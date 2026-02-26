@@ -1,0 +1,48 @@
+[project]
+name = "video-screenshot"
+version = "0.1.0"
+description = "视频自动截图系统 - 主播好看照片 & 高能时刻检测"
+requires-python = ">=3.11"
+dependencies = [
+    # 视频
+    "opencv-python>=4.8",
+    "ffmpeg-python>=0.2",
+    "streamget>=4.0",
+    # 人脸
+    "mediapipe>=0.10",
+    "insightface>=0.7",
+    "onnxruntime>=1.16",
+    # 美学
+    "torch>=2.1",
+    "open-clip-torch>=2.24",
+    "pyiqa>=0.1",
+    "transformers>=4.36",
+    # 音频
+    "librosa>=0.10",
+    "openai-whisper>=20231117",
+    "soundfile>=0.12",
+    # 存储
+    "sqlmodel>=0.0.14",
+    "Pillow>=10.0",
+    # HTTP
+    "requests>=2.31",
+    # 配置
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+claude = ["anthropic>=0.40"]
+gemini = ["google-generativeai"]
+openai = ["openai"]
+all-ai = ["anthropic>=0.40", "google-generativeai", "openai"]
+ui = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+
+[project.scripts]
+video-screenshot = "main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

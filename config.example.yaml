@@ -1,0 +1,78 @@
+# 视频自动截图系统配置
+# 复制此文件为 config.yaml 并填入你的配置
+
+# 视频输入
+input:
+  # 帧提取帧率 (fps)
+  extract_fps: 2
+  # 直播流最大录制时长 (秒), 0=无限
+  max_duration: 0
+  # 直播画质: origin(原画) / uhd(蓝光) / hd(高清) / sd(标清) / ld(流畅)
+  quality: origin
+  # 分段处理间隔 (秒), 每段独立做 top-k 并保存, 0=不分段 (等全部完成)
+  segment_duration: 300
+
+  # 抖音 cookies (从浏览器复制整个 cookie 字符串)
+  # 获取方式: 打开 live.douyin.com → F12 → Network → 任意请求 → Request Headers → Cookie
+  # 最低要求: ttwid; 登录后效果更好 (含 sessionid, passport_csrf_token 等)
+  # cookies: "ttwid=xxx; my_rd=1; passport_csrf_token=xxx; LOGIN_STATUS=1; sessionid=xxx"
+
+# 模糊检测
+blur:
+  # Laplacian 方差阈值, 低于此值判定为模糊
+  threshold: 50.0
+
+# 人脸检测
+face:
+  # MediaPipe 人脸检测置信度阈值
+  detection_confidence: 0.7
+  # 人脸占画面最小比例 (过滤太小的人脸)
+  min_face_ratio: 0.05
+  # InsightFace 人脸角度阈值 (度), 偏转超过此值丢弃
+  max_yaw: 30.0
+  max_pitch: 25.0
+
+# 美学评分
+aesthetic:
+  # CLIP 美学评分最低阈值 (1-10 分)
+  min_score: 5.0
+  # 最终保留 Top-K 张照片
+  top_k: 20
+  # 去重: 两张照片的特征余弦相似度阈值
+  dedup_similarity: 0.95
+
+# 高能时刻检测
+highlight:
+  # 音频分析: 音量突变倍率 (相对平均值)
+  volume_spike_ratio: 2.0
+  # 候选区间前后扩展 (秒)
+  context_seconds: 3.0
+  # AI 分析时每个区间抽帧数
+  frames_per_segment: 5
+
+# AI 后端
+ai:
+  # 默认后端: claude / gemini / gpt4o / qwen_local
+  default_backend: claude
+  # API keys (也可通过环境变量设置: ANTHROPIC_API_KEY, GOOGLE_API_KEY, OPENAI_API_KEY)
+  # anthropic_api_key: null
+  # google_api_key: null
+  # openai_api_key: null
+
+# 存储
+storage:
+  # 截图输出目录
+  output_dir: ./output
+  # 数据库路径
+  db_path: ./output/metadata.db
+  # 图片格式
+  image_format: jpg
+  # JPEG 质量
+  image_quality: 95
+
+# Whisper 语音识别
+whisper:
+  # 模型大小: tiny / base / small / medium / large
+  model_size: base
+  # 语言
+  language: zh
