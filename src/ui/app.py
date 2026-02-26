@@ -11,7 +11,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
-from src.task_manager import TaskManager
+from src.config import load_config
+from src.task_manager import LOCAL_ID_OFFSET, TaskManager
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,8 @@ app = FastAPI(title="直播录制控制台")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 # ── 全局 TaskManager 实例 ────────────────────────────────────────────────
-task_manager = TaskManager()
+_config = load_config()
+task_manager = TaskManager(output_dir=_config.storage.output_dir)
 
 
 # ── HTML 页面 ─────────────────────────────────────────────────────────────
@@ -30,6 +32,73 @@ async def index():
     return HTMLResponse(html)
 
 
+# ── 序列化 ────────────────────────────────────────────────────────────────
+
+def _serialize_task(t, worker_status: str = "") -> dict:
+    return {
+        "id": t.id,
+        "url": t.url,
+        "name": t.name,
+        "quality": t.quality,
+        "segment_min": t.segment_min,
+        "enable_record": t.enable_record,
+        "enable_screenshot": t.enable_screenshot,
+        "enable_segment": t.enable_segment,
+        "segment_sec": t.segment_sec,
+        "poll_interval": t.poll_interval,
+        "show_countdown": t.show_countdown,
+        "max_threads": t.max_threads,
+        "schedule_enabled": t.schedule_enabled,
+        "schedule_timezone": t.schedule_timezone,
+        "schedule_start": t.schedule_start,
+        "schedule_stop": t.schedule_stop,
+        "status": t.status,
+        "error_msg": t.error_msg,
+        "worker_status": worker_status,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+        "stopped_at": t.stopped_at.isoformat() if t.stopped_at else None,
+        "is_previewing": task_manager.get_preview_task_id() == t.id,
+    }
+
+
+# ── 文件浏览 API ─────────────────────────────────────────────────────────
+
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".ts", ".webm", ".m4v", ".wmv", ".mpg", ".mpeg"}
+
+
+@app.get("/api/browse")
+async def browse_files(path: str = "~"):
+    """浏览本地文件系统，返回目录和视频文件列表"""
+    try:
+        target = Path(path).expanduser().resolve()
+    except Exception:
+        return JSONResponse({"error": "无效路径"}, status_code=400)
+
+    if not target.exists():
+        return JSONResponse({"error": "路径不存在"}, status_code=404)
+
+    if target.is_file():
+        # 直接返回文件信息
+        return {"path": str(target), "is_file": True}
+
+    dirs = []
+    files = []
+    try:
+        for entry in sorted(target.iterdir(), key=lambda e: e.name.lower()):
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                dirs.append({"name": entry.name, "path": str(entry)})
+            elif entry.is_file() and entry.suffix.lower() in VIDEO_EXTENSIONS:
+                size_mb = entry.stat().st_size / (1024 * 1024)
+                files.append({"name": entry.name, "path": str(entry), "size": f"{size_mb:.1f} MB"})
+    except PermissionError:
+        return JSONResponse({"error": "无权限访问"}, status_code=403)
+
+    parent = str(target.parent) if target.parent != target else None
+    return {"current": str(target), "parent": parent, "dirs": dirs, "files": files}
+
+
 # ── 任务 CRUD API ─────────────────────────────────────────────────────────
 
 @app.get("/api/tasks")
@@ -38,21 +107,7 @@ async def list_tasks():
     result = []
     for t in tasks:
         worker_status = task_manager.get_worker_status(t.id)
-        result.append({
-            "id": t.id,
-            "url": t.url,
-            "name": t.name,
-            "quality": t.quality,
-            "segment_min": t.segment_min,
-            "enable_record": t.enable_record,
-            "enable_screenshot": t.enable_screenshot,
-            "status": t.status,
-            "error_msg": t.error_msg,
-            "worker_status": worker_status,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-            "stopped_at": t.stopped_at.isoformat() if t.stopped_at else None,
-            "is_previewing": task_manager.get_preview_task_id() == t.id,
-        })
+        result.append(_serialize_task(t, worker_status))
     return {"tasks": result}
 
 
@@ -76,8 +131,26 @@ async def create_task(request: Request):
         enable_record=enable_record,
         enable_screenshot=enable_screenshot,
         cookies=body.get("cookies"),
+        enable_segment=body.get("enable_segment", True),
+        segment_sec=int(body.get("segment_sec", 1800)),
+        poll_interval=int(body.get("poll_interval", 180)),
+        show_countdown=body.get("show_countdown", True),
+        max_threads=int(body.get("max_threads", 3)),
+        schedule_enabled=body.get("schedule_enabled", False),
+        schedule_timezone=body.get("schedule_timezone", "Asia/Shanghai"),
+        schedule_start=body.get("schedule_start", "00:00"),
+        schedule_stop=body.get("schedule_stop", "23:59"),
     )
     return {"ok": True, "task_id": task.id}
+
+
+@app.get("/api/tasks/{task_id}")
+async def get_task(task_id: int):
+    t = task_manager.get_task(task_id)
+    if t is None:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    worker_status = task_manager.get_worker_status(t.id)
+    return _serialize_task(t, worker_status)
 
 
 @app.delete("/api/tasks/{task_id}")
@@ -172,3 +245,156 @@ async def logs_sse():
             task_manager.remove_log_queue(q)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/tasks/{task_id}/logs/history")
+async def task_logs_history(task_id: int):
+    """返回任务的历史日志"""
+    t = task_manager.get_task(task_id)
+    if t is None:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    lines = task_manager.get_task_log_lines(task_id)
+    return {"lines": lines}
+
+
+@app.get("/api/tasks/{task_id}/logs")
+async def task_logs_sse(task_id: int):
+    """SSE 端点 — 推送指定任务的日志"""
+    t = task_manager.get_task(task_id)
+    if t is None:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+
+    q = task_manager.add_log_queue(task_id=task_id)
+
+    async def event_stream():
+        try:
+            while True:
+                try:
+                    line = q.get_nowait()
+                    yield f"data: {line}\n\n"
+                except Exception:
+                    await asyncio.sleep(0.3)
+        finally:
+            task_manager.remove_log_queue(q)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ── 本地视频任务 API ─────────────────────────────────────────────────────
+
+def _serialize_local_task(t) -> dict:
+    return {
+        "id": t.id,
+        "video_path": t.video_path,
+        "name": t.name,
+        "task_type": t.task_type,
+        "status": t.status,
+        "error_msg": t.error_msg,
+        "progress": t.progress,
+        "progress_text": t.progress_text,
+        "result_summary": t.result_summary,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+        "finished_at": t.finished_at.isoformat() if t.finished_at else None,
+    }
+
+
+@app.get("/api/local/tasks")
+async def list_local_tasks():
+    tasks = task_manager.list_local_tasks()
+    return {"tasks": [_serialize_local_task(t) for t in tasks]}
+
+
+@app.post("/api/local/tasks")
+async def create_local_task(request: Request):
+    body = await request.json()
+    video_path = body.get("video_path", "").strip()
+    if not video_path:
+        return JSONResponse({"error": "请输入视频文件路径"}, status_code=400)
+
+    task_type = body.get("task_type", "portrait")
+    if task_type not in ("portrait", "highlight"):
+        return JSONResponse({"error": "无效的任务类型"}, status_code=400)
+
+    try:
+        task = task_manager.create_local_task(
+            video_path=video_path,
+            task_type=task_type,
+            name=body.get("name"),
+        )
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"ok": True, "task_id": task.id}
+
+
+@app.get("/api/local/tasks/{task_id}")
+async def get_local_task(task_id: int):
+    t = task_manager.get_local_task(task_id)
+    if t is None:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    return _serialize_local_task(t)
+
+
+@app.delete("/api/local/tasks/{task_id}")
+async def delete_local_task(task_id: int):
+    task = task_manager.get_local_task(task_id)
+    if task is None:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    if task.status == "running":
+        return JSONResponse({"error": "不能删除运行中的任务"}, status_code=409)
+    ok = task_manager.delete_local_task(task_id)
+    if not ok:
+        return JSONResponse({"error": "删除失败"}, status_code=500)
+    return {"ok": True}
+
+
+@app.post("/api/local/tasks/{task_id}/start")
+async def start_local_task(task_id: int):
+    try:
+        task_manager.start_local_task(task_id)
+    except (ValueError, FileNotFoundError) as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    return {"ok": True}
+
+
+@app.post("/api/local/tasks/{task_id}/stop")
+async def stop_local_task(task_id: int):
+    task = task_manager.get_local_task(task_id)
+    if task is None:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    task_manager.stop_local_task(task_id)
+    return {"ok": True}
+
+
+@app.get("/api/local/tasks/{task_id}/logs")
+async def local_task_logs_sse(task_id: int):
+    """SSE 端点 — 推送本地任务的日志"""
+    t = task_manager.get_local_task(task_id)
+    if t is None:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+
+    log_id = task_id + LOCAL_ID_OFFSET
+    q = task_manager.add_log_queue(task_id=log_id)
+
+    async def event_stream():
+        try:
+            while True:
+                try:
+                    line = q.get_nowait()
+                    yield f"data: {line}\n\n"
+                except Exception:
+                    await asyncio.sleep(0.3)
+        finally:
+            task_manager.remove_log_queue(q)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/local/tasks/{task_id}/logs/history")
+async def local_task_logs_history(task_id: int):
+    """返回本地任务的历史日志"""
+    t = task_manager.get_local_task(task_id)
+    if t is None:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    log_id = task_id + LOCAL_ID_OFFSET
+    lines = task_manager.get_task_log_lines(log_id)
+    return {"lines": lines}

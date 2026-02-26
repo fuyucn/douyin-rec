@@ -129,15 +129,21 @@ class DouyinLiveSource:
         poll_interval: float = 180,
         on_status=None,
         stop_event=None,
+        show_countdown: bool = False,
+        schedule_check=None,
     ) -> str:
         """轮询等待直播开播，返回 stream_url。
 
         on_status: 可选回调 (message: str) -> None，用于 UI 显示状态。
         stop_event: 可选 threading.Event，被 set 时中止等待。
+        show_countdown: 是否通过 on_status 显示倒计时秒数。
+        schedule_check: 可选回调 () -> bool，返回 False 时中止等待（定时窗口结束）。
         """
         while True:
             if stop_event and stop_event.is_set():
                 raise InterruptedError("用户取消等待")
+            if schedule_check and not schedule_check():
+                raise InterruptedError("定时窗口结束")
             try:
                 url = self._extract_stream_url()
                 if on_status:
@@ -153,13 +159,19 @@ class DouyinLiveSource:
                 logger.warning(msg)
                 if on_status:
                     on_status(msg)
-            # 分段 sleep 以便及时响应 stop_event
+            # 分段 sleep 以便及时响应 stop_event 和 schedule_check
             elapsed = 0.0
             while elapsed < poll_interval:
                 if stop_event and stop_event.is_set():
                     raise InterruptedError("用户取消等待")
+                if schedule_check and not schedule_check():
+                    raise InterruptedError("定时窗口结束")
                 time.sleep(min(1.0, poll_interval - elapsed))
                 elapsed += 1.0
+                if show_countdown and on_status:
+                    remaining = int(poll_interval - elapsed)
+                    if remaining > 0 and int(elapsed) % 10 == 0:
+                        on_status(f"距下次检测还有 {remaining} 秒")
 
     # -- internal helpers ----------------------------------------------------
 

@@ -135,6 +135,35 @@ def test_preview_nonexistent_task(client):
     assert r.status_code == 404
 
 
+def test_get_task_detail(client):
+    """获取单个任务详情"""
+    r = client.post("/api/tasks", json={
+        "url": "https://live.douyin.com/123",
+        "quality": "uhd",
+        "segment": 60,
+        "record": True,
+        "screenshot": True,
+    })
+    task_id = r.json()["task_id"]
+    r = client.get(f"/api/tasks/{task_id}")
+    assert r.status_code == 200
+    t = r.json()
+    assert t["id"] == task_id
+    assert t["url"] == "https://live.douyin.com/123"
+    assert t["quality"] == "uhd"
+    assert t["segment_min"] == 60
+    assert t["enable_record"] is True
+    assert t["enable_screenshot"] is True
+    assert t["status"] == "pending"
+    assert t["created_at"] is not None
+
+
+def test_get_task_detail_not_found(client):
+    """获取不存在的任务返回 404"""
+    r = client.get("/api/tasks/999")
+    assert r.status_code == 404
+
+
 def test_task_fields(client):
     """任务字段完整性"""
     client.post("/api/tasks", json={
@@ -152,3 +181,124 @@ def test_task_fields(client):
     assert t["enable_screenshot"] is True
     assert t["status"] == "pending"
     assert t["created_at"] is not None
+
+
+# ── 本地视频 API 测试 ────────────────────────────────────────
+
+
+def test_list_local_tasks_empty(client):
+    """初始本地任务列表为空"""
+    r = client.get("/api/local/tasks")
+    assert r.status_code == 200
+    assert r.json()["tasks"] == []
+
+
+def test_create_local_task(client, tmp_path):
+    """创建本地视频任务"""
+    video = tmp_path / "test.mp4"
+    video.touch()
+    r = client.post("/api/local/tasks", json={
+        "video_path": str(video),
+        "task_type": "portrait",
+    })
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["task_id"] is not None
+
+
+def test_create_local_task_no_path(client):
+    """缺少路径返回 400"""
+    r = client.post("/api/local/tasks", json={"video_path": ""})
+    assert r.status_code == 400
+
+
+def test_create_local_task_file_not_found(client):
+    """文件不存在返回 400"""
+    r = client.post("/api/local/tasks", json={
+        "video_path": "/nonexistent/video.mp4",
+        "task_type": "portrait",
+    })
+    assert r.status_code == 400
+    assert "不存在" in r.json()["error"]
+
+
+def test_create_local_task_invalid_type(client, tmp_path):
+    """无效任务类型返回 400"""
+    video = tmp_path / "test.mp4"
+    video.touch()
+    r = client.post("/api/local/tasks", json={
+        "video_path": str(video),
+        "task_type": "invalid",
+    })
+    assert r.status_code == 400
+
+
+def test_list_local_tasks_after_create(client, tmp_path):
+    """创建后列出本地任务"""
+    v1 = tmp_path / "a.mp4"
+    v2 = tmp_path / "b.mp4"
+    v1.touch()
+    v2.touch()
+    client.post("/api/local/tasks", json={"video_path": str(v1), "task_type": "portrait"})
+    client.post("/api/local/tasks", json={"video_path": str(v2), "task_type": "highlight"})
+    r = client.get("/api/local/tasks")
+    tasks = r.json()["tasks"]
+    assert len(tasks) == 2
+    assert tasks[0]["task_type"] == "portrait"
+    assert tasks[1]["task_type"] == "highlight"
+
+
+def test_get_local_task_detail(client, tmp_path):
+    """获取单个本地任务详情"""
+    video = tmp_path / "test.mp4"
+    video.touch()
+    r = client.post("/api/local/tasks", json={
+        "video_path": str(video),
+        "task_type": "portrait",
+    })
+    task_id = r.json()["task_id"]
+    r = client.get(f"/api/local/tasks/{task_id}")
+    assert r.status_code == 200
+    t = r.json()
+    assert t["id"] == task_id
+    assert t["task_type"] == "portrait"
+    assert t["name"] == "test"
+    assert t["status"] == "pending"
+    assert t["progress"] == 0.0
+
+
+def test_get_local_task_not_found(client):
+    """获取不存在的本地任务返回 404"""
+    r = client.get("/api/local/tasks/999")
+    assert r.status_code == 404
+
+
+def test_delete_local_task(client, tmp_path):
+    """删除本地任务"""
+    video = tmp_path / "test.mp4"
+    video.touch()
+    r = client.post("/api/local/tasks", json={"video_path": str(video), "task_type": "portrait"})
+    task_id = r.json()["task_id"]
+    r = client.delete(f"/api/local/tasks/{task_id}")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    r = client.get("/api/local/tasks")
+    assert len(r.json()["tasks"]) == 0
+
+
+def test_delete_local_task_not_found(client):
+    """删除不存在的本地任务返回 404"""
+    r = client.delete("/api/local/tasks/999")
+    assert r.status_code == 404
+
+
+def test_start_local_task_not_found(client):
+    """启动不存在的本地任务"""
+    r = client.post("/api/local/tasks/999/start")
+    assert r.status_code == 409
+
+
+def test_stop_local_task_not_found(client):
+    """停止不存在的本地任务"""
+    r = client.post("/api/local/tasks/999/stop")
+    assert r.status_code == 404

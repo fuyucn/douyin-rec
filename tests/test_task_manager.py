@@ -1,6 +1,10 @@
 """测试任务管理器"""
 
 import tempfile
+from datetime import datetime, time as dt_time
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
+
 import pytest
 from pathlib import Path
 
@@ -159,9 +163,230 @@ def test_log_queue_full(tm):
     """日志队列满时不阻塞"""
     import queue
     q = queue.Queue(maxsize=1)
-    tm._log_queues.append(q)
+    tm._log_queues.append((q, None))
     q.put("占位")
     # 应该不会阻塞
     tm.broadcast("第二条消息")
     # 满的队列会被移除
-    assert q not in tm._log_queues
+    assert all(stored_q is not q for stored_q, _ in tm._log_queues)
+
+
+# ── 本地视频任务测试 ──────────────────────────────────────────
+
+
+def test_create_local_task(tm, tmp_path):
+    """创建本地视频任务"""
+    video = tmp_path / "test.mp4"
+    video.touch()
+    task = tm.create_local_task(video_path=str(video), task_type="portrait")
+    assert task.id is not None
+    assert task.task_type == "portrait"
+    assert task.status == "pending"
+    assert task.name == "test"
+    assert task.progress == 0.0
+
+
+def test_create_local_task_highlight(tm, tmp_path):
+    """创建高能时刻任务"""
+    video = tmp_path / "test.mp4"
+    video.touch()
+    task = tm.create_local_task(video_path=str(video), task_type="highlight", name="我的视频")
+    assert task.task_type == "highlight"
+    assert task.name == "我的视频"
+
+
+def test_create_local_task_file_not_found(tm):
+    """文件不存在时创建失败"""
+    with pytest.raises(FileNotFoundError, match="文件不存在"):
+        tm.create_local_task(video_path="/nonexistent/video.mp4")
+
+
+def test_list_local_tasks(tm, tmp_path):
+    """列出本地任务"""
+    v1 = tmp_path / "a.mp4"
+    v2 = tmp_path / "b.mp4"
+    v1.touch()
+    v2.touch()
+    tm.create_local_task(video_path=str(v1))
+    tm.create_local_task(video_path=str(v2))
+    tasks = tm.list_local_tasks()
+    assert len(tasks) == 2
+
+
+def test_get_local_task(tm, tmp_path):
+    """获取单个本地任务"""
+    video = tmp_path / "test.mp4"
+    video.touch()
+    created = tm.create_local_task(video_path=str(video))
+    task = tm.get_local_task(created.id)
+    assert task is not None
+    assert task.name == "test"
+
+
+def test_get_local_task_not_found(tm):
+    """获取不存在的本地任务"""
+    assert tm.get_local_task(999) is None
+
+
+def test_delete_local_task(tm, tmp_path):
+    """删除本地任务"""
+    video = tmp_path / "test.mp4"
+    video.touch()
+    task = tm.create_local_task(video_path=str(video))
+    assert tm.delete_local_task(task.id) is True
+    assert tm.get_local_task(task.id) is None
+
+
+def test_delete_local_task_not_found(tm):
+    """删除不存在的本地任务"""
+    assert tm.delete_local_task(999) is False
+
+
+def test_delete_running_local_task(tm, tmp_path):
+    """不能删除运行中的本地任务"""
+    video = tmp_path / "test.mp4"
+    video.touch()
+    task = tm.create_local_task(video_path=str(video))
+    tm._update_local_task(task.id, status="running")
+    assert tm.delete_local_task(task.id) is False
+
+
+def test_update_local_task(tm, tmp_path):
+    """更新本地任务字段"""
+    video = tmp_path / "test.mp4"
+    video.touch()
+    task = tm.create_local_task(video_path=str(video))
+    tm._update_local_task(task.id, progress=50.0, progress_text="帧处理: 500/1000")
+    updated = tm.get_local_task(task.id)
+    assert updated.progress == 50.0
+    assert updated.progress_text == "帧处理: 500/1000"
+
+
+def test_start_nonexistent_local_task(tm):
+    """启动不存在的本地任务"""
+    with pytest.raises(ValueError, match="不存在"):
+        tm.start_local_task(999)
+
+
+def test_recover_running_local_tasks(tmp_path):
+    """重启后 running 状态的本地任务恢复为 error"""
+    db_path = str(tmp_path / "test_tasks.db")
+    video = tmp_path / "test.mp4"
+    video.touch()
+
+    tm1 = TaskManager(db_path=db_path)
+    task = tm1.create_local_task(video_path=str(video))
+    tm1._update_local_task(task.id, status="running")
+
+    # 模拟重启
+    tm2 = TaskManager(db_path=db_path)
+    recovered = tm2.get_local_task(task.id)
+    assert recovered.status == "error"
+    assert recovered.error_msg == "服务重启，任务中断"
+
+
+# ── 定时调度测试 ──────────────────────────────────────────
+
+
+def test_create_task_with_schedule(tm):
+    """创建带调度的任务，验证字段存储"""
+    task = tm.create_task(
+        url="https://live.douyin.com/123",
+        schedule_enabled=True,
+        schedule_timezone="Asia/Tokyo",
+        schedule_start="20:00",
+        schedule_stop="02:00",
+    )
+    assert task.schedule_enabled is True
+    assert task.schedule_timezone == "Asia/Tokyo"
+    assert task.schedule_start == "20:00"
+    assert task.schedule_stop == "02:00"
+
+    # 从 DB 重新读取验证持久化
+    loaded = tm.get_task(task.id)
+    assert loaded.schedule_enabled is True
+    assert loaded.schedule_timezone == "Asia/Tokyo"
+    assert loaded.schedule_start == "20:00"
+    assert loaded.schedule_stop == "02:00"
+
+
+def test_create_task_schedule_defaults(tm):
+    """创建任务时调度字段默认值"""
+    task = tm.create_task(url="https://live.douyin.com/123")
+    assert task.schedule_enabled is False
+    assert task.schedule_timezone == "Asia/Shanghai"
+    assert task.schedule_start == "00:00"
+    assert task.schedule_stop == "23:59"
+
+
+def test_is_in_schedule_disabled(tm):
+    """schedule_enabled=False 时始终返回 True"""
+    task = tm.create_task(
+        url="https://live.douyin.com/123",
+        schedule_enabled=False,
+        schedule_start="09:00",
+        schedule_stop="18:00",
+    )
+    assert TaskManager._is_in_schedule(task) is True
+
+
+def test_is_in_schedule_same_day(tm):
+    """同日窗口 (09:00~18:00)"""
+    task = tm.create_task(
+        url="https://live.douyin.com/123",
+        schedule_enabled=True,
+        schedule_timezone="Asia/Shanghai",
+        schedule_start="09:00",
+        schedule_stop="18:00",
+    )
+    # 模拟 14:00 — 在窗口内
+    mock_dt = datetime(2026, 2, 26, 14, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    with patch("src.task_manager.datetime") as mock_datetime:
+        mock_datetime.now.return_value = mock_dt
+        mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert TaskManager._is_in_schedule(task) is True
+
+    # 模拟 06:00 — 在窗口外
+    mock_dt = datetime(2026, 2, 26, 6, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    with patch("src.task_manager.datetime") as mock_datetime:
+        mock_datetime.now.return_value = mock_dt
+        mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert TaskManager._is_in_schedule(task) is False
+
+    # 模拟 20:00 — 在窗口外
+    mock_dt = datetime(2026, 2, 26, 20, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    with patch("src.task_manager.datetime") as mock_datetime:
+        mock_datetime.now.return_value = mock_dt
+        mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert TaskManager._is_in_schedule(task) is False
+
+
+def test_is_in_schedule_cross_midnight(tm):
+    """跨午夜窗口 (22:00~03:00)"""
+    task = tm.create_task(
+        url="https://live.douyin.com/123",
+        schedule_enabled=True,
+        schedule_timezone="Asia/Shanghai",
+        schedule_start="22:00",
+        schedule_stop="03:00",
+    )
+    # 模拟 23:00 — 在窗口内
+    mock_dt = datetime(2026, 2, 26, 23, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    with patch("src.task_manager.datetime") as mock_datetime:
+        mock_datetime.now.return_value = mock_dt
+        mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert TaskManager._is_in_schedule(task) is True
+
+    # 模拟 01:00 — 在窗口内
+    mock_dt = datetime(2026, 2, 27, 1, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    with patch("src.task_manager.datetime") as mock_datetime:
+        mock_datetime.now.return_value = mock_dt
+        mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert TaskManager._is_in_schedule(task) is True
+
+    # 模拟 10:00 — 在窗口外
+    mock_dt = datetime(2026, 2, 26, 10, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    with patch("src.task_manager.datetime") as mock_datetime:
+        mock_datetime.now.return_value = mock_dt
+        mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        assert TaskManager._is_in_schedule(task) is False

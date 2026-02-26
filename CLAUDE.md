@@ -13,7 +13,7 @@ src/
 ├── models.py                # 共享数据模型: FrameInfo, FaceInfo, FrameScore, HighlightMoment
 ├── display.py               # CLI headed 模式的 cv2 窗口显示 (人脸框、分数标注)
 ├── recorder.py              # StreamRecorder: ffmpeg -c copy 录制，支持 segment muxer 分段
-├── task_manager.py          # TaskManager: 多任务并发管理 (CRUD + 执行控制 + 预览)
+├── task_manager.py          # TaskManager: 多任务并发管理 (CRUD + 执行控制 + 预览 + 日志持久化)
 ├── input/
 │   ├── source.py            # VideoSource Protocol (统一接口)
 │   ├── live.py              # DouyinLiveSource: 抖音直播流 (基于 streamget 库)
@@ -42,7 +42,18 @@ src/
     ├── __init__.py
     ├── app.py               # FastAPI 应用: REST API + SSE 日志 + MJPEG 预览
     └── static/
-        └── index.html        # 单页前端 (暗色主题)
+        └── index.html        # SPA 前端 (daisyUI + Tailwind CDN, hash 路由)
+tests/
+├── test_config.py
+├── test_extractor.py
+├── test_live.py
+├── test_models.py
+├── test_recorder.py
+├── test_task_manager.py
+└── test_ui_api.py
+output/
+├── tasks.db                 # SQLite 任务数据库
+└── logs/                    # 任务日志文件 (task_{id}.log)
 ```
 
 ## 关键设计
@@ -56,6 +67,7 @@ src/
 - `_run_async()` 检测是否已有 event loop (uvicorn 环境)，有则用 ThreadPoolExecutor 跑 `asyncio.run()`
 - 开播状态: `status == 2` 开播, `status == 4` 未开播
 - 画质映射: origin→OD, uhd→UHD, hd→HD, sd→SD, ld→LD
+- `wait_for_live()` 支持 `show_countdown` 参数，启用后每 10 秒在日志输出剩余倒计时
 
 ### 录制 (ffmpeg segment muxer)
 
@@ -79,18 +91,54 @@ src/
 
 `src/task_manager.py` 管理多任务并发:
 - **DB 持久化**: SQLite 存储任务列表，跨 session 保留
+- **自动迁移**: `_migrate_db()` 启动时自动为旧 DB 补充缺失列 (ALTER TABLE)
 - **多任务并发**: 每个任务独立 worker 线程
 - **持续监控**: 下播后自动等待下一次开播，直到手动停止
 - **状态恢复**: 重启时将 running 状态恢复为 stopped
+- **日志持久化**: 每个任务的日志写入 `output/logs/task_{id}.log`，页面刷新后可恢复
+- **日志队列过滤**: `add_log_queue(task_id)` 支持按任务过滤，详情页 SSE 只收该任务日志
 
-### Web UI 架构 (FastAPI)
+### RecordingTask 字段
 
-`src/ui/app.py` 多任务 FastAPI 应用，基于 `TaskManager`:
-- **任务 CRUD**: `GET/POST /api/tasks`, `DELETE /api/tasks/{id}`
-- **执行控制**: `POST /api/tasks/{id}/start`, `POST /api/tasks/{id}/stop`
-- **预览切换**: `POST /api/tasks/{id}/preview` — 切换到指定任务的预览
-- **SSE 日志**: `GET /api/logs` — 所有任务的日志，带 [任务名] 前缀
-- **MJPEG 预览**: `GET /api/preview` — 当前选中任务的画面
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| url | str | - | 直播间 URL |
+| name | str? | None | 主播名称 (自动获取) |
+| quality | str | "origin" | 画质: origin/uhd/hd/sd/ld |
+| enable_record | bool | True | 是否录制 |
+| enable_screenshot | bool | False | 是否截图 |
+| enable_segment | bool | True | 是否启用分段录制 |
+| segment_sec | int | 1800 | 视频分段时间 (秒) |
+| segment_min | int | 30 | (旧字段, 保留兼容) |
+| poll_interval | int | 180 | 循环检测间隔 (秒) |
+| show_countdown | bool | True | 是否显示循环倒计时 |
+| max_threads | int | 3 | 网络线程数 |
+| cookies | str? | None | cookie 字符串 |
+| status | str | "pending" | pending/running/stopped/error |
+
+### Web UI 架构 (FastAPI + SPA)
+
+**前端**: 单 HTML 文件 SPA，daisyUI (night 主题) + Tailwind CDN，hash 路由 (`#/` 和 `#/task/{id}`)。
+
+**后端 API**:
+
+| 路由 | 方法 | 说明 |
+|------|------|------|
+| `/api/tasks` | GET | 任务列表 |
+| `/api/tasks` | POST | 创建任务 |
+| `/api/tasks/{id}` | GET | 单个任务详情 |
+| `/api/tasks/{id}` | DELETE | 删除任务 |
+| `/api/tasks/{id}/start` | POST | 启动任务 |
+| `/api/tasks/{id}/stop` | POST | 停止任务 |
+| `/api/tasks/{id}/preview` | POST | 切换预览 (toggle) |
+| `/api/tasks/{id}/logs` | GET | SSE 该任务日志流 |
+| `/api/tasks/{id}/logs/history` | GET | 历史日志 (JSON) |
+| `/api/logs` | GET | SSE 全局日志流 |
+| `/api/preview` | GET | MJPEG 画面流 |
+
+**前端视图**:
+- **列表页 `#/`**: 创建表单 + 任务表格，2 秒轮询刷新，行可点击进入详情
+- **详情页 `#/task/{id}`**: 任务信息卡片 + 预览 toggle + 过滤后的 SSE 日志，加载时先 fetch 历史日志再接 SSE
 
 线程模型:
 - 每个任务一个 `_task_worker` 线程 (等待开播 → 录制/截图 → 流断重连)

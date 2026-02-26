@@ -1,278 +1,918 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="lyra">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>直播录制控制台</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.22/dist/full.min.css" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      borderRadius: {
+        none: '0', DEFAULT: '0', sm: '0', md: '0', lg: '0', xl: '0', '2xl': '0', '3xl': '0',
+      }
+    }
+  }
+}
+</script>
 <style>
-  :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --accent: #6c8cff; --green: #4caf50; --red: #ef5350; --orange: #ff9800; --text: #e0e0e0; --muted: #888; }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, "Segoe UI", Roboto, monospace; background: var(--bg); color: var(--text); min-height: 100vh; padding: 1.5rem; }
-  .layout { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: 1fr 380px; gap: 1.2rem; }
-  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
-  h1 { font-size: 1.3rem; margin-bottom: 1rem; color: var(--accent); grid-column: 1 / -1; }
-
-  /* ── 创建任务表单 ── */
-  .create-form { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
-  .create-form label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.2rem; }
-  .create-form input, .create-form select { width: 100%; padding: 0.45rem 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.85rem; margin-bottom: 0.6rem; }
-  .create-form input:focus, .create-form select:focus { outline: none; border-color: var(--accent); }
-  .form-row { display: flex; gap: 0.6rem; }
-  .form-row > div { flex: 1; }
-  .form-checks { display: flex; gap: 1rem; margin: 0.4rem 0 0.6rem; }
-  .form-checks label { display: flex; align-items: center; gap: 0.3rem; cursor: pointer; color: var(--text); font-size: 0.82rem; margin: 0; }
-  .form-checks input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--accent); }
-  #btnAdd { width: 100%; padding: 0.55rem; border: none; border-radius: 6px; font-size: 0.88rem; font-weight: 600; cursor: pointer; background: var(--accent); color: #fff; transition: opacity 0.2s; }
-  #btnAdd:hover { opacity: 0.85; }
-
-  /* ── 任务列表 ── */
-  .task-list { display: flex; flex-direction: column; gap: 0.6rem; }
-  .task-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem 1rem; }
-  .task-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
-  .task-name { font-weight: 600; font-size: 0.95rem; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .task-id { font-size: 0.75rem; color: var(--muted); }
-  .task-url { font-size: 0.78rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 0.4rem; }
-  .task-tags { display: flex; gap: 0.4rem; margin-bottom: 0.5rem; flex-wrap: wrap; }
-  .tag { font-size: 0.7rem; padding: 0.15rem 0.45rem; border-radius: 3px; background: var(--border); color: var(--muted); }
-  .tag-record { background: #1b3a2a; color: var(--green); }
-  .tag-screenshot { background: #3a2a1b; color: var(--orange); }
-  .task-status { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; margin-bottom: 0.5rem; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
-  .dot-pending { background: var(--muted); }
-  .dot-running { background: var(--green); animation: blink 1s infinite; }
-  .dot-stopped { background: var(--red); }
-  .dot-error { background: var(--red); }
-  @keyframes blink { 50% { opacity: 0.3; } }
-  .task-actions { display: flex; gap: 0.4rem; }
-  .task-actions button { padding: 0.35rem 0.7rem; border: 1px solid var(--border); border-radius: 4px; font-size: 0.78rem; cursor: pointer; background: var(--bg); color: var(--text); transition: all 0.15s; }
-  .task-actions button:hover { border-color: var(--accent); }
-  .task-actions button:disabled { opacity: 0.3; cursor: not-allowed; }
-  .btn-start { border-color: var(--green) !important; color: var(--green) !important; }
-  .btn-stop { border-color: var(--red) !important; color: var(--red) !important; }
-  .btn-preview { border-color: var(--accent) !important; color: var(--accent) !important; }
-  .btn-preview.active { background: var(--accent) !important; color: #fff !important; }
-  .btn-delete { border-color: var(--red) !important; color: var(--red) !important; }
-  .worker-status { font-size: 0.75rem; color: var(--muted); font-style: italic; }
-
-  /* ── 右侧面板 ── */
-  .side-panel { display: flex; flex-direction: column; gap: 1rem; }
-  .preview-box { background: #000; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; min-height: 200px; display: flex; align-items: center; justify-content: center; position: relative; }
-  .preview-box img { width: 100%; display: block; }
-  .preview-box .no-signal { color: var(--muted); font-size: 0.85rem; }
-  .preview-label { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.6); color: var(--accent); font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 3px; }
-  #logs { background: #0a0c10; border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem; height: 300px; overflow-y: auto; font-family: "SF Mono", "Fira Code", monospace; font-size: 0.75rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #b0b8c8; flex: 1; }
-  .empty-state { text-align: center; padding: 2rem; color: var(--muted); font-size: 0.88rem; }
+  [data-theme="lyra"] {
+    color-scheme: dark;
+    --b1: 13.5% 0 0;
+    --b2: 17.5% 0 0;
+    --b3: 22% 0 0;
+    --bc: 90% 0 0;
+    --p: 88% 0 0;
+    --pc: 13.5% 0 0;
+    --s: 55% 0 0;
+    --sc: 95% 0 0;
+    --a: 65% 0 0;
+    --ac: 13.5% 0 0;
+    --n: 25% 0 0;
+    --nc: 88% 0 0;
+    --su: 72% 0.19 155;
+    --suc: 13.5% 0 0;
+    --er: 62% 0.22 25;
+    --erc: 95% 0 0;
+    --wa: 75% 0.18 80;
+    --wac: 13.5% 0 0;
+    --in: 67% 0.15 250;
+    --inc: 95% 0 0;
+    --rounded-box: 0;
+    --rounded-btn: 0;
+    --rounded-badge: 0;
+    --tab-radius: 0;
+    --animation-btn: 0;
+    --btn-focus-scale: 1;
+  }
+  @keyframes pulse-dot { 50% { opacity: 0.3; } }
+  .dot-running { animation: pulse-dot 1s infinite; }
+  .log-box {
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+    font-size: 0.78rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: oklch(var(--b2)); }
 </style>
 </head>
-<body>
-<div class="layout">
-  <h1>直播录制控制台</h1>
-
-  <div class="main-col">
-    <!-- 创建任务表单 -->
-    <div class="create-form">
-      <label for="url">直播间 URL</label>
-      <input id="url" type="text" placeholder="https://live.douyin.com/xxxxxxxxx">
-      <div class="form-row">
-        <div>
-          <label for="quality">画质</label>
-          <select id="quality">
-            <option value="origin">原画 (origin)</option>
-            <option value="uhd">蓝光 (uhd)</option>
-            <option value="hd">高清 (hd)</option>
-            <option value="sd">标清 (sd)</option>
-            <option value="ld">流畅 (ld)</option>
-          </select>
-        </div>
-        <div>
-          <label for="segment">分段 (分钟)</label>
-          <input id="segment" type="number" value="30" min="0" step="1">
-        </div>
-      </div>
-      <div class="form-checks">
-        <label><input type="checkbox" id="chkRecord" checked> 录制</label>
-        <label><input type="checkbox" id="chkScreenshot"> 截图</label>
-      </div>
-      <button id="btnAdd">添加任务</button>
-    </div>
-
-    <!-- 任务列表 -->
-    <div id="taskList" class="task-list">
-      <div class="empty-state">暂无任务，请添加直播间 URL</div>
-    </div>
-  </div>
-
-  <div class="side-panel">
-    <!-- 预览区域 -->
-    <div class="preview-box" id="previewBox">
-      <span class="no-signal" id="noSignal">点击任务「预览」按钮查看画面</span>
-      <img id="previewImg" alt="preview" style="display:none" src="">
-      <span class="preview-label" id="previewLabel" style="display:none"></span>
-    </div>
-    <!-- 日志区域 -->
-    <div id="logs"></div>
-  </div>
-</div>
+<body class="min-h-screen bg-base-100">
+<div class="max-w-4xl mx-auto px-4 py-6" id="app"></div>
 
 <script>
-const $ = id => document.getElementById(id);
-const $url = $('url'), $quality = $('quality'), $segment = $('segment');
-const $chkRecord = $('chkRecord'), $chkScreenshot = $('chkScreenshot');
-const $taskList = $('taskList');
-const $logs = $('logs');
-const $previewImg = $('previewImg'), $noSignal = $('noSignal'), $previewLabel = $('previewLabel');
-
-const STATUS_LABELS = {
-  pending: '待启动', running: '运行中', stopped: '已停止', error: '错误',
+const STATUS_LABELS = { pending: '待启动', running: '运行中', stopped: '已停止', error: '错误', completed: '已完成' };
+const STATUS_BADGE = {
+  pending:    'badge-ghost',
+  running:    'badge-success',
+  stopped:    'badge-error',
+  error:      'badge-error',
+  completed:  'badge-info',
 };
+const LOCAL_TYPE_LABELS = { portrait: '截图筛选', highlight: '高能时刻' };
 
-let previewingTaskId = null;
+let currentView = null;
+let pollTimer = null;
+let evtSource = null;
+let detailPreviewActive = false;
 
-// ── 添加任务 ──
-$('btnAdd').addEventListener('click', async () => {
-  const url = $url.value.trim();
-  if (!url) { alert('请输入直播间 URL'); return; }
-  if (!$chkRecord.checked && !$chkScreenshot.checked) {
-    alert('请至少勾选「录制」或「截图」'); return;
+// ── Hash 路由 ──────────────────────────────────────────────
+function getRoute() {
+  const hash = location.hash || '#/';
+  let m;
+  m = hash.match(/^#\/local\/task\/(\d+)$/);
+  if (m) return { view: 'local-detail', id: parseInt(m[1]) };
+  m = hash.match(/^#\/task\/(\d+)$/);
+  if (m) return { view: 'detail', id: parseInt(m[1]) };
+  if (hash === '#/local') return { view: 'local' };
+  return { view: 'list' };
+}
+
+function navigate(hash) { location.hash = hash; }
+
+window.addEventListener('hashchange', () => route());
+window.addEventListener('load', () => route());
+
+function route() {
+  cleanup();
+  const r = getRoute();
+  if (r.view === 'detail') { currentView = 'detail'; renderDetailView(r.id); }
+  else if (r.view === 'local-detail') { currentView = 'local-detail'; renderLocalDetailView(r.id); }
+  else if (r.view === 'local') { currentView = 'local'; renderLocalListView(); }
+  else { currentView = 'list'; renderListView(); }
+}
+
+function cleanup() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (evtSource) { evtSource.close(); evtSource = null; }
+  if (detailPreviewActive) {
+    detailPreviewActive = false;
+    const previewId = getRoute().id;
+    if (previewId) fetch(`/api/tasks/${previewId}/preview`, { method: 'POST' }).catch(() => {});
   }
+}
+
+// ── Tab 切换 HTML ─────────────────────────────────────────
+function tabsHTML(active) {
+  return `
+    <h1 class="text-2xl font-bold mb-4">直播录制控制台</h1>
+    <div role="tablist" class="tabs tabs-bordered mb-6">
+      <a role="tab" class="tab ${active === 'live' ? 'tab-active' : ''}" onclick="navigate('#/')">直播录制</a>
+      <a role="tab" class="tab ${active === 'local' ? 'tab-active' : ''}" onclick="navigate('#/local')">本地视频</a>
+    </div>`;
+}
+
+// ── 直播录制列表视图 ──────────────────────────────────────
+function renderListView() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    ${tabsHTML('live')}
+
+    <div class="card bg-base-200 shadow-md mb-6">
+      <div class="card-body p-5">
+        <div class="form-control mb-3">
+          <label class="label py-1"><span class="label-text">直播间 URL</span></label>
+          <input id="url" type="text" placeholder="https://live.douyin.com/xxxxxxxxx" class="input input-bordered input-sm w-full" />
+        </div>
+        <div class="grid grid-cols-3 gap-3 mb-3">
+          <div class="form-control">
+            <label class="label py-1"><span class="label-text">画质</span></label>
+            <select id="quality" class="select select-bordered select-sm w-full">
+              <option value="origin">原画 (origin)</option>
+              <option value="uhd">蓝光 (uhd)</option>
+              <option value="hd">高清 (hd)</option>
+              <option value="sd">标清 (sd)</option>
+              <option value="ld">流畅 (ld)</option>
+            </select>
+          </div>
+          <div class="form-control">
+            <label class="label py-1"><span class="label-text">分段时间 (秒)</span></label>
+            <input id="segmentSec" type="number" value="1800" min="0" step="60" class="input input-bordered input-sm w-full" />
+          </div>
+          <div class="form-control">
+            <label class="label py-1"><span class="label-text">循环检测 (秒)</span></label>
+            <input id="pollInterval" type="number" value="180" min="10" step="10" class="input input-bordered input-sm w-full" />
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div class="form-control">
+            <label class="label py-1"><span class="label-text">网络线程数</span></label>
+            <input id="maxThreads" type="number" value="3" min="1" max="10" step="1" class="input input-bordered input-sm w-full" />
+          </div>
+        </div>
+        <div class="flex items-center gap-5 mb-4 flex-wrap">
+          <label class="label cursor-pointer gap-2">
+            <input type="checkbox" id="chkRecord" checked class="checkbox checkbox-sm checkbox-primary" />
+            <span class="label-text">录制</span>
+          </label>
+          <label class="label cursor-pointer gap-2">
+            <input type="checkbox" id="chkScreenshot" class="checkbox checkbox-sm checkbox-warning" />
+            <span class="label-text">截图</span>
+          </label>
+          <label class="label cursor-pointer gap-2">
+            <input type="checkbox" id="chkSegment" checked class="checkbox checkbox-sm" />
+            <span class="label-text">分段录制</span>
+          </label>
+          <label class="label cursor-pointer gap-2">
+            <input type="checkbox" id="chkCountdown" checked class="checkbox checkbox-sm" />
+            <span class="label-text">显示循环倒计时</span>
+          </label>
+          <label class="label cursor-pointer gap-2">
+            <input type="checkbox" id="chkSchedule" class="checkbox checkbox-sm checkbox-accent" onchange="toggleScheduleInputs()" />
+            <span class="label-text">启用定时</span>
+          </label>
+        </div>
+        <div class="grid grid-cols-3 gap-3 mb-3 hidden" id="scheduleRow">
+          <div class="form-control">
+            <label class="label py-1"><span class="label-text">时区</span></label>
+            <select id="scheduleTz" class="select select-bordered select-sm w-full">
+              <option value="Asia/Shanghai">Asia/Shanghai</option>
+              <option value="Asia/Tokyo">Asia/Tokyo</option>
+              <option value="Asia/Hong_Kong">Asia/Hong_Kong</option>
+              <option value="America/New_York">America/New_York</option>
+              <option value="America/Los_Angeles">America/Los_Angeles</option>
+              <option value="Europe/London">Europe/London</option>
+              <option value="UTC">UTC</option>
+            </select>
+          </div>
+          <div class="form-control">
+            <label class="label py-1"><span class="label-text">开始时间</span></label>
+            <input id="scheduleStart" type="time" value="20:00" class="input input-bordered input-sm w-full" />
+          </div>
+          <div class="form-control">
+            <label class="label py-1"><span class="label-text">停止时间</span></label>
+            <input id="scheduleStop" type="time" value="02:00" class="input input-bordered input-sm w-full" />
+          </div>
+        </div>
+        <button class="btn btn-primary btn-sm w-full" id="btnAdd">添加任务</button>
+      </div>
+    </div>
+
+    <div id="taskTableWrap"></div>
+  `;
+
+  document.getElementById('btnAdd').addEventListener('click', addTask);
+  document.getElementById('url').addEventListener('keydown', e => { if (e.key === 'Enter') addTask(); });
+  refreshTaskList();
+  pollTimer = setInterval(refreshTaskList, 2000);
+}
+
+function toggleScheduleInputs() {
+  const chk = document.getElementById('chkSchedule');
+  const row = document.getElementById('scheduleRow');
+  if (row) row.classList.toggle('hidden', !chk.checked);
+}
+
+async function addTask() {
+  const url = document.getElementById('url').value.trim();
+  if (!url) { alert('请输入直播间 URL'); return; }
+  const chkRecord = document.getElementById('chkRecord');
+  const chkScreenshot = document.getElementById('chkScreenshot');
+  if (!chkRecord.checked && !chkScreenshot.checked) { alert('请至少勾选「录制」或「截图」'); return; }
   try {
+    const segmentSec = parseInt(document.getElementById('segmentSec').value) || 1800;
+    const scheduleEnabled = document.getElementById('chkSchedule').checked;
+    const payload = {
+      url, quality: document.getElementById('quality').value,
+      segment: Math.floor(segmentSec / 60),
+      record: chkRecord.checked, screenshot: chkScreenshot.checked,
+      enable_segment: document.getElementById('chkSegment').checked,
+      segment_sec: segmentSec,
+      poll_interval: parseInt(document.getElementById('pollInterval').value) || 180,
+      show_countdown: document.getElementById('chkCountdown').checked,
+      max_threads: parseInt(document.getElementById('maxThreads').value) || 3,
+      schedule_enabled: scheduleEnabled,
+    };
+    if (scheduleEnabled) {
+      payload.schedule_timezone = document.getElementById('scheduleTz').value;
+      payload.schedule_start = document.getElementById('scheduleStart').value;
+      payload.schedule_stop = document.getElementById('scheduleStop').value;
+    }
     const r = await fetch('/api/tasks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        url,
-        quality: $quality.value,
-        segment: parseInt($segment.value) || 0,
-        record: $chkRecord.checked,
-        screenshot: $chkScreenshot.checked,
-      }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
-    $url.value = '';
-    refreshTasks();
+    document.getElementById('url').value = '';
+    refreshTaskList();
   } catch (e) { alert('请求失败: ' + e.message); }
-});
-
-// ── 刷新任务列表 ──
-async function refreshTasks() {
-  try {
-    const r = await fetch('/api/tasks');
-    const d = await r.json();
-    renderTasks(d.tasks);
-  } catch {}
 }
 
-function renderTasks(tasks) {
+async function refreshTaskList() {
+  try { const r = await fetch('/api/tasks'); const d = await r.json(); renderTaskTable(d.tasks); } catch {}
+}
+
+function renderTaskTable(tasks) {
+  const wrap = document.getElementById('taskTableWrap');
+  if (!wrap) return;
   if (!tasks || tasks.length === 0) {
-    $taskList.innerHTML = '<div class="empty-state">暂无任务，请添加直播间 URL</div>';
+    wrap.innerHTML = '<div class="text-center py-12 text-base-content/50">暂无任务，请添加直播间 URL</div>';
     return;
   }
-  $taskList.innerHTML = tasks.map(t => {
-    const dotClass = 'dot dot-' + t.status;
+
+  const rows = tasks.map(t => {
     const canStart = t.status === 'pending' || t.status === 'stopped' || t.status === 'error';
     const canStop = t.status === 'running';
     const canDelete = t.status !== 'running';
     const displayName = t.name || t.url;
-    const isPreview = t.is_previewing;
+    const features = [];
+    if (t.enable_record) features.push('<span class="badge badge-success badge-outline badge-xs">录制</span>');
+    if (t.enable_screenshot) features.push('<span class="badge badge-warning badge-outline badge-xs">截图</span>');
+    if (t.schedule_enabled) features.push(`<span class="badge badge-accent badge-outline badge-xs">定时 ${t.schedule_start}~${t.schedule_stop}</span>`);
+    const workerInfo = t.worker_status ? `<span class="text-xs opacity-50 ml-1">· ${esc(t.worker_status)}</span>` : '';
 
-    return `<div class="task-card">
-      <div class="task-header">
-        <span class="task-id">#${t.id}</span>
-        <span class="task-name" title="${t.url}">${displayName}</span>
-      </div>
-      <div class="task-url">${t.url}</div>
-      <div class="task-tags">
-        ${t.enable_record ? '<span class="tag tag-record">录制</span>' : ''}
-        ${t.enable_screenshot ? '<span class="tag tag-screenshot">截图</span>' : ''}
-        <span class="tag">${t.quality}</span>
-        ${t.segment_min > 0 ? `<span class="tag">${t.segment_min}min</span>` : ''}
-      </div>
-      <div class="task-status">
-        <span class="${dotClass}"></span>
-        <span>${STATUS_LABELS[t.status] || t.status}</span>
-        ${t.worker_status ? `<span class="worker-status">· ${t.worker_status}</span>` : ''}
-        ${t.error_msg ? `<span class="worker-status" style="color:var(--red)">· ${t.error_msg}</span>` : ''}
-      </div>
-      <div class="task-actions">
-        <button class="btn-start" onclick="startTask(${t.id})" ${canStart ? '' : 'disabled'}>启动</button>
-        <button class="btn-stop" onclick="stopTask(${t.id})" ${canStop ? '' : 'disabled'}>停止</button>
-        <button class="btn-preview ${isPreview ? 'active' : ''}" onclick="togglePreview(${t.id})">预览</button>
-        <button class="btn-delete" onclick="deleteTask(${t.id})" ${canDelete ? '' : 'disabled'}>删除</button>
-      </div>
-    </div>`;
+    return `<tr class="clickable hover" data-id="${t.id}">
+      <td class="text-base-content/50 font-mono">${t.id}</td>
+      <td>
+        <div class="font-semibold text-sm truncate max-w-[240px]">${esc(displayName)}</div>
+        <div class="text-xs opacity-40 truncate max-w-[240px]">${esc(t.url)}</div>
+      </td>
+      <td>
+        <span class="badge ${STATUS_BADGE[t.status] || 'badge-ghost'} badge-sm gap-1">
+          <span class="inline-block w-1.5 h-1.5 rounded-full ${t.status === 'running' ? 'bg-success dot-running' : t.status === 'stopped' || t.status === 'error' ? 'bg-error' : 'bg-base-content/40'}"></span>
+          ${STATUS_LABELS[t.status] || t.status}
+        </span>
+        ${workerInfo}
+      </td>
+      <td><div class="flex gap-1">${features.join('')}</div></td>
+      <td onclick="event.stopPropagation()">
+        <div class="flex gap-1">
+          ${canStart ? `<button class="btn btn-success btn-outline btn-xs" onclick="listAction('start',${t.id})">启动</button>` : ''}
+          ${canStop ? `<button class="btn btn-error btn-outline btn-xs" onclick="listAction('stop',${t.id})">停止</button>` : ''}
+          <button class="btn btn-info btn-outline btn-xs" onclick="navigate('#/task/${t.id}')">详情</button>
+          ${canDelete ? `<button class="btn btn-ghost btn-xs text-error" onclick="listDelete(${t.id})">删除</button>` : ''}
+        </div>
+      </td>
+    </tr>`;
   }).join('');
+
+  wrap.innerHTML = `
+    <div class="overflow-x-auto rounded-lg border border-base-300">
+      <table class="table table-sm">
+        <thead><tr><th>#</th><th>名称 / URL</th><th>状态</th><th>功能</th><th>操作</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+
+  wrap.querySelectorAll('tr.clickable').forEach(tr => {
+    tr.addEventListener('click', () => navigate('#/task/' + tr.dataset.id));
+  });
 }
 
-// ── 任务操作 ──
-async function startTask(id) {
+async function listAction(action, id) {
   try {
-    const r = await fetch(`/api/tasks/${id}/start`, { method: 'POST' });
+    const r = await fetch(`/api/tasks/${id}/${action}`, { method: 'POST' });
     if (!r.ok) { const d = await r.json(); alert(d.error); }
-    refreshTasks();
+    refreshTaskList();
   } catch (e) { alert(e.message); }
 }
 
-async function stopTask(id) {
-  try {
-    await fetch(`/api/tasks/${id}/stop`, { method: 'POST' });
-    refreshTasks();
-  } catch (e) { alert(e.message); }
-}
-
-async function deleteTask(id) {
+async function listDelete(id) {
   if (!confirm('确认删除此任务？')) return;
   try {
     const r = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
     if (!r.ok) { const d = await r.json(); alert(d.error); }
-    refreshTasks();
+    refreshTaskList();
   } catch (e) { alert(e.message); }
 }
 
-async function togglePreview(id) {
+// ── 直播详情视图 ──────────────────────────────────────────
+async function renderDetailView(id) {
+  const app = document.getElementById('app');
+  app.innerHTML = '<div class="flex justify-center py-20"><span class="loading loading-spinner loading-md"></span></div>';
+
+  let task;
   try {
-    const r = await fetch(`/api/tasks/${id}/preview`, { method: 'POST' });
-    const d = await r.json();
-    if (d.previewing) {
-      previewingTaskId = id;
-      $previewImg.src = '/api/preview?' + Date.now();
-      $previewImg.style.display = 'block';
-      $noSignal.style.display = 'none';
-      $previewLabel.textContent = '任务 #' + id;
-      $previewLabel.style.display = 'block';
-      $previewImg.onerror = () => {
-        $previewImg.style.display = 'none';
-        $noSignal.textContent = '等待画面...';
-        $noSignal.style.display = 'block';
+    const r = await fetch(`/api/tasks/${id}`);
+    if (!r.ok) { app.innerHTML = '<div class="text-center py-16 text-base-content/50">任务不存在 — <a class="link link-primary" href="#/">返回列表</a></div>'; return; }
+    task = await r.json();
+  } catch { app.innerHTML = '<div class="text-center py-16 text-base-content/50">加载失败 — <a class="link link-primary" href="#/">返回列表</a></div>'; return; }
+
+  const canStart = task.status === 'pending' || task.status === 'stopped' || task.status === 'error';
+  const canStop = task.status === 'running';
+  const canDelete = task.status !== 'running';
+  const displayName = task.name || '未命名';
+  const features = [];
+  if (task.enable_record) features.push('<span class="badge badge-success badge-outline badge-sm">录制</span>');
+  if (task.enable_screenshot) features.push('<span class="badge badge-warning badge-outline badge-sm">截图</span>');
+  const createdDate = task.created_at ? task.created_at.split('T')[0] : '-';
+  const workerInfo = task.worker_status ? ` · ${task.worker_status}` : '';
+
+  app.innerHTML = `
+    <div class="flex items-center gap-3 mb-5">
+      <a href="#/" class="btn btn-ghost btn-sm gap-1"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>返回</a>
+      <h2 class="text-xl font-bold">#${task.id} ${esc(displayName)}</h2>
+    </div>
+
+    <div class="card bg-base-200 shadow-md mb-4">
+      <div class="card-body p-5 gap-3">
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+          <div><span class="opacity-50 mr-1">URL</span> <span class="break-all">${esc(task.url)}</span></div>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+          <div><span class="opacity-50 mr-1">画质</span> <span class="badge badge-sm badge-outline">${task.quality}</span></div>
+          <div><span class="opacity-50 mr-1">分段</span> ${task.enable_segment ? task.segment_sec + 's' : '关闭'}</div>
+          <div><span class="opacity-50 mr-1">循环检测</span> ${task.poll_interval}s</div>
+          <div><span class="opacity-50 mr-1">线程数</span> ${task.max_threads}</div>
+          <div><span class="opacity-50 mr-1">倒计时</span> ${task.show_countdown ? '开' : '关'}</div>
+        </div>
+        ${task.schedule_enabled ? `
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+          <div><span class="opacity-50 mr-1">定时</span> <span class="badge badge-accent badge-outline badge-sm">${task.schedule_start} ~ ${task.schedule_stop}</span></div>
+          <div><span class="opacity-50 mr-1">时区</span> ${task.schedule_timezone}</div>
+        </div>` : ''}
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+          <div><span class="opacity-50 mr-1">功能</span> <span class="inline-flex gap-1">${features.join('') || '-'}</span></div>
+          <div><span class="opacity-50 mr-1">创建</span> ${createdDate}</div>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+          <div>
+            <span class="opacity-50 mr-1">状态</span>
+            <span class="badge ${STATUS_BADGE[task.status] || 'badge-ghost'} badge-sm gap-1">
+              <span class="inline-block w-1.5 h-1.5 rounded-full ${task.status === 'running' ? 'bg-success dot-running' : task.status === 'stopped' || task.status === 'error' ? 'bg-error' : 'bg-base-content/40'}"></span>
+              ${STATUS_LABELS[task.status] || task.status}${workerInfo}
+            </span>
+          </div>
+        </div>
+        ${task.error_msg ? `<div class="text-sm text-error"><span class="opacity-50 mr-1">错误</span> ${esc(task.error_msg)}</div>` : ''}
+        <div class="flex gap-2 mt-1" id="detailActions">
+          ${canStart ? `<button class="btn btn-success btn-outline btn-sm" onclick="detailAction('start',${id})">启动</button>` : ''}
+          ${canStop ? `<button class="btn btn-error btn-outline btn-sm" onclick="detailAction('stop',${id})">停止</button>` : ''}
+          ${canDelete ? `<button class="btn btn-ghost btn-sm text-error" onclick="detailDelete(${id})">删除</button>` : ''}
+        </div>
+      </div>
+    </div>
+
+    <div class="mb-4">
+      <button class="btn btn-outline btn-primary btn-sm" id="btnPreviewToggle" onclick="toggleDetailPreview(${id},'${esc(displayName).replace(/'/g, "\\'")}')">开启预览</button>
+    </div>
+    <div class="bg-black rounded-lg overflow-hidden min-h-[200px] flex items-center justify-center relative mb-4 hidden" id="previewBox">
+      <span class="text-base-content/40 text-sm" id="noSignal">等待画面...</span>
+      <img id="previewImg" alt="preview" class="w-full block hidden" src="">
+      <span class="absolute top-2 left-2 bg-black/60 text-primary text-xs px-2 py-0.5 rounded hidden" id="previewLabel">#${task.id} ${esc(displayName)}</span>
+    </div>
+
+    <div class="log-box bg-base-300 rounded-lg p-3 h-72 overflow-y-auto text-base-content/70" id="logs"></div>
+  `;
+
+  loadLogsAndConnect(id);
+  pollTimer = setInterval(() => refreshDetailStatus(id), 2000);
+}
+
+async function toggleDetailPreview(id, name) {
+  const btn = document.getElementById('btnPreviewToggle');
+  const box = document.getElementById('previewBox');
+  const img = document.getElementById('previewImg');
+  const noSignal = document.getElementById('noSignal');
+  const label = document.getElementById('previewLabel');
+
+  if (detailPreviewActive) {
+    try { await fetch(`/api/tasks/${id}/preview`, { method: 'POST' }); } catch {}
+    detailPreviewActive = false;
+    if (img) { img.src = ''; img.classList.add('hidden'); }
+    if (box) box.classList.add('hidden');
+    if (btn) { btn.textContent = '开启预览'; btn.classList.remove('btn-active'); }
+  } else {
+    try {
+      const r = await fetch(`/api/tasks/${id}/preview`, { method: 'POST' });
+      const d = await r.json();
+      if (!d.previewing) await fetch(`/api/tasks/${id}/preview`, { method: 'POST' });
+    } catch {}
+    detailPreviewActive = true;
+    if (box) box.classList.remove('hidden');
+    if (img) {
+      img.src = '/api/preview?' + Date.now();
+      img.classList.remove('hidden');
+      if (noSignal) noSignal.classList.add('hidden');
+      if (label) label.classList.remove('hidden');
+      img.onerror = () => {
+        img.classList.add('hidden');
+        if (noSignal) { noSignal.textContent = '等待画面...'; noSignal.classList.remove('hidden'); }
       };
-    } else {
-      previewingTaskId = null;
-      $previewImg.src = '';
-      $previewImg.style.display = 'none';
-      $noSignal.textContent = '点击任务「预览」按钮查看画面';
-      $noSignal.style.display = 'block';
-      $previewLabel.style.display = 'none';
     }
-    refreshTasks();
+    if (btn) { btn.textContent = '关闭预览'; btn.classList.add('btn-active'); }
+  }
+}
+
+async function loadLogsAndConnect(id) {
+  const logs = document.getElementById('logs');
+  try {
+    const r = await fetch(`/api/tasks/${id}/logs/history`);
+    if (r.ok) {
+      const d = await r.json();
+      if (d.lines && d.lines.length > 0 && logs) {
+        logs.textContent = d.lines.join('\n') + '\n';
+        logs.scrollTop = logs.scrollHeight;
+      }
+    }
+  } catch {}
+  connectTaskSSE(id);
+}
+
+function connectTaskSSE(id) {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource(`/api/tasks/${id}/logs`);
+  const logs = document.getElementById('logs');
+  evtSource.onmessage = e => {
+    if (logs) { logs.textContent += e.data + '\n'; logs.scrollTop = logs.scrollHeight; }
+  };
+  evtSource.onerror = () => { if (currentView === 'detail') setTimeout(() => connectTaskSSE(id), 2000); };
+}
+
+async function refreshDetailStatus(id) {
+  try {
+    const r = await fetch(`/api/tasks/${id}`);
+    if (!r.ok) return;
+    const task = await r.json();
+    const canStart = task.status === 'pending' || task.status === 'stopped' || task.status === 'error';
+    const canStop = task.status === 'running';
+    const canDelete = task.status !== 'running';
+    const actions = document.getElementById('detailActions');
+    if (actions) {
+      actions.innerHTML = `
+        ${canStart ? `<button class="btn btn-success btn-outline btn-sm" onclick="detailAction('start',${id})">启动</button>` : ''}
+        ${canStop ? `<button class="btn btn-error btn-outline btn-sm" onclick="detailAction('stop',${id})">停止</button>` : ''}
+        ${canDelete ? `<button class="btn btn-ghost btn-sm text-error" onclick="detailDelete(${id})">删除</button>` : ''}
+      `;
+    }
+  } catch {}
+}
+
+async function detailAction(action, id) {
+  try {
+    const r = await fetch(`/api/tasks/${id}/${action}`, { method: 'POST' });
+    if (!r.ok) { const d = await r.json(); alert(d.error); }
+    refreshDetailStatus(id);
   } catch (e) { alert(e.message); }
 }
 
-// ── SSE 日志 ──
-let evtSource = null;
-function connectSSE() {
-  if (evtSource) evtSource.close();
-  evtSource = new EventSource('/api/logs');
-  evtSource.onmessage = e => {
-    $logs.textContent += e.data + '\n';
-    $logs.scrollTop = $logs.scrollHeight;
-  };
-  evtSource.onerror = () => { setTimeout(connectSSE, 2000); };
+async function detailDelete(id) {
+  if (!confirm('确认删除此任务？')) return;
+  try {
+    const r = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+    if (!r.ok) { const d = await r.json(); alert(d.error); return; }
+    navigate('#/');
+  } catch (e) { alert(e.message); }
 }
-connectSSE();
 
-// ── 轮询状态 ──
-setInterval(refreshTasks, 2000);
-refreshTasks();
+// ══════════════════════════════════════════════════════════
+// ── 本地视频 ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════
+
+function renderLocalListView() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    ${tabsHTML('local')}
+
+    <div class="card bg-base-200 shadow-md mb-6">
+      <div class="card-body p-5">
+        <div class="form-control mb-3">
+          <label class="label py-1"><span class="label-text">视频文件路径</span></label>
+          <div class="flex gap-2">
+            <input id="localPath" type="text" placeholder="/path/to/video.mp4" class="input input-bordered input-sm flex-1" />
+            <button class="btn btn-outline btn-sm" onclick="openFileBrowser()">浏览...</button>
+          </div>
+        </div>
+        <div class="flex items-center gap-5 mb-4">
+          <span class="label-text opacity-60 mr-1">任务类型</span>
+          <label class="label cursor-pointer gap-2">
+            <input type="radio" name="localType" value="portrait" checked class="radio radio-sm radio-primary" />
+            <span class="label-text">截图筛选</span>
+          </label>
+          <label class="label cursor-pointer gap-2">
+            <input type="radio" name="localType" value="highlight" class="radio radio-sm radio-secondary" />
+            <span class="label-text">高能时刻</span>
+          </label>
+        </div>
+        <button class="btn btn-primary btn-sm w-full" id="btnLocalAdd">添加任务</button>
+      </div>
+    </div>
+
+    <div id="localTaskTableWrap"></div>
+  `;
+
+  document.getElementById('btnLocalAdd').addEventListener('click', addLocalTask);
+  document.getElementById('localPath').addEventListener('keydown', e => { if (e.key === 'Enter') addLocalTask(); });
+  refreshLocalTaskList();
+  pollTimer = setInterval(refreshLocalTaskList, 2000);
+}
+
+async function addLocalTask() {
+  const videoPath = document.getElementById('localPath').value.trim();
+  if (!videoPath) { alert('请输入视频文件路径'); return; }
+  const taskType = document.querySelector('input[name="localType"]:checked').value;
+  try {
+    const r = await fetch('/api/local/tasks', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video_path: videoPath, task_type: taskType }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); return; }
+    document.getElementById('localPath').value = '';
+    refreshLocalTaskList();
+  } catch (e) { alert('请求失败: ' + e.message); }
+}
+
+async function refreshLocalTaskList() {
+  try { const r = await fetch('/api/local/tasks'); const d = await r.json(); renderLocalTaskTable(d.tasks); } catch {}
+}
+
+function renderLocalTaskTable(tasks) {
+  const wrap = document.getElementById('localTaskTableWrap');
+  if (!wrap) return;
+  if (!tasks || tasks.length === 0) {
+    wrap.innerHTML = '<div class="text-center py-12 text-base-content/50">暂无本地视频任务</div>';
+    return;
+  }
+
+  const rows = tasks.map(t => {
+    const canStart = t.status === 'pending' || t.status === 'error';
+    const canStop = t.status === 'running';
+    const canDelete = t.status !== 'running';
+    const displayName = t.name || t.video_path;
+    const typeLabel = LOCAL_TYPE_LABELS[t.task_type] || t.task_type;
+
+    const dotClass = t.status === 'running' ? 'bg-success dot-running'
+                   : t.status === 'completed' ? 'bg-info'
+                   : t.status === 'error' ? 'bg-error'
+                   : 'bg-base-content/40';
+
+    const progressBar = t.status === 'running'
+      ? `<progress class="progress progress-primary w-24 h-2" value="${t.progress}" max="100"></progress>
+         <span class="text-xs opacity-50 ml-1">${Math.round(t.progress)}%</span>`
+      : (t.result_summary ? `<span class="text-xs opacity-60">${esc(t.result_summary)}</span>` : '');
+
+    return `<tr class="clickable hover" data-id="${t.id}">
+      <td class="text-base-content/50 font-mono">${t.id}</td>
+      <td>
+        <div class="font-semibold text-sm truncate max-w-[200px]">${esc(displayName)}</div>
+        <div class="text-xs opacity-40 truncate max-w-[200px]">${esc(t.video_path)}</div>
+      </td>
+      <td><span class="badge badge-outline badge-sm">${typeLabel}</span></td>
+      <td>
+        <span class="badge ${STATUS_BADGE[t.status] || 'badge-ghost'} badge-sm gap-1">
+          <span class="inline-block w-1.5 h-1.5 rounded-full ${dotClass}"></span>
+          ${STATUS_LABELS[t.status] || t.status}
+        </span>
+      </td>
+      <td>${progressBar}</td>
+      <td onclick="event.stopPropagation()">
+        <div class="flex gap-1">
+          ${canStart ? `<button class="btn btn-success btn-outline btn-xs" onclick="localListAction('start',${t.id})">启动</button>` : ''}
+          ${canStop ? `<button class="btn btn-error btn-outline btn-xs" onclick="localListAction('stop',${t.id})">停止</button>` : ''}
+          <button class="btn btn-info btn-outline btn-xs" onclick="navigate('#/local/task/${t.id}')">详情</button>
+          ${canDelete ? `<button class="btn btn-ghost btn-xs text-error" onclick="localListDelete(${t.id})">删除</button>` : ''}
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  wrap.innerHTML = `
+    <div class="overflow-x-auto rounded-lg border border-base-300">
+      <table class="table table-sm">
+        <thead><tr><th>#</th><th>名称 / 路径</th><th>类型</th><th>状态</th><th>进度</th><th>操作</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+
+  wrap.querySelectorAll('tr.clickable').forEach(tr => {
+    tr.addEventListener('click', () => navigate('#/local/task/' + tr.dataset.id));
+  });
+}
+
+async function localListAction(action, id) {
+  try {
+    const r = await fetch(`/api/local/tasks/${id}/${action}`, { method: 'POST' });
+    if (!r.ok) { const d = await r.json(); alert(d.error); }
+    refreshLocalTaskList();
+  } catch (e) { alert(e.message); }
+}
+
+async function localListDelete(id) {
+  if (!confirm('确认删除此任务？')) return;
+  try {
+    const r = await fetch(`/api/local/tasks/${id}`, { method: 'DELETE' });
+    if (!r.ok) { const d = await r.json(); alert(d.error); }
+    refreshLocalTaskList();
+  } catch (e) { alert(e.message); }
+}
+
+// ── 本地视频详情 ──────────────────────────────────────────
+async function renderLocalDetailView(id) {
+  const app = document.getElementById('app');
+  app.innerHTML = '<div class="flex justify-center py-20"><span class="loading loading-spinner loading-md"></span></div>';
+
+  let task;
+  try {
+    const r = await fetch(`/api/local/tasks/${id}`);
+    if (!r.ok) { app.innerHTML = '<div class="text-center py-16 text-base-content/50">任务不存在 — <a class="link link-primary" href="#/local">返回列表</a></div>'; return; }
+    task = await r.json();
+  } catch { app.innerHTML = '<div class="text-center py-16 text-base-content/50">加载失败 — <a class="link link-primary" href="#/local">返回列表</a></div>'; return; }
+
+  const canStart = task.status === 'pending' || task.status === 'error';
+  const canStop = task.status === 'running';
+  const canDelete = task.status !== 'running';
+  const displayName = task.name || '未命名';
+  const typeLabel = LOCAL_TYPE_LABELS[task.task_type] || task.task_type;
+  const createdDate = task.created_at ? task.created_at.split('T')[0] : '-';
+
+  const dotClass = task.status === 'running' ? 'bg-success dot-running'
+                 : task.status === 'completed' ? 'bg-info'
+                 : task.status === 'error' ? 'bg-error'
+                 : 'bg-base-content/40';
+
+  app.innerHTML = `
+    <div class="flex items-center gap-3 mb-5">
+      <a href="#/local" class="btn btn-ghost btn-sm gap-1"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>返回</a>
+      <h2 class="text-xl font-bold">#${task.id} ${esc(displayName)}</h2>
+    </div>
+
+    <div class="card bg-base-200 shadow-md mb-4">
+      <div class="card-body p-5 gap-3">
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+          <div><span class="opacity-50 mr-1">文件</span> <span class="break-all">${esc(task.video_path)}</span></div>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+          <div><span class="opacity-50 mr-1">类型</span> <span class="badge badge-sm badge-outline">${typeLabel}</span></div>
+          <div><span class="opacity-50 mr-1">创建</span> ${createdDate}</div>
+          ${task.finished_at ? `<div><span class="opacity-50 mr-1">完成</span> ${task.finished_at.split('T')[0]}</div>` : ''}
+        </div>
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+          <div>
+            <span class="opacity-50 mr-1">状态</span>
+            <span class="badge ${STATUS_BADGE[task.status] || 'badge-ghost'} badge-sm gap-1">
+              <span class="inline-block w-1.5 h-1.5 rounded-full ${dotClass}"></span>
+              ${STATUS_LABELS[task.status] || task.status}
+            </span>
+          </div>
+        </div>
+        <div class="mt-1" id="localProgressWrap">
+          <progress class="progress progress-primary w-full h-3" value="${task.progress}" max="100" id="localProgressBar"></progress>
+          <div class="text-xs opacity-60 mt-1" id="localProgressText">${esc(task.progress_text) || Math.round(task.progress) + '%'}</div>
+        </div>
+        ${task.result_summary ? `<div class="text-sm"><span class="opacity-50 mr-1">结果</span> ${esc(task.result_summary)}</div>` : ''}
+        ${task.error_msg ? `<div class="text-sm text-error"><span class="opacity-50 mr-1">错误</span> ${esc(task.error_msg)}</div>` : ''}
+        <div class="flex gap-2 mt-1" id="localDetailActions">
+          ${canStart ? `<button class="btn btn-success btn-outline btn-sm" onclick="localDetailAction('start',${id})">启动</button>` : ''}
+          ${canStop ? `<button class="btn btn-error btn-outline btn-sm" onclick="localDetailAction('stop',${id})">停止</button>` : ''}
+          ${canDelete ? `<button class="btn btn-ghost btn-sm text-error" onclick="localDetailDelete(${id})">删除</button>` : ''}
+        </div>
+      </div>
+    </div>
+
+    <div class="log-box bg-base-300 rounded-lg p-3 h-72 overflow-y-auto text-base-content/70" id="logs"></div>
+  `;
+
+  loadLocalLogsAndConnect(id);
+  pollTimer = setInterval(() => refreshLocalDetailStatus(id), 2000);
+}
+
+async function loadLocalLogsAndConnect(id) {
+  const logs = document.getElementById('logs');
+  try {
+    const r = await fetch(`/api/local/tasks/${id}/logs/history`);
+    if (r.ok) {
+      const d = await r.json();
+      if (d.lines && d.lines.length > 0 && logs) {
+        logs.textContent = d.lines.join('\n') + '\n';
+        logs.scrollTop = logs.scrollHeight;
+      }
+    }
+  } catch {}
+  connectLocalTaskSSE(id);
+}
+
+function connectLocalTaskSSE(id) {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource(`/api/local/tasks/${id}/logs`);
+  const logs = document.getElementById('logs');
+  evtSource.onmessage = e => {
+    if (logs) { logs.textContent += e.data + '\n'; logs.scrollTop = logs.scrollHeight; }
+  };
+  evtSource.onerror = () => { if (currentView === 'local-detail') setTimeout(() => connectLocalTaskSSE(id), 2000); };
+}
+
+async function refreshLocalDetailStatus(id) {
+  try {
+    const r = await fetch(`/api/local/tasks/${id}`);
+    if (!r.ok) return;
+    const task = await r.json();
+    const canStart = task.status === 'pending' || task.status === 'error';
+    const canStop = task.status === 'running';
+    const canDelete = task.status !== 'running';
+
+    const bar = document.getElementById('localProgressBar');
+    const text = document.getElementById('localProgressText');
+    if (bar) bar.value = task.progress;
+    if (text) text.textContent = task.progress_text || Math.round(task.progress) + '%';
+
+    const actions = document.getElementById('localDetailActions');
+    if (actions) {
+      actions.innerHTML = `
+        ${canStart ? `<button class="btn btn-success btn-outline btn-sm" onclick="localDetailAction('start',${id})">启动</button>` : ''}
+        ${canStop ? `<button class="btn btn-error btn-outline btn-sm" onclick="localDetailAction('stop',${id})">停止</button>` : ''}
+        ${canDelete ? `<button class="btn btn-ghost btn-sm text-error" onclick="localDetailDelete(${id})">删除</button>` : ''}
+      `;
+    }
+  } catch {}
+}
+
+async function localDetailAction(action, id) {
+  try {
+    const r = await fetch(`/api/local/tasks/${id}/${action}`, { method: 'POST' });
+    if (!r.ok) { const d = await r.json(); alert(d.error); }
+    refreshLocalDetailStatus(id);
+  } catch (e) { alert(e.message); }
+}
+
+async function localDetailDelete(id) {
+  if (!confirm('确认删除此任务？')) return;
+  try {
+    const r = await fetch(`/api/local/tasks/${id}`, { method: 'DELETE' });
+    if (!r.ok) { const d = await r.json(); alert(d.error); return; }
+    navigate('#/local');
+  } catch (e) { alert(e.message); }
+}
+
+// ══════════════════════════════════════════════════════════
+// ── 文件浏览器 ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════
+
+function openFileBrowser() {
+  // 如果 modal 已存在，复用
+  let modal = document.getElementById('fileBrowserModal');
+  if (!modal) {
+    modal = document.createElement('dialog');
+    modal.id = 'fileBrowserModal';
+    modal.className = 'modal';
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-box max-w-2xl max-h-[80vh] flex flex-col">
+      <h3 class="font-bold text-lg mb-3">选择视频文件</h3>
+      <div class="flex gap-2 mb-3">
+        <input id="fbPathInput" type="text" class="input input-bordered input-sm flex-1" placeholder="输入路径后回车" />
+        <button class="btn btn-sm btn-outline" onclick="fbGoTo()">前往</button>
+      </div>
+      <div class="flex-1 overflow-y-auto border border-base-300 rounded-lg" id="fbList">
+        <div class="flex justify-center py-8"><span class="loading loading-spinner loading-sm"></span></div>
+      </div>
+      <div class="modal-action">
+        <button class="btn btn-sm btn-ghost" onclick="document.getElementById('fileBrowserModal').close()">取消</button>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+  `;
+  modal.showModal();
+  document.getElementById('fbPathInput').addEventListener('keydown', e => { if (e.key === 'Enter') fbGoTo(); });
+
+  // 初始路径：输入框已有的值 或 ~
+  const existing = document.getElementById('localPath')?.value.trim();
+  let startPath = '~';
+  if (existing) {
+    // 尝试取目录部分
+    const lastSlash = existing.lastIndexOf('/');
+    startPath = lastSlash > 0 ? existing.substring(0, lastSlash) : existing;
+  }
+  fbNavigate(startPath);
+}
+
+async function fbNavigate(path) {
+  const list = document.getElementById('fbList');
+  const pathInput = document.getElementById('fbPathInput');
+  if (!list) return;
+  list.innerHTML = '<div class="flex justify-center py-8"><span class="loading loading-spinner loading-sm"></span></div>';
+
+  try {
+    const r = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
+    const d = await r.json();
+    if (!r.ok) { list.innerHTML = `<div class="text-center py-8 text-error">${esc(d.error)}</div>`; return; }
+    if (d.is_file) {
+      fbSelectFile(d.path);
+      return;
+    }
+
+    if (pathInput) pathInput.value = d.current;
+
+    let html = '';
+    // 上级目录
+    if (d.parent) {
+      html += `<div class="flex items-center gap-2 px-3 py-2 hover:bg-base-200 cursor-pointer border-b border-base-300" onclick="fbNavigate('${escAttr(d.parent)}')">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>
+        <span class="text-sm opacity-60">..</span>
+      </div>`;
+    }
+    // 目录
+    for (const dir of d.dirs) {
+      html += `<div class="flex items-center gap-2 px-3 py-2 hover:bg-base-200 cursor-pointer border-b border-base-300/50" onclick="fbNavigate('${escAttr(dir.path)}')">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+        <span class="text-sm truncate">${esc(dir.name)}</span>
+      </div>`;
+    }
+    // 视频文件
+    for (const file of d.files) {
+      html += `<div class="flex items-center gap-2 px-3 py-2 hover:bg-base-200 cursor-pointer border-b border-base-300/50" onclick="fbSelectFile('${escAttr(file.path)}')">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-primary shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+        <span class="text-sm truncate flex-1">${esc(file.name)}</span>
+        <span class="text-xs opacity-40 shrink-0">${file.size}</span>
+      </div>`;
+    }
+    if (!d.dirs.length && !d.files.length) {
+      html = '<div class="text-center py-8 text-base-content/50">此目录下没有视频文件</div>';
+    }
+    list.innerHTML = html;
+  } catch (e) {
+    list.innerHTML = `<div class="text-center py-8 text-error">加载失败: ${esc(e.message)}</div>`;
+  }
+}
+
+function fbGoTo() {
+  const input = document.getElementById('fbPathInput');
+  if (input && input.value.trim()) fbNavigate(input.value.trim());
+}
+
+function fbSelectFile(path) {
+  const input = document.getElementById('localPath');
+  if (input) input.value = path;
+  const modal = document.getElementById('fileBrowserModal');
+  if (modal) modal.close();
+}
+
+function escAttr(s) {
+  return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+// ── 通用工具 ─────────────────────────────────────────────
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
 </script>
 </body>
 </html>

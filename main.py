@@ -305,7 +305,8 @@ def cmd_task(args):
     """任务管理 CLI 子命令"""
     from src.task_manager import TaskManager
 
-    tm = TaskManager()
+    config = load_config(args.config)
+    tm = TaskManager(output_dir=config.storage.output_dir)
     action = args.task_action
 
     if action == "add":
@@ -361,10 +362,13 @@ def cmd_record(args):
     """纯录制直播流为 .ts 文件（支持分段 + 等待开播）"""
     if getattr(args, "ui", False):
         import uvicorn
-        from src.ui.app import app
+        import src.ui.app as app_module
+        if getattr(args, "output_dir", None):
+            from src.task_manager import TaskManager
+            app_module.task_manager = TaskManager(output_dir=args.output_dir)
         port = getattr(args, "port", 7860)
         logger.info("启动 Web UI: http://0.0.0.0:%d", port)
-        uvicorn.run(app, host="0.0.0.0", port=port)
+        uvicorn.run(app_module.app, host="0.0.0.0", port=port)
         return
 
     if not args.source:
