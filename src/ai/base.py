@@ -58,7 +58,7 @@ def parse_highlight_result(text: str) -> HighlightResult:
 
     data = json.loads(match.group())
 
-    category_str = data.get("category", "other").lower()
+    category_str = (data.get("category") or "other").lower()
     try:
         category = HighlightCategory(category_str)
     except ValueError:
