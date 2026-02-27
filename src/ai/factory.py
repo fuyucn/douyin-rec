@@ -30,4 +30,8 @@ def create_analyzer(config: AIConfig) -> HighlightAnalyzer:
         from .qwen_backend import QwenLocalAnalyzer
         return QwenLocalAnalyzer()
 
-    raise ValueError(f"Unknown AI backend: {backend!r}. Supported: claude, gemini, gpt4o, qwen")
+    if backend == "ollama":
+        from .ollama_backend import OllamaAnalyzer
+        return OllamaAnalyzer(config)
+
+    raise ValueError(f"Unknown AI backend: {backend!r}. Supported: claude, gemini, gpt4o, qwen, ollama")
