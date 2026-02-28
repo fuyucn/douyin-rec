@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import platform
+import re
+import subprocess
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -34,7 +37,15 @@ async def index():
 
 # ── 序列化 ────────────────────────────────────────────────────────────────
 
-def _serialize_task(t, worker_status: str = "") -> dict:
+def _task_output_dir(t) -> str | None:
+    """计算任务对应的输出子目录路径（与 StorageManager 逻辑保持一致）"""
+    if not t.name:
+        return None
+    safe_name = re.sub(r"[^\w\u4e00-\u9fff\-.]", "_", t.name)
+    return str(Path(_config.storage.output_dir) / safe_name)
+
+
+def _serialize_task(t, worker_status: str = "", recording_started_at: str | None = None) -> dict:
     return {
         "id": t.id,
         "url": t.url,
@@ -56,7 +67,10 @@ def _serialize_task(t, worker_status: str = "") -> dict:
         "error_msg": t.error_msg,
         "worker_status": worker_status,
         "created_at": t.created_at.isoformat() if t.created_at else None,
+        "started_at": t.started_at.isoformat() if t.started_at else None,
         "stopped_at": t.stopped_at.isoformat() if t.stopped_at else None,
+        "recording_started_at": recording_started_at,
+        "output_dir": _task_output_dir(t),
         "is_previewing": task_manager.get_preview_task_id() == t.id,
     }
 
@@ -99,6 +113,35 @@ async def browse_files(path: str = "~"):
     return {"current": str(target), "parent": parent, "dirs": dirs, "files": files}
 
 
+# ── 打开目录 API ──────────────────────────────────────────────────────────
+
+@app.post("/api/open-folder")
+async def open_folder(request: Request):
+    """在系统文件管理器中打开指定目录（仅限 output_dir 内）"""
+    body = await request.json()
+    raw_path = body.get("path", "").strip()
+    if not raw_path:
+        return JSONResponse({"error": "路径为空"}, status_code=400)
+
+    target = Path(raw_path).expanduser().resolve()
+    allowed = Path(_config.storage.output_dir).expanduser().resolve()
+    if not str(target).startswith(str(allowed)):
+        return JSONResponse({"error": "不允许访问此目录"}, status_code=403)
+
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.Popen(["open", str(target)])
+        elif system == "Windows":
+            subprocess.Popen(["explorer", str(target)])
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return {"ok": True}
+
+
 # ── 任务 CRUD API ─────────────────────────────────────────────────────────
 
 @app.get("/api/tasks")
@@ -107,7 +150,8 @@ async def list_tasks():
     result = []
     for t in tasks:
         worker_status = task_manager.get_worker_status(t.id)
-        result.append(_serialize_task(t, worker_status))
+        recording_started_at = task_manager.get_worker_recording_started_at(t.id)
+        result.append(_serialize_task(t, worker_status, recording_started_at))
     return {"tasks": result}
 
 
@@ -150,7 +194,8 @@ async def get_task(task_id: int):
     if t is None:
         return JSONResponse({"error": "任务不存在"}, status_code=404)
     worker_status = task_manager.get_worker_status(t.id)
-    return _serialize_task(t, worker_status)
+    recording_started_at = task_manager.get_worker_recording_started_at(t.id)
+    return _serialize_task(t, worker_status, recording_started_at)
 
 
 @app.delete("/api/tasks/{task_id}")
@@ -280,6 +325,46 @@ async def task_logs_sse(task_id: int):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ── AI 后端 API ──────────────────────────────────────────────────────────
+
+@app.get("/api/ai/backends")
+async def get_ai_backends():
+    """返回各 AI 后端可用状态（不暴露 key 内容）"""
+    import os
+    config = load_config()
+    ai = config.ai
+    return {
+        "default": ai.default_backend,
+        "backends": [
+            {
+                "id": "ollama",
+                "label": "Ollama（本地）",
+                "local": True,
+                "available": True,
+                "model": ai.ollama_model,
+            },
+            {
+                "id": "claude",
+                "label": "Claude",
+                "local": False,
+                "available": bool(ai.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")),
+            },
+            {
+                "id": "gemini",
+                "label": "Gemini",
+                "local": False,
+                "available": bool(ai.google_api_key or os.environ.get("GOOGLE_API_KEY")),
+            },
+            {
+                "id": "gpt4o",
+                "label": "GPT-4o",
+                "local": False,
+                "available": bool(ai.openai_api_key or os.environ.get("OPENAI_API_KEY")),
+            },
+        ],
+    }
+
+
 # ── 本地视频任务 API ─────────────────────────────────────────────────────
 
 def _serialize_local_task(t) -> dict:
@@ -293,6 +378,7 @@ def _serialize_local_task(t) -> dict:
         "progress": t.progress,
         "progress_text": t.progress_text,
         "result_summary": t.result_summary,
+        "ai_backend": t.ai_backend,
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "finished_at": t.finished_at.isoformat() if t.finished_at else None,
     }
@@ -315,11 +401,13 @@ async def create_local_task(request: Request):
     if task_type not in ("portrait", "highlight"):
         return JSONResponse({"error": "无效的任务类型"}, status_code=400)
 
+    ai_backend = body.get("ai_backend") or None
     try:
         task = task_manager.create_local_task(
             video_path=video_path,
             task_type=task_type,
             name=body.get("name"),
+            ai_backend=ai_backend,
         )
     except FileNotFoundError as e:
         return JSONResponse({"error": str(e)}, status_code=400)

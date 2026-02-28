@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 
 import cv2
@@ -73,41 +74,24 @@ class DouyinLiveSource:
         return DouyinLiveStream(cookies=cookies or "")
 
     def _fetch_stream_data(self) -> dict:
-        """用 streamget 获取直播间数据（同步封装）
+        """用 streamget 获取直播间数据（供 extract_streamer_info 使用）
 
-        优先 fetch_app_stream_data（支持短链接/用户主页），
-        失败时回退 fetch_web_stream_data（需要 live.douyin.com URL）。
+        优先 fetch_app_stream_data（支持短链接/用户主页，且 ORIGIN 画质更可靠），
+        失败时回退 fetch_web_stream_data（仅支持 live.douyin.com 直链，ORIGIN 可能缺失）。
         """
         client = self._get_douyin_client()
 
         async def _fetch():
-            # app 接口支持 v.douyin.com 短链接和用户主页
             try:
                 return await client.fetch_app_stream_data(self._url)
             except Exception as e:
-                logger.debug("fetch_app_stream_data 失败: %s, 尝试 web 接口", e)
+                logger.warning("App API 失败 (%s)，回退 Web API（ORIGIN 画质可能降级）", e)
             return await client.fetch_web_stream_data(self._url)
 
         data = _run_async(_fetch())
         if not data:
             raise RuntimeError(f"streamget 返回数据为空: {self._url}")
         return data
-
-    def _fetch_stream_url_from_data(self, data: dict) -> str:
-        """从 streamget 返回的数据中提取流地址"""
-        client = self._get_douyin_client()
-        quality = _QUALITY_MAP.get(self._config.quality.lower(), "OD")
-
-        async def _fetch():
-            return await client.fetch_stream_url(data, quality)
-
-        stream = _run_async(_fetch())
-        url = getattr(stream, "flv_url", None) or getattr(stream, "m3u8_url", None)
-        if not url:
-            url = getattr(stream, "record_url", None)
-        if not url:
-            raise RuntimeError(f"streamget 未返回可用流地址 (画质={quality})")
-        return url
 
     # -- 等待开播 ---------------------------------------------------------------
 
@@ -198,8 +182,27 @@ class DouyinLiveSource:
         return "; ".join(cookies)
 
     def _extract_stream_url(self) -> str:
-        """提取直播流地址 (通过 streamget)"""
-        data = self._fetch_stream_data()
+        """提取直播流地址：合并两次 API 调用，共享同一客户端实例"""
+        quality = _QUALITY_MAP.get(self._config.quality.lower(), "OD")
+
+        async def _fetch():
+            client = self._get_douyin_client()
+            # App API 优先：支持短链接，且总能可靠提取 ORIGIN 画质
+            try:
+                data = await client.fetch_app_stream_data(self._url)
+            except Exception as e:
+                logger.warning("App API 失败 (%s)，回退 Web API（ORIGIN 画质可能降级）", e)
+                data = await client.fetch_web_stream_data(self._url)
+            if not data:
+                raise RuntimeError(f"streamget 返回数据为空: {self._url}")
+            # 未开播时直接返回，无需提取流地址
+            if data.get("status", 0) == 4:
+                return data, None
+            # 同一客户端、同一 async 上下文，避免重复开销
+            stream = await client.fetch_stream_url(data, quality)
+            return data, stream
+
+        data, stream = _run_async(_fetch())
 
         # 提取主播昵称
         nickname = data.get("anchor_name")
@@ -207,14 +210,22 @@ class DouyinLiveSource:
             self.streamer_name = nickname
             logger.info("主播: %s", nickname)
 
-        # 检查是否开播 (streamget: status=2 开播, status=4 未开播)
-        status = data.get("status", 0)
-        if status == 4:
+        # 检查是否开播 (status=2 开播, status=4 未开播)
+        if data.get("status", 0) == 4:
             raise LiveNotStarted(f"直播间未开播: {self._url}")
 
-        # 提取流地址
-        url = self._fetch_stream_url_from_data(data)
-        logger.info("获取到流地址: %s", url)
+        # 优先 record_url（streamget 健康检查后的推荐地址，通常为 M3U8）
+        url = (
+            getattr(stream, "record_url", None)
+            or getattr(stream, "flv_url", None)
+            or getattr(stream, "m3u8_url", None)
+        )
+        if not url:
+            raise RuntimeError(f"streamget 未返回可用流地址 (画质={quality})")
+
+        proto = "M3U8" if url.split("?")[0].lower().endswith(".m3u8") else "FLV"
+        cm = re.search(r"[?&]codec=([^&]+)", url)
+        logger.info("获取到流地址: %s codec=%s 画质=%s", proto, cm.group(1) if cm else "?", quality)
         return url
 
     def _open_stream(self) -> cv2.VideoCapture:

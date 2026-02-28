@@ -73,11 +73,32 @@ const STATUS_BADGE = {
   completed:  'badge-info',
 };
 const LOCAL_TYPE_LABELS = { portrait: '截图筛选', highlight: '高能时刻' };
+const QUALITY_LABELS = { origin: 'OD', uhd: 'UHD', hd: 'HD', sd: 'SD', ld: 'LD' };
 
 let currentView = null;
 let pollTimer = null;
+let timeUpdateTimer = null;
 let evtSource = null;
 let detailPreviewActive = false;
+let aiBackendsCache = null;
+
+function formatElapsed(isoStr) {
+  if (!isoStr) return '-';
+  const elapsed = Math.max(0, Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000));
+  const h = Math.floor(elapsed / 3600);
+  const m = Math.floor((elapsed % 3600) / 60);
+  const s = elapsed % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function updateElapsedTimes() {
+  document.querySelectorAll('[data-elapsed-from]').forEach(el => {
+    const ts = el.dataset.elapsedFrom;
+    if (ts) el.textContent = formatElapsed(ts);
+  });
+}
 
 // ── Hash 路由 ──────────────────────────────────────────────
 function getRoute() {
@@ -107,6 +128,7 @@ function route() {
 
 function cleanup() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (timeUpdateTimer) { clearInterval(timeUpdateTimer); timeUpdateTimer = null; }
   if (evtSource) { evtSource.close(); evtSource = null; }
   if (detailPreviewActive) {
     detailPreviewActive = false;
@@ -141,11 +163,11 @@ function renderListView() {
           <div class="form-control">
             <label class="label py-1"><span class="label-text">画质</span></label>
             <select id="quality" class="select select-bordered select-sm w-full">
-              <option value="origin">原画 (origin)</option>
-              <option value="uhd">蓝光 (uhd)</option>
-              <option value="hd">高清 (hd)</option>
-              <option value="sd">标清 (sd)</option>
-              <option value="ld">流畅 (ld)</option>
+              <option value="origin">OD（原画）</option>
+              <option value="uhd">UHD（蓝光）</option>
+              <option value="hd">HD（高清）</option>
+              <option value="sd">SD（标清）</option>
+              <option value="ld">LD（流畅）</option>
             </select>
           </div>
           <div class="form-control">
@@ -218,6 +240,7 @@ function renderListView() {
   document.getElementById('url').addEventListener('keydown', e => { if (e.key === 'Enter') addTask(); });
   refreshTaskList();
   pollTimer = setInterval(refreshTaskList, 2000);
+  timeUpdateTimer = setInterval(updateElapsedTimes, 1000);
 }
 
 function toggleScheduleInputs() {
@@ -297,6 +320,7 @@ function renderTaskTable(tasks) {
           ${STATUS_LABELS[t.status] || t.status}
         </span>
         ${workerInfo}
+        ${t.status === 'running' && t.started_at ? `<div class="text-xs opacity-40 mt-0.5">运行 <span data-elapsed-from="${t.started_at}"></span>${t.recording_started_at ? ` · 录制 <span data-elapsed-from="${t.recording_started_at}"></span>` : ''}</div>` : ''}
       </td>
       <td><div class="flex gap-1">${features.join('')}</div></td>
       <td onclick="event.stopPropagation()">
@@ -374,7 +398,7 @@ async function renderDetailView(id) {
           <div><span class="opacity-50 mr-1">URL</span> <span class="break-all">${esc(task.url)}</span></div>
         </div>
         <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
-          <div><span class="opacity-50 mr-1">画质</span> <span class="badge badge-sm badge-outline">${task.quality}</span></div>
+          <div><span class="opacity-50 mr-1">画质</span> <span class="badge badge-sm badge-outline">${QUALITY_LABELS[task.quality] || task.quality}</span></div>
           <div><span class="opacity-50 mr-1">分段</span> ${task.enable_segment ? task.segment_sec + 's' : '关闭'}</div>
           <div><span class="opacity-50 mr-1">循环检测</span> ${task.poll_interval}s</div>
           <div><span class="opacity-50 mr-1">线程数</span> ${task.max_threads}</div>
@@ -389,6 +413,15 @@ async function renderDetailView(id) {
           <div><span class="opacity-50 mr-1">功能</span> <span class="inline-flex gap-1">${features.join('') || '-'}</span></div>
           <div><span class="opacity-50 mr-1">创建</span> ${createdDate}</div>
         </div>
+        ${task.output_dir ? `
+        <div class="flex items-center gap-2 text-sm">
+          <span class="opacity-50 shrink-0">目录</span>
+          <span class="font-mono text-xs opacity-60 break-all">${esc(task.output_dir)}</span>
+          <button class="btn btn-ghost btn-xs shrink-0" onclick="openFolder('${esc(task.output_dir).replace(/'/g,"\\'")}')">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+            打开
+          </button>
+        </div>` : ''}
         <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
           <div>
             <span class="opacity-50 mr-1">状态</span>
@@ -397,6 +430,10 @@ async function renderDetailView(id) {
               ${STATUS_LABELS[task.status] || task.status}${workerInfo}
             </span>
           </div>
+        </div>
+        <div id="detailTimeRow" class="${task.started_at ? '' : 'hidden'} flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+          <div><span class="opacity-50 mr-1">运行时间</span><span id="detailStartedEl" data-elapsed-from="${task.started_at || ''}"></span></div>
+          <div id="detailRecordingDiv" class="${task.recording_started_at ? '' : 'hidden'}"><span class="opacity-50 mr-1">录制时间</span><span id="detailRecordingEl" data-elapsed-from="${task.recording_started_at || ''}"></span></div>
         </div>
         ${task.error_msg ? `<div class="text-sm text-error"><span class="opacity-50 mr-1">错误</span> ${esc(task.error_msg)}</div>` : ''}
         <div class="flex gap-2 mt-1" id="detailActions">
@@ -421,6 +458,7 @@ async function renderDetailView(id) {
 
   loadLogsAndConnect(id);
   pollTimer = setInterval(() => refreshDetailStatus(id), 2000);
+  timeUpdateTimer = setInterval(updateElapsedTimes, 1000);
 }
 
 async function toggleDetailPreview(id, name) {
@@ -499,6 +537,15 @@ async function refreshDetailStatus(id) {
         ${canDelete ? `<button class="btn btn-ghost btn-sm text-error" onclick="detailDelete(${id})">删除</button>` : ''}
       `;
     }
+    // Update time rows
+    const timeRow = document.getElementById('detailTimeRow');
+    const startedEl = document.getElementById('detailStartedEl');
+    const recordingDiv = document.getElementById('detailRecordingDiv');
+    const recordingEl = document.getElementById('detailRecordingEl');
+    if (timeRow) timeRow.classList.toggle('hidden', !task.started_at);
+    if (startedEl) startedEl.dataset.elapsedFrom = task.started_at || '';
+    if (recordingEl) recordingEl.dataset.elapsedFrom = task.recording_started_at || '';
+    if (recordingDiv) recordingDiv.classList.toggle('hidden', !task.recording_started_at);
   } catch {}
 }
 
@@ -507,6 +554,16 @@ async function detailAction(action, id) {
     const r = await fetch(`/api/tasks/${id}/${action}`, { method: 'POST' });
     if (!r.ok) { const d = await r.json(); alert(d.error); }
     refreshDetailStatus(id);
+  } catch (e) { alert(e.message); }
+}
+
+async function openFolder(path) {
+  try {
+    const r = await fetch('/api/open-folder', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    if (!r.ok) { const d = await r.json(); alert(d.error); }
   } catch (e) { alert(e.message); }
 }
 
@@ -537,16 +594,22 @@ function renderLocalListView() {
             <button class="btn btn-outline btn-sm" onclick="openFileBrowser()">浏览...</button>
           </div>
         </div>
-        <div class="flex items-center gap-5 mb-4">
+        <div class="flex items-center gap-5 mb-3">
           <span class="label-text opacity-60 mr-1">任务类型</span>
           <label class="label cursor-pointer gap-2">
-            <input type="radio" name="localType" value="portrait" checked class="radio radio-sm radio-primary" />
+            <input type="radio" name="localType" value="portrait" checked class="radio radio-sm radio-primary" onchange="onTaskTypeChange()" />
             <span class="label-text">截图筛选</span>
           </label>
           <label class="label cursor-pointer gap-2">
-            <input type="radio" name="localType" value="highlight" class="radio radio-sm radio-secondary" />
+            <input type="radio" name="localType" value="highlight" class="radio radio-sm radio-secondary" onchange="onTaskTypeChange()" />
             <span class="label-text">高能时刻</span>
           </label>
+        </div>
+        <div id="aiBackendRow" class="mb-3 hidden">
+          <div class="label py-1"><span class="label-text opacity-60">AI 后端</span></div>
+          <div id="aiBackendOptions" class="flex flex-wrap gap-3">
+            <span class="text-xs opacity-40">加载中...</span>
+          </div>
         </div>
         <button class="btn btn-primary btn-sm w-full" id="btnLocalAdd">添加任务</button>
       </div>
@@ -557,18 +620,65 @@ function renderLocalListView() {
 
   document.getElementById('btnLocalAdd').addEventListener('click', addLocalTask);
   document.getElementById('localPath').addEventListener('keydown', e => { if (e.key === 'Enter') addLocalTask(); });
+  loadAiBackends();
   refreshLocalTaskList();
   pollTimer = setInterval(refreshLocalTaskList, 2000);
+}
+
+function onTaskTypeChange() {
+  const taskType = document.querySelector('input[name="localType"]:checked')?.value;
+  const row = document.getElementById('aiBackendRow');
+  if (!row) return;
+  if (taskType === 'highlight') {
+    row.classList.remove('hidden');
+  } else {
+    row.classList.add('hidden');
+  }
+}
+
+async function loadAiBackends() {
+  try {
+    const r = await fetch('/api/ai/backends');
+    if (!r.ok) return;
+    aiBackendsCache = await r.json();
+    renderAiBackendOptions();
+  } catch {}
+}
+
+function renderAiBackendOptions() {
+  const container = document.getElementById('aiBackendOptions');
+  if (!container || !aiBackendsCache) return;
+  const { default: defaultId, backends } = aiBackendsCache;
+  container.innerHTML = backends.map(b => {
+    const checked = b.id === defaultId ? 'checked' : '';
+    let statusBadge = '';
+    if (b.local) {
+      statusBadge = `<span class="text-xs opacity-50 ml-1">${esc(b.model || '')}</span>`;
+    } else if (b.available) {
+      statusBadge = `<span class="text-xs text-success ml-1">✓ 已配置</span>`;
+    } else {
+      statusBadge = `<span class="text-xs text-warning ml-1">⚠ 缺少 API Key</span>`;
+    }
+    return `<label class="label cursor-pointer gap-1.5 py-0">
+      <input type="radio" name="aiBackend" value="${b.id}" ${checked} class="radio radio-xs radio-secondary" />
+      <span class="label-text text-sm">${esc(b.label)}</span>${statusBadge}
+    </label>`;
+  }).join('');
 }
 
 async function addLocalTask() {
   const videoPath = document.getElementById('localPath').value.trim();
   if (!videoPath) { alert('请输入视频文件路径'); return; }
   const taskType = document.querySelector('input[name="localType"]:checked').value;
+  const payload = { video_path: videoPath, task_type: taskType };
+  if (taskType === 'highlight') {
+    const aiBackendEl = document.querySelector('input[name="aiBackend"]:checked');
+    if (aiBackendEl) payload.ai_backend = aiBackendEl.value;
+  }
   try {
     const r = await fetch('/api/local/tasks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ video_path: videoPath, task_type: taskType }),
+      body: JSON.stringify(payload),
     });
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
@@ -913,6 +1023,7 @@ function esc(s) {
   d.textContent = s;
   return d.innerHTML;
 }
+
 </script>
 </body>
 </html>

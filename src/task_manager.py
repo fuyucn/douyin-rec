@@ -35,6 +35,7 @@ class TaskWorker:
     preview_lock: threading.Lock = field(default_factory=threading.Lock)
     stream_url: str | None = None
     status_text: str = ""
+    recording_started_at: datetime | None = None
 
 
 @dataclass
@@ -89,6 +90,10 @@ class TaskManager:
             ("schedule_timezone", "TEXT NOT NULL DEFAULT 'Asia/Shanghai'"),
             ("schedule_start", "TEXT NOT NULL DEFAULT '00:00'"),
             ("schedule_stop", "TEXT NOT NULL DEFAULT '23:59'"),
+            ("started_at", "DATETIME"),
+        ]
+        local_migrations = [
+            ("ai_backend", "TEXT"),
         ]
         with self.engine.connect() as conn:
             for col, col_def in migrations:
@@ -96,6 +101,16 @@ class TaskManager:
                     conn.execute(
                         sa_text(
                             f"ALTER TABLE recordingtask ADD COLUMN {col} {col_def}"
+                        )
+                    )
+                    conn.commit()
+                except Exception:
+                    pass  # 列已存在，跳过
+            for col, col_def in local_migrations:
+                try:
+                    conn.execute(
+                        sa_text(
+                            f"ALTER TABLE localvideotask ADD COLUMN {col} {col_def}"
                         )
                     )
                     conn.commit()
@@ -241,6 +256,8 @@ class TaskManager:
                 return
             task.status = status
             task.error_msg = error_msg
+            if status == "running":
+                task.started_at = datetime.now()
             if status == "stopped":
                 task.stopped_at = datetime.now()
             session.add(task)
@@ -341,6 +358,14 @@ class TaskManager:
         if worker is None:
             return ""
         return worker.status_text
+
+    def get_worker_recording_started_at(self, task_id: int) -> str | None:
+        """获取当前录制开始时间（ISO 格式），未录制时返回 None"""
+        with self._lock:
+            worker = self._workers.get(task_id)
+        if worker is None or worker.recording_started_at is None:
+            return None
+        return worker.recording_started_at.isoformat()
 
     # ── 定时调度 ──────────────────────────────────────────────────
 
@@ -492,6 +517,7 @@ class TaskManager:
                         stream_url, path_or_pattern, segment_duration=segment_sec,
                     )
                     recorder.start()
+                    worker.recording_started_at = datetime.now()
 
                 # 启动截图
                 if task.enable_screenshot:
@@ -517,6 +543,7 @@ class TaskManager:
 
                 if recorder:
                     recorder.stop()
+                    worker.recording_started_at = None
                 if screenshot_thread and screenshot_thread.is_alive():
                     screenshot_thread.join(timeout=5)
                 try:
@@ -538,6 +565,7 @@ class TaskManager:
             return
         finally:
             worker.stream_url = None
+            worker.recording_started_at = None
             worker.status_text = ""
             with worker.preview_lock:
                 worker.preview_frame = None
@@ -677,6 +705,7 @@ class TaskManager:
         video_path: str,
         task_type: str = "portrait",
         name: str | None = None,
+        ai_backend: str | None = None,
     ) -> LocalVideoTask:
         p = Path(video_path)
         if not p.exists():
@@ -687,6 +716,7 @@ class TaskManager:
             video_path=str(p.resolve()),
             name=name,
             task_type=task_type,
+            ai_backend=ai_backend,
         )
         with Session(self.engine) as session:
             session.add(task)
@@ -879,6 +909,8 @@ class TaskManager:
         from src.models import FrameInfo
 
         config = load_config()
+        if task.ai_backend:
+            config.ai.default_backend = task.ai_backend
 
         config.storage.output_dir = str(self._output_dir)
         video_name = Path(task.video_path).stem
@@ -886,6 +918,7 @@ class TaskManager:
 
         audio_analyzer = AudioAnalyzer(config.highlight, config.whisper)
         ai_analyzer = create_analyzer(config.ai)
+        log(f"使用 AI 后端: {config.ai.default_backend}")
 
         # 1. 提取音频
         log("提取音频...")

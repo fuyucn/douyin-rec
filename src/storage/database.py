@@ -26,6 +26,7 @@ class RecordingTask(SQLModel, table=True):
     status: str = "pending"  # pending / running / stopped / error
     error_msg: str | None = None  # 错误信息
     created_at: datetime = Field(default_factory=datetime.now)
+    started_at: datetime | None = None
     stopped_at: datetime | None = None
 
 
@@ -54,6 +55,7 @@ class LocalVideoTask(SQLModel, table=True):
     progress: float = 0.0  # 0.0 ~ 100.0
     progress_text: str = ""  # "帧处理: 1234/5678"
     result_summary: str | None = None  # "保存 15 张照片"
+    ai_backend: str | None = None  # 任务级 AI 后端覆盖，None 表示用全局默认
     created_at: datetime = Field(default_factory=datetime.now)
     finished_at: datetime | None = None
 

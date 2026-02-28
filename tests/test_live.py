@@ -74,16 +74,21 @@ def test_run_async():
 
 
 def test_extract_stream_url_live_not_started():
-    """status == 4 时应抛出 LiveNotStarted"""
+    """status == 4 时应抛出 LiveNotStarted，且主播名已设置"""
     source = DouyinLiveSource("https://live.douyin.com/123")
     mock_data = {"anchor_name": "测试主播", "status": 4}
 
-    with patch.object(source, "_fetch_stream_data", return_value=mock_data):
+    mock_client = MagicMock()
+    mock_client.fetch_app_stream_data = AsyncMock(return_value=mock_data)
+    mock_client.fetch_stream_url = AsyncMock()  # 不应被调用
+
+    with patch.object(source, "_get_douyin_client", return_value=mock_client):
         try:
             source._extract_stream_url()
             assert False, "应抛出 LiveNotStarted"
         except LiveNotStarted:
             assert source.streamer_name == "测试主播"
+            mock_client.fetch_stream_url.assert_not_called()
 
 
 def test_extract_streamer_info_success():

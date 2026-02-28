@@ -58,7 +58,10 @@ def parse_highlight_result(text: str) -> HighlightResult:
 
     data = json.loads(match.group())
 
-    category_str = (data.get("category") or "other").lower()
+    category_raw = data.get("category") or "other"
+    if isinstance(category_raw, list):
+        category_raw = category_raw[0] if category_raw else "other"
+    category_str = str(category_raw).lower()
     try:
         category = HighlightCategory(category_str)
     except ValueError:
@@ -66,9 +69,9 @@ def parse_highlight_result(text: str) -> HighlightResult:
 
     return HighlightResult(
         is_highlight=bool(data.get("is_highlight", False)),
-        score=float(data.get("score", 0.0)),
+        score=float(data.get("score") or 0.0),
         category=category,
-        description=str(data.get("description", "")),
+        description=str(data.get("description") or ""),
     )
 
 
