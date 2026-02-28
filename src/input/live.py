@@ -225,8 +225,15 @@ class DouyinLiveSource:
         record_url = getattr(stream, "record_url", None)
         m3u8_url   = getattr(stream, "m3u8_url",   None)
 
-        # 参考 DouyinLiveRecorder: FLV 只在 H.264 时使用；
-        # bytevc1/hevc/h265 放进 FLV 容器会导致 ffmpeg SIGSEGV
+        # URL 选择策略（参考 DouyinLiveRecorder）：
+        #
+        # FLV URL 中的 codec 参数不可信 —— 某些 CDN 节点实际推送 ByteVC1（抖音私有
+        # H.265 变体），但 URL 仍标注 codec=h264，导致 ffmpeg SIGSEGV (rc=-11)。
+        #
+        # streamget 内部已对 record_url 做过 HTTP HEAD 验证，是更可靠的选择：
+        #   1. record_url（streamget 验证的 M3U8）codec=h264 → 优先使用
+        #   2. flv_url codec=h264 → 次选（仅当 record_url 不可用或含 H.265）
+        #   3. 兜底：任意可用地址
         _H265_CODECS = {"h265", "hevc", "bytevc1", "bytevc2"}
 
         def _codec(u: str | None) -> str:
@@ -235,10 +242,12 @@ class DouyinLiveSource:
             m = re.search(r"[?&]codec=([^&]+)", u)
             return m.group(1).lower() if m else ""
 
-        if flv_url and _codec(flv_url) not in _H265_CODECS:
-            url = flv_url
+        if record_url and _codec(record_url) not in _H265_CODECS:
+            url = record_url                           # M3U8，streamget 已验证
+        elif flv_url and _codec(flv_url) not in _H265_CODECS:
+            url = flv_url                              # FLV H.264 次选
         else:
-            url = record_url or m3u8_url or flv_url  # M3U8 fallback
+            url = record_url or m3u8_url or flv_url   # 兜底
 
         if not url:
             raise RuntimeError(f"streamget 未返回可用流地址 (画质={quality})")
