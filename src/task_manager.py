@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import random
 import threading
 import time
 from dataclasses import dataclass, field
@@ -504,6 +505,8 @@ class TaskManager:
                 # ── 开播 ──
                 worker.status_text = "直播中"
                 worker.stream_url = stream_url
+                proto = "M3U8" if stream_url.split("?")[0].lower().endswith(".m3u8") else "FLV"
+                log(f"[流] {proto} {stream_url[:60]}...")
 
                 # 启动预览抓帧线程
                 preview_thread = threading.Thread(
@@ -584,8 +587,9 @@ class TaskManager:
 
                 _session_sec = (datetime.now() - _session_started_at).total_seconds()
                 if _session_sec < 30:
-                    log(f"[系统] 直播流快速断开 ({_session_sec:.0f}s)，15 秒后重连...")
-                    if worker.stop_event.wait(15):
+                    _cooldown = random.uniform(15, 40)
+                    log(f"[系统] 直播流快速断开 ({_session_sec:.0f}s)，{_cooldown:.0f} 秒后重连...")
+                    if worker.stop_event.wait(_cooldown):
                         break
                 log("[系统] 直播流断开，将重新等待开播...")
 

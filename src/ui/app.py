@@ -37,11 +37,12 @@ async def index():
 
 # ── 序列化 ────────────────────────────────────────────────────────────────
 
-def _task_output_dir(t) -> str | None:
-    """计算任务对应的输出子目录路径（custom_name 优先，否则用主播名）"""
-    folder = t.custom_name or t.name
-    if not folder:
-        return None
+def _task_output_dir(t) -> str:
+    """计算任务对应的输出子目录路径（与 task_manager 保持一致）
+
+    优先级: custom_name > name > 任务{id}
+    """
+    folder = t.custom_name or t.name or f"任务{t.id}"
     safe_name = re.sub(r"[^\w\u4e00-\u9fff\-.]", "_", folder)
     return str(Path(_config.storage.output_dir) / safe_name)
 
