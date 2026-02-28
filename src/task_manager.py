@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import random
+import signal
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -75,7 +78,8 @@ class TaskManager:
         self._logs_dir = self._output_dir / "logs"
         self._logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # 启动时将所有 running 状态恢复为 stopped（上次异常退出）
+        # 启动时清理上次遗留的孤儿 ffmpeg 进程，再恢复任务状态
+        self._kill_orphan_ffmpeg()
         self._recover_running_tasks()
         self._recover_running_local_tasks()
 
@@ -119,6 +123,27 @@ class TaskManager:
                     conn.commit()
                 except Exception:
                     pass  # 列已存在，跳过
+
+    def _kill_orphan_ffmpeg(self) -> None:
+        """终止上次服务器退出时遗留的孤儿 ffmpeg 录制进程。
+
+        通过 pgrep 查找命令行中包含本项目 output_dir 的 ffmpeg 进程，
+        发送 SIGTERM 使其优雅退出（与正常停止录制一致）。
+        """
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", f"ffmpeg.*{self._output_dir}"],
+                capture_output=True, text=True,
+            )
+            pids = [int(p) for p in result.stdout.strip().splitlines() if p.strip()]
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    logger.info("已终止孤儿 ffmpeg 进程 (pid=%d)", pid)
+                except ProcessLookupError:
+                    pass  # 进程已自行退出
+        except Exception as e:
+            logger.warning("清理孤儿 ffmpeg 失败: %s", e)
 
     def _recover_running_tasks(self) -> None:
         with Session(self.engine) as session:
