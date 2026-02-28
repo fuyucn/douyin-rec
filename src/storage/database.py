@@ -62,6 +62,18 @@ class LocalVideoTask(SQLModel, table=True):
     finished_at: datetime | None = None
 
 
+class RecordingSession(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    task_id: int = Field(index=True)
+    ffmpeg_pid: int
+    output_path: str
+    started_at: datetime = Field(default_factory=datetime.now)
+    ended_at: datetime | None = None
+    duration_sec: float | None = None
+    status: str = "active"  # active | stopped | orphan
+    end_reason: str | None = None  # user_stop|stream_end|server_restart|orphan_died|error
+
+
 class HighlightClip(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     source: str

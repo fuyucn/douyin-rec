@@ -308,6 +308,7 @@ async def task_logs_history(task_id: int):
     return {"lines": lines}
 
 
+
 @app.get("/api/tasks/{task_id}/logs")
 async def task_logs_sse(task_id: int):
     """SSE 端点 — 推送指定任务的日志"""

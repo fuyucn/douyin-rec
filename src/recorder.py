@@ -149,6 +149,11 @@ class StreamRecorder:
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
+    @property
+    def pid(self) -> int | None:
+        """返回 ffmpeg 进程 PID（录制中才有效）"""
+        return self._process.pid if self._process else None
+
     # -- context manager -----------------------------------------------------
 
     def __enter__(self) -> StreamRecorder:

@@ -6,7 +6,6 @@ import logging
 import os
 import queue
 import random
-import signal
 import subprocess
 import threading
 import time
@@ -21,7 +20,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from src.config import load_config
 from src.input.live import DouyinLiveSource
 from src.recorder import StreamRecorder
-from src.storage.database import LocalVideoTask, RecordingTask
+from src.storage.database import LocalVideoTask, RecordingSession, RecordingTask
 from src.storage.manager import StorageManager
 
 logger = logging.getLogger(__name__)
@@ -40,6 +39,7 @@ class TaskWorker:
     stream_url: str | None = None
     status_text: str = ""
     recording_started_at: datetime | None = None
+    active_session_id: int | None = None
 
 
 @dataclass
@@ -78,8 +78,8 @@ class TaskManager:
         self._logs_dir = self._output_dir / "logs"
         self._logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # 启动时清理上次遗留的孤儿 ffmpeg 进程，再恢复任务状态
-        self._kill_orphan_ffmpeg()
+        # 启动时处理上次遗留的孤儿录制会话，再恢复任务状态
+        self._handle_orphan_sessions()
         self._recover_running_tasks()
         self._recover_running_local_tasks()
 
@@ -124,36 +124,91 @@ class TaskManager:
                 except Exception:
                     pass  # 列已存在，跳过
 
-    def _kill_orphan_ffmpeg(self) -> None:
-        """终止上次服务器退出时遗留的孤儿 ffmpeg 录制进程。
+    def _handle_orphan_sessions(self) -> None:
+        """服务器重启时处理上次未关闭的录制会话"""
+        with Session(self.engine) as db:
+            orphans = list(db.exec(
+                select(RecordingSession).where(RecordingSession.status == "active")
+            ).all())
+        for s in orphans:
+            alive = self._pid_is_ffmpeg(s.ffmpeg_pid)
+            with Session(self.engine) as db:
+                sess = db.get(RecordingSession, s.id)
+                if alive:
+                    sess.status = "orphan"
+                    db.add(sess)
+                    db.commit()
+                    t = threading.Thread(
+                        target=self._orphan_monitor,
+                        args=(s.id, s.ffmpeg_pid, s.task_id),
+                        daemon=True,
+                        name=f"orphan-{s.ffmpeg_pid}",
+                    )
+                    t.start()
+                else:
+                    sess.status = "stopped"
+                    sess.end_reason = "server_restart"
+                    sess.ended_at = datetime.now()
+                    if sess.started_at:
+                        sess.duration_sec = (sess.ended_at - sess.started_at).total_seconds()
+                    db.add(sess)
+                    db.commit()
 
-        通过 pgrep 查找命令行中包含本项目 output_dir 的 ffmpeg 进程，
-        发送 SIGTERM 使其优雅退出（与正常停止录制一致）。
-        """
+    @staticmethod
+    def _pid_is_ffmpeg(pid: int) -> bool:
+        """检查 PID 是否存活且是 ffmpeg 进程"""
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
         try:
             result = subprocess.run(
-                ["pgrep", "-f", f"ffmpeg.*{self._output_dir}"],
-                capture_output=True, text=True,
+                ["ps", "-p", str(pid), "-o", "comm="],
+                capture_output=True, text=True, timeout=3,
             )
-            pids = [int(p) for p in result.stdout.strip().splitlines() if p.strip()]
-            for pid in pids:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                    logger.info("已终止孤儿 ffmpeg 进程 (pid=%d)", pid)
-                except ProcessLookupError:
-                    pass  # 进程已自行退出
-        except Exception as e:
-            logger.warning("清理孤儿 ffmpeg 失败: %s", e)
+            return "ffmpeg" in result.stdout.lower()
+        except Exception:
+            return False
+
+    def _orphan_monitor(self, session_id: int, pid: int, task_id: int) -> None:
+        """被动轮询孤儿 PID，进程结束后更新 session 状态"""
+        logger.info("[孤儿监控] task=%d pid=%d 开始监控", task_id, pid)
+        while True:
+            time.sleep(5)
+            if not self._pid_is_ffmpeg(pid):
+                break
+        with Session(self.engine) as db:
+            sess = db.get(RecordingSession, session_id)
+            if sess and sess.status == "orphan":
+                sess.status = "stopped"
+                sess.end_reason = "orphan_died"
+                sess.ended_at = datetime.now()
+                if sess.started_at:
+                    sess.duration_sec = (sess.ended_at - sess.started_at).total_seconds()
+                db.add(sess)
+                db.commit()
+        logger.info("[孤儿监控] task=%d pid=%d 进程已结束", task_id, pid)
 
     def _recover_running_tasks(self) -> None:
-        with Session(self.engine) as session:
-            stmt = select(RecordingTask).where(RecordingTask.status == "running")
-            tasks = list(session.exec(stmt).all())
-            for task in tasks:
+        with Session(self.engine) as db:
+            orphan_task_ids = set(
+                r.task_id for r in db.exec(
+                    select(RecordingSession).where(RecordingSession.status == "orphan")
+                ).all()
+            )
+            running = list(db.exec(
+                select(RecordingTask).where(RecordingTask.status == "running")
+            ).all())
+        for t in running:
+            if t.id in orphan_task_ids:
+                logger.info("task %d 有活跃孤儿进程，跳过状态重置", t.id)
+                continue
+            with Session(self.engine) as db:
+                task = db.get(RecordingTask, t.id)
                 task.status = "stopped"
                 task.stopped_at = datetime.now()
-                session.add(task)
-            session.commit()
+                db.add(task)
+                db.commit()
 
     # ── 日志广播 ─────────────────────────────────────────────────────
 
@@ -547,6 +602,7 @@ class TaskManager:
                 recorder = None
                 screenshot_thread = None
                 _session_started_at = datetime.now()
+                session_id: int | None = None
 
                 # 启动录制
                 if task.enable_record:
@@ -559,6 +615,19 @@ class TaskManager:
                     )
                     recorder.start()
                     worker.recording_started_at = datetime.now()
+                    if recorder.pid:
+                        with Session(self.engine) as db:
+                            sess = RecordingSession(
+                                task_id=task.id,
+                                ffmpeg_pid=recorder.pid,
+                                output_path=path_or_pattern,
+                                started_at=worker.recording_started_at,
+                            )
+                            db.add(sess)
+                            db.commit()
+                            db.refresh(sess)
+                            session_id = sess.id
+                        worker.active_session_id = session_id
 
                 # 启动截图
                 if task.enable_screenshot:
@@ -590,7 +659,21 @@ class TaskManager:
                     time.sleep(1)
 
                 if recorder:
+                    _end_reason = "user_stop" if worker.stop_event.is_set() else "stream_end"
                     recorder.stop()
+                    if session_id:
+                        with Session(self.engine) as db:
+                            sess = db.get(RecordingSession, session_id)
+                            if sess and sess.status == "active":
+                                sess.status = "stopped"
+                                sess.end_reason = _end_reason
+                                sess.ended_at = datetime.now()
+                                if sess.started_at:
+                                    sess.duration_sec = (sess.ended_at - sess.started_at).total_seconds()
+                                db.add(sess)
+                                db.commit()
+                        worker.active_session_id = None
+                        session_id = None
                     worker.recording_started_at = None
                 if screenshot_thread and screenshot_thread.is_alive():
                     screenshot_thread.join(timeout=5)
