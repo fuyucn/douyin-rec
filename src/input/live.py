@@ -221,18 +221,31 @@ class DouyinLiveSource:
         if data.get("status", 0) == 4:
             raise LiveNotStarted(f"直播间未开播: {self._url}")
 
-        # 优先 flv_url（H.264，兼容性最好），record_url 通常为 H.265 M3U8 在部分环境下不稳定
-        url = (
-            getattr(stream, "flv_url", None)
-            or getattr(stream, "record_url", None)
-            or getattr(stream, "m3u8_url", None)
-        )
+        flv_url    = getattr(stream, "flv_url",    None)
+        record_url = getattr(stream, "record_url", None)
+        m3u8_url   = getattr(stream, "m3u8_url",   None)
+
+        # 参考 DouyinLiveRecorder: FLV 只在 H.264 时使用；
+        # bytevc1/hevc/h265 放进 FLV 容器会导致 ffmpeg SIGSEGV
+        _H265_CODECS = {"h265", "hevc", "bytevc1", "bytevc2"}
+
+        def _codec(u: str | None) -> str:
+            if not u:
+                return ""
+            m = re.search(r"[?&]codec=([^&]+)", u)
+            return m.group(1).lower() if m else ""
+
+        if flv_url and _codec(flv_url) not in _H265_CODECS:
+            url = flv_url
+        else:
+            url = record_url or m3u8_url or flv_url  # M3U8 fallback
+
         if not url:
             raise RuntimeError(f"streamget 未返回可用流地址 (画质={quality})")
 
         proto = "M3U8" if url.split("?")[0].lower().endswith(".m3u8") else "FLV"
-        cm = re.search(r"[?&]codec=([^&]+)", url)
-        logger.info("获取到流地址: %s codec=%s 画质=%s", proto, cm.group(1) if cm else "?", quality)
+        codec = _codec(url) or "?"
+        logger.info("获取到流地址: %s codec=%s 画质=%s", proto, codec, quality)
         return url
 
     def _open_stream(self) -> cv2.VideoCapture:

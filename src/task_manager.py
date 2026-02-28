@@ -505,8 +505,11 @@ class TaskManager:
                 # ── 开播 ──
                 worker.status_text = "直播中"
                 worker.stream_url = stream_url
+                import re as _re
                 proto = "M3U8" if stream_url.split("?")[0].lower().endswith(".m3u8") else "FLV"
-                log(f"[流] {proto} {stream_url[:60]}...")
+                _cm = _re.search(r"[?&]codec=([^&]+)", stream_url)
+                _codec = _cm.group(1) if _cm else "?"
+                log(f"[流] {proto} codec={_codec} {stream_url[:80]}...")
 
                 # 启动预览抓帧线程
                 preview_thread = threading.Thread(
