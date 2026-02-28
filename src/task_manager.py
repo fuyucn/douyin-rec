@@ -90,7 +90,9 @@ class TaskManager:
             ("schedule_timezone", "TEXT NOT NULL DEFAULT 'Asia/Shanghai'"),
             ("schedule_start", "TEXT NOT NULL DEFAULT '00:00'"),
             ("schedule_stop", "TEXT NOT NULL DEFAULT '23:59'"),
+            ("schedule_run_until_end", "BOOLEAN NOT NULL DEFAULT 0"),
             ("started_at", "DATETIME"),
+            ("custom_name", "TEXT"),
         ]
         local_migrations = [
             ("ai_backend", "TEXT"),
@@ -199,6 +201,8 @@ class TaskManager:
         schedule_timezone: str = "Asia/Shanghai",
         schedule_start: str = "00:00",
         schedule_stop: str = "23:59",
+        schedule_run_until_end: bool = False,
+        custom_name: str | None = None,
     ) -> RecordingTask:
         task = RecordingTask(
             url=url,
@@ -217,6 +221,8 @@ class TaskManager:
             schedule_timezone=schedule_timezone,
             schedule_start=schedule_start,
             schedule_stop=schedule_stop,
+            schedule_run_until_end=schedule_run_until_end,
+            custom_name=custom_name,
         )
         with Session(self.engine) as session:
             session.add(task)
@@ -440,8 +446,7 @@ class TaskManager:
             source.extract_streamer_info()
             if source.streamer_name:
                 task_name = source.streamer_name
-                if not task.name:
-                    self._update_task_name(task_id, source.streamer_name)
+                self._update_task_name(task_id, source.streamer_name)
                 log(f"主播: {task_name}")
 
             features = []
@@ -451,8 +456,11 @@ class TaskManager:
                 features.append("截图")
             log(f"已启用: {', '.join(features)}")
 
+            # 文件夹用 custom_name，没有则 fallback 到主播名
+            folder_name = task.custom_name or task_name
+
             config.storage.output_dir = str(self._output_dir)
-            storage = StorageManager(config.storage, name=task_name)
+            storage = StorageManager(config.storage, name=folder_name)
             segment_sec = task.segment_sec if task.enable_segment else 0
             poll_interval = task.poll_interval
 
@@ -482,11 +490,12 @@ class TaskManager:
                         show_countdown=task.show_countdown,
                         schedule_check=schedule_check if task.schedule_enabled else None,
                     )
-                except InterruptedError:
-                    # 可能是用户取消，也可能是定时窗口结束
+                except InterruptedError as ie:
                     if worker.stop_event.is_set():
+                        log(f"[用户] 停止任务")
                         break
-                    # 定时窗口结束，回到循环顶部
+                    # 定时窗口结束，回到循环顶部重新判断
+                    log(f"[定时] {ie}")
                     continue
 
                 if worker.stop_event.is_set():
@@ -506,6 +515,7 @@ class TaskManager:
 
                 recorder = None
                 screenshot_thread = None
+                _session_started_at = datetime.now()
 
                 # 启动录制
                 if task.enable_record:
@@ -539,6 +549,13 @@ class TaskManager:
                         break
                     if not recorder and screenshot_thread and not screenshot_thread.is_alive():
                         break
+                    # 定时窗口结束时主动停止录制
+                    if task.schedule_enabled and not self._is_in_schedule(task):
+                        if task.schedule_run_until_end:
+                            pass  # 继续录制直到直播自然结束
+                        else:
+                            log(f"定时窗口结束 ({task.schedule_stop})，停止录制")
+                            break
                     time.sleep(1)
 
                 if recorder:
@@ -554,13 +571,26 @@ class TaskManager:
                 worker.stream_url = None
 
                 if worker.stop_event.is_set():
-                    log("用户停止")
+                    log("[用户] 停止任务")
                     break
 
-                log("直播流断开，将重新等待开播...")
+                if task.schedule_enabled and not self._is_in_schedule(task):
+                    if task.schedule_run_until_end:
+                        log(f"[定时] 直播已结束，任务完成")
+                        break
+                    else:
+                        log(f"[定时] 窗口结束 ({task.schedule_stop})，等待下次开播窗口")
+                        continue
+
+                _session_sec = (datetime.now() - _session_started_at).total_seconds()
+                if _session_sec < 30:
+                    log(f"[系统] 直播流快速断开 ({_session_sec:.0f}s)，15 秒后重连...")
+                    if worker.stop_event.wait(15):
+                        break
+                log("[系统] 直播流断开，将重新等待开播...")
 
         except Exception as e:
-            log(f"任务出错: {e}")
+            log(f"[系统] 任务出错: {e}")
             self._update_task_status(task_id, "error", error_msg=str(e))
             return
         finally:
@@ -571,7 +601,7 @@ class TaskManager:
                 worker.preview_frame = None
 
         self._update_task_status(task_id, "stopped")
-        log("任务结束")
+        log("[用户] 任务已停止")
 
     def _preview_worker(self, worker: TaskWorker) -> None:
         """后台线程：持续读帧排空缓冲，保持最新 JPEG 供 MJPEG 流"""

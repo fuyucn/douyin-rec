@@ -38,10 +38,11 @@ async def index():
 # ── 序列化 ────────────────────────────────────────────────────────────────
 
 def _task_output_dir(t) -> str | None:
-    """计算任务对应的输出子目录路径（与 StorageManager 逻辑保持一致）"""
-    if not t.name:
+    """计算任务对应的输出子目录路径（custom_name 优先，否则用主播名）"""
+    folder = t.custom_name or t.name
+    if not folder:
         return None
-    safe_name = re.sub(r"[^\w\u4e00-\u9fff\-.]", "_", t.name)
+    safe_name = re.sub(r"[^\w\u4e00-\u9fff\-.]", "_", folder)
     return str(Path(_config.storage.output_dir) / safe_name)
 
 
@@ -50,6 +51,7 @@ def _serialize_task(t, worker_status: str = "", recording_started_at: str | None
         "id": t.id,
         "url": t.url,
         "name": t.name,
+        "custom_name": t.custom_name,
         "quality": t.quality,
         "segment_min": t.segment_min,
         "enable_record": t.enable_record,
@@ -63,6 +65,7 @@ def _serialize_task(t, worker_status: str = "", recording_started_at: str | None
         "schedule_timezone": t.schedule_timezone,
         "schedule_start": t.schedule_start,
         "schedule_stop": t.schedule_stop,
+        "schedule_run_until_end": t.schedule_run_until_end,
         "status": t.status,
         "error_msg": t.error_msg,
         "worker_status": worker_status,
@@ -184,6 +187,8 @@ async def create_task(request: Request):
         schedule_timezone=body.get("schedule_timezone", "Asia/Shanghai"),
         schedule_start=body.get("schedule_start", "00:00"),
         schedule_stop=body.get("schedule_stop", "23:59"),
+        schedule_run_until_end=body.get("schedule_run_until_end", False),
+        custom_name=body.get("custom_name") or None,
     )
     return {"ok": True, "task_id": task.id}
 

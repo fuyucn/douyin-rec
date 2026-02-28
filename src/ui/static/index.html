@@ -159,6 +159,10 @@ function renderListView() {
           <label class="label py-1"><span class="label-text">直播间 URL</span></label>
           <input id="url" type="text" placeholder="https://live.douyin.com/xxxxxxxxx" class="input input-bordered input-sm w-full" />
         </div>
+        <div class="form-control mb-3">
+          <label class="label py-0"><span class="label-text opacity-70">文件夹名（选填，留空则用主播名）</span></label>
+          <input id="customName" type="text" placeholder="自定义目录名，如：小花妹妹" class="input input-bordered input-sm w-full" />
+        </div>
         <div class="grid grid-cols-3 gap-3 mb-3">
           <div class="form-control">
             <label class="label py-1"><span class="label-text">画质</span></label>
@@ -228,6 +232,12 @@ function renderListView() {
             <label class="label py-1"><span class="label-text">停止时间</span></label>
             <input id="scheduleStop" type="time" value="02:00" class="input input-bordered input-sm w-full" />
           </div>
+          <div class="col-span-1 mt-1">
+            <label class="label cursor-pointer gap-2 py-0">
+              <input type="checkbox" id="chkRunUntilEnd" class="checkbox checkbox-sm" />
+              <span class="label-text">直到直播结束（忽略停止时间，等直播自然断开后停止）</span>
+            </label>
+          </div>
         </div>
         <button class="btn btn-primary btn-sm w-full" id="btnAdd">添加任务</button>
       </div>
@@ -259,7 +269,9 @@ async function addTask() {
     const segmentSec = parseInt(document.getElementById('segmentSec').value) || 1800;
     const scheduleEnabled = document.getElementById('chkSchedule').checked;
     const payload = {
-      url, quality: document.getElementById('quality').value,
+      url,
+      custom_name: document.getElementById('customName').value.trim() || null,
+      quality: document.getElementById('quality').value,
       segment: Math.floor(segmentSec / 60),
       record: chkRecord.checked, screenshot: chkScreenshot.checked,
       enable_segment: document.getElementById('chkSegment').checked,
@@ -273,6 +285,7 @@ async function addTask() {
       payload.schedule_timezone = document.getElementById('scheduleTz').value;
       payload.schedule_start = document.getElementById('scheduleStart').value;
       payload.schedule_stop = document.getElementById('scheduleStop').value;
+      payload.schedule_run_until_end = document.getElementById('chkRunUntilEnd').checked;
     }
     const r = await fetch('/api/tasks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -281,6 +294,7 @@ async function addTask() {
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
     document.getElementById('url').value = '';
+    document.getElementById('customName').value = '';
     refreshTaskList();
   } catch (e) { alert('请求失败: ' + e.message); }
 }
@@ -396,6 +410,7 @@ async function renderDetailView(id) {
       <div class="card-body p-5 gap-3">
         <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
           <div><span class="opacity-50 mr-1">URL</span> <span class="break-all">${esc(task.url)}</span></div>
+          ${task.custom_name ? `<div><span class="opacity-50 mr-1">文件夹</span> <span class="badge badge-outline badge-sm font-mono">${esc(task.custom_name)}</span> <span class="text-xs opacity-40">主播: ${esc(task.name || '未知')}</span></div>` : ''}
         </div>
         <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
           <div><span class="opacity-50 mr-1">画质</span> <span class="badge badge-sm badge-outline">${QUALITY_LABELS[task.quality] || task.quality}</span></div>
@@ -406,7 +421,7 @@ async function renderDetailView(id) {
         </div>
         ${task.schedule_enabled ? `
         <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
-          <div><span class="opacity-50 mr-1">定时</span> <span class="badge badge-accent badge-outline badge-sm">${task.schedule_start} ~ ${task.schedule_stop}</span></div>
+          <div><span class="opacity-50 mr-1">定时</span> <span class="badge badge-accent badge-outline badge-sm">${task.schedule_start} ~ ${task.schedule_stop}</span>${task.schedule_run_until_end ? `<span class="badge badge-outline badge-xs ml-1">直到直播结束</span>` : ''}</div>
           <div><span class="opacity-50 mr-1">时区</span> ${task.schedule_timezone}</div>
         </div>` : ''}
         <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">

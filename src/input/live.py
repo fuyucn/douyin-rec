@@ -188,13 +188,20 @@ class DouyinLiveSource:
         async def _fetch():
             client = self._get_douyin_client()
             # App API 优先：支持短链接，且总能可靠提取 ORIGIN 画质
+            data = None
             try:
                 data = await client.fetch_app_stream_data(self._url)
             except Exception as e:
                 logger.warning("App API 失败 (%s)，回退 Web API（ORIGIN 画质可能降级）", e)
-                data = await client.fetch_web_stream_data(self._url)
+            if data is None:
+                try:
+                    data = await client.fetch_web_stream_data(self._url)
+                except Exception as e:
+                    # 两个 API 均失败：streamget 无法解析页面，通常表示主播未开播
+                    logger.debug("Web API 也失败 (%s)，视为未开播", e)
+                    raise LiveNotStarted(f"无法获取直播间数据（可能未开播）: {self._url}") from e
             if not data:
-                raise RuntimeError(f"streamget 返回数据为空: {self._url}")
+                raise LiveNotStarted(f"streamget 返回数据为空: {self._url}")
             # 未开播时直接返回，无需提取流地址
             if data.get("status", 0) == 4:
                 return data, None
@@ -214,10 +221,10 @@ class DouyinLiveSource:
         if data.get("status", 0) == 4:
             raise LiveNotStarted(f"直播间未开播: {self._url}")
 
-        # 优先 record_url（streamget 健康检查后的推荐地址，通常为 M3U8）
+        # 优先 flv_url（H.264，兼容性最好），record_url 通常为 H.265 M3U8 在部分环境下不稳定
         url = (
-            getattr(stream, "record_url", None)
-            or getattr(stream, "flv_url", None)
+            getattr(stream, "flv_url", None)
+            or getattr(stream, "record_url", None)
             or getattr(stream, "m3u8_url", None)
         )
         if not url:

@@ -23,6 +23,8 @@ class RecordingTask(SQLModel, table=True):
     schedule_timezone: str = "Asia/Shanghai"  # 时区 (IANA)
     schedule_start: str = "00:00"  # 每日开始时间 HH:MM
     schedule_stop: str = "23:59"  # 每日停止时间 HH:MM
+    schedule_run_until_end: bool = False  # 到定时停止时间后等直播自然结束
+    custom_name: str | None = None  # 自定义输出文件夹名（可选，留空则用主播名）
     status: str = "pending"  # pending / running / stopped / error
     error_msg: str | None = None  # 错误信息
     created_at: datetime = Field(default_factory=datetime.now)
