@@ -1,0 +1,14 @@
+.env
+.venv/
+output/
+*.ts
+*.db
+*.log
+plans/
+.git/
+__pycache__/
+*.pyc
+tests/
+.pytest_cache/
+dist/
+build/
