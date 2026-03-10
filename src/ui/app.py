@@ -486,6 +486,89 @@ async def local_task_logs_sse(task_id: int):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ── 录制组合并 API ────────────────────────────────────────────────────────
+
+_merging_prefixes: set[str] = set()  # 防止同一前缀并发重复合并
+
+_PREFIX_DT_RE = re.compile(r"^.+_(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})$")
+
+
+@app.get("/api/tasks/{task_id}/segments")
+async def list_segments(task_id: int):
+    """返回任务目录下的录制组列表，按日期分组所需的 date/time 字段已解析"""
+    t = task_manager.get_task(task_id)
+    if t is None:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+
+    output_dir = Path(_task_output_dir(t))
+    if not output_dir.exists():
+        return {"groups": []}
+
+    from src.merge.merger import discover_groups
+    is_running = (t.status == "running")
+    groups = discover_groups(output_dir, exclude_last=is_running)
+
+    result = []
+    for g in groups:
+        m = _PREFIX_DT_RE.match(g.prefix)
+        result.append({
+            "prefix": g.prefix,
+            "date": m.group(1) if m else None,
+            "time": m.group(2).replace("-", ":") if m else None,
+            "segment_count": len(g.ts_files),
+            "has_danmu": len(g.ass_map) > 0,
+            "merged": g.already_merged,
+            "danmu_merged": g.merged_danmu_mp4.exists(),
+        })
+    return {"groups": result}
+
+
+@app.post("/api/tasks/{task_id}/merge")
+async def merge_segments(task_id: int, request: Request):
+    """触发合并（后台线程执行，立即返回，进度通过 SSE 日志流输出）"""
+    import threading
+
+    t = task_manager.get_task(task_id)
+    if t is None:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+
+    body = await request.json()
+    prefix = body.get("prefix", "").strip()
+    do_danmu = body.get("burn_danmu", True)
+    overwrite = body.get("overwrite", False)
+
+    if not prefix:
+        return JSONResponse({"error": "prefix 不能为空"}, status_code=400)
+
+    lock_key = f"{task_id}:{prefix}"
+    if lock_key in _merging_prefixes:
+        return JSONResponse({"error": "正在合并中，请稍候"}, status_code=409)
+
+    output_dir = Path(_task_output_dir(t))
+    from src.merge.merger import discover_groups, merge_group
+
+    groups = discover_groups(output_dir)
+    target = next((g for g in groups if g.prefix == prefix), None)
+    if target is None:
+        return JSONResponse({"error": f"未找到录制组: {prefix}"}, status_code=404)
+
+    task_name = t.name or f"task{task_id}"
+
+    def _run() -> None:
+        _merging_prefixes.add(lock_key)
+        try:
+            def log_fn(msg: str) -> None:
+                task_manager.broadcast(msg, task_name=task_name, task_id=task_id)
+            merge_group(target, log_fn=log_fn, do_danmu=do_danmu, overwrite=overwrite)
+        except Exception as e:
+            task_manager.broadcast(f"[合并] 错误: {e}", task_name=task_name, task_id=task_id)
+        finally:
+            _merging_prefixes.discard(lock_key)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "status": "merging", "message": "合并已启动，请查看日志"}
+
+
 @app.get("/api/local/tasks/{task_id}/logs/history")
 async def local_task_logs_history(task_id: int):
     """返回本地任务的历史日志"""

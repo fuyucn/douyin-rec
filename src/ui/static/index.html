@@ -498,12 +498,97 @@ async function renderDetailView(id) {
       <span class="absolute top-2 left-2 bg-black/60 text-primary text-xs px-2 py-0.5 rounded hidden" id="previewLabel">#${task.id} ${esc(displayName)}</span>
     </div>
 
+    <div class="card bg-base-200 mb-4">
+      <div class="card-body py-3 px-4">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="font-semibold text-sm">录制组</h3>
+          <button class="btn btn-ghost btn-xs" onclick="loadSegments(${id})">刷新</button>
+        </div>
+        <div id="segmentsList" class="text-sm"><span class="opacity-40">加载中...</span></div>
+      </div>
+    </div>
+
     <div class="log-box bg-base-300 rounded-lg p-3 h-72 overflow-y-auto text-base-content/70" id="logs"></div>
   `;
 
   loadLogsAndConnect(id);
+  loadSegments(id);
   pollTimer = setInterval(() => refreshDetailStatus(id), 2000);
   timeUpdateTimer = setInterval(updateElapsedTimes, 1000);
+}
+
+async function loadSegments(taskId) {
+  const el = document.getElementById('segmentsList');
+  if (!el) return;
+  try {
+    const r = await fetch(`/api/tasks/${taskId}/segments`);
+    const d = await r.json();
+    if (!d.groups?.length) {
+      el.innerHTML = '<span class="opacity-40 text-xs">暂无录制组</span>';
+      return;
+    }
+    // 按日期分组
+    const byDate = {};
+    for (const g of d.groups) {
+      const date = g.date || '未知日期';
+      (byDate[date] = byDate[date] || []).push(g);
+    }
+    el.innerHTML = Object.entries(byDate).map(([date, groups]) => `
+      <div class="mb-2 last:mb-0">
+        <div class="text-xs font-semibold opacity-40 mb-1 pt-1">${esc(date)}</div>
+        ${groups.map(g => `
+          <div class="flex flex-wrap items-center gap-2 py-1 pl-3 border-b border-base-300 last:border-0">
+            <span class="font-mono text-xs w-20 shrink-0 opacity-80">${esc(g.time || g.prefix)}</span>
+            <span class="badge badge-outline badge-xs">${g.segment_count}段</span>
+            ${g.has_danmu ? '<span class="badge badge-info badge-outline badge-xs">弹幕</span>' : ''}
+            ${g.merged
+              ? '<span class="badge badge-success badge-outline badge-xs">已合并</span>'
+              : `<button class="btn btn-xs btn-outline"
+                   data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="false"
+                   onclick="mergeGroup(this)">合并</button>`
+            }
+            ${g.has_danmu && !g.danmu_merged
+              ? `<button class="btn btn-xs btn-outline btn-info"
+                   data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="true"
+                   onclick="mergeGroup(this)">烧录弹幕</button>`
+              : (g.danmu_merged ? '<span class="badge badge-info badge-xs">弹幕已合并</span>' : '')
+            }
+          </div>
+        `).join('')}
+      </div>
+    `).join('');
+  } catch {
+    el.innerHTML = '<span class="text-error text-xs">加载失败</span>';
+  }
+}
+
+async function mergeGroup(btn) {
+  const taskId = btn.dataset.task;
+  const prefix = btn.dataset.prefix;
+  const burnDanmu = btn.dataset.danmu === 'true';
+  btn.disabled = true;
+  btn.textContent = '启动中...';
+  try {
+    const r = await fetch(`/api/tasks/${taskId}/merge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefix, burn_danmu: burnDanmu }),
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      alert(d.error);
+      btn.disabled = false;
+      btn.textContent = burnDanmu ? '烧录弹幕' : '合并';
+      return;
+    }
+    btn.textContent = burnDanmu ? '烧录中...' : '合并中...';
+    // plain merge 通常秒级完成；弹幕重编码较慢，30s 后刷新列表
+    setTimeout(() => loadSegments(taskId), burnDanmu ? 30000 : 5000);
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false;
+    btn.textContent = burnDanmu ? '烧录弹幕' : '合并';
+  }
 }
 
 async function toggleDetailPreview(id, name) {

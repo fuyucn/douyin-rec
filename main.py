@@ -358,6 +358,54 @@ def cmd_task(args):
             sys.exit(1)
 
 
+def cmd_merge(args):
+    """合并分段 .ts 录制文件为 .mp4，支持弹幕烧录"""
+    from src.merge.merger import discover_groups, merge_group
+    from pathlib import Path
+
+    root = Path(args.path)
+    if not root.exists():
+        print(f"错误: 目录不存在: {root}", file=sys.stderr)
+        sys.exit(1)
+
+    # 自动检测：是根 output 目录还是 task 子目录
+    task_dirs = sorted(root.glob("task_*/")) if list(root.glob("task_*/")) else [root]
+
+    total_merged = 0
+    for task_dir in task_dirs:
+        groups = discover_groups(task_dir)
+        if args.prefix:
+            groups = [g for g in groups if g.prefix == args.prefix]
+        if not groups:
+            continue
+
+        for group in groups:
+            if group.already_merged and not args.overwrite and not (args.danmu and not group.merged_danmu_mp4.exists()):
+                print(f"跳过（已合并）: {group.prefix}")
+                continue
+            n = len(group.ts_files)
+            danmu_info = f"  弹幕: {len(group.ass_map)}段" if group.ass_map else ""
+            print(f"合并: {group.prefix}  [{n}段{danmu_info}]")
+            try:
+                result = merge_group(
+                    group,
+                    log_fn=print,
+                    do_plain=not args.danmu_only,
+                    do_danmu=not args.no_danmu,
+                    overwrite=args.overwrite,
+                )
+                if result.get("plain_mp4"):
+                    print(f"  => {result['plain_mp4']}")
+                if result.get("danmu_mp4"):
+                    print(f"  => {result['danmu_mp4']}")
+                total_merged += 1
+            except Exception as e:
+                print(f"  失败: {e}", file=sys.stderr)
+
+    if total_merged == 0:
+        print("未发现可合并的录制组（使用 --overwrite 强制重新合并已有文件）")
+
+
 def cmd_record(args):
     """纯录制直播流为 .ts 文件（支持分段 + 等待开播）"""
     if getattr(args, "ui", False):
@@ -519,12 +567,24 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
+    # merge 子命令
+    p_merge = subparsers.add_parser("merge", help="合并分段 .ts 录制文件为 .mp4")
+    p_merge.add_argument("path", help="录制输出目录（task_N 子目录或含多个 task_* 的根目录）")
+    p_merge.add_argument("--prefix", help="只合并指定前缀（不填则合并目录下所有录制组）")
+    p_merge.add_argument("--no-danmu", action="store_true", dest="no_danmu",
+                         help="跳过弹幕烧录版生成")
+    p_merge.add_argument("--danmu-only", action="store_true", dest="danmu_only",
+                         help="只生成弹幕版（跳过 plain merge，需 .mp4 已存在）")
+    p_merge.add_argument("--overwrite", action="store_true",
+                         help="覆盖已存在的 .mp4 文件")
+
     commands = {
         "portrait": cmd_portrait,
         "highlight": cmd_highlight,
         "live": cmd_live,
         "record": cmd_record,
         "task": cmd_task,
+        "merge": cmd_merge,
     }
 
     commands[args.command](args)
