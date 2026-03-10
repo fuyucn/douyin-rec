@@ -489,6 +489,7 @@ async def local_task_logs_sse(task_id: int):
 # ── 录制组合并 API ────────────────────────────────────────────────────────
 
 _merging_prefixes: set[str] = set()  # 防止同一前缀并发重复合并
+_merge_results: dict[str, dict] = {}  # lock_key → {"ok": bool, "error": str|None}
 
 _PREFIX_DT_RE = re.compile(r"^.+_(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})$")
 
@@ -511,6 +512,8 @@ async def list_segments(task_id: int):
     result = []
     for g in groups:
         m = _PREFIX_DT_RE.match(g.prefix)
+        lk = f"{task_id}:{g.prefix}"
+        mr = _merge_results.get(lk)
         result.append({
             "prefix": g.prefix,
             "date": m.group(1) if m else None,
@@ -519,6 +522,8 @@ async def list_segments(task_id: int):
             "has_danmu": len(g.ass_map) > 0,
             "merged": g.already_merged,
             "danmu_merged": g.merged_danmu_mp4.exists(),
+            "merging": lk in _merging_prefixes,
+            "merge_error": mr["error"] if (mr and not mr["ok"]) else None,
         })
     return {"groups": result}
 
@@ -560,8 +565,11 @@ async def merge_segments(task_id: int, request: Request):
             def log_fn(msg: str) -> None:
                 task_manager.broadcast(msg, task_name=task_name, task_id=task_id)
             merge_group(target, log_fn=log_fn, do_danmu=do_danmu, overwrite=overwrite)
+            _merge_results[lock_key] = {"ok": True, "error": None}
         except Exception as e:
-            task_manager.broadcast(f"[合并] 错误: {e}", task_name=task_name, task_id=task_id)
+            err = str(e).strip()[:300]
+            task_manager.broadcast(f"[合并] 错误: {err}", task_name=task_name, task_id=task_id)
+            _merge_results[lock_key] = {"ok": False, "error": err}
         finally:
             _merging_prefixes.discard(lock_key)
 

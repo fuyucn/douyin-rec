@@ -36,7 +36,7 @@ class AssWriter:
         opacity: float = 0.8,
         margin_h: int = 6,
         margin_w: int = 12,
-        dst: int = 20,
+        dst: int = 60,
         outlinecolor: str = '000000',
         outlinesize: float = 1.0,
     ) -> None:
