@@ -24,10 +24,14 @@ dependencies = [
     # 存储
     "sqlmodel>=0.0.14",
     "Pillow>=10.0",
-    # HTTP
+    # HTTP / WebSocket
     "requests>=2.31",
+    "aiohttp>=3.9",
+    "protobuf>=4.23",
     # 配置
     "pyyaml>=6.0",
+    "jsengine>=1.0.7.post1",
+    "gmssl>=3.2.2",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +40,7 @@ gemini = ["google-generativeai"]
 openai = ["openai"]
 all-ai = ["anthropic>=0.40", "google-generativeai", "openai"]
 ui = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+danmu = ["aiohttp>=3.9", "protobuf>=4.23", "jsengine>=0.1"]
 
 [project.scripts]
 video-screenshot = "main:main"

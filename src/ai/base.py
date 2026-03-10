@@ -50,6 +50,13 @@ def encode_frame_to_base64(frame: np.ndarray, quality: int = 80) -> str:
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 
+def _parse_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def parse_highlight_result(text: str) -> HighlightResult:
     """Parse a JSON response from any AI backend into a HighlightResult."""
     match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
@@ -69,7 +76,7 @@ def parse_highlight_result(text: str) -> HighlightResult:
 
     return HighlightResult(
         is_highlight=bool(data.get("is_highlight", False)),
-        score=float(data.get("score") or 0.0),
+        score=_parse_float(data.get("score", 0.0)),
         category=category,
         description=str(data.get("description") or ""),
     )

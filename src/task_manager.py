@@ -18,6 +18,8 @@ from sqlalchemy import text as sa_text
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from src.config import load_config
+from src.danmu.recorder import DanmuRecorder
+from src.downloader import DirectStreamDownloader
 from src.input.live import DouyinLiveSource
 from src.recorder import StreamRecorder
 from src.storage.database import LocalVideoTask, RecordingSession, RecordingTask
@@ -26,6 +28,9 @@ from src.storage.manager import StorageManager
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = "./output"
+
+# 画质自动降级顺序（ByteVC1 兼容模式）
+_QUALITY_FALLBACK_ORDER = ["origin", "uhd", "hd", "sd", "ld"]
 
 
 @dataclass
@@ -98,6 +103,9 @@ class TaskManager:
             ("schedule_run_until_end", "BOOLEAN NOT NULL DEFAULT 0"),
             ("started_at", "DATETIME"),
             ("custom_name", "TEXT"),
+            ("enable_danmu", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("danmu_cdn_delay", "INTEGER NOT NULL DEFAULT 6"),
+            ("auto_quality_fallback", "BOOLEAN NOT NULL DEFAULT 0"),
         ]
         local_migrations = [
             ("ai_backend", "TEXT"),
@@ -199,6 +207,7 @@ class TaskManager:
             running = list(db.exec(
                 select(RecordingTask).where(RecordingTask.status == "running")
             ).all())
+        scheduled_to_restart: list[int] = []
         for t in running:
             if t.id in orphan_task_ids:
                 logger.info("task %d 有活跃孤儿进程，跳过状态重置", t.id)
@@ -209,6 +218,14 @@ class TaskManager:
                 task.stopped_at = datetime.now()
                 db.add(task)
                 db.commit()
+            if t.schedule_enabled:
+                scheduled_to_restart.append(t.id)
+        for task_id in scheduled_to_restart:
+            try:
+                self.start_task(task_id)
+                logger.info("task %d 定时任务已自动重启", task_id)
+            except Exception as e:
+                logger.warning("task %d 定时任务重启失败: %s", task_id, e)
 
     # ── 日志广播 ─────────────────────────────────────────────────────
 
@@ -284,6 +301,9 @@ class TaskManager:
         schedule_stop: str = "23:59",
         schedule_run_until_end: bool = False,
         custom_name: str | None = None,
+        enable_danmu: bool = False,
+        danmu_cdn_delay: int = 6,
+        auto_quality_fallback: bool = False,
     ) -> RecordingTask:
         task = RecordingTask(
             url=url,
@@ -304,6 +324,9 @@ class TaskManager:
             schedule_stop=schedule_stop,
             schedule_run_until_end=schedule_run_until_end,
             custom_name=custom_name,
+            enable_danmu=enable_danmu,
+            danmu_cdn_delay=danmu_cdn_delay,
+            auto_quality_fallback=auto_quality_fallback,
         )
         with Session(self.engine) as session:
             session.add(task)
@@ -537,11 +560,9 @@ class TaskManager:
                 features.append("截图")
             log(f"已启用: {', '.join(features)}")
 
-            # 文件夹用 custom_name，没有则 fallback 到主播名
-            folder_name = task.custom_name or task_name
-
+            # 文件夹按任务 ID 分类，文件名仍用主播名
             config.storage.output_dir = str(self._output_dir)
-            storage = StorageManager(config.storage, name=folder_name)
+            storage = StorageManager(config.storage, name=f"task_{task_id}")
             segment_sec = task.segment_sec if task.enable_segment else 0
             poll_interval = task.poll_interval
 
@@ -550,6 +571,12 @@ class TaskManager:
             # 定时调度检查回调 (供 wait_for_live 在每次轮询前调用)
             def schedule_check() -> bool:
                 return self._is_in_schedule(task)
+
+            _quick_fail_count = 0  # 连续快速断开（<30s）计数，用于触发 FLV fallback
+            _override_url: str | None = None  # ByteVC1 崩溃后强制使用的备用地址
+            _last_rc: int | None = None  # 上次 ffmpeg 退出码
+            _current_quality = task.quality  # 画质自动降级追踪
+            _use_direct_dl = False  # ByteVC1 全画质耗尽后切换直接下载
 
             while not worker.stop_event.is_set():
                 # ── 定时窗口检查 ──
@@ -562,22 +589,33 @@ class TaskManager:
 
                 # ── 等待开播 ──
                 worker.status_text = "等待开播"
-                log("等待直播开播...")
-                try:
-                    stream_url = source.wait_for_live(
-                        poll_interval=poll_interval,
-                        on_status=log,
-                        stop_event=worker.stop_event,
-                        show_countdown=task.show_countdown,
-                        schedule_check=schedule_check if task.schedule_enabled else None,
-                    )
-                except InterruptedError as ie:
-                    if worker.stop_event.is_set():
-                        log(f"[用户] 停止任务")
-                        break
-                    # 定时窗口结束，回到循环顶部重新判断
-                    log(f"[定时] {ie}")
-                    continue
+                if _override_url:
+                    stream_url = _override_url
+                    _override_url = None
+                    _proto = "FLV" if not stream_url.split("?")[0].lower().endswith(".m3u8") else "M3U8"
+                    log(f"[系统] ByteVC1 崩溃，切换 {_proto} 地址重试")
+                else:
+                    # 每次重新等待开播时恢复到配置画质，下次直播从头重试降级
+                    if _current_quality != task.quality:
+                        _current_quality = task.quality
+                        source._config.quality = task.quality
+                    _use_direct_dl = False  # 新直播重置直接下载标志
+                    log("等待直播开播...")
+                    try:
+                        stream_url = source.wait_for_live(
+                            poll_interval=poll_interval,
+                            on_status=log,
+                            stop_event=worker.stop_event,
+                            show_countdown=task.show_countdown,
+                            schedule_check=schedule_check if task.schedule_enabled else None,
+                        )
+                    except InterruptedError as ie:
+                        if worker.stop_event.is_set():
+                            log(f"[用户] 停止任务")
+                            break
+                        # 定时窗口结束，回到循环顶部重新判断
+                        log(f"[定时] {ie}")
+                        continue
 
                 if worker.stop_event.is_set():
                     break
@@ -586,10 +624,26 @@ class TaskManager:
                 worker.status_text = "直播中"
                 worker.stream_url = stream_url
                 import re as _re
+                _H265_TAGS = {"h265", "hevc", "bytevc1", "bytevc2"}
                 proto = "M3U8" if stream_url.split("?")[0].lower().endswith(".m3u8") else "FLV"
                 _cm = _re.search(r"[?&]codec=([^&]+)", stream_url)
-                _codec = _cm.group(1) if _cm else "?"
-                log(f"[流] {proto} codec={_codec} {stream_url[:80]}...")
+                _codec_in_url = _cm.group(1).lower() if _cm else None
+                # FLV URL 的 codec 参数更可靠；M3U8 URL 通常不含 codec 参数
+                _flv_url_now = getattr(source, "_flv_url", None)
+                _flv_cm = _re.search(r"[?&]codec=([^&]+)", _flv_url_now or "")
+                _flv_codec = _flv_cm.group(1).lower() if _flv_cm else None
+                # 综合判断 codec
+                if _codec_in_url and _codec_in_url in _H265_TAGS:
+                    _codec_label = f"ByteVC1/H.265 ⚠️  ({_codec_in_url})"
+                elif _codec_in_url == "h264":
+                    _codec_label = "H.264 ✓"
+                elif _flv_codec and _flv_codec in _H265_TAGS:
+                    _codec_label = f"ByteVC1/H.265 ⚠️  (FLV: {_flv_codec}，当前 {proto} 未标注)"
+                elif _flv_codec == "h264":
+                    _codec_label = f"H.264 ✓ (FLV 确认，当前 {proto} 未标注)"
+                else:
+                    _codec_label = f"未知 (url 无 codec 参数)"
+                log(f"[流] {proto} | codec: {_codec_label}")
 
                 # 启动预览抓帧线程
                 preview_thread = threading.Thread(
@@ -606,13 +660,48 @@ class TaskManager:
 
                 # 启动录制
                 if task.enable_record:
-                    path_or_pattern, display = StreamRecorder.make_output_path(
-                        task_name, storage.output_dir, segment=segment_sec > 0,
-                    )
-                    log(f"开始录制: {display}")
-                    recorder = StreamRecorder(
-                        stream_url, path_or_pattern, segment_duration=segment_sec,
-                    )
+                    # 诊断：M3U8 快速断开时抓取首行判断是否含 ENDLIST
+                    if stream_url.split("?")[0].lower().endswith(".m3u8"):
+                        try:
+                            import urllib.request
+                            req = urllib.request.Request(
+                                stream_url,
+                                headers={
+                                    "Referer": "https://live.douyin.com",
+                                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                    **({"Cookie": task.cookies or config.input.cookies} if (task.cookies or config.input.cookies) else {}),
+                                },
+                            )
+                            with urllib.request.urlopen(req, timeout=5) as resp:
+                                m3u8_head = resp.read(800).decode(errors="replace")
+                            has_endlist = "#EXT-X-ENDLIST" in m3u8_head
+                            seg_count = m3u8_head.count(".ts")
+                            log(f"[诊断] M3U8 状态: {'含 ENDLIST（已结束）' if has_endlist else '活跃'}, .ts 分片数≈{seg_count}, 首行: {m3u8_head[:120].replace(chr(10),'|')}")
+                        except Exception as _e:
+                            log(f"[诊断] M3U8 获取失败: {_e}")
+
+                    _flv_for_dl = getattr(source, "_flv_url", None)
+                    if _use_direct_dl and _flv_for_dl:
+                        # ByteVC1 全画质耗尽 → 直接 HTTP 字节流下载 FLV（绕过 ffmpeg）
+                        path_or_pattern, display = StreamRecorder.make_output_path(
+                            task_name, storage.output_dir, segment=False, ext="flv",
+                        )
+                        log(f"[直下] 直接下载 (ByteVC1 兼容): {display}.flv")
+                        recorder = DirectStreamDownloader(
+                            _flv_for_dl, path_or_pattern,
+                            cookies=task.cookies or config.input.cookies,
+                            log_callback=log,
+                        )
+                    else:
+                        path_or_pattern, display = StreamRecorder.make_output_path(
+                            task_name, storage.output_dir, segment=segment_sec > 0,
+                        )
+                        log(f"开始录制: {display}")
+                        recorder = StreamRecorder(
+                            stream_url, path_or_pattern, segment_duration=segment_sec,
+                            log_callback=log,
+                            cookies=task.cookies or config.input.cookies,
+                        )
                     recorder.start()
                     worker.recording_started_at = datetime.now()
                     if recorder.pid:
@@ -628,6 +717,31 @@ class TaskManager:
                             db.refresh(sess)
                             session_id = sess.id
                         worker.active_session_id = session_id
+
+                # 启动弹幕录制
+                danmu_recorder = None
+                if task.enable_danmu and task.enable_record and worker.recording_started_at:
+                    if segment_sec > 0:
+                        ass_path = storage.output_dir / f"{display}_%03d_danmu.ass"
+                    else:
+                        ass_path = storage.output_dir / f"{display}_danmu.ass"
+                    _danmu_cookies = task.cookies or config.input.cookies
+                    log(f"[弹幕] cookies: {'任务配置' if task.cookies else ('config.yaml' if config.input.cookies else '无（匿名）')}")
+                    danmu_recorder = DanmuRecorder(
+                        url=task.url,
+                        started_at=worker.recording_started_at,
+                        output_path=ass_path,
+                        cdn_delay=task.danmu_cdn_delay,
+                        segment_duration=segment_sec,
+                        cookies=_danmu_cookies,
+                        log_callback=log,
+                    )
+                    try:
+                        danmu_recorder.start()
+                        log(f"[弹幕] 录制已启动 → {ass_path.name}")
+                    except Exception as e:
+                        log(f"[弹幕] 启动失败: {e}")
+                        danmu_recorder = None
 
                 # 启动截图
                 if task.enable_screenshot:
@@ -658,7 +772,9 @@ class TaskManager:
                             break
                     time.sleep(1)
 
+                _last_rc = None
                 if recorder:
+                    _last_rc = recorder.last_exit_code  # 捕获退出码（stop() 前读取最可靠）
                     _end_reason = "user_stop" if worker.stop_event.is_set() else "stream_end"
                     recorder.stop()
                     if session_id:
@@ -675,6 +791,9 @@ class TaskManager:
                         worker.active_session_id = None
                         session_id = None
                     worker.recording_started_at = None
+                if danmu_recorder:
+                    danmu_recorder.stop()
+                    danmu_recorder = None
                 if screenshot_thread and screenshot_thread.is_alive():
                     screenshot_thread.join(timeout=5)
                 try:
@@ -689,19 +808,35 @@ class TaskManager:
                     break
 
                 if task.schedule_enabled and not self._is_in_schedule(task):
-                    if task.schedule_run_until_end:
-                        log(f"[定时] 直播已结束，任务完成")
-                        break
-                    else:
-                        log(f"[定时] 窗口结束 ({task.schedule_stop})，等待下次开播窗口")
-                        continue
+                    log(f"[定时] 当前不在窗口内，等待下次开播窗口 ({task.schedule_start})")
+                    continue
 
                 _session_sec = (datetime.now() - _session_started_at).total_seconds()
                 if _session_sec < 30:
+                    _quick_fail_count += 1
                     _cooldown = random.uniform(15, 40)
                     log(f"[系统] 直播流快速断开 ({_session_sec:.0f}s)，{_cooldown:.0f} 秒后重连...")
+                    # 连续 3 次快速断开，提示可能需要 cookie 或切换 URL 格式
+                    if _quick_fail_count == 3:
+                        log("[系统] 连续快速断开 3 次，CDN 可能需要 cookie 鉴权，建议在任务设置中填写 cookies")
+                    # ByteVC1 崩溃 (rc=-11)
+                    if _last_rc == -11:
+                        _flv = getattr(source, "_flv_url", None)
+                        if _flv and _flv != stream_url:
+                            # Step 1: M3U8 是 ByteVC1，先试 FLV
+                            log("[系统] 检测到 ByteVC1 (rc=-11)，下次尝试 FLV 地址")
+                            _override_url = _flv
+                        elif _flv:
+                            # Step 2: FLV 也是 ByteVC1 → 直接下载（绕过 ffmpeg）
+                            log("[系统] ByteVC1 崩溃，FLV 也不兼容，切换直接下载模式（绕过 ffmpeg）")
+                            _use_direct_dl = True
+                            _override_url = _flv
+                        else:
+                            log("[系统] ByteVC1 崩溃，无可用 FLV 地址，等待 3 分钟")
                     if worker.stop_event.wait(_cooldown):
                         break
+                else:
+                    _quick_fail_count = 0  # 成功录制超 30s，重置计数
                 log("[系统] 直播流断开，将重新等待开播...")
 
         except Exception as e:
@@ -1133,11 +1268,19 @@ class TaskManager:
             result = ai_analyzer.analyze_frames(raw_frames, transcript)
 
             if result.is_highlight:
+                # 顺序读取片段所有帧，按 Laplacian 方差选最清晰的 top-K
+                save_frames = self._select_sharpest_frames(
+                    task.video_path, start, end,
+                    config.highlight.key_frames_per_segment,
+                )
+                if not save_frames:
+                    save_frames = frames  # fallback: 用 AI 分析的帧
+
                 from src.models import HighlightMoment
                 moment = HighlightMoment(
                     start_time=start,
                     end_time=end,
-                    frames=frames,
+                    frames=save_frames,
                     result=result,
                     audio_segment=seg,
                 )
@@ -1185,3 +1328,45 @@ class TaskManager:
 
         cap.release()
         return frames
+
+    @staticmethod
+    def _select_sharpest_frames(
+        video_path: str, start: float, end: float, top_k: int,
+    ) -> list:
+        """顺序读取片段内所有帧，用 min-heap 保留清晰度最高的 top_k 张。"""
+        import heapq
+        import cv2
+        from src.filter.blur import BlurDetector
+        from src.models import FrameInfo
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return []
+        cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
+
+        blur_det = BlurDetector()
+        heap: list = []
+        counter = 0
+
+        while True:
+            pos_s = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            if pos_s >= end:
+                break
+            ret, frame = cap.read()
+            if not ret:
+                break
+            score = blur_det.detect(frame)
+            fi = FrameInfo(
+                frame=frame,
+                timestamp=pos_s,
+                frame_index=int(cap.get(cv2.CAP_PROP_POS_FRAMES) - 1),
+                source=video_path,
+            )
+            if len(heap) < top_k:
+                heapq.heappush(heap, (score, counter, fi))
+            elif score > heap[0][0]:
+                heapq.heapreplace(heap, (score, counter, fi))
+            counter += 1
+
+        cap.release()
+        return [fi for _, _, fi in sorted(heap, key=lambda x: -x[0])]

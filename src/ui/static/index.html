@@ -66,12 +66,26 @@ tailwind.config = {
 <script>
 const STATUS_LABELS = { pending: '待启动', running: '运行中', stopped: '已停止', error: '错误', completed: '已完成' };
 const STATUS_BADGE = {
-  pending:    'badge-ghost',
-  running:    'badge-success',
-  stopped:    'badge-error',
-  error:      'badge-error',
-  completed:  'badge-info',
+  pending:    'badge-ghost badge-outline',
+  running:    'badge-success badge-outline',
+  stopped:    'badge-error badge-outline',
+  error:      'badge-error badge-outline',
+  completed:  'badge-info badge-outline',
 };
+
+// 综合 DB status + worker_status 返回显示信息
+function statusDisplay(status, workerStatus) {
+  if (status === 'running' && workerStatus === '定时等待') {
+    return { label: '等待时段', badgeClass: 'badge-warning badge-outline', dotClass: 'bg-warning' };
+  }
+  return {
+    label: STATUS_LABELS[status] || status,
+    badgeClass: STATUS_BADGE[status] || 'badge-ghost',
+    dotClass: status === 'running' ? 'bg-success dot-running'
+            : (status === 'stopped' || status === 'error') ? 'bg-error'
+            : 'bg-base-content/40',
+  };
+}
 const LOCAL_TYPE_LABELS = { portrait: '截图筛选', highlight: '高能时刻' };
 const QUALITY_LABELS = { origin: 'OD', uhd: 'UHD', hd: 'HD', sd: 'SD', ld: 'LD' };
 
@@ -168,7 +182,7 @@ function renderListView() {
             <label class="label py-1"><span class="label-text">画质</span></label>
             <select id="quality" class="select select-bordered select-sm w-full">
               <option value="origin">OD（原画）</option>
-              <option value="uhd">UHD（蓝光）</option>
+              <option value="uhd" selected>UHD（蓝光）</option>
               <option value="hd">HD（高清）</option>
               <option value="sd">SD（标清）</option>
               <option value="ld">LD（流畅）</option>
@@ -201,6 +215,14 @@ function renderListView() {
           <label class="label cursor-pointer gap-2">
             <input type="checkbox" id="chkSegment" checked class="checkbox checkbox-sm" />
             <span class="label-text">分段录制</span>
+          </label>
+          <label class="label cursor-pointer gap-2">
+            <input type="checkbox" id="chkDanmu" class="checkbox checkbox-sm checkbox-info" />
+            <span class="label-text">录制弹幕</span>
+          </label>
+          <label class="label cursor-pointer gap-2">
+            <input type="checkbox" id="chkQualityFallback" class="checkbox checkbox-sm checkbox-warning" />
+            <span class="label-text" title="ByteVC1/H265 崩溃时自动降级画质重试 (UHD→HD→SD→LD)">兼容模式</span>
           </label>
           <label class="label cursor-pointer gap-2">
             <input type="checkbox" id="chkCountdown" checked class="checkbox checkbox-sm" />
@@ -274,6 +296,8 @@ async function addTask() {
       quality: document.getElementById('quality').value,
       segment: Math.floor(segmentSec / 60),
       record: chkRecord.checked, screenshot: chkScreenshot.checked,
+      enable_danmu: document.getElementById('chkDanmu').checked,
+      auto_quality_fallback: document.getElementById('chkQualityFallback').checked,
       enable_segment: document.getElementById('chkSegment').checked,
       segment_sec: segmentSec,
       poll_interval: parseInt(document.getElementById('pollInterval').value) || 180,
@@ -319,8 +343,11 @@ function renderTaskTable(tasks) {
     const features = [];
     if (t.enable_record) features.push('<span class="badge badge-success badge-outline badge-xs">录制</span>');
     if (t.enable_screenshot) features.push('<span class="badge badge-warning badge-outline badge-xs">截图</span>');
+    if (t.enable_danmu) features.push('<span class="badge badge-info badge-outline badge-xs">弹幕</span>');
+    if (t.auto_quality_fallback) features.push('<span class="badge badge-warning badge-outline badge-xs">兼容</span>');
     if (t.schedule_enabled) features.push(`<span class="badge badge-accent badge-outline badge-xs">定时 ${t.schedule_start}~${t.schedule_stop}</span>`);
-    const workerInfo = t.worker_status ? `<span class="text-xs opacity-50 ml-1">· ${esc(t.worker_status)}</span>` : '';
+    const sd = statusDisplay(t.status, t.worker_status);
+    const workerInfo = (t.worker_status && t.worker_status !== '定时等待') ? `<span class="text-xs opacity-50 ml-1">· ${esc(t.worker_status)}</span>` : '';
 
     return `<tr class="clickable hover" data-id="${t.id}">
       <td class="text-base-content/50 font-mono">${t.id}</td>
@@ -329,9 +356,9 @@ function renderTaskTable(tasks) {
         <div class="text-xs opacity-40 truncate max-w-[240px]">${esc(t.url)}</div>
       </td>
       <td>
-        <span class="badge ${STATUS_BADGE[t.status] || 'badge-ghost'} badge-sm gap-1">
-          <span class="inline-block w-1.5 h-1.5 rounded-full ${t.status === 'running' ? 'bg-success dot-running' : t.status === 'stopped' || t.status === 'error' ? 'bg-error' : 'bg-base-content/40'}"></span>
-          ${STATUS_LABELS[t.status] || t.status}
+        <span class="badge ${sd.badgeClass} badge-sm gap-1">
+          <span class="inline-block w-1.5 h-1.5 rounded-full ${sd.dotClass}"></span>
+          ${sd.label}
         </span>
         ${workerInfo}
         ${t.status === 'running' && t.started_at ? `<div class="text-xs opacity-40 mt-0.5">运行 <span data-elapsed-from="${t.started_at}"></span>${t.recording_started_at ? ` · 录制 <span data-elapsed-from="${t.recording_started_at}"></span>` : ''}</div>` : ''}
@@ -397,8 +424,11 @@ async function renderDetailView(id) {
   const features = [];
   if (task.enable_record) features.push('<span class="badge badge-success badge-outline badge-sm">录制</span>');
   if (task.enable_screenshot) features.push('<span class="badge badge-warning badge-outline badge-sm">截图</span>');
+  if (task.enable_danmu) features.push('<span class="badge badge-info badge-outline badge-sm">弹幕</span>');
+  if (task.auto_quality_fallback) features.push('<span class="badge badge-warning badge-outline badge-sm">兼容模式</span>');
   const createdDate = task.created_at ? task.created_at.split('T')[0] : '-';
-  const workerInfo = task.worker_status ? ` · ${task.worker_status}` : '';
+  const taskSd = statusDisplay(task.status, task.worker_status);
+  const workerInfo = (task.worker_status && task.worker_status !== '定时等待') ? ` · ${task.worker_status}` : '';
 
   app.innerHTML = `
     <div class="flex items-center gap-3 mb-5">
@@ -440,9 +470,9 @@ async function renderDetailView(id) {
         <div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
           <div>
             <span class="opacity-50 mr-1">状态</span>
-            <span class="badge ${STATUS_BADGE[task.status] || 'badge-ghost'} badge-sm gap-1">
-              <span class="inline-block w-1.5 h-1.5 rounded-full ${task.status === 'running' ? 'bg-success dot-running' : task.status === 'stopped' || task.status === 'error' ? 'bg-error' : 'bg-base-content/40'}"></span>
-              ${STATUS_LABELS[task.status] || task.status}${workerInfo}
+            <span class="badge ${taskSd.badgeClass} badge-sm gap-1">
+              <span class="inline-block w-1.5 h-1.5 rounded-full ${taskSd.dotClass}"></span>
+              ${taskSd.label}${workerInfo}
             </span>
           </div>
         </div>

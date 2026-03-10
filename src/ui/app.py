@@ -38,13 +38,8 @@ async def index():
 # ── 序列化 ────────────────────────────────────────────────────────────────
 
 def _task_output_dir(t) -> str:
-    """计算任务对应的输出子目录路径（与 task_manager 保持一致）
-
-    优先级: custom_name > name > 任务{id}
-    """
-    folder = t.custom_name or t.name or f"任务{t.id}"
-    safe_name = re.sub(r"[^\w\u4e00-\u9fff\-.]", "_", folder)
-    return str(Path(_config.storage.output_dir) / safe_name)
+    """计算任务对应的输出子目录绝对路径（与 task_manager 保持一致）"""
+    return str(Path(_config.storage.output_dir).resolve() / f"task_{t.id}")
 
 
 def _serialize_task(t, worker_status: str = "", recording_started_at: str | None = None) -> dict:
@@ -57,6 +52,8 @@ def _serialize_task(t, worker_status: str = "", recording_started_at: str | None
         "segment_min": t.segment_min,
         "enable_record": t.enable_record,
         "enable_screenshot": t.enable_screenshot,
+        "enable_danmu": t.enable_danmu,
+        "auto_quality_fallback": t.auto_quality_fallback,
         "enable_segment": t.enable_segment,
         "segment_sec": t.segment_sec,
         "poll_interval": t.poll_interval,
@@ -129,7 +126,9 @@ async def open_folder(request: Request):
 
     target = Path(raw_path).expanduser().resolve()
     allowed = Path(_config.storage.output_dir).expanduser().resolve()
-    if not str(target).startswith(str(allowed)):
+    try:
+        target.relative_to(allowed)
+    except ValueError:
         return JSONResponse({"error": "不允许访问此目录"}, status_code=403)
 
     target.mkdir(parents=True, exist_ok=True)
@@ -179,6 +178,9 @@ async def create_task(request: Request):
         enable_record=enable_record,
         enable_screenshot=enable_screenshot,
         cookies=body.get("cookies"),
+        enable_danmu=body.get("enable_danmu", False),
+        danmu_cdn_delay=int(body.get("danmu_cdn_delay", 6)),
+        auto_quality_fallback=body.get("auto_quality_fallback", False),
         enable_segment=body.get("enable_segment", True),
         segment_sec=int(body.get("segment_sec", 1800)),
         poll_interval=int(body.get("poll_interval", 180)),

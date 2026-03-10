@@ -25,13 +25,17 @@ class AudioAnalyzer:
 
     def extract_audio(self, video_path: str, output_path: str) -> str:
         """Extract audio from video to a WAV file using ffmpeg-python."""
-        (
-            ffmpeg
-            .input(video_path)
-            .output(output_path, ac=1, ar=16000, format="wav")
-            .overwrite_output()
-            .run(quiet=True)
-        )
+        try:
+            (
+                ffmpeg
+                .input(video_path)
+                .output(output_path, ac=1, ar=16000, format="wav")
+                .overwrite_output()
+                .run(capture_stdout=True, capture_stderr=True)
+            )
+        except ffmpeg.Error as e:
+            stderr = e.stderr.decode(errors="replace") if e.stderr else "(no stderr)"
+            raise RuntimeError(f"ffmpeg 音频提取失败:\n{stderr}") from e
         logger.info("Extracted audio to %s", output_path)
         return output_path
 

@@ -41,6 +41,8 @@ class HighlightConfig:
     volume_spike_ratio: float = 2.0
     context_seconds: float = 3.0
     frames_per_segment: int = 5
+    key_frames_per_segment: int = 3   # 每个高能时刻最终保存的帧数
+    save_fps: float = 5.0             # 密集提帧 FPS，覆盖更多时机
 
 
 @dataclass
@@ -50,7 +52,7 @@ class AIConfig:
     google_api_key: str | None = None
     openai_api_key: str | None = None
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "minicpm-v"
+    ollama_model: str = "qwen3-vl:8b"
 
 
 @dataclass

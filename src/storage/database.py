@@ -9,7 +9,7 @@ class RecordingTask(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     url: str  # 直播间 URL
     name: str | None = None  # 主播名称 (自动获取或手动指定)
-    quality: str = "origin"  # 画质
+    quality: str = "uhd"  # 画质
     segment_min: int = 30  # (旧字段, 保留兼容) 分段时长(分钟)
     enable_record: bool = True  # 是否录制
     enable_screenshot: bool = False  # 是否截图
@@ -19,6 +19,9 @@ class RecordingTask(SQLModel, table=True):
     poll_interval: int = 180  # 循环检测间隔(秒)
     show_countdown: bool = True  # 是否显示循环倒计时
     max_threads: int = 3  # 同一时间访问网络的线程数
+    enable_danmu: bool = False  # 是否录制弹幕
+    danmu_cdn_delay: int = 6  # CDN 推流延迟补偿秒数（弹幕时间对齐）
+    auto_quality_fallback: bool = False  # ByteVC1 崩溃时自动降级画质
     schedule_enabled: bool = False  # 是否启用定时
     schedule_timezone: str = "Asia/Shanghai"  # 时区 (IANA)
     schedule_start: str = "00:00"  # 每日开始时间 HH:MM
