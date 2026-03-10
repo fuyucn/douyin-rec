@@ -45,6 +45,7 @@ class TaskWorker:
     status_text: str = ""
     recording_started_at: datetime | None = None
     active_session_id: int | None = None
+    log_file: "Path | None" = None
 
 
 @dataclass
@@ -241,9 +242,12 @@ class TaskManager:
         # 写入日志文件
         if task_id is not None:
             try:
-                log_file = self._logs_dir / f"task_{task_id}.log"
-                with open(log_file, "a", encoding="utf-8") as f:
-                    f.write(line + "\n")
+                worker = self._workers.get(task_id)
+                log_file = worker.log_file if (worker and worker.log_file) else None
+                if log_file:
+                    log_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        f.write(line + "\n")
             except Exception:
                 pass
 
@@ -270,10 +274,23 @@ class TaskManager:
         ]
 
     def get_task_log_lines(self, task_id: int) -> list[str]:
-        """读取任务的历史日志文件"""
-        log_file = self._logs_dir / f"task_{task_id}.log"
-        if not log_file.exists():
-            return []
+        """读取任务最新一次启动的历史日志文件"""
+        # 优先使用当前运行 worker 的 log_file
+        worker = self._workers.get(task_id)
+        if worker and worker.log_file and worker.log_file.exists():
+            log_file = worker.log_file
+        else:
+            # 查找最新的 *_task{id}.log（文件名含时间戳，字典序即时间序）
+            candidates = sorted(self._logs_dir.glob(f"*_task{task_id}.log"))
+            if not candidates:
+                # 兼容旧格式 task_{id}.log
+                legacy = self._logs_dir / f"task_{task_id}.log"
+                if legacy.exists():
+                    log_file = legacy
+                else:
+                    return []
+            else:
+                log_file = candidates[-1]
         try:
             return log_file.read_text(encoding="utf-8").splitlines()
         except Exception:
@@ -398,7 +415,10 @@ class TaskManager:
                 if w.thread.is_alive():
                     raise ValueError(f"任务 {task_id} 线程仍在运行")
 
-            worker = TaskWorker()
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            worker = TaskWorker(
+                log_file=self._logs_dir / f"{ts}_task{task_id}.log"
+            )
             self._workers[task_id] = worker
 
         self._update_task_status(task_id, "running")
