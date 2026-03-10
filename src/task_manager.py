@@ -29,9 +29,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = "./output"
 
-# 画质自动降级顺序（ByteVC1 兼容模式）
-_QUALITY_FALLBACK_ORDER = ["origin", "uhd", "hd", "sd", "ld"]
-
 
 @dataclass
 class TaskWorker:
@@ -592,11 +589,8 @@ class TaskManager:
             def schedule_check() -> bool:
                 return self._is_in_schedule(task)
 
-            _quick_fail_count = 0  # 连续快速断开（<30s）计数，用于触发 FLV fallback
-            _override_url: str | None = None  # ByteVC1 崩溃后强制使用的备用地址
+            _quick_fail_count = 0  # 连续快速断开（<30s）计数
             _last_rc: int | None = None  # 上次 ffmpeg 退出码
-            _current_quality = task.quality  # 画质自动降级追踪
-            _use_direct_dl = False  # ByteVC1 全画质耗尽后切换直接下载
 
             while not worker.stop_event.is_set():
                 # ── 定时窗口检查 ──
@@ -609,27 +603,16 @@ class TaskManager:
 
                 # ── 等待开播 ──
                 worker.status_text = "等待开播"
-                if _override_url:
-                    stream_url = _override_url
-                    _override_url = None
-                    _proto = "FLV" if not stream_url.split("?")[0].lower().endswith(".m3u8") else "M3U8"
-                    log(f"[系统] ByteVC1 崩溃，切换 {_proto} 地址重试")
-                else:
-                    # 每次重新等待开播时恢复到配置画质，下次直播从头重试降级
-                    if _current_quality != task.quality:
-                        _current_quality = task.quality
-                        source._config.quality = task.quality
-                    _use_direct_dl = False  # 新直播重置直接下载标志
-                    log("等待直播开播...")
-                    try:
-                        stream_url = source.wait_for_live(
-                            poll_interval=poll_interval,
-                            on_status=log,
-                            stop_event=worker.stop_event,
-                            show_countdown=task.show_countdown,
-                            schedule_check=schedule_check if task.schedule_enabled else None,
-                        )
-                    except InterruptedError as ie:
+                log("等待直播开播...")
+                try:
+                    stream_url = source.wait_for_live(
+                        poll_interval=poll_interval,
+                        on_status=log,
+                        stop_event=worker.stop_event,
+                        show_countdown=task.show_countdown,
+                        schedule_check=schedule_check if task.schedule_enabled else None,
+                    )
+                except InterruptedError as ie:
                         if worker.stop_event.is_set():
                             log(f"[用户] 停止任务")
                             break
@@ -643,31 +626,8 @@ class TaskManager:
                 # ── 开播 ──
                 worker.status_text = "直播中"
                 worker.stream_url = stream_url
-                import re as _re
-                _H265_TAGS = {"h265", "hevc", "bytevc1", "bytevc2"}
                 proto = "M3U8" if stream_url.split("?")[0].lower().endswith(".m3u8") else "FLV"
-                _cm = _re.search(r"[?&]codec=([^&]+)", stream_url)
-                _codec_in_url = _cm.group(1).lower() if _cm else None
-                # FLV URL 的 codec 参数更可靠；M3U8 URL 通常不含 codec 参数
-                _flv_url_now = getattr(source, "_flv_url", None)
-                _flv_cm = _re.search(r"[?&]codec=([^&]+)", _flv_url_now or "")
-                _flv_codec = _flv_cm.group(1).lower() if _flv_cm else None
-                # 综合判断 codec
-                _is_bytevc1 = False
-                if _codec_in_url and _codec_in_url in _H265_TAGS:
-                    _codec_label = f"ByteVC1/H.265 ⚠️  ({_codec_in_url})"
-                    _is_bytevc1 = True
-                elif _codec_in_url == "h264":
-                    _codec_label = "H.264 ✓"
-                elif _flv_codec and _flv_codec in _H265_TAGS:
-                    _codec_label = f"ByteVC1/H.265 ⚠️  (FLV: {_flv_codec}，当前 {proto} 未标注)"
-                    _is_bytevc1 = True
-                elif _flv_codec == "h264":
-                    _codec_label = f"H.264 ✓ (FLV 确认，当前 {proto} 未标注)"
-                else:
-                    _codec_label = f"未知 (url 无 codec 参数)"
-                    _is_bytevc1 = True  # codec 未知时保守处理，仍走 ByteVC1 路径
-                log(f"[流] {proto} | codec: {_codec_label}")
+                log(f"[流] {proto}")
 
                 # 启动预览抓帧线程
                 preview_thread = threading.Thread(
@@ -684,39 +644,20 @@ class TaskManager:
 
                 # 启动录制
                 if task.enable_record:
-                    # 诊断：M3U8 快速断开时抓取首行判断是否含 ENDLIST
-                    if stream_url.split("?")[0].lower().endswith(".m3u8"):
-                        try:
-                            import urllib.request
-                            req = urllib.request.Request(
-                                stream_url,
-                                headers={
-                                    "Referer": "https://live.douyin.com",
-                                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                                    **({"Cookie": task.cookies or config.input.cookies} if (task.cookies or config.input.cookies) else {}),
-                                },
-                            )
-                            with urllib.request.urlopen(req, timeout=5) as resp:
-                                m3u8_head = resp.read(800).decode(errors="replace")
-                            has_endlist = "#EXT-X-ENDLIST" in m3u8_head
-                            seg_count = m3u8_head.count(".ts")
-                            log(f"[诊断] M3U8 状态: {'含 ENDLIST（已结束）' if has_endlist else '活跃'}, .ts 分片数≈{seg_count}, 首行: {m3u8_head[:120].replace(chr(10),'|')}")
-                        except Exception as _e:
-                            log(f"[诊断] M3U8 获取失败: {_e}")
-
-                    _flv_for_dl = getattr(source, "_flv_url", None) or (stream_url if proto == "FLV" else None)
-                    if (_use_direct_dl or proto == "FLV") and _flv_for_dl:
-                        # FLV 流一律用直接下载（绕过 ffmpeg），避免 macOS ffmpeg 兼容性崩溃
+                    if proto == "FLV":
+                        # FLV 一律走 DirectStreamDownloader(httpx)，绕过 ffmpeg
+                        # ByteVC1/H264 均透明，无崩溃风险
                         path_or_pattern, display = StreamRecorder.make_output_path(
                             task_name, storage.output_dir, segment=False, ext="flv",
                         )
                         log(f"[直下] 直接下载 (FLV): {display}.flv")
                         recorder = DirectStreamDownloader(
-                            _flv_for_dl, path_or_pattern,
+                            stream_url, path_or_pattern,
                             cookies=task.cookies or config.input.cookies,
                             log_callback=log,
                         )
                     else:
+                        # M3U8 → ffmpeg（仅在无 FLV URL 时走此路径）
                         path_or_pattern, display = StreamRecorder.make_output_path(
                             task_name, storage.output_dir, segment=segment_sec > 0,
                         )
@@ -847,20 +788,6 @@ class TaskManager:
                     # 连续 3 次快速断开，提示可能需要 cookie 或切换 URL 格式
                     if _quick_fail_count == 3:
                         log("[系统] 连续快速断开 3 次，CDN 可能需要 cookie 鉴权，建议在任务设置中填写 cookies")
-                    # ffmpeg 崩溃 (rc=-11)：ByteVC1 或 H.264 均可能出现，超过 2 次切直接下载
-                    if _last_rc == -11:
-                        _flv = getattr(source, "_flv_url", None)
-                        if _is_bytevc1 and _flv and _flv != stream_url:
-                            # ByteVC1: M3U8 先切换到 FLV
-                            log("[系统] 检测到 ByteVC1 (rc=-11)，下次尝试 FLV 地址")
-                            _override_url = _flv
-                        elif _flv and _quick_fail_count >= 2:
-                            # 连续 2 次 rc=-11（无论 codec）→ 直接下载绕过 ffmpeg
-                            log("[系统] ffmpeg 连续崩溃 (rc=-11)，切换直接下载模式（绕过 ffmpeg）")
-                            _use_direct_dl = True
-                            _override_url = _flv
-                        else:
-                            log("[系统] ByteVC1 崩溃，无可用 FLV 地址，等待 3 分钟")
                     if worker.stop_event.wait(_cooldown):
                         break
                 else:

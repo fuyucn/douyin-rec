@@ -72,6 +72,9 @@ class DouyinDanmakuClient:
                 except (KeyError, IndexError, TypeError) as e:
                     raise RuntimeError(f'获取房间信息失败 (HTTP {resp.status}): {text[:200]}') from e
 
+        actual_room_id = room_info['id_str']
+        logger.debug('弹幕房间 web_rid=%s → room_id=%s', self._room_id, actual_room_id)
+
         uid = DouyinDanmakuUtils.get_user_unique_id()
         VERSION_CODE = 180800
         SDK_VERSION = '1.0.14-beta.0'
@@ -80,7 +83,7 @@ class DouyinDanmakuClient:
             'live_id': '1', 'aid': '6383',
             'version_code': VERSION_CODE,
             'webcast_sdk_version': SDK_VERSION,
-            'room_id': room_info['id_str'],
+            'room_id': actual_room_id,
             'sub_room_id': '', 'sub_channel_id': '',
             'did_rule': '3', 'user_unique_id': uid,
             'device_platform': 'web', 'device_type': '',
@@ -89,13 +92,13 @@ class DouyinDanmakuClient:
         try:
             sig = DouyinDanmakuUtils.get_signature(
                 DouyinDanmakuUtils.get_x_ms_stub(sig_params))
-            logger.debug('弹幕签名: %s', sig)
+            logger.info('弹幕签名成功: %s (room_id=%s)', sig, actual_room_id)
         except Exception as _e:
-            logger.warning('弹幕签名失败: %s', _e)
+            logger.warning('弹幕签名失败 (将用 0): %s', _e)
             sig = 0
 
         params = {
-            'room_id': room_info['id_str'],
+            'room_id': actual_room_id,
             'compress': 'gzip',
             'version_code': VERSION_CODE,
             'webcast_sdk_version': SDK_VERSION,
@@ -182,11 +185,20 @@ class DouyinDanmakuClient:
         ws_url = await self._get_ws_url()
         ctx = ssl.create_default_context()
         ctx.set_ciphers('DEFAULT')
+        # WebSocket 连接需要 Origin；去掉 authority（HTTP/2 伪头部，不能用于 WS）
+        ws_headers = {k: v for k, v in self._headers.items() if k.lower() != 'authority'}
+        ws_headers['Origin'] = 'https://live.douyin.com'
+        if self._session and not self._session.closed:
+            await self._session.close()
         self._session = aiohttp.ClientSession()
-        self._ws = await self._session.ws_connect(
-            ws_url, ssl_context=ctx,
-            headers=self._headers,
-        )
+        try:
+            self._ws = await self._session.ws_connect(
+                ws_url, ssl_context=ctx,
+                headers=ws_headers,
+            )
+        except Exception as e:
+            logger.warning('WebSocket 连接失败 (status=%s): %s', getattr(e, 'status', '?'), e)
+            raise
         await asyncio.gather(self._heartbeat_loop(), self._fetch_loop())
 
     async def stop(self) -> None:

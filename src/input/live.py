@@ -118,29 +118,19 @@ class DouyinLiveSource:
         m3u8_url = stream_info.get("m3u8_url")
         self._flv_url = flv_url  # 存储供 ByteVC1 fallback 使用
 
-        # URL 选择策略（与原逻辑一致）:
-        #   1. FLV codec=h264 → 优先（最高码率）
-        #   2. record_url（M3U8）codec 非 H265 → 次选
-        #   3. FLV codec 未知 → 再次选
-        #   4. 兜底：任意可用地址
-        _H265_CODECS = {"h265", "hevc", "bytevc1", "bytevc2"}
-
+        # URL 选择策略:
+        #   FLV 优先 —— 无论 codec 如何，FLV 都走 DirectStreamDownloader(httpx)，
+        #   ByteVC1 完全透明，不需要 ffmpeg 介入。
+        #   M3U8 仅在没有 FLV URL 时才使用（需要 ffmpeg，ByteVC1 会崩）。
         def _codec(u: str | None) -> str:
             if not u:
                 return ""
             m = re.search(r"[?&]codec=([^&]+)", u)
             return m.group(1).lower() if m else ""
 
-        flv_codec = _codec(flv_url)
         record_url = stream_info.get("record_url")
 
-        if flv_url and flv_codec == "h264":
-            url = flv_url
-        elif record_url and _codec(record_url) not in _H265_CODECS:
-            url = record_url
-        elif flv_url and flv_codec not in _H265_CODECS:
-            url = flv_url
-        elif flv_url:
+        if flv_url:
             url = flv_url
         else:
             url = record_url or m3u8_url
