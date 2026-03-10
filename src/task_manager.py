@@ -704,13 +704,13 @@ class TaskManager:
                         except Exception as _e:
                             log(f"[诊断] M3U8 获取失败: {_e}")
 
-                    _flv_for_dl = getattr(source, "_flv_url", None)
-                    if _use_direct_dl and _flv_for_dl:
-                        # ByteVC1 全画质耗尽 → 直接 HTTP 字节流下载 FLV（绕过 ffmpeg）
+                    _flv_for_dl = getattr(source, "_flv_url", None) or (stream_url if proto == "FLV" else None)
+                    if (_use_direct_dl or proto == "FLV") and _flv_for_dl:
+                        # FLV 流一律用直接下载（绕过 ffmpeg），避免 macOS ffmpeg 兼容性崩溃
                         path_or_pattern, display = StreamRecorder.make_output_path(
                             task_name, storage.output_dir, segment=False, ext="flv",
                         )
-                        log(f"[直下] 直接下载 (ByteVC1 兼容): {display}.flv")
+                        log(f"[直下] 直接下载 (FLV): {display}.flv")
                         recorder = DirectStreamDownloader(
                             _flv_for_dl, path_or_pattern,
                             cookies=task.cookies or config.input.cookies,
@@ -847,16 +847,16 @@ class TaskManager:
                     # 连续 3 次快速断开，提示可能需要 cookie 或切换 URL 格式
                     if _quick_fail_count == 3:
                         log("[系统] 连续快速断开 3 次，CDN 可能需要 cookie 鉴权，建议在任务设置中填写 cookies")
-                    # ByteVC1 崩溃 (rc=-11)：仅当 codec 确认是 ByteVC1 或未知时才走此路径
-                    if _last_rc == -11 and _is_bytevc1:
+                    # ffmpeg 崩溃 (rc=-11)：ByteVC1 或 H.264 均可能出现，超过 2 次切直接下载
+                    if _last_rc == -11:
                         _flv = getattr(source, "_flv_url", None)
-                        if _flv and _flv != stream_url:
-                            # Step 1: M3U8 是 ByteVC1，先试 FLV
+                        if _is_bytevc1 and _flv and _flv != stream_url:
+                            # ByteVC1: M3U8 先切换到 FLV
                             log("[系统] 检测到 ByteVC1 (rc=-11)，下次尝试 FLV 地址")
                             _override_url = _flv
-                        elif _flv:
-                            # Step 2: FLV 也是 ByteVC1 → 直接下载（绕过 ffmpeg）
-                            log("[系统] ByteVC1 崩溃，FLV 也不兼容，切换直接下载模式（绕过 ffmpeg）")
+                        elif _flv and _quick_fail_count >= 2:
+                            # 连续 2 次 rc=-11（无论 codec）→ 直接下载绕过 ffmpeg
+                            log("[系统] ffmpeg 连续崩溃 (rc=-11)，切换直接下载模式（绕过 ffmpeg）")
                             _use_direct_dl = True
                             _override_url = _flv
                         else:
