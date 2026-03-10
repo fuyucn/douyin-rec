@@ -1,0 +1,22 @@
+services:
+  video-screenshot:
+    build:
+      context: .
+      args:
+        CPU_ONLY: "true"   # 服务器通常无 GPU, 默认用 CPU-only torch
+    platform: linux/amd64   # mediapipe 只有 x86_64 wheel; 服务器通常也是 amd64
+    image: video-screenshot:latest
+    ports:
+      - "7860:7860"
+    volumes:
+      - ${OUTPUT_DIR:-./output}:/app/output                     # 录制文件和截图
+      - insightface_cache:/root/.insightface                    # insightface 模型 (~300MB)
+      - hf_cache:/root/.cache/huggingface                      # CLIP/HuggingFace 模型 (~600MB)
+      - ${CONFIG_FILE:-./config.yaml}:/app/config.yaml:ro      # 用户配置 (可选, 不存在时用默认值)
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+
+volumes:
+  insightface_cache:
+  hf_cache:
