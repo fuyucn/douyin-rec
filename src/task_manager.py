@@ -653,16 +653,20 @@ class TaskManager:
                 _flv_cm = _re.search(r"[?&]codec=([^&]+)", _flv_url_now or "")
                 _flv_codec = _flv_cm.group(1).lower() if _flv_cm else None
                 # 综合判断 codec
+                _is_bytevc1 = False
                 if _codec_in_url and _codec_in_url in _H265_TAGS:
                     _codec_label = f"ByteVC1/H.265 ⚠️  ({_codec_in_url})"
+                    _is_bytevc1 = True
                 elif _codec_in_url == "h264":
                     _codec_label = "H.264 ✓"
                 elif _flv_codec and _flv_codec in _H265_TAGS:
                     _codec_label = f"ByteVC1/H.265 ⚠️  (FLV: {_flv_codec}，当前 {proto} 未标注)"
+                    _is_bytevc1 = True
                 elif _flv_codec == "h264":
                     _codec_label = f"H.264 ✓ (FLV 确认，当前 {proto} 未标注)"
                 else:
                     _codec_label = f"未知 (url 无 codec 参数)"
+                    _is_bytevc1 = True  # codec 未知时保守处理，仍走 ByteVC1 路径
                 log(f"[流] {proto} | codec: {_codec_label}")
 
                 # 启动预览抓帧线程
@@ -835,12 +839,16 @@ class TaskManager:
                 if _session_sec < 30:
                     _quick_fail_count += 1
                     _cooldown = random.uniform(15, 40)
-                    log(f"[系统] 直播流快速断开 ({_session_sec:.0f}s)，{_cooldown:.0f} 秒后重连...")
+                    _rc_info = f", rc={_last_rc}" if _last_rc is not None else ""
+                    log(f"[系统] 直播流快速断开 ({_session_sec:.0f}s{_rc_info})，{_cooldown:.0f} 秒后重连...")
+                    # 诊断信息：打印当前使用的流地址（截断以免太长）
+                    _url_short = (stream_url[:80] + "...") if len(stream_url) > 80 else stream_url
+                    log(f"[系统] 断流地址: {_url_short}")
                     # 连续 3 次快速断开，提示可能需要 cookie 或切换 URL 格式
                     if _quick_fail_count == 3:
                         log("[系统] 连续快速断开 3 次，CDN 可能需要 cookie 鉴权，建议在任务设置中填写 cookies")
-                    # ByteVC1 崩溃 (rc=-11)
-                    if _last_rc == -11:
+                    # ByteVC1 崩溃 (rc=-11)：仅当 codec 确认是 ByteVC1 或未知时才走此路径
+                    if _last_rc == -11 and _is_bytevc1:
                         _flv = getattr(source, "_flv_url", None)
                         if _flv and _flv != stream_url:
                             # Step 1: M3U8 是 ByteVC1，先试 FLV

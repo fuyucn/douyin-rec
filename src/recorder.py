@@ -153,8 +153,10 @@ class StreamRecorder:
         rc = process.poll()
         self._last_exit_code = rc
         if rc not in (None, 0, 255):  # 255 = ffmpeg quit gracefully via 'q'
-            tail = lines[-10:] if len(lines) > 10 else lines
-            msg = f"ffmpeg 异常退出 (rc={rc}): {'; '.join(tail)}"
+            # 优先取含错误关键词的行，没有则取最后几行
+            err_lines = [l for l in lines if any(k in l.lower() for k in ("error", "invalid", "failed", "unable", "no such", "moov", "broken", "corrupt", "refused", "403", "404", "connection"))]
+            tail = (err_lines[-5:] if err_lines else lines[-5:]) if lines else []
+            msg = f"ffmpeg 异常退出 (rc={rc}): {'; '.join(tail)}" if tail else f"ffmpeg 异常退出 (rc={rc}): (无输出)"
             logger.error(msg)
             if log_callback:
                 log_callback(f"[ffmpeg] {msg}")

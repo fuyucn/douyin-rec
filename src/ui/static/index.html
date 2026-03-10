@@ -78,6 +78,12 @@ function statusDisplay(status, workerStatus) {
   if (status === 'running' && workerStatus === '定时等待') {
     return { label: '等待时段', badgeClass: 'badge-warning badge-outline', dotClass: 'bg-warning' };
   }
+  if (status === 'running' && workerStatus === '等待开播') {
+    return { label: '等待开播', badgeClass: 'badge-info badge-outline', dotClass: 'bg-info dot-running' };
+  }
+  if (status === 'running' && workerStatus === '直播中') {
+    return { label: '录制中', badgeClass: 'badge-success', dotClass: 'bg-success dot-running' };
+  }
   return {
     label: STATUS_LABELS[status] || status,
     badgeClass: STATUS_BADGE[status] || 'badge-ghost',
