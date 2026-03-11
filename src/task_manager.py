@@ -76,6 +76,8 @@ class TaskManager:
         self._local_workers: dict[int, LocalVideoWorker] = {}  # local task_id → worker
         self._preview_task_id: int | None = None  # 当前预览的任务 ID
         self._lock = threading.Lock()
+        # 串行化 ffmpeg 启动：防止多任务同时初始化 ByteVC1 流触发并发 SIGSEGV
+        self._ffmpeg_start_lock = threading.Lock()
         self._log_queues: list[tuple[queue.Queue, int | None]] = []  # (queue, task_id_filter)
         self._logs_dir = self._output_dir / "logs"
         self._logs_dir.mkdir(parents=True, exist_ok=True)
@@ -655,7 +657,11 @@ class TaskManager:
                         log_callback=log,
                         cookies=task.cookies or config.input.cookies,
                     )
-                    recorder.start()
+                    # 串行化启动：同一时刻只允许一个 ffmpeg 进程完成初始化
+                    # 防止多任务并发探针 ByteVC1 流时触发 SIGSEGV（macOS 竞争条件）
+                    with self._ffmpeg_start_lock:
+                        recorder.start()
+                        time.sleep(3)  # 等待 ByteVC1 parser 初始化完成后再放开锁
                     worker.recording_started_at = datetime.now()
                     if recorder.pid:
                         with Session(self.engine) as db:

@@ -132,18 +132,28 @@ class DouyinLiveSource:
             m = re.search(r"[?&]codec=([^&]+)", u)
             return m.group(1).lower() if m else ""
 
+        def _is_bytevc1(u: str | None) -> bool:
+            """检测 URL 是否为 ByteVC1/HEVC 流（URL 参数或路径中的 _or4 标志）"""
+            if not u:
+                return False
+            if _codec(u) in ("bytevc1", "hevc", "h265"):
+                return True
+            # _or4 在路径中是抖音 ByteVC1 原画流的可靠标志
+            path = u.split("?")[0].lower()
+            return "_or4" in path
+
         record_url = stream_info.get("record_url")
         flv_codec = _codec(flv_url)
-        _bytevc1 = flv_codec in ("bytevc1", "hevc", "h265")
+        _bytevc1 = _is_bytevc1(flv_url)
 
         if self.force_m3u8 and m3u8_url:
             url = m3u8_url
         elif flv_url and not _bytevc1:
             url = flv_url
         elif m3u8_url:
-            # ByteVC1 FLV → 直接用 M3U8（HLS 通常是 H.264，不崩溃）
+            # ByteVC1 FLV → 直接用 M3U8
             if _bytevc1:
-                logger.info("FLV codec=%s (ByteVC1)，自动改用 M3U8 流", flv_codec)
+                logger.info("FLV 检测到 ByteVC1 (codec=%s / _or4 路径)，自动改用 M3U8 流", flv_codec)
             url = m3u8_url
         else:
             url = record_url or flv_url
