@@ -133,12 +133,18 @@ class DouyinLiveSource:
             return m.group(1).lower() if m else ""
 
         def _is_bytevc1(u: str | None) -> bool:
-            """检测 URL 是否为 ByteVC1/HEVC 流（URL 参数或路径中的 _or4 标志）"""
+            """检测 URL 是否为 ByteVC1/HEVC 流。
+            优先看 codec= 参数；无参数时再看 _or4 路径（不可靠，仅作兜底）。
+            若 codec=h264/avc 则明确不是 ByteVC1，不做路径检测。
+            """
             if not u:
                 return False
-            if _codec(u) in ("bytevc1", "hevc", "h265"):
+            codec = _codec(u)
+            if codec in ("bytevc1", "hevc", "h265"):
                 return True
-            # _or4 在路径中是抖音 ByteVC1 原画流的可靠标志
+            if codec:  # 有明确非-ByteVC1 的 codec（如 h264/avc），信任它
+                return False
+            # 无 codec 参数时，_or4 路径是 ByteVC1 的常见标志
             path = u.split("?")[0].lower()
             return "_or4" in path
 
@@ -146,14 +152,50 @@ class DouyinLiveSource:
         flv_codec = _codec(flv_url)
         _bytevc1 = _is_bytevc1(flv_url)
 
-        if self.force_m3u8 and m3u8_url:
-            url = m3u8_url
+        # M3U8 画质降级列表（按优先级）：从当前 force_quality 开始向下找
+        _M3U8_QUALITY_ORDER = ["origin", "uhd", "hd", "sd", "ld"]
+
+        def _pick_non_bytevc1_m3u8(room_data: dict, start_quality: str) -> tuple[str | None, str]:
+            """从 room_data 中按画质顺序找第一个非 ByteVC1 的 M3U8 URL。
+            返回 (url, quality_label)，找不到时返回 (None, start_quality)。
+            """
+            from src.input.douyin_spider import QUALITY_MAP, _QUALITY_MAPPING
+            m3u8_list = list(room_data.get("stream_url", {}).get("hls_pull_url_map", {}).values())
+            while len(m3u8_list) < 5:
+                if not m3u8_list:
+                    return None, start_quality
+                m3u8_list.append(m3u8_list[-1])
+
+            qi_start = _QUALITY_MAPPING.get(QUALITY_MAP.get(start_quality, "OD"), 0)
+            for q in _M3U8_QUALITY_ORDER[qi_start:]:
+                qi = _QUALITY_MAPPING.get(QUALITY_MAP.get(q, "OD"), 0)
+                candidate = m3u8_list[qi] if qi < len(m3u8_list) else m3u8_list[-1]
+                if not _is_bytevc1(candidate):
+                    return candidate, q
+            return None, start_quality  # 全是 ByteVC1，返回 None
+
+        if self.force_m3u8 or _bytevc1:
+            # ByteVC1 模式（FLV 检测到 ByteVC1，或上次 rc=-11 切换到 M3U8）
+            # 先确认 M3U8 origin 是否也是 ByteVC1；若是，直接扫描更低画质
+            if _bytevc1 and not self.force_m3u8:
+                logger.info("FLV 检测到 ByteVC1 (codec=%s)，改用 M3U8 流", flv_codec or "?")
+            start_q = self.force_quality or quality
+            if _is_bytevc1(m3u8_url):
+                # origin M3U8 也是 ByteVC1 → 直接找非 ByteVC1 画质，避免无谓崩溃
+                non_bytevc1_url, picked_q = _pick_non_bytevc1_m3u8(room_data, start_q)
+                if non_bytevc1_url:
+                    if picked_q != start_q:
+                        logger.info("M3U8 origin 也是 ByteVC1，直接降级到 %s", picked_q)
+                        self.force_quality = picked_q
+                    url = non_bytevc1_url
+                else:
+                    logger.warning("所有 M3U8 画质均为 ByteVC1，无法避免崩溃")
+                    url = m3u8_url or record_url or flv_url
+            else:
+                url = m3u8_url or record_url or flv_url
         elif flv_url and not _bytevc1:
             url = flv_url
         elif m3u8_url:
-            # ByteVC1 FLV → 直接用 M3U8
-            if _bytevc1:
-                logger.info("FLV 检测到 ByteVC1 (codec=%s / _or4 路径)，自动改用 M3U8 流", flv_codec)
             url = m3u8_url
         else:
             url = record_url or flv_url
