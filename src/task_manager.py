@@ -735,13 +735,18 @@ class TaskManager:
                             log(f"定时窗口结束 ({task.schedule_stop})，停止录制")
                             break
                     # Watchdog: ffmpeg 启动超时仍无 .ts 输出 → CDN 卡死，强制 kill 重连
+                    # 只检查当前 session 的输出文件（前缀匹配），避免把旧 .ts 误判为有效输出
                     if recorder and not _watchdog_triggered:
                         _elapsed = (datetime.now() - _session_started_at).total_seconds()
                         if _elapsed >= _WATCHDOG_TIMEOUT_SEC:
-                            ts_recent = [
-                                f for f in storage.output_dir.glob("*.ts")
-                                if f.stat().st_mtime >= _session_started_at.timestamp()
-                            ]
+                            _out = Path(path_or_pattern)
+                            if segment_sec > 0:
+                                # 分段模式：查找 session 前缀匹配的 .ts 文件
+                                _stem_prefix = _out.stem.replace("%03d", "")
+                                ts_recent = list(_out.parent.glob(f"{_stem_prefix}*.ts"))
+                            else:
+                                # 单文件模式：检查输出文件是否已有数据
+                                ts_recent = [_out] if _out.exists() and _out.stat().st_size > 0 else []
                             if not ts_recent:
                                 _watchdog_triggered = True
                                 log(f"[系统] Watchdog: ffmpeg 已运行 {_elapsed:.0f}s 无 .ts 输出，强制重连...")
