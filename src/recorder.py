@@ -78,26 +78,31 @@ class StreamRecorder:
         else:
             input_opts = base_input_opts
 
-        # 输出参数
+        # 输出参数（对齐 DouyinLiveRecorder）
+        # -reconnect_* 放输出侧：对 FLV 流也启用，在段内断流时自动续连
+        # -map 0: 明确映射所有流（音频 + 视频），避免默认规则漏流
         output_opts: list[str] = [
             "-bufsize", "15000k",
             "-sn", "-dn",
+            "-reconnect_delay_max", "60",
+            "-reconnect_streamed",
+            "-reconnect_at_eof",
             "-max_muxing_queue_size", "1024",
             "-correct_ts_overflow", "1",
             "-avoid_negative_ts", "1",
-            "-flush_packets", "1",
         ]
         if self._segment_duration > 0:
             output_opts += [
-                "-c", "copy",
+                "-c:v", "copy",
+                "-c:a", "copy",
+                "-map", "0",
                 "-f", "segment",
                 "-segment_time", str(self._segment_duration),
                 "-segment_format", "mpegts",
                 "-reset_timestamps", "1",
-                "-mpegts_flags", "+resend_headers",
             ]
         else:
-            output_opts += ["-c", "copy", "-f", "mpegts"]
+            output_opts += ["-c:v", "copy", "-c:a", "copy", "-map", "0", "-f", "mpegts"]
 
         cmd = (
             ["ffmpeg", "-y"]
