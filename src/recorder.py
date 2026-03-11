@@ -58,9 +58,9 @@ class StreamRecorder:
         base_input_opts: list[str] = [
             "-loglevel", "error",
             "-hide_banner",
-            "-rw_timeout", "15000000",
+            "-rw_timeout", "5000000",
             "-analyzeduration", "20000000",
-            "-probesize", "20000000",
+            "-probesize", "10000000",
             "-protocol_whitelist", "rtmp,crypto,file,http,https,tcp,tls,udp,rtp,httpproxy",
             "-thread_queue_size", "1024",
             "-headers", headers,
@@ -80,7 +80,7 @@ class StreamRecorder:
         output_opts: list[str] = [
             "-bufsize", "15000k",
             "-sn", "-dn",
-            "-max_muxing_queue_size", "2048",
+            "-max_muxing_queue_size", "1024",
             "-correct_ts_overflow", "1",
             "-avoid_negative_ts", "1",
             "-flush_packets", "1",
