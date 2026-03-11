@@ -41,10 +41,6 @@ class StreamRecorder:
             return
         Path(self._output_path).parent.mkdir(parents=True, exist_ok=True)
 
-        # 判断 FLV 还是 HLS，以选择合适的 demuxer 和重连策略
-        url_path = self._stream_url.split("?")[0].lower()
-        is_flv = url_path.endswith(".flv")
-
         # 通用选项：超时 + 抖音 CDN Referer + 浏览器 UA + 丢弃损坏包
         headers = (
             "Referer: https://live.douyin.com\r\n"
@@ -68,17 +64,18 @@ class StreamRecorder:
             "-fflags", "+discardcorrupt+igndts",  # 丢弃损坏包 + 忽略 DTS 错误
         ]
 
-        if is_flv:
-            # FLV：不使用 ffmpeg 内置 -reconnect，由 task_manager 断流重连循环负责。
-            # 内置重连会在重连后写入 CDN 绝对时间戳，造成 PTS 跳跃污染同一个 ts 文件。
-            input_opts = base_opts + ["-f", "live_flv"]
-        else:
+        url_path = self._stream_url.split("?")[0].lower()
+        if url_path.endswith(".m3u8"):
             # HLS：启用 EOF 重连，demuxer 自动刷新 playlist
             input_opts = base_opts + [
                 "-reconnect_streamed", "1",
                 "-reconnect_at_eof", "1",
                 "-reconnect_delay_max", "60",
             ]
+        else:
+            # FLV / 其他：不加 -f live_flv，让 ffmpeg 自动探测。
+            # 断流由 task_manager 重连循环负责，不使用内置重连（避免 PTS 跳跃）。
+            input_opts = base_opts
 
         # 输出参数
         output_opts: list[str] = [
@@ -109,7 +106,8 @@ class StreamRecorder:
             + ["-progress", "pipe:2", "-nostats", self._output_path]
         )
 
-        logger.info("开始录制 (%s): %s", "FLV" if is_flv else "HLS", self._output_path)
+        proto_label = "HLS" if url_path.endswith(".m3u8") else "FLV"
+        logger.info("开始录制 (%s): %s", proto_label, self._output_path)
         logger.debug("ffmpeg cmd: %s", " ".join(cmd))
         self._process = subprocess.Popen(
             cmd,
@@ -216,7 +214,7 @@ class StreamRecorder:
         返回 (path_or_pattern, display_name):
         - 分段模式: ("{dir}/{name}_2026-02-26_12-30-05_%03d.ts", "name_2026-02-26_12-30-05")
         - 非分段:   ("{dir}/{name}_2026-02-26_12-30-05.ts", 同上)
-        ext: 扩展名，默认 "ts"，直接下载时传 "flv"
+        ext: 扩展名，默认 "ts"
         """
         now = datetime.now()
         base = f"{name}_{now:%Y-%m-%d}_{now:%H-%M-%S}"

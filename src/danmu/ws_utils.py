@@ -26,23 +26,33 @@ class DouyinDanmakuUtils:
 
     @staticmethod
     def get_signature(x_ms_stub: str) -> int:
+        import time
         with _JSENGINE_LOCK:  # jsengine 不支持并发，序列化调用
             try:
                 import jsengine
-                with open(os.path.join(_DIR, 'webmssdk.js'), 'r', encoding='utf-8') as f:
-                    js_enc = f.read()
-                js_dom = "document={}\nwindow={}\nnavigator={'userAgent': 'Mozilla/5.0'}"
-                ctx = jsengine.jsengine()
-                ctx.eval(js_dom + '\n' + js_enc)
-                result = ctx.eval(f"get_sign('{x_ms_stub}')")
-                logger.debug('jsengine get_sign 成功: %s', result)
-                return result
             except ImportError:
                 logger.warning('jsengine 未安装，弹幕签名将使用 0（可能影响部分直播间连接）')
                 return 0
+            try:
+                with open(os.path.join(_DIR, 'webmssdk.js'), 'r', encoding='utf-8') as f:
+                    js_enc = f.read()
             except FileNotFoundError:
                 logger.warning('webmssdk.js 文件缺失，弹幕签名将使用 0')
                 return 0
-            except Exception as e:
-                logger.warning('jsengine get_sign 失败（将使用 0）: %s', e)
-                return 0
+
+            js_dom = "document={}\nwindow={}\nnavigator={'userAgent': 'Mozilla/5.0'}"
+            for attempt in range(3):
+                try:
+                    ctx = jsengine.jsengine()
+                    ctx.eval(js_dom + '\n' + js_enc)
+                    result = ctx.eval(f"get_sign('{x_ms_stub}')")
+                    logger.debug('jsengine get_sign 成功: %s', result)
+                    return result
+                except Exception as e:
+                    if attempt < 2:
+                        time.sleep(0.5 * (attempt + 1))
+                        logger.debug('jsengine get_sign 第%d次重试: %s', attempt + 2, e)
+                    else:
+                        logger.warning('jsengine get_sign 3次均失败，使用 0: %s', e)
+                        return 0
+        return 0  # unreachable

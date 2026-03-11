@@ -19,7 +19,6 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from src.config import load_config
 from src.danmu.recorder import DanmuRecorder
-from src.downloader import DirectStreamDownloader
 from src.input.live import DouyinLiveSource
 from src.recorder import StreamRecorder
 from src.storage.database import LocalVideoTask, RecordingSession, RecordingTask
@@ -591,6 +590,7 @@ class TaskManager:
 
             _quick_fail_count = 0  # 连续快速断开（<30s）计数
             _last_rc: int | None = None  # 上次 ffmpeg 退出码
+            _rc11_count = 0             # 连续 rc=-11 (ByteVC1 SIGSEGV) 次数
 
             while not worker.stop_event.is_set():
                 # ── 定时窗口检查 ──
@@ -642,31 +642,17 @@ class TaskManager:
                 _session_started_at = datetime.now()
                 session_id: int | None = None
 
-                # 启动录制
+                # 启动录制（统一输出 TS 分段，FLV/M3U8 均走 StreamRecorder + ffmpeg）
                 if task.enable_record:
-                    if proto == "FLV":
-                        # FLV 一律走 DirectStreamDownloader(httpx)，绕过 ffmpeg
-                        # ByteVC1/H264 均透明，无崩溃风险
-                        path_or_pattern, display = StreamRecorder.make_output_path(
-                            task_name, storage.output_dir, segment=False, ext="flv",
-                        )
-                        log(f"[直下] 直接下载 (FLV): {display}.flv")
-                        recorder = DirectStreamDownloader(
-                            stream_url, path_or_pattern,
-                            cookies=task.cookies or config.input.cookies,
-                            log_callback=log,
-                        )
-                    else:
-                        # M3U8 → ffmpeg（仅在无 FLV URL 时走此路径）
-                        path_or_pattern, display = StreamRecorder.make_output_path(
-                            task_name, storage.output_dir, segment=segment_sec > 0,
-                        )
-                        log(f"开始录制: {display}")
-                        recorder = StreamRecorder(
-                            stream_url, path_or_pattern, segment_duration=segment_sec,
-                            log_callback=log,
-                            cookies=task.cookies or config.input.cookies,
-                        )
+                    path_or_pattern, display = StreamRecorder.make_output_path(
+                        task_name, storage.output_dir, segment=segment_sec > 0,
+                    )
+                    log(f"开始录制: {display}")
+                    recorder = StreamRecorder(
+                        stream_url, path_or_pattern, segment_duration=segment_sec,
+                        log_callback=log,
+                        cookies=task.cookies or config.input.cookies,
+                    )
                     recorder.start()
                     worker.recording_started_at = datetime.now()
                     if recorder.pid:
@@ -782,16 +768,23 @@ class TaskManager:
                     _cooldown = random.uniform(15, 40)
                     _rc_info = f", rc={_last_rc}" if _last_rc is not None else ""
                     log(f"[系统] 直播流快速断开 ({_session_sec:.0f}s{_rc_info})，{_cooldown:.0f} 秒后重连...")
-                    # 诊断信息：打印当前使用的流地址（截断以免太长）
                     _url_short = (stream_url[:80] + "...") if len(stream_url) > 80 else stream_url
                     log(f"[系统] 断流地址: {_url_short}")
-                    # 连续 3 次快速断开，提示可能需要 cookie 或切换 URL 格式
-                    if _quick_fail_count == 3:
-                        log("[系统] 连续快速断开 3 次，CDN 可能需要 cookie 鉴权，建议在任务设置中填写 cookies")
+                    # rc=-11 = ffmpeg SIGSEGV，通常是 FLV 流含 ByteVC1 codec 在 macOS 崩溃
+                    if _last_rc == -11:
+                        _rc11_count += 1
+                        if _rc11_count == 2 and not source.force_m3u8:
+                            source.force_m3u8 = True
+                            log("[系统] 连续 2 次 rc=-11 (ByteVC1)，切换到 M3U8 流")
+                    else:
+                        _rc11_count = 0
+                        if _quick_fail_count == 3:
+                            log("[系统] 连续快速断开 3 次，CDN 可能需要 cookie 鉴权，建议在任务设置中填写 cookies")
                     if worker.stop_event.wait(_cooldown):
                         break
                 else:
                     _quick_fail_count = 0  # 成功录制超 30s，重置计数
+                    _rc11_count = 0
                 log("[系统] 直播流断开，将重新等待开播...")
 
         except Exception as e:

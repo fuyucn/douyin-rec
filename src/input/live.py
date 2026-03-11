@@ -58,10 +58,12 @@ class DouyinLiveSource:
         self._url = url
         self._config = config or InputConfig()
         self._stream_url: str | None = None
-        self._flv_url: str | None = None  # FLV 备用地址（ByteVC1 fallback 用）
+        self._flv_url: str | None = None
+        self._m3u8_url: str | None = None
         self._cap: cv2.VideoCapture | None = None
         self._frame_index = 0
         self.streamer_name: str | None = None  # 主播昵称 (连接后可用)
+        self.force_m3u8: bool = False  # True = 跳过 FLV，使用 M3U8（rc=-11 fallback）
 
     # -- 内部方法 ---------------------------------------------------------------
 
@@ -116,12 +118,12 @@ class DouyinLiveSource:
 
         flv_url = stream_info.get("flv_url")
         m3u8_url = stream_info.get("m3u8_url")
-        self._flv_url = flv_url  # 存储供 ByteVC1 fallback 使用
+        self._flv_url = flv_url
+        self._m3u8_url = m3u8_url  # 存储 M3U8 地址供 rc=-11 fallback 使用
 
         # URL 选择策略:
-        #   FLV 优先 —— 无论 codec 如何，FLV 都走 DirectStreamDownloader(httpx)，
-        #   ByteVC1 完全透明，不需要 ffmpeg 介入。
-        #   M3U8 仅在没有 FLV URL 时才使用（需要 ffmpeg，ByteVC1 会崩）。
+        #   默认 FLV 优先（无 -f live_flv，与 DouyinLiveRecorder 一致）
+        #   若 force_m3u8=True（连续 rc=-11 触发），改用 M3U8 绕过 ByteVC1 崩溃
         def _codec(u: str | None) -> str:
             if not u:
                 return ""
@@ -130,7 +132,9 @@ class DouyinLiveSource:
 
         record_url = stream_info.get("record_url")
 
-        if flv_url:
+        if self.force_m3u8 and m3u8_url:
+            url = m3u8_url
+        elif flv_url:
             url = flv_url
         else:
             url = record_url or m3u8_url
@@ -140,7 +144,7 @@ class DouyinLiveSource:
 
         proto = "M3U8" if url.split("?")[0].lower().endswith(".m3u8") else "FLV"
         codec = _codec(url) or "?"
-        logger.info("获取到流地址: %s codec=%s 画质=%s", proto, codec, quality)
+        logger.info("获取到流地址: %s codec=%s 画质=%s force_m3u8=%s", proto, codec, quality, self.force_m3u8)
         return url
 
     def _open_stream(self) -> cv2.VideoCapture:
