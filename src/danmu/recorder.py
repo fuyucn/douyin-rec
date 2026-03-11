@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .ass_writer import AssWriter
 from .client import DouyinDanmakuClient
-from .models import SimpleDanmaku
+from .models import SimpleDanmaku, StreamEndSignal
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ class DanmuRecorder:
         segment_duration: int = 0,
         cookies: str | None = None,
         log_callback=None,
+        stream_end_callback=None,
         width: int = 1920,
         height: int = 1080,
     ) -> None:
@@ -48,6 +49,7 @@ class DanmuRecorder:
         self._segment_duration = segment_duration
         self._cookies = cookies
         self._log = log_callback or (lambda msg: logger.info(msg))
+        self._stream_end_callback = stream_end_callback
 
         self._writer = AssWriter(width=width, height=height)
         self._stop_event = threading.Event()
@@ -130,6 +132,15 @@ class DanmuRecorder:
                 except asyncio.QueueEmpty:
                     await asyncio.sleep(0.05)
                     continue
+                if isinstance(dm, StreamEndSignal):
+                    self._log('[弹幕] 收到主播下播信号')
+                    self._stop_event.set()
+                    if self._stream_end_callback:
+                        try:
+                            self._stream_end_callback()
+                        except Exception as e:
+                            logger.warning('stream_end_callback 异常: %s', e)
+                    break
                 with self._part_lock:
                     part_start = self._part_start_time
                 video_offset = dm.timestamp - part_start - self._cdn_delay

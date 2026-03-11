@@ -16,7 +16,7 @@ from google.protobuf import json_format
 
 from .douyin_utils import DouyinUtils
 from .dy_pb2 import ChatMessage, GiftMessage, MemberMessage, PushFrame, Response
-from .models import GiftDanmaku, SimpleDanmaku
+from .models import GiftDanmaku, SimpleDanmaku, StreamEndSignal
 from .ws_utils import DouyinDanmakuUtils
 
 logger = logging.getLogger(__name__)
@@ -158,7 +158,14 @@ class DouyinDanmakuClient:
                     gift_name=gift_name, gift_count=count,
                     dtype='gift', color='ffaa00',
                 ))
-            # WebcastMemberMessage（进场）跳过
+            elif msg.method == 'WebcastControlMessage':
+                # status 字段 (field 1, uint32)：3 = 主播下播
+                # Protobuf wire format: tag byte 0x08 + varint value
+                if len(msg.payload) >= 2 and msg.payload[0] == 0x08:
+                    status = msg.payload[1] & 0x7f
+                    if status == 3:
+                        msgs.append(StreamEndSignal(status=status))
+            # WebcastMemberMessage（进场）等其他消息跳过
         return msgs, ack
 
     async def _heartbeat_loop(self) -> None:

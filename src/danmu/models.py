@@ -31,6 +31,12 @@ class SimpleDanmaku:
         yield from self.__dict__.items()
 
 
+class StreamEndSignal:
+    """主播下播信号（WebcastControlMessage status=3）"""
+    def __init__(self, status: int = 3) -> None:
+        self.status = status
+
+
 class GiftDanmaku(SimpleDanmaku):
     def __init__(self, text: str = None, price: float = None,
                  gift_name: str = '', gift_count: int = 1,

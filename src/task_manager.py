@@ -691,6 +691,12 @@ class TaskManager:
                     else:
                         _danmu_ass_path = storage.output_dir / f"{display}_danmu.ass"
                     _danmu_cookies = task.cookies or config.input.cookies
+
+                    def _on_stream_end(_rec=recorder, _log=log):
+                        _log("[弹幕] 检测到主播下播，停止录制")
+                        if _rec:
+                            _rec.stop()
+
                     danmu_recorder = DanmuRecorder(
                         url=task.url,
                         started_at=worker.recording_started_at,
@@ -699,6 +705,7 @@ class TaskManager:
                         segment_duration=segment_sec,
                         cookies=_danmu_cookies,
                         log_callback=log,
+                        stream_end_callback=_on_stream_end,
                     )
                     # 注意：start() 延迟到确认有 .ts 输出后调用（见等待循环）
 
