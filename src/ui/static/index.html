@@ -334,7 +334,47 @@ async function addTask() {
 }
 
 async function refreshTaskList() {
-  try { const r = await fetch('/api/tasks'); const d = await r.json(); renderTaskTable(d.tasks); } catch {}
+  try {
+    const r = await fetch('/api/tasks');
+    const d = await r.json();
+    if (!tryUpdateTasksInPlace(d.tasks)) {
+      renderTaskTable(d.tasks);
+      updateElapsedTimes();
+    }
+  } catch {}
+}
+
+function taskStatusCellHTML(t) {
+  const sd = statusDisplay(t.status, t.worker_status);
+  const workerInfo = (t.worker_status && t.worker_status !== '定时等待') ? `<span class="text-xs opacity-50 ml-1">· ${esc(t.worker_status)}</span>` : '';
+  return `<span class="badge ${sd.badgeClass} badge-sm gap-1"><span class="inline-block w-1.5 h-1.5 rounded-full ${sd.dotClass}"></span>${sd.label}</span>${workerInfo}${t.status === 'running' && t.started_at ? `<div class="text-xs opacity-40 mt-0.5">运行 <span data-elapsed-from="${t.started_at}"></span>${t.recording_started_at ? ` · 录制 <span data-elapsed-from="${t.recording_started_at}"></span>` : ''}</div>` : ''}`;
+}
+
+function taskActionsCellHTML(t) {
+  const canStart = t.status === 'pending' || t.status === 'stopped' || t.status === 'error';
+  const canStop = t.status === 'running';
+  const canDelete = t.status !== 'running';
+  return `<div class="flex gap-1">${canStart ? `<button class="btn btn-success btn-outline btn-xs" onclick="listAction('start',${t.id},this)">启动</button>` : ''}${canStop ? `<button class="btn btn-error btn-outline btn-xs" onclick="listAction('stop',${t.id},this)">停止</button>` : ''}<button class="btn btn-info btn-outline btn-xs" onclick="navigate('#/task/${t.id}')">详情</button>${canDelete ? `<button class="btn btn-ghost btn-xs text-error" onclick="listDelete(${t.id},this)">删除</button>` : ''}</div>`;
+}
+
+function tryUpdateTasksInPlace(tasks) {
+  const wrap = document.getElementById('taskTableWrap');
+  if (!wrap) return false;
+  const tbody = wrap.querySelector('tbody');
+  if (!tbody) return false;
+  const existingRows = [...tbody.querySelectorAll('tr[data-id]')];
+  if (existingRows.length !== (tasks || []).length) return false;
+  const existingIds = existingRows.map(r => parseInt(r.dataset.id));
+  const newIds = (tasks || []).map(t => t.id);
+  if (existingIds.join(',') !== newIds.join(',')) return false;
+  (tasks || []).forEach(t => {
+    const statusEl = document.getElementById(`task-status-${t.id}`);
+    const actionsEl = document.getElementById(`task-actions-${t.id}`);
+    if (statusEl) statusEl.innerHTML = taskStatusCellHTML(t);
+    if (actionsEl) actionsEl.innerHTML = taskActionsCellHTML(t);
+  });
+  updateElapsedTimes();
+  return true;
 }
 
 function renderTaskTable(tasks) {
@@ -346,9 +386,6 @@ function renderTaskTable(tasks) {
   }
 
   const rows = tasks.map(t => {
-    const canStart = t.status === 'pending' || t.status === 'stopped' || t.status === 'error';
-    const canStop = t.status === 'running';
-    const canDelete = t.status !== 'running';
     const displayName = t.name || t.url;
     const features = [];
     if (t.enable_record) features.push('<span class="badge badge-success badge-outline badge-xs">录制</span>');
@@ -356,8 +393,6 @@ function renderTaskTable(tasks) {
     if (t.enable_danmu) features.push('<span class="badge badge-info badge-outline badge-xs">弹幕</span>');
     if (t.auto_quality_fallback) features.push('<span class="badge badge-warning badge-outline badge-xs">兼容</span>');
     if (t.schedule_enabled) features.push(`<span class="badge badge-accent badge-outline badge-xs">定时 ${t.schedule_start}~${t.schedule_stop}</span>`);
-    const sd = statusDisplay(t.status, t.worker_status);
-    const workerInfo = (t.worker_status && t.worker_status !== '定时等待') ? `<span class="text-xs opacity-50 ml-1">· ${esc(t.worker_status)}</span>` : '';
 
     return `<tr class="clickable hover" data-id="${t.id}">
       <td class="text-base-content/50 font-mono">${t.id}</td>
@@ -365,23 +400,9 @@ function renderTaskTable(tasks) {
         <div class="font-semibold text-sm truncate max-w-[240px]">${esc(displayName)}</div>
         <div class="text-xs opacity-40 truncate max-w-[240px]">${esc(t.url)}</div>
       </td>
-      <td>
-        <span class="badge ${sd.badgeClass} badge-sm gap-1">
-          <span class="inline-block w-1.5 h-1.5 rounded-full ${sd.dotClass}"></span>
-          ${sd.label}
-        </span>
-        ${workerInfo}
-        ${t.status === 'running' && t.started_at ? `<div class="text-xs opacity-40 mt-0.5">运行 <span data-elapsed-from="${t.started_at}"></span>${t.recording_started_at ? ` · 录制 <span data-elapsed-from="${t.recording_started_at}"></span>` : ''}</div>` : ''}
-      </td>
+      <td id="task-status-${t.id}">${taskStatusCellHTML(t)}</td>
       <td><div class="flex gap-1">${features.join('')}</div></td>
-      <td onclick="event.stopPropagation()">
-        <div class="flex gap-1">
-          ${canStart ? `<button class="btn btn-success btn-outline btn-xs" onclick="listAction('start',${t.id},this)">启动</button>` : ''}
-          ${canStop ? `<button class="btn btn-error btn-outline btn-xs" onclick="listAction('stop',${t.id},this)">停止</button>` : ''}
-          <button class="btn btn-info btn-outline btn-xs" onclick="navigate('#/task/${t.id}')">详情</button>
-          ${canDelete ? `<button class="btn btn-ghost btn-xs text-error" onclick="listDelete(${t.id},this)">删除</button>` : ''}
-        </div>
-      </td>
+      <td id="task-actions-${t.id}" onclick="event.stopPropagation()">${taskActionsCellHTML(t)}</td>
     </tr>`;
   }).join('');
 
