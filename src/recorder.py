@@ -51,38 +51,31 @@ class StreamRecorder:
         if self._cookies:
             headers += f"Cookie: {self._cookies}\r\n"
 
-        # 基础 ffmpeg 参数（参考 StreamCap ffmpeg_builders/base.py）
-        base_opts: list[str] = [
+        # 基础 ffmpeg 参数（对齐 DouyinLiveRecorder，经 10 分钟实测无崩溃）
+        # -re: 限速至 native frame rate，防止 ByteVC1 在 macOS 上初始化过快触发 SIGSEGV
+        # -reconnect_*: 所有流均启用，FLV/HLS 断流后自动重连
+        url_path = self._stream_url.split("?")[0].lower()
+        input_opts: list[str] = [
             "-loglevel", "error",
             "-hide_banner",
-            "-rw_timeout", "15000000",           # 15 秒读写超时
-            "-analyzeduration", "20000000",       # 提高流分析时长
-            "-probesize", "10000000",             # 提高 probe 大小
+            "-rw_timeout", "15000000",
+            "-analyzeduration", "20000000",
+            "-probesize", "10000000",
             "-protocol_whitelist", "rtmp,crypto,file,http,https,tcp,tls,udp,rtp,httpproxy",
             "-thread_queue_size", "1024",
             "-headers", headers,
-            "-fflags", "+discardcorrupt+igndts",  # 丢弃损坏包 + 忽略 DTS 错误
+            "-fflags", "+discardcorrupt",
+            "-re",
+            "-reconnect_streamed", "1",
+            "-reconnect_at_eof", "1",
+            "-reconnect_delay_max", "60",
         ]
-
-        url_path = self._stream_url.split("?")[0].lower()
-        if url_path.endswith(".m3u8"):
-            # HLS：启用 EOF 重连，demuxer 自动刷新 playlist
-            input_opts = base_opts + [
-                "-reconnect_streamed", "1",
-                "-reconnect_at_eof", "1",
-                "-reconnect_delay_max", "60",
-            ]
-        else:
-            # FLV / 其他：不加 -f live_flv，让 ffmpeg 自动探测。
-            # 加 -re 限速读取，防止 ByteVC1 FLV 在 macOS 上因初始化过快触发 SIGSEGV。
-            # 断流由 task_manager 重连循环负责，不使用内置重连（避免 PTS 跳跃）。
-            input_opts = base_opts + ["-re"]
 
         # 输出参数
         output_opts: list[str] = [
-            "-bufsize", "8000k",
-            "-sn", "-dn",                         # 跳过字幕和数据流
-            "-max_muxing_queue_size", "1024",
+            "-bufsize", "15000k",
+            "-sn", "-dn",
+            "-max_muxing_queue_size", "2048",
             "-correct_ts_overflow", "1",
             "-avoid_negative_ts", "1",
             "-flush_packets", "1",

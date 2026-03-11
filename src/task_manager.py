@@ -591,6 +591,8 @@ class TaskManager:
             _quick_fail_count = 0  # 连续快速断开（<30s）计数
             _last_rc: int | None = None  # 上次 ffmpeg 退出码
             _rc11_count = 0             # 连续 rc=-11 (ByteVC1 SIGSEGV) 次数
+            # ByteVC1 画质降级链：FLV失败→M3U8→降画质逐级尝试
+            _QUALITY_FALLBACK = ["origin", "uhd", "hd", "sd", "ld"]
 
             while not worker.stop_event.is_set():
                 # ── 定时窗口检查 ──
@@ -774,8 +776,19 @@ class TaskManager:
                     if _last_rc == -11:
                         _rc11_count += 1
                         if not source.force_m3u8:
+                            # 第一次：FLV → M3U8
                             source.force_m3u8 = True
                             log("[系统] rc=-11 (ByteVC1/SIGSEGV)，切换到 M3U8 流")
+                        else:
+                            # M3U8 也崩溃：逐级降画质
+                            cur_q = source.force_quality or task.quality or "origin"
+                            try:
+                                next_q = _QUALITY_FALLBACK[_QUALITY_FALLBACK.index(cur_q) + 1]
+                                source.force_quality = next_q
+                                log(f"[系统] M3U8 仍 rc=-11，画质降级: {cur_q} → {next_q}")
+                            except (ValueError, IndexError):
+                                log("[系统] 已到最低画质仍 rc=-11，停止重试")
+                                worker.stop_event.set()
                     else:
                         _rc11_count = 0
                         if _quick_fail_count == 3:

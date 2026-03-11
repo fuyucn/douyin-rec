@@ -64,6 +64,7 @@ class DouyinLiveSource:
         self._frame_index = 0
         self.streamer_name: str | None = None  # 主播昵称 (连接后可用)
         self.force_m3u8: bool = False  # True = 强制 M3U8（rc=-11 fallback；ByteVC1 FLV 会自动走 M3U8）
+        self.force_quality: str | None = None  # 覆盖画质（ByteVC1 降级链：origin→uhd→hd→sd→ld）
 
     # -- 内部方法 ---------------------------------------------------------------
 
@@ -97,7 +98,7 @@ class DouyinLiveSource:
     def _extract_stream_url(self) -> str:
         """提取直播流地址，更新 streamer_name 和 _flv_url"""
         cookies = self._get_cookie_string()
-        quality = self._config.quality.lower()
+        quality = self.force_quality or self._config.quality.lower()
 
         async def _fetch():
             room_data = await get_douyin_stream_data(self._url, cookies=cookies)
@@ -152,7 +153,9 @@ class DouyinLiveSource:
 
         proto = "M3U8" if url.split("?")[0].lower().endswith(".m3u8") else "FLV"
         codec = _codec(url) or "?"
-        logger.info("获取到流地址: %s codec=%s 画质=%s force_m3u8=%s", proto, codec, quality, self.force_m3u8)
+        orig_quality = self._config.quality.lower()
+        q_label = f"{quality}(降级)" if quality != orig_quality else quality
+        logger.info("获取到流地址: %s codec=%s 画质=%s force_m3u8=%s", proto, codec, q_label, self.force_m3u8)
         return url
 
     def _open_stream(self) -> cv2.VideoCapture:
