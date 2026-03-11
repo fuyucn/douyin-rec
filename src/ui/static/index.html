@@ -293,6 +293,9 @@ async function addTask() {
   const chkRecord = document.getElementById('chkRecord');
   const chkScreenshot = document.getElementById('chkScreenshot');
   if (!chkRecord.checked && !chkScreenshot.checked) { alert('请至少勾选「录制」或「截图」'); return; }
+  const btnAdd = document.getElementById('btnAdd');
+  btnAdd.disabled = true;
+  btnAdd.innerHTML = '<span class="loading loading-spinner loading-xs"></span> 添加中...';
   try {
     const segmentSec = parseInt(document.getElementById('segmentSec').value) || 1800;
     const scheduleEnabled = document.getElementById('chkSchedule').checked;
@@ -322,11 +325,12 @@ async function addTask() {
       body: JSON.stringify(payload),
     });
     const d = await r.json();
-    if (!r.ok) { alert(d.error); return; }
+    if (!r.ok) { alert(d.error); btnAdd.disabled = false; btnAdd.innerHTML = '添加任务'; return; }
     document.getElementById('url').value = '';
     document.getElementById('customName').value = '';
     refreshTaskList();
   } catch (e) { alert('请求失败: ' + e.message); }
+  finally { btnAdd.disabled = false; btnAdd.innerHTML = '添加任务'; }
 }
 
 async function refreshTaskList() {
@@ -372,10 +376,10 @@ function renderTaskTable(tasks) {
       <td><div class="flex gap-1">${features.join('')}</div></td>
       <td onclick="event.stopPropagation()">
         <div class="flex gap-1">
-          ${canStart ? `<button class="btn btn-success btn-outline btn-xs" onclick="listAction('start',${t.id})">启动</button>` : ''}
-          ${canStop ? `<button class="btn btn-error btn-outline btn-xs" onclick="listAction('stop',${t.id})">停止</button>` : ''}
+          ${canStart ? `<button class="btn btn-success btn-outline btn-xs" onclick="listAction('start',${t.id},this)">启动</button>` : ''}
+          ${canStop ? `<button class="btn btn-error btn-outline btn-xs" onclick="listAction('stop',${t.id},this)">停止</button>` : ''}
           <button class="btn btn-info btn-outline btn-xs" onclick="navigate('#/task/${t.id}')">详情</button>
-          ${canDelete ? `<button class="btn btn-ghost btn-xs text-error" onclick="listDelete(${t.id})">删除</button>` : ''}
+          ${canDelete ? `<button class="btn btn-ghost btn-xs text-error" onclick="listDelete(${t.id},this)">删除</button>` : ''}
         </div>
       </td>
     </tr>`;
@@ -394,7 +398,8 @@ function renderTaskTable(tasks) {
   });
 }
 
-async function listAction(action, id) {
+async function listAction(action, id, btn) {
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading loading-spinner loading-xs"></span>'; }
   try {
     const r = await fetch(`/api/tasks/${id}/${action}`, { method: 'POST' });
     if (!r.ok) { const d = await r.json(); alert(d.error); }
@@ -402,8 +407,9 @@ async function listAction(action, id) {
   } catch (e) { alert(e.message); }
 }
 
-async function listDelete(id) {
+async function listDelete(id, btn) {
   if (!confirm('确认删除此任务？')) return;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading loading-spinner loading-xs"></span>'; }
   try {
     const r = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
     if (!r.ok) { const d = await r.json(); alert(d.error); }
@@ -488,9 +494,9 @@ async function renderDetailView(id) {
         </div>
         ${task.error_msg ? `<div class="text-sm text-error"><span class="opacity-50 mr-1">错误</span> ${esc(task.error_msg)}</div>` : ''}
         <div class="flex gap-2 mt-1" id="detailActions">
-          ${canStart ? `<button class="btn btn-success btn-outline btn-sm" onclick="detailAction('start',${id})">启动</button>` : ''}
-          ${canStop ? `<button class="btn btn-error btn-outline btn-sm" onclick="detailAction('stop',${id})">停止</button>` : ''}
-          ${canDelete ? `<button class="btn btn-ghost btn-sm text-error" onclick="detailDelete(${id})">删除</button>` : ''}
+          ${canStart ? `<button class="btn btn-success btn-outline btn-sm" onclick="detailAction('start',${id},this)">启动</button>` : ''}
+          ${canStop ? `<button class="btn btn-error btn-outline btn-sm" onclick="detailAction('stop',${id},this)">停止</button>` : ''}
+          ${canDelete ? `<button class="btn btn-ghost btn-sm text-error" onclick="detailDelete(${id},this)">删除</button>` : ''}
         </div>
       </div>
     </div>
@@ -684,9 +690,9 @@ async function refreshDetailStatus(id) {
     const actions = document.getElementById('detailActions');
     if (actions) {
       actions.innerHTML = `
-        ${canStart ? `<button class="btn btn-success btn-outline btn-sm" onclick="detailAction('start',${id})">启动</button>` : ''}
-        ${canStop ? `<button class="btn btn-error btn-outline btn-sm" onclick="detailAction('stop',${id})">停止</button>` : ''}
-        ${canDelete ? `<button class="btn btn-ghost btn-sm text-error" onclick="detailDelete(${id})">删除</button>` : ''}
+        ${canStart ? `<button class="btn btn-success btn-outline btn-sm" onclick="detailAction('start',${id},this)">启动</button>` : ''}
+        ${canStop ? `<button class="btn btn-error btn-outline btn-sm" onclick="detailAction('stop',${id},this)">停止</button>` : ''}
+        ${canDelete ? `<button class="btn btn-ghost btn-sm text-error" onclick="detailDelete(${id},this)">删除</button>` : ''}
       `;
     }
     // Update time rows
@@ -701,7 +707,8 @@ async function refreshDetailStatus(id) {
   } catch {}
 }
 
-async function detailAction(action, id) {
+async function detailAction(action, id, btn) {
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading loading-spinner loading-xs"></span>'; }
   try {
     const r = await fetch(`/api/tasks/${id}/${action}`, { method: 'POST' });
     if (!r.ok) { const d = await r.json(); alert(d.error); }
@@ -719,13 +726,14 @@ async function openFolder(path) {
   } catch (e) { alert(e.message); }
 }
 
-async function detailDelete(id) {
+async function detailDelete(id, btn) {
   if (!confirm('确认删除此任务？')) return;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading loading-spinner loading-xs"></span>'; }
   try {
     const r = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
-    if (!r.ok) { const d = await r.json(); alert(d.error); return; }
+    if (!r.ok) { const d = await r.json(); alert(d.error); if (btn) { btn.disabled = false; btn.innerHTML = '删除'; } return; }
     navigate('#/');
-  } catch (e) { alert(e.message); }
+  } catch (e) { alert(e.message); if (btn) { btn.disabled = false; btn.innerHTML = '删除'; } }
 }
 
 // ══════════════════════════════════════════════════════════
