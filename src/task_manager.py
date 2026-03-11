@@ -773,9 +773,9 @@ class TaskManager:
                     # rc=-11 = ffmpeg SIGSEGV，通常是 FLV 流含 ByteVC1 codec 在 macOS 崩溃
                     if _last_rc == -11:
                         _rc11_count += 1
-                        if _rc11_count == 2 and not source.force_m3u8:
+                        if not source.force_m3u8:
                             source.force_m3u8 = True
-                            log("[系统] 连续 2 次 rc=-11 (ByteVC1)，切换到 M3U8 流")
+                            log("[系统] rc=-11 (ByteVC1/SIGSEGV)，切换到 M3U8 流")
                     else:
                         _rc11_count = 0
                         if _quick_fail_count == 3:

@@ -63,7 +63,7 @@ class DouyinLiveSource:
         self._cap: cv2.VideoCapture | None = None
         self._frame_index = 0
         self.streamer_name: str | None = None  # 主播昵称 (连接后可用)
-        self.force_m3u8: bool = False  # True = 跳过 FLV，使用 M3U8（rc=-11 fallback）
+        self.force_m3u8: bool = False  # True = 强制 M3U8（rc=-11 fallback；ByteVC1 FLV 会自动走 M3U8）
 
     # -- 内部方法 ---------------------------------------------------------------
 
@@ -123,7 +123,8 @@ class DouyinLiveSource:
 
         # URL 选择策略:
         #   默认 FLV 优先（无 -f live_flv，与 DouyinLiveRecorder 一致）
-        #   若 force_m3u8=True（连续 rc=-11 触发），改用 M3U8 绕过 ByteVC1 崩溃
+        #   若 FLV codec=bytevc1/hevc，直接用 M3U8（ffmpeg 对 ByteVC1 FLV 会 SIGSEGV）
+        #   若 force_m3u8=True（连续 rc=-11 触发），也用 M3U8
         def _codec(u: str | None) -> str:
             if not u:
                 return ""
@@ -131,13 +132,20 @@ class DouyinLiveSource:
             return m.group(1).lower() if m else ""
 
         record_url = stream_info.get("record_url")
+        flv_codec = _codec(flv_url)
+        _bytevc1 = flv_codec in ("bytevc1", "hevc", "h265")
 
         if self.force_m3u8 and m3u8_url:
             url = m3u8_url
-        elif flv_url:
+        elif flv_url and not _bytevc1:
             url = flv_url
+        elif m3u8_url:
+            # ByteVC1 FLV → 直接用 M3U8（HLS 通常是 H.264，不崩溃）
+            if _bytevc1:
+                logger.info("FLV codec=%s (ByteVC1)，自动改用 M3U8 流", flv_codec)
+            url = m3u8_url
         else:
-            url = record_url or m3u8_url
+            url = record_url or flv_url
 
         if not url:
             raise RuntimeError(f"未能获取到可用流地址 (画质={quality})")

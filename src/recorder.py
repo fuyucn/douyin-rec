@@ -74,8 +74,9 @@ class StreamRecorder:
             ]
         else:
             # FLV / 其他：不加 -f live_flv，让 ffmpeg 自动探测。
+            # 加 -re 限速读取，防止 ByteVC1 FLV 在 macOS 上因初始化过快触发 SIGSEGV。
             # 断流由 task_manager 重连循环负责，不使用内置重连（避免 PTS 跳跃）。
-            input_opts = base_opts
+            input_opts = base_opts + ["-re"]
 
         # 输出参数
         output_opts: list[str] = [
