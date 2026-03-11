@@ -53,23 +53,28 @@ class StreamRecorder:
 
         # 基础 ffmpeg 参数（对齐 DouyinLiveRecorder，经 10 分钟实测无崩溃）
         # -re: 限速至 native frame rate，防止 ByteVC1 在 macOS 上初始化过快触发 SIGSEGV
-        # -reconnect_*: 所有流均启用，FLV/HLS 断流后自动重连
+        # 注意：-reconnect_* 仅作为 M3U8 的输入选项；FLV 不加（DouyinLiveRecorder 的 reconnect_* 在 -i 之后，属于输出选项，不影响 FLV 输入）
         url_path = self._stream_url.split("?")[0].lower()
-        input_opts: list[str] = [
+        base_input_opts: list[str] = [
             "-loglevel", "error",
             "-hide_banner",
             "-rw_timeout", "15000000",
             "-analyzeduration", "20000000",
-            "-probesize", "10000000",
+            "-probesize", "20000000",
             "-protocol_whitelist", "rtmp,crypto,file,http,https,tcp,tls,udp,rtp,httpproxy",
             "-thread_queue_size", "1024",
             "-headers", headers,
             "-fflags", "+discardcorrupt",
             "-re",
-            "-reconnect_streamed", "1",
-            "-reconnect_at_eof", "1",
-            "-reconnect_delay_max", "60",
         ]
+        if url_path.endswith(".m3u8"):
+            input_opts = base_input_opts + [
+                "-reconnect_streamed", "1",
+                "-reconnect_at_eof", "1",
+                "-reconnect_delay_max", "60",
+            ]
+        else:
+            input_opts = base_input_opts
 
         # 输出参数
         output_opts: list[str] = [
