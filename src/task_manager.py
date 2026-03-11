@@ -592,9 +592,12 @@ class TaskManager:
 
             _quick_fail_count = 0  # 连续快速断开（<30s）计数
             _last_rc: int | None = None  # 上次 ffmpeg 退出码
-            _rc11_count = 0             # 连续 rc=-11 (ByteVC1 SIGSEGV) 次数
-            # ByteVC1 画质降级链：FLV失败→M3U8→降画质逐级尝试，最低 HD
-            _QUALITY_FALLBACK = ["origin", "uhd", "hd"]
+            _rc11_count = 0             # 连续 rc=-11 次数
+            # rc=-11 处理策略：
+            #   第1次：重置状态，重新拉 URL（CDN 可能换一条 H.264 流）
+            #   第2次：force_m3u8=True（确认是 ByteVC1，换 M3U8）
+            #   第3次+：逐级降画质 origin→uhd→hd→sd→ld
+            _QUALITY_FALLBACK = ["origin", "uhd", "hd", "sd", "ld"]
 
             while not worker.stop_event.is_set():
                 # ── 定时窗口检查 ──
@@ -778,22 +781,29 @@ class TaskManager:
                     log(f"[系统] 直播流快速断开 ({_session_sec:.0f}s{_rc_info})，{_cooldown:.0f} 秒后重连...")
                     _url_short = (stream_url[:80] + "...") if len(stream_url) > 80 else stream_url
                     log(f"[系统] 断流地址: {_url_short}")
-                    # rc=-11 = ffmpeg SIGSEGV，通常是 FLV 流含 ByteVC1 codec 在 macOS 崩溃
+                    # rc=-11 = ffmpeg SIGSEGV（ByteVC1 在 macOS 崩溃）
                     if _last_rc == -11:
                         _rc11_count += 1
-                        if not source.force_m3u8:
-                            # 第一次：FLV → M3U8
+                        if _rc11_count == 1:
+                            # 第1次：重置所有 ByteVC1 状态，重新拉 URL
+                            # CDN 每次返回的 stream URL 可能不同，下次可能是 H.264
+                            source.force_m3u8 = False
+                            source.force_quality = None
+                            log("[系统] rc=-11 (ByteVC1/SIGSEGV)，重新获取流地址（CDN 可能换流）...")
+                        elif _rc11_count == 2:
+                            # 第2次：确认是 ByteVC1，切换到 M3U8
                             source.force_m3u8 = True
-                            log("[系统] rc=-11 (ByteVC1/SIGSEGV)，切换到 M3U8 流")
+                            source.force_quality = None
+                            log("[系统] 连续 rc=-11，切换到 M3U8 流")
                         else:
-                            # M3U8 也崩溃：逐级降画质
+                            # 第3次+：M3U8 也崩溃，逐级降画质
                             cur_q = source.force_quality or task.quality or "origin"
                             try:
                                 next_q = _QUALITY_FALLBACK[_QUALITY_FALLBACK.index(cur_q) + 1]
                                 source.force_quality = next_q
                                 log(f"[系统] M3U8 仍 rc=-11，画质降级: {cur_q} → {next_q}")
                             except (ValueError, IndexError):
-                                log("[系统] 已到最低画质 HD 仍 rc=-11，停止重试")
+                                log("[系统] 已到最低画质仍 rc=-11，停止重试")
                                 worker.stop_event.set()
                     else:
                         _rc11_count = 0
