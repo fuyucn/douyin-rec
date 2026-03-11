@@ -680,30 +680,28 @@ class TaskManager:
                             session_id = sess.id
                         worker.active_session_id = session_id
 
-                # 启动弹幕录制
+                # 初始化弹幕录制器（延迟启动：等 ffmpeg 确认有 .ts 输出后再 start()）
+                # 防止 watchdog 触发时留下无对应 TS 的孤立 ASS 文件
                 danmu_recorder = None
+                _danmu_started = False
+                _danmu_ass_path: Path | None = None
                 if task.enable_danmu and task.enable_record and worker.recording_started_at:
                     if segment_sec > 0:
-                        ass_path = storage.output_dir / f"{display}_%03d_danmu.ass"
+                        _danmu_ass_path = storage.output_dir / f"{display}_%03d_danmu.ass"
                     else:
-                        ass_path = storage.output_dir / f"{display}_danmu.ass"
+                        _danmu_ass_path = storage.output_dir / f"{display}_danmu.ass"
                     _danmu_cookies = task.cookies or config.input.cookies
                     log(f"[弹幕] cookies: {'任务配置' if task.cookies else ('config.yaml' if config.input.cookies else '无（匿名）')}")
                     danmu_recorder = DanmuRecorder(
                         url=task.url,
                         started_at=worker.recording_started_at,
-                        output_path=ass_path,
+                        output_path=_danmu_ass_path,
                         cdn_delay=task.danmu_cdn_delay,
                         segment_duration=segment_sec,
                         cookies=_danmu_cookies,
                         log_callback=log,
                     )
-                    try:
-                        danmu_recorder.start()
-                        log(f"[弹幕] 录制已启动 → {ass_path.name}")
-                    except Exception as e:
-                        log(f"[弹幕] 启动失败: {e}")
-                        danmu_recorder = None
+                    # 注意：start() 延迟到确认有 .ts 输出后调用（见等待循环）
 
                 # 启动截图
                 if task.enable_screenshot:
@@ -734,20 +732,28 @@ class TaskManager:
                         else:
                             log(f"定时窗口结束 ({task.schedule_stop})，停止录制")
                             break
-                    # Watchdog: ffmpeg 启动超时仍无 .ts 输出 → CDN 卡死，强制 kill 重连
-                    # 只检查当前 session 的输出文件（前缀匹配），避免把旧 .ts 误判为有效输出
+                    # TS 确认检查（复用 watchdog 计算）：
+                    #   有 .ts → 启动弹幕（首次）；无 .ts 且超时 → watchdog kill
                     if recorder and not _watchdog_triggered:
-                        _elapsed = (datetime.now() - _session_started_at).total_seconds()
-                        if _elapsed >= _WATCHDOG_TIMEOUT_SEC:
-                            _out = Path(path_or_pattern)
-                            if segment_sec > 0:
-                                # 分段模式：查找 session 前缀匹配的 .ts 文件
-                                _stem_prefix = _out.stem.replace("%03d", "")
-                                ts_recent = list(_out.parent.glob(f"{_stem_prefix}*.ts"))
-                            else:
-                                # 单文件模式：检查输出文件是否已有数据
-                                ts_recent = [_out] if _out.exists() and _out.stat().st_size > 0 else []
-                            if not ts_recent:
+                        _out = Path(path_or_pattern)
+                        if segment_sec > 0:
+                            _stem_prefix = _out.stem.replace("%03d", "")
+                            ts_ready = list(_out.parent.glob(f"{_stem_prefix}*.ts"))
+                        else:
+                            ts_ready = [_out] if _out.exists() and _out.stat().st_size > 0 else []
+                        if ts_ready:
+                            # ffmpeg 已有输出：启动弹幕（仅一次）
+                            if danmu_recorder is not None and not _danmu_started:
+                                try:
+                                    danmu_recorder.start()
+                                    _danmu_started = True
+                                    log(f"[弹幕] 录制已启动 → {_danmu_ass_path.name}")
+                                except Exception as e:
+                                    log(f"[弹幕] 启动失败: {e}")
+                                    danmu_recorder = None
+                        else:
+                            _elapsed = (datetime.now() - _session_started_at).total_seconds()
+                            if _elapsed >= _WATCHDOG_TIMEOUT_SEC:
                                 _watchdog_triggered = True
                                 log(f"[系统] Watchdog: ffmpeg 已运行 {_elapsed:.0f}s 无 .ts 输出，强制重连...")
                                 recorder.stop()
@@ -773,7 +779,7 @@ class TaskManager:
                         worker.active_session_id = None
                         session_id = None
                     worker.recording_started_at = None
-                if danmu_recorder:
+                if danmu_recorder and _danmu_started:
                     danmu_recorder.stop()
                     danmu_recorder = None
                 if screenshot_thread and screenshot_thread.is_alive():

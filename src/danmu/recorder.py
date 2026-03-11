@@ -63,6 +63,11 @@ class DanmuRecorder:
 
     def start(self) -> None:
         self._output_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._segment_duration > 0:
+            # 对齐到 ffmpeg 分段边界：以 started_at 为基准计算当前所在分段
+            elapsed = time.time() - self._started_at
+            self._part_index = int(elapsed / self._segment_duration)
+            self._part_start_time = self._started_at + self._part_index * self._segment_duration
         current_path = self._current_part_path()
         self._writer.open(current_path)
         self._thread = threading.Thread(target=self._run, daemon=True, name='danmu-recorder')
@@ -135,9 +140,15 @@ class DanmuRecorder:
                     count += 1
 
         async def _segment_timer() -> None:
-            """按 segment_duration 定时切分 .ass"""
+            """按 segment_duration 定时切分 .ass，与 ffmpeg 分段边界对齐"""
             if not self._segment_duration:
                 return
+            # 第一次 sleep 对齐到 ffmpeg 下一个分段边界
+            elapsed = time.time() - self._started_at
+            first_sleep = self._segment_duration - (elapsed % self._segment_duration)
+            await asyncio.sleep(first_sleep)
+            if not self._stop_event.is_set():
+                self._split()
             while not self._stop_event.is_set():
                 await asyncio.sleep(self._segment_duration)
                 if not self._stop_event.is_set():
