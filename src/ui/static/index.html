@@ -347,7 +347,10 @@ async function refreshTaskList() {
 function taskStatusCellHTML(t) {
   const sd = statusDisplay(t.status, t.worker_status);
   const workerInfo = (t.worker_status && t.worker_status !== '定时等待') ? `<span class="text-xs opacity-50 ml-1">· ${esc(t.worker_status)}</span>` : '';
-  return `<span class="badge ${sd.badgeClass} badge-sm gap-1"><span class="inline-block w-1.5 h-1.5 rounded-full ${sd.dotClass}"></span>${sd.label}</span>${workerInfo}${t.status === 'running' && t.started_at ? `<div class="text-xs opacity-40 mt-0.5">运行 <span data-elapsed-from="${t.started_at}"></span>${t.recording_started_at ? ` · 录制 <span data-elapsed-from="${t.recording_started_at}"></span>` : ''}</div>` : ''}`;
+  const elapsedPart = t.status === 'running' && t.started_at
+    ? `<div class="text-xs opacity-40 mt-0.5">运行 ${formatElapsed(t.started_at)}${t.recording_started_at ? ` · 录制 ${formatElapsed(t.recording_started_at)}` : ''}</div>`
+    : '';
+  return `<span class="badge ${sd.badgeClass} badge-sm gap-1"><span class="inline-block w-1.5 h-1.5 rounded-full ${sd.dotClass}"></span>${sd.label}</span>${workerInfo}${elapsedPart}`;
 }
 
 function taskActionsCellHTML(t) {
