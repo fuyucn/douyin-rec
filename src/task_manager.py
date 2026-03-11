@@ -720,6 +720,8 @@ class TaskManager:
                         log(f"截图连接失败: {e}")
 
                 # 等待结束
+                _WATCHDOG_TIMEOUT_SEC = 90  # ffmpeg 启动后若此时间内无 .ts 输出，视为卡死
+                _watchdog_triggered = False
                 while not worker.stop_event.is_set():
                     if recorder and not recorder.is_running:
                         break
@@ -732,6 +734,19 @@ class TaskManager:
                         else:
                             log(f"定时窗口结束 ({task.schedule_stop})，停止录制")
                             break
+                    # Watchdog: ffmpeg 启动超时仍无 .ts 输出 → CDN 卡死，强制 kill 重连
+                    if recorder and not _watchdog_triggered:
+                        _elapsed = (datetime.now() - _session_started_at).total_seconds()
+                        if _elapsed >= _WATCHDOG_TIMEOUT_SEC:
+                            ts_recent = [
+                                f for f in storage.output_dir.glob("*.ts")
+                                if f.stat().st_mtime >= _session_started_at.timestamp()
+                            ]
+                            if not ts_recent:
+                                _watchdog_triggered = True
+                                log(f"[系统] Watchdog: ffmpeg 已运行 {_elapsed:.0f}s 无 .ts 输出，强制重连...")
+                                recorder.stop()
+                                break
                     time.sleep(1)
 
                 _last_rc = None
