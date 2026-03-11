@@ -825,10 +825,26 @@ class TaskManager:
                             source.force_quality = None
                             log("[系统] rc=-11 (ByteVC1/SIGSEGV)，重新获取流地址（CDN 可能换流）...")
                         elif _rc11_count == 2:
-                            # 第2次：确认是 ByteVC1，切换到 M3U8
+                            # 第2次：若已是 M3U8 则直接降画质，否则切换到 M3U8
+                            _already_m3u8 = stream_url.split("?")[0].lower().endswith(".m3u8")
                             source.force_m3u8 = True
-                            source.force_quality = None
-                            log("[系统] 连续 rc=-11，切换到 M3U8 流")
+                            if _already_m3u8:
+                                # 已是 M3U8 仍 rc=-11，直接开始画质降级
+                                cur_q = source.force_quality or task.quality or "origin"
+                                try:
+                                    next_q = _QUALITY_FALLBACK[_QUALITY_FALLBACK.index(cur_q) + 1]
+                                    source.force_quality = next_q
+                                    log(f"[系统] 已是 M3U8 仍 rc=-11，画质降级: {cur_q} → {next_q}")
+                                    _rc11_count = 3  # 对齐后续逻辑
+                                except (ValueError, IndexError):
+                                    log(f"[系统] 所有画质均 ByteVC1 rc=-11，{task.poll_interval}s 后重试...")
+                                    source.force_m3u8 = False
+                                    source.force_quality = None
+                                    _rc11_count = 0
+                                    _cooldown = task.poll_interval
+                            else:
+                                source.force_quality = None
+                                log("[系统] 连续 rc=-11，切换到 M3U8 流")
                         else:
                             # 第3次+：M3U8 也崩溃，逐级降画质
                             cur_q = source.force_quality or task.quality or "origin"
@@ -837,12 +853,13 @@ class TaskManager:
                                 source.force_quality = next_q
                                 log(f"[系统] M3U8 仍 rc=-11，画质降级: {cur_q} → {next_q}")
                             except (ValueError, IndexError):
-                                # 全部画质均 ByteVC1：重置降级链，等待下次开播时重试
+                                # 全部画质均 ByteVC1：重置降级链，等待 poll_interval 后重试
                                 # 主播可能之后切换回 H.264，不直接停止任务
-                                log("[系统] 所有画质均 ByteVC1 rc=-11，重置状态，等待下次开播重试...")
+                                log(f"[系统] 所有画质均 ByteVC1 rc=-11，{task.poll_interval}s 后重试...")
                                 source.force_m3u8 = False
                                 source.force_quality = None
                                 _rc11_count = 0
+                                _cooldown = task.poll_interval
                     else:
                         _rc11_count = 0
                         if _quick_fail_count == 3:
