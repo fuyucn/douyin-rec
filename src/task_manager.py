@@ -691,7 +691,6 @@ class TaskManager:
                     else:
                         _danmu_ass_path = storage.output_dir / f"{display}_danmu.ass"
                     _danmu_cookies = task.cookies or config.input.cookies
-                    log(f"[弹幕] cookies: {'任务配置' if task.cookies else ('config.yaml' if config.input.cookies else '无（匿名）')}")
                     danmu_recorder = DanmuRecorder(
                         url=task.url,
                         started_at=worker.recording_started_at,
@@ -745,6 +744,8 @@ class TaskManager:
                             # ffmpeg 已有输出：启动弹幕（仅一次）
                             if danmu_recorder is not None and not _danmu_started:
                                 try:
+                                    _danmu_cookies = task.cookies or config.input.cookies
+                                    log(f"[弹幕] cookies: {'任务配置' if task.cookies else ('config.yaml' if config.input.cookies else '无（匿名）')}")
                                     danmu_recorder.start()
                                     _danmu_started = True
                                     log(f"[弹幕] 录制已启动 → {_danmu_ass_path.name}")
@@ -829,8 +830,12 @@ class TaskManager:
                                 source.force_quality = next_q
                                 log(f"[系统] M3U8 仍 rc=-11，画质降级: {cur_q} → {next_q}")
                             except (ValueError, IndexError):
-                                log("[系统] 已到最低画质仍 rc=-11，停止重试")
-                                worker.stop_event.set()
+                                # 全部画质均 ByteVC1：重置降级链，等待下次开播时重试
+                                # 主播可能之后切换回 H.264，不直接停止任务
+                                log("[系统] 所有画质均 ByteVC1 rc=-11，重置状态，等待下次开播重试...")
+                                source.force_m3u8 = False
+                                source.force_quality = None
+                                _rc11_count = 0
                     else:
                         _rc11_count = 0
                         if _quick_fail_count == 3:
