@@ -134,19 +134,12 @@ class DouyinLiveSource:
 
         def _is_bytevc1(u: str | None) -> bool:
             """检测 URL 是否为 ByteVC1/HEVC 流。
-            优先看 codec= 参数；无参数时再看 _or4 路径（不可靠，仅作兜底）。
-            若 codec=h264/avc 则明确不是 ByteVC1，不做路径检测。
+            仅凭 codec= 参数判断；无参数时不猜测（_or4 路径可能是 H.264 或 ByteVC1）。
             """
             if not u:
                 return False
             codec = _codec(u)
-            if codec in ("bytevc1", "hevc", "h265"):
-                return True
-            if codec:  # 有明确非-ByteVC1 的 codec（如 h264/avc），信任它
-                return False
-            # 无 codec 参数时，_or4 路径是 ByteVC1 的常见标志
-            path = u.split("?")[0].lower()
-            return "_or4" in path
+            return codec in ("bytevc1", "hevc", "h265")
 
         record_url = stream_info.get("record_url")
         flv_codec = _codec(flv_url)

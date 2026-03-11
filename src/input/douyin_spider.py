@@ -540,6 +540,31 @@ QUALITY_MAP = {
 }
 
 
+# 画质 index → URL dict 中的候选 key 名称（优先级从高到低）
+# 抖音 API 的 flv_pull_url / hls_pull_url_map 可能以 OD/UHD/HD/SD/LD 为 key，
+# 我们自己注入的 origin URL 用 'ORIGIN' key。
+_QUALITY_KEY_NAMES: dict[int, list[str]] = {
+    0: ['ORIGIN', 'OD', 'BD'],  # origin
+    1: ['UHD'],
+    2: ['HD'],
+    3: ['SD'],
+    4: ['LD'],
+}
+
+
+def _lookup_quality(d: dict, qi: int) -> str | None:
+    """先按画质 key 名称查找，找不到再按位置索引。
+
+    API 返回的 dict 顺序可能不确定（例如 HD 排在 OD 前面），
+    key 查找确保即使注入 ORIGIN 失败也能选到正确画质。
+    """
+    for k in _QUALITY_KEY_NAMES.get(qi, []):
+        if k in d:
+            return d[k]
+    values = list(d.values())
+    return values[qi] if qi < len(values) else (values[-1] if values else None)
+
+
 async def get_douyin_stream_url(room_data: dict, quality: str = "origin") -> dict:
     """从 room_data 中按画质提取流地址。
 
@@ -566,20 +591,17 @@ async def get_douyin_stream_url(room_data: dict, quality: str = "origin") -> dic
     qi = _QUALITY_MAPPING.get(quality_code, 0)
 
     stream_url = room_data['stream_url']
-    flv_list = list(stream_url.get('flv_pull_url', {}).values())
-    m3u8_list = list(stream_url.get('hls_pull_url_map', {}).values())
+    flv_dict = stream_url.get('flv_pull_url', {})
+    m3u8_dict = stream_url.get('hls_pull_url_map', {})
 
-    # 补齐到 5 个（不足时用最后一个填充）
-    while flv_list and len(flv_list) < 5:
-        flv_list.append(flv_list[-1])
-    while m3u8_list and len(m3u8_list) < 5:
-        m3u8_list.append(m3u8_list[-1])
-
-    flv_url = flv_list[qi] if qi < len(flv_list) else (flv_list[-1] if flv_list else None)
-    m3u8_url = m3u8_list[qi] if qi < len(m3u8_list) else (m3u8_list[-1] if m3u8_list else None)
+    # 按 key 名优先查找（避免因 dict 顺序不定而选错画质）
+    flv_url = _lookup_quality(flv_dict, qi)
+    m3u8_url = _lookup_quality(m3u8_dict, qi)
 
     # 若目标画质 M3U8 不可用，尝试相邻画质
     if m3u8_url and not await _check_url_alive(m3u8_url):
+        m3u8_list = list(m3u8_dict.values())
+        flv_list = list(flv_dict.values())
         alt = qi + 1 if qi < 4 else qi - 1
         if alt < len(m3u8_list):
             m3u8_url = m3u8_list[alt]
