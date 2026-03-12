@@ -558,7 +558,10 @@ QUALITY_MAP = {
 # 抖音 API 的 flv_pull_url / hls_pull_url_map 可能以 OD/UHD/HD/SD/LD 为 key，
 # 我们自己注入的 origin URL 用 'ORIGIN' key。
 _QUALITY_KEY_NAMES: dict[int, list[str]] = {
-    0: ['FULL_HD1', 'OD', 'BD'],  # origin — FULL_HD1/OD 是 API 原始条目（expire/sign CDN，H.264）；ORIGIN 注入 URL 可能指向 ByteVC1 CDN 节点，不列入候选
+    # origin — ORIGIN 是我们注入的 URL（sdk_params origin_main，expire/sign + codec=h264）
+    # 在 cookie 移除 hevc_supported 后，ORIGIN 始终为 H.264 且路径一致（如 _or4）。
+    # FULL_HD1 在 CDN 负载均衡时可能指向 ByteVC1 变体（如 _Stage0T000ld），不稳定。
+    0: ['ORIGIN', 'FULL_HD1', 'OD', 'BD'],
     1: ['UHD'],
     2: ['HD'],
     3: ['SD'],
