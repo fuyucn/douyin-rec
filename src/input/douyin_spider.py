@@ -375,6 +375,8 @@ def _inject_origin_quality(room_data: dict, stream_data_str: str) -> None:
         origin_main = sd['data']['origin']['main']
         sdk_params = json.loads(origin_main.get('sdk_params', '{}'))
         codec = sdk_params.get('VCodec', '')
+        if codec:
+            room_data['_vcodec'] = codec.lower()  # 供 get_douyin_stream_url 追加 codec= 参数
         origin_m3u8 = {'ORIGIN': origin_main['hls'] + '&codec=' + codec}
         origin_flv = {'ORIGIN': origin_main['flv'] + '&codec=' + codec}
         # 原始条目优先（expire/sign 格式，H.264 CDN）；ORIGIN 放末尾备用
@@ -519,6 +521,8 @@ async def get_douyin_stream_data(url: str, cookies: str | None = None) -> dict:
                     codec = json.loads(origin_url_list['sdk_params']).get('VCodec', '')
                 except Exception:
                     codec = ''
+            if codec:
+                json_data['_vcodec'] = codec.lower()  # 供 get_douyin_stream_url 追加 codec= 参数
             origin_m3u8 = {'ORIGIN': origin_url_list['hls'] + '&codec=' + codec}
             origin_flv = {'ORIGIN': origin_url_list['flv'] + '&codec=' + codec}
             # 原始条目优先（可能是 expire/sign 格式，H.264 CDN）；ORIGIN 放末尾备用
@@ -611,12 +615,25 @@ async def get_douyin_stream_url(room_data: dict, quality: str = "origin") -> dic
     # 按 key 名优先查找（避免因 dict 顺序不定而选错画质）
     flv_url, flv_key = _lookup_quality(flv_dict, qi)
     m3u8_url, m3u8_key = _lookup_quality(m3u8_dict, qi)
+
+    # 若 API 原始条目缺少 codec= 参数，追加已知 VCodec（与 DLR 一致）。
+    # pull-q5/stage/ CDN 默认 ByteVC1，需要 &codec=h264 才路由到 H.264 流。
+    vcodec = room_data.get('_vcodec', '')
+    def _with_codec(url: str | None) -> str | None:
+        if not url or not vcodec or 'codec=' in url:
+            return url
+        sep = '&' if '?' in url else '?'
+        return url + sep + 'codec=' + vcodec
+    flv_url = _with_codec(flv_url)
+    m3u8_url = _with_codec(m3u8_url)
+
     _log.info(
-        "[spider] flv_pull_url keys=%s → selected key=%s url_auth=%s",
+        "[spider] flv_pull_url keys=%s → selected key=%s url_auth=%s vcodec=%s",
         list(flv_dict.keys()), flv_key,
         "wsSecret" if flv_url and "wsSecret" in flv_url else
         "expire/sign" if flv_url and "expire=" in flv_url else
         "k/t" if flv_url and "&k=" in flv_url else "unknown",
+        vcodec or "(none)",
     )
 
     # 若目标画质 M3U8 不可用，尝试相邻画质
