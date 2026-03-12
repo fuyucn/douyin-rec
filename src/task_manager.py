@@ -579,10 +579,10 @@ class TaskManager:
                 features.append("截图")
             log(f"已启用: {', '.join(features)}")
 
-            # 文件夹：task_{id}_{主播名}/
+            # 文件夹：task{id}_{主播名}/
             config.storage.output_dir = str(self._output_dir)
             _safe_anchor = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]", "", task_name) if task_name else ""
-            _dir_name = f"task_{task_id}_{_safe_anchor}" if _safe_anchor else f"task_{task_id}"
+            _dir_name = f"task{task_id}_{_safe_anchor}" if _safe_anchor else f"task{task_id}"
             storage = StorageManager(config.storage, name=_dir_name)
             segment_sec = task.segment_sec if task.enable_segment else 0
             poll_interval = task.poll_interval
