@@ -15,6 +15,7 @@ License: MIT
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import time
@@ -22,6 +23,8 @@ import urllib.parse
 from typing import Any
 
 import httpx
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # ab_sign — 纯 Python 实现的 a_bogus 签名算法
@@ -359,7 +362,12 @@ _DEFAULT_COOKIE = (
 
 
 def _inject_origin_quality(room_data: dict, stream_data_str: str) -> None:
-    """将 ORIGIN 画质注入到 flv_pull_url / hls_pull_url_map 的最前面"""
+    """将 ORIGIN 画质注入到 flv_pull_url / hls_pull_url_map 的末尾（备用）。
+
+    ⚠️ 注入 URL 使用 wsSecret/wsTime auth 格式，与 flv_pull_url 原始条目的
+    expire/sign 格式不同。wsSecret/wsTime 格式可能被路由到 ByteVC1 CDN 节点。
+    因此 ORIGIN 放末尾，position-based lookup 优先使用原始条目（与 DLR 一致）。
+    """
     try:
         sd = json.loads(stream_data_str)
         if 'origin' not in sd.get('data', {}):
@@ -369,10 +377,11 @@ def _inject_origin_quality(room_data: dict, stream_data_str: str) -> None:
         codec = sdk_params.get('VCodec', '')
         origin_m3u8 = {'ORIGIN': origin_main['hls'] + '&codec=' + codec}
         origin_flv = {'ORIGIN': origin_main['flv'] + '&codec=' + codec}
+        # 原始条目优先（expire/sign 格式，H.264 CDN）；ORIGIN 放末尾备用
         room_data['stream_url']['hls_pull_url_map'] = {
-            **origin_m3u8, **room_data['stream_url'].get('hls_pull_url_map', {})}
+            **room_data['stream_url'].get('hls_pull_url_map', {}), **origin_m3u8}
         room_data['stream_url']['flv_pull_url'] = {
-            **origin_flv, **room_data['stream_url'].get('flv_pull_url', {})}
+            **room_data['stream_url'].get('flv_pull_url', {}), **origin_flv}
     except Exception:
         pass
 
@@ -512,10 +521,11 @@ async def get_douyin_stream_data(url: str, cookies: str | None = None) -> dict:
                     codec = ''
             origin_m3u8 = {'ORIGIN': origin_url_list['hls'] + '&codec=' + codec}
             origin_flv = {'ORIGIN': origin_url_list['flv'] + '&codec=' + codec}
+            # 原始条目优先（可能是 expire/sign 格式，H.264 CDN）；ORIGIN 放末尾备用
             json_data['stream_url']['hls_pull_url_map'] = {
-                **origin_m3u8, **json_data['stream_url'].get('hls_pull_url_map', {})}
+                **json_data['stream_url'].get('hls_pull_url_map', {}), **origin_m3u8}
             json_data['stream_url']['flv_pull_url'] = {
-                **origin_flv, **json_data['stream_url'].get('flv_pull_url', {})}
+                **json_data['stream_url'].get('flv_pull_url', {}), **origin_flv}
         return json_data
 
     except Exception as e:
@@ -544,7 +554,7 @@ QUALITY_MAP = {
 # 抖音 API 的 flv_pull_url / hls_pull_url_map 可能以 OD/UHD/HD/SD/LD 为 key，
 # 我们自己注入的 origin URL 用 'ORIGIN' key。
 _QUALITY_KEY_NAMES: dict[int, list[str]] = {
-    0: ['ORIGIN', 'OD', 'BD'],  # origin
+    0: ['FULL_HD1', 'OD', 'BD'],  # origin — FULL_HD1/OD 是 API 原始条目（expire/sign CDN，H.264）；ORIGIN 注入 URL 可能指向 ByteVC1 CDN 节点，不列入候选
     1: ['UHD'],
     2: ['HD'],
     3: ['SD'],
@@ -552,17 +562,21 @@ _QUALITY_KEY_NAMES: dict[int, list[str]] = {
 }
 
 
-def _lookup_quality(d: dict, qi: int) -> str | None:
-    """先按画质 key 名称查找，找不到再按位置索引。
+def _lookup_quality(d: dict, qi: int) -> tuple[str | None, str]:
+    """先按画质 key 名称查找，找不到再按位置索引。返回 (url, matched_key)。
 
     API 返回的 dict 顺序可能不确定（例如 HD 排在 OD 前面），
     key 查找确保即使注入 ORIGIN 失败也能选到正确画质。
     """
     for k in _QUALITY_KEY_NAMES.get(qi, []):
         if k in d:
-            return d[k]
+            return d[k], k
     values = list(d.values())
-    return values[qi] if qi < len(values) else (values[-1] if values else None)
+    keys = list(d.keys())
+    idx = qi if qi < len(values) else (len(values) - 1 if values else -1)
+    if idx < 0:
+        return None, "?"
+    return values[idx], keys[idx]
 
 
 async def get_douyin_stream_url(room_data: dict, quality: str = "origin") -> dict:
@@ -595,8 +609,15 @@ async def get_douyin_stream_url(room_data: dict, quality: str = "origin") -> dic
     m3u8_dict = stream_url.get('hls_pull_url_map', {})
 
     # 按 key 名优先查找（避免因 dict 顺序不定而选错画质）
-    flv_url = _lookup_quality(flv_dict, qi)
-    m3u8_url = _lookup_quality(m3u8_dict, qi)
+    flv_url, flv_key = _lookup_quality(flv_dict, qi)
+    m3u8_url, m3u8_key = _lookup_quality(m3u8_dict, qi)
+    _log.info(
+        "[spider] flv_pull_url keys=%s → selected key=%s url_auth=%s",
+        list(flv_dict.keys()), flv_key,
+        "wsSecret" if flv_url and "wsSecret" in flv_url else
+        "expire/sign" if flv_url and "expire=" in flv_url else
+        "k/t" if flv_url and "&k=" in flv_url else "unknown",
+    )
 
     # 若目标画质 M3U8 不可用，尝试相邻画质
     if m3u8_url and not await _check_url_alive(m3u8_url):
