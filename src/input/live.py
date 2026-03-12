@@ -95,8 +95,15 @@ class DouyinLiveSource:
         cookies = self._get_cookie_string()
         return _run_async(get_douyin_stream_data(self._url, cookies=cookies))
 
-    def _extract_stream_url(self) -> str:
-        """提取直播流地址，更新 streamer_name 和 _flv_url"""
+    def _extract_stream_url(self, log_fn=None) -> str:
+        """提取直播流地址，更新 streamer_name 和 _flv_url。
+        log_fn: 可选回调 (str) -> None，将关键决策路由到任务日志（ByteVC1 检测、URL 选择等）。
+        """
+        def _log(msg: str) -> None:
+            logger.info(msg)
+            if log_fn:
+                log_fn(msg)
+
         cookies = self._get_cookie_string()
         quality = self.force_quality or self._config.quality.lower()
 
@@ -121,6 +128,9 @@ class DouyinLiveSource:
         m3u8_url = stream_info.get("m3u8_url")
         self._flv_url = flv_url
         self._m3u8_url = m3u8_url  # 存储 M3U8 地址供 rc=-11 fallback 使用
+
+        def _url_base(u: str | None) -> str:
+            return u.split("?")[0] if u else "(无)"
 
         # URL 选择策略:
         #   默认 FLV 优先（无 -f live_flv，与 DouyinLiveRecorder 一致）
@@ -171,18 +181,20 @@ class DouyinLiveSource:
             # ByteVC1 模式（FLV 检测到 ByteVC1，或上次 rc=-11 切换到 M3U8）
             # 先确认 M3U8 origin 是否也是 ByteVC1；若是，直接扫描更低画质
             if _bytevc1 and not self.force_m3u8:
-                logger.info("FLV 检测到 ByteVC1 (codec=%s)，改用 M3U8 流", flv_codec or "?")
+                _log(f"[ByteVC1] FLV 检测到 ByteVC1 (codec={flv_codec or '?'})，改用 M3U8 流")
+            elif self.force_m3u8:
+                _log(f"[ByteVC1] force_m3u8=True（上次 rc=-11 触发），使用 M3U8 流")
             start_q = self.force_quality or quality
             if _is_bytevc1(m3u8_url):
                 # origin M3U8 也是 ByteVC1 → 直接找非 ByteVC1 画质，避免无谓崩溃
                 non_bytevc1_url, picked_q = _pick_non_bytevc1_m3u8(room_data, start_q)
                 if non_bytevc1_url:
                     if picked_q != start_q:
-                        logger.info("M3U8 origin 也是 ByteVC1，直接降级到 %s", picked_q)
+                        _log(f"[ByteVC1] M3U8 origin 也是 ByteVC1，直接降级到 {picked_q}")
                         self.force_quality = picked_q
                     url = non_bytevc1_url
                 else:
-                    logger.warning("所有 M3U8 画质均为 ByteVC1，无法避免崩溃")
+                    _log("[ByteVC1] ⚠️ 所有 M3U8 画质均为 ByteVC1，无法避免崩溃")
                     url = m3u8_url or record_url or flv_url
             else:
                 url = m3u8_url or record_url or flv_url
@@ -197,10 +209,14 @@ class DouyinLiveSource:
             raise RuntimeError(f"未能获取到可用流地址 (画质={quality})")
 
         proto = "M3U8" if url.split("?")[0].lower().endswith(".m3u8") else "FLV"
-        codec = _codec(url) or "?"
+        codec = _codec(url) or "(none)"
         orig_quality = self._config.quality.lower()
         q_label = f"{quality}(降级)" if quality != orig_quality else quality
-        logger.info("获取到流地址: %s codec=%s 画质=%s force_m3u8=%s", proto, codec, q_label, self.force_m3u8)
+        # FLV vs 选择对比（仅当二者不同时才额外打印，避免重复）
+        if flv_url and _url_base(url) != _url_base(flv_url):
+            _log(f"[URL] FLV(跳过): {_url_base(flv_url)}")
+        _log(f"[流] 选择: {proto} | codec={codec} | 画质={q_label} | force_m3u8={self.force_m3u8}")
+        _log(f"[URL] {proto}: {_url_base(url)}")
         return url
 
     def _open_stream(self) -> cv2.VideoCapture:
@@ -263,7 +279,7 @@ class DouyinLiveSource:
             if schedule_check and not schedule_check():
                 raise InterruptedError("定时窗口结束")
             try:
-                url = self._extract_stream_url()
+                url = self._extract_stream_url(log_fn=on_status)
                 if on_status:
                     on_status("直播已开播，获取到流地址")
                 return url
