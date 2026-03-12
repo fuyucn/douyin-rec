@@ -202,7 +202,7 @@ def merge_group(
     """
     合并一个录制组。
     do_plain: 生成 {prefix}.mp4（-c copy，无损）
-    do_danmu: 生成 {prefix}_danmu.mp4（libx264 重编码烧录弹幕，依赖 plain mp4）
+    do_danmu: 生成 {prefix}_danmu.mp4（h264_videotoolbox 硬件编码烧录弹幕，依赖 plain mp4）
     若 do_danmu=True 但 plain mp4 不存在，自动先执行 plain merge。
     返回 {"plain_mp4": str | None, "danmu_mp4": str | None}
     """
@@ -286,13 +286,13 @@ def merge_group(
                 _log(f"[合并] 合并弹幕 ({len(group.ass_map)} 段)...")
                 merge_ass_files(group.ts_files, group.ass_map, group.merged_ass, log_fn=log_fn)
 
-                _log(f"[合并] 烧录弹幕 → {group.merged_danmu_mp4.name}（重编码，请稍候）")
+                _log(f"[合并] 烧录弹幕 → {group.merged_danmu_mp4.name}（VideoToolbox 硬件编码）")
                 proc = subprocess.run(
                     [
                         "ffmpeg", "-y",
                         "-i", str(group.merged_mp4),
                         "-vf", f"ass={group.merged_ass.name}",
-                        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                        "-c:v", "h264_videotoolbox", "-q:v", "65",
                         "-c:a", "copy",
                         "-movflags", "+faststart",
                         str(group.merged_danmu_mp4),
