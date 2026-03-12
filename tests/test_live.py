@@ -5,7 +5,8 @@ import threading
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from src.config import InputConfig
-from src.input.live import DouyinLiveSource, LiveNotStarted, _QUALITY_MAP, _run_async
+from src.input.live import DouyinLiveSource, LiveNotStarted, _run_async
+from src.input.douyin_spider import QUALITY_MAP as _QUALITY_MAP
 
 
 def test_quality_map():
@@ -76,19 +77,16 @@ def test_run_async():
 def test_extract_stream_url_live_not_started():
     """status == 4 时应抛出 LiveNotStarted，且主播名已设置"""
     source = DouyinLiveSource("https://live.douyin.com/123")
-    mock_data = {"anchor_name": "测试主播", "status": 4}
+    mock_room = {"anchor_name": "测试主播", "status": 4}
+    mock_stream = {"is_live": False}
 
-    mock_client = MagicMock()
-    mock_client.fetch_app_stream_data = AsyncMock(return_value=mock_data)
-    mock_client.fetch_stream_url = AsyncMock()  # 不应被调用
-
-    with patch.object(source, "_get_douyin_client", return_value=mock_client):
+    with patch("src.input.live.get_douyin_stream_data", return_value=mock_room), \
+         patch("src.input.live.get_douyin_stream_url", return_value=mock_stream):
         try:
             source._extract_stream_url()
             assert False, "应抛出 LiveNotStarted"
         except LiveNotStarted:
             assert source.streamer_name == "测试主播"
-            mock_client.fetch_stream_url.assert_not_called()
 
 
 def test_extract_streamer_info_success():
@@ -96,7 +94,7 @@ def test_extract_streamer_info_success():
     source = DouyinLiveSource("https://live.douyin.com/123")
     mock_data = {"anchor_name": "一勺小苏打"}
 
-    with patch.object(source, "_fetch_stream_data", return_value=mock_data):
+    with patch.object(source, "_fetch_room_data", return_value=mock_data):
         name = source.extract_streamer_info()
         assert name == "一勺小苏打"
         assert source.streamer_name == "一勺小苏打"
@@ -106,7 +104,7 @@ def test_extract_streamer_info_failure():
     """提取主播信息失败返回 None"""
     source = DouyinLiveSource("https://live.douyin.com/123")
 
-    with patch.object(source, "_fetch_stream_data", side_effect=RuntimeError("fail")):
+    with patch.object(source, "_fetch_room_data", side_effect=RuntimeError("fail")):
         name = source.extract_streamer_info()
         assert name is None
 
