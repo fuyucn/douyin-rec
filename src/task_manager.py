@@ -826,46 +826,25 @@ class TaskManager:
                     # 断流地址：完整 URL（不截断，方便与 DLR 对比 codec/CDN 参数）
                     log(f"[系统] 断流地址: {stream_url}")
                     # rc=-11 = ffmpeg SIGSEGV（ByteVC1 在 macOS 崩溃）
+                    # fallback 链：第1次→立即切 M3U8，第2次+→逐级降画质，全部失败→等待重试
                     if _last_rc == -11:
                         _rc11_count += 1
-                        log(f"[ByteVC1] rc=-11 第 {_rc11_count} 次，fallback 链: FLV→M3U8→画质降级")
-                        if _rc11_count == 1:
-                            # 第1次：重置所有 ByteVC1 状态，重新拉 URL
-                            # CDN 每次返回的 stream URL 可能不同，下次可能是 H.264
-                            source.force_m3u8 = False
-                            source.force_quality = None
-                            log("[ByteVC1] 第1次 rc=-11：重新获取流地址（期望 CDN 换 H.264 流）")
-                        elif _rc11_count == 2:
-                            # 第2次：若已是 M3U8 则直接降画质，否则切换到 M3U8
-                            _already_m3u8 = stream_url.split("?")[0].lower().endswith(".m3u8")
+                        _already_m3u8 = stream_url.split("?")[0].lower().endswith(".m3u8")
+                        log(f"[ByteVC1] rc=-11 第 {_rc11_count} 次（{'M3U8' if _already_m3u8 else 'FLV'}）")
+                        if not _already_m3u8:
+                            # FLV 崩溃：立即切换到 M3U8，不再浪费一次重试
                             source.force_m3u8 = True
-                            if _already_m3u8:
-                                # 已是 M3U8 仍 rc=-11，直接开始画质降级
-                                cur_q = source.force_quality or task.quality or "origin"
-                                try:
-                                    next_q = _QUALITY_FALLBACK[_QUALITY_FALLBACK.index(cur_q) + 1]
-                                    source.force_quality = next_q
-                                    log(f"[ByteVC1] 第2次 rc=-11（已是 M3U8）：画质降级 {cur_q} → {next_q}")
-                                    _rc11_count = 3  # 对齐后续逻辑
-                                except (ValueError, IndexError):
-                                    log(f"[ByteVC1] 所有画质均 rc=-11，{task.poll_interval}s 后重试（等待主播切回 H.264）")
-                                    source.force_m3u8 = False
-                                    source.force_quality = None
-                                    _rc11_count = 0
-                                    _cooldown = task.poll_interval
-                            else:
-                                source.force_quality = None
-                                log("[ByteVC1] 第2次 rc=-11：切换到 M3U8 流")
+                            source.force_quality = None
+                            log("[ByteVC1] FLV rc=-11 → 立即切换到 M3U8 流")
                         else:
-                            # 第3次+：M3U8 也崩溃，逐级降画质
+                            # 已是 M3U8 仍 rc=-11 → 逐级降画质
                             cur_q = source.force_quality or task.quality or "origin"
                             try:
                                 next_q = _QUALITY_FALLBACK[_QUALITY_FALLBACK.index(cur_q) + 1]
                                 source.force_quality = next_q
-                                log(f"[ByteVC1] 第{_rc11_count}次 rc=-11（M3U8）：画质降级 {cur_q} → {next_q}")
+                                log(f"[ByteVC1] M3U8 rc=-11 → 画质降级: {cur_q} → {next_q}")
                             except (ValueError, IndexError):
-                                # 全部画质均 ByteVC1：重置降级链，等待 poll_interval 后重试
-                                # 主播可能之后切换回 H.264，不直接停止任务
+                                # 全部画质均 ByteVC1：重置降级链，等待主播切回 H.264
                                 log(f"[ByteVC1] 所有画质均 rc=-11，{task.poll_interval}s 后重试（等待主播切回 H.264）")
                                 source.force_m3u8 = False
                                 source.force_quality = None

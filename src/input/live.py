@@ -198,9 +198,13 @@ class DouyinLiveSource:
                     url = m3u8_url or record_url or flv_url
             else:
                 url = m3u8_url or record_url or flv_url
-        elif flv_url and not _bytevc1:
+        elif flv_url and not _bytevc1 and flv_codec:
+            # FLV codec 已知且非 ByteVC1（如 codec=h264）→ 安全使用 FLV
             url = flv_url
         elif m3u8_url:
+            # FLV codec 未知（无 codec= 参数，注入失败，可能是 ByteVC1）→ 优先 M3U8 避免崩溃
+            if flv_url and not flv_codec:
+                _log(f"[流] FLV 无 codec 信息（可能 ByteVC1），优先使用 M3U8")
             url = m3u8_url
         else:
             url = record_url or flv_url
