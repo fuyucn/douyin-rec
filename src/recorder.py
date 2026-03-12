@@ -103,7 +103,7 @@ class StreamRecorder:
             output_opts += ["-c:v", "copy", "-c:a", "copy", "-map", "0", "-f", "mpegts"]
 
         cmd = (
-            ["ffmpeg", "-y"]
+            ["ffmpeg", "-y", "-v", "verbose"]
             + input_opts
             + ["-i", self._stream_url]
             + output_opts
