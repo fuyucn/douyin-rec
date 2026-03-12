@@ -523,9 +523,9 @@ async def list_segments(task_id: int):
             "merged": g.already_merged,
             "danmu_merged": g.merged_danmu_mp4.exists(),
             "merging": lk in _merging_prefixes,
-            "merge_error": mr["error"] if (mr and not mr["ok"]) else None,
+            "merge_error": mr["error"] if (mr and not mr["ok"] and not g.already_merged) else None,
         })
-    return {"groups": result}
+    return {"groups": result, "is_running": is_running}
 
 
 @app.post("/api/tasks/{task_id}/merge")

@@ -249,8 +249,8 @@ def merge_group(
                 )
                 if proc.returncode != 0:
                     group.merged_mp4.unlink(missing_ok=True)
-                    err = proc.stderr.decode(errors="replace")[-600:]
-                    raise RuntimeError(f"ffmpeg 合并失败:\n{err}")
+                    err = (proc.stderr + proc.stdout).decode(errors="replace")[-600:].strip()
+                    raise RuntimeError(f"ffmpeg 合并失败 (rc={proc.returncode}): {err or '(无输出)'}")
 
                 # 校验输出文件
                 check = subprocess.run(
@@ -302,8 +302,8 @@ def merge_group(
                 )
                 if proc.returncode != 0:
                     group.merged_danmu_mp4.unlink(missing_ok=True)
-                    err = proc.stderr.decode(errors="replace")[-600:]
-                    raise RuntimeError(f"ffmpeg 弹幕烧录失败:\n{err}")
+                    err = (proc.stderr + proc.stdout).decode(errors="replace")[-600:].strip()
+                    raise RuntimeError(f"ffmpeg 弹幕烧录失败 (rc={proc.returncode}): {err or '(无输出)'}")
 
                 size_mb = group.merged_danmu_mp4.stat().st_size / 1024 / 1024
                 danmu_mp4 = str(group.merged_danmu_mp4)

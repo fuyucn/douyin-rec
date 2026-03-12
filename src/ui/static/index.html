@@ -443,6 +443,7 @@ async function listDelete(id, btn) {
 
 // ── 直播详情视图 ──────────────────────────────────────────
 async function renderDetailView(id) {
+  _detailLastStatus = null;
   const app = document.getElementById('app');
   app.innerHTML = '<div class="flex justify-center py-20"><span class="loading loading-spinner loading-md"></span></div>';
 
@@ -569,6 +570,7 @@ async function loadSegments(taskId) {
       const date = g.date || '未知日期';
       (byDate[date] = byDate[date] || []).push(g);
     }
+    const recording = d.is_running;
     el.innerHTML = Object.entries(byDate).map(([date, groups]) => `
       <div class="mb-2 last:mb-0">
         <div class="text-xs font-semibold opacity-40 mb-1 pt-1">${esc(date)}</div>
@@ -582,12 +584,12 @@ async function loadSegments(taskId) {
                 ? '<span class="badge badge-warning badge-xs gap-1"><span class="loading loading-spinner loading-xs"></span>合并中</span>'
                 : g.merged
                   ? '<span class="badge badge-success badge-outline badge-xs">已合并</span>'
-                  : `<button class="btn btn-xs btn-outline"
+                  : `<button class="btn btn-xs btn-outline" ${recording ? 'disabled title="录制中，请停止后再合并"' : ''}
                        data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="false"
                        onclick="mergeGroup(this)">合并</button>`
               }
               ${g.has_danmu && !g.danmu_merged && !g.merging
-                ? `<button class="btn btn-xs btn-outline btn-info"
+                ? `<button class="btn btn-xs btn-outline btn-info" ${recording ? 'disabled title="录制中，请停止后再合并"' : ''}
                      data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="true"
                      onclick="mergeGroup(this)">烧录弹幕</button>`
                 : (g.danmu_merged ? '<span class="badge badge-info badge-xs">弹幕已合并</span>' : '')
@@ -703,6 +705,7 @@ function connectTaskSSE(id) {
   evtSource.onerror = () => { if (currentView === 'detail') setTimeout(() => connectTaskSSE(id), 2000); };
 }
 
+let _detailLastStatus = null;
 async function refreshDetailStatus(id) {
   try {
     const r = await fetch(`/api/tasks/${id}`);
@@ -719,6 +722,11 @@ async function refreshDetailStatus(id) {
         ${canDelete ? `<button class="btn btn-ghost btn-sm text-error" onclick="detailDelete(${id},this)">删除</button>` : ''}
       `;
     }
+    // Reload segments when task transitions out of running (file writing complete)
+    if (_detailLastStatus === 'running' && task.status !== 'running') {
+      loadSegments(id);
+    }
+    _detailLastStatus = task.status;
     // Update time rows
     const timeRow = document.getElementById('detailTimeRow');
     const startedEl = document.getElementById('detailStartedEl');
