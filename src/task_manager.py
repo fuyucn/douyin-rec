@@ -57,6 +57,12 @@ class LocalVideoWorker:
 LOCAL_ID_OFFSET = 1_000_000
 
 
+def task_dir_name(task_id: int, anchor_name: str | None) -> str:
+    """返回任务输出子目录名：task{id}_{主播名}（特殊字符去掉）"""
+    safe = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]", "", anchor_name or "")
+    return f"task{task_id}_{safe}" if safe else f"task{task_id}"
+
+
 class TaskManager:
     """集中管理任务 DB 操作和运行状态"""
 
@@ -581,9 +587,7 @@ class TaskManager:
 
             # 文件夹：task{id}_{主播名}/
             config.storage.output_dir = str(self._output_dir)
-            _safe_anchor = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]", "", task_name) if task_name else ""
-            _dir_name = f"task{task_id}_{_safe_anchor}" if _safe_anchor else f"task{task_id}"
-            storage = StorageManager(config.storage, name=_dir_name)
+            storage = StorageManager(config.storage, name=task_dir_name(task_id, task_name))
             segment_sec = task.segment_sec if task.enable_segment else 0
             poll_interval = task.poll_interval
 
