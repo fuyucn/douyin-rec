@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import re
 import random
 import subprocess
 import threading
@@ -578,9 +579,11 @@ class TaskManager:
                 features.append("截图")
             log(f"已启用: {', '.join(features)}")
 
-            # 文件夹按任务 ID 分类，文件名仍用主播名
+            # 文件夹：task_{id}_{主播名}/
             config.storage.output_dir = str(self._output_dir)
-            storage = StorageManager(config.storage, name=f"task_{task_id}")
+            _safe_anchor = re.sub(r"[^\w\u4e00-\u9fff\U0001F000-\U0001FFFF\-]", "_", task_name) if task_name else ""
+            _dir_name = f"task_{task_id}_{_safe_anchor}" if _safe_anchor else f"task_{task_id}"
+            storage = StorageManager(config.storage, name=_dir_name)
             segment_sec = task.segment_sec if task.enable_segment else 0
             poll_interval = task.poll_interval
 
