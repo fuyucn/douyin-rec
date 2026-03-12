@@ -51,9 +51,10 @@ class StreamRecorder:
         )
 
         # 基础 ffmpeg 参数（对齐 DouyinLiveRecorder，经 10 分钟实测无崩溃）
-        # -re: 限速至 native frame rate，防止 ByteVC1 在 macOS 上初始化过快触发 SIGSEGV
-        # 注意：-reconnect_* 仅作为 M3U8 的输入选项；FLV 不加（DouyinLiveRecorder 的 reconnect_* 在 -i 之后，属于输出选项，不影响 FLV 输入）
+        # -re 仅对 FLV 加：限速至 native frame rate，防止 ByteVC1 在 macOS 上初始化过快触发 SIGSEGV
+        # M3U8 不加 -re：HLS 分段本身已有速率控制，-re 反而可能导致时序问题
         url_path = self._stream_url.split("?")[0].lower()
+        is_m3u8 = url_path.endswith(".m3u8")
         base_input_opts: list[str] = [
             "-loglevel", "error",
             "-hide_banner",
@@ -64,16 +65,16 @@ class StreamRecorder:
             "-thread_queue_size", "1024",
             "-user_agent", user_agent,
             "-fflags", "+discardcorrupt",
-            "-re",
         ]
-        if url_path.endswith(".m3u8"):
+        if is_m3u8:
             input_opts = base_input_opts + [
                 "-reconnect_streamed", "1",
                 "-reconnect_at_eof", "1",
                 "-reconnect_delay_max", "60",
             ]
         else:
-            input_opts = base_input_opts
+            # FLV: 加 -re 防止 ByteVC1 初始化过快崩溃
+            input_opts = base_input_opts + ["-re"]
 
         # 输出参数（对齐 DouyinLiveRecorder）
         # -reconnect_* 放输出侧：对 FLV 流也启用，在段内断流时自动续连
