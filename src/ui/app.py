@@ -39,7 +39,10 @@ async def index():
 
 def _task_output_dir(t) -> str:
     """计算任务对应的输出子目录绝对路径（与 task_manager 保持一致）"""
-    return str(Path(_config.storage.output_dir).resolve() / f"task_{t.id}")
+    import re as _re
+    safe = _re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]", "", t.name or "") if t.name else ""
+    dir_name = f"task{t.id}_{safe}" if safe else f"task{t.id}"
+    return str(Path(_config.storage.output_dir).resolve() / dir_name)
 
 
 def _serialize_task(t, worker_status: str = "", recording_started_at: str | None = None) -> dict:
