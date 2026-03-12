@@ -41,7 +41,7 @@
 | 参数 | 值 | 作用 | 影响 |
 |------|----|------|------|
 | `-thread_queue_size` | `1024` | demux 线程向 decode/encode 线程传包的队列大小（包数） | 过小会报 "Thread message queue blocking"，导致丢包；1024 足够直播场景 |
-| `-headers` | `Referer + UA` | 附加到 HTTP 请求头 | 抖音 CDN 校验 Referer；UA 模拟移动端避免限流。**⚠️ 不传 Cookie**：`hevc_supported=true` 等 cookie 会让部分 CDN（pull-q5）切换为 ByteVC1，导致 SIGSEGV (rc=-11)。流 URL 已有内嵌 auth（volcSecret/sign），不需要 Cookie。与 DouyinLiveRecorder 一致。 |
+| `-user_agent` | `Samsung UA` | 设置 HTTP User-Agent | UA 模拟移动端避免限流。**⚠️ 不传 Referer/Cookie**：`Referer` 和 `hevc_supported=true` 等 cookie 会让部分 CDN（pull-q5、pull-flv-l11）切换为 ByteVC1，导致 SIGSEGV (rc=-11)。流 URL 已有内嵌 auth（volcSecret/sign），不需要额外头部。与 DouyinLiveRecorder 一致（DLR 也只用 `-user_agent`）。 |
 | `-fflags +discardcorrupt` | — | 遇到损坏包时丢弃而不是中断 | 直播流中偶发的花屏/损坏包不会让 ffmpeg 退出 |
 
 ### 限速
