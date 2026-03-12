@@ -552,7 +552,8 @@ async def merge_segments(task_id: int, request: Request):
     output_dir = Path(_task_output_dir(t))
     from src.merge.merger import discover_groups, merge_group
 
-    groups = discover_groups(output_dir)
+    is_running = (t.status == "running")
+    groups = discover_groups(output_dir, exclude_last=is_running)
     target = next((g for g in groups if g.prefix == prefix), None)
     if target is None:
         return JSONResponse({"error": f"未找到录制组: {prefix}"}, status_code=404)
