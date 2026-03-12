@@ -41,16 +41,13 @@ class StreamRecorder:
             return
         Path(self._output_path).parent.mkdir(parents=True, exist_ok=True)
 
-        # 通用选项：超时 + 抖音 CDN Referer + 浏览器 UA + 丢弃损坏包
-        # ⚠️ 不传 Cookie：部分 CDN（pull-q5.douyincdn.com）看到 Cookie 中的
-        # hevc_supported=true 后会切换为 ByteVC1 流，导致 ffmpeg SIGSEGV (rc=-11)。
-        # 流 URL 已通过 volcSecret/sign/t 参数携带认证信息，无需 Cookie。
-        # 与 DouyinLiveRecorder 保持一致：只传 User-Agent，不传 Referer/Cookie。
-        headers = (
-            "Referer: https://live.douyin.com\r\n"
-            "User-Agent: Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) "
+        # ⚠️ 与 DouyinLiveRecorder 完全对齐：只传 User-Agent，不传 Referer/Cookie。
+        # 部分 CDN（pull-q5、pull-flv-l11）对 Referer/Cookie 敏感，
+        # 会切换为 ByteVC1 流导致 ffmpeg SIGSEGV (rc=-11)。
+        user_agent = (
+            "Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "SamsungBrowser/14.2 Chrome/87.0.4280.141 Mobile Safari/537.36\r\n"
+            "SamsungBrowser/14.2 Chrome/87.0.4280.141 Mobile Safari/537.36"
         )
 
         # 基础 ffmpeg 参数（对齐 DouyinLiveRecorder，经 10 分钟实测无崩溃）
@@ -65,7 +62,7 @@ class StreamRecorder:
             "-probesize", "10000000",
             "-protocol_whitelist", "rtmp,crypto,file,http,https,tcp,tls,udp,rtp,httpproxy",
             "-thread_queue_size", "1024",
-            "-headers", headers,
+            "-user_agent", user_agent,
             "-fflags", "+discardcorrupt",
             "-re",
         ]
