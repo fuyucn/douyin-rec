@@ -581,7 +581,7 @@ class TaskManager:
 
             # 文件夹：task_{id}_{主播名}/
             config.storage.output_dir = str(self._output_dir)
-            _safe_anchor = re.sub(r"[^\w\u4e00-\u9fff\U0001F000-\U0001FFFF\-]", "_", task_name) if task_name else ""
+            _safe_anchor = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]", "", task_name) if task_name else ""
             _dir_name = f"task_{task_id}_{_safe_anchor}" if _safe_anchor else f"task_{task_id}"
             storage = StorageManager(config.storage, name=_dir_name)
             segment_sec = task.segment_sec if task.enable_segment else 0
