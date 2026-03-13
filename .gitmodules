@@ -1,0 +1,3 @@
+[submodule "vendor/DouyinLiveRecorder"]
+	path = vendor/DouyinLiveRecorder
+	url = https://github.com/ihmily/DouyinLiveRecorder.git

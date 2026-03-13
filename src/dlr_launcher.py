@@ -8,6 +8,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -15,8 +16,10 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
-_DLR_ROOT = Path("/Users/yuf/Developer/DouyinLiveRecorder")
-_DLR_PYTHON = _DLR_ROOT / ".venv/bin/python"
+# vendor/DouyinLiveRecorder — git submodule，路径相对于本文件位置
+_DLR_ROOT = Path(__file__).resolve().parent.parent / "vendor" / "DouyinLiveRecorder"
+# 使用当前 venv 的 Python（已包含 DLR 所需的所有依赖）
+_DLR_PYTHON = Path(sys.executable)
 
 _QUALITY_MAP = {
     "origin": "原画",
