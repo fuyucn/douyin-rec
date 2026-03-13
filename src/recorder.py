@@ -3,10 +3,30 @@
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
+
+from src.dlr.recorder import build_ffmpeg_command, stop_ffmpeg
+
+
+def _reset_signals_preexec() -> None:
+    """在 fork 后、exec 前重置所有信号为默认值。
+
+    uvicorn/asyncio 会修改父进程的信号 disposition，fork 时子进程继承这些状态，
+    可能导致 ffmpeg 在第二次+ 启动时 SIGSEGV (rc=-11)。
+    重置信号恢复 ffmpeg 期望的干净环境。
+    使用 preexec_fn 时 Python 改用 fork+exec（非 posix_spawn）。
+    """
+    os.setsid()  # 新会话（等效于 start_new_session=True）
+    for sig in range(1, signal.NSIG):
+        try:
+            signal.signal(sig, signal.SIG_DFL)
+        except (OSError, ValueError):
+            pass
 
 logger = logging.getLogger(__name__)
 
@@ -41,53 +61,14 @@ class StreamRecorder:
             return
         Path(self._output_path).parent.mkdir(parents=True, exist_ok=True)
 
-        # ffmpeg 参数与 biliLive-tools DouYinRecorder 完全对齐
-        # 参考: packages/DouYinRecorder/src/index.ts + packages/liveManager/src/downloader/FFmpegDownloader.ts
-        user_agent = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/73.0.3683.86 Safari/537.36"
+        cmd = build_ffmpeg_command(
+            self._stream_url,
+            self._output_path,
+            self._segment_duration,
+            self._cookies,
         )
 
         url_path = self._stream_url.split("?")[0].lower()
-        is_m3u8 = url_path.endswith(".m3u8")
-
-        # 输入参数（ffmpegInputOptions from DouYinRecorder index.ts）
-        # -loglevel debug: biliLive-tools 实测必加，防止从 Python subprocess 启动时 SIGSEGV (rc=-11)
-        input_opts: list[str] = [
-            "-loglevel", "debug",
-            "-rw_timeout", "10000000",
-            "-timeout", "10000000",
-            "-user_agent", user_agent,
-        ]
-        # Cookie header（若提供）
-        if self._cookies:
-            input_opts += ["-headers", f"Cookie:{self._cookies}\r\n"]
-        # HLS reconnect（FFmpegDownloader.ts createCommand: isHls 时追加）
-        if is_m3u8:
-            input_opts += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "3"]
-
-        # 输出参数（FFmpegDownloader.ts buildOutputOptions）
-        output_opts: list[str] = [
-            "-c", "copy",
-            "-movflags", "+frag_keyframe+empty_moov+separate_moof",
-            "-fflags", "+genpts+igndts",
-            "-min_frag_duration", "10000000",
-        ]
-        if self._segment_duration > 0:
-            output_opts += [
-                "-f", "segment",
-                "-segment_time", str(self._segment_duration),
-                "-reset_timestamps", "1",
-            ]
-
-        cmd = (
-            ["ffmpeg", "-y"]
-            + input_opts
-            + ["-i", self._stream_url]
-            + output_opts
-            + [self._output_path]
-        )
-
         proto_label = "HLS" if url_path.endswith(".m3u8") else "FLV"
         logger.info("开始录制 (%s): %s", proto_label, self._output_path)
         logger.debug("ffmpeg cmd: %s", " ".join(cmd))
@@ -96,6 +77,7 @@ class StreamRecorder:
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            preexec_fn=_reset_signals_preexec,  # fork+exec 路径，重置信号，防 SIGSEGV (rc=-11)
         )
 
         # 后台读取 stderr，防止 pipe buffer 满 + 监控丢帧
@@ -138,22 +120,21 @@ class StreamRecorder:
         if self._process is None:
             return
         logger.info("正在停止录制...")
-        try:
-            self._process.stdin.write(b"q")
-            self._process.stdin.flush()
-        except (BrokenPipeError, OSError):
-            pass
-        try:
-            self._process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            logger.warning("ffmpeg 未响应，强制终止")
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-        logger.info("录制已停止: %s", self._output_path)
+        proc = self._process
         self._process = None
+        stop_ffmpeg(proc)
+        # 显式关闭 pipes，确保 monitor thread 尽快退出（防止 fd 重用竞态）
+        for pipe in (proc.stdin, proc.stderr):
+            try:
+                if pipe and not pipe.closed:
+                    pipe.close()
+            except Exception:
+                pass
+        # 等待 monitor thread 结束，再返回（下一次 start() 会创建新 Popen）
+        if self._stderr_thread and self._stderr_thread.is_alive():
+            self._stderr_thread.join(timeout=3)
+        self._stderr_thread = None
+        logger.info("录制已停止: %s", self._output_path)
 
     @property
     def last_exit_code(self) -> int | None:

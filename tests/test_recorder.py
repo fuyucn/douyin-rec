@@ -1,10 +1,12 @@
 """测试 StreamRecorder"""
 
 import re
+import signal
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from src.recorder import StreamRecorder
+from src.dlr.recorder import build_ffmpeg_command
 
 
 def test_make_output_path_no_segment(tmp_path):
@@ -60,11 +62,18 @@ def test_recorder_start_segment(tmp_path):
         assert cmd[idx + 1] == "segment"
         assert "-segment_time" in cmd
         assert "1800" in cmd
+        assert "-segment_format" in cmd
+        idx2 = cmd.index("-segment_format")
+        assert cmd[idx2 + 1] == "mpegts"
+        assert "-fflags" in cmd
+        idx3 = cmd.index("-fflags")
+        assert "+discardcorrupt" in cmd[idx3 + 1]
+        assert "-movflags" not in cmd
         rec._process = None  # cleanup
 
 
 def test_recorder_start_no_segment(tmp_path):
-    """非分段模式下 ffmpeg 命令不包含 -segment_time，使用 -c copy"""
+    """非分段模式下 ffmpeg 命令不包含 -segment_time，使用 -c:v copy"""
     out = str(tmp_path / "test.ts")
     rec = StreamRecorder("http://example.com/stream", out, segment_duration=0)
 
@@ -75,22 +84,25 @@ def test_recorder_start_no_segment(tmp_path):
         rec.start()
         cmd = mock_popen.call_args[0][0]
         assert "-segment_time" not in cmd
-        assert "-c" in cmd
-        assert "copy" in cmd
+        assert "-c:v" in cmd
+        idx = cmd.index("-c:v")
+        assert cmd[idx + 1] == "copy"
+        assert "-movflags" not in cmd
         rec._process = None  # cleanup
 
 
 def test_recorder_stop():
-    """stop() 正常停止 ffmpeg 进程"""
+    """stop() 发送 SIGINT 停止 ffmpeg 进程（非 Windows）"""
     rec = StreamRecorder("http://example.com/stream", "/tmp/test.ts")
     mock_proc = MagicMock()
     mock_proc.stdin = MagicMock()
     mock_proc.wait.return_value = 0
     rec._process = mock_proc
 
-    rec.stop()
+    with patch("os.name", "posix"):
+        rec.stop()
 
-    mock_proc.stdin.write.assert_called_once_with(b"q")
+    mock_proc.send_signal.assert_called_once_with(signal.SIGINT)
     mock_proc.wait.assert_called()
     assert rec._process is None
 
@@ -107,3 +119,34 @@ def test_recorder_is_running():
 
     mock_proc.poll.return_value = 0  # 进程已退出
     assert rec.is_running is False
+
+
+def test_build_ffmpeg_command_dlr_params():
+    """build_ffmpeg_command 包含所有 DLR 关键参数"""
+    cmd = build_ffmpeg_command("http://example.com/live.flv", "/tmp/out.ts")
+    assert "-rw_timeout" in cmd
+    assert "15000000" in cmd
+    assert "-fflags" in cmd
+    assert "+discardcorrupt" in cmd
+    assert "-analyzeduration" in cmd
+    assert "-probesize" in cmd
+    assert "-correct_ts_overflow" in cmd
+    assert "-avoid_negative_ts" in cmd
+    assert "-movflags" not in cmd
+
+
+def test_build_ffmpeg_command_with_cookies():
+    """cookies 参数正确注入为 -headers"""
+    cmd = build_ffmpeg_command("http://example.com/live.flv", "/tmp/out.ts", cookies="sid=abc")
+    assert "-headers" in cmd
+    idx = cmd.index("-headers")
+    assert "Cookie:sid=abc" in cmd[idx + 1]
+
+
+def test_build_ffmpeg_command_segment():
+    """分段模式包含 -segment_format mpegts"""
+    cmd = build_ffmpeg_command("http://example.com/live.flv", "/tmp/out_%03d.ts", segment_duration=1800)
+    assert "-segment_format" in cmd
+    idx = cmd.index("-segment_format")
+    assert cmd[idx + 1] == "mpegts"
+    assert "-reset_timestamps" in cmd
