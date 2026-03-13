@@ -361,25 +361,64 @@ _DEFAULT_COOKIE = (
 )
 
 
-def _inject_origin_quality(room_data: dict, stream_data_str: str) -> None:
-    """将 ORIGIN 画质注入到 flv_pull_url / hls_pull_url_map 的末尾（备用）。
+def _extract_quality_urls(stream_data_str: str) -> tuple[dict[str, dict], str]:
+    """从 stream_data_str JSON 提取各画质 FLV + M3U8 地址（与 biliLive-tools 保持一致）。
 
-    ⚠️ 注入 URL 使用 wsSecret/wsTime auth 格式，与 flv_pull_url 原始条目的
-    expire/sign 格式不同。wsSecret/wsTime 格式可能被路由到 ByteVC1 CDN 节点。
-    因此 ORIGIN 放末尾，position-based lookup 优先使用原始条目（与 DLR 一致）。
+    stream_data_str 结构：{"data": {"origin": {"main": {"flv": ..., "hls": ..., "sdk_params": ...}}, "uhd": {...}, ...}}
+
+    返回: (quality_urls, vcodec)
+      quality_urls: {'origin': {'flv': url, 'm3u8': url}, 'uhd': {...}, ...}
+      vcodec: origin 画质的 VCodec 小写（如 'h264'），仅供日志，不再追加到 URL
+    """
+    quality_urls: dict[str, dict] = {}
+    vcodec = ''
+    try:
+        sd = json.loads(stream_data_str)
+        data = sd.get('data', {})
+        for q_key, q_data in data.items():
+            main = q_data.get('main', {})
+            if not main:
+                continue
+            flv = main.get('flv', '')
+            hls = main.get('hls', '')
+            sdk_params_raw = main.get('sdk_params', '{}')
+            codec = ''
+            if isinstance(sdk_params_raw, str):
+                try:
+                    codec = json.loads(sdk_params_raw).get('VCodec', '')
+                except Exception:
+                    pass
+            elif isinstance(sdk_params_raw, dict):
+                codec = sdk_params_raw.get('VCodec', '')
+            if q_key == 'origin' and codec:
+                vcodec = codec.lower()
+            # 直接使用 API 原始 URL，不追加 codec= 参数（与 biliLive-tools 一致）
+            quality_urls[q_key] = {'flv': flv, 'm3u8': hls}
+    except Exception:
+        pass
+    return quality_urls, vcodec
+
+
+def _inject_origin_quality(room_data: dict, stream_data_str: str) -> None:
+    """将 ORIGIN 画质注入到 flv_pull_url / hls_pull_url_map 的末尾（fallback 兼容）。
+
+    供 get_douyin_stream_url fallback 路径使用；主路径已改为 _quality_urls。
     """
     try:
         sd = json.loads(stream_data_str)
         if 'origin' not in sd.get('data', {}):
             return
         origin_main = sd['data']['origin']['main']
-        sdk_params = json.loads(origin_main.get('sdk_params', '{}'))
+        sdk_params_raw = origin_main.get('sdk_params', '{}')
+        if isinstance(sdk_params_raw, str):
+            sdk_params = json.loads(sdk_params_raw)
+        else:
+            sdk_params = sdk_params_raw
         codec = sdk_params.get('VCodec', '')
         if codec:
-            room_data['_vcodec'] = codec.lower()  # 供 get_douyin_stream_url 追加 codec= 参数
-        origin_m3u8 = {'ORIGIN': origin_main['hls'] + '&codec=' + codec}
-        origin_flv = {'ORIGIN': origin_main['flv'] + '&codec=' + codec}
-        # 原始条目优先（expire/sign 格式，H.264 CDN）；ORIGIN 放末尾备用
+            room_data['_vcodec'] = codec.lower()
+        origin_m3u8 = {'ORIGIN': origin_main['hls']}
+        origin_flv = {'ORIGIN': origin_main['flv']}
         room_data['stream_url']['hls_pull_url_map'] = {
             **room_data['stream_url'].get('hls_pull_url_map', {}), **origin_m3u8}
         room_data['stream_url']['flv_pull_url'] = {
@@ -422,7 +461,12 @@ async def get_douyin_web_stream_data(url: str, cookies: str | None = None) -> di
                 stream_data_str = pull_datas[key]['stream_data']
             else:
                 stream_data_str = live_core['pull_data']['stream_data']
-            _inject_origin_quality(room_data, stream_data_str)
+            quality_urls, vcodec = _extract_quality_urls(stream_data_str)
+            if quality_urls:
+                room_data['_quality_urls'] = quality_urls
+            if vcodec:
+                room_data['_vcodec'] = vcodec
+            _inject_origin_quality(room_data, stream_data_str)  # fallback
     return room_data
 
 
@@ -472,7 +516,12 @@ async def get_douyin_app_stream_data(url: str, cookies: str | None = None) -> di
                 stream_data_str = pull_datas[key]['stream_data']
             else:
                 stream_data_str = live_core['pull_data']['stream_data']
-            _inject_origin_quality(room_data, stream_data_str)
+            quality_urls, vcodec = _extract_quality_urls(stream_data_str)
+            if quality_urls:
+                room_data['_quality_urls'] = quality_urls
+            if vcodec:
+                room_data['_vcodec'] = vcodec
+            _inject_origin_quality(room_data, stream_data_str)  # fallback
     return room_data
 
 
@@ -501,35 +550,50 @@ async def get_douyin_stream_data(url: str, cookies: str | None = None) -> dict:
             return json_data
 
         stream_orientation = json_data['stream_url'].get('stream_orientation', 1)
-        origin_url_list = None
         matches2 = re.findall(r'"(\{\\"common\\":.*?)"]\)</script><script nonce=', html_str)
         if matches2:
             js2 = matches2[0] if stream_orientation == 1 else matches2[1]
             jd2 = json.loads(js2.replace('\\', '').replace('"{', '{').replace('}"', '}').replace('u0026', '&'))
-            if 'origin' in jd2.get('data', {}):
-                origin_url_list = jd2['data']['origin']['main']
+            # 从 jd2 中提取所有画质 URL（新逻辑：遍历所有 quality key）
+            quality_urls, vcodec = _extract_quality_urls(json.dumps(jd2))
+            if quality_urls:
+                json_data['_quality_urls'] = quality_urls
+            if vcodec:
+                json_data['_vcodec'] = vcodec
+            # 保留 ORIGIN 注入到 flv_pull_url 作为 fallback
+            origin_entry = quality_urls.get('origin', {})
+            if origin_entry.get('flv'):
+                json_data['stream_url']['flv_pull_url'] = {
+                    **json_data['stream_url'].get('flv_pull_url', {}),
+                    'ORIGIN': origin_entry['flv']}
+            if origin_entry.get('m3u8'):
+                json_data['stream_url']['hls_pull_url_map'] = {
+                    **json_data['stream_url'].get('hls_pull_url_map', {}),
+                    'ORIGIN': origin_entry['m3u8']}
         else:
+            # regex fallback：仅能提取 origin 画质
             h2 = html_str.replace('\\', '').replace('u0026', '&')
             m3 = re.search(r'"origin":\\{"main":(.*?),"dash"', h2, re.DOTALL)
             if m3:
                 origin_url_list = json.loads(m3.group(1) + '}')
-
-        if origin_url_list:
-            codec = origin_url_list.get('sdk_params', {}).get('VCodec', '') if isinstance(origin_url_list.get('sdk_params'), dict) else ''
-            if isinstance(origin_url_list.get('sdk_params'), str):
-                try:
-                    codec = json.loads(origin_url_list['sdk_params']).get('VCodec', '')
-                except Exception:
-                    codec = ''
-            if codec:
-                json_data['_vcodec'] = codec.lower()  # 供 get_douyin_stream_url 追加 codec= 参数
-            origin_m3u8 = {'ORIGIN': origin_url_list['hls'] + '&codec=' + codec}
-            origin_flv = {'ORIGIN': origin_url_list['flv'] + '&codec=' + codec}
-            # 原始条目优先（可能是 expire/sign 格式，H.264 CDN）；ORIGIN 放末尾备用
-            json_data['stream_url']['hls_pull_url_map'] = {
-                **json_data['stream_url'].get('hls_pull_url_map', {}), **origin_m3u8}
-            json_data['stream_url']['flv_pull_url'] = {
-                **json_data['stream_url'].get('flv_pull_url', {}), **origin_flv}
+                sdk_params_raw = origin_url_list.get('sdk_params', '{}')
+                codec = ''
+                if isinstance(sdk_params_raw, str):
+                    try:
+                        codec = json.loads(sdk_params_raw).get('VCodec', '')
+                    except Exception:
+                        pass
+                elif isinstance(sdk_params_raw, dict):
+                    codec = sdk_params_raw.get('VCodec', '')
+                if codec:
+                    json_data['_vcodec'] = codec.lower()
+                flv = origin_url_list.get('flv', '')
+                hls = origin_url_list.get('hls', '')
+                json_data['_quality_urls'] = {'origin': {'flv': flv, 'm3u8': hls}}
+                json_data['stream_url']['flv_pull_url'] = {
+                    **json_data['stream_url'].get('flv_pull_url', {}), 'ORIGIN': flv}
+                json_data['stream_url']['hls_pull_url_map'] = {
+                    **json_data['stream_url'].get('hls_pull_url_map', {}), 'ORIGIN': hls}
         return json_data
 
     except Exception as e:
@@ -554,14 +618,10 @@ QUALITY_MAP = {
 }
 
 
-# 画质 index → URL dict 中的候选 key 名称（优先级从高到低）
-# 抖音 API 的 flv_pull_url / hls_pull_url_map 可能以 OD/UHD/HD/SD/LD 为 key，
-# 我们自己注入的 origin URL 用 'ORIGIN' key。
+# 画质 index → flv_pull_url / hls_pull_url_map 中的候选 key 名称（fallback 路径使用）
+# 主路径已改为 _quality_urls；此 dict 仅在 _quality_urls 不可用时作为 fallback。
 _QUALITY_KEY_NAMES: dict[int, list[str]] = {
-    # origin — ORIGIN 是我们注入的 URL（sdk_params origin_main，expire/sign + codec=h264）
-    # 在 cookie 移除 hevc_supported 后，ORIGIN 始终为 H.264 且路径一致（如 _or4）。
-    # FULL_HD1 在 CDN 负载均衡时可能指向 ByteVC1 变体（如 _Stage0T000ld），不稳定。
-    0: ['ORIGIN', 'FULL_HD1', 'OD', 'BD'],
+    0: ['FULL_HD1', 'OD', 'BD', 'ORIGIN'],
     1: ['UHD'],
     2: ['HD'],
     3: ['SD'],
@@ -611,42 +671,35 @@ async def get_douyin_stream_url(room_data: dict, quality: str = "origin") -> dic
     quality_code = QUALITY_MAP.get(quality.lower(), "OD")
     qi = _QUALITY_MAPPING.get(quality_code, 0)
 
-    stream_url = room_data['stream_url']
-    flv_dict = stream_url.get('flv_pull_url', {})
-    m3u8_dict = stream_url.get('hls_pull_url_map', {})
+    flv_url: str | None = None
+    m3u8_url: str | None = None
 
-    # 按 key 名优先查找（避免因 dict 顺序不定而选错画质）
-    flv_url, flv_key = _lookup_quality(flv_dict, qi)
-    m3u8_url, m3u8_key = _lookup_quality(m3u8_dict, qi)
-
-    # 若 API 原始条目缺少 codec= 参数，追加已知 VCodec（与 DLR 一致）。
-    # pull-q5/stage/ CDN 默认 ByteVC1，需要 &codec=h264 才路由到 H.264 流。
-    vcodec = room_data.get('_vcodec', '')
-    def _with_codec(url: str | None) -> str | None:
-        if not url or not vcodec or 'codec=' in url:
-            return url
-        sep = '&' if '?' in url else '?'
-        return url + sep + 'codec=' + vcodec
-    flv_url = _with_codec(flv_url)
-    m3u8_url = _with_codec(m3u8_url)
-
-    _log.info(
-        "[spider] flv_pull_url keys=%s → selected key=%s url_auth=%s vcodec=%s",
-        list(flv_dict.keys()), flv_key,
-        "wsSecret" if flv_url and "wsSecret" in flv_url else
-        "expire/sign" if flv_url and "expire=" in flv_url else
-        "k/t" if flv_url and "&k=" in flv_url else "unknown",
-        vcodec or "(none)",
-    )
-
-    # 若目标画质 M3U8 不可用，尝试相邻画质
-    if m3u8_url and not await _check_url_alive(m3u8_url):
-        m3u8_list = list(m3u8_dict.values())
-        flv_list = list(flv_dict.values())
-        alt = qi + 1 if qi < 4 else qi - 1
-        if alt < len(m3u8_list):
-            m3u8_url = m3u8_list[alt]
-            flv_url = flv_list[alt] if alt < len(flv_list) else flv_url
+    # 主路径：从 _quality_urls 直接取 API stream_data 中的各画质原始 URL（与 biliLive-tools 一致）。
+    # 不追加 codec= 参数——URL 由 Douyin 服务端路由，无需客户端干预。
+    quality_urls = room_data.get('_quality_urls', {})
+    _qentry = quality_urls.get(quality.lower(), {}) if quality_urls else {}
+    _qflv = _qentry.get('flv') or None
+    _qm3u8 = _qentry.get('m3u8') or None
+    if _qflv:
+        flv_url = _qflv
+        m3u8_url = _qm3u8
+        _log.info(
+            "[spider] _quality_urls[%s] flv=%s m3u8=%s",
+            quality,
+            flv_url.split("?")[0] if flv_url else "(无)",
+            m3u8_url.split("?")[0] if m3u8_url else "(无)",
+        )
+    else:
+        # fallback：使用 flv_pull_url / hls_pull_url_map（原始 API dict）
+        stream_url = room_data.get('stream_url', {})
+        flv_dict = stream_url.get('flv_pull_url', {})
+        m3u8_dict = stream_url.get('hls_pull_url_map', {})
+        flv_url, flv_key = _lookup_quality(flv_dict, qi)
+        m3u8_url, _m3u8_key = _lookup_quality(m3u8_dict, qi)
+        _log.info(
+            "[spider] fallback flv_pull_url keys=%s → selected key=%s",
+            list(flv_dict.keys()), flv_key,
+        )
 
     result.update({
         'is_live': True,

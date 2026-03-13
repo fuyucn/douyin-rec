@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 
 import cv2
@@ -63,8 +62,6 @@ class DouyinLiveSource:
         self._cap: cv2.VideoCapture | None = None
         self._frame_index = 0
         self.streamer_name: str | None = None  # 主播昵称 (连接后可用)
-        self.force_m3u8: bool = False  # True = 强制 M3U8（rc=-11 fallback；ByteVC1 FLV 会自动走 M3U8）
-        self.force_quality: str | None = None  # 覆盖画质（ByteVC1 降级链：origin→uhd→hd→sd→ld）
 
     # -- 内部方法 ---------------------------------------------------------------
 
@@ -97,7 +94,8 @@ class DouyinLiveSource:
 
     def _extract_stream_url(self, log_fn=None) -> str:
         """提取直播流地址，更新 streamer_name 和 _flv_url。
-        log_fn: 可选回调 (str) -> None，将关键决策路由到任务日志（ByteVC1 检测、URL 选择等）。
+        log_fn: 可选回调 (str) -> None，将关键决策路由到任务日志。
+        与 biliLive-tools 一致：FLV 优先，HLS 作 fallback，不做 codec 检测。
         """
         def _log(msg: str) -> None:
             logger.info(msg)
@@ -105,7 +103,7 @@ class DouyinLiveSource:
                 log_fn(msg)
 
         cookies = self._get_cookie_string()
-        quality = self.force_quality or self._config.quality.lower()
+        quality = self._config.quality.lower()
 
         async def _fetch():
             room_data = await get_douyin_stream_data(self._url, cookies=cookies)
@@ -127,99 +125,33 @@ class DouyinLiveSource:
         flv_url = stream_info.get("flv_url")
         m3u8_url = stream_info.get("m3u8_url")
         self._flv_url = flv_url
-        self._m3u8_url = m3u8_url  # 存储 M3U8 地址供 rc=-11 fallback 使用
+        self._m3u8_url = m3u8_url
 
         def _url_base(u: str | None) -> str:
             return u.split("?")[0] if u else "(无)"
 
-        # URL 选择策略:
-        #   默认 FLV 优先（无 -f live_flv，与 DouyinLiveRecorder 一致）
-        #   若 FLV codec=bytevc1/hevc，直接用 M3U8（ffmpeg 对 ByteVC1 FLV 会 SIGSEGV）
-        #   若 force_m3u8=True（连续 rc=-11 触发），也用 M3U8
-        def _codec(u: str | None) -> str:
-            if not u:
-                return ""
-            m = re.search(r"[?&]codec=([^&]+)", u)
-            return m.group(1).lower() if m else ""
-
-        def _is_bytevc1(u: str | None) -> bool:
-            """检测 URL 是否为 ByteVC1/HEVC 流。
-            仅凭 codec= 参数判断；无参数时不猜测（_or4 路径可能是 H.264 或 ByteVC1）。
-            """
+        # URL 选择策略（FLV 优先，HLS fallback）
+        # macOS 特殊处理：_Stage0T000*.flv 是 ByteVC1 passthrough，在 macOS ffmpeg 上必 SIGSEGV
+        # biliLive-tools 在 Win/Linux 无此问题，但我们需要绕过
+        def _is_bytevc1_path(u: str | None) -> bool:
             if not u:
                 return False
-            codec = _codec(u)
-            return codec in ("bytevc1", "hevc", "h265")
+            path = u.split("?")[0]
+            return "_Stage0T000" in path
 
-        record_url = stream_info.get("record_url")
-        flv_codec = _codec(flv_url)
-        _bytevc1 = _is_bytevc1(flv_url)
-
-        # M3U8 画质降级列表（按优先级）：从当前 force_quality 开始向下找
-        _M3U8_QUALITY_ORDER = ["origin", "uhd", "hd", "sd", "ld"]
-
-        def _pick_non_bytevc1_m3u8(room_data: dict, start_quality: str) -> tuple[str | None, str]:
-            """从 room_data 中按画质顺序找第一个非 ByteVC1 的 M3U8 URL。
-            返回 (url, quality_label)，找不到时返回 (None, start_quality)。
-            """
-            from src.input.douyin_spider import QUALITY_MAP, _QUALITY_MAPPING
-            m3u8_list = list(room_data.get("stream_url", {}).get("hls_pull_url_map", {}).values())
-            while len(m3u8_list) < 5:
-                if not m3u8_list:
-                    return None, start_quality
-                m3u8_list.append(m3u8_list[-1])
-
-            qi_start = _QUALITY_MAPPING.get(QUALITY_MAP.get(start_quality, "OD"), 0)
-            for q in _M3U8_QUALITY_ORDER[qi_start:]:
-                qi = _QUALITY_MAPPING.get(QUALITY_MAP.get(q, "OD"), 0)
-                candidate = m3u8_list[qi] if qi < len(m3u8_list) else m3u8_list[-1]
-                if not _is_bytevc1(candidate):
-                    return candidate, q
-            return None, start_quality  # 全是 ByteVC1，返回 None
-
-        if self.force_m3u8 or _bytevc1:
-            # ByteVC1 模式（FLV 检测到 ByteVC1，或上次 rc=-11 切换到 M3U8）
-            # 先确认 M3U8 origin 是否也是 ByteVC1；若是，直接扫描更低画质
-            if _bytevc1 and not self.force_m3u8:
-                _log(f"[ByteVC1] FLV 检测到 ByteVC1 (codec={flv_codec or '?'})，改用 M3U8 流")
-            elif self.force_m3u8:
-                _log(f"[ByteVC1] force_m3u8=True（上次 rc=-11 触发），使用 M3U8 流")
-            start_q = self.force_quality or quality
-            if _is_bytevc1(m3u8_url):
-                # origin M3U8 也是 ByteVC1 → 直接找非 ByteVC1 画质，避免无谓崩溃
-                non_bytevc1_url, picked_q = _pick_non_bytevc1_m3u8(room_data, start_q)
-                if non_bytevc1_url:
-                    if picked_q != start_q:
-                        _log(f"[ByteVC1] M3U8 origin 也是 ByteVC1，直接降级到 {picked_q}")
-                        self.force_quality = picked_q
-                    url = non_bytevc1_url
-                else:
-                    _log("[ByteVC1] ⚠️ 所有 M3U8 画质均为 ByteVC1，无法避免崩溃")
-                    url = m3u8_url or record_url or flv_url
-            else:
-                url = m3u8_url or record_url or flv_url
-        elif flv_url and not _bytevc1:
-            # FLV 非 ByteVC1（含 codec 未知情况）→ 直接用 FLV，与 DouyinLiveRecorder 一致
-            # /third/ 路径没有 codec= 参数注入，但仍可能是 H.264，不应盲目跳过
-            if not flv_codec:
-                _log(f"[流] FLV 无 codec 信息（/third/ 流），直接尝试 FLV（与 DLR 一致）")
+        if flv_url and not _is_bytevc1_path(flv_url):
             url = flv_url
         elif m3u8_url:
+            if _is_bytevc1_path(flv_url):
+                _log(f"[流] FLV 为 ByteVC1 (_Stage0T000)，改用 M3U8")
             url = m3u8_url
+        elif flv_url:
+            url = flv_url  # 最后兜底，即使是 ByteVC1 也尝试
         else:
-            url = record_url or flv_url
-
-        if not url:
             raise RuntimeError(f"未能获取到可用流地址 (画质={quality})")
 
         proto = "M3U8" if url.split("?")[0].lower().endswith(".m3u8") else "FLV"
-        codec = _codec(url) or "(none)"
-        orig_quality = self._config.quality.lower()
-        q_label = f"{quality}(降级)" if quality != orig_quality else quality
-        # FLV vs 选择对比（仅当二者不同时才额外打印，避免重复）
-        if flv_url and _url_base(url) != _url_base(flv_url):
-            _log(f"[URL] FLV(跳过): {_url_base(flv_url)}")
-        _log(f"[流] 选择: {proto} | codec={codec} | 画质={q_label} | force_m3u8={self.force_m3u8}")
+        _log(f"[流] 选择: {proto} | 画质={quality}")
         _log(f"[URL] {proto}: {_url_base(url)}")
         return url
 

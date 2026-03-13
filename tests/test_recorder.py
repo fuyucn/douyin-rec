@@ -64,7 +64,7 @@ def test_recorder_start_segment(tmp_path):
 
 
 def test_recorder_start_no_segment(tmp_path):
-    """非分段模式下 ffmpeg 命令使用 mpegts"""
+    """非分段模式下 ffmpeg 命令不包含 -segment_time，使用 -c copy"""
     out = str(tmp_path / "test.ts")
     rec = StreamRecorder("http://example.com/stream", out, segment_duration=0)
 
@@ -74,10 +74,9 @@ def test_recorder_start_no_segment(tmp_path):
     with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
         rec.start()
         cmd = mock_popen.call_args[0][0]
-        assert "-f" in cmd
-        idx = cmd.index("-f")
-        assert cmd[idx + 1] == "mpegts"
         assert "-segment_time" not in cmd
+        assert "-c" in cmd
+        assert "copy" in cmd
         rec._process = None  # cleanup
 
 

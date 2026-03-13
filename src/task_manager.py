@@ -83,7 +83,7 @@ class TaskManager:
         self._local_workers: dict[int, LocalVideoWorker] = {}  # local task_id → worker
         self._preview_task_id: int | None = None  # 当前预览的任务 ID
         self._lock = threading.Lock()
-        # 串行化 ffmpeg 启动：防止多任务同时初始化 ByteVC1 流触发并发 SIGSEGV
+        # 串行化 ffmpeg 启动：防止多任务同时初始化导致竞争
         self._ffmpeg_start_lock = threading.Lock()
         self._log_queues: list[tuple[queue.Queue, int | None]] = []  # (queue, task_id_filter)
         self._logs_dir = self._output_dir / "logs"
@@ -601,10 +601,6 @@ class TaskManager:
             _last_rc: int | None = None  # 上次 ffmpeg 退出码
             _rc11_count = 0             # 连续 rc=-11 次数
             # rc=-11 处理策略：
-            #   第1次：重置状态，重新拉 URL（CDN 可能换一条 H.264 流）
-            #   第2次：force_m3u8=True（确认是 ByteVC1，换 M3U8）
-            #   第3次+：逐级降画质 origin→uhd→hd→sd→ld
-            _QUALITY_FALLBACK = ["origin", "uhd", "hd", "sd", "ld"]
 
             while not worker.stop_event.is_set():
                 # ── 定时窗口检查 ──
@@ -641,7 +637,7 @@ class TaskManager:
                 worker.status_text = "直播中"
                 worker.stream_url = stream_url
                 proto = "M3U8" if stream_url.split("?")[0].lower().endswith(".m3u8") else "FLV"
-                # live.py 已通过 on_status 回调输出 [URL]/[流]/[ByteVC1] 详情，这里只补充 CDN 节点
+                # live.py 已通过 on_status 回调输出 [URL]/[流] 详情，这里只补充 CDN 节点
                 import re as _re
                 _domain = stream_url.split("//")[-1].split("/")[0] if "//" in stream_url else "?"
                 log(f"[流] {proto} | CDN: {_domain}")
@@ -668,13 +664,11 @@ class TaskManager:
                     recorder = StreamRecorder(
                         stream_url, path_or_pattern, segment_duration=segment_sec,
                         log_callback=log,
-                        cookies=task.cookies or config.input.cookies,
+                        cookies=task.cookies or config.input.cookies or None,
                     )
-                    # 串行化启动：同一时刻只允许一个 ffmpeg 进程完成初始化
-                    # 防止多任务并发探针 ByteVC1 流时触发 SIGSEGV（macOS 竞争条件）
                     with self._ffmpeg_start_lock:
                         recorder.start()
-                        time.sleep(3)  # 等待 ByteVC1 parser 初始化完成后再放开锁
+                        time.sleep(1)
                     worker.recording_started_at = datetime.now()
                     if recorder.pid:
                         with Session(self.engine) as db:
@@ -825,31 +819,13 @@ class TaskManager:
                     log(f"[系统] 直播流快速断开 ({_session_sec:.0f}s{_rc_info})，{_cooldown:.0f} 秒后重连...")
                     # 断流地址：完整 URL（不截断，方便与 DLR 对比 codec/CDN 参数）
                     log(f"[系统] 断流地址: {stream_url}")
-                    # rc=-11 = ffmpeg SIGSEGV（ByteVC1 在 macOS 崩溃）
-                    # fallback 链：第1次→立即切 M3U8，第2次+→逐级降画质，全部失败→等待重试
                     if _last_rc == -11:
                         _rc11_count += 1
-                        _already_m3u8 = stream_url.split("?")[0].lower().endswith(".m3u8")
-                        log(f"[ByteVC1] rc=-11 第 {_rc11_count} 次（{'M3U8' if _already_m3u8 else 'FLV'}）")
-                        if not _already_m3u8:
-                            # FLV 崩溃：立即切换到 M3U8，不再浪费一次重试
-                            source.force_m3u8 = True
-                            source.force_quality = None
-                            log("[ByteVC1] FLV rc=-11 → 立即切换到 M3U8 流")
-                        else:
-                            # 已是 M3U8 仍 rc=-11 → 逐级降画质
-                            cur_q = source.force_quality or task.quality or "origin"
-                            try:
-                                next_q = _QUALITY_FALLBACK[_QUALITY_FALLBACK.index(cur_q) + 1]
-                                source.force_quality = next_q
-                                log(f"[ByteVC1] M3U8 rc=-11 → 画质降级: {cur_q} → {next_q}")
-                            except (ValueError, IndexError):
-                                # 全部画质均 ByteVC1：重置降级链，等待主播切回 H.264
-                                log(f"[ByteVC1] 所有画质均 rc=-11，{task.poll_interval}s 后重试（等待主播切回 H.264）")
-                                source.force_m3u8 = False
-                                source.force_quality = None
-                                _rc11_count = 0
-                                _cooldown = task.poll_interval
+                        log(f"[rc=-11] 第 {_rc11_count} 次（ffmpeg SIGSEGV）")
+                        if _rc11_count >= 3:
+                            log(f"[rc=-11] 连续 {_rc11_count} 次，{task.poll_interval}s 后重新拉流")
+                            _rc11_count = 0
+                            _cooldown = task.poll_interval
                     else:
                         _rc11_count = 0
                         if _quick_fail_count == 3:

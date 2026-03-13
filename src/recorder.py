@@ -29,7 +29,7 @@ class StreamRecorder:
         self._output_path = str(output_path)
         self._segment_duration = segment_duration
         self._log_callback = log_callback  # 可选: (msg: str) -> None，转发 ffmpeg 错误到 task log
-        self._cookies = cookies  # 可选: 浏览器 cookie 字符串，用于 CDN 鉴权
+        self._cookies = cookies  # 可选: 传给 ffmpeg -headers "Cookie: xxx"
         self._process: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
         self._last_exit_code: int | None = None
@@ -41,73 +41,51 @@ class StreamRecorder:
             return
         Path(self._output_path).parent.mkdir(parents=True, exist_ok=True)
 
-        # ⚠️ 与 DouyinLiveRecorder 完全对齐：只传 User-Agent，不传 Referer/Cookie。
-        # 部分 CDN（pull-q5、pull-flv-l11）对 Referer/Cookie 敏感，
-        # 会切换为 ByteVC1 流导致 ffmpeg SIGSEGV (rc=-11)。
+        # ffmpeg 参数与 biliLive-tools DouYinRecorder 完全对齐
+        # 参考: packages/DouYinRecorder/src/index.ts + packages/liveManager/src/downloader/FFmpegDownloader.ts
         user_agent = (
-            "Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "SamsungBrowser/14.2 Chrome/87.0.4280.141 Mobile Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/73.0.3683.86 Safari/537.36"
         )
 
-        # 基础 ffmpeg 参数（对齐 DouyinLiveRecorder，经 10 分钟实测无崩溃）
-        # -re 仅对 FLV 加：限速至 native frame rate，防止 ByteVC1 在 macOS 上初始化过快触发 SIGSEGV
-        # M3U8 不加 -re：HLS 分段本身已有速率控制，-re 反而可能导致时序问题
         url_path = self._stream_url.split("?")[0].lower()
         is_m3u8 = url_path.endswith(".m3u8")
-        base_input_opts: list[str] = [
-            "-loglevel", "error",
-            "-hide_banner",
-            "-rw_timeout", "5000000",
-            "-analyzeduration", "20000000",
-            "-probesize", "10000000",
-            "-protocol_whitelist", "rtmp,crypto,file,http,https,tcp,tls,udp,rtp,httpproxy",
-            "-thread_queue_size", "1024",
-            "-user_agent", user_agent,
-            "-fflags", "+discardcorrupt",
-        ]
-        if is_m3u8:
-            input_opts = base_input_opts + [
-                "-reconnect_streamed", "1",
-                "-reconnect_at_eof", "1",
-                "-reconnect_delay_max", "60",
-            ]
-        else:
-            # FLV: 加 -re 防止 ByteVC1 初始化过快崩溃
-            input_opts = base_input_opts + ["-re"]
 
-        # 输出参数（对齐 DouyinLiveRecorder）
-        # -reconnect_* 放输出侧：对 FLV 流也启用，在段内断流时自动续连
-        # -map 0: 明确映射所有流（音频 + 视频），避免默认规则漏流
+        # 输入参数（ffmpegInputOptions from DouYinRecorder index.ts）
+        # -loglevel debug: biliLive-tools 实测必加，防止从 Python subprocess 启动时 SIGSEGV (rc=-11)
+        input_opts: list[str] = [
+            "-loglevel", "debug",
+            "-rw_timeout", "10000000",
+            "-timeout", "10000000",
+            "-user_agent", user_agent,
+        ]
+        # Cookie header（若提供）
+        if self._cookies:
+            input_opts += ["-headers", f"Cookie:{self._cookies}\r\n"]
+        # HLS reconnect（FFmpegDownloader.ts createCommand: isHls 时追加）
+        if is_m3u8:
+            input_opts += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "3"]
+
+        # 输出参数（FFmpegDownloader.ts buildOutputOptions）
         output_opts: list[str] = [
-            "-bufsize", "15000k",
-            "-sn", "-dn",
-            "-reconnect_delay_max", "60",
-            "-reconnect_streamed",
-            "-reconnect_at_eof",
-            "-max_muxing_queue_size", "1024",
-            "-correct_ts_overflow", "1",
-            "-avoid_negative_ts", "1",
+            "-c", "copy",
+            "-movflags", "+frag_keyframe+empty_moov+separate_moof",
+            "-fflags", "+genpts+igndts",
+            "-min_frag_duration", "10000000",
         ]
         if self._segment_duration > 0:
             output_opts += [
-                "-c:v", "copy",
-                "-c:a", "copy",
-                "-map", "0",
                 "-f", "segment",
                 "-segment_time", str(self._segment_duration),
-                "-segment_format", "mpegts",
                 "-reset_timestamps", "1",
             ]
-        else:
-            output_opts += ["-c:v", "copy", "-c:a", "copy", "-map", "0", "-f", "mpegts"]
 
         cmd = (
-            ["ffmpeg", "-y", "-v", "verbose"]
+            ["ffmpeg", "-y"]
             + input_opts
             + ["-i", self._stream_url]
             + output_opts
-            + ["-progress", "pipe:2", "-nostats", self._output_path]
+            + [self._output_path]
         )
 
         proto_label = "HLS" if url_path.endswith(".m3u8") else "FLV"
@@ -129,24 +107,18 @@ class StreamRecorder:
         self._stderr_thread.start()
 
     def _monitor_stderr(self, process: subprocess.Popen, log_callback=None) -> None:
-        """持续读取 ffmpeg stderr，记录错误和丢帧"""
-        last_drop = 0
+        """持续读取 ffmpeg stderr，记录错误行"""
         lines: list[str] = []
         try:
             for raw in process.stderr:
                 line = raw.decode(errors="replace").strip()
                 if not line:
                     continue
+                # 跳过进度行（frame= / fps= / time= 等）
+                if any(line.startswith(k) for k in ("frame=", "fps=", "size=", "time=", "bitrate=", "speed=", "video:", "audio:", "  ")):
+                    continue
                 lines.append(line)
-                if line.startswith("drop_frames="):
-                    try:
-                        drop = int(line.split("=", 1)[1])
-                        if drop > last_drop:
-                            logger.warning("录制丢帧: 累计 %d 帧", drop)
-                            last_drop = drop
-                    except ValueError:
-                        pass
-                elif any(k in line.lower() for k in ("error", "invalid", "failed", "unable", "no such")):
+                if any(k in line.lower() for k in ("error", "invalid", "failed", "unable", "no such")):
                     logger.warning("ffmpeg: %s", line)
                     if log_callback:
                         log_callback(f"[ffmpeg] {line}")
@@ -155,7 +127,6 @@ class StreamRecorder:
         rc = process.poll()
         self._last_exit_code = rc
         if rc not in (None, 0, 255):  # 255 = ffmpeg quit gracefully via 'q'
-            # 优先取含错误关键词的行，没有则取最后几行
             err_lines = [l for l in lines if any(k in l.lower() for k in ("error", "invalid", "failed", "unable", "no such", "moov", "broken", "corrupt", "refused", "403", "404", "connection"))]
             tail = (err_lines[-5:] if err_lines else lines[-5:]) if lines else []
             msg = f"ffmpeg 异常退出 (rc={rc}): {'; '.join(tail)}" if tail else f"ffmpeg 异常退出 (rc={rc}): (无输出)"

@@ -578,6 +578,7 @@ async def merge_segments(task_id: int, request: Request):
     return {"ok": True, "status": "merging", "message": "合并已启动，请查看日志"}
 
 
+
 @app.get("/api/local/tasks/{task_id}/logs/history")
 async def local_task_logs_history(task_id: int):
     """返回本地任务的历史日志"""
