@@ -13,8 +13,8 @@ import aiohttp
 from google.protobuf import json_format
 
 from .douyin_utils import DouyinUtils
-from .dy_pb2 import ChatMessage, GiftMessage, PushFrame, Response
-from .models import GiftDanmaku, SimpleDanmaku, StreamEndSignal
+from .dy_pb2 import ChatMessage, GiftMessage, MemberMessage, PushFrame, Response
+from .models import GiftDanmaku, MemberDanmaku, SimpleDanmaku, StreamEndSignal
 from .ws_utils import DouyinDanmakuUtils
 from src.input.douyin_spider import get_douyin_stream_data
 
@@ -174,7 +174,20 @@ class DouyinDanmakuClient:
                     status = msg.payload[1] & 0x7f
                     if status == 3:
                         msgs.append(StreamEndSignal(status=status))
-            # WebcastMemberMessage（进场）等其他消息跳过
+            elif msg.method == 'WebcastMemberMessage':
+                member = MemberMessage()
+                member.ParseFromString(msg.payload)
+                d = json_format.MessageToDict(member, preserving_proto_field_name=True)
+                name = d.get('user', {}).get('nickName', '')
+                member_count = d.get('memberCount', 0)
+                if name:
+                    msgs.append(MemberDanmaku(
+                        timestamp=now, uname=name,
+                        content=f'{name} 进入直播间',
+                        member_count=member_count,
+                        dtype='member', color='00aaff',
+                    ))
+            # 其他消息跳过
         return msgs, ack
 
     async def _heartbeat_loop(self) -> None:

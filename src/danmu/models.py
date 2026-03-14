@@ -37,6 +37,16 @@ class StreamEndSignal:
         self.status = status
 
 
+class MemberDanmaku(SimpleDanmaku):
+    """入场提醒（WebcastMemberMessage）"""
+    def __init__(self, member_count: int = 0, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.member_count = int(member_count)
+        self.dtype = 'member'
+        if self.text is None:
+            self.text = self.content
+
+
 class GiftDanmaku(SimpleDanmaku):
     def __init__(self, text: str = None, price: float = None,
                  gift_name: str = '', gift_count: int = 1,
