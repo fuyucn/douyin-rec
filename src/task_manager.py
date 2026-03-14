@@ -586,9 +586,9 @@ class TaskManager:
 
             segment_sec = task.segment_sec if task.enable_segment else 0
             poll_interval = task.poll_interval
-            # DLR 输出目录：output/recordings/task{id}_{name}/（DLR 再建 抖音/{主播名或custom_name}/ 子目录）
+            # 输出目录与 app.py _task_output_dir 保持一致：output/task{id}_{name}/
             output_dir = str(
-                (self._output_dir / "recordings" / task_dir_name(task_id, task_name)).resolve()
+                (self._output_dir / task_dir_name(task_id, task_name)).resolve()
             )
 
             log(f"轮询间隔: {poll_interval}s, 分段: {'开启 (' + str(segment_sec) + 's)' if segment_sec > 0 else '关闭'}")

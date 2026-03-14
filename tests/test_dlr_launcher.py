@@ -198,7 +198,8 @@ def test_dlr_launcher_start_calls_popen_with_new_session():
          patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
          patch("tempfile.mkdtemp", return_value="/tmp/dlr_task1_abc"), \
          patch("pathlib.Path.write_text"), \
-         patch("pathlib.Path.mkdir"):
+         patch("pathlib.Path.mkdir"), \
+         patch("pathlib.Path.symlink_to"):
         launcher = DlrLauncher(
             task_id=1,
             url="https://live.douyin.com/123",
@@ -320,7 +321,8 @@ def test_dlr_launcher_log_callback_called(tmp_path):
          patch("subprocess.Popen", return_value=mock_proc), \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)), \
          patch("pathlib.Path.write_text"), \
-         patch("pathlib.Path.mkdir"):
+         patch("pathlib.Path.mkdir"), \
+         patch("pathlib.Path.symlink_to"):
         launcher = DlrLauncher(
             task_id=2,
             url="https://live.douyin.com/123",

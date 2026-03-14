@@ -56,7 +56,7 @@ def write_dlr_config(
         "language(zh_cn/en)": "zh_cn",
         "是否跳过代理检测(是/否)": "是",
         "直播保存路径(不填则默认)": output_dir,
-        "保存文件夹是否以作者区分": "是",
+        "保存文件夹是否以作者区分": "否",
         "保存文件夹是否以时间区分": "否",
         "保存文件夹是否以标题区分": "否",
         "保存文件名是否包含标题": "否",
@@ -182,7 +182,15 @@ class DlrLauncher:
         )
 
         # 确保 output 目录存在，DLR 的 check_disk_capacity 会用 shutil.disk_usage(output_dir)
-        Path(self._output_dir).mkdir(parents=True, exist_ok=True)
+        output_path = Path(self._output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        # DLR 强制在 output_dir 下建 抖音直播/{name}/ 子目录（无法通过配置禁用平台目录）。
+        # 预先将 抖音直播 创建为指向 output_dir 本身的符号链接，配合 folder_by_author=否，
+        # 使 DLR 写入 output_dir/抖音直播/ 时实际落到 output_dir/ 下。
+        # discover_groups() 只用 glob("*.ts")（非递归），不会因符号链接产生循环。
+        platform_link = output_path / "抖音直播"
+        if not platform_link.exists() and not platform_link.is_symlink():
+            platform_link.symlink_to(output_path.resolve())
 
         self._log_callback(f"[DLR] 启动子进程 (tmpdir={self._tmpdir})")
         self._process = subprocess.Popen(
