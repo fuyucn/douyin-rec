@@ -42,6 +42,11 @@ def _task_output_dir(t) -> str:
     return str(Path(_config.storage.output_dir).resolve() / task_dir_name(t.id, t.name))
 
 
+def _recording_dir(t) -> Path:
+    """录制文件目录（DLR 直接写入 output_dir，无平台子目录）。"""
+    return Path(_task_output_dir(t))
+
+
 def _serialize_task(t, worker_status: str = "", recording_started_at: str | None = None) -> dict:
     return {
         "id": t.id,
@@ -501,7 +506,7 @@ async def list_segments(task_id: int):
     if t is None:
         return JSONResponse({"error": "任务不存在"}, status_code=404)
 
-    output_dir = Path(_task_output_dir(t))
+    output_dir = _recording_dir(t)
     if not output_dir.exists():
         return {"groups": []}
 
@@ -549,7 +554,7 @@ async def merge_segments(task_id: int, request: Request):
     if lock_key in _merging_prefixes:
         return JSONResponse({"error": "正在合并中，请稍候"}, status_code=409)
 
-    output_dir = Path(_task_output_dir(t))
+    output_dir = _recording_dir(t)
     from src.merge.merger import discover_groups, merge_group
 
     is_running = (t.status == "running")
