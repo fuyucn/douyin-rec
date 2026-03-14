@@ -81,14 +81,17 @@ class _DanmuWorker:
         self._segment_sec = segment_sec
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        # DLR 开始写入文件时调用 sync_start()，用于对齐文件名时间戳
+        # DLR 开始写入文件时调用 sync_start()，用于对齐文件名时间戳和 seg_start
         self._sync_event = threading.Event()
         self._sync_ts: str = ""
+        self._sync_wall_time: float = 0.0  # sync_start() 被调用的精确时刻
 
     def sync_start(self) -> None:
-        """DLR 日志出现"准备开始录制视频"时调用，将 ASS 文件名时间戳对齐到此刻"""
+        """DLR 日志出现"准备开始录制视频"时调用。
+        在调用线程（log callback）里精确记录 wall time，供 seg_start 使用。"""
         if not self._sync_event.is_set():
-            self._sync_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            self._sync_wall_time = time.time()
+            self._sync_ts = datetime.fromtimestamp(self._sync_wall_time).strftime("%Y-%m-%d_%H-%M-%S")
             self._sync_event.set()
 
     def _seg_path(self, ts: str, idx: int) -> Path:
@@ -136,7 +139,8 @@ class _DanmuWorker:
             return
 
         seg_idx = 0
-        seg_start = time.time()
+        # 用 sync_start() 记录的精确时刻作为 seg_start，而非 asyncio sleep 醒来后的时间
+        seg_start = self._sync_wall_time if self._sync_wall_time > 0 else time.time()
         open_ts = self._sync_ts or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         writer.open(self._seg_path(open_ts, seg_idx))
         self._log(f"[弹幕] 开始录制 → {self._seg_path(open_ts, seg_idx).name}")
