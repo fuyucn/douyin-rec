@@ -67,26 +67,35 @@ class _DanmuWorker:
     def __init__(
         self,
         url: str,
-        ass_path: Path,
+        ass_base: Path,     # 不含扩展名的基路径，如 recording_dir / "瑶瑶_session"
         cookies: str | None,
         cdn_delay: int,
         log_fn,
         segment_sec: int = 0,
     ) -> None:
         self._url = url
-        self._ass_path = ass_path   # 用作 base：stem + suffix，分段时追加 _001 / _002 …
+        self._ass_base = ass_base
         self._cookies = cookies
         self._cdn_delay = cdn_delay
         self._log = log_fn
         self._segment_sec = segment_sec
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # DLR 开始写入文件时调用 sync_start()，用于对齐文件名时间戳
+        self._sync_event = threading.Event()
+        self._sync_ts: str = ""
 
-    def _seg_path(self, idx: int) -> Path:
-        """第 idx 段（0-based）的 ASS 文件路径。无分段时直接返回原路径。"""
+    def sync_start(self) -> None:
+        """DLR 日志出现"准备开始录制视频"时调用，将 ASS 文件名时间戳对齐到此刻"""
+        if not self._sync_event.is_set():
+            self._sync_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            self._sync_event.set()
+
+    def _seg_path(self, ts: str, idx: int) -> Path:
+        """生成 ASS 文件路径：{base}_{ts}[_{idx:03d}].ass（0-based 索引与 DLR 一致）"""
         if self._segment_sec <= 0:
-            return self._ass_path
-        return self._ass_path.parent / f"{self._ass_path.stem}_{idx + 1:03d}{self._ass_path.suffix}"
+            return self._ass_base.parent / f"{self._ass_base.name}_{ts}.ass"
+        return self._ass_base.parent / f"{self._ass_base.name}_{ts}_{idx:03d}.ass"
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -97,6 +106,8 @@ class _DanmuWorker:
 
     def stop(self) -> None:
         self._stop_event.set()
+        # 如果还在等待 sync，直接触发让 asyncio 退出等待
+        self._sync_event.set()
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
@@ -108,15 +119,27 @@ class _DanmuWorker:
             self._log(f"[弹幕] 线程异常: {e}")
 
     async def _async_main(self) -> None:
-        self._ass_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ass_base.parent.mkdir(parents=True, exist_ok=True)
         q: asyncio.Queue = asyncio.Queue()
         client = DouyinDanmakuClient(self._url, q, self._cookies)
         writer = AssWriter()
 
+        # 等待 DLR 开始写入（sync_start 触发），最多 30s，超时则用当前时间
+        wait_deadline = time.time() + 30
+        while not self._sync_event.is_set() and not self._stop_event.is_set():
+            await asyncio.sleep(0.2)
+            if time.time() > wait_deadline:
+                self._sync_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                break
+
+        if self._stop_event.is_set():
+            return
+
         seg_idx = 0
         seg_start = time.time()
-        writer.open(self._seg_path(seg_idx))
-        self._log(f"[弹幕] 开始录制 → {self._seg_path(seg_idx).name}")
+        open_ts = self._sync_ts or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        writer.open(self._seg_path(open_ts, seg_idx))
+        self._log(f"[弹幕] 开始录制 → {self._seg_path(open_ts, seg_idx).name}")
 
         async def consume() -> None:
             nonlocal seg_idx, seg_start
@@ -135,8 +158,8 @@ class _DanmuWorker:
                         writer.close()
                         seg_idx += 1
                         seg_start = now
-                        writer.open(self._seg_path(seg_idx))
-                        self._log(f"[弹幕] 新分段 → {self._seg_path(seg_idx).name}")
+                        writer.open(self._seg_path(open_ts, seg_idx))
+                        self._log(f"[弹幕] 新分段 → {self._seg_path(open_ts, seg_idx).name}")
                     item.time = now - seg_start - self._cdn_delay
                     writer.add(item)
 
@@ -714,8 +737,13 @@ class TaskManager:
         # task 级 cookies 优先；为空时 fallback 到 config.yaml input.cookies
         cookies = task.cookies or self._config.input.cookies
 
+        _danmu_ref: list[_DanmuWorker | None] = [None]  # 供 log() 触发 sync_start()
+
         def log(msg: str) -> None:
             self.broadcast(msg, task_name=task_name, task_id=task_id)
+            # DLR 日志"准备开始录制视频"= ffmpeg 即将写入第一帧，触发弹幕文件名对齐
+            if _danmu_ref[0] is not None and '准备开始录制视频' in msg:
+                _danmu_ref[0].sync_start()
 
         # 后台抓取主播名（未设置时存 DB）
         def _fetch_name():
@@ -920,22 +948,24 @@ class TaskManager:
                 danmu_worker: _DanmuWorker | None = None
                 if task.enable_danmu:
                     recording_dir = self._output_dir.resolve() / "抖音直播" / display_name
-                    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                    ass_path = recording_dir / f"{display_name}_{ts}.ass"
+                    # ass_base 不含时间戳/扩展名；时间戳由 sync_start() 在 DLR 开始写入时确定
+                    ass_base = recording_dir / display_name
                     danmu_worker = _DanmuWorker(
                         url=task.url,
-                        ass_path=ass_path,
+                        ass_base=ass_base,
                         cookies=cookies,
                         cdn_delay=task.danmu_cdn_delay,
                         log_fn=log,
                         segment_sec=task.segment_sec if task.enable_segment else 0,
                     )
+                    _danmu_ref[0] = danmu_worker
                     try:
                         danmu_worker.start()
                         worker.danmu_worker = danmu_worker
                     except Exception as e:
                         log(f"[弹幕] 启动失败（继续录制）: {e}")
                         danmu_worker = None
+                        _danmu_ref[0] = None
 
                 try:
                     while not worker.stop_event.is_set() and launcher.is_running:
@@ -953,6 +983,7 @@ class TaskManager:
                         except Exception as e:
                             log(f"[弹幕] 停止时出错: {e}")
                     worker.danmu_worker = None
+                    _danmu_ref[0] = None
 
                 if worker.stop_event.is_set():
                     log("[用户] 停止任务")
