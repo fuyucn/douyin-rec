@@ -762,32 +762,50 @@ class TaskManager:
                 # DLR 启动后（直播确认开播），后台抓取并 log 流元数据
                 def _log_stream_meta(url=task.url, ck=cookies):
                     try:
+                        import json as _json
                         from src.input.douyin_spider import get_douyin_stream_data
                         data = asyncio.run(get_douyin_stream_data(url, cookies=ck))
                         title = data.get('title', '')
                         if title:
                             log(f"直播标题: {title}")
+
+                        # 从 stream_url.extra 取分辨率和编码标志
                         extra = data.get('stream_url', {}).get('extra', {})
                         if not extra:
                             return
                         w, h = extra.get('width', 0), extra.get('height', 0)
-                        fps = extra.get('fps', 0)
-                        default_br = extra.get('default_bitrate', 0)
-                        max_br = extra.get('max_bitrate', 0)
                         hw_enc = extra.get('hardware_encode', False)
                         h265 = extra.get('h265_enable', False)
                         bytevc1 = extra.get('bytevc1_enable', False)
-                        vcodec = data.get('_vcodec', '')
+
+                        # 从 origin sdk_params 取实际 fps / 码率（extra 经常返回 0）
+                        sdk: dict = {}
+                        try:
+                            lc = data.get('stream_url', {}).get('live_core_sdk_data', {})
+                            sd_str = lc.get('pull_data', {}).get('stream_data', '')
+                            if sd_str:
+                                sd = _json.loads(sd_str)
+                                origin_main = sd.get('data', {}).get('origin', {}).get('main', {})
+                                sp_raw = origin_main.get('sdk_params', '{}')
+                                sdk = _json.loads(sp_raw) if isinstance(sp_raw, str) else sp_raw
+                        except Exception:
+                            pass
+
+                        vcodec = (sdk.get('VCodec') or data.get('_vcodec', '')).upper()
+                        fps = sdk.get('fps') or extra.get('fps', 0)
+                        vbitrate = sdk.get('vbitrate', 0)  # bps
+                        resolution = sdk.get('resolution', '') or (f"{w}x{h}" if w and h else '')
+
                         parts = []
-                        if w and h:
-                            parts.append(f"{w}x{h}")
+                        if resolution:
+                            parts.append(resolution)
                         if fps:
                             parts.append(f"{fps}fps")
-                        if default_br:
-                            parts.append(f"码率 {default_br//1000}k (max {max_br//1000}k)")
+                        if vbitrate:
+                            parts.append(f"码率 {vbitrate//1000}k")
                         codec_flags = []
                         if vcodec:
-                            codec_flags.append(vcodec.upper())
+                            codec_flags.append(vcodec)
                         if hw_enc:
                             codec_flags.append("硬件编码")
                         if h265:
