@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import random
+import signal
 import subprocess
 import threading
 import time
@@ -168,9 +169,35 @@ class TaskManager:
         self._logs_dir.mkdir(parents=True, exist_ok=True)
 
         # 启动时处理上次遗留的孤儿录制会话，再恢复任务状态
+        self._kill_orphan_dlr_processes()
         self._handle_orphan_sessions()
         self._recover_running_tasks()
         self._recover_running_local_tasks()
+
+    def _kill_orphan_dlr_processes(self) -> None:
+        """启动时清理上次遗留的 DLR 子进程（匹配 tmpdir 路径 dlr_task{N}_）"""
+        try:
+            result = subprocess.run(
+                ['pgrep', '-f', r'dlr_task[0-9]+_'],
+                capture_output=True, text=True,
+            )
+            pids = [int(p) for p in result.stdout.split() if p.strip().isdigit()]
+            if not pids:
+                return
+            logger.info("清理遗留 DLR 进程: %s", pids)
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            time.sleep(1)
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        except Exception as e:
+            logger.warning("清理遗留 DLR 进程失败: %s", e)
 
     def _migrate_db(self) -> None:
         """为旧 DB 补充缺失的列"""
