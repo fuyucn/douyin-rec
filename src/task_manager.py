@@ -692,21 +692,61 @@ class TaskManager:
         def log(msg: str) -> None:
             self.broadcast(msg, task_name=task_name, task_id=task_id)
 
-        # 如果任务没有名字，后台抓取主播名并存 DB
-        if not task.name:
-            def _fetch_name():
-                try:
-                    from src.input.douyin_spider import get_douyin_stream_data
-                    data = asyncio.run(get_douyin_stream_data(task.url, cookies=cookies))
-                    name = data.get('anchor_name') or ''
-                    if name:
-                        self._update_task_name(task_id, name)
-                        nonlocal task_name
-                        task_name = name
-                        log(f"主播名: {name}")
-                except Exception as e:
-                    logger.debug('获取主播名失败: %s', e)
-            threading.Thread(target=_fetch_name, daemon=True, name=f"fetch-name-{task_id}").start()
+        # 后台抓取主播名（如未设置）+ 流元数据（始终）
+        def _fetch_stream_info():
+            try:
+                from src.input.douyin_spider import get_douyin_stream_data
+                data = asyncio.run(get_douyin_stream_data(task.url, cookies=cookies))
+
+                # 主播名
+                name = data.get('anchor_name') or ''
+                if name and not task.name:
+                    self._update_task_name(task_id, name)
+                    nonlocal task_name
+                    task_name = name
+                    log(f"主播名: {name}")
+
+                # 直播标题
+                title = data.get('title', '')
+                if title:
+                    log(f"直播标题: {title}")
+
+                # 流元数据（来自 stream_url.extra）
+                extra = data.get('stream_url', {}).get('extra', {})
+                if extra:
+                    w, h = extra.get('width', 0), extra.get('height', 0)
+                    fps = extra.get('fps', 0)
+                    default_br = extra.get('default_bitrate', 0)
+                    max_br = extra.get('max_bitrate', 0)
+                    hw_enc = extra.get('hardware_encode', False)
+                    h265 = extra.get('h265_enable', False)
+                    bytevc1 = extra.get('bytevc1_enable', False)
+                    vcodec = data.get('_vcodec', '')
+
+                    parts = []
+                    if w and h:
+                        parts.append(f"{w}x{h}")
+                    if fps:
+                        parts.append(f"{fps}fps")
+                    if default_br:
+                        parts.append(f"码率 {default_br//1000}k (max {max_br//1000}k)")
+                    codec_flags = []
+                    if vcodec:
+                        codec_flags.append(vcodec.upper())
+                    if hw_enc:
+                        codec_flags.append("硬件编码")
+                    if h265:
+                        codec_flags.append("H265")
+                    if bytevc1:
+                        codec_flags.append("ByteVC1")
+                    if codec_flags:
+                        parts.append(' '.join(codec_flags))
+                    if parts:
+                        log(f"流信息: {' | '.join(parts)}")
+            except Exception as e:
+                logger.debug('获取流信息失败: %s', e)
+        threading.Thread(target=_fetch_stream_info, daemon=True,
+                         name=f"fetch-info-{task_id}").start()
 
         try:
             features = []
