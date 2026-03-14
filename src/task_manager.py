@@ -19,9 +19,8 @@ from sqlalchemy import text as sa_text
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from src.config import load_config
-from src.danmu.recorder import DanmuRecorder
+from src.dlr_launcher import DlrLauncher
 from src.input.live import DouyinLiveSource
-from src.recorder import StreamRecorder
 from src.storage.database import LocalVideoTask, RecordingSession, RecordingTask
 from src.storage.manager import StorageManager
 
@@ -551,7 +550,7 @@ class TaskManager:
     # ── Worker 线程 ──────────────────────────────────────────────────
 
     def _task_worker(self, task_id: int, worker: TaskWorker) -> None:
-        """单个任务的工作线程：等待开播 → 录制/截图 → 下播 → 重新等待"""
+        """单个任务的工作线程：启动 DLR 子进程录制 → 退出后重试"""
         task = self.get_task(task_id)
         if task is None:
             return
@@ -562,22 +561,6 @@ class TaskManager:
             self.broadcast(msg, task_name=task_name, task_id=task_id)
 
         try:
-            config = load_config()
-            if task.cookies:
-                config.input.cookies = task.cookies
-            config.input.quality = task.quality
-
-            source = DouyinLiveSource(task.url, config=config.input)
-
-            # 获取主播名
-            log("正在获取主播信息...")
-            worker.status_text = "获取主播信息"
-            source.extract_streamer_info()
-            if source.streamer_name:
-                task_name = source.streamer_name
-                self._update_task_name(task_id, source.streamer_name)
-                log(f"主播: {task_name}")
-
             features = []
             if task.enable_record:
                 features.append("录制")
@@ -585,22 +568,14 @@ class TaskManager:
                 features.append("截图")
             log(f"已启用: {', '.join(features)}")
 
-            # 文件夹：task{id}_{主播名}/
-            config.storage.output_dir = str(self._output_dir)
-            storage = StorageManager(config.storage, name=task_dir_name(task_id, task_name))
             segment_sec = task.segment_sec if task.enable_segment else 0
             poll_interval = task.poll_interval
+            # DLR 以 folder_by_author=是 在 output_dir/抖音直播/ 下建 {anchor_name}/ 子目录。
+            # anchor_name 取自 URL_config.ini 中设置的名字（task{id}_{name} 格式）。
+            # 最终路径：output/抖音直播/task{id}_{name}/*.ts
+            output_dir = str(self._output_dir.resolve())
 
             log(f"轮询间隔: {poll_interval}s, 分段: {'开启 (' + str(segment_sec) + 's)' if segment_sec > 0 else '关闭'}")
-
-            # 定时调度检查回调 (供 wait_for_live 在每次轮询前调用)
-            def schedule_check() -> bool:
-                return self._is_in_schedule(task)
-
-            _quick_fail_count = 0  # 连续快速断开（<30s）计数
-            _last_rc: int | None = None  # 上次 ffmpeg 退出码
-            _rc11_count = 0             # 连续 rc=-11 次数
-            # rc=-11 处理策略：
 
             while not worker.stop_event.is_set():
                 # ── 定时窗口检查 ──
@@ -611,231 +586,43 @@ class TaskManager:
                     worker.stop_event.wait(min(wait_secs, 60))
                     continue
 
-                # ── 等待开播 ──
-                worker.status_text = "等待开播"
-                log("等待直播开播...")
-                try:
-                    stream_url = source.wait_for_live(
-                        poll_interval=poll_interval,
-                        on_status=log,
-                        stop_event=worker.stop_event,
-                        show_countdown=task.show_countdown,
-                        schedule_check=schedule_check if task.schedule_enabled else None,
-                    )
-                except InterruptedError as ie:
-                        if worker.stop_event.is_set():
-                            log(f"[用户] 停止任务")
-                            break
-                        # 定时窗口结束，回到循环顶部重新判断
-                        log(f"[定时] {ie}")
-                        continue
+                if not task.enable_record:
+                    worker.stop_event.wait(poll_interval)
+                    continue
 
-                if worker.stop_event.is_set():
-                    break
-
-                # ── 开播 ──
-                worker.status_text = "直播中"
-                worker.stream_url = stream_url
-                proto = "M3U8" if stream_url.split("?")[0].lower().endswith(".m3u8") else "FLV"
-                # live.py 已通过 on_status 回调输出 [URL]/[流] 详情，这里只补充 CDN 节点
-                import re as _re
-                _domain = stream_url.split("//")[-1].split("/")[0] if "//" in stream_url else "?"
-                log(f"[流] {proto} | CDN: {_domain}")
-
-                # 启动预览抓帧线程
-                preview_thread = threading.Thread(
-                    target=self._preview_worker,
-                    args=(worker,),
-                    daemon=True,
+                worker.status_text = "运行中（DLR）"
+                log("启动 DLR 录制进程...")
+                launcher = DlrLauncher(
+                    task_id=task_id,
+                    url=task.url,
+                    name=task_name,
+                    quality=task.quality,
+                    output_dir=output_dir,
+                    segment_sec=segment_sec,
+                    poll_interval=poll_interval,
+                    max_threads=task.max_threads,
+                    cookies=task.cookies,
+                    # custom_name 优先；无则用 task{id}_{name} 作为 DLR 文件夹名
+                    custom_name=task.custom_name or task_dir_name(task_id, task_name),
+                    log_callback=log,
                 )
-                preview_thread.start()
+                launcher.start()
 
-                recorder = None
-                screenshot_thread = None
-                _session_started_at = datetime.now()
-                session_id: int | None = None
-
-                # 启动录制（统一输出 TS 分段，FLV/M3U8 均走 StreamRecorder + ffmpeg）
-                if task.enable_record:
-                    path_or_pattern, display = StreamRecorder.make_output_path(
-                        task_name, storage.output_dir, segment=segment_sec > 0,
-                    )
-                    log(f"开始录制: {display}")
-                    recorder = StreamRecorder(
-                        stream_url, path_or_pattern, segment_duration=segment_sec,
-                        log_callback=log,
-                        cookies=task.cookies or config.input.cookies or None,
-                    )
-                    with self._ffmpeg_start_lock:
-                        recorder.start()
-                        time.sleep(1)
-                    worker.recording_started_at = datetime.now()
-                    if recorder.pid:
-                        with Session(self.engine) as db:
-                            sess = RecordingSession(
-                                task_id=task.id,
-                                ffmpeg_pid=recorder.pid,
-                                output_path=path_or_pattern,
-                                started_at=worker.recording_started_at,
-                            )
-                            db.add(sess)
-                            db.commit()
-                            db.refresh(sess)
-                            session_id = sess.id
-                        worker.active_session_id = session_id
-
-                # 初始化弹幕录制器（延迟启动：等 ffmpeg 确认有 .ts 输出后再 start()）
-                # 防止 watchdog 触发时留下无对应 TS 的孤立 ASS 文件
-                danmu_recorder = None
-                _danmu_started = False
-                _danmu_ass_path: Path | None = None
-                if task.enable_danmu and task.enable_record and worker.recording_started_at:
-                    if segment_sec > 0:
-                        _danmu_ass_path = storage.output_dir / f"{display}_%03d_danmu.ass"
-                    else:
-                        _danmu_ass_path = storage.output_dir / f"{display}_danmu.ass"
-                    _danmu_cookies = task.cookies or config.input.cookies
-
-                    def _on_stream_end(_rec=recorder, _log=log):
-                        _log("[弹幕] 检测到主播下播，停止录制")
-                        if _rec:
-                            _rec.stop()
-
-                    danmu_recorder = DanmuRecorder(
-                        url=task.url,
-                        started_at=worker.recording_started_at,
-                        output_path=_danmu_ass_path,
-                        cdn_delay=task.danmu_cdn_delay,
-                        segment_duration=segment_sec,
-                        cookies=_danmu_cookies,
-                        log_callback=log,
-                        stream_end_callback=_on_stream_end,
-                    )
-                    # 注意：start() 延迟到确认有 .ts 输出后调用（见等待循环）
-
-                # 启动截图
-                if task.enable_screenshot:
-                    source._stream_url = stream_url
-                    try:
-                        source.open()
-                        screenshot_thread = threading.Thread(
-                            target=self._screenshot_worker,
-                            args=(source, storage, worker, task_name, task_id),
-                            daemon=True,
-                        )
-                        screenshot_thread.start()
-                    except Exception as e:
-                        log(f"截图连接失败: {e}")
-
-                # 等待结束
-                _WATCHDOG_TIMEOUT_SEC = 90  # ffmpeg 启动后若此时间内无 .ts 输出，视为卡死
-                _watchdog_triggered = False
-                while not worker.stop_event.is_set():
-                    if recorder and not recorder.is_running:
-                        break
-                    if not recorder and screenshot_thread and not screenshot_thread.is_alive():
-                        break
-                    # 定时窗口结束时主动停止录制
+                while not worker.stop_event.is_set() and launcher.is_running:
                     if task.schedule_enabled and not self._is_in_schedule(task):
-                        if task.schedule_run_until_end:
-                            pass  # 继续录制直到直播自然结束
-                        else:
+                        if not task.schedule_run_until_end:
                             log(f"定时窗口结束 ({task.schedule_stop})，停止录制")
                             break
-                    # TS 确认检查（复用 watchdog 计算）：
-                    #   有 .ts → 启动弹幕（首次）；无 .ts 且超时 → watchdog kill
-                    if recorder and not _watchdog_triggered:
-                        _out = Path(path_or_pattern)
-                        if segment_sec > 0:
-                            _stem_prefix = _out.stem.replace("%03d", "")
-                            ts_ready = list(_out.parent.glob(f"{_stem_prefix}*.ts"))
-                        else:
-                            ts_ready = [_out] if _out.exists() and _out.stat().st_size > 0 else []
-                        if ts_ready:
-                            # ffmpeg 已有输出：启动弹幕（仅一次）
-                            if danmu_recorder is not None and not _danmu_started:
-                                try:
-                                    _danmu_cookies = task.cookies or config.input.cookies
-                                    log(f"[弹幕] cookies: {'任务配置' if task.cookies else ('config.yaml' if config.input.cookies else '无（匿名）')}")
-                                    danmu_recorder.start()
-                                    _danmu_started = True
-                                    log(f"[弹幕] 录制已启动 → {_danmu_ass_path.name}")
-                                except Exception as e:
-                                    log(f"[弹幕] 启动失败: {e}")
-                                    danmu_recorder = None
-                        else:
-                            _elapsed = (datetime.now() - _session_started_at).total_seconds()
-                            if _elapsed >= _WATCHDOG_TIMEOUT_SEC:
-                                _watchdog_triggered = True
-                                log(f"[系统] Watchdog: ffmpeg 已运行 {_elapsed:.0f}s 无 .ts 输出，强制重连...")
-                                recorder.stop()
-                                break
-                    time.sleep(1)
+                    worker.stop_event.wait(5)
 
-                _last_rc = None
-                if recorder:
-                    _last_rc = recorder.last_exit_code  # 捕获退出码（stop() 前读取最可靠）
-                    _end_reason = "user_stop" if worker.stop_event.is_set() else "stream_end"
-                    recorder.stop()
-                    if session_id:
-                        with Session(self.engine) as db:
-                            sess = db.get(RecordingSession, session_id)
-                            if sess and sess.status == "active":
-                                sess.status = "stopped"
-                                sess.end_reason = _end_reason
-                                sess.ended_at = datetime.now()
-                                if sess.started_at:
-                                    sess.duration_sec = (sess.ended_at - sess.started_at).total_seconds()
-                                db.add(sess)
-                                db.commit()
-                        worker.active_session_id = None
-                        session_id = None
-                    worker.recording_started_at = None
-                if danmu_recorder and _danmu_started:
-                    danmu_recorder.stop()
-                    danmu_recorder = None
-                if screenshot_thread and screenshot_thread.is_alive():
-                    screenshot_thread.join(timeout=5)
-                try:
-                    source.close()
-                except Exception:
-                    pass
-
-                worker.stream_url = None
+                launcher.stop()
 
                 if worker.stop_event.is_set():
                     log("[用户] 停止任务")
                     break
 
-                if task.schedule_enabled and not self._is_in_schedule(task):
-                    log(f"[定时] 当前不在窗口内，等待下次开播窗口 ({task.schedule_start})")
-                    continue
-
-                _session_sec = (datetime.now() - _session_started_at).total_seconds()
-                if _session_sec < 30:
-                    _quick_fail_count += 1
-                    _cooldown = random.uniform(15, 40)
-                    _rc_info = f", rc={_last_rc}" if _last_rc is not None else ""
-                    log(f"[系统] 直播流快速断开 ({_session_sec:.0f}s{_rc_info})，{_cooldown:.0f} 秒后重连...")
-                    # 断流地址：完整 URL（不截断，方便与 DLR 对比 codec/CDN 参数）
-                    log(f"[系统] 断流地址: {stream_url}")
-                    if _last_rc == -11:
-                        _rc11_count += 1
-                        log(f"[rc=-11] 第 {_rc11_count} 次（ffmpeg SIGSEGV）")
-                        if _rc11_count >= 3:
-                            log(f"[rc=-11] 连续 {_rc11_count} 次，{task.poll_interval}s 后重新拉流")
-                            _rc11_count = 0
-                            _cooldown = task.poll_interval
-                    else:
-                        _rc11_count = 0
-                        if _quick_fail_count == 3:
-                            log("[系统] 连续快速断开 3 次，CDN 可能需要 cookie 鉴权，建议在任务设置中填写 cookies")
-                    if worker.stop_event.wait(_cooldown):
-                        break
-                else:
-                    _quick_fail_count = 0  # 成功录制超 30s，重置计数
-                    _rc11_count = 0
-                log("[系统] 直播流断开，将重新等待开播...")
+                log(f"DLR 进程退出，{poll_interval}s 后重试...")
+                worker.stop_event.wait(poll_interval)
 
         except Exception as e:
             log(f"[系统] 任务出错: {e}")
