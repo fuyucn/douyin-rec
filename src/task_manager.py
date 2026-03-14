@@ -520,6 +520,8 @@ class TaskManager:
             # 任务可能不在内存中但 DB 中状态为 running
             self._update_task_status(task_id, "stopped")
             return
+        # 立即更新 DB 状态，让 UI 快速响应；worker 线程完成后会再次写 stopped（幂等）
+        self._update_task_status(task_id, "stopped")
         worker.stop_event.set()
 
     def start_all_pending(self) -> None:
