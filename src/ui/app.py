@@ -14,10 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
-import concurrent.futures
-
 from src.config import load_config
-from src.input.live import DouyinLiveSource
 from src.task_manager import LOCAL_ID_OFFSET, TaskManager, task_dir_name
 
 logger = logging.getLogger(__name__)
@@ -181,27 +178,9 @@ async def create_task(request: Request):
     if not enable_record and not enable_screenshot:
         return JSONResponse({"error": "请至少启用录制或截图"}, status_code=400)
 
-    # 创建前同步预取主播名（超时 5s），确保任务一入库就带真实名字
-    resolved_name = body.get("name") or None
-    if not resolved_name:
-        def _fetch_name():
-            try:
-                cfg = load_config()
-                src = DouyinLiveSource(url, config=cfg.input)
-                src.extract_streamer_info()
-                return src.streamer_name or None
-            except Exception:
-                return None
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_fetch_name)
-            try:
-                resolved_name = fut.result(timeout=5)
-            except concurrent.futures.TimeoutError:
-                resolved_name = None
-
     task = task_manager.create_task(
         url=url,
-        name=resolved_name,
+        name=body.get("name") or None,
         quality=body.get("quality", "origin"),
         segment_min=int(body.get("segment", 30)),
         enable_record=enable_record,

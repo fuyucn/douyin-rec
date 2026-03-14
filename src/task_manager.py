@@ -561,22 +561,6 @@ class TaskManager:
             self.broadcast(msg, task_name=task_name, task_id=task_id)
 
         try:
-            config = load_config()
-            if task.cookies:
-                config.input.cookies = task.cookies
-            config.input.quality = task.quality
-
-            source = DouyinLiveSource(task.url, config=config.input)
-
-            # 获取主播名
-            log("正在获取主播信息...")
-            worker.status_text = "获取主播信息"
-            source.extract_streamer_info()
-            if source.streamer_name:
-                task_name = source.streamer_name
-                self._update_task_name(task_id, source.streamer_name)
-                log(f"主播: {task_name}")
-
             features = []
             if task.enable_record:
                 features.append("录制")
