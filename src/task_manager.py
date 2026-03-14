@@ -151,6 +151,7 @@ class TaskManager:
         *,
         db_path: str | None = None,
     ) -> None:
+        self._config = load_config()
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         db = Path(db_path) if db_path else self._output_dir / "tasks.db"
