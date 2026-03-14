@@ -71,14 +71,22 @@ class _DanmuWorker:
         cookies: str | None,
         cdn_delay: int,
         log_fn,
+        segment_sec: int = 0,
     ) -> None:
         self._url = url
-        self._ass_path = ass_path
+        self._ass_path = ass_path   # 用作 base：stem + suffix，分段时追加 _001 / _002 …
         self._cookies = cookies
         self._cdn_delay = cdn_delay
         self._log = log_fn
+        self._segment_sec = segment_sec
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+
+    def _seg_path(self, idx: int) -> Path:
+        """第 idx 段（0-based）的 ASS 文件路径。无分段时直接返回原路径。"""
+        if self._segment_sec <= 0:
+            return self._ass_path
+        return self._ass_path.parent / f"{self._ass_path.stem}_{idx + 1:03d}{self._ass_path.suffix}"
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -104,11 +112,14 @@ class _DanmuWorker:
         q: asyncio.Queue = asyncio.Queue()
         client = DouyinDanmakuClient(self._url, q, self._cookies)
         writer = AssWriter()
-        writer.open(self._ass_path)
-        start_time = time.time()
-        self._log(f"[弹幕] 开始录制 → {self._ass_path.name}")
+
+        seg_idx = 0
+        seg_start = time.time()
+        writer.open(self._seg_path(seg_idx))
+        self._log(f"[弹幕] 开始录制 → {self._seg_path(seg_idx).name}")
 
         async def consume() -> None:
+            nonlocal seg_idx, seg_start
             while not self._stop_event.is_set():
                 try:
                     item = await asyncio.wait_for(q.get(), timeout=1.0)
@@ -118,7 +129,15 @@ class _DanmuWorker:
                     self._log("[弹幕] 收到下播信号")
                     continue
                 if isinstance(item, SimpleDanmaku):
-                    item.time = time.time() - start_time - self._cdn_delay
+                    now = time.time()
+                    # 分段边界：关闭当前 ASS，打开下一个，重置计时
+                    if self._segment_sec > 0 and (now - seg_start) >= self._segment_sec:
+                        writer.close()
+                        seg_idx += 1
+                        seg_start = now
+                        writer.open(self._seg_path(seg_idx))
+                        self._log(f"[弹幕] 新分段 → {self._seg_path(seg_idx).name}")
+                    item.time = now - seg_start - self._cdn_delay
                     writer.add(item)
 
         try:
@@ -906,6 +925,7 @@ class TaskManager:
                         cookies=cookies,
                         cdn_delay=task.danmu_cdn_delay,
                         log_fn=log,
+                        segment_sec=task.segment_sec if task.enable_segment else 0,
                     )
                     try:
                         danmu_worker.start()
