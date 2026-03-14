@@ -201,7 +201,6 @@ async def create_task(request: Request):
         schedule_run_until_end=body.get("schedule_run_until_end", False),
         custom_name=body.get("custom_name") or None,
     )
-    task_manager.prefetch_name(task.id)
     return {"ok": True, "task_id": task.id}
 
 
