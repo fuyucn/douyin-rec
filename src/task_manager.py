@@ -586,10 +586,10 @@ class TaskManager:
 
             segment_sec = task.segment_sec if task.enable_segment else 0
             poll_interval = task.poll_interval
-            # 输出目录与 app.py _task_output_dir 保持一致：output/task{id}_{name}/
-            output_dir = str(
-                (self._output_dir / task_dir_name(task_id, task_name)).resolve()
-            )
+            # DLR 以 folder_by_author=是 在 output_dir/抖音直播/ 下建 {anchor_name}/ 子目录。
+            # anchor_name 取自 URL_config.ini 中设置的名字（task{id}_{name} 格式）。
+            # 最终路径：output/抖音直播/task{id}_{name}/*.ts
+            output_dir = str(self._output_dir.resolve())
 
             log(f"轮询间隔: {poll_interval}s, 分段: {'开启 (' + str(segment_sec) + 's)' if segment_sec > 0 else '关闭'}")
 
@@ -618,7 +618,8 @@ class TaskManager:
                     poll_interval=poll_interval,
                     max_threads=task.max_threads,
                     cookies=task.cookies,
-                    custom_name=task.custom_name or None,
+                    # custom_name 优先；无则用 task{id}_{name} 作为 DLR 文件夹名
+                    custom_name=task.custom_name or task_dir_name(task_id, task_name),
                     log_callback=log,
                 )
                 launcher.start()

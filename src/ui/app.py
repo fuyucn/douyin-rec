@@ -38,15 +38,16 @@ async def index():
 # ── 序列化 ────────────────────────────────────────────────────────────────
 
 def _task_output_dir(t) -> str:
-    """计算任务对应的输出子目录绝对路径（与 task_manager 保持一致）"""
-    return str(Path(_config.storage.output_dir).resolve() / task_dir_name(t.id, t.name))
+    """计算任务对应的输出子目录绝对路径（与 task_manager 保持一致）
+    路径结构：output/抖音直播/task{id}_{name}/
+    DLR folder_by_author=是，anchor_name=task{id}_{name} → 文件直接落到此目录。
+    """
+    folder = t.custom_name or task_dir_name(t.id, t.name)
+    return str(Path(_config.storage.output_dir).resolve() / "抖音直播" / folder)
 
 
 def _recording_dir(t) -> Path:
-    """录制文件目录。DLR 在 output_dir 下建 抖音直播/ 子目录；CLI 录制直接在 output_dir。"""
-    base = Path(_task_output_dir(t))
-    dlr_subdir = base / "抖音直播"
-    return dlr_subdir if dlr_subdir.is_dir() else base
+    return Path(_task_output_dir(t))
 
 
 def _serialize_task(t, worker_status: str = "", recording_started_at: str | None = None) -> dict:
