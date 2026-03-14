@@ -43,8 +43,10 @@ def _task_output_dir(t) -> str:
 
 
 def _recording_dir(t) -> Path:
-    """录制文件目录（DLR 直接写入 output_dir，无平台子目录）。"""
-    return Path(_task_output_dir(t))
+    """录制文件目录。DLR 在 output_dir 下建 抖音直播/ 子目录；CLI 录制直接在 output_dir。"""
+    base = Path(_task_output_dir(t))
+    dlr_subdir = base / "抖音直播"
+    return dlr_subdir if dlr_subdir.is_dir() else base
 
 
 def _serialize_task(t, worker_status: str = "", recording_started_at: str | None = None) -> dict:
