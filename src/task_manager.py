@@ -816,6 +816,50 @@ class TaskManager:
                             parts.append(' '.join(codec_flags))
                         if parts:
                             log(f"流信息: {' | '.join(parts)}")
+
+                        # 从 FLV 流 onMetaData 读取 Encoder（直播设备/推流软件）
+                        # biliLive-tools 同款：bytedmediasdkios=iPhone, bytedmediasdk=Android, obs=OBS
+                        try:
+                            flv_url = (
+                                data.get('_quality_urls', {}).get('origin', {}).get('flv')
+                                or data.get('stream_url', {}).get('flv_pull_url', {}).get('ORIGIN', '')
+                            )
+                            if flv_url:
+                                probe = subprocess.run(
+                                    [
+                                        'ffprobe', '-v', 'quiet',
+                                        '-print_format', 'json',
+                                        '-show_format',
+                                        '-probesize', '65536',
+                                        '-analyzeduration', '0',
+                                        '-headers', 'User-Agent: Mozilla/5.0\r\n',
+                                        flv_url,
+                                    ],
+                                    capture_output=True, text=True, timeout=15,
+                                )
+                                if probe.returncode == 0 and probe.stdout:
+                                    fmt = _json.loads(probe.stdout).get('format', {})
+                                    tags = fmt.get('tags', {})
+                                    encoder_raw = tags.get('encoder') or tags.get('Encoder', '')
+                                    if encoder_raw:
+                                        enc_lower = encoder_raw.lower()
+                                        if 'bytedmediasdkios' in enc_lower:
+                                            device = 'iOS（iPhone/iPad）'
+                                        elif 'bytedmediasdk' in enc_lower:
+                                            device = 'Android'
+                                        elif 'obs' in enc_lower:
+                                            device = 'OBS'
+                                        elif 'fmle' in enc_lower or 'flash' in enc_lower:
+                                            device = 'Flash Media Encoder'
+                                        elif 'xsplit' in enc_lower:
+                                            device = 'XSplit'
+                                        else:
+                                            device = encoder_raw.split(':')[0]
+                                        log(f"直播设备: {device}")
+                        except subprocess.TimeoutExpired:
+                            logger.debug('ffprobe 超时，跳过直播设备检测')
+                        except Exception as e:
+                            logger.debug('直播设备检测失败: %s', e)
                     except Exception as e:
                         logger.debug('获取流元数据失败: %s', e)
                 threading.Thread(target=_log_stream_meta, daemon=True,
