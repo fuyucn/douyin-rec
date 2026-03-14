@@ -144,6 +144,7 @@ class DlrLauncher:
         self._process: subprocess.Popen | None = None
         self._tmpdir: str | None = None
         self._log_thread: threading.Thread | None = None
+        self._stop_lock = threading.Lock()
 
     def start(self) -> None:
         """启动 DLR 子进程"""
@@ -201,7 +202,11 @@ class DlrLauncher:
         self._log_thread.start()
 
     def stop(self) -> None:
-        """停止 DLR 子进程及其进程组"""
+        """停止 DLR 子进程及其进程组（线程安全，可并发调用）"""
+        with self._stop_lock:
+            self._stop_locked()
+
+    def _stop_locked(self) -> None:
         if self._process is None:
             return
         if self._process.poll() is not None:

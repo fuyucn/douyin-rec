@@ -47,6 +47,9 @@ class TaskWorker:
     recording_started_at: datetime | None = None
     active_session_id: int | None = None
     log_file: "Path | None" = None
+    # 当前活跃的子组件引用，供 stop_task() 直接停止
+    launcher: "DlrLauncher | None" = None
+    danmu_worker: "_DanmuWorker | None" = None
 
 
 @dataclass
@@ -513,16 +516,37 @@ class TaskManager:
         thread.start()
 
     def stop_task(self, task_id: int) -> None:
-        """停止指定任务"""
+        """停止指定任务：主动停子组件 → 更新 DB 状态"""
         with self._lock:
             worker = self._workers.get(task_id)
         if worker is None:
-            # 任务可能不在内存中但 DB 中状态为 running
             self._update_task_status(task_id, "stopped")
             return
-        # 立即更新 DB 状态，让 UI 快速响应；worker 线程完成后会再次写 stopped（幂等）
-        self._update_task_status(task_id, "stopped")
+
+        # 1. 先通知 worker 线程退出循环
         worker.stop_event.set()
+
+        # 2. 直接停止各子组件（后台线程，不阻塞 API 响应）
+        launcher = worker.launcher
+        danmu = worker.danmu_worker
+
+        def _do_stop():
+            if danmu is not None:
+                try:
+                    danmu.stop()
+                except Exception:
+                    pass
+            if launcher is not None:
+                try:
+                    launcher.stop()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_do_stop, daemon=True,
+                         name=f"stop-{task_id}").start()
+
+        # 3. 立即更新 DB，UI 下次轮询即可反映
+        self._update_task_status(task_id, "stopped")
 
     def start_all_pending(self) -> None:
         """启动所有 pending 状态的任务"""
@@ -705,6 +729,7 @@ class TaskManager:
                     log_callback=log,
                 )
                 launcher.start()
+                worker.launcher = launcher
 
                 # 弹幕录制：与 DLR 同生共死，失败不影响录制
                 danmu_worker: _DanmuWorker | None = None
@@ -721,6 +746,7 @@ class TaskManager:
                     )
                     try:
                         danmu_worker.start()
+                        worker.danmu_worker = danmu_worker
                     except Exception as e:
                         log(f"[弹幕] 启动失败（继续录制）: {e}")
                         danmu_worker = None
@@ -734,11 +760,13 @@ class TaskManager:
                         worker.stop_event.wait(5)
                 finally:
                     launcher.stop()
+                    worker.launcher = None
                     if danmu_worker is not None:
                         try:
                             danmu_worker.stop()
                         except Exception as e:
                             log(f"[弹幕] 停止时出错: {e}")
+                    worker.danmu_worker = None
 
                 if worker.stop_event.is_set():
                     log("[用户] 停止任务")
