@@ -730,8 +730,11 @@ class TaskManager:
                     log(f"主播名: {name}")
             except Exception as e:
                 logger.debug('获取主播名失败: %s', e)
-        threading.Thread(target=_fetch_name, daemon=True,
-                         name=f"fetch-name-{task_id}").start()
+        _fetch_name_thread = threading.Thread(
+            target=_fetch_name, daemon=True, name=f"fetch-name-{task_id}"
+        )
+        _fetch_name_thread.start()
+        _fetch_name_thread.join(timeout=10)  # 等主播名获取完再进主循环，避免用"任务N"命名目录
 
         try:
             features = []
