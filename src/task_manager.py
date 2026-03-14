@@ -18,7 +18,12 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text as sa_text
 from sqlmodel import Session, SQLModel, create_engine, select
 
+import asyncio
+
 from src.config import load_config
+from src.danmu.ass_writer import AssWriter
+from src.danmu.client import DouyinDanmakuClient
+from src.danmu.models import SimpleDanmaku, StreamEndSignal
 from src.dlr_launcher import DlrLauncher
 from src.input.live import DouyinLiveSource
 from src.storage.database import LocalVideoTask, RecordingSession, RecordingTask
@@ -50,6 +55,77 @@ class LocalVideoWorker:
 
     thread: threading.Thread | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
+
+
+class _DanmuWorker:
+    """在 daemon thread 里跑 asyncio，与 DLR 子进程同生共死"""
+
+    def __init__(
+        self,
+        url: str,
+        ass_path: Path,
+        cookies: str | None,
+        cdn_delay: int,
+        log_fn,
+    ) -> None:
+        self._url = url
+        self._ass_path = ass_path
+        self._cookies = cookies
+        self._cdn_delay = cdn_delay
+        self._log = log_fn
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+
+    def start(self) -> None:
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._thread_main, daemon=True, name=f"danmu-{id(self)}"
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def _thread_main(self) -> None:
+        try:
+            asyncio.run(self._async_main())
+        except Exception as e:
+            self._log(f"[弹幕] 线程异常: {e}")
+
+    async def _async_main(self) -> None:
+        self._ass_path.parent.mkdir(parents=True, exist_ok=True)
+        q: asyncio.Queue = asyncio.Queue()
+        client = DouyinDanmakuClient(self._url, q, self._cookies)
+        writer = AssWriter()
+        writer.open(self._ass_path)
+        start_time = time.time()
+        self._log(f"[弹幕] 开始录制 → {self._ass_path.name}")
+
+        async def consume() -> None:
+            while not self._stop_event.is_set():
+                try:
+                    item = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                if isinstance(item, StreamEndSignal):
+                    self._log("[弹幕] 收到下播信号")
+                    continue
+                if isinstance(item, SimpleDanmaku):
+                    item.time = time.time() - start_time - self._cdn_delay
+                    writer.add(item)
+
+        try:
+            await asyncio.gather(client.start(), consume())
+        except Exception as e:
+            if not self._stop_event.is_set():
+                self._log(f"[弹幕] 连接中断: {e}")
+        finally:
+            await client.stop()
+            writer.close()
+            self._log("[弹幕] 录制结束")
 
 
 # 本地任务日志 ID 偏移，避免与录制任务 ID 冲突
@@ -566,6 +642,8 @@ class TaskManager:
                 features.append("录制")
             if task.enable_screenshot:
                 features.append("截图")
+            if task.enable_danmu:
+                features.append("弹幕")
             log(f"已启用: {', '.join(features)}")
 
             segment_sec = task.segment_sec if task.enable_segment else 0
@@ -592,6 +670,7 @@ class TaskManager:
 
                 worker.status_text = "运行中（DLR）"
                 log("启动 DLR 录制进程...")
+                display_name = task.custom_name or task_dir_name(task_id, task_name)
                 launcher = DlrLauncher(
                     task_id=task_id,
                     url=task.url,
@@ -602,20 +681,44 @@ class TaskManager:
                     poll_interval=poll_interval,
                     max_threads=task.max_threads,
                     cookies=task.cookies,
-                    # custom_name 优先；无则用 task{id}_{name} 作为 DLR 文件夹名
-                    custom_name=task.custom_name or task_dir_name(task_id, task_name),
+                    custom_name=display_name,
                     log_callback=log,
                 )
                 launcher.start()
 
-                while not worker.stop_event.is_set() and launcher.is_running:
-                    if task.schedule_enabled and not self._is_in_schedule(task):
-                        if not task.schedule_run_until_end:
-                            log(f"定时窗口结束 ({task.schedule_stop})，停止录制")
-                            break
-                    worker.stop_event.wait(5)
+                # 弹幕录制：与 DLR 同生共死，失败不影响录制
+                danmu_worker: _DanmuWorker | None = None
+                if task.enable_danmu:
+                    recording_dir = self._output_dir.resolve() / "抖音直播" / display_name
+                    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                    ass_path = recording_dir / f"{display_name}_{ts}.ass"
+                    danmu_worker = _DanmuWorker(
+                        url=task.url,
+                        ass_path=ass_path,
+                        cookies=task.cookies,
+                        cdn_delay=task.danmu_cdn_delay,
+                        log_fn=log,
+                    )
+                    try:
+                        danmu_worker.start()
+                    except Exception as e:
+                        log(f"[弹幕] 启动失败（继续录制）: {e}")
+                        danmu_worker = None
 
-                launcher.stop()
+                try:
+                    while not worker.stop_event.is_set() and launcher.is_running:
+                        if task.schedule_enabled and not self._is_in_schedule(task):
+                            if not task.schedule_run_until_end:
+                                log(f"定时窗口结束 ({task.schedule_stop})，停止录制")
+                                break
+                        worker.stop_event.wait(5)
+                finally:
+                    launcher.stop()
+                    if danmu_worker is not None:
+                        try:
+                            danmu_worker.stop()
+                        except Exception as e:
+                            log(f"[弹幕] 停止时出错: {e}")
 
                 if worker.stop_event.is_set():
                     log("[用户] 停止任务")

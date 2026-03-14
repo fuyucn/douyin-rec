@@ -1,4 +1,4 @@
-"""抖音弹幕 WebSocket 签名工具（源自 DanmakuRender/DMR/LiveAPI/danmaku/douyin/utils.py）"""
+"""抖音弹幕 WebSocket 签名工具"""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ import hashlib
 import logging
 import os
 import random
-import threading
+import subprocess
 
 logger = logging.getLogger(__name__)
 
 _DIR = os.path.dirname(os.path.realpath(__file__))
-_JSENGINE_LOCK = threading.Lock()  # jsengine 不支持并发，序列化所有调用
+_RUNNER = os.path.join(_DIR, 'sign_runner.mjs')
 
 
 class DouyinDanmakuUtils:
@@ -25,34 +25,22 @@ class DouyinDanmakuUtils:
         return hashlib.md5(sig_params.encode()).hexdigest()
 
     @staticmethod
-    def get_signature(x_ms_stub: str) -> int:
-        import time
-        with _JSENGINE_LOCK:  # jsengine 不支持并发，序列化调用
-            try:
-                import jsengine
-            except ImportError:
-                logger.warning('jsengine 未安装，弹幕签名将使用 0（可能影响部分直播间连接）')
-                return 0
-            try:
-                with open(os.path.join(_DIR, 'webmssdk.js'), 'r', encoding='utf-8') as f:
-                    js_enc = f.read()
-            except FileNotFoundError:
-                logger.warning('webmssdk.js 文件缺失，弹幕签名将使用 0')
-                return 0
-
-            js_dom = "document={}\nwindow={}\nnavigator={'userAgent': 'Mozilla/5.0'}"
-            for attempt in range(3):
-                try:
-                    ctx = jsengine.jsengine()
-                    ctx.eval(js_dom + '\n' + js_enc)
-                    result = ctx.eval(f"get_sign('{x_ms_stub}')")
-                    logger.debug('jsengine get_sign 成功: %s', result)
-                    return result
-                except Exception as e:
-                    if attempt < 2:
-                        time.sleep(0.5 * (attempt + 1))
-                        logger.debug('jsengine get_sign 第%d次重试: %s', attempt + 2, e)
-                    else:
-                        logger.warning('jsengine get_sign 3次均失败，使用 0: %s', e)
-                        return 0
-        return 0  # unreachable
+    def get_signature(x_ms_stub: str) -> str:
+        """通过 Node.js 子进程调用 webmssdk.js get_sign()，对齐 bililive-tools 实现。"""
+        try:
+            result = subprocess.run(
+                ['node', _RUNNER, x_ms_stub],
+                capture_output=True, text=True, timeout=5,
+            )
+            sig = result.stdout.strip()
+            if sig:
+                logger.debug('get_sign 成功: %s', sig)
+                return sig
+            logger.warning('get_sign 返回空，使用 fallback: %s', result.stderr.strip())
+        except FileNotFoundError:
+            logger.warning('Node.js 未安装，弹幕签名将使用 fallback')
+        except subprocess.TimeoutExpired:
+            logger.warning('get_sign 超时，使用 fallback')
+        except Exception as e:
+            logger.warning('get_sign 失败，使用 fallback: %s', e)
+        return "00000000"

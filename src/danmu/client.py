@@ -77,7 +77,7 @@ class DouyinDanmakuClient:
 
         uid = DouyinDanmakuUtils.get_user_unique_id()
         VERSION_CODE = 180800
-        SDK_VERSION = '1.0.14-beta.0'
+        SDK_VERSION = '1.0.15'  # 对齐 bililive-tools DouYinDanma
 
         sig_params = {
             'live_id': '1', 'aid': '6383',
@@ -89,13 +89,9 @@ class DouyinDanmakuClient:
             'device_platform': 'web', 'device_type': '',
             'ac': '', 'identity': 'audience',
         }
-        try:
-            sig = DouyinDanmakuUtils.get_signature(
-                DouyinDanmakuUtils.get_x_ms_stub(sig_params))
-            logger.info('弹幕签名成功: %s (room_id=%s)', sig, actual_room_id)
-        except Exception as _e:
-            logger.warning('弹幕签名失败 (将用 0): %s', _e)
-            sig = 0
+        sig = DouyinDanmakuUtils.get_signature(
+            DouyinDanmakuUtils.get_x_ms_stub(sig_params))
+        logger.info('弹幕签名: %s (room_id=%s)', sig, actual_room_id)
 
         params = {
             'room_id': actual_room_id,
@@ -109,8 +105,8 @@ class DouyinDanmakuClient:
             'signature': sig,
         }
         qs = '&'.join(f'{k}={v}' for k, v in params.items())
-        wss_url = f'wss://webcast5-ws-web-lf.douyin.com/webcast/im/push/v2/?{qs}'
-        return DouyinUtils.build_request_url(wss_url)
+        # 使用 bililive-tools 相同的 WS host
+        return f'wss://webcast100-ws-web-hl.douyin.com/webcast/im/push/v2/?{qs}'
 
     @staticmethod
     def _decode(data: bytes) -> tuple[list, bytes | None]:
