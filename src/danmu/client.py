@@ -174,20 +174,7 @@ class DouyinDanmakuClient:
                     status = msg.payload[1] & 0x7f
                     if status == 3:
                         msgs.append(StreamEndSignal(status=status))
-            elif msg.method == 'WebcastMemberMessage':
-                member = MemberMessage()
-                member.ParseFromString(msg.payload)
-                d = json_format.MessageToDict(member, preserving_proto_field_name=True)
-                name = d.get('user', {}).get('nickName', '')
-                member_count = d.get('memberCount', 0)
-                if name:
-                    msgs.append(MemberDanmaku(
-                        timestamp=now, uname=name,
-                        content=f'{name} 进入直播间',
-                        member_count=member_count,
-                        dtype='member', color='00aaff',
-                    ))
-            # 其他消息跳过
+            # 其他消息（含 WebcastMemberMessage 入场提醒）跳过
         return msgs, ack
 
     async def _heartbeat_loop(self) -> None:

@@ -187,7 +187,7 @@ class DlrLauncher:
 
         self._log_callback(f"[DLR] 启动子进程 (tmpdir={self._tmpdir})")
         self._process = subprocess.Popen(
-            [str(_DLR_PYTHON), str(runner_path)],
+            [str(_DLR_PYTHON), "-u", str(runner_path)],  # -u: 禁用 stdout 缓冲，日志实时到达
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             start_new_session=True,
