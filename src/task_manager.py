@@ -636,6 +636,22 @@ class TaskManager:
         def log(msg: str) -> None:
             self.broadcast(msg, task_name=task_name, task_id=task_id)
 
+        # 如果任务没有名字，后台抓取主播名并存 DB
+        if not task.name:
+            def _fetch_name():
+                try:
+                    from src.input.douyin_spider import get_douyin_stream_data
+                    data = asyncio.run(get_douyin_stream_data(task.url, cookies=task.cookies))
+                    name = data.get('anchor_name') or ''
+                    if name:
+                        self._update_task_name(task_id, name)
+                        nonlocal task_name
+                        task_name = name
+                        log(f"主播名: {name}")
+                except Exception as e:
+                    logger.debug('获取主播名失败: %s', e)
+            threading.Thread(target=_fetch_name, daemon=True, name=f"fetch-name-{task_id}").start()
+
         try:
             features = []
             if task.enable_record:

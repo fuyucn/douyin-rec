@@ -4,31 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import gzip
-import json
 import logging
 import re
-import ssl
-import time
 from datetime import datetime
+from urllib.parse import urlencode
 
 import aiohttp
 from google.protobuf import json_format
 
 from .douyin_utils import DouyinUtils
-from .dy_pb2 import ChatMessage, GiftMessage, MemberMessage, PushFrame, Response
+from .dy_pb2 import ChatMessage, GiftMessage, PushFrame, Response
 from .models import GiftDanmaku, SimpleDanmaku, StreamEndSignal
 from .ws_utils import DouyinDanmakuUtils
+from src.input.douyin_spider import get_douyin_stream_data
 
 logger = logging.getLogger(__name__)
 
-
-def _cookiestr2dict(cookie_str: str) -> dict:
-    result = {}
-    for part in cookie_str.split('; '):
-        if '=' in part:
-            k, v = part.split('=', 1)
-            result[k.strip()] = v.strip()
-    return result
 
 
 def _extract_room_id(url: str) -> str:
@@ -54,26 +45,45 @@ class DouyinDanmakuClient:
         self._stop = False
         self._ws = None
         self._session: aiohttp.ClientSession | None = None
-
-        extra_cookies = _cookiestr2dict(cookies) if cookies else None
-        self._headers = DouyinUtils.get_headers(extra_cookies=extra_cookies)
+        self._user_cookies = cookies  # 用户提供的额外 cookie
         self._room_id = _extract_room_id(url)
 
-    async def _get_ws_url(self) -> str:
-        async with aiohttp.ClientSession() as sess:
-            api_url = DouyinUtils.build_request_url(
-                f'https://live.douyin.com/webcast/room/web/enter/?web_rid={self._room_id}'
-            )
-            async with sess.get(api_url, headers=self._headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                text = await resp.text()
-                data = json.loads(text)
-                try:
-                    room_info = data['data']['data'][0]
-                except (KeyError, IndexError, TypeError) as e:
-                    raise RuntimeError(f'获取房间信息失败 (HTTP {resp.status}): {text[:200]}') from e
+    async def _get_cookie(self) -> str:
+        """获取 WS 用 cookie。有用户 cookie（含 sessionid）直接用；否则从首页获取匿名 cookie"""
+        if self._user_cookies:
+            # 用户提供了登录态 cookie，直接使用（含 sessionid / ttwid 等完整信息）
+            logger.debug('弹幕 使用用户 cookie (len=%d)', len(self._user_cookies))
+            return self._user_cookies
 
-        actual_room_id = room_info['id_str']
+        # 匿名模式：从首页获取 ttwid + 生成设备 cookie
+        ua = DouyinUtils.base_headers['user-agent']
+        from yarl import URL
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get('https://live.douyin.com/',
+                                headers={'User-Agent': ua},
+                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                await resp.read()
+            jar = sess.cookie_jar.filter_cookies(URL('https://live.douyin.com/'))
+            parts = [f'{k}={v.value}' for k, v in jar.items()]
+        parts.append(f'__ac_nonce={DouyinUtils.generate_nonce()}')
+        parts.append(f'odin_ttid={DouyinUtils.generate_odin_ttid()}')
+        parts.append(f'msToken={DouyinUtils.generate_ms_token()}')
+        cookie_str = '; '.join(parts)
+        logger.debug('弹幕 匿名 cookie: %.120s', cookie_str)
+        return cookie_str
+
+    async def _get_ws_url(self) -> tuple[str, str]:
+        """返回 (ws_url, cookie_str)"""
+        # 获取 room_id：通过 HTML 解析（douyin_spider），避免调用地域受限的 webcast API
+        room_data = await get_douyin_stream_data(
+            f'https://live.douyin.com/{self._room_id}',
+            cookies=self._user_cookies,
+        )
+        actual_room_id = str(room_data.get('id_str', self._room_id))
         logger.debug('弹幕房间 web_rid=%s → room_id=%s', self._room_id, actual_room_id)
+
+        # 获取 WS 连接用的 cookie
+        cookie_str = await self._get_cookie()
 
         uid = DouyinDanmakuUtils.get_user_unique_id()
         VERSION_CODE = 180800
@@ -102,11 +112,14 @@ class DouyinDanmakuClient:
             'did_rule': '3',
             'user_unique_id': uid,
             'identity': 'audience',
+            'aid': '6383',
+            'device_platform': 'web',
+            'device_type': '',
             'signature': sig,
         }
-        qs = '&'.join(f'{k}={v}' for k, v in params.items())
-        # 使用 bililive-tools 相同的 WS host
-        return f'wss://webcast100-ws-web-hl.douyin.com/webcast/im/push/v2/?{qs}'
+        qs = urlencode(params)
+        ws_url = f'wss://webcast100-ws-web-hl.douyin.com/webcast/im/push/v2/?{qs}'
+        return ws_url, cookie_str
 
     @staticmethod
     def _decode(data: bytes) -> tuple[list, bytes | None]:
@@ -185,19 +198,21 @@ class DouyinDanmakuClient:
                 await self._queue.put(m)
 
     async def start(self) -> None:
-        ws_url = await self._get_ws_url()
-        ctx = ssl.create_default_context()
-        ctx.set_ciphers('DEFAULT')
-        # WebSocket 连接需要 Origin；去掉 authority（HTTP/2 伪头部，不能用于 WS）
-        ws_headers = {k: v for k, v in self._headers.items() if k.lower() != 'authority'}
-        ws_headers['Origin'] = 'https://live.douyin.com'
+        ws_url, cookie_str = await self._get_ws_url()
+        ws_headers = {
+            'Cookie': cookie_str,
+            'User-Agent': DouyinUtils.base_headers['user-agent'],
+            'Origin': 'https://live.douyin.com',
+            'Referer': 'https://live.douyin.com/',
+        }
         if self._session and not self._session.closed:
             await self._session.close()
         self._session = aiohttp.ClientSession()
         try:
             self._ws = await self._session.ws_connect(
-                ws_url, ssl_context=ctx,
+                ws_url,
                 headers=ws_headers,
+                ssl=True,
             )
         except Exception as e:
             logger.warning('WebSocket 连接失败 (status=%s): %s', getattr(e, 'status', '?'), e)
