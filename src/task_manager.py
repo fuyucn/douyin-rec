@@ -218,6 +218,12 @@ class TaskManager:
             ("enable_danmu", "BOOLEAN NOT NULL DEFAULT 0"),
             ("danmu_cdn_delay", "INTEGER NOT NULL DEFAULT 6"),
             ("auto_quality_fallback", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("stream_title", "TEXT"),
+            ("stream_resolution", "TEXT"),
+            ("stream_fps", "INTEGER"),
+            ("stream_vbitrate", "INTEGER"),
+            ("stream_vcodec", "TEXT"),
+            ("stream_encoder", "TEXT"),
         ]
         local_migrations = [
             ("ai_backend", "TEXT"),
@@ -819,6 +825,7 @@ class TaskManager:
 
                         # 从 FLV 流 onMetaData 读取 Encoder（直播设备/推流软件）
                         # biliLive-tools 同款：bytedmediasdkios=iPhone, bytedmediasdk=Android, obs=OBS
+                        encoder_raw = ''
                         try:
                             flv_url = (
                                 data.get('_quality_urls', {}).get('origin', {}).get('flv')
@@ -860,6 +867,28 @@ class TaskManager:
                             logger.debug('ffprobe 超时，跳过直播设备检测')
                         except Exception as e:
                             logger.debug('直播设备检测失败: %s', e)
+
+                        # 将原始值持久化到 DB（每次开播覆盖写入）
+                        try:
+                            with Session(self.engine) as sess:
+                                db_task = sess.get(RecordingTask, task_id)
+                                if db_task:
+                                    if title:
+                                        db_task.stream_title = title
+                                    if resolution:
+                                        db_task.stream_resolution = resolution
+                                    if fps:
+                                        db_task.stream_fps = int(fps)
+                                    if vbitrate:
+                                        db_task.stream_vbitrate = int(vbitrate)
+                                    if vcodec:
+                                        db_task.stream_vcodec = vcodec
+                                    if encoder_raw:
+                                        db_task.stream_encoder = encoder_raw
+                                    sess.add(db_task)
+                                    sess.commit()
+                        except Exception as e:
+                            logger.debug('流元数据写入 DB 失败: %s', e)
                     except Exception as e:
                         logger.debug('获取流元数据失败: %s', e)
                 threading.Thread(target=_log_stream_meta, daemon=True,

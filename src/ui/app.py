@@ -81,6 +81,12 @@ def _serialize_task(t, worker_status: str = "", recording_started_at: str | None
         "recording_started_at": recording_started_at,
         "output_dir": _task_output_dir(t),
         "is_previewing": task_manager.get_preview_task_id() == t.id,
+        "stream_title": t.stream_title,
+        "stream_resolution": t.stream_resolution,
+        "stream_fps": t.stream_fps,
+        "stream_vbitrate": t.stream_vbitrate,
+        "stream_vcodec": t.stream_vcodec,
+        "stream_encoder": t.stream_encoder,
     }
 
 

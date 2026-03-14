@@ -33,6 +33,13 @@ class RecordingTask(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.now)
     started_at: datetime | None = None
     stopped_at: datetime | None = None
+    # 流元数据（每次开播后从 API + FLV onMetaData 获取，覆盖写入）
+    stream_title: str | None = None       # 直播标题
+    stream_resolution: str | None = None  # 分辨率，如 "1088x1920"
+    stream_fps: int | None = None         # 帧率
+    stream_vbitrate: int | None = None    # 视频码率（bps）
+    stream_vcodec: str | None = None      # 编码，如 "H264"
+    stream_encoder: str | None = None     # FLV onMetaData Encoder 原始值
 
 
 class Screenshot(SQLModel, table=True):
