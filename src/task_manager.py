@@ -632,6 +632,8 @@ class TaskManager:
             return
 
         task_name = task.name or f"任务{task_id}"
+        # task 级 cookies 优先；为空时 fallback 到 config.yaml input.cookies
+        cookies = task.cookies or self._config.input.cookies
 
         def log(msg: str) -> None:
             self.broadcast(msg, task_name=task_name, task_id=task_id)
@@ -641,7 +643,7 @@ class TaskManager:
             def _fetch_name():
                 try:
                     from src.input.douyin_spider import get_douyin_stream_data
-                    data = asyncio.run(get_douyin_stream_data(task.url, cookies=task.cookies))
+                    data = asyncio.run(get_douyin_stream_data(task.url, cookies=cookies))
                     name = data.get('anchor_name') or ''
                     if name:
                         self._update_task_name(task_id, name)
@@ -696,7 +698,7 @@ class TaskManager:
                     segment_sec=segment_sec,
                     poll_interval=poll_interval,
                     max_threads=task.max_threads,
-                    cookies=task.cookies,
+                    cookies=cookies,
                     custom_name=display_name,
                     log_callback=log,
                 )
@@ -711,7 +713,7 @@ class TaskManager:
                     danmu_worker = _DanmuWorker(
                         url=task.url,
                         ass_path=ass_path,
-                        cookies=task.cookies,
+                        cookies=cookies,
                         cdn_delay=task.danmu_cdn_delay,
                         log_fn=log,
                     )
