@@ -403,6 +403,26 @@ class TaskManager:
             session.add(task)
             session.commit()
 
+    def prefetch_name(self, task_id: int) -> None:
+        """后台预取主播名并更新 task.name（创建任务后立即调用）。"""
+        def _fetch() -> None:
+            task = self.get_task(task_id)
+            if not task or task.name:
+                return
+            try:
+                config = load_config()
+                if task.cookies:
+                    config.input.cookies = task.cookies
+                source = DouyinLiveSource(task.url, config=config.input)
+                source.extract_streamer_info()
+                if source.streamer_name:
+                    self._update_task_name(task_id, source.streamer_name)
+                    logger.info("prefetch_name task=%d name=%s", task_id, source.streamer_name)
+            except Exception as e:
+                logger.debug("prefetch_name task=%d failed: %s", task_id, e)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
     # ── 执行控制 ─────────────────────────────────────────────────────
 
     def start_task(self, task_id: int) -> None:
