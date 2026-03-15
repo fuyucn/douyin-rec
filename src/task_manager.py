@@ -302,6 +302,7 @@ class TaskManager:
             ("custom_name", "TEXT"),
             ("enable_danmu", "BOOLEAN NOT NULL DEFAULT 0"),
             ("danmu_cdn_delay", "INTEGER NOT NULL DEFAULT 6"),
+            ("danmu_merge_types", "TEXT NOT NULL DEFAULT 'danmaku,gift'"),
             ("auto_quality_fallback", "BOOLEAN NOT NULL DEFAULT 0"),
             ("stream_title", "TEXT"),
             ("stream_resolution", "TEXT"),
@@ -522,6 +523,7 @@ class TaskManager:
         custom_name: str | None = None,
         enable_danmu: bool = False,
         danmu_cdn_delay: int = 6,
+        danmu_merge_types: str = "danmaku,gift",
         auto_quality_fallback: bool = False,
     ) -> RecordingTask:
         task = RecordingTask(
@@ -545,6 +547,7 @@ class TaskManager:
             custom_name=custom_name,
             enable_danmu=enable_danmu,
             danmu_cdn_delay=danmu_cdn_delay,
+            danmu_merge_types=danmu_merge_types,
             auto_quality_fallback=auto_quality_fallback,
         )
         with Session(self.engine) as session:
@@ -615,7 +618,11 @@ class TaskManager:
             if task_id in self._workers and self._workers[task_id].thread is not None:
                 w = self._workers[task_id]
                 if w.thread.is_alive():
-                    raise ValueError(f"任务 {task_id} 线程仍在运行")
+                    if w.stop_event.is_set():
+                        # stop 已请求但线程尚未退出，等它自然结束（最多 15s）
+                        w.thread.join(timeout=15)
+                    if w.thread.is_alive():
+                        raise ValueError(f"任务 {task_id} 线程仍在运行")
 
             ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             worker = TaskWorker(

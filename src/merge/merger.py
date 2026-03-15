@@ -50,6 +50,7 @@ class RecordingGroup:
     output_dir: Path
     ts_files: list[Path]     # 排序后的 .ts 分段（完整列表）
     ass_map: dict[int, Path] = field(default_factory=dict)  # 段索引 → ass 路径
+    xml_map: dict[int, Path] = field(default_factory=dict)  # 段索引 → xml 路径
 
     @property
     def merged_mp4(self) -> Path:
@@ -60,12 +61,20 @@ class RecordingGroup:
         return self.output_dir / f"{self.prefix}_danmu.ass"
 
     @property
+    def merged_xml(self) -> Path:
+        return self.output_dir / f"{self.prefix}_danmu.xml"
+
+    @property
     def merged_danmu_mp4(self) -> Path:
         return self.output_dir / f"{self.prefix}_danmu.mp4"
 
     @property
     def already_merged(self) -> bool:
         return self.merged_mp4.exists()
+
+    @property
+    def has_danmu(self) -> bool:
+        return bool(self.xml_map) or bool(self.ass_map)
 
 
 # ── 录制组发现 ───────────────────────────────────────────────────────────────
@@ -92,8 +101,12 @@ def discover_groups(output_dir: Path, exclude_last: bool = False) -> list[Record
             all_ts = all_ts[:-1]  # 排除正在写入的最后一段
 
         ass_map: dict[int, Path] = {}
+        xml_map: dict[int, Path] = {}
         for i, ts in enumerate(all_ts):
-            ass = output_dir / (ts.stem + "_danmu.ass")
+            xml = ts.with_suffix(".xml")
+            if xml.exists():
+                xml_map[i] = xml
+            ass = ts.with_suffix(".ass")
             if ass.exists():
                 ass_map[i] = ass
 
@@ -102,6 +115,7 @@ def discover_groups(output_dir: Path, exclude_last: bool = False) -> list[Record
             output_dir=output_dir,
             ts_files=all_ts,
             ass_map=ass_map,
+            xml_map=xml_map,
         ))
 
     return result
@@ -198,14 +212,18 @@ def merge_group(
     do_plain: bool = True,
     do_danmu: bool = True,
     overwrite: bool = False,
+    danmu_types: set[str] | None = None,
 ) -> dict:
     """
     合并一个录制组。
     do_plain: 生成 {prefix}.mp4（-c copy，无损）
     do_danmu: 生成 {prefix}_danmu.mp4（h264_videotoolbox 硬件编码烧录弹幕，依赖 plain mp4）
+    danmu_types: 烧录的弹幕类型集合，默认 {"danmaku", "gift"}；XML 路径时生效，ASS fallback 忽略此参数。
     若 do_danmu=True 但 plain mp4 不存在，自动先执行 plain merge。
     返回 {"plain_mp4": str | None, "danmu_mp4": str | None}
     """
+    if danmu_types is None:
+        danmu_types = {"danmaku", "gift"}
     def _log(msg: str) -> None:
         if log_fn:
             log_fn(msg)
@@ -274,7 +292,7 @@ def merge_group(
 
     # ── Step 2: Danmu merge ──────────────────────────────────────────────────
     if do_danmu:
-        if not group.ass_map:
+        if not group.has_danmu:
             _log("[合并] 无弹幕文件，跳过弹幕烧录")
         elif not group.merged_mp4.exists():
             _log("[合并] plain mp4 不存在，无法烧录弹幕")
@@ -283,8 +301,67 @@ def merge_group(
             danmu_mp4 = str(group.merged_danmu_mp4)
         else:
             try:
-                _log(f"[合并] 合并弹幕 ({len(group.ass_map)} 段)...")
-                merge_ass_files(group.ts_files, group.ass_map, group.merged_ass, log_fn=log_fn)
+                if group.xml_map:
+                    # XML 路径：合并 XML → 按 danmu_types 过滤 → 渲染 ASS
+                    from src.danmu.xml_writer import XmlWriter  # noqa: F401 (ensure import path)
+                    import xml.etree.ElementTree as ET
+                    import xml.sax.saxutils as saxutils
+                    from src.danmu.ass_writer import AssWriter
+                    from src.danmu.models import GiftDanmaku, MemberDanmaku, SimpleDanmaku
+
+                    _log(f"[合并] 合并弹幕 XML ({len(group.xml_map)} 段，类型: {','.join(sorted(danmu_types))})...")
+
+                    # 合并 XML（按 record_start 偏移）
+                    xml_files = [group.xml_map[i] for i in sorted(group.xml_map)]
+                    base_start = float(ET.parse(str(xml_files[0])).getroot().get("record_start", 0))
+
+                    ass_writer = AssWriter()
+                    ass_writer.open(group.merged_ass)
+                    count = 0
+                    for xml_path in xml_files:
+                        root = ET.parse(str(xml_path)).getroot()
+                        seg_start = float(root.get("record_start", base_start))
+                        offset = seg_start - base_start
+                        for d in root.findall("d"):
+                            dtype = d.get("type", "danmaku")
+                            if dtype not in danmu_types:
+                                continue
+                            t_val = float(d.get("t", 0)) + offset
+                            if t_val < 0:
+                                continue
+                            uname = d.get("uname", "")
+                            uid = d.get("uid", "")
+                            color = d.get("color", "ffffff")
+                            content = (d.text or "").strip()
+                            if dtype == "gift":
+                                item = GiftDanmaku(
+                                    time=t_val, uname=uname, uid=uid,
+                                    gift_name=d.get("gift", ""),
+                                    gift_count=int(d.get("count", 1)),
+                                    gift_price=float(d.get("price", 0)),
+                                    content=content, color=color, dtype="gift",
+                                )
+                            elif dtype == "member":
+                                item = MemberDanmaku(
+                                    time=t_val, uname=uname, uid=uid,
+                                    member_count=int(d.get("member_count", 0)),
+                                    content=content or f"{uname} 进入直播间",
+                                    color=color, dtype="member",
+                                )
+                            else:
+                                item = SimpleDanmaku(
+                                    time=t_val, uname=uname, uid=uid,
+                                    content=content, color=color, dtype="danmaku",
+                                    text=f"{uname}: {content}" if uname else content,
+                                )
+                            if ass_writer.add(item):
+                                count += 1
+                    ass_writer.close()
+                    _log(f"[合并] 渲染 {count} 条弹幕 → {group.merged_ass.name}")
+                else:
+                    # ASS fallback（旧格式，无 XML）
+                    _log(f"[合并] 合并弹幕 ASS ({len(group.ass_map)} 段，fallback 模式)...")
+                    merge_ass_files(group.ts_files, group.ass_map, group.merged_ass, log_fn=log_fn)
 
                 _log(f"[合并] 烧录弹幕 → {group.merged_danmu_mp4.name}（VideoToolbox 硬件编码）")
                 proc = subprocess.run(
@@ -298,7 +375,7 @@ def merge_group(
                         str(group.merged_danmu_mp4),
                     ],
                     capture_output=True,
-                    cwd=str(group.output_dir),  # cwd = ASS 所在目录，避免中文路径转义
+                    cwd=str(group.output_dir),
                 )
                 if proc.returncode != 0:
                     group.merged_danmu_mp4.unlink(missing_ok=True)

@@ -61,6 +61,7 @@ def _serialize_task(t, worker_status: str = "", recording_started_at: str | None
         "enable_record": t.enable_record,
         "enable_screenshot": t.enable_screenshot,
         "enable_danmu": t.enable_danmu,
+        "danmu_merge_types": t.danmu_merge_types,
         "auto_quality_fallback": t.auto_quality_fallback,
         "enable_segment": t.enable_segment,
         "segment_sec": t.segment_sec,
@@ -194,6 +195,7 @@ async def create_task(request: Request):
         cookies=body.get("cookies"),
         enable_danmu=body.get("enable_danmu", False),
         danmu_cdn_delay=int(body.get("danmu_cdn_delay", 6)),
+        danmu_merge_types=body.get("danmu_merge_types", "danmaku,gift"),
         auto_quality_fallback=body.get("auto_quality_fallback", False),
         enable_segment=body.get("enable_segment", True),
         segment_sec=int(body.get("segment_sec", 1800)),
@@ -533,7 +535,7 @@ async def list_segments(task_id: int):
             "date": m.group(1) if m else None,
             "time": m.group(2).replace("-", ":") if m else None,
             "segment_count": len(g.ts_files),
-            "has_danmu": len(g.ass_map) > 0,
+            "has_danmu": g.has_danmu,
             "merged": g.already_merged,
             "danmu_merged": g.merged_danmu_mp4.exists(),
             "merging": lk in _merging_prefixes,
@@ -579,7 +581,8 @@ async def merge_segments(task_id: int, request: Request):
         try:
             def log_fn(msg: str) -> None:
                 task_manager.broadcast(msg, task_name=task_name, task_id=task_id)
-            merge_group(target, log_fn=log_fn, do_danmu=do_danmu, overwrite=overwrite)
+            danmu_types = set(t.danmu_merge_types.split(",")) if t.danmu_merge_types else {"danmaku", "gift"}
+            merge_group(target, log_fn=log_fn, do_danmu=do_danmu, overwrite=overwrite, danmu_types=danmu_types)
             _merge_results[lock_key] = {"ok": True, "error": None}
         except Exception as e:
             err = str(e).strip()[:300]

@@ -21,6 +21,7 @@ class RecordingTask(SQLModel, table=True):
     max_threads: int = 3  # 同一时间访问网络的线程数
     enable_danmu: bool = False  # 是否录制弹幕
     danmu_cdn_delay: int = 6  # CDN 推流延迟补偿秒数（弹幕时间对齐）
+    danmu_merge_types: str = "danmaku,gift"  # 合并时包含的弹幕类型（逗号分隔）
     auto_quality_fallback: bool = False  # ByteVC1 崩溃时自动降级画质
     schedule_enabled: bool = False  # 是否启用定时
     schedule_timezone: str = "Asia/Shanghai"  # 时区 (IANA)
