@@ -100,6 +100,12 @@ class _DanmuWorker:
             return self._ass_base.parent / f"{self._ass_base.name}_{ts}.ass"
         return self._ass_base.parent / f"{self._ass_base.name}_{ts}_{idx:03d}.ass"
 
+    def _item_time(self, item: SimpleDanmaku, seg_start: float) -> float:
+        """计算弹幕相对于分段起始的时间（秒）。
+        使用 ChatMessage.eventTime（服务端 Unix 秒时间戳），对齐方式参考 biliLive-tools DouYinDanma：
+        progress = eventTime - recordStart（自然补偿 CDN 延迟，无需手动调参）。"""
+        return item.timestamp - seg_start
+
     def start(self) -> None:
         self._stop_event.clear()
         self._thread = threading.Thread(
@@ -127,45 +133,61 @@ class _DanmuWorker:
         client = DouyinDanmakuClient(self._url, q, self._cookies)
         writer = AssWriter()
 
-        # 等待 DLR 开始写入（sync_start 触发），最多 30s，超时则用当前时间
-        wait_deadline = time.time() + 30
-        while not self._sync_event.is_set() and not self._stop_event.is_set():
-            await asyncio.sleep(0.2)
-            if time.time() > wait_deadline:
-                self._sync_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                break
-
-        if self._stop_event.is_set():
-            return
-
+        # WebSocket 立即启动，弹幕先缓冲到内存，等 DLR 开始写入后再落盘
+        pre_buffer: list[SimpleDanmaku] = []
         seg_idx = 0
-        # 用 sync_start() 记录的精确时刻作为 seg_start，而非 asyncio sleep 醒来后的时间
-        seg_start = self._sync_wall_time if self._sync_wall_time > 0 else time.time()
-        open_ts = self._sync_ts or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        writer.open(self._seg_path(open_ts, seg_idx))
-        self._log(f"[弹幕] 开始录制 → {self._seg_path(open_ts, seg_idx).name}")
+        seg_start = 0.0
+        open_ts = ""
+        writer_opened = False
+
+        def _open_writer() -> None:
+            nonlocal seg_start, open_ts, writer_opened
+            seg_start = self._sync_wall_time if self._sync_wall_time > 0 else time.time()
+            open_ts = self._sync_ts or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            writer.open(self._seg_path(open_ts, seg_idx))
+            self._log(f"[弹幕] 开始录制 → {self._seg_path(open_ts, seg_idx).name}")
+            # 回放缓冲区（server_ts 对齐，负时间由 AssWriter 过滤）
+            for buffered in pre_buffer:
+                buffered.time = self._item_time(buffered, seg_start)
+                writer.add(buffered)
+            pre_buffer.clear()
+            writer_opened = True
 
         async def consume() -> None:
-            nonlocal seg_idx, seg_start
+            nonlocal seg_idx, seg_start, open_ts, writer_opened
             while not self._stop_event.is_set():
                 try:
                     item = await asyncio.wait_for(q.get(), timeout=1.0)
                 except asyncio.TimeoutError:
+                    # 超时期间检查 sync 是否触发
+                    if not writer_opened and self._sync_event.is_set():
+                        _open_writer()
                     continue
                 if isinstance(item, StreamEndSignal):
                     self._log("[弹幕] 收到下播信号")
                     continue
-                if isinstance(item, SimpleDanmaku):
-                    now = time.time()
-                    # 分段边界：关闭当前 ASS，打开下一个，重置计时
-                    if self._segment_sec > 0 and (now - seg_start) >= self._segment_sec:
-                        writer.close()
-                        seg_idx += 1
-                        seg_start = now
-                        writer.open(self._seg_path(open_ts, seg_idx))
-                        self._log(f"[弹幕] 新分段 → {self._seg_path(open_ts, seg_idx).name}")
-                    item.time = now - seg_start - self._cdn_delay
-                    writer.add(item)
+                if not isinstance(item, SimpleDanmaku):
+                    continue
+
+                if not writer_opened:
+                    if self._sync_event.is_set():
+                        _open_writer()
+                        # fall through：写当前条目
+                    else:
+                        pre_buffer.append(item)
+                        continue
+
+                # 分段边界（按挂钟时间，与 DLR 分段逻辑一致）
+                now = time.time()
+                if self._segment_sec > 0 and (now - seg_start) >= self._segment_sec:
+                    writer.close()
+                    seg_idx += 1
+                    seg_start = now
+                    writer.open(self._seg_path(open_ts, seg_idx))
+                    self._log(f"[弹幕] 新分段 → {self._seg_path(open_ts, seg_idx).name}")
+
+                item.time = self._item_time(item, seg_start)
+                writer.add(item)
 
         try:
             await asyncio.gather(client.start(), consume())
@@ -222,7 +244,8 @@ class TaskManager:
         self._recover_running_local_tasks()
 
     def _kill_orphan_dlr_processes(self) -> None:
-        """启动时清理上次遗留的 DLR 子进程（匹配 tmpdir 路径 dlr_task{N}_）"""
+        """启动时清理上次遗留的 DLR 子进程（匹配 tmpdir 路径 dlr_task{N}_）。
+        用 killpg 杀整个进程组，确保 DLR 启动的 ffmpeg 子进程也被清理。"""
         try:
             result = subprocess.run(
                 ['pgrep', '-f', r'dlr_task[0-9]+_'],
@@ -231,16 +254,22 @@ class TaskManager:
             pids = [int(p) for p in result.stdout.split() if p.strip().isdigit()]
             if not pids:
                 return
-            logger.info("清理遗留 DLR 进程: %s", pids)
+            logger.info("清理遗留 DLR 进程组: %s", pids)
+            pgids: set[int] = set()
             for pid in pids:
                 try:
-                    os.kill(pid, signal.SIGTERM)
+                    pgids.add(os.getpgid(pid))
+                except ProcessLookupError:
+                    pass
+            for pgid in pgids:
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
             time.sleep(1)
-            for pid in pids:
+            for pgid in pgids:
                 try:
-                    os.kill(pid, signal.SIGKILL)
+                    os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
         except Exception as e:

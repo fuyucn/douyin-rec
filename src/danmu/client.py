@@ -145,8 +145,12 @@ class DouyinDanmakuClient:
                 d = json_format.MessageToDict(chat, preserving_proto_field_name=True)
                 name = d.get('user', {}).get('nickName', '')
                 content = d.get('content', '')
+                # eventTime (field 15) = 服务端 Unix 秒时间戳，用于弹幕-视频对齐
+                # 对齐公式参考 biliLive-tools DouYinDanma：progress = eventTime - recordStart
+                event_time = int(d.get('eventTime', 0))
+                ts = float(event_time) if event_time > 1_000_000_000 else now
                 msgs.append(SimpleDanmaku(
-                    timestamp=now, uname=name,
+                    timestamp=ts, uname=name,
                     content=content,
                     text=f'{name}: {content}',
                     dtype='danmaku', color='ffffff',
