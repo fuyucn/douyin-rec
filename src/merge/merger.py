@@ -304,15 +304,13 @@ def merge_group(
             try:
                 if group.xml_map:
                     # XML 路径：合并 XML → 按 danmu_types 过滤 → 渲染 ASS
-                    from src.danmu.xml_writer import XmlWriter  # noqa: F401 (ensure import path)
                     import xml.etree.ElementTree as ET
-                    import xml.sax.saxutils as saxutils
                     from src.danmu.ass_writer import AssWriter
+                    from src.danmu.chat_panel_writer import ChatPanelWriter
                     from src.danmu.models import GiftDanmaku, MemberDanmaku, SimpleDanmaku
 
                     _log(f"[合并] 合并弹幕 XML ({len(group.xml_map)} 段，类型: {','.join(sorted(danmu_types))})...")
 
-                    # 合并 XML（按 record_start/video_start_time 偏移）
                     # 兼容新格式（<i><metadata><video_start_time>ms）和旧格式（<danmaku record_start="sec">）
                     def _xml_record_start(root) -> float:
                         meta = root.find('metadata')
@@ -324,16 +322,38 @@ def merge_group(
                     xml_files = [group.xml_map[i] for i in sorted(group.xml_map)]
                     base_start = _xml_record_start(ET.parse(str(xml_files[0])).getroot())
 
-                    ass_writer = AssWriter()
+                    # 探测视频分辨率（用于 AssWriter / ChatPanelWriter 适配）
+                    vid_w, vid_h = 1920, 1080
+                    try:
+                        import json as _json
+                        probe = subprocess.run(
+                            ["ffprobe", "-v", "quiet", "-print_format", "json",
+                             "-show_streams", str(group.merged_mp4)],
+                            capture_output=True, text=True, timeout=15,
+                        )
+                        if probe.returncode == 0:
+                            for s in _json.loads(probe.stdout).get("streams", []):
+                                if s.get("codec_type") == "video":
+                                    vid_w = int(s.get("width", vid_w))
+                                    vid_h = int(s.get("height", vid_h))
+                                    break
+                    except Exception:
+                        pass
+
+                    # danmaku → 顶部横向滚动（AssWriter）
+                    # gift/member → 左下聊天面板（ChatPanelWriter，批量处理）
+                    ass_writer = AssWriter(width=vid_w, height=vid_h)
                     ass_writer.open(group.merged_ass)
-                    count = 0
+                    chat_items: list[SimpleDanmaku] = []
+                    dm_count = 0
+
                     for xml_path in xml_files:
                         root = ET.parse(str(xml_path)).getroot()
                         seg_start = _xml_record_start(root)
                         offset = seg_start - base_start
                         is_new_fmt = root.find('metadata') is not None
 
-                        # 聊天弹幕 <d>
+                        # 聊天弹幕 → 横向滚动
                         if 'danmaku' in danmu_types:
                             for d in root.findall('d'):
                                 if is_new_fmt:
@@ -352,33 +372,42 @@ def merge_group(
                                     text=f'{uname}: {content}' if uname else content,
                                 )
                                 if ass_writer.add(item):
-                                    count += 1
+                                    dm_count += 1
 
-                        # 礼物 <gift>
+                        # 礼物 → 聊天面板
                         if 'gift' in danmu_types:
                             for g in root.findall('gift'):
                                 ts_ms = int(g.get('ts', 0))
-                                if is_new_fmt:
-                                    # ts 是 Unix ms，转换为相对时间
-                                    t_val = (ts_ms / 1000.0 - seg_start) + offset
-                                else:
-                                    t_val = float(g.get('t', 0)) + offset
+                                t_val = (ts_ms / 1000.0 - seg_start) + offset if is_new_fmt else float(g.get('t', 0)) + offset
                                 if t_val < 0:
                                     t_val = 0.0
                                 uname = g.get('user', '') or g.get('uname', '')
                                 uid = g.get('uid', '')
-                                item = GiftDanmaku(
+                                chat_items.append(GiftDanmaku(
                                     time=t_val, uname=uname, uid=uid,
                                     gift_name=g.get('giftname', '') or g.get('gift', ''),
                                     gift_count=int(g.get('giftcount', 1) or g.get('count', 1)),
                                     gift_price=float(g.get('price', 0)),
-                                    content=f'{uname}: 送了 {g.get("giftcount", 1)} 个 {g.get("giftname", "")}',
-                                    color='ffaa00', dtype='gift',
-                                )
-                                if ass_writer.add(item):
-                                    count += 1
+                                    content='', color='ffaa00', dtype='gift',
+                                ))
+                            # 旧格式 <d type="gift">
+                            if not is_new_fmt:
+                                for d in root.findall('d'):
+                                    if d.get('type') != 'gift':
+                                        continue
+                                    t_val = float(d.get('t', 0)) + offset
+                                    if t_val < 0:
+                                        continue
+                                    uname = d.get('uname', '')
+                                    chat_items.append(GiftDanmaku(
+                                        time=t_val, uname=uname, uid=d.get('uid', ''),
+                                        gift_name=d.get('gift', ''),
+                                        gift_count=int(d.get('count', 1)),
+                                        gift_price=float(d.get('price', 0)),
+                                        content='', color='ffaa00', dtype='gift',
+                                    ))
 
-                        # 入场 <member>（旧格式里是 <d type="member">）
+                        # 入場 → 聊天面板
                         if 'member' in danmu_types:
                             for m in root.findall('member'):
                                 ts_ms = int(m.get('ts', 0))
@@ -386,16 +415,12 @@ def merge_group(
                                 if t_val < 0:
                                     t_val = 0.0
                                 uname = m.get('user', '') or m.get('uname', '')
-                                uid = m.get('uid', '')
-                                item = MemberDanmaku(
-                                    time=t_val, uname=uname, uid=uid,
+                                chat_items.append(MemberDanmaku(
+                                    time=t_val, uname=uname, uid=m.get('uid', ''),
                                     member_count=int(m.get('member_count', 0)),
-                                    content=f'{uname} 进入直播间',
-                                    color='aaaaaa', dtype='member',
-                                )
-                                if ass_writer.add(item):
-                                    count += 1
-                            # 旧格式：<d type="member">
+                                    content='', color='aaaaaa', dtype='member',
+                                ))
+                            # 旧格式 <d type="member">
                             if not is_new_fmt:
                                 for d in root.findall('d'):
                                     if d.get('type') != 'member':
@@ -404,19 +429,22 @@ def merge_group(
                                     if t_val < 0:
                                         continue
                                     uname = d.get('uname', '')
-                                    uid = d.get('uid', '')
-                                    content = (d.text or '').strip()
-                                    item = MemberDanmaku(
-                                        time=t_val, uname=uname, uid=uid,
+                                    chat_items.append(MemberDanmaku(
+                                        time=t_val, uname=uname, uid=d.get('uid', ''),
                                         member_count=int(d.get('member_count', 0)),
-                                        content=content or f'{uname} 进入直播间',
-                                        color='aaaaaa', dtype='member',
-                                    )
-                                    if ass_writer.add(item):
-                                        count += 1
+                                        content='', color='aaaaaa', dtype='member',
+                                    ))
 
                     ass_writer.close()
-                    _log(f"[合并] 渲染 {count} 条弹幕 → {group.merged_ass.name}")
+
+                    # 批量写入聊天面板事件
+                    chat_count = 0
+                    if chat_items:
+                        chat_items.sort(key=lambda x: x.time or 0)
+                        chat_writer = ChatPanelWriter(width=vid_w, height=vid_h)
+                        chat_count = chat_writer.write(chat_items, group.merged_ass)
+
+                    _log(f"[合并] 渲染完成 — 弹幕 {dm_count} 条（横向）+ 聊天面板 {chat_count} 条（礼物/入场）→ {group.merged_ass.name}")
                 else:
                     # ASS fallback（旧格式，无 XML）
                     _log(f"[合并] 合并弹幕 ASS ({len(group.ass_map)} 段，fallback 模式)...")
