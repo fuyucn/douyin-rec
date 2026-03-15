@@ -22,6 +22,7 @@ class RecordingTask(SQLModel, table=True):
     enable_danmu: bool = False  # 是否录制弹幕
     danmu_cdn_delay: int = 6  # CDN 推流延迟补偿秒数（弹幕时间对齐）
     danmu_merge_types: str = "danmaku,gift"  # 合并时包含的弹幕类型（逗号分隔）
+    danmu_burn_min_vbitrate: int = 2166      # 弹幕烧录最低视频码率（kbps），低于此值按此值，高于则用原片码率
     auto_quality_fallback: bool = False  # ByteVC1 崩溃时自动降级画质
     schedule_enabled: bool = False  # 是否启用定时
     schedule_timezone: str = "Asia/Shanghai"  # 时区 (IANA)

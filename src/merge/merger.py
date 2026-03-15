@@ -213,6 +213,7 @@ def merge_group(
     do_danmu: bool = True,
     overwrite: bool = False,
     danmu_types: set[str] | None = None,
+    min_vbitrate: int = 2166,
 ) -> dict:
     """
     合并一个录制组。
@@ -311,51 +312,109 @@ def merge_group(
 
                     _log(f"[合并] 合并弹幕 XML ({len(group.xml_map)} 段，类型: {','.join(sorted(danmu_types))})...")
 
-                    # 合并 XML（按 record_start 偏移）
+                    # 合并 XML（按 record_start/video_start_time 偏移）
+                    # 兼容新格式（<i><metadata><video_start_time>ms）和旧格式（<danmaku record_start="sec">）
+                    def _xml_record_start(root) -> float:
+                        meta = root.find('metadata')
+                        if meta is not None:
+                            vst = meta.findtext('video_start_time', '0')
+                            return int(vst) / 1000.0
+                        return float(root.get('record_start', 0))
+
                     xml_files = [group.xml_map[i] for i in sorted(group.xml_map)]
-                    base_start = float(ET.parse(str(xml_files[0])).getroot().get("record_start", 0))
+                    base_start = _xml_record_start(ET.parse(str(xml_files[0])).getroot())
 
                     ass_writer = AssWriter()
                     ass_writer.open(group.merged_ass)
                     count = 0
                     for xml_path in xml_files:
                         root = ET.parse(str(xml_path)).getroot()
-                        seg_start = float(root.get("record_start", base_start))
+                        seg_start = _xml_record_start(root)
                         offset = seg_start - base_start
-                        for d in root.findall("d"):
-                            dtype = d.get("type", "danmaku")
-                            if dtype not in danmu_types:
-                                continue
-                            t_val = float(d.get("t", 0)) + offset
-                            if t_val < 0:
-                                continue
-                            uname = d.get("uname", "")
-                            uid = d.get("uid", "")
-                            color = d.get("color", "ffffff")
-                            content = (d.text or "").strip()
-                            if dtype == "gift":
-                                item = GiftDanmaku(
-                                    time=t_val, uname=uname, uid=uid,
-                                    gift_name=d.get("gift", ""),
-                                    gift_count=int(d.get("count", 1)),
-                                    gift_price=float(d.get("price", 0)),
-                                    content=content, color=color, dtype="gift",
-                                )
-                            elif dtype == "member":
-                                item = MemberDanmaku(
-                                    time=t_val, uname=uname, uid=uid,
-                                    member_count=int(d.get("member_count", 0)),
-                                    content=content or f"{uname} 进入直播间",
-                                    color=color, dtype="member",
-                                )
-                            else:
+                        is_new_fmt = root.find('metadata') is not None
+
+                        # 聊天弹幕 <d>
+                        if 'danmaku' in danmu_types:
+                            for d in root.findall('d'):
+                                if is_new_fmt:
+                                    t_val = float(d.get('p', '0').split(',')[0]) + offset
+                                    uname = d.get('user', '')
+                                else:
+                                    t_val = float(d.get('t', 0)) + offset
+                                    uname = d.get('uname', '')
+                                if t_val < 0:
+                                    continue
+                                uid = d.get('uid', '')
+                                content = (d.text or '').strip()
                                 item = SimpleDanmaku(
                                     time=t_val, uname=uname, uid=uid,
-                                    content=content, color=color, dtype="danmaku",
-                                    text=f"{uname}: {content}" if uname else content,
+                                    content=content, color='ffffff', dtype='danmaku',
+                                    text=f'{uname}: {content}' if uname else content,
                                 )
-                            if ass_writer.add(item):
-                                count += 1
+                                if ass_writer.add(item):
+                                    count += 1
+
+                        # 礼物 <gift>
+                        if 'gift' in danmu_types:
+                            for g in root.findall('gift'):
+                                ts_ms = int(g.get('ts', 0))
+                                if is_new_fmt:
+                                    # ts 是 Unix ms，转换为相对时间
+                                    t_val = (ts_ms / 1000.0 - seg_start) + offset
+                                else:
+                                    t_val = float(g.get('t', 0)) + offset
+                                if t_val < 0:
+                                    t_val = 0.0
+                                uname = g.get('user', '') or g.get('uname', '')
+                                uid = g.get('uid', '')
+                                item = GiftDanmaku(
+                                    time=t_val, uname=uname, uid=uid,
+                                    gift_name=g.get('giftname', '') or g.get('gift', ''),
+                                    gift_count=int(g.get('giftcount', 1) or g.get('count', 1)),
+                                    gift_price=float(g.get('price', 0)),
+                                    content=f'{uname}: 送了 {g.get("giftcount", 1)} 个 {g.get("giftname", "")}',
+                                    color='ffaa00', dtype='gift',
+                                )
+                                if ass_writer.add(item):
+                                    count += 1
+
+                        # 入场 <member>（旧格式里是 <d type="member">）
+                        if 'member' in danmu_types:
+                            for m in root.findall('member'):
+                                ts_ms = int(m.get('ts', 0))
+                                t_val = (ts_ms / 1000.0 - seg_start) + offset if ts_ms else offset
+                                if t_val < 0:
+                                    t_val = 0.0
+                                uname = m.get('user', '') or m.get('uname', '')
+                                uid = m.get('uid', '')
+                                item = MemberDanmaku(
+                                    time=t_val, uname=uname, uid=uid,
+                                    member_count=int(m.get('member_count', 0)),
+                                    content=f'{uname} 进入直播间',
+                                    color='aaaaaa', dtype='member',
+                                )
+                                if ass_writer.add(item):
+                                    count += 1
+                            # 旧格式：<d type="member">
+                            if not is_new_fmt:
+                                for d in root.findall('d'):
+                                    if d.get('type') != 'member':
+                                        continue
+                                    t_val = float(d.get('t', 0)) + offset
+                                    if t_val < 0:
+                                        continue
+                                    uname = d.get('uname', '')
+                                    uid = d.get('uid', '')
+                                    content = (d.text or '').strip()
+                                    item = MemberDanmaku(
+                                        time=t_val, uname=uname, uid=uid,
+                                        member_count=int(d.get('member_count', 0)),
+                                        content=content or f'{uname} 进入直播间',
+                                        color='aaaaaa', dtype='member',
+                                    )
+                                    if ass_writer.add(item):
+                                        count += 1
+
                     ass_writer.close()
                     _log(f"[合并] 渲染 {count} 条弹幕 → {group.merged_ass.name}")
                 else:
@@ -363,13 +422,29 @@ def merge_group(
                     _log(f"[合并] 合并弹幕 ASS ({len(group.ass_map)} 段，fallback 模式)...")
                     merge_ass_files(group.ts_files, group.ass_map, group.merged_ass, log_fn=log_fn)
 
-                _log(f"[合并] 烧录弹幕 → {group.merged_danmu_mp4.name}（VideoToolbox 硬件编码）")
+                # 获取原片视频码率，取 max(min_vbitrate, 原片码率) 作为目标
+                src_vbitrate = min_vbitrate
+                try:
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-print_format", "json",
+                         "-show_streams", str(group.merged_mp4)],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if probe.returncode == 0:
+                        import json as _json
+                        for s in _json.loads(probe.stdout).get("streams", []):
+                            if s.get("codec_type") == "video":
+                                src_vbitrate = max(min_vbitrate, int(s.get("bit_rate", 0)) // 1000)
+                                break
+                except Exception:
+                    pass
+                _log(f"[合并] 烧录弹幕 → {group.merged_danmu_mp4.name}（VideoToolbox {src_vbitrate}k）")
                 proc = subprocess.run(
                     [
                         "ffmpeg", "-y",
                         "-i", str(group.merged_mp4),
                         "-vf", f"ass={group.merged_ass.name}",
-                        "-c:v", "h264_videotoolbox", "-q:v", "65",
+                        "-c:v", "h264_videotoolbox", "-b:v", f"{src_vbitrate}k",
                         "-c:a", "copy",
                         "-movflags", "+faststart",
                         str(group.merged_danmu_mp4),

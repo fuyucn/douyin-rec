@@ -73,6 +73,7 @@ class _DanmuWorker:
         cdn_delay: int,
         log_fn,
         segment_sec: int = 0,
+        anchor_name: str = '',
     ) -> None:
         self._url = url
         self._ass_base = ass_base
@@ -80,6 +81,7 @@ class _DanmuWorker:
         self._cdn_delay = cdn_delay
         self._log = log_fn
         self._segment_sec = segment_sec
+        self._anchor_name = anchor_name
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         # DLR 开始写入文件时调用 sync_start()，用于对齐文件名时间戳和 seg_start
@@ -114,6 +116,9 @@ class _DanmuWorker:
         )
         self._thread.start()
 
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def stop(self) -> None:
         self._stop_event.set()
         # 如果还在等待 sync，直接触发让 asyncio 退出等待
@@ -129,11 +134,14 @@ class _DanmuWorker:
             self._log(f"[弹幕] 线程异常: {e}")
 
     async def _async_main(self) -> None:
+        import re as _re
         self._ass_base.parent.mkdir(parents=True, exist_ok=True)
         q: asyncio.Queue = asyncio.Queue()
         client = DouyinDanmakuClient(self._url, q, self._cookies)
         ass_writer = AssWriter()
         xml_writer = XmlWriter()
+        _m = _re.search(r'live\.douyin\.com/(\d+)', self._url)
+        _room_id = _m.group(1) if _m else ''
 
         # WebSocket 立即启动，弹幕先缓冲到内存，等 DLR 开始写入后再落盘
         pre_buffer: list[SimpleDanmaku] = []
@@ -147,7 +155,8 @@ class _DanmuWorker:
             seg_start = self._sync_wall_time if self._sync_wall_time > 0 else time.time()
             open_ts = self._sync_ts or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             ass_writer.open(self._seg_path(open_ts, seg_idx, '.ass'))
-            xml_writer.open(self._seg_path(open_ts, seg_idx, '.xml'), seg_start, open_ts, seg_idx)
+            xml_writer.open(self._seg_path(open_ts, seg_idx, '.xml'), seg_start, open_ts, seg_idx,
+                            user_name=self._anchor_name, room_id=_room_id)
             self._log(f"[弹幕] 开始录制 → {self._seg_path(open_ts, seg_idx, '.ass').name}")
             # 回放缓冲区（eventTime 对齐，负时间由 AssWriter 过滤）
             for buffered in pre_buffer:
@@ -190,7 +199,8 @@ class _DanmuWorker:
                     seg_idx += 1
                     seg_start = now
                     ass_writer.open(self._seg_path(open_ts, seg_idx, '.ass'))
-                    xml_writer.open(self._seg_path(open_ts, seg_idx, '.xml'), seg_start, open_ts, seg_idx)
+                    xml_writer.open(self._seg_path(open_ts, seg_idx, '.xml'), seg_start, open_ts, seg_idx,
+                            user_name=self._anchor_name, room_id=_room_id)
                     self._log(f"[弹幕] 新分段 → {self._seg_path(open_ts, seg_idx, '.ass').name}")
 
                 item.time = self._item_time(item, seg_start)
@@ -303,6 +313,7 @@ class TaskManager:
             ("enable_danmu", "BOOLEAN NOT NULL DEFAULT 0"),
             ("danmu_cdn_delay", "INTEGER NOT NULL DEFAULT 6"),
             ("danmu_merge_types", "TEXT NOT NULL DEFAULT 'danmaku,gift'"),
+            ("danmu_burn_min_vbitrate", "INTEGER NOT NULL DEFAULT 2166"),
             ("auto_quality_fallback", "BOOLEAN NOT NULL DEFAULT 0"),
             ("stream_title", "TEXT"),
             ("stream_resolution", "TEXT"),
@@ -524,6 +535,7 @@ class TaskManager:
         enable_danmu: bool = False,
         danmu_cdn_delay: int = 6,
         danmu_merge_types: str = "danmaku,gift",
+        danmu_burn_min_vbitrate: int = 2166,
         auto_quality_fallback: bool = False,
     ) -> RecordingTask:
         task = RecordingTask(
@@ -548,6 +560,7 @@ class TaskManager:
             enable_danmu=enable_danmu,
             danmu_cdn_delay=danmu_cdn_delay,
             danmu_merge_types=danmu_merge_types,
+            danmu_burn_min_vbitrate=danmu_burn_min_vbitrate,
             auto_quality_fallback=auto_quality_fallback,
         )
         with Session(self.engine) as session:
@@ -788,12 +801,35 @@ class TaskManager:
         cookies = task.cookies or self._config.input.cookies
 
         _danmu_ref: list[_DanmuWorker | None] = [None]  # 供 log() 触发 sync_start()
+        _ass_base_ref: list[Path | None] = [None]       # 每次 DLR 启动时设置
 
         def log(msg: str) -> None:
             self.broadcast(msg, task_name=task_name, task_id=task_id)
-            # DLR 日志"准备开始录制视频"= ffmpeg 即将写入第一帧，触发弹幕文件名对齐
-            if _danmu_ref[0] is not None and '准备开始录制视频' in msg:
-                _danmu_ref[0].sync_start()
+            # DLR 日志"准备开始录制视频"= ffmpeg 即将写入第一帧
+            # → 此时才开始连接弹幕 WS（避免等待开播期间空连）
+            if task.enable_danmu and '准备开始录制视频' in msg and _ass_base_ref[0] is not None:
+                dw = _danmu_ref[0]
+                if dw is not None and dw.is_alive():
+                    dw.sync_start()
+                else:
+                    new_dw = _DanmuWorker(
+                        url=task.url,
+                        ass_base=_ass_base_ref[0],
+                        cookies=cookies,
+                        cdn_delay=task.danmu_cdn_delay,
+                        log_fn=log,
+                        segment_sec=task.segment_sec if task.enable_segment else 0,
+                        anchor_name=task_name,
+                    )
+                    _danmu_ref[0] = new_dw
+                    worker.danmu_worker = new_dw
+                    try:
+                        new_dw.start()
+                        new_dw.sync_start()
+                    except Exception as e:
+                        self.broadcast(f"[弹幕] 启动失败: {e}", task_name=task_name, task_id=task_id)
+                        _danmu_ref[0] = None
+                        worker.danmu_worker = None
 
         # 后台抓取主播名（未设置时存 DB）
         def _fetch_name():
@@ -849,6 +885,9 @@ class TaskManager:
                 worker.status_text = "运行中（DLR）"
                 log("启动 DLR 录制进程...")
                 display_name = task.custom_name or task_dir_name(task_id, task_name)
+                if task.enable_danmu:
+                    recording_dir = self._output_dir.resolve() / "抖音直播" / display_name
+                    _ass_base_ref[0] = recording_dir / display_name
                 launcher = DlrLauncher(
                     task_id=task_id,
                     url=task.url,
@@ -994,46 +1033,47 @@ class TaskManager:
                 threading.Thread(target=_log_stream_meta, daemon=True,
                                  name=f"stream-meta-{task_id}").start()
 
-                # 弹幕录制：与 DLR 同生共死，失败不影响录制
-                danmu_worker: _DanmuWorker | None = None
-                if task.enable_danmu:
-                    recording_dir = self._output_dir.resolve() / "抖音直播" / display_name
-                    # ass_base 不含时间戳/扩展名；时间戳由 sync_start() 在 DLR 开始写入时确定
-                    ass_base = recording_dir / display_name
-                    danmu_worker = _DanmuWorker(
-                        url=task.url,
-                        ass_base=ass_base,
-                        cookies=cookies,
-                        cdn_delay=task.danmu_cdn_delay,
-                        log_fn=log,
-                        segment_sec=task.segment_sec if task.enable_segment else 0,
-                    )
-                    _danmu_ref[0] = danmu_worker
-                    try:
-                        danmu_worker.start()
-                        worker.danmu_worker = danmu_worker
-                    except Exception as e:
-                        log(f"[弹幕] 启动失败（继续录制）: {e}")
-                        danmu_worker = None
-                        _danmu_ref[0] = None
-
+                # 弹幕 worker 在"准备开始录制视频"信号触发时由 log() 回调懒启动
                 try:
                     while not worker.stop_event.is_set() and launcher.is_running:
                         if task.schedule_enabled and not self._is_in_schedule(task):
                             if not task.schedule_run_until_end:
                                 log(f"定时窗口结束 ({task.schedule_stop})，停止录制")
                                 break
+                        # 弹幕 worker 断线自动重启（DLR 仍在录制中）
+                        dw = _danmu_ref[0]
+                        if dw is not None and not dw.is_alive():
+                            log("[弹幕] 检测到断线，重新启动...")
+                            new_dw = _DanmuWorker(
+                                url=task.url,
+                                ass_base=_ass_base_ref[0],
+                                cookies=cookies,
+                                cdn_delay=task.danmu_cdn_delay,
+                                log_fn=log,
+                                segment_sec=task.segment_sec if task.enable_segment else 0,
+                            )
+                            _danmu_ref[0] = new_dw
+                            try:
+                                new_dw.start()
+                                new_dw.sync_start()  # DLR 已在录制，立即对齐
+                                worker.danmu_worker = new_dw
+                            except Exception as e:
+                                log(f"[弹幕] 重启失败: {e}")
+                                _danmu_ref[0] = None
+                                worker.danmu_worker = None
                         worker.stop_event.wait(5)
                 finally:
                     launcher.stop()
                     worker.launcher = None
-                    if danmu_worker is not None:
+                    dw = _danmu_ref[0]
+                    if dw is not None:
                         try:
-                            danmu_worker.stop()
+                            dw.stop()
                         except Exception as e:
                             log(f"[弹幕] 停止时出错: {e}")
                     worker.danmu_worker = None
                     _danmu_ref[0] = None
+                    _ass_base_ref[0] = None
 
                 if worker.stop_event.is_set():
                     log("[用户] 停止任务")

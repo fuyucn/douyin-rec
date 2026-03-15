@@ -62,6 +62,7 @@ def _serialize_task(t, worker_status: str = "", recording_started_at: str | None
         "enable_screenshot": t.enable_screenshot,
         "enable_danmu": t.enable_danmu,
         "danmu_merge_types": t.danmu_merge_types,
+        "danmu_burn_min_vbitrate": t.danmu_burn_min_vbitrate,
         "auto_quality_fallback": t.auto_quality_fallback,
         "enable_segment": t.enable_segment,
         "segment_sec": t.segment_sec,
@@ -196,6 +197,7 @@ async def create_task(request: Request):
         enable_danmu=body.get("enable_danmu", False),
         danmu_cdn_delay=int(body.get("danmu_cdn_delay", 6)),
         danmu_merge_types=body.get("danmu_merge_types", "danmaku,gift"),
+        danmu_burn_min_vbitrate=int(body.get("danmu_burn_min_vbitrate", 2166)),
         auto_quality_fallback=body.get("auto_quality_fallback", False),
         enable_segment=body.get("enable_segment", True),
         segment_sec=int(body.get("segment_sec", 1800)),
@@ -582,7 +584,8 @@ async def merge_segments(task_id: int, request: Request):
             def log_fn(msg: str) -> None:
                 task_manager.broadcast(msg, task_name=task_name, task_id=task_id)
             danmu_types = set(t.danmu_merge_types.split(",")) if t.danmu_merge_types else {"danmaku", "gift"}
-            merge_group(target, log_fn=log_fn, do_danmu=do_danmu, overwrite=overwrite, danmu_types=danmu_types)
+            merge_group(target, log_fn=log_fn, do_danmu=do_danmu, overwrite=overwrite,
+                        danmu_types=danmu_types, min_vbitrate=t.danmu_burn_min_vbitrate)
             _merge_results[lock_key] = {"ok": True, "error": None}
         except Exception as e:
             err = str(e).strip()[:300]
