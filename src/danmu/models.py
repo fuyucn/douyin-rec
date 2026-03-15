@@ -5,7 +5,7 @@ from datetime import datetime
 
 class SimpleDanmaku:
     def __init__(self, time: float = None, timestamp: float = None,
-                 dtype: str = None, uname: str = None,
+                 dtype: str = None, uname: str = None, uid: str = None,
                  color: str = 'ffffff', content: str = None,
                  text: str = None, **kwargs) -> None:
         # time: 相对时间（秒），timestamp: 绝对 Unix 时间戳
@@ -18,6 +18,7 @@ class SimpleDanmaku:
             self.timestamp = float(timestamp)
         self.dtype = dtype
         self.uname = uname
+        self.uid = uid or ''
         self.color = color
         self.content = content
         for key, value in kwargs.items():

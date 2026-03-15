@@ -25,8 +25,13 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
+
+# 让 tools/ 下的脚本能 import src.danmu
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 # ── ASS 工具 ───────────────────────────────────────────────────────────────
@@ -218,6 +223,110 @@ def burn_ass_to_mp4(video_path: Path, ass_path: Path, out_path: Path) -> None:
         raise RuntimeError("ffmpeg 烧录失败")
 
 
+# ── XML 工具 ──────────────────────────────────────────────────────────────
+
+
+def _read_xml_record_start(xml_path: Path) -> float:
+    """读取 XML 根节点的 record_start 属性（Unix 秒）"""
+    for event, elem in ET.iterparse(str(xml_path), events=("start",)):
+        return float(elem.get("record_start", 0))
+    return 0.0
+
+
+def merge_xml_files(xml_files: list[Path], out_path: Path) -> None:
+    """将多个 XML 分段按 record_start 偏移合并。
+    偏移 = xml_files[i].record_start - xml_files[0].record_start
+    直接从文件头读取，不需要 ffprobe。
+    """
+    base_start = _read_xml_record_start(xml_files[0])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(out_path, "w", encoding="utf-8") as out:
+        out.write('<?xml version="1.0" encoding="utf-8"?>\n')
+        out.write(f'<danmaku record_start="{base_start:.3f}" session="merged">\n')
+
+        for xml_path in xml_files:
+            seg_start = _read_xml_record_start(xml_path)
+            offset = seg_start - base_start
+            tree = ET.parse(str(xml_path))
+            root = tree.getroot()
+            for d in root.findall("d"):
+                t = float(d.get("t", 0)) + offset
+                d.set("t", f"{t:.3f}")
+                # 序列化单个 <d> 元素
+                attrs = " ".join(f'{k}="{v}"' for k, v in d.attrib.items())
+                text = (d.text or "").strip()
+                if text:
+                    import xml.sax.saxutils as saxutils
+                    out.write(f"  <d {attrs}>{saxutils.escape(text)}</d>\n")
+                else:
+                    out.write(f"  <d {attrs}/>\n")
+
+        out.write("</danmaku>\n")
+
+    print(f"[XML] 合并 {len(xml_files)} 个文件 → {out_path.name}")
+
+
+def xml_to_ass(
+    xml_path: Path,
+    ass_path: Path,
+    types: set[str] | None = None,
+) -> None:
+    """将合并后的 XML 按类型过滤，用 AssWriter 重新渲染为 ASS。
+    types 默认 {'danmaku', 'gift'}，传 None 表示全部类型。
+    """
+    from src.danmu.ass_writer import AssWriter
+    from src.danmu.models import GiftDanmaku, MemberDanmaku, SimpleDanmaku
+
+    if types is None:
+        types = {"danmaku", "gift", "member"}
+
+    writer = AssWriter()
+    writer.open(ass_path)
+
+    tree = ET.parse(str(xml_path))
+    root = tree.getroot()
+    count = 0
+    for d in root.findall("d"):
+        dtype = d.get("type", "danmaku")
+        if dtype not in types:
+            continue
+        t = float(d.get("t", 0))
+        if t < 0:
+            continue
+        uname = d.get("uname", "")
+        uid = d.get("uid", "")
+        color = d.get("color", "ffffff")
+        content = (d.text or "").strip()
+
+        if dtype == "gift":
+            item = GiftDanmaku(
+                time=t, uname=uname, uid=uid,
+                gift_name=d.get("gift", ""),
+                gift_count=int(d.get("count", 1)),
+                gift_price=float(d.get("price", 0)),
+                content=content, color=color, dtype="gift",
+            )
+        elif dtype == "member":
+            item = MemberDanmaku(
+                time=t, uname=uname, uid=uid,
+                member_count=int(d.get("member_count", 0)),
+                content=content or f"{uname} 进入直播间",
+                color=color, dtype="member",
+            )
+        else:
+            item = SimpleDanmaku(
+                time=t, uname=uname, uid=uid,
+                content=content, color=color, dtype="danmaku",
+                text=f"{uname}: {content}" if uname else content,
+            )
+        if writer.add(item):
+            count += 1
+
+    writer.close()
+    print(f"[XML→ASS] 渲染 {count} 条弹幕 → {ass_path.name}")
+
+
 # ── 主逻辑 ────────────────────────────────────────────────────────────────
 
 
@@ -246,6 +355,11 @@ def main() -> None:
     parser.add_argument(
         "--danmu-only", action="store_true", help="只生成弹幕版，跳过无弹幕版"
     )
+    parser.add_argument(
+        "--danmu-types",
+        default="danmaku,gift",
+        help="烧录的弹幕类型（逗号分隔），可选: danmaku,gift,member。默认: danmaku,gift",
+    )
     args = parser.parse_args()
 
     task_dir = Path(args.task_dir)
@@ -273,9 +387,12 @@ def main() -> None:
 
     indices = sessions[session_ts]
 
-    # 收集 TS 和 ASS 文件
+    danmu_types = set(args.danmu_types.split(",")) if args.danmu_types else {"danmaku", "gift"}
+
+    # 收集 TS、XML、ASS 文件
     prefix = None
     ts_files: list[Path] = []
+    xml_files: list[Path] = []
     ass_files: list[Path] = []
     for i in indices:
         matches = list(task_dir.glob(f"*_{session_ts}_{i:03d}.ts"))
@@ -286,6 +403,9 @@ def main() -> None:
         if prefix is None:
             prefix = ts.name.rsplit(f"_{session_ts}_", 1)[0]
         ts_files.append(ts)
+        xml = ts.with_suffix(".xml")
+        if xml.exists():
+            xml_files.append(xml)
         ass = ts.with_suffix(".ass")
         if ass.exists():
             ass_files.append(ass)
@@ -294,8 +414,10 @@ def main() -> None:
         print("没有找到有效的 TS 文件")
         return
 
-    print(f"[分段] TS: {[f.name for f in ts_files]}")
-    if ass_files:
+    print(f"[分段] TS:  {[f.name for f in ts_files]}")
+    if xml_files:
+        print(f"[分段] XML: {[f.name for f in xml_files]}")
+    elif ass_files:
         print(f"[分段] ASS: {[f.name for f in ass_files]}")
 
     # 输出文件名：{主播名}_{YYYY-MM-DD}_{HH}（小时粒度）
@@ -310,18 +432,28 @@ def main() -> None:
         anchor = re.sub(r"^task\d+_", "", dir_name) or dir_name
         out_base = task_dir / f"{anchor}_{date_hour_str}"
 
-    out_ass = out_base.with_suffix(".ass")  # MiiiX大鹏_2026-03-14.ass
-    out_mp4 = out_base.with_suffix(".mp4")  # MiiiX大鹏_2026-03-14.mp4
-    out_danmu_mp4 = (
-        task_dir / f"{out_base.name}_danmu.mp4"
-    )  # MiiiX大鹏_2026-03-14_danmu.mp4
+    out_xml = out_base.with_suffix(".xml")       # MiiiX大鹏_2026-03-14_15.xml
+    out_ass = out_base.with_suffix(".ass")        # MiiiX大鹏_2026-03-14_15.ass
+    out_mp4 = out_base.with_suffix(".mp4")        # MiiiX大鹏_2026-03-14_15.mp4
+    out_danmu_mp4 = task_dir / f"{out_base.name}_danmu.mp4"  # ..._danmu.mp4
 
-    # 1. 合并 ASS（计算各分段时长偏移）
-    has_danmu = bool(ass_files) and not args.no_danmu
-    if has_danmu:
+    # 1. 合并弹幕
+    has_danmu = not args.no_danmu
+    use_xml = bool(xml_files) and has_danmu
+
+    if use_xml:
+        # XML 路径：优先用与 TS 同名的 XML
+        if len(xml_files) < len(ts_files):
+            print(f"注意：只有 {len(xml_files)}/{len(ts_files)} 个分段有 XML 文件")
+        merge_xml_files(xml_files, out_xml)
+        print(f"✓ 合并 XML: {out_xml.name}")
+        xml_to_ass(out_xml, out_ass, types=danmu_types)
+        print(f"✓ 字幕: {out_ass.name}  (类型: {','.join(sorted(danmu_types))})")
+    elif ass_files and has_danmu:
+        # fallback：旧格式，用 ffprobe 偏移合并 ASS
+        print("[fallback] 未找到 XML，改用 ASS 合并（ffprobe 偏移）")
         if len(ass_files) < len(ts_files):
             print(f"注意：只有 {len(ass_files)}/{len(ts_files)} 个分段有 ASS 文件")
-
         offsets: list[float] = [0.0]
         for ts in ts_files[: len(ass_files) - 1]:
             try:
@@ -331,19 +463,19 @@ def main() -> None:
             except Exception as e:
                 print(f"警告：获取 {ts.name} 时长失败: {e}，使用 0 偏移")
                 offsets.append(offsets[-1])
-
         merge_ass_files(ass_files, offsets, out_ass)
         print(f"✓ 字幕: {out_ass.name}")
     else:
-        if not args.no_danmu and not ass_files:
-            print("未找到 ASS 弹幕文件，跳过弹幕烧录")
+        if has_danmu:
+            print("未找到弹幕文件，跳过弹幕烧录")
+        has_danmu = False
 
     # 2. 合并 TS → MP4
     merge_ts_to_mp4(ts_files, out_mp4)
     print(f"✓ 视频: {out_mp4.name}")
 
     # 3. 烧录弹幕
-    if has_danmu:
+    if has_danmu and out_ass.exists():
         burn_ass_to_mp4(out_mp4, out_ass, out_danmu_mp4)
         print(f"✓ 弹幕版: {out_danmu_mp4.name}")
 

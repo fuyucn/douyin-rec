@@ -149,8 +149,9 @@ class DouyinDanmakuClient:
                 # 对齐公式参考 biliLive-tools DouYinDanma：progress = eventTime - recordStart
                 event_time = int(d.get('eventTime', 0))
                 ts = float(event_time) if event_time > 1_000_000_000 else now
+                uid = str(d.get('user', {}).get('id', ''))
                 msgs.append(SimpleDanmaku(
-                    timestamp=ts, uname=name,
+                    timestamp=ts, uname=name, uid=uid,
                     content=content,
                     text=f'{name}: {content}',
                     dtype='danmaku', color='ffffff',
@@ -163,12 +164,15 @@ class DouyinDanmakuClient:
                 if 'combo' in d.get('gift', {}) and 'repeatEnd' not in d:
                     continue
                 name = d.get('user', {}).get('nickName', '')
+                uid = str(d.get('user', {}).get('id', ''))
                 gift_name = d.get('gift', {}).get('name', '')
                 count = d.get('repeatCount', 1)
+                diamond_count = d.get('gift', {}).get('diamondCount', 0)
                 msgs.append(GiftDanmaku(
-                    timestamp=now, uname=name,
+                    timestamp=now, uname=name, uid=uid,
                     content=f'{name}: 送了 {count} 个 {gift_name}',
                     gift_name=gift_name, gift_count=count,
+                    gift_price=float(diamond_count) / 10,
                     dtype='gift', color='ffaa00',
                 ))
             elif msg.method == 'WebcastControlMessage':
@@ -178,7 +182,22 @@ class DouyinDanmakuClient:
                     status = msg.payload[1] & 0x7f
                     if status == 3:
                         msgs.append(StreamEndSignal(status=status))
-            # 其他消息（含 WebcastMemberMessage 入场提醒）跳过
+            elif msg.method == 'WebcastMemberMessage':
+                member = MemberMessage()
+                member.ParseFromString(msg.payload)
+                d = json_format.MessageToDict(member, preserving_proto_field_name=True)
+                event_time = int(d.get('eventTime', 0))
+                ts = float(event_time) if event_time > 1_000_000_000 else now
+                name = d.get('user', {}).get('nickName', '')
+                uid = str(d.get('user', {}).get('id', ''))
+                member_count = int(d.get('memberCount', 0))
+                msgs.append(MemberDanmaku(
+                    timestamp=ts, uname=name, uid=uid,
+                    member_count=member_count,
+                    content=f'{name} 进入直播间',
+                    dtype='member', color='aaaaaa',
+                ))
+            # 其他消息跳过
         return msgs, ack
 
     async def _heartbeat_loop(self) -> None:

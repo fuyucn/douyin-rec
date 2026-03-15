@@ -25,6 +25,7 @@ from src.config import load_config
 from src.danmu.ass_writer import AssWriter
 from src.danmu.client import DouyinDanmakuClient
 from src.danmu.models import SimpleDanmaku, StreamEndSignal
+from src.danmu.xml_writer import XmlWriter
 from src.dlr_launcher import DlrLauncher
 from src.input.live import DouyinLiveSource
 from src.storage.database import LocalVideoTask, RecordingSession, RecordingTask
@@ -94,11 +95,11 @@ class _DanmuWorker:
             self._sync_ts = datetime.fromtimestamp(self._sync_wall_time).strftime("%Y-%m-%d_%H-%M-%S")
             self._sync_event.set()
 
-    def _seg_path(self, ts: str, idx: int) -> Path:
-        """生成 ASS 文件路径：{base}_{ts}[_{idx:03d}].ass（0-based 索引与 DLR 一致）"""
+    def _seg_path(self, ts: str, idx: int, ext: str = '.ass') -> Path:
+        """生成弹幕文件路径：{base}_{ts}[_{idx:03d}]{ext}（0-based 索引与 DLR 一致）"""
         if self._segment_sec <= 0:
-            return self._ass_base.parent / f"{self._ass_base.name}_{ts}.ass"
-        return self._ass_base.parent / f"{self._ass_base.name}_{ts}_{idx:03d}.ass"
+            return self._ass_base.parent / f"{self._ass_base.name}_{ts}{ext}"
+        return self._ass_base.parent / f"{self._ass_base.name}_{ts}_{idx:03d}{ext}"
 
     def _item_time(self, item: SimpleDanmaku, seg_start: float) -> float:
         """计算弹幕相对于分段起始的时间（秒）。
@@ -131,7 +132,8 @@ class _DanmuWorker:
         self._ass_base.parent.mkdir(parents=True, exist_ok=True)
         q: asyncio.Queue = asyncio.Queue()
         client = DouyinDanmakuClient(self._url, q, self._cookies)
-        writer = AssWriter()
+        ass_writer = AssWriter()
+        xml_writer = XmlWriter()
 
         # WebSocket 立即启动，弹幕先缓冲到内存，等 DLR 开始写入后再落盘
         pre_buffer: list[SimpleDanmaku] = []
@@ -144,12 +146,15 @@ class _DanmuWorker:
             nonlocal seg_start, open_ts, writer_opened
             seg_start = self._sync_wall_time if self._sync_wall_time > 0 else time.time()
             open_ts = self._sync_ts or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            writer.open(self._seg_path(open_ts, seg_idx))
-            self._log(f"[弹幕] 开始录制 → {self._seg_path(open_ts, seg_idx).name}")
-            # 回放缓冲区（server_ts 对齐，负时间由 AssWriter 过滤）
+            ass_writer.open(self._seg_path(open_ts, seg_idx, '.ass'))
+            xml_writer.open(self._seg_path(open_ts, seg_idx, '.xml'), seg_start, open_ts, seg_idx)
+            self._log(f"[弹幕] 开始录制 → {self._seg_path(open_ts, seg_idx, '.ass').name}")
+            # 回放缓冲区（eventTime 对齐，负时间由 AssWriter 过滤）
             for buffered in pre_buffer:
                 buffered.time = self._item_time(buffered, seg_start)
-                writer.add(buffered)
+                xml_writer.add(buffered)
+                if buffered.dtype in ('danmaku', 'gift'):
+                    ass_writer.add(buffered)
             pre_buffer.clear()
             writer_opened = True
 
@@ -180,14 +185,18 @@ class _DanmuWorker:
                 # 分段边界（按挂钟时间，与 DLR 分段逻辑一致）
                 now = time.time()
                 if self._segment_sec > 0 and (now - seg_start) >= self._segment_sec:
-                    writer.close()
+                    ass_writer.close()
+                    xml_writer.close()
                     seg_idx += 1
                     seg_start = now
-                    writer.open(self._seg_path(open_ts, seg_idx))
-                    self._log(f"[弹幕] 新分段 → {self._seg_path(open_ts, seg_idx).name}")
+                    ass_writer.open(self._seg_path(open_ts, seg_idx, '.ass'))
+                    xml_writer.open(self._seg_path(open_ts, seg_idx, '.xml'), seg_start, open_ts, seg_idx)
+                    self._log(f"[弹幕] 新分段 → {self._seg_path(open_ts, seg_idx, '.ass').name}")
 
                 item.time = self._item_time(item, seg_start)
-                writer.add(item)
+                xml_writer.add(item)                          # 全量写 XML
+                if item.dtype in ('danmaku', 'gift'):
+                    ass_writer.add(item)                      # chat/gift 写 ASS
 
         try:
             await asyncio.gather(client.start(), consume())
@@ -196,7 +205,8 @@ class _DanmuWorker:
                 self._log(f"[弹幕] 连接中断: {e}")
         finally:
             await client.stop()
-            writer.close()
+            ass_writer.close()
+            xml_writer.close()
             self._log("[弹幕] 录制结束")
 
 
