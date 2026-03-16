@@ -243,11 +243,11 @@ function renderListView() {
           <div class="form-control">
             <label class="label py-1"><span class="label-text">时区</span></label>
             <select id="scheduleTz" class="select select-bordered select-sm w-full">
+              <option value="America/Los_Angeles">America/Los_Angeles</option>
+              <option value="America/New_York">America/New_York</option>
               <option value="Asia/Shanghai">Asia/Shanghai</option>
               <option value="Asia/Tokyo">Asia/Tokyo</option>
               <option value="Asia/Hong_Kong">Asia/Hong_Kong</option>
-              <option value="America/New_York">America/New_York</option>
-              <option value="America/Los_Angeles">America/Los_Angeles</option>
               <option value="Europe/London">Europe/London</option>
               <option value="UTC">UTC</option>
             </select>
@@ -581,7 +581,15 @@ async function loadSegments(taskId) {
               <span class="badge badge-outline badge-xs">${g.segment_count}段</span>
               ${g.has_danmu ? '<span class="badge badge-info badge-outline badge-xs">弹幕</span>' : ''}
               ${g.merging
-                ? '<span class="badge badge-warning badge-xs gap-1"><span class="loading loading-spinner loading-xs"></span>合并中</span>'
+                ? `<div class="flex items-center gap-2">
+                    <span class="badge badge-warning badge-xs gap-1">
+                      <span class="loading loading-spinner loading-xs"></span>
+                      ${g.burn_progress > 0 ? g.burn_progress + '%' : '合并中'}
+                    </span>
+                    ${g.burn_progress > 0
+                      ? `<progress class="progress progress-warning w-24 h-1.5" value="${g.burn_progress}" max="100"></progress>`
+                      : ''}
+                  </div>`
                 : g.merged
                   ? '<span class="badge badge-success badge-outline badge-xs">已合并</span>'
                   : `<button class="btn btn-xs btn-outline" ${recording ? 'disabled title="录制中，请停止后再合并"' : ''}
@@ -600,6 +608,10 @@ async function loadSegments(taskId) {
         `).join('')}
       </div>
     `).join('');
+    // 若有进行中的合并，自动继续轮询
+    if (d.groups?.some(g => g.merging)) {
+      setTimeout(() => loadSegments(taskId), 1500);
+    }
   } catch {
     el.innerHTML = '<span class="text-error text-xs">加载失败</span>';
   }
@@ -637,7 +649,7 @@ async function mergeGroup(btn) {
         const pg = pd.groups?.find(x => x.prefix === prefix);
         if (!pg || !pg.merging) { clearInterval(pollMerge); loadSegments(taskId); }
       } catch { clearInterval(pollMerge); }
-    }, 3000);
+    }, 1500);
   } catch (e) {
     alert(e.message);
     btn.disabled = false;

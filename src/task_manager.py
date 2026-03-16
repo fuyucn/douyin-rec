@@ -138,6 +138,7 @@ class _DanmuWorker:
         self._ass_base.parent.mkdir(parents=True, exist_ok=True)
         q: asyncio.Queue = asyncio.Queue()
         client = DouyinDanmakuClient(self._url, q, self._cookies)
+        self._log("[弹幕] 正在连接 WebSocket...")
         ass_writer = AssWriter()
         xml_writer = XmlWriter()
         _m = _re.search(r'live\.douyin\.com/(\d+)', self._url)
@@ -212,12 +213,12 @@ class _DanmuWorker:
             await asyncio.gather(client.start(), consume())
         except Exception as e:
             if not self._stop_event.is_set():
-                self._log(f"[弹幕] 连接中断: {e}")
+                self._log(f"[弹幕] 连接中断: {type(e).__name__}: {e}")
         finally:
             await client.stop()
             ass_writer.close()
             xml_writer.close()
-            self._log("[弹幕] 录制结束")
+            self._log("[弹幕] 录制结束（线程退出）")
 
 
 # 本地任务日志 ID 偏移，避免与录制任务 ID 冲突
@@ -304,7 +305,7 @@ class TaskManager:
             ("show_countdown", "BOOLEAN NOT NULL DEFAULT 1"),
             ("max_threads", "INTEGER NOT NULL DEFAULT 3"),
             ("schedule_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
-            ("schedule_timezone", "TEXT NOT NULL DEFAULT 'Asia/Shanghai'"),
+            ("schedule_timezone", "TEXT NOT NULL DEFAULT 'America/Los_Angeles'"),
             ("schedule_start", "TEXT NOT NULL DEFAULT '00:00'"),
             ("schedule_stop", "TEXT NOT NULL DEFAULT '23:59'"),
             ("schedule_run_until_end", "BOOLEAN NOT NULL DEFAULT 0"),
@@ -527,7 +528,7 @@ class TaskManager:
         show_countdown: bool = True,
         max_threads: int = 3,
         schedule_enabled: bool = False,
-        schedule_timezone: str = "Asia/Shanghai",
+        schedule_timezone: str = "America/Los_Angeles",
         schedule_start: str = "00:00",
         schedule_stop: str = "23:59",
         schedule_run_until_end: bool = False,
@@ -752,7 +753,7 @@ class TaskManager:
         try:
             tz = ZoneInfo(task.schedule_timezone)
         except Exception:
-            tz = ZoneInfo("Asia/Shanghai")
+            tz = ZoneInfo("America/Los_Angeles")
         now = datetime.now(tz).time()
         start_parts = task.schedule_start.split(":")
         stop_parts = task.schedule_stop.split(":")
@@ -772,7 +773,7 @@ class TaskManager:
         try:
             tz = ZoneInfo(task.schedule_timezone)
         except Exception:
-            tz = ZoneInfo("Asia/Shanghai")
+            tz = ZoneInfo("America/Los_Angeles")
         now = datetime.now(tz)
         start_parts = task.schedule_start.split(":")
         from datetime import time as dt_time
@@ -1043,7 +1044,9 @@ class TaskManager:
                         # 弹幕 worker 断线自动重启（DLR 仍在录制中）
                         dw = _danmu_ref[0]
                         if dw is not None and not dw.is_alive():
-                            log("[弹幕] 检测到断线，重新启动...")
+                            _danmu_reconnect_count = getattr(worker, '_danmu_reconnect_count', 0) + 1
+                            worker._danmu_reconnect_count = _danmu_reconnect_count
+                            log(f"[弹幕] 检测到断线，第 {_danmu_reconnect_count} 次重连...")
                             new_dw = _DanmuWorker(
                                 url=task.url,
                                 ass_base=_ass_base_ref[0],
@@ -1051,14 +1054,16 @@ class TaskManager:
                                 cdn_delay=task.danmu_cdn_delay,
                                 log_fn=log,
                                 segment_sec=task.segment_sec if task.enable_segment else 0,
+                                anchor_name=task_name,
                             )
                             _danmu_ref[0] = new_dw
                             try:
                                 new_dw.start()
                                 new_dw.sync_start()  # DLR 已在录制，立即对齐
                                 worker.danmu_worker = new_dw
+                                log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连已启动")
                             except Exception as e:
-                                log(f"[弹幕] 重启失败: {e}")
+                                log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连失败: {type(e).__name__}: {e}")
                                 _danmu_ref[0] = None
                                 worker.danmu_worker = None
                         worker.stop_event.wait(5)

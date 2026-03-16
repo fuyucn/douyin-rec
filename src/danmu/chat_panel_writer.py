@@ -24,8 +24,8 @@ class ChatPanelWriter:
     """批量处理礼物/入场消息，追加到已有 ASS 文件的聊天面板样式。
 
     布局：
-      - 区域：屏幕左侧 40%，底部 30% 高度（70%–100%）
-      - 每条消息从底部向上匀速滚动，到达 70% 高度时消失
+      - 区域：屏幕左侧，底部 20% 高度（80%–100%）
+      - 每条消息从底部向上匀速滚动，到达 80% 高度时消失
       - 速度：scroll_speed px/s（默认 50）
     """
 
@@ -36,7 +36,7 @@ class ChatPanelWriter:
         width: int = 1920,
         height: int = 1080,
         font: str = 'Microsoft YaHei',
-        fontsize: int = 32,
+        fontsize: int = 24,
         opacity: float = 0.85,
         scroll_speed: float = 50.0,
         panel_x: int = 20,
@@ -55,7 +55,7 @@ class ChatPanelWriter:
 
         # 聊天面板：底部 30% 区域
         self.panel_bottom = height
-        self.panel_top = int(height * 0.70)
+        self.panel_top = int(height * 0.80)
         self.duration = (self.panel_bottom - self.panel_top) / scroll_speed  # 秒
 
     def _style_line(self) -> str:
@@ -107,7 +107,7 @@ class ChatPanelWriter:
             color = _rgb2bgr(item.color if item.color.startswith('#') else f'#{item.color}')
             line = (
                 f'Dialogue: 1,{t_start},{t_end},{self.STYLE_NAME},,0,0,0,,'
-                f'{{\\move({x},{y0},{x},{y1})}}'
+                f'{{\\q2\\move({x},{y0},{x},{y1})}}'
                 f'{{\\alpha&H{self.opacity}\\1c{color}&}}'
                 f'{text}'
             )

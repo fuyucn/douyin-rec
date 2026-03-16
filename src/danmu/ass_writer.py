@@ -30,7 +30,7 @@ class AssWriter:
         width: int = 1920,
         height: int = 1080,
         font: str = 'Microsoft YaHei',
-        fontsize: int = 36,
+        fontsize: int = 32,
         dmrate: float = 0.20,
         dmduration: float = 16.0,
         opacity: float = 0.8,
@@ -63,6 +63,7 @@ class AssWriter:
             f'PlayResX: {width}',
             f'PlayResY: {height}',
             'Timer: 100.0000',
+            'WrapStyle: 2',
             '',
             '[V4+ Styles]',
             'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, '
@@ -125,7 +126,7 @@ class AssWriter:
             color_str = _rgb2bgr(dm.color if dm.color.startswith('#') else f'#{dm.color}')
             line = (
                 f'Dialogue: 0,{t0},{t1},R2L,,0,0,0,,'
-                f'{{\\move({x0},{y + self.dst},{x1},{y + self.dst})}}'
+                f'{{\\q2\\move({x0},{y + self.dst},{x1},{y + self.dst})}}'
                 f'{{\\alpha&H{self.opacity}\\1c{color_str}&}}'
                 + dm.text.replace('\n', ' ').replace('\r', ' ')
             )

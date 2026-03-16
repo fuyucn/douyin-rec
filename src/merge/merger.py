@@ -6,6 +6,7 @@ import logging
 import re
 import subprocess
 import tempfile
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -143,6 +144,103 @@ def get_segment_duration(ts_path: Path) -> float:
         raise RuntimeError(f"ffprobe 输出无法解析 ({ts_path.name}): {result.stdout.strip()[:100]}")
 
 
+# ── XML 工具 ─────────────────────────────────────────────────────────────────
+
+def _parse_xml_safe(path: Path):
+    """解析 XML 文件，自动修复常见的截断问题（缺少结尾标签）。"""
+    import xml.etree.ElementTree as ET
+    content = path.read_text(encoding='utf-8', errors='replace')
+    try:
+        return ET.fromstring(content)
+    except ET.ParseError:
+        # 尝试补全常见根标签
+        for closing in ('</i>', '</danmaku>'):
+            try:
+                return ET.fromstring(content + f'\n{closing}')
+            except ET.ParseError:
+                pass
+        raise
+
+
+# ── XML 合并 ─────────────────────────────────────────────────────────────────
+
+def merge_xml_files(
+    xml_map: dict[int, Path],
+    output_path: Path,
+    log_fn: Callable[[str], None] | None = None,
+) -> None:
+    """
+    合并多段 XML 弹幕文件为单个 XML（biliLive-tools 格式）。
+
+    - <d> 的 p 属性第一字段（相对时间秒）按段偏移调整
+    - <gift> / <member> 的 ts 是绝对 ms 时间戳，无需调整
+    - metadata.video_start_time 取第一段的值（整场录制基准）
+    """
+    import xml.etree.ElementTree as ET
+    import copy
+
+    if not xml_map:
+        return
+
+    xml_files = [xml_map[i] for i in sorted(xml_map)]
+    roots = [_parse_xml_safe(f) for f in xml_files]
+
+    def _start_ms(root) -> int:
+        meta = root.find('metadata')
+        if meta is not None:
+            return int(meta.findtext('video_start_time', '0'))
+        return int(float(root.get('record_start', 0)) * 1000)
+
+    base_ms = _start_ms(roots[0])
+
+    lines: list[str] = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<?xml-stylesheet type="text/xsl" href="#s"?>',
+        '<i>',
+    ]
+
+    # metadata + RecorderXmlStyle from first segment
+    first_meta = roots[0].find('metadata')
+    if first_meta is not None:
+        lines.append(ET.tostring(first_meta, encoding='unicode'))
+    first_style = roots[0].find('RecorderXmlStyle')
+    if first_style is not None:
+        lines.append(ET.tostring(first_style, encoding='unicode'))
+
+    d_count = gift_count = member_count = 0
+
+    for root in roots:
+        seg_ms = _start_ms(root)
+        offset_sec = (seg_ms - base_ms) / 1000.0
+        is_new_fmt = root.find('metadata') is not None
+
+        for d in root.findall('d'):
+            elem = copy.copy(d)
+            if is_new_fmt:
+                p_parts = elem.get('p', '').split(',')
+                if p_parts:
+                    p_parts[0] = f"{float(p_parts[0]) + offset_sec:.3f}"
+                    elem.set('p', ','.join(p_parts))
+            else:
+                elem.set('t', f"{float(elem.get('t', 0)) + offset_sec:.3f}")
+            lines.append(ET.tostring(elem, encoding='unicode'))
+            d_count += 1
+
+        for g in root.findall('gift'):
+            lines.append(ET.tostring(copy.copy(g), encoding='unicode'))
+            gift_count += 1
+
+        for m in root.findall('member'):
+            lines.append(ET.tostring(copy.copy(m), encoding='unicode'))
+            member_count += 1
+
+    lines.append('</i>')
+    output_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+    if log_fn:
+        log_fn(f"[弹幕] 合并 XML → {output_path.name}（{d_count} 弹幕 + {gift_count} 礼物 + {member_count} 入场）")
+
+
 # ── ASS 合并 ─────────────────────────────────────────────────────────────────
 
 def merge_ass_files(
@@ -214,6 +312,7 @@ def merge_group(
     overwrite: bool = False,
     danmu_types: set[str] | None = None,
     min_vbitrate: int = 2166,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> dict:
     """
     合并一个录制组。
@@ -311,6 +410,9 @@ def merge_group(
 
                     _log(f"[合并] 合并弹幕 XML ({len(group.xml_map)} 段，类型: {','.join(sorted(danmu_types))})...")
 
+                    # 生成合并后的 XML
+                    merge_xml_files(group.xml_map, group.merged_xml, log_fn=_log)
+
                     # 兼容新格式（<i><metadata><video_start_time>ms）和旧格式（<danmaku record_start="sec">）
                     def _xml_record_start(root) -> float:
                         meta = root.find('metadata')
@@ -320,7 +422,7 @@ def merge_group(
                         return float(root.get('record_start', 0))
 
                     xml_files = [group.xml_map[i] for i in sorted(group.xml_map)]
-                    base_start = _xml_record_start(ET.parse(str(xml_files[0])).getroot())
+                    base_start = _xml_record_start(_parse_xml_safe(xml_files[0]))
 
                     # 探测视频分辨率（用于 AssWriter / ChatPanelWriter 适配）
                     vid_w, vid_h = 1920, 1080
@@ -348,7 +450,7 @@ def merge_group(
                     dm_count = 0
 
                     for xml_path in xml_files:
-                        root = ET.parse(str(xml_path)).getroot()
+                        root = _parse_xml_safe(xml_path)
                         seg_start = _xml_record_start(root)
                         offset = seg_start - base_start
                         is_new_fmt = root.find('metadata') is not None
@@ -450,40 +552,65 @@ def merge_group(
                     _log(f"[合并] 合并弹幕 ASS ({len(group.ass_map)} 段，fallback 模式)...")
                     merge_ass_files(group.ts_files, group.ass_map, group.merged_ass, log_fn=log_fn)
 
-                # 获取原片视频码率，取 max(min_vbitrate, 原片码率) 作为目标
+                # 获取原片视频码率 + 时长（用于烧录进度计算）
                 src_vbitrate = min_vbitrate
+                total_ms = 0
                 try:
                     probe = subprocess.run(
                         ["ffprobe", "-v", "quiet", "-print_format", "json",
-                         "-show_streams", str(group.merged_mp4)],
+                         "-show_streams", "-show_format", str(group.merged_mp4)],
                         capture_output=True, text=True, timeout=30,
                     )
                     if probe.returncode == 0:
                         import json as _json
-                        for s in _json.loads(probe.stdout).get("streams", []):
+                        probe_data = _json.loads(probe.stdout)
+                        for s in probe_data.get("streams", []):
                             if s.get("codec_type") == "video":
                                 src_vbitrate = max(min_vbitrate, int(s.get("bit_rate", 0)) // 1000)
                                 break
+                        dur = float(probe_data.get("format", {}).get("duration", 0))
+                        total_ms = int(dur * 1000)
                 except Exception:
                     pass
                 _log(f"[合并] 烧录弹幕 → {group.merged_danmu_mp4.name}（VideoToolbox {src_vbitrate}k）")
-                proc = subprocess.run(
+                proc = subprocess.Popen(
                     [
                         "ffmpeg", "-y",
                         "-i", str(group.merged_mp4),
+                        "-progress", "pipe:1", "-nostats",
                         "-vf", f"ass={group.merged_ass.name}",
                         "-c:v", "h264_videotoolbox", "-b:v", f"{src_vbitrate}k",
                         "-c:a", "copy",
                         "-movflags", "+faststart",
                         str(group.merged_danmu_mp4),
                     ],
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
                     cwd=str(group.output_dir),
                 )
+                # 后台收集 stderr（错误信息）
+                stderr_lines: list[str] = []
+                def _read_stderr() -> None:
+                    for line in proc.stderr:
+                        stderr_lines.append(line)
+                threading.Thread(target=_read_stderr, daemon=True).start()
+                # 从 stdout 解析 ffmpeg progress 协议
+                for line in proc.stdout:
+                    if line.startswith("out_time_ms=") and total_ms > 0 and progress_callback:
+                        val = line.split("=", 1)[1].strip()
+                        if val.lstrip("-").isdigit():
+                            ms = int(val)
+                            if ms > 0:
+                                pct = min(99, int(ms / total_ms * 100))
+                                progress_callback(pct)
+                proc.wait()
                 if proc.returncode != 0:
                     group.merged_danmu_mp4.unlink(missing_ok=True)
-                    err = (proc.stderr + proc.stdout).decode(errors="replace")[-600:].strip()
+                    err = "".join(stderr_lines)[-600:].strip()
                     raise RuntimeError(f"ffmpeg 弹幕烧录失败 (rc={proc.returncode}): {err or '(无输出)'}")
+                if progress_callback:
+                    progress_callback(100)
 
                 size_mb = group.merged_danmu_mp4.stat().st_size / 1024 / 1024
                 danmu_mp4 = str(group.merged_danmu_mp4)

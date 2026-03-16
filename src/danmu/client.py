@@ -206,19 +206,30 @@ class DouyinDanmakuClient:
             try:
                 if self._ws and not self._ws.closed:
                     await self._ws.send_bytes(self.heartbeat)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning('弹幕心跳发送失败: %s', e)
+                # 心跳失败意味着连接已断，退出循环让 _fetch_loop 报错
+                break
 
     async def _fetch_loop(self) -> None:
+        msg_count = 0
         while not self._stop:
             msg = await self._ws.receive()
-            if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                raise RuntimeError('WebSocket closed')
-            msgs, ack = self._decode(msg.data)
-            if ack:
-                await self._ws.send_bytes(ack)
-            for m in msgs:
-                await self._queue.put(m)
+            if msg.type == aiohttp.WSMsgType.BINARY:
+                msg_count += 1
+                msgs, ack = self._decode(msg.data)
+                if ack:
+                    await self._ws.send_bytes(ack)
+                for m in msgs:
+                    await self._queue.put(m)
+            elif msg.type == aiohttp.WSMsgType.CLOSED:
+                close_code = self._ws.close_code
+                raise RuntimeError(f'WebSocket 被关闭 (code={close_code}, 已收 {msg_count} 帧)')
+            elif msg.type == aiohttp.WSMsgType.CLOSING:
+                logger.info('弹幕 WebSocket 正在关闭 (已收 %d 帧)', msg_count)
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                exc = self._ws.exception()
+                raise RuntimeError(f'WebSocket 错误: {exc} (已收 {msg_count} 帧)')
 
     async def start(self) -> None:
         ws_url, cookie_str = await self._get_ws_url()
@@ -240,6 +251,7 @@ class DouyinDanmakuClient:
         except Exception as e:
             logger.warning('WebSocket 连接失败 (status=%s): %s', getattr(e, 'status', '?'), e)
             raise
+        logger.info('弹幕 WebSocket 已连接 (room_id=%s)', self._room_id)
         await asyncio.gather(self._heartbeat_loop(), self._fetch_loop())
 
     async def stop(self) -> None:

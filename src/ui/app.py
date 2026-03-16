@@ -205,7 +205,7 @@ async def create_task(request: Request):
         show_countdown=body.get("show_countdown", True),
         max_threads=int(body.get("max_threads", 3)),
         schedule_enabled=body.get("schedule_enabled", False),
-        schedule_timezone=body.get("schedule_timezone", "Asia/Shanghai"),
+        schedule_timezone=body.get("schedule_timezone", "America/Los_Angeles"),
         schedule_start=body.get("schedule_start", "00:00"),
         schedule_stop=body.get("schedule_stop", "23:59"),
         schedule_run_until_end=body.get("schedule_run_until_end", False),
@@ -506,8 +506,10 @@ async def local_task_logs_sse(task_id: int):
 
 # ── 录制组合并 API ────────────────────────────────────────────────────────
 
-_merging_prefixes: set[str] = set()  # 防止同一前缀并发重复合并
-_merge_results: dict[str, dict] = {}  # lock_key → {"ok": bool, "error": str|None}
+_merging_prefixes: set[str] = set()    # 防止同一前缀并发重复合并
+_merge_results: dict[str, dict] = {}   # lock_key → {"ok": bool, "error": str|None}
+_burn_progress: dict[str, int] = {}    # lock_key → 0-100（烧录进度百分比）
+_burn_last_log_pct: dict[str, int] = {}  # lock_key → 上次推日志时的百分比
 
 _PREFIX_DT_RE = re.compile(r"^.+_(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})$")
 
@@ -541,6 +543,7 @@ async def list_segments(task_id: int):
             "merged": g.already_merged,
             "danmu_merged": g.merged_danmu_mp4.exists(),
             "merging": lk in _merging_prefixes,
+            "burn_progress": _burn_progress.get(lk, 0),
             "merge_error": mr["error"] if (mr and not mr["ok"] and not g.already_merged) else None,
         })
     return {"groups": result, "is_running": is_running}
@@ -580,12 +583,20 @@ async def merge_segments(task_id: int, request: Request):
 
     def _run() -> None:
         _merging_prefixes.add(lock_key)
+        _burn_progress[lock_key] = 0
         try:
             def log_fn(msg: str) -> None:
                 task_manager.broadcast(msg, task_name=task_name, task_id=task_id)
+            def prog_cb(pct: int) -> None:
+                _burn_progress[lock_key] = pct
+                last = _burn_last_log_pct.get(lock_key, -5)
+                if pct - last >= 5:
+                    _burn_last_log_pct[lock_key] = pct
+                    task_manager.broadcast(f"[合并] 烧录进度: {pct}%", task_name=task_name, task_id=task_id)
             danmu_types = set(t.danmu_merge_types.split(",")) if t.danmu_merge_types else {"danmaku", "gift"}
             merge_group(target, log_fn=log_fn, do_danmu=do_danmu, overwrite=overwrite,
-                        danmu_types=danmu_types, min_vbitrate=t.danmu_burn_min_vbitrate)
+                        danmu_types=danmu_types, min_vbitrate=t.danmu_burn_min_vbitrate,
+                        progress_callback=prog_cb)
             _merge_results[lock_key] = {"ok": True, "error": None}
         except Exception as e:
             err = str(e).strip()[:300]
@@ -593,6 +604,8 @@ async def merge_segments(task_id: int, request: Request):
             _merge_results[lock_key] = {"ok": False, "error": err}
         finally:
             _merging_prefixes.discard(lock_key)
+            _burn_progress.pop(lock_key, None)
+            _burn_last_log_pct.pop(lock_key, None)
 
     threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "status": "merging", "message": "合并已启动，请查看日志"}
