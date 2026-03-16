@@ -22,7 +22,6 @@ from sqlmodel import Session, SQLModel, create_engine, select
 import asyncio
 
 from src.config import load_config
-from src.danmu.ass_writer import AssWriter
 from src.danmu.client import DouyinDanmakuClient
 from src.danmu.models import SimpleDanmaku, StreamEndSignal
 from src.danmu.xml_writer import XmlWriter
@@ -97,7 +96,7 @@ class _DanmuWorker:
             self._sync_ts = datetime.fromtimestamp(self._sync_wall_time).strftime("%Y-%m-%d_%H-%M-%S")
             self._sync_event.set()
 
-    def _seg_path(self, ts: str, idx: int, ext: str = '.ass') -> Path:
+    def _seg_path(self, ts: str, idx: int, ext: str = '.xml') -> Path:
         """生成弹幕文件路径：{base}_{ts}[_{idx:03d}]{ext}（0-based 索引与 DLR 一致）"""
         if self._segment_sec <= 0:
             return self._ass_base.parent / f"{self._ass_base.name}_{ts}{ext}"
@@ -139,7 +138,6 @@ class _DanmuWorker:
         q: asyncio.Queue = asyncio.Queue()
         client = DouyinDanmakuClient(self._url, q, self._cookies)
         self._log("[弹幕] 正在连接 WebSocket...")
-        ass_writer = AssWriter()
         xml_writer = XmlWriter()
         _m = _re.search(r'live\.douyin\.com/(\d+)', self._url)
         _room_id = _m.group(1) if _m else ''
@@ -155,16 +153,13 @@ class _DanmuWorker:
             nonlocal seg_start, open_ts, writer_opened
             seg_start = self._sync_wall_time if self._sync_wall_time > 0 else time.time()
             open_ts = self._sync_ts or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            ass_writer.open(self._seg_path(open_ts, seg_idx, '.ass'))
             xml_writer.open(self._seg_path(open_ts, seg_idx, '.xml'), seg_start, open_ts, seg_idx,
                             user_name=self._anchor_name, room_id=_room_id)
-            self._log(f"[弹幕] 开始录制 → {self._seg_path(open_ts, seg_idx, '.ass').name}")
-            # 回放缓冲区（eventTime 对齐，负时间由 AssWriter 过滤）
+            self._log(f"[弹幕] 开始录制 → {self._seg_path(open_ts, seg_idx, '.xml').name}")
+            # 回放缓冲区（eventTime 对齐）
             for buffered in pre_buffer:
                 buffered.time = self._item_time(buffered, seg_start)
                 xml_writer.add(buffered)
-                if buffered.dtype in ('danmaku', 'gift'):
-                    ass_writer.add(buffered)
             pre_buffer.clear()
             writer_opened = True
 
@@ -195,19 +190,15 @@ class _DanmuWorker:
                 # 分段边界（按挂钟时间，与 DLR 分段逻辑一致）
                 now = time.time()
                 if self._segment_sec > 0 and (now - seg_start) >= self._segment_sec:
-                    ass_writer.close()
                     xml_writer.close()
                     seg_idx += 1
                     seg_start = now
-                    ass_writer.open(self._seg_path(open_ts, seg_idx, '.ass'))
                     xml_writer.open(self._seg_path(open_ts, seg_idx, '.xml'), seg_start, open_ts, seg_idx,
                             user_name=self._anchor_name, room_id=_room_id)
-                    self._log(f"[弹幕] 新分段 → {self._seg_path(open_ts, seg_idx, '.ass').name}")
+                    self._log(f"[弹幕] 新分段 → {self._seg_path(open_ts, seg_idx, '.xml').name}")
 
                 item.time = self._item_time(item, seg_start)
-                xml_writer.add(item)                          # 全量写 XML
-                if item.dtype in ('danmaku', 'gift'):
-                    ass_writer.add(item)                      # chat/gift 写 ASS
+                xml_writer.add(item)
 
         try:
             await asyncio.gather(client.start(), consume())
@@ -216,7 +207,6 @@ class _DanmuWorker:
                 self._log(f"[弹幕] 连接中断: {type(e).__name__}: {e}")
         finally:
             await client.stop()
-            ass_writer.close()
             xml_writer.close()
             self._log("[弹幕] 录制结束（线程退出）")
 
@@ -860,22 +850,22 @@ class TaskManager:
             if task.enable_danmu:
                 features.append("弹幕")
             log(f"已启用: {', '.join(features)}")
+            log(f"URL: {task.url}")
+            log(f"画质: {task.quality} | Cookie: {'有' if cookies else '无'}")
 
             segment_sec = task.segment_sec if task.enable_segment else 0
             poll_interval = task.poll_interval
-            # DLR 以 folder_by_author=是 在 output_dir/抖音直播/ 下建 {anchor_name}/ 子目录。
-            # anchor_name 取自 URL_config.ini 中设置的名字（task{id}_{name} 格式）。
-            # 最终路径：output/抖音直播/task{id}_{name}/*.ts
             output_dir = str(self._output_dir.resolve())
 
-            log(f"轮询间隔: {poll_interval}s, 分段: {'开启 (' + str(segment_sec) + 's)' if segment_sec > 0 else '关闭'}")
+            log(f"分段: {'开启 (' + str(segment_sec) + 's)' if segment_sec > 0 else '关闭'} | 断流重检间隔: {poll_interval}s")
 
             while not worker.stop_event.is_set():
                 # ── 定时窗口检查 ──
                 if task.schedule_enabled and not self._is_in_schedule(task):
                     worker.status_text = "定时等待"
-                    log(f"当前不在定时窗口 ({task.schedule_start}~{task.schedule_stop})，等待...")
                     wait_secs = self._seconds_until_schedule_start(task)
+                    wait_min = int(wait_secs // 60)
+                    log(f"[定时] 当前不在窗口 ({task.schedule_start}~{task.schedule_stop})，距开始还有 {wait_min}m{int(wait_secs%60)}s")
                     worker.stop_event.wait(min(wait_secs, 60))
                     continue
 
@@ -883,9 +873,40 @@ class TaskManager:
                     worker.stop_event.wait(poll_interval)
                     continue
 
+                # ── 等待开播（快速轮询，30s 间隔） ──────────────────────────
+                LIVE_POLL_INTERVAL = 30
+                worker.status_text = "等待开播"
+                _poll_count = 0
+                _wait_start = time.time()
+                log("[检测] 开始轮询开播状态（间隔 30s）...")
+                while not worker.stop_event.is_set():
+                    _poll_count += 1
+                    _elapsed = int(time.time() - _wait_start)
+                    try:
+                        from src.input.douyin_spider import get_douyin_stream_data
+                        log(f"[检测] 第 {_poll_count} 次查询直播状态（已等待 {_elapsed}s）...")
+                        data = asyncio.run(get_douyin_stream_data(task.url, cookies=cookies))
+                        status = data.get('status')
+                        anchor = data.get('anchor_name', '')
+                        title = data.get('title', '')
+                        if status == 2:
+                            desc = f"{anchor}" + (f" 《{title}》" if title else "")
+                            log(f"[检测] ✓ 已开播: {desc}")
+                            break
+                        else:
+                            status_text = {4: "未开播", 3: "直播结束", 2: "直播中"}.get(status, f"status={status}")
+                            log(f"[检测] {status_text}，{LIVE_POLL_INTERVAL}s 后重试（第 {_poll_count} 次）")
+                    except Exception as e:
+                        log(f"[检测] 查询失败: {type(e).__name__}: {e}，{LIVE_POLL_INTERVAL}s 后重试")
+                    worker.stop_event.wait(LIVE_POLL_INTERVAL)
+
+                if worker.stop_event.is_set():
+                    break
+
                 worker.status_text = "运行中（DLR）"
-                log("启动 DLR 录制进程...")
+                _dlr_start_time = time.time()
                 display_name = task.custom_name or task_dir_name(task_id, task_name)
+                log(f"[DLR] 正在启动录制进程... (输出目录: {display_name})")
                 if task.enable_danmu:
                     recording_dir = self._output_dir.resolve() / "抖音直播" / display_name
                     _ass_base_ref[0] = recording_dir / display_name
@@ -904,6 +925,7 @@ class TaskManager:
                 )
                 launcher.start()
                 worker.launcher = launcher
+                log(f"[DLR] 进程已启动 (PID={launcher._process.pid if launcher._process else '?'})")
 
                 # DLR 启动后（直播确认开播），后台抓取并 log 流元数据
                 def _log_stream_meta(url=task.url, ck=cookies):
@@ -1035,13 +1057,29 @@ class TaskManager:
                                  name=f"stream-meta-{task_id}").start()
 
                 # 弹幕 worker 在"准备开始录制视频"信号触发时由 log() 回调懒启动
+                _schedule_end_logged = False
+                _heartbeat_last = time.time()
+                HEARTBEAT_INTERVAL = 300  # 每 5 分钟输出一次心跳
                 try:
                     while not worker.stop_event.is_set() and launcher.is_running:
+                        # 定时窗口检查
                         if task.schedule_enabled and not self._is_in_schedule(task):
                             if not task.schedule_run_until_end:
-                                log(f"定时窗口结束 ({task.schedule_stop})，停止录制")
+                                log(f"[定时] 窗口结束 ({task.schedule_stop})，停止录制")
                                 break
-                        # 弹幕 worker 断线自动重启（DLR 仍在录制中）
+                            elif not _schedule_end_logged:
+                                log(f"[定时] 窗口结束 ({task.schedule_stop})，等待直播结束后停止...")
+                                _schedule_end_logged = True
+
+                        # 周期性心跳（每 5 分钟）
+                        now = time.time()
+                        if now - _heartbeat_last >= HEARTBEAT_INTERVAL:
+                            elapsed = int(now - _dlr_start_time)
+                            h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
+                            log(f"[DLR] 录制进行中，已运行 {h:02d}:{m:02d}:{s:02d}")
+                            _heartbeat_last = now
+
+                        # 弹幕 worker 断线自动重启
                         dw = _danmu_ref[0]
                         if dw is not None and not dw.is_alive():
                             _danmu_reconnect_count = getattr(worker, '_danmu_reconnect_count', 0) + 1
@@ -1059,7 +1097,7 @@ class TaskManager:
                             _danmu_ref[0] = new_dw
                             try:
                                 new_dw.start()
-                                new_dw.sync_start()  # DLR 已在录制，立即对齐
+                                new_dw.sync_start()
                                 worker.danmu_worker = new_dw
                                 log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连已启动")
                             except Exception as e:
@@ -1068,12 +1106,18 @@ class TaskManager:
                                 worker.danmu_worker = None
                         worker.stop_event.wait(5)
                 finally:
+                    exit_code = launcher.exit_code
+                    elapsed = int(time.time() - _dlr_start_time)
+                    h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
+                    log(f"[DLR] 进程结束 — 运行时长 {h:02d}:{m:02d}:{s:02d}，退出码: {exit_code}")
                     launcher.stop()
                     worker.launcher = None
                     dw = _danmu_ref[0]
                     if dw is not None:
+                        log("[弹幕] 正在停止弹幕录制...")
                         try:
                             dw.stop()
+                            log("[弹幕] 弹幕录制已停止")
                         except Exception as e:
                             log(f"[弹幕] 停止时出错: {e}")
                     worker.danmu_worker = None
@@ -1084,8 +1128,7 @@ class TaskManager:
                     log("[用户] 停止任务")
                     break
 
-                log(f"DLR 进程退出，{poll_interval}s 后重试...")
-                worker.stop_event.wait(poll_interval)
+                log(f"[检测] DLR 已退出，重新进入开播检测...")
 
         except Exception as e:
             log(f"[系统] 任务出错: {e}")

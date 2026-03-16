@@ -42,6 +42,7 @@ class XmlWriter:
         self._lock = threading.Lock()
         self._file = None
         self._path: Path | None = None
+        self._insert_pos: int = 0  # byte offset of the closing </i> tag
 
     def open(
         self,
@@ -55,7 +56,7 @@ class XmlWriter:
     ) -> None:
         with self._lock:
             self._path = path
-            self._file = open(path, 'w', encoding='utf-8')
+            self._file = open(path, 'w+', encoding='utf-8')
             video_start_time = int(record_start * 1000)
             self._file.write('<?xml version="1.0" encoding="utf-8"?>\n')
             self._file.write('<?xml-stylesheet type="text/xsl" href="#s"?>\n')
@@ -68,6 +69,9 @@ class XmlWriter:
             self._file.write(f'  <room_id>{saxutils.escape(room_id)}</room_id>\n')
             self._file.write('</metadata>\n')
             self._file.write(_RECORDER_XML_STYLE + '\n')
+            # 记录插入点，写入关闭标签使文件始终是合法 XML
+            self._insert_pos = self._file.tell()
+            self._file.write('</i>\n')
             self._file.flush()
 
     def add(self, item: SimpleDanmaku) -> None:
@@ -82,7 +86,7 @@ class XmlWriter:
             if self._file is None:
                 return
             if isinstance(item, GiftDanmaku):
-                self._file.write(
+                line = (
                     f'<gift'
                     f' user="{uname}"'
                     f' uid="{uid}"'
@@ -93,7 +97,7 @@ class XmlWriter:
                     f'/>\n'
                 )
             elif isinstance(item, MemberDanmaku):
-                self._file.write(
+                line = (
                     f'<member'
                     f' user="{uname}"'
                     f' uid="{uid}"'
@@ -105,15 +109,19 @@ class XmlWriter:
                 # 聊天弹幕：<d p="time_sec,mode,fontsize,color,timestamp_ms,pool,uid,uid,0">
                 p = f'{t:.3f},1,25,16777215,{ts_ms},0,{uid},{uid},0'
                 text = saxutils.escape((item.content or '').replace('\n', ' ').replace('\r', ' '))
-                self._file.write(
-                    f'<d p="{p}" user="{uname}" uid="{uid}" timestamp="{ts_ms}">{text}</d>\n'
-                )
+                line = f'<d p="{p}" user="{uname}" uid="{uid}" timestamp="{ts_ms}">{text}</d>\n'
+            # 在 </i> 之前插入，保持文件始终是合法 XML
+            self._file.seek(self._insert_pos)
+            self._file.write(line)
+            self._insert_pos = self._file.tell()
+            self._file.write('</i>\n')
             self._file.flush()
 
     def close(self) -> None:
         with self._lock:
             if self._file is not None:
-                self._file.write('</i>\n')
+                # </i> 已在每次 add() 后写入，直接关闭即可
                 self._file.close()
                 self._file = None
                 self._path = None
+                self._insert_pos = 0

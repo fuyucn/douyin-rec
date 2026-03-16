@@ -252,6 +252,13 @@ class DlrLauncher:
             return False
         return self._process.poll() is None
 
+    @property
+    def exit_code(self) -> int | None:
+        """进程退出码；仍在运行时返回 None。"""
+        if self._process is None:
+            return None
+        return self._process.poll()
+
     def _forward_logs(self) -> None:
         """读取子进程 stdout，转发给 log_callback"""
         if self._process is None or self._process.stdout is None:

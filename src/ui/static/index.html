@@ -592,12 +592,12 @@ async function loadSegments(taskId) {
                   </div>`
                 : g.merged
                   ? '<span class="badge badge-success badge-outline badge-xs">已合并</span>'
-                  : `<button class="btn btn-xs btn-outline" ${recording ? 'disabled title="录制中，请停止后再合并"' : ''}
+                  : `<button class="btn btn-xs btn-outline"
                        data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="false"
                        onclick="mergeGroup(this)">合并</button>`
               }
               ${g.has_danmu && !g.danmu_merged && !g.merging
-                ? `<button class="btn btn-xs btn-outline btn-info" ${recording ? 'disabled title="录制中，请停止后再合并"' : ''}
+                ? `<button class="btn btn-xs btn-outline btn-info"
                      data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="true"
                      onclick="mergeGroup(this)">烧录弹幕</button>`
                 : (g.danmu_merged ? '<span class="badge badge-info badge-xs">弹幕已合并</span>' : '')
