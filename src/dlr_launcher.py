@@ -179,20 +179,23 @@ class DlrLauncher:
         # Monkey-patch: 替换 DLR 的 QQBrowser UA spider，改用我们的 Chrome UA HTML spider，
         # 解决抖音风控问题（DLR 原始 get_douyin_web_stream_data 使用 QQBrowser UA + a_bogus，
         # 与 macOS Chrome cookie 不匹配，导致风控报错）。
+        our_spider_py = str(Path(__file__).resolve().parent / "input" / "douyin_spider.py")
         runner_path.write_text(
             f"import sys\n"
             f"sys.argv[0] = __file__  # DLR 用此路径确定 config 目录（= tmpdir/runner.py）\n"
             f"if {dlr_root!r} not in sys.path:\n"
             f"    sys.path.insert(0, {dlr_root!r})\n"
             f"# ── Monkey-patch DLR spider ────────────────────────────────────\n"
-            f"_project_root = {project_root!r}\n"
-            f"if _project_root not in sys.path:\n"
-            f"    sys.path.insert(0, _project_root)\n"
+            f"# 注意：不能把项目根加到 sys.path（会与 DLR 的 src/ 包名冲突）。\n"
+            f"# 用 importlib 直接按文件路径加载我们的 spider 模块，规避包名冲突。\n"
             f"try:\n"
+            f"    import importlib.util as _ilu\n"
+            f"    _spec = _ilu.spec_from_file_location('_vs_douyin_spider', {our_spider_py!r})\n"
+            f"    _vs_spider = _ilu.module_from_spec(_spec)\n"
+            f"    _spec.loader.exec_module(_vs_spider)\n"
+            f"    _our_spider = _vs_spider.get_douyin_stream_data_by_method\n"
             f"    from src import spider as _dlr_spider\n"
-            f"    from src.input.douyin_spider import get_douyin_stream_data_by_method as _our_spider\n"
             f"    _spider_method = {spider_method!r}\n"
-            f"    import asyncio as _asyncio\n"
             f"    async def _patched_web(url, proxy_addr=None, cookies=None):\n"
             f"        return await _our_spider(url, cookies=cookies, method=_spider_method)\n"
             f"    _dlr_spider.get_douyin_web_stream_data = _patched_web\n"
