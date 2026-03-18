@@ -35,6 +35,27 @@ logger = logging.getLogger(__name__)
 DEFAULT_OUTPUT_DIR = "./output"
 
 
+def _install_thread_excepthook() -> None:
+    """将未捕获的线程异常记录到 logger（含完整 traceback），便于事后排查线程死亡原因。"""
+    _orig = threading.excepthook
+
+    def _hook(args: threading.ExceptHookArgs) -> None:
+        if args.exc_type is SystemExit:
+            _orig(args)
+            return
+        logger.error(
+            "线程 %s 异常退出:",
+            args.thread.name if args.thread else "unknown",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+        _orig(args)
+
+    threading.excepthook = _hook
+
+
+_install_thread_excepthook()
+
+
 @dataclass
 class TaskWorker:
     """单个任务的运行时状态"""
@@ -47,7 +68,8 @@ class TaskWorker:
     status_text: str = ""
     recording_started_at: datetime | None = None
     active_session_id: int | None = None
-    log_file: "Path | None" = None
+    log_file: "Path | None" = None       # 服务器日志（全量）
+    rec_log_file: "Path | None" = None   # 录制日志（仅录制相关，与 TS 文件同目录）
     # 当前活跃的子组件引用，供 stop_task() 直接停止
     launcher: "DlrLauncher | None" = None
     danmu_worker: "_DanmuWorker | None" = None
@@ -130,7 +152,8 @@ class _DanmuWorker:
         try:
             asyncio.run(self._async_main())
         except Exception as e:
-            self._log(f"[弹幕] 线程异常: {e}")
+            logger.exception("弹幕线程异常退出 (%s):", self._url)
+            self._log(f"[弹幕] 线程异常: {type(e).__name__}: {e}")
 
     async def _async_main(self) -> None:
         import re as _re
@@ -435,6 +458,13 @@ class TaskManager:
 
     # ── 日志广播 ─────────────────────────────────────────────────────
 
+    _REC_LOG_KEYWORDS = ('[DLR]', '[弹幕]', '[检测]', '[定时]',
+                         '直播标题:', '流信息:', '直播设备:')
+
+    @staticmethod
+    def _is_rec_log(msg: str) -> bool:
+        return any(kw in msg for kw in TaskManager._REC_LOG_KEYWORDS)
+
     def broadcast(
         self, msg: str, task_name: str | None = None, task_id: int | None = None,
     ) -> None:
@@ -448,13 +478,19 @@ class TaskManager:
         if task_id is not None:
             try:
                 worker = self._workers.get(task_id)
+                # 服务器日志：全量
                 log_file = worker.log_file if (worker and worker.log_file) else None
                 if log_file:
                     log_file.parent.mkdir(parents=True, exist_ok=True)
                     with open(log_file, "a", encoding="utf-8") as f:
                         f.write(line + "\n")
+                # 录制日志：仅录制相关消息
+                rec_log_file = worker.rec_log_file if (worker and worker.rec_log_file) else None
+                if rec_log_file and self._is_rec_log(msg):
+                    with open(rec_log_file, "a", encoding="utf-8") as f:
+                        f.write(line + "\n")
             except Exception:
-                pass
+                logger.debug("broadcast log write failed", exc_info=True)
 
         dead: list[tuple[queue.Queue, int | None]] = []
         for q, filter_id in self._log_queues:
@@ -479,16 +515,15 @@ class TaskManager:
         ]
 
     def get_task_log_lines(self, task_id: int) -> list[str]:
-        """读取任务最新一次启动的历史日志文件"""
+        """读取任务最新一次启动的历史日志（服务器全量日志）"""
         # 优先使用当前运行 worker 的 log_file
         worker = self._workers.get(task_id)
         if worker and worker.log_file and worker.log_file.exists():
             log_file = worker.log_file
         else:
-            # 查找最新的 *_task{id}.log（文件名含时间戳，字典序即时间序）
+            # 查找最新的 {ts}_task{id}.log
             candidates = sorted(self._logs_dir.glob(f"*_task{task_id}.log"))
             if not candidates:
-                # 兼容旧格式 task_{id}.log
                 legacy = self._logs_dir / f"task_{task_id}.log"
                 if legacy.exists():
                     log_file = legacy
@@ -793,10 +828,24 @@ class TaskManager:
 
         _danmu_ref: list[_DanmuWorker | None] = [None]  # 供 log() 触发 sync_start()
         _ass_base_ref: list[Path | None] = [None]       # 每次 DLR 启动时设置
+        _dlr_stream_ended_ref: list[bool] = [False]     # DLR 报告录制结束/出错时置 True → 触发重启
+        _dlr_quick_restart_ref: list[bool] = [False]   # 同上，且跳过首次 30s 等待直接查状态
 
         def log(msg: str) -> None:
             self.broadcast(msg, task_name=task_name, task_id=task_id)
+            # DLR 录制结束或出错（含 rc=-11）→ 标记需要重启 DLR 进程，并尝试快速重连
+            if '[DLR]' in msg and ('直播录制出错' in msg or '直播录制完成' in msg):
+                _dlr_stream_ended_ref[0] = True
+                _dlr_quick_restart_ref[0] = True
             # DLR 日志"准备开始录制视频"= ffmpeg 即将写入第一帧
+            # → 创建与 TS 文件同名的录制日志（时间戳从路径提取）
+            if '[DLR]' in msg and '准备开始录制视频' in msg:
+                m = re.search(r'(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})', msg)
+                rec_ts = m.group(1) if m else datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+                _rec_display = task.custom_name or task_dir_name(task_id, task_name)
+                _rec_dir = self._output_dir.resolve() / "抖音直播" / _rec_display
+                _rec_dir.mkdir(parents=True, exist_ok=True)
+                worker.rec_log_file = _rec_dir / f"{_rec_display}_{rec_ts}.log"
             # → 此时才开始连接弹幕 WS（避免等待开播期间空连）
             if task.enable_danmu and '准备开始录制视频' in msg and _ass_base_ref[0] is not None:
                 dw = _danmu_ref[0]
@@ -832,9 +881,8 @@ class TaskManager:
                     self._update_task_name(task_id, name)
                     nonlocal task_name
                     task_name = name
-                    log(f"主播名: {name}")
             except Exception as e:
-                logger.debug('获取主播名失败: %s', e)
+                logger.warning('获取主播名失败: %s', e)
         _fetch_name_thread = threading.Thread(
             target=_fetch_name, daemon=True, name=f"fetch-name-{task_id}"
         )
@@ -842,6 +890,7 @@ class TaskManager:
         _fetch_name_thread.join(timeout=10)  # 等主播名获取完再进主循环，避免用"任务N"命名目录
 
         try:
+            log(f"主播名: {task_name}")
             features = []
             if task.enable_record:
                 features.append("录制")
@@ -905,6 +954,8 @@ class TaskManager:
 
                 worker.status_text = "运行中（DLR）"
                 _dlr_start_time = time.time()
+                _dlr_stream_ended_ref[0] = False   # 每次启动新 DLR 前清标志
+                _dlr_quick_restart_ref[0] = False
                 display_name = task.custom_name or task_dir_name(task_id, task_name)
                 log(f"[DLR] 正在启动录制进程... (输出目录: {display_name})")
                 if task.enable_danmu:
@@ -1062,6 +1113,11 @@ class TaskManager:
                 HEARTBEAT_INTERVAL = 300  # 每 5 分钟输出一次心跳
                 try:
                     while not worker.stop_event.is_set() and launcher.is_running:
+                        # DLR 录制结束/出错 → 重启 DLR 进程（避免 DLR 内部 rc=-11 重试循环）
+                        if _dlr_stream_ended_ref[0]:
+                            log("[DLR] 检测到录制结束，终止当前进程并重启...")
+                            break
+
                         # 定时窗口检查
                         if task.schedule_enabled and not self._is_in_schedule(task):
                             if not task.schedule_run_until_end:
@@ -1097,9 +1153,10 @@ class TaskManager:
                             _danmu_ref[0] = new_dw
                             try:
                                 new_dw.start()
-                                new_dw.sync_start()
+                                # 不立刻 sync_start()：等 DLR 下一次"准备开始录制视频"信号
+                                # 避免 WebSocket 重连时创建无对应视频的孤立 XML 文件
                                 worker.danmu_worker = new_dw
-                                log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连已启动")
+                                log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连已启动（等待 DLR 信号后开始写入）")
                             except Exception as e:
                                 log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连失败: {type(e).__name__}: {e}")
                                 _danmu_ref[0] = None
@@ -1128,10 +1185,30 @@ class TaskManager:
                     log("[用户] 停止任务")
                     break
 
-                log(f"[检测] DLR 已退出，重新进入开播检测...")
+                # 快速重连：DLR 录制出错/完成后立刻查一次状态，在线则跳过轮询直接重启
+                if _dlr_quick_restart_ref[0]:
+                    _dlr_quick_restart_ref[0] = False
+                    log("[检测] 录制中断，立刻检查直播状态...")
+                    try:
+                        from src.input.douyin_spider import get_douyin_stream_data
+                        data = asyncio.run(get_douyin_stream_data(task.url, cookies=cookies))
+                        if data.get('status') == 2:
+                            anchor = data.get('anchor_name', '')
+                            title = data.get('title', '')
+                            desc = f"{anchor}" + (f" 《{title}》" if title else "")
+                            log(f"[检测] ✓ 直播仍在线: {desc}，立刻重启 DLR")
+                            continue  # 直接跳到外层 while 顶部 → 启动新 DLR
+                        else:
+                            status_text = {4: "未开播", 3: "直播结束"}.get(data.get('status'), "离线")
+                            log(f"[检测] {status_text}，进入轮询等待...")
+                    except Exception as e:
+                        log(f"[检测] 状态查询失败: {e}，进入轮询等待...")
+                else:
+                    log("[检测] DLR 已退出，重新进入开播检测...")
 
         except Exception as e:
-            log(f"[系统] 任务出错: {e}")
+            logger.exception("task_worker %d (%s) 异常退出:", task_id, task_name)
+            log(f"[系统] 任务出错: {type(e).__name__}: {e}")
             self._update_task_status(task_id, "error", error_msg=str(e))
             return
         finally:

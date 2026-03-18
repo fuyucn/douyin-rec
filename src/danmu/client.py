@@ -160,8 +160,14 @@ class DouyinDanmakuClient:
                 gift = GiftMessage()
                 gift.ParseFromString(msg.payload)
                 d = json_format.MessageToDict(gift, preserving_proto_field_name=True)
+                # DEBUG: 记录所有礼物消息的关键字段
+                _g = d.get('gift', {})
+                logger.info('[礼物DEBUG] combo=%s repeatEnd=%s repeatCount=%s giftName=%s user=%s',
+                            _g.get('combo'), d.get('repeatEnd'), d.get('repeatCount'),
+                            _g.get('name'), d.get('user', {}).get('nickName', ''))
                 # 连击礼物：只在 repeatEnd 时记录
                 if 'combo' in d.get('gift', {}) and 'repeatEnd' not in d:
+                    logger.info('[礼物DEBUG] 跳过（combo 中间帧）')
                     continue
                 name = d.get('user', {}).get('nickName', '')
                 uid = str(d.get('user', {}).get('id', ''))
