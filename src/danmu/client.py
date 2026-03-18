@@ -125,7 +125,11 @@ class DouyinDanmakuClient:
     def _decode(data: bytes) -> tuple[list, bytes | None]:
         frame = PushFrame()
         frame.ParseFromString(data)
-        decompressed = gzip.decompress(frame.payload)
+        try:
+            decompressed = gzip.decompress(frame.payload)
+        except (gzip.BadGzipFile, OSError):
+            # 服务端偶发未压缩帧（不遵守 compress=gzip 协议），直接用原始 payload
+            decompressed = frame.payload
         response = Response()
         response.ParseFromString(decompressed)
 
