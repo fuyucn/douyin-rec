@@ -128,6 +128,7 @@ class DlrLauncher:
         max_threads: int = 3,
         cookies: str | None = None,
         custom_name: str | None = None,
+        spider_method: str = "html",
         log_callback: Callable[[str], None] | None = None,
     ) -> None:
         self._task_id = task_id
@@ -140,6 +141,7 @@ class DlrLauncher:
         self._max_threads = max_threads
         self._cookies = cookies
         self._custom_name = custom_name
+        self._spider_method = spider_method
         self._log_callback = log_callback or (lambda msg: None)
         self._process: subprocess.Popen | None = None
         self._tmpdir: str | None = None
@@ -169,14 +171,35 @@ class DlrLauncher:
         dlr_main = str(_DLR_ROOT / "main.py")
         runner_path = task_dir / "runner.py"
         dlr_root = str(_DLR_ROOT)
+        project_root = str(Path(__file__).resolve().parent.parent)
+        spider_method = self._spider_method
         # 注意：不能用 runpy.run_path()，它会把 sys.argv[0] 强制设成 main.py 路径，
         # 导致 DLR 的 script_path 指向 DLR 安装目录而不是 tmpdir。
         # 改用 exec() 直接执行 main.py 代码，sys.argv[0] 保持 runner.py 路径不变。
+        # Monkey-patch: 替换 DLR 的 QQBrowser UA spider，改用我们的 Chrome UA HTML spider，
+        # 解决抖音风控问题（DLR 原始 get_douyin_web_stream_data 使用 QQBrowser UA + a_bogus，
+        # 与 macOS Chrome cookie 不匹配，导致风控报错）。
         runner_path.write_text(
             f"import sys\n"
             f"sys.argv[0] = __file__  # DLR 用此路径确定 config 目录（= tmpdir/runner.py）\n"
             f"if {dlr_root!r} not in sys.path:\n"
             f"    sys.path.insert(0, {dlr_root!r})\n"
+            f"# ── Monkey-patch DLR spider ────────────────────────────────────\n"
+            f"_project_root = {project_root!r}\n"
+            f"if _project_root not in sys.path:\n"
+            f"    sys.path.insert(0, _project_root)\n"
+            f"try:\n"
+            f"    from src import spider as _dlr_spider\n"
+            f"    from src.input.douyin_spider import get_douyin_stream_data_by_method as _our_spider\n"
+            f"    _spider_method = {spider_method!r}\n"
+            f"    import asyncio as _asyncio\n"
+            f"    async def _patched_web(url, proxy_addr=None, cookies=None):\n"
+            f"        return await _our_spider(url, cookies=cookies, method=_spider_method)\n"
+            f"    _dlr_spider.get_douyin_web_stream_data = _patched_web\n"
+            f"    print('[patch] DLR spider patched (method=' + repr(_spider_method) + ')')\n"
+            f"except Exception as _e:\n"
+            f"    print('[patch] spider patch failed: ' + str(_e))\n"
+            f"# ──────────────────────────────────────────────────────────────\n"
             f"with open({dlr_main!r}, encoding='utf-8') as _f:\n"
             f"    exec(compile(_f.read(), {dlr_main!r}, 'exec'), {{'__name__': '__main__', '__file__': {dlr_main!r}, '__builtins__': __builtins__}})\n",
             encoding="utf-8",

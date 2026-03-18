@@ -896,8 +896,8 @@ class TaskManager:
         # 后台抓取主播名（未设置时存 DB）
         def _fetch_name():
             try:
-                from src.input.douyin_spider import get_douyin_stream_data
-                data = asyncio.run(get_douyin_stream_data(task.url, cookies=cookies))
+                from src.input.douyin_spider import get_douyin_stream_data_by_method as get_douyin_stream_data
+                data = asyncio.run(get_douyin_stream_data(task.url, cookies=cookies, method=self._config.input.spider_method))
                 name = data.get('anchor_name') or ''
                 if name and not task.name:
                     self._update_task_name(task_id, name)
@@ -954,9 +954,9 @@ class TaskManager:
                     _poll_count += 1
                     _elapsed = int(time.time() - _wait_start)
                     try:
-                        from src.input.douyin_spider import get_douyin_stream_data
+                        from src.input.douyin_spider import get_douyin_stream_data_by_method as get_douyin_stream_data
                         log(f"[检测] 第 {_poll_count} 次查询直播状态（已等待 {_elapsed}s）...")
-                        data = asyncio.run(get_douyin_stream_data(task.url, cookies=cookies))
+                        data = asyncio.run(get_douyin_stream_data(task.url, cookies=cookies, method=self._config.input.spider_method))
                         status = data.get('status')
                         anchor = data.get('anchor_name', '')
                         title = data.get('title', '')
@@ -994,18 +994,18 @@ class TaskManager:
                     max_threads=task.max_threads,
                     cookies=cookies,
                     custom_name=display_name,
+                    spider_method=self._config.input.spider_method,
                     log_callback=log,
                 )
                 launcher.start()
                 worker.launcher = launcher
                 log(f"[DLR] 进程已启动 (PID={launcher._process.pid if launcher._process else '?'})")
 
-                # DLR 启动后（直播确认开播），后台抓取并 log 流元数据
-                def _log_stream_meta(url=task.url, ck=cookies):
+                # DLR 启动后，复用已有的开播检测 data，不再重复请求（避免与 DLR 并发触发风控）
+                def _log_stream_meta(_data=data):
                     try:
                         import json as _json
-                        from src.input.douyin_spider import get_douyin_stream_data
-                        data = asyncio.run(get_douyin_stream_data(url, cookies=ck))
+                        data = _data
                         title = data.get('title', '')
                         if title:
                             log(f"直播标题: {title}")
@@ -1217,8 +1217,8 @@ class TaskManager:
                     _dlr_quick_restart_ref[0] = False
                     log("[检测] 录制中断，立刻检查直播状态...")
                     try:
-                        from src.input.douyin_spider import get_douyin_stream_data
-                        data = asyncio.run(get_douyin_stream_data(task.url, cookies=cookies))
+                        from src.input.douyin_spider import get_douyin_stream_data_by_method as get_douyin_stream_data
+                        data = asyncio.run(get_douyin_stream_data(task.url, cookies=cookies, method=self._config.input.spider_method))
                         if data.get('status') == 2:
                             anchor = data.get('anchor_name', '')
                             title = data.get('title', '')

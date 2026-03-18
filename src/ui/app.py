@@ -614,6 +614,96 @@ async def merge_segments(task_id: int, request: Request):
 
 
 
+# ── Cookie 管理 ───────────────────────────────────────────────────────────────
+
+def _save_cookies_to_config(cookie_str: str) -> None:
+    """将 cookie 写入 config.yaml input.cookies 字段"""
+    import re as _re
+    config_path = Path("config.yaml")
+    if not config_path.exists():
+        return
+    text = config_path.read_text(encoding="utf-8")
+    escaped = cookie_str.replace('\\', '\\\\').replace('"', '\\"')
+    new_line = f'  cookies: "{escaped}"'
+    if _re.search(r'^\s*cookies:', text, _re.MULTILINE):
+        text = _re.sub(r'^\s*cookies:.*$', new_line, text, flags=_re.MULTILINE, count=1)
+    else:
+        text += f'\n{new_line}\n'
+    config_path.write_text(text, encoding="utf-8")
+
+
+@app.get("/api/settings/cookies")
+async def get_cookies():
+    """获取当前全局 cookie 信息（不返回原文，只返回元信息）"""
+    ck = task_manager._config.input.cookies or ''
+    has_session = 'sessionid=' in ck
+    has_ttwid = 'ttwid=' in ck
+    return {
+        'length': len(ck),
+        'has_session': has_session,
+        'has_ttwid': has_ttwid,
+        'status': '已登录' if has_session else ('匿名' if has_ttwid else '未配置'),
+    }
+
+
+@app.post("/api/settings/cookies")
+async def save_cookies(request: Request):
+    """保存全局 cookie 到 config.yaml 并即时生效"""
+    body = await request.json()
+    cookie_str = (body.get('cookies') or '').strip()
+    if not cookie_str:
+        return JSONResponse({'error': 'cookies 不能为空'}, status_code=400)
+    _save_cookies_to_config(cookie_str)
+    task_manager._config.input.cookies = cookie_str
+    has_session = 'sessionid=' in cookie_str
+    logger.info('Cookies updated (%d chars, has_session=%s)', len(cookie_str), has_session)
+    return {
+        'ok': True,
+        'length': len(cookie_str),
+        'has_session': has_session,
+        'status': '已登录' if has_session else '匿名',
+    }
+
+
+def _save_spider_method_to_config(method: str) -> None:
+    """将 spider_method 写入 config.yaml input.spider_method 字段"""
+    config_path = Path("config.yaml")
+    if not config_path.exists():
+        return
+    text = config_path.read_text(encoding="utf-8")
+    new_line = f'  spider_method: "{method}"'
+    if re.search(r'^\s*spider_method:', text, re.MULTILINE):
+        text = re.sub(r'^\s*spider_method:.*$', new_line, text, flags=re.MULTILINE, count=1)
+    else:
+        text += f'\n{new_line}\n'
+    config_path.write_text(text, encoding="utf-8")
+
+
+@app.get("/api/settings/spider")
+async def get_spider_method():
+    """获取当前流地址获取方式"""
+    from src.input.douyin_spider import SPIDER_METHODS, _SPIDER_METHOD_LABELS
+    current = task_manager._config.input.spider_method or 'html'
+    return {
+        'method': current,
+        'methods': [{'value': m, 'label': _SPIDER_METHOD_LABELS.get(m, m)} for m in SPIDER_METHODS],
+    }
+
+
+@app.post("/api/settings/spider")
+async def save_spider_method(request: Request):
+    """保存流地址获取方式到 config.yaml 并即时生效"""
+    from src.input.douyin_spider import SPIDER_METHODS
+    body = await request.json()
+    method = (body.get('method') or 'html').strip()
+    if method not in SPIDER_METHODS:
+        return JSONResponse({'error': f'无效方法: {method}'}, status_code=400)
+    _save_spider_method_to_config(method)
+    task_manager._config.input.spider_method = method
+    logger.info('Spider method updated: %s', method)
+    return {'ok': True, 'method': method}
+
+
 @app.get("/api/local/tasks/{task_id}/logs/history")
 async def local_task_logs_history(task_id: int):
     """返回本地任务的历史日志"""

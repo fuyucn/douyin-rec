@@ -14,6 +14,7 @@ class InputConfig:
     quality: str = "origin"  # 直播画质: origin(原画) / uhd(蓝光) / hd(高清) / sd(标清) / ld(流畅)
     cookies_file: str | None = None
     cookies: str | None = None  # raw cookie string (browser format: "key1=val1; key2=val2")
+    spider_method: str = "html"  # 流地址获取方式: html | web_api | app_api | mobile_html
 
 
 @dataclass
