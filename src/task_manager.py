@@ -11,7 +11,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dc_replace
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -1321,7 +1321,7 @@ class TaskManager:
         from src.extract.extractor import FrameExtractor
         from src.filter.pipeline import FilterPipeline
 
-        config = load_config()
+        config = self._config
         pipeline = FilterPipeline(config)
         extractor = FrameExtractor(fps=config.input.extract_fps)
 
@@ -1511,13 +1511,12 @@ class TaskManager:
         from src.filter.pipeline import FilterPipeline
         from src.input.local import LocalVideoSource
 
-        config = load_config()
+        config = self._config
         pipeline = FilterPipeline(config)
         extractor = FrameExtractor(fps=config.input.extract_fps)
 
-        config.storage.output_dir = str(self._output_dir)
         video_name = Path(task.video_path).stem
-        storage = StorageManager(config.storage, name=video_name)
+        storage = StorageManager(dc_replace(config.storage, output_dir=str(self._output_dir)), name=video_name)
 
         source = LocalVideoSource(task.video_path)
         source.open()
@@ -1583,17 +1582,16 @@ class TaskManager:
         from src.ai.factory import create_analyzer
         from src.models import FrameInfo
 
-        config = load_config()
+        ai_cfg = self._config.ai
         if task.ai_backend:
-            config.ai.default_backend = task.ai_backend
+            ai_cfg = dc_replace(ai_cfg, default_backend=task.ai_backend)
 
-        config.storage.output_dir = str(self._output_dir)
         video_name = Path(task.video_path).stem
-        storage = StorageManager(config.storage, name=video_name)
+        storage = StorageManager(dc_replace(self._config.storage, output_dir=str(self._output_dir)), name=video_name)
 
-        audio_analyzer = AudioAnalyzer(config.highlight, config.whisper)
-        ai_analyzer = create_analyzer(config.ai)
-        log(f"使用 AI 后端: {config.ai.default_backend}")
+        audio_analyzer = AudioAnalyzer(self._config.highlight, self._config.whisper)
+        ai_analyzer = create_analyzer(ai_cfg)
+        log(f"使用 AI 后端: {ai_cfg.default_backend}")
 
         # 1. 提取音频
         log("提取音频...")
