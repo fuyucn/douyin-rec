@@ -830,6 +830,7 @@ class TaskManager:
         _ass_base_ref: list[Path | None] = [None]       # 每次 DLR 启动时设置
         _dlr_stream_ended_ref: list[bool] = [False]     # DLR 报告录制结束/出错时置 True → 触发重启
         _dlr_quick_restart_ref: list[bool] = [False]   # 同上，且跳过首次 30s 等待直接查状态
+        _dlr_recording_active: list[bool] = [False]     # True = DLR ffmpeg 正在写入文件
 
         def log(msg: str) -> None:
             self.broadcast(msg, task_name=task_name, task_id=task_id)
@@ -837,9 +838,11 @@ class TaskManager:
             if '[DLR]' in msg and ('直播录制出错' in msg or '直播录制完成' in msg):
                 _dlr_stream_ended_ref[0] = True
                 _dlr_quick_restart_ref[0] = True
+                _dlr_recording_active[0] = False
             # DLR 日志"准备开始录制视频"= ffmpeg 即将写入第一帧
             # → 创建与 TS 文件同名的录制日志（时间戳从路径提取）
             if '[DLR]' in msg and '准备开始录制视频' in msg:
+                _dlr_recording_active[0] = True
                 m = re.search(r'(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})', msg)
                 rec_ts = m.group(1) if m else datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                 _rec_display = task.custom_name or task_dir_name(task_id, task_name)
@@ -1153,10 +1156,14 @@ class TaskManager:
                             _danmu_ref[0] = new_dw
                             try:
                                 new_dw.start()
-                                # 不立刻 sync_start()：等 DLR 下一次"准备开始录制视频"信号
-                                # 避免 WebSocket 重连时创建无对应视频的孤立 XML 文件
+                                if _dlr_recording_active[0]:
+                                    # DLR 正在录制 → 立刻 sync_start()，接续当前 session 写 XML
+                                    new_dw.sync_start()
+                                    log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连已启动（DLR 录制中，立即接续写入）")
+                                else:
+                                    # DLR 尚未开始录制 → 等"准备开始录制视频"信号，避免孤立 XML
+                                    log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连已启动（等待 DLR 信号后开始写入）")
                                 worker.danmu_worker = new_dw
-                                log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连已启动（等待 DLR 信号后开始写入）")
                             except Exception as e:
                                 log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连失败: {type(e).__name__}: {e}")
                                 _danmu_ref[0] = None
