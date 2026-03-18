@@ -110,12 +110,12 @@ class _DanmuWorker:
         self._sync_ts: str = ""
         self._sync_wall_time: float = 0.0  # sync_start() 被调用的精确时刻
 
-    def sync_start(self) -> None:
+    def sync_start(self, ts_override: str | None = None) -> None:
         """DLR 日志出现"准备开始录制视频"时调用。
-        在调用线程（log callback）里精确记录 wall time，供 seg_start 使用。"""
+        ts_override：强制使用指定时间戳字符串（外部崩溃重启时，保持与原 TS 文件一致）。"""
         if not self._sync_event.is_set():
             self._sync_wall_time = time.time()
-            self._sync_ts = datetime.fromtimestamp(self._sync_wall_time).strftime("%Y-%m-%d_%H-%M-%S")
+            self._sync_ts = ts_override or datetime.fromtimestamp(self._sync_wall_time).strftime("%Y-%m-%d_%H-%M-%S")
             self._sync_event.set()
 
     def _seg_path(self, ts: str, idx: int, ext: str = '.xml') -> Path:
@@ -158,19 +158,17 @@ class _DanmuWorker:
     async def _async_main(self) -> None:
         import re as _re
         self._ass_base.parent.mkdir(parents=True, exist_ok=True)
-        q: asyncio.Queue = asyncio.Queue()
-        client = DouyinDanmakuClient(self._url, q, self._cookies)
-        self._log("[弹幕] 正在连接 WebSocket...")
-        xml_writer = XmlWriter()
         _m = _re.search(r'live\.douyin\.com/(\d+)', self._url)
         _room_id = _m.group(1) if _m else ''
 
-        # WebSocket 立即启动，弹幕先缓冲到内存，等 DLR 开始写入后再落盘
+        # 以下状态在 WS 断线重连时保持不变 —— 这是避免孤立 XML 的关键
         pre_buffer: list[SimpleDanmaku] = []
         seg_idx = 0
         seg_start = 0.0
         open_ts = ""
         writer_opened = False
+        xml_writer = XmlWriter()
+        q: asyncio.Queue = asyncio.Queue()  # 每次重连前刷新
 
         def _open_writer() -> None:
             nonlocal seg_start, open_ts, writer_opened
@@ -223,15 +221,33 @@ class _DanmuWorker:
                 item.time = self._item_time(item, seg_start)
                 xml_writer.add(item)
 
-        try:
-            await asyncio.gather(client.start(), consume())
-        except Exception as e:
-            if not self._stop_event.is_set():
-                self._log(f"[弹幕] 连接中断: {type(e).__name__}: {e}")
-        finally:
-            await client.stop()
-            xml_writer.close()
-            self._log("[弹幕] 录制结束（线程退出）")
+        # 内部 WS 重连循环：断线后保持 seg_idx/xml_writer 状态，避免孤立 XML
+        _ws_reconnect_count = 0
+        while not self._stop_event.is_set():
+            if _ws_reconnect_count > 0:
+                delay = min(5 * _ws_reconnect_count, 60)
+                self._log(f"[弹幕] {delay}s 后第 {_ws_reconnect_count} 次重连...")
+                for _ in range(delay):
+                    if self._stop_event.is_set():
+                        break
+                    await asyncio.sleep(1)
+                if self._stop_event.is_set():
+                    break
+            q = asyncio.Queue()  # 刷新队列，丢弃旧连接残留
+            client = DouyinDanmakuClient(self._url, q, self._cookies)
+            self._log("[弹幕] 正在连接 WebSocket...")
+            try:
+                await asyncio.gather(client.start(), consume())
+                break  # stop_event 触发正常退出
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    self._log(f"[弹幕] 连接中断: {type(e).__name__}: {e}")
+                    _ws_reconnect_count += 1
+            finally:
+                await client.stop()
+
+        xml_writer.close()
+        self._log("[弹幕] 录制结束（线程退出）")
 
 
 # 本地任务日志 ID 偏移，避免与录制任务 ID 冲突
@@ -830,6 +846,7 @@ class TaskManager:
         _ass_base_ref: list[Path | None] = [None]       # 每次 DLR 启动时设置
         _dlr_stream_ended_ref: list[bool] = [False]     # DLR 报告录制结束/出错时置 True → 触发重启
         _dlr_quick_restart_ref: list[bool] = [False]   # 同上，且跳过首次 30s 等待直接查状态
+        _dlr_session_ts_ref: list[str | None] = [None]  # 当前 DLR session 的 TS 时间戳（如"2026-03-18_10-33-50"）
         _dlr_recording_active: list[bool] = [False]     # True = DLR ffmpeg 正在写入文件
 
         def log(msg: str) -> None:
@@ -839,12 +856,14 @@ class TaskManager:
                 _dlr_stream_ended_ref[0] = True
                 _dlr_quick_restart_ref[0] = True
                 _dlr_recording_active[0] = False
+                _dlr_session_ts_ref[0] = None
             # DLR 日志"准备开始录制视频"= ffmpeg 即将写入第一帧
             # → 创建与 TS 文件同名的录制日志（时间戳从路径提取）
             if '[DLR]' in msg and '准备开始录制视频' in msg:
                 _dlr_recording_active[0] = True
                 m = re.search(r'(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})', msg)
                 rec_ts = m.group(1) if m else datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+                _dlr_session_ts_ref[0] = rec_ts  # 记录 session ts，供外部崩溃重建时保持文件名一致
                 _rec_display = task.custom_name or task_dir_name(task_id, task_name)
                 _rec_dir = self._output_dir.resolve() / "抖音直播" / _rec_display
                 _rec_dir.mkdir(parents=True, exist_ok=True)
@@ -1138,12 +1157,12 @@ class TaskManager:
                             log(f"[DLR] 录制进行中，已运行 {h:02d}:{m:02d}:{s:02d}")
                             _heartbeat_last = now
 
-                        # 弹幕 worker 断线自动重启
+                        # 弹幕 worker 线程意外崩溃时重建（正常 WS 断线由内部重连处理，不触发此处）
                         dw = _danmu_ref[0]
                         if dw is not None and not dw.is_alive():
-                            _danmu_reconnect_count = getattr(worker, '_danmu_reconnect_count', 0) + 1
-                            worker._danmu_reconnect_count = _danmu_reconnect_count
-                            log(f"[弹幕] 检测到断线，第 {_danmu_reconnect_count} 次重连...")
+                            _danmu_crash_count = getattr(worker, '_danmu_crash_count', 0) + 1
+                            worker._danmu_crash_count = _danmu_crash_count
+                            log(f"[弹幕] 线程意外退出，第 {_danmu_crash_count} 次重建...")
                             new_dw = _DanmuWorker(
                                 url=task.url,
                                 ass_base=_ass_base_ref[0],
@@ -1157,15 +1176,15 @@ class TaskManager:
                             try:
                                 new_dw.start()
                                 if _dlr_recording_active[0]:
-                                    # DLR 正在录制 → 立刻 sync_start()，接续当前 session 写 XML
-                                    new_dw.sync_start()
-                                    log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连已启动（DLR 录制中，立即接续写入）")
+                                    # DLR 正在录制 → 立刻 sync_start()，ts_override 保持文件名与原 session 一致
+                                    new_dw.sync_start(ts_override=_dlr_session_ts_ref[0])
+                                    log(f"[弹幕] 第 {_danmu_crash_count} 次重建已启动（DLR 录制中，ts={_dlr_session_ts_ref[0]}）")
                                 else:
-                                    # DLR 尚未开始录制 → 等"准备开始录制视频"信号，避免孤立 XML
-                                    log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连已启动（等待 DLR 信号后开始写入）")
+                                    # DLR 尚未开始录制 → 等"准备开始录制视频"信号
+                                    log(f"[弹幕] 第 {_danmu_crash_count} 次重建已启动（等待 DLR 信号后开始写入）")
                                 worker.danmu_worker = new_dw
                             except Exception as e:
-                                log(f"[弹幕] 第 {_danmu_reconnect_count} 次重连失败: {type(e).__name__}: {e}")
+                                log(f"[弹幕] 第 {_danmu_crash_count} 次重建失败: {type(e).__name__}: {e}")
                                 _danmu_ref[0] = None
                                 worker.danmu_worker = None
                         worker.stop_event.wait(5)
@@ -1187,6 +1206,7 @@ class TaskManager:
                     worker.danmu_worker = None
                     _danmu_ref[0] = None
                     _ass_base_ref[0] = None
+                    _dlr_session_ts_ref[0] = None
 
                 if worker.stop_event.is_set():
                     log("[用户] 停止任务")
