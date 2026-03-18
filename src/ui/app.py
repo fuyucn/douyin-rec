@@ -526,8 +526,9 @@ async def list_segments(task_id: int):
         return {"groups": []}
 
     from src.merge.merger import discover_groups
-    is_running = (t.status == "running")
-    groups = discover_groups(output_dir, exclude_last=is_running)
+    worker_status = task_manager.get_worker_status(t.id)
+    is_recording = (t.status == "running") and "运行中" in (worker_status or "")
+    groups = discover_groups(output_dir, exclude_last=is_recording)
 
     result = []
     for g in groups:
@@ -546,7 +547,7 @@ async def list_segments(task_id: int):
             "burn_progress": _burn_progress.get(lk, 0),
             "merge_error": mr["error"] if (mr and not mr["ok"] and not g.already_merged) else None,
         })
-    return {"groups": result, "is_running": is_running}
+    return {"groups": result, "is_running": is_recording}
 
 
 @app.post("/api/tasks/{task_id}/merge")
@@ -573,8 +574,9 @@ async def merge_segments(task_id: int, request: Request):
     output_dir = _recording_dir(t)
     from src.merge.merger import discover_groups, merge_group
 
-    is_running = (t.status == "running")
-    groups = discover_groups(output_dir, exclude_last=is_running)
+    worker_status = task_manager.get_worker_status(t.id)
+    is_recording = (t.status == "running") and "运行中" in (worker_status or "")
+    groups = discover_groups(output_dir, exclude_last=is_recording)
     target = next((g for g in groups if g.prefix == prefix), None)
     if target is None:
         return JSONResponse({"error": f"未找到录制组: {prefix}"}, status_code=404)
