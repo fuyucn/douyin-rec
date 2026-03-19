@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import re
 import threading
-import xml.sax.saxutils as saxutils
+import xml.sax.saxutils as _saxutils
 from pathlib import Path
+
+# XML 1.0 合法字符范围（不含这些范围的字符会导致解析失败）
+_XML_INVALID_CHARS = re.compile(
+    r'[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]'
+)
+
+
+def _xml_escape(s: str) -> str:
+    """先去除 XML 1.0 非法字符，再做标准 escape（防止弹幕内容破坏 XML 结构）"""
+    s = _XML_INVALID_CHARS.sub('', s)
+    return _saxutils.escape(s)
 
 from .models import GiftDanmaku, MemberDanmaku, SimpleDanmaku
 
@@ -64,9 +76,9 @@ class XmlWriter:
             self._file.write('<metadata>\n')
             self._file.write('  <platform>DouYin</platform>\n')
             self._file.write(f'  <video_start_time>{video_start_time}</video_start_time>\n')
-            self._file.write(f'  <room_title>{saxutils.escape(room_title)}</room_title>\n')
-            self._file.write(f'  <user_name>{saxutils.escape(user_name)}</user_name>\n')
-            self._file.write(f'  <room_id>{saxutils.escape(room_id)}</room_id>\n')
+            self._file.write(f'  <room_title>{_xml_escape(room_title)}</room_title>\n')
+            self._file.write(f'  <user_name>{_xml_escape(user_name)}</user_name>\n')
+            self._file.write(f'  <room_id>{_xml_escape(room_id)}</room_id>\n')
             self._file.write('</metadata>\n')
             self._file.write(_RECORDER_XML_STYLE + '\n')
             # 记录插入点，写入关闭标签使文件始终是合法 XML
@@ -78,8 +90,8 @@ class XmlWriter:
         if self._file is None or item.time is None:
             return
         t = max(0.0, item.time)
-        uid = saxutils.escape(str(getattr(item, 'uid', '') or ''))
-        uname = saxutils.escape(item.uname or '')
+        uid = _xml_escape(str(getattr(item, 'uid', '') or ''))
+        uname = _xml_escape(item.uname or '')
         ts_ms = int(item.timestamp * 1000)
 
         with self._lock:
@@ -90,7 +102,7 @@ class XmlWriter:
                     f'<gift'
                     f' user="{uname}"'
                     f' uid="{uid}"'
-                    f' giftname="{saxutils.escape(item.gift_name)}"'
+                    f' giftname="{_xml_escape(item.gift_name)}"'
                     f' giftcount="{item.gift_count}"'
                     f' price="{item.gift_price:.1f}"'
                     f' ts="{ts_ms}"'
@@ -108,7 +120,7 @@ class XmlWriter:
             else:
                 # 聊天弹幕：<d p="time_sec,mode,fontsize,color,timestamp_ms,pool,uid,uid,0">
                 p = f'{t:.3f},1,25,16777215,{ts_ms},0,{uid},{uid},0'
-                text = saxutils.escape((item.content or '').replace('\n', ' ').replace('\r', ' '))
+                text = _xml_escape((item.content or '').replace('\n', ' ').replace('\r', ' '))
                 line = f'<d p="{p}" user="{uname}" uid="{uid}" timestamp="{ts_ms}">{text}</d>\n'
             # 在 </i> 之前插入，保持文件始终是合法 XML
             self._file.seek(self._insert_pos)

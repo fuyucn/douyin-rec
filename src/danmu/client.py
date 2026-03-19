@@ -20,6 +20,33 @@ from src.input.douyin_spider import get_douyin_stream_data
 
 logger = logging.getLogger(__name__)
 
+# 弹幕 WS 连接所需的 cookie 白名单（过滤浏览器完整 cookie 里的无关追踪字段）
+_DANMU_COOKIE_KEYS = {
+    'ttwid',
+    'sessionid', 'sessionid_ss',
+    'uid_tt', 'uid_tt_ss',
+    'sid_tt', 'sid_tt_ss',
+    'msToken',
+    '__ac_nonce', '__ac_signature',
+    's_v_web_id',
+    'odin_ttid',
+    'passport_csrf_token', 'passport_csrf_token_default',
+    'LOGIN_STATUS',
+    'passport_auth_status',
+    'n_mh', 'd_ticket',
+}
+
+
+def _filter_danmu_cookies(raw: str) -> str:
+    kept = []
+    for part in raw.split(';'):
+        part = part.strip()
+        if not part:
+            continue
+        key = part.split('=', 1)[0].strip()
+        if key in _DANMU_COOKIE_KEYS:
+            kept.append(part)
+    return '; '.join(kept)
 
 
 def _extract_room_id(url: str) -> str:
@@ -48,29 +75,54 @@ class DouyinDanmakuClient:
         self._user_cookies = cookies  # 用户提供的额外 cookie
         self._room_id = _extract_room_id(url)
 
-    async def _get_cookie(self) -> str:
-        """获取 WS 用 cookie。有用户 cookie（含 sessionid）直接用；否则从首页获取匿名 cookie"""
-        if self._user_cookies:
-            # 用户提供了登录态 cookie，直接使用（含 sessionid / ttwid 等完整信息）
-            logger.debug('弹幕 使用用户 cookie (len=%d)', len(self._user_cookies))
-            return self._user_cookies
+    async def _fetch_anon_cookie(self) -> str:
+        """获取匿名 cookie：ttwid（缓存）+ 随机设备标识（对齐 DouyinUtils.get_headers）"""
+        ttwid = await asyncio.to_thread(DouyinUtils.get_ttwid)
+        parts = []
+        if ttwid:
+            parts.append(f'ttwid={ttwid}')
+        parts.extend([
+            f'__ac_nonce={DouyinUtils.generate_nonce()}',
+            f'odin_ttid={DouyinUtils.generate_odin_ttid()}',
+            f'msToken={DouyinUtils.generate_ms_token()}',
+        ])
+        return '; '.join(parts)
 
-        # 匿名模式：从首页获取 ttwid + 生成设备 cookie
-        ua = DouyinUtils.base_headers['user-agent']
-        from yarl import URL
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get('https://live.douyin.com/',
-                                headers={'User-Agent': ua},
-                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                await resp.read()
-            jar = sess.cookie_jar.filter_cookies(URL('https://live.douyin.com/'))
-            parts = [f'{k}={v.value}' for k, v in jar.items()]
-        parts.append(f'__ac_nonce={DouyinUtils.generate_nonce()}')
-        parts.append(f'odin_ttid={DouyinUtils.generate_odin_ttid()}')
-        parts.append(f'msToken={DouyinUtils.generate_ms_token()}')
-        cookie_str = '; '.join(parts)
-        logger.debug('弹幕 匿名 cookie: %.120s', cookie_str)
-        return cookie_str
+    async def _get_cookie(self) -> str:
+        """获取 WS 用 cookie。始终确保包含有效 ttwid（WS 服务器强制要求）。"""
+        # 先获取匿名 ttwid（WS 鉴权必须有此字段）
+        anon_cookie = await self._fetch_anon_cookie()
+        logger.debug('弹幕 匿名 cookie: %.120s', anon_cookie)
+
+        if not self._user_cookies:
+            return anon_cookie
+
+        # 用户有 cookie：过滤后与匿名 cookie 合并
+        # 匿名 ttwid 优先（避免用户 cookie 里 ttwid 缺失或过期导致 417）
+        # 用户 sessionid/uid_tt 等字段附加（提升账号稳定性）
+        filtered = _filter_danmu_cookies(self._user_cookies)
+        logger.debug('弹幕 用户 cookie 过滤: %d → %d 字符', len(self._user_cookies), len(filtered))
+        if not filtered:
+            return anon_cookie
+
+        # 合并：anon 提供 ttwid/msToken/odin_ttid，user 提供 sessionid/uid_tt 等
+        # 以 anon 为基础，用 user 字段覆盖（anon 没有的字段）
+        anon_dict: dict[str, str] = {}
+        for part in anon_cookie.split(';'):
+            part = part.strip()
+            if '=' in part:
+                k, v = part.split('=', 1)
+                anon_dict[k.strip()] = v
+        user_dict: dict[str, str] = {}
+        for part in filtered.split(';'):
+            part = part.strip()
+            if '=' in part:
+                k, v = part.split('=', 1)
+                user_dict[k.strip()] = v
+        merged = {**user_dict, **anon_dict}  # anon 的 ttwid/msToken 覆盖 user 的
+        merged_str = '; '.join(f'{k}={v}' for k, v in merged.items())
+        logger.debug('弹幕 合并 cookie: %.120s', merged_str)
+        return merged_str
 
     async def _get_ws_url(self) -> tuple[str, str]:
         """返回 (ws_url, cookie_str)"""
@@ -253,9 +305,11 @@ class DouyinDanmakuClient:
 
     async def start(self) -> None:
         ws_url, cookie_str = await self._get_ws_url()
-        # bililive-tools 只发 Cookie header，不发 UA/Origin/Referer
         ws_headers = {
             'Cookie': cookie_str,
+            'User-Agent': DouyinUtils.base_headers['user-agent'],
+            'Origin': 'https://live.douyin.com',
+            'Referer': f'https://live.douyin.com/{self._room_id}',
         }
         if self._session and not self._session.closed:
             await self._session.close()

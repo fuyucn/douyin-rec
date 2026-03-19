@@ -146,10 +146,17 @@ def get_segment_duration(ts_path: Path) -> float:
 
 # ── XML 工具 ─────────────────────────────────────────────────────────────────
 
+_XML_INVALID_CHARS = re.compile(
+    r'[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]'
+)
+
+
 def _parse_xml_safe(path: Path):
-    """解析 XML 文件，自动修复常见的截断问题（缺少结尾标签）。"""
+    """解析 XML 文件，自动修复常见的截断问题和非法字符。"""
     import xml.etree.ElementTree as ET
     content = path.read_text(encoding='utf-8', errors='replace')
+    # 过滤 XML 1.0 非法字符（控制字符等），避免 ParseError
+    content = _XML_INVALID_CHARS.sub('', content)
     try:
         return ET.fromstring(content)
     except ET.ParseError:
