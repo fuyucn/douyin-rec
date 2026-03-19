@@ -99,6 +99,24 @@ let currentView = null;
 let pollTimer = null;
 let timeUpdateTimer = null;
 let evtSource = null;
+let _logAutoScroll = true;  // 是否自动跟随到底部
+
+function _initLogScroll() {
+  const logs = document.getElementById('logs');
+  if (!logs) return;
+  _logAutoScroll = true;
+  logs.onscroll = () => {
+    // 距底部 ≤ 40px 视为"在底部"，恢复自动滚动；否则暂停
+    _logAutoScroll = logs.scrollHeight - logs.scrollTop - logs.clientHeight <= 40;
+  };
+}
+
+function _appendLog(text) {
+  const logs = document.getElementById('logs');
+  if (!logs) return;
+  logs.textContent += text + '\n';
+  if (_logAutoScroll) logs.scrollTop = logs.scrollHeight;
+}
 let detailPreviewActive = false;
 let aiBackendsCache = null;
 
@@ -785,6 +803,7 @@ async function toggleDetailPreview(id, name) {
 }
 
 async function loadLogsAndConnect(id) {
+  _initLogScroll();
   const logs = document.getElementById('logs');
   try {
     const r = await fetch(`/api/tasks/${id}/logs/history`);
@@ -802,10 +821,7 @@ async function loadLogsAndConnect(id) {
 function connectTaskSSE(id) {
   if (evtSource) evtSource.close();
   evtSource = new EventSource(`/api/tasks/${id}/logs`);
-  const logs = document.getElementById('logs');
-  evtSource.onmessage = e => {
-    if (logs) { logs.textContent += e.data + '\n'; logs.scrollTop = logs.scrollHeight; }
-  };
+  evtSource.onmessage = e => { _appendLog(e.data); };
   evtSource.onerror = () => { if (currentView === 'detail') setTimeout(() => connectTaskSSE(id), 2000); };
 }
 
@@ -1138,6 +1154,7 @@ async function renderLocalDetailView(id) {
 }
 
 async function loadLocalLogsAndConnect(id) {
+  _initLogScroll();
   const logs = document.getElementById('logs');
   try {
     const r = await fetch(`/api/local/tasks/${id}/logs/history`);
@@ -1155,10 +1172,7 @@ async function loadLocalLogsAndConnect(id) {
 function connectLocalTaskSSE(id) {
   if (evtSource) evtSource.close();
   evtSource = new EventSource(`/api/local/tasks/${id}/logs`);
-  const logs = document.getElementById('logs');
-  evtSource.onmessage = e => {
-    if (logs) { logs.textContent += e.data + '\n'; logs.scrollTop = logs.scrollHeight; }
-  };
+  evtSource.onmessage = e => { _appendLog(e.data); };
   evtSource.onerror = () => { if (currentView === 'local-detail') setTimeout(() => connectLocalTaskSSE(id), 2000); };
 }
 
