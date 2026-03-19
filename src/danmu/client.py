@@ -91,9 +91,6 @@ class DouyinDanmakuClient:
         uid = uid_match.group(1) if uid_match else DouyinDanmakuUtils.get_user_unique_id()
         logger.debug('弹幕 uid: %s (from_cookie=%s)', uid, uid_match is not None)
 
-        # WS URL 里的 msToken 需要新鲜生成（浏览器 session 绑定的 msToken 不能复用）
-        ms_token = DouyinUtils.generate_ms_token()
-
         VERSION_CODE = 180800
         SDK_VERSION = '1.0.15'  # 对齐 bililive-tools DouYinDanma
 
@@ -111,6 +108,7 @@ class DouyinDanmakuClient:
             DouyinDanmakuUtils.get_x_ms_stub(sig_params))
         logger.info('弹幕签名: %s (room_id=%s, uid=%s)', sig, actual_room_id, uid)
 
+        # 对齐 bililive-tools DouYinDanma — 无 msToken，有 browser_* 参数
         params = {
             'room_id': actual_room_id,
             'compress': 'gzip',
@@ -123,12 +121,14 @@ class DouyinDanmakuClient:
             'aid': '6383',
             'device_platform': 'web',
             'device_type': '',
-            'msToken': ms_token,
+            'browser_language': 'zh-CN',
+            'browser_platform': 'Win32',
+            'browser_name': 'Mozilla',
+            'browser_version': '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36',
             'signature': sig,
         }
         qs = urlencode(params)
-        # webcast3-ws-web-lq: 大多数开源弹幕实现使用的端点，验证宽松于 webcast100-ws-web-hl
-        ws_url = f'wss://webcast3-ws-web-lq.douyin.com/webcast/im/push/v2/?{qs}'
+        ws_url = f'wss://webcast100-ws-web-hl.douyin.com/webcast/im/push/v2/?{qs}'
         return ws_url, cookie_str
 
     @staticmethod
@@ -253,11 +253,9 @@ class DouyinDanmakuClient:
 
     async def start(self) -> None:
         ws_url, cookie_str = await self._get_ws_url()
+        # bililive-tools 只发 Cookie header，不发 UA/Origin/Referer
         ws_headers = {
             'Cookie': cookie_str,
-            'User-Agent': DouyinUtils.base_headers['user-agent'],
-            'Origin': 'https://live.douyin.com',
-            'Referer': 'https://live.douyin.com/',
         }
         if self._session and not self._session.closed:
             await self._session.close()
