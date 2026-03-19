@@ -616,6 +616,37 @@ async def merge_segments(task_id: int, request: Request):
 
 # ── Cookie 管理 ───────────────────────────────────────────────────────────────
 
+# 抖音直播/弹幕所需的 cookie key 白名单（过滤掉广告追踪、AB实验等无用字段）
+_DOUYIN_COOKIE_KEYS = {
+    'ttwid',                                    # WS 连接必须
+    'sessionid', 'sessionid_ss',                # 登录态
+    'uid_tt', 'uid_tt_ss',                      # 用户 ID（弹幕 user_unique_id）
+    'sid_tt', 'sid_tt_ss',                      # session token
+    'msToken',                                  # API token
+    '__ac_nonce', '__ac_signature',             # 反爬签名
+    's_v_web_id',                               # web 设备 ID
+    'odin_ttid',                                # 设备 ID
+    'passport_csrf_token', 'passport_csrf_token_default',
+    'LOGIN_STATUS',                             # 登录标记
+    'passport_auth_status',
+    'n_mh', 'd_ticket',
+    'store-region', 'store-region-src',
+}
+
+
+def _filter_douyin_cookies(raw: str) -> str:
+    """从浏览器粘贴的完整 cookie 字符串中，只保留抖音直播/弹幕所需的字段。"""
+    kept = []
+    for part in raw.split(';'):
+        part = part.strip()
+        if not part:
+            continue
+        key = part.split('=', 1)[0].strip()
+        if key in _DOUYIN_COOKIE_KEYS:
+            kept.append(part)
+    return '; '.join(kept)
+
+
 def _save_cookies_to_config(cookie_str: str) -> None:
     """将 cookie 写入 config.yaml input.cookies 字段"""
     import re as _re
@@ -648,18 +679,25 @@ async def get_cookies():
 
 @app.post("/api/settings/cookies")
 async def save_cookies(request: Request):
-    """保存全局 cookie 到 config.yaml 并即时生效"""
+    """保存全局 cookie 到 config.yaml 并即时生效（自动过滤无关字段）"""
     body = await request.json()
-    cookie_str = (body.get('cookies') or '').strip()
-    if not cookie_str:
+    raw = (body.get('cookies') or '').strip()
+    if not raw:
         return JSONResponse({'error': 'cookies 不能为空'}, status_code=400)
+    cookie_str = _filter_douyin_cookies(raw)
+    if not cookie_str:
+        return JSONResponse({'error': '未识别到有效的抖音 cookie 字段'}, status_code=400)
     _save_cookies_to_config(cookie_str)
     task_manager._config.input.cookies = cookie_str
     has_session = 'sessionid=' in cookie_str
-    logger.info('Cookies updated (%d chars, has_session=%s)', len(cookie_str), has_session)
+    kept = len([p for p in cookie_str.split(';') if p.strip()])
+    total = len([p for p in raw.split(';') if p.strip()])
+    logger.info('Cookies updated (%d/%d fields, has_session=%s)', kept, total, has_session)
     return {
         'ok': True,
         'length': len(cookie_str),
+        'kept': kept,
+        'total': total,
         'has_session': has_session,
         'status': '已登录' if has_session else '匿名',
     }

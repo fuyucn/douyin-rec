@@ -270,7 +270,7 @@ async function saveCookieSettings() {
   });
   const d = await r.json();
   if (!r.ok) { alert(d.error || '保存失败'); return; }
-  document.getElementById('ckStatus').textContent = `已保存: ${d.status}（${d.length} 字符）`;
+  document.getElementById('ckStatus').textContent = `已保存: ${d.status}（保留 ${d.kept}/${d.total} 个字段，${d.length} 字符）`;
   document.getElementById('ckInput').value = '';
   await refreshCookieStatus();
   setTimeout(() => document.getElementById('cookieModal')?.close(), 1200);
