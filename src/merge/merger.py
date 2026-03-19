@@ -14,6 +14,9 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
+# 项目自带字体目录（NotoEmoji-Static.ttf 等），传给 libass fontsdir
+_FONTS_DIR = Path(__file__).resolve().parent.parent.parent / 'assets' / 'fonts'
+
 _SEGMENT_RE = re.compile(r"^(.+)_(\d+)\.ts$")
 _ASS_TIME_RE = re.compile(r"(\d+):(\d{2}):(\d{2}\.\d{2})")
 
@@ -640,7 +643,7 @@ def merge_group(
                         "ffmpeg", "-y",
                         "-i", str(group.merged_mp4),
                         "-progress", "pipe:1", "-nostats",
-                        "-vf", f"ass={group.merged_ass.name},format=yuv420p",
+                        "-vf", f"ass={group.merged_ass.name}:fontsdir={_FONTS_DIR},format=yuv420p",
                         "-c:v", "h264_videotoolbox", "-b:v", f"{src_vbitrate}k",
                         "-color_range", "tv",
                         "-c:a", "copy",
