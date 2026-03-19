@@ -91,9 +91,8 @@ class DouyinDanmakuClient:
         uid = uid_match.group(1) if uid_match else DouyinDanmakuUtils.get_user_unique_id()
         logger.debug('弹幕 uid: %s (from_cookie=%s)', uid, uid_match is not None)
 
-        # 从 cookie 提取 msToken（抖音 WS 需要放在 URL 参数里）
-        ms_match = re.search(r'(?:^|[;\s])msToken=([^;]+)', cookie_str)
-        ms_token = ms_match.group(1).strip() if ms_match else DouyinUtils.generate_ms_token()
+        # WS URL 里的 msToken 需要新鲜生成（浏览器 session 绑定的 msToken 不能复用）
+        ms_token = DouyinUtils.generate_ms_token()
 
         VERSION_CODE = 180800
         SDK_VERSION = '1.0.15'  # 对齐 bililive-tools DouYinDanma
@@ -128,7 +127,8 @@ class DouyinDanmakuClient:
             'signature': sig,
         }
         qs = urlencode(params)
-        ws_url = f'wss://webcast100-ws-web-hl.douyin.com/webcast/im/push/v2/?{qs}'
+        # webcast3-ws-web-lq: 大多数开源弹幕实现使用的端点，验证宽松于 webcast100-ws-web-hl
+        ws_url = f'wss://webcast3-ws-web-lq.douyin.com/webcast/im/push/v2/?{qs}'
         return ws_url, cookie_str
 
     @staticmethod
