@@ -85,7 +85,16 @@ class DouyinDanmakuClient:
         # 获取 WS 连接用的 cookie
         cookie_str = await self._get_cookie()
 
-        uid = DouyinDanmakuUtils.get_user_unique_id()
+        # 若 cookie 里有 uid_tt（登录态），用真实 UID；否则随机生成（匿名）
+        # 抖音 WS 服务端会校验 user_unique_id 与 sessionid 对应的 UID 是否一致
+        uid_match = re.search(r'(?:^|[;\s])uid_tt=(\d+)', cookie_str)
+        uid = uid_match.group(1) if uid_match else DouyinDanmakuUtils.get_user_unique_id()
+        logger.debug('弹幕 uid: %s (from_cookie=%s)', uid, uid_match is not None)
+
+        # 从 cookie 提取 msToken（抖音 WS 需要放在 URL 参数里）
+        ms_match = re.search(r'(?:^|[;\s])msToken=([^;]+)', cookie_str)
+        ms_token = ms_match.group(1).strip() if ms_match else DouyinUtils.generate_ms_token()
+
         VERSION_CODE = 180800
         SDK_VERSION = '1.0.15'  # 对齐 bililive-tools DouYinDanma
 
@@ -101,7 +110,7 @@ class DouyinDanmakuClient:
         }
         sig = DouyinDanmakuUtils.get_signature(
             DouyinDanmakuUtils.get_x_ms_stub(sig_params))
-        logger.info('弹幕签名: %s (room_id=%s)', sig, actual_room_id)
+        logger.info('弹幕签名: %s (room_id=%s, uid=%s)', sig, actual_room_id, uid)
 
         params = {
             'room_id': actual_room_id,
@@ -115,6 +124,7 @@ class DouyinDanmakuClient:
             'aid': '6383',
             'device_platform': 'web',
             'device_type': '',
+            'msToken': ms_token,
             'signature': sig,
         }
         qs = urlencode(params)
