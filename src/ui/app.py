@@ -562,6 +562,7 @@ async def merge_segments(task_id: int, request: Request):
     body = await request.json()
     prefix = body.get("prefix", "").strip()
     do_danmu = body.get("burn_danmu", True)
+    do_danmu2 = body.get("burn_danmu2", False)
     overwrite = body.get("overwrite", False)
 
     if not prefix:
@@ -596,9 +597,9 @@ async def merge_segments(task_id: int, request: Request):
                     _burn_last_log_pct[lock_key] = pct
                     task_manager.broadcast(f"[合并] 烧录进度: {pct}%", task_name=task_name, task_id=task_id)
             danmu_types = set(t.danmu_merge_types.split(",")) if t.danmu_merge_types else {"danmaku", "gift"}
-            merge_group(target, log_fn=log_fn, do_danmu=do_danmu, overwrite=overwrite,
-                        danmu_types=danmu_types, min_vbitrate=t.danmu_burn_min_vbitrate,
-                        progress_callback=prog_cb)
+            merge_group(target, log_fn=log_fn, do_danmu=do_danmu, do_danmu2=do_danmu2,
+                        overwrite=overwrite, danmu_types=danmu_types,
+                        min_vbitrate=t.danmu_burn_min_vbitrate, progress_callback=prog_cb)
             _merge_results[lock_key] = {"ok": True, "error": None}
         except Exception as e:
             err = str(e).strip()[:300]

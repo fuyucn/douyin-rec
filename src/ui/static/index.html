@@ -708,8 +708,11 @@ async function loadSegments(taskId) {
               }
               ${g.has_danmu && !g.danmu_merged && !g.merging
                 ? `<button class="btn btn-xs btn-outline btn-info"
-                     data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="true"
-                     onclick="mergeGroup(this)">烧录弹幕</button>`
+                     data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="true" data-danmu2="false"
+                     onclick="mergeGroup(this)">烧录弹幕</button>
+                   <button class="btn btn-xs btn-outline btn-secondary"
+                     data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="false" data-danmu2="true"
+                     onclick="mergeGroup(this)">弹幕2</button>`
                 : (g.danmu_merged ? '<span class="badge badge-info badge-xs">弹幕已合并</span>' : '')
               }
             </div>
@@ -731,22 +734,24 @@ async function mergeGroup(btn) {
   const taskId = btn.dataset.task;
   const prefix = btn.dataset.prefix;
   const burnDanmu = btn.dataset.danmu === 'true';
+  const burnDanmu2 = btn.dataset.danmu2 === 'true';
+  const label = burnDanmu2 ? '弹幕2' : burnDanmu ? '烧录弹幕' : '合并';
   btn.disabled = true;
   btn.textContent = '启动中...';
   try {
     const r = await fetch(`/api/tasks/${taskId}/merge`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prefix, burn_danmu: burnDanmu }),
+      body: JSON.stringify({ prefix, burn_danmu: burnDanmu, burn_danmu2: burnDanmu2 }),
     });
     const d = await r.json();
     if (!r.ok) {
       alert(d.error);
       btn.disabled = false;
-      btn.textContent = burnDanmu ? '烧录弹幕' : '合并';
+      btn.textContent = label;
       return;
     }
-    btn.textContent = burnDanmu ? '烧录中...' : '合并中...';
+    btn.textContent = '烧录中...';
     // 每 3 秒轮询一次，直到不再 merging（最多 10 分钟）
     let polls = 0;
     const maxPolls = 200;
@@ -763,7 +768,7 @@ async function mergeGroup(btn) {
   } catch (e) {
     alert(e.message);
     btn.disabled = false;
-    btn.textContent = burnDanmu ? '烧录弹幕' : '合并';
+    btn.textContent = label;
   }
 }
 

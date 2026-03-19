@@ -73,6 +73,14 @@ class RecordingGroup:
         return self.output_dir / f"{self.prefix}_danmu.mp4"
 
     @property
+    def merged_ass2(self) -> Path:
+        return self.output_dir / f"{self.prefix}_livechat.ass"
+
+    @property
+    def merged_danmu2_mp4(self) -> Path:
+        return self.output_dir / f"{self.prefix}_livechat.mp4"
+
+    @property
     def already_merged(self) -> bool:
         return self.merged_mp4.exists()
 
@@ -434,6 +442,7 @@ def merge_group(
     log_fn: Callable[[str], None] | None = None,
     do_plain: bool = True,
     do_danmu: bool = True,
+    do_danmu2: bool = False,
     overwrite: bool = False,
     danmu_types: set[str] | None = None,
     min_vbitrate: int = 2166,
@@ -443,9 +452,10 @@ def merge_group(
     合并一个录制组。
     do_plain: 生成 {prefix}.mp4（-c copy，无损）
     do_danmu: 生成 {prefix}_danmu.mp4（h264_videotoolbox 硬件编码烧录弹幕，依赖 plain mp4）
+    do_danmu2: 生成 {prefix}_livechat.mp4（直播间聊天框样式，左下角聊天面板）
     danmu_types: 烧录的弹幕类型集合，默认 {"danmaku", "gift"}；XML 路径时生效，ASS fallback 忽略此参数。
-    若 do_danmu=True 但 plain mp4 不存在，自动先执行 plain merge。
-    返回 {"plain_mp4": str | None, "danmu_mp4": str | None}
+    若 do_danmu/do_danmu2=True 但 plain mp4 不存在，自动先执行 plain merge。
+    返回 {"plain_mp4": str | None, "danmu_mp4": str | None, "danmu2_mp4": str | None}
     """
     if danmu_types is None:
         danmu_types = {"danmaku", "gift"}
@@ -457,13 +467,14 @@ def merge_group(
 
     if not group.ts_files:
         _log("[合并] 没有 .ts 文件，跳过")
-        return {"plain_mp4": None, "danmu_mp4": None}
+        return {"plain_mp4": None, "danmu_mp4": None, "danmu2_mp4": None}
 
     plain_mp4: str | None = None
     danmu_mp4: str | None = None
+    danmu2_mp4: str | None = None
 
     # ── Step 1: Plain merge ──────────────────────────────────────────────────
-    need_plain = do_plain or (do_danmu and not group.merged_mp4.exists())
+    need_plain = do_plain or ((do_danmu or do_danmu2) and not group.merged_mp4.exists())
     if need_plain:
         if group.merged_mp4.exists() and not overwrite:
             _log(f"[合并] 已存在: {group.merged_mp4.name}，跳过（传 overwrite=True 强制覆盖）")
@@ -700,4 +711,164 @@ def merge_group(
                 _log(f"[合并] 弹幕烧录失败: {e}")
                 raise
 
-    return {"plain_mp4": plain_mp4, "danmu_mp4": danmu_mp4}
+    # ── Step 3: Danmu2 (LiveChat panel) ──────────────────────────────────────
+    if do_danmu2:
+        if not group.has_danmu:
+            _log("[合并] 无弹幕文件，跳过直播间聊天框烧录")
+        elif not group.merged_mp4.exists():
+            _log("[合并] plain mp4 不存在，无法烧录直播间聊天框")
+        elif group.merged_danmu2_mp4.exists() and not overwrite:
+            _log(f"[合并] 直播间聊天框版已存在: {group.merged_danmu2_mp4.name}")
+            danmu2_mp4 = str(group.merged_danmu2_mp4)
+        else:
+            try:
+                from src.danmu.live_chat_writer import LiveChatWriter
+                from src.danmu.models import GiftDanmaku, MemberDanmaku, SimpleDanmaku
+
+                # 探测视频分辨率
+                vid_w, vid_h = 1920, 1080
+                try:
+                    import json as _json
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-print_format", "json",
+                         "-show_streams", str(group.merged_mp4)],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    if probe.returncode == 0:
+                        for s in _json.loads(probe.stdout).get("streams", []):
+                            if s.get("codec_type") == "video":
+                                vid_w = int(s.get("width", vid_w))
+                                vid_h = int(s.get("height", vid_h))
+                                break
+                except Exception:
+                    pass
+
+                # 收集所有消息（弹幕 + 礼物 + 入场），带时间偏移
+                all_items: list[SimpleDanmaku] = []
+                if group.xml_map:
+                    xml_files = [group.xml_map[i] for i in sorted(group.xml_map)]
+                    base_start = _xml_record_start(_parse_xml_safe(xml_files[0]))
+
+                    for xml_path in xml_files:
+                        root = _parse_xml_safe(xml_path)
+                        seg_start = _xml_record_start(root)
+                        offset = seg_start - base_start
+                        is_new_fmt = root.find('metadata') is not None
+
+                        if 'danmaku' in danmu_types:
+                            for d in root.findall('d'):
+                                t_val = (float(d.get('p', '0').split(',')[0]) if is_new_fmt
+                                         else float(d.get('t', 0))) + offset
+                                if t_val < 0:
+                                    continue
+                                uname = d.get('user', '') if is_new_fmt else d.get('uname', '')
+                                content = (d.text or '').strip()
+                                all_items.append(SimpleDanmaku(
+                                    time=t_val, uname=uname, uid=d.get('uid', ''),
+                                    content=content, color='ffffff', dtype='danmaku',
+                                    text=f'{uname}: {content}' if uname else content,
+                                ))
+
+                        if 'gift' in danmu_types:
+                            for g in root.findall('gift'):
+                                ts_ms = int(g.get('ts', 0))
+                                t_val = (ts_ms / 1000.0 - seg_start if is_new_fmt
+                                         else float(g.get('t', 0))) + offset
+                                uname = g.get('user', '') if is_new_fmt else g.get('uname', '')
+                                all_items.append(GiftDanmaku(
+                                    time=max(0.0, t_val), uname=uname, uid=g.get('uid', ''),
+                                    gift_name=g.get('giftname', '') or g.get('gift', ''),
+                                    gift_count=int(g.get('giftcount', 1) or g.get('count', 1)),
+                                    gift_price=float(g.get('price', 0)),
+                                    content='', color='ffaa00', dtype='gift',
+                                ))
+
+                        if 'member' in danmu_types:
+                            for m in root.findall('member'):
+                                ts_ms = int(m.get('ts', 0))
+                                t_val = (ts_ms / 1000.0 - seg_start if ts_ms else 0.0) + offset
+                                uname = m.get('user', '') if is_new_fmt else m.get('uname', '')
+                                all_items.append(MemberDanmaku(
+                                    time=max(0.0, t_val), uname=uname, uid=m.get('uid', ''),
+                                    member_count=int(m.get('member_count', 0)),
+                                    content='', color='aaaaaa', dtype='member',
+                                ))
+                else:
+                    _log("[合并] 直播间聊天框：无 XML，跳过（仅支持 XML 格式）")
+                    do_danmu2 = False
+
+                if do_danmu2 and all_items:
+                    all_items.sort(key=lambda x: x.time or 0)
+                    chat_writer = LiveChatWriter(width=vid_w, height=vid_h)
+                    written = chat_writer.write(all_items, group.merged_ass2)
+                    _log(f"[合并] 直播间聊天框 ASS → {group.merged_ass2.name}（{written} 条）")
+
+                    # 获取码率信息
+                    src_vbitrate = min_vbitrate
+                    total_ms = 0
+                    try:
+                        probe = subprocess.run(
+                            ["ffprobe", "-v", "quiet", "-print_format", "json",
+                             "-show_streams", "-show_format", str(group.merged_mp4)],
+                            capture_output=True, text=True, timeout=30,
+                        )
+                        if probe.returncode == 0:
+                            import json as _json
+                            probe_data = _json.loads(probe.stdout)
+                            for s in probe_data.get("streams", []):
+                                if s.get("codec_type") == "video":
+                                    src_vbitrate = max(min_vbitrate, int(s.get("bit_rate", 0)) // 1000)
+                                    break
+                            dur = float(probe_data.get("format", {}).get("duration", 0))
+                            total_ms = int(dur * 1000)
+                    except Exception:
+                        pass
+
+                    _log(f"[合并] 烧录直播间聊天框 → {group.merged_danmu2_mp4.name}（VideoToolbox {src_vbitrate}k）")
+                    proc2 = subprocess.Popen(
+                        [
+                            "ffmpeg", "-y",
+                            "-i", str(group.merged_mp4),
+                            "-progress", "pipe:1", "-nostats",
+                            "-vf", f"ass={group.merged_ass2.name}:fontsdir={_FONTS_DIR},format=yuv420p",
+                            "-c:v", "h264_videotoolbox", "-b:v", f"{src_vbitrate}k",
+                            "-color_range", "tv",
+                            "-c:a", "copy",
+                            "-movflags", "+faststart",
+                            str(group.merged_danmu2_mp4),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        cwd=str(group.output_dir),
+                    )
+                    stderr_lines2: list[str] = []
+                    def _read_stderr2() -> None:
+                        for line in proc2.stderr:
+                            stderr_lines2.append(line)
+                    threading.Thread(target=_read_stderr2, daemon=True).start()
+                    for line in proc2.stdout:
+                        if line.startswith("out_time_ms=") and total_ms > 0 and progress_callback:
+                            val = line.split("=", 1)[1].strip()
+                            if val.lstrip("-").isdigit():
+                                ms = int(val)
+                                if ms > 0:
+                                    pct = min(99, int(ms / total_ms * 100))
+                                    progress_callback(pct)
+                    proc2.wait()
+                    if proc2.returncode != 0:
+                        group.merged_danmu2_mp4.unlink(missing_ok=True)
+                        err = "".join(stderr_lines2)[-600:].strip()
+                        raise RuntimeError(f"ffmpeg 直播间聊天框烧录失败 (rc={proc2.returncode}): {err or '(无输出)'}")
+                    if progress_callback:
+                        progress_callback(100)
+
+                    size_mb = group.merged_danmu2_mp4.stat().st_size / 1024 / 1024
+                    danmu2_mp4 = str(group.merged_danmu2_mp4)
+                    _log(f"[合并] 直播间聊天框版完成: {group.merged_danmu2_mp4.name} ({size_mb:.1f} MB)")
+
+            except Exception as e:
+                _log(f"[合并] 直播间聊天框烧录失败: {e}")
+                raise
+
+    return {"plain_mp4": plain_mp4, "danmu_mp4": danmu_mp4, "danmu2_mp4": danmu2_mp4}
