@@ -994,7 +994,6 @@ class TaskManager:
                     max_threads=task.max_threads,
                     cookies=cookies,
                     custom_name=display_name,
-                    spider_method=self._config.input.spider_method,
                     log_callback=log,
                 )
                 launcher.start()

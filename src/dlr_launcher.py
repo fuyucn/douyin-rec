@@ -39,7 +39,6 @@ def write_dlr_config(
     segment_sec: int,
     poll_interval: int,
     max_threads: int,
-    cookies: str | None = None,
     custom_name: str | None = None,
 ) -> None:
     """在 task_dir/config/ 写入 DLR 所需的 config.ini 和 URL_config.ini"""
@@ -88,8 +87,10 @@ def write_dlr_config(
         "直播状态推送渠道": "",
     }
 
+    # 不传用户 cookie 给 DLR：DLR 用自己的匿名 ttwid + QQBrowser UA，
+    # 两者匹配，不触发风控。用户 cookie 只用于弹幕 WS 连接。
     config["Cookie"] = {
-        "抖音cookie": cookies or "",
+        "抖音cookie": "",
     }
 
     config["Authorization"] = {
@@ -128,7 +129,6 @@ class DlrLauncher:
         max_threads: int = 3,
         cookies: str | None = None,
         custom_name: str | None = None,
-        spider_method: str = "html",
         log_callback: Callable[[str], None] | None = None,
     ) -> None:
         self._task_id = task_id
@@ -139,9 +139,7 @@ class DlrLauncher:
         self._segment_sec = segment_sec
         self._poll_interval = poll_interval
         self._max_threads = max_threads
-        self._cookies = cookies
         self._custom_name = custom_name
-        self._spider_method = spider_method
         self._log_callback = log_callback or (lambda msg: None)
         self._process: subprocess.Popen | None = None
         self._tmpdir: str | None = None
@@ -164,45 +162,23 @@ class DlrLauncher:
             segment_sec=self._segment_sec,
             poll_interval=self._poll_interval,
             max_threads=self._max_threads,
-            cookies=self._cookies,
             custom_name=self._custom_name,
         )
 
         dlr_main = str(_DLR_ROOT / "main.py")
         runner_path = task_dir / "runner.py"
         dlr_root = str(_DLR_ROOT)
-        project_root = str(Path(__file__).resolve().parent.parent)
-        spider_method = self._spider_method
         # 注意：不能用 runpy.run_path()，它会把 sys.argv[0] 强制设成 main.py 路径，
         # 导致 DLR 的 script_path 指向 DLR 安装目录而不是 tmpdir。
         # 改用 exec() 直接执行 main.py 代码，sys.argv[0] 保持 runner.py 路径不变。
         # Monkey-patch: 替换 DLR 的 QQBrowser UA spider，改用我们的 Chrome UA HTML spider，
         # 解决抖音风控问题（DLR 原始 get_douyin_web_stream_data 使用 QQBrowser UA + a_bogus，
         # 与 macOS Chrome cookie 不匹配，导致风控报错）。
-        our_spider_py = str(Path(__file__).resolve().parent / "input" / "douyin_spider.py")
         runner_path.write_text(
             f"import sys\n"
             f"sys.argv[0] = __file__  # DLR 用此路径确定 config 目录（= tmpdir/runner.py）\n"
             f"if {dlr_root!r} not in sys.path:\n"
             f"    sys.path.insert(0, {dlr_root!r})\n"
-            f"# ── Monkey-patch DLR spider ────────────────────────────────────\n"
-            f"# 注意：不能把项目根加到 sys.path（会与 DLR 的 src/ 包名冲突）。\n"
-            f"# 用 importlib 直接按文件路径加载我们的 spider 模块，规避包名冲突。\n"
-            f"try:\n"
-            f"    import importlib.util as _ilu\n"
-            f"    _spec = _ilu.spec_from_file_location('_vs_douyin_spider', {our_spider_py!r})\n"
-            f"    _vs_spider = _ilu.module_from_spec(_spec)\n"
-            f"    _spec.loader.exec_module(_vs_spider)\n"
-            f"    _our_spider = _vs_spider.get_douyin_stream_data_by_method\n"
-            f"    from src import spider as _dlr_spider\n"
-            f"    _spider_method = {spider_method!r}\n"
-            f"    async def _patched_web(url, proxy_addr=None, cookies=None):\n"
-            f"        return await _our_spider(url, cookies=cookies, method=_spider_method)\n"
-            f"    _dlr_spider.get_douyin_web_stream_data = _patched_web\n"
-            f"    print('[patch] DLR spider patched (method=' + repr(_spider_method) + ')')\n"
-            f"except Exception as _e:\n"
-            f"    print('[patch] spider patch failed: ' + str(_e))\n"
-            f"# ──────────────────────────────────────────────────────────────\n"
             f"with open({dlr_main!r}, encoding='utf-8') as _f:\n"
             f"    exec(compile(_f.read(), {dlr_main!r}, 'exec'), {{'__name__': '__main__', '__file__': {dlr_main!r}, '__builtins__': __builtins__}})\n",
             encoding="utf-8",

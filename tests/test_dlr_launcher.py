@@ -112,8 +112,8 @@ def test_write_dlr_config_output_dir(tmp_path):
     assert cfg.get("录制设置", "直播保存路径(不填则默认)") == "/custom/output/path"
 
 
-def test_write_dlr_config_cookies(tmp_path):
-    """cookies 写入 Cookie section"""
+def test_write_dlr_config_cookie_always_empty(tmp_path):
+    """DLR cookie 始终为空（用户 cookie 只给弹幕用，不传给 DLR 避免 UA 风控）"""
     write_dlr_config(
         task_dir=tmp_path,
         url="https://live.douyin.com/123",
@@ -123,26 +123,6 @@ def test_write_dlr_config_cookies(tmp_path):
         segment_sec=1800,
         poll_interval=180,
         max_threads=3,
-        cookies="sid=abc123",
-    )
-    cfg = configparser.RawConfigParser()
-    cfg.optionxform = str
-    cfg.read(str(tmp_path / "config" / "config.ini"), encoding="utf-8-sig")
-    assert cfg.get("Cookie", "抖音cookie") == "sid=abc123"
-
-
-def test_write_dlr_config_no_cookies(tmp_path):
-    """无 cookies 时写入空字符串"""
-    write_dlr_config(
-        task_dir=tmp_path,
-        url="https://live.douyin.com/123",
-        name="主播",
-        quality="origin",
-        output_dir="/tmp/out",
-        segment_sec=1800,
-        poll_interval=180,
-        max_threads=3,
-        cookies=None,
     )
     cfg = configparser.RawConfigParser()
     cfg.optionxform = str
