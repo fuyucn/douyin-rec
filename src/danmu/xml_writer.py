@@ -14,9 +14,9 @@ _XML_INVALID_CHARS = re.compile(
 
 
 def _xml_escape(s: str) -> str:
-    """先去除 XML 1.0 非法字符，再做标准 escape（防止弹幕内容破坏 XML 结构）"""
+    """先去除 XML 1.0 非法字符，再做标准 escape（含属性值里的双引号）"""
     s = _XML_INVALID_CHARS.sub('', s)
-    return _saxutils.escape(s)
+    return _saxutils.escape(s, {'"': '&quot;'})
 
 from .models import GiftDanmaku, MemberDanmaku, SimpleDanmaku
 

@@ -154,12 +154,26 @@ _XML_INVALID_CHARS = re.compile(
 )
 
 
+def _sanitize_xml_content(content: str) -> str:
+    """清洗 XML 内容：过滤非法字符 + 转义属性值中的裸双引号。"""
+    content = _XML_INVALID_CHARS.sub('', content)
+    # 修复属性值中未转义的 "（如 user="name""）
+    # 策略：将 ="..." 中多余的 " 替换为 &quot;
+    def _fix_attr(m: re.Match) -> str:
+        key = m.group(1)
+        val = m.group(2)
+        # 把 val 里的 " 转为 &quot;，再重新包裹
+        val = val.replace('"', '&quot;')
+        return f'{key}="{val}"'
+    content = re.sub(r'(\w+)="([^<>]*?)"(?=\s|/|>)', _fix_attr, content)
+    return content
+
+
 def _parse_xml_safe(path: Path):
     """解析 XML 文件，自动修复常见的截断问题和非法字符。"""
     import xml.etree.ElementTree as ET
     content = path.read_text(encoding='utf-8', errors='replace')
-    # 过滤 XML 1.0 非法字符（控制字符等），避免 ParseError
-    content = _XML_INVALID_CHARS.sub('', content)
+    content = _sanitize_xml_content(content)
     try:
         return ET.fromstring(content)
     except ET.ParseError:
