@@ -37,6 +37,9 @@ uvicorn (Web UI + 任务管理)
 - [DouyinLiveRecorder](https://github.com/ihmily/DouyinLiveRecorder) 安装于 `/Users/yuf/Developer/DouyinLiveRecorder`（含独立 `.venv`）
 - [ffmpeg](https://ffmpeg.org/)（DLR 调用）
 - [uv](https://github.com/astral-sh/uv)（包管理）
+- 字体（弹幕烧录）：
+  - [Noto Sans CJK](https://github.com/notofonts/noto-cjk)（中文弹幕渲染）：`brew install --cask font-noto-sans-cjk`
+  - Noto Emoji（emoji 渲染）：静态 TTF 已内置于 `assets/fonts/NotoEmoji-Static.ttf`，通过 ffmpeg `fontsdir` 参数直接加载，无需系统安装
 
 ## 安装
 

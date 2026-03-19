@@ -18,6 +18,14 @@ fi
 echo "==> 安装 Python 依赖..."
 uv sync --extra ui
 
+echo "==> 安装弹幕中文字体..."
+if command -v brew &>/dev/null; then
+    brew install --cask font-noto-sans-cjk 2>/dev/null || true
+else
+    echo "  未找到 brew，请手动安装 Noto Sans CJK 字体"
+fi
+echo "  (emoji 字体已内置于 assets/fonts/NotoEmoji-Static.ttf)"
+
 echo ""
 echo "✓ 安装完成。启动 Web UI："
 echo "  ./run.sh"

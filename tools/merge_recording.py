@@ -196,7 +196,12 @@ def get_video_bitrate(path: Path) -> int | None:
 def burn_ass_to_mp4(video_path: Path, ass_path: Path, out_path: Path) -> None:
     """将 ASS 字幕烧录进视频，尽量保持原始码率（-b:v），无法获取则用 -crf 0 无损）"""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    ass_escaped = str(ass_path.resolve()).replace("\\", "/").replace(":", "\\:")
+
+    # 项目内置字体目录（assets/fonts/），含 NotoEmoji-Static.ttf
+    fonts_dir = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+    ass_str = str(ass_path.resolve()).replace("\\", "/").replace(":", "\\:")
+    fonts_str = str(fonts_dir).replace("\\", "/").replace(":", "\\:")
+    vf = f"ass={ass_str}:fontsdir={fonts_str}"
 
     bitrate = get_video_bitrate(video_path)
     if bitrate:
@@ -212,7 +217,7 @@ def burn_ass_to_mp4(video_path: Path, ass_path: Path, out_path: Path) -> None:
         "-i",
         str(video_path),
         "-vf",
-        f"ass={ass_escaped}",
+        vf,
         *venc_opts,
         "-c:a",
         "copy",
