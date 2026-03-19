@@ -709,11 +709,14 @@ async function loadSegments(taskId) {
               ${g.has_danmu && !g.danmu_merged && !g.merging
                 ? `<button class="btn btn-xs btn-outline btn-info"
                      data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="true" data-danmu2="false"
-                     onclick="mergeGroup(this)">烧录弹幕</button>
-                   <button class="btn btn-xs btn-outline btn-secondary"
+                     onclick="mergeGroup(this)">烧录弹幕</button>`
+                : (g.danmu_merged ? '<span class="badge badge-info badge-xs">弹幕已合并</span>' : '')
+              }
+              ${g.has_danmu && !g.livechat_merged && !g.merging
+                ? `<button class="btn btn-xs btn-outline btn-secondary"
                      data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="false" data-danmu2="true"
                      onclick="mergeGroup(this)">弹幕2</button>`
-                : (g.danmu_merged ? '<span class="badge badge-info badge-xs">弹幕已合并</span>' : '')
+                : (g.livechat_merged ? '<span class="badge badge-secondary badge-xs">弹幕2已合并</span>' : '')
               }
             </div>
             ${g.merge_error ? `<div class="text-xs text-error mt-1 break-all opacity-80">${esc(g.merge_error)}</div>` : ''}

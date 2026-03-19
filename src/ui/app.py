@@ -543,6 +543,7 @@ async def list_segments(task_id: int):
             "has_danmu": g.has_danmu,
             "merged": g.already_merged,
             "danmu_merged": g.merged_danmu_mp4.exists(),
+            "livechat_merged": g.merged_danmu2_mp4.exists(),
             "merging": lk in _merging_prefixes,
             "burn_progress": _burn_progress.get(lk, 0),
             "merge_error": mr["error"] if (mr and not mr["ok"] and not g.already_merged) else None,
