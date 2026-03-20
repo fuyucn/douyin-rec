@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import unicodedata
 from pathlib import Path
 
 from .models import SimpleDanmaku
@@ -32,6 +33,11 @@ _EMOJI_RANGES = (
 
 def _is_emoji(cp: int) -> bool:
     return any(lo <= cp <= hi for lo, hi in _EMOJI_RANGES)
+
+
+def _prepare_text(text: str, main_font: str) -> str:
+    """NFKC 规范化（花体字 → ASCII fallback）+ emoji 字体标签。"""
+    return _tag_emoji(unicodedata.normalize('NFKC', text), main_font)
 
 
 def _tag_emoji(text: str, main_font: str) -> str:
@@ -168,7 +174,7 @@ class AssWriter:
             t1 = '%02d:%02d:%05.2f' % _sec2hms(dm.time + self.dmduration)
 
             color_str = _rgb2bgr(dm.color if dm.color.startswith('#') else f'#{dm.color}')
-            text = _tag_emoji(
+            text = _prepare_text(
                 dm.text.replace('\n', ' ').replace('\r', ' '),
                 self.font,
             )

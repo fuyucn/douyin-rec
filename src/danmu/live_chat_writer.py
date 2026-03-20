@@ -10,9 +10,10 @@
 
 from __future__ import annotations
 
+import unicodedata
 from pathlib import Path
 
-from .ass_writer import _tag_emoji
+from .ass_writer import _prepare_text
 from .models import GiftDanmaku, MemberDanmaku, SimpleDanmaku
 
 # 项目内置字体目录
@@ -48,31 +49,37 @@ class LiveChatWriter:
         width: int = 1920,
         height: int = 1080,
         font: str = 'Noto Sans CJK SC',
-        fontsize: int = 26,
+        fontsize: int = 32,
         line_spacing: int = 6,
         opacity: float = 0.85,
         display_duration: float = 30.0,
         panel_left_pct: float = 0.02,
-        panel_right_pct: float = 0.42,
-        panel_top_pct: float = 0.75,
-        panel_bottom_pct: float = 0.95,
+        panel_right_pct: float = 0.65,
+        panel_top_pct: float = 0.78,
+        panel_bottom_pct: float = 0.98,
         outlinecolor: str = '000000',
         outlinesize: float = 1.0,
     ) -> None:
         self.width = width
         self.height = height
-        self.fontsize = int(height / 1080 * fontsize)
+        self.fontsize = int(min(width, height) / 1080 * fontsize)
         self.font = font
         self.opacity = hex(255 - int(opacity * 255))[2:].zfill(2)
         self.display_duration = display_duration
         self.outlinecolor = outlinecolor.zfill(6)
         self.outlinesize = outlinesize
 
-        # 面板像素坐标
+        # 面板像素坐标（panel_right 上限 min(w,h)/2 = 540px@1080p）
         self.panel_x = int(width * panel_left_pct)
         self.panel_right = int(width * panel_right_pct)
         self.panel_top = int(height * panel_top_pct)
         self.panel_bottom = int(height * panel_bottom_pct)
+
+        # 面板宽度（用于手动预计算折行）
+        self.panel_w = self.panel_right - self.panel_x
+
+        # 右边距（用于 Dialogue MarginR）
+        self.margin_r = width - self.panel_right
 
         # 每行高度 = 字体大小 + 行间距
         self.line_h = self.fontsize + line_spacing
@@ -107,6 +114,32 @@ class LiveChatWriter:
             'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
         ]) + '\n'
 
+    def _char_w(self, ch: str) -> int:
+        """估算单个字符的渲染宽度（像素）。用 east_asian_width 区分全角/半角。"""
+        eaw = unicodedata.east_asian_width(ch)
+        if eaw in ('W', 'F'):          # 全宽：CJK、全角标点等
+            return self.fontsize
+        if eaw in ('Na', 'H'):         # 窄/半角：ASCII、半角标点
+            return self.fontsize // 2
+        # 'N' 中性 / 'A' 歧义：按字节数粗判，多字节按全宽处理
+        return self.fontsize if len(ch.encode('utf-8')) > 1 else self.fontsize // 2
+
+    def _wrap_text(self, text: str) -> str:
+        """在面板宽度处插入 \\N（ASS 硬换行），避免依赖 libass 自动折行。"""
+        max_w = self.panel_w
+        lines, cur, cur_w = [], '', 0
+        for ch in text:
+            ch_w = self._char_w(ch)
+            if cur_w + ch_w > max_w and cur:  # 留一字宽安全边距
+                lines.append(cur)
+                cur, cur_w = ch, ch_w
+            else:
+                cur += ch
+                cur_w += ch_w
+        if cur:
+            lines.append(cur)
+        return r'\N'.join(lines)
+
     def _format_text(self, item: SimpleDanmaku) -> str:
         if isinstance(item, GiftDanmaku):
             return f'🎁 {item.uname}: {item.gift_count}个{item.gift_name}'
@@ -129,24 +162,40 @@ class LiveChatWriter:
         dialogue_lines: list[str] = []
         count = 0
 
-        for i, item in enumerate(valid):
-            text = _tag_emoji(
-                self._format_text(item).replace('\n', ' ').replace('\r', ' '),
-                self.font,
+        # 预计算每条消息的折行后实际高度（行数 × line_h）
+        wrapped: list[str] = []
+        heights: list[int] = []
+        for item in valid:
+            raw = self._wrap_text(
+                self._format_text(item).replace('\n', ' ').replace('\r', ' ')
             )
+            wrapped.append(raw)
+            heights.append((raw.count(r'\N') + 1) * self.line_h)
+
+        for i, item in enumerate(valid):
+            text = _prepare_text(wrapped[i], self.font)
             if not text:
                 continue
             color = _rgb2bgr(item.color if item.color.startswith('#') else f'#{item.color}')
             expire = item.time + self.display_duration
 
             # rank k：消息 i 在面板中的位置（0 = 最底部，随新消息到来逐渐增大）
-            # 每当后续第 k 条消息到来，该消息上移到 rank k
+            # y = panel_bottom 减去"我下方所有消息"的累计高度
+            # 当 k=0 时消息 i 就在最底部，y = panel_bottom（\an1 底边贴面板底）
             for k in range(self.max_visible):
                 j = i + k  # 触发 rank k 的消息索引
                 if j >= len(valid):
                     break
 
-                seg_start = valid[j].time  # rank k 开始时刻（k=0 即消息本身出现时）
+                # 累计 i 下方（rank 0..k-1）各消息的实际高度
+                below_h = sum(heights[i + m] for m in range(1, k + 1))
+                y = self.panel_bottom - below_h
+
+                # 若消息已超出面板顶部，停止
+                if y - heights[i] < self.panel_top:
+                    break
+
+                seg_start = valid[j].time
                 next_j = j + 1
                 if next_j < len(valid):
                     seg_end = min(valid[next_j].time, expire)
@@ -154,11 +203,8 @@ class LiveChatWriter:
                     seg_end = expire
 
                 if seg_end <= seg_start:
-                    # 下一条消息同时到来（零时段），直接跳过，等下一个 k
                     continue
 
-                # \an1 = 左下角锚点，y 为文字底边坐标
-                y = self.panel_bottom - self.line_h * (k + 1)
                 t0 = _sec2ts(seg_start)
                 t1 = _sec2ts(seg_end)
                 line = (
