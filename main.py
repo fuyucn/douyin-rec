@@ -24,13 +24,45 @@ def _signal_handler(signum, frame):
     _shutdown = True
 
 
-def setup_logging(verbose: bool = False):
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+def setup_logging(verbose: bool = False, log_dir: str = "output/logs"):
+    """配置 Python logging：控制台（INFO/DEBUG）+ app 日志文件（DEBUG，含完整 traceback）"""
+    import os
+    from datetime import date as _date
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)  # 让 handler 自行过滤
+
+    # 我们自己的模块始终 DEBUG；第三方库保持 WARNING 避免噪音
+    for ns in ("src", "__main__"):
+        logging.getLogger(ns).setLevel(logging.DEBUG)
+    for ns in ("aiohttp", "uvicorn", "fastapi", "asyncio", "httpcore", "httpx"):
+        logging.getLogger(ns).setLevel(logging.WARNING)
+
+    console_fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    file_fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # 控制台：默认 INFO，--verbose 时 DEBUG
+    console = logging.StreamHandler()
+    console.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console.setFormatter(console_fmt)
+    root.addHandler(console)
+
+    # App 日志文件：DEBUG 级别，每天一个文件，包含完整 traceback
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        app_log = os.path.join(log_dir, f"app_{_date.today().isoformat()}.log")
+        fh = logging.FileHandler(app_log, encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(file_fmt)
+        root.addHandler(fh)
+    except Exception as e:
+        logging.getLogger(__name__).warning("无法创建 app 日志文件: %s", e)
 
 
 def _get_source_name(source) -> str | None:

@@ -39,7 +39,6 @@ def write_dlr_config(
     segment_sec: int,
     poll_interval: int,
     max_threads: int,
-    cookies: str | None = None,
     custom_name: str | None = None,
 ) -> None:
     """在 task_dir/config/ 写入 DLR 所需的 config.ini 和 URL_config.ini"""
@@ -88,8 +87,10 @@ def write_dlr_config(
         "直播状态推送渠道": "",
     }
 
+    # 不传用户 cookie 给 DLR：DLR 用自己的匿名 ttwid + QQBrowser UA，
+    # 两者匹配，不触发风控。用户 cookie 只用于弹幕 WS 连接。
     config["Cookie"] = {
-        "抖音cookie": cookies or "",
+        "抖音cookie": "",
     }
 
     config["Authorization"] = {
@@ -138,12 +139,12 @@ class DlrLauncher:
         self._segment_sec = segment_sec
         self._poll_interval = poll_interval
         self._max_threads = max_threads
-        self._cookies = cookies
         self._custom_name = custom_name
         self._log_callback = log_callback or (lambda msg: None)
         self._process: subprocess.Popen | None = None
         self._tmpdir: str | None = None
         self._log_thread: threading.Thread | None = None
+        self._stop_lock = threading.Lock()
 
     def start(self) -> None:
         """启动 DLR 子进程"""
@@ -161,7 +162,6 @@ class DlrLauncher:
             segment_sec=self._segment_sec,
             poll_interval=self._poll_interval,
             max_threads=self._max_threads,
-            cookies=self._cookies,
             custom_name=self._custom_name,
         )
 
@@ -171,6 +171,9 @@ class DlrLauncher:
         # 注意：不能用 runpy.run_path()，它会把 sys.argv[0] 强制设成 main.py 路径，
         # 导致 DLR 的 script_path 指向 DLR 安装目录而不是 tmpdir。
         # 改用 exec() 直接执行 main.py 代码，sys.argv[0] 保持 runner.py 路径不变。
+        # Monkey-patch: 替换 DLR 的 QQBrowser UA spider，改用我们的 Chrome UA HTML spider，
+        # 解决抖音风控问题（DLR 原始 get_douyin_web_stream_data 使用 QQBrowser UA + a_bogus，
+        # 与 macOS Chrome cookie 不匹配，导致风控报错）。
         runner_path.write_text(
             f"import sys\n"
             f"sys.argv[0] = __file__  # DLR 用此路径确定 config 目录（= tmpdir/runner.py）\n"
@@ -186,7 +189,7 @@ class DlrLauncher:
 
         self._log_callback(f"[DLR] 启动子进程 (tmpdir={self._tmpdir})")
         self._process = subprocess.Popen(
-            [str(_DLR_PYTHON), str(runner_path)],
+            [str(_DLR_PYTHON), "-u", str(runner_path)],  # -u: 禁用 stdout 缓冲，日志实时到达
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -201,7 +204,11 @@ class DlrLauncher:
         self._log_thread.start()
 
     def stop(self) -> None:
-        """停止 DLR 子进程及其进程组"""
+        """停止 DLR 子进程及其进程组（线程安全，可并发调用）"""
+        with self._stop_lock:
+            self._stop_locked()
+
+    def _stop_locked(self) -> None:
         if self._process is None:
             return
         if self._process.poll() is not None:
@@ -246,6 +253,13 @@ class DlrLauncher:
         if self._process is None:
             return False
         return self._process.poll() is None
+
+    @property
+    def exit_code(self) -> int | None:
+        """进程退出码；仍在运行时返回 None。"""
+        if self._process is None:
+            return None
+        return self._process.poll()
 
     def _forward_logs(self) -> None:
         """读取子进程 stdout，转发给 log_callback"""

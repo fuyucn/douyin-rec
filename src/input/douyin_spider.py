@@ -525,6 +525,61 @@ async def get_douyin_app_stream_data(url: str, cookies: str | None = None) -> di
     return room_data
 
 
+_MOBILE_LIVE_UA = ('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
+                   'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1')
+
+
+async def get_douyin_mobile_html_stream_data(url: str, cookies: str | None = None) -> dict:
+    """通过移动端 UA 抓取直播页 HTML 获取直播间数据。失败时回退到桌面 HTML 解析。"""
+    headers = {
+        'User-Agent': _MOBILE_LIVE_UA,
+        'Accept-Language': 'zh-CN,zh;q=0.8',
+        'Referer': 'https://live.douyin.com/',
+        'Cookie': cookies or _DEFAULT_COOKIE,
+    }
+    try:
+        html_str = await _async_req(url, headers=headers)
+        match = re.search(r'(\{\\"state\\":.*?)]\\n"]\)', html_str)
+        if not match:
+            match = re.search(r'(\{\\"common\\":.*?)]\\n"]\)</script><div hidden', html_str)
+        if not match:
+            raise RuntimeError("mobile HTML: no JSON match")
+        json_str = match.group(1)
+        cleaned = json_str.replace('\\', '').replace(r'u0026', '&')
+        room_store = re.search('"roomStore":(.*?),"linkmicStore"', cleaned, re.DOTALL).group(1)
+        anchor_name = re.search('"nickname":"(.*?)","avatar_thumb', room_store, re.DOTALL).group(1)
+        room_store = room_store.split(',"has_commerce_goods"')[0] + '}}}'
+        json_data = json.loads(room_store)['roomInfo']['room']
+        json_data['anchor_name'] = anchor_name
+
+        if json_data.get('status') == 4:
+            return json_data
+
+        stream_orientation = json_data['stream_url'].get('stream_orientation', 1)
+        matches2 = re.findall(r'"(\{\\"common\\":.*?)"]\)</script><script nonce=', html_str)
+        if matches2:
+            js2 = matches2[0] if stream_orientation == 1 else matches2[1]
+            jd2 = json.loads(js2.replace('\\', '').replace('"{', '{').replace('}"', '}').replace('u0026', '&'))
+            quality_urls, vcodec = _extract_quality_urls(json.dumps(jd2))
+            if quality_urls:
+                json_data['_quality_urls'] = quality_urls
+            if vcodec:
+                json_data['_vcodec'] = vcodec
+            origin_entry = quality_urls.get('origin', {})
+            if origin_entry.get('flv'):
+                json_data['stream_url']['flv_pull_url'] = {
+                    **json_data['stream_url'].get('flv_pull_url', {}),
+                    'ORIGIN': origin_entry['flv']}
+            if origin_entry.get('m3u8'):
+                json_data['stream_url']['hls_pull_url_map'] = {
+                    **json_data['stream_url'].get('hls_pull_url_map', {}),
+                    'ORIGIN': origin_entry['m3u8']}
+        return json_data
+    except Exception as e:
+        _log.debug("[mobile_html] parsing failed (%s), fallback to desktop html", e)
+        return await get_douyin_stream_data(url, cookies)
+
+
 async def get_douyin_stream_data(url: str, cookies: str | None = None) -> dict:
     """主入口：先尝试 HTML 解析，失败则回退 App API。"""
     headers = {
@@ -710,3 +765,34 @@ async def get_douyin_stream_url(room_data: dict, quality: str = "origin") -> dic
         'record_url': m3u8_url or flv_url,
     })
     return result
+
+
+# ---------------------------------------------------------------------------
+# 多方法派发入口
+# ---------------------------------------------------------------------------
+
+#: 支持的流地址获取方式
+SPIDER_METHODS = ["html", "mobile_html", "web_api", "app_api"]
+
+_SPIDER_METHOD_LABELS = {
+    "html": "直播页 HTML 解析（Firefox UA，推荐）",
+    "mobile_html": "直播页 HTML 解析（移动端 UA）",
+    "web_api": "Web API（webcast/room/web/enter，QQBrowser UA）",
+    "app_api": "App API（webcast.amemv.com/webcast/room/reflow）",
+}
+
+
+async def get_douyin_stream_data_by_method(
+    url: str,
+    cookies: str | None = None,
+    method: str = "html",
+) -> dict:
+    """按指定方法获取抖音直播间数据。method: html | mobile_html | web_api | app_api"""
+    if method == "web_api":
+        return await get_douyin_web_stream_data(url, cookies)
+    elif method == "app_api":
+        return await get_douyin_app_stream_data(url, cookies)
+    elif method == "mobile_html":
+        return await get_douyin_mobile_html_stream_data(url, cookies)
+    else:
+        return await get_douyin_stream_data(url, cookies)

@@ -32,11 +32,8 @@ class StorageManager:
             self.output_dir = self.output_dir / safe_name
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # 数据库跟随主播子目录：./output/{name}/metadata.db
-        if name:
-            db_path = self.output_dir / "metadata.db"
-        else:
-            db_path = Path(config.db_path)
+        # 数据库统一存放在 output/ 根目录，不跟随主播子目录
+        db_path = Path(config.db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(f"sqlite:///{db_path}")
         SQLModel.metadata.create_all(self.engine)

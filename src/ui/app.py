@@ -61,6 +61,8 @@ def _serialize_task(t, worker_status: str = "", recording_started_at: str | None
         "enable_record": t.enable_record,
         "enable_screenshot": t.enable_screenshot,
         "enable_danmu": t.enable_danmu,
+        "danmu_merge_types": t.danmu_merge_types,
+        "danmu_burn_min_vbitrate": t.danmu_burn_min_vbitrate,
         "auto_quality_fallback": t.auto_quality_fallback,
         "enable_segment": t.enable_segment,
         "segment_sec": t.segment_sec,
@@ -81,6 +83,12 @@ def _serialize_task(t, worker_status: str = "", recording_started_at: str | None
         "recording_started_at": recording_started_at,
         "output_dir": _task_output_dir(t),
         "is_previewing": task_manager.get_preview_task_id() == t.id,
+        "stream_title": t.stream_title,
+        "stream_resolution": t.stream_resolution,
+        "stream_fps": t.stream_fps,
+        "stream_vbitrate": t.stream_vbitrate,
+        "stream_vcodec": t.stream_vcodec,
+        "stream_encoder": t.stream_encoder,
     }
 
 
@@ -188,6 +196,8 @@ async def create_task(request: Request):
         cookies=body.get("cookies"),
         enable_danmu=body.get("enable_danmu", False),
         danmu_cdn_delay=int(body.get("danmu_cdn_delay", 6)),
+        danmu_merge_types=body.get("danmu_merge_types", "danmaku,gift"),
+        danmu_burn_min_vbitrate=int(body.get("danmu_burn_min_vbitrate", 2166)),
         auto_quality_fallback=body.get("auto_quality_fallback", False),
         enable_segment=body.get("enable_segment", True),
         segment_sec=int(body.get("segment_sec", 1800)),
@@ -195,7 +205,7 @@ async def create_task(request: Request):
         show_countdown=body.get("show_countdown", True),
         max_threads=int(body.get("max_threads", 3)),
         schedule_enabled=body.get("schedule_enabled", False),
-        schedule_timezone=body.get("schedule_timezone", "Asia/Shanghai"),
+        schedule_timezone=body.get("schedule_timezone", "America/Los_Angeles"),
         schedule_start=body.get("schedule_start", "00:00"),
         schedule_stop=body.get("schedule_stop", "23:59"),
         schedule_run_until_end=body.get("schedule_run_until_end", False),
@@ -496,8 +506,10 @@ async def local_task_logs_sse(task_id: int):
 
 # ── 录制组合并 API ────────────────────────────────────────────────────────
 
-_merging_prefixes: set[str] = set()  # 防止同一前缀并发重复合并
-_merge_results: dict[str, dict] = {}  # lock_key → {"ok": bool, "error": str|None}
+_merging_prefixes: set[str] = set()    # 防止同一前缀并发重复合并
+_merge_results: dict[str, dict] = {}   # lock_key → {"ok": bool, "error": str|None}
+_burn_progress: dict[str, int] = {}    # lock_key → 0-100（烧录进度百分比）
+_burn_last_log_pct: dict[str, int] = {}  # lock_key → 上次推日志时的百分比
 
 _PREFIX_DT_RE = re.compile(r"^.+_(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})$")
 
@@ -514,8 +526,9 @@ async def list_segments(task_id: int):
         return {"groups": []}
 
     from src.merge.merger import discover_groups
-    is_running = (t.status == "running")
-    groups = discover_groups(output_dir, exclude_last=is_running)
+    worker_status = task_manager.get_worker_status(t.id)
+    is_recording = (t.status == "running") and "运行中" in (worker_status or "")
+    groups = discover_groups(output_dir, exclude_last=is_recording)
 
     result = []
     for g in groups:
@@ -527,13 +540,15 @@ async def list_segments(task_id: int):
             "date": m.group(1) if m else None,
             "time": m.group(2).replace("-", ":") if m else None,
             "segment_count": len(g.ts_files),
-            "has_danmu": len(g.ass_map) > 0,
+            "has_danmu": g.has_danmu,
             "merged": g.already_merged,
             "danmu_merged": g.merged_danmu_mp4.exists(),
+            "livechat_merged": g.merged_danmu2_mp4.exists(),
             "merging": lk in _merging_prefixes,
+            "burn_progress": _burn_progress.get(lk, 0),
             "merge_error": mr["error"] if (mr and not mr["ok"] and not g.already_merged) else None,
         })
-    return {"groups": result, "is_running": is_running}
+    return {"groups": result, "is_running": is_recording}
 
 
 @app.post("/api/tasks/{task_id}/merge")
@@ -548,6 +563,7 @@ async def merge_segments(task_id: int, request: Request):
     body = await request.json()
     prefix = body.get("prefix", "").strip()
     do_danmu = body.get("burn_danmu", True)
+    do_danmu2 = body.get("burn_danmu2", False)
     overwrite = body.get("overwrite", False)
 
     if not prefix:
@@ -560,8 +576,9 @@ async def merge_segments(task_id: int, request: Request):
     output_dir = _recording_dir(t)
     from src.merge.merger import discover_groups, merge_group
 
-    is_running = (t.status == "running")
-    groups = discover_groups(output_dir, exclude_last=is_running)
+    worker_status = task_manager.get_worker_status(t.id)
+    is_recording = (t.status == "running") and "运行中" in (worker_status or "")
+    groups = discover_groups(output_dir, exclude_last=is_recording)
     target = next((g for g in groups if g.prefix == prefix), None)
     if target is None:
         return JSONResponse({"error": f"未找到录制组: {prefix}"}, status_code=404)
@@ -570,10 +587,20 @@ async def merge_segments(task_id: int, request: Request):
 
     def _run() -> None:
         _merging_prefixes.add(lock_key)
+        _burn_progress[lock_key] = 0
         try:
             def log_fn(msg: str) -> None:
                 task_manager.broadcast(msg, task_name=task_name, task_id=task_id)
-            merge_group(target, log_fn=log_fn, do_danmu=do_danmu, overwrite=overwrite)
+            def prog_cb(pct: int) -> None:
+                _burn_progress[lock_key] = pct
+                last = _burn_last_log_pct.get(lock_key, -5)
+                if pct - last >= 5:
+                    _burn_last_log_pct[lock_key] = pct
+                    task_manager.broadcast(f"[合并] 烧录进度: {pct}%", task_name=task_name, task_id=task_id)
+            danmu_types = set(t.danmu_merge_types.split(",")) if t.danmu_merge_types else {"danmaku", "gift"}
+            merge_group(target, log_fn=log_fn, do_danmu=do_danmu, do_danmu2=do_danmu2,
+                        overwrite=overwrite, danmu_types=danmu_types,
+                        min_vbitrate=t.danmu_burn_min_vbitrate, progress_callback=prog_cb)
             _merge_results[lock_key] = {"ok": True, "error": None}
         except Exception as e:
             err = str(e).strip()[:300]
@@ -581,10 +608,103 @@ async def merge_segments(task_id: int, request: Request):
             _merge_results[lock_key] = {"ok": False, "error": err}
         finally:
             _merging_prefixes.discard(lock_key)
+            _burn_progress.pop(lock_key, None)
+            _burn_last_log_pct.pop(lock_key, None)
 
     threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "status": "merging", "message": "合并已启动，请查看日志"}
 
+
+
+# ── Cookie 管理 ───────────────────────────────────────────────────────────────
+
+
+def _save_cookies_to_config(cookie_str: str) -> None:
+    """将 cookie 写入 config.yaml input.cookies 字段"""
+    import re as _re
+    config_path = Path("config.yaml")
+    if not config_path.exists():
+        return
+    text = config_path.read_text(encoding="utf-8")
+    escaped = cookie_str.replace('\\', '\\\\').replace('"', '\\"')
+    new_line = f'  cookies: "{escaped}"'
+    if _re.search(r'^\s*cookies:', text, _re.MULTILINE):
+        text = _re.sub(r'^\s*cookies:.*$', new_line, text, flags=_re.MULTILINE, count=1)
+    else:
+        text += f'\n{new_line}\n'
+    config_path.write_text(text, encoding="utf-8")
+
+
+@app.get("/api/settings/cookies")
+async def get_cookies():
+    """获取当前全局 cookie 信息（不返回原文，只返回元信息）"""
+    ck = task_manager._config.input.cookies or ''
+    has_session = 'sessionid=' in ck
+    has_ttwid = 'ttwid=' in ck
+    return {
+        'length': len(ck),
+        'has_session': has_session,
+        'has_ttwid': has_ttwid,
+        'status': '已登录' if has_session else ('匿名' if has_ttwid else '未配置'),
+    }
+
+
+@app.post("/api/settings/cookies")
+async def save_cookies(request: Request):
+    """保存全局 cookie 到 config.yaml 并即时生效"""
+    body = await request.json()
+    cookie_str = (body.get('cookies') or '').strip()
+    if not cookie_str:
+        return JSONResponse({'error': 'cookies 不能为空'}, status_code=400)
+    _save_cookies_to_config(cookie_str)
+    task_manager._config.input.cookies = cookie_str
+    has_session = 'sessionid=' in cookie_str
+    logger.info('Cookies updated (%d chars, has_session=%s)', len(cookie_str), has_session)
+    return {
+        'ok': True,
+        'length': len(cookie_str),
+        'has_session': has_session,
+        'status': '已登录' if has_session else '匿名',
+    }
+
+
+def _save_spider_method_to_config(method: str) -> None:
+    """将 spider_method 写入 config.yaml input.spider_method 字段"""
+    config_path = Path("config.yaml")
+    if not config_path.exists():
+        return
+    text = config_path.read_text(encoding="utf-8")
+    new_line = f'  spider_method: "{method}"'
+    if re.search(r'^\s*spider_method:', text, re.MULTILINE):
+        text = re.sub(r'^\s*spider_method:.*$', new_line, text, flags=re.MULTILINE, count=1)
+    else:
+        text += f'\n{new_line}\n'
+    config_path.write_text(text, encoding="utf-8")
+
+
+@app.get("/api/settings/spider")
+async def get_spider_method():
+    """获取当前流地址获取方式"""
+    from src.input.douyin_spider import SPIDER_METHODS, _SPIDER_METHOD_LABELS
+    current = task_manager._config.input.spider_method or 'html'
+    return {
+        'method': current,
+        'methods': [{'value': m, 'label': _SPIDER_METHOD_LABELS.get(m, m)} for m in SPIDER_METHODS],
+    }
+
+
+@app.post("/api/settings/spider")
+async def save_spider_method(request: Request):
+    """保存流地址获取方式到 config.yaml 并即时生效"""
+    from src.input.douyin_spider import SPIDER_METHODS
+    body = await request.json()
+    method = (body.get('method') or 'html').strip()
+    if method not in SPIDER_METHODS:
+        return JSONResponse({'error': f'无效方法: {method}'}, status_code=400)
+    _save_spider_method_to_config(method)
+    task_manager._config.input.spider_method = method
+    logger.info('Spider method updated: %s', method)
+    return {'ok': True, 'method': method}
 
 
 @app.get("/api/local/tasks/{task_id}/logs/history")

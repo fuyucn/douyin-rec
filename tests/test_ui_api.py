@@ -302,3 +302,86 @@ def test_stop_local_task_not_found(client):
     """停止不存在的本地任务"""
     r = client.post("/api/local/tasks/999/stop")
     assert r.status_code == 404
+
+
+# ── /api/tasks/{id}/segments — exclude_last 仅在 DLR 录制中生效 ───────────────
+
+@pytest.fixture
+def client_with_segments(tmp_path):
+    """带一个任务的测试客户端，在 tmp_path 下准备 3 个假 TS 分段文件"""
+    db_path = str(tmp_path / "test_tasks.db")
+    tm = TaskManager(db_path=db_path)
+    app_module.task_manager = tm
+    client = TestClient(app_module.app)
+
+    r = client.post("/api/tasks", json={"url": "https://live.douyin.com/123"})
+    task_id = r.json()["task_id"]
+
+    # 在 tmp_path 下建 3 个假 TS 分段，mock _recording_dir 返回此目录
+    output_dir = tmp_path / "segs"
+    output_dir.mkdir()
+    for i in range(3):
+        (output_dir / f"task1_主播_2026-03-18_08-00-00_{i:03d}.ts").touch()
+
+    return client, task_id, output_dir, tm
+
+
+def test_segments_exclude_last_when_recording(client_with_segments):
+    """task status=running 且 worker_status='运行中（DLR）'時，最后一段被排除"""
+    client, task_id, output_dir, tm = client_with_segments
+    tm._update_task_status(task_id, "running")
+    with patch("src.ui.app._recording_dir", return_value=output_dir), \
+         patch.object(tm, "get_worker_status", return_value="运行中（DLR）"):
+        r = client.get(f"/api/tasks/{task_id}/segments")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["is_running"] is True
+    assert len(data["groups"]) == 1
+    assert data["groups"][0]["segment_count"] == 2  # 3 段减去最后一段
+
+
+def test_segments_include_last_when_waiting(client_with_segments):
+    """task status=running 但 worker_status='等待开播'时，所有段可见"""
+    client, task_id, output_dir, tm = client_with_segments
+    tm._update_task_status(task_id, "running")
+    with patch("src.ui.app._recording_dir", return_value=output_dir), \
+         patch.object(tm, "get_worker_status", return_value="等待开播"):
+        r = client.get(f"/api/tasks/{task_id}/segments")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["is_running"] is False
+    assert data["groups"][0]["segment_count"] == 3  # 全部 3 段可见
+
+
+def test_segments_include_last_when_schedule_wait(client_with_segments):
+    """定时等待状态也不排除最后段"""
+    client, task_id, output_dir, tm = client_with_segments
+    tm._update_task_status(task_id, "running")
+    with patch("src.ui.app._recording_dir", return_value=output_dir), \
+         patch.object(tm, "get_worker_status", return_value="定时等待"):
+        r = client.get(f"/api/tasks/{task_id}/segments")
+    assert r.status_code == 200
+    assert r.json()["is_running"] is False
+    assert r.json()["groups"][0]["segment_count"] == 3
+
+
+def test_segments_include_last_when_stopped(client_with_segments):
+    """任务 stopped 时所有段可见"""
+    client, task_id, output_dir, tm = client_with_segments
+    with patch("src.ui.app._recording_dir", return_value=output_dir), \
+         patch.object(tm, "get_worker_status", return_value=""):
+        r = client.get(f"/api/tasks/{task_id}/segments")
+    assert r.status_code == 200
+    assert r.json()["is_running"] is False
+    assert r.json()["groups"][0]["segment_count"] == 3
+
+
+def test_segments_no_output_dir(client, tmp_path):
+    """输出目录不存在时返回空 groups"""
+    r = client.post("/api/tasks", json={"url": "https://live.douyin.com/999"})
+    task_id = r.json()["task_id"]
+    nonexistent = tmp_path / "nonexistent"
+    with patch("src.ui.app._recording_dir", return_value=nonexistent):
+        r = client.get(f"/api/tasks/{task_id}/segments")
+    assert r.status_code == 200
+    assert r.json()["groups"] == []

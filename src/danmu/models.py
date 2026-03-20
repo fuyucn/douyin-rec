@@ -5,7 +5,7 @@ from datetime import datetime
 
 class SimpleDanmaku:
     def __init__(self, time: float = None, timestamp: float = None,
-                 dtype: str = None, uname: str = None,
+                 dtype: str = None, uname: str = None, uid: str = None,
                  color: str = 'ffffff', content: str = None,
                  text: str = None, **kwargs) -> None:
         # time: 相对时间（秒），timestamp: 绝对 Unix 时间戳
@@ -18,6 +18,7 @@ class SimpleDanmaku:
             self.timestamp = float(timestamp)
         self.dtype = dtype
         self.uname = uname
+        self.uid = uid or ''
         self.color = color
         self.content = content
         for key, value in kwargs.items():
@@ -35,6 +36,16 @@ class StreamEndSignal:
     """主播下播信号（WebcastControlMessage status=3）"""
     def __init__(self, status: int = 3) -> None:
         self.status = status
+
+
+class MemberDanmaku(SimpleDanmaku):
+    """入场提醒（WebcastMemberMessage）"""
+    def __init__(self, member_count: int = 0, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.member_count = int(member_count)
+        self.dtype = 'member'
+        if self.text is None:
+            self.text = self.content
 
 
 class GiftDanmaku(SimpleDanmaku):

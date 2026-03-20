@@ -13,13 +13,40 @@ import aiohttp
 from google.protobuf import json_format
 
 from .douyin_utils import DouyinUtils
-from .dy_pb2 import ChatMessage, GiftMessage, PushFrame, Response
-from .models import GiftDanmaku, SimpleDanmaku, StreamEndSignal
+from .dy_pb2 import ChatMessage, GiftMessage, MemberMessage, PushFrame, Response
+from .models import GiftDanmaku, MemberDanmaku, SimpleDanmaku, StreamEndSignal
 from .ws_utils import DouyinDanmakuUtils
 from src.input.douyin_spider import get_douyin_stream_data
 
 logger = logging.getLogger(__name__)
 
+# 弹幕 WS 连接所需的 cookie 白名单（过滤浏览器完整 cookie 里的无关追踪字段）
+_DANMU_COOKIE_KEYS = {
+    'ttwid',
+    'sessionid', 'sessionid_ss',
+    'uid_tt', 'uid_tt_ss',
+    'sid_tt', 'sid_tt_ss',
+    'msToken',
+    '__ac_nonce', '__ac_signature',
+    's_v_web_id',
+    'odin_ttid',
+    'passport_csrf_token', 'passport_csrf_token_default',
+    'LOGIN_STATUS',
+    'passport_auth_status',
+    'n_mh', 'd_ticket',
+}
+
+
+def _filter_danmu_cookies(raw: str) -> str:
+    kept = []
+    for part in raw.split(';'):
+        part = part.strip()
+        if not part:
+            continue
+        key = part.split('=', 1)[0].strip()
+        if key in _DANMU_COOKIE_KEYS:
+            kept.append(part)
+    return '; '.join(kept)
 
 
 def _extract_room_id(url: str) -> str:
@@ -48,29 +75,54 @@ class DouyinDanmakuClient:
         self._user_cookies = cookies  # 用户提供的额外 cookie
         self._room_id = _extract_room_id(url)
 
-    async def _get_cookie(self) -> str:
-        """获取 WS 用 cookie。有用户 cookie（含 sessionid）直接用；否则从首页获取匿名 cookie"""
-        if self._user_cookies:
-            # 用户提供了登录态 cookie，直接使用（含 sessionid / ttwid 等完整信息）
-            logger.debug('弹幕 使用用户 cookie (len=%d)', len(self._user_cookies))
-            return self._user_cookies
+    async def _fetch_anon_cookie(self) -> str:
+        """获取匿名 cookie：ttwid（缓存）+ 随机设备标识（对齐 DouyinUtils.get_headers）"""
+        ttwid = await asyncio.to_thread(DouyinUtils.get_ttwid)
+        parts = []
+        if ttwid:
+            parts.append(f'ttwid={ttwid}')
+        parts.extend([
+            f'__ac_nonce={DouyinUtils.generate_nonce()}',
+            f'odin_ttid={DouyinUtils.generate_odin_ttid()}',
+            f'msToken={DouyinUtils.generate_ms_token()}',
+        ])
+        return '; '.join(parts)
 
-        # 匿名模式：从首页获取 ttwid + 生成设备 cookie
-        ua = DouyinUtils.base_headers['user-agent']
-        from yarl import URL
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get('https://live.douyin.com/',
-                                headers={'User-Agent': ua},
-                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                await resp.read()
-            jar = sess.cookie_jar.filter_cookies(URL('https://live.douyin.com/'))
-            parts = [f'{k}={v.value}' for k, v in jar.items()]
-        parts.append(f'__ac_nonce={DouyinUtils.generate_nonce()}')
-        parts.append(f'odin_ttid={DouyinUtils.generate_odin_ttid()}')
-        parts.append(f'msToken={DouyinUtils.generate_ms_token()}')
-        cookie_str = '; '.join(parts)
-        logger.debug('弹幕 匿名 cookie: %.120s', cookie_str)
-        return cookie_str
+    async def _get_cookie(self) -> str:
+        """获取 WS 用 cookie。始终确保包含有效 ttwid（WS 服务器强制要求）。"""
+        # 先获取匿名 ttwid（WS 鉴权必须有此字段）
+        anon_cookie = await self._fetch_anon_cookie()
+        logger.debug('弹幕 匿名 cookie: %.120s', anon_cookie)
+
+        if not self._user_cookies:
+            return anon_cookie
+
+        # 用户有 cookie：过滤后与匿名 cookie 合并
+        # 匿名 ttwid 优先（避免用户 cookie 里 ttwid 缺失或过期导致 417）
+        # 用户 sessionid/uid_tt 等字段附加（提升账号稳定性）
+        filtered = _filter_danmu_cookies(self._user_cookies)
+        logger.debug('弹幕 用户 cookie 过滤: %d → %d 字符', len(self._user_cookies), len(filtered))
+        if not filtered:
+            return anon_cookie
+
+        # 合并：anon 提供 ttwid/msToken/odin_ttid，user 提供 sessionid/uid_tt 等
+        # 以 anon 为基础，用 user 字段覆盖（anon 没有的字段）
+        anon_dict: dict[str, str] = {}
+        for part in anon_cookie.split(';'):
+            part = part.strip()
+            if '=' in part:
+                k, v = part.split('=', 1)
+                anon_dict[k.strip()] = v
+        user_dict: dict[str, str] = {}
+        for part in filtered.split(';'):
+            part = part.strip()
+            if '=' in part:
+                k, v = part.split('=', 1)
+                user_dict[k.strip()] = v
+        merged = {**user_dict, **anon_dict}  # anon 的 ttwid/msToken 覆盖 user 的
+        merged_str = '; '.join(f'{k}={v}' for k, v in merged.items())
+        logger.debug('弹幕 合并 cookie: %.120s', merged_str)
+        return merged_str
 
     async def _get_ws_url(self) -> tuple[str, str]:
         """返回 (ws_url, cookie_str)"""
@@ -85,7 +137,12 @@ class DouyinDanmakuClient:
         # 获取 WS 连接用的 cookie
         cookie_str = await self._get_cookie()
 
-        uid = DouyinDanmakuUtils.get_user_unique_id()
+        # 若 cookie 里有 uid_tt（登录态），用真实 UID；否则随机生成（匿名）
+        # 抖音 WS 服务端会校验 user_unique_id 与 sessionid 对应的 UID 是否一致
+        uid_match = re.search(r'(?:^|[;\s])uid_tt=(\d+)', cookie_str)
+        uid = uid_match.group(1) if uid_match else DouyinDanmakuUtils.get_user_unique_id()
+        logger.debug('弹幕 uid: %s (from_cookie=%s)', uid, uid_match is not None)
+
         VERSION_CODE = 180800
         SDK_VERSION = '1.0.15'  # 对齐 bililive-tools DouYinDanma
 
@@ -101,8 +158,9 @@ class DouyinDanmakuClient:
         }
         sig = DouyinDanmakuUtils.get_signature(
             DouyinDanmakuUtils.get_x_ms_stub(sig_params))
-        logger.info('弹幕签名: %s (room_id=%s)', sig, actual_room_id)
+        logger.info('弹幕签名: %s (room_id=%s, uid=%s)', sig, actual_room_id, uid)
 
+        # 对齐 bililive-tools DouYinDanma — 无 msToken，有 browser_* 参数
         params = {
             'room_id': actual_room_id,
             'compress': 'gzip',
@@ -115,6 +173,10 @@ class DouyinDanmakuClient:
             'aid': '6383',
             'device_platform': 'web',
             'device_type': '',
+            'browser_language': 'zh-CN',
+            'browser_platform': 'Win32',
+            'browser_name': 'Mozilla',
+            'browser_version': '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36',
             'signature': sig,
         }
         qs = urlencode(params)
@@ -125,7 +187,11 @@ class DouyinDanmakuClient:
     def _decode(data: bytes) -> tuple[list, bytes | None]:
         frame = PushFrame()
         frame.ParseFromString(data)
-        decompressed = gzip.decompress(frame.payload)
+        try:
+            decompressed = gzip.decompress(frame.payload)
+        except (gzip.BadGzipFile, OSError):
+            # 服务端偶发未压缩帧（不遵守 compress=gzip 协议），直接用原始 payload
+            decompressed = frame.payload
         response = Response()
         response.ParseFromString(decompressed)
 
@@ -145,8 +211,13 @@ class DouyinDanmakuClient:
                 d = json_format.MessageToDict(chat, preserving_proto_field_name=True)
                 name = d.get('user', {}).get('nickName', '')
                 content = d.get('content', '')
+                # eventTime (field 15) = 服务端 Unix 秒时间戳，用于弹幕-视频对齐
+                # 对齐公式参考 biliLive-tools DouYinDanma：progress = eventTime - recordStart
+                event_time = int(d.get('eventTime', 0))
+                ts = float(event_time) if event_time > 1_000_000_000 else now
+                uid = str(d.get('user', {}).get('id', ''))
                 msgs.append(SimpleDanmaku(
-                    timestamp=now, uname=name,
+                    timestamp=ts, uname=name, uid=uid,
                     content=content,
                     text=f'{name}: {content}',
                     dtype='danmaku', color='ffffff',
@@ -155,16 +226,25 @@ class DouyinDanmakuClient:
                 gift = GiftMessage()
                 gift.ParseFromString(msg.payload)
                 d = json_format.MessageToDict(gift, preserving_proto_field_name=True)
+                # DEBUG: 记录所有礼物消息的关键字段
+                _g = d.get('gift', {})
+                logger.info('[礼物DEBUG] combo=%s repeatEnd=%s repeatCount=%s giftName=%s user=%s',
+                            _g.get('combo'), d.get('repeatEnd'), d.get('repeatCount'),
+                            _g.get('name'), d.get('user', {}).get('nickName', ''))
                 # 连击礼物：只在 repeatEnd 时记录
                 if 'combo' in d.get('gift', {}) and 'repeatEnd' not in d:
+                    logger.info('[礼物DEBUG] 跳过（combo 中间帧）')
                     continue
                 name = d.get('user', {}).get('nickName', '')
+                uid = str(d.get('user', {}).get('id', ''))
                 gift_name = d.get('gift', {}).get('name', '')
                 count = d.get('repeatCount', 1)
+                diamond_count = d.get('gift', {}).get('diamondCount', 0)
                 msgs.append(GiftDanmaku(
-                    timestamp=now, uname=name,
+                    timestamp=now, uname=name, uid=uid,
                     content=f'{name}: 送了 {count} 个 {gift_name}',
                     gift_name=gift_name, gift_count=count,
+                    gift_price=float(diamond_count) / 10,
                     dtype='gift', color='ffaa00',
                 ))
             elif msg.method == 'WebcastControlMessage':
@@ -174,7 +254,22 @@ class DouyinDanmakuClient:
                     status = msg.payload[1] & 0x7f
                     if status == 3:
                         msgs.append(StreamEndSignal(status=status))
-            # WebcastMemberMessage（进场）等其他消息跳过
+            elif msg.method == 'WebcastMemberMessage':
+                member = MemberMessage()
+                member.ParseFromString(msg.payload)
+                d = json_format.MessageToDict(member, preserving_proto_field_name=True)
+                event_time = int(d.get('eventTime', 0))
+                ts = float(event_time) if event_time > 1_000_000_000 else now
+                name = d.get('user', {}).get('nickName', '')
+                uid = str(d.get('user', {}).get('id', ''))
+                member_count = int(d.get('memberCount', 0))
+                msgs.append(MemberDanmaku(
+                    timestamp=ts, uname=name, uid=uid,
+                    member_count=member_count,
+                    content=f'{name} 进入直播间',
+                    dtype='member', color='aaaaaa',
+                ))
+            # 其他消息跳过
         return msgs, ack
 
     async def _heartbeat_loop(self) -> None:
@@ -183,19 +278,30 @@ class DouyinDanmakuClient:
             try:
                 if self._ws and not self._ws.closed:
                     await self._ws.send_bytes(self.heartbeat)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning('弹幕心跳发送失败: %s', e)
+                # 心跳失败意味着连接已断，退出循环让 _fetch_loop 报错
+                break
 
     async def _fetch_loop(self) -> None:
+        msg_count = 0
         while not self._stop:
             msg = await self._ws.receive()
-            if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                raise RuntimeError('WebSocket closed')
-            msgs, ack = self._decode(msg.data)
-            if ack:
-                await self._ws.send_bytes(ack)
-            for m in msgs:
-                await self._queue.put(m)
+            if msg.type == aiohttp.WSMsgType.BINARY:
+                msg_count += 1
+                msgs, ack = self._decode(msg.data)
+                if ack:
+                    await self._ws.send_bytes(ack)
+                for m in msgs:
+                    await self._queue.put(m)
+            elif msg.type == aiohttp.WSMsgType.CLOSED:
+                close_code = self._ws.close_code
+                raise RuntimeError(f'WebSocket 被关闭 (code={close_code}, 已收 {msg_count} 帧)')
+            elif msg.type == aiohttp.WSMsgType.CLOSING:
+                logger.info('弹幕 WebSocket 正在关闭 (已收 %d 帧)', msg_count)
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                exc = self._ws.exception()
+                raise RuntimeError(f'WebSocket 错误: {exc} (已收 {msg_count} 帧)')
 
     async def start(self) -> None:
         ws_url, cookie_str = await self._get_ws_url()
@@ -203,7 +309,7 @@ class DouyinDanmakuClient:
             'Cookie': cookie_str,
             'User-Agent': DouyinUtils.base_headers['user-agent'],
             'Origin': 'https://live.douyin.com',
-            'Referer': 'https://live.douyin.com/',
+            'Referer': f'https://live.douyin.com/{self._room_id}',
         }
         if self._session and not self._session.closed:
             await self._session.close()
@@ -217,6 +323,7 @@ class DouyinDanmakuClient:
         except Exception as e:
             logger.warning('WebSocket 连接失败 (status=%s): %s', getattr(e, 'status', '?'), e)
             raise
+        logger.info('弹幕 WebSocket 已连接 (room_id=%s)', self._room_id)
         await asyncio.gather(self._heartbeat_loop(), self._fetch_loop())
 
     async def stop(self) -> None:

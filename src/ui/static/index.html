@@ -99,6 +99,24 @@ let currentView = null;
 let pollTimer = null;
 let timeUpdateTimer = null;
 let evtSource = null;
+let _logAutoScroll = true;  // 是否自动跟随到底部
+
+function _initLogScroll() {
+  const logs = document.getElementById('logs');
+  if (!logs) return;
+  _logAutoScroll = true;
+  logs.onscroll = () => {
+    // 距底部 ≤ 40px 视为"在底部"，恢复自动滚动；否则暂停
+    _logAutoScroll = logs.scrollHeight - logs.scrollTop - logs.clientHeight <= 40;
+  };
+}
+
+function _appendLog(text) {
+  const logs = document.getElementById('logs');
+  if (!logs) return;
+  logs.textContent += text + '\n';
+  if (_logAutoScroll) logs.scrollTop = logs.scrollHeight;
+}
 let detailPreviewActive = false;
 let aiBackendsCache = null;
 
@@ -160,11 +178,102 @@ function cleanup() {
 // ── Tab 切换 HTML ─────────────────────────────────────────
 function tabsHTML(active) {
   return `
-    <h1 class="text-2xl font-bold mb-4">直播录制控制台</h1>
+    <div class="flex items-center justify-between mb-4">
+      <h1 class="text-2xl font-bold">直播录制控制台</h1>
+      <button class="btn btn-ghost btn-sm gap-1" onclick="openCookieSettings()" id="btnCookieSettings">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+        <span id="cookieStatusLabel">Cookie</span>
+      </button>
+    </div>
     <div role="tablist" class="tabs tabs-bordered mb-6">
       <a role="tab" class="tab ${active === 'live' ? 'tab-active' : ''}" onclick="navigate('#/')">直播录制</a>
       <a role="tab" class="tab ${active === 'local' ? 'tab-active' : ''}" onclick="navigate('#/local')">本地视频</a>
     </div>`;
+}
+
+// ── Cookie 设置 ───────────────────────────────────────────────────────────────
+async function refreshCookieStatus() {
+  try {
+    const r = await fetch('/api/settings/cookies');
+    if (!r.ok) return;
+    const d = await r.json();
+    const el = document.getElementById('cookieStatusLabel');
+    if (el) el.textContent = d.status === '已登录' ? '已登录' : (d.status === '匿名' ? 'Cookie(匿名)' : 'Cookie');
+  } catch(e) {}
+}
+
+function openCookieSettings() {
+  let modal = document.getElementById('cookieModal');
+  if (!modal) {
+    modal = document.createElement('dialog');
+    modal.id = 'cookieModal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+      <div class="modal-box w-full max-w-2xl">
+        <h3 class="font-bold text-lg mb-3">设置</h3>
+
+        <div class="divider text-xs opacity-50 my-2">Cookie</div>
+        <p class="text-xs opacity-50 mb-2">在 Chrome 打开 live.douyin.com → F12 → Console 粘贴：<code class="bg-base-300 px-1">copy(document.cookie)</code>，然后粘贴到下方</p>
+        <div id="ckStatus" class="text-sm mb-2 opacity-60"></div>
+        <textarea id="ckInput" class="textarea textarea-bordered w-full font-mono text-xs" rows="5" placeholder="ttwid=...; sessionid=...; uid_tt=..."></textarea>
+        <div class="flex gap-2 mt-2">
+          <button class="btn btn-primary btn-sm" onclick="saveCookieSettings()">保存 Cookie</button>
+        </div>
+
+        <div class="divider text-xs opacity-50 my-3">流地址获取方式</div>
+        <div id="spiderStatus" class="text-xs opacity-50 mb-2"></div>
+        <select id="spiderMethodSelect" class="select select-bordered select-sm w-full" onchange="saveSpiderMethod()"></select>
+
+        <div class="modal-action mt-4">
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('cookieModal').close()">关闭</button>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop"><button>close</button></form>
+    `;
+    document.body.appendChild(modal);
+  }
+  // 加载当前 cookie 状态
+  fetch('/api/settings/cookies').then(r => r.json()).then(d => {
+    document.getElementById('ckStatus').textContent = `当前状态: ${d.status}（${d.length} 字符）`;
+  }).catch(() => {});
+  document.getElementById('ckInput').value = '';
+  // 加载 spider 方法选项
+  fetch('/api/settings/spider').then(r => r.json()).then(d => {
+    const sel = document.getElementById('spiderMethodSelect');
+    sel.innerHTML = d.methods.map(m =>
+      `<option value="${m.value}" ${m.value === d.method ? 'selected' : ''}>${m.label}</option>`
+    ).join('');
+    document.getElementById('spiderStatus').textContent = `当前: ${d.method}`;
+  }).catch(() => {});
+  modal.showModal();
+}
+
+async function saveSpiderMethod() {
+  const method = document.getElementById('spiderMethodSelect').value;
+  const r = await fetch('/api/settings/spider', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ method }),
+  });
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || '保存失败'); return; }
+  document.getElementById('spiderStatus').textContent = `已保存: ${d.method}`;
+}
+
+async function saveCookieSettings() {
+  const cookies = document.getElementById('ckInput').value.trim();
+  if (!cookies) { alert('请输入 Cookie'); return; }
+  const r = await fetch('/api/settings/cookies', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cookies }),
+  });
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || '保存失败'); return; }
+  document.getElementById('ckStatus').textContent = `已保存: ${d.status}（${d.length} 字符）`;
+  document.getElementById('ckInput').value = '';
+  await refreshCookieStatus();
+  setTimeout(() => document.getElementById('cookieModal')?.close(), 1200);
 }
 
 // ── 直播录制列表视图 ──────────────────────────────────────
@@ -243,11 +352,11 @@ function renderListView() {
           <div class="form-control">
             <label class="label py-1"><span class="label-text">时区</span></label>
             <select id="scheduleTz" class="select select-bordered select-sm w-full">
+              <option value="America/Los_Angeles">America/Los_Angeles</option>
+              <option value="America/New_York">America/New_York</option>
               <option value="Asia/Shanghai">Asia/Shanghai</option>
               <option value="Asia/Tokyo">Asia/Tokyo</option>
               <option value="Asia/Hong_Kong">Asia/Hong_Kong</option>
-              <option value="America/New_York">America/New_York</option>
-              <option value="America/Los_Angeles">America/Los_Angeles</option>
               <option value="Europe/London">Europe/London</option>
               <option value="UTC">UTC</option>
             </select>
@@ -277,6 +386,7 @@ function renderListView() {
   document.getElementById('btnAdd').addEventListener('click', addTask);
   document.getElementById('url').addEventListener('keydown', e => { if (e.key === 'Enter') addTask(); });
   refreshTaskList();
+  refreshCookieStatus();
   pollTimer = setInterval(refreshTaskList, 2000);
   timeUpdateTimer = setInterval(updateElapsedTimes, 1000);
 }
@@ -581,18 +691,32 @@ async function loadSegments(taskId) {
               <span class="badge badge-outline badge-xs">${g.segment_count}段</span>
               ${g.has_danmu ? '<span class="badge badge-info badge-outline badge-xs">弹幕</span>' : ''}
               ${g.merging
-                ? '<span class="badge badge-warning badge-xs gap-1"><span class="loading loading-spinner loading-xs"></span>合并中</span>'
+                ? `<div class="flex items-center gap-2">
+                    <span class="badge badge-warning badge-xs gap-1">
+                      <span class="loading loading-spinner loading-xs"></span>
+                      ${g.burn_progress > 0 ? g.burn_progress + '%' : '合并中'}
+                    </span>
+                    ${g.burn_progress > 0
+                      ? `<progress class="progress progress-warning w-24 h-1.5" value="${g.burn_progress}" max="100"></progress>`
+                      : ''}
+                  </div>`
                 : g.merged
                   ? '<span class="badge badge-success badge-outline badge-xs">已合并</span>'
-                  : `<button class="btn btn-xs btn-outline" ${recording ? 'disabled title="录制中，请停止后再合并"' : ''}
+                  : `<button class="btn btn-xs btn-outline"
                        data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="false"
                        onclick="mergeGroup(this)">合并</button>`
               }
               ${g.has_danmu && !g.danmu_merged && !g.merging
-                ? `<button class="btn btn-xs btn-outline btn-info" ${recording ? 'disabled title="录制中，请停止后再合并"' : ''}
-                     data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="true"
+                ? `<button class="btn btn-xs btn-outline btn-info"
+                     data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="true" data-danmu2="false"
                      onclick="mergeGroup(this)">烧录弹幕</button>`
                 : (g.danmu_merged ? '<span class="badge badge-info badge-xs">弹幕已合并</span>' : '')
+              }
+              ${g.has_danmu && !g.livechat_merged && !g.merging
+                ? `<button class="btn btn-xs btn-outline btn-secondary"
+                     data-task="${taskId}" data-prefix="${esc(g.prefix)}" data-danmu="false" data-danmu2="true"
+                     onclick="mergeGroup(this)">弹幕2</button>`
+                : (g.livechat_merged ? '<span class="badge badge-secondary badge-xs">弹幕2已合并</span>' : '')
               }
             </div>
             ${g.merge_error ? `<div class="text-xs text-error mt-1 break-all opacity-80">${esc(g.merge_error)}</div>` : ''}
@@ -600,6 +724,10 @@ async function loadSegments(taskId) {
         `).join('')}
       </div>
     `).join('');
+    // 若有进行中的合并，自动继续轮询
+    if (d.groups?.some(g => g.merging)) {
+      setTimeout(() => loadSegments(taskId), 1500);
+    }
   } catch {
     el.innerHTML = '<span class="text-error text-xs">加载失败</span>';
   }
@@ -609,22 +737,24 @@ async function mergeGroup(btn) {
   const taskId = btn.dataset.task;
   const prefix = btn.dataset.prefix;
   const burnDanmu = btn.dataset.danmu === 'true';
+  const burnDanmu2 = btn.dataset.danmu2 === 'true';
+  const label = burnDanmu2 ? '弹幕2' : burnDanmu ? '烧录弹幕' : '合并';
   btn.disabled = true;
   btn.textContent = '启动中...';
   try {
     const r = await fetch(`/api/tasks/${taskId}/merge`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prefix, burn_danmu: burnDanmu }),
+      body: JSON.stringify({ prefix, burn_danmu: burnDanmu, burn_danmu2: burnDanmu2 }),
     });
     const d = await r.json();
     if (!r.ok) {
       alert(d.error);
       btn.disabled = false;
-      btn.textContent = burnDanmu ? '烧录弹幕' : '合并';
+      btn.textContent = label;
       return;
     }
-    btn.textContent = burnDanmu ? '烧录中...' : '合并中...';
+    btn.textContent = '烧录中...';
     // 每 3 秒轮询一次，直到不再 merging（最多 10 分钟）
     let polls = 0;
     const maxPolls = 200;
@@ -637,11 +767,11 @@ async function mergeGroup(btn) {
         const pg = pd.groups?.find(x => x.prefix === prefix);
         if (!pg || !pg.merging) { clearInterval(pollMerge); loadSegments(taskId); }
       } catch { clearInterval(pollMerge); }
-    }, 3000);
+    }, 1500);
   } catch (e) {
     alert(e.message);
     btn.disabled = false;
-    btn.textContent = burnDanmu ? '烧录弹幕' : '合并';
+    btn.textContent = label;
   }
 }
 
@@ -681,6 +811,7 @@ async function toggleDetailPreview(id, name) {
 }
 
 async function loadLogsAndConnect(id) {
+  _initLogScroll();
   const logs = document.getElementById('logs');
   try {
     const r = await fetch(`/api/tasks/${id}/logs/history`);
@@ -698,10 +829,7 @@ async function loadLogsAndConnect(id) {
 function connectTaskSSE(id) {
   if (evtSource) evtSource.close();
   evtSource = new EventSource(`/api/tasks/${id}/logs`);
-  const logs = document.getElementById('logs');
-  evtSource.onmessage = e => {
-    if (logs) { logs.textContent += e.data + '\n'; logs.scrollTop = logs.scrollHeight; }
-  };
+  evtSource.onmessage = e => { _appendLog(e.data); };
   evtSource.onerror = () => { if (currentView === 'detail') setTimeout(() => connectTaskSSE(id), 2000); };
 }
 
@@ -1034,6 +1162,7 @@ async function renderLocalDetailView(id) {
 }
 
 async function loadLocalLogsAndConnect(id) {
+  _initLogScroll();
   const logs = document.getElementById('logs');
   try {
     const r = await fetch(`/api/local/tasks/${id}/logs/history`);
@@ -1051,10 +1180,7 @@ async function loadLocalLogsAndConnect(id) {
 function connectLocalTaskSSE(id) {
   if (evtSource) evtSource.close();
   evtSource = new EventSource(`/api/local/tasks/${id}/logs`);
-  const logs = document.getElementById('logs');
-  evtSource.onmessage = e => {
-    if (logs) { logs.textContent += e.data + '\n'; logs.scrollTop = logs.scrollHeight; }
-  };
+  evtSource.onmessage = e => { _appendLog(e.data); };
   evtSource.onerror = () => { if (currentView === 'local-detail') setTimeout(() => connectLocalTaskSSE(id), 2000); };
 }
 

@@ -390,3 +390,72 @@ def test_is_in_schedule_cross_midnight(tm):
         mock_datetime.now.return_value = mock_dt
         mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
         assert TaskManager._is_in_schedule(task) is False
+
+
+# ── _is_rec_log 过滤测试 ──────────────────────────────────────────────────────
+
+def test_is_rec_log_dlr():
+    assert TaskManager._is_rec_log("[DLR] 直播录制完成") is True
+
+def test_is_rec_log_danmu():
+    assert TaskManager._is_rec_log("[弹幕] 断线重连") is True
+
+def test_is_rec_log_detect():
+    assert TaskManager._is_rec_log("[检测] 立刻检查直播状态...") is True
+
+def test_is_rec_log_schedule():
+    assert TaskManager._is_rec_log("[定时] 当前不在窗口") is True
+
+def test_is_rec_log_stream_title():
+    assert TaskManager._is_rec_log("直播标题: 测试直播") is True
+
+def test_is_rec_log_stream_info():
+    assert TaskManager._is_rec_log("流信息: 1920x1080") is True
+
+def test_is_rec_log_device_info():
+    assert TaskManager._is_rec_log("直播设备: iPhone") is True
+
+def test_is_rec_log_unrelated():
+    """普通主播名/状态日志不写入录制日志"""
+    assert TaskManager._is_rec_log("主播名: 一勺小苏打") is False
+    assert TaskManager._is_rec_log("已启用: 录制, 弹幕") is False
+    assert TaskManager._is_rec_log("URL: https://live.douyin.com/123") is False
+
+
+# ── broadcast 双层日志写入测试 ─────────────────────────────────────────────────
+
+def test_broadcast_writes_server_log(tm, tmp_path):
+    """broadcast 写入服务器日志（全量）"""
+    from src.task_manager import TaskWorker
+    task = tm.create_task(url="https://live.douyin.com/123")
+    log_file = tmp_path / "server.log"
+    worker = TaskWorker(log_file=log_file)
+    tm._workers[task.id] = worker
+
+    tm.broadcast("主播名: 测试", task_name="测试", task_id=task.id)
+    assert log_file.exists()
+    assert "主播名: 测试" in log_file.read_text()
+
+
+def test_broadcast_rec_log_only_rec_messages(tm, tmp_path):
+    """rec_log_file 只写录制相关消息，不写普通启动日志"""
+    from src.task_manager import TaskWorker
+    task = tm.create_task(url="https://live.douyin.com/123")
+    server_log = tmp_path / "server.log"
+    rec_log = tmp_path / "rec.log"
+    worker = TaskWorker(log_file=server_log, rec_log_file=rec_log)
+    tm._workers[task.id] = worker
+
+    tm.broadcast("主播名: 测试", task_name="测试", task_id=task.id)
+    tm.broadcast("[DLR] 直播录制完成", task_name="测试", task_id=task.id)
+    tm.broadcast("[弹幕] 断线重连", task_name="测试", task_id=task.id)
+
+    server_content = server_log.read_text()
+    rec_content = rec_log.read_text()
+
+    assert "主播名: 测试" in server_content
+    assert "[DLR] 直播录制完成" in server_content
+    assert "[弹幕] 断线重连" in server_content
+    assert "主播名: 测试" not in rec_content
+    assert "[DLR] 直播录制完成" in rec_content
+    assert "[弹幕] 断线重连" in rec_content

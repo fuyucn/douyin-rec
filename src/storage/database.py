@@ -21,9 +21,11 @@ class RecordingTask(SQLModel, table=True):
     max_threads: int = 3  # 同一时间访问网络的线程数
     enable_danmu: bool = False  # 是否录制弹幕
     danmu_cdn_delay: int = 6  # CDN 推流延迟补偿秒数（弹幕时间对齐）
+    danmu_merge_types: str = "danmaku,gift"  # 合并时包含的弹幕类型（逗号分隔）
+    danmu_burn_min_vbitrate: int = 2166      # 弹幕烧录最低视频码率（kbps），低于此值按此值，高于则用原片码率
     auto_quality_fallback: bool = False  # ByteVC1 崩溃时自动降级画质
     schedule_enabled: bool = False  # 是否启用定时
-    schedule_timezone: str = "Asia/Shanghai"  # 时区 (IANA)
+    schedule_timezone: str = "America/Los_Angeles"  # 时区 (IANA)
     schedule_start: str = "00:00"  # 每日开始时间 HH:MM
     schedule_stop: str = "23:59"  # 每日停止时间 HH:MM
     schedule_run_until_end: bool = False  # 到定时停止时间后等直播自然结束
@@ -33,6 +35,13 @@ class RecordingTask(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.now)
     started_at: datetime | None = None
     stopped_at: datetime | None = None
+    # 流元数据（每次开播后从 API + FLV onMetaData 获取，覆盖写入）
+    stream_title: str | None = None       # 直播标题
+    stream_resolution: str | None = None  # 分辨率，如 "1088x1920"
+    stream_fps: int | None = None         # 帧率
+    stream_vbitrate: int | None = None    # 视频码率（bps）
+    stream_vcodec: str | None = None      # 编码，如 "H264"
+    stream_encoder: str | None = None     # FLV onMetaData Encoder 原始值
 
 
 class Screenshot(SQLModel, table=True):
