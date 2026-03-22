@@ -23,7 +23,7 @@ import asyncio
 
 from src.config import load_config
 from src.danmu.client import DouyinDanmakuClient
-from src.danmu.models import SimpleDanmaku, StreamEndSignal
+from src.danmu.models import GiftDanmaku, MemberDanmaku, SimpleDanmaku, StreamEndSignal
 from src.danmu.xml_writer import XmlWriter
 from src.dlr_launcher import DlrLauncher
 from src.input.live import DouyinLiveSource
@@ -170,13 +170,24 @@ class _DanmuWorker:
         xml_writer = XmlWriter()
         q: asyncio.Queue = asyncio.Queue()  # 每次重连前刷新
 
+        # 分段统计计数器
+        seg_danmaku = 0
+        seg_gift = 0
+        seg_member = 0
+        last_stat_time = 0.0  # 上次打印周期统计的时间
+
+        def _stat_str() -> str:
+            return f"弹幕{seg_danmaku}条 礼物{seg_gift}条 入场{seg_member}条"
+
         def _open_writer() -> None:
-            nonlocal seg_start, open_ts, writer_opened
+            nonlocal seg_start, open_ts, writer_opened, seg_danmaku, seg_gift, seg_member, last_stat_time
             seg_start = self._sync_wall_time if self._sync_wall_time > 0 else time.time()
             open_ts = self._sync_ts or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             xml_writer.open(self._seg_path(open_ts, seg_idx, '.xml'), seg_start, open_ts, seg_idx,
                             user_name=self._anchor_name, room_id=_room_id)
-            self._log(f"[弹幕] 开始录制 → {self._seg_path(open_ts, seg_idx, '.xml').name}")
+            seg_danmaku = seg_gift = seg_member = 0
+            last_stat_time = time.time()
+            self._log(f"[弹幕] 开始录制 片段{seg_idx} → {self._seg_path(open_ts, seg_idx, '.xml').name}")
             # 回放缓冲区（eventTime 对齐）
             for buffered in pre_buffer:
                 buffered.time = self._item_time(buffered, seg_start)
@@ -186,6 +197,8 @@ class _DanmuWorker:
 
         async def consume() -> None:
             nonlocal seg_idx, seg_start, open_ts, writer_opened
+            nonlocal seg_danmaku, seg_gift, seg_member, last_stat_time
+            _stat_interval = 60.0  # 每 60s 打印一次周期统计
             while not self._stop_event.is_set():
                 try:
                     item = await asyncio.wait_for(q.get(), timeout=1.0)
@@ -193,6 +206,12 @@ class _DanmuWorker:
                     # 超时期间检查 sync 是否触发
                     if not writer_opened and self._sync_event.is_set():
                         _open_writer()
+                    elif writer_opened:
+                        now = time.time()
+                        if now - last_stat_time >= _stat_interval:
+                            elapsed = int(now - seg_start)
+                            self._log(f"[弹幕] 片段{seg_idx} 进行中 {elapsed}s — {_stat_str()}")
+                            last_stat_time = now
                     continue
                 if isinstance(item, StreamEndSignal):
                     self._log("[弹幕] 收到下播信号")
@@ -211,15 +230,25 @@ class _DanmuWorker:
                 # 分段边界（按挂钟时间，与 DLR 分段逻辑一致）
                 now = time.time()
                 if self._segment_sec > 0 and (now - seg_start) >= self._segment_sec:
+                    elapsed = int(now - seg_start)
+                    self._log(f"[弹幕] 片段{seg_idx} 关闭 {elapsed}s — {_stat_str()}")
                     xml_writer.close()
                     seg_idx += 1
                     seg_start = now
+                    seg_danmaku = seg_gift = seg_member = 0
+                    last_stat_time = now
                     xml_writer.open(self._seg_path(open_ts, seg_idx, '.xml'), seg_start, open_ts, seg_idx,
                             user_name=self._anchor_name, room_id=_room_id)
-                    self._log(f"[弹幕] 新分段 → {self._seg_path(open_ts, seg_idx, '.xml').name}")
+                    self._log(f"[弹幕] 新分段 片段{seg_idx} → {self._seg_path(open_ts, seg_idx, '.xml').name}")
 
                 item.time = self._item_time(item, seg_start)
                 xml_writer.add(item)
+                if isinstance(item, GiftDanmaku):
+                    seg_gift += 1
+                elif isinstance(item, MemberDanmaku):
+                    seg_member += 1
+                else:
+                    seg_danmaku += 1
 
         # 内部 WS 重连循环：断线后保持 seg_idx/xml_writer 状态，避免孤立 XML
         _ws_reconnect_count = 0
@@ -246,6 +275,9 @@ class _DanmuWorker:
             finally:
                 await client.stop()
 
+        if writer_opened:
+            elapsed = int(time.time() - seg_start)
+            self._log(f"[弹幕] 片段{seg_idx} 关闭 {elapsed}s — {_stat_str()}")
         xml_writer.close()
         self._log("[弹幕] 录制结束（线程退出）")
 
