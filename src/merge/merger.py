@@ -437,6 +437,26 @@ def merge_ass_files(
 
 # ── 核心合并 ─────────────────────────────────────────────────────────────────
 
+def _bitrate_to_qv(kbps: int) -> int:
+    """根据源视频码率映射 q:v 值（稍微上调一档，保留更多细节）。
+    映射关系（基准档 +5）：
+      < 1500k  → 60  (基准 55)
+      < 2500k  → 65  (基准 60)
+      < 4000k  → 70  (基准 65)
+      < 6000k  → 75  (基准 70)
+      ≥ 6000k  → 80  (基准 75)
+    """
+    if kbps < 1500:
+        return 60
+    if kbps < 2500:
+        return 65
+    if kbps < 4000:
+        return 70
+    if kbps < 6000:
+        return 75
+    return 80
+
+
 def merge_group(
     group: RecordingGroup,
     log_fn: Callable[[str], None] | None = None,
@@ -642,21 +662,28 @@ def merge_group(
                     _log(f"[合并] 合并弹幕 ASS ({len(group.ass_map)} 段，fallback 模式)...")
                     merge_ass_files(group.ts_files, group.ass_map, group.merged_ass, log_fn=log_fn)
 
-                # 获取时长（用于烧录进度计算）
+                # 获取源码率 + 时长（码率用于动态 q:v，时长用于进度条）
+                src_kbps = min_vbitrate
                 total_ms = 0
                 try:
                     probe = subprocess.run(
                         ["ffprobe", "-v", "quiet", "-print_format", "json",
-                         "-show_format", str(group.merged_mp4)],
+                         "-show_streams", "-show_format", str(group.merged_mp4)],
                         capture_output=True, text=True, timeout=30,
                     )
                     if probe.returncode == 0:
                         import json as _json
-                        dur = float(_json.loads(probe.stdout).get("format", {}).get("duration", 0))
+                        probe_data = _json.loads(probe.stdout)
+                        for s in probe_data.get("streams", []):
+                            if s.get("codec_type") == "video":
+                                src_kbps = max(min_vbitrate, int(s.get("bit_rate", 0)) // 1000)
+                                break
+                        dur = float(probe_data.get("format", {}).get("duration", 0))
                         total_ms = int(dur * 1000)
                 except Exception:
                     pass
-                _log(f"[合并] 烧录弹幕 → {group.merged_danmu_mp4.name}（VideoToolbox q:v 70）")
+                qv = _bitrate_to_qv(src_kbps)
+                _log(f"[合并] 烧录弹幕 → {group.merged_danmu_mp4.name}（VideoToolbox q:v {qv}，源 {src_kbps}k）")
                 proc = subprocess.Popen(
                     [
                         "ffmpeg", "-y",
@@ -664,7 +691,7 @@ def merge_group(
                         "-i", str(group.merged_mp4),
                         "-progress", "pipe:1", "-nostats",
                         "-vf", f"ass={group.merged_ass.name}:fontsdir={_FONTS_DIR},format=yuv420p",
-                        "-c:v", "h264_videotoolbox", "-q:v", "70",
+                        "-c:v", "h264_videotoolbox", "-q:v", str(qv),
                         "-color_range", "tv",
                         "-c:a", "copy",
                         "-movflags", "+faststart",
@@ -798,22 +825,28 @@ def merge_group(
                     written = chat_writer.write(all_items, group.merged_ass2)
                     _log(f"[合并] 直播间聊天框 ASS → {group.merged_ass2.name}（{written} 条）")
 
-                    # 获取时长（用于烧录进度计算）
+                    # 获取源码率 + 时长（码率用于动态 q:v，时长用于进度条）
+                    src_kbps2 = min_vbitrate
                     total_ms = 0
                     try:
                         probe = subprocess.run(
                             ["ffprobe", "-v", "quiet", "-print_format", "json",
-                             "-show_format", str(group.merged_mp4)],
+                             "-show_streams", "-show_format", str(group.merged_mp4)],
                             capture_output=True, text=True, timeout=30,
                         )
                         if probe.returncode == 0:
                             import json as _json
-                            dur = float(_json.loads(probe.stdout).get("format", {}).get("duration", 0))
+                            probe_data = _json.loads(probe.stdout)
+                            for s in probe_data.get("streams", []):
+                                if s.get("codec_type") == "video":
+                                    src_kbps2 = max(min_vbitrate, int(s.get("bit_rate", 0)) // 1000)
+                                    break
+                            dur = float(probe_data.get("format", {}).get("duration", 0))
                             total_ms = int(dur * 1000)
                     except Exception:
                         pass
-
-                    _log(f"[合并] 烧录直播间聊天框 → {group.merged_danmu2_mp4.name}（VideoToolbox q:v 70）")
+                    qv2 = _bitrate_to_qv(src_kbps2)
+                    _log(f"[合并] 烧录直播间聊天框 → {group.merged_danmu2_mp4.name}（VideoToolbox q:v {qv2}，源 {src_kbps2}k）")
                     proc2 = subprocess.Popen(
                         [
                             "ffmpeg", "-y",
@@ -821,7 +854,7 @@ def merge_group(
                             "-i", str(group.merged_mp4),
                             "-progress", "pipe:1", "-nostats",
                             "-vf", f"ass={group.merged_ass2.name}:fontsdir={_FONTS_DIR},format=yuv420p",
-                            "-c:v", "h264_videotoolbox", "-q:v", "70",
+                            "-c:v", "h264_videotoolbox", "-q:v", str(qv2),
                             "-color_range", "tv",
                             "-c:a", "copy",
                             "-movflags", "+faststart",
