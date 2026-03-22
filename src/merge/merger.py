@@ -666,6 +666,7 @@ def merge_group(
                 proc = subprocess.Popen(
                     [
                         "ffmpeg", "-y",
+                        "-hwaccel", "videotoolbox",
                         "-i", str(group.merged_mp4),
                         "-progress", "pipe:1", "-nostats",
                         "-vf", f"ass={group.merged_ass.name}:fontsdir={_FONTS_DIR},format=yuv420p",
@@ -828,6 +829,7 @@ def merge_group(
                     proc2 = subprocess.Popen(
                         [
                             "ffmpeg", "-y",
+                            "-hwaccel", "videotoolbox",
                             "-i", str(group.merged_mp4),
                             "-progress", "pipe:1", "-nostats",
                             "-vf", f"ass={group.merged_ass2.name}:fontsdir={_FONTS_DIR},format=yuv420p",
