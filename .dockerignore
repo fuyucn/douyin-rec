@@ -1,0 +1,36 @@
+# 只让构建需要的进上下文，避免把 15G+ 数据塞进 docker build。
+.git
+.github
+**/node_modules
+dist
+web/dist
+recordings
+output
+docker-data
+*.db
+*.log
+.env
+cookies.json
+config.yaml
+**/.DS_Store
+
+# 本地 Python 环境 / 本地数据 / 本地二进制 —— 镜像内不用(merge 走 VPS;mesio 由 install-mesio.sh 现拉)
+# .venv 尤其大(uv 建的本地 merge 环境,~1.8G),不排除会每次塞进 build 上下文。
+.venv
+venv
+data-local
+bin
+.codex
+AGENTS.md
+
+# 与 TS 镜像无关的目录
+vendor
+remote
+tools
+scripts/*
+!scripts/install-mesio.sh
+plans
+docs
+test
+icloud
+assets/**/*.bak

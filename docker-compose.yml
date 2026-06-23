@@ -1,0 +1,39 @@
+# douyin-rec 录制服务 — 单容器（Web UI + 定时调度）。
+#
+# 用法：
+#   cp .env.example .env   # 改 TZ / 宿主机路径 / 端口 / Discord
+#   # 部署最新版（GIT_SHA 让 About 页显示正确版本号 0.0.0-{commit后6位};不传则 0.0.0-dev）：
+#   GIT_SHA=$(git rev-parse HEAD) docker compose up -d --build
+#   docker compose logs -f            # 看日志
+#   docker compose down               # 停
+#
+# 数据都在挂载卷上（DB / 录像 / config），容器重建不丢。
+
+services:
+  douyin-rec:
+    build:
+      context: .
+      args:
+        # 部署命令前缀 GIT_SHA=$(git rev-parse HEAD) 即注入;未设则空 → 版本回落 0.0.0-dev。
+        GIT_SHA: "${GIT_SHA:-}"
+    image: douyin-rec:latest
+    container_name: douyin-rec
+    restart: unless-stopped
+    ports:
+      # 绑所有网卡：局域网任意机器可用 <本机IP>:7860 访问，Tailscale 也通。
+      # 家用机在 NAT 路由器后 → 公网进不来（除非路由器做了端口转发），故无需绑具体 IP。
+      # 若部署到有公网 IP 的机器，请改成绑具体内网/Tailscale IP 或加防火墙。
+      - "${BIND:-0.0.0.0}:${PORT:-7860}:7860"
+    environment:
+      # 调度按本地时间算窗口；默认美西（自动处理 PST/PDT 夏令时），按需改。
+      TZ: ${TZ:-America/Los_Angeles}
+      # 单一数据根：容器内固定 /data，内部布局固定（不用改）：
+      #   /data/db/douyin-rec.db · /data/recordings · /data/config/biliup/cookies.json
+      DOUYIN_REC_ROOT: /data
+      BILIUP_COOKIE: /data/config/biliup/cookies.json
+      DOUYIN_REC_STATIC: /app/web/dist
+      # 可选 Discord 通知 webhook。
+      DISCORD_WEBHOOK: ${DISCORD_WEBHOOK:-}
+    volumes:
+      # 单一挂载卷：所有持久数据(db/录像/config)都在它下面，容器重建不丢。
+      - ${DATA_ROOT:-./docker-data}:/data

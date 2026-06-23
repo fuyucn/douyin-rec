@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""重命名直播录制文件：去 task{N}_ 前缀，去时间后缀。
+
+用法：
+    ./scripts/rename <目录>                       # 扫描目录内全部可识别文件
+    ./scripts/rename <file1> <file2> ...          # 指定若干文件
+    ./scripts/rename ... --apply                  # 实际执行（不加则 dry-run）
+
+变换规则（任选一项能命中即生效；已是目标命名则跳过）：
+    task1_一勺小苏打_2026-04-22_08-00-42.mp4       → 一勺小苏打_2026-04-22.mp4
+    task1_一勺小苏打_2026-04-22_08-00-42_danmu.mp4 → 一勺小苏打_2026-04-22_danmu.mp4
+
+支持的后缀：.mp4 / .xml / .ass / .log / _danmu.{mp4,ass} / _livechat.{mp4,ass}
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+# 顺序重要：复合后缀必须在单后缀前面（endswith 匹配）
+SUFFIXES = [
+    "_danmu.mp4", "_danmu.ass",
+    "_livechat.mp4", "_livechat.ass",
+    ".mp4", ".xml", ".ass", ".log",
+]
+
+# (可选的 task{N}_)(主干名)_(日期 YYYY-MM-DD)(可选的 _HH-MM-SS)
+STEM_RE = re.compile(
+    r"^(?:task\d+_)?(?P<name>.+?)_(?P<date>\d{4}-\d{2}-\d{2})(?:_\d{2}-\d{2}-\d{2})?$"
+)
+
+
+def split_suffix(filename: str) -> tuple[str, str] | None:
+    for suf in SUFFIXES:
+        if filename.endswith(suf):
+            return filename[: -len(suf)], suf
+    return None
+
+
+def target_path(src: Path) -> Path | None:
+    parts = split_suffix(src.name)
+    if parts is None:
+        return None
+    stem, suffix = parts
+    m = STEM_RE.match(stem)
+    if not m:
+        return None
+    return src.parent / f"{m['name']}_{m['date']}{suffix}"
+
+
+def collect_files(args: list[str]) -> list[Path]:
+    if len(args) == 1 and Path(args[0]).is_dir():
+        d = Path(args[0])
+        return sorted(p for p in d.iterdir() if p.is_file() and split_suffix(p.name) is not None)
+    return [Path(a) for a in args]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("paths", nargs="+", help="目录路径，或多个文件路径")
+    ap.add_argument("--apply", action="store_true", help="实际执行（不加则 dry-run）")
+    args = ap.parse_args()
+
+    files = collect_files(args.paths)
+    if not files:
+        print("[错误] 未找到可处理的文件", file=sys.stderr)
+        return 1
+
+    plans: list[tuple[Path, Path]] = []
+    skipped: list[tuple[Path, str]] = []
+
+    for f in files:
+        if not f.exists():
+            skipped.append((f, "不存在"))
+            continue
+        dst = target_path(f)
+        if dst is None:
+            skipped.append((f, "无法识别命名模式"))
+            continue
+        if dst == f:
+            skipped.append((f, "已是目标命名"))
+            continue
+        if dst.exists():
+            skipped.append((f, f"目标已存在: {dst.name}"))
+            continue
+        plans.append((f, dst))
+
+    mode = "执行" if args.apply else "预览（加 --apply 实际执行）"
+    if plans:
+        print(f"[{mode}] {len(plans)} 个文件将重命名:")
+        for src, dst in plans:
+            print(f"  {src.name}  →  {dst.name}")
+    if skipped:
+        print(f"\n[跳过] {len(skipped)} 个:")
+        for f, reason in skipped:
+            print(f"  {f.name}  ({reason})")
+    if not plans:
+        return 0
+    if not args.apply:
+        return 0
+    for src, dst in plans:
+        src.rename(dst)
+    print(f"\n[完成] 已重命名 {len(plans)} 个文件")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

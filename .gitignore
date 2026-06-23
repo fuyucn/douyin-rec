@@ -1,0 +1,43 @@
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 依赖 / 构建产物 / 二进制
+node_modules/
+dist/
+/bin/
+
+# 本地数据 / 输出 / 日志
+output/
+recordings/
+data-local/
+docker-data/
+*.db
+*.log
+mesio.log*
+
+# 密钥 / 配置(勿提交)
+config.yaml
+cookies.json
+.env
+
+# Python venv(本地跑 remote/ 脚本时可能有)
+.venv/
+venv/
+
+# 本地专属 / 一次性调试产物(非本项目产物,勿带入 main)
+/AGENTS.md
+/.codex/
+/.orka/
+/icloud
+/_*.py
+/concat-best.txt
+*_check_frame.jpg
+
+# VPS merge 管线(含个人 IP/SSH)+ AI 工具配置 —— 本地保留,不入库
+remote/
+.claude/

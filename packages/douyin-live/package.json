@@ -1,0 +1,24 @@
+{
+  "name": "@drec/douyin-live",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@drec/core": "workspace:*",
+    "@drec/ffmpeg-recorder-extra": "workspace:*",
+    "axios": "^1.15.0",
+    "lodash-es": "^4.17.21",
+    "protobufjs": "^7.6.3",
+    "sm-crypto": "^0.3.13",
+    "tiny-typed-emitter": "^2.1.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0"
+  }
+}

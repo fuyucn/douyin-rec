@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "outDir": "dist",
+    "rootDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "declaration": false,
+    "resolveJsonModule": true,
+    "paths": {
+      "@drec/core": ["./packages/core/src/index.ts"],
+      "@drec/manager": ["./packages/manager/src/index.ts"],
+      "@drec/post-process": ["./packages/post-process/src/index.ts"],
+      "@drec/tui": ["./packages/tui/src/index.ts"],
+      "@drec/douyin-live": ["./packages/douyin-live/src/index.ts"],
+      "@drec/record-engine": ["./packages/record-engine/src/index.ts"],
+      "@drec/ffmpeg-recorder-extra": ["./packages/ffmpeg-recorder-extra/src/index.ts"],
+      "@bililive-tools/manager": ["./node_modules/@bililive-tools/manager/lib/index.d.ts"],
+      "@bililive-tools/douyin-recorder": ["./node_modules/@bililive-tools/douyin-recorder/lib/index.d.ts"]
+    }
+  },
+  "include": ["packages/**/*"],
+  "exclude": ["packages/web"]
+}

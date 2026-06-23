@@ -1,0 +1,4 @@
+# Standalone workspace root — isolates the React web app from the parent
+# node CLI workspace at ts/ (which has its own patchedDependencies). Empty
+# packages list = this single package only.
+packages: []

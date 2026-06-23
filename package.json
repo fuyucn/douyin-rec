@@ -1,0 +1,42 @@
+{
+  "name": "douyin-rec",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "douyin-rec": "./dist/douyin-rec.mjs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "bundle": "node esbuild.config.mjs && chmod +x dist/douyin-rec.mjs",
+    "dev": "tsx packages/cli/src/cli.ts",
+    "tui": "node dist/douyin-rec.mjs task tui",
+    "tui:local": "node dist/douyin-rec.mjs task tui --api http://localhost:7861",
+    "serve:local": "node dist/douyin-rec.mjs task serve --port 7861 --db ./douyin-rec-local.db",
+    "mesio:install": "sh scripts/install-mesio.sh",
+    "biliup:install": "sh scripts/install-biliup.sh",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "douyin-danma-listener": "0.4.1",
+    "eastasianwidth": "^0.3.0",
+    "fast-xml-parser": "^5.8.0",
+    "ink": "^7.0.6",
+    "playwright": "^1.60.0",
+    "protobufjs": "7.6.3",
+    "react": "^19.2.7",
+    "tiny-typed-emitter": "2.1.0",
+    "ws": "8.21.0",
+    "yaml": "^2.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
