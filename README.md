@@ -13,7 +13,9 @@
 
 ## 架构
 
-pnpm workspace（11 包），收敛成 **2 个可插拔接缝**:**平台轴**(各 `<平台>-live`,平台专属取流+弹幕)+ **引擎轴**(`record-engine`,平台无关下载),其余全通用。依赖只能向下（`test/arch/layering.test.ts` 守护）。esbuild 把 `cli` 打成 `dist/douyin-rec.mjs`(+ `dist/tui.mjs`)。架构图见 `docs/architecture.html`。
+pnpm workspace（11 包），收敛成 **2 个可插拔接缝**:**平台轴**(各 `<平台>-live`,平台专属取流+弹幕)+ **引擎轴**(`record-engine`,平台无关下载),其余全通用。依赖只能向下（`test/arch/layering.test.ts` 守护）。esbuild 把 `cli` 打成 `dist/douyin-rec.mjs`(+ `dist/tui.mjs`)。
+
+> 📐 **架构图(依赖分层 + 运行时数据流,mermaid)：[docs/architecture.md](./docs/architecture.md)**(GitHub 直接渲染);可交互版 [docs/architecture.html](./docs/architecture.html)。
 
 ```
 packages/
