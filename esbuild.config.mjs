@@ -11,12 +11,13 @@
 //      __require stub throws "Dynamic require ... not supported". The shim wires
 //      `require` to the real one so node built-ins / externals resolve.
 import { build } from "esbuild";
-import { writeFileSync, chmodSync } from "node:fs";
+import { writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 
-// 版本号 = 0.0.0-{commit 后6位}。host 本地打包直接读 git;docker 容器内无 .git/git,
-// 由 Dockerfile 的 GIT_SHA build-arg → ENV 注入(见 docker-compose.yml build.args)。
-// 两者都拿不到 → "dev"。经 esbuild `define` 替换源码里的 __APP_VERSION__(见 app/version.ts)。
+// 版本号 = {package.json version}-{commit 后6位}。基底版本号单一真相 = 根 package.json 的 `version`
+// (bump 版本只改那一处)。host 本地打包直接读 git 拿 sha;docker 容器内无 .git/git,由 Dockerfile
+// 的 GIT_SHA build-arg → ENV 注入(见 docker-compose.yml build.args)。两者都拿不到 → "dev"。
+// 经 esbuild `define` 替换源码里的 __APP_VERSION__(见 app/version.ts)。
 function gitSha() {
   if (process.env.GIT_SHA) return process.env.GIT_SHA.trim();
   try {
@@ -25,8 +26,9 @@ function gitSha() {
     return "";
   }
 }
+const pkgVersion = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
 const sha = gitSha();
-const APP_VERSION = `0.0.0-${sha ? sha.slice(-6) : "dev"}`;
+const APP_VERSION = `${pkgVersion}-${sha ? sha.slice(-6) : "dev"}`;
 console.log(`[bundle] APP_VERSION=${APP_VERSION}`);
 
 const REQUIRE_SHIM =
