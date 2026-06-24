@@ -525,15 +525,23 @@ table.tasks tbody tr:last-child td {
   border-left-color: var(--muted-soft);
 }
 
-/* scrollbar */
+/* scrollbar — slim */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--scrollbar);
-  border-radius: 6px;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted, #9a9aa4);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar) transparent;
 }
