@@ -2,12 +2,14 @@
 
 抖音直播录制 + 弹幕捕获 + 后处理 + 投稿的 TypeScript 实现。从直播流录制视频（`.ts` 分段）、捕获弹幕（biliLive 风格 `.xml`）、合并分段、烧录弹幕字幕、投稿 B 站，并支持 sqlite 持久化任务 + Web 控制台 + 定时调度。录制引擎与弹幕源**可插拔**。
 
+> **这是一个私人自用项目。** 只为录制我自己关注的几位主播、把成品（仅自己可见）归档到 B 站，按我自己的工作流持续打磨；不面向公开发行、不提供支持或质量保证，文档与默认值都围绕个人使用习惯写死。代码公开仅供参考学习，请勿据此对第三方平台做任何违反其条款的事，自行承担风险。
+
 ## 状态
 
 - **全流程完成**：录制 / 弹幕 / 合并 / 烧录(danmu + livechat) / 投稿 / Discord 通知 / sqlite 持久化任务 / 子进程化录制 / 定时调度(跨夜窗口) / Web 控制台(REST + SPA) / 终端 TUI。
 - **引擎策略化录制**(通用 `record-engine` + 引擎 `ffmpeg`[默认,.ts] / `mesio`[rust-srec,.flv],任务字段 `engine` 选):取流靠平台 `getStream`(抖音 vendored a_bogus 签名,匿名不踢手机),引擎平台无关;已对真实直播 live 端到端验证。
 - **Platform 抽象**：平台专属逻辑收口 `Platform` 接口 + 注册表(matchUrl/getStream/getLiving/…),抖音为完整实现、bilibili 为脚手架占位;接第二平台 = 写 `<平台>-live` 包 + 注册一行。
-- 在 `ts-rewrite` 分支开发(pnpm workspace,11 包)。
+- pnpm workspace,11 包,主线在 `main`。
 
 ## 架构
 
@@ -183,3 +185,13 @@ docker compose down           # 停
 - **弹幕 xml 写入**：录制 video-only，弹幕由独立 `DanmuSource` + 本项目 `XmlDanmuWriter` 落盘(biliLive 兼容格式,会话级 xml)。
 - **未实现 `task start` / `task stop` CLI 子命令**：进程化启停只通过 Web API 或 daemon 自动调度暴露（见 [docs/app.md](./docs/app.md#已实现--未实现)）。
 - **扫码登录需完整安装（playwright + chromium），单文件 bundle 不够用**：扫码登录靠 headless 真浏览器在抖音登录页里中继二维码到网页——因为抖音 qrcode 接口依赖浏览器 webmssdk 生成的 `msToken`/`s_v_web_id`，纯 server 端拿不到（实测结论，详见 [docs/app.md 扫码登录](./docs/app.md#扫码登录-qr-login)）。playwright 无法打进 bundle，需另装；不装时扫码登录报错降级，手动粘 cookie 照常可用。
+
+## 致谢 / Credits
+
+本项目是 TypeScript 重写的自用实现，思路与部分底层代码受以下开源项目启发，特此致谢：
+
+- **[bililive-tools](https://github.com/renmu123/biliLive-tools)**（[@renmu123](https://github.com/renmu123)）——录制管线 / 取流 / 后处理思路的主要参考。抖音取流签名（a_bogus 等）的 vendored 副本（`packages/douyin-live/src/vendor`）源自其 `@bililive-tools/douyin-recorder`。
+- **[DouyinLiveRecorder](https://github.com/ihmily/DouyinLiveRecorder)**（[@ihmily](https://github.com/ihmily)）——抖音直播录制的早期参考实现（本项目最初的 Python 版即基于它，现已全部用 TS 重写）。
+- 弹幕 WS 客户端（`packages/douyin-live/src/danmaku/client.ts`）参考 **douyin-danma-listener** 重写（非复制），仅保留签名 `webmssdk.js` 与 schema `proto.js` 作 vendored blob。
+
+上述项目各自的许可与版权归原作者所有。
