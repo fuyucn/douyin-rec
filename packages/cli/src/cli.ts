@@ -431,9 +431,15 @@ program
 
 // ─── task 子命令组（stateful app 层：sqlite 持久化 + 运行任务）─────────────────
 // webhook 解析复用全局 --discord-webhook / env DISCORD_WEBHOOK（settings 表在 runTask 内兜底）。
+// 用 `||` 而非 `??`:env `DISCORD_WEBHOOK=`(set-but-empty,docker .env 常见)会让 `??` 透出空串,
+// 进而毒化下游 `getWebhook() ?? settings.discordWebhook` 链(?? 不接空串)→ UI 设的全局 webhook
+// 永远读不到。空串一律归一为 undefined,下游 `??` 才能正确回落到 settings 表。
 program.addCommand(
   buildTaskCommand(
-    () => (program.opts() as { discordWebhook?: string }).discordWebhook ?? process.env.DISCORD_WEBHOOK,
+    () =>
+      (program.opts() as { discordWebhook?: string }).discordWebhook ||
+      process.env.DISCORD_WEBHOOK ||
+      undefined,
   ),
 );
 
