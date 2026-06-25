@@ -37,6 +37,16 @@ export class RecordingSession {
   private draining = false;
   /** True while a recording is actively in progress (onLive → onOffline). */
   private live = false;
+  /**
+   * 本次「断流 gap」开始的 epoch ms（onOffline 进入重连时置；重连成功 onLive 时清）。
+   * null = 当前不在断流缺口里（首次开播 / 已恢复）。用于:区分「重连」vs「首次开播」,并算中断时长。
+   */
+  private offlineSince: number | null = null;
+  /**
+   * 本次断流缺口是否已判定为「主播下播」并发过 recordEnd（getLiving=false）。
+   * true → 不再在 onLive 时补发「抖动重连」warning（那次 onLive 是下播后重新开播 → 正常 recordStart）。
+   */
+  private offlineNotified = false;
   private drainTimer: ReturnType<typeof setTimeout> | null = null;
   private drainDone: Promise<void> | null = null;
   private resolveDrainDone: (() => void) | null = null;
@@ -71,6 +81,21 @@ export class RecordingSession {
   /** Fire-and-forget notifier call — swallows errors so notifications never affect recording. */
   private notify(e: NotifyEvent): void {
     void this.notifier?.notify(e).catch(() => {});
+  }
+
+  /**
+   * **可等待**的通知:用于 stop() 的终止事件——cli 在 `session.stop().then(()=>process.exit())`
+   * 里停止,若 recordEnd 仍 fire-and-forget,POST 会被 process.exit 腰斩、Discord 收不到。
+   * 这里 await 推送、但用 timeout 兜底(挂死的 webhook 不能拖垮停止)。
+   */
+  private async notifyAwait(e: NotifyEvent, timeoutMs = 3000): Promise<void> {
+    if (!this.notifier) return;
+    try {
+      await Promise.race([
+        this.notifier.notify(e),
+        new Promise<void>((r) => setTimeout(r, timeoutMs)),
+      ]);
+    } catch { /* 通知失败绝不影响停止 */ }
   }
 
   async start(roomUrl: string, opts: RecordOpts, info: StreamInfo): Promise<void> {
@@ -108,7 +133,17 @@ export class RecordingSession {
         // 只在首次拿到非空主播名、且与上次不同时打，避免重连刷屏。
         if (resolved && resolved !== this.anchor) console.log(`[主播] ${resolved}`);
         this.anchor = resolved;
-        this.notify({ kind: "recordStart", anchor: this.anchor, room: this.roomUrl, quality: this.opts.quality });
+        // 通知:首次开播 / 下播后重新开播 → recordStart;**抖动断流后重连成功** → 一条 recordReconnect
+        // warning(报中断时长),不重复发「开播」。offlineNotified=true(已发过「主播下播」)的那次 onLive
+        // 是下播后重新开播 → 走正常 recordStart。
+        if (this.offlineSince != null && !this.offlineNotified) {
+          const downSec = Math.max(1, Math.round((Date.now() - this.offlineSince) / 1000));
+          this.notify({ kind: "recordReconnect", anchor: this.anchor, room: this.roomUrl, downSec });
+        } else {
+          this.notify({ kind: "recordStart", anchor: this.anchor, room: this.roomUrl, quality: this.opts.quality });
+        }
+        this.offlineSince = null;
+        this.offlineNotified = false;
         // 开播确认后才连弹幕:此时 liveId 才是当场的(开播前连会拿陈旧 id → 整场 0 弹幕)。
         // 弹幕来源由 roomUrl 命中的平台提供(platform.connectDanmu),不再外部注入;返回未 start 的
         // 源,由本处 start。fire-and-forget,不阻塞录制;每个 _startInner 只连一次(重连由
@@ -182,6 +217,20 @@ export class RecordingSession {
     if (this.reconnecting) return;       // already reconnecting — ignore duplicate event
     this.reconnecting = true;
 
+    // 标记断流缺口起点(重连成功 onLive 时用于算中断时长 + 区分「重连」vs「首次开播」)。
+    this.offlineSince = Date.now();
+    this.offlineNotified = false;
+    // 区分「真下播」vs「网络抖动断流」:查权威 getLiving。
+    //   false(主播确实下播)→ 立刻发 recordEnd(reason:主播下播),并标记 offlineNotified
+    //                        (重连循环仍继续,主播重新开播时正常发 recordStart);
+    //   true / 无 isLive(只是流抖动,主播还在播)→ 不发,留待 onLive 重连成功时发「抖动重连」warning。
+    let stillLive = true;
+    if (this.recorder.isLive) stillLive = await this.recorder.isLive().catch(() => true);
+    if (!stillLive) {
+      this.notify({ kind: "recordEnd", anchor: this.anchor, room: this.roomUrl, outDir: this.opts.outDir, reason: "主播下播" });
+      this.offlineNotified = true;
+    }
+
     // Tear down the current recorder/danmu before restarting (下一场会重新 connectDanmu 拿当场 liveId)。
     if (!this.recorder.providesDanmu && this.danmu) {
       await this.danmu.stop().catch(() => {});
@@ -242,7 +291,9 @@ export class RecordingSession {
     this.writer.add(m);
   }
 
-  async stop(): Promise<void> {
+  /** @param reason 录制结束原因(进 recordEnd 通知)。缺省「手动停止」——SIGTERM/手动停止走这条;
+   *  窗口结束排空由 drain 传「窗口结束收播」。 */
+  async stop(reason = "手动停止"): Promise<void> {
     if (this.userStopped) return;
     this.userStopped = true;
     if (!this.recorder.providesDanmu && this.danmu) {
@@ -251,7 +302,8 @@ export class RecordingSession {
     }
     await this.recorder.stop().catch(() => {});
     if (this.writerOpen) { this.writer.close(); this.writerOpen = false; this.currentXmlPath = null; }
-    this.notify({ kind: "recordEnd", anchor: this.anchor, room: this.roomUrl, outDir: this.opts.outDir });
+    // await(带 timeout):stop() 后调用方常立刻 process.exit,fire-and-forget 会丢这条 recordEnd。
+    await this.notifyAwait({ kind: "recordEnd", anchor: this.anchor, room: this.roomUrl, outDir: this.opts.outDir, reason });
   }
 
   /**
@@ -274,7 +326,7 @@ export class RecordingSession {
     this.drainDone = new Promise<void>((r) => { this.resolveDrainDone = r; });
 
     if (!this.recorder.drain) {        // recorder can't drain → degrade to hard stop
-      await this.stop();
+      await this.stop("窗口结束收播");
       this._resolveDrain();
       return this.drainDone;
     }
@@ -307,7 +359,7 @@ export class RecordingSession {
   /** Tear down after a drained broadcast ends; resolves drainDone exactly once. */
   private async _finishDrain(): Promise<void> {
     if (this.drainTimer) { clearTimeout(this.drainTimer); this.drainTimer = null; }
-    if (!this.userStopped) await this.stop();
+    if (!this.userStopped) await this.stop("窗口结束收播");
     this._resolveDrain();
   }
 

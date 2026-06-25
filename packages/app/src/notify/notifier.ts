@@ -11,7 +11,8 @@ export class NullNotifier implements Notifier {
 export function formatMessage(e: NotifyEvent): string {
   switch (e.kind) {
     case "recordStart": return `🔴 开播录制：${e.anchor || e.room}（房间 ${e.room}，画质 ${e.quality}）`;
-    case "recordEnd":   return `⏹️ 录制结束：${e.anchor || e.room}（房间 ${e.room}）→ ${e.outDir}`;
+    case "recordEnd":   return `⏹️ 录制结束${e.reason ? `（${e.reason}）` : ""}：${e.anchor || e.room}（房间 ${e.room}）→ ${e.outDir}`;
+    case "recordReconnect": return `⚠️ 直播中断 ${e.downSec}s 后已重连，恢复录制：${e.anchor || e.room}（房间 ${e.room}）`;
     case "mergeDone":   return `🎬 合并完成：${e.file}`;
     case "burnDone":    return `🔥 烧录完成（${e.style}）：${e.file}`;
     case "uploadDone":  return `⬆️ 上传完成：${e.bv} ${e.url}`;

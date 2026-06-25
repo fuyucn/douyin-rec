@@ -41,6 +41,21 @@ class MockDanmuSource implements DanmuSource {
   async stop() { this.started = false; this.stopCount++; }
 }
 
+/** 可控 mock：每次 start 都 fire onLive(模拟开播/重连成功)，isLive 按序列返回(控真下播 vs 抖动)。 */
+class OfflineMock implements Recorder {
+  name = "mock-offline"; providesDanmu = false;
+  startCount = 0; ev!: RecorderEvents;
+  /** onOffline 时 session 查 isLive 判别:false=主播下播 / true=流抖动还在播。耗尽默认 false。 */
+  isLiveResults: boolean[] = [];
+  async start(_u: string, o: RecordOpts, ev: RecorderEvents) {
+    this.startCount++; this.ev = ev;
+    ev.onLive({ anchorName: "主播R" });
+    ev.onSegment(join(o.outDir, `seg_${this.startCount}.ts`));
+  }
+  async stop() {}
+  async isLive() { return this.isLiveResults.length ? this.isLiveResults.shift()! : false; }
+}
+
 /**
  * 弹幕来源现由 `platform.connectDanmu()` 提供(不再注入 session)。测试注册一个假抖音平台,
  * connectDanmu 返回 `currentDanmu`(测试可控/可观测的 MockDanmuSource)。setCurrentDanmu(null)
@@ -320,6 +335,50 @@ describe("RecordingSession", () => {
     expect(events.some((e) => e.kind === "recordEnd")).toBe(true);
   });
 
+  it("stop() 默认 → recordEnd reason=手动停止", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-stop-reason-"));
+    const events: NotifyEvent[] = [];
+    const notifier: Notifier = { async notify(e) { events.push(e); } };
+    const sess = new RecordingSession(new MockDlrRecorder(), { notifier });
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "主播X" });
+    await sess.stop();
+    expect(events.some((e) => e.kind === "recordEnd" && e.reason === "手动停止")).toBe(true);
+  });
+
+  it("自然下播(getLiving=false)→ recordEnd reason=主播下播；主播回来 → 再次 recordStart", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-offline-real-"));
+    const events: NotifyEvent[] = [];
+    const notifier: Notifier = { async notify(e) { events.push(e); } };
+    const rec = new OfflineMock();
+    rec.isLiveResults = [false];           // onOffline 判别 → 主播确实下播
+    const sess = new RecordingSession(rec, { notifier, reconnectDelaySec: 0.01 });
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "" });
+    rec.ev.onOffline();                     // 下播
+    await vi.runAllTimersAsync();           // 判别 false → recordEnd 主播下播;重连 → onLive → recordStart
+    expect(events.some((e) => e.kind === "recordEnd" && e.reason === "主播下播")).toBe(true);
+    expect(events.filter((e) => e.kind === "recordStart").length).toBeGreaterThanOrEqual(2);
+    expect(events.some((e) => e.kind === "recordReconnect")).toBe(false); // 下播不算抖动
+    await sess.stop();
+  });
+
+  it("抖动断流(getLiving=true)→ 重连成功发 recordReconnect(warning)，不重复 recordStart/不发 recordEnd", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-offline-blip-"));
+    const events: NotifyEvent[] = [];
+    const notifier: Notifier = { async notify(e) { events.push(e); } };
+    const rec = new OfflineMock();
+    rec.isLiveResults = [true];            // onOffline 判别 → 流还在播,只是抖动
+    const sess = new RecordingSession(rec, { notifier, reconnectDelaySec: 0.01 });
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "" });
+    rec.ev.onOffline();                     // 抖动断流
+    await vi.runAllTimersAsync();           // 判别 true → 不发 recordEnd;重连 onLive → recordReconnect
+    expect(events.some((e) => e.kind === "recordReconnect")).toBe(true);
+    expect(events.filter((e) => e.kind === "recordStart").length).toBe(1); // 重连不重复发开播
+    expect(events.some((e) => e.kind === "recordEnd")).toBe(false);        // 抖动不是结束
+    await sess.stop();
+  });
+
   it("弹幕健康告警 onAlert → notify {kind:error,stage:弹幕}(来源经 platform.connectDanmu)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sess-danmu-alert-"));
     const events: NotifyEvent[] = [];
@@ -411,6 +470,18 @@ describe("RecordingSession.drain (窗口结束排空)", () => {
     expect(rec.drainCount).toBe(1);
     expect(rec.stopCount).toBe(1);            // 立即停
     expect(rec.isLiveCount).toBe(0);          // 没起轮询
+  });
+
+  it("窗口结束排空收尾 → recordEnd reason=窗口结束收播", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-drain-reason-"));
+    const events: NotifyEvent[] = [];
+    const notifier: Notifier = { async notify(e) { events.push(e); } };
+    const rec = new DrainMock();
+    rec.fireLiveOnStart = false;              // idle → drain 立即 stop
+    const sess = new RecordingSession(rec, { notifier, drainPollSec: 0.01 });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    await sess.drain();
+    expect(events.some((e) => e.kind === "recordEnd" && e.reason === "窗口结束收播")).toBe(true);
   });
 
   it("直播仍在播 → isLive 连续 2 次 false 才收尾", async () => {

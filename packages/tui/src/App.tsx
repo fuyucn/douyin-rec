@@ -11,7 +11,9 @@ function eventLine(e: TuiEvent): string | null {
     case "recordStart":
       return `🔴 开播 · 开始录制：${s("anchor")}`;
     case "recordEnd":
-      return `✅ 录制完成：${s("anchor")}`;
+      return `⏹️ 录制结束${s("reason") ? `（${s("reason")}）` : ""}：${s("anchor")}`;
+    case "recordReconnect":
+      return `⚠️ 直播中断 ${s("downSec")}s 后已重连：${s("anchor")}`;
     case "mergeDone":
       return `✅ 合成完成：${s("file").split(/[/\\]/).pop()}`;
     case "burnDone":

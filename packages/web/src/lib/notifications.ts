@@ -51,8 +51,12 @@ function describe(e: AppEventDTO, t: T): { key: NotifKey; message: string; type:
   switch (ev.kind) {
     case "recordStart":
       return { key: "live", message: t("notif.evLive", { anchor: s("anchor") }), type: "info" };
-    case "recordEnd":
-      return { key: "recordEnd", message: t("notif.evRecordEnd", { anchor: s("anchor") }), type: "success" };
+    case "recordEnd": {
+      const reason = s("reason");
+      return { key: "recordEnd", message: t("notif.evRecordEnd", { anchor: s("anchor"), reason: reason ? `（${reason}）` : "" }), type: "success" };
+    }
+    case "recordReconnect":
+      return { key: "live", message: t("notif.evReconnect", { anchor: s("anchor"), sec: s("downSec") }), type: "warning" };
     case "mergeDone":
       return { key: "merge", message: t("notif.evMerge", { file: baseName(s("file")) }), type: "success" };
     case "burnDone":
