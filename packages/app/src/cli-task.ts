@@ -380,7 +380,9 @@ export function buildTaskCommand(getWebhook: () => string | undefined): Command 
       // manager owns lifecycle + crash auto-restart; the daemon only gates by
       // the schedule. webhook is threaded through as a GLOBAL flag.
       const spawner = new NodeRecordSpawner({
-        webhook: getWebhook(),
+        // getter:每次 spawn 读「全局 --discord-webhook/env ?? settings 表 discordWebhook」,
+        // 否则 UI 里设的 webhook 进不了子进程(子进程无 DB,只能靠 --discord-webhook 透传)。
+        webhook: () => getWebhook() ?? store.getSetting("discordWebhook") ?? undefined,
         // mesio 路径设置:每次 spawn 读 settings.mesioPath(空=引擎兜底 bin/mesio)→ 注入 MESIO_PATH。
         mesioPath: () => store.getSetting("mesioPath") || undefined,
         onLog: (m) => console.log(m),
@@ -441,7 +443,9 @@ export function buildTaskCommand(getWebhook: () => string | undefined): Command 
       // the scheduler (automatic start/stop). They share the same subprocess
       // lifecycle + crash auto-restart.
       const spawner = new NodeRecordSpawner({
-        webhook: getWebhook(),
+        // getter:每次 spawn 读「全局 --discord-webhook/env ?? settings 表 discordWebhook」(与下方
+        // EventCenter 的 globalHook 一致),否则 UI 里设的 webhook 进不了子进程(子进程无 DB)。
+        webhook: () => getWebhook() ?? store.getSetting("discordWebhook") ?? undefined,
         // mesio 路径设置:每次 spawn 读 settings.mesioPath(空=引擎兜底 bin/mesio)→ 注入 MESIO_PATH。
         mesioPath: () => store.getSetting("mesioPath") || undefined,
         onLog: (m) => console.log(m),
