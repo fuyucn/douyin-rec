@@ -125,7 +125,7 @@ node dist/douyin-rec.mjs task add URL                       # CLI 加任务
 
 ## 硬性约束
 
-- **永远不删 `.xml` / `.ass` 文件**（`.claude/hooks/block_xml_ass_delete.py` 会拦截）。清理只删 `.ts`/`.mp4` 大文件。
+- **删 `.xml` / `.ass` 前必须人工确认**（`.claude/hooks/block_xml_ass_delete.py` 对疑似删除它们的命令**弹确认 ask**，不再硬 block）。原则上清理只删 `.ts`/`.mp4` 大文件；`.xml`/`.ass` 不可再生，确认确实要删再放行。
 - **不要破坏 VPS 生产录制**：VPS 只读检查，不杀进程/不删文件。
 - 测试录制只用 VPS，本地仅验证 TS（本地 macOS 有 rc-11 fork 污染）。
 - `cookies.json`（biliup B站上传 auth）、`config.yaml`、`douyin-rec.db` 已 gitignore，勿提交。
