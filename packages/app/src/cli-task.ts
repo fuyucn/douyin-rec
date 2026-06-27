@@ -13,7 +13,7 @@ import { Command } from "commander";
 import { readFileSync, mkdirSync } from "node:fs";
 import { TaskStore, resolveTaskCookies, resolveTaskWebhook, type Task, type EngineKind } from "./store.js";
 import { EventCenter } from "./events.js";
-import { resolveOutputDir } from "./paths.js";
+import { resolveOutputDir, ensureHubConfigExample } from "./paths.js";
 import { RecordingSession } from "@drec/manager";
 import { createLogger, getEngine, getPlatform, platformForRoom } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
@@ -456,6 +456,10 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .action((o: { port?: string; db?: string; schedule?: boolean; hub?: boolean; hubConfig?: string }) => {
       const store = new TaskStore(o.db);
       const port = o.port !== undefined ? Number(o.port) : 7860;
+
+      // 数据根初始化时种一份多节点编排配置模板(<root>/config/hub-config.example.json,幂等)。
+      const seeded = ensureHubConfigExample();
+      if (seeded) console.log(`[hub] 已生成配置模板: ${seeded}(改 host/cookies/uploadMode 后用 --hub-config 启用)`);
 
       // ONE manager drives both the web (manual start/stop) and, if requested,
       // the scheduler (automatic start/stop). They share the same subprocess

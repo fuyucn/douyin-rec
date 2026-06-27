@@ -107,19 +107,44 @@ interface Transport {
 
 ## 配置
 
+hub 配置为 **JSON**,经 `task serve --hub --hub-config '<JSON>'` 或 settings 表 `hubConfig` 传入(`--hub` 不带配置则跳过、warn)。**数据根初始化时自动种一份模板** `<root>/config/hub-config.example.json`(serve 启动 + `DOUYIN_REC_ROOT` 可解析时,幂等不覆盖;改 host/cookies/uploadMode 后用 `--hub-config` 指过去)。
+
+| 字段 | 类型 | 默认 | 含义 |
+|---|---|---|---|
+| `platform` | string | `"douyin"` | 平台(聚类 / 取 roomSlug) |
+| `tenants` | `Tenant[]` | `[]` | **所有录制节点**(含 master 自己) |
+| `cookies` | string | `""` | biliup cookie 路径(投稿用;指 `<root>/config/biliup/cookies.json`) |
+| `uploadMode` | `"auto-private"` \| `"stage-only"` | `"stage-only"` | 自动投(仅自己可见)/ 只暂存不投 |
+| `uploadMeta` | `{tag, tid, desc?}` | `{tag:"直播,录像", tid:21}` | 投稿元数据 |
+| `cleanMaxGapSec` | number | `30` | 「干净」阈值;winner 缺口 > 此 → 都断逃生口(webhook+人工) |
+| `stageDir` | string | `"./stage"` | 拉取 / 合并暂存目录 |
+| `settleMs` | number | `90000` | 收播去抖窗口(isRecording 持续 false 多久算结束) |
+| `pollMs` | number | `3000` | isRecording 轮询间隔 |
+| `reconcileIntervalMs` | number | `1800000` | 周期兜底对账(30min) |
+| `maxWaitSec` | number | `600` | 对账前等所有节点收播的上限 |
+| `settleSec` | number | `15` | 上面的轮询间隔 |
+
+**Tenant**:`{ id: string, kind: "local"|"ssh"|"tailscale-ssh", host?: string, dataRoot?: string }`
+- `local`:master 自己,无需 host;`dataRoot` = 该机数据根(扫 `<dataRoot>/recordings`)
+- `ssh` / `tailscale-ssh`:`host` = 主机名/tailscale 名;`dataRoot` = 远端数据根(远端跑 `node <dataRoot>/dist/douyin-rec.mjs _inventory <dataRoot>` 出清单)
+
+```json
+{
+  "platform": "douyin",
+  "tenants": [
+    { "id": "local", "kind": "local", "dataRoot": "/home/ubuntu/drec" },
+    { "id": "vps2", "kind": "tailscale-ssh", "host": "node2.ts.net", "dataRoot": "/home/ubuntu/drec" }
+  ],
+  "cookies": "/home/ubuntu/drec/config/biliup/cookies.json",
+  "uploadMode": "auto-private",
+  "uploadMeta": { "tag": "直播,录像,抖音", "tid": 21 },
+  "cleanMaxGapSec": 30,
+  "stageDir": "/home/ubuntu/drec/stage",
+  "settleMs": 90000, "maxWaitSec": 600
+}
 ```
-master:
-  tenants:
-    - { id: local,  transport: local }
-    - { id: vps1,   transport: tailscale-ssh, host: <tailscale-host>, dataRoot: ~/drec }
-  settleSec: 90
-  maxWaitSec: 600
-  cleanThreshold: { maxGapSec: 30 }      # 超此视为"不干净"
-  tiePreference: remote
-  upload: { mode: auto-private, cookie: <root>/config/biliup/cookies.json }  # 或 stage-only
-  cleanupSourcesAfterUpload: false       # 成功后删租户 .ts(留 .xml)
-  reconcileIntervalMin: 30               # 兜底对账
-```
+
+> ⚠️ 自动生成的模板 `uploadMode` 是保守的 `stage-only`(不自动投稿)——要全链路投稿改 `auto-private`,并把 `cookies` 指向 config 那份。master 自己也要在 `tenants` 里列为 `kind:"local"`(它共录,要参与选优)。
 
 ## 失败处理
 
