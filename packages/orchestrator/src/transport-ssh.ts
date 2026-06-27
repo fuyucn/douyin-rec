@@ -48,7 +48,9 @@ export class SshTransport implements Transport {
     const out = await this.run(["bash", "-lc",
       `cat /proc/[0-9]*/comm 2>/dev/null | grep -ic ffmpeg || true`]);
     const n = parseInt(out.trim(), 10);
-    return (isNaN(n) ? 0 : n) === 0; // 无 ffmpeg = 已收(roomSlug 精化留 v1.1)
+    // 未知/乱码输出 → 视为未收播(安全默认：编排器等待而非提前同步)
+    if (isNaN(n)) return false;
+    return n === 0; // 0 ffmpeg 进程 = 已收播
   }
   async pull(remotePaths: string[], localDir: string): Promise<void> {
     for (const rp of remotePaths) await this.rsync(rp, localDir);
