@@ -537,6 +537,44 @@ program.addCommand(
 // ─── cookie 子命令组：管理全局抖音账号 cookie（所有任务共享）────────────────────
 program.addCommand(buildCookieCommand());
 
+// ─── _inventory <dataRoot>（隐藏子命令，供多节点编排 master 通过 SSH 调用）──────────
+// master 通过 ssh 在 slave 上执行 `node <dataRoot>/dist/douyin-rec.mjs _inventory <dataRoot>`。
+// slave 扫描自己的 recordings 目录，输出 JSON { recordings: NodeRecording[] } 到 stdout。
+// 注意：此命令在 slave（VPS）上运行，不在 master 本地运行，也不是用户可见子命令。
+program
+  .command("_inventory <dataRoot>", { hidden: true })
+  .description("(内部) 扫描 <dataRoot>/recordings，输出 JSON 清单（供 master ssh 调用）")
+  .action(async (dataRoot: string) => {
+    const { join: pathJoin } = await import("node:path");
+    const { statSync } = await import("node:fs");
+    const { TaskStore } = await import("@drec/app");
+    const { ffprobeVideo } = await import("@drec/post-process");
+    const { scanRecordings } = await import("@drec/orchestrator");
+
+    // 打开 slave 自身的 db，构建 taskRooms（anchorName/name → roomSlug）
+    const dbPath = pathJoin(dataRoot, "db", "douyin-rec.db");
+    const store = new TaskStore(dbPath);
+    const taskRooms: Record<string, string> = {};
+    for (const task of store.listTasks()) {
+      try {
+        const slug = platformForRoom(task.room).extractRoomSlug(task.room);
+        if (task.name) taskRooms[task.name] = slug;
+        if (task.anchorName) taskRooms[task.anchorName] = slug;
+      } catch { /* skip tasks whose platform can't be resolved */ }
+    }
+
+    // ffprobe 适配器：durationMs via ffprobeVideo + mtime → startMs/endMs
+    const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
+      const { durationMs } = await ffprobeVideo(file).catch(() => ({ durationMs: 0 }));
+      const endMs = statSync(file).mtimeMs;
+      return { durationSec: durationMs / 1000, endMs, startMs: endMs - durationMs };
+    };
+
+    const recordingsDir = pathJoin(dataRoot, "recordings");
+    const recordings = await scanRecordings(recordingsDir, taskRooms, ffprobe);
+    process.stdout.write(JSON.stringify({ recordings }) + "\n");
+  });
+
 program.parseAsync(process.argv).catch((err: unknown) => {
   // 运行期错误统一走这里：干净的一行写 stderr + 退出码 1（参数/校验错由各命令 exit 2）。
   const msg = err instanceof Error ? err.message : String(err);

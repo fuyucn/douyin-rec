@@ -1,9 +1,8 @@
 // packages/orchestrator/src/transport-local.ts
-import { readdirSync, mkdirSync, copyFileSync } from "node:fs";
+import { mkdirSync, copyFileSync } from "node:fs";
 import { join, basename } from "node:path";
-import { groupSessions } from "@drec/post-process";
-import type { Transport, NodeInventory, NodeRecording } from "./transport.js";
-import { readGaps } from "./gaps.js";
+import type { Transport, NodeInventory } from "./transport.js";
+import { scanRecordings } from "./scan.js";
 
 export interface LocalOpts {
   id: string;
@@ -23,38 +22,7 @@ export class LocalTransport implements Transport {
 
   async listInventory(): Promise<NodeInventory> {
     const taskRooms = this.resolveTaskRooms();
-    const recordings: NodeRecording[] = [];
-    let anchors: string[] = [];
-    try {
-      anchors = readdirSync(this.o.recordingsDir, { withFileTypes: true })
-        .filter((e) => e.isDirectory())
-        .map((e) => e.name);
-    } catch { anchors = []; }
-    for (const anchor of anchors) {
-      const dir = join(this.o.recordingsDir, anchor);
-      const groups = groupSessions(readdirSync(dir));
-      for (const [base, g] of Object.entries(groups)) {
-        if (!g.ts.length) continue;
-        let durationSec = 0, startMs = Infinity, endMs = 0;
-        for (const f of g.ts) {
-          const p = await this.o.ffprobe(join(dir, f));
-          durationSec += p.durationSec;
-          startMs = Math.min(startMs, p.startMs);
-          endMs = Math.max(endMs, p.endMs);
-        }
-        const gaps = readGaps(join(dir, `${base}.gaps.json`));
-        recordings.push({
-          roomSlug: taskRooms[anchor] ?? anchor,
-          sessionBase: base,
-          tsFiles: g.ts.map((f) => join(dir, f)),
-          xmlPath: join(dir, `${base}.xml`),
-          durationSec,
-          startMs: startMs === Infinity ? 0 : startMs,
-          endMs,
-          totalGapSec: gaps?.totalGapSec ?? 0,
-        });
-      }
-    }
+    const recordings = await scanRecordings(this.o.recordingsDir, taskRooms, this.o.ffprobe);
     return { tenantId: this.id, recordings };
   }
 

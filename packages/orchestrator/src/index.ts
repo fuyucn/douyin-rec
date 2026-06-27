@@ -1,4 +1,6 @@
 export * from "./transport.js";
+export { scanRecordings } from "./scan.js";
+export type { FfprobeAdapter } from "./scan.js";
 export { Reconciler } from "./reconciler.js";
 export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";

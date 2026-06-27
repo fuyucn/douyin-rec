@@ -6,6 +6,11 @@ export interface SshOpts {
   id: string; host: string; dataRoot: string;
   run?: (argv: string[]) => Promise<string>;   // 默认 ssh host -- <argv>
   rsync?: (remote: string, localDir: string) => Promise<void>;
+  /**
+   * 覆盖 slave 端调用的 node 前缀（默认 `node <dataRoot>/dist/douyin-rec.mjs`）。
+   * 主要用于测试（注入 fake run 时此字段无实际影响）或 slave 部署路径非标准时的覆盖。
+   */
+  remoteNode?: string;
 }
 
 function defaultRun(host: string) {
@@ -17,15 +22,6 @@ function defaultRun(host: string) {
     p.on("error", reject);
   });
 }
-
-// 远端清单脚本：对 <dataRoot>/recordings 下每会话求时长/起止/缺口，输出一行 JSON。
-// v1 stub：实际远端扫描逻辑待后续落地——两种方案选一：
-//   (a) 把独立 inventory.mjs 随 orchestrator 分发，scp 到 slave 后 `node inventory.mjs <dataRoot>` 输出 JSON；
-//   (b) 给 slave serve 加 GET /api/recordings（spec D1，干净方案）。
-// 本任务测试已用注入 run 与具体脚本解耦，脚本内容不阻塞其余任务。
-const INVENTORY_SH = (dataRoot: string) => `node - <<'NODE'
-// 远端需有 node;实际实现里把扫描逻辑做成随包分发的小脚本或 slave 的 /api/recordings。
-NODE`;
 
 export class SshTransport implements Transport {
   readonly id: string;
@@ -40,7 +36,11 @@ export class SshTransport implements Transport {
     }));
   }
   async listInventory(): Promise<NodeInventory> {
-    const out = await this.run(["bash", "-lc", INVENTORY_SH(this.o.dataRoot)]);
+    // 调用 slave 部署的 CLI bundle：`node <dataRoot>/dist/douyin-rec.mjs _inventory <dataRoot>`
+    // slave 端 _inventory 子命令扫描自身 recordings 并输出 JSON { recordings: NodeRecording[] }。
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const cmd = `${nodePrefix} _inventory ${this.o.dataRoot}`;
+    const out = await this.run(["bash", "-lc", cmd]);
     const parsed = JSON.parse(out) as { recordings: NodeRecording[] };
     return { tenantId: this.id, recordings: parsed.recordings };
   }

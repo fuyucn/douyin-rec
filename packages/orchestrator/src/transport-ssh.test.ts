@@ -15,6 +15,34 @@ describe("SshTransport", () => {
     expect(inv.recordings[0].roomSlug).toBe("411");
     expect(inv.recordings[0].durationSec).toBe(3600);
   });
+
+  it("listInventory 发送包含 _inventory 和 dataRoot 的命令", async () => {
+    const capturedArgv: string[][] = [];
+    const t = new SshTransport({
+      id: "vps", host: "h", dataRoot: "/data/drec",
+      run: async (argv) => { capturedArgv.push(argv); return JSON.stringify({ recordings: [] }); },
+      rsync: async () => {},
+    });
+    await t.listInventory();
+    expect(capturedArgv).toHaveLength(1);
+    const cmdStr = capturedArgv[0].join(" ");
+    expect(cmdStr).toContain("_inventory");
+    expect(cmdStr).toContain("/data/drec");
+  });
+
+  it("listInventory 支持 remoteNode 覆盖", async () => {
+    const capturedArgv: string[][] = [];
+    const t = new SshTransport({
+      id: "vps", host: "h", dataRoot: "/data/drec",
+      remoteNode: "custom-node /opt/drec/douyin-rec.mjs",
+      run: async (argv) => { capturedArgv.push(argv); return JSON.stringify({ recordings: [] }); },
+      rsync: async () => {},
+    });
+    await t.listInventory();
+    const cmdStr = capturedArgv[0].join(" ");
+    expect(cmdStr).toContain("custom-node");
+    expect(cmdStr).toContain("_inventory");
+  });
   it("isDone：远端 ffmpeg 计数为 0 → true（已收播）", async () => {
     const t = new SshTransport({ id: "vps", host: "h", dataRoot: "~/drec",
       run: async () => "0", rsync: async () => {} });
