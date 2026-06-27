@@ -1,5 +1,5 @@
 import { basename, join, dirname } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type {
   Recorder, DanmuSource, RecorderEvents, RecordOpts, DanmuMessage, StreamInfo,
 } from "@drec/core";
@@ -48,6 +48,10 @@ export class RecordingSession {
    */
   private offlineNotified = false;
   private drainTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 断流缺口列表（startMs/endMs epoch ms）；会话结束时写 {base}.gaps.json sidecar。 */
+  private gaps: { startMs: number; endMs: number }[] = [];
+  /** 最后一次打开的 xml 路径（stop 时 currentXmlPath 已清空，用此回溯会话基名）。 */
+  private lastXmlPath: string | null = null;
   private drainDone: Promise<void> | null = null;
   private resolveDrainDone: (() => void) | null = null;
 
@@ -138,6 +142,7 @@ export class RecordingSession {
         // 是下播后重新开播 → 走正常 recordStart。
         if (this.offlineSince != null && !this.offlineNotified) {
           const downSec = Math.max(1, Math.round((Date.now() - this.offlineSince) / 1000));
+          this.gaps.push({ startMs: this.offlineSince!, endMs: Date.now() });
           this.notify({ kind: "recordReconnect", anchor: this.anchor, room: this.roomUrl, downSec });
         } else {
           this.notify({ kind: "recordStart", anchor: this.anchor, room: this.roomUrl, quality: this.opts.quality });
@@ -284,6 +289,7 @@ export class RecordingSession {
     this.writer.open(xmlPath, { anchorName: this.anchor, videoStartMs: Date.now() });
     this.writerOpen = true;
     this.currentXmlPath = xmlPath;
+    this.lastXmlPath = xmlPath;
   }
 
   private write(m: DanmuMessage): void {
@@ -302,6 +308,14 @@ export class RecordingSession {
     }
     await this.recorder.stop().catch(() => {});
     if (this.writerOpen) { this.writer.close(); this.writerOpen = false; this.currentXmlPath = null; }
+    // 写缺口 sidecar（供多节点选优用）
+    try {
+      if (this.currentXmlPath || this.lastXmlPath) {
+        const base = (this.currentXmlPath ?? this.lastXmlPath!).replace(/\.xml$/i, "");
+        const totalGapSec = Math.round(this.gaps.reduce((s, g) => s + (g.endMs - g.startMs), 0) / 1000);
+        writeFileSync(`${base}.gaps.json`, JSON.stringify({ sessionBase: basename(base), gaps: this.gaps, totalGapSec }), "utf-8");
+      }
+    } catch { /* sidecar 失败不影响停止 */ }
     // await(带 timeout):stop() 后调用方常立刻 process.exit,fire-and-forget 会丢这条 recordEnd。
     await this.notifyAwait({ kind: "recordEnd", anchor: this.anchor, room: this.roomUrl, outDir: this.opts.outDir, reason });
   }

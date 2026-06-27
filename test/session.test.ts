@@ -422,6 +422,23 @@ describe("RecordingSession", () => {
     await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "主播X" });
     await expect(sess.stop()).resolves.toBeUndefined();
   });
+
+  it("断流缺口写入 {base}.gaps.json（供选优用）", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-gaps-"));
+    const rec = new OfflineMock();
+    rec.isLiveResults = [true]; // 抖动：会重连成功 → 记一段缺口
+    const sess = new RecordingSession(rec, { reconnectDelaySec: 0.01 });
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "" });
+    rec.ev.onOffline();
+    await vi.runAllTimersAsync();
+    await sess.stop();
+    const gapsFile = readdirSync(dir).find((f) => f.endsWith(".gaps.json"));
+    expect(gapsFile).toBeTruthy();
+    const g = JSON.parse(readFileSync(join(dir, gapsFile!), "utf-8"));
+    expect(g.gaps.length).toBeGreaterThanOrEqual(1);
+    expect(g.totalGapSec).toBeGreaterThanOrEqual(0);
+  });
 });
 
 // ── 窗口结束「优雅排空」drain() ────────────────────────────────────────────────
