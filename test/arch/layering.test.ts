@@ -37,8 +37,6 @@ const RANKS: Record<string, number> = {
   "@drec/app": 4,
   "@drec/orchestrator": 4.5,
   "@drec/cli": 5,
-  // 6 多节点编排:跨节点同步流水线(依赖 app/core/post-process)
-  "@drec/orchestrator": 6,
 };
 
 interface PkgInfo {
