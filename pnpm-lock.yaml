@@ -175,6 +175,18 @@ importers:
         specifier: workspace:*
         version: link:../core
 
+  packages/orchestrator:
+    dependencies:
+      '@drec/app':
+        specifier: workspace:*
+        version: link:../app
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
+      '@drec/post-process':
+        specifier: workspace:*
+        version: link:../post-process
+
   packages/post-process: {}
 
   packages/record-engine:

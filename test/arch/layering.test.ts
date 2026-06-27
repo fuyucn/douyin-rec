@@ -35,6 +35,7 @@ const RANKS: Record<string, number> = {
   // 3 编排 → 4 应用 → 5 入口
   "@drec/manager": 3,
   "@drec/app": 4,
+  "@drec/orchestrator": 4.5,
   "@drec/cli": 5,
 };
 
