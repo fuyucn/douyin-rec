@@ -1,8 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, type Mock } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runPipeline, type PipelineDeps } from "./pipeline.js";
+import { runPipeline, type PipelineDeps, type UploadArgs } from "./pipeline.js";
 import { SyncLedger } from "./ledger.js";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
@@ -44,22 +44,24 @@ function makeTransport(tenantId: string): Transport {
   };
 }
 
-function makeDeps(overrides: Partial<PipelineDeps> = {}): PipelineDeps & {
-  sh: ReturnType<typeof vi.fn>;
-  upload: ReturnType<typeof vi.fn>;
-  notify: ReturnType<typeof vi.fn>;
+type TestDeps = Omit<PipelineDeps, "sh" | "upload" | "notify"> & {
+  sh: Mock<(cmd: string) => Promise<void>>;
+  upload: Mock<(o: UploadArgs) => Promise<string>>;
+  notify: Mock<(e: NotifyEvent) => void>;
   transports: Map<string, Transport>;
   ledger: SyncLedger;
-} {
+};
+
+function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   const ledger = freshLedger();
   const t1 = makeTransport("node-1");
   const t2 = makeTransport("node-2");
   const transports = new Map([["node-1", t1], ["node-2", t2]]);
-  const sh = vi.fn().mockResolvedValue(undefined);
-  const upload = vi.fn().mockResolvedValue("BV123");
-  const notify = vi.fn();
+  const sh = vi.fn<(cmd: string) => Promise<void>>().mockResolvedValue(undefined);
+  const upload = vi.fn<(o: UploadArgs) => Promise<string>>().mockResolvedValue("BV123");
+  const notify = vi.fn<(e: NotifyEvent) => void>();
 
-  return {
+  const base: PipelineDeps = {
     transports,
     ledger,
     sh,
@@ -78,6 +80,7 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): PipelineDeps & {
     },
     ...overrides,
   };
+  return base as unknown as TestDeps;
 }
 
 describe("runPipeline", () => {

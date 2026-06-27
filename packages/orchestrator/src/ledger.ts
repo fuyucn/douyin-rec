@@ -11,7 +11,7 @@ export class SyncLedger {
       streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
       winnerTenant TEXT, bv TEXT, error TEXT, updatedAt INTEGER NOT NULL)`);
   }
-  private now(): number { return Number(this.db.prepare("SELECT unixepoch('now')*1000 AS t").get()!.t); }
+  private now(): number { return Number((this.db.prepare("SELECT unixepoch('now')*1000 AS t").get() as unknown as { t: number })!.t); }
   upsertPending(streamKey: string): { isNew: boolean } {
     const existing = this.get(streamKey);
     if (existing) return { isNew: false };
@@ -19,7 +19,7 @@ export class SyncLedger {
     return { isNew: true };
   }
   get(streamKey: string): JobRow | null {
-    const r = this.db.prepare("SELECT * FROM sync_jobs WHERE streamKey=?").get(streamKey) as JobRow | undefined;
+    const r = this.db.prepare("SELECT * FROM sync_jobs WHERE streamKey=?").get(streamKey) as unknown as JobRow | undefined;
     return r ?? null;
   }
   setState(streamKey: string, state: JobState, patch: { winnerTenant?: string; error?: string } = {}): void {
@@ -30,7 +30,7 @@ export class SyncLedger {
     this.db.prepare("UPDATE sync_jobs SET state='done', bv=?, error=NULL, updatedAt=? WHERE streamKey=?").run(bv, this.now(), streamKey);
   }
   listActive(): JobRow[] {
-    return this.db.prepare("SELECT * FROM sync_jobs WHERE state NOT IN('done','needs_manual')").all() as JobRow[];
+    return this.db.prepare("SELECT * FROM sync_jobs WHERE state NOT IN('done','needs_manual')").all() as unknown as JobRow[];
   }
   close(): void { this.db.close(); }
 }
