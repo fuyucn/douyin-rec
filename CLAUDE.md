@@ -115,7 +115,7 @@ node dist/douyin-rec.mjs task add URL                       # CLI 加任务
 （`~/.claude/skills/upload-recording-today/scripts/upload-recording-today`）是设置的**唯一权威**——
 里面写死了正确的 tag / 简介 / 关水印 / 仅自己可见。手搓极易漏 `--desc`、用错 `--tag`、漏关水印（踩过坑）。
 
-- **一稿三分P**：plain + danmu + livechat 作为同一稿件三个分 P，顺序 **P1=plain → P2=danmu → P3=livechat**。skill 用**单次多文件 `upload a b c`**（不是 append；多文件 upload 是正常的，历史 06-11 等都这么传成功）。
+- **一稿三分P**：plain + danmu + livechat 作为同一稿件三个分 P，顺序 **P1=plain → P2=danmu → P3=livechat**。**分步上传（2026-06-27 起用户改）**：先单独 `upload` plain（P1，带全部 metadata + 关水印 + 仅自己可见）**完成、解析出 BVID**，再 `biliup append --vid <BV>` 追加 danmu(P2)、livechat(P3)。**不要再一次性 `upload a b c`**（旧做法已废）——先出 BV 拿到稿件再追加更稳健（P2/P3 是 10GB 级大文件，失败也不影响已建稿）。
 - **关水印是硬性**：skill 默认带 `--extra-fields '{"watermark":{"state":0}}'` 关昵称水印。**水印在投稿后无法修改**（用户确认）→ 必须上传时就关，漏了只能删稿重传。
 - **可见性默认「仅自己可见」**（`--is-only-self 1`）；用户明确要公开才传 `--public`。tid 21、copyright 1、title `{name}_{date}`。tag/简介是主播专属，**以 skill 脚本里的值为准**。
 - **本地胜出时**（`docker-data/output/{主播名}/`）：skill 只扫 `remote/recordings/{主播名}/`，故把本地三文件 **symlink** 进临时 root（`/tmp/upload_stage/remote/recordings/{主播名}/`）再 `--repo /tmp/upload_stage --cookies <repo>/cookies.json` 跑 skill。biliup 跟随 symlink 读真实大小（skill 显示 0.00GB 是 stat 符号链接的 cosmetic 假象，不影响）。
