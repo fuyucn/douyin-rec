@@ -13,12 +13,15 @@ import { SshTransport } from "./transport-ssh.js";
 
 export function registerBuiltinTransports(deps: {
   ffprobe: (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;
+  /** anchorName(目录名) → roomSlug 映射；接受普通 Record 或 getter 函数（默认空 Record）。 */
+  taskRooms?: Record<string, string> | (() => Record<string, string>);
 }): void {
+  const taskRooms = deps.taskRooms ?? {};
   registerTransport("local", (cfg) =>
     new LocalTransport({
       id: cfg.id,
       recordingsDir: `${cfg.dataRoot}/recordings`,
-      taskRooms: {},
+      taskRooms,
       ffprobe: deps.ffprobe,
     }),
   );

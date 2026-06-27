@@ -83,8 +83,13 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   return base as unknown as TestDeps;
 }
 
+// streamKey "douyin:test-room:2026-06-27" → sanitized "douyin_test-room_2026-06-27"
+const STREAM_KEY = "douyin:test-room:2026-06-27";
+const STAGE_DIR = "/tmp/stage";
+const STAGE_SUB = `${STAGE_DIR}/douyin_test-room_2026-06-27`;
+
 describe("runPipeline", () => {
-  it("场景1: 有干净胜者 + auto-private → merge/burn×2/upload, ledger=done, bv=BV123", async () => {
+  it("场景1: 有干净胜者 + auto-private → pull到stageSub, merge/burn×2/upload, ledger=done, bv=BV123", async () => {
     const cleanRec = makeRec({ totalGapSec: 0 });    // winner: totalGapSec=0, coverage=1
     const dirtyRec = makeRec({ totalGapSec: 200 });   // loser: totalGapSec=200
 
@@ -102,14 +107,26 @@ describe("runPipeline", () => {
     expect(result.state).toBe("done");
     expect(result.bv).toBe("BV123");
 
+    // transport.pull should be called with the stageSub path
+    const winnerTransport = deps.transports.get("node-1")!;
+    expect(winnerTransport.pull).toHaveBeenCalledTimes(1);
+    const pullCall = (winnerTransport.pull as Mock).mock.calls[0];
+    expect(pullCall[0]).toEqual(["/remote/a.ts", "/remote/b.ts", "/remote/danmu.xml"]);
+    expect(pullCall[1]).toBe(STAGE_SUB);
+
     // sh should be called 3 times: merge + burn danmu + burn livechat
     expect(deps.sh).toHaveBeenCalledTimes(3);
     const shCalls = deps.sh.mock.calls.map((c) => c[0] as string);
+    // merge --in uses stageSub
     expect(shCalls[0]).toContain("merge");
+    expect(shCalls[0]).toContain(STAGE_SUB);
+    // burn uses files inside stageSub
     expect(shCalls[1]).toContain("burn");
     expect(shCalls[1]).toContain("danmu");
+    expect(shCalls[1]).toContain(STAGE_SUB);
     expect(shCalls[2]).toContain("burn");
     expect(shCalls[2]).toContain("livechat");
+    expect(shCalls[2]).toContain(STAGE_SUB);
 
     // upload should be called once
     expect(deps.upload).toHaveBeenCalledTimes(1);
@@ -127,7 +144,7 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
-  it("场景2: 都断(无干净胜者) → upload未调, notify收到error, ledger=needs_manual", async () => {
+  it("场景2: 都断(无干净胜者) → upload未调, notify收到error, ledger=needs_manual, pull仍到stageSub", async () => {
     // Both have large gaps, exceeding cleanMaxGapSec=30
     const dirtyRec1 = makeRec({ totalGapSec: 200 });
     const dirtyRec2 = makeRec({ totalGapSec: 200 });
@@ -146,8 +163,17 @@ describe("runPipeline", () => {
     expect(result.state).toBe("needs_manual");
     expect(result.bv).toBeUndefined();
 
+    // pull should still be called with stageSub
+    const winnerTransport = deps.transports.get("node-1")!;
+    expect(winnerTransport.pull).toHaveBeenCalledTimes(1);
+    const pullCall = (winnerTransport.pull as Mock).mock.calls[0];
+    expect(pullCall[1]).toBe(STAGE_SUB);
+
     // sh should still be called 3 times (merge+burn happen even for dirty, per spec)
     expect(deps.sh).toHaveBeenCalledTimes(3);
+    const shCalls = deps.sh.mock.calls.map((c) => c[0] as string);
+    expect(shCalls[0]).toContain("merge");
+    expect(shCalls[0]).toContain(STAGE_SUB);
 
     // upload should NOT be called
     expect(deps.upload).toHaveBeenCalledTimes(0);

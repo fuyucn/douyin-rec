@@ -462,7 +462,18 @@ const hubStarter: HubStarter = {
       return { durationSec: durationMs / 1000, endMs, startMs: endMs - durationMs };
     };
 
-    registerBuiltinTransports({ ffprobe });
+    // BUG#2 fix: taskRooms getter — maps both anchorName AND task.name → roomSlug so
+    // local node recordings cluster with remote (ssh) nodes that report the numeric roomSlug.
+    const buildTaskRooms = (): Record<string, string> => {
+      const map: Record<string, string> = {};
+      for (const task of opts.store.listTasks()) {
+        const slug = platformForRoom(task.room).extractRoomSlug(task.room);
+        if (task.name) map[task.name] = slug;
+        if (task.anchorName) map[task.anchorName] = slug;
+      }
+      return map;
+    };
+    registerBuiltinTransports({ ffprobe, taskRooms: buildTaskRooms });
 
     const tenants = hubCfg.tenants ?? [];
     const transports = new Map(tenants.map((t) => [t.id, getTransport(t)]));

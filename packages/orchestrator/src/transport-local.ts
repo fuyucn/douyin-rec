@@ -1,6 +1,6 @@
 // packages/orchestrator/src/transport-local.ts
-import { readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, mkdirSync, copyFileSync } from "node:fs";
+import { join, basename } from "node:path";
 import { groupSessions } from "@drec/post-process";
 import type { Transport, NodeInventory, NodeRecording } from "./transport.js";
 import { readGaps } from "./gaps.js";
@@ -8,7 +8,8 @@ import { readGaps } from "./gaps.js";
 export interface LocalOpts {
   id: string;
   recordingsDir: string;
-  taskRooms: Record<string, string>; // anchorName(目录名) → roomSlug
+  /** anchorName(目录名) → roomSlug。接受普通 Record 或 getter 函数（getter 每次调用时取最新快照）。 */
+  taskRooms: Record<string, string> | (() => Record<string, string>);
   ffprobe: (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;
 }
 
@@ -16,7 +17,12 @@ export class LocalTransport implements Transport {
   readonly id: string;
   constructor(private o: LocalOpts) { this.id = o.id; }
 
+  private resolveTaskRooms(): Record<string, string> {
+    return typeof this.o.taskRooms === "function" ? this.o.taskRooms() : this.o.taskRooms;
+  }
+
   async listInventory(): Promise<NodeInventory> {
+    const taskRooms = this.resolveTaskRooms();
     const recordings: NodeRecording[] = [];
     let anchors: string[] = [];
     try {
@@ -38,7 +44,7 @@ export class LocalTransport implements Transport {
         }
         const gaps = readGaps(join(dir, `${base}.gaps.json`));
         recordings.push({
-          roomSlug: this.o.taskRooms[anchor] ?? anchor,
+          roomSlug: taskRooms[anchor] ?? anchor,
           sessionBase: base,
           tsFiles: g.ts.map((f) => join(dir, f)),
           xmlPath: join(dir, `${base}.xml`),
@@ -53,5 +59,12 @@ export class LocalTransport implements Transport {
   }
 
   async isDone(_roomSlug: string): Promise<boolean> { return true; }
-  async pull(_remotePaths: string[], _localDir: string): Promise<void> { /* 同机无需拉 */ }
+
+  /** 同机 pull：mkdir -p localDir，然后把每个文件复制进去（保留文件名）。 */
+  async pull(remotePaths: string[], localDir: string): Promise<void> {
+    mkdirSync(localDir, { recursive: true });
+    for (const src of remotePaths) {
+      copyFileSync(src, join(localDir, basename(src)));
+    }
+  }
 }
