@@ -53,6 +53,7 @@ export default defineConfig({
       "@drec/douyin-live": fileURLToPath(new URL("./packages/douyin-live/src/index.ts", import.meta.url)),
       "@drec/record-engine": fileURLToPath(new URL("./packages/record-engine/src/index.ts", import.meta.url)),
       "@drec/ffmpeg-recorder-extra": fileURLToPath(new URL("./packages/ffmpeg-recorder-extra/src/index.ts", import.meta.url)),
+      "@drec/orchestrator": fileURLToPath(new URL("./packages/orchestrator/src/index.ts", import.meta.url)),
     },
   },
 });

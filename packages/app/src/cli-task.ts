@@ -177,8 +177,24 @@ function parseBoolFlag(v: string | undefined, def: boolean): boolean {
   return !["0", "off", "false", "no", "none"].includes(v.trim().toLowerCase());
 }
 
+/**
+ * Optional hub deps injected by cli (L5) into app (L4) to avoid circular deps.
+ * cli depends on @drec/orchestrator; app does not.
+ */
+export interface HubStarter {
+  start(opts: {
+    hubConfigJson: string | undefined;
+    dbPath: string | undefined;
+    store: TaskStore;
+    manager: { isRecording(id: number): boolean };
+    onEvent: (e: import("@drec/core").NotifyEvent) => void;
+    log: (msg: string) => void;
+    warn: (msg: string) => void;
+  }): Promise<(() => void) | undefined>;
+}
+
 /** Build the `task` command group. Pass a getWebhook() that reads program-level opts/env. */
-export function buildTaskCommand(getWebhook: () => string | undefined): Command {
+export function buildTaskCommand(getWebhook: () => string | undefined, hubStarter?: HubStarter): Command {
   const task = new Command("task").description("管理录制任务（持久化到 sqlite）");
 
   task
@@ -435,7 +451,9 @@ export function buildTaskCommand(getWebhook: () => string | undefined): Command 
     .option("--db <path>", "数据库路径")
     // 调度默认开：启用的任务无窗口=24h 录、有窗口=窗口内录。--no-schedule 退化为纯手动控制台。
     .option("--no-schedule", "关闭定时调度，仅手动启停（默认开启调度）")
-    .action((o: { port?: string; db?: string; schedule?: boolean }) => {
+    .option("--hub", "启用多节点同步编排(默认关)")
+    .option("--hub-config <json>", "hub 配置 JSON")
+    .action((o: { port?: string; db?: string; schedule?: boolean; hub?: boolean; hubConfig?: string }) => {
       const store = new TaskStore(o.db);
       const port = o.port !== undefined ? Number(o.port) : 7860;
 
@@ -594,6 +612,26 @@ export function buildTaskCommand(getWebhook: () => string | undefined): Command 
         daemon = new TaskDaemon(store, manager, { log: (m) => console.log(m) });
       }
 
+      // ── Hub：多节点同步编排（--hub 开启；默认关，默认路径完全不变）─────────────────
+      // Hub 逻辑由 cli (L5) 通过 hubStarter 回调注入，app (L4) 不直接依赖 @drec/orchestrator，
+      // 避免 app→orchestrator→app 的循环依赖（orchestrator 依赖 app 的 UploadOpts 等类型）。
+      let stopHub: (() => void) | undefined;
+      if (o.hub && hubStarter) {
+        void hubStarter.start({
+          hubConfigJson: o.hubConfig ?? store.getSetting("hubConfig") ?? undefined,
+          dbPath: o.db,
+          store,
+          manager,
+          onEvent: (e) => { events.emit(null, e); },
+          log: (m) => serveLog.info(m),
+          warn: (m) => serveLog.warn(m),
+        }).then((stop) => { stopHub = stop; }).catch((err) => {
+          serveLog.error("[hub] 启动失败:", err);
+        });
+      } else if (o.hub && !hubStarter) {
+        serveLog.warn("[hub] --hub 已设置但未提供 hubStarter 实现，跳过");
+      }
+
       let stopping = false;
       const shutdown = (sig: string): void => {
         if (stopping) return;
@@ -602,6 +640,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined): Command 
         clearInterval(diskWatch);
         clearInterval(cookieWatch);
         if (canaryWatch) clearInterval(canaryWatch);
+        if (stopHub) stopHub();
         serveLog.info(`\n收到 ${sig}，正在关闭…`);
         // Stop scheduler ticks first (so it won't re-start a task), then stop
         // every running recorder, then close the http server.

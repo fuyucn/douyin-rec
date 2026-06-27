@@ -117,6 +117,9 @@ importers:
       '@drec/manager':
         specifier: workspace:*
         version: link:../manager
+      '@drec/orchestrator':
+        specifier: workspace:*
+        version: link:../orchestrator
       '@drec/post-process':
         specifier: workspace:*
         version: link:../post-process

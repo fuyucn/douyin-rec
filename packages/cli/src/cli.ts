@@ -26,6 +26,7 @@ import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES } from "@drec/app";
 import type { Recorder, RecordOpts, NotifyEvent, Notifier } from "@drec/core";
 import { makeNotifier } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand } from "@drec/app";
+import type { HubStarter } from "@drec/app";
 
 /** 从 CLI 全局选项 → config → env 三层解析 Discord webhook URL。 */
 function webhookOf(localCfg?: { discordWebhook?: string }): string | undefined {
@@ -429,6 +430,84 @@ program
     }
   });
 
+// ─── Hub starter: 多节点同步编排（cli L5 注入到 app L4，避免循环依赖）──────────────
+// app 不直接依赖 @drec/orchestrator（orchestrator 依赖 app），由 cli 作为 L5 入口注入。
+const hubStarter: HubStarter = {
+  async start(opts) {
+    const { registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport } = await import("@drec/orchestrator");
+    const { ffprobeVideo } = await import("@drec/post-process");
+    const { statSync } = await import("node:fs");
+    const { uploadThenAppend } = await import("@drec/app");
+
+    const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
+      platform?: string;
+      tenants?: Array<{ id: string; kind: string; host?: string; dataRoot?: string }>;
+      settleMs?: number;
+      pollMs?: number;
+      reconcileIntervalMs?: number;
+      stageDir?: string;
+      cookies?: string;
+      cleanMaxGapSec?: number;
+      uploadMode?: "auto-private" | "stage-only";
+      uploadMeta?: { tag: string; tid: number; desc?: string };
+    };
+    if (!hubCfg) {
+      opts.warn("[hub] --hub 已设置但 --hub-config / settings.hubConfig 未提供，跳过");
+      return undefined;
+    }
+
+    const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
+      const { durationMs } = await ffprobeVideo(file).catch(() => ({ durationMs: 0 }));
+      const endMs = statSync(file).mtimeMs;
+      return { durationSec: durationMs / 1000, endMs, startMs: endMs - durationMs };
+    };
+
+    registerBuiltinTransports({ ffprobe });
+
+    const tenants = hubCfg.tenants ?? [];
+    const transports = new Map(tenants.map((t) => [t.id, getTransport(t)]));
+    const dbPath = (opts.dbPath ?? "douyin-rec.db").replace(/\.db$/, "-sync.db");
+    const ledger = new SyncLedger(dbPath);
+
+    const { exec } = await import("node:child_process");
+    const pipelineDeps = {
+      transports,
+      ledger,
+      sh: (cmd: string) => new Promise<void>((res, rej) => {
+        exec(cmd, (err) => (err ? rej(err) : res()));
+      }),
+      upload: uploadThenAppend,
+      notify: opts.onEvent,
+      cfg: {
+        cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
+        stageDir: hubCfg.stageDir ?? "./stage",
+        cookies: hubCfg.cookies ?? "",
+        uploadMode: hubCfg.uploadMode ?? "stage-only",
+        uploadMeta: hubCfg.uploadMeta ?? { tag: "直播,录像", tid: 21 },
+      },
+    };
+
+    const reconciler = new Reconciler({
+      platform: hubCfg.platform ?? "douyin",
+      transports,
+      ledger,
+      pipelineDeps,
+    });
+
+    const stop = startHub({
+      tasks: () => opts.store.listTasks(),
+      isRecording: (id) => opts.manager.isRecording(id),
+      reconcileAll: () => reconciler.reconcileAll(),
+      settleMs: hubCfg.settleMs ?? 10_000,
+      pollMs: hubCfg.pollMs ?? 3_000,
+      reconcileIntervalMs: hubCfg.reconcileIntervalMs ?? 30 * 60_000,
+    });
+
+    opts.log(`[hub] 已启用，${tenants.length} 个租户`);
+    return stop;
+  },
+};
+
 // ─── task 子命令组（stateful app 层：sqlite 持久化 + 运行任务）─────────────────
 // webhook 解析复用全局 --discord-webhook / env DISCORD_WEBHOOK（settings 表在 runTask 内兜底）。
 // 用 `||` 而非 `??`:env `DISCORD_WEBHOOK=`(set-but-empty,docker .env 常见)会让 `??` 透出空串,
@@ -440,6 +519,7 @@ program.addCommand(
       (program.opts() as { discordWebhook?: string }).discordWebhook ||
       process.env.DISCORD_WEBHOOK ||
       undefined,
+    hubStarter,
   ),
 );
 
