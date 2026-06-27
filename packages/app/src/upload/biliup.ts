@@ -48,20 +48,50 @@ export function checkBiliup(cookies: string): Promise<string | null> {
   });
 }
 
-/** 调 biliup 上传，返回 BV（解析不到则抛错）。 */
-export function upload(o: UploadOpts): Promise<{ bv: string }> {
+/** 底层：spawn biliup argv，收集 stdout+stderr，非零退出抛错，返回合并输出。 */
+export function runBiliup(argv: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = buildUploadArgs(o);
-    const p = spawn("biliup", args);
+    const p = spawn("biliup", argv);
     let out = "", err = "";
-    p.stdout.on("data", (c) => (out += c));
-    p.stderr.on("data", (c) => (err += c));
+    p.stdout.on("data", (c: Buffer) => (out += c));
+    p.stderr.on("data", (c: Buffer) => (err += c));
     p.on("error", reject);
     p.on("close", (code) => {
-      if (code !== 0) { reject(new Error(`biliup upload 失败 (rc=${code}): ${(err || out).slice(-400).trim()}`)); return; }
-      const bv = parseBV(out + err);
-      if (!bv) { reject(new Error(`biliup 上传完成但解析不到 BV：${(out + err).slice(-300).trim()}`)); return; }
-      resolve({ bv });
+      if (code !== 0) { reject(new Error(`biliup 失败 (rc=${code}): ${(err || out).slice(-400).trim()}`)); return; }
+      resolve(out + err);
     });
   });
+}
+
+/** 调 biliup 上传，返回 BV（解析不到则抛错）。 */
+export function upload(o: UploadOpts): Promise<{ bv: string }> {
+  return runBiliup(buildUploadArgs(o)).then((combined) => {
+    const bv = parseBV(combined);
+    if (!bv) throw new Error(`biliup 上传完成但解析不到 BV：${combined.slice(-300).trim()}`);
+    return { bv };
+  });
+}
+
+/** 构造 biliup append 参数（纯函数）。 */
+export function buildAppendArgs(o: { cookies: string; bv: string; files: string[] }): string[] {
+  return ["-u", o.cookies, "append", "--vid", o.bv, ...o.files];
+}
+
+/**
+ * 分P 上传：先用 plain（P1）上传拿 BV，再 append extras（P2、P3）。
+ * `run` 可注入（测试用假实现）；默认走 runBiliup。
+ */
+export async function uploadThenAppend(o: {
+  plain: UploadOpts;
+  extras: string[];
+  run?: (argv: string[]) => Promise<string>;
+}): Promise<string> {
+  const run = o.run ?? runBiliup;
+  const uploadOut = await run(buildUploadArgs(o.plain));
+  const bv = parseBV(uploadOut);
+  if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${uploadOut.slice(-300)}`);
+  if (o.extras.length > 0) {
+    await run(buildAppendArgs({ cookies: o.plain.cookies, bv, files: o.extras }));
+  }
+  return bv;
 }
