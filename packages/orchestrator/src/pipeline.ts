@@ -3,7 +3,7 @@ import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import type { NotifyEvent } from "@drec/core";
-import type { UploadOpts } from "@drec/app/src/upload/biliup.js";
+import type { UploadOpts } from "@drec/app";
 import { selectWinner } from "./select.js";
 
 export interface UploadArgs {

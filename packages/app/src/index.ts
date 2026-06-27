@@ -2,5 +2,6 @@
 // cli 从这里取命令构造器与工具;app 内部模块互引保持相对。
 export { buildTaskCommand, buildCookieCommand } from "./cli-task.js";
 export { makeNotifier, NullNotifier, formatMessage } from "./notify/notifier.js";
-export { upload, checkBiliup, DEFAULT_COOKIES } from "./upload/biliup.js";
+export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
+export type { UploadOpts } from "./upload/biliup.js";
 export { fetchAnchorName, resolveShortUrl } from "./anchor.js";
