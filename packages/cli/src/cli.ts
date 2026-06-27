@@ -496,7 +496,7 @@ const hubStarter: HubStarter = {
 
     const stop = startHub({
       tasks: () => opts.store.listTasks(),
-      isRecording: (id) => opts.manager.isRecording(id),
+      isRecording: (id: number) => opts.manager.isRecording(id),
       reconcileAll: () => reconciler.reconcileAll(),
       settleMs: hubCfg.settleMs ?? 10_000,
       pollMs: hubCfg.pollMs ?? 3_000,
