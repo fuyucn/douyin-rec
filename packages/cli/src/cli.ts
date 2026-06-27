@@ -450,6 +450,10 @@ const hubStarter: HubStarter = {
       cleanMaxGapSec?: number;
       uploadMode?: "auto-private" | "stage-only";
       uploadMeta?: { tag: string; tid: number; desc?: string };
+      /** Max settle wait before reconciler proceeds regardless (seconds). */
+      maxWaitSec?: number;
+      /** Settle poll interval (seconds). */
+      settleSec?: number;
     };
     if (!hubCfg) {
       opts.warn("[hub] --hub 已设置但 --hub-config / settings.hubConfig 未提供，跳过");
@@ -503,13 +507,21 @@ const hubStarter: HubStarter = {
       transports,
       ledger,
       pipelineDeps,
+      ...(hubCfg.maxWaitSec != null || hubCfg.settleSec != null
+        ? {
+            settle: {
+              maxWaitMs: (hubCfg.maxWaitSec ?? 600) * 1000,
+              pollMs: (hubCfg.settleSec ?? 15) * 1000,
+            },
+          }
+        : {}),
     });
 
     const stop = startHub({
       tasks: () => opts.store.listTasks(),
       isRecording: (id: number) => opts.manager.isRecording(id),
       reconcileAll: () => reconciler.reconcileAll(),
-      settleMs: hubCfg.settleMs ?? 10_000,
+      settleMs: hubCfg.settleMs ?? 90_000,
       pollMs: hubCfg.pollMs ?? 3_000,
       reconcileIntervalMs: hubCfg.reconcileIntervalMs ?? 30 * 60_000,
     });

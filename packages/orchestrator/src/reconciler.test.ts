@@ -32,7 +32,7 @@ function makeTransport(id: string, recordings: NodeRecording[]): Transport {
   return {
     id,
     listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ tenantId: id, recordings }),
-    isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(false),
+    isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(true),
     pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
   };
 }
@@ -53,6 +53,10 @@ function makePipelineDeps(ledger: SyncLedger, transports: Map<string, Transport>
     },
   };
 }
+
+/** Fast settle config for tests: skip the real timeout. */
+const fastSettle = { maxWaitMs: 50, pollMs: 1 };
+const fastSleep = async (_ms: number): Promise<void> => {};
 
 describe("Reconciler", () => {
   it("场景A: 两 transport 各报同一场 → 聚成 1 簇 → runPipeline 调 1 次，ledger=done", async () => {
@@ -82,6 +86,8 @@ describe("Reconciler", () => {
       ledger,
       pipelineDeps,
       runPipeline: spyRunPipeline,
+      settle: fastSettle,
+      sleep: fastSleep,
     };
 
     const reconciler = new Reconciler(deps);
@@ -120,6 +126,8 @@ describe("Reconciler", () => {
       ledger,
       pipelineDeps,
       runPipeline: spyRunPipeline,
+      settle: fastSettle,
+      sleep: fastSleep,
     };
 
     const reconciler = new Reconciler(deps);
@@ -141,7 +149,7 @@ describe("Reconciler", () => {
     const t1: Transport = {
       id: "node-dead",
       listInventory: vi.fn<() => Promise<NodeInventory>>().mockRejectedValue(new Error("connection refused")),
-      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(false),
+      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(true),
       pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
     };
     const t2 = makeTransport("node-live", [rec]);
@@ -161,6 +169,8 @@ describe("Reconciler", () => {
       ledger,
       pipelineDeps,
       runPipeline: spyRunPipeline,
+      settle: fastSettle,
+      sleep: fastSleep,
     };
 
     const reconciler = new Reconciler(deps);
@@ -169,6 +179,99 @@ describe("Reconciler", () => {
     // The live node's recording should still be processed
     expect(spyRunPipeline).toHaveBeenCalledTimes(1);
 
+    ledger.close();
+  });
+
+  it("settle: isDone 前 2 次 false 再 true → 等待后 pipeline 跑一次", async () => {
+    const ledger = freshLedger();
+    const rec = makeRec();
+
+    let callCount = 0;
+    const t1: Transport = {
+      id: "node-1",
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ tenantId: "node-1", recordings: [rec] }),
+      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockImplementation(async () => {
+        callCount += 1;
+        return callCount >= 3; // false, false, then true
+      }),
+      pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
+    };
+    const transports = new Map([["node-1", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b, _deps) => {
+        ledger.markDone(b.streamKey, "BV_SETTLE");
+        return { state: "done", bv: "BV_SETTLE" };
+      },
+    );
+
+    const deps: ReconcilerDeps = {
+      platform: "douyin",
+      transports,
+      ledger,
+      pipelineDeps,
+      runPipeline: spyRunPipeline,
+      settle: { maxWaitMs: 100, pollMs: 1 },
+      sleep: fastSleep,
+    };
+
+    const reconciler = new Reconciler(deps);
+    await reconciler.reconcileAll();
+
+    // isDone was called more than once (polled at least twice before returning true)
+    expect(t1.isDone).toHaveBeenCalledTimes(3);
+    // Pipeline still ran exactly once
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+
+    ledger.close();
+  });
+
+  it("settle: isDone 始终 false → maxWait 后仍继续 pipeline（不 hang、不抛、有 warn 日志）", async () => {
+    const ledger = freshLedger();
+    const rec = makeRec();
+
+    const t1: Transport = {
+      id: "node-slow",
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ tenantId: "node-slow", recordings: [rec] }),
+      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(false),
+      pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
+    };
+    const transports = new Map([["node-slow", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b, _deps) => {
+        ledger.markDone(b.streamKey, "BV_SLOW");
+        return { state: "done", bv: "BV_SLOW" };
+      },
+    );
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const deps: ReconcilerDeps = {
+      platform: "douyin",
+      transports,
+      ledger,
+      pipelineDeps,
+      runPipeline: spyRunPipeline,
+      settle: { maxWaitMs: 50, pollMs: 1 },
+      sleep: fastSleep,
+    };
+
+    const reconciler = new Reconciler(deps);
+    // Must not hang and must not throw
+    await expect(reconciler.reconcileAll()).resolves.toBeUndefined();
+
+    // Pipeline still ran (no hang, no skip)
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+
+    // A warning was logged mentioning the tenant that was still recording
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("node-slow"),
+    );
+
+    warnSpy.mockRestore();
     ledger.close();
   });
 });
