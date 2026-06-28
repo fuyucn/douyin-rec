@@ -10,10 +10,24 @@
  * scheduled start/stop is out of scope for this skeleton. `task run` records now.
  */
 import { Command } from "commander";
-import { readFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { TaskStore, resolveTaskCookies, resolveTaskWebhook, type Task, type EngineKind } from "./store.js";
 import { EventCenter } from "./events.js";
-import { resolveOutputDir, ensureHubConfigExample } from "./paths.js";
+import { resolveOutputDir, ensureHubConfigExample, rootHubConfig } from "./paths.js";
+
+/**
+ * 解析 hub 配置 JSON 串(供 startHub)。优先级:
+ *   --hub-config(存在的文件路径→读文件;否则当内联 JSON 串) > settings 表 hubConfig > <root>/config/hub-config.json(自动读)。
+ * 即:把 hub-config.example.json 复制成 hub-config.json 改完,`serve --hub` 即自动加载(无需 --hub-config)。都没有 → undefined(跳过)。
+ */
+export function resolveHubConfigJson(arg: string | undefined, store: TaskStore): string | undefined {
+  if (arg) return existsSync(arg) ? readFileSync(arg, "utf-8") : arg;
+  const fromDb = store.getSetting("hubConfig");
+  if (fromDb) return fromDb;
+  const p = rootHubConfig();
+  if (p && existsSync(p)) return readFileSync(p, "utf-8");
+  return undefined;
+}
 import { RecordingSession } from "@drec/manager";
 import { createLogger, getEngine, getPlatform, platformForRoom } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
@@ -452,14 +466,14 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     // 调度默认开：启用的任务无窗口=24h 录、有窗口=窗口内录。--no-schedule 退化为纯手动控制台。
     .option("--no-schedule", "关闭定时调度，仅手动启停（默认开启调度）")
     .option("--hub", "启用多节点同步编排(默认关)")
-    .option("--hub-config <json>", "hub 配置 JSON")
+    .option("--hub-config <json|path>", "hub 配置(JSON 串或文件路径);省略则自动读 <root>/config/hub-config.json")
     .action((o: { port?: string; db?: string; schedule?: boolean; hub?: boolean; hubConfig?: string }) => {
       const store = new TaskStore(o.db);
       const port = o.port !== undefined ? Number(o.port) : 7860;
 
       // 数据根初始化时种一份多节点编排配置模板(<root>/config/hub-config.example.json,幂等)。
       const seeded = ensureHubConfigExample();
-      if (seeded) console.log(`[hub] 已生成配置模板: ${seeded}(改 host/cookies/uploadMode 后用 --hub-config 启用)`);
+      if (seeded) console.log(`[hub] 已生成配置模板: ${seeded}(复制成同目录 hub-config.json 并改 host/cookies/uploadMode → serve --hub 自动加载)`);
 
       // ONE manager drives both the web (manual start/stop) and, if requested,
       // the scheduler (automatic start/stop). They share the same subprocess
@@ -622,7 +636,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
       let stopHub: (() => void) | undefined;
       if (o.hub && hubStarter) {
         void hubStarter.start({
-          hubConfigJson: o.hubConfig ?? store.getSetting("hubConfig") ?? undefined,
+          hubConfigJson: resolveHubConfigJson(o.hubConfig, store),
           dbPath: o.db,
           store,
           manager,

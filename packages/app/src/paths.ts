@@ -34,6 +34,12 @@ export function rootConfigDir(): string | undefined {
   return r ? join(r, "config") : undefined;
 }
 
+/** <root>/config/hub-config.json(多节点编排「实际生效」配置;复制自 .example 后改);无 root 为 undefined。 */
+export function rootHubConfig(): string | undefined {
+  const d = rootConfigDir();
+  return d ? join(d, "hub-config.json") : undefined;
+}
+
 /**
  * 数据根初始化时**复制一份多节点编排配置模板**到 `<root>/config/hub-config.example.json`。
  * 内容逐字来自仓库源文件 `configs/hub-config.example.json`(见 `hubConfigExampleText`,bundle 内联 / dev 读源文件)。

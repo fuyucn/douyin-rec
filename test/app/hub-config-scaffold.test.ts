@@ -1,8 +1,14 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureHubConfigExample } from "../../packages/app/src/paths.js";
+import { resolveHubConfigJson } from "../../packages/app/src/cli-task.js";
+import type { TaskStore } from "../../packages/app/src/store.js";
+
+/** 极简假 store:resolveHubConfigJson 只用到 getSetting("hubConfig")。 */
+const fakeStore = (hubConfig?: string): TaskStore =>
+  ({ getSetting: (k: string) => (k === "hubConfig" ? hubConfig : undefined) }) as unknown as TaskStore;
 
 /**
  * 数据根初始化时种 hub-config.example.json 模板。
@@ -47,5 +53,47 @@ describe("ensureHubConfigExample（init-time scaffold）", () => {
     expect(ensureHubConfigExample()).toBeUndefined(); // 第二次跳过
     expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({ mine: true }); // 未被覆盖
     expect(existsSync(path)).toBe(true);
+  });
+});
+
+/**
+ * hub 配置解析优先级:--hub-config(文件路径→读 / 否则内联 JSON) > settings.hubConfig > <root>/config/hub-config.json。
+ * 即把 .example 复制成 hub-config.json 改完,serve --hub 自动加载。
+ */
+describe("resolveHubConfigJson（配置解析优先级）", () => {
+  const prev = process.env.DOUYIN_REC_ROOT;
+  afterEach(() => {
+    if (prev === undefined) delete process.env.DOUYIN_REC_ROOT;
+    else process.env.DOUYIN_REC_ROOT = prev;
+  });
+
+  it("--hub-config 是内联 JSON 串 → 原样返回", () => {
+    delete process.env.DOUYIN_REC_ROOT;
+    expect(resolveHubConfigJson('{"platform":"douyin"}', fakeStore())).toBe('{"platform":"douyin"}');
+  });
+
+  it("--hub-config 是存在的文件路径 → 读文件内容", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hubcfg-"));
+    const f = join(dir, "h.json");
+    writeFileSync(f, '{"from":"file"}');
+    expect(resolveHubConfigJson(f, fakeStore())).toBe('{"from":"file"}');
+  });
+
+  it("无 arg + settings.hubConfig 有值 → 用 settings", () => {
+    delete process.env.DOUYIN_REC_ROOT;
+    expect(resolveHubConfigJson(undefined, fakeStore('{"from":"db"}'))).toBe('{"from":"db"}');
+  });
+
+  it("无 arg + 无 settings + <root>/config/hub-config.json 存在 → 自动读该文件", () => {
+    const root = mkdtempSync(join(tmpdir(), "hubroot-cfg-"));
+    process.env.DOUYIN_REC_ROOT = root;
+    mkdirSync(join(root, "config"), { recursive: true });
+    writeFileSync(join(root, "config", "hub-config.json"), '{"from":"root-file"}');
+    expect(resolveHubConfigJson(undefined, fakeStore())).toBe('{"from":"root-file"}');
+  });
+
+  it("都没有 → undefined(serve --hub 会跳过)", () => {
+    delete process.env.DOUYIN_REC_ROOT;
+    expect(resolveHubConfigJson(undefined, fakeStore())).toBeUndefined();
   });
 });
