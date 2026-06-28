@@ -31,6 +31,11 @@ const sha = gitSha();
 const APP_VERSION = `${pkgVersion}-${sha ? sha.slice(-6) : "dev"}`;
 console.log(`[bundle] APP_VERSION=${APP_VERSION}`);
 
+// 多节点编排配置模板:仓库源文件 configs/hub-config.example.json 构建期 inline 进 bundle
+// (单文件运行时无仓库目录,故内联;init 时 ensureHubConfigExample 把它写到 <root>/config/)。
+// 经 define 替换源码里的 __HUB_CONFIG_EXAMPLE__(见 app/paths.ts)。
+const HUB_CONFIG_EXAMPLE = readFileSync(new URL("./configs/hub-config.example.json", import.meta.url), "utf8");
+
 const REQUIRE_SHIM =
   "import{createRequire as __createRequire}from'module';" +
   "const require=__createRequire(import.meta.url);";
@@ -54,7 +59,10 @@ await build({
   // - ws optional native speedups — not present, keep external so they no-op.
   // - playwright is heavy + ships native browser binaries; lazy-imported in QR login.
   external: ["bufferutil", "utf-8-validate", "playwright", "playwright-core"],
-  define: { __APP_VERSION__: JSON.stringify(APP_VERSION) },
+  define: {
+    __APP_VERSION__: JSON.stringify(APP_VERSION),
+    __HUB_CONFIG_EXAMPLE__: JSON.stringify(HUB_CONFIG_EXAMPLE),
+  },
   banner: { js: "#!/usr/bin/env node\n" + REQUIRE_SHIM },
 });
 

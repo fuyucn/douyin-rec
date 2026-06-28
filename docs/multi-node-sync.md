@@ -107,7 +107,7 @@ interface Transport {
 
 ## 配置
 
-hub 配置为 **JSON**,经 `task serve --hub --hub-config '<JSON>'` 或 settings 表 `hubConfig` 传入(`--hub` 不带配置则跳过、warn)。**数据根初始化时自动种一份模板** `<root>/config/hub-config.example.json`(serve 启动 + `DOUYIN_REC_ROOT` 可解析时,幂等不覆盖;改 host/cookies/uploadMode 后用 `--hub-config` 指过去)。
+hub 配置为 **JSON**,经 `task serve --hub --hub-config '<JSON>'` 或 settings 表 `hubConfig` 传入(`--hub` 不带配置则跳过、warn)。**模板单一真相 = 仓库源文件 [`configs/hub-config.example.json`](../configs/hub-config.example.json)**(打包时 esbuild 内联进 bundle);**数据根初始化时自动复制一份**到 `<root>/config/hub-config.example.json`(serve 启动 + `DOUYIN_REC_ROOT` 可解析时,幂等不覆盖;复制出来的是占位值,改 host/cookies/uploadMode 后用 `--hub-config` 指过去)。
 
 | 字段 | 类型 | 默认 | 含义 |
 |---|---|---|---|

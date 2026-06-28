@@ -9,7 +9,18 @@
  * > 由 DOUYIN_REC_ROOT 派生的固定子路径 > 各自的本地默认。专用 env 仍可单独覆盖某一项。
  */
 import { join } from "node:path";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+
+/**
+ * hub 配置模板内容。**单一真相 = 仓库源文件 `configs/hub-config.example.json`**。
+ * 打包(`pnpm bundle`)时 esbuild 经 `define` 把该文件文本内联成 `__HUB_CONFIG_EXAMPLE__`(单文件运行时无仓库目录);
+ * 非打包(tsx/vitest)`__HUB_CONFIG_EXAMPLE__` 未声明 → 从仓库源文件读(相对本文件定位 repo 根)。
+ */
+declare const __HUB_CONFIG_EXAMPLE__: string | undefined;
+function hubConfigExampleText(): string {
+  if (typeof __HUB_CONFIG_EXAMPLE__ !== "undefined" && __HUB_CONFIG_EXAMPLE__) return __HUB_CONFIG_EXAMPLE__;
+  return readFileSync(new URL("../../../configs/hub-config.example.json", import.meta.url), "utf-8");
+}
 
 /** DOUYIN_REC_ROOT(去空白);未设为 undefined。 */
 export function drecRoot(): string | undefined {
@@ -24,36 +35,18 @@ export function rootConfigDir(): string | undefined {
 }
 
 /**
- * 数据根初始化时**种一份多节点编排配置模板** `<root>/config/hub-config.example.json`。
+ * 数据根初始化时**复制一份多节点编排配置模板**到 `<root>/config/hub-config.example.json`。
+ * 内容逐字来自仓库源文件 `configs/hub-config.example.json`(见 `hubConfigExampleText`,bundle 内联 / dev 读源文件)。
  * 幂等:无 DOUYIN_REC_ROOT 则跳过;文件已存在则不覆盖(保留用户改动)。返回写入路径,跳过/已存在返回 undefined。
- * 模板字段以 root 填充(local tenant dataRoot / cookies / stageDir),vps tenant 与 host 为占位需手改;
- * uploadMode 默认 stage-only(保守,不自动投稿,改 auto-private 才投)。字段说明见 docs/multi-node-sync.md「配置」。
+ * 模板是占位值(dataRoot=/data、host=CHANGE-ME、uploadMode=stage-only)——复制后按环境改;字段说明见 docs/multi-node-sync.md「配置」。
  */
 export function ensureHubConfigExample(): string | undefined {
   const cfgDir = rootConfigDir();
   if (!cfgDir) return undefined;
-  const root = drecRoot()!;
   const path = join(cfgDir, "hub-config.example.json");
   if (existsSync(path)) return undefined;
-  const template = {
-    platform: "douyin",
-    tenants: [
-      { id: "local", kind: "local", dataRoot: root },
-      { id: "vps", kind: "tailscale-ssh", host: "CHANGE-ME.ts.net", dataRoot: "/home/ubuntu/drec" },
-    ],
-    cookies: join(root, "config", "biliup", "cookies.json"),
-    uploadMode: "stage-only",
-    uploadMeta: { tag: "直播,录像", tid: 21 },
-    cleanMaxGapSec: 30,
-    stageDir: join(root, "stage"),
-    settleMs: 90000,
-    pollMs: 3000,
-    reconcileIntervalMs: 1800000,
-    maxWaitSec: 600,
-    settleSec: 15,
-  };
   mkdirSync(cfgDir, { recursive: true });
-  writeFileSync(path, JSON.stringify(template, null, 2) + "\n", "utf-8");
+  writeFileSync(path, hubConfigExampleText(), "utf-8");
   return path;
 }
 

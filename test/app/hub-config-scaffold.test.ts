@@ -20,18 +20,21 @@ describe("ensureHubConfigExample（init-time scaffold）", () => {
     expect(ensureHubConfigExample()).toBeUndefined();
   });
 
-  it("有 root 且文件不存在 → 写模板,字段据 root 填充", () => {
+  it("有 root 且文件不存在 → 逐字复制仓库源文件 configs/hub-config.example.json", () => {
     const root = mkdtempSync(join(tmpdir(), "hubroot-"));
     process.env.DOUYIN_REC_ROOT = root;
     const path = ensureHubConfigExample();
     expect(path).toBe(join(root, "config", "hub-config.example.json"));
-    const cfg = JSON.parse(readFileSync(path!, "utf-8"));
+    // 复制内容必须逐字等于仓库源模板(单一真相)。vitest cwd=repo 根。
+    const source = readFileSync(join(process.cwd(), "configs/hub-config.example.json"), "utf-8");
+    const written = readFileSync(path!, "utf-8");
+    expect(written).toBe(source);
+    // 抽查关键字段(占位模型:dataRoot=/data,uploadMode 保守 stage-only)。
+    const cfg = JSON.parse(written);
     expect(cfg.platform).toBe("douyin");
-    expect(cfg.tenants[0]).toMatchObject({ id: "local", kind: "local", dataRoot: root });
+    expect(cfg.tenants[0].kind).toBe("local");
     expect(cfg.tenants[1].kind).toBe("tailscale-ssh");
-    expect(cfg.cookies).toBe(join(root, "config", "biliup", "cookies.json"));
-    expect(cfg.stageDir).toBe(join(root, "stage"));
-    expect(cfg.uploadMode).toBe("stage-only"); // 保守默认
+    expect(cfg.uploadMode).toBe("stage-only");
     expect(cfg.settleMs).toBe(90000);
   });
 
