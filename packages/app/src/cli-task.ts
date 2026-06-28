@@ -12,6 +12,7 @@
 import { Command } from "commander";
 import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { TaskStore, resolveTaskCookies, resolveTaskWebhook, type Task, type EngineKind } from "./store.js";
+import { resolveDbPath } from "./db.js";
 import { EventCenter } from "./events.js";
 import { resolveOutputDir, ensureHubConfigExample, rootHubConfig } from "./paths.js";
 
@@ -637,7 +638,9 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
       if (o.hub && hubStarter) {
         void hubStarter.start({
           hubConfigJson: resolveHubConfigJson(o.hubConfig, store),
-          dbPath: o.db,
+          // 解析后的 db 路径(--db 省略+DOUYIN_REC_ROOT 时 → <root>/db/douyin-rec.db),
+          // 使 hub 台账 <…>-sync.db 落数据根而非 cwd。
+          dbPath: resolveDbPath(o.db),
           store,
           manager,
           onEvent: (e) => { events.emit(null, e); },
