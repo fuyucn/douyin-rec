@@ -313,7 +313,9 @@ export class RecordingSession {
       if (this.currentXmlPath || this.lastXmlPath) {
         const base = (this.currentXmlPath ?? this.lastXmlPath!).replace(/\.xml$/i, "");
         const totalGapSec = Math.round(this.gaps.reduce((s, g) => s + (g.endMs - g.startMs), 0) / 1000);
-        writeFileSync(`${base}.gaps.json`, JSON.stringify({ sessionBase: basename(base), gaps: this.gaps, totalGapSec }), "utf-8");
+        // 写入权威 roomSlug:多节点选优的 scan 优先用它,跨节点一致(不依赖各节点 anchorName 是否解析)。
+        const roomSlug = platformForRoom(this.roomUrl).extractRoomSlug(this.roomUrl);
+        writeFileSync(`${base}.gaps.json`, JSON.stringify({ sessionBase: basename(base), gaps: this.gaps, totalGapSec, roomSlug }), "utf-8");
       }
     } catch { /* sidecar 失败不影响停止 */ }
     // await(带 timeout):stop() 后调用方常立刻 process.exit,fire-and-forget 会丢这条 recordEnd。

@@ -11,8 +11,9 @@ describe("gaps sidecar", () => {
   it("readGaps 解析合法文件", () => {
     const dir = mkdtempSync(join(tmpdir(), "gaps-"));
     const p = join(dir, "s.gaps.json");
-    writeFileSync(p, JSON.stringify({ sessionBase: "s", gaps: [{ startMs: 0, endMs: 5000 }], totalGapSec: 5 }));
+    writeFileSync(p, JSON.stringify({ sessionBase: "s", gaps: [{ startMs: 0, endMs: 5000 }], totalGapSec: 5, roomSlug: "465721793855" }));
     expect(readGaps(p)?.totalGapSec).toBe(5);
+    expect(readGaps(p)?.roomSlug).toBe("465721793855");   // Bug A:权威 slug 随 gaps 走
   });
   it("缺失/损坏 → null", () => {
     expect(readGaps("/no/such.json")).toBeNull();

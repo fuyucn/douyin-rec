@@ -42,7 +42,9 @@ export async function scanRecordings(
       }
       const gaps = readGaps(join(dir, `${base}.gaps.json`));
       recordings.push({
-        roomSlug: taskRooms[anchor] ?? anchor,
+        // 优先用录制端写进 gaps.json 的权威 roomSlug(跨节点一致);否则回退 anchorName 映射 / 目录名。
+        // 解决:某节点 anchorName 未解析 → 回退目录名 → 与其他节点 slug 不一致 → 同场被切成两个 streamKey。
+        roomSlug: gaps?.roomSlug ?? taskRooms[anchor] ?? anchor,
         sessionBase: base,
         tsFiles: g.ts.map((f) => join(dir, f)),
         xmlPath: join(dir, `${base}.xml`),

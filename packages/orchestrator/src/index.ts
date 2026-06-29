@@ -17,6 +17,8 @@ export function registerBuiltinTransports(deps: {
   ffprobe: (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;
   /** anchorName(目录名) → roomSlug 映射；接受普通 Record 或 getter 函数（默认空 Record）。 */
   taskRooms?: Record<string, string> | (() => Record<string, string>);
+  /** 某 roomSlug 此刻是否还在本机录制(local transport 的 isDone 用;不传 → isDone 恒 true)。 */
+  isRoomRecording?: (roomSlug: string) => boolean;
 }): void {
   const taskRooms = deps.taskRooms ?? {};
   registerTransport("local", (cfg) =>
@@ -25,6 +27,7 @@ export function registerBuiltinTransports(deps: {
       recordingsDir: `${cfg.dataRoot}/recordings`,
       taskRooms,
       ffprobe: deps.ffprobe,
+      isRoomRecording: deps.isRoomRecording,
     }),
   );
   registerTransport("ssh", (cfg) =>

@@ -482,7 +482,13 @@ const hubStarter: HubStarter = {
       }
       return map;
     };
-    registerBuiltinTransports({ ffprobe, taskRooms: buildTaskRooms });
+    // 某 roomSlug 是否还在本机录制(local transport settle 用):匹配该 slug 的任务有在录的就算「未收播」,
+    // 防周期对账在录制中途就合并残片(settle 等录完才处理)。
+    const isRoomRecording = (slug: string): boolean =>
+      opts.store.listTasks().some(
+        (t) => platformForRoom(t.room).extractRoomSlug(t.room) === slug && opts.manager.isRecording(t.id),
+      );
+    registerBuiltinTransports({ ffprobe, taskRooms: buildTaskRooms, isRoomRecording });
 
     const tenants = hubCfg.tenants ?? [];
     const transports = new Map(tenants.map((t) => [t.id, getTransport(t)]));

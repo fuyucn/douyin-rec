@@ -41,6 +41,38 @@ describe("LocalTransport.listInventory", () => {
   });
 });
 
+describe("LocalTransport.isDone（Bug B:不再恒 true）", () => {
+  const base = (over = {}) => new LocalTransport({
+    id: "l", recordingsDir: "/x", taskRooms: {},
+    ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }), ...over,
+  });
+  it("isRoomRecording=true（在录）→ isDone=false（未收播,settle 会等）", async () => {
+    expect(await base({ isRoomRecording: () => true }).isDone("999")).toBe(false);
+  });
+  it("isRoomRecording=false → isDone=true", async () => {
+    expect(await base({ isRoomRecording: () => false }).isDone("999")).toBe(true);
+  });
+  it("未注入 → 默认 true(旧行为兼容)", async () => {
+    expect(await base().isDone("999")).toBe(true);
+  });
+});
+
+describe("LocalTransport.listInventory（Bug A:gaps.roomSlug 优先)", () => {
+  it("gaps.json 带 roomSlug → 用它,不回退目录名(防跨节点 slug 不一致)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "loc-slug-"));
+    const dir = join(root, "流放2-老于"); mkdirSync(dir);
+    writeFileSync(join(dir, "流放2-老于_2026-06-29_08-40_000.ts"), "x");
+    writeFileSync(join(dir, "流放2-老于_2026-06-29_08-40.gaps.json"),
+      JSON.stringify({ sessionBase: "流放2-老于_2026-06-29_08-40", gaps: [], totalGapSec: 0, roomSlug: "465721793855" }));
+    const t = new LocalTransport({
+      id: "local", recordingsDir: root, taskRooms: {},  // 空:模拟 anchorName 未解析
+      ffprobe: async () => ({ durationSec: 300, startMs: 1, endMs: 300_001 }),
+    });
+    const inv = await t.listInventory();
+    expect(inv.recordings[0].roomSlug).toBe("465721793855");  // gaps 优先,非目录名"流放2-老于"
+  });
+});
+
 describe("LocalTransport.pull", () => {
   it("复制文件到目标目录（同机 pull 实装）", async () => {
     const root = mkdtempSync(join(tmpdir(), "pull-"));

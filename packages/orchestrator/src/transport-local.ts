@@ -10,6 +10,12 @@ export interface LocalOpts {
   /** anchorName(目录名) → roomSlug。接受普通 Record 或 getter 函数（getter 每次调用时取最新快照）。 */
   taskRooms: Record<string, string> | (() => Record<string, string>);
   ffprobe: (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;
+  /**
+   * 该 roomSlug 此刻是否还在本机录制中(用于 settle 判定是否收播)。
+   * 不提供 → 默认「不在录」(isDone=true),保留旧行为。**多节点 master 必须注入**,
+   * 否则 isDone 恒 true → settle 不等录完 → 周期对账边录边合并残片(踩过)。
+   */
+  isRoomRecording?: (roomSlug: string) => boolean;
 }
 
 export class LocalTransport implements Transport {
@@ -26,7 +32,10 @@ export class LocalTransport implements Transport {
     return { tenantId: this.id, recordings };
   }
 
-  async isDone(_roomSlug: string): Promise<boolean> { return true; }
+  /** 该 room 还在本机录制 → 未收播(false);否则已收播(true)。注入 isRoomRecording 才生效,否则恒 true(旧行为)。 */
+  async isDone(roomSlug: string): Promise<boolean> {
+    return !(this.o.isRoomRecording?.(roomSlug) ?? false);
+  }
 
   /** 同机:fs 判存在(全在才 true)。 */
   async exists(paths: string[]): Promise<boolean> {
