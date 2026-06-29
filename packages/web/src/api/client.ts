@@ -14,7 +14,9 @@ import type {
   TaskRuntime,
   CookieStatus,
   TaskPayload,
-  TaskPipelineConfig,
+  HubPipelineConfig,
+  HubRuleDTO,
+  HubRulePayload,
   RecordingsDTO,
   MergeJobDTO,
   EventsDTO,
@@ -22,7 +24,7 @@ import type {
   PlatformDTO,
   PlatformsDTO,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, TaskPipelineConfig, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -89,6 +91,14 @@ export const api = {
 
   // ── 站内事件流(轮询)──────────────────────────────────────────────────────
   getEvents: (since: number): Promise<EventsDTO> => request("GET", `/api/events?since=${since}`),
+
+  // ── 多节点 hub 规则(按 roomSlug)──────────────────────────────────────────────
+  listHubRules: (): Promise<HubRuleDTO[]> => request("GET", "/api/hub/rules"),
+  createHubRule: (input: HubRulePayload): Promise<HubRuleDTO> => request("POST", "/api/hub/rules", input),
+  updateHubRule: (roomSlug: string, input: HubRulePayload): Promise<HubRuleDTO> =>
+    request("PATCH", `/api/hub/rules/${roomSlug}`, input),
+  deleteHubRule: (roomSlug: string): Promise<{ ok: boolean; roomSlug: string }> =>
+    request("DELETE", `/api/hub/rules/${roomSlug}`),
 
   // ── Global cookie ────────────────────────────────────────────────────────
   getCookie: (): Promise<CookieStatus> => request("GET", "/api/cookie"),

@@ -7,7 +7,7 @@
  */
 import type { DatabaseSync } from "node:sqlite";
 import { getPlatform, platformForRoom } from "@drec/core";
-import type { TaskPipelineConfig } from "@drec/core";
+import type { HubPipelineConfig } from "@drec/core";
 import { openDb } from "./db.js";
 
 export type TaskStatus = "stopped" | "running" | "error" | "pending" | "draining";
@@ -57,8 +57,6 @@ export interface Task {
    * settings.discordWebhook。见 resolveTaskWebhook。
    */
   webhook: string | null;
-  /** 多节点 hub pipeline 配置(per-task);null = 未配(该房间不 hub,只录)。存为 JSON。 */
-  pipeline: TaskPipelineConfig | null;
 }
 
 /** Fields accepted when adding a task. Defaults applied for omitted values. */
@@ -85,8 +83,6 @@ export interface TaskInput {
   createdAt?: string;
   /** 任务专属 Discord webhook;null/省略 = 回落全局。 */
   webhook?: string | null;
-  /** 多节点 hub pipeline 配置;省略 = 不设。 */
-  pipeline?: TaskPipelineConfig | null;
 }
 
 /** Raw row shape as returned by node:sqlite (danmu/segmentSec are bigint-or-number). */
@@ -109,7 +105,6 @@ interface TaskRow {
   createdAt: string;
   anchorName: string | null;
   webhook: string | null;
-  pipeline: string | null;
 }
 
 /**
@@ -168,14 +163,7 @@ function rowToTask(r: TaskRow): Task {
     createdAt: r.createdAt,
     anchorName: r.anchorName ?? null,
     webhook: r.webhook ?? null,
-    pipeline: parsePipeline(r.pipeline),
   };
-}
-
-/** 解析 pipeline JSON 列(损坏/空 → null)。 */
-function parsePipeline(s: string | null): TaskPipelineConfig | null {
-  if (!s) return null;
-  try { return JSON.parse(s) as TaskPipelineConfig; } catch { return null; }
 }
 
 /**
@@ -190,6 +178,22 @@ export function resolveTaskWebhook(
   if (v.length > 0) return v;
   const g = (globalWebhook ?? "").trim();
   return g.length > 0 ? g : null;
+}
+
+/** 一条多节点 hub 规则(按 roomSlug=web_rid 唯一;独立于录制任务)。 */
+export interface HubRule {
+  roomSlug: string;
+  room: string;
+  platform: string;
+  enabled: boolean;
+  config: HubPipelineConfig;
+  createdAt: string;
+}
+interface HubRuleRow { roomSlug: string; room: string; platform: string; enabled: number; config: string | null; createdAt: string }
+function rowToHubRule(r: HubRuleRow): HubRule {
+  let config: HubPipelineConfig = {};
+  try { if (r.config) config = JSON.parse(r.config) as HubPipelineConfig; } catch { /* 坏 JSON → 空配置 */ }
+  return { roomSlug: r.roomSlug, room: r.room, platform: r.platform ?? "douyin", enabled: Number(r.enabled) !== 0, config, createdAt: r.createdAt };
 }
 
 export class TaskStore {
@@ -220,8 +224,8 @@ export class TaskStore {
     const stmt = this.db.prepare(
       `INSERT INTO tasks
          (room, platform, name, quality, engine, danmu, segmentSec, cookies, outDir,
-          scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook, pipeline)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       room,
@@ -240,7 +244,6 @@ export class TaskStore {
       (input.enabled ?? false) ? 1 : 0,
       createdAt,
       input.webhook ?? null,
-      input.pipeline != null ? JSON.stringify(input.pipeline) : null,
     );
     const id = Number(info.lastInsertRowid);
     const task = this.getTask(id);
@@ -275,7 +278,6 @@ export class TaskStore {
         | "useCookie"
         | "enabled"
         | "webhook"
-        | "pipeline"
       >
     >,
   ): Task | null {
@@ -323,7 +325,6 @@ export class TaskStore {
     if ("useCookie" in patch) set("useCookie", patch.useCookie ? 1 : 0);
     if ("enabled" in patch) set("enabled", patch.enabled ? 1 : 0);
     if ("webhook" in patch) set("webhook", patch.webhook ?? null);
-    if ("pipeline" in patch) set("pipeline", patch.pipeline != null ? JSON.stringify(patch.pipeline) : null);
 
     if (cols.length === 0) return this.getTask(id); // nothing to change
 
@@ -402,6 +403,41 @@ export class TaskStore {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
       )
       .run(key, value);
+  }
+
+  // ── 多节点 hub 规则(独立于录制任务,按 roomSlug=web_rid 唯一)─────────────────
+  listHubRules(): HubRule[] {
+    return (this.db.prepare(`SELECT * FROM hub_rules ORDER BY createdAt DESC`).all() as unknown as HubRuleRow[]).map(rowToHubRule);
+  }
+  getHubRule(roomSlug: string): HubRule | null {
+    const r = this.db.prepare(`SELECT * FROM hub_rules WHERE roomSlug = ?`).get(roomSlug) as unknown as HubRuleRow | undefined;
+    return r ? rowToHubRule(r) : null;
+  }
+  /** 新建/覆盖一条 hub 规则(按 room 解析 roomSlug+platform;upsert)。 */
+  upsertHubRule(input: { room: string; enabled?: boolean; config?: HubPipelineConfig }): HubRule {
+    const room = normalizeRoom(input.room);
+    const platform = platformForRoom(room);
+    const roomSlug = platform.extractRoomSlug(room);
+    this.db.prepare(
+      `INSERT INTO hub_rules (roomSlug, room, platform, enabled, config, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(roomSlug) DO UPDATE SET room=excluded.room, platform=excluded.platform,
+         enabled=excluded.enabled, config=excluded.config`,
+    ).run(roomSlug, room, platform.id, (input.enabled ?? true) ? 1 : 0,
+      input.config != null ? JSON.stringify(input.config) : null, new Date().toISOString());
+    return this.getHubRule(roomSlug)!;
+  }
+  /** 部分更新一条 hub 规则(只改给的字段)。 */
+  updateHubRule(roomSlug: string, patch: { enabled?: boolean; config?: HubPipelineConfig }): HubRule | null {
+    if (!this.getHubRule(roomSlug)) return null;
+    const cols: string[] = []; const vals: (string | number | null)[] = [];
+    if ("enabled" in patch) { cols.push("enabled = ?"); vals.push(patch.enabled ? 1 : 0); }
+    if ("config" in patch) { cols.push("config = ?"); vals.push(patch.config != null ? JSON.stringify(patch.config) : null); }
+    if (cols.length) { vals.push(roomSlug); this.db.prepare(`UPDATE hub_rules SET ${cols.join(", ")} WHERE roomSlug = ?`).run(...vals); }
+    return this.getHubRule(roomSlug);
+  }
+  removeHubRule(roomSlug: string): boolean {
+    return Number(this.db.prepare(`DELETE FROM hub_rules WHERE roomSlug = ?`).run(roomSlug).changes) > 0;
   }
 
   close(): void {

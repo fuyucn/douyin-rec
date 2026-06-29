@@ -24,14 +24,18 @@
   settleAll 返回仍在录成员、reconcileAll **跳过仍在录的场**(不抓残片)。(`92eb428`)
 - **SshTransport.pull 不 mkdir** —— rsync 把不存在目标当文件名致 merge ENOTDIR(VPS-winner 拉流首次暴露)。(`38b39c3`)
 
-### ✅ 架构升级(`adb2143`,真实验证通过):hub=全局管理器 + per-task pipeline 配置
-- Task 加 `pipeline` JSON 字段:`{sync, steps{burnDanmu,burnLivechat}, cleanup{stageSourceAfterMerge,sourceAfterDone,stageAfterDone,includeXmlAss}, upload{mode,tag,tid,desc}}`。
-- reconciler `resolveCfg(roomSlug)` 查 master 任务的 pipeline → 组装 PipelineCfg 逐场执行;无配置回落全局(兼容),`sync:false` 跳过。
+### ✅ 架构升级:hub=全局管理器 + **HubRule 独立实体**(按 roomSlug,与录制任务解耦)
+- 先做成 per-task pipeline(`adb2143`,实测通过),后按「录制任务只管录、hub 是独立管理器」拆成独立实体:
+  **`hub_rules` 表**(主键 roomSlug=web_rid,列 room/platform/enabled/config)。Task 不再有 pipeline 字段。
+- `config` JSON = `{steps{burnDanmu,burnLivechat}, cleanup{stageSourceAfterMerge,sourceAfterDone,stageAfterDone,includeXmlAss}, upload{mode,tag,tid,desc}}`。
+- reconciler `resolveCfg(roomSlug)` 查 `store.getHubRule(slug)`:**有 enabled 规则才处理**(opt-in),无规则/禁用 → null 跳过。
+- store CRUD:`listHubRules/getHubRule/upsertHubRule({room,enabled?,config?})/updateHubRule/removeHubRule`(upsert 经 platformForRoom.extractRoomSlug 派生 roomSlug)。
+- API:`GET/POST /api/hub/rules` + `PATCH/DELETE /api/hub/rules/:roomSlug`(DTO 带 anchorName,关联同房间录制任务显示)。
+- Web:**独立「Hub」页**(`/hub`,TopNav 加导航)+ `HubRuleDialog`;录制任务弹窗回归纯录制(无 hub 面板)。
 - pipeline 步骤开关(可只到 plain 就停)+ cleanup 开关(删 stage 源/源节点录制/stage 产物;includeXmlAss 守弹幕源)+ Transport.cleanup(local fs / ssh rm)。
 - **2026-06-29 实测(房间 杨甜甜)逐项验证**:唯一 streamKey、2 节点选优、`burnLivechat:false`→无 livechat、`stageSourceAfterMerge:true`→源 .ts 删、`stage-only`→needs_manual、xml 保留、无 fork 风暴。
 
 ### 待做
-- **阶段 2:Web UI** 编辑每任务的 pipeline 配置(现仅 API `PATCH /api/tasks/:id {pipeline}`)。
 - **daemon 自动重启已停任务**:任务手动 stop 后 daemon 下 tick 又重启(enabled+在窗口+在播)。正解:手动 stop 置 paused 标志,daemon 不自动重启;仅窗口调度自动启停。(测试时靠 delete 任务规避)
 
 ## 测试备注

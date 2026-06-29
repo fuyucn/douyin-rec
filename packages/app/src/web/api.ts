@@ -16,8 +16,8 @@ import { join } from "node:path";
 import { groupSessions, mergeSessions } from "@drec/post-process";
 import { resolveMesioBin } from "@drec/record-engine";
 import { APP_VERSION } from "../version.js";
-import type { RecordingSessionDTO, TaskPipelineConfig } from "@drec/core";
-import { listPlatforms } from "@drec/core";
+import type { RecordingSessionDTO, HubRulePayload, HubRuleDTO, HubPipelineConfig } from "@drec/core";
+import { listPlatforms, platformForRoom } from "@drec/core";
 import type { EventCenter } from "../events.js";
 import { resolveOutputDir } from "../paths.js";
 import type { Task, TaskStore } from "../store.js";
@@ -131,8 +131,6 @@ export interface CreateTaskInput {
   scheduleEnd?: string | null;
   /** 任务专属 Discord webhook;空/省略 = 回落全局。 */
   webhook?: string | null;
-  /** 多节点 hub pipeline 配置(per-task);省略 = 不 hub。 */
-  pipeline?: TaskPipelineConfig | null;
 }
 
 /**
@@ -155,8 +153,6 @@ export interface UpdateTaskInput {
   scheduleEnd?: string | null;
   /** 任务专属 Discord webhook;空/省略 = 回落全局。 */
   webhook?: string | null;
-  /** 多节点 hub pipeline 配置(per-task);省略 = 不改。 */
-  pipeline?: TaskPipelineConfig | null;
 }
 
 function err(status: number, message: string): ApiResult {
@@ -278,6 +274,14 @@ export interface Api {
   getEvents(since: number): ApiResult;
   /** GET /api/platforms — 已注册平台的配置(画质/录制器/弹幕/默认 + urlPattern),供前端按 URL 判平台、动态填表单。 */
   listPlatforms(): ApiResult;
+  /** GET /api/hub/rules — 所有多节点 hub 后处理规则(按 roomSlug)。 */
+  listHubRules(): ApiResult;
+  /** POST /api/hub/rules { room, enabled?, config? } — 新建/覆盖一条 hub 规则。 */
+  createHubRule(input: HubRulePayload): ApiResult;
+  /** PATCH /api/hub/rules/:roomSlug { enabled?, config? } — 部分更新一条规则。 */
+  updateHubRule(roomSlug: string, input: HubRulePayload): ApiResult;
+  /** DELETE /api/hub/rules/:roomSlug — 删除一条规则。 */
+  deleteHubRule(roomSlug: string): ApiResult;
 }
 
 /** Build the handler set bound to the injected store + manager. */
@@ -318,6 +322,22 @@ export function makeApi(deps: ApiDeps): Api {
     ...view(t),
     runtime: manager.getRuntime(t.id),
   });
+
+  // hub 规则 → DTO:补 anchorName(若有同 roomSlug 的录制任务,显示其主播名/任务名)。
+  const hubRuleView = (r: ReturnType<TaskStore["getHubRule"]> & {}): HubRuleDTO => {
+    const t = store.listTasks().find(
+      (task) => platformForRoom(task.room).extractRoomSlug(task.room) === r.roomSlug,
+    );
+    const anchorName = t ? manager.getAnchorName(t.id) ?? t.anchorName ?? t.name ?? null : null;
+    return {
+      roomSlug: r.roomSlug,
+      room: r.room,
+      platform: r.platform,
+      enabled: r.enabled,
+      config: r.config,
+      anchorName,
+    };
+  };
 
   // 任务录制目录 = {outDir}/{子目录}/,子目录与 buildSavePathRule 一致:
   // 有 name 用 sanitize(name),否则用主播名(biliLive owner)。无法确定子目录 → null。
@@ -375,7 +395,6 @@ export function makeApi(deps: ApiDeps): Api {
         scheduleStart,
         scheduleEnd,
         webhook: normWebhook(input.webhook),
-        pipeline: input.pipeline ?? null,
       });
       // 创建即抓主播名（不等开始录制）；后台写回，UI 轮询即显示。
       resolveAnchorBg(task.id, task.room);
@@ -403,7 +422,6 @@ export function makeApi(deps: ApiDeps): Api {
       if ("cookies" in input) patch.cookies = input.cookies ?? null;
       if ("outDir" in input) patch.outDir = input.outDir ?? null;
       if ("webhook" in input) patch.webhook = normWebhook(input.webhook);
-      if ("pipeline" in input) patch.pipeline = input.pipeline ?? null;
 
       // schedule "HH:MM-HH:MM" wins over explicit scheduleStart/End if present.
       if (input.schedule !== undefined) {
@@ -642,6 +660,33 @@ export function makeApi(deps: ApiDeps): Api {
     getEvents(since: number): ApiResult {
       const cursor = Number.isFinite(since) && since >= 0 ? Math.floor(since) : 0;
       return { status: 200, body: deps.events ? deps.events.since(cursor) : { events: [], cursor: 0 } };
+    },
+
+    listHubRules(): ApiResult {
+      return { status: 200, body: store.listHubRules().map(hubRuleView) };
+    },
+    createHubRule(input: HubRulePayload): ApiResult {
+      const room = (input.room ?? "").trim();
+      if (!room) return err(400, "缺少房间地址 room");
+      try {
+        const rule = store.upsertHubRule({ room, enabled: input.enabled, config: input.config });
+        return { status: 201, body: hubRuleView(rule) };
+      } catch (e) {
+        return err(400, `无法解析房间地址: ${(e as Error).message}`);
+      }
+    },
+    updateHubRule(roomSlug: string, input: HubRulePayload): ApiResult {
+      const patch: { enabled?: boolean; config?: HubPipelineConfig } = {};
+      if ("enabled" in input) patch.enabled = input.enabled;
+      if ("config" in input) patch.config = input.config;
+      const updated = store.updateHubRule(roomSlug, patch);
+      if (!updated) return err(404, `未找到 hub 规则 roomSlug=${roomSlug}`);
+      return { status: 200, body: hubRuleView(updated) };
+    },
+    deleteHubRule(roomSlug: string): ApiResult {
+      const ok = store.removeHubRule(roomSlug);
+      if (!ok) return err(404, `未找到 hub 规则 roomSlug=${roomSlug}`);
+      return { status: 200, body: { ok: true, roomSlug } };
     },
   };
 }

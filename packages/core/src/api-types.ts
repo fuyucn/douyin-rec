@@ -4,12 +4,10 @@ import type { NotifyEvent } from "./notify.js";
 export type { NotifyEvent };
 
 /**
- * 任务的多节点 hub pipeline 配置(per-task)。hub 是全局管理器,执行每个任务这份配置。
- * 省略/sync!=true → 该房间不走 hub(只录制)。所有 cleanup/steps 默认见各字段。
+ * 多节点 hub 后处理配置(按房间)。**独立于录制任务**——录制任务只管录,hub 规则管后处理。
+ * hub 是全局管理器,对每个 enabled 的 HubRule(按 roomSlug)执行这份 pipeline。
  */
-export interface TaskPipelineConfig {
-  /** 是否多节点 hub 同步(opt-in)。false/省略 → 只录,不 hub。 */
-  sync?: boolean;
+export interface HubPipelineConfig {
   /** 产出哪些(merge plain 是基础总做)。默认全 true。 */
   steps?: { burnDanmu?: boolean; burnLivechat?: boolean };
   /** 清理开关(都默认 false;includeXmlAss 决定删除是否含 .xml/.ass)。 */
@@ -18,10 +16,30 @@ export interface TaskPipelineConfig {
   upload?: { mode?: "stage-only" | "auto-private"; tag?: string; tid?: number; desc?: string };
 }
 
-/** POST /api/tasks + PATCH /api/tasks/:id 的请求体(部分字段)。 */
+/** 一条 hub 规则(GET /api/hub/rules)。按 roomSlug(web_rid)唯一。 */
+export interface HubRuleDTO {
+  /** 房间唯一 ID(web_rid),= 主键。 */
+  roomSlug: string;
+  /** 用户输入的房间地址(显示用)。 */
+  room: string;
+  platform: string;
+  /** 规则启用?false = 暂停该房间的 hub 处理。 */
+  enabled: boolean;
+  config: HubPipelineConfig;
+  /** 主播名(若有同 roomSlug 的录制任务/录像可关联显示);未知 null。 */
+  anchorName?: string | null;
+}
+
+/** POST /api/hub/rules + PATCH /api/hub/rules/:roomSlug 的请求体。 */
+export interface HubRulePayload {
+  /** 房间地址或房间号(归一化解析出 roomSlug);create 必填。 */
+  room?: string;
+  enabled?: boolean;
+  config?: HubPipelineConfig;
+}
+
+/** POST /api/tasks + PATCH /api/tasks/:id 的请求体(部分字段;录制专属,hub 配置见 HubRule)。 */
 export interface TaskPayload {
-  /** 多节点 hub pipeline 配置(per-task);省略 = 不改/不 hub。 */
-  pipeline?: TaskPipelineConfig | null;
   room: string;
   name?: string | null;
   quality?: string;
@@ -81,8 +99,6 @@ export interface TaskDTO {
   recording: boolean;
   /** 任务专属 Discord webhook;null = 回落全局。 */
   webhook: string | null;
-  /** 多节点 hub pipeline 配置;null = 未配(不 hub)。 */
-  pipeline: TaskPipelineConfig | null;
 }
 
 /** 详情页 live runtime(GET /api/tasks/:id)。 */

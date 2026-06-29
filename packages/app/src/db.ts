@@ -72,6 +72,16 @@ export function migrate(db: DatabaseSync): void {
       error     TEXT,
       createdAt TEXT
     );
+    -- 多节点 hub 规则:按房间(roomSlug=web_rid 唯一)管后处理,独立于录制任务。
+    -- config = JSON {steps, cleanup, upload};reconciler 按 roomSlug 查 enabled 规则取配置。
+    CREATE TABLE IF NOT EXISTS hub_rules (
+      roomSlug  TEXT PRIMARY KEY,
+      room      TEXT NOT NULL,
+      platform  TEXT NOT NULL DEFAULT 'douyin',
+      enabled   INTEGER NOT NULL DEFAULT 1,
+      config    TEXT,
+      createdAt TEXT
+    );
   `);
 
   // `CREATE TABLE IF NOT EXISTS` never alters an EXISTING table, so columns
@@ -104,8 +114,7 @@ export function migrate(db: DatabaseSync): void {
   ensureColumn(db, "tasks", "anchorName", "TEXT");
   // 任务专属 Discord webhook（开播/录完/合并完成/错误事件）。null = 回落全局 settings.discordWebhook。
   ensureColumn(db, "tasks", "webhook", "TEXT");
-  // 多节点 hub pipeline 配置(per-task,JSON 串)。null = 未配(该房间不 hub,只录)。
-  ensureColumn(db, "tasks", "pipeline", "TEXT");
+  // 注:多节点 hub 配置已独立成 hub_rules 表(按 roomSlug),不再放 tasks 上。
 }
 
 /**

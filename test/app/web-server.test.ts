@@ -67,6 +67,10 @@ describe("matchRoute", () => {
     expect(matchRoute("GET", "/api/cookie")?.name).toBe("getCookie");
     expect(matchRoute("POST", "/api/cookie")).toMatchObject({ name: "setCookie", needsBody: true });
     expect(matchRoute("DELETE", "/api/cookie")?.name).toBe("clearCookie");
+    expect(matchRoute("GET", "/api/hub/rules")?.name).toBe("listHubRules");
+    expect(matchRoute("POST", "/api/hub/rules")).toMatchObject({ name: "createHubRule", needsBody: true });
+    expect(matchRoute("PATCH", "/api/hub/rules/123456")).toMatchObject({ name: "updateHubRule", slug: "123456", needsBody: true });
+    expect(matchRoute("DELETE", "/api/hub/rules/123456")).toMatchObject({ name: "deleteHubRule", slug: "123456" });
   });
 
   it("returns null for unknown routes / wrong methods", () => {
@@ -169,6 +173,33 @@ describe("createWebServer (live)", () => {
 
     const list = (await (await fetch(`${base}/api/tasks`)).json()) as Array<{ id: number; name: string }>;
     expect(list.find((t) => t.id === created.id)!.name).toBe("new");
+  });
+
+  it("hub rules CRUD via http (create → list → patch → delete)", async () => {
+    const create = await fetch(`${base}/api/hub/rules`, {
+      method: "POST",
+      body: JSON.stringify({ room: "https://live.douyin.com/654321", config: { steps: { burnLivechat: false } } }),
+    });
+    expect(create.status).toBe(201);
+    const rule = (await create.json()) as { roomSlug: string; enabled: boolean; config: { steps?: { burnLivechat?: boolean } } };
+    expect(rule.roomSlug).toBe("654321");
+    expect(rule.enabled).toBe(true);
+    expect(rule.config.steps?.burnLivechat).toBe(false);
+
+    const list = (await (await fetch(`${base}/api/hub/rules`)).json()) as Array<{ roomSlug: string }>;
+    expect(list).toHaveLength(1);
+
+    const patch = await fetch(`${base}/api/hub/rules/654321`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(patch.status).toBe(200);
+    expect(((await patch.json()) as { enabled: boolean }).enabled).toBe(false);
+
+    const del = await fetch(`${base}/api/hub/rules/654321`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+    const missing = await fetch(`${base}/api/hub/rules/654321`, { method: "PATCH", body: JSON.stringify({ enabled: true }) });
+    expect(missing.status).toBe(404);
   });
 
   it("start/stop lifecycle via http", async () => {

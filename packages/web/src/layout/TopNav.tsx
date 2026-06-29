@@ -1,5 +1,6 @@
 import { useAtomValue } from "jotai";
 import { useState, type ReactNode } from "react";
+import { NavLink } from "react-router-dom";
 import { Settings } from "lucide-react";
 import { cookieStatusAtom } from "../atoms";
 import { RecordGlyph } from "../components/Brand";
@@ -53,6 +54,25 @@ export function TopNav(): ReactNode {
             <RecordGlyph />
           </div>
           <span className="headline text-[17px] truncate">{t("nav.title")}</span>
+          <nav className="hidden sm:flex items-center gap-1 ml-4">
+            {([
+              ["/", "录制"],
+              ["/hub", "Hub"],
+            ] as const).map(([to, label]) => (
+              <NavLink
+                key={to}
+                to={to}
+                end={to === "/"}
+                className={({ isActive }) =>
+                  `px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                    isActive ? "bg-surface-soft text-ink" : "text-muted hover:text-ink hover:bg-surface-soft"
+                  }`
+                }
+              >
+                {label}
+              </NavLink>
+            ))}
+          </nav>
         </div>
 
         <div className="flex items-center gap-2 sm:gap-3 shrink-0">

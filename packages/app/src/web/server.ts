@@ -54,11 +54,17 @@ export interface RouteMatch {
     | "getMerge"
     | "getEvents"
     | "listPlatforms"
+    | "listHubRules"
+    | "createHubRule"
+    | "updateHubRule"
+    | "deleteHubRule"
     | "index";
   /** Path param when the route has /:id. */
   id?: number;
   /** Path param for string-keyed routes (e.g. login session id). */
   sid?: string;
+  /** Path param for roomSlug-keyed routes (hub rules). */
+  slug?: string;
   /** Whether the handler consumes a JSON request body. */
   needsBody?: boolean;
 }
@@ -119,6 +125,18 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
   // 站内事件流: GET /api/events(?since=N 在 dispatch 解析 query)
   if (p === "/api/events") {
     if (method === "GET") return { name: "getEvents" };
+    return null;
+  }
+  // 多节点 hub 规则: GET/POST /api/hub/rules + PATCH/DELETE /api/hub/rules/:roomSlug
+  if (p === "/api/hub/rules") {
+    if (method === "GET") return { name: "listHubRules" };
+    if (method === "POST") return { name: "createHubRule", needsBody: true };
+    return null;
+  }
+  const hr = /^\/api\/hub\/rules\/([A-Za-z0-9_-]+)$/.exec(p);
+  if (hr) {
+    if (method === "PATCH") return { name: "updateHubRule", slug: hr[1], needsBody: true };
+    if (method === "DELETE") return { name: "deleteHubRule", slug: hr[1] };
     return null;
   }
   // 合成任务轮询: GET /api/merges/:jobId
@@ -270,6 +288,18 @@ async function dispatch(
       const since = Number(new URL(req.url ?? "/", "http://localhost").searchParams.get("since") ?? "0");
       return api.getEvents(since);
     }
+    case "listHubRules":
+      return api.listHubRules();
+    case "createHubRule": {
+      const body = (await readJson(req)) as Parameters<Api["createHubRule"]>[0];
+      return api.createHubRule(body ?? {});
+    }
+    case "updateHubRule": {
+      const body = (await readJson(req)) as Parameters<Api["updateHubRule"]>[1];
+      return api.updateHubRule(match.slug!, body ?? {});
+    }
+    case "deleteHubRule":
+      return api.deleteHubRule(match.slug!);
     case "index":
       // handled by caller (html, not json)
       return { status: 200, body: null };

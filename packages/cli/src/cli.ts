@@ -514,28 +514,25 @@ const hubStarter: HubStarter = {
       },
     };
 
-    // 按房间(roomSlug)取该场的 pipeline 配置 = 对应任务的 per-task pipeline 配置。
-    // 任务有 pipeline → 用它(merge plain/burn/cleanup/upload 全按任务;sync===false 则跳过该房间);
-    // 任务无 pipeline → 回落全局 cfg(兼容旧的全局模式,不破坏现状)。hub = 全局管理器,执行每任务这份配置。
+    // 按房间(roomSlug)取该场的 pipeline 配置 = 对应 hub 规则(独立于录制任务)。
+    // hub = 全局管理器:只处理「有 enabled HubRule」的房间;无规则/禁用 → 返 null 跳过该房间。
+    // 录制任务只管录;某房间要不要后处理、产哪些、清不清理、传不传,全看它的 HubRule。
     const resolveCfg = (slug: string): PipelineCfg | null => {
-      const task = opts.store.listTasks().find(
-        (t) => platformForRoom(t.room).extractRoomSlug(t.room) === slug,
-      );
-      const p = task?.pipeline;
-      if (!p) return pipelineDeps.cfg; // 无 per-task 配置 → 全局默认
-      if (p.sync === false) return null; // 显式关闭 hub → 不处理该房间
+      const rule = opts.store.getHubRule(slug);
+      if (!rule || !rule.enabled) return null; // 无规则或已禁用 → hub 不处理该房间
+      const c = rule.config ?? {};
       return {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         stageDir: hubCfg.stageDir ?? "./stage",
         cookies: hubCfg.cookies ?? "",
-        uploadMode: p.upload?.mode ?? hubCfg.uploadMode ?? "stage-only",
+        uploadMode: c.upload?.mode ?? hubCfg.uploadMode ?? "stage-only",
         uploadMeta: {
-          tag: p.upload?.tag ?? hubCfg.uploadMeta?.tag ?? "直播,录像",
-          tid: p.upload?.tid ?? hubCfg.uploadMeta?.tid ?? 21,
-          desc: p.upload?.desc ?? hubCfg.uploadMeta?.desc,
+          tag: c.upload?.tag ?? hubCfg.uploadMeta?.tag ?? "直播,录像",
+          tid: c.upload?.tid ?? hubCfg.uploadMeta?.tid ?? 21,
+          desc: c.upload?.desc ?? hubCfg.uploadMeta?.desc,
         },
-        steps: p.steps,
-        cleanup: p.cleanup,
+        steps: c.steps,
+        cleanup: c.cleanup,
       };
     };
 

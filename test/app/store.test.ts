@@ -329,21 +329,25 @@ describe("TaskStore", () => {
     db.close();
   });
 
-  it("pipeline 配置:addTask 存 + getTask 取(JSON 往返),updateTask 改,默认 null", () => {
+  it("hub 规则:upsert 派生 roomSlug + JSON 往返 config,update 改,list/get/remove", () => {
     const store = new TaskStore(dbPath);
-    // 默认无 pipeline
-    const a = store.addTask({ room: "no-pipe" });
-    expect(store.getTask(a.id)!.pipeline).toBeNull();
-    // 带 pipeline 配置
-    const cfg = { sync: true, steps: { burnDanmu: false }, cleanup: { sourceAfterDone: true }, upload: { mode: "stage-only" as const, tag: "t", tid: 21 } };
-    const b = store.addTask({ room: "with-pipe", pipeline: cfg });
-    expect(store.getTask(b.id)!.pipeline).toEqual(cfg);
-    // updateTask 改 pipeline
-    store.updateTask(b.id, { pipeline: { sync: false } });
-    expect(store.getTask(b.id)!.pipeline).toEqual({ sync: false });
-    // 清空
-    store.updateTask(b.id, { pipeline: null });
-    expect(store.getTask(b.id)!.pipeline).toBeNull();
+    // 创建:room 归一化解析出 roomSlug(web_rid)
+    const cfg = { steps: { burnDanmu: false }, cleanup: { sourceAfterDone: true }, upload: { mode: "stage-only" as const, tag: "t", tid: 21 } };
+    const r = store.upsertHubRule({ room: "https://live.douyin.com/123456", config: cfg });
+    expect(r.roomSlug).toBe("123456");
+    expect(r.platform).toBe("douyin");
+    expect(r.enabled).toBe(true); // 默认启用
+    expect(store.getHubRule("123456")!.config).toEqual(cfg);
+    // upsert 同房间 = 覆盖(主键 roomSlug)
+    store.upsertHubRule({ room: "https://live.douyin.com/123456", enabled: false });
+    expect(store.getHubRule("123456")!.enabled).toBe(false);
+    // updateHubRule 部分改
+    expect(store.updateHubRule("123456", { enabled: true })!.enabled).toBe(true);
+    expect(store.updateHubRule("nope", { enabled: true })).toBeNull();
+    // list + remove
+    expect(store.listHubRules().length).toBe(1);
+    expect(store.removeHubRule("123456")).toBe(true);
+    expect(store.getHubRule("123456")).toBeNull();
     store.close();
   });
 });

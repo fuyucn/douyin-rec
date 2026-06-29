@@ -5,6 +5,7 @@ import { Footer } from "./layout/Footer";
 import { TopNav } from "./layout/TopNav";
 import { useRefreshCookie } from "./lib/hooks";
 import { useEventNotifications } from "./lib/notifications";
+import { HubPage } from "./pages/HubPage";
 import { TaskDetail } from "./pages/TaskDetail";
 import { TaskList } from "./pages/TaskList";
 
@@ -24,6 +25,7 @@ export function App(): ReactNode {
         <Routes>
           <Route path="/" element={<TaskList />} />
           <Route path="/task/:id" element={<TaskDetail />} />
+          <Route path="/hub" element={<HubPage />} />
           <Route path="*" element={<TaskList />} />
         </Routes>
       </main>
