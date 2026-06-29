@@ -52,12 +52,16 @@ export class SshTransport implements Transport {
     // slave 端 _inventory 子命令扫描自身 recordings 并输出 JSON { recordings: NodeRecording[] }。
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const cmd = `${nodePrefix} _inventory ${this.o.dataRoot}`;
-    const out = await this.run(["bash", "-lc", cmd]);
+    // 命令作**单个字符串**传:ssh 本就经远端 shell(`$SHELL -c`)执行命令,无需再包 bash -lc。
+    // 旧写法 ["bash","-lc",cmd] 经 ssh 空格 join 成 `bash -lc node /path …` → bash -c 只取 "node"
+    // 当命令、其余成位置参数 → 实际只跑 `node`(无脚本)→ 空输出 → JSON.parse 抛错 → 该节点恒缺席。
+    const out = await this.run([cmd]);
     const parsed = JSON.parse(out) as { recordings: NodeRecording[] };
     return { tenantId: this.id, recordings: parsed.recordings };
   }
   async isDone(roomSlug: string): Promise<boolean> {
-    const out = await this.run(["bash", "-lc",
+    // 同 listInventory:命令作单个字符串传(远端 shell 执行,glob/管道生效),不包 bash -lc。
+    const out = await this.run([
       `cat /proc/[0-9]*/comm 2>/dev/null | grep -ic ffmpeg || true`]);
     const n = parseInt(out.trim(), 10);
     // 未知/乱码输出 → 视为未收播(安全默认：编排器等待而非提前同步)
