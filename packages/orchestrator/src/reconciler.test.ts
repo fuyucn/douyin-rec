@@ -227,49 +227,33 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
-  it("settle: isDone 始终 false → maxWait 后仍继续 pipeline（不 hang、不抛、有 warn 日志）", async () => {
+  it("settle: isDone 始终 false（仍在录）→ **跳过该场**不处理(等录完),不 hang/不抛,有 warn 日志（Bug B 完整修复）", async () => {
     const ledger = freshLedger();
     const rec = makeRec();
 
     const t1: Transport = {
       id: "node-slow",
       listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ tenantId: "node-slow", recordings: [rec] }),
-      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(false),
+      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(false), // 一直在录
       pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
     };
     const transports = new Map([["node-slow", t1]]);
     const pipelineDeps = makePipelineDeps(ledger, transports);
-
     const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
-      async (b, _deps) => {
-        ledger.markDone(b.streamKey, "BV_SLOW");
-        return { state: "done", bv: "BV_SLOW" };
-      },
+      async (b) => { ledger.markDone(b.streamKey, "BV_SLOW"); return { state: "done", bv: "BV_SLOW" }; },
     );
-
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const deps: ReconcilerDeps = {
-      platform: "douyin",
-      transports,
-      ledger,
-      pipelineDeps,
-      runPipeline: spyRunPipeline,
-      settle: { maxWaitMs: 50, pollMs: 1 },
-      sleep: fastSleep,
-    };
-
-    const reconciler = new Reconciler(deps);
-    // Must not hang and must not throw
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: { maxWaitMs: 50, pollMs: 1 }, sleep: fastSleep,
+    });
     await expect(reconciler.reconcileAll()).resolves.toBeUndefined();
 
-    // Pipeline still ran (no hang, no skip)
-    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
-
-    // A warning was logged mentioning the tenant that was still recording
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("node-slow"),
-    );
+    // 关键:仍在录 → pipeline **不跑**(不抓残片),也不建 job;只 warn
+    expect(spyRunPipeline).toHaveBeenCalledTimes(0);
+    expect(ledger.listActive()).toHaveLength(0);   // 没建任何 job
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("node-slow"));
 
     warnSpy.mockRestore();
     ledger.close();

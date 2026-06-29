@@ -76,12 +76,12 @@ export class Reconciler {
   }
 
   /**
-   * Poll all transports' isDone(roomSlug) for each broadcast member until ALL return true,
-   * or maxWaitMs elapses. Transports without isDone are treated as done.
-   * isDone() errors count as "not done" for that round but never abort the loop.
-   * After settling, always proceed (runs pipeline even if some nodes timed out).
+   * 轮询各成员 isDone(roomSlug) 直到全部收播或 maxWaitMs 超时。无 isDone 的 transport 视为已收播。
+   * isDone 抛错按"未收播"算(但不中止循环)。
+   * **返回仍未收播的成员 key 集合(`tenantId:roomSlug`)** —— 调用方据此跳过仍在录制的场,
+   * 避免边录边合并残片(Bug B:之前超时即"继续对账"处理残片 → job 标终态 → 真收播被跳过)。
    */
-  private async settleAll(broadcasts: ReturnType<typeof clusterBroadcasts>): Promise<void> {
+  private async settleAll(broadcasts: ReturnType<typeof clusterBroadcasts>): Promise<Set<string>> {
     const { maxWaitMs, pollMs } = this.settle;
     const deadline = Date.now() + maxWaitMs;
 
@@ -96,7 +96,7 @@ export class Reconciler {
       }
     }
 
-    if (pending.size === 0) return;
+    if (pending.size === 0) return pending;
 
     while (pending.size > 0 && Date.now() < deadline) {
       // Check all pending members this round
@@ -129,9 +129,10 @@ export class Reconciler {
         return `${tenantId}/${roomSlug}`;
       });
       console.warn(
-        `[reconciler] settle timeout — 以下节点仍在录制，将继续对账: ${timedOut.join(", ")}`,
+        `[reconciler] settle 超时 — 以下节点仍在录制，本轮跳过其所在场，待录完后续轮再处理: ${timedOut.join(", ")}`,
       );
     }
+    return pending;
   }
 
   async reconcileAll(): Promise<void> {
@@ -147,12 +148,15 @@ export class Reconciler {
       invs.map((i) => ({ tenantId: i.tenantId, recordings: i.recordings })),
     );
 
-    // 3. Settle: wait for all members to finish recording before running pipeline.
-    await this.settleAll(broadcasts);
+    // 3. Settle: 等各成员收播;返回仍在录的成员 key 集。
+    const stillRecording = await this.settleAll(broadcasts);
 
     // 4. For each broadcast: idempotent upsert + run pipeline if needed.
     for (const b of broadcasts) {
       try {
+        // 仍有成员在录制 → 本轮跳过(不建 job、不合并残片),待其录完的后续轮再处理。
+        if (b.members.some((m) => stillRecording.has(`${m.tenantId}:${m.rec.roomSlug}`))) continue;
+
         const job = this.ledger.get(b.streamKey);
 
         // Skip terminal states.
