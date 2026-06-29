@@ -42,6 +42,7 @@ function makeTransport(tenantId: string, exists = true): Transport {
     isDone: vi.fn().mockResolvedValue(true),
     pull: vi.fn().mockResolvedValue(undefined),
     exists: vi.fn().mockResolvedValue(exists),
+    cleanup: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -262,6 +263,35 @@ describe("runPipeline", () => {
     expect(deps.upload).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
+    deps.ledger.close();
+  });
+
+  it("场景6(步骤开关): burnDanmu=false → 不烧 danmu、upload 的 danmu 组为空,只 livechat", async () => {
+    const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { burnDanmu: false } } });
+    deps.ledger.upsertPending(broadcast.streamKey);
+    await runPipeline(broadcast, deps);
+    const shCalls = deps.sh.mock.calls.map((c) => c[0] as string);
+    expect(shCalls.some((c) => c.includes("--style danmu"))).toBe(false);   // 没烧 danmu
+    expect(shCalls.some((c) => c.includes("--style livechat"))).toBe(true); // 烧了 livechat
+    const uploadArg = (deps.upload as Mock).mock.calls[0][0] as UploadArgs;
+    expect(uploadArg.groups[0]).toEqual([]);                                 // danmu 组空
+    expect(uploadArg.groups[1].length).toBeGreaterThan(0);                   // livechat 有
+    deps.ledger.close();
+  });
+
+  it("场景7(cleanup): sourceAfterDone → done 后各成员 transport.cleanup 被调", async () => {
+    const broadcast = makeBroadcast([
+      { tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
+      { tenantId: "node-2", rec: makeRec({ totalGapSec: 0 }) },
+    ]);
+    const deps = makeDeps({ cfg: { ...makeDeps().cfg, cleanup: { sourceAfterDone: true } } });
+    deps.ledger.upsertPending(broadcast.streamKey);
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("done");
+    // 两个成员节点的 cleanup 都被调(删源 .ts)
+    expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+    expect(deps.transports.get("node-2")!.cleanup).toHaveBeenCalled();
     deps.ledger.close();
   });
 });

@@ -1,6 +1,6 @@
 import type { Transport, NodeInventory } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import type { PipelineDeps } from "./pipeline.js";
+import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
 import { clusterBroadcasts } from "./identity.js";
 
@@ -22,6 +22,12 @@ export interface ReconcilerDeps {
   sleep?: (ms: number) => Promise<void>;
   /** 单个租户 listInventory 的超时(ms);挂起即降级为空,防一个 hung 节点锁死整轮对账。默认 60s。 */
   inventoryTimeoutMs?: number;
+  /**
+   * 按房间(roomSlug)解析该场的 pipeline 配置(来自对应任务的 per-task 配置)。
+   * 返回 null → 该房间没开 hub(无 task 配置)→ **跳过不处理**。
+   * 不提供 → 用全局 pipelineDeps.cfg(兼容旧的全局模式 / 测试)。
+   */
+  resolveCfg?: (roomSlug: string) => PipelineCfg | null;
   /** pipeline 失败的最大自动重试次数;达到后留 failed 不再重入。默认 3。 */
   maxRetries?: number;
 }
@@ -43,6 +49,7 @@ export class Reconciler {
   private sleep: (ms: number) => Promise<void>;
   private inventoryTimeoutMs: number;
   private maxRetries: number;
+  private resolveCfg?: (roomSlug: string) => PipelineCfg | null;
 
   constructor(deps: ReconcilerDeps) {
     this.platform = deps.platform;
@@ -54,6 +61,7 @@ export class Reconciler {
     this.sleep = deps.sleep ?? DEFAULT_SLEEP;
     this.inventoryTimeoutMs = deps.inventoryTimeoutMs ?? DEFAULT_INVENTORY_TIMEOUT_MS;
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.resolveCfg = deps.resolveCfg;
   }
 
   /** listInventory 包超时:挂起超过 inventoryTimeoutMs 即降级为空(该租户本轮缺席),不锁死整轮。 */
@@ -157,6 +165,15 @@ export class Reconciler {
         // 仍有成员在录制 → 本轮跳过(不建 job、不合并残片),待其录完的后续轮再处理。
         if (b.members.some((m) => stillRecording.has(`${m.tenantId}:${m.rec.roomSlug}`))) continue;
 
+        // 按任务取该房间的 pipeline 配置;resolveCfg 返回 null = 该房间没开 hub → 跳过。
+        // 不提供 resolveCfg → 用全局 pipelineDeps.cfg(兼容旧的全局模式)。
+        let cfg = this.pipelineDeps.cfg;
+        if (this.resolveCfg) {
+          const resolved = this.resolveCfg(b.roomSlug);
+          if (!resolved) continue; // 房间未开 hub 任务 → 不处理
+          cfg = resolved;
+        }
+
         const job = this.ledger.get(b.streamKey);
 
         // Skip terminal states.
@@ -170,7 +187,7 @@ export class Reconciler {
         // Don't re-enter an in-progress job unless it was retryable.
         if (!isNew && job && !RETRYABLE.has(job.state)) continue;
 
-        await this._runPipeline(b, this.pipelineDeps);
+        await this._runPipeline(b, { ...this.pipelineDeps, cfg });
       } catch (err) {
         // Per-broadcast 出错:置 job=failed(可见 + 重试上限内自动重试),不中止其余 broadcast。
         console.error(`[reconciler] broadcast ${b.streamKey} failed:`, err);

@@ -22,6 +22,8 @@ export interface Transport {
    * 可选:无此能力的 transport 视为「信任存在」(pull 失败仍由 reconciler 标 failed 兜底)。
    */
   exists?(paths: string[]): Promise<boolean>;
+  /** 删除该节点上的这些文件(cleanup 配置用;删失败应吞掉不抛)。无此能力则跳过清理。 */
+  cleanup?(paths: string[]): Promise<void>;
 }
 
 type Factory = (cfg: TenantConfig) => Transport;

@@ -81,6 +81,13 @@ export class SshTransport implements Transport {
     }
   }
 
+  /** 远端:rm -f 这些文件(命令单字符串传,失败吞掉)。 */
+  async cleanup(paths: string[]): Promise<void> {
+    if (paths.length === 0) return;
+    const quoted = paths.map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(" ");
+    try { await this.run([`rm -f ${quoted}`]); } catch { /* 忽略 */ }
+  }
+
   async pull(remotePaths: string[], localDir: string): Promise<void> {
     // 必须先建目标目录:否则 rsync 拉单文件到不存在的 localDir 会把它当**文件名**创建
     // → stage 路径变成文件 → 后续 merge scandir 报 ENOTDIR(ssh winner 拉流首次真跑才暴露)。

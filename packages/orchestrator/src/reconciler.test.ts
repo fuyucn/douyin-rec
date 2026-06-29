@@ -326,4 +326,44 @@ describe("Reconciler", () => {
     warnSpy.mockRestore();
     ledger.close();
   });
+
+  it("场景G(按任务取配置): resolveCfg 返回 null(房间没开 hub)→ 跳过不建 job/不跑 pipeline", async () => {
+    const ledger = freshLedger();
+    const t1 = makeTransport("node-1", [makeRec()]);
+    const transports = new Map([["node-1", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "X"); return { state: "done", bv: "X" }; },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+      resolveCfg: () => null,   // 该房间没有开 hub 的任务
+    });
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(0);
+    expect(ledger.listActive()).toHaveLength(0);
+    ledger.close();
+  });
+
+  it("场景H(按任务取配置): resolveCfg 返回 cfg → 用它跑 pipeline", async () => {
+    const ledger = freshLedger();
+    const t1 = makeTransport("node-1", [makeRec()]);
+    const transports = new Map([["node-1", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    let usedCfg: unknown;
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b, d) => { usedCfg = d.cfg; ledger.markDone(b.streamKey, "X"); return { state: "done", bv: "X" }; },
+    );
+    const perTaskCfg = { cleanMaxGapSec: 5, stageDir: "/s", cookies: "/c", uploadMode: "stage-only" as const, uploadMeta: { tag: "t", tid: 21 }, steps: { burnDanmu: false } };
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+      resolveCfg: () => perTaskCfg,
+    });
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(usedCfg).toEqual(perTaskCfg);   // pipeline 收到的是任务的 cfg
+    ledger.close();
+  });
 });
