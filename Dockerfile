@@ -35,7 +35,7 @@ FROM node:24-bookworm-slim AS runtime
 # ffmpeg/ffprobe 录制必需；ca-certificates 走 https 拉流/上报；curl 供 install-mesio.sh 下载。
 # openssh-client + rsync：docker 当 master 时经 SshTransport ssh/rsync 从 VPS 拉流(走 tailscale sidecar)。
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl openssh-client rsync \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl openssh-client rsync xz-utils \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
@@ -54,6 +54,11 @@ RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh && printf '%s\n' \
 # 不污染系统 /usr/local/bin）。版本由脚本内 PINNED_VERSION 存档；升级改脚本即可。bookworm=glibc → gnu。
 COPY scripts/install-mesio.sh /tmp/install-mesio.sh
 RUN MESIO_LIBC=gnu sh /tmp/install-mesio.sh /app/bin && rm /tmp/install-mesio.sh
+
+# biliup:docker 当 master 时 auto-private 上传用(orchestrator runBiliup spawn 裸 "biliup")。
+# 装到 /usr/local/bin 上 PATH;cookies 走挂载卷 /data/config/biliup/cookies.json(BILIUP_COOKIE env)。
+COPY scripts/install-biliup.sh /tmp/install-biliup.sh
+RUN BILIUP_LIBC=gnu sh /tmp/install-biliup.sh /usr/local/bin && rm /tmp/install-biliup.sh
 
 # 只拷构建产物（bundle 自包含依赖，无需 node_modules）。
 COPY --from=builder /app/dist ./dist

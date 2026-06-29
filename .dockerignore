@@ -29,6 +29,7 @@ remote
 tools
 scripts/*
 !scripts/install-mesio.sh
+!scripts/install-biliup.sh
 plans
 docs
 test
