@@ -28,6 +28,18 @@ interface FormState {
   danmu: boolean;
   useCookie: boolean;
   webhook: string;
+  // 多节点 hub pipeline(per-task)。hubSync=总开关;其余在开启后生效。
+  hubSync: boolean;
+  burnDanmu: boolean;
+  burnLivechat: boolean;
+  clStageSourceAfterMerge: boolean;
+  clSourceAfterDone: boolean;
+  clStageAfterDone: boolean;
+  clIncludeXmlAss: boolean;
+  uploadMode: string; // "stage-only" | "auto-private"
+  uploadTag: string;
+  uploadTid: string;
+  uploadDesc: string;
 }
 
 const BLANK: FormState = {
@@ -40,9 +52,21 @@ const BLANK: FormState = {
   danmu: true,
   useCookie: true,
   webhook: "",
+  hubSync: false,
+  burnDanmu: true,
+  burnLivechat: true,
+  clStageSourceAfterMerge: false,
+  clSourceAfterDone: false,
+  clStageAfterDone: false,
+  clIncludeXmlAss: false,
+  uploadMode: "stage-only",
+  uploadTag: "",
+  uploadTid: "21",
+  uploadDesc: "",
 };
 
 function fromTask(t: Task): FormState {
+  const p = t.pipeline ?? null;
   return {
     room: t.room ?? "",
     name: t.name ?? "",
@@ -53,6 +77,17 @@ function fromTask(t: Task): FormState {
     danmu: !!t.danmu,
     useCookie: !!t.useCookie,
     webhook: t.webhook ?? "",
+    hubSync: p?.sync === true,
+    burnDanmu: p?.steps?.burnDanmu !== false,
+    burnLivechat: p?.steps?.burnLivechat !== false,
+    clStageSourceAfterMerge: p?.cleanup?.stageSourceAfterMerge === true,
+    clSourceAfterDone: p?.cleanup?.sourceAfterDone === true,
+    clStageAfterDone: p?.cleanup?.stageAfterDone === true,
+    clIncludeXmlAss: p?.cleanup?.includeXmlAss === true,
+    uploadMode: p?.upload?.mode ?? "stage-only",
+    uploadTag: p?.upload?.tag ?? "",
+    uploadTid: String(p?.upload?.tid ?? 21),
+    uploadDesc: p?.upload?.desc ?? "",
   };
 }
 
@@ -158,6 +193,25 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
       useCookie: cookieReady && form.useCookie,
       schedule: form.schedule.trim() || null,
       webhook: form.webhook.trim() || null,
+      // 多节点 hub:开启时下发完整 per-task 配置;关闭时下发 {sync:false}(明确不 hub,可关掉旧配置)。
+      pipeline: form.hubSync
+        ? {
+            sync: true,
+            steps: { burnDanmu: form.burnDanmu, burnLivechat: form.burnLivechat },
+            cleanup: {
+              stageSourceAfterMerge: form.clStageSourceAfterMerge,
+              sourceAfterDone: form.clSourceAfterDone,
+              stageAfterDone: form.clStageAfterDone,
+              includeXmlAss: form.clIncludeXmlAss,
+            },
+            upload: {
+              mode: form.uploadMode === "auto-private" ? "auto-private" : "stage-only",
+              tag: form.uploadTag.trim() || undefined,
+              tid: Number(form.uploadTid) || 21,
+              desc: form.uploadDesc.trim() || undefined,
+            },
+          }
+        : { sync: false },
     };
     setBusy(true);
     try {
@@ -295,6 +349,58 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
               disabled={!cookieReady || !danmuAvailable}
             />
           </label>
+        </div>
+
+        {/* 多节点 hub pipeline(per-task)。hubSync 总开关;开启后逐步配置。 */}
+        <div className="sm:col-span-2 rounded-lg border border-hairline p-4 mt-1">
+          <label className="flex items-center justify-between gap-3 cursor-pointer">
+            <span className="flex flex-col">
+              <span className="text-sm font-medium text-ink">多节点 hub 同步 / Multi-node hub sync</span>
+              <span className="text-xs text-muted mt-0.5">开启 = 此房间由 hub 跨节点选优合并(否则只录,不 hub)</span>
+            </span>
+            <Switch checked={form.hubSync} onCheckedChange={(v) => set("hubSync", v)} name="hubSync" />
+          </label>
+
+          {form.hubSync && (
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {([
+                ["burnDanmu", "烧 danmu / 飞屏弹幕", "合成飞屏弹幕版"],
+                ["burnLivechat", "烧 livechat / 聊天框", "合成聊天框版"],
+                ["clStageSourceAfterMerge", "合并后删 stage 源 .ts", "留合成产物,删拉来的源片"],
+                ["clSourceAfterDone", "完成后删源节点录制", "各节点原始 .ts(完成后)"],
+                ["clStageAfterDone", "完成后删 stage 产物", "上传后删合成 mp4"],
+                ["clIncludeXmlAss", "删除含 .xml/.ass", "默认只删 .ts/.mp4(守弹幕源)"],
+              ] as const).map(([key, label, sub]) => (
+                <label key={key} className="flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 cursor-pointer">
+                  <span className="flex flex-col">
+                    <span className="text-sm font-medium text-ink">{label}</span>
+                    <span className="text-xs text-muted mt-0.5">{sub}</span>
+                  </span>
+                  <Switch checked={form[key]} onCheckedChange={(v) => set(key, v)} name={key} />
+                </label>
+              ))}
+
+              <div>
+                <label className="field-label">上传 / upload mode</label>
+                <select className="select" value={form.uploadMode} onChange={(e) => set("uploadMode", e.target.value)}>
+                  <option value="stage-only">stage-only(只合成不上传)</option>
+                  <option value="auto-private">auto-private(自动传 B站·仅自己可见)</option>
+                </select>
+              </div>
+              <div>
+                <label className="field-label">B站分区 tid</label>
+                <input type="number" min={1} className="input" value={form.uploadTid} onChange={(e) => set("uploadTid", e.target.value)} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="field-label">B站 tag(逗号分隔)</label>
+                <input className="input" placeholder="直播,录像,…" value={form.uploadTag} onChange={(e) => set("uploadTag", e.target.value)} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="field-label">B站简介 desc</label>
+                <input className="input" placeholder="(可选)" value={form.uploadDesc} onChange={(e) => set("uploadDesc", e.target.value)} />
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="sm:col-span-2 flex justify-end gap-3 mt-3">

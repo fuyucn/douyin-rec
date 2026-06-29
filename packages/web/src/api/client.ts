@@ -14,6 +14,7 @@ import type {
   TaskRuntime,
   CookieStatus,
   TaskPayload,
+  TaskPipelineConfig,
   RecordingsDTO,
   MergeJobDTO,
   EventsDTO,
@@ -21,7 +22,7 @@ import type {
   PlatformDTO,
   PlatformsDTO,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, TaskPipelineConfig, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
