@@ -1,5 +1,8 @@
 // packages/orchestrator/src/transport-ssh.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { existsSync, rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SshTransport } from "./transport-ssh.js";
 
 describe("SshTransport", () => {
@@ -57,5 +60,29 @@ describe("SshTransport", () => {
     const t = new SshTransport({ id: "vps", host: "h", dataRoot: "~/drec",
       run: async () => "DONE", rsync: async () => {} });
     expect(await t.isDone("411")).toBe(false);
+  });
+
+  const made: string[] = [];
+  afterEach(() => { for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  it("pull：先 mkdir localDir 再逐个 rsync(防 rsync 把不存在目标当文件名 → merge ENOTDIR)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "sshpull-")); made.push(root);
+    const localDir = join(root, "stage", "douyin_x");   // 多级、不存在
+    const calls: Array<[string, string]> = [];
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "~/drec",
+      run: async () => "", rsync: async (remote, dir) => { calls.push([remote, dir]); } });
+    await t.pull(["/r/a.ts", "/r/b.ts"], localDir);
+    expect(existsSync(localDir)).toBe(true);             // 关键:目录先建出来
+    expect(calls).toEqual([["/r/a.ts", localDir], ["/r/b.ts", localDir]]);
+  });
+
+  it("exists：远端全在→true,缺→false,空列表→true,ssh 抛错→false", async () => {
+    const ok = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "OK\n", rsync: async () => {} });
+    const miss = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "MISSING\n", rsync: async () => {} });
+    const fail = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => { throw new Error("x"); }, rsync: async () => {} });
+    expect(await ok.exists(["/a", "/b"])).toBe(true);
+    expect(await miss.exists(["/a"])).toBe(false);
+    expect(await ok.exists([])).toBe(true);
+    expect(await fail.exists(["/a"])).toBe(false);
   });
 });

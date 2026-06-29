@@ -1,5 +1,6 @@
 // packages/orchestrator/src/transport-ssh.ts
 import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import type { Transport, NodeInventory, NodeRecording } from "./transport.js";
 
 export interface SshOpts {
@@ -81,6 +82,9 @@ export class SshTransport implements Transport {
   }
 
   async pull(remotePaths: string[], localDir: string): Promise<void> {
+    // 必须先建目标目录:否则 rsync 拉单文件到不存在的 localDir 会把它当**文件名**创建
+    // → stage 路径变成文件 → 后续 merge scandir 报 ENOTDIR(ssh winner 拉流首次真跑才暴露)。
+    mkdirSync(localDir, { recursive: true });
     for (const rp of remotePaths) await this.rsync(rp, localDir);
   }
 }
