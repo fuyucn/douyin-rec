@@ -11,7 +11,11 @@
 
 ## 待修 followup
 
-### 1. streamKey 同主播同日复用碰撞(高)
+### ✅ 已修(`c8d6de1`)
+- **#1 选优剔除缺文件成员**:Transport 加 `exists(paths)`(Local=fs.existsSync,Ssh=远端 test -e),pipeline 选优前过滤 exists=false 的成员 → 不再选中已归档/清理的录像;全缺失 → job=failed。**这也是下面「streamKey 碰撞」卡 syncing 的直接止血**(选中旧归档录像会被剔除)。
+- **#2 pipeline 出错标 failed**:ledger 加 fails 列 + markFailed;reconciler catch → failed(maxRetries=3 内自动重试,达上限留 failed 不再重入)。原本卡 merging/syncing 永不动 → 现可见 + 有限重试。
+
+### 1. streamKey 同主播同日复用碰撞(中 —— #1 已止血,根因待清)
 streamKey = `平台:roomSlug:日期`。同一主播**同一天的新旧两场**(或测试反复跑)→ 撞同一 streamKey。
 旧场已 `needs_manual`/`done`(终态)且文件已归档 → 其陈旧 sync_candidates 残留 → 新场重聚时 winner 可能选中**已归档的旧录像** → pull 找不到文件 → 卡 syncing。
 - clusterBroadcasts 对**同日多簇**已有 `_HHMM` 后缀逻辑,但跨「已从 recordings 移走的旧场」失效(旧场不在 inventory 里,但 sync db 残留)。
