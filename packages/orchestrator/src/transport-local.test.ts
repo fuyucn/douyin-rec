@@ -73,6 +73,25 @@ describe("LocalTransport.listInventory（Bug A:gaps.roomSlug 优先)", () => {
   });
 });
 
+describe("LocalTransport.listInventory（meta.roomSlug 优先级最高）", () => {
+  it("meta.json 的 roomSlug 优先于 gaps.roomSlug / taskRooms / 目录名", async () => {
+    const root = mkdtempSync(join(tmpdir(), "loc-meta-"));
+    const dir = join(root, "流放2-老于"); mkdirSync(dir);
+    writeFileSync(join(dir, "流放2-老于_2026-06-29_08-40_000.ts"), "x");
+    // meta=465(权威),gaps=999(旧/不同),taskRooms=888 → 应取 meta 的 465
+    writeFileSync(join(dir, "流放2-老于_2026-06-29_08-40.meta.json"),
+      JSON.stringify({ sessionBase: "流放2-老于_2026-06-29_08-40", roomSlug: "465721793855" }));
+    writeFileSync(join(dir, "流放2-老于_2026-06-29_08-40.gaps.json"),
+      JSON.stringify({ sessionBase: "流放2-老于_2026-06-29_08-40", gaps: [], totalGapSec: 0, roomSlug: "999" }));
+    const t = new LocalTransport({
+      id: "local", recordingsDir: root, taskRooms: { "流放2-老于": "888" },
+      ffprobe: async () => ({ durationSec: 300, startMs: 1, endMs: 300_001 }),
+    });
+    const inv = await t.listInventory();
+    expect(inv.recordings[0].roomSlug).toBe("465721793855");
+  });
+});
+
 describe("LocalTransport.pull", () => {
   it("复制文件到目标目录（同机 pull 实装）", async () => {
     const root = mkdtempSync(join(tmpdir(), "pull-"));

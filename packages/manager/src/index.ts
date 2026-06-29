@@ -290,6 +290,13 @@ export class RecordingSession {
     this.writerOpen = true;
     this.currentXmlPath = xmlPath;
     this.lastXmlPath = xmlPath;
+    // 会话**开始**即写身份 sidecar:roomSlug(web_rid)= 唯一 ID。多节点 scan 优先读它当 slug,
+    // 从第一秒就有、跨节点一致、不依赖主播名解析,也无"停录后 gaps 才有 slug"的时序竞态。
+    try {
+      const base = xmlPath.replace(/\.xml$/i, "");
+      const roomSlug = platformForRoom(this.roomUrl).extractRoomSlug(this.roomUrl);
+      writeFileSync(`${base}.meta.json`, JSON.stringify({ sessionBase: basename(base), roomSlug }), "utf-8");
+    } catch { /* meta 写失败不影响录制 */ }
   }
 
   private write(m: DanmuMessage): void {

@@ -102,6 +102,10 @@ describe("RecordingSession", () => {
     await sess.stop();
     const xmls = readdirSync(dir).filter((f) => f.endsWith(".xml"));
     expect(xmls.length).toBeGreaterThanOrEqual(1); // 生成了 xml
+    // 会话开始即写身份 sidecar {base}.meta.json,roomSlug = web_rid(从 live.douyin.com/123 解析)。
+    const metas = readdirSync(dir).filter((f) => f.endsWith(".meta.json"));
+    expect(metas.length).toBeGreaterThanOrEqual(1);
+    expect(JSON.parse(readFileSync(join(dir, metas[0]), "utf-8")).roomSlug).toBe("123");
   });
 
   it("弹幕只在 onLive 后启动：recorder 未 fire onLive(等开播)→ 弹幕不连(防开播前陈旧 liveId)", async () => {

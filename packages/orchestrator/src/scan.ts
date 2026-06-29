@@ -1,10 +1,18 @@
 // packages/orchestrator/src/scan.ts
 // 共享录像扫描函数：被 LocalTransport 和 _inventory CLI 子命令复用。
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { groupSessions } from "@drec/post-process";
 import type { NodeRecording } from "./transport.js";
 import { readGaps } from "./gaps.js";
+
+/** 读会话身份 sidecar {base}.meta.json(录制开始即写),取其权威 roomSlug;缺失/损坏返回 undefined。 */
+function readMetaRoomSlug(jsonPath: string): string | undefined {
+  try {
+    const d = JSON.parse(readFileSync(jsonPath, "utf-8")) as { roomSlug?: string };
+    return d.roomSlug || undefined;
+  } catch { return undefined; }
+}
 
 export type FfprobeAdapter = (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;
 
@@ -41,10 +49,11 @@ export async function scanRecordings(
         endMs = Math.max(endMs, p.endMs);
       }
       const gaps = readGaps(join(dir, `${base}.gaps.json`));
+      const metaSlug = readMetaRoomSlug(join(dir, `${base}.meta.json`));
       recordings.push({
-        // 优先用录制端写进 gaps.json 的权威 roomSlug(跨节点一致);否则回退 anchorName 映射 / 目录名。
-        // 解决:某节点 anchorName 未解析 → 回退目录名 → 与其他节点 slug 不一致 → 同场被切成两个 streamKey。
-        roomSlug: gaps?.roomSlug ?? taskRooms[anchor] ?? anchor,
+        // slug = 房间号(web_rid)唯一 ID。优先级:meta(录制开始即写,最稳)> gaps(停录写)
+        // > taskRooms[主播名] > 目录名。前两者随录像走、跨节点一致;后两者是不可靠回退。
+        roomSlug: metaSlug ?? gaps?.roomSlug ?? taskRooms[anchor] ?? anchor,
         sessionBase: base,
         tsFiles: g.ts.map((f) => join(dir, f)),
         xmlPath: join(dir, `${base}.xml`),
