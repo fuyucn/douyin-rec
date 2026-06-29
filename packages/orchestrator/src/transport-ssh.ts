@@ -68,6 +68,18 @@ export class SshTransport implements Transport {
     if (isNaN(n)) return false;
     return n === 0; // 0 ffmpeg 进程 = 已收播
   }
+  /** 远端:逐个 `test -e`,全在则 echo OK(命令单字符串传,同 listInventory 规避 ssh 打散)。 */
+  async exists(paths: string[]): Promise<boolean> {
+    if (paths.length === 0) return true;
+    const test = paths.map((p) => `test -e '${p.replace(/'/g, "'\\''")}'`).join(" && ");
+    try {
+      const out = await this.run([`${test} && echo OK || echo MISSING`]);
+      return out.trim().endsWith("OK");
+    } catch {
+      return false; // ssh 失败 → 当作不可用(选优会剔除;另有 reconciler failed 兜底)
+    }
+  }
+
   async pull(remotePaths: string[], localDir: string): Promise<void> {
     for (const rp of remotePaths) await this.rsync(rp, localDir);
   }

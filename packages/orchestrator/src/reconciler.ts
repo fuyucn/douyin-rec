@@ -22,10 +22,13 @@ export interface ReconcilerDeps {
   sleep?: (ms: number) => Promise<void>;
   /** 单个租户 listInventory 的超时(ms);挂起即降级为空,防一个 hung 节点锁死整轮对账。默认 60s。 */
   inventoryTimeoutMs?: number;
+  /** pipeline 失败的最大自动重试次数;达到后留 failed 不再重入。默认 3。 */
+  maxRetries?: number;
 }
 
 const DEFAULT_SETTLE: SettleConfig = { maxWaitMs: 600_000, pollMs: 15_000 };
 const DEFAULT_INVENTORY_TIMEOUT_MS = 60_000;
+const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_SLEEP = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const RETRYABLE = new Set<JobState>(["pending", "failed"]);
@@ -39,6 +42,7 @@ export class Reconciler {
   private settle: SettleConfig;
   private sleep: (ms: number) => Promise<void>;
   private inventoryTimeoutMs: number;
+  private maxRetries: number;
 
   constructor(deps: ReconcilerDeps) {
     this.platform = deps.platform;
@@ -49,6 +53,7 @@ export class Reconciler {
     this.settle = deps.settle ?? DEFAULT_SETTLE;
     this.sleep = deps.sleep ?? DEFAULT_SLEEP;
     this.inventoryTimeoutMs = deps.inventoryTimeoutMs ?? DEFAULT_INVENTORY_TIMEOUT_MS;
+    this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
   }
 
   /** listInventory 包超时:挂起超过 inventoryTimeoutMs 即降级为空(该租户本轮缺席),不锁死整轮。 */
@@ -153,6 +158,9 @@ export class Reconciler {
         // Skip terminal states.
         if (job?.state === "done" || job?.state === "needs_manual") continue;
 
+        // failed 且已达重试上限 → 放弃自动重试(留 failed 供人工/诊断),不再重入。
+        if (job?.state === "failed" && (job.fails ?? 0) >= this.maxRetries) continue;
+
         const { isNew } = this.ledger.upsertPending(b.streamKey);
 
         // Don't re-enter an in-progress job unless it was retryable.
@@ -160,8 +168,9 @@ export class Reconciler {
 
         await this._runPipeline(b, this.pipelineDeps);
       } catch (err) {
-        // Per-broadcast errors are logged and swallowed so remaining broadcasts proceed.
+        // Per-broadcast 出错:置 job=failed(可见 + 重试上限内自动重试),不中止其余 broadcast。
         console.error(`[reconciler] broadcast ${b.streamKey} failed:`, err);
+        this.ledger.markFailed(b.streamKey, String((err as Error)?.message ?? err).slice(0, 300));
       }
     }
   }

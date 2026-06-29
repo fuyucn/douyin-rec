@@ -1,5 +1,5 @@
 // packages/orchestrator/src/transport-local.ts
-import { mkdirSync, copyFileSync } from "node:fs";
+import { mkdirSync, copyFileSync, existsSync } from "node:fs";
 import { join, basename } from "node:path";
 import type { Transport, NodeInventory } from "./transport.js";
 import { scanRecordings } from "./scan.js";
@@ -27,6 +27,11 @@ export class LocalTransport implements Transport {
   }
 
   async isDone(_roomSlug: string): Promise<boolean> { return true; }
+
+  /** 同机:fs 判存在(全在才 true)。 */
+  async exists(paths: string[]): Promise<boolean> {
+    return paths.every((p) => existsSync(p));
+  }
 
   /** 同机 pull：mkdir -p localDir，然后把每个文件复制进去（保留文件名）。 */
   async pull(remotePaths: string[], localDir: string): Promise<void> {

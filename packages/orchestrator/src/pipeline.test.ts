@@ -35,12 +35,13 @@ function makeBroadcast(members: Array<{ tenantId: string; rec: NodeRecording }>)
   };
 }
 
-function makeTransport(tenantId: string): Transport {
+function makeTransport(tenantId: string, exists = true): Transport {
   return {
     id: tenantId,
     listInventory: vi.fn().mockResolvedValue({ tenantId, recordings: [] }),
     isDone: vi.fn().mockResolvedValue(true),
     pull: vi.fn().mockResolvedValue(undefined),
+    exists: vi.fn().mockResolvedValue(exists),
   };
 }
 
@@ -223,6 +224,44 @@ describe("runPipeline", () => {
     expect(uploadArg.groups[0][1]).toContain("_danmu_part1");
     expect(uploadArg.groups[1]).toEqual([expect.stringContaining("_livechat.mp4")]);
 
+    deps.ledger.close();
+  });
+
+  it("场景4(#1 剔除缺文件成员): node-1 文件已不在 → 剔除,winner 落到 node-2", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // node-1 时长更长(本应胜),但其文件已不存在(exists=false)→ 应被剔除,winner=node-2
+    const broadcast = makeBroadcast([
+      { tenantId: "node-1", rec: makeRec({ durationSec: 9999, totalGapSec: 0 }) },
+      { tenantId: "node-2", rec: makeRec({ durationSec: 3600, totalGapSec: 0 }) },
+    ]);
+    const deps = makeDeps();
+    deps.transports.set("node-1", makeTransport("node-1", false)); // 文件缺失
+    deps.transports.set("node-2", makeTransport("node-2", true));
+    deps.ledger.upsertPending(broadcast.streamKey);
+
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("done");
+    // winner 应是 node-2(node-1 被剔除),pull 在 node-2 上调用
+    expect(deps.ledger.get(broadcast.streamKey)?.winnerTenant).toBe("node-2");
+    expect(deps.transports.get("node-2")!.pull).toHaveBeenCalledTimes(1);
+    expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+    deps.ledger.close();
+  });
+
+  it("场景5(#1 全缺失): 所有成员文件都没了 → failed", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const deps = makeDeps();
+    deps.transports.set("node-1", makeTransport("node-1", false));
+    deps.ledger.upsertPending(broadcast.streamKey);
+
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("failed");
+    expect(deps.upload).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
     deps.ledger.close();
   });
 });

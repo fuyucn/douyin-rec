@@ -48,11 +48,22 @@ export async function runPipeline(
   const splitForUpload = deps.splitForUpload ?? ((mp4: string) => splitToSizeLimit(mp4));
   const { streamKey } = b;
 
-  // Select the best recording across all nodes
-  const selection = selectWinner(b, cfg.cleanMaxGapSec);
+  // #1 防护:剔除「文件已不在该节点」的成员(已归档/清理)——否则可能选中其为 winner、pull 失败卡住。
+  // 无 exists 能力的 transport 视为信任存在;exists 抛错按缺失剔除。
+  const presentMembers = [];
+  for (const m of b.members) {
+    const tp = transports.get(m.tenantId);
+    const ok = tp?.exists ? await tp.exists(m.rec.tsFiles).catch(() => false) : true;
+    if (ok) presentMembers.push(m);
+    else console.warn(`[pipeline] ${streamKey} 剔除成员 ${m.tenantId}:文件已不存在`);
+  }
+  const candidates = { ...b, members: presentMembers };
+
+  // Select the best recording across all (present) nodes
+  const selection = selectWinner(candidates, cfg.cleanMaxGapSec);
 
   if (!selection.winner) {
-    ledger.setState(streamKey, "failed", { error: "no winner" });
+    ledger.setState(streamKey, "failed", { error: presentMembers.length ? "no winner" : "无可用成员(文件均缺失)" });
     return { state: "failed" };
   }
 

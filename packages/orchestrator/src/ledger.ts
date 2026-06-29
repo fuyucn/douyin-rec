@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 
 export type JobState = "pending"|"settling"|"syncing"|"merging"|"uploading"|"done"|"failed"|"needs_manual";
-export interface JobRow { streamKey: string; state: JobState; winnerTenant?: string; bv?: string; error?: string; updatedAt: number; }
+export interface JobRow { streamKey: string; state: JobState; winnerTenant?: string; bv?: string; error?: string; fails: number; updatedAt: number; }
 
 /** 一个节点候选的选优指标(落库供复盘"为什么这台赢")。 */
 export interface CandidateRow {
@@ -22,7 +22,9 @@ export class SyncLedger {
     this.db = new DatabaseSync(dbPath);
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_jobs(
       streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
-      winnerTenant TEXT, bv TEXT, error TEXT, updatedAt INTEGER NOT NULL)`);
+      winnerTenant TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    // 既有库迁移:补 fails 列(已存在则忽略)。
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN fails INTEGER NOT NULL DEFAULT 0"); } catch { /* 列已存在 */ }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, tenantId TEXT NOT NULL,
@@ -48,6 +50,11 @@ export class SyncLedger {
   }
   markDone(streamKey: string, bv: string): void {
     this.db.prepare("UPDATE sync_jobs SET state='done', bv=?, error=NULL, updatedAt=? WHERE streamKey=?").run(bv, this.now(), streamKey);
+  }
+  /** pipeline 抛错时:置 failed + 记 error + fails 自增(供重试上限判定)。 */
+  markFailed(streamKey: string, error: string): void {
+    this.db.prepare("UPDATE sync_jobs SET state='failed', error=?, fails=fails+1, updatedAt=? WHERE streamKey=?")
+      .run(error, this.now(), streamKey);
   }
   listActive(): JobRow[] {
     return this.db.prepare("SELECT * FROM sync_jobs WHERE state NOT IN('done','needs_manual')").all() as unknown as JobRow[];

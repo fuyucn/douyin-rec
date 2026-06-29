@@ -17,6 +17,11 @@ export interface Transport {
   listInventory(): Promise<NodeInventory>;
   isDone(roomSlug: string): Promise<boolean>;
   pull(remotePaths: string[], localDir: string): Promise<void>;
+  /**
+   * 该节点上这些路径是否都还存在(选优前剔除「文件已被清理/归档」的候选,防选中后 pull 失败卡住)。
+   * 可选:无此能力的 transport 视为「信任存在」(pull 失败仍由 reconciler 标 failed 兜底)。
+   */
+  exists?(paths: string[]): Promise<boolean>;
 }
 
 type Factory = (cfg: TenantConfig) => Transport;

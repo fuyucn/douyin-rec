@@ -275,6 +275,40 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
+  it("场景F(出错标 failed + 重试上限): runPipeline 抛错 → job=failed/fails 自增,达上限后不再重入", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ledger = freshLedger();
+    const t1 = makeTransport("node-1", [makeRec()]);
+    const transports = new Map([["node-1", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async () => { throw new Error("merge 爆了"); },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: { maxWaitMs: 50, pollMs: 1 }, sleep: fastSleep,
+      maxRetries: 2,
+    });
+    const key = "douyin:test-room:2026-06-22";
+
+    await reconciler.reconcileAll();                 // 第1次 → 抛错 → failed, fails=1
+    let job = ledger.get(key);
+    expect(job?.state).toBe("failed");
+    expect(job?.fails).toBe(1);
+    expect(job?.error).toContain("merge 爆了");
+
+    await reconciler.reconcileAll();                 // 第2次 → 重试 → failed, fails=2(达上限)
+    expect(ledger.get(key)?.fails).toBe(2);
+    expect(spyRunPipeline).toHaveBeenCalledTimes(2);
+
+    await reconciler.reconcileAll();                 // 第3次 → 达上限 → 跳过,不再调 runPipeline
+    expect(spyRunPipeline).toHaveBeenCalledTimes(2); // 仍是 2
+    expect(ledger.get(key)?.fails).toBe(2);
+
+    errSpy.mockRestore();
+    ledger.close();
+  });
+
   it("场景E(防锁死): 一个租户 listInventory 永久挂起 → 超时降级为空,reconcile 仍完成且处理其余租户", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const ledger = freshLedger();
