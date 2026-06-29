@@ -28,4 +28,24 @@ describe("SyncLedger", () => {
     expect(l.get("k1")?.error).toBe("boom");
     l.close();
   });
+  it("recordCandidates 落库 + 标记 winner + 幂等覆盖（选优可复盘）", () => {
+    const l = fresh();
+    const cands = [
+      { tenantId: "local", coverage: 1, durationSec: 20525, startMs: 100, endMs: 20625100, totalGapSec: 0 },
+      { tenantId: "vps2", coverage: 1, durationSec: 20503, startMs: 20100, endMs: 20623100, totalGapSec: 0 },
+    ];
+    l.recordCandidates("douyin:767:2026-06-28", cands, "local");
+    const rows = l.getCandidates("douyin:767:2026-06-28");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].isWinner).toBe(1);          // winner 排最前
+    expect(rows[0].tenantId).toBe("local");
+    expect(rows[0].durationSec).toBe(20525);
+    expect(rows[1].isWinner).toBe(0);
+    // 再次写 → 覆盖不重复（PRIMARY KEY streamKey+tenantId）
+    l.recordCandidates("douyin:767:2026-06-28", cands, "vps2");
+    const again = l.getCandidates("douyin:767:2026-06-28");
+    expect(again).toHaveLength(2);
+    expect(again.find((r) => r.tenantId === "vps2")?.isWinner).toBe(1);
+    l.close();
+  });
 });

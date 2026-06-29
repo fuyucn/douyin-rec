@@ -7,14 +7,30 @@ export function coverageOf(rec: NodeRecording): number {
   return Math.max(0, Math.min(1, 1 - rec.totalGapSec / spanSec));
 }
 
+export interface CandidateMetrics {
+  tenantId: string;
+  coverage: number;
+  durationSec: number;
+  startMs: number;
+  endMs: number;
+  totalGapSec: number;
+}
+
 export interface Selection {
   winner: BroadcastMember | null;
   clean: boolean;
-  perNode: { tenantId: string; coverage: number; durationSec: number }[];
+  perNode: CandidateMetrics[];
 }
 
 export function selectWinner(b: Broadcast, cleanMaxGapSec: number): Selection {
-  const perNode = b.members.map((m) => ({ tenantId: m.tenantId, coverage: coverageOf(m.rec), durationSec: m.rec.durationSec }));
+  const perNode: CandidateMetrics[] = b.members.map((m) => ({
+    tenantId: m.tenantId,
+    coverage: coverageOf(m.rec),
+    durationSec: m.rec.durationSec,
+    startMs: m.rec.startMs,
+    endMs: m.rec.endMs,
+    totalGapSec: m.rec.totalGapSec,
+  }));
   const winner = [...b.members].sort((x, y) =>
     coverageOf(y.rec) - coverageOf(x.rec) || y.rec.durationSec - x.rec.durationSec
   )[0] ?? null;

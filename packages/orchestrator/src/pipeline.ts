@@ -4,11 +4,13 @@ import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import type { NotifyEvent } from "@drec/core";
 import type { UploadOpts } from "@drec/app";
+import { splitToSizeLimit } from "@drec/post-process";
 import { selectWinner } from "./select.js";
 
 export interface UploadArgs {
   plain: UploadOpts;
-  extras: string[];
+  /** 按逻辑块分组的分P(每组一条 append),例:[[danmu_part0,danmu_part1],[livechat]]。 */
+  groups: string[][];
   run?: (argv: string[]) => Promise<string>;
 }
 
@@ -17,6 +19,8 @@ export interface PipelineDeps {
   ledger: SyncLedger;
   sh: (cmd: string) => Promise<void>;
   upload: (o: UploadArgs) => Promise<string>;
+  /** 把单个烧录产物按 16GB 上限切成多段(默认 splitToSizeLimit);可注入测试。 */
+  splitForUpload?: (mp4: string) => Promise<string[]>;
   notify: (e: NotifyEvent) => void;
   cfg: {
     cleanMaxGapSec: number;
@@ -41,6 +45,7 @@ export async function runPipeline(
   deps: PipelineDeps,
 ): Promise<{ state: JobState; bv?: string }> {
   const { transports, ledger, sh, upload, notify, cfg } = deps;
+  const splitForUpload = deps.splitForUpload ?? ((mp4: string) => splitToSizeLimit(mp4));
   const { streamKey } = b;
 
   // Select the best recording across all nodes
@@ -52,6 +57,9 @@ export async function runPipeline(
   }
 
   const winner = selection.winner;
+
+  // 落库选优候选明细(coverage/时长/起止/缺口 + 谁胜出),供事后复盘"为什么这台赢"。
+  ledger.recordCandidates(streamKey, selection.perNode, winner.tenantId);
 
   // Mark syncing and pull files from winner node into a per-broadcast sub-directory
   ledger.setState(streamKey, "syncing", { winnerTenant: winner.tenantId });
@@ -91,8 +99,11 @@ export async function runPipeline(
     return { state: "needs_manual" };
   }
 
-  // Upload clean winner
+  // Upload clean winner. 每个逻辑块(danmu/livechat)先按 16GB 上限切分(超限→多段),
+  // 再作为**独立一组**传给 upload(每组一条 append → 增量提交、各自可续传)。
   ledger.setState(streamKey, "uploading");
+  const danmuParts = await splitForUpload(danmuMp4);
+  const livechatParts = await splitForUpload(livechatMp4);
   const bv = await upload({
     plain: {
       video: plain,
@@ -103,7 +114,7 @@ export async function runPipeline(
       public: false,
       desc: cfg.uploadMeta.desc,
     },
-    extras: [danmuMp4, livechatMp4],
+    groups: [danmuParts, livechatParts],
   });
 
   ledger.markDone(streamKey, bv);

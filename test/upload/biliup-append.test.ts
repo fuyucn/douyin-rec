@@ -1,6 +1,6 @@
 // test/upload/biliup-append.test.ts
 import { describe, it, expect } from "vitest";
-import { buildAppendArgs, uploadThenAppend } from "../../packages/app/src/upload/biliup.js";
+import { buildAppendArgs, uploadThenAppend, uploadThenAppendGroups } from "../../packages/app/src/upload/biliup.js";
 
 describe("P1→append", () => {
   it("buildAppendArgs 形如 append --vid BV files", () => {
@@ -51,5 +51,40 @@ describe("P1→append", () => {
         run,
       })
     ).rejects.toThrow("BV");
+  });
+});
+
+describe("uploadThenAppendGroups（每逻辑组一条 append）", () => {
+  it("plain → BV，danmu 组(2段)一条 append，livechat 组一条 append", async () => {
+    const calls: string[][] = [];
+    const run = async (argv: string[]): Promise<string> => {
+      calls.push(argv);
+      return argv.includes("append") ? "appended" : "... bvid BV9Ab4y1C7xY ...";
+    };
+    const bv = await uploadThenAppendGroups({
+      plain: { video: "p.mp4", cookies: "c.json", title: "t", tag: "a", tid: 21, public: false },
+      groups: [["d0.mp4", "d1.mp4"], ["l.mp4"]],
+      run,
+    });
+    expect(bv).toBe("BV9Ab4y1C7xY");
+    expect(calls).toHaveLength(3); // upload + 2 appends（不是把 3 文件塞一条）
+    expect(calls[0].includes("upload")).toBe(true);
+    expect(calls[1]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", "d0.mp4", "d1.mp4"]);
+    expect(calls[2]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", "l.mp4"]);
+  });
+
+  it("空组被跳过（不发空 append）", async () => {
+    const calls: string[][] = [];
+    const run = async (argv: string[]): Promise<string> => {
+      calls.push(argv);
+      return "投稿成功 BV1Ab4y1C7xY";
+    };
+    await uploadThenAppendGroups({
+      plain: { video: "p.mp4", cookies: "c.json", title: "t", tag: "a", tid: 21, public: true },
+      groups: [[], ["l.mp4"]],
+      run,
+    });
+    expect(calls).toHaveLength(2); // upload + 仅 livechat 那一条
+    expect(calls[1][4]).toBe("BV1Ab4y1C7xY");
   });
 });

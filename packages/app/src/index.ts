@@ -5,6 +5,6 @@ export type { HubStarter } from "./cli-task.js";
 export { TaskStore } from "./store.js";
 export type { Task } from "./store.js";
 export { makeNotifier, NullNotifier, formatMessage } from "./notify/notifier.js";
-export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
+export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, uploadThenAppendGroups, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
 export type { UploadOpts } from "./upload/biliup.js";
 export { fetchAnchorName, resolveShortUrl } from "./anchor.js";

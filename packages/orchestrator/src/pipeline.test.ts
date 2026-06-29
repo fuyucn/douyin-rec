@@ -66,6 +66,8 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
     ledger,
     sh,
     upload,
+    // 默认 passthrough(不切);个别用例覆盖以模拟超限切分。
+    splitForUpload: async (mp4: string) => [mp4],
     notify,
     cfg: {
       cleanMaxGapSec: 30,
@@ -128,8 +130,12 @@ describe("runPipeline", () => {
     expect(shCalls[2]).toContain("livechat");
     expect(shCalls[2]).toContain(STAGE_SUB);
 
-    // upload should be called once
+    // upload should be called once, with danmu/livechat as TWO logical groups (#3 拆 append)
     expect(deps.upload).toHaveBeenCalledTimes(1);
+    const uploadArg = (deps.upload as Mock).mock.calls[0][0] as UploadArgs;
+    expect(uploadArg.groups).toHaveLength(2);
+    expect(uploadArg.groups[0][0]).toContain("_danmu");
+    expect(uploadArg.groups[1][0]).toContain("_livechat");
 
     // notify should NOT be called with error (clean winner case)
     const errorNotifications = (deps.notify.mock.calls as Array<[NotifyEvent]>)
@@ -192,6 +198,30 @@ describe("runPipeline", () => {
     // ledger should end at "needs_manual"
     const job = deps.ledger.get(broadcast.streamKey);
     expect(job?.state).toBe("needs_manual");
+
+    deps.ledger.close();
+  });
+
+  it("场景3: danmu 超 16GB → splitForUpload 切 2 段,upload 收到 danmu 组含两 part(#1+#3)", async () => {
+    const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const deps = makeDeps({
+      // 模拟今天:danmu 超限切 2 段,livechat 不切
+      splitForUpload: async (mp4: string) =>
+        mp4.includes("_danmu")
+          ? [mp4.replace(/\.mp4$/, "_part0.mp4"), mp4.replace(/\.mp4$/, "_part1.mp4")]
+          : [mp4],
+    });
+    deps.ledger.upsertPending(broadcast.streamKey);
+
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("done");
+
+    const uploadArg = (deps.upload as Mock).mock.calls[0][0] as UploadArgs;
+    // danmu 组 2 段、livechat 组 1 段
+    expect(uploadArg.groups[0]).toHaveLength(2);
+    expect(uploadArg.groups[0][0]).toContain("_danmu_part0");
+    expect(uploadArg.groups[0][1]).toContain("_danmu_part1");
+    expect(uploadArg.groups[1]).toEqual([expect.stringContaining("_livechat.mp4")]);
 
     deps.ledger.close();
   });

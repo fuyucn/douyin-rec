@@ -95,3 +95,26 @@ export async function uploadThenAppend(o: {
   }
   return bv;
 }
+
+/**
+ * 分P 上传(**按逻辑块拆 append**):先 plain(P1)拿 BV,再**每个逻辑组一条独立 append**。
+ * groups 例:`[[danmu_part0, danmu_part1], [livechat]]` → 一条 append 提交 danmu 两段、另一条提交 livechat。
+ * 比 uploadThenAppend(所有 extras 塞一条 append)好:① 传完一组即提交、增量可见 ② 各组独立可续传/重试。
+ * 见 memory feedback_upload_append_per_logical_part。`run` 可注入(测试)。
+ */
+export async function uploadThenAppendGroups(o: {
+  plain: UploadOpts;
+  groups: string[][];
+  run?: (argv: string[]) => Promise<string>;
+}): Promise<string> {
+  const run = o.run ?? runBiliup;
+  const uploadOut = await run(buildUploadArgs(o.plain));
+  const bv = parseBV(uploadOut);
+  if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${uploadOut.slice(-300)}`);
+  for (const files of o.groups) {
+    if (files.length > 0) {
+      await run(buildAppendArgs({ cookies: o.plain.cookies, bv, files }));
+    }
+  }
+  return bv;
+}
