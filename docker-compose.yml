@@ -10,6 +10,29 @@
 # 数据都在挂载卷上（DB / 录像 / config），容器重建不丢。
 
 services:
+  # Tailscale sidecar：容器内 tailscaled，让 docker 当 master 时够得到 VPS（100.x）。
+  # 持久化：state 卷 + .env 里 Reusable TS_AUTHKEY → 容器重启不用重认证。
+  # douyin-rec 经 network_mode: service:tailscale 共享它的 netns，故 Web UI 端口绑在本服务上。
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: drec-tailscale
+    hostname: drec-docker            # tailnet 里显示的节点名
+    restart: unless-stopped
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?需在 .env 设置 Reusable auth key}
+      TS_STATE_DIR: /var/lib/tailscale   # 持久 state（配合下方卷）
+      TS_USERSPACE: "false"              # 内核态 TUN：透明路由（ssh/rsync 直接走），需 NET_ADMIN+/dev/net/tun
+      TS_EXTRA_ARGS: --accept-routes
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    ports:
+      # Web UI 端口绑这里（douyin-rec 共享本 netns，不能自带 ports）。
+      - "${BIND:-0.0.0.0}:${PORT:-7860}:7860"
+
   douyin-rec:
     build:
       context: .
@@ -19,11 +42,10 @@ services:
     image: douyin-rec:latest
     container_name: douyin-rec
     restart: unless-stopped
-    ports:
-      # 绑所有网卡：局域网任意机器可用 <本机IP>:7860 访问，Tailscale 也通。
-      # 家用机在 NAT 路由器后 → 公网进不来（除非路由器做了端口转发），故无需绑具体 IP。
-      # 若部署到有公网 IP 的机器，请改成绑具体内网/Tailscale IP 或加防火墙。
-      - "${BIND:-0.0.0.0}:${PORT:-7860}:7860"
+    # 共享 tailscale sidecar 的网络 → 容器能 ssh 100.x VPS。端口在 tailscale 服务上。
+    network_mode: service:tailscale
+    depends_on:
+      - tailscale
     environment:
       # 调度按本地时间算窗口；默认美西（自动处理 PST/PDT 夏令时），按需改。
       TZ: ${TZ:-America/Los_Angeles}
@@ -37,3 +59,11 @@ services:
     volumes:
       # 单一挂载卷：所有持久数据(db/录像/config)都在它下面，容器重建不丢。
       - ${DATA_ROOT:-./docker-data}:/data
+      # VPS ssh key(只读)→ master 经 SshTransport 拉流时认证(配合镜像内 /root/.ssh/config)。
+      - ./remote/vps.key:/root/.ssh/vps.key:ro
+    # master 模式:serve 带 --hub → 自动读 /data/config/hub-config.json(docker-data/config/hub-config.json)。
+    command: ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860", "--hub"]
+
+volumes:
+  # tailscale 持久 state（节点身份）→ 容器重启免重认证。
+  tailscale-state:

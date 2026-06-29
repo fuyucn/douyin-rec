@@ -33,10 +33,22 @@ RUN cd packages/web && pnpm install --frozen-lockfile && pnpm build
 # ---- runtime ----
 FROM node:24-bookworm-slim AS runtime
 # ffmpeg/ffprobe 录制必需；ca-certificates 走 https 拉流/上报；curl 供 install-mesio.sh 下载。
+# openssh-client + rsync：docker 当 master 时经 SshTransport ssh/rsync 从 VPS 拉流(走 tailscale sidecar)。
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl openssh-client rsync \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+
+# SSH 到 VPS 用挂载进来的 key(compose 挂 /root/.ssh/vps.key);SshTransport 不带 -i,靠此 config 指定。
+# host 用 tailnet IP(经 sidecar 可达);User/Key/免交互全在这。known_hosts 走 /dev/null + accept-new。
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh && printf '%s\n' \
+  'Host 100.97.21.80' \
+  '  User ubuntu' \
+  '  IdentityFile /root/.ssh/vps.key' \
+  '  IdentitiesOnly yes' \
+  '  StrictHostKeyChecking accept-new' \
+  '  UserKnownHostsFile /dev/null' \
+  > /root/.ssh/config && chmod 600 /root/.ssh/config
 
 # mesio 录制引擎(可选 recorder)：build 时按平台拉 linux 二进制到 /app/bin（与本机 ./bin 约定一致，
 # 不污染系统 /usr/local/bin）。版本由脚本内 PINNED_VERSION 存档；升级改脚本即可。bookworm=glibc → gnu。
