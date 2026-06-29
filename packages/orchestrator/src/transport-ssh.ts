@@ -13,13 +13,22 @@ export interface SshOpts {
   remoteNode?: string;
 }
 
-function defaultRun(host: string) {
+// SSH 心跳 + 免交互:ServerAlive 5s×3≈15s 检测死连接自动断(tailscale 偶发 stall 不再永久挂);
+// BatchMode 杜绝 auth 提示挂起。defaultRun 另加硬超时(到点 SIGKILL),双保险防 hung ssh 锁死 reconciler。
+const SSH_KEEPALIVE = ["-o", "BatchMode=yes", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"];
+
+function defaultRun(host: string, timeoutMs = 45_000) {
   return (argv: string[]): Promise<string> => new Promise((resolve, reject) => {
-    const p = spawn("ssh", ["-o", "ConnectTimeout=10", host, "--", ...argv]);
-    let out = "", err = "";
+    const p = spawn("ssh", ["-o", "ConnectTimeout=10", ...SSH_KEEPALIVE, host, "--", ...argv]);
+    let out = "", err = "", settled = false;
+    const finish = (fn: () => void): void => { if (settled) return; settled = true; clearTimeout(timer); fn(); };
+    const timer = setTimeout(() => {
+      try { p.kill("SIGKILL"); } catch { /* already gone */ }
+      finish(() => reject(new Error(`ssh 超时 ${timeoutMs}ms 被杀: ${host} -- ${argv.join(" ").slice(0, 60)}`)));
+    }, timeoutMs);
     p.stdout.on("data", (b) => (out += b)); p.stderr.on("data", (b) => (err += b));
-    p.on("close", (c) => (c === 0 ? resolve(out) : reject(new Error(`ssh rc=${c}: ${err.slice(-300)}`))));
-    p.on("error", reject);
+    p.on("close", (c) => finish(() => (c === 0 ? resolve(out) : reject(new Error(`ssh rc=${c}: ${err.slice(-300)}`)))));
+    p.on("error", (e) => finish(() => reject(e)));
   });
 }
 
@@ -31,7 +40,10 @@ export class SshTransport implements Transport {
     this.id = o.id;
     this.run = o.run ?? defaultRun(o.host);
     this.rsync = o.rsync ?? ((remote, localDir) => new Promise((res, rej) => {
-      const p = spawn("rsync", ["-az", "-e", "ssh -o StrictHostKeyChecking=no", `${o.host}:${remote}`, localDir]);
+      // 心跳同 ssh:大文件传输慢但死连接 ~15s 即断,不无限挂。
+      const p = spawn("rsync", ["-az", "-e",
+        "ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=5 -o ServerAliveCountMax=3",
+        `${o.host}:${remote}`, localDir]);
       p.on("close", (c) => (c === 0 ? res() : rej(new Error(`rsync rc=${c}`)))); p.on("error", rej);
     }));
   }

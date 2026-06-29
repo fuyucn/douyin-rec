@@ -274,4 +274,38 @@ describe("Reconciler", () => {
     warnSpy.mockRestore();
     ledger.close();
   });
+
+  it("场景E(防锁死): 一个租户 listInventory 永久挂起 → 超时降级为空,reconcile 仍完成且处理其余租户", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ledger = freshLedger();
+    const t1 = makeTransport("node-1", [makeRec()]);
+    // node-hang 的 listInventory 永不 resolve(模拟 hung ssh)
+    const tHang: Transport = {
+      id: "node-hang",
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockReturnValue(new Promise(() => {})),
+      isDone: vi.fn<(s: string) => Promise<boolean>>().mockResolvedValue(true),
+      pull: vi.fn<(p: string[], d: string) => Promise<void>>().mockResolvedValue(undefined),
+    };
+    const transports = new Map([["node-1", t1], ["node-hang", tHang]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV_HANG"); return { state: "done", bv: "BV_HANG" }; },
+    );
+
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: { maxWaitMs: 50, pollMs: 1 }, sleep: fastSleep,
+      inventoryTimeoutMs: 30,   // 挂起的租户 30ms 后降级为空
+    });
+
+    // 不挂起、不抛错,且仍处理了 node-1 的那一簇(单成员)
+    await expect(reconciler.reconcileAll()).resolves.toBeUndefined();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(spyRunPipeline.mock.calls[0][0].members).toHaveLength(1);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("node-hang"));
+
+    warnSpy.mockRestore();
+    ledger.close();
+  });
 });

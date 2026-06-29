@@ -1,4 +1,4 @@
-import type { Transport } from "./transport.js";
+import type { Transport, NodeInventory } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import type { PipelineDeps } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
@@ -20,9 +20,12 @@ export interface ReconcilerDeps {
   settle?: SettleConfig;
   /** Injectable sleep for testing; defaults to real setTimeout-based sleep. */
   sleep?: (ms: number) => Promise<void>;
+  /** 单个租户 listInventory 的超时(ms);挂起即降级为空,防一个 hung 节点锁死整轮对账。默认 60s。 */
+  inventoryTimeoutMs?: number;
 }
 
 const DEFAULT_SETTLE: SettleConfig = { maxWaitMs: 600_000, pollMs: 15_000 };
+const DEFAULT_INVENTORY_TIMEOUT_MS = 60_000;
 const DEFAULT_SLEEP = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const RETRYABLE = new Set<JobState>(["pending", "failed"]);
@@ -35,6 +38,7 @@ export class Reconciler {
   private _runPipeline: typeof runPipeline;
   private settle: SettleConfig;
   private sleep: (ms: number) => Promise<void>;
+  private inventoryTimeoutMs: number;
 
   constructor(deps: ReconcilerDeps) {
     this.platform = deps.platform;
@@ -44,6 +48,26 @@ export class Reconciler {
     this._runPipeline = deps.runPipeline ?? runPipeline;
     this.settle = deps.settle ?? DEFAULT_SETTLE;
     this.sleep = deps.sleep ?? DEFAULT_SLEEP;
+    this.inventoryTimeoutMs = deps.inventoryTimeoutMs ?? DEFAULT_INVENTORY_TIMEOUT_MS;
+  }
+
+  /** listInventory 包超时:挂起超过 inventoryTimeoutMs 即降级为空(该租户本轮缺席),不锁死整轮。 */
+  private async inventoryWithTimeout(t: Transport): Promise<NodeInventory> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<NodeInventory>((resolve) => {
+      timer = setTimeout(() => {
+        console.warn(`[reconciler] 租户 ${t.id} listInventory 超时 ${this.inventoryTimeoutMs}ms,本轮按空处理`);
+        resolve({ tenantId: t.id, recordings: [] });
+      }, this.inventoryTimeoutMs);
+    });
+    try {
+      return await Promise.race([
+        t.listInventory().catch(() => ({ tenantId: t.id, recordings: [] })),
+        timeout,
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**
@@ -106,11 +130,10 @@ export class Reconciler {
   }
 
   async reconcileAll(): Promise<void> {
-    // 1. Concurrently fetch all inventories; dead tenants degrade to empty, don't abort.
+    // 1. Concurrently fetch all inventories; 挂起的租户经 inventoryWithTimeout 降级为空(不锁死整轮),
+    //    出错的租户也降级为空,均不中止其余节点。
     const invs = await Promise.all(
-      [...this.transports.values()].map((t) =>
-        t.listInventory().catch(() => ({ tenantId: t.id, recordings: [] })),
-      ),
+      [...this.transports.values()].map((t) => this.inventoryWithTimeout(t)),
     );
 
     // 2. Cluster recordings across nodes into broadcasts.
