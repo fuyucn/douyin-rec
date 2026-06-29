@@ -123,6 +123,15 @@ export async function runPipeline(
   if (burnDanmu) await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style danmu --gift-value 0.9`);
   if (burnLivechat) await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style livechat --gift-value 0.9`);
 
+  // 把弹幕 xml 复制一份作为 **plain xml 产物**(与 plain mp4 同名 {dateName}.xml),作为备份留在 stage。
+  // 它是产物、不是「拉来的源」——所以 stageSourceAfterMerge 删源时不动它(即便 includeXmlAss);
+  // 只有 stageAfterDone(上传后清产物)才按 includeXmlAss 一并删。这样 stage 备份永远含 plain xml。
+  const plainXml = xmlArg ? path.join(stageSub, dateName + ".xml") : "";
+  if (plainXml) {
+    const { copyFileSync } = await import("node:fs");
+    try { copyFileSync(xmlArg, plainXml); } catch { /* 源 xml 缺失则跳过 */ }
+  }
+
   // 各成员节点的待删源(.ts 总删;.xml 仅 includeXmlAss)——给 sourceAfterDone 用。
   const sourcePathsOf = (m: typeof winner): string[] =>
     [...m.rec.tsFiles, ...(clean.includeXmlAss && m.rec.xmlPath ? [m.rec.xmlPath] : [])];
@@ -175,7 +184,7 @@ export async function runPipeline(
   if (clean.stageAfterDone) {
     const products = [plain, ...danmuParts, ...livechatParts];
     const xmlAss = clean.includeXmlAss
-      ? [xmlArg, danmuMp4.replace(/\.mp4$/, ".ass"), livechatMp4.replace(/\.mp4$/, ".ass")].filter(Boolean)
+      ? [plainXml, xmlArg, danmuMp4.replace(/\.mp4$/, ".ass"), livechatMp4.replace(/\.mp4$/, ".ass")].filter(Boolean)
       : [];
     await rmStage([...products, ...xmlAss]);
   }

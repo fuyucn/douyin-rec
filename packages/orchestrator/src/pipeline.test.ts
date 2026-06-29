@@ -280,6 +280,43 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
+  // dateName = sessionBase 剥时间戳 = "主播名_2026-06-27";plain xml 产物 = {dateName}.xml
+  const PLAIN_XML = `${STAGE_SUB}/主播名_2026-06-27.xml`;
+  const SOURCE_XML = `${STAGE_SUB}/danmu.xml`; // basename of /remote/danmu.xml
+
+  it("场景8(plain xml 产物): stageSourceAfterMerge+includeXmlAss 删源 xml 但**保留** plain xml 产物", async () => {
+    const rmStage = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
+    const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    // stage-only:合并后清源,但不到 stageAfterDone(产物含 plain xml 留存)
+    const deps = makeDeps({
+      rmStage,
+      cfg: { ...makeDeps().cfg, uploadMode: "stage-only", cleanup: { stageSourceAfterMerge: true, includeXmlAss: true } },
+    });
+    deps.ledger.upsertPending(broadcast.streamKey);
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("needs_manual");
+    // stageSourceAfterMerge 删:拉来的源 .ts + 源 xml(timestamped),但 **不删** plain xml 产物
+    const deleted = rmStage.mock.calls.flatMap((c) => c[0]);
+    expect(deleted).toContain(SOURCE_XML);          // 源 xml 删
+    expect(deleted).not.toContain(PLAIN_XML);        // plain xml 产物保留
+    deps.ledger.close();
+  });
+
+  it("场景9(plain xml 产物): stageAfterDone+includeXmlAss 上传后才连 plain xml 一并清", async () => {
+    const rmStage = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
+    const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const deps = makeDeps({
+      rmStage,
+      cfg: { ...makeDeps().cfg, uploadMode: "auto-private", cleanup: { stageAfterDone: true, includeXmlAss: true } },
+    });
+    deps.ledger.upsertPending(broadcast.streamKey);
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("done");
+    const deleted = rmStage.mock.calls.flatMap((c) => c[0]);
+    expect(deleted).toContain(PLAIN_XML);            // 上传后清产物含 plain xml
+    deps.ledger.close();
+  });
+
   it("场景7(cleanup): sourceAfterDone → done 后各成员 transport.cleanup 被调", async () => {
     const broadcast = makeBroadcast([
       { tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
