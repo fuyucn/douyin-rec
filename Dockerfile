@@ -22,6 +22,9 @@ ARG GIT_SHA=""
 ENV GIT_SHA=$GIT_SHA
 COPY tsconfig.json esbuild.config.mjs ./
 COPY assets ./assets
+# configs/hub-config.example.json:esbuild 经 define 内联进 bundle(__HUB_CONFIG_EXAMPLE__),
+# 不 COPY 则 `pnpm bundle` 读不到 → ENOENT 构建失败。
+COPY configs ./configs
 RUN pnpm bundle
 
 # 前端是独立 pnpm 工程（已随 COPY packages 拷入）：在自己目录 install + build。
