@@ -15,23 +15,24 @@
 - **#1 选优剔除缺文件成员**:Transport 加 `exists(paths)`(Local=fs.existsSync,Ssh=远端 test -e),pipeline 选优前过滤 exists=false 的成员 → 不再选中已归档/清理的录像;全缺失 → job=failed。**这也是下面「streamKey 碰撞」卡 syncing 的直接止血**(选中旧归档录像会被剔除)。
 - **#2 pipeline 出错标 failed**:ledger 加 fails 列 + markFailed;reconciler catch → failed(maxRetries=3 内自动重试,达上限留 failed 不再重入)。原本卡 merging/syncing 永不动 → 现可见 + 有限重试。
 
-### 1. streamKey 同主播同日复用碰撞(中 —— #1 已止血,根因待清)
-streamKey = `平台:roomSlug:日期`。同一主播**同一天的新旧两场**(或测试反复跑)→ 撞同一 streamKey。
-旧场已 `needs_manual`/`done`(终态)且文件已归档 → 其陈旧 sync_candidates 残留 → 新场重聚时 winner 可能选中**已归档的旧录像** → pull 找不到文件 → 卡 syncing。
-- clusterBroadcasts 对**同日多簇**已有 `_HHMM` 后缀逻辑,但跨「已从 recordings 移走的旧场」失效(旧场不在 inventory 里,但 sync db 残留)。
-- 正解:① 选优/pull 前校验 winner.rec.tsFiles 存在,缺失则剔除该候选;② streamKey 含会话起播时刻区分;③ 或 sync_candidates 随 job 状态清理,不跨场残留。
+### ✅ 已修(2026-06-29 续,真实多节点录制验证通过)
+- **#1 streamKey 同主播同日碰撞 + #3 slug 不一致 + 停录时序竞态** —— 统一用 **meta.json 身份**根治:
+  RecordingSession 会话**开始**即写 `{base}.meta.json {roomSlug=web_rid}`,scan slug 优先级 `meta > gaps > taskRooms > 目录名`。
+  slug 从第一秒就有、随录像走、跨节点一致,不依赖主播名解析、无"停录后 gaps 才有 slug"的竞态。(`c946f85`)
+- **#2 pipeline 出错标 failed** —— ledger fails 列 + markFailed + maxRetries(`c8d6de1`)。
+- **Bug B settle 边录边合并残片**(致命)—— LocalTransport.isDone 注入 isRoomRecording(不再恒 true)+
+  settleAll 返回仍在录成员、reconcileAll **跳过仍在录的场**(不抓残片)。(`92eb428`)
+- **SshTransport.pull 不 mkdir** —— rsync 把不存在目标当文件名致 merge ENOTDIR(VPS-winner 拉流首次暴露)。(`38b39c3`)
 
-### 2. pipeline 出错 / pull 失败应标 job=failed(高)
-reconciler 的 per-broadcast try/catch 只 `console.error` 不更新 job 状态 → runPipeline 抛错时 job 卡在最后设的状态(merging/syncing)永不动,且不重试(RETRYABLE 只含 pending/failed)。
-- 正解:catch 里 `ledger.setState(streamKey, "failed", {error})`,使其可被后续 reconcile 重试 / 人工可见。
+### ✅ 架构升级(`adb2143`,真实验证通过):hub=全局管理器 + per-task pipeline 配置
+- Task 加 `pipeline` JSON 字段:`{sync, steps{burnDanmu,burnLivechat}, cleanup{stageSourceAfterMerge,sourceAfterDone,stageAfterDone,includeXmlAss}, upload{mode,tag,tid,desc}}`。
+- reconciler `resolveCfg(roomSlug)` 查 master 任务的 pipeline → 组装 PipelineCfg 逐场执行;无配置回落全局(兼容),`sync:false` 跳过。
+- pipeline 步骤开关(可只到 plain 就停)+ cleanup 开关(删 stage 源/源节点录制/stage 产物;includeXmlAss 守弹幕源)+ Transport.cleanup(local fs / ssh rm)。
+- **2026-06-29 实测(房间 杨甜甜)逐项验证**:唯一 streamKey、2 节点选优、`burnLivechat:false`→无 livechat、`stageSourceAfterMerge:true`→源 .ts 删、`stage-only`→needs_manual、xml 保留、无 fork 风暴。
 
-### 3. VPS 短链转换 best-effort 无重试 → slug 不一致(中)
-`resolveAnchorBg` 后台把 `v.douyin.com/XXX` 转 `live.douyin.com/<web_rid>`,但 `resolveShortUrl().catch(()=>null)` 失败即保留短链、**无重试**。某节点转换失败 → 该节点 `_inventory` 回退主播名 slug → 跨节点 slug 不一致 → 聚不上。
-- 正解:① 转换失败重试(几次退避);② 或 inventory 的 roomSlug 解析运行时统一(不依赖入库转换是否成功,如统一用 web_rid 或统一用主播名)。
-
-### 4. daemon 自动重启已停任务(中)
-任务 stop 后,daemon 下一 tick 见 enabled + 在窗口 + 房间在播 → 又重启录制。测试时需 delete 任务才能真正停。
-- 正解:区分「用户手动 stop」与「窗口调度」——手动 stop 应置一个 `disabled`/`paused` 标志,daemon 不自动重启;窗口调度才自动启停。
+### 待做
+- **阶段 2:Web UI** 编辑每任务的 pipeline 配置(现仅 API `PATCH /api/tasks/:id {pipeline}`)。
+- **daemon 自动重启已停任务**:任务手动 stop 后 daemon 下 tick 又重启(enabled+在窗口+在播)。正解:手动 stop 置 paused 标志,daemon 不自动重启;仅窗口调度自动启停。(测试时靠 delete 任务规避)
 
 ## 测试备注
 - docker-as-master 经 tailscale sidecar(`network_mode: service:tailscale`)够到 VPS;Tailscale SSH 需把 VPS 打 `tag:rec` + ACL `ssh` accept(tag:rec)避开 check 重认证。详见 [[reference_vps_ssh_keybased]]。
