@@ -27,6 +27,7 @@ import type { Recorder, RecordOpts, NotifyEvent, Notifier } from "@drec/core";
 import { makeNotifier } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand } from "@drec/app";
 import type { HubStarter } from "@drec/app";
+import type { PipelineCfg } from "@drec/orchestrator";
 
 /** 从 CLI 全局选项 → config → env 三层解析 Discord webhook URL。 */
 function webhookOf(localCfg?: { discordWebhook?: string }): string | undefined {
@@ -513,11 +514,37 @@ const hubStarter: HubStarter = {
       },
     };
 
+    // 按房间(roomSlug)取该场的 pipeline 配置 = 对应任务的 per-task pipeline 配置。
+    // 任务有 pipeline → 用它(merge plain/burn/cleanup/upload 全按任务;sync===false 则跳过该房间);
+    // 任务无 pipeline → 回落全局 cfg(兼容旧的全局模式,不破坏现状)。hub = 全局管理器,执行每任务这份配置。
+    const resolveCfg = (slug: string): PipelineCfg | null => {
+      const task = opts.store.listTasks().find(
+        (t) => platformForRoom(t.room).extractRoomSlug(t.room) === slug,
+      );
+      const p = task?.pipeline;
+      if (!p) return pipelineDeps.cfg; // 无 per-task 配置 → 全局默认
+      if (p.sync === false) return null; // 显式关闭 hub → 不处理该房间
+      return {
+        cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
+        stageDir: hubCfg.stageDir ?? "./stage",
+        cookies: hubCfg.cookies ?? "",
+        uploadMode: p.upload?.mode ?? hubCfg.uploadMode ?? "stage-only",
+        uploadMeta: {
+          tag: p.upload?.tag ?? hubCfg.uploadMeta?.tag ?? "直播,录像",
+          tid: p.upload?.tid ?? hubCfg.uploadMeta?.tid ?? 21,
+          desc: p.upload?.desc ?? hubCfg.uploadMeta?.desc,
+        },
+        steps: p.steps,
+        cleanup: p.cleanup,
+      };
+    };
+
     const reconciler = new Reconciler({
       platform: hubCfg.platform ?? "douyin",
       transports,
       ledger,
       pipelineDeps,
+      resolveCfg,
       ...(hubCfg.maxWaitSec != null || hubCfg.settleSec != null
         ? {
             settle: {

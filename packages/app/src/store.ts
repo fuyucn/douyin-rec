@@ -7,6 +7,7 @@
  */
 import type { DatabaseSync } from "node:sqlite";
 import { getPlatform, platformForRoom } from "@drec/core";
+import type { TaskPipelineConfig } from "@drec/core";
 import { openDb } from "./db.js";
 
 export type TaskStatus = "stopped" | "running" | "error" | "pending" | "draining";
@@ -56,6 +57,8 @@ export interface Task {
    * settings.discordWebhook。见 resolveTaskWebhook。
    */
   webhook: string | null;
+  /** 多节点 hub pipeline 配置(per-task);null = 未配(该房间不 hub,只录)。存为 JSON。 */
+  pipeline: TaskPipelineConfig | null;
 }
 
 /** Fields accepted when adding a task. Defaults applied for omitted values. */
@@ -82,6 +85,8 @@ export interface TaskInput {
   createdAt?: string;
   /** 任务专属 Discord webhook;null/省略 = 回落全局。 */
   webhook?: string | null;
+  /** 多节点 hub pipeline 配置;省略 = 不设。 */
+  pipeline?: TaskPipelineConfig | null;
 }
 
 /** Raw row shape as returned by node:sqlite (danmu/segmentSec are bigint-or-number). */
@@ -104,6 +109,7 @@ interface TaskRow {
   createdAt: string;
   anchorName: string | null;
   webhook: string | null;
+  pipeline: string | null;
 }
 
 /**
@@ -162,7 +168,14 @@ function rowToTask(r: TaskRow): Task {
     createdAt: r.createdAt,
     anchorName: r.anchorName ?? null,
     webhook: r.webhook ?? null,
+    pipeline: parsePipeline(r.pipeline),
   };
+}
+
+/** 解析 pipeline JSON 列(损坏/空 → null)。 */
+function parsePipeline(s: string | null): TaskPipelineConfig | null {
+  if (!s) return null;
+  try { return JSON.parse(s) as TaskPipelineConfig; } catch { return null; }
 }
 
 /**
@@ -207,8 +220,8 @@ export class TaskStore {
     const stmt = this.db.prepare(
       `INSERT INTO tasks
          (room, platform, name, quality, engine, danmu, segmentSec, cookies, outDir,
-          scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook, pipeline)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       room,
@@ -227,6 +240,7 @@ export class TaskStore {
       (input.enabled ?? false) ? 1 : 0,
       createdAt,
       input.webhook ?? null,
+      input.pipeline != null ? JSON.stringify(input.pipeline) : null,
     );
     const id = Number(info.lastInsertRowid);
     const task = this.getTask(id);
@@ -261,6 +275,7 @@ export class TaskStore {
         | "useCookie"
         | "enabled"
         | "webhook"
+        | "pipeline"
       >
     >,
   ): Task | null {
@@ -308,6 +323,7 @@ export class TaskStore {
     if ("useCookie" in patch) set("useCookie", patch.useCookie ? 1 : 0);
     if ("enabled" in patch) set("enabled", patch.enabled ? 1 : 0);
     if ("webhook" in patch) set("webhook", patch.webhook ?? null);
+    if ("pipeline" in patch) set("pipeline", patch.pipeline != null ? JSON.stringify(patch.pipeline) : null);
 
     if (cols.length === 0) return this.getTask(id); // nothing to change
 

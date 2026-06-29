@@ -4,7 +4,7 @@ export type { FfprobeAdapter } from "./scan.js";
 export { Reconciler } from "./reconciler.js";
 export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";
-export type { PipelineDeps } from "./pipeline.js";
+export type { PipelineDeps, PipelineCfg, PipelineSteps, PipelineCleanup } from "./pipeline.js";
 export { LocalTransport } from "./transport-local.js";
 export { SshTransport } from "./transport-ssh.js";
 export { startHub } from "./hub.js";

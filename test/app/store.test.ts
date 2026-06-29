@@ -328,4 +328,22 @@ describe("TaskStore", () => {
     expect(store.getTask(t.id)!.room).toBe("external-db");
     db.close();
   });
+
+  it("pipeline 配置:addTask 存 + getTask 取(JSON 往返),updateTask 改,默认 null", () => {
+    const store = new TaskStore(dbPath);
+    // 默认无 pipeline
+    const a = store.addTask({ room: "no-pipe" });
+    expect(store.getTask(a.id)!.pipeline).toBeNull();
+    // 带 pipeline 配置
+    const cfg = { sync: true, steps: { burnDanmu: false }, cleanup: { sourceAfterDone: true }, upload: { mode: "stage-only" as const, tag: "t", tid: 21 } };
+    const b = store.addTask({ room: "with-pipe", pipeline: cfg });
+    expect(store.getTask(b.id)!.pipeline).toEqual(cfg);
+    // updateTask 改 pipeline
+    store.updateTask(b.id, { pipeline: { sync: false } });
+    expect(store.getTask(b.id)!.pipeline).toEqual({ sync: false });
+    // 清空
+    store.updateTask(b.id, { pipeline: null });
+    expect(store.getTask(b.id)!.pipeline).toBeNull();
+    store.close();
+  });
 });

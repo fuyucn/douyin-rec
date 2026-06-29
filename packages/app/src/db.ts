@@ -104,6 +104,8 @@ export function migrate(db: DatabaseSync): void {
   ensureColumn(db, "tasks", "anchorName", "TEXT");
   // 任务专属 Discord webhook（开播/录完/合并完成/错误事件）。null = 回落全局 settings.discordWebhook。
   ensureColumn(db, "tasks", "webhook", "TEXT");
+  // 多节点 hub pipeline 配置(per-task,JSON 串)。null = 未配(该房间不 hub,只录)。
+  ensureColumn(db, "tasks", "pipeline", "TEXT");
 }
 
 /**

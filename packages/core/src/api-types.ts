@@ -3,8 +3,25 @@
 import type { NotifyEvent } from "./notify.js";
 export type { NotifyEvent };
 
+/**
+ * 任务的多节点 hub pipeline 配置(per-task)。hub 是全局管理器,执行每个任务这份配置。
+ * 省略/sync!=true → 该房间不走 hub(只录制)。所有 cleanup/steps 默认见各字段。
+ */
+export interface TaskPipelineConfig {
+  /** 是否多节点 hub 同步(opt-in)。false/省略 → 只录,不 hub。 */
+  sync?: boolean;
+  /** 产出哪些(merge plain 是基础总做)。默认全 true。 */
+  steps?: { burnDanmu?: boolean; burnLivechat?: boolean };
+  /** 清理开关(都默认 false;includeXmlAss 决定删除是否含 .xml/.ass)。 */
+  cleanup?: { stageSourceAfterMerge?: boolean; sourceAfterDone?: boolean; stageAfterDone?: boolean; includeXmlAss?: boolean };
+  /** 上传:mode 缺省 stage-only(不传);auto-private 才上传 B站。tag/tid/desc 为该稿 metadata。 */
+  upload?: { mode?: "stage-only" | "auto-private"; tag?: string; tid?: number; desc?: string };
+}
+
 /** POST /api/tasks + PATCH /api/tasks/:id 的请求体(部分字段)。 */
 export interface TaskPayload {
+  /** 多节点 hub pipeline 配置(per-task);省略 = 不改/不 hub。 */
+  pipeline?: TaskPipelineConfig | null;
   room: string;
   name?: string | null;
   quality?: string;
@@ -64,6 +81,8 @@ export interface TaskDTO {
   recording: boolean;
   /** 任务专属 Discord webhook;null = 回落全局。 */
   webhook: string | null;
+  /** 多节点 hub pipeline 配置;null = 未配(不 hub)。 */
+  pipeline: TaskPipelineConfig | null;
 }
 
 /** 详情页 live runtime(GET /api/tasks/:id)。 */

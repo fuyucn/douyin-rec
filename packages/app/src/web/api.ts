@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { groupSessions, mergeSessions } from "@drec/post-process";
 import { resolveMesioBin } from "@drec/record-engine";
 import { APP_VERSION } from "../version.js";
-import type { RecordingSessionDTO } from "@drec/core";
+import type { RecordingSessionDTO, TaskPipelineConfig } from "@drec/core";
 import { listPlatforms } from "@drec/core";
 import type { EventCenter } from "../events.js";
 import { resolveOutputDir } from "../paths.js";
@@ -131,6 +131,8 @@ export interface CreateTaskInput {
   scheduleEnd?: string | null;
   /** 任务专属 Discord webhook;空/省略 = 回落全局。 */
   webhook?: string | null;
+  /** 多节点 hub pipeline 配置(per-task);省略 = 不 hub。 */
+  pipeline?: TaskPipelineConfig | null;
 }
 
 /**
@@ -153,6 +155,8 @@ export interface UpdateTaskInput {
   scheduleEnd?: string | null;
   /** 任务专属 Discord webhook;空/省略 = 回落全局。 */
   webhook?: string | null;
+  /** 多节点 hub pipeline 配置(per-task);省略 = 不改。 */
+  pipeline?: TaskPipelineConfig | null;
 }
 
 function err(status: number, message: string): ApiResult {
@@ -371,6 +375,7 @@ export function makeApi(deps: ApiDeps): Api {
         scheduleStart,
         scheduleEnd,
         webhook: normWebhook(input.webhook),
+        pipeline: input.pipeline ?? null,
       });
       // 创建即抓主播名（不等开始录制）；后台写回，UI 轮询即显示。
       resolveAnchorBg(task.id, task.room);
@@ -398,6 +403,7 @@ export function makeApi(deps: ApiDeps): Api {
       if ("cookies" in input) patch.cookies = input.cookies ?? null;
       if ("outDir" in input) patch.outDir = input.outDir ?? null;
       if ("webhook" in input) patch.webhook = normWebhook(input.webhook);
+      if ("pipeline" in input) patch.pipeline = input.pipeline ?? null;
 
       // schedule "HH:MM-HH:MM" wins over explicit scheduleStart/End if present.
       if (input.schedule !== undefined) {
