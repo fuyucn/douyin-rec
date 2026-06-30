@@ -1,6 +1,10 @@
 # 多节点同步编排（master/slave）设计
 
-> 状态：设计稿（待评审 → 实现计划）。把现在**手动**的每日同步（拉取 → LOCAL vs REMOTE 选优 → 合并/烧录 → 分P 上传 B 站）**自动化 + 多节点化**。
+> **状态:已实现并实测通过(2026-06-30,双节点双平台 douyin+bilibili)。** 本文是原始设计稿;
+> 实现过程中的若干演进 —— **配置文件化**(`config/hub/{platform}.{roomSlug}.json`,非 DB)、**多平台**(按 platform,roomSlug 聚类)、
+> **session.json sidecar**(合并 meta+gaps)、**穿插上传**、**完整录全优先选优**、**slave UI 区分** —— 见
+> [multi-node-sync-followups.md](./multi-node-sync-followups.md)(最终状态 + 实测记录),架构总览见 [architecture.md](./architecture.md)「多节点 hub」。
+> 下文设计与最终实现大方向一致,细节以 followups + 代码为准。
 
 ## 目标
 

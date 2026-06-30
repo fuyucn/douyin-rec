@@ -1,6 +1,6 @@
 # douyin-rec (TS)
 
-抖音直播录制 + 弹幕捕获 + 后处理 + 投稿的 TypeScript 实现。从直播流录制视频（`.ts` 分段）、捕获弹幕（biliLive 风格 `.xml`）、合并分段、烧录弹幕字幕、投稿 B 站，并支持 sqlite 持久化任务 + Web 控制台 + 定时调度。录制引擎与弹幕源**可插拔**。
+抖音 / Bilibili 直播录制 + 弹幕捕获 + 后处理 + 投稿的 TypeScript 实现。从直播流录制视频（`.ts`/`.flv` 分段）、捕获弹幕（biliLive 风格 `.xml`）、合并分段、烧录弹幕字幕、投稿 B 站,支持 sqlite 持久化任务 + Web 控制台 + 定时调度。平台与下载引擎**可插拔**;并支持**多节点同步编排(hub)**——多台机器各自匿名录同一场,master 自动选优合并、烧录、分 P 上传。
 
 > **这是一个私人自用项目。** 只为录制我自己关注的几位主播、把成品（仅自己可见）归档到 B 站，按我自己的工作流持续打磨；不面向公开发行、不提供支持或质量保证，文档与默认值都围绕个人使用习惯写死。代码公开仅供参考学习，请勿据此对第三方平台做任何违反其条款的事，自行承担风险。
 
@@ -9,11 +9,12 @@
 - **全流程完成**：录制 / 弹幕 / 合并 / 烧录(danmu + livechat) / 投稿 / Discord 通知 / sqlite 持久化任务 / 子进程化录制 / 定时调度(跨夜窗口) / Web 控制台(REST + SPA) / 终端 TUI。
 - **引擎策略化录制**(通用 `record-engine` + 引擎 `ffmpeg`[默认,.ts] / `mesio`[rust-srec,.flv],任务字段 `engine` 选):取流靠平台 `getStream`(抖音 vendored a_bogus 签名,匿名不踢手机),引擎平台无关;已对真实直播 live 端到端验证。
 - **Platform 抽象**：平台专属逻辑收口 `Platform` 接口 + 注册表(matchUrl/getStream/getLiving/connectDanmu/…),抖音与 bilibili **均完整实装**(取流 + 弹幕);接第二平台 = 写 `<平台>-live` 包 + 注册一行。
-- pnpm workspace,11 包,主线在 `main`。
+- **多节点 hub**(`orchestrator`):master/slave 跨节点选优(覆盖度,完整录全优先)→ 合并 → 穿插上传;配置文件化(`config/hub/{platform}.{roomSlug}.json`);多平台(douyin/bilibili 同房间号不撞)。已双节点双平台实测。
+- pnpm workspace,12 包,主线在 `main`。
 
 ## 架构
 
-pnpm workspace（11 包），收敛成 **2 个可插拔接缝**:**平台轴**(各 `<平台>-live`,平台专属取流+弹幕)+ **引擎轴**(`record-engine`,平台无关下载),其余全通用。依赖只能向下（`test/arch/layering.test.ts` 守护）。esbuild 把 `cli` 打成 `dist/douyin-rec.mjs`(+ `dist/tui.mjs`)。
+pnpm workspace（12 包），收敛成 **2 个可插拔接缝** + **1 个多节点编排层**:**平台轴**(各 `<平台>-live`,平台专属取流+弹幕)+ **引擎轴**(`record-engine`,平台无关下载)+ **多节点 hub**(`orchestrator`,master/slave 跨节点选优合并上传),其余全通用。依赖只能向下（`test/arch/layering.test.ts` 守护）。esbuild 把 `cli` 打成 `dist/douyin-rec.mjs`(+ `dist/tui.mjs`)。
 
 > 📐 **架构图(依赖分层 + 运行时数据流,mermaid)：[docs/architecture.md](./docs/architecture.md)**(GitHub 直接渲染);可交互版 [docs/architecture.html](./docs/architecture.html)。
 
@@ -26,9 +27,10 @@ packages/
 ├── record-engine/         # 【引擎轴·平台无关】通用 PollingRecorder + 下载引擎 ffmpeg(.ts)/mesio(.flv);取流经 platform.getStream(url+headers)
 ├── douyin-live/           # 【平台轴】douyinPlatform:src/{stream(vendored a_bogus 取流)+ danmaku(自有 TS WS 客户端,仅签名/schema vendored)} + probe + index 装配
 ├── bilibili-live/         # 【平台轴】bilibiliPlatform:getStream(getRoomPlayInfo,headers 带 referer)/getLiving;connectDanmu 实装(WBI 签名 + 二进制 WS 协议)
-├── manager/               # RecordingSession:会话编排 + onLive 经 platform.connectDanmu 连弹幕 + 健康告警 + 断流重连 + 会话级 xml + danmu-xml(XmlDanmuWriter)
-├── app/                   # stateful:db/store(房间归一化+平台校验) / task-manager / daemon / web(api+server) / events / login / upload
-├── cli/                   # 入口:record/merge/burn/probe + task · providers-register(注册平台 douyin/bilibili + 引擎 ffmpeg/mesio)
+├── manager/               # RecordingSession:会话编排 + onLive 经 platform.connectDanmu 连弹幕 + 健康告警 + 断流重连 + 会话级 xml + {base}.session.json sidecar(身份+缺口)
+├── orchestrator/          # 【多节点 hub】Transport(local/ssh/tailscale-ssh) + identity(按 platform,roomSlug 聚类) + select(覆盖度选优) + reconciler + pipeline(选优→pull→merge→burn→穿插上传) + SyncLedger
+├── app/                   # stateful:db/store(房间归一化+平台校验) / hub-store(文件版 hub 规则) / task-manager / daemon / web(api+server) / events / login / upload
+├── cli/                   # 入口:record/merge/burn/probe + task(serve [--hub]) · providers-register(注册平台 douyin/bilibili + 引擎 ffmpeg/mesio)
 └── web/                   # React19 + jotai + @base-ui/react + Tailwind v4 前端 → packages/web/dist,由 app/web/server 托管
 ```
 
@@ -164,6 +166,20 @@ docker compose down           # 停
 - cookie / 任务等设置都存在 DB 卷里，跨重建保留。
 
 完整部署指南（环境变量、卷、时区、排查）见 **[docs/docker.md](./docs/docker.md)**。
+
+## 多节点同步（hub）
+
+多台机器各自匿名录同一场，由一个 **master** 统一选优合并上传:
+
+```bash
+node dist/douyin-rec.mjs task serve --port 7860 --hub   # master(如 docker):Web + 调度 + hub
+node dist/douyin-rec.mjs task serve --port 7860         # slave(如 VPS):普通 serve,无 --hub
+```
+
+- **slave 不需要 `--hub`**:master 经 **SSH** 主动够到它——`_inventory`(一次性扫 `recordings/` 输出 JSON 清单)+ rsync 拉文件 + ssh 清理。slave 只需 SSH 可达 + 有 `dist` 产物。
+- **身份/选优**:录制端写 `{base}.session.json`(roomSlug + platform + 缺口);master 按 **(platform, roomSlug)** 聚成一场(douyin/bilibili 同房间号不撞)→ 覆盖度选优(**完整录全优先**;所有节点都断流 → 中断 + 通知 + 不删源)→ 拉取 → 合并/烧 danmu+livechat → **穿插上传**(P1 上传与烧录并行,append 分 P,关水印/仅自己可见由代码常量保证)。
+- **配置 = 文件**(对标 DLR,文件=唯一真理源):全局 `<root>/config/hub.config.json`(tenants/stageDir/uploadDefaults)+ 每房间 `<root>/config/hub/{platform}.{roomSlug}.json`(`{enabled, pipeline:{steps, upload:{mode:stage|upload, private}, cleanup}}`)。Web「Hub」页(master 才显示)增删改 = 建/写/删这些文件;现读不缓存 → UI 与手改文件天然同步。
+- 设计与实测见 **[docs/multi-node-sync.md](./docs/multi-node-sync.md)** + **[docs/multi-node-sync-followups.md](./docs/multi-node-sync-followups.md)**。
 
 ## 依赖补丁（pnpm patch）
 

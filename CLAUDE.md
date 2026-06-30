@@ -11,8 +11,9 @@
 
 分层(`test/arch/layering.test.ts` 守护依赖只能向下;新增包须在该测试 RANKS 登记)。架构=**2 个可插拔接缝**:
 **平台轴**(各 `<平台>-live`,平台专属:取流 + 弹幕)+ **引擎轴**(`record-engine`,平台无关下载)。其余全通用。
+另有**多节点编排层**(`orchestrator`,master/slave 跨节点选优合并上传,见「多节点 hub」)。
 esbuild 把 cli 打包成 `dist/douyin-rec.mjs`(+ `dist/tui.mjs`),录制必须跑这个打包产物(sm-crypto interop)。
-当前 **11 包**(架构图见 `docs/architecture.html`)。
+当前 **12 包**(架构图见 `docs/architecture.html`;多节点设计见 `docs/multi-node-sync.md`)。
 
 ```
 packages/
@@ -28,8 +29,10 @@ packages/
 ├── bilibili-live/         # L1.5 【平台轴】bilibiliPlatform:getStream(getRoomPlayInfo,headers 带 referer)/getLiving;
 │                          #   connectDanmu 实装(WBI 签名 + B站二进制 WS 协议,见 src/danmaku)
 ├── manager/               # L3 RecordingSession:会话编排(onLive 经 platform.connectDanmu 连弹幕 / 重连指数退避 / drain / 会话级 xml)
-│                          #   + danmu-xml/(XmlDanmuWriter + RecorderXmlStyle 弹幕 XML 写入,原 danmaku-core 因唯一消费者是 manager 而下沉)
-├── app/                   # L4 有状态层:db(node:sqlite+迁移) / store(房间归一化+平台校验) / task-manager / daemon(定时) /
+│                          #   + danmu-xml/(XmlDanmuWriter + RecorderXmlStyle 弹幕 XML 写入) + {base}.session.json sidecar(身份 roomSlug/platform + 缺口 gaps,供 hub 聚类/选优)
+├── orchestrator/          # L4.5 【多节点 hub】Transport 轴(local/ssh/tailscale-ssh)+ identity(按 platform,roomSlug 聚类)
+│                          #   + select(覆盖度选优,完整录全优先)+ reconciler(recordEnd 触发 + 周期对账)+ pipeline(选优→pull→merge→burn→穿插上传)+ SyncLedger
+├── app/                   # L4 有状态层:db(node:sqlite+迁移) / store(房间归一化+平台校验) / hub-store(文件版 hub 规则) / task-manager / daemon(定时) /
 │                          #   scheduler / process(record-args) / login(扫码) / web(server+api) / events / anchor / notify / upload
 ├── cli/                   # L5 入口:cli.ts(record/merge/burn/probe + task)+ providers-register(注册平台 douyin/bilibili + 引擎 ffmpeg/mesio)
 └── web/                   # 前端(独立 Vite:React19 + jotai + @base-ui/react + Tailwind v4 + lucide + react-i18next)→ packages/web/dist
@@ -38,7 +41,7 @@ test/                         # vitest:纯包单测**就近** packages/**/*.test
 │                             #   setup.ts 注册假平台,因 vitest 不能 import douyin-live 的 sm-crypto)
 patches/                      # 空(无 pnpm patch；取流签名/弹幕 WS 均已 vendored 进各自包源码)
 bin/                          # mesio / biliup 二进制(install-*.sh 下载,不提交)
-docs/                         # 设计文档:app/cli/docker.md · architecture.html(2 轴图)· 取流防踢调研
+docs/                         # 设计文档:app/cli/docker.md · architecture.html/.md(架构图)· multi-node-sync(.md/-followups.md 多节点 hub)· 取流防踢调研
 scripts/ assets/fonts         # install-mesio/biliup · rename(重命名)· 烧字幕字体
 remote/                       # 已移出仓库(.gitignore;含 VPS IP/SSH 个人信息,本地保留供 VPS 工作流);
                               #   旧 Python merge 管线依赖已删的 src/ → 本地已不可跑,合并改走 TS CLI(见下)
@@ -87,9 +90,19 @@ remote/                       # 已移出仓库(.gitignore;含 VPS IP/SSH 个人
 - cookie 过期时间从 `sid_guard` 解析（`parseCookieExpiry`），UI 顶栏/弹窗显示剩余天数。
 
 ### Web UI（React）
-- `web/`：Vite + React19 + react-router + jotai（tasksAtom/cookieStatusAtom/toastsAtom）+ @base-ui/react + Tailwind v4 + lucide。Cal.com 风格设计 token。
+- `web/`：Vite + React19 + react-router + jotai（tasksAtom/cookieStatusAtom/hubEnabledAtom）+ @base-ui/react + Tailwind v4 + lucide。Cal.com 风格设计 token。
 - `app/web/server.ts`：http server + REST api + SPA fallback，托管 `web/dist`。
-- 列表页 + 任务详情/日志页（状态、录制时长、SSE 日志）。
+- 列表页 + 任务详情/日志页（状态、录制时长、SSE 日志）+ Hub 页(master 才显示;slave 显示 child node 提示)。
+
+### 多节点 hub（`@drec/orchestrator`,master/slave 跨节点同步编排）
+- **形态**:一个 **master**(`task serve --hub`,如 docker)编排多个 **slave**(`task serve`,无 `--hub`,如 VPS);各节点匿名各录各的,master 选优合并上传。slave **不需要 `--hub`**——master 经 **SSH** 主动够到它:`_inventory`(一次性扫 `recordings/` 输出 JSON 清单)+ rsync 拉文件 + ssh 清理。
+- **身份/聚类**:录制端写 `{base}.session.json`(roomSlug=web_rid + platform + gaps)。`identity` 按 **(platform, roomSlug)** 聚成一场(streamKey=`{platform}:{roomSlug}:{date}`)→ douyin/bilibili 同房间号不撞、跨节点一致(不靠主播名)。
+- **选优**:`select` 覆盖度优先(coverage=1−gap/span)→ **完整录全(单会话无断流)优先**,多个完整取最长;**所有节点都断流(没人录全)→ 中断 + 通知 + 绝不删源**(留人工)。
+- **pipeline**(`pipeline.ts`,复用 post-process + biliup):选优 winner → pull 到 stage → merge plain → burn danmu/livechat → **穿插上传**(merge 完即后台 fire P1 上传、与烧录并行,await BV 后串行 append;append 也带关水印+仅自己可见,防重置)。
+- **配置 = 文件**(对标 DLR,文件=唯一真理源,现读不缓存→UI↔手改文件天然同步):全局 `<root>/config/hub.config.json`(tenants/stageDir/时序 + uploadDefaults)+ 每房间 `<root>/config/hub/{platform}.{roomSlug}.json`(`{room,enabled,pipeline:{steps,upload,cleanup}}`)。`upload.mode`=stage(只合成)|upload(传);`private` 布尔(默认仅自己可见)。**hub-store** 文件版 CRUD;Web Hub 页增删改 = 建/写/删文件。**hub 规则不在 DB**。
+- **SyncLedger**(`<db>-sync.db`)幂等台账:sync_jobs(状态机 pending→syncing→merging→uploading→done/needs_manual/failed)+ sync_candidates(选优明细)。reconciler:recordEnd 触发 + 周期 reconcileAll(in-flight 守卫 + settle 等收播,仍在录的场跳过)。
+- **硬标准代码常量**(`biliup.ts`,不可配、绝不漏):关水印 `--extra-fields watermark.state=0`、copyright=1、`--is-only-self`(private 时)。可配的只有 tag/tid/desc(主播专属,写任务文件)。
+- 详见 `docs/multi-node-sync.md` + `docs/multi-node-sync-followups.md`(实测记录 + per-平台 cookie 等 followup)。
 
 ## 常用命令
 
@@ -103,7 +116,8 @@ cd packages/web && pnpm build # 构建前端 → packages/web/dist（独立 Vite
 
 # 运行
 node dist/douyin-rec.mjs record --room URL --segment 1800   # 单次录制
-node dist/douyin-rec.mjs task serve --port 7860 --db douyin-rec.db   # Web UI（端口 7860）
+node dist/douyin-rec.mjs task serve --port 7860 --db douyin-rec.db   # Web UI（端口 7860）/ slave 节点
+node dist/douyin-rec.mjs task serve --port 7860 --hub        # master:Web UI + 多节点 hub(读 <root>/config/hub.config.json)
 node dist/douyin-rec.mjs task add URL                       # CLI 加任务
 ```
 

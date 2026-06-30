@@ -48,8 +48,8 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>直播录制架构 · 2 轴终态</h1>
-  <p class="sub">平台专属的一切归平台(取流 + 弹幕);下载是平台无关的共享引擎。契约在 core,其余全通用。</p>
+  <h1>直播录制架构 · 2 轴 + 多节点 hub</h1>
+  <p class="sub">平台专属的一切归平台(取流 + 弹幕);下载是平台无关的共享引擎;多节点编排在 orchestrator。契约在 core,其余全通用。</p>
 
   <div class="axes">
     <div class="axis ax-plat">
@@ -69,8 +69,9 @@
       <div class="row">
         <div class="box b-app"><div class="t">web</div><div class="d">前端(HTTP → app)</div></div>
         <div class="box b-app"><div class="t">cli</div><div class="d">入口 + providers-register(注册平台 / 引擎)</div></div>
-        <div class="box b-app"><div class="t">app</div><div class="d">db / store / daemon / web server</div></div>
-        <div class="box b-app"><div class="t">manager</div><div class="d">RecordingSession:重连 / drain / 弹幕扇出 / xml</div></div>
+        <div class="box b-app"><div class="t">app</div><div class="d">db / store / hub-store(文件版规则) / daemon / web server</div></div>
+        <div class="box b-app"><div class="t">manager</div><div class="d">RecordingSession:重连 / drain / 弹幕扇出 / xml / session.json</div></div>
+        <div class="box b-app" style="background:#e0e7ff;border-color:#c7d2fe;color:#312e81;"><div class="t">orchestrator <span style="font-weight:400">(多节点 hub)</span></div><div class="d">Transport(ssh) / 聚类(platform,roomSlug) / 选优 / pipeline / Ledger</div></div>
       </div>
     </div>
 
@@ -86,7 +87,7 @@
         </div>
         <div class="box b-plat" style="flex:1; min-width:240px;">
           <div class="t">bilibili-live <span style="font-weight:400">(平台轴)</span></div>
-          <div class="d">bilibiliPlatform:getStream(getRoomPlayInfo,headers 带 referer) · getLiving · anchor · matchUrl(connectDanmu 暂无)</div>
+          <div class="d">bilibiliPlatform:getStream(getRoomPlayInfo,headers 带 referer) · getLiving · anchor · matchUrl · connectDanmu(WBI 签名 + 二进制 WS)</div>
           <div class="dep">依赖 <code>core</code> 仅此</div>
         </div>
         <div class="box b-eng" style="flex:1; min-width:240px;">
@@ -126,6 +127,27 @@
   <div class="note">
     <b>接新平台(如虎牙)= 只写一个 <span class="mono">huya-live</span> 包</b>(实现 getStream + 可选 connectDanmu + matchUrl)。引擎(ffmpeg/mesio)白嫖 <span class="mono">record-engine</span>,无需写任何录制器;弹幕协议不同则在该包内实现。<br>
     <b>加新引擎(如 yt-dlp)= 只在 <span class="mono">record-engine</span> 里加一个实现 Engine 接口的策略</b>,所有平台立即可用。
+  </div>
+
+  <h2>多节点 hub(master 编排 slave)</h2>
+  <div class="flow">
+    <div class="step"><div class="t">各节点录制</div><div class="d">recordings/ + {base}.session.json</div></div>
+    <div class="sep">→</div>
+    <div class="step"><div class="t">master 拿清单</div><div class="d">local 直接 scan / 远端 ssh _inventory</div></div>
+    <div class="sep">→</div>
+    <div class="step"><div class="t">聚类</div><div class="d">(platform, roomSlug) → streamKey</div></div>
+    <div class="sep">→</div>
+    <div class="step"><div class="t">选优</div><div class="d">覆盖度优先(完整录全)</div></div>
+    <div class="sep">→</div>
+    <div class="step"><div class="t">pull → 合并/烧</div><div class="d">rsync → merge → burn</div></div>
+    <div class="sep">→</div>
+    <div class="step" style="background:#e0e7ff;border-color:#c7d2fe;color:#312e81;"><div class="t">穿插上传</div><div class="d">P1 ∥ 烧录, append 分P</div></div>
+  </div>
+  <div class="note">
+    <b>master = <span class="mono">task serve --hub</span></b>(编排 + 自己也录);<b>slave = 普通 <span class="mono">task serve</span></b>(只录,master 经 SSH 够到,<b>不需要 --hub</b>)。
+    每房间配置 = 一个文件 <span class="mono">config/hub/{platform}.{roomSlug}.json</span>(文件=唯一真理源,UI 与手改天然同步)。
+    所有节点都断流(没人录全)→ 中断 + 通知 + <b>不删源</b>。关水印 / 仅自己可见 / copyright 是代码常量。详见
+    <span class="mono">docs/multi-node-sync.md</span>。
   </div>
 </div>
 </body>
