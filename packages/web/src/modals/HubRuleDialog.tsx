@@ -200,7 +200,14 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           </div>
           <div className="sm:col-span-2">
             <label className="field-label">B站简介 desc</label>
-            <input className="input" placeholder="(可选)" value={form.uploadDesc} onChange={(e) => set("uploadDesc", e.target.value)} />
+            <textarea
+              className="input"
+              rows={4}
+              placeholder="(可选,支持多行)"
+              value={form.uploadDesc}
+              onChange={(e) => set("uploadDesc", e.target.value)}
+              style={{ resize: "vertical", minHeight: "5rem", fontFamily: "inherit", whiteSpace: "pre-wrap" }}
+            />
           </div>
         </div>
 
