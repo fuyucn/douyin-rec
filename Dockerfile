@@ -34,8 +34,10 @@ RUN cd packages/web && pnpm install --frozen-lockfile && pnpm build
 FROM node:24-bookworm-slim AS runtime
 # ffmpeg/ffprobe 录制必需；ca-certificates 走 https 拉流/上报；curl 供 install-mesio.sh 下载。
 # openssh-client + rsync：docker 当 master 时经 SshTransport ssh/rsync 从 VPS 拉流(走 tailscale sidecar)。
+# fonts-noto-cjk：烧字幕(burn danmu/livechat)的 ASS 字体名 = "Noto Sans CJK SC",镜像无 CJK 字体
+#   则 libass 回落到无中文字形的字体 → 中文乱码。装上它 fontconfig 才能解析出真字体。
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl openssh-client rsync xz-utils \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl openssh-client rsync xz-utils fonts-noto-cjk \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
