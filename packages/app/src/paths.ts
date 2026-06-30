@@ -12,14 +12,14 @@ import { join } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 
 /**
- * hub 配置模板内容。**单一真相 = 仓库源文件 `configs/hub-config.example.json`**。
+ * hub 全局配置模板内容。**单一真相 = 仓库源文件 `configs/hub.config.example.json`**。
  * 打包(`pnpm bundle`)时 esbuild 经 `define` 把该文件文本内联成 `__HUB_CONFIG_EXAMPLE__`(单文件运行时无仓库目录);
  * 非打包(tsx/vitest)`__HUB_CONFIG_EXAMPLE__` 未声明 → 从仓库源文件读(相对本文件定位 repo 根)。
  */
 declare const __HUB_CONFIG_EXAMPLE__: string | undefined;
 function hubConfigExampleText(): string {
   if (typeof __HUB_CONFIG_EXAMPLE__ !== "undefined" && __HUB_CONFIG_EXAMPLE__) return __HUB_CONFIG_EXAMPLE__;
-  return readFileSync(new URL("../../../configs/hub-config.example.json", import.meta.url), "utf-8");
+  return readFileSync(new URL("../../../configs/hub.config.example.json", import.meta.url), "utf-8");
 }
 
 /** DOUYIN_REC_ROOT(去空白);未设为 undefined。 */
@@ -34,10 +34,29 @@ export function rootConfigDir(): string | undefined {
   return r ? join(r, "config") : undefined;
 }
 
-/** <root>/config/hub-config.json(多节点编排「实际生效」配置;复制自 .example 后改);无 root 为 undefined。 */
+/**
+ * <root>/config/hub.config.json(多节点编排全局「实际生效」配置;复制自 .example 后改)。
+ * **兼容**:新路径不存在但旧 `hub-config.json` 在 → 返回旧路径(平滑迁移,老部署不中断)。无 root 为 undefined。
+ */
 export function rootHubConfig(): string | undefined {
   const d = rootConfigDir();
-  return d ? join(d, "hub-config.json") : undefined;
+  if (!d) return undefined;
+  const cur = join(d, "hub.config.json");
+  const old = join(d, "hub-config.json");
+  if (!existsSync(cur) && existsSync(old)) return old; // 迁移兼容:只在新文件缺失时回退旧名
+  return cur;
+}
+
+/** <root>/config/hub —— 每房间 hub 任务配置文件目录(一房间一 {roomSlug}.json)。无 root 为 undefined。 */
+export function rootHubDir(): string | undefined {
+  const d = rootConfigDir();
+  return d ? join(d, "hub") : undefined;
+}
+
+/** <root>/config/hub/{roomSlug}.json —— 单个房间的 hub 任务配置文件路径。无 root 为 undefined。 */
+export function rootHubTaskConfig(roomSlug: string): string | undefined {
+  const d = rootHubDir();
+  return d ? join(d, `${roomSlug}.json`) : undefined;
 }
 
 /**
@@ -49,9 +68,11 @@ export function rootHubConfig(): string | undefined {
 export function ensureHubConfigExample(): string | undefined {
   const cfgDir = rootConfigDir();
   if (!cfgDir) return undefined;
-  const path = join(cfgDir, "hub-config.example.json");
+  const path = join(cfgDir, "hub.config.example.json");
   if (existsSync(path)) return undefined;
   mkdirSync(cfgDir, { recursive: true });
+  // 顺带建 hub/ 任务目录(空也建,UI/手放任务文件即用)。
+  try { mkdirSync(join(cfgDir, "hub"), { recursive: true }); } catch { /* 忽略 */ }
   writeFileSync(path, hubConfigExampleText(), "utf-8");
   return path;
 }

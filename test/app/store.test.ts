@@ -328,26 +328,5 @@ describe("TaskStore", () => {
     expect(store.getTask(t.id)!.room).toBe("external-db");
     db.close();
   });
-
-  it("hub 规则:upsert 派生 roomSlug + JSON 往返 config,update 改,list/get/remove", () => {
-    const store = new TaskStore(dbPath);
-    // 创建:room 归一化解析出 roomSlug(web_rid)
-    const cfg = { steps: { burnDanmu: false }, cleanup: { sourceAfterDone: true }, upload: { mode: "stage-only" as const, tag: "t", tid: 21 } };
-    const r = store.upsertHubRule({ room: "https://live.douyin.com/123456", config: cfg });
-    expect(r.roomSlug).toBe("123456");
-    expect(r.platform).toBe("douyin");
-    expect(r.enabled).toBe(true); // 默认启用
-    expect(store.getHubRule("123456")!.config).toEqual(cfg);
-    // upsert 同房间 = 覆盖(主键 roomSlug)
-    store.upsertHubRule({ room: "https://live.douyin.com/123456", enabled: false });
-    expect(store.getHubRule("123456")!.enabled).toBe(false);
-    // updateHubRule 部分改
-    expect(store.updateHubRule("123456", { enabled: true })!.enabled).toBe(true);
-    expect(store.updateHubRule("nope", { enabled: true })).toBeNull();
-    // list + remove
-    expect(store.listHubRules().length).toBe(1);
-    expect(store.removeHubRule("123456")).toBe(true);
-    expect(store.getHubRule("123456")).toBeNull();
-    store.close();
-  });
+  // hub 规则现为文件版 → 测试在 packages/app/src/hub-store.test.ts。
 });

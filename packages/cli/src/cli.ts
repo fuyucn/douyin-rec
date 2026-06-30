@@ -443,7 +443,7 @@ const hubStarter: HubStarter = {
     const { registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
-    const { uploadThenAppendGroups } = await import("@drec/app");
+    const { uploadThenAppendGroups, hubStore, rootHubDir } = await import("@drec/app");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
       platform?: string;
@@ -454,8 +454,9 @@ const hubStarter: HubStarter = {
       stageDir?: string;
       cookies?: string;
       cleanMaxGapSec?: number;
-      uploadMode?: "auto-private" | "stage-only";
-      uploadMeta?: { tag: string; tid: number; desc?: string };
+      /** 投稿默认(per-task 文件留空时回退);旧字段 uploadMeta 也认(迁移兼容)。 */
+      uploadDefaults?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string };
+      uploadMeta?: { tag?: string; tid?: number; desc?: string };
       /** Max settle wait before reconciler proceeds regardless (seconds). */
       maxWaitSec?: number;
       /** Settle poll interval (seconds). */
@@ -496,6 +497,11 @@ const hubStarter: HubStarter = {
     const dbPath = (opts.dbPath ?? "douyin-rec.db").replace(/\.db$/, "-sync.db");
     const ledger = new SyncLedger(dbPath);
 
+    // 投稿默认:uploadDefaults(新)> uploadMeta(旧,迁移兼容)> 硬兜底。
+    const uploadDefaults = hubCfg.uploadDefaults ?? hubCfg.uploadMeta ?? {};
+    const defaultTag = uploadDefaults.tag ?? "直播,录像";
+    const defaultTid = uploadDefaults.tid ?? 21;
+
     const { exec } = await import("node:child_process");
     const pipelineDeps = {
       transports,
@@ -509,30 +515,31 @@ const hubStarter: HubStarter = {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         stageDir: hubCfg.stageDir ?? "./stage",
         cookies: hubCfg.cookies ?? "",
-        uploadMode: hubCfg.uploadMode ?? "stage-only",
-        uploadMeta: hubCfg.uploadMeta ?? { tag: "直播,录像", tid: 21 },
+        uploadMode: "stage-only" as const, // 全局兜底 = 不自动传;每任务文件按需开 auto-private
+        uploadMeta: { tag: defaultTag, tid: defaultTid, desc: uploadDefaults.desc },
       },
     };
 
-    // 按房间(roomSlug)取该场的 pipeline 配置 = 对应 hub 规则(独立于录制任务)。
-    // hub = 全局管理器:只处理「有 enabled HubRule」的房间;无规则/禁用 → 返 null 跳过该房间。
-    // 录制任务只管录;某房间要不要后处理、产哪些、清不清理、传不传,全看它的 HubRule。
-    const resolveCfg = (slug: string): PipelineCfg | null => {
-      const rule = opts.store.getHubRule(slug);
-      if (!rule || !rule.enabled) return null; // 无规则或已禁用 → hub 不处理该房间
-      const c = rule.config ?? {};
+    // 每房间 hub 任务配置来自文件 <root>/config/hub/{platform}.{roomSlug}.json(现读不缓存→手改/UI 即时生效)。
+    // hub = 全局管理器:只处理「有 enabled 任务文件」的房间;无文件/禁用 → 返 null 跳过该房间。
+    // 录制任务只管录;某房间产哪些、清不清理、传不传,全看它的 hub 任务文件。upload 留空回退全局默认。
+    const hubDir = rootHubDir() ?? "./config/hub";
+    const resolveCfg = (platform: string, slug: string): PipelineCfg | null => {
+      const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform, slug));
+      if (!rule || !rule.enabled) return null; // 无任务文件或已禁用 → hub 不处理该房间
+      const p = rule.pipeline ?? {};
       return {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         stageDir: hubCfg.stageDir ?? "./stage",
         cookies: hubCfg.cookies ?? "",
-        uploadMode: c.upload?.mode ?? hubCfg.uploadMode ?? "stage-only",
+        uploadMode: p.upload?.mode ?? "stage-only",
         uploadMeta: {
-          tag: c.upload?.tag ?? hubCfg.uploadMeta?.tag ?? "直播,录像",
-          tid: c.upload?.tid ?? hubCfg.uploadMeta?.tid ?? 21,
-          desc: c.upload?.desc ?? hubCfg.uploadMeta?.desc,
+          tag: p.upload?.tag || defaultTag,
+          tid: p.upload?.tid ?? defaultTid,
+          desc: p.upload?.desc ?? uploadDefaults.desc,
         },
-        steps: c.steps,
-        cleanup: c.cleanup,
+        steps: p.steps,
+        cleanup: p.cleanup,
       };
     };
 

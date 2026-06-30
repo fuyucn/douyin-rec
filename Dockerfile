@@ -22,7 +22,7 @@ ARG GIT_SHA=""
 ENV GIT_SHA=$GIT_SHA
 COPY tsconfig.json esbuild.config.mjs ./
 COPY assets ./assets
-# configs/hub-config.example.json:esbuild 经 define 内联进 bundle(__HUB_CONFIG_EXAMPLE__),
+# configs/hub.config.example.json:esbuild 经 define 内联进 bundle(__HUB_CONFIG_EXAMPLE__),
 # 不 COPY 则 `pnpm bundle` 读不到 → ENOENT 构建失败。
 COPY configs ./configs
 RUN pnpm bundle

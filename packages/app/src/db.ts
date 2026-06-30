@@ -72,17 +72,9 @@ export function migrate(db: DatabaseSync): void {
       error     TEXT,
       createdAt TEXT
     );
-    -- 多节点 hub 规则:按房间(roomSlug=web_rid 唯一)管后处理,独立于录制任务。
-    -- config = JSON {steps, cleanup, upload};reconciler 按 roomSlug 查 enabled 规则取配置。
-    CREATE TABLE IF NOT EXISTS hub_rules (
-      roomSlug  TEXT PRIMARY KEY,
-      room      TEXT NOT NULL,
-      platform  TEXT NOT NULL DEFAULT 'douyin',
-      enabled   INTEGER NOT NULL DEFAULT 1,
-      config    TEXT,
-      createdAt TEXT
-    );
   `);
+  // 注:多节点 hub 规则**不在 DB**——已迁到文件 <root>/config/hub/{roomSlug}.json(见 hub-store.ts)。
+  // 旧库若有遗留 hub_rules 表,留着无害(不再读写)。
 
   // `CREATE TABLE IF NOT EXISTS` never alters an EXISTING table, so columns
   // added after a db was first created must be backfilled here. Each entry is

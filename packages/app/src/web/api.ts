@@ -18,6 +18,9 @@ import { resolveMesioBin } from "@drec/record-engine";
 import { APP_VERSION } from "../version.js";
 import type { RecordingSessionDTO, HubRulePayload, HubRuleDTO, HubPipelineConfig } from "@drec/core";
 import { listPlatforms, platformForRoom } from "@drec/core";
+import * as hubStore from "../hub-store.js";
+import type { HubRule } from "../hub-store.js";
+import { rootHubDir } from "../paths.js";
 import type { EventCenter } from "../events.js";
 import { resolveOutputDir } from "../paths.js";
 import type { Task, TaskStore } from "../store.js";
@@ -83,6 +86,8 @@ export interface ApiDeps {
    * 省略=不记录事件、不发通知,合成照常。
    */
   events?: EventCenter;
+  /** hub 任务配置目录(<root>/config/hub);省略=回落 rootHubDir() ?? "./config/hub"。 */
+  hubDir?: string;
 }
 
 /**
@@ -274,19 +279,21 @@ export interface Api {
   getEvents(since: number): ApiResult;
   /** GET /api/platforms — 已注册平台的配置(画质/录制器/弹幕/默认 + urlPattern),供前端按 URL 判平台、动态填表单。 */
   listPlatforms(): ApiResult;
-  /** GET /api/hub/rules — 所有多节点 hub 后处理规则(按 roomSlug)。 */
+  /** GET /api/hub/rules — 所有多节点 hub 后处理规则(按 {platform}.{roomSlug})。 */
   listHubRules(): ApiResult;
-  /** POST /api/hub/rules { room, enabled?, config? } — 新建/覆盖一条 hub 规则。 */
+  /** POST /api/hub/rules { room, enabled?, pipeline? } — 新建/覆盖一条 hub 规则。 */
   createHubRule(input: HubRulePayload): ApiResult;
-  /** PATCH /api/hub/rules/:roomSlug { enabled?, config? } — 部分更新一条规则。 */
-  updateHubRule(roomSlug: string, input: HubRulePayload): ApiResult;
-  /** DELETE /api/hub/rules/:roomSlug — 删除一条规则。 */
-  deleteHubRule(roomSlug: string): ApiResult;
+  /** PATCH /api/hub/rules/:key { enabled?, pipeline? } — 部分更新一条规则(key={platform}.{roomSlug})。 */
+  updateHubRule(key: string, input: HubRulePayload): ApiResult;
+  /** DELETE /api/hub/rules/:key — 删除一条规则。 */
+  deleteHubRule(key: string): ApiResult;
 }
 
 /** Build the handler set bound to the injected store + manager. */
 export function makeApi(deps: ApiDeps): Api {
   const { store, manager, login } = deps;
+  // hub 任务配置目录(文件版,现读不缓存)。注入 > rootHubDir() > 本地默认。
+  const hubDir = deps.hubDir ?? rootHubDir() ?? "./config/hub";
 
   // 后台抓主播名写回 store（创建/改房间号时）。fire-and-forget：不阻塞响应，
   // UI 下次轮询列表即可看到。失败静默（保留房间号显示）。
@@ -324,17 +331,18 @@ export function makeApi(deps: ApiDeps): Api {
   });
 
   // hub 规则 → DTO:补 anchorName(若有同 roomSlug 的录制任务,显示其主播名/任务名)。
-  const hubRuleView = (r: ReturnType<TaskStore["getHubRule"]> & {}): HubRuleDTO => {
+  const hubRuleView = (r: HubRule): HubRuleDTO => {
     const t = store.listTasks().find(
       (task) => platformForRoom(task.room).extractRoomSlug(task.room) === r.roomSlug,
     );
     const anchorName = t ? manager.getAnchorName(t.id) ?? t.anchorName ?? t.name ?? null : null;
     return {
+      key: r.key,
       roomSlug: r.roomSlug,
       room: r.room,
       platform: r.platform,
       enabled: r.enabled,
-      config: r.config,
+      pipeline: r.pipeline,
       anchorName,
     };
   };
@@ -663,30 +671,30 @@ export function makeApi(deps: ApiDeps): Api {
     },
 
     listHubRules(): ApiResult {
-      return { status: 200, body: store.listHubRules().map(hubRuleView) };
+      return { status: 200, body: hubStore.listHubRules(hubDir).map(hubRuleView) };
     },
     createHubRule(input: HubRulePayload): ApiResult {
       const room = (input.room ?? "").trim();
       if (!room) return err(400, "缺少房间地址 room");
       try {
-        const rule = store.upsertHubRule({ room, enabled: input.enabled, config: input.config });
+        const rule = hubStore.upsertHubRule(hubDir, { room, enabled: input.enabled, pipeline: input.pipeline });
         return { status: 201, body: hubRuleView(rule) };
       } catch (e) {
         return err(400, `无法解析房间地址: ${(e as Error).message}`);
       }
     },
-    updateHubRule(roomSlug: string, input: HubRulePayload): ApiResult {
-      const patch: { enabled?: boolean; config?: HubPipelineConfig } = {};
+    updateHubRule(key: string, input: HubRulePayload): ApiResult {
+      const patch: { enabled?: boolean; pipeline?: HubPipelineConfig } = {};
       if ("enabled" in input) patch.enabled = input.enabled;
-      if ("config" in input) patch.config = input.config;
-      const updated = store.updateHubRule(roomSlug, patch);
-      if (!updated) return err(404, `未找到 hub 规则 roomSlug=${roomSlug}`);
+      if ("pipeline" in input) patch.pipeline = input.pipeline;
+      const updated = hubStore.updateHubRule(hubDir, key, patch);
+      if (!updated) return err(404, `未找到 hub 规则 key=${key}`);
       return { status: 200, body: hubRuleView(updated) };
     },
-    deleteHubRule(roomSlug: string): ApiResult {
-      const ok = store.removeHubRule(roomSlug);
-      if (!ok) return err(404, `未找到 hub 规则 roomSlug=${roomSlug}`);
-      return { status: 200, body: { ok: true, roomSlug } };
+    deleteHubRule(key: string): ApiResult {
+      const ok = hubStore.removeHubRule(hubDir, key);
+      if (!ok) return err(404, `未找到 hub 规则 key=${key}`);
+      return { status: 200, body: { ok: true, key } };
     },
   };
 }

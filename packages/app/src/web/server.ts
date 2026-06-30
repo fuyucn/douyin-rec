@@ -127,13 +127,14 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
     if (method === "GET") return { name: "getEvents" };
     return null;
   }
-  // 多节点 hub 规则: GET/POST /api/hub/rules + PATCH/DELETE /api/hub/rules/:roomSlug
+  // 多节点 hub 规则: GET/POST /api/hub/rules + PATCH/DELETE /api/hub/rules/:key
+  // key = {platform}.{roomSlug}(含点)→ 字符类需含 `.`。
   if (p === "/api/hub/rules") {
     if (method === "GET") return { name: "listHubRules" };
     if (method === "POST") return { name: "createHubRule", needsBody: true };
     return null;
   }
-  const hr = /^\/api\/hub\/rules\/([A-Za-z0-9_-]+)$/.exec(p);
+  const hr = /^\/api\/hub\/rules\/([A-Za-z0-9_.-]+)$/.exec(p);
   if (hr) {
     if (method === "PATCH") return { name: "updateHubRule", slug: hr[1], needsBody: true };
     if (method === "DELETE") return { name: "deleteHubRule", slug: hr[1] };
@@ -179,6 +180,8 @@ export interface WebServerDeps {
   resolveShortUrl?: (url: string) => Promise<string | null>;
   /** 站内事件中枢（合成完成/错误 + 开播/录完观察器 emit 到此 → 本地流 + webhook）。 */
   events?: EventCenter;
+  /** hub 任务配置目录(<root>/config/hub);省略=回落 rootHubDir() ?? "./config/hub"。测试注入 temp 目录。 */
+  hubDir?: string;
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {}). */
@@ -315,6 +318,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     login: deps.login,
     resolveAnchor: deps.resolveAnchor ?? fetchAnchorName,
     resolveShortUrl: deps.resolveShortUrl ?? resolveShortUrl,
+    hubDir: deps.hubDir,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);
       const n = mj.recoverOrphans(); // 启动:清理上次重启腰斩的合成 job

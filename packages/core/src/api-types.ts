@@ -16,16 +16,19 @@ export interface HubPipelineConfig {
   upload?: { mode?: "stage-only" | "auto-private"; tag?: string; tid?: number; desc?: string };
 }
 
-/** 一条 hub 规则(GET /api/hub/rules)。按 roomSlug(web_rid)唯一。 */
+/** 一条 hub 规则(GET /api/hub/rules)。按平台限定,持久化为 <root>/config/hub/{platform}.{roomSlug}.json。 */
 export interface HubRuleDTO {
-  /** 房间唯一 ID(web_rid),= 主键。 */
+  /** `{platform}.{roomSlug}` —— 全局唯一 id(文件名 stem + API 路由参数;跨平台不撞)。 */
+  key: string;
+  /** 房间 ID(web_rid);单平台内唯一。 */
   roomSlug: string;
-  /** 用户输入的房间地址(显示用)。 */
+  /** 用户输入的房间地址(显示用,文件内 room 字段)。 */
   room: string;
   platform: string;
   /** 规则启用?false = 暂停该房间的 hub 处理。 */
   enabled: boolean;
-  config: HubPipelineConfig;
+  /** 流水线配置(steps / upload / cleanup);upload 是 pipeline 的一个阶段。 */
+  pipeline: HubPipelineConfig;
   /** 主播名(若有同 roomSlug 的录制任务/录像可关联显示);未知 null。 */
   anchorName?: string | null;
 }
@@ -35,7 +38,7 @@ export interface HubRulePayload {
   /** 房间地址或房间号(归一化解析出 roomSlug);create 必填。 */
   room?: string;
   enabled?: boolean;
-  config?: HubPipelineConfig;
+  pipeline?: HubPipelineConfig;
 }
 
 /** POST /api/tasks + PATCH /api/tasks/:id 的请求体(部分字段;录制专属,hub 配置见 HubRule)。 */

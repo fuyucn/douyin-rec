@@ -44,7 +44,7 @@ const BLANK: FormState = {
 };
 
 function fromRule(r: HubRuleDTO): FormState {
-  const c = r.config ?? {};
+  const c = r.pipeline ?? {};
   return {
     room: r.room ?? "",
     enabled: r.enabled,
@@ -71,7 +71,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
   useEffect(() => {
     if (open) setForm(rule ? fromRule(rule) : BLANK);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, rule?.roomSlug]);
+  }, [open, rule?.key]);
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]): void {
     setForm((f) => ({ ...f, [key]: value }));
@@ -81,7 +81,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     ev.preventDefault();
     const payload: HubRulePayload = {
       enabled: form.enabled,
-      config: {
+      pipeline: {
         steps: { burnDanmu: form.burnDanmu, burnLivechat: form.burnLivechat },
         cleanup: {
           stageSourceAfterMerge: form.clStageSourceAfterMerge,
@@ -100,7 +100,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     if (!isEdit) payload.room = form.room.trim();
     setBusy(true);
     try {
-      if (isEdit) await api.updateHubRule(rule.roomSlug, payload);
+      if (isEdit) await api.updateHubRule(rule.key, payload);
       else await api.createHubRule(payload);
       onClose();
       toast(isEdit ? "Hub 规则已更新" : "Hub 规则已创建", "success");

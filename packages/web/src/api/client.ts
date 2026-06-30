@@ -92,13 +92,13 @@ export const api = {
   // ── 站内事件流(轮询)──────────────────────────────────────────────────────
   getEvents: (since: number): Promise<EventsDTO> => request("GET", `/api/events?since=${since}`),
 
-  // ── 多节点 hub 规则(按 roomSlug)──────────────────────────────────────────────
+  // ── 多节点 hub 规则(key = {platform}.{roomSlug})──────────────────────────────
   listHubRules: (): Promise<HubRuleDTO[]> => request("GET", "/api/hub/rules"),
   createHubRule: (input: HubRulePayload): Promise<HubRuleDTO> => request("POST", "/api/hub/rules", input),
-  updateHubRule: (roomSlug: string, input: HubRulePayload): Promise<HubRuleDTO> =>
-    request("PATCH", `/api/hub/rules/${roomSlug}`, input),
-  deleteHubRule: (roomSlug: string): Promise<{ ok: boolean; roomSlug: string }> =>
-    request("DELETE", `/api/hub/rules/${roomSlug}`),
+  updateHubRule: (key: string, input: HubRulePayload): Promise<HubRuleDTO> =>
+    request("PATCH", `/api/hub/rules/${encodeURIComponent(key)}`, input),
+  deleteHubRule: (key: string): Promise<{ ok: boolean; key: string }> =>
+    request("DELETE", `/api/hub/rules/${encodeURIComponent(key)}`),
 
   // ── Global cookie ────────────────────────────────────────────────────────
   getCookie: (): Promise<CookieStatus> => request("GET", "/api/cookie"),

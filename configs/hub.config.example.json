@@ -5,13 +5,12 @@
     { "id": "vps2", "kind": "tailscale-ssh", "host": "CHANGE-ME.ts.net", "dataRoot": "/home/ubuntu/drec" }
   ],
   "cookies": "/data/config/biliup/cookies.json",
-  "uploadMode": "stage-only",
-  "uploadMeta": { "tag": "直播,录像", "tid": 21 },
-  "cleanMaxGapSec": 30,
   "stageDir": "/data/stage",
+  "cleanMaxGapSec": 30,
   "settleMs": 90000,
   "pollMs": 3000,
   "reconcileIntervalMs": 1800000,
   "maxWaitSec": 600,
-  "settleSec": 15
+  "settleSec": 15,
+  "uploadDefaults": { "tag": "直播,录像", "tid": 21, "titleTemplate": "{name}_{date}" }
 }

@@ -23,11 +23,12 @@ export interface ReconcilerDeps {
   /** 单个租户 listInventory 的超时(ms);挂起即降级为空,防一个 hung 节点锁死整轮对账。默认 60s。 */
   inventoryTimeoutMs?: number;
   /**
-   * 按房间(roomSlug)解析该场的 pipeline 配置(来自对应任务的 per-task 配置)。
-   * 返回 null → 该房间没开 hub(无 task 配置)→ **跳过不处理**。
+   * 按平台 + 房间解析该场的 pipeline 配置(来自 hub 任务文件 config/hub/{platform}.{roomSlug}.json)。
+   * 返回 null → 该房间没开 hub(无配置文件 / 已禁用)→ **跳过不处理**。
    * 不提供 → 用全局 pipelineDeps.cfg(兼容旧的全局模式 / 测试)。
+   * 带 platform 入参 → 多平台天然就绪(douyin/bilibili 同房间号不撞)。
    */
-  resolveCfg?: (roomSlug: string) => PipelineCfg | null;
+  resolveCfg?: (platform: string, roomSlug: string) => PipelineCfg | null;
   /** pipeline 失败的最大自动重试次数;达到后留 failed 不再重入。默认 3。 */
   maxRetries?: number;
 }
@@ -49,7 +50,7 @@ export class Reconciler {
   private sleep: (ms: number) => Promise<void>;
   private inventoryTimeoutMs: number;
   private maxRetries: number;
-  private resolveCfg?: (roomSlug: string) => PipelineCfg | null;
+  private resolveCfg?: (platform: string, roomSlug: string) => PipelineCfg | null;
 
   constructor(deps: ReconcilerDeps) {
     this.platform = deps.platform;
@@ -169,7 +170,7 @@ export class Reconciler {
         // 不提供 resolveCfg → 用全局 pipelineDeps.cfg(兼容旧的全局模式)。
         let cfg = this.pipelineDeps.cfg;
         if (this.resolveCfg) {
-          const resolved = this.resolveCfg(b.roomSlug);
+          const resolved = this.resolveCfg(this.platform, b.roomSlug);
           if (!resolved) continue; // 房间未开 hub 任务 → 不处理
           cfg = resolved;
         }

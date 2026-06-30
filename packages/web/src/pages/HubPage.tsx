@@ -9,7 +9,7 @@ import { HubRuleDialog } from "../modals/HubRuleDialog";
 
 /** 后处理 step 摘要(产哪些 + 上传模式),给列表一眼看清。 */
 function summarize(r: HubRuleDTO): string {
-  const c = r.config ?? {};
+  const c = r.pipeline ?? {};
   const out: string[] = ["plain"];
   if (c.steps?.burnDanmu !== false) out.push("danmu");
   if (c.steps?.burnLivechat !== false) out.push("livechat");
@@ -48,7 +48,7 @@ export function HubPage(): ReactNode {
 
   const toggle = async (r: HubRuleDTO): Promise<void> => {
     try {
-      await api.updateHubRule(r.roomSlug, { enabled: !r.enabled });
+      await api.updateHubRule(r.key, { enabled: !r.enabled });
       await refresh();
     } catch (e) {
       toast(errMessage(e), "error");
@@ -108,7 +108,7 @@ export function HubPage(): ReactNode {
               )}
               {loaded &&
                 rules.map((r) => (
-                  <tr key={r.roomSlug}>
+                  <tr key={r.key}>
                     <td>
                       {r.anchorName ? (
                         <>
@@ -142,7 +142,7 @@ export function HubPage(): ReactNode {
                         <IconButton title="编辑" onClick={() => openEdit(r)}>
                           <Pencil className="w-4 h-4" />
                         </IconButton>
-                        <IconButton title="删除" style={{ color: "var(--error)" }} onClick={() => setPendingDelete(r.roomSlug)}>
+                        <IconButton title="删除" style={{ color: "var(--error)" }} onClick={() => setPendingDelete(r.key)}>
                           <Trash2 className="w-4 h-4" />
                         </IconButton>
                       </div>

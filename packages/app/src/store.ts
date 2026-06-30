@@ -7,7 +7,6 @@
  */
 import type { DatabaseSync } from "node:sqlite";
 import { getPlatform, platformForRoom } from "@drec/core";
-import type { HubPipelineConfig } from "@drec/core";
 import { openDb } from "./db.js";
 
 export type TaskStatus = "stopped" | "running" | "error" | "pending" | "draining";
@@ -180,21 +179,8 @@ export function resolveTaskWebhook(
   return g.length > 0 ? g : null;
 }
 
-/** 一条多节点 hub 规则(按 roomSlug=web_rid 唯一;独立于录制任务)。 */
-export interface HubRule {
-  roomSlug: string;
-  room: string;
-  platform: string;
-  enabled: boolean;
-  config: HubPipelineConfig;
-  createdAt: string;
-}
-interface HubRuleRow { roomSlug: string; room: string; platform: string; enabled: number; config: string | null; createdAt: string }
-function rowToHubRule(r: HubRuleRow): HubRule {
-  let config: HubPipelineConfig = {};
-  try { if (r.config) config = JSON.parse(r.config) as HubPipelineConfig; } catch { /* 坏 JSON → 空配置 */ }
-  return { roomSlug: r.roomSlug, room: r.room, platform: r.platform ?? "douyin", enabled: Number(r.enabled) !== 0, config, createdAt: r.createdAt };
-}
+// hub 规则**已从 DB 迁出**到文件(<root>/config/hub/{roomSlug}.json,见 hub-store.ts)——
+// 纯配置、低频、可手改/进 git,文件比 sqlite 行更合适。录制任务(运行态)仍留 DB。
 
 export class TaskStore {
   readonly db: DatabaseSync;
@@ -405,40 +391,7 @@ export class TaskStore {
       .run(key, value);
   }
 
-  // ── 多节点 hub 规则(独立于录制任务,按 roomSlug=web_rid 唯一)─────────────────
-  listHubRules(): HubRule[] {
-    return (this.db.prepare(`SELECT * FROM hub_rules ORDER BY createdAt DESC`).all() as unknown as HubRuleRow[]).map(rowToHubRule);
-  }
-  getHubRule(roomSlug: string): HubRule | null {
-    const r = this.db.prepare(`SELECT * FROM hub_rules WHERE roomSlug = ?`).get(roomSlug) as unknown as HubRuleRow | undefined;
-    return r ? rowToHubRule(r) : null;
-  }
-  /** 新建/覆盖一条 hub 规则(按 room 解析 roomSlug+platform;upsert)。 */
-  upsertHubRule(input: { room: string; enabled?: boolean; config?: HubPipelineConfig }): HubRule {
-    const room = normalizeRoom(input.room);
-    const platform = platformForRoom(room);
-    const roomSlug = platform.extractRoomSlug(room);
-    this.db.prepare(
-      `INSERT INTO hub_rules (roomSlug, room, platform, enabled, config, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(roomSlug) DO UPDATE SET room=excluded.room, platform=excluded.platform,
-         enabled=excluded.enabled, config=excluded.config`,
-    ).run(roomSlug, room, platform.id, (input.enabled ?? true) ? 1 : 0,
-      input.config != null ? JSON.stringify(input.config) : null, new Date().toISOString());
-    return this.getHubRule(roomSlug)!;
-  }
-  /** 部分更新一条 hub 规则(只改给的字段)。 */
-  updateHubRule(roomSlug: string, patch: { enabled?: boolean; config?: HubPipelineConfig }): HubRule | null {
-    if (!this.getHubRule(roomSlug)) return null;
-    const cols: string[] = []; const vals: (string | number | null)[] = [];
-    if ("enabled" in patch) { cols.push("enabled = ?"); vals.push(patch.enabled ? 1 : 0); }
-    if ("config" in patch) { cols.push("config = ?"); vals.push(patch.config != null ? JSON.stringify(patch.config) : null); }
-    if (cols.length) { vals.push(roomSlug); this.db.prepare(`UPDATE hub_rules SET ${cols.join(", ")} WHERE roomSlug = ?`).run(...vals); }
-    return this.getHubRule(roomSlug);
-  }
-  removeHubRule(roomSlug: string): boolean {
-    return Number(this.db.prepare(`DELETE FROM hub_rules WHERE roomSlug = ?`).run(roomSlug).changes) > 0;
-  }
+  // hub 规则的 CRUD 已迁到 hub-store.ts(文件版)。
 
   close(): void {
     this.db.close();

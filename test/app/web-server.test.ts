@@ -10,6 +10,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
+import { mkdtempSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
 import { createWebServer, matchRoute } from "../../packages/app/src/web/server.js";
 import type { ManagerLike } from "../../packages/app/src/web/api.js";
@@ -69,8 +72,8 @@ describe("matchRoute", () => {
     expect(matchRoute("DELETE", "/api/cookie")?.name).toBe("clearCookie");
     expect(matchRoute("GET", "/api/hub/rules")?.name).toBe("listHubRules");
     expect(matchRoute("POST", "/api/hub/rules")).toMatchObject({ name: "createHubRule", needsBody: true });
-    expect(matchRoute("PATCH", "/api/hub/rules/123456")).toMatchObject({ name: "updateHubRule", slug: "123456", needsBody: true });
-    expect(matchRoute("DELETE", "/api/hub/rules/123456")).toMatchObject({ name: "deleteHubRule", slug: "123456" });
+    expect(matchRoute("PATCH", "/api/hub/rules/douyin.123456")).toMatchObject({ name: "updateHubRule", slug: "douyin.123456", needsBody: true });
+    expect(matchRoute("DELETE", "/api/hub/rules/douyin.123456")).toMatchObject({ name: "deleteHubRule", slug: "douyin.123456" });
   });
 
   it("returns null for unknown routes / wrong methods", () => {
@@ -87,9 +90,11 @@ describe("createWebServer (live)", () => {
   let store: TaskStore;
   let server: Server;
   let base: string;
+  let hubDir: string;
 
   beforeEach(async () => {
     store = new TaskStore(":memory:");
+    hubDir = mkdtempSync(join(tmpdir(), "web-hub-")); // 文件版 hub 配置 → 临时目录
     // no-op anchor resolver so创建任务不会触发真实 getInfo（vitest 无法 import biliLive）。
     server = createWebServer({
       store,
@@ -97,6 +102,7 @@ describe("createWebServer (live)", () => {
       log: () => {},
       resolveAnchor: async () => null,
       resolveShortUrl: async () => null,
+      hubDir,
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     const addr = server.address() as AddressInfo;
@@ -175,30 +181,34 @@ describe("createWebServer (live)", () => {
     expect(list.find((t) => t.id === created.id)!.name).toBe("new");
   });
 
-  it("hub rules CRUD via http (create → list → patch → delete)", async () => {
+  it("hub rules CRUD via http(文件版,key={platform}.{roomSlug};建/删落到 hubDir 文件)", async () => {
     const create = await fetch(`${base}/api/hub/rules`, {
       method: "POST",
-      body: JSON.stringify({ room: "https://live.douyin.com/654321", config: { steps: { burnLivechat: false } } }),
+      body: JSON.stringify({ room: "https://live.douyin.com/654321", pipeline: { steps: { burnLivechat: false } } }),
     });
     expect(create.status).toBe(201);
-    const rule = (await create.json()) as { roomSlug: string; enabled: boolean; config: { steps?: { burnLivechat?: boolean } } };
+    const rule = (await create.json()) as { key: string; roomSlug: string; platform: string; enabled: boolean; pipeline: { steps?: { burnLivechat?: boolean } } };
+    expect(rule.key).toBe("douyin.654321");
     expect(rule.roomSlug).toBe("654321");
     expect(rule.enabled).toBe(true);
-    expect(rule.config.steps?.burnLivechat).toBe(false);
+    expect(rule.pipeline.steps?.burnLivechat).toBe(false);
+    // 文件真的落到 hubDir
+    expect(existsSync(join(hubDir, "douyin.654321.json"))).toBe(true);
 
-    const list = (await (await fetch(`${base}/api/hub/rules`)).json()) as Array<{ roomSlug: string }>;
-    expect(list).toHaveLength(1);
+    const list = (await (await fetch(`${base}/api/hub/rules`)).json()) as Array<{ key: string }>;
+    expect(list.map((r) => r.key)).toEqual(["douyin.654321"]);
 
-    const patch = await fetch(`${base}/api/hub/rules/654321`, {
+    const patch = await fetch(`${base}/api/hub/rules/douyin.654321`, {
       method: "PATCH",
       body: JSON.stringify({ enabled: false }),
     });
     expect(patch.status).toBe(200);
     expect(((await patch.json()) as { enabled: boolean }).enabled).toBe(false);
 
-    const del = await fetch(`${base}/api/hub/rules/654321`, { method: "DELETE" });
+    const del = await fetch(`${base}/api/hub/rules/douyin.654321`, { method: "DELETE" });
     expect(del.status).toBe(200);
-    const missing = await fetch(`${base}/api/hub/rules/654321`, { method: "PATCH", body: JSON.stringify({ enabled: true }) });
+    expect(existsSync(join(hubDir, "douyin.654321.json"))).toBe(false); // 删文件
+    const missing = await fetch(`${base}/api/hub/rules/douyin.654321`, { method: "PATCH", body: JSON.stringify({ enabled: true }) });
     expect(missing.status).toBe(404);
   });
 
