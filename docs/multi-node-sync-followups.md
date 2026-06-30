@@ -63,11 +63,18 @@
   (`douyin.788…` / `bilibili.186…`)→ 各自选优(winner 可不同)→ 合并/烧/真实上传(4 条测试 BV,已清任务/规则/产物,BV 待手删)。
 - bilibili 平台录制验证 OK(WBI 取流 + 二进制 WS 弹幕);**匿名拿到 1080p60 原画**(qn 10000)。
 
+### ✅ sidecar 合并(2026-06-30):meta.json + gaps.json → {base}.session.json
+- 开录写身份(sessionBase/roomSlug/platform),停录同名覆盖补 gaps/totalGapSec。媒体目录少一种文件。scan 读 session.json,旧两文件仍兼容回落。
+
+### ✅ daemon「手动 stop 后自动重启」—— 已解决(非待办)
+- 旧 followup 已失效:`stopTask` 现 `setEnabled(false)`,daemon 只拉起 enabled 的任务 → 手动停不会被重启。
+  enabled=false 本身就是「暂停」。(注:带排期的任务停了,未来窗口也不录,直到重新启动 —— 符合直觉。)
+
 ### 待做
 - **per-平台 cookie**:cookie 模型目前「抖音单一」(全局 cookie = 抖音账号)。bilibili getStream **支持传 cookie**
   (登录态取大会员/4K/杜比/HDR 等更高 tier),但没 per-平台 cookie 存储 → bilibili 高 tier(超 1080p 原画)目前拿不到。
   原画 1080p 匿名够用。要覆盖 4K/大会员档需做按平台分别存 cookie。
-- daemon 手动 stop 后又自动重启(待加 paused 标志)。
+- **`merge-recording-today` skill 仍调不可跑的 Python `remote/merge.py`** —— hub 已自动做合并/上传,该 skill 待切 TS CLI 或标废弃。
 - **跨会话对齐拼接(断流场自动出完整版)** —— 先记录,后续做:
   - 现在「都断流」是中断+通知人工。要 hub 自动把断流多会话拼成完整版,需移植 skill 的**逐会话烧再拼**:
     每会话先 `merge`→`burn(offset=0)`(弹幕 p 偏移本就相对本会话起点,零累计漂移),再 **concat filter 重编码**拼接(各会话 fps 可能不同,`-c copy` 会压坏 PTS;重编码统一 fps/timebase)。
