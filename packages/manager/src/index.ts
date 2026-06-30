@@ -290,15 +290,30 @@ export class RecordingSession {
     this.writerOpen = true;
     this.currentXmlPath = xmlPath;
     this.lastXmlPath = xmlPath;
-    // 会话**开始**即写身份 sidecar:roomSlug(web_rid)= 唯一 ID。多节点 scan 优先读它当 slug,
-    // 从第一秒就有、跨节点一致、不依赖主播名解析,也无"停录后 gaps 才有 slug"的时序竞态。
+    // 会话**开始**即写身份 sidecar `{base}.session.json`:roomSlug(web_rid)+ platform = 唯一身份。
+    // 从第一秒就有、跨节点一致、不依赖主播名解析。停录时同名覆盖、补上 gaps(见 _writeSession)。
+    // 一个 sidecar 同时承载「身份(聚类)」+「缺口(选优)」,不再分 meta/gaps 两个文件。
     try {
-      const base = xmlPath.replace(/\.xml$/i, "");
-      const plat = platformForRoom(this.roomUrl);
-      const roomSlug = plat.extractRoomSlug(this.roomUrl);
-      // platform 也写进 meta:多节点 hub 按 (platform, roomSlug) 聚类,douyin/bilibili 同房间号不撞。
-      writeFileSync(`${base}.meta.json`, JSON.stringify({ sessionBase: basename(base), roomSlug, platform: plat.id }), "utf-8");
-    } catch { /* meta 写失败不影响录制 */ }
+      this._writeSession(xmlPath.replace(/\.xml$/i, ""));
+    } catch { /* sidecar 写失败不影响录制 */ }
+  }
+
+  /**
+   * 写会话 sidecar `{base}.session.json`(合并旧 meta+gaps)。
+   * 开录调(withGaps=false,只身份);停录调(withGaps=true,身份 + 缺口)→ 同名覆盖。
+   */
+  private _writeSession(base: string, withGaps = false): void {
+    const plat = platformForRoom(this.roomUrl);
+    const data: Record<string, unknown> = {
+      sessionBase: basename(base),
+      roomSlug: plat.extractRoomSlug(this.roomUrl),
+      platform: plat.id,
+    };
+    if (withGaps) {
+      data.gaps = this.gaps;
+      data.totalGapSec = Math.round(this.gaps.reduce((s, g) => s + (g.endMs - g.startMs), 0) / 1000);
+    }
+    writeFileSync(`${base}.session.json`, JSON.stringify(data), "utf-8");
   }
 
   private write(m: DanmuMessage): void {
@@ -317,14 +332,10 @@ export class RecordingSession {
     }
     await this.recorder.stop().catch(() => {});
     if (this.writerOpen) { this.writer.close(); this.writerOpen = false; this.currentXmlPath = null; }
-    // 写缺口 sidecar（供多节点选优用）
+    // 停录:同名覆盖 session.json,补上缺口(身份字段不变)。供多节点选优用。
     try {
       if (this.currentXmlPath || this.lastXmlPath) {
-        const base = (this.currentXmlPath ?? this.lastXmlPath!).replace(/\.xml$/i, "");
-        const totalGapSec = Math.round(this.gaps.reduce((s, g) => s + (g.endMs - g.startMs), 0) / 1000);
-        // 写入权威 roomSlug:多节点选优的 scan 优先用它,跨节点一致(不依赖各节点 anchorName 是否解析)。
-        const roomSlug = platformForRoom(this.roomUrl).extractRoomSlug(this.roomUrl);
-        writeFileSync(`${base}.gaps.json`, JSON.stringify({ sessionBase: basename(base), gaps: this.gaps, totalGapSec, roomSlug }), "utf-8");
+        this._writeSession((this.currentXmlPath ?? this.lastXmlPath!).replace(/\.xml$/i, ""), true);
       }
     } catch { /* sidecar 失败不影响停止 */ }
     // await(带 timeout):stop() 后调用方常立刻 process.exit,fire-and-forget 会丢这条 recordEnd。

@@ -102,10 +102,12 @@ describe("RecordingSession", () => {
     await sess.stop();
     const xmls = readdirSync(dir).filter((f) => f.endsWith(".xml"));
     expect(xmls.length).toBeGreaterThanOrEqual(1); // 生成了 xml
-    // 会话开始即写身份 sidecar {base}.meta.json,roomSlug = web_rid(从 live.douyin.com/123 解析)。
-    const metas = readdirSync(dir).filter((f) => f.endsWith(".meta.json"));
-    expect(metas.length).toBeGreaterThanOrEqual(1);
-    expect(JSON.parse(readFileSync(join(dir, metas[0]), "utf-8")).roomSlug).toBe("123");
+    // 会话开始即写身份 sidecar {base}.session.json,roomSlug = web_rid(从 live.douyin.com/123 解析)+ platform。
+    const sessFiles = readdirSync(dir).filter((f) => f.endsWith(".session.json"));
+    expect(sessFiles.length).toBeGreaterThanOrEqual(1);
+    const sj = JSON.parse(readFileSync(join(dir, sessFiles[0]), "utf-8"));
+    expect(sj.roomSlug).toBe("123");
+    expect(sj.platform).toBe("douyin");
   });
 
   it("弹幕只在 onLive 后启动：recorder 未 fire onLive(等开播)→ 弹幕不连(防开播前陈旧 liveId)", async () => {
@@ -427,7 +429,7 @@ describe("RecordingSession", () => {
     await expect(sess.stop()).resolves.toBeUndefined();
   });
 
-  it("断流缺口写入 {base}.gaps.json（供选优用）", async () => {
+  it("断流缺口写入 {base}.session.json(身份+缺口合一,供选优用)", async () => {
     vi.useFakeTimers();
     const dir = mkdtempSync(join(tmpdir(), "sess-gaps-"));
     const rec = new OfflineMock();
@@ -437,9 +439,12 @@ describe("RecordingSession", () => {
     rec.ev.onOffline();
     await vi.runAllTimersAsync();
     await sess.stop();
-    const gapsFile = readdirSync(dir).find((f) => f.endsWith(".gaps.json"));
-    expect(gapsFile).toBeTruthy();
-    const g = JSON.parse(readFileSync(join(dir, gapsFile!), "utf-8"));
+    // 重连产生多份 session.json(每场开录各写身份);缺口在停录时写进「最后一场」那份。
+    const all = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")));
+    expect(all.every((j) => j.roomSlug === "123")).toBe(true); // 每份都有身份
+    const g = all.find((j) => Array.isArray(j.gaps));          // 含缺口的那份
+    expect(g).toBeTruthy();
     expect(g.gaps.length).toBeGreaterThanOrEqual(1);
     expect(g.totalGapSec).toBeGreaterThanOrEqual(0);
   });

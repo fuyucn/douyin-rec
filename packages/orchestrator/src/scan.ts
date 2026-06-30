@@ -4,14 +4,33 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { groupSessions } from "@drec/post-process";
 import type { NodeRecording } from "./transport.js";
-import { readGaps } from "./gaps.js";
+import { readGaps, totalGapSecOf } from "./gaps.js";
 
-/** 读会话身份 sidecar {base}.meta.json(录制开始即写),取 roomSlug + platform;缺失/损坏返回 {}。 */
-function readMeta(jsonPath: string): { roomSlug?: string; platform?: string } {
+interface GapInterval { startMs: number; endMs: number }
+
+/**
+ * 读会话 sidecar,取 roomSlug + platform + totalGapSec。
+ * 新格式:`{base}.session.json`(身份+缺口合一,录制端 manager 写)。
+ * 旧格式回落:`{base}.meta.json`(身份)+ `{base}.gaps.json`(缺口)—— 兼容历史录像。
+ * 全缺失/损坏 → totalGapSec=0、roomSlug/platform=undefined。
+ */
+function readSession(dir: string, base: string): { roomSlug?: string; platform?: string; totalGapSec: number } {
   try {
-    const d = JSON.parse(readFileSync(jsonPath, "utf-8")) as { roomSlug?: string; platform?: string };
-    return { roomSlug: d.roomSlug || undefined, platform: d.platform || undefined };
-  } catch { return {}; }
+    const d = JSON.parse(readFileSync(join(dir, `${base}.session.json`), "utf-8")) as
+      { roomSlug?: string; platform?: string; totalGapSec?: number; gaps?: GapInterval[] };
+    return {
+      roomSlug: d.roomSlug || undefined,
+      platform: d.platform || undefined,
+      totalGapSec: d.totalGapSec ?? (d.gaps ? totalGapSecOf(d.gaps) : 0),
+    };
+  } catch { /* 无 session.json → 回落旧 meta+gaps */ }
+  let roomSlug: string | undefined, platform: string | undefined;
+  try {
+    const m = JSON.parse(readFileSync(join(dir, `${base}.meta.json`), "utf-8")) as { roomSlug?: string; platform?: string };
+    roomSlug = m.roomSlug || undefined; platform = m.platform || undefined;
+  } catch { /* 无 meta */ }
+  const g = readGaps(join(dir, `${base}.gaps.json`));
+  return { roomSlug: roomSlug ?? g?.roomSlug, platform, totalGapSec: g?.totalGapSec ?? 0 };
 }
 
 export type FfprobeAdapter = (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;
@@ -48,21 +67,20 @@ export async function scanRecordings(
         startMs = Math.min(startMs, p.startMs);
         endMs = Math.max(endMs, p.endMs);
       }
-      const gaps = readGaps(join(dir, `${base}.gaps.json`));
-      const meta = readMeta(join(dir, `${base}.meta.json`));
+      const sess = readSession(dir, base);
       recordings.push({
-        // slug = 房间号(web_rid)唯一 ID。优先级:meta(录制开始即写,最稳)> gaps(停录写)
-        // > taskRooms[主播名] > 目录名。前两者随录像走、跨节点一致;后两者是不可靠回退。
-        roomSlug: meta.roomSlug ?? gaps?.roomSlug ?? taskRooms[anchor] ?? anchor,
-        // platform 来自 meta(新录像必有);旧录像缺省 → douyin(历史只有抖音)。
-        platform: meta.platform ?? "douyin",
+        // slug = 房间号(web_rid)唯一 ID。优先级:session.json/旧 sidecar(随录像走、跨节点一致)
+        // > taskRooms[主播名] > 目录名(后两者不可靠回退)。
+        roomSlug: sess.roomSlug ?? taskRooms[anchor] ?? anchor,
+        // platform 来自 sidecar(新录像必有);旧录像/缺省 → douyin(历史只有抖音)。
+        platform: sess.platform ?? "douyin",
         sessionBase: base,
         tsFiles: g.ts.map((f) => join(dir, f)),
         xmlPath: join(dir, `${base}.xml`),
         durationSec,
         startMs: startMs === Infinity ? 0 : startMs,
         endMs,
-        totalGapSec: gaps?.totalGapSec ?? 0,
+        totalGapSec: sess.totalGapSec,
       });
     }
   }
