@@ -151,10 +151,12 @@ export class Reconciler {
       [...this.transports.values()].map((t) => this.inventoryWithTimeout(t)),
     );
 
-    // 2. Cluster recordings across nodes into broadcasts.
+    // 2. Cluster recordings across nodes into broadcasts —— 按每条录像的 platform 聚类(多平台)。
+    //    this.platform 仅作旧录像(meta 无 platform)的兜底默认。
     const broadcasts = clusterBroadcasts(
-      this.platform,
       invs.map((i) => ({ tenantId: i.tenantId, recordings: i.recordings })),
+      undefined,
+      this.platform,
     );
 
     // 3. Settle: 等各成员收播;返回仍在录的成员 key 集。
@@ -170,7 +172,7 @@ export class Reconciler {
         // 不提供 resolveCfg → 用全局 pipelineDeps.cfg(兼容旧的全局模式)。
         let cfg = this.pipelineDeps.cfg;
         if (this.resolveCfg) {
-          const resolved = this.resolveCfg(this.platform, b.roomSlug);
+          const resolved = this.resolveCfg(b.platform, b.roomSlug); // 按本场 platform 取配置(多平台)
           if (!resolved) continue; // 房间未开 hub 任务 → 不处理
           cfg = resolved;
         }

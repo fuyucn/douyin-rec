@@ -15,6 +15,7 @@ function freshLedger(): SyncLedger {
 function makeRec(overrides: Partial<NodeRecording> = {}): NodeRecording {
   return {
     roomSlug: "test-room",
+    platform: "douyin",
     sessionBase: "主播名_2026-06-27_08-00-00",
     tsFiles: ["/remote/a.ts", "/remote/b.ts"],
     xmlPath: "/remote/danmu.xml",
@@ -29,6 +30,7 @@ function makeRec(overrides: Partial<NodeRecording> = {}): NodeRecording {
 function makeBroadcast(members: Array<{ tenantId: string; rec: NodeRecording }>): Broadcast {
   return {
     streamKey: "douyin:test-room:2026-06-27",
+    platform: "douyin",
     roomSlug: "test-room",
     startMs: Date.now() - 3_600_000,
     members,

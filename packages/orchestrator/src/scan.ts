@@ -6,12 +6,12 @@ import { groupSessions } from "@drec/post-process";
 import type { NodeRecording } from "./transport.js";
 import { readGaps } from "./gaps.js";
 
-/** 读会话身份 sidecar {base}.meta.json(录制开始即写),取其权威 roomSlug;缺失/损坏返回 undefined。 */
-function readMetaRoomSlug(jsonPath: string): string | undefined {
+/** 读会话身份 sidecar {base}.meta.json(录制开始即写),取 roomSlug + platform;缺失/损坏返回 {}。 */
+function readMeta(jsonPath: string): { roomSlug?: string; platform?: string } {
   try {
-    const d = JSON.parse(readFileSync(jsonPath, "utf-8")) as { roomSlug?: string };
-    return d.roomSlug || undefined;
-  } catch { return undefined; }
+    const d = JSON.parse(readFileSync(jsonPath, "utf-8")) as { roomSlug?: string; platform?: string };
+    return { roomSlug: d.roomSlug || undefined, platform: d.platform || undefined };
+  } catch { return {}; }
 }
 
 export type FfprobeAdapter = (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;
@@ -49,11 +49,13 @@ export async function scanRecordings(
         endMs = Math.max(endMs, p.endMs);
       }
       const gaps = readGaps(join(dir, `${base}.gaps.json`));
-      const metaSlug = readMetaRoomSlug(join(dir, `${base}.meta.json`));
+      const meta = readMeta(join(dir, `${base}.meta.json`));
       recordings.push({
         // slug = 房间号(web_rid)唯一 ID。优先级:meta(录制开始即写,最稳)> gaps(停录写)
         // > taskRooms[主播名] > 目录名。前两者随录像走、跨节点一致;后两者是不可靠回退。
-        roomSlug: metaSlug ?? gaps?.roomSlug ?? taskRooms[anchor] ?? anchor,
+        roomSlug: meta.roomSlug ?? gaps?.roomSlug ?? taskRooms[anchor] ?? anchor,
+        // platform 来自 meta(新录像必有);旧录像缺省 → douyin(历史只有抖音)。
+        platform: meta.platform ?? "douyin",
         sessionBase: base,
         tsFiles: g.ts.map((f) => join(dir, f)),
         xmlPath: join(dir, `${base}.xml`),

@@ -4,11 +4,11 @@ import type { Broadcast } from "./identity.js";
 import type { NodeRecording } from "./transport.js";
 
 const rec = (over: Partial<NodeRecording>): NodeRecording => ({
-  roomSlug: "411", sessionBase: "s", tsFiles: [], durationSec: 1000,
+  roomSlug: "411", platform: "douyin", sessionBase: "s", tsFiles: [], durationSec: 1000,
   startMs: 0, endMs: 1_000_000, totalGapSec: 0, ...over,
 });
 const bc = (recs: NodeRecording[]): Broadcast => ({
-  streamKey: "k", roomSlug: "411", startMs: 0,
+  streamKey: "k", platform: "douyin", roomSlug: "411", startMs: 0,
   members: recs.map((r, i) => ({ tenantId: `n${i}`, rec: r })),
 });
 
@@ -30,7 +30,7 @@ describe("覆盖度选优", () => {
   it("同 tenant 多会话(断流重连=新会话)→ 该 tenant 不完整;无完整 tenant → clean=false", () => {
     // 单一 tenant 'A' 在本场断流成 2 个会话(各自 gap=0),没有任何完整录全 → clean=false。
     const b: Broadcast = {
-      streamKey: "k", roomSlug: "411", startMs: 0,
+      streamKey: "k", platform: "douyin", roomSlug: "411", startMs: 0,
       members: [
         { tenantId: "A", rec: rec({ sessionBase: "s1", durationSec: 1800, totalGapSec: 0 }) },
         { tenantId: "A", rec: rec({ sessionBase: "s2", durationSec: 3000, totalGapSec: 0 }) },
@@ -42,7 +42,7 @@ describe("覆盖度选优", () => {
   });
   it("一台完整 + 另一台断流多会话(总时长更长)→ 仍选完整那台,clean=true", () => {
     const b: Broadcast = {
-      streamKey: "k", roomSlug: "411", startMs: 0,
+      streamKey: "k", platform: "douyin", roomSlug: "411", startMs: 0,
       members: [
         { tenantId: "complete", rec: rec({ sessionBase: "c", durationSec: 3600, totalGapSec: 0 }) },
         { tenantId: "broken", rec: rec({ sessionBase: "b1", durationSec: 2000, totalGapSec: 0 }) },

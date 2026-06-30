@@ -2,6 +2,7 @@ export interface TenantConfig { id: string; kind: string; host?: string; dataRoo
 
 export interface NodeRecording {
   roomSlug: string;
+  platform: string;          // douyin / bilibili(来自 meta.json;缺省 fallback douyin)。按 (platform,roomSlug) 聚类。
   sessionBase: string;       // 如 一勺小苏打_2026-06-27_07-54-33
   tsFiles: string[];         // 绝对/相对该节点路径
   xmlPath?: string;

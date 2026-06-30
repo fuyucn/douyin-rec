@@ -294,8 +294,10 @@ export class RecordingSession {
     // 从第一秒就有、跨节点一致、不依赖主播名解析,也无"停录后 gaps 才有 slug"的时序竞态。
     try {
       const base = xmlPath.replace(/\.xml$/i, "");
-      const roomSlug = platformForRoom(this.roomUrl).extractRoomSlug(this.roomUrl);
-      writeFileSync(`${base}.meta.json`, JSON.stringify({ sessionBase: basename(base), roomSlug }), "utf-8");
+      const plat = platformForRoom(this.roomUrl);
+      const roomSlug = plat.extractRoomSlug(this.roomUrl);
+      // platform 也写进 meta:多节点 hub 按 (platform, roomSlug) 聚类,douyin/bilibili 同房间号不撞。
+      writeFileSync(`${base}.meta.json`, JSON.stringify({ sessionBase: basename(base), roomSlug, platform: plat.id }), "utf-8");
     } catch { /* meta 写失败不影响录制 */ }
   }
 

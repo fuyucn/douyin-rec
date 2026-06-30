@@ -17,6 +17,7 @@ function freshLedger(): SyncLedger {
 function makeRec(overrides: Partial<NodeRecording> = {}): NodeRecording {
   return {
     roomSlug: "test-room",
+    platform: "douyin",
     sessionBase: "主播名_2026-06-22_08-00-00",
     tsFiles: ["/remote/a.ts"],
     xmlPath: "/remote/danmu.xml",
