@@ -171,25 +171,33 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
             </label>
           ))}
 
-          <div>
-            <label className="field-label">上传 / upload</label>
-            <select className="select" value={form.uploadMode} onChange={(e) => set("uploadMode", e.target.value)}>
-              <option value="stage">stage(只合成,不传)</option>
-              <option value="upload">upload(自动传 B站)</option>
-            </select>
-          </div>
-          <div>
-            <label className="field-label">可见性 / visibility</label>
-            <select
-              className="select"
-              value={form.uploadPrivate ? "private" : "public"}
-              onChange={(e) => set("uploadPrivate", e.target.value === "private")}
+          {/* 上传 B站开关:off=stage(只合成不传) on=upload(自动传) */}
+          <label className="flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 cursor-pointer">
+            <span className="flex flex-col">
+              <span className="text-sm font-medium text-ink">上传 B站 / bilibili upload</span>
+              <span className="text-xs text-muted mt-0.5">{form.uploadMode === "upload" ? "合成后自动投稿" : "只合成,不上传(留 stage)"}</span>
+            </span>
+            <Switch
+              checked={form.uploadMode === "upload"}
+              onCheckedChange={(v) => set("uploadMode", v ? "upload" : "stage")}
+              name="uploadOn"
+            />
+          </label>
+          {/* 公开开关:off=仅自己可见(默认) on=公开;仅 upload 时可用 */}
+          <label className={`flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 ${form.uploadMode === "upload" ? "cursor-pointer" : "opacity-60 cursor-not-allowed"}`}>
+            <span className="flex flex-col">
+              <span className="text-sm font-medium text-ink">公开 / public</span>
+              <span className="text-xs text-muted mt-0.5">
+                {form.uploadMode !== "upload" ? "(需先开上传)" : form.uploadPrivate ? "仅自己可见(默认)" : "公开投稿"}
+              </span>
+            </span>
+            <Switch
+              checked={!form.uploadPrivate}
+              onCheckedChange={(v) => set("uploadPrivate", !v)}
+              name="uploadPublic"
               disabled={form.uploadMode !== "upload"}
-            >
-              <option value="private">仅自己可见(默认)</option>
-              <option value="public">公开</option>
-            </select>
-          </div>
+            />
+          </label>
           <div>
             <label className="field-label">B站分区 tid</label>
             <input type="number" min={1} className="input" value={form.uploadTid} onChange={(e) => set("uploadTid", e.target.value)} />
