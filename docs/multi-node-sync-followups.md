@@ -42,7 +42,17 @@
   - `select.ts`:按 tenant 会话数判完整(>1 会话 = 断流过 = 不完整);`clean` ⇔ 存在完整 tenant;winner 完整优先、否则报最长供人工参考。
   - `pipeline.ts`:`!clean` → early-return `needs_manual` + notify(「所有节点均断流,最完整=X,已保留全部源」)+ **不 pull/不 merge/不删源**。
 
+### ✅ hub 配置文件化(2026-06-30):config/hub/{platform}.{roomSlug}.json,从 DB 迁出
+- **文件 = 唯一真理源**(对标 DLR):服务端现读不缓存 → UI 与手改文件天然同步,无两份存储要对齐;
+  reconciler 每 tick 现读 → 手改即时生效。删了 sqlite `hub_rules` 表 + store DB 方法。
+- 结构:全局 `config/hub.config.json`(基础设施 + `uploadDefaults`)+ 每房间 `config/hub/{platform}.{roomSlug}.json`。
+  **key 按平台限定**(douyin/bilibili 同房间号不撞);任务文件 `{room, enabled, pipeline:{steps, upload, cleanup}}`(upload 收进 pipeline)。
+- `hub-store.ts`(app):文件版 CRUD,原子写(temp+rename)、坏 JSON 跳过、现读不缓存。api 注入 hubDir;reconciler `resolveCfg(platform, roomSlug)`。
+- upload metadata(tag/desc/tid/title)写在任务文件,留空回退 `hub.config.json` 的 `uploadDefaults`;硬标准(关水印/仅自己可见/copyright)仍在 biliup.ts 代码常量。
+- 实测(docker master):API 建→文件冒出、手改文件→API 现读即变、删→文件消失;迁移 docker 旧 sqlite 规则(767116735823)→ `douyin.767116735823.json`。
+
 ### 待做
+- **穿插上传(pipelined upload)**:后处理时上传(网络)与烧录(CPU)并行 —— merge plain → 后台传 P1 → 烧 danmu/livechat 时 P1 在传 → 拿 BV 后串行 append。对标 merge-recording-today skill;仅 auto-private 有意义。**文件化已先做(用户排期 1),这是紧接着的第二步。**
 - **跨会话对齐拼接(断流场自动出完整版)** —— 先记录,后续做:
   - 现在「都断流」是中断+通知人工。要 hub 自动把断流多会话拼成完整版,需移植 skill 的**逐会话烧再拼**:
     每会话先 `merge`→`burn(offset=0)`(弹幕 p 偏移本就相对本会话起点,零累计漂移),再 **concat filter 重编码**拼接(各会话 fps 可能不同,`-c copy` 会压坏 PTS;重编码统一 fps/timebase)。
