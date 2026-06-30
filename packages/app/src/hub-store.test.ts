@@ -12,7 +12,7 @@ beforeEach(() => {
 
 describe("hub-store(文件版,按平台限定 key)", () => {
   it("upsert 由 room 派生 {platform}.{roomSlug} 写文件 + get/list 往返", () => {
-    const pipeline = { steps: { burnDanmu: false }, upload: { mode: "stage-only" as const, tag: "t", tid: 21 } };
+    const pipeline = { steps: { burnDanmu: false }, upload: { mode: "stage" as const, tag: "t", tid: 21 } };
     const r = upsertHubRule(dir, { room: "https://live.douyin.com/123456", pipeline });
     expect(r.roomSlug).toBe("123456");
     expect(r.platform).toBe("douyin");

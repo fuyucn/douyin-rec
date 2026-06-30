@@ -49,7 +49,7 @@ function makePipelineDeps(ledger: SyncLedger, transports: Map<string, Transport>
       cleanMaxGapSec: 30,
       stageDir: "/tmp/stage",
       cookies: "/tmp/cookies.json",
-      uploadMode: "auto-private",
+      uploadMode: "upload",
       uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像" },
     },
   };
@@ -356,7 +356,7 @@ describe("Reconciler", () => {
     const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
       async (b, d) => { usedCfg = d.cfg; ledger.markDone(b.streamKey, "X"); return { state: "done", bv: "X" }; },
     );
-    const perTaskCfg = { cleanMaxGapSec: 5, stageDir: "/s", cookies: "/c", uploadMode: "stage-only" as const, uploadMeta: { tag: "t", tid: 21 }, steps: { burnDanmu: false } };
+    const perTaskCfg = { cleanMaxGapSec: 5, stageDir: "/s", cookies: "/c", uploadMode: "stage" as const, uploadMeta: { tag: "t", tid: 21 }, steps: { burnDanmu: false } };
     const reconciler = new Reconciler({
       platform: "douyin", transports, ledger, pipelineDeps,
       runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,

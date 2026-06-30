@@ -12,8 +12,11 @@ export interface HubPipelineConfig {
   steps?: { burnDanmu?: boolean; burnLivechat?: boolean };
   /** 清理开关(都默认 false;includeXmlAss 决定删除是否含 .xml/.ass)。 */
   cleanup?: { stageSourceAfterMerge?: boolean; sourceAfterDone?: boolean; stageAfterDone?: boolean; includeXmlAss?: boolean };
-  /** 上传:mode 缺省 stage-only(不传);auto-private 才上传 B站。tag/tid/desc 为该稿 metadata。 */
-  upload?: { mode?: "stage-only" | "auto-private"; tag?: string; tid?: number; desc?: string };
+  /**
+   * 上传:`mode` = stage(只合成不传)/ upload(传 B站);缺省 stage。
+   * `private` 仅 mode=upload 时有意义:true(默认)= 仅自己可见,false = 公开。tag/tid/desc 为该稿 metadata。
+   */
+  upload?: { mode?: "stage" | "upload"; private?: boolean; tag?: string; tid?: number; desc?: string };
 }
 
 /** 一条 hub 规则(GET /api/hub/rules)。按平台限定,持久化为 <root>/config/hub/{platform}.{roomSlug}.json。 */

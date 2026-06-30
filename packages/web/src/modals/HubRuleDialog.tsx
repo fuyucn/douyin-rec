@@ -22,7 +22,8 @@ interface FormState {
   clSourceAfterDone: boolean;
   clStageAfterDone: boolean;
   clIncludeXmlAss: boolean;
-  uploadMode: string; // "stage-only" | "auto-private"
+  uploadMode: string; // "stage" | "upload"
+  uploadPrivate: boolean; // 仅 upload 有意义:true=仅自己可见,false=公开
   uploadTag: string;
   uploadTid: string;
   uploadDesc: string;
@@ -37,7 +38,8 @@ const BLANK: FormState = {
   clSourceAfterDone: false,
   clStageAfterDone: false,
   clIncludeXmlAss: false,
-  uploadMode: "stage-only",
+  uploadMode: "stage",
+  uploadPrivate: true,
   uploadTag: "",
   uploadTid: "21",
   uploadDesc: "",
@@ -54,7 +56,8 @@ function fromRule(r: HubRuleDTO): FormState {
     clSourceAfterDone: c.cleanup?.sourceAfterDone === true,
     clStageAfterDone: c.cleanup?.stageAfterDone === true,
     clIncludeXmlAss: c.cleanup?.includeXmlAss === true,
-    uploadMode: c.upload?.mode ?? "stage-only",
+    uploadMode: c.upload?.mode === "upload" ? "upload" : "stage",
+    uploadPrivate: c.upload?.private !== false,
     uploadTag: c.upload?.tag ?? "",
     uploadTid: String(c.upload?.tid ?? 21),
     uploadDesc: c.upload?.desc ?? "",
@@ -90,7 +93,8 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           includeXmlAss: form.clIncludeXmlAss,
         },
         upload: {
-          mode: form.uploadMode === "auto-private" ? "auto-private" : "stage-only",
+          mode: form.uploadMode === "upload" ? "upload" : "stage",
+          private: form.uploadPrivate,
           tag: form.uploadTag.trim() || undefined,
           tid: Number(form.uploadTid) || 21,
           desc: form.uploadDesc.trim() || undefined,
@@ -168,10 +172,22 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           ))}
 
           <div>
-            <label className="field-label">上传 / upload mode</label>
+            <label className="field-label">上传 / upload</label>
             <select className="select" value={form.uploadMode} onChange={(e) => set("uploadMode", e.target.value)}>
-              <option value="stage-only">stage-only(只合成不上传)</option>
-              <option value="auto-private">auto-private(自动传 B站·仅自己可见)</option>
+              <option value="stage">stage(只合成,不传)</option>
+              <option value="upload">upload(自动传 B站)</option>
+            </select>
+          </div>
+          <div>
+            <label className="field-label">可见性 / visibility</label>
+            <select
+              className="select"
+              value={form.uploadPrivate ? "private" : "public"}
+              onChange={(e) => set("uploadPrivate", e.target.value === "private")}
+              disabled={form.uploadMode !== "upload"}
+            >
+              <option value="private">仅自己可见(默认)</option>
+              <option value="public">公开</option>
             </select>
           </div>
           <div>

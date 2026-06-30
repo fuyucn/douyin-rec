@@ -13,7 +13,7 @@ function summarize(r: HubRuleDTO): string {
   const out: string[] = ["plain"];
   if (c.steps?.burnDanmu !== false) out.push("danmu");
   if (c.steps?.burnLivechat !== false) out.push("livechat");
-  const up = c.upload?.mode === "auto-private" ? " → 上传" : "";
+  const up = c.upload?.mode === "upload" ? (c.upload.private === false ? " → 上传(公开)" : " → 上传(私)") : "";
   return out.join(" + ") + up;
 }
 

@@ -25,7 +25,10 @@ export interface PipelineCfg {
   cleanMaxGapSec: number;
   stageDir: string;
   cookies: string;
-  uploadMode: "auto-private" | "stage-only";
+  /** stage = 只合成不传;upload = 传 B站。 */
+  uploadMode: "stage" | "upload";
+  /** 仅 upload 时有意义:true(默认)= 仅自己可见,false = 公开。 */
+  uploadPrivate?: boolean;
   uploadMeta: { tag: string; tid: number; desc?: string };
   steps?: PipelineSteps;
   cleanup?: PipelineCleanup;
@@ -129,19 +132,21 @@ export async function runPipeline(
 
   await sh(`node dist/douyin-rec.mjs merge --in ${stageSub} --base ${winner.rec.sessionBase}`);
 
-  // 穿插上传:auto-private 下 merge 完 plain 即**后台 fire P1 上传**(网络),与随后的烧录(CPU)并行,
-  // 省总墙钟。stage-only 不传(bvPromise=null)。先 .then 收成 {bv}|{err},即便后续烧录抛错也不留
+  // 穿插上传:upload 模式下 merge 完 plain 即**后台 fire P1 上传**(网络),与随后的烧录(CPU)并行,
+  // 省总墙钟。stage 模式不传(bvPromise=null)。先 .then 收成 {bv}|{err},即便后续烧录抛错也不留
   // unhandled rejection(P1 可能已建稿 → 失败按 retry 处理,可接受)。
-  const willUpload = cfg.uploadMode !== "stage-only";
+  const willUpload = cfg.uploadMode === "upload";
   const bvPromise: Promise<{ bv: string } | { err: Error }> | null = willUpload
     ? (ledger.setState(streamKey, "uploading"),
        uploadPlain({
          video: plain, cookies: cfg.cookies, title: dateName,
-         tag: cfg.uploadMeta.tag, tid: cfg.uploadMeta.tid, public: false, desc: cfg.uploadMeta.desc,
+         tag: cfg.uploadMeta.tag, tid: cfg.uploadMeta.tid,
+         public: cfg.uploadPrivate === false, // private=false → 公开;默认(true)→ 仅自己可见
+         desc: cfg.uploadMeta.desc,
        }).then((bv) => ({ bv }), (err: unknown) => ({ err: err as Error })))
     : null;
 
-  // 步骤开关:burnDanmu/burnLivechat 默认开,false 则跳过该产出。此刻 P1 在后台上传(若 auto-private)。
+  // 步骤开关:burnDanmu/burnLivechat 默认开,false 则跳过该产出。此刻 P1 在后台上传(若 upload 模式)。
   if (burnDanmu) await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style danmu --gift-value 0.9`);
   if (burnLivechat) await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style livechat --gift-value 0.9`);
 
@@ -170,20 +175,20 @@ export async function runPipeline(
     await rmStage([...pulledTs, ...(clean.includeXmlAss && xmlArg ? [xmlArg] : [])]);
   }
 
-  // stage-only:有完整 winner 但不自动上传 → 产物已在 stage 待人工上传,源按配置清。
+  // stage 模式:有完整 winner 但不自动上传 → 产物已在 stage 待人工上传,源按配置清。
   // (!selection.clean 的「都断流」情况已在前面 early-return,这里 clean 必为 true。)
-  if (cfg.uploadMode === "stage-only") {
+  if (!willUpload) {
     ledger.setState(streamKey, "needs_manual");
     await cleanupSources();
     notify({
       kind: "error",
       stage: "同步",
-      message: `已合成完整版,待人工上传(stage-only)。覆盖度：${JSON.stringify(selection.perNode)}`,
+      message: `已合成完整版,待人工上传(stage)。覆盖度：${JSON.stringify(selection.perNode)}`,
     });
     return { state: "needs_manual" };
   }
 
-  // auto-private:P1 已在后台传(bvPromise)。各逻辑块先按 16GB 上限切分(超限→多段),
+  // upload 模式:P1 已在后台传(bvPromise)。各逻辑块先按 16GB 上限切分(超限→多段),
   // 再 await BV → **串行 append**(同稿件并发会撞;每组一条 append → 增量提交、各自可续传)。关掉的步骤 → 空组。
   const danmuParts = burnDanmu ? await splitForUpload(danmuMp4) : [];
   const livechatParts = burnLivechat ? await splitForUpload(livechatMp4) : [];

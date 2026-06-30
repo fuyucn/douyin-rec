@@ -48,7 +48,7 @@ function makeTransport(tenantId: string, exists = true): Transport {
 
 type TestDeps = Omit<PipelineDeps, "sh" | "uploadPlain" | "appendGroup" | "notify"> & {
   sh: Mock<(cmd: string) => Promise<void>>;
-  uploadPlain: Mock<(plain: { video?: string }) => Promise<string>>;
+  uploadPlain: Mock<(plain: { video?: string; public?: boolean }) => Promise<string>>;
   appendGroup: Mock<(o: { bv: string; files: string[]; cookies: string }) => Promise<void>>;
   notify: Mock<(e: NotifyEvent) => void>;
   transports: Map<string, Transport>;
@@ -61,7 +61,7 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   const t2 = makeTransport("node-2");
   const transports = new Map([["node-1", t1], ["node-2", t2]]);
   const sh = vi.fn<(cmd: string) => Promise<void>>().mockResolvedValue(undefined);
-  const uploadPlain = vi.fn<(plain: { video?: string }) => Promise<string>>().mockResolvedValue("BV123");
+  const uploadPlain = vi.fn<(plain: { video?: string; public?: boolean }) => Promise<string>>().mockResolvedValue("BV123");
   const appendGroup = vi.fn<(o: { bv: string; files: string[]; cookies: string }) => Promise<void>>().mockResolvedValue(undefined);
   const notify = vi.fn<(e: NotifyEvent) => void>();
 
@@ -78,7 +78,7 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
       cleanMaxGapSec: 30,
       stageDir: "/tmp/stage",
       cookies: "/tmp/cookies.json",
-      uploadMode: "auto-private",
+      uploadMode: "upload",
       uploadMeta: {
         tag: "直播录像",
         tid: 21,
@@ -138,6 +138,7 @@ describe("runPipeline", () => {
     // 穿插上传:uploadPlain 一次(P1)+ 每逻辑组一条 appendGroup(danmu、livechat 各一,串行)
     expect(deps.uploadPlain).toHaveBeenCalledTimes(1);
     expect((deps.uploadPlain as Mock).mock.calls[0][0].video).toContain(".mp4");
+    expect((deps.uploadPlain as Mock).mock.calls[0][0].public).toBe(false); // auto-private → 仅自己可见
     expect(deps.appendGroup).toHaveBeenCalledTimes(2);
     const apCalls = (deps.appendGroup as Mock).mock.calls.map((c) => c[0] as { bv: string; files: string[] });
     expect(apCalls[0].bv).toBe("BV123");
@@ -295,7 +296,7 @@ describe("runPipeline", () => {
     // stage-only:合并后清源,但不到 stageAfterDone(产物含 plain xml 留存)
     const deps = makeDeps({
       rmStage,
-      cfg: { ...makeDeps().cfg, uploadMode: "stage-only", cleanup: { stageSourceAfterMerge: true, includeXmlAss: true } },
+      cfg: { ...makeDeps().cfg, uploadMode: "stage", cleanup: { stageSourceAfterMerge: true, includeXmlAss: true } },
     });
     deps.ledger.upsertPending(broadcast.streamKey);
     const result = await runPipeline(broadcast, deps);
@@ -312,7 +313,7 @@ describe("runPipeline", () => {
     const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
     const deps = makeDeps({
       rmStage,
-      cfg: { ...makeDeps().cfg, uploadMode: "auto-private", cleanup: { stageAfterDone: true, includeXmlAss: true } },
+      cfg: { ...makeDeps().cfg, uploadMode: "upload", cleanup: { stageAfterDone: true, includeXmlAss: true } },
     });
     deps.ledger.upsertPending(broadcast.streamKey);
     const result = await runPipeline(broadcast, deps);

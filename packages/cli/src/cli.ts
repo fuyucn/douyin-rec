@@ -518,7 +518,8 @@ const hubStarter: HubStarter = {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         stageDir: hubCfg.stageDir ?? "./stage",
         cookies: hubCfg.cookies ?? "",
-        uploadMode: "stage-only" as const, // 全局兜底 = 不自动传;每任务文件按需开 auto-private
+        uploadMode: "stage" as const, // 全局兜底 = 不自动传;每任务文件按需 mode:"upload"
+        uploadPrivate: true,
         uploadMeta: { tag: defaultTag, tid: defaultTid, desc: uploadDefaults.desc },
       },
     };
@@ -535,7 +536,8 @@ const hubStarter: HubStarter = {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         stageDir: hubCfg.stageDir ?? "./stage",
         cookies: hubCfg.cookies ?? "",
-        uploadMode: p.upload?.mode ?? "stage-only",
+        uploadMode: p.upload?.mode === "upload" ? "upload" : "stage", // 其它值(含旧 stage-only)→ stage
+        uploadPrivate: p.upload?.private !== false,                    // 缺省 / true → 仅自己可见
         uploadMeta: {
           tag: p.upload?.tag || defaultTag,
           tid: p.upload?.tid ?? defaultTid,
