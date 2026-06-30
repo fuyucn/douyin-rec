@@ -95,6 +95,19 @@ export async function runPipeline(
   // 落库选优候选明细(coverage/时长/起止/缺口 + 谁胜出),供事后复盘"为什么这台赢"。
   ledger.recordCandidates(streamKey, selection.perNode, winner.tenantId);
 
+  // 没有任何 tenant 完整录全(所有节点都断流过)→ 直接中断 + 通知,**绝不删源**(保护数据,
+  // 留人工对齐拼接)。跨会话自动拼接是 followup(见 docs/multi-node-sync-followups.md),暂不自动做。
+  // selection.clean=true ⇔ 存在「单会话且 gap≤阈值」的完整 tenant;false ⇔ 都断流。
+  if (!selection.clean) {
+    ledger.setState(streamKey, "needs_manual", { winnerTenant: winner.tenantId });
+    notify({
+      kind: "error",
+      stage: "同步",
+      message: `所有节点均断流未录全,最完整=${winner.tenantId}(${Math.round(winner.rec.durationSec)}s),已保留全部源,请人工对齐拼接。覆盖度:${JSON.stringify(selection.perNode)}`,
+    });
+    return { state: "needs_manual" };
+  }
+
   // Mark syncing and pull files from winner node into a per-broadcast sub-directory
   ledger.setState(streamKey, "syncing", { winnerTenant: winner.tenantId });
   const transport = transports.get(winner.tenantId);
@@ -148,14 +161,15 @@ export async function runPipeline(
     await rmStage([...pulledTs, ...(clean.includeXmlAss && xmlArg ? [xmlArg] : [])]);
   }
 
-  // If not clean or stage-only mode: escalate to manual review(产物已在 stage,源也可按配置清)
-  if (!selection.clean || cfg.uploadMode === "stage-only") {
+  // stage-only:有完整 winner 但不自动上传 → 产物已在 stage 待人工上传,源按配置清。
+  // (!selection.clean 的「都断流」情况已在前面 early-return,这里 clean 必为 true。)
+  if (cfg.uploadMode === "stage-only") {
     ledger.setState(streamKey, "needs_manual");
     await cleanupSources();
     notify({
       kind: "error",
       stage: "同步",
-      message: `无干净版本/待批，覆盖度：${JSON.stringify(selection.perNode)}`,
+      message: `已合成完整版,待人工上传(stage-only)。覆盖度：${JSON.stringify(selection.perNode)}`,
     });
     return { state: "needs_manual" };
   }

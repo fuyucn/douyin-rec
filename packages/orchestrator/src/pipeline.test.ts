@@ -152,14 +152,11 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
-  it("场景2: 都断(无干净胜者) → upload未调, notify收到error, ledger=needs_manual, pull仍到stageSub", async () => {
-    // Both have large gaps, exceeding cleanMaxGapSec=30
-    const dirtyRec1 = makeRec({ totalGapSec: 200 });
-    const dirtyRec2 = makeRec({ totalGapSec: 200 });
-
+  it("场景2: 都断(无完整 tenant) → 直接中断+通知,**不 pull/不 merge/不删源**, ledger=needs_manual", async () => {
+    // 两节点各 1 会话但都断流(gap 200 > 30)→ 无完整 tenant → 直接中断,保留全部源。
     const broadcast = makeBroadcast([
-      { tenantId: "node-1", rec: dirtyRec1 },
-      { tenantId: "node-2", rec: dirtyRec2 },
+      { tenantId: "node-1", rec: makeRec({ totalGapSec: 200 }) },
+      { tenantId: "node-2", rec: makeRec({ totalGapSec: 200 }) },
     ]);
 
     const deps = makeDeps();
@@ -167,40 +164,42 @@ describe("runPipeline", () => {
 
     const result = await runPipeline(broadcast, deps);
 
-    // Should escalate to manual
     expect(result.state).toBe("needs_manual");
     expect(result.bv).toBeUndefined();
 
-    // pull should still be called with stageSub
-    const winnerTransport = deps.transports.get("node-1")!;
-    expect(winnerTransport.pull).toHaveBeenCalledTimes(1);
-    const pullCall = (winnerTransport.pull as Mock).mock.calls[0];
-    expect(pullCall[1]).toBe(STAGE_SUB);
-
-    // sh should still be called 3 times (merge+burn happen even for dirty, per spec)
-    expect(deps.sh).toHaveBeenCalledTimes(3);
-    const shCalls = deps.sh.mock.calls.map((c) => c[0] as string);
-    expect(shCalls[0]).toContain("merge");
-    expect(shCalls[0]).toContain(STAGE_SUB);
-
-    // upload should NOT be called
+    // 都断流 → 直接中断:不 pull、不 merge/burn、不上传、**不删任何源**(保护数据)。
+    expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+    expect(deps.transports.get("node-2")!.pull).not.toHaveBeenCalled();
+    expect(deps.sh).toHaveBeenCalledTimes(0);
     expect(deps.upload).toHaveBeenCalledTimes(0);
+    expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+    expect(deps.transports.get("node-2")!.cleanup).not.toHaveBeenCalled();
 
-    // notify should be called with an error event for "同步"
-    const errorNotifications = (deps.notify.mock.calls as Array<[NotifyEvent]>)
-      .filter(([e]) => e.kind === "error");
-    expect(errorNotifications).toHaveLength(1);
-    const [errEvent] = errorNotifications[0];
-    expect(errEvent.kind).toBe("error");
+    // notify error「同步」,带「断流」提示
+    const errs = (deps.notify.mock.calls as Array<[NotifyEvent]>).filter(([e]) => e.kind === "error");
+    expect(errs).toHaveLength(1);
+    const [errEvent] = errs[0];
     if (errEvent.kind === "error") {
       expect(errEvent.stage).toBe("同步");
-      expect(errEvent.message).toContain("覆盖度");
+      expect(errEvent.message).toContain("断流");
     }
+    expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("needs_manual");
+    deps.ledger.close();
+  });
 
-    // ledger should end at "needs_manual"
-    const job = deps.ledger.get(broadcast.streamKey);
-    expect(job?.state).toBe("needs_manual");
-
+  it("场景2b: 同 tenant 断流多会话(无完整 tenant)→ 同样直接中断+保留源", async () => {
+    // node-1 断流成 2 会话(各 gap=0),没有完整 tenant → 不 pull/merge,不删源。
+    const broadcast = makeBroadcast([
+      { tenantId: "node-1", rec: makeRec({ sessionBase: "主播名_2026-06-27_08-00-00", durationSec: 1800, totalGapSec: 0 }) },
+      { tenantId: "node-1", rec: makeRec({ sessionBase: "主播名_2026-06-27_08-35-00", durationSec: 3000, totalGapSec: 0 }) },
+    ]);
+    const deps = makeDeps({ cfg: { ...makeDeps().cfg, cleanup: { sourceAfterDone: true } } });
+    deps.ledger.upsertPending(broadcast.streamKey);
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("needs_manual");
+    expect(deps.sh).toHaveBeenCalledTimes(0);            // 不合并
+    expect(deps.upload).not.toHaveBeenCalled();
+    expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled(); // 即便配了 sourceAfterDone 也不删
     deps.ledger.close();
   });
 

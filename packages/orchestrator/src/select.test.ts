@@ -27,4 +27,30 @@ describe("覆盖度选优", () => {
     expect(s.winner?.tenantId).toBe("n0"); // 缺口少者覆盖高
     expect(s.clean).toBe(false);
   });
+  it("同 tenant 多会话(断流重连=新会话)→ 该 tenant 不完整;无完整 tenant → clean=false", () => {
+    // 单一 tenant 'A' 在本场断流成 2 个会话(各自 gap=0),没有任何完整录全 → clean=false。
+    const b: Broadcast = {
+      streamKey: "k", roomSlug: "411", startMs: 0,
+      members: [
+        { tenantId: "A", rec: rec({ sessionBase: "s1", durationSec: 1800, totalGapSec: 0 }) },
+        { tenantId: "A", rec: rec({ sessionBase: "s2", durationSec: 3000, totalGapSec: 0 }) },
+      ],
+    };
+    const s = selectWinner(b, 30);
+    expect(s.clean).toBe(false);             // A 有 2 会话 → 不完整 → 无完整 tenant
+    expect(s.winner?.tenantId).toBe("A");    // 仍报最长会话供人工参考
+  });
+  it("一台完整 + 另一台断流多会话(总时长更长)→ 仍选完整那台,clean=true", () => {
+    const b: Broadcast = {
+      streamKey: "k", roomSlug: "411", startMs: 0,
+      members: [
+        { tenantId: "complete", rec: rec({ sessionBase: "c", durationSec: 3600, totalGapSec: 0 }) },
+        { tenantId: "broken", rec: rec({ sessionBase: "b1", durationSec: 2000, totalGapSec: 0 }) },
+        { tenantId: "broken", rec: rec({ sessionBase: "b2", durationSec: 2500, totalGapSec: 0 }) },
+      ],
+    };
+    const s = selectWinner(b, 30);
+    expect(s.clean).toBe(true);
+    expect(s.winner?.tenantId).toBe("complete"); // 完整优先,即便 broken 两段合计更长
+  });
 });

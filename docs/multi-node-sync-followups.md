@@ -35,7 +35,19 @@
 - pipeline 步骤开关(可只到 plain 就停)+ cleanup 开关(删 stage 源/源节点录制/stage 产物;includeXmlAss 守弹幕源)+ Transport.cleanup(local fs / ssh rm)。
 - **2026-06-29 实测(房间 杨甜甜)逐项验证**:唯一 streamKey、2 节点选优、`burnLivechat:false`→无 livechat、`stageSourceAfterMerge:true`→源 .ts 删、`stage-only`→needs_manual、xml 保留、无 fork 风暴。
 
+### ✅ 断流多会话选优:完整优先 + 都断则中断通知(2026-06-29)
+- **背景**:我们的录制器**断流重连 = 新会话**(每次 `spawnRecording` 用新时间戳 nameBase)。所以一场断流几次 = 几个 sessionBase。`scan` 每会话一条 `NodeRecording`,`identity` 把同房间 5min 内的会话聚成一个 Broadcast(members = 所有节点 × 所有会话)。
+- **旧 bug**:`selectWinner` 按单会话覆盖度选最长那一个会话,单会话自身 gap=0 → 误判 clean → 当完整版上传,且 `sourceAfterDone` 删掉所有会话源 → **丢内容**。
+- **新规则(用户定)**:**完整录全的 tenant 优先**(= 只有 1 个会话、没断流、gap≤阈值);多个完整取最长。**没有任何完整 tenant(都断流过)→ 直接中断 + 通知,绝不删源**(保护数据,留人工)。
+  - `select.ts`:按 tenant 会话数判完整(>1 会话 = 断流过 = 不完整);`clean` ⇔ 存在完整 tenant;winner 完整优先、否则报最长供人工参考。
+  - `pipeline.ts`:`!clean` → early-return `needs_manual` + notify(「所有节点均断流,最完整=X,已保留全部源」)+ **不 pull/不 merge/不删源**。
+
 ### 待做
+- **跨会话对齐拼接(断流场自动出完整版)** —— 先记录,后续做:
+  - 现在「都断流」是中断+通知人工。要 hub 自动把断流多会话拼成完整版,需移植 skill 的**逐会话烧再拼**:
+    每会话先 `merge`→`burn(offset=0)`(弹幕 p 偏移本就相对本会话起点,零累计漂移),再 **concat filter 重编码**拼接(各会话 fps 可能不同,`-c copy` 会压坏 PTS;重编码统一 fps/timebase)。
+  - 对齐保证靠「**每会话弹幕只跟自己视频对齐 → 物理拼接**」,不靠墙钟偏移(gap 被压扁 → 墙钟会漂)。livechat 的 gift/member 绝对 epoch 锚点需在拼接后统一参照系。会话真实时长用 ffprobe 末帧 PTS(mesio flv 头时长可能=0)。
+  - building blocks 已在 `post-process`(`mergeSession` / `burn --indir --base` / ass 按 `video_start_time` 分段锚定);缺 orchestrator 层串「winner tenant 多会话逐烧+concat 拼」。
 - **daemon 自动重启已停任务**:任务手动 stop 后 daemon 下 tick 又重启(enabled+在窗口+在播)。正解:手动 stop 置 paused 标志,daemon 不自动重启;仅窗口调度自动启停。(测试时靠 delete 任务规避)
 
 ## 测试备注
