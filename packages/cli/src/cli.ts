@@ -511,8 +511,8 @@ const hubStarter: HubStarter = {
       }),
       // 穿插上传接缝:pipeline 先 fire uploadPlain(网络)与烧录并行,再 await BV 后串行 appendGroup。
       uploadPlain: (plain: UploadOpts) => uploadPlain({ plain }),
-      appendGroup: (o: { bv: string; files: string[]; cookies: string }) =>
-        appendGroup({ cookies: o.cookies, bv: o.bv, files: o.files }),
+      appendGroup: (o: { bv: string; files: string[]; cookies: string; public: boolean }) =>
+        appendGroup({ cookies: o.cookies, bv: o.bv, files: o.files, public: o.public }),
       notify: opts.onEvent,
       cfg: {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,

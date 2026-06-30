@@ -49,7 +49,7 @@ function makeTransport(tenantId: string, exists = true): Transport {
 type TestDeps = Omit<PipelineDeps, "sh" | "uploadPlain" | "appendGroup" | "notify"> & {
   sh: Mock<(cmd: string) => Promise<void>>;
   uploadPlain: Mock<(plain: { video?: string; public?: boolean }) => Promise<string>>;
-  appendGroup: Mock<(o: { bv: string; files: string[]; cookies: string }) => Promise<void>>;
+  appendGroup: Mock<(o: { bv: string; files: string[]; cookies: string; public: boolean }) => Promise<void>>;
   notify: Mock<(e: NotifyEvent) => void>;
   transports: Map<string, Transport>;
   ledger: SyncLedger;
@@ -62,7 +62,7 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   const transports = new Map([["node-1", t1], ["node-2", t2]]);
   const sh = vi.fn<(cmd: string) => Promise<void>>().mockResolvedValue(undefined);
   const uploadPlain = vi.fn<(plain: { video?: string; public?: boolean }) => Promise<string>>().mockResolvedValue("BV123");
-  const appendGroup = vi.fn<(o: { bv: string; files: string[]; cookies: string }) => Promise<void>>().mockResolvedValue(undefined);
+  const appendGroup = vi.fn<(o: { bv: string; files: string[]; cookies: string; public: boolean }) => Promise<void>>().mockResolvedValue(undefined);
   const notify = vi.fn<(e: NotifyEvent) => void>();
 
   const base: PipelineDeps = {

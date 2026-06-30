@@ -73,8 +73,14 @@ export function upload(o: UploadOpts): Promise<{ bv: string }> {
 }
 
 /** 构造 biliup append 参数（纯函数）。 */
-export function buildAppendArgs(o: { cookies: string; bv: string; files: string[] }): string[] {
-  return ["-u", o.cookies, "append", "--vid", o.bv, ...o.files];
+export function buildAppendArgs(o: { cookies: string; bv: string; files: string[]; public?: boolean }): string[] {
+  // 防御:append 重新提交稿件元数据时可能重置「水印/可见性」(biliLive-tools v3.9.0 修过
+  // 「续传水印不被继承」的同类 bug)。故 append 也带上关水印 + 仅自己可见,与 P1 upload 保持一致,
+  // 避免追加分 P 后整稿被翻成「带水印 / 公开」。两者均为不可逆/隐私关键项。
+  const args = ["-u", o.cookies, "append", "--vid", o.bv, "--extra-fields", '{"watermark":{"state":0}}'];
+  if (!o.public) args.push("--is-only-self", "1");
+  args.push(...o.files);
+  return args;
 }
 
 /**
@@ -92,16 +98,18 @@ export async function uploadPlain(o: {
   return bv;
 }
 
-/** 追加一个逻辑组到已建稿件(空组跳过)。多组必须**串行**调用(同稿件并发 append 会撞)。 */
+/** 追加一个逻辑组到已建稿件(空组跳过)。多组必须**串行**调用(同稿件并发 append 会撞)。
+ *  public 透传给 buildAppendArgs,保证追加分 P 时保留 P1 的可见性/水印设置。 */
 export async function appendGroup(o: {
   cookies: string;
   bv: string;
   files: string[];
+  public?: boolean;
   run?: (argv: string[]) => Promise<string>;
 }): Promise<void> {
   if (o.files.length === 0) return;
   const run = o.run ?? runBiliup;
-  await run(buildAppendArgs({ cookies: o.cookies, bv: o.bv, files: o.files }));
+  await run(buildAppendArgs({ cookies: o.cookies, bv: o.bv, files: o.files, public: o.public }));
 }
 
 /**
@@ -118,7 +126,7 @@ export async function uploadThenAppend(o: {
   const bv = parseBV(uploadOut);
   if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${uploadOut.slice(-300)}`);
   if (o.extras.length > 0) {
-    await run(buildAppendArgs({ cookies: o.plain.cookies, bv, files: o.extras }));
+    await run(buildAppendArgs({ cookies: o.plain.cookies, bv, files: o.extras, public: o.plain.public }));
   }
   return bv;
 }
@@ -140,7 +148,7 @@ export async function uploadThenAppendGroups(o: {
   if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${uploadOut.slice(-300)}`);
   for (const files of o.groups) {
     if (files.length > 0) {
-      await run(buildAppendArgs({ cookies: o.plain.cookies, bv, files }));
+      await run(buildAppendArgs({ cookies: o.plain.cookies, bv, files, public: o.plain.public }));
     }
   }
   return bv;

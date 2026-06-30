@@ -40,8 +40,9 @@ export interface PipelineDeps {
   sh: (cmd: string) => Promise<void>;
   /** 仅上传 plain(P1)拿 BV —— **穿插上传接缝**:pipeline 先 fire 它(网络),与烧录(CPU)并行。 */
   uploadPlain: (plain: UploadOpts) => Promise<string>;
-  /** 追加一个逻辑组到稿件(空组跳过)。多组**串行**调用(同稿件并发 append 会撞)。 */
-  appendGroup: (o: { bv: string; files: string[]; cookies: string }) => Promise<void>;
+  /** 追加一个逻辑组到稿件(空组跳过)。多组**串行**调用(同稿件并发 append 会撞)。
+   *  public 透传 → append 保留 P1 的水印关/可见性(防 append 重置)。 */
+  appendGroup: (o: { bv: string; files: string[]; cookies: string; public: boolean }) => Promise<void>;
   /** 把单个烧录产物按 16GB 上限切成多段(默认 splitToSizeLimit);可注入测试。 */
   splitForUpload?: (mp4: string) => Promise<string[]>;
   /** 删 master 本地 stage 文件(cleanup 用);默认 fs.rm,可注入测试。 */
@@ -199,9 +200,10 @@ export async function runPipeline(
     return { state: "failed" };
   }
   const bv = r.bv;
+  const isPublic = cfg.uploadPrivate === false;
   for (const files of [danmuParts, livechatParts]) {
     if (files.length === 0) continue; // 关掉的步骤 → 空组,不传
-    await appendGroup({ bv, files, cookies: cfg.cookies });
+    await appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic });
   }
 
   ledger.markDone(streamKey, bv);

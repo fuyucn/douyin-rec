@@ -2,10 +2,17 @@
 import { describe, it, expect } from "vitest";
 import { buildAppendArgs, uploadThenAppend, uploadThenAppendGroups } from "../../packages/app/src/upload/biliup.js";
 
+// 防御:append 也带关水印 + 仅自己可见(防 append 重置稿件设置,见 biliup.ts 注释)。
+const WM = '{"watermark":{"state":0}}';
+
 describe("P1→append", () => {
-  it("buildAppendArgs 形如 append --vid BV files", () => {
+  it("buildAppendArgs 带关水印 + 仅自己可见(public 省略=私有)", () => {
     expect(buildAppendArgs({ cookies: "c.json", bv: "BV1", files: ["d.mp4", "l.mp4"] }))
-      .toEqual(["-u", "c.json", "append", "--vid", "BV1", "d.mp4", "l.mp4"]);
+      .toEqual(["-u", "c.json", "append", "--vid", "BV1", "--extra-fields", WM, "--is-only-self", "1", "d.mp4", "l.mp4"]);
+  });
+  it("buildAppendArgs public:true → 关水印但不加 is-only-self", () => {
+    expect(buildAppendArgs({ cookies: "c.json", bv: "BV1", files: ["d.mp4"], public: true }))
+      .toEqual(["-u", "c.json", "append", "--vid", "BV1", "--extra-fields", WM, "d.mp4"]);
   });
 
   it("uploadThenAppend：先传 plain 拿 BV，再 append 两个分P", async () => {
@@ -23,8 +30,8 @@ describe("P1→append", () => {
     // first call should be the upload call
     expect(calls[0].includes("upload")).toBe(true);
     expect(calls[0].includes("p.mp4")).toBe(true);
-    // second call should be the append call
-    expect(calls[1]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", "d.mp4", "l.mp4"]);
+    // second call should be the append call(public:false → 带 is-only-self)
+    expect(calls[1]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", "--extra-fields", WM, "--is-only-self", "1", "d.mp4", "l.mp4"]);
   });
 
   it("uploadThenAppend：无 extras 时不调 append，返回 BV", async () => {
@@ -69,8 +76,8 @@ describe("uploadThenAppendGroups（每逻辑组一条 append）", () => {
     expect(bv).toBe("BV9Ab4y1C7xY");
     expect(calls).toHaveLength(3); // upload + 2 appends（不是把 3 文件塞一条）
     expect(calls[0].includes("upload")).toBe(true);
-    expect(calls[1]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", "d0.mp4", "d1.mp4"]);
-    expect(calls[2]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", "l.mp4"]);
+    expect(calls[1]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", "--extra-fields", WM, "--is-only-self", "1", "d0.mp4", "d1.mp4"]);
+    expect(calls[2]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", "--extra-fields", WM, "--is-only-self", "1", "l.mp4"]);
   });
 
   it("空组被跳过（不发空 append）", async () => {
