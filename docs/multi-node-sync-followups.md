@@ -55,7 +55,18 @@
 - merge plain 完即**后台 fire P1 上传**(网络),与随后的 burn danmu/livechat(CPU)并行;再 split → await BV → **串行 append**(同稿件并发会撞)。省总墙钟。仅 auto-private 生效;stage-only 不传。
 - 接缝:biliup `uploadPlain`(传 plain 拿 BV)+ `appendGroup`(追加一组);`PipelineDeps.upload` → `uploadPlain`+`appendGroup`。P1 失败→failed+notify;空组不 append。
 
+### ✅ 多平台 hub(2026-06-30,实测 douyin+bilibili 双跑通)
+- meta.json 加 `platform`(manager 写);NodeRecording 加 platform(scan 读,旧录像 fallback douyin);
+  clusterBroadcasts 按 (platform,roomSlug) 聚类,Broadcast 带 platform,streamKey=`{platform}:{roomSlug}:{date}`;
+  reconciler 用 b.platform 调 resolveCfg(this.platform 仅作旧录像默认)。
+- **实测**:douyin 788038294100 + bilibili 1861302252 同时两节点录 → 聚成两个独立 streamKey → 各查各的 hub 规则
+  (`douyin.788…` / `bilibili.186…`)→ 各自选优(winner 可不同)→ 合并/烧/真实上传(4 条测试 BV,已清任务/规则/产物,BV 待手删)。
+- bilibili 平台录制验证 OK(WBI 取流 + 二进制 WS 弹幕);**匿名拿到 1080p60 原画**(qn 10000)。
+
 ### 待做
+- **per-平台 cookie**:cookie 模型目前「抖音单一」(全局 cookie = 抖音账号)。bilibili getStream **支持传 cookie**
+  (登录态取大会员/4K/杜比/HDR 等更高 tier),但没 per-平台 cookie 存储 → bilibili 高 tier(超 1080p 原画)目前拿不到。
+  原画 1080p 匿名够用。要覆盖 4K/大会员档需做按平台分别存 cookie。
 - daemon 手动 stop 后又自动重启(待加 paused 标志)。
 - **跨会话对齐拼接(断流场自动出完整版)** —— 先记录,后续做:
   - 现在「都断流」是中断+通知人工。要 hub 自动把断流多会话拼成完整版,需移植 skill 的**逐会话烧再拼**:
