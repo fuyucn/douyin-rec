@@ -51,8 +51,12 @@
 - upload metadata(tag/desc/tid/title)写在任务文件,留空回退 `hub.config.json` 的 `uploadDefaults`;硬标准(关水印/仅自己可见/copyright)仍在 biliup.ts 代码常量。
 - 实测(docker master):API 建→文件冒出、手改文件→API 现读即变、删→文件消失;迁移 docker 旧 sqlite 规则(767116735823)→ `douyin.767116735823.json`。
 
+### ✅ 穿插上传(pipelined upload,2026-06-30)
+- merge plain 完即**后台 fire P1 上传**(网络),与随后的 burn danmu/livechat(CPU)并行;再 split → await BV → **串行 append**(同稿件并发会撞)。省总墙钟。仅 auto-private 生效;stage-only 不传。
+- 接缝:biliup `uploadPlain`(传 plain 拿 BV)+ `appendGroup`(追加一组);`PipelineDeps.upload` → `uploadPlain`+`appendGroup`。P1 失败→failed+notify;空组不 append。
+
 ### 待做
-- **穿插上传(pipelined upload)**:后处理时上传(网络)与烧录(CPU)并行 —— merge plain → 后台传 P1 → 烧 danmu/livechat 时 P1 在传 → 拿 BV 后串行 append。对标 merge-recording-today skill;仅 auto-private 有意义。**文件化已先做(用户排期 1),这是紧接着的第二步。**
+- daemon 手动 stop 后又自动重启(待加 paused 标志)。
 - **跨会话对齐拼接(断流场自动出完整版)** —— 先记录,后续做:
   - 现在「都断流」是中断+通知人工。要 hub 自动把断流多会话拼成完整版,需移植 skill 的**逐会话烧再拼**:
     每会话先 `merge`→`burn(offset=0)`(弹幕 p 偏移本就相对本会话起点,零累计漂移),再 **concat filter 重编码**拼接(各会话 fps 可能不同,`-c copy` 会压坏 PTS;重编码统一 fps/timebase)。
