@@ -7,13 +7,6 @@ import type { UploadOpts } from "@drec/app";
 import { splitToSizeLimit } from "@drec/post-process";
 import { selectWinner } from "./select.js";
 
-export interface UploadArgs {
-  plain: UploadOpts;
-  /** 按逻辑块分组的分P(每组一条 append),例:[[danmu_part0,danmu_part1],[livechat]]。 */
-  groups: string[][];
-  run?: (argv: string[]) => Promise<string>;
-}
-
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。merge plain 是基础,总做。 */
 export interface PipelineSteps {
   burnDanmu?: boolean;     // 默认 true:烧飞屏弹幕版
@@ -42,7 +35,10 @@ export interface PipelineDeps {
   transports: Map<string, Transport>;
   ledger: SyncLedger;
   sh: (cmd: string) => Promise<void>;
-  upload: (o: UploadArgs) => Promise<string>;
+  /** 仅上传 plain(P1)拿 BV —— **穿插上传接缝**:pipeline 先 fire 它(网络),与烧录(CPU)并行。 */
+  uploadPlain: (plain: UploadOpts) => Promise<string>;
+  /** 追加一个逻辑组到稿件(空组跳过)。多组**串行**调用(同稿件并发 append 会撞)。 */
+  appendGroup: (o: { bv: string; files: string[]; cookies: string }) => Promise<void>;
   /** 把单个烧录产物按 16GB 上限切成多段(默认 splitToSizeLimit);可注入测试。 */
   splitForUpload?: (mp4: string) => Promise<string[]>;
   /** 删 master 本地 stage 文件(cleanup 用);默认 fs.rm,可注入测试。 */
@@ -60,7 +56,7 @@ export async function runPipeline(
   b: Broadcast,
   deps: PipelineDeps,
 ): Promise<{ state: JobState; bv?: string }> {
-  const { transports, ledger, sh, upload, notify, cfg } = deps;
+  const { transports, ledger, sh, uploadPlain, appendGroup, notify, cfg } = deps;
   const splitForUpload = deps.splitForUpload ?? ((mp4: string) => splitToSizeLimit(mp4));
   const rmStage = deps.rmStage ?? (async (paths: string[]) => {
     const { rmSync } = await import("node:fs");
@@ -132,7 +128,20 @@ export async function runPipeline(
   const xmlArg = winner.rec.xmlPath ? path.join(stageSub, path.basename(winner.rec.xmlPath)) : "";
 
   await sh(`node dist/douyin-rec.mjs merge --in ${stageSub} --base ${winner.rec.sessionBase}`);
-  // 步骤开关:burnDanmu/burnLivechat 默认开,false 则跳过该产出。
+
+  // 穿插上传:auto-private 下 merge 完 plain 即**后台 fire P1 上传**(网络),与随后的烧录(CPU)并行,
+  // 省总墙钟。stage-only 不传(bvPromise=null)。先 .then 收成 {bv}|{err},即便后续烧录抛错也不留
+  // unhandled rejection(P1 可能已建稿 → 失败按 retry 处理,可接受)。
+  const willUpload = cfg.uploadMode !== "stage-only";
+  const bvPromise: Promise<{ bv: string } | { err: Error }> | null = willUpload
+    ? (ledger.setState(streamKey, "uploading"),
+       uploadPlain({
+         video: plain, cookies: cfg.cookies, title: dateName,
+         tag: cfg.uploadMeta.tag, tid: cfg.uploadMeta.tid, public: false, desc: cfg.uploadMeta.desc,
+       }).then((bv) => ({ bv }), (err: unknown) => ({ err: err as Error })))
+    : null;
+
+  // 步骤开关:burnDanmu/burnLivechat 默认开,false 则跳过该产出。此刻 P1 在后台上传(若 auto-private)。
   if (burnDanmu) await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style danmu --gift-value 0.9`);
   if (burnLivechat) await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style livechat --gift-value 0.9`);
 
@@ -174,23 +183,21 @@ export async function runPipeline(
     return { state: "needs_manual" };
   }
 
-  // Upload clean winner. 每个逻辑块(danmu/livechat)先按 16GB 上限切分(超限→多段),
-  // 再作为**独立一组**传给 upload(每组一条 append → 增量提交、各自可续传)。关掉的步骤 → 空组(不传)。
-  ledger.setState(streamKey, "uploading");
+  // auto-private:P1 已在后台传(bvPromise)。各逻辑块先按 16GB 上限切分(超限→多段),
+  // 再 await BV → **串行 append**(同稿件并发会撞;每组一条 append → 增量提交、各自可续传)。关掉的步骤 → 空组。
   const danmuParts = burnDanmu ? await splitForUpload(danmuMp4) : [];
   const livechatParts = burnLivechat ? await splitForUpload(livechatMp4) : [];
-  const bv = await upload({
-    plain: {
-      video: plain,
-      cookies: cfg.cookies,
-      title: dateName,
-      tag: cfg.uploadMeta.tag,
-      tid: cfg.uploadMeta.tid,
-      public: false,
-      desc: cfg.uploadMeta.desc,
-    },
-    groups: [danmuParts, livechatParts],
-  });
+  const r = await bvPromise!;
+  if ("err" in r) {
+    ledger.setState(streamKey, "failed", { error: `P1 上传失败: ${r.err.message}` });
+    notify({ kind: "error", stage: "上传", message: `plain 上传失败:${r.err.message}` });
+    return { state: "failed" };
+  }
+  const bv = r.bv;
+  for (const files of [danmuParts, livechatParts]) {
+    if (files.length === 0) continue; // 关掉的步骤 → 空组,不传
+    await appendGroup({ bv, files, cookies: cfg.cookies });
+  }
 
   ledger.markDone(streamKey, bv);
   // cleanup:done 后删源节点录制 + stage 产物(按配置)。

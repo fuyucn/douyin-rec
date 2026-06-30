@@ -2,7 +2,7 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runPipeline, type PipelineDeps, type UploadArgs } from "./pipeline.js";
+import { runPipeline, type PipelineDeps } from "./pipeline.js";
 import { SyncLedger } from "./ledger.js";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
@@ -46,9 +46,10 @@ function makeTransport(tenantId: string, exists = true): Transport {
   };
 }
 
-type TestDeps = Omit<PipelineDeps, "sh" | "upload" | "notify"> & {
+type TestDeps = Omit<PipelineDeps, "sh" | "uploadPlain" | "appendGroup" | "notify"> & {
   sh: Mock<(cmd: string) => Promise<void>>;
-  upload: Mock<(o: UploadArgs) => Promise<string>>;
+  uploadPlain: Mock<(plain: { video?: string }) => Promise<string>>;
+  appendGroup: Mock<(o: { bv: string; files: string[]; cookies: string }) => Promise<void>>;
   notify: Mock<(e: NotifyEvent) => void>;
   transports: Map<string, Transport>;
   ledger: SyncLedger;
@@ -60,14 +61,16 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   const t2 = makeTransport("node-2");
   const transports = new Map([["node-1", t1], ["node-2", t2]]);
   const sh = vi.fn<(cmd: string) => Promise<void>>().mockResolvedValue(undefined);
-  const upload = vi.fn<(o: UploadArgs) => Promise<string>>().mockResolvedValue("BV123");
+  const uploadPlain = vi.fn<(plain: { video?: string }) => Promise<string>>().mockResolvedValue("BV123");
+  const appendGroup = vi.fn<(o: { bv: string; files: string[]; cookies: string }) => Promise<void>>().mockResolvedValue(undefined);
   const notify = vi.fn<(e: NotifyEvent) => void>();
 
   const base: PipelineDeps = {
     transports,
     ledger,
     sh,
-    upload,
+    uploadPlain,
+    appendGroup,
     // 默认 passthrough(不切);个别用例覆盖以模拟超限切分。
     splitForUpload: async (mp4: string) => [mp4],
     notify,
@@ -132,12 +135,14 @@ describe("runPipeline", () => {
     expect(shCalls[2]).toContain("livechat");
     expect(shCalls[2]).toContain(STAGE_SUB);
 
-    // upload should be called once, with danmu/livechat as TWO logical groups (#3 拆 append)
-    expect(deps.upload).toHaveBeenCalledTimes(1);
-    const uploadArg = (deps.upload as Mock).mock.calls[0][0] as UploadArgs;
-    expect(uploadArg.groups).toHaveLength(2);
-    expect(uploadArg.groups[0][0]).toContain("_danmu");
-    expect(uploadArg.groups[1][0]).toContain("_livechat");
+    // 穿插上传:uploadPlain 一次(P1)+ 每逻辑组一条 appendGroup(danmu、livechat 各一,串行)
+    expect(deps.uploadPlain).toHaveBeenCalledTimes(1);
+    expect((deps.uploadPlain as Mock).mock.calls[0][0].video).toContain(".mp4");
+    expect(deps.appendGroup).toHaveBeenCalledTimes(2);
+    const apCalls = (deps.appendGroup as Mock).mock.calls.map((c) => c[0] as { bv: string; files: string[] });
+    expect(apCalls[0].bv).toBe("BV123");
+    expect(apCalls[0].files[0]).toContain("_danmu");
+    expect(apCalls[1].files[0]).toContain("_livechat");
 
     // notify should NOT be called with error (clean winner case)
     const errorNotifications = (deps.notify.mock.calls as Array<[NotifyEvent]>)
@@ -171,7 +176,7 @@ describe("runPipeline", () => {
     expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
     expect(deps.transports.get("node-2")!.pull).not.toHaveBeenCalled();
     expect(deps.sh).toHaveBeenCalledTimes(0);
-    expect(deps.upload).toHaveBeenCalledTimes(0);
+    expect(deps.uploadPlain).toHaveBeenCalledTimes(0);
     expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
     expect(deps.transports.get("node-2")!.cleanup).not.toHaveBeenCalled();
 
@@ -198,7 +203,7 @@ describe("runPipeline", () => {
     const result = await runPipeline(broadcast, deps);
     expect(result.state).toBe("needs_manual");
     expect(deps.sh).toHaveBeenCalledTimes(0);            // 不合并
-    expect(deps.upload).not.toHaveBeenCalled();
+    expect(deps.uploadPlain).not.toHaveBeenCalled();
     expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled(); // 即便配了 sourceAfterDone 也不删
     deps.ledger.close();
   });
@@ -217,12 +222,13 @@ describe("runPipeline", () => {
     const result = await runPipeline(broadcast, deps);
     expect(result.state).toBe("done");
 
-    const uploadArg = (deps.upload as Mock).mock.calls[0][0] as UploadArgs;
-    // danmu 组 2 段、livechat 组 1 段
-    expect(uploadArg.groups[0]).toHaveLength(2);
-    expect(uploadArg.groups[0][0]).toContain("_danmu_part0");
-    expect(uploadArg.groups[0][1]).toContain("_danmu_part1");
-    expect(uploadArg.groups[1]).toEqual([expect.stringContaining("_livechat.mp4")]);
+    // danmu append 组含两 part、livechat 组 1 段(两条独立 appendGroup)
+    const apCalls = (deps.appendGroup as Mock).mock.calls.map((c) => c[0] as { files: string[] });
+    expect(apCalls).toHaveLength(2);
+    expect(apCalls[0].files).toHaveLength(2);
+    expect(apCalls[0].files[0]).toContain("_danmu_part0");
+    expect(apCalls[0].files[1]).toContain("_danmu_part1");
+    expect(apCalls[1].files).toEqual([expect.stringContaining("_livechat.mp4")]);
 
     deps.ledger.close();
   });
@@ -259,13 +265,13 @@ describe("runPipeline", () => {
 
     const result = await runPipeline(broadcast, deps);
     expect(result.state).toBe("failed");
-    expect(deps.upload).not.toHaveBeenCalled();
+    expect(deps.uploadPlain).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
     deps.ledger.close();
   });
 
-  it("场景6(步骤开关): burnDanmu=false → 不烧 danmu、upload 的 danmu 组为空,只 livechat", async () => {
+  it("场景6(步骤开关): burnDanmu=false → 不烧 danmu、danmu 组空不 append,只 livechat", async () => {
     const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
     const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { burnDanmu: false } } });
     deps.ledger.upsertPending(broadcast.streamKey);
@@ -273,9 +279,9 @@ describe("runPipeline", () => {
     const shCalls = deps.sh.mock.calls.map((c) => c[0] as string);
     expect(shCalls.some((c) => c.includes("--style danmu"))).toBe(false);   // 没烧 danmu
     expect(shCalls.some((c) => c.includes("--style livechat"))).toBe(true); // 烧了 livechat
-    const uploadArg = (deps.upload as Mock).mock.calls[0][0] as UploadArgs;
-    expect(uploadArg.groups[0]).toEqual([]);                                 // danmu 组空
-    expect(uploadArg.groups[1].length).toBeGreaterThan(0);                   // livechat 有
+    // danmu 组空 → 不 append;只 livechat 一条 append
+    expect(deps.appendGroup).toHaveBeenCalledTimes(1);
+    expect((deps.appendGroup as Mock).mock.calls[0][0].files[0]).toContain("_livechat");
     deps.ledger.close();
   });
 

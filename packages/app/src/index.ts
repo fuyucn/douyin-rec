@@ -9,6 +9,6 @@ export * as hubStore from "./hub-store.js";
 export type { HubRule } from "./hub-store.js";
 export { rootHubDir, rootHubConfig } from "./paths.js";
 export { makeNotifier, NullNotifier, formatMessage } from "./notify/notifier.js";
-export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, uploadThenAppendGroups, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
+export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, uploadThenAppendGroups, uploadPlain, appendGroup, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
 export type { UploadOpts } from "./upload/biliup.js";
 export { fetchAnchorName, resolveShortUrl } from "./anchor.js";

@@ -42,7 +42,8 @@ function makePipelineDeps(ledger: SyncLedger, transports: Map<string, Transport>
     transports,
     ledger,
     sh: vi.fn<(cmd: string) => Promise<void>>().mockResolvedValue(undefined),
-    upload: vi.fn<(o: unknown) => Promise<string>>().mockResolvedValue("BV123"),
+    uploadPlain: vi.fn<(plain: unknown) => Promise<string>>().mockResolvedValue("BV123"),
+    appendGroup: vi.fn<(o: unknown) => Promise<void>>().mockResolvedValue(undefined),
     notify: vi.fn<(e: NotifyEvent) => void>(),
     cfg: {
       cleanMaxGapSec: 30,

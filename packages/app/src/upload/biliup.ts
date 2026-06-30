@@ -78,6 +78,33 @@ export function buildAppendArgs(o: { cookies: string; bv: string; files: string[
 }
 
 /**
+ * 仅上传 plain(P1)拿 BV —— **穿插上传的接缝**:调用方可先 fire 这个(网络),与烧录(CPU)并行,
+ * 再 await BV 后逐组 appendGroup。`run` 可注入(测试)。
+ */
+export async function uploadPlain(o: {
+  plain: UploadOpts;
+  run?: (argv: string[]) => Promise<string>;
+}): Promise<string> {
+  const run = o.run ?? runBiliup;
+  const out = await run(buildUploadArgs(o.plain));
+  const bv = parseBV(out);
+  if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${out.slice(-300)}`);
+  return bv;
+}
+
+/** 追加一个逻辑组到已建稿件(空组跳过)。多组必须**串行**调用(同稿件并发 append 会撞)。 */
+export async function appendGroup(o: {
+  cookies: string;
+  bv: string;
+  files: string[];
+  run?: (argv: string[]) => Promise<string>;
+}): Promise<void> {
+  if (o.files.length === 0) return;
+  const run = o.run ?? runBiliup;
+  await run(buildAppendArgs({ cookies: o.cookies, bv: o.bv, files: o.files }));
+}
+
+/**
  * 分P 上传：先用 plain（P1）上传拿 BV，再 append extras（P2、P3）。
  * `run` 可注入（测试用假实现）；默认走 runBiliup。
  */

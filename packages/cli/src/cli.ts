@@ -26,7 +26,7 @@ import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES } from "@drec/app";
 import type { Recorder, RecordOpts, NotifyEvent, Notifier } from "@drec/core";
 import { makeNotifier } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand } from "@drec/app";
-import type { HubStarter } from "@drec/app";
+import type { HubStarter, UploadOpts } from "@drec/app";
 import type { PipelineCfg } from "@drec/orchestrator";
 
 /** 从 CLI 全局选项 → config → env 三层解析 Discord webhook URL。 */
@@ -443,7 +443,7 @@ const hubStarter: HubStarter = {
     const { registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
-    const { uploadThenAppendGroups, hubStore, rootHubDir } = await import("@drec/app");
+    const { uploadPlain, appendGroup, hubStore, rootHubDir } = await import("@drec/app");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
       platform?: string;
@@ -509,7 +509,10 @@ const hubStarter: HubStarter = {
       sh: (cmd: string) => new Promise<void>((res, rej) => {
         exec(cmd, (err) => (err ? rej(err) : res()));
       }),
-      upload: uploadThenAppendGroups,
+      // 穿插上传接缝:pipeline 先 fire uploadPlain(网络)与烧录并行,再 await BV 后串行 appendGroup。
+      uploadPlain: (plain: UploadOpts) => uploadPlain({ plain }),
+      appendGroup: (o: { bv: string; files: string[]; cookies: string }) =>
+        appendGroup({ cookies: o.cookies, bv: o.bv, files: o.files }),
       notify: opts.onEvent,
       cfg: {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
