@@ -70,6 +70,7 @@ describe("matchRoute", () => {
     expect(matchRoute("GET", "/api/cookie")?.name).toBe("getCookie");
     expect(matchRoute("POST", "/api/cookie")).toMatchObject({ name: "setCookie", needsBody: true });
     expect(matchRoute("DELETE", "/api/cookie")?.name).toBe("clearCookie");
+    expect(matchRoute("GET", "/api/hub/status")?.name).toBe("hubStatus");
     expect(matchRoute("GET", "/api/hub/rules")?.name).toBe("listHubRules");
     expect(matchRoute("POST", "/api/hub/rules")).toMatchObject({ name: "createHubRule", needsBody: true });
     expect(matchRoute("PATCH", "/api/hub/rules/douyin.123456")).toMatchObject({ name: "updateHubRule", slug: "douyin.123456", needsBody: true });
@@ -179,6 +180,12 @@ describe("createWebServer (live)", () => {
 
     const list = (await (await fetch(`${base}/api/tasks`)).json()) as Array<{ id: number; name: string }>;
     expect(list.find((t) => t.id === created.id)!.name).toBe("new");
+  });
+
+  it("hub status via http(未注入 hubEnabled → enabled:false,= slave/child node)", async () => {
+    const res = await fetch(`${base}/api/hub/status`);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { enabled: boolean }).enabled).toBe(false);
   });
 
   it("hub rules CRUD via http(文件版,key={platform}.{roomSlug};建/删落到 hubDir 文件)", async () => {

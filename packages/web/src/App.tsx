@@ -1,6 +1,9 @@
 import { useEffect, type ReactNode } from "react";
+import { useSetAtom } from "jotai";
 import { Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
+import { api } from "./api/client";
+import { hubEnabledAtom } from "./atoms";
 import { Footer } from "./layout/Footer";
 import { TopNav } from "./layout/TopNav";
 import { useRefreshCookie } from "./lib/hooks";
@@ -12,9 +15,12 @@ import { TaskList } from "./pages/TaskList";
 /** App shell: nav + routed main + dark footer + toast host. */
 export function App(): ReactNode {
   const refreshCookie = useRefreshCookie();
+  const setHubEnabled = useSetAtom(hubEnabledAtom);
   useEffect(() => {
     void refreshCookie();
-  }, [refreshCookie]);
+    // 本节点是不是 master(启用 hub)?启动时拉一次,决定是否显示「Hub」导航/页。
+    void api.getHubStatus().then((s) => setHubEnabled(s.enabled)).catch(() => setHubEnabled(false));
+  }, [refreshCookie, setHubEnabled]);
   // 站内事件流 → toast(开播/录完/合成/出错;按用户开关)。
   useEventNotifications();
 

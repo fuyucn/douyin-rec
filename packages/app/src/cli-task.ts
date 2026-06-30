@@ -525,7 +525,10 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
           return resolveTaskWebhook(t ?? { webhook: null }, globalHook()) ?? undefined;
         },
       });
-      const server = createWebServer({ store, manager, login, events, log: (m) => console.log(m) });
+      // hub 是否在本节点启用(master)?= --hub + 有 hubStarter + 能解析出 hub 配置。
+      // slave(无 --hub)= false → 前端据此隐藏 Hub 页 / 显示 child node 提示。
+      const hubEnabled = !!(o.hub && hubStarter && resolveHubConfigJson(o.hubConfig, store));
+      const server = createWebServer({ store, manager, login, events, hubEnabled, log: (m) => console.log(m) });
 
       // 开播/收播观察器:轮询 manager.isRecording 翻转 → emit 到本地流(Discord 已由录制子进程
       // 用每任务 webhook 发,故 { webhook:false } 不重复推)。首次见到只播种不触发,避免启动即误报。

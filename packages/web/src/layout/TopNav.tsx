@@ -2,7 +2,7 @@ import { useAtomValue } from "jotai";
 import { useState, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import { Settings } from "lucide-react";
-import { cookieStatusAtom } from "../atoms";
+import { cookieStatusAtom, hubEnabledAtom } from "../atoms";
 import { RecordGlyph } from "../components/Brand";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { LangToggle } from "../components/LangToggle";
@@ -15,6 +15,7 @@ import { useT } from "../lib/i18n";
 export function TopNav(): ReactNode {
   const t = useT();
   const cookie = useAtomValue(cookieStatusAtom);
+  const hubEnabled = useAtomValue(hubEnabledAtom);
   const [qrOpen, setQrOpen] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -55,10 +56,11 @@ export function TopNav(): ReactNode {
           </div>
           <span className="headline text-[17px] truncate">{t("nav.title")}</span>
           <nav className="hidden sm:flex items-center gap-1 ml-4">
-            {([
+            {(([
               ["/", "录制"],
-              ["/hub", "Hub"],
-            ] as const).map(([to, label]) => (
+              // Hub 仅 master(启用 hub)显示;slave/未开不显示。
+              ...(hubEnabled ? [["/hub", "Hub"] as const] : []),
+            ]) as const).map(([to, label]) => (
               <NavLink
                 key={to}
                 to={to}

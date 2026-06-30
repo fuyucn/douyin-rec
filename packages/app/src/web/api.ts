@@ -88,6 +88,8 @@ export interface ApiDeps {
   events?: EventCenter;
   /** hub 任务配置目录(<root>/config/hub);省略=回落 rootHubDir() ?? "./config/hub"。 */
   hubDir?: string;
+  /** 本节点是否启用了 hub(master);slave/未开 = false。前端据此显示/隐藏 Hub 页。 */
+  hubEnabled?: boolean;
 }
 
 /**
@@ -279,6 +281,8 @@ export interface Api {
   getEvents(since: number): ApiResult;
   /** GET /api/platforms — 已注册平台的配置(画质/录制器/弹幕/默认 + urlPattern),供前端按 URL 判平台、动态填表单。 */
   listPlatforms(): ApiResult;
+  /** GET /api/hub/status — 本节点是否 master(启用了 hub)。前端据此显示/隐藏 Hub 页。 */
+  hubStatus(): ApiResult;
   /** GET /api/hub/rules — 所有多节点 hub 后处理规则(按 {platform}.{roomSlug})。 */
   listHubRules(): ApiResult;
   /** POST /api/hub/rules { room, enabled?, pipeline? } — 新建/覆盖一条 hub 规则。 */
@@ -670,6 +674,9 @@ export function makeApi(deps: ApiDeps): Api {
       return { status: 200, body: deps.events ? deps.events.since(cursor) : { events: [], cursor: 0 } };
     },
 
+    hubStatus(): ApiResult {
+      return { status: 200, body: { enabled: deps.hubEnabled ?? false } };
+    },
     listHubRules(): ApiResult {
       return { status: 200, body: hubStore.listHubRules(hubDir).map(hubRuleView) };
     },

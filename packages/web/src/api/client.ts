@@ -93,6 +93,7 @@ export const api = {
   getEvents: (since: number): Promise<EventsDTO> => request("GET", `/api/events?since=${since}`),
 
   // ── 多节点 hub 规则(key = {platform}.{roomSlug})──────────────────────────────
+  getHubStatus: (): Promise<{ enabled: boolean }> => request("GET", "/api/hub/status"),
   listHubRules: (): Promise<HubRuleDTO[]> => request("GET", "/api/hub/rules"),
   createHubRule: (input: HubRulePayload): Promise<HubRuleDTO> => request("POST", "/api/hub/rules", input),
   updateHubRule: (key: string, input: HubRulePayload): Promise<HubRuleDTO> =>

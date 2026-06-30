@@ -54,6 +54,7 @@ export interface RouteMatch {
     | "getMerge"
     | "getEvents"
     | "listPlatforms"
+    | "hubStatus"
     | "listHubRules"
     | "createHubRule"
     | "updateHubRule"
@@ -129,6 +130,7 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
   }
   // 多节点 hub 规则: GET/POST /api/hub/rules + PATCH/DELETE /api/hub/rules/:key
   // key = {platform}.{roomSlug}(含点)→ 字符类需含 `.`。
+  if (p === "/api/hub/status" && method === "GET") return { name: "hubStatus" };
   if (p === "/api/hub/rules") {
     if (method === "GET") return { name: "listHubRules" };
     if (method === "POST") return { name: "createHubRule", needsBody: true };
@@ -182,6 +184,8 @@ export interface WebServerDeps {
   events?: EventCenter;
   /** hub 任务配置目录(<root>/config/hub);省略=回落 rootHubDir() ?? "./config/hub"。测试注入 temp 目录。 */
   hubDir?: string;
+  /** 本节点是否启用 hub(master);slave=false。前端据此显示/隐藏 Hub 页。 */
+  hubEnabled?: boolean;
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {}). */
@@ -291,6 +295,8 @@ async function dispatch(
       const since = Number(new URL(req.url ?? "/", "http://localhost").searchParams.get("since") ?? "0");
       return api.getEvents(since);
     }
+    case "hubStatus":
+      return api.hubStatus();
     case "listHubRules":
       return api.listHubRules();
     case "createHubRule": {
@@ -319,6 +325,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     resolveAnchor: deps.resolveAnchor ?? fetchAnchorName,
     resolveShortUrl: deps.resolveShortUrl ?? resolveShortUrl,
     hubDir: deps.hubDir,
+    hubEnabled: deps.hubEnabled,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);
       const n = mj.recoverOrphans(); // 启动:清理上次重启腰斩的合成 job

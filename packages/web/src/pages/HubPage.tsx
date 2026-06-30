@@ -1,6 +1,8 @@
-import { Pencil, Plus, Radio, Trash2 } from "lucide-react";
+import { Network, Pencil, Plus, Radio, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { useAtomValue } from "jotai";
 import { api, type HubRuleDTO } from "../api/client";
+import { hubEnabledAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
@@ -19,6 +21,7 @@ function summarize(r: HubRuleDTO): string {
 
 /** Hub 管理页(/hub):全局管理器,按直播间配置多节点后处理规则(独立于录制任务)。 */
 export function HubPage(): ReactNode {
+  const hubEnabled = useAtomValue(hubEnabledAtom);
   const toast = useToast();
   const [rules, setRules] = useState<HubRuleDTO[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -64,6 +67,21 @@ export function HubPage(): ReactNode {
       toast(errMessage(e), "error");
     }
   };
+
+  // 本节点不是 master(未启用 hub)→ 不显示规则管理,提示这是 child node。
+  if (hubEnabled === false) {
+    return (
+      <div className="card p-10 flex flex-col items-center gap-4 text-center">
+        <Network className="w-10 h-10" style={{ color: "var(--muted-soft)" }} />
+        <h1 className="headline text-[22px]">这是 child node(从节点)</h1>
+        <p className="text-muted text-sm max-w-md">
+          本节点未启用 hub(以 <code>task serve</code> 运行,无 <code>--hub</code>)。
+          多节点选优合并 / 上传由 <b>master 节点</b>统一编排;Hub 规则只在 master 上配置与生效。
+          本节点只负责录制 + 供 master 拉取。
+        </p>
+      </div>
+    );
+  }
 
   return (
     <>
