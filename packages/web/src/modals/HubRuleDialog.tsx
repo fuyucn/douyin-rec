@@ -153,29 +153,37 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           <Switch checked={form.enabled} onCheckedChange={(v) => set("enabled", v)} name="enabled" />
         </label>
 
-        <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {([
-            ["burnDanmu", "烧 danmu / 飞屏弹幕", "合成飞屏弹幕版"],
-            ["burnLivechat", "烧 livechat / 聊天框", "合成聊天框版"],
-            ["clStageSourceAfterMerge", "合并后删 stage 源 .ts", "留合成产物,删拉来的源片"],
-            ["clSourceAfterDone", "完成后删源节点录制", "各节点原始 .ts(完成后)"],
-            ["clStageAfterDone", "完成后删 stage 产物", "上传后删合成 mp4"],
-            ["clIncludeXmlAss", "删除含 .xml/.ass", "默认只删 .ts/.mp4(守弹幕源)"],
-          ] as const).map(([key, label, sub]) => (
-            <label key={key} className="flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 cursor-pointer">
-              <span className="flex flex-col">
-                <span className="text-sm font-medium text-ink">{label}</span>
-                <span className="text-xs text-muted mt-0.5">{sub}</span>
-              </span>
-              <Switch checked={form[key]} onCheckedChange={(v) => set(key, v)} name={key} />
-            </label>
-          ))}
+        {/* ── Section: 流水线 pipeline(产出 + 清理)── */}
+        <div className="sm:col-span-2">
+          <h3 className="text-sm font-semibold text-ink mb-2 pb-1 border-b border-hairline">流水线 / pipeline</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {([
+              ["burnDanmu", "烧 danmu / 飞屏弹幕", "合成飞屏弹幕版"],
+              ["burnLivechat", "烧 livechat / 聊天框", "合成聊天框版"],
+              ["clStageSourceAfterMerge", "合并后删 stage 源 .ts", "留合成产物,删拉来的源片"],
+              ["clSourceAfterDone", "完成后删源节点录制", "各节点原始 .ts(完成后)"],
+              ["clStageAfterDone", "完成后删 stage 产物", "上传后删合成 mp4"],
+              ["clIncludeXmlAss", "删除含 .xml/.ass", "默认只删 .ts/.mp4(守弹幕源)"],
+            ] as const).map(([key, label, sub]) => (
+              <label key={key} className="flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 cursor-pointer">
+                <span className="flex flex-col">
+                  <span className="text-sm font-medium text-ink">{label}</span>
+                  <span className="text-xs text-muted mt-0.5">{sub}</span>
+                </span>
+                <Switch checked={form[key]} onCheckedChange={(v) => set(key, v)} name={key} />
+              </label>
+            ))}
+          </div>
+        </div>
 
-          {/* 上传 B站开关:off=stage(只合成不传) on=upload(自动传) */}
+        {/* ── Section: Bilibili 上传(总开关 + 开启后才显示投稿明细)── */}
+        <div className="sm:col-span-2">
+          <h3 className="text-sm font-semibold text-ink mb-2 pb-1 border-b border-hairline">Bilibili 上传 / upload</h3>
+          {/* 上传 B站总开关:off=stage(只合成不传) on=upload(自动传) */}
           <label className="flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 cursor-pointer">
             <span className="flex flex-col">
               <span className="text-sm font-medium text-ink">上传 B站 / bilibili upload</span>
-              <span className="text-xs text-muted mt-0.5">{form.uploadMode === "upload" ? "合成后自动投稿" : "只合成,不上传(留 stage)"}</span>
+              <span className="text-xs text-muted mt-0.5">{form.uploadMode === "upload" ? "合成后自动投稿(关水印·copyright 自制)" : "只合成,不上传(留 stage 待人工)"}</span>
             </span>
             <Switch
               checked={form.uploadMode === "upload"}
@@ -183,40 +191,38 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
               name="uploadOn"
             />
           </label>
-          {/* 公开开关:off=仅自己可见(默认) on=公开;仅 upload 时可用 */}
-          <label className={`flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 ${form.uploadMode === "upload" ? "cursor-pointer" : "opacity-60 cursor-not-allowed"}`}>
-            <span className="flex flex-col">
-              <span className="text-sm font-medium text-ink">公开 / public</span>
-              <span className="text-xs text-muted mt-0.5">
-                {form.uploadMode !== "upload" ? "(需先开上传)" : form.uploadPrivate ? "仅自己可见(默认)" : "公开投稿"}
-              </span>
-            </span>
-            <Switch
-              checked={!form.uploadPrivate}
-              onCheckedChange={(v) => set("uploadPrivate", !v)}
-              name="uploadPublic"
-              disabled={form.uploadMode !== "upload"}
-            />
-          </label>
-          <div>
-            <label className="field-label">B站分区 tid</label>
-            <input type="number" min={1} className="input" value={form.uploadTid} onChange={(e) => set("uploadTid", e.target.value)} />
-          </div>
-          <div className="sm:col-span-2">
-            <label className="field-label">B站 tag(逗号分隔)</label>
-            <input className="input" placeholder="直播,录像,…" value={form.uploadTag} onChange={(e) => set("uploadTag", e.target.value)} />
-          </div>
-          <div className="sm:col-span-2">
-            <label className="field-label">B站简介 desc</label>
-            <textarea
-              className="input"
-              rows={4}
-              placeholder="(可选,支持多行)"
-              value={form.uploadDesc}
-              onChange={(e) => set("uploadDesc", e.target.value)}
-              style={{ resize: "vertical", minHeight: "5rem", fontFamily: "inherit", whiteSpace: "pre-wrap" }}
-            />
-          </div>
+
+          {/* 只有开了上传才显示后面的投稿明细 */}
+          {form.uploadMode === "upload" && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+              <label className="flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 cursor-pointer">
+                <span className="flex flex-col">
+                  <span className="text-sm font-medium text-ink">公开 / public</span>
+                  <span className="text-xs text-muted mt-0.5">{form.uploadPrivate ? "仅自己可见(默认)" : "公开投稿"}</span>
+                </span>
+                <Switch checked={!form.uploadPrivate} onCheckedChange={(v) => set("uploadPrivate", !v)} name="uploadPublic" />
+              </label>
+              <div>
+                <label className="field-label">B站分区 tid</label>
+                <input type="number" min={1} className="input" value={form.uploadTid} onChange={(e) => set("uploadTid", e.target.value)} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="field-label">B站 tag(逗号分隔)</label>
+                <input className="input" placeholder="直播,录像,…" value={form.uploadTag} onChange={(e) => set("uploadTag", e.target.value)} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="field-label">B站简介 desc</label>
+                <textarea
+                  className="input"
+                  rows={4}
+                  placeholder="(可选,支持多行)"
+                  value={form.uploadDesc}
+                  onChange={(e) => set("uploadDesc", e.target.value)}
+                  style={{ resize: "vertical", minHeight: "5rem", fontFamily: "inherit", whiteSpace: "pre-wrap" }}
+                />
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="sm:col-span-2 flex justify-end gap-3 mt-3">
