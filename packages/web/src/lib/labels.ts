@@ -1,5 +1,6 @@
 /** Shared display-label helpers (quality, schedule, clock formatting). */
 import type { Task } from "../api/client";
+import { fmtDateTimeInTz } from "./tz";
 
 export const QUALITY_SHORT: Record<string, string> = {
   origin: "OD",
@@ -95,12 +96,11 @@ export function fmtClock(ms: number | null | undefined): string {
   return `${h}:${m}:${s}`;
 }
 
-/** Format an epoch-ms instant as local YYYY-MM-DD HH:MM:SS. */
-export function fmtStartedAt(epochMs: number | null | undefined): string {
+/**
+ * Format an epoch-ms instant as "YYYY-MM-DD HH:MM:SS" in `tz`(后端配置时区,GET /api/timezone 的
+ * effective;空串则回落浏览器本地时区,见 lib/tz.ts)。
+ */
+export function fmtStartedAt(epochMs: number | null | undefined, tz: string): string {
   if (epochMs == null) return "—";
-  const d = new Date(epochMs);
-  const p = (n: number): string => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(
-    d.getMinutes(),
-  )}:${p(d.getSeconds())}`;
+  return fmtDateTimeInTz(new Date(epochMs), tz);
 }

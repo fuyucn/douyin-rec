@@ -1,14 +1,15 @@
-import { useAtom } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import { FileText, FolderOpen, Pencil, Play, Plus, Square, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, type Task } from "../api/client";
-import { connAtom, tasksAtom } from "../atoms";
+import { connAtom, serverTimezoneAtom, tasksAtom } from "../atoms";
 import { DanmuBadge, StatusBadge } from "../components/Badge";
 import { Button, IconButton } from "../components/Button";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { QUALITY_SHORT, roomId, scheduleText } from "../lib/labels";
+import { fmtTimeInTz, localTimeTooltip } from "../lib/tz";
 import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
@@ -17,6 +18,7 @@ export function TaskList(): ReactNode {
   const t = useT();
   const [tasks, setTasks] = useAtom(tasksAtom);
   const [conn, setConn] = useAtom(connAtom);
+  const serverTz = useAtomValue(serverTimezoneAtom);
   const toast = useToast();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Task | null>(null);
@@ -88,11 +90,18 @@ export function TaskList(): ReactNode {
         <div className="flex items-center gap-3">
           {conn && (
             <span
-              className="hidden sm:inline-flex items-center gap-1.5 text-xs"
+              className="hidden sm:inline-flex items-center gap-1.5 text-xs cursor-help"
               style={{ color: conn.ok ? "var(--success)" : "var(--error)" }}
+              title={
+                conn.ok
+                  ? localTimeTooltip(new Date(conn.at), serverTz, (local) => t("common.localTimeTooltip", { local }))
+                  : undefined
+              }
             >
               <span className="dot" style={{ background: conn.ok ? "var(--success)" : "var(--error)" }} />
-              {conn.ok ? t("tasks.connected", { time: new Date(conn.at).toLocaleTimeString() }) : t("tasks.connFailed")}
+              {conn.ok
+                ? t("tasks.connected", { time: fmtTimeInTz(new Date(conn.at), serverTz) })
+                : t("tasks.connFailed")}
             </span>
           )}
           <Button onClick={openCreate}>

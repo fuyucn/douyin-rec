@@ -52,7 +52,7 @@ export function useT(): (key: string, vars?: Record<string, string | number>) =>
 // zh / en 同构。新增文案两边都加。值里用单花括号 {var} 占位;计数键用 _one/_other + {count}。
 const DICT = {
   zh: {
-    common: { cancel: "取消", confirm: "确定", save: "保存", delete: "删除", refresh: "刷新", close: "关闭", optional: "可选", on: "开", off: "关", yes: "是", no: "否" },
+    common: { cancel: "取消", confirm: "确定", save: "保存", delete: "删除", refresh: "刷新", close: "关闭", optional: "可选", on: "开", off: "关", yes: "是", no: "否", localTimeTooltip: "你的本地时间：{local}" },
     nav: { title: "抖音录制控制台", login: "扫码登录", paste: "手动粘贴", clear: "清除", notif: "站内提醒设置" },
     cookie: {
       checking: "检查中…", loggedIn: "✅ 已登录", expired: "⚠️ 登录已过期", expiresIn: "⚠️ 剩 {days} 天过期",
@@ -81,9 +81,8 @@ const DICT = {
       runningWarn: "⚠️ 运行中任务：修改将保存到数据库，下次启动生效。",
       room: "直播间（房间号或 URL）", roomPlaceholder: "36464127515 或 https://live.douyin.com/...",
       name: "主播名称", namePlaceholder: "可选，自动获取", quality: "画质",
-      segment: "分段时长（秒，0 = 不分段）", scheduleWindow: "定时窗口（本地时间）",
+      segment: "分段时长（秒，0 = 不分段）", scheduleWindow: "定时窗口（服务端时区）",
       schedulePlaceholder: "可选，如 22:30-01:00（支持跨夜）", schedHint: "按服务端配置的时区判断（现在 {now}{tz}），支持跨夜窗口如 22:30-01:00。",
-      schedHintLocalTooltip: "你的本地时间：{local}",
       webhook: "通知 Webhook（Discord）", webhookPlaceholder: "可选，留空回落全局 webhook",
       webhookHint: "本任务专属：开播 / 录制完成 / 合并完成 / 出错时推送到此 Discord webhook。留空则用全局设置。",
       recDanmu: "录制弹幕", danmuGift: "弹幕含礼物 + 入场",
@@ -137,7 +136,7 @@ const DICT = {
     },
   },
   en: {
-    common: { cancel: "Cancel", confirm: "Confirm", save: "Save", delete: "Delete", refresh: "Refresh", close: "Close", optional: "optional", on: "On", off: "Off", yes: "Yes", no: "No" },
+    common: { cancel: "Cancel", confirm: "Confirm", save: "Save", delete: "Delete", refresh: "Refresh", close: "Close", optional: "optional", on: "On", off: "Off", yes: "Yes", no: "No", localTimeTooltip: "Your local time: {local}" },
     nav: { title: "Douyin Recorder", login: "QR Login", paste: "Paste Cookie", clear: "Clear", notif: "Notification settings" },
     cookie: {
       checking: "Checking…", loggedIn: "✅ Logged in", expired: "⚠️ Login expired", expiresIn: "⚠️ {days}d left",
@@ -166,9 +165,8 @@ const DICT = {
       runningWarn: "⚠️ Running task: changes are saved to the DB and take effect on next start.",
       room: "Room (id or URL)", roomPlaceholder: "36464127515 or https://live.douyin.com/...",
       name: "Streamer name", namePlaceholder: "optional, auto-detected", quality: "Quality",
-      segment: "Segment seconds (0 = no split)", scheduleWindow: "Schedule window (local time)",
+      segment: "Segment seconds (0 = no split)", scheduleWindow: "Schedule window (server timezone)",
       schedulePlaceholder: "optional, e.g. 22:30-01:00 (overnight ok)", schedHint: "Judged by the server's configured timezone (now {now}{tz}); overnight windows like 22:30-01:00 supported.",
-      schedHintLocalTooltip: "Your local time: {local}",
       webhook: "Notify Webhook (Discord)", webhookPlaceholder: "optional, empty = fall back to global",
       webhookHint: "Per-task: live start / recording done / merge done / errors are pushed to this Discord webhook. Empty uses the global setting.",
       recDanmu: "Record danmu", danmuGift: "Danmu with gifts + entries",

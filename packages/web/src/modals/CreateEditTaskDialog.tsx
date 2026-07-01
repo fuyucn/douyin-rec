@@ -1,13 +1,14 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useAtomValue } from "jotai";
 import { api, type Task, type TaskPayload, type PlatformDTO } from "../api/client";
-import { cookieStatusAtom } from "../atoms";
+import { cookieStatusAtom, serverTimezoneAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { Switch } from "../components/Switch";
 import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { qualityLabel, scheduleInput } from "../lib/labels";
+import { fmtTimeInTz, localTimeTooltip } from "../lib/tz";
 
 interface Props {
   open: boolean;
@@ -75,36 +76,9 @@ function pickPlatform(room: string, platforms: PlatformDTO[]): PlatformDTO | und
   return platforms[0];
 }
 
-/**
- * 当前时间 HH:MM(schedule 提示的 {now} 插值)。**必须按后端实际生效的时区算**(`settings.timezone`,
- * 见 GET /api/timezone 的 effective),不能用浏览器本地时区——排期窗口是后端 daemon 按它的
- * `applyTimezone()` 判定的,展示口径要对得上,否则用户在别的时区开浏览器会看到误导性的当前时间。
- * tz 未加载完成时(dialog 刚打开的一瞬)回落浏览器时区,避免闪一下空值。
- */
-function schedNow(tz: string): string {
-  try {
-    const opts: Intl.DateTimeFormatOptions = { hour: "2-digit", minute: "2-digit", hourCycle: "h23" };
-    if (tz) opts.timeZone = tz;
-    return new Intl.DateTimeFormat("en-GB", opts).format(new Date());
-  } catch {
-    const now = new Date();
-    return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  }
-}
 /** 时区后缀(" · Asia/Shanghai"),{tz} 插值。 */
 function schedTzLabel(tz: string): string {
   return tz ? " · " + tz : "";
-}
-/** hover 提示:换算成浏览器本地时间,方便对不熟悉服务端时区的用户换算排期窗口。 */
-function browserLocalNowLabel(): string {
-  try {
-    const now = new Date();
-    const time = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now);
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-    return tz ? `${time} · ${tz}` : time;
-  } catch {
-    return "";
-  }
 }
 
 /** Shared create + edit task modal (Base UI Dialog). */
@@ -115,7 +89,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
   const [form, setForm] = useState<FormState>(BLANK);
   const [busy, setBusy] = useState(false);
   const [platforms, setPlatforms] = useState<PlatformDTO[]>([]);
-  const [serverTz, setServerTz] = useState("");
+  const serverTz = useAtomValue(serverTimezoneAtom);
   // 含礼物需要已登录的全局 cookie；没有则禁用「弹幕含礼物」开关（拿不到礼物）。
   const cookieStatus = useAtomValue(cookieStatusAtom);
   const cookieReady = !!cookieStatus?.hasSession;
@@ -125,7 +99,6 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
     if (!open) return;
     let alive = true;
     void api.getPlatforms().then((r) => alive && setPlatforms(r.platforms)).catch(() => {});
-    void api.getTimezone().then((r) => alive && setServerTz(r.effective || r.default)).catch(() => {});
     return () => {
       alive = false;
     };
@@ -272,9 +245,9 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
           />
           <p
             className="mt-1 text-[12px] text-muted-soft cursor-help"
-            title={t("dialog.schedHintLocalTooltip", { local: browserLocalNowLabel() })}
+            title={localTimeTooltip(new Date(), serverTz, (local) => t("common.localTimeTooltip", { local }))}
           >
-            {t("dialog.schedHint", { now: schedNow(serverTz), tz: schedTzLabel(serverTz) })}
+            {t("dialog.schedHint", { now: fmtTimeInTz(new Date(), serverTz), tz: schedTzLabel(serverTz) })}
           </p>
         </div>
 

@@ -1,13 +1,16 @@
 import { ChevronLeft, ExternalLink } from "lucide-react";
+import { useAtomValue } from "jotai";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, type Task, type TaskDetail as TaskDetailModel } from "../api/client";
+import { serverTimezoneAtom } from "../atoms";
 import { DanmuBadge, StatusBadge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { errMessage, usePolling, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { classifyLogLine, LOG_LINE_STYLE } from "../lib/logLevel";
 import { QUALITY_FULL, fmtClock, fmtStartedAt, roomHref, roomId, scheduleText } from "../lib/labels";
+import { localTimeTooltip } from "../lib/tz";
 import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
 import { MergePanel } from "../components/MergePanel";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -15,6 +18,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 /** Detail page (#/task/:id): info card + live logs console, 2s polling. */
 export function TaskDetail(): ReactNode {
   const t = useT();
+  const serverTz = useAtomValue(serverTimezoneAtom);
   const { id } = useParams();
   const taskId = Number(id);
   const navigate = useNavigate();
@@ -164,7 +168,24 @@ export function TaskDetail(): ReactNode {
             <Row label={t("tasks.schedule")} mono value={sched ?? "—"} />
             <Row label={t("tasks.giftCookie")} value={task ? (task.useCookie ? t("common.yes") : t("common.no")) : "—"} />
             <Row label={t("tasks.outDir")} mono value={task?.outDir ?? "—"} />
-            <Row label={t("tasks.startedAt")} mono value={fmtStartedAt(task?.runtime?.startedAt)} />
+            <Row
+              label={t("tasks.startedAt")}
+              mono
+              value={
+                task?.runtime?.startedAt != null ? (
+                  <span
+                    className="cursor-help"
+                    title={localTimeTooltip(new Date(task.runtime.startedAt), serverTz, (local) =>
+                      t("common.localTimeTooltip", { local }),
+                    )}
+                  >
+                    {fmtStartedAt(task.runtime.startedAt, serverTz)}
+                  </span>
+                ) : (
+                  "—"
+                )
+              }
+            />
             <Row label={t("tasks.elapsed")} mono value={fmtClock(task?.runtime?.elapsedMs)} />
           </dl>
         </section>
