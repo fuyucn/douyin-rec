@@ -48,7 +48,7 @@ services:
       - tailscale
     environment:
       # 调度按本地时间算窗口；默认美西（自动处理 PST/PDT 夏令时），按需改。
-      TZ: ${TZ:-America/Los_Angeles}
+      TZ: ${TZ:-Asia/Shanghai}
       # 单一数据根：容器内固定 /output-data（与代码默认根 DEFAULT_ROOT 同名），内部布局固定（不用改）：
       #   /output-data/db/douyin-rec.db · /output-data/recordings · /output-data/config/biliup/cookies.json
       DOUYIN_REC_ROOT: /output-data

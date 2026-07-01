@@ -81,7 +81,7 @@ remote/                       # 已移出仓库(.gitignore;含 VPS IP/SSH 个人
 
 ### 任务系统（app 层，子进程模型）
 - `TaskManager` 持有 `Map<taskId, RecorderProcess>`，每任务 = 一个 `node dist/douyin-rec.mjs record ...` 子进程。
-- `TaskDaemon` 每 60s tick，按 `scheduler.inWindow`（本地时区，跨夜）决定 start / stopGraceful。**时区由 config 决定,不看 host/容器的 `TZ` env**:`task serve` 启动时 `applyTimezone()`(`app/src/timezone.ts`)读 `settings.timezone`(未设→默认 `America/Los_Angeles`)并**覆盖** `process.env.TZ`,启动日志打一行 `[tz] 时区 = ...` 可查;`GET/POST /api/timezone` 可查/改,改了立即生效(daemon 下一次 tick 就用新时区,不用重启)。之前踩过「host 层 TZ 难从进程外内省——`ssh vps date` 显示的是 ssh 会话自己的环境,不是目标服务进程的,得挖 `/proc/<pid>/environ` 才能确认」的坑,这条彻底绕开。
+- `TaskDaemon` 每 60s tick，按 `scheduler.inWindow`（本地时区，跨夜）决定 start / stopGraceful。**时区由 config 决定,不看 host/容器的 `TZ` env**:`task serve` 启动时 `applyTimezone()`(`app/src/timezone.ts`)读 `settings.timezone`(未设→默认 `Asia/Shanghai`,因为录的都是国内主播)并**覆盖** `process.env.TZ`,启动日志打一行 `[tz] 时区 = ...` 可查;`GET/POST /api/timezone` 可查/改,改了立即生效(daemon 下一次 tick 就用新时区,不用重启)。之前踩过「host 层 TZ 难从进程外内省——`ssh vps date` 显示的是 ssh 会话自己的环境,不是目标服务进程的,得挖 `/proc/<pid>/environ` 才能确认」的坑,这条彻底绕开。
 - 状态恢复、崩溃自动重启、每任务日志环形缓冲（web 实时 tail）。
 
 ### Cookie 模型

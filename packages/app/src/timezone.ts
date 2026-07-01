@@ -13,8 +13,13 @@
  */
 import type { TaskStore } from "./store.js";
 
-/** 未配置时的默认时区(与项目一直以来的 docker/systemd 默认保持一致,不引入行为突变)。 */
-export const DEFAULT_TIMEZONE = "America/Los_Angeles";
+/**
+ * 未配置时的默认时区。**北京时间**(Asia/Shanghai,无夏令时)——项目录的都是国内主播,排期本质上
+ * 是按主播的北京时间开播习惯定的;之前默认美西时间(有夏令时)会导致排期在每年 3 月/11 月
+ * 悄悄漂移 1 小时(相对主播的真实开播时刻),多节点(docker+VPS)各自按自己 host 时区走还可能
+ * 因夏令时切换时机不同步而彼此错开。北京时间常年固定,不会有这些问题。
+ */
+export const DEFAULT_TIMEZONE = "Asia/Shanghai";
 
 /** 校验是不是一个 Intl 认得的 IANA 时区名(如 "America/Los_Angeles"/"Asia/Shanghai")。 */
 export function isValidTimezone(tz: string): boolean {

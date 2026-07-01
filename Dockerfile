@@ -75,7 +75,7 @@ ENV NODE_ENV=production \
     BILIUP_COOKIE=/output-data/config/biliup/cookies.json \
     FONTS_DIR=/app/assets/fonts \
     MESIO_PATH=/app/bin/mesio \
-    TZ=America/Los_Angeles
+    TZ=Asia/Shanghai
 
 EXPOSE 7860
 

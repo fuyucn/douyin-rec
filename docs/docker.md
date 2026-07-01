@@ -33,7 +33,7 @@ docker compose exec douyin-rec date   # 验证容器时区
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `TZ` | `America/Los_Angeles` | 只是容器启动前的初始值/`date` 等诊断命令参考。**调度实际用的时区由 config 决定**(`settings.timezone`,启动时 `applyTimezone()` 会**覆盖** `process.env.TZ`,不看这个 env)——查看启动日志 `[tz] 时区 = ...` 或 `GET /api/timezone`;要改用 `POST /api/timezone`,立即生效。 |
+| `TZ` | `Asia/Shanghai` | 只是容器启动前的初始值/`date` 等诊断命令参考。**调度实际用的时区由 config 决定**(`settings.timezone`,未设默认也是 `Asia/Shanghai`,启动时 `applyTimezone()` 会**覆盖** `process.env.TZ`,不看这个 env)——查看启动日志 `[tz] 时区 = ...` 或 `GET /api/timezone`;要改用 `POST /api/timezone`,立即生效。 |
 | `PORT` | `7860` | Web UI 映射到宿主机的端口。 |
 | `DB_DIR` | `./docker-data/db` | 宿主机目录 → 容器 `/data`；SQLite 库落在 `/data/douyin-rec.db`。任务、设置、全局 cookie 都在这。 |
 | `OUTPUT_DIR` | `./docker-data/output` | 宿主机目录 → 容器 `/output`；任务**未单独设 outDir** 时录像/弹幕落在这（经 `DOUYIN_REC_OUTPUT`）。 |
@@ -48,7 +48,7 @@ docker compose exec douyin-rec date   # 验证容器时区
 
 ```dotenv
 # .env
-TZ=America/Los_Angeles
+TZ=Asia/Shanghai
 PORT=7860
 DB_DIR=/srv/douyin/db
 OUTPUT_DIR=/mnt/bigdisk/douyin-recordings
