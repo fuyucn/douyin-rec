@@ -6,6 +6,7 @@ import { api, type Task, type TaskDetail as TaskDetailModel } from "../api/clien
 import { serverTimezoneAtom } from "../atoms";
 import { DanmuBadge, StatusBadge } from "../components/Badge";
 import { Button } from "../components/Button";
+import { Tooltip } from "../components/Tooltip";
 import { errMessage, usePolling, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { classifyLogLine, LOG_LINE_STYLE } from "../lib/logLevel";
@@ -173,14 +174,13 @@ export function TaskDetail(): ReactNode {
               mono
               value={
                 task?.runtime?.startedAt != null ? (
-                  <span
-                    className="cursor-help"
-                    title={localTimeTooltip(new Date(task.runtime.startedAt), serverTz, (local) =>
+                  <Tooltip
+                    content={localTimeTooltip(new Date(task.runtime.startedAt), serverTz, (local) =>
                       t("common.localTimeTooltip", { local }),
                     )}
                   >
-                    {fmtStartedAt(task.runtime.startedAt, serverTz)}
-                  </span>
+                    <span>{fmtStartedAt(task.runtime.startedAt, serverTz)}</span>
+                  </Tooltip>
                 ) : (
                   "—"
                 )

@@ -449,6 +449,27 @@ table.tasks tbody tr:last-child td {
   transition: opacity 0.18s ease, transform 0.18s ease;
 }
 
+/* ── Tooltip (Base UI Tooltip) ────────────────────────────────────────── */
+.tooltip-popup {
+  background: var(--primary);
+  color: var(--primary-fg);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 6px 10px;
+  border-radius: var(--r-btn);
+  box-shadow: 0 8px 20px -8px rgba(0, 0, 0, 0.35);
+  z-index: 110;
+  max-width: 280px;
+}
+.tooltip-popup[data-starting-style],
+.tooltip-popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.96);
+}
+.tooltip-popup {
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
 /* QR image crisp scaling */
 .qr-img {
   image-rendering: pixelated;

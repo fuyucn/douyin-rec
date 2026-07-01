@@ -5,6 +5,7 @@ import { cookieStatusAtom, serverTimezoneAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { Switch } from "../components/Switch";
+import { Tooltip } from "../components/Tooltip";
 import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { qualityLabel, scheduleInput } from "../lib/labels";
@@ -243,11 +244,12 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
             value={form.schedule}
             onChange={(e) => set("schedule", e.target.value)}
           />
-          <p
-            className="mt-1 text-[12px] text-muted-soft cursor-help"
-            title={localTimeTooltip(new Date(), serverTz, (local) => t("common.localTimeTooltip", { local }))}
-          >
-            {t("dialog.schedHint", { now: fmtTimeInTz(new Date(), serverTz), tz: schedTzLabel(serverTz) })}
+          <p className="mt-1 text-[12px] text-muted-soft">
+            <Tooltip
+              content={localTimeTooltip(new Date(), serverTz, (local) => t("common.localTimeTooltip", { local }))}
+            >
+              <span>{t("dialog.schedHint", { now: fmtTimeInTz(new Date(), serverTz), tz: schedTzLabel(serverTz) })}</span>
+            </Tooltip>
           </p>
         </div>
 

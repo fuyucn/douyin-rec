@@ -6,6 +6,7 @@ import { api, type Task } from "../api/client";
 import { connAtom, serverTimezoneAtom, tasksAtom } from "../atoms";
 import { DanmuBadge, StatusBadge } from "../components/Badge";
 import { Button, IconButton } from "../components/Button";
+import { Tooltip } from "../components/Tooltip";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { QUALITY_SHORT, roomId, scheduleText } from "../lib/labels";
@@ -89,20 +90,23 @@ export function TaskList(): ReactNode {
         </div>
         <div className="flex items-center gap-3">
           {conn && (
-            <span
-              className="hidden sm:inline-flex items-center gap-1.5 text-xs cursor-help"
-              style={{ color: conn.ok ? "var(--success)" : "var(--error)" }}
-              title={
+            <Tooltip
+              content={
                 conn.ok
                   ? localTimeTooltip(new Date(conn.at), serverTz, (local) => t("common.localTimeTooltip", { local }))
                   : undefined
               }
             >
-              <span className="dot" style={{ background: conn.ok ? "var(--success)" : "var(--error)" }} />
-              {conn.ok
-                ? t("tasks.connected", { time: fmtTimeInTz(new Date(conn.at), serverTz) })
-                : t("tasks.connFailed")}
-            </span>
+              <span
+                className="hidden sm:inline-flex items-center gap-1.5 text-xs"
+                style={{ color: conn.ok ? "var(--success)" : "var(--error)" }}
+              >
+                <span className="dot" style={{ background: conn.ok ? "var(--success)" : "var(--error)" }} />
+                {conn.ok
+                  ? t("tasks.connected", { time: fmtTimeInTz(new Date(conn.at), serverTz) })
+                  : t("tasks.connFailed")}
+              </span>
+            </Tooltip>
           )}
           <Button onClick={openCreate}>
             <Plus className="w-4 h-4" />
