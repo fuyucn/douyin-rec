@@ -100,7 +100,7 @@ const DICT = {
     },
     settings: {
       title: "设置", tabAccount: "账号", tabWebhook: "Webhook", tabEngine: "综合", tabNotif: "通知", tabAbout: "关于",
-      aboutSection: "关于", aboutVersion: "版本", aboutHint: "版本号 = 0.0.0-{构建时 commit 后6位}。",
+      aboutSection: "关于", aboutVersion: "版本",
       accountSection: "抖音账号 Cookie", accountHint: "扫码登录或手动粘贴 cookie。作用:抓礼物 + 入场(视频/评论匿名即可)。所有任务共享。",
       notifSection: "站内提醒", webhookSection: "全局通知 Webhook",
       webhookLabel: "Discord Webhook URL", webhookPlaceholder: "https://discord.com/api/webhooks/…（留空=关闭全局推送）",
@@ -184,7 +184,7 @@ const DICT = {
     },
     settings: {
       title: "Settings", tabAccount: "Account", tabWebhook: "Webhook", tabEngine: "General", tabNotif: "Notifications", tabAbout: "About",
-      aboutSection: "About", aboutVersion: "Version", aboutHint: "Version = 0.0.0-{last 6 of the build commit}.",
+      aboutSection: "About", aboutVersion: "Version",
       accountSection: "Douyin account cookie", accountHint: "QR-login or paste a cookie. Used to capture gifts + entries (video/comments work anonymously). Shared by all tasks.",
       notifSection: "In-app notifications", webhookSection: "Global notification webhook",
       webhookLabel: "Discord Webhook URL", webhookPlaceholder: "https://discord.com/api/webhooks/… (empty = disable global push)",

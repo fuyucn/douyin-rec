@@ -274,7 +274,6 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
             <span className="text-sm text-body">{t("settings.aboutVersion")}</span>
             <span className="font-mono text-xs text-ink">{version || "…"}</span>
           </div>
-          <p className="mt-2 text-[12px] text-muted-soft">{t("settings.aboutHint")}</p>
         </div>
       )}
 
