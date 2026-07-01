@@ -7,7 +7,7 @@ export type { Task } from "./store.js";
 // 文件版 hub 任务配置(<root>/config/hub/{roomSlug}.json):cli reconciler + api 用。
 export * as hubStore from "./hub-store.js";
 export type { HubRule } from "./hub-store.js";
-export { rootHubDir, rootHubConfig } from "./paths.js";
+export { rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, DEFAULT_ROOT } from "./paths.js";
 export { makeNotifier, NullNotifier, formatMessage } from "./notify/notifier.js";
 export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, uploadThenAppendGroups, uploadPlain, appendGroup, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
 export type { UploadOpts } from "./upload/biliup.js";

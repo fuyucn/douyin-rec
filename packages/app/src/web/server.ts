@@ -182,7 +182,7 @@ export interface WebServerDeps {
   resolveShortUrl?: (url: string) => Promise<string | null>;
   /** 站内事件中枢（合成完成/错误 + 开播/录完观察器 emit 到此 → 本地流 + webhook）。 */
   events?: EventCenter;
-  /** hub 任务配置目录(<root>/config/hub);省略=回落 rootHubDir() ?? "./config/hub"。测试注入 temp 目录。 */
+  /** hub 任务配置目录(<root>/config/hub);省略=回落 rootHubDir()。测试注入 temp 目录。 */
   hubDir?: string;
   /** 本节点是否启用 hub(master);slave=false。前端据此显示/隐藏 Hub 页。 */
   hubEnabled?: boolean;

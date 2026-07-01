@@ -85,6 +85,26 @@ node dist/douyin-rec.mjs task serve --port 7860
 
 每个命令的全部选项与示例见 **[docs/cli.md](./docs/cli.md)**。
 
+## 数据目录（`DOUYIN_REC_ROOT`）
+
+db / recordings / stage / config（含 hub 规则、biliup cookies）全部收在**一个数据根**下，不散落在项目里：
+
+```
+<DOUYIN_REC_ROOT>/
+├── db/douyin-rec.db
+├── recordings/{主播}/…
+├── stage/…                      # hub 合成暂存
+└── config/
+    ├── biliup/cookies.json
+    ├── hub.config.json          # hub 全局配置
+    └── hub/{platform}.{roomSlug}.json  # hub 每房间任务配置
+```
+
+- **未设 `DOUYIN_REC_ROOT`** → 默认 `./output-data`（相对启动 cwd）。裸跑 `node dist/douyin-rec.mjs record ...` 或 `task serve` 不再把文件散在项目根（旧默认 `./recordings`、`./douyin-rec.db`、`./stage` 平铺在 cwd）。
+- **本地多实例约定**：本仓库用 `DOUYIN_REC_ROOT=./data-local` 跑 `pnpm serve:local`（独立于 docker 生产），互不干扰。
+- **Docker** 固定 `DOUYIN_REC_ROOT=/data`（compose 映射到宿主机 `docker-data/`，见下）——不受上述默认值影响。
+- 专用 env（`DOUYIN_REC_DB` / `DOUYIN_REC_OUTPUT` / `BILIUP_COOKIE`）可单独覆盖某一项，优先级最高。
+
 ## 终端 TUI 控制台（`task tui`）
 
 在终端里交互式管理任务（Web 的命令行替代）。**TUI 是瘦客户端**——它本身**不录制**，只通过 REST API 连到 `task serve`（默认 `http://localhost:7860`）去看状态、启停、看日志。真正录制的是 serve 的进程；**关掉 TUI 录制照常继续**，**没开 serve 则 TUI 连不上、什么也录不了**。

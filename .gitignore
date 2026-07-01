@@ -16,6 +16,7 @@ output/
 recordings/
 data-local/
 docker-data/
+output-data/     # 未设 DOUYIN_REC_ROOT 时的默认数据根(见 packages/app/src/paths.ts DEFAULT_ROOT)
 *.db
 *.log
 mesio.log*

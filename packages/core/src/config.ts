@@ -12,6 +12,8 @@ export interface AppConfig {
   /** 弹幕开关字符串(1/0/on/off/none);来源由命中平台的 connectDanmu 决定,不再是 provider 名。 */
   danmu: string;
   cookies?: string;
+  /** 输出目录。留空(默认)= 由使用处解析(cli record 回落 `@drec/app` 的 `rootOutputDir()`,
+   *  即 `<DOUYIN_REC_ROOT ?? DEFAULT_ROOT>/recordings`)——core 不依赖 app,故不在此写死路径。 */
   outDir: string;
   segmentSec: number;
   /** 弹幕 xml 粒度: "session"(整场一个,默认,稳) | "segment"(逐段一个)。 */
@@ -29,7 +31,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   // Platform.defaultEngine 解析(见 cli record / store.addTask)。接第二平台时各平台默认各异,不写死抖音。
   recorder: "",
   danmu: "",
-  outDir: "./recordings",
+  outDir: "", // 留空同 recorder/danmu:回落值由使用处解析(见上方字段注释),不写死路径。
   segmentSec: 1800,
   danmuXmlMode: "session",
   pollIntervalSec: 30,

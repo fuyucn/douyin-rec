@@ -123,6 +123,8 @@ node dist/douyin-rec.mjs task add URL                       # CLI 加任务
 
 ⚠️ **库 interop**：录制必须跑打包后的 `node dist/douyin-rec.mjs`，不能 `tsx`/直 import（douyin-live 的 sm-crypto/protobufjs ESM 坑）。vitest 无法 import 这些包 → recorder/douyin-live/平台实例 **零单测**，靠 session/manager/daemon/store 测 + `test/setup.ts` 注册假平台 + 真实录制覆盖。
 
+📁 **数据目录**：db / recordings / stage / config(含 hub 规则、biliup cookies)全收在**一个数据根** `DOUYIN_REC_ROOT` 下(见 `packages/app/src/paths.ts`),不散落项目里。**未设时默认 `./output-data`**(裸跑不再把文件平铺进 cwd)。本仓库约定:`pnpm serve:local` 用 `DOUYIN_REC_ROOT=./data-local`;docker 固定 `/data`(映射宿主机 `docker-data/`)。专用 env(`DOUYIN_REC_DB`/`DOUYIN_REC_OUTPUT`/`BILIUP_COOKIE`)可单独覆盖某一项。
+
 ## B站上传规则（biliup）
 
 **永远用 `upload-recording-today` skill 上传，不要手搓 biliup 命令。** skill 脚本

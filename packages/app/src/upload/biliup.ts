@@ -1,13 +1,10 @@
 // ts/src/core/upload/biliup.ts
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { rootBiliupCookies } from "../paths.js";
 
-/** biliup cookies.json:BILIUP_COOKIE > <DOUYIN_REC_ROOT>/config/biliup/cookies.json > ~/.config/biliup/cookies.json。 */
-export const DEFAULT_COOKIES =
-  process.env.BILIUP_COOKIE ?? rootBiliupCookies() ?? join(homedir(), ".config", "biliup", "cookies.json");
+/** biliup cookies.json:BILIUP_COOKIE > <DOUYIN_REC_ROOT ?? DEFAULT_ROOT>/config/biliup/cookies.json。 */
+export const DEFAULT_COOKIES = process.env.BILIUP_COOKIE ?? rootBiliupCookies();
 
 export interface UploadOpts {
   video: string;

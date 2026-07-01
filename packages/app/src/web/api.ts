@@ -86,7 +86,7 @@ export interface ApiDeps {
    * 省略=不记录事件、不发通知,合成照常。
    */
   events?: EventCenter;
-  /** hub 任务配置目录(<root>/config/hub);省略=回落 rootHubDir() ?? "./config/hub"。 */
+  /** hub 任务配置目录(<root>/config/hub);省略=回落 rootHubDir()。 */
   hubDir?: string;
   /** 本节点是否启用了 hub(master);slave/未开 = false。前端据此显示/隐藏 Hub 页。 */
   hubEnabled?: boolean;
@@ -296,8 +296,8 @@ export interface Api {
 /** Build the handler set bound to the injected store + manager. */
 export function makeApi(deps: ApiDeps): Api {
   const { store, manager, login } = deps;
-  // hub 任务配置目录(文件版,现读不缓存)。注入 > rootHubDir() > 本地默认。
-  const hubDir = deps.hubDir ?? rootHubDir() ?? "./config/hub";
+  // hub 任务配置目录(文件版,现读不缓存)。注入 > rootHubDir()(<root>/config/hub,root 见 paths.ts)。
+  const hubDir = deps.hubDir ?? rootHubDir();
 
   // 后台抓主播名写回 store（创建/改房间号时）。fire-and-forget：不阻塞响应，
   // UI 下次轮询列表即可看到。失败静默（保留房间号显示）。

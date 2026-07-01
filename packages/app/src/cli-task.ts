@@ -26,7 +26,7 @@ export function resolveHubConfigJson(arg: string | undefined, store: TaskStore):
   const fromDb = store.getSetting("hubConfig");
   if (fromDb) return fromDb;
   const p = rootHubConfig();
-  if (p && existsSync(p)) return readFileSync(p, "utf-8");
+  if (existsSync(p)) return readFileSync(p, "utf-8");
   return undefined;
 }
 import { RecordingSession } from "@drec/manager";
@@ -80,7 +80,7 @@ export function buildSessionForTask(
   const opts: RecordOpts = {
     quality: task.quality as RecordOpts["quality"],
     cookies: resolveTaskCookies(task, store.getDefaultCookies()) ?? undefined,
-    outDir: task.outDir ?? store.getSetting("outDir") ?? "./recordings",
+    outDir: resolveOutputDir(task.outDir),
     segmentSec: task.segmentSec,
     // per-streamer output subfolder; empty/undefined → recorder auto-uses anchor name
     name: task.name ?? undefined,

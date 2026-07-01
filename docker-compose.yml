@@ -61,7 +61,7 @@ services:
       - ${DATA_ROOT:-./docker-data}:/data
       # VPS ssh key(只读)→ master 经 SshTransport 拉流时认证(配合镜像内 /root/.ssh/config)。
       - ./remote/vps.key:/root/.ssh/vps.key:ro
-    # master 模式:serve 带 --hub → 自动读 /data/config/hub-config.json(docker-data/config/hub-config.json)。
+    # master 模式:serve 带 --hub → 自动读 /data/config/hub.config.json(docker-data/config/hub.config.json)。
     command: ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860", "--hub"]
 
 volumes:

@@ -3,13 +3,22 @@
  *
  *   <root>/db/douyin-rec.db          数据库(含抖音账号 cookie)
  *   <root>/recordings/               录像输出
- *   <root>/config/biliup/cookies.json  biliup B站上传 cookie(未来)
+ *   <root>/stage/                    hub 合成暂存(合并/烧录中间产物)
+ *   <root>/config/biliup/cookies.json  biliup B站上传 cookie
+ *   <root>/config/hub.config.json    hub 全局配置;<root>/config/hub/       hub 每房间任务配置
  *
+ * **root 永远有值**:未设 `DOUYIN_REC_ROOT` 时默认 `DEFAULT_ROOT`("./output-data",相对启动 cwd)——
+ * 所有运行数据(db/recordings/stage/config)收进这一个目录,不再散落在项目根(旧默认各自 `./recordings`、
+ * `./douyin-rec.db`、`./stage`、`./config/hub` 平铺在 cwd)。类比 docker 的 `docker-data/`(那里 root 固定
+ * 由 compose 设为容器内 `/data`,不受此默认影响)。
  * 解析优先级(各处一致):专用 env(DOUYIN_REC_DB / DOUYIN_REC_OUTPUT / BILIUP_COOKIE)
- * > 由 DOUYIN_REC_ROOT 派生的固定子路径 > 各自的本地默认。专用 env 仍可单独覆盖某一项。
+ * > 由 DOUYIN_REC_ROOT(或其默认值)派生的固定子路径。专用 env 仍可单独覆盖某一项。
  */
 import { join } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+
+/** 未设 DOUYIN_REC_ROOT 时的默认数据根(相对启动 cwd)。db/recordings/stage/config 都收在这一个目录下。 */
+export const DEFAULT_ROOT = "./output-data";
 
 /**
  * hub 全局配置模板内容。**单一真相 = 仓库源文件 `configs/hub.config.example.json`**。
@@ -22,52 +31,47 @@ function hubConfigExampleText(): string {
   return readFileSync(new URL("../../../configs/hub.config.example.json", import.meta.url), "utf-8");
 }
 
-/** DOUYIN_REC_ROOT(去空白);未设为 undefined。 */
-export function drecRoot(): string | undefined {
+/** 数据根:DOUYIN_REC_ROOT(去空白)未设 → 回落 {@link DEFAULT_ROOT}。永远返回有值的路径。 */
+export function drecRoot(): string {
   const r = (process.env.DOUYIN_REC_ROOT ?? "").trim();
-  return r.length > 0 ? r : undefined;
+  return r.length > 0 ? r : DEFAULT_ROOT;
 }
 
-/** <root>/config;无 root 为 undefined。 */
-export function rootConfigDir(): string | undefined {
-  const r = drecRoot();
-  return r ? join(r, "config") : undefined;
+/** <root>/config。 */
+export function rootConfigDir(): string {
+  return join(drecRoot(), "config");
 }
 
 /**
  * <root>/config/hub.config.json(多节点编排全局「实际生效」配置;复制自 .example 后改)。
- * **兼容**:新路径不存在但旧 `hub-config.json` 在 → 返回旧路径(平滑迁移,老部署不中断)。无 root 为 undefined。
+ * **兼容**:新路径不存在但旧 `hub-config.json` 在 → 返回旧路径(平滑迁移,老部署不中断)。
  */
-export function rootHubConfig(): string | undefined {
+export function rootHubConfig(): string {
   const d = rootConfigDir();
-  if (!d) return undefined;
   const cur = join(d, "hub.config.json");
   const old = join(d, "hub-config.json");
   if (!existsSync(cur) && existsSync(old)) return old; // 迁移兼容:只在新文件缺失时回退旧名
   return cur;
 }
 
-/** <root>/config/hub —— 每房间 hub 任务配置文件目录(一房间一 {roomSlug}.json)。无 root 为 undefined。 */
-export function rootHubDir(): string | undefined {
-  const d = rootConfigDir();
-  return d ? join(d, "hub") : undefined;
+/** <root>/config/hub —— 每房间 hub 任务配置文件目录(一房间一 {roomSlug}.json)。 */
+export function rootHubDir(): string {
+  return join(rootConfigDir(), "hub");
 }
 
-/** <root>/config/hub/{roomSlug}.json —— 单个房间的 hub 任务配置文件路径。无 root 为 undefined。 */
-export function rootHubTaskConfig(roomSlug: string): string | undefined {
-  const d = rootHubDir();
-  return d ? join(d, `${roomSlug}.json`) : undefined;
+/** <root>/config/hub/{roomSlug}.json —— 单个房间的 hub 任务配置文件路径。 */
+export function rootHubTaskConfig(roomSlug: string): string {
+  return join(rootHubDir(), `${roomSlug}.json`);
 }
 
 /**
- * 数据根初始化时**复制一份多节点编排配置模板**到 `<root>/config/hub-config.example.json`。
- * 内容逐字来自仓库源文件 `configs/hub-config.example.json`(见 `hubConfigExampleText`,bundle 内联 / dev 读源文件)。
- * 幂等:无 DOUYIN_REC_ROOT 则跳过;文件已存在则不覆盖(保留用户改动)。返回写入路径,跳过/已存在返回 undefined。
+ * 数据根初始化时**复制一份多节点编排配置模板**到 `<root>/config/hub.config.example.json`。
+ * 内容逐字来自仓库源文件 `configs/hub.config.example.json`(见 `hubConfigExampleText`,bundle 内联 / dev 读源文件)。
+ * 幂等:文件已存在则不覆盖(保留用户改动)。返回写入路径,已存在返回 undefined。
  * 模板是占位值(dataRoot=/data、host=CHANGE-ME、uploadMode=stage-only)——复制后按环境改;字段说明见 docs/multi-node-sync.md「配置」。
  */
 export function ensureHubConfigExample(): string | undefined {
   const cfgDir = rootConfigDir();
-  if (!cfgDir) return undefined;
   const path = join(cfgDir, "hub.config.example.json");
   if (existsSync(path)) return undefined;
   mkdirSync(cfgDir, { recursive: true });
@@ -77,28 +81,30 @@ export function ensureHubConfigExample(): string | undefined {
   return path;
 }
 
-/** <root>/db/douyin-rec.db;无 root 为 undefined。 */
-export function rootDbPath(): string | undefined {
-  const r = drecRoot();
-  return r ? join(r, "db", "douyin-rec.db") : undefined;
+/** <root>/db/douyin-rec.db。 */
+export function rootDbPath(): string {
+  return join(drecRoot(), "db", "douyin-rec.db");
 }
 
-/** <root>/recordings;无 root 为 undefined。 */
-export function rootOutputDir(): string | undefined {
-  const r = drecRoot();
-  return r ? join(r, "recordings") : undefined;
+/** <root>/recordings。 */
+export function rootOutputDir(): string {
+  return join(drecRoot(), "recordings");
 }
 
-/** <root>/config/biliup/cookies.json;无 root 为 undefined。 */
-export function rootBiliupCookies(): string | undefined {
-  const r = drecRoot();
-  return r ? join(r, "config", "biliup", "cookies.json") : undefined;
+/** <root>/stage —— hub 合成暂存(合并/烧录中间产物;上传后可按 cleanup 配置清理)。 */
+export function rootStageDir(): string {
+  return join(drecRoot(), "stage");
+}
+
+/** <root>/config/biliup/cookies.json。 */
+export function rootBiliupCookies(): string {
+  return join(drecRoot(), "config", "biliup", "cookies.json");
 }
 
 /**
  * 解析输出目录(录像)。**录制端(record-args)与合成端(api recordingsDir)必须用同一函数**,
- * 否则录到一处、合成去另一处找。优先级:任务 outDir > DOUYIN_REC_OUTPUT > <root>/recordings > ./recordings。
+ * 否则录到一处、合成去另一处找。优先级:任务 outDir > DOUYIN_REC_OUTPUT > <root>/recordings。
  */
 export function resolveOutputDir(taskOutDir?: string | null): string {
-  return taskOutDir ?? process.env.DOUYIN_REC_OUTPUT ?? rootOutputDir() ?? "./recordings";
+  return taskOutDir ?? process.env.DOUYIN_REC_OUTPUT ?? rootOutputDir();
 }

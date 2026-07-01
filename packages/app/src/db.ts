@@ -5,19 +5,16 @@
  * ExperimentalWarning on first import — harmless, and does NOT affect the
  * stateless record/merge/burn/upload commands (they never import this module).
  *
- * DB path resolution: explicit arg > env DOUYIN_REC_DB > default "./douyin-rec.db".
+ * DB path resolution: explicit arg > env DOUYIN_REC_DB > <DOUYIN_REC_ROOT ?? DEFAULT_ROOT>/db/douyin-rec.db.
  */
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { rootDbPath } from "./paths.js";
 
-/** Default on-disk database path (relative to cwd). */
-export const DEFAULT_DB_PATH = "./douyin-rec.db";
-
-/** Resolve the db path: explicit arg > env DOUYIN_REC_DB > <DOUYIN_REC_ROOT>/db/douyin-rec.db > default. */
+/** Resolve the db path: explicit arg > env DOUYIN_REC_DB > <root>/db/douyin-rec.db (root always resolves, see paths.ts). */
 export function resolveDbPath(path?: string): string {
-  return path ?? process.env.DOUYIN_REC_DB ?? rootDbPath() ?? DEFAULT_DB_PATH;
+  return path ?? process.env.DOUYIN_REC_DB ?? rootDbPath();
 }
 
 /**

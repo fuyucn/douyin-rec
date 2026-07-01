@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureHubConfigExample } from "../../packages/app/src/paths.js";
+import { ensureHubConfigExample, drecRoot, DEFAULT_ROOT } from "../../packages/app/src/paths.js";
 import { resolveHubConfigJson } from "../../packages/app/src/cli-task.js";
 import type { TaskStore } from "../../packages/app/src/store.js";
 
@@ -12,7 +12,7 @@ const fakeStore = (hubConfig?: string): TaskStore =>
 
 /**
  * 数据根初始化时种 hub-config.example.json 模板。
- * 幂等:无 DOUYIN_REC_ROOT 跳过;已存在不覆盖;路径据 root 填充。
+ * 幂等:已存在不覆盖;路径据 root(显式 DOUYIN_REC_ROOT,或未设时的默认 DEFAULT_ROOT)填充。
  */
 describe("ensureHubConfigExample（init-time scaffold）", () => {
   const prev = process.env.DOUYIN_REC_ROOT;
@@ -21,9 +21,11 @@ describe("ensureHubConfigExample（init-time scaffold）", () => {
     else process.env.DOUYIN_REC_ROOT = prev;
   });
 
-  it("无 DOUYIN_REC_ROOT → 跳过(返回 undefined,不写文件)", () => {
+  it("无 DOUYIN_REC_ROOT → drecRoot() 回落默认根 DEFAULT_ROOT(不再是「跳过」)", () => {
+    // 纯函数断言,不调用 ensureHubConfigExample()——它真的会写文件,若在真实 cwd(仓库根)下
+    // 以默认根跑会往 <cwd>/output-data/ 写东西,污染仓库(曾经这样跑过一次,已手动清理)。
     delete process.env.DOUYIN_REC_ROOT;
-    expect(ensureHubConfigExample()).toBeUndefined();
+    expect(drecRoot()).toBe(DEFAULT_ROOT);
   });
 
   it("有 root 且文件不存在 → 逐字复制仓库源文件 configs/hub.config.example.json", () => {

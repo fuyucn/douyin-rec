@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildRecordArgs } from "../../packages/app/src/process/record-args.js";
+import { rootOutputDir } from "../../packages/app/src/paths.js";
 import type { Task } from "../../packages/app/src/store.js";
 
 function mkTask(over: Partial<Task> = {}): Task {
@@ -35,7 +36,9 @@ describe("buildRecordArgs", () => {
       "--danmu",
       "1",
       "--out",
-      "./recordings",
+      // 无 DOUYIN_REC_ROOT 时的默认值(见 paths.ts DEFAULT_ROOT="./output-data")——用真实解析函数,
+      // 不写死字符串,避免默认根改名/改路径时这个断言悄悄漂移。
+      rootOutputDir(),
       "--segment",
       "1800",
       "--name",

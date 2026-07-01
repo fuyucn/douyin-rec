@@ -22,7 +22,7 @@ import { groupSessions, mergeSession } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
-import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES } from "@drec/app";
+import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
 import type { Recorder, RecordOpts, NotifyEvent, Notifier } from "@drec/core";
 import { makeNotifier } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand } from "@drec/app";
@@ -104,7 +104,7 @@ program
   .option("--danmu <0|1>", "弹幕开关: 1=开(由平台 connectDanmu 提供) 0=关 (默认 1)")
   .option("--cookies <s>", "抖音 cookie 字符串")
   .option("--cookies-file <path>", "从文件读取 cookie (优先于 --cookies)")
-  .option("--out <dir>", "输出目录 (默认 ./recordings)")
+  .option("--out <dir>", "输出目录 (默认 <DOUYIN_REC_ROOT>/recordings,未设根则 output-data/recordings)")
   .option("--segment <sec>", "分段时长(秒), 0=不分段 (默认 1800)")
   .option("--danmu-xml-mode <mode>", "弹幕 xml 粒度: session(整场一个,默认) | segment(逐段一个)")
   .option("--reconnect <sec>", "断流快速重连等待(秒) (默认 5)")
@@ -126,7 +126,8 @@ program
     const opts: RecordOpts = {
       quality: (o.quality ?? cfg.quality) as RecordOpts["quality"],
       cookies,
-      outDir: o.out ?? cfg.outDir,
+      // 留空(未传 --out、YAML 也未设 outDir)→ 回落 rootOutputDir()(<DOUYIN_REC_ROOT ?? DEFAULT_ROOT>/recordings)。
+      outDir: o.out || cfg.outDir || rootOutputDir(),
       segmentSec: o.segment !== undefined ? Number(o.segment) : cfg.segmentSec,
       name: o.name?.trim() || undefined,
       danmuXmlMode:
@@ -443,7 +444,7 @@ const hubStarter: HubStarter = {
     const { registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, hubStore, rootHubDir } = await import("@drec/app");
+    const { uploadPlain, appendGroup, hubStore, rootHubDir, rootStageDir } = await import("@drec/app");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
       platform?: string;
@@ -516,7 +517,7 @@ const hubStarter: HubStarter = {
       notify: opts.onEvent,
       cfg: {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
-        stageDir: hubCfg.stageDir ?? "./stage",
+        stageDir: hubCfg.stageDir ?? rootStageDir(),
         cookies: hubCfg.cookies ?? "",
         uploadMode: "stage" as const, // 全局兜底 = 不自动传;每任务文件按需 mode:"upload"
         uploadPrivate: true,
@@ -527,14 +528,14 @@ const hubStarter: HubStarter = {
     // 每房间 hub 任务配置来自文件 <root>/config/hub/{platform}.{roomSlug}.json(现读不缓存→手改/UI 即时生效)。
     // hub = 全局管理器:只处理「有 enabled 任务文件」的房间;无文件/禁用 → 返 null 跳过该房间。
     // 录制任务只管录;某房间产哪些、清不清理、传不传,全看它的 hub 任务文件。upload 留空回退全局默认。
-    const hubDir = rootHubDir() ?? "./config/hub";
+    const hubDir = rootHubDir();
     const resolveCfg = (platform: string, slug: string): PipelineCfg | null => {
       const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform, slug));
       if (!rule || !rule.enabled) return null; // 无任务文件或已禁用 → hub 不处理该房间
       const p = rule.pipeline ?? {};
       return {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
-        stageDir: hubCfg.stageDir ?? "./stage",
+        stageDir: hubCfg.stageDir ?? rootStageDir(),
         cookies: hubCfg.cookies ?? "",
         uploadMode: p.upload?.mode === "upload" ? "upload" : "stage", // 其它值(含旧 stage-only)→ stage
         uploadPrivate: p.upload?.private !== false,                    // 缺省 / true → 仅自己可见
