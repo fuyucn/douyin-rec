@@ -21,6 +21,7 @@ import { listPlatforms, platformForRoom } from "@drec/core";
 import * as hubStore from "../hub-store.js";
 import type { HubRule } from "../hub-store.js";
 import { rootHubDir } from "../paths.js";
+import { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "../timezone.js";
 import type { EventCenter } from "../events.js";
 import { resolveOutputDir } from "../paths.js";
 import type { Task, TaskStore } from "../store.js";
@@ -271,6 +272,11 @@ export interface Api {
   getMesioPath(): ApiResult;
   /** POST /api/mesio-path { mesioPath } — set/clear mesio 路径(空串=清除→回落 bin/mesio 默认)。 */
   setMesioPath(input: { mesioPath?: string }): ApiResult;
+  /** GET /api/timezone — 当前生效时区(settings.timezone,留空=默认)+ 默认值。 */
+  getTimezone(): ApiResult;
+  /** POST /api/timezone { timezone } — 设时区(config 驱动,覆盖 host 环境变量,立即生效不用重启);
+   *  空串=清除(回落默认);非法 IANA 时区名 → 400。 */
+  setTimezone(input: { timezone?: string }): ApiResult;
   /** GET /api/tasks/:id/recordings — list recorded sessions for the merge selector. */
   listRecordings(id: number): ApiResult;
   /** POST /api/tasks/:id/merge { sessions } — start a background merge job → 202 { job }. */
@@ -585,6 +591,22 @@ export function makeApi(deps: ApiDeps): Api {
         status: 200,
         body: { mesioPath: store.getSetting("mesioPath") ?? "", default: resolveMesioBin() },
       };
+    },
+
+    getTimezone(): ApiResult {
+      return {
+        status: 200,
+        body: { timezone: store.getSetting("timezone") ?? "", default: DEFAULT_TIMEZONE, effective: process.env.TZ ?? "" },
+      };
+    },
+
+    setTimezone(input: { timezone?: string }): ApiResult {
+      const v = (input.timezone ?? "").trim();
+      if (v && !isValidTimezone(v)) return err(400, `不是合法的 IANA 时区名: ${v}`);
+      store.setSetting("timezone", v);
+      // 立即应用(覆盖 process.env.TZ),daemon 下一次 tick 的 schedule 窗口判定即刻用新时区,不用重启。
+      const effective = applyTimezone(store);
+      return { status: 200, body: { timezone: v, default: DEFAULT_TIMEZONE, effective } };
     },
 
     async testWebhook(input: { content?: string }): Promise<ApiResult> {

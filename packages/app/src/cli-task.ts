@@ -15,6 +15,7 @@ import { TaskStore, resolveTaskCookies, resolveTaskWebhook, type Task, type Engi
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "./events.js";
 import { resolveOutputDir, ensureHubConfigExample, rootHubConfig } from "./paths.js";
+import { applyTimezone } from "./timezone.js";
 
 /**
  * 解析 hub 配置 JSON 串(供 startHub)。优先级:
@@ -471,6 +472,13 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .action((o: { port?: string; db?: string; schedule?: boolean; hub?: boolean; hubConfig?: string }) => {
       const store = new TaskStore(o.db);
       const port = o.port !== undefined ? Number(o.port) : 7860;
+
+      // 时区由 config(settings.timezone)决定,不看 host/容器的 TZ 环境变量——覆盖式应用,
+      // 启动就打日志,免得再靠挖 /proc/<pid>/environ 才能确认服务实际用的哪个时区(踩过的坑)。
+      // schedule 窗口判定(inWindow/nowMinutesLocal)全靠 Date 的本地时间转换,这一行必须在
+      // daemon 起来之前跑。Web UI/API 改设置后重新调 applyTimezone 即刻生效,不用重启。
+      const tz = applyTimezone(store);
+      console.log(`[tz] 时区 = ${tz}(来自 config,已覆盖 host 环境变量)`);
 
       // 数据根初始化时种一份多节点编排配置模板(<root>/config/hub-config.example.json,幂等)。
       const seeded = ensureHubConfigExample();

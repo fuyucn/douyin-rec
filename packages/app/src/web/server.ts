@@ -49,6 +49,8 @@ export interface RouteMatch {
     | "getVersion"
     | "getMesioPath"
     | "setMesioPath"
+    | "getTimezone"
+    | "setTimezone"
     | "listRecordings"
     | "startMerge"
     | "getMerge"
@@ -121,6 +123,12 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
   if (p === "/api/mesio-path") {
     if (method === "GET") return { name: "getMesioPath" };
     if (method === "POST") return { name: "setMesioPath", needsBody: true };
+    return null;
+  }
+  // 时区设置(config 驱动,覆盖 host 环境变量): GET / POST /api/timezone
+  if (p === "/api/timezone") {
+    if (method === "GET") return { name: "getTimezone" };
+    if (method === "POST") return { name: "setTimezone", needsBody: true };
     return null;
   }
   // 站内事件流: GET /api/events(?since=N 在 dispatch 解析 query)
@@ -282,6 +290,12 @@ async function dispatch(
     case "setMesioPath": {
       const body = (await readJson(req)) as { mesioPath?: string };
       return api.setMesioPath(body ?? {});
+    }
+    case "getTimezone":
+      return api.getTimezone();
+    case "setTimezone": {
+      const body = (await readJson(req)) as { timezone?: string };
+      return api.setTimezone(body ?? {});
     }
     case "listRecordings":
       return api.listRecordings(match.id!);

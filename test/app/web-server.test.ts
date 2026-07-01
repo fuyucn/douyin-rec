@@ -75,6 +75,8 @@ describe("matchRoute", () => {
     expect(matchRoute("POST", "/api/hub/rules")).toMatchObject({ name: "createHubRule", needsBody: true });
     expect(matchRoute("PATCH", "/api/hub/rules/douyin.123456")).toMatchObject({ name: "updateHubRule", slug: "douyin.123456", needsBody: true });
     expect(matchRoute("DELETE", "/api/hub/rules/douyin.123456")).toMatchObject({ name: "deleteHubRule", slug: "douyin.123456" });
+    expect(matchRoute("GET", "/api/timezone")?.name).toBe("getTimezone");
+    expect(matchRoute("POST", "/api/timezone")).toMatchObject({ name: "setTimezone", needsBody: true });
   });
 
   it("returns null for unknown routes / wrong methods", () => {
@@ -92,6 +94,7 @@ describe("createWebServer (live)", () => {
   let server: Server;
   let base: string;
   let hubDir: string;
+  const prevTZ = process.env.TZ; // timezone 测试会覆盖 process.env.TZ,每个 it 后还原,不泄漏到别的测试文件。
 
   beforeEach(async () => {
     store = new TaskStore(":memory:");
@@ -112,6 +115,8 @@ describe("createWebServer (live)", () => {
 
   afterEach(async () => {
     await new Promise<void>((r) => server.close(() => r()));
+    if (prevTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTZ;
   });
 
   it("GET / serves the SPA html", async () => {
@@ -180,6 +185,27 @@ describe("createWebServer (live)", () => {
 
     const list = (await (await fetch(`${base}/api/tasks`)).json()) as Array<{ id: number; name: string }>;
     expect(list.find((t) => t.id === created.id)!.name).toBe("new");
+  });
+
+  it("timezone via http(config 驱动,覆盖 process.env.TZ;非法值 400;空串回落默认)", async () => {
+    const get1 = await fetch(`${base}/api/timezone`);
+    expect(get1.status).toBe(200);
+    const body1 = (await get1.json()) as { timezone: string; default: string; effective: string };
+    expect(body1.timezone).toBe(""); // 未设置
+    expect(body1.default).toBeTruthy();
+
+    const bad = await fetch(`${base}/api/timezone`, { method: "POST", body: JSON.stringify({ timezone: "Not/A/Zone" }) });
+    expect(bad.status).toBe(400);
+
+    const set = await fetch(`${base}/api/timezone`, { method: "POST", body: JSON.stringify({ timezone: "Asia/Shanghai" }) });
+    expect(set.status).toBe(200);
+    const setBody = (await set.json()) as { timezone: string; effective: string };
+    expect(setBody.timezone).toBe("Asia/Shanghai");
+    expect(setBody.effective).toBe("Asia/Shanghai");
+    expect(process.env.TZ).toBe("Asia/Shanghai"); // 真的覆盖了进程环境变量
+
+    const clear = await fetch(`${base}/api/timezone`, { method: "POST", body: JSON.stringify({ timezone: "" }) });
+    expect(((await clear.json()) as { effective: string }).effective).toBe(body1.default); // 清空回落默认
   });
 
   it("hub status via http(未注入 hubEnabled → enabled:false,= slave/child node)", async () => {

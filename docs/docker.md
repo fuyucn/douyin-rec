@@ -33,7 +33,7 @@ docker compose exec douyin-rec date   # 验证容器时区
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `TZ` | `America/Los_Angeles` | **最关键**。调度按**本地时间**算 `schedule` 窗口；容器默认 UTC 会让 `07:30-10:30` 这种窗口整体错乱。默认美西，自动处理 PST/PDT 夏令时。在别的机房就改成对应时区。 |
+| `TZ` | `America/Los_Angeles` | 只是容器启动前的初始值/`date` 等诊断命令参考。**调度实际用的时区由 config 决定**(`settings.timezone`,启动时 `applyTimezone()` 会**覆盖** `process.env.TZ`,不看这个 env)——查看启动日志 `[tz] 时区 = ...` 或 `GET /api/timezone`;要改用 `POST /api/timezone`,立即生效。 |
 | `PORT` | `7860` | Web UI 映射到宿主机的端口。 |
 | `DB_DIR` | `./docker-data/db` | 宿主机目录 → 容器 `/data`；SQLite 库落在 `/data/douyin-rec.db`。任务、设置、全局 cookie 都在这。 |
 | `OUTPUT_DIR` | `./docker-data/output` | 宿主机目录 → 容器 `/output`；任务**未单独设 outDir** 时录像/弹幕落在这（经 `DOUYIN_REC_OUTPUT`）。 |
@@ -113,7 +113,7 @@ CONFIG_DIR=/srv/douyin/config
 
 | 现象 | 排查 |
 |---|---|
-| 定时窗口不按预期触发 | `docker compose exec douyin-rec date` 看时区是否对；`.env` 的 `TZ` 改对后 `docker compose up -d` 重起。 |
+| 定时窗口不按预期触发 | 时区由 config 决定,`docker compose exec ... date` 看到的是容器基线环境,**不是**我们服务实际用的时区(`applyTimezone()` 启动时覆盖了 `process.env.TZ`)——查 `docker compose logs` 里的 `[tz] 时区 = ...` 那行,或 `GET /api/timezone`;要改就 `POST /api/timezone {"timezone":"..."}`,立即生效不用重启。 |
 | 页面打不开 | `docker compose ps` 看是否 running；`docker compose logs` 看启动报错；确认 `PORT` 没被占。 |
 | 录像没出现 | 看任务详情日志；确认 `OUTPUT_DIR` 宿主机目录可写、磁盘有空间。 |
 | 投稿失败 | 容器默认不自动投稿（`serve` 只录制）；投稿是单独的 `upload` 步骤，需 `/config/cookies.json`（biliup 登录态）。 |

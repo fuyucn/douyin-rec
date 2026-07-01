@@ -8,6 +8,7 @@ export type { Task } from "./store.js";
 export * as hubStore from "./hub-store.js";
 export type { HubRule } from "./hub-store.js";
 export { rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, DEFAULT_ROOT } from "./paths.js";
+export { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
 export { makeNotifier, NullNotifier, formatMessage } from "./notify/notifier.js";
 export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, uploadThenAppendGroups, uploadPlain, appendGroup, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
 export type { UploadOpts } from "./upload/biliup.js";
