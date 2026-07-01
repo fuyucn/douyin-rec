@@ -58,7 +58,7 @@ COPY scripts/install-mesio.sh /tmp/install-mesio.sh
 RUN MESIO_LIBC=gnu sh /tmp/install-mesio.sh /app/bin && rm /tmp/install-mesio.sh
 
 # biliup:docker 当 master 时 auto-private 上传用(orchestrator runBiliup spawn 裸 "biliup")。
-# 装到 /usr/local/bin 上 PATH;cookies 走挂载卷 /data/config/biliup/cookies.json(BILIUP_COOKIE env)。
+# 装到 /usr/local/bin 上 PATH;cookies 走挂载卷 /output-data/config/biliup/cookies.json(BILIUP_COOKIE env)。
 COPY scripts/install-biliup.sh /tmp/install-biliup.sh
 RUN BILIUP_LIBC=gnu sh /tmp/install-biliup.sh /usr/local/bin && rm /tmp/install-biliup.sh
 
@@ -67,11 +67,12 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/packages/web/dist ./web/dist
 COPY --from=builder /app/assets ./assets
 
-# 单一数据根 /data（compose 挂载卷）→ 内部固定 db/ recordings/ config/。可被 compose env 覆盖。
+# 单一数据根 /output-data（compose 挂载卷，与代码默认根 DEFAULT_ROOT 同名）→ 内部固定 db/ recordings/ config/。
+# 可被 compose env 覆盖。
 ENV NODE_ENV=production \
     DOUYIN_REC_STATIC=/app/web/dist \
-    DOUYIN_REC_ROOT=/data \
-    BILIUP_COOKIE=/data/config/biliup/cookies.json \
+    DOUYIN_REC_ROOT=/output-data \
+    BILIUP_COOKIE=/output-data/config/biliup/cookies.json \
     FONTS_DIR=/app/assets/fonts \
     MESIO_PATH=/app/bin/mesio \
     TZ=America/Los_Angeles

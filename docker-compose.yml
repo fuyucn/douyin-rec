@@ -49,19 +49,21 @@ services:
     environment:
       # 调度按本地时间算窗口；默认美西（自动处理 PST/PDT 夏令时），按需改。
       TZ: ${TZ:-America/Los_Angeles}
-      # 单一数据根：容器内固定 /data，内部布局固定（不用改）：
-      #   /data/db/douyin-rec.db · /data/recordings · /data/config/biliup/cookies.json
-      DOUYIN_REC_ROOT: /data
-      BILIUP_COOKIE: /data/config/biliup/cookies.json
+      # 单一数据根：容器内固定 /output-data（与代码默认根 DEFAULT_ROOT 同名），内部布局固定（不用改）：
+      #   /output-data/db/douyin-rec.db · /output-data/recordings · /output-data/config/biliup/cookies.json
+      DOUYIN_REC_ROOT: /output-data
+      BILIUP_COOKIE: /output-data/config/biliup/cookies.json
       DOUYIN_REC_STATIC: /app/web/dist
       # 可选 Discord 通知 webhook。
       DISCORD_WEBHOOK: ${DISCORD_WEBHOOK:-}
     volumes:
-      # 单一挂载卷：所有持久数据(db/录像/config)都在它下面，容器重建不丢。
-      - ${DATA_ROOT:-./docker-data}:/data
+      # 单一挂载卷：所有持久数据(db/录像/config)都在它下面，容器重建不丢。宿主机侧目录名(docker-data/)
+      # 与容器内挂载点名(/output-data)不必一致——bind mount 只是把这块磁盘的两个入口对上,改容器内
+      # 名字不影响宿主机上的文件,也不需要迁移数据。
+      - ${DATA_ROOT:-./docker-data}:/output-data
       # VPS ssh key(只读)→ master 经 SshTransport 拉流时认证(配合镜像内 /root/.ssh/config)。
       - ./remote/vps.key:/root/.ssh/vps.key:ro
-    # master 模式:serve 带 --hub → 自动读 /data/config/hub.config.json(docker-data/config/hub.config.json)。
+    # master 模式:serve 带 --hub → 自动读 /output-data/config/hub.config.json(docker-data/config/hub.config.json)。
     command: ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860", "--hub"]
 
 volumes:
