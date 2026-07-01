@@ -9,6 +9,8 @@
  *
  * 设计：核心逻辑全在 core/，CLI 仅薄封装 → 二期 UI 复用同一核心。
  */
+import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌 env(如 DOUYIN_REC_ROOT),
+                         // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
 import { Command } from "commander";
 import pkg from "../package.json" with { type: "json" };
 import { readFileSync, readdirSync } from "node:fs";
