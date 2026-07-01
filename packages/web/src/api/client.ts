@@ -121,6 +121,13 @@ export const api = {
   setMesioPath: (mesioPath: string): Promise<{ mesioPath: string; default: string }> =>
     request("POST", "/api/mesio-path", { mesioPath }),
 
+  // ── 时区(config 驱动,覆盖 host/容器 TZ)─────────────────────────────────────
+  // timezone = 用户配置值(空=用默认);default = 未配置时的默认值;effective = 当前进程实际生效值。
+  getTimezone: (): Promise<{ timezone: string; default: string; effective: string }> =>
+    request("GET", "/api/timezone"),
+  setTimezone: (timezone: string): Promise<{ timezone: string; default: string; effective: string }> =>
+    request("POST", "/api/timezone", { timezone }),
+
   // ── QR login ──────────────────────────────────────────────────────────────
   startLogin: (): Promise<QrStart> => request("POST", "/api/login/qr"),
   pollLogin: (sid: string): Promise<QrPoll> => request("GET", `/api/login/qr/${sid}`),

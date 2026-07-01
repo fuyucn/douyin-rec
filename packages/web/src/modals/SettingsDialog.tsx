@@ -12,6 +12,16 @@ import { getToggles, setToggle, NOTIF_KEYS, type NotifKey } from "../lib/notific
 
 type Tab = "account" | "webhook" | "engine" | "notif" | "about";
 
+/** 固定几个常用大时区(够用即可,不需要全量 IANA 列表)。 */
+const TIMEZONE_OPTIONS = [
+  "Asia/Shanghai",
+  "Asia/Tokyo",
+  "America/Los_Angeles",
+  "America/New_York",
+  "Europe/London",
+  "UTC",
+];
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -27,7 +37,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const toast = useToast();
   const refreshCookie = useRefreshCookie();
   const cookie = useAtomValue(cookieStatusAtom);
-  const [tab, setTab] = useState<Tab>("account");
+  const [tab, setTab] = useState<Tab>("engine");
   const [toggles, setToggles] = useState(getToggles());
   const [webhook, setWebhook] = useState("");
   const [savingHook, setSavingHook] = useState(false);
@@ -35,6 +45,10 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const [mesioPath, setMesioPath] = useState("");
   const [mesioDefault, setMesioDefault] = useState("");
   const [savingMesio, setSavingMesio] = useState(false);
+  const [timezone, setTimezone] = useState("");
+  const [tzDefault, setTzDefault] = useState("");
+  const [tzEffective, setTzEffective] = useState("");
+  const [savingTz, setSavingTz] = useState(false);
   const [version, setVersion] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
 
@@ -43,6 +57,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     setToggles(getToggles());
     void api.getWebhook().then((r) => setWebhook(r.webhook)).catch(() => {});
     void api.getMesioPath().then((r) => { setMesioPath(r.mesioPath); setMesioDefault(r.default); }).catch(() => {});
+    void api.getTimezone().then((r) => { setTimezone(r.timezone); setTzDefault(r.default); setTzEffective(r.effective); }).catch(() => {});
     void api.getVersion().then((r) => setVersion(r.version)).catch(() => {});
   }, [open]);
 
@@ -94,6 +109,22 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     }
   };
 
+  const saveTimezone = async (): Promise<void> => {
+    setSavingTz(true);
+    try {
+      const r = await api.setTimezone(timezone.trim());
+      setTimezone(r.timezone);
+      setTzDefault(r.default);
+      setTzEffective(r.effective);
+      toast(t("settings.tzSaved"), "success");
+    } catch (e) {
+      const msg = errMessage(e);
+      toast(msg.includes("不是合法") || msg.toLowerCase().includes("valid") ? t("settings.tzInvalid") : t("settings.tzFailed", { msg }), "error");
+    } finally {
+      setSavingTz(false);
+    }
+  };
+
   const doClearCookie = async (): Promise<void> => {
     setConfirmClear(false);
     try {
@@ -123,9 +154,9 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   }
 
   const TABS: Array<{ id: Tab; label: string }> = [
+    { id: "engine", label: t("settings.tabEngine") },
     { id: "account", label: t("settings.tabAccount") },
     { id: "webhook", label: t("settings.tabWebhook") },
-    { id: "engine", label: t("settings.tabEngine") },
     { id: "notif", label: t("settings.tabNotif") },
     { id: "about", label: t("settings.tabAbout") },
   ];
@@ -211,6 +242,27 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
           </div>
           <p className="mt-1 text-[12px] text-muted-soft">
             {t("settings.mesioHint", { path: mesioDefault || "bin/mesio" })}
+          </p>
+
+          <h4 className="text-sm font-semibold text-ink mb-2 mt-5">{t("settings.tzSection")}</h4>
+          <label className="field-label">{t("settings.tzLabel")}</label>
+          <div className="flex gap-2">
+            <select
+              className="input flex-1 text-xs"
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+            >
+              <option value="">{tzDefault ? `${t("common.optional")} (${tzDefault})` : t("common.optional")}</option>
+              {TIMEZONE_OPTIONS.map((tz) => (
+                <option key={tz} value={tz}>{tz}</option>
+              ))}
+            </select>
+            <Button small onClick={() => void saveTimezone()} disabled={savingTz} loading={savingTz}>
+              {t("common.save")}
+            </Button>
+          </div>
+          <p className="mt-1 text-[12px] text-muted-soft">
+            {t("settings.tzHint", { default: tzDefault || "Asia/Shanghai", effective: tzEffective || "…" })}
           </p>
         </div>
       )}
