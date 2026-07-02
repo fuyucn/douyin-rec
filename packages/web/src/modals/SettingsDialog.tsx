@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { useAtomValue } from "jotai";
+import { useAtomValue, useSetAtom } from "jotai";
 import { api } from "../api/client";
-import { cookieStatusAtom } from "../atoms";
+import { cookieStatusAtom, serverTimezoneAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -37,6 +37,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const toast = useToast();
   const refreshCookie = useRefreshCookie();
   const cookie = useAtomValue(cookieStatusAtom);
+  const setServerTimezone = useSetAtom(serverTimezoneAtom);
   const [tab, setTab] = useState<Tab>("engine");
   const [toggles, setToggles] = useState(getToggles());
   const [webhook, setWebhook] = useState("");
@@ -57,7 +58,15 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     setToggles(getToggles());
     void api.getWebhook().then((r) => setWebhook(r.webhook)).catch(() => {});
     void api.getMesioPath().then((r) => { setMesioPath(r.mesioPath); setMesioDefault(r.default); }).catch(() => {});
-    void api.getTimezone().then((r) => { setTimezone(r.timezone); setTzDefault(r.default); setTzEffective(r.effective); }).catch(() => {});
+    void api
+      .getTimezone()
+      .then((r) => {
+        setTimezone(r.timezone);
+        setTzDefault(r.default);
+        setTzEffective(r.effective);
+        setServerTimezone(r.effective || r.default);
+      })
+      .catch(() => {});
     void api.getVersion().then((r) => setVersion(r.version)).catch(() => {});
   }, [open]);
 
@@ -116,6 +125,8 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       setTimezone(r.timezone);
       setTzDefault(r.default);
       setTzEffective(r.effective);
+      // 全局 atom 也要同步,否则 TaskList/TaskDetail/CreateEditTaskDialog 的时区显示要等下次刷新页面才会变。
+      setServerTimezone(r.effective || r.default);
       toast(t("settings.tzSaved"), "success");
     } catch (e) {
       const msg = errMessage(e);
