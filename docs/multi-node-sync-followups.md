@@ -82,6 +82,22 @@
   - building blocks 已在 `post-process`(`mergeSession` / `burn --indir --base` / ass 按 `video_start_time` 分段锚定);缺 orchestrator 层串「winner tenant 多会话逐烧+concat 拼」。
 - **daemon 自动重启已停任务**:任务手动 stop 后 daemon 下 tick 又重启(enabled+在窗口+在播)。正解:手动 stop 置 paused 标志,daemon 不自动重启;仅窗口调度自动启停。(测试时靠 delete 任务规避)
 
+### 想法记录(暂不做,评估过收益/成本)
+
+- **hub 中心化任务管理(centered manage,2026-07-01 讨论)**:在 hub 建任务时勾选目标 slave 节点
+  (如 VPS),任务定义自动下发,不用去各节点单独建;录制结束结果回收(这半边即现有 inventory+选优+pipeline,已存在)。
+  - **方向对**:与现有「master 经 SSH 主动够 slave、slave 零感知」哲学一致。做的话走 Transport 轴加
+    `_apply-tasks` 类子命令(slave 收 JSON upsert 进自己 DB),**desired state 周期对账**而非一次性推送
+    (幂等、自愈,同 reconciler 思路);任务定义放 `config/hub/` 文件(文件即真理,与 hub-store 一致)。
+  - **要想清楚的点**:归属标记(`managedBy: hub`,slave UI 只读化,防两边改回到漂移)、per-node override
+    (如同任务 VPS 用 cookie / docker 匿名,避免弹幕 WS 相撞——已验证的真实约束)、时区一致性
+    (排期窗口 "HH:MM" 由各节点自己的 settings.timezone 解释,下发前须校验或把时区纳入 desired state)。
+  - **结论:现在不做**。规模 = 2 节点 1 生产任务、任务定义月改一两次,省的是每月一两分钟;而实现要好几天
+    并给稳定生产加一层新状态同步。**唯一真实痛点(改漏一边→两边悄悄漂移→选优时段不对齐)用检测就够**:
+    reconciler 周期扫描时顺手比对同 roomSlug 任务的关键字段(排期窗口/画质/engine),不一致→通知告警。
+    几十行、零新增写路径,覆盖漂移风险的 90%。**触发重评的条件**:节点 ≥3、任务增删变频繁、或出现
+    per-node 差异化配置的真需求。
+
 ## 测试备注
 - docker-as-master 经 tailscale sidecar(`network_mode: service:tailscale`)够到 VPS;Tailscale SSH 需把 VPS 打 `tag:rec` + ACL `ssh` accept(tag:rec)避开 check 重认证。详见 [[reference_vps_ssh_keybased]]。
 - 重启 tailscale sidecar 后须连带重启 douyin-rec(共享 netns)。
