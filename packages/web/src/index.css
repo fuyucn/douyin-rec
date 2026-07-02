@@ -450,6 +450,12 @@ table.tasks tbody tr:last-child td {
 }
 
 /* ── Tooltip (Base UI Tooltip) ────────────────────────────────────────── */
+/* z-index 在实际定位元素(Positioner,position:absolute)上设,不是 Popup(position:static,
+   z-index 在其上无效)。得高于表头 sticky th 的 z-index:2,统一用 200(高于 modal 的 100/101,
+   万一将来在弹窗内触发 tooltip 也能盖住)。 */
+.tooltip-positioner {
+  z-index: 200;
+}
 .tooltip-popup {
   background: var(--primary);
   color: var(--primary-fg);
@@ -458,7 +464,6 @@ table.tasks tbody tr:last-child td {
   padding: 6px 10px;
   border-radius: var(--r-btn);
   box-shadow: 0 8px 20px -8px rgba(0, 0, 0, 0.35);
-  z-index: 110;
   max-width: 280px;
 }
 .tooltip-popup[data-starting-style],

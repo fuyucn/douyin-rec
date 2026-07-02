@@ -11,7 +11,7 @@ import { errMessage, usePolling, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { classifyLogLine, LOG_LINE_STYLE } from "../lib/logLevel";
 import { QUALITY_FULL, fmtClock, fmtStartedAt, roomHref, roomId, scheduleText } from "../lib/labels";
-import { localTimeTooltip } from "../lib/tz";
+import { localScheduleTooltip, localTimeTooltip } from "../lib/tz";
 import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
 import { MergePanel } from "../components/MergePanel";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -166,7 +166,23 @@ export function TaskDetail(): ReactNode {
               <dt className="text-muted">{t("tasks.danmu")}</dt>
               <dd className="text-right">{task ? <DanmuBadge task={task} /> : "—"}</dd>
             </div>
-            <Row label={t("tasks.schedule")} mono value={sched ?? "—"} />
+            <Row
+              label={t("tasks.schedule")}
+              mono
+              value={
+                sched && task?.scheduleStart && task?.scheduleEnd ? (
+                  <Tooltip
+                    content={localScheduleTooltip(task.scheduleStart, task.scheduleEnd, serverTz, (window, local) =>
+                      t("tasks.scheduleLocalTooltip", { window, local }),
+                    )}
+                  >
+                    <span>{sched}</span>
+                  </Tooltip>
+                ) : (
+                  sched ?? "—"
+                )
+              }
+            />
             <Row label={t("tasks.giftCookie")} value={task ? (task.useCookie ? t("common.yes") : t("common.no")) : "—"} />
             <Row label={t("tasks.outDir")} mono value={task?.outDir ?? "—"} />
             <Row

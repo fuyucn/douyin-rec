@@ -10,7 +10,7 @@ import { Tooltip } from "../components/Tooltip";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { QUALITY_SHORT, roomId, scheduleText } from "../lib/labels";
-import { fmtTimeInTz, localTimeTooltip } from "../lib/tz";
+import { fmtTimeInTz, localScheduleTooltip, localTimeTooltip } from "../lib/tz";
 import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
@@ -180,7 +180,17 @@ export function TaskList(): ReactNode {
                     </td>
                     <td>
                       {scheduleText(task) ? (
-                        <span className="font-mono text-[13px] text-body">{scheduleText(task)}</span>
+                        <Tooltip
+                          content={
+                            task.scheduleStart && task.scheduleEnd
+                              ? localScheduleTooltip(task.scheduleStart, task.scheduleEnd, serverTz, (window, local) =>
+                                  t("tasks.scheduleLocalTooltip", { window, local }),
+                                )
+                              : undefined
+                          }
+                        >
+                          <span className="font-mono text-[13px] text-body">{scheduleText(task)}</span>
+                        </Tooltip>
                       ) : (
                         <span className="text-muted-soft">—</span>
                       )}

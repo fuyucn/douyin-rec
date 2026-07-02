@@ -14,7 +14,7 @@ export function Tooltip({ content, children }: Props): ReactNode {
     <BaseTooltip.Root>
       <BaseTooltip.Trigger render={<span className="inline-flex" />}>{children}</BaseTooltip.Trigger>
       <BaseTooltip.Portal>
-        <BaseTooltip.Positioner sideOffset={6}>
+        <BaseTooltip.Positioner sideOffset={6} className="tooltip-positioner">
           <BaseTooltip.Popup className="tooltip-popup">{content}</BaseTooltip.Popup>
         </BaseTooltip.Positioner>
       </BaseTooltip.Portal>
