@@ -450,6 +450,19 @@ table.tasks tbody tr:last-child td {
 }
 
 /* ── Tooltip (Base UI Tooltip) ────────────────────────────────────────── */
+/* trigger:hover 用 pointer 不用文本选择光标,底部点状下划线做 hover 提示线索(悬停时加深)。 */
+.tooltip-trigger {
+  cursor: pointer;
+  user-select: none;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: var(--muted-soft);
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.12s ease;
+}
+.tooltip-trigger:hover {
+  text-decoration-color: currentColor;
+}
 /* z-index 在实际定位元素(Positioner,position:absolute)上设,不是 Popup(position:static,
    z-index 在其上无效)。得高于表头 sticky th 的 z-index:2,统一用 200(高于 modal 的 100/101,
    万一将来在弹窗内触发 tooltip 也能盖住)。 */
