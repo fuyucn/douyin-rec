@@ -99,6 +99,13 @@
     per-node 差异化配置的真需求。
 
 ## 测试备注
+- **2026-07-02 时区+双节点+hub 全链路复测通过**(房间 465721793855):docker 12:20:03 / VPS 12:30:53 均按
+  config 时区(Asia/Shanghai)准点启动,12:45 窗口结束双双转 draining;hub 聚类两节点→选优 local 胜
+  (1629s 完整 vs vps2 988s)→pull→merge→烧danmu→stage(needs_manual=stage 模式正常终态)。
+  **过程中揪出并修复**:容器挂载点 `/data`→`/output-data` 重命名(2026-07-01)时漏迁主机侧
+  `docker-data/config/hub.config.json`(dataRoot/cookies/stageDir 仍指 `/data`)→ local tenant 扫不到
+  自己的录像、选优错判 vps2 胜。已迁路径 + 重置 sync job 重跑改判。**教训:改容器内路径时,主机侧
+  数据目录里的 hub.config.json 等引用容器内路径的配置必须同步迁移(它们不在镜像里,rebuild 不会更新)。**
 - docker-as-master 经 tailscale sidecar(`network_mode: service:tailscale`)够到 VPS;Tailscale SSH 需把 VPS 打 `tag:rec` + ACL `ssh` accept(tag:rec)避开 check 重认证。详见 [[reference_vps_ssh_keybased]]。
 - 重启 tailscale sidecar 后须连带重启 douyin-rec(共享 netns)。
 - 测试产物 BV14pT56uE6p(加不加辣 510s,仅自己可见)= pipeline 自动上传验证稿,用后删。
