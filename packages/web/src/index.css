@@ -478,6 +478,7 @@ table.tasks tbody tr:last-child td {
   border-radius: var(--r-btn);
   box-shadow: 0 8px 20px -8px rgba(0, 0, 0, 0.35);
   max-width: 280px;
+  white-space: pre-line; /* 文案里的 \n 渲染成真实换行(纯文本节点默认会被折叠)。 */
 }
 .tooltip-popup[data-starting-style],
 .tooltip-popup[data-ending-style] {

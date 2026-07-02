@@ -42,16 +42,17 @@ export function fmtDateTimeInTz(date: Date, tz: string): string {
 
 /**
  * 本地时间换算的 hover tooltip 文案;serverTz 与浏览器时区相同(或任一取不到)时返回 undefined,
- * 调用方据此决定是否渲染 tooltip。
+ * 调用方据此决定是否渲染 tooltip。label 拿到 (当前生效时区名, 换算成本地时间的文案) 两段,同时
+ * 交代"这是哪个时区"和"换算到我本地是几点"。
  */
 export function localTimeTooltip(
   date: Date,
   serverTz: string,
-  label: (local: string) => string,
+  label: (serverTz: string, local: string) => string,
 ): string | undefined {
   const local = browserTimezone();
   if (!serverTz || !local || serverTz === local) return undefined;
-  return label(`${fmtDateTimeInTz(date, local)} · ${local}`);
+  return label(serverTz, `${fmtDateTimeInTz(date, local)} · ${local}`);
 }
 
 /** tz 在 date 这一刻相对 UTC 的偏移(分钟,东正西负)。 */
@@ -90,7 +91,7 @@ export function localScheduleTooltip(
   start: string,
   end: string,
   serverTz: string,
-  label: (window: string, local: string) => string,
+  label: (serverTz: string, localWindow: string) => string,
 ): string | undefined {
   const local = browserTimezone();
   if (!serverTz || !local || serverTz === local) return undefined;
@@ -102,6 +103,6 @@ export function localScheduleTooltip(
   const endServerMin = eh * 60 + em + (eh * 60 + em <= startServerMin ? 1440 : 0);
   const fmtPart = (p: { time: string; dayDelta: number }): string =>
     p.dayDelta === 0 ? p.time : `${p.time}(${p.dayDelta > 0 ? "+" : ""}${p.dayDelta}d)`;
-  const window = `${fmtPart(toClock(startServerMin + diff))}-${fmtPart(toClock(endServerMin + diff))}`;
-  return label(window, local);
+  const localWindow = `${fmtPart(toClock(startServerMin + diff))}-${fmtPart(toClock(endServerMin + diff))}`;
+  return label(serverTz, `${localWindow} · ${local}`);
 }

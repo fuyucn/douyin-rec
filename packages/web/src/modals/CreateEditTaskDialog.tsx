@@ -246,7 +246,9 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
           />
           <p className="mt-1 text-[12px] text-muted-soft">
             <Tooltip
-              content={localTimeTooltip(new Date(), serverTz, (local) => t("common.localTimeTooltip", { local }))}
+              content={localTimeTooltip(new Date(), serverTz, (tz, local) =>
+                t("common.localTimeTooltip", { serverTz: tz, local }),
+              )}
             >
               <span>{t("dialog.schedHint", { now: fmtTimeInTz(new Date(), serverTz), tz: schedTzLabel(serverTz) })}</span>
             </Tooltip>

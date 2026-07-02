@@ -172,8 +172,8 @@ export function TaskDetail(): ReactNode {
               value={
                 sched && task?.scheduleStart && task?.scheduleEnd ? (
                   <Tooltip
-                    content={localScheduleTooltip(task.scheduleStart, task.scheduleEnd, serverTz, (window, local) =>
-                      t("tasks.scheduleLocalTooltip", { window, local }),
+                    content={localScheduleTooltip(task.scheduleStart, task.scheduleEnd, serverTz, (tz, local) =>
+                      t("tasks.scheduleLocalTooltip", { serverTz: tz, local }),
                     )}
                   >
                     <span>{sched}</span>
@@ -191,8 +191,8 @@ export function TaskDetail(): ReactNode {
               value={
                 task?.runtime?.startedAt != null ? (
                   <Tooltip
-                    content={localTimeTooltip(new Date(task.runtime.startedAt), serverTz, (local) =>
-                      t("common.localTimeTooltip", { local }),
+                    content={localTimeTooltip(new Date(task.runtime.startedAt), serverTz, (tz, local) =>
+                      t("common.localTimeTooltip", { serverTz: tz, local }),
                     )}
                   >
                     <span>{fmtStartedAt(task.runtime.startedAt, serverTz)}</span>

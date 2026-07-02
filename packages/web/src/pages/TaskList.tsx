@@ -93,7 +93,9 @@ export function TaskList(): ReactNode {
             <Tooltip
               content={
                 conn.ok
-                  ? localTimeTooltip(new Date(conn.at), serverTz, (local) => t("common.localTimeTooltip", { local }))
+                  ? localTimeTooltip(new Date(conn.at), serverTz, (tz, local) =>
+                      t("common.localTimeTooltip", { serverTz: tz, local }),
+                    )
                   : undefined
               }
             >
@@ -183,8 +185,8 @@ export function TaskList(): ReactNode {
                         <Tooltip
                           content={
                             task.scheduleStart && task.scheduleEnd
-                              ? localScheduleTooltip(task.scheduleStart, task.scheduleEnd, serverTz, (window, local) =>
-                                  t("tasks.scheduleLocalTooltip", { window, local }),
+                              ? localScheduleTooltip(task.scheduleStart, task.scheduleEnd, serverTz, (tz, local) =>
+                                  t("tasks.scheduleLocalTooltip", { serverTz: tz, local }),
                                 )
                               : undefined
                           }

@@ -52,7 +52,7 @@ export function useT(): (key: string, vars?: Record<string, string | number>) =>
 // zh / en 同构。新增文案两边都加。值里用单花括号 {var} 占位;计数键用 _one/_other + {count}。
 const DICT = {
   zh: {
-    common: { cancel: "取消", confirm: "确定", save: "保存", delete: "删除", refresh: "刷新", close: "关闭", optional: "可选", on: "开", off: "关", yes: "是", no: "否", localTimeTooltip: "你的本地时间：{local}" },
+    common: { cancel: "取消", confirm: "确定", save: "保存", delete: "删除", refresh: "刷新", close: "关闭", optional: "可选", on: "开", off: "关", yes: "是", no: "否", localTimeTooltip: "当前时区：{serverTz}\n你的本地时间：{local}" },
     nav: { title: "抖音录制控制台", login: "扫码登录", paste: "手动粘贴", clear: "清除", notif: "站内提醒设置" },
     cookie: {
       checking: "检查中…", loggedIn: "✅ 已登录", expired: "⚠️ 登录已过期", expiresIn: "⚠️ 剩 {days} 天过期",
@@ -71,7 +71,7 @@ const DICT = {
       pageTitle: "录制任务", pageSubtitle: "多任务直播流录制 · 弹幕 · 定时调度 · 列表每 2 秒自动刷新",
       connected: "已连接 · {time}", connFailed: "连接失败", loading: "加载中…", noneYet: "还没有任务",
       colName: "名称 / 房间", colQuality: "画质", colDanmu: "弹幕", colSchedule: "定时", colStatus: "状态", colAction: "操作",
-      scheduleLocalTooltip: "你的本地时间窗口：{window} · {local}",
+      scheduleLocalTooltip: "当前时区：{serverTz}\n你的本地时间窗口：{local}",
       titleStart: "启动（启用）", titleStop: "停止（停用）", titleDetail: "详情", titleEdit: "编辑",
     },
     status: { stopped: "○ 待命", recording: "● 录制中", waiting: "◌ 等待开播", draining: "⏳ 超窗录制中", error: "✗ 错误", disabled: "○ 已停用" },
@@ -137,7 +137,7 @@ const DICT = {
     },
   },
   en: {
-    common: { cancel: "Cancel", confirm: "Confirm", save: "Save", delete: "Delete", refresh: "Refresh", close: "Close", optional: "optional", on: "On", off: "Off", yes: "Yes", no: "No", localTimeTooltip: "Your local time: {local}" },
+    common: { cancel: "Cancel", confirm: "Confirm", save: "Save", delete: "Delete", refresh: "Refresh", close: "Close", optional: "optional", on: "On", off: "Off", yes: "Yes", no: "No", localTimeTooltip: "Current timezone: {serverTz}\nYour local time: {local}" },
     nav: { title: "Douyin Recorder", login: "QR Login", paste: "Paste Cookie", clear: "Clear", notif: "Notification settings" },
     cookie: {
       checking: "Checking…", loggedIn: "✅ Logged in", expired: "⚠️ Login expired", expiresIn: "⚠️ {days}d left",
@@ -156,7 +156,7 @@ const DICT = {
       pageTitle: "Recording tasks", pageSubtitle: "Multi-task live recording · danmu · scheduling · list auto-refreshes every 2s",
       connected: "Connected · {time}", connFailed: "Disconnected", loading: "Loading…", noneYet: "No tasks yet",
       colName: "Name / Room", colQuality: "Quality", colDanmu: "Danmu", colSchedule: "Schedule", colStatus: "Status", colAction: "Actions",
-      scheduleLocalTooltip: "Your local window: {window} · {local}",
+      scheduleLocalTooltip: "Current timezone: {serverTz}\nYour local window: {local}",
       titleStart: "Start (enable)", titleStop: "Stop (disable)", titleDetail: "Details", titleEdit: "Edit",
     },
     status: { stopped: "○ Idle", recording: "● Recording", waiting: "◌ Waiting", draining: "⏳ Over-window", error: "✗ Error", disabled: "○ Disabled" },
