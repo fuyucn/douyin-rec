@@ -38,6 +38,12 @@ export class RecordingSession {
   /** True while a recording is actively in progress (onLive → onOffline). */
   private live = false;
   /**
+   * 本会话是否**曾经**真正开录过(onLive 触发过一次即 true,之后不清)。
+   * 用于 stop() 收尾时决定发不发 recordEnd:整窗口主播没开播 → 一秒没录 → 收尾静默,
+   * 不推「录制结束(窗口结束收播)」这种误导通知(没录过就没有「录制结束」可言)。
+   */
+  private everLive = false;
+  /**
    * 本次「断流 gap」开始的 epoch ms（onOffline 进入重连时置；重连成功 onLive 时清）。
    * null = 当前不在断流缺口里（首次开播 / 已恢复）。用于:区分「重连」vs「首次开播」,并算中断时长。
    */
@@ -130,6 +136,7 @@ export class RecordingSession {
     const ev: RecorderEvents = {
       onLive: (i) => {
         this.live = true;
+        this.everLive = true;
         this.reconnectFails = 0; // 录制成功恢复 → 清零重连失败计数(退避复位)
         console.log(`[状态] 录制中`); // 真正拿到流、开始录视频
         const resolved = i.anchorName || this.anchor;
@@ -339,7 +346,13 @@ export class RecordingSession {
       }
     } catch { /* sidecar 失败不影响停止 */ }
     // await(带 timeout):stop() 后调用方常立刻 process.exit,fire-and-forget 会丢这条 recordEnd。
-    await this.notifyAwait({ kind: "recordEnd", anchor: this.anchor, room: this.roomUrl, outDir: this.opts.outDir, reason });
+    // 只有本会话**真开录过**才发 recordEnd —— 整窗口没开播的空等会话收尾静默
+    // (否则每晚主播不播,窗口一关照样推「录制结束(窗口结束收播)」,纯属打扰)。
+    if (this.everLive) {
+      await this.notifyAwait({ kind: "recordEnd", anchor: this.anchor, room: this.roomUrl, outDir: this.opts.outDir, reason });
+    } else {
+      log.info(`会话收尾(${reason}):本会话未录制任何内容,跳过 recordEnd 通知`);
+    }
   }
 
   /**

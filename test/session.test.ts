@@ -498,16 +498,44 @@ describe("RecordingSession.drain (窗口结束排空)", () => {
     expect(rec.isLiveCount).toBe(0);          // 没起轮询
   });
 
-  it("窗口结束排空收尾 → recordEnd reason=窗口结束收播", async () => {
+  it("窗口结束排空收尾(录过) → recordEnd reason=窗口结束收播", async () => {
+    vi.useFakeTimers();
     const dir = mkdtempSync(join(tmpdir(), "sess-drain-reason-"));
     const events: NotifyEvent[] = [];
     const notifier: Notifier = { async notify(e) { events.push(e); } };
+    const rec = new DrainMock();              // fireLiveOnStart=true → 本会话真录过
+    rec.isLiveResults = [false, false];       // 排空轮询判定收播
+    const sess = new RecordingSession(rec, { notifier, drainPollSec: 0.01 });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    const p = sess.drain();
+    await vi.runAllTimersAsync();
+    await p;
+    expect(events.some((e) => e.kind === "recordEnd" && e.reason === "窗口结束收播")).toBe(true);
+  });
+
+  it("整窗口没开播(从未 onLive)→ drain 收尾**不发** recordEnd(没录过就没有「录制结束」)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-drain-neverlive-"));
+    const events: NotifyEvent[] = [];
+    const notifier: Notifier = { async notify(e) { events.push(e); } };
     const rec = new DrainMock();
-    rec.fireLiveOnStart = false;              // idle → drain 立即 stop
+    rec.fireLiveOnStart = false;              // 整场没开播
     const sess = new RecordingSession(rec, { notifier, drainPollSec: 0.01 });
     await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
     await sess.drain();
-    expect(events.some((e) => e.kind === "recordEnd" && e.reason === "窗口结束收播")).toBe(true);
+    expect(rec.stopCount).toBe(1);            // 照常收尾
+    expect(events.some((e) => e.kind === "recordEnd")).toBe(false); // 但不打扰
+  });
+
+  it("从未 onLive 的会话手动 stop() → 同样不发 recordEnd", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-stop-neverlive-"));
+    const events: NotifyEvent[] = [];
+    const notifier: Notifier = { async notify(e) { events.push(e); } };
+    const rec = new DrainMock();
+    rec.fireLiveOnStart = false;
+    const sess = new RecordingSession(rec, { notifier });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    await sess.stop();
+    expect(events.some((e) => e.kind === "recordEnd")).toBe(false);
   });
 
   it("直播仍在播 → isLive 连续 2 次 false 才收尾", async () => {
