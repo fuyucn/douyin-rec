@@ -52,6 +52,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const [savingTz, setSavingTz] = useState(false);
   const [version, setVersion] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmTz, setConfirmTz] = useState<{ affected: number } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -118,7 +119,8 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     }
   };
 
-  const saveTimezone = async (): Promise<void> => {
+  /** 实际调用 /api/timezone 落盘 + 同步全局 atom(不含确认逻辑,confirmTz 确认后或无需确认时调用)。 */
+  const doSaveTimezone = async (): Promise<void> => {
     setSavingTz(true);
     try {
       const r = await api.setTimezone(timezone.trim());
@@ -134,6 +136,30 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     } finally {
       setSavingTz(false);
     }
+  };
+
+  /**
+   * 保存前先判断:改的目标时区和当前生效时区不同吗?**任务的 scheduleStart/scheduleEnd 是纯
+   * "HH:MM" 字符串,不带时区,daemon 用当前 settings.timezone 解释它**——改时区不会改这两个字段
+   * 的文本,但会整体平移所有任务真实触发的那一刻(如 Shanghai→LA 平移 15 小时),这几乎肯定不是
+   * 用户想要的(主播真实开播时间没变,只是想修正时区设置本身)。有任务设了排期窗口时先警告 + 二次
+   * 确认,避免改完时区后所有任务在错误的真实时刻悄悄启停。
+   */
+  const saveTimezone = async (): Promise<void> => {
+    const target = timezone.trim() || tzDefault;
+    if (target && target !== tzEffective) {
+      try {
+        const tasks = await api.listTasks();
+        const affected = tasks.filter((tk) => tk.scheduleStart && tk.scheduleEnd).length;
+        if (affected > 0) {
+          setConfirmTz({ affected });
+          return;
+        }
+      } catch {
+        /* 拉任务列表失败不阻塞保存,静默跳过确认 */
+      }
+    }
+    await doSaveTimezone();
   };
 
   const doClearCookie = async (): Promise<void> => {
@@ -312,6 +338,19 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
         destructive
         onConfirm={() => void doClearCookie()}
         onCancel={() => setConfirmClear(false)}
+      />
+
+      <ConfirmDialog
+        open={confirmTz !== null}
+        title={t("settings.tzChangeConfirmTitle")}
+        message={confirmTz ? t("settings.tzChangeConfirmMessage", { count: confirmTz.affected }) : undefined}
+        confirmLabel={t("settings.tzChangeConfirmButton")}
+        destructive
+        onConfirm={() => {
+          setConfirmTz(null);
+          void doSaveTimezone();
+        }}
+        onCancel={() => setConfirmTz(null)}
       />
     </Dialog>
   );
