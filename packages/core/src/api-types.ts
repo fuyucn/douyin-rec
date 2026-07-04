@@ -44,6 +44,15 @@ export interface HubJobEventDTO {
   at: number;
 }
 
+/** 细粒度子步骤事件(start/done),驱动 fork/join 流程图。 */
+export interface HubJobStepDTO {
+  /** select / pull / merge / burn_danmu / burn_livechat / upload_plain / append_danmu / append_livechat。 */
+  step: string;
+  /** start | done。 */
+  phase: string;
+  at: number;
+}
+
 /** 一个 hub 任务的运行视图(GET /api/hub/jobs)。展示当前 pipeline step / 进度 / 运行时间 / ETA。 */
 export interface HubJobDTO {
   /** `{platform}:{roomSlug}:{date}`。 */
@@ -60,6 +69,8 @@ export interface HubJobDTO {
   startedAt: number | null;
   /** 状态转换时间线(升序)——每步起点 = 事件时刻,步骤耗时 = 相邻差。 */
   events: HubJobEventDTO[];
+  /** 细粒度子步骤 start/done 事件(升序);空=旧 run,前端回落粗粒度。 */
+  steps: HubJobStepDTO[];
   /** 当前步已运行秒数(终态 = null)。 */
   currentStepSec: number | null;
   /** 当前步预计剩余秒数(粗估,按历史同步骤速率;终态/无依据 = null)。 */

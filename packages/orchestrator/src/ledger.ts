@@ -19,6 +19,14 @@ export interface CandidateRow {
 /** 一次状态转换事件(时间线复盘:每步起点 = 该事件时刻,步骤耗时 = 相邻事件差)。 */
 export interface JobEvent { streamKey: string; state: JobState; at: number; }
 
+/** pipeline 细粒度子步骤规范名(流程图节点)。upload/append 仅 upload 模式有。 */
+export type StepName =
+  | "select" | "pull" | "merge"
+  | "burn_danmu" | "burn_livechat"
+  | "upload_plain" | "append_danmu" | "append_livechat";
+/** 子步骤事件:start/done 配对(能算每步耗时 + 判断当前在跑哪步;异步并行的两轨各有各的起止)。 */
+export interface StepEvent { streamKey: string; step: StepName; phase: "start" | "done"; at: number; }
+
 export class SyncLedger {
   private db: DatabaseSync;
   constructor(dbPath: string) {
@@ -40,9 +48,24 @@ export class SyncLedger {
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_job_events(
       streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_job_events_key ON sync_job_events(streamKey, at)");
+    // 细粒度子步骤流(start/done):驱动前端「真·分叉双轨」流程图(合并后 烧录轨‖上传轨,再 join)。
+    // 与粗粒度 sync_job_events 分表:events 驱动状态徽标/ETA,steps 驱动流程图。
+    this.db.exec(`CREATE TABLE IF NOT EXISTS sync_job_steps(
+      streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL)`);
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_job_steps_key ON sync_job_steps(streamKey, at)");
   }
   private logEvent(streamKey: string, state: JobState, at: number): void {
     this.db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(streamKey, state, at);
+  }
+  /** 记一个子步骤 start/done(pipeline 调用;流程图用)。 */
+  logStep(streamKey: string, step: StepName, phase: "start" | "done"): void {
+    this.db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at) VALUES(?,?,?,?)")
+      .run(streamKey, step, phase, this.now());
+  }
+  /** 某场的子步骤事件流(升序)。 */
+  getSteps(streamKey: string): StepEvent[] {
+    return this.db.prepare("SELECT streamKey,step,phase,at FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
+      .all(streamKey) as unknown as StepEvent[];
   }
   /** 上次发出的时间戳(见 now 的单调性保证)。 */
   private lastNow = 0;

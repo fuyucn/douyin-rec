@@ -1,5 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Check, FileText, Loader2, Minus, X } from "lucide-react";
+import { ReactFlow, Background, Handle, Position, type Node, type Edge } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
 import { api, type HubJobDTO } from "../api/client";
 import { IconButton } from "./Button";
 import { Dialog } from "./Dialog";
@@ -39,58 +41,7 @@ export function runDate(streamKey: string): string {
   return parts.slice(2).join(":") || streamKey;
 }
 
-/** pipeline 的规范线性步骤(节点顺序;终态另算)。 */
-const FLOW_STEPS: Array<{ key: string; label: string }> = [
-  { key: "pending", label: "排队" },
-  { key: "syncing", label: "拉取" },
-  { key: "merging", label: "合并/烧录" },
-  { key: "uploading", label: "上传" },
-];
-
 type NodeStatus = "done" | "active" | "skipped" | "todo" | "failed";
-
-interface FlowNode {
-  label: string;
-  status: NodeStatus;
-  sec: number | null;
-}
-
-/** 从 run 的 events 推导每个流程节点的状态 + 耗时,末尾补一个终态节点。 */
-function buildFlow(job: HubJobDTO): FlowNode[] {
-  const seen = new Set(job.events.map((e) => e.state));
-  const last = job.events[job.events.length - 1];
-  const lastState = last?.state;
-  const terminal = lastState ? TERMINAL.has(lastState) : false;
-  const successTerminal = lastState === "done" || lastState === "needs_manual";
-  // 某状态耗时 = 下一事件时刻 − 本事件时刻;末个非终态用 currentStepSec。
-  const durOf = (state: string): number | null => {
-    const idx = job.events.findIndex((e) => e.state === state);
-    if (idx < 0) return null;
-    const next = job.events[idx + 1];
-    return next ? Math.round((next.at - job.events[idx].at) / 1000) : job.currentStepSec;
-  };
-
-  const nodes: FlowNode[] = FLOW_STEPS.map((s) => {
-    if (seen.has(s.key)) {
-      const active = s.key === lastState && !terminal;
-      return { label: s.label, status: active ? "active" : "done", sec: durOf(s.key) };
-    }
-    // 没走到这步:成功终态(如 stage 模式跳过上传)= 跳过;否则 = 待执行/未到达。
-    return { label: s.label, status: successTerminal ? "skipped" : "todo", sec: null };
-  });
-
-  // 终态节点。
-  if (terminal) {
-    nodes.push({
-      label: STEP_LABEL[lastState!] ?? lastState!,
-      status: lastState === "failed" ? "failed" : "done",
-      sec: null,
-    });
-  } else {
-    nodes.push({ label: "完成", status: "todo", sec: null });
-  }
-  return nodes;
-}
 
 const NODE_COLOR: Record<NodeStatus, { bg: string; fg: string; ring: string }> = {
   done: { bg: "var(--success)", fg: "#fff", ring: "var(--success)" },
@@ -100,52 +51,129 @@ const NODE_COLOR: Record<NodeStatus, { bg: string; fg: string; ring: string }> =
   todo: { bg: "transparent", fg: "var(--muted-soft)", ring: "var(--hairline)" },
 };
 
-/** 单条 run 的横向流程图:固定节点(排队→拉取→合并/烧录→上传→完成),按 events 上色 + 每步耗时。 */
-function PipelineFlow({ job }: { job: HubJobDTO }): ReactNode {
-  if (job.events.length === 0) return <span className="text-muted-soft text-xs">（无流程记录;旧版本任务）</span>;
-  const nodes = buildFlow(job);
+/** 规范 pipeline 节点固定布局(fork/join):merge 后分「烧录轨(上)/上传轨(下)」,再 join 到 append。 */
+const STEP_DEFS: Array<{ key: string; label: string; x: number; y: number }> = [
+  { key: "select", label: "选优", x: 0, y: 70 },
+  { key: "pull", label: "拉取", x: 150, y: 70 },
+  { key: "merge", label: "合并 plain", x: 300, y: 70 },
+  { key: "burn_danmu", label: "烧 danmu", x: 470, y: 10 },
+  { key: "burn_livechat", label: "烧 livechat", x: 640, y: 10 },
+  { key: "upload_plain", label: "传 plain P1", x: 470, y: 130 },
+  { key: "append_danmu", label: "追 danmu P2", x: 810, y: 70 },
+  { key: "append_livechat", label: "追 livechat P3", x: 980, y: 70 },
+];
+const TERM = { key: "__term__", label: "完成", x: 1150, y: 70 };
+const FLOW_EDGES: Array<[string, string]> = [
+  ["select", "pull"], ["pull", "merge"],
+  ["merge", "burn_danmu"], ["merge", "upload_plain"],
+  ["burn_danmu", "burn_livechat"],
+  ["burn_livechat", "append_danmu"], ["upload_plain", "append_danmu"],
+  ["append_danmu", "append_livechat"], ["append_livechat", "__term__"],
+];
+
+/** 从 job.steps(start/done 配对)推导每个子步骤的状态 + 耗时。 */
+function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec: number | null }> {
+  const pair = new Map<string, { start?: number; done?: number }>();
+  for (const s of job.steps) {
+    const e = pair.get(s.step) ?? {};
+    if (s.phase === "start") e.start = s.at;
+    else e.done = s.at;
+    pair.set(s.step, e);
+  }
+  const success = job.state === "done" || job.state === "needs_manual";
+  const now = Date.now();
+  const out: Record<string, { status: NodeStatus; sec: number | null }> = {};
+  for (const def of STEP_DEFS) {
+    const e = pair.get(def.key);
+    if (e?.done != null) out[def.key] = { status: "done", sec: e.start != null ? Math.round((e.done - e.start) / 1000) : null };
+    else if (e?.start != null) out[def.key] = { status: "active", sec: Math.round((now - e.start) / 1000) };
+    else out[def.key] = { status: success ? "skipped" : "todo", sec: null };
+  }
+  return out;
+}
+
+/** 自定义节点:状态圆 + 标签 + 耗时。 */
+function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: number | null } }): ReactNode {
+  const c = NODE_COLOR[data.status];
   return (
-    <div className="flex items-start overflow-x-auto pb-1">
-      {nodes.map((n, i) => {
-        const c = NODE_COLOR[n.status];
-        const next = nodes[i + 1];
-        // 连接线状态:流入进行中节点 → 流动虚线动画;流入已完成/失败 → 实色;否则灰。
-        const connIntoActive = next?.status === "active";
-        const connReached = next && ["done", "active", "failed"].includes(next.status);
-        return (
-          <div key={i} className="flex items-start shrink-0">
-            {/* 节点:圆形状态图标 + 下方标签 + 耗时(进行中加脉冲光环) */}
-            <div className="flex flex-col items-center gap-1 w-[68px]">
-              <span
-                className={`inline-flex items-center justify-center rounded-full w-6 h-6${n.status === "active" ? " flow-node-active" : ""}`}
-                style={{ background: c.bg, color: c.fg, border: `1.5px solid ${c.ring}` }}
-              >
-                {n.status === "done" && <Check className="w-3.5 h-3.5" />}
-                {n.status === "active" && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                {n.status === "failed" && <X className="w-3.5 h-3.5" />}
-                {n.status === "skipped" && <Minus className="w-3.5 h-3.5" />}
-                {n.status === "todo" && <span className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--muted-soft)" }} />}
-              </span>
-              <span
-                className="text-[11px] text-center leading-tight"
-                style={{ color: n.status === "todo" || n.status === "skipped" ? "var(--muted-soft)" : "var(--ink)", fontWeight: n.status === "active" ? 600 : 400 }}
-              >
-                {n.label}
-              </span>
-              <span className="text-[10px] font-mono" style={{ color: n.status === "active" ? "var(--ink)" : "var(--muted-soft)" }}>
-                {n.status === "skipped" ? "跳过" : n.status === "todo" ? "" : humanSec(n.sec)}
-              </span>
-            </div>
-            {/* 连接线(最后一个节点后不画) */}
-            {i < nodes.length - 1 && (
-              <span
-                className={`mt-3 h-[2px] w-5 sm:w-8${connIntoActive ? " flow-connector-active" : ""}`}
-                style={connIntoActive ? undefined : { background: connReached ? "var(--success)" : "var(--hairline)" }}
-              />
-            )}
-          </div>
-        );
-      })}
+    <div className="flex flex-col items-center gap-1" style={{ width: 92 }}>
+      <Handle type="target" position={Position.Left} style={{ opacity: 0, top: 11 }} />
+      <span
+        className={`inline-flex items-center justify-center rounded-full w-6 h-6${data.status === "active" ? " flow-node-active" : ""}`}
+        style={{ background: c.bg, color: c.fg, border: `1.5px solid ${c.ring}` }}
+      >
+        {data.status === "done" && <Check className="w-3.5 h-3.5" />}
+        {data.status === "active" && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+        {data.status === "failed" && <X className="w-3.5 h-3.5" />}
+        {data.status === "skipped" && <Minus className="w-3.5 h-3.5" />}
+        {data.status === "todo" && <span className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--muted-soft)" }} />}
+      </span>
+      <span
+        className="text-[11px] text-center leading-tight"
+        style={{ color: data.status === "todo" || data.status === "skipped" ? "var(--muted-soft)" : "var(--ink)", fontWeight: data.status === "active" ? 600 : 400 }}
+      >
+        {data.label}
+      </span>
+      <span className="text-[10px] font-mono" style={{ color: data.status === "active" ? "var(--ink)" : "var(--muted-soft)" }}>
+        {data.status === "skipped" ? "跳过" : data.status === "todo" ? "" : humanSec(data.sec)}
+      </span>
+      <Handle type="source" position={Position.Right} style={{ opacity: 0, top: 11 }} />
+    </div>
+  );
+}
+
+const NODE_TYPES = { step: StepNode };
+
+/** 单条 run 的 fork/join 流程图(React Flow):固定布局,节点按 job.steps 上色,active 边动画。 */
+function PipelineFlow({ job }: { job: HubJobDTO }): ReactNode {
+  // 旧版本 run 无细粒度 steps → 回落一行粗粒度状态文字(不画图)。
+  if (job.steps.length === 0) {
+    const line = job.events.map((e) => STEP_LABEL[e.state] ?? e.state).join(" → ");
+    return <span className="text-muted-soft text-xs">{line || "（无流程记录;旧版本任务）"}</span>;
+  }
+  const st = stepStatuses(job);
+  const termStatus: NodeStatus =
+    job.state === "failed" ? "failed" : job.state === "done" ? "done" : job.state === "needs_manual" ? "done" : "todo";
+  const termLabel = job.state === "needs_manual" ? "待人工" : job.state === "failed" ? "失败" : "完成";
+  const statusOf = (key: string): NodeStatus => (key === "__term__" ? termStatus : st[key].status);
+
+  const nodes: Node[] = [
+    ...STEP_DEFS.map((d) => ({
+      id: d.key, type: "step", position: { x: d.x, y: d.y },
+      data: { label: d.label, status: st[d.key].status, sec: st[d.key].sec },
+    })),
+    { id: TERM.key, type: "step", position: { x: TERM.x, y: TERM.y }, data: { label: termLabel, status: termStatus, sec: null } },
+  ];
+  const edges: Edge[] = FLOW_EDGES.map(([s, t]) => {
+    const ts = statusOf(t);
+    const reached = ts === "done" || ts === "active" || ts === "failed";
+    return {
+      id: `${s}-${t}`, source: s, target: t,
+      animated: ts === "active", // 流入进行中节点 → React Flow 内置流动动画
+      style: { stroke: reached ? "var(--success)" : "var(--hairline)", strokeWidth: 1.5 },
+    };
+  });
+
+  return (
+    <div style={{ height: 190 }} className="w-full">
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={NODE_TYPES}
+        fitView
+        fitViewOptions={{ padding: 0.15 }}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        elementsSelectable={false}
+        zoomOnScroll={false}
+        zoomOnPinch={false}
+        zoomOnDoubleClick={false}
+        panOnDrag={false}
+        preventScrolling={false}
+        proOptions={{ hideAttribution: true }}
+      >
+        <Background gap={16} color="var(--hairline)" />
+      </ReactFlow>
     </div>
   );
 }

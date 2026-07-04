@@ -13,6 +13,7 @@ function makeSyncDb(): { dbPath: string; db: DatabaseSync } {
   db.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
     winnerTenant TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
   db.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
+  db.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL)`);
   db.exec(`CREATE TABLE sync_candidates(streamKey TEXT NOT NULL, tenantId TEXT NOT NULL,
     coverage REAL NOT NULL, durationSec REAL NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER NOT NULL,
     totalGapSec REAL NOT NULL, isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
@@ -34,6 +35,17 @@ function seedJob(db: DatabaseSync, key: string, states: Array<[string, number]>,
 describe("listHubJobs", () => {
   it("sync db 不存在(hub 未开过)→ 空结果不炸", () => {
     expect(listHubJobs("/nonexistent/x-sync.db")).toEqual({ jobs: [], total: 0 });
+  });
+
+  it("steps 子步骤事件透出(供 fork/join 流程图);无 steps 时为空数组", () => {
+    const { dbPath, db } = makeSyncDb();
+    seedJob(db, "douyin:9:2026-07-05", [["merging", T0 + 5000]], 100);
+    for (const [step, phase, at] of [["merge", "start", T0 + 1000], ["merge", "done", T0 + 2000], ["burn_danmu", "start", T0 + 2000]] as const) {
+      db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at) VALUES(?,?,?,?)").run("douyin:9:2026-07-05", step, phase, at);
+    }
+    db.close();
+    const { jobs } = listHubJobs(dbPath, { now: T0 + 6000 });
+    expect(jobs[0].steps.map((s) => `${s.step}:${s.phase}`)).toEqual(["merge:start", "merge:done", "burn_danmu:start"]);
   });
 
   it("时间线/当前步时长/ETA:历史 done job 的步骤速率喂给进行中 job", () => {

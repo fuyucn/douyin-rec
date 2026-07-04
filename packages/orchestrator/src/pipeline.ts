@@ -128,7 +128,9 @@ async function runPipelineInner(
   const candidates = { ...b, members: presentMembers };
 
   // Select the best recording across all (present) nodes
+  ledger.logStep(streamKey, "select", "start");
   const selection = selectWinner(candidates, cfg.cleanMaxGapSec);
+  ledger.logStep(streamKey, "select", "done");
 
   if (!selection.winner) {
     jlog(`选优失败:${presentMembers.length ? "no winner" : "无可用成员(文件均缺失)"}`);
@@ -170,7 +172,9 @@ async function runPipelineInner(
   ];
   jlog(`pull 开始: ${filesToPull.length} 个文件 ← ${winner.tenantId}`);
   const tPull = Date.now();
+  ledger.logStep(streamKey, "pull", "start");
   await transport.pull(filesToPull, stageSub);
+  ledger.logStep(streamKey, "pull", "done");
   jlog(`pull 完成(${Math.round((Date.now() - tPull) / 1000)}s)`);
 
   // Merge and burn from the stageSub directory
@@ -182,13 +186,17 @@ async function runPipelineInner(
   const livechatMp4 = path.join(stageSub, dateName + "_livechat.mp4");
   const xmlArg = winner.rec.xmlPath ? path.join(stageSub, path.basename(winner.rec.xmlPath)) : "";
 
+  ledger.logStep(streamKey, "merge", "start");
   await sh(`node dist/douyin-rec.mjs merge --in ${stageSub} --base ${winner.rec.sessionBase}`);
+  ledger.logStep(streamKey, "merge", "done");
 
   // 穿插上传:upload 模式下 merge 完 plain 即**后台 fire P1 上传**(网络),与随后的烧录(CPU)并行,
   // 省总墙钟。stage 模式不传(bvPromise=null)。先 .then 收成 {bv}|{err},即便后续烧录抛错也不留
-  // unhandled rejection(P1 可能已建稿 → 失败按 retry 处理,可接受)。
+  // unhandled rejection(P1 可能已建稿 → 失败按 retry 处理,可接受)。upload_plain 的 start/done
+  // 各自打点(与烧录轨并行,流程图分两轨)。
   const willUpload = cfg.uploadMode === "upload";
   if (willUpload) jlog(`P1(plain)后台上传启动(与烧录并行): ${plain}`);
+  if (willUpload) ledger.logStep(streamKey, "upload_plain", "start");
   const bvPromise: Promise<{ bv: string } | { err: Error }> | null = willUpload
     ? (ledger.setState(streamKey, "uploading"),
        uploadPlain({
@@ -196,12 +204,21 @@ async function runPipelineInner(
          tag: cfg.uploadMeta.tag, tid: cfg.uploadMeta.tid,
          public: cfg.uploadPrivate === false, // private=false → 公开;默认(true)→ 仅自己可见
          desc: cfg.uploadMeta.desc,
-       }).then((bv) => ({ bv }), (err: unknown) => ({ err: err as Error })))
+       }).then((bv) => { ledger.logStep(streamKey, "upload_plain", "done"); return { bv }; },
+              (err: unknown) => ({ err: err as Error })))
     : null;
 
   // 步骤开关:burnDanmu/burnLivechat 默认开,false 则跳过该产出。此刻 P1 在后台上传(若 upload 模式)。
-  if (burnDanmu) await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style danmu --gift-value 0.9`);
-  if (burnLivechat) await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style livechat --gift-value 0.9`);
+  if (burnDanmu) {
+    ledger.logStep(streamKey, "burn_danmu", "start");
+    await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style danmu --gift-value 0.9`);
+    ledger.logStep(streamKey, "burn_danmu", "done");
+  }
+  if (burnLivechat) {
+    ledger.logStep(streamKey, "burn_livechat", "start");
+    await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style livechat --gift-value 0.9`);
+    ledger.logStep(streamKey, "burn_livechat", "done");
+  }
 
   // 把弹幕 xml 复制一份作为 **plain xml 产物**(与 plain mp4 同名 {dateName}.xml),作为备份留在 stage。
   // 它是产物、不是「拉来的源」——所以 stageSourceAfterMerge 删源时不动它(即便 includeXmlAss);
@@ -257,11 +274,17 @@ async function runPipelineInner(
   const bv = r.bv;
   jlog(`P1 上传完成: ${bv}`);
   const isPublic = cfg.uploadPrivate === false;
-  for (const files of [danmuParts, livechatParts]) {
-    if (files.length === 0) continue; // 关掉的步骤 → 空组,不传
-    jlog(`append 开始: ${files.map((f) => path.basename(f)).join(", ")}`);
+  const appendGroups: Array<{ step: "append_danmu" | "append_livechat"; files: string[] }> = [
+    { step: "append_danmu", files: danmuParts },
+    { step: "append_livechat", files: livechatParts },
+  ];
+  for (const g of appendGroups) {
+    if (g.files.length === 0) continue; // 关掉的步骤 → 空组,不传
+    jlog(`append 开始: ${g.files.map((f) => path.basename(f)).join(", ")}`);
     const tApp = Date.now();
-    await appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic });
+    ledger.logStep(streamKey, g.step, "start");
+    await appendGroup({ bv, files: g.files, cookies: cfg.cookies, public: isPublic });
+    ledger.logStep(streamKey, g.step, "done");
     jlog(`append 完成(${Math.round((Date.now() - tApp) / 1000)}s)`);
   }
 

@@ -14,6 +14,8 @@ import { join } from "node:path";
 import { rootHubConfig, rootStageDir } from "./paths.js";
 
 export interface HubJobEvent { state: string; at: number; }
+/** 细粒度子步骤事件(start/done)—— 驱动前端 fork/join 流程图。 */
+export interface HubJobStep { step: string; phase: string; at: number; }
 export interface HubJobView {
   streamKey: string;
   state: string;
@@ -26,6 +28,8 @@ export interface HubJobView {
   startedAt: number | null;
   /** 状态转换时间线(升序)。 */
   events: HubJobEvent[];
+  /** 子步骤 start/done 事件(升序);空=旧版本 run(前端回落粗粒度)。 */
+  steps: HubJobStep[];
   /** 当前步已运行秒数(终态 = null)。 */
   currentStepSec: number | null;
   /** 当前步预计剩余秒数(粗估;终态/没依据 = null)。 */
@@ -139,6 +143,11 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         events = db.prepare("SELECT state, at FROM sync_job_events WHERE streamKey=? ORDER BY at ASC, rowid ASC")
           .all(j.streamKey) as unknown as HubJobEvent[];
       } catch { /* 旧库无 events 表 → 空时间线 */ }
+      let steps: HubJobStep[] = [];
+      try {
+        steps = db.prepare("SELECT step, phase, at FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
+          .all(j.streamKey) as unknown as HubJobStep[];
+      } catch { /* 旧库无 steps 表 → 空(前端回落粗粒度) */ }
       const videoDurationSec = (db.prepare("SELECT durationSec FROM sync_candidates WHERE streamKey=? AND isWinner=1")
         .get(j.streamKey) as unknown as { durationSec: number } | undefined)?.durationSec ?? null;
       const terminal = TERMINAL.has(j.state);
@@ -155,6 +164,7 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         fails: Number(j.fails ?? 0), updatedAt: Number(j.updatedAt),
         startedAt: events.length ? Number(events[0].at) : null,
         events: events.map((e) => ({ state: e.state, at: Number(e.at) })),
+        steps: steps.map((s) => ({ step: s.step, phase: s.phase, at: Number(s.at) })),
         currentStepSec, etaSec, videoDurationSec,
         hasLog: existsSync(jobLogPath(j.streamKey, stageDir)),
       };
