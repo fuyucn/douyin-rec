@@ -71,6 +71,11 @@
   enabled=false 本身就是「暂停」。(注:带排期的任务停了,未来窗口也不录,直到重新启动 —— 符合直觉。)
 
 ### 待做
+- **⚠️ pipeline 重试对上传不幂等(2026-07-05 fulltest 实测暴露,重要)**:upload 模式下若 P1 已上传成稿(拿到 BV)、
+  但 P2/P3 append 失败 → pipeline 抛错 → reconciler markFailed → 重试**从头重跑整条**(重新 merge/burn/**又传一个新
+  P1 稿**)→ **B 站上留下重复/残稿**(实测第一次 BV1xAMM6QEAu 只有 plain 的残稿 + 重试 BV1sAMM6QErq 完整稿)。
+  正解:P1 上传成功后**立即把 BV 持久化进 ledger**(不等 markDone);重试时若该场已有 BV → 跳过 select/pull/merge/
+  burn/uploadP1,直接从 append 续传(biliup append 本就幂等可续)。需 ledger 早写 bv + pipeline 入口检测已有 bv 分支。
 - **per-平台 cookie**:cookie 模型目前「抖音单一」(全局 cookie = 抖音账号)。bilibili getStream **支持传 cookie**
   (登录态取大会员/4K/杜比/HDR 等更高 tier),但没 per-平台 cookie 存储 → bilibili 高 tier(超 1080p 原画)目前拿不到。
   原画 1080p 匿名够用。要覆盖 4K/大会员档需做按平台分别存 cookie。
