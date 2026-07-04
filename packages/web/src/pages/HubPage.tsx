@@ -6,6 +6,7 @@ import { api, type HubRuleDTO, type HubJobDTO } from "../api/client";
 import { hubEnabledAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { Switch } from "../components/Switch";
 import { LatestRunBadge } from "../components/HubJobs";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
@@ -144,14 +145,16 @@ export function HubPage(): ReactNode {
                 rules.map((r) => (
                   <tr key={r.key}>
                     <td>
-                      {r.anchorName ? (
-                        <>
-                          <div className="font-medium text-ink">{r.anchorName}</div>
-                          <div className="font-mono text-xs text-muted mt-0.5 break-all">{roomId(r.room)}</div>
-                        </>
-                      ) : (
-                        <div className="font-mono text-[13px] font-medium text-ink break-all">{roomId(r.room)}</div>
-                      )}
+                      <Link to={`/hub/${encodeURIComponent(r.key)}`} className="hover:opacity-70">
+                        {r.anchorName ? (
+                          <>
+                            <div className="font-medium text-ink">{r.anchorName}</div>
+                            <div className="font-mono text-xs text-muted mt-0.5 break-all">{roomId(r.room)}</div>
+                          </>
+                        ) : (
+                          <div className="font-mono text-[13px] font-medium text-ink break-all">{roomId(r.room)}</div>
+                        )}
+                      </Link>
                     </td>
                     <td>
                       <span className="font-mono text-[13px] text-body">{summarize(r)}</span>
@@ -178,22 +181,18 @@ export function HubPage(): ReactNode {
                       })()}
                     </td>
                     <td>
-                      <button
-                        type="button"
-                        className="badge"
-                        style={{
-                          background: r.enabled ? "var(--success-soft, var(--surface-soft))" : "var(--surface-soft)",
-                          color: r.enabled ? "var(--success)" : "var(--muted)",
-                          cursor: "pointer",
-                        }}
-                        onClick={() => void toggle(r)}
-                        title="点击切换启用/暂停"
-                      >
-                        {r.enabled ? "启用中" : "已暂停"}
-                      </button>
+                      {/* 只读状态显示(不再点击切换,避免误操作)。 */}
+                      <span className="inline-flex items-center gap-1.5 text-[13px]">
+                        <span className="dot" style={{ background: r.enabled ? "var(--success)" : "var(--muted-soft)" }} />
+                        <span style={{ color: r.enabled ? "var(--success)" : "var(--muted)" }}>
+                          {r.enabled ? "启用中" : "已暂停"}
+                        </span>
+                      </span>
                     </td>
                     <td className="text-right whitespace-nowrap">
-                      <div className="inline-flex items-center gap-1.5 justify-end">
+                      <div className="inline-flex items-center gap-2.5 justify-end">
+                        {/* 启用/暂停:专门的开关控件(刻意操作,不与状态显示混淆)。 */}
+                        <Switch checked={r.enabled} onCheckedChange={() => void toggle(r)} name={`hub-${r.key}`} />
                         <IconButton title="编辑" onClick={() => openEdit(r)}>
                           <Pencil className="w-4 h-4" />
                         </IconButton>
