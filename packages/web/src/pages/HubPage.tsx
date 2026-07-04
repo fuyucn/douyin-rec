@@ -1,11 +1,11 @@
-import { Network, Pencil, Plus, Radio, Trash2 } from "lucide-react";
+import { ListChecks, Network, Pencil, Plus, Radio, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useAtomValue } from "jotai";
-import { api, type HubRuleDTO } from "../api/client";
+import { api, type HubRuleDTO, type HubJobDTO } from "../api/client";
 import { hubEnabledAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { HubJobs } from "../components/HubJobs";
+import { HubTaskDetail, LatestRunBadge } from "../components/HubJobs";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
@@ -25,10 +25,13 @@ export function HubPage(): ReactNode {
   const hubEnabled = useAtomValue(hubEnabledAtom);
   const toast = useToast();
   const [rules, setRules] = useState<HubRuleDTO[]>([]);
+  const [jobs, setJobs] = useState<HubJobDTO[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<HubRuleDTO | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  /** 打开「运行记录」详情的规则(null=关闭)。 */
+  const [detailRule, setDetailRule] = useState<HubRuleDTO | null>(null);
 
   const refresh = async (): Promise<void> => {
     try {
@@ -38,8 +41,20 @@ export function HubPage(): ReactNode {
     } finally {
       setLoaded(true);
     }
+    // hub 任务(运行态)单独拉,失败静默(不阻塞规则展示)。
+    try {
+      setJobs((await api.listHubJobs()).jobs);
+    } catch {
+      /* 忽略 */
+    }
   };
-  usePolling(() => void refresh(), 4000);
+  usePolling(() => void refresh(), 3000);
+
+  /** 某规则(房间)的历次 run,新→旧:streamKey 前缀 `{platform}:{roomSlug}:` 匹配。 */
+  const runsOf = (r: HubRuleDTO): HubJobDTO[] => {
+    const prefix = `${r.platform}:${r.roomSlug}:`;
+    return jobs.filter((j) => j.streamKey.startsWith(prefix));
+  };
 
   const openCreate = (): void => {
     setEditing(null);
@@ -97,8 +112,6 @@ export function HubPage(): ReactNode {
         </Button>
       </div>
 
-      <HubJobs />
-
       <section className="card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="tasks">
@@ -106,6 +119,7 @@ export function HubPage(): ReactNode {
               <tr>
                 <th>直播间</th>
                 <th>产物 / 上传</th>
+                <th>最近运行</th>
                 <th>状态</th>
                 <th className="text-right">操作</th>
               </tr>
@@ -113,12 +127,12 @@ export function HubPage(): ReactNode {
             <tbody>
               {!loaded && (
                 <tr>
-                  <td colSpan={4} className="text-center text-muted py-12">加载中…</td>
+                  <td colSpan={5} className="text-center text-muted py-12">加载中…</td>
                 </tr>
               )}
               {loaded && rules.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="py-16">
+                  <td colSpan={5} className="py-16">
                     <div className="flex flex-col items-center gap-4 text-muted">
                       <Radio className="w-10 h-10" style={{ color: "var(--muted-soft)" }} />
                       <div className="text-sm font-medium text-ink">还没有 Hub 规则</div>
@@ -142,6 +156,27 @@ export function HubPage(): ReactNode {
                     </td>
                     <td>
                       <span className="font-mono text-[13px] text-body">{summarize(r)}</span>
+                    </td>
+                    <td>
+                      {(() => {
+                        const runs = runsOf(r);
+                        return (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1.5 hover:opacity-70"
+                            onClick={() => setDetailRule(r)}
+                            title="查看运行记录"
+                          >
+                            <LatestRunBadge run={runs[0]} />
+                            {runs.length > 0 && (
+                              <span className="inline-flex items-center gap-0.5 text-[11px] text-muted-soft">
+                                <ListChecks className="w-3 h-3" />
+                                {runs.length}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })()}
                     </td>
                     <td>
                       <button
@@ -180,6 +215,13 @@ export function HubPage(): ReactNode {
         onClose={() => setDialogOpen(false)}
         rule={editing}
         onSaved={() => void refresh()}
+      />
+
+      <HubTaskDetail
+        open={detailRule !== null}
+        onClose={() => setDetailRule(null)}
+        title={detailRule ? (detailRule.anchorName ?? roomId(detailRule.room)) : ""}
+        runs={detailRule ? runsOf(detailRule) : []}
       />
 
       <ConfirmDialog
