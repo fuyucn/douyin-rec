@@ -108,13 +108,17 @@ function PipelineFlow({ job }: { job: HubJobDTO }): ReactNode {
     <div className="flex items-start overflow-x-auto pb-1">
       {nodes.map((n, i) => {
         const c = NODE_COLOR[n.status];
+        const next = nodes[i + 1];
+        // 连接线状态:流入进行中节点 → 流动虚线动画;流入已完成/失败 → 实色;否则灰。
+        const connIntoActive = next?.status === "active";
+        const connReached = next && ["done", "active", "failed"].includes(next.status);
         return (
           <div key={i} className="flex items-start shrink-0">
-            {/* 节点:圆形状态图标 + 下方标签 + 耗时 */}
+            {/* 节点:圆形状态图标 + 下方标签 + 耗时(进行中加脉冲光环) */}
             <div className="flex flex-col items-center gap-1 w-[68px]">
               <span
-                className="inline-flex items-center justify-center rounded-full w-6 h-6"
-                style={{ background: c.bg, color: c.fg, boxShadow: `inset 0 0 0 1.5px ${c.ring}` }}
+                className={`inline-flex items-center justify-center rounded-full w-6 h-6${n.status === "active" ? " flow-node-active" : ""}`}
+                style={{ background: c.bg, color: c.fg, border: `1.5px solid ${c.ring}` }}
               >
                 {n.status === "done" && <Check className="w-3.5 h-3.5" />}
                 {n.status === "active" && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
@@ -122,18 +126,21 @@ function PipelineFlow({ job }: { job: HubJobDTO }): ReactNode {
                 {n.status === "skipped" && <Minus className="w-3.5 h-3.5" />}
                 {n.status === "todo" && <span className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--muted-soft)" }} />}
               </span>
-              <span className="text-[11px] text-center leading-tight" style={{ color: n.status === "todo" || n.status === "skipped" ? "var(--muted-soft)" : "var(--ink)" }}>
+              <span
+                className="text-[11px] text-center leading-tight"
+                style={{ color: n.status === "todo" || n.status === "skipped" ? "var(--muted-soft)" : "var(--ink)", fontWeight: n.status === "active" ? 600 : 400 }}
+              >
                 {n.label}
               </span>
-              <span className="text-[10px] font-mono text-muted-soft">
+              <span className="text-[10px] font-mono" style={{ color: n.status === "active" ? "var(--ink)" : "var(--muted-soft)" }}>
                 {n.status === "skipped" ? "跳过" : n.status === "todo" ? "" : humanSec(n.sec)}
               </span>
             </div>
-            {/* 连接线(最后一个节点后不画):走过为实色,未走为虚灰 */}
+            {/* 连接线(最后一个节点后不画) */}
             {i < nodes.length - 1 && (
               <span
-                className="mt-3 h-[1.5px] w-5 sm:w-8"
-                style={{ background: nodes[i + 1].status === "done" || nodes[i + 1].status === "active" || nodes[i + 1].status === "failed" ? "var(--success)" : "var(--hairline)" }}
+                className={`mt-3 h-[2px] w-5 sm:w-8${connIntoActive ? " flow-connector-active" : ""}`}
+                style={connIntoActive ? undefined : { background: connReached ? "var(--success)" : "var(--hairline)" }}
               />
             )}
           </div>
