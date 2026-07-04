@@ -300,8 +300,8 @@ export interface Api {
   updateHubRule(key: string, input: HubRulePayload): ApiResult;
   /** DELETE /api/hub/rules/:key — 删除一条规则。 */
   deleteHubRule(key: string): ApiResult;
-  /** GET /api/hub/jobs — 最近 hub 任务(状态/时间线/当前步时长/ETA/hasLog)。 */
-  listHubJobs(): ApiResult;
+  /** GET /api/hub/jobs[?room=&limit=&offset=] — hub run 列表(状态/时间线/ETA/hasLog + total 分页)。 */
+  listHubJobs(opts?: { room?: string; limit?: number; offset?: number }): ApiResult;
   /** GET /api/hub/jobs/:key/log — 该场 job.log 尾部(key=streamKey,URL-encoded)。 */
   getHubJobLog(streamKey: string): ApiResult;
 }
@@ -732,10 +732,15 @@ export function makeApi(deps: ApiDeps): Api {
       if (!ok) return err(404, `未找到 hub 规则 key=${key}`);
       return { status: 200, body: { ok: true, key } };
     },
-    listHubJobs(): ApiResult {
-      if (!deps.syncDbPath) return { status: 200, body: { jobs: [] } }; // slave/hub 未开 → 空
+    listHubJobs(opts: { room?: string; limit?: number; offset?: number } = {}): ApiResult {
+      if (!deps.syncDbPath) return { status: 200, body: { jobs: [], total: 0 } }; // slave/hub 未开 → 空
       try {
-        return { status: 200, body: { jobs: listHubJobs(deps.syncDbPath) } };
+        const { jobs, total } = listHubJobs(deps.syncDbPath, {
+          room: opts.room,
+          limit: opts.limit ?? 20,
+          offset: opts.offset ?? 0,
+        });
+        return { status: 200, body: { jobs, total } };
       } catch (e) {
         return err(500, `读 hub 台账失败: ${String((e as Error)?.message ?? e)}`);
       }

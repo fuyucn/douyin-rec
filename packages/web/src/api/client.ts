@@ -105,7 +105,15 @@ export const api = {
     request("DELETE", `/api/hub/rules/${encodeURIComponent(key)}`),
 
   // ── hub 任务(运行态:step/进度/ETA/日志)──────────────────────────────────────
-  listHubJobs: (): Promise<HubJobsDTO> => request("GET", "/api/hub/jobs"),
+  // room 给定=只列该房间的历次 run(独立历史页);省略=全房间最近 N(规则行取最近一条)。
+  listHubJobs: (opts: { room?: string; limit?: number; offset?: number } = {}): Promise<HubJobsDTO> => {
+    const q = new URLSearchParams();
+    if (opts.room) q.set("room", opts.room);
+    if (opts.limit != null) q.set("limit", String(opts.limit));
+    if (opts.offset != null) q.set("offset", String(opts.offset));
+    const qs = q.toString();
+    return request("GET", `/api/hub/jobs${qs ? "?" + qs : ""}`);
+  },
   getHubJobLog: (streamKey: string): Promise<{ streamKey: string; log: string }> =>
     request("GET", `/api/hub/jobs/${encodeURIComponent(streamKey)}/log`),
 

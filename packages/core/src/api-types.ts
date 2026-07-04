@@ -70,9 +70,10 @@ export interface HubJobDTO {
   hasLog: boolean;
 }
 
-/** GET /api/hub/jobs 响应。 */
+/** GET /api/hub/jobs 响应(total = 满足过滤的 run 总数,分页用)。 */
 export interface HubJobsDTO {
   jobs: HubJobDTO[];
+  total: number;
 }
 
 /** POST /api/hub/rules + PATCH /api/hub/rules/:roomSlug 的请求体。 */

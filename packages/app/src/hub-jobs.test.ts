@@ -32,8 +32,8 @@ function seedJob(db: DatabaseSync, key: string, states: Array<[string, number]>,
 }
 
 describe("listHubJobs", () => {
-  it("sync db 不存在(hub 未开过)→ 空数组不炸", () => {
-    expect(listHubJobs("/nonexistent/x-sync.db")).toEqual([]);
+  it("sync db 不存在(hub 未开过)→ 空结果不炸", () => {
+    expect(listHubJobs("/nonexistent/x-sync.db")).toEqual({ jobs: [], total: 0 });
   });
 
   it("时间线/当前步时长/ETA:历史 done job 的步骤速率喂给进行中 job", () => {
@@ -52,7 +52,8 @@ describe("listHubJobs", () => {
     ], 2000);
     db.close();
 
-    const jobs = listHubJobs(dbPath, 10, now, stage);
+    const { jobs, total } = listHubJobs(dbPath, { now, stageDir: stage });
+    expect(total).toBe(2);
     expect(jobs).toHaveLength(2);
     expect(jobs[0].streamKey).toBe("douyin:2:2026-07-02"); // updatedAt 倒序
     const cur = jobs[0];
@@ -70,6 +71,28 @@ describe("listHubJobs", () => {
     expect(fin.etaSec).toBeNull();
   });
 
+  it("按房间过滤 + 分页:room 只返回该房间的 run,total 是过滤后总数,limit/offset 翻页", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "hubstage-pg-"));
+    // 房间 A(douyin.100)3 场 + 房间 B(douyin.200)1 场。
+    seedJob(db, "douyin:100:2026-07-01", [["done", T0 + 1000]], 100, { bv: "A1" });
+    seedJob(db, "douyin:100:2026-07-02", [["done", T0 + 2000]], 100, { bv: "A2" });
+    seedJob(db, "douyin:100:2026-07-03", [["done", T0 + 3000]], 100, { bv: "A3" });
+    seedJob(db, "douyin:200:2026-07-01", [["done", T0 + 4000]], 100, { bv: "B1" });
+    db.close();
+
+    // room=douyin.100 → 只 3 场,total=3,新→旧
+    const p1 = listHubJobs(dbPath, { room: "douyin.100", limit: 2, offset: 0, now: T0 + 5000, stageDir: stage });
+    expect(p1.total).toBe(3);
+    expect(p1.jobs.map((j) => j.streamKey)).toEqual(["douyin:100:2026-07-03", "douyin:100:2026-07-02"]);
+    // 第二页
+    const p2 = listHubJobs(dbPath, { room: "douyin.100", limit: 2, offset: 2, now: T0 + 5000, stageDir: stage });
+    expect(p2.total).toBe(3);
+    expect(p2.jobs.map((j) => j.streamKey)).toEqual(["douyin:100:2026-07-01"]);
+    // 不跨房间:room=douyin.200 只 1 场
+    expect(listHubJobs(dbPath, { room: "douyin.200", stageDir: stage }).total).toBe(1);
+  });
+
   it("无历史速率 → 回落保守常数;hasLog 反映 job.log 是否存在", () => {
     const { dbPath, db } = makeSyncDb();
     const stage = mkdtempSync(join(tmpdir(), "hubstage2-"));
@@ -81,7 +104,7 @@ describe("listHubJobs", () => {
     mkdirSync(join(stage, "douyin_3_2026-07-03"), { recursive: true });
     writeFileSync(logP, "[t] hello\n");
 
-    const jobs = listHubJobs(dbPath, 10, now, stage);
+    const { jobs } = listHubJobs(dbPath, { now, stageDir: stage });
     expect(jobs[0].currentStepSec).toBe(50);
     // fallback merging rate 0.3 × 1000 − 50 = 250
     expect(jobs[0].etaSec).toBe(250);

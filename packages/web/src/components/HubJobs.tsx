@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { FileText, Loader2 } from "lucide-react";
 import { api, type HubJobDTO } from "../api/client";
 import { IconButton } from "./Button";
@@ -68,85 +68,69 @@ function Timeline({ job }: { job: HubJobDTO }): ReactNode {
   );
 }
 
-/** 一个直播间的「运行记录」详情:该房间历次 run(新→旧),每条展开步骤时间线/进度/ETA/日志。 */
-export function HubTaskDetail({
-  open,
-  onClose,
-  title,
-  runs,
-}: {
-  open: boolean;
-  onClose: () => void;
-  title: string;
-  runs: HubJobDTO[];
-}): ReactNode {
-  const [logKey, setLogKey] = useState<string | null>(null);
-  const [logText, setLogText] = useState("");
-
-  const openLog = async (key: string): Promise<void> => {
-    setLogKey(key);
-    setLogText("加载中…");
-    try {
-      const r = await api.getHubJobLog(key);
-      setLogText(r.log || "(空)");
-    } catch {
-      setLogText("读取日志失败(可能 stage 已清理)。");
-    }
-  };
-
+/** 一条 run 卡片:状态行 + 步骤时间线 + 元信息(选优/时长/BV/错误)+ 日志按钮。 */
+export function RunCard({ job, onOpenLog }: { job: HubJobDTO; onOpenLog: (key: string) => void }): ReactNode {
   return (
-    <Dialog open={open} onClose={onClose} widthClass="max-w-3xl" title={`运行记录 · ${title}`}>
-      {runs.length === 0 ? (
-        <p className="text-sm text-muted py-6 text-center">该直播间还没有 hub 运行记录(录制并收播后自动产生)。</p>
-      ) : (
-        <div className="space-y-3 max-h-[65vh] overflow-auto">
-          {runs.map((j) => (
-            <div key={j.streamKey} className="rounded-lg border border-hairline p-3">
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-[13px] text-ink">{runDate(j.streamKey)}</span>
-                  <span className="inline-flex items-center gap-1 text-[13px] font-medium" style={{ color: stateColor(j.state) }}>
-                    {!TERMINAL.has(j.state) && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                    {STEP_LABEL[j.state] ?? j.state}
-                    {j.currentStepSec != null && <span className="text-muted-soft font-normal">· 已运行 {humanSec(j.currentStepSec)}</span>}
-                    {!TERMINAL.has(j.state) && j.etaSec != null && (
-                      <span className="text-muted-soft font-normal">· 预计剩余约 {humanSec(j.etaSec)}</span>
-                    )}
-                  </span>
-                </div>
-                {j.hasLog && (
-                  <IconButton title="查看日志" onClick={() => void openLog(j.streamKey)}>
-                    <FileText className="w-4 h-4" />
-                  </IconButton>
-                )}
-              </div>
-              <Timeline job={j} />
-              <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-2 text-[12px] text-muted">
-                {j.winnerTenant && <span>选优: {j.winnerTenant}</span>}
-                {j.videoDurationSec != null && <span>时长: {humanSec(Math.round(j.videoDurationSec))}</span>}
-                {j.fails > 0 && <span style={{ color: "var(--warning)" }}>已重试 {j.fails} 次</span>}
-                {j.bv && (
-                  <a className="text-muted hover:text-ink" href={`https://www.bilibili.com/video/${j.bv}`} target="_blank" rel="noreferrer">
-                    {j.bv}
-                  </a>
-                )}
-              </div>
-              {j.error && <div className="text-[12px] mt-1" style={{ color: "var(--error)" }}>{j.error}</div>}
-            </div>
-          ))}
+    <div className="rounded-lg border border-hairline p-3">
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-mono text-[13px] text-ink">{runDate(job.streamKey)}</span>
+          <span className="inline-flex items-center gap-1 text-[13px] font-medium" style={{ color: stateColor(job.state) }}>
+            {!TERMINAL.has(job.state) && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            {STEP_LABEL[job.state] ?? job.state}
+            {job.currentStepSec != null && <span className="text-muted-soft font-normal">· 已运行 {humanSec(job.currentStepSec)}</span>}
+            {!TERMINAL.has(job.state) && job.etaSec != null && (
+              <span className="text-muted-soft font-normal">· 预计剩余约 {humanSec(job.etaSec)}</span>
+            )}
+          </span>
         </div>
-      )}
+        {job.hasLog && (
+          <IconButton title="查看日志" onClick={() => onOpenLog(job.streamKey)}>
+            <FileText className="w-4 h-4" />
+          </IconButton>
+        )}
+      </div>
+      <Timeline job={job} />
+      <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-2 text-[12px] text-muted">
+        {job.winnerTenant && <span>选优: {job.winnerTenant}</span>}
+        {job.videoDurationSec != null && <span>时长: {humanSec(Math.round(job.videoDurationSec))}</span>}
+        {job.fails > 0 && <span style={{ color: "var(--warning)" }}>已重试 {job.fails} 次</span>}
+        {job.bv && (
+          <a className="text-muted hover:text-ink" href={`https://www.bilibili.com/video/${job.bv}`} target="_blank" rel="noreferrer">
+            {job.bv}
+          </a>
+        )}
+      </div>
+      {job.error && <div className="text-[12px] mt-1" style={{ color: "var(--error)" }}>{job.error}</div>}
+    </div>
+  );
+}
 
-      <Dialog open={logKey !== null} onClose={() => setLogKey(null)} widthClass="max-w-3xl" title={`任务日志 · ${logKey ?? ""}`}>
-        <pre className="text-[11px] font-mono whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-surface-soft rounded p-3 text-body">
-          {logText}
-        </pre>
-      </Dialog>
+/** job.log 查看弹窗(受控:logKey!=null 打开;logKey 变化即重新拉取)。列表页/历史页共用。 */
+export function JobLogDialog({ logKey, onClose }: { logKey: string | null; onClose: () => void }): ReactNode {
+  const [text, setText] = useState("加载中…");
+  useEffect(() => {
+    if (logKey === null) return;
+    let alive = true;
+    setText("加载中…");
+    void api
+      .getHubJobLog(logKey)
+      .then((r) => alive && setText(r.log || "(空)"))
+      .catch(() => alive && setText("读取日志失败(可能 stage 已清理)。"));
+    return () => {
+      alive = false;
+    };
+  }, [logKey]);
+  return (
+    <Dialog open={logKey !== null} onClose={onClose} widthClass="max-w-3xl" title={`任务日志 · ${logKey ?? ""}`}>
+      <pre className="text-[11px] font-mono whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-surface-soft rounded p-3 text-body">
+        {text}
+      </pre>
     </Dialog>
   );
 }
 
-/** 规则行内的「最近一次运行」紧凑徽标(在跑=当前步 spinner;终态=状态+可选 BV)。无 run → null。 */
+/** 规则行内的「最近一次运行」紧凑徽标(在跑=当前步 spinner;终态=状态)。无 run → 提示。 */
 export function LatestRunBadge({ run }: { run: HubJobDTO | undefined }): ReactNode {
   if (!run) return <span className="text-muted-soft text-xs">尚无运行</span>;
   return (

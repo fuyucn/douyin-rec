@@ -90,17 +90,50 @@ function historicalRates(db: DatabaseSync): Map<string, number> {
   return rates;
 }
 
-/** 最近 N 个 hub job 的展示视图(无 sync db / 表还没建 → 空数组,slave/hub 未开过属正常)。 */
-export function listHubJobs(syncDbPath: string, limit = 10, now = Date.now(), stageDir = hubStageDir()): HubJobView[] {
-  if (!existsSync(syncDbPath)) return [];
+export interface ListHubJobsOpts {
+  /** 只列某房间的 run(key=`{platform}.{roomSlug}`;streamKey 前缀 `{platform}:{roomSlug}:` 过滤)。省略=全部房间。 */
+  room?: string;
+  /** 分页:返回条数(默认 10)。 */
+  limit?: number;
+  /** 分页:跳过条数(默认 0)。 */
+  offset?: number;
+  now?: number;
+  stageDir?: string;
+}
+
+export interface HubJobsResult {
+  jobs: HubJobView[];
+  /** 满足过滤条件的 run 总数(分页用;前端据此决定还有没有下一页)。 */
+  total: number;
+}
+
+/**
+ * hub run 列表(分页 + 可按房间过滤)。无 sync db / 表还没建 → 空(slave/hub 未开过属正常)。
+ * room 给定 → 只列该房间的历次 run(GitHub「某 workflow 的 run 列表」);省略 → 全房间最近 N。
+ */
+export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): HubJobsResult {
+  const { room, limit = 10, offset = 0, now = Date.now(), stageDir = hubStageDir() } = opts;
+  if (!existsSync(syncDbPath)) return { jobs: [], total: 0 };
   const db = new DatabaseSync(syncDbPath, { readOnly: true });
+  // room key `{platform}.{roomSlug}` → streamKey 前缀 `{platform}:{roomSlug}:`(仅替换首个点)。
+  const prefix = room ? room.replace(".", ":") + ":" : null;
   try {
     let jobs: RawJob[];
+    let total = 0;
     try {
-      jobs = db.prepare("SELECT * FROM sync_jobs ORDER BY updatedAt DESC LIMIT ?").all(limit) as unknown as RawJob[];
-    } catch { return []; } // 旧库无表
+      if (prefix) {
+        total = Number((db.prepare("SELECT COUNT(*) AS n FROM sync_jobs WHERE streamKey LIKE ?")
+          .get(prefix + "%") as unknown as { n: number }).n);
+        jobs = db.prepare("SELECT * FROM sync_jobs WHERE streamKey LIKE ? ORDER BY updatedAt DESC LIMIT ? OFFSET ?")
+          .all(prefix + "%", limit, offset) as unknown as RawJob[];
+      } else {
+        total = Number((db.prepare("SELECT COUNT(*) AS n FROM sync_jobs").get() as unknown as { n: number }).n);
+        jobs = db.prepare("SELECT * FROM sync_jobs ORDER BY updatedAt DESC LIMIT ? OFFSET ?")
+          .all(limit, offset) as unknown as RawJob[];
+      }
+    } catch { return { jobs: [], total: 0 }; } // 旧库无表
     const rates = historicalRates(db);
-    return jobs.map((j) => {
+    const views = jobs.map((j) => {
       let events: HubJobEvent[] = [];
       try {
         events = db.prepare("SELECT state, at FROM sync_job_events WHERE streamKey=? ORDER BY at ASC, rowid ASC")
@@ -126,6 +159,7 @@ export function listHubJobs(syncDbPath: string, limit = 10, now = Date.now(), st
         hasLog: existsSync(jobLogPath(j.streamKey, stageDir)),
       };
     });
+    return { jobs: views, total };
   } finally {
     db.close();
   }

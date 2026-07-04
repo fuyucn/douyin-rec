@@ -332,8 +332,13 @@ async function dispatch(
     }
     case "deleteHubRule":
       return api.deleteHubRule(match.slug!);
-    case "listHubJobs":
-      return api.listHubJobs();
+    case "listHubJobs": {
+      const q = new URL(req.url ?? "/", "http://localhost").searchParams;
+      const room = q.get("room") ?? undefined;
+      const limit = q.get("limit") ? Number(q.get("limit")) : undefined;
+      const offset = q.get("offset") ? Number(q.get("offset")) : undefined;
+      return api.listHubJobs({ room, limit, offset });
+    }
     case "getHubJobLog":
       return api.getHubJobLog(match.sid!);
     case "index":

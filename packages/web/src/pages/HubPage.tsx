@@ -1,11 +1,12 @@
-import { ListChecks, Network, Pencil, Plus, Radio, Trash2 } from "lucide-react";
+import { ChevronRight, ListChecks, Network, Pencil, Plus, Radio, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { useAtomValue } from "jotai";
 import { api, type HubRuleDTO, type HubJobDTO } from "../api/client";
 import { hubEnabledAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { HubTaskDetail, LatestRunBadge } from "../components/HubJobs";
+import { LatestRunBadge } from "../components/HubJobs";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
@@ -30,8 +31,6 @@ export function HubPage(): ReactNode {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<HubRuleDTO | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-  /** 打开「运行记录」详情的规则(null=关闭)。 */
-  const [detailRule, setDetailRule] = useState<HubRuleDTO | null>(null);
 
   const refresh = async (): Promise<void> => {
     try {
@@ -161,10 +160,9 @@ export function HubPage(): ReactNode {
                       {(() => {
                         const runs = runsOf(r);
                         return (
-                          <button
-                            type="button"
+                          <Link
+                            to={`/hub/${encodeURIComponent(r.key)}`}
                             className="inline-flex items-center gap-1.5 hover:opacity-70"
-                            onClick={() => setDetailRule(r)}
                             title="查看运行记录"
                           >
                             <LatestRunBadge run={runs[0]} />
@@ -174,7 +172,8 @@ export function HubPage(): ReactNode {
                                 {runs.length}
                               </span>
                             )}
-                          </button>
+                            <ChevronRight className="w-3.5 h-3.5 text-muted-soft" />
+                          </Link>
                         );
                       })()}
                     </td>
@@ -215,13 +214,6 @@ export function HubPage(): ReactNode {
         onClose={() => setDialogOpen(false)}
         rule={editing}
         onSaved={() => void refresh()}
-      />
-
-      <HubTaskDetail
-        open={detailRule !== null}
-        onClose={() => setDetailRule(null)}
-        title={detailRule ? (detailRule.anchorName ?? roomId(detailRule.room)) : ""}
-        runs={detailRule ? runsOf(detailRule) : []}
       />
 
       <ConfirmDialog
