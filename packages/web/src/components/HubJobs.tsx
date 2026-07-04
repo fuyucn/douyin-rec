@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { FileText, Loader2 } from "lucide-react";
+import { Check, FileText, Loader2, Minus, X } from "lucide-react";
 import { api, type HubJobDTO } from "../api/client";
 import { IconButton } from "./Button";
 import { Dialog } from "./Dialog";
@@ -39,31 +39,106 @@ export function runDate(streamKey: string): string {
   return parts.slice(2).join(":") || streamKey;
 }
 
-/** 单条 run 的步骤时间线(横向:每步耗时,当前步高亮 spinner + 已运行时长)。 */
-function Timeline({ job }: { job: HubJobDTO }): ReactNode {
-  const segs: Array<{ state: string; sec: number | null; active: boolean }> = [];
-  for (let i = 0; i < job.events.length; i++) {
-    const cur = job.events[i];
-    const next = job.events[i + 1];
-    if (next) segs.push({ state: cur.state, sec: Math.round((next.at - cur.at) / 1000), active: false });
-    else if (!TERMINAL.has(cur.state)) segs.push({ state: cur.state, sec: job.currentStepSec, active: true });
+/** pipeline 的规范线性步骤(节点顺序;终态另算)。 */
+const FLOW_STEPS: Array<{ key: string; label: string }> = [
+  { key: "pending", label: "排队" },
+  { key: "syncing", label: "拉取" },
+  { key: "merging", label: "合并/烧录" },
+  { key: "uploading", label: "上传" },
+];
+
+type NodeStatus = "done" | "active" | "skipped" | "todo" | "failed";
+
+interface FlowNode {
+  label: string;
+  status: NodeStatus;
+  sec: number | null;
+}
+
+/** 从 run 的 events 推导每个流程节点的状态 + 耗时,末尾补一个终态节点。 */
+function buildFlow(job: HubJobDTO): FlowNode[] {
+  const seen = new Set(job.events.map((e) => e.state));
+  const last = job.events[job.events.length - 1];
+  const lastState = last?.state;
+  const terminal = lastState ? TERMINAL.has(lastState) : false;
+  const successTerminal = lastState === "done" || lastState === "needs_manual";
+  // 某状态耗时 = 下一事件时刻 − 本事件时刻;末个非终态用 currentStepSec。
+  const durOf = (state: string): number | null => {
+    const idx = job.events.findIndex((e) => e.state === state);
+    if (idx < 0) return null;
+    const next = job.events[idx + 1];
+    return next ? Math.round((next.at - job.events[idx].at) / 1000) : job.currentStepSec;
+  };
+
+  const nodes: FlowNode[] = FLOW_STEPS.map((s) => {
+    if (seen.has(s.key)) {
+      const active = s.key === lastState && !terminal;
+      return { label: s.label, status: active ? "active" : "done", sec: durOf(s.key) };
+    }
+    // 没走到这步:成功终态(如 stage 模式跳过上传)= 跳过;否则 = 待执行/未到达。
+    return { label: s.label, status: successTerminal ? "skipped" : "todo", sec: null };
+  });
+
+  // 终态节点。
+  if (terminal) {
+    nodes.push({
+      label: STEP_LABEL[lastState!] ?? lastState!,
+      status: lastState === "failed" ? "failed" : "done",
+      sec: null,
+    });
+  } else {
+    nodes.push({ label: "完成", status: "todo", sec: null });
   }
-  if (segs.length === 0) return <span className="text-muted-soft text-xs">（无时间线;旧版本任务）</span>;
+  return nodes;
+}
+
+const NODE_COLOR: Record<NodeStatus, { bg: string; fg: string; ring: string }> = {
+  done: { bg: "var(--success)", fg: "#fff", ring: "var(--success)" },
+  active: { bg: "var(--ink)", fg: "var(--canvas)", ring: "var(--ink)" },
+  failed: { bg: "var(--error)", fg: "#fff", ring: "var(--error)" },
+  skipped: { bg: "transparent", fg: "var(--muted-soft)", ring: "var(--hairline)" },
+  todo: { bg: "transparent", fg: "var(--muted-soft)", ring: "var(--hairline)" },
+};
+
+/** 单条 run 的横向流程图:固定节点(排队→拉取→合并/烧录→上传→完成),按 events 上色 + 每步耗时。 */
+function PipelineFlow({ job }: { job: HubJobDTO }): ReactNode {
+  if (job.events.length === 0) return <span className="text-muted-soft text-xs">（无流程记录;旧版本任务）</span>;
+  const nodes = buildFlow(job);
   return (
-    <div className="flex flex-wrap gap-1.5 items-center">
-      {segs.map((s, i) => (
-        <span
-          key={i}
-          className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-mono"
-          style={{
-            background: s.active ? "var(--ink)" : "var(--surface-soft)",
-            color: s.active ? "var(--canvas)" : "var(--muted)",
-          }}
-        >
-          {s.active && <Loader2 className="w-3 h-3 animate-spin" />}
-          {STEP_LABEL[s.state] ?? s.state} {humanSec(s.sec)}
-        </span>
-      ))}
+    <div className="flex items-start overflow-x-auto pb-1">
+      {nodes.map((n, i) => {
+        const c = NODE_COLOR[n.status];
+        return (
+          <div key={i} className="flex items-start shrink-0">
+            {/* 节点:圆形状态图标 + 下方标签 + 耗时 */}
+            <div className="flex flex-col items-center gap-1 w-[68px]">
+              <span
+                className="inline-flex items-center justify-center rounded-full w-6 h-6"
+                style={{ background: c.bg, color: c.fg, boxShadow: `inset 0 0 0 1.5px ${c.ring}` }}
+              >
+                {n.status === "done" && <Check className="w-3.5 h-3.5" />}
+                {n.status === "active" && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {n.status === "failed" && <X className="w-3.5 h-3.5" />}
+                {n.status === "skipped" && <Minus className="w-3.5 h-3.5" />}
+                {n.status === "todo" && <span className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--muted-soft)" }} />}
+              </span>
+              <span className="text-[11px] text-center leading-tight" style={{ color: n.status === "todo" || n.status === "skipped" ? "var(--muted-soft)" : "var(--ink)" }}>
+                {n.label}
+              </span>
+              <span className="text-[10px] font-mono text-muted-soft">
+                {n.status === "skipped" ? "跳过" : n.status === "todo" ? "" : humanSec(n.sec)}
+              </span>
+            </div>
+            {/* 连接线(最后一个节点后不画):走过为实色,未走为虚灰 */}
+            {i < nodes.length - 1 && (
+              <span
+                className="mt-3 h-[1.5px] w-5 sm:w-8"
+                style={{ background: nodes[i + 1].status === "done" || nodes[i + 1].status === "active" || nodes[i + 1].status === "failed" ? "var(--success)" : "var(--hairline)" }}
+              />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -90,7 +165,7 @@ export function RunCard({ job, onOpenLog }: { job: HubJobDTO; onOpenLog: (key: s
           </IconButton>
         )}
       </div>
-      <Timeline job={job} />
+      <PipelineFlow job={job} />
       <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-2 text-[12px] text-muted">
         {job.winnerTenant && <span>选优: {job.winnerTenant}</span>}
         {job.videoDurationSec != null && <span>时长: {humanSec(Math.round(job.videoDurationSec))}</span>}
