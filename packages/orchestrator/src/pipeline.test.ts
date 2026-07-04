@@ -160,6 +160,25 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
+  it("job.log: 每场写专属日志(选优/步骤/终态可复盘)", async () => {
+    const { readFileSync, rmSync } = await import("node:fs");
+    rmSync(`${STAGE_SUB}/job.log`, { force: true });   // 场景1可能已写过,清掉保证本用例独立
+    const broadcast = makeBroadcast([
+      { tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
+      { tenantId: "node-2", rec: makeRec({ totalGapSec: 200 }) },
+    ]);
+    const deps = makeDeps();
+    deps.ledger.upsertPending(broadcast.streamKey);
+    await runPipeline(broadcast, deps);
+    const log = readFileSync(`${STAGE_SUB}/job.log`, "utf-8");
+    expect(log).toContain("pipeline start");
+    expect(log).toContain("选优: winner=node-1");
+    expect(log).toContain("pull 完成");
+    expect(log).toContain("P1 上传完成: BV123");
+    expect(log).toContain("pipeline end: done bv=BV123");
+    deps.ledger.close();
+  });
+
   it("场景2: 都断(无完整 tenant) → 直接中断+通知,**不 pull/不 merge/不删源**, ledger=needs_manual", async () => {
     // 两节点各 1 会话但都断流(gap 200 > 30)→ 无完整 tenant → 直接中断,保留全部源。
     const broadcast = makeBroadcast([

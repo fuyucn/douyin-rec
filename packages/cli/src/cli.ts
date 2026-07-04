@@ -509,8 +509,13 @@ const hubStarter: HubStarter = {
     const pipelineDeps = {
       transports,
       ledger,
-      sh: (cmd: string) => new Promise<void>((res, rej) => {
-        exec(cmd, (err) => (err ? rej(err) : res()));
+      // 返回 stdout+stderr(各截尾 64KB,biliup 输出可达 MB 级)→ pipeline 摘尾写进该场 job.log。
+      sh: (cmd: string) => new Promise<string>((res, rej) => {
+        exec(cmd, { maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+          const tail = (s: string): string => (s.length > 65536 ? s.slice(-65536) : s);
+          if (err) rej(new Error(`${err.message}\n${tail(String(stderr ?? ""))}`));
+          else res(`${tail(String(stdout ?? ""))}\n${tail(String(stderr ?? ""))}`);
+        });
       }),
       // 穿插上传接缝:pipeline 先 fire uploadPlain(网络)与烧录并行,再 await BV 后串行 appendGroup。
       uploadPlain: (plain: UploadOpts) => uploadPlain({ plain }),

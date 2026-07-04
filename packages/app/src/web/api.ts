@@ -29,6 +29,7 @@ import { resolveTaskCookies } from "../store.js";
 import type { TaskRuntime } from "../task-manager.js";
 import { inWindow, nowMinutesLocal } from "../scheduler.js";
 import type { MergeJobStore } from "../merge-jobs.js";
+import { listHubJobs, readHubJobLog } from "../hub-jobs.js";
 
 /** Uniform handler result. status = HTTP status, body = JSON-serialisable. */
 export interface ApiResult {
@@ -91,6 +92,8 @@ export interface ApiDeps {
   hubDir?: string;
   /** 本节点是否启用了 hub(master);slave/未开 = false。前端据此显示/隐藏 Hub 页。 */
   hubEnabled?: boolean;
+  /** hub 台账 sqlite(<db>-sync.db)路径;省略=hub 任务端点返回空列表(slave 属正常)。 */
+  syncDbPath?: string;
 }
 
 /**
@@ -297,6 +300,10 @@ export interface Api {
   updateHubRule(key: string, input: HubRulePayload): ApiResult;
   /** DELETE /api/hub/rules/:key — 删除一条规则。 */
   deleteHubRule(key: string): ApiResult;
+  /** GET /api/hub/jobs — 最近 hub 任务(状态/时间线/当前步时长/ETA/hasLog)。 */
+  listHubJobs(): ApiResult;
+  /** GET /api/hub/jobs/:key/log — 该场 job.log 尾部(key=streamKey,URL-encoded)。 */
+  getHubJobLog(streamKey: string): ApiResult;
 }
 
 /** Build the handler set bound to the injected store + manager. */
@@ -724,6 +731,19 @@ export function makeApi(deps: ApiDeps): Api {
       const ok = hubStore.removeHubRule(hubDir, key);
       if (!ok) return err(404, `未找到 hub 规则 key=${key}`);
       return { status: 200, body: { ok: true, key } };
+    },
+    listHubJobs(): ApiResult {
+      if (!deps.syncDbPath) return { status: 200, body: { jobs: [] } }; // slave/hub 未开 → 空
+      try {
+        return { status: 200, body: { jobs: listHubJobs(deps.syncDbPath) } };
+      } catch (e) {
+        return err(500, `读 hub 台账失败: ${String((e as Error)?.message ?? e)}`);
+      }
+    },
+    getHubJobLog(streamKey: string): ApiResult {
+      const log = readHubJobLog(streamKey);
+      if (log == null) return err(404, `该场无 job.log(旧版本产生的任务没有,或 stage 已清理): ${streamKey}`);
+      return { status: 200, body: { streamKey, log } };
     },
   };
 }

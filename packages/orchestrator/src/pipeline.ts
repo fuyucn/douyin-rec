@@ -1,4 +1,5 @@
 import path from "node:path";
+import { appendFileSync, mkdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
@@ -37,7 +38,8 @@ export interface PipelineCfg {
 export interface PipelineDeps {
   transports: Map<string, Transport>;
   ledger: SyncLedger;
-  sh: (cmd: string) => Promise<void>;
+  /** 执行子命令(merge/burn 等)。可选返回 stdout+stderr 文本 → pipeline 会摘尾写进该场 job.log。 */
+  sh: (cmd: string) => Promise<void | string>;
   /** 仅上传 plain(P1)拿 BV —— **穿插上传接缝**:pipeline 先 fire 它(网络),与烧录(CPU)并行。 */
   uploadPlain: (plain: UploadOpts) => Promise<string>;
   /** 追加一个逻辑组到稿件(空组跳过)。多组**串行**调用(同稿件并发 append 会撞)。
@@ -56,11 +58,51 @@ function sanitizeKey(key: string): string {
   return key.replace(/[:/]/g, "_");
 }
 
+/**
+ * 每场专属日志(`<stageSub>/job.log`,append-only,随 stage 产物持久保留)。
+ * 记录选优明细/每步起止耗时/子命令输出摘尾/致命错误——补上「容器日志混杂且重启即丢」的复盘缺口。
+ * 写失败静默(日志绝不反噬 pipeline)。
+ */
+function makeJobLog(stageSub: string): (msg: string) => void {
+  let dirReady = false;
+  return (msg: string): void => {
+    try {
+      if (!dirReady) { mkdirSync(stageSub, { recursive: true }); dirReady = true; }
+      appendFileSync(path.join(stageSub, "job.log"), `[${new Date().toISOString()}] ${msg}\n`, "utf-8");
+    } catch { /* 日志失败不影响管线 */ }
+  };
+}
+
 export async function runPipeline(
   b: Broadcast,
   deps: PipelineDeps,
 ): Promise<{ state: JobState; bv?: string }> {
-  const { transports, ledger, sh, uploadPlain, appendGroup, notify, cfg } = deps;
+  const jlog = makeJobLog(path.join(deps.cfg.stageDir, sanitizeKey(b.streamKey)));
+  jlog(`=== pipeline start ${b.streamKey} 成员=[${b.members.map((m) => m.tenantId).join(",")}] mode=${deps.cfg.uploadMode} ===`);
+  try {
+    const r = await runPipelineInner(b, deps, jlog);
+    jlog(`=== pipeline end: ${r.state}${r.bv ? ` bv=${r.bv}` : ""} ===`);
+    return r;
+  } catch (e) {
+    jlog(`!!! pipeline 抛错(reconciler 将标 failed): ${String((e as Error)?.stack ?? e)}`);
+    throw e;
+  }
+}
+
+async function runPipelineInner(
+  b: Broadcast,
+  deps: PipelineDeps,
+  jlog: (msg: string) => void,
+): Promise<{ state: JobState; bv?: string }> {
+  const { transports, ledger, uploadPlain, appendGroup, notify, cfg } = deps;
+  // 子命令统一经此执行:命令行 + 耗时 + 输出摘尾(最后 2KB,biliup 输出可能很长)都进 job.log。
+  const sh = async (cmd: string): Promise<void> => {
+    jlog(`$ ${cmd}`);
+    const t0 = Date.now();
+    const out = await deps.sh(cmd);
+    jlog(`  ✓ 完成(${Math.round((Date.now() - t0) / 1000)}s)`);
+    if (typeof out === "string" && out.trim()) jlog(`  输出尾: ${out.trim().slice(-2048)}`);
+  };
   const splitForUpload = deps.splitForUpload ?? ((mp4: string) => splitToSizeLimit(mp4));
   const rmStage = deps.rmStage ?? (async (paths: string[]) => {
     const { rmSync } = await import("node:fs");
@@ -78,7 +120,10 @@ export async function runPipeline(
     const tp = transports.get(m.tenantId);
     const ok = tp?.exists ? await tp.exists(m.rec.tsFiles).catch(() => false) : true;
     if (ok) presentMembers.push(m);
-    else console.warn(`[pipeline] ${streamKey} 剔除成员 ${m.tenantId}:文件已不存在`);
+    else {
+      console.warn(`[pipeline] ${streamKey} 剔除成员 ${m.tenantId}:文件已不存在`);
+      jlog(`剔除成员 ${m.tenantId}:文件已不存在`);
+    }
   }
   const candidates = { ...b, members: presentMembers };
 
@@ -86,11 +131,13 @@ export async function runPipeline(
   const selection = selectWinner(candidates, cfg.cleanMaxGapSec);
 
   if (!selection.winner) {
+    jlog(`选优失败:${presentMembers.length ? "no winner" : "无可用成员(文件均缺失)"}`);
     ledger.setState(streamKey, "failed", { error: presentMembers.length ? "no winner" : "无可用成员(文件均缺失)" });
     return { state: "failed" };
   }
 
   const winner = selection.winner;
+  jlog(`选优: winner=${winner.tenantId} clean=${selection.clean} 各节点=${JSON.stringify(selection.perNode)}`);
 
   // 落库选优候选明细(coverage/时长/起止/缺口 + 谁胜出),供事后复盘"为什么这台赢"。
   ledger.recordCandidates(streamKey, selection.perNode, winner.tenantId);
@@ -99,6 +146,7 @@ export async function runPipeline(
   // 留人工对齐拼接)。跨会话自动拼接是 followup(见 docs/multi-node-sync-followups.md),暂不自动做。
   // selection.clean=true ⇔ 存在「单会话且 gap≤阈值」的完整 tenant;false ⇔ 都断流。
   if (!selection.clean) {
+    jlog(`所有节点均断流未录全 → 中断留人工(绝不删源)`);
     ledger.setState(streamKey, "needs_manual", { winnerTenant: winner.tenantId });
     notify({
       kind: "error",
@@ -120,7 +168,10 @@ export async function runPipeline(
     ...winner.rec.tsFiles,
     ...(winner.rec.xmlPath ? [winner.rec.xmlPath] : []),
   ];
+  jlog(`pull 开始: ${filesToPull.length} 个文件 ← ${winner.tenantId}`);
+  const tPull = Date.now();
   await transport.pull(filesToPull, stageSub);
+  jlog(`pull 完成(${Math.round((Date.now() - tPull) / 1000)}s)`);
 
   // Merge and burn from the stageSub directory
   ledger.setState(streamKey, "merging");
@@ -137,6 +188,7 @@ export async function runPipeline(
   // 省总墙钟。stage 模式不传(bvPromise=null)。先 .then 收成 {bv}|{err},即便后续烧录抛错也不留
   // unhandled rejection(P1 可能已建稿 → 失败按 retry 处理,可接受)。
   const willUpload = cfg.uploadMode === "upload";
+  if (willUpload) jlog(`P1(plain)后台上传启动(与烧录并行): ${plain}`);
   const bvPromise: Promise<{ bv: string } | { err: Error }> | null = willUpload
     ? (ledger.setState(streamKey, "uploading"),
        uploadPlain({
@@ -179,6 +231,7 @@ export async function runPipeline(
   // stage 模式:有完整 winner 但不自动上传 → 产物已在 stage 待人工上传,源按配置清。
   // (!selection.clean 的「都断流」情况已在前面 early-return,这里 clean 必为 true。)
   if (!willUpload) {
+    jlog(`stage 模式:合成完毕待人工上传`);
     ledger.setState(streamKey, "needs_manual");
     await cleanupSources();
     notify({
@@ -193,17 +246,23 @@ export async function runPipeline(
   // 再 await BV → **串行 append**(同稿件并发会撞;每组一条 append → 增量提交、各自可续传)。关掉的步骤 → 空组。
   const danmuParts = burnDanmu ? await splitForUpload(danmuMp4) : [];
   const livechatParts = burnLivechat ? await splitForUpload(livechatMp4) : [];
+  jlog(`烧录全部完成,等待 P1 上传出 BV…(danmu ${danmuParts.length} 段 / livechat ${livechatParts.length} 段待 append)`);
   const r = await bvPromise!;
   if ("err" in r) {
+    jlog(`P1 上传失败: ${r.err.message}`);
     ledger.setState(streamKey, "failed", { error: `P1 上传失败: ${r.err.message}` });
     notify({ kind: "error", stage: "上传", message: `plain 上传失败:${r.err.message}` });
     return { state: "failed" };
   }
   const bv = r.bv;
+  jlog(`P1 上传完成: ${bv}`);
   const isPublic = cfg.uploadPrivate === false;
   for (const files of [danmuParts, livechatParts]) {
     if (files.length === 0) continue; // 关掉的步骤 → 空组,不传
+    jlog(`append 开始: ${files.map((f) => path.basename(f)).join(", ")}`);
+    const tApp = Date.now();
     await appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic });
+    jlog(`append 完成(${Math.round((Date.now() - tApp) / 1000)}s)`);
   }
 
   ledger.markDone(streamKey, bv);

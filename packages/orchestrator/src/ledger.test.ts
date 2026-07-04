@@ -28,6 +28,30 @@ describe("SyncLedger", () => {
     expect(l.get("k1")?.error).toBe("boom");
     l.close();
   });
+  it("状态转换自动记入 sync_job_events(时间线可复盘:每步起点=事件时刻)", () => {
+    const l = fresh();
+    l.upsertPending("k1");                       // → pending 事件
+    l.setState("k1", "syncing");
+    l.setState("k1", "merging");
+    l.markDone("k1", "BVyyy");                   // → done 事件
+    const ev = l.getEvents("k1");
+    expect(ev.map((e) => e.state)).toEqual(["pending", "syncing", "merging", "done"]);
+    for (const e of ev) expect(e.at).toBeGreaterThan(0);
+    // markFailed 也记录
+    l.upsertPending("k2");
+    l.markFailed("k2", "boom");
+    expect(l.getEvents("k2").map((e) => e.state)).toEqual(["pending", "failed"]);
+    l.close();
+  });
+  it("listRecent 按 updatedAt 倒序返回最近 N 个 job", () => {
+    const l = fresh();
+    l.upsertPending("a"); l.upsertPending("b"); l.upsertPending("c");
+    l.setState("b", "merging");                  // b 最新
+    const rows = l.listRecent(2);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].streamKey).toBe("b");
+    l.close();
+  });
   it("recordCandidates 落库 + 标记 winner + 幂等覆盖（选优可复盘）", () => {
     const l = fresh();
     const cands = [

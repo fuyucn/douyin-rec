@@ -7,6 +7,8 @@ export type { Task } from "./store.js";
 // 文件版 hub 任务配置(<root>/config/hub/{roomSlug}.json):cli reconciler + api 用。
 export * as hubStore from "./hub-store.js";
 export type { HubRule } from "./hub-store.js";
+export { listHubJobs, readHubJobLog, jobLogPath, hubStageDir } from "./hub-jobs.js";
+export type { HubJobView, HubJobEvent } from "./hub-jobs.js";
 export { rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, DEFAULT_ROOT } from "./paths.js";
 export { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
 export { makeNotifier, NullNotifier, formatMessage } from "./notify/notifier.js";

@@ -61,6 +61,8 @@ export interface RouteMatch {
     | "createHubRule"
     | "updateHubRule"
     | "deleteHubRule"
+    | "listHubJobs"
+    | "getHubJobLog"
     | "index";
   /** Path param when the route has /:id. */
   id?: number;
@@ -139,6 +141,11 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
   // 多节点 hub 规则: GET/POST /api/hub/rules + PATCH/DELETE /api/hub/rules/:key
   // key = {platform}.{roomSlug}(含点)→ 字符类需含 `.`。
   if (p === "/api/hub/status" && method === "GET") return { name: "hubStatus" };
+  // hub 任务: GET /api/hub/jobs(列表)+ GET /api/hub/jobs/:key/log(job.log 尾部)。
+  // key = streamKey,含 `:`(douyin:767…:2026-07-04),客户端 encodeURIComponent 传。
+  if (p === "/api/hub/jobs" && method === "GET") return { name: "listHubJobs" };
+  const hj = /^\/api\/hub\/jobs\/([^/]+)\/log$/.exec(p);
+  if (hj && method === "GET") return { name: "getHubJobLog", sid: decodeURIComponent(hj[1]) };
   if (p === "/api/hub/rules") {
     if (method === "GET") return { name: "listHubRules" };
     if (method === "POST") return { name: "createHubRule", needsBody: true };
@@ -194,6 +201,8 @@ export interface WebServerDeps {
   hubDir?: string;
   /** 本节点是否启用 hub(master);slave=false。前端据此显示/隐藏 Hub 页。 */
   hubEnabled?: boolean;
+  /** hub 台账 sqlite(<db>-sync.db)路径;省略=hub 任务端点返回空列表。 */
+  syncDbPath?: string;
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {}). */
@@ -323,6 +332,10 @@ async function dispatch(
     }
     case "deleteHubRule":
       return api.deleteHubRule(match.slug!);
+    case "listHubJobs":
+      return api.listHubJobs();
+    case "getHubJobLog":
+      return api.getHubJobLog(match.sid!);
     case "index":
       // handled by caller (html, not json)
       return { status: 200, body: null };
@@ -340,6 +353,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     resolveShortUrl: deps.resolveShortUrl ?? resolveShortUrl,
     hubDir: deps.hubDir,
     hubEnabled: deps.hubEnabled,
+    syncDbPath: deps.syncDbPath,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);
       const n = mj.recoverOrphans(); // 启动:清理上次重启腰斩的合成 job

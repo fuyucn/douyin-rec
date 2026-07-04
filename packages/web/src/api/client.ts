@@ -17,6 +17,9 @@ import type {
   HubPipelineConfig,
   HubRuleDTO,
   HubRulePayload,
+  HubJobDTO,
+  HubJobEventDTO,
+  HubJobsDTO,
   RecordingsDTO,
   MergeJobDTO,
   EventsDTO,
@@ -24,7 +27,7 @@ import type {
   PlatformDTO,
   PlatformsDTO,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -100,6 +103,11 @@ export const api = {
     request("PATCH", `/api/hub/rules/${encodeURIComponent(key)}`, input),
   deleteHubRule: (key: string): Promise<{ ok: boolean; key: string }> =>
     request("DELETE", `/api/hub/rules/${encodeURIComponent(key)}`),
+
+  // ── hub 任务(运行态:step/进度/ETA/日志)──────────────────────────────────────
+  listHubJobs: (): Promise<HubJobsDTO> => request("GET", "/api/hub/jobs"),
+  getHubJobLog: (streamKey: string): Promise<{ streamKey: string; log: string }> =>
+    request("GET", `/api/hub/jobs/${encodeURIComponent(streamKey)}/log`),
 
   // ── Global cookie ────────────────────────────────────────────────────────
   getCookie: (): Promise<CookieStatus> => request("GET", "/api/cookie"),

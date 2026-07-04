@@ -5,6 +5,7 @@ import { api, type HubRuleDTO } from "../api/client";
 import { hubEnabledAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { HubJobs } from "../components/HubJobs";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
@@ -95,6 +96,8 @@ export function HubPage(): ReactNode {
           新建规则
         </Button>
       </div>
+
+      <HubJobs />
 
       <section className="card overflow-hidden">
         <div className="overflow-x-auto">

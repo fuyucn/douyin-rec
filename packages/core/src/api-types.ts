@@ -36,6 +36,45 @@ export interface HubRuleDTO {
   anchorName?: string | null;
 }
 
+/** hub 任务的一次状态转换事件(时间线;GET /api/hub/jobs 内嵌)。 */
+export interface HubJobEventDTO {
+  /** pending / settling / syncing / merging / uploading / done / failed / needs_manual。 */
+  state: string;
+  /** 事件时刻(epoch ms)。 */
+  at: number;
+}
+
+/** 一个 hub 任务的运行视图(GET /api/hub/jobs)。展示当前 pipeline step / 进度 / 运行时间 / ETA。 */
+export interface HubJobDTO {
+  /** `{platform}:{roomSlug}:{date}`。 */
+  streamKey: string;
+  /** 当前状态(= 当前 pipeline step;终态 done/failed/needs_manual)。 */
+  state: string;
+  winnerTenant: string | null;
+  bv: string | null;
+  error: string | null;
+  /** 自动重试已失败次数。 */
+  fails: number;
+  updatedAt: number;
+  /** job 创建(首个事件)时刻;无 = null。 */
+  startedAt: number | null;
+  /** 状态转换时间线(升序)——每步起点 = 事件时刻,步骤耗时 = 相邻差。 */
+  events: HubJobEventDTO[];
+  /** 当前步已运行秒数(终态 = null)。 */
+  currentStepSec: number | null;
+  /** 当前步预计剩余秒数(粗估,按历史同步骤速率;终态/无依据 = null)。 */
+  etaSec: number | null;
+  /** winner 视频时长秒(ETA 换算基准;无 = null)。 */
+  videoDurationSec: number | null;
+  /** 该场是否有 job.log(有才给「查看日志」入口)。 */
+  hasLog: boolean;
+}
+
+/** GET /api/hub/jobs 响应。 */
+export interface HubJobsDTO {
+  jobs: HubJobDTO[];
+}
+
 /** POST /api/hub/rules + PATCH /api/hub/rules/:roomSlug 的请求体。 */
 export interface HubRulePayload {
   /** 房间地址或房间号(归一化解析出 roomSlug);create 必填。 */

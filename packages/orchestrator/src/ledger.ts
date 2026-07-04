@@ -16,6 +16,9 @@ export interface CandidateRow {
   updatedAt: number;
 }
 
+/** 一次状态转换事件(时间线复盘:每步起点 = 该事件时刻,步骤耗时 = 相邻事件差)。 */
+export interface JobEvent { streamKey: string; state: JobState; at: number; }
+
 export class SyncLedger {
   private db: DatabaseSync;
   constructor(dbPath: string) {
@@ -32,12 +35,34 @@ export class SyncLedger {
       startMs INTEGER NOT NULL, endMs INTEGER NOT NULL, totalGapSec REAL NOT NULL,
       isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
       PRIMARY KEY(streamKey, tenantId))`);
+    // 状态转换事件流(append-only):每次 setState/markDone/markFailed/upsertPending 追加一行。
+    // Web「hub 任务」页据此展示步骤时间线/当前步已运行时长/按历史步骤耗时估 ETA。
+    this.db.exec(`CREATE TABLE IF NOT EXISTS sync_job_events(
+      streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_job_events_key ON sync_job_events(streamKey, at)");
   }
-  private now(): number { return Number((this.db.prepare("SELECT unixepoch('now')*1000 AS t").get() as unknown as { t: number })!.t); }
+  private logEvent(streamKey: string, state: JobState, at: number): void {
+    this.db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(streamKey, state, at);
+  }
+  /** 上次发出的时间戳(见 now 的单调性保证)。 */
+  private lastNow = 0;
+  /**
+   * 毫秒时间戳,**进程内严格单调递增**(同毫秒内多次调用 +1 递推)。
+   * 旧实现用 sqlite unixepoch 只有秒精度 → 同秒内多次状态转换的 updatedAt/事件时序不可分,
+   * listRecent 排序与事件时间线都会乱。
+   */
+  private now(): number {
+    let t = Date.now();
+    if (t <= this.lastNow) t = this.lastNow + 1;
+    this.lastNow = t;
+    return t;
+  }
   upsertPending(streamKey: string): { isNew: boolean } {
     const existing = this.get(streamKey);
     if (existing) return { isNew: false };
-    this.db.prepare("INSERT INTO sync_jobs(streamKey,state,updatedAt) VALUES(?,?,?)").run(streamKey, "pending", this.now());
+    const at = this.now();
+    this.db.prepare("INSERT INTO sync_jobs(streamKey,state,updatedAt) VALUES(?,?,?)").run(streamKey, "pending", at);
+    this.logEvent(streamKey, "pending", at);
     return { isNew: true };
   }
   get(streamKey: string): JobRow | null {
@@ -45,16 +70,31 @@ export class SyncLedger {
     return r ?? null;
   }
   setState(streamKey: string, state: JobState, patch: { winnerTenant?: string; error?: string } = {}): void {
+    const at = this.now();
     this.db.prepare("UPDATE sync_jobs SET state=?, winnerTenant=COALESCE(?,winnerTenant), error=?, updatedAt=? WHERE streamKey=?")
-      .run(state, patch.winnerTenant ?? null, patch.error ?? null, this.now(), streamKey);
+      .run(state, patch.winnerTenant ?? null, patch.error ?? null, at, streamKey);
+    this.logEvent(streamKey, state, at);
   }
   markDone(streamKey: string, bv: string): void {
-    this.db.prepare("UPDATE sync_jobs SET state='done', bv=?, error=NULL, updatedAt=? WHERE streamKey=?").run(bv, this.now(), streamKey);
+    const at = this.now();
+    this.db.prepare("UPDATE sync_jobs SET state='done', bv=?, error=NULL, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
+    this.logEvent(streamKey, "done", at);
   }
   /** pipeline 抛错时:置 failed + 记 error + fails 自增(供重试上限判定)。 */
   markFailed(streamKey: string, error: string): void {
+    const at = this.now();
     this.db.prepare("UPDATE sync_jobs SET state='failed', error=?, fails=fails+1, updatedAt=? WHERE streamKey=?")
-      .run(error, this.now(), streamKey);
+      .run(error, at, streamKey);
+    this.logEvent(streamKey, "failed", at);
+  }
+  /** 某场的状态转换时间线(升序)。 */
+  getEvents(streamKey: string): JobEvent[] {
+    return this.db.prepare("SELECT * FROM sync_job_events WHERE streamKey=? ORDER BY at ASC, rowid ASC")
+      .all(streamKey) as unknown as JobEvent[];
+  }
+  /** 最近 N 个 job(updatedAt 倒序,Web hub 任务页用)。 */
+  listRecent(limit = 20): JobRow[] {
+    return this.db.prepare("SELECT * FROM sync_jobs ORDER BY updatedAt DESC LIMIT ?").all(limit) as unknown as JobRow[];
   }
   listActive(): JobRow[] {
     return this.db.prepare("SELECT * FROM sync_jobs WHERE state NOT IN('done','needs_manual')").all() as unknown as JobRow[];
