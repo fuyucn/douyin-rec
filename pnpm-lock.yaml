@@ -72,6 +72,9 @@ importers:
       '@drec/manager':
         specifier: workspace:*
         version: link:../manager
+      '@drec/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@drec/post-process':
         specifier: workspace:*
         version: link:../post-process
@@ -117,6 +120,9 @@ importers:
       '@drec/manager':
         specifier: workspace:*
         version: link:../manager
+      '@drec/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@drec/orchestrator':
         specifier: workspace:*
         version: link:../orchestrator
@@ -173,6 +179,12 @@ importers:
   packages/ffmpeg-recorder-extra: {}
 
   packages/manager:
+    dependencies:
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/observability:
     dependencies:
       '@drec/core':
         specifier: workspace:*

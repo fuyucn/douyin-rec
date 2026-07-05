@@ -6,6 +6,7 @@
   "main": "./src/cli.ts",
   "dependencies": {
     "@drec/core": "workspace:*",
+    "@drec/observability": "workspace:*",
     "@drec/manager": "workspace:*",
     "@drec/post-process": "workspace:*",
     "@drec/app": "workspace:*",
