@@ -32,7 +32,7 @@ function makeRec(overrides: Partial<NodeRecording> = {}): NodeRecording {
 function makeTransport(id: string, recordings: NodeRecording[]): Transport {
   return {
     id,
-    listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ tenantId: id, recordings }),
+    listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ workerId: id, recordings }),
     isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(true),
     pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
   };
@@ -63,8 +63,8 @@ const fastSleep = async (_ms: number): Promise<void> => {};
 describe("Reconciler", () => {
   it("场景A: 两 transport 各报同一场 → 聚成 1 簇 → runPipeline 调 1 次，ledger=done", async () => {
     const ledger = freshLedger();
-    const rec1 = makeRec({ tenantId: "node-1" } as Partial<NodeRecording>);
-    const rec2 = makeRec({ tenantId: "node-2" } as Partial<NodeRecording>);
+    const rec1 = makeRec({ workerId: "node-1" } as Partial<NodeRecording>);
+    const rec2 = makeRec({ workerId: "node-2" } as Partial<NodeRecording>);
 
     const t1 = makeTransport("node-1", [rec1]);
     const t2 = makeTransport("node-2", [rec2]);
@@ -98,7 +98,7 @@ describe("Reconciler", () => {
     // Both transports had same roomSlug + overlapping time → should cluster into 1 broadcast
     expect(spyRunPipeline).toHaveBeenCalledTimes(1);
     expect(spyCalls).toHaveLength(1);
-    // The single broadcast should include both tenants as members
+    // The single broadcast should include both workers as members
     expect(spyCalls[0].members).toHaveLength(2);
     // Ledger should be done
     const job = ledger.get(spyCalls[0].streamKey);
@@ -191,7 +191,7 @@ describe("Reconciler", () => {
     let callCount = 0;
     const t1: Transport = {
       id: "node-1",
-      listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ tenantId: "node-1", recordings: [rec] }),
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ workerId: "node-1", recordings: [rec] }),
       isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockImplementation(async () => {
         callCount += 1;
         return callCount >= 3; // false, false, then true
@@ -235,7 +235,7 @@ describe("Reconciler", () => {
 
     const t1: Transport = {
       id: "node-slow",
-      listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ tenantId: "node-slow", recordings: [rec] }),
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ workerId: "node-slow", recordings: [rec] }),
       isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(false), // 一直在录
       pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
     };
@@ -295,7 +295,7 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
-  it("场景E(防锁死): 一个租户 listInventory 永久挂起 → 超时降级为空,reconcile 仍完成且处理其余租户", async () => {
+  it("场景E(防锁死): 一个worker listInventory 永久挂起 → 超时降级为空,reconcile 仍完成且处理其余worker", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const ledger = freshLedger();
     const t1 = makeTransport("node-1", [makeRec()]);
@@ -316,7 +316,7 @@ describe("Reconciler", () => {
     const reconciler = new Reconciler({
       platform: "douyin", transports, ledger, pipelineDeps,
       runPipeline: spyRunPipeline, settle: { maxWaitMs: 50, pollMs: 1 }, sleep: fastSleep,
-      inventoryTimeoutMs: 30,   // 挂起的租户 30ms 后降级为空
+      inventoryTimeoutMs: 30,   // 挂起的worker 30ms 后降级为空
     });
 
     // 不挂起、不抛错,且仍处理了 node-1 的那一簇(单成员)

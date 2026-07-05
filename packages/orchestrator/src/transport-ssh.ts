@@ -58,7 +58,7 @@ export class SshTransport implements Transport {
     // 当命令、其余成位置参数 → 实际只跑 `node`(无脚本)→ 空输出 → JSON.parse 抛错 → 该节点恒缺席。
     const out = await this.run([cmd]);
     const parsed = JSON.parse(out) as { recordings: NodeRecording[] };
-    return { tenantId: this.id, recordings: parsed.recordings };
+    return { workerId: this.id, recordings: parsed.recordings };
   }
   async isDone(roomSlug: string): Promise<boolean> {
     // 同 listInventory:命令作单个字符串传(远端 shell 执行,glob/管道生效),不包 bash -lc。

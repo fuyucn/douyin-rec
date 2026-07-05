@@ -202,7 +202,7 @@ export function RunCard({ job, onOpenLog }: { job: HubJobDTO; onOpenLog: (key: s
       </div>
       <PipelineFlow job={job} />
       <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-2 text-[12px] text-muted">
-        {job.winnerTenant && <span>选优: {job.winnerTenant}</span>}
+        {job.winnerWorker && <span>选优: {job.winnerWorker}</span>}
         {job.videoDurationSec != null && <span>时长: {humanSec(Math.round(job.videoDurationSec))}</span>}
         {job.fails > 0 && <span style={{ color: "var(--warning)" }}>已重试 {job.fails} 次</span>}
         {job.bv && (

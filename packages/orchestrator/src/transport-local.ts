@@ -29,7 +29,7 @@ export class LocalTransport implements Transport {
   async listInventory(): Promise<NodeInventory> {
     const taskRooms = this.resolveTaskRooms();
     const recordings = await scanRecordings(this.o.recordingsDir, taskRooms, this.o.ffprobe);
-    return { tenantId: this.id, recordings };
+    return { workerId: this.id, recordings };
   }
 
   /** 该 room 还在本机录制 → 未收播(false);否则已收播(true)。注入 isRoomRecording 才生效,否则恒 true(旧行为)。 */

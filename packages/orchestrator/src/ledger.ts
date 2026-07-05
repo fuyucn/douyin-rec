@@ -1,12 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
 
 export type JobState = "pending"|"settling"|"syncing"|"merging"|"uploading"|"done"|"failed"|"needs_manual";
-export interface JobRow { streamKey: string; state: JobState; winnerTenant?: string; bv?: string; error?: string; fails: number; updatedAt: number; }
+export interface JobRow { streamKey: string; state: JobState; winnerWorker?: string; bv?: string; error?: string; fails: number; updatedAt: number; }
 
 /** 一个节点候选的选优指标(落库供复盘"为什么这台赢")。 */
 export interface CandidateRow {
   streamKey: string;
-  tenantId: string;
+  workerId: string;
   coverage: number;
   durationSec: number;
   startMs: number;
@@ -33,16 +33,19 @@ export class SyncLedger {
     this.db = new DatabaseSync(dbPath);
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_jobs(
       streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
-      winnerTenant TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+      winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
     // 既有库迁移:补 fails 列(已存在则忽略)。
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN fails INTEGER NOT NULL DEFAULT 0"); } catch { /* 列已存在 */ }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
-      streamKey TEXT NOT NULL, tenantId TEXT NOT NULL,
+      streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
       coverage REAL NOT NULL, durationSec REAL NOT NULL,
       startMs INTEGER NOT NULL, endMs INTEGER NOT NULL, totalGapSec REAL NOT NULL,
       isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
-      PRIMARY KEY(streamKey, tenantId))`);
+      PRIMARY KEY(streamKey, workerId))`);
+    // 既有库列改名 tenant→worker(fresh DB 上旧列不存在会抛 → 吞掉;SQLite ≥3.25 支持 PK 列改名)。
+    try { this.db.exec("ALTER TABLE sync_jobs RENAME COLUMN winnerTenant TO winnerWorker"); } catch { /* 已是新列名或 fresh */ }
+    try { this.db.exec("ALTER TABLE sync_candidates RENAME COLUMN tenantId TO workerId"); } catch { /* 已是新列名或 fresh */ }
     // 状态转换事件流(append-only):每次 setState/markDone/markFailed/upsertPending 追加一行。
     // Web「hub 任务」页据此展示步骤时间线/当前步已运行时长/按历史步骤耗时估 ETA。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_job_events(
@@ -92,10 +95,10 @@ export class SyncLedger {
     const r = this.db.prepare("SELECT * FROM sync_jobs WHERE streamKey=?").get(streamKey) as unknown as JobRow | undefined;
     return r ?? null;
   }
-  setState(streamKey: string, state: JobState, patch: { winnerTenant?: string; error?: string } = {}): void {
+  setState(streamKey: string, state: JobState, patch: { winnerWorker?: string; error?: string } = {}): void {
     const at = this.now();
-    this.db.prepare("UPDATE sync_jobs SET state=?, winnerTenant=COALESCE(?,winnerTenant), error=?, updatedAt=? WHERE streamKey=?")
-      .run(state, patch.winnerTenant ?? null, patch.error ?? null, at, streamKey);
+    this.db.prepare("UPDATE sync_jobs SET state=?, winnerWorker=COALESCE(?,winnerWorker), error=?, updatedAt=? WHERE streamKey=?")
+      .run(state, patch.winnerWorker ?? null, patch.error ?? null, at, streamKey);
     this.logEvent(streamKey, state, at);
   }
   markDone(streamKey: string, bv: string): void {
@@ -122,24 +125,24 @@ export class SyncLedger {
   listActive(): JobRow[] {
     return this.db.prepare("SELECT * FROM sync_jobs WHERE state NOT IN('done','needs_manual')").all() as unknown as JobRow[];
   }
-  /** 记录某场各节点的选优候选指标(幂等覆盖)。winnerTenantId 标记哪台胜出。 */
+  /** 记录某场各节点的选优候选指标(幂等覆盖)。winnerWorkerId 标记哪台胜出。 */
   recordCandidates(
     streamKey: string,
-    cands: Array<{ tenantId: string; coverage: number; durationSec: number; startMs: number; endMs: number; totalGapSec: number }>,
-    winnerTenantId?: string,
+    cands: Array<{ workerId: string; coverage: number; durationSec: number; startMs: number; endMs: number; totalGapSec: number }>,
+    winnerWorkerId?: string,
   ): void {
     const now = this.now();
     const stmt = this.db.prepare(
-      `INSERT INTO sync_candidates(streamKey,tenantId,coverage,durationSec,startMs,endMs,totalGapSec,isWinner,updatedAt)
+      `INSERT INTO sync_candidates(streamKey,workerId,coverage,durationSec,startMs,endMs,totalGapSec,isWinner,updatedAt)
        VALUES(?,?,?,?,?,?,?,?,?)
-       ON CONFLICT(streamKey,tenantId) DO UPDATE SET
+       ON CONFLICT(streamKey,workerId) DO UPDATE SET
          coverage=excluded.coverage, durationSec=excluded.durationSec,
          startMs=excluded.startMs, endMs=excluded.endMs, totalGapSec=excluded.totalGapSec,
          isWinner=excluded.isWinner, updatedAt=excluded.updatedAt`,
     );
     for (const c of cands) {
-      stmt.run(streamKey, c.tenantId, c.coverage, c.durationSec, c.startMs, c.endMs, c.totalGapSec,
-        c.tenantId === winnerTenantId ? 1 : 0, now);
+      stmt.run(streamKey, c.workerId, c.coverage, c.durationSec, c.startMs, c.endMs, c.totalGapSec,
+        c.workerId === winnerWorkerId ? 1 : 0, now);
     }
   }
   /** 取某场的候选明细(复盘用)。 */

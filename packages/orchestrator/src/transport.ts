@@ -1,4 +1,4 @@
-export interface TenantConfig { id: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string; }
+export interface WorkerConfig { id: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string; name?: string; }
 
 export interface NodeRecording {
   roomSlug: string;
@@ -11,7 +11,7 @@ export interface NodeRecording {
   endMs: number;             // 末段收录 epoch ms
   totalGapSec: number;       // 断流缺口总秒数(来自 gaps sidecar)
 }
-export interface NodeInventory { tenantId: string; recordings: NodeRecording[]; }
+export interface NodeInventory { workerId: string; recordings: NodeRecording[]; }
 
 export interface Transport {
   readonly id: string;
@@ -27,11 +27,11 @@ export interface Transport {
   cleanup?(paths: string[]): Promise<void>;
 }
 
-type Factory = (cfg: TenantConfig) => Transport;
+type Factory = (cfg: WorkerConfig) => Transport;
 const registry = new Map<string, Factory>();
 
 export function registerTransport(kind: string, factory: Factory): void { registry.set(kind, factory); }
-export function getTransport(cfg: TenantConfig): Transport {
+export function getTransport(cfg: WorkerConfig): Transport {
   const f = registry.get(cfg.kind);
   if (!f) throw new Error(`未注册的 transport kind: ${cfg.kind}`);
   return f(cfg);

@@ -40,8 +40,8 @@ describe("ensureHubConfigExample（init-time scaffold）", () => {
     // 抽查关键字段(占位模型:dataRoot=/data;upload 默认在 uploadDefaults)。
     const cfg = JSON.parse(written);
     expect(cfg.platform).toBe("douyin");
-    expect(cfg.tenants[0].kind).toBe("local");
-    expect(cfg.tenants[1].kind).toBe("tailscale-ssh");
+    expect(cfg.workers[0].kind).toBe("local");
+    expect(cfg.workers[1].kind).toBe("tailscale-ssh");
     expect(cfg.uploadDefaults.tid).toBe(21);
     expect(cfg.settleMs).toBe(90000);
   });

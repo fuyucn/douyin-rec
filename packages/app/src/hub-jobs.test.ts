@@ -11,13 +11,13 @@ function makeSyncDb(): { dbPath: string; db: DatabaseSync } {
   const dbPath = join(dir, "x-sync.db");
   const db = new DatabaseSync(dbPath);
   db.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
-    winnerTenant TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
   db.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
   db.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL)`);
-  db.exec(`CREATE TABLE sync_candidates(streamKey TEXT NOT NULL, tenantId TEXT NOT NULL,
+  db.exec(`CREATE TABLE sync_candidates(streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
     coverage REAL NOT NULL, durationSec REAL NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER NOT NULL,
     totalGapSec REAL NOT NULL, isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
-    PRIMARY KEY(streamKey, tenantId))`);
+    PRIMARY KEY(streamKey, workerId))`);
   return { dbPath, db };
 }
 
@@ -25,10 +25,10 @@ const T0 = 1_700_000_000_000;
 
 function seedJob(db: DatabaseSync, key: string, states: Array<[string, number]>, durationSec: number, opts: { bv?: string } = {}): void {
   const [lastState, lastAt] = states[states.length - 1];
-  db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerTenant,bv,fails,updatedAt) VALUES(?,?,?,?,0,?)")
+  db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,fails,updatedAt) VALUES(?,?,?,?,0,?)")
     .run(key, lastState, "local", opts.bv ?? null, lastAt);
   for (const [s, at] of states) db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(key, s, at);
-  db.prepare(`INSERT INTO sync_candidates(streamKey,tenantId,coverage,durationSec,startMs,endMs,totalGapSec,isWinner,updatedAt)
+  db.prepare(`INSERT INTO sync_candidates(streamKey,workerId,coverage,durationSec,startMs,endMs,totalGapSec,isWinner,updatedAt)
     VALUES(?,?,1,?,0,0,0,1,?)`).run(key, "local", durationSec, lastAt);
 }
 

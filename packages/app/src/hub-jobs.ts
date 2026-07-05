@@ -19,7 +19,7 @@ export interface HubJobStep { step: string; phase: string; at: number; }
 export interface HubJobView {
   streamKey: string;
   state: string;
-  winnerTenant: string | null;
+  winnerWorker: string | null;
   bv: string | null;
   error: string | null;
   fails: number;
@@ -64,7 +64,7 @@ export function jobLogPath(streamKey: string, stageDir = hubStageDir()): string 
   return join(stageDir, sanitizeKey(streamKey), "job.log");
 }
 
-interface RawJob { streamKey: string; state: string; winnerTenant: string | null; bv: string | null; error: string | null; fails: number; updatedAt: number; }
+interface RawJob { streamKey: string; state: string; winnerWorker: string | null; bv: string | null; error: string | null; fails: number; updatedAt: number; }
 
 /**
  * 历史步骤速率:最近 done 的 job 里,step 耗时 / winner 视频时长 的中位数。
@@ -164,7 +164,7 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
       }
       return {
         streamKey: j.streamKey, state: j.state,
-        winnerTenant: j.winnerTenant ?? null, bv: j.bv ?? null, error: j.error ?? null,
+        winnerWorker: j.winnerWorker ?? null, bv: j.bv ?? null, error: j.error ?? null,
         fails: Number(j.fails ?? 0), updatedAt: Number(j.updatedAt),
         startedAt: events.length ? Number(events[0].at) : null,
         events: events.map((e) => ({ state: e.state, at: Number(e.at) })),

@@ -59,7 +59,7 @@ export interface HubJobDTO {
   streamKey: string;
   /** 当前状态(= 当前 pipeline step;终态 done/failed/needs_manual)。 */
   state: string;
-  winnerTenant: string | null;
+  winnerWorker: string | null;
   bv: string | null;
   error: string | null;
   /** 自动重试已失败次数。 */

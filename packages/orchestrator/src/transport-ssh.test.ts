@@ -14,7 +14,7 @@ describe("SshTransport", () => {
     const t = new SshTransport({ id: "vps", host: "h", dataRoot: "~/drec",
       run: async () => fakeJson, rsync: async () => {} });
     const inv = await t.listInventory();
-    expect(inv.tenantId).toBe("vps");
+    expect(inv.workerId).toBe("vps");
     expect(inv.recordings[0].roomSlug).toBe("411");
     expect(inv.recordings[0].durationSec).toBe(3600);
   });

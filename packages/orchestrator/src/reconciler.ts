@@ -65,18 +65,18 @@ export class Reconciler {
     this.resolveCfg = deps.resolveCfg;
   }
 
-  /** listInventory 包超时:挂起超过 inventoryTimeoutMs 即降级为空(该租户本轮缺席),不锁死整轮。 */
+  /** listInventory 包超时:挂起超过 inventoryTimeoutMs 即降级为空(该 worker 本轮缺席),不锁死整轮。 */
   private async inventoryWithTimeout(t: Transport): Promise<NodeInventory> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<NodeInventory>((resolve) => {
       timer = setTimeout(() => {
-        console.warn(`[reconciler] 租户 ${t.id} listInventory 超时 ${this.inventoryTimeoutMs}ms,本轮按空处理`);
-        resolve({ tenantId: t.id, recordings: [] });
+        console.warn(`[reconciler] worker ${t.id} listInventory 超时 ${this.inventoryTimeoutMs}ms,本轮按空处理`);
+        resolve({ workerId: t.id, recordings: [] });
       }, this.inventoryTimeoutMs);
     });
     try {
       return await Promise.race([
-        t.listInventory().catch(() => ({ tenantId: t.id, recordings: [] })),
+        t.listInventory().catch(() => ({ workerId: t.id, recordings: [] })),
         timeout,
       ]);
     } finally {
@@ -87,21 +87,21 @@ export class Reconciler {
   /**
    * 轮询各成员 isDone(roomSlug) 直到全部收播或 maxWaitMs 超时。无 isDone 的 transport 视为已收播。
    * isDone 抛错按"未收播"算(但不中止循环)。
-   * **返回仍未收播的成员 key 集合(`tenantId:roomSlug`)** —— 调用方据此跳过仍在录制的场,
+   * **返回仍未收播的成员 key 集合(`workerId:roomSlug`)** —— 调用方据此跳过仍在录制的场,
    * 避免边录边合并残片(Bug B:之前超时即"继续对账"处理残片 → job 标终态 → 真收播被跳过)。
    */
   private async settleAll(broadcasts: ReturnType<typeof clusterBroadcasts>): Promise<Set<string>> {
     const { maxWaitMs, pollMs } = this.settle;
     const deadline = Date.now() + maxWaitMs;
 
-    // Collect unique (tenantId, roomSlug) pairs across all broadcasts
+    // Collect unique (workerId, roomSlug) pairs across all broadcasts
     const pending = new Set<string>();
-    const memberMap = new Map<string, { tenantId: string; roomSlug: string }>();
+    const memberMap = new Map<string, { workerId: string; roomSlug: string }>();
     for (const b of broadcasts) {
       for (const m of b.members) {
-        const key = `${m.tenantId}:${m.rec.roomSlug}`;
+        const key = `${m.workerId}:${m.rec.roomSlug}`;
         pending.add(key);
-        memberMap.set(key, { tenantId: m.tenantId, roomSlug: m.rec.roomSlug });
+        memberMap.set(key, { workerId: m.workerId, roomSlug: m.rec.roomSlug });
       }
     }
 
@@ -111,8 +111,8 @@ export class Reconciler {
       // Check all pending members this round
       const toRemove: string[] = [];
       for (const key of pending) {
-        const { tenantId, roomSlug } = memberMap.get(key)!;
-        const transport = this.transports.get(tenantId);
+        const { workerId, roomSlug } = memberMap.get(key)!;
+        const transport = this.transports.get(workerId);
         if (!transport || typeof transport.isDone !== "function") {
           // Transport doesn't support isDone → treat as done
           toRemove.push(key);
@@ -134,8 +134,8 @@ export class Reconciler {
     // Log any members that timed out
     if (pending.size > 0) {
       const timedOut = [...pending].map((k) => {
-        const { tenantId, roomSlug } = memberMap.get(k)!;
-        return `${tenantId}/${roomSlug}`;
+        const { workerId, roomSlug } = memberMap.get(k)!;
+        return `${workerId}/${roomSlug}`;
       });
       console.warn(
         `[reconciler] settle 超时 — 以下节点仍在录制，本轮跳过其所在场，待录完后续轮再处理: ${timedOut.join(", ")}`,
@@ -154,7 +154,7 @@ export class Reconciler {
     // 2. Cluster recordings across nodes into broadcasts —— 按每条录像的 platform 聚类(多平台)。
     //    this.platform 仅作旧录像(meta 无 platform)的兜底默认。
     const broadcasts = clusterBroadcasts(
-      invs.map((i) => ({ tenantId: i.tenantId, recordings: i.recordings })),
+      invs.map((i) => ({ workerId: i.workerId, recordings: i.recordings })),
       undefined,
       this.platform,
     );
@@ -166,7 +166,7 @@ export class Reconciler {
     for (const b of broadcasts) {
       try {
         // 仍有成员在录制 → 本轮跳过(不建 job、不合并残片),待其录完的后续轮再处理。
-        if (b.members.some((m) => stillRecording.has(`${m.tenantId}:${m.rec.roomSlug}`))) continue;
+        if (b.members.some((m) => stillRecording.has(`${m.workerId}:${m.rec.roomSlug}`))) continue;
 
         // 按任务取该房间的 pipeline 配置;resolveCfg 返回 null = 该房间没开 hub → 跳过。
         // 不提供 resolveCfg → 用全局 pipelineDeps.cfg(兼容旧的全局模式)。

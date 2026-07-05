@@ -85,7 +85,7 @@ export async function runPipeline(
   const jlog = injected
     ? (msg: string): void => injected.info(msg)
     : makeJobLog(path.join(deps.cfg.stageDir, sanitizeKey(b.streamKey)));
-  jlog(`=== pipeline start ${b.streamKey} 成员=[${b.members.map((m) => m.tenantId).join(",")}] mode=${deps.cfg.uploadMode} ===`);
+  jlog(`=== pipeline start ${b.streamKey} 成员=[${b.members.map((m) => m.workerId).join(",")}] mode=${deps.cfg.uploadMode} ===`);
   try {
     const r = await runPipelineInner(b, deps, jlog);
     jlog(`=== pipeline end: ${r.state}${r.bv ? ` bv=${r.bv}` : ""} ===`);
@@ -124,12 +124,12 @@ async function runPipelineInner(
   // 无 exists 能力的 transport 视为信任存在;exists 抛错按缺失剔除。
   const presentMembers = [];
   for (const m of b.members) {
-    const tp = transports.get(m.tenantId);
+    const tp = transports.get(m.workerId);
     const ok = tp?.exists ? await tp.exists(m.rec.tsFiles).catch(() => false) : true;
     if (ok) presentMembers.push(m);
     else {
-      console.warn(`[pipeline] ${streamKey} 剔除成员 ${m.tenantId}:文件已不存在`);
-      jlog(`剔除成员 ${m.tenantId}:文件已不存在`);
+      console.warn(`[pipeline] ${streamKey} 剔除成员 ${m.workerId}:文件已不存在`);
+      jlog(`剔除成员 ${m.workerId}:文件已不存在`);
     }
   }
   const candidates = { ...b, members: presentMembers };
@@ -146,29 +146,29 @@ async function runPipelineInner(
   }
 
   const winner = selection.winner;
-  jlog(`选优: winner=${winner.tenantId} clean=${selection.clean} 各节点=${JSON.stringify(selection.perNode)}`);
+  jlog(`选优: winner=${winner.workerId} clean=${selection.clean} 各节点=${JSON.stringify(selection.perNode)}`);
 
   // 落库选优候选明细(coverage/时长/起止/缺口 + 谁胜出),供事后复盘"为什么这台赢"。
-  ledger.recordCandidates(streamKey, selection.perNode, winner.tenantId);
+  ledger.recordCandidates(streamKey, selection.perNode, winner.workerId);
 
-  // 没有任何 tenant 完整录全(所有节点都断流过)→ 直接中断 + 通知,**绝不删源**(保护数据,
+  // 没有任何 worker 完整录全(所有节点都断流过)→ 直接中断 + 通知,**绝不删源**(保护数据,
   // 留人工对齐拼接)。跨会话自动拼接是 followup(见 docs/multi-node-sync-followups.md),暂不自动做。
-  // selection.clean=true ⇔ 存在「单会话且 gap≤阈值」的完整 tenant;false ⇔ 都断流。
+  // selection.clean=true ⇔ 存在「单会话且 gap≤阈值」的完整 worker;false ⇔ 都断流。
   if (!selection.clean) {
     jlog(`所有节点均断流未录全 → 中断留人工(绝不删源)`);
-    ledger.setState(streamKey, "needs_manual", { winnerTenant: winner.tenantId });
+    ledger.setState(streamKey, "needs_manual", { winnerWorker: winner.workerId });
     notify({
       kind: "error",
       stage: "同步",
-      message: `所有节点均断流未录全,最完整=${winner.tenantId}(${Math.round(winner.rec.durationSec)}s),已保留全部源,请人工对齐拼接。覆盖度:${JSON.stringify(selection.perNode)}`,
+      message: `所有节点均断流未录全,最完整=${winner.workerId}(${Math.round(winner.rec.durationSec)}s),已保留全部源,请人工对齐拼接。覆盖度:${JSON.stringify(selection.perNode)}`,
     });
     return { state: "needs_manual" };
   }
 
   // Mark syncing and pull files from winner node into a per-broadcast sub-directory
-  ledger.setState(streamKey, "syncing", { winnerTenant: winner.tenantId });
-  const transport = transports.get(winner.tenantId);
-  if (!transport) throw new Error(`No transport for tenant: ${winner.tenantId}`);
+  ledger.setState(streamKey, "syncing", { winnerWorker: winner.workerId });
+  const transport = transports.get(winner.workerId);
+  if (!transport) throw new Error(`No transport for worker: ${winner.workerId}`);
 
   // stageSub = stageDir/<sanitized-streamKey> — isolates each broadcast's files
   const stageSub = path.join(cfg.stageDir, sanitizeKey(streamKey));
@@ -177,7 +177,7 @@ async function runPipelineInner(
     ...winner.rec.tsFiles,
     ...(winner.rec.xmlPath ? [winner.rec.xmlPath] : []),
   ];
-  jlog(`pull 开始: ${filesToPull.length} 个文件 ← ${winner.tenantId}`);
+  jlog(`pull 开始: ${filesToPull.length} 个文件 ← ${winner.workerId}`);
   const tPull = Date.now();
   ledger.logStep(streamKey, "pull", "start");
   await transport.pull(filesToPull, stageSub);
@@ -242,7 +242,7 @@ async function runPipelineInner(
   const cleanupSources = async (): Promise<void> => {
     if (!clean.sourceAfterDone) return;
     for (const m of candidates.members) {
-      await transports.get(m.tenantId)?.cleanup?.(sourcePathsOf(m)).catch(() => {});
+      await transports.get(m.workerId)?.cleanup?.(sourcePathsOf(m)).catch(() => {});
     }
   };
 

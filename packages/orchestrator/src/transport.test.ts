@@ -5,7 +5,7 @@ describe("transport registry", () => {
   beforeEach(() => _resetTransports());
   it("注册后能按 kind 取到，cfg 透传", () => {
     registerTransport("fake", (cfg) => ({
-      id: cfg.id, async listInventory() { return { tenantId: cfg.id, recordings: [] }; },
+      id: cfg.id, async listInventory() { return { workerId: cfg.id, recordings: [] }; },
       async isDone() { return true; }, async pull() {},
     }));
     const t = getTransport({ id: "n1", kind: "fake" });

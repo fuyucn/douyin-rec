@@ -1,6 +1,6 @@
 import type { NodeRecording } from "./transport.js";
 
-export interface BroadcastMember { tenantId: string; rec: NodeRecording; }
+export interface BroadcastMember { workerId: string; rec: NodeRecording; }
 export interface Broadcast { streamKey: string; platform: string; roomSlug: string; startMs: number; members: BroadcastMember[]; }
 
 const DEFAULT_TOLERANCE = 5 * 60_000;
@@ -19,12 +19,12 @@ function hhmm(ms: number): string { const d = new Date(ms); return `${pad(d.getH
  * platform 取自每条 rec(scan 从 meta.json 读;旧录像 fallback douyin);defaultPlatform 仅作极端兜底。
  */
 export function clusterBroadcasts(
-  byTenant: { tenantId: string; recordings: NodeRecording[] }[],
+  byTenant: { workerId: string; recordings: NodeRecording[] }[],
   overlapToleranceMs = DEFAULT_TOLERANCE,
   defaultPlatform = "douyin",
 ): Broadcast[] {
-  // 展平成 (tenantId, rec)，按 platform+roomSlug 分组(键含平台),组内按 startMs 排序后区间合并聚簇。
-  const flat: BroadcastMember[] = byTenant.flatMap((t) => t.recordings.map((rec) => ({ tenantId: t.tenantId, rec })));
+  // 展平成 (workerId, rec)，按 platform+roomSlug 分组(键含平台),组内按 startMs 排序后区间合并聚簇。
+  const flat: BroadcastMember[] = byTenant.flatMap((t) => t.recordings.map((rec) => ({ workerId: t.workerId, rec })));
   const groups = new Map<string, BroadcastMember[]>();
   for (const m of flat) {
     const plat = m.rec.platform || defaultPlatform;

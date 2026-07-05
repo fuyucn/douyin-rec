@@ -27,7 +27,7 @@ function makeRec(overrides: Partial<NodeRecording> = {}): NodeRecording {
   };
 }
 
-function makeBroadcast(members: Array<{ tenantId: string; rec: NodeRecording }>): Broadcast {
+function makeBroadcast(members: Array<{ workerId: string; rec: NodeRecording }>): Broadcast {
   return {
     streamKey: "douyin:test-room:2026-06-27",
     platform: "douyin",
@@ -37,10 +37,10 @@ function makeBroadcast(members: Array<{ tenantId: string; rec: NodeRecording }>)
   };
 }
 
-function makeTransport(tenantId: string, exists = true): Transport {
+function makeTransport(workerId: string, exists = true): Transport {
   return {
-    id: tenantId,
-    listInventory: vi.fn().mockResolvedValue({ tenantId, recordings: [] }),
+    id: workerId,
+    listInventory: vi.fn().mockResolvedValue({ workerId, recordings: [] }),
     isDone: vi.fn().mockResolvedValue(true),
     pull: vi.fn().mockResolvedValue(undefined),
     exists: vi.fn().mockResolvedValue(exists),
@@ -102,8 +102,8 @@ describe("runPipeline", () => {
     const lines: string[] = [];
     const fakeLogger = { info: (...a: unknown[]) => lines.push(a.join(" ")), warn: () => {}, error: () => {} };
     const broadcast = makeBroadcast([
-      { tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
-      { tenantId: "node-2", rec: makeRec({ totalGapSec: 200 }) },
+      { workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
+      { workerId: "node-2", rec: makeRec({ totalGapSec: 200 }) },
     ]);
     const deps = makeDeps({ makeRunLogger: () => fakeLogger });
     deps.ledger.upsertPending(broadcast.streamKey);
@@ -118,8 +118,8 @@ describe("runPipeline", () => {
     const dirtyRec = makeRec({ totalGapSec: 200 });   // loser: totalGapSec=200
 
     const broadcast = makeBroadcast([
-      { tenantId: "node-1", rec: cleanRec },
-      { tenantId: "node-2", rec: dirtyRec },
+      { workerId: "node-1", rec: cleanRec },
+      { workerId: "node-2", rec: dirtyRec },
     ]);
 
     const deps = makeDeps();
@@ -185,8 +185,8 @@ describe("runPipeline", () => {
     const { readFileSync, rmSync } = await import("node:fs");
     rmSync(`${STAGE_SUB}/job.log`, { force: true });   // 场景1可能已写过,清掉保证本用例独立
     const broadcast = makeBroadcast([
-      { tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
-      { tenantId: "node-2", rec: makeRec({ totalGapSec: 200 }) },
+      { workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
+      { workerId: "node-2", rec: makeRec({ totalGapSec: 200 }) },
     ]);
     const deps = makeDeps();
     deps.ledger.upsertPending(broadcast.streamKey);
@@ -200,11 +200,11 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
-  it("场景2: 都断(无完整 tenant) → 直接中断+通知,**不 pull/不 merge/不删源**, ledger=needs_manual", async () => {
-    // 两节点各 1 会话但都断流(gap 200 > 30)→ 无完整 tenant → 直接中断,保留全部源。
+  it("场景2: 都断(无完整 worker) → 直接中断+通知,**不 pull/不 merge/不删源**, ledger=needs_manual", async () => {
+    // 两节点各 1 会话但都断流(gap 200 > 30)→ 无完整 worker → 直接中断,保留全部源。
     const broadcast = makeBroadcast([
-      { tenantId: "node-1", rec: makeRec({ totalGapSec: 200 }) },
-      { tenantId: "node-2", rec: makeRec({ totalGapSec: 200 }) },
+      { workerId: "node-1", rec: makeRec({ totalGapSec: 200 }) },
+      { workerId: "node-2", rec: makeRec({ totalGapSec: 200 }) },
     ]);
 
     const deps = makeDeps();
@@ -235,11 +235,11 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
-  it("场景2b: 同 tenant 断流多会话(无完整 tenant)→ 同样直接中断+保留源", async () => {
-    // node-1 断流成 2 会话(各 gap=0),没有完整 tenant → 不 pull/merge,不删源。
+  it("场景2b: 同 worker 断流多会话(无完整 worker)→ 同样直接中断+保留源", async () => {
+    // node-1 断流成 2 会话(各 gap=0),没有完整 worker → 不 pull/merge,不删源。
     const broadcast = makeBroadcast([
-      { tenantId: "node-1", rec: makeRec({ sessionBase: "主播名_2026-06-27_08-00-00", durationSec: 1800, totalGapSec: 0 }) },
-      { tenantId: "node-1", rec: makeRec({ sessionBase: "主播名_2026-06-27_08-35-00", durationSec: 3000, totalGapSec: 0 }) },
+      { workerId: "node-1", rec: makeRec({ sessionBase: "主播名_2026-06-27_08-00-00", durationSec: 1800, totalGapSec: 0 }) },
+      { workerId: "node-1", rec: makeRec({ sessionBase: "主播名_2026-06-27_08-35-00", durationSec: 3000, totalGapSec: 0 }) },
     ]);
     const deps = makeDeps({ cfg: { ...makeDeps().cfg, cleanup: { sourceAfterDone: true } } });
     deps.ledger.upsertPending(broadcast.streamKey);
@@ -252,7 +252,7 @@ describe("runPipeline", () => {
   });
 
   it("场景3: danmu 超 16GB → splitForUpload 切 2 段,upload 收到 danmu 组含两 part(#1+#3)", async () => {
-    const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
     const deps = makeDeps({
       // 模拟今天:danmu 超限切 2 段,livechat 不切
       splitForUpload: async (mp4: string) =>
@@ -280,8 +280,8 @@ describe("runPipeline", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     // node-1 时长更长(本应胜),但其文件已不存在(exists=false)→ 应被剔除,winner=node-2
     const broadcast = makeBroadcast([
-      { tenantId: "node-1", rec: makeRec({ durationSec: 9999, totalGapSec: 0 }) },
-      { tenantId: "node-2", rec: makeRec({ durationSec: 3600, totalGapSec: 0 }) },
+      { workerId: "node-1", rec: makeRec({ durationSec: 9999, totalGapSec: 0 }) },
+      { workerId: "node-2", rec: makeRec({ durationSec: 3600, totalGapSec: 0 }) },
     ]);
     const deps = makeDeps();
     deps.transports.set("node-1", makeTransport("node-1", false)); // 文件缺失
@@ -291,7 +291,7 @@ describe("runPipeline", () => {
     const result = await runPipeline(broadcast, deps);
     expect(result.state).toBe("done");
     // winner 应是 node-2(node-1 被剔除),pull 在 node-2 上调用
-    expect(deps.ledger.get(broadcast.streamKey)?.winnerTenant).toBe("node-2");
+    expect(deps.ledger.get(broadcast.streamKey)?.winnerWorker).toBe("node-2");
     expect(deps.transports.get("node-2")!.pull).toHaveBeenCalledTimes(1);
     expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
 
@@ -301,7 +301,7 @@ describe("runPipeline", () => {
 
   it("场景5(#1 全缺失): 所有成员文件都没了 → failed", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
     const deps = makeDeps();
     deps.transports.set("node-1", makeTransport("node-1", false));
     deps.ledger.upsertPending(broadcast.streamKey);
@@ -315,7 +315,7 @@ describe("runPipeline", () => {
   });
 
   it("场景6(步骤开关): burnDanmu=false → 不烧 danmu、danmu 组空不 append,只 livechat", async () => {
-    const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
     const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { burnDanmu: false } } });
     deps.ledger.upsertPending(broadcast.streamKey);
     await runPipeline(broadcast, deps);
@@ -334,7 +334,7 @@ describe("runPipeline", () => {
 
   it("场景8(plain xml 产物): stageSourceAfterMerge+includeXmlAss 删源 xml 但**保留** plain xml 产物", async () => {
     const rmStage = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
-    const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
     // stage-only:合并后清源,但不到 stageAfterDone(产物含 plain xml 留存)
     const deps = makeDeps({
       rmStage,
@@ -352,7 +352,7 @@ describe("runPipeline", () => {
 
   it("场景9(plain xml 产物): stageAfterDone+includeXmlAss 上传后才连 plain xml 一并清", async () => {
     const rmStage = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
-    const broadcast = makeBroadcast([{ tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
     const deps = makeDeps({
       rmStage,
       cfg: { ...makeDeps().cfg, uploadMode: "upload", cleanup: { stageAfterDone: true, includeXmlAss: true } },
@@ -367,8 +367,8 @@ describe("runPipeline", () => {
 
   it("场景7(cleanup): sourceAfterDone → done 后各成员 transport.cleanup 被调", async () => {
     const broadcast = makeBroadcast([
-      { tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
-      { tenantId: "node-2", rec: makeRec({ totalGapSec: 0 }) },
+      { workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
+      { workerId: "node-2", rec: makeRec({ totalGapSec: 0 }) },
     ]);
     const deps = makeDeps({ cfg: { ...makeDeps().cfg, cleanup: { sourceAfterDone: true } } });
     deps.ledger.upsertPending(broadcast.streamKey);

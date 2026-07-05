@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { SyncLedger } from "./ledger.js";
 
 function fresh(): SyncLedger { return new SyncLedger(join(mkdtempSync(join(tmpdir(), "led-")), "j.db")); }
@@ -55,21 +56,52 @@ describe("SyncLedger", () => {
   it("recordCandidates 落库 + 标记 winner + 幂等覆盖（选优可复盘）", () => {
     const l = fresh();
     const cands = [
-      { tenantId: "local", coverage: 1, durationSec: 20525, startMs: 100, endMs: 20625100, totalGapSec: 0 },
-      { tenantId: "vps2", coverage: 1, durationSec: 20503, startMs: 20100, endMs: 20623100, totalGapSec: 0 },
+      { workerId: "local", coverage: 1, durationSec: 20525, startMs: 100, endMs: 20625100, totalGapSec: 0 },
+      { workerId: "vps2", coverage: 1, durationSec: 20503, startMs: 20100, endMs: 20623100, totalGapSec: 0 },
     ];
     l.recordCandidates("douyin:767:2026-06-28", cands, "local");
     const rows = l.getCandidates("douyin:767:2026-06-28");
     expect(rows).toHaveLength(2);
     expect(rows[0].isWinner).toBe(1);          // winner 排最前
-    expect(rows[0].tenantId).toBe("local");
+    expect(rows[0].workerId).toBe("local");
     expect(rows[0].durationSec).toBe(20525);
     expect(rows[1].isWinner).toBe(0);
-    // 再次写 → 覆盖不重复（PRIMARY KEY streamKey+tenantId）
+    // 再次写 → 覆盖不重复（PRIMARY KEY streamKey+workerId）
     l.recordCandidates("douyin:767:2026-06-28", cands, "vps2");
     const again = l.getCandidates("douyin:767:2026-06-28");
     expect(again).toHaveLength(2);
-    expect(again.find((r) => r.tenantId === "vps2")?.isWinner).toBe(1);
+    expect(again.find((r) => r.workerId === "vps2")?.isWinner).toBe(1);
     l.close();
+  });
+});
+
+describe("ledger 列迁移 tenant→worker(幂等 RENAME COLUMN)", () => {
+  it("打开旧 schema(winnerTenant/tenantId)库 → 自动改名列 + 旧值保留", () => {
+    const dir = mkdtempSync(join(tmpdir(), "led-mig-"));
+    const p = join(dir, "old.db");
+    const raw = new DatabaseSync(p);
+    raw.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+      winnerTenant TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_candidates(streamKey TEXT NOT NULL, tenantId TEXT NOT NULL,
+      coverage REAL NOT NULL, durationSec REAL NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER NOT NULL,
+      totalGapSec REAL NOT NULL, isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+      PRIMARY KEY(streamKey, tenantId))`);
+    raw.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL)`);
+    raw.prepare("INSERT INTO sync_jobs(streamKey,state,winnerTenant,updatedAt) VALUES(?,?,?,?)")
+      .run("douyin:1:2026-06-28", "done", "local", 1);
+    raw.prepare(`INSERT INTO sync_candidates(streamKey,tenantId,coverage,durationSec,startMs,endMs,totalGapSec,isWinner,updatedAt)
+      VALUES(?,?,1,10,0,10,0,1,1)`).run("douyin:1:2026-06-28", "vps2");
+    raw.close();
+
+    const l = new SyncLedger(p); // 构造函数应就地迁移
+    expect(l.get("douyin:1:2026-06-28")?.winnerWorker).toBe("local");   // 旧值保留 + 新列名
+    expect(l.getCandidates("douyin:1:2026-06-28")[0].workerId).toBe("vps2");
+    l.close();
+
+    // 幂等:同一(已迁移)库再次打开不抛。
+    const l2 = new SyncLedger(p);
+    expect(l2.get("douyin:1:2026-06-28")?.winnerWorker).toBe("local");
+    l2.close();
   });
 });

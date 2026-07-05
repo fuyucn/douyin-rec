@@ -451,7 +451,9 @@ const hubStarter: HubStarter = {
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
       platform?: string;
-      tenants?: Array<{ id: string; kind: string; host?: string; dataRoot?: string }>;
+      workers?: Array<{ id: string; kind: string; host?: string; dataRoot?: string; name?: string }>;
+      /** 旧字段名(迁移兼容,读时 `workers ?? tenants`)。 */
+      tenants?: Array<{ id: string; kind: string; host?: string; dataRoot?: string; name?: string }>;
       settleMs?: number;
       pollMs?: number;
       reconcileIntervalMs?: number;
@@ -496,8 +498,8 @@ const hubStarter: HubStarter = {
       );
     registerBuiltinTransports({ ffprobe, taskRooms: buildTaskRooms, isRoomRecording });
 
-    const tenants = hubCfg.tenants ?? [];
-    const transports = new Map(tenants.map((t) => [t.id, getTransport(t)]));
+    const workers = hubCfg.workers ?? hubCfg.tenants ?? [];
+    const transports = new Map(workers.map((t) => [t.id, getTransport(t)]));
     const dbPath = (opts.dbPath ?? "douyin-rec.db").replace(/\.db$/, "-sync.db");
     const ledger = new SyncLedger(dbPath);
 
@@ -586,7 +588,7 @@ const hubStarter: HubStarter = {
       reconcileIntervalMs: hubCfg.reconcileIntervalMs ?? 30 * 60_000,
     });
 
-    opts.log(`[hub] 已启用，${tenants.length} 个租户`);
+    opts.log(`[hub] 已启用，${workers.length} 个 worker`);
     return stop;
   },
 };
