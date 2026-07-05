@@ -367,6 +367,16 @@ export function makeApi(deps: ApiDeps): Api {
     runtime: manager.getRuntime(t.id),
   });
 
+  // workers 校验:present(payload 含该键)时必须是非空 string[](元素为 worker id 字符串);
+  // 缺省(不含键)允许(= 全部 worker,兼容老规则)。返回错误消息(null=通过)。
+  const validateWorkers = (input: HubRulePayload): string | null => {
+    if (!("workers" in input) || input.workers === undefined) return null;
+    const w = input.workers;
+    if (!Array.isArray(w) || w.length === 0) return "workers 必须是非空 worker id 列表";
+    if (!w.every((x) => typeof x === "string" && x.trim().length > 0)) return "workers 每项必须是非空字符串(worker id)";
+    return null;
+  };
+
   // hub 规则 → DTO:补 anchorName(若有同 roomSlug 的录制任务,显示其主播名/任务名)。
   const hubRuleView = (r: HubRule): HubRuleDTO => {
     const t = store.listTasks().find(
@@ -380,6 +390,7 @@ export function makeApi(deps: ApiDeps): Api {
       platform: r.platform,
       enabled: r.enabled,
       pipeline: r.pipeline,
+      workers: r.workers,
       anchorName,
     };
   };
@@ -732,17 +743,22 @@ export function makeApi(deps: ApiDeps): Api {
     createHubRule(input: HubRulePayload): ApiResult {
       const room = (input.room ?? "").trim();
       if (!room) return err(400, "缺少房间地址 room");
+      const werr = validateWorkers(input);
+      if (werr) return err(400, werr);
       try {
-        const rule = hubStore.upsertHubRule(hubDir, { room, enabled: input.enabled, pipeline: input.pipeline });
+        const rule = hubStore.upsertHubRule(hubDir, { room, enabled: input.enabled, pipeline: input.pipeline, workers: input.workers });
         return { status: 201, body: hubRuleView(rule) };
       } catch (e) {
         return err(400, `无法解析房间地址: ${(e as Error).message}`);
       }
     },
     updateHubRule(key: string, input: HubRulePayload): ApiResult {
-      const patch: { enabled?: boolean; pipeline?: HubPipelineConfig } = {};
+      const werr = validateWorkers(input);
+      if (werr) return err(400, werr);
+      const patch: { enabled?: boolean; pipeline?: HubPipelineConfig; workers?: string[] } = {};
       if ("enabled" in input) patch.enabled = input.enabled;
       if ("pipeline" in input) patch.pipeline = input.pipeline;
+      if ("workers" in input) patch.workers = input.workers;
       const updated = hubStore.updateHubRule(hubDir, key, patch);
       if (!updated) return err(404, `未找到 hub 规则 key=${key}`);
       return { status: 200, body: hubRuleView(updated) };

@@ -663,3 +663,44 @@ describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
     expect((r.body as any).error).toBe("ECONNREFUSED");
   });
 });
+
+describe("hub rules workers 字段(校验 + 往返)", () => {
+  function apiWithHubDir(): ReturnType<typeof makeApi> {
+    const hubDir = mkdtempSync(join(tmpdir(), "hubrules-"));
+    return makeApi({ store, manager, hubDir });
+  }
+  it("createHubRule 带空 workers → 400", () => {
+    const a = apiWithHubDir();
+    const r = a.createHubRule({ room: "https://live.douyin.com/123456", workers: [] });
+    expect(r.status).toBe(400);
+  });
+  it("createHubRule 带非空 workers → 201 且回显", () => {
+    const a = apiWithHubDir();
+    const r = a.createHubRule({ room: "https://live.douyin.com/123456", workers: ["local", "vps2"] });
+    expect(r.status).toBe(201);
+    expect((r.body as { workers?: string[] }).workers).toEqual(["local", "vps2"]);
+  });
+  it("createHubRule 不带 workers → 201(向后兼容,workers 缺省)", () => {
+    const a = apiWithHubDir();
+    const r = a.createHubRule({ room: "https://live.douyin.com/123456" });
+    expect(r.status).toBe(201);
+    expect((r.body as { workers?: string[] }).workers).toBeUndefined();
+  });
+  it("createHubRule workers 含非字符串 → 400", () => {
+    const a = apiWithHubDir();
+    const r = a.createHubRule({ room: "https://live.douyin.com/123456", workers: [1 as unknown as string] });
+    expect(r.status).toBe(400);
+  });
+  it("updateHubRule 改 workers 生效", () => {
+    const a = apiWithHubDir();
+    a.createHubRule({ room: "https://live.douyin.com/123456", workers: ["local", "vps2"] });
+    const u = a.updateHubRule("douyin.123456", { workers: ["local"] });
+    expect(u.status).toBe(200);
+    expect((u.body as { workers?: string[] }).workers).toEqual(["local"]);
+  });
+  it("updateHubRule 带空 workers → 400", () => {
+    const a = apiWithHubDir();
+    a.createHubRule({ room: "https://live.douyin.com/123456", workers: ["local"] });
+    expect(a.updateHubRule("douyin.123456", { workers: [] }).status).toBe(400);
+  });
+});

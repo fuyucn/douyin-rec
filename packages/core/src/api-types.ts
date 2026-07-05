@@ -32,6 +32,8 @@ export interface HubRuleDTO {
   enabled: boolean;
   /** 流水线配置(steps / upload / cleanup);upload 是 pipeline 的一个阶段。 */
   pipeline: HubPipelineConfig;
+  /** 选中参与该房间 hub 处理的 worker id;缺省/空 = 全部 worker(向后兼容)。 */
+  workers?: string[];
   /** 主播名(若有同 roomSlug 的录制任务/录像可关联显示);未知 null。 */
   anchorName?: string | null;
 }
@@ -99,6 +101,8 @@ export interface HubRulePayload {
   room?: string;
   enabled?: boolean;
   pipeline?: HubPipelineConfig;
+  /** 选中的 worker id;present 时后端校验必须为非空 string[]。缺省 = 全部 worker。 */
+  workers?: string[];
 }
 
 /** POST /api/tasks + PATCH /api/tasks/:id 的请求体(部分字段;录制专属,hub 配置见 HubRule)。 */
