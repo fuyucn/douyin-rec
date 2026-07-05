@@ -63,6 +63,10 @@ export interface RouteMatch {
     | "deleteHubRule"
     | "listHubJobs"
     | "getHubJobLog"
+    | "listWorkers"
+    | "createWorker"
+    | "updateWorker"
+    | "deleteWorker"
     | "index";
   /** Path param when the route has /:id. */
   id?: number;
@@ -146,6 +150,18 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
   if (p === "/api/hub/jobs" && method === "GET") return { name: "listHubJobs" };
   const hj = /^\/api\/hub\/jobs\/([^/]+)\/log$/.exec(p);
   if (hj && method === "GET") return { name: "getHubJobLog", sid: decodeURIComponent(hj[1]) };
+  // 多节点 worker: GET/POST /api/hub/workers + PATCH/DELETE /api/hub/workers/:id
+  if (p === "/api/hub/workers") {
+    if (method === "GET") return { name: "listWorkers" };
+    if (method === "POST") return { name: "createWorker", needsBody: true };
+    return null;
+  }
+  const wk = /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)$/.exec(p);
+  if (wk) {
+    if (method === "PATCH") return { name: "updateWorker", slug: wk[1], needsBody: true };
+    if (method === "DELETE") return { name: "deleteWorker", slug: wk[1] };
+    return null;
+  }
   if (p === "/api/hub/rules") {
     if (method === "GET") return { name: "listHubRules" };
     if (method === "POST") return { name: "createHubRule", needsBody: true };
@@ -203,6 +219,8 @@ export interface WebServerDeps {
   hubEnabled?: boolean;
   /** hub 台账 sqlite(<db>-sync.db)路径;省略=hub 任务端点返回空列表。 */
   syncDbPath?: string;
+  /** hub.config.json 路径;省略回落 rootHubConfig()。 */
+  hubConfigPath?: string;
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {}). */
@@ -341,6 +359,18 @@ async function dispatch(
     }
     case "getHubJobLog":
       return api.getHubJobLog(match.sid!);
+    case "listWorkers":
+      return api.listWorkers();
+    case "createWorker": {
+      const body = (await readJson(req)) as Parameters<Api["createWorker"]>[0];
+      return api.createWorker(body ?? {});
+    }
+    case "updateWorker": {
+      const body = (await readJson(req)) as Parameters<Api["updateWorker"]>[1];
+      return api.updateWorker(match.slug!, body ?? {});
+    }
+    case "deleteWorker":
+      return api.deleteWorker(match.slug!);
     case "index":
       // handled by caller (html, not json)
       return { status: 200, body: null };
@@ -359,6 +389,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     hubDir: deps.hubDir,
     hubEnabled: deps.hubEnabled,
     syncDbPath: deps.syncDbPath,
+    hubConfigPath: deps.hubConfigPath,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);
       const n = mj.recoverOrphans(); // 启动:清理上次重启腰斩的合成 job

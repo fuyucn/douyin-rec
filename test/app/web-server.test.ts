@@ -77,6 +77,10 @@ describe("matchRoute", () => {
     expect(matchRoute("DELETE", "/api/hub/rules/douyin.123456")).toMatchObject({ name: "deleteHubRule", slug: "douyin.123456" });
     expect(matchRoute("GET", "/api/timezone")?.name).toBe("getTimezone");
     expect(matchRoute("POST", "/api/timezone")).toMatchObject({ name: "setTimezone", needsBody: true });
+    expect(matchRoute("GET", "/api/hub/workers")?.name).toBe("listWorkers");
+    expect(matchRoute("POST", "/api/hub/workers")).toMatchObject({ name: "createWorker", needsBody: true });
+    expect(matchRoute("PATCH", "/api/hub/workers/worker-1")).toMatchObject({ name: "updateWorker", slug: "worker-1", needsBody: true });
+    expect(matchRoute("DELETE", "/api/hub/workers/local")).toMatchObject({ name: "deleteWorker", slug: "local" });
   });
 
   it("returns null for unknown routes / wrong methods", () => {

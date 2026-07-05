@@ -31,6 +31,11 @@ export interface ReconcilerDeps {
   resolveCfg?: (platform: string, roomSlug: string) => PipelineCfg | null;
   /** pipeline 失败的最大自动重试次数;达到后留 failed 不再重入。默认 3。 */
   maxRetries?: number;
+  /**
+   * 实时重载(Approach A):每轮 reconcileAll 开头调用重建 transports Map。
+   * 无状态 transport 重建极廉价。省略 → 用构造时的 transports(旧行为/测试)。
+   */
+  loadTransports?: () => Map<string, Transport>;
 }
 
 const DEFAULT_SETTLE: SettleConfig = { maxWaitMs: 600_000, pollMs: 15_000 };
@@ -51,6 +56,7 @@ export class Reconciler {
   private inventoryTimeoutMs: number;
   private maxRetries: number;
   private resolveCfg?: (platform: string, roomSlug: string) => PipelineCfg | null;
+  private loadTransports?: () => Map<string, Transport>;
 
   constructor(deps: ReconcilerDeps) {
     this.platform = deps.platform;
@@ -63,6 +69,7 @@ export class Reconciler {
     this.inventoryTimeoutMs = deps.inventoryTimeoutMs ?? DEFAULT_INVENTORY_TIMEOUT_MS;
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.resolveCfg = deps.resolveCfg;
+    this.loadTransports = deps.loadTransports;
   }
 
   /** listInventory 包超时:挂起超过 inventoryTimeoutMs 即降级为空(该 worker 本轮缺席),不锁死整轮。 */
@@ -145,10 +152,14 @@ export class Reconciler {
   }
 
   async reconcileAll(): Promise<void> {
+    // 实时重载:重建 transports(反映 hub.config.json 最新 workers);同步给 pipeline 用的那份。
+    if (this.loadTransports) this.transports = this.loadTransports();
+    const transports = this.transports;
+
     // 1. Concurrently fetch all inventories; 挂起的租户经 inventoryWithTimeout 降级为空(不锁死整轮),
     //    出错的租户也降级为空,均不中止其余节点。
     const invs = await Promise.all(
-      [...this.transports.values()].map((t) => this.inventoryWithTimeout(t)),
+      [...transports.values()].map((t) => this.inventoryWithTimeout(t)),
     );
 
     // 2. Cluster recordings across nodes into broadcasts —— 按每条录像的 platform 聚类(多平台)。
@@ -190,7 +201,7 @@ export class Reconciler {
         // Don't re-enter an in-progress job unless it was retryable.
         if (!isNew && job && !RETRYABLE.has(job.state)) continue;
 
-        await this._runPipeline(b, { ...this.pipelineDeps, cfg });
+        await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
       } catch (err) {
         // Per-broadcast 出错:置 job=failed(可见 + 重试上限内自动重试),不中止其余 broadcast。
         console.error(`[reconciler] broadcast ${b.streamKey} failed:`, err);

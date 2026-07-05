@@ -16,11 +16,12 @@ import { join } from "node:path";
 import { groupSessions, mergeSessions } from "@drec/post-process";
 import { resolveMesioBin } from "@drec/record-engine";
 import { APP_VERSION } from "../version.js";
-import type { RecordingSessionDTO, HubRulePayload, HubRuleDTO, HubPipelineConfig } from "@drec/core";
+import type { RecordingSessionDTO, HubRulePayload, HubRuleDTO, HubPipelineConfig, WorkerDTO } from "@drec/core";
 import { listPlatforms, platformForRoom } from "@drec/core";
 import * as hubStore from "../hub-store.js";
 import type { HubRule } from "../hub-store.js";
-import { rootHubDir } from "../paths.js";
+import * as workerStore from "../worker-store.js";
+import { rootHubDir, rootHubConfig } from "../paths.js";
 import { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "../timezone.js";
 import type { EventCenter } from "@drec/observability";
 import { resolveOutputDir } from "../paths.js";
@@ -94,6 +95,8 @@ export interface ApiDeps {
   hubEnabled?: boolean;
   /** hub 台账 sqlite(<db>-sync.db)路径;省略=hub 任务端点返回空列表(slave 属正常)。 */
   syncDbPath?: string;
+  /** hub.config.json 路径;省略回落 rootHubConfig()。 */
+  hubConfigPath?: string;
 }
 
 /**
@@ -304,6 +307,14 @@ export interface Api {
   listHubJobs(opts?: { room?: string; limit?: number; offset?: number }): ApiResult;
   /** GET /api/hub/jobs/:key/log — 该场 job.log 尾部(key=streamKey,URL-encoded)。 */
   getHubJobLog(streamKey: string): ApiResult;
+  /** GET /api/hub/workers — 列出录制 worker(hub 未启用 → 400)。 */
+  listWorkers(): ApiResult;
+  /** POST /api/hub/workers — 新建 worker。 */
+  createWorker(input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string }): ApiResult;
+  /** PATCH /api/hub/workers/:id — 部分更新。 */
+  updateWorker(id: string, input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string }): ApiResult;
+  /** DELETE /api/hub/workers/:id — 删除(local 保护)。 */
+  deleteWorker(id: string): ApiResult;
 }
 
 /** Build the handler set bound to the injected store + manager. */
@@ -311,6 +322,11 @@ export function makeApi(deps: ApiDeps): Api {
   const { store, manager, login } = deps;
   // hub 任务配置目录(文件版,现读不缓存)。注入 > rootHubDir()(<root>/config/hub,root 见 paths.ts)。
   const hubDir = deps.hubDir ?? rootHubDir();
+  // hub.config.json 路径(worker 数组的真理源);注入 > rootHubConfig()。
+  const hubConfigPath = deps.hubConfigPath ?? rootHubConfig();
+  const workerToDto = (w: workerStore.WorkerConfig): WorkerDTO => ({
+    id: w.id, name: w.name ?? w.id, kind: w.kind, host: w.host, dataRoot: w.dataRoot, apiUrl: w.apiUrl,
+  });
 
   // 后台抓主播名写回 store（创建/改房间号时）。fire-and-forget：不阻塞响应，
   // UI 下次轮询列表即可看到。失败静默（保留房间号显示）。
@@ -749,6 +765,36 @@ export function makeApi(deps: ApiDeps): Api {
       const log = readHubJobLog(streamKey);
       if (log == null) return err(404, `该场无 job.log(旧版本产生的任务没有,或 stage 已清理): ${streamKey}`);
       return { status: 200, body: { streamKey, log } };
+    },
+
+    listWorkers(): ApiResult {
+      if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可管理 worker)");
+      return { status: 200, body: workerStore.listWorkers(hubConfigPath).map(workerToDto) };
+    },
+    createWorker(input): ApiResult {
+      if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可管理 worker)");
+      try {
+        const w = workerStore.createWorker(hubConfigPath, {
+          name: input.name ?? undefined, kind: input.kind ?? "", host: input.host, dataRoot: input.dataRoot, apiUrl: input.apiUrl,
+        });
+        return { status: 201, body: workerToDto(w) };
+      } catch (e) { return err(400, (e as Error).message); }
+    },
+    updateWorker(id, input): ApiResult {
+      if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可管理 worker)");
+      try {
+        const w = workerStore.updateWorker(hubConfigPath, id, input);
+        if (!w) return err(404, `未找到 worker id=${id}`);
+        return { status: 200, body: workerToDto(w) };
+      } catch (e) { return err(400, (e as Error).message); }
+    },
+    deleteWorker(id): ApiResult {
+      if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可管理 worker)");
+      try {
+        const ok = workerStore.deleteWorker(hubConfigPath, id);
+        if (!ok) return err(404, `未找到 worker id=${id}`);
+        return { status: 200, body: { ok: true, id } };
+      } catch (e) { return err(400, (e as Error).message); }
     },
   };
 }

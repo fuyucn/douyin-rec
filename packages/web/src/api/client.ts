@@ -26,8 +26,9 @@ import type {
   AppEventDTO,
   PlatformDTO,
   PlatformsDTO,
+  WorkerDTO,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO, WorkerDTO };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -116,6 +117,14 @@ export const api = {
   },
   getHubJobLog: (streamKey: string): Promise<{ streamKey: string; log: string }> =>
     request("GET", `/api/hub/jobs/${encodeURIComponent(streamKey)}/log`),
+
+  // ── 多节点 worker(录制节点)管理 ─────────────────────────────────────────────
+  listWorkers: (): Promise<WorkerDTO[]> => request("GET", "/api/hub/workers"),
+  createWorker: (input: Partial<WorkerDTO>): Promise<WorkerDTO> => request("POST", "/api/hub/workers", input),
+  updateWorker: (id: string, input: Partial<WorkerDTO>): Promise<WorkerDTO> =>
+    request("PATCH", `/api/hub/workers/${encodeURIComponent(id)}`, input),
+  deleteWorker: (id: string): Promise<{ ok: boolean; id: string }> =>
+    request("DELETE", `/api/hub/workers/${encodeURIComponent(id)}`),
 
   // ── Global cookie ────────────────────────────────────────────────────────
   getCookie: (): Promise<CookieStatus> => request("GET", "/api/cookie"),

@@ -446,7 +446,7 @@ const hubStarter: HubStarter = {
     const { registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, hubStore, rootHubDir, rootStageDir } = await import("@drec/app");
+    const { uploadPlain, appendGroup, hubStore, workerStore, rootHubDir, rootHubConfig, rootStageDir } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
@@ -499,7 +499,14 @@ const hubStarter: HubStarter = {
     registerBuiltinTransports({ ffprobe, taskRooms: buildTaskRooms, isRoomRecording });
 
     const workers = hubCfg.workers ?? hubCfg.tenants ?? [];
-    const transports = new Map(workers.map((t) => [t.id, getTransport(t)]));
+    // loadWorkers 现读 hub.config.json(现读不缓存→UI/手改即时生效)。首启无文件时回落 --hub-config 里的 workers。
+    const loadWorkers = (): Array<{ id: string; kind: string; host?: string; dataRoot?: string; name?: string }> => {
+      const fromFile = workerStore.listWorkers(rootHubConfig());
+      return fromFile.length ? fromFile : workers;
+    };
+    const buildTransports = (): Map<string, ReturnType<typeof getTransport>> =>
+      new Map(loadWorkers().map((w) => [w.id, getTransport(w)]));
+    const transports = buildTransports();     // 初始 Map(pipelineDeps 也用它)
     const dbPath = (opts.dbPath ?? "douyin-rec.db").replace(/\.db$/, "-sync.db");
     const ledger = new SyncLedger(dbPath);
 
@@ -569,6 +576,7 @@ const hubStarter: HubStarter = {
       ledger,
       pipelineDeps,
       resolveCfg,
+      loadTransports: buildTransports,
       ...(hubCfg.maxWaitSec != null || hubCfg.settleSec != null
         ? {
             settle: {
@@ -588,7 +596,7 @@ const hubStarter: HubStarter = {
       reconcileIntervalMs: hubCfg.reconcileIntervalMs ?? 30 * 60_000,
     });
 
-    opts.log(`[hub] 已启用，${workers.length} 个 worker`);
+    opts.log(`[hub] 已启用，${loadWorkers().length} 个 worker`);
     return stop;
   },
 };

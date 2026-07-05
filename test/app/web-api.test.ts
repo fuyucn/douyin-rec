@@ -598,3 +598,33 @@ describe("全局 webhook 端点", () => {
     expect((api.setWebhook({ webhook: "" }).body as { webhook: string }).webhook).toBe("");
   });
 });
+
+describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
+  function apiWith(hubEnabled: boolean): { api: ReturnType<typeof makeApi>; cfg: string } {
+    const cfg = join(mkdtempSync(join(tmpdir(), "wapi-")), "hub.config.json");
+    writeFileSync(cfg, JSON.stringify({ platform: "douyin",
+      workers: [{ id: "local", name: "本机", kind: "local", dataRoot: "/data" }] }, null, 2));
+    return { api: makeApi({ store, manager, hubEnabled, hubConfigPath: cfg }), cfg };
+  }
+  it("hub 未启用 → 端点返回 400 hub 未启用", () => {
+    const { api: a } = apiWith(false);
+    expect(a.listWorkers().status).toBe(400);
+    expect(a.createWorker({ kind: "ssh", host: "h", dataRoot: "/d" }).status).toBe(400);
+  });
+  it("list 含 local;create 返 worker-1;update/delete 往返", () => {
+    const { api: a } = apiWith(true);
+    expect((a.listWorkers().body as any[]).map((w) => w.id)).toEqual(["local"]);
+    const c = a.createWorker({ kind: "ssh", host: "1.2.3.4", dataRoot: "/drec", name: "港" });
+    expect(c.status).toBe(201);
+    expect((c.body as any).id).toBe("worker-1");
+    expect(a.updateWorker("worker-1", { name: "港2" }).status).toBe(200);
+    expect(a.deleteWorker("worker-1").status).toBe(200);
+    expect(a.deleteWorker("worker-1").status).toBe(404);   // 已删
+  });
+  it("create 校验错 → 400;local 保护 → 400", () => {
+    const { api: a } = apiWith(true);
+    expect(a.createWorker({ kind: "ssh", dataRoot: "/d" } as any).status).toBe(400); // 缺 host
+    expect(a.deleteWorker("local").status).toBe(400);
+    expect(a.updateWorker("local", { kind: "ssh" }).status).toBe(400);
+  });
+});

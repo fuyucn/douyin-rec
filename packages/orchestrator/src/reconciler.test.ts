@@ -368,4 +368,30 @@ describe("Reconciler", () => {
     expect(usedCfg).toEqual(perTaskCfg);   // pipeline 收到的是任务的 cfg
     ledger.close();
   });
+
+  it("实时重载:loadTransports 返回变化 → 下一轮用新 transports 重建", async () => {
+    const ledger = freshLedger();
+    const recA = makeRec();
+    const tOld = makeTransport("old-node", [recA]);
+    let current = new Map<string, Transport>([["old-node", tOld]]);
+    const pipelineDeps = makePipelineDeps(ledger, current);
+    const seen: string[][] = [];
+    const spy = vi.fn(async (b: Broadcast) => { seen.push(b.members.map((m) => m.workerId)); ledger.markDone(b.streamKey, "BV"); return { state: "done" as JobState }; });
+    const rec = new Reconciler({
+      platform: "douyin", transports: current, ledger, pipelineDeps,
+      runPipeline: spy, loadTransports: () => current, settle: fastSettle, sleep: fastSleep,
+    });
+    await rec.reconcileAll();
+    expect(seen.at(-1)).toEqual(["old-node"]);
+    // 换一台节点(模拟改 hub.config.json 后 loadWorkers→重建)。不同 roomSlug 避免撞上 old-node
+    // 那场已 done 的 streamKey(否则幂等跳过掩盖了「用没用新 transports」这个断言点)。
+    const tNew = makeTransport("new-node", [makeRec({ roomSlug: "test-room-2" })]);
+    current = new Map<string, Transport>([["new-node", tNew]]);
+    await rec.reconcileAll();
+    expect(seen.at(-1)).toEqual(["new-node"]);   // 用的是重建后的 transports
+    // old-node 已不在 current 里 → 第二轮的 inventory 只应来自 new-node(证明真的重建了 Map,不是沿用旧的)。
+    expect(tOld.listInventory).toHaveBeenCalledTimes(1);
+    expect(tNew.listInventory).toHaveBeenCalledTimes(1);
+    ledger.close();
+  });
 });
