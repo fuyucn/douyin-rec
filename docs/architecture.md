@@ -4,7 +4,7 @@ pnpm workspace monorepo，12 个包，收敛成 **2 个可插拔接缝** + **1 �
 
 - **平台轴**（`<平台>-live`）—— 平台专属的一切：取流（`getStream`）+ 弹幕（`connectDanmu`）+ 开播判定（`getLiving`）。接新平台 = 写一个 `<平台>-live` 实现 `Platform` 接口 + `registerPlatform` 一行。
 - **引擎轴**（`record-engine`）—— 平台无关的下载：通用 `PollingRecorder` + 下载引擎策略（`ffmpeg` / `mesio`）。加新引擎 = 写一个 `DownloadEngine` 策略 + `registerEngine` 一行，所有平台立即可用。
-- **多节点 hub**（`orchestrator`）—— master/slave 跨节点同步:各节点匿名各录各的，master 经 SSH 拿各节点录像清单 → 按 (platform, roomSlug) 聚成一场 → 覆盖度选优 → 拉取 → 合并/烧录 → 穿插上传 B 站。配置文件化（`config/hub/{platform}.{roomSlug}.json`）。详见 [multi-node-sync.md](./multi-node-sync.md)。
+- **多节点 hub**（`orchestrator`）—— master/slave 跨节点同步，**多副本冗余 + read-repair**:各节点跑**同一套 task configs**（镜像 master 的任务表，非匿名随录）各录一份冗余副本，master 经 SSH 拿各节点录像清单 → 按 (platform, roomSlug) 聚成一场 → 覆盖度选优（选最完整副本）→ 拉取 → 合并/烧录 → 穿插上传 B 站。**master 只做读侧协调，不下发任务**（相同 configs 靠人工镜像）。配置文件化（`config/hub/{platform}.{roomSlug}.json`）。详见 [multi-node-sync.md](./multi-node-sync.md)。
 
 依赖**只能向下**（`test/arch/layering.test.ts` 守护：每个包的 rank 必须严格大于它依赖的任何包；新增包须在 `RANKS` 登记）。esbuild 把 `cli` 打成自包含单文件 `dist/douyin-rec.mjs`（+ 独立的 `dist/tui.mjs`）。
 
@@ -111,11 +111,11 @@ flowchart LR
 
 ## 多节点 hub 数据流（直播结束 → 选优 → 上传）
 
-**master**（`task serve --hub`）编排多个 **slave**（`task serve`，无 `--hub`）。各节点匿名各录各的；master 经 SSH 主动够到 slave（不需要 slave 跑 hub 服务）。
+**master**（`task serve --hub`）编排多个 **slave**（`task serve`，无 `--hub`）。**心智模型 = 多副本冗余 + read-repair**：各节点跑**同一套 task configs**（镜像 master 的任务表——同房间 + 同画质/弹幕/cookie/窗口，非「匿名随录」）各录一份全量副本；master 是**只读协调者**，经 SSH 主动够到 slave（不需要 slave 跑 hub 服务），选最完整那份 → 合并发布。**注意方向**：master **不下发任务**（那套相同 configs 目前靠人工镜像 → 「配置漂移」是真正痛点）；「master 下发任务、节点回报」是未实现的写侧（见 [multi-node-sync.md](./multi-node-sync.md) 心智模型 + followups 的集中式任务管理）。
 
 ```mermaid
 flowchart TB
-  subgraph nodes["各节点(各录各的)"]
+  subgraph nodes["各节点(镜像同一 task 表·各录冗余副本)"]
     dk["docker(local)<br/>recordings/ + {base}.session.json"]
     vps["VPS(slave)<br/>recordings/ + {base}.session.json"]
   end
