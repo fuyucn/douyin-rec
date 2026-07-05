@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import type { NotifyEvent } from "@drec/core";
+import type { NotifyEvent, ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/app";
 import { splitToSizeLimit } from "@drec/post-process";
 import { selectWinner } from "./select.js";
@@ -50,6 +50,9 @@ export interface PipelineDeps {
   /** 删 master 本地 stage 文件(cleanup 用);默认 fs.rm,可注入测试。 */
   rmStage?: (paths: string[]) => Promise<void>;
   notify: (e: NotifyEvent) => void;
+  /** 按 streamKey 造该场的 run 级 Logger(job.log)。缺省=内置文件直写(兼容旧行为/测试)。
+   *  CLI 注入 @drec/observability 的 FileLogger,使「怎么落盘」由组合根装配、orchestrator 只调 ScopedLogger 接口。 */
+  makeRunLogger?: (streamKey: string) => ScopedLogger;
   cfg: PipelineCfg;
 }
 
@@ -77,7 +80,11 @@ export async function runPipeline(
   b: Broadcast,
   deps: PipelineDeps,
 ): Promise<{ state: JobState; bv?: string }> {
-  const jlog = makeJobLog(path.join(deps.cfg.stageDir, sanitizeKey(b.streamKey)));
+  // 优先用注入的 run Logger(实现由 CLI 装配:observability 的 FileLogger);无则回退内置文件直写(兼容测试)。
+  const injected = deps.makeRunLogger?.(b.streamKey);
+  const jlog = injected
+    ? (msg: string): void => injected.info(msg)
+    : makeJobLog(path.join(deps.cfg.stageDir, sanitizeKey(b.streamKey)));
   jlog(`=== pipeline start ${b.streamKey} 成员=[${b.members.map((m) => m.tenantId).join(",")}] mode=${deps.cfg.uploadMode} ===`);
   try {
     const r = await runPipelineInner(b, deps, jlog);

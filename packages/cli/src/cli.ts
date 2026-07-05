@@ -447,6 +447,7 @@ const hubStarter: HubStarter = {
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
     const { uploadPlain, appendGroup, hubStore, rootHubDir, rootStageDir } = await import("@drec/app");
+    const { FileLogger } = await import("@drec/observability");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
       platform?: string;
@@ -522,6 +523,10 @@ const hubStarter: HubStarter = {
       appendGroup: (o: { bv: string; files: string[]; cookies: string; public: boolean }) =>
         appendGroup({ cookies: o.cookies, bv: o.bv, files: o.files, public: o.public }),
       notify: opts.onEvent,
+      // job.log 的落盘实现由组合根装配:observability 的 FileLogger,路径 = <stage>/<sanitized streamKey>/job.log
+      //(sanitize 规则与 pipeline 内 sanitizeKey 一致:替换 : / 为 _)。orchestrator 只调 ScopedLogger 接口。
+      makeRunLogger: (streamKey: string) =>
+        new FileLogger(`${hubCfg.stageDir ?? rootStageDir()}/${streamKey.replace(/[:/]/g, "_")}/job.log`),
       cfg: {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         stageDir: hubCfg.stageDir ?? rootStageDir(),

@@ -98,6 +98,21 @@ const STAGE_DIR = "/tmp/stage";
 const STAGE_SUB = `${STAGE_DIR}/douyin_test-room_2026-06-27`;
 
 describe("runPipeline", () => {
+  it("makeRunLogger 注入 → job.log 经该 ScopedLogger 写入(不直接 appendFileSync)", async () => {
+    const lines: string[] = [];
+    const fakeLogger = { info: (...a: unknown[]) => lines.push(a.join(" ")), warn: () => {}, error: () => {} };
+    const broadcast = makeBroadcast([
+      { tenantId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
+      { tenantId: "node-2", rec: makeRec({ totalGapSec: 200 }) },
+    ]);
+    const deps = makeDeps({ makeRunLogger: () => fakeLogger });
+    deps.ledger.upsertPending(broadcast.streamKey);
+    await runPipeline(broadcast, deps);
+    expect(lines.some((l) => l.includes("pipeline start"))).toBe(true);
+    expect(lines.some((l) => l.includes("选优: winner=node-1"))).toBe(true);
+    deps.ledger.close();
+  });
+
   it("场景1: 有干净胜者 + auto-private → pull到stageSub, merge/burn×2/upload, ledger=done, bv=BV123", async () => {
     const cleanRec = makeRec({ totalGapSec: 0 });    // winner: totalGapSec=0, coverage=1
     const dirtyRec = makeRec({ totalGapSec: 200 });   // loser: totalGapSec=200
