@@ -37,7 +37,7 @@ import { makeNotifier } from "@drec/observability";
 import type { Recorder, RecordOpts } from "@drec/core";
 import { TaskDaemon } from "./daemon.js";
 import { TaskManager } from "./task-manager.js";
-import { TaskLogStore } from "./task-logs.js";
+import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { createWebServer } from "./web/server.js";
 import { QrLoginManager } from "./login/login-manager.js";

@@ -5,7 +5,7 @@
  * the oldest line on overflow, multi-line splitting, and clear().
  */
 import { describe, it, expect } from "vitest";
-import { TaskLogStore } from "../../packages/app/src/task-logs.js";
+import { TaskLogStore } from "../../packages/observability/src/logger/ring.js";
 
 /** Fixed clock → deterministic [HH:MM:SS] prefix. */
 const fixedClock = (): Date => new Date(2026, 5, 12, 9, 8, 7);

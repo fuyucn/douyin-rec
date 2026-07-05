@@ -6,7 +6,7 @@ import type {
   ExitInfo,
 } from "../../packages/app/src/process/recorder-process.js";
 import { TaskStore } from "../../packages/app/src/store.js";
-import { TaskLogStore } from "../../packages/app/src/task-logs.js";
+import { TaskLogStore } from "../../packages/observability/src/logger/ring.js";
 
 /** Controllable fake: tests drive start/stop/exit explicitly. */
 class FakeRecorderProcess implements RecorderProcess {

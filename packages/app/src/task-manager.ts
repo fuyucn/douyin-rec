@@ -13,7 +13,7 @@
 import { type TaskStore, resolveTaskCookies } from "./store.js";
 import type { Spawner } from "./process/spawner.js";
 import type { RecorderProcess, ExitInfo } from "./process/recorder-process.js";
-import { TaskLogStore } from "./task-logs.js";
+import { TaskLogStore } from "@drec/observability";
 
 /** Live runtime info for a task, surfaced to the web 详情 page. */
 export interface TaskRuntime {
