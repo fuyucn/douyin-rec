@@ -5,6 +5,9 @@ import "@xyflow/react/dist/style.css";
 import { api, type HubJobDTO } from "../api/client";
 import { IconButton } from "./Button";
 import { Dialog } from "./Dialog";
+import { useT } from "../lib/i18n";
+
+type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
 /** 秒 → 人类可读("2h13m" / "8m" / "45s")。 */
 export function humanSec(sec: number | null): string {
@@ -15,17 +18,20 @@ export function humanSec(sec: number | null): string {
   return h > 0 ? `${h}h${m}m` : `${m}m`;
 }
 
-/** 状态 → 中文步骤名。 */
-export const STEP_LABEL: Record<string, string> = {
-  pending: "排队中",
-  settling: "等待收播",
-  syncing: "拉取文件",
-  merging: "合并 / 烧录",
-  uploading: "上传 B 站",
-  done: "已完成",
-  failed: "失败",
-  needs_manual: "待人工",
-};
+/** 状态 → 步骤名(译文,渲染时按当前语言解析)。 */
+function stepLabelMap(t: TFunc): Record<string, string> {
+  return {
+    pending: t("hub.jobs.step.pending"),
+    settling: t("hub.jobs.step.settling"),
+    syncing: t("hub.jobs.step.syncing"),
+    merging: t("hub.jobs.step.merging"),
+    uploading: t("hub.jobs.step.uploading"),
+    done: t("hub.jobs.step.done"),
+    failed: t("hub.jobs.step.failed"),
+    needs_manual: t("hub.jobs.step.needsManual"),
+  };
+}
+
 export const TERMINAL = new Set(["done", "failed", "needs_manual"]);
 
 export function stateColor(state: string): string {
@@ -52,17 +58,17 @@ const NODE_COLOR: Record<NodeStatus, { bg: string; fg: string; ring: string }> =
 };
 
 /** 规范 pipeline 节点固定布局(fork/join):merge 后分「烧录轨(上)/上传轨(下)」,再 join 到 append。 */
-const STEP_DEFS: Array<{ key: string; label: string; x: number; y: number }> = [
-  { key: "select", label: "选优", x: 0, y: 70 },
-  { key: "pull", label: "拉取", x: 150, y: 70 },
-  { key: "merge", label: "合并 plain", x: 300, y: 70 },
-  { key: "burn_danmu", label: "烧 danmu", x: 470, y: 10 },
-  { key: "burn_livechat", label: "烧 livechat", x: 640, y: 10 },
-  { key: "upload_plain", label: "传 plain P1", x: 470, y: 130 },
-  { key: "append_danmu", label: "追 danmu P2", x: 810, y: 70 },
-  { key: "append_livechat", label: "追 livechat P3", x: 980, y: 70 },
+const STEP_DEFS: Array<{ key: string; x: number; y: number }> = [
+  { key: "select", x: 0, y: 70 },
+  { key: "pull", x: 150, y: 70 },
+  { key: "merge", x: 300, y: 70 },
+  { key: "burn_danmu", x: 470, y: 10 },
+  { key: "burn_livechat", x: 640, y: 10 },
+  { key: "upload_plain", x: 470, y: 130 },
+  { key: "append_danmu", x: 810, y: 70 },
+  { key: "append_livechat", x: 980, y: 70 },
 ];
-const TERM = { key: "__term__", label: "完成", x: 1150, y: 70 };
+const TERM = { key: "__term__", x: 1150, y: 70 };
 const FLOW_EDGES: Array<[string, string]> = [
   ["select", "pull"], ["pull", "merge"],
   ["merge", "burn_danmu"], ["merge", "upload_plain"],
@@ -94,6 +100,7 @@ function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec:
 
 /** 自定义节点:状态圆 + 标签 + 耗时。 */
 function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: number | null } }): ReactNode {
+  const t = useT();
   const c = NODE_COLOR[data.status];
   return (
     <div className="flex flex-col items-center gap-1" style={{ width: 92 }}>
@@ -115,7 +122,7 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
         {data.label}
       </span>
       <span className="text-[10px] font-mono" style={{ color: data.status === "active" ? "var(--ink)" : "var(--muted-soft)" }}>
-        {data.status === "skipped" ? "跳过" : data.status === "todo" ? "" : humanSec(data.sec)}
+        {data.status === "skipped" ? t("hub.jobs.skipped") : data.status === "todo" ? "" : humanSec(data.sec)}
       </span>
       <Handle type="source" position={Position.Right} style={{ opacity: 0, top: 11 }} />
     </div>
@@ -126,29 +133,31 @@ const NODE_TYPES = { step: StepNode };
 
 /** 单条 run 的 fork/join 流程图(React Flow):固定布局,节点按 job.steps 上色,active 边动画。 */
 function PipelineFlow({ job }: { job: HubJobDTO }): ReactNode {
+  const t = useT();
+  const labels = stepLabelMap(t);
   // 旧版本 run 无细粒度 steps → 回落一行粗粒度状态文字(不画图)。
   if (job.steps.length === 0) {
-    const line = job.events.map((e) => STEP_LABEL[e.state] ?? e.state).join(" → ");
-    return <span className="text-muted-soft text-xs">{line || "（无流程记录;旧版本任务）"}</span>;
+    const line = job.events.map((e) => labels[e.state] ?? e.state).join(" → ");
+    return <span className="text-muted-soft text-xs">{line || t("hub.jobs.noStepRecord")}</span>;
   }
   const st = stepStatuses(job);
   const termStatus: NodeStatus =
     job.state === "failed" ? "failed" : job.state === "done" ? "done" : job.state === "needs_manual" ? "done" : "todo";
-  const termLabel = job.state === "needs_manual" ? "待人工" : job.state === "failed" ? "失败" : "完成";
+  const termLabel = job.state === "needs_manual" ? labels.needs_manual : job.state === "failed" ? labels.failed : t("hub.jobs.termDone");
   const statusOf = (key: string): NodeStatus => (key === "__term__" ? termStatus : st[key].status);
 
   const nodes: Node[] = [
     ...STEP_DEFS.map((d) => ({
       id: d.key, type: "step", position: { x: d.x, y: d.y },
-      data: { label: d.label, status: st[d.key].status, sec: st[d.key].sec },
+      data: { label: t(`hub.jobs.stepNode.${d.key}`), status: st[d.key].status, sec: st[d.key].sec },
     })),
     { id: TERM.key, type: "step", position: { x: TERM.x, y: TERM.y }, data: { label: termLabel, status: termStatus, sec: null } },
   ];
-  const edges: Edge[] = FLOW_EDGES.map(([s, t]) => {
-    const ts = statusOf(t);
+  const edges: Edge[] = FLOW_EDGES.map(([src, dst]) => {
+    const ts = statusOf(dst);
     const reached = ts === "done" || ts === "active" || ts === "failed";
     return {
-      id: `${s}-${t}`, source: s, target: t,
+      id: `${src}-${dst}`, source: src, target: dst,
       animated: ts === "active", // 流入进行中节点 → React Flow 内置流动动画
       style: { stroke: reached ? "var(--success)" : "var(--hairline)", strokeWidth: 1.5 },
     };
@@ -189,6 +198,8 @@ export function RunCard({
   onOpenLog: (key: string) => void;
   workerName?: (id: string) => string;
 }): ReactNode {
+  const t = useT();
+  const labels = stepLabelMap(t);
   return (
     <div className="rounded-lg border border-hairline p-3">
       <div className="flex items-center justify-between gap-2 mb-2">
@@ -196,24 +207,26 @@ export function RunCard({
           <span className="font-mono text-[13px] text-ink">{runDate(job.streamKey)}</span>
           <span className="inline-flex items-center gap-1 text-[13px] font-medium" style={{ color: stateColor(job.state) }}>
             {!TERMINAL.has(job.state) && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-            {STEP_LABEL[job.state] ?? job.state}
-            {job.currentStepSec != null && <span className="text-muted-soft font-normal">· 已运行 {humanSec(job.currentStepSec)}</span>}
+            {labels[job.state] ?? job.state}
+            {job.currentStepSec != null && (
+              <span className="text-muted-soft font-normal">{t("hub.jobs.runningFor", { time: humanSec(job.currentStepSec) })}</span>
+            )}
             {!TERMINAL.has(job.state) && job.etaSec != null && (
-              <span className="text-muted-soft font-normal">· 预计剩余约 {humanSec(job.etaSec)}</span>
+              <span className="text-muted-soft font-normal">{t("hub.jobs.etaRemaining", { time: humanSec(job.etaSec) })}</span>
             )}
           </span>
         </div>
         {job.hasLog && (
-          <IconButton title="查看日志" onClick={() => onOpenLog(job.streamKey)}>
+          <IconButton title={t("hub.jobs.viewLog")} onClick={() => onOpenLog(job.streamKey)}>
             <FileText className="w-4 h-4" />
           </IconButton>
         )}
       </div>
       <PipelineFlow job={job} />
       <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-2 text-[12px] text-muted">
-        {job.winnerWorker && <span>选优: {workerName ? workerName(job.winnerWorker) : job.winnerWorker}</span>}
-        {job.videoDurationSec != null && <span>时长: {humanSec(Math.round(job.videoDurationSec))}</span>}
-        {job.fails > 0 && <span style={{ color: "var(--warning)" }}>已重试 {job.fails} 次</span>}
+        {job.winnerWorker && <span>{t("hub.jobs.selected", { worker: workerName ? workerName(job.winnerWorker) : job.winnerWorker })}</span>}
+        {job.videoDurationSec != null && <span>{t("hub.jobs.duration", { time: humanSec(Math.round(job.videoDurationSec)) })}</span>}
+        {job.fails > 0 && <span style={{ color: "var(--warning)" }}>{t("hub.jobs.retries", { count: job.fails })}</span>}
         {job.bv && (
           <a className="text-muted hover:text-ink" href={`https://www.bilibili.com/video/${job.bv}`} target="_blank" rel="noreferrer">
             {job.bv}
@@ -227,21 +240,23 @@ export function RunCard({
 
 /** job.log 查看弹窗(受控:logKey!=null 打开;logKey 变化即重新拉取)。列表页/历史页共用。 */
 export function JobLogDialog({ logKey, onClose }: { logKey: string | null; onClose: () => void }): ReactNode {
-  const [text, setText] = useState("加载中…");
+  const t = useT();
+  const [text, setText] = useState(t("hub.common.loading"));
   useEffect(() => {
     if (logKey === null) return;
     let alive = true;
-    setText("加载中…");
+    setText(t("hub.common.loading"));
     void api
       .getHubJobLog(logKey)
-      .then((r) => alive && setText(r.log || "(空)"))
-      .catch(() => alive && setText("读取日志失败(可能 stage 已清理)。"));
+      .then((r) => alive && setText(r.log || t("hub.jobs.logEmpty")))
+      .catch(() => alive && setText(t("hub.jobs.logReadFailed")));
     return () => {
       alive = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [logKey]);
   return (
-    <Dialog open={logKey !== null} onClose={onClose} widthClass="max-w-3xl" title={`任务日志 · ${logKey ?? ""}`}>
+    <Dialog open={logKey !== null} onClose={onClose} widthClass="max-w-3xl" title={t("hub.jobs.logTitle", { key: logKey ?? "" })}>
       <pre className="text-[11px] font-mono whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-surface-soft rounded p-3 text-body">
         {text}
       </pre>
@@ -251,11 +266,13 @@ export function JobLogDialog({ logKey, onClose }: { logKey: string | null; onClo
 
 /** 规则行内的「最近一次运行」紧凑徽标(在跑=当前步 spinner;终态=状态)。无 run → 提示。 */
 export function LatestRunBadge({ run }: { run: HubJobDTO | undefined }): ReactNode {
-  if (!run) return <span className="text-muted-soft text-xs">尚无运行</span>;
+  const t = useT();
+  const labels = stepLabelMap(t);
+  if (!run) return <span className="text-muted-soft text-xs">{t("hub.jobs.noRunYet")}</span>;
   return (
     <span className="inline-flex items-center gap-1 text-[12px] font-medium" style={{ color: stateColor(run.state) }}>
       {!TERMINAL.has(run.state) && <Loader2 className="w-3 h-3 animate-spin" />}
-      {STEP_LABEL[run.state] ?? run.state}
+      {labels[run.state] ?? run.state}
       {run.currentStepSec != null && <span className="text-muted-soft font-normal">· {humanSec(run.currentStepSec)}</span>}
     </span>
   );

@@ -5,9 +5,11 @@ import { Button, IconButton } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { WorkerDialog } from "../modals/WorkerDialog";
+import { useT } from "../lib/i18n";
 
 /** Hub 页顶部的 Workers 卡:录制节点列表(name/kind/host/连接状态)+ 增删改测。 */
 export function WorkersCard(): ReactNode {
+  const t = useT();
   const toast = useToast();
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -52,7 +54,7 @@ export function WorkersCard(): ReactNode {
   const doDelete = async (id: string): Promise<void> => {
     try {
       await api.deleteWorker(id);
-      toast("Worker 已删除", "info");
+      toast(t("hub.workers.deleted"), "info");
       await refresh();
     } catch (e) {
       toast(errMessage(e), "error");
@@ -69,34 +71,34 @@ export function WorkersCard(): ReactNode {
       <section className="card overflow-hidden mb-6">
         <div className="flex items-end justify-between gap-3 p-4 pb-2">
           <div>
-            <h2 className="headline text-[18px] leading-tight">Workers / 录制节点</h2>
-            <p className="text-muted text-xs mt-1">选优合并的数据来源,local = master 自身。</p>
+            <h2 className="headline text-[18px] leading-tight">{t("hub.workers.title")}</h2>
+            <p className="text-muted text-xs mt-1">{t("hub.workers.subtitle")}</p>
           </div>
           <Button small onClick={openCreate}>
             <Plus className="w-4 h-4" />
-            添加 Worker
+            {t("hub.workers.add")}
           </Button>
         </div>
         <div className="overflow-x-auto">
           <table className="tasks">
             <thead>
               <tr>
-                <th>名称</th>
-                <th>类型</th>
-                <th>host</th>
-                <th>状态</th>
-                <th className="text-right">操作</th>
+                <th>{t("hub.workers.colName")}</th>
+                <th>{t("hub.workers.colKind")}</th>
+                <th>{t("hub.workers.colHost")}</th>
+                <th>{t("hub.workers.colStatus")}</th>
+                <th className="text-right">{t("hub.workers.colAction")}</th>
               </tr>
             </thead>
             <tbody>
               {!loaded && (
                 <tr>
-                  <td colSpan={5} className="text-center text-muted py-8">加载中…</td>
+                  <td colSpan={5} className="text-center text-muted py-8">{t("hub.common.loading")}</td>
                 </tr>
               )}
               {loaded && workers.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="text-center text-muted py-8">还没有 Worker</td>
+                  <td colSpan={5} className="text-center text-muted py-8">{t("hub.workers.empty")}</td>
                 </tr>
               )}
               {loaded &&
@@ -116,14 +118,14 @@ export function WorkersCard(): ReactNode {
                     </td>
                     <td className="text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-2.5 justify-end">
-                        <IconButton title="测试连接" onClick={() => void runTest(w)} disabled={testing[w.id]}>
+                        <IconButton title={t("hub.workers.testConn")} onClick={() => void runTest(w)} disabled={testing[w.id]}>
                           <Wifi className="w-4 h-4" />
                         </IconButton>
-                        <IconButton title="编辑" onClick={() => openEdit(w)}>
+                        <IconButton title={t("hub.common.edit")} onClick={() => openEdit(w)}>
                           <Pencil className="w-4 h-4" />
                         </IconButton>
                         {w.id !== "local" && (
-                          <IconButton title="删除" style={{ color: "var(--error)" }} onClick={() => setPendingDelete(w.id)}>
+                          <IconButton title={t("hub.common.delete")} style={{ color: "var(--error)" }} onClick={() => setPendingDelete(w.id)}>
                             <Trash2 className="w-4 h-4" />
                           </IconButton>
                         )}
@@ -140,8 +142,8 @@ export function WorkersCard(): ReactNode {
 
       <ConfirmDialog
         open={pendingDelete !== null}
-        title="删除该 Worker?"
-        confirmLabel="删除"
+        title={t("hub.workers.deleteConfirmTitle")}
+        confirmLabel={t("hub.common.delete")}
         destructive
         onConfirm={() => {
           const id = pendingDelete;

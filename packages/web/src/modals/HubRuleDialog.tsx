@@ -4,6 +4,7 @@ import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { Switch } from "../components/Switch";
 import { errMessage, useToast } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 
 interface Props {
   open: boolean;
@@ -67,6 +68,7 @@ function fromRule(r: HubRuleDTO): FormState {
 /** Hub 规则的创建/编辑弹窗:按房间(roomSlug)配置后处理 pipeline。 */
 export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNode {
   const isEdit = rule !== null;
+  const t = useT();
   const toast = useToast();
   const [form, setForm] = useState<FormState>(BLANK);
   const [busy, setBusy] = useState(false);
@@ -107,7 +109,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
       if (isEdit) await api.updateHubRule(rule.key, payload);
       else await api.createHubRule(payload);
       onClose();
-      toast(isEdit ? "Hub 规则已更新" : "Hub 规则已创建", "success");
+      toast(isEdit ? t("hub.ruleDialog.updated") : t("hub.ruleDialog.created"), "success");
       onSaved();
     } catch (e) {
       toast(errMessage(e), "error");
@@ -121,24 +123,24 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
       open={open}
       onClose={onClose}
       widthClass="max-w-2xl"
-      title={isEdit ? "编辑 Hub 规则" : "新建 Hub 规则"}
-      description="按直播间配置多节点选优合并 → 烧录 → 上传的后处理流程"
+      title={isEdit ? t("hub.ruleDialog.editTitle") : t("hub.ruleDialog.createTitle")}
+      description={t("hub.ruleDialog.desc")}
     >
       <form className="grid grid-cols-1 sm:grid-cols-2 gap-4" onSubmit={submit}>
         <div className="sm:col-span-2">
           <label className="field-label">
-            直播间地址 / room{!isEdit && <span style={{ color: "var(--error)" }}>*</span>}
+            {t("hub.ruleDialog.roomLabel")}{!isEdit && <span style={{ color: "var(--error)" }}>*</span>}
           </label>
           {isEdit ? (
             <div className="font-mono text-sm text-body break-all">
               {rule.room}
-              <span className="text-muted-soft ml-2">(roomSlug: {rule.roomSlug})</span>
+              <span className="text-muted-soft ml-2">{t("hub.ruleDialog.roomSlugSuffix", { slug: rule.roomSlug })}</span>
             </div>
           ) : (
             <input
               required
               className="input"
-              placeholder="https://live.douyin.com/123456 或房间号"
+              placeholder={t("hub.ruleDialog.roomPlaceholder")}
               value={form.room}
               onChange={(e) => set("room", e.target.value)}
             />
@@ -147,23 +149,23 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
 
         <label className="sm:col-span-2 flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 cursor-pointer">
           <span className="flex flex-col">
-            <span className="text-sm font-medium text-ink">规则启用 / enabled</span>
-            <span className="text-xs text-muted mt-0.5">关闭 = hub 暂停处理此房间(录制不受影响)</span>
+            <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.enabledLabel")}</span>
+            <span className="text-xs text-muted mt-0.5">{t("hub.ruleDialog.enabledHint")}</span>
           </span>
           <Switch checked={form.enabled} onCheckedChange={(v) => set("enabled", v)} name="enabled" />
         </label>
 
         {/* ── Section: 流水线 pipeline(产出 + 清理)── */}
         <div className="sm:col-span-2">
-          <h3 className="text-sm font-semibold text-ink mb-2 pb-1 border-b border-hairline">流水线 / pipeline</h3>
+          <h3 className="text-sm font-semibold text-ink mb-2 pb-1 border-b border-hairline">{t("hub.ruleDialog.pipelineSection")}</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {([
-              ["burnDanmu", "烧 danmu / 飞屏弹幕", "合成飞屏弹幕版"],
-              ["burnLivechat", "烧 livechat / 聊天框", "合成聊天框版"],
-              ["clStageSourceAfterMerge", "合并后删 stage 源 .ts", "留合成产物,删拉来的源片"],
-              ["clSourceAfterDone", "完成后删源节点录制", "各节点原始 .ts(完成后)"],
-              ["clStageAfterDone", "完成后删 stage 产物", "上传后删合成 mp4"],
-              ["clIncludeXmlAss", "删除含 .xml/.ass", "默认只删 .ts/.mp4(守弹幕源)"],
+              ["burnDanmu", t("hub.ruleDialog.toggleBurnDanmuLabel"), t("hub.ruleDialog.toggleBurnDanmuSub")],
+              ["burnLivechat", t("hub.ruleDialog.toggleBurnLivechatLabel"), t("hub.ruleDialog.toggleBurnLivechatSub")],
+              ["clStageSourceAfterMerge", t("hub.ruleDialog.toggleClStageSourceAfterMergeLabel"), t("hub.ruleDialog.toggleClStageSourceAfterMergeSub")],
+              ["clSourceAfterDone", t("hub.ruleDialog.toggleClSourceAfterDoneLabel"), t("hub.ruleDialog.toggleClSourceAfterDoneSub")],
+              ["clStageAfterDone", t("hub.ruleDialog.toggleClStageAfterDoneLabel"), t("hub.ruleDialog.toggleClStageAfterDoneSub")],
+              ["clIncludeXmlAss", t("hub.ruleDialog.toggleClIncludeXmlAssLabel"), t("hub.ruleDialog.toggleClIncludeXmlAssSub")],
             ] as const).map(([key, label, sub]) => (
               <label key={key} className="flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 cursor-pointer">
                 <span className="flex flex-col">
@@ -178,12 +180,12 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
 
         {/* ── Section: Bilibili 上传(总开关 + 开启后才显示投稿明细)── */}
         <div className="sm:col-span-2">
-          <h3 className="text-sm font-semibold text-ink mb-2 pb-1 border-b border-hairline">Bilibili 上传 / upload</h3>
+          <h3 className="text-sm font-semibold text-ink mb-2 pb-1 border-b border-hairline">{t("hub.ruleDialog.uploadSection")}</h3>
           {/* 上传 B站总开关:off=stage(只合成不传) on=upload(自动传) */}
           <label className="flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 cursor-pointer">
             <span className="flex flex-col">
-              <span className="text-sm font-medium text-ink">上传 B站 / bilibili upload</span>
-              <span className="text-xs text-muted mt-0.5">{form.uploadMode === "upload" ? "合成后自动投稿(关水印·copyright 自制)" : "只合成,不上传(留 stage 待人工)"}</span>
+              <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.uploadToggleLabel")}</span>
+              <span className="text-xs text-muted mt-0.5">{form.uploadMode === "upload" ? t("hub.ruleDialog.uploadOnHint") : t("hub.ruleDialog.uploadOffHint")}</span>
             </span>
             <Switch
               checked={form.uploadMode === "upload"}
@@ -197,25 +199,25 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
               <label className="flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 cursor-pointer">
                 <span className="flex flex-col">
-                  <span className="text-sm font-medium text-ink">公开 / public</span>
-                  <span className="text-xs text-muted mt-0.5">{form.uploadPrivate ? "仅自己可见(默认)" : "公开投稿"}</span>
+                  <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.publicLabel")}</span>
+                  <span className="text-xs text-muted mt-0.5">{form.uploadPrivate ? t("hub.ruleDialog.privateHint") : t("hub.ruleDialog.publicHint")}</span>
                 </span>
                 <Switch checked={!form.uploadPrivate} onCheckedChange={(v) => set("uploadPrivate", !v)} name="uploadPublic" />
               </label>
               <div>
-                <label className="field-label">B站分区 tid</label>
+                <label className="field-label">{t("hub.ruleDialog.tidLabel")}</label>
                 <input type="number" min={1} className="input" value={form.uploadTid} onChange={(e) => set("uploadTid", e.target.value)} />
               </div>
               <div className="sm:col-span-2">
-                <label className="field-label">B站 tag(逗号分隔)</label>
-                <input className="input" placeholder="直播,录像,…" value={form.uploadTag} onChange={(e) => set("uploadTag", e.target.value)} />
+                <label className="field-label">{t("hub.ruleDialog.tagLabel")}</label>
+                <input className="input" placeholder={t("hub.ruleDialog.tagPlaceholder")} value={form.uploadTag} onChange={(e) => set("uploadTag", e.target.value)} />
               </div>
               <div className="sm:col-span-2">
-                <label className="field-label">B站简介 desc</label>
+                <label className="field-label">{t("hub.ruleDialog.descLabel")}</label>
                 <textarea
                   className="input"
                   rows={4}
-                  placeholder="(可选,支持多行)"
+                  placeholder={t("hub.ruleDialog.descPlaceholder")}
                   value={form.uploadDesc}
                   onChange={(e) => set("uploadDesc", e.target.value)}
                   style={{ resize: "vertical", minHeight: "5rem", fontFamily: "inherit", whiteSpace: "pre-wrap" }}
@@ -227,10 +229,10 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
 
         <div className="sm:col-span-2 flex justify-end gap-3 mt-3">
           <Button type="button" variant="secondary" onClick={onClose}>
-            取消
+            {t("hub.common.cancel")}
           </Button>
           <Button type="submit" disabled={busy} loading={busy}>
-            {isEdit ? "保存" : "创建"}
+            {isEdit ? t("hub.common.save") : t("hub.common.create")}
           </Button>
         </div>
       </form>

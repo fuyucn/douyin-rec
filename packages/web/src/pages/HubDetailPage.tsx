@@ -9,16 +9,19 @@ import { Switch } from "../components/Switch";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
+import { useT } from "../lib/i18n";
 
 const PAGE = 20;
 
+type TFunc = (key: string, vars?: Record<string, string | number>) => string;
+
 /** 后处理配置摘要(与列表页一致)。 */
-function summarize(r: HubRuleDTO): string {
+function summarize(r: HubRuleDTO, t: TFunc): string {
   const c = r.pipeline ?? {};
   const out = ["plain"];
   if (c.steps?.burnDanmu !== false) out.push("danmu");
   if (c.steps?.burnLivechat !== false) out.push("livechat");
-  const up = c.upload?.mode === "upload" ? (c.upload.private === false ? " → 上传(公开)" : " → 上传(私)") : " → 仅合成(stage)";
+  const up = c.upload?.mode === "upload" ? (c.upload.private === false ? t("hub.common.uploadPublicSuffix") : t("hub.common.uploadPrivateSuffix")) : t("hub.common.stageOnlySuffix");
   return out.join(" + ") + up;
 }
 
@@ -27,6 +30,7 @@ function summarize(r: HubRuleDTO): string {
  * 上半配置卡(pipeline 摘要 / 启用开关 / 编辑 / 删除),下半运行记录(分页,进行中 3s 轮询)。
  */
 export function HubDetailPage(): ReactNode {
+  const t = useT();
   const { key = "" } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
@@ -79,7 +83,7 @@ export function HubDetailPage(): ReactNode {
     setConfirmDelete(false);
     try {
       await api.deleteHubRule(key);
-      toast("Hub 规则已删除", "info");
+      toast(t("hub.common.ruleDeleted"), "info");
       navigate("/hub");
     } catch (e) {
       toast(errMessage(e), "error");
@@ -93,7 +97,7 @@ export function HubDetailPage(): ReactNode {
     <>
       <div className="mb-6">
         <Link to="/hub" className="inline-flex items-center gap-1 text-sm text-muted hover:text-ink mb-2">
-          <ChevronLeft className="w-4 h-4" /> Hub 管理
+          <ChevronLeft className="w-4 h-4" /> {t("hub.page.title")}
         </Link>
         <h1 className="headline text-[26px] sm:text-[30px] leading-tight">{title}</h1>
         <p className="text-muted text-sm mt-1.5 font-mono break-all">{key}</p>
@@ -104,21 +108,21 @@ export function HubDetailPage(): ReactNode {
         <section className="card p-5 mb-6">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
-              <h2 className="text-sm font-semibold text-ink mb-2">后处理配置</h2>
-              <div className="font-mono text-[13px] text-body break-all">{summarize(rule)}</div>
+              <h2 className="text-sm font-semibold text-ink mb-2">{t("hub.detail.pipelineConfig")}</h2>
+              <div className="font-mono text-[13px] text-body break-all">{summarize(rule, t)}</div>
               <div className="flex items-center gap-1.5 text-[13px] mt-2">
                 <span className="dot" style={{ background: rule.enabled ? "var(--success)" : "var(--muted-soft)" }} />
                 <span style={{ color: rule.enabled ? "var(--success)" : "var(--muted)" }}>
-                  {rule.enabled ? "启用中" : "已暂停"}
+                  {rule.enabled ? t("hub.common.enabledState") : t("hub.common.disabledState")}
                 </span>
               </div>
             </div>
             <div className="flex items-center gap-2.5 shrink-0">
               <Switch checked={rule.enabled} onCheckedChange={() => void toggle()} name={`hub-detail-${rule.key}`} />
-              <IconButton title="编辑" onClick={() => setEditOpen(true)}>
+              <IconButton title={t("hub.common.edit")} onClick={() => setEditOpen(true)}>
                 <Pencil className="w-4 h-4" />
               </IconButton>
-              <IconButton title="删除" style={{ color: "var(--error)" }} onClick={() => setConfirmDelete(true)}>
+              <IconButton title={t("hub.common.delete")} style={{ color: "var(--error)" }} onClick={() => setConfirmDelete(true)}>
                 <Trash2 className="w-4 h-4" />
               </IconButton>
             </div>
@@ -128,14 +132,14 @@ export function HubDetailPage(): ReactNode {
 
       {/* 运行记录 */}
       <div className="flex items-baseline justify-between mb-3">
-        <h2 className="text-sm font-semibold text-ink">运行记录</h2>
-        <span className="text-[12px] text-muted-soft">共 {total} 次</span>
+        <h2 className="text-sm font-semibold text-ink">{t("hub.detail.runsHeading")}</h2>
+        <span className="text-[12px] text-muted-soft">{t("hub.detail.totalRuns", { count: total })}</span>
       </div>
       {!loaded ? (
-        <div className="card p-10 text-center text-muted">加载中…</div>
+        <div className="card p-10 text-center text-muted">{t("hub.common.loading")}</div>
       ) : runs.length === 0 ? (
         <div className="card p-10 text-center text-muted text-sm">
-          该直播间还没有 hub 运行记录(录制并收播后自动产生)。
+          {t("hub.detail.noRuns")}
         </div>
       ) : (
         <div className="space-y-3">
@@ -145,7 +149,7 @@ export function HubDetailPage(): ReactNode {
           {runs.length < total && (
             <div className="text-center pt-2">
               <Button small variant="secondary" onClick={() => setPages((p) => p + 1)}>
-                加载更多（还有 {total - runs.length} 次）
+                {t("hub.detail.loadMore", { count: total - runs.length })}
               </Button>
             </div>
           )}
@@ -156,8 +160,8 @@ export function HubDetailPage(): ReactNode {
       <JobLogDialog logKey={logKey} onClose={() => setLogKey(null)} />
       <ConfirmDialog
         open={confirmDelete}
-        title="删除该 Hub 规则?"
-        confirmLabel="删除"
+        title={t("hub.common.deleteRuleConfirmTitle")}
+        confirmLabel={t("hub.common.delete")}
         destructive
         onConfirm={() => void doDelete()}
         onCancel={() => setConfirmDelete(false)}

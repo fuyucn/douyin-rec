@@ -3,6 +3,7 @@ import { api, type WorkerDTO, type WorkerTestResult } from "../api/client";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { errMessage, useToast } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 
 interface Props {
   open: boolean;
@@ -26,6 +27,7 @@ const KINDS = ["local", "ssh", "tailscale-ssh"] as const;
 export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNode {
   const isEdit = worker !== null;
   const isLocal = worker?.id === "local";
+  const t = useT();
   const toast = useToast();
   const [form, setForm] = useState<FormState>(BLANK);
   const [busy, setBusy] = useState(false);
@@ -71,7 +73,7 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
       if (isEdit) await api.updateWorker(worker.id, payload());
       else await api.createWorker(payload());
       onClose();
-      toast(isEdit ? "Worker 已更新" : "Worker 已创建", "success");
+      toast(isEdit ? t("hub.workerDialog.updated") : t("hub.workerDialog.created"), "success");
       onSaved();
     } catch (e) {
       toast(errMessage(e), "error");
@@ -85,24 +87,24 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
       open={open}
       onClose={onClose}
       widthClass="max-w-lg"
-      title={isEdit ? "编辑 Worker" : "新建 Worker"}
-      description="录制节点(选优合并的数据来源)"
+      title={isEdit ? t("hub.workerDialog.editTitle") : t("hub.workerDialog.createTitle")}
+      description={t("hub.workerDialog.desc")}
     >
       <form className="grid grid-cols-1 gap-4" onSubmit={submit}>
         {isEdit && (
-          <div className="text-xs text-muted-soft font-mono break-all">id: {worker.id}</div>
+          <div className="text-xs text-muted-soft font-mono break-all">{t("hub.workerDialog.idLabel", { id: worker.id })}</div>
         )}
         <div>
-          <label className="field-label">名称 / name</label>
+          <label className="field-label">{t("hub.workerDialog.nameLabel")}</label>
           <input
             className="input"
-            placeholder="友好名(留空则用 host)"
+            placeholder={t("hub.workerDialog.namePlaceholder")}
             value={form.name}
             onChange={(e) => set("name", e.target.value)}
           />
         </div>
         <div>
-          <label className="field-label">类型 / kind</label>
+          <label className="field-label">{t("hub.workerDialog.kindLabel")}</label>
           <select className="input" value={form.kind} disabled={isLocal} onChange={(e) => set("kind", e.target.value)}>
             {KINDS.map((k) => (
               <option key={k} value={k}>
@@ -110,17 +112,17 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
               </option>
             ))}
           </select>
-          {isLocal && <div className="text-xs text-muted mt-1">master 自身,类型不可改</div>}
+          {isLocal && <div className="text-xs text-muted mt-1">{t("hub.workerDialog.localKindHint")}</div>}
         </div>
         {needsHost && (
           <div>
             <label className="field-label">
-              host<span style={{ color: "var(--error)" }}>*</span>
+              {t("hub.workerDialog.hostLabel")}<span style={{ color: "var(--error)" }}>*</span>
             </label>
             <input
               required
               className="input"
-              placeholder="100.x.y.z 或 host.ts.net"
+              placeholder={t("hub.workerDialog.hostPlaceholder")}
               value={form.host}
               onChange={(e) => set("host", e.target.value)}
             />
@@ -128,12 +130,12 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
         )}
         <div>
           <label className="field-label">
-            dataRoot<span style={{ color: "var(--error)" }}>*</span>
+            {t("hub.workerDialog.dataRootLabel")}<span style={{ color: "var(--error)" }}>*</span>
           </label>
           <input
             required
             className="input"
-            placeholder="/home/ubuntu/drec 或 /data"
+            placeholder={t("hub.workerDialog.dataRootPlaceholder")}
             value={form.dataRoot}
             onChange={(e) => set("dataRoot", e.target.value)}
           />
@@ -143,19 +145,19 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
             className="text-sm rounded-lg border border-hairline px-3 py-2"
             style={{ color: test.ok ? "var(--success)" : "var(--error)" }}
           >
-            {test.ok ? `连接成功 · 可见 ${test.recordingCount ?? 0} 场录制` : `连接失败:${test.error ?? "未知错误"}`}
+            {test.ok ? t("hub.workerDialog.testOk", { count: test.recordingCount ?? 0 }) : t("hub.workerDialog.testFailed", { error: test.error ?? t("hub.workerDialog.unknownError") })}
           </div>
         )}
         <div className="flex justify-between gap-3 mt-2">
           <Button type="button" variant="secondary" onClick={() => void runTest()} disabled={testing} loading={testing}>
-            测试连接
+            {t("hub.workers.testConn")}
           </Button>
           <div className="flex gap-3">
             <Button type="button" variant="secondary" onClick={onClose}>
-              取消
+              {t("hub.common.cancel")}
             </Button>
             <Button type="submit" disabled={busy} loading={busy}>
-              {isEdit ? "保存" : "创建"}
+              {isEdit ? t("hub.common.save") : t("hub.common.create")}
             </Button>
           </div>
         </div>
