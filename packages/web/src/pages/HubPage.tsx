@@ -8,6 +8,7 @@ import { Button, IconButton } from "../components/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Switch } from "../components/Switch";
 import { LatestRunBadge } from "../components/HubJobs";
+import { WorkersCard } from "../components/WorkersCard";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
@@ -111,6 +112,8 @@ export function HubPage(): ReactNode {
           新建规则
         </Button>
       </div>
+
+      <WorkersCard />
 
       <section className="card overflow-hidden">
         <div className="overflow-x-auto">

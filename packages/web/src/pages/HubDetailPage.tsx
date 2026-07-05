@@ -1,7 +1,7 @@
 import { ChevronLeft, Pencil, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, type HubJobDTO, type HubRuleDTO } from "../api/client";
+import { api, type HubJobDTO, type HubRuleDTO, type WorkerDTO } from "../api/client";
 import { RunCard, JobLogDialog } from "../components/HubJobs";
 import { Button, IconButton } from "../components/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -31,6 +31,7 @@ export function HubDetailPage(): ReactNode {
   const navigate = useNavigate();
   const toast = useToast();
   const [rule, setRule] = useState<HubRuleDTO | null>(null);
+  const [workers, setWorkers] = useState<WorkerDTO[]>([]);
   const [runs, setRuns] = useState<HubJobDTO[]>([]);
   const [total, setTotal] = useState(0);
   const [loaded, setLoaded] = useState(false);
@@ -45,6 +46,11 @@ export function HubDetailPage(): ReactNode {
       setRule(rules.find((r) => r.key === key) ?? null);
     } catch {
       /* 轮询重试 */
+    }
+    try {
+      setWorkers(await api.listWorkers());
+    } catch {
+      /* 忽略:workerName 回落展示 id */
     }
     try {
       const r = await api.listHubJobs({ room: key, limit: pages * PAGE, offset: 0 });
@@ -81,6 +87,7 @@ export function HubDetailPage(): ReactNode {
   };
 
   const title = rule?.anchorName ?? (rule ? roomId(rule.room) : key);
+  const workerName = (id: string): string => workers.find((w) => w.id === id)?.name ?? id;
 
   return (
     <>
@@ -133,7 +140,7 @@ export function HubDetailPage(): ReactNode {
       ) : (
         <div className="space-y-3">
           {runs.map((j) => (
-            <RunCard key={j.streamKey} job={j} onOpenLog={setLogKey} />
+            <RunCard key={j.streamKey} job={j} onOpenLog={setLogKey} workerName={workerName} />
           ))}
           {runs.length < total && (
             <div className="text-center pt-2">

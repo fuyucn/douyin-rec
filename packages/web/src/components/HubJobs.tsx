@@ -178,8 +178,17 @@ function PipelineFlow({ job }: { job: HubJobDTO }): ReactNode {
   );
 }
 
-/** 一条 run 卡片:状态行 + 步骤时间线 + 元信息(选优/时长/BV/错误)+ 日志按钮。 */
-export function RunCard({ job, onOpenLog }: { job: HubJobDTO; onOpenLog: (key: string) => void }): ReactNode {
+/** 一条 run 卡片:状态行 + 步骤时间线 + 元信息(选优/时长/BV/错误)+ 日志按钮。
+ * `workerName` 可选:把 job.winnerWorker(id)映射成友好名,查不到回落 id。 */
+export function RunCard({
+  job,
+  onOpenLog,
+  workerName,
+}: {
+  job: HubJobDTO;
+  onOpenLog: (key: string) => void;
+  workerName?: (id: string) => string;
+}): ReactNode {
   return (
     <div className="rounded-lg border border-hairline p-3">
       <div className="flex items-center justify-between gap-2 mb-2">
@@ -202,7 +211,7 @@ export function RunCard({ job, onOpenLog }: { job: HubJobDTO; onOpenLog: (key: s
       </div>
       <PipelineFlow job={job} />
       <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-2 text-[12px] text-muted">
-        {job.winnerWorker && <span>选优: {job.winnerWorker}</span>}
+        {job.winnerWorker && <span>选优: {workerName ? workerName(job.winnerWorker) : job.winnerWorker}</span>}
         {job.videoDurationSec != null && <span>时长: {humanSec(Math.round(job.videoDurationSec))}</span>}
         {job.fails > 0 && <span style={{ color: "var(--warning)" }}>已重试 {job.fails} 次</span>}
         {job.bv && (
