@@ -81,6 +81,7 @@ describe("matchRoute", () => {
     expect(matchRoute("POST", "/api/hub/workers")).toMatchObject({ name: "createWorker", needsBody: true });
     expect(matchRoute("PATCH", "/api/hub/workers/worker-1")).toMatchObject({ name: "updateWorker", slug: "worker-1", needsBody: true });
     expect(matchRoute("DELETE", "/api/hub/workers/local")).toMatchObject({ name: "deleteWorker", slug: "local" });
+    expect(matchRoute("POST", "/api/hub/workers/test")).toMatchObject({ name: "testWorker", needsBody: true });
   });
 
   it("returns null for unknown routes / wrong methods", () => {

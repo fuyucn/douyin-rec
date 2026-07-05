@@ -207,6 +207,8 @@ export interface HubStarter {
     log: (msg: string) => void;
     warn: (msg: string) => void;
   }): Promise<(() => void) | undefined>;
+  /** 连接测试(cli L5 用 orchestrator getTransport + listInventory 实现)。 */
+  testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
 }
 
 /** Build the `task` command group. Pass a getWebhook() that reads program-level opts/env. */
@@ -538,7 +540,12 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
       const hubEnabled = !!(o.hub && hubStarter && resolveHubConfigJson(o.hubConfig, store));
       // hub 台账路径与 cli hubStarter 同一推导(<db>-sync.db)——「hub 任务」端点读它展示进度/ETA/日志。
       const syncDbPath = resolveDbPath(o.db).replace(/\.db$/, "-sync.db");
-      const server = createWebServer({ store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(), log: (m) => console.log(m) });
+      const server = createWebServer({
+        store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(),
+        // hub 未启用不注入 → 端点回落 400(与 hub.start 一致的开关逻辑)。
+        testWorker: hubEnabled ? hubStarter?.testWorker : undefined,
+        log: (m) => console.log(m),
+      });
 
       // 开播/收播观察器:轮询 manager.isRecording 翻转 → emit 到本地流(Discord 已由录制子进程
       // 用每任务 webhook 发,故 { webhook:false } 不重复推)。首次见到只播种不触发,避免启动即误报。

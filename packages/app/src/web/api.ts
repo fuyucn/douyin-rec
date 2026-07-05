@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { groupSessions, mergeSessions } from "@drec/post-process";
 import { resolveMesioBin } from "@drec/record-engine";
 import { APP_VERSION } from "../version.js";
-import type { RecordingSessionDTO, HubRulePayload, HubRuleDTO, HubPipelineConfig, WorkerDTO } from "@drec/core";
+import type { RecordingSessionDTO, HubRulePayload, HubRuleDTO, HubPipelineConfig, WorkerDTO, WorkerTestResult } from "@drec/core";
 import { listPlatforms, platformForRoom } from "@drec/core";
 import * as hubStore from "../hub-store.js";
 import type { HubRule } from "../hub-store.js";
@@ -97,6 +97,8 @@ export interface ApiDeps {
   syncDbPath?: string;
   /** hub.config.json 路径;省略回落 rootHubConfig()。 */
   hubConfigPath?: string;
+  /** 连接测试(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
+  testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<WorkerTestResult>;
 }
 
 /**
@@ -315,6 +317,8 @@ export interface Api {
   updateWorker(id: string, input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string }): ApiResult;
   /** DELETE /api/hub/workers/:id — 删除(local 保护)。 */
   deleteWorker(id: string): ApiResult;
+  /** POST /api/hub/workers/test — 连接测试(hub 未启用 / 未注入 testWorker → 400;测试异常也回 200 结构化 error)。 */
+  testWorker(input: { kind?: string; host?: string; dataRoot?: string; apiUrl?: string }): Promise<ApiResult>;
 }
 
 /** Build the handler set bound to the injected store + manager. */
@@ -795,6 +799,16 @@ export function makeApi(deps: ApiDeps): Api {
         if (!ok) return err(404, `未找到 worker id=${id}`);
         return { status: 200, body: { ok: true, id } };
       } catch (e) { return err(400, (e as Error).message); }
+    },
+    async testWorker(input): Promise<ApiResult> {
+      if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可测试 worker)");
+      if (!deps.testWorker) return err(400, "hub 未启用(连接测试未注入)");
+      try {
+        const r = await deps.testWorker({ kind: input.kind ?? "", host: input.host, dataRoot: input.dataRoot, apiUrl: input.apiUrl });
+        return { status: 200, body: r };
+      } catch (e) {
+        return { status: 200, body: { ok: false, reachable: false, dataRootExists: false, error: (e as Error).message } };
+      }
     },
   };
 }

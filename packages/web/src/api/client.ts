@@ -27,8 +27,9 @@ import type {
   PlatformDTO,
   PlatformsDTO,
   WorkerDTO,
+  WorkerTestResult,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO, WorkerDTO };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -125,6 +126,7 @@ export const api = {
     request("PATCH", `/api/hub/workers/${encodeURIComponent(id)}`, input),
   deleteWorker: (id: string): Promise<{ ok: boolean; id: string }> =>
     request("DELETE", `/api/hub/workers/${encodeURIComponent(id)}`),
+  testWorker: (cfg: Partial<WorkerDTO>): Promise<WorkerTestResult> => request("POST", "/api/hub/workers/test", cfg),
 
   // ── Global cookie ────────────────────────────────────────────────────────
   getCookie: (): Promise<CookieStatus> => request("GET", "/api/cookie"),

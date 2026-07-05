@@ -599,6 +599,28 @@ const hubStarter: HubStarter = {
     opts.log(`[hub] 已启用，${loadWorkers().length} 个 worker`);
     return stop;
   },
+  async testWorker(cfg) {
+    const { getTransport, registerBuiltinTransports } = await import("@drec/orchestrator");
+    const { ffprobeVideo } = await import("@drec/post-process");
+    const { statSync } = await import("node:fs");
+    // testWorker 可能在 hub.start 之前被调 → 幂等注册一份 transport(registry.set 覆盖,无副作用)。
+    const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
+      const { durationMs } = await ffprobeVideo(file).catch(() => ({ durationMs: 0 }));
+      const endMs = statSync(file).mtimeMs;
+      return { durationSec: durationMs / 1000, endMs, startMs: endMs - durationMs };
+    };
+    registerBuiltinTransports({ ffprobe });
+    const withTimeout = <T,>(pms: Promise<T>, ms: number): Promise<T> =>
+      Promise.race([pms, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`连接测试超时 ${ms}ms`)), ms))]);
+    try {
+      const t = getTransport({ id: cfg.id ?? "test", kind: cfg.kind, host: cfg.host, dataRoot: cfg.dataRoot });
+      const inv = await withTimeout(t.listInventory(), 20_000);
+      // listInventory 解析成功 = 可达 + dataRoot/recordings 可扫 + inventory JSON 可解析。
+      return { ok: true, reachable: true, dataRootExists: true, recordingCount: inv.recordings.length };
+    } catch (e) {
+      return { ok: false, reachable: false, dataRootExists: false, error: (e as Error).message };
+    }
+  },
 };
 
 // ─── task 子命令组（stateful app 层：sqlite 持久化 + 运行任务）─────────────────

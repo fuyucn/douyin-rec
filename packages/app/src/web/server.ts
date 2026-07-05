@@ -67,6 +67,7 @@ export interface RouteMatch {
     | "createWorker"
     | "updateWorker"
     | "deleteWorker"
+    | "testWorker"
     | "index";
   /** Path param when the route has /:id. */
   id?: number;
@@ -150,6 +151,8 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
   if (p === "/api/hub/jobs" && method === "GET") return { name: "listHubJobs" };
   const hj = /^\/api\/hub\/jobs\/([^/]+)\/log$/.exec(p);
   if (hj && method === "GET") return { name: "getHubJobLog", sid: decodeURIComponent(hj[1]) };
+  // 连接测试:必须在 /api/hub/workers/:id 正则之前匹配,否则 "test" 被当成 :id。
+  if (p === "/api/hub/workers/test" && method === "POST") return { name: "testWorker", needsBody: true };
   // 多节点 worker: GET/POST /api/hub/workers + PATCH/DELETE /api/hub/workers/:id
   if (p === "/api/hub/workers") {
     if (method === "GET") return { name: "listWorkers" };
@@ -221,6 +224,8 @@ export interface WebServerDeps {
   syncDbPath?: string;
   /** hub.config.json 路径;省略回落 rootHubConfig()。 */
   hubConfigPath?: string;
+  /** 连接测试(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
+  testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {}). */
@@ -371,6 +376,10 @@ async function dispatch(
     }
     case "deleteWorker":
       return api.deleteWorker(match.slug!);
+    case "testWorker": {
+      const body = (await readJson(req)) as Parameters<Api["testWorker"]>[0];
+      return api.testWorker(body ?? {});
+    }
     case "index":
       // handled by caller (html, not json)
       return { status: 200, body: null };
@@ -390,6 +399,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     hubEnabled: deps.hubEnabled,
     syncDbPath: deps.syncDbPath,
     hubConfigPath: deps.hubConfigPath,
+    testWorker: deps.testWorker,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);
       const n = mj.recoverOrphans(); // 启动:清理上次重启腰斩的合成 job

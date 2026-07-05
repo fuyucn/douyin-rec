@@ -6,7 +6,7 @@
  * real in-memory TaskStore and a mock TaskManager (just records runningIds +
  * start/stop calls) so assertions stay deterministic.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -626,5 +626,17 @@ describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
     expect(a.createWorker({ kind: "ssh", dataRoot: "/d" } as any).status).toBe(400); // 缺 host
     expect(a.deleteWorker("local").status).toBe(400);
     expect(a.updateWorker("local", { kind: "ssh" }).status).toBe(400);
+  });
+  it("testWorker:注入 fake → 端点透传结果;未注入(hub 未启用)→ 400", async () => {
+    const cfg = join(mkdtempSync(join(tmpdir(), "wt-")), "hub.config.json");
+    writeFileSync(cfg, JSON.stringify({ workers: [] }));
+    const fake = vi.fn(async () => ({ ok: true, reachable: true, dataRootExists: true, recordingCount: 3 }));
+    const a = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg, testWorker: fake });
+    const r = await a.testWorker({ kind: "ssh", host: "h", dataRoot: "/d" });
+    expect(r.status).toBe(200);
+    expect((r.body as any).recordingCount).toBe(3);
+    expect(fake).toHaveBeenCalledOnce();
+    const noDep = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg });
+    expect((await noDep.testWorker({ kind: "ssh", host: "h", dataRoot: "/d" })).status).toBe(400);
   });
 });
