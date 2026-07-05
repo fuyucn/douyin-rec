@@ -156,7 +156,11 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
       let etaSec: number | null = null;
       if (!terminal && videoDurationSec && videoDurationSec > 0 && currentStepSec != null) {
         const rate = rates.get(j.state) ?? FALLBACK_RATE[j.state];
-        if (rate != null) etaSec = Math.max(0, Math.round(rate * videoDurationSec - currentStepSec));
+        if (rate != null) {
+          // 已超预估(剩余 ≤ 0)→ null 让前端隐藏,而非显示误导的「约 0s」。
+          const remain = Math.round(rate * videoDurationSec - currentStepSec);
+          etaSec = remain > 0 ? remain : null;
+        }
       }
       return {
         streamKey: j.streamKey, state: j.state,

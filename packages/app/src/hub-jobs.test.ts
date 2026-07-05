@@ -83,6 +83,18 @@ describe("listHubJobs", () => {
     expect(fin.etaSec).toBeNull();
   });
 
+  it("已超预估 → etaSec 为 null(不显示误导的「约 0s」)", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "hubstage-eta0-"));
+    const now = T0 + 1_000_000;
+    // 短视频 200s + fallback uploading rate 0.6 → 预估总耗时 120s;但已跑 300s 远超 → 剩余负 → null。
+    seedJob(db, "douyin:9:2026-07-09", [["merging", now - 320_000], ["uploading", now - 300_000]], 200);
+    db.close();
+    const { jobs } = listHubJobs(dbPath, { now, stageDir: stage });
+    expect(jobs[0].currentStepSec).toBe(300);
+    expect(jobs[0].etaSec).toBeNull();
+  });
+
   it("按房间过滤 + 分页:room 只返回该房间的 run,total 是过滤后总数,limit/offset 翻页", () => {
     const { dbPath, db } = makeSyncDb();
     const stage = mkdtempSync(join(tmpdir(), "hubstage-pg-"));

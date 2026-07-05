@@ -57,7 +57,8 @@ export function HubDetailPage(): ReactNode {
     }
   };
   const anyActive = runs.some((j) => !["done", "failed", "needs_manual"].includes(j.state));
-  usePolling(() => void refresh(), anyActive ? 3000 : 15000);
+  // 有进行中的 run → 3s;空闲也保持 5s(否则新 run 出现/首步进度最多滞后 15s,像「没实时更新」)。
+  usePolling(() => void refresh(), anyActive ? 3000 : 5000);
 
   const toggle = async (): Promise<void> => {
     if (!rule) return;
