@@ -12,6 +12,8 @@ export interface SshOpts {
    * 主要用于测试（注入 fake run 时此字段无实际影响）或 slave 部署路径非标准时的覆盖。
    */
   remoteNode?: string;
+  /** ping() 硬超时(ms),默认 6000。测试注入小值验证超时路径。 */
+  pingTimeoutMs?: number;
 }
 
 // SSH 心跳 + 免交互:ServerAlive 5s×3≈15s 检测死连接自动断(tailscale 偶发 stall 不再永久挂);
@@ -79,6 +81,19 @@ export class SshTransport implements Transport {
     } catch {
       return false; // ssh 失败 → 当作不可用(选优会剔除;另有 reconciler failed 兜底)
     }
+  }
+
+  /** 轻量探针:远端 `test -d <dataRoot>`(不扫 recordings),硬超时默认 6s。退出非零/超时 → throw。 */
+  async ping(): Promise<void> {
+    const root = this.o.dataRoot.replace(/'/g, "'\\''");
+    const ms = this.o.pingTimeoutMs ?? 6000;
+    let timer: NodeJS.Timeout;
+    const timeout = new Promise<never>((_, rej) => {
+      timer = setTimeout(() => rej(new Error(`ssh ping 超时 ${ms}ms: ${this.o.host}`)), ms);
+    });
+    // run 单字符串传(远端 shell 执行),同 listInventory 规避 ssh 打散。test -d 成功 → 退出 0 → run resolve。
+    const probe = this.run([`test -d '${root}'`]).then(() => undefined);
+    await Promise.race([probe, timeout]).finally(() => clearTimeout(timer));
   }
 
   /** 远端:rm -f 这些文件(命令单字符串传,失败吞掉)。 */

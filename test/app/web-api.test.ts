@@ -630,11 +630,11 @@ describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
   it("testWorker:注入 fake → 端点透传结果;未注入(hub 未启用)→ 400", async () => {
     const cfg = join(mkdtempSync(join(tmpdir(), "wt-")), "hub.config.json");
     writeFileSync(cfg, JSON.stringify({ workers: [] }));
-    const fake = vi.fn(async () => ({ ok: true, reachable: true, dataRootExists: true, recordingCount: 3 }));
+    const fake = vi.fn(async () => ({ ok: true }));
     const a = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg, testWorker: fake });
     const r = await a.testWorker({ kind: "ssh", host: "h", dataRoot: "/d" });
     expect(r.status).toBe(200);
-    expect((r.body as any).recordingCount).toBe(3);
+    expect((r.body as any).ok).toBe(true);
     expect(fake).toHaveBeenCalledOnce();
     const noDep = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg });
     expect((await noDep.testWorker({ kind: "ssh", host: "h", dataRoot: "/d" })).status).toBe(400);
@@ -642,12 +642,11 @@ describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
   it("testWorker:注入 fake RESOLVES 不可达 → 200 + 结构化 {ok:false,...}(不是错误状态码)", async () => {
     const cfg = join(mkdtempSync(join(tmpdir(), "wt-")), "hub.config.json");
     writeFileSync(cfg, JSON.stringify({ workers: [] }));
-    const fake = vi.fn(async () => ({ ok: false, reachable: false, dataRootExists: false, error: "连接测试超时 20000ms" }));
+    const fake = vi.fn(async () => ({ ok: false, error: "连接测试超时 20000ms" }));
     const a = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg, testWorker: fake });
     const r = await a.testWorker({ kind: "ssh", host: "h", dataRoot: "/d" });
     expect(r.status).toBe(200);
     expect((r.body as any).ok).toBe(false);
-    expect((r.body as any).reachable).toBe(false);
     expect((r.body as any).error).toBe("连接测试超时 20000ms");
   });
   it("testWorker:注入 fake THROWS → catch 分支仍回 200 结构化 error(绝不 500/崩)", async () => {
@@ -658,9 +657,40 @@ describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
     const r = await a.testWorker({ kind: "ssh", host: "h", dataRoot: "/d" });
     expect(r.status).toBe(200);
     expect((r.body as any).ok).toBe(false);
-    expect((r.body as any).reachable).toBe(false);
-    expect((r.body as any).dataRootExists).toBe(false);
     expect((r.body as any).error).toBe("ECONNREFUSED");
+  });
+  it("workersStatus:注入 probeAllWorkers fake → 端点透传数组", async () => {
+    const cfg = join(mkdtempSync(join(tmpdir(), "ws-")), "hub.config.json");
+    writeFileSync(cfg, JSON.stringify({ workers: [] }));
+    const fake = vi.fn(async () => [
+      { id: "local", ok: true },
+      { id: "worker-1", ok: false, error: "ssh ping 超时 6000ms" },
+    ]);
+    const a = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg, probeAllWorkers: fake });
+    const r = await a.workersStatus();
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual([
+      { id: "local", ok: true },
+      { id: "worker-1", ok: false, error: "ssh ping 超时 6000ms" },
+    ]);
+    expect(fake).toHaveBeenCalledOnce();
+  });
+  it("workersStatus:未注入 probeAllWorkers → 200 []", async () => {
+    const cfg = join(mkdtempSync(join(tmpdir(), "ws-")), "hub.config.json");
+    writeFileSync(cfg, JSON.stringify({ workers: [] }));
+    const a = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg });
+    const r = await a.workersStatus();
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual([]);
+  });
+  it("workersStatus:probeAllWorkers 抛错 → 200 [](不崩)", async () => {
+    const cfg = join(mkdtempSync(join(tmpdir(), "ws-")), "hub.config.json");
+    writeFileSync(cfg, JSON.stringify({ workers: [] }));
+    const fake = vi.fn(async () => { throw new Error("boom"); });
+    const a = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg, probeAllWorkers: fake });
+    const r = await a.workersStatus();
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual([]);
   });
 });
 

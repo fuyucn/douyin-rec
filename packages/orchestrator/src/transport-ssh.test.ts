@@ -85,4 +85,28 @@ describe("SshTransport", () => {
     expect(await ok.exists([])).toBe(true);
     expect(await fail.exists(["/a"])).toBe(false);
   });
+
+  describe("ping(轻量存活探针)", () => {
+    it("远端 test -d 退出 0(run resolve)→ resolve;命令含 test -d + dataRoot", async () => {
+      const captured: string[][] = [];
+      const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec",
+        run: async (argv) => { captured.push(argv); return ""; }, rsync: async () => {} });
+      await expect(t.ping()).resolves.toBeUndefined();
+      const cmd = captured[0].join(" ");
+      expect(cmd).toContain("test -d");
+      expect(cmd).toContain("/data/drec");
+    });
+    it("远端非零退出(run reject)→ reject 带 message", async () => {
+      const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec",
+        run: async () => { throw new Error("ssh rc=1: No such file"); }, rsync: async () => {} });
+      await expect(t.ping()).rejects.toThrow(/rc=1|No such file/);
+    });
+    it("run 卡住 → pingTimeoutMs 硬超时 reject(不永久挂)", async () => {
+      const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec",
+        pingTimeoutMs: 20,                       // 测试用小超时替代 6s
+        run: () => new Promise<string>(() => {}),  // 永不 resolve
+        rsync: async () => {} });
+      await expect(t.ping()).rejects.toThrow(/超时|timeout/i);
+    });
+  });
 });

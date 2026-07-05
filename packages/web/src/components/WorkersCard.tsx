@@ -45,7 +45,7 @@ export function WorkersCard(): ReactNode {
       const result = await api.testWorker(w);
       setTests((t) => ({ ...t, [w.id]: result }));
     } catch (e) {
-      setTests((t) => ({ ...t, [w.id]: { ok: false, reachable: false, dataRootExists: false, error: errMessage(e) } }));
+      setTests((t) => ({ ...t, [w.id]: { ok: false, error: errMessage(e) } }));
     } finally {
       setTesting((t) => ({ ...t, [w.id]: false }));
     }

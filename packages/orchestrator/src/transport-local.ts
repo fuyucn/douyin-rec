@@ -37,6 +37,13 @@ export class LocalTransport implements Transport {
     return !(this.o.isRoomRecording?.(roomSlug) ?? false);
   }
 
+  /** 轻量探针:recordings 目录存在即视为就绪(不扫内容)。 */
+  async ping(): Promise<void> {
+    if (!existsSync(this.o.recordingsDir)) {
+      throw new Error(`dataRoot 不存在或不可达: ${this.o.recordingsDir}`);
+    }
+  }
+
   /** 同机:fs 判存在(全在才 true)。 */
   async exists(paths: string[]): Promise<boolean> {
     return paths.every((p) => existsSync(p));

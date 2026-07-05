@@ -60,7 +60,7 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
     try {
       setTest(await api.testWorker(payload()));
     } catch (e) {
-      setTest({ ok: false, reachable: false, dataRootExists: false, error: errMessage(e) });
+      setTest({ ok: false, error: errMessage(e) });
     } finally {
       setTesting(false);
     }
@@ -145,7 +145,7 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
             className="text-sm rounded-lg border border-hairline px-3 py-2"
             style={{ color: test.ok ? "var(--success)" : "var(--error)" }}
           >
-            {test.ok ? t("hub.workerDialog.testOk", { count: test.recordingCount ?? 0 }) : t("hub.workerDialog.testFailed", { error: test.error ?? t("hub.workerDialog.unknownError") })}
+            {test.ok ? t("hub.workerDialog.testOk") : t("hub.workerDialog.testFailed", { error: test.error ?? t("hub.workerDialog.unknownError") })}
           </div>
         )}
         <div className="flex justify-between gap-3 mt-2">

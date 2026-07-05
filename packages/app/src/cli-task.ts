@@ -209,6 +209,8 @@ export interface HubStarter {
   }): Promise<(() => void) | undefined>;
   /** 连接测试(cli L5 用 orchestrator getTransport + listInventory 实现)。 */
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
+  /** 批量存活探针(cli L5 用 orchestrator scoped transport ping 实现)。省略 → status 端点返回 []。 */
+  probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
 }
 
 /** Build the `task` command group. Pass a getWebhook() that reads program-level opts/env. */
@@ -544,6 +546,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(),
         // hub 未启用不注入 → 端点回落 400(与 hub.start 一致的开关逻辑)。
         testWorker: hubEnabled ? hubStarter?.testWorker : undefined,
+        probeAllWorkers: hubEnabled ? hubStarter?.probeAllWorkers : undefined,
         log: (m) => console.log(m),
       });
 

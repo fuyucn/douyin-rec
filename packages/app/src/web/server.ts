@@ -68,6 +68,7 @@ export interface RouteMatch {
     | "updateWorker"
     | "deleteWorker"
     | "testWorker"
+    | "workersStatus"
     | "index";
   /** Path param when the route has /:id. */
   id?: number;
@@ -153,6 +154,8 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
   if (hj && method === "GET") return { name: "getHubJobLog", sid: decodeURIComponent(hj[1]) };
   // 连接测试:必须在 /api/hub/workers/:id 正则之前匹配,否则 "test" 被当成 :id。
   if (p === "/api/hub/workers/test" && method === "POST") return { name: "testWorker", needsBody: true };
+  // 批量状态(轮询用):同 /test,必须在 /:id 正则之前匹配,否则 "status" 被当 :id。
+  if (p === "/api/hub/workers/status" && method === "GET") return { name: "workersStatus" };
   // 多节点 worker: GET/POST /api/hub/workers + PATCH/DELETE /api/hub/workers/:id
   if (p === "/api/hub/workers") {
     if (method === "GET") return { name: "listWorkers" };
@@ -226,6 +229,8 @@ export interface WebServerDeps {
   hubConfigPath?: string;
   /** 连接测试(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
+  /** 批量存活探针(CLI 注入)。省略 → status 端点返回 []。 */
+  probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {}). */
@@ -380,6 +385,8 @@ async function dispatch(
       const body = (await readJson(req)) as Parameters<Api["testWorker"]>[0];
       return api.testWorker(body ?? {});
     }
+    case "workersStatus":
+      return api.workersStatus();
     case "index":
       // handled by caller (html, not json)
       return { status: 200, body: null };
@@ -400,6 +407,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     syncDbPath: deps.syncDbPath,
     hubConfigPath: deps.hubConfigPath,
     testWorker: deps.testWorker,
+    probeAllWorkers: deps.probeAllWorkers,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);
       const n = mj.recoverOrphans(); // 启动:清理上次重启腰斩的合成 job

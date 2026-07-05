@@ -5,6 +5,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalTransport } from "./transport-local.js";
 
+describe("LocalTransport.ping(轻量存活探针)", () => {
+  it("dataRoot 存在 → resolve", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ping-ok-"));
+    const t = new LocalTransport({
+      id: "local", recordingsDir: root, taskRooms: {},
+      ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }),
+    });
+    await expect(t.ping()).resolves.toBeUndefined();
+  });
+  it("dataRoot 不存在 → reject 带 message", async () => {
+    const t = new LocalTransport({
+      id: "local", recordingsDir: "/no/such/dir/xyz", taskRooms: {},
+      ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }),
+    });
+    await expect(t.ping()).rejects.toThrow(/不存在|not exist|\/no\/such/i);
+  });
+});
+
 describe("LocalTransport.listInventory", () => {
   it("聚合会话分段时长 + 读 gaps + 映射 roomSlug（getter 函数）", async () => {
     const root = mkdtempSync(join(tmpdir(), "loc-"));

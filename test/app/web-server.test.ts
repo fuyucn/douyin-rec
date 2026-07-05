@@ -82,6 +82,9 @@ describe("matchRoute", () => {
     expect(matchRoute("PATCH", "/api/hub/workers/worker-1")).toMatchObject({ name: "updateWorker", slug: "worker-1", needsBody: true });
     expect(matchRoute("DELETE", "/api/hub/workers/local")).toMatchObject({ name: "deleteWorker", slug: "local" });
     expect(matchRoute("POST", "/api/hub/workers/test")).toMatchObject({ name: "testWorker", needsBody: true });
+    expect(matchRoute("GET", "/api/hub/workers/status")?.name).toBe("workersStatus");
+    // status 不能被 /:id 正则吞掉
+    expect(matchRoute("GET", "/api/hub/workers/local")).toBeNull(); // GET /:id 无路由(只有 PATCH/DELETE)
   });
 
   it("returns null for unknown routes / wrong methods", () => {

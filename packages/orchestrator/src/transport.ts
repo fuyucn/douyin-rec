@@ -25,6 +25,11 @@ export interface Transport {
   exists?(paths: string[]): Promise<boolean>;
   /** 删除该节点上的这些文件(cleanup 配置用;删失败应吞掉不抛)。无此能力则跳过清理。 */
   cleanup?(paths: string[]): Promise<void>;
+  /**
+   * 轻量存活探针:可达 + dataRoot 存在 → resolve;不可达 / dataRoot 不存在 → reject(带 message)。
+   * 不扫 recordings(区别于 listInventory)。可选:无此能力的 transport 视为「不支持探针」。
+   */
+  ping?(): Promise<void>;
 }
 
 type Factory = (cfg: WorkerConfig) => Transport;

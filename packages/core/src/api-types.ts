@@ -86,8 +86,10 @@ export interface HubJobDTO {
 /** 一个录制 worker(节点)的展示投影。id 内部稳定主键(UI 不展示);name 友好名。 */
 export interface WorkerDTO { id: string; name: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string }
 
-/** worker 连接测试结果(POST /api/hub/workers/test)。 */
-export interface WorkerTestResult { ok: boolean; reachable: boolean; dataRootExists: boolean; recordingCount?: number; error?: string; }
+/** worker 连接测试结果(POST /api/hub/workers/test)——轻量 ping:可达 + dataRoot 存在。 */
+export interface WorkerTestResult { ok: boolean; error?: string; }
+/** GET /api/hub/workers/status 的单个 worker 健康结果(批量 ping)。 */
+export interface WorkerStatus { id: string; ok: boolean; error?: string; }
 
 /** GET /api/hub/jobs 响应(total = 满足过滤的 run 总数,分页用)。 */
 export interface HubJobsDTO {

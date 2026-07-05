@@ -619,20 +619,38 @@ const hubStarter: HubStarter = {
     const t = cfg.kind === "local"
       ? new LocalTransport({ id, recordingsDir: `${cfg.dataRoot}/recordings`, taskRooms: {}, ffprobe })
       : new SshTransport({ id, host: cfg.host!, dataRoot: cfg.dataRoot! });
-    const withTimeout = <T,>(pms: Promise<T>, ms: number): Promise<T> => {
-      let timer: NodeJS.Timeout;
-      const timeout = new Promise<T>((_, rej) => {
-        timer = setTimeout(() => rej(new Error(`连接测试超时 ${ms}ms`)), ms);
-      });
-      return Promise.race([pms, timeout]).finally(() => clearTimeout(timer));
-    };
     try {
-      const inv = await withTimeout(t.listInventory(), 20_000);
-      // listInventory 解析成功 = 可达 + dataRoot/recordings 可扫 + inventory JSON 可解析。
-      return { ok: true, reachable: true, dataRootExists: true, recordingCount: inv.recordings.length };
+      // ping 内置超时(local 瞬时;ssh 6s)。这里不再额外包 20s——探针本就轻量。
+      await t.ping!();
+      return { ok: true };
     } catch (e) {
-      return { ok: false, reachable: false, dataRootExists: false, error: (e as Error).message };
+      return { ok: false, error: (e as Error).message };
     }
+  },
+  async probeAllWorkers(): Promise<Array<{ id: string; ok: boolean; error?: string }>> {
+    // scoped 一次性 transport(不进全局 registry,不污染运行中的 hub);逐 worker ping,allSettled 汇总。
+    const { LocalTransport, SshTransport } = await import("@drec/orchestrator");
+    const { ffprobeVideo } = await import("@drec/post-process");
+    const { statSync } = await import("node:fs");
+    const { workerStore, rootHubConfig } = await import("@drec/app");
+    const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
+      const { durationMs } = await ffprobeVideo(file).catch(() => ({ durationMs: 0 }));
+      const endMs = statSync(file).mtimeMs;
+      return { durationSec: durationMs / 1000, endMs, startMs: endMs - durationMs };
+    };
+    const workers = workerStore.listWorkers(rootHubConfig());
+    const results = await Promise.allSettled(workers.map(async (w) => {
+      const t = w.kind === "local"
+        ? new LocalTransport({ id: w.id, recordingsDir: `${w.dataRoot}/recordings`, taskRooms: {}, ffprobe })
+        : new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+      await t.ping!();
+    }));
+    return workers.map((w, i) => {
+      const r = results[i];
+      return r.status === "fulfilled"
+        ? { id: w.id, ok: true }
+        : { id: w.id, ok: false, error: (r.reason as Error)?.message ?? String(r.reason) };
+    });
   },
 };
 
