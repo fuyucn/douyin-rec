@@ -14,8 +14,8 @@
 
 容易误当成数据库 **master-slave 复制**，但那要拆成两个方向看，本设计**只做了读侧**：
 
-- **读侧（已实现）= 多副本冗余 + read-repair / anti-entropy**：每个节点**独立配置、独立匿名录制**同一直播间的**全量副本**（任务在各节点各自建，master **不下发**）。master 是个**只读协调者**——收播/周期触发去各节点扫清单，按覆盖度选「最完整那份副本」（挑没 gap 的 replica），merge/burn/发布；都断流没人录全 → 不删源、挂起交人工（= anti-entropy 不敢自动 resolve 冲突时的挂起）。且是 master **主动 pull**（SSH inventory + rsync），不是 slave 主动 report。
-- **写侧（未实现，future）= master 拥有任务并下发/同步到从节点**（DB 里 master 把 binlog 推给 slave 那半）。当前**没有**任务下发；「master 管任务、同步到节点、节点回报」是目标态，见 [followups](./multi-node-sync-followups.md) 里 defer 的「集中式任务管理」。实测结论：各节点手配任务够用，真正痛点是**配置漂移**而非下发，故暂缓。
+- **读侧（已实现）= 多副本冗余 + read-repair / anti-entropy**：每个节点跑**与 master 相同的一套 task configs**（同一批直播间 + 同样的画质/弹幕/cookie/窗口设置——**不只是「匿名随录」**，是完整镜像 master 的任务表），各自录一份**全量副本**。这套配置目前**靠人工在各节点保持一致**（master **不自动下发**），所以「配置漂移」才是真正痛点。master 是个**只读协调者**——收播/周期触发去各节点扫清单，按覆盖度选「最完整那份副本」（挑没 gap 的 replica），merge/burn/发布；都断流没人录全 → 不删源、挂起交人工（= anti-entropy 不敢自动 resolve 冲突时的挂起）。且是 master **主动 pull**（SSH inventory + rsync），不是 slave 主动 report。
+- **写侧（未实现，future）= master 拥有任务并下发/同步到从节点**（DB 里 master 把 binlog 推给 slave 那半）。当前这套「相同 task configs」是人工镜像、非自动同步；「master 管任务、自动下发到节点、节点回报」是目标态，见 [followups](./multi-node-sync-followups.md) 里 defer 的「集中式任务管理」。实测结论：各节点手配任务够用，真正痛点是**配置漂移**（人工镜像会走样）而非下发本身，故先做漂移检测告警、暂缓自动下发。
 
 所以一句话：**多节点各录冗余副本，master 做 read-repair 选优 + 发布**——而非「master 下发任务、slave 回报」。
 
