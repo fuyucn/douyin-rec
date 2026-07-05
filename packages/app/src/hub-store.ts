@@ -24,6 +24,8 @@ export interface HubRule {
   room: string;
   enabled: boolean;
   pipeline: HubPipelineConfig;
+  /** 选中参与该房间 hub 处理的 worker id;缺省/空 = 全部(向后兼容)。 */
+  workers?: string[];
 }
 
 /** 磁盘文件的形状(key/roomSlug/platform 不存盘,由 room 派生)。 */
@@ -31,6 +33,7 @@ interface HubFile {
   room: string;
   enabled?: boolean;
   pipeline?: HubPipelineConfig;
+  workers?: string[];
 }
 
 /** 组合 key:平台 + 房间号,两段都不含点。 */
@@ -64,6 +67,8 @@ function fileToRule(stem: string, raw: HubFile): HubRule {
     // 文件省略 enabled 视为启用(文件存在=已配置;enabled 仅作开关)。
     enabled: raw.enabled !== false,
     pipeline: raw.pipeline ?? {},
+    // workers 缺省 = undefined(= 全部 worker,向后兼容)。只在文件显式含时透出。
+    workers: raw.workers,
   };
 }
 
@@ -110,7 +115,7 @@ export function getHubRule(dir: string, key: string): HubRule | null {
 /** 新建/覆盖:由 room 派生 platform+roomSlug+key → 写 {key}.json(缺省字段沿用已有)。 */
 export function upsertHubRule(
   dir: string,
-  input: { room: string; enabled?: boolean; pipeline?: HubPipelineConfig },
+  input: { room: string; enabled?: boolean; pipeline?: HubPipelineConfig; workers?: string[] },
 ): HubRule {
   const { key } = deriveKey(input.room);
   const existing = readRule(dir, key);
@@ -118,15 +123,17 @@ export function upsertHubRule(
     room: normalizeRoom(input.room),
     enabled: input.enabled ?? existing?.enabled ?? true,
     pipeline: input.pipeline ?? existing?.pipeline ?? {},
+    // workers 缺省沿用已有(undefined = 全部);显式传才覆盖。
+    workers: input.workers ?? existing?.workers,
   });
   return getHubRule(dir, key)!;
 }
 
-/** 部分更新(enabled / pipeline);不存在返回 null。 */
+/** 部分更新(enabled / pipeline / workers);不存在返回 null。 */
 export function updateHubRule(
   dir: string,
   key: string,
-  patch: { enabled?: boolean; pipeline?: HubPipelineConfig },
+  patch: { enabled?: boolean; pipeline?: HubPipelineConfig; workers?: string[] },
 ): HubRule | null {
   const existing = readRule(dir, key);
   if (!existing) return null;
@@ -134,6 +141,8 @@ export function updateHubRule(
     room: existing.room,
     enabled: patch.enabled ?? existing.enabled,
     pipeline: patch.pipeline ?? existing.pipeline,
+    // 部分更新:未传 workers 沿用已有;传了(UI 总传非空列表)才覆盖。
+    workers: patch.workers ?? existing.workers,
   });
   return getHubRule(dir, key);
 }

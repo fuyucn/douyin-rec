@@ -67,4 +67,20 @@ describe("hub-store(文件版,按平台限定 key)", () => {
   it("hubKey 拼接", () => {
     expect(hubKey("douyin", "767116735823")).toBe("douyin.767116735823");
   });
+
+  it("workers 字段创建/更新往返 + 其余字段(room/enabled/pipeline)保留", () => {
+    const pipeline = { steps: { burnDanmu: false }, upload: { mode: "stage" as const, tag: "t", tid: 21 } };
+    const r = upsertHubRule(dir, { room: "https://live.douyin.com/123456", pipeline, workers: ["local", "vps2"] });
+    expect(r.workers).toEqual(["local", "vps2"]);
+    // 落盘往返
+    expect(getHubRule(dir, "douyin.123456")!.workers).toEqual(["local", "vps2"]);
+    // update 只改 workers,其余保留
+    const u = updateHubRule(dir, "douyin.123456", { workers: ["local"] })!;
+    expect(u.workers).toEqual(["local"]);
+    expect(u.pipeline).toEqual(pipeline);   // pipeline 保留
+    expect(u.enabled).toBe(true);           // enabled 保留
+    // 缺省(老规则)= 无 workers 字段
+    const bare = upsertHubRule(dir, { room: "https://live.douyin.com/999" });
+    expect(bare.workers).toBeUndefined();
+  });
 });
