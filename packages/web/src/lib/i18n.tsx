@@ -181,6 +181,11 @@ const DICT = {
         publicLabel: "公开 / public", privateHint: "仅自己可见(默认)", publicHint: "公开投稿",
         tidLabel: "B站分区 tid", tagLabel: "B站 tag(逗号分隔)", tagPlaceholder: "直播,录像,…",
         descLabel: "B站简介 desc", descPlaceholder: "(可选,支持多行)",
+        workersSection: "参与 Worker / workers",
+        workersHint: "只对勾选的 worker 的录像做选优合并上传;不勾 = 忽略该 worker。至少选 1 个。",
+        workersEmpty: "还没有配置 Worker,请先在 Workers 页添加。",
+        workersLoadFailed: "加载 Worker 列表失败,请重试。",
+        workersRequired: "请至少选择一个 Worker",
         created: "Hub 规则已创建", updated: "Hub 规则已更新",
       },
       workers: {
@@ -329,6 +334,11 @@ const DICT = {
         publicLabel: "Public", privateHint: "Private (default)", publicHint: "Public submission",
         tidLabel: "Bilibili partition tid", tagLabel: "Bilibili tags (comma-separated)", tagPlaceholder: "live, replay, …",
         descLabel: "Bilibili description", descPlaceholder: "(optional, multi-line)",
+        workersSection: "Participating workers",
+        workersHint: "Only selected workers' recordings are selected / merged / uploaded; unchecked = ignore that worker. Pick at least one.",
+        workersEmpty: "No workers configured yet. Add one on the Workers page first.",
+        workersLoadFailed: "Failed to load workers, please retry.",
+        workersRequired: "Select at least one worker",
         created: "Hub rule created", updated: "Hub rule updated",
       },
       workers: {
