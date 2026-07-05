@@ -167,6 +167,12 @@ describe("runPipeline", () => {
       .filter(([e]) => e.kind === "error");
     expect(errorNotifications).toHaveLength(0);
 
+    // 成功完成 → 发 uploadDone 通知(BV + 稿件 url),供 hub 任务完成提醒
+    const uploadDone = (deps.notify.mock.calls as Array<[NotifyEvent]>)
+      .map(([e]) => e)
+      .find((e) => e.kind === "uploadDone");
+    expect(uploadDone).toEqual({ kind: "uploadDone", bv: "BV123", url: "https://www.bilibili.com/video/BV123" });
+
     // ledger should end at "done"
     const job = deps.ledger.get(broadcast.streamKey);
     expect(job?.state).toBe("done");

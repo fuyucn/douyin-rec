@@ -296,6 +296,8 @@ async function runPipelineInner(
   }
 
   ledger.markDone(streamKey, bv);
+  // hub 任务完成通知(成功上传):EventCenter 扇出 → 站内 toast + Discord webhook。
+  notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
   // cleanup:done 后删源节点录制 + stage 产物(按配置)。
   await cleanupSources();
   if (clean.stageAfterDone) {
