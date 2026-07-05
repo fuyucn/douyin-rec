@@ -1,20 +1,22 @@
-import { Pencil, Plus, Trash2, Wifi } from "lucide-react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { api, type WorkerDTO, type WorkerTestResult } from "../api/client";
+import { api, type WorkerDTO, type WorkerStatus } from "../api/client";
 import { Button, IconButton } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { WorkerDialog } from "../modals/WorkerDialog";
 import { useT } from "../lib/i18n";
 
-/** Hub 页顶部的 Workers 卡:录制节点列表(name/kind/host/连接状态)+ 增删改测。 */
+/** worker 状态轮询周期(ms)。改 10 分钟只需改这个数。 */
+const WORKER_STATUS_POLL_MS = 300_000;
+
+/** Hub 页顶部的 Workers 卡:录制节点列表(name/kind/host/实时状态点)+ 增删改。 */
 export function WorkersCard(): ReactNode {
   const t = useT();
   const toast = useToast();
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [tests, setTests] = useState<Record<string, WorkerTestResult>>({});
-  const [testing, setTesting] = useState<Record<string, boolean>>({});
+  const [status, setStatus] = useState<Record<string, WorkerStatus>>({});
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<WorkerDTO | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
@@ -30,6 +32,17 @@ export function WorkersCard(): ReactNode {
   };
   usePolling(() => void refresh(), 3000);
 
+  // 状态点自动轮询:挂载即拉一次 + 每 5 分钟。整体失败 → 保上次状态(不清空),不崩。
+  const fetchStatus = async (): Promise<void> => {
+    try {
+      const list = await api.getWorkersStatus();
+      setStatus(Object.fromEntries(list.map((s) => [s.id, s])));
+    } catch {
+      /* 保留上次 status */
+    }
+  };
+  usePolling(() => void fetchStatus(), WORKER_STATUS_POLL_MS);
+
   const openCreate = (): void => {
     setEditing(null);
     setDialogOpen(true);
@@ -37,18 +50,6 @@ export function WorkersCard(): ReactNode {
   const openEdit = (w: WorkerDTO): void => {
     setEditing(w);
     setDialogOpen(true);
-  };
-
-  const runTest = async (w: WorkerDTO): Promise<void> => {
-    setTesting((t) => ({ ...t, [w.id]: true }));
-    try {
-      const result = await api.testWorker(w);
-      setTests((t) => ({ ...t, [w.id]: result }));
-    } catch (e) {
-      setTests((t) => ({ ...t, [w.id]: { ok: false, error: errMessage(e) } }));
-    } finally {
-      setTesting((t) => ({ ...t, [w.id]: false }));
-    }
   };
 
   const doDelete = async (id: string): Promise<void> => {
@@ -61,9 +62,15 @@ export function WorkersCard(): ReactNode {
     }
   };
 
-  const dot = (w: WorkerDTO): string => {
-    const r = tests[w.id];
-    return !r ? "var(--muted-soft)" : r.ok ? "var(--success)" : "var(--error)";
+  // 三态:绿=ok / 红=fail / 灰=首次结果返回前(checking)。
+  const dotColor = (w: WorkerDTO): string => {
+    const s = status[w.id];
+    return !s ? "var(--muted-soft)" : s.ok ? "var(--success)" : "var(--error)";
+  };
+  const dotTitle = (w: WorkerDTO): string => {
+    const s = status[w.id];
+    if (!s) return t("hub.workers.statusChecking");
+    return s.ok ? t("hub.workers.statusOk") : (s.error ?? t("hub.workerDialog.unknownError"));
   };
 
   return (
@@ -114,13 +121,10 @@ export function WorkersCard(): ReactNode {
                       <span className="font-mono text-xs text-body">{w.host ?? "—"}</span>
                     </td>
                     <td>
-                      <span className="dot" style={{ background: dot(w) }} />
+                      <span className="dot" style={{ background: dotColor(w) }} title={dotTitle(w)} />
                     </td>
                     <td className="text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-2.5 justify-end">
-                        <IconButton title={t("hub.workers.testConn")} onClick={() => void runTest(w)} disabled={testing[w.id]}>
-                          <Wifi className="w-4 h-4" />
-                        </IconButton>
                         <IconButton title={t("hub.common.edit")} onClick={() => openEdit(w)}>
                           <Pencil className="w-4 h-4" />
                         </IconButton>

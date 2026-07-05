@@ -192,6 +192,7 @@ const DICT = {
         title: "Workers / 录制节点", subtitle: "选优合并的数据来源,local = master 自身。", add: "添加 Worker",
         colName: "名称", colKind: "类型", colHost: "host", colStatus: "状态", colAction: "操作",
         empty: "还没有 Worker", testConn: "测试连接", deleteConfirmTitle: "删除该 Worker?", deleted: "Worker 已删除",
+        statusOk: "在线 · dataRoot 可达", statusChecking: "检测中…",
       },
       workerDialog: {
         createTitle: "新建 Worker", editTitle: "编辑 Worker", desc: "录制节点(选优合并的数据来源)",
@@ -199,7 +200,7 @@ const DICT = {
         kindLabel: "类型 / kind", localKindHint: "master 自身,类型不可改",
         hostLabel: "host", hostPlaceholder: "100.x.y.z 或 host.ts.net",
         dataRootLabel: "dataRoot", dataRootPlaceholder: "/home/ubuntu/drec 或 /data",
-        testOk: "连接成功", testFailed: "连接失败:{error}", unknownError: "未知错误",
+        testOk: "连接成功 · dataRoot 可达", testFailed: "连接失败:{error}", unknownError: "未知错误",
         created: "Worker 已创建", updated: "Worker 已更新",
       },
     },
@@ -345,6 +346,7 @@ const DICT = {
         title: "Workers / recording nodes", subtitle: "Data sources for selection & merge; local = master itself.", add: "Add worker",
         colName: "Name", colKind: "Kind", colHost: "Host", colStatus: "Status", colAction: "Actions",
         empty: "No workers yet", testConn: "Test connection", deleteConfirmTitle: "Delete this worker?", deleted: "Worker deleted",
+        statusOk: "Online · dataRoot reachable", statusChecking: "Checking…",
       },
       workerDialog: {
         createTitle: "New worker", editTitle: "Edit worker", desc: "Recording node (a data source for selection & merge)",
@@ -352,7 +354,7 @@ const DICT = {
         kindLabel: "Kind", localKindHint: "Master itself, kind can't be changed",
         hostLabel: "Host", hostPlaceholder: "100.x.y.z or host.ts.net",
         dataRootLabel: "dataRoot", dataRootPlaceholder: "/home/ubuntu/drec or /data",
-        testOk: "Connected", testFailed: "Connection failed: {error}", unknownError: "Unknown error",
+        testOk: "Connected · dataRoot reachable", testFailed: "Connection failed: {error}", unknownError: "Unknown error",
         created: "Worker created", updated: "Worker updated",
       },
     },

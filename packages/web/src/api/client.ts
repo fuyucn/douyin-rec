@@ -28,8 +28,9 @@ import type {
   PlatformsDTO,
   WorkerDTO,
   WorkerTestResult,
+  WorkerStatus,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -127,6 +128,8 @@ export const api = {
   deleteWorker: (id: string): Promise<{ ok: boolean; id: string }> =>
     request("DELETE", `/api/hub/workers/${encodeURIComponent(id)}`),
   testWorker: (cfg: Partial<WorkerDTO>): Promise<WorkerTestResult> => request("POST", "/api/hub/workers/test", cfg),
+  /** 批量存活状态(卡片轮询):每 worker {id,ok,error?};hub 未开 → []。 */
+  getWorkersStatus: (): Promise<WorkerStatus[]> => request("GET", "/api/hub/workers/status"),
 
   // ── Global cookie ────────────────────────────────────────────────────────
   getCookie: (): Promise<CookieStatus> => request("GET", "/api/cookie"),
