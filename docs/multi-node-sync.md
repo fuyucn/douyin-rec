@@ -10,6 +10,15 @@
 
 多台录制节点（本地 docker、VPS 等）**对等共录**同一批直播间。任一场直播**真下播**后，自动在所有节点间挑出**覆盖最全**的一份，同步到 master，合并 + 烧录弹幕/聊天，按「P1→append」规则投稿 B 站。没有干净版本（都断）时不自动投，发 webhook 交人工。
 
+## 心智模型：多副本冗余 + read-repair（不是 master→slave 复制）
+
+容易误当成数据库 **master-slave 复制**，但那要拆成两个方向看，本设计**只做了读侧**：
+
+- **读侧（已实现）= 多副本冗余 + read-repair / anti-entropy**：每个节点**独立配置、独立匿名录制**同一直播间的**全量副本**（任务在各节点各自建，master **不下发**）。master 是个**只读协调者**——收播/周期触发去各节点扫清单，按覆盖度选「最完整那份副本」（挑没 gap 的 replica），merge/burn/发布；都断流没人录全 → 不删源、挂起交人工（= anti-entropy 不敢自动 resolve 冲突时的挂起）。且是 master **主动 pull**（SSH inventory + rsync），不是 slave 主动 report。
+- **写侧（未实现，future）= master 拥有任务并下发/同步到从节点**（DB 里 master 把 binlog 推给 slave 那半）。当前**没有**任务下发；「master 管任务、同步到节点、节点回报」是目标态，见 [followups](./multi-node-sync-followups.md) 里 defer 的「集中式任务管理」。实测结论：各节点手配任务够用，真正痛点是**配置漂移**而非下发，故暂缓。
+
+所以一句话：**多节点各录冗余副本，master 做 read-repair 选优 + 发布**——而非「master 下发任务、slave 回报」。
+
 ## 角色
 
 - **slave** = 现有 `serve`（已具备：录制 + REST API + `recordEnd`/`recordReconnect` 事件 + getLiving 权威判活）。本设计对 slave **零或极小改动**。
