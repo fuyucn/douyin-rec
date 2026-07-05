@@ -5,7 +5,7 @@
 抖音直播流录制 + 弹幕捕获 + 后处理（合并/烧录/上传）工具，TypeScript 重写版（原 Python 版已移除）。
 提供 CLI 子命令与 Web UI（React）。生产录制在 VPS，本地用于开发验证。
 
-**技术栈**：Node 24（ESM，`.js` import 后缀）、pnpm workspace（11 包）、TypeScript、vitest、commander、esbuild 双产物打包（`dist/douyin-rec.mjs` + `dist/tui.mjs`）、`node:sqlite`（内置）。录制自研：取流靠 vendored a_bogus 签名（`packages/douyin-live/src/vendor`，源自 `@bililive-tools/douyin-recorder`），ffmpeg/mesio 引擎落盘；弹幕用**我们自己的 TS 客户端 `packages/douyin-live/src/danmaku/client.ts`**（参考 `douyin-danma-listener` 重写、非复制;签名 `webmssdk.js`(a_bogus) + schema `proto.js` 仍 vendored,经 `Platform.connectDanmu` 暴露,无 pnpm patch）。
+**技术栈**：Node 24（ESM，`.js` import 后缀）、pnpm workspace（13 包）、TypeScript、vitest、commander、esbuild 双产物打包（`dist/douyin-rec.mjs` + `dist/tui.mjs`）、`node:sqlite`（内置）。录制自研：取流靠 vendored a_bogus 签名（`packages/douyin-live/src/vendor`，源自 `@bililive-tools/douyin-recorder`），ffmpeg/mesio 引擎落盘；弹幕用**我们自己的 TS 客户端 `packages/douyin-live/src/danmaku/client.ts`**（参考 `douyin-danma-listener` 重写、非复制;签名 `webmssdk.js`(a_bogus) + schema `proto.js` 仍 vendored,经 `Platform.connectDanmu` 暴露,无 pnpm patch）。
 
 ## 仓库布局（pnpm workspace monorepo，`packages/*`）
 
@@ -13,7 +13,7 @@
 **平台轴**(各 `<平台>-live`,平台专属:取流 + 弹幕)+ **引擎轴**(`record-engine`,平台无关下载)。其余全通用。
 另有**多节点编排层**(`orchestrator`,master/slave 跨节点选优合并上传,见「多节点 hub」)。
 esbuild 把 cli 打包成 `dist/douyin-rec.mjs`(+ `dist/tui.mjs`),录制必须跑这个打包产物(sm-crypto interop)。
-当前 **12 包**(架构图见 `docs/architecture.html`;多节点设计见 `docs/multi-node-sync.md`)。
+当前 **13 包**(架构图见 `docs/architecture.html`;多节点设计见 `docs/multi-node-sync.md`)。
 
 ```
 packages/
@@ -21,6 +21,9 @@ packages/
 │                          #   (registerPlatform/platformForRoom · registerEngine/getEngine) + types/config/notify/api-types
 ├── post-process/          # L0 后处理纯函数:concat 多会话拼接 / burn 烧字幕 / ass(rolling·livechat·multi·emoji·render) / merge / ffmpeg / fonts
 ├── ffmpeg-recorder-extra/ # L0 附加:logStreamMeta(流信息) + detectDevice(ffprobe encoder)
+├── observability/         # L0.5 logs+notification 实现(端口在 core:Notifier/ScopedLogger):EventCenter(事件总线)
+│                          #   + Discord/makeNotifier/formatMessage + TaskLogStore(任务日志环形缓冲)+ FileLogger/composite。
+│                          #   被 app/cli 依赖;manager/orchestrator 只吃 core 接口 + CLI 注入(不 import 本包)。
 ├── tui/                   # L0 Ink TUI(独立打包 dist/tui.mjs)
 ├── record-engine/         # L1 【引擎轴·平台无关】通用 PollingRecorder(开播轮询/onLive/断流/drain/isLive/卡死看门狗)
 │                          #   + 下载引擎策略 ffmpeg(.ts)/ mesio(.flv);取流经 platformForRoom→platform.getStream(url+headers)
@@ -33,7 +36,7 @@ packages/
 ├── orchestrator/          # L4.5 【多节点 hub】Transport 轴(local/ssh/tailscale-ssh)+ identity(按 platform,roomSlug 聚类)
 │                          #   + select(覆盖度选优,完整录全优先)+ reconciler(recordEnd 触发 + 周期对账)+ pipeline(选优→pull→merge→burn→穿插上传)+ SyncLedger
 ├── app/                   # L4 有状态层:db(node:sqlite+迁移) / store(房间归一化+平台校验) / hub-store(文件版 hub 规则) / task-manager / daemon(定时) /
-│                          #   scheduler / process(record-args) / login(扫码) / web(server+api) / events / anchor / notify / upload
+│                          #   scheduler / process(record-args) / login(扫码) / web(server+api) / anchor / upload(通知/日志已移至 observability)
 ├── cli/                   # L5 入口:cli.ts(record/merge/burn/probe + task)+ providers-register(注册平台 douyin/bilibili + 引擎 ffmpeg/mesio)
 └── web/                   # 前端(独立 Vite:React19 + jotai + @base-ui/react + Tailwind v4 + lucide + react-i18next)→ packages/web/dist
 test/                         # vitest:纯包单测**就近** packages/**/*.test.ts(挨着源码,如 engines/mesio.test.ts);
