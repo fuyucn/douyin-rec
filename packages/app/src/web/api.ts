@@ -22,7 +22,7 @@ import * as hubStore from "../hub-store.js";
 import type { HubRule } from "../hub-store.js";
 import { rootHubDir } from "../paths.js";
 import { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "../timezone.js";
-import type { EventCenter } from "../events.js";
+import type { EventCenter } from "@drec/observability";
 import { resolveOutputDir } from "../paths.js";
 import type { Task, TaskStore } from "../store.js";
 import { resolveTaskCookies } from "../store.js";

@@ -13,7 +13,7 @@ import { Command } from "commander";
 import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { TaskStore, resolveTaskCookies, resolveTaskWebhook, type Task, type EngineKind } from "./store.js";
 import { resolveDbPath } from "./db.js";
-import { EventCenter } from "./events.js";
+import { EventCenter } from "@drec/observability";
 import { resolveOutputDir, ensureHubConfigExample, rootHubConfig } from "./paths.js";
 import { applyTimezone } from "./timezone.js";
 

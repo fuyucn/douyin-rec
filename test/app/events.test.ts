@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { EventCenter } from "../../packages/app/src/events.js";
+import { EventCenter } from "../../packages/observability/src/bus.js";
 
 describe("EventCenter", () => {
   it("emit 压入本地流;since 增量拉取 + 推进游标", () => {

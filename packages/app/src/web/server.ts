@@ -24,7 +24,7 @@ import { loadIndexHtml, loadStaticAsset } from "./static-html.js";
 import { fetchAnchorName, resolveShortUrl } from "../anchor.js";
 import type { TaskStore } from "../store.js";
 import { MergeJobStore } from "../merge-jobs.js";
-import type { EventCenter } from "../events.js";
+import type { EventCenter } from "@drec/observability";
 
 /** A matched route: the api method to call + extracted :id (if any). */
 export interface RouteMatch {

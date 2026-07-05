@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
 import { MergeJobStore } from "../../packages/app/src/merge-jobs.js";
-import { EventCenter } from "../../packages/app/src/events.js";
+import { EventCenter } from "../../packages/observability/src/bus.js";
 import {
   makeApi,
   type ApiDeps,
