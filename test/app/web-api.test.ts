@@ -639,4 +639,27 @@ describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
     const noDep = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg });
     expect((await noDep.testWorker({ kind: "ssh", host: "h", dataRoot: "/d" })).status).toBe(400);
   });
+  it("testWorker:注入 fake RESOLVES 不可达 → 200 + 结构化 {ok:false,...}(不是错误状态码)", async () => {
+    const cfg = join(mkdtempSync(join(tmpdir(), "wt-")), "hub.config.json");
+    writeFileSync(cfg, JSON.stringify({ workers: [] }));
+    const fake = vi.fn(async () => ({ ok: false, reachable: false, dataRootExists: false, error: "连接测试超时 20000ms" }));
+    const a = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg, testWorker: fake });
+    const r = await a.testWorker({ kind: "ssh", host: "h", dataRoot: "/d" });
+    expect(r.status).toBe(200);
+    expect((r.body as any).ok).toBe(false);
+    expect((r.body as any).reachable).toBe(false);
+    expect((r.body as any).error).toBe("连接测试超时 20000ms");
+  });
+  it("testWorker:注入 fake THROWS → catch 分支仍回 200 结构化 error(绝不 500/崩)", async () => {
+    const cfg = join(mkdtempSync(join(tmpdir(), "wt-")), "hub.config.json");
+    writeFileSync(cfg, JSON.stringify({ workers: [] }));
+    const fake = vi.fn(async () => { throw new Error("ECONNREFUSED"); });
+    const a = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg, testWorker: fake });
+    const r = await a.testWorker({ kind: "ssh", host: "h", dataRoot: "/d" });
+    expect(r.status).toBe(200);
+    expect((r.body as any).ok).toBe(false);
+    expect((r.body as any).reachable).toBe(false);
+    expect((r.body as any).dataRootExists).toBe(false);
+    expect((r.body as any).error).toBe("ECONNREFUSED");
+  });
 });

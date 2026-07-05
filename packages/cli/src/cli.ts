@@ -600,20 +600,30 @@ const hubStarter: HubStarter = {
     return stop;
   },
   async testWorker(cfg) {
-    const { getTransport, registerBuiltinTransports } = await import("@drec/orchestrator");
+    // 注意:不能调 registerBuiltinTransports —— 那是全量 registry.set("local", …) 覆盖,
+    // 若在 `task serve --hub` 运行期间调用会永久降级共享的 "local" transport 工厂
+    // (isDone 退化恒 true → reconciler 不再等本地收播就合并残片;taskRooms 塌成 {} → 聚类失效)。
+    // 探测只需一次性、不进 registry 的 scoped transport 实例,直接按 cfg.kind 构造。
+    const { LocalTransport, SshTransport } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
-    // testWorker 可能在 hub.start 之前被调 → 幂等注册一份 transport(registry.set 覆盖,无副作用)。
     const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
       const { durationMs } = await ffprobeVideo(file).catch(() => ({ durationMs: 0 }));
       const endMs = statSync(file).mtimeMs;
       return { durationSec: durationMs / 1000, endMs, startMs: endMs - durationMs };
     };
-    registerBuiltinTransports({ ffprobe });
-    const withTimeout = <T,>(pms: Promise<T>, ms: number): Promise<T> =>
-      Promise.race([pms, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`连接测试超时 ${ms}ms`)), ms))]);
+    const id = cfg.id ?? "test";
+    const t = cfg.kind === "local"
+      ? new LocalTransport({ id, recordingsDir: `${cfg.dataRoot}/recordings`, taskRooms: {}, ffprobe })
+      : new SshTransport({ id, host: cfg.host!, dataRoot: cfg.dataRoot! });
+    const withTimeout = <T,>(pms: Promise<T>, ms: number): Promise<T> => {
+      let timer: NodeJS.Timeout;
+      const timeout = new Promise<T>((_, rej) => {
+        timer = setTimeout(() => rej(new Error(`连接测试超时 ${ms}ms`)), ms);
+      });
+      return Promise.race([pms, timeout]).finally(() => clearTimeout(timer));
+    };
     try {
-      const t = getTransport({ id: cfg.id ?? "test", kind: cfg.kind, host: cfg.host, dataRoot: cfg.dataRoot });
       const inv = await withTimeout(t.listInventory(), 20_000);
       // listInventory 解析成功 = 可达 + dataRoot/recordings 可扫 + inventory JSON 可解析。
       return { ok: true, reachable: true, dataRootExists: true, recordingCount: inv.recordings.length };
