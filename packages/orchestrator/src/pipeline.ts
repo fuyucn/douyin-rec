@@ -33,6 +33,8 @@ export interface PipelineCfg {
   uploadMeta: { tag: string; tid: number; desc?: string };
   steps?: PipelineSteps;
   cleanup?: PipelineCleanup;
+  /** reconciler 硬过滤用:非空 → 只处理这些 worker 的录像;缺省/空 = 全部(向后兼容)。pipeline 本身不读。 */
+  workers?: string[];
 }
 
 export interface PipelineDeps {

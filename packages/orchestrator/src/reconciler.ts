@@ -170,23 +170,35 @@ export class Reconciler {
       this.platform,
     );
 
-    // 3. Settle: 等各成员收播;返回仍在录的成员 key 集。
+    // 2.5 按每场规则解析 cfg + **worker 硬过滤**(单一插入点:聚类后、settle 前)。
+    //   - resolveCfg 返回 null(房间没开 hub)→ 清空 members → settle 不等它、循环跳过。
+    //   - cfg.workers 显式非空 → 只留 workerId∈workers 的成员;缺省/空 = 全部(向后兼容)。
+    const cfgByKey = new Map<string, PipelineCfg>();
+    for (const b of broadcasts) {
+      let cfg = this.pipelineDeps.cfg;
+      if (this.resolveCfg) {
+        const resolved = this.resolveCfg(b.platform, b.roomSlug); // 按本场 platform 取配置(多平台)
+        if (!resolved) { b.members = []; continue; }              // 房间未开 hub → 本场不处理
+        cfg = resolved;
+      }
+      if (cfg.workers && cfg.workers.length > 0) {
+        b.members = b.members.filter((m) => cfg.workers!.includes(m.workerId));
+      }
+      cfgByKey.set(b.streamKey, cfg);   // 过滤后仍有/无成员都缓存;空成员在循环里跳过
+    }
+
+    // 3. Settle: 只等(过滤后)仍有成员的场收播;返回仍在录的成员 key 集。
     const stillRecording = await this.settleAll(broadcasts);
 
     // 4. For each broadcast: idempotent upsert + run pipeline if needed.
     for (const b of broadcasts) {
       try {
+        // 过滤后无成员 → 房间没开 hub / 选中 worker 没人录到 → 跳过(不建 job)。
+        if (b.members.length === 0) continue;
         // 仍有成员在录制 → 本轮跳过(不建 job、不合并残片),待其录完的后续轮再处理。
         if (b.members.some((m) => stillRecording.has(`${m.workerId}:${m.rec.roomSlug}`))) continue;
 
-        // 按任务取该房间的 pipeline 配置;resolveCfg 返回 null = 该房间没开 hub → 跳过。
-        // 不提供 resolveCfg → 用全局 pipelineDeps.cfg(兼容旧的全局模式)。
-        let cfg = this.pipelineDeps.cfg;
-        if (this.resolveCfg) {
-          const resolved = this.resolveCfg(b.platform, b.roomSlug); // 按本场 platform 取配置(多平台)
-          if (!resolved) continue; // 房间未开 hub 任务 → 不处理
-          cfg = resolved;
-        }
+        const cfg = cfgByKey.get(b.streamKey) ?? this.pipelineDeps.cfg;
 
         const job = this.ledger.get(b.streamKey);
 

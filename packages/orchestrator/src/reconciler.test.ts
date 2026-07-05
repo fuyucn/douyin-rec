@@ -394,4 +394,110 @@ describe("Reconciler", () => {
     expect(tNew.listInventory).toHaveBeenCalledTimes(1);
     ledger.close();
   });
+
+  it("场景I(worker 硬过滤): workers=[local] → 即使 vps2 也录了该场,vps2 被过滤,winner 只能 local", async () => {
+    const ledger = freshLedger();
+    const t1 = makeTransport("local", [makeRec()]);
+    const t2 = makeTransport("vps2", [makeRec()]);      // vps2 也录了同一场
+    const transports = new Map([["local", t1], ["vps2", t2]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV"); return { state: "done", bv: "BV" }; },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+      resolveCfg: () => ({
+        cleanMaxGapSec: 30, stageDir: "/s", cookies: "/c",
+        uploadMode: "stage" as const, uploadMeta: { tag: "t", tid: 21 },
+        workers: ["local"],   // 只选 local
+      }),
+    });
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    const members = spyRunPipeline.mock.calls[0][0].members;
+    expect(members).toHaveLength(1);
+    expect(members[0].workerId).toBe("local");   // vps2 被硬过滤
+    ledger.close();
+  });
+
+  it("场景J(向后兼容): resolveCfg 返回的 cfg 无 workers → 全部 members 参与", async () => {
+    const ledger = freshLedger();
+    const t1 = makeTransport("local", [makeRec()]);
+    const t2 = makeTransport("vps2", [makeRec()]);
+    const transports = new Map([["local", t1], ["vps2", t2]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV"); return { state: "done", bv: "BV" }; },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+      resolveCfg: () => ({
+        cleanMaxGapSec: 30, stageDir: "/s", cookies: "/c",
+        uploadMode: "stage" as const, uploadMeta: { tag: "t", tid: 21 },
+        // 无 workers → 不过滤
+      }),
+    });
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(spyRunPipeline.mock.calls[0][0].members).toHaveLength(2);
+    ledger.close();
+  });
+
+  it("场景K(选中的没人录): workers=[local] 但只有 vps2 录到 → 不建 job/不跑 pipeline", async () => {
+    const ledger = freshLedger();
+    const t2 = makeTransport("vps2", [makeRec()]);   // 只有 vps2 录了
+    // local transport 存在但本场没录像(inventory 空)
+    const t1 = makeTransport("local", []);
+    const transports = new Map([["local", t1], ["vps2", t2]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV"); return { state: "done", bv: "BV" }; },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+      resolveCfg: () => ({
+        cleanMaxGapSec: 30, stageDir: "/s", cookies: "/c",
+        uploadMode: "stage" as const, uploadMeta: { tag: "t", tid: 21 },
+        workers: ["local"],
+      }),
+    });
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(0);
+    expect(ledger.listActive()).toHaveLength(0);   // 没建任何 job
+    ledger.close();
+  });
+
+  it("场景L(settle 只等选中): 未选中的 vps2 仍在录(isDone=false)不阻塞;local 已收播 → pipeline 跑", async () => {
+    const ledger = freshLedger();
+    const t1 = makeTransport("local", [makeRec()]);   // isDone 默认 true
+    const t2: Transport = {
+      id: "vps2",
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ workerId: "vps2", recordings: [makeRec()] }),
+      isDone: vi.fn<(s: string) => Promise<boolean>>().mockResolvedValue(false),   // 仍在录
+      pull: vi.fn<(p: string[], d: string) => Promise<void>>().mockResolvedValue(undefined),
+    };
+    const transports = new Map([["local", t1], ["vps2", t2]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV"); return { state: "done", bv: "BV" }; },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: { maxWaitMs: 50, pollMs: 1 }, sleep: fastSleep,
+      resolveCfg: () => ({
+        cleanMaxGapSec: 30, stageDir: "/s", cookies: "/c",
+        uploadMode: "stage" as const, uploadMeta: { tag: "t", tid: 21 },
+        workers: ["local"],
+      }),
+    });
+    await reconciler.reconcileAll();
+    // vps2 被过滤 → settle 不查它;local 已收播 → pipeline 跑一次(只含 local)。
+    expect(t2.isDone).not.toHaveBeenCalled();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(spyRunPipeline.mock.calls[0][0].members).toHaveLength(1);
+    ledger.close();
+  });
 });
