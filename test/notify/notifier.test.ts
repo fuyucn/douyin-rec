@@ -1,7 +1,7 @@
 // ts/test/notify/notifier.test.ts
 import { describe, it, expect, vi } from "vitest";
-import { formatMessage, makeNotifier, NullNotifier, type NotifyEvent } from "../../packages/app/src/notify/notifier.js";
-import { DiscordNotifier } from "../../packages/app/src/notify/discord.js";
+import { formatMessage, makeNotifier, NullNotifier, type NotifyEvent } from "../../packages/observability/src/notifier/index.js";
+import { DiscordNotifier } from "../../packages/observability/src/notifier/discord.js";
 
 describe("notifier", () => {
   it("formatMessage 各事件含关键信息", () => {

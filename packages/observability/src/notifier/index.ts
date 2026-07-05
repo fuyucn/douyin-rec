@@ -1,4 +1,4 @@
-// ts/src/core/notify/notifier.ts
+// observability/src/notifier/index.ts
 import type { Notifier, NotifyEvent } from "@drec/core";
 export type { Notifier, NotifyEvent } from "@drec/core";
 

@@ -33,7 +33,7 @@ export function resolveHubConfigJson(arg: string | undefined, store: TaskStore):
 import { RecordingSession } from "@drec/manager";
 import { createLogger, getEngine, getPlatform, platformForRoom } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
-import { makeNotifier } from "./notify/notifier.js";
+import { makeNotifier } from "@drec/observability";
 import type { Recorder, RecordOpts } from "@drec/core";
 import { TaskDaemon } from "./daemon.js";
 import { TaskManager } from "./task-manager.js";

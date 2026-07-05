@@ -1,6 +1,6 @@
-// ts/src/core/notify/discord.ts
+// observability/src/notifier/discord.ts
 import { createLogger } from "@drec/core";
-import { type Notifier, type NotifyEvent, formatMessage } from "./notifier.js";
+import { type Notifier, type NotifyEvent, formatMessage } from "./index.js";
 
 const log = createLogger("notifier");
 
