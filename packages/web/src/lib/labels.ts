@@ -3,11 +3,11 @@ import type { Task } from "../api/client";
 import { fmtDateTimeInTz } from "./tz";
 
 export const QUALITY_SHORT: Record<string, string> = {
-  origin: "OD",
-  uhd: "UHD",
-  hd: "HD",
-  sd: "SD",
-  ld: "LD",
+  origin: "原画",
+  uhd: "超清",
+  hd: "高清",
+  sd: "标清",
+  ld: "流畅",
 };
 
 export const QUALITY_FULL: Record<string, string> = {

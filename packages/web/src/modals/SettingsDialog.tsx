@@ -199,7 +199,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   ];
 
   return (
-    <Dialog open={open} onClose={onClose} widthClass="max-w-md" title={t("settings.title")}>
+    <Dialog open={open} onClose={onClose} widthClass="max-w-xl" title={t("settings.title")}>
       {/* tab 头:横向可滚(tab 多时只滚这一行,不撑宽对话框/整页;禁竖向溢出) */}
       <div className="flex gap-1 mb-5 border-b border-hairline overflow-x-auto overflow-y-hidden">
         {TABS.map((tb) => (
