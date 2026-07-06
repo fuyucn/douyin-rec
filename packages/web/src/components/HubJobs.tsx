@@ -1,5 +1,5 @@
 import { memo, useEffect, useState, type ReactNode } from "react";
-import { Check, FileText, Loader2, Minus, X } from "lucide-react";
+import { Check, ChevronDown, FileText, Loader2, Minus, X } from "lucide-react";
 import { ReactFlow, Background, Handle, Position, type Node, type Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api, type HubJobDTO } from "../api/client";
@@ -200,30 +200,32 @@ export function RunCard({
   job,
   onOpenLog,
   workerName,
-  hideGraph,
-  selected,
-  onSelect,
+  expanded,
+  onToggle,
 }: {
   job: HubJobDTO;
   onOpenLog: (key: string) => void;
   workerName?: (id: string) => string;
-  hideGraph?: boolean;
-  selected?: boolean;
-  onSelect?: (streamKey: string) => void;
+  /** 展开时内联显示该 run 自己的 PipelineFlow 图;收起只留状态行。 */
+  expanded?: boolean;
+  onToggle?: (streamKey: string) => void;
 }): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
   return (
     <div
-      className={`px-3 py-3${onSelect ? " cursor-pointer transition-colors" : ""}`}
+      className={`px-3 py-3${onToggle ? " cursor-pointer transition-colors" : ""}`}
       style={{
-        // 平铺列表行:无边框/圆角,选中用直边左 accent 条(方形行不弯曲),靠 divide-y 分隔。
-        borderLeft: `2px solid ${selected ? "var(--muted-soft)" : "transparent"}`,
+        // 平铺列表行:无边框/圆角,展开的一条用直边左 accent 条(方形行不弯曲),靠 divide-y 分隔。
+        borderLeft: `2px solid ${expanded ? "var(--muted-soft)" : "transparent"}`,
       }}
-      onClick={onSelect ? () => onSelect(job.streamKey) : undefined}
+      onClick={onToggle ? () => onToggle(job.streamKey) : undefined}
     >
-      <div className="flex items-center justify-between gap-2 mb-2">
+      <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 flex-wrap">
+          {onToggle && (
+            <ChevronDown className={`w-3.5 h-3.5 text-muted-soft transition-transform ${expanded ? "" : "-rotate-90"}`} />
+          )}
           <span className="font-mono text-[13px] text-ink">{runDate(job.streamKey)}</span>
           <span className="inline-flex items-center gap-1 text-[13px] font-medium" style={{ color: stateColor(job.state) }}>
             {!TERMINAL.has(job.state) && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
@@ -248,7 +250,6 @@ export function RunCard({
           </IconButton>
         )}
       </div>
-      {!hideGraph && <PipelineFlow job={job} />}
       <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-2 text-[12px] text-muted">
         {job.winnerWorker && <span>{t("hub.jobs.selected", { worker: workerName ? workerName(job.winnerWorker) : job.winnerWorker })}</span>}
         {job.videoDurationSec != null && <span>{t("hub.jobs.duration", { time: humanSec(Math.round(job.videoDurationSec)) })}</span>}
@@ -260,6 +261,11 @@ export function RunCard({
         )}
       </div>
       {job.error && <div className="text-[12px] mt-1" style={{ color: "var(--error)" }}>{job.error}</div>}
+      {expanded && (
+        <div className="mt-3 pt-3 border-t border-hairline overflow-x-auto" onClick={(e) => e.stopPropagation()}>
+          <PipelineFlow job={job} />
+        </div>
+      )}
     </div>
   );
 }

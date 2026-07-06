@@ -1,7 +1,7 @@
 import { Pencil, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { api, type HubJobDTO, type HubRuleDTO, type WorkerDTO } from "../api/client";
-import { PipelineFlow, RunCard, JobLogDialog } from "./HubJobs";
+import { RunCard, JobLogDialog } from "./HubJobs";
 import { Button, IconButton } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Switch } from "./Switch";
@@ -51,7 +51,7 @@ export function RoomDetail({
   const [loaded, setLoaded] = useState(false);
   const [pages, setPages] = useState(1);
   const [logKey, setLogKey] = useState<string | null>(null);
-  const [selectedRunKey, setSelectedRunKey] = useState<string | null>(null);
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -76,8 +76,12 @@ export function RoomDetail({
   usePolling(() => void refresh(), anyActive ? 3000 : 5000);
 
   const workerName = (id: string): string => workers.find((w) => w.id === id)?.name ?? id;
-  // 选中的 run(点列表切换);默认最近一次(runs[0])。
-  const selectedRun = runs.find((j) => j.streamKey === selectedRunKey) ?? runs[0];
+  // 展开的 run:默认最近一次(runs[0])展开;点击行展开/收起该行自己的 PipelineFlow。
+  // expandedKey===null → 用默认(首条);===""(哨兵)→ 全收起;其它 → 展开那条。
+  const defaultKey = runs[0]?.streamKey;
+  const isExpanded = (k: string): boolean => (expandedKey === null ? k === defaultKey : k === expandedKey);
+  const toggleRun = (k: string): void =>
+    setExpandedKey((prev) => ((prev === null ? defaultKey : prev) === k ? "" : k));
 
   const toggle = async (): Promise<void> => {
     try {
@@ -148,18 +152,7 @@ export function RoomDetail({
         </div>
       </div>
 
-      {/* 最近(或选中)run 的完整 PipelineFlow —— 无边框,靠 hairline 分隔 */}
-      {selectedRun ? (
-        <div className="mt-6 pt-6 border-t border-hairline overflow-x-auto">
-          <PipelineFlow job={selectedRun} />
-        </div>
-      ) : (
-        loaded && (
-          <div className="mt-6 pt-8 border-t border-hairline text-center text-muted-soft text-sm">{t("hub.detail.noRunGraph")}</div>
-        )
-      )}
-
-      {/* 运行记录列表(精简:不重复画图,点某条切上方图) */}
+      {/* 运行记录列表:每条 run 可展开显示它自己的完整 PipelineFlow(默认展开最近一次) */}
       <div className="mt-6 pt-6 border-t border-hairline flex items-baseline justify-between mb-3">
         <h3 className={sectionLabel}>{t("hub.detail.runsHeading")}</h3>
         <span className="text-[12px] text-muted-soft">{t("hub.detail.totalRuns", { count: total })}</span>
@@ -176,9 +169,8 @@ export function RoomDetail({
               job={j}
               onOpenLog={setLogKey}
               workerName={workerName}
-              hideGraph
-              selected={j.streamKey === (selectedRun?.streamKey ?? "")}
-              onSelect={setSelectedRunKey}
+              expanded={isExpanded(j.streamKey)}
+              onToggle={toggleRun}
             />
           ))}
           {runs.length < total && (
