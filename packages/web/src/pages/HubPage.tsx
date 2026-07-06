@@ -146,8 +146,8 @@ export function HubPage(): ReactNode {
                   onClick={() => selectRoom(r)}
                   className="w-full text-left rounded-lg px-3 py-2.5 flex flex-col gap-1 transition-colors"
                   style={{
-                    borderLeft: `3px solid ${active ? "var(--ink)" : "transparent"}`,
                     background: active ? "var(--surface-soft)" : "transparent",
+                    boxShadow: active ? "inset 3px 0 0 var(--ink)" : undefined,
                     opacity: r.enabled ? 1 : 0.55,
                   }}
                 >
