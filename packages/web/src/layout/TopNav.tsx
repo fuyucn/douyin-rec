@@ -66,7 +66,7 @@ export function TopNav(): ReactNode {
                 to={to}
                 end={to === "/"}
                 className={({ isActive }) =>
-                  `px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                  `px-3 py-1.5 rounded-sm text-sm font-medium transition-colors ${
                     isActive ? "bg-surface-soft text-ink" : "text-muted hover:text-ink hover:bg-surface-soft"
                   }`
                 }
