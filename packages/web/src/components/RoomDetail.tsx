@@ -169,7 +169,7 @@ export function RoomDetail({
       ) : runs.length === 0 ? (
         <div className="py-10 text-center text-muted-soft text-sm">{t("hub.detail.noRuns")}</div>
       ) : (
-        <div className="space-y-2">
+        <div className="divide-y divide-hairline">
           {runs.map((j) => (
             <RunCard
               key={j.streamKey}

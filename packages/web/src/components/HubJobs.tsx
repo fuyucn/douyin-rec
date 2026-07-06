@@ -215,9 +215,10 @@ export function RunCard({
   const labels = stepLabelMap(t);
   return (
     <div
-      className={`rounded-lg border p-3${onSelect ? " cursor-pointer transition-colors" : ""}`}
+      className={`px-3 py-3${onSelect ? " cursor-pointer transition-colors" : ""}`}
       style={{
-        borderColor: selected ? "var(--muted-soft)" : "var(--hairline)",
+        // 平铺列表行:无边框/圆角,选中用直边左 accent 条(方形行不弯曲),靠 divide-y 分隔。
+        borderLeft: `2px solid ${selected ? "var(--muted-soft)" : "transparent"}`,
       }}
       onClick={onSelect ? () => onSelect(job.streamKey) : undefined}
     >
