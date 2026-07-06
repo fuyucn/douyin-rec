@@ -147,7 +147,6 @@ export function HubPage(): ReactNode {
                   className="w-full text-left rounded-lg px-3 py-2.5 flex flex-col gap-1 transition-colors"
                   style={{
                     background: active ? "var(--surface-soft)" : "transparent",
-                    boxShadow: active ? "inset 3px 0 0 var(--ink)" : undefined,
                     opacity: r.enabled ? 1 : 0.55,
                   }}
                 >

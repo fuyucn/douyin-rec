@@ -212,7 +212,6 @@ export function RunCard({
       style={{
         borderColor: "var(--hairline)",
         background: selected ? "var(--surface-soft)" : undefined,
-        boxShadow: selected ? "inset 3px 0 0 var(--ink)" : undefined,
       }}
       onClick={onSelect ? () => onSelect(job.streamKey) : undefined}
     >
