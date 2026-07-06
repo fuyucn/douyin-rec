@@ -117,7 +117,7 @@ export function TaskList(): ReactNode {
         </div>
       </div>
 
-      <section className="card overflow-hidden">
+      <section className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="tasks">
             <thead>

@@ -53,8 +53,8 @@ export const DANMU_LABEL: Record<DanmuKind, string> = {
 
 export const DANMU_BADGE_CLASS: Record<DanmuKind, string> = {
   off: "badge-muted",
-  gift: "badge-violet",
-  anon: "badge-emerald",
+  gift: "badge-emerald",
+  anon: "badge-neutral",
 };
 
 export function scheduleText(t: Pick<Task, "scheduleStart" | "scheduleEnd">): string | null {

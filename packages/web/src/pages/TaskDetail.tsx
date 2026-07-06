@@ -136,8 +136,8 @@ export function TaskDetail(): ReactNode {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <section className="card p-6 lg:col-span-1">
-          <h3 className="headline text-[16px] mb-4">{t("tasks.info")}</h3>
+        <section className="lg:col-span-1">
+          <h3 className="text-[11px] font-medium uppercase tracking-[0.07em] text-muted-soft mb-4">{t("tasks.info")}</h3>
           <dl className="space-y-3 text-sm">
             <Row
               label={t("tasks.room")}
@@ -206,9 +206,9 @@ export function TaskDetail(): ReactNode {
           </dl>
         </section>
 
-        <section className="card p-6 lg:col-span-2 flex flex-col">
+        <section className="lg:col-span-2 flex flex-col">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="headline text-[16px]">{t("tasks.logs")}</h3>
+            <h3 className="text-[11px] font-medium uppercase tracking-[0.07em] text-muted-soft">{t("tasks.logs")}</h3>
             <span className="text-xs text-muted-soft">{logs.length ? t("tasks.lines", { count: logs.length }) : ""}</span>
           </div>
           <pre

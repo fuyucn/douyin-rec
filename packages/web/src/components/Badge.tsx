@@ -63,7 +63,7 @@ export function StatusBadge({
     // 进程在跑但还没拿到流（轮询开播 / 重连中）→ 「等待开播中」，不要误显示录制中。
     if (recording === false) {
       return (
-        <Badge tone="badge-violet">
+        <Badge tone="badge-neutral">
           <Dot color="var(--muted-soft)" pulse />
           {t("badge.waiting")}
         </Badge>
@@ -86,7 +86,7 @@ export function StatusBadge({
   }
   // 已启用但当前没在录：等窗口 / 等开播。
   return (
-    <Badge tone="badge-violet">
+    <Badge tone="badge-neutral">
       <Dot color="var(--muted-soft)" />
       {t("badge.idle")}
     </Badge>
