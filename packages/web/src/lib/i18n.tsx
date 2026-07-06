@@ -197,6 +197,7 @@ const DICT = {
         colName: "名称", colKind: "类型", colHost: "host", colStatus: "状态", colAction: "操作",
         empty: "还没有 Worker", testConn: "测试连接", deleteConfirmTitle: "删除该 Worker?", deleted: "Worker 已删除",
         statusOk: "在线 · dataRoot 可达", statusChecking: "检测中…",
+        pill: "Workers · {count}", close: "关闭 Workers 面板", statusFail: "离线", statusMixed: "部分离线",
       },
       workerDialog: {
         createTitle: "新建 Worker", editTitle: "编辑 Worker", desc: "录制节点(选优合并的数据来源)",
@@ -355,6 +356,7 @@ const DICT = {
         colName: "Name", colKind: "Kind", colHost: "Host", colStatus: "Status", colAction: "Actions",
         empty: "No workers yet", testConn: "Test connection", deleteConfirmTitle: "Delete this worker?", deleted: "Worker deleted",
         statusOk: "Online · dataRoot reachable", statusChecking: "Checking…",
+        pill: "Workers · {count}", close: "Close Workers panel", statusFail: "Offline", statusMixed: "Some offline",
       },
       workerDialog: {
         createTitle: "New worker", editTitle: "Edit worker", desc: "Recording node (a data source for selection & merge)",

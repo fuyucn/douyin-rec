@@ -1,13 +1,13 @@
-import { Plus, Radio } from "lucide-react";
+import { Plus, Radio, Server } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAtomValue } from "jotai";
-import { api, type HubRuleDTO, type HubJobDTO } from "../api/client";
+import { api, type HubRuleDTO, type HubJobDTO, type WorkerDTO, type WorkerStatus } from "../api/client";
 import { hubEnabledAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { LatestRunBadge } from "../components/HubJobs";
 import { RoomDetail } from "../components/RoomDetail";
-import { WorkersCard } from "../components/WorkersCard";
+import { WorkersPanel } from "../components/WorkersPanel";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
 import { usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
@@ -24,6 +24,9 @@ export function HubPage(): ReactNode {
   const [jobs, setJobs] = useState<HubJobDTO[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [workers, setWorkers] = useState<WorkerDTO[]>([]);
+  const [workerStatus, setWorkerStatus] = useState<Record<string, WorkerStatus>>({});
+  const [panelOpen, setPanelOpen] = useState(false);
 
   const refresh = async (): Promise<void> => {
     try {
@@ -40,6 +43,26 @@ export function HubPage(): ReactNode {
     }
   };
   usePolling(() => void refresh(), 3000);
+
+  const refreshWorkers = async (): Promise<void> => {
+    try {
+      setWorkers(await api.listWorkers());
+    } catch {
+      /* 静默:轮询会重试 */
+    }
+  };
+  usePolling(() => void refreshWorkers(), 3000, hubEnabled === true);
+
+  const fetchWorkerStatus = async (): Promise<void> => {
+    try {
+      const list = await api.getWorkersStatus();
+      setWorkerStatus(Object.fromEntries(list.map((s) => [s.id, s])));
+    } catch {
+      /* 保留上次 status */
+    }
+  };
+  // worker 存活轮询周期(ms):5 分钟(沿用原 WorkersCard 常量)。
+  usePolling(() => void fetchWorkerStatus(), 300_000, hubEnabled === true);
 
   /** 某规则(房间)的历次 run,新→旧:streamKey 前缀 `{platform}:{roomSlug}:` 匹配。 */
   const runsOf = (r: HubRuleDTO): HubJobDTO[] => {
@@ -68,6 +91,13 @@ export function HubPage(): ReactNode {
     navigate(`/hub/${encodeURIComponent(r.key)}`);
   };
 
+  // pill 健康点:全 ok=绿 / 有 fail=红 / 尚无结果=灰。
+  const statuses = workers.map((w) => workerStatus[w.id]).filter(Boolean) as WorkerStatus[];
+  const anyFail = statuses.some((s) => !s.ok);
+  const allOk = statuses.length > 0 && statuses.every((s) => s.ok);
+  const pillDot = anyFail ? "var(--error)" : allOk ? "var(--success)" : "var(--muted-soft)";
+  const pillTitle = anyFail ? t("hub.workers.statusMixed") : allOk ? t("hub.workers.statusOk") : t("hub.workers.statusChecking");
+
   return (
     <>
       <div className="flex items-end justify-between gap-3 mb-6">
@@ -75,14 +105,22 @@ export function HubPage(): ReactNode {
           <h1 className="headline text-[28px] sm:text-[32px] leading-tight">{t("hub.page.title")}</h1>
           <p className="text-muted text-sm mt-1.5">{t("hub.page.subtitle")}</p>
         </div>
-        <Button onClick={() => setDialogOpen(true)}>
-          <Plus className="w-4 h-4" />
-          {t("hub.page.newRule")}
-        </Button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setPanelOpen(true)}
+            className="btn-secondary btn-sm inline-flex items-center gap-2"
+            title={pillTitle}
+          >
+            <Server className="w-4 h-4" />
+            {t("hub.workers.pill", { count: workers.length })}
+            <span className="dot" style={{ background: pillDot }} />
+          </button>
+          <Button onClick={() => setDialogOpen(true)}>
+            <Plus className="w-4 h-4" />
+            {t("hub.page.newRule")}
+          </Button>
+        </div>
       </div>
-
-      {/* Task 2 会把 WorkersCard 移入浮层;本任务先原样保留,保功能不断。 */}
-      <WorkersCard />
 
       {loaded && rules.length === 0 ? (
         <section className="card p-16">
@@ -149,6 +187,14 @@ export function HubPage(): ReactNode {
       )}
 
       <HubRuleDialog open={dialogOpen} onClose={() => setDialogOpen(false)} rule={null} onSaved={() => void refresh()} />
+
+      <WorkersPanel
+        open={panelOpen}
+        onClose={() => setPanelOpen(false)}
+        workers={workers}
+        status={workerStatus}
+        onChanged={() => void refreshWorkers()}
+      />
     </>
   );
 }
