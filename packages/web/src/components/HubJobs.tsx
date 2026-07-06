@@ -132,7 +132,7 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
 const NODE_TYPES = { step: StepNode };
 
 /** 单条 run 的 fork/join 流程图(React Flow):固定布局,节点按 job.steps 上色,active 边动画。 */
-function PipelineFlow({ job }: { job: HubJobDTO }): ReactNode {
+export function PipelineFlow({ job }: { job: HubJobDTO }): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
   // 旧版本 run 无细粒度 steps → 回落一行粗粒度状态文字(不画图)。
@@ -193,15 +193,28 @@ export function RunCard({
   job,
   onOpenLog,
   workerName,
+  hideGraph,
+  selected,
+  onSelect,
 }: {
   job: HubJobDTO;
   onOpenLog: (key: string) => void;
   workerName?: (id: string) => string;
+  hideGraph?: boolean;
+  selected?: boolean;
+  onSelect?: (streamKey: string) => void;
 }): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
   return (
-    <div className="rounded-lg border border-hairline p-3">
+    <div
+      className={`rounded-lg border p-3${onSelect ? " cursor-pointer transition-colors" : ""}`}
+      style={{
+        borderColor: selected ? "var(--ink)" : "var(--hairline)",
+        background: selected ? "var(--surface-soft)" : undefined,
+      }}
+      onClick={onSelect ? () => onSelect(job.streamKey) : undefined}
+    >
       <div className="flex items-center justify-between gap-2 mb-2">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-mono text-[13px] text-ink">{runDate(job.streamKey)}</span>
@@ -217,12 +230,18 @@ export function RunCard({
           </span>
         </div>
         {job.hasLog && (
-          <IconButton title={t("hub.jobs.viewLog")} onClick={() => onOpenLog(job.streamKey)}>
+          <IconButton
+            title={t("hub.jobs.viewLog")}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenLog(job.streamKey);
+            }}
+          >
             <FileText className="w-4 h-4" />
           </IconButton>
         )}
       </div>
-      <PipelineFlow job={job} />
+      {!hideGraph && <PipelineFlow job={job} />}
       <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-2 text-[12px] text-muted">
         {job.winnerWorker && <span>{t("hub.jobs.selected", { worker: workerName ? workerName(job.winnerWorker) : job.winnerWorker })}</span>}
         {job.videoDurationSec != null && <span>{t("hub.jobs.duration", { time: humanSec(Math.round(job.videoDurationSec)) })}</span>}

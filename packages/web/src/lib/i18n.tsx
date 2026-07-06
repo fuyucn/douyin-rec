@@ -152,10 +152,14 @@ const DICT = {
         childTitle: "这是 child node(从节点)",
         childDesc1: "本节点未启用 hub(以 ", childDesc2: " 运行,无 ", childDesc3: ")。多节点选优合并 / 上传由 ",
         childMaster: "master 节点", childDesc4: "统一编排;Hub 规则只在 master 上配置与生效。本节点只负责录制 + 供 master 拉取。",
+        roomsHeading: "直播间", selectRoomHint: "从左侧选择一个直播间查看运行记录。",
       },
       detail: {
         pipelineConfig: "后处理配置", runsHeading: "运行记录", totalRuns: "共 {count} 次",
         noRuns: "该直播间还没有 hub 运行记录(录制并收播后自动产生)。", loadMore: "加载更多（还有 {count} 次）",
+        workersLabel: "参与 Worker", allWorkers: "全部节点",
+        chipUploadPrivate: "上传(私)", chipUploadPublic: "上传(公开)", chipStageOnly: "仅合成",
+        noRunGraph: "尚无运行(录制并收播后自动产生流程图)。",
       },
       jobs: {
         step: { pending: "排队中", settling: "等待收播", syncing: "拉取文件", merging: "合并 / 烧录", uploading: "上传 B 站", done: "已完成", failed: "失败", needsManual: "待人工" },
@@ -306,10 +310,14 @@ const DICT = {
         childTitle: "This is a child node",
         childDesc1: "Hub isn't enabled on this node (running ", childDesc2: " without ", childDesc3: "). Multi-node selection/merge/upload is orchestrated entirely by the ",
         childMaster: "master node", childDesc4: "; Hub rules are only configured and take effect on master. This node only records and lets master pull from it.",
+        roomsHeading: "Rooms", selectRoomHint: "Select a room on the left to view its run history.",
       },
       detail: {
         pipelineConfig: "Post-processing config", runsHeading: "Run history", totalRuns: "{count} runs total",
         noRuns: "No hub runs yet for this room (created automatically after recording ends).", loadMore: "Load more ({count} remaining)",
+        workersLabel: "Participating workers", allWorkers: "All nodes",
+        chipUploadPrivate: "Upload (private)", chipUploadPublic: "Upload (public)", chipStageOnly: "Stage only",
+        noRunGraph: "No runs yet (a pipeline graph appears automatically after recording ends).",
       },
       jobs: {
         step: { pending: "Queued", settling: "Waiting for stream to end", syncing: "Pulling files", merging: "Merging / burning", uploading: "Uploading to Bilibili", done: "Done", failed: "Failed", needsManual: "Needs review" },
