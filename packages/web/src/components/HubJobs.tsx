@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { memo, useEffect, useState, type ReactNode } from "react";
 import { Check, FileText, Loader2, Minus, X } from "lucide-react";
 import { ReactFlow, Background, Handle, Position, type Node, type Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -132,7 +132,7 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
 const NODE_TYPES = { step: StepNode };
 
 /** 单条 run 的 fork/join 流程图(React Flow):固定布局,节点按 job.steps 上色,active 边动画。 */
-export function PipelineFlow({ job }: { job: HubJobDTO }): ReactNode {
+function PipelineFlowInner({ job }: { job: HubJobDTO }): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
   // 旧版本 run 无细粒度 steps → 回落一行粗粒度状态文字(不画图)。
@@ -186,6 +186,13 @@ export function PipelineFlow({ job }: { job: HubJobDTO }): ReactNode {
     </div>
   );
 }
+
+/** graph 的稳定签名:只由 steps + state 决定。轮询每 3s 传入新 job 对象,但只要签名不变就
+ *  跳过重渲染 —— 避免每次轮询用全新 nodes/edges 数组冲刷 React Flow、触发 fitView 重算导致偶发空白。 */
+function pipelineSig(j: HubJobDTO): string {
+  return `${j.state}|${j.steps.map((s) => `${s.step}:${s.phase}:${s.at}`).join(",")}`;
+}
+export const PipelineFlow = memo(PipelineFlowInner, (a, b) => pipelineSig(a.job) === pipelineSig(b.job));
 
 /** 一条 run 卡片:状态行 + 步骤时间线 + 元信息(选优/时长/BV/错误)+ 日志按钮。
  * `workerName` 可选:把 job.winnerWorker(id)映射成友好名,查不到回落 id。 */
