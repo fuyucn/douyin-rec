@@ -218,7 +218,7 @@ export function RunCard({
       className={`rounded-lg border p-3${onSelect ? " cursor-pointer transition-colors" : ""}`}
       style={{
         borderColor: "var(--hairline)",
-        background: selected ? "var(--surface-soft)" : undefined,
+        background: selected ? "var(--surface-active)" : undefined,
       }}
       onClick={onSelect ? () => onSelect(job.streamKey) : undefined}
     >
