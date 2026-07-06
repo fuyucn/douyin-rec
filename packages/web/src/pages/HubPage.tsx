@@ -133,8 +133,8 @@ export function HubPage(): ReactNode {
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-[288px_1fr] gap-6 items-start">
           {/* 左:房间列表 */}
-          <aside className="card p-2 space-y-1">
-            <div className="px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-soft">
+          <aside className="space-y-0.5 lg:pr-2">
+            <div className="px-1 pb-2 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-soft">
               {t("hub.page.roomsHeading")}
             </div>
             {!loaded && <div className="px-2 py-3 text-sm text-muted">{t("hub.common.loading")}</div>}
@@ -144,7 +144,7 @@ export function HubPage(): ReactNode {
                 <button
                   key={r.key}
                   onClick={() => selectRoom(r)}
-                  className="w-full text-left rounded-lg px-3 py-2.5 flex flex-col gap-1 transition-colors"
+                  className="w-full text-left rounded-lg px-3 py-2.5 flex flex-col gap-1 cursor-pointer transition-colors hover:bg-[var(--surface-soft)]"
                   style={{
                     outline: active ? "1.5px solid var(--muted-soft)" : undefined,
                     outlineOffset: active ? "-1.5px" : undefined,

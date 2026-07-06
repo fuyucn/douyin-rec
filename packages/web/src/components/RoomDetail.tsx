@@ -30,6 +30,8 @@ function uploadChip(r: HubRuleDTO, t: TFunc): string {
 
 const chipCls = "inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-mono";
 const chipStyle = { background: "var(--surface-soft)", color: "var(--body)", border: "1px solid var(--hairline)" } as const;
+/** 统一的分区小标签:muted + 大写 + 字距,替代粗黑标题,营造层次而非盒中盒。 */
+const sectionLabel = "text-[11px] font-medium uppercase tracking-[0.07em] text-muted-soft";
 
 /** 右详情 pane:某直播间的房间头 + 配置/worker chips + 最近(或选中)run 完整 PipelineFlow + 运行记录列表。 */
 export function RoomDetail({
@@ -102,14 +104,14 @@ export function RoomDetail({
   return (
     <>
       {/* 房间头 */}
-      <div className="flex items-start justify-between gap-4 mb-5">
+      <div className="flex items-start justify-between gap-4 mb-6">
         <div className="min-w-0">
           <h2 className="headline text-[22px] sm:text-[24px] leading-tight truncate">
             {rule.anchorName ?? roomId(rule.room)}
           </h2>
-          <p className="text-muted text-sm mt-1 font-mono break-all">{rule.platform} · {roomId(rule.room)}</p>
+          <p className="text-muted-soft text-[13px] mt-1 font-mono break-all">{rule.platform} · {roomId(rule.room)}</p>
         </div>
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
           <Switch checked={rule.enabled} onCheckedChange={() => void toggle()} name={`hub-detail-${rule.key}`} />
           <IconButton title={t("hub.common.edit")} onClick={() => setEditOpen(true)}>
             <Pencil className="w-4 h-4" />
@@ -120,10 +122,10 @@ export function RoomDetail({
         </div>
       </div>
 
-      {/* 配置 + 参与 worker chips */}
-      <div className="card p-4 mb-6 space-y-3">
+      {/* 配置 + 参与 worker:并排 label+chips,无盒中盒 */}
+      <div className="flex flex-wrap items-start gap-x-12 gap-y-4">
         <div>
-          <div className="text-xs font-semibold text-ink mb-2">{t("hub.detail.pipelineConfig")}</div>
+          <div className={`${sectionLabel} mb-2`}>{t("hub.detail.pipelineConfig")}</div>
           <div className="flex flex-wrap items-center gap-1.5">
             {outputChips(rule).map((c) => (
               <span key={c} className={chipCls} style={chipStyle}>{c}</span>
@@ -133,7 +135,7 @@ export function RoomDetail({
           </div>
         </div>
         <div>
-          <div className="text-xs font-semibold text-ink mb-2">{t("hub.detail.workersLabel")}</div>
+          <div className={`${sectionLabel} mb-2`}>{t("hub.detail.workersLabel")}</div>
           <div className="flex flex-wrap items-center gap-1.5">
             {participating === null ? (
               <span className={chipCls} style={chipStyle}>{t("hub.detail.allWorkers")}</span>
@@ -146,28 +148,28 @@ export function RoomDetail({
         </div>
       </div>
 
-      {/* 最近(或选中)run 的完整 PipelineFlow */}
+      {/* 最近(或选中)run 的完整 PipelineFlow —— 无边框,靠 hairline 分隔 */}
       {selectedRun ? (
-        <div className="card p-3 mb-6 overflow-x-auto">
+        <div className="mt-6 pt-6 border-t border-hairline overflow-x-auto">
           <PipelineFlow job={selectedRun} />
         </div>
       ) : (
         loaded && (
-          <div className="card p-8 mb-6 text-center text-muted text-sm">{t("hub.detail.noRunGraph")}</div>
+          <div className="mt-6 pt-8 border-t border-hairline text-center text-muted-soft text-sm">{t("hub.detail.noRunGraph")}</div>
         )
       )}
 
       {/* 运行记录列表(精简:不重复画图,点某条切上方图) */}
-      <div className="flex items-baseline justify-between mb-3">
-        <h3 className="text-sm font-semibold text-ink">{t("hub.detail.runsHeading")}</h3>
+      <div className="mt-6 pt-6 border-t border-hairline flex items-baseline justify-between mb-3">
+        <h3 className={sectionLabel}>{t("hub.detail.runsHeading")}</h3>
         <span className="text-[12px] text-muted-soft">{t("hub.detail.totalRuns", { count: total })}</span>
       </div>
       {!loaded ? (
-        <div className="card p-10 text-center text-muted">{t("hub.common.loading")}</div>
+        <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>
       ) : runs.length === 0 ? (
-        <div className="card p-10 text-center text-muted text-sm">{t("hub.detail.noRuns")}</div>
+        <div className="py-10 text-center text-muted-soft text-sm">{t("hub.detail.noRuns")}</div>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-2">
           {runs.map((j) => (
             <RunCard
               key={j.streamKey}
