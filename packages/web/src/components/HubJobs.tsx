@@ -10,13 +10,27 @@ import { useT } from "../lib/i18n";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
-/** 秒 → 人类可读("2h13m" / "8m" / "45s")。 */
+/** 秒 → 人类可读("2h13m" / "8m" / "45s")。节点面板紧凑用,分钟四舍五入(不显示秒)。 */
 export function humanSec(sec: number | null): string {
   if (sec == null) return "—";
   if (sec < 60) return `${sec}s`;
   const h = Math.floor(sec / 3600);
   const m = Math.round((sec % 3600) / 60);
   return h > 0 ? `${h}h${m}m` : `${m}m`;
+}
+
+/** 秒 → 精确到秒("1h37m59s" / "9m53s" / "45s")。hover 详情用(不四舍五入,整秒为 0 时省略)。 */
+export function humanSecFull(sec: number | null): string {
+  if (sec == null) return "—";
+  const s = Math.round(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  const parts: string[] = [];
+  if (h) parts.push(`${h}h`);
+  if (m) parts.push(`${m}m`);
+  if (ss || parts.length === 0) parts.push(`${ss}s`);
+  return parts.join("");
 }
 
 /** 状态 → 步骤名(译文,渲染时按当前语言解析)。 */
@@ -109,7 +123,7 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
       <div className="font-medium text-[12px]">{data.label}</div>
       <div className="text-[11px] text-muted-soft mt-0.5">
         {t(`hub.jobs.tipStatus.${data.status}`)}
-        {showSec ? ` · ${humanSec(data.sec)}` : ""}
+        {showSec ? ` · ${humanSecFull(data.sec)}` : ""}
       </div>
     </div>
   );
@@ -152,7 +166,7 @@ function CandidateNode({ data }: { data: { name: string; coveragePct: number; du
     <div className="text-left leading-snug">
       <div className="font-medium text-[12px]">{data.name}{win ? ` · ${t("hub.jobs.candWinner")}` : ""}</div>
       <div className="text-[11px] text-muted-soft mt-0.5">
-        {t("hub.jobs.candCoverage", { pct: data.coveragePct })} · {humanSec(Math.round(data.durationSec))}
+        {t("hub.jobs.candCoverage", { pct: data.coveragePct })} · {humanSecFull(data.durationSec)}
         {data.complete ? ` · ${t("hub.jobs.candComplete")}` : ""}
       </div>
     </div>
