@@ -457,6 +457,33 @@ table.tasks tbody tr:last-child td {
   100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ink) 0%, transparent); }
 }
 .flow-node-active { animation: flow-pulse 1.5s ease-out infinite; }
+/* 流程图节点上的 tooltip trigger:不要 inline 文本那套点状下划线/pointer(节点不是可点文字)。 */
+.react-flow__node .tooltip-trigger {
+  cursor: inherit;
+  text-decoration: none;
+}
+/* 节点不可选/拖/连时 React Flow 会把 pointer-events:none 作为**内联样式**写在节点上
+   → hover 收不到、tooltip 不弹。内联优先级高于类,必须 !important 才能覆盖(拖拽平移仍在空白画布进行)。 */
+.react-flow__node { pointer-events: all !important; }
+/* React Flow 缩放/居中控件:改深色 token(默认白底黑字在暗色下很突兀)。 */
+.flow-controls.react-flow__controls {
+  box-shadow: 0 4px 14px -8px rgba(0, 0, 0, 0.4);
+  border-radius: var(--r-btn);
+  overflow: hidden;
+}
+.flow-controls .react-flow__controls-button {
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+  color: var(--ink);
+  width: 22px;
+  height: 22px;
+}
+.flow-controls .react-flow__controls-button:hover {
+  background: var(--surface-soft);
+}
+.flow-controls .react-flow__controls-button svg {
+  fill: var(--ink);
+}
 /* 流入进行中节点的连接线:marching ants 流动虚线(从左向右流,表示"数据在流过")。 */
 @keyframes flow-march { to { background-position: 14px 0; } }
 .flow-connector-active {

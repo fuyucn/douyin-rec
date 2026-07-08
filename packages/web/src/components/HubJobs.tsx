@@ -1,10 +1,11 @@
 import { memo, useEffect, useState, type ReactNode } from "react";
 import { Check, ChevronDown, FileText, Loader2, Minus, X } from "lucide-react";
-import { ReactFlow, Background, Handle, Position, type Node, type Edge } from "@xyflow/react";
+import { ReactFlow, Background, Controls, Handle, Position, type Node, type Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api, type HubJobDTO } from "../api/client";
 import { IconButton } from "./Button";
 import { Dialog } from "./Dialog";
+import { Tooltip } from "./Tooltip";
 import { useT } from "../lib/i18n";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
@@ -98,58 +99,85 @@ function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec:
   return out;
 }
 
-/** 自定义节点:状态圆 + 标签 + 耗时。 */
+/** 自定义节点:状态圆 + 标签 + 耗时。hover 出详情(状态 + 耗时)。 */
 function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: number | null } }): ReactNode {
   const t = useT();
   const c = NODE_COLOR[data.status];
+  const showSec = data.status !== "skipped" && data.status !== "todo" && data.sec != null;
+  const tip = (
+    <div className="text-left leading-snug">
+      <div className="font-medium text-[12px]">{data.label}</div>
+      <div className="text-[11px] text-muted-soft mt-0.5">
+        {t(`hub.jobs.tipStatus.${data.status}`)}
+        {showSec ? ` · ${humanSec(data.sec)}` : ""}
+      </div>
+    </div>
+  );
   return (
-    <div className="flex flex-col items-center gap-1" style={{ width: 92 }}>
+    <div className="flex flex-col items-center" style={{ width: 92 }}>
       <Handle type="target" position={Position.Left} style={{ opacity: 0, top: 11 }} />
-      <span
-        className={`inline-flex items-center justify-center rounded-full w-6 h-6${data.status === "active" ? " flow-node-active" : ""}`}
-        style={{ background: c.bg, color: c.fg, border: `1.5px solid ${c.ring}` }}
-      >
-        {data.status === "done" && <Check className="w-3.5 h-3.5" />}
-        {data.status === "active" && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-        {data.status === "failed" && <X className="w-3.5 h-3.5" />}
-        {data.status === "skipped" && <Minus className="w-3.5 h-3.5" />}
-        {data.status === "todo" && <span className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--muted-soft)" }} />}
-      </span>
-      <span
-        className="text-[11px] text-center leading-tight"
-        style={{ color: data.status === "todo" || data.status === "skipped" ? "var(--muted-soft)" : "var(--ink)", fontWeight: data.status === "active" ? 600 : 400 }}
-      >
-        {data.label}
-      </span>
-      <span className="text-[10px] font-mono" style={{ color: data.status === "active" ? "var(--ink)" : "var(--muted-soft)" }}>
-        {data.status === "skipped" ? t("hub.jobs.skipped") : data.status === "todo" ? "" : humanSec(data.sec)}
-      </span>
+      <Tooltip content={tip}>
+        <div className="flex flex-col items-center gap-1">
+          <span
+            className={`inline-flex items-center justify-center rounded-full w-6 h-6${data.status === "active" ? " flow-node-active" : ""}`}
+            style={{ background: c.bg, color: c.fg, border: `1.5px solid ${c.ring}` }}
+          >
+            {data.status === "done" && <Check className="w-3.5 h-3.5" />}
+            {data.status === "active" && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            {data.status === "failed" && <X className="w-3.5 h-3.5" />}
+            {data.status === "skipped" && <Minus className="w-3.5 h-3.5" />}
+            {data.status === "todo" && <span className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--muted-soft)" }} />}
+          </span>
+          <span
+            className="text-[11px] text-center leading-tight"
+            style={{ color: data.status === "todo" || data.status === "skipped" ? "var(--muted-soft)" : "var(--ink)", fontWeight: data.status === "active" ? 600 : 400 }}
+          >
+            {data.label}
+          </span>
+          <span className="text-[10px] font-mono" style={{ color: data.status === "active" ? "var(--ink)" : "var(--muted-soft)" }}>
+            {data.status === "skipped" ? t("hub.jobs.skipped") : data.status === "todo" ? "" : humanSec(data.sec)}
+          </span>
+        </div>
+      </Tooltip>
       <Handle type="source" position={Position.Right} style={{ opacity: 0, top: 11 }} />
     </div>
   );
 }
 
-/** select 步的 fan-in 候选节点:录制节点 + 覆盖度;winner 绿框 + ✔ + 「最优」。 */
-function CandidateNode({ data }: { data: { name: string; coveragePct: number; complete: boolean; isWinner: boolean } }): ReactNode {
+/** select 步的 fan-in 候选节点:录制节点 + 覆盖度;winner 绿框 + ✔ + 「最优」。hover 出详情(覆盖/时长/完整/胜出)。 */
+function CandidateNode({ data }: { data: { name: string; coveragePct: number; durationSec: number; complete: boolean; isWinner: boolean } }): ReactNode {
   const t = useT();
   const win = data.isWinner;
+  const tip = (
+    <div className="text-left leading-snug">
+      <div className="font-medium text-[12px]">{data.name}{win ? ` · ${t("hub.jobs.candWinner")}` : ""}</div>
+      <div className="text-[11px] text-muted-soft mt-0.5">
+        {t("hub.jobs.candCoverage", { pct: data.coveragePct })} · {humanSec(Math.round(data.durationSec))}
+        {data.complete ? ` · ${t("hub.jobs.candComplete")}` : ""}
+      </div>
+    </div>
+  );
   return (
-    <div className="flex flex-col items-center gap-0.5" style={{ width: 104 }}>
-      <span
-        className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] max-w-full"
-        style={{
-          border: `1.5px solid ${win ? "var(--success)" : "var(--hairline)"}`,
-          background: win ? "color-mix(in srgb, var(--success) 12%, transparent)" : "transparent",
-          color: win ? "var(--ink)" : "var(--muted-soft)",
-        }}
-      >
-        {win && <Check className="w-3 h-3 shrink-0" style={{ color: "var(--success)" }} />}
-        <span className="font-medium truncate">{data.name}</span>
-      </span>
-      <span className="text-[10px] font-mono leading-tight" style={{ color: win ? "var(--ink)" : "var(--muted-soft)" }}>
-        {data.complete ? t("hub.jobs.candComplete") : t("hub.jobs.candCoverage", { pct: data.coveragePct })}
-        {win ? ` · ${t("hub.jobs.candWinner")}` : ""}
-      </span>
+    <div className="flex flex-col items-center" style={{ width: 104 }}>
+      <Tooltip content={tip}>
+        <div className="flex flex-col items-center gap-0.5">
+          <span
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] max-w-full"
+            style={{
+              border: `1.5px solid ${win ? "var(--success)" : "var(--hairline)"}`,
+              background: win ? "color-mix(in srgb, var(--success) 12%, transparent)" : "transparent",
+              color: win ? "var(--ink)" : "var(--muted-soft)",
+            }}
+          >
+            {win && <Check className="w-3 h-3 shrink-0" style={{ color: "var(--success)" }} />}
+            <span className="font-medium truncate">{data.name}</span>
+          </span>
+          <span className="text-[10px] font-mono leading-tight" style={{ color: win ? "var(--ink)" : "var(--muted-soft)" }}>
+            {data.complete ? t("hub.jobs.candComplete") : t("hub.jobs.candCoverage", { pct: data.coveragePct })}
+            {win ? ` · ${t("hub.jobs.candWinner")}` : ""}
+          </span>
+        </div>
+      </Tooltip>
       <Handle type="source" position={Position.Right} style={{ opacity: 0, top: 13 }} />
     </div>
   );
@@ -177,6 +205,7 @@ function PipelineFlowInner({ job, workerName }: { job: HubJobDTO; workerName?: (
     data: {
       name: workerName ? workerName(c.worker) : c.worker,
       coveragePct: Math.round(c.coverage * 100),
+      durationSec: c.durationSec,
       complete: c.complete,
       isWinner: c.isWinner,
     },
@@ -225,17 +254,20 @@ function PipelineFlowInner({ job, workerName }: { job: HubJobDTO; workerName?: (
         nodeTypes={NODE_TYPES}
         fitView
         fitViewOptions={{ padding: 0.15 }}
+        minZoom={0.2}
+        maxZoom={2}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
-        zoomOnScroll={false}
-        zoomOnPinch={false}
-        zoomOnDoubleClick={false}
-        panOnDrag={false}
-        preventScrolling={false}
+        zoomOnScroll
+        zoomOnPinch
+        zoomOnDoubleClick
+        panOnDrag
+        preventScrolling
         proOptions={{ hideAttribution: true }}
       >
         <Background gap={16} color="var(--hairline)" />
+        <Controls showInteractive={false} className="flow-controls" />
       </ReactFlow>
     </div>
   );
