@@ -129,10 +129,37 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
   );
 }
 
-const NODE_TYPES = { step: StepNode };
+/** select 步的 fan-in 候选节点:录制节点 + 覆盖度;winner 绿框 + ✔ + 「最优」。 */
+function CandidateNode({ data }: { data: { name: string; coveragePct: number; complete: boolean; isWinner: boolean } }): ReactNode {
+  const t = useT();
+  const win = data.isWinner;
+  return (
+    <div className="flex flex-col items-center gap-0.5" style={{ width: 104 }}>
+      <span
+        className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] max-w-full"
+        style={{
+          border: `1.5px solid ${win ? "var(--success)" : "var(--hairline)"}`,
+          background: win ? "color-mix(in srgb, var(--success) 12%, transparent)" : "transparent",
+          color: win ? "var(--ink)" : "var(--muted-soft)",
+        }}
+      >
+        {win && <Check className="w-3 h-3 shrink-0" style={{ color: "var(--success)" }} />}
+        <span className="font-medium truncate">{data.name}</span>
+      </span>
+      <span className="text-[10px] font-mono leading-tight" style={{ color: win ? "var(--ink)" : "var(--muted-soft)" }}>
+        {data.complete ? t("hub.jobs.candComplete") : t("hub.jobs.candCoverage", { pct: data.coveragePct })}
+        {win ? ` · ${t("hub.jobs.candWinner")}` : ""}
+      </span>
+      <Handle type="source" position={Position.Right} style={{ opacity: 0, top: 13 }} />
+    </div>
+  );
+}
 
-/** 单条 run 的 fork/join 流程图(React Flow):固定布局,节点按 job.steps 上色,active 边动画。 */
-function PipelineFlowInner({ job }: { job: HubJobDTO }): ReactNode {
+const NODE_TYPES = { step: StepNode, candidate: CandidateNode };
+
+/** 单条 run 的 fork/join 流程图(React Flow):固定布局,节点按 job.steps 上色,active 边动画。
+ *  workerName:candidate 节点 id→友好名映射(缺省回落 id)。 */
+function PipelineFlowInner({ job, workerName }: { job: HubJobDTO; workerName?: (id: string) => string }): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
   // 旧版本 run 无细粒度 steps → 回落一行粗粒度状态文字(不画图)。
@@ -141,6 +168,29 @@ function PipelineFlowInner({ job }: { job: HubJobDTO }): ReactNode {
     return <span className="text-muted-soft text-xs">{line || t("hub.jobs.noStepRecord")}</span>;
   }
   const st = stepStatuses(job);
+  // select 步的候选节点:各录制节点竖排在 select 左侧(-190),edge 汇入 select;winner 高亮。
+  const cands = job.candidates;
+  const candNodes: Node[] = cands.map((c, i) => ({
+    id: `cand:${c.worker}`,
+    type: "candidate",
+    position: { x: -190, y: 70 + (i - (cands.length - 1) / 2) * 66 },
+    data: {
+      name: workerName ? workerName(c.worker) : c.worker,
+      coveragePct: Math.round(c.coverage * 100),
+      complete: c.complete,
+      isWinner: c.isWinner,
+    },
+  }));
+  const candEdges: Edge[] = cands.map((c) => ({
+    id: `cand:${c.worker}-select`,
+    source: `cand:${c.worker}`,
+    target: "select",
+    style: {
+      stroke: c.isWinner ? "var(--success)" : "var(--hairline)",
+      strokeWidth: c.isWinner ? 2 : 1,
+      strokeDasharray: c.isWinner ? undefined : "3 3",
+    },
+  }));
   const termStatus: NodeStatus =
     job.state === "failed" ? "failed" : job.state === "done" ? "done" : job.state === "needs_manual" ? "done" : "todo";
   const termLabel = job.state === "needs_manual" ? labels.needs_manual : job.state === "failed" ? labels.failed : t("hub.jobs.termDone");
@@ -152,16 +202,20 @@ function PipelineFlowInner({ job }: { job: HubJobDTO }): ReactNode {
       data: { label: t(`hub.jobs.stepNode.${d.key}`), status: st[d.key].status, sec: st[d.key].sec },
     })),
     { id: TERM.key, type: "step", position: { x: TERM.x, y: TERM.y }, data: { label: termLabel, status: termStatus, sec: null } },
+    ...candNodes,
   ];
-  const edges: Edge[] = FLOW_EDGES.map(([src, dst]) => {
-    const ts = statusOf(dst);
-    const reached = ts === "done" || ts === "active" || ts === "failed";
-    return {
-      id: `${src}-${dst}`, source: src, target: dst,
-      animated: ts === "active", // 流入进行中节点 → React Flow 内置流动动画
-      style: { stroke: reached ? "var(--success)" : "var(--hairline)", strokeWidth: 1.5 },
-    };
-  });
+  const edges: Edge[] = [
+    ...FLOW_EDGES.map(([src, dst]) => {
+      const ts = statusOf(dst);
+      const reached = ts === "done" || ts === "active" || ts === "failed";
+      return {
+        id: `${src}-${dst}`, source: src, target: dst,
+        animated: ts === "active", // 流入进行中节点 → React Flow 内置流动动画
+        style: { stroke: reached ? "var(--success)" : "var(--hairline)", strokeWidth: 1.5 },
+      };
+    }),
+    ...candEdges,
+  ];
 
   return (
     <div style={{ height: 190 }} className="w-full">
@@ -187,12 +241,18 @@ function PipelineFlowInner({ job }: { job: HubJobDTO }): ReactNode {
   );
 }
 
-/** graph 的稳定签名:只由 steps + state 决定。轮询每 3s 传入新 job 对象,但只要签名不变就
- *  跳过重渲染 —— 避免每次轮询用全新 nodes/edges 数组冲刷 React Flow、触发 fitView 重算导致偶发空白。 */
+/** graph 的稳定签名:由 steps + state + 候选(节点/胜出)决定。轮询每 3s 传入新 job 对象,但只要
+ *  签名不变就跳过重渲染 —— 避免每次轮询用全新 nodes/edges 数组冲刷 React Flow、触发 fitView 重算导致偶发空白。 */
 function pipelineSig(j: HubJobDTO): string {
-  return `${j.state}|${j.steps.map((s) => `${s.step}:${s.phase}:${s.at}`).join(",")}`;
+  const cand = j.candidates.map((c) => `${c.worker}:${c.isWinner ? 1 : 0}`).join(",");
+  return `${j.state}|${j.steps.map((s) => `${s.step}:${s.phase}:${s.at}`).join(",")}|${cand}`;
 }
-export const PipelineFlow = memo(PipelineFlowInner, (a, b) => pipelineSig(a.job) === pipelineSig(b.job));
+// workerName 也纳入比较:worker 列表异步加载完(candidate 名从 id 变友好名)时须重渲染一次。
+// 依赖 workerName 用 useCallback 稳定引用(见 RoomDetail),否则每帧新引用会击穿 memo → 空白 bug 复发。
+export const PipelineFlow = memo(
+  PipelineFlowInner,
+  (a, b) => pipelineSig(a.job) === pipelineSig(b.job) && a.workerName === b.workerName,
+);
 
 /** 一条 run 卡片:状态行 + 步骤时间线 + 元信息(选优/时长/BV/错误)+ 日志按钮。
  * `workerName` 可选:把 job.winnerWorker(id)映射成友好名,查不到回落 id。 */
@@ -263,7 +323,7 @@ export function RunCard({
       {job.error && <div className="text-[12px] mt-1" style={{ color: "var(--error)" }}>{job.error}</div>}
       {expanded && (
         <div className="mt-3 pt-3 border-t border-hairline overflow-x-auto" onClick={(e) => e.stopPropagation()}>
-          <PipelineFlow job={job} />
+          <PipelineFlow job={job} workerName={workerName} />
         </div>
       )}
     </div>

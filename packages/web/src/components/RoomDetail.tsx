@@ -1,5 +1,5 @@
 import { Pencil, Trash2 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { api, type HubJobDTO, type HubRuleDTO, type WorkerDTO } from "../api/client";
 import { RunCard, JobLogDialog } from "./HubJobs";
 import { Button, IconButton } from "./Button";
@@ -75,7 +75,8 @@ export function RoomDetail({
   // 有进行中的 run → 3s;空闲 5s(与原 HubDetailPage 一致,避免像「没实时更新」)。
   usePolling(() => void refresh(), anyActive ? 3000 : 5000);
 
-  const workerName = (id: string): string => workers.find((w) => w.id === id)?.name ?? id;
+  // 稳定引用(仅 workers 变化时才换):PipelineFlow memo 用它比较,防每帧新引用击穿 memo。
+  const workerName = useCallback((id: string): string => workers.find((w) => w.id === id)?.name ?? id, [workers]);
   // 展开的 run:默认最近一次(runs[0])展开;点击行展开/收起该行自己的 PipelineFlow。
   // expandedKey===null → 用默认(首条);===""(哨兵)→ 全收起;其它 → 展开那条。
   const defaultKey = runs[0]?.streamKey;

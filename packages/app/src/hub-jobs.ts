@@ -16,10 +16,14 @@ import { rootHubConfig, rootStageDir } from "./paths.js";
 export interface HubJobEvent { state: string; at: number; }
 /** 细粒度子步骤事件(start/done)—— 驱动前端 fork/join 流程图。 */
 export interface HubJobStep { step: string; phase: string; at: number; }
+/** 选优候选(流程图 select 步 fan-in 节点)。 */
+export interface HubJobCandidate { worker: string; coverage: number; durationSec: number; complete: boolean; isWinner: boolean; }
 export interface HubJobView {
   streamKey: string;
   state: string;
   winnerWorker: string | null;
+  /** 各录制节点的选优候选(空=旧 run / 未选优)。 */
+  candidates: HubJobCandidate[];
   bv: string | null;
   error: string | null;
   fails: number;
@@ -148,8 +152,20 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         steps = db.prepare("SELECT step, phase, at FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
           .all(j.streamKey) as unknown as HubJobStep[];
       } catch { /* 旧库无 steps 表 → 空(前端回落粗粒度) */ }
-      const videoDurationSec = (db.prepare("SELECT durationSec FROM sync_candidates WHERE streamKey=? AND isWinner=1")
-        .get(j.streamKey) as unknown as { durationSec: number } | undefined)?.durationSec ?? null;
+      let candidates: HubJobCandidate[] = [];
+      try {
+        const rows = db.prepare(
+          "SELECT workerId, coverage, durationSec, totalGapSec, isWinner FROM sync_candidates WHERE streamKey=? ORDER BY isWinner DESC, coverage DESC",
+        ).all(j.streamKey) as unknown as { workerId: string; coverage: number; durationSec: number; totalGapSec: number; isWinner: number }[];
+        candidates = rows.map((c) => ({
+          worker: c.workerId,
+          coverage: Number(c.coverage),
+          durationSec: Number(c.durationSec),
+          complete: Number(c.totalGapSec) <= 0,
+          isWinner: Number(c.isWinner) === 1,
+        }));
+      } catch { /* 旧库无表 → 无候选(前端 select 步不画 fan-in) */ }
+      const videoDurationSec = candidates.find((c) => c.isWinner)?.durationSec ?? null;
       const terminal = TERMINAL.has(j.state);
       const stepStart = events.length ? events[events.length - 1].at : j.updatedAt;
       const currentStepSec = terminal ? null : Math.max(0, Math.round((now - stepStart) / 1000));
@@ -164,7 +180,7 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
       }
       return {
         streamKey: j.streamKey, state: j.state,
-        winnerWorker: j.winnerWorker ?? null, bv: j.bv ?? null, error: j.error ?? null,
+        winnerWorker: j.winnerWorker ?? null, candidates, bv: j.bv ?? null, error: j.error ?? null,
         fails: Number(j.fails ?? 0), updatedAt: Number(j.updatedAt),
         startedAt: events.length ? Number(events[0].at) : null,
         events: events.map((e) => ({ state: e.state, at: Number(e.at) })),

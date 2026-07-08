@@ -55,6 +55,20 @@ export interface HubJobStepDTO {
   at: number;
 }
 
+/** 某场某节点的选优候选(流程图 select 步的 fan-in 节点)。worker=节点 id(前端映射友好名)。 */
+export interface HubJobCandidateDTO {
+  /** 录制节点(worker)id。 */
+  worker: string;
+  /** 覆盖度 0..1(=1−gap/span);前端显示 %。 */
+  coverage: number;
+  /** 该节点录到的视频总时长(秒)。 */
+  durationSec: number;
+  /** 是否完整录全(单会话无断流缺口)。 */
+  complete: boolean;
+  /** 是否本场胜出节点。 */
+  isWinner: boolean;
+}
+
 /** 一个 hub 任务的运行视图(GET /api/hub/jobs)。展示当前 pipeline step / 进度 / 运行时间 / ETA。 */
 export interface HubJobDTO {
   /** `{platform}:{roomSlug}:{date}`。 */
@@ -62,6 +76,8 @@ export interface HubJobDTO {
   /** 当前状态(= 当前 pipeline step;终态 done/failed/needs_manual)。 */
   state: string;
   winnerWorker: string | null;
+  /** 各录制节点的选优候选(空=旧 run / 未选优;前端 select 步据此画 fan-in)。 */
+  candidates: HubJobCandidateDTO[];
   bv: string | null;
   error: string | null;
   /** 自动重试已失败次数。 */

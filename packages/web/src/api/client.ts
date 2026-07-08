@@ -18,6 +18,7 @@ import type {
   HubRuleDTO,
   HubRulePayload,
   HubJobDTO,
+  HubJobCandidateDTO,
   HubJobEventDTO,
   HubJobsDTO,
   RecordingsDTO,
@@ -30,7 +31,7 @@ import type {
   WorkerTestResult,
   WorkerStatus,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
