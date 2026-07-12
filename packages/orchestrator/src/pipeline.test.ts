@@ -379,4 +379,21 @@ describe("runPipeline", () => {
     expect(deps.transports.get("node-2")!.cleanup).toHaveBeenCalled();
     deps.ledger.close();
   });
+
+  describe("step detail", () => {
+    it("merge/clean steps carry count detail (upload mode)", async () => {
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, uploadMode: "upload", cleanup: { sourceAfterDone: true } } });
+      const b = makeBroadcast([
+        { workerId: "node-1", rec: makeRec({ tsFiles: ["/r/a.ts", "/r/b.ts", "/r/c.ts", "/r/d.ts"] }) },
+      ]);
+      deps.ledger.upsertPending(b.streamKey);
+      await runPipeline(b, deps);
+      const steps = deps.ledger.getSteps(b.streamKey);
+      const merge = steps.find((s) => s.step === "merge" && s.phase === "done");
+      expect(merge?.detail).toContain("4 段");
+      const cleanSrc = steps.find((s) => s.step === "clean_source" && s.phase === "done");
+      expect(cleanSrc?.detail).toContain("删 1 节点");
+      deps.ledger.close();
+    });
+  });
 });

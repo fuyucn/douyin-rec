@@ -1,5 +1,5 @@
 import path from "node:path";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
@@ -7,6 +7,7 @@ import type { NotifyEvent, ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/app";
 import { splitToSizeLimit } from "@drec/post-process";
 import { selectWinner } from "./select.js";
+import { humanBytes, humanDur, sumBytes } from "./format.js";
 
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。merge plain 是基础,总做。 */
 export interface PipelineSteps {
@@ -183,7 +184,10 @@ async function runPipelineInner(
   const tPull = Date.now();
   ledger.logStep(streamKey, "pull", "start");
   await transport.pull(filesToPull, stageSub);
-  ledger.logStep(streamKey, "pull", "done");
+  const pulledPaths = filesToPull.map((f) => path.join(stageSub, path.basename(f)));
+  const pullBytes = sumBytes(pulledPaths);
+  ledger.logStep(streamKey, "pull", "done",
+    `${filesToPull.length} 文件${pullBytes > 0 ? ` · ${humanBytes(pullBytes)}` : ""} ← ${winner.workerId}`);
   jlog(`pull 完成(${Math.round((Date.now() - tPull) / 1000)}s)`);
 
   // Merge and burn from the stageSub directory
@@ -197,7 +201,9 @@ async function runPipelineInner(
 
   ledger.logStep(streamKey, "merge", "start");
   await sh(`node dist/douyin-rec.mjs merge --in ${stageSub} --base ${winner.rec.sessionBase}`);
-  ledger.logStep(streamKey, "merge", "done");
+  const plainBytes = (() => { try { return Number(statSync(plain).size); } catch { return 0; } })();
+  ledger.logStep(streamKey, "merge", "done",
+    `${winner.rec.tsFiles.length} 段 → ${plainBytes > 0 ? humanBytes(plainBytes) : "?"}${winner.rec.durationSec > 0 ? ` · ${humanDur(winner.rec.durationSec)}` : ""}`);
 
   // 穿插上传:upload 模式下 merge 完 plain 即**后台 fire P1 上传**(网络),与随后的烧录(CPU)并行,
   // 省总墙钟。stage 模式不传(bvPromise=null)。先 .then 收成 {bv}|{err},即便后续烧录抛错也不留
@@ -213,7 +219,11 @@ async function runPipelineInner(
          tag: cfg.uploadMeta.tag, tid: cfg.uploadMeta.tid,
          public: cfg.uploadPrivate === false, // private=false → 公开;默认(true)→ 仅自己可见
          desc: cfg.uploadMeta.desc,
-       }).then((bv) => { ledger.logStep(streamKey, "upload_plain", "done"); return { bv }; },
+       }).then((bv) => {
+         const sz = (() => { try { return Number(statSync(plain).size); } catch { return 0; } })();
+         ledger.logStep(streamKey, "upload_plain", "done", sz > 0 ? humanBytes(sz) : undefined);
+         return { bv };
+       },
               (err: unknown) => ({ err: err as Error })))
     : null;
 
@@ -221,12 +231,14 @@ async function runPipelineInner(
   if (burnDanmu) {
     ledger.logStep(streamKey, "burn_danmu", "start");
     await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style danmu --gift-value 0.9`);
-    ledger.logStep(streamKey, "burn_danmu", "done");
+    ledger.logStep(streamKey, "burn_danmu", "done",
+      (() => { try { return `→ ${humanBytes(Number(statSync(danmuMp4).size))}`; } catch { return undefined; } })());
   }
   if (burnLivechat) {
     ledger.logStep(streamKey, "burn_livechat", "start");
     await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style livechat --gift-value 0.9`);
-    ledger.logStep(streamKey, "burn_livechat", "done");
+    ledger.logStep(streamKey, "burn_livechat", "done",
+      (() => { try { return `→ ${humanBytes(Number(statSync(livechatMp4).size))}`; } catch { return undefined; } })());
   }
 
   // 把弹幕 xml 复制一份作为 **plain xml 产物**(与 plain mp4 同名 {dateName}.xml),作为备份留在 stage。
@@ -244,18 +256,22 @@ async function runPipelineInner(
   const cleanupSources = async (): Promise<void> => {
     if (!clean.sourceAfterDone) return;
     ledger.logStep(streamKey, "clean_source", "start");
+    let fileCount = 0;
     for (const m of candidates.members) {
-      await transports.get(m.workerId)?.cleanup?.(sourcePathsOf(m)).catch(() => {});
+      const paths = sourcePathsOf(m);
+      fileCount += paths.length;
+      await transports.get(m.workerId)?.cleanup?.(paths).catch(() => {});
     }
-    ledger.logStep(streamKey, "clean_source", "done");
+    ledger.logStep(streamKey, "clean_source", "done", `删 ${candidates.members.length} 节点 · ${fileCount} 文件`);
   };
 
   // cleanup:合并后删 stage 里拉来的源 .ts(留合成产物)。
   if (clean.stageSourceAfterMerge) {
     ledger.logStep(streamKey, "clean_stage_src", "start");
     const pulledTs = winner.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f)));
-    await rmStage([...pulledTs, ...(clean.includeXmlAss && xmlArg ? [xmlArg] : [])]);
-    ledger.logStep(streamKey, "clean_stage_src", "done");
+    const victims = [...pulledTs, ...(clean.includeXmlAss && xmlArg ? [xmlArg] : [])];
+    await rmStage(victims);
+    ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${victims.length} 文件`);
   }
 
   // stage 模式:有完整 winner 但不自动上传 → 产物已在 stage 待人工上传,源按配置清。
@@ -297,7 +313,9 @@ async function runPipelineInner(
     const tApp = Date.now();
     ledger.logStep(streamKey, g.step, "start");
     await appendGroup({ bv, files: g.files, cookies: cfg.cookies, public: isPublic });
-    ledger.logStep(streamKey, g.step, "done");
+    const apBytes = sumBytes(g.files);
+    ledger.logStep(streamKey, g.step, "done",
+      `${g.files.length} 段${apBytes > 0 ? ` · ${humanBytes(apBytes)}` : ""}`);
     jlog(`append 完成(${Math.round((Date.now() - tApp) / 1000)}s)`);
   }
 
@@ -312,8 +330,9 @@ async function runPipelineInner(
     const xmlAss = clean.includeXmlAss
       ? [plainXml, xmlArg, danmuMp4.replace(/\.mp4$/, ".ass"), livechatMp4.replace(/\.mp4$/, ".ass")].filter(Boolean)
       : [];
-    await rmStage([...products, ...xmlAss]);
-    ledger.logStep(streamKey, "clean_stage", "done");
+    const victims = [...products, ...xmlAss];
+    await rmStage(victims);
+    ledger.logStep(streamKey, "clean_stage", "done", `删 ${victims.length} 文件`);
   }
   return { state: "done", bv };
 }
