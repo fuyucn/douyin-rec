@@ -163,7 +163,7 @@ const DICT = {
       },
       jobs: {
         step: { pending: "排队中", settling: "等待收播", syncing: "拉取文件", merging: "合并 / 烧录", uploading: "上传 B 站", done: "已完成", failed: "失败", needsManual: "待人工" },
-        stepNode: { select: "选优", pull: "拉取", merge: "合并 plain", burn_danmu: "烧 danmu", burn_livechat: "烧 livechat", upload_plain: "传 plain P1", append_danmu: "追 danmu P2", append_livechat: "追 livechat P3" },
+        stepNode: { select: "选优", pull: "拉取", merge: "合并 plain", burn_danmu: "烧 danmu", burn_livechat: "烧 livechat", upload_plain: "传 plain P1", append_danmu: "追 danmu P2", append_livechat: "追 livechat P3", clean_stage_src: "清理暂存源", clean_source: "清理节点源", clean_stage: "清理产物" },
         termDone: "完成", skipped: "跳过", noStepRecord: "（无流程记录;旧版本任务）",
         candComplete: "完整", candCoverage: "覆盖 {pct}%", candWinner: "最优",
         tipStatus: { done: "已完成", active: "进行中", skipped: "已跳过", todo: "待运行", failed: "失败" },
@@ -324,7 +324,7 @@ const DICT = {
       },
       jobs: {
         step: { pending: "Queued", settling: "Waiting for stream to end", syncing: "Pulling files", merging: "Merging / burning", uploading: "Uploading to Bilibili", done: "Done", failed: "Failed", needsManual: "Needs review" },
-        stepNode: { select: "Select", pull: "Pull", merge: "Merge plain", burn_danmu: "Burn danmu", burn_livechat: "Burn livechat", upload_plain: "Upload plain P1", append_danmu: "Append danmu P2", append_livechat: "Append livechat P3" },
+        stepNode: { select: "Select", pull: "Pull", merge: "Merge plain", burn_danmu: "Burn danmu", burn_livechat: "Burn livechat", upload_plain: "Upload plain P1", append_danmu: "Append danmu P2", append_livechat: "Append livechat P3", clean_stage_src: "Clean staged src", clean_source: "Clean node src", clean_stage: "Clean products" },
         termDone: "Done", skipped: "Skipped", noStepRecord: "(no step record; legacy job)",
         candComplete: "complete", candCoverage: "{pct}% cover", candWinner: "winner",
         tipStatus: { done: "Done", active: "In progress", skipped: "Skipped", todo: "Pending", failed: "Failed" },

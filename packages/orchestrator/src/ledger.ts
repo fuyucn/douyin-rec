@@ -23,7 +23,11 @@ export interface JobEvent { streamKey: string; state: JobState; at: number; }
 export type StepName =
   | "select" | "pull" | "merge"
   | "burn_danmu" | "burn_livechat"
-  | "upload_plain" | "append_danmu" | "append_livechat";
+  | "upload_plain" | "append_danmu" | "append_livechat"
+  // 清理步骤(各由对应 cleanup 开关驱动;没开 → 不打点 → 前端显示 skipped):
+  | "clean_stage_src"   // stageSourceAfterMerge:merge 后删 stage 里拉来的源 .ts
+  | "clean_source"      // sourceAfterDone:完成后删各节点原始录制 .ts
+  | "clean_stage";      // stageAfterDone:完成后删 stage 合成产物
 /** 子步骤事件:start/done 配对(能算每步耗时 + 判断当前在跑哪步;异步并行的两轨各有各的起止)。 */
 export interface StepEvent { streamKey: string; step: StepName; phase: "start" | "done"; at: number; }
 

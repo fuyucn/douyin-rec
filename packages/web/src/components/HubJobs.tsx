@@ -79,17 +79,22 @@ const STEP_DEFS: Array<{ key: string; x: number; y: number }> = [
   { key: "merge", x: 300, y: 70 },
   { key: "burn_danmu", x: 470, y: 10 },
   { key: "burn_livechat", x: 640, y: 10 },
+  { key: "clean_stage_src", x: 810, y: 10 }, // 烧完后:删 stage 拉来的源(在 append 前)
   { key: "upload_plain", x: 470, y: 130 },
-  { key: "append_danmu", x: 810, y: 70 },
-  { key: "append_livechat", x: 980, y: 70 },
+  { key: "append_danmu", x: 980, y: 70 },
+  { key: "append_livechat", x: 1150, y: 70 },
+  { key: "clean_source", x: 1320, y: 70 },   // 完成后:删各节点源 .ts
+  { key: "clean_stage", x: 1490, y: 70 },    // 完成后:删 stage 产物
 ];
-const TERM = { key: "__term__", x: 1150, y: 70 };
+const TERM = { key: "__term__", x: 1660, y: 70 };
 const FLOW_EDGES: Array<[string, string]> = [
   ["select", "pull"], ["pull", "merge"],
   ["merge", "burn_danmu"], ["merge", "upload_plain"],
   ["burn_danmu", "burn_livechat"],
-  ["burn_livechat", "append_danmu"], ["upload_plain", "append_danmu"],
-  ["append_danmu", "append_livechat"], ["append_livechat", "__term__"],
+  ["burn_livechat", "clean_stage_src"], ["clean_stage_src", "append_danmu"],
+  ["upload_plain", "append_danmu"],
+  ["append_danmu", "append_livechat"],
+  ["append_livechat", "clean_source"], ["clean_source", "clean_stage"], ["clean_stage", "__term__"],
 ];
 
 /** 从 job.steps(start/done 配对)推导每个子步骤的状态 + 耗时。 */

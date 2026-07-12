@@ -243,15 +243,19 @@ async function runPipelineInner(
     [...m.rec.tsFiles, ...(clean.includeXmlAss && m.rec.xmlPath ? [m.rec.xmlPath] : [])];
   const cleanupSources = async (): Promise<void> => {
     if (!clean.sourceAfterDone) return;
+    ledger.logStep(streamKey, "clean_source", "start");
     for (const m of candidates.members) {
       await transports.get(m.workerId)?.cleanup?.(sourcePathsOf(m)).catch(() => {});
     }
+    ledger.logStep(streamKey, "clean_source", "done");
   };
 
   // cleanup:合并后删 stage 里拉来的源 .ts(留合成产物)。
   if (clean.stageSourceAfterMerge) {
+    ledger.logStep(streamKey, "clean_stage_src", "start");
     const pulledTs = winner.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f)));
     await rmStage([...pulledTs, ...(clean.includeXmlAss && xmlArg ? [xmlArg] : [])]);
+    ledger.logStep(streamKey, "clean_stage_src", "done");
   }
 
   // stage 模式:有完整 winner 但不自动上传 → 产物已在 stage 待人工上传,源按配置清。
@@ -303,11 +307,13 @@ async function runPipelineInner(
   // cleanup:done 后删源节点录制 + stage 产物(按配置)。
   await cleanupSources();
   if (clean.stageAfterDone) {
+    ledger.logStep(streamKey, "clean_stage", "start");
     const products = [plain, ...danmuParts, ...livechatParts];
     const xmlAss = clean.includeXmlAss
       ? [plainXml, xmlArg, danmuMp4.replace(/\.mp4$/, ".ass"), livechatMp4.replace(/\.mp4$/, ".ass")].filter(Boolean)
       : [];
     await rmStage([...products, ...xmlAss]);
+    ledger.logStep(streamKey, "clean_stage", "done");
   }
   return { state: "done", bv };
 }
