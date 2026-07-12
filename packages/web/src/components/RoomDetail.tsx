@@ -9,6 +9,7 @@ import { HubRuleDialog } from "../modals/HubRuleDialog";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
 import { useT } from "../lib/i18n";
+import type { FlowCfg } from "./flow-build";
 
 const PAGE = 20;
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
@@ -170,6 +171,7 @@ export function RoomDetail({
               job={j}
               onOpenLog={setLogKey}
               workerName={workerName}
+              cfg={rule.pipeline as FlowCfg}
               expanded={isExpanded(j.streamKey)}
               onToggle={toggleRun}
             />

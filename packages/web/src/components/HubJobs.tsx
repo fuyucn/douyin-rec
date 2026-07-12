@@ -7,6 +7,7 @@ import { IconButton } from "./Button";
 import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
 import { useT } from "../lib/i18n";
+import { buildFlow, pickMetric, type FlowCfg } from "./flow-build";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -72,30 +73,8 @@ const NODE_COLOR: Record<NodeStatus, { bg: string; fg: string; ring: string }> =
   todo: { bg: "transparent", fg: "var(--muted-soft)", ring: "var(--hairline)" },
 };
 
-/** 规范 pipeline 节点固定布局(fork/join):merge 后分「烧录轨(上)/上传轨(下)」,再 join 到 append。 */
-const STEP_DEFS: Array<{ key: string; x: number; y: number }> = [
-  { key: "select", x: 0, y: 70 },
-  { key: "pull", x: 150, y: 70 },
-  { key: "merge", x: 300, y: 70 },
-  { key: "burn_danmu", x: 470, y: 10 },
-  { key: "burn_livechat", x: 640, y: 10 },
-  { key: "clean_stage_src", x: 810, y: 10 }, // 烧完后:删 stage 拉来的源(在 append 前)
-  { key: "upload_plain", x: 470, y: 130 },
-  { key: "append_danmu", x: 980, y: 70 },
-  { key: "append_livechat", x: 1150, y: 70 },
-  { key: "clean_source", x: 1320, y: 70 },   // 完成后:删各节点源 .ts
-  { key: "clean_stage", x: 1490, y: 70 },    // 完成后:删 stage 产物
-];
-const TERM = { key: "__term__", x: 1660, y: 70 };
-const FLOW_EDGES: Array<[string, string]> = [
-  ["select", "pull"], ["pull", "merge"],
-  ["merge", "burn_danmu"], ["merge", "upload_plain"],
-  ["burn_danmu", "burn_livechat"],
-  ["burn_livechat", "clean_stage_src"], ["clean_stage_src", "append_danmu"],
-  ["upload_plain", "append_danmu"],
-  ["append_danmu", "append_livechat"],
-  ["append_livechat", "clean_source"], ["clean_source", "clean_stage"], ["clean_stage", "__term__"],
-];
+/** 所有可能出现的子步骤 key(与布局解耦,仅供 stepStatuses 遍历取状态)。 */
+const ALL_STEP_KEYS = ["select", "pull", "merge", "burn_danmu", "burn_livechat", "clean_stage_src", "upload_plain", "append_danmu", "append_livechat", "clean_source", "clean_stage"] as const;
 
 /** 从 job.steps(start/done 配对)推导每个子步骤的状态 + 耗时。 */
 function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec: number | null }> {
@@ -109,17 +88,17 @@ function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec:
   const success = job.state === "done" || job.state === "needs_manual";
   const now = Date.now();
   const out: Record<string, { status: NodeStatus; sec: number | null }> = {};
-  for (const def of STEP_DEFS) {
-    const e = pair.get(def.key);
-    if (e?.done != null) out[def.key] = { status: "done", sec: e.start != null ? Math.round((e.done - e.start) / 1000) : null };
-    else if (e?.start != null) out[def.key] = { status: "active", sec: Math.round((now - e.start) / 1000) };
-    else out[def.key] = { status: success ? "skipped" : "todo", sec: null };
+  for (const key of ALL_STEP_KEYS) {
+    const e = pair.get(key);
+    if (e?.done != null) out[key] = { status: "done", sec: e.start != null ? Math.round((e.done - e.start) / 1000) : null };
+    else if (e?.start != null) out[key] = { status: "active", sec: Math.round((now - e.start) / 1000) };
+    else out[key] = { status: success ? "skipped" : "todo", sec: null };
   }
   return out;
 }
 
 /** 自定义节点:状态圆 + 标签 + 耗时。hover 出详情(状态 + 耗时)。 */
-function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: number | null } }): ReactNode {
+function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: number | null; metric?: string | null; detail?: string } }): ReactNode {
   const t = useT();
   const c = NODE_COLOR[data.status];
   const showSec = data.status !== "skipped" && data.status !== "todo" && data.sec != null;
@@ -130,6 +109,7 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
         {t(`hub.jobs.tipStatus.${data.status}`)}
         {showSec ? ` · ${humanSecFull(data.sec)}` : ""}
       </div>
+      {data.detail && <div className="text-[11px] text-muted-soft mt-0.5">{data.detail}</div>}
     </div>
   );
   return (
@@ -154,7 +134,7 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
             {data.label}
           </span>
           <span className="text-[10px] font-mono" style={{ color: data.status === "active" ? "var(--ink)" : "var(--muted-soft)" }}>
-            {data.status === "skipped" ? t("hub.jobs.skipped") : data.status === "todo" ? "" : humanSec(data.sec)}
+            {data.metric ?? (data.status === "skipped" ? t("hub.jobs.skipped") : data.status === "todo" ? "" : humanSec(data.sec))}
           </span>
         </div>
       </Tooltip>
@@ -204,9 +184,9 @@ function CandidateNode({ data }: { data: { name: string; coveragePct: number; du
 
 const NODE_TYPES = { step: StepNode, candidate: CandidateNode };
 
-/** 单条 run 的 fork/join 流程图(React Flow):固定布局,节点按 job.steps 上色,active 边动画。
- *  workerName:candidate 节点 id→友好名映射(缺省回落 id)。 */
-function PipelineFlowInner({ job, workerName }: { job: HubJobDTO; workerName?: (id: string) => string }): ReactNode {
+/** 单条 run 的 fork/join 流程图(React Flow):按 job.steps + cfg 动态生成节点(buildFlow),按 job.steps 上色,active 边动画。
+ *  workerName:candidate 节点 id→友好名映射(缺省回落 id)。cfg:该房间的 pipeline 规则(决定进行中 run 画哪些可选节点)。 */
+function PipelineFlowInner({ job, workerName, cfg }: { job: HubJobDTO; workerName?: (id: string) => string; cfg?: FlowCfg }): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
   // 旧版本 run 无细粒度 steps → 回落一行粗粒度状态文字(不画图)。
@@ -239,22 +219,35 @@ function PipelineFlowInner({ job, workerName }: { job: HubJobDTO; workerName?: (
       strokeDasharray: c.isWinner ? undefined : "3 3",
     },
   }));
+  const graph = buildFlow(job, TERMINAL.has(job.state) ? undefined : cfg);
+  const detailOf = (key: string): string | undefined =>
+    job.steps.filter((s) => s.step === key && s.phase === "done").map((s) => s.detail).filter(Boolean).pop();
   const termStatus: NodeStatus =
     job.state === "failed" ? "failed" : job.state === "done" ? "done" : job.state === "needs_manual" ? "done" : "todo";
   const termLabel = job.state === "needs_manual" ? labels.needs_manual : job.state === "failed" ? labels.failed : t("hub.jobs.termDone");
-  const statusOf = (key: string): NodeStatus => (key === "__term__" ? termStatus : st[key].status);
 
   const nodes: Node[] = [
-    ...STEP_DEFS.map((d) => ({
-      id: d.key, type: "step", position: { x: d.x, y: d.y },
-      data: { label: t(`hub.jobs.stepNode.${d.key}`), status: st[d.key].status, sec: st[d.key].sec },
+    ...graph.nodes.filter((n) => n.key !== "__term__").map((n) => ({
+      id: n.key, type: "step", position: { x: n.x, y: n.y },
+      data: {
+        label: t(`hub.jobs.stepNode.${n.key}`),
+        status: st[n.key]?.status ?? "todo",
+        sec: st[n.key]?.sec ?? null,
+        detail: detailOf(n.key),
+        metric: n.key === "select"
+          ? (job.winnerWorker ? (workerName ? workerName(job.winnerWorker) : job.winnerWorker) : null)
+          : pickMetric(n.key, detailOf(n.key)),
+      },
     })),
-    { id: TERM.key, type: "step", position: { x: TERM.x, y: TERM.y }, data: { label: termLabel, status: termStatus, sec: null } },
+    ...(() => {
+      const tn = graph.nodes.find((n) => n.key === "__term__")!;
+      return [{ id: "__term__", type: "step", position: { x: tn.x, y: tn.y }, data: { label: termLabel, status: termStatus, sec: null, metric: null } }];
+    })(),
     ...candNodes,
   ];
   const edges: Edge[] = [
-    ...FLOW_EDGES.map(([src, dst]) => {
-      const ts = statusOf(dst);
+    ...graph.edges.map(([src, dst]) => {
+      const ts = dst === "__term__" ? termStatus : (st[dst]?.status ?? "todo");
       const reached = ts === "done" || ts === "active" || ts === "failed";
       return {
         id: `${src}-${dst}`, source: src, target: dst,
@@ -294,15 +287,17 @@ function PipelineFlowInner({ job, workerName }: { job: HubJobDTO; workerName?: (
 
 /** graph 的稳定签名:由 steps + state + 候选(节点/胜出)决定。轮询每 3s 传入新 job 对象,但只要
  *  签名不变就跳过重渲染 —— 避免每次轮询用全新 nodes/edges 数组冲刷 React Flow、触发 fitView 重算导致偶发空白。 */
-function pipelineSig(j: HubJobDTO): string {
+function pipelineSig(j: HubJobDTO, cfg?: FlowCfg): string {
   const cand = j.candidates.map((c) => `${c.worker}:${c.isWinner ? 1 : 0}`).join(",");
-  return `${j.state}|${j.steps.map((s) => `${s.step}:${s.phase}:${s.at}`).join(",")}|${cand}`;
+  const steps = j.steps.map((s) => `${s.step}:${s.phase}:${s.at}:${s.detail ?? ""}`).join(",");
+  const c = cfg ? JSON.stringify([cfg.steps, cfg.upload?.mode, cfg.cleanup]) : "";
+  return `${j.state}|${steps}|${cand}|${c}`;
 }
 // workerName 也纳入比较:worker 列表异步加载完(candidate 名从 id 变友好名)时须重渲染一次。
 // 依赖 workerName 用 useCallback 稳定引用(见 RoomDetail),否则每帧新引用会击穿 memo → 空白 bug 复发。
 export const PipelineFlow = memo(
   PipelineFlowInner,
-  (a, b) => pipelineSig(a.job) === pipelineSig(b.job) && a.workerName === b.workerName,
+  (a, b) => pipelineSig(a.job, a.cfg) === pipelineSig(b.job, b.cfg) && a.workerName === b.workerName,
 );
 
 /** 一条 run 卡片:状态行 + 步骤时间线 + 元信息(选优/时长/BV/错误)+ 日志按钮。
@@ -311,12 +306,15 @@ export function RunCard({
   job,
   onOpenLog,
   workerName,
+  cfg,
   expanded,
   onToggle,
 }: {
   job: HubJobDTO;
   onOpenLog: (key: string) => void;
   workerName?: (id: string) => string;
+  /** 该房间的 pipeline 规则(决定进行中 run 画哪些可选节点);终态 run 不需要(buildFlow 按实际 steps)。 */
+  cfg?: FlowCfg;
   /** 展开时内联显示该 run 自己的 PipelineFlow 图;收起只留状态行。 */
   expanded?: boolean;
   onToggle?: (streamKey: string) => void;
@@ -374,7 +372,7 @@ export function RunCard({
       {job.error && <div className="text-[12px] mt-1" style={{ color: "var(--error)" }}>{job.error}</div>}
       {expanded && (
         <div className="mt-3 pt-3 border-t border-hairline overflow-x-auto" onClick={(e) => e.stopPropagation()}>
-          <PipelineFlow job={job} workerName={workerName} />
+          <PipelineFlow job={job} workerName={workerName} cfg={cfg} />
         </div>
       )}
     </div>
