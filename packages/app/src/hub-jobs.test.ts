@@ -136,4 +136,16 @@ describe("listHubJobs", () => {
     expect(readHubJobLog("douyin:3:2026-07-03", 65536, stage)).toContain("hello");
     expect(readHubJobLog("douyin:no-such", 65536, stage)).toBeNull();
   });
+
+  it("includes step detail in the DTO", () => {
+    const { dbPath, db } = makeSyncDb();
+    db.exec(`ALTER TABLE sync_job_steps ADD COLUMN detail TEXT`);
+    seedJob(db, "douyin:room:2026-07-10", [["done", T0 + 5000]], 100, { bv: "BVdetail" });
+    db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at,detail) VALUES(?,?,?,?,?)")
+      .run("douyin:room:2026-07-10", "merge", "done", T0 + 2000, "4 段 → 90MB");
+    db.close();
+    const { jobs } = listHubJobs(dbPath, { room: "douyin.room" });
+    const merge = jobs[0].steps.find((s) => s.step === "merge" && s.phase === "done");
+    expect(merge?.detail).toBe("4 段 → 90MB");
+  });
 });

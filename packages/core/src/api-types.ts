@@ -53,6 +53,8 @@ export interface HubJobStepDTO {
   /** start | done。 */
   phase: string;
   at: number;
+  /** 该步真实信息(done 事件才有;旧库无 → 缺省)。 */
+  detail?: string;
 }
 
 /** 某场某节点的选优候选(流程图 select 步的 fan-in 节点)。worker=节点 id(前端映射友好名)。 */

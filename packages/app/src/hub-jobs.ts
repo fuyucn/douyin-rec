@@ -15,7 +15,7 @@ import { rootHubConfig, rootStageDir } from "./paths.js";
 
 export interface HubJobEvent { state: string; at: number; }
 /** 细粒度子步骤事件(start/done)—— 驱动前端 fork/join 流程图。 */
-export interface HubJobStep { step: string; phase: string; at: number; }
+export interface HubJobStep { step: string; phase: string; at: number; detail?: string }
 /** 选优候选(流程图 select 步 fan-in 节点)。 */
 export interface HubJobCandidate { worker: string; coverage: number; durationSec: number; complete: boolean; isWinner: boolean; }
 export interface HubJobView {
@@ -149,9 +149,14 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
       } catch { /* 旧库无 events 表 → 空时间线 */ }
       let steps: HubJobStep[] = [];
       try {
-        steps = db.prepare("SELECT step, phase, at FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
+        steps = db.prepare("SELECT step, phase, at, detail FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
           .all(j.streamKey) as unknown as HubJobStep[];
-      } catch { /* 旧库无 steps 表 → 空(前端回落粗粒度) */ }
+      } catch {
+        try {
+          steps = db.prepare("SELECT step, phase, at FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
+            .all(j.streamKey) as unknown as HubJobStep[];
+        } catch { /* 旧库无表 → 空(前端回落粗粒度) */ }
+      }
       let candidates: HubJobCandidate[] = [];
       try {
         const rows = db.prepare(
@@ -184,7 +189,7 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         fails: Number(j.fails ?? 0), updatedAt: Number(j.updatedAt),
         startedAt: events.length ? Number(events[0].at) : null,
         events: events.map((e) => ({ state: e.state, at: Number(e.at) })),
-        steps: steps.map((s) => ({ step: s.step, phase: s.phase, at: Number(s.at) })),
+        steps: steps.map((s) => ({ step: s.step, phase: s.phase, at: Number(s.at), detail: s.detail ?? undefined })),
         currentStepSec, etaSec, videoDurationSec,
         hasLog: existsSync(jobLogPath(j.streamKey, stageDir)),
       };
