@@ -75,6 +75,21 @@ describe("SyncLedger", () => {
   });
 });
 
+describe("logStep detail", () => {
+  it("stores and reads back a step detail", () => {
+    const l = fresh();
+    l.upsertPending("k1");
+    l.logStep("k1", "pull", "start");
+    l.logStep("k1", "pull", "done", "2 文件 · 1.9GB ← vps");
+    const steps = l.getSteps("k1");
+    const done = steps.find((s) => s.step === "pull" && s.phase === "done");
+    expect(done?.detail).toBe("2 文件 · 1.9GB ← vps");
+    const start = steps.find((s) => s.step === "pull" && s.phase === "start");
+    expect(start?.detail ?? null).toBeNull();
+    l.close();
+  });
+});
+
 describe("ledger 列迁移 tenant→worker(幂等 RENAME COLUMN)", () => {
   it("打开旧 schema(winnerTenant/tenantId)库 → 自动改名列 + 旧值保留", () => {
     const dir = mkdtempSync(join(tmpdir(), "led-mig-"));

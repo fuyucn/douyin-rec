@@ -29,7 +29,7 @@ export type StepName =
   | "clean_source"      // sourceAfterDone:完成后删各节点原始录制 .ts
   | "clean_stage";      // stageAfterDone:完成后删 stage 合成产物
 /** 子步骤事件:start/done 配对(能算每步耗时 + 判断当前在跑哪步;异步并行的两轨各有各的起止)。 */
-export interface StepEvent { streamKey: string; step: StepName; phase: "start" | "done"; at: number; }
+export interface StepEvent { streamKey: string; step: StepName; phase: "start" | "done"; at: number; detail?: string }
 
 export class SyncLedger {
   private db: DatabaseSync;
@@ -58,20 +58,22 @@ export class SyncLedger {
     // 细粒度子步骤流(start/done):驱动前端「真·分叉双轨」流程图(合并后 烧录轨‖上传轨,再 join)。
     // 与粗粒度 sync_job_events 分表:events 驱动状态徽标/ETA,steps 驱动流程图。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_job_steps(
-      streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL)`);
+      streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT)`);
+    // 既有库迁移:补 detail 列(已存在则忽略)。
+    try { this.db.exec("ALTER TABLE sync_job_steps ADD COLUMN detail TEXT"); } catch { /* 列已存在 */ }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_job_steps_key ON sync_job_steps(streamKey, at)");
   }
   private logEvent(streamKey: string, state: JobState, at: number): void {
     this.db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(streamKey, state, at);
   }
   /** 记一个子步骤 start/done(pipeline 调用;流程图用)。 */
-  logStep(streamKey: string, step: StepName, phase: "start" | "done"): void {
-    this.db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at) VALUES(?,?,?,?)")
-      .run(streamKey, step, phase, this.now());
+  logStep(streamKey: string, step: StepName, phase: "start" | "done", detail?: string): void {
+    this.db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at,detail) VALUES(?,?,?,?,?)")
+      .run(streamKey, step, phase, this.now(), detail ?? null);
   }
   /** 某场的子步骤事件流(升序)。 */
   getSteps(streamKey: string): StepEvent[] {
-    return this.db.prepare("SELECT streamKey,step,phase,at FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
+    return this.db.prepare("SELECT streamKey,step,phase,at,detail FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
       .all(streamKey) as unknown as StepEvent[];
   }
   /** 上次发出的时间戳(见 now 的单调性保证)。 */
