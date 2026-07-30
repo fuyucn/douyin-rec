@@ -29,8 +29,10 @@ export interface ReconcilerDeps {
    * 带 platform 入参 → 多平台天然就绪(douyin/bilibili 同房间号不撞)。
    */
   resolveCfg?: (platform: string, roomSlug: string) => PipelineCfg | null;
-  /** pipeline 失败的最大自动重试次数;达到后留 failed 不再重入。默认 3。 */
+  /** pipeline 失败的最大自动重试次数;达到后升级 needs_manual 不再重入。默认 3。 */
   maxRetries?: number;
+  /** 达重试上限升级 needs_manual 时发一次通知(webhook/UI)。省略 → 只转状态不通知。 */
+  notify?: (e: import("@drec/core").NotifyEvent) => void;
   /**
    * 实时重载(Approach A):每轮 reconcileAll 开头调用重建 transports Map。
    * 无状态 transport 重建极廉价。省略 → 用构造时的 transports(旧行为/测试)。
@@ -55,6 +57,7 @@ export class Reconciler {
   private sleep: (ms: number) => Promise<void>;
   private inventoryTimeoutMs: number;
   private maxRetries: number;
+  private notify?: (e: import("@drec/core").NotifyEvent) => void;
   private resolveCfg?: (platform: string, roomSlug: string) => PipelineCfg | null;
   private loadTransports?: () => Map<string, Transport>;
 
@@ -68,6 +71,7 @@ export class Reconciler {
     this.sleep = deps.sleep ?? DEFAULT_SLEEP;
     this.inventoryTimeoutMs = deps.inventoryTimeoutMs ?? DEFAULT_INVENTORY_TIMEOUT_MS;
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.notify = deps.notify;
     this.resolveCfg = deps.resolveCfg;
     this.loadTransports = deps.loadTransports;
   }
@@ -205,8 +209,16 @@ export class Reconciler {
         // Skip terminal states.
         if (job?.state === "done" || job?.state === "needs_manual") continue;
 
-        // failed 且已达重试上限 → 放弃自动重试(留 failed 供人工/诊断),不再重入。
-        if (job?.state === "failed" && (job.fails ?? 0) >= this.maxRetries) continue;
+        // failed 且已达重试上限 → 升级 needs_manual(终态)+ 通知一次人工,不再重入。
+        if (job?.state === "failed" && (job.fails ?? 0) >= this.maxRetries) {
+          this.ledger.setState(b.streamKey, "needs_manual", { error: job.error ?? "达重试上限" });
+          this.notify?.({
+            kind: "error",
+            stage: "同步",
+            message: `${b.streamKey} 上传重试 ${job.fails} 次仍失败,已转人工(needs_manual)。最后错误:${(job.error ?? "").slice(0, 200)}`,
+          });
+          continue;
+        }
 
         const { isNew } = this.ledger.upsertPending(b.streamKey);
 

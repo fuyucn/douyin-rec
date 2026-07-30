@@ -580,6 +580,7 @@ const hubStarter: HubStarter = {
       pipelineDeps,
       resolveCfg,
       loadTransports: buildTransports,
+      notify: pipelineDeps.notify, // 达重试上限升级 needs_manual 时,复用 pipeline 同源 EventCenter 通知(站内+webhook)
       ...(hubCfg.maxWaitSec != null || hubCfg.settleSec != null
         ? {
             settle: {
