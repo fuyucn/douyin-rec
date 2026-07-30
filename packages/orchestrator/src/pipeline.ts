@@ -1,5 +1,5 @@
 import path from "node:path";
-import { appendFileSync, mkdirSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
@@ -125,6 +125,13 @@ async function runPipelineInner(
   const burnLivechat = cfg.steps?.burnLivechat !== false;  // 默认开
   const clean = cfg.cleanup ?? {};
   const { streamKey } = b;
+  const stageSub = path.join(cfg.stageDir, sanitizeKey(streamKey));
+
+  // 续跑:job 已有 bv ⇒ P1 已建稿(不可逆),绝不重传。跳过 select/pull/merge/burn/uploadPlain,只补 append。
+  const existing = ledger.get(streamKey);
+  if (cfg.uploadMode === "upload" && existing?.bv) {
+    return await resumeAppends(streamKey, existing.bv, stageSub, deps, jlog);
+  }
 
   // #1 防护:剔除「文件已不在该节点」的成员(已归档/清理)——否则可能选中其为 winner、pull 失败卡住。
   // 无 exists 能力的 transport 视为信任存在;exists 抛错按缺失剔除。
@@ -176,9 +183,7 @@ async function runPipelineInner(
   const transport = transports.get(winner.workerId);
   if (!transport) throw new Error(`No transport for worker: ${winner.workerId}`);
 
-  // stageSub = stageDir/<sanitized-streamKey> — isolates each broadcast's files
-  const stageSub = path.join(cfg.stageDir, sanitizeKey(streamKey));
-
+  // stageSub 已在入口声明(续跑分支复用)——stageDir/<sanitized-streamKey>,隔离各场文件。
   const filesToPull = [
     ...winner.rec.tsFiles,
     ...(winner.rec.xmlPath ? [winner.rec.xmlPath] : []),
@@ -348,6 +353,98 @@ async function runPipelineInner(
     const victims = [...products, ...xmlAss];
     await rmStage(victims);
     ledger.logStep(streamKey, "clean_stage", "done", `删 ${victims.length} 文件`);
+  }
+  return { state: "done", bv };
+}
+
+/** 从 stageSub 目录按确定命名反推产物路径;找不到任何产物 → null。 */
+function deriveProducts(stageSub: string): { dateName: string; plain: string; danmuMp4: string; livechatMp4: string } | null {
+  let files: string[];
+  try { files = readdirSync(stageSub); } catch { return null; }
+  const danmu = files.find((f) => f.endsWith("_danmu.mp4"));
+  const livechat = files.find((f) => f.endsWith("_livechat.mp4"));
+  const plainF = files.find((f) => f.endsWith(".mp4") && !f.endsWith("_danmu.mp4") && !f.endsWith("_livechat.mp4"));
+  let dateName: string | undefined;
+  if (danmu) dateName = danmu.slice(0, -"_danmu.mp4".length);
+  else if (livechat) dateName = livechat.slice(0, -"_livechat.mp4".length);
+  else if (plainF) dateName = plainF.slice(0, -".mp4".length);
+  if (!dateName) return null;
+  return {
+    dateName,
+    plain: path.join(stageSub, dateName + ".mp4"),
+    danmuMp4: path.join(stageSub, dateName + "_danmu.mp4"),
+    livechatMp4: path.join(stageSub, dateName + "_livechat.mp4"),
+  };
+}
+
+/**
+ * 续跑:已建稿(bv 已落库),只补没做完的 append。产物齐全 → markDone;缺失 → needs_manual。
+ * 不做 sourceAfterDone(无成员清单),只做 append + 可选 stageAfterDone 清理。
+ */
+async function resumeAppends(
+  streamKey: string,
+  bv: string,
+  stageSub: string,
+  deps: PipelineDeps,
+  jlog: (msg: string) => void,
+): Promise<{ state: JobState; bv?: string }> {
+  const { ledger, appendGroup, notify, cfg } = deps;
+  jlog(`续跑:已建稿 bv=${bv},跳过 select/pull/merge/burn/uploadPlain,只补 append(不做 sourceAfterDone 清理)`);
+  const splitForUpload = deps.splitForUpload ?? ((mp4: string) => splitToSizeLimit(mp4));
+  const burnDanmu = cfg.steps?.burnDanmu !== false;
+  const burnLivechat = cfg.steps?.burnLivechat !== false;
+  const isPublic = cfg.uploadPrivate === false;
+
+  const prod = deriveProducts(stageSub);
+  const need = [
+    ...(burnDanmu ? [prod?.danmuMp4] : []),
+    ...(burnLivechat ? [prod?.livechatMp4] : []),
+  ].filter((f): f is string => !!f);
+  if (!prod || need.some((f) => !existsSync(f))) {
+    jlog(`续跑失败:stage 产物缺失(可能已清理),转人工。need=${JSON.stringify(need)}`);
+    ledger.setState(streamKey, "needs_manual", { error: `续跑失败:bv=${bv} 但 stage 产物缺失,请人工补 append` });
+    notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });
+    return { state: "needs_manual", bv };
+  }
+
+  const groups: Array<{ step: "append_danmu" | "append_livechat"; mp4: string; on: boolean }> = [
+    { step: "append_danmu", mp4: prod.danmuMp4, on: burnDanmu },
+    { step: "append_livechat", mp4: prod.livechatMp4, on: burnLivechat },
+  ];
+  for (const g of groups) {
+    if (!g.on) continue;
+    if (ledger.isStepDone(streamKey, g.step)) { jlog(`append 跳过(已完成): ${g.step}`); continue; }
+    const files = await splitForUpload(g.mp4);
+    if (files.length === 0) continue;
+    jlog(`续跑 append 开始: ${g.step} (${files.length} 段)`);
+    ledger.logStep(streamKey, g.step, "start");
+    const tries = files.length === 1 ? 3 : 1;
+    await retry(() => appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic }), {
+      tries,
+      sleep: deps.sleep,
+      onRetry: (attempt, err) => jlog(`续跑 append ${g.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
+    });
+    ledger.logStep(streamKey, g.step, "done", `${files.length} 段`);
+    jlog(`续跑 append 完成: ${g.step}`);
+  }
+
+  ledger.markDone(streamKey, bv);
+  notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+
+  // 可选:done 后删 stage 产物(与主路径同一开关;续跑不删 slave 源)。
+  if (cfg.cleanup?.stageAfterDone) {
+    const rmStage = deps.rmStage ?? (async (paths: string[]) => {
+      const { rmSync } = await import("node:fs");
+      for (const p of paths) { try { rmSync(p, { force: true }); } catch { /* 忽略 */ } }
+    });
+    const products = [prod.plain, prod.danmuMp4, prod.livechatMp4];
+    const xmlAss = cfg.cleanup?.includeXmlAss
+      ? [path.join(stageSub, prod.dateName + ".xml"),
+         prod.danmuMp4.replace(/\.mp4$/, ".ass"), prod.livechatMp4.replace(/\.mp4$/, ".ass")]
+      : [];
+    ledger.logStep(streamKey, "clean_stage", "start");
+    await rmStage([...products, ...xmlAss]);
+    ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length + xmlAss.length} 文件`);
   }
   return { state: "done", bv };
 }

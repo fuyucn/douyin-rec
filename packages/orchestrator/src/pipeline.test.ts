@@ -437,4 +437,54 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
   });
+
+  describe("续跑分支(已建稿)", () => {
+    it("续跑:job 已有 bv → 跳过 uploadPlain/merge/burn,只补没做完的 append,最后 markDone", async () => {
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const stageDir = mkdtempSync(join(tmpdir(), "resume-stage-"));
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      // 预置:已建稿 + danmu 已 append 完
+      deps.ledger.upsertPending(b.streamKey);
+      deps.ledger.setState(b.streamKey, "uploading");
+      deps.ledger.setBv(b.streamKey, "BVexisting");
+      deps.ledger.logStep(b.streamKey, "append_danmu", "start");
+      deps.ledger.logStep(b.streamKey, "append_danmu", "done");
+      // 预置 stage 产物(dateName 由 deriveProducts 从目录反推)
+      const dateName = "主播名_2026-06-27";
+      const sub = join(stageDir, "douyin_test-room_2026-06-27");
+      mkdirSync(sub, { recursive: true });
+      for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, dateName + suf), "x");
+
+      const r = await runPipeline(b, deps);
+
+      expect(deps.uploadPlain).not.toHaveBeenCalled();  // 绝不重传 P1(防重核心)
+      expect(deps.sh).not.toHaveBeenCalled();           // 不 merge/burn
+      const appended = deps.appendGroup.mock.calls.map((c) => c[0].files.join(",")).join("|");
+      expect(appended).not.toContain("_danmu.mp4");     // danmu 已 done,跳过
+      expect(appended).toContain("_livechat.mp4");      // 只补 livechat
+      expect(deps.appendGroup.mock.calls.every((c) => c[0].bv === "BVexisting")).toBe(true);
+      expect(r).toEqual({ state: "done", bv: "BVexisting" });
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
+      deps.ledger.close();
+    });
+
+    it("续跑:有 bv 但 stage 产物缺失 → needs_manual + 通知,绝不重传", async () => {
+      const stageDir = mkdtempSync(join(tmpdir(), "resume-missing-"));
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      deps.ledger.setBv(b.streamKey, "BVexisting");
+      // 不创建任何 stage 产物文件
+
+      const r = await runPipeline(b, deps);
+
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect(deps.appendGroup).not.toHaveBeenCalled();
+      expect(r.state).toBe("needs_manual");
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
+      expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
+      deps.ledger.close();
+    });
+  });
 });
