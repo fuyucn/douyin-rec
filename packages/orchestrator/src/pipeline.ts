@@ -7,6 +7,7 @@ import type { NotifyEvent, ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/app";
 import { splitToSizeLimit } from "@drec/post-process";
 import { selectWinner } from "./select.js";
+import { retry } from "./retry.js";
 import { humanBytes, humanDur, sumBytes } from "./format.js";
 
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。merge plain 是基础,总做。 */
@@ -56,6 +57,8 @@ export interface PipelineDeps {
   /** 按 streamKey 造该场的 run 级 Logger(job.log)。缺省=内置文件直写(兼容旧行为/测试)。
    *  CLI 注入 @drec/observability 的 FileLogger,使「怎么落盘」由组合根装配、orchestrator 只调 ScopedLogger 接口。 */
   makeRunLogger?: (streamKey: string) => ScopedLogger;
+  /** append 就地重试的退避 sleep(可注入测试,免真等 5s)。省略 → retry 内置 setTimeout。 */
+  sleep?: (ms: number) => Promise<void>;
   cfg: PipelineCfg;
 }
 
@@ -302,17 +305,29 @@ async function runPipelineInner(
   }
   const bv = r.bv;
   jlog(`P1 上传完成: ${bv}`);
+  ledger.setBv(streamKey, bv); // checkpoint:此刻烧录已完成 ⇒ bv 落库 ⟺ 产物齐全,续跑可复用
   const isPublic = cfg.uploadPrivate === false;
   const appendGroups: Array<{ step: "append_danmu" | "append_livechat"; files: string[] }> = [
     { step: "append_danmu", files: danmuParts },
     { step: "append_livechat", files: livechatParts },
   ];
   for (const g of appendGroups) {
-    if (g.files.length === 0) continue; // 关掉的步骤 → 空组,不传
+    if (g.files.length === 0) continue;          // 关掉的步骤 → 空组,不传
+    if (ledger.isStepDone(streamKey, g.step)) {  // 续跑:已完成的组跳过(幂等)
+      jlog(`append 跳过(已完成): ${g.step}`);
+      continue;
+    }
     jlog(`append 开始: ${g.files.map((f) => path.basename(f)).join(", ")}`);
     const tApp = Date.now();
     ledger.logStep(streamKey, g.step, "start");
-    await appendGroup({ bv, files: g.files, cookies: cfg.cookies, public: isPublic });
+    // 单文件组就地重试安全(biliup 完整上传才加分 P);多段组 tries=1(避免跨调用重复分 P,见计划 021 Notes)
+    const tries = g.files.length === 1 ? 3 : 1;
+    await retry(() => appendGroup({ bv, files: g.files, cookies: cfg.cookies, public: isPublic }), {
+      tries,
+      sleep: deps.sleep,
+      onRetry: (attempt, err) =>
+        jlog(`append ${g.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
+    });
     const apBytes = sumBytes(g.files);
     ledger.logStep(streamKey, g.step, "done",
       `${g.files.length} 段${apBytes > 0 ? ` · ${humanBytes(apBytes)}` : ""}`);

@@ -396,4 +396,45 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
   });
+
+  describe("上传重试(主路径)", () => {
+    it("P1 上传成功后立即 setBv 落库(append 之前 job.bv 已存在)", async () => {
+      const deps = makeDeps();
+      deps.appendGroup.mockImplementation(async () => {
+        expect(deps.ledger.get(STREAM_KEY)?.bv).toBe("BV123"); // append 时 bv 已落库
+      });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      await runPipeline(b, deps);
+      expect(deps.ledger.get(STREAM_KEY)?.bv).toBe("BV123");
+      deps.ledger.close();
+    });
+
+    it("appendGroup 单文件组瞬时失败 → 就地重试后成功(不重传 P1)", async () => {
+      const deps = makeDeps({ sleep: async () => {} }); // 注入 noop sleep,免真等退避
+      deps.appendGroup
+        .mockRejectedValueOnce(new Error("Connection timed out"))
+        .mockResolvedValue(undefined);
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      const r = await runPipeline(b, deps);
+      expect(deps.uploadPlain).toHaveBeenCalledTimes(1);                    // 绝不重传 P1
+      expect(deps.appendGroup.mock.calls.length).toBeGreaterThanOrEqual(2); // 至少重试一次
+      expect(r.state).toBe("done");
+      deps.ledger.close();
+    });
+
+    it("append 循环跳过 isStepDone 已完成的组(续跑幂等基石)", async () => {
+      const deps = makeDeps();
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      deps.ledger.logStep(b.streamKey, "append_danmu", "start"); // 预置 danmu 已完成
+      deps.ledger.logStep(b.streamKey, "append_danmu", "done");
+      await runPipeline(b, deps);
+      const appended = deps.appendGroup.mock.calls.map((c) => c[0].files.join(",")).join("|");
+      expect(appended).not.toContain("_danmu.mp4"); // 已 done → 跳过
+      expect(appended).toContain("_livechat.mp4");  // 只补 livechat
+      deps.ledger.close();
+    });
+  });
 });
