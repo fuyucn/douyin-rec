@@ -486,5 +486,44 @@ describe("runPipeline", () => {
       expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
       deps.ledger.close();
     });
+
+    it("Critical: P1 成功后 burn 失败 → bv 已落库,重试走续跑绝不重传 P1", async () => {
+      const deps = makeDeps();
+      // merge 成功、burn 抛错(模拟 P1 已建稿后烧录失败)
+      deps.sh.mockImplementation(async (cmd: string) => { if (cmd.includes("burn")) throw new Error("ffmpeg boom"); });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      await expect(runPipeline(b, deps)).rejects.toThrow("ffmpeg boom");
+      expect(deps.ledger.get(b.streamKey)?.bv).toBe("BV123"); // P1 成功即落库(即使随后 burn 失败)
+      // 模拟 reconciler 重试:同 ledger 再跑 → 有 bv → 续跑分支,绝不重传 P1
+      deps.uploadPlain.mockClear();
+      const r2 = await runPipeline(b, deps);
+      expect(deps.uploadPlain).not.toHaveBeenCalled(); // 防重复稿:绝不再传 P1
+      expect(r2.state).toBe("needs_manual");            // stage 无真产物 → 安全阀
+      deps.ledger.close();
+    });
+
+    it("续跑遇多段组(>1 段)→ needs_manual,不 append(防重复分 P)", async () => {
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const stageDir = mkdtempSync(join(tmpdir(), "resume-multipart-"));
+      const deps = makeDeps({
+        cfg: { ...makeDeps().cfg, stageDir },
+        splitForUpload: async (mp4: string) => [mp4, mp4 + ".part2"], // 模拟 >16GB 切 2 段
+      });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      deps.ledger.setBv(b.streamKey, "BVexisting");
+      const dateName = "主播名_2026-06-27";
+      const sub = join(stageDir, "douyin_test-room_2026-06-27");
+      mkdirSync(sub, { recursive: true });
+      for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4"]) writeFileSync(join(sub, dateName + suf), "x");
+
+      const r = await runPipeline(b, deps);
+
+      expect(r.state).toBe("needs_manual");
+      expect(deps.appendGroup).not.toHaveBeenCalled(); // 绝不盲目重传多段组
+      expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
+      deps.ledger.close();
+    });
   });
 });

@@ -228,6 +228,9 @@ async function runPipelineInner(
          public: cfg.uploadPrivate === false, // private=false → 公开;默认(true)→ 仅自己可见
          desc: cfg.uploadMeta.desc,
        }).then((bv) => {
+         // checkpoint:P1 建稿成功即刻落库 bv —— 必须在这里(不能等烧录/split 完),
+         // 否则 P1 成功后若 burn/split 抛错,bv 丢失 → 重试重传 P1 → 重复稿(review Critical)。
+         ledger.setBv(streamKey, bv);
          const sz = (() => { try { return Number(statSync(plain).size); } catch { return 0; } })();
          ledger.logStep(streamKey, "upload_plain", "done", sz > 0 ? humanBytes(sz) : undefined);
          return { bv };
@@ -309,8 +312,7 @@ async function runPipelineInner(
     return { state: "failed" };
   }
   const bv = r.bv;
-  jlog(`P1 上传完成: ${bv}`);
-  ledger.setBv(streamKey, bv); // checkpoint:此刻烧录已完成 ⇒ bv 落库 ⟺ 产物齐全,续跑可复用
+  jlog(`P1 上传完成: ${bv}`); // bv 已在 uploadPlain 的 .then 里即刻 setBv(见上,防 burn/split 失败丢 bv)
   const isPublic = cfg.uploadPrivate === false;
   const appendGroups: Array<{ step: "append_danmu" | "append_livechat"; files: string[] }> = [
     { step: "append_danmu", files: danmuParts },
@@ -416,6 +418,13 @@ async function resumeAppends(
     if (ledger.isStepDone(streamKey, g.step)) { jlog(`append 跳过(已完成): ${g.step}`); continue; }
     const files = await splitForUpload(g.mp4);
     if (files.length === 0) continue;
+    // 多段组(>16GB)无法安全续跑:上一轮可能已 append 部分段,重跑会重复分 P(无 per-part checkpoint)→ 转人工。
+    if (files.length > 1) {
+      jlog(`续跑无法安全处理多段组 ${g.step}(${files.length} 段,可能已 append 部分)→ 转人工`);
+      ledger.setState(streamKey, "needs_manual", { error: `续跑遇多段组 ${g.step}(${files.length} 段),无法安全续传,请人工核对分 P` });
+      notify({ kind: "error", stage: "上传", message: `${bv} 续跑遇多段组 ${g.step},无法安全续传,请人工核对分 P` });
+      return { state: "needs_manual", bv };
+    }
     jlog(`续跑 append 开始: ${g.step} (${files.length} 段)`);
     ledger.logStep(streamKey, g.step, "start");
     const tries = files.length === 1 ? 3 : 1;
