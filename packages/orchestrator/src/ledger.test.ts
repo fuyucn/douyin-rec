@@ -119,4 +119,37 @@ describe("ledger 列迁移 tenant→worker(幂等 RENAME COLUMN)", () => {
     expect(l2.get("douyin:1:2026-06-28")?.winnerWorker).toBe("local");
     l2.close();
   });
+
+  it("setBv 只落 bv 列,不改 state、不产生新事件", () => {
+    const l = fresh();
+    l.upsertPending("k1");                 // pending
+    l.setState("k1", "uploading");         // uploading
+    const before = l.getEvents("k1").length;
+    l.setBv("k1", "BVabc");
+    expect(l.get("k1")?.bv).toBe("BVabc");
+    expect(l.get("k1")?.state).toBe("uploading"); // state 不变
+    expect(l.getEvents("k1").length).toBe(before); // 不新增事件
+    l.close();
+  });
+
+  it("isStepDone:最新事件为 done → true;只有 start → false;无该 step → false", () => {
+    const l = fresh();
+    l.upsertPending("k1");
+    l.logStep("k1", "append_danmu", "start");
+    expect(l.isStepDone("k1", "append_danmu")).toBe(false); // 只 start
+    l.logStep("k1", "append_danmu", "done");
+    expect(l.isStepDone("k1", "append_danmu")).toBe(true);  // 最新 done
+    expect(l.isStepDone("k1", "append_livechat")).toBe(false); // 无该 step
+    l.close();
+  });
+
+  it("isStepDone:同 step 再次 start(续跑重入)→ 最新为 start → false", () => {
+    const l = fresh();
+    l.upsertPending("k1");
+    l.logStep("k1", "append_danmu", "start");
+    l.logStep("k1", "append_danmu", "done");
+    l.logStep("k1", "append_danmu", "start"); // 重入又开始
+    expect(l.isStepDone("k1", "append_danmu")).toBe(false);
+    l.close();
+  });
 });

@@ -112,6 +112,18 @@ export class SyncLedger {
     this.db.prepare("UPDATE sync_jobs SET state='done', bv=?, error=NULL, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
     this.logEvent(streamKey, "done", at);
   }
+  /** checkpoint:P1 上传成功即落 bv 列(不改 state、不写事件)。续跑靠它判断"已建稿"。 */
+  setBv(streamKey: string, bv: string): void {
+    const at = this.now();
+    this.db.prepare("UPDATE sync_jobs SET bv=?, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
+  }
+  /** 某 step 的最新事件是否为 done(续跑用:跳过已完成的 append 组)。无该 step 事件 → false。 */
+  isStepDone(streamKey: string, step: StepName): boolean {
+    const r = this.db
+      .prepare("SELECT phase FROM sync_job_steps WHERE streamKey=? AND step=? ORDER BY at DESC, rowid DESC LIMIT 1")
+      .get(streamKey, step) as { phase?: string } | undefined;
+    return r?.phase === "done";
+  }
   /** pipeline 抛错时:置 failed + 记 error + fails 自增(供重试上限判定)。 */
   markFailed(streamKey: string, error: string): void {
     const at = this.now();
