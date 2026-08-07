@@ -16,12 +16,12 @@ export function classifyLogLine(line: string): LogLevel {
   return "info";
 }
 
-/** 每行内联样式（用 rgba 兜底，深浅色模式都可读；error 浅红行背景）。 */
+/** 每行内联样式（按日志台深色底校准，见 index.css .terminal-body；error 浅红行背景）。 */
 export const LOG_LINE_STYLE: Record<LogLevel, CSSProperties> = {
-  error: { background: "rgba(239,68,68,0.15)", color: "#ef4444" },
-  warn: { color: "var(--warning)" },
-  success: { color: "var(--success)" },
-  danmu: { color: "var(--muted-soft)" },
-  status: { color: "#0ea5e9" },
+  error: { background: "rgba(255,35,87,0.14)", color: "#ff8fa3" },
+  warn: { color: "#ffc04d" },
+  success: { color: "#5ee9b5" },
+  danmu: { color: "#9aa0a6" },
+  status: { color: "#6db9f4" },
   info: {},
 };

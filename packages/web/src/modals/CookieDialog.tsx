@@ -69,7 +69,7 @@ export function CookieDialog({ open, onClose }: Props): ReactNode {
       title={t("paste.title")}
       description={t("paste.desc")}
     >
-      <div className="mb-3 text-xs text-muted bg-surface-soft border border-hairline rounded px-3 py-2">
+      <div className="status-strip mb-3">
         {cookieStatusLine(cookie, t)}
       </div>
       <textarea

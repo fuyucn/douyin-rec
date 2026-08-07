@@ -1,6 +1,6 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 
-type Variant = "primary" | "secondary";
+type Variant = "primary" | "secondary" | "danger";
 
 interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
@@ -11,7 +11,7 @@ interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
   children?: ReactNode;
 }
 
-/** Cal.com-style primary/secondary button. */
+/** 控制台按钮:primary=信号色 / secondary=描边 / danger=破坏性操作。 */
 export function Button({
   variant = "primary",
   small,
@@ -20,7 +20,8 @@ export function Button({
   children,
   ...rest
 }: Props): ReactNode {
-  const base = variant === "primary" ? "btn-primary" : "btn-secondary";
+  const base =
+    variant === "primary" ? "btn-primary" : variant === "danger" ? "btn-danger" : "btn-secondary";
   const sm = small ? "btn-sm" : "";
   return (
     <button className={`${base} ${sm} ${className}`.trim()} {...rest}>
@@ -30,7 +31,7 @@ export function Button({
   );
 }
 
-/** Round 36px icon button used in table rows / modal close. */
+/** 方形 34px 图标按钮,用于表格行操作 / 弹窗关闭。 */
 export function IconButton({
   className = "",
   children,

@@ -173,7 +173,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
       description={t("dialog.desc")}
     >
       {isEdit && task?.running && (
-        <p className="text-sm mb-4" style={{ color: "var(--warning)" }}>
+        <p className="text-sm mb-4 text-warning-fg">
           {t("dialog.runningWarn")}
         </p>
       )}
@@ -181,7 +181,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
       <form className="grid grid-cols-1 sm:grid-cols-2 gap-4" onSubmit={submit}>
         <div className="sm:col-span-2">
           <label className="field-label">
-            {t("dialog.room")}<span style={{ color: "var(--error)" }}>*</span>
+            {t("dialog.room")}<span className="text-error-fg">*</span>
           </label>
           <input
             required
@@ -190,7 +190,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
             value={form.room}
             onChange={(e) => set("room", e.target.value)}
           />
-          {plat && <p className="mt-1 text-[12px] text-muted-soft">{`平台 / platform: ${plat.id}`}</p>}
+          {plat && <p className="mt-1 text-xs text-muted-soft">{t("dialog.platform", { id: plat.id })}</p>}
         </div>
 
         <div>
@@ -244,7 +244,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
             value={form.schedule}
             onChange={(e) => set("schedule", e.target.value)}
           />
-          <p className="mt-1 text-[12px] text-muted-soft">
+          <p className="mt-1 text-xs text-muted-soft">
             <Tooltip
               content={localTimeTooltip(new Date(), serverTz, (tz, local) =>
                 t("common.localTimeTooltip", { serverTz: tz, local }),
@@ -263,12 +263,13 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
             value={form.webhook}
             onChange={(e) => set("webhook", e.target.value)}
           />
-          <p className="mt-1 text-[12px] text-muted-soft">{t("dialog.webhookHint")}</p>
+          <p className="mt-1 text-xs text-muted-soft">{t("dialog.webhookHint")}</p>
         </div>
 
         <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3 mt-1">
           <label
-            className={`flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 ${danmuAvailable ? "cursor-pointer" : "opacity-60 cursor-not-allowed"}`}
+            className="switch-row"
+            data-disabled={!danmuAvailable}
           >
             <span className="flex flex-col">
               <span className="text-sm font-medium text-ink">{t("dialog.recDanmu")}</span>
@@ -279,7 +280,8 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
             <Switch checked={danmuAvailable && form.danmu} onCheckedChange={(v) => set("danmu", v)} name="danmu" disabled={!danmuAvailable} />
           </label>
           <label
-            className={`flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 ${cookieReady && danmuAvailable ? "cursor-pointer" : "opacity-60 cursor-not-allowed"}`}
+            className="switch-row"
+            data-disabled={!cookieReady || !danmuAvailable}
           >
             <span className="flex flex-col">
               <span className="text-sm font-medium text-ink">{t("dialog.danmuGift")}</span>

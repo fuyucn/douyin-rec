@@ -117,7 +117,7 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
         {needsHost && (
           <div>
             <label className="field-label">
-              {t("hub.workerDialog.hostLabel")}<span style={{ color: "var(--error)" }}>*</span>
+              {t("hub.workerDialog.hostLabel")}<span className="text-error-fg">*</span>
             </label>
             <input
               required
@@ -130,7 +130,7 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
         )}
         <div>
           <label className="field-label">
-            {t("hub.workerDialog.dataRootLabel")}<span style={{ color: "var(--error)" }}>*</span>
+            {t("hub.workerDialog.dataRootLabel")}<span className="text-error-fg">*</span>
           </label>
           <input
             required
@@ -142,8 +142,8 @@ export function WorkerDialog({ open, onClose, worker, onSaved }: Props): ReactNo
         </div>
         {test && (
           <div
-            className="text-sm rounded-lg border border-hairline px-3 py-2"
-            style={{ color: test.ok ? "var(--success)" : "var(--error)" }}
+            className="status-strip text-sm"
+            style={{ color: test.ok ? "var(--success-fg)" : "var(--error-fg)" }}
           >
             {test.ok ? t("hub.workerDialog.testOk") : t("hub.workerDialog.testFailed", { error: test.error ?? t("hub.workerDialog.unknownError") })}
           </div>

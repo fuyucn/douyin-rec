@@ -85,7 +85,7 @@ export function WorkersPanel({
           zIndex: 101,
           background: "var(--raised)",
           borderLeft: "1px solid var(--hairline)",
-          boxShadow: "0 24px 60px -20px rgba(0,0,0,0.35)",
+          boxShadow: "var(--shadow-slide)",
           transform: open ? "translateX(0)" : "translateX(100%)",
           transition: "transform 0.22s ease",
         }}
@@ -95,14 +95,15 @@ export function WorkersPanel({
         <div className="flex items-start justify-between gap-3 p-5 pb-3">
           <div>
             <h2 className="headline text-[20px] leading-tight">{t("hub.workers.title")}</h2>
-            <p className="text-muted text-xs mt-1">{t("hub.workers.subtitle")}</p>
+            <p className="text-muted text-xs mt-1 font-mono">{t("hub.workers.subtitle")}</p>
           </div>
           <IconButton title={t("hub.workers.close")} onClick={onClose}>
             <X className="w-4 h-4" />
           </IconButton>
         </div>
 
-        <div className="px-5 pb-3">
+        <div className="px-5 pb-3 flex items-center justify-between gap-3">
+          <span className="section-label">{t("hub.workers.colName")}</span>
           <Button small onClick={openCreate}>
             <Plus className="w-4 h-4" />
             {t("hub.workers.add")}
@@ -111,10 +112,10 @@ export function WorkersPanel({
 
         <div className="px-3 pb-5 space-y-1">
           {workers.length === 0 && (
-            <div className="text-center text-muted text-sm py-8">{t("hub.workers.empty")}</div>
+            <div className="text-center text-muted text-sm py-8 border border-dashed border-hairline" style={{ borderRadius: "var(--r-card)" }}>{t("hub.workers.empty")}</div>
           )}
           {workers.map((w) => (
-            <div key={w.id} className="flex items-center gap-3 rounded-lg px-2 py-2.5">
+            <div key={w.id} className="flex items-center gap-3 border border-transparent px-2 py-2.5 transition-colors hover:bg-surface-soft hover:border-hairline" style={{ borderRadius: "var(--r-card)" }}>
               <span className="dot shrink-0" style={{ background: dotColor(w) }} title={dotTitle(w)} />
               <div className="min-w-0 flex-1">
                 <div className="font-medium text-ink truncate">{w.name}</div>
@@ -127,7 +128,7 @@ export function WorkersPanel({
                   <Pencil className="w-4 h-4" />
                 </IconButton>
                 {w.id !== "local" && (
-                  <IconButton title={t("hub.common.delete")} style={{ color: "var(--error)" }} onClick={() => setPendingDelete(w.id)}>
+                  <IconButton title={t("hub.common.delete")} style={{ color: "var(--error-fg)" }} onClick={() => setPendingDelete(w.id)}>
                     <Trash2 className="w-4 h-4" />
                   </IconButton>
                 )}

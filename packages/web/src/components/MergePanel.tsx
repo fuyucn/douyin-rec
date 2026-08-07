@@ -84,7 +84,7 @@ export function MergePanel({ taskId }: { taskId: number }): ReactNode {
   return (
     <section className="lg:col-span-3 border-t border-hairline pt-6">
       <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
-        <h3 className="text-[11px] font-medium uppercase tracking-[0.07em] text-muted-soft">{t("merge.title")}</h3>
+        <h3 className="section-label">{t("merge.title")}</h3>
         <div className="flex items-center gap-2">
           <Button small variant="secondary" onClick={() => void refresh()}>
             {t("common.refresh")}
@@ -108,7 +108,7 @@ export function MergePanel({ taskId }: { taskId: number }): ReactNode {
         <ul className="space-y-1.5">
           {sessions.map((s) => (
             <li key={s.base}>
-              <label className="flex items-center gap-3 rounded-lg border border-hairline px-3 py-2 cursor-pointer text-sm">
+              <label className="merge-row">
                 <input
                   type="checkbox"
                   checked={selected.has(s.base)}

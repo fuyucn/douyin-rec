@@ -208,7 +208,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
             type="button"
             onClick={() => setTab(tb.id)}
             className={`shrink-0 whitespace-nowrap px-3 py-2 text-sm -mb-px border-b-2 transition-colors ${
-              tab === tb.id ? "border-ink text-ink font-medium" : "border-transparent text-muted hover:text-ink"
+              tab === tb.id ? "border-transparent text-ink font-medium" : "border-transparent text-muted hover:text-ink"
             }`}
           >
             {tb.label}
@@ -218,25 +218,25 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
 
       {tab === "account" && (
         <div>
-          <h4 className="text-sm font-semibold text-ink mb-1">{t("settings.accountSection")}</h4>
-          <div className="mb-3 flex items-center gap-2 text-xs">
+          <h4 className="form-section">{t("settings.accountSection")}</h4>
+          <div className="status-strip mb-3">
             <span className="dot" style={{ background: statusColor }} />
             <span className="text-body">{statusText}</span>
           </div>
           <div className="flex gap-2">
             <Button small onClick={onOpenQr}>{t("nav.login")}</Button>
             <Button small variant="secondary" onClick={onOpenPaste}>{t("nav.paste")}</Button>
-            <Button small variant="secondary" style={{ color: "var(--error)" }} onClick={() => setConfirmClear(true)}>
+            <Button small variant="secondary" style={{ color: "var(--error-fg)" }} onClick={() => setConfirmClear(true)}>
               {t("nav.clear")}
             </Button>
           </div>
-          <p className="mt-3 text-[12px] text-muted-soft">{t("settings.accountHint")}</p>
+          <p className="mt-3 text-xs text-muted-soft">{t("settings.accountHint")}</p>
         </div>
       )}
 
       {tab === "webhook" && (
         <div>
-          <h4 className="text-sm font-semibold text-ink mb-2">{t("settings.webhookSection")}</h4>
+          <h4 className="form-section">{t("settings.webhookSection")}</h4>
           <label className="field-label">{t("settings.webhookLabel")}</label>
           <div className="flex gap-2">
             <input
@@ -258,13 +258,13 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
               {t("settings.webhookTest")}
             </Button>
           </div>
-          <p className="mt-1 text-[12px] text-muted-soft">{t("settings.webhookHint")}</p>
+          <p className="mt-1 text-xs text-muted-soft">{t("settings.webhookHint")}</p>
         </div>
       )}
 
       {tab === "engine" && (
         <div>
-          <h4 className="text-sm font-semibold text-ink mb-2">{t("settings.mesioSection")}</h4>
+          <h4 className="form-section">{t("settings.mesioSection")}</h4>
           <label className="field-label">{t("settings.mesioLabel")}</label>
           <div className="flex gap-2">
             <input
@@ -277,11 +277,11 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
               {t("common.save")}
             </Button>
           </div>
-          <p className="mt-1 text-[12px] text-muted-soft">
+          <p className="mt-1 text-xs text-muted-soft">
             {t("settings.mesioHint", { path: mesioDefault || "bin/mesio" })}
           </p>
 
-          <h4 className="text-sm font-semibold text-ink mb-2 mt-5">{t("settings.tzSection")}</h4>
+          <h4 className="form-section mt-6">{t("settings.tzSection")}</h4>
           <label className="field-label">{t("settings.tzLabel")}</label>
           <div className="flex gap-2">
             <select
@@ -298,7 +298,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
               {t("common.save")}
             </Button>
           </div>
-          <p className="mt-1 text-[12px] text-muted-soft">
+          <p className="mt-1 text-xs text-muted-soft">
             {t("settings.tzHint", { default: tzDefault || "Asia/Shanghai", effective: tzEffective || "…" })}
           </p>
         </div>
@@ -306,8 +306,8 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
 
       {tab === "about" && (
         <div>
-          <h4 className="text-sm font-semibold text-ink mb-2">{t("settings.aboutSection")}</h4>
-          <div className="flex items-center justify-between rounded-lg border border-hairline px-4 py-2.5">
+          <h4 className="form-section">{t("settings.aboutSection")}</h4>
+          <div className="switch-row switch-row-sm">
             <span className="text-sm text-body">{t("settings.aboutVersion")}</span>
             <span className="font-mono text-xs text-ink">{version || "…"}</span>
           </div>
@@ -321,7 +321,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
             {NOTIF_KEYS.map((key) => (
               <label
                 key={key}
-                className="flex items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-2.5 cursor-pointer"
+                className="switch-row switch-row-sm"
               >
                 <span className="text-sm font-medium text-ink">{t(`notif.${key}`)}</span>
                 <Switch checked={toggles[key]} onCheckedChange={(v) => flip(key, v)} name={`notif-${key}`} />

@@ -1,5 +1,17 @@
 import { useAtom, useAtomValue } from "jotai";
-import { FileText, FolderOpen, Pencil, Play, Plus, Square, Trash2 } from "lucide-react";
+import {
+  Activity,
+  FileText,
+  FolderOpen,
+  LayoutGrid,
+  Pencil,
+  Play,
+  Plus,
+  Square,
+  Timer,
+  Trash2,
+  TriangleAlert,
+} from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, type Task } from "../api/client";
@@ -81,6 +93,11 @@ export function TaskList(): ReactNode {
     }
   };
 
+  // 顶部指标带:总数 / 录制中 / 待命 / 错误,一眼看当前机群状态。
+  const recording = tasks.filter((t) => t.enabled && t.running && t.recording !== false).length;
+  const waiting = tasks.filter((t) => t.enabled && !t.running && t.status !== "error").length;
+  const errors = tasks.filter((t) => t.status === "error").length;
+
   return (
     <>
       <div className="flex items-end justify-between gap-3 mb-6">
@@ -101,7 +118,7 @@ export function TaskList(): ReactNode {
             >
               <span
                 className="hidden sm:inline-flex items-center gap-1.5 text-xs"
-                style={{ color: conn.ok ? "var(--success)" : "var(--error)" }}
+                style={{ color: conn.ok ? "var(--success-fg)" : "var(--error-fg)" }}
               >
                 <span className="dot" style={{ background: conn.ok ? "var(--success)" : "var(--error)" }} />
                 {conn.ok
@@ -117,7 +134,38 @@ export function TaskList(): ReactNode {
         </div>
       </div>
 
-      <section className="overflow-hidden">
+      <div className="telemetry-bar mb-5">
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("tasks.metricTotal")}</span>
+            <span className="telemetry-value tabular-nums">{tasks.length}</span>
+          </div>
+          <span className="telemetry-icon"><LayoutGrid className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("tasks.metricRecording")}</span>
+            <span className="telemetry-value tabular-nums" style={{ color: "var(--success-fg)" }}>{recording}</span>
+          </div>
+          <span className="telemetry-icon" style={{ color: "var(--success-fg)" }}><Activity className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("tasks.metricWaiting")}</span>
+            <span className="telemetry-value tabular-nums">{waiting}</span>
+          </div>
+          <span className="telemetry-icon"><Timer className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("tasks.metricError")}</span>
+            <span className="telemetry-value tabular-nums" style={{ color: errors ? "var(--error-fg)" : "var(--muted-soft)" }}>{errors}</span>
+          </div>
+          <span className="telemetry-icon" style={errors ? { color: "var(--error-fg)" } : undefined}><TriangleAlert className="w-4 h-4" /></span>
+        </div>
+      </div>
+
+      <section className="table-shell">
         <div className="overflow-x-auto">
           <table className="tasks">
             <thead>
@@ -132,17 +180,30 @@ export function TaskList(): ReactNode {
               </tr>
             </thead>
             <tbody>
-              {!loaded && (
-                <tr>
-                  <td colSpan={7} className="text-center text-muted py-12">
-                    {t("tasks.loading")}
-                  </td>
-                </tr>
-              )}
+              {!loaded &&
+                [0, 1, 2].map((i) => (
+                  <tr key={i} aria-hidden="true">
+                    <td><span className="skeleton block h-4 w-8" /></td>
+                    <td>
+                      <span className="skeleton block h-4 w-40 max-w-full" />
+                      <span className="skeleton block h-3 w-28 max-w-full mt-2" />
+                    </td>
+                    <td><span className="skeleton block h-4 w-12" /></td>
+                    <td><span className="skeleton block h-4 w-16" /></td>
+                    <td><span className="skeleton block h-4 w-20" /></td>
+                    <td><span className="skeleton block h-4 w-24" /></td>
+                    <td>
+                      <div className="flex justify-end gap-1.5">
+                        <span className="skeleton block h-8 w-8" />
+                        <span className="skeleton block h-8 w-8" />
+                      </div>
+                    </td>
+                  </tr>
+                ))}
               {loaded && tasks.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="py-16">
-                    <div className="flex flex-col items-center gap-4 text-muted">
+                  <td colSpan={7} className="p-0">
+                    <div className="empty-state">
                       <FolderOpen className="w-10 h-10" style={{ color: "var(--muted-soft)" }} />
                       <div className="text-sm font-medium text-ink">{t("tasks.noneYet")}</div>
                       <Button small onClick={openCreate}>
@@ -160,20 +221,34 @@ export function TaskList(): ReactNode {
                       <Link to={`/task/${task.id}`} className="group block cursor-pointer">
                         {task.name || task.anchorName ? (
                           <>
-                            <div className="font-medium text-ink group-hover:underline">
-                              {task.name || task.anchorName}
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-medium text-ink group-hover:underline">
+                                {task.name || task.anchorName}
+                              </span>
+                              {task.managedBy === "hub" && (
+                                <span className="badge badge-muted" title={t("tasks.managedHint")}>
+                                  {t("tasks.managed")}
+                                </span>
+                              )}
                             </div>
                             <div className="font-mono text-xs text-muted mt-0.5 break-all">{roomId(task.room)}</div>
                           </>
                         ) : (
-                          <div className="font-mono text-[13px] font-medium text-ink break-all group-hover:underline">
-                            {roomId(task.room)}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono text-[13px] font-medium text-ink break-all group-hover:underline">
+                              {roomId(task.room)}
+                            </span>
+                            {task.managedBy === "hub" && (
+                              <span className="badge badge-muted" title={t("tasks.managedHint")}>
+                                {t("tasks.managed")}
+                              </span>
+                            )}
                           </div>
                         )}
                       </Link>
                     </td>
                     <td>
-                      <span className="badge badge-muted font-mono">
+                      <span className="chip">
                         {QUALITY_SHORT[task.quality] ?? task.quality}
                       </span>
                     </td>
@@ -191,10 +266,10 @@ export function TaskList(): ReactNode {
                               : undefined
                           }
                         >
-                          <span className="font-mono text-[13px] text-body">{scheduleText(task)}</span>
+                          <span className="font-mono text-[12.5px] text-body tabular-nums">{scheduleText(task)}</span>
                         </Tooltip>
                       ) : (
-                        <span className="text-muted-soft">—</span>
+                        <span className="text-muted-soft">-</span>
                       )}
                     </td>
                     <td>
@@ -203,28 +278,40 @@ export function TaskList(): ReactNode {
                     <td className="text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1.5 justify-end">
                         {task.enabled ? (
-                          <IconButton title={t("tasks.titleStop")} onClick={() => act(task.id, "stop")}>
-                            <Square className="w-4 h-4" style={{ color: "var(--warning)" }} fill="currentColor" />
+                          <IconButton
+                            title={task.managedBy === "hub" ? t("tasks.managedHint") : t("tasks.titleStop")}
+                            disabled={task.managedBy === "hub"}
+                            onClick={() => act(task.id, "stop")}
+                          >
+                            <Square className="w-4 h-4" style={{ color: "var(--warning-fg)" }} fill="currentColor" />
                           </IconButton>
                         ) : (
-                          <IconButton title={t("tasks.titleStart")} onClick={() => act(task.id, "start")}>
-                            <Play className="w-4 h-4" style={{ color: "var(--success)" }} fill="currentColor" />
+                          <IconButton
+                            title={task.managedBy === "hub" ? t("tasks.managedHint") : t("tasks.titleStart")}
+                            disabled={task.managedBy === "hub"}
+                            onClick={() => act(task.id, "start")}
+                          >
+                            <Play className="w-4 h-4" style={{ color: "var(--success-fg)" }} fill="currentColor" />
                           </IconButton>
                         )}
                         <Link className="btn-icon" to={`/task/${task.id}`} title={t("tasks.titleDetail")}>
                           <FileText className="w-4 h-4" />
                         </Link>
-                        <IconButton title={t("tasks.titleEdit")} onClick={() => openEdit(task)}>
-                          <Pencil className="w-4 h-4" />
-                        </IconButton>
-                        <IconButton
-                          title={task.enabled || task.running ? t("tasks.stopFirst") : t("common.delete")}
-                          style={{ color: "var(--error)" }}
-                          disabled={task.enabled || task.running}
-                          onClick={() => act(task.id, "delete")}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </IconButton>
+                        {!task.managedBy && (
+                          <>
+                            <IconButton title={t("tasks.titleEdit")} onClick={() => openEdit(task)}>
+                              <Pencil className="w-4 h-4" />
+                            </IconButton>
+                            <IconButton
+                              title={task.enabled || task.running ? t("tasks.stopFirst") : t("common.delete")}
+                              style={{ color: "var(--error-fg)" }}
+                              disabled={task.enabled || task.running}
+                              onClick={() => act(task.id, "delete")}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </IconButton>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>

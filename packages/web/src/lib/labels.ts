@@ -88,7 +88,7 @@ export function scheduleInput(t: Pick<Task, "scheduleStart" | "scheduleEnd">): s
 
 /** Format an elapsed duration (ms) as HH:MM:SS. */
 export function fmtClock(ms: number | null | undefined): string {
-  if (ms == null) return "—";
+  if (ms == null) return "-";
   const total = Math.floor(ms / 1000);
   const h = String(Math.floor(total / 3600)).padStart(2, "0");
   const m = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
@@ -101,6 +101,6 @@ export function fmtClock(ms: number | null | undefined): string {
  * effective;空串则回落浏览器本地时区,见 lib/tz.ts)。
  */
 export function fmtStartedAt(epochMs: number | null | undefined, tz: string): string {
-  if (epochMs == null) return "—";
+  if (epochMs == null) return "-";
   return fmtDateTimeInTz(new Date(epochMs), tz);
 }

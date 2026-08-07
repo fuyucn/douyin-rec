@@ -13,7 +13,7 @@ interface Props {
 /** state → { i18n key, badge class, spinner }。文案渲染时经 t() 取。 */
 const STATE_META: Record<string, { key: string; cls: string; spin: boolean }> = {
   pending: { key: "qr.stPending", cls: "badge-neutral", spin: true },
-  scanned: { key: "qr.stScanned", cls: "badge-violet", spin: true },
+  scanned: { key: "qr.stScanned", cls: "badge-orange", spin: true },
   confirmed: { key: "qr.stConfirmed", cls: "badge-success", spin: false },
   expired: { key: "qr.stExpired", cls: "badge-error", spin: false },
 };
@@ -104,7 +104,7 @@ export function QrLoginDialog({ open, onClose }: Props): ReactNode {
     <Dialog open={open} onClose={onClose} widthClass="max-w-sm" center title={t("qr.title")}>
       <p className="text-sm text-muted mb-5">{t("qr.desc")}</p>
       <div className="flex justify-center mb-5">
-        <div className="bg-white border border-hairline rounded-lg p-4 w-[232px] h-[232px] flex items-center justify-center">
+        <div className="border border-hairline p-4 w-[232px] h-[232px] flex items-center justify-center" style={{ borderRadius: "var(--r-card)", background: "var(--qr-surface)" }}>
           {qrPng ? (
             <img
               className="qr-img w-[200px] h-[200px]"

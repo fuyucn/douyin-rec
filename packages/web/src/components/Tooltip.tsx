@@ -7,7 +7,7 @@ interface Props {
   children: ReactNode;
 }
 
-/** Cal.com 风格 hover tooltip,包 Base UI Tooltip 原语(与 Dialog/Switch 同一套组件库)。 */
+/** Base UI Tooltip 原语封装(与 Dialog/Switch 同一套组件库)。 */
 export function Tooltip({ content, children }: Props): ReactNode {
   if (!content) return <>{children}</>;
   return (

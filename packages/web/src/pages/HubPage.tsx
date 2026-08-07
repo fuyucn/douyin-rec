@@ -1,4 +1,4 @@
-import { Plus, Radio, Server } from "lucide-react";
+import { Activity, Plus, Radio, Server } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAtomValue } from "jotai";
@@ -97,15 +97,16 @@ export function HubPage(): ReactNode {
   const allOk = statuses.length > 0 && statuses.every((s) => s.ok);
   const pillDot = anyFail ? "var(--error)" : allOk ? "var(--success)" : "var(--muted-soft)";
   const pillTitle = anyFail ? t("hub.workers.statusMixed") : allOk ? t("hub.workers.statusOk") : t("hub.workers.statusChecking");
+  const activeRuns = jobs.filter((j) => !["done", "failed", "needs_manual"].includes(j.state)).length;
 
   return (
     <>
-      <div className="flex items-end justify-between gap-3 mb-6">
+      <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
         <div>
-          <h1 className="headline text-[28px] sm:text-[32px] leading-tight">{t("hub.page.title")}</h1>
+          <h1 className="headline text-[26px] sm:text-[30px] leading-tight">{t("hub.page.title")}</h1>
           <p className="text-muted text-sm mt-1.5">{t("hub.page.subtitle")}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => setPanelOpen(true)}
             className="btn-secondary btn-sm inline-flex items-center gap-2"
@@ -122,52 +123,85 @@ export function HubPage(): ReactNode {
         </div>
       </div>
 
-      {loaded && rules.length === 0 ? (
-        <section className="card p-16">
-          <div className="flex flex-col items-center gap-4 text-muted">
-            <Radio className="w-10 h-10" style={{ color: "var(--muted-soft)" }} />
-            <div className="text-sm font-medium text-ink">{t("hub.page.noRules")}</div>
-            <Button small onClick={() => setDialogOpen(true)}>{t("hub.page.newRule")}</Button>
+      <div className="telemetry-bar telemetry-bar-cols-3 mb-5">
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("hub.page.metricRules")}</span>
+            <span className="telemetry-value tabular-nums">{rules.length}</span>
           </div>
+          <span className="telemetry-icon"><Radio className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("hub.page.metricWorkers")}</span>
+            <span className="telemetry-value tabular-nums">{workers.length}</span>
+          </div>
+          <span className="telemetry-icon"><Server className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("hub.page.metricActive")}</span>
+            <span className="telemetry-value tabular-nums" style={{ color: activeRuns ? "var(--success-fg)" : "var(--muted-soft)" }}>
+              {activeRuns}
+            </span>
+          </div>
+          <span className="telemetry-icon" style={activeRuns ? { color: "var(--success-fg)" } : undefined}>
+            <Activity className="w-4 h-4" />
+          </span>
+        </div>
+      </div>
+
+      {loaded && rules.length === 0 ? (
+        <section className="empty-state">
+          <Radio className="w-10 h-10" style={{ color: "var(--muted-soft)" }} />
+          <div className="text-sm font-medium text-ink">{t("hub.page.noRules")}</div>
+          <Button small onClick={() => setDialogOpen(true)}>{t("hub.page.newRule")}</Button>
         </section>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-[288px_1fr] gap-6 items-start">
           {/* 左:房间列表 */}
-          <aside className="space-y-0.5 lg:pr-2">
-            <div className="px-1 pb-2 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-soft">
-              {t("hub.page.roomsHeading")}
+          <aside className="lg:pr-2">
+            <div className="run-list-shell">
+              <div className="px-3 py-2.5 border-b border-hairline flex items-center justify-between gap-3">
+                <span className="section-label">{t("hub.page.roomsHeading")}</span>
+                <span className="font-mono text-[11px] text-muted-soft">{rules.length}</span>
+              </div>
+              <div className="p-1.5 space-y-0.5">
+                {!loaded &&
+                  [0, 1, 2].map((i) => (
+                    <div key={i} className="px-3 py-2.5" aria-hidden="true">
+                      <span className="skeleton block h-4 w-28 max-w-full" />
+                      <span className="skeleton block h-3 w-36 max-w-full mt-2" />
+                    </div>
+                  ))}
+                {rules.map((r) => {
+                  const active = r.key === selectedKey;
+                  return (
+                    <button
+                      key={r.key}
+                      onClick={() => selectRoom(r)}
+                      className={`rail-item ${active ? "rail-item-active" : ""}`}
+                      style={{ opacity: r.enabled ? 1 : 0.55 }}
+                    >
+                      <div className="min-w-0">
+                        {r.anchorName ? (
+                          <>
+                            <div className="font-medium text-ink truncate">{r.anchorName}</div>
+                            <div className="font-mono text-[11px] text-muted-soft mt-0.5 truncate">{roomId(r.room)}</div>
+                          </>
+                        ) : (
+                          <div className="font-mono text-[13px] font-medium text-ink truncate">{roomId(r.room)}</div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="dot" style={{ background: r.enabled ? "var(--success)" : "var(--muted-soft)" }} />
+                        <LatestRunBadge run={runsOf(r)[0]} />
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-            {!loaded && <div className="px-2 py-3 text-sm text-muted">{t("hub.common.loading")}</div>}
-            {rules.map((r) => {
-              const active = r.key === selectedKey;
-              return (
-                <button
-                  key={r.key}
-                  onClick={() => selectRoom(r)}
-                  className="w-full text-left rounded-lg px-3 py-2.5 flex flex-col gap-1 cursor-pointer transition-colors hover:bg-[var(--surface-soft)]"
-                  style={{
-                    outline: active ? "1.5px solid var(--muted-soft)" : undefined,
-                    outlineOffset: active ? "-1.5px" : undefined,
-                    opacity: r.enabled ? 1 : 0.55,
-                  }}
-                >
-                  <div className="min-w-0">
-                    {r.anchorName ? (
-                      <>
-                        <div className="font-medium text-ink truncate">{r.anchorName}</div>
-                        <div className="font-mono text-[11px] text-muted-soft mt-0.5 truncate">{roomId(r.room)}</div>
-                      </>
-                    ) : (
-                      <div className="font-mono text-[13px] font-medium text-ink truncate">{roomId(r.room)}</div>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="dot" style={{ background: r.enabled ? "var(--success)" : "var(--muted-soft)" }} />
-                    <LatestRunBadge run={runsOf(r)[0]} />
-                  </div>
-                </button>
-              );
-            })}
           </aside>
 
           {/* 右:选中房间详情 */}
@@ -180,7 +214,7 @@ export function HubPage(): ReactNode {
                 onDeleted={() => navigate("/hub")}
               />
             ) : (
-              <div className="card p-16 text-center text-muted text-sm">{t("hub.page.selectRoomHint")}</div>
+              <div className="card p-12 text-center text-muted text-sm">{t("hub.page.selectRoomHint")}</div>
             )}
           </section>
         </div>

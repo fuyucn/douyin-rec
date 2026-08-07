@@ -1,4 +1,4 @@
-import { ChevronLeft, ExternalLink } from "lucide-react";
+import { CalendarClock, CalendarRange, ChevronLeft, Clock3, ExternalLink, MonitorPlay, Terminal } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -99,10 +99,17 @@ export function TaskDetail(): ReactNode {
       <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
         <div className="min-w-0">
           <div className="flex items-center gap-3 flex-wrap">
-            <h1 className="headline text-[28px] sm:text-[32px] leading-tight break-all">
-              {task ? task.name || task.anchorName || task.room : "—"}
+            <h1 className="headline text-[26px] sm:text-[30px] leading-tight break-all">
+              {task ? task.name || task.anchorName || task.room : "-"}
             </h1>
-            {task && <StatusBadge running={task.running} status={task.status} enabled={task.enabled} recording={task.recording} />}
+            {task && (
+              <>
+                <StatusBadge running={task.running} status={task.status} enabled={task.enabled} recording={task.recording} />
+                {task.managedBy === "hub" && (
+                  <span className="badge badge-muted" title={t("tasks.managedHint")}>{t("tasks.managed")}</span>
+                )}
+              </>
+            )}
           </div>
           <p className="font-mono text-sm text-muted mt-1.5 break-all">
             {task && (task.name || task.anchorName) ? roomId(task.room) : ""}
@@ -110,136 +117,189 @@ export function TaskDetail(): ReactNode {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {task && !task.enabled && (
-            <Button small onClick={() => action("start")}>
+            <Button
+              small
+              onClick={() => action("start")}
+              disabled={task.managedBy === "hub"}
+              title={task.managedBy === "hub" ? t("tasks.managedHint") : undefined}
+            >
               {t("tasks.start")}
             </Button>
           )}
           {task && task.enabled && (
-            <Button small variant="secondary" onClick={() => action("stop")}>
+            <Button
+              small
+              variant="secondary"
+              onClick={() => action("stop")}
+              disabled={task.managedBy === "hub"}
+              title={task.managedBy === "hub" ? t("tasks.managedHint") : undefined}
+            >
               {t("tasks.stop")}
             </Button>
           )}
-          <Button small variant="secondary" onClick={() => setEditOpen(true)} disabled={!task}>
+          <Button
+            small
+            variant="secondary"
+            onClick={() => setEditOpen(true)}
+            disabled={!task || task.managedBy === "hub"}
+            title={task?.managedBy === "hub" ? t("tasks.managedHint") : undefined}
+          >
             {t("tasks.edit")}
           </Button>
           <Button
             small
-            variant="secondary"
-            style={{ color: "var(--error)" }}
+            variant="danger"
             onClick={() => setConfirmDel(true)}
-            disabled={!task || task.enabled || task.running}
-            title={task && (task.enabled || task.running) ? t("tasks.stopFirst") : t("common.delete")}
+            disabled={!task || task.managedBy === "hub" || task.enabled || task.running}
+            title={task?.managedBy === "hub" ? t("tasks.managedHint") : task && (task.enabled || task.running) ? t("tasks.stopFirst") : t("common.delete")}
           >
             {t("common.delete")}
           </Button>
         </div>
       </div>
 
+      <div className="telemetry-bar mb-6">
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("tasks.quality")}</span>
+            <span className="telemetry-value-sm">{task ? QUALITY_FULL[task.quality] ?? task.quality : "-"}</span>
+          </div>
+          <span className="telemetry-icon"><MonitorPlay className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("tasks.elapsed")}</span>
+            <span className="telemetry-value tabular-nums" style={{ color: "var(--success-fg)" }}>{fmtClock(task?.runtime?.elapsedMs)}</span>
+          </div>
+          <span className="telemetry-icon" style={{ color: "var(--success-fg)" }}><Clock3 className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("tasks.startedAt")}</span>
+            <span className="telemetry-value-mono truncate">{fmtStartedAt(task?.runtime?.startedAt, serverTz)}</span>
+          </div>
+          <span className="telemetry-icon"><CalendarClock className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("tasks.schedule")}</span>
+            <span className="telemetry-value-mono truncate">{sched ?? "-"}</span>
+          </div>
+          <span className="telemetry-icon"><CalendarRange className="w-4 h-4" /></span>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <section className="lg:col-span-1">
-          <h3 className="text-[11px] font-medium uppercase tracking-[0.07em] text-muted-soft mb-4">{t("tasks.info")}</h3>
-          <dl className="space-y-3 text-sm">
-            <Row
-              label={t("tasks.room")}
-              mono
-              value={
-                task ? (
-                  <a
-                    href={roomHref(task.room)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-ink hover:underline"
-                    title={t("tasks.openLive")}
-                  >
-                    {roomId(task.room)}
-                    <ExternalLink className="w-3.5 h-3.5 opacity-70" />
-                  </a>
-                ) : (
-                  "—"
-                )
-              }
-            />
-            <Row label={t("tasks.anchor")} value={task?.anchorName ?? "—"} />
-            <Row label={t("tasks.quality")} value={task ? QUALITY_FULL[task.quality] ?? task.quality : "—"} />
-            <Row label={t("tasks.recorder")} mono value={task?.engine ?? "—"} />
-            <div className="flex justify-between gap-3">
-              <dt className="text-muted">{t("tasks.danmu")}</dt>
-              <dd className="text-right">{task ? <DanmuBadge task={task} /> : "—"}</dd>
-            </div>
-            <Row
-              label={t("tasks.schedule")}
-              mono
-              value={
-                sched && task?.scheduleStart && task?.scheduleEnd ? (
-                  <Tooltip
-                    content={localScheduleTooltip(task.scheduleStart, task.scheduleEnd, serverTz, (tz, local) =>
-                      t("tasks.scheduleLocalTooltip", { serverTz: tz, local }),
-                    )}
-                  >
-                    <span>{sched}</span>
-                  </Tooltip>
-                ) : (
-                  sched ?? "—"
-                )
-              }
-            />
-            <Row label={t("tasks.giftCookie")} value={task ? (task.useCookie ? t("common.yes") : t("common.no")) : "—"} />
-            <Row label={t("tasks.outDir")} mono value={task?.outDir ?? "—"} />
-            <Row
-              label={t("tasks.startedAt")}
-              mono
-              value={
-                task?.runtime?.startedAt != null ? (
-                  <Tooltip
-                    content={localTimeTooltip(new Date(task.runtime.startedAt), serverTz, (tz, local) =>
-                      t("common.localTimeTooltip", { serverTz: tz, local }),
-                    )}
-                  >
-                    <span>{fmtStartedAt(task.runtime.startedAt, serverTz)}</span>
-                  </Tooltip>
-                ) : (
-                  "—"
-                )
-              }
-            />
-            <Row label={t("tasks.elapsed")} mono value={fmtClock(task?.runtime?.elapsedMs)} />
-          </dl>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="section-label">{t("tasks.info")}</h3>
+            <span className="font-mono text-[10px] text-muted-soft uppercase">#{taskId}</span>
+          </div>
+          <div className="card p-5">
+            <dl className="text-sm">
+              <Row
+                label={t("tasks.room")}
+                mono
+                value={
+                  task ? (
+                    <a
+                      href={roomHref(task.room)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-ink hover:underline"
+                      title={t("tasks.openLive")}
+                    >
+                      {roomId(task.room)}
+                      <ExternalLink className="w-3.5 h-3.5 opacity-70" />
+                    </a>
+                  ) : (
+                    "-"
+                  )
+                }
+              />
+              <Row label={t("tasks.anchor")} value={task?.anchorName ?? "-"} />
+              <Row label={t("tasks.quality")} value={task ? QUALITY_FULL[task.quality] ?? task.quality : "-"} />
+              <Row label={t("tasks.recorder")} mono value={task?.engine ?? "-"} />
+              <div className="flex justify-between gap-3 py-2.5 border-b border-hairline">
+                <dt className="text-muted">{t("tasks.danmu")}</dt>
+                <dd className="text-right">{task ? <DanmuBadge task={task} /> : "-"}</dd>
+              </div>
+              <Row
+                label={t("tasks.schedule")}
+                mono
+                value={
+                  sched && task?.scheduleStart && task?.scheduleEnd ? (
+                    <Tooltip
+                      content={localScheduleTooltip(task.scheduleStart, task.scheduleEnd, serverTz, (tz, local) =>
+                        t("tasks.scheduleLocalTooltip", { serverTz: tz, local }),
+                      )}
+                    >
+                      <span>{sched}</span>
+                    </Tooltip>
+                  ) : (
+                    sched ?? "-"
+                  )
+                }
+              />
+              <Row label={t("tasks.giftCookie")} value={task ? (task.useCookie ? t("common.yes") : t("common.no")) : "-"} />
+              <Row label={t("tasks.outDir")} mono value={task?.outDir ?? "-"} />
+              <Row
+                label={t("tasks.startedAt")}
+                mono
+                value={
+                  task?.runtime?.startedAt != null ? (
+                    <Tooltip
+                      content={localTimeTooltip(new Date(task.runtime.startedAt), serverTz, (tz, local) =>
+                        t("common.localTimeTooltip", { serverTz: tz, local }),
+                      )}
+                    >
+                      <span>{fmtStartedAt(task.runtime.startedAt, serverTz)}</span>
+                    </Tooltip>
+                  ) : (
+                    "-"
+                  )
+                }
+              />
+              <Row label={t("tasks.elapsed")} mono value={fmtClock(task?.runtime?.elapsedMs)} />
+            </dl>
+          </div>
         </section>
 
         <section className="lg:col-span-2 flex flex-col">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-[11px] font-medium uppercase tracking-[0.07em] text-muted-soft">{t("tasks.logs")}</h3>
-            <span className="text-xs text-muted-soft">{logs.length ? t("tasks.lines", { count: logs.length }) : ""}</span>
+          <div className="terminal">
+            <div className="terminal-head">
+              <span className="terminal-title">
+                <span
+                  className={`dot${task?.running ? " dot-running" : ""}`}
+                  style={{ background: task?.running ? "var(--success)" : "var(--muted-soft)" }}
+                />
+                <Terminal className="w-3.5 h-3.5" />
+                {t("tasks.logs")}
+              </span>
+              <span className="terminal-count">{logs.length ? t("tasks.lines", { count: logs.length }) : ""}</span>
+            </div>
+            <pre
+              ref={preRef}
+              onScroll={onScroll}
+              className="terminal-body"
+            >
+              {logs.length
+                ? logs.map((line, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        ...LOG_LINE_STYLE[classifyLogLine(line)],
+                        // 让整行(含背景)铺满,error 浅红底覆盖整行。
+                        margin: "0 -14px",
+                        padding: "0 14px",
+                      }}
+                    >
+                      {line || " "}
+                    </div>
+                  ))
+                : t("tasks.noLogs")}
+            </pre>
           </div>
-          <pre
-            ref={preRef}
-            onScroll={onScroll}
-            className="text-[12.5px] leading-relaxed rounded p-4 overflow-auto"
-            style={{
-              background: "var(--surface-soft)",
-              border: "1px solid var(--hairline)",
-              height: "360px",
-              whiteSpace: "pre-wrap",
-              fontFamily: "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",
-              color: "var(--body)",
-            }}
-          >
-            {logs.length
-              ? logs.map((line, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      ...LOG_LINE_STYLE[classifyLogLine(line)],
-                      // 让整行(含背景)铺满,error 浅红底覆盖整行。
-                      margin: "0 -16px",
-                      padding: "0 16px",
-                    }}
-                  >
-                    {line || " "}
-                  </div>
-                ))
-              : t("tasks.noLogs")}
-          </pre>
         </section>
 
         {Number.isFinite(taskId) && <MergePanel taskId={taskId} />}
@@ -274,7 +334,7 @@ function Row({
   mono?: boolean;
 }): ReactNode {
   return (
-    <div className="flex justify-between gap-3">
+    <div className="flex justify-between gap-3 py-2.5 first:pt-0 last:pb-0 border-b border-hairline last:border-0">
       <dt className="text-muted">{label}</dt>
       <dd className={`text-ink text-right break-all ${mono ? "font-mono" : ""}`}>{value}</dd>
     </div>

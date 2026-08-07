@@ -13,7 +13,7 @@ type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
 /** 秒 → 人类可读("2h13m" / "8m" / "45s")。节点面板紧凑用,分钟四舍五入(不显示秒)。 */
 export function humanSec(sec: number | null): string {
-  if (sec == null) return "—";
+  if (sec == null) return "-";
   if (sec < 60) return `${sec}s`;
   const h = Math.floor(sec / 3600);
   const m = Math.round((sec % 3600) / 60);
@@ -22,7 +22,7 @@ export function humanSec(sec: number | null): string {
 
 /** 秒 → 精确到秒("1h37m59s" / "9m53s" / "45s")。hover 详情用(不四舍五入,整秒为 0 时省略)。 */
 export function humanSecFull(sec: number | null): string {
-  if (sec == null) return "—";
+  if (sec == null) return "-";
   const s = Math.round(sec);
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
@@ -51,9 +51,9 @@ function stepLabelMap(t: TFunc): Record<string, string> {
 export const TERMINAL = new Set(["done", "failed", "needs_manual"]);
 
 export function stateColor(state: string): string {
-  if (state === "done") return "var(--success)";
-  if (state === "failed") return "var(--error)";
-  if (state === "needs_manual") return "var(--warning)";
+  if (state === "done") return "var(--success-fg)";
+  if (state === "failed") return "var(--error-fg)";
+  if (state === "needs_manual") return "var(--warning-fg)";
   return "var(--ink)"; // 进行中
 }
 
@@ -66,9 +66,9 @@ export function runDate(streamKey: string): string {
 type NodeStatus = "done" | "active" | "skipped" | "todo" | "failed";
 
 const NODE_COLOR: Record<NodeStatus, { bg: string; fg: string; ring: string }> = {
-  done: { bg: "var(--success)", fg: "#fff", ring: "var(--success)" },
+  done: { bg: "var(--success)", fg: "var(--qr-surface)", ring: "var(--success)" },
   active: { bg: "var(--ink)", fg: "var(--canvas)", ring: "var(--ink)" },
-  failed: { bg: "var(--error)", fg: "#fff", ring: "var(--error)" },
+  failed: { bg: "var(--error)", fg: "var(--qr-surface)", ring: "var(--error)" },
   skipped: { bg: "transparent", fg: "var(--muted-soft)", ring: "var(--hairline)" },
   todo: { bg: "transparent", fg: "var(--muted-soft)", ring: "var(--hairline)" },
 };
@@ -118,7 +118,7 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
       <Tooltip content={tip}>
         <div className="flex flex-col items-center gap-1">
           <span
-            className={`inline-flex items-center justify-center rounded-full w-6 h-6${data.status === "active" ? " flow-node-active" : ""}`}
+            className="inline-flex items-center justify-center rounded-full w-6 h-6"
             style={{ background: c.bg, color: c.fg, border: `1.5px solid ${c.ring}` }}
           >
             {data.status === "done" && <Check className="w-3.5 h-3.5" />}
@@ -168,7 +168,7 @@ function CandidateNode({ data }: { data: { name: string; coveragePct: number; du
               color: win ? "var(--ink)" : "var(--muted-soft)",
             }}
           >
-            {win && <Check className="w-3 h-3 shrink-0" style={{ color: "var(--success)" }} />}
+            {win && <Check className="w-3 h-3 shrink-0" style={{ color: "var(--success-fg)" }} />}
             <span className="font-medium truncate">{data.name}</span>
           </span>
           <span className="text-[10px] font-mono leading-tight" style={{ color: win ? "var(--ink)" : "var(--muted-soft)" }}>
@@ -323,11 +323,7 @@ export function RunCard({
   const labels = stepLabelMap(t);
   return (
     <div
-      className={`px-3 py-3${onToggle ? " cursor-pointer transition-colors" : ""}`}
-      style={{
-        // 平铺列表行:无边框/圆角,展开的一条用直边左 accent 条(方形行不弯曲),靠 divide-y 分隔。
-        borderLeft: `2px solid ${expanded ? "var(--muted-soft)" : "transparent"}`,
-      }}
+      className={`px-3 py-3 ${onToggle ? "cursor-pointer transition-colors hover:bg-surface-soft" : ""}`}
       onClick={onToggle ? () => onToggle(job.streamKey) : undefined}
     >
       <div className="flex items-center justify-between gap-2">
@@ -362,14 +358,14 @@ export function RunCard({
       <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-2 text-[12px] text-muted">
         {job.winnerWorker && <span>{t("hub.jobs.selected", { worker: workerName ? workerName(job.winnerWorker) : job.winnerWorker })}</span>}
         {job.videoDurationSec != null && <span>{t("hub.jobs.duration", { time: humanSec(Math.round(job.videoDurationSec)) })}</span>}
-        {job.fails > 0 && <span style={{ color: "var(--warning)" }}>{t("hub.jobs.retries", { count: job.fails })}</span>}
+        {job.fails > 0 && <span style={{ color: "var(--warning-fg)" }}>{t("hub.jobs.retries", { count: job.fails })}</span>}
         {job.bv && (
           <a className="text-muted hover:text-ink" href={`https://www.bilibili.com/video/${job.bv}`} target="_blank" rel="noreferrer">
             {job.bv}
           </a>
         )}
       </div>
-      {job.error && <div className="text-[12px] mt-1" style={{ color: "var(--error)" }}>{job.error}</div>}
+      {job.error && <div className="text-[12px] mt-1" style={{ color: "var(--error-fg)" }}>{job.error}</div>}
       {expanded && (
         <div className="mt-3 pt-3 border-t border-hairline overflow-x-auto" onClick={(e) => e.stopPropagation()}>
           <PipelineFlow job={job} workerName={workerName} cfg={cfg} />

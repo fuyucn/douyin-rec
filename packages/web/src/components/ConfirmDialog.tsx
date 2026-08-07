@@ -19,7 +19,7 @@ interface Props {
 }
 
 /**
- * Cal.com-style confirm modal built on Base UI **AlertDialog**(替代 window.confirm)。
+ * 控制台风格确认框，基于 Base UI **AlertDialog**(替代 window.confirm)。
  * AlertDialog 语义=必须明确选择(点背景不关、Esc=取消),适合删除/清除这类破坏性确认。
  */
 export function ConfirmDialog({
@@ -39,26 +39,19 @@ export function ConfirmDialog({
         <AlertDialog.Backdrop className="modal-backdrop" />
         <div className="modal-positioner">
           <AlertDialog.Popup className="modal-card w-[92vw] max-w-sm">
-            <AlertDialog.Title className="headline text-[19px] mb-1">{title}</AlertDialog.Title>
-            {message && (
-              <AlertDialog.Description className="text-sm text-muted mb-5">
-                {message}
-              </AlertDialog.Description>
-            )}
+            <div className="modal-header">
+              <div className="min-w-0">
+                <AlertDialog.Title className="headline text-lg leading-snug">{title}</AlertDialog.Title>
+                {message && (
+                  <AlertDialog.Description className="modal-desc">{message}</AlertDialog.Description>
+                )}
+              </div>
+            </div>
             <div className="flex justify-end gap-2">
               <Button small variant="secondary" onClick={onCancel}>
                 {cancelLabel ?? t("common.cancel")}
               </Button>
-              <Button
-                small
-                variant="primary"
-                onClick={onConfirm}
-                style={
-                  destructive
-                    ? { background: "var(--error)", borderColor: "var(--error)", color: "#fff" }
-                    : undefined
-                }
-              >
+              <Button small variant={destructive ? "danger" : "primary"} onClick={onConfirm}>
                 {confirmLabel ?? t("common.confirm")}
               </Button>
             </div>

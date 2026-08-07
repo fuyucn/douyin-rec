@@ -9,7 +9,7 @@ interface Props {
   id?: string;
 }
 
-/** Cal.com-style toggle built on Base UI Switch (headless). */
+/** Base UI Switch(headless)封装。 */
 export function Switch({ checked, onCheckedChange, name, disabled, id }: Props): ReactNode {
   return (
     <BaseSwitch.Root

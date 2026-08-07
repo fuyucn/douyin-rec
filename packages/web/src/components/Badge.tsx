@@ -9,12 +9,12 @@ interface BadgeProps {
   children: ReactNode;
 }
 
-/** Generic pastel badge. */
+/** Square mono chip badge. */
 export function Badge({ tone = "badge-muted", children }: BadgeProps): ReactNode {
   return <span className={`badge ${tone}`}>{children}</span>;
 }
 
-/** A colored dot (optionally pulsing for the running state). */
+/** A square status dot (optionally pulsing for the running state). */
 export function Dot({ color, pulse }: { color: string; pulse?: boolean }): ReactNode {
   return <span className={`dot${pulse ? " dot-running" : ""}`} style={{ background: color }} />;
 }

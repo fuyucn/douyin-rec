@@ -29,11 +29,6 @@ function uploadChip(r: HubRuleDTO, t: TFunc): string {
   return t("hub.detail.chipStageOnly");
 }
 
-const chipCls = "inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-mono";
-const chipStyle = { background: "var(--surface-soft)", color: "var(--body)", border: "1px solid var(--hairline)" } as const;
-/** 统一的分区小标签:muted + 大写 + 字距,替代粗黑标题,营造层次而非盒中盒。 */
-const sectionLabel = "text-[11px] font-medium uppercase tracking-[0.07em] text-muted-soft";
-
 /** 右详情 pane:某直播间的房间头 + 配置/worker chips + 最近(或选中)run 完整 PipelineFlow + 运行记录列表。 */
 export function RoomDetail({
   rule,
@@ -122,7 +117,7 @@ export function RoomDetail({
           <IconButton title={t("hub.common.edit")} onClick={() => setEditOpen(true)}>
             <Pencil className="w-4 h-4" />
           </IconButton>
-          <IconButton title={t("hub.common.delete")} style={{ color: "var(--error)" }} onClick={() => setConfirmDelete(true)}>
+          <IconButton title={t("hub.common.delete")} style={{ color: "var(--error-fg)" }} onClick={() => setConfirmDelete(true)}>
             <Trash2 className="w-4 h-4" />
           </IconButton>
         </div>
@@ -131,23 +126,23 @@ export function RoomDetail({
       {/* 配置 + 参与 worker:并排 label+chips,无盒中盒 */}
       <div className="flex flex-wrap items-start gap-x-12 gap-y-4">
         <div>
-          <div className={`${sectionLabel} mb-2`}>{t("hub.detail.pipelineConfig")}</div>
+          <div className="section-label mb-2">{t("hub.detail.pipelineConfig")}</div>
           <div className="flex flex-wrap items-center gap-1.5">
             {outputChips(rule).map((c) => (
-              <span key={c} className={chipCls} style={chipStyle}>{c}</span>
+              <span key={c} className="chip">{c}</span>
             ))}
             <span className="text-muted-soft text-xs">→</span>
-            <span className={chipCls} style={chipStyle}>{uploadChip(rule, t)}</span>
+            <span className="chip chip-accent">{uploadChip(rule, t)}</span>
           </div>
         </div>
         <div>
-          <div className={`${sectionLabel} mb-2`}>{t("hub.detail.workersLabel")}</div>
+          <div className="section-label mb-2">{t("hub.detail.workersLabel")}</div>
           <div className="flex flex-wrap items-center gap-1.5">
             {participating === null ? (
-              <span className={chipCls} style={chipStyle}>{t("hub.detail.allWorkers")}</span>
+              <span className="chip">{t("hub.detail.allWorkers")}</span>
             ) : (
               participating.map((n, i) => (
-                <span key={i} className={chipCls} style={chipStyle}>{n}</span>
+                <span key={i} className="chip">{n}</span>
               ))
             )}
           </div>
@@ -156,7 +151,7 @@ export function RoomDetail({
 
       {/* 运行记录列表:每条 run 可展开显示它自己的完整 PipelineFlow(默认展开最近一次) */}
       <div className="mt-6 pt-6 border-t border-hairline flex items-baseline justify-between mb-3">
-        <h3 className={sectionLabel}>{t("hub.detail.runsHeading")}</h3>
+        <h3 className="section-label">{t("hub.detail.runsHeading")}</h3>
         <span className="text-[12px] text-muted-soft">{t("hub.detail.totalRuns", { count: total })}</span>
       </div>
       {!loaded ? (
@@ -164,7 +159,7 @@ export function RoomDetail({
       ) : runs.length === 0 ? (
         <div className="py-10 text-center text-muted-soft text-sm">{t("hub.detail.noRuns")}</div>
       ) : (
-        <div className="divide-y divide-hairline">
+        <div className="run-list-shell divide-y divide-hairline">
           {runs.map((j) => (
             <RunCard
               key={j.streamKey}
