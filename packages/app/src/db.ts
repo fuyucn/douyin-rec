@@ -30,6 +30,9 @@ export function openDb(path?: string): DatabaseSync {
     if (dir && dir !== ".") mkdirSync(dir, { recursive: true });
   }
   const db = new DatabaseSync(p);
+  // 节点侧 task serve 常驻持库，hub 的 _inventory/_apply-tasks 会以第二连接短时打开。
+  // 不设 busy_timeout 时一旦撞上写事务就立刻 SQLITE_BUSY，导致该轮对账把节点当成缺席。
+  db.exec("PRAGMA busy_timeout = 5000");
   migrate(db);
   return db;
 }
@@ -103,6 +106,8 @@ export function migrate(db: DatabaseSync): void {
   ensureColumn(db, "tasks", "anchorName", "TEXT");
   // 任务专属 Discord webhook（开播/录完/合并完成/错误事件）。null = 回落全局 settings.discordWebhook。
   ensureColumn(db, "tasks", "webhook", "TEXT");
+  // hub 受管标记:NULL=手动任务,'hub'=由 master hub 下发/管理的任务(Web 禁止编辑/删除)。
+  ensureColumn(db, "tasks", "managedBy", "TEXT");
   // 注:多节点 hub 配置已独立成 hub_rules 表(按 roomSlug),不再放 tasks 上。
 }
 

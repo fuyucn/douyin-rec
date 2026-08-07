@@ -25,7 +25,7 @@ import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
-import type { Recorder, RecordOpts, NotifyEvent, Notifier } from "@drec/core";
+import type { Recorder, RecordOpts, NotifyEvent, Notifier, RemoteTaskSpec } from "@drec/core";
 import { makeNotifier } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand } from "@drec/app";
 import type { HubStarter, UploadOpts } from "@drec/app";
@@ -441,12 +441,24 @@ program
 
 // ─── Hub starter: 多节点同步编排（cli L5 注入到 app L4，避免循环依赖）──────────────
 // app 不直接依赖 @drec/orchestrator（orchestrator 依赖 app），由 cli 作为 L5 入口注入。
+// web API 在 hub 规则/worker 变更后立即触发一次任务同步(不等 60s 周期 tick)。
+let hubSyncTasks: (() => Promise<void>) | undefined;
+let hubSyncPending = false;
+const requestHubSync = (): void => {
+  if (hubSyncTasks) {
+    void hubSyncTasks();
+    return;
+  }
+  hubSyncPending = true; // start 尚未就绪:等 syncTasks 定义后补跑一次
+};
+
 const hubStarter: HubStarter = {
+  requestSyncTasks: requestHubSync,
   async start(opts) {
     const { registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, hubStore, workerStore, rootHubDir, rootHubConfig, rootStageDir } = await import("@drec/app");
+    const { uploadPlain, appendGroup, hubStore, workerStore, rootHubDir, rootHubConfig, rootStageDir, listNodeTasks, applyRemoteTasks, resolveTaskCookies } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
@@ -457,6 +469,8 @@ const hubStarter: HubStarter = {
       settleMs?: number;
       pollMs?: number;
       reconcileIntervalMs?: number;
+      /** hub 任务同步周期(ms);缺省 60_000。 */
+      syncIntervalMs?: number;
       stageDir?: string;
       cookies?: string;
       cleanMaxGapSec?: number;
@@ -496,7 +510,15 @@ const hubStarter: HubStarter = {
       opts.store.listTasks().some(
         (t) => platformForRoom(t.room).extractRoomSlug(t.room) === slug && opts.manager.isRecording(t.id),
       );
-    registerBuiltinTransports({ ffprobe, taskRooms: buildTaskRooms, isRoomRecording });
+    registerBuiltinTransports({
+      ffprobe,
+      taskRooms: buildTaskRooms,
+      isRoomRecording,
+      // local worker = master 自身:hub 任务同步直接落在本机 store(与远端 `_tasks` / `_apply-tasks` 同路径)。
+      listTasks: () => listNodeTasks(opts.store),
+      // adopt=false:本机源任务保持用户可编辑(managedBy 不置 hub),只有远端节点的同步任务才锁编辑。
+      applyTasks: (input) => applyRemoteTasks(opts.store, input.desired, opts.log, { adopt: false }),
+    });
 
     const workers = hubCfg.workers ?? hubCfg.tenants ?? [];
     // loadWorkers 现读 hub.config.json(现读不缓存→UI/手改即时生效)。首启无文件时回落 --hub-config 里的 workers。
@@ -591,6 +613,78 @@ const hubStarter: HubStarter = {
         : {}),
     });
 
+    // hub 受管录制任务同步:对每个 worker 计算「期望任务」并下发。
+    // 规则里 recording.sourceTaskId 绑定的 master 任务 → 推送到规则 workers 勾选的节点;
+    // 节点侧 applyRemoteTasks 按 (platform, roomSlug) 对账(收编/更新/两阶段删除)。
+    const desiredFor = (workerId: string): RemoteTaskSpec[] => {
+      const out: RemoteTaskSpec[] = [];
+      for (const rule of hubStore.listHubRules(hubDir)) {
+        if (!rule.enabled || !rule.recording?.sourceTaskId) continue;
+        if (rule.workers && rule.workers.length > 0 && !rule.workers.includes(workerId)) continue;
+        const src = opts.store.getTask(rule.recording.sourceTaskId);
+        if (!src) continue;
+        const p = platformForRoom(src.room);
+        if (p.extractRoomSlug(src.room) !== rule.roomSlug) continue; // 绑定必须同房间
+        out.push({
+          platform: p.id,
+          roomSlug: rule.roomSlug,
+          room: src.room,
+          name: src.name,
+          quality: src.quality,
+          engine: src.engine,
+          danmu: src.danmu,
+          segmentSec: src.segmentSec,
+          scheduleStart: src.scheduleStart,
+          scheduleEnd: src.scheduleEnd,
+          enabled: src.enabled,
+          useCookie: src.useCookie,
+          cookies: resolveTaskCookies(src, opts.store.getDefaultCookies()),
+          outDir: src.outDir,
+          webhook: src.webhook,
+          anchorName: src.anchorName,
+        });
+      }
+      return out;
+    };
+    // 周期 tick 与 web API 的「变更即同步」共用同一函数:内部守卫防重入,
+    // 期间再有请求则合并成一轮补跑(期望任务是全量对账,不丢变更)。
+    let syncRunning = false;
+    let syncRequested = false;
+    const syncTasks = async (): Promise<void> => {
+      if (syncRunning) {
+        syncRequested = true;
+        return;
+      }
+      syncRunning = true;
+      try {
+        for (const w of loadWorkers()) {
+          const t = buildTransports().get(w.id);
+          if (!t?.applyTasks) continue; // 该 transport 不支持任务同步 → 跳过(下轮再试)
+          try {
+            const desired = desiredFor(w.id);
+            const r = await t.applyTasks({ desired });
+            if (r.applied.length > 0 || r.removed.length > 0 || r.pending.length > 0) {
+              opts.log(`[hub] 任务同步 ${w.id}: applied=${r.applied.length} removed=${r.removed.length} pending=${r.pending.length}`);
+            }
+          } catch (e) {
+            // 节点离线/命令失败 → 只 warn,下轮对账自愈,不打断 reconcile。
+            opts.warn(`[hub] 任务同步 ${w.id} 失败: ${(e as Error).message}`);
+          }
+        }
+      } finally {
+        syncRunning = false;
+        if (syncRequested) {
+          syncRequested = false;
+          void syncTasks();
+        }
+      }
+    };
+    hubSyncTasks = syncTasks;
+    if (hubSyncPending) {
+      hubSyncPending = false;
+      void syncTasks();
+    }
+
     const stop = startHub({
       tasks: () => opts.store.listTasks(),
       isRecording: (id: number) => opts.manager.isRecording(id),
@@ -598,10 +692,15 @@ const hubStarter: HubStarter = {
       settleMs: hubCfg.settleMs ?? 90_000,
       pollMs: hubCfg.pollMs ?? 3_000,
       reconcileIntervalMs: hubCfg.reconcileIntervalMs ?? 30 * 60_000,
+      syncTasks,
+      syncIntervalMs: hubCfg.syncIntervalMs ?? 60_000,
     });
 
     opts.log(`[hub] 已启用，${loadWorkers().length} 个 worker`);
-    return stop;
+    return () => {
+      stop();
+      hubSyncTasks = undefined;
+    };
   },
   async testWorker(cfg) {
     // 注意:不能调 registerBuiltinTransports —— 那是全量 registry.set("local", …) 覆盖,
@@ -709,6 +808,33 @@ program
     const recordingsDir = pathJoin(dataRoot, "recordings");
     const recordings = await scanRecordings(recordingsDir, taskRooms, ffprobe);
     process.stdout.write(JSON.stringify({ recordings }) + "\n");
+  });
+
+// ─── _tasks <dataRoot>（隐藏子命令，供 master 通过 SSH 调用）──────────────────────
+// 输出本节点全部任务的隐私安全投影(无 cookies)。master 的任务同步对账用。
+program
+  .command("_tasks <dataRoot>", { hidden: true })
+  .description("(内部) 输出节点任务清单 JSON(供 master ssh 调用)")
+  .action(async (dataRoot: string) => {
+    const { join: pathJoin } = await import("node:path");
+    const { TaskStore, listNodeTasks } = await import("@drec/app");
+    const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
+    process.stdout.write(JSON.stringify({ tasks: listNodeTasks(store) }) + "\n");
+  });
+
+// ─── _apply-tasks <dataRoot> <base64>（隐藏子命令，供 master 通过 SSH 调用）────────
+// base64 = JSON { desired: RemoteTaskSpec[] }。按 (platform, roomSlug) 对账:
+// 收编/新建期望任务、两阶段删除不再期望的受管任务。cookies 只走可信 ssh/本地通道。
+program
+  .command("_apply-tasks <dataRoot> <base64>", { hidden: true })
+  .description("(内部) 应用 master 下发的期望任务(供 master ssh 调用)")
+  .action(async (dataRoot: string, b64: string) => {
+    const { join: pathJoin } = await import("node:path");
+    const { TaskStore, applyRemoteTasks } = await import("@drec/app");
+    const input = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as { desired: RemoteTaskSpec[] };
+    const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
+    const result = applyRemoteTasks(store, Array.isArray(input.desired) ? input.desired : []);
+    process.stdout.write(JSON.stringify(result) + "\n");
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {

@@ -1,3 +1,5 @@
+import type { NodeTaskDTO, RemoteTaskSpec } from "@drec/core";
+
 export interface WorkerConfig { id: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string; name?: string; }
 
 export interface NodeRecording {
@@ -12,6 +14,12 @@ export interface NodeRecording {
   totalGapSec: number;       // 断流缺口总秒数(来自 gaps sidecar)
 }
 export interface NodeInventory { workerId: string; recordings: NodeRecording[]; }
+
+/** `_tasks` 远端输出:该节点全部任务的隐私安全投影(无 cookies)。 */
+export interface NodeTasks { workerId: string; tasks: NodeTaskDTO[]; }
+
+/** `_apply-tasks` 远端输出:本轮对账动作汇总。 */
+export interface ApplyTasksResult { applied: string[]; removed: string[]; pending: string[]; }
 
 export interface Transport {
   readonly id: string;
@@ -30,6 +38,10 @@ export interface Transport {
    * 不扫 recordings(区别于 listInventory)。可选:无此能力的 transport 视为「不支持探针」。
    */
   ping?(): Promise<void>;
+  /** 读取该节点的任务清单(隐藏 `_tasks` 子命令;可选:无此能力 = 不支持任务同步)。 */
+  listTasks?(): Promise<NodeTasks>;
+  /** 把 master 期望任务下发到该节点(隐藏 `_apply-tasks` 子命令;可选:无此能力 = 不支持任务同步)。 */
+  applyTasks?(input: { desired: RemoteTaskSpec[] }): Promise<ApplyTasksResult>;
 }
 
 type Factory = (cfg: WorkerConfig) => Transport;

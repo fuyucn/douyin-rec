@@ -1,7 +1,8 @@
 // packages/orchestrator/src/transport-ssh.ts
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import type { Transport, NodeInventory, NodeRecording } from "./transport.js";
+import type { RemoteTaskSpec } from "@drec/core";
+import type { ApplyTasksResult, NodeInventory, NodeRecording, NodeTasks, Transport } from "./transport.js";
 
 export interface SshOpts {
   id: string; host: string; dataRoot: string;
@@ -62,6 +63,23 @@ export class SshTransport implements Transport {
     const parsed = JSON.parse(out) as { recordings: NodeRecording[] };
     return { workerId: this.id, recordings: parsed.recordings };
   }
+
+  /** 读远端任务清单(隐藏 `_tasks` 子命令;输出不含 cookies)。 */
+  async listTasks(): Promise<NodeTasks> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const out = await this.run([`${nodePrefix} _tasks ${this.o.dataRoot}`]);
+    const parsed = JSON.parse(out) as { tasks: NodeTasks["tasks"] };
+    return { workerId: this.id, tasks: parsed.tasks };
+  }
+
+  /** 下发 master 期望任务(base64 防引号/换行问题;cookies 只走可信 ssh 通道)。 */
+  async applyTasks(input: { desired: RemoteTaskSpec[] }): Promise<ApplyTasksResult> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const b64 = Buffer.from(JSON.stringify(input), "utf-8").toString("base64");
+    const out = await this.run([`${nodePrefix} _apply-tasks ${this.o.dataRoot} ${b64}`]);
+    return JSON.parse(out) as ApplyTasksResult;
+  }
+
   async isDone(roomSlug: string): Promise<boolean> {
     // 同 listInventory:命令作单个字符串传(远端 shell 执行,glob/管道生效),不包 bash -lc。
     const out = await this.run([

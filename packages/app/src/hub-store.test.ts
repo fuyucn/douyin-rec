@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listHubRules, getHubRule, upsertHubRule, updateHubRule, removeHubRule, hubKey } from "./hub-store.js";
@@ -11,13 +11,14 @@ beforeEach(() => {
 });
 
 describe("hub-store(文件版,按平台限定 key)", () => {
-  it("upsert 由 room 派生 {platform}.{roomSlug} 写文件 + get/list 往返", () => {
+  it("upsert 由 platform+roomSlug 写 {key}.json + get/list 往返", () => {
     const pipeline = { steps: { burnDanmu: false }, upload: { mode: "stage" as const, tag: "t", tid: 21 } };
-    const r = upsertHubRule(dir, { room: "https://live.douyin.com/123456", pipeline });
+    const r = upsertHubRule(dir, { platform: "douyin", roomSlug: "123456", room: "https://live.douyin.com/123456", pipeline });
     expect(r.roomSlug).toBe("123456");
     expect(r.platform).toBe("douyin");
     expect(r.key).toBe("douyin.123456");
     expect(r.enabled).toBe(true);
+    expect(r.room).toBe("https://live.douyin.com/123456");
     // 文件名 = {platform}.{roomSlug}.json
     expect(existsSync(join(dir, "douyin.123456.json"))).toBe(true);
     expect(getHubRule(dir, "douyin.123456")!.pipeline).toEqual(pipeline);
@@ -25,8 +26,8 @@ describe("hub-store(文件版,按平台限定 key)", () => {
   });
 
   it("跨平台同房间号不撞(douyin.123 vs bilibili.123)", () => {
-    upsertHubRule(dir, { room: "https://live.douyin.com/123", pipeline: { steps: { burnDanmu: true } } });
-    upsertHubRule(dir, { room: "https://live.bilibili.com/123", pipeline: { steps: { burnDanmu: false } } });
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "123", pipeline: { steps: { burnDanmu: true } } });
+    upsertHubRule(dir, { platform: "bilibili", roomSlug: "123", pipeline: { steps: { burnDanmu: false } } });
     expect(existsSync(join(dir, "douyin.123.json"))).toBe(true);
     expect(existsSync(join(dir, "bilibili.123.json"))).toBe(true);
     expect(listHubRules(dir)).toHaveLength(2);
@@ -35,21 +36,21 @@ describe("hub-store(文件版,按平台限定 key)", () => {
   });
 
   it("upsert 同 key = 覆盖;缺省字段沿用已有", () => {
-    upsertHubRule(dir, { room: "https://live.douyin.com/123456", enabled: true, pipeline: { steps: { burnDanmu: true } } });
-    const r2 = upsertHubRule(dir, { room: "https://live.douyin.com/123456", enabled: false });
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "123456", enabled: true, pipeline: { steps: { burnDanmu: true } } });
+    const r2 = upsertHubRule(dir, { platform: "douyin", roomSlug: "123456", enabled: false });
     expect(r2.enabled).toBe(false);
     expect(r2.pipeline).toEqual({ steps: { burnDanmu: true } });
     expect(listHubRules(dir)).toHaveLength(1);
   });
 
   it("update 部分改(按 key);不存在返回 null", () => {
-    upsertHubRule(dir, { room: "https://live.douyin.com/123456" });
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "123456" });
     expect(updateHubRule(dir, "douyin.123456", { enabled: false })!.enabled).toBe(false);
     expect(updateHubRule(dir, "douyin.nope", { enabled: true })).toBeNull();
   });
 
   it("remove 删文件(按 key);不存在返回 false", () => {
-    upsertHubRule(dir, { room: "https://live.douyin.com/123456" });
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "123456" });
     expect(removeHubRule(dir, "douyin.123456")).toBe(true);
     expect(existsSync(join(dir, "douyin.123456.json"))).toBe(false);
     expect(getHubRule(dir, "douyin.123456")).toBeNull();
@@ -59,9 +60,24 @@ describe("hub-store(文件版,按平台限定 key)", () => {
   it("坏 JSON / 缺失目录不抛:list 跳过、get 返 null", () => {
     expect(listHubRules(join(dir, "nonexistent"))).toEqual([]);
     writeFileSync(join(dir, "douyin.bad.json"), "{not json", "utf-8");
-    upsertHubRule(dir, { room: "https://live.douyin.com/999" });
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "999" });
     expect(listHubRules(dir).map((r) => r.key)).toEqual(["douyin.999"]);
     expect(getHubRule(dir, "douyin.bad")).toBeNull();
+  });
+
+  it("room 可选:不带 room 落盘不写该字段,读取由文件名还原 roomSlug", () => {
+    const r = upsertHubRule(dir, { platform: "douyin", roomSlug: "123456" });
+    expect(r.room).toBe("");
+    expect(r.roomSlug).toBe("123456");
+    expect(JSON.parse(readFileSync(join(dir, "douyin.123456.json"), "utf-8")).room).toBeUndefined();
+  });
+
+  it("遗留文件含 room 字段仍按 room 还原显示", () => {
+    writeFileSync(join(dir, "douyin.123456.json"), JSON.stringify({ room: "https://live.douyin.com/123456", enabled: false }));
+    const r = getHubRule(dir, "douyin.123456")!;
+    expect(r.room).toBe("https://live.douyin.com/123456");
+    expect(r.roomSlug).toBe("123456");
+    expect(r.enabled).toBe(false);
   });
 
   it("hubKey 拼接", () => {
@@ -70,7 +86,7 @@ describe("hub-store(文件版,按平台限定 key)", () => {
 
   it("workers 字段创建/更新往返 + 其余字段(room/enabled/pipeline)保留", () => {
     const pipeline = { steps: { burnDanmu: false }, upload: { mode: "stage" as const, tag: "t", tid: 21 } };
-    const r = upsertHubRule(dir, { room: "https://live.douyin.com/123456", pipeline, workers: ["local", "vps2"] });
+    const r = upsertHubRule(dir, { platform: "douyin", roomSlug: "123456", room: "https://live.douyin.com/123456", pipeline, workers: ["local", "vps2"] });
     expect(r.workers).toEqual(["local", "vps2"]);
     // 落盘往返
     expect(getHubRule(dir, "douyin.123456")!.workers).toEqual(["local", "vps2"]);
@@ -80,7 +96,7 @@ describe("hub-store(文件版,按平台限定 key)", () => {
     expect(u.pipeline).toEqual(pipeline);   // pipeline 保留
     expect(u.enabled).toBe(true);           // enabled 保留
     // 缺省(老规则)= 无 workers 字段
-    const bare = upsertHubRule(dir, { room: "https://live.douyin.com/999" });
+    const bare = upsertHubRule(dir, { platform: "douyin", roomSlug: "999" });
     expect(bare.workers).toBeUndefined();
   });
 });

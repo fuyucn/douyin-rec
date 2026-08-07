@@ -3,7 +3,10 @@
 export { buildTaskCommand, buildCookieCommand } from "./cli-task.js";
 export type { HubStarter } from "./cli-task.js";
 export { TaskStore } from "./store.js";
+export { resolveTaskCookies } from "./store.js";
 export type { Task } from "./store.js";
+export { listNodeTasks, applyRemoteTasks } from "./task-sync.js";
+export type { ApplyTasksResult } from "./task-sync.js";
 // 文件版 hub 任务配置(<root>/config/hub/{roomSlug}.json):cli reconciler + api 用。
 export * as hubStore from "./hub-store.js";
 export type { HubRule } from "./hub-store.js";

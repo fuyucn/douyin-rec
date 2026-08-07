@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { groupSessions, mergeSessions } from "@drec/post-process";
 import { resolveMesioBin } from "@drec/record-engine";
 import { APP_VERSION } from "../version.js";
-import type { RecordingSessionDTO, HubRulePayload, HubRuleDTO, HubPipelineConfig, WorkerDTO, WorkerTestResult, WorkerStatus } from "@drec/core";
+import type { RecordingSessionDTO, HubRulePayload, HubRuleDTO, HubPipelineConfig, HubRecordingConfig, WorkerDTO, WorkerTestResult, WorkerStatus } from "@drec/core";
 import { listPlatforms, platformForRoom } from "@drec/core";
 import * as hubStore from "../hub-store.js";
 import type { HubRule } from "../hub-store.js";
@@ -101,6 +101,8 @@ export interface ApiDeps {
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<WorkerTestResult>;
   /** 批量存活探针(CLI 注入)。省略(hub 未开)→ status 端点返回 []。 */
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  /** 立即触发一次 hub 任务同步(hub 规则/worker 变更后由 web API 调用;省略=只等周期 tick)。 */
+  requestSyncTasks?: () => void;
 }
 
 /**
@@ -332,6 +334,10 @@ export function makeApi(deps: ApiDeps): Api {
   const hubDir = deps.hubDir ?? rootHubDir();
   // hub.config.json 路径(worker 数组的真理源);注入 > rootHubConfig()。
   const hubConfigPath = deps.hubConfigPath ?? rootHubConfig();
+  // 该任务是否被任一启用中的 hub 规则绑定为 source task。只有这类任务的手动启停
+  // 成功后才需要立即同步到节点；普通任务启停不触发 hub 对账。
+  const isHubSourceTask = (id: number): boolean =>
+    hubStore.listHubRules(hubDir).some((r) => r.enabled && r.recording?.sourceTaskId === id);
   const workerToDto = (w: workerStore.WorkerConfig): WorkerDTO => ({
     id: w.id, name: w.name ?? w.id, kind: w.kind, host: w.host, dataRoot: w.dataRoot, apiUrl: w.apiUrl,
   });
@@ -383,20 +389,47 @@ export function makeApi(deps: ApiDeps): Api {
 
   // hub 规则 → DTO:补 anchorName(若有同 roomSlug 的录制任务,显示其主播名/任务名)。
   const hubRuleView = (r: HubRule): HubRuleDTO => {
-    const t = store.listTasks().find(
+    const srcTask = r.recording?.sourceTaskId
+      ? store.listTasks().find(
+          (task) =>
+            task.id === r.recording!.sourceTaskId &&
+            platformForRoom(task.room).extractRoomSlug(task.room) === r.roomSlug,
+        ) ?? null
+      : null;
+    const t = srcTask ?? store.listTasks().find(
       (task) => platformForRoom(task.room).extractRoomSlug(task.room) === r.roomSlug,
     );
     const anchorName = t ? manager.getAnchorName(t.id) ?? t.anchorName ?? t.name ?? null : null;
     return {
       key: r.key,
       roomSlug: r.roomSlug,
-      room: r.room,
+      // 新规则文件不再由用户填 room:显示用房间取关联任务(遗留文件仍自带 room)。
+      room: r.room || srcTask?.room || "",
       platform: r.platform,
       enabled: r.enabled,
       pipeline: r.pipeline,
       workers: r.workers,
+      recording: r.recording,
+      sourceTask: srcTask
+        ? {
+            id: srcTask.id,
+            room: srcTask.room,
+            name: srcTask.name,
+            anchorName: srcTask.anchorName,
+            enabled: srcTask.enabled,
+          }
+        : null,
       anchorName,
     };
+  };
+
+  // 校验 hub 规则绑定的 source task:必须存在且与规则同 roomSlug。
+  const recordingError = (sourceTaskId: number | null | undefined, roomSlug: string): string | null => {
+    if (!sourceTaskId) return null;
+    const t = store.getTask(Number(sourceTaskId));
+    if (!t) return "recording.sourceTaskId 指向的任务不存在";
+    if (platformForRoom(t.room).extractRoomSlug(t.room) !== roomSlug) return "recording.sourceTaskId 与规则房间不一致";
+    return null;
   };
 
   // 任务录制目录 = {outDir}/{子目录}/,子目录与 buildSavePathRule 一致:
@@ -462,7 +495,11 @@ export function makeApi(deps: ApiDeps): Api {
     },
 
     updateTask(id: number, input: UpdateTaskInput): ApiResult {
-      if (!store.getTask(id)) return err(404, `未找到任务 id=${id}`);
+      const existing = store.getTask(id);
+      if (!existing) return err(404, `未找到任务 id=${id}`);
+      if (existing.managedBy === "hub") {
+        return err(403, `任务 id=${id} 由 hub 管理，请在 master 上修改`);
+      }
 
       // Build a patch with ONLY the keys the client actually sent, so omitted
       // fields stay untouched (store.updateTask keys off `in patch`).
@@ -529,6 +566,9 @@ export function makeApi(deps: ApiDeps): Api {
     async deleteTask(id: number): Promise<ApiResult> {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
+      if (t.managedBy === "hub") {
+        return err(403, `任务 id=${id} 由 hub 管理，请在 master 上删除`);
+      }
       if (t.enabled || manager.isRunning(id)) {
         return err(409, `任务 id=${id} 仍启用或运行中，请先停止再删除`);
       }
@@ -543,9 +583,17 @@ export function makeApi(deps: ApiDeps): Api {
     startTask(id: number): ApiResult {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
-      store.setEnabled(id, true);
-      const eligible = inWindow(nowMinutesLocal(new Date()), t.scheduleStart, t.scheduleEnd);
-      if (eligible && !manager.isRunning(id)) manager.start(id);
+      if (t.managedBy === "hub") return err(403, `任务 id=${id} 由 hub 管理，请在 master 上操作`);
+      try {
+        store.setEnabled(id, true);
+        const eligible = inWindow(nowMinutesLocal(new Date()), t.scheduleStart, t.scheduleEnd);
+        if (eligible && !manager.isRunning(id)) manager.start(id);
+      } catch (e) {
+        // 启动失败要把 enabled 回滚，避免下一轮周期同步把失败状态传到节点。
+        try { store.setEnabled(id, false); } catch { /* 回滚失败以原始错误为准 */ }
+        return err(500, `启动任务失败: ${(e as Error).message}`);
+      }
+      if (isHubSourceTask(id)) deps.requestSyncTasks?.();
       return { status: 200, body: view(store.getTask(id)!) };
     },
 
@@ -556,8 +604,15 @@ export function makeApi(deps: ApiDeps): Api {
     async stopTask(id: number): Promise<ApiResult> {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
-      store.setEnabled(id, false);
-      if (manager.isRunning(id)) await manager.stop(id);
+      if (t.managedBy === "hub") return err(403, `任务 id=${id} 由 hub 管理，请在 master 上操作`);
+      try {
+        store.setEnabled(id, false);
+        if (manager.isRunning(id)) await manager.stop(id);
+      } catch (e) {
+        try { store.setEnabled(id, true); } catch { /* 回滚失败以原始错误为准 */ }
+        return err(500, `停止任务失败: ${(e as Error).message}`);
+      }
+      if (isHubSourceTask(id)) deps.requestSyncTasks?.();
       return { status: 200, body: view(store.getTask(id)!) };
     },
 
@@ -745,12 +800,25 @@ export function makeApi(deps: ApiDeps): Api {
       return { status: 200, body: hubStore.listHubRules(hubDir).map(hubRuleView) };
     },
     createHubRule(input: HubRulePayload): ApiResult {
-      const room = (input.room ?? "").trim();
-      if (!room) return err(400, "缺少房间地址 room");
       const werr = validateWorkers(input);
       if (werr) return err(400, werr);
+      const sourceTaskId = input.recording?.sourceTaskId;
+      if (!sourceTaskId) return err(400, "新建 hub 规则必须绑定 source task（房间取自该任务）");
+      const task = store.getTask(Number(sourceTaskId));
+      if (!task) return err(400, "recording.sourceTaskId 指向的任务不存在");
+      const platform = platformForRoom(task.room);
+      const roomSlug = platform.extractRoomSlug(task.room);
       try {
-        const rule = hubStore.upsertHubRule(hubDir, { room, enabled: input.enabled, pipeline: input.pipeline, workers: input.workers });
+        const rule = hubStore.upsertHubRule(hubDir, {
+          platform: platform.id,
+          roomSlug,
+          room: task.room,
+          enabled: input.enabled,
+          pipeline: input.pipeline,
+          recording: input.recording,
+          workers: input.workers,
+        });
+        deps.requestSyncTasks?.();
         return { status: 201, body: hubRuleView(rule) };
       } catch (e) {
         return err(400, `无法解析房间地址: ${(e as Error).message}`);
@@ -759,17 +827,24 @@ export function makeApi(deps: ApiDeps): Api {
     updateHubRule(key: string, input: HubRulePayload): ApiResult {
       const werr = validateWorkers(input);
       if (werr) return err(400, werr);
-      const patch: { enabled?: boolean; pipeline?: HubPipelineConfig; workers?: string[] } = {};
+      const dot = key.indexOf(".");
+      const ruleSlug = dot < 0 ? key : key.slice(dot + 1);
+      const rerr = recordingError(input.recording?.sourceTaskId, ruleSlug);
+      if (rerr) return err(400, rerr);
+      const patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[] } = {};
       if ("enabled" in input) patch.enabled = input.enabled;
       if ("pipeline" in input) patch.pipeline = input.pipeline;
+      if ("recording" in input) patch.recording = input.recording;
       if ("workers" in input) patch.workers = input.workers;
       const updated = hubStore.updateHubRule(hubDir, key, patch);
       if (!updated) return err(404, `未找到 hub 规则 key=${key}`);
+      deps.requestSyncTasks?.();
       return { status: 200, body: hubRuleView(updated) };
     },
     deleteHubRule(key: string): ApiResult {
       const ok = hubStore.removeHubRule(hubDir, key);
       if (!ok) return err(404, `未找到 hub 规则 key=${key}`);
+      deps.requestSyncTasks?.();
       return { status: 200, body: { ok: true, key } };
     },
     listHubJobs(opts: { room?: string; limit?: number; offset?: number } = {}): ApiResult {
@@ -801,6 +876,7 @@ export function makeApi(deps: ApiDeps): Api {
         const w = workerStore.createWorker(hubConfigPath, {
           name: input.name ?? undefined, kind: input.kind ?? "", host: input.host, dataRoot: input.dataRoot, apiUrl: input.apiUrl,
         });
+        deps.requestSyncTasks?.();
         return { status: 201, body: workerToDto(w) };
       } catch (e) { return err(400, (e as Error).message); }
     },
@@ -809,6 +885,7 @@ export function makeApi(deps: ApiDeps): Api {
       try {
         const w = workerStore.updateWorker(hubConfigPath, id, input);
         if (!w) return err(404, `未找到 worker id=${id}`);
+        deps.requestSyncTasks?.();
         return { status: 200, body: workerToDto(w) };
       } catch (e) { return err(400, (e as Error).message); }
     },
@@ -817,6 +894,7 @@ export function makeApi(deps: ApiDeps): Api {
       try {
         const ok = workerStore.deleteWorker(hubConfigPath, id);
         if (!ok) return err(404, `未找到 worker id=${id}`);
+        deps.requestSyncTasks?.();
         return { status: 200, body: { ok: true, id } };
       } catch (e) { return err(400, (e as Error).message); }
     },

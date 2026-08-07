@@ -1,9 +1,11 @@
 /**
  * hub-store.ts — 文件版 hub 任务配置存储(**唯一真理源 = 磁盘文件**)。
  *
- * 每个房间一份 `<hubDir>/{platform}.{roomSlug}.json`,内容 `{ room, enabled, pipeline }`。
+ * 每个房间一份 `<hubDir>/{platform}.{roomSlug}.json`,内容 `{ room?, enabled, pipeline }`。
  * **按平台限定**:roomSlug(web_rid)只在单平台内唯一,douyin 的 123456 与 bilibili 的 123456
  * 会撞,故 key = `{platform}.{roomSlug}`(= 文件名 stem + API 路由 id;两段都不含点,按首个 `.` 切)。
+ * **房间身份来自绑定的 master 任务**:create 时 API 由 `recording.sourceTaskId` 解析出
+ * platform + roomSlug 作为 key;`room` 仅作显示用(由任务派生写入,可省略)。
  *
  * 设计要点(见 docs/multi-node-sync-followups.md):
  *   - **现读不缓存**:每次调用都读磁盘 → UI 与手改文件天然同步(无两份存储要对齐)。
@@ -12,7 +14,7 @@
  */
 import { readdirSync, readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { platformForRoom, type HubPipelineConfig } from "@drec/core";
+import { platformForRoom, type HubPipelineConfig, type HubRecordingConfig } from "@drec/core";
 import { normalizeRoom } from "./store.js";
 
 /** 一条 hub 规则(内存表示;持久化为 {key}.json)。 */
@@ -24,15 +26,18 @@ export interface HubRule {
   room: string;
   enabled: boolean;
   pipeline: HubPipelineConfig;
+  /** 录制下发配置(sourceTaskId 非空 → hub 把该 task 同步到 workers 勾选的节点)。 */
+  recording?: HubRecordingConfig;
   /** 选中参与该房间 hub 处理的 worker id;缺省/空 = 全部(向后兼容)。 */
   workers?: string[];
 }
 
-/** 磁盘文件的形状(key/roomSlug/platform 不存盘,由 room 派生)。 */
+/** 磁盘文件的形状(key/roomSlug/platform 不存盘;room 为显示用,新规则由 source task 派生可省略)。 */
 interface HubFile {
-  room: string;
+  room?: string;
   enabled?: boolean;
   pipeline?: HubPipelineConfig;
+  recording?: HubRecordingConfig;
   workers?: string[];
 }
 
@@ -67,6 +72,7 @@ function fileToRule(stem: string, raw: HubFile): HubRule {
     // 文件省略 enabled 视为启用(文件存在=已配置;enabled 仅作开关)。
     enabled: raw.enabled !== false,
     pipeline: raw.pipeline ?? {},
+    recording: raw.recording,
     // workers 缺省 = undefined(= 全部 worker,向后兼容)。只在文件显式含时透出。
     workers: raw.workers,
   };
@@ -112,17 +118,26 @@ export function getHubRule(dir: string, key: string): HubRule | null {
   return readRule(dir, key);
 }
 
-/** 新建/覆盖:由 room 派生 platform+roomSlug+key → 写 {key}.json(缺省字段沿用已有)。 */
+/** 新建/覆盖:由显式 platform+roomSlug 定 key → 写 {key}.json(room 可选,仅作显示;缺省字段沿用已有)。 */
 export function upsertHubRule(
   dir: string,
-  input: { room: string; enabled?: boolean; pipeline?: HubPipelineConfig; workers?: string[] },
+  input: {
+    platform: string;
+    roomSlug: string;
+    room?: string;
+    enabled?: boolean;
+    pipeline?: HubPipelineConfig;
+    recording?: HubRecordingConfig;
+    workers?: string[];
+  },
 ): HubRule {
-  const { key } = deriveKey(input.room);
+  const key = hubKey(input.platform, input.roomSlug);
   const existing = readRule(dir, key);
   writeRule(dir, key, {
-    room: normalizeRoom(input.room),
+    ...(input.room ? { room: normalizeRoom(input.room) } : {}),
     enabled: input.enabled ?? existing?.enabled ?? true,
     pipeline: input.pipeline ?? existing?.pipeline ?? {},
+    recording: input.recording ?? existing?.recording,
     // workers 缺省沿用已有(undefined = 全部);显式传才覆盖。
     workers: input.workers ?? existing?.workers,
   });
@@ -133,14 +148,15 @@ export function upsertHubRule(
 export function updateHubRule(
   dir: string,
   key: string,
-  patch: { enabled?: boolean; pipeline?: HubPipelineConfig; workers?: string[] },
+  patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[] },
 ): HubRule | null {
   const existing = readRule(dir, key);
   if (!existing) return null;
   writeRule(dir, key, {
-    room: existing.room,
+    ...(existing.room ? { room: existing.room } : {}),
     enabled: patch.enabled ?? existing.enabled,
     pipeline: patch.pipeline ?? existing.pipeline,
+    recording: patch.recording ?? existing.recording,
     // 部分更新:未传 workers 沿用已有;传了(UI 总传非空列表)才覆盖。
     workers: patch.workers ?? existing.workers,
   });

@@ -231,6 +231,8 @@ export interface WebServerDeps {
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
   /** 批量存活探针(CLI 注入)。省略 → status 端点返回 []。 */
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  /** 立即触发一次 hub 任务同步(规则/worker 变更后调用,不用等周期 tick)。 */
+  requestSyncTasks?: () => void;
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {}). */
@@ -408,6 +410,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     hubConfigPath: deps.hubConfigPath,
     testWorker: deps.testWorker,
     probeAllWorkers: deps.probeAllWorkers,
+    requestSyncTasks: deps.requestSyncTasks,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);
       const n = mj.recoverOrphans(); // 启动:清理上次重启腰斩的合成 job

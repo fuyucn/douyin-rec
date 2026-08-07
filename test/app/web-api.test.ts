@@ -25,6 +25,8 @@ class MockManager implements ManagerLike {
   private running = new Set<number>();
   readonly startCalls: number[] = [];
   readonly stopCalls: number[] = [];
+  startError: Error | null = null;
+  stopError: Error | null = null;
   /** Test-controllable per-task log lines. */
   readonly logs = new Map<number, string[]>();
 
@@ -36,12 +38,14 @@ class MockManager implements ManagerLike {
   }
   start(id: number): boolean {
     this.startCalls.push(id);
+    if (this.startError) throw this.startError;
     if (this.running.has(id)) return false;
     this.running.add(id);
     return true;
   }
   async stop(id: number): Promise<void> {
     this.stopCalls.push(id);
+    if (this.stopError) throw this.stopError;
     this.running.delete(id);
   }
   readonly gracefulCalls: number[] = [];
@@ -357,6 +361,48 @@ describe("startTask", () => {
     expect(manager.startCalls).toEqual([]); // 已在跑，不重复 start
     expect(store.getTask(a.id)!.enabled).toBe(true);
   });
+
+  it("hub source task 手动启动成功 → 触发立即任务同步", () => {
+    const requestSyncTasks = vi.fn();
+    const hubDir = mkdtempSync(join(tmpdir(), "start-sync-"));
+    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const t = a.createTask({ room: "111" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
+    requestSyncTasks.mockClear(); // 建规则本身已触发过一次同步，这里只测手动启停
+    expect(a.startTask(t.id).status).toBe(200);
+    expect(requestSyncTasks).toHaveBeenCalledTimes(1);
+  });
+
+  it("非 hub 任务启动成功 → 不触发同步", () => {
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({ store, manager, hubDir: mkdtempSync(join(tmpdir(), "start-nohub-")), requestSyncTasks });
+    const t = a.createTask({ room: "111" }).body as { id: number };
+    expect(a.startTask(t.id).status).toBe(200);
+    expect(requestSyncTasks).not.toHaveBeenCalled();
+  });
+
+  it("受管任务禁止手动启动 → 403 且不触发同步", () => {
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({ store, manager, hubDir: mkdtempSync(join(tmpdir(), "start-managed-")), requestSyncTasks });
+    const t = store.addTask({ room: "111", managedBy: "hub" });
+    expect(a.startTask(t.id).status).toBe(403);
+    expect(store.getTask(t.id)!.enabled).toBe(false);
+    expect(requestSyncTasks).not.toHaveBeenCalled();
+  });
+
+  it("manager.start 抛错 → 500、enabled 回滚、不触发同步", () => {
+    const requestSyncTasks = vi.fn();
+    const hubDir = mkdtempSync(join(tmpdir(), "start-error-"));
+    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const t = a.createTask({ room: "111" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
+    requestSyncTasks.mockClear();
+    manager.startError = new Error("spawn failed");
+    const res = a.startTask(t.id);
+    expect(res.status).toBe(500);
+    expect(store.getTask(t.id)!.enabled).toBe(false); // 失败不落库，也不外传
+    expect(requestSyncTasks).not.toHaveBeenCalled();
+  });
 });
 
 describe("stopTask", () => {
@@ -372,6 +418,52 @@ describe("stopTask", () => {
 
   it("404 for missing task", async () => {
     expect((await api.stopTask(9999)).status).toBe(404);
+  });
+
+  it("hub source task 手动停止成功 → 触发立即任务同步", async () => {
+    const requestSyncTasks = vi.fn();
+    const hubDir = mkdtempSync(join(tmpdir(), "stop-sync-"));
+    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const t = a.createTask({ room: "111" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
+    requestSyncTasks.mockClear();
+    store.setEnabled(t.id, true);
+    expect((await a.stopTask(t.id)).status).toBe(200);
+    expect(requestSyncTasks).toHaveBeenCalledTimes(1);
+  });
+
+  it("非 hub 任务停止成功 → 不触发同步", async () => {
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({ store, manager, hubDir: mkdtempSync(join(tmpdir(), "stop-nohub-")), requestSyncTasks });
+    const t = a.createTask({ room: "111" }).body as { id: number };
+    store.setEnabled(t.id, true);
+    expect((await a.stopTask(t.id)).status).toBe(200);
+    expect(requestSyncTasks).not.toHaveBeenCalled();
+  });
+
+  it("受管任务禁止手动停止 → 403 且不触发同步", async () => {
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({ store, manager, hubDir: mkdtempSync(join(tmpdir(), "stop-managed-")), requestSyncTasks });
+    const t = store.addTask({ room: "111", managedBy: "hub", enabled: true });
+    expect((await a.stopTask(t.id)).status).toBe(403);
+    expect(store.getTask(t.id)!.enabled).toBe(true);
+    expect(requestSyncTasks).not.toHaveBeenCalled();
+  });
+
+  it("manager.stop 抛错 → 500、enabled 回滚、不触发同步", async () => {
+    const requestSyncTasks = vi.fn();
+    const hubDir = mkdtempSync(join(tmpdir(), "stop-error-"));
+    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const t = a.createTask({ room: "111" }).body as { id: number };
+    store.setEnabled(t.id, true);
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
+    requestSyncTasks.mockClear();
+    manager.forceRunning(t.id);
+    manager.stopError = new Error("SIGTERM timeout");
+    const res = await a.stopTask(t.id);
+    expect(res.status).toBe(500);
+    expect(store.getTask(t.id)!.enabled).toBe(true); // 失败保持原状态，不外传
+    expect(requestSyncTasks).not.toHaveBeenCalled();
   });
 });
 
@@ -701,36 +793,142 @@ describe("hub rules workers 字段(校验 + 往返)", () => {
   }
   it("createHubRule 带空 workers → 400", () => {
     const a = apiWithHubDir();
-    const r = a.createHubRule({ room: "https://live.douyin.com/123456", workers: [] });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    const r = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: [] });
     expect(r.status).toBe(400);
   });
   it("createHubRule 带非空 workers → 201 且回显", () => {
     const a = apiWithHubDir();
-    const r = a.createHubRule({ room: "https://live.douyin.com/123456", workers: ["local", "vps2"] });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    const r = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local", "vps2"] });
     expect(r.status).toBe(201);
     expect((r.body as { workers?: string[] }).workers).toEqual(["local", "vps2"]);
   });
   it("createHubRule 不带 workers → 201(向后兼容,workers 缺省)", () => {
     const a = apiWithHubDir();
-    const r = a.createHubRule({ room: "https://live.douyin.com/123456" });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    const r = a.createHubRule({ recording: { sourceTaskId: t.id } });
     expect(r.status).toBe(201);
     expect((r.body as { workers?: string[] }).workers).toBeUndefined();
   });
   it("createHubRule workers 含非字符串 → 400", () => {
     const a = apiWithHubDir();
-    const r = a.createHubRule({ room: "https://live.douyin.com/123456", workers: [1 as unknown as string] });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    const r = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: [1 as unknown as string] });
     expect(r.status).toBe(400);
   });
   it("updateHubRule 改 workers 生效", () => {
     const a = apiWithHubDir();
-    a.createHubRule({ room: "https://live.douyin.com/123456", workers: ["local", "vps2"] });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local", "vps2"] });
     const u = a.updateHubRule("douyin.123456", { workers: ["local"] });
     expect(u.status).toBe(200);
     expect((u.body as { workers?: string[] }).workers).toEqual(["local"]);
   });
   it("updateHubRule 带空 workers → 400", () => {
     const a = apiWithHubDir();
-    a.createHubRule({ room: "https://live.douyin.com/123456", workers: ["local"] });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
     expect(a.updateHubRule("douyin.123456", { workers: [] }).status).toBe(400);
+  });
+});
+
+describe("hub 规则/worker 变更立即触发任务同步", () => {
+  it("createHubRule 成功后调用 requestSyncTasks", () => {
+    const requestSyncTasks = vi.fn();
+    const hubDir = mkdtempSync(join(tmpdir(), "hubsync-"));
+    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    expect(requestSyncTasks).not.toHaveBeenCalled();
+    const r = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
+    expect(r.status).toBe(201);
+    expect(requestSyncTasks).toHaveBeenCalledTimes(1);
+  });
+  it("update/deleteHubRule 成功后也触发;校验失败不触发", () => {
+    const requestSyncTasks = vi.fn();
+    const hubDir = mkdtempSync(join(tmpdir(), "hubsync-"));
+    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id } });
+    expect(requestSyncTasks).toHaveBeenCalledTimes(1);
+    expect(a.updateHubRule("douyin.123456", { enabled: false }).status).toBe(200);
+    expect(a.deleteHubRule("douyin.123456").status).toBe(200);
+    expect(requestSyncTasks).toHaveBeenCalledTimes(3);
+    expect(a.createHubRule({}).status).toBe(400);
+    expect(requestSyncTasks).toHaveBeenCalledTimes(3);
+  });
+  it("create/update/deleteWorker 成功后触发", () => {
+    const requestSyncTasks = vi.fn();
+    const cfg = join(mkdtempSync(join(tmpdir(), "wsync-")), "hub.config.json");
+    writeFileSync(cfg, JSON.stringify({ workers: [{ id: "local", kind: "local", dataRoot: "/data" }] }));
+    const a = makeApi({ store, manager, hubEnabled: true, hubConfigPath: cfg, requestSyncTasks });
+    expect(a.createWorker({ kind: "ssh", host: "1.2.3.4", dataRoot: "/drec" }).status).toBe(201);
+    expect(a.updateWorker("worker-1", { name: "港2" }).status).toBe(200);
+    expect(a.deleteWorker("worker-1").status).toBe(200);
+    expect(requestSyncTasks).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("hub 受管任务与规则录制下发", () => {
+  function apiWithHubDir(): ReturnType<typeof makeApi> {
+    const hubDir = mkdtempSync(join(tmpdir(), "hubmanaged-"));
+    return makeApi({ store, manager, hubDir });
+  }
+  it("受管任务(managedBy=hub)禁止编辑 → 403 且字段不动", () => {
+    const a = apiWithHubDir();
+    const t = store.addTask({ room: "123456", managedBy: "hub" });
+    const r = a.updateTask(t.id, { name: "hack" });
+    expect(r.status).toBe(403);
+    expect(store.getTask(t.id)!.name).toBeNull();
+  });
+  it("受管任务禁止删除 → 403(即使已停用)", async () => {
+    const a = apiWithHubDir();
+    const t = store.addTask({ room: "123456", managedBy: "hub", enabled: false });
+    const r = await a.deleteTask(t.id);
+    expect(r.status).toBe(403);
+    expect(store.getTask(t.id)).not.toBeNull();
+  });
+  it("createHubRule 绑定不存在的 sourceTask → 400", () => {
+    const a = apiWithHubDir();
+    const r = a.createHubRule({ recording: { sourceTaskId: 9999 } });
+    expect(r.status).toBe(400);
+  });
+  it("createHubRule 未绑定 sourceTask → 400", () => {
+    const a = apiWithHubDir();
+    const r = a.createHubRule({});
+    expect(r.status).toBe(400);
+  });
+  it("createHubRule 绑定 sourceTask → 201,房间/key 取自任务,DTO 解析 sourceTask", () => {
+    const a = apiWithHubDir();
+    const t = a.createTask({ room: "123456", name: "主播A" }).body as { id: number };
+    const r = a.createHubRule({ workers: ["local"], recording: { sourceTaskId: t.id } });
+    expect(r.status).toBe(201);
+    const body = r.body as {
+      key: string;
+      room: string;
+      roomSlug: string;
+      recording?: { sourceTaskId?: number | null };
+      sourceTask?: { id: number; name: string | null } | null;
+    };
+    expect(body.key).toBe("douyin.123456");
+    expect(body.roomSlug).toBe("123456");
+    expect(body.room).toBe("https://live.douyin.com/123456");
+    expect(body.recording?.sourceTaskId).toBe(t.id);
+    expect(body.sourceTask?.id).toBe(t.id);
+    expect(body.sourceTask?.name).toBe("主播A");
+    const listed = (a.listHubRules().body as Array<{ recording?: { sourceTaskId?: number | null }; sourceTask?: { id: number } | null }>)
+      .find((x) => x.recording?.sourceTaskId === t.id)!;
+    expect(listed.sourceTask?.id).toBe(t.id);
+  });
+  it("updateHubRule 可挂载 / 清空 recording", () => {
+    const a = apiWithHubDir();
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id } });
+    const clear = a.updateHubRule("douyin.123456", { recording: { sourceTaskId: null } });
+    expect(clear.status).toBe(200);
+    expect((clear.body as { recording?: { sourceTaskId?: number | null } }).recording?.sourceTaskId).toBeNull();
+    const attach = a.updateHubRule("douyin.123456", { recording: { sourceTaskId: t.id } });
+    expect(attach.status).toBe(200);
+    expect((attach.body as { recording?: { sourceTaskId?: number | null } }).recording?.sourceTaskId).toBe(t.id);
   });
 });

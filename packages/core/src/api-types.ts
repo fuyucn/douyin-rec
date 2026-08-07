@@ -19,13 +19,19 @@ export interface HubPipelineConfig {
   upload?: { mode?: "stage" | "upload"; private?: boolean; tag?: string; tid?: number; desc?: string };
 }
 
+/** hub 规则里「录制下发」的配置:绑定 master 本地 task,自动同步到选中的 worker 节点。 */
+export interface HubRecordingConfig {
+  /** master 本地任务的 id(身份跨节点仍是 (platform, roomSlug));null/缺省 = 不下发。 */
+  sourceTaskId?: number | null;
+}
+
 /** 一条 hub 规则(GET /api/hub/rules)。按平台限定,持久化为 <root>/config/hub/{platform}.{roomSlug}.json。 */
 export interface HubRuleDTO {
   /** `{platform}.{roomSlug}` —— 全局唯一 id(文件名 stem + API 路由参数;跨平台不撞)。 */
   key: string;
   /** 房间 ID(web_rid);单平台内唯一。 */
   roomSlug: string;
-  /** 用户输入的房间地址(显示用,文件内 room 字段)。 */
+  /** 显示用房间地址(新规则取自关联 source task;遗留文件自带 room 字段)。 */
   room: string;
   platform: string;
   /** 规则启用?false = 暂停该房间的 hub 处理。 */
@@ -34,6 +40,16 @@ export interface HubRuleDTO {
   pipeline: HubPipelineConfig;
   /** 选中参与该房间 hub 处理的 worker id;缺省/空 = 全部 worker(向后兼容)。 */
   workers?: string[];
+  /** 录制下发配置(sourceTaskId 非空 → hub 把该 task 同步到 workers 勾选的节点)。 */
+  recording?: HubRecordingConfig;
+  /** 关联的 master 录制任务显示投影(由后端按 recording.sourceTaskId 解析;无则 null)。 */
+  sourceTask?: {
+    id: number;
+    room: string;
+    name: string | null;
+    anchorName: string | null;
+    enabled: boolean;
+  } | null;
   /** 主播名(若有同 roomSlug 的录制任务/录像可关联显示);未知 null。 */
   anchorName?: string | null;
 }
@@ -117,12 +133,56 @@ export interface HubJobsDTO {
 
 /** POST /api/hub/rules + PATCH /api/hub/rules/:roomSlug 的请求体。 */
 export interface HubRulePayload {
-  /** 房间地址或房间号(归一化解析出 roomSlug);create 必填。 */
+  /** 遗留兼容:旧创建接口传 room。新创建不再需要,房间由 recording.sourceTaskId 派生。 */
   room?: string;
   enabled?: boolean;
   pipeline?: HubPipelineConfig;
   /** 选中的 worker id;present 时后端校验必须为非空 string[]。缺省 = 全部 worker。 */
   workers?: string[];
+  /** 录制下发配置(sourceTaskId → hub 自动同步到选中节点)。 */
+  recording?: HubRecordingConfig;
+}
+
+/** 单个 node 上的任务投影(`_tasks` 隐藏子命令输出,永不含 cookies)。 */
+export interface NodeTaskDTO {
+  id: number;
+  platform: string;
+  roomSlug: string;
+  room: string;
+  name: string | null;
+  quality: string;
+  engine: string;
+  danmu: number;
+  segmentSec: number;
+  scheduleStart: string | null;
+  scheduleEnd: string | null;
+  status: string;
+  useCookie: boolean;
+  enabled: boolean;
+  outDir: string | null;
+  webhook: string | null;
+  managedBy: string | null;
+  anchorName: string | null;
+}
+
+/** master → node 的期望任务(applyTasks;含 cookies,只走可信 ssh/本地通道)。 */
+export interface RemoteTaskSpec {
+  platform: string;
+  roomSlug: string;
+  room: string;
+  name: string | null;
+  quality: string;
+  engine: string;
+  danmu: number;
+  segmentSec: number;
+  scheduleStart: string | null;
+  scheduleEnd: string | null;
+  enabled: boolean;
+  useCookie: boolean;
+  cookies: string | null;
+  outDir: string | null;
+  webhook: string | null;
+  anchorName: string | null;
 }
 
 /** POST /api/tasks + PATCH /api/tasks/:id 的请求体(部分字段;录制专属,hub 配置见 HubRule)。 */
@@ -166,6 +226,8 @@ export interface TaskDTO {
   id: number;
   room: string;
   name: string | null;
+  /** hub 受管标记:null=手动,'hub'=由 master hub 下发管理(禁止编辑/删除)。 */
+  managedBy: string | null;
   quality: string;
   /** 下载引擎 id(ffmpeg / mesio)。 */
   engine: string;

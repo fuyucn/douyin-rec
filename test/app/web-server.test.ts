@@ -223,9 +223,20 @@ describe("createWebServer (live)", () => {
   });
 
   it("hub rules CRUD via http(文件版,key={platform}.{roomSlug};建/删落到 hubDir 文件)", async () => {
+    // 新规则必须绑定一个 master 源任务:房间/roomSlug 从该任务派生。
+    const task = await fetch(`${base}/api/tasks`, {
+      method: "POST",
+      body: JSON.stringify({ room: "654321" }),
+    });
+    expect(task.status).toBe(201);
+    const { id: sourceTaskId } = (await task.json()) as { id: number };
+
     const create = await fetch(`${base}/api/hub/rules`, {
       method: "POST",
-      body: JSON.stringify({ room: "https://live.douyin.com/654321", pipeline: { steps: { burnLivechat: false } } }),
+      body: JSON.stringify({
+        recording: { sourceTaskId },
+        pipeline: { steps: { burnLivechat: false } },
+      }),
     });
     expect(create.status).toBe(201);
     const rule = (await create.json()) as { key: string; roomSlug: string; platform: string; enabled: boolean; pipeline: { steps?: { burnLivechat?: boolean } } };

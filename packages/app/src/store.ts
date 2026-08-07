@@ -56,6 +56,11 @@ export interface Task {
    * settings.discordWebhook。见 resolveTaskWebhook。
    */
   webhook: string | null;
+  /**
+   * hub 受管标记：null = 手动任务；'hub' = 由 master hub 下发/管理的任务。受管任务的
+   * 配置由 hub 同步维护，Web UI/API 禁止编辑、删除。普通录制/调度路径不关心该字段。
+   */
+  managedBy: string | null;
 }
 
 /** Fields accepted when adding a task. Defaults applied for omitted values. */
@@ -82,6 +87,10 @@ export interface TaskInput {
   createdAt?: string;
   /** 任务专属 Discord webhook;null/省略 = 回落全局。 */
   webhook?: string | null;
+  /** hub 受管标记;省略 = null(手动任务)。仅内部同步路径可写,Web 不暴露。 */
+  managedBy?: string | null;
+  /** 主播名(收编/下发时同步 master 侧);省略 = null。仅内部同步路径可写,Web 不暴露。 */
+  anchorName?: string | null;
 }
 
 /** Raw row shape as returned by node:sqlite (danmu/segmentSec are bigint-or-number). */
@@ -104,6 +113,7 @@ interface TaskRow {
   createdAt: string;
   anchorName: string | null;
   webhook: string | null;
+  managedBy: string | null;
 }
 
 /**
@@ -162,6 +172,7 @@ function rowToTask(r: TaskRow): Task {
     createdAt: r.createdAt,
     anchorName: r.anchorName ?? null,
     webhook: r.webhook ?? null,
+    managedBy: r.managedBy ?? null,
   };
 }
 
@@ -210,8 +221,8 @@ export class TaskStore {
     const stmt = this.db.prepare(
       `INSERT INTO tasks
          (room, platform, name, quality, engine, danmu, segmentSec, cookies, outDir,
-          scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook, managedBy, anchorName)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       room,
@@ -230,6 +241,8 @@ export class TaskStore {
       (input.enabled ?? false) ? 1 : 0,
       createdAt,
       input.webhook ?? null,
+      input.managedBy ?? null,
+      input.anchorName ?? null,
     );
     const id = Number(info.lastInsertRowid);
     const task = this.getTask(id);
@@ -264,7 +277,10 @@ export class TaskStore {
         | "useCookie"
         | "enabled"
         | "webhook"
-      >
+      > & {
+        /** 自动抓取的主播名(收编时同步 master 侧名称;不在 TaskInput 上,仅 updateTask 可写)。 */
+        anchorName?: string | null;
+      }
     >,
   ): Task | null {
     const existing = this.getTask(id);
@@ -311,6 +327,7 @@ export class TaskStore {
     if ("useCookie" in patch) set("useCookie", patch.useCookie ? 1 : 0);
     if ("enabled" in patch) set("enabled", patch.enabled ? 1 : 0);
     if ("webhook" in patch) set("webhook", patch.webhook ?? null);
+    if ("anchorName" in patch) set("anchorName", patch.anchorName ?? null);
 
     if (cols.length === 0) return this.getTask(id); // nothing to change
 
@@ -361,6 +378,14 @@ export class TaskStore {
     const info = this.db
       .prepare(`UPDATE tasks SET enabled = ? WHERE id = ?`)
       .run(on ? 1 : 0, id);
+    return Number(info.changes) > 0;
+  }
+
+  /** 设置 hub 受管标记(null = 手动,'hub' = 受管)。仅内部同步路径调用。 */
+  setManagedBy(id: number, v: string | null): boolean {
+    const info = this.db
+      .prepare(`UPDATE tasks SET managedBy = ? WHERE id = ?`)
+      .run(v, id);
     return Number(info.changes) > 0;
   }
 
