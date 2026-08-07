@@ -178,10 +178,14 @@ export class PlaywrightQrLogin implements QrLogin {
       );
     }
 
-    const launchOpts: Record<string, unknown> = {
-      headless: this.headless,
-      args: ["--disable-blink-features=AutomationControlled"],
-    };
+    const args = ["--disable-blink-features=AutomationControlled"];
+    // Docker 里我们是 root：chromium 自带 sandbox 在 root 下直接拒绝启动
+    // （"Running as root without --no-sandbox is not supported"）→ 检测到
+    // linux+uid0 就关沙箱。非容器场景（macOS 本机开发）不受影响。
+    if (process.platform === "linux" && process.getuid?.() === 0) {
+      args.push("--no-sandbox", "--disable-setuid-sandbox");
+    }
+    const launchOpts: Record<string, unknown> = { headless: this.headless, args };
     if (this.channel) launchOpts.channel = this.channel;
 
     this.log(`[login] 启动 chromium headless=${this.headless}…`);

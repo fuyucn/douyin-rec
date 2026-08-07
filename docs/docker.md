@@ -73,7 +73,12 @@ CONFIG_DIR=/srv/douyin/config
 
 ## 设置抖音 Cookie（容器内）
 
-镜像**不含 playwright/chromium**（省体积），所以**扫码登录不可用**。用手动粘贴：
+镜像**含 playwright + chromium**（runtime 阶段 `npm install playwright@$PLAYWRIGHT_VERSION` 到 `/app/node_modules`
++ `playwright install --with-deps chromium`，浏览器落 `/root/.cache/ms-playwright`，代价约 +500MB），所以
+**「扫码登录」在容器里可用**：Web 控制台顶部点扫码 → 抖音 App 扫 → cookie 自动落库。
+容器以 root 跑，`qr-login.ts` 检测到 linux+uid0 会自动加 `--no-sandbox`（否则 chromium 拒绝启动）。
+
+抖音风控偶尔不给二维码（报「未能在登录页找到二维码」），此时回落手动粘贴：
 
 1. 打开 Web 控制台 → 顶部「手动粘贴」。
 2. 浏览器登录抖音，复制 cookie 字符串（含 `sessionid`、`sid_guard`），粘进去保存。

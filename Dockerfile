@@ -62,6 +62,18 @@ RUN MESIO_LIBC=gnu sh /tmp/install-mesio.sh /app/bin && rm /tmp/install-mesio.sh
 COPY scripts/install-biliup.sh /tmp/install-biliup.sh
 RUN BILIUP_LIBC=gnu sh /tmp/install-biliup.sh /usr/local/bin && rm /tmp/install-biliup.sh
 
+# playwright + chromium:抖音扫码登录(qr-login.ts 动态 import("playwright"))唯一依赖。
+# bundle 把 playwright 标 external,故运行时必须有真模块:装进 /app/node_modules
+# (dist/douyin-rec.mjs 在 /app/dist → node 向上找到 /app/node_modules,能解析裸 "playwright")。
+# 浏览器落 /root/.cache/ms-playwright;--with-deps 顺带装 chromium 的系统库。
+# 版本与根 package.json 对齐(playwright ^1.60.0):npm 包与浏览器构建号必须同版本。
+# 代价:镜像 +~500MB。不想要就删这两行,扫码登录回落到「本地扫 + 手动粘贴 cookie」。
+ARG PLAYWRIGHT_VERSION=1.60.0
+RUN npm install --no-save --no-package-lock playwright@${PLAYWRIGHT_VERSION} \
+ && npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium \
+ && npm cache clean --force \
+ && rm -rf /var/lib/apt/lists/*
+
 # 只拷构建产物（bundle 自包含依赖，无需 node_modules）。
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/packages/web/dist ./web/dist
@@ -80,5 +92,5 @@ ENV NODE_ENV=production \
 EXPOSE 7860
 
 # task serve：Web 控制台(7860) + 定时调度（默认开，按各任务 schedule 本地时区窗口自动启停；
-# 无窗口=24h，窗口结束优雅排空、不腰斩直播）。QR 登录需 playwright（镜像未装）→ 用手动粘贴 cookie。
+# 无窗口=24h，窗口结束优雅排空、不腰斩直播）。QR 扫码登录可用（镜像内含 playwright+chromium）。
 CMD ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860"]
