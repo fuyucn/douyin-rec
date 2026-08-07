@@ -155,28 +155,30 @@ export class Reconciler {
     return pending;
   }
 
-  async reconcileAll(): Promise<void> {
-    // 实时重载:重建 transports(反映 hub.config.json 最新 workers);同步给 pipeline 用的那份。
-    if (this.loadTransports) this.transports = this.loadTransports();
-    const transports = this.transports;
-
-    // 1. Concurrently fetch all inventories; 挂起的租户经 inventoryWithTimeout 降级为空(不锁死整轮),
-    //    出错的租户也降级为空,均不中止其余节点。
+  /**
+   * 收一份权威清单并聚类:
+   * 1. Concurrently fetch all inventories; 挂起的租户经 inventoryWithTimeout 降级为空(不锁死整轮),
+   *    出错的租户也降级为空,均不中止其余节点。
+   * 2. Cluster recordings across nodes into broadcasts —— 按每条录像的 platform 聚类(多平台)。
+   *    this.platform 仅作旧录像(meta 无 platform)的兜底默认。
+   * 2.5 按每场规则解析 cfg + **worker 硬过滤**(单一插入点:聚类后、settle 前)。
+   *   - resolveCfg 返回 null(房间没开 hub)→ 清空 members → settle 不等它、循环跳过。
+   *   - cfg.workers 显式非空 → 只留 workerId∈workers 的成员;缺省/空 = 全部(向后兼容)。
+   */
+  private async collect(transports: Map<string, Transport>): Promise<{
+    broadcasts: ReturnType<typeof clusterBroadcasts>;
+    cfgByKey: Map<string, PipelineCfg>;
+  }> {
     const invs = await Promise.all(
       [...transports.values()].map((t) => this.inventoryWithTimeout(t)),
     );
 
-    // 2. Cluster recordings across nodes into broadcasts —— 按每条录像的 platform 聚类(多平台)。
-    //    this.platform 仅作旧录像(meta 无 platform)的兜底默认。
     const broadcasts = clusterBroadcasts(
       invs.map((i) => ({ workerId: i.workerId, recordings: i.recordings })),
       undefined,
       this.platform,
     );
 
-    // 2.5 按每场规则解析 cfg + **worker 硬过滤**(单一插入点:聚类后、settle 前)。
-    //   - resolveCfg 返回 null(房间没开 hub)→ 清空 members → settle 不等它、循环跳过。
-    //   - cfg.workers 显式非空 → 只留 workerId∈workers 的成员;缺省/空 = 全部(向后兼容)。
     const cfgByKey = new Map<string, PipelineCfg>();
     for (const b of broadcasts) {
       let cfg = this.pipelineDeps.cfg;
@@ -190,9 +192,22 @@ export class Reconciler {
       }
       cfgByKey.set(b.streamKey, cfg);   // 过滤后仍有/无成员都缓存;空成员在循环里跳过
     }
+    return { broadcasts, cfgByKey };
+  }
+
+  async reconcileAll(): Promise<void> {
+    // 实时重载:重建 transports(反映 hub.config.json 最新 workers);同步给 pipeline 用的那份。
+    if (this.loadTransports) this.transports = this.loadTransports();
+    const transports = this.transports;
+
+    // 第一份清单只用来确定「要等哪些场收播」;settle 期间节点可能还在写新分段,
+    // 旧快照会漏尾巴 → settle 后必须再收一份权威清单,选优/合并只用新快照。
+    const first = await this.collect(transports);
 
     // 3. Settle: 只等(过滤后)仍有成员的场收播;返回仍在录的成员 key 集。
-    const stillRecording = await this.settleAll(broadcasts);
+    const stillRecording = await this.settleAll(first.broadcasts);
+
+    const { broadcasts, cfgByKey } = await this.collect(transports);
 
     // 4. For each broadcast: idempotent upsert + run pipeline if needed.
     for (const b of broadcasts) {

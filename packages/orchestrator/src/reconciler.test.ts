@@ -397,8 +397,64 @@ describe("Reconciler", () => {
     await rec.reconcileAll();
     expect(seen.at(-1)).toEqual(["new-node"]);   // 用的是重建后的 transports
     // old-node 已不在 current 里 → 第二轮的 inventory 只应来自 new-node(证明真的重建了 Map,不是沿用旧的)。
-    expect(tOld.listInventory).toHaveBeenCalledTimes(1);
-    expect(tNew.listInventory).toHaveBeenCalledTimes(1);
+    // 每轮 reconcile = settle 前收一次清单 + settle 后刷新一次权威清单。
+    expect(tOld.listInventory).toHaveBeenCalledTimes(2);
+    expect(tNew.listInventory).toHaveBeenCalledTimes(2);
+    ledger.close();
+  });
+
+  it("场景M(settle 后刷新清单): 收播等待期间新分段落盘 → pipeline 用刷新后的完整分段", async () => {
+    const ledger = freshLedger();
+    const partial = makeRec({
+      sessionBase: "主播_2026-06-22_08-00-00",
+      tsFiles: ["/remote/a_000.ts"],
+      xmlPath: "/remote/danmu.xml",
+      durationSec: 60,
+      startMs: new Date("2026-06-22T08:00:00Z").getTime(),
+      endMs: new Date("2026-06-22T08:01:00Z").getTime(),
+    });
+    const full = {
+      ...partial,
+      tsFiles: ["/remote/a_000.ts", "/remote/a_001.ts"],
+      durationSec: 120,
+      endMs: new Date("2026-06-22T08:02:00Z").getTime(),
+    };
+    let inv = [partial];        // settle 前:只扫到第 1 段
+    let isDoneCalls = 0;
+    const t1: Transport = {
+      id: "node-1",
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockImplementation(async () => ({ workerId: "node-1", recordings: inv })),
+      // 第一次说未收播并模拟「等待期间新分段落盘」;第二次起收播 → 刷新清单必须拿到 full。
+      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockImplementation(async () => {
+        isDoneCalls++;
+        if (isDoneCalls === 1) { inv = [full]; return false; }
+        return true;
+      }),
+      pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
+    };
+    const transports = new Map([["node-1", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    let captured: Broadcast | undefined;
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => {
+        captured = b;
+        ledger.markDone(b.streamKey, "BV_M");
+        return { state: "done", bv: "BV_M" };
+      },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin",
+      transports,
+      ledger,
+      pipelineDeps,
+      runPipeline: spyRunPipeline,
+      settle: { maxWaitMs: 50, pollMs: 1 },
+      sleep: fastSleep,
+    });
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(captured?.members[0].rec.tsFiles).toHaveLength(2);   // 用了刷新后的完整分段
+    expect(captured?.members[0].rec.durationSec).toBe(120);
     ledger.close();
   });
 
