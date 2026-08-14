@@ -1,10 +1,10 @@
 # 架构
 
-pnpm workspace monorepo，12 个包，收敛成 **2 个可插拔接缝** + **1 个多节点编排层**：
+pnpm workspace monorepo，13 个包，收敛成 **2 个可插拔接缝** + **1 个多节点编排层**：
 
 - **平台轴**（`<平台>-live`）—— 平台专属的一切：取流（`getStream`）+ 弹幕（`connectDanmu`）+ 开播判定（`getLiving`）。接新平台 = 写一个 `<平台>-live` 实现 `Platform` 接口 + `registerPlatform` 一行。
 - **引擎轴**（`record-engine`）—— 平台无关的下载：通用 `PollingRecorder` + 下载引擎策略（`ffmpeg` / `mesio`）。加新引擎 = 写一个 `DownloadEngine` 策略 + `registerEngine` 一行，所有平台立即可用。
-- **多节点 hub**（`orchestrator`）—— master/slave 跨节点同步，**多副本冗余 + read-repair**:各节点跑**同一套 task configs**（镜像 master 的任务表，非匿名随录）各录一份冗余副本，master 经 SSH 拿各节点录像清单 → 按 (platform, roomSlug) 聚成一场 → 覆盖度选优（选最完整副本）→ 拉取 → 合并/烧录 → 穿插上传 B 站。**master 只做读侧协调，不下发任务**（相同 configs 靠人工镜像）。配置文件化（`config/hub/{platform}.{roomSlug}.json`）。详见 [multi-node-sync.md](./multi-node-sync.md)。
+- **多节点 hub**（`orchestrator`）—— master/slave 跨节点：hub 规则**绑定 master 本地任务**（`recording.sourceTaskId`）并**自动下发到选中 worker 节点**（远端受管任务只读），各节点共录冗余副本；master 经 SSH 拿各节点录像清单 → 按 (platform, roomSlug) 聚成一场 → 覆盖度选优（选最完整副本）→ 拉取 → 合并/烧录 → 穿插上传 B 站。配置文件化（`config/hub/{platform}.{roomSlug}.json` + `hub.config.json`）。详见 [multi-node-sync.md](./multi-node-sync.md)。
 
 依赖**只能向下**（`test/arch/layering.test.ts` 守护：每个包的 rank 必须严格大于它依赖的任何包；新增包须在 `RANKS` 登记）。esbuild 把 `cli` 打成自包含单文件 `dist/douyin-rec.mjs`（+ 独立的 `dist/tui.mjs`）。
 
@@ -20,7 +20,7 @@ flowchart TB
     cli["<b>cli</b><br/>record / merge / burn / probe + task<br/>providers-register: 注册平台 + 引擎"]
   end
   subgraph L45["L4.5 · 多节点 hub (master 编排)"]
-    orch["<b>orchestrator</b><br/>Transport(local/ssh/tailscale-ssh)<br/>identity(按 platform,roomSlug 聚类) / select(覆盖度选优)<br/>reconciler / pipeline(选优→pull→merge→burn→穿插上传) / SyncLedger"]
+    orch["<b>orchestrator</b><br/>Transport(local/ssh/tailscale-ssh)<br/>identity(按 platform,roomSlug 聚类) / select(覆盖度选优)<br/>reconciler / pipeline(选优→pull→merge→burn→穿插上传) / SyncLedger<br/>受管任务下发(_tasks/_apply-tasks)"]
   end
   subgraph L4["L4 · 有状态应用"]
     app["<b>app</b><br/>db / store(房间归一化+平台校验) / hub-store(文件版 hub 规则)<br/>task-manager / daemon(定时) / scheduler<br/>web(api+server) / login(扫码) / upload / events / notify"]
@@ -37,6 +37,7 @@ flowchart TB
   end
   subgraph L0["L0 · 基础叶子"]
     core["<b>core</b><br/>Platform / DownloadEngine 契约<br/>+ 注册表 + types/config/notify/api-types + log"]
+    observ["<b>observability</b><br/>Notifier / EventCenter / 日志"]
     post["<b>post-process</b><br/>concat / burn / ass / merge / ffmpeg / fonts"]
     extra["<b>ffmpeg-recorder-extra</b><br/>logStreamMeta + detectDevice"]
     tui["<b>tui</b><br/>Ink 终端控制台 (独立 bundle)"]
@@ -47,6 +48,7 @@ flowchart TB
   orch --> post
   orch --> core
   cli --> app
+  cli --> observ
   cli --> manager
   cli --> douyin
   cli --> bilibili
@@ -54,6 +56,7 @@ flowchart TB
   cli --> post
   cli --> core
   app --> manager
+  app --> observ
   app --> douyin
   app --> engine
   app --> post
@@ -111,15 +114,16 @@ flowchart LR
 
 ## 多节点 hub 数据流（直播结束 → 选优 → 上传）
 
-**master**（`task serve --hub`）编排多个 **slave**（`task serve`，无 `--hub`）。**心智模型 = 多副本冗余 + read-repair**：各节点跑**同一套 task configs**（镜像 master 的任务表——同房间 + 同画质/弹幕/cookie/窗口，非「匿名随录」）各录一份全量副本；master 是**只读协调者**，经 SSH 主动够到 slave（不需要 slave 跑 hub 服务），选最完整那份 → 合并发布。**注意方向**：master **不下发任务**（那套相同 configs 目前靠人工镜像 → 「配置漂移」是真正痛点）；「master 下发任务、节点回报」是未实现的写侧（见 [multi-node-sync.md](./multi-node-sync.md) 心智模型 + followups 的集中式任务管理）。
+**master**（`task serve --hub`）编排多个 **slave**（`task serve`，无 `--hub`）。**心智模型 = 受管任务下发 + 多副本冗余 + read-repair**：在 master 建好录制任务后，hub 规则绑定该任务（`recording.sourceTaskId`）并勾选 worker 节点，master 把任务定义下发到各节点（远端任务 `managedBy='hub'`，Web 只读、不可改删启停；本机源任务保持可编辑），各节点各自录一份全量副本；master 经 SSH 主动够到 slave（不需要 slave 跑 hub 服务），选最完整那份 → 合并发布。
 
 ```mermaid
 flowchart TB
-  subgraph nodes["各节点(镜像同一 task 表·各录冗余副本)"]
+  subgraph nodes["各节点(受管任务·各录冗余副本)"]
     dk["docker(local)<br/>recordings/ + {base}.session.json"]
     vps["VPS(slave)<br/>recordings/ + {base}.session.json"]
   end
   subgraph master["master = docker 的 orchestrator"]
+    sync["任务同步<br/>_apply-tasks(local/ssh)"]
     inv["listInventory<br/>local 直接 scan / 远端 ssh _inventory"]
     cluster["identity 聚类<br/>(platform, roomSlug) → streamKey"]
     sel["select 选优<br/>覆盖度优先(完整录全)"]
@@ -128,6 +132,8 @@ flowchart TB
     up["穿插上传<br/>P1 上传 ∥ 烧录, append 分P"]
     led[("SyncLedger<br/>sync_jobs / candidates")]
   end
+  sync -->|"受管任务(只读)"| dk
+  sync -->|"受管任务(只读)"| vps
   dk --> inv
   vps -->|ssh| inv
   inv --> cluster --> sel --> pull --> merge --> up

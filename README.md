@@ -9,18 +9,19 @@
 - **全流程完成**：录制 / 弹幕 / 合并 / 烧录(danmu + livechat) / 投稿 / Discord 通知 / sqlite 持久化任务 / 子进程化录制 / 定时调度(跨夜窗口) / Web 控制台(REST + SPA) / 终端 TUI。
 - **引擎策略化录制**(通用 `record-engine` + 引擎 `ffmpeg`[默认,.ts] / `mesio`[rust-srec,.flv],任务字段 `engine` 选):取流靠平台 `getStream`(抖音 vendored a_bogus 签名,匿名不踢手机),引擎平台无关;已对真实直播 live 端到端验证。
 - **Platform 抽象**：平台专属逻辑收口 `Platform` 接口 + 注册表(matchUrl/getStream/getLiving/connectDanmu/…),抖音与 bilibili **均完整实装**(取流 + 弹幕);接第二平台 = 写 `<平台>-live` 包 + 注册一行。
-- **多节点 hub**(`orchestrator`):master/slave 跨节点选优(覆盖度,完整录全优先)→ 合并 → 穿插上传;配置文件化(`config/hub/{platform}.{roomSlug}.json`);多平台(douyin/bilibili 同房间号不撞)。已双节点双平台实测。
-- pnpm workspace,12 包,主线在 `main`。
+- **多节点 hub**(`orchestrator`):master/slave 跨节点选优(覆盖度,完整录全优先)→ 合并 → 穿插上传;hub 规则可**绑定 master 录制任务并按选中节点下发受管任务**(远端只读);配置文件化(`config/hub/{platform}.{roomSlug}.json` + `hub.config.json`);多平台(douyin/bilibili 同房间号不撞)。已双节点双平台实测。
+- pnpm workspace,13 包,主线在 `main`。
 
 ## 架构
 
-pnpm workspace（12 包），收敛成 **2 个可插拔接缝** + **1 个多节点编排层**:**平台轴**(各 `<平台>-live`,平台专属取流+弹幕)+ **引擎轴**(`record-engine`,平台无关下载)+ **多节点 hub**(`orchestrator`,master/slave 跨节点选优合并上传),其余全通用。依赖只能向下（`test/arch/layering.test.ts` 守护）。esbuild 把 `cli` 打成 `dist/douyin-rec.mjs`(+ `dist/tui.mjs`)。
+pnpm workspace（13 包），收敛成 **2 个可插拔接缝** + **1 个多节点编排层**:**平台轴**(各 `<平台>-live`,平台专属取流+弹幕)+ **引擎轴**(`record-engine`,平台无关下载)+ **多节点 hub**(`orchestrator`,master/slave **任务下发** + 跨节点选优合并上传),其余全通用。依赖只能向下（`test/arch/layering.test.ts` 守护）。esbuild 把 `cli` 打成 `dist/douyin-rec.mjs`(+ `dist/tui.mjs`)。
 
 > 📐 **架构图(依赖分层 + 运行时数据流,mermaid)：[docs/architecture.md](./docs/architecture.md)**(GitHub 直接渲染);可交互版 [docs/architecture.html](./docs/architecture.html)。
 
 ```
 packages/
 ├── core/                  # 契约 + 注册表:Platform 接口 + DownloadEngine 接口 + 注册表 + types/config/notify/api-types + log(scoped logger)
+├── observability/         # 日志/通知实现:Notifier/EventCenter/TaskLogStore/FileLogger(接口在 core)
 ├── post-process/          # 后处理纯函数:concat / burn / ass(rolling·livechat·multi·emoji·render) / merge / ffmpeg / fonts
 ├── ffmpeg-recorder-extra/ # 附加:流信息 logStreamMeta + 设备检测 detectDevice
 ├── tui/                   # Ink 终端控制台(独立打包 dist/tui.mjs)
@@ -28,7 +29,7 @@ packages/
 ├── douyin-live/           # 【平台轴】douyinPlatform:src/{stream(vendored a_bogus 取流)+ danmaku(自有 TS WS 客户端,仅签名/schema vendored)} + probe + index 装配
 ├── bilibili-live/         # 【平台轴】bilibiliPlatform:getStream(getRoomPlayInfo,headers 带 referer)/getLiving;connectDanmu 实装(WBI 签名 + 二进制 WS 协议)
 ├── manager/               # RecordingSession:会话编排 + onLive 经 platform.connectDanmu 连弹幕 + 健康告警 + 断流重连 + 会话级 xml + {base}.session.json sidecar(身份+缺口)
-├── orchestrator/          # 【多节点 hub】Transport(local/ssh/tailscale-ssh) + identity(按 platform,roomSlug 聚类) + select(覆盖度选优) + reconciler + pipeline(选优→pull→merge→burn→穿插上传) + SyncLedger
+├── orchestrator/          # 【多节点 hub】Transport(local/ssh/tailscale-ssh) + identity(按 platform,roomSlug 聚类) + select(覆盖度选优) + reconciler + pipeline(选优→pull→merge→burn→穿插上传) + SyncLedger + 受管任务下发(task-sync)
 ├── app/                   # stateful:db/store(房间归一化+平台校验) / hub-store(文件版 hub 规则) / task-manager / daemon / web(api+server) / events / login / upload
 ├── cli/                   # 入口:record/merge/burn/probe + task(serve [--hub]) · providers-register(注册平台 douyin/bilibili + 引擎 ffmpeg/mesio)
 └── web/                   # React19 + jotai + @base-ui/react + Tailwind v4 前端 → packages/web/dist,由 app/web/server 托管
@@ -156,8 +157,8 @@ node dist/douyin-rec.mjs task tui --api http://localhost:7861   # 连别的 serv
 # 生产：docker，:7860（.env 的 PORT），DB 在 docker-data/db
 docker compose up -d
 
-# 开发：本地，:7861，独立库 douyin-rec-local.db
-pnpm serve:local        # = task serve --port 7861 --db ./douyin-rec-local.db（默认含调度）
+# 开发：本地，:7861，独立数据根 data-local（db 在 data-local/db）
+pnpm serve:local        # = DOUYIN_REC_ROOT=./data-local task serve --port 7861（默认含调度）
 
 # TUI 分别连：
 pnpm tui                # docker  :7860
@@ -192,19 +193,15 @@ docker compose down           # 停
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `TZ` | `Asia/Shanghai` | 仅作容器启动前几毫秒 + `date` 等诊断命令的参考值；**调度实际用的时区由 config 决定**(`settings.timezone`,未设默认也是 `Asia/Shanghai`,启动时 `applyTimezone()` 覆盖 `process.env.TZ`,不看这个 env)。查/改走 `GET`/`POST /api/timezone`,或看启动日志 `[tz] 时区 = ...` |
+| `DATA_ROOT` | `./docker-data` | 宿主机**单一数据根** → 容器 `/output-data`（内部固定：`db/` `recordings/` `config/`） |
+| `TS_AUTHKEY` | 无（必填） | Tailscale 可复用 auth key（sidecar 用；docker 作 master 时经它够到 VPS） |
 | `PORT` | `7860` | Web UI 宿主机端口 |
-| `DB_DIR` | `./docker-data/db` | 宿主机 DB 目录（→ 容器 `/data/douyin-rec.db`） |
-| `OUTPUT_DIR` | `./docker-data/output` | 录像输出目录（任务未单独设 outDir 时用，env `DOUYIN_REC_OUTPUT`） |
-| `CONFIG_DIR` | `./docker-data/config` | 放 biliup `cookies.json` / 可选 `config.yaml`（→ `/config`） |
+| `BIND` | `0.0.0.0` | 端口绑定网卡；有公网 IP 时建议改具体内网/Tailscale IP |
+| `TZ` | `Asia/Shanghai` | 仅作容器启动前几毫秒 + `date` 等诊断命令的参考值；**调度实际用的时区由 config 决定**(`settings.timezone`,未设默认也是 `Asia/Shanghai`,启动时 `applyTimezone()` 覆盖 `process.env.TZ`,不看这个 env)。查/改走 `GET`/`POST /api/timezone`,或看启动日志 `[tz] 时区 = ...` |
 | `DISCORD_WEBHOOK` | 空 | 可选通知 |
 
-> ⚠️ 这张表(`DB_DIR`/`OUTPUT_DIR`/`CONFIG_DIR` 三个分开的卷)是**旧版设计**,和当前实际的
-> `docker-compose.yml`(单一 `DATA_ROOT` 卷 + tailscale sidecar + `--hub`)不符——发现于 2026-07,
-> 待重写,先别照这张表配置,以 `docker-compose.yml` 本身 + 上面的「多节点同步」章节为准。
-
 - 镜像基于 `node:24-bookworm-slim` + `ffmpeg`，运行自包含 bundle（无需 node_modules）。Linux 容器免疫 macOS 的 rc-11 fork 崩溃。
-- **不含 playwright/chromium** → 扫码登录不可用，用 Web 控制台「手动粘贴 cookie」。
+- 镜像**含 playwright + chromium**，容器内 Web 控制台「扫码登录」可用。
 - cookie / 任务等设置都存在 DB 卷里，跨重建保留。
 
 完整部署指南（环境变量、卷、时区、排查）见 **[docs/docker.md](./docs/docker.md)**。
@@ -218,9 +215,10 @@ node dist/douyin-rec.mjs task serve --port 7860 --hub   # master(如 docker):Web
 node dist/douyin-rec.mjs task serve --port 7860         # slave(如 VPS):普通 serve,无 --hub
 ```
 
-- **slave 不需要 `--hub`**:master 经 **SSH** 主动够到它——`_inventory`(一次性扫 `recordings/` 输出 JSON 清单)+ rsync 拉文件 + ssh 清理。slave 只需 SSH 可达 + 有 `dist` 产物。
+- **slave 不需要 `--hub`**:master 经 **SSH** 主动够到它——任务同步走 `_tasks`/`_apply-tasks` 对账(见下)，录制拉取走 `_inventory`(扫 `recordings/` 输出 JSON 清单)+ rsync + ssh 清理。slave 只需 SSH 可达 + 有 `dist` 产物。
+- **受管任务下发(2026-08)**:hub 规则绑定一个 master 本地任务(`recording.sourceTaskId`)并勾选参与节点(`workers`);master 按 `(platform, roomSlug)` 把任务定义下发到各节点(启动 + 周期 1min + 变更即同步),远端任务标 `managedBy='hub'`,Web 只读、禁止改删启停;本机 local worker `adopt=false`,源任务保持可编辑。cookies 只单向下发,节点本地 override(cookies/outDir/webhook)保留;不再期望的任务两阶段删除(先停、收播后删)。
 - **身份/选优**:录制端写 `{base}.session.json`(roomSlug + platform + 缺口);master 按 **(platform, roomSlug)** 聚成一场(douyin/bilibili 同房间号不撞)→ 覆盖度选优(**完整录全优先**;所有节点都断流 → 中断 + 通知 + 不删源)→ 拉取 → 合并/烧 danmu+livechat → **穿插上传**(P1 上传与烧录并行,append 分 P,关水印/仅自己可见由代码常量保证)。
-- **配置 = 文件**(对标 DLR,文件=唯一真理源):全局 `<root>/config/hub.config.json`(tenants/stageDir/uploadDefaults)+ 每房间 `<root>/config/hub/{platform}.{roomSlug}.json`(`{enabled, pipeline:{steps, upload:{mode:stage|upload, private}, cleanup}}`)。Web「Hub」页(master 才显示)增删改 = 建/写/删这些文件;现读不缓存 → UI 与手改文件天然同步。
+- **配置 = 文件**(对标 DLR,文件=唯一真理源):全局 `<root>/config/hub.config.json`(workers,旧名 tenants 兼容)+ 每房间 `<root>/config/hub/{platform}.{roomSlug}.json`(`{enabled, pipeline:{steps, upload:{mode:stage|upload, private}, cleanup}}`)。Web「Hub」页(master 才显示)增删改 = 建/写/删这些文件;现读不缓存 → UI 与手改文件天然同步。
 - 设计与实测见 **[docs/multi-node-sync.md](./docs/multi-node-sync.md)** + **[docs/multi-node-sync-followups.md](./docs/multi-node-sync-followups.md)**。
 
 ## 依赖补丁（pnpm patch）

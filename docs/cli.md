@@ -191,7 +191,7 @@ node dist/douyin-rec.mjs upload --video x.mp4 --title "标题" --public --tag "�
 
 stateful app 层：任务持久化到 sqlite（`node:sqlite`，Node 24 内置），支持手动 CRUD、立即运行、Web 控制台、定时调度。app 层完整设计见 [app.md](./app.md)。
 
-**数据库路径解析**：`--db <path>` > 环境变量 `DOUYIN_REC_DB` > `<DOUYIN_REC_ROOT>/db/douyin-rec.db`（未设 `DOUYIN_REC_ROOT` 时根默认 `./output-data`，即 `./output-data/db/douyin-rec.db`；docker 固定 `DOUYIN_REC_ROOT=/data`）。多数 task 子命令都支持 `--db`。db/recordings/stage/config 都收在同一个数据根下，见 [paths.ts](../packages/app/src/paths.ts)。
+**数据库路径解析**：`--db <path>` > 环境变量 `DOUYIN_REC_DB` > `<DOUYIN_REC_ROOT>/db/douyin-rec.db`（未设 `DOUYIN_REC_ROOT` 时根默认 `./output-data`，即 `./output-data/db/douyin-rec.db`；docker 固定 `DOUYIN_REC_ROOT=/output-data`）。多数 task 子命令都支持 `--db`。db/recordings/stage/config 都收在同一个数据根下，见 [paths.ts](../packages/app/src/paths.ts)。
 
 ### `task add` — 新增任务
 
@@ -298,11 +298,16 @@ Web 控制台顶部有**全局「抖音账号 Cookie」面板**：登录一次�
 | `--port <n>` | `7860` | 监听端口 |
 | `--db <path>` | 见上方「数据库路径解析」 | 数据库路径 |
 | `--no-schedule` | （默认开调度）| 关闭定时调度守护，仅手动启停 |
+| `--hub` | （默认关）| 启用多节点编排：hub 规则绑定源任务 → 自动下发受管任务到 worker + 收播后选优/合并/上传 |
+| `--hub-config <json\|path>` | 自动读 `<root>/config/hub.config.json` | hub 全局配置（JSON 串或文件路径） |
 
 ```bash
-node dist/douyin-rec.mjs task serve --port 7860              # 仅手动控制
-node dist/douyin-rec.mjs task serve --port 7860            # 默认含定时调度（--no-schedule 关）
+node dist/douyin-rec.mjs task serve --port 7860 --no-schedule   # 仅手动控制
+node dist/douyin-rec.mjs task serve --port 7860                 # 默认含定时调度
+node dist/douyin-rec.mjs task serve --port 7860 --hub           # master：Web + 调度 + 多节点编排
 ```
+
+**master 模式（`--hub`）**：本机是 master（通常同时是录制节点），读取 `hub.config.json`（workers）与 `config/hub/{platform}.{roomSlug}.json`（每房间规则）。规则绑定 source task 后，master 把任务定义下发到选中 worker（远端受管任务只读）；收播后做覆盖度选优 → 拉取 → 合并/烧录 → 上传。slave/VPS 跑普通 `task serve`（无 `--hub`），由 master 经 SSH 主动够到（隐藏命令 `_tasks` / `_apply-tasks`）。详见 [multi-node-sync.md](./multi-node-sync.md)。
 
 REST API、SPA 功能、SPA 静态文件解析详见 [app.md Web 控制台](./app.md#web-控制台-task-serve)。
 

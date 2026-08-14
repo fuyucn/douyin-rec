@@ -102,7 +102,7 @@ remote/                       # 已移出仓库(.gitignore;含 VPS IP/SSH 个人
 - **身份/聚类**:录制端写 `{base}.session.json`(roomSlug=web_rid + platform + gaps)。`identity` 按 **(platform, roomSlug)** 聚成一场(streamKey=`{platform}:{roomSlug}:{date}`)→ douyin/bilibili 同房间号不撞、跨节点一致(不靠主播名)。
 - **选优**:`select` 覆盖度优先(coverage=1−gap/span)→ **完整录全(单会话无断流)优先**,多个完整取最长;**所有节点都断流(没人录全)→ 中断 + 通知 + 绝不删源**(留人工)。
 - **pipeline**(`pipeline.ts`,复用 post-process + biliup):选优 winner → pull 到 stage → merge plain → burn danmu/livechat → **穿插上传**(merge 完即后台 fire P1 上传、与烧录并行,await BV 后串行 append;append 也带关水印+仅自己可见,防重置)。
-- **配置 = 文件**(对标 DLR,文件=唯一真理源,现读不缓存→UI↔手改文件天然同步):全局 `<root>/config/hub.config.json`(tenants/stageDir/时序 + uploadDefaults)+ 每房间 `<root>/config/hub/{platform}.{roomSlug}.json`(`{room,enabled,pipeline:{steps,upload,cleanup}}`)。`upload.mode`=stage(只合成)|upload(传);`private` 布尔(默认仅自己可见)。**hub-store** 文件版 CRUD;Web Hub 页增删改 = 建/写/删文件。**hub 规则不在 DB**。
+- **配置 = 文件**(对标 DLR,文件=唯一真理源,现读不缓存→UI↔手改文件天然同步):全局 `<root>/config/hub.config.json`(workers,旧名 tenants 兼容;stageDir/时序 + uploadDefaults)+ 每房间 `<root>/config/hub/{platform}.{roomSlug}.json`(`{room,enabled,pipeline:{steps,upload,cleanup}}`)。`upload.mode`=stage(只合成)|upload(传);`private` 布尔(默认仅自己可见)。**hub-store** 文件版 CRUD;Web Hub 页增删改 = 建/写/删文件。**hub 规则不在 DB**。
 - **SyncLedger**(`<db>-sync.db`)幂等台账:sync_jobs(状态机 pending→syncing→merging→uploading→done/needs_manual/failed)+ sync_candidates(选优明细)。reconciler:recordEnd 触发 + 周期 reconcileAll(in-flight 守卫 + settle 等收播,仍在录的场跳过)。
 - **硬标准代码常量**(`biliup.ts`,不可配、绝不漏):关水印 `--extra-fields watermark.state=0`、copyright=1、`--is-only-self`(private 时)。可配的只有 tag/tid/desc(主播专属,写任务文件)。
 - 详见 `docs/multi-node-sync.md` + `docs/multi-node-sync-followups.md`(实测记录 + per-平台 cookie 等 followup)。
@@ -126,7 +126,7 @@ node dist/douyin-rec.mjs task add URL                       # CLI 加任务
 
 ⚠️ **库 interop**：录制必须跑打包后的 `node dist/douyin-rec.mjs`，不能 `tsx`/直 import（douyin-live 的 sm-crypto/protobufjs ESM 坑）。vitest 无法 import 这些包 → recorder/douyin-live/平台实例 **零单测**，靠 session/manager/daemon/store 测 + `test/setup.ts` 注册假平台 + 真实录制覆盖。
 
-📁 **数据目录**：db / recordings / stage / config(含 hub 规则、biliup cookies)全收在**一个数据根** `DOUYIN_REC_ROOT` 下(见 `packages/app/src/paths.ts`),不散落项目里。**未设时默认 `./output-data`**(裸跑不再把文件平铺进 cwd)。本仓库约定:`pnpm serve:local` 用 `DOUYIN_REC_ROOT=./data-local`;docker 固定 `/data`(映射宿主机 `docker-data/`)。专用 env(`DOUYIN_REC_DB`/`DOUYIN_REC_OUTPUT`/`BILIUP_COOKIE`)可单独覆盖某一项。
+📁 **数据目录**：db / recordings / stage / config(含 hub 规则、biliup cookies)全收在**一个数据根** `DOUYIN_REC_ROOT` 下(见 `packages/app/src/paths.ts`),不散落项目里。**未设时默认 `./output-data`**(裸跑不再把文件平铺进 cwd)。本仓库约定:`pnpm serve:local` 用 `DOUYIN_REC_ROOT=./data-local`;docker 固定 `/output-data`(映射宿主机 `docker-data/`)。专用 env(`DOUYIN_REC_DB`/`DOUYIN_REC_OUTPUT`/`BILIUP_COOKIE`)可单独覆盖某一项。
 
 ## B站上传规则（biliup）
 
@@ -167,4 +167,4 @@ node dist/douyin-rec.mjs task add URL                       # CLI 加任务
 > 它的 `merge.py` 依赖已删除的 Python `src/`,**本地已不可跑**。合并/烧录改走 **TS CLI**:
 > `node dist/douyin-rec.mjs merge --in <dir>` + `burn --video <mp4> --xml <xml> --style danmu|livechat --gift-value 0.9`
 > (`packages/post-process` 移植版,已实测产出可上传成品)。
-> ⚠️ `merge-recording-today` skill 仍调那个不可跑的 Python `remote/merge.py` → **待切到 TS CLI**(已知缺口)。
+> ✅ `merge-recording-today` skill **已删除**(2026-08):合并/烧录走 hub 自动管线或 TS CLI,上传仍走 `upload-recording-today` skill。

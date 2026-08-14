@@ -71,37 +71,21 @@
   enabled=false 本身就是「暂停」。(注:带排期的任务停了,未来窗口也不录,直到重新启动 —— 符合直觉。)
 
 ### 待做
-- **⚠️ pipeline 重试对上传不幂等(2026-07-05 fulltest 实测暴露,重要)**:upload 模式下若 P1 已上传成稿(拿到 BV)、
-  但 P2/P3 append 失败 → pipeline 抛错 → reconciler markFailed → 重试**从头重跑整条**(重新 merge/burn/**又传一个新
-  P1 稿**)→ **B 站上留下重复/残稿**(实测第一次 BV1xAMM6QEAu 只有 plain 的残稿 + 重试 BV1sAMM6QErq 完整稿)。
-  正解:P1 上传成功后**立即把 BV 持久化进 ledger**(不等 markDone);重试时若该场已有 BV → 跳过 select/pull/merge/
-  burn/uploadP1,直接从 append 续传(biliup append 本就幂等可续)。需 ledger 早写 bv + pipeline 入口检测已有 bv 分支。
+- ✅ **pipeline 上传幂等 + 断点续跑(2026-07 已修)**:P1 上传成功即把 BV 持久化进 ledger(`6e565e9`);重试/续跑检测到已有 BV → 跳过 select/pull/merge/burn/uploadP1,只补 append(`a609410`);达重试上限升级 `needs_manual` + 通知人工(`ad9652b`)。重复建稿问题已闭环。
 - **per-平台 cookie**:cookie 模型目前「抖音单一」(全局 cookie = 抖音账号)。bilibili getStream **支持传 cookie**
   (登录态取大会员/4K/杜比/HDR 等更高 tier),但没 per-平台 cookie 存储 → bilibili 高 tier(超 1080p 原画)目前拿不到。
   原画 1080p 匿名够用。要覆盖 4K/大会员档需做按平台分别存 cookie。
-- **`merge-recording-today` skill 仍调不可跑的 Python `remote/merge.py`** —— hub 已自动做合并/上传,该 skill 待切 TS CLI 或标废弃。
+- ✅ **`merge-recording-today` skill 已删除(2026-08)** —— 合并/烧录走 hub 自动管线或 TS CLI,上传仍走 `upload-recording-today`。
 - **跨会话对齐拼接(断流场自动出完整版)** —— 先记录,后续做:
   - 现在「都断流」是中断+通知人工。要 hub 自动把断流多会话拼成完整版,需移植 skill 的**逐会话烧再拼**:
     每会话先 `merge`→`burn(offset=0)`(弹幕 p 偏移本就相对本会话起点,零累计漂移),再 **concat filter 重编码**拼接(各会话 fps 可能不同,`-c copy` 会压坏 PTS;重编码统一 fps/timebase)。
   - 对齐保证靠「**每会话弹幕只跟自己视频对齐 → 物理拼接**」,不靠墙钟偏移(gap 被压扁 → 墙钟会漂)。livechat 的 gift/member 绝对 epoch 锚点需在拼接后统一参照系。会话真实时长用 ffprobe 末帧 PTS(mesio flv 头时长可能=0)。
   - building blocks 已在 `post-process`(`mergeSession` / `burn --indir --base` / ass 按 `video_start_time` 分段锚定);缺 orchestrator 层串「winner tenant 多会话逐烧+concat 拼」。
-- **daemon 自动重启已停任务**:任务手动 stop 后 daemon 下 tick 又重启(enabled+在窗口+在播)。正解:手动 stop 置 paused 标志,daemon 不自动重启;仅窗口调度自动启停。(测试时靠 delete 任务规避)
+### ✅ hub 中心化任务管理 —— 已实现(2026-08-07,`e6da56b`)
 
-### 想法记录(暂不做,评估过收益/成本)
-
-- **hub 中心化任务管理(centered manage,2026-07-01 讨论)**:在 hub 建任务时勾选目标 slave 节点
-  (如 VPS),任务定义自动下发,不用去各节点单独建;录制结束结果回收(这半边即现有 inventory+选优+pipeline,已存在)。
-  - **方向对**:与现有「master 经 SSH 主动够 slave、slave 零感知」哲学一致。做的话走 Transport 轴加
-    `_apply-tasks` 类子命令(slave 收 JSON upsert 进自己 DB),**desired state 周期对账**而非一次性推送
-    (幂等、自愈,同 reconciler 思路);任务定义放 `config/hub/` 文件(文件即真理,与 hub-store 一致)。
-  - **要想清楚的点**:归属标记(`managedBy: hub`,slave UI 只读化,防两边改回到漂移)、per-node override
-    (如同任务 VPS 用 cookie / docker 匿名,避免弹幕 WS 相撞——已验证的真实约束)、时区一致性
-    (排期窗口 "HH:MM" 由各节点自己的 settings.timezone 解释,下发前须校验或把时区纳入 desired state)。
-  - **结论:现在不做**。规模 = 2 节点 1 生产任务、任务定义月改一两次,省的是每月一两分钟;而实现要好几天
-    并给稳定生产加一层新状态同步。**唯一真实痛点(改漏一边→两边悄悄漂移→选优时段不对齐)用检测就够**:
-    reconciler 周期扫描时顺手比对同 roomSlug 任务的关键字段(排期窗口/画质/engine),不一致→通知告警。
-    几十行、零新增写路径,覆盖漂移风险的 90%。**触发重评的条件**:节点 ≥3、任务增删变频繁、或出现
-    per-node 差异化配置的真需求。
+- 之前(2026-07-01)评估过收益/成本后暂缓;节点 ≥3、per-node 差异化配置成为真实需求后实现:**hub 规则绑定 source task**(`recording.sourceTaskId`,房间身份从任务派生,不再手填房间 URL)+ 勾选目标节点(`workers`)→ master 按 `(platform, roomSlug)` 自动下发/对账。
+- 实现要点(与当年设计一致):远端任务 `managedBy='hub'` 只读(Web API/UI 禁改删启停,只能在 master 操作);走 Transport 轴隐藏命令 `_tasks`/`_apply-tasks`(local 直写 store,`adopt=false` 不锁本机源任务);desired-state 周期对账(启动即跑 + 1min + 变更即同步)而非一次性推送;per-node override(cookies/useCookie/outDir/webhook)保留,防弹幕 WS 相撞等真实约束。
+- 任务定义仍存 `tasks` 表(受管任务 = 普通行 + `managedBy='hub'`),规则文件 `config/hub/{platform}.{roomSlug}.json` 仍为真理源。
 
 ## 测试备注
 - **2026-07-02 时区+双节点+hub 全链路复测通过**(房间 465721793855):docker 12:20:03 / VPS 12:30:53 均按

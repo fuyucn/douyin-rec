@@ -71,7 +71,7 @@
         <div class="box b-app"><div class="t">cli</div><div class="d">入口 + providers-register(注册平台 / 引擎)</div></div>
         <div class="box b-app"><div class="t">app</div><div class="d">db / store / hub-store(文件版规则) / daemon / web server</div></div>
         <div class="box b-app"><div class="t">manager</div><div class="d">RecordingSession:重连 / drain / 弹幕扇出 / xml / session.json</div></div>
-        <div class="box b-app" style="background:#e0e7ff;border-color:#c7d2fe;color:#312e81;"><div class="t">orchestrator <span style="font-weight:400">(多节点 hub)</span></div><div class="d">Transport(ssh) / 聚类(platform,roomSlug) / 选优 / pipeline / Ledger</div></div>
+        <div class="box b-app" style="background:#e0e7ff;border-color:#c7d2fe;color:#312e81;"><div class="t">orchestrator <span style="font-weight:400">(多节点 hub)</span></div><div class="d">Transport(local/ssh/tailscale-ssh) / 受管任务下发(_tasks/_apply-tasks) / 聚类(platform,roomSlug) / 选优 / pipeline / Ledger</div></div>
       </div>
     </div>
 
@@ -104,6 +104,7 @@
       <div class="lbl">共享基础 / 契约</div>
       <div class="row">
         <div class="box b-base"><div class="t">core</div><div class="d">契约 + 注册表:<b>Platform 接口</b><span class="pill">Engine 接口</span> + api-types</div></div>
+        <div class="box b-base"><div class="t">observability</div><div class="d">Notifier / EventCenter / 日志</div></div>
         <div class="box b-base"><div class="t">post-process</div><div class="d">concat / burn / ass / merge</div></div>
         <div class="box b-base"><div class="t">tui</div><div class="d">Ink 终端控制台</div></div>
       </div>
@@ -131,7 +132,9 @@
 
   <h2>多节点 hub(master 编排 slave)</h2>
   <div class="flow">
-    <div class="step"><div class="t">各节点录制</div><div class="d">recordings/ + {base}.session.json</div></div>
+    <div class="step"><div class="t">master 下发受管任务</div><div class="d">规则绑定源任务 → _tasks/_apply-tasks(启动 + 周期1min + 变更即同步)</div></div>
+    <div class="sep">→</div>
+    <div class="step"><div class="t">各节点录制</div><div class="d">recordings/ + {base}.session.json(受管任务只读)</div></div>
     <div class="sep">→</div>
     <div class="step"><div class="t">master 拿清单</div><div class="d">local 直接 scan / 远端 ssh _inventory</div></div>
     <div class="sep">→</div>
@@ -145,7 +148,8 @@
   </div>
   <div class="note">
     <b>master = <span class="mono">task serve --hub</span></b>(编排 + 自己也录);<b>slave = 普通 <span class="mono">task serve</span></b>(只录,master 经 SSH 够到,<b>不需要 --hub</b>)。
-    每房间配置 = 一个文件 <span class="mono">config/hub/{platform}.{roomSlug}.json</span>(文件=唯一真理源,UI 与手改天然同步)。
+    受管任务下发:hub 规则绑定 master 本地任务(<span class="mono">recording.sourceTaskId</span>)并勾选节点(<span class="mono">workers</span>,旧名 tenants 兼容),远端任务标 <span class="mono">managedBy='hub'</span> 只读、禁止改删启停;本机源任务保持可编辑。
+    每房间配置 = 一个文件 <span class="mono">config/hub/{platform}.{roomSlug}.json</span>(文件=唯一真理源,UI 与手改天然同步),全局配置 = <span class="mono">config/hub.config.json</span>(workers / cookies / stageDir / uploadDefaults)。
     所有节点都断流(没人录全)→ 中断 + 通知 + <b>不删源</b>。关水印 / 仅自己可见 / copyright 是代码常量。详见
     <span class="mono">docs/multi-node-sync.md</span>。
   </div>

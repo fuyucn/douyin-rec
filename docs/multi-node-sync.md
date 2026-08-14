@@ -2,7 +2,7 @@
 
 > **状态:已实现并实测通过(2026-06-30,双节点双平台 douyin+bilibili)。** 本文是原始设计稿;
 > 实现过程中的若干演进 —— **配置文件化**(`config/hub/{platform}.{roomSlug}.json`,非 DB)、**多平台**(按 platform,roomSlug 聚类)、
-> **session.json sidecar**(合并 meta+gaps)、**穿插上传**、**完整录全优先选优**、**slave UI 区分** —— 见
+> **session.json sidecar**(合并 meta+gaps)、**穿插上传**、**完整录全优先选优**、**slave UI 区分**、**受管任务下发**(绑定 source task → 按 worker 下发,远端只读,2026-08) —— 见
 > [multi-node-sync-followups.md](./multi-node-sync-followups.md)(最终状态 + 实测记录),架构总览见 [architecture.md](./architecture.md)「多节点 hub」。
 > 下文设计与最终实现大方向一致,细节以 followups + 代码为准。
 
@@ -10,18 +10,18 @@
 
 多台录制节点（本地 docker、VPS 等）**对等共录**同一批直播间。任一场直播**真下播**后，自动在所有节点间挑出**覆盖最全**的一份，同步到 master，合并 + 烧录弹幕/聊天，按「P1→append」规则投稿 B 站。没有干净版本（都断）时不自动投，发 webhook 交人工。
 
-## 心智模型：多副本冗余 + read-repair（不是 master→slave 复制）
+## 心智模型：受管任务下发 + 多副本冗余 + read-repair
 
-容易误当成数据库 **master-slave 复制**，但那要拆成两个方向看，本设计**只做了读侧**：
+容易误当成数据库 **master-slave 复制**，但要拆成两个方向看，**两侧都已实现**：
 
-- **读侧（已实现）= 多副本冗余 + read-repair / anti-entropy**：每个节点跑**与 master 相同的一套 task configs**（同一批直播间 + 同样的画质/弹幕/cookie/窗口设置——**不只是「匿名随录」**，是完整镜像 master 的任务表），各自录一份**全量副本**。这套配置目前**靠人工在各节点保持一致**（master **不自动下发**），所以「配置漂移」才是真正痛点。master 是个**只读协调者**——收播/周期触发去各节点扫清单，按覆盖度选「最完整那份副本」（挑没 gap 的 replica），merge/burn/发布；都断流没人录全 → 不删源、挂起交人工（= anti-entropy 不敢自动 resolve 冲突时的挂起）。且是 master **主动 pull**（SSH inventory + rsync），不是 slave 主动 report。
-- **写侧（未实现，future）= master 拥有任务并下发/同步到从节点**（DB 里 master 把 binlog 推给 slave 那半）。当前这套「相同 task configs」是人工镜像、非自动同步；「master 管任务、自动下发到节点、节点回报」是目标态，见 [followups](./multi-node-sync-followups.md) 里 defer 的「集中式任务管理」。实测结论：各节点手配任务够用，真正痛点是**配置漂移**（人工镜像会走样）而非下发本身，故先做漂移检测告警、暂缓自动下发。
+- **写侧（已实现，2026-08）= 受管任务下发**：hub 规则绑定 master 本地任务（`recording.sourceTaskId`）并勾选参与节点（`workers`）；master 对每个 worker 计算期望任务，按 `(platform, roomSlug)` 全量对账下发（local 直接写本机 store，ssh/tailscale-ssh 走隐藏 `_apply-tasks`）。远端任务收编为 `managedBy='hub'`，Web 只读、禁止改删启停；本机 local worker `adopt=false`，源任务保持用户可编辑。cookies 只单向下发，节点本地 override（cookies/useCookie/outDir/webhook）保留；不再期望的任务两阶段删除（先停、收播后删）。同步 = 启动即跑 + 周期 1min + 规则/worker/源任务变更即触发，失败下轮自愈。
+- **读侧（已实现）= 多副本冗余 + read-repair / anti-entropy**：各节点各自录一份**全量副本**；master 是**读侧协调者**——收播/周期触发去各节点扫清单，按覆盖度选「最完整那份副本」（挑没 gap 的 replica），merge/burn/发布；都断流没人录全 → 不删源、挂起交人工（= anti-entropy 不敢自动 resolve 冲突时的挂起）。且是 master **主动 pull**（SSH inventory + rsync），不是 slave 主动 report。
 
-所以一句话：**多节点各录冗余副本，master 做 read-repair 选优 + 发布**——而非「master 下发任务、slave 回报」。
+所以一句话：**master 下发受管任务 + 各节点共录冗余副本，master 做 read-repair 选优 + 发布**。
 
 ## 角色
 
-- **slave** = 现有 `serve`（已具备：录制 + REST API + `recordEnd`/`recordReconnect` 事件 + getLiving 权威判活）。本设计对 slave **零或极小改动**。
+- **slave** = 现有 `serve`（已具备：录制 + REST API + `recordEnd`/`recordReconnect` 事件 + getLiving 权威判活）。受管任务由 master 下发，远端 Web 只读（`managedBy='hub'` 禁止改删启停）。本设计对 slave **零或极小改动**。
 - **master** = 新增角色，**本身也是一个录制节点**（对等共录），额外承担：租户注册表 + 对账引擎 + 合并/烧录/上传。**一台 slave 可兼任 master**；master 可跑在任何设备上。
 
 > master 只需在「自己录制时」在线（它录的时候本来就在线），不要求 7×24 —— 漏掉的触发由周期性兜底对账补回（见下）。
@@ -50,7 +50,7 @@ interface Transport {
 
 实现：`local`（master 自己）/ `ssh` / `tailscale-ssh`。认证（ssh key / tailscale 身份）封装在各实现内。
 
-**租户注册表**（master 配置）：`tenants: [{ id, transport: "local"|"ssh"|"tailscale-ssh", host, dataRoot, ... }]`。`dataRoot` 即该节点的 `DOUYIN_REC_ROOT`（录像在 `<dataRoot>/recordings`，cookie 等见 [biliup 认证]）。
+**Worker 注册表**（master 配置）：`workers: [{ id, name?, kind: "local"|"ssh"|"tailscale-ssh", host?, dataRoot?, ... }]`（旧名 `tenants` 兼容，读取时 `workers ?? tenants`，首次写入迁移为 `workers`）。`dataRoot` 即该节点的 `DOUYIN_REC_ROOT`（录像在 `<dataRoot>/recordings`，cookie 等见 [biliup 认证]）。
 
 ## 触发模型：自录 recordEnd + 兜底对账
 
@@ -81,7 +81,7 @@ interface Transport {
   3. 给该簇赋一个**规范 streamKey**（簇日期，同一天多场则用取整到分钟的早场标签如 `2026-06-27_0754`）。「时间标签」只是给人/台账看的，跨 node 的秒级差在「聚类」这步已吸收。
 - **不用 node 内部 task id**（各 node DB 各自编号，必然不同）、**不用 liveId**（每场的、可能解析过期/不一致）。
 - **node→room 关联**：落盘目录按 `anchorName/`（可能因改名/自定义名不可靠），但每个 node 的 task 知道自己的 room URL → roomSlug；master 查各 tenant 的 `/api/tasks`（返回 room）即可把「该 tenant 的某场录像」对到 roomSlug，task id / anchorName 目录差异都不影响。
-- 前提：同一批房间 URL 配在每个 node 上（即共录的前提）。master 配置可作为「关心哪些房间」的真相源。
+- 前提：**同一批房间 URL 由 master 下发到每个 worker**（hub 规则绑定源任务后自动对账，不再靠人工镜像）；master 的规则文件是「关心哪些房间」的真相源。
 
 ## 对账引擎（核心流程）
 
@@ -120,44 +120,55 @@ interface Transport {
 
 ## 配置
 
-hub 配置为 **JSON**。解析优先级:`--hub-config`(**文件路径→读文件 / 否则当内联 JSON 串**) > settings 表 `hubConfig` > **自动读 `<root>/config/hub-config.json`**。**约定(推荐)**:把自动生成的 `hub-config.example.json` **复制成同目录 `hub-config.json`** 改完,直接 `task serve --hub`(无需 `--hub-config`)即自动加载;三者都没有则跳过、warn。**模板单一真相 = 仓库源文件 [`configs/hub-config.example.json`](../configs/hub-config.example.json)**(打包时 esbuild 内联进 bundle);**数据根初始化时自动复制一份**到 `<root>/config/hub-config.example.json`(serve 启动 + `DOUYIN_REC_ROOT` 可解析时,幂等不覆盖;复制出来的是占位值,改 host/cookies/uploadMode 后用 `--hub-config` 指过去)。
+hub 全局配置为 **JSON**，路径 `<root>/config/hub.config.json`（旧名 `hub-config.json` 自动兼容）。解析优先级：`--hub-config`（文件路径 → 读文件 / 否则当内联 JSON 串）> settings 表 `hubConfig` > 自动读 `<root>/config/hub.config.json`。**约定（推荐）**：数据根初始化时自动复制一份模板到 `<root>/config/hub.config.example.json`，改成同目录 `hub.config.json` 后直接 `task serve --hub`（无需 `--hub-config`）自动加载；三者都没有则跳过、warn。模板单一真相 = 仓库源文件 [`configs/hub.config.example.json`](../configs/hub.config.example.json)（打包时 esbuild 内联进 bundle）。
 
 | 字段 | 类型 | 默认 | 含义 |
 |---|---|---|---|
-| `platform` | string | `"douyin"` | 平台(聚类 / 取 roomSlug) |
-| `tenants` | `Tenant[]` | `[]` | **所有录制节点**(含 master 自己) |
-| `cookies` | string | `""` | biliup cookie 路径(投稿用;指 `<root>/config/biliup/cookies.json`) |
-| `uploadMode` | `"auto-private"` \| `"stage-only"` | `"stage-only"` | 自动投(仅自己可见)/ 只暂存不投 |
-| `uploadMeta` | `{tag, tid, desc?}` | `{tag:"直播,录像", tid:21}` | 投稿元数据 |
-| `cleanMaxGapSec` | number | `30` | 「干净」阈值;winner 缺口 > 此 → 都断逃生口(webhook+人工) |
+| `platform` | string | `"douyin"` | 默认平台（聚类 / 取 roomSlug） |
+| `workers` | `Worker[]` | `[]` | **所有录制节点**（含 master 自己；旧名 `tenants` 兼容） |
+| `cookies` | string | `""` | biliup cookie 路径（投稿用；指 `<root>/config/biliup/cookies.json`） |
 | `stageDir` | string | `"./stage"` | 拉取 / 合并暂存目录 |
-| `settleMs` | number | `90000` | 收播去抖窗口(isRecording 持续 false 多久算结束) |
+| `cleanMaxGapSec` | number | `30` | 「干净」阈值；winner 缺口 > 此 → 都断逃生口（webhook+人工） |
+| `settleMs` | number | `90000` | 收播去抖窗口（isRecording 持续 false 多久算结束） |
 | `pollMs` | number | `3000` | isRecording 轮询间隔 |
-| `reconcileIntervalMs` | number | `1800000` | 周期兜底对账(30min) |
+| `reconcileIntervalMs` | number | `1800000` | 周期兜底对账（30min） |
+| `syncIntervalMs` | number | `60000` | 受管任务下发对账周期（1min） |
 | `maxWaitSec` | number | `600` | 对账前等所有节点收播的上限 |
 | `settleSec` | number | `15` | 上面的轮询间隔 |
+| `uploadDefaults` | `{tag,tid,titleTemplate?}` | `{tag:"直播,录像", tid:21}` | 投稿元数据默认（旧名 `uploadMeta` 兼容） |
 
-**Tenant**:`{ id: string, kind: "local"|"ssh"|"tailscale-ssh", host?: string, dataRoot?: string }`
-- `local`:master 自己,无需 host;`dataRoot` = 该机数据根(扫 `<dataRoot>/recordings`)
-- `ssh` / `tailscale-ssh`:`host` = 主机名/tailscale 名;`dataRoot` = 远端数据根(远端跑 `node <dataRoot>/dist/douyin-rec.mjs _inventory <dataRoot>` 出清单)
+**Worker**：`{ id, name, kind: "local"|"ssh"|"tailscale-ssh", host?, dataRoot? }`
+- `local`：master 自己，无需 host；`dataRoot` = 该机数据根（扫 `<dataRoot>/recordings`）
+- `ssh` / `tailscale-ssh`：`host` = 主机名/tailscale 名；`dataRoot` = 远端数据根（远端跑 `node <dataRoot>/dist/douyin-rec.mjs _tasks <dataRoot>` / `_apply-tasks` 出清单/收下发）
 
 ```json
 {
   "platform": "douyin",
-  "tenants": [
-    { "id": "local", "kind": "local", "dataRoot": "/home/ubuntu/drec" },
-    { "id": "vps2", "kind": "tailscale-ssh", "host": "node2.ts.net", "dataRoot": "/home/ubuntu/drec" }
+  "workers": [
+    { "id": "local", "name": "本机(master)", "kind": "local", "dataRoot": "/home/ubuntu/drec" },
+    { "id": "vps2", "name": "香港 VPS", "kind": "tailscale-ssh", "host": "node2.ts.net", "dataRoot": "/home/ubuntu/drec" }
   ],
   "cookies": "/home/ubuntu/drec/config/biliup/cookies.json",
-  "uploadMode": "auto-private",
-  "uploadMeta": { "tag": "直播,录像,抖音", "tid": 21 },
-  "cleanMaxGapSec": 30,
   "stageDir": "/home/ubuntu/drec/stage",
-  "settleMs": 90000, "maxWaitSec": 600
+  "cleanMaxGapSec": 30,
+  "settleMs": 90000, "pollMs": 3000, "reconcileIntervalMs": 1800000,
+  "syncIntervalMs": 60000, "maxWaitSec": 600, "settleSec": 15,
+  "uploadDefaults": { "tag": "直播,录像,抖音", "tid": 21 }
 }
 ```
 
-> ⚠️ 自动生成的模板 `uploadMode` 是保守的 `stage-only`(不自动投稿)——要全链路投稿改 `auto-private`,并把 `cookies` 指向 config 那份。master 自己也要在 `tenants` 里列为 `kind:"local"`(它共录,要参与选优)。
+> ⚠️ 全局兜底 = `stage`（只合成不投）。要让某房间全链路投稿，在其 `config/hub/{platform}.{roomSlug}.json` 的 `pipeline.upload.mode` 设 `"upload"`（`private` 默认 true = 仅自己可见），并把 `cookies` 指向 config 那份。master 自己也要在 `workers` 里列为 `kind:"local"`（它共录，要参与选优）。
+
+## 受管任务下发（hub → worker，2026-08）
+
+hub 规则（`config/hub/{platform}.{roomSlug}.json`）新增 `recording.sourceTaskId` + `workers` 后，master 自动把录制任务下发给选中节点：
+
+1. master 建普通录制任务（本机也录）。
+2. Web「Hub」页建/编辑规则时绑定该任务（`recording.sourceTaskId`，房间身份从任务派生，不再手填房间 URL）并勾选参与节点（`workers`）。
+3. master 对每个 worker 计算期望任务：启用的规则 + 绑定的源任务 + worker 在规则 `workers` 里（缺省 = 全部）。
+4. 下发走 Transport 轴：local = 直接写本机 store（`adopt=false`，源任务保持可编辑）；ssh/tailscale-ssh = 远端隐藏命令 `_tasks` / `_apply-tasks`（`_tasks` 输出无 cookies 的隐私投影；cookies 只随下发通道单向传递）。
+5. 远端按 `(platform, roomSlug)` 对账：新建或收编更新受管任务（`managedBy='hub'`），不再期望的任务两阶段删除（先在录/启用的置停，等 daemon 收播后下一轮删）。受管任务 Web API/UI 禁止改删启停，只能在 master 操作。
+6. 同步触发：启动即跑 + 周期 `syncIntervalMs`（默认 1min）+ 规则/worker/源任务变更后立即触发；节点离线只 warn，下轮对账自愈。
 
 ## 失败处理
 
@@ -168,7 +179,7 @@ hub 配置为 **JSON**。解析优先级:`--hub-config`(**文件路径→读文�
 
 ## 包与分层
 
-新增 `@drec/orchestrator`（依赖 `core`/`app`/`post-process`，rank 待定，**须在 `test/arch/layering.test.ts` 的 RANKS 登记**）。Transport 实现注册表（`registerTransport`，对齐 `registerPlatform`/`registerEngine` 风格）。master 经 `task hub`（或 `task serve --hub`）启动；web 扩展展示租户可达性 + sync_jobs。
+`@drec/orchestrator`（L4.5，依赖 `core`/`app`/`post-process`，已在 `test/arch/layering.test.ts` 的 RANKS 登记）。Transport 实现注册表（`registerTransport`，对齐 `registerPlatform`/`registerEngine` 风格）。master 经 `task serve --hub` 启动；受管任务下发 = app 层 `task-sync`（`listNodeTasks` / `applyRemoteTasks`）+ `Transport.applyTasks`（远端 `_tasks` / `_apply-tasks` 隐藏子命令）。web 扩展展示 worker 可达性 + hub jobs。
 
 ## 决策（默认值，已在脑暴中确认）
 
