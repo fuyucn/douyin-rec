@@ -79,6 +79,8 @@ export class PollingRecorder implements Recorder {
   /** 卡死看门狗:上次「输出有前进」的墙钟。引擎调 markProgress() 刷新。 */
   protected lastAdvanceAt = 0;
   private stallTimer: ReturnType<typeof setInterval> | null = null;
+  /** 卡死判定中的异步 living 查询;防止 interval 重入并发处理。 */
+  private stallInFlight = false;
   /** 最近 stderr 尾(断链诊断;引擎按需 push)。 */
   protected stderrTail: string[] = [];
 
@@ -222,6 +224,11 @@ export class PollingRecorder implements Recorder {
       if (this.stopped) return; // 用户/排空已停,不再上报
       void this.reportExitThenOffline(code);
     });
+    // exit 先于 close(close 还要等 stdio 关):立即摘看门狗,避免「进程已退出但 close 晚到」
+    // 的窗口里把正常下播误判成卡死。上报/收尾仍由 close 负责。
+    proc.on("exit", () => {
+      this.clearStallWatch();
+    });
     proc.on("error", (e) => {
       this.proc = null;
       this.clearStallWatch();
@@ -247,15 +254,48 @@ export class PollingRecorder implements Recorder {
   private startStallWatch(proc: ChildProcess): void {
     this.clearStallWatch();
     this.stallTimer = setInterval(() => {
-      if (this.stopped || this.proc !== proc) return;
+      if (this.stopped || this.proc !== proc || this.stallInFlight) return;
+      // 进程已 exit 但 close 还没收 stdio → 不判卡死,等 close 收尾。
+      if (proc.exitCode !== null || proc.signalCode !== null) return;
       if (Date.now() - this.lastAdvanceAt <= STALL_TIMEOUT_MS) return;
       const secs = Math.round((Date.now() - this.lastAdvanceAt) / 1000);
-      log.warn(`⚠️ 录制卡死:${secs}s 无新输出,杀进程触发重连`);
-      this.ev?.onProbeError?.(`录制卡死:≥${secs}s 未写入新数据(流连着但无内容),已杀进程重连。room=${this.channelId}`);
-      this.clearStallWatch();
-      try { proc.kill("SIGKILL"); } catch { /* close 事件会 onOffline */ }
+      this.stallInFlight = true;
+      void this.handleStall(proc, secs);
     }, STALL_CHECK_MS);
     this.stallTimer.unref?.();
+  }
+
+  /**
+   * 停滞超阈值后的处置:先查权威 living,再决定「真卡死(告警+杀)」还是「主播已下播但下载进程
+   * 还吊着(静默收尾)」——避免正常下播被误报成录制卡死。
+   */
+  private async handleStall(proc: ChildProcess, secs: number): Promise<void> {
+    let living: boolean | null = null;
+    try {
+      living = await this.platform.getLiving(this.channelId);
+    } catch {
+      /* API 不可达:无法确认主播是否下播 → 按卡死保守重连,但告警要说明真实原因 */
+    }
+    this.stallInFlight = false;
+    if (this.stopped || this.proc !== proc || proc.exitCode !== null || proc.signalCode !== null) return;
+
+    if (living === false) {
+      log.info(`主播已下播但下载进程 ${secs}s 无输出未退出,静默收尾(不报卡死)`);
+      this.clearStallWatch();
+      try { proc.kill("SIGKILL"); } catch { /* close 事件会收尾 */ }
+      return;
+    }
+
+    const apiUnreachable = living === null;
+    const label = apiUnreachable ? "无法确认主播状态" : "录制卡死";
+    log.warn(`⚠️ ${label}:${secs}s 无新输出,杀进程触发重连`);
+    this.ev?.onProbeError?.(
+      apiUnreachable
+        ? `无法确认主播状态(判活 API 不可达),≥${secs}s 未写入新数据,按卡死重连。room=${this.channelId}`
+        : `录制卡死:≥${secs}s 未写入新数据(流连着但无内容),已杀进程重连。room=${this.channelId}`,
+    );
+    this.clearStallWatch();
+    try { proc.kill("SIGKILL"); } catch { /* close 事件会 onOffline */ }
   }
 
   private clearStallWatch(): void {
