@@ -465,30 +465,23 @@ git commit -m "docs(hub): daemon 手动停止条目收尾(已由 stop=停用 解
 
 ---
 
-### Task 4: `merge-recording-today` skill 标废弃
+### Task 4: `merge-recording-today` skill 删除
 
-skill 调已删除的 Python `remote/merge.py`(本地不可跑);hub 已自动合并/烧录/上传,手动路径走 TS CLI。skill 文件在 `~/.claude/skills/merge-recording-today/`(用户目录,不在仓库)。
+skill 调已删除的 Python `remote/merge.py`(本地不可跑);hub 已自动合并/烧录/上传,手动路径走 TS CLI。2026-08 已从 `~/Developer/skills`、`~/.agents/skills`、`~/.claude/skills` 三处删除,并同步更新 `upload/cleanup/archive-recording-today` skill 与仓库文档引用。
 
 **Files:**
-- Modify: `~/.claude/skills/merge-recording-today/SKILL.md`(顶部加废弃声明)
+- Delete: `~/Developer/skills/merge-recording-today/`、`~/.agents/skills/merge-recording-today/`、`~/.claude/skills/merge-recording-today/`(2026-08 已删)
 - Modify: `CLAUDE.md`(仓库,更新「保留的 Python 部分」缺口备注)
+- Modify: `AGENTS.md`、`docs/multi-node-sync-followups.md`、`upload/cleanup/archive-recording-today` skill 引用(2026-08 已改)
 
-- [ ] **Step 1:** SKILL.md 标题下加:
-
-```markdown
-> ⚠️ **已废弃(2026-07)**:本 skill 依赖已删除的 Python `remote/merge.py`,本地不可跑。
-> 替代:**hub 自动管线**(task serve --hub,录完自动 选优→merge→烧录→上传)或手动 TS CLI:
-> `node dist/douyin-rec.mjs merge --in <dir>` + `burn --video <mp4> --xml <xml> --style danmu|livechat --gift-value 0.9`,
-> 上传仍用 upload-recording-today skill。保留本文档仅供流程参考。
-```
-
-- [ ] **Step 2:** CLAUDE.md 末尾「保留的 Python 部分」里 `⚠️ merge-recording-today skill 仍调…待切到 TS CLI(已知缺口)` 改为 `merge-recording-today skill 已标废弃(合并走 hub 自动管线或 TS CLI)`。
+- [x] **Step 1:** 删除三个位置的 skill 目录,并更新 `upload/cleanup/archive-recording-today` 的引用。
+- [x] **Step 2:** CLAUDE.md 末尾「保留的 Python 部分」里 `⚠️ merge-recording-today skill 仍调…待切到 TS CLI(已知缺口)` 改为 `merge-recording-today skill 已删除(合并走 hub 自动管线或 TS CLI)`。
 
 - [ ] **Step 3: Commit(仅仓库文件)**
 
 ```bash
 git add CLAUDE.md
-git commit -m "docs: merge-recording-today skill 标废弃(合并已由 hub 管线/TS CLI 取代)"
+git commit -m "docs: merge-recording-today skill 已删除(合并已由 hub 管线/TS CLI 取代)"
 ```
 
 ---
