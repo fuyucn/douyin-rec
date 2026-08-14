@@ -56,6 +56,23 @@ describe("applyRemoteTasks", () => {
     expect(store.getTask(doomed.id)).toBeNull();
   });
 
+  it("期望任务已禁用但仍在运行:置 pending 硬停而不是等排空", () => {
+    const live = store.addTask({ room: "123456", managedBy: "hub" });
+    store.setStatus(live.id, "draining");
+    const r = applyRemoteTasks(store, [spec({ enabled: false })]);
+    expect(r.pending).toEqual(["douyin:123456"]);
+    const t = store.getTask(live.id)!;
+    expect(t.enabled).toBe(false);
+    expect(t.status).toBe("draining"); // 硬停由 _apply-tasks / master manager 执行
+  });
+
+  it("期望任务已禁用且已停止:不再进 pending(避免每轮重复硬停)", () => {
+    const done = store.addTask({ room: "123456", managedBy: "hub" });
+    const r = applyRemoteTasks(store, [spec({ enabled: false })]);
+    expect(r.pending).toEqual([]);
+    expect(store.getTask(done.id)!.enabled).toBe(false);
+  });
+
   it("master 本地(adopt=false):已有源任务保持可编辑,历史 hub 标记被清掉", () => {
     const src = store.addTask({ room: "123456", name: "一勺小苏打", managedBy: "hub" });
     const r = applyRemoteTasks(store, [spec({ name: "一勺小苏打" })], undefined, { adopt: false });

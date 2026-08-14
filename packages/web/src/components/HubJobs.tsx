@@ -1,9 +1,10 @@
-import { memo, useEffect, useState, type ReactNode } from "react";
-import { Check, ChevronDown, FileText, Loader2, Minus, X } from "lucide-react";
+import { memo, useCallback, useEffect, useState, type ReactNode } from "react";
+import { Check, ChevronDown, FileText, Loader2, Minus, RotateCcw, TriangleAlert, X } from "lucide-react";
 import { ReactFlow, Background, Controls, Handle, Position, type Node, type Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api, type HubJobDTO } from "../api/client";
 import { IconButton } from "./Button";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
 import { useT } from "../lib/i18n";
@@ -42,6 +43,7 @@ function stepLabelMap(t: TFunc): Record<string, string> {
     syncing: t("hub.jobs.step.syncing"),
     merging: t("hub.jobs.step.merging"),
     uploading: t("hub.jobs.step.uploading"),
+    retrying: t("hub.jobs.step.retrying"),
     done: t("hub.jobs.step.done"),
     failed: t("hub.jobs.step.failed"),
     needs_manual: t("hub.jobs.step.needsManual"),
@@ -54,6 +56,7 @@ export function stateColor(state: string): string {
   if (state === "done") return "var(--success-fg)";
   if (state === "failed") return "var(--error-fg)";
   if (state === "needs_manual") return "var(--warning-fg)";
+  if (state === "retrying") return "var(--warning-fg)";
   return "var(--ink)"; // 进行中
 }
 
@@ -63,14 +66,25 @@ export function runDate(streamKey: string): string {
   return parts.slice(2).join(":") || streamKey;
 }
 
-type NodeStatus = "done" | "active" | "skipped" | "todo" | "failed";
+type NodeStatus = "done" | "active" | "skipped" | "todo" | "failed" | "blocked";
 
 const NODE_COLOR: Record<NodeStatus, { bg: string; fg: string; ring: string }> = {
   done: { bg: "var(--success)", fg: "var(--qr-surface)", ring: "var(--success)" },
   active: { bg: "var(--ink)", fg: "var(--canvas)", ring: "var(--ink)" },
   failed: { bg: "var(--error)", fg: "var(--qr-surface)", ring: "var(--error)" },
+  blocked: { bg: "var(--warning)", fg: "var(--qr-surface)", ring: "var(--warning)" },
   skipped: { bg: "transparent", fg: "var(--muted-soft)", ring: "var(--hairline)" },
   todo: { bg: "transparent", fg: "var(--muted-soft)", ring: "var(--hairline)" },
+};
+
+/** API nodeStates.state → UI 状态(未知值一律回落 todo)。 */
+const NODE_STATE_TO_UI: Record<string, NodeStatus> = {
+  running: "active",
+  pending: "todo",
+  done: "done",
+  failed: "failed",
+  blocked: "blocked",
+  skipped: "skipped",
 };
 
 /** 所有可能出现的子步骤 key(与布局解耦,仅供 stepStatuses 遍历取状态)。 */
@@ -87,9 +101,20 @@ function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec:
   }
   const success = job.state === "done" || job.state === "needs_manual";
   const now = Date.now();
+  const nodeStates = new Map(job.nodeStates.map((n) => [n.node, n]));
   const out: Record<string, { status: NodeStatus; sec: number | null }> = {};
   for (const key of ALL_STEP_KEYS) {
     const e = pair.get(key);
+    const n = nodeStates.get(key);
+    if (n) {
+      // workflow 安全阀状态优先(running→active、pending→todo);耗时仍由 steps 配对推导。
+      const status: NodeStatus = NODE_STATE_TO_UI[n.state] ?? "todo";
+      const sec = e?.done != null && e.start != null ? Math.round((e.done - e.start) / 1000)
+        : status === "active" && e?.start != null ? Math.round((now - e.start) / 1000)
+        : null;
+      out[key] = { status, sec };
+      continue;
+    }
     if (e?.done != null) out[key] = { status: "done", sec: e.start != null ? Math.round((e.done - e.start) / 1000) : null };
     else if (e?.start != null) out[key] = { status: "active", sec: Math.round((now - e.start) / 1000) };
     else out[key] = { status: success ? "skipped" : "todo", sec: null };
@@ -98,10 +123,11 @@ function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec:
 }
 
 /** 自定义节点:状态圆 + 标签 + 耗时。hover 出详情(状态 + 耗时)。 */
-function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: number | null; metric?: string | null; detail?: string } }): ReactNode {
+function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: number | null; metric?: string | null; detail?: string; onRetry?: () => void } }): ReactNode {
   const t = useT();
   const c = NODE_COLOR[data.status];
   const showSec = data.status !== "skipped" && data.status !== "todo" && data.sec != null;
+  const showRetry = (data.status === "failed" || data.status === "blocked") && data.onRetry != null;
   const tip = (
     <div className="text-left leading-snug">
       <div className="font-medium text-[12px]">{data.label}</div>
@@ -124,6 +150,7 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
             {data.status === "done" && <Check className="w-3.5 h-3.5" />}
             {data.status === "active" && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             {data.status === "failed" && <X className="w-3.5 h-3.5" />}
+            {data.status === "blocked" && <TriangleAlert className="w-3.5 h-3.5" />}
             {data.status === "skipped" && <Minus className="w-3.5 h-3.5" />}
             {data.status === "todo" && <span className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--muted-soft)" }} />}
           </span>
@@ -138,6 +165,21 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
           </span>
         </div>
       </Tooltip>
+      {showRetry && (
+        <button
+          type="button"
+          title={t("hub.jobs.retryNode")}
+          className="inline-flex items-center justify-center w-5 h-5 rounded-full border cursor-pointer mt-1"
+          style={{ borderColor: "var(--hairline)", background: "var(--surface-soft)", color: "var(--warning-fg)" }}
+          onPointerDownCapture={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            data.onRetry?.();
+          }}
+        >
+          <RotateCcw className="w-3 h-3" />
+        </button>
+      )}
       <Handle type="source" position={Position.Right} style={{ opacity: 0, top: 11 }} />
     </div>
   );
@@ -184,13 +226,24 @@ function CandidateNode({ data }: { data: { name: string; coveragePct: number; du
 
 const NODE_TYPES = { step: StepNode, candidate: CandidateNode };
 
-/** 单条 run 的 fork/join 流程图(React Flow):按 job.steps + cfg 动态生成节点(buildFlow),按 job.steps 上色,active 边动画。
+/** 单条 run 的 fork/join 流程图(React Flow):按 job.steps + cfg 动态生成节点(buildFlow),按 nodeStates/steps 上色,active 边动画。
  *  workerName:candidate 节点 id→友好名映射(缺省回落 id)。cfg:该房间的 pipeline 规则(决定进行中 run 画哪些可选节点)。 */
-function PipelineFlowInner({ job, workerName, cfg }: { job: HubJobDTO; workerName?: (id: string) => string; cfg?: FlowCfg }): ReactNode {
+function PipelineFlowInner({
+  job,
+  workerName,
+  cfg,
+  onRetry,
+}: {
+  job: HubJobDTO;
+  workerName?: (id: string) => string;
+  cfg?: FlowCfg;
+  onRetry?: (node: string) => void;
+}): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
-  // 旧版本 run 无细粒度 steps → 回落一行粗粒度状态文字(不画图)。
-  if (job.steps.length === 0) {
+  // 终态旧版本 run 无细粒度 steps → 回落一行粗粒度状态文字(不画图)。
+  // 进行中新 run 还没写任何 steps 时仍按规则画「计划图」(全部 todo),避免流程图突然消失。
+  if (job.steps.length === 0 && TERMINAL.has(job.state)) {
     const line = job.events.map((e) => labels[e.state] ?? e.state).join(" → ");
     return <span className="text-muted-soft text-xs">{line || t("hub.jobs.noStepRecord")}</span>;
   }
@@ -222,6 +275,9 @@ function PipelineFlowInner({ job, workerName, cfg }: { job: HubJobDTO; workerNam
   const graph = buildFlow(job, TERMINAL.has(job.state) ? undefined : cfg);
   const detailOf = (key: string): string | undefined =>
     job.steps.filter((s) => s.step === key && s.phase === "done").map((s) => s.detail).filter(Boolean).pop();
+  const nodeErrorOf = (key: string): string | undefined =>
+    job.nodeStates.find((n) => n.node === key && n.state !== "done")?.error ?? undefined;
+  const RETRYABLE = new Set(["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat"]);
   const termStatus: NodeStatus =
     job.state === "failed" ? "failed" : job.state === "done" ? "done" : job.state === "needs_manual" ? "done" : "todo";
   const termLabel = job.state === "needs_manual" ? labels.needs_manual : job.state === "failed" ? labels.failed : t("hub.jobs.termDone");
@@ -233,7 +289,10 @@ function PipelineFlowInner({ job, workerName, cfg }: { job: HubJobDTO; workerNam
         label: t(`hub.jobs.stepNode.${n.key}`),
         status: st[n.key]?.status ?? "todo",
         sec: st[n.key]?.sec ?? null,
-        detail: detailOf(n.key),
+        detail: nodeErrorOf(n.key) ?? detailOf(n.key),
+        onRetry: (st[n.key]?.status === "failed" || st[n.key]?.status === "blocked") && RETRYABLE.has(n.key) && onRetry
+          ? () => onRetry(n.key)
+          : undefined,
         metric: n.key === "select"
           ? (job.winnerWorker ? (workerName ? workerName(job.winnerWorker) : job.winnerWorker) : null)
           : pickMetric(n.key, detailOf(n.key)),
@@ -290,14 +349,15 @@ function PipelineFlowInner({ job, workerName, cfg }: { job: HubJobDTO; workerNam
 function pipelineSig(j: HubJobDTO, cfg?: FlowCfg): string {
   const cand = j.candidates.map((c) => `${c.worker}:${c.isWinner ? 1 : 0}`).join(",");
   const steps = j.steps.map((s) => `${s.step}:${s.phase}:${s.at}:${s.detail ?? ""}`).join(",");
+  const nodes = j.nodeStates.map((n) => `${n.node}:${n.state}:${n.error ?? ""}:${n.updatedAt}`).join(",");
   const c = cfg ? JSON.stringify([cfg.steps, cfg.upload?.mode, cfg.cleanup]) : "";
-  return `${j.state}|${steps}|${cand}|${c}`;
+  return `${j.state}|${steps}|${nodes}|${cand}|${c}`;
 }
 // workerName 也纳入比较:worker 列表异步加载完(candidate 名从 id 变友好名)时须重渲染一次。
 // 依赖 workerName 用 useCallback 稳定引用(见 RoomDetail),否则每帧新引用会击穿 memo → 空白 bug 复发。
 export const PipelineFlow = memo(
   PipelineFlowInner,
-  (a, b) => pipelineSig(a.job, a.cfg) === pipelineSig(b.job, b.cfg) && a.workerName === b.workerName,
+  (a, b) => pipelineSig(a.job, a.cfg) === pipelineSig(b.job, b.cfg) && a.workerName === b.workerName && a.onRetry === b.onRetry,
 );
 
 /** 一条 run 卡片:状态行 + 步骤时间线 + 元信息(选优/时长/BV/错误)+ 日志按钮。
@@ -309,6 +369,7 @@ export function RunCard({
   cfg,
   expanded,
   onToggle,
+  onRetry,
 }: {
   job: HubJobDTO;
   onOpenLog: (key: string) => void;
@@ -318,9 +379,27 @@ export function RunCard({
   /** 展开时内联显示该 run 自己的 PipelineFlow 图;收起只留状态行。 */
   expanded?: boolean;
   onToggle?: (streamKey: string) => void;
+  /** 单节点重跑:force=true 表示已二次确认(上传类节点)。省略 = 流程图不显示重跑按钮。 */
+  onRetry?: (streamKey: string, node: string, force?: boolean) => Promise<void> | void;
 }): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
+  const [pendingRetry, setPendingRetry] = useState<{ node: string } | null>(null);
+  // 稳定引用(仅 onRetry / streamKey 变化时才换):PipelineFlow memo 比较 onRetry 引用,
+  // 若每帧新建箭头函数会击穿 memo → 每次轮询冲刷 React Flow 导致偶发空白。
+  const requestRetry = useCallback((node: string): void => {
+    if (!onRetry) return;
+    if (node === "upload_plain" || node === "append_danmu" || node === "append_livechat") {
+      setPendingRetry({ node });
+      return;
+    }
+    void onRetry(job.streamKey, node, false);
+  }, [onRetry, job.streamKey]);
+  const confirmRetry = (): void => {
+    const p = pendingRetry;
+    setPendingRetry(null);
+    if (p && onRetry) void onRetry(job.streamKey, p.node, true);
+  };
   return (
     <div
       className={`px-3 py-3 ${onToggle ? "cursor-pointer transition-colors hover:bg-surface-soft" : ""}`}
@@ -368,9 +447,18 @@ export function RunCard({
       {job.error && <div className="text-[12px] mt-1" style={{ color: "var(--error-fg)" }}>{job.error}</div>}
       {expanded && (
         <div className="mt-3 pt-3 border-t border-hairline overflow-x-auto" onClick={(e) => e.stopPropagation()}>
-          <PipelineFlow job={job} workerName={workerName} cfg={cfg} />
+          <PipelineFlow job={job} workerName={workerName} cfg={cfg} onRetry={onRetry ? requestRetry : undefined} />
         </div>
       )}
+      <ConfirmDialog
+        open={pendingRetry !== null}
+        title={t("hub.jobs.retryNodeConfirmTitle")}
+        message={t("hub.jobs.retryNodeConfirmMessage")}
+        confirmLabel={t("hub.jobs.retryNode")}
+        destructive
+        onConfirm={confirmRetry}
+        onCancel={() => setPendingRetry(null)}
+      />
     </div>
   );
 }

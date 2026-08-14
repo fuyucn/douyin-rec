@@ -22,6 +22,7 @@ export function clusterBroadcasts(
   byTenant: { workerId: string; recordings: NodeRecording[] }[],
   overlapToleranceMs = DEFAULT_TOLERANCE,
   defaultPlatform = "douyin",
+  knownKeys: Iterable<{ streamKey: string; startMs?: number | null; updatedAt?: number }> = [],
 ): Broadcast[] {
   // 展平成 (workerId, rec)，按 platform+roomSlug 分组(键含平台),组内按 startMs 排序后区间合并聚簇。
   const flat: BroadcastMember[] = byTenant.flatMap((t) => t.recordings.map((rec) => ({ workerId: t.workerId, rec })));
@@ -54,9 +55,20 @@ export function clusterBroadcasts(
   // 同 (platform,房间) 同一天多簇 → streamKey 追加 _HHMM 区分。
   const dayCount = new Map<string, number>();
   for (const b of out) { const k = `${b.platform}:${b.roomSlug}:${ymd(b.startMs)}`; dayCount.set(k, (dayCount.get(k) ?? 0) + 1); }
+  const known = new Map(Array.from(knownKeys, (k) => [k.streamKey, k]));
   for (const b of out) {
     const day = ymd(b.startMs); const base = `${b.platform}:${b.roomSlug}:${day}`;
-    b.streamKey = (dayCount.get(base)! > 1) ? `${base}_${hhmm(b.startMs)}` : base;
+    const knownJob = known.get(base);
+    // 已知 job 与当前簇同一场(开录时间在容差内)→ 继续用 base(幂等);
+    // 旧库无 startMs 时,用「开录早于 job 最后更新」近似判断,避免把已 done 的第一场误判成第二场。
+    const sameAsKnown = knownJob
+      ? knownJob.startMs != null
+        ? Math.abs(knownJob.startMs - b.startMs) <= overlapToleranceMs
+        : b.startMs <= (knownJob.updatedAt ?? 0) + overlapToleranceMs
+      : false;
+    // 同一天多簇 + 已存在的异场 job 都要 _HHMM,否则会复用 base key 被幂等跳过。
+    const clash = dayCount.get(base)! > 1;
+    b.streamKey = (clash || knownJob) && !sameAsKnown ? `${base}_${hhmm(b.startMs)}` : base;
   }
   return out;
 }

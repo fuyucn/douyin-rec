@@ -145,6 +145,78 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
+  it("场景N(重连窗): 广播结束仍在 reconnectWindowMs 内 → 先不建 job/不跑 pipeline", async () => {
+    const ledger = freshLedger();
+    const endMs = Date.now() - 60_000; // 1 分钟前收播,10 分钟重连窗内
+    const rec = makeRec({
+      roomSlug: "reconnect-window-room",
+      sessionBase: "主播名_2026-08-14_08-00-00",
+      startMs: endMs - 3_600_000,
+      endMs,
+      durationSec: 3600,
+    });
+    const t1 = makeTransport("node-1", [rec]);
+    const transports = new Map([["node-1", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV"); return { state: "done", bv: "BV" }; },
+    );
+
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+      reconnectWindowMs: 10 * 60_000,
+    });
+    await reconciler.reconcileAll();
+
+    expect(spyRunPipeline).not.toHaveBeenCalled();
+    expect(ledger.listActive()).toHaveLength(0); // 还没建 job,等重连窗结束再聚同一场
+    ledger.close();
+  });
+
+  it("场景O(同日第二场): 已有 done 的 base job → 新场用 _HHMM 后缀,跑自己的 pipeline", async () => {
+    const ledger = freshLedger();
+    // 第一场已 done(记录 startMs,供聚类判断不是同一场)
+    const firstStart = new Date("2026-08-14T08:00:00Z").getTime();
+    const secondStart = new Date("2026-08-14T12:00:00Z").getTime();
+    const secondEnd = secondStart + 3_600_000;
+    ledger.upsertPending("douyin:same-day-room:2026-08-14", firstStart);
+    ledger.markDone("douyin:same-day-room:2026-08-14", "BV_FIRST");
+
+    const rec2 = makeRec({
+      roomSlug: "same-day-room",
+      sessionBase: "主播名_2026-08-14_12-00-00",
+      startMs: secondStart,
+      endMs: secondEnd,
+      durationSec: 3600,
+    });
+    const t1 = makeTransport("node-1", [rec2]);
+    const transports = new Map([["node-1", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const seen: Broadcast[] = [];
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => {
+        seen.push(b);
+        ledger.markDone(b.streamKey, "BV_SECOND");
+        return { state: "done", bv: "BV_SECOND" };
+      },
+    );
+
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+    });
+    await reconciler.reconcileAll();
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].streamKey).toMatch(/^douyin:same-day-room:2026-08-14_\d{4}$/);
+    expect(ledger.get(seen[0].streamKey)?.state).toBe("done");
+    expect(ledger.get(seen[0].streamKey)?.startMs).toBe(secondStart);
+    // base job 不受影响
+    expect(ledger.get("douyin:same-day-room:2026-08-14")?.state).toBe("done");
+    ledger.close();
+  });
+
   it("死 transport 不阻断其他 transport 对账", async () => {
     const ledger = freshLedger();
     const rec = makeRec();
@@ -258,6 +330,80 @@ describe("Reconciler", () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("node-slow"));
 
     warnSpy.mockRestore();
+    ledger.close();
+  });
+
+  it("Bug C: 首快照为空 → 第二快照才出现刚开播的分段(isDone=false)→ 不建 job、不跑 pipeline", async () => {
+    const ledger = freshLedger();
+    const rec = makeRec({
+      durationSec: 5.7,
+      startMs: new Date("2026-06-22T08:00:00Z").getTime(),
+      endMs: new Date("2026-06-22T08:00:05Z").getTime(),
+    });
+    let invCalls = 0;
+    const t1: Transport = {
+      id: "node-1",
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockImplementation(async () => {
+        invCalls += 1;
+        return { workerId: "node-1", recordings: invCalls === 1 ? [] : [rec] };
+      }),
+      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(false), // 仍在录
+      pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
+    };
+    const transports = new Map([["node-1", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV_LATE"); return { state: "done", bv: "BV_LATE" }; },
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+    });
+    await expect(reconciler.reconcileAll()).resolves.toBeUndefined();
+
+    // 关键:第二快照新出现的成员仍未被确认收播 → pipeline **不跑**,也不建 job;只 warn
+    expect(spyRunPipeline).toHaveBeenCalledTimes(0);
+    expect(ledger.listActive()).toHaveLength(0);
+    expect(t1.isDone).toHaveBeenCalledTimes(1); // 只为第二快照新出现的成员现查一次
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("node-1"));
+
+    warnSpy.mockRestore();
+    ledger.close();
+  });
+
+  it("Bug C 对照: 首快照为空,第二快照的分段已收播(isDone=true)→ 正常跑 pipeline", async () => {
+    const ledger = freshLedger();
+    const rec = makeRec({
+      durationSec: 5.7,
+      startMs: new Date("2026-06-22T08:00:00Z").getTime(),
+      endMs: new Date("2026-06-22T08:00:05Z").getTime(),
+    });
+    let invCalls = 0;
+    const t1: Transport = {
+      id: "node-1",
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockImplementation(async () => {
+        invCalls += 1;
+        return { workerId: "node-1", recordings: invCalls === 1 ? [] : [rec] };
+      }),
+      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(true), // 已收播
+      pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
+    };
+    const transports = new Map([["node-1", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV_LATE_OK"); return { state: "done", bv: "BV_LATE_OK" }; },
+    );
+
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+    });
+    await expect(reconciler.reconcileAll()).resolves.toBeUndefined();
+
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(t1.isDone).toHaveBeenCalledTimes(1);
     ledger.close();
   });
 

@@ -9,7 +9,7 @@
  * 无历史 → 保守常数比率。ETA 剩余 = 预计总耗时 − 当前步已运行时长(负数归 0)。粗估,UI 标注"约"。
  */
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { rootHubConfig, rootStageDir } from "./paths.js";
 
@@ -18,6 +18,8 @@ export interface HubJobEvent { state: string; at: number; }
 export interface HubJobStep { step: string; phase: string; at: number; detail?: string }
 /** 选优候选(流程图 select 步 fan-in 节点)。 */
 export interface HubJobCandidate { worker: string; coverage: number; durationSec: number; complete: boolean; isWinner: boolean; }
+/** 单个 workflow 节点的安全阀状态(空=旧 run,前端回落 steps 推导)。 */
+export interface HubJobNodeState { node: string; state: string; error: string | null; attempts: number; updatedAt: number }
 export interface HubJobView {
   streamKey: string;
   state: string;
@@ -34,6 +36,8 @@ export interface HubJobView {
   events: HubJobEvent[];
   /** 子步骤 start/done 事件(升序);空=旧版本 run(前端回落粗粒度)。 */
   steps: HubJobStep[];
+  /** 单节点状态(workflow 安全阀;空=旧 run,前端回落 steps 推导)。 */
+  nodeStates: HubJobNodeState[];
   /** 当前步已运行秒数(终态 = null)。 */
   currentStepSec: number | null;
   /** 当前步预计剩余秒数(粗估;终态/没依据 = null)。 */
@@ -46,10 +50,72 @@ export interface HubJobView {
 
 /** 终态集合(与 orchestrator ledger 的 JobState 对齐,字符串契约)。 */
 const TERMINAL = new Set(["done", "needs_manual", "failed"]);
+/** 历史台账表(与 orchestrator SyncLedger 结构对齐;旧库缺表跳过)。 */
+const HISTORY_TABLES = ["sync_jobs", "sync_job_events", "sync_job_steps", "sync_candidates", "sync_node_states"] as const;
 /** 无历史数据时的保守「步骤耗时/视频时长」比率(按 2026-07 实测:烧录 veryfast ~0.11×,上传取决于带宽)。 */
 const FALLBACK_RATE: Record<string, number> = { pending: 0.01, settling: 0.05, syncing: 0.1, merging: 0.3, uploading: 0.6 };
 
 function sanitizeKey(key: string): string { return key.replace(/[:/]/g, "_"); }
+
+/** room key `{platform}.{roomSlug}` → streamKey 前缀 `{platform}:{roomSlug}:`(仅替换首个点)。 */
+function roomKeyToStreamPrefix(roomKey: string): string {
+  return `${roomKey.replace(".", ":")}:`;
+}
+
+/**
+ * 该房间仍有「进行中」run(终态 done/failed/needs_manual 不算;failed 允许删除清掉卡住的旧记录)。
+ * 无 db / 旧库无表 → 空(无从守卫)。
+ */
+export function activeHubJobKeys(syncDbPath: string, roomKey: string): string[] {
+  if (!existsSync(syncDbPath)) return [];
+  const db = new DatabaseSync(syncDbPath, { readOnly: true });
+  try {
+    return (db.prepare(
+      "SELECT streamKey FROM sync_jobs WHERE streamKey LIKE ? AND state NOT IN ('done','failed','needs_manual') ORDER BY updatedAt DESC",
+    ).all(roomKeyToStreamPrefix(roomKey) + "%") as unknown as { streamKey: string }[]).map((r) => r.streamKey);
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+export interface DeleteHubHistoryResult {
+  /** 删除的历史 run 数(按 sync_jobs 行数计)。 */
+  deleted: number;
+  /** 被删 run 的 streamKey(旧库无 sync_jobs → 空)。 */
+  streamKeys: string[];
+}
+
+/**
+ * 删除某房间的全部历史 run:五张台账表 + 各场 job.log。
+ * 表结构即契约;旧库缺表按存在表删,不炸。无 sync db → 空结果。
+ */
+export function deleteHubJobHistory(syncDbPath: string, roomKey: string, stageDir = hubStageDir()): DeleteHubHistoryResult {
+  const prefix = roomKeyToStreamPrefix(roomKey);
+  if (!existsSync(syncDbPath)) return { deleted: 0, streamKeys: [] };
+  const db = new DatabaseSync(syncDbPath);
+  let rows: { streamKey: string }[] = [];
+  try {
+    const tables = new Set(
+      (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as unknown as { name: string }[]).map((r) => r.name),
+    );
+    try {
+      rows = db.prepare("SELECT streamKey FROM sync_jobs WHERE streamKey LIKE ?").all(prefix + "%") as unknown as { streamKey: string }[];
+    } catch { /* 旧库连 sync_jobs 都没有 → 仍按存在表删 */ }
+    for (const table of HISTORY_TABLES) {
+      if (!tables.has(table)) continue;
+      db.prepare(`DELETE FROM ${table} WHERE streamKey LIKE ?`).run(prefix + "%");
+    }
+  } finally {
+    db.close();
+  }
+  const streamKeys = rows.map((r) => r.streamKey);
+  for (const key of streamKeys) {
+    try { rmSync(jobLogPath(key, stageDir), { force: true }); } catch { /* 日志不存在/权限 → 不阻断 */ }
+  }
+  return { deleted: streamKeys.length, streamKeys };
+}
 
 /** stage 根目录:hub.config.json 的 stageDir 优先,否则 rootStageDir()(与 cli hubStarter 同一解析序)。 */
 export function hubStageDir(): string {
@@ -170,6 +236,12 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
           isWinner: Number(c.isWinner) === 1,
         }));
       } catch { /* 旧库无表 → 无候选(前端 select 步不画 fan-in) */ }
+      let nodeStates: HubJobNodeState[] = [];
+      try {
+        nodeStates = db.prepare(
+          "SELECT node, state, error, attempts, updatedAt FROM sync_node_states WHERE streamKey=? ORDER BY node ASC",
+        ).all(j.streamKey) as unknown as HubJobNodeState[];
+      } catch { /* 旧库无表 → 空(前端回落 steps) */ }
       const videoDurationSec = candidates.find((c) => c.isWinner)?.durationSec ?? null;
       const terminal = TERMINAL.has(j.state);
       const stepStart = events.length ? events[events.length - 1].at : j.updatedAt;
@@ -190,6 +262,7 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         startedAt: events.length ? Number(events[0].at) : null,
         events: events.map((e) => ({ state: e.state, at: Number(e.at) })),
         steps: steps.map((s) => ({ step: s.step, phase: s.phase, at: Number(s.at), detail: s.detail ?? undefined })),
+        nodeStates,
         currentStepSec, etaSec, videoDurationSec,
         hasLog: existsSync(jobLogPath(j.streamKey, stageDir)),
       };

@@ -20,7 +20,7 @@ import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { getEngine, platformForRoom } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
-import { groupSessions, mergeSession } from "@drec/post-process";
+import { groupSessions, mergeSession, mergeSessions } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
@@ -29,7 +29,7 @@ import type { Recorder, RecordOpts, NotifyEvent, Notifier, RemoteTaskSpec } from
 import { makeNotifier } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand } from "@drec/app";
 import type { HubStarter, UploadOpts } from "@drec/app";
-import type { PipelineCfg } from "@drec/orchestrator";
+import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
 
 /** 从 CLI 全局选项 → config → env 三层解析 Discord webhook URL。 */
 function webhookOf(localCfg?: { discordWebhook?: string }): string | undefined {
@@ -128,7 +128,8 @@ program
     const opts: RecordOpts = {
       quality: (o.quality ?? cfg.quality) as RecordOpts["quality"],
       cookies,
-      // 留空(未传 --out、YAML 也未设 outDir)→ 回落 rootOutputDir()(<DOUYIN_REC_ROOT ?? DEFAULT_ROOT>/recordings)。
+      // 留空(未传 --out、YAML 也未设 outDir)→ 回落 rootOutputDir()
+      // (<DOUYIN_REC_ROOT ?? DEFAULT_ROOT>/recordings)。
       outDir: o.out || cfg.outDir || rootOutputDir(),
       segmentSec: o.segment !== undefined ? Number(o.segment) : cfg.segmentSec,
       name: o.name?.trim() || undefined,
@@ -296,15 +297,33 @@ program
   .description("合并会话分段 {base}-PART*.ts → {主播}_{日期}.mp4（上传命名约定；同日多会话保留时间戳区分）")
   .requiredOption("--in <dir>", "录像目录（含 {base}-PART*.ts / {base}.xml）")
   .option("--base <base>", "只合并指定会话基名（默认目录内全部会话）")
+  .option("--merge-sessions", "把目录内全部会话按时间序拼成一片(断流重连合并用)")
   .option("--keep-time", "输出保留会话时间戳 {base}.mp4（默认剥成 {主播}_{日期}.mp4）")
-  .action(async (o: { in: string; base?: string; keepTime?: boolean }) => {
+  .action(async (o: { in: string; base?: string; keepTime?: boolean; mergeSessions?: boolean }) => {
     const notifier = makeNotifier(webhookOf());
     try {
       const groups = groupSessions(readdirSync(o.in));
       const bases = o.base ? [o.base] : Object.keys(groups);
+      if (o.mergeSessions) {
+        // 断流重连 = 同一场:全部会话按时间序无损拼成一片,弹幕按累计视频时长偏移合并。
+        const ordered = Object.keys(groups).sort();
+        const inputs = ordered.map((b) => ({
+          tsFiles: groups[b].ts.map((f) => join(o.in, f)),
+          xmlPath: groups[b].xml ? join(o.in, groups[b].xml) : undefined,
+        }));
+        const outBase = ordered[0] ? dateNameOf(ordered[0]) : "";
+        if (!outBase) { console.error("[merge] --merge-sessions 目录内无会话"); process.exitCode = 2; return; }
+        const outMp4 = join(o.in, `${outBase}.mp4`);
+        const outXml = join(o.in, `${outBase}.xml`);
+        console.log(`[merge] ${ordered.join(" + ")} → ${basename(outMp4)}`);
+        await mergeSessions(inputs, outMp4, outXml);
+        console.log(`[merge] 完成: ${outMp4}`);
+        await notifier.notify({ kind: "mergeDone", file: outMp4 });
+        return;
+      }
       // 会话 base = {主播}_{YYYY-MM-DD}_{HH-MM-SS};上传约定用 {主播}_{YYYY-MM-DD}。
       // 同日多会话(断流多场)会撞名 → 撞的保留完整 base(带时间戳),不撞的剥成 {主播}_{日期}。
-      const dateName = (b: string): string => b.replace(/_\d{2}-\d{2}-\d{2}$/, "");
+      const dateName = dateNameOf;
       const clash: Record<string, number> = {};
       for (const b of bases) clash[dateName(b)] = (clash[dateName(b)] ?? 0) + 1;
       for (const b of bases) {
@@ -322,6 +341,10 @@ program
       throw e;
     }
   });
+
+function dateNameOf(base: string): string {
+  return base.replace(/_\d{2}-\d{2}-\d{2}$/, "");
+}
 
 // ffprobe 视频实际宽高 → 传给 ASS 渲染器,让 PlayRes 与视频一致(竖屏 1088x1920 不再被
 // 当成默认横屏 1920x1080 拉伸 → 字号正常)。拿不到则回落 {}(渲染器用默认值)。
@@ -452,10 +475,27 @@ const requestHubSync = (): void => {
   hubSyncPending = true; // start 尚未就绪:等 syncTasks 定义后补跑一次
 };
 
+let hubRetryNode:
+  | ((streamKey: string, node: WorkflowNodeKey, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>)
+  | undefined;
+/** web API → hubStarter.retryNode 的统一入口(hub 未启动 → 400)。 */
+const requestHubRetryNode = async (
+  streamKey: string,
+  node: string,
+  opts?: { force?: boolean },
+): Promise<{ ok: boolean; error?: string; code?: number }> => {
+  if (!hubRetryNode) return { ok: false, error: "hub 未启动", code: 400 };
+  return hubRetryNode(streamKey, node as WorkflowNodeKey, opts);
+};
+
 const hubStarter: HubStarter = {
   requestSyncTasks: requestHubSync,
+  retryNode: requestHubRetryNode,
   async start(opts) {
-    const { registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport } = await import("@drec/orchestrator");
+    const {
+      registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport,
+      buildWorkflow, runWorkflowNodes, deriveStageProducts, ResourcePool,
+    } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
     const { uploadPlain, appendGroup, hubStore, workerStore, rootHubDir, rootHubConfig, rootStageDir, listNodeTasks, applyRemoteTasks, resolveTaskCookies } = await import("@drec/app");
@@ -474,6 +514,8 @@ const hubStarter: HubStarter = {
       stageDir?: string;
       cookies?: string;
       cleanMaxGapSec?: number;
+      /** 断流重连合并窗(ms);缺省 10 分钟。 */
+      reconnectWindowMs?: number;
       /** 投稿默认(per-task 文件留空时回退);旧字段 uploadMeta 也认(迁移兼容)。 */
       uploadDefaults?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string };
       uploadMeta?: { tag?: string; tid?: number; desc?: string };
@@ -481,6 +523,14 @@ const hubStarter: HubStarter = {
       maxWaitSec?: number;
       /** Settle poll interval (seconds). */
       settleSec?: number;
+      /** 资源池 / 崩溃恢复安全阀。缺省:cpu/net 各 1、内存闸门 2048MB/600s、stale 600s。 */
+      resources?: {
+        maxCpuParallel?: number;
+        maxNetParallel?: number;
+        minBurnFreeMemMB?: number;
+        memWaitTimeoutMs?: number;
+        staleMs?: number;
+      };
     };
     if (!hubCfg) {
       opts.warn("[hub] --hub 已设置但 --hub-config / settings.hubConfig 未提供，跳过");
@@ -538,9 +588,16 @@ const hubStarter: HubStarter = {
     const defaultTid = uploadDefaults.tid ?? 21;
 
     const { exec } = await import("node:child_process");
+    const pool = new ResourcePool({
+      maxCpuParallel: hubCfg.resources?.maxCpuParallel ?? 1,
+      maxNetParallel: hubCfg.resources?.maxNetParallel ?? 1,
+      minBurnFreeMemMB: hubCfg.resources?.minBurnFreeMemMB ?? 2048,
+      memWaitTimeoutMs: hubCfg.resources?.memWaitTimeoutMs ?? 600_000,
+    });
     const pipelineDeps = {
       transports,
       ledger,
+      pool,
       // 返回 stdout+stderr(各截尾 64KB,biliup 输出可达 MB 级)→ pipeline 摘尾写进该场 job.log。
       sh: (cmd: string) => new Promise<string>((res, rej) => {
         exec(cmd, { maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
@@ -578,6 +635,7 @@ const hubStarter: HubStarter = {
       const p = rule.pipeline ?? {};
       return {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
+        reconnectWindowMs: p.reconnectWindowMs ?? hubCfg.reconnectWindowMs,
         stageDir: hubCfg.stageDir ?? rootStageDir(),
         cookies: hubCfg.cookies ?? "",
         uploadMode: p.upload?.mode === "upload" ? "upload" : "stage", // 其它值(含旧 stage-only)→ stage
@@ -601,8 +659,10 @@ const hubStarter: HubStarter = {
       ledger,
       pipelineDeps,
       resolveCfg,
+      reconnectWindowMs: hubCfg.reconnectWindowMs,
       loadTransports: buildTransports,
       notify: pipelineDeps.notify, // 达重试上限升级 needs_manual 时,复用 pipeline 同源 EventCenter 通知(站内+webhook)
+      staleMs: hubCfg.resources?.staleMs ?? 600_000,
       ...(hubCfg.maxWaitSec != null || hubCfg.settleSec != null
         ? {
             settle: {
@@ -663,6 +723,22 @@ const hubStarter: HubStarter = {
           try {
             const desired = desiredFor(w.id);
             const r = await t.applyTasks({ desired });
+            // 本机(local worker)的 pending 任务直接走同一进程里的 TaskManager 硬停,
+            // 与远端 `_apply-tasks` 的 serve API 硬停语义一致:停源任务/删规则要立即停,
+            // 不能等排空(否则 hub settle 会一直等这场直播自然收播,迟迟不建 job)。
+            if (w.kind === "local" && r.pending.length > 0) {
+              for (const key of r.pending) {
+                const task = opts.store.listTasks().find((x) => {
+                  try {
+                    const p = platformForRoom(x.room);
+                    return `${p.id}:${p.extractRoomSlug(x.room)}` === key;
+                  } catch {
+                    return false;
+                  }
+                });
+                if (task && opts.manager.isRunning(task.id)) await opts.manager.stop(task.id);
+              }
+            }
             if (r.applied.length > 0 || r.removed.length > 0 || r.pending.length > 0) {
               opts.log(`[hub] 任务同步 ${w.id}: applied=${r.applied.length} removed=${r.removed.length} pending=${r.pending.length}`);
             }
@@ -685,6 +761,75 @@ const hubStarter: HubStarter = {
       void syncTasks();
     }
 
+    // 手动单节点重跑:UI → web API → 这里。与 reconciler 共享同一 ResourcePool 流锁,保证同场不并发;
+    // 上传类节点默认拒绝(可能已建稿/已 append),force 才放行(UI 二次确认)。
+    const retryNode = async (
+      streamKey: string,
+      node: WorkflowNodeKey,
+      force = false,
+    ): Promise<{ ok: boolean; error?: string; code?: number }> => {
+      const CORE: WorkflowNodeKey[] = ["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat"];
+      const unsafe = (n: WorkflowNodeKey): boolean =>
+        n === "upload_plain" || n === "append_danmu" || n === "append_livechat";
+      if (!CORE.includes(node)) return { ok: false, error: `不可重跑的节点: ${node}`, code: 400 };
+      if (unsafe(node) && !force) return { ok: false, error: `${node} 属上传类节点,需确认后才可重跑`, code: 400 };
+      const parts = streamKey.split(":");
+      if (parts.length < 3) return { ok: false, error: `非法 streamKey: ${streamKey}`, code: 400 };
+      const platform = parts[0];
+      const roomSlug = parts[1];
+      const stageSub = join(hubCfg.stageDir ?? rootStageDir(), streamKey.replace(/[:/]/g, "_"));
+      const job = ledger.get(streamKey);
+      // 已建稿后重传 P1 会重复投稿;已有 append done 再跑 append 会重复分 P → 拒绝(除非 force 且 UI 二次确认)。
+      if (node === "upload_plain" && job?.bv) {
+        const appended = ["append_danmu", "append_livechat"].some(
+          (k) => ledger.getNodeState(streamKey, k as WorkflowNodeKey)?.state === "done",
+        );
+        if (appended) return { ok: false, error: `已建稿(${job.bv})且已有分 P,不能重跑 P1(会重复投稿)`, code: 409 };
+      }
+      return pool.withStreamLock(streamKey, async () => {
+        ledger.setState(streamKey, "retrying");
+        const cfg = resolveCfg(platform, roomSlug);
+        if (!cfg) {
+          ledger.setState(streamKey, "failed", { error: `房间未开 hub: ${streamKey}` });
+          return { ok: false, error: `房间未开 hub: ${streamKey}`, code: 400 };
+        }
+        ledger.backfillNodeStates(streamKey);
+        const products = deriveStageProducts(stageSub);
+        if (!products) {
+          ledger.setState(streamKey, "failed", { error: `stage 产物缺失,无法重跑: ${stageSub}` });
+          return { ok: false, error: `stage 产物缺失,无法重跑: ${stageSub}`, code: 409 };
+        }
+        const workflow = buildWorkflow({
+          streamKey, stageSub, products, deps: pipelineDeps, cfg, log: opts.log,
+          willUpload: cfg.uploadMode === "upload",
+          burnDanmu: cfg.steps?.burnDanmu !== false,
+          burnLivechat: cfg.steps?.burnLivechat !== false,
+          mergeSegments: 0,
+        });
+        const r = await runWorkflowNodes({
+          streamKey, nodes: workflow.nodes, edges: workflow.edges, ctx: workflow.ctx,
+          pool, forceRetry: new Set<WorkflowNodeKey>([node]),
+        });
+        if (r.ok) {
+          if (cfg.uploadMode === "upload") {
+            const bv = ledger.get(streamKey)?.bv ?? "";
+            ledger.markDone(streamKey, bv);
+            if (bv) opts.onEvent({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+          } else {
+            ledger.setState(streamKey, "needs_manual");
+          }
+          return { ok: true };
+        }
+        const errText = r.failed.length
+          ? ledger.getNodeState(streamKey, r.failed[0])?.error ?? `节点失败: ${r.failed.join(",")}`
+          : `节点被阻断: ${r.blocked.join(",")}`;
+        ledger.setState(streamKey, "failed", { error: errText });
+        return { ok: false, error: errText, code: 500 };
+      });
+    };
+    hubRetryNode = (streamKey: string, node: WorkflowNodeKey, o?: { force?: boolean }) =>
+      retryNode(streamKey, node, o?.force === true);
+
     const stop = startHub({
       tasks: () => opts.store.listTasks(),
       isRecording: (id: number) => opts.manager.isRecording(id),
@@ -700,6 +845,7 @@ const hubStarter: HubStarter = {
     return () => {
       stop();
       hubSyncTasks = undefined;
+      hubRetryNode = undefined;
     };
   },
   async testWorker(cfg) {
@@ -772,6 +918,49 @@ program.addCommand(
 // ─── cookie 子命令组：管理全局抖音账号 cookie（所有任务共享）────────────────────
 program.addCommand(buildCookieCommand());
 
+// ─── _is-done <dataRoot> <roomSlug>（隐藏子命令，供 master 通过 SSH 调用）────────
+// 只查「该房间」是否还有活着的下载进程(ffmpeg/mesio 子进程)在写盘,不再数全机 ffmpeg:
+// 之前用全局 ffmpeg 计数,别的房间还在录会把本房间也当成未收播,settle 一直空等。
+// record 子进程命令含 `--room <URL/房间号>`;有孙进程(ffmpeg/mesio)= 正在录;仅轮询等开播无子进程 = 已收播。
+function roomRecordingAlive(roomSlug: string): boolean {
+  try {
+    for (const entry of readdirSync("/proc", { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+      let cmdline: string[];
+      try {
+        cmdline = readFileSync(`/proc/${entry.name}/cmdline`, "utf8").split("\0").filter(Boolean);
+      } catch {
+        continue; // 进程刚退出 / 权限不足
+      }
+      const roomIdx = cmdline.indexOf("--room");
+      if (roomIdx < 0 || roomIdx + 1 >= cmdline.length) continue;
+      let slug: string;
+      try {
+        slug = platformForRoom(cmdline[roomIdx + 1]).extractRoomSlug(cmdline[roomIdx + 1]);
+      } catch {
+        continue;
+      }
+      if (slug !== roomSlug) continue;
+      try {
+        const children = readFileSync(`/proc/${entry.name}/task/${entry.name}/children`, "utf8").trim();
+        if (children.length > 0) return true;
+      } catch {
+        /* 进程刚退出,忽略 */
+      }
+    }
+  } catch {
+    /* 非 Linux(本地开发)无 /proc → 视为无进程 */
+  }
+  return false;
+}
+
+program
+  .command("_is-done <dataRoot> <roomSlug>", { hidden: true })
+  .description("(内部) 判断该房间是否已收播(供 master ssh settle)")
+  .action((_dataRoot: string, roomSlug: string) => {
+    process.stdout.write((roomRecordingAlive(roomSlug) ? "false" : "true") + "\n");
+  });
+
 // ─── _inventory <dataRoot>（隐藏子命令，供多节点编排 master 通过 SSH 调用）──────────
 // master 通过 ssh 在 slave 上执行 `node <dataRoot>/dist/douyin-rec.mjs _inventory <dataRoot>`。
 // slave 扫描自己的 recordings 目录，输出 JSON { recordings: NodeRecording[] } 到 stdout。
@@ -834,6 +1023,34 @@ program
     const input = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as { desired: RemoteTaskSpec[] };
     const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
     const result = applyRemoteTasks(store, Array.isArray(input.desired) ? input.desired : []);
+    // 不再期望的受管任务必须**硬停**(而非排空):这是「用户停源任务/删规则」的明确意图,
+    // 排空会等到直播自然收播,hub 的 settle 因而一直卡着不建 job。
+    // `_apply-tasks` 是独立短命进程,没有 TaskManager 引用,只能走本机 serve 的
+    // POST /api/tasks/:id/stop → 由 serve 内的 manager 置 expected 停掉子进程(不会触发崩溃自愈重启)。
+    if (result.pending.length > 0) {
+      const apiBase = process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860";
+      for (const key of result.pending) {
+        const task = store.listTasks().find((x) => {
+          try {
+            const p = platformForRoom(x.room);
+            return `${p.id}:${p.extractRoomSlug(x.room)}` === key;
+          } catch {
+            return false;
+          }
+        });
+        if (!task) continue;
+        try {
+          // internal=1 仅允许本机回环:serve 借此放行 hub 受管任务的硬停(外部 API 仍 403)。
+          const res = await fetch(`${apiBase}/api/tasks/${task.id}/stop?internal=1`, { method: "POST" });
+          if (!res.ok) {
+            console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: HTTP ${res.status}`);
+          }
+        } catch (e) {
+          // serve 未起/重启中 → 下一轮对账会再进 pending 重试;若 serve 一直不可达则回落 daemon 排空兜底。
+          console.error(`[task-sync] 硬停任务 id=${task.id}(${key}) 失败: ${(e as Error).message}`);
+        }
+      }
+    }
     process.stdout.write(JSON.stringify(result) + "\n");
   });
 

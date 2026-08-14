@@ -100,6 +100,12 @@ export function applyRemoteTasks(
         anchorName: spec.anchorName ?? null,
       });
       log?.(`[task-sync] 收编任务 ${existing.id}: ${key}`);
+      // 期望任务已禁用但节点上还在录/待起:必须硬停,不能等 daemon 排空到自然收播。
+      // 否则 hub reconcile 的 settle 会一直卡在这场直播,迟迟不建 run。
+      if (!spec.enabled && (existing.status === "running" || existing.status === "pending" || existing.status === "draining")) {
+        pending.push(key);
+        log?.(`[task-sync] 停用运行中任务 ${existing.id}: ${key}`);
+      }
     } else {
       store.addTask({
         room: spec.room,

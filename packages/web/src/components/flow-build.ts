@@ -9,6 +9,7 @@ export type FlowCfg = {
 
 const COL = 170;
 const Y_MID = 70, Y_TOP = 10, Y_BOT = 130;
+const Y_ROW3 = 190;
 const TERMINAL = new Set(["done", "failed", "needs_manual"]);
 const OPTIONAL = [
   "burn_danmu", "burn_livechat", "clean_stage_src",
@@ -47,27 +48,40 @@ export function buildFlow(
   const p = presentSet(job, cfg);
   const keep = (arr: string[]): string[] => arr.filter((k) => p.has(k));
   const spine = ["select", "pull", "merge"];
-  const burnLane = keep(["burn_danmu", "burn_livechat", "clean_stage_src"]);
-  const uploadLane = keep(["upload_plain"]);
-  const tail = [...keep(["append_danmu", "append_livechat", "clean_source", "clean_stage"]), "__term__"];
+  // 并行轨:merge 后同时起跑。danmu/livechat 各自 burn → append,upload_plain(P1)独立轨,
+  // clean_stage_src 也可选并行(拆 pipeline 后结构:烧录与上传互不等,append 串行在轨内)。
+  const lanes = [
+    keep(["burn_danmu", "append_danmu"]),
+    keep(["upload_plain"]),
+    keep(["burn_livechat", "append_livechat"]),
+    keep(["clean_stage_src"]),
+  ].filter((lane) => lane.length > 0);
+  const tail = [...keep(["clean_source", "clean_stage"]), "__term__"];
 
   const nodes: FlowNode[] = [];
   spine.forEach((k, i) => nodes.push({ key: k, x: i * COL, y: Y_MID }));
   const forkStart = spine.length;
-  const forked = burnLane.length > 0 && uploadLane.length > 0; // 只有两轨都在才分叉
-  burnLane.forEach((k, i) => nodes.push({ key: k, x: (forkStart + i) * COL, y: forked ? Y_TOP : Y_MID }));
-  uploadLane.forEach((k, i) => nodes.push({ key: k, x: (forkStart + i) * COL, y: forked ? Y_BOT : Y_MID }));
-  const forkWidth = Math.max(burnLane.length, uploadLane.length);
+  const forked = lanes.length > 1;
+  const laneYs = [Y_TOP, Y_MID, Y_BOT, Y_ROW3];
+  lanes.forEach((lane, i) => {
+    lane.forEach((k, j) => nodes.push({ key: k, x: (forkStart + j) * COL, y: forked ? laneYs[i % laneYs.length] : Y_MID }));
+  });
+  const forkWidth = Math.max(0, ...lanes.map((lane) => lane.length));
   const tailStart = forkStart + forkWidth;
   tail.forEach((k, i) => nodes.push({ key: k, x: (tailStart + i) * COL, y: Y_MID }));
 
   const edges: Array<[string, string]> = [["select", "pull"], ["pull", "merge"]];
   const chain = (arr: string[]): void => { for (let i = 0; i + 1 < arr.length; i++) edges.push([arr[i], arr[i + 1]]); };
-  chain(burnLane); chain(uploadLane); chain(tail);
+  lanes.forEach((lane) => chain(lane));
+  // append_danmu(P2) 完成后才追 append_livechat(P3),保证 B 站分 P 顺序。
+  if (p.has("append_danmu") && p.has("append_livechat")) edges.push(["append_danmu", "append_livechat"]);
+  chain(tail);
   const joinTarget = tail[0]; // 恒有(至少 __term__)
-  if (burnLane.length) { edges.push(["merge", burnLane[0]]); edges.push([burnLane[burnLane.length - 1], joinTarget]); }
-  if (uploadLane.length) { edges.push(["merge", uploadLane[0]]); edges.push([uploadLane[uploadLane.length - 1], joinTarget]); }
-  if (!burnLane.length && !uploadLane.length) edges.push(["merge", joinTarget]);
+  lanes.forEach((lane) => {
+    edges.push(["merge", lane[0]]);
+    edges.push([lane[lane.length - 1], joinTarget]);
+  });
+  if (lanes.length === 0) edges.push(["merge", joinTarget]);
 
   return { nodes, edges };
 }

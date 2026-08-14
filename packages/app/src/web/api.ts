@@ -30,7 +30,7 @@ import { resolveTaskCookies } from "../store.js";
 import type { TaskRuntime } from "../task-manager.js";
 import { inWindow, nowMinutesLocal } from "../scheduler.js";
 import type { MergeJobStore } from "../merge-jobs.js";
-import { listHubJobs, readHubJobLog } from "../hub-jobs.js";
+import { activeHubJobKeys, deleteHubJobHistory, listHubJobs, readHubJobLog } from "../hub-jobs.js";
 
 /** Uniform handler result. status = HTTP status, body = JSON-serialisable. */
 export interface ApiResult {
@@ -103,6 +103,8 @@ export interface ApiDeps {
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
   /** 立即触发一次 hub 任务同步(hub 规则/worker 变更后由 web API 调用;省略=只等周期 tick)。 */
   requestSyncTasks?: () => void;
+  /** 手动重跑单个 workflow 节点(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
+  retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
 }
 
 /**
@@ -261,7 +263,7 @@ export interface Api {
   getTaskLogs(id: number): ApiResult;
   deleteTask(id: number): Promise<ApiResult>;
   startTask(id: number): ApiResult;
-  stopTask(id: number): Promise<ApiResult>;
+  stopTask(id: number, opts?: { internal?: boolean }): Promise<ApiResult>;
   /** POST /api/login/qr — start a QR-login → { sessionId, qrPng }. */
   startLogin(): Promise<ApiResult>;
   /** GET /api/login/qr/:sid — poll → { state, cookie? }. */
@@ -313,6 +315,8 @@ export interface Api {
   listHubJobs(opts?: { room?: string; limit?: number; offset?: number }): ApiResult;
   /** GET /api/hub/jobs/:key/log — 该场 job.log 尾部(key=streamKey,URL-encoded)。 */
   getHubJobLog(streamKey: string): ApiResult;
+  /** POST /api/hub/jobs/:key/retry-node { node, force? } — 手动重跑单个 workflow 节点。 */
+  retryHubNode(streamKey: string, input: { node?: string; force?: boolean }): Promise<ApiResult>;
   /** GET /api/hub/workers — 列出录制 worker(hub 未启用 → 400)。 */
   listWorkers(): ApiResult;
   /** POST /api/hub/workers — 新建 worker。 */
@@ -601,10 +605,14 @@ export function makeApi(deps: ApiDeps): Api {
      * 「停止」= 置 enabled=false（daemon 不再拉起）+ 立即硬停（SIGTERM→SIGKILL）。
      * 用户主动停就是要立刻停。优雅排空（不腰斩）只用于自动场景：窗口结束由 daemon 触发。
      */
-    async stopTask(id: number): Promise<ApiResult> {
+    async stopTask(id: number, opts: { internal?: boolean } = {}): Promise<ApiResult> {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
-      if (t.managedBy === "hub") return err(403, `任务 id=${id} 由 hub 管理，请在 master 上操作`);
+      // 内部停止仅限本机回环调用(_apply-tasks 的硬停通道),供 hub 停用/删除受管任务;
+      // 外部 UI/API 仍禁止直接操作受管任务,必须回 master 改源任务。
+      if (t.managedBy === "hub" && !opts.internal) {
+        return err(403, `任务 id=${id} 由 hub 管理，请在 master 上操作`);
+      }
       try {
         store.setEnabled(id, false);
         if (manager.isRunning(id)) await manager.stop(id);
@@ -842,10 +850,19 @@ export function makeApi(deps: ApiDeps): Api {
       return { status: 200, body: hubRuleView(updated) };
     },
     deleteHubRule(key: string): ApiResult {
+      const existing = hubStore.getHubRule(hubDir, key);
+      if (!existing) return err(404, `未找到 hub 规则 key=${key}`);
+      if (deps.syncDbPath) {
+        const active = activeHubJobKeys(deps.syncDbPath, key);
+        if (active.length > 0) {
+          return err(409, `该直播间有进行中的 hub 任务(${active[0]}),请先等它结束或停止后再删除规则`);
+        }
+      }
+      const history = deps.syncDbPath ? deleteHubJobHistory(deps.syncDbPath, key) : { deleted: 0, streamKeys: [] };
       const ok = hubStore.removeHubRule(hubDir, key);
       if (!ok) return err(404, `未找到 hub 规则 key=${key}`);
       deps.requestSyncTasks?.();
-      return { status: 200, body: { ok: true, key } };
+      return { status: 200, body: { ok: true, key, deletedHistory: history.deleted } };
     },
     listHubJobs(opts: { room?: string; limit?: number; offset?: number } = {}): ApiResult {
       if (!deps.syncDbPath) return { status: 200, body: { jobs: [], total: 0 } }; // slave/hub 未开 → 空
@@ -864,6 +881,12 @@ export function makeApi(deps: ApiDeps): Api {
       const log = readHubJobLog(streamKey);
       if (log == null) return err(404, `该场无 job.log(旧版本产生的任务没有,或 stage 已清理): ${streamKey}`);
       return { status: 200, body: { streamKey, log } };
+    },
+    async retryHubNode(streamKey, input): Promise<ApiResult> {
+      if (!deps.syncDbPath || !deps.retryNode) return err(400, "hub 未启用(单节点重跑未注入)");
+      if (!input.node) return err(400, "node 必填");
+      const r = await deps.retryNode(streamKey, input.node, { force: input.force === true });
+      return r.ok ? { status: 200, body: r } : { status: r.code ?? 400, body: r };
     },
 
     listWorkers(): ApiResult {

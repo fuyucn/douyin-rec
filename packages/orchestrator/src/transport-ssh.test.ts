@@ -46,20 +46,41 @@ describe("SshTransport", () => {
     expect(cmdStr).toContain("custom-node");
     expect(cmdStr).toContain("_inventory");
   });
-  it("isDone：远端 ffmpeg 计数为 0 → true（已收播）", async () => {
+  it("isDone：远端 _is-done 返回 true → 已收播", async () => {
     const t = new SshTransport({ id: "vps", host: "h", dataRoot: "~/drec",
-      run: async () => "0", rsync: async () => {} });
+      run: async () => "true", rsync: async () => {} });
     expect(await t.isDone("411")).toBe(true);
   });
-  it("isDone：远端 ffmpeg 计数 > 0 → false（录制中）", async () => {
+  it("isDone：远端 _is-done 返回 false → 录制中", async () => {
     const t = new SshTransport({ id: "vps", host: "h", dataRoot: "~/drec",
-      run: async () => "2", rsync: async () => {} });
+      run: async () => "false", rsync: async () => {} });
     expect(await t.isDone("411")).toBe(false);
   });
   it("isDone：远端输出乱码/非数字 → false（未知状态，安全默认）", async () => {
     const t = new SshTransport({ id: "vps", host: "h", dataRoot: "~/drec",
       run: async () => "DONE", rsync: async () => {} });
     expect(await t.isDone("411")).toBe(false);
+  });
+  it("isDone：命令按房间查询 _is-done(不再全机数 ffmpeg)", async () => {
+    const capturedArgv: string[][] = [];
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec",
+      run: async (argv) => { capturedArgv.push(argv); return "true"; }, rsync: async () => {} });
+    await t.isDone("411");
+    const cmdStr = capturedArgv[0].join(" ");
+    expect(cmdStr).toContain("_is-done");
+    expect(cmdStr).toContain("/data/drec");
+    expect(cmdStr).toContain("411");
+    expect(cmdStr).not.toContain("ffmpeg");
+  });
+  it("isDone：支持 remoteNode 覆盖", async () => {
+    const capturedArgv: string[][] = [];
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec",
+      remoteNode: "custom-node /opt/drec/douyin-rec.mjs",
+      run: async (argv) => { capturedArgv.push(argv); return "false"; }, rsync: async () => {} });
+    await t.isDone("411");
+    const cmdStr = capturedArgv[0].join(" ");
+    expect(cmdStr).toContain("custom-node");
+    expect(cmdStr).toContain("_is-done");
   });
 
   const made: string[] = [];

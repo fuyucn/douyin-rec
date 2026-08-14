@@ -202,7 +202,11 @@ export interface HubStarter {
     hubConfigJson: string | undefined;
     dbPath: string | undefined;
     store: TaskStore;
-    manager: { isRecording(id: number): boolean };
+    manager: {
+      isRecording(id: number): boolean;
+      isRunning(id: number): boolean;
+      stop(id: number): Promise<void>;
+    };
     onEvent: (e: import("@drec/core").NotifyEvent) => void;
     log: (msg: string) => void;
     warn: (msg: string) => void;
@@ -213,6 +217,8 @@ export interface HubStarter {
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
   /** 立即触发一次 hub 任务同步(规则/worker 变更后由 web API 调用;hub 未就绪时排队,start 后补跑)。 */
   requestSyncTasks?: () => void;
+  /** 手动重跑单个 workflow 节点(hub 未启用 → web API 返回 400)。 */
+  retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
 }
 
 /** Build the `task` command group. Pass a getWebhook() that reads program-level opts/env. */
@@ -550,6 +556,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         testWorker: hubEnabled ? hubStarter?.testWorker : undefined,
         probeAllWorkers: hubEnabled ? hubStarter?.probeAllWorkers : undefined,
         requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
+        retryNode: hubEnabled ? hubStarter?.retryNode : undefined,
         log: (m) => console.log(m),
       });
 

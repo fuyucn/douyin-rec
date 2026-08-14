@@ -14,6 +14,30 @@ describe("SyncLedger", () => {
     expect(l.upsertPending("k1").isNew).toBe(false);
     l.close();
   });
+  it("upsertPending 存 startMs;旧库无 startMs 时再 upsert 回填", () => {
+    const l = fresh();
+    l.upsertPending("k1", 111);
+    expect(l.get("k1")?.startMs).toBe(111);
+    // 无 startMs 的旧行(模拟旧库)→ 带 startMs 再 upsert → 回填且不重置状态
+    l.upsertPending("k2");
+    expect(l.get("k2")?.startMs).toBeNull();
+    l.upsertPending("k2", 222);
+    expect(l.get("k2")?.startMs).toBe(222);
+    l.close();
+  });
+  it("listKeys 返回 streamKey/startMs/updatedAt 对象(供同日多场 key 去重)", () => {
+    const l = fresh();
+    l.upsertPending("douyin:1:2026-08-14", 123);
+    l.upsertPending("douyin:1:2026-08-14_1200");
+    const keys = l.listKeys();
+    expect(keys).toHaveLength(2);
+    const base = keys.find((k) => k.streamKey === "douyin:1:2026-08-14");
+    expect(base?.startMs).toBe(123);
+    expect(base?.updatedAt).toBeGreaterThan(0);
+    const suffixed = keys.find((k) => k.streamKey === "douyin:1:2026-08-14_1200");
+    expect(suffixed?.startMs).toBeNull();
+    l.close();
+  });
   it("已 done 的作业不被 upsertPending 重置", () => {
     const l = fresh();
     l.upsertPending("k1"); l.markDone("k1", "BVxxx");
@@ -150,6 +174,97 @@ describe("ledger 列迁移 tenant→worker(幂等 RENAME COLUMN)", () => {
     l.logStep("k1", "append_danmu", "done");
     l.logStep("k1", "append_danmu", "start"); // 重入又开始
     expect(l.isStepDone("k1", "append_danmu")).toBe(false);
+    l.close();
+  });
+});
+
+describe("sweepStale 崩溃恢复", () => {
+  it("running 节点过期 → 标 failed,并同步 job 级状态(防 merging 僵尸 job 卡死)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "led-sweep-"));
+    const p = join(dir, "j.db");
+    const raw = new DatabaseSync(p);
+    raw.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+      winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT)`);
+    raw.exec(`CREATE TABLE sync_node_states(streamKey TEXT NOT NULL, node TEXT NOT NULL, state TEXT NOT NULL,
+      error TEXT, attempts INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL, PRIMARY KEY(streamKey, node))`);
+    raw.prepare("INSERT INTO sync_jobs(streamKey,state,updatedAt) VALUES(?,?,?)").run("douyin:1:2026-08-11", "merging", 1);
+    raw.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("douyin:1:2026-08-11", "merge", "running", null, 1, 1);
+    raw.close();
+
+    const l = new SyncLedger(p);
+    l.sweepStale(1000);
+    expect(l.getNodeState("douyin:1:2026-08-11", "merge")?.state).toBe("failed");
+    expect(l.getNodeState("douyin:1:2026-08-11", "merge")?.error).toBe("进程重启中断");
+    // job 级必须同步为 failed,否则 reconciler 只认 pending/failed,僵尸 merging 永不重入。
+    expect(l.get("douyin:1:2026-08-11")?.state).toBe("failed");
+    l.close();
+  });
+
+  it("本进程正在跑的场(长 burn 超 staleMs)不被误杀", () => {
+    const dir = mkdtempSync(join(tmpdir(), "led-sweep-live-"));
+    const p = join(dir, "j.db");
+    const raw = new DatabaseSync(p);
+    raw.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+      winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT)`);
+    raw.exec(`CREATE TABLE sync_node_states(streamKey TEXT NOT NULL, node TEXT NOT NULL, state TEXT NOT NULL,
+      error TEXT, attempts INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL, PRIMARY KEY(streamKey, node))`);
+    raw.prepare("INSERT INTO sync_jobs(streamKey,state,updatedAt) VALUES(?,?,?)").run("douyin:2:2026-08-11", "merging", 1);
+    raw.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("douyin:2:2026-08-11", "burn_livechat", "running", null, 1, 1);
+    raw.close();
+
+    const l = new SyncLedger(p);
+    l.sweepStale(1000, (k) => k === "douyin:2:2026-08-11");
+    expect(l.getNodeState("douyin:2:2026-08-11", "burn_livechat")?.state).toBe("running");
+    expect(l.get("douyin:2:2026-08-11")?.state).toBe("merging");
+    l.close();
+  });
+
+  it("节点已 failed 但 job 仍是 merging(无 running 节点)→ 整场标 failed,reconciler 可重入", () => {
+    const dir = mkdtempSync(join(tmpdir(), "led-sweep-zombie-"));
+    const p = join(dir, "j.db");
+    const raw = new DatabaseSync(p);
+    raw.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+      winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT)`);
+    raw.exec(`CREATE TABLE sync_node_states(streamKey TEXT NOT NULL, node TEXT NOT NULL, state TEXT NOT NULL,
+      error TEXT, attempts INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL, PRIMARY KEY(streamKey, node))`);
+    raw.prepare("INSERT INTO sync_jobs(streamKey,state,updatedAt) VALUES(?,?,?)").run("douyin:3:2026-08-11", "merging", 1);
+    raw.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("douyin:3:2026-08-11", "merge", "failed", "进程重启中断", 1, 1);
+    raw.close();
+
+    const l = new SyncLedger(p);
+    l.sweepStale(1000);
+    expect(l.getNodeState("douyin:3:2026-08-11", "merge")?.state).toBe("failed");
+    expect(l.get("douyin:3:2026-08-11")?.state).toBe("failed");
+    l.close();
+  });
+
+  it("僵尸 job 但该场正在本进程手动重跑 → 不标 failed(避免打断 retryNode)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "led-sweep-zombie-live-"));
+    const p = join(dir, "j.db");
+    const raw = new DatabaseSync(p);
+    raw.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+      winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT)`);
+    raw.exec(`CREATE TABLE sync_node_states(streamKey TEXT NOT NULL, node TEXT NOT NULL, state TEXT NOT NULL,
+      error TEXT, attempts INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL, PRIMARY KEY(streamKey, node))`);
+    raw.prepare("INSERT INTO sync_jobs(streamKey,state,updatedAt) VALUES(?,?,?)").run("douyin:4:2026-08-11", "merging", 1);
+    raw.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("douyin:4:2026-08-11", "merge", "failed", "进程重启中断", 1, 1);
+    raw.close();
+
+    const l = new SyncLedger(p);
+    l.sweepStale(1000, (k) => k === "douyin:4:2026-08-11");
+    expect(l.get("douyin:4:2026-08-11")?.state).toBe("merging");
     l.close();
   });
 });

@@ -81,13 +81,16 @@ export class SshTransport implements Transport {
   }
 
   async isDone(roomSlug: string): Promise<boolean> {
-    // 同 listInventory:命令作单个字符串传(远端 shell 执行,glob/管道生效),不包 bash -lc。
-    const out = await this.run([
-      `cat /proc/[0-9]*/comm 2>/dev/null | grep -ic ffmpeg || true`]);
-    const n = parseInt(out.trim(), 10);
+    // 每房间判定:远端 `_is-done <dataRoot> <roomSlug>` 只查该房间 record 进程是否还有
+    // ffmpeg/mesio 孙进程。旧实现 `grep -ic ffmpeg` 是全机计数 —— 别的房间还在录会把
+    // 本房间也判成未收播,settle 一直空等、hub 迟迟不建 job(实测踩过)。
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const q = roomSlug.replace(/'/g, "'\\''");
+    const out = await this.run([`${nodePrefix} _is-done ${this.o.dataRoot} '${q}'`]);
+    const trimmed = out.trim().toLowerCase();
     // 未知/乱码输出 → 视为未收播(安全默认：编排器等待而非提前同步)
-    if (isNaN(n)) return false;
-    return n === 0; // 0 ffmpeg 进程 = 已收播
+    if (trimmed !== "true" && trimmed !== "false") return false;
+    return trimmed === "true";
   }
   /** 远端:逐个 `test -e`,全在则 echo OK(命令单字符串传,同 listInventory 规避 ssh 打散)。 */
   async exists(paths: string[]): Promise<boolean> {

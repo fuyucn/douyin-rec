@@ -83,6 +83,11 @@ describe("matchRoute", () => {
     expect(matchRoute("DELETE", "/api/hub/workers/local")).toMatchObject({ name: "deleteWorker", slug: "local" });
     expect(matchRoute("POST", "/api/hub/workers/test")).toMatchObject({ name: "testWorker", needsBody: true });
     expect(matchRoute("GET", "/api/hub/workers/status")?.name).toBe("workersStatus");
+    expect(matchRoute("POST", "/api/hub/jobs/douyin%3A123%3A2026-08-10/retry-node")).toMatchObject({
+      name: "retryHubNode",
+      sid: "douyin:123:2026-08-10",
+      needsBody: true,
+    });
     // status 不能被 /:id 正则吞掉
     expect(matchRoute("GET", "/api/hub/workers/local")).toBeNull(); // GET /:id 无路由(只有 PATCH/DELETE)
   });

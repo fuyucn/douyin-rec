@@ -7,12 +7,14 @@
  * start/stop calls) so assertions stay deterministic.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
 import { MergeJobStore } from "../../packages/app/src/merge-jobs.js";
 import { EventCenter } from "../../packages/observability/src/bus.js";
+import { listHubJobs } from "../../packages/app/src/hub-jobs.js";
 import {
   makeApi,
   type ApiDeps,
@@ -450,6 +452,18 @@ describe("stopTask", () => {
     expect(requestSyncTasks).not.toHaveBeenCalled();
   });
 
+  it("internal 停止放行 hub 受管任务(仅本机回环 _apply-tasks 通道)", async () => {
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({ store, manager, hubDir: mkdtempSync(join(tmpdir(), "stop-internal-")), requestSyncTasks });
+    const t = store.addTask({ room: "111", managedBy: "hub", enabled: true });
+    manager.forceRunning(t.id);
+    const res = await a.stopTask(t.id, { internal: true });
+    expect(res.status).toBe(200);
+    expect(manager.stopCalls).toEqual([t.id]);
+    expect(store.getTask(t.id)!.enabled).toBe(false);
+    expect(requestSyncTasks).not.toHaveBeenCalled(); // 节点内部硬停不回 master 同步
+  });
+
   it("manager.stop 抛错 → 500、enabled 回滚、不触发同步", async () => {
     const requestSyncTasks = vi.fn();
     const hubDir = mkdtempSync(join(tmpdir(), "stop-error-"));
@@ -786,6 +800,41 @@ describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
   });
 });
 
+describe("hub 单节点重跑端点", () => {
+  it("注入 retryNode → 200 + 透传结果,force 透传 true", async () => {
+    const fake = vi.fn(async (_key: string, node: string, opts?: { force?: boolean }) =>
+      ({ ok: true, node, force: opts?.force === true }));
+    const a = makeApi({
+      store,
+      manager,
+      syncDbPath: join(mkdtempSync(join(tmpdir(), "retry-")), "x-sync.db"),
+      retryNode: fake,
+    });
+    const r = await a.retryHubNode("douyin:123:2026-08-10", { node: "upload_plain", force: true });
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ ok: true, node: "upload_plain", force: true });
+    expect(fake).toHaveBeenCalledWith("douyin:123:2026-08-10", "upload_plain", { force: true });
+  });
+  it("缺 node → 400 且不调 retryNode", async () => {
+    const fake = vi.fn(async () => ({ ok: true }));
+    const a = makeApi({
+      store,
+      manager,
+      syncDbPath: join(mkdtempSync(join(tmpdir(), "retry-")), "x-sync.db"),
+      retryNode: fake,
+    });
+    const r = await a.retryHubNode("douyin:123:2026-08-10", {});
+    expect(r.status).toBe(400);
+    expect(fake).not.toHaveBeenCalled();
+  });
+  it("未注入 retryNode/syncDbPath → 400 hub 未启用", async () => {
+    const a = makeApi({ store, manager });
+    const r = await a.retryHubNode("douyin:123:2026-08-10", { node: "merge" });
+    expect(r.status).toBe(400);
+    expect((r.body as { error?: string }).error).toContain("hub 未启用");
+  });
+});
+
 describe("hub rules workers 字段(校验 + 往返)", () => {
   function apiWithHubDir(): ReturnType<typeof makeApi> {
     const hubDir = mkdtempSync(join(tmpdir(), "hubrules-"));
@@ -866,6 +915,72 @@ describe("hub 规则/worker 变更立即触发任务同步", () => {
     expect(a.updateWorker("worker-1", { name: "港2" }).status).toBe(200);
     expect(a.deleteWorker("worker-1").status).toBe(200);
     expect(requestSyncTasks).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("删除 hub 规则同时清理该直播间历史 run", () => {
+  function makeSyncDb(): string {
+    const p = join(mkdtempSync(join(tmpdir(), "hubdel-")), "sync.db");
+    const db = new DatabaseSync(p);
+    db.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+      winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    db.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
+    db.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT)`);
+    db.exec(`CREATE TABLE sync_candidates(streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
+      coverage REAL NOT NULL, durationSec REAL NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER NOT NULL,
+      totalGapSec REAL NOT NULL, isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+      PRIMARY KEY(streamKey, workerId))`);
+    db.exec(`CREATE TABLE sync_node_states(streamKey TEXT NOT NULL, node TEXT NOT NULL, state TEXT NOT NULL,
+      error TEXT, attempts INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL,
+      PRIMARY KEY(streamKey, node))`);
+    db.close();
+    return p;
+  }
+
+  it("删除成功后清掉该房间历史,其他房间不动", () => {
+    const syncDbPath = makeSyncDb();
+    const hubDir = mkdtempSync(join(tmpdir(), "hubdel-rule-"));
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({ store, manager, hubDir, syncDbPath, requestSyncTasks });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id } });
+
+    const db = new DatabaseSync(syncDbPath);
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,error,fails,updatedAt) VALUES(?,?,?,?,?,0,?)")
+      .run("douyin:123456:2026-08-11", "done", "local", null, null, 1_700_000_000_000);
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,error,fails,updatedAt) VALUES(?,?,?,?,?,0,?)")
+      .run("douyin:999:2026-08-11", "done", "local", null, null, 1_700_000_000_001);
+    db.close();
+
+    const r = a.deleteHubRule("douyin.123456");
+    expect(r.status).toBe(200);
+    expect((r.body as { deletedHistory: number }).deletedHistory).toBe(1);
+    expect(requestSyncTasks).toHaveBeenCalledTimes(2);
+    const { jobs } = listHubJobs(syncDbPath, { limit: 50 });
+    expect(jobs.map((j) => j.streamKey)).toEqual(["douyin:999:2026-08-11"]);
+  });
+
+  it("有进行中 run → 409 且规则保留;终态后可删", () => {
+    const syncDbPath = makeSyncDb();
+    const hubDir = mkdtempSync(join(tmpdir(), "hubdel-active-"));
+    const a = makeApi({ store, manager, hubDir, syncDbPath });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id } });
+
+    const db = new DatabaseSync(syncDbPath);
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,error,fails,updatedAt) VALUES(?,?,?,?,?,0,?)")
+      .run("douyin:123456:2026-08-11", "merging", "local", null, null, 1_700_000_000_000);
+    db.close();
+
+    const blocked = a.deleteHubRule("douyin.123456");
+    expect(blocked.status).toBe(409);
+    expect((blocked.body as { error: string }).error).toContain("进行中");
+    expect((a.listHubRules().body as { key: string }[]).some((r) => r.key === "douyin.123456")).toBe(true);
+
+    const db2 = new DatabaseSync(syncDbPath);
+    db2.prepare("UPDATE sync_jobs SET state='done' WHERE streamKey=?").run("douyin:123456:2026-08-11");
+    db2.close();
+    expect(a.deleteHubRule("douyin.123456").status).toBe(200);
   });
 });
 

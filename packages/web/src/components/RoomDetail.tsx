@@ -98,6 +98,15 @@ export function RoomDetail({
       toast(errMessage(e), "error");
     }
   };
+  // 稳定引用(仅 t/toast 变化时才换):PipelineFlow memo 比较 onRetry 引用,防每帧新函数击穿 memo。
+  const retryNode = useCallback(async (streamKey: string, node: string, force = false): Promise<void> => {
+    try {
+      await api.retryHubNode(streamKey, node, { force });
+      toast(t("hub.jobs.retryNode"), "info");
+    } catch (e) {
+      toast(errMessage(e), "error");
+    }
+  }, [t, toast]);
 
   // 参与 worker:rule.workers 有值=选中的这些;缺省/空=全部节点。
   const participating = rule.workers && rule.workers.length > 0 ? rule.workers.map(workerName) : null;
@@ -169,6 +178,7 @@ export function RoomDetail({
               cfg={rule.pipeline as FlowCfg}
               expanded={isExpanded(j.streamKey)}
               onToggle={toggleRun}
+              onRetry={retryNode}
             />
           ))}
           {runs.length < total && (

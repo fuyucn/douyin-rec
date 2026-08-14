@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listHubJobs, readHubJobLog, jobLogPath } from "./hub-jobs.js";
+import { activeHubJobKeys, deleteHubJobHistory, listHubJobs, readHubJobLog, jobLogPath } from "./hub-jobs.js";
 
 /** 手工建台账 fixture(表结构与 orchestrator SyncLedger 对齐——结构即契约,不 import 它保分层)。 */
 function makeSyncDb(): { dbPath: string; db: DatabaseSync } {
@@ -13,11 +13,14 @@ function makeSyncDb(): { dbPath: string; db: DatabaseSync } {
   db.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
     winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
   db.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
-  db.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL)`);
+  db.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT)`);
   db.exec(`CREATE TABLE sync_candidates(streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
     coverage REAL NOT NULL, durationSec REAL NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER NOT NULL,
     totalGapSec REAL NOT NULL, isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
     PRIMARY KEY(streamKey, workerId))`);
+  db.exec(`CREATE TABLE sync_node_states(streamKey TEXT NOT NULL, node TEXT NOT NULL, state TEXT NOT NULL,
+    error TEXT, attempts INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL,
+    PRIMARY KEY(streamKey, node))`);
   return { dbPath, db };
 }
 
@@ -139,7 +142,6 @@ describe("listHubJobs", () => {
 
   it("includes step detail in the DTO", () => {
     const { dbPath, db } = makeSyncDb();
-    db.exec(`ALTER TABLE sync_job_steps ADD COLUMN detail TEXT`);
     seedJob(db, "douyin:room:2026-07-10", [["done", T0 + 5000]], 100, { bv: "BVdetail" });
     db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at,detail) VALUES(?,?,?,?,?)")
       .run("douyin:room:2026-07-10", "merge", "done", T0 + 2000, "4 段 → 90MB");
@@ -147,5 +149,59 @@ describe("listHubJobs", () => {
     const { jobs } = listHubJobs(dbPath, { room: "douyin.room" });
     const merge = jobs[0].steps.find((s) => s.step === "merge" && s.phase === "done");
     expect(merge?.detail).toBe("4 段 → 90MB");
+  });
+});
+
+describe("deleteHubJobHistory / activeHubJobKeys", () => {
+  it("删除该房间全部历史(五表 + job.log),不动其他房间", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "hubdelete-"));
+    seedJob(db, "douyin:100:2026-07-01", [["done", T0]], 100, { bv: "A1" });
+    seedJob(db, "douyin:100:2026-07-02", [["done", T0 + 1000]], 100, { bv: "A2" });
+    seedJob(db, "douyin:200:2026-07-01", [["done", T0 + 2000]], 100, { bv: "B1" });
+    for (const key of ["douyin:100:2026-07-01", "douyin:100:2026-07-02", "douyin:200:2026-07-01"]) {
+      db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at,detail) VALUES(?,?,?,?,?)")
+        .run(key, "merge", "start", T0, "4 段");
+      db.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+        .run(key, "merge", "done", null, 1, T0);
+      const logP = jobLogPath(key, stage);
+      mkdirSync(join(stage, key.replace(/[:/]/g, "_")), { recursive: true });
+      writeFileSync(logP, "log\n");
+    }
+    db.close();
+
+    const r = deleteHubJobHistory(dbPath, "douyin.100", stage);
+    expect(r.deleted).toBe(2);
+    expect(new Set(r.streamKeys)).toEqual(new Set(["douyin:100:2026-07-01", "douyin:100:2026-07-02"]));
+
+    const { jobs } = listHubJobs(dbPath, { stageDir: stage });
+    expect(jobs.map((j) => j.streamKey)).toEqual(["douyin:200:2026-07-01"]);
+    expect(existsSync(jobLogPath("douyin:100:2026-07-01", stage))).toBe(false);
+    expect(existsSync(jobLogPath("douyin:200:2026-07-01", stage))).toBe(true);
+  });
+
+  it("activeHubJobKeys 只报非终态 run;done/failed/needs_manual 不拦", () => {
+    const { dbPath, db } = makeSyncDb();
+    seedJob(db, "douyin:100:2026-07-01", [["merging", T0]], 100);
+    seedJob(db, "douyin:100:2026-07-02", [["done", T0 + 1000]], 100);
+    seedJob(db, "douyin:200:2026-07-01", [["uploading", T0 + 2000]], 100);
+    db.close();
+    expect(activeHubJobKeys(dbPath, "douyin.100")).toEqual(["douyin:100:2026-07-01"]);
+    expect(activeHubJobKeys(dbPath, "douyin.200")).toEqual(["douyin:200:2026-07-01"]);
+    expect(activeHubJobKeys(dbPath, "douyin.300")).toEqual([]);
+  });
+
+  it("旧库缺表 / sync db 不存在 → 不炸,只删能删的", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hubdelete-old-"));
+    const dbPath = join(dir, "old-sync.db");
+    const db = new DatabaseSync(dbPath);
+    db.exec("CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL, updatedAt INTEGER NOT NULL)");
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,updatedAt) VALUES(?,?,?)").run("douyin:100:2026-08-01", "done", T0);
+    db.close();
+
+    const r = deleteHubJobHistory(dbPath, "douyin.100");
+    expect(r).toEqual({ deleted: 1, streamKeys: ["douyin:100:2026-08-01"] });
+    expect(activeHubJobKeys(dbPath, "douyin.100")).toEqual([]);
+    expect(deleteHubJobHistory("/nonexistent/x-sync.db", "douyin.100")).toEqual({ deleted: 0, streamKeys: [] });
   });
 });

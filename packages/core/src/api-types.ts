@@ -10,6 +10,8 @@ export type { NotifyEvent };
 export interface HubPipelineConfig {
   /** 产出哪些(merge plain 是基础总做)。默认全 true。 */
   steps?: { burnDanmu?: boolean; burnLivechat?: boolean };
+  /** 断流重连合并窗(ms):结束距现在不足该窗的场先不处理,等可能的重连并成一簇。缺省 10 分钟。 */
+  reconnectWindowMs?: number;
   /** 清理开关(都默认 false;includeXmlAss 决定删除是否含 .xml/.ass)。 */
   cleanup?: { stageSourceAfterMerge?: boolean; sourceAfterDone?: boolean; stageAfterDone?: boolean; includeXmlAss?: boolean };
   /**
@@ -73,6 +75,17 @@ export interface HubJobStepDTO {
   detail?: string;
 }
 
+/** 单个 workflow 节点的安全阀状态(UI 单节点重跑入口的数据源)。 */
+export interface HubJobNodeStateDTO {
+  /** merge / burn_danmu / burn_livechat / upload_plain / append_danmu / append_livechat。 */
+  node: string;
+  /** pending / running / done / failed / blocked / skipped。 */
+  state: string;
+  error: string | null;
+  attempts: number;
+  updatedAt: number;
+}
+
 /** 某场某节点的选优候选(流程图 select 步的 fan-in 节点)。worker=节点 id(前端映射友好名)。 */
 export interface HubJobCandidateDTO {
   /** 录制节点(worker)id。 */
@@ -107,6 +120,8 @@ export interface HubJobDTO {
   events: HubJobEventDTO[];
   /** 细粒度子步骤 start/done 事件(升序);空=旧 run,前端回落粗粒度。 */
   steps: HubJobStepDTO[];
+  /** 单节点状态(workflow 安全阀;空=旧 run,前端回落 steps 推导)。 */
+  nodeStates: HubJobNodeStateDTO[];
   /** 当前步已运行秒数(终态 = null)。 */
   currentStepSec: number | null;
   /** 当前步预计剩余秒数(粗估,按历史同步骤速率;终态/无依据 = null)。 */

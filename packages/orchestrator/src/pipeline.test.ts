@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runPipeline, type PipelineDeps } from "./pipeline.js";
+import { runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
@@ -62,10 +63,35 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   const t1 = makeTransport("node-1");
   const t2 = makeTransport("node-2");
   const transports = new Map([["node-1", t1], ["node-2", t2]]);
-  const sh = vi.fn<(cmd: string) => Promise<void>>().mockResolvedValue(undefined);
+  const cfg: PipelineCfg = {
+    cleanMaxGapSec: 30,
+    stageDir: mkdtempSync(join(tmpdir(), "pipeline-stage-")),
+    cookies: "/tmp/cookies.json",
+    uploadMode: "upload",
+    uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像" },
+    ...(overrides.cfg ?? {}),
+  };
+  const stageSub = join(cfg.stageDir, "douyin_test-room_2026-06-27");
+  const dateName = "主播名_2026-06-27";
+  // 模拟 merge/burn 的真实产物,让 workflow 输入/输出安全阀通过(与真实子命令一致)。
+  const sh = vi.fn<(cmd: string) => Promise<void>>().mockImplementation(async (cmd: string) => {
+    if (cmd.includes(" merge ")) {
+      mkdirSync(stageSub, { recursive: true });
+      writeFileSync(join(stageSub, "src.ts"), "x");
+      writeFileSync(join(stageSub, "danmu.xml"), "x");
+      writeFileSync(join(stageSub, `${dateName}.mp4`), "x");
+      writeFileSync(join(stageSub, `${dateName}.xml`), "x");
+    } else if (cmd.includes("--style danmu")) {
+      writeFileSync(join(stageSub, `${dateName}_danmu.mp4`), "x");
+    } else if (cmd.includes("--style livechat")) {
+      writeFileSync(join(stageSub, `${dateName}_livechat.mp4`), "x");
+    }
+  });
   const uploadPlain = vi.fn<(plain: { video?: string; public?: boolean }) => Promise<string>>().mockResolvedValue("BV123");
   const appendGroup = vi.fn<(o: { bv: string; files: string[]; cookies: string; public: boolean }) => Promise<void>>().mockResolvedValue(undefined);
   const notify = vi.fn<(e: NotifyEvent) => void>();
+  // 默认资源池:内存闸门关(本机/CI 空闲内存可能 < 2GB)、cpu/net 各串成一个。
+  const pool = new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, maxNetParallel: 1 });
 
   const base: PipelineDeps = {
     transports,
@@ -73,20 +99,11 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
     sh,
     uploadPlain,
     appendGroup,
+    pool,
     // 默认 passthrough(不切);个别用例覆盖以模拟超限切分。
     splitForUpload: async (mp4: string) => [mp4],
     notify,
-    cfg: {
-      cleanMaxGapSec: 30,
-      stageDir: "/tmp/stage",
-      cookies: "/tmp/cookies.json",
-      uploadMode: "upload",
-      uploadMeta: {
-        tag: "直播录像",
-        tid: 21,
-        desc: "直播录像",
-      },
-    },
+    cfg,
     ...overrides,
   };
   return base as unknown as TestDeps;
@@ -94,8 +111,21 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
 
 // streamKey "douyin:test-room:2026-06-27" → sanitized "douyin_test-room_2026-06-27"
 const STREAM_KEY = "douyin:test-room:2026-06-27";
-const STAGE_DIR = "/tmp/stage";
-const STAGE_SUB = `${STAGE_DIR}/douyin_test-room_2026-06-27`;
+
+function stageSubOf(deps: TestDeps): string {
+  return join(deps.cfg.stageDir, "douyin_test-room_2026-06-27");
+}
+
+/** 模拟 merge 子命令的真实产物(源 .ts/.xml + plain.mp4/.xml),喂 workflow 安全阀。 */
+function writePlainArtifacts(deps: TestDeps): void {
+  const sub = stageSubOf(deps);
+  mkdirSync(sub, { recursive: true });
+  const dateName = "主播名_2026-06-27";
+  writeFileSync(join(sub, "src.ts"), "x");
+  writeFileSync(join(sub, "danmu.xml"), "x");
+  writeFileSync(join(sub, `${dateName}.mp4`), "x");
+  writeFileSync(join(sub, `${dateName}.xml`), "x");
+}
 
 describe("runPipeline", () => {
   it("makeRunLogger 注入 → job.log 经该 ScopedLogger 写入(不直接 appendFileSync)", async () => {
@@ -136,21 +166,21 @@ describe("runPipeline", () => {
     expect(winnerTransport.pull).toHaveBeenCalledTimes(1);
     const pullCall = (winnerTransport.pull as Mock).mock.calls[0];
     expect(pullCall[0]).toEqual(["/remote/a.ts", "/remote/b.ts", "/remote/danmu.xml"]);
-    expect(pullCall[1]).toBe(STAGE_SUB);
+    expect(pullCall[1]).toBe(stageSubOf(deps));
 
     // sh should be called 3 times: merge + burn danmu + burn livechat
     expect(deps.sh).toHaveBeenCalledTimes(3);
     const shCalls = deps.sh.mock.calls.map((c) => c[0] as string);
     // merge --in uses stageSub
     expect(shCalls[0]).toContain("merge");
-    expect(shCalls[0]).toContain(STAGE_SUB);
+    expect(shCalls[0]).toContain(stageSubOf(deps));
     // burn uses files inside stageSub
     expect(shCalls[1]).toContain("burn");
     expect(shCalls[1]).toContain("danmu");
-    expect(shCalls[1]).toContain(STAGE_SUB);
+    expect(shCalls[1]).toContain(stageSubOf(deps));
     expect(shCalls[2]).toContain("burn");
     expect(shCalls[2]).toContain("livechat");
-    expect(shCalls[2]).toContain(STAGE_SUB);
+    expect(shCalls[2]).toContain(stageSubOf(deps));
 
     // 穿插上传:uploadPlain 一次(P1)+ 每逻辑组一条 appendGroup(danmu、livechat 各一,串行)
     expect(deps.uploadPlain).toHaveBeenCalledTimes(1);
@@ -183,7 +213,6 @@ describe("runPipeline", () => {
 
   it("job.log: 每场写专属日志(选优/步骤/终态可复盘)", async () => {
     const { readFileSync, rmSync } = await import("node:fs");
-    rmSync(`${STAGE_SUB}/job.log`, { force: true });   // 场景1可能已写过,清掉保证本用例独立
     const broadcast = makeBroadcast([
       { workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
       { workerId: "node-2", rec: makeRec({ totalGapSec: 200 }) },
@@ -191,7 +220,7 @@ describe("runPipeline", () => {
     const deps = makeDeps();
     deps.ledger.upsertPending(broadcast.streamKey);
     await runPipeline(broadcast, deps);
-    const log = readFileSync(`${STAGE_SUB}/job.log`, "utf-8");
+    const log = readFileSync(join(stageSubOf(deps), "job.log"), "utf-8");
     expect(log).toContain("pipeline start");
     expect(log).toContain("选优: winner=node-1");
     expect(log).toContain("pull 完成");
@@ -235,19 +264,53 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
-  it("场景2b: 同 worker 断流多会话(无完整 worker)→ 同样直接中断+保留源", async () => {
-    // node-1 断流成 2 会话(各 gap=0),没有完整 worker → 不 pull/merge,不删源。
+  it("场景2b: 同 worker 断流重连多会话(各自无缺口)→ 拉全部分段,一次 merge-sessions 拼整场", async () => {
+    // node-1 断流重连成 2 会话(各 gap=0)→ 视为完整录全,自动拼成完整版(不再转人工)。
+    const s1 = {
+      tsFiles: [
+        "/remote/主播名_2026-06-27_08-00-00-PART000.ts",
+        "/remote/主播名_2026-06-27_08-00-00-PART001.ts",
+      ],
+      xmlPath: "/remote/主播名_2026-06-27_08-00-00.xml",
+    };
+    const s2 = {
+      tsFiles: [
+        "/remote/主播名_2026-06-27_08-02-00-PART000.ts",
+        "/remote/主播名_2026-06-27_08-02-00-PART001.ts",
+      ],
+      xmlPath: "/remote/主播名_2026-06-27_08-02-00.xml",
+    };
     const broadcast = makeBroadcast([
-      { workerId: "node-1", rec: makeRec({ sessionBase: "主播名_2026-06-27_08-00-00", durationSec: 1800, totalGapSec: 0 }) },
-      { workerId: "node-1", rec: makeRec({ sessionBase: "主播名_2026-06-27_08-35-00", durationSec: 3000, totalGapSec: 0 }) },
+      { workerId: "node-1", rec: makeRec({ sessionBase: "主播名_2026-06-27_08-00-00", durationSec: 1800, totalGapSec: 0, ...s1 }) },
+      { workerId: "node-1", rec: makeRec({ sessionBase: "主播名_2026-06-27_08-02-00", durationSec: 3000, totalGapSec: 0, ...s2 }) },
     ]);
-    const deps = makeDeps({ cfg: { ...makeDeps().cfg, cleanup: { sourceAfterDone: true } } });
+    const rmStage = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      rmStage,
+      cfg: { ...makeDeps().cfg, cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true } },
+    });
     deps.ledger.upsertPending(broadcast.streamKey);
     const result = await runPipeline(broadcast, deps);
-    expect(result.state).toBe("needs_manual");
-    expect(deps.sh).toHaveBeenCalledTimes(0);            // 不合并
-    expect(deps.uploadPlain).not.toHaveBeenCalled();
-    expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled(); // 即便配了 sourceAfterDone 也不删
+    expect(result.state).toBe("done");
+    // 两个会话的全部 ts + 会话级 xml 拉到 stage(共 6 个文件)
+    const pullCall = (deps.transports.get("node-1")!.pull as Mock).mock.calls[0];
+    expect(pullCall[0]).toEqual([...s1.tsFiles, s1.xmlPath, ...s2.tsFiles, s2.xmlPath]);
+    const shCalls = deps.sh.mock.calls.map((c) => c[0] as string);
+    expect(shCalls[0]).toContain("merge --in");
+    expect(shCalls[0]).toContain("--merge-sessions");
+    // sourceAfterDone + stageSourceAfterMerge 都执行:两个会话的源 .ts 全部清
+    expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+    const cleaned = (deps.transports.get("node-1")!.cleanup as Mock).mock.calls.flatMap((c) => c[0] as string[]);
+    expect(cleaned).toEqual([...s1.tsFiles, ...s2.tsFiles]); // 未开 includeXmlAss → 不删 xml
+    expect(deps.ledger.getNodeState(broadcast.streamKey, "merge")?.state).toBe("done");
+    // 拉下来的 stage 源清掉(不含 xml)
+    const stageCleaned = rmStage.mock.calls.flatMap((c) => c[0] as string[]);
+    expect(stageCleaned).toEqual([
+      expect.stringContaining("主播名_2026-06-27_08-00-00-PART000.ts"),
+      expect.stringContaining("主播名_2026-06-27_08-00-00-PART001.ts"),
+      expect.stringContaining("主播名_2026-06-27_08-02-00-PART000.ts"),
+      expect.stringContaining("主播名_2026-06-27_08-02-00-PART001.ts"),
+    ]);
     deps.ledger.close();
   });
 
@@ -328,9 +391,83 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
-  // dateName = sessionBase 剥时间戳 = "主播名_2026-06-27";plain xml 产物 = {dateName}.xml
-  const PLAIN_XML = `${STAGE_SUB}/主播名_2026-06-27.xml`;
-  const SOURCE_XML = `${STAGE_SUB}/danmu.xml`; // basename of /remote/danmu.xml
+  describe("并行双轨(拆 pipeline)", () => {
+    it("两条 burn DAG 就绪但 cpu max=1 串行:第二条等第一条完成才发命令", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+      const deps = makeDeps();
+      const burnResolvers: Array<() => void> = [];
+      deps.sh.mockImplementation(async (cmd: string) => {
+        if (cmd.includes(" merge ")) { writePlainArtifacts(deps); return; }
+        if (cmd.includes("burn")) {
+          await new Promise<void>((resolve) => { burnResolvers.push(resolve); });
+          const dateName = "主播名_2026-06-27";
+          const style = cmd.includes("--style danmu") ? "danmu" : "livechat";
+          writeFileSync(join(stageSubOf(deps), `${dateName}_${style}.mp4`), "x");
+        }
+      });
+      deps.ledger.upsertPending(broadcast.streamKey);
+      const runPromise = runPipeline(broadcast, deps);
+      // 第一条 burn 已发出;第二条还拿不到 cpu 锁,不得同时发命令。
+      await vi.waitFor(() => {
+        const calls = deps.sh.mock.calls.map((c) => c[0] as string);
+        expect(calls.filter((c) => c.includes("burn"))).toHaveLength(1);
+      });
+      const calls = deps.sh.mock.calls.map((c) => c[0] as string);
+      expect(calls.some((c) => c.includes("--style danmu"))).toBe(true);
+      expect(calls.some((c) => c.includes("--style livechat"))).toBe(false);
+      burnResolvers.shift()!(); // 放行第一条 → 第二条才能起
+      await vi.waitFor(() => {
+        const calls = deps.sh.mock.calls.map((c) => c[0] as string);
+        expect(calls.some((c) => c.includes("--style livechat"))).toBe(true);
+      });
+      burnResolvers.shift()!();
+      const r = await runPromise;
+      expect(r.state).toBe("done");
+      deps.ledger.close();
+    });
+
+    it("append 串行:danmu 组完成后才发起 livechat 组(同稿件并发会撞)", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+      const deps = makeDeps();
+      let releaseDanmuAppend: () => void = () => {};
+      deps.appendGroup.mockImplementation(async (o: { files: string[] }) => {
+        if (o.files[0].includes("_danmu")) {
+          return new Promise<void>((resolve) => { releaseDanmuAppend = resolve; });
+        }
+        return undefined;
+      });
+      deps.ledger.upsertPending(broadcast.streamKey);
+      const runPromise = runPipeline(broadcast, deps);
+      await vi.waitFor(() => {
+        expect(deps.appendGroup).toHaveBeenCalledTimes(1);
+        expect((deps.appendGroup as Mock).mock.calls[0][0].files[0]).toContain("_danmu");
+      });
+      // danmu append 挂起中 → livechat 不得并发发起
+      expect(deps.appendGroup).toHaveBeenCalledTimes(1);
+      releaseDanmuAppend();
+      const r = await runPromise;
+      expect(r.state).toBe("done");
+      const appended = (deps.appendGroup as Mock).mock.calls.map((c) => c[0].files.join(","));
+      expect(appended[0]).toContain("_danmu");
+      expect(appended[1]).toContain("_livechat");
+      deps.ledger.close();
+    });
+
+    it("P1 上传失败 → 双轨跳过 append,不悬挂,收口 failed", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+      const deps = makeDeps();
+      deps.uploadPlain.mockRejectedValue(new Error("network down"));
+      deps.ledger.upsertPending(broadcast.streamKey);
+      const r = await Promise.race([
+        runPipeline(broadcast, deps),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("deadlock timeout")), 3000)),
+      ]);
+      expect(r.state).toBe("failed");
+      expect(deps.appendGroup).not.toHaveBeenCalled();
+      expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("failed");
+      deps.ledger.close();
+    });
+  });
 
   it("场景8(plain xml 产物): stageSourceAfterMerge+includeXmlAss 删源 xml 但**保留** plain xml 产物", async () => {
     const rmStage = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
@@ -343,6 +480,9 @@ describe("runPipeline", () => {
     deps.ledger.upsertPending(broadcast.streamKey);
     const result = await runPipeline(broadcast, deps);
     expect(result.state).toBe("needs_manual");
+    const stageSub = stageSubOf(deps);
+    const PLAIN_XML = join(stageSub, "主播名_2026-06-27.xml");
+    const SOURCE_XML = join(stageSub, "danmu.xml"); // basename of /remote/danmu.xml
     // stageSourceAfterMerge 删:拉来的源 .ts + 源 xml(timestamped),但 **不删** plain xml 产物
     const deleted = rmStage.mock.calls.flatMap((c) => c[0]);
     expect(deleted).toContain(SOURCE_XML);          // 源 xml 删
@@ -360,6 +500,8 @@ describe("runPipeline", () => {
     deps.ledger.upsertPending(broadcast.streamKey);
     const result = await runPipeline(broadcast, deps);
     expect(result.state).toBe("done");
+    const stageSub = stageSubOf(deps);
+    const PLAIN_XML = join(stageSub, "主播名_2026-06-27.xml");
     const deleted = rmStage.mock.calls.flatMap((c) => c[0]);
     expect(deleted).toContain(PLAIN_XML);            // 上传后清产物含 plain xml
     deps.ledger.close();
@@ -428,8 +570,7 @@ describe("runPipeline", () => {
       const deps = makeDeps();
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       deps.ledger.upsertPending(b.streamKey);
-      deps.ledger.logStep(b.streamKey, "append_danmu", "start"); // 预置 danmu 已完成
-      deps.ledger.logStep(b.streamKey, "append_danmu", "done");
+      deps.ledger.syncNodeState(b.streamKey, "append_danmu", "done"); // 预置 danmu 已完成
       await runPipeline(b, deps);
       const appended = deps.appendGroup.mock.calls.map((c) => c[0].files.join(",")).join("|");
       expect(appended).not.toContain("_danmu.mp4"); // 已 done → 跳过
@@ -487,13 +628,17 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
 
-    it("Critical: P1 成功后 burn 失败 → bv 已落库,重试走续跑绝不重传 P1", async () => {
+    it("Critical: P1 成功后 burn 失败 → bv 已落库,pipeline 收口 failed,重试走续跑绝不重传 P1", async () => {
       const deps = makeDeps();
       // merge 成功、burn 抛错(模拟 P1 已建稿后烧录失败)
-      deps.sh.mockImplementation(async (cmd: string) => { if (cmd.includes("burn")) throw new Error("ffmpeg boom"); });
+      deps.sh.mockImplementation(async (cmd: string) => {
+        if (cmd.includes(" merge ")) { writePlainArtifacts(deps); return; }
+        if (cmd.includes("burn")) throw new Error("ffmpeg boom");
+      });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       deps.ledger.upsertPending(b.streamKey);
-      await expect(runPipeline(b, deps)).rejects.toThrow("ffmpeg boom");
+      const r = await runPipeline(b, deps);
+      expect(r.state).toBe("failed");
       expect(deps.ledger.get(b.streamKey)?.bv).toBe("BV123"); // P1 成功即落库(即使随后 burn 失败)
       // 模拟 reconciler 重试:同 ledger 再跑 → 有 bv → 续跑分支,绝不重传 P1
       deps.uploadPlain.mockClear();

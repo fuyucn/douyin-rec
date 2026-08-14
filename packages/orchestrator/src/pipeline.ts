@@ -1,14 +1,14 @@
 import path from "node:path";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import type { NotifyEvent, ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/app";
-import { splitToSizeLimit } from "@drec/post-process";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
-import { humanBytes, humanDur, sumBytes } from "./format.js";
+import { humanBytes, sumBytes } from "./format.js";
+import { buildWorkflow, deriveStageProducts, runWorkflowNodes, ResourcePool, type StageProducts, type WorkflowNodeKey } from "./workflow.js";
 
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。merge plain 是基础,总做。 */
 export interface PipelineSteps {
@@ -26,6 +26,8 @@ export interface PipelineCleanup {
 
 export interface PipelineCfg {
   cleanMaxGapSec: number;
+  /** 断流重连合并窗(ms):结束距现在不足该窗的场暂不处理;聚类容差同窗。缺省 reconciler 默认 10 分钟。 */
+  reconnectWindowMs?: number;
   stageDir: string;
   cookies: string;
   /** stage = 只合成不传;upload = 传 B站。 */
@@ -42,6 +44,8 @@ export interface PipelineCfg {
 export interface PipelineDeps {
   transports: Map<string, Transport>;
   ledger: SyncLedger;
+  /** 共享资源池(cpu/net 各 max=1 + 内存闸门)。缺省 → runPipeline 内部新建(测试/兼容)。 */
+  pool?: ResourcePool;
   /** 执行子命令(merge/burn 等)。可选返回 stdout+stderr 文本 → pipeline 会摘尾写进该场 job.log。 */
   sh: (cmd: string) => Promise<void | string>;
   /** 仅上传 plain(P1)拿 BV —— **穿插上传接缝**:pipeline 先 fire 它(网络),与烧录(CPU)并行。 */
@@ -93,7 +97,9 @@ export async function runPipeline(
     : makeJobLog(path.join(deps.cfg.stageDir, sanitizeKey(b.streamKey)));
   jlog(`=== pipeline start ${b.streamKey} 成员=[${b.members.map((m) => m.workerId).join(",")}] mode=${deps.cfg.uploadMode} ===`);
   try {
-    const r = await runPipelineInner(b, deps, jlog);
+    // 同一 streamKey 的 pipeline 与手动 retryNode 共享流锁:reconciler 周期对账和
+    // 用户单节点重跑永不并发操作同一场(防止 select/pull 与 retry 同时改文件/状态)。
+    const r = await (deps.pool ?? new ResourcePool()).withStreamLock(b.streamKey, () => runPipelineInner(b, deps, jlog));
     jlog(`=== pipeline end: ${r.state}${r.bv ? ` bv=${r.bv}` : ""} ===`);
     return r;
   } catch (e) {
@@ -116,7 +122,7 @@ async function runPipelineInner(
     jlog(`  ✓ 完成(${Math.round((Date.now() - t0) / 1000)}s)`);
     if (typeof out === "string" && out.trim()) jlog(`  输出尾: ${out.trim().slice(-2048)}`);
   };
-  const splitForUpload = deps.splitForUpload ?? ((mp4: string) => splitToSizeLimit(mp4));
+  const splitForUpload = deps.splitForUpload ?? ((mp4: string) => import("@drec/post-process").then((m) => m.splitToSizeLimit(mp4)));
   const rmStage = deps.rmStage ?? (async (paths: string[]) => {
     const { rmSync } = await import("node:fs");
     for (const p of paths) { try { rmSync(p, { force: true }); } catch { /* 忽略 */ } }
@@ -131,6 +137,16 @@ async function runPipelineInner(
   const existing = ledger.get(streamKey);
   if (cfg.uploadMode === "upload" && existing?.bv) {
     return await resumeAppends(streamKey, existing.bv, stageSub, deps, jlog);
+  }
+
+  // 幂等:上一轮已把所有核心节点跑完(如 markDone 前中断) → 直接收口 done,不再 select/pull。
+  const coreNodes = ["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat"] as const;
+  const nodeStates = ledger.getNodeStates(streamKey);
+  if (nodeStates.length > 0 && coreNodes.every((n) => nodeStates.find((r) => r.node === n)?.state === "done")) {
+    const bv = ledger.get(streamKey)?.bv;
+    jlog(`全部核心节点已 done,直接 markDone 收口`);
+    ledger.markDone(streamKey, bv ?? "");
+    return { state: "done", bv };
   }
 
   // #1 防护:剔除「文件已不在该节点」的成员(已归档/清理)——否则可能选中其为 winner、pull 失败卡住。
@@ -159,7 +175,8 @@ async function runPipelineInner(
   }
 
   const winner = selection.winner;
-  jlog(`选优: winner=${winner.workerId} clean=${selection.clean} 各节点=${JSON.stringify(selection.perNode)}`);
+  const winnerMembers = selection.winnerMembers;
+  jlog(`选优: winner=${winner.workerId} clean=${selection.clean} 会话=${winnerMembers.length} 各节点=${JSON.stringify(selection.perNode)}`);
 
   // 落库选优候选明细(coverage/时长/起止/缺口 + 谁胜出),供事后复盘"为什么这台赢"。
   ledger.recordCandidates(streamKey, selection.perNode, winner.workerId);
@@ -184,10 +201,10 @@ async function runPipelineInner(
   if (!transport) throw new Error(`No transport for worker: ${winner.workerId}`);
 
   // stageSub 已在入口声明(续跑分支复用)——stageDir/<sanitized-streamKey>,隔离各场文件。
-  const filesToPull = [
-    ...winner.rec.tsFiles,
-    ...(winner.rec.xmlPath ? [winner.rec.xmlPath] : []),
-  ];
+  const filesToPull = winnerMembers.flatMap((m) => [
+    ...m.rec.tsFiles,
+    ...(m.rec.xmlPath ? [m.rec.xmlPath] : []),
+  ]);
   jlog(`pull 开始: ${filesToPull.length} 个文件 ← ${winner.workerId}`);
   const tPull = Date.now();
   ledger.logStep(streamKey, "pull", "start");
@@ -200,69 +217,21 @@ async function runPipelineInner(
 
   // Merge and burn from the stageSub directory
   ledger.setState(streamKey, "merging");
-
   const dateName = winner.rec.sessionBase.replace(/_\d{2}-\d{2}-\d{2}$/, "");
   const plain = path.join(stageSub, dateName + ".mp4");
   const danmuMp4 = path.join(stageSub, dateName + "_danmu.mp4");
   const livechatMp4 = path.join(stageSub, dateName + "_livechat.mp4");
   const xmlArg = winner.rec.xmlPath ? path.join(stageSub, path.basename(winner.rec.xmlPath)) : "";
-
-  ledger.logStep(streamKey, "merge", "start");
-  await sh(`node dist/douyin-rec.mjs merge --in ${stageSub} --base ${winner.rec.sessionBase}`);
-  const plainBytes = (() => { try { return Number(statSync(plain).size); } catch { return 0; } })();
-  ledger.logStep(streamKey, "merge", "done",
-    `${winner.rec.tsFiles.length} 段 → ${plainBytes > 0 ? humanBytes(plainBytes) : "?"}${winner.rec.durationSec > 0 ? ` · ${humanDur(winner.rec.durationSec)}` : ""}`);
-
-  // 穿插上传:upload 模式下 merge 完 plain 即**后台 fire P1 上传**(网络),与随后的烧录(CPU)并行,
-  // 省总墙钟。stage 模式不传(bvPromise=null)。先 .then 收成 {bv}|{err},即便后续烧录抛错也不留
-  // unhandled rejection(P1 可能已建稿 → 失败按 retry 处理,可接受)。upload_plain 的 start/done
-  // 各自打点(与烧录轨并行,流程图分两轨)。
-  const willUpload = cfg.uploadMode === "upload";
-  if (willUpload) jlog(`P1(plain)后台上传启动(与烧录并行): ${plain}`);
-  if (willUpload) ledger.logStep(streamKey, "upload_plain", "start");
-  const bvPromise: Promise<{ bv: string } | { err: Error }> | null = willUpload
-    ? (ledger.setState(streamKey, "uploading"),
-       uploadPlain({
-         video: plain, cookies: cfg.cookies, title: dateName,
-         tag: cfg.uploadMeta.tag, tid: cfg.uploadMeta.tid,
-         public: cfg.uploadPrivate === false, // private=false → 公开;默认(true)→ 仅自己可见
-         desc: cfg.uploadMeta.desc,
-       }).then((bv) => {
-         // checkpoint:P1 建稿成功即刻落库 bv —— 必须在这里(不能等烧录/split 完),
-         // 否则 P1 成功后若 burn/split 抛错,bv 丢失 → 重试重传 P1 → 重复稿(review Critical)。
-         ledger.setBv(streamKey, bv);
-         const sz = (() => { try { return Number(statSync(plain).size); } catch { return 0; } })();
-         ledger.logStep(streamKey, "upload_plain", "done", sz > 0 ? humanBytes(sz) : undefined);
-         return { bv };
-       },
-              (err: unknown) => ({ err: err as Error })))
-    : null;
-
-  // 步骤开关:burnDanmu/burnLivechat 默认开,false 则跳过该产出。此刻 P1 在后台上传(若 upload 模式)。
-  if (burnDanmu) {
-    ledger.logStep(streamKey, "burn_danmu", "start");
-    await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style danmu --gift-value 0.9`);
-    ledger.logStep(streamKey, "burn_danmu", "done",
-      (() => { try { return `→ ${humanBytes(Number(statSync(danmuMp4).size))}`; } catch { return undefined; } })());
-  }
-  if (burnLivechat) {
-    ledger.logStep(streamKey, "burn_livechat", "start");
-    await sh(`node dist/douyin-rec.mjs burn --video ${plain} --xml ${xmlArg} --style livechat --gift-value 0.9`);
-    ledger.logStep(streamKey, "burn_livechat", "done",
-      (() => { try { return `→ ${humanBytes(Number(statSync(livechatMp4).size))}`; } catch { return undefined; } })());
-  }
-
-  // 把弹幕 xml 复制一份作为 **plain xml 产物**(与 plain mp4 同名 {dateName}.xml),作为备份留在 stage。
-  // 它是产物、不是「拉来的源」——所以 stageSourceAfterMerge 删源时不动它(即便 includeXmlAss);
-  // 只有 stageAfterDone(上传后清产物)才按 includeXmlAss 一并删。这样 stage 备份永远含 plain xml。
   const plainXml = xmlArg ? path.join(stageSub, dateName + ".xml") : "";
-  if (plainXml) {
-    const { copyFileSync } = await import("node:fs");
-    try { copyFileSync(xmlArg, plainXml); } catch { /* 源 xml 缺失则跳过 */ }
-  }
+  const products: StageProducts = {
+    dateName,
+    sessionBase: winner.rec.sessionBase,
+    sessionBases: winnerMembers.map((m) => m.rec.sessionBase),
+    plain, danmuMp4, livechatMp4, plainXml, xmlArg,
+  };
 
   // 各成员节点的待删源(.ts 总删;.xml 仅 includeXmlAss)——给 sourceAfterDone 用。
-  const sourcePathsOf = (m: typeof winner): string[] =>
+  const sourcePathsOf = (m: (typeof winnerMembers)[number]): string[] =>
     [...m.rec.tsFiles, ...(clean.includeXmlAss && m.rec.xmlPath ? [m.rec.xmlPath] : [])];
   const cleanupSources = async (): Promise<void> => {
     if (!clean.sourceAfterDone) return;
@@ -276,18 +245,44 @@ async function runPipelineInner(
     ledger.logStep(streamKey, "clean_source", "done", `删 ${candidates.members.length} 节点 · ${fileCount} 文件`);
   };
 
-  // cleanup:合并后删 stage 里拉来的源 .ts(留合成产物)。
-  if (clean.stageSourceAfterMerge) {
-    ledger.logStep(streamKey, "clean_stage_src", "start");
-    const pulledTs = winner.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f)));
-    const victims = [...pulledTs, ...(clean.includeXmlAss && xmlArg ? [xmlArg] : [])];
-    await rmStage(victims);
-    ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${victims.length} 文件`);
+  const workflow = buildWorkflow({
+    streamKey, stageSub, products, deps, cfg, log: jlog,
+    willUpload: cfg.uploadMode === "upload", burnDanmu, burnLivechat,
+    mergeSegments: winnerMembers.reduce((n, m) => n + m.rec.tsFiles.length, 0),
+  });
+  const failedNodes = ledger.getFailedNodes(streamKey);
+  const result = await runWorkflowNodes({
+    streamKey, nodes: workflow.nodes, edges: workflow.edges, ctx: workflow.ctx,
+    pool: deps.pool ?? new ResourcePool(),
+    autoRetry: new Set<WorkflowNodeKey>(
+      failedNodes
+        .filter((n) => n.node === "merge" || n.node === "burn_danmu" || n.node === "burn_livechat")
+        .map((n) => n.node as WorkflowNodeKey),
+    ),
+  });
+  if (!result.ok) {
+    const errText = result.failed.length
+      ? ledger.getNodeState(streamKey, result.failed[0])?.error ?? `节点失败: ${result.failed.join(",")}`
+      : `节点被阻断: ${result.blocked.join(",")}`;
+    jlog(`pipeline 节点失败: failed=${result.failed.join(",")} blocked=${result.blocked.join(",")}`);
+    ledger.setState(streamKey, "failed", { error: `${errText} [${[...result.failed, ...result.blocked].join(",")}]` });
+    notify({ kind: "error", stage: "同步", message: `${streamKey} 节点失败: ${errText}` });
+    return { state: "failed", bv: ledger.get(streamKey)?.bv };
   }
 
-  // stage 模式:有完整 winner 但不自动上传 → 产物已在 stage 待人工上传,源按配置清。
-  // (!selection.clean 的「都断流」情况已在前面 early-return,这里 clean 必为 true。)
-  if (!willUpload) {
+  // stageSourceAfterMerge:合并/烧录完成后删 stage 里拉来的源 .ts(留合成产物),尽早释放磁盘。
+  // 放在 stage/upload 分支之前:stage 模式同样享受(旧测试断言),只是不动各成员节点原始源。
+  if (clean.stageSourceAfterMerge) {
+    const pulledTs = winnerMembers.flatMap((m) => m.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f))));
+    const pulledXml = winnerMembers.flatMap((m) => (m.rec.xmlPath ? [path.join(stageSub, path.basename(m.rec.xmlPath))] : []));
+    const xmlVictims = clean.includeXmlAss ? pulledXml : [];
+    ledger.logStep(streamKey, "clean_stage_src", "start");
+    await rmStage([...pulledTs, ...xmlVictims]);
+    ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${pulledTs.length + xmlVictims.length} 文件`);
+  }
+
+  const bv = ledger.get(streamKey)?.bv;
+  if (cfg.uploadMode !== "upload") {
     jlog(`stage 模式:合成完毕待人工上传`);
     ledger.setState(streamKey, "needs_manual");
     await cleanupSources();
@@ -299,84 +294,21 @@ async function runPipelineInner(
     return { state: "needs_manual" };
   }
 
-  // upload 模式:P1 已在后台传(bvPromise)。各逻辑块先按 16GB 上限切分(超限→多段),
-  // 再 await BV → **串行 append**(同稿件并发会撞;每组一条 append → 增量提交、各自可续传)。关掉的步骤 → 空组。
-  const danmuParts = burnDanmu ? await splitForUpload(danmuMp4) : [];
-  const livechatParts = burnLivechat ? await splitForUpload(livechatMp4) : [];
-  jlog(`烧录全部完成,等待 P1 上传出 BV…(danmu ${danmuParts.length} 段 / livechat ${livechatParts.length} 段待 append)`);
-  const r = await bvPromise!;
-  if ("err" in r) {
-    jlog(`P1 上传失败: ${r.err.message}`);
-    ledger.setState(streamKey, "failed", { error: `P1 上传失败: ${r.err.message}` });
-    notify({ kind: "error", stage: "上传", message: `plain 上传失败:${r.err.message}` });
-    return { state: "failed" };
-  }
-  const bv = r.bv;
-  jlog(`P1 上传完成: ${bv}`); // bv 已在 uploadPlain 的 .then 里即刻 setBv(见上,防 burn/split 失败丢 bv)
-  const isPublic = cfg.uploadPrivate === false;
-  const appendGroups: Array<{ step: "append_danmu" | "append_livechat"; files: string[] }> = [
-    { step: "append_danmu", files: danmuParts },
-    { step: "append_livechat", files: livechatParts },
-  ];
-  for (const g of appendGroups) {
-    if (g.files.length === 0) continue;          // 关掉的步骤 → 空组,不传
-    if (ledger.isStepDone(streamKey, g.step)) {  // 续跑:已完成的组跳过(幂等)
-      jlog(`append 跳过(已完成): ${g.step}`);
-      continue;
-    }
-    jlog(`append 开始: ${g.files.map((f) => path.basename(f)).join(", ")}`);
-    const tApp = Date.now();
-    ledger.logStep(streamKey, g.step, "start");
-    // 单文件组就地重试安全(biliup 完整上传才加分 P);多段组 tries=1(避免跨调用重复分 P,见计划 021 Notes)
-    const tries = g.files.length === 1 ? 3 : 1;
-    await retry(() => appendGroup({ bv, files: g.files, cookies: cfg.cookies, public: isPublic }), {
-      tries,
-      sleep: deps.sleep,
-      onRetry: (attempt, err) =>
-        jlog(`append ${g.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
-    });
-    const apBytes = sumBytes(g.files);
-    ledger.logStep(streamKey, g.step, "done",
-      `${g.files.length} 段${apBytes > 0 ? ` · ${humanBytes(apBytes)}` : ""}`);
-    jlog(`append 完成(${Math.round((Date.now() - tApp) / 1000)}s)`);
-  }
-
-  ledger.markDone(streamKey, bv);
-  // hub 任务完成通知(成功上传):EventCenter 扇出 → 站内 toast + Discord webhook。
-  notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
-  // cleanup:done 后删源节点录制 + stage 产物(按配置)。
+  jlog(`P1 上传完成: ${bv}`);
+  ledger.markDone(streamKey, bv!);
+  notify({ kind: "uploadDone", bv: bv!, url: `https://www.bilibili.com/video/${bv!}` });
   await cleanupSources();
   if (clean.stageAfterDone) {
     ledger.logStep(streamKey, "clean_stage", "start");
-    const products = [plain, ...danmuParts, ...livechatParts];
-    const xmlAss = clean.includeXmlAss
-      ? [plainXml, xmlArg, danmuMp4.replace(/\.mp4$/, ".ass"), livechatMp4.replace(/\.mp4$/, ".ass")].filter(Boolean)
-      : [];
-    const victims = [...products, ...xmlAss];
-    await rmStage(victims);
-    ledger.logStep(streamKey, "clean_stage", "done", `删 ${victims.length} 文件`);
+    const victims = [plain, danmuMp4, livechatMp4];
+    if (clean.includeXmlAss) {
+      victims.push(plainXml, xmlArg, danmuMp4.replace(/\.mp4$/, ".ass"), livechatMp4.replace(/\.mp4$/, ".ass"));
+    }
+    const present = victims.filter((p) => p && existsSync(p));
+    await rmStage(present);
+    ledger.logStep(streamKey, "clean_stage", "done", `删 ${present.length} 文件`);
   }
   return { state: "done", bv };
-}
-
-/** 从 stageSub 目录按确定命名反推产物路径;找不到任何产物 → null。 */
-function deriveProducts(stageSub: string): { dateName: string; plain: string; danmuMp4: string; livechatMp4: string } | null {
-  let files: string[];
-  try { files = readdirSync(stageSub); } catch { return null; }
-  const danmu = files.find((f) => f.endsWith("_danmu.mp4"));
-  const livechat = files.find((f) => f.endsWith("_livechat.mp4"));
-  const plainF = files.find((f) => f.endsWith(".mp4") && !f.endsWith("_danmu.mp4") && !f.endsWith("_livechat.mp4"));
-  let dateName: string | undefined;
-  if (danmu) dateName = danmu.slice(0, -"_danmu.mp4".length);
-  else if (livechat) dateName = livechat.slice(0, -"_livechat.mp4".length);
-  else if (plainF) dateName = plainF.slice(0, -".mp4".length);
-  if (!dateName) return null;
-  return {
-    dateName,
-    plain: path.join(stageSub, dateName + ".mp4"),
-    danmuMp4: path.join(stageSub, dateName + "_danmu.mp4"),
-    livechatMp4: path.join(stageSub, dateName + "_livechat.mp4"),
-  };
 }
 
 /**
@@ -392,12 +324,12 @@ async function resumeAppends(
 ): Promise<{ state: JobState; bv?: string }> {
   const { ledger, appendGroup, notify, cfg } = deps;
   jlog(`续跑:已建稿 bv=${bv},跳过 select/pull/merge/burn/uploadPlain,只补 append(不做 sourceAfterDone 清理)`);
-  const splitForUpload = deps.splitForUpload ?? ((mp4: string) => splitToSizeLimit(mp4));
+  const splitForUpload = deps.splitForUpload ?? ((mp4: string) => import("@drec/post-process").then((m) => m.splitToSizeLimit(mp4)));
   const burnDanmu = cfg.steps?.burnDanmu !== false;
   const burnLivechat = cfg.steps?.burnLivechat !== false;
   const isPublic = cfg.uploadPrivate === false;
 
-  const prod = deriveProducts(stageSub);
+  const prod = deriveStageProducts(stageSub);
   const need = [
     ...(burnDanmu ? [prod?.danmuMp4] : []),
     ...(burnLivechat ? [prod?.livechatMp4] : []),
@@ -427,9 +359,11 @@ async function resumeAppends(
     }
     jlog(`续跑 append 开始: ${g.step} (${files.length} 段)`);
     ledger.logStep(streamKey, g.step, "start");
-    const tries = files.length === 1 ? 3 : 1;
+    // 与主 workflow 一致:B站追加分 P 后稿件短暂锁定,60s*2^n 退避等锁释放。
+    const tries = files.length === 1 ? 5 : 1;
     await retry(() => appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic }), {
       tries,
+      backoffMs: 60_000,
       sleep: deps.sleep,
       onRetry: (attempt, err) => jlog(`续跑 append ${g.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
     });

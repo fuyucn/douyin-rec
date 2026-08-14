@@ -17,18 +17,37 @@ describe("buildFlow — 终态按 job.steps", () => {
     expect(keys(g)).not.toContain("append_danmu");
   });
 
-  it("upload+双烧+清理:fork/join,burn 轨 y=10、upload 轨 y=130", () => {
+  it("upload+双烧+清理:fork/join,danmu 轨 y=10、upload 轨 y=70、livechat 轨 y=130,各轨 join 到 tail", () => {
     const g = buildFlow(doneJob([
       "select", "pull", "merge", "burn_danmu", "burn_livechat",
       "upload_plain", "append_danmu", "append_livechat", "clean_source",
     ]), undefined);
     expect(keys(g)).toContain("upload_plain");
     expect(g.nodes.find((n) => n.key === "burn_danmu")!.y).toBe(10);
-    expect(g.nodes.find((n) => n.key === "upload_plain")!.y).toBe(130);
+    expect(g.nodes.find((n) => n.key === "upload_plain")!.y).toBe(70);
+    expect(g.nodes.find((n) => n.key === "burn_livechat")!.y).toBe(130);
     expect(g.edges).toContainEqual(["merge", "burn_danmu"]);
     expect(g.edges).toContainEqual(["merge", "upload_plain"]);
-    // join:两轨末节点都指向第一个 tail(append_danmu)
-    expect(g.edges).toContainEqual(["upload_plain", "append_danmu"]);
+    expect(g.edges).toContainEqual(["merge", "burn_livechat"]);
+    // 每条轨内部 burn → append(拆 pipeline 后 append 属于自己轨,不再整成一条长尾)
+    expect(g.edges).toContainEqual(["burn_danmu", "append_danmu"]);
+    expect(g.edges).toContainEqual(["burn_livechat", "append_livechat"]);
+    // P2 → P3 顺序依赖:append_danmu 完成才追 append_livechat
+    expect(g.edges).toContainEqual(["append_danmu", "append_livechat"]);
+    // join:三条轨末节点都指向第一个 tail(clean_source)
+    expect(g.edges).toContainEqual(["upload_plain", "clean_source"]);
+    expect(g.edges).toContainEqual(["append_danmu", "clean_source"]);
+    expect(g.edges).toContainEqual(["append_livechat", "clean_source"]);
+  });
+
+  it("clean_stage_src 也是独立并行轨(y=190),merge 直连、末节点 join 到 tail", () => {
+    const g = buildFlow(doneJob([
+      "select", "pull", "merge", "burn_danmu", "append_danmu",
+      "upload_plain", "burn_livechat", "append_livechat", "clean_stage_src", "__term__",
+    ]), undefined);
+    expect(g.nodes.find((n) => n.key === "clean_stage_src")!.y).toBe(190);
+    expect(g.edges).toContainEqual(["merge", "clean_stage_src"]);
+    expect(g.edges).toContainEqual(["clean_stage_src", "__term__"]);
   });
 });
 

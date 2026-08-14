@@ -5,6 +5,22 @@ export { Reconciler } from "./reconciler.js";
 export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";
 export type { PipelineDeps, PipelineCfg, PipelineSteps, PipelineCleanup } from "./pipeline.js";
+export {
+  buildWorkflow,
+  runWorkflowNodes,
+  ResourcePool,
+  deriveStageProducts,
+} from "./workflow.js";
+export type {
+  Workflow,
+  WorkflowNode,
+  WorkflowNodeKey,
+  WorkflowBuildInput,
+  WorkflowRunOptions,
+  WorkflowRunResult,
+  ResourcePoolCfg,
+  StageProducts,
+} from "./workflow.js";
 export { LocalTransport } from "./transport-local.js";
 export { SshTransport } from "./transport-ssh.js";
 export { startHub } from "./hub.js";

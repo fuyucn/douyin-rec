@@ -18,6 +18,7 @@ import type {
   HubRuleDTO,
   HubRulePayload,
   HubJobDTO,
+  HubJobNodeStateDTO,
   HubJobCandidateDTO,
   HubJobEventDTO,
   HubJobsDTO,
@@ -31,7 +32,7 @@ import type {
   WorkerTestResult,
   WorkerStatus,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -120,6 +121,9 @@ export const api = {
   },
   getHubJobLog: (streamKey: string): Promise<{ streamKey: string; log: string }> =>
     request("GET", `/api/hub/jobs/${encodeURIComponent(streamKey)}/log`),
+  /** 手动重跑单个 workflow 节点(force=true 表示已确认,放行上传类节点)。 */
+  retryHubNode: (streamKey: string, node: string, opts?: { force?: boolean }): Promise<{ ok: boolean; error?: string }> =>
+    request("POST", `/api/hub/jobs/${encodeURIComponent(streamKey)}/retry-node`, { node, force: opts?.force }),
 
   // ── 多节点 worker(录制节点)管理 ─────────────────────────────────────────────
   listWorkers: (): Promise<WorkerDTO[]> => request("GET", "/api/hub/workers"),

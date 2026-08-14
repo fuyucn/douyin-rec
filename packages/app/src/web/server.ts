@@ -63,6 +63,7 @@ export interface RouteMatch {
     | "deleteHubRule"
     | "listHubJobs"
     | "getHubJobLog"
+    | "retryHubNode"
     | "listWorkers"
     | "createWorker"
     | "updateWorker"
@@ -152,6 +153,8 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
   if (p === "/api/hub/jobs" && method === "GET") return { name: "listHubJobs" };
   const hj = /^\/api\/hub\/jobs\/([^/]+)\/log$/.exec(p);
   if (hj && method === "GET") return { name: "getHubJobLog", sid: decodeURIComponent(hj[1]) };
+  const hrj = /^\/api\/hub\/jobs\/([^/]+)\/retry-node$/.exec(p);
+  if (hrj && method === "POST") return { name: "retryHubNode", sid: decodeURIComponent(hrj[1]), needsBody: true };
   // 连接测试:必须在 /api/hub/workers/:id 正则之前匹配,否则 "test" 被当成 :id。
   if (p === "/api/hub/workers/test" && method === "POST") return { name: "testWorker", needsBody: true };
   // 批量状态(轮询用):同 /test,必须在 /:id 正则之前匹配,否则 "status" 被当 :id。
@@ -233,6 +236,8 @@ export interface WebServerDeps {
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
   /** 立即触发一次 hub 任务同步(规则/worker 变更后调用,不用等周期 tick)。 */
   requestSyncTasks?: () => void;
+  /** 手动重跑单个 workflow 节点(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
+  retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {}). */
@@ -251,6 +256,11 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
     "content-length": Buffer.byteLength(payload),
   });
   res.end(payload);
+}
+
+/** 本机回环调用判定:内部自动化(_apply-tasks)停受管任务的唯一可信通道。 */
+function isLoopback(addr: string | undefined): boolean {
+  return addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
 }
 
 function sendHtml(res: ServerResponse, status: number, html: string): void {
@@ -299,7 +309,7 @@ async function dispatch(
     case "startTask":
       return api.startTask(match.id!);
     case "stopTask":
-      return api.stopTask(match.id!);
+      return api.stopTask(match.id!, { internal: isLoopback(req.socket.remoteAddress) });
     case "startLogin":
       return api.startLogin();
     case "pollLogin":
@@ -371,6 +381,10 @@ async function dispatch(
     }
     case "getHubJobLog":
       return api.getHubJobLog(match.sid!);
+    case "retryHubNode": {
+      const body = (await readJson(req)) as { node?: string; force?: boolean };
+      return api.retryHubNode(match.sid!, body ?? {});
+    }
     case "listWorkers":
       return api.listWorkers();
     case "createWorker": {
@@ -411,6 +425,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     testWorker: deps.testWorker,
     probeAllWorkers: deps.probeAllWorkers,
     requestSyncTasks: deps.requestSyncTasks,
+    retryNode: deps.retryNode,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);
       const n = mj.recoverOrphans(); // 启动:清理上次重启腰斩的合成 job
