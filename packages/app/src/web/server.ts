@@ -81,6 +81,64 @@ export interface RouteMatch {
   needsBody?: boolean;
 }
 
+interface RouteEntry {
+  name: RouteMatch["name"];
+  methods: readonly string[];
+  pattern: RegExp;
+  param?: "id" | "sid" | "slug";
+  decode?: boolean;
+  needsBody?: boolean;
+}
+
+/**
+ * 路由表按声明顺序匹配。param 取第 1 个捕获组;decode=true 的 key 形路由
+ * (hub job streamKey)客户端会 encodeURIComponent,匹配后统一解一次。
+ * test/status 子路径放在 :id 通配之前,避免被当 worker id。
+ */
+const ROUTES: readonly RouteEntry[] = [
+  { name: "index", methods: ["GET"], pattern: /^\/$|^\/index\.html$/ },
+  { name: "listTasks", methods: ["GET"], pattern: /^\/api\/tasks$/ },
+  { name: "createTask", methods: ["POST"], pattern: /^\/api\/tasks$/, needsBody: true },
+  { name: "listPlatforms", methods: ["GET"], pattern: /^\/api\/platforms$/ },
+  { name: "getCookie", methods: ["GET"], pattern: /^\/api\/cookie$/ },
+  { name: "setCookie", methods: ["POST"], pattern: /^\/api\/cookie$/, needsBody: true },
+  { name: "clearCookie", methods: ["DELETE"], pattern: /^\/api\/cookie$/ },
+  { name: "startLogin", methods: ["POST"], pattern: /^\/api\/login\/qr$/ },
+  { name: "pollLogin", methods: ["GET"], pattern: /^\/api\/login\/qr\/([A-Za-z0-9_-]+)$/, param: "sid" },
+  { name: "testWebhook", methods: ["POST"], pattern: /^\/api\/webhook\/test$/, needsBody: true },
+  { name: "getWebhook", methods: ["GET"], pattern: /^\/api\/webhook$/ },
+  { name: "setWebhook", methods: ["POST"], pattern: /^\/api\/webhook$/, needsBody: true },
+  { name: "getVersion", methods: ["GET"], pattern: /^\/api\/version$/ },
+  { name: "getMesioPath", methods: ["GET"], pattern: /^\/api\/mesio-path$/ },
+  { name: "setMesioPath", methods: ["POST"], pattern: /^\/api\/mesio-path$/, needsBody: true },
+  { name: "getTimezone", methods: ["GET"], pattern: /^\/api\/timezone$/ },
+  { name: "setTimezone", methods: ["POST"], pattern: /^\/api\/timezone$/, needsBody: true },
+  { name: "getEvents", methods: ["GET"], pattern: /^\/api\/events$/ },
+  { name: "hubStatus", methods: ["GET"], pattern: /^\/api\/hub\/status$/ },
+  { name: "listHubJobs", methods: ["GET"], pattern: /^\/api\/hub\/jobs$/ },
+  { name: "getHubJobLog", methods: ["GET"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/log$/, param: "sid", decode: true },
+  { name: "retryHubNode", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/retry-node$/, param: "sid", decode: true, needsBody: true },
+  { name: "testWorker", methods: ["POST"], pattern: /^\/api\/hub\/workers\/test$/, needsBody: true },
+  { name: "workersStatus", methods: ["GET"], pattern: /^\/api\/hub\/workers\/status$/ },
+  { name: "listWorkers", methods: ["GET"], pattern: /^\/api\/hub\/workers$/ },
+  { name: "createWorker", methods: ["POST"], pattern: /^\/api\/hub\/workers$/, needsBody: true },
+  { name: "updateWorker", methods: ["PATCH"], pattern: /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)$/, param: "slug", needsBody: true },
+  { name: "deleteWorker", methods: ["DELETE"], pattern: /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)$/, param: "slug" },
+  { name: "listHubRules", methods: ["GET"], pattern: /^\/api\/hub\/rules$/ },
+  { name: "createHubRule", methods: ["POST"], pattern: /^\/api\/hub\/rules$/, needsBody: true },
+  { name: "updateHubRule", methods: ["PATCH"], pattern: /^\/api\/hub\/rules\/([A-Za-z0-9_.-]+)$/, param: "slug", needsBody: true },
+  { name: "deleteHubRule", methods: ["DELETE"], pattern: /^\/api\/hub\/rules\/([A-Za-z0-9_.-]+)$/, param: "slug" },
+  { name: "getMerge", methods: ["GET"], pattern: /^\/api\/merges\/([A-Za-z0-9_-]+)$/, param: "sid" },
+  { name: "startTask", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/start$/, param: "id" },
+  { name: "stopTask", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/stop$/, param: "id" },
+  { name: "getTaskLogs", methods: ["GET"], pattern: /^\/api\/tasks\/(\d+)\/logs$/, param: "id" },
+  { name: "listRecordings", methods: ["GET"], pattern: /^\/api\/tasks\/(\d+)\/recordings$/, param: "id" },
+  { name: "startMerge", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/merge$/, param: "id", needsBody: true },
+  { name: "getTask", methods: ["GET"], pattern: /^\/api\/tasks\/(\d+)$/, param: "id" },
+  { name: "updateTask", methods: ["PATCH"], pattern: /^\/api\/tasks\/(\d+)$/, param: "id", needsBody: true },
+  { name: "deleteTask", methods: ["DELETE"], pattern: /^\/api\/tasks\/(\d+)$/, param: "id" },
+];
+
 /**
  * PURE router. Maps (method, pathname) → RouteMatch or null (404). Exported for
  * unit testing of param extraction without spinning up a server.
@@ -89,121 +147,18 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
   // normalise trailing slash (but keep root "/")
   const p = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
 
-  if (method === "GET" && (p === "/" || p === "/index.html")) {
-    return { name: "index" };
-  }
-  if (p === "/api/tasks") {
-    if (method === "GET") return { name: "listTasks" };
-    if (method === "POST") return { name: "createTask", needsBody: true };
-    return null;
-  }
-  if (p === "/api/platforms" && method === "GET") return { name: "listPlatforms" };
-  // 全局 cookie: GET / POST / DELETE /api/cookie
-  if (p === "/api/cookie") {
-    if (method === "GET") return { name: "getCookie" };
-    if (method === "POST") return { name: "setCookie", needsBody: true };
-    if (method === "DELETE") return { name: "clearCookie" };
-    return null;
-  }
-  // QR-login: POST /api/login/qr (start) + GET /api/login/qr/:sid (poll)
-  if (p === "/api/login/qr") {
-    if (method === "POST") return { name: "startLogin" };
-    return null;
-  }
-  const lm = /^\/api\/login\/qr\/([A-Za-z0-9_-]+)$/.exec(p);
-  if (lm) {
-    if (method === "GET") return { name: "pollLogin", sid: lm[1] };
-    return null;
-  }
-  // 全局 webhook: POST /api/webhook/test(发测试通知)
-  if (p === "/api/webhook/test") {
-    if (method === "POST") return { name: "testWebhook", needsBody: true };
-    return null;
-  }
-  // 全局 webhook: GET / POST /api/webhook
-  if (p === "/api/webhook") {
-    if (method === "GET") return { name: "getWebhook" };
-    if (method === "POST") return { name: "setWebhook", needsBody: true };
-    return null;
-  }
-  // 版本号: GET /api/version
-  if (p === "/api/version" && method === "GET") return { name: "getVersion" };
-  // mesio 路径设置: GET / POST /api/mesio-path
-  if (p === "/api/mesio-path") {
-    if (method === "GET") return { name: "getMesioPath" };
-    if (method === "POST") return { name: "setMesioPath", needsBody: true };
-    return null;
-  }
-  // 时区设置(config 驱动,覆盖 host 环境变量): GET / POST /api/timezone
-  if (p === "/api/timezone") {
-    if (method === "GET") return { name: "getTimezone" };
-    if (method === "POST") return { name: "setTimezone", needsBody: true };
-    return null;
-  }
-  // 站内事件流: GET /api/events(?since=N 在 dispatch 解析 query)
-  if (p === "/api/events") {
-    if (method === "GET") return { name: "getEvents" };
-    return null;
-  }
-  // 多节点 hub 规则: GET/POST /api/hub/rules + PATCH/DELETE /api/hub/rules/:key
-  // key = {platform}.{roomSlug}(含点)→ 字符类需含 `.`。
-  if (p === "/api/hub/status" && method === "GET") return { name: "hubStatus" };
-  // hub 任务: GET /api/hub/jobs(列表)+ GET /api/hub/jobs/:key/log(job.log 尾部)。
-  // key = streamKey,含 `:`(douyin:767…:2026-07-04),客户端 encodeURIComponent 传。
-  if (p === "/api/hub/jobs" && method === "GET") return { name: "listHubJobs" };
-  const hj = /^\/api\/hub\/jobs\/([^/]+)\/log$/.exec(p);
-  if (hj && method === "GET") return { name: "getHubJobLog", sid: decodeURIComponent(hj[1]) };
-  const hrj = /^\/api\/hub\/jobs\/([^/]+)\/retry-node$/.exec(p);
-  if (hrj && method === "POST") return { name: "retryHubNode", sid: decodeURIComponent(hrj[1]), needsBody: true };
-  // 连接测试:必须在 /api/hub/workers/:id 正则之前匹配,否则 "test" 被当成 :id。
-  if (p === "/api/hub/workers/test" && method === "POST") return { name: "testWorker", needsBody: true };
-  // 批量状态(轮询用):同 /test,必须在 /:id 正则之前匹配,否则 "status" 被当 :id。
-  if (p === "/api/hub/workers/status" && method === "GET") return { name: "workersStatus" };
-  // 多节点 worker: GET/POST /api/hub/workers + PATCH/DELETE /api/hub/workers/:id
-  if (p === "/api/hub/workers") {
-    if (method === "GET") return { name: "listWorkers" };
-    if (method === "POST") return { name: "createWorker", needsBody: true };
-    return null;
-  }
-  const wk = /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)$/.exec(p);
-  if (wk) {
-    if (method === "PATCH") return { name: "updateWorker", slug: wk[1], needsBody: true };
-    if (method === "DELETE") return { name: "deleteWorker", slug: wk[1] };
-    return null;
-  }
-  if (p === "/api/hub/rules") {
-    if (method === "GET") return { name: "listHubRules" };
-    if (method === "POST") return { name: "createHubRule", needsBody: true };
-    return null;
-  }
-  const hr = /^\/api\/hub\/rules\/([A-Za-z0-9_.-]+)$/.exec(p);
-  if (hr) {
-    if (method === "PATCH") return { name: "updateHubRule", slug: hr[1], needsBody: true };
-    if (method === "DELETE") return { name: "deleteHubRule", slug: hr[1] };
-    return null;
-  }
-  // 合成任务轮询: GET /api/merges/:jobId
-  const mj = /^\/api\/merges\/([A-Za-z0-9_-]+)$/.exec(p);
-  if (mj) {
-    if (method === "GET") return { name: "getMerge", sid: mj[1] };
-    return null;
-  }
-  // /api/tasks/:id  and  /api/tasks/:id/{start,stop,logs,recordings,merge}
-  const m = /^\/api\/tasks\/(\d+)(\/start|\/stop|\/logs|\/recordings|\/merge)?$/.exec(p);
-  if (m) {
-    const id = Number(m[1]);
-    const sub = m[2];
-    if (sub === "/start" && method === "POST") return { name: "startTask", id };
-    if (sub === "/stop" && method === "POST") return { name: "stopTask", id };
-    if (sub === "/logs" && method === "GET") return { name: "getTaskLogs", id };
-    if (sub === "/recordings" && method === "GET") return { name: "listRecordings", id };
-    if (sub === "/merge" && method === "POST") return { name: "startMerge", id, needsBody: true };
-    if (!sub) {
-      if (method === "GET") return { name: "getTask", id };
-      if (method === "PATCH") return { name: "updateTask", id, needsBody: true };
-      if (method === "DELETE") return { name: "deleteTask", id };
+  for (const route of ROUTES) {
+    const m = route.pattern.exec(p);
+    if (!m || !route.methods.includes(method)) continue;
+    const match: RouteMatch = { name: route.name };
+    if (route.needsBody) match.needsBody = true;
+    if (route.param && m[1] !== undefined) {
+      const raw = route.decode ? decodeURIComponent(m[1]) : m[1];
+      if (route.param === "id") match.id = Number(raw);
+      else if (route.param === "sid") match.sid = raw;
+      else match.slug = raw;
     }
-    return null;
+    return match;
   }
   return null;
 }

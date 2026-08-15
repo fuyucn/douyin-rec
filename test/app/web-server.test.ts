@@ -83,13 +83,35 @@ describe("matchRoute", () => {
     expect(matchRoute("DELETE", "/api/hub/workers/local")).toMatchObject({ name: "deleteWorker", slug: "local" });
     expect(matchRoute("POST", "/api/hub/workers/test")).toMatchObject({ name: "testWorker", needsBody: true });
     expect(matchRoute("GET", "/api/hub/workers/status")?.name).toBe("workersStatus");
+    expect(matchRoute("GET", "/api/hub/jobs")?.name).toBe("listHubJobs");
+    expect(matchRoute("GET", "/api/hub/jobs/douyin%3A123%3A2026-08-10/log")).toMatchObject({
+      name: "getHubJobLog",
+      sid: "douyin:123:2026-08-10",
+    });
     expect(matchRoute("POST", "/api/hub/jobs/douyin%3A123%3A2026-08-10/retry-node")).toMatchObject({
       name: "retryHubNode",
       sid: "douyin:123:2026-08-10",
       needsBody: true,
     });
+    expect(matchRoute("GET", "/api/platforms")?.name).toBe("listPlatforms");
+    expect(matchRoute("GET", "/api/webhook")?.name).toBe("getWebhook");
+    expect(matchRoute("POST", "/api/webhook")).toMatchObject({ name: "setWebhook", needsBody: true });
+    expect(matchRoute("POST", "/api/webhook/test")).toMatchObject({ name: "testWebhook", needsBody: true });
+    expect(matchRoute("GET", "/api/version")?.name).toBe("getVersion");
+    expect(matchRoute("GET", "/api/mesio-path")?.name).toBe("getMesioPath");
+    expect(matchRoute("POST", "/api/mesio-path")).toMatchObject({ name: "setMesioPath", needsBody: true });
+    expect(matchRoute("GET", "/api/events")?.name).toBe("getEvents");
+    expect(matchRoute("GET", "/api/merges/merge-job-1")).toMatchObject({ name: "getMerge", sid: "merge-job-1" });
+    expect(matchRoute("GET", "/api/tasks/7/recordings")).toMatchObject({ name: "listRecordings", id: 7 });
+    expect(matchRoute("POST", "/api/tasks/7/merge")).toMatchObject({ name: "startMerge", id: 7, needsBody: true });
     // status 不能被 /:id 正则吞掉
     expect(matchRoute("GET", "/api/hub/workers/local")).toBeNull(); // GET /:id 无路由(只有 PATCH/DELETE)
+  });
+
+  it("normalises trailing slash and keeps root", () => {
+    expect(matchRoute("GET", "/api/tasks/")?.name).toBe("listTasks");
+    expect(matchRoute("GET", "/api/tasks/7/")).toMatchObject({ name: "getTask", id: 7 });
+    expect(matchRoute("GET", "/")).toMatchObject({ name: "index" });
   });
 
   it("returns null for unknown routes / wrong methods", () => {
@@ -99,6 +121,9 @@ describe("matchRoute", () => {
     expect(matchRoute("GET", "/api/login/qr")).toBeNull();
     expect(matchRoute("POST", "/api/login/qr/abc")).toBeNull();
     expect(matchRoute("PUT", "/api/cookie")).toBeNull();
+    expect(matchRoute("DELETE", "/api/hub/jobs/x/log")).toBeNull();
+    expect(matchRoute("GET", "/api/merges")).toBeNull();
+    expect(matchRoute("PATCH", "/api/tasks/7/recordings")).toBeNull();
   });
 });
 
