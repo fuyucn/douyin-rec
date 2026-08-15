@@ -39,6 +39,9 @@ services:
       args:
         # 部署命令前缀 GIT_SHA=$(git rev-parse HEAD) 即注入;未设则空 → 版本回落 0.0.0-dev。
         GIT_SHA: "${GIT_SHA:-}"
+        # 本服务是 master(带 --hub,需要 playwright/ssh/biliup/字体)。
+        # 纯 worker 部署用 `docker build --build-arg IMAGE_ROLE=worker` 跳过这些重件。
+        IMAGE_ROLE: "master"
     image: douyin-rec:latest
     container_name: douyin-rec
     restart: unless-stopped

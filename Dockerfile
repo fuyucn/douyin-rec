@@ -32,25 +32,33 @@ RUN cd packages/web && pnpm install --frozen-lockfile && pnpm build
 
 # ---- runtime ----
 FROM node:24-bookworm-slim AS runtime
+# IMAGE_ROLE=worker 的纯录制节点不装 master 专属件(playwright/biliup/ssh/中文字体)，镜像可显著变小。
+ARG IMAGE_ROLE=master
 # ffmpeg/ffprobe 录制必需；ca-certificates 走 https 拉流/上报；curl 供 install-mesio.sh 下载。
 # openssh-client + rsync：docker 当 master 时经 SshTransport ssh/rsync 从 VPS 拉流(走 tailscale sidecar)。
 # fonts-noto-cjk：烧字幕(burn danmu/livechat)的 ASS 字体名 = "Noto Sans CJK SC",镜像无 CJK 字体
 #   则 libass 回落到无中文字形的字体 → 中文乱码。装上它 fontconfig 才能解析出真字体。
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl openssh-client rsync xz-utils fonts-noto-cjk \
+ && if [ "$IMAGE_ROLE" = "master" ]; then \
+      apt-get install -y --no-install-recommends ffmpeg ca-certificates curl openssh-client rsync xz-utils fonts-noto-cjk; \
+    else \
+      apt-get install -y --no-install-recommends ffmpeg ca-certificates curl xz-utils; \
+    fi \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 # SSH 到 VPS 用挂载进来的 key(compose 挂 /root/.ssh/vps.key);SshTransport 不带 -i,靠此 config 指定。
 # host 用 tailnet IP(经 sidecar 可达);User/Key/免交互全在这。known_hosts 走 /dev/null + accept-new。
-RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh && printf '%s\n' \
-  'Host 100.97.21.80' \
-  '  User ubuntu' \
-  '  IdentityFile /root/.ssh/vps.key' \
-  '  IdentitiesOnly yes' \
-  '  StrictHostKeyChecking accept-new' \
-  '  UserKnownHostsFile /dev/null' \
-  > /root/.ssh/config && chmod 600 /root/.ssh/config
+RUN if [ "$IMAGE_ROLE" = "master" ]; then \
+      mkdir -p /root/.ssh && chmod 700 /root/.ssh && printf '%s\n' \
+        'Host 100.97.21.80' \
+        '  User ubuntu' \
+        '  IdentityFile /root/.ssh/vps.key' \
+        '  IdentitiesOnly yes' \
+        '  StrictHostKeyChecking accept-new' \
+        '  UserKnownHostsFile /dev/null' \
+        > /root/.ssh/config && chmod 600 /root/.ssh/config; \
+    fi
 
 # mesio 录制引擎(可选 recorder)：build 时按平台拉 linux 二进制到 /app/bin（与本机 ./bin 约定一致，
 # 不污染系统 /usr/local/bin）。版本由脚本内 PINNED_VERSION 存档；升级改脚本即可。bookworm=glibc → gnu。
@@ -60,7 +68,8 @@ RUN MESIO_LIBC=gnu sh /tmp/install-mesio.sh /app/bin && rm /tmp/install-mesio.sh
 # biliup:docker 当 master 时 auto-private 上传用(orchestrator runBiliup spawn 裸 "biliup")。
 # 装到 /usr/local/bin 上 PATH;cookies 走挂载卷 /output-data/config/biliup/cookies.json(BILIUP_COOKIE env)。
 COPY scripts/install-biliup.sh /tmp/install-biliup.sh
-RUN BILIUP_LIBC=gnu sh /tmp/install-biliup.sh /usr/local/bin && rm /tmp/install-biliup.sh
+RUN if [ "$IMAGE_ROLE" = "master" ]; then BILIUP_LIBC=gnu sh /tmp/install-biliup.sh /usr/local/bin; fi \
+ && rm /tmp/install-biliup.sh
 
 # playwright + chromium:抖音扫码登录(qr-login.ts 动态 import("playwright"))唯一依赖。
 # bundle 把 playwright 标 external,故运行时必须有真模块:装进 /app/node_modules
@@ -69,9 +78,11 @@ RUN BILIUP_LIBC=gnu sh /tmp/install-biliup.sh /usr/local/bin && rm /tmp/install-
 # 版本与根 package.json 对齐(playwright ^1.60.0):npm 包与浏览器构建号必须同版本。
 # 代价:镜像 +~500MB。不想要就删这两行,扫码登录回落到「本地扫 + 手动粘贴 cookie」。
 ARG PLAYWRIGHT_VERSION=1.60.0
-RUN npm install --no-save --no-package-lock playwright@${PLAYWRIGHT_VERSION} \
- && npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium \
- && npm cache clean --force \
+RUN if [ "$IMAGE_ROLE" = "master" ]; then \
+      npm install --no-save --no-package-lock playwright@${PLAYWRIGHT_VERSION} \
+      && npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium \
+      && npm cache clean --force; \
+    fi \
  && rm -rf /var/lib/apt/lists/*
 
 # 只拷构建产物（bundle 自包含依赖，无需 node_modules）。
