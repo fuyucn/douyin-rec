@@ -11,6 +11,16 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // 把 react 全家桶与其余第三方拆成独立 vendor chunk，主包只留业务代码。
+        manualChunks(id: string): string | undefined {
+          if (!id.includes("node_modules")) return undefined;
+          if (/(?:^|[/\\])node_modules[/\\](react|react-dom|scheduler)[/\\]/.test(id)) return "react-vendor";
+          return "vendor";
+        },
+      },
+    },
   },
   server: {
     proxy: {

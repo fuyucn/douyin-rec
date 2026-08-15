@@ -46,6 +46,7 @@ const shared = {
   format: "esm",
   target: "node20",
   logLevel: "info",
+  minify: true,
 };
 
 // ── Main bundle: CLI + serve (single file; docker runs this; NO TUI/React/Ink) ──
