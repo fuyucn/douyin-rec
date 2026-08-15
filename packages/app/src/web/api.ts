@@ -20,6 +20,7 @@ import type { RecordingSessionDTO, HubRulePayload, HubRuleDTO, HubPipelineConfig
 import { listPlatforms, platformForRoom } from "@drec/core";
 import * as hubStore from "../hub-store.js";
 import type { HubRule } from "../hub-store.js";
+import { parseSchedule, toDanmuFlag } from "../task-input.js";
 import * as workerStore from "../worker-store.js";
 import { rootHubDir, rootHubConfig } from "../paths.js";
 import { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "../timezone.js";
@@ -223,20 +224,6 @@ function cookieStatus(value: string | null): CookieStatus {
     length: v.length,
     expiresAt: v.length > 0 ? parseCookieExpiry(v) : null,
   };
-}
-
-/** "HH:MM-HH:MM" → [start, end]; null on empty; throws on malformed. */
-function parseSchedule(s: string): [string, string] {
-  const m = /^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/.exec(s.trim());
-  if (!m) throw new Error(`schedule 格式应为 HH:MM-HH:MM，收到: ${s}`);
-  return [m[1], m[2]];
-}
-
-/** Normalise a danmu value (number|boolean) to 0/1; defaults to 1. */
-function toDanmu(v: number | boolean | undefined): number {
-  if (v === undefined) return 1;
-  if (typeof v === "boolean") return v ? 1 : 0;
-  return v ? 1 : 0;
 }
 
 // engine 的校验与归一化已下沉到 store.addTask/updateTask(唯一真理 = platform.engines),
@@ -484,7 +471,7 @@ export function makeApi(deps: ApiDeps): Api {
         name: input.name ?? null,
         quality: input.quality ?? "origin",
         engine: input.engine, // store 按 platform.engines 校验/回落
-        danmu: toDanmu(input.danmu),
+        danmu: toDanmuFlag(input.danmu),
         segmentSec: input.segmentSec ?? 1800,
         cookies: input.cookies ?? null,
         useCookie: toUseCookie(input.useCookie),
@@ -517,7 +504,7 @@ export function makeApi(deps: ApiDeps): Api {
       if ("name" in input) patch.name = input.name ?? null;
       if ("quality" in input) patch.quality = input.quality;
       if ("engine" in input) patch.engine = input.engine; // store 按 platform 校验
-      if ("danmu" in input) patch.danmu = toDanmu(input.danmu);
+      if ("danmu" in input) patch.danmu = toDanmuFlag(input.danmu);
       if ("useCookie" in input) patch.useCookie = toUseCookie(input.useCookie);
       if ("segmentSec" in input) patch.segmentSec = input.segmentSec;
       if ("cookies" in input) patch.cookies = input.cookies ?? null;

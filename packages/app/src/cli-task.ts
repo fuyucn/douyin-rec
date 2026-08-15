@@ -16,6 +16,7 @@ import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
 import { resolveOutputDir, ensureHubConfigExample, rootHubConfig } from "./paths.js";
 import { applyTimezone } from "./timezone.js";
+import { parseSchedule, toDanmuFlag, parseBoolFlag } from "./task-input.js";
 
 /**
  * 解析 hub 配置 JSON 串(供 startHub)。优先级:
@@ -165,13 +166,6 @@ export function buildCookieCommand(): Command {
   return cookie;
 }
 
-/** Parse "HH:MM-HH:MM" → [start, end]; throws on malformed input. */
-function parseSchedule(s: string): [string, string] {
-  const m = /^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/.exec(s.trim());
-  if (!m) throw new Error(`--schedule 格式应为 HH:MM-HH:MM，收到: ${s}`);
-  return [m[1], m[2]];
-}
-
 interface AddOpts {
   room: string;
   name?: string;
@@ -185,12 +179,6 @@ interface AddOpts {
   out?: string;
   schedule?: string;
   db?: string;
-}
-
-/** Parse a 0/1/on/off/true/false flag string → boolean. Defaults to `def`. */
-function parseBoolFlag(v: string | undefined, def: boolean): boolean {
-  if (v === undefined) return def;
-  return !["0", "off", "false", "no", "none"].includes(v.trim().toLowerCase());
 }
 
 /**
@@ -271,7 +259,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         name: o.name ?? null,
         quality: o.quality ?? platform.defaultQuality,
         engine,
-        danmu: o.danmu !== undefined ? (["0", "off", "false", "none"].includes(o.danmu) ? 0 : 1) : 1,
+        danmu: toDanmuFlag(o.danmu),
         segmentSec: o.segment !== undefined ? Number(o.segment) : 1800,
         cookies,
         useCookie: parseBoolFlag(o.useCookie, true),
@@ -327,9 +315,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         }
         patch.engine = engineOpt as EngineKind;
       }
-      if (o.danmu !== undefined) {
-        patch.danmu = ["0", "off", "false", "none"].includes(o.danmu) ? 0 : 1;
-      }
+      if (o.danmu !== undefined) patch.danmu = toDanmuFlag(o.danmu);
       if (o.segment !== undefined) patch.segmentSec = Number(o.segment);
       if (o.cookiesFile !== undefined) {
         patch.cookies = readFileSync(o.cookiesFile, "utf-8").trim();
