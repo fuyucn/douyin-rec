@@ -55,6 +55,7 @@ const DEFAULT_RECONNECT_WINDOW_MS = 10 * 60_000;
 const DEFAULT_SLEEP = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const RETRYABLE = new Set<JobState>(["pending", "failed"]);
+const UNSAFE_RETRY_NODES = new Set(["upload_plain", "append_danmu", "append_livechat"]);
 
 export class Reconciler {
   private platform: string;
@@ -104,7 +105,7 @@ export class Reconciler {
         timeout,
       ]);
     } finally {
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
     }
   }
 
@@ -129,15 +130,13 @@ export class Reconciler {
       }
     }
 
-    if (pending.size === 0) return pending;
-
     while (pending.size > 0 && Date.now() < deadline) {
       // Check all pending members this round
       const toRemove: string[] = [];
       for (const key of pending) {
         const { workerId, roomSlug } = memberMap.get(key)!;
         const transport = this.transports.get(workerId);
-        if (!transport || typeof transport.isDone !== "function") {
+        if (typeof transport?.isDone !== "function") {
           // Transport doesn't support isDone → treat as done
           toRemove.push(key);
           continue;
@@ -187,7 +186,7 @@ export class Reconciler {
         const key = `${m.workerId}:${m.rec.roomSlug}`;
         if (firstKeys.has(key) || stillRecording.has(key)) continue;
         const transport = this.transports.get(m.workerId);
-        if (!transport || typeof transport.isDone !== "function") continue;
+        if (typeof transport?.isDone !== "function") continue;
         try {
           if (!(await transport.isDone(m.rec.roomSlug))) {
             console.warn(
@@ -239,7 +238,7 @@ export class Reconciler {
         if (!resolved) { b.members = []; continue; }              // 房间未开 hub → 本场不处理
         cfg = resolved;
       }
-      if (cfg.workers && cfg.workers.length > 0) {
+      if (cfg.workers?.length) {
         b.members = b.members.filter((m) => cfg.workers!.includes(m.workerId));
       }
       cfgByKey.set(b.streamKey, cfg);   // 过滤后仍有/无成员都缓存;空成员在循环里跳过
@@ -295,15 +294,13 @@ export class Reconciler {
         // failed 且已达重试上限 → 升级 needs_manual(终态)+ 通知一次人工,不再重入。
         const failedNodes = job?.state === "failed" ? this.ledger.getFailedNodes(b.streamKey) : [];
         // 上传类节点失败不可自动重试(可能已建稿/已 append 部分分 P)→ 直接转人工,避免重复稿。
-        const unsafeRetry = failedNodes.some(
-          (n) => n.node === "upload_plain" || n.node === "append_danmu" || n.node === "append_livechat",
-        );
-        if (job?.state === "failed" && unsafeRetry) {
-          this.ledger.setState(b.streamKey, "needs_manual", { error: job.error ?? "上传类节点失败,禁止自动重试" });
+        const unsafeRetry = failedNodes.some((n) => UNSAFE_RETRY_NODES.has(n.node));
+        if (unsafeRetry) {
+          this.ledger.setState(b.streamKey, "needs_manual", { error: job?.error ?? "上传类节点失败,禁止自动重试" });
           this.notify?.({
             kind: "error",
             stage: "同步",
-            message: `${b.streamKey} 上传类节点失败(${failedNodes.map((n) => n.node).join(",")}),已转人工(needs_manual)。最后错误:${(job.error ?? "").slice(0, 200)}`,
+            message: `${b.streamKey} 上传类节点失败(${failedNodes.map((n) => n.node).join(",")}),已转人工(needs_manual)。最后错误:${(job?.error ?? "").slice(0, 200)}`,
           });
           continue;
         }

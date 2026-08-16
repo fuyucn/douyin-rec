@@ -71,6 +71,16 @@ function sanitizeKey(key: string): string {
   return key.replace(/[:/]/g, "_");
 }
 
+const defaultSplitForUpload = (mp4: string): Promise<string[]> =>
+  import("@drec/post-process").then((m) => m.splitToSizeLimit(mp4));
+
+async function defaultRmStage(paths: string[]): Promise<void> {
+  const { rmSync } = await import("node:fs");
+  for (const p of paths) {
+    try { rmSync(p, { force: true }); } catch { /* 忽略 */ }
+  }
+}
+
 /**
  * 每场专属日志(`<stageSub>/job.log`,append-only,随 stage 产物持久保留)。
  * 记录选优明细/每步起止耗时/子命令输出摘尾/致命错误——补上「容器日志混杂且重启即丢」的复盘缺口。
@@ -122,11 +132,8 @@ async function runPipelineInner(
     jlog(`  ✓ 完成(${Math.round((Date.now() - t0) / 1000)}s)`);
     if (typeof out === "string" && out.trim()) jlog(`  输出尾: ${out.trim().slice(-2048)}`);
   };
-  const splitForUpload = deps.splitForUpload ?? ((mp4: string) => import("@drec/post-process").then((m) => m.splitToSizeLimit(mp4)));
-  const rmStage = deps.rmStage ?? (async (paths: string[]) => {
-    const { rmSync } = await import("node:fs");
-    for (const p of paths) { try { rmSync(p, { force: true }); } catch { /* 忽略 */ } }
-  });
+  const splitForUpload = deps.splitForUpload ?? defaultSplitForUpload;
+  const rmStage = deps.rmStage ?? defaultRmStage;
   const burnDanmu = cfg.steps?.burnDanmu !== false;        // 默认开
   const burnLivechat = cfg.steps?.burnLivechat !== false;  // 默认开
   const clean = cfg.cleanup ?? {};
@@ -304,7 +311,7 @@ async function runPipelineInner(
     if (clean.includeXmlAss) {
       victims.push(plainXml, xmlArg, danmuMp4.replace(/\.mp4$/, ".ass"), livechatMp4.replace(/\.mp4$/, ".ass"));
     }
-    const present = victims.filter((p) => p && existsSync(p));
+    const present = victims.filter(Boolean).filter(existsSync);
     await rmStage(present);
     ledger.logStep(streamKey, "clean_stage", "done", `删 ${present.length} 文件`);
   }
@@ -324,7 +331,7 @@ async function resumeAppends(
 ): Promise<{ state: JobState; bv?: string }> {
   const { ledger, appendGroup, notify, cfg } = deps;
   jlog(`续跑:已建稿 bv=${bv},跳过 select/pull/merge/burn/uploadPlain,只补 append(不做 sourceAfterDone 清理)`);
-  const splitForUpload = deps.splitForUpload ?? ((mp4: string) => import("@drec/post-process").then((m) => m.splitToSizeLimit(mp4)));
+  const splitForUpload = deps.splitForUpload ?? defaultSplitForUpload;
   const burnDanmu = cfg.steps?.burnDanmu !== false;
   const burnLivechat = cfg.steps?.burnLivechat !== false;
   const isPublic = cfg.uploadPrivate === false;
@@ -376,10 +383,7 @@ async function resumeAppends(
 
   // 可选:done 后删 stage 产物(与主路径同一开关;续跑不删 slave 源)。
   if (cfg.cleanup?.stageAfterDone) {
-    const rmStage = deps.rmStage ?? (async (paths: string[]) => {
-      const { rmSync } = await import("node:fs");
-      for (const p of paths) { try { rmSync(p, { force: true }); } catch { /* 忽略 */ } }
-    });
+    const rmStage = deps.rmStage ?? defaultRmStage;
     const products = [prod.plain, prod.danmuMp4, prod.livechatMp4];
     const xmlAss = cfg.cleanup?.includeXmlAss
       ? [path.join(stageSub, prod.dateName + ".xml"),

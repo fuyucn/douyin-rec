@@ -121,7 +121,6 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
   const fileBytes = (p: string): number => {
     try { return Number(statSync(p).size); } catch { return 0; }
   };
-  const splitForUpload = deps.splitForUpload ?? ((mp4: string) => splitToSizeLimitSafe(mp4));
   const isPublic = cfg.uploadPrivate === false;
 
   artifacts.set("src", stageSub);
@@ -225,13 +224,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
       outputs: [{ name: "p2", kind: "ref", required: true }],
       resource: "net",
       run: async (c: NodeRunContext): Promise<void> => {
-        const files = await splitForUpload(products.danmuMp4);
-        await appendGroupSafe({
-          deps, bv: c.get("bv")!, files, isPublic,
-          step: "append_danmu", log,
-        });
-        c.set("p2", "done");
-        c.stepDetail("append_danmu", `${files.length} 段${files.length ? ` · ${humanBytes(sumBytesOf(files))}` : ""}`);
+        await runAppendGroup(c, "append_danmu", products.danmuMp4, "p2");
       },
     },
     {
@@ -245,13 +238,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
       outputs: [{ name: "p3", kind: "ref", required: true }],
       resource: "net",
       run: async (c: NodeRunContext): Promise<void> => {
-        const files = await splitForUpload(products.livechatMp4);
-        await appendGroupSafe({
-          deps, bv: c.get("bv")!, files, isPublic,
-          step: "append_livechat", log,
-        });
-        c.set("p3", "done");
-        c.stepDetail("append_livechat", `${files.length} 段${files.length ? ` · ${humanBytes(sumBytesOf(files))}` : ""}`);
+        await runAppendGroup(c, "append_livechat", products.livechatMp4, "p3");
       },
     },
   ];
@@ -309,6 +296,26 @@ async function appendGroupSafe(o: {
     onRetry: (attempt, err) =>
       o.log(`append ${o.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
   });
+}
+
+async function runAppendGroup(
+  c: NodeRunContext,
+  step: "append_danmu" | "append_livechat",
+  mp4: string,
+  out: string,
+): Promise<void> {
+  const splitForUpload = c.deps.splitForUpload ?? splitToSizeLimitSafe;
+  const files = await splitForUpload(mp4);
+  await appendGroupSafe({
+    deps: c.deps,
+    bv: c.get("bv")!,
+    files,
+    isPublic: c.cfg.uploadPrivate === false,
+    step,
+    log: c.log,
+  });
+  c.set(out, "done");
+  c.stepDetail(step, `${files.length} 段${files.length ? ` · ${humanBytes(sumBytesOf(files))}` : ""}`);
 }
 
 /** 共享资源池:cpu/net 各 max=1(可配置),cpu 前先过内存闸门。 */
@@ -403,10 +410,7 @@ export class ResourcePool {
     const prev = this.streamLocks.get(streamKey) ?? Promise.resolve();
     const run = prev.then(fn, fn);
     // 链尾始终存一个 resolve 的哨兵,避免未处理 rejection。
-    const tail = run.then(
-      () => undefined,
-      () => undefined,
-    );
+    const tail = run.catch(() => undefined);
     this.streamLocks.set(streamKey, tail);
     try { return await run; } finally {
       if (this.streamLocks.get(streamKey) === tail) this.streamLocks.delete(streamKey);
@@ -463,11 +467,9 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
     if (!row) return "pending";
     if (row.state === "done") return "done";
     if (row.state === "skipped") return "skipped";
-    if (row.state === "failed" && autoRetry.has(key)) return "pending";
-    if (row.state === "failed") return "failed";
+    if (row.state === "failed") return autoRetry.has(key) ? "pending" : "failed";
     // blocked 只是「上游失败」的派生态:父节点重跑成功后应恢复可执行,不能永久卡死。
-    if (row.state === "blocked") return "pending";
-    return "pending"; // running/pending → 在流锁下不可能并发,按 pending 继续
+    return "pending"; // blocked / running/pending → 在流锁下不可能并发,按 pending 继续
   };
 
   const compute = (key: WorkflowNodeKey): "done" | "skipped" | "failed" | "blocked" | "pending" => {
@@ -480,8 +482,8 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
     if (node.disabled) { state.set(key, "skipped"); return "skipped"; }
     const p = parents.get(key) ?? [];
     const pStates = p.map((k) => compute(k));
-    if (pStates.some((s) => s === "failed" || s === "blocked")) { state.set(key, "blocked"); return "blocked"; }
-    if (pStates.some((s) => s === "skipped") && !forceRetry.has(key)) { state.set(key, "skipped"); return "skipped"; }
+    if (pStates.includes("failed") || pStates.includes("blocked")) { state.set(key, "blocked"); return "blocked"; }
+    if (pStates.includes("skipped") && !forceRetry.has(key)) { state.set(key, "skipped"); return "skipped"; }
     return "pending";
   };
 
@@ -497,39 +499,25 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
     }
   };
 
-  const validateInputs = (node: WorkflowNode): void => {
-    for (const spec of node.inputs) {
-      const v = ctx.get(spec.name);
-      const required = spec.required !== false;
-      if (spec.kind === "file") {
-        if (!required || !v) continue;
-        if (!existsSync(v) || Number(statSync(v).size) < (spec.minBytes ?? 1)) {
-          throw new Error(`节点输入缺失或为空: ${spec.name}`);
-        }
-      } else if (spec.kind === "dir") {
-        if (!required || !v) continue;
-        if (!existsSync(v) || readdirSync(v).length === 0) throw new Error(`节点输入目录为空: ${spec.name}`);
-      } else if (spec.kind === "ref") {
-        if (required && !v) throw new Error(`节点输入缺失: ${spec.name}`);
-      }
+  const checkArtifact = (spec: ArtifactSpec, v: string | undefined, kind: "输入" | "输出"): string | undefined => {
+    const required = spec.required !== false;
+    if (!required) return undefined;
+    if (spec.kind === "file") {
+      if (!v) return undefined;
+      return !existsSync(v) || Number(statSync(v).size) < (spec.minBytes ?? 1)
+        ? `节点${kind}缺失或为空: ${spec.name}`
+        : undefined;
     }
+    if (spec.kind === "dir") {
+      if (!v) return undefined;
+      return !existsSync(v) || readdirSync(v).length === 0 ? `节点${kind}目录为空: ${spec.name}` : undefined;
+    }
+    return !v ? `节点${kind}缺失: ${spec.name}` : undefined;
   };
-
-  const validateOutputs = (node: WorkflowNode): void => {
-    for (const spec of node.outputs) {
-      const v = ctx.get(spec.name);
-      const required = spec.required !== false;
-      if (spec.kind === "file") {
-        if (!required) continue;
-        if (!v || !existsSync(v) || Number(statSync(v).size) < (spec.minBytes ?? 1)) {
-          throw new Error(`节点输出为空: ${spec.name}`);
-        }
-      } else if (spec.kind === "dir") {
-        if (!required) continue;
-        if (!v || !existsSync(v) || readdirSync(v).length === 0) throw new Error(`节点输出为空: ${spec.name}`);
-      } else if (spec.kind === "ref") {
-        if (required && !v) throw new Error(`节点输出为空: ${spec.name}`);
-      }
+  const validateArtifacts = (specs: ArtifactSpec[], kind: "输入" | "输出"): void => {
+    for (const spec of specs) {
+      const msg = checkArtifact(spec, ctx.get(spec.name), kind);
+      if (msg) throw new Error(msg);
     }
   };
 
@@ -539,9 +527,9 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
       ctx.ledger.logStep(streamKey, node.key, "start");
       ctx.log(`[node] ${node.key} start`);
       const body = async (): Promise<void> => {
-        validateInputs(node);
+        validateArtifacts(node.inputs, "输入");
         await node.run(ctx);
-        validateOutputs(node);
+        validateArtifacts(node.outputs, "输出");
       };
       if (node.resource === "cpu") await pool.withCpu(body);
       else if (node.resource === "net") await pool.withNet(body);
