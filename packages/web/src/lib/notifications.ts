@@ -8,8 +8,9 @@ import { useEffect, useRef } from "react";
 import { showToast, type ToastType } from "./hooks";
 import { useT } from "./i18n";
 import { api, type AppEventDTO } from "../api/client";
+import type { NotifKey } from "@drec/contracts";
 
-export type NotifKey = "live" | "recordEnd" | "merge" | "hub" | "error";
+export type { NotifKey };
 /** 设置面板里展示的顺序(文案走 i18n notif.<key>)。 */
 export const NOTIF_KEYS: NotifKey[] = ["live", "recordEnd", "merge", "hub", "error"];
 

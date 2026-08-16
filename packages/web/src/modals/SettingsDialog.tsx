@@ -9,6 +9,7 @@ import { Switch } from "../components/Switch";
 import { errMessage, useRefreshCookie, useToast } from "../lib/hooks";
 import { useT, useLang } from "../lib/i18n";
 import { getToggles, setToggle, NOTIF_KEYS, type NotifKey } from "../lib/notifications";
+import type { NotifWebhookToggles } from "@drec/contracts";
 
 type Tab = "account" | "webhook" | "engine" | "notif" | "about";
 
@@ -40,6 +41,10 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const setServerTimezone = useSetAtom(serverTimezoneAtom);
   const [tab, setTab] = useState<Tab>("engine");
   const [toggles, setToggles] = useState(getToggles());
+  const [webhookToggles, setWebhookToggles] = useState<NotifWebhookToggles>({
+    live: false, recordEnd: false, merge: false, hub: false, error: false,
+  });
+  const [savingNotif, setSavingNotif] = useState(false);
   const [webhook, setWebhook] = useState("");
   const [savingHook, setSavingHook] = useState(false);
   const [testingHook, setTestingHook] = useState(false);
@@ -57,6 +62,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   useEffect(() => {
     if (!open) return;
     setToggles(getToggles());
+    void api.getNotifSettings().then((r) => setWebhookToggles(r)).catch(() => {});
     void api.getWebhook().then((r) => setWebhook(r.webhook)).catch(() => {});
     void api.getMesioPath().then((r) => { setMesioPath(r.mesioPath); setMesioDefault(r.default); }).catch(() => {});
     void api
@@ -72,8 +78,27 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   }, [open]);
 
   const flip = (key: NotifKey, on: boolean): void => {
-    setToggle(key, on);
     setToggles((s) => ({ ...s, [key]: on }));
+  };
+
+  const flipWebhook = (key: NotifKey, on: boolean): void => {
+    setWebhookToggles((s) => ({ ...s, [key]: on }));
+  };
+
+  const webhookConfigured = webhook.trim().length > 0;
+
+  const saveNotif = async (): Promise<void> => {
+    setSavingNotif(true);
+    try {
+      const r = await api.setNotifSettings(webhookToggles);
+      setWebhookToggles(r);
+      for (const key of NOTIF_KEYS) setToggle(key, toggles[key]);
+      toast(t("settings.notifSaved"), "success");
+    } catch (e) {
+      toast(t("settings.notifFailed", { msg: errMessage(e) }), "error");
+    } finally {
+      setSavingNotif(false);
+    }
   };
 
   const saveWebhook = async (): Promise<void> => {
@@ -317,16 +342,39 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       {tab === "notif" && (
         <div>
           <p className="text-xs text-muted-soft mb-2">{t("notif.desc")}</p>
-          <div className="space-y-2">
+          <div className="rounded-md border border-hairline bg-raised overflow-hidden">
+            <div className="grid grid-cols-[1fr_auto_auto] items-center gap-x-6 gap-y-0 px-4 py-2 border-b border-hairline text-xs text-muted-soft">
+              <span>{t("notif.typeLabel")}</span>
+              <span className="w-16 text-center">{t("notif.inAppLabel")}</span>
+              <span className="w-16 text-center">{t("notif.webhookLabel")}</span>
+            </div>
             {NOTIF_KEYS.map((key) => (
-              <label
+              <div
                 key={key}
-                className="switch-row switch-row-sm"
+                className="grid grid-cols-[1fr_auto_auto] items-center gap-x-6 px-4 py-3 border-b border-hairline last:border-b-0"
               >
                 <span className="text-sm font-medium text-ink">{t(`notif.${key}`)}</span>
-                <Switch checked={toggles[key]} onCheckedChange={(v) => flip(key, v)} name={`notif-${key}`} />
-              </label>
+                <div className="w-16 flex justify-center">
+                  <Switch checked={toggles[key]} onCheckedChange={(v) => flip(key, v)} name={`notif-inapp-${key}`} />
+                </div>
+                <div className="w-16 flex justify-center">
+                  <Switch
+                    checked={webhookConfigured && webhookToggles[key]}
+                    disabled={!webhookConfigured}
+                    onCheckedChange={(v) => flipWebhook(key, v)}
+                    name={`notif-webhook-${key}`}
+                  />
+                </div>
+              </div>
             ))}
+          </div>
+          {!webhookConfigured && (
+            <p className="mt-2 text-xs text-muted-soft">{t("notif.webhookLockedHint")}</p>
+          )}
+          <div className="mt-3 flex justify-end">
+            <Button small onClick={() => void saveNotif()} disabled={savingNotif} loading={savingNotif}>
+              {t("common.save")}
+            </Button>
           </div>
         </div>
       )}

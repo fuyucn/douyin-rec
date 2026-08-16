@@ -1,7 +1,7 @@
 // API 契约 DTO —— 纯类型,前后端单一来源(无运行时依赖,前端 build 时擦除,不拉后端代码)。
 // 后端 @drec/app 的 web/api 用它定请求/响应;前端 packages/web 经 alias import 同一份。
-import type { NotifyEvent } from "./notify.js";
-export type { NotifyEvent };
+import type { NotifyEvent, NotifKey, NotifWebhookToggles } from "./notify.js";
+export type { NotifyEvent, NotifKey, NotifWebhookToggles };
 
 /**
  * 多节点 hub 后处理配置(按房间)。**独立于录制任务**——录制任务只管录,hub 规则管后处理。

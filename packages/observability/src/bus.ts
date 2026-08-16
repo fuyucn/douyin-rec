@@ -9,7 +9,8 @@
  * (--discord-webhook 用每任务 webhook),故这些 emit 走 { webhook: false } 避免重复推送。
  * 合成完成/失败由 api emit,webhook 由本中枢发(子进程不参与)。
  */
-import type { NotifyEvent, Notifier } from "@drec/core";
+import type { NotifyEvent, Notifier, NotifWebhookToggles } from "@drec/core";
+import { DEFAULT_WEBHOOK_TOGGLES, shouldSendWebhook } from "./notifier/index.js";
 
 /** 站内事件:NotifyEvent + 序号/时间/归属任务,供前端按 id 游标增量拉取。 */
 export interface AppEvent {
@@ -28,6 +29,11 @@ export interface EventCenterOpts {
   makeNotifier?: (webhook: string | undefined) => Notifier;
   /** 解析某任务生效的 webhook(任务自带 ?? 全局);省略=无 webhook。 */
   resolveWebhook?: (taskId: number | null) => string | undefined;
+  /**
+   * 每类提醒的 webhook 开关(getter,每次 emit 时求值 → UI 改设置立即生效)。
+   * 省略=全关(webhook 默认不推)。false 的类别即使有 webhook 也不推送。
+   */
+  webhookToggles?: () => NotifWebhookToggles;
   /** 环形缓冲容量(默认 200)。 */
   max?: number;
   /**
@@ -44,10 +50,12 @@ export class EventCenter {
   private readonly max: number;
   private readonly makeNotifier?: (webhook: string | undefined) => Notifier;
   private readonly resolveWebhook?: (taskId: number | null) => string | undefined;
+  private readonly webhookToggles?: () => NotifWebhookToggles;
 
   constructor(opts: EventCenterOpts = {}) {
     this.makeNotifier = opts.makeNotifier;
     this.resolveWebhook = opts.resolveWebhook;
+    this.webhookToggles = opts.webhookToggles;
     this.max = opts.max ?? 200;
     this.seq = opts.initialSeq ?? 0;
   }
@@ -60,7 +68,8 @@ export class EventCenter {
     const e: AppEvent = { id: ++this.seq, at: Date.now(), taskId, event };
     this.buf.push(e);
     if (this.buf.length > this.max) this.buf.shift();
-    if (opts?.webhook !== false && this.makeNotifier) {
+    const toggles = this.webhookToggles?.() ?? DEFAULT_WEBHOOK_TOGGLES;
+    if (opts?.webhook !== false && this.makeNotifier && shouldSendWebhook(toggles, event)) {
       const hook = this.resolveWebhook?.(taskId);
       void this.makeNotifier(hook).notify(event).catch(() => {});
     }

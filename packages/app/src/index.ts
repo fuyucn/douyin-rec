@@ -18,6 +18,14 @@ export type { HubJobView, HubJobEvent } from "./hub-jobs.js";
 export { rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, DEFAULT_ROOT } from "./paths.js";
 export { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
 export { makeNotifier, NullNotifier, formatMessage } from "@drec/observability";
+export {
+  DEFAULT_WEBHOOK_TOGGLES,
+  resolveWebhookToggles,
+  shouldSendWebhook,
+  webhookTogglesFromEnv,
+  WEBHOOK_TOGGLES_ENV,
+} from "@drec/observability";
+export type { NotifKey, NotifWebhookToggles } from "@drec/observability";
 export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, uploadThenAppendGroups, uploadPlain, appendGroup, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
 export type { UploadOpts } from "./upload/biliup.js";
 export { fetchAnchorName, resolveShortUrl } from "./anchor.js";

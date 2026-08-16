@@ -1,6 +1,48 @@
 // observability/src/notifier/index.ts
 import type { Notifier, NotifyEvent } from "@drec/core";
-export type { Notifier, NotifyEvent } from "@drec/core";
+import { notifKeyOf, type NotifWebhookToggles } from "@drec/core";
+export type { Notifier, NotifyEvent, NotifKey, NotifWebhookToggles } from "@drec/core";
+
+/** 子进程 webhook 类型开关的注入环境变量(serve → record)。JSON 串,缺省全关。 */
+export const WEBHOOK_TOGGLES_ENV = "DREC_WEBHOOK_TOGGLES";
+
+/** 设置面板里每类提醒的 webhook 默认值:全关(需显式开启;无 webhook 时 UI 也禁用)。 */
+export const DEFAULT_WEBHOOK_TOGGLES: NotifWebhookToggles = {
+  live: false,
+  recordEnd: false,
+  merge: false,
+  hub: false,
+  error: false,
+};
+
+/**
+ * 解析用户配置的 webhook 开关(设置表 JSON 串 / 子进程环境变量)。
+ * 非法 JSON/未知键一律回落默认全关,避免未显式开启的类别推送 webhook。
+ */
+export function resolveWebhookToggles(raw: string | null | undefined): NotifWebhookToggles {
+  if (!raw) return { ...DEFAULT_WEBHOOK_TOGGLES };
+  try {
+    const parsed = JSON.parse(raw) as Partial<NotifWebhookToggles>;
+    return {
+      ...DEFAULT_WEBHOOK_TOGGLES,
+      ...Object.fromEntries(
+        Object.entries(parsed).filter(([k, v]) => k in DEFAULT_WEBHOOK_TOGGLES && typeof v === "boolean"),
+      ),
+    } as NotifWebhookToggles;
+  } catch {
+    return { ...DEFAULT_WEBHOOK_TOGGLES };
+  }
+}
+
+/** 子进程环境变量里的开关(serve 注入;手工跑 CLI 无此 env = 全关)。 */
+export function webhookTogglesFromEnv(): NotifWebhookToggles {
+  return resolveWebhookToggles(process.env[WEBHOOK_TOGGLES_ENV]);
+}
+
+/** 该事件是否应推 webhook:按类型开关过滤。 */
+export function shouldSendWebhook(toggles: NotifWebhookToggles, e: NotifyEvent): boolean {
+  return toggles[notifKeyOf(e)];
+}
 
 /** 未配置 webhook 时使用，全程 no-op。 */
 export class NullNotifier implements Notifier {

@@ -18,9 +18,11 @@ describe("EventCenter", () => {
 
   it("webhook=true 触发通知器(按任务解析 webhook);webhook=false 只进本地流", () => {
     const notify = vi.fn().mockResolvedValue(undefined);
+    // 默认开关全关;显式开 merge 后才会发。
     const ec = new EventCenter({
       makeNotifier: () => ({ notify }),
       resolveWebhook: (taskId) => (taskId === 1 ? "https://hook" : undefined),
+      webhookToggles: () => ({ live: false, recordEnd: false, merge: true, hub: false, error: false }),
     });
     ec.emit(1, { kind: "mergeDone", file: "/a.mp4" }); // 默认 webhook
     ec.emit(1, { kind: "recordStart", anchor: "A", room: "r", quality: "o" }, { webhook: false });

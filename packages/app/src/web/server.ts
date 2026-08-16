@@ -46,6 +46,8 @@ export interface RouteMatch {
     | "getWebhook"
     | "setWebhook"
     | "testWebhook"
+    | "getNotifSettings"
+    | "setNotifSettings"
     | "getVersion"
     | "getMesioPath"
     | "setMesioPath"
@@ -108,6 +110,8 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "testWebhook", methods: ["POST"], pattern: /^\/api\/webhook\/test$/, needsBody: true },
   { name: "getWebhook", methods: ["GET"], pattern: /^\/api\/webhook$/ },
   { name: "setWebhook", methods: ["POST"], pattern: /^\/api\/webhook$/, needsBody: true },
+  { name: "getNotifSettings", methods: ["GET"], pattern: /^\/api\/notif-settings$/ },
+  { name: "setNotifSettings", methods: ["PUT"], pattern: /^\/api\/notif-settings$/, needsBody: true },
   { name: "getVersion", methods: ["GET"], pattern: /^\/api\/version$/ },
   { name: "getMesioPath", methods: ["GET"], pattern: /^\/api\/mesio-path$/ },
   { name: "setMesioPath", methods: ["POST"], pattern: /^\/api\/mesio-path$/, needsBody: true },
@@ -286,6 +290,12 @@ async function dispatch(
     case "testWebhook": {
       const body = (await readJson(req)) as { content?: string };
       return api.testWebhook(body ?? {});
+    }
+    case "getNotifSettings":
+      return api.getNotifSettings();
+    case "setNotifSettings": {
+      const body = (await readJson(req)) as Parameters<Api["setNotifSettings"]>[0];
+      return api.setNotifSettings(body ?? {});
     }
     case "getVersion":
       return api.getVersion();

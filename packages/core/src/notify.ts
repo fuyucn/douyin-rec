@@ -14,3 +14,28 @@ export type NotifyEvent =
   | { kind: "error"; stage: string; message: string };
 
 export interface Notifier { notify(e: NotifyEvent): Promise<void>; }
+
+/** 设置面板里每类提醒的开关键(与 web 前端 NOTIF_KEYS 一致)。 */
+export type NotifKey = "live" | "recordEnd" | "merge" | "hub" | "error";
+
+/** 每类提醒的 webhook(Discord)推送开关(实际缺省见 DEFAULT_WEBHOOK_TOGGLES,全关)。 */
+export type NotifWebhookToggles = Record<NotifKey, boolean>;
+
+/** 事件 kind → 设置开关键(webhook 与 in-app 共用同一套分类)。 */
+export function notifKeyOf(e: NotifyEvent): NotifKey {
+  switch (e.kind) {
+    case "recordStart":
+    case "recordReconnect":
+      return "live";
+    case "recordEnd":
+      return "recordEnd";
+    case "mergeDone":
+    case "burnDone":
+    case "uploadDone":
+      return "merge";
+    case "hubTaskStart":
+      return "hub";
+    case "error":
+      return "error";
+  }
+}

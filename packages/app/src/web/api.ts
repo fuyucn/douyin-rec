@@ -25,6 +25,7 @@ import * as workerStore from "../worker-store.js";
 import { rootHubDir, rootHubConfig } from "../paths.js";
 import { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "../timezone.js";
 import type { EventCenter } from "@drec/observability";
+import { resolveWebhookToggles, DEFAULT_WEBHOOK_TOGGLES, type NotifWebhookToggles } from "@drec/observability";
 import { resolveOutputDir } from "../paths.js";
 import type { Task, TaskStore } from "../store.js";
 import { resolveTaskCookies } from "../store.js";
@@ -267,6 +268,10 @@ export interface Api {
   setWebhook(input: { webhook?: string }): ApiResult;
   /** POST /api/webhook/test { content } — 把 content 发到已保存的全局 webhook(走真实 Discord POST 路径)。 */
   testWebhook(input: { content?: string }): Promise<ApiResult>;
+  /** GET /api/notif-settings — 每类提醒的 webhook 开关(缺省全关)。 */
+  getNotifSettings(): ApiResult;
+  /** PUT /api/notif-settings { live?, recordEnd?, merge?, hub?, error? } — 保存每类提醒的 webhook 开关。 */
+  setNotifSettings(input: Partial<NotifWebhookToggles>): ApiResult;
   /** GET /api/version — 应用版本号(0.0.0-{commit 后6位};About 页显示)。 */
   getVersion(): ApiResult;
   /** GET /api/mesio-path — mesio 二进制路径设置(settings.mesioPath)+ 留空时的实际默认(供 UI 占位符)。 */
@@ -661,6 +666,22 @@ export function makeApi(deps: ApiDeps): Api {
       // DISCORD_WEBHOOK 若设置会优先于此(见 cli-task globalHook)。
       store.setSetting("discordWebhook", (input.webhook ?? "").trim());
       return { status: 200, body: { webhook: store.getSetting("discordWebhook") ?? "" } };
+    },
+
+    /** GET /api/notif-settings — 每类提醒的 webhook(Discord)开关(设置表,缺省全关)。 */
+    getNotifSettings(): ApiResult {
+      return { status: 200, body: resolveWebhookToggles(store.getSetting("notifWebhookToggles")) };
+    },
+
+    /** PUT /api/notif-settings — 保存每类提醒的 webhook 开关(部分更新,未知键丢弃)。 */
+    setNotifSettings(input: Partial<NotifWebhookToggles>): ApiResult {
+      const current = resolveWebhookToggles(store.getSetting("notifWebhookToggles"));
+      const merged: NotifWebhookToggles = { ...current };
+      for (const k of Object.keys(DEFAULT_WEBHOOK_TOGGLES) as Array<keyof NotifWebhookToggles>) {
+        if (typeof input[k] === "boolean") merged[k] = input[k]!;
+      }
+      store.setSetting("notifWebhookToggles", JSON.stringify(merged));
+      return { status: 200, body: resolveWebhookToggles(store.getSetting("notifWebhookToggles")) };
     },
 
     getVersion(): ApiResult {

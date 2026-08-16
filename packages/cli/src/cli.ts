@@ -26,7 +26,7 @@ import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
 import type { Recorder, RecordOpts, NotifyEvent, Notifier, RemoteTaskSpec } from "@drec/core";
-import { makeNotifier } from "@drec/app";
+import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand } from "@drec/app";
 import type { HubStarter, UploadOpts } from "@drec/app";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
@@ -66,6 +66,22 @@ interface RecordCliOpts {
   danmuXmlMode?: string;
   reconnect?: string;
   config?: string;
+}
+
+/**
+ * 带类型开关的 Discord 通知器:serve 经 `DREC_WEBHOOK_TOGGLES` 注入到子进程环境,
+ * 关闭的类别不发 webhook(仍保留站内 @@DREC_ALERT@@ 通道)。手工跑 CLI 无 env → 全关。
+ */
+function toggledNotifier(
+  webhook: string | undefined,
+  toggles: NotifWebhookToggles = webhookTogglesFromEnv(),
+): Notifier {
+  const base = makeNotifier(webhook);
+  return {
+    notify: async (e: NotifyEvent): Promise<void> => {
+      if (shouldSendWebhook(toggles, e)) await base.notify(e);
+    },
+  };
 }
 
 const program = new Command();
@@ -149,7 +165,8 @@ program
     const webhook = (program.opts() as { discordWebhook?: string }).discordWebhook ?? cfg.discordWebhook ?? process.env.DISCORD_WEBHOOK;
     // 告警双通道:webhook(makeNotifier)+ error 事件额外打一行 @@DREC_ALERT@@{json} 到 stdout,
     // 供父进程(TaskManager)解析 → EventCenter → 站内 toast(webhook 已由 makeNotifier 发,父进程不再重发)。
-    const baseNotifier = makeNotifier(webhook);
+    const toggles = webhookTogglesFromEnv();
+    const baseNotifier = toggledNotifier(webhook, toggles);
     const notifier: Notifier = {
       notify: async (e: NotifyEvent): Promise<void> => {
         await baseNotifier.notify(e);
@@ -300,7 +317,7 @@ program
   .option("--merge-sessions", "把目录内全部会话按时间序拼成一片(断流重连合并用)")
   .option("--keep-time", "输出保留会话时间戳 {base}.mp4（默认剥成 {主播}_{日期}.mp4）")
   .action(async (o: { in: string; base?: string; keepTime?: boolean; mergeSessions?: boolean }) => {
-    const notifier = makeNotifier(webhookOf());
+    const notifier = toggledNotifier(webhookOf());
     try {
       const groups = groupSessions(readdirSync(o.in));
       const bases = o.base ? [o.base] : Object.keys(groups);
@@ -337,7 +354,7 @@ program
         await notifier.notify({ kind: "mergeDone", file: out });
       }
     } catch (e) {
-      await makeNotifier(webhookOf()).notify({ kind: "error", stage: "merge", message: (e as Error).message });
+      await toggledNotifier(webhookOf()).notify({ kind: "error", stage: "merge", message: (e as Error).message });
       throw e;
     }
   });
@@ -426,9 +443,9 @@ program
       await burn({ inputMp4: video, assText: ass, outMp4: out, fontsDir: FONTS_DIR, hwaccel: o.hwaccel as "auto",
         videoCodec: o.videoCodec, crf: o.crf, preset: o.preset, videoBitrate: o.videoBitrate });
       console.log(`[burn] 完成: ${out}`);
-      await makeNotifier(webhookOf()).notify({ kind: "burnDone", style: o.style, file: out });
+      await toggledNotifier(webhookOf()).notify({ kind: "burnDone", style: o.style, file: out });
     } catch (e) {
-      await makeNotifier(webhookOf()).notify({ kind: "error", stage: "burn", message: (e as Error).message });
+      await toggledNotifier(webhookOf()).notify({ kind: "error", stage: "burn", message: (e as Error).message });
       throw e;
     }
   });
@@ -455,9 +472,9 @@ program
         tag: o.tag, tid: Number(o.tid), public: o.public, desc: o.desc,
       });
       console.log(`[upload] 完成: ${bv}  https://www.bilibili.com/video/${bv}`);
-      await makeNotifier(webhookOf()).notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+      await toggledNotifier(webhookOf()).notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
     } catch (e) {
-      await makeNotifier(webhookOf()).notify({ kind: "error", stage: "upload", message: (e as Error).message });
+      await toggledNotifier(webhookOf()).notify({ kind: "error", stage: "upload", message: (e as Error).message });
       throw e;
     }
   });

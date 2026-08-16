@@ -26,13 +26,14 @@ import type {
   MergeJobDTO,
   EventsDTO,
   AppEventDTO,
+  NotifWebhookToggles,
   PlatformDTO,
   PlatformsDTO,
   WorkerDTO,
   WorkerTestResult,
   WorkerStatus,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -146,6 +147,11 @@ export const api = {
   setWebhook: (webhook: string): Promise<{ webhook: string }> => request("POST", "/api/webhook", { webhook }),
   testWebhook: (content: string): Promise<{ ok: boolean; code: number }> =>
     request("POST", "/api/webhook/test", { content }),
+
+  // ── 每类提醒的 webhook(Discord)开关 ────────────────────────────────────────
+  getNotifSettings: (): Promise<NotifWebhookToggles> => request("GET", "/api/notif-settings"),
+  setNotifSettings: (toggles: NotifWebhookToggles): Promise<NotifWebhookToggles> =>
+    request("PUT", "/api/notif-settings", toggles),
 
   // ── 版本号(About)──────────────────────────────────────────────────────────
   getVersion: (): Promise<{ version: string }> => request("GET", "/api/version"),

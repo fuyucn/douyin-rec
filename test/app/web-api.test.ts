@@ -705,6 +705,24 @@ describe("全局 webhook 端点", () => {
   });
 });
 
+describe("通知类型 webhook 开关端点", () => {
+  it("get 默认全关;put 持久化 + 回读;未知键/非布尔丢弃", () => {
+    const off = { live: false, recordEnd: false, merge: false, hub: false, error: false };
+    expect(api.getNotifSettings().body).toEqual(off);
+
+    const r = api.setNotifSettings({ live: true, error: true, merge: "yes" as never, future: true });
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ ...off, live: true, error: true });
+    expect(store.getSetting("notifWebhookToggles")).toContain('"live":true');
+    expect(store.getSetting("notifWebhookToggles")).not.toContain("future");
+    expect(api.getNotifSettings().body).toEqual({ ...off, live: true, error: true });
+
+    // 关闭某类后再回读,其余保持。
+    api.setNotifSettings({ error: false });
+    expect(api.getNotifSettings().body).toEqual({ ...off, live: true });
+  });
+});
+
 describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
   function apiWith(hubEnabled: boolean): { api: ReturnType<typeof makeApi>; cfg: string } {
     const cfg = join(mkdtempSync(join(tmpdir(), "wapi-")), "hub.config.json");

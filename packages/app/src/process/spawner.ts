@@ -15,6 +15,7 @@ import {
   type RecorderProcess,
 } from "./recorder-process.js";
 import type { Task } from "../store.js";
+import { WEBHOOK_TOGGLES_ENV, type NotifWebhookToggles } from "@drec/observability";
 
 /** Factory seam: Task → RecorderProcess. Mockable in tests. */
 export interface Spawner {
@@ -58,6 +59,12 @@ export interface NodeRecordSpawnerOpts {
    * 空/undefined → 不注入,引擎自行 resolveMesioBin(继承 env > <cwd>/bin/mesio > PATH)。
    */
   mesioPath?: () => string | undefined;
+  /**
+   * 每类提醒的 webhook 开关(getter,每次 spawn 时读取 settings 表)。经
+   * `DREC_WEBHOOK_TOGGLES` 环境变量注入子进程,子进程发 Discord 前按类型过滤。
+   * 省略=不注入,子进程全开(向后兼容)。
+   */
+  webhookToggles?: () => NotifWebhookToggles;
   /** Receives child stdout/stderr lines. */
   onLog?: (msg: string) => void;
   /** ms to wait after SIGTERM before SIGKILL. */
@@ -71,6 +78,7 @@ export class NodeRecordSpawner implements Spawner {
   private readonly cwd: string | undefined;
   private readonly webhook: string | (() => string | undefined) | undefined;
   private readonly mesioPath: (() => string | undefined) | undefined;
+  private readonly webhookToggles: (() => NotifWebhookToggles) | undefined;
   private readonly onLog: ((msg: string) => void) | undefined;
   private readonly killTimeoutMs: number | undefined;
 
@@ -80,6 +88,7 @@ export class NodeRecordSpawner implements Spawner {
     this.cwd = opts.cwd;
     this.webhook = opts.webhook;
     this.mesioPath = opts.mesioPath;
+    this.webhookToggles = opts.webhookToggles;
     this.onLog = opts.onLog;
     this.killTimeoutMs = opts.killTimeoutMs;
   }
@@ -92,7 +101,15 @@ export class NodeRecordSpawner implements Spawner {
     const args = [this.cliEntry, ...globals, ...buildRecordArgs(task)];
     // mesio 路径设置(若配置)→ 注入 MESIO_PATH;否则继承父 env(引擎自行兜底 bin/mesio)。
     const mesio = this.mesioPath?.()?.trim();
-    const env = mesio ? { ...process.env, MESIO_PATH: mesio } : undefined;
+    const toggles = this.webhookToggles?.();
+    const env =
+      mesio || toggles
+        ? {
+            ...process.env,
+            ...(mesio ? { MESIO_PATH: mesio } : {}),
+            ...(toggles ? { [WEBHOOK_TOGGLES_ENV]: JSON.stringify(toggles) } : {}),
+          }
+        : undefined;
     return new ChildRecorderProcess({
       taskId: task.id,
       command: this.command,

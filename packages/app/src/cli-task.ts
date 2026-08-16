@@ -34,8 +34,14 @@ export function resolveHubConfigJson(arg: string | undefined, store: TaskStore):
 import { RecordingSession } from "@drec/manager";
 import { createLogger, getEngine, getPlatform, platformForRoom } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
-import { makeNotifier } from "@drec/observability";
-import type { Recorder, RecordOpts } from "@drec/core";
+import {
+  makeNotifier,
+  resolveWebhookToggles,
+  shouldSendWebhook,
+  webhookTogglesFromEnv,
+  type NotifWebhookToggles,
+} from "@drec/observability";
+import type { Recorder, RecordOpts, NotifyEvent, Notifier } from "@drec/core";
 import { TaskDaemon } from "./daemon.js";
 import { TaskManager } from "./task-manager.js";
 import { TaskLogStore } from "@drec/observability";
@@ -75,7 +81,13 @@ export function buildSessionForTask(
   const danmuEnabled = !!task.danmu;
 
   const hook = webhook ?? store.getSetting("discordWebhook") ?? undefined;
-  const notifier = makeNotifier(hook);
+  // webhook 按类型开关过滤(serve 注入 DREC_WEBHOOK_TOGGLES;手工 task run 无 env = 全关)。
+  const toggles = webhookTogglesFromEnv();
+  const notifier: Notifier = {
+    notify: async (e: NotifyEvent): Promise<void> => {
+      if (shouldSendWebhook(toggles, e)) await makeNotifier(hook).notify(e);
+    },
+  };
 
   // Cookie resolution gated by the per-task useCookie toggle (resolveTaskCookies
   // is the single source of truth, also used by TaskManager.spawnFor).
@@ -415,6 +427,8 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         webhook: () => getWebhook() ?? store.getSetting("discordWebhook") ?? undefined,
         // mesio 路径设置:每次 spawn 读 settings.mesioPath(空=引擎兜底 bin/mesio)→ 注入 MESIO_PATH。
         mesioPath: () => store.getSetting("mesioPath") || undefined,
+        // webhook 类型开关:每次 spawn 读 settings → DREC_WEBHOOK_TOGGLES 注入子进程。
+        webhookToggles: () => resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
         onLog: (m) => console.log(m),
       });
       const manager = new TaskManager(store, spawner, {
@@ -491,6 +505,8 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         webhook: () => getWebhook() ?? store.getSetting("discordWebhook") ?? undefined,
         // mesio 路径设置:每次 spawn 读 settings.mesioPath(空=引擎兜底 bin/mesio)→ 注入 MESIO_PATH。
         mesioPath: () => store.getSetting("mesioPath") || undefined,
+        // webhook 类型开关:每次 spawn 读 settings → DREC_WEBHOOK_TOGGLES 注入子进程。
+        webhookToggles: () => resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
         onLog: (m) => console.log(m),
       });
       // Per-task log ring buffer shared with the manager so the Web 详情/日志
@@ -530,6 +546,8 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
           const t = taskId == null ? null : store.getTask(taskId);
           return resolveTaskWebhook(t ?? { webhook: null }, globalHook()) ?? undefined;
         },
+        // webhook 类型开关:EventCenter 发的 merge/upload/hub/error 等按设置过滤。
+        webhookToggles: () => resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
       });
       // hub 是否在本节点启用(master)?= --hub + 有 hubStarter + 能解析出 hub 配置。
       // slave(无 --hub)= false → 前端据此隐藏 Hub 页 / 显示 child node 提示。
