@@ -316,6 +316,17 @@ export class Reconciler {
 
         const { isNew } = this.ledger.upsertPending(b.streamKey, b.startMs);
 
+        // 新建 job(同一场只一次)→ 通知「hub 任务开始」(站内 toast + 全局 webhook)。
+        if (isNew) {
+          this.notify?.({
+            kind: "hubTaskStart",
+            streamKey: b.streamKey,
+            room: b.roomSlug,
+            workers: b.members.map((m) => m.workerId),
+            mode: cfg.uploadMode,
+          });
+        }
+
         // Don't re-enter an in-progress job unless it was retryable.
         if (!isNew && job && !RETRYABLE.has(job.state)) continue;
 

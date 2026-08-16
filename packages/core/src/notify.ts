@@ -9,6 +9,8 @@ export type NotifyEvent =
   | { kind: "mergeDone"; file: string }
   | { kind: "burnDone"; style: string; file: string }
   | { kind: "uploadDone"; bv: string; url: string }
+  // hub 编排开始处理一场直播(新建 job、pipeline 启动)。同一场只发一次。
+  | { kind: "hubTaskStart"; streamKey: string; room: string; workers: string[]; mode: "stage" | "upload" }
   | { kind: "error"; stage: string; message: string };
 
 export interface Notifier { notify(e: NotifyEvent): Promise<void>; }

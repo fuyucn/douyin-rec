@@ -145,6 +145,40 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
+  it("场景B2(hub 任务开始通知): 新建 job 发一次 hubTaskStart,后续对账不重复", async () => {
+    const ledger = freshLedger();
+    const rec = makeRec();
+    const t1 = makeTransport("node-1", [rec]);
+    const transports = new Map([["node-1", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const notify = vi.fn<(e: NotifyEvent) => void>();
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV_START"); return { state: "done", bv: "BV_START" }; },
+    );
+
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep, notify,
+    });
+
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    const starts = notify.mock.calls.map(([e]) => e).filter((e) => e.kind === "hubTaskStart");
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toEqual({
+      kind: "hubTaskStart",
+      streamKey: "douyin:test-room:2026-06-22",
+      room: "test-room",
+      workers: ["node-1"],
+      mode: "upload",
+    });
+
+    // 第二次对账:job 已 done → 不再新建、不重复通知。
+    await reconciler.reconcileAll();
+    expect(notify.mock.calls.filter(([e]) => e.kind === "hubTaskStart")).toHaveLength(1);
+    ledger.close();
+  });
+
   it("场景N(重连窗): 广播结束仍在 reconnectWindowMs 内 → 先不建 job/不跑 pipeline", async () => {
     const ledger = freshLedger();
     const endMs = Date.now() - 60_000; // 1 分钟前收播,10 分钟重连窗内
@@ -438,11 +472,11 @@ describe("Reconciler", () => {
     expect(spyRunPipeline).toHaveBeenCalledTimes(2); // 仍是 2
     expect(ledger.get(key)?.state).toBe("needs_manual");
     expect(ledger.get(key)?.fails).toBe(2);
-    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls.filter(([e]) => e.kind === "error")).toHaveLength(1);
     expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error", stage: "同步" }));
 
     await reconciler.reconcileAll();                 // 第4次 → 已 needs_manual(终态)→ 跳过,不重复通知
-    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls.filter(([e]) => e.kind === "error")).toHaveLength(1);
 
     errSpy.mockRestore();
     ledger.close();

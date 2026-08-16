@@ -9,12 +9,12 @@ import { showToast, type ToastType } from "./hooks";
 import { useT } from "./i18n";
 import { api, type AppEventDTO } from "../api/client";
 
-export type NotifKey = "live" | "recordEnd" | "merge" | "error";
+export type NotifKey = "live" | "recordEnd" | "merge" | "hub" | "error";
 /** 设置面板里展示的顺序(文案走 i18n notif.<key>)。 */
-export const NOTIF_KEYS: NotifKey[] = ["live", "recordEnd", "merge", "error"];
+export const NOTIF_KEYS: NotifKey[] = ["live", "recordEnd", "merge", "hub", "error"];
 
 const STORAGE = "drec.notif.toggles";
-const DEFAULTS: Record<NotifKey, boolean> = { live: true, recordEnd: true, merge: true, error: true };
+const DEFAULTS: Record<NotifKey, boolean> = { live: true, recordEnd: true, merge: true, hub: true, error: true };
 
 export function getToggles(): Record<NotifKey, boolean> {
   try {
@@ -63,6 +63,10 @@ function describe(e: AppEventDTO, t: T): { key: NotifKey; message: string; type:
       return { key: "merge", message: t("notif.evBurn", { file: baseName(s("file")) }), type: "success" };
     case "uploadDone":
       return { key: "merge", message: t("notif.evUpload", { bv: s("bv") }), type: "success" };
+    case "hubTaskStart": {
+      const workers = Array.isArray(ev.workers) ? (ev.workers as unknown[]).length : 0;
+      return { key: "hub", message: t("notif.evHubStart", { room: s("room"), count: workers }), type: "info" };
+    }
     case "error":
       return { key: "error", message: t("notif.evError", { stage: s("stage"), message: s("message") }), type: "error" };
     default:

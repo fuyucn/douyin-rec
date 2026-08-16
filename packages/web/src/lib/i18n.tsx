@@ -125,10 +125,10 @@ const DICT = {
     },
     notif: {
       title: "站内提醒", desc: "选择哪些事件在网页内弹出提醒。Discord 推送由各任务的 Webhook 单独控制，不受此处影响。",
-      live: "开播 / 开始录制", recordEnd: "录制完成 / 收播", merge: "合成 / 烧录 / 上传完成", error: "出错",
+      live: "开播 / 开始录制", recordEnd: "录制完成 / 收播", merge: "合成 / 烧录 / 上传完成", hub: "Hub 任务开始", error: "出错",
       evLive: "开播 · 开始录制：{anchor}", evRecordEnd: "录制结束{reason}：{anchor}", evMerge: "合成完成：{file}",
       evReconnect: "直播中断 {sec}s 后已重连：{anchor}",
-      evBurn: "烧录完成：{file}", evUpload: "上传完成：{bv}", evError: "出错[{stage}]：{message}",
+      evBurn: "烧录完成：{file}", evUpload: "上传完成：{bv}", evHubStart: "Hub 任务开始：{room}（{count} 个节点）", evError: "出错[{stage}]：{message}",
     },
     qr: {
       title: "抖音扫码登录", desc: "用抖音 App 扫码，确认后自动获取登录 Cookie", alt: "二维码", close: "关闭",
@@ -300,10 +300,10 @@ const DICT = {
     },
     notif: {
       title: "In-app notifications", desc: "Choose which events pop a toast in the web UI. Discord pushes are controlled per-task by each Webhook, unaffected here.",
-      live: "Live start / recording", recordEnd: "Recording done", merge: "Merge / burn / upload done", error: "Errors",
+      live: "Live start / recording", recordEnd: "Recording done", merge: "Merge / burn / upload done", hub: "Hub task started", error: "Errors",
       evLive: "Live · recording started: {anchor}", evRecordEnd: "Recording ended{reason}: {anchor}", evMerge: "Merge done: {file}",
       evReconnect: "Reconnected after {sec}s interruption: {anchor}",
-      evBurn: "Burn done: {file}", evUpload: "Upload done: {bv}", evError: "Error[{stage}]: {message}",
+      evBurn: "Burn done: {file}", evUpload: "Upload done: {bv}", evHubStart: "Hub task started: {room} ({count} nodes)", evError: "Error[{stage}]: {message}",
     },
     qr: {
       title: "Douyin QR Login", desc: "Scan with the Douyin app; the cookie is fetched after you confirm.", alt: "QR code", close: "Close",
