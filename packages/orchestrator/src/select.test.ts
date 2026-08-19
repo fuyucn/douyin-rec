@@ -97,4 +97,28 @@ describe("覆盖度选优", () => {
     expect(s.clean).toBe(false); // s1 内部断流超阈值 → 该 worker 不完整
     expect(s.winner?.workerId).toBe("A");
   });
+  it("单会话只晚开录约30s vs 另一台断链多会话 → 选连续那台,并按 worker 聚合指标", () => {
+    // 2026-08-19 一勺小苏打: VPS 连续 6742s, local 断成 3 段。旧 30s 首尾容差会把 VPS 判成没覆盖。
+    const local1Start = 1_787_150_715_170;
+    const b: Broadcast = {
+      streamKey: "k", platform: "douyin", roomSlug: "411", startMs: local1Start,
+      members: [
+        { workerId: "local", rec: rec({ sessionBase: "l1", durationSec: 2366.308, startMs: local1Start, endMs: 1_787_153_147_756, totalGapSec: 0 }) },
+        { workerId: "vps2", rec: rec({ sessionBase: "v1", durationSec: 6742.328, startMs: 1_787_150_745_181, endMs: 1_787_157_491_724, totalGapSec: 0 }) },
+        { workerId: "local", rec: rec({ sessionBase: "l2", durationSec: 2938.023, startMs: 1_787_153_155_068, endMs: 1_787_156_092_955, totalGapSec: 0 }) },
+        { workerId: "local", rec: rec({ sessionBase: "l3", durationSec: 1322.31, startMs: 1_787_156_169_422, endMs: 1_787_157_491_732, totalGapSec: 0 }) },
+      ],
+    };
+    const s = selectWinner(b, 30);
+    expect(s.clean).toBe(true);
+    expect(s.winner?.workerId).toBe("vps2");
+    expect(s.winnerMembers).toHaveLength(1);
+    expect(s.perNode).toHaveLength(2);
+    const local = s.perNode.find((n) => n.workerId === "local");
+    const vps = s.perNode.find((n) => n.workerId === "vps2");
+    expect(local?.durationSec).toBeCloseTo(6626.641);
+    expect(vps?.durationSec).toBeCloseTo(6742.328);
+    expect(vps?.totalGapSec).toBe(0);
+    expect(local?.totalGapSec).toBeGreaterThan(70);
+  });
 });

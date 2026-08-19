@@ -177,7 +177,7 @@ async function runPipelineInner(
 
   if (!selection.winner) {
     jlog(`选优失败:${presentMembers.length ? "no winner" : "无可用成员(文件均缺失)"}`);
-    ledger.setState(streamKey, "failed", { error: presentMembers.length ? "no winner" : "无可用成员(文件均缺失)" });
+    ledger.markFailed(streamKey, presentMembers.length ? "no winner" : "无可用成员(文件均缺失)");
     return { state: "failed" };
   }
 
@@ -188,9 +188,7 @@ async function runPipelineInner(
   // 落库选优候选明细(coverage/时长/起止/缺口 + 谁胜出),供事后复盘"为什么这台赢"。
   ledger.recordCandidates(streamKey, selection.perNode, winner.workerId);
 
-  // 没有任何 worker 完整录全(所有节点都断流过)→ 直接中断 + 通知,**绝不删源**(保护数据,
-  // 留人工对齐拼接)。跨会话自动拼接是 followup(见 docs/multi-node-sync-followups.md),暂不自动做。
-  // selection.clean=true ⇔ 存在「单会话且 gap≤阈值」的完整 worker;false ⇔ 都断流。
+  // 没有任何 worker 盖住整场 → 中断 + 通知,绝不删源。clean=true 表示至少一台内部无超阈值缺口且首尾包住并集。
   if (!selection.clean) {
     jlog(`所有节点均断流未录全 → 中断留人工(绝不删源)`);
     ledger.setState(streamKey, "needs_manual", { winnerWorker: winner.workerId });
@@ -272,7 +270,7 @@ async function runPipelineInner(
       ? ledger.getNodeState(streamKey, result.failed[0])?.error ?? `节点失败: ${result.failed.join(",")}`
       : `节点被阻断: ${result.blocked.join(",")}`;
     jlog(`pipeline 节点失败: failed=${result.failed.join(",")} blocked=${result.blocked.join(",")}`);
-    ledger.setState(streamKey, "failed", { error: `${errText} [${[...result.failed, ...result.blocked].join(",")}]` });
+    ledger.markFailed(streamKey, `${errText} [${[...result.failed, ...result.blocked].join(",")}]`);
     notify({ kind: "error", stage: "同步", message: `${streamKey} 节点失败: ${errText}` });
     return { state: "failed", bv: ledger.get(streamKey)?.bv };
   }

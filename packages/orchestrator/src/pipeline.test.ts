@@ -371,6 +371,7 @@ describe("runPipeline", () => {
 
     const result = await runPipeline(broadcast, deps);
     expect(result.state).toBe("failed");
+    expect(deps.ledger.get(broadcast.streamKey)?.fails).toBe(1);
     expect(deps.uploadPlain).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
@@ -465,6 +466,7 @@ describe("runPipeline", () => {
       expect(r.state).toBe("failed");
       expect(deps.appendGroup).not.toHaveBeenCalled();
       expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("failed");
+      expect(deps.ledger.get(broadcast.streamKey)?.fails).toBe(1);
       deps.ledger.close();
     });
   });
@@ -639,6 +641,7 @@ describe("runPipeline", () => {
       deps.ledger.upsertPending(b.streamKey);
       const r = await runPipeline(b, deps);
       expect(r.state).toBe("failed");
+      expect(deps.ledger.get(b.streamKey)?.fails).toBe(1);
       expect(deps.ledger.get(b.streamKey)?.bv).toBe("BV123"); // P1 成功即落库(即使随后 burn 失败)
       // 模拟 reconciler 重试:同 ledger 再跑 → 有 bv → 续跑分支,绝不重传 P1
       deps.uploadPlain.mockClear();
