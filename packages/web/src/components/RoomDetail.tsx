@@ -1,7 +1,8 @@
-import { Pencil, Trash2 } from "lucide-react";
+import { Pencil, Play, Trash2 } from "lucide-react";
 import { useCallback, useState, type ReactNode } from "react";
 import { api, type HubJobDTO, type HubRuleDTO, type WorkerDTO } from "../api/client";
-import { RunCard, JobLogDialog } from "./HubJobs";
+import { RunCard, JobLogDialog, runDate } from "./HubJobs";
+import { Dialog } from "./Dialog";
 import { Button, IconButton } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Switch } from "./Switch";
@@ -12,7 +13,13 @@ import { useT } from "../lib/i18n";
 import type { FlowCfg } from "./flow-build";
 
 const PAGE = 20;
+const CUSTOM_DATE = "__custom__";
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
+
+function todayYmd(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 
 /** 产物 chips(plain 恒有;danmu/livechat 默认开,仅显式 false 才去掉)。 */
 function outputChips(r: HubRuleDTO): string[] {
@@ -50,6 +57,11 @@ export function RoomDetail({
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [runOpen, setRunOpen] = useState(false);
+  const [runKey, setRunKey] = useState(CUSTOM_DATE);
+  const [runCustom, setRunCustom] = useState(todayYmd());
+  const [runWorker, setRunWorker] = useState("");
+  const [runBusy, setRunBusy] = useState(false);
 
   const refresh = async (): Promise<void> => {
     try {
@@ -107,6 +119,45 @@ export function RoomDetail({
       toast(errMessage(e), "error");
     }
   }, [t, toast]);
+  const stopJob = async (streamKey: string): Promise<void> => {
+    try {
+      await api.stopHubJob(streamKey);
+      toast(t("hub.jobs.stopped"), "info");
+      void refresh();
+    } catch (e) {
+      toast(errMessage(e), "error");
+    }
+  };
+  const runNow = async (streamKey: string, winnerWorker?: string): Promise<void> => {
+    try {
+      await api.runHubJob({ streamKey, winnerWorker });
+      toast(t("hub.jobs.started"), "info");
+      void refresh();
+    } catch (e) {
+      toast(errMessage(e), "error");
+    }
+  };
+  const openRun = (): void => {
+    setRunKey(runs[0]?.streamKey ?? CUSTOM_DATE);
+    setRunCustom(runs[0] ? runDate(runs[0].streamKey).slice(0, 10) : todayYmd());
+    setRunWorker("");
+    setRunOpen(true);
+  };
+  const submitRun = async (): Promise<void> => {
+    const date = runCustom.trim();
+    const key = runKey === CUSTOM_DATE ? `${rule.platform}:${rule.roomSlug}:${date}` : runKey;
+    if (runKey === CUSTOM_DATE && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      toast(t("hub.jobs.runNowDateHint"), "error");
+      return;
+    }
+    setRunBusy(true);
+    try {
+      await runNow(key, runWorker || undefined);
+      setRunOpen(false);
+    } finally {
+      setRunBusy(false);
+    }
+  };
 
   // 参与 worker:rule.workers 有值=选中的这些;缺省/空=全部节点。
   const participating = rule.workers && rule.workers.length > 0 ? rule.workers.map(workerName) : null;
@@ -122,6 +173,10 @@ export function RoomDetail({
           <p className="text-muted-soft text-[13px] mt-1 font-mono break-all">{rule.platform} · {roomId(rule.room)}</p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          <Button small variant="secondary" onClick={openRun}>
+            <Play className="w-3.5 h-3.5" />
+            {t("hub.jobs.runNow")}
+          </Button>
           <Switch checked={rule.enabled} onCheckedChange={() => void toggle()} name={`hub-detail-${rule.key}`} />
           <IconButton title={t("hub.common.edit")} onClick={() => setEditOpen(true)}>
             <Pencil className="w-4 h-4" />
@@ -179,6 +234,8 @@ export function RoomDetail({
               expanded={isExpanded(j.streamKey)}
               onToggle={toggleRun}
               onRetry={retryNode}
+              onStop={stopJob}
+              onRunNow={(key) => void runNow(key)}
             />
           ))}
           {runs.length < total && (
@@ -193,6 +250,47 @@ export function RoomDetail({
 
       <HubRuleDialog open={editOpen} onClose={() => setEditOpen(false)} rule={rule} onSaved={() => { onChanged(); void refresh(); }} />
       <JobLogDialog logKey={logKey} onClose={() => setLogKey(null)} />
+      <Dialog
+        open={runOpen}
+        onClose={() => !runBusy && setRunOpen(false)}
+        title={t("hub.jobs.runNowTitle")}
+        description={t("hub.jobs.runNowDesc")}
+      >
+        <div className="flex flex-col gap-4">
+          <div>
+            <label className="field-label">{t("hub.jobs.runNowDate")}</label>
+            <select className="input" value={runKey} onChange={(e) => setRunKey(e.target.value)}>
+              {runs.map((j) => (
+                <option key={j.streamKey} value={j.streamKey}>{runDate(j.streamKey)}</option>
+              ))}
+              <option value={CUSTOM_DATE}>{t("hub.jobs.runNowCustom")}</option>
+            </select>
+          </div>
+          {runKey === CUSTOM_DATE && (
+            <div>
+              <label className="field-label">{t("hub.jobs.runNowDateHint")}</label>
+              <input className="input" value={runCustom} onChange={(e) => setRunCustom(e.target.value)} placeholder={todayYmd()} />
+            </div>
+          )}
+          <div>
+            <label className="field-label">{t("hub.jobs.runNowWorker")}</label>
+            <select className="input" value={runWorker} onChange={(e) => setRunWorker(e.target.value)}>
+              <option value="">{t("hub.jobs.runNowWorkerAuto")}</option>
+              {(rule.workers && rule.workers.length > 0 ? workers.filter((w) => rule.workers!.includes(w.id)) : workers).map((w) => (
+                <option key={w.id} value={w.id}>{w.name || w.id}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="secondary" disabled={runBusy} onClick={() => setRunOpen(false)}>
+              {t("hub.common.cancel")}
+            </Button>
+            <Button type="button" loading={runBusy} disabled={runBusy} onClick={() => void submitRun()}>
+              {t("hub.jobs.runNow")}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
       <ConfirmDialog
         open={confirmDelete}
         title={t("hub.common.deleteRuleConfirmTitle")}

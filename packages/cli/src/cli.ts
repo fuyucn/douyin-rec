@@ -25,7 +25,7 @@ import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
-import type { Recorder, RecordOpts, NotifyEvent, Notifier, RemoteTaskSpec } from "@drec/core";
+import { isJobAbort, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand } from "@drec/app";
 import type { HubStarter, UploadOpts } from "@drec/app";
@@ -495,6 +495,12 @@ const requestHubSync = (): void => {
 let hubRetryNode:
   | ((streamKey: string, node: WorkflowNodeKey, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>)
   | undefined;
+let hubStopJob:
+  | ((streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>)
+  | undefined;
+let hubRunNow:
+  | ((opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>)
+  | undefined;
 /** web API → hubStarter.retryNode 的统一入口(hub 未启动 → 400)。 */
 const requestHubRetryNode = async (
   streamKey: string,
@@ -504,10 +510,24 @@ const requestHubRetryNode = async (
   if (!hubRetryNode) return { ok: false, error: "hub 未启动", code: 400 };
   return hubRetryNode(streamKey, node as WorkflowNodeKey, opts);
 };
+const requestHubStopJob = async (
+  streamKey: string,
+): Promise<{ ok: boolean; error?: string; code?: number }> => {
+  if (!hubStopJob) return { ok: false, error: "hub 未启动", code: 400 };
+  return hubStopJob(streamKey);
+};
+const requestHubRunNow = async (
+  opts: { streamKey: string; winnerWorker?: string; wait?: boolean },
+): Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }> => {
+  if (!hubRunNow) return { ok: false, error: "hub 未启动", code: 400 };
+  return hubRunNow(opts);
+};
 
 const hubStarter: HubStarter = {
   requestSyncTasks: requestHubSync,
   retryNode: requestHubRetryNode,
+  stopJob: requestHubStopJob,
+  runNow: requestHubRunNow,
   async start(opts) {
     const {
       registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport,
@@ -604,7 +624,7 @@ const hubStarter: HubStarter = {
     const defaultTag = uploadDefaults.tag ?? "直播,录像";
     const defaultTid = uploadDefaults.tid ?? 21;
 
-    const { exec } = await import("node:child_process");
+    const { spawn } = await import("node:child_process");
     const pool = new ResourcePool({
       maxCpuParallel: hubCfg.resources?.maxCpuParallel ?? 1,
       maxNetParallel: hubCfg.resources?.maxNetParallel ?? 1,
@@ -617,10 +637,18 @@ const hubStarter: HubStarter = {
       pool,
       // 返回 stdout+stderr(各截尾 64KB,biliup 输出可达 MB 级)→ pipeline 摘尾写进该场 job.log。
       sh: (cmd: string) => new Promise<string>((res, rej) => {
-        exec(cmd, { maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
-          const tail = (s: string): string => (s.length > 65536 ? s.slice(-65536) : s);
-          if (err) rej(new Error(`${err.message}\n${tail(String(stderr ?? ""))}`));
-          else res(`${tail(String(stdout ?? ""))}\n${tail(String(stderr ?? ""))}`);
+        // detached 进程组:停任务时 kill(-pid) 能带走 ffmpeg 孙进程;其它 spawn 不建组。
+        const p = spawn("sh", ["-c", cmd], { detached: true });
+        registerChild(p, { processGroup: true });
+        const tail = (s: string): string => (s.length > 65536 ? s.slice(-65536) : s);
+        let stdout = "", stderr = "";
+        p.stdout?.on("data", (b) => { stdout = tail(stdout + String(b)); });
+        p.stderr?.on("data", (b) => { stderr = tail(stderr + String(b)); });
+        p.on("error", rej);
+        p.on("close", (code) => {
+          try { throwIfAborted(); } catch (e) { rej(e); return; }
+          if (code !== 0) rej(new Error(`sh rc=${code}\n${stderr}`));
+          else res(`${stdout}\n${stderr}`);
         });
       }),
       // 穿插上传接缝:pipeline 先 fire uploadPlain(网络)与烧录并行,再 await BV 后串行 appendGroup。
@@ -803,49 +831,66 @@ const hubStarter: HubStarter = {
         );
         if (appended) return { ok: false, error: `已建稿(${job.bv})且已有分 P,不能重跑 P1(会重复投稿)`, code: 409 };
       }
-      return pool.withStreamLock(streamKey, async () => {
-        ledger.setState(streamKey, "retrying");
-        const cfg = resolveCfg(platform, roomSlug);
-        if (!cfg) {
-          ledger.setState(streamKey, "failed", { error: `房间未开 hub: ${streamKey}` });
-          return { ok: false, error: `房间未开 hub: ${streamKey}`, code: 400 };
-        }
-        ledger.backfillNodeStates(streamKey);
-        const products = deriveStageProducts(stageSub);
-        if (!products) {
-          ledger.setState(streamKey, "failed", { error: `stage 产物缺失,无法重跑: ${stageSub}` });
-          return { ok: false, error: `stage 产物缺失,无法重跑: ${stageSub}`, code: 409 };
-        }
-        const workflow = buildWorkflow({
-          streamKey, stageSub, products, deps: pipelineDeps, cfg, log: opts.log,
-          willUpload: cfg.uploadMode === "upload",
-          burnDanmu: cfg.steps?.burnDanmu !== false,
-          burnLivechat: cfg.steps?.burnLivechat !== false,
-          mergeSegments: 0,
-        });
-        const r = await runWorkflowNodes({
-          streamKey, nodes: workflow.nodes, edges: workflow.edges, ctx: workflow.ctx,
-          pool, forceRetry: new Set<WorkflowNodeKey>([node]),
-        });
-        if (r.ok) {
-          if (cfg.uploadMode === "upload") {
-            const bv = ledger.get(streamKey)?.bv ?? "";
-            ledger.markDone(streamKey, bv);
-            if (bv) opts.onEvent({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
-          } else {
-            ledger.setState(streamKey, "needs_manual");
+      return runWithJob(streamKey, async () => {
+        try {
+          return await pool.withStreamLock(streamKey, async () => {
+            throwIfAborted();
+            ledger.setState(streamKey, "retrying");
+            const cfg = resolveCfg(platform, roomSlug);
+            if (!cfg) {
+              ledger.setState(streamKey, "failed", { error: `房间未开 hub: ${streamKey}` });
+              return { ok: false, error: `房间未开 hub: ${streamKey}`, code: 400 };
+            }
+            ledger.backfillNodeStates(streamKey);
+            const products = deriveStageProducts(stageSub);
+            if (!products) {
+              ledger.setState(streamKey, "failed", { error: `stage 产物缺失,无法重跑: ${stageSub}` });
+              return { ok: false, error: `stage 产物缺失,无法重跑: ${stageSub}`, code: 409 };
+            }
+            const workflow = buildWorkflow({
+              streamKey, stageSub, products, deps: pipelineDeps, cfg, log: opts.log,
+              willUpload: cfg.uploadMode === "upload",
+              burnDanmu: cfg.steps?.burnDanmu !== false,
+              burnLivechat: cfg.steps?.burnLivechat !== false,
+              mergeSegments: 0,
+            });
+            const r = await runWorkflowNodes({
+              streamKey, nodes: workflow.nodes, edges: workflow.edges, ctx: workflow.ctx,
+              pool, forceRetry: new Set<WorkflowNodeKey>([node]),
+            });
+            if (r.ok) {
+              if (cfg.uploadMode === "upload") {
+                const bv = ledger.get(streamKey)?.bv ?? "";
+                ledger.markDone(streamKey, bv);
+                if (bv) opts.onEvent({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+              } else {
+                ledger.setState(streamKey, "needs_manual");
+              }
+              return { ok: true };
+            }
+            const errText = r.failed.length
+              ? ledger.getNodeState(streamKey, r.failed[0])?.error ?? `节点失败: ${r.failed.join(",")}`
+              : `节点被阻断: ${r.blocked.join(",")}`;
+            if (errText === USER_STOP || r.blocked.some((k) => ledger.getNodeState(streamKey, k)?.error === USER_STOP)) {
+              ledger.setState(streamKey, "needs_manual", { error: USER_STOP });
+              return { ok: false, error: USER_STOP, code: 409 };
+            }
+            ledger.setState(streamKey, "failed", { error: errText });
+            return { ok: false, error: errText, code: 500 };
+          });
+        } catch (e) {
+          if (isJobAbort(e)) {
+            ledger.setState(streamKey, "needs_manual", { error: USER_STOP });
+            return { ok: false, error: USER_STOP, code: 409 };
           }
-          return { ok: true };
+          throw e;
         }
-        const errText = r.failed.length
-          ? ledger.getNodeState(streamKey, r.failed[0])?.error ?? `节点失败: ${r.failed.join(",")}`
-          : `节点被阻断: ${r.blocked.join(",")}`;
-        ledger.setState(streamKey, "failed", { error: errText });
-        return { ok: false, error: errText, code: 500 };
       });
     };
     hubRetryNode = (streamKey: string, node: WorkflowNodeKey, o?: { force?: boolean }) =>
       retryNode(streamKey, node, o?.force === true);
+    hubStopJob = (streamKey: string) => reconciler.stopJob(streamKey);
+    hubRunNow = (opts) => reconciler.runNow(opts);
 
     const stop = startHub({
       tasks: () => opts.store.listTasks(),
@@ -863,6 +908,8 @@ const hubStarter: HubStarter = {
       stop();
       hubSyncTasks = undefined;
       hubRetryNode = undefined;
+      hubStopJob = undefined;
+      hubRunNow = undefined;
     };
   },
   async testWorker(cfg) {

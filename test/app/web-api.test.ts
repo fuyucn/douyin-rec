@@ -853,6 +853,81 @@ describe("hub 单节点重跑端点", () => {
   });
 });
 
+describe("hub 停止 / 立即执行端点", () => {
+  it("注入 stopJob → 200 + 透传结果", async () => {
+    const fake = vi.fn(async (key: string) => ({ ok: true, streamKey: key }));
+    const a = makeApi({
+      store,
+      manager,
+      syncDbPath: join(mkdtempSync(join(tmpdir(), "stop-")), "x-sync.db"),
+      stopJob: fake,
+    });
+    const r = await a.stopHubJob("douyin:123:2026-08-10");
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ ok: true, streamKey: "douyin:123:2026-08-10" });
+    expect(fake).toHaveBeenCalledWith("douyin:123:2026-08-10");
+  });
+  it("stopJob 失败 → 透传 code", async () => {
+    const a = makeApi({
+      store,
+      manager,
+      syncDbPath: join(mkdtempSync(join(tmpdir(), "stop-")), "x-sync.db"),
+      stopJob: async () => ({ ok: false, error: "已完成,不能停止", code: 409 }),
+    });
+    const r = await a.stopHubJob("douyin:123:2026-08-10");
+    expect(r.status).toBe(409);
+    expect((r.body as { error?: string }).error).toContain("已完成");
+  });
+  it("未注入 stopJob/syncDbPath → 400 hub 未启用", async () => {
+    const a = makeApi({ store, manager });
+    const r = await a.stopHubJob("douyin:123:2026-08-10");
+    expect(r.status).toBe(400);
+    expect((r.body as { error?: string }).error).toContain("hub 未启用");
+  });
+  it("注入 runNow → 默认 202,wait/winnerWorker 透传", async () => {
+    const fake = vi.fn(async (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) =>
+      ({ ok: true, code: opts.wait ? 200 : 202, streamKey: opts.streamKey }));
+    const a = makeApi({
+      store,
+      manager,
+      syncDbPath: join(mkdtempSync(join(tmpdir(), "run-")), "x-sync.db"),
+      runNow: fake,
+    });
+    const r = await a.runHubJob({ streamKey: "douyin:123:2026-08-10", winnerWorker: "vps", wait: false });
+    expect(r.status).toBe(202);
+    expect(r.body).toEqual({ ok: true, code: 202, streamKey: "douyin:123:2026-08-10" });
+    expect(fake).toHaveBeenCalledWith({ streamKey: "douyin:123:2026-08-10", winnerWorker: "vps", wait: false });
+  });
+  it("runNow wait=true → 200", async () => {
+    const a = makeApi({
+      store,
+      manager,
+      syncDbPath: join(mkdtempSync(join(tmpdir(), "run-")), "x-sync.db"),
+      runNow: async () => ({ ok: true, code: 200, streamKey: "douyin:123:2026-08-10" }),
+    });
+    const r = await a.runHubJob({ streamKey: "douyin:123:2026-08-10", wait: true });
+    expect(r.status).toBe(200);
+  });
+  it("缺 streamKey → 400 且不调 runNow", async () => {
+    const fake = vi.fn(async () => ({ ok: true, code: 202 }));
+    const a = makeApi({
+      store,
+      manager,
+      syncDbPath: join(mkdtempSync(join(tmpdir(), "run-")), "x-sync.db"),
+      runNow: fake,
+    });
+    const r = await a.runHubJob({});
+    expect(r.status).toBe(400);
+    expect(fake).not.toHaveBeenCalled();
+  });
+  it("未注入 runNow/syncDbPath → 400 hub 未启用", async () => {
+    const a = makeApi({ store, manager });
+    const r = await a.runHubJob({ streamKey: "douyin:123:2026-08-10" });
+    expect(r.status).toBe(400);
+    expect((r.body as { error?: string }).error).toContain("hub 未启用");
+  });
+});
+
 describe("hub rules workers 字段(校验 + 往返)", () => {
   function apiWithHubDir(): ReturnType<typeof makeApi> {
     const hubDir = mkdtempSync(join(tmpdir(), "hubrules-"));

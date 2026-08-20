@@ -219,6 +219,10 @@ export interface HubStarter {
   requestSyncTasks?: () => void;
   /** 手动重跑单个 workflow 节点(hub 未启用 → web API 返回 400)。 */
   retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
+  /** 停一场后处理(rsync/ffmpeg/biliup),不动录制。hub 未启用 → web API 返回 400。 */
+  stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
+  /** 立刻跑一场已有录像的后处理(跳过 settle / 断流窗)。hub 未启用 → web API 返回 400。 */
+  runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
 }
 
 /** Build the `task` command group. Pass a getWebhook() that reads program-level opts/env. */
@@ -561,6 +565,8 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         probeAllWorkers: hubEnabled ? hubStarter?.probeAllWorkers : undefined,
         requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
         retryNode: hubEnabled ? hubStarter?.retryNode : undefined,
+        stopJob: hubEnabled ? hubStarter?.stopJob : undefined,
+        runNow: hubEnabled ? hubStarter?.runNow : undefined,
         log: (m) => console.log(m),
       });
 

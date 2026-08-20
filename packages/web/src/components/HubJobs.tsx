@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useState, type ReactNode } from "react";
-import { Check, ChevronDown, FileText, Loader2, Minus, RotateCcw, TriangleAlert, X } from "lucide-react";
+import { Check, ChevronDown, FileText, Loader2, Minus, Play, RotateCcw, Square, TriangleAlert, X } from "lucide-react";
 import { ReactFlow, Background, Controls, Handle, Position, type Node, type Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api, type HubJobDTO } from "../api/client";
@@ -370,6 +370,8 @@ export function RunCard({
   expanded,
   onToggle,
   onRetry,
+  onStop,
+  onRunNow,
 }: {
   job: HubJobDTO;
   onOpenLog: (key: string) => void;
@@ -381,6 +383,10 @@ export function RunCard({
   onToggle?: (streamKey: string) => void;
   /** 单节点重跑:force=true 表示已二次确认(上传类节点)。省略 = 流程图不显示重跑按钮。 */
   onRetry?: (streamKey: string, node: string, force?: boolean) => Promise<void> | void;
+  /** 停这场后处理(进行中才显示;无确认)。 */
+  onStop?: (streamKey: string) => Promise<void> | void;
+  /** 用这场 streamKey 立刻再跑(failed / needs_manual 才显示)。 */
+  onRunNow?: (streamKey: string) => Promise<void> | void;
 }): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
@@ -422,17 +428,41 @@ export function RunCard({
             )}
           </span>
         </div>
-        {job.hasLog && (
-          <IconButton
-            title={t("hub.jobs.viewLog")}
-            onClick={(e) => {
-              e.stopPropagation();
-              onOpenLog(job.streamKey);
-            }}
-          >
-            <FileText className="w-4 h-4" />
-          </IconButton>
-        )}
+        <div className="flex items-center gap-1 shrink-0">
+          {!TERMINAL.has(job.state) && onStop && (
+            <IconButton
+              title={t("hub.jobs.stopTitle")}
+              onClick={(e) => {
+                e.stopPropagation();
+                void onStop(job.streamKey);
+              }}
+            >
+              <Square className="w-3.5 h-3.5" />
+            </IconButton>
+          )}
+          {(job.state === "failed" || job.state === "needs_manual") && onRunNow && (
+            <IconButton
+              title={t("hub.jobs.rerun")}
+              onClick={(e) => {
+                e.stopPropagation();
+                void onRunNow(job.streamKey);
+              }}
+            >
+              <Play className="w-3.5 h-3.5" />
+            </IconButton>
+          )}
+          {job.hasLog && (
+            <IconButton
+              title={t("hub.jobs.viewLog")}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenLog(job.streamKey);
+              }}
+            >
+              <FileText className="w-4 h-4" />
+            </IconButton>
+          )}
+        </div>
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-2 text-[12px] text-muted">
         {job.winnerWorker && <span>{t("hub.jobs.selected", { worker: workerName ? workerName(job.winnerWorker) : job.winnerWorker })}</span>}

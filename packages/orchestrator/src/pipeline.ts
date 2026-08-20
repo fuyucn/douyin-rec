@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import type { NotifyEvent, ScopedLogger } from "@drec/core";
+import { isJobAbort, runWithJob, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/app";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
@@ -106,16 +106,26 @@ export async function runPipeline(
     ? (msg: string): void => injected.info(msg)
     : makeJobLog(path.join(deps.cfg.stageDir, sanitizeKey(b.streamKey)));
   jlog(`=== pipeline start ${b.streamKey} 成员=[${b.members.map((m) => m.workerId).join(",")}] mode=${deps.cfg.uploadMode} ===`);
-  try {
-    // 同一 streamKey 的 pipeline 与手动 retryNode 共享流锁:reconciler 周期对账和
-    // 用户单节点重跑永不并发操作同一场(防止 select/pull 与 retry 同时改文件/状态)。
-    const r = await (deps.pool ?? new ResourcePool()).withStreamLock(b.streamKey, () => runPipelineInner(b, deps, jlog));
-    jlog(`=== pipeline end: ${r.state}${r.bv ? ` bv=${r.bv}` : ""} ===`);
-    return r;
-  } catch (e) {
-    jlog(`!!! pipeline 抛错(reconciler 将标 failed): ${String((e as Error)?.stack ?? e)}`);
-    throw e;
-  }
+  return runWithJob(b.streamKey, async () => {
+    try {
+      // 同一 streamKey 的 pipeline 与手动 retryNode 共享流锁:reconciler 周期对账和
+      // 用户单节点重跑永不并发操作同一场(防止 select/pull 与 retry 同时改文件/状态)。
+      const r = await (deps.pool ?? new ResourcePool()).withStreamLock(b.streamKey, () => {
+        throwIfAborted();
+        return runPipelineInner(b, deps, jlog);
+      });
+      jlog(`=== pipeline end: ${r.state}${r.bv ? ` bv=${r.bv}` : ""} ===`);
+      return r;
+    } catch (e) {
+      if (isJobAbort(e)) {
+        jlog(`用户停止,转人工(不标 failed)`);
+        deps.ledger.setState(b.streamKey, "needs_manual", { error: USER_STOP });
+        return { state: "needs_manual" as const };
+      }
+      jlog(`!!! pipeline 抛错(reconciler 将标 failed): ${String((e as Error)?.stack ?? e)}`);
+      throw e;
+    }
+  });
 }
 
 async function runPipelineInner(

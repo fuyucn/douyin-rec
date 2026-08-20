@@ -1,8 +1,9 @@
+import { abortJob, isJobAbort, isJobLive, USER_STOP } from "@drec/core";
 import type { Transport, NodeInventory } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
-import { clusterBroadcasts } from "./identity.js";
+import { clusterBroadcasts, type Broadcast } from "./identity.js";
 
 export interface SettleConfig {
   maxWaitMs: number;
@@ -332,10 +333,108 @@ export class Reconciler {
 
         await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
       } catch (err) {
+        // 用户停止 → 转人工,绝不能 markFailed(failed 会自动重试)。
+        if (isJobAbort(err)) {
+          this.ledger.setState(b.streamKey, "needs_manual", { error: USER_STOP });
+          continue;
+        }
         // Per-broadcast 出错:置 job=failed(可见 + 重试上限内自动重试),不中止其余 broadcast。
         console.error(`[reconciler] broadcast ${b.streamKey} failed:`, err);
         this.ledger.markFailed(b.streamKey, String((err as Error)?.message ?? err).slice(0, 300));
       }
     }
   }
+
+  /**
+   * 停一场后处理(rsync/ffmpeg/biliup),不动录制。
+   * 无 job → 200 且不建行;done → 409;已 needs_manual → 200。
+   * 空闲 pending/failed 也标 needs_manual,否则 reconciler 会按 RETRYABLE 重入。
+   */
+  async stopJob(streamKey: string): Promise<{ ok: boolean; error?: string; code?: number }> {
+    const job = this.ledger.get(streamKey);
+    if (!job) return { ok: true };
+    if (job.state === "done") return { ok: false, error: "已完成,不能停止", code: 409 };
+    if (job.state === "needs_manual") return { ok: true };
+    abortJob(streamKey); // 非 live → false,不留 aborted 痕迹
+    this.ledger.setState(streamKey, "needs_manual", { error: USER_STOP });
+    return { ok: true };
+  }
+
+  /**
+   * 立刻跑一场已有录像的后处理:跳过 settle / 断流重连窗。
+   * wait 默认 false → 点火后返回 202。
+   */
+  async runNow(opts: {
+    streamKey: string;
+    winnerWorker?: string;
+    wait?: boolean;
+  }): Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }> {
+    const streamKey = opts.streamKey?.trim() ?? "";
+    if (!streamKey) return { ok: false, error: "streamKey 必填", code: 400 };
+    const wait = opts.wait === true;
+    const winnerWorker = opts.winnerWorker?.trim() || undefined;
+
+    if (this.loadTransports) this.transports = this.loadTransports();
+    const transports = this.transports;
+    const { broadcasts, cfgByKey } = await this.collect(transports, this.ledger.listKeys());
+    const found = pickBroadcast(broadcasts, streamKey);
+    if (!found || found.members.length === 0) {
+      return { ok: false, error: `没有可跑的录像: ${streamKey}`, code: 404 };
+    }
+
+    const members = winnerWorker
+      ? found.members.filter((m) => m.workerId === winnerWorker)
+      : found.members.slice();
+    if (members.length === 0) {
+      return { ok: false, error: `节点 ${winnerWorker} 没有这场录像`, code: 404 };
+    }
+    const b: Broadcast = { ...found, members };
+    const key = b.streamKey;
+    if (isJobLive(key) || (this.pipelineDeps.pool?.hasStreamLock(key) ?? false)) {
+      return { ok: false, error: "任务正在执行", code: 409 };
+    }
+    const job = this.ledger.get(key);
+    if (job?.state === "done" && job.bv) {
+      return { ok: false, error: `已完成(${job.bv}),不能重跑`, code: 409 };
+    }
+
+    this.ledger.upsertPending(key, b.startMs);
+    this.ledger.resetActiveNodes(key);
+    this.ledger.setState(key, "retrying");
+
+    const cfg = cfgByKey.get(key) ?? this.pipelineDeps.cfg;
+    const fire = async (): Promise<void> => {
+      try {
+        await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
+      } catch (err) {
+        if (isJobAbort(err)) {
+          this.ledger.setState(key, "needs_manual", { error: USER_STOP });
+          return;
+        }
+        console.error(`[reconciler] runNow ${key} failed:`, err);
+        this.ledger.markFailed(key, String((err as Error)?.message ?? err).slice(0, 300));
+        if (wait) throw err;
+      }
+    };
+    if (wait) {
+      try {
+        await fire();
+      } catch (err) {
+        return { ok: false, error: String((err as Error)?.message ?? err).slice(0, 300), code: 500, streamKey: key };
+      }
+      return { ok: true, code: 200, streamKey: key };
+    }
+    void fire();
+    return { ok: true, code: 202, streamKey: key };
+  }
+}
+
+/** 精确 key 优先;否则同日前缀 `_HHMM`;多场取 startMs 最新。 */
+function pickBroadcast(broadcasts: Broadcast[], streamKey: string): Broadcast | undefined {
+  const exact = broadcasts.find((b) => b.streamKey === streamKey);
+  if (exact) return exact;
+  const prefix = `${streamKey}_`;
+  const matches = broadcasts.filter((b) => b.streamKey.startsWith(prefix));
+  if (matches.length === 0) return undefined;
+  return matches.reduce((a, b) => (a.startMs >= b.startMs ? a : b));
 }

@@ -107,6 +107,10 @@ export interface ApiDeps {
   requestSyncTasks?: () => void;
   /** 手动重跑单个 workflow 节点(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
   retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
+  /** 停一场后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
+  stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
+  /** 立刻跑一场已有录像的后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
+  runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
 }
 
 /**
@@ -309,6 +313,10 @@ export interface Api {
   getHubJobLog(streamKey: string): ApiResult;
   /** POST /api/hub/jobs/:key/retry-node { node, force? } — 手动重跑单个 workflow 节点。 */
   retryHubNode(streamKey: string, input: { node?: string; force?: boolean }): Promise<ApiResult>;
+  /** POST /api/hub/jobs/:key/stop — 停一场后处理,不动录制。 */
+  stopHubJob(streamKey: string): Promise<ApiResult>;
+  /** POST /api/hub/jobs/run { streamKey, winnerWorker?, wait? } — 立刻跑一场已有录像的后处理。 */
+  runHubJob(input: { streamKey?: string; winnerWorker?: string; wait?: boolean }): Promise<ApiResult>;
   /** GET /api/hub/workers — 列出录制 worker(hub 未启用 → 400)。 */
   listWorkers(): ApiResult;
   /** POST /api/hub/workers — 新建 worker。 */
@@ -895,6 +903,21 @@ export function makeApi(deps: ApiDeps): Api {
       if (!input.node) return err(400, "node 必填");
       const r = await deps.retryNode(streamKey, input.node, { force: input.force === true });
       return r.ok ? { status: 200, body: r } : { status: r.code ?? 400, body: r };
+    },
+    async stopHubJob(streamKey): Promise<ApiResult> {
+      if (!deps.syncDbPath || !deps.stopJob) return err(400, "hub 未启用(停止任务未注入)");
+      const r = await deps.stopJob(streamKey);
+      return r.ok ? { status: 200, body: r } : { status: r.code ?? 400, body: r };
+    },
+    async runHubJob(input): Promise<ApiResult> {
+      if (!deps.syncDbPath || !deps.runNow) return err(400, "hub 未启用(立即执行未注入)");
+      if (!input.streamKey) return err(400, "streamKey 必填");
+      const r = await deps.runNow({
+        streamKey: input.streamKey,
+        winnerWorker: input.winnerWorker,
+        wait: input.wait === true,
+      });
+      return r.ok ? { status: r.code ?? 202, body: r } : { status: r.code ?? 400, body: r };
     },
 
     listWorkers(): ApiResult {

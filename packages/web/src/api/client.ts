@@ -125,6 +125,12 @@ export const api = {
   /** 手动重跑单个 workflow 节点(force=true 表示已确认,放行上传类节点)。 */
   retryHubNode: (streamKey: string, node: string, opts?: { force?: boolean }): Promise<{ ok: boolean; error?: string }> =>
     request("POST", `/api/hub/jobs/${encodeURIComponent(streamKey)}/retry-node`, { node, force: opts?.force }),
+  /** 停一场后处理(rsync/ffmpeg/biliup),不动录制。 */
+  stopHubJob: (streamKey: string): Promise<{ ok: boolean; error?: string }> =>
+    request("POST", `/api/hub/jobs/${encodeURIComponent(streamKey)}/stop`),
+  /** 立刻跑一场已有录像的后处理。默认异步 202。 */
+  runHubJob: (input: { streamKey: string; winnerWorker?: string; wait?: boolean }): Promise<{ ok: boolean; error?: string; streamKey?: string }> =>
+    request("POST", "/api/hub/jobs/run", input),
 
   // ── 多节点 worker(录制节点)管理 ─────────────────────────────────────────────
   listWorkers: (): Promise<WorkerDTO[]> => request("GET", "/api/hub/workers"),

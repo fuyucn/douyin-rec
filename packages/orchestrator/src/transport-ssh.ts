@@ -1,7 +1,7 @@
 // packages/orchestrator/src/transport-ssh.ts
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import type { RemoteTaskSpec } from "@drec/core";
+import { registerChild, throwIfAborted, type RemoteTaskSpec } from "@drec/core";
 import type { ApplyTasksResult, NodeInventory, NodeRecording, NodeTasks, Transport } from "./transport.js";
 
 export interface SshOpts {
@@ -24,6 +24,7 @@ const SSH_KEEPALIVE = ["-o", "BatchMode=yes", "-o", "ServerAliveInterval=5", "-o
 function defaultRun(host: string, timeoutMs = 45_000) {
   return (argv: string[]): Promise<string> => new Promise((resolve, reject) => {
     const p = spawn("ssh", ["-o", "ConnectTimeout=10", ...SSH_KEEPALIVE, host, "--", ...argv]);
+    registerChild(p); // 不建进程组:ssh 自己是叶子
     let out = "", err = "", settled = false;
     const finish = (fn: () => void): void => { if (settled) return; settled = true; clearTimeout(timer); fn(); };
     const timer = setTimeout(() => {
@@ -31,7 +32,10 @@ function defaultRun(host: string, timeoutMs = 45_000) {
       finish(() => reject(new Error(`ssh 超时 ${timeoutMs}ms 被杀: ${host} -- ${argv.join(" ").slice(0, 60)}`)));
     }, timeoutMs);
     p.stdout.on("data", (b) => (out += b)); p.stderr.on("data", (b) => (err += b));
-    p.on("close", (c) => finish(() => (c === 0 ? resolve(out) : reject(new Error(`ssh rc=${c}: ${err.slice(-300)}`)))));
+    p.on("close", (c) => finish(() => {
+      try { throwIfAborted(); } catch (e) { reject(e); return; }
+      c === 0 ? resolve(out) : reject(new Error(`ssh rc=${c}: ${err.slice(-300)}`));
+    }));
     p.on("error", (e) => finish(() => reject(e)));
   });
 }
@@ -48,7 +52,11 @@ export class SshTransport implements Transport {
       const p = spawn("rsync", ["-az", "-e",
         "ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=5 -o ServerAliveCountMax=3",
         `${o.host}:${remote}`, localDir]);
-      p.on("close", (c) => (c === 0 ? res() : rej(new Error(`rsync rc=${c}`)))); p.on("error", rej);
+      registerChild(p);
+      p.on("close", (c) => {
+        try { throwIfAborted(); } catch (e) { rej(e); return; }
+        c === 0 ? res() : rej(new Error(`rsync rc=${c}`));
+      }); p.on("error", rej);
     }));
   }
   async listInventory(): Promise<NodeInventory> {

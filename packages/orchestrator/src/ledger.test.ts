@@ -267,4 +267,43 @@ describe("sweepStale 崩溃恢复", () => {
     expect(l.get("douyin:4:2026-08-11")?.state).toBe("merging");
     l.close();
   });
+
+  it("needs_manual 的 running 节点不被 sweep 改写", () => {
+    const dir = mkdtempSync(join(tmpdir(), "led-sweep-stop-"));
+    const p = join(dir, "j.db");
+    const raw = new DatabaseSync(p);
+    raw.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+      winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
+    raw.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT)`);
+    raw.exec(`CREATE TABLE sync_node_states(streamKey TEXT NOT NULL, node TEXT NOT NULL, state TEXT NOT NULL,
+      error TEXT, attempts INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL, PRIMARY KEY(streamKey, node))`);
+    raw.prepare("INSERT INTO sync_jobs(streamKey,state,error,updatedAt) VALUES(?,?,?,?)")
+      .run("douyin:5:2026-08-11", "needs_manual", "用户停止", 1);
+    raw.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("douyin:5:2026-08-11", "merge", "running", null, 1, 1);
+    raw.close();
+
+    const l = new SyncLedger(p);
+    l.sweepStale(1000);
+    expect(l.get("douyin:5:2026-08-11")?.state).toBe("needs_manual");
+    expect(l.get("douyin:5:2026-08-11")?.error).toBe("用户停止");
+    expect(l.getNodeState("douyin:5:2026-08-11", "merge")?.state).toBe("running");
+    l.close();
+  });
+
+  it("resetActiveNodes 把 blocked/running 拨回 pending 并清 error", () => {
+    const dir = mkdtempSync(join(tmpdir(), "led-reset-"));
+    const l = new SyncLedger(join(dir, "j.db"));
+    l.upsertPending("douyin:6:2026-08-11");
+    l.syncNodeState("douyin:6:2026-08-11", "merge", "blocked", { error: "用户停止" });
+    l.syncNodeState("douyin:6:2026-08-11", "burn_danmu", "running");
+    l.syncNodeState("douyin:6:2026-08-11", "upload_plain", "done");
+    l.resetActiveNodes("douyin:6:2026-08-11");
+    expect(l.getNodeState("douyin:6:2026-08-11", "merge")?.state).toBe("pending");
+    expect(l.getNodeState("douyin:6:2026-08-11", "merge")?.error).toBeNull();
+    expect(l.getNodeState("douyin:6:2026-08-11", "burn_danmu")?.state).toBe("pending");
+    expect(l.getNodeState("douyin:6:2026-08-11", "upload_plain")?.state).toBe("done");
+    l.close();
+  });
 });

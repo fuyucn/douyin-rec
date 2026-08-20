@@ -178,6 +178,11 @@ const DICT = {
         runningFor: "· 已运行 {time}", etaRemaining: "· 预计剩余约 {time}",
         logTitle: "任务日志 · {key}", logEmpty: "(空)", logReadFailed: "读取日志失败(可能 stage 已清理)。", noRunYet: "尚无运行",
         retryNode: "重跑此节点", retryNodeConfirmTitle: "重跑上传节点?", retryNodeConfirmMessage: "该节点已产生远端副作用(建稿/追加分 P)。若上一次实际已成功，重跑会重复投稿。确认要继续吗?",
+        stop: "停止", stopTitle: "停止后处理", stopped: "已停止后处理",
+        runNow: "立即执行", runNowTitle: "立即执行后处理", runNowDesc: "跳过收播等待，立刻用已有录像跑合并 / 烧录 / 上传。",
+        runNowDate: "场次", runNowCustom: "自定义日期", runNowDateHint: "YYYY-MM-DD",
+        runNowWorker: "选优节点", runNowWorkerAuto: "自动选优",
+        started: "已启动后处理", rerun: "重跑此场",
       },
       ruleDialog: {
         createTitle: "新建 Hub 规则", editTitle: "编辑 Hub 规则", desc: "按直播间配置多节点选优合并 → 烧录 → 上传的后处理流程",
@@ -356,6 +361,11 @@ const DICT = {
         runningFor: "· running {time}", etaRemaining: "· ~{time} remaining",
         logTitle: "Job log · {key}", logEmpty: "(empty)", logReadFailed: "Failed to read log (stage may have been cleaned up).", noRunYet: "No runs yet",
         retryNode: "Retry node", retryNodeConfirmTitle: "Retry upload node?", retryNodeConfirmMessage: "This node has remote side effects (created submission / appended parts). If the previous attempt actually succeeded, retrying will create a duplicate. Continue?",
+        stop: "Stop", stopTitle: "Stop post-process", stopped: "Post-process stopped",
+        runNow: "Run now", runNowTitle: "Run post-process now", runNowDesc: "Skip the settle / reconnect wait and run merge / burn / upload on existing recordings.",
+        runNowDate: "Broadcast", runNowCustom: "Custom date", runNowDateHint: "YYYY-MM-DD",
+        runNowWorker: "Winner node", runNowWorkerAuto: "Auto-select",
+        started: "Post-process started", rerun: "Rerun this broadcast",
       },
       ruleDialog: {
         createTitle: "New Hub rule", editTitle: "Edit Hub rule", desc: "Configure the multi-node select → merge → burn → upload pipeline for this room",

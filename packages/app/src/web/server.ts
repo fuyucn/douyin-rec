@@ -66,6 +66,8 @@ export interface RouteMatch {
     | "listHubJobs"
     | "getHubJobLog"
     | "retryHubNode"
+    | "stopHubJob"
+    | "runHubJob"
     | "listWorkers"
     | "createWorker"
     | "updateWorker"
@@ -120,8 +122,10 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "getEvents", methods: ["GET"], pattern: /^\/api\/events$/ },
   { name: "hubStatus", methods: ["GET"], pattern: /^\/api\/hub\/status$/ },
   { name: "listHubJobs", methods: ["GET"], pattern: /^\/api\/hub\/jobs$/ },
+  { name: "runHubJob", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/run$/, needsBody: true },
   { name: "getHubJobLog", methods: ["GET"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/log$/, param: "sid", decode: true },
   { name: "retryHubNode", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/retry-node$/, param: "sid", decode: true, needsBody: true },
+  { name: "stopHubJob", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/stop$/, param: "sid", decode: true },
   { name: "testWorker", methods: ["POST"], pattern: /^\/api\/hub\/workers\/test$/, needsBody: true },
   { name: "workersStatus", methods: ["GET"], pattern: /^\/api\/hub\/workers\/status$/ },
   { name: "listWorkers", methods: ["GET"], pattern: /^\/api\/hub\/workers$/ },
@@ -197,6 +201,10 @@ export interface WebServerDeps {
   requestSyncTasks?: () => void;
   /** 手动重跑单个 workflow 节点(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
+  /** 停一场后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
+  stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
+  /** 立刻跑一场已有录像的后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
+  runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {}). */
@@ -350,6 +358,12 @@ async function dispatch(
       const body = (await readJson(req)) as { node?: string; force?: boolean };
       return api.retryHubNode(match.sid!, body ?? {});
     }
+    case "stopHubJob":
+      return api.stopHubJob(match.sid!);
+    case "runHubJob": {
+      const body = (await readJson(req)) as Parameters<Api["runHubJob"]>[0];
+      return api.runHubJob(body ?? {});
+    }
     case "listWorkers":
       return api.listWorkers();
     case "createWorker": {
@@ -391,6 +405,8 @@ export function createWebServer(deps: WebServerDeps): Server {
     probeAllWorkers: deps.probeAllWorkers,
     requestSyncTasks: deps.requestSyncTasks,
     retryNode: deps.retryNode,
+    stopJob: deps.stopJob,
+    runNow: deps.runNow,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);
       const n = mj.recoverOrphans(); // 启动:清理上次重启腰斩的合成 job

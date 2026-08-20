@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
+import { JobAbortedError, USER_STOP, abortJob, runWithJob, throwIfAborted } from "@drec/core";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -292,6 +293,65 @@ describe("ResourcePool — cpu/net 串行与内存闸门", () => {
     });
     expect(slept).toBeGreaterThan(0); // 等过内存
     expect(active.max).toBe(1);
+    t.ledger.close();
+  });
+});
+
+describe("runWorkflowNodes — 用户停止", () => {
+  it("节点 abort 标 blocked+用户停止并抛出,不标 failed;不再起下游", async () => {
+    const t = makeDeps();
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0 });
+    const started: string[] = [];
+    const merge: WorkflowNode = {
+      key: "merge",
+      inputs: [],
+      outputs: [],
+      resource: "none",
+      run: async () => {
+        started.push("merge");
+        abortJob(STREAM_KEY);
+        throwIfAborted();
+      },
+    };
+    const burn: WorkflowNode = {
+      key: "burn_danmu",
+      inputs: [],
+      outputs: [],
+      resource: "none",
+      run: async () => { started.push("burn"); },
+    };
+    await expect(runWithJob(STREAM_KEY, () => runWorkflowNodes({
+      streamKey: STREAM_KEY,
+      nodes: [merge, burn],
+      edges: [["merge", "burn_danmu"]],
+      ctx: minimalCtx(t, pool),
+      pool,
+    }))).rejects.toBeInstanceOf(JobAbortedError);
+    expect(started).toEqual(["merge"]);
+    expect(t.ledger.getNodeState(STREAM_KEY, "merge")?.state).toBe("blocked");
+    expect(t.ledger.getNodeState(STREAM_KEY, "merge")?.error).toBe(USER_STOP);
+    t.ledger.close();
+  });
+
+  it("内存闸门等待中 abort → 立刻抛,不标 failed", async () => {
+    const t = makeDeps();
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 2048, memWaitTimeoutMs: 60_000 },
+      { sleep: async () => { abortJob(STREAM_KEY); }, freeMemMB: () => 100 },
+    );
+    const node: WorkflowNode = {
+      key: "merge", inputs: [], outputs: [], resource: "cpu",
+      run: async () => { throw new Error("should not run"); },
+    };
+    await expect(runWithJob(STREAM_KEY, () => runWorkflowNodes({
+      streamKey: STREAM_KEY,
+      nodes: [node],
+      edges: [],
+      ctx: minimalCtx(t, pool),
+      pool,
+    }))).rejects.toBeInstanceOf(JobAbortedError);
+    expect(t.ledger.getNodeState(STREAM_KEY, "merge")?.state).toBe("blocked");
+    expect(t.ledger.getNodeState(STREAM_KEY, "merge")?.error).toBe(USER_STOP);
     t.ledger.close();
   });
 });

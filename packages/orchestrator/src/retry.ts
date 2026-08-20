@@ -1,3 +1,5 @@
+import { isJobAbort, throwIfAborted } from "@drec/core";
+
 export interface RetryOpts {
   /** 最大调用次数(含首次)。默认 3。<=1 则只调一次不重试。 */
   tries?: number;
@@ -13,6 +15,7 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 
 /**
  * 有限次重试 + 指数退避。fn 成功即返回;全部失败抛**最后一次**错误。
+ * 用户停止(JobAbortedError)立刻抛出,不 sleep、不重试。
  * 纯逻辑,不知道 fn 是什么——调用方负责保证 fn 幂等安全(见 pipeline:只包安全的单文件 append)。
  */
 export async function retry<T>(fn: () => Promise<T>, opts: RetryOpts = {}): Promise<T> {
@@ -21,11 +24,12 @@ export async function retry<T>(fn: () => Promise<T>, opts: RetryOpts = {}): Prom
   const sleep = opts.sleep ?? defaultSleep;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= Math.max(1, tries); attempt++) {
+    throwIfAborted();
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
-      if (attempt >= tries) break; // 用尽,跳出后抛
+      if (isJobAbort(err) || attempt >= tries) break;
       opts.onRetry?.(attempt, err);
       await sleep(backoffMs * 2 ** (attempt - 1));
     }

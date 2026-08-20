@@ -6,3 +6,4 @@ export * from "./platform.js";
 export * from "./notify.js";
 export * from "./api-types.js";
 export * from "./log.js";
+export * from "./job-abort.js";

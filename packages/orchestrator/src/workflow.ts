@@ -3,6 +3,7 @@ import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
 import { humanBytes } from "./format.js";
+import { isJobAbort, throwIfAborted, USER_STOP } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 
@@ -391,6 +392,7 @@ export class ResourcePool {
       if (this.minBurnFreeMemMB > 0) {
         const deadline = this.now() + this.memWaitTimeoutMs;
         while (this.freeMemMB() < this.minBurnFreeMemMB) {
+          throwIfAborted();
           if (this.now() >= deadline) {
             throw new Error(`内存不足(可用 ${Math.round(this.freeMemMB())}MB < ${this.minBurnFreeMemMB}MB),等待超时`);
           }
@@ -488,11 +490,15 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
   };
 
   const persist = (key: WorkflowNodeKey, s: "done" | "skipped" | "failed" | "blocked"): void => {
+    const existing = ctx.ledger.getNodeState(streamKey, key);
     if (s === "skipped") ctx.ledger.syncNodeState(streamKey, key, "skipped");
-    else if (s === "blocked") ctx.ledger.syncNodeState(streamKey, key, "blocked", { error: "上游失败" });
-    else if (s === "failed") {
+    else if (s === "blocked") {
+      // runNode 已写「用户停止」;后续循环不得覆盖成「上游失败」。
+      ctx.ledger.syncNodeState(streamKey, key, "blocked", {
+        error: existing?.error === USER_STOP ? USER_STOP : "上游失败",
+      });
+    } else if (s === "failed") {
       // runNode 已把真实错误写进节点表;这里只保留它,避免被「上游失败」覆盖。
-      const existing = ctx.ledger.getNodeState(streamKey, key);
       ctx.ledger.syncNodeState(streamKey, key, "failed", {
         error: existing?.state === "failed" ? existing.error ?? "上游失败" : "上游失败",
       });
@@ -540,6 +546,12 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
       state.set(node.key, "done");
       ctx.log(`[node] ${node.key} done`);
     } catch (e) {
+      if (isJobAbort(e)) {
+        ctx.ledger.syncNodeState(streamKey, node.key, "blocked", { error: USER_STOP });
+        state.set(node.key, "blocked");
+        ctx.log(`[node] ${node.key} aborted: ${USER_STOP}`);
+        throw e;
+      }
       const msg = String((e as Error)?.message ?? e).slice(0, 300);
       ctx.ledger.syncNodeState(streamKey, node.key, "failed", { error: msg });
       state.set(node.key, "failed");
@@ -557,6 +569,7 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
   }
   state.clear();
 
+  let abortErr: unknown;
   while (true) {
     for (const node of nodes) {
       if (running.has(node.key)) continue;
@@ -569,22 +582,27 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
         persist(node.key, s);
         continue;
       }
+      // 用户停止后不再起新节点,等已在跑的兄弟轨收口再抛。
+      if (abortErr) continue;
       // pending:所有父节点终态 done/skipped 才可起跑。
       const p = parents.get(node.key) ?? [];
       if (p.every((k) => { const ps = state.get(k) ?? compute(k); return ps === "done" || ps === "skipped"; })) {
-        const run = runNode(node).catch(() => {});
+        const run = runNode(node).catch((e: unknown) => {
+          if (isJobAbort(e)) abortErr = e;
+        });
         running.set(node.key, run);
       }
     }
     if (running.size === 0) break;
     await Promise.race([...running.values()]);
     for (const [k, r] of running) {
-      if (state.get(k) === "done" || state.get(k) === "failed") {
+      if (state.get(k) === "done" || state.get(k) === "failed" || state.get(k) === "blocked") {
         void r;
         running.delete(k);
       }
     }
   }
+  if (abortErr) throw abortErr;
   // 最后一轮 failed 父节点可能没来得及算到兄弟轨末尾节点 → 补算,保证返回结果完整(ledger 已 persist)。
   for (const node of nodes) compute(node.key);
 

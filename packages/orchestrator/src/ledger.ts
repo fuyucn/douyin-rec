@@ -232,7 +232,12 @@ export class SyncLedger {
     const staleNodes = this.db.prepare(
       "SELECT streamKey FROM sync_node_states WHERE state='running' AND updatedAt<=?",
     ).all(cutoff) as unknown as Array<{ streamKey: string }>;
-    const sweptKeys = [...new Set(staleNodes.map((r) => r.streamKey))].filter((k) => !isStreamActive(k));
+    const sweptKeys = [...new Set(staleNodes.map((r) => r.streamKey))].filter((k) => {
+      if (isStreamActive(k)) return false;
+      const job = this.get(k);
+      // needs_manual / done 是终态:用户停止后 running 节点可能还没刷盘,sweep 不得改写。
+      return job?.state !== "needs_manual" && job?.state !== "done";
+    });
     if (sweptKeys.length === 0) return;
     this.db.prepare(
       "UPDATE sync_node_states SET state='failed', error='进程重启中断', updatedAt=? WHERE streamKey IN (" +
@@ -242,8 +247,17 @@ export class SyncLedger {
     // 会留下 merging/uploading 的僵尸 job 永远跳过(本次线上卡住即此 bug)。
     for (const streamKey of sweptKeys) {
       const job = this.get(streamKey);
-      if (job && job.state !== "failed") {
+      if (job && job.state !== "failed" && job.state !== "needs_manual" && job.state !== "done") {
         this.setState(streamKey, "failed", { error: "进程重启中断" });
+      }
+    }
+  }
+
+  /** runNow 前把 blocked/running 节点拨回 pending,清 error,让 DAG 能再起。 */
+  resetActiveNodes(streamKey: string): void {
+    for (const row of this.getNodeStates(streamKey)) {
+      if (row.state === "blocked" || row.state === "running") {
+        this.syncNodeState(streamKey, row.node, "pending", { error: null });
       }
     }
   }

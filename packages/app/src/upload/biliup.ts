@@ -1,6 +1,7 @@
 // ts/src/core/upload/biliup.ts
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { registerChild, throwIfAborted } from "@drec/core";
 import { rootBiliupCookies } from "../paths.js";
 
 /** biliup cookies.json:BILIUP_COOKIE > <DOUYIN_REC_ROOT ?? DEFAULT_ROOT>/config/biliup/cookies.json。 */
@@ -49,11 +50,13 @@ export function checkBiliup(cookies: string): Promise<string | null> {
 export function runBiliup(argv: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const p = spawn("biliup", argv);
+    registerChild(p); // 不建进程组:biliup 自己管分块;checkBiliup(-V)不走这里
     let out = "", err = "";
     p.stdout.on("data", (c: Buffer) => (out += c));
     p.stderr.on("data", (c: Buffer) => (err += c));
     p.on("error", reject);
     p.on("close", (code) => {
+      try { throwIfAborted(); } catch (e) { reject(e); return; }
       if (code !== 0) { reject(new Error(`biliup 失败 (rc=${code}): ${(err || out).slice(-400).trim()}`)); return; }
       resolve(out + err);
     });

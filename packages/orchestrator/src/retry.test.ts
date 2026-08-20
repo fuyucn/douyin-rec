@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { JobAbortedError, abortJob, runWithJob } from "@drec/core";
 import { retry } from "./retry.js";
 
 const noSleep = (_ms: number): Promise<void> => Promise.resolve();
@@ -50,5 +51,20 @@ describe("retry", () => {
     const seen: number[] = [];
     await retry(fn, { tries: 3, sleep: noSleep, onRetry: (a) => seen.push(a) });
     expect(seen).toEqual([1]); // 第 1 次失败后回调一次
+  });
+
+  it("用户停止立刻抛出,不 sleep 不重试", async () => {
+    const fn = vi.fn().mockRejectedValue(new JobAbortedError());
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(retry(fn, { tries: 5, sleep })).rejects.toBeInstanceOf(JobAbortedError);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+
+    await runWithJob("k", async () => {
+      abortJob("k");
+      const fn2 = vi.fn().mockResolvedValue("ok");
+      await expect(retry(fn2, { tries: 5, sleep })).rejects.toBeInstanceOf(JobAbortedError);
+      expect(fn2).not.toHaveBeenCalled();
+    });
   });
 });
