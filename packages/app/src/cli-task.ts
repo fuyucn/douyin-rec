@@ -480,14 +480,16 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .command("serve")
     .description("启动 Web 控制台：HTTP 服务 + SPA + 定时调度守护（默认开；--no-schedule 关）")
     .option("--port <n>", "监听端口（默认 7860）")
+    .option("--host <host>", "监听地址（默认所有网卡；worker 建议 127.0.0.1）")
     .option("--db <path>", "数据库路径")
     // 调度默认开：启用的任务无窗口=24h 录、有窗口=窗口内录。--no-schedule 退化为纯手动控制台。
     .option("--no-schedule", "关闭定时调度，仅手动启停（默认开启调度）")
     .option("--hub", "启用多节点同步编排(默认关)")
     .option("--hub-config <json|path>", "hub 配置(JSON 串或文件路径);省略则自动读 <root>/config/hub-config.json")
-    .action((o: { port?: string; db?: string; schedule?: boolean; hub?: boolean; hubConfig?: string }) => {
+    .action((o: { port?: string; host?: string; db?: string; schedule?: boolean; hub?: boolean; hubConfig?: string }) => {
       const store = new TaskStore(o.db);
       const port = o.port !== undefined ? Number(o.port) : 7860;
+      const host = o.host?.trim() || undefined;
 
       // 时区由 config(settings.timezone)决定,不看 host/容器的 TZ 环境变量——覆盖式应用,
       // 启动就打日志,免得再靠挖 /proc/<pid>/environ 才能确认服务实际用的哪个时区(踩过的坑)。
@@ -725,15 +727,18 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
       process.on("SIGINT", () => shutdown("SIGINT"));
       process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-      server.listen(port, () => {
-        serveLog.info(`Web 控制台已启动: http://localhost:${port}`);
+      const onListen = (): void => {
+        const displayHost = host && host !== "0.0.0.0" && host !== "::" ? host : "localhost";
+        serveLog.info(`Web 控制台已启动: http://${displayHost}:${port}`);
         if (daemon) {
           daemon.start();
           serveLog.info("定时调度已启用（默认；启用的任务无窗口=24h录/有窗口=窗口内录）");
         } else {
           serveLog.info("定时调度已关闭（--no-schedule）：仅手动启停");
         }
-      });
+      };
+      if (host) server.listen(port, host, onListen);
+      else server.listen(port, onListen);
     });
 
   // ── tui：终端交互界面（连 task serve 的 REST API）─────────────────────────────

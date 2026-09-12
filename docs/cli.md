@@ -304,6 +304,7 @@ Web 控制台顶部有**全局「抖音账号 Cookie」面板**：登录一次�
 ```bash
 node dist/douyin-rec.mjs task serve --port 7860 --no-schedule   # 仅手动控制
 node dist/douyin-rec.mjs task serve --port 7860                 # 默认含定时调度
+node dist/douyin-rec.mjs task serve --port 7860 --host 127.0.0.1 # worker：仅本机 loopback
 node dist/douyin-rec.mjs task serve --port 7860 --hub           # master：Web + 调度 + 多节点编排
 ```
 
