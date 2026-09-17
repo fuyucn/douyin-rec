@@ -1,20 +1,20 @@
 #!/usr/bin/env sh
-# install-worker.sh — Linux worker 安装器。
+# install-worker.sh - Linux worker installer.
 #
-# 设计边界:
-#   - 只安装 drec worker runtime、systemd service 和可选 tunnel 客户端。
-#   - 不生成/保存 SSH key、Tailscale auth key、Cloudflare token 或任何 Secret。
-#   - 不执行 ssh-copy-id、tailscale up、cloudflared login 等认证动作。
+# Design boundaries:
+#   - Installs the drec worker runtime, systemd service, and optional tunnel client.
+#   - Does not create or store SSH keys, Tailscale auth keys, Cloudflare tokens, or secrets.
+#   - Does not perform ssh-copy-id, tailscale up, cloudflared login, or other auth actions.
 #
-# 用法:
+# Usage:
 #   curl -fsSL https://github.com/fuyucn/douyin-rec/releases/latest/download/install-worker.sh \
 #     | sudo sh
 #
-# 默认从 GitHub Release 下载:
+# Downloads from the GitHub Release by default:
 #   douyin-rec-worker-linux-amd64.tar.gz
 #   douyin-rec-worker-linux-arm64.tar.gz
 #
-# 本地开发可传 --archive <本地 tar.gz 或 URL>。
+# For local development, pass --archive <local tar.gz or URL>.
 set -eu
 
 REPO="${DREC_REPO:-fuyucn/douyin-rec}"
@@ -32,32 +32,32 @@ START=1
 
 usage() {
   cat <<'EOF'
-用法:
-  install-worker.sh [选项]
+Usage:
+  install-worker.sh [options]
 
-选项:
-  --version <x.y.z>       固定发布版本（默认 latest）
-  --root <dir>            数据根与安装目录（默认 /srv/drec）
-  --port <n>              worker 监听端口（默认 7860）
-  --host <host>           监听地址（默认 127.0.0.1，不向公网暴露）
-  --service <name>        systemd service 名（默认 drec-worker）
-  --user <name>           service 运行用户（默认 sudo 调用者或 root）
-  --tunnel <mode>         none|tailscale|cloudflared（默认 none；只安装客户端，不认证）
-  --archive <path|url>    自定义 worker tar.gz（开发/私有镜像来源）
-  --tz <name>             时区（默认 Asia/Shanghai）
-  --no-start              安装后不启动 service
-  --dry-run               只检查参数和归档，不写系统
-  -h, --help              显示帮助
+Options:
+  --version <x.y.z>       Pin a release version (default: latest)
+  --root <dir>            Data root and install directory (default: /srv/drec)
+  --port <n>              Worker listen port (default: 7860)
+  --host <host>           Listen address (default: 127.0.0.1; not public)
+  --service <name>        systemd service name (default: drec-worker)
+  --user <name>           Service user (default: sudo caller or root)
+  --tunnel <mode>         none|tailscale|cloudflared (default: none; client only)
+  --archive <path|url>    Custom worker tar.gz (development/private mirror)
+  --tz <name>             Timezone (default: Asia/Shanghai)
+  --no-start              Install without starting the service
+  --dry-run               Validate arguments and archive without writing to the system
+  -h, --help              Show help
 EOF
 }
 
 fail() {
-  printf '错误: %s\n' "$*" >&2
+  printf 'Error: %s\n' "$*" >&2
   exit 1
 }
 
 need_value() {
-  [ "$#" -ge 2 ] || fail "$1 缺少参数"
+  [ "$#" -ge 2 ] || fail "$1 requires a value"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -74,37 +74,37 @@ while [ "$#" -gt 0 ]; do
     --no-start) START=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) fail "未知参数: $1" ;;
+    *) fail "Unknown argument: $1" ;;
   esac
 done
 
 case "$PORT" in
-  ''|*[!0-9]*) fail "端口必须是数字: $PORT" ;;
+  ''|*[!0-9]*) fail "Port must be numeric: $PORT" ;;
 esac
-[ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || fail "端口超出范围: $PORT"
+[ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || fail "Port out of range: $PORT"
 
 case "$TUNNEL" in
   none|tailscale|cloudflared) ;;
-  *) fail "--tunnel 只支持 none|tailscale|cloudflared，收到: $TUNNEL" ;;
+  *) fail "--tunnel supports only none|tailscale|cloudflared; got: $TUNNEL" ;;
 esac
 
 case "$SERVICE" in
-  ''|*[!A-Za-z0-9_.@-]*) fail "service 名含非法字符: $SERVICE" ;;
+  ''|*[!A-Za-z0-9_.@-]*) fail "Service name contains invalid characters: $SERVICE" ;;
 esac
 
 case "$HOST" in
-  ''|*[[:space:]]*) fail "host 不能为空或含空白字符: $HOST" ;;
+  ''|*[[:space:]]*) fail "Host cannot be empty or contain whitespace: $HOST" ;;
 esac
 case "$TIMEZONE" in
-  ''|*[[:space:]]*) fail "时区不能为空或含空白字符: $TIMEZONE" ;;
+  ''|*[[:space:]]*) fail "Timezone cannot be empty or contain whitespace: $TIMEZONE" ;;
 esac
 
 case "$ROOT" in
   /*) ;;
-  *) fail "--root 必须是绝对路径: $ROOT" ;;
+  *) fail "--root must be an absolute path: $ROOT" ;;
 esac
 case "$ROOT" in
-  *[[:space:]]*) fail "--root 暂不支持空格: $ROOT" ;;
+  *[[:space:]]*) fail "--root does not support spaces: $ROOT" ;;
 esac
 
 if [ -z "$VERSION" ]; then
@@ -113,11 +113,11 @@ fi
 case "$VERSION" in
   latest) ;;
   dev)
-    [ -n "$ARCHIVE" ] || fail "使用 dev 时必须同时传 --archive"
+    [ -n "$ARCHIVE" ] || fail "Version dev requires --archive"
     ;;
   *)
     printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
-      || fail "版本号必须是 x.y.z 或 latest，收到: $VERSION"
+      || fail "Version must be x.y.z or latest; got: $VERSION"
     ;;
 esac
 
@@ -126,23 +126,23 @@ RAW_ARCH="$(uname -m)"
 case "$RAW_ARCH" in
   x86_64|amd64) ARCH="amd64" ;;
   aarch64|arm64) ARCH="arm64" ;;
-  *) fail "不支持的架构: $RAW_ARCH（支持 amd64 / arm64）" ;;
+  *) fail "Unsupported architecture: $RAW_ARCH (supported: amd64 / arm64)" ;;
 esac
 
 if [ "$DRY_RUN" -eq 0 ]; then
-  [ "$OS" = "Linux" ] || fail "install-worker.sh 当前只支持 Linux"
-  [ "$(id -u)" -eq 0 ] || fail "需要 root；请用 sudo sh -s -- ..."
-  command -v systemctl >/dev/null 2>&1 || fail "未找到 systemd"
-  command -v tar >/dev/null 2>&1 || fail "缺少 tar"
+  [ "$OS" = "Linux" ] || fail "install-worker.sh currently supports Linux only"
+  [ "$(id -u)" -eq 0 ] || fail "Root privileges required; run with sudo sh -s -- ..."
+  command -v systemctl >/dev/null 2>&1 || fail "systemctl not found"
+  command -v tar >/dev/null 2>&1 || fail "tar not found"
 
   NODE_BIN="$(command -v node || true)"
-  [ -n "$NODE_BIN" ] || fail "缺少 Node 24+；请先安装 Node，再重新运行"
+  [ -n "$NODE_BIN" ] || fail "Node 24+ not found; install Node and run again"
   NODE_MAJOR="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')"
-  [ "$NODE_MAJOR" -ge 24 ] || fail "Node 版本过低: $("$NODE_BIN" -v)；需要 Node 24+"
+  [ "$NODE_MAJOR" -ge 24 ] || fail "Node version too old: $("$NODE_BIN" -v); Node 24+ required"
 
-  command -v ffmpeg >/dev/null 2>&1 || fail "缺少 ffmpeg；请先安装 ffmpeg"
-  command -v ffprobe >/dev/null 2>&1 || fail "缺少 ffprobe；请安装完整 ffmpeg"
-  id "$SERVICE_USER" >/dev/null 2>&1 || fail "用户不存在: $SERVICE_USER"
+  command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg not found; install ffmpeg first"
+  command -v ffprobe >/dev/null 2>&1 || fail "ffprobe not found; install a complete ffmpeg package"
+  id "$SERVICE_USER" >/dev/null 2>&1 || fail "User does not exist: $SERVICE_USER"
 else
   NODE_BIN="${DREC_NODE_BIN:-node}"
 fi
@@ -179,7 +179,7 @@ download() {
   elif command -v wget >/dev/null 2>&1; then
     wget -O "$dst" "$src"
   else
-    fail "需要 curl 或 wget 下载归档"
+    fail "curl or wget is required to download the archive"
   fi
 }
 
@@ -196,22 +196,22 @@ sha256_of() {
 verify_checksum() {
   expected="$(awk 'NR == 1 { print $1 }' "$2")"
   actual="$(sha256_of "$1")"
-  [ -n "$expected" ] || fail "校验文件为空: $2"
-  [ "$expected" = "$actual" ] || fail "SHA256 不匹配: $1"
+  [ -n "$expected" ] || fail "Checksum file is empty: $2"
+  [ "$expected" = "$actual" ] || fail "SHA256 mismatch: $1"
 }
 
-printf '==> 获取 worker 归档\n'
+printf '==> Fetching worker archive\n'
 case "$ARCHIVE" in
   http://*|https://*)
     download "$ARCHIVE" "$ARCHIVE_FILE"
     if download "${ARCHIVE}.sha256" "$TMP/worker.tar.gz.sha256" 2>/dev/null; then
       verify_checksum "$ARCHIVE_FILE" "$TMP/worker.tar.gz.sha256"
     else
-      printf '提示: 未找到 %s.sha256，跳过校验\n' "$ARCHIVE" >&2
+      printf 'Note: %s.sha256 not found; skipping checksum verification\n' "$ARCHIVE" >&2
     fi
     ;;
   *)
-    [ -f "$ARCHIVE" ] || fail "归档不存在: $ARCHIVE"
+    [ -f "$ARCHIVE" ] || fail "Archive does not exist: $ARCHIVE"
     cp "$ARCHIVE" "$ARCHIVE_FILE"
     if [ -f "${ARCHIVE}.sha256" ]; then
       cp "${ARCHIVE}.sha256" "$TMP/worker.tar.gz.sha256"
@@ -220,22 +220,22 @@ case "$ARCHIVE" in
     ;;
 esac
 
-tar -tzf "$ARCHIVE_FILE" >/dev/null 2>&1 || fail "归档不是有效的 tar.gz: $ARCHIVE"
+tar -tzf "$ARCHIVE_FILE" >/dev/null 2>&1 || fail "Archive is not a valid tar.gz: $ARCHIVE"
 if tar -tzf "$ARCHIVE_FILE" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
-  fail "归档包含不安全路径: $ARCHIVE"
+  fail "Archive contains unsafe paths: $ARCHIVE"
 fi
 tar -xzf "$ARCHIVE_FILE" -C "$TMP"
-[ -f "$TMP/dist/douyin-rec.mjs" ] || fail "归档缺少 dist/douyin-rec.mjs"
-[ -x "$TMP/bin/mesio" ] || fail "归档缺少可执行文件 bin/mesio"
+[ -f "$TMP/dist/douyin-rec.mjs" ] || fail "Archive is missing dist/douyin-rec.mjs"
+[ -x "$TMP/bin/mesio" ] || fail "Archive is missing executable bin/mesio"
 INSTALLED_VERSION="$(cat "$TMP/VERSION" 2>/dev/null || printf '%s' "$VERSION")"
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  printf '✓ dry-run 通过\n'
+  printf '✓ Dry run passed\n'
   printf '  version: %s\n' "$INSTALLED_VERSION"
   printf '  root:    %s\n' "$ROOT"
   printf '  listen:  %s:%s\n' "$HOST" "$PORT"
   printf '  user:    %s\n' "$SERVICE_USER"
-  printf '  tunnel:  %s (认证由用户配置)\n' "$TUNNEL"
+  printf '  tunnel:  %s (authentication must be configured separately)\n' "$TUNNEL"
   exit 0
 fi
 
@@ -243,7 +243,7 @@ SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
 ENV_FILE="/etc/${SERVICE}.env"
 UNIT_FILE="/etc/systemd/system/${SERVICE}.service"
 
-printf '==> 安装到 %s\n' "$ROOT"
+printf '==> Installing to %s\n' "$ROOT"
 mkdir -p "$ROOT"
 tar -xzf "$ARCHIVE_FILE" -C "$ROOT"
 mkdir -p "$ROOT/config" "$ROOT/db" "$ROOT/recordings" "$ROOT/stage"
@@ -285,14 +285,14 @@ WantedBy=multi-user.target
 EOF
 
 if [ "$TUNNEL" = "tailscale" ] && ! command -v tailscale >/dev/null 2>&1; then
-  printf '==> 安装 Tailscale 客户端（不会执行 tailscale up）\n'
+  printf '==> Installing Tailscale client (does not run tailscale up)\n'
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL https://tailscale.com/install.sh | sh
   else
-    fail "安装 Tailscale 需要 curl"
+    fail "Installing Tailscale requires curl"
   fi
 elif [ "$TUNNEL" = "cloudflared" ] && ! command -v cloudflared >/dev/null 2>&1; then
-  printf '==> 安装 cloudflared（不会执行 tunnel login/run）\n'
+  printf '==> Installing cloudflared (does not run tunnel login/run)\n'
   CLOUDFLARED_URL="${CLOUDFLARED_URL:-https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}}"
   download "$CLOUDFLARED_URL" "$TMP/cloudflared"
   install -m 0755 "$TMP/cloudflared" /usr/local/bin/cloudflared
@@ -304,7 +304,7 @@ if [ "$START" -eq 1 ]; then
   systemctl restart "$SERVICE"
 fi
 
-printf '\n✓ worker 已安装\n'
+printf '\n✓ Worker installed\n'
 printf '  version: %s\n' "$INSTALLED_VERSION"
 printf '  service: %s\n' "$SERVICE"
 printf '  root:    %s\n' "$ROOT"
@@ -313,28 +313,28 @@ printf '  user:    %s\n' "$SERVICE_USER"
 
 case "$TUNNEL" in
   tailscale)
-    printf '\nTunnel 认证由你配置，安装器没有执行 tailscale up:\n'
+    printf '\nConfigure tunnel authentication separately. The installer did not run tailscale up:\n'
     printf '  sudo tailscale up\n'
     printf '  sudo tailscale status\n'
     ;;
   cloudflared)
-    printf '\nTunnel 认证由你配置，安装器没有执行 cloudflared login/run:\n'
+    printf '\nConfigure tunnel authentication separately. The installer did not run cloudflared login/run:\n'
     printf '  cloudflared tunnel login\n'
     printf '  cloudflared tunnel run <tunnel-name>\n'
     ;;
   none)
-    printf '\n连通性/认证由你配置（公网 SSH、LAN、WireGuard、Tailscale 或其他 tunnel）。\n'
+    printf '\nConfigure connectivity and authentication separately (public SSH, LAN, WireGuard, Tailscale, or another tunnel).\n'
     ;;
 esac
 
-printf '\nmaster 端只填 endpoint，不填 key/token:\n'
+printf '\nOn the master, configure only the endpoint, not keys or tokens:\n'
 printf '  { "id": "vps1", "kind": "ssh", "host": "<ssh-alias>", "dataRoot": "%s" }\n' "$ROOT"
-printf '\n本机自检:\n'
+printf '\nLocal self-check:\n'
 printf '  node %s/dist/douyin-rec.mjs _tasks %s\n' "$ROOT" "$ROOT"
 
 if [ "$START" -eq 1 ] && command -v curl >/dev/null 2>&1; then
   sleep 1
   curl -fsS "${API_URL}/api/version" >/dev/null \
-    && printf '✓ worker API 已响应 %s\n' "$API_URL" \
-    || printf '警告: worker 已启动但 API 尚未响应，请查看 journalctl -u %s\n' "$SERVICE" >&2
+    && printf '✓ Worker API responded at %s\n' "$API_URL" \
+    || printf 'Warning: worker started but the API has not responded yet; check journalctl -u %s\n' "$SERVICE" >&2
 fi
