@@ -300,7 +300,8 @@ fi
 
 systemctl daemon-reload
 if [ "$START" -eq 1 ]; then
-  systemctl enable --now "$SERVICE"
+  systemctl enable "$SERVICE"
+  systemctl restart "$SERVICE"
 fi
 
 printf '\n✓ worker 已安装\n'

@@ -162,5 +162,5 @@ douyin-rec-worker-linux-arm64.tar.gz
 
 ```bash
 pnpm bundle
-scripts/build-worker-release.sh --version 0.0.8 --arch all
+scripts/build-worker-release.sh --version 0.0.9 --arch all
 ```
