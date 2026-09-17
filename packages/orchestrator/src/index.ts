@@ -10,6 +10,7 @@ export {
   runWorkflowNodes,
   ResourcePool,
   deriveStageProducts,
+  withOutputStem,
 } from "./workflow.js";
 export type {
   Workflow,

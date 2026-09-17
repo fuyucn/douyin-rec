@@ -7,7 +7,7 @@ import { isJobAbort, throwIfAborted, USER_STOP } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 
-export { deriveStageProducts, type StageProducts } from "./session-plan.js";
+export { deriveStageProducts, withOutputStem, type StageProducts } from "./session-plan.js";
 
 /** DAG 核心节点(select/pull 是前奏,clean_* 是收尾,均不进节点表)。 */
 export type WorkflowNodeKey = Extract<
@@ -142,9 +142,11 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
       run: async (c: NodeRunContext): Promise<void> => {
         const multi = c.products.sessionBases.length > 1;
         // 断流重连多会话:一次 merge --merge-sessions 拼全部会话(视频 -c copy + 弹幕偏移合并)。
+        // --out-base 锁定 stem(= B 站标题),stage 与投稿同一串。
+        const outBase = shSingleQuote(products.dateName);
         const cmd = multi
-          ? `node dist/douyin-rec.mjs merge --in ${stageSub} --merge-sessions`
-          : `node dist/douyin-rec.mjs merge --in ${stageSub} --base ${c.products.sessionBase}`;
+          ? `node dist/douyin-rec.mjs merge --in ${stageSub} --merge-sessions --out-base ${outBase}`
+          : `node dist/douyin-rec.mjs merge --in ${stageSub} --base ${c.products.sessionBase} --out-base ${outBase}`;
         await c.sh(cmd);
         c.set("plain.mp4", products.plain);
         // 单会话才补拷源 xml 为 plain.xml;多会话的合并 xml 由 --merge-sessions 直接产出,不能覆盖。
@@ -334,7 +336,8 @@ class Semaphore {
   async acquire(): Promise<void> {
     if (this.active < this.max) { this.active++; return; }
     await new Promise<void>((resolve) => this.queue.push(resolve));
-    this.active++;
+    // release() 让渡时已 active++,这里不能再加,否则排队者持锁数会多 1,
+    // 永久泄漏一个许可(后续同资源任务全部卡死)。
   }
   release(): void {
     this.active--;
@@ -468,7 +471,9 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
     const row = ctx.ledger.getNodeState(streamKey, key);
     if (!row) return "pending";
     if (row.state === "done") return "done";
-    if (row.state === "skipped") return "skipped";
+    // skipped 是「禁用 / 父链跳过」的派生态:换配置重跑(如 stage → upload)时应重新计算,
+    // 否则上一轮被跳过的 upload/append 会永远卡死,任务 done 但 B 站没上传。
+    if (row.state === "skipped") return "pending";
     if (row.state === "failed") return autoRetry.has(key) ? "pending" : "failed";
     // blocked 只是「上游失败」的派生态:父节点重跑成功后应恢复可执行,不能永久卡死。
     return "pending"; // blocked / running/pending → 在流锁下不可能并发,按 pending 继续
@@ -609,4 +614,8 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
   const failed = nodes.filter((n) => state.get(n.key) === "failed").map((n) => n.key);
   const blocked = nodes.filter((n) => state.get(n.key) === "blocked").map((n) => n.key);
   return { ok: failed.length === 0 && blocked.length === 0, failed, blocked };
+}
+
+function shSingleQuote(s: string): string {
+  return "'" + s.replaceAll("'", "") + "'";
 }

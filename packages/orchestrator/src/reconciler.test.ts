@@ -939,4 +939,55 @@ describe("Reconciler.stopJob / runNow", () => {
     expect(spyRunPipeline.mock.calls[0][0].startMs).toBe(late.startMs);
     ledger.close();
   });
+
+  it("runNow: -N 后缀解析回 base 广播,用后缀 key 建独立 job(新建投稿)", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup();
+    const r = await reconciler.runNow({ streamKey: `${key}-1`, wait: true });
+    expect(r).toMatchObject({ ok: true, code: 200, streamKey: `${key}-1` });
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(spyRunPipeline.mock.calls[0][0].streamKey).toBe(`${key}-1`);
+    expect(ledger.get(`${key}-1`)?.state).toBe("done");
+    expect(ledger.get(key)).toBeNull(); // 原 key 不被占用/覆盖
+    ledger.close();
+  });
+
+  it("runNow: -N 后缀已 done+BV → 409(不重复建稿)", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup();
+    ledger.upsertPending(`${key}-1`);
+    ledger.markDone(`${key}-1`, "BV_SUB");
+    const r = await reconciler.runNow({ streamKey: `${key}-1`, wait: true });
+    expect(r).toMatchObject({ ok: false, code: 409 });
+    expect(spyRunPipeline).not.toHaveBeenCalled();
+    ledger.close();
+  });
+
+  it("runNow: -N 后缀按广播身份取房间 cfg(不回落全局 stage,上传节点不 skip)", async () => {
+    const ledger = freshLedger();
+    const t1 = makeTransport("node-1", [makeRec()]);
+    const transports = new Map([["node-1", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    pipelineDeps.cfg = { ...pipelineDeps.cfg, uploadMode: "stage" }; // 全局默认 stage,模拟真实回落陷阱
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => {
+        ledger.markDone(b.streamKey, "BV_NOW");
+        return { state: "done", bv: "BV_NOW" };
+      },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin",
+      transports,
+      ledger,
+      pipelineDeps,
+      runPipeline: spyRunPipeline,
+      settle: fastSettle,
+      sleep: fastSleep,
+      resolveCfg: () => ({ ...pipelineDeps.cfg, uploadMode: "upload" }),
+    });
+
+    const r = await reconciler.runNow({ streamKey: `${key}-1`, wait: true });
+    expect(r).toMatchObject({ ok: true, code: 200, streamKey: `${key}-1` });
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(spyRunPipeline.mock.calls[0][1].cfg.uploadMode).toBe("upload");
+    ledger.close();
+  });
 });

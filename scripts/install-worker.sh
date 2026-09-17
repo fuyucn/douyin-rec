@@ -7,8 +7,8 @@
 #   - 不执行 ssh-copy-id、tailscale up、cloudflared login 等认证动作。
 #
 # 用法:
-#   curl -fsSL https://github.com/fuyucn/douyin-rec/releases/download/v0.0.7/install-worker.sh \
-#     | sudo sh -s -- --version 0.0.7
+#   curl -fsSL https://github.com/fuyucn/douyin-rec/releases/latest/download/install-worker.sh \
+#     | sudo sh
 #
 # 默认从 GitHub Release 下载:
 #   douyin-rec-worker-linux-amd64.tar.gz
@@ -18,7 +18,7 @@
 set -eu
 
 REPO="${DREC_REPO:-fuyucn/douyin-rec}"
-VERSION="${DREC_VERSION:-}"
+VERSION="${DREC_VERSION:-latest}"
 ROOT="${DREC_ROOT:-/srv/drec}"
 PORT="${DREC_PORT:-7860}"
 HOST="${DREC_HOST:-127.0.0.1}"
@@ -36,7 +36,7 @@ usage() {
   install-worker.sh [选项]
 
 选项:
-  --version <x.y.z>       发布版本；使用默认 GitHub Release 时必填
+  --version <x.y.z>       固定发布版本（默认 latest）
   --root <dir>            数据根与安装目录（默认 /srv/drec）
   --port <n>              worker 监听端口（默认 7860）
   --host <host>           监听地址（默认 127.0.0.1，不向公网暴露）
@@ -107,15 +107,19 @@ case "$ROOT" in
   *[[:space:]]*) fail "--root 暂不支持空格: $ROOT" ;;
 esac
 
-if [ -z "$ARCHIVE" ] && [ -z "$VERSION" ]; then
-  fail "使用默认 GitHub Release 时必须传 --version，例如 --version 0.0.7"
-fi
 if [ -z "$VERSION" ]; then
-  VERSION="dev"
+  VERSION="latest"
 fi
-if [ "$VERSION" != "dev" ] && ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-  fail "版本号必须是 x.y.z，收到: $VERSION"
-fi
+case "$VERSION" in
+  latest) ;;
+  dev)
+    [ -n "$ARCHIVE" ] || fail "使用 dev 时必须同时传 --archive"
+    ;;
+  *)
+    printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+      || fail "版本号必须是 x.y.z 或 latest，收到: $VERSION"
+    ;;
+esac
 
 OS="$(uname -s)"
 RAW_ARCH="$(uname -m)"
@@ -153,7 +157,14 @@ case "$API_HOST" in
 esac
 
 if [ -z "$ARCHIVE" ]; then
-  ARCHIVE="https://github.com/${REPO}/releases/download/v${VERSION}/douyin-rec-worker-linux-${ARCH}.tar.gz"
+  case "$VERSION" in
+    latest)
+      ARCHIVE="https://github.com/${REPO}/releases/latest/download/douyin-rec-worker-linux-${ARCH}.tar.gz"
+      ;;
+    *)
+      ARCHIVE="https://github.com/${REPO}/releases/download/v${VERSION}/douyin-rec-worker-linux-${ARCH}.tar.gz"
+      ;;
+  esac
 fi
 
 TMP="$(mktemp -d)"
@@ -216,10 +227,11 @@ fi
 tar -xzf "$ARCHIVE_FILE" -C "$TMP"
 [ -f "$TMP/dist/douyin-rec.mjs" ] || fail "归档缺少 dist/douyin-rec.mjs"
 [ -x "$TMP/bin/mesio" ] || fail "归档缺少可执行文件 bin/mesio"
+INSTALLED_VERSION="$(cat "$TMP/VERSION" 2>/dev/null || printf '%s' "$VERSION")"
 
 if [ "$DRY_RUN" -eq 1 ]; then
   printf '✓ dry-run 通过\n'
-  printf '  version: %s\n' "$VERSION"
+  printf '  version: %s\n' "$INSTALLED_VERSION"
   printf '  root:    %s\n' "$ROOT"
   printf '  listen:  %s:%s\n' "$HOST" "$PORT"
   printf '  user:    %s\n' "$SERVICE_USER"
@@ -292,6 +304,7 @@ if [ "$START" -eq 1 ]; then
 fi
 
 printf '\n✓ worker 已安装\n'
+printf '  version: %s\n' "$INSTALLED_VERSION"
 printf '  service: %s\n' "$SERVICE"
 printf '  root:    %s\n' "$ROOT"
 printf '  listen:  %s:%s\n' "$HOST" "$PORT"

@@ -72,19 +72,27 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
     ...(overrides.cfg ?? {}),
   };
   const stageSub = join(cfg.stageDir, "douyin_test-room_2026-06-27");
-  const dateName = "主播名_2026-06-27";
+  const fallbackStem = "主播名_2026-06-27";
+  const stemOf = (cmd: string): string => {
+    const quoted = /--out-base\s+'([^']+)'/.exec(cmd);
+    if (quoted?.[1]) return quoted[1];
+    const bare = /--out-base\s+(\S+)/.exec(cmd);
+    return bare?.[1] ?? fallbackStem;
+  };
   // 模拟 merge/burn 的真实产物,让 workflow 输入/输出安全阀通过(与真实子命令一致)。
   const sh = vi.fn<(cmd: string) => Promise<void>>().mockImplementation(async (cmd: string) => {
     if (cmd.includes(" merge ")) {
+      const dateName = stemOf(cmd);
       mkdirSync(stageSub, { recursive: true });
       writeFileSync(join(stageSub, "src.ts"), "x");
       writeFileSync(join(stageSub, "danmu.xml"), "x");
       writeFileSync(join(stageSub, `${dateName}.mp4`), "x");
       writeFileSync(join(stageSub, `${dateName}.xml`), "x");
-    } else if (cmd.includes("--style danmu")) {
-      writeFileSync(join(stageSub, `${dateName}_danmu.mp4`), "x");
-    } else if (cmd.includes("--style livechat")) {
-      writeFileSync(join(stageSub, `${dateName}_livechat.mp4`), "x");
+    } else if (cmd.includes("--style danmu") || cmd.includes("--style livechat")) {
+      const video = /--video\s+(\S+)/.exec(cmd)?.[1] ?? "";
+      const stem = (video.split("/").pop() ?? fallbackStem).replace(/\.mp4$/i, "");
+      const style = cmd.includes("--style livechat") ? "_livechat.mp4" : "_danmu.mp4";
+      writeFileSync(join(stageSub, stem + style), "x");
     }
   });
   const uploadPlain = vi.fn<(plain: { video?: string; public?: boolean }) => Promise<string>>().mockResolvedValue("BV123");
@@ -261,6 +269,27 @@ describe("runPipeline", () => {
       expect(errEvent.message).toContain("断流");
     }
     expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("needs_manual");
+    deps.ledger.close();
+  });
+
+  it("titleTemplate 同时用于 stage stem 和 B 站标题,并锁定 outputStem", async () => {
+    const broadcast = makeBroadcast([
+      { workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
+    ]);
+    const seed = makeDeps();
+    const deps = makeDeps({
+      cfg: { ...seed.cfg, uploadMeta: { ...seed.cfg.uploadMeta, titleTemplate: "{name}_{date}_{HHmmss}" } },
+    });
+    seed.ledger.close();
+    deps.ledger.upsertPending(broadcast.streamKey);
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("done");
+    expect(deps.ledger.get(broadcast.streamKey)?.outputStem).toBe("主播名_2026-06-27_080000");
+    const uploaded = (deps.uploadPlain as Mock).mock.calls[0][0] as { title?: string; video?: string };
+    expect(uploaded.title).toBe("主播名_2026-06-27_080000");
+    expect(uploaded.video).toContain("主播名_2026-06-27_080000.mp4");
+    const mergeCmd = deps.sh.mock.calls.map((c) => c[0] as string).find((c) => c.includes(" merge "));
+    expect(mergeCmd).toContain("--out-base '主播名_2026-06-27_080000'");
     deps.ledger.close();
   });
 

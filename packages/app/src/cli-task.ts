@@ -257,16 +257,17 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         log.error(`--engine 仅支持 ${platform.engines.join(" | ")}(平台 ${platform.id})`);
         process.exit(2);
       }
-      // 短链入库即转换:v.douyin.com/XXX → https://live.douyin.com/<web_rid>。
+      // 短链/用户名入库即转换 → 数字 web_rid。
       let room = o.room;
-      if (/v\.douyin\.com\//.test(room)) {
+      const initialSlug = platform.extractRoomSlug(room);
+      if (platform.resolveShortUrl && !/^\d+$/.test(initialSlug)) {
         const { resolveShortUrl } = await import("./anchor.js");
         const webRid = await resolveShortUrl(room);
         if (webRid) {
           room = `https://live.douyin.com/${webRid}`;
-          log.info(`短链已转换 → ${room}`);
+          log.info(`房间地址已转换 → ${room}`);
         } else {
-          log.warn(`短链解析失败,按原样存(运行时仍会内部解析): ${room}`);
+          log.warn(`web_rid 解析失败,按原样存(运行时仍会内部解析): ${room}`);
         }
       }
       const t = store.addTask({

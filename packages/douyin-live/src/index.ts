@@ -12,8 +12,8 @@ import { createLogger, type Platform, type PlatformStream } from "@drec/core";
 import { ListenerDanmuSource, type DanmaClientCtor } from "./danmaku/listener-base.js";
 
 const log = createLogger("stream_processor");
-import { getStream, getInfo, resolveShortURL } from "./stream/index.js";
-export { getStream, getInfo, resolveShortURL } from "./stream/index.js";
+import { getStream, getInfo, resolveShortURL, resolveWebRid } from "./stream/index.js";
+export { getStream, getInfo, resolveShortURL, resolveWebRid } from "./stream/index.js";
 export type { GetStreamResult, GetInfoResult, StreamProfile, SourceProfile } from "./stream/index.js";
 
 /** 抖音画质档(从高到低)。通用层用 string;此处是抖音的具体取值。 */
@@ -27,16 +27,48 @@ export type DouyinEngine = (typeof DOUYIN_ENGINES)[number];
 export { probeStream } from "./probe.js";
 export type { StreamProbe, QualityInfo } from "./probe.js";
 
-/** 房间 URL / 房间号 → web_rid(短链需先 resolveShortURL)。 */
+/** 房间 URL / 用户名 / web_rid → 直播间 slug(短链需先 resolveShortURL)。 */
 export function extractRoomSlug(url: string): string {
-  const m = url.match(/live\.douyin\.com\/(\d+)/);
-  return m ? m[1] : url;
+  const trimmed = url.trim();
+  const m = trimmed.match(/^https?:\/\/live\.douyin\.com\/([^/?#]+)/);
+  return m ? decodeURIComponent(m[1]) : trimmed;
 }
 
 /** 房间号或 URL → 抖音规范直播 URL。 */
 export function roomToUrl(room: string): string {
   if (/^https?:\/\//.test(room)) return room;
   return `https://live.douyin.com/${room}`;
+}
+
+/**
+ * 用户名/短链 → 数字 web_rid。
+ *
+ * live.douyin.com 页面即使未开播也会保留最后一次 room.id_str 与主播 sec_uid；
+ * mobile reflow/info 用这两个值可以反查 owner.web_rid。数字 web_rid 直接返回。
+ */
+export async function resolveDouyinWebRid(room: string): Promise<string | null> {
+  let slug = extractRoomSlug(room);
+  if (/^https?:\/\//.test(slug)) {
+    if (!/v\.douyin\.com\//.test(room)) return null;
+    try {
+      slug = String(await resolveShortURL(room));
+    } catch (e) {
+      log.error(`短链解析失败 (${room}):`, (e as Error)?.message ?? e);
+      return null;
+    }
+  }
+  if (/^\d+$/.test(slug)) return slug;
+
+  try {
+    const info = await getInfo(slug, { api: "webHTML" });
+    const roomId = String(info?.liveId ?? "").trim();
+    const secUid = String(info?.uid ?? "").trim();
+    if (!roomId || !secUid) return null;
+    return await resolveWebRid(roomId, secUid);
+  } catch (e) {
+    log.error(`解析 web_rid 失败 room=${slug}:`, (e as Error)?.message ?? e);
+    return null;
+  }
 }
 
 /**
@@ -100,7 +132,7 @@ export const douyinPlatform: Platform = {
   roomToUrl,
   extractRoomSlug,
   async resolveShortUrl(url) {
-    const id = await resolveShortURL(url);
+    const id = await resolveDouyinWebRid(url);
     return id ? String(id) : null;
   },
   async fetchAnchorName(room) {

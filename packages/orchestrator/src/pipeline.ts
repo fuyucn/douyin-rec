@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { isJobAbort, runWithJob, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { isJobAbort, resolveOutputStem, runWithJob, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/app";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
@@ -34,7 +34,9 @@ export interface PipelineCfg {
   uploadMode: "stage" | "upload";
   /** 仅 upload 时有意义:true(默认)= 仅自己可见,false = 公开。 */
   uploadPrivate?: boolean;
-  uploadMeta: { tag: string; tid: number; desc?: string };
+  uploadMeta: { tag: string; tid: number; desc?: string; titleTemplate?: string };
+  /** 渲染 {date}/{time} 回退用(sessionBase 解析不到时);缺省 Asia/Shanghai。 */
+  timeZone?: string;
   steps?: PipelineSteps;
   cleanup?: PipelineCleanup;
   /** reconciler 硬过滤用:非空 → 只处理这些 worker 的录像;缺省/空 = 全部(向后兼容)。pipeline 本身不读。 */
@@ -232,7 +234,19 @@ async function runPipelineInner(
 
   // Merge and burn from the stageSub directory
   ledger.setState(streamKey, "merging");
-  const dateName = winner.rec.sessionBase.replace(/_\d{2}-\d{2}-\d{2}$/, "");
+  const earliest = winnerMembers.reduce((a, m) => (m.rec.startMs < a.rec.startMs ? m : a));
+  const derived = deriveStageProducts(stageSub);
+  const existingStem = (ledger.get(streamKey)?.outputStem ?? "").trim()
+    || (derived && existsSync(derived.plain) ? derived.dateName : "");
+  const dateName = resolveOutputStem({
+    template: cfg.uploadMeta.titleTemplate,
+    sessionBase: earliest.rec.sessionBase,
+    startMs: earliest.rec.startMs || b.startMs,
+    timeZone: cfg.timeZone,
+    existingStem,
+  });
+  ledger.setOutputStem(streamKey, dateName);
+  jlog(`产物 stem / 标题: ${dateName}`);
   const plain = path.join(stageSub, dateName + ".mp4");
   const danmuMp4 = path.join(stageSub, dateName + "_danmu.mp4");
   const livechatMp4 = path.join(stageSub, dateName + "_livechat.mp4");
@@ -309,6 +323,15 @@ async function runPipelineInner(
     return { state: "needs_manual" };
   }
 
+  // upload 模式但 bv 为空 = P1 没真正传上去(例如 upload_plain 被旧 skipped 状态卡住)。
+  // 绝不能假装 done/发 uploadDone,否则 UI 显示完成、B 站其实没有稿。
+  if (!bv) {
+    jlog(`upload 模式但 P1 未上传(bv 为空),转人工`);
+    ledger.setState(streamKey, "needs_manual", { error: "upload 模式但 P1 未上传(bv 为空),请重跑或人工上传" });
+    notify({ kind: "error", stage: "上传", message: `${streamKey} upload 模式但 P1 未上传(bv 为空),请人工处理` });
+    return { state: "needs_manual" };
+  }
+
   jlog(`P1 上传完成: ${bv}`);
   ledger.markDone(streamKey, bv!);
   notify({ kind: "uploadDone", bv: bv!, url: `https://www.bilibili.com/video/${bv!}` });
@@ -345,11 +368,47 @@ async function resumeAppends(
   const isPublic = cfg.uploadPrivate === false;
 
   const prod = deriveStageProducts(stageSub);
+  if (!prod) {
+    jlog(`续跑失败:stage 产物缺失(可能已清理),转人工。`);
+    ledger.setState(streamKey, "needs_manual", { error: `续跑失败:bv=${bv} 但 stage 产物缺失,请人工补 append` });
+    notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });
+    return { state: "needs_manual", bv };
+  }
+  // 续跑前先修复失败的烧录节点:docker crash / 中断可能留下半成品(文件在但缺 moov),
+  // 直接 append 会把坏文件传上去;烧录是本地产物,重烧不会重复投稿。
+  const burnRepairs: Array<{ step: "burn_danmu" | "burn_livechat"; on: boolean }> = [
+    { step: "burn_danmu", on: burnDanmu },
+    { step: "burn_livechat", on: burnLivechat },
+  ];
+  for (const br of burnRepairs) {
+    if (!br.on) continue;
+    if (ledger.getNodeState(streamKey, br.step)?.state !== "failed") continue;
+    jlog(`续跑发现失败节点 ${br.step},先重烧再 append`);
+    const workflow = buildWorkflow({
+      streamKey, stageSub, products: prod, deps, cfg,
+      log: jlog, willUpload: true, burnDanmu, burnLivechat, mergeSegments: 0,
+    });
+    const repaired = await runWorkflowNodes({
+      streamKey,
+      nodes: workflow.nodes.filter((n) => n.key === br.step),
+      edges: [],
+      ctx: workflow.ctx,
+      pool: deps.pool ?? new ResourcePool(),
+      forceRetry: new Set<WorkflowNodeKey>([br.step]),
+    });
+    if (!repaired.ok) {
+      const err = ledger.getNodeState(streamKey, br.step)?.error ?? `重烧失败: ${br.step}`;
+      jlog(`续跑重烧 ${br.step} 失败,转人工: ${err}`);
+      ledger.setState(streamKey, "needs_manual", { error: err });
+      notify({ kind: "error", stage: "上传", message: `续跑重烧 ${br.step} 失败,请人工处理: ${err}` });
+      return { state: "needs_manual", bv };
+    }
+  }
   const need = [
     ...(burnDanmu ? [prod?.danmuMp4] : []),
     ...(burnLivechat ? [prod?.livechatMp4] : []),
   ].filter((f): f is string => !!f);
-  if (!prod || need.some((f) => !existsSync(f))) {
+  if (need.some((f) => !existsSync(f))) {
     jlog(`续跑失败:stage 产物缺失(可能已清理),转人工。need=${JSON.stringify(need)}`);
     ledger.setState(streamKey, "needs_manual", { error: `续跑失败:bv=${bv} 但 stage 产物缺失,请人工补 append` });
     notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });

@@ -17,8 +17,9 @@ export interface HubPipelineConfig {
   /**
    * 上传:`mode` = stage(只合成不传)/ upload(传 B站);缺省 stage。
    * `private` 仅 mode=upload 时有意义:true(默认)= 仅自己可见,false = 公开。tag/tid/desc 为该稿 metadata。
+   * `titleTemplate` 同时用于 B 站标题和 stage 产物 stem;空 = `{name}_{date}`。
    */
-  upload?: { mode?: "stage" | "upload"; private?: boolean; tag?: string; tid?: number; desc?: string };
+  upload?: { mode?: "stage" | "upload"; private?: boolean; tag?: string; tid?: number; desc?: string; titleTemplate?: string };
 }
 
 /** hub 规则里「录制下发」的配置:绑定 master 本地 task,自动同步到选中的 worker 节点。 */

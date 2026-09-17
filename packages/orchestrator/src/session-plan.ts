@@ -65,3 +65,18 @@ export function deriveStageProducts(stageSub: string): StageProducts | null {
     xmlArg: xmlFile ? joinPath(stageSub, xmlFile) : "",
   };
 }
+
+/** 把产物路径改到锁定的 stem(重跑时优先 ledger.outputStem,避免改模板后找不到已合成文件)。 */
+export function withOutputStem(p: StageProducts, stem: string): StageProducts {
+  const s = stem.trim();
+  if (!s || s === p.dateName) return p;
+  const dir = p.plain.slice(0, p.plain.lastIndexOf("/") + 1);
+  return {
+    ...p,
+    dateName: s,
+    plain: `${dir}${s}.mp4`,
+    danmuMp4: `${dir}${s}_danmu.mp4`,
+    livechatMp4: `${dir}${s}_livechat.mp4`,
+    plainXml: `${dir}${s}.xml`,
+  };
+}

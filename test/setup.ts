@@ -19,7 +19,7 @@ const fakeDouyin: Platform = {
   matchUrl: (url) => /(?:live|v)\.douyin\.com\//.test(url),
   roomToUrl: (room) => (/^https?:\/\//.test(room) ? room : `https://live.douyin.com/${room}`),
   extractRoomSlug: (url) => {
-    const m = url.match(/live\.douyin\.com\/(\d+)/);
+    const m = url.match(/^https?:\/\/live\.douyin\.com\/([^/?#]+)/);
     return m ? m[1] : url;
   },
   resolveShortUrl: async () => null,

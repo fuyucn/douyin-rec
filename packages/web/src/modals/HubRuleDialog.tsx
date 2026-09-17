@@ -30,6 +30,7 @@ interface FormState {
   uploadTag: string;
   uploadTid: string;
   uploadDesc: string;
+  uploadTitle: string;
   /** 绑定的 master 任务 id;null = 不下发录制。 */
   sourceTaskId: number | null;
 }
@@ -49,6 +50,7 @@ const BLANK: FormState = {
   uploadTag: "",
   uploadTid: "21",
   uploadDesc: "",
+  uploadTitle: "",
   sourceTaskId: null,
 };
 
@@ -70,6 +72,7 @@ function fromRule(r: HubRuleDTO): FormState {
     uploadTag: c.upload?.tag ?? "",
     uploadTid: String(c.upload?.tid ?? 21),
     uploadDesc: c.upload?.desc ?? "",
+    uploadTitle: c.upload?.titleTemplate ?? "",
     sourceTaskId: r.recording?.sourceTaskId ?? null,
   };
 }
@@ -82,6 +85,27 @@ function slugOfRoom(room: string): string {
   if (/^\d+$/.test(r)) return r;
   const q = r.indexOf("?");
   return q >= 0 ? r.slice(0, q) : r;
+}
+
+
+const TITLE_TOKEN_RE = /\{([A-Za-z]+)\}/g;
+function previewTitle(template: string, name: string): string {
+  const t = template.trim() || "{name}_{date}";
+  const parts: Record<string, string> = {
+    name, user: name, owner: name,
+    date: "2026-09-12",
+    time: "14-30-05",
+    datetime: "2026-09-12_14-30-05",
+    yyyy: "2026", YYYY: "2026", year: "2026",
+    MM: "09", month: "09",
+    dd: "12", day: "12",
+    HH: "14", hh: "14", hour: "14",
+    mm: "30", min: "30",
+    ss: "05", sec: "05",
+    HHmm: "1430",
+    HHmmss: "143005",
+  };
+  return t.replace(TITLE_TOKEN_RE, (raw, key: string) => parts[key] ?? raw);
 }
 
 /** Hub 规则的创建/编辑弹窗:按房间(roomSlug)配置后处理 pipeline。 */
@@ -173,6 +197,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           tag: form.uploadTag.trim() || undefined,
           tid: Number(form.uploadTid) || 21,
           desc: form.uploadDesc.trim() || undefined,
+          titleTemplate: form.uploadTitle.trim() || undefined,
         },
       },
     };
@@ -337,6 +362,31 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
               <div className="sm:col-span-2">
                 <label className="field-label">{t("hub.ruleDialog.tagLabel")}</label>
                 <input className="input" placeholder={t("hub.ruleDialog.tagPlaceholder")} value={form.uploadTag} onChange={(e) => set("uploadTag", e.target.value)} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="field-label">{t("hub.ruleDialog.titleTemplateLabel")}</label>
+                <input
+                  className="input font-mono text-sm"
+                  placeholder="{name}_{date}"
+                  value={form.uploadTitle}
+                  onChange={(e) => set("uploadTitle", e.target.value)}
+                />
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {(["{name}_{date}", "{name}_{date}_{HH}-{mm}", "{name}_{date}_{HH}-{mm}-{ss}"] as const).map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      className="text-[11px] font-mono px-2 py-0.5 rounded border border-hairline text-muted hover:text-ink"
+                      onClick={() => set("uploadTitle", preset)}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-muted-soft mt-1">
+                  {t("hub.ruleDialog.titleTemplateHint")}
+                  <span className="font-mono text-body ml-1">{previewTitle(form.uploadTitle, selectedTask?.name || rule?.anchorName || "主播名")}</span>
+                </p>
               </div>
               <div className="sm:col-span-2">
                 <label className="field-label">{t("hub.ruleDialog.descLabel")}</label>

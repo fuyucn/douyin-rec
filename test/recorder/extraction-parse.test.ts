@@ -45,6 +45,10 @@ describe("extractRoomSlug — 房间 URL → web_rid", () => {
     expect(extractRoomSlug("https://live.douyin.com/105633855291")).toBe("105633855291");
     expect(extractRoomSlug("https://live.douyin.com/105633855291?x=1")).toBe("105633855291");
   });
+  it("从完整 URL 取用户名 slug", () => {
+    expect(extractRoomSlug("https://live.douyin.com/zhiroubabee")).toBe("zhiroubabee");
+    expect(extractRoomSlug("https://live.douyin.com/sy051314.?x=1")).toBe("sy051314.");
+  });
   it("裸房间号原样;短链原样(由 resolveShortURL 另解)", () => {
     expect(extractRoomSlug("105633855291")).toBe("105633855291");
     expect(extractRoomSlug("https://v.douyin.com/abc/")).toBe("https://v.douyin.com/abc/");

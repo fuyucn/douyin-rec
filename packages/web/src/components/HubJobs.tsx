@@ -278,6 +278,9 @@ function PipelineFlowInner({
   const nodeErrorOf = (key: string): string | undefined =>
     job.nodeStates.find((n) => n.node === key && n.state !== "done")?.error ?? undefined;
   const RETRYABLE = new Set(["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat"]);
+  // 运行中 run 的失败节点可能是上一轮崩溃残留,而续跑已经在处理该轨道(append 中);
+  // 此刻点重跑会排队/与续跑冲突,故只在终态(failed / needs_manual)才显示节点级重跑。
+  const nodeRetryVisible = TERMINAL.has(job.state) && onRetry != null;
   const termStatus: NodeStatus =
     job.state === "failed" ? "failed" : job.state === "done" ? "done" : job.state === "needs_manual" ? "done" : "todo";
   const termLabel = job.state === "needs_manual" ? labels.needs_manual : job.state === "failed" ? labels.failed : t("hub.jobs.termDone");
@@ -290,7 +293,7 @@ function PipelineFlowInner({
         status: st[n.key]?.status ?? "todo",
         sec: st[n.key]?.sec ?? null,
         detail: nodeErrorOf(n.key) ?? detailOf(n.key),
-        onRetry: (st[n.key]?.status === "failed" || st[n.key]?.status === "blocked") && RETRYABLE.has(n.key) && onRetry
+        onRetry: (st[n.key]?.status === "failed" || st[n.key]?.status === "blocked") && RETRYABLE.has(n.key) && nodeRetryVisible
           ? () => onRetry(n.key)
           : undefined,
         metric: n.key === "select"

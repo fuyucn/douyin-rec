@@ -139,6 +139,22 @@ describe("createTask → resolveAnchor 创建即抓主播名", () => {
     // 后台转换后入库为 live.douyin.com/<web_rid>
     expect(s.getTask(created.id)?.room).toBe("https://live.douyin.com/465721793855");
   });
+
+  it("用户名 → 创建后台转成数字 web_rid 入库", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const api2 = makeApi({
+      store: s,
+      manager: m,
+      resolveShortUrl: async (url) => (/zhiroubabee/.test(url) ? "900612215935" : null),
+    });
+    const created = api2.createTask({ room: "https://live.douyin.com/zhiroubabee" }).body as { id: number; room: string };
+    expect(created.room).toBe("https://live.douyin.com/zhiroubabee");
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(s.getTask(created.id)?.room).toBe("https://live.douyin.com/900612215935");
+  });
 });
 
 describe("listTasks", () => {
@@ -938,6 +954,17 @@ describe("hub rules workers 字段(校验 + 往返)", () => {
     const t = a.createTask({ room: "123456" }).body as { id: number };
     const r = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: [] });
     expect(r.status).toBe(400);
+  });
+  it("createHubRule 非法 titleTemplate → 400", () => {
+    const a = apiWithHubDir();
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    const r = a.createHubRule({
+      recording: { sourceTaskId: t.id },
+      workers: ["local"],
+      pipeline: { upload: { mode: "upload", titleTemplate: "{name}_{date}_{hh}:{mm}" } },
+    });
+    expect(r.status).toBe(400);
+    expect(String((r.body as { error?: string }).error ?? r.body)).toMatch(/非法字符|titleTemplate/);
   });
   it("createHubRule 带非空 workers → 201 且回显", () => {
     const a = apiWithHubDir();

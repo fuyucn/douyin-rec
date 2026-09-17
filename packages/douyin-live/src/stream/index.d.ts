@@ -26,6 +26,7 @@ export interface GetInfoResult {
   roomId: string;
   liveId: string;
   uid: string;
+  webRid?: string;
   api: string;
   area: string;
 }
@@ -40,3 +41,4 @@ export function getStream(opts: {
 }): Promise<GetStreamResult>;
 export function getInfo(channelId: string, opts?: { auth?: string; [k: string]: unknown }): Promise<GetInfoResult>;
 export function resolveShortURL(shortURL: string): Promise<string>;
+export function resolveWebRid(roomId: string, secUserId: string, opts?: Record<string, unknown>): Promise<string | null>;

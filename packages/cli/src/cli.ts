@@ -25,7 +25,7 @@ import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
-import { isJobAbort, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec } from "@drec/core";
+import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand } from "@drec/app";
 import type { HubStarter, UploadOpts } from "@drec/app";
@@ -316,7 +316,8 @@ program
   .option("--base <base>", "只合并指定会话基名（默认目录内全部会话）")
   .option("--merge-sessions", "把目录内全部会话按时间序拼成一片(断流重连合并用)")
   .option("--keep-time", "输出保留会话时间戳 {base}.mp4（默认剥成 {主播}_{日期}.mp4）")
-  .action(async (o: { in: string; base?: string; keepTime?: boolean; mergeSessions?: boolean }) => {
+  .option("--out-base <name>", "输出 stem(覆盖默认剥日期 / --keep-time;hub 标题模板用)")
+  .action(async (o: { in: string; base?: string; keepTime?: boolean; mergeSessions?: boolean; outBase?: string }) => {
     const notifier = toggledNotifier(webhookOf());
     try {
       const groups = groupSessions(readdirSync(o.in));
@@ -328,7 +329,7 @@ program
           tsFiles: groups[b].ts.map((f) => join(o.in, f)),
           xmlPath: groups[b].xml ? join(o.in, groups[b].xml) : undefined,
         }));
-        const outBase = ordered[0] ? dateNameOf(ordered[0]) : "";
+        const outBase = (o.outBase ?? "").trim() || (ordered[0] ? dateNameOf(ordered[0]) : "");
         if (!outBase) { console.error("[merge] --merge-sessions 目录内无会话"); process.exitCode = 2; return; }
         const outMp4 = join(o.in, `${outBase}.mp4`);
         const outXml = join(o.in, `${outBase}.xml`);
@@ -346,7 +347,7 @@ program
       for (const b of bases) {
         const g = groups[b];
         if (!g || g.ts.length === 0) { console.error(`[merge] 跳过 ${b}：无分段`); continue; }
-        const outBase = o.keepTime || clash[dateName(b)] > 1 ? b : dateName(b);
+        const outBase = (o.outBase ?? "").trim() || (o.keepTime || clash[dateName(b)] > 1 ? b : dateName(b));
         const out = join(o.in, `${outBase}.mp4`);
         console.log(`[merge] ${b}: ${g.ts.length} 段 → ${basename(out)}`);
         await mergeSession(g.ts.map((f) => join(o.in, f)), out);
@@ -531,7 +532,7 @@ const hubStarter: HubStarter = {
   async start(opts) {
     const {
       registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport,
-      buildWorkflow, runWorkflowNodes, deriveStageProducts, ResourcePool,
+      buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool,
     } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
@@ -555,7 +556,7 @@ const hubStarter: HubStarter = {
       reconnectWindowMs?: number;
       /** 投稿默认(per-task 文件留空时回退);旧字段 uploadMeta 也认(迁移兼容)。 */
       uploadDefaults?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string };
-      uploadMeta?: { tag?: string; tid?: number; desc?: string };
+      uploadMeta?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string };
       /** Max settle wait before reconciler proceeds regardless (seconds). */
       maxWaitSec?: number;
       /** Settle poll interval (seconds). */
@@ -666,7 +667,8 @@ const hubStarter: HubStarter = {
         cookies: hubCfg.cookies ?? "",
         uploadMode: "stage" as const, // 全局兜底 = 不自动传;每任务文件按需 mode:"upload"
         uploadPrivate: true,
-        uploadMeta: { tag: defaultTag, tid: defaultTid, desc: uploadDefaults.desc },
+        uploadMeta: { tag: defaultTag, tid: defaultTid, desc: uploadDefaults.desc, titleTemplate: uploadDefaults.titleTemplate },
+        timeZone: (opts.store.getSetting("timezone") ?? "").trim() || process.env.TZ || "Asia/Shanghai",
       },
     };
 
@@ -689,7 +691,9 @@ const hubStarter: HubStarter = {
           tag: p.upload?.tag || defaultTag,
           tid: p.upload?.tid ?? defaultTid,
           desc: p.upload?.desc ?? uploadDefaults.desc,
+          titleTemplate: (p.upload?.titleTemplate ?? "").trim() || uploadDefaults.titleTemplate,
         },
+        timeZone: (opts.store.getSetting("timezone") ?? "").trim() || process.env.TZ || "Asia/Shanghai",
         steps: p.steps,
         cleanup: p.cleanup,
         // worker 硬过滤:reconciler 据此把 broadcast members 收窄到选中的 worker。
@@ -824,6 +828,11 @@ const hubStarter: HubStarter = {
       const roomSlug = parts[1];
       const stageSub = join(hubCfg.stageDir ?? rootStageDir(), streamKey.replace(/[:/]/g, "_"));
       const job = ledger.get(streamKey);
+      // 同场 pipeline 正在跑(持流锁 / live job)→ 不排队,直接 409。
+      // 否则会静默等在锁后,等当前上传完成又重跑一次,造成重复烧录/重复分 P。
+      if (isJobLive(streamKey) || pool.hasStreamLock(streamKey)) {
+        return { ok: false, error: "任务正在执行,不能重跑节点", code: 409 };
+      }
       // 已建稿后重传 P1 会重复投稿;已有 append done 再跑 append 会重复分 P → 拒绝(除非 force 且 UI 二次确认)。
       if (node === "upload_plain" && job?.bv) {
         const appended = ["append_danmu", "append_livechat"].some(
@@ -842,11 +851,12 @@ const hubStarter: HubStarter = {
               return { ok: false, error: `房间未开 hub: ${streamKey}`, code: 400 };
             }
             ledger.backfillNodeStates(streamKey);
-            const products = deriveStageProducts(stageSub);
-            if (!products) {
+            const derived = deriveStageProducts(stageSub);
+            if (!derived) {
               ledger.setState(streamKey, "failed", { error: `stage 产物缺失,无法重跑: ${stageSub}` });
               return { ok: false, error: `stage 产物缺失,无法重跑: ${stageSub}`, code: 409 };
             }
+            const products = job?.outputStem ? withOutputStem(derived, job.outputStem) : derived;
             const workflow = buildWorkflow({
               streamKey, stageSub, products, deps: pipelineDeps, cfg, log: opts.log,
               willUpload: cfg.uploadMode === "upload",

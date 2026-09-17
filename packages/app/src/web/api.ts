@@ -16,8 +16,19 @@ import { join } from "node:path";
 import { groupSessions, mergeSessions } from "@drec/post-process";
 import { resolveMesioBin } from "@drec/record-engine";
 import { APP_VERSION } from "../version.js";
-import type { RecordingSessionDTO, HubRulePayload, HubRuleDTO, HubPipelineConfig, HubRecordingConfig, WorkerDTO, WorkerTestResult, WorkerStatus } from "@drec/core";
-import { listPlatforms, platformForRoom } from "@drec/core";
+import {
+  listPlatforms,
+  platformForRoom,
+  validateTitleTemplate,
+  type RecordingSessionDTO,
+  type HubRulePayload,
+  type HubRuleDTO,
+  type HubPipelineConfig,
+  type HubRecordingConfig,
+  type WorkerDTO,
+  type WorkerTestResult,
+  type WorkerStatus,
+} from "@drec/core";
 import * as hubStore from "../hub-store.js";
 import type { HubRule } from "../hub-store.js";
 import { parseSchedule, toDanmuFlag } from "../task-input.js";
@@ -351,8 +362,10 @@ export function makeApi(deps: ApiDeps): Api {
   const resolveAnchorBg = (taskId: number, room: string): void => {
     void (async () => {
       let r = room;
-      // 短链入库即转换:v.douyin.com/XXX → https://live.douyin.com/<web_rid>(写回 DB)。
-      if (deps.resolveShortUrl && /v\.douyin\.com\//.test(r)) {
+      // 短链/用户名入库即转换 → 数字 web_rid(写回 DB)。
+      const platform = platformForRoom(r);
+      const slug = platform.extractRoomSlug(r);
+      if (deps.resolveShortUrl && platform.resolveShortUrl && !/^\d+$/.test(slug)) {
         const webRid = await deps.resolveShortUrl(r).catch(() => null);
         if (webRid) {
           r = `https://live.douyin.com/${webRid}`;
@@ -389,6 +402,11 @@ export function makeApi(deps: ApiDeps): Api {
     if (!Array.isArray(w) || w.length === 0) return "workers 必须是非空 worker id 列表";
     if (!w.every((x) => typeof x === "string" && x.trim().length > 0)) return "workers 每项必须是非空字符串(worker id)";
     return null;
+  };
+  const validatePipeline = (input: HubRulePayload): string | null => {
+    const tmpl = input.pipeline?.upload?.titleTemplate;
+    if (tmpl == null || !String(tmpl).trim()) return null;
+    return validateTitleTemplate(String(tmpl));
   };
 
   // hub 规则 → DTO:补 anchorName(若有同 roomSlug 的录制任务,显示其主播名/任务名)。
@@ -826,6 +844,8 @@ export function makeApi(deps: ApiDeps): Api {
     createHubRule(input: HubRulePayload): ApiResult {
       const werr = validateWorkers(input);
       if (werr) return err(400, werr);
+      const perr = validatePipeline(input);
+      if (perr) return err(400, perr);
       const sourceTaskId = input.recording?.sourceTaskId;
       if (!sourceTaskId) return err(400, "新建 hub 规则必须绑定 source task（房间取自该任务）");
       const task = store.getTask(Number(sourceTaskId));
@@ -851,6 +871,8 @@ export function makeApi(deps: ApiDeps): Api {
     updateHubRule(key: string, input: HubRulePayload): ApiResult {
       const werr = validateWorkers(input);
       if (werr) return err(400, werr);
+      const perr = validatePipeline(input);
+      if (perr) return err(400, perr);
       const dot = key.indexOf(".");
       const ruleSlug = dot < 0 ? key : key.slice(dot + 1);
       const rerr = recordingError(input.recording?.sourceTaskId, ruleSlug);

@@ -377,9 +377,15 @@ export class Reconciler {
     if (this.loadTransports) this.transports = this.loadTransports();
     const transports = this.transports;
     const { broadcasts, cfgByKey } = await this.collect(transports, this.ledger.listKeys());
-    const found = pickBroadcast(broadcasts, streamKey);
+    // 新建任务(UI 用 -1/-2 后缀):录像身份仍是 base key,但 job/stage 用带后缀的新 key,
+    // 这样每次「立即执行」都是独立 hub 任务,不会续跑旧任务。
+    // 注意不能用裸 /-\d+$/ 判断:日期本身以 -DD 结尾(2026-08-27 会误判成 -27 后缀)。
+    const newSub = /^(.+?:\d{4}-\d{2}-\d{2}(?:_\d{4})?)-(\d+)$/.exec(streamKey);
+    const isNewSubmission = newSub != null;
+    const baseKey = isNewSubmission ? newSub![1] : streamKey;
+    const found = pickBroadcast(broadcasts, baseKey);
     if (!found || found.members.length === 0) {
-      return { ok: false, error: `没有可跑的录像: ${streamKey}`, code: 404 };
+      return { ok: false, error: `没有可跑的录像: ${baseKey}`, code: 404 };
     }
 
     const members = winnerWorker
@@ -388,7 +394,7 @@ export class Reconciler {
     if (members.length === 0) {
       return { ok: false, error: `节点 ${winnerWorker} 没有这场录像`, code: 404 };
     }
-    const b: Broadcast = { ...found, members };
+    const b: Broadcast = { ...found, streamKey: isNewSubmission ? streamKey : found.streamKey, members };
     const key = b.streamKey;
     if (isJobLive(key) || (this.pipelineDeps.pool?.hasStreamLock(key) ?? false)) {
       return { ok: false, error: "任务正在执行", code: 409 };
@@ -402,7 +408,9 @@ export class Reconciler {
     this.ledger.resetActiveNodes(key);
     this.ledger.setState(key, "retrying");
 
-    const cfg = cfgByKey.get(key) ?? this.pipelineDeps.cfg;
+    // 配置按广播身份(found.streamKey)缓存;新建任务 key 带 -N 后缀,直接按任务 key 查会
+    // miss 而回落成全局 stage 默认 → 上传节点全 skip。必须按 found 的原始广播身份查。
+    const cfg = cfgByKey.get(found.streamKey) ?? cfgByKey.get(key) ?? this.pipelineDeps.cfg;
     const fire = async (): Promise<void> => {
       try {
         await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });

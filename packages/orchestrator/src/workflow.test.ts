@@ -237,6 +237,7 @@ describe("buildWorkflow — 断流重连多会话合并", () => {
     const mergeCalls = t.sh.mock.calls.map((c) => c[0] as string).filter((cmd) => cmd.includes(" merge "));
     expect(mergeCalls).toHaveLength(1);
     expect(mergeCalls[0]).toContain("--merge-sessions");
+    expect(mergeCalls[0]).toContain("--out-base '主播名_2026-06-27'");
     expect(mergeCalls[0]).not.toContain("--base ");
     expect(t.ledger.getNodeState(STREAM_KEY, "merge")?.state).toBe("done");
     t.ledger.close();
@@ -264,6 +265,23 @@ describe("ResourcePool — cpu/net 串行与内存闸门", () => {
     expect(active.max).toBe(1); // 绝无两个 cpu 节点同时执行
     expect(events.map((e) => `${e.key}:${e.at}`)).toEqual(["merge:start", "merge:end", "burn_danmu:start", "burn_danmu:end"]);
     t.ledger.close();
+  });
+
+  it("cpu 排队任务释放后许可不泄漏(后续批次可复用)", async () => {
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let entered = 0;
+    const first = pool.withCpu(async () => { entered++; await gate; });
+    await vi.waitFor(() => expect(entered).toBe(1)); // 确认已持锁
+    const second = pool.withCpu(async () => { entered++; });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(entered).toBe(1); // 第二个在排队,不能并发
+    release();
+    await Promise.all([first, second]);
+    expect(entered).toBe(2);
+    // 许可泄漏回归:上一批释放后,新任务还能拿到锁(旧实现排队者 active 多 1,永久卡死)
+    await pool.withCpu(async () => {});
   });
 
   it("内存闸门:可用内存不足时 cpu 节点等待,充足后放行", async () => {
@@ -352,6 +370,32 @@ describe("runWorkflowNodes — 用户停止", () => {
     }))).rejects.toBeInstanceOf(JobAbortedError);
     expect(t.ledger.getNodeState(STREAM_KEY, "merge")?.state).toBe("blocked");
     expect(t.ledger.getNodeState(STREAM_KEY, "merge")?.error).toBe(USER_STOP);
+    t.ledger.close();
+  });
+});
+
+describe("runWorkflowNodes — 重跑语义", () => {
+  it("上一轮 skipped 的节点重新执行时不再永久跳过(enabled 后真正跑)", async () => {
+    const t = makeDeps();
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0 });
+    t.ledger.syncNodeState(STREAM_KEY, "upload_plain", "skipped");
+    let ran = 0;
+    const node: WorkflowNode = {
+      key: "upload_plain",
+      inputs: [],
+      outputs: [],
+      resource: "none",
+      run: async () => { ran++; },
+    };
+    await runWorkflowNodes({
+      streamKey: STREAM_KEY,
+      nodes: [node],
+      edges: [],
+      ctx: minimalCtx(t, pool),
+      pool,
+    });
+    expect(ran).toBe(1);
+    expect(t.ledger.getNodeState(STREAM_KEY, "upload_plain")?.state).toBe("done");
     t.ledger.close();
   });
 });

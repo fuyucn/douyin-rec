@@ -13,6 +13,8 @@ export interface JobRow {
   fails: number;
   /** 该场第一簇的开录时间(供同日多场 key 去重判断;旧库为 null)。 */
   startMs?: number | null;
+  /** 本场 stage stem / B 站标题(首次 merge 锁定,改模板不影响重跑)。旧库为 null。 */
+  outputStem?: string | null;
   updatedAt: number;
 }
 
@@ -66,6 +68,7 @@ export class SyncLedger {
     // 既有库迁移:补 fails 列(已存在则忽略)。
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN fails INTEGER NOT NULL DEFAULT 0"); } catch { /* 列已存在 */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN startMs INTEGER"); } catch { /* 列已存在 */ }
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN outputStem TEXT"); } catch { /* 列已存在 */ }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -155,6 +158,13 @@ export class SyncLedger {
   setBv(streamKey: string, bv: string): void {
     const at = this.now();
     this.db.prepare("UPDATE sync_jobs SET bv=?, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
+  }
+  /** 锁定本场产物 stem(不改 state、不写事件)。已有值不覆盖。 */
+  setOutputStem(streamKey: string, stem: string): void {
+    const existing = this.get(streamKey)?.outputStem?.trim();
+    if (existing) return;
+    const at = this.now();
+    this.db.prepare("UPDATE sync_jobs SET outputStem=?, updatedAt=? WHERE streamKey=?").run(stem, at, streamKey);
   }
   /** 某 step 的最新事件是否为 done(续跑用:跳过已完成的 append 组)。无该 step 事件 → false。 */
   isStepDone(streamKey: string, step: StepName): boolean {

@@ -38,9 +38,12 @@ sudo apt-get install -y ffmpeg
 发布版本：
 
 ```bash
-curl -fsSL https://github.com/fuyucn/douyin-rec/releases/download/v0.0.7/install-worker.sh \
-  | sudo sh -s -- --version 0.0.7
+curl -fsSL https://github.com/fuyucn/douyin-rec/releases/latest/download/install-worker.sh \
+  | sudo sh
 ```
+
+默认安装 GitHub 最新 Release。需要复现或固定版本时传
+`--version x.y.z`。
 
 默认安装位置是 `/srv/drec`，service 名为 `drec-worker`，只监听
 `127.0.0.1:7860`。SSH 登录用户默认继承 `sudo` 调用者，确保 master 通过 SSH
@@ -50,6 +53,7 @@ curl -fsSL https://github.com/fuyucn/douyin-rec/releases/download/v0.0.7/install
 
 ```text
 --root <dir>            数据根与安装目录
+--version <x.y.z>       固定发布版本（默认 latest）
 --port <n>              监听端口
 --host <host>           监听地址
 --user <name>           service 运行用户
@@ -158,5 +162,5 @@ douyin-rec-worker-linux-arm64.tar.gz
 
 ```bash
 pnpm bundle
-scripts/build-worker-release.sh --version 0.0.7 --arch all
+scripts/build-worker-release.sh --version 0.0.8 --arch all
 ```

@@ -21,6 +21,22 @@ function todayYmd(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/** 新建投稿序号:同 base key 已有 -N 则取最大 +1,否则从 -1 开始。 */
+function nextSubmissionNo(baseKey: string, runs: HubJobDTO[]): number {
+  const prefix = `${baseKey}-`;
+  const max = runs.reduce((acc, j) => {
+    const m = /-(\d+)$/.exec(j.streamKey);
+    return m && j.streamKey.startsWith(prefix) ? Math.max(acc, Number(m[1])) : acc;
+  }, 0);
+  return max + 1;
+}
+
+/** 去掉新建投稿的 -N 后缀(不能用裸 /-\d+$/ :日期本身以 -DD 结尾)。 */
+function submissionBaseKey(key: string): string {
+  const m = /^(.+?:\d{4}-\d{2}-\d{2}(?:_\d{4})?)-(\d+)$/.exec(key);
+  return m ? m[1] : key;
+}
+
 /** 产物 chips(plain 恒有;danmu/livechat 默认开,仅显式 false 才去掉)。 */
 function outputChips(r: HubRuleDTO): string[] {
   const c = r.pipeline ?? {};
@@ -62,6 +78,8 @@ export function RoomDetail({
   const [runCustom, setRunCustom] = useState(todayYmd());
   const [runWorker, setRunWorker] = useState("");
   const [runBusy, setRunBusy] = useState(false);
+  // 立即执行默认新建任务(id 自动 -1/-2),避免复用同一天旧任务导致“重试不像重试”。
+  const [runNew, setRunNew] = useState(true);
 
   const refresh = async (): Promise<void> => {
     try {
@@ -141,15 +159,18 @@ export function RoomDetail({
     setRunKey(runs[0]?.streamKey ?? CUSTOM_DATE);
     setRunCustom(runs[0] ? runDate(runs[0].streamKey).slice(0, 10) : todayYmd());
     setRunWorker("");
+    setRunNew(true);
     setRunOpen(true);
   };
   const submitRun = async (): Promise<void> => {
     const date = runCustom.trim();
-    const key = runKey === CUSTOM_DATE ? `${rule.platform}:${rule.roomSlug}:${date}` : runKey;
     if (runKey === CUSTOM_DATE && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       toast(t("hub.jobs.runNowDateHint"), "error");
       return;
     }
+    const selectedKey = runKey === CUSTOM_DATE ? `${rule.platform}:${rule.roomSlug}:${date}` : runKey;
+    const baseKey = submissionBaseKey(selectedKey);
+    const key = runNew ? `${baseKey}-${nextSubmissionNo(baseKey, runs)}` : selectedKey;
     setRunBusy(true);
     try {
       await runNow(key, runWorker || undefined);
@@ -158,6 +179,11 @@ export function RoomDetail({
       setRunBusy(false);
     }
   };
+  const nextSubmissionKey = ((): string => {
+    const selectedKey = runKey === CUSTOM_DATE ? `${rule.platform}:${rule.roomSlug}:${runCustom.trim()}` : runKey;
+    const baseKey = submissionBaseKey(selectedKey);
+    return `${baseKey}-${nextSubmissionNo(baseKey, runs)}`;
+  })();
 
   // 参与 worker:rule.workers 有值=选中的这些;缺省/空=全部节点。
   const participating = rule.workers && rule.workers.length > 0 ? rule.workers.map(workerName) : null;
@@ -272,6 +298,14 @@ export function RoomDetail({
               <input className="input" value={runCustom} onChange={(e) => setRunCustom(e.target.value)} placeholder={todayYmd()} />
             </div>
           )}
+          <div>
+            <label className="field-label">{t("hub.jobs.runNowMode")}</label>
+            <select className="input" value={runNew ? "new" : "resume"} onChange={(e) => setRunNew(e.target.value === "new")}>
+              <option value="resume">{t("hub.jobs.runNowResume")}</option>
+              <option value="new">{t("hub.jobs.runNowNew")}</option>
+            </select>
+          </div>
+          {runNew && <p className="text-[12px] text-muted-soft">{t("hub.jobs.runNowNewHint", { key: nextSubmissionKey })}</p>}
           <div>
             <label className="field-label">{t("hub.jobs.runNowWorker")}</label>
             <select className="input" value={runWorker} onChange={(e) => setRunWorker(e.target.value)}>

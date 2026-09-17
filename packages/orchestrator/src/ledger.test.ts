@@ -144,6 +144,19 @@ describe("ledger 列迁移 tenant→worker(幂等 RENAME COLUMN)", () => {
     l2.close();
   });
 
+  it("setOutputStem 只落一次,不改 state、已有值不覆盖", () => {
+    const l = fresh();
+    l.upsertPending("k1");
+    const before = l.getEvents("k1").length;
+    l.setOutputStem("k1", "主播_2026-09-12_143005");
+    expect(l.get("k1")?.outputStem).toBe("主播_2026-09-12_143005");
+    expect(l.get("k1")?.state).toBe("pending");
+    l.setOutputStem("k1", "别的");
+    expect(l.get("k1")?.outputStem).toBe("主播_2026-09-12_143005");
+    expect(l.getEvents("k1").length).toBe(before);
+    l.close();
+  });
+
   it("setBv 只落 bv 列,不改 state、不产生新事件", () => {
     const l = fresh();
     l.upsertPending("k1");                 // pending

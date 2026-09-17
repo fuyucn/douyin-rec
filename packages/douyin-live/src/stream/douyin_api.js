@@ -357,7 +357,7 @@ async function getRoomInfoByMobile(secUserId, opts = {}) {
         app_id: 1128,
         live_id: 1,
         verifyFp: "",
-        room_id: 2,
+        room_id: opts.roomId ?? 2,
         type_id: 0,
         sec_user_id: secUserId,
     };
@@ -381,7 +381,13 @@ async function getRoomInfoByMobile(secUserId, opts = {}) {
             id_str: room?.id_str,
             stream_url: room?.stream_url,
         },
+        webRid: room?.owner?.web_rid,
     };
+}
+/** 用「上一次/当前 room.id_str + sec_uid」离线反查稳定 web_rid。 */
+export async function resolveWebRid(roomId, secUserId, opts = {}) {
+    const data = await getRoomInfoByMobile(secUserId, { ...opts, roomId });
+    return String(data.webRid ?? "").trim() || null;
 }
 export async function getRoomInfo(webRoomId, opts = {}) {
     let data;
