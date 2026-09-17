@@ -8,7 +8,6 @@
 # 归档布局:
 #   dist/douyin-rec.mjs
 #   bin/mesio
-#   scripts/install-worker.sh
 #   VERSION
 set -euo pipefail
 
@@ -80,9 +79,8 @@ build_one() {
   arch_tmp="$(mktemp -d)"
   trap 'rm -rf "$stage" "$arch_tmp"' RETURN
 
-  mkdir -p "$stage/dist" "$stage/bin" "$stage/scripts"
+  mkdir -p "$stage/dist" "$stage/bin"
   cp "$BUNDLE" "$stage/dist/douyin-rec.mjs"
-  cp "$ROOT/scripts/install-worker.sh" "$stage/scripts/install-worker.sh"
   printf '%s\n' "$VERSION" >"$stage/VERSION"
 
   mesio_url="https://github.com/hua0512/rust-srec/releases/download/${MESIO_VERSION}/mesio-${ra}-unknown-linux-gnu"
