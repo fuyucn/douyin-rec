@@ -34,7 +34,7 @@ interface Props {
 /** 设置:分类 tabs —— 账号 Cookie(扫码/粘贴/清除)/ 全局 Webhook / 站内提醒开关。 */
 export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props): ReactNode {
   const t = useT();
-  const [lang] = useLang();
+  const [lang, setLang] = useLang();
   const toast = useToast();
   const refreshCookie = useRefreshCookie();
   const cookie = useAtomValue(cookieStatusAtom);
@@ -289,7 +289,22 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
 
       {tab === "engine" && (
         <div>
-          <h4 className="form-section">{t("settings.mesioSection")}</h4>
+          <h4 className="form-section">{t("settings.languageSection")}</h4>
+          <label className="field-label" htmlFor="settings-language">
+            {t("settings.languageLabel")}
+          </label>
+          <select
+            id="settings-language"
+            className="input text-xs"
+            value={lang}
+            onChange={(e) => setLang(e.target.value === "en" ? "en" : "zh")}
+          >
+            <option value="zh">{t("settings.languageZh")}</option>
+            <option value="en">{t("settings.languageEn")}</option>
+          </select>
+          <p className="mt-1 text-xs text-muted-soft">{t("settings.languageHint")}</p>
+
+          <h4 className="form-section mt-6">{t("settings.mesioSection")}</h4>
           <label className="field-label">{t("settings.mesioLabel")}</label>
           <div className="flex gap-2">
             <input

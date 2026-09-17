@@ -5,7 +5,6 @@ import { Settings } from "lucide-react";
 import { cookieStatusAtom, hubEnabledAtom } from "../atoms";
 import { RecordGlyph } from "../components/Brand";
 import { ThemeToggle } from "../components/ThemeToggle";
-import { LangToggle } from "../components/LangToggle";
 import { CookieDialog } from "../modals/CookieDialog";
 import { QrLoginDialog } from "../modals/QrLoginDialog";
 import { SettingsDialog } from "../modals/SettingsDialog";
@@ -103,7 +102,6 @@ export function TopNav(): ReactNode {
           >
             <Settings className="w-4 h-4" />
           </button>
-          <LangToggle />
           <ThemeToggle />
         </div>
       </div>
