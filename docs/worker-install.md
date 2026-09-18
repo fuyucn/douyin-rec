@@ -58,12 +58,57 @@ curl -fsSL https://raw.githubusercontent.com/fuyucn/douyin-rec/main/scripts/inst
 --host <host>           监听地址
 --user <name>           service 运行用户
 --service <name>        systemd service 名
+--packages <list>       base,web,hub（默认 base,web）
+--role <role>           worker|master（选择 hub 时自动为 master）
 --tunnel <mode>         none|tailscale|cloudflared
 --archive <path|url>    本地或私有镜像中的 worker tar.gz
 --tz <name>             时区
 --no-start              只安装，不启动
 --dry-run               检查参数和归档，不写系统
 ```
+
+## Packages 与角色
+
+默认安装完整 worker package：
+
+```text
+base + web
+```
+
+其中：
+
+- `base`：CLI/API、录制、弹幕、mesio、systemd 基础
+- `web`：Web UI 静态资源，依赖 `base`
+- `hub`：Hub 配置模板和 `--hub` 运行模式，依赖 `base + web`
+
+安装无 Web UI 的 headless worker：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fuyucn/douyin-rec/main/scripts/install-worker.sh \
+  | sudo sh -s -- --packages base
+```
+
+安装单机 master：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fuyucn/douyin-rec/main/scripts/install-worker.sh \
+  | sudo sh -s -- --packages base,web,hub --role master
+```
+
+master 模式会生成：
+
+```text
+<root>/config/hub.config.example.json
+```
+
+实际运行前配置：
+
+```text
+<root>/config/hub.config.json
+```
+
+安装器不会自动安装 `biliup`、Playwright/Chromium、CJK 字体等 master
+可选依赖；缺少时会在安装阶段给出 warning。
 
 ## Tunnel
 
@@ -146,8 +191,10 @@ sudo journalctl -u drec-worker -f
 curl -fsS http://127.0.0.1:7860/api/version
 ```
 
-升级 worker 时重新运行 install 命令即可。安装器会更新 bundle、mesio 和
-systemd 配置，但不会修改 SSH、Tailscale、Cloudflare 或任何用户凭据。
+升级时重新运行 install 命令即可。未显式传 `--packages` / `--role` 时，
+安装器会保留已写入 `/etc/<service>.env` 的原组合。安装器只更新受管
+package、systemd 配置和 env，不修改 SSH、Tailscale、Cloudflare、数据库、
+录像目录或用户凭据。
 
 ## 发布
 
