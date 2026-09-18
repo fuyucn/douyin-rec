@@ -202,10 +202,7 @@ export class TaskManager {
   /** Spawn a fresh process for the task and wire its exit handling. */
   private spawnFor(taskId: number): void {
     const task = this.store.getTask(taskId)!;
-    // Cookie resolution gated by the per-task useCookie toggle. Same
-    // resolveTaskCookies helper as buildSessionForTask → both paths stay in
-    // sync: useCookie=false → null → no --cookies → anonymous danmu; otherwise
-    // task.cookies override, else the global settings.defaultCookies.
+    // Platform-aware cookie resolution, shared with buildSessionForTask.
     const effective = {
       ...task,
       cookies: resolveTaskStreamCookies(task, this.store),

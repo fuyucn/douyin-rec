@@ -143,10 +143,12 @@ export const api = {
   /** 批量存活状态(卡片轮询):每 worker {id,ok,error?};hub 未开 → []。 */
   getWorkersStatus: (): Promise<WorkerStatus[]> => request("GET", "/api/hub/workers/status"),
 
-  // ── Global cookie ────────────────────────────────────────────────────────
-  getCookie: (): Promise<CookieStatus> => request("GET", "/api/cookie"),
-  setCookie: (cookie: string): Promise<CookieStatus> => request("POST", "/api/cookie", { cookie }),
-  clearCookie: (): Promise<CookieStatus> => request("DELETE", "/api/cookie"),
+  // ── Per-platform cookies ─────────────────────────────────────────────────
+  getCookies: (): Promise<{ platforms: CookieStatus[] }> => request("GET", "/api/cookies"),
+  getCookie: (platform = "douyin"): Promise<CookieStatus> => request("GET", `/api/cookies/${platform}`),
+  setCookie: (cookie: string, platform = "douyin"): Promise<CookieStatus> =>
+    request("POST", `/api/cookies/${platform}`, { cookie }),
+  clearCookie: (platform = "douyin"): Promise<CookieStatus> => request("DELETE", `/api/cookies/${platform}`),
 
   // ── 全局 Discord webhook ────────────────────────────────────────────────────
   getWebhook: (): Promise<{ webhook: string }> => request("GET", "/api/webhook"),

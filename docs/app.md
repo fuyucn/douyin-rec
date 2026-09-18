@@ -72,19 +72,19 @@ Web POST /api/tasks/:id/start   或   Daemon tick（进入窗口）
 
 已知键：`discordWebhook`（webhook 兜底）、`defaultCookies`（**全局账号 cookie**，所有任务共享；扫码登录 / `cookie set` / 手动粘贴写入）、`outDir`（输出目录兜底）。这些在 `buildSessionForTask` 里作为 task 字段缺省时的回退来源。
 
-**cookie 的用途**：抖音 cookie 只为弹幕的**礼物（gift）+ 入场（member）**服务；抖音视频拉流仍匿名。B 站不同：高画质取流会使用 B 站登录 cookie，优先任务覆盖 / `settings.bilibiliCookies`，否则复用 biliup `cookies.json`。⚠️ 抖音 getInfo/取流一律匿名，避免异地登录踢手机（见 `docs/douyin-kick-investigation.md`）。
+**cookie 的用途**：平台 cookie 独立保存于 `settings.platformCookies`。抖音 cookie 只为弹幕的**礼物（gift）+ 入场（member）**服务；抖音视频拉流仍匿名。B 站高画质取流会使用 B 站登录 cookie，未显式配置时复用 biliup `cookies.json`。⚠️ 抖音 getInfo/取流一律匿名，避免异地登录踢手机（见 `docs/douyin-kick-investigation.md`）。
 
 **cookie 两层模型**：
 
-1. **全局 cookie**（账号级）：登录一次，所有任务共用 `settings.defaultCookies`（扫码登录 / `cookie set` / 手动粘贴写入）。
-2. **每任务 `useCookie` 开关**（任务级，默认 true）：决定该任务是否把全局 cookie 传给录制器。每任务的 `tasks.cookies` 列仍保留，作为 `useCookie=true` 时的**可选覆盖**（仅 `task add --cookies-file` 设置；Web 创建的任务恒为 `null`）。
+1. **平台 cookie**（账号级）：每个平台独立保存于 `settings.platformCookies`；抖音兼容使用 `settings.defaultCookies`。
+2. **每任务 `useCookie` 开关**（任务级，默认 true）：决定该任务是否把本平台 cookie 传给录制器。每任务的 `tasks.cookies` 列仍保留，作为 `useCookie=true` 时的**可选覆盖**。
 
-运行时解析由 `store.ts` 的纯函数 `resolveTaskCookies(task, globalCookie)` 统一实现，两条录制路径共用：
+运行时解析由 `stream-cookies.ts` 的 `resolveTaskStreamCookies(task, store)` 统一实现，两条录制路径共用：
 
 - `useCookie=false` → `null`（匿名:仅评论弹幕,无礼物/入场),即使全局已设置也不传 cookie。
-- `useCookie=true` → `task.cookies ?? globalCookie ?? null`（`getDefaultCookies()` 把空字符串视为未设置 → `null`）。
+- `useCookie=true` → `task.cookies ?? platformCookie ?? null`；B 站还可回退 biliup cookies.json。
 
-`cli-task.ts buildSessionForTask`（`task run` 路径，结果落到 `RecordOpts.cookies`）与 `task-manager.ts spawnFor`（子进程路径，结果落到 `effective.cookies` → `buildRecordArgs` 仅在非空时追加 `--cookies`）都调用 `resolveTaskCookies`，因此两路一致。
+`cli-task.ts buildSessionForTask`（`task run` 路径）与 `task-manager.ts spawnFor`（子进程路径）都调用 `resolveTaskStreamCookies`，因此两路一致。
 
 ---
 
@@ -244,9 +244,9 @@ interface ExitInfo { code: number | null; signal: NodeJS.Signals | null; expecte
 
 其他错误：未知路由→404；请求体非合法 JSON→400；处理器抛错→500。
 
-**全局 cookie 端点（`/api/cookie`）**：读写 `settings.defaultCookies`（全局账号 cookie）。`GET` 返回**隐私安全状态**——`set`=非空，`hasSession`=含 `sessionid`/`sessionid_ss`，`length`=字符数，**绝不回传原始 cookie 值**。`POST` 手动粘贴设置（trim 后非空校验）；`DELETE` 置空（空字符串视为未设置）。QR 登录 `POST /api/login/qr` 仍直接写 `defaultCookies`，无需经此端点。
+**平台 cookie 端点**：`/api/cookies` 列表；`/api/cookies/:platform` 读取/设置/清除。旧 `/api/cookie` 仍映射抖音。`GET` 只返回隐私安全状态，绝不回传原始值；`POST` 手动粘贴；`DELETE` 清除。QR 登录仍写抖音兼容键 `defaultCookies`。
 
-**`CreateTaskInput`** 字段（均可选，除 `room`）：`room`（必填，trim 后非空）· `name` · `quality`（默认 `origin`）· `engine`（按 `platform.engines` 校验,非法/省略→平台默认 `ffmpeg`；store 层兜底）· `danmu`（number/boolean，默认 1）· `segmentSec`（默认 1800）· `useCookie`（number/boolean，强制转 boolean，默认 true）· `outDir` · `schedule`（`"HH:MM-HH:MM"`，解析为 `scheduleStart`/`scheduleEnd`）· 或直接 `scheduleStart`/`scheduleEnd`。`cookies` 字段仍被后端接受（CLI override 路径），但 **Web 创建表单不再发送**——cookie 全局化，Web 任务恒为 `null`、走全局 cookie。Web 创建表单含「使用 cookie 抓弹幕(礼物)」开关（默认开）→ 以 `useCookie` 字段发送；任务表格新增 `cookie`(用/否) 列展示该状态。`listTasks` 返回的 `TaskView` 含 `useCookie`。
+**`CreateTaskInput`** 字段（均可选，除 `room`）：`room`（必填，trim 后非空）· `name` · `quality`（默认 `origin`）· `engine`（按 `platform.engines` 校验,非法/省略→平台默认 `ffmpeg`；store 层兜底）· `danmu`（number/boolean，默认 1）· `segmentSec`（默认 1800）· `useCookie`（number/boolean，强制转 boolean，默认 true）· `outDir` · `schedule`（`"HH:MM-HH:MM"`，解析为 `scheduleStart`/`scheduleEnd`）· 或直接 `scheduleStart`/`scheduleEnd`。`cookies` 字段仍被后端接受作为 per-task override；Web 创建的任务通常为 `null`，走平台 Cookie。
 
 > 注意：`engine` 的校验与归一化已下沉到 `store.addTask`/`updateTask`（唯一真理 = `platform.engines`）；非法/省略 → 平台默认引擎，Web API 不单独报错。
 
@@ -369,11 +369,11 @@ Web/CLI 层与 `QrLogin` 会话之间的中间层，**最多一个**活跃会话
 | POST | `/api/login/qr` | - | `{ sessionId, qrPng }`（`qrPng` 为 base64 PNG）| 200；未装 playwright→501；`start()` 抛错→500 |
 | GET | `/api/login/qr/:sid` | - | `{ state }`（不回传原始 cookie；`confirmed` 时 cookie 已由 manager 落库到 `defaultCookies`）| 200；未知会话→404；未装 playwright→501 |
 
-`:sid` 由路由正则 `^/api/login/qr/([A-Za-z0-9_-]+)$` 提取。SPA 端（全局 cookie 面板的「扫码登录」按钮）：点击 → `POST` 拿二维码 → 每 2 秒 `GET` 轮询 → `confirmed` 时 server 已把 cookie 落到 `defaultCookies`，前端只刷新 `GET /api/cookie` 状态徽标（不接触原始 cookie）；`expired`/出错则停轮询。
+`:sid` 由路由正则 `^/api/login/qr/([A-Za-z0-9_-]+)$` 提取。SPA 端（平台 cookie 面板的「扫码登录」按钮）：点击 → `POST` 拿二维码 → 每 2 秒 `GET` 轮询 → `confirmed` 时 server 已把抖音 cookie 落到 `defaultCookies`，前端刷新 `/api/cookies/douyin` 状态；`expired`/出错则停轮询。
 
 ### 依赖与优雅降级
 
-`playwright` 是可选依赖（`pnpm add playwright && npx playwright install chromium`），且在 `esbuild.config.mjs` 标记为 external——它自带原生浏览器二进制，无法打进单文件 bundle。`PlaywrightQrLogin.start()` 里动态 `import("playwright")`，未装时抛 `未安装 playwright…`，经 api 变成 500（端点本身在 `login` manager 缺席时才返回 501）。无论哪种，扫码登录失败都不影响其余功能——可在全局 cookie 面板「手动粘贴」cookie（`POST /api/cookie`），或终端 `cookie set` 照常工作。
+`playwright` 是可选依赖（`pnpm add playwright && npx playwright install chromium`），且在 `esbuild.config.mjs` 标记为 external——它自带原生浏览器二进制，无法打进单文件 bundle。`PlaywrightQrLogin.start()` 里动态 `import("playwright")`，未装时抛 `未安装 playwright…`，经 api 变成 500（端点本身在 `login` manager 缺席时才返回 501）。扫码登录失败不影响 B 站或手动 Cookie：可在平台 Cookie 面板粘贴（`POST /api/cookies/:platform`），或终端 `cookie set --platform <id>`。
 
 ---
 

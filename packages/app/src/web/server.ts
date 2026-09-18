@@ -40,9 +40,13 @@ export interface RouteMatch {
     | "stopTask"
     | "startLogin"
     | "pollLogin"
+    | "listCookies"
     | "getCookie"
     | "setCookie"
     | "clearCookie"
+    | "getCookiePlatform"
+    | "setCookiePlatform"
+    | "clearCookiePlatform"
     | "getWebhook"
     | "setWebhook"
     | "testWebhook"
@@ -107,6 +111,10 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "getCookie", methods: ["GET"], pattern: /^\/api\/cookie$/ },
   { name: "setCookie", methods: ["POST"], pattern: /^\/api\/cookie$/, needsBody: true },
   { name: "clearCookie", methods: ["DELETE"], pattern: /^\/api\/cookie$/ },
+  { name: "listCookies", methods: ["GET"], pattern: /^\/api\/cookies$/ },
+  { name: "getCookiePlatform", methods: ["GET"], pattern: /^\/api\/cookies\/([A-Za-z0-9_-]+)$/, param: "slug" },
+  { name: "setCookiePlatform", methods: ["POST"], pattern: /^\/api\/cookies\/([A-Za-z0-9_-]+)$/, param: "slug", needsBody: true },
+  { name: "clearCookiePlatform", methods: ["DELETE"], pattern: /^\/api\/cookies\/([A-Za-z0-9_-]+)$/, param: "slug" },
   { name: "startLogin", methods: ["POST"], pattern: /^\/api\/login\/qr$/ },
   { name: "pollLogin", methods: ["GET"], pattern: /^\/api\/login\/qr\/([A-Za-z0-9_-]+)$/, param: "sid" },
   { name: "testWebhook", methods: ["POST"], pattern: /^\/api\/webhook\/test$/, needsBody: true },
@@ -289,6 +297,16 @@ async function dispatch(
     }
     case "clearCookie":
       return api.clearCookie();
+    case "listCookies":
+      return api.listCookies();
+    case "getCookiePlatform":
+      return api.getCookie(match.slug!);
+    case "setCookiePlatform": {
+      const body = (await readJson(req)) as { cookie?: string };
+      return api.setCookie(body ?? {}, match.slug!);
+    }
+    case "clearCookiePlatform":
+      return api.clearCookie(match.slug!);
     case "getWebhook":
       return api.getWebhook();
     case "setWebhook": {

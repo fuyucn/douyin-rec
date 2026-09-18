@@ -279,12 +279,15 @@ export interface TaskDetailDTO extends TaskDTO {
   runtime: TaskRuntime;
 }
 
-/** GET /api/cookie 的全局 cookie 状态。 */
+/** GET /api/cookie(s/:platform) 的平台 cookie 状态。 */
 export interface CookieStatus {
+  platform: string;
   set: boolean;
   hasSession: boolean;
   length: number;
   expiresAt: number | null;
+  /** settings = platformCookies/defaultCookies; biliup = cookies.json fallback. */
+  source: "settings" | "biliup" | "none";
 }
 
 /** GET /api/tasks/:id/recordings 的单个会话项(合成选择器用)。 */

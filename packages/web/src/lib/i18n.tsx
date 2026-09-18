@@ -58,7 +58,7 @@ const DICT = {
     cookie: {
       checking: "检查中…", loggedIn: "已登录", expired: "登录已过期", expiresIn: "剩 {days} 天过期",
       loggedInDays: "已登录 · 剩 {days} 天", noSession: "无 session", notSet: "未设置",
-      clearConfirm: "清除全局 Cookie？所有任务将变为匿名连接。", cleared: "全局 Cookie 已清除", clearFailed: "清除失败: {msg}",
+      clearConfirm: "清除当前平台 Cookie？相关任务将变为匿名或降级连接。", cleared: "平台 Cookie 已清除", clearFailed: "清除失败: {msg}",
     },
     footer: { tagline: "抖音直播录制 · 弹幕捕获 · 后处理" },
     tasks: {
@@ -105,7 +105,8 @@ const DICT = {
     settings: {
       title: "设置", tabAccount: "账号", tabWebhook: "Webhook", tabEngine: "综合", tabNotif: "通知", tabAbout: "关于",
       aboutSection: "关于", aboutVersion: "版本",
-      accountSection: "抖音账号 Cookie", accountHint: "扫码登录或手动粘贴 cookie。作用:抓礼物 + 入场(视频/评论匿名即可)。所有任务共享。",
+      accountSection: "平台账号 Cookie", cookiePlatformLabel: "平台",
+      accountHint: "每个平台独立保存。抖音 Cookie 用于礼物/入场弹幕；B站 Cookie 用于高画质取流。也可自动复用 biliup 的 B站 cookies.json。",
       notifSection: "站内提醒", webhookSection: "全局通知 Webhook",
       languageSection: "界面语言", languageLabel: "语言", languageHint: "切换后立即生效，并保存在当前浏览器。",
       languageZh: "简体中文", languageEn: "English",
@@ -141,7 +142,7 @@ const DICT = {
       stPending: "待扫码", stScanned: "已扫码，请在手机上确认", stConfirmed: "登录成功，已保存 Cookie", stExpired: "二维码已过期，请重试",
     },
     paste: {
-      title: "手动粘贴 Cookie", desc: "全局账号 cookie,所有任务共享。作用:登录后弹幕能抓【礼物 + 入场】(视频拉流与评论弹幕匿名即可,无需 cookie)。含 sessionid 才算已登录。", placeholder: "sessionid=...; sessionid_ss=...; ttwid=...; ...",
+      title: "手动粘贴 Cookie", desc: "保存当前平台的登录 Cookie。抖音用于礼物/入场弹幕；B站用于高画质取流。", placeholder: "sessionid=...; sessionid_ss=...; ttwid=...; ...",
       saved: "Cookie 已保存", saveFailed: "保存失败: {msg}", empty: "Cookie 不能为空",
       stUnset: "当前：未设置", stLoggedIn: "当前：已登录", stSetNoSession: "当前：已设置（无 sessionid）",
       expiredOn: "{base} · 登录已于 {date} 过期", validUntil: "{base} · 有效期至 {date}（剩 {days} 天）",
@@ -247,7 +248,7 @@ const DICT = {
     cookie: {
       checking: "Checking…", loggedIn: "Logged in", expired: "Login expired", expiresIn: "{days}d left",
       loggedInDays: "Logged in · {days}d left", noSession: "No session", notSet: "Not set",
-      clearConfirm: "Clear the global cookie? All tasks will connect anonymously.", cleared: "Global cookie cleared", clearFailed: "Clear failed: {msg}",
+      clearConfirm: "Clear this platform cookie? Related tasks may become anonymous or fall back to lower quality.", cleared: "Platform cookie cleared", clearFailed: "Clear failed: {msg}",
     },
     footer: { tagline: "Douyin live recording · danmu capture · post-processing" },
     tasks: {
@@ -294,7 +295,8 @@ const DICT = {
     settings: {
       title: "Settings", tabAccount: "Account", tabWebhook: "Webhook", tabEngine: "General", tabNotif: "Notifications", tabAbout: "About",
       aboutSection: "About", aboutVersion: "Version",
-      accountSection: "Douyin account cookie", accountHint: "QR-login or paste a cookie. Used to capture gifts + entries (video/comments work anonymously). Shared by all tasks.",
+      accountSection: "Platform account cookies", cookiePlatformLabel: "Platform",
+      accountHint: "Each platform stores its cookie independently. Douyin is used for gift/entry danmu; Bilibili is used for high-quality streams. Bilibili can also reuse biliup cookies.json.",
       notifSection: "In-app notifications", webhookSection: "Global notification webhook",
       languageSection: "Interface language", languageLabel: "Language", languageHint: "Takes effect immediately and is saved in this browser.",
       languageZh: "简体中文", languageEn: "English",
@@ -330,7 +332,7 @@ const DICT = {
       stPending: "Awaiting scan", stScanned: "Scanned, confirm on your phone", stConfirmed: "Logged in, cookie saved", stExpired: "QR expired, retrying",
     },
     paste: {
-      title: "Paste cookie", desc: "Global account cookie, shared by all tasks. Purpose: once logged in, danmu can capture [gifts + entries] (video pull and comment danmu work anonymously, no cookie needed). A sessionid means logged in.", placeholder: "sessionid=...; sessionid_ss=...; ttwid=...; ...",
+      title: "Paste cookie", desc: "Save a login cookie for the selected platform. Douyin uses it for gift/entry danmu; Bilibili uses it for higher stream quality.", placeholder: "sessionid=...; sessionid_ss=...; ttwid=...; ...",
       saved: "Cookie saved", saveFailed: "Save failed: {msg}", empty: "Cookie cannot be empty",
       stUnset: "Current: not set", stLoggedIn: "Current: logged in", stSetNoSession: "Current: set (no sessionid)",
       expiredOn: "{base} · login expired on {date}", validUntil: "{base} · valid until {date} ({days}d left)",

@@ -23,14 +23,16 @@ function cookieStatusLine(c: { set: boolean; hasSession: boolean; expiresAt: num
 interface Props {
   open: boolean;
   onClose: () => void;
+  platform?: string;
 }
 
-/** Manual cookie paste modal (set the global Douyin cookie). */
-export function CookieDialog({ open, onClose }: Props): ReactNode {
+/** Manual cookie paste modal (set one platform's cookie). */
+export function CookieDialog({ open, onClose, platform = "douyin" }: Props): ReactNode {
   const t = useT();
   const toast = useToast();
   const refreshCookie = useRefreshCookie();
-  const cookie = useAtomValue(cookieStatusAtom);
+  const atomCookie = useAtomValue(cookieStatusAtom);
+  const [cookie, setCookie] = useState<typeof atomCookie>(atomCookie);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -38,10 +40,11 @@ export function CookieDialog({ open, onClose }: Props): ReactNode {
   useEffect(() => {
     if (open) {
       setValue("");
+      void api.getCookie(platform).then(setCookie).catch(() => setCookie(null));
       const t = setTimeout(() => ref.current?.focus(), 50);
       return () => clearTimeout(t);
     }
-  }, [open]);
+  }, [open, platform]);
 
   async function save(): Promise<void> {
     const cookie = value.trim();
@@ -51,7 +54,8 @@ export function CookieDialog({ open, onClose }: Props): ReactNode {
     }
     setBusy(true);
     try {
-      await api.setCookie(cookie);
+      const status = await api.setCookie(cookie, platform);
+      setCookie(status);
       onClose();
       toast(t("paste.saved"), "success");
       await refreshCookie();
@@ -76,7 +80,9 @@ export function CookieDialog({ open, onClose }: Props): ReactNode {
         ref={ref}
         rows={4}
         className="textarea font-mono text-xs"
-        placeholder="sessionid=...; sessionid_ss=...; ttwid=...; ..."
+        placeholder={platform === "bilibili"
+          ? "SESSDATA=...; bili_jct=...; DedeUserID=...; ..."
+          : "sessionid=...; sessionid_ss=...; ttwid=...; ..."}
         value={value}
         onChange={(e) => setValue(e.target.value)}
       />

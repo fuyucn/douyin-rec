@@ -39,6 +39,21 @@ describe("resolveTaskCookies", () => {
   });
 });
 
+describe("platform cookie storage", () => {
+  it("stores platforms independently and keeps Douyin defaultCookies compatibility", () => {
+    const store = new TaskStore(":memory:");
+    store.setPlatformCookies("douyin", "sessionid=DY");
+    store.setPlatformCookies("bilibili", "SESSDATA=BI");
+    expect(store.getDefaultCookies()).toBe("sessionid=DY");
+    expect(store.getPlatformCookies("douyin")).toBe("sessionid=DY");
+    expect(store.getPlatformCookies("bilibili")).toBe("SESSDATA=BI");
+    store.setPlatformCookies("bilibili", "");
+    expect(store.getPlatformCookies("douyin")).toBe("sessionid=DY");
+    expect(store.getPlatformCookies("bilibili")).toBeNull();
+    store.close();
+  });
+});
+
 /** Resolve effective cookies exactly as TaskManager.spawnFor does. */
 function effective(task: Task, store: TaskStore): Task {
   return { ...task, cookies: resolveTaskStreamCookies(task, store) };
@@ -74,7 +89,7 @@ describe("subprocess path — effective task + buildRecordArgs", () => {
   it("bilibili 使用 bilibiliCookies，而不是抖音 defaultCookies", () => {
     const store = new TaskStore(":memory:");
     store.setSetting("defaultCookies", GLOBAL);
-    store.setSetting("bilibiliCookies", "SESSDATA=BI");
+    store.setPlatformCookies("bilibili", "SESSDATA=BI");
     const t = store.addTask({ room: "https://live.bilibili.com/6", useCookie: true });
     expect(resolveTaskStreamCookies(t, store)).toBe("SESSDATA=BI");
     store.close();
@@ -82,7 +97,7 @@ describe("subprocess path — effective task + buildRecordArgs", () => {
 
   it("bilibili task.cookies override 优先于 bilibiliCookies", () => {
     const store = new TaskStore(":memory:");
-    store.setSetting("bilibiliCookies", "SESSDATA=BI");
+    store.setPlatformCookies("bilibili", "SESSDATA=BI");
     const t = store.addTask({ room: "https://live.bilibili.com/6", useCookie: true, cookies: "SESSDATA=OVERRIDE" });
     expect(resolveTaskStreamCookies(t, store)).toBe("SESSDATA=OVERRIDE");
     store.close();

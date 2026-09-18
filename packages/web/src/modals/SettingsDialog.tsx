@@ -9,7 +9,7 @@ import { Switch } from "../components/Switch";
 import { errMessage, useRefreshCookie, useToast } from "../lib/hooks";
 import { useT, useLang } from "../lib/i18n";
 import { getToggles, setToggle, NOTIF_KEYS, type NotifKey } from "../lib/notifications";
-import type { NotifWebhookToggles } from "@drec/contracts";
+import type { CookieStatus, NotifWebhookToggles } from "@drec/contracts";
 
 type Tab = "account" | "webhook" | "engine" | "notif" | "about";
 
@@ -28,7 +28,7 @@ interface Props {
   onClose: () => void;
   /** 打开扫码登录 / 手动粘贴(对话框由 TopNav 渲染,这里只触发)。 */
   onOpenQr: () => void;
-  onOpenPaste: () => void;
+  onOpenPaste: (platform: string) => void;
 }
 
 /** 设置:分类 tabs —— 账号 Cookie(扫码/粘贴/清除)/ 全局 Webhook / 站内提醒开关。 */
@@ -37,7 +37,9 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const [lang, setLang] = useLang();
   const toast = useToast();
   const refreshCookie = useRefreshCookie();
-  const cookie = useAtomValue(cookieStatusAtom);
+  const douyinCookie = useAtomValue(cookieStatusAtom);
+  const [cookiePlatform, setCookiePlatform] = useState("douyin");
+  const [cookieStatuses, setCookieStatuses] = useState<CookieStatus[]>([]);
   const setServerTimezone = useSetAtom(serverTimezoneAtom);
   const [tab, setTab] = useState<Tab>("engine");
   const [toggles, setToggles] = useState(getToggles());
@@ -62,6 +64,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   useEffect(() => {
     if (!open) return;
     setToggles(getToggles());
+    void api.getCookies().then((r) => setCookieStatuses(r.platforms)).catch(() => {});
     void api.getNotifSettings().then((r) => setWebhookToggles(r)).catch(() => {});
     void api.getWebhook().then((r) => setWebhook(r.webhook)).catch(() => {});
     void api.getMesioPath().then((r) => { setMesioPath(r.mesioPath); setMesioDefault(r.default); }).catch(() => {});
@@ -190,8 +193,10 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const doClearCookie = async (): Promise<void> => {
     setConfirmClear(false);
     try {
-      await api.clearCookie();
+      await api.clearCookie(cookiePlatform);
       toast(t("cookie.cleared"), "info");
+      const status = await api.getCookies().catch(() => null);
+      if (status) setCookieStatuses(status.platforms);
       await refreshCookie();
     } catch (e) {
       toast(t("cookie.clearFailed", { msg: errMessage(e) }), "error");
@@ -199,6 +204,8 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   };
 
   // 账号 cookie 状态行(复用顶栏 pill 逻辑)。
+  const cookie = cookieStatuses.find((c) => c.platform === cookiePlatform)
+    ?? (cookiePlatform === "douyin" ? douyinCookie : null);
   let statusText = t("cookie.checking");
   let statusColor = "var(--warning)";
   if (cookie) {
@@ -244,13 +251,25 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       {tab === "account" && (
         <div>
           <h4 className="form-section">{t("settings.accountSection")}</h4>
+          <label className="field-label" htmlFor="settings-cookie-platform">
+            {t("settings.cookiePlatformLabel")}
+          </label>
+          <select
+            id="settings-cookie-platform"
+            className="input mb-3 text-xs"
+            value={cookiePlatform}
+            onChange={(e) => setCookiePlatform(e.target.value)}
+          >
+            <option value="douyin">Douyin</option>
+            <option value="bilibili">Bilibili</option>
+          </select>
           <div className="status-strip mb-3">
             <span className="dot" style={{ background: statusColor }} />
             <span className="text-body">{statusText}</span>
           </div>
           <div className="flex gap-2">
-            <Button small onClick={onOpenQr}>{t("nav.login")}</Button>
-            <Button small variant="secondary" onClick={onOpenPaste}>{t("nav.paste")}</Button>
+            {cookiePlatform === "douyin" && <Button small onClick={onOpenQr}>{t("nav.login")}</Button>}
+            <Button small variant="secondary" onClick={() => onOpenPaste(cookiePlatform)}>{t("nav.paste")}</Button>
             <Button small variant="secondary" style={{ color: "var(--error-fg)" }} onClick={() => setConfirmClear(true)}>
               {t("nav.clear")}
             </Button>

@@ -40,6 +40,7 @@ import { resolveWebhookToggles, DEFAULT_WEBHOOK_TOGGLES, type NotifWebhookToggle
 import { resolveOutputDir } from "../paths.js";
 import type { Task, TaskStore } from "../store.js";
 import { resolveTaskCookies } from "../store.js";
+import { readBiliupCookieHeader } from "../upload/biliup.js";
 import type { TaskRuntime } from "../task-manager.js";
 import { inWindow, nowMinutesLocal } from "../scheduler.js";
 import type { MergeJobStore } from "../merge-jobs.js";
@@ -161,7 +162,7 @@ export interface CreateTaskInput {
   danmu?: number | boolean;
   segmentSec?: number;
   cookies?: string | null;
-  /** Per-task: pass the global cookie to the recorder? Default true. */
+  /** Per-task: pass its platform cookie to the recorder? Default true. */
   useCookie?: boolean | number;
   outDir?: string | null;
   /** "HH:MM-HH:MM"; parsed into scheduleStart/scheduleEnd. */
@@ -201,8 +202,9 @@ function err(status: number, message: string): ApiResult {
 /** Settings key for the GLOBAL Douyin account cookie (shared by all tasks). */
 export const DEFAULT_COOKIES_KEY = "defaultCookies";
 
-/** A cookie string has a usable login session if it carries sessionid[_ss]. */
-function hasSessionCookie(cookie: string): boolean {
+/** A cookie string has a usable login session for the target platform. */
+function hasSessionCookie(cookie: string, platform: string): boolean {
+  if (platform === "bilibili") return /(?:^|;\s*)SESSDATA=/.test(cookie);
   return /(?:^|;\s*)sessionid(?:_ss)?=/.test(cookie);
 }
 
@@ -222,23 +224,31 @@ export function parseCookieExpiry(cookie: string): number | null {
   return (loginTs + maxAge) * 1000;
 }
 
-/** Public status of the global cookie (never leaks the raw value). */
+/** Public status of one platform cookie (never leaks the raw value). */
 export interface CookieStatus {
+  platform: string;
   set: boolean;
   hasSession: boolean;
   length: number;
   /** 登录态过期时间（epoch ms），解析自 sid_guard；解析不出为 null。 */
   expiresAt: number | null;
+  source: "settings" | "biliup" | "none";
 }
 
 /** Derive the privacy-safe status from a stored (possibly empty/null) value. */
-function cookieStatus(value: string | null): CookieStatus {
+function cookieStatus(
+  platform: string,
+  value: string | null,
+  source: CookieStatus["source"] = value ? "settings" : "none",
+): CookieStatus {
   const v = (value ?? "").trim();
   return {
+    platform,
     set: v.length > 0,
-    hasSession: v.length > 0 && hasSessionCookie(v),
+    hasSession: v.length > 0 && hasSessionCookie(v, platform),
     length: v.length,
-    expiresAt: v.length > 0 ? parseCookieExpiry(v) : null,
+    expiresAt: platform === "douyin" && v.length > 0 ? parseCookieExpiry(v) : null,
+    source: v ? source : "none",
   };
 }
 
@@ -271,12 +281,14 @@ export interface Api {
   startLogin(): Promise<ApiResult>;
   /** GET /api/login/qr/:sid — poll → { state, cookie? }. */
   pollLogin(sessionId: string): Promise<ApiResult>;
-  /** GET /api/cookie — global cookie status (never the raw value). */
-  getCookie(): ApiResult;
-  /** POST /api/cookie { cookie } — set the global cookie (manual paste). */
-  setCookie(input: { cookie?: string }): ApiResult;
-  /** DELETE /api/cookie — clear the global cookie. */
-  clearCookie(): ApiResult;
+  /** GET /api/cookies — status for every registered platform. */
+  listCookies(): ApiResult;
+  /** GET /api/cookie[s/:platform] — platform cookie status (never the raw value). */
+  getCookie(platform?: string): ApiResult;
+  /** POST /api/cookie[s/:platform] { cookie } — set a platform cookie (manual paste). */
+  setCookie(input: { cookie?: string }, platform?: string): ApiResult;
+  /** DELETE /api/cookie[s/:platform] — clear a platform cookie. */
+  clearCookie(platform?: string): ApiResult;
   /** GET /api/webhook — global Discord webhook (settings.discordWebhook). */
   getWebhook(): ApiResult;
   /** POST /api/webhook { webhook } — set/clear the global Discord webhook. */
@@ -462,6 +474,17 @@ export function makeApi(deps: ApiDeps): Api {
     const sub = (t.name ? sanitizeSeg(t.name) : "") || (anchor ? sanitizeSeg(anchor) : "");
     return sub ? join(outDir, sub) : null;
   };
+
+  const platformCookie = (platform: string): { value: string | null; source: CookieStatus["source"] } => {
+    const stored = store.getPlatformCookies(platform);
+    if (stored) return { value: stored, source: "settings" };
+    if (platform === "bilibili") {
+      const biliup = readBiliupCookieHeader();
+      if (biliup) return { value: biliup, source: "biliup" };
+    }
+    return { value: null, source: "none" };
+  };
+  const validCookiePlatform = (platform: string): boolean => listPlatforms().some((p) => p.id === platform);
 
   return {
     listTasks(): ApiResult {
@@ -666,21 +689,37 @@ export function makeApi(deps: ApiDeps): Api {
       return { status: 200, body: { state: r.state } };
     },
 
-    getCookie(): ApiResult {
-      return { status: 200, body: cookieStatus(store.getSetting(DEFAULT_COOKIES_KEY)) };
+    listCookies(): ApiResult {
+      return {
+        status: 200,
+        body: {
+          platforms: listPlatforms().map((p) => {
+            const c = platformCookie(p.id);
+            return cookieStatus(p.id, c.value, c.source);
+          }),
+        },
+      };
     },
 
-    setCookie(input: { cookie?: string }): ApiResult {
+    getCookie(platform = "douyin"): ApiResult {
+      if (!validCookiePlatform(platform)) return err(404, `未知平台: ${platform}`);
+      const c = platformCookie(platform);
+      return { status: 200, body: cookieStatus(platform, c.value, c.source) };
+    },
+
+    setCookie(input: { cookie?: string }, platform = "douyin"): ApiResult {
+      if (!validCookiePlatform(platform)) return err(404, `未知平台: ${platform}`);
       const cookie = (input.cookie ?? "").trim();
       if (!cookie) return err(400, "cookie 不能为空");
-      store.setSetting(DEFAULT_COOKIES_KEY, cookie);
-      return { status: 200, body: cookieStatus(cookie) };
+      store.setPlatformCookies(platform, cookie);
+      return { status: 200, body: cookieStatus(platform, cookie, "settings") };
     },
 
-    clearCookie(): ApiResult {
-      // Empty string is treated as unset by cookieStatus / the run-time fallback.
-      store.setSetting(DEFAULT_COOKIES_KEY, "");
-      return { status: 200, body: cookieStatus("") };
+    clearCookie(platform = "douyin"): ApiResult {
+      if (!validCookiePlatform(platform)) return err(404, `未知平台: ${platform}`);
+      store.setPlatformCookies(platform, "");
+      const c = platformCookie(platform);
+      return { status: 200, body: cookieStatus(platform, c.value, c.source) };
     },
 
     getWebhook(): ApiResult {

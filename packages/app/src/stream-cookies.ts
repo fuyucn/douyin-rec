@@ -16,11 +16,8 @@ export function resolveTaskStreamCookies(
   const override = task.cookies?.trim();
   if (override) return override;
 
-  if (task.platform === "bilibili") {
-    const configured = store.getSetting("bilibiliCookies")?.trim();
-    if (configured) return configured;
-    return readBiliupCookieHeader();
-  }
-
-  return store.getDefaultCookies();
+  const configured = store.getPlatformCookies(task.platform);
+  if (configured) return configured;
+  if (task.platform === "bilibili") return readBiliupCookieHeader();
+  return null;
 }

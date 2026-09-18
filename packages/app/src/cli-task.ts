@@ -106,44 +106,51 @@ export function buildSessionForTask(
 }
 
 /**
- * Build the `cookie` command group — manage the GLOBAL Douyin account cookie
- * (settings key `defaultCookies`, shared by ALL tasks). The QR-login path lives
+ * Build the `cookie` command group — manage platform account cookies.
+ * The QR-login path lives
  * in the Web 控制台 (`task serve`); the terminal only does show/set/clear.
  *
- * Subcommands: show / set (--file | --str) / clear. All take an optional --db.
+ * Subcommands: show / set (--file | --str) / clear. All take --platform and --db.
  */
 export function buildCookieCommand(): Command {
   const cookie = new Command("cookie").description(
-    "管理全局抖音账号 cookie（所有任务共享；扫码登录请用 Web 控制台 task serve）",
+    "管理平台账号 cookie（扫码登录请用 Web 控制台 task serve）",
   );
 
-  /** A cookie string has a usable login session if it carries sessionid[_ss]. */
-  const hasSession = (c: string): boolean => /(?:^|;\s*)sessionid(?:_ss)?=/.test(c);
+  /** A cookie string has a usable login session for the selected platform. */
+  const hasSession = (c: string, platform: string): boolean =>
+    platform === "bilibili"
+      ? /(?:^|;\s*)SESSDATA=/.test(c)
+      : /(?:^|;\s*)sessionid(?:_ss)?=/.test(c);
 
   cookie
     .command("show")
-    .description("查看全局 cookie 状态（不打印原始值）")
+    .description("查看平台 cookie 状态（不打印原始值）")
+    .option("--platform <id>", "平台 id（默认 douyin）")
     .option("--db <path>", "数据库路径（默认 ./douyin-rec.db 或 env DOUYIN_REC_DB）")
-    .action((o: { db?: string }) => {
+    .action((o: { db?: string; platform?: string }) => {
+      const platform = o.platform ?? "douyin";
       const store = new TaskStore(o.db);
-      const value = store.getDefaultCookies();
+      const value = store.getPlatformCookies(platform);
       store.close();
       if (!value) {
-        console.log("[cookie] 全局 cookie: 未设置");
+        console.log(`[cookie] ${platform} cookie: 未设置`);
         return;
       }
       console.log(
-        `[cookie] 全局 cookie: 已设置 · sessionid=${hasSession(value) ? "有" : "无"} · 长度=${value.length}`,
+        `[cookie] ${platform} cookie: 已设置 · session=${hasSession(value, platform) ? "有" : "无"} · 长度=${value.length}`,
       );
     });
 
   cookie
     .command("set")
-    .description("设置全局 cookie（从文件或字符串）")
+    .description("设置平台 cookie（从文件或字符串）")
+    .option("--platform <id>", "平台 id（默认 douyin）")
     .option("--file <path>", "从文件读取 cookie（读取后 trim）")
     .option("--str <s>", "直接给 cookie 字符串")
     .option("--db <path>", "数据库路径")
-    .action((o: { file?: string; str?: string; db?: string }) => {
+    .action((o: { platform?: string; file?: string; str?: string; db?: string }) => {
+      const platform = o.platform ?? "douyin";
       let value: string;
       if (o.file) value = readFileSync(o.file, "utf-8").trim();
       else if (o.str !== undefined) value = o.str.trim();
@@ -158,22 +165,24 @@ export function buildCookieCommand(): Command {
         return;
       }
       const store = new TaskStore(o.db);
-      store.setSetting("defaultCookies", value);
+      store.setPlatformCookies(platform, value);
       store.close();
       console.log(
-        `[cookie] 已设置全局 cookie · sessionid=${hasSession(value) ? "有" : "无"} · 长度=${value.length}`,
+        `[cookie] 已设置 ${platform} cookie · session=${hasSession(value, platform) ? "有" : "无"} · 长度=${value.length}`,
       );
     });
 
   cookie
     .command("clear")
-    .description("清除全局 cookie")
+    .description("清除平台 cookie")
+    .option("--platform <id>", "平台 id（默认 douyin）")
     .option("--db <path>", "数据库路径")
-    .action((o: { db?: string }) => {
+    .action((o: { db?: string; platform?: string }) => {
+      const platform = o.platform ?? "douyin";
       const store = new TaskStore(o.db);
-      store.setSetting("defaultCookies", "");
+      store.setPlatformCookies(platform, "");
       store.close();
-      console.log("[cookie] 已清除全局 cookie");
+      console.log(`[cookie] 已清除 ${platform} cookie`);
     });
 
   return cookie;
@@ -240,7 +249,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .option("--recorder <r>", "[已废弃别名] 等价 --engine")
     .option("--danmu <0|1>", "弹幕开关: 1=开 0=关 (默认 1)")
     .option("--segment <sec>", "分段时长(秒), 0=不分段 (默认 1800)")
-    .option("--cookies-file <path>", "从文件读取本任务专属 cookie（可选覆盖；默认用全局 cookie）")
+    .option("--cookies-file <path>", "从文件读取本任务专属 cookie（可选覆盖；默认用本平台 cookie）")
     .option("--use-cookie <0|1>", "弹幕含礼物: 1=含礼物(需账号cookie) 0=仅评论(匿名) (默认 1)")
     .option("--out <dir>", "输出目录")
     .option("--schedule <HH:MM-HH:MM>", "定时窗口（仅存储，本骨架不自动启停）")

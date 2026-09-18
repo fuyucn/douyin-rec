@@ -36,9 +36,9 @@ export interface Task {
   scheduleEnd: string | null;
   status: TaskStatus;
   /**
-   * Whether THIS task passes the global cookie to its recorder. true → danmu
-   * via the logged-in session (gifts / more stable); false → anonymous danmu
-   * (comments only). Per-task, independent of the global cookie. Default true.
+   * Whether THIS task passes its platform cookie to the recorder. Douyin uses
+   * it for gift/entry danmu; Bilibili uses it for higher-quality streams.
+   * Per-task switch, default true.
    */
   useCookie: boolean;
   /**
@@ -79,7 +79,7 @@ export interface TaskInput {
   scheduleStart?: string | null;
   scheduleEnd?: string | null;
   status?: TaskStatus;
-  /** Whether this task uses the global cookie for its recorder. Default true. */
+  /** Whether this task uses its platform cookie for the recorder. Default true. */
   useCookie?: boolean;
   /** User intent switch (daemon-managed). Default false. */
   enabled?: boolean;
@@ -397,6 +397,35 @@ export class TaskStore {
   getDefaultCookies(): string | null {
     const v = (this.getSetting("defaultCookies") ?? "").trim();
     return v.length > 0 ? v : null;
+  }
+
+  /** Per-platform cookie map (`settings.platformCookies`). Douyin falls back to defaultCookies. */
+  getPlatformCookies(platformId: string): string | null {
+    let map: Record<string, string> = {};
+    try {
+      const raw = this.getSetting("platformCookies");
+      map = raw ? JSON.parse(raw) as Record<string, string> : {};
+    } catch {
+      map = {};
+    }
+    const value = map[platformId]?.trim();
+    if (value) return value;
+    return platformId === "douyin" ? this.getDefaultCookies() : null;
+  }
+
+  setPlatformCookies(platformId: string, value: string): void {
+    let map: Record<string, string> = {};
+    try {
+      const raw = this.getSetting("platformCookies");
+      map = raw ? JSON.parse(raw) as Record<string, string> : {};
+    } catch {
+      map = {};
+    }
+    const v = value.trim();
+    if (v) map[platformId] = v;
+    else delete map[platformId];
+    this.setSetting("platformCookies", JSON.stringify(map));
+    if (platformId === "douyin") this.setSetting("defaultCookies", v);
   }
 
   getSetting(key: string): string | null {

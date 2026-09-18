@@ -70,6 +70,10 @@ describe("matchRoute", () => {
     expect(matchRoute("GET", "/api/cookie")?.name).toBe("getCookie");
     expect(matchRoute("POST", "/api/cookie")).toMatchObject({ name: "setCookie", needsBody: true });
     expect(matchRoute("DELETE", "/api/cookie")?.name).toBe("clearCookie");
+    expect(matchRoute("GET", "/api/cookies")?.name).toBe("listCookies");
+    expect(matchRoute("GET", "/api/cookies/bilibili")).toMatchObject({ name: "getCookiePlatform", slug: "bilibili" });
+    expect(matchRoute("POST", "/api/cookies/bilibili")).toMatchObject({ name: "setCookiePlatform", slug: "bilibili", needsBody: true });
+    expect(matchRoute("DELETE", "/api/cookies/bilibili")).toMatchObject({ name: "clearCookiePlatform", slug: "bilibili" });
     expect(matchRoute("GET", "/api/hub/status")?.name).toBe("hubStatus");
     expect(matchRoute("GET", "/api/hub/rules")?.name).toBe("listHubRules");
     expect(matchRoute("POST", "/api/hub/rules")).toMatchObject({ name: "createHubRule", needsBody: true });

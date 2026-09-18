@@ -577,7 +577,7 @@ describe("cookie handlers (global account cookie)", () => {
   it("GET reports unset when no cookie stored", () => {
     const res = api.getCookie();
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ set: false, hasSession: false, length: 0, expiresAt: null });
+    expect(res.body).toEqual({ platform: "douyin", set: false, hasSession: false, length: 0, expiresAt: null, source: "none" });
   });
 
   it("POST sets the cookie; GET reflects set + hasSession (sessionid present)", () => {
@@ -587,10 +587,12 @@ describe("cookie handlers (global account cookie)", () => {
     expect(store.getSetting("defaultCookies")).toBe("x=1; sessionid=abc");
     const get = api.getCookie();
     expect(get.body).toEqual({
+      platform: "douyin",
       set: true,
       hasSession: true,
       length: "x=1; sessionid=abc".length,
       expiresAt: null,
+      source: "settings",
     });
   });
 
@@ -621,8 +623,18 @@ describe("cookie handlers (global account cookie)", () => {
     api.setCookie({ cookie: "sessionid=abc" });
     const del = api.clearCookie();
     expect(del.status).toBe(200);
-    expect(del.body).toEqual({ set: false, hasSession: false, length: 0, expiresAt: null });
-    expect(api.getCookie().body).toEqual({ set: false, hasSession: false, length: 0, expiresAt: null });
+    expect(del.body).toEqual({ platform: "douyin", set: false, hasSession: false, length: 0, expiresAt: null, source: "none" });
+    expect(api.getCookie().body).toEqual({ platform: "douyin", set: false, hasSession: false, length: 0, expiresAt: null, source: "none" });
+  });
+
+  it("stores Douyin and Bilibili cookies independently", () => {
+    api.setCookie({ cookie: "sessionid=douyin" }, "douyin");
+    api.setCookie({ cookie: "SESSDATA=bili" }, "bilibili");
+    expect(api.getCookie("douyin").body).toMatchObject({ set: true, hasSession: true, source: "settings" });
+    expect(api.getCookie("bilibili").body).toMatchObject({ set: true, hasSession: true, source: "settings" });
+    api.clearCookie("bilibili");
+    expect(api.getCookie("douyin").body).toMatchObject({ set: true, hasSession: true });
+    expect(api.getCookie("bilibili").body).toMatchObject({ set: false, hasSession: false });
   });
 });
 
