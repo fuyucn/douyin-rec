@@ -15,6 +15,7 @@
 import { describe, it, expect } from "vitest";
 import { TaskStore, resolveTaskCookies, type Task } from "../../packages/app/src/store.js";
 import { buildRecordArgs } from "../../packages/app/src/process/record-args.js";
+import { resolveTaskStreamCookies } from "../../packages/app/src/stream-cookies.js";
 
 const GLOBAL = "sessionid=GLOBAL";
 
@@ -40,7 +41,7 @@ describe("resolveTaskCookies", () => {
 
 /** Resolve effective cookies exactly as TaskManager.spawnFor does. */
 function effective(task: Task, store: TaskStore): Task {
-  return { ...task, cookies: resolveTaskCookies(task, store.getDefaultCookies()) };
+  return { ...task, cookies: resolveTaskStreamCookies(task, store) };
 }
 
 describe("subprocess path — effective task + buildRecordArgs", () => {
@@ -67,6 +68,23 @@ describe("subprocess path — effective task + buildRecordArgs", () => {
     const t = store.addTask({ room: "111", useCookie: true, cookies: "sessionid=OVERRIDE" });
     const args = buildRecordArgs(effective(t, store));
     expect(args[args.indexOf("--cookies") + 1]).toBe("sessionid=OVERRIDE");
+    store.close();
+  });
+
+  it("bilibili 使用 bilibiliCookies，而不是抖音 defaultCookies", () => {
+    const store = new TaskStore(":memory:");
+    store.setSetting("defaultCookies", GLOBAL);
+    store.setSetting("bilibiliCookies", "SESSDATA=BI");
+    const t = store.addTask({ room: "https://live.bilibili.com/6", useCookie: true });
+    expect(resolveTaskStreamCookies(t, store)).toBe("SESSDATA=BI");
+    store.close();
+  });
+
+  it("bilibili task.cookies override 优先于 bilibiliCookies", () => {
+    const store = new TaskStore(":memory:");
+    store.setSetting("bilibiliCookies", "SESSDATA=BI");
+    const t = store.addTask({ room: "https://live.bilibili.com/6", useCookie: true, cookies: "SESSDATA=OVERRIDE" });
+    expect(resolveTaskStreamCookies(t, store)).toBe("SESSDATA=OVERRIDE");
     store.close();
   });
 });

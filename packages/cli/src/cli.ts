@@ -536,7 +536,7 @@ const hubStarter: HubStarter = {
     } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, hubStore, workerStore, rootHubDir, rootHubConfig, rootStageDir, listNodeTasks, applyRemoteTasks, resolveTaskCookies } = await import("@drec/app");
+    const { uploadPlain, appendGroup, hubStore, workerStore, rootHubDir, rootHubConfig, rootStageDir, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
@@ -747,7 +747,7 @@ const hubStarter: HubStarter = {
           scheduleEnd: src.scheduleEnd,
           enabled: src.enabled,
           useCookie: src.useCookie,
-          cookies: resolveTaskCookies(src, opts.store.getDefaultCookies()),
+          cookies: resolveTaskStreamCookies(src, opts.store),
           outDir: src.outDir,
           webhook: src.webhook,
           anchorName: src.anchorName,

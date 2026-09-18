@@ -10,7 +10,8 @@
  * controllable fake process. The injectable timer (`schedule`) lets restart
  * tests run synchronously.
  */
-import { type TaskStore, resolveTaskCookies } from "./store.js";
+import { type TaskStore } from "./store.js";
+import { resolveTaskStreamCookies } from "./stream-cookies.js";
 import type { Spawner } from "./process/spawner.js";
 import type { RecorderProcess, ExitInfo } from "./process/recorder-process.js";
 import { TaskLogStore } from "@drec/observability";
@@ -207,7 +208,7 @@ export class TaskManager {
     // task.cookies override, else the global settings.defaultCookies.
     const effective = {
       ...task,
-      cookies: resolveTaskCookies(task, this.store.getDefaultCookies()),
+      cookies: resolveTaskStreamCookies(task, this.store),
     };
     const proc = this.spawner.spawn(effective);
     this.procs.set(taskId, proc);

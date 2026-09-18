@@ -11,7 +11,8 @@
  */
 import { Command } from "commander";
 import { readFileSync, mkdirSync, existsSync } from "node:fs";
-import { TaskStore, resolveTaskCookies, resolveTaskWebhook, type Task, type EngineKind } from "./store.js";
+import { TaskStore, resolveTaskWebhook, type Task, type EngineKind } from "./store.js";
+import { resolveTaskStreamCookies } from "./stream-cookies.js";
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
 import { resolveOutputDir, ensureHubConfigExample, rootHubConfig } from "./paths.js";
@@ -93,7 +94,7 @@ export function buildSessionForTask(
   // is the single source of truth, also used by TaskManager.spawnFor).
   const opts: RecordOpts = {
     quality: task.quality as RecordOpts["quality"],
-    cookies: resolveTaskCookies(task, store.getDefaultCookies()) ?? undefined,
+    cookies: resolveTaskStreamCookies(task, store) ?? undefined,
     outDir: resolveOutputDir(task.outDir),
     segmentSec: task.segmentSec,
     // per-streamer output subfolder; empty/undefined → recorder auto-uses anchor name

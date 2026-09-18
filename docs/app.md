@@ -72,7 +72,7 @@ Web POST /api/tasks/:id/start   或   Daemon tick（进入窗口）
 
 已知键：`discordWebhook`（webhook 兜底）、`defaultCookies`（**全局账号 cookie**，所有任务共享；扫码登录 / `cookie set` / 手动粘贴写入）、`outDir`（输出目录兜底）。这些在 `buildSessionForTask` 里作为 task 字段缺省时的回退来源。
 
-**cookie 的用途**：cookie 只为弹幕的**礼物（gift）+ 入场（member）**服务 —— 这两类事件抖音要求登录态才下发。**视频拉流是匿名的**（公开，匿名即可拿原画，见 `@drec/douyin-live` getStream），**评论弹幕也匿名能抓**；所以不带 cookie 仍能录视频 + 评论弹幕，只是没有礼物/入场。⚠️ getInfo/取流一律匿名（带会话 cookie 会触发抖音异地登录踢手机，见 `docs/douyin-kick-investigation.md`）；cookie 仅用于弹幕 WS 连接。
+**cookie 的用途**：抖音 cookie 只为弹幕的**礼物（gift）+ 入场（member）**服务；抖音视频拉流仍匿名。B 站不同：高画质取流会使用 B 站登录 cookie，优先任务覆盖 / `settings.bilibiliCookies`，否则复用 biliup `cookies.json`。⚠️ 抖音 getInfo/取流一律匿名，避免异地登录踢手机（见 `docs/douyin-kick-investigation.md`）。
 
 **cookie 两层模型**：
 

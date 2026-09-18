@@ -1,6 +1,6 @@
 // ts/test/upload/biliup.test.ts
 import { describe, it, expect } from "vitest";
-import { buildUploadArgs, parseBV } from "../../packages/app/src/upload/biliup.js";
+import { biliupCookieHeader, buildUploadArgs, parseBV } from "../../packages/app/src/upload/biliup.js";
 
 describe("biliup 包装", () => {
   it("buildUploadArgs：公开稿件参数映射", () => {
@@ -31,5 +31,15 @@ describe("biliup 包装", () => {
   it("parseBV：从 biliup 输出抓 BV 号", () => {
     expect(parseBV("...投稿成功 BV1Ab4y1C7xY ...")).toBe("BV1Ab4y1C7xY");
     expect(parseBV("无 BV 输出")).toBeNull();
+  });
+  it("biliupCookieHeader：解析 cookie_info.cookies", () => {
+    expect(biliupCookieHeader({
+      cookie_info: {
+        cookies: [
+          { name: "SESSDATA", value: "sess" },
+          { name: "bili_jct", value: "csrf" },
+        ],
+      },
+    })).toBe("SESSDATA=sess; bili_jct=csrf");
   });
 });

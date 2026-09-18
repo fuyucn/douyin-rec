@@ -4,6 +4,7 @@ export { buildTaskCommand, buildCookieCommand } from "./cli-task.js";
 export type { HubStarter } from "./cli-task.js";
 export { TaskStore } from "./store.js";
 export { resolveTaskCookies } from "./store.js";
+export { resolveTaskStreamCookies } from "./stream-cookies.js";
 export type { Task } from "./store.js";
 export { listNodeTasks, applyRemoteTasks } from "./task-sync.js";
 export type { ApplyTasksResult } from "./task-sync.js";

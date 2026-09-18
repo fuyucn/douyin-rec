@@ -75,7 +75,7 @@ export function pickStreamUrl(playInfo: Record<string, unknown>): string | undef
   const playurl = (playInfo.playurl as { stream?: StreamProto[] } | undefined)?.stream;
   if (!Array.isArray(playurl)) return undefined;
 
-  type Cand = { url: string; protoFlv: boolean; fmtFlv: boolean; avc: boolean };
+  type Cand = { url: string; qn: number; protoFlv: boolean; fmtFlv: boolean; avc: boolean };
   const cands: Cand[] = [];
   for (const s of playurl) {
     const protoFlv = s.protocol_name === "http_stream";
@@ -86,6 +86,7 @@ export function pickStreamUrl(playInfo: Record<string, unknown>): string | undef
         if (!ui?.host || !c.base_url) continue;
         cands.push({
           url: `${ui.host}${c.base_url}${ui.extra ?? ""}`,
+          qn: Number(c.current_qn ?? 0),
           protoFlv,
           fmtFlv,
           avc: c.codec_name === "avc",
@@ -94,9 +95,10 @@ export function pickStreamUrl(playInfo: Record<string, unknown>): string | undef
     }
   }
   if (!cands.length) return undefined;
-  // 评分:FLV 协议 > FLV 格式 > avc 编码。取最高。
+  // 评分:实际 qn > FLV 协议 > FLV 格式 > avc 编码。取最高。
   cands.sort(
     (a, b) =>
+      b.qn - a.qn ||
       Number(b.protoFlv) - Number(a.protoFlv) ||
       Number(b.fmtFlv) - Number(a.fmtFlv) ||
       Number(b.avc) - Number(a.avc),

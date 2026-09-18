@@ -1,11 +1,36 @@
 // ts/src/core/upload/biliup.ts
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { registerChild, throwIfAborted } from "@drec/core";
 import { rootBiliupCookies } from "../paths.js";
 
 /** biliup cookies.json:BILIUP_COOKIE > <DOUYIN_REC_ROOT ?? DEFAULT_ROOT>/config/biliup/cookies.json。 */
 export const DEFAULT_COOKIES = process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+
+/** Extract a Cookie header from biliup cookies.json without exposing values. */
+export function biliupCookieHeader(data: unknown): string | null {
+  const root = data as { cookie_info?: { cookies?: unknown }; cookies?: unknown } | null;
+  const raw = root?.cookie_info?.cookies ?? root?.cookies ?? data;
+  if (!Array.isArray(raw)) return null;
+  const pairs = raw
+    .map((item) => {
+      const c = item as { name?: unknown; value?: unknown };
+      const name = String(c?.name ?? "").trim();
+      const value = String(c?.value ?? "").trim();
+      return name && value ? `${name}=${value}` : "";
+    })
+    .filter(Boolean);
+  return pairs.length > 0 ? pairs.join("; ") : null;
+}
+
+/** Read biliup's Bilibili login cookies as a request Cookie header. */
+export function readBiliupCookieHeader(cookiesPath = DEFAULT_COOKIES): string | null {
+  try {
+    return biliupCookieHeader(JSON.parse(readFileSync(cookiesPath, "utf-8")));
+  } catch {
+    return null;
+  }
+}
 
 export interface UploadOpts {
   video: string;
