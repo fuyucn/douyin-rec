@@ -7,6 +7,7 @@
 #
 # 归档布局:
 #   dist/douyin-rec.mjs
+#   web/dist/
 #   bin/mesio
 #   VERSION
 set -euo pipefail
@@ -16,6 +17,7 @@ VERSION=""
 OUT_DIR="${DREC_RELEASE_DIR:-$ROOT/dist/releases}"
 ARCHES="all"
 BUNDLE="${DREC_BUNDLE:-$ROOT/dist/douyin-rec.mjs}"
+WEB_DIST="${DREC_WEB_DIST:-$ROOT/packages/web/dist}"
 MESIO_VERSION="${MESIO_VERSION:-mesio-v0.4.1}"
 
 usage() {
@@ -25,6 +27,7 @@ usage() {
 
 环境变量:
   DREC_BUNDLE      指定 dist/douyin-rec.mjs（默认仓库 dist/）
+  DREC_WEB_DIST    指定前端 dist（默认 packages/web/dist）
   DREC_RELEASE_DIR 输出目录（默认 dist/releases）
   MESIO_VERSION    mesio 版本（默认 mesio-v0.4.1）
 EOF
@@ -43,6 +46,7 @@ done
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "--version 必须是 x.y.z" >&2; exit 1; }
 case "$ARCHES" in all|amd64|arm64) ;; *) echo "--arch 只支持 all|amd64|arm64" >&2; exit 1 ;; esac
 [ -f "$BUNDLE" ] || { echo "找不到 bundle: $BUNDLE；先运行 pnpm bundle" >&2; exit 1; }
+[ -f "$WEB_DIST/index.html" ] || { echo "找不到前端: $WEB_DIST；先构建 packages/web" >&2; exit 1; }
 command -v tar >/dev/null 2>&1 || { echo "缺少 tar" >&2; exit 1; }
 
 download() {
@@ -79,8 +83,9 @@ build_one() {
   arch_tmp="$(mktemp -d)"
   trap 'rm -rf "$stage" "$arch_tmp"' RETURN
 
-  mkdir -p "$stage/dist" "$stage/bin"
+  mkdir -p "$stage/dist" "$stage/web/dist" "$stage/bin"
   cp "$BUNDLE" "$stage/dist/douyin-rec.mjs"
+  cp -R "$WEB_DIST"/. "$stage/web/dist/"
   printf '%s\n' "$VERSION" >"$stage/VERSION"
 
   mesio_url="https://github.com/hua0512/rust-srec/releases/download/${MESIO_VERSION}/mesio-${ra}-unknown-linux-gnu"

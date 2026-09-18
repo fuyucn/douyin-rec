@@ -37,6 +37,9 @@ jobs:
       - name: Build bundle
         run: pnpm bundle
 
+      - name: Build web UI
+        run: cd packages/web && pnpm install --frozen-lockfile && pnpm build
+
       - name: Build worker archives
         run: scripts/build-worker-release.sh --version "${GITHUB_REF_NAME#v}" --arch all
 

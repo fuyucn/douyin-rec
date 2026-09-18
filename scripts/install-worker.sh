@@ -227,6 +227,9 @@ fi
 tar -xzf "$ARCHIVE_FILE" -C "$TMP"
 [ -f "$TMP/dist/douyin-rec.mjs" ] || fail "Archive is missing dist/douyin-rec.mjs"
 [ -x "$TMP/bin/mesio" ] || fail "Archive is missing executable bin/mesio"
+if [ ! -f "$TMP/web/dist/index.html" ] && [ ! -f "$ROOT/web/dist/index.html" ]; then
+  fail "Archive is missing web/dist/index.html and no existing web UI is installed"
+fi
 INSTALLED_VERSION="$(cat "$TMP/VERSION" 2>/dev/null || printf '%s' "$VERSION")"
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -249,6 +252,7 @@ tar -xzf "$ARCHIVE_FILE" -C "$ROOT"
 mkdir -p "$ROOT/config" "$ROOT/db" "$ROOT/recordings" "$ROOT/stage"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$ROOT/dist" "$ROOT/bin"
 [ ! -e "$ROOT/scripts" ] || chown -R "$SERVICE_USER:$SERVICE_GROUP" "$ROOT/scripts"
+[ ! -e "$ROOT/web" ] || chown -R "$SERVICE_USER:$SERVICE_GROUP" "$ROOT/web"
 [ ! -e "$ROOT/VERSION" ] || chown "$SERVICE_USER:$SERVICE_GROUP" "$ROOT/VERSION"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$ROOT" "$ROOT/config" "$ROOT/db" "$ROOT/recordings" "$ROOT/stage"
 chmod 0750 "$ROOT"
