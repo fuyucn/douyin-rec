@@ -52,5 +52,4 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" \
             dist/releases/*.tar.gz \
             dist/releases/*.sha256 \
-            dist/releases/install-worker.sh \
             --clobber

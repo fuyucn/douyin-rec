@@ -7,7 +7,7 @@
 #   - Does not perform ssh-copy-id, tailscale up, cloudflared login, or other auth actions.
 #
 # Usage:
-#   curl -fsSL https://github.com/fuyucn/douyin-rec/releases/latest/download/install-worker.sh \
+#   curl -fsSL https://raw.githubusercontent.com/fuyucn/douyin-rec/main/scripts/install-worker.sh \
 #     | sudo sh
 #
 # Downloads from the GitHub Release by default:

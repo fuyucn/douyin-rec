@@ -38,7 +38,7 @@ sudo apt-get install -y ffmpeg
 发布版本：
 
 ```bash
-curl -fsSL https://github.com/fuyucn/douyin-rec/releases/latest/download/install-worker.sh \
+curl -fsSL https://raw.githubusercontent.com/fuyucn/douyin-rec/main/scripts/install-worker.sh \
   | sudo sh
 ```
 

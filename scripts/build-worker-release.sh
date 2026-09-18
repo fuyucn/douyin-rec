@@ -94,7 +94,6 @@ build_one() {
   install -m 0755 "$arch_tmp/mesio" "$stage/bin/mesio"
 
   mkdir -p "$OUT_DIR"
-  cp "$ROOT/scripts/install-worker.sh" "$OUT_DIR/install-worker.sh"
   archive="$OUT_DIR/douyin-rec-worker-linux-${arch}.tar.gz"
   rm -f "$archive" "${archive}.sha256"
   COPYFILE_DISABLE=1 tar -C "$stage" -czf "$archive" .
