@@ -155,6 +155,23 @@ describe("createTask → resolveAnchor 创建即抓主播名", () => {
     await Promise.resolve();
     expect(s.getTask(created.id)?.room).toBe("https://live.douyin.com/900612215935");
   });
+
+  it("b23.tv 分享短链 → 创建后台转为 B站直播 URL 和 bilibili 平台", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const api2 = makeApi({
+      store: s,
+      manager: m,
+      resolveShortUrl: async (url) => (/b23\.tv/.test(url) ? "31372993" : null),
+    });
+    const created = (api2.createTask({ room: "https://b23.tv/b2nQfPy" }).body as { id: number; room: string });
+    expect(created.room).toBe("https://b23.tv/b2nQfPy");
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(s.getTask(created.id)?.platform).toBe("bilibili");
+    expect(s.getTask(created.id)?.room).toBe("https://live.bilibili.com/31372993");
+  });
 });
 
 describe("listTasks", () => {
@@ -529,7 +546,9 @@ describe("login handlers", () => {
   /** Mock login manager (the LoginManagerLike slice). */
   class MockLogin implements LoginManagerLike {
     pollResult: { state: string; cookie?: string } = { state: "pending" };
-    async start(): Promise<{ sessionId: string; qrPng: string }> {
+    lastPlatform?: string;
+    async start(platform?: string): Promise<{ sessionId: string; qrPng: string }> {
+      this.lastPlatform = platform;
       return { sessionId: "login-1", qrPng: "QQ==" };
     }
     async poll(sessionId: string): Promise<{ state: string; cookie?: string }> {
@@ -547,9 +566,11 @@ describe("login handlers", () => {
   it("startLogin returns sessionId + qrPng", async () => {
     const login = new MockLogin();
     const a = makeApi({ store, manager, login });
-    const res = await a.startLogin();
+    const res = await a.startLogin({ platform: "bilibili" });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ sessionId: "login-1", qrPng: "QQ==" });
+    expect(login.lastPlatform).toBe("bilibili");
+    expect((await a.startLogin({ platform: "unknown" })).status).toBe(400);
   });
 
   it("pollLogin returns state pending, and 404 for unknown session", async () => {
@@ -635,6 +656,19 @@ describe("cookie handlers (global account cookie)", () => {
     api.clearCookie("bilibili");
     expect(api.getCookie("douyin").body).toMatchObject({ set: true, hasSession: true });
     expect(api.getCookie("bilibili").body).toMatchObject({ set: false, hasSession: false });
+  });
+
+  it("biliup 上传登录态独立于 B站录制 Cookie", () => {
+    const dir = mkdtempSync(join(tmpdir(), "biliup-auth-"));
+    const cookies = join(dir, "cookies.json");
+    writeFileSync(cookies, JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "upload-only" }] },
+    }));
+    const a = makeApi({ store, manager, biliupCookiesPath: cookies });
+
+    expect(a.getCookie("bilibili").body).toMatchObject({ set: false, hasSession: false, source: "none" });
+    expect(a.getBiliupStatus().body).toEqual({ set: true, hasSession: true, length: "SESSDATA=upload-only".length, source: "biliup" });
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

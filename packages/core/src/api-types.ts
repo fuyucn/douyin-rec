@@ -286,8 +286,16 @@ export interface CookieStatus {
   hasSession: boolean;
   length: number;
   expiresAt: number | null;
-  /** settings = platformCookies/defaultCookies; biliup = cookies.json fallback. */
-  source: "settings" | "biliup" | "none";
+  /** 录制平台 Cookie 的来源；biliup 上传登录态不在本接口中。 */
+  source: "settings" | "none";
+}
+
+/** biliup 上传账号状态（独立于录制平台 Cookie）。 */
+export interface BiliupAuthStatus {
+  set: boolean;
+  hasSession: boolean;
+  length: number;
+  source: "biliup" | "none";
 }
 
 /** GET /api/tasks/:id/recordings 的单个会话项(合成选择器用)。 */

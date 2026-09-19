@@ -62,7 +62,7 @@ describe("matchRoute", () => {
     expect(matchRoute("POST", "/api/tasks/7/start")).toMatchObject({ name: "startTask", id: 7 });
     expect(matchRoute("POST", "/api/tasks/7/stop")).toMatchObject({ name: "stopTask", id: 7 });
     expect(matchRoute("GET", "/api/tasks/7/logs")).toMatchObject({ name: "getTaskLogs", id: 7 });
-    expect(matchRoute("POST", "/api/login/qr")?.name).toBe("startLogin");
+    expect(matchRoute("POST", "/api/login/qr")).toMatchObject({ name: "startLogin", needsBody: true });
     expect(matchRoute("GET", "/api/login/qr/login-abc_1")).toMatchObject({
       name: "pollLogin",
       sid: "login-abc_1",
@@ -70,6 +70,7 @@ describe("matchRoute", () => {
     expect(matchRoute("GET", "/api/cookie")?.name).toBe("getCookie");
     expect(matchRoute("POST", "/api/cookie")).toMatchObject({ name: "setCookie", needsBody: true });
     expect(matchRoute("DELETE", "/api/cookie")?.name).toBe("clearCookie");
+    expect(matchRoute("GET", "/api/biliup/status")?.name).toBe("getBiliupStatus");
     expect(matchRoute("GET", "/api/cookies")?.name).toBe("listCookies");
     expect(matchRoute("GET", "/api/cookies/bilibili")).toMatchObject({ name: "getCookiePlatform", slug: "bilibili" });
     expect(matchRoute("POST", "/api/cookies/bilibili")).toMatchObject({ name: "setCookiePlatform", slug: "bilibili", needsBody: true });

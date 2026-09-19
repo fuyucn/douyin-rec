@@ -44,6 +44,7 @@ export interface RouteMatch {
     | "getCookie"
     | "setCookie"
     | "clearCookie"
+    | "getBiliupStatus"
     | "getCookiePlatform"
     | "setCookiePlatform"
     | "clearCookiePlatform"
@@ -111,11 +112,12 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "getCookie", methods: ["GET"], pattern: /^\/api\/cookie$/ },
   { name: "setCookie", methods: ["POST"], pattern: /^\/api\/cookie$/, needsBody: true },
   { name: "clearCookie", methods: ["DELETE"], pattern: /^\/api\/cookie$/ },
+  { name: "getBiliupStatus", methods: ["GET"], pattern: /^\/api\/biliup\/status$/ },
   { name: "listCookies", methods: ["GET"], pattern: /^\/api\/cookies$/ },
   { name: "getCookiePlatform", methods: ["GET"], pattern: /^\/api\/cookies\/([A-Za-z0-9_-]+)$/, param: "slug" },
   { name: "setCookiePlatform", methods: ["POST"], pattern: /^\/api\/cookies\/([A-Za-z0-9_-]+)$/, param: "slug", needsBody: true },
   { name: "clearCookiePlatform", methods: ["DELETE"], pattern: /^\/api\/cookies\/([A-Za-z0-9_-]+)$/, param: "slug" },
-  { name: "startLogin", methods: ["POST"], pattern: /^\/api\/login\/qr$/ },
+  { name: "startLogin", methods: ["POST"], pattern: /^\/api\/login\/qr$/, needsBody: true },
   { name: "pollLogin", methods: ["GET"], pattern: /^\/api\/login\/qr\/([A-Za-z0-9_-]+)$/, param: "sid" },
   { name: "testWebhook", methods: ["POST"], pattern: /^\/api\/webhook\/test$/, needsBody: true },
   { name: "getWebhook", methods: ["GET"], pattern: /^\/api\/webhook$/ },
@@ -201,6 +203,8 @@ export interface WebServerDeps {
   syncDbPath?: string;
   /** hub.config.json 路径;省略回落 rootHubConfig()。 */
   hubConfigPath?: string;
+  /** biliup cookies.json 路径;省略回落应用默认路径。 */
+  biliupCookiesPath?: string;
   /** 连接测试(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
   /** 批量存活探针(CLI 注入)。省略 → status 端点返回 []。 */
@@ -285,8 +289,10 @@ async function dispatch(
       return api.startTask(match.id!);
     case "stopTask":
       return api.stopTask(match.id!, { internal: isLoopback(req.socket.remoteAddress) });
-    case "startLogin":
-      return api.startLogin();
+    case "startLogin": {
+      const body = (await readJson(req)) as { platform?: string };
+      return api.startLogin(body ?? {});
+    }
     case "pollLogin":
       return api.pollLogin(match.sid!);
     case "getCookie":
@@ -297,6 +303,8 @@ async function dispatch(
     }
     case "clearCookie":
       return api.clearCookie();
+    case "getBiliupStatus":
+      return api.getBiliupStatus();
     case "listCookies":
       return api.listCookies();
     case "getCookiePlatform":
@@ -419,6 +427,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     hubEnabled: deps.hubEnabled,
     syncDbPath: deps.syncDbPath,
     hubConfigPath: deps.hubConfigPath,
+    biliupCookiesPath: deps.biliupCookiesPath,
     testWorker: deps.testWorker,
     probeAllWorkers: deps.probeAllWorkers,
     requestSyncTasks: deps.requestSyncTasks,

@@ -50,6 +50,7 @@ import { NodeRecordSpawner } from "./process/spawner.js";
 import { createWebServer } from "./web/server.js";
 import { QrLoginManager } from "./login/login-manager.js";
 import { PlaywrightQrLogin } from "./login/qr-login.js";
+import { BiliQrLogin } from "./login/bili-qr-login.js";
 
 // 本文件含多个命令组,日志按命令归属 scope:task→task_manager、daemon→scheduler、serve→web_server。
 const log = createLogger("task_manager");
@@ -272,9 +273,9 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
       const initialSlug = platform.extractRoomSlug(room);
       if (platform.resolveShortUrl && !/^\d+$/.test(initialSlug)) {
         const { resolveShortUrl } = await import("./anchor.js");
-        const webRid = await resolveShortUrl(room);
-        if (webRid) {
-          room = `https://live.douyin.com/${webRid}`;
+        const roomId = await resolveShortUrl(room);
+        if (roomId) {
+          room = platform.roomToUrl(roomId);
           log.info(`房间地址已转换 → ${room}`);
         } else {
           log.warn(`web_rid 解析失败,按原样存(运行时仍会内部解析): ${room}`);
@@ -549,7 +550,10 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
       // message which the api turns into a 500 — manual cookie keeps working.
       const login = new QrLoginManager(
         store,
-        () => new PlaywrightQrLogin({ log: (m) => console.log(m) }),
+        (platform) =>
+          platform === "bilibili"
+            ? new BiliQrLogin({ log: (m) => console.log(m) })
+            : new PlaywrightQrLogin({ log: (m) => console.log(m) }),
         { log: (m) => console.log(m) },
       );
 

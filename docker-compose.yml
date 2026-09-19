@@ -56,6 +56,10 @@ services:
       #   /output-data/db/douyin-rec.db · /output-data/recordings · /output-data/config/biliup/cookies.json
       DOUYIN_REC_ROOT: /output-data
       BILIUP_COOKIE: /output-data/config/biliup/cookies.json
+      # 上传线路可覆盖：默认由程序按 alia 优先并在连接错误时自动换线。
+      # 可选值见 `biliup upload --help` 的 --line（如 alia / txa / bda2）。
+      BILIUP_UPLOAD_LINE: ${BILIUP_UPLOAD_LINE:-}
+      BILIUP_UPLOAD_LINES: ${BILIUP_UPLOAD_LINES:-}
       DOUYIN_REC_STATIC: /app/web/dist
       # 可选 Discord 通知 webhook。
       DISCORD_WEBHOOK: ${DISCORD_WEBHOOK:-}

@@ -36,12 +36,13 @@ const fakeDouyin: Platform = {
 // 假 bilibili 平台(镜像真 bilibiliPlatform 的取值)—— 用于跨平台逻辑测试(如 updateTask 改 room 换平台)。
 const fakeBilibili: Platform = {
   id: "bilibili",
-  matchUrl: (url) => /live\.bilibili\.com\//.test(url),
+  matchUrl: (url) => /live\.bilibili\.com\//.test(url) || /b23\.tv\//i.test(url),
   roomToUrl: (room) => (/^https?:\/\//.test(room) ? room : `https://live.bilibili.com/${room}`),
   extractRoomSlug: (url) => {
     const m = url.match(/live\.bilibili\.com\/(\d+)/);
     return m ? m[1] : url;
   },
+  resolveShortUrl: async () => null,
   fetchAnchorName: async () => null,
   getStream: async () => ({ living: false }),
   getLiving: async () => false,

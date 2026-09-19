@@ -40,6 +40,51 @@ export interface UploadOpts {
   tid: number;
   public: boolean;
   desc?: string;
+  line?: UploadLine;
+}
+
+export type UploadLine =
+  | "bldsa" | "cnbldsa" | "andsa" | "atdsa" | "bda2" | "cnbd" | "anbd" | "atbd"
+  | "tx" | "cntx" | "antx" | "attx" | "bda" | "txa" | "alia";
+
+/**
+ * B站 preupload probe 在当前 deployment 通常只返回 txa/alia；默认 probe 可能选中
+ * 延迟低但分块连接不稳定的线路。这里优先 alia，并在 chunk SendRequest/connection
+ * error 时自动换其他线路。可用 BILIUP_UPLOAD_LINE 或 BILIUP_UPLOAD_LINES 覆盖。
+ */
+export const DEFAULT_UPLOAD_LINES: readonly UploadLine[] = ["alia", "bda2", "cnbd", "txa", "bldsa"];
+
+const UPLOAD_LINES = new Set<UploadLine>([
+  "bldsa", "cnbldsa", "andsa", "atdsa", "bda2", "cnbd", "anbd", "atbd",
+  "tx", "cntx", "antx", "attx", "bda", "txa", "alia",
+]);
+
+function isUploadLine(value: string): value is UploadLine {
+  return UPLOAD_LINES.has(value as UploadLine);
+}
+
+/** 显式传入 > BILIUP_UPLOAD_LINE > BILIUP_UPLOAD_LINES > 内置线路。 */
+export function uploadLineCandidates(explicit?: UploadLine, override?: readonly UploadLine[]): UploadLine[] {
+  const envLine = (process.env.BILIUP_UPLOAD_LINE ?? "").trim();
+  const envLines = (process.env.BILIUP_UPLOAD_LINES ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const configured = [
+    ...(explicit ? [explicit] : []),
+    ...(envLine ? [envLine] : []),
+    ...envLines,
+    ...(override ?? []),
+  ].filter(isUploadLine);
+  return [...new Set([...configured, ...DEFAULT_UPLOAD_LINES])];
+}
+
+function isRetryableLineError(err: unknown): boolean {
+  const msg = String((err as Error)?.message ?? err);
+  return (
+    /connection error|error sending request|connection reset|unexpected eof|broken pipe|timed? out/i.test(msg)
+    && /start=\d+.*end=\d+|uploader\.rs:\d+/i.test(msg)
+  );
 }
 
 /** 构造 biliup upload 参数（纯函数）。照搬 merge-best-today 的命令。 */
@@ -52,6 +97,7 @@ export function buildUploadArgs(o: UploadOpts): string[] {
   ];
   if (!o.public) args.push("--is-only-self", "1");   // 默认公开；仅自己可见才加
   if (o.desc) args.push("--desc", o.desc);
+  if (o.line) args.push("--line", o.line);
   return args;
 }
 
@@ -77,33 +123,45 @@ export function runBiliup(argv: string[]): Promise<string> {
     const p = spawn("biliup", argv);
     registerChild(p); // 不建进程组:biliup 自己管分块;checkBiliup(-V)不走这里
     let out = "", err = "";
-    p.stdout.on("data", (c: Buffer) => (out += c));
-    p.stderr.on("data", (c: Buffer) => (err += c));
+    const appendTail = (current: string, c: Buffer): string => (current + String(c)).slice(-65536);
+    p.stdout.on("data", (c: Buffer) => (out = appendTail(out, c)));
+    p.stderr.on("data", (c: Buffer) => (err = appendTail(err, c)));
     p.on("error", reject);
     p.on("close", (code) => {
       try { throwIfAborted(); } catch (e) { reject(e); return; }
-      if (code !== 0) { reject(new Error(`biliup 失败 (rc=${code}): ${(err || out).slice(-400).trim()}`)); return; }
+      if (code !== 0) { reject(new Error(`biliup 失败 (rc=${code}): ${(err || out).slice(-2000).trim()}`)); return; }
       resolve(out + err);
     });
   });
 }
 
 /** 调 biliup 上传，返回 BV（解析不到则抛错）。 */
-export function upload(o: UploadOpts): Promise<{ bv: string }> {
-  return runBiliup(buildUploadArgs(o)).then((combined) => {
-    const bv = parseBV(combined);
-    if (!bv) throw new Error(`biliup 上传完成但解析不到 BV：${combined.slice(-300).trim()}`);
-    return { bv };
-  });
+export async function upload(o: UploadOpts): Promise<{ bv: string }> {
+  const tried: UploadLine[] = [];
+  let last: unknown;
+  for (const line of uploadLineCandidates(o.line)) {
+    tried.push(line);
+    try {
+      const combined = await runBiliup(buildUploadArgs({ ...o, line }));
+      const bv = parseBV(combined);
+      if (!bv) throw new Error(`biliup 上传完成但解析不到 BV：${combined.slice(-300).trim()}`);
+      return { bv };
+    } catch (e) {
+      last = e;
+      if (!isRetryableLineError(e)) throw e;
+    }
+  }
+  throw new Error(`biliup 上传线路均失败 (${tried.join(",")}): ${String((last as Error)?.message ?? last)}`);
 }
 
 /** 构造 biliup append 参数（纯函数）。 */
-export function buildAppendArgs(o: { cookies: string; bv: string; files: string[]; public?: boolean }): string[] {
+export function buildAppendArgs(o: { cookies: string; bv: string; files: string[]; public?: boolean; line?: UploadLine }): string[] {
   // 防御:append 重新提交稿件元数据时可能重置「水印/可见性」(biliLive-tools v3.9.0 修过
   // 「续传水印不被继承」的同类 bug)。故 append 也带上关水印 + 仅自己可见,与 P1 upload 保持一致,
   // 避免追加分 P 后整稿被翻成「带水印 / 公开」。两者均为不可逆/隐私关键项。
   const args = ["-u", o.cookies, "append", "--vid", o.bv, "--extra-fields", '{"watermark":{"state":0}}'];
   if (!o.public) args.push("--is-only-self", "1");
+  if (o.line) args.push("--line", o.line);
   args.push(...o.files);
   return args;
 }
@@ -115,12 +173,24 @@ export function buildAppendArgs(o: { cookies: string; bv: string; files: string[
 export async function uploadPlain(o: {
   plain: UploadOpts;
   run?: (argv: string[]) => Promise<string>;
+  lines?: readonly UploadLine[];
 }): Promise<string> {
   const run = o.run ?? runBiliup;
-  const out = await run(buildUploadArgs(o.plain));
-  const bv = parseBV(out);
-  if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${out.slice(-300)}`);
-  return bv;
+  const tried: UploadLine[] = [];
+  let last: unknown;
+  for (const line of uploadLineCandidates(o.plain.line, o.lines)) {
+    tried.push(line);
+    try {
+      const out = await run(buildUploadArgs({ ...o.plain, line }));
+      const bv = parseBV(out);
+      if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${out.slice(-300)}`);
+      return bv;
+    } catch (e) {
+      last = e;
+      if (!isRetryableLineError(e)) throw e;
+    }
+  }
+  throw new Error(`upload plain 上传线路均失败 (${tried.join(",")}): ${String((last as Error)?.message ?? last)}`);
 }
 
 /** 追加一个逻辑组到已建稿件(空组跳过)。多组必须**串行**调用(同稿件并发 append 会撞)。
@@ -130,11 +200,25 @@ export async function appendGroup(o: {
   bv: string;
   files: string[];
   public?: boolean;
+  line?: UploadLine;
+  lines?: readonly UploadLine[];
   run?: (argv: string[]) => Promise<string>;
 }): Promise<void> {
   if (o.files.length === 0) return;
   const run = o.run ?? runBiliup;
-  await run(buildAppendArgs({ cookies: o.cookies, bv: o.bv, files: o.files, public: o.public }));
+  const tried: UploadLine[] = [];
+  let last: unknown;
+  for (const line of uploadLineCandidates(o.line, o.lines)) {
+    tried.push(line);
+    try {
+      await run(buildAppendArgs({ cookies: o.cookies, bv: o.bv, files: o.files, public: o.public, line }));
+      return;
+    } catch (e) {
+      last = e;
+      if (!isRetryableLineError(e)) throw e;
+    }
+  }
+  throw new Error(`append 上传线路均失败 (${tried.join(",")}): ${String((last as Error)?.message ?? last)}`);
 }
 
 /**

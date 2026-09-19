@@ -102,4 +102,11 @@ describe("subprocess path — effective task + buildRecordArgs", () => {
     expect(resolveTaskStreamCookies(t, store)).toBe("SESSDATA=OVERRIDE");
     store.close();
   });
+
+  it("bilibili 未配置平台 Cookie → 匿名，不复用 biliup 上传 Cookie", () => {
+    const store = new TaskStore(":memory:");
+    const t = store.addTask({ room: "https://live.bilibili.com/6", useCookie: true });
+    expect(resolveTaskStreamCookies(t, store)).toBeNull();
+    store.close();
+  });
 });

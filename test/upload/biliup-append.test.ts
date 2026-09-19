@@ -1,6 +1,6 @@
 // test/upload/biliup-append.test.ts
 import { describe, it, expect } from "vitest";
-import { buildAppendArgs, uploadThenAppend, uploadThenAppendGroups } from "../../packages/app/src/upload/biliup.js";
+import { appendGroup, buildAppendArgs, uploadThenAppend, uploadThenAppendGroups } from "../../packages/app/src/upload/biliup.js";
 
 // 防御:append 也带关水印 + 仅自己可见(防 append 重置稿件设置,见 biliup.ts 注释)。
 const WM = '{"watermark":{"state":0}}';
@@ -13,6 +13,25 @@ describe("P1→append", () => {
   it("buildAppendArgs public:true → 关水印但不加 is-only-self", () => {
     expect(buildAppendArgs({ cookies: "c.json", bv: "BV1", files: ["d.mp4"], public: true }))
       .toEqual(["-u", "c.json", "append", "--vid", "BV1", "--extra-fields", WM, "d.mp4"]);
+  });
+  it("buildAppendArgs 显式线路加 --line", () => {
+    expect(buildAppendArgs({ cookies: "c.json", bv: "BV1", files: ["d.mp4"], line: "alia" }))
+      .toEqual(["-u", "c.json", "append", "--vid", "BV1", "--extra-fields", WM, "--is-only-self", "1", "--line", "alia", "d.mp4"]);
+  });
+  it("appendGroup：分块连接错误时自动换线", async () => {
+    const calls: string[][] = [];
+    const run = async (argv: string[]): Promise<string> => {
+      calls.push(argv);
+      if (argv.includes("alia")) {
+        throw new Error("biliup 失败 (rc=1): connection error uploader.rs:557 start=52428800 end=62914560");
+      }
+      return "appended";
+    };
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run, lines: ["alia", "txa"],
+    });
+    expect(calls[0]).toContain("alia");
+    expect(calls[1]).toContain("txa");
   });
 
   it("uploadThenAppend：先传 plain 拿 BV，再 append 两个分P", async () => {

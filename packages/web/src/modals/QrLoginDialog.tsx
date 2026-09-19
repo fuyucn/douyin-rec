@@ -8,6 +8,7 @@ import { useT } from "../lib/i18n";
 interface Props {
   open: boolean;
   onClose: () => void;
+  platform?: string;
 }
 
 /** state → { i18n key, badge class, spinner }。文案渲染时经 t() 取。 */
@@ -19,7 +20,7 @@ const STATE_META: Record<string, { key: string; cls: string; spin: boolean }> = 
 };
 
 /** Abducts a QR login: POST /api/login/qr → show qrPng → poll status. */
-export function QrLoginDialog({ open, onClose }: Props): ReactNode {
+export function QrLoginDialog({ open, onClose, platform = "douyin" }: Props): ReactNode {
   const t = useT();
   const toast = useToast();
   const refreshCookie = useRefreshCookie();
@@ -73,7 +74,7 @@ export function QrLoginDialog({ open, onClose }: Props): ReactNode {
     setState("pending");
     setOverride(t("qr.launching"));
     try {
-      const r = await api.startLogin();
+      const r = await api.startLogin(platform);
       sidRef.current = r.sessionId;
       setQrPng(r.qrPng);
       setOverride(null);
@@ -83,7 +84,7 @@ export function QrLoginDialog({ open, onClose }: Props): ReactNode {
       setOverride(t("qr.fetchFailed", { msg: errMessage(e) }));
       toast(t("qr.fetchFailed", { msg: errMessage(e) }), "error");
     }
-  }, [poll, stopPoll, toast, t]);
+  }, [platform, poll, stopPoll, toast, t]);
 
   // Start on open; clean up all timers on close/unmount.
   useEffect(() => {
@@ -101,8 +102,16 @@ export function QrLoginDialog({ open, onClose }: Props): ReactNode {
   const info = STATE_META[state] ?? { key: "", cls: "badge-neutral", spin: true };
 
   return (
-    <Dialog open={open} onClose={onClose} widthClass="max-w-sm" center title={t("qr.title")}>
-      <p className="text-sm text-muted mb-5">{t("qr.desc")}</p>
+    <Dialog
+      open={open}
+      onClose={onClose}
+      widthClass="max-w-sm"
+      center
+      title={platform === "bilibili" ? t("qr.biliTitle") : t("qr.title")}
+    >
+      <p className="text-sm text-muted mb-5">
+        {platform === "bilibili" ? t("qr.biliDesc") : t("qr.desc")}
+      </p>
       <div className="flex justify-center mb-5">
         <div className="border border-hairline p-4 w-[232px] h-[232px] flex items-center justify-center" style={{ borderRadius: "var(--r-card)", background: "var(--qr-surface)" }}>
           {qrPng ? (

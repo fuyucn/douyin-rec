@@ -2,11 +2,10 @@
  * Resolve the effective cookie for a task's platform.
  *
  * Douyin uses the global Douyin account cookie (`defaultCookies`). Bilibili
- * streaming quality uses Bilibili login cookies; reuse biliup's cookies.json
- * unless the task has an explicit override.
+ * streaming quality uses only its platform cookie/override. biliup
+ * cookies.json is upload-only and must never be reused for recording.
  */
 import type { Task, TaskStore } from "./store.js";
-import { readBiliupCookieHeader } from "./upload/biliup.js";
 
 export function resolveTaskStreamCookies(
   task: Pick<Task, "platform" | "useCookie" | "cookies">,
@@ -18,6 +17,5 @@ export function resolveTaskStreamCookies(
 
   const configured = store.getPlatformCookies(task.platform);
   if (configured) return configured;
-  if (task.platform === "bilibili") return readBiliupCookieHeader();
   return null;
 }

@@ -72,7 +72,7 @@ Web POST /api/tasks/:id/start   或   Daemon tick（进入窗口）
 
 已知键：`discordWebhook`（webhook 兜底）、`defaultCookies`（**全局账号 cookie**，所有任务共享；扫码登录 / `cookie set` / 手动粘贴写入）、`outDir`（输出目录兜底）。这些在 `buildSessionForTask` 里作为 task 字段缺省时的回退来源。
 
-**cookie 的用途**：平台 cookie 独立保存于 `settings.platformCookies`。抖音 cookie 只为弹幕的**礼物（gift）+ 入场（member）**服务；抖音视频拉流仍匿名。B 站高画质取流会使用 B 站登录 cookie，未显式配置时复用 biliup `cookies.json`。⚠️ 抖音 getInfo/取流一律匿名，避免异地登录踢手机（见 `docs/douyin-kick-investigation.md`）。
+**cookie 的用途**：平台 cookie 独立保存于 `settings.platformCookies`。抖音 cookie 只为弹幕的**礼物（gift）+ 入场（member）**服务；抖音视频拉流仍匿名。B 站高画质取流只使用 B 站录制平台 cookie，不复用 biliup `cookies.json`；可通过扫码或手动粘贴获取。biliup 登录态只用于 Hub 上传，两者互不 fallback。⚠️ 抖音 getInfo/取流一律匿名，避免异地登录踢手机（见 `docs/douyin-kick-investigation.md`）。
 
 **cookie 两层模型**：
 
@@ -82,7 +82,7 @@ Web POST /api/tasks/:id/start   或   Daemon tick（进入窗口）
 运行时解析由 `stream-cookies.ts` 的 `resolveTaskStreamCookies(task, store)` 统一实现，两条录制路径共用：
 
 - `useCookie=false` → `null`（匿名:仅评论弹幕,无礼物/入场),即使全局已设置也不传 cookie。
-- `useCookie=true` → `task.cookies ?? platformCookie ?? null`；B 站还可回退 biliup cookies.json。
+- `useCookie=true` → `task.cookies ?? platformCookie ?? null`；biliup cookies.json 不参与录制解析。
 
 `cli-task.ts buildSessionForTask`（`task run` 路径）与 `task-manager.ts spawnFor`（子进程路径）都调用 `resolveTaskStreamCookies`，因此两路一致。
 

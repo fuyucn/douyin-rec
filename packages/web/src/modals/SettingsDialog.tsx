@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
+import { ClipboardPaste } from "lucide-react";
 import { api } from "../api/client";
 import { cookieStatusAtom, serverTimezoneAtom } from "../atoms";
 import { Button } from "../components/Button";
@@ -9,7 +10,7 @@ import { Switch } from "../components/Switch";
 import { errMessage, useRefreshCookie, useToast } from "../lib/hooks";
 import { useT, useLang } from "../lib/i18n";
 import { getToggles, setToggle, NOTIF_KEYS, type NotifKey } from "../lib/notifications";
-import type { CookieStatus, NotifWebhookToggles } from "@drec/contracts";
+import type { BiliupAuthStatus, CookieStatus, NotifWebhookToggles } from "@drec/contracts";
 
 type Tab = "account" | "webhook" | "engine" | "notif" | "about";
 
@@ -27,7 +28,7 @@ interface Props {
   open: boolean;
   onClose: () => void;
   /** 打开扫码登录 / 手动粘贴(对话框由 TopNav 渲染,这里只触发)。 */
-  onOpenQr: () => void;
+  onOpenQr: (platform: string) => void;
   onOpenPaste: (platform: string) => void;
 }
 
@@ -38,8 +39,8 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const toast = useToast();
   const refreshCookie = useRefreshCookie();
   const douyinCookie = useAtomValue(cookieStatusAtom);
-  const [cookiePlatform, setCookiePlatform] = useState("douyin");
   const [cookieStatuses, setCookieStatuses] = useState<CookieStatus[]>([]);
+  const [biliupAuth, setBiliupAuth] = useState<BiliupAuthStatus | null>(null);
   const setServerTimezone = useSetAtom(serverTimezoneAtom);
   const [tab, setTab] = useState<Tab>("engine");
   const [toggles, setToggles] = useState(getToggles());
@@ -58,13 +59,14 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const [tzEffective, setTzEffective] = useState("");
   const [savingTz, setSavingTz] = useState(false);
   const [version, setVersion] = useState("");
-  const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmClear, setConfirmClear] = useState<string | null>(null);
   const [confirmTz, setConfirmTz] = useState<{ affected: number } | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setToggles(getToggles());
     void api.getCookies().then((r) => setCookieStatuses(r.platforms)).catch(() => {});
+    void api.getBiliupStatus().then(setBiliupAuth).catch(() => setBiliupAuth(null));
     void api.getNotifSettings().then((r) => setWebhookToggles(r)).catch(() => {});
     void api.getWebhook().then((r) => setWebhook(r.webhook)).catch(() => {});
     void api.getMesioPath().then((r) => { setMesioPath(r.mesioPath); setMesioDefault(r.default); }).catch(() => {});
@@ -190,10 +192,10 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     await doSaveTimezone();
   };
 
-  const doClearCookie = async (): Promise<void> => {
-    setConfirmClear(false);
+  const doClearCookie = async (platform: string): Promise<void> => {
+    setConfirmClear(null);
     try {
-      await api.clearCookie(cookiePlatform);
+      await api.clearCookie(platform);
       toast(t("cookie.cleared"), "info");
       const status = await api.getCookies().catch(() => null);
       if (status) setCookieStatuses(status.platforms);
@@ -203,24 +205,27 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     }
   };
 
-  // 账号 cookie 状态行(复用顶栏 pill 逻辑)。
-  const cookie = cookieStatuses.find((c) => c.platform === cookiePlatform)
-    ?? (cookiePlatform === "douyin" ? douyinCookie : null);
-  let statusText = t("cookie.checking");
-  let statusColor = "var(--warning)";
-  if (cookie) {
+  const cookieSummary = (platform: string): { text: string; color: string; set: boolean } => {
+    const cookie = cookieStatuses.find((c) => c.platform === platform)
+      ?? (platform === "douyin" ? douyinCookie : null);
+    if (!cookie) return { text: t("cookie.checking"), color: "var(--warning)", set: false };
     if (cookie.set && cookie.hasSession) {
-      statusText = t("cookie.loggedIn");
-      statusColor = "var(--success)";
+      let text = t("cookie.loggedIn");
+      let color = "var(--success)";
       if (cookie.expiresAt) {
         const days = Math.floor((cookie.expiresAt - Date.now()) / 86400000);
-        if (days < 0) { statusText = t("cookie.expired"); statusColor = "var(--error)"; }
-        else if (days <= 3) { statusText = t("cookie.expiresIn", { days }); }
-        else { statusText = t("cookie.loggedInDays", { days }); }
+        if (days < 0) { text = t("cookie.expired"); color = "var(--error)"; }
+        else if (days <= 3) { text = t("cookie.expiresIn", { days }); }
+        else { text = t("cookie.loggedInDays", { days }); }
       }
-    } else if (cookie.set) { statusText = t("cookie.noSession"); }
-    else { statusText = t("cookie.notSet"); }
-  }
+      return { text, color, set: true };
+    }
+    if (cookie.set) return { text: t("cookie.noSession"), color: "var(--warning)", set: true };
+    return { text: t("cookie.notSet"), color: "var(--warning)", set: false };
+  };
+
+  const douyinStatus = cookieSummary("douyin");
+  const bilibiliStatus = cookieSummary("bilibili");
 
   const TABS: Array<{ id: Tab; label: string }> = [
     { id: "engine", label: t("settings.tabEngine") },
@@ -250,31 +255,62 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
 
       {tab === "account" && (
         <div>
-          <h4 className="form-section">{t("settings.accountSection")}</h4>
-          <label className="field-label" htmlFor="settings-cookie-platform">
-            {t("settings.cookiePlatformLabel")}
-          </label>
-          <select
-            id="settings-cookie-platform"
-            className="input mb-3 text-xs"
-            value={cookiePlatform}
-            onChange={(e) => setCookiePlatform(e.target.value)}
-          >
-            <option value="douyin">Douyin</option>
-            <option value="bilibili">Bilibili</option>
-          </select>
+          <h4 className="form-section">{t("settings.douyinSection")}</h4>
           <div className="status-strip mb-3">
-            <span className="dot" style={{ background: statusColor }} />
-            <span className="text-body">{statusText}</span>
+            <span className="dot" style={{ background: douyinStatus.color }} />
+            <span className="text-body">{douyinStatus.text}</span>
           </div>
-          <div className="flex gap-2">
-            {cookiePlatform === "douyin" && <Button small onClick={onOpenQr}>{t("nav.login")}</Button>}
-            <Button small variant="secondary" onClick={() => onOpenPaste(cookiePlatform)}>{t("nav.paste")}</Button>
-            <Button small variant="secondary" style={{ color: "var(--error-fg)" }} onClick={() => setConfirmClear(true)}>
+          <div className="flex flex-wrap gap-2">
+            <Button small onClick={() => onOpenQr("douyin")}>{t("nav.login")}</Button>
+            <Button small variant="secondary" onClick={() => onOpenPaste("douyin")}>
+              <ClipboardPaste className="h-3.5 w-3.5" />
+              {t("settings.douyinPaste")}
+            </Button>
+            <Button small variant="secondary" style={{ color: "var(--error-fg)" }} onClick={() => setConfirmClear("douyin")}>
               {t("nav.clear")}
             </Button>
           </div>
-          <p className="mt-3 text-xs text-muted-soft">{t("settings.accountHint")}</p>
+          <p className="mt-3 text-xs text-muted-soft">{t("settings.douyinHint")}</p>
+
+          <h4 className="form-section mt-6">{t("settings.biliSection")}</h4>
+          <div className="status-strip mb-3">
+            <span className="dot" style={{ background: bilibiliStatus.color }} />
+            <span className="text-body">{bilibiliStatus.text}</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button small onClick={() => onOpenQr("bilibili")}>{t("nav.login")}</Button>
+            <Button small onClick={() => onOpenPaste("bilibili")}>
+              <ClipboardPaste className="h-3.5 w-3.5" />
+              {t("settings.biliPaste")}
+            </Button>
+            <Button
+              small
+              variant="secondary"
+              style={{ color: "var(--error-fg)" }}
+              onClick={() => setConfirmClear("bilibili")}
+            >
+              {t("nav.clear")}
+            </Button>
+          </div>
+          <p className="mt-3 text-xs text-muted-soft">{t("settings.biliHint")}</p>
+
+          <h4 className="form-section mt-6">{t("settings.biliupSection")}</h4>
+          <div className="status-strip mb-3">
+            <span
+              className="dot"
+              style={{ background: biliupAuth?.hasSession ? "var(--success)" : "var(--warning)" }}
+            />
+            <span className="text-body">
+              {!biliupAuth
+                ? t("cookie.checking")
+                : biliupAuth.hasSession
+                  ? t("cookie.loggedIn")
+                  : biliupAuth.set
+                    ? t("cookie.noSession")
+                    : t("cookie.notSet")}
+            </span>
+          </div>
+          <p className="text-xs text-muted-soft">{t("settings.biliupHint")}</p>
         </div>
       )}
 
@@ -414,12 +450,14 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       )}
 
       <ConfirmDialog
-        open={confirmClear}
+        open={confirmClear !== null}
         title={t("cookie.clearConfirm")}
         confirmLabel={t("common.delete")}
         destructive
-        onConfirm={() => void doClearCookie()}
-        onCancel={() => setConfirmClear(false)}
+        onConfirm={() => {
+          if (confirmClear) void doClearCookie(confirmClear);
+        }}
+        onCancel={() => setConfirmClear(null)}
       />
 
       <ConfirmDialog

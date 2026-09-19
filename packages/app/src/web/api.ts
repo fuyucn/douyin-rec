@@ -28,6 +28,7 @@ import {
   type WorkerDTO,
   type WorkerTestResult,
   type WorkerStatus,
+  type BiliupAuthStatus,
 } from "@drec/core";
 import * as hubStore from "../hub-store.js";
 import type { HubRule } from "../hub-store.js";
@@ -77,7 +78,7 @@ export interface ManagerLike {
  * playwright) the login endpoints return a clear 501.
  */
 export interface LoginManagerLike {
-  start(): Promise<{ sessionId: string; qrPng: string }>;
+  start(platform?: string): Promise<{ sessionId: string; qrPng: string }>;
   poll(sessionId: string): Promise<{ state: string; cookie?: string }>;
 }
 
@@ -111,6 +112,8 @@ export interface ApiDeps {
   syncDbPath?: string;
   /** hub.config.json 路径;省略回落 rootHubConfig()。 */
   hubConfigPath?: string;
+  /** biliup cookies.json 路径;省略回落 DEFAULT_COOKIES(测试注入用)。 */
+  biliupCookiesPath?: string;
   /** 连接测试(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<WorkerTestResult>;
   /** 批量存活探针(CLI 注入)。省略(hub 未开)→ status 端点返回 []。 */
@@ -232,7 +235,7 @@ export interface CookieStatus {
   length: number;
   /** 登录态过期时间（epoch ms），解析自 sid_guard；解析不出为 null。 */
   expiresAt: number | null;
-  source: "settings" | "biliup" | "none";
+  source: "settings" | "none";
 }
 
 /** Derive the privacy-safe status from a stored (possibly empty/null) value. */
@@ -277,8 +280,8 @@ export interface Api {
   deleteTask(id: number): Promise<ApiResult>;
   startTask(id: number): ApiResult;
   stopTask(id: number, opts?: { internal?: boolean }): Promise<ApiResult>;
-  /** POST /api/login/qr — start a QR-login → { sessionId, qrPng }. */
-  startLogin(): Promise<ApiResult>;
+  /** POST /api/login/qr { platform? } — start a QR-login → { sessionId, qrPng }. */
+  startLogin(input?: { platform?: string }): Promise<ApiResult>;
   /** GET /api/login/qr/:sid — poll → { state, cookie? }. */
   pollLogin(sessionId: string): Promise<ApiResult>;
   /** GET /api/cookies — status for every registered platform. */
@@ -289,6 +292,8 @@ export interface Api {
   setCookie(input: { cookie?: string }, platform?: string): ApiResult;
   /** DELETE /api/cookie[s/:platform] — clear a platform cookie. */
   clearCookie(platform?: string): ApiResult;
+  /** GET /api/biliup/status — biliup 上传登录态(独立于录制 Cookie)。 */
+  getBiliupStatus(): ApiResult;
   /** GET /api/webhook — global Discord webhook (settings.discordWebhook). */
   getWebhook(): ApiResult;
   /** POST /api/webhook { webhook } — set/clear the global Discord webhook. */
@@ -378,9 +383,9 @@ export function makeApi(deps: ApiDeps): Api {
       const platform = platformForRoom(r);
       const slug = platform.extractRoomSlug(r);
       if (deps.resolveShortUrl && platform.resolveShortUrl && !/^\d+$/.test(slug)) {
-        const webRid = await deps.resolveShortUrl(r).catch(() => null);
-        if (webRid) {
-          r = `https://live.douyin.com/${webRid}`;
+        const roomId = await deps.resolveShortUrl(r).catch(() => null);
+        if (roomId) {
+          r = platform.roomToUrl(roomId);
           store.updateTask(taskId, { room: r });
         }
       }
@@ -478,11 +483,16 @@ export function makeApi(deps: ApiDeps): Api {
   const platformCookie = (platform: string): { value: string | null; source: CookieStatus["source"] } => {
     const stored = store.getPlatformCookies(platform);
     if (stored) return { value: stored, source: "settings" };
-    if (platform === "bilibili") {
-      const biliup = readBiliupCookieHeader();
-      if (biliup) return { value: biliup, source: "biliup" };
-    }
     return { value: null, source: "none" };
+  };
+  const biliupStatus = (): BiliupAuthStatus => {
+    const value = readBiliupCookieHeader(deps.biliupCookiesPath)?.trim() ?? "";
+    return {
+      set: value.length > 0,
+      hasSession: value.length > 0 && hasSessionCookie(value, "bilibili"),
+      length: value.length,
+      source: value ? "biliup" : "none",
+    };
   };
   const validCookiePlatform = (platform: string): boolean => listPlatforms().some((p) => p.id === platform);
 
@@ -665,12 +675,14 @@ export function makeApi(deps: ApiDeps): Api {
       return { status: 200, body: view(store.getTask(id)!) };
     },
 
-    async startLogin(): Promise<ApiResult> {
+    async startLogin(input = {}): Promise<ApiResult> {
       if (!login) {
-        return err(501, "扫码登录不可用：未安装 playwright（请用手动 cookie）");
+        return err(501, "扫码登录不可用（请用手动 cookie）");
       }
+      const platform = (input.platform ?? "douyin").trim() || "douyin";
+      if (platform !== "douyin" && platform !== "bilibili") return err(400, `平台不支持扫码登录: ${platform}`);
       try {
-        const { sessionId, qrPng } = await login.start();
+        const { sessionId, qrPng } = await login.start(platform);
         return { status: 200, body: { sessionId, qrPng } };
       } catch (e) {
         return err(500, `启动扫码登录失败: ${(e as Error).message}`);
@@ -679,11 +691,11 @@ export function makeApi(deps: ApiDeps): Api {
 
     async pollLogin(sessionId: string): Promise<ApiResult> {
       if (!login) {
-        return err(501, "扫码登录不可用：未安装 playwright（请用手动 cookie）");
+        return err(501, "扫码登录不可用（请用手动 cookie）");
       }
       const r = await login.poll(sessionId);
       if (r.state === "unknown") return err(404, `未找到登录会话: ${sessionId}`);
-      // The manager already persisted the cookie to settings.defaultCookies on
+      // The manager already persisted the cookie to the platform settings on
       // confirmed; we do NOT surface the raw cookie here (privacy). The UI just
       // refreshes GET /api/cookie to see the new status.
       return { status: 200, body: { state: r.state } };
@@ -720,6 +732,10 @@ export function makeApi(deps: ApiDeps): Api {
       store.setPlatformCookies(platform, "");
       const c = platformCookie(platform);
       return { status: 200, body: cookieStatus(platform, c.value, c.source) };
+    },
+
+    getBiliupStatus(): ApiResult {
+      return { status: 200, body: biliupStatus() };
     },
 
     getWebhook(): ApiResult {

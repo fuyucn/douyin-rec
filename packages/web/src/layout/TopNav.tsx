@@ -16,6 +16,7 @@ export function TopNav(): ReactNode {
   const cookie = useAtomValue(cookieStatusAtom);
   const hubEnabled = useAtomValue(hubEnabledAtom);
   const [qrOpen, setQrOpen] = useState(false);
+  const [qrPlatform, setQrPlatform] = useState("douyin");
   const [pasteOpen, setPasteOpen] = useState(false);
   const [cookiePlatform, setCookiePlatform] = useState("douyin");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -107,12 +108,15 @@ export function TopNav(): ReactNode {
         </div>
       </div>
 
-      <QrLoginDialog open={qrOpen} onClose={() => setQrOpen(false)} />
+      <QrLoginDialog open={qrOpen} onClose={() => setQrOpen(false)} platform={qrPlatform} />
       <CookieDialog open={pasteOpen} onClose={() => setPasteOpen(false)} platform={cookiePlatform} />
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        onOpenQr={() => setQrOpen(true)}
+        onOpenQr={(platform) => {
+          setQrPlatform(platform);
+          setQrOpen(true);
+        }}
         onOpenPaste={(platform) => {
           setCookiePlatform(platform);
           setPasteOpen(true);

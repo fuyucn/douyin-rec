@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useAtomValue } from "jotai";
+import { ExternalLink } from "lucide-react";
 import { api } from "../api/client";
 import { cookieStatusAtom } from "../atoms";
 import { Button } from "../components/Button";
@@ -31,6 +32,7 @@ export function CookieDialog({ open, onClose, platform = "douyin" }: Props): Rea
   const t = useT();
   const toast = useToast();
   const refreshCookie = useRefreshCookie();
+  const isBilibili = platform === "bilibili";
   const atomCookie = useAtomValue(cookieStatusAtom);
   const [cookie, setCookie] = useState<typeof atomCookie>(atomCookie);
   const [value, setValue] = useState("");
@@ -52,6 +54,10 @@ export function CookieDialog({ open, onClose, platform = "douyin" }: Props): Rea
       toast(t("paste.empty"), "warning");
       return;
     }
+    if (isBilibili && !/(?:^|;\s*)SESSDATA=/.test(cookie)) {
+      toast(t("paste.biliMissingSession"), "error");
+      return;
+    }
     setBusy(true);
     try {
       const status = await api.setCookie(cookie, platform);
@@ -70,17 +76,46 @@ export function CookieDialog({ open, onClose, platform = "douyin" }: Props): Rea
     <Dialog
       open={open}
       onClose={onClose}
-      title={t("paste.title")}
-      description={t("paste.desc")}
+      title={isBilibili ? t("paste.biliTitle") : t("paste.title")}
+      description={isBilibili ? t("paste.biliDesc") : t("paste.desc")}
+      widthClass={isBilibili ? "max-w-2xl" : "max-w-lg"}
     >
       <div className="status-strip mb-3">
         {cookieStatusLine(cookie, t)}
       </div>
+      {isBilibili && (
+        <div className="mb-4 border-y border-hairline py-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-medium text-ink">{t("paste.biliGuideTitle")}</p>
+            <a
+              href="https://www.bilibili.com/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs font-medium text-muted hover:text-ink"
+            >
+              {t("paste.biliOpen")}
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+          <ol className="mt-2 list-decimal space-y-1.5 pl-5 text-xs leading-relaxed text-muted">
+            <li>{t("paste.biliStep1")}</li>
+            <li>{t("paste.biliStep2")}</li>
+            <li>{t("paste.biliStep3")}</li>
+            <li>{t("paste.biliStep4")}</li>
+            <li>{t("paste.biliStep5")}</li>
+          </ol>
+          <p className="mt-3 text-xs text-muted-soft">{t("paste.biliFallback")}</p>
+          <p className="mt-2 font-mono text-[11px] leading-relaxed text-ink">
+            {t("paste.biliRequired")}
+          </p>
+        </div>
+      )}
       <textarea
         ref={ref}
         rows={4}
+        aria-label={isBilibili ? t("paste.biliTitle") : t("paste.title")}
         className="textarea font-mono text-xs"
-        placeholder={platform === "bilibili"
+        placeholder={isBilibili
           ? "SESSDATA=...; bili_jct=...; DedeUserID=...; ..."
           : "sessionid=...; sessionid_ss=...; ttwid=...; ..."}
         value={value}

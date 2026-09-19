@@ -18,10 +18,12 @@ import type { QrLogin, QrLoginState } from "./qr-login.js";
 export interface SettingsStore {
   setSetting(key: string, value: string): void;
   getSetting(key: string): string | null;
+  /** Persist a platform-scoped recording cookie when supported by the store. */
+  setPlatformCookies?(platform: string, value: string): void;
 }
 
 /** Factory that mints a fresh QrLogin session. Injected for testability. */
-export type QrLoginFactory = () => QrLogin;
+export type QrLoginFactory = (platform: string) => QrLogin;
 
 /** Settings key under which the harvested login cookie is stored. */
 export const DEFAULT_COOKIES_KEY = "defaultCookies";
@@ -40,6 +42,7 @@ export interface PollResult {
 
 interface Session {
   id: string;
+  platform: string;
   login: QrLogin;
   /** Latched terminal cookie once confirmed (so repeated polls are stable). */
   cookie?: string;
@@ -66,16 +69,16 @@ export class QrLoginManager {
    * Start a new QR-login. Cancels any previous active session first (only one
    * headless browser at a time). Returns the session id + base64 QR PNG.
    */
-  async start(): Promise<StartResult> {
+  async start(platform = "douyin"): Promise<StartResult> {
     if (this.active) {
       this.log(`[login-mgr] 取消上一个会话 ${this.active.id}`);
       await this.cancelActive();
     }
-    const login = this.factory();
+    const login = this.factory(platform);
     const { qrPng } = await login.start();
     const id = `login-${Date.now().toString(36)}-${(++this.seq).toString(36)}`;
-    this.active = { id, login };
-    this.log(`[login-mgr] 新会话 ${id}`);
+    this.active = { id, platform, login };
+    this.log(`[login-mgr] 新会话 ${id} platform=${platform}`);
     return { sessionId: id, qrPng };
   }
 
@@ -92,8 +95,9 @@ export class QrLoginManager {
     const r = await s.login.poll();
     if (r.state === "confirmed" && r.cookie) {
       s.cookie = r.cookie;
-      this.store.setSetting(DEFAULT_COOKIES_KEY, r.cookie);
-      this.log(`[login-mgr] 会话 ${sessionId} 已保存 defaultCookies`);
+      if (s.platform === "douyin") this.store.setSetting(DEFAULT_COOKIES_KEY, r.cookie);
+      this.store.setPlatformCookies?.(s.platform, r.cookie);
+      this.log(`[login-mgr] 会话 ${sessionId} 已保存 ${s.platform} cookie`);
       return { state: "confirmed", cookie: r.cookie };
     }
     if (r.state === "expired") {

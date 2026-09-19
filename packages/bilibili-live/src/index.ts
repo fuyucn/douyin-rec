@@ -29,13 +29,34 @@ export function roomToUrl(room: string): string {
   return `https://live.bilibili.com/${room}`;
 }
 
+/** b23.tv 分享短链 → live.bilibili.com/{roomId}；解析失败返回 null。 */
+export async function resolveBilibiliShortUrl(url: string): Promise<string | null> {
+  if (!/b23\.tv\//i.test(url)) return null;
+  try {
+    const res = await fetch(url, {
+      method: "HEAD",
+      redirect: "manual",
+      headers: {
+        "user-agent": "Mozilla/5.0 (compatible; douyin-rec/1.0)",
+        referer: "https://live.bilibili.com/",
+      },
+    });
+    const location = res.headers.get("location");
+    const target = location ? new URL(location, url).toString() : res.url;
+    const slug = extractRoomSlug(target);
+    return /^\d+$/.test(slug) ? slug : null;
+  } catch {
+    return null;
+  }
+}
+
 export const bilibiliPlatform: Platform = {
   id: "bilibili",
-  matchUrl: (url) => /live\.bilibili\.com\//.test(url),
-  urlPattern: "live\\.bilibili\\.com\\/",
+  matchUrl: (url) => /live\.bilibili\.com\//.test(url) || /b23\.tv\//i.test(url),
+  urlPattern: "(?:live\\.bilibili\\.com|b23\\.tv)\\/",
   roomToUrl,
   extractRoomSlug,
-  // b23.tv 短链暂不处理(Platform.resolveShortUrl 可选,省略)。
+  resolveShortUrl: resolveBilibiliShortUrl,
   async fetchAnchorName(room) {
     try {
       const { uid } = await getRoomInfo(extractRoomSlug(room));

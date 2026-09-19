@@ -17,11 +17,18 @@ import type { QrLogin, QrPollResult, QrStartResult } from "../../packages/app/sr
 /** In-memory settings store (the slice the manager needs). */
 class MemStore implements SettingsStore {
   private m = new Map<string, string>();
+  private platform = new Map<string, string>();
   setSetting(k: string, v: string): void {
     this.m.set(k, v);
   }
   getSetting(k: string): string | null {
     return this.m.get(k) ?? null;
+  }
+  setPlatformCookies(platform: string, value: string): void {
+    this.platform.set(platform, value);
+  }
+  getPlatformCookies(platform: string): string | null {
+    return this.platform.get(platform) ?? null;
   }
 }
 
@@ -110,6 +117,19 @@ describe("QrLoginManager.poll", () => {
     const again = await mgr.poll(sessionId);
     expect(again.state).toBe("confirmed");
     expect(again.cookie).toBe(cookie);
+  });
+
+  it("B站扫码成功后保存到 platformCookies，不写抖音 defaultCookies", async () => {
+    const cookie = "SESSDATA=bili; bili_jct=csrf";
+    const login = new MockQrLogin("QR", [{ state: "confirmed", cookie }]);
+    const mgr = new QrLoginManager(store, (platform) => {
+      expect(platform).toBe("bilibili");
+      return login;
+    });
+    const { sessionId } = await mgr.start("bilibili");
+    await mgr.poll(sessionId);
+    expect(store.getPlatformCookies("bilibili")).toBe(cookie);
+    expect(store.getSetting(DEFAULT_COOKIES_KEY)).toBeNull();
   });
 
   it("expired drops the session (next poll → unknown)", async () => {

@@ -13,6 +13,7 @@ import type {
   TaskDetailDTO as TaskDetail,
   TaskRuntime,
   CookieStatus,
+  BiliupAuthStatus,
   TaskPayload,
   HubPipelineConfig,
   HubRuleDTO,
@@ -33,7 +34,7 @@ import type {
   WorkerTestResult,
   WorkerStatus,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -149,6 +150,7 @@ export const api = {
   setCookie: (cookie: string, platform = "douyin"): Promise<CookieStatus> =>
     request("POST", `/api/cookies/${platform}`, { cookie }),
   clearCookie: (platform = "douyin"): Promise<CookieStatus> => request("DELETE", `/api/cookies/${platform}`),
+  getBiliupStatus: (): Promise<BiliupAuthStatus> => request("GET", "/api/biliup/status"),
 
   // ── 全局 Discord webhook ────────────────────────────────────────────────────
   getWebhook: (): Promise<{ webhook: string }> => request("GET", "/api/webhook"),
@@ -178,6 +180,6 @@ export const api = {
     request("POST", "/api/timezone", { timezone }),
 
   // ── QR login ──────────────────────────────────────────────────────────────
-  startLogin: (): Promise<QrStart> => request("POST", "/api/login/qr"),
+  startLogin: (platform = "douyin"): Promise<QrStart> => request("POST", "/api/login/qr", { platform }),
   pollLogin: (sid: string): Promise<QrPoll> => request("GET", `/api/login/qr/${sid}`),
 };
