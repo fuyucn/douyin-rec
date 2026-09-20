@@ -121,6 +121,9 @@ importers:
       '@drec/douyin-live':
         specifier: workspace:*
         version: link:../douyin-live
+      '@drec/kuaishou-live':
+        specifier: workspace:*
+        version: link:../kuaishou-live
       '@drec/manager':
         specifier: workspace:*
         version: link:../manager
@@ -181,6 +184,12 @@ importers:
         version: 8.18.1
 
   packages/ffmpeg-recorder-extra: {}
+
+  packages/kuaishou-live:
+    dependencies:
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/manager:
     dependencies:

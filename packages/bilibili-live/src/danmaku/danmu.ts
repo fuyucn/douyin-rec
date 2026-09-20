@@ -233,9 +233,10 @@ export class BilibiliDanmuSource implements DanmuSource {
   private scheduleReconnect(info: DanmuInfo, reason: string): void {
     if (this.stopped || this.reconnectTimer) return;
     if (this.reconnects >= MAX_RECONNECT) {
-      log.warn(`${this.name} 重连超 ${MAX_RECONNECT} 次,放弃(${reason})`);
-      this.alert(`弹幕 WS 多次重连失败,本场后续无弹幕(${reason})。room=${this.roomUrl}`);
-      return;
+      // 不再本场放弃：B站 SEI/风控可能让 WS 断开一阵子，若此时还在直播路上，放手会导致视频有但弹幕整场断。
+      // 固定恢复 30s 上限间隔持续重连，直到本场结束(manager stop() 时 stopped=true)。
+      log.warn(`${this.name} 已重连超 ${MAX_RECONNECT} 次(${reason})，继续 30s 间隔重试`);
+      this.alert(`弹幕 WS 多次重连失败(${reason})，继续低频重试中。room=${this.roomUrl}`);
     }
     const delay = Math.min(2000 * 2 ** this.reconnects, 30_000);
     this.reconnects += 1;

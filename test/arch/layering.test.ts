@@ -34,6 +34,7 @@ const RANKS: Record<string, number> = {
   //     自己的(ListenerDanmuSource),弹幕 XML 写入已下沉至 manager。
   "@drec/douyin-live": 1.5,
   "@drec/bilibili-live": 1.5,
+  "@drec/kuaishou-live": 1.5,
   // 3 编排 → 4 应用 → 5 入口
   "@drec/manager": 3,
   "@drec/app": 4,

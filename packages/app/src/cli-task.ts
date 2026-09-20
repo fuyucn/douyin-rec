@@ -51,6 +51,7 @@ import { createWebServer } from "./web/server.js";
 import { QrLoginManager } from "./login/login-manager.js";
 import { PlaywrightQrLogin } from "./login/qr-login.js";
 import { BiliQrLogin } from "./login/bili-qr-login.js";
+import { KuaishouQrLogin } from "./login/kuaishou-qr-login.js";
 
 // 本文件含多个命令组,日志按命令归属 scope:task→task_manager、daemon→scheduler、serve→web_server。
 const log = createLogger("task_manager");
@@ -122,7 +123,9 @@ export function buildCookieCommand(): Command {
   const hasSession = (c: string, platform: string): boolean =>
     platform === "bilibili"
       ? /(?:^|;\s*)SESSDATA=/.test(c)
-      : /(?:^|;\s*)sessionid(?:_ss)?=/.test(c);
+      : platform === "kuaishou"
+        ? /(?:^|;\s*)kuaishou\.web\.cp\.api_st=|(?:^|;\s*)passToken=|(?:^|;\s*)userId=/.test(c)
+        : /(?:^|;\s*)sessionid(?:_ss)?=/.test(c);
 
   cookie
     .command("show")
@@ -553,7 +556,9 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         (platform) =>
           platform === "bilibili"
             ? new BiliQrLogin({ log: (m) => console.log(m) })
-            : new PlaywrightQrLogin({ log: (m) => console.log(m) }),
+            : platform === "kuaishou"
+              ? new KuaishouQrLogin({ log: (m) => console.log(m) })
+              : new PlaywrightQrLogin({ log: (m) => console.log(m) }),
         { log: (m) => console.log(m) },
       );
 

@@ -17,6 +17,8 @@ export const QUALITY_FULL: Record<string, string> = {
   hd: "高清 HD",
   sd: "标清 SD",
   ld: "流畅 LD",
+  // kuaishou 档位(大写;与 douyin 小写档位区分)
+  OD: "原画", BD: "蓝光", UHD: "超清", HD: "高清", SD: "标清", LD: "流畅",
   // bilibili qn(从高到低)
   "10000": "原画",
   "400": "蓝光",
@@ -28,6 +30,17 @@ export const QUALITY_FULL: Record<string, string> = {
 /** 画质 id → 友好标签(未知值原样显示)。 */
 export function qualityLabel(q: string): string {
   return QUALITY_FULL[q] ?? q;
+}
+
+export const PLATFORM_LABEL: Record<string, string> = {
+  douyin: "DouyinLive",
+  bilibili: "BilibiliLive",
+  kuaishou: "KuaishouLive",
+};
+
+/** 平台 id → 友好展示名(未知值原样显示)。 */
+export function platformLabel(p: string): string {
+  return PLATFORM_LABEL[p] ?? p;
 }
 
 export const QUALITY_OPTIONS: Array<{ value: string; label: string }> = [

@@ -240,6 +240,8 @@ export interface PlatformsDTO {
 /** GET /api/tasks[] 的任务响应(含 live 运行态;不含敏感 cookies)。 */
 export interface TaskDTO {
   id: number;
+  /** 平台 id(douyin / bilibili / kuaishou / ...)。由创建/改 room 时按 urlPattern 重判。 */
+  platform: string;
   room: string;
   name: string | null;
   /** hub 受管标记:null=手动,'hub'=由 master hub 下发管理(禁止编辑/删除)。 */

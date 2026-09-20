@@ -208,6 +208,8 @@ export const DEFAULT_COOKIES_KEY = "defaultCookies";
 /** A cookie string has a usable login session for the target platform. */
 function hasSessionCookie(cookie: string, platform: string): boolean {
   if (platform === "bilibili") return /(?:^|;\s*)SESSDATA=/.test(cookie);
+  if (platform === "kuaishou")
+    return /(?:^|;\s*)kuaishou\.web\.cp\.api_st=|(?:^|;\s*)passToken=|(?:^|;\s*)userId=/.test(cookie);
   return /(?:^|;\s*)sessionid(?:_ss)?=/.test(cookie);
 }
 
@@ -680,7 +682,7 @@ export function makeApi(deps: ApiDeps): Api {
         return err(501, "扫码登录不可用（请用手动 cookie）");
       }
       const platform = (input.platform ?? "douyin").trim() || "douyin";
-      if (platform !== "douyin" && platform !== "bilibili") return err(400, `平台不支持扫码登录: ${platform}`);
+      if (platform !== "douyin" && platform !== "bilibili" && platform !== "kuaishou") return err(400, `平台不支持扫码登录: ${platform}`);
       try {
         const { sessionId, qrPng } = await login.start(platform);
         return { status: 200, body: { sessionId, qrPng } };

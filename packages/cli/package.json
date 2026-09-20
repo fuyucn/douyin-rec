@@ -15,6 +15,7 @@
     "yaml": "^2.5.0",
     "@drec/douyin-live": "workspace:*",
     "@drec/bilibili-live": "workspace:*",
+    "@drec/kuaishou-live": "workspace:*",
     "@drec/orchestrator": "workspace:*"
   }
 }

@@ -10,7 +10,7 @@ import { Tooltip } from "../components/Tooltip";
 import { errMessage, usePolling, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { classifyLogLine, LOG_LINE_STYLE } from "../lib/logLevel";
-import { QUALITY_FULL, fmtClock, fmtStartedAt, roomHref, roomId, scheduleText } from "../lib/labels";
+import { QUALITY_FULL, fmtClock, fmtStartedAt, platformLabel, roomHref, roomId, scheduleText } from "../lib/labels";
 import { localScheduleTooltip, localTimeTooltip } from "../lib/tz";
 import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
 import { MergePanel } from "../components/MergePanel";
@@ -218,6 +218,7 @@ export function TaskDetail(): ReactNode {
                 }
               />
               <Row label={t("tasks.anchor")} value={task?.anchorName ?? "-"} />
+              <Row label={t("tasks.platform")} mono value={task ? platformLabel(task.platform) : "-"} />
               <Row label={t("tasks.quality")} value={task ? QUALITY_FULL[task.quality] ?? task.quality : "-"} />
               <Row label={t("tasks.recorder")} mono value={task?.engine ?? "-"} />
               <div className="flex justify-between gap-3 py-2.5 border-b border-hairline">

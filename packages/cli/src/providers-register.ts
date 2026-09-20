@@ -14,12 +14,14 @@
 import { registerEngine, registerPlatform } from "@drec/core";
 import { douyinPlatform } from "@drec/douyin-live";
 import { bilibiliPlatform } from "@drec/bilibili-live";
+import { kuaishouPlatform } from "@drec/kuaishou-live";
 import { ffmpegEngine, mesioEngine } from "@drec/record-engine";
 
 // ── 平台 ────────────────────────────────────────────────────────────────────
 // 接第二平台:写 <平台>-core 实现 Platform + 在此 registerPlatform 一行。
 registerPlatform(douyinPlatform, { default: true });
-registerPlatform(bilibiliPlatform); // bilibili(取流为骨架 stub,见 @drec/bilibili-live)
+registerPlatform(bilibiliPlatform); // bilibili
+registerPlatform(kuaishouPlatform); // 快手(取流 = 直播页 __INITIAL_STATE__;无弹幕)
 
 // ── 下载引擎 ──────────────────────────────────────────────────────────────────
 // 通用录制器(PollingRecorder)按 task.engine / platform.defaultEngine 选其一。

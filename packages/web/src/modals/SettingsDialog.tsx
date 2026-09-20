@@ -226,6 +226,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
 
   const douyinStatus = cookieSummary("douyin");
   const bilibiliStatus = cookieSummary("bilibili");
+  const kuaishouStatus = cookieSummary("kuaishou");
 
   const TABS: Array<{ id: Tab; label: string }> = [
     { id: "engine", label: t("settings.tabEngine") },
@@ -293,6 +294,23 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
             </Button>
           </div>
           <p className="mt-3 text-xs text-muted-soft">{t("settings.biliHint")}</p>
+
+          <h4 className="form-section mt-6">{t("settings.kuaishouSection")}</h4>
+          <div className="status-strip mb-3">
+            <span className="dot" style={{ background: kuaishouStatus.color }} />
+            <span className="text-body">{kuaishouStatus.text}</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button small onClick={() => onOpenQr("kuaishou")}>{t("nav.login")}</Button>
+            <Button small onClick={() => onOpenPaste("kuaishou")}>
+              <ClipboardPaste className="h-3.5 w-3.5" />
+              {t("settings.kuaishouPaste")}
+            </Button>
+            <Button small variant="secondary" style={{ color: "var(--error-fg)" }} onClick={() => setConfirmClear("kuaishou")}>
+              {t("nav.clear")}
+            </Button>
+          </div>
+          <p className="mt-3 text-xs text-muted-soft">{t("settings.kuaishouHint")}</p>
 
           <h4 className="form-section mt-6">{t("settings.biliupSection")}</h4>
           <div className="status-strip mb-3">

@@ -107,10 +107,10 @@ export function QrLoginDialog({ open, onClose, platform = "douyin" }: Props): Re
       onClose={onClose}
       widthClass="max-w-sm"
       center
-      title={platform === "bilibili" ? t("qr.biliTitle") : t("qr.title")}
+      title={platform === "bilibili" ? t("qr.biliTitle") : platform === "kuaishou" ? t("qr.ksTitle") : t("qr.title")}
     >
       <p className="text-sm text-muted mb-5">
-        {platform === "bilibili" ? t("qr.biliDesc") : t("qr.desc")}
+        {platform === "bilibili" ? t("qr.biliDesc") : platform === "kuaishou" ? t("qr.ksDesc") : t("qr.desc")}
       </p>
       <div className="flex justify-center mb-5">
         <div className="border border-hairline p-4 w-[232px] h-[232px] flex items-center justify-center" style={{ borderRadius: "var(--r-card)", background: "var(--qr-surface)" }}>

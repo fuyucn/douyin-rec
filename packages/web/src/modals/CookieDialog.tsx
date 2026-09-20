@@ -33,6 +33,7 @@ export function CookieDialog({ open, onClose, platform = "douyin" }: Props): Rea
   const toast = useToast();
   const refreshCookie = useRefreshCookie();
   const isBilibili = platform === "bilibili";
+  const isKuaishou = platform === "kuaishou";
   const atomCookie = useAtomValue(cookieStatusAtom);
   const [cookie, setCookie] = useState<typeof atomCookie>(atomCookie);
   const [value, setValue] = useState("");
@@ -76,9 +77,9 @@ export function CookieDialog({ open, onClose, platform = "douyin" }: Props): Rea
     <Dialog
       open={open}
       onClose={onClose}
-      title={isBilibili ? t("paste.biliTitle") : t("paste.title")}
-      description={isBilibili ? t("paste.biliDesc") : t("paste.desc")}
-      widthClass={isBilibili ? "max-w-2xl" : "max-w-lg"}
+      title={isBilibili ? t("paste.biliTitle") : isKuaishou ? t("paste.ksTitle") : t("paste.title")}
+      description={isBilibili ? t("paste.biliDesc") : isKuaishou ? t("paste.ksDesc") : t("paste.desc")}
+      widthClass={isBilibili || isKuaishou ? "max-w-2xl" : "max-w-lg"}
     >
       <div className="status-strip mb-3">
         {cookieStatusLine(cookie, t)}
