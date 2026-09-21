@@ -12,7 +12,7 @@ import { useT, useLang } from "../lib/i18n";
 import { getToggles, setToggle, NOTIF_KEYS, type NotifKey } from "../lib/notifications";
 import type { BiliupAuthStatus, CookieStatus, NotifWebhookToggles } from "@drec/contracts";
 
-type Tab = "account" | "webhook" | "engine" | "notif" | "about";
+type Tab = "account" | "engine" | "notif" | "about";
 
 /** 固定几个常用大时区(够用即可,不需要全量 IANA 列表)。 */
 const TIMEZONE_OPTIONS = [
@@ -228,10 +228,15 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const bilibiliStatus = cookieSummary("bilibili");
   const kuaishouStatus = cookieSummary("kuaishou");
 
+  const accountRows = [
+    { id: "douyin", title: t("settings.douyinSection"), hint: t("settings.douyinHint"), status: douyinStatus },
+    { id: "bilibili", title: t("settings.biliSection"), hint: t("settings.biliHint"), status: bilibiliStatus },
+    { id: "kuaishou", title: t("settings.kuaishouSection"), hint: t("settings.kuaishouHint"), status: kuaishouStatus },
+  ];
+
   const TABS: Array<{ id: Tab; label: string }> = [
     { id: "engine", label: t("settings.tabEngine") },
     { id: "account", label: t("settings.tabAccount") },
-    { id: "webhook", label: t("settings.tabWebhook") },
     { id: "notif", label: t("settings.tabNotif") },
     { id: "about", label: t("settings.tabAbout") },
   ];
@@ -255,113 +260,58 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       </div>
 
       {tab === "account" && (
-        <div>
-          <h4 className="form-section">{t("settings.douyinSection")}</h4>
-          <div className="status-strip mb-3">
-            <span className="dot" style={{ background: douyinStatus.color }} />
-            <span className="text-body">{douyinStatus.text}</span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button small onClick={() => onOpenQr("douyin")}>{t("nav.login")}</Button>
-            <Button small variant="secondary" onClick={() => onOpenPaste("douyin")}>
-              <ClipboardPaste className="h-3.5 w-3.5" />
-              {t("settings.douyinPaste")}
-            </Button>
-            <Button small variant="secondary" style={{ color: "var(--error-fg)" }} onClick={() => setConfirmClear("douyin")}>
-              {t("nav.clear")}
-            </Button>
-          </div>
-          <p className="mt-3 text-xs text-muted-soft">{t("settings.douyinHint")}</p>
+        <div className="settings-tab-body">
+          <div className="space-y-3">
+            {accountRows.map((row) => (
+              <div key={row.id} className="border border-hairline rounded-lg p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="dot" style={{ background: row.status.color }} />
+                      <h4 className="text-sm font-medium text-ink">{row.title}</h4>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-soft">{row.hint}</p>
+                    <p className="mt-2 text-xs text-body">{row.status.text}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 shrink-0">
+                    <Button small onClick={() => onOpenQr(row.id)}>{t("nav.login")}</Button>
+                    <Button small variant="secondary" onClick={() => onOpenPaste(row.id)}>
+                      <ClipboardPaste className="h-3.5 w-3.5" />
+                      {t("nav.paste")}
+                    </Button>
+                    <Button small variant="secondary" style={{ color: "var(--error-fg)" }} onClick={() => setConfirmClear(row.id)}>
+                      {t("nav.clear")}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))}
 
-          <h4 className="form-section mt-6">{t("settings.biliSection")}</h4>
-          <div className="status-strip mb-3">
-            <span className="dot" style={{ background: bilibiliStatus.color }} />
-            <span className="text-body">{bilibiliStatus.text}</span>
+            <div className="border border-hairline rounded-lg p-4">
+              <div className="flex items-center gap-2">
+                <span
+                  className="dot"
+                  style={{ background: biliupAuth?.hasSession ? "var(--success)" : "var(--warning)" }}
+                />
+                <h4 className="text-sm font-medium text-ink">{t("settings.biliupSection")}</h4>
+              </div>
+              <p className="mt-2 text-xs text-body">
+                {!biliupAuth
+                  ? t("cookie.checking")
+                  : biliupAuth.hasSession
+                    ? t("cookie.loggedIn")
+                    : biliupAuth.set
+                      ? t("cookie.noSession")
+                      : t("cookie.notSet")}
+              </p>
+              <p className="mt-1 text-xs text-muted-soft">{t("settings.biliupHint")}</p>
+            </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Button small onClick={() => onOpenQr("bilibili")}>{t("nav.login")}</Button>
-            <Button small onClick={() => onOpenPaste("bilibili")}>
-              <ClipboardPaste className="h-3.5 w-3.5" />
-              {t("settings.biliPaste")}
-            </Button>
-            <Button
-              small
-              variant="secondary"
-              style={{ color: "var(--error-fg)" }}
-              onClick={() => setConfirmClear("bilibili")}
-            >
-              {t("nav.clear")}
-            </Button>
-          </div>
-          <p className="mt-3 text-xs text-muted-soft">{t("settings.biliHint")}</p>
-
-          <h4 className="form-section mt-6">{t("settings.kuaishouSection")}</h4>
-          <div className="status-strip mb-3">
-            <span className="dot" style={{ background: kuaishouStatus.color }} />
-            <span className="text-body">{kuaishouStatus.text}</span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button small onClick={() => onOpenQr("kuaishou")}>{t("nav.login")}</Button>
-            <Button small onClick={() => onOpenPaste("kuaishou")}>
-              <ClipboardPaste className="h-3.5 w-3.5" />
-              {t("settings.kuaishouPaste")}
-            </Button>
-            <Button small variant="secondary" style={{ color: "var(--error-fg)" }} onClick={() => setConfirmClear("kuaishou")}>
-              {t("nav.clear")}
-            </Button>
-          </div>
-          <p className="mt-3 text-xs text-muted-soft">{t("settings.kuaishouHint")}</p>
-
-          <h4 className="form-section mt-6">{t("settings.biliupSection")}</h4>
-          <div className="status-strip mb-3">
-            <span
-              className="dot"
-              style={{ background: biliupAuth?.hasSession ? "var(--success)" : "var(--warning)" }}
-            />
-            <span className="text-body">
-              {!biliupAuth
-                ? t("cookie.checking")
-                : biliupAuth.hasSession
-                  ? t("cookie.loggedIn")
-                  : biliupAuth.set
-                    ? t("cookie.noSession")
-                    : t("cookie.notSet")}
-            </span>
-          </div>
-          <p className="text-xs text-muted-soft">{t("settings.biliupHint")}</p>
-        </div>
-      )}
-
-      {tab === "webhook" && (
-        <div>
-          <h4 className="form-section">{t("settings.webhookSection")}</h4>
-          <label className="field-label">{t("settings.webhookLabel")}</label>
-          <div className="flex gap-2">
-            <input
-              className="input flex-1 font-mono text-xs"
-              placeholder={t("settings.webhookPlaceholder")}
-              value={webhook}
-              onChange={(e) => setWebhook(e.target.value)}
-            />
-            <Button small onClick={() => void saveWebhook()} disabled={savingHook} loading={savingHook}>
-              {t("common.save")}
-            </Button>
-            <Button
-              small
-              variant="secondary"
-              onClick={() => void testWebhook()}
-              disabled={testingHook || !webhook.trim()}
-              loading={testingHook}
-            >
-              {t("settings.webhookTest")}
-            </Button>
-          </div>
-          <p className="mt-1 text-xs text-muted-soft">{t("settings.webhookHint")}</p>
         </div>
       )}
 
       {tab === "engine" && (
-        <div>
+        <div className="settings-tab-body">
           <h4 className="form-section">{t("settings.languageSection")}</h4>
           <label className="field-label" htmlFor="settings-language">
             {t("settings.languageLabel")}
@@ -418,7 +368,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       )}
 
       {tab === "about" && (
-        <div>
+        <div className="settings-tab-body">
           <h4 className="form-section">{t("settings.aboutSection")}</h4>
           <div className="switch-row switch-row-sm">
             <span className="text-sm text-body">{t("settings.aboutVersion")}</span>
@@ -428,7 +378,34 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       )}
 
       {tab === "notif" && (
-        <div>
+        <div className="settings-tab-body">
+          <section className="mb-6">
+          <h4 className="form-section">{t("settings.webhookSection")}</h4>
+          <label className="field-label">{t("settings.webhookLabel")}</label>
+          <div className="flex gap-2">
+            <input
+              className="input flex-1 font-mono text-xs"
+              placeholder={t("settings.webhookPlaceholder")}
+              value={webhook}
+              onChange={(e) => setWebhook(e.target.value)}
+            />
+            <Button small onClick={() => void saveWebhook()} disabled={savingHook} loading={savingHook}>
+              {t("common.save")}
+            </Button>
+            <Button
+              small
+              variant="secondary"
+              onClick={() => void testWebhook()}
+              disabled={testingHook || !webhook.trim()}
+              loading={testingHook}
+            >
+              {t("settings.webhookTest")}
+            </Button>
+          </div>
+          <p className="mt-1 text-xs text-muted-soft">{t("settings.webhookHint")}</p>
+        
+          </section>
+
           <p className="text-xs text-muted-soft mb-2">{t("notif.desc")}</p>
           <div className="rounded-md border border-hairline bg-raised overflow-hidden">
             <div className="grid grid-cols-[1fr_auto_auto] items-center gap-x-6 gap-y-0 px-4 py-2 border-b border-hairline text-xs text-muted-soft">

@@ -567,6 +567,14 @@ table.tasks tbody tr:last-child td {
   justify-content: center;
   padding: 16px;
 }
+/* Settings: tab 内容固定高度 + 内部滚动,避免切 tab 时整个弹窗高度跳变。 */
+.settings-tab-body {
+  height: min(520px, 58vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
 .modal-card {
   position: relative;
   background: var(--raised);
