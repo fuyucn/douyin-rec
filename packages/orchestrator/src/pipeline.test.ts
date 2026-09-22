@@ -2,7 +2,7 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { runPipeline, resolveUploadDestinations, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
 import type { Broadcast } from "./identity.js";
@@ -119,6 +119,26 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
 
 // streamKey "douyin:test-room:2026-06-27" → sanitized "douyin_test-room_2026-06-27"
 const STREAM_KEY = "douyin:test-room:2026-06-27";
+
+describe("resolveUploadDestinations", () => {
+  it("缺省：upload → bilibili；stage → 空", () => {
+    expect([...resolveUploadDestinations({
+      cleanMaxGapSec: 30, stageDir: "/tmp/s", cookies: "/c", uploadMode: "upload",
+      uploadMeta: { tag: "t", tid: 21 },
+    })]).toEqual(["bilibili"]);
+    expect([...resolveUploadDestinations({
+      cleanMaxGapSec: 30, stageDir: "/tmp/s", cookies: "/c", uploadMode: "stage",
+      uploadMeta: { tag: "t", tid: 21 },
+    })]).toEqual([]);
+  });
+
+  it("显式 destinations 可管两种模式，空数组也能表示“不传”", () => {
+    const base = { cleanMaxGapSec: 30, stageDir: "/tmp/s", cookies: "/c", uploadMode: "stage" as const, uploadMeta: { tag: "t", tid: 21 } };
+    expect([...resolveUploadDestinations({ ...base, uploadDestinations: ["youtube"] })]).toEqual(["youtube"]);
+    expect([...resolveUploadDestinations({ ...base, uploadDestinations: ["bilibili", "youtube"] })]).toEqual(["bilibili", "youtube"]);
+    expect([...resolveUploadDestinations({ ...base, uploadDestinations: [] })]).toEqual([]);
+  });
+});
 
 function stageSubOf(deps: TestDeps): string {
   return join(deps.cfg.stageDir, "douyin_test-room_2026-06-27");
