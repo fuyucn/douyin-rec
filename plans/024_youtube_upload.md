@@ -41,12 +41,16 @@ hub pipeline 里 `upload.mode` 目前只有 `stage | upload` 两个状态，`upl
    - 本地/VPS：`<DOUYIN_REC_ROOT>/config/youtube/client_secrets.json`
 6. 在本机（有浏览器）先运行：
    ```bash
+   pnpm youtubeuploader:auth
+   ```
+   浏览器会打开 Google 授权页；登录上传账号完成授权后，生成 `request.token`。
+   或者直接用底层命令：
+   ```bash
    ./bin/youtubeuploader -filename /tmp/placeholder.mp4 -title "auth" \
      -secrets output-data/config/youtube/client_secrets.json \
      -cache output-data/config/youtube/request.token \
      -quiet -privacy private
    ```
-   浏览器会打开 Google 授权页；登录上传账号完成授权后，生成 `request.token`。
 7. 把 `request.token` 复制到远端同一个 `<root>/config/youtube/request.token`。
 8. token 会由 `youtubeuploader` 在服务端自动刷新（缓存文件会更新），远端的 worker 不用打开浏览器。
 
@@ -103,6 +107,7 @@ hub pipeline 里 `upload.mode` 目前只有 `stage | upload` 两个状态，`upl
 - [x] 缺 `client_secrets.json` 时预检给中文错误。
 - [x] 缺 `request.token` 时预检给中文错误(headless/docker 不会误进 OAuth 循环)。
 - [x] Docker master 镜像可使用：`docker compose build douyin-rec` 通过；镜像内 `youtubeuploader -version` 输出 `1.25.5`。
+- [x] 本地新增一次命令：`pnpm youtubeuploader:auth`（自动生成 1s private 授权视频并写 token）。
 - [ ] Docker master 里把 `client_secrets.json`/`request.token` 放入 config/youtube，跑手动 CLI 成功。
 - [ ] 房间配置 `destinations: ["youtube"]` 后，收播自动传 YouTube、台账出现 YouTube URL。
 - [ ] 房间配置 `destinations: ["bilibili", "youtube"]` 后，B 站分 P 与 YouTube 单视频都成功。

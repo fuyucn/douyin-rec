@@ -16,6 +16,7 @@
     "mesio:install": "sh scripts/install-mesio.sh",
     "biliup:install": "sh scripts/install-biliup.sh",
     "youtubeuploader:install": "sh scripts/install-youtubeuploader.sh",
+    "youtubeuploader:auth": "sh scripts/setup-youtube-auth.sh",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
