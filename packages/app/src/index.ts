@@ -29,4 +29,6 @@ export {
 export type { NotifKey, NotifWebhookToggles } from "@drec/observability";
 export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, uploadThenAppendGroups, uploadPlain, appendGroup, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
 export type { UploadOpts } from "./upload/biliup.js";
+export { uploadYoutube, checkYoutube, buildYoutubeArgs, parseYoutubeVideoId, runYoutubeUploader, DEFAULT_YOUTUBE_BIN, DEFAULT_YOUTUBE_SECRETS, DEFAULT_YOUTUBE_TOKEN } from "./upload/youtube.js";
+export type { YoutubeUploadOpts, YoutubeUploadResult, YoutubeVisibility } from "./upload/youtube.js";
 export { fetchAnchorName, resolveShortUrl } from "./anchor.js";

@@ -173,6 +173,20 @@ FONTS_DIR=/path/to/fonts node dist/douyin-rec.mjs burn --video x.mp4 --xml x.xml
 
 底层固定带 `--copyright 1`（自制）。上传成功发 `uploadDone` 通知（含 BV 号 + URL）。
 
+### `upload-youtube`
+
+上传 mp4 到 YouTube（包 `youtubeuploader` CLI + Google OAuth2）：
+
+```bash
+node dist/douyin-rec.mjs upload-youtube --video x.mp4 --title "直播录像" \
+  --secrets ./output-data/config/youtube/client_secrets.json \
+  --cache ./output-data/config/youtube/request.token \
+  --privacy private
+```
+
+`--privacy` 支持 `private|unlisted|public`，默认 `private`；显式 `--notify-subscribers` 才会通知订阅者。
+未通过审核的 Google OAuth 项目上传后视频默认私有（YouTube 官方 2020-07 限制）。首次授权流程见 `plans/024_youtube_upload.md`。
+
 > 预检失败时 `process.exit(2)`，**不发** error 通知（预检在 try 之外）。
 
 ```bash

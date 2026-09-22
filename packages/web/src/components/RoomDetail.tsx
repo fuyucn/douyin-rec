@@ -48,6 +48,14 @@ function outputChips(r: HubRuleDTO): string[] {
 /** 上传模式 chip 文案。 */
 function uploadChip(r: HubRuleDTO, t: TFunc): string {
   const c = r.pipeline ?? {};
+  const dests = c.upload?.destinations && c.upload.destinations.length > 0
+    ? new Set(c.upload.destinations)
+    : c.upload?.mode === "upload"
+      ? new Set(["bilibili"])
+      : new Set<string>();
+  if (dests.has("bilibili") && dests.has("youtube")) return t("hub.detail.chipUploadDual");
+  if (dests.has("youtube")) return t("hub.detail.chipUploadYt");
+  if (dests.has("bilibili")) return c.upload?.private === false ? t("hub.detail.chipUploadPublic") : t("hub.detail.chipUploadPrivate");
   if (c.upload?.mode === "upload") return c.upload.private === false ? t("hub.detail.chipUploadPublic") : t("hub.detail.chipUploadPrivate");
   return t("hub.detail.chipStageOnly");
 }

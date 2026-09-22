@@ -19,7 +19,25 @@ export interface HubPipelineConfig {
    * `private` 仅 mode=upload 时有意义:true(默认)= 仅自己可见,false = 公开。tag/tid/desc 为该稿 metadata。
    * `titleTemplate` 同时用于 B 站标题和 stage 产物 stem;空 = `{name}_{date}`。
    */
-  upload?: { mode?: "stage" | "upload"; private?: boolean; tag?: string; tid?: number; desc?: string; titleTemplate?: string };
+  upload?: {
+    mode?: "stage" | "upload";
+    /**
+     * 上传目的地;**不写则按 mode 兼容旧行为**:upload = [bilibili];stage = []。
+     * 写了就以它为唯一真相,可支持 ["bilibili"]、["youtube"] 或 ["bilibili","youtube"]。
+     */
+    destinations?: Array<"bilibili" | "youtube">;
+    private?: boolean;
+    tag?: string; tid?: number; desc?: string; titleTemplate?: string;
+    /** YouTube 专属上传配置(destinations 含 youtube 时生效)。privacy 缺省 private。 */
+    youtube?: {
+      privacy?: "private" | "unlisted" | "public";
+      description?: string;
+      tags?: string[];
+      categoryId?: string;
+      /** 默认 false,避免每次上传都通知订阅者。 */
+      notifySubscribers?: boolean;
+    };
+  };
 }
 
 /** hub 规则里「录制下发」的配置:绑定 master 本地 task,自动同步到选中的 worker 节点。 */
@@ -111,6 +129,8 @@ export interface HubJobDTO {
   /** 各录制节点的选优候选(空=旧 run / 未选优;前端 select 步据此画 fan-in)。 */
   candidates: HubJobCandidateDTO[];
   bv: string | null;
+  /** YouTube 视频 id(destinations 含 youtube 且上传成功时). */
+  ytId: string | null;
   error: string | null;
   /** 自动重试已失败次数。 */
   fails: number;
@@ -298,6 +318,17 @@ export interface BiliupAuthStatus {
   hasSession: boolean;
   length: number;
   source: "biliup" | "none";
+}
+
+/** YouTube 上传账号状态（client_secrets + token 缓存；独立于录制平台 Cookie）。 */
+export interface YouTubeAuthStatus {
+  /** client_secrets.json 已就绪（OAuth client 配置）。 */
+  secretsSet: boolean;
+  /** request.token 已就绪（本地首次授权后会有）。 */
+  tokenSet: boolean;
+  /** 凭据就绪可工作（secrets + token）。 */
+  ready: boolean;
+  source: "youtube" | "none";
 }
 
 /** GET /api/tasks/:id/recordings 的单个会话项(合成选择器用)。 */

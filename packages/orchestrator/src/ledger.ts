@@ -9,6 +9,8 @@ export interface JobRow {
   state: JobState;
   winnerWorker?: string;
   bv?: string;
+  /** YouTube 视频 id(只传 B站时为 null)。 */
+  ytId?: string;
   error?: string;
   fails: number;
   /** 该场第一簇的开录时间(供同日多场 key 去重判断;旧库为 null)。 */
@@ -39,6 +41,7 @@ export type StepName =
   | "select" | "pull" | "merge"
   | "burn_danmu" | "burn_livechat"
   | "upload_plain" | "append_danmu" | "append_livechat"
+  | "youtube_plain"
   // 清理步骤(各由对应 cleanup 开关驱动;没开 → 不打点 → 前端显示 skipped):
   | "clean_stage_src"   // stageSourceAfterMerge:merge 后删 stage 里拉来的源 .ts
   | "clean_source"      // sourceAfterDone:完成后删各节点原始录制 .ts
@@ -69,6 +72,7 @@ export class SyncLedger {
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN fails INTEGER NOT NULL DEFAULT 0"); } catch { /* 列已存在 */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN startMs INTEGER"); } catch { /* 列已存在 */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN outputStem TEXT"); } catch { /* 列已存在 */ }
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ytId TEXT"); } catch { /* 列已存在 */ }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -149,15 +153,28 @@ export class SyncLedger {
       .run(state, patch.winnerWorker ?? null, patch.error ?? null, at, streamKey);
     this.logEvent(streamKey, state, at);
   }
-  markDone(streamKey: string, bv: string): void {
+  markDone(streamKey: string, bv: string, extras: { ytId?: string } = {}): void {
     const at = this.now();
-    this.db.prepare("UPDATE sync_jobs SET state='done', bv=?, error=NULL, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
+    if (extras.ytId !== undefined) {
+      this.db.prepare("UPDATE sync_jobs SET state='done', bv=?, ytId=?, error=NULL, updatedAt=? WHERE streamKey=?")
+        .run(bv, extras.ytId, at, streamKey);
+    } else {
+      this.db.prepare("UPDATE sync_jobs SET state='done', bv=?, error=NULL, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
+    }
     this.logEvent(streamKey, "done", at);
   }
   /** checkpoint:P1 上传成功即落 bv 列(不改 state、不写事件)。续跑靠它判断"已建稿"。 */
   setBv(streamKey: string, bv: string): void {
     const at = this.now();
     this.db.prepare("UPDATE sync_jobs SET bv=?, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
+  }
+  /** checkpoint:YouTube 上传成功即落 ytId 列(不改 state、不写事件)。续跑靠它判断"已建稿"。 */
+  setYt(streamKey: string, ytId: string): void {
+    const at = this.now();
+    this.db.prepare(
+      "INSERT INTO sync_jobs(streamKey,state,ytId,updatedAt) VALUES(?,?,?,?) " +
+      "ON CONFLICT(streamKey) DO UPDATE SET ytId=excluded.ytId, updatedAt=excluded.updatedAt",
+    ).run(streamKey, "pending", ytId, at);
   }
   /** 锁定本场产物 stem(不改 state、不写事件)。已有值不覆盖。 */
   setOutputStem(streamKey: string, stem: string): void {
@@ -222,6 +239,7 @@ export class SyncLedger {
       });
     }
     if (job?.bv) this.syncNodeState(streamKey, "upload_plain", "done");
+    if (job?.ytId) this.syncNodeState(streamKey, "youtube_plain", "done");
   }
   /**
    * 崩溃恢复 sweep:超过 staleMs 的 retrying job / running 节点 → 标 failed(「进程重启中断」),

@@ -5,6 +5,7 @@ export { Reconciler } from "./reconciler.js";
 export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";
 export type { PipelineDeps, PipelineCfg, PipelineSteps, PipelineCleanup } from "./pipeline.js";
+export { resolveUploadDestinations } from "./pipeline.js";
 export {
   buildWorkflow,
   runWorkflowNodes,

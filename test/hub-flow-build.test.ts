@@ -61,6 +61,15 @@ describe("buildFlow — 进行中按 cfg", () => {
     expect(keys(g)).not.toContain("upload_plain");
     expect(keys(g)).toContain("clean_source");
   });
+
+  it("destinations 含 youtube → 画 youtube_plain 节点", () => {
+    const job = { state: "merging", steps: [{ step: "select" }, { step: "pull" }, { step: "merge" }] };
+    const cfg = { steps: { burnDanmu: true, burnLivechat: false }, upload: { destinations: ["bilibili", "youtube"] } };
+    const g = buildFlow(job, cfg);
+    expect(keys(g)).toContain("upload_plain");
+    expect(keys(g)).toContain("youtube_plain");
+    expect(g.edges).toContainEqual(["merge", "youtube_plain"]);
+  });
 });
 
 describe("pickMetric", () => {

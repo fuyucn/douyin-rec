@@ -94,7 +94,7 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   return { deps, ledger, stageDir, stageSub, products, sh, uploadPlain, appendGroup };
 }
 
-function build(t: TestDeps, opts: { burnDanmu?: boolean; burnLivechat?: boolean; willUpload?: boolean } = {}): Workflow {
+function build(t: TestDeps, opts: { burnDanmu?: boolean; burnLivechat?: boolean; willUpload?: boolean; willUploadYoutube?: boolean } = {}): Workflow {
   return buildWorkflow({
     streamKey: STREAM_KEY,
     stageSub: t.stageSub,
@@ -103,6 +103,7 @@ function build(t: TestDeps, opts: { burnDanmu?: boolean; burnLivechat?: boolean;
     cfg: t.deps.cfg,
     log: () => {},
     willUpload: opts.willUpload ?? true,
+    willUploadYoutube: opts.willUploadYoutube ?? false,
     burnDanmu: opts.burnDanmu ?? true,
     burnLivechat: opts.burnLivechat ?? true,
     mergeSegments: 2,
@@ -215,6 +216,52 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
     for (const k of ["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat"] as const) {
       expect(t.ledger.getNodeState(STREAM_KEY, k)?.state).toBe("done");
     }
+    t.ledger.close();
+  });
+});
+
+describe("buildWorkflow — YouTube 目的地", () => {
+  it("willUploadYoutube=true → youtube_plain 执行并把 ytId/url 落库", async () => {
+    const uploadYoutube = vi.fn<(o: { video?: string }) => Promise<{ videoId: string; url: string }>>(
+      async () => ({ videoId: "abc123xyz89", url: "https://youtu.be/abc123xyz89" }),
+    );
+    const t = makeDeps({ uploadYoutube });
+    const workflow = build(t, { willUploadYoutube: true });
+
+    const r = await runWorkflowNodes({
+      streamKey: STREAM_KEY,
+      nodes: workflow.nodes,
+      edges: workflow.edges,
+      ctx: workflow.ctx,
+      pool: t.deps.pool!,
+    });
+
+    expect(r.ok).toBe(true);
+    expect(uploadYoutube).toHaveBeenCalledTimes(1);
+    expect(uploadYoutube.mock.calls[0]?.[0]?.video).toBe(t.products.plain);
+    expect(t.ledger.get(STREAM_KEY)?.ytId).toBe("abc123xyz89");
+    expect(t.ledger.getNodeState(STREAM_KEY, "youtube_plain")?.state).toBe("done");
+    const ytStep = t.ledger.getSteps(STREAM_KEY).find((s) => s.step === "youtube_plain" && s.phase === "done");
+    expect(ytStep?.detail).toContain("https://youtu.be/abc123xyz89");
+    t.ledger.close();
+  });
+
+  it("willUploadYoutube=false → youtube_plain 被 skip,不调用 uploader", async () => {
+    const uploadYoutube = vi.fn(async () => ({ videoId: "x", url: "u" }));
+    const t = makeDeps({ uploadYoutube });
+    const workflow = build(t, { willUploadYoutube: false });
+
+    const r = await runWorkflowNodes({
+      streamKey: STREAM_KEY,
+      nodes: workflow.nodes,
+      edges: workflow.edges,
+      ctx: workflow.ctx,
+      pool: t.deps.pool!,
+    });
+
+    expect(r.ok).toBe(true);
+    expect(uploadYoutube).not.toHaveBeenCalled();
+    expect(t.ledger.getNodeState(STREAM_KEY, "youtube_plain")?.state).toBe("skipped");
     t.ledger.close();
   });
 });

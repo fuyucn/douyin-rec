@@ -5,6 +5,7 @@
  *   <root>/recordings/               录像输出
  *   <root>/stage/                    hub 合成暂存(合并/烧录中间产物)
  *   <root>/config/biliup/cookies.json  biliup B站上传 cookie
+ *   <root>/config/youtube/            YouTube OAuth(secrets + token)
  *   <root>/config/hub.config.json    hub 全局配置;<root>/config/hub/       hub 每房间任务配置
  *
  * **root 永远有值**:未设 `DOUYIN_REC_ROOT` 时默认 `DEFAULT_ROOT`("./output-data",相对启动 cwd)——
@@ -99,6 +100,16 @@ export function rootStageDir(): string {
 /** <root>/config/biliup/cookies.json。 */
 export function rootBiliupCookies(): string {
   return join(drecRoot(), "config", "biliup", "cookies.json");
+}
+
+/** <root>/config/youtube/client_secrets.json —— YouTube Data API OAuth client。 */
+export function rootYouTubeSecrets(): string {
+  return join(drecRoot(), "config", "youtube", "client_secrets.json");
+}
+
+/** <root>/config/youtube/request.token —— youtubeuploader OAuth token 缓存。 */
+export function rootYouTubeToken(): string {
+  return join(drecRoot(), "config", "youtube", "request.token");
 }
 
 /**

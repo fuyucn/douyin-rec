@@ -214,6 +214,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
     command -v ssh >/dev/null 2>&1 || warn "ssh not found; SSH workers will be unavailable"
     command -v rsync >/dev/null 2>&1 || warn "rsync not found; remote recording transfer may be unavailable"
     command -v biliup >/dev/null 2>&1 || warn "biliup not found; upload nodes will fail"
+    command -v youtubeuploader >/dev/null 2>&1 || warn "youtubeuploader not found; YouTube upload destinations will fail"
     command -v fc-list >/dev/null 2>&1 || warn "fontconfig not found; subtitle burning may fail"
   fi
 else

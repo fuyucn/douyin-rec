@@ -15,6 +15,7 @@
     "serve:local": "DOUYIN_REC_ROOT=./data-local node dist/douyin-rec.mjs task serve --port 7861",
     "mesio:install": "sh scripts/install-mesio.sh",
     "biliup:install": "sh scripts/install-biliup.sh",
+    "youtubeuploader:install": "sh scripts/install-youtubeuploader.sh",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

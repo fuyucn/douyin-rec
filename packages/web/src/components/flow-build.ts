@@ -3,7 +3,7 @@ export interface FlowNode { key: string; x: number; y: number }
 export interface FlowGraph { nodes: FlowNode[]; edges: Array<[string, string]> }
 export type FlowCfg = {
   steps?: { burnDanmu?: boolean; burnLivechat?: boolean };
-  upload?: { mode?: string };
+  upload?: { mode?: string; destinations?: string[] };
   cleanup?: { stageSourceAfterMerge?: boolean; sourceAfterDone?: boolean; stageAfterDone?: boolean };
 };
 
@@ -13,7 +13,7 @@ const Y_ROW3 = 190;
 const TERMINAL = new Set(["done", "failed", "needs_manual"]);
 const OPTIONAL = [
   "burn_danmu", "burn_livechat", "clean_stage_src",
-  "upload_plain", "append_danmu", "append_livechat",
+  "upload_plain", "youtube_plain", "append_danmu", "append_livechat",
   "clean_source", "clean_stage",
 ] as const;
 
@@ -27,13 +27,16 @@ export function presentSet(
   for (const k of OPTIONAL) if (has(k)) p.add(k); // 已跑过的一律画(兜底 + 终态即全部依据)
   if (!TERMINAL.has(job.state) && cfg) {
     const st = cfg.steps ?? {};
-    const up = cfg.upload?.mode === "upload";
     const cl = cfg.cleanup ?? {};
+    const destinations = cfg.upload?.destinations && cfg.upload.destinations.length > 0
+      ? new Set(cfg.upload.destinations)
+      : new Set(cfg.upload?.mode === "upload" ? ["bilibili"] : []);
     if (st.burnDanmu !== false) p.add("burn_danmu");
     if (st.burnLivechat !== false) p.add("burn_livechat");
-    if (up) p.add("upload_plain");
-    if (up && st.burnDanmu !== false) p.add("append_danmu");
-    if (up && st.burnLivechat !== false) p.add("append_livechat");
+    if (destinations.has("bilibili")) p.add("upload_plain");
+    if (destinations.has("bilibili") && st.burnDanmu !== false) p.add("append_danmu");
+    if (destinations.has("bilibili") && st.burnLivechat !== false) p.add("append_livechat");
+    if (destinations.has("youtube")) p.add("youtube_plain");
     if (cl.stageSourceAfterMerge) p.add("clean_stage_src");
     if (cl.sourceAfterDone) p.add("clean_source");
     if (cl.stageAfterDone) p.add("clean_stage");
@@ -53,6 +56,7 @@ export function buildFlow(
   const lanes = [
     keep(["burn_danmu", "append_danmu"]),
     keep(["upload_plain"]),
+    keep(["youtube_plain"]),
     keep(["burn_livechat", "append_livechat"]),
     keep(["clean_stage_src"]),
   ].filter((lane) => lane.length > 0);

@@ -4,7 +4,7 @@ import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { isJobAbort, resolveOutputStem, runWithJob, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
-import type { UploadOpts } from "@drec/app";
+import type { UploadOpts, YoutubeUploadOpts } from "@drec/app";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
 import { humanBytes, sumBytes } from "./format.js";
@@ -30,17 +30,33 @@ export interface PipelineCfg {
   reconnectWindowMs?: number;
   stageDir: string;
   cookies: string;
-  /** stage = 只合成不传;upload = 传 B站。 */
+  /** stage = 只合成不传;upload = 按旧规则传 B站(无 destinations 时)。 */
   uploadMode: "stage" | "upload";
+  /** 上传目的地;缺省由 uploadMode 推("upload"→["bilibili"];其它→[])。写了就以它为唯一真相。 */
+  uploadDestinations?: readonly ("bilibili" | "youtube")[];
   /** 仅 upload 时有意义:true(默认)= 仅自己可见,false = 公开。 */
   uploadPrivate?: boolean;
   uploadMeta: { tag: string; tid: number; desc?: string; titleTemplate?: string };
+  /** YouTube 目的地专属元数据;只在 destinations 含 youtube 时生效。 */
+  youtubeMeta?: {
+    privacy?: "private" | "unlisted" | "public";
+    description?: string;
+    tags?: string[];
+    categoryId?: string;
+    notifySubscribers?: boolean;
+  };
   /** 渲染 {date}/{time} 回退用(sessionBase 解析不到时);缺省 Asia/Shanghai。 */
   timeZone?: string;
   steps?: PipelineSteps;
   cleanup?: PipelineCleanup;
   /** reconciler 硬过滤用:非空 → 只处理这些 worker 的录像;缺省/空 = 全部(向后兼容)。pipeline 本身不读。 */
   workers?: string[];
+}
+
+/** 由配置得出要跑哪些上传目的地(缺省保持旧行为:mode=upload → B站;mode=stage → 不传)。 */
+export function resolveUploadDestinations(cfg: PipelineCfg): ReadonlySet<"bilibili" | "youtube"> {
+  if (cfg.uploadDestinations) return new Set(cfg.uploadDestinations);
+  return cfg.uploadMode === "upload" ? new Set(["bilibili"]) : new Set();
 }
 
 export interface PipelineDeps {
@@ -55,6 +71,8 @@ export interface PipelineDeps {
   /** 追加一个逻辑组到稿件(空组跳过)。多组**串行**调用(同稿件并发 append 会撞)。
    *  public 透传 → append 保留 P1 的水印关/可见性(防 append 重置)。 */
   appendGroup: (o: { bv: string; files: string[]; cookies: string; public: boolean }) => Promise<void>;
+  /** 上传 plain mp4 到 YouTube;destinations 含 youtube 时由 CLI 注入。测试可 mock。 */
+  uploadYoutube?: (o: YoutubeUploadOpts) => Promise<{ videoId: string; url: string }>;
   /** 把单个烧录产物按 16GB 上限切成多段(默认 splitToSizeLimit);可注入测试。 */
   splitForUpload?: (mp4: string) => Promise<string[]>;
   /** 删 master 本地 stage 文件(cleanup 用);默认 fs.rm,可注入测试。 */
@@ -153,9 +171,21 @@ async function runPipelineInner(
   const stageSub = path.join(cfg.stageDir, sanitizeKey(streamKey));
 
   // 续跑:job 已有 bv ⇒ P1 已建稿(不可逆),绝不重传。跳过 select/pull/merge/burn/uploadPlain,只补 append。
+  const destinations = resolveUploadDestinations(cfg);
+  const bilibiliOn = destinations.has("bilibili");
+  const youtubeOn = destinations.has("youtube");
+
   const existing = ledger.get(streamKey);
-  if (cfg.uploadMode === "upload" && existing?.bv) {
+  // 续跑:job 已有 bv ⇒ P1 已建稿(不可逆),绝不重传。跳过 select/pull/merge/burn/uploadPlain,只补 append。
+  if (bilibiliOn && existing?.bv) {
     return await resumeAppends(streamKey, existing.bv, stageSub, deps, jlog);
+  }
+  // YouTube-only 且有 ytId:YouTube 不可逆建稿已完成,直接收口 done(不再需要 rerun)。
+  if (!bilibiliOn && youtubeOn && existing?.ytId) {
+    jlog(`YouTube 已建稿 yt=${existing.ytId},收口 done`);
+    ledger.markDone(streamKey, existing.bv ?? "", { ytId: existing.ytId });
+    notify({ kind: "uploadDone", label: "YouTube", url: `https://youtu.be/${existing.ytId}` });
+    return { state: "done" };
   }
 
   // 幂等:上一轮已把所有核心节点跑完(如 markDone 前中断) → 直接收口 done,不再 select/pull。
@@ -276,7 +306,9 @@ async function runPipelineInner(
 
   const workflow = buildWorkflow({
     streamKey, stageSub, products, deps, cfg, log: jlog,
-    willUpload: cfg.uploadMode === "upload", burnDanmu, burnLivechat,
+    willUpload: bilibiliOn,
+    willUploadYoutube: youtubeOn,
+    burnDanmu, burnLivechat,
     mergeSegments: winnerMembers.reduce((n, m) => n + m.rec.tsFiles.length, 0),
   });
   const failedNodes = ledger.getFailedNodes(streamKey);
@@ -311,7 +343,8 @@ async function runPipelineInner(
   }
 
   const bv = ledger.get(streamKey)?.bv;
-  if (cfg.uploadMode !== "upload") {
+  const ytId = ledger.get(streamKey)?.ytId;
+  if (destinations.size === 0) {
     jlog(`stage 模式:合成完毕待人工上传`);
     ledger.setState(streamKey, "needs_manual");
     await cleanupSources();
@@ -325,16 +358,24 @@ async function runPipelineInner(
 
   // upload 模式但 bv 为空 = P1 没真正传上去(例如 upload_plain 被旧 skipped 状态卡住)。
   // 绝不能假装 done/发 uploadDone,否则 UI 显示完成、B 站其实没有稿。
-  if (!bv) {
+  if (bilibiliOn && !bv) {
     jlog(`upload 模式但 P1 未上传(bv 为空),转人工`);
     ledger.setState(streamKey, "needs_manual", { error: "upload 模式但 P1 未上传(bv 为空),请重跑或人工上传" });
     notify({ kind: "error", stage: "上传", message: `${streamKey} upload 模式但 P1 未上传(bv 为空),请人工处理` });
     return { state: "needs_manual" };
   }
+  if (youtubeOn && !ytId) {
+    jlog(`YouTube 上传未成功(ytId 为空),转人工`);
+    ledger.setState(streamKey, "needs_manual", { error: "YouTube 上传未成功(ytId 为空),请重跑或人工上传" });
+    notify({ kind: "error", stage: "上传", message: `${streamKey} YouTube 上传未成功,请人工处理` });
+    return { state: "needs_manual" };
+  }
 
-  jlog(`P1 上传完成: ${bv}`);
-  ledger.markDone(streamKey, bv!);
-  notify({ kind: "uploadDone", bv: bv!, url: `https://www.bilibili.com/video/${bv!}` });
+  if (bv) jlog(`P1 上传完成: ${bv}`);
+  if (ytId) jlog(`YouTube 上传完成: ${ytId}`);
+  ledger.markDone(streamKey, bv ?? "", ytId ? { ytId } : {});
+  if (bv) notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+  if (ytId) notify({ kind: "uploadDone", label: "YouTube", url: `https://youtu.be/${ytId}` });
   await cleanupSources();
   if (clean.stageAfterDone) {
     ledger.logStep(streamKey, "clean_stage", "start");
@@ -346,7 +387,7 @@ async function runPipelineInner(
     await rmStage(present);
     ledger.logStep(streamKey, "clean_stage", "done", `删 ${present.length} 文件`);
   }
-  return { state: "done", bv };
+  return { state: "done", bv: bv ?? undefined };
 }
 
 /**
@@ -366,6 +407,8 @@ async function resumeAppends(
   const burnDanmu = cfg.steps?.burnDanmu !== false;
   const burnLivechat = cfg.steps?.burnLivechat !== false;
   const isPublic = cfg.uploadPrivate === false;
+  const destinations = resolveUploadDestinations(cfg);
+  const youtubeOn = destinations.has("youtube");
 
   const prod = deriveStageProducts(stageSub);
   if (!prod) {
@@ -386,7 +429,7 @@ async function resumeAppends(
     jlog(`续跑发现失败节点 ${br.step},先重烧再 append`);
     const workflow = buildWorkflow({
       streamKey, stageSub, products: prod, deps, cfg,
-      log: jlog, willUpload: true, burnDanmu, burnLivechat, mergeSegments: 0,
+      log: jlog, willUpload: true, willUploadYoutube: false, burnDanmu, burnLivechat, mergeSegments: 0,
     });
     const repaired = await runWorkflowNodes({
       streamKey,
@@ -404,6 +447,31 @@ async function resumeAppends(
       return { state: "needs_manual", bv };
     }
   }
+  // 双平台续跑:B 站 P1 已成功(bv 已落库),YouTube 若随后失败,这里也要补跑 youtube_plain,
+  // 否则会让「B 站有稿,YouTube 无录」被错误标 done。
+  if (youtubeOn && !ledger.get(streamKey)?.ytId) {
+    jlog(`续跑:补 YouTube 上传(upload_plain 已完成,只跑 youtube_plain)`);
+    const workflow = buildWorkflow({
+      streamKey, stageSub, products: prod, deps, cfg,
+      log: jlog, willUpload: true, willUploadYoutube: true, burnDanmu, burnLivechat, mergeSegments: 0,
+    });
+    const r = await runWorkflowNodes({
+      streamKey,
+      nodes: workflow.nodes.filter((n) => n.key === "youtube_plain"),
+      edges: [],
+      ctx: workflow.ctx,
+      pool: deps.pool ?? new ResourcePool(),
+      forceRetry: new Set<WorkflowNodeKey>(["youtube_plain"]),
+    });
+    if (!r.ok) {
+      const err = ledger.getNodeState(streamKey, "youtube_plain")?.error ?? "YouTube 上传失败";
+      jlog(`续跑补 YouTube 失败,转人工: ${err}`);
+      ledger.setState(streamKey, "needs_manual", { error: err });
+      notify({ kind: "error", stage: "上传", message: `续跑补 YouTube 失败,请人工处理: ${err}` });
+      return { state: "needs_manual", bv };
+    }
+  }
+
   const need = [
     ...(burnDanmu ? [prod?.danmuMp4] : []),
     ...(burnLivechat ? [prod?.livechatMp4] : []),
@@ -445,8 +513,10 @@ async function resumeAppends(
     jlog(`续跑 append 完成: ${g.step}`);
   }
 
-  ledger.markDone(streamKey, bv);
+  const ytId = ledger.get(streamKey)?.ytId;
+  ledger.markDone(streamKey, bv, ytId ? { ytId } : {});
   notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+  if (ytId) notify({ kind: "uploadDone", label: "YouTube", url: `https://youtu.be/${ytId}` });
 
   // 可选:done 后删 stage 产物(与主路径同一开关;续跑不删 slave 源)。
   if (cfg.cleanup?.stageAfterDone) {

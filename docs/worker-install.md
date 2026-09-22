@@ -107,7 +107,7 @@ master 模式会生成：
 <root>/config/hub.config.json
 ```
 
-安装器不会自动安装 `biliup`、Playwright/Chromium、CJK 字体等 master
+安装器不会自动安装 `biliup`、`youtubeuploader`、Playwright/Chromium、CJK 字体等 master
 可选依赖；缺少时会在安装阶段给出 warning。
 
 ## Tunnel
