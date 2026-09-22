@@ -326,6 +326,11 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
                       ? t("settings.youtubeNeedToken")
                       : t("settings.youtubeNeedSecrets")}
               </p>
+              {youtubeAuth?.errors?.length ? (
+                <ul className="mt-2 list-disc pl-4 text-xs text-muted-soft">
+                  {youtubeAuth.errors.map((e) => <li key={e}>{e}</li>)}
+                </ul>
+              ) : null}
               <p className="mt-1 text-xs text-muted-soft">{t("settings.youtubeHint")}</p>
             </div>
           </div>

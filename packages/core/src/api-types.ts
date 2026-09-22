@@ -329,6 +329,8 @@ export interface YouTubeAuthStatus {
   /** 凭据就绪可工作（secrets + token）。 */
   ready: boolean;
   source: "youtube" | "none";
+  /** 内容校验失败项（secrets/token 的实际错误描述）。 */
+  errors?: string[];
 }
 
 /** GET /api/tasks/:id/recordings 的单个会话项(合成选择器用)。 */

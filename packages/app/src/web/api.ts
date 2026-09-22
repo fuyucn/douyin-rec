@@ -43,7 +43,7 @@ import { resolveOutputDir } from "../paths.js";
 import type { Task, TaskStore } from "../store.js";
 import { resolveTaskCookies } from "../store.js";
 import { readBiliupCookieHeader } from "../upload/biliup.js";
-import { DEFAULT_YOUTUBE_SECRETS, DEFAULT_YOUTUBE_TOKEN } from "../upload/youtube.js";
+import { DEFAULT_YOUTUBE_SECRETS, DEFAULT_YOUTUBE_TOKEN, validateYoutubeSecretsFile, validateYoutubeTokenFile } from "../upload/youtube.js";
 import type { TaskRuntime } from "../task-manager.js";
 import { inWindow, nowMinutesLocal } from "../scheduler.js";
 import type { MergeJobStore } from "../merge-jobs.js";
@@ -502,11 +502,21 @@ export function makeApi(deps: ApiDeps): Api {
   const youtubeStatus = (): YouTubeAuthStatus => {
     const secretsSet = existsSync(DEFAULT_YOUTUBE_SECRETS);
     const tokenSet = existsSync(DEFAULT_YOUTUBE_TOKEN);
+    const errors: string[] = [];
+    if (secretsSet) {
+      const err = validateYoutubeSecretsFile(DEFAULT_YOUTUBE_SECRETS);
+      if (err) errors.push(err);
+    }
+    if (tokenSet) {
+      const err = validateYoutubeTokenFile(DEFAULT_YOUTUBE_TOKEN);
+      if (err) errors.push(err);
+    }
     return {
-      secretsSet,
-      tokenSet,
-      ready: secretsSet && tokenSet,
+      secretsSet: secretsSet && !errors.some((e) => e.startsWith("client_secrets")),
+      tokenSet: tokenSet && !errors.some((e) => e.startsWith("request.token")),
+      ready: secretsSet && tokenSet && errors.length === 0,
       source: secretsSet || tokenSet ? "youtube" : "none",
+      errors: errors.length > 0 ? errors : undefined,
     };
   };
   const validCookiePlatform = (platform: string): boolean => listPlatforms().some((p) => p.id === platform);
