@@ -76,6 +76,9 @@ node dist/douyin-rec.mjs burn --video recordings/{base}.mp4 --xml recordings/{ba
 # 投稿 B 站（默认仅自己可见）
 node dist/douyin-rec.mjs upload --video recordings/{base}_danmu.mp4 --title "标题"
 
+# 上传 YouTube（OAuth 凭据见 plans/024_youtube_upload.md）
+node dist/douyin-rec.mjs upload-youtube --video recordings/{base}_danmu.mp4 --title "标题" --privacy private
+
 # 全局抖音账号 cookie（所有任务共享；扫码登录走 Web 控制台）
 node dist/douyin-rec.mjs cookie set --str "x=1; sessionid=abc"   # 或 --file ./cookies.txt
 node dist/douyin-rec.mjs cookie show                            # 查看状态（不打印原始值）
@@ -219,7 +222,7 @@ node dist/douyin-rec.mjs task serve --port 7860         # slave(如 VPS):普通 
 - **worker 安装**:Linux/systemd 节点可用 `scripts/install-worker.sh` 安装；脚本只处理 runtime/service/可选 tunnel 客户端，SSH key、Tailscale ACL、Cloudflare Access 等认证全部由用户配置。见 **[docs/worker-install.md](./docs/worker-install.md)**。
 - **受管任务下发(2026-08)**:hub 规则绑定一个 master 本地任务(`recording.sourceTaskId`)并勾选参与节点(`workers`);master 按 `(platform, roomSlug)` 把任务定义下发到各节点(启动 + 周期 1min + 变更即同步),远端任务标 `managedBy='hub'`,Web 只读、禁止改删启停;本机 local worker `adopt=false`,源任务保持可编辑。cookies 只单向下发,节点本地 override(cookies/outDir/webhook)保留;不再期望的任务两阶段删除(先停、收播后删)。
 - **身份/选优**:录制端写 `{base}.session.json`(roomSlug + platform + 缺口);master 按 **(platform, roomSlug)** 聚成一场(douyin/bilibili 同房间号不撞)→ 覆盖度选优(**完整录全优先**;所有节点都断流 → 中断 + 通知 + 不删源)→ 拉取 → 合并/烧 danmu+livechat → **穿插上传**(P1 上传与烧录并行,append 分 P,关水印/仅自己可见由代码常量保证)。
-- **配置 = 文件**(对标 DLR,文件=唯一真理源):全局 `<root>/config/hub.config.json`(workers,旧名 tenants 兼容)+ 每房间 `<root>/config/hub/{platform}.{roomSlug}.json`(`{enabled, pipeline:{steps, upload:{mode:stage|upload, private}, cleanup}}`)。Web「Hub」页(master 才显示)增删改 = 建/写/删这些文件;现读不缓存 → UI 与手改文件天然同步。
+- **配置 = 文件**(对标 DLR,文件=唯一真理源):全局 `<root>/config/hub.config.json`(workers,旧名 tenants 兼容)+ 每房间 `<root>/config/hub/{platform}.{roomSlug}.json`(`{enabled, pipeline:{steps, upload:{mode:stage|upload, destinations?:["bilibili","youtube"], private}, cleanup}}`)。Web「Hub」页(master 才显示)增删改 = 建/写/删这些文件;现读不缓存 → UI 与手改文件天然同步。
 - 设计与实测见 **[docs/multi-node-sync.md](./docs/multi-node-sync.md)** + **[docs/multi-node-sync-followups.md](./docs/multi-node-sync-followups.md)**。
 
 ## 依赖补丁（pnpm patch）

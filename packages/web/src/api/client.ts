@@ -14,6 +14,7 @@ import type {
   TaskRuntime,
   CookieStatus,
   BiliupAuthStatus,
+  YouTubeAuthStatus,
   TaskPayload,
   HubPipelineConfig,
   HubRuleDTO,
@@ -35,6 +36,7 @@ import type {
   WorkerStatus,
 } from "@drec/contracts";
 export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
+export type { YouTubeAuthStatus };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -151,6 +153,7 @@ export const api = {
     request("POST", `/api/cookies/${platform}`, { cookie }),
   clearCookie: (platform = "douyin"): Promise<CookieStatus> => request("DELETE", `/api/cookies/${platform}`),
   getBiliupStatus: (): Promise<BiliupAuthStatus> => request("GET", "/api/biliup/status"),
+  getYouTubeStatus: (): Promise<YouTubeAuthStatus> => request("GET", "/api/youtube/status"),
 
   // ── 全局 Discord webhook ────────────────────────────────────────────────────
   getWebhook: (): Promise<{ webhook: string }> => request("GET", "/api/webhook"),

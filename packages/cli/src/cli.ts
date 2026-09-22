@@ -25,6 +25,7 @@ import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
+import { uploadYoutube, checkYoutube, DEFAULT_YOUTUBE_BIN, DEFAULT_YOUTUBE_SECRETS, DEFAULT_YOUTUBE_TOKEN } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand } from "@drec/app";
@@ -480,6 +481,56 @@ program
     }
   });
 
+// ─── upload-youtube 子命令 ─────────────────────────────────────────────
+program
+  .command("upload-youtube")
+  .description("上传 mp4 到 YouTube（包 youtubeuploader CLI + OAuth2）")
+  .requiredOption("--video <mp4>", "要上传的 mp4")
+  .requiredOption("--title <s>", "视频标题")
+  .option("--desc <s>", "视频简介")
+  .option("--tags <csv>", "标签（逗号分隔）")
+  .option("--category-id <s>", "YouTube categoryId")
+  .option("--privacy <private|unlisted|public>", "可见性（默认 private）", "private")
+  .option("--notify-subscribers", "通知订阅者（默认不通知）", false)
+  .option("--secrets <path>", "client_secrets.json", DEFAULT_YOUTUBE_SECRETS)
+  .option("--cache <path>", "token 缓存 request.token", DEFAULT_YOUTUBE_TOKEN)
+  .option("--bin <path>", "youtubeuploader 二进制", DEFAULT_YOUTUBE_BIN)
+  .action(async (o: {
+    video: string;
+    title: string;
+    desc?: string;
+    tags?: string;
+    categoryId?: string;
+    privacy: string;
+    notifySubscribers: boolean;
+    secrets: string;
+    cache: string;
+    bin: string;
+  }) => {
+    const err = await checkYoutube({ bin: o.bin, secrets: o.secrets, video: o.video });
+    if (err) { console.error(`[upload-youtube] 预检失败: ${err}`); process.exit(2); return; }
+    try {
+      console.log(`[upload-youtube] ${o.title} (${o.privacy}) → 上传中…`);
+      const { url } = await uploadYoutube({
+        video: o.video,
+        title: o.title,
+        description: o.desc,
+        tags: o.tags ? o.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
+        categoryId: o.categoryId,
+        visibility: o.privacy as "private" | "unlisted" | "public",
+        notifySubscribers: o.notifySubscribers,
+        secrets: o.secrets,
+        cache: o.cache,
+        bin: o.bin,
+      });
+      console.log(`[upload-youtube] 完成: ${url}`);
+      await toggledNotifier(webhookOf()).notify({ kind: "uploadDone", label: "YouTube", url });
+    } catch (e) {
+      await toggledNotifier(webhookOf()).notify({ kind: "error", stage: "youtube-upload", message: (e as Error).message });
+      throw e;
+    }
+  });
+
 // ─── Hub starter: 多节点同步编排（cli L5 注入到 app L4，避免循环依赖）──────────────
 // app 不直接依赖 @drec/orchestrator（orchestrator 依赖 app），由 cli 作为 L5 入口注入。
 // web API 在 hub 规则/worker 变更后立即触发一次任务同步(不等 60s 周期 tick)。
@@ -532,11 +583,12 @@ const hubStarter: HubStarter = {
   async start(opts) {
     const {
       registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport,
-      buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool,
+      buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool, resolveUploadDestinations,
     } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
     const { uploadPlain, appendGroup, hubStore, workerStore, rootHubDir, rootHubConfig, rootStageDir, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
+    const { uploadYoutube: youtubeUpload } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
@@ -656,6 +708,8 @@ const hubStarter: HubStarter = {
       uploadPlain: (plain: UploadOpts) => uploadPlain({ plain }),
       appendGroup: (o: { bv: string; files: string[]; cookies: string; public: boolean }) =>
         appendGroup({ cookies: o.cookies, bv: o.bv, files: o.files, public: o.public }),
+      uploadYoutube: (o: { video: string; title: string; description?: string; tags?: string[]; categoryId?: string; visibility?: "private" | "unlisted" | "public"; notifySubscribers?: boolean }) =>
+        youtubeUpload(o),
       notify: opts.onEvent,
       // job.log 的落盘实现由组合根装配:observability 的 FileLogger,路径 = <stage>/<sanitized streamKey>/job.log
       //(sanitize 规则与 pipeline 内 sanitizeKey 一致:替换 : / 为 _)。orchestrator 只调 ScopedLogger 接口。
@@ -686,6 +740,8 @@ const hubStarter: HubStarter = {
         stageDir: hubCfg.stageDir ?? rootStageDir(),
         cookies: hubCfg.cookies ?? "",
         uploadMode: p.upload?.mode === "upload" ? "upload" : "stage", // 其它值(含旧 stage-only)→ stage
+        // 显式 destinations 优先于 mode:缺省 undefined → mode=upload 相当于 ["bilibili"]。
+        uploadDestinations: p.upload?.destinations,
         uploadPrivate: p.upload?.private !== false,                    // 缺省 / true → 仅自己可见
         uploadMeta: {
           tag: p.upload?.tag || defaultTag,
@@ -693,6 +749,15 @@ const hubStarter: HubStarter = {
           desc: p.upload?.desc ?? uploadDefaults.desc,
           titleTemplate: (p.upload?.titleTemplate ?? "").trim() || uploadDefaults.titleTemplate,
         },
+        youtubeMeta: p.upload?.youtube
+          ? {
+              privacy: p.upload.youtube.privacy,
+              description: p.upload.youtube.description,
+              tags: p.upload.youtube.tags,
+              categoryId: p.upload.youtube.categoryId,
+              notifySubscribers: p.upload.youtube.notifySubscribers,
+            }
+          : undefined,
         timeZone: (opts.store.getSetting("timezone") ?? "").trim() || process.env.TZ || "Asia/Shanghai",
         steps: p.steps,
         cleanup: p.cleanup,
@@ -857,9 +922,11 @@ const hubStarter: HubStarter = {
               return { ok: false, error: `stage 产物缺失,无法重跑: ${stageSub}`, code: 409 };
             }
             const products = job?.outputStem ? withOutputStem(derived, job.outputStem) : derived;
+            const destinations = resolveUploadDestinations(cfg);
             const workflow = buildWorkflow({
               streamKey, stageSub, products, deps: pipelineDeps, cfg, log: opts.log,
-              willUpload: cfg.uploadMode === "upload",
+              willUpload: destinations.has("bilibili"),
+              willUploadYoutube: destinations.has("youtube"),
               burnDanmu: cfg.steps?.burnDanmu !== false,
               burnLivechat: cfg.steps?.burnLivechat !== false,
               mergeSegments: 0,

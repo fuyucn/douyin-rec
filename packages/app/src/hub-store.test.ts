@@ -99,4 +99,19 @@ describe("hub-store(文件版,按平台限定 key)", () => {
     const bare = upsertHubRule(dir, { platform: "douyin", roomSlug: "999" });
     expect(bare.workers).toBeUndefined();
   });
+
+  it("upload.destinations / youtube 字段落盘保留双平台配置", () => {
+    const pipeline = {
+      upload: {
+        mode: "upload" as const,
+        destinations: ["bilibili", "youtube"] as const,
+        private: true,
+        youtube: { privacy: "unlisted" as const, description: "x" },
+      },
+    };
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "123456", pipeline });
+    const back = getHubRule(dir, "douyin.123456")!;
+    expect(back.pipeline.upload?.destinations).toEqual(["bilibili", "youtube"]);
+    expect(back.pipeline.upload?.youtube).toEqual({ privacy: "unlisted", description: "x" });
+  });
 });

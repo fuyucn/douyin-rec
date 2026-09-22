@@ -95,6 +95,26 @@ interface Transport {
 6. **合并**：`merge` → `{主播}_{日期}.mp4`（复用 `post-process`）。
 7. **烧录**：`burn --style danmu` + `--style livechat`（复用 `post-process`）。
 8. **上传**：**P1 plain `upload` → 解析 BVID → `biliup append --vid <BV>` 追加 P2 danmu / P3 livechat**（见 [分P上传规则]）。仅自己可见 + 关水印 + config cookie。
+
+### YouTube 上传（实验 feature，`codex/youtube-upload`）
+
+默认仍是 B 站。要在某个房间同时或改传 YouTube，在该房间 `config/hub/{platform}.{roomSlug}.json` 的 `pipeline.upload` 加 `destinations`：
+
+```json
+{
+  "pipeline": {
+    "upload": {
+      "mode": "upload",
+      "destinations": ["bilibili", "youtube"],
+      "private": true,
+      "youtube": { "privacy": "private", "description": "", "tags": [], "notifySubscribers": false }
+    }
+  }
+}
+```
+
+`destinations` 不写时沿用旧行为（`mode=upload` 相当于只 `["bilibili"]`），`stage` 表示不自动上传。
+YouTube 上传走 `porjo/youtubeuploader`（OAuth 2.0 + YouTube Data API v3），首获 token 的完整步骤见 [`plans/024_youtube_upload.md`](../plans/024_youtube_upload.md)。未通过 Google 审核的 OAuth 项目上传的视频默认是私有。
 9. **台账落地** + 可选清理。
 
 ### 选优：覆盖度（谁的洞最少）

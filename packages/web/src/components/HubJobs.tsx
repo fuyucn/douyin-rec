@@ -476,6 +476,11 @@ export function RunCard({
             {job.bv}
           </a>
         )}
+        {job.ytId && (
+          <a className="text-muted hover:text-ink" href={`https://youtu.be/${job.ytId}`} target="_blank" rel="noreferrer">
+            YouTube {job.ytId}
+          </a>
+        )}
       </div>
       {job.error && <div className="text-[12px] mt-1" style={{ color: "var(--error-fg)" }}>{job.error}</div>}
       {expanded && (

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { runPipeline, resolveUploadDestinations, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
 import type { Broadcast } from "./identity.js";
@@ -120,6 +120,26 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
 // streamKey "douyin:test-room:2026-06-27" → sanitized "douyin_test-room_2026-06-27"
 const STREAM_KEY = "douyin:test-room:2026-06-27";
 
+describe("resolveUploadDestinations", () => {
+  it("缺省：upload → bilibili；stage → 空", () => {
+    expect([...resolveUploadDestinations({
+      cleanMaxGapSec: 30, stageDir: "/tmp/s", cookies: "/c", uploadMode: "upload",
+      uploadMeta: { tag: "t", tid: 21 },
+    })]).toEqual(["bilibili"]);
+    expect([...resolveUploadDestinations({
+      cleanMaxGapSec: 30, stageDir: "/tmp/s", cookies: "/c", uploadMode: "stage",
+      uploadMeta: { tag: "t", tid: 21 },
+    })]).toEqual([]);
+  });
+
+  it("显式 destinations 可管两种模式，空数组也能表示“不传”", () => {
+    const base = { cleanMaxGapSec: 30, stageDir: "/tmp/s", cookies: "/c", uploadMode: "stage" as const, uploadMeta: { tag: "t", tid: 21 } };
+    expect([...resolveUploadDestinations({ ...base, uploadDestinations: ["youtube"] })]).toEqual(["youtube"]);
+    expect([...resolveUploadDestinations({ ...base, uploadDestinations: ["bilibili", "youtube"] })]).toEqual(["bilibili", "youtube"]);
+    expect([...resolveUploadDestinations({ ...base, uploadDestinations: [] })]).toEqual([]);
+  });
+});
+
 function stageSubOf(deps: TestDeps): string {
   return join(deps.cfg.stageDir, "douyin_test-room_2026-06-27");
 }
@@ -216,6 +236,30 @@ describe("runPipeline", () => {
     expect(job?.state).toBe("done");
     expect(job?.bv).toBe("BV123");
 
+    deps.ledger.close();
+  });
+
+  it("destinations=[\'youtube\'] → 只传 YouTube,不传 B 站", async () => {
+    const broadcast = makeBroadcast([
+      { workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) },
+      { workerId: "node-2", rec: makeRec({ totalGapSec: 200 }) },
+    ]);
+    const uploadYoutube = vi.fn<(o: { video?: string }) => Promise<{ videoId: string; url: string }>>(
+      async () => ({ videoId: "yt000000001", url: "https://youtu.be/yt000000001" }),
+    );
+    const deps = makeDeps({ uploadYoutube });
+    deps.cfg.uploadDestinations = ["youtube"];
+    deps.ledger.upsertPending(broadcast.streamKey);
+
+    const result = await runPipeline(broadcast, deps);
+
+    expect(result.state).toBe("done");
+    expect(result.bv).toBeUndefined();
+    expect(deps.uploadPlain).not.toHaveBeenCalled();
+    expect(deps.appendGroup).not.toHaveBeenCalled();
+    expect(uploadYoutube).toHaveBeenCalledTimes(1);
+    expect(uploadYoutube.mock.calls[0]?.[0]?.video).toContain(".mp4");
+    expect(deps.ledger.get(broadcast.streamKey)?.ytId).toBe("yt000000001");
     deps.ledger.close();
   });
 
@@ -637,6 +681,43 @@ describe("runPipeline", () => {
       expect(appended).toContain("_livechat.mp4");      // 只补 livechat
       expect(deps.appendGroup.mock.calls.every((c) => c[0].bv === "BVexisting")).toBe(true);
       expect(r).toEqual({ state: "done", bv: "BVexisting" });
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
+      deps.ledger.close();
+    });
+
+    it("续跑:B站已建稿但 YouTube 没上传 → 只补 youtube_plain,不重跑 uploadPlain/append", async () => {
+      const stageDir = mkdtempSync(join(tmpdir(), "resume-yt-"));
+      const uploadYoutube = vi.fn<(o: { video?: string }) => Promise<{ videoId: string; url: string }>>(
+        async () => ({ videoId: "ytResume001", url: "https://youtu.be/ytResume001" }),
+      );
+      const deps = makeDeps({
+        uploadYoutube,
+        cfg: { ...makeDeps().cfg, stageDir, uploadDestinations: ["bilibili", "youtube"] },
+      });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      deps.ledger.setState(b.streamKey, "uploading");
+      deps.ledger.setBv(b.streamKey, "BVexisting");
+      // B 站分 P 已完成,只缺 YouTube(upload_plain / append / merge / burn 都不需要)。
+      deps.ledger.syncNodeState(b.streamKey, "upload_plain", "done");
+      deps.ledger.syncNodeState(b.streamKey, "append_danmu", "done");
+      deps.ledger.syncNodeState(b.streamKey, "append_livechat", "done");
+      deps.ledger.logStep(b.streamKey, "append_danmu", "done");
+      deps.ledger.logStep(b.streamKey, "append_livechat", "done");
+      const dateName = "主播名_2026-06-27";
+      const sub = join(stageDir, "douyin_test-room_2026-06-27");
+      mkdirSync(sub, { recursive: true });
+      for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, dateName + suf), "x");
+
+      const r = await runPipeline(b, deps);
+
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect(deps.appendGroup).not.toHaveBeenCalled();
+      expect(deps.sh).not.toHaveBeenCalled();
+      expect(uploadYoutube).toHaveBeenCalledTimes(1);
+      expect(uploadYoutube.mock.calls[0]?.[0]?.video).toBe(join(sub, `${dateName}.mp4`));
+      expect(r).toEqual({ state: "done", bv: "BVexisting" });
+      expect(deps.ledger.get(b.streamKey)?.ytId).toBe("ytResume001");
       expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
       deps.ledger.close();
     });

@@ -63,7 +63,7 @@ function describe(e: AppEventDTO, t: T): { key: NotifKey; message: string; type:
     case "burnDone":
       return { key: "merge", message: t("notif.evBurn", { file: baseName(s("file")) }), type: "success" };
     case "uploadDone":
-      return { key: "merge", message: t("notif.evUpload", { bv: s("bv") }), type: "success" };
+      return { key: "merge", message: t("notif.evUpload", { bv: s("bv") || s("url") }), type: "success" };
     case "hubTaskStart": {
       const workers = Array.isArray(ev.workers) ? (ev.workers as unknown[]).length : 0;
       return { key: "hub", message: t("notif.evHubStart", { room: s("room"), count: workers }), type: "info" };

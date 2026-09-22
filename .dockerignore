@@ -30,6 +30,7 @@ tools
 scripts/*
 !scripts/install-mesio.sh
 !scripts/install-biliup.sh
+!scripts/install-youtubeuploader.sh
 plans
 docs
 test

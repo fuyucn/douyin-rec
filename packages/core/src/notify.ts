@@ -8,7 +8,8 @@ export type NotifyEvent =
   | { kind: "recordReconnect"; anchor: string; room: string; downSec: number }
   | { kind: "mergeDone"; file: string }
   | { kind: "burnDone"; style: string; file: string }
-  | { kind: "uploadDone"; bv: string; url: string }
+  // B 站:bv 必填;B站以外(如 YouTube)可只给 url / label。
+  | { kind: "uploadDone"; bv?: string; label?: string; url: string }
   // hub 编排开始处理一场直播(新建 job、pipeline 启动)。同一场只发一次。
   | { kind: "hubTaskStart"; streamKey: string; room: string; workers: string[]; mode: "stage" | "upload" }
   | { kind: "error"; stage: string; message: string };

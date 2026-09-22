@@ -10,7 +10,7 @@ import { Switch } from "../components/Switch";
 import { errMessage, useRefreshCookie, useToast } from "../lib/hooks";
 import { useT, useLang } from "../lib/i18n";
 import { getToggles, setToggle, NOTIF_KEYS, type NotifKey } from "../lib/notifications";
-import type { BiliupAuthStatus, CookieStatus, NotifWebhookToggles } from "@drec/contracts";
+import type { BiliupAuthStatus, CookieStatus, NotifWebhookToggles, YouTubeAuthStatus } from "@drec/contracts";
 
 type Tab = "account" | "engine" | "notif" | "about";
 
@@ -41,6 +41,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const douyinCookie = useAtomValue(cookieStatusAtom);
   const [cookieStatuses, setCookieStatuses] = useState<CookieStatus[]>([]);
   const [biliupAuth, setBiliupAuth] = useState<BiliupAuthStatus | null>(null);
+  const [youtubeAuth, setYouTubeAuth] = useState<YouTubeAuthStatus | null>(null);
   const setServerTimezone = useSetAtom(serverTimezoneAtom);
   const [tab, setTab] = useState<Tab>("engine");
   const [toggles, setToggles] = useState(getToggles());
@@ -67,6 +68,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     setToggles(getToggles());
     void api.getCookies().then((r) => setCookieStatuses(r.platforms)).catch(() => {});
     void api.getBiliupStatus().then(setBiliupAuth).catch(() => setBiliupAuth(null));
+    void api.getYouTubeStatus().then(setYouTubeAuth).catch(() => setYouTubeAuth(null));
     void api.getNotifSettings().then((r) => setWebhookToggles(r)).catch(() => {});
     void api.getWebhook().then((r) => setWebhook(r.webhook)).catch(() => {});
     void api.getMesioPath().then((r) => { setMesioPath(r.mesioPath); setMesioDefault(r.default); }).catch(() => {});
@@ -305,6 +307,31 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
                       : t("cookie.notSet")}
               </p>
               <p className="mt-1 text-xs text-muted-soft">{t("settings.biliupHint")}</p>
+            </div>
+
+            <div className="border border-hairline rounded-lg p-4">
+              <div className="flex items-center gap-2">
+                <span
+                  className="dot"
+                  style={{ background: youtubeAuth?.ready ? "var(--success)" : "var(--warning)" }}
+                />
+                <h4 className="text-sm font-medium text-ink">{t("settings.youtubeSection")}</h4>
+              </div>
+              <p className="mt-2 text-xs text-body">
+                {!youtubeAuth
+                  ? t("cookie.checking")
+                  : youtubeAuth.ready
+                    ? t("settings.youtubeReady")
+                    : youtubeAuth.secretsSet
+                      ? t("settings.youtubeNeedToken")
+                      : t("settings.youtubeNeedSecrets")}
+              </p>
+              {youtubeAuth?.errors?.length ? (
+                <ul className="mt-2 list-disc pl-4 text-xs text-muted-soft">
+                  {youtubeAuth.errors.map((e) => <li key={e}>{e}</li>)}
+                </ul>
+              ) : null}
+              <p className="mt-1 text-xs text-muted-soft">{t("settings.youtubeHint")}</p>
             </div>
           </div>
         </div>

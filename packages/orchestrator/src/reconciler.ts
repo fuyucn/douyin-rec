@@ -400,8 +400,9 @@ export class Reconciler {
       return { ok: false, error: "任务正在执行", code: 409 };
     }
     const job = this.ledger.get(key);
-    if (job?.state === "done" && job.bv) {
-      return { ok: false, error: `已完成(${job.bv}),不能重跑`, code: 409 };
+    if (job?.state === "done" && (job.bv || job.ytId)) {
+      const ref = job.bv ?? (job.ytId ? `yt:${job.ytId}` : "done");
+      return { ok: false, error: `已完成(${ref}),不能重跑`, code: 409 };
     }
 
     this.ledger.upsertPending(key, b.startMs);

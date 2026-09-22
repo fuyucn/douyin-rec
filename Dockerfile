@@ -71,6 +71,12 @@ COPY scripts/install-biliup.sh /tmp/install-biliup.sh
 RUN if [ "$IMAGE_ROLE" = "master" ]; then BILIUP_LIBC=gnu sh /tmp/install-biliup.sh /usr/local/bin; fi \
  && rm /tmp/install-biliup.sh
 
+# youtubeuploader:docker 当 master 时选择 destinations=youtube 后执行 YouTube 上传。
+# 装到 /usr/local/bin 上 PATH;OAuth 凭据(request.token / client_secrets.json)经挂载卷 /output-data/config/youtube/。
+COPY scripts/install-youtubeuploader.sh /tmp/install-youtubeuploader.sh
+RUN if [ "$IMAGE_ROLE" = "master" ]; then sh /tmp/install-youtubeuploader.sh /usr/local/bin; fi \
+ && rm /tmp/install-youtubeuploader.sh
+
 # playwright + chromium:抖音扫码登录(qr-login.ts 动态 import("playwright"))唯一依赖。
 # bundle 把 playwright 标 external,故运行时必须有真模块:装进 /app/node_modules
 # (dist/douyin-rec.mjs 在 /app/dist → node 向上找到 /app/node_modules,能解析裸 "playwright")。
@@ -96,6 +102,8 @@ ENV NODE_ENV=production \
     DOUYIN_REC_STATIC=/app/web/dist \
     DOUYIN_REC_ROOT=/output-data \
     BILIUP_COOKIE=/output-data/config/biliup/cookies.json \
+    YOUTUBE_CLIENT_SECRETS=/output-data/config/youtube/client_secrets.json \
+    YOUTUBE_REQUEST_TOKEN=/output-data/config/youtube/request.token \
     FONTS_DIR=/app/assets/fonts \
     MESIO_PATH=/app/bin/mesio \
     TZ=Asia/Shanghai

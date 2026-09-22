@@ -27,6 +27,11 @@ interface FormState {
   clIncludeXmlAss: boolean;
   uploadMode: string; // "stage" | "upload"
   uploadPrivate: boolean; // 仅 upload 有意义:true=仅自己可见,false=公开
+  /** 上传目的地;uploadMode=upload 时使用。 */
+  destBilibili: boolean;
+  destYouTube: boolean;
+  /** YouTube 上传隐私(destYouTube 启用时占位,默认 private)。 */
+  ytPrivacy: "private" | "unlisted" | "public";
   uploadTag: string;
   uploadTid: string;
   uploadDesc: string;
@@ -47,6 +52,9 @@ const BLANK: FormState = {
   clIncludeXmlAss: false,
   uploadMode: "stage",
   uploadPrivate: true,
+  destBilibili: true,
+  destYouTube: false,
+  ytPrivacy: "private",
   uploadTag: "",
   uploadTid: "21",
   uploadDesc: "",
@@ -56,6 +64,8 @@ const BLANK: FormState = {
 
 function fromRule(r: HubRuleDTO): FormState {
   const c = r.pipeline ?? {};
+  const dests = c.upload?.destinations;
+  const mode = c.upload?.mode === "upload" ? "upload" : "stage";
   return {
     room: r.room ?? "",
     enabled: r.enabled,
@@ -67,8 +77,11 @@ function fromRule(r: HubRuleDTO): FormState {
     clSourceAfterDone: c.cleanup?.sourceAfterDone === true,
     clStageAfterDone: c.cleanup?.stageAfterDone === true,
     clIncludeXmlAss: c.cleanup?.includeXmlAss === true,
-    uploadMode: c.upload?.mode === "upload" ? "upload" : "stage",
+    uploadMode: mode,
     uploadPrivate: c.upload?.private !== false,
+    destBilibili: dests ? dests.includes("bilibili") : mode === "upload",
+    destYouTube: dests ? dests.includes("youtube") : false,
+    ytPrivacy: c.upload?.youtube?.privacy ?? "private",
     uploadTag: c.upload?.tag ?? "",
     uploadTid: String(c.upload?.tid ?? 21),
     uploadDesc: c.upload?.desc ?? "",
@@ -179,6 +192,10 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
       return;
     }
     if (workersInvalid) { toast(t("hub.ruleDialog.workersRequired"), "error"); return; }
+    if (form.uploadMode === "upload" && !form.destBilibili && !form.destYouTube) {
+      toast(t("hub.ruleDialog.uploadDestRequired"), "error");
+      return;
+    }
     const payload: HubRulePayload = {
       enabled: form.enabled,
       workers: form.workers,
@@ -193,7 +210,16 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
         },
         upload: {
           mode: form.uploadMode === "upload" ? "upload" : "stage",
+          destinations: form.uploadMode === "upload"
+            ? [
+              ...(form.destBilibili ? ["bilibili" as const] : []),
+              ...(form.destYouTube ? ["youtube" as const] : []),
+            ]
+            : undefined,
           private: form.uploadPrivate,
+          ...(form.uploadMode === "upload" && form.destYouTube
+            ? { youtube: { privacy: form.ytPrivacy } }
+            : {}),
           tag: form.uploadTag.trim() || undefined,
           tid: Number(form.uploadTid) || 21,
           desc: form.uploadDesc.trim() || undefined,
@@ -348,6 +374,35 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           {/* 只有开了上传才显示后面的投稿明细 */}
           {form.uploadMode === "upload" && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+              <label className="switch-row">
+                <span className="flex flex-col">
+                  <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.destBilibiliLabel")}</span>
+                  <span className="text-xs text-muted mt-0.5">{t("hub.ruleDialog.destBilibiliHint")}</span>
+                </span>
+                <Switch checked={form.destBilibili} onCheckedChange={(v) => set("destBilibili", v)} name="destBilibili" />
+              </label>
+              <label className="switch-row">
+                <span className="flex flex-col">
+                  <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.destYouTubeLabel")}</span>
+                  <span className="text-xs text-muted mt-0.5">{t("hub.ruleDialog.destYouTubeHint")}</span>
+                </span>
+                <Switch checked={form.destYouTube} onCheckedChange={(v) => set("destYouTube", v)} name="destYouTube" />
+              </label>
+              {form.destYouTube && (
+                <div className="sm:col-span-2">
+                  <label className="field-label">{t("hub.ruleDialog.ytPrivacyLabel")}</label>
+                  <select
+                    className="input text-xs"
+                    value={form.ytPrivacy}
+                    onChange={(e) => set("ytPrivacy", e.target.value as "private" | "unlisted" | "public")}
+                  >
+                    <option value="private">Private</option>
+                    <option value="unlisted">Unlisted</option>
+                    <option value="public">Public</option>
+                  </select>
+                  <p className="mt-1 text-xs text-muted-soft">{t("hub.ruleDialog.ytPrivacyHint")}</p>
+                </div>
+              )}
               <label className="switch-row">
                 <span className="flex flex-col">
                   <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.publicLabel")}</span>

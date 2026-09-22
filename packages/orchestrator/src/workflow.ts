@@ -12,7 +12,7 @@ export { deriveStageProducts, withOutputStem, type StageProducts } from "./sessi
 /** DAG 核心节点(select/pull 是前奏,clean_* 是收尾,均不进节点表)。 */
 export type WorkflowNodeKey = Extract<
   StepName,
-  "merge" | "burn_danmu" | "burn_livechat" | "upload_plain" | "append_danmu" | "append_livechat"
+  "merge" | "burn_danmu" | "burn_livechat" | "upload_plain" | "youtube_plain" | "append_danmu" | "append_livechat"
 >;
 
 export type ResourceKind = "cpu" | "net" | "none";
@@ -62,6 +62,8 @@ export interface WorkflowBuildInput {
   cfg: PipelineCfg;
   log(msg: string): void;
   willUpload: boolean;
+  /** destinations 含 youtube → 跑 youtube_plain 节点。 */
+  willUploadYoutube: boolean;
   burnDanmu: boolean;
   burnLivechat: boolean;
   /** 该场拉下来的源段数(merge 完成 detail 用)。 */
@@ -79,17 +81,21 @@ export interface Workflow {
  * append_danmu → append_livechat(B 站 P2/P3 顺序)。禁用步骤 = disabled,由 executor 标 skipped 并放行下游。
  */
 export function buildWorkflow(input: WorkflowBuildInput): Workflow {
-  const { streamKey, stageSub, products, deps, cfg, log, willUpload, burnDanmu, burnLivechat, mergeSegments } = input;
+  const { streamKey, stageSub, products, deps, cfg, log, willUpload, willUploadYoutube, burnDanmu, burnLivechat, mergeSegments } = input;
   const ledger = deps.ledger;
   const artifacts = new Map<string, string>();
   const details = new Map<string, string>();
   // append_livechat 只在 danmu 轨存在时依赖其 p2 输出(否则跳过 append_danmu 不应阻断 livechat)。
   const appendDanmuOn = willUpload && burnDanmu;
+  const ytId = ledger.get(streamKey)?.ytId;
 
   // 续跑幂等:已 done 的产物直接从确定性路径回填,下游 append 无需重跑上游也能拿到输入。
   if (ledger.getNodeState(streamKey, "upload_plain")?.state === "done") {
     const bv = ledger.get(streamKey)?.bv;
     if (bv) artifacts.set("bv", bv);
+  }
+  if (ledger.getNodeState(streamKey, "youtube_plain")?.state === "done" && ytId) {
+    artifacts.set("youtubeUrl", `https://youtu.be/${ytId}`);
   }
   if (ledger.getNodeState(streamKey, "merge")?.state === "done") artifacts.set("plain.mp4", products.plain);
   if (ledger.getNodeState(streamKey, "burn_danmu")?.state === "done") artifacts.set("danmu.mp4", products.danmuMp4);
@@ -218,6 +224,30 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
       },
     },
     {
+      key: "youtube_plain",
+      disabled: !willUploadYoutube,
+      inputs: [{ name: "plain.mp4", kind: "file", required: true, minBytes: 1 }],
+      outputs: [{ name: "youtubeUrl", kind: "ref", required: true }],
+      resource: "net",
+      run: async (c: NodeRunContext): Promise<void> => {
+        const uploader = c.deps.uploadYoutube;
+        if (!uploader) throw new Error("youtube 上传能力未注入(uploadYoutube)");
+        const r = await uploader({
+          video: products.plain,
+          title: products.dateName,
+          description: cfg.youtubeMeta?.description ?? cfg.uploadMeta.desc,
+          tags: cfg.youtubeMeta?.tags,
+          categoryId: cfg.youtubeMeta?.categoryId,
+          visibility: cfg.youtubeMeta?.privacy ?? "private",
+          notifySubscribers: cfg.youtubeMeta?.notifySubscribers ?? false,
+        });
+        // checkpoint:YouTube 建稿成功即刻落库 ytId;重启/崩溃重跑不会重复上传。
+        ledger.setYt(streamKey, r.videoId);
+        c.set("youtubeUrl", r.url);
+        c.stepDetail("youtube_plain", r.url);
+      },
+    },
+    {
       key: "append_danmu",
       disabled: !(willUpload && burnDanmu),
       inputs: [
@@ -253,6 +283,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
     ["merge", "burn_danmu"],
     ["merge", "burn_livechat"],
     ["merge", "upload_plain"],
+    ["merge", "youtube_plain"],
     ["upload_plain", "append_danmu"],
     ["burn_danmu", "append_danmu"],
     ["upload_plain", "append_livechat"],

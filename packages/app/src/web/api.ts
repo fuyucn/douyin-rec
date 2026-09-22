@@ -29,6 +29,7 @@ import {
   type WorkerTestResult,
   type WorkerStatus,
   type BiliupAuthStatus,
+  type YouTubeAuthStatus,
 } from "@drec/core";
 import * as hubStore from "../hub-store.js";
 import type { HubRule } from "../hub-store.js";
@@ -42,6 +43,7 @@ import { resolveOutputDir } from "../paths.js";
 import type { Task, TaskStore } from "../store.js";
 import { resolveTaskCookies } from "../store.js";
 import { readBiliupCookieHeader } from "../upload/biliup.js";
+import { DEFAULT_YOUTUBE_SECRETS, DEFAULT_YOUTUBE_TOKEN, validateYoutubeSecretsFile, validateYoutubeTokenFile } from "../upload/youtube.js";
 import type { TaskRuntime } from "../task-manager.js";
 import { inWindow, nowMinutesLocal } from "../scheduler.js";
 import type { MergeJobStore } from "../merge-jobs.js";
@@ -296,6 +298,7 @@ export interface Api {
   clearCookie(platform?: string): ApiResult;
   /** GET /api/biliup/status — biliup 上传登录态(独立于录制 Cookie)。 */
   getBiliupStatus(): ApiResult;
+  getYouTubeStatus(): ApiResult;
   /** GET /api/webhook — global Discord webhook (settings.discordWebhook). */
   getWebhook(): ApiResult;
   /** POST /api/webhook { webhook } — set/clear the global Discord webhook. */
@@ -494,6 +497,26 @@ export function makeApi(deps: ApiDeps): Api {
       hasSession: value.length > 0 && hasSessionCookie(value, "bilibili"),
       length: value.length,
       source: value ? "biliup" : "none",
+    };
+  };
+  const youtubeStatus = (): YouTubeAuthStatus => {
+    const secretsSet = existsSync(DEFAULT_YOUTUBE_SECRETS);
+    const tokenSet = existsSync(DEFAULT_YOUTUBE_TOKEN);
+    const errors: string[] = [];
+    if (secretsSet) {
+      const err = validateYoutubeSecretsFile(DEFAULT_YOUTUBE_SECRETS);
+      if (err) errors.push(err);
+    }
+    if (tokenSet) {
+      const err = validateYoutubeTokenFile(DEFAULT_YOUTUBE_TOKEN);
+      if (err) errors.push(err);
+    }
+    return {
+      secretsSet: secretsSet && !errors.some((e) => e.startsWith("client_secrets")),
+      tokenSet: tokenSet && !errors.some((e) => e.startsWith("request.token")),
+      ready: secretsSet && tokenSet && errors.length === 0,
+      source: secretsSet || tokenSet ? "youtube" : "none",
+      errors: errors.length > 0 ? errors : undefined,
     };
   };
   const validCookiePlatform = (platform: string): boolean => listPlatforms().some((p) => p.id === platform);
@@ -738,6 +761,10 @@ export function makeApi(deps: ApiDeps): Api {
 
     getBiliupStatus(): ApiResult {
       return { status: 200, body: biliupStatus() };
+    },
+
+    getYouTubeStatus(): ApiResult {
+      return { status: 200, body: youtubeStatus() };
     },
 
     getWebhook(): ApiResult {

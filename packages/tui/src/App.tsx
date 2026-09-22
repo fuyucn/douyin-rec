@@ -19,7 +19,7 @@ function eventLine(e: TuiEvent): string | null {
     case "burnDone":
       return `✅ 烧录完成：${s("file").split(/[/\\]/).pop()}`;
     case "uploadDone":
-      return `✅ 上传完成：${s("bv")}`;
+      return `✅ 上传完成：${s("bv") || s("url")}`;
     case "hubTaskStart":
       return `📋 Hub 任务开始：${s("room")}（${Array.isArray(ev.workers) ? (ev.workers as unknown[]).length : 0} 个节点）`;
     case "error":

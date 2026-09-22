@@ -45,6 +45,7 @@ export interface RouteMatch {
     | "setCookie"
     | "clearCookie"
     | "getBiliupStatus"
+    | "getYouTubeStatus"
     | "getCookiePlatform"
     | "setCookiePlatform"
     | "clearCookiePlatform"
@@ -113,6 +114,7 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "setCookie", methods: ["POST"], pattern: /^\/api\/cookie$/, needsBody: true },
   { name: "clearCookie", methods: ["DELETE"], pattern: /^\/api\/cookie$/ },
   { name: "getBiliupStatus", methods: ["GET"], pattern: /^\/api\/biliup\/status$/ },
+  { name: "getYouTubeStatus", methods: ["GET"], pattern: /^\/api\/youtube\/status$/ },
   { name: "listCookies", methods: ["GET"], pattern: /^\/api\/cookies$/ },
   { name: "getCookiePlatform", methods: ["GET"], pattern: /^\/api\/cookies\/([A-Za-z0-9_-]+)$/, param: "slug" },
   { name: "setCookiePlatform", methods: ["POST"], pattern: /^\/api\/cookies\/([A-Za-z0-9_-]+)$/, param: "slug", needsBody: true },
@@ -305,6 +307,8 @@ async function dispatch(
       return api.clearCookie();
     case "getBiliupStatus":
       return api.getBiliupStatus();
+    case "getYouTubeStatus":
+      return api.getYouTubeStatus();
     case "listCookies":
       return api.listCookies();
     case "getCookiePlatform":
