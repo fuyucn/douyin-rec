@@ -89,6 +89,8 @@ hub pipeline 里 `upload.mode` 目前只有 `stage | upload` 两个状态，`upl
 - [x] Task 5: `PipelineCfg.uploadDestinations` + `uploadYoutube` dep + pipeline 接线（`youtube_plain` 节点、`ytId` 台账、恢复不重传）
 - [x] Task 6: 配置文档 + settings 文案 + hub 规则弹窗目的地/隐私
 - [x] Task 6b: `docs/worker-install.md` 明确 youtubeuploader 是 master 可选依赖
+- [x] PR 已开：#1（draft；branch `codex/youtube-upload` → main）
+- [x] GitHub Actions `test` workflow 接上；push/PR 会跑 `typecheck + unit tests + web build`
 - [ ] Task 7: UAT checklist（见下）
 
 ## 不破坏现有部署
