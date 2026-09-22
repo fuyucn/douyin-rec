@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { registerChild, throwIfAborted } from "@drec/core";
 import { rootYouTubeSecrets, rootYouTubeToken } from "../paths.js";
 
@@ -67,6 +67,34 @@ export function parseYoutubeVideoId(out: string): string | null {
   return m ? m[1] : null;
 }
 
+/** client_secrets.json 基础结构校验;错误返回文本,null = OK。 */
+export function validateYoutubeSecretsFile(path: string): string | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    const node = (raw.web ?? raw.installed) as Record<string, unknown> | undefined;
+    if (!node) return `client_secrets 结构不完整: ${path}(缺 web/installed 段)`;
+    if (typeof node.client_id !== "string" || node.client_id.trim().length === 0) return `client_secrets 缺 client_id: ${path}`;
+    if (typeof node.client_secret !== "string" || node.client_secret.trim().length === 0) return `client_secrets 缺 client_secret: ${path}`;
+    return null;
+  } catch (e) {
+    return `client_secrets 无法解析: ${path}(${String((e as Error)?.message ?? e)})`;
+  }
+}
+
+/** request.token 结构校验;需要 refresh_token(后续服务器端自动刷新要靠它)。 */
+export function validateYoutubeTokenFile(path: string): string | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    const refresh = raw.refresh_token;
+    if (typeof refresh !== "string" || refresh.trim().length === 0) {
+      return `request.token 缺 refresh_token: ${path}(请先完成 pnpm youtubeuploader:auth)`;
+    }
+    return null;
+  } catch (e) {
+    return `request.token 无法解析: ${path}(${String((e as Error)?.message ?? e)})`;
+  }
+}
+
 /** 预检：二进制可执行 + client_secrets 存在 + 视频文件存在。返回错误信息或 null。 */
 export function checkYoutube(
   o: { bin?: string; secrets?: string; cache?: string; video?: string; requireToken?: boolean } = {},
@@ -79,9 +107,15 @@ export function checkYoutube(
       resolve(`youtube client_secrets 不存在: ${secrets}（先按 plans/024_youtube_upload.md 配置 OAuth）`);
       return;
     }
-    if ((o.requireToken ?? true) && !existsSync(cache)) {
-      resolve(`youtube request.token 不存在: ${cache}（先在本机用 youtubeuploader 完成 OAuth 授权，再把 token 复制到远端）`);
-      return;
+    const secretsErr = validateYoutubeSecretsFile(secrets);
+    if (secretsErr) { resolve(secretsErr); return; }
+    if (o.requireToken ?? true) {
+      if (!existsSync(cache)) {
+        resolve(`youtube request.token 不存在: ${cache}（先在本机用 youtubeuploader 完成 OAuth 授权，再把 token 复制到远端）`);
+        return;
+      }
+      const tokenErr = validateYoutubeTokenFile(cache);
+      if (tokenErr) { resolve(tokenErr); return; }
     }
     if (o.video && !existsSync(o.video)) {
       resolve(`视频文件不存在: ${o.video}`);
@@ -118,10 +152,6 @@ export function runYoutubeUploader(argv: string[], bin = DEFAULT_YOUTUBE_BIN): P
 export async function uploadYoutube(o: YoutubeUploadOpts): Promise<YoutubeUploadResult> {
   const pre = await checkYoutube({ bin: o.bin, secrets: o.secrets, cache: o.cache, video: o.video, requireToken: o.requireToken });
   if (pre) throw new Error(pre);
-  if (o.cache && existsSync(o.cache)) {
-    // 极小防御：缓存写成目录/空文件时让二进制重新走 OAuth，而不是让它内部分错。
-    try { if (statSync(o.cache).size === 0) throw new Error("token cache empty"); } catch { /* keep */ }
-  }
   const out = await runYoutubeUploader(buildYoutubeArgs(o), o.bin ?? DEFAULT_YOUTUBE_BIN);
   const videoId = parseYoutubeVideoId(out);
   if (!videoId) throw new Error(`youtubeuploader 上传完成但解析不到 Video ID：${out.slice(-300).trim()}`);

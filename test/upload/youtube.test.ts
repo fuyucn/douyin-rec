@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildYoutubeArgs, checkYoutube, parseYoutubeVideoId } from "../../packages/app/src/upload/youtube.js";
 
+const VALID_SECRETS = JSON.stringify({ web: { client_id: "x", client_secret: "y" }, installed: { client_id: "x", client_secret: "y" } });
+
 describe("youtube upload 包装", () => {
   it("buildYoutubeArgs：默认安全参数", () => {
     const a = buildYoutubeArgs({
@@ -50,11 +52,32 @@ describe("youtube upload 包装", () => {
 
   it("checkYoutube：默认要求 request.token 已就位", async () => {
     const dir = mkdtempSync(join(tmpdir(), "yt-check-"));
-    writeFileSync(join(dir, "client_secrets.json"), "{}");
+    writeFileSync(join(dir, "client_secrets.json"), VALID_SECRETS);
     const err = await checkYoutube({
       secrets: join(dir, "client_secrets.json"),
       cache: join(dir, "request.token"),
     });
     expect(err).toContain("request.token 不存在");
+  });
+
+  it("checkYoutube：client_secrets 只是占位 JSON 时报明确错误", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "yt-check-secrets-"));
+    writeFileSync(join(dir, "client_secrets.json"), "{}");
+    const err = await checkYoutube({
+      secrets: join(dir, "client_secrets.json"),
+      cache: join(dir, "request.token"),
+    });
+    expect(err).toContain("client_secrets 结构不完整");
+  });
+
+  it("checkYoutube：request.token 没有 refresh_token 时不能当授权成功", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "yt-check-token-"));
+    writeFileSync(join(dir, "client_secrets.json"), VALID_SECRETS);
+    writeFileSync(join(dir, "request.token"), JSON.stringify({ access_token: "x" }));
+    const err = await checkYoutube({
+      secrets: join(dir, "client_secrets.json"),
+      cache: join(dir, "request.token"),
+    });
+    expect(err).toContain("request.token 缺 refresh_token");
   });
 });
