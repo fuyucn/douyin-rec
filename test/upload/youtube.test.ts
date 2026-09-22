@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildYoutubeArgs, checkYoutube, parseYoutubeVideoId } from "../../packages/app/src/upload/youtube.js";
+import { buildYoutubeArgs, checkYoutube, normalizeYoutubeTitle, parseYoutubeVideoId } from "../../packages/app/src/upload/youtube.js";
 
 const VALID_SECRETS = JSON.stringify({ web: { client_id: "x", client_secret: "y" }, installed: { client_id: "x", client_secret: "y" } });
 
@@ -48,6 +48,13 @@ describe("youtube upload 包装", () => {
   it("parseYoutubeVideoId：从 youtubeuploader 输出抓 Video ID", () => {
     expect(parseYoutubeVideoId("\nUpload successful! Video ID: AbC12345678\n")).toBe("AbC12345678");
     expect(parseYoutubeVideoId("无 Video ID 输出")).toBeNull();
+  });
+
+  it("normalizeYoutubeTitle：超过 100 个字符会截断", () => {
+    expect(normalizeYoutubeTitle(" 固定标题 ")).toBe("固定标题");
+    const long = "a".repeat(110);
+    expect(Array.from(normalizeYoutubeTitle(long))).toHaveLength(100);
+    expect(normalizeYoutubeTitle(long)).toMatch(/…$/);
   });
 
   it("checkYoutube：默认要求 request.token 已就位", async () => {

@@ -25,7 +25,7 @@ export interface HubPipelineConfig {
      * 上传目的地;**不写则按 mode 兼容旧行为**:upload = [bilibili];stage = []。
      * 写了就以它为唯一真相,可支持 ["bilibili"]、["youtube"] 或 ["bilibili","youtube"]。
      */
-    destinations?: Array<"bilibili" | "youtube">;
+    destinations?: readonly ("bilibili" | "youtube")[];
     private?: boolean;
     tag?: string; tid?: number; desc?: string; titleTemplate?: string;
     /** YouTube 专属上传配置(destinations 含 youtube 时生效)。privacy 缺省 private。 */

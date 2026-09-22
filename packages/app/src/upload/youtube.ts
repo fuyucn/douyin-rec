@@ -12,6 +12,16 @@ export const DEFAULT_YOUTUBE_TOKEN = process.env.YOUTUBE_REQUEST_TOKEN ?? rootYo
 
 export type YoutubeVisibility = "private" | "unlisted" | "public";
 
+const YOUTUBE_TITLE_MAX = 100;
+
+/** YouTube 标题上限 100 个面向用户的字符；超了用 … 截断，防止整场上传被 API 拒绝。 */
+export function normalizeYoutubeTitle(title: string): string {
+  const trimmed = title.trim();
+  const chars = Array.from(trimmed);
+  if (chars.length <= YOUTUBE_TITLE_MAX) return trimmed;
+  return `${Array.from(chars.slice(0, YOUTUBE_TITLE_MAX - 1)).join("")}…`;
+}
+
 export interface YoutubeUploadOpts {
   video: string;
   title: string;
@@ -45,7 +55,7 @@ export interface YoutubeUploadResult {
 export function buildYoutubeArgs(o: YoutubeUploadOpts): string[] {
   const args = [
     "-filename", o.video,
-    "-title", o.title,
+    "-title", normalizeYoutubeTitle(o.title),
     "-secrets", o.secrets ?? DEFAULT_YOUTUBE_SECRETS,
     "-cache", o.cache ?? DEFAULT_YOUTUBE_TOKEN,
     "-privacy", o.visibility ?? "private",
