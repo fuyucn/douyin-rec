@@ -333,9 +333,12 @@ program
         if (!outBase) { console.error("[merge] --merge-sessions 目录内无会话"); process.exitCode = 2; return; }
         const outMp4 = join(o.in, `${outBase}.mp4`);
         const outXml = join(o.in, `${outBase}.xml`);
+        const segFiles = ordered.flatMap((b) => groups[b].ts.map((f) => join(o.in, f)));
         console.log(`[merge] ${ordered.join(" + ")} → ${basename(outMp4)}`);
+        await scanSegmentsIntegrity(segFiles);
         await mergeSessions(inputs, outMp4, outXml);
         console.log(`[merge] 完成: ${outMp4}`);
+        await scanOutputTailIntegrity(outMp4);
         await notifier.notify({ kind: "mergeDone", file: outMp4 });
         return;
       }
@@ -349,9 +352,12 @@ program
         if (!g || g.ts.length === 0) { console.error(`[merge] 跳过 ${b}：无分段`); continue; }
         const outBase = (o.outBase ?? "").trim() || (o.keepTime || clash[dateName(b)] > 1 ? b : dateName(b));
         const out = join(o.in, `${outBase}.mp4`);
+        const segFiles = g.ts.map((f) => join(o.in, f));
         console.log(`[merge] ${b}: ${g.ts.length} 段 → ${basename(out)}`);
-        await mergeSession(g.ts.map((f) => join(o.in, f)), out);
+        await scanSegmentsIntegrity(segFiles);
+        await mergeSession(segFiles, out);
         console.log(`[merge] 完成: ${out}`);
+        await scanOutputTailIntegrity(out);
         await notifier.notify({ kind: "mergeDone", file: out });
       }
     } catch (e) {
@@ -362,6 +368,29 @@ program
 
 function dateNameOf(base: string): string {
   return base.replace(/_\d{2}-\d{2}-\d{2}$/, "");
+}
+
+/**
+ * 合并前分段体检（只读解码扫描，不改码流；见 @drec/post-process integrity）：
+ * 末段整段扫（主播硬切断流的残帧都在末段），其余段只扫尾 90s（廉价覆盖段边界）。
+ */
+async function scanSegmentsIntegrity(tsFiles: string[]): Promise<void> {
+  const { scanMediaErrors, formatScanLine } = await import("@drec/post-process");
+  for (let i = 0; i < tsFiles.length; i++) {
+    const last = i === tsFiles.length - 1;
+    const res = await scanMediaErrors(tsFiles[i], last ? {} : { lastSeconds: 90 });
+    console.log(formatScanLine(`${last ? "末段" : `段 ${i + 1}/${tsFiles.length}`} ${basename(tsFiles[i])}`, res));
+  }
+}
+
+/**
+ * 合并后成品尾部体检（只读）：`-c copy` 无损,前段干净不代表尾部干净,这里确认末段损坏有没有被带进成品。
+ * 两个体检都打印 `[integrity] ✓/⚠` 行,⚠ 表示可能花屏 —— hub 管线会解析并告警,由人决定删稿重录。
+ */
+async function scanOutputTailIntegrity(outMp4: string): Promise<void> {
+  const { scanMediaErrors, formatScanLine } = await import("@drec/post-process");
+  const res = await scanMediaErrors(outMp4, { lastSeconds: 60 });
+  console.log(formatScanLine("成品尾部 60s", res));
 }
 
 // ffprobe 视频实际宽高 → 传给 ASS 渲染器,让 PlayRes 与视频一致(竖屏 1088x1920 不再被

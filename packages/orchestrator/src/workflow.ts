@@ -44,8 +44,8 @@ export interface NodeRunContext {
   deps: PipelineDeps;
   cfg: PipelineCfg;
   log(msg: string): void;
-  /** 带 job.log 摘尾包装的子命令执行器(merge/burn 用)。 */
-  sh(cmd: string): Promise<void>;
+  /** 带 job.log 摘尾包装的子命令执行器(merge/burn 用);返回完整输出供调用方解析(如 integrity 告警)。 */
+  sh(cmd: string): Promise<string>;
   /** 取产物值(file 路径 / dir 路径 / ref 字符串)。 */
   get(name: string): string | undefined;
   /** 节点 run 内声明产物。 */
@@ -104,12 +104,13 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
     deps,
     cfg,
     log,
-    sh: async (cmd: string): Promise<void> => {
+    sh: async (cmd: string): Promise<string> => {
       log(`$ ${cmd}`);
       const t0 = Date.now();
       const out = await deps.sh(cmd);
       log(`  ✓ 完成(${Math.round((Date.now() - t0) / 1000)}s)`);
       if (typeof out === "string" && out.trim()) log(`  输出尾: ${out.trim().slice(-2048)}`);
+      return out ?? "";
     },
     get: (name: string): string | undefined => artifacts.get(name),
     set: (name: string, value: string): void => { artifacts.set(name, value); },
@@ -147,7 +148,11 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         const cmd = multi
           ? `node dist/douyin-rec.mjs merge --in ${stageSub} --merge-sessions --out-base ${outBase}`
           : `node dist/douyin-rec.mjs merge --in ${stageSub} --base ${c.products.sessionBase} --out-base ${outBase}`;
-        await c.sh(cmd);
+        const out = await c.sh(cmd);
+        // 录制产物体检告警(CLI merge 打印 `[integrity] ⚠ …`):末段残帧会被 -c copy 带进成品,
+        // 上传后表现为末段花屏。这里落进 step detail(UI 时间线可见)+ 发一条告警,上传前就有信号。
+        const { parseIntegrityWarnings } = await import("@drec/post-process");
+        const integrityWarns = parseIntegrityWarnings(out);
         c.set("plain.mp4", products.plain);
         // 单会话才补拷源 xml 为 plain.xml;多会话的合并 xml 由 --merge-sessions 直接产出,不能覆盖。
         if (!multi && products.plainXml && products.xmlArg && products.xmlArg !== products.plainXml) {
@@ -158,7 +163,18 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         }
         if (products.plainXml && existsSync(products.plainXml)) c.set("plain.xml", products.plainXml);
         const bytes = fileBytes(products.plain);
-        if (bytes > 0) c.stepDetail("merge", `${mergeSegments} 段 → ${humanBytes(bytes)}`);
+        const detail = bytes > 0 ? `${mergeSegments} 段 → ${humanBytes(bytes)}` : "";
+        if (integrityWarns.length > 0) {
+          const warn = integrityWarns.join(" · ");
+          c.stepDetail("merge", `${detail}${detail ? " " : ""}⚠ 体检异常`);
+          c.deps.notify({
+            kind: "error",
+            stage: "合并",
+            message: `${streamKey} 录制产物体检异常,成品可能末段花屏:${warn}`,
+          });
+        } else if (detail) {
+          c.stepDetail("merge", detail);
+        }
       },
     },
     {

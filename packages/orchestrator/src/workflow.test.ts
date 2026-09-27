@@ -140,7 +140,7 @@ function minimalCtx(t: TestDeps, pool: ResourcePool): NodeRunContext {
     deps: t.deps,
     cfg: t.deps.cfg,
     log: () => {},
-    sh: async () => {},
+    sh: async () => "",
     get: () => undefined,
     set: () => {},
     stepDetail: () => undefined,
