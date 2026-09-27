@@ -30,6 +30,12 @@ export interface DaemonOpts {
   now?: () => Date;
   /** Injectable logger. Default console.log. */
   log?: (msg: string) => void;
+  /**
+   * master 本机抑制名单(hub 语义):返回「不应在本节点实跑」的任务 id
+   * (规则绑定的源任务、workers 勾选了远端节点但不含 local)。daemon 每 tick 现读,
+   * 跟随规则文件手改即时生效;缺省 = 不抑制(单机/worker 行为完全不变)。
+   */
+  localSuppressedIds?: () => ReadonlySet<number>;
 }
 
 /** Result of a pure scheduling decision: which task ids to start / stop. */
@@ -68,6 +74,7 @@ export class TaskDaemon {
   private readonly intervalMs: number;
   private readonly now: () => Date;
   private readonly log: (msg: string) => void;
+  private readonly localSuppressedIds?: () => ReadonlySet<number>;
 
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Guards against overlapping ticks (a slow start/stop spanning intervals). */
@@ -82,6 +89,7 @@ export class TaskDaemon {
     this.intervalMs = opts.intervalMs ?? 60_000;
     this.now = opts.now ?? ((): Date => new Date());
     this.log = opts.log ?? ((m): void => console.log(m));
+    this.localSuppressedIds = opts.localSuppressedIds;
   }
 
   /** Currently-active task ids (for tests / introspection). */
@@ -103,8 +111,19 @@ export class TaskDaemon {
     if (this.ticking || this.stopped) return;
     this.ticking = true;
     try {
-      const tasks = this.store.listTasks();
+      const suppressed = this.localSuppressedIds?.() ?? new Set<number>();
+      let tasks = this.store.listTasks();
       const active = new Set(this.manager.runningIds());
+      // 被抑制但还在本机跑 → 硬停(不走 drain:换节点语义是让位给远端,drain 会让两端同场重复录制)。
+      for (const id of active) {
+        if (!suppressed.has(id)) continue;
+        const t = this.store.getTask(id);
+        this.log(
+          `[scheduler] ⏹ 任务 id=${id}（${t?.name ?? t?.room ?? id}）已由 hub 规则切到其他节点录制,本机停止(源任务仅作配置模板)`,
+        );
+        await this.manager.stop(id);
+      }
+      tasks = tasks.filter((t) => !suppressed.has(t.id));
       const { start, stop } = decide(tasks, this.now(), active);
       for (const id of stop) {
         // GRACEFUL stop at window-end: never cut a live broadcast. The recorder

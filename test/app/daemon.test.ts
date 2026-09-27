@@ -252,6 +252,32 @@ describe("TaskDaemon — composition with TaskManager", () => {
     expect(mgr.isRunning(id)).toBe(true);
   });
 
+  it("localSuppressedIds:抑制名单中的任务不启动;在跑的立即硬停(让位远端节点)", async () => {
+    const store = new TaskStore(":memory:");
+    const idA = store.addTask({ room: "a", enabled: true }).id; // 无窗口 = 始终 eligible
+    const idB = store.addTask({ room: "b", enabled: true }).id;
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {} });
+    // idA 已被 hub 规则切到其他节点录制 → 本机抑制
+    const daemon = new TaskDaemon(store, mgr, {
+      now: () => localAt(7), log: () => {},
+      localSuppressedIds: () => new Set([idA]),
+    });
+
+    await daemon.tick();
+    expect(mgr.isRunning(idA)).toBe(false); // 抑制:不启动
+    expect(mgr.isRunning(idB)).toBe(true);  // 未抑制:正常启动
+
+    // 中途把 idB 也切走 → 下个 tick 立即硬停(不等 drain)
+    const daemon2 = new TaskDaemon(store, mgr, {
+      now: () => localAt(8), log: () => {},
+      localSuppressedIds: () => new Set([idA, idB]),
+    });
+    await daemon2.tick();
+    expect(mgr.isRunning(idB)).toBe(false);
+    expect(spawner.spawned).toHaveLength(1); // 全程只 spawn 过 idB 一次
+  });
+
   it("stop() stops all recorders and is idempotent", async () => {
     const store = new TaskStore(":memory:");
     store.addTask({ room: "a", enabled: true });

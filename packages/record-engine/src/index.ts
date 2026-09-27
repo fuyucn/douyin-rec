@@ -22,10 +22,12 @@ import { logStreamMeta, type StreamMetaSource } from "@drec/ffmpeg-recorder-extr
 const log = createLogger("stream_recorder");
 
 export const POLL_MS = 30_000;        // 开播探测间隔
+export const THROTTLE_POLL_MS = 5 * 60_000; // 风控降频探测间隔(冷却期少打扰平台,代价是开播检测延迟)
 export const FAIL_ALERT = 3;          // 连续「取流+判活均失败」首次告警阈值(≈1.5 分钟)
 export const ALERT_REPEAT = 20;       // 持续失败每隔此次数再提醒(≈10 分钟)
 export const STALL_CHECK_MS = 15_000; // 卡死看门狗检查间隔
 export const STALL_TIMEOUT_MS = 60_000; // 输出停滞 ≥ 此时长 → 判定卡死
+export const STALL_GRACEFUL_EXIT_MS = 5_000; // 主播已下播但进程吊着 → SIGINT 后等它收尾的宽限
 
 export type { PlatformStream };
 export { ffmpegEngine, buildFfmpegArgs } from "./engines/ffmpeg.js";
@@ -83,6 +85,12 @@ export class PollingRecorder implements Recorder {
   private stallInFlight = false;
   /** 最近 stderr 尾(断链诊断;引擎按需 push)。 */
   protected stderrTail: string[] = [];
+  /** 平台建议的基础探测间隔(缺省 30s;快手页面限流紧 → 5 分钟)。 */
+  private basePollMs = POLL_MS;
+  /** 当前开播探测间隔(风控时升 THROTTLE_POLL_MS,解除回 basePollMs)。 */
+  private pollDelayMs = POLL_MS;
+  /** 最近一次风控提示(去重:同一文案只在进入时打一次,解除时再打恢复日志)。 */
+  private lastThrottledReason: string | null = null;
 
   /** 注入下载引擎(ffmpeg / mesio)。name 取引擎 id,便于日志/识别。 */
   constructor(engine: DownloadEngine) {
@@ -137,6 +145,9 @@ export class PollingRecorder implements Recorder {
     this.noNewSession = false;
     this.ev = ev;
     this.platform = platformForRoom(roomUrl);
+    // 平台可指定更保守的基础轮询间隔(快手页面限流紧 → 5 分钟);缺省仍是 30s。
+    this.basePollMs = this.platform.pollIntervalMs ?? POLL_MS;
+    this.pollDelayMs = this.basePollMs;
     this.quality = opts.quality;
     this.cookies = opts.cookies;
     this.outDir = resolve(opts.outDir);
@@ -167,6 +178,18 @@ export class PollingRecorder implements Recorder {
       const probe = await this.platform.getStream(this.channelId, this.quality, this.cookies);
       this.probeFails = 0; // 取流成功 → 清零
       if (this.stopped) return;
+      if (probe.throttledReason) {
+        // 风控(平台页可达但被限流)→ 显式日志 + 降频轮询,避免把风控伪装成「主播没开播」掩盖漏录。
+        this.pollDelayMs = Math.max(this.basePollMs, THROTTLE_POLL_MS);
+        if (probe.throttledReason !== this.lastThrottledReason) {
+          this.lastThrottledReason = probe.throttledReason;
+          log.warn(`平台风控:${probe.throttledReason} —— ${Math.round(this.pollDelayMs / 60000)} 分钟一探(冷却期少打扰平台;解除前若在播会漏录)`);
+        }
+      } else if (this.lastThrottledReason) {
+        log.info(`风控解除,恢复正常轮询`);
+        this.lastThrottledReason = null;
+        this.pollDelayMs = this.basePollMs;
+      }
       if (probe.living && probe.url) {
         this.spawnRecording(probe.url, probe, String(probe.owner ?? ""), String(probe.title ?? ""));
         return;
@@ -202,7 +225,7 @@ export class PollingRecorder implements Recorder {
 
   private scheduleNextPoll(): void {
     if (this.stopped || this.noNewSession) return;
-    this.pollTimer = setTimeout(() => void this.poll(), POLL_MS);
+    this.pollTimer = setTimeout(() => void this.poll(), this.pollDelayMs);
   }
 
   /**
@@ -280,9 +303,18 @@ export class PollingRecorder implements Recorder {
     if (this.stopped || this.proc !== proc || proc.exitCode !== null || proc.signalCode !== null) return;
 
     if (living === false) {
-      log.info(`主播已下播但下载进程 ${secs}s 无输出未退出,静默收尾(不报卡死)`);
+      // 先 SIGINT 让 ffmpeg 正常收尾(写完 PAT/PMT、flush 最后一帧),避免 SIGKILL 留下未收尾的 .ts
+      // (那种尾部会在体检里报时间戳/残帧问题,重封装后才消失)。宽限内没退再 SIGKILL。
+      log.info(`主播已下播但下载进程 ${secs}s 无输出未退出,先 SIGINT 收尾(${STALL_GRACEFUL_EXIT_MS / 1000}s 未退再强杀)`);
       this.clearStallWatch();
-      try { proc.kill("SIGKILL"); } catch { /* close 事件会收尾 */ }
+      const killTimer = setTimeout(() => {
+        try { proc.kill("SIGKILL"); } catch { /* 已退出 */ }
+      }, STALL_GRACEFUL_EXIT_MS);
+      killTimer.unref?.();
+      const cancelKill = (): void => clearTimeout(killTimer);
+      proc.once("exit", cancelKill);
+      proc.once("close", cancelKill);
+      try { proc.kill("SIGINT"); } catch { /* close 事件会收尾 */ }
       return;
     }
 

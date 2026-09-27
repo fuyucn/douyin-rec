@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
 import { registerPlatform, type DownloadEngine, type Platform, type RecorderEvents } from "@drec/core";
-import { PollingRecorder, STALL_CHECK_MS, STALL_TIMEOUT_MS } from "./index.js";
+import {
+  PollingRecorder, POLL_MS, STALL_CHECK_MS, STALL_GRACEFUL_EXIT_MS, STALL_TIMEOUT_MS, THROTTLE_POLL_MS,
+} from "./index.js";
 
 /** 可控退出状态的假下载子进程(不真 spawn)。 */
 class FakeProc extends EventEmitter {
@@ -85,18 +87,21 @@ describe("卡死看门狗(正常下播不误报)", () => {
     rmSync(outDir, { recursive: true, force: true });
   });
 
-  it("主播已下播但进程仍吊着 → 静默收尾,不报卡死", async () => {
+  it("主播已下播但进程仍吊着 → 先 SIGINT 优雅收尾(不报卡死);宽限内没退再 SIGKILL", async () => {
     vi.useFakeTimers();
     registerPlatform(makePlatform(false));
     const proc = new FakeProc();
     const { rec, ev, outDir } = await startRecorder(proc);
     (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = Date.now() - 120_000;
 
-    await vi.advanceTimersByTimeAsync(STALL_CHECK_MS * 2);
+    await vi.advanceTimersByTimeAsync(STALL_CHECK_MS);
     await vi.advanceTimersByTimeAsync(0); // 冲掉 handleStall 里的 living 查询微任务
 
     expect(ev.onProbeError).not.toHaveBeenCalled();
-    expect(proc.killCalls).toEqual(["SIGKILL"]);
+    expect(proc.killCalls).toEqual(["SIGINT"]); // 不再直接强杀:给 ffmpeg 收尾机会
+
+    await vi.advanceTimersByTimeAsync(STALL_GRACEFUL_EXIT_MS + 1); // 进程仍未退出 → 兜底强杀
+    expect(proc.killCalls).toEqual(["SIGINT", "SIGKILL"]);
 
     proc.emit("close", null, "SIGKILL");
     await vi.advanceTimersByTimeAsync(1);
@@ -140,6 +145,53 @@ describe("卡死看门狗(正常下播不误报)", () => {
     expect(String(onProbeError.mock.calls[0]?.[0])).toContain("无法确认主播状态");
     expect(String(onProbeError.mock.calls[0]?.[0])).not.toContain("录制卡死");
     expect(proc.killCalls).toEqual(["SIGKILL"]);
+    rmSync(outDir, { recursive: true, force: true });
+  });
+});
+
+describe("风控降频轮询(platform.getStream 返回 throttledReason)", () => {
+  it("探到风控 → 降频 + 不算取流失败告警;解除后恢复正常间隔", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const state = { throttled: true };
+    const p = makePlatform(false);
+    p.getStream = async () => {
+      calls++;
+      return state.throttled ? { living: false, throttledReason: "请求过快，请稍后重试" } : { living: false };
+    };
+    registerPlatform(p);
+    const { ev, outDir } = await startRecorder(new FakeProc());
+    await vi.advanceTimersByTimeAsync(1); // 首次 poll
+    expect(calls).toBe(1);
+    expect(ev.onProbeError).not.toHaveBeenCalled(); // 风控不是「取流失败」,不告警
+
+    await vi.advanceTimersByTimeAsync(POLL_MS);            // 30s 内不再探测(降频生效)
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(THROTTLE_POLL_MS - POLL_MS); // 满 5 分钟才探第二次
+    expect(calls).toBe(2);
+
+    state.throttled = false;                               // 风控解除
+    await vi.advanceTimersByTimeAsync(THROTTLE_POLL_MS);   // 本次仍按降频间隔到点,届时报解除
+    expect(calls).toBe(3);
+    await vi.advanceTimersByTimeAsync(POLL_MS);            // 之后恢复 30s 间隔
+    expect(calls).toBe(4);
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("平台指定 pollIntervalMs(快手 5 分钟)→ 常态就按该间隔探测,不再 30s 一次", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const p = makePlatform(false);
+    p.pollIntervalMs = 5 * 60_000;
+    p.getStream = async () => { calls++; return { living: false }; };
+    registerPlatform(p);
+    const { outDir } = await startRecorder(new FakeProc());
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(POLL_MS);            // 30s 内不探
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - POLL_MS); // 满 5 分钟才探第二次
+    expect(calls).toBe(2);
     rmSync(outDir, { recursive: true, force: true });
   });
 });

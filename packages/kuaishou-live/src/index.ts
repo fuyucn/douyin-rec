@@ -48,4 +48,6 @@ export const kuaishouPlatform: Platform = {
   defaultEngine: "ffmpeg",
   qualities: [...KUAISHOU_QUALITIES],
   engines: ["ffmpeg", "mesio"],
+  // 页面接口限流紧:30s 轮询约 40 次即「请求过快」。5 分钟一探,宁可晚发现开播也不被持续封。
+  pollIntervalMs: 5 * 60_000,
 };

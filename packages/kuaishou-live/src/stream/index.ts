@@ -154,7 +154,9 @@ export async function getStream(userId: string, quality: string, cookies?: strin
   if (!item) return { living: false, raw };
   const owner = item.author?.name?.trim() || undefined;
   const ls = item.liveStream;
-  if (item.errorType || !ls) return { living: false, owner, raw };
+  // 风控(errorType.type=2,如「请求过快」)→ 显式带 throttledReason,录制器降频轮询+告警;封禁等结构性错误同样上报。
+  if (item.errorType) return { living: false, owner, raw, throttledReason: item.errorType.title || item.errorType.content };
+  if (!ls) return { living: false, owner, raw };
 
   // FLV 档:h264 优先(录制兼容),其次 hevc;HLS 保底。
   const playUrls = ls.playUrls ?? {};

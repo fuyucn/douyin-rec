@@ -32,6 +32,11 @@ export interface PlatformStream {
   headers?: Record<string, string>;
   /** 平台专属原始结果(子类按需用,如 douyin 的 logStreamMeta);平台无关层不碰。 */
   raw?: unknown;
+  /**
+   * 风控/限流信号:平台取流页可达但被风控(如快手「请求过快,请稍后重试」)时给出可读原因。
+   * 录制器据此进入降频轮询 + 显式日志(否则「等待开播」会把风控伪装成「主播没开播」,掩盖漏录)。
+   */
+  throttledReason?: string;
 }
 
 /** 一个直播平台的能力契约。 */
@@ -81,6 +86,12 @@ export interface Platform {
   qualities: readonly string[];
   /** 本平台可用的下载引擎 id(校验、列举用;= core/engine 注册表里的 id)。 */
   engines: readonly string[];
+  /**
+   * 平台建议的开播轮询间隔(ms);缺省走录制器默认(30s)。
+   * 快手直播间页接口限流很紧(约 40 次请求即触发「请求过快」),设 5 分钟换取可持续的匿名轮询;
+   * 代价是开播检测延迟变大。
+   */
+  pollIntervalMs?: number;
 }
 
 const platforms = new Map<string, Platform>();
