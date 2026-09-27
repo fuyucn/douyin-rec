@@ -1,4 +1,4 @@
-import { Activity, Plus, Radio, Server } from "lucide-react";
+import { Activity, GripVertical, Network, Plus, Radio, Server } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAtomValue } from "jotai";
@@ -9,10 +9,10 @@ import { LatestRunBadge } from "../components/HubJobs";
 import { RoomDetail } from "../components/RoomDetail";
 import { WorkersPanel } from "../components/WorkersPanel";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
-import { usePolling } from "../lib/hooks";
+import { useDragReorder } from "../lib/dragReorder";
+import { usePolling, useToast, errMessage } from "../lib/hooks";
 import { roomId } from "../lib/labels";
 import { useT } from "../lib/i18n";
-import { Network } from "lucide-react";
 
 /** Hub 管理页(/hub 与 /hub/:key 共用):左房间列表 + 右详情(RoomDetail)。 */
 export function HubPage(): ReactNode {
@@ -69,6 +69,22 @@ export function HubPage(): ReactNode {
     const prefix = `${r.platform}:${r.roomSlug}:`;
     return jobs.filter((j) => j.streamKey.startsWith(prefix));
   };
+
+  const toast = useToast();
+  // 房间列表拖拽排序:drop 后整体顺序持久化到 {key}.json,服务端返回权威顺序回显。
+  const dnd = useDragReorder<HubRuleDTO>({
+    items: rules,
+    keyOf: (r) => r.key,
+    disabled: hubEnabled !== true,
+    onCommit: async (keys) => {
+      try {
+        setRules(await api.reorderHubRules(keys));
+      } catch (e) {
+        toast(errMessage(e), "error");
+        void refresh();
+      }
+    },
+  });
 
   // 本节点不是 master(未启用 hub)→ child-node 提示(原样保留)。
   if (hubEnabled === false) {
@@ -174,23 +190,27 @@ export function HubPage(): ReactNode {
                       <span className="skeleton block h-3 w-36 max-w-full mt-2" />
                     </div>
                   ))}
-                {rules.map((r) => {
+                {dnd.ordered.map((r) => {
                   const active = r.key === selectedKey;
                   return (
                     <button
                       key={r.key}
                       onClick={() => selectRoom(r)}
-                      className={`rail-item ${active ? "rail-item-active" : ""}`}
-                      style={{ opacity: r.enabled ? 1 : 0.55 }}
+                      className={`rail-item ${active ? "rail-item-active" : ""} ${dnd.overKey === r.key && dnd.dragKey !== r.key ? "rail-item-drag-over" : ""}`}
+                      style={{ opacity: (r.enabled ? 1 : 0.55) * (dnd.dragKey === r.key ? 0.5 : 1) }}
+                      {...dnd.itemProps(r.key)}
                     >
                       <div className="min-w-0">
-                        {r.anchorName ? (
-                          <>
+                        <div className="flex items-center gap-1.5">
+                          <span className="rail-grip" title={t("hub.common.dragTip")}><GripVertical className="w-3.5 h-3.5 shrink-0" /></span>
+                          {r.anchorName ? (
                             <div className="font-medium text-ink truncate">{r.anchorName}</div>
-                            <div className="font-mono text-[11px] text-muted-soft mt-0.5 truncate">{roomId(r.room)}</div>
-                          </>
-                        ) : (
-                          <div className="font-mono text-[13px] font-medium text-ink truncate">{roomId(r.room)}</div>
+                          ) : (
+                            <div className="font-mono text-[13px] font-medium text-ink truncate">{roomId(r.room)}</div>
+                          )}
+                        </div>
+                        {r.anchorName && (
+                          <div className="font-mono text-[11px] text-muted-soft mt-0.5 truncate pl-5">{roomId(r.room)}</div>
                         )}
                       </div>
                       <div className="flex items-center gap-1.5">

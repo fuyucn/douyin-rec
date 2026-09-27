@@ -96,3 +96,16 @@ export function deleteWorker(configPath: string, id: string): boolean {
   writeConfig(configPath, cfg, next, cfg.workerSeq ?? 0);
   return true;
 }
+
+/** 整体重排版序:ids 必须与现有 worker 集合完全相等,按数组顺序写回(数组序 = 显示序)。 */
+export function reorderWorkers(configPath: string, ids: string[]): WorkerConfig[] {
+  const cfg = readConfig(configPath);
+  const workers = workersOf(cfg);
+  const byId = new Map(workers.map((w) => [w.id, w]));
+  if (ids.length !== workers.length || ids.some((id) => !byId.has(id)) || new Set(ids).size !== ids.length) {
+    throw new Error(`重排失败: 顺序与现有 worker 不匹配(现有 ${workers.length} 个)`);
+  }
+  const next = ids.map((id) => byId.get(id)!);
+  writeConfig(configPath, cfg, next, cfg.workerSeq ?? 0);
+  return next;
+}

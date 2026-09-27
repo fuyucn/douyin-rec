@@ -1,11 +1,12 @@
-import { Pencil, Plus, Trash2, X } from "lucide-react";
+import { GripVertical, Pencil, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { api, type WorkerDTO, type WorkerStatus } from "../api/client";
 import { Button, IconButton } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { useDragReorder } from "../lib/dragReorder";
 import { errMessage, useToast } from "../lib/hooks";
-import { WorkerDialog } from "../modals/WorkerDialog";
 import { useT } from "../lib/i18n";
+import { WorkerDialog } from "../modals/WorkerDialog";
 
 /** Workers 滑入浮层:录制节点列表(name/kind/host/实时状态点)+ 增删改。状态由父层轮询下发。 */
 export function WorkersPanel({
@@ -66,6 +67,21 @@ export function WorkersPanel({
     return s.ok ? t("hub.workers.statusOk") : (s.error ?? t("hub.workerDialog.unknownError"));
   };
 
+  // 拖拽排序:drop 后把完整 id 顺序 POST 回 hub.config.json(数组序 = 显示序)。
+  const dnd = useDragReorder<WorkerDTO>({
+    items: workers,
+    keyOf: (w) => w.id,
+    onCommit: async (ids) => {
+      try {
+        await api.reorderWorkers(ids);
+        onChanged();
+      } catch (e) {
+        toast(errMessage(e), "error");
+        onChanged();
+      }
+    },
+  });
+
   return (
     <>
       {/* scrim:open 才可见/可点(点击关闭)。 */}
@@ -114,8 +130,14 @@ export function WorkersPanel({
           {workers.length === 0 && (
             <div className="text-center text-muted text-sm py-8 border border-dashed border-hairline" style={{ borderRadius: "var(--r-card)" }}>{t("hub.workers.empty")}</div>
           )}
-          {workers.map((w) => (
-            <div key={w.id} className="flex items-center gap-3 border border-transparent px-2 py-2.5 transition-colors hover:bg-surface-soft hover:border-hairline" style={{ borderRadius: "var(--r-card)" }}>
+          {dnd.ordered.map((w) => (
+            <div
+              key={w.id}
+              className={`worker-row flex items-center gap-3 border border-transparent px-2 py-2.5 transition-colors hover:bg-surface-soft hover:border-hairline ${dnd.overKey === w.id && dnd.dragKey !== w.id ? "drag-over" : ""}`}
+              style={{ borderRadius: "var(--r-card)", opacity: dnd.dragKey === w.id ? 0.5 : 1 }}
+              {...dnd.itemProps(w.id)}
+            >
+              <span className="rail-grip" title={t("hub.common.dragTip")}><GripVertical className="w-3.5 h-3.5 shrink-0" /></span>
               <span className="dot shrink-0" style={{ background: dotColor(w) }} title={dotTitle(w)} />
               <div className="min-w-0 flex-1">
                 <div className="font-medium text-ink truncate">{w.name}</div>

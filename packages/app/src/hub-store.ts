@@ -30,6 +30,8 @@ export interface HubRule {
   recording?: HubRecordingConfig;
   /** 选中参与该房间 hub 处理的 worker id;缺省/空 = 全部(向后兼容)。 */
   workers?: string[];
+  /** 列表自定义排序(可拖拽调整);越小越靠前,缺省 = 未排过序(按 key 兜底)。 */
+  order?: number;
 }
 
 /** 磁盘文件的形状(key/roomSlug/platform 不存盘;room 为显示用,新规则由 source task 派生可省略)。 */
@@ -39,6 +41,7 @@ interface HubFile {
   pipeline?: HubPipelineConfig;
   recording?: HubRecordingConfig;
   workers?: string[];
+  order?: number;
 }
 
 /** 组合 key:平台 + 房间号,两段都不含点。 */
@@ -75,6 +78,7 @@ function fileToRule(stem: string, raw: HubFile): HubRule {
     recording: raw.recording,
     // workers 缺省 = undefined(= 全部 worker,向后兼容)。只在文件显式含时透出。
     workers: raw.workers,
+    order: raw.order,
   };
 }
 
@@ -97,7 +101,14 @@ function writeRule(dir: string, key: string, file: HubFile): void {
   renameSync(tmp, path);
 }
 
-/** 列出全部 hub 规则(扫 <hubDir>/*.json;坏文件跳过;按 key 排序)。 */
+/** 排序键:order 升序(未排过序的规则置后),同位按 key 稳定排序。 */
+function byOrderThenKey(a: HubRule, b: HubRule): number {
+  const oa = a.order ?? Number.MAX_SAFE_INTEGER;
+  const ob = b.order ?? Number.MAX_SAFE_INTEGER;
+  return oa !== ob ? oa - ob : a.key.localeCompare(b.key);
+}
+
+/** 列出全部 hub 规则(扫 <hubDir>/*.json;坏文件跳过;order 升序、无 order 按 key 兜底)。 */
 export function listHubRules(dir: string): HubRule[] {
   let names: string[] = [];
   try {
@@ -110,12 +121,29 @@ export function listHubRules(dir: string): HubRule[] {
     const r = readRule(dir, n.replace(/\.json$/, ""));
     if (r) out.push(r);
   }
-  return out.sort((a, b) => a.key.localeCompare(b.key));
+  return out.sort(byOrderThenKey);
 }
 
 /** 取单条(key=`{platform}.{roomSlug}`);无则 null。 */
 export function getHubRule(dir: string, key: string): HubRule | null {
   return readRule(dir, key);
+}
+
+/**
+ * 源任务本机抑制名单:规则启用 + 绑了 sourceTaskId + workers 显式勾选且不含 "local"
+ * → 该房间的录制明确交给远端节点,master 本机的源任务只当配置模板,不应再实跑
+ * (避免本机持续轮询触发风控/两节点重复录制)。daemon 每 tick 现读,跟随手改文件。
+ */
+export function localSuppressedSourceTaskIds(dir: string): Set<number> {
+  const out = new Set<number>();
+  for (const rule of listHubRules(dir)) {
+    if (!rule.enabled) continue;
+    const tid = rule.recording?.sourceTaskId;
+    if (tid == null) continue;
+    const ws = rule.workers;
+    if (ws && ws.length > 0 && !ws.includes("local")) out.add(tid);
+  }
+  return out;
 }
 
 /** 新建/覆盖:由显式 platform+roomSlug 定 key → 写 {key}.json(room 可选,仅作显示;缺省字段沿用已有)。 */
@@ -140,6 +168,8 @@ export function upsertHubRule(
     recording: input.recording ?? existing?.recording,
     // workers 缺省沿用已有(undefined = 全部);显式传才覆盖。
     workers: input.workers ?? existing?.workers,
+    // order 同理:只在 reorderHubRules 显式写入;upsert/update 均沿用。
+    order: existing?.order,
   });
   return getHubRule(dir, key)!;
 }
@@ -159,8 +189,30 @@ export function updateHubRule(
     recording: patch.recording ?? existing.recording,
     // 部分更新:未传 workers 沿用已有;传了(UI 总传非空列表)才覆盖。
     workers: patch.workers ?? existing.workers,
+    order: existing.order,
   });
   return getHubRule(dir, key);
+}
+
+/** 整体重排:keys 必须与现有规则集合完全相等,按下标写回 order(0..n-1)。 */
+export function reorderHubRules(dir: string, keys: string[]): HubRule[] {
+  const existing = listHubRules(dir);
+  const byKey = new Map(existing.map((r) => [r.key, r]));
+  if (keys.length !== existing.length || keys.some((k) => !byKey.has(k)) || new Set(keys).size !== keys.length) {
+    throw new Error(`重排失败: 顺序与现有规则不匹配(现有 ${existing.length} 条)`);
+  }
+  for (let i = 0; i < keys.length; i++) {
+    const r = byKey.get(keys[i])!;
+    writeRule(dir, r.key, {
+      ...(r.room ? { room: r.room } : {}),
+      enabled: r.enabled,
+      pipeline: r.pipeline,
+      recording: r.recording,
+      workers: r.workers,
+      order: i,
+    });
+  }
+  return listHubRules(dir);
 }
 
 /** 删除(删文件);文件不存在返回 false。 */

@@ -68,6 +68,7 @@ export interface RouteMatch {
     | "createHubRule"
     | "updateHubRule"
     | "deleteHubRule"
+    | "reorderHubRules"
     | "listHubJobs"
     | "getHubJobLog"
     | "retryHubNode"
@@ -77,6 +78,7 @@ export interface RouteMatch {
     | "createWorker"
     | "updateWorker"
     | "deleteWorker"
+    | "reorderWorkers"
     | "testWorker"
     | "workersStatus"
     | "index";
@@ -141,8 +143,10 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "listWorkers", methods: ["GET"], pattern: /^\/api\/hub\/workers$/ },
   { name: "createWorker", methods: ["POST"], pattern: /^\/api\/hub\/workers$/, needsBody: true },
   { name: "updateWorker", methods: ["PATCH"], pattern: /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)$/, param: "slug", needsBody: true },
+  { name: "reorderWorkers", methods: ["POST"], pattern: /^\/api\/hub\/workers\/reorder$/, needsBody: true },
   { name: "deleteWorker", methods: ["DELETE"], pattern: /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)$/, param: "slug" },
   { name: "listHubRules", methods: ["GET"], pattern: /^\/api\/hub\/rules$/ },
+  { name: "reorderHubRules", methods: ["POST"], pattern: /^\/api\/hub\/rules\/reorder$/, needsBody: true },
   { name: "createHubRule", methods: ["POST"], pattern: /^\/api\/hub\/rules$/, needsBody: true },
   { name: "updateHubRule", methods: ["PATCH"], pattern: /^\/api\/hub\/rules\/([A-Za-z0-9_.-]+)$/, param: "slug", needsBody: true },
   { name: "deleteHubRule", methods: ["DELETE"], pattern: /^\/api\/hub\/rules\/([A-Za-z0-9_.-]+)$/, param: "slug" },
@@ -365,6 +369,10 @@ async function dispatch(
       const body = (await readJson(req)) as Parameters<Api["createHubRule"]>[0];
       return api.createHubRule(body ?? {});
     }
+    case "reorderHubRules": {
+      const body = (await readJson(req)) as Parameters<Api["reorderHubRules"]>[0];
+      return api.reorderHubRules(body ?? {});
+    }
     case "updateHubRule": {
       const body = (await readJson(req)) as Parameters<Api["updateHubRule"]>[1];
       return api.updateHubRule(match.slug!, body ?? {});
@@ -399,6 +407,10 @@ async function dispatch(
     case "updateWorker": {
       const body = (await readJson(req)) as Parameters<Api["updateWorker"]>[1];
       return api.updateWorker(match.slug!, body ?? {});
+    }
+    case "reorderWorkers": {
+      const body = (await readJson(req)) as Parameters<Api["reorderWorkers"]>[0];
+      return api.reorderWorkers(body ?? {});
     }
     case "deleteWorker":
       return api.deleteWorker(match.slug!);

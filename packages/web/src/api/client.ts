@@ -110,6 +110,8 @@ export const api = {
     request("PATCH", `/api/hub/rules/${encodeURIComponent(key)}`, input),
   deleteHubRule: (key: string): Promise<{ ok: boolean; key: string }> =>
     request("DELETE", `/api/hub/rules/${encodeURIComponent(key)}`),
+  /** 拖拽排序持久化:keys = 完整送序。 */
+  reorderHubRules: (keys: string[]): Promise<HubRuleDTO[]> => request("POST", "/api/hub/rules/reorder", { keys }),
 
   // ── hub 任务(运行态:step/进度/ETA/日志)──────────────────────────────────────
   // room 给定=只列该房间的历次 run(独立历史页);省略=全房间最近 N(规则行取最近一条)。
@@ -140,6 +142,8 @@ export const api = {
     request("PATCH", `/api/hub/workers/${encodeURIComponent(id)}`, input),
   deleteWorker: (id: string): Promise<{ ok: boolean; id: string }> =>
     request("DELETE", `/api/hub/workers/${encodeURIComponent(id)}`),
+  /** 拖拽排序持久化:ids = 完整送序。 */
+  reorderWorkers: (ids: string[]): Promise<WorkerDTO[]> => request("POST", "/api/hub/workers/reorder", { ids }),
   testWorker: (cfg: Partial<WorkerDTO>): Promise<WorkerTestResult> => request("POST", "/api/hub/workers/test", cfg),
   /** 批量存活状态(卡片轮询):每 worker {id,ok,error?};hub 未开 → []。 */
   getWorkersStatus: (): Promise<WorkerStatus[]> => request("GET", "/api/hub/workers/status"),

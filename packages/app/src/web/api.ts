@@ -337,6 +337,8 @@ export interface Api {
   updateHubRule(key: string, input: HubRulePayload): ApiResult;
   /** DELETE /api/hub/rules/:key — 删除一条规则。 */
   deleteHubRule(key: string): ApiResult;
+  /** POST /api/hub/rules/reorder { keys } — 按给定顺序整体重排规则列表(拖拽排序持久化)。 */
+  reorderHubRules(input: { keys?: string[] }): ApiResult;
   /** GET /api/hub/jobs[?room=&limit=&offset=] — hub run 列表(状态/时间线/ETA/hasLog + total 分页)。 */
   listHubJobs(opts?: { room?: string; limit?: number; offset?: number }): ApiResult;
   /** GET /api/hub/jobs/:key/log — 该场 job.log 尾部(key=streamKey,URL-encoded)。 */
@@ -355,6 +357,8 @@ export interface Api {
   updateWorker(id: string, input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string }): ApiResult;
   /** DELETE /api/hub/workers/:id — 删除(local 保护)。 */
   deleteWorker(id: string): ApiResult;
+  /** POST /api/hub/workers/reorder { ids } — 按给定顺序整体重排 worker 列表(拖拽排序持久化)。 */
+  reorderWorkers(input: { ids?: string[] }): ApiResult;
   /** POST /api/hub/workers/test — 连接测试(hub 未启用 / 未注入 testWorker → 400;测试异常也回 200 结构化 error)。 */
   testWorker(input: { kind?: string; host?: string; dataRoot?: string; apiUrl?: string }): Promise<ApiResult>;
   /** GET /api/hub/workers/status — 并行 ping 所有已配置 worker(未注入 probeAllWorkers → [])。 */
@@ -959,6 +963,17 @@ export function makeApi(deps: ApiDeps): Api {
       deps.requestSyncTasks?.();
       return { status: 200, body: { ok: true, key, deletedHistory: history.deleted } };
     },
+    reorderHubRules(input: { keys?: string[] }): ApiResult {
+      if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可管理规则)");
+      if (!Array.isArray(input.keys)) return err(400, "keys 必填(数组)");
+      try {
+        const rules = hubStore.reorderHubRules(hubDir, input.keys);
+        deps.requestSyncTasks?.();
+        return { status: 200, body: rules.map(hubRuleView) };
+      } catch (e) {
+        return err(400, (e as Error).message);
+      }
+    },
     listHubJobs(opts: { room?: string; limit?: number; offset?: number } = {}): ApiResult {
       if (!deps.syncDbPath) return { status: 200, body: { jobs: [], total: 0 } }; // slave/hub 未开 → 空
       try {
@@ -1030,6 +1045,17 @@ export function makeApi(deps: ApiDeps): Api {
         deps.requestSyncTasks?.();
         return { status: 200, body: { ok: true, id } };
       } catch (e) { return err(400, (e as Error).message); }
+    },
+    reorderWorkers(input: { ids?: string[] }): ApiResult {
+      if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可管理 worker)");
+      if (!Array.isArray(input.ids)) return err(400, "ids 必填(数组)");
+      try {
+        const workers = workerStore.reorderWorkers(hubConfigPath, input.ids);
+        deps.requestSyncTasks?.();
+        return { status: 200, body: workers.map(workerToDto) };
+      } catch (e) {
+        return err(400, (e as Error).message);
+      }
     },
     async testWorker(input): Promise<ApiResult> {
       if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可测试 worker)");

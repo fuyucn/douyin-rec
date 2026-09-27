@@ -173,7 +173,7 @@ const DICT = {
       common: {
         edit: "编辑", delete: "删除", cancel: "取消", save: "保存", create: "创建",
         enabledState: "启用中", disabledState: "已暂停", loading: "加载中…",
-        deleteRuleConfirmTitle: "删除该 Hub 规则?", ruleDeleted: "Hub 规则已删除",
+        deleteRuleConfirmTitle: "删除该 Hub 规则?", ruleDeleted: "Hub 规则已删除", dragTip: "拖拽调整顺序",
         uploadPublicSuffix: " → 上传(公开)", uploadPrivateSuffix: " → 上传(私)", stageOnlySuffix: " → 仅合成(stage)",
       },
       page: {
@@ -385,7 +385,7 @@ const DICT = {
       common: {
         edit: "Edit", delete: "Delete", cancel: "Cancel", save: "Save", create: "Create",
         enabledState: "Enabled", disabledState: "Paused", loading: "Loading…",
-        deleteRuleConfirmTitle: "Delete this Hub rule?", ruleDeleted: "Hub rule deleted",
+        deleteRuleConfirmTitle: "Delete this Hub rule?", ruleDeleted: "Hub rule deleted", dragTip: "Drag to reorder",
         uploadPublicSuffix: " → Upload (public)", uploadPrivateSuffix: " → Upload (private)", stageOnlySuffix: " → Stage only",
       },
       page: {

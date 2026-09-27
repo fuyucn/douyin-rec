@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listHubRules, getHubRule, upsertHubRule, updateHubRule, removeHubRule, hubKey } from "./hub-store.js";
+import { listHubRules, getHubRule, upsertHubRule, updateHubRule, removeHubRule, reorderHubRules, localSuppressedSourceTaskIds, hubKey } from "./hub-store.js";
 
 // 这些测试不碰 sm-crypto;normalizeRoom + platformForRoom 经 store→core,test/setup 注册假平台。
 let dir: string;
@@ -98,5 +98,30 @@ describe("hub-store(文件版,按平台限定 key)", () => {
     // 缺省(老规则)= 无 workers 字段
     const bare = upsertHubRule(dir, { platform: "douyin", roomSlug: "999" });
     expect(bare.workers).toBeUndefined();
+  });
+
+  it("reorder:整体重排写 order;upsert/update 沿用 order;集合不匹配则拒绝", () => {
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "aaa" });
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "bbb" });
+    upsertHubRule(dir, { platform: "bilibili", roomSlug: "ccc" });
+    // 默认按 key 排序
+    expect(listHubRules(dir).map((r) => r.key)).toEqual(["bilibili.ccc", "douyin.aaa", "douyin.bbb"]);
+    reorderHubRules(dir, ["douyin.bbb", "bilibili.ccc", "douyin.aaa"]);
+    expect(listHubRules(dir).map((r) => r.key)).toEqual(["douyin.bbb", "bilibili.ccc", "douyin.aaa"]);
+    // upsert/update 保留 order
+    updateHubRule(dir, "douyin.aaa", { enabled: false });
+    expect(listHubRules(dir).map((r) => r.key)).toEqual(["douyin.bbb", "bilibili.ccc", "douyin.aaa"]);
+    // 缺 key / 重复 / 未知 key → 报错且不改盘
+    expect(() => reorderHubRules(dir, ["douyin.aaa"])).toThrow();
+    expect(() => reorderHubRules(dir, ["douyin.aaa", "douyin.bbb", "nope.zzz"])).toThrow();
+    expect(listHubRules(dir).map((r) => r.key)).toEqual(["douyin.bbb", "bilibili.ccc", "douyin.aaa"]);
+  });
+
+  it("localSuppressedSourceTaskIds:源任务被绑且 workers 不含 local → 本机抑制", () => {
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 10 }, workers: ["vps2"] });
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "222", recording: { sourceTaskId: 11 }, workers: ["local", "vps2"] });
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "333", recording: { sourceTaskId: 12 }, enabled: false, workers: ["vps2"] });
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "444", recording: { sourceTaskId: 13 } }); // workers 缺省=全部
+    expect([...localSuppressedSourceTaskIds(dir)].sort()).toEqual([10]);
   });
 });

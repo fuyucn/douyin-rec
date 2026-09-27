@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listWorkers, createWorker, updateWorker, deleteWorker } from "./worker-store.js";
+import { listWorkers, createWorker, updateWorker, deleteWorker, reorderWorkers } from "./worker-store.js";
 
 let cfg: string;
 const read = (): any => JSON.parse(readFileSync(cfg, "utf-8"));
@@ -65,5 +65,16 @@ describe("worker-store(文件版 CRUD)", () => {
     expect(j.workers.map((w: any) => w.id)).toEqual(["local", "vps2", "worker-1"]); // grandfather 值不变
     expect(j.tenants).toBeUndefined();       // 迁移后删旧键
     expect(j.workerSeq).toBe(1);
+  });
+  it("reorder:按 ids 整体重排数组(顺序 = 显示序),集合不匹配则拒绝", () => {
+    createWorker(cfg, { kind: "ssh", host: "h2", dataRoot: "/d" }); // worker-1
+    const w3 = createWorker(cfg, { kind: "ssh", host: "h3", dataRoot: "/d" }); // worker-2
+    expect(reorderWorkers(cfg, ["worker-2", "local", "worker-1"]).map((w) => w.id)).toEqual(["worker-2", "local", "worker-1"]);
+    expect(listWorkers(cfg).map((w) => w.id)[0]).toBe("worker-2");
+    // 未知 id / 缺一项 → 报错且不改盘
+    expect(() => reorderWorkers(cfg, ["local", "worker-1", "ghost"])).toThrow();
+    expect(() => reorderWorkers(cfg, ["local"])).toThrow();
+    expect(listWorkers(cfg).map((w) => w.id)[0]).toBe("worker-2");
+    expect(w3.kind).toBe("ssh"); // 安静失败不影响内容
   });
 });
