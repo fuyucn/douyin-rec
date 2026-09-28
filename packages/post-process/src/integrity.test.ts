@@ -14,9 +14,9 @@ const result = (p: Partial<MediaScanResult>): MediaScanResult => ({
 });
 
 describe("integrity — 分级判定(纯函数)", () => {
-  it("重复时间戳 = info(TS + -c copy 的常见提示,播放器能处理)", () => {
+  it("重复时间戳 = ignore(实测是扫描管线伪影:-c copy/-f rawvideo 路径均 0 条 → 完全不统计)", () => {
     const line = "Application provided invalid, non monotonically increasing dts to muxer in stream 0: 22528 >= 22528";
-    expect(classifyFfmpegLine(line)).toBe("info");
+    expect(classifyFfmpegLine(line)).toBe("ignore");
   });
 
   it("跳尾扫描的起始伪影 = info,但全片扫描时同样文案 = problem", () => {
@@ -34,7 +34,7 @@ describe("integrity — 分级判定(纯函数)", () => {
     expect(classifyFfmpegLine("Invalid data found when processing input")).toBe("problem");
   });
 
-  it("parseFfmpegIssues 分离 problem/info 并各自去重取样例", () => {
+  it("parseFfmpegIssues:problem 计数、ignore 完全不计入、各自取样例", () => {
     const stderr = [
       "[h264 @ 0xaaa] cbp too large (3199971767) at 32 16",
       "[h264 @ 0xaaa] error while decoding MB 32 16",
@@ -42,13 +42,12 @@ describe("integrity — 分级判定(纯函数)", () => {
       "[mpegts @ 0xbbb] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 2 >= 2",
     ].join("\n");
     const r = parseFfmpegIssues(stderr);
-    expect(r.errorCount).toBe(4);
+    expect(r.errorCount).toBe(2);   // dts 行不统计
     expect(r.problemCount).toBe(2);
-    expect(r.infoCount).toBe(2);
+    expect(r.infoCount).toBe(0);
+    expect(r.ignored).toBe(2);
     expect(r.samples).toEqual(["cbp too large (3199971767) at 32 16", "error while decoding MB 32 16"]);
-    // 两条 dts 提示文案不同(时间戳数字不同) → 各自留一条样例
-    expect(r.infoSamples).toHaveLength(2);
-    expect(r.infoSamples[0]).toContain("non monotonically increasing dts");
+    expect(r.infoSamples).toEqual([]);
   });
 });
 
@@ -58,19 +57,19 @@ describe("integrity — 结论行格式(CLI/hub 合同)", () => {
   });
 
   it("只有 info → 仍是 ✓,附注说明,不触发 hub 告警", () => {
-    const line = formatScanLine("末段 a.ts", result({ errorCount: 192, infoCount: 192 }));
+    const line = formatScanLine("末段 a.ts", result({ errorCount: 3, infoCount: 3 }));
     expect(line.startsWith("[integrity] ✓")).toBe(true);
-    expect(line).toContain("另有 192 条时间戳/跳尾提示");
+    expect(line).toContain("另有 3 条跳尾提示");
     expect(parseIntegrityWarnings(line)).toEqual([]);
   });
 
   it("真问题 → ⚠ + 样例 + info 计数", () => {
     const line = formatScanLine("末段 a.ts", result({
-      ok: false, errorCount: 194, problemCount: 2, infoCount: 192, samples: ["cbp too large (3199971767) at 32 16"],
+      ok: false, errorCount: 5, problemCount: 2, infoCount: 3, samples: ["cbp too large (3199971767) at 32 16"],
     }));
     expect(line).toContain("[integrity] ⚠ 末段 a.ts: 2 处解码错误");
     expect(line).toContain("示例: cbp too large");
-    expect(line).toContain("另有 192 条无画面影响的提示");
+    expect(line).toContain("另有 3 条无画面影响的提示");
     expect(parseIntegrityWarnings(line)).toHaveLength(1);
   });
 
@@ -83,7 +82,7 @@ describe("integrity — 结论行格式(CLI/hub 合同)", () => {
   it("parseIntegrityWarnings:只挑 ⚠ 行(hub 管线据此告警),✓/普通输出忽略", () => {
     const output = [
       "[merge] seg: 3 段 → out.mp4",
-      "[integrity] ✓ 段 1/3 a.ts: 解码正常(另有 5 条时间戳/跳尾提示,无画面影响)",
+      "[integrity] ✓ 末段 a.ts: 解码正常(另有 5 条跳尾提示,无画面影响)",
       "[integrity] ⚠ 末段 c.ts: 2 处解码错误(示例: cbp too large)",
       "[merge] 完成: /x/out.mp4",
     ].join("\n");

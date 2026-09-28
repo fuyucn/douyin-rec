@@ -6,13 +6,14 @@
  * 会把损坏带进成品 → 上传后末段花屏。本模块用 ffmpeg 做**只读解码扫描**，把「哪一段有多少
  * 真问题」暴露出来，供 merge 命令打印、hub 管线告警。
  *
- * 分级(关键):`ffmpeg -v error` 的行不都是画面损坏，必须分两类，否则天天误报：
+ * 分级(关键):`ffmpeg -v error` 的行不都是画面损坏，必须分类，否则天天误报：
  *   - **problem**(告警):真正的解码/码流损坏 —— `cbp too large`、`error while decoding MB`、
  *     `Invalid data found`、缺参考帧(全片扫描时) 等。
- *   - **info**(不告警):`non monotonically increasing dts`(TS 里 B 帧拷贝的重复时间戳，播放器能处理);
- *     以及**跳尾扫描**时必然出现的 seek 起始伪影(`co located POCs unavailable` /
- *     `mmco: unref short failure`)——TS 无索引，`-sseof` 会落在非关键帧上，解码器缺前置参考帧就会报，
- *     与文件好坏无关(已用完好 TS 对照验证)。
+ *   - **info**(不告警):跳尾扫描时必然出现的 seek 起始伪影(`co located POCs unavailable` /
+ *     `mmco: unref short failure` / `Missing reference picture`)——TS 无索引，`-sseof` 会落在非关键帧上，
+ *     解码器缺前置参考帧就会报，与文件好坏无关(已用完好 TS 对照验证)。
+ *   - **ignore**(完全不统计):`non monotonically increasing dts` —— 实测是「解码→再喂 muxer」这条
+ *     扫描管线自己制造的伪影(同一文件 `-c copy` 路径 0 条、`-f rawvideo` 路径 0 条)，不是文件属性。
  */
 import { spawn } from "node:child_process";
 
@@ -28,22 +29,26 @@ export interface MediaScanResult {
   ok: boolean;
   /** ffmpeg 执行/被杀等导致扫描不可信。 */
   failed?: boolean;
-  /** ffmpeg -v error 的原始行数(含 info 类)。 */
+/** 计入统计的行数(= problemCount + infoCount;被 ignore 的完全不统计)。 */
   errorCount: number;
   /** 需要告警的真问题条数。 */
   problemCount: number;
-  /** 已知无画面影响的提示条数(重复时间戳 / 跳尾伪影)。 */
+  /** 已知无画面影响的提示条数(跳尾伪影)。 */
   infoCount: number;
   /** 真问题样例(≤5 条,去重)。 */
   samples: string[];
   /** info 样例(≤5 条,去重)。 */
   infoSamples: string[];
+  /** 被 ignore 的行数(不进 errorCount/判定),只做透明记录。 */
+  ignored?: number;
 }
 
 export interface ParsedIssues {
   errorCount: number;
   problemCount: number;
   infoCount: number;
+  /** 被 ignore 的行数(如扫描管线产生的重复时间戳),不参与任何判定。 */
+  ignored: number;
   samples: string[];
   infoSamples: string[];
 }
@@ -54,12 +59,12 @@ function stripPrefix(line: string): string {
 }
 
 /**
- * 判定一行属于 problem 还是 info。
+ * 判定一行属于 problem / info / ignore。
  * `seekTail=true` 时把 seek 起始伪影也算 info —— 只有「跳到文件尾部」的扫描才有这个前提。
  */
-export function classifyFfmpegLine(msg: string, opts: { seekTail?: boolean } = {}): "problem" | "info" {
-  // 重复时间戳:TS/`-c copy` 录制的常见现象,muxer 提示级别,播放器能处理。
-  if (/non monotonically increasing dts/i.test(msg)) return "info";
+export function classifyFfmpegLine(msg: string, opts: { seekTail?: boolean } = {}): "problem" | "info" | "ignore" {
+  // 重复时间戳:实测为扫描管线(解码→null muxer)伪影,`-c copy`/`-f rawvideo` 路径均 0 条 → 不统计。
+  if (/non monotonically increasing dts/i.test(msg)) return "ignore";
   // 跳尾扫描的起始伪影:解码从非关键帧开始,缺前置参考帧(与文件好坏无关,已验证)。
   if (
     opts.seekTail &&
@@ -81,10 +86,16 @@ export function parseFfmpegIssues(
   const infoSamples: string[] = [];
   let problemCount = 0;
   let infoCount = 0;
+  let ignored = 0;
   for (const line of lines) {
     const msg = stripPrefix(line);
     if (!msg) continue;
-    if (classifyFfmpegLine(msg, opts) === "info") {
+    const level = classifyFfmpegLine(msg, opts);
+    if (level === "ignore") {
+      ignored++;
+      continue;
+    }
+    if (level === "info") {
       infoCount++;
       if (!infoSamples.includes(msg) && infoSamples.length < maxSamples) infoSamples.push(msg);
     } else {
@@ -92,7 +103,7 @@ export function parseFfmpegIssues(
       if (!samples.includes(msg) && samples.length < maxSamples) samples.push(msg);
     }
   }
-  return { errorCount: lines.length, problemCount, infoCount, samples, infoSamples };
+  return { errorCount: problemCount + infoCount, problemCount, infoCount, samples, infoSamples, ignored };
 }
 
 /** 兼容旧调用:只取原始行数 + 全部去重样例(不分类)。 */
@@ -114,7 +125,7 @@ export function formatScanLine(label: string, res: MediaScanResult): string {
     const extra = res.infoCount > 0 ? `,另有 ${res.infoCount} 条无画面影响的提示` : "";
     return `${WARN_MARK} ${label}: ${res.problemCount} 处解码错误${sample}${extra}`;
   }
-  const note = res.infoCount > 0 ? `(另有 ${res.infoCount} 条时间戳/跳尾提示,无画面影响)` : "";
+  const note = res.infoCount > 0 ? `(另有 ${res.infoCount} 条跳尾提示,无画面影响)` : "";
   return `${OK_MARK} ${label}: 解码正常${note}`;
 }
 

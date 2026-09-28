@@ -371,16 +371,17 @@ function dateNameOf(base: string): string {
 }
 
 /**
- * 合并前分段体检（只读解码扫描，不改码流；见 @drec/post-process integrity）：
- * 末段整段扫（主播硬切断流的残帧都在末段），其余段只扫尾 90s（廉价覆盖段边界）。
+ * 合并前体检（只读解码扫描，不改码流；见 @drec/post-process integrity）：
+ * **只整段扫末段** —— 主播硬切断流/进程被强杀的残帧都集中在末段，也是唯一会导致明显花屏的位置。
+ * 曾经用 `-sseof` 扫其余段的尾部，但 TS 无索引、跳过去必落在非关键帧，会刷出
+ * `co located POCs unavailable` / `Missing reference picture` 之类的伪影（实测成品全片 0 条），故废弃。
  */
 async function scanSegmentsIntegrity(tsFiles: string[]): Promise<void> {
   const { scanMediaErrors, formatScanLine } = await import("@drec/post-process");
-  for (let i = 0; i < tsFiles.length; i++) {
-    const last = i === tsFiles.length - 1;
-    const res = await scanMediaErrors(tsFiles[i], last ? {} : { lastSeconds: 90 });
-    console.log(formatScanLine(`${last ? "末段" : `段 ${i + 1}/${tsFiles.length}`} ${basename(tsFiles[i])}`, res));
-  }
+  const last = tsFiles[tsFiles.length - 1];
+  if (!last) return;
+  const res = await scanMediaErrors(last);
+  console.log(formatScanLine(`末段 ${basename(last)}`, res));
 }
 
 /**

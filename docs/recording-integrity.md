@@ -26,20 +26,29 @@
 
 ### 1. 合并前后体检（`packages/post-process/src/integrity.ts`）
 
-- 合并前：逐段只读解码扫描（末段**整段**扫，其余段跳尾 90s 覆盖段边界）。
-- 合并后：扫成品最后 60s。
-- hub 管线解析 `[integrity] ⚠` 行 → 写 merge 步骤详情（UI 时间线）+ 发通知，上传前即有信号。
+- 合并前：**只整段扫末段**（残帧集中在末段，也是唯一造成明显花屏的位置）。
+  早期版本还用 `-sseof` 扫其余段尾部，但 TS 无索引、跳过去必落在非关键帧，会刷出
+  `co located POCs unavailable` / `Missing reference picture` 之类的伪影（成品全片 0 条），已废弃。
+- 合并后：扫成品最后 60s（MP4 有索引，seek 落在关键帧，无此类伪影）。
+- hub 管线按行前缀分级处理：`⚠` 只写进 merge 步骤详情（UI 时间线可见，不打扰），
+  `❗` 才发通知 —— 仅当成品尾部 60s 的真问题 ≥ 2 处（`TAIL_ALERT_MIN_PROBLEMS`）。
 
 ### 2. 告警分级（避免误报）
 
-`ffmpeg -v error` 的行不都是画面损坏，必须分两类：
+`ffmpeg -v error` 的行不都是画面损坏，必须分类：
 
 | 类别 | 内容 | 是否告警 |
 | --- | --- | --- |
 | problem | `cbp too large`、`error while decoding MB`、`max resync size reached`、`Invalid data`、全片扫描下的缺参考帧 | ⚠ 告警 |
-| info | `non monotonically increasing dts`（TS+`-c copy` 的重复时间戳）；**跳尾扫描**时的 `co located POCs unavailable` / `mmco: unref short failure` | 不告警，仅附注 |
+| info | **跳尾扫描**时的 `co located POCs unavailable` / `mmco: unref short failure` / `Missing reference picture` | 不告警，仅附注 |
+| ignore | `non monotonically increasing dts` | **完全不统计** |
 
-跳尾伪影已用**完好 TS 对照验证**：全片扫 0 错，`-sseof -90` 立刻复现上述两条 —— TS 无索引，跳过去落在非关键帧，解码器缺前置参考帧就会报，与文件好坏无关。
+两类噪音都做过对照实验：
+
+- **跳尾伪影**：完好 TS 全片扫 0 错，`-sseof -90` 立刻复现上述消息；SO 上「seek/设置帧位置」场景同样复现（[56688672](https://stackoverflow.com/questions/56688672/)）。
+- **重复时间戳**：同一文件 `-f null -`（解码→null muxer）报 199 条，而 `-c copy -f null -` 与 `-f rawvideo` **均 0 条** —— 是扫描管线自身产生的伪影，与文件无关（源码见 [mux.c](https://github.com/FFmpeg/FFmpeg/blob/n5.1/libavformat/mux.c#L544)）。
+
+另外 `error while decoding MB …` 在源码里走 `er_add_slice(..., ER_MB_ERROR)`（[h264_slice.c](https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/h264_slice.c#L2762)）：解码器用容错机制补帧后继续，孤立 1 处肉眼不可见，故成品阈值设为 ≥2。
 
 ### 3. 录制器优雅收尾（`packages/record-engine/src/index.ts`）
 
