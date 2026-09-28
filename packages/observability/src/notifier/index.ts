@@ -59,6 +59,7 @@ export function formatMessage(e: NotifyEvent): string {
     case "burnDone":    return `🔥 烧录完成（${e.style}）：${e.file}`;
     case "uploadDone":  return `⬆️ 上传完成：${e.bv} ${e.url}`;
     case "hubTaskStart": return `📋 Hub 任务开始：${e.room}（${e.workers.length} 个节点：${e.workers.join(", ")}）· ${e.mode === "upload" ? "上传" : "仅合成"}`;
+    case "stageReady":   return `📦 合成完成待人工上传：${e.streamKey}`;
     case "error":       return `⚠️ 出错（${e.stage}）：${e.message}`;
   }
 }

@@ -13,7 +13,10 @@ export {
   parseFfmpegIssues,
   classifyFfmpegLine,
   formatScanLine,
+  formatOutputVerdict,
   parseIntegrityWarnings,
+  parseIntegrityAlerts,
+  TAIL_ALERT_MIN_PROBLEMS,
   type MediaScanResult,
   type ParsedIssues,
 } from "./integrity.js";

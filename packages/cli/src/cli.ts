@@ -388,9 +388,11 @@ async function scanSegmentsIntegrity(tsFiles: string[]): Promise<void> {
  * 两个体检都打印 `[integrity] ✓/⚠` 行,⚠ 表示可能花屏 —— hub 管线会解析并告警,由人决定删稿重录。
  */
 async function scanOutputTailIntegrity(outMp4: string): Promise<void> {
-  const { scanMediaErrors, formatScanLine } = await import("@drec/post-process");
+  const { scanMediaErrors, formatScanLine, formatOutputVerdict } = await import("@drec/post-process");
   const res = await scanMediaErrors(outMp4, { lastSeconds: 60 });
   console.log(formatScanLine("成品尾部 60s", res));
+  const verdict = formatOutputVerdict(res);
+  if (verdict) console.log(verdict);
 }
 
 // ffprobe 视频实际宽高 → 传给 ASS 渲染器,让 PlayRes 与视频一致(竖屏 1088x1920 不再被

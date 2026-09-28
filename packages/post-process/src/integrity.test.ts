@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   classifyFfmpegLine,
   formatScanLine,
+  formatOutputVerdict,
   parseFfmpegIssues,
+  parseIntegrityAlerts,
   parseIntegrityWarnings,
   type MediaScanResult,
 } from "./integrity.js";
@@ -19,7 +21,8 @@ describe("integrity — 分级判定(纯函数)", () => {
 
   it("跳尾扫描的起始伪影 = info,但全片扫描时同样文案 = problem", () => {
     // 已用完好 TS 对照验证:-sseof 落到非关键帧必然报这两条,与文件好坏无关。
-    for (const msg of ["co located POCs unavailable", "mmco: unref short failure"]) {
+    // Missing reference picture 是同一家族(2026-09-28 实测:段 1~4 各 2~3 条,而成品全片扫 0 条)。
+    for (const msg of ["co located POCs unavailable", "mmco: unref short failure", "Missing reference picture, default is 0"]) {
       expect(classifyFfmpegLine(msg, { seekTail: true })).toBe("info");
       expect(classifyFfmpegLine(msg, { seekTail: false })).toBe("problem");
     }
@@ -85,5 +88,15 @@ describe("integrity — 结论行格式(CLI/hub 合同)", () => {
       "[merge] 完成: /x/out.mp4",
     ].join("\n");
     expect(parseIntegrityWarnings(output)).toEqual(["[integrity] ⚠ 末段 c.ts: 2 处解码错误(示例: cbp too large)"]);
+  });
+
+  it("成品结论分级:0 处不打印、1 处只提示(ℹ)、≥2 处才 ❗ 告警", () => {
+    expect(formatOutputVerdict(result({}))).toBe("");
+    const one = formatOutputVerdict(result({ ok: false, problemCount: 1, errorCount: 1, samples: ["error while decoding MB 8 23"] }));
+    expect(one.startsWith("[integrity] ℹ")).toBe(true);
+    expect(parseIntegrityAlerts(one)).toEqual([]);
+    const two = formatOutputVerdict(result({ ok: false, problemCount: 2, errorCount: 2, samples: ["cbp too large"] }));
+    expect(two.startsWith("[integrity] ❗")).toBe(true);
+    expect(parseIntegrityAlerts([one, two].join("\n"))).toHaveLength(1);
   });
 });

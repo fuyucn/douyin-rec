@@ -315,11 +315,8 @@ async function runPipelineInner(
     jlog(`stage 模式:合成完毕待人工上传`);
     ledger.setState(streamKey, "needs_manual");
     await cleanupSources();
-    notify({
-      kind: "error",
-      stage: "同步",
-      message: `已合成完整版,待人工上传(stage)。覆盖度：${JSON.stringify(selection.perNode)}`,
-    });
+    // 正常终点(不是错误):走 stageReady,别再以「出错（同步）」打扰用户。
+    notify({ kind: "stageReady", streamKey });
     return { state: "needs_manual" };
   }
 

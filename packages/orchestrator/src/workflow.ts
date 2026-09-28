@@ -149,10 +149,11 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
           ? `node dist/douyin-rec.mjs merge --in ${stageSub} --merge-sessions --out-base ${outBase}`
           : `node dist/douyin-rec.mjs merge --in ${stageSub} --base ${c.products.sessionBase} --out-base ${outBase}`;
         const out = await c.sh(cmd);
-        // 录制产物体检告警(CLI merge 打印 `[integrity] ⚠ …`):末段残帧会被 -c copy 带进成品,
-        // 上传后表现为末段花屏。这里落进 step detail(UI 时间线可见)+ 发一条告警,上传前就有信号。
-        const { parseIntegrityWarnings } = await import("@drec/post-process");
+        // 录制产物体检:⚠ 是诊断明细(段级提示,只进 step detail),❗ 才是「成品确实有可见风险」,
+        // 由 CLI 按成品尾部错误数判定阈值后打印 —— 只有 ❗ 才发通知,避免孤立坏块天天刷告警。
+        const { parseIntegrityWarnings, parseIntegrityAlerts } = await import("@drec/post-process");
         const integrityWarns = parseIntegrityWarnings(out);
+        const integrityAlerts = parseIntegrityAlerts(out);
         c.set("plain.mp4", products.plain);
         // 单会话才补拷源 xml 为 plain.xml;多会话的合并 xml 由 --merge-sessions 直接产出,不能覆盖。
         if (!multi && products.plainXml && products.xmlArg && products.xmlArg !== products.plainXml) {
@@ -164,14 +165,16 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         if (products.plainXml && existsSync(products.plainXml)) c.set("plain.xml", products.plainXml);
         const bytes = fileBytes(products.plain);
         const detail = bytes > 0 ? `${mergeSegments} 段 → ${humanBytes(bytes)}` : "";
-        if (integrityWarns.length > 0) {
-          const warn = integrityWarns.join(" · ");
-          c.stepDetail("merge", `${detail}${detail ? " " : ""}⚠ 体检异常`);
+        if (integrityAlerts.length > 0) {
+          c.stepDetail("merge", `${detail}${detail ? " " : ""}❗ 体检告警`);
           c.deps.notify({
             kind: "error",
             stage: "合并",
-            message: `${streamKey} 录制产物体检异常,成品可能末段花屏:${warn}`,
+            message: `${streamKey} 录制产物体检告警:${integrityAlerts.join(" · ")}`,
           });
+        } else if (integrityWarns.length > 0) {
+          // 段级提示(多为跳尾扫描伪影/孤立坏块):只在 UI 详情可见,不打扰用户。
+          c.stepDetail("merge", `${detail}${detail ? " " : ""}⚠ 体检提示 ${integrityWarns.length} 条(未达告警阈值)`);
         } else if (detail) {
           c.stepDetail("merge", detail);
         }

@@ -9,6 +9,10 @@ describe("notifier", () => {
     expect(formatMessage({ kind: "uploadDone", bv: "BV1x", url: "https://b/BV1x" })).toContain("BV1x");
     expect(formatMessage({ kind: "error", stage: "burn", message: "boom" })).toContain("boom");
     expect(formatMessage({ kind: "burnDone", style: "danmu", file: "/o/x_danmu.mp4" })).toContain("danmu");
+    // stage 正常终点:不再是「出错」文案
+    const stageMsg = formatMessage({ kind: "stageReady", streamKey: "douyin:1:2026-09-28" });
+    expect(stageMsg).toContain("待人工上传");
+    expect(stageMsg).not.toContain("出错");
   });
   it("makeNotifier：无 webhook → NullNotifier（no-op 不抛）", async () => {
     const n = makeNotifier(undefined);

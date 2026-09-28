@@ -19,6 +19,8 @@ import { spawn } from "node:child_process";
 const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 /** 体检告警行前缀:CLI 打印、hub 管线按此识别(唯一真理,避免两边各写一份字符串)。 */
 const WARN_MARK = "[integrity] ⚠";
+/** 需要打扰用户的行前缀(成品确实有可见风险时才有);⚠ 只进日志/详情,这一档才发通知。 */
+const ALERT_MARK = "[integrity] ❗";
 const OK_MARK = "[integrity] ✓";
 
 export interface MediaScanResult {
@@ -59,7 +61,10 @@ export function classifyFfmpegLine(msg: string, opts: { seekTail?: boolean } = {
   // 重复时间戳:TS/`-c copy` 录制的常见现象,muxer 提示级别,播放器能处理。
   if (/non monotonically increasing dts/i.test(msg)) return "info";
   // 跳尾扫描的起始伪影:解码从非关键帧开始,缺前置参考帧(与文件好坏无关,已验证)。
-  if (opts.seekTail && /co located POCs unavailable|mmco: unref short failure|reference picture missing/i.test(msg)) {
+  if (
+    opts.seekTail &&
+    /co located POCs unavailable|mmco: unref short failure|reference picture missing|Missing reference picture/i.test(msg)
+  ) {
     return "info";
   }
   return "problem";
@@ -119,6 +124,29 @@ export function parseIntegrityWarnings(output: string): string[] {
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.startsWith(WARN_MARK));
+}
+
+/** 从 merge 命令输出挑出「需要通知用户」的行(成品尾部确有可见风险)。 */
+export function parseIntegrityAlerts(output: string): string[] {
+  return output
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith(ALERT_MARK));
+}
+
+/** 成品尾部解码错误达到这个数才值得打扰用户:1 处孤立坏块在 2h+ 录像里肉眼不可见。 */
+export const TAIL_ALERT_MIN_PROBLEMS = 2;
+
+/** 合并后成品的体检结论行:达到阈值 → ❗(hub 会通知);低于阈值 → ℹ 明细。 */
+export function formatOutputVerdict(res: MediaScanResult, minProblems = TAIL_ALERT_MIN_PROBLEMS): string {
+  if (res.failed) return `${ALERT_MARK} 成品体检无法完成(${res.samples[0] ?? "扫描失败"})`;
+  if (res.problemCount >= minProblems) {
+    return `${ALERT_MARK} 成品尾部 60s 有 ${res.problemCount} 处解码错误(示例: ${res.samples[0] ?? "-"}),可能花屏`;
+  }
+  if (res.problemCount > 0) {
+    return `[integrity] ℹ 成品尾部 60s 仅 ${res.problemCount} 处孤立解码错误(<${minProblems}),按无可见影响处理`;
+  }
+  return "";
 }
 
 /**

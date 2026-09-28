@@ -11,6 +11,8 @@ export type NotifyEvent =
   | { kind: "uploadDone"; bv: string; url: string }
   // hub 编排开始处理一场直播(新建 job、pipeline 启动)。同一场只发一次。
   | { kind: "hubTaskStart"; streamKey: string; room: string; workers: string[]; mode: "stage" | "upload" }
+  // stage 模式:合成完毕、等人工上传(正常终点,不是错误)。同一场只发一次。
+  | { kind: "stageReady"; streamKey: string }
   | { kind: "error"; stage: string; message: string };
 
 export interface Notifier { notify(e: NotifyEvent): Promise<void>; }
@@ -32,6 +34,7 @@ export function notifKeyOf(e: NotifyEvent): NotifKey {
     case "mergeDone":
     case "burnDone":
     case "uploadDone":
+    case "stageReady":
       return "merge";
     case "hubTaskStart":
       return "hub";
