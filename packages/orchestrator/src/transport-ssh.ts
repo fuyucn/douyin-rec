@@ -21,6 +21,19 @@ export interface SshOpts {
 // BatchMode 杜绝 auth 提示挂起。defaultRun 另加硬超时(到点 SIGKILL),双保险防 hung ssh 锁死 reconciler。
 const SSH_KEEPALIVE = ["-o", "BatchMode=yes", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"];
 
+/** rsync 静默看门狗:活跃传输有进度输出,连续这么久无任何输出 → 判定半挂死并强杀。
+ *  (rsync 自身没有本地超时;不设的话坏连接会一直占着 pipeline 的 stream lock。) */
+export const RSYNC_IDLE_TIMEOUT_MS = 300_000;
+
+/** rsync 参数(纯函数,便于单测):免交互 ssh + 进度输出(给静默看门狗当心跳)。 */
+export function buildRsyncArgs(host: string, remote: string, localDir: string): string[] {
+  return [
+    "-az", "--info=progress2",
+    "-e", `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3`,
+    `${host}:${remote}`, localDir,
+  ];
+}
+
 function defaultRun(host: string, timeoutMs = 45_000) {
   return (argv: string[]): Promise<string> => new Promise((resolve, reject) => {
     const p = spawn("ssh", ["-o", "ConnectTimeout=10", ...SSH_KEEPALIVE, host, "--", ...argv]);
@@ -48,15 +61,30 @@ export class SshTransport implements Transport {
     this.id = o.id;
     this.run = o.run ?? defaultRun(o.host);
     this.rsync = o.rsync ?? ((remote, localDir) => new Promise((res, rej) => {
-      // 心跳同 ssh:大文件传输慢但死连接 ~15s 即断,不无限挂。
-      const p = spawn("rsync", ["-az", "-e",
-        "ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=5 -o ServerAliveCountMax=3",
-        `${o.host}:${remote}`, localDir]);
+      // 免交互(BatchMode)+ ConnectTimeout,避免 auth 提示/连不上时挂死;进度输出作为心跳。
+      const p = spawn("rsync", buildRsyncArgs(o.host, remote, localDir));
       registerChild(p);
-      p.on("close", (c) => {
+      let settled = false;
+      let killed = false;
+      let idleTimer: ReturnType<typeof setTimeout>;
+      const bump = (): void => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          killed = true;
+          try { p.kill("SIGKILL"); } catch { /* already gone */ }
+        }, RSYNC_IDLE_TIMEOUT_MS);
+        idleTimer.unref?.();
+      };
+      const finish = (fn: () => void): void => { if (settled) return; settled = true; clearTimeout(idleTimer); fn(); };
+      bump();
+      p.stdout?.on("data", bump);
+      p.stderr?.on("data", bump);
+      p.on("close", (c) => finish(() => {
+        if (killed) { rej(new Error(`rsync 静默 ${Math.round(RSYNC_IDLE_TIMEOUT_MS / 1000)}s 无输出,已中止: ${o.host}:${remote}`)); return; }
         try { throwIfAborted(); } catch (e) { rej(e); return; }
         c === 0 ? res() : rej(new Error(`rsync rc=${c}`));
-      }); p.on("error", rej);
+      }));
+      p.on("error", (e) => finish(() => rej(e)));
     }));
   }
   async listInventory(): Promise<NodeInventory> {

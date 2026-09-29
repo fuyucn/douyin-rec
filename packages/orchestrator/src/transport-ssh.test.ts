@@ -3,9 +3,20 @@ import { describe, it, expect, afterEach } from "vitest";
 import { existsSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SshTransport } from "./transport-ssh.js";
+import { SshTransport, buildRsyncArgs } from "./transport-ssh.js";
 
 describe("SshTransport", () => {
+  it("buildRsyncArgs:免交互 + 连接超时 + 心跳参数(防 auth 挂起/死连接占锁)", () => {
+    const args = buildRsyncArgs("vps", "/data/rec/a.ts", "/stage/x");
+    const sshOpts = args[args.indexOf("-e") + 1];
+    expect(sshOpts).toContain("BatchMode=yes");
+    expect(sshOpts).toContain("ConnectTimeout=10");
+    expect(sshOpts).toContain("ServerAliveInterval=5");
+    expect(args).toContain("--info=progress2");            // 进度输出 = 静默看门狗的心跳
+    expect(args).toContain("vps:/data/rec/a.ts");
+    expect(args).toContain("/stage/x");
+  });
+
   it("listInventory 解析远端 JSON 输出", async () => {
     const fakeJson = JSON.stringify({ recordings: [
       { roomSlug: "411", sessionBase: "z_2026-06-27_07-54", tsFiles: ["a_000.ts"], xmlPath: "z.xml",

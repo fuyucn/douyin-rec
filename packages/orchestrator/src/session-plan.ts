@@ -14,9 +14,12 @@ export interface StageProducts {
   xmlArg: string;
 }
 
-/** `主播名_2026-08-10_23-08-10(-PART01).ts` → `主播名_2026-08-10_23-08-10`。 */
+/**
+ * `主播名_2026-08-10_23-08-10` 的会话文件 → 会话 base。识别三种分段后缀:
+ * `-PART01`(biliLive)、`_PART001`(biliLive 下划线)、`_000`(本项目录制器/DLR/ffmpeg 的裸段号)。
+ */
 export function sessionBaseOfFile(name: string): string | undefined {
-  const m = /^(.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:-PART\d+)?\.(?:ts|flv|xml|mp4)$/i.exec(name);
+  const m = /^(.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:-PART\d+|_PART\d+|_\d{3,})?\.(?:ts|flv|xml|mp4)$/i.exec(name);
   return m?.[1];
 }
 

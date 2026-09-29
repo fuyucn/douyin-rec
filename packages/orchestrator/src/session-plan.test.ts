@@ -13,6 +13,20 @@ describe("sessionBaseOfFile", () => {
     expect(sessionBaseOfFile(`${base}.mp4`)).toBe(base);
     expect(sessionBaseOfFile(`${base}-PART01.ts`)).toBe(base);
     expect(sessionBaseOfFile(`${base}-PART12.flv`)).toBe(base);
+    // 本项目录制器的裸段号(_000)与 biliLive 下划线段号(_PART001)
+    expect(sessionBaseOfFile(`${base}_000.ts`)).toBe(base);
+    expect(sessionBaseOfFile(`${base}_017.flv`)).toBe(base);
+    expect(sessionBaseOfFile(`${base}_PART001.ts`)).toBe(base);
+  });
+
+  it("merge 未产出 mp4 时,能从 _NNN.ts 源段反推 stage 产物(续跑/立即执行)", () => {
+    const stage = mkdtempSync(join(tmpdir(), "session-plan-"));
+    const base = "主播A_2026-08-14_23-08-10";
+    writeFileSync(join(stage, `${base}_000.ts`), "x");
+    writeFileSync(join(stage, `${base}_001.ts`), "x");
+    const prod = deriveStageProducts(stage);
+    expect(prod?.sessionBase).toBe(base);
+    expect(prod?.dateName).toBe("主播A_2026-08-14");
   });
 
   it("非会话命名返回 undefined", () => {

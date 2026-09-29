@@ -1,6 +1,6 @@
 // packages/orchestrator/src/scan.ts
 // 共享录像扫描函数：被 LocalTransport 和 _inventory CLI 子命令复用。
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { groupSessions } from "@drec/post-process";
 import type { NodeRecording } from "./transport.js";
@@ -68,6 +68,9 @@ export async function scanRecordings(
         endMs = Math.max(endMs, p.endMs);
       }
       const sess = readSession(dir, base);
+      // 弹幕源 .xml 是**可选**产物:缺失(异常中断/历史录像)时不能把不存在的路径交给 pull
+      // (本地 copyFileSync 会 ENOENT、rsync 会 rc≠0,整场后处理直接失败)。
+      const xmlAbs = join(dir, `${base}.xml`);
       recordings.push({
         // slug = 房间号(web_rid)唯一 ID。优先级:session.json/旧 sidecar(随录像走、跨节点一致)
         // > taskRooms[主播名] > 目录名(后两者不可靠回退)。
@@ -76,7 +79,7 @@ export async function scanRecordings(
         platform: sess.platform ?? "douyin",
         sessionBase: base,
         tsFiles: g.ts.map((f) => join(dir, f)),
-        xmlPath: join(dir, `${base}.xml`),
+        xmlPath: existsSync(xmlAbs) ? xmlAbs : undefined,
         durationSec,
         startMs: startMs === Infinity ? 0 : startMs,
         endMs,

@@ -43,6 +43,19 @@ describe("scanRecordings", () => {
     expect(recordings[0].roomSlug).toBe("主播A"); // directory name as fallback
   });
 
+  it("弹幕源 .xml 是可选的:不存在时不挂 xmlPath(避免 pull 一个不存在文件而整场失败)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00_000.ts"), "x");
+
+    const without = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1, endMs: 2 }));
+    expect(without[0].xmlPath).toBeUndefined();
+
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00.xml"), "<i/>");
+    const withXml = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1, endMs: 2 }));
+    expect(withXml[0].xmlPath).toBe(join(dir, "主播A_2026-06-27_08-00.xml"));
+  });
+
   it("recordings 目录不存在时返回空数组（不抛异常）", async () => {
     const recordings = await scanRecordings(
       "/does/not/exist",
