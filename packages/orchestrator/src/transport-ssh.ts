@@ -68,6 +68,7 @@ export class SshTransport implements Transport {
       let killed = false;
       let idleTimer: ReturnType<typeof setTimeout>;
       const bump = (): void => {
+        if (settled) return; // 进程已收尾:迟到的 data 事件不得再武装看门狗(否则泄漏 timer/误标 killed)
         clearTimeout(idleTimer);
         idleTimer = setTimeout(() => {
           killed = true;
