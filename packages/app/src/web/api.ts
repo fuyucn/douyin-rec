@@ -418,12 +418,17 @@ export function makeApi(deps: ApiDeps): Api {
   });
 
   // workers 校验:present(payload 含该键)时必须是非空 string[](元素为 worker id 字符串);
-  // 缺省(不含键)允许(= 全部 worker,兼容老规则)。返回错误消息(null=通过)。
+  // 缺省(不含键)允许(= 全部 worker,兼容老规则)。**每个 id 必须真实存在** ——
+  // 幽灵 id 会让 localSuppressedSourceTaskIds 误停本机、远端又收不到任务(静默漏录)。
+  // 返回错误消息(null=通过)。
   const validateWorkers = (input: HubRulePayload): string | null => {
     if (!("workers" in input) || input.workers === undefined) return null;
     const w = input.workers;
     if (!Array.isArray(w) || w.length === 0) return "workers 必须是非空 worker id 列表";
     if (!w.every((x) => typeof x === "string" && x.trim().length > 0)) return "workers 每项必须是非空字符串(worker id)";
+    const known = new Set(workerStore.listWorkers(hubConfigPath).map((x) => x.id));
+    const missing = w.map((x) => String(x).trim()).filter((x) => !known.has(x));
+    if (missing.length > 0) return `workers 含未配置的 worker id: ${[...new Set(missing)].join(", ")}`;
     return null;
   };
   const validatePipeline = (input: HubRulePayload): string | null => {
@@ -1039,6 +1044,11 @@ export function makeApi(deps: ApiDeps): Api {
     },
     deleteWorker(id): ApiResult {
       if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可管理 worker)");
+      // 被 hub 规则引用的 worker 不能删:删除后规则里留下幽灵 id,本机被抑制、远端又收不到任务 → 静默漏录。
+      const refs = hubStore.listHubRules(hubDir).filter((r) => (r.workers ?? []).includes(id));
+      if (refs.length > 0) {
+        return err(409, `worker ${id} 仍被 ${refs.length} 条 hub 规则引用(${refs.slice(0, 3).map((r) => r.key).join(", ")}${refs.length > 3 ? " …" : ""}),请先改规则再删`);
+      }
       try {
         const ok = workerStore.deleteWorker(hubConfigPath, id);
         if (!ok) return err(404, `未找到 worker id=${id}`);

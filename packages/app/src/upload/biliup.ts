@@ -1,8 +1,11 @@
 // ts/src/core/upload/biliup.ts
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { registerChild, throwIfAborted } from "@drec/core";
+import { registerChild, throwIfAborted, type UploadLine, type UploadOpts } from "@drec/core";
 import { rootBiliupCookies } from "../paths.js";
+
+// 契约在 core(orchestrator 也要用,不能让 L4.5 反向依赖 L4);这里 re-export 保持既有调用点不变。
+export type { UploadLine, UploadOpts } from "@drec/core";
 
 /** biliup cookies.json:BILIUP_COOKIE > <DOUYIN_REC_ROOT ?? DEFAULT_ROOT>/config/biliup/cookies.json。 */
 export const DEFAULT_COOKIES = process.env.BILIUP_COOKIE ?? rootBiliupCookies();
@@ -31,21 +34,6 @@ export function readBiliupCookieHeader(cookiesPath = DEFAULT_COOKIES): string | 
     return null;
   }
 }
-
-export interface UploadOpts {
-  video: string;
-  cookies: string;
-  title: string;
-  tag: string;
-  tid: number;
-  public: boolean;
-  desc?: string;
-  line?: UploadLine;
-}
-
-export type UploadLine =
-  | "bldsa" | "cnbldsa" | "andsa" | "atdsa" | "bda2" | "cnbd" | "anbd" | "atbd"
-  | "tx" | "cntx" | "antx" | "attx" | "bda" | "txa" | "alia";
 
 /**
  * B站 preupload probe 在当前 deployment 通常只返回 txa/alia；默认 probe 可能选中

@@ -1,6 +1,7 @@
-import type { NodeTaskDTO, RemoteTaskSpec } from "@drec/core";
+import type { ApplyTasksResult, NodeTaskDTO, RemoteTaskSpec, WorkerConfig } from "@drec/core";
 
-export interface WorkerConfig { id: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string; name?: string; }
+// 契约在 core(app 的 worker-store 用同一形状);这里 re-export 保持既有调用点不变。
+export type { ApplyTasksResult, WorkerConfig } from "@drec/core";
 
 export interface NodeRecording {
   roomSlug: string;
@@ -17,9 +18,6 @@ export interface NodeInventory { workerId: string; recordings: NodeRecording[]; 
 
 /** `_tasks` 远端输出:该节点全部任务的隐私安全投影(无 cookies)。 */
 export interface NodeTasks { workerId: string; tasks: NodeTaskDTO[]; }
-
-/** `_apply-tasks` 远端输出:本轮对账动作汇总。 */
-export interface ApplyTasksResult { applied: string[]; removed: string[]; pending: string[]; }
 
 export interface Transport {
   readonly id: string;

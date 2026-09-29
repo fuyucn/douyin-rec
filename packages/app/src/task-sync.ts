@@ -6,7 +6,7 @@
  * 编辑、删除。删除走两阶段：先在录/启用的只置 enabled=false，等 daemon 自然停录后
  * 下一轮再 removeTask。
  */
-import { platformForRoom, type NodeTaskDTO, type RemoteTaskSpec } from "@drec/core";
+import { platformForRoom, type ApplyTasksResult, type NodeTaskDTO, type RemoteTaskSpec } from "@drec/core";
 import type { TaskStore } from "./store.js";
 
 function slugOf(room: string): { platform: string; roomSlug: string } {
@@ -41,14 +41,8 @@ export function listNodeTasks(store: TaskStore): NodeTaskDTO[] {
   });
 }
 
-export interface ApplyTasksResult {
-  /** 已创建 / 已收编更新的 (platform:roomSlug) 列表。 */
-  applied: string[];
-  /** 已删除的 (platform:roomSlug) 列表。 */
-  removed: string[];
-  /** 已置 enabled=false、等待收播后下轮删除的 (platform:roomSlug) 列表。 */
-  pending: string[];
-}
+// 契约在 core(orchestrator 的 transport 也用同一形状);这里 re-export 保持既有调用点不变。
+export type { ApplyTasksResult } from "@drec/core";
 
 export interface ApplyTasksOptions {
   /**

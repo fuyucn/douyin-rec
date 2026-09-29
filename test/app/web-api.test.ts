@@ -90,6 +90,23 @@ beforeEach(() => {
   api = makeApi(deps);
 });
 
+/**
+ * 建一个带 worker 配置的临时 hub 环境。
+ * hub 规则里的 worker id 现在必须真实存在(防幽灵 id 导致本机抑制 + 远端没人接的静默漏录),
+ * 所以凡是要建规则的用例都要把 hubConfigPath 一起注入。
+ */
+function hubDeps(prefix: string, extra: Partial<ApiDeps> = {}): Partial<ApiDeps> {
+  const hubDir = mkdtempSync(join(tmpdir(), prefix));
+  const hubConfigPath = join(hubDir, "hub.config.json");
+  writeFileSync(hubConfigPath, JSON.stringify({
+    workers: [
+      { id: "local", name: "本机", kind: "local", dataRoot: "/data" },
+      { id: "vps2", name: "VPS", kind: "ssh", host: "1.2.3.4", dataRoot: "/drec" },
+    ],
+  }, null, 2));
+  return { hubDir, hubConfigPath, ...extra };
+}
+
 describe("createTask → resolveAnchor 创建即抓主播名", () => {
   it("注入 resolveAnchor 时，创建后台抓名并持久化，显示用 name>anchorName>room", async () => {
     const s = new TaskStore(":memory:");
@@ -399,8 +416,7 @@ describe("startTask", () => {
 
   it("hub source task 手动启动成功 → 触发立即任务同步", () => {
     const requestSyncTasks = vi.fn();
-    const hubDir = mkdtempSync(join(tmpdir(), "start-sync-"));
-    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const a = makeApi({ store, manager, ...hubDeps("start-sync-", { requestSyncTasks }) });
     const t = a.createTask({ room: "111" }).body as { id: number };
     a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
     requestSyncTasks.mockClear(); // 建规则本身已触发过一次同步，这里只测手动启停
@@ -427,8 +443,7 @@ describe("startTask", () => {
 
   it("manager.start 抛错 → 500、enabled 回滚、不触发同步", () => {
     const requestSyncTasks = vi.fn();
-    const hubDir = mkdtempSync(join(tmpdir(), "start-error-"));
-    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const a = makeApi({ store, manager, ...hubDeps("start-error-", { requestSyncTasks }) });
     const t = a.createTask({ room: "111" }).body as { id: number };
     a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
     requestSyncTasks.mockClear();
@@ -457,8 +472,7 @@ describe("stopTask", () => {
 
   it("hub source task 手动停止成功 → 触发立即任务同步", async () => {
     const requestSyncTasks = vi.fn();
-    const hubDir = mkdtempSync(join(tmpdir(), "stop-sync-"));
-    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const a = makeApi({ store, manager, ...hubDeps("stop-sync-", { requestSyncTasks }) });
     const t = a.createTask({ room: "111" }).body as { id: number };
     a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
     requestSyncTasks.mockClear();
@@ -499,8 +513,7 @@ describe("stopTask", () => {
 
   it("manager.stop 抛错 → 500、enabled 回滚、不触发同步", async () => {
     const requestSyncTasks = vi.fn();
-    const hubDir = mkdtempSync(join(tmpdir(), "stop-error-"));
-    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const a = makeApi({ store, manager, ...hubDeps("stop-error-", { requestSyncTasks }) });
     const t = a.createTask({ room: "111" }).body as { id: number };
     store.setEnabled(t.id, true);
     a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
@@ -992,8 +1005,17 @@ describe("hub 停止 / 立即执行端点", () => {
 
 describe("hub rules workers 字段(校验 + 往返)", () => {
   function apiWithHubDir(): ReturnType<typeof makeApi> {
+    // workers 现在必须真实存在(防幽灵 id 导致本机抑制 + 远端没人接的静默漏录),
+    // 所以这里给出与用例一致的 worker 配置。
     const hubDir = mkdtempSync(join(tmpdir(), "hubrules-"));
-    return makeApi({ store, manager, hubDir });
+    const hubConfigPath = join(hubDir, "hub.config.json");
+    writeFileSync(hubConfigPath, JSON.stringify({
+      workers: [
+        { id: "local", name: "本机", kind: "local", dataRoot: "/data" },
+        { id: "vps2", name: "VPS", kind: "ssh", host: "1.2.3.4", dataRoot: "/drec" },
+      ],
+    }, null, 2));
+    return makeApi({ store, manager, hubDir, hubConfigPath });
   }
   it("createHubRule 带空 workers → 400", () => {
     const a = apiWithHubDir();
@@ -1032,6 +1054,13 @@ describe("hub rules workers 字段(校验 + 往返)", () => {
     const r = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: [1 as unknown as string] });
     expect(r.status).toBe(400);
   });
+  it("createHubRule workers 含未配置的 worker id → 400(防幽灵 id 静默漏录)", () => {
+    const a = apiWithHubDir();
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    const r = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local", "ghost"] });
+    expect(r.status).toBe(400);
+    expect(String((r.body as { error?: string }).error)).toContain("未配置的 worker id");
+  });
   it("updateHubRule 改 workers 生效", () => {
     const a = apiWithHubDir();
     const t = a.createTask({ room: "123456" }).body as { id: number };
@@ -1051,8 +1080,7 @@ describe("hub rules workers 字段(校验 + 往返)", () => {
 describe("hub 规则/worker 变更立即触发任务同步", () => {
   it("createHubRule 成功后调用 requestSyncTasks", () => {
     const requestSyncTasks = vi.fn();
-    const hubDir = mkdtempSync(join(tmpdir(), "hubsync-"));
-    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const a = makeApi({ store, manager, ...hubDeps("hubsync-", { requestSyncTasks }) });
     const t = a.createTask({ room: "123456" }).body as { id: number };
     expect(requestSyncTasks).not.toHaveBeenCalled();
     const r = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
@@ -1061,8 +1089,7 @@ describe("hub 规则/worker 变更立即触发任务同步", () => {
   });
   it("update/deleteHubRule 成功后也触发;校验失败不触发", () => {
     const requestSyncTasks = vi.fn();
-    const hubDir = mkdtempSync(join(tmpdir(), "hubsync-"));
-    const a = makeApi({ store, manager, hubDir, requestSyncTasks });
+    const a = makeApi({ store, manager, ...hubDeps("hubsync-", { requestSyncTasks }) });
     const t = a.createTask({ room: "123456" }).body as { id: number };
     a.createHubRule({ recording: { sourceTaskId: t.id } });
     expect(requestSyncTasks).toHaveBeenCalledTimes(1);
@@ -1152,8 +1179,7 @@ describe("删除 hub 规则同时清理该直播间历史 run", () => {
 
 describe("hub 受管任务与规则录制下发", () => {
   function apiWithHubDir(): ReturnType<typeof makeApi> {
-    const hubDir = mkdtempSync(join(tmpdir(), "hubmanaged-"));
-    return makeApi({ store, manager, hubDir });
+    return makeApi({ store, manager, ...hubDeps("hubmanaged-") });
   }
   it("受管任务(managedBy=hub)禁止编辑 → 403 且字段不动", () => {
     const a = apiWithHubDir();

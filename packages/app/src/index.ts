@@ -18,6 +18,8 @@ export { listHubJobs, readHubJobLog, jobLogPath, hubStageDir } from "./hub-jobs.
 export type { HubJobView, HubJobEvent } from "./hub-jobs.js";
 export { rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, DEFAULT_ROOT } from "./paths.js";
 export { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
+/** 应用版本号({root package.json version}-{commit6},由 pnpm bundle 注入;非打包环境回落 dev)。 */
+export { APP_VERSION } from "./version.js";
 export { makeNotifier, NullNotifier, formatMessage } from "@drec/observability";
 export {
   DEFAULT_WEBHOOK_TOGGLES,

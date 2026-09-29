@@ -130,18 +130,23 @@ export function getHubRule(dir: string, key: string): HubRule | null {
 }
 
 /**
- * 源任务本机抑制名单:规则启用 + 绑了 sourceTaskId + workers 显式勾选且不含 "local"
+ * 源任务本机抑制名单:规则启用 + 绑了 sourceTaskId + workers 显式勾选且不含 "local"、
+ * 且**至少有一个确实存在的远端 worker** 会接这场的录制
  * → 该房间的录制明确交给远端节点,master 本机的源任务只当配置模板,不应再实跑
  * (避免本机持续轮询触发风控/两节点重复录制)。daemon 每 tick 现读,跟随手改文件。
+ *
+ * 传入 knownWorkerIds(= 当前 hub.config.json 的 worker id 集合):规则里若只剩已删除的
+ * 幽灵 id,则**不抑制**本机 —— 否则会出现「本机不录、远端也没人接」的静默漏录。
  */
-export function localSuppressedSourceTaskIds(dir: string): Set<number> {
+export function localSuppressedSourceTaskIds(dir: string, knownWorkerIds: ReadonlySet<string>): Set<number> {
   const out = new Set<number>();
   for (const rule of listHubRules(dir)) {
     if (!rule.enabled) continue;
     const tid = rule.recording?.sourceTaskId;
     if (tid == null) continue;
     const ws = rule.workers;
-    if (ws && ws.length > 0 && !ws.includes("local")) out.add(tid);
+    const hasRemote = !!ws?.some((id) => id !== "local" && knownWorkerIds.has(id));
+    if (ws && ws.length > 0 && !ws.includes("local") && hasRemote) out.add(tid);
   }
   return out;
 }

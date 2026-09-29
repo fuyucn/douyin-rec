@@ -11,6 +11,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { HUB_TABLE_NAMES, HUB_TERMINAL_STATES } from "@drec/core";
 import { rootHubConfig, rootStageDir } from "./paths.js";
 
 export interface HubJobEvent { state: string; at: number; }
@@ -48,10 +49,10 @@ export interface HubJobView {
   hasLog: boolean;
 }
 
-/** 终态集合(与 orchestrator ledger 的 JobState 对齐,字符串契约)。 */
-const TERMINAL = new Set(["done", "needs_manual", "failed"]);
-/** 历史台账表(与 orchestrator SyncLedger 结构对齐;旧库缺表跳过)。 */
-const HISTORY_TABLES = ["sync_jobs", "sync_job_events", "sync_job_steps", "sync_candidates", "sync_node_states"] as const;
+/** 终态集合(唯一真理 = core 的 hub 台账契约,与 orchestrator SyncLedger 对齐)。 */
+const TERMINAL = new Set<string>(HUB_TERMINAL_STATES);
+/** 历史台账表(同上;旧库缺表跳过)。 */
+const HISTORY_TABLES = HUB_TABLE_NAMES;
 /** 无历史数据时的保守「步骤耗时/视频时长」比率(按 2026-07 实测:烧录 veryfast ~0.11×,上传取决于带宽)。 */
 const FALLBACK_RATE: Record<string, number> = { pending: 0.01, settling: 0.05, syncing: 0.1, merging: 0.3, uploading: 0.6 };
 

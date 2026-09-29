@@ -5,8 +5,10 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
+import type { WorkerConfig } from "@drec/core";
 
-export interface WorkerConfig { id: string; name?: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string }
+// 契约在 core(orchestrator 也要用同一形状);这里 re-export 保持既有调用点不变。
+export type { WorkerConfig } from "@drec/core";
 
 const KINDS = new Set(["local", "ssh", "tailscale-ssh"]);
 

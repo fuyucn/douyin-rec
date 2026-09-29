@@ -117,11 +117,16 @@ describe("hub-store(文件版,按平台限定 key)", () => {
     expect(listHubRules(dir).map((r) => r.key)).toEqual(["douyin.bbb", "bilibili.ccc", "douyin.aaa"]);
   });
 
-  it("localSuppressedSourceTaskIds:源任务被绑且 workers 不含 local → 本机抑制", () => {
+  it("localSuppressedSourceTaskIds:源任务被绑 + workers 不含 local + 远端 worker 真实存在 → 本机抑制", () => {
     upsertHubRule(dir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 10 }, workers: ["vps2"] });
     upsertHubRule(dir, { platform: "douyin", roomSlug: "222", recording: { sourceTaskId: 11 }, workers: ["local", "vps2"] });
     upsertHubRule(dir, { platform: "douyin", roomSlug: "333", recording: { sourceTaskId: 12 }, enabled: false, workers: ["vps2"] });
     upsertHubRule(dir, { platform: "douyin", roomSlug: "444", recording: { sourceTaskId: 13 } }); // workers 缺省=全部
-    expect([...localSuppressedSourceTaskIds(dir)].sort()).toEqual([10]);
+    expect([...localSuppressedSourceTaskIds(dir, new Set(["local", "vps2"]))].sort()).toEqual([10]);
+  });
+
+  it("localSuppressedSourceTaskIds:远端 worker 已被删除(幽灵 id)→ 不抑制本机,避免两头都不录", () => {
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 10 }, workers: ["ghost"] });
+    expect([...localSuppressedSourceTaskIds(dir, new Set(["local"]))]).toEqual([]);
   });
 });

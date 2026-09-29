@@ -330,7 +330,7 @@ describe("runPipeline", () => {
     // sourceAfterDone + stageSourceAfterMerge 都执行:两个会话的源 .ts 全部清
     expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
     const cleaned = (deps.transports.get("node-1")!.cleanup as Mock).mock.calls.flatMap((c) => c[0] as string[]);
-    expect(cleaned).toEqual([...s1.tsFiles, ...s2.tsFiles]); // 未开 includeXmlAss → 不删 xml
+    expect(cleaned).toEqual([...s1.tsFiles, ...s2.tsFiles]); // 硬约束:只删 .ts,弹幕源 .xml 永不删
     expect(deps.ledger.getNodeState(broadcast.streamKey, "merge")?.state).toBe("done");
     // 拉下来的 stage 源清掉(不含 xml)
     const stageCleaned = rmStage.mock.calls.flatMap((c) => c[0] as string[]);
@@ -500,13 +500,14 @@ describe("runPipeline", () => {
     });
   });
 
-  it("场景8(plain xml 产物): stageSourceAfterMerge+includeXmlAss 删源 xml 但**保留** plain xml 产物", async () => {
+  it("场景8(硬约束): 旧规则带 includeXmlAss 也绝不删 .xml(源 xml 与 plain xml 都保留)", async () => {
     const rmStage = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
     const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
-    // stage-only:合并后清源,但不到 stageAfterDone(产物含 plain xml 留存)
+    // 模拟生产里遗留的规则文件:仍带 includeXmlAss: true(类型已移除,清理逻辑必须忽略它)
+    const legacyCleanup = { stageSourceAfterMerge: true, includeXmlAss: true } as unknown as NonNullable<PipelineCfg["cleanup"]>;
     const deps = makeDeps({
       rmStage,
-      cfg: { ...makeDeps().cfg, uploadMode: "stage", cleanup: { stageSourceAfterMerge: true, includeXmlAss: true } },
+      cfg: { ...makeDeps().cfg, uploadMode: "stage", cleanup: legacyCleanup },
     });
     deps.ledger.upsertPending(broadcast.streamKey);
     const result = await runPipeline(broadcast, deps);
@@ -514,19 +515,21 @@ describe("runPipeline", () => {
     const stageSub = stageSubOf(deps);
     const PLAIN_XML = join(stageSub, "主播名_2026-06-27.xml");
     const SOURCE_XML = join(stageSub, "danmu.xml"); // basename of /remote/danmu.xml
-    // stageSourceAfterMerge 删:拉来的源 .ts + 源 xml(timestamped),但 **不删** plain xml 产物
+    // 只删拉来的源 .ts;源 xml / plain xml 产物都不许碰
     const deleted = rmStage.mock.calls.flatMap((c) => c[0]);
-    expect(deleted).toContain(SOURCE_XML);          // 源 xml 删
-    expect(deleted).not.toContain(PLAIN_XML);        // plain xml 产物保留
+    expect(deleted.every((p) => /\.ts$/i.test(p))).toBe(true);
+    expect(deleted).not.toContain(SOURCE_XML);
+    expect(deleted).not.toContain(PLAIN_XML);
     deps.ledger.close();
   });
 
-  it("场景9(plain xml 产物): stageAfterDone+includeXmlAss 上传后才连 plain xml 一并清", async () => {
+  it("场景9(硬约束): stageAfterDone 只删 mp4 产物,.xml/.ass 一律保留", async () => {
     const rmStage = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
     const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const legacyCleanup = { stageAfterDone: true, includeXmlAss: true } as unknown as NonNullable<PipelineCfg["cleanup"]>;
     const deps = makeDeps({
       rmStage,
-      cfg: { ...makeDeps().cfg, uploadMode: "upload", cleanup: { stageAfterDone: true, includeXmlAss: true } },
+      cfg: { ...makeDeps().cfg, uploadMode: "upload", cleanup: legacyCleanup },
     });
     deps.ledger.upsertPending(broadcast.streamKey);
     const result = await runPipeline(broadcast, deps);
@@ -534,7 +537,9 @@ describe("runPipeline", () => {
     const stageSub = stageSubOf(deps);
     const PLAIN_XML = join(stageSub, "主播名_2026-06-27.xml");
     const deleted = rmStage.mock.calls.flatMap((c) => c[0]);
-    expect(deleted).toContain(PLAIN_XML);            // 上传后清产物含 plain xml
+    expect(deleted.some((p) => /\.mp4$/i.test(p))).toBe(true);   // 合成 mp4 照删
+    expect(deleted.some((p) => /\.(xml|ass)$/i.test(p))).toBe(false); // xml/ass 一律不删
+    expect(deleted).not.toContain(PLAIN_XML);
     deps.ledger.close();
   });
 

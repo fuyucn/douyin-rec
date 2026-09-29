@@ -1,9 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
+import type { HubJobState, HubNodeStateName, HubStepName } from "@drec/core";
 
-export type JobState =
-  | "pending"|"settling"|"syncing"|"merging"|"uploading"
-  | "retrying"        // 单节点重跑中(非终态,reconciler 不重入)
-  | "done"|"failed"|"needs_manual";
+// 状态/步骤名的**唯一真理 = core 的只读契约**(app 的 hub 任务页只读同一张库,靠它对齐)。
+export type JobState = HubJobState;
 export interface JobRow {
   streamKey: string;
   state: JobState;
@@ -35,19 +34,12 @@ export interface CandidateRow {
 export interface JobEvent { streamKey: string; state: JobState; at: number; }
 
 /** pipeline 细粒度子步骤规范名(流程图节点)。upload/append 仅 upload 模式有。 */
-export type StepName =
-  | "select" | "pull" | "merge"
-  | "burn_danmu" | "burn_livechat"
-  | "upload_plain" | "append_danmu" | "append_livechat"
-  // 清理步骤(各由对应 cleanup 开关驱动;没开 → 不打点 → 前端显示 skipped):
-  | "clean_stage_src"   // stageSourceAfterMerge:merge 后删 stage 里拉来的源 .ts
-  | "clean_source"      // sourceAfterDone:完成后删各节点原始录制 .ts
-  | "clean_stage";      // stageAfterDone:完成后删 stage 合成产物
+export type StepName = HubStepName;
 /** 子步骤事件:start/done 配对(能算每步耗时 + 判断当前在跑哪步;异步并行的两轨各有各的起止)。 */
 export interface StepEvent { streamKey: string; step: StepName; phase: "start" | "done"; at: number; detail?: string }
 
 /** 单节点状态(workflow 安全阀 + 单节点重跑)。与 StepName 同 key。 */
-export type NodeStateName = "pending" | "running" | "done" | "failed" | "blocked" | "skipped";
+export type NodeStateName = HubNodeStateName;
 export interface NodeStateRow {
   streamKey: string;
   node: StepName;

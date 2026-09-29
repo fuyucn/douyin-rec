@@ -12,7 +12,6 @@
 import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌 env(如 DOUYIN_REC_ROOT),
                          // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
 import { Command } from "commander";
-import pkg from "../package.json" with { type: "json" };
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { loadConfig } from "@drec/core";
@@ -27,8 +26,9 @@ import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, type NotifWebhookToggles } from "@drec/app";
-import { buildTaskCommand, buildCookieCommand } from "@drec/app";
-import type { HubStarter, UploadOpts } from "@drec/app";
+import { buildTaskCommand, buildCookieCommand, APP_VERSION } from "@drec/app";
+import type { HubStarter } from "@drec/app";
+import type { UploadOpts } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
 
 /** 从 CLI 全局选项 → config → env 三层解析 Discord webhook URL。 */
@@ -88,7 +88,7 @@ const program = new Command();
 program
   .name("douyin-rec")
   .description("抖音直播录制 + 弹幕捕获 (TS, 单文件 CLI)")
-  .version(pkg.version, "-v, --version", "显示版本号")
+  .version(APP_VERSION, "-v, --version", "显示版本号")
   .option("--discord-webhook <url>", "Discord incoming webhook（也读 config / env DISCORD_WEBHOOK）")
   // 参数错误后顺带提示 --help，省得用户再敲一次。
   .showHelpAfterError("(用 --help 查看用法)")
@@ -842,6 +842,9 @@ const hubStarter: HubStarter = {
       void syncTasks();
     }
 
+    // 正在进行的重跑(streamKey):检查与占用必须同步完成,否则并发请求会双双通过
+    // isJobLive/hasStreamLock 检查、再被 withStreamLock 排队串行执行两次(上传类节点会重复投稿)。
+    const retryingKeys = new Set<string>();
     // 手动单节点重跑:UI → web API → 这里。与 reconciler 共享同一 ResourcePool 流锁,保证同场不并发;
     // 上传类节点默认拒绝(可能已建稿/已 append),force 才放行(UI 二次确认)。
     const retryNode = async (
@@ -872,6 +875,10 @@ const hubStarter: HubStarter = {
         );
         if (appended) return { ok: false, error: `已建稿(${job.bv})且已有分 P,不能重跑 P1(会重复投稿)`, code: 409 };
       }
+      if (retryingKeys.has(streamKey)) {
+        return { ok: false, error: "该场已有重跑在执行,请稍后", code: 409 };
+      }
+      retryingKeys.add(streamKey);
       return runWithJob(streamKey, async () => {
         try {
           return await pool.withStreamLock(streamKey, async () => {
@@ -927,7 +934,7 @@ const hubStarter: HubStarter = {
           }
           throw e;
         }
-      });
+      }).finally(() => retryingKeys.delete(streamKey));
     };
     hubRetryNode = (streamKey: string, node: WorkflowNodeKey, o?: { force?: boolean }) =>
       retryNode(streamKey, node, o?.force === true);

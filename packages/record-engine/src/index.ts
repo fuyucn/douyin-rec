@@ -342,20 +342,26 @@ export class PollingRecorder implements Recorder {
   private async reportExitThenOffline(code: number | null): Promise<void> {
     const ev = this.ev;
     if (!ev || this.stopped) return;
-    let living = false;
+    // 三态:false=确认下播 / true=仍在播 / null=无法确认(API 不可达或被风控)。
+    // 后两者都按「断流」处理并继续重连 —— 只有确认下播才收尾。
+    let living: boolean | null = null;
     try {
       living = await this.platform.getLiving(this.channelId);
     } catch {
-      /* API 不可达 → 按断流处理 */
+      living = null;
     }
     if (this.stopped) return;
-    if (!living) {
+    if (living === false) {
       log.info(`主播已下播,本场录制结束,等待下次开播。room=${this.channelId}`);
     } else {
       const tail = this.stderrTail
         .filter((l) => /error|fail|403|404|reset|refused|invalid|eof|timeout|http/i.test(l))
         .slice(-6);
-      log.info(`录制进程退出 code=${code}(房间仍在播 → 疑似断流,将重连)`);
+      log.info(
+        living === true
+          ? `录制进程退出 code=${code}(房间仍在播 → 疑似断流,将重连)`
+          : `录制进程退出 code=${code}(主播状态未知/被风控 → 按断流处理,将重连)`,
+      );
       if (tail.length) log.info(`断链前 stderr:\n  ${tail.join("\n  ")}`);
     }
     ev.onOffline();

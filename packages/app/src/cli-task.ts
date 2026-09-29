@@ -17,6 +17,7 @@ import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
 import { resolveOutputDir, ensureHubConfigExample, rootHubConfig, rootHubDir } from "./paths.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
+import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
 import { parseSchedule, toDanmuFlag, parseBoolFlag } from "./task-input.js";
 
@@ -698,7 +699,12 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
           log: (m) => console.log(m),
           // master(--hub)有效:规则把源任务交给远端节点(workers 不含 local)时,本机不再实跑该任务,
           // 避免本机持续轮询(触发风控)或双节点重复录制。daemon tick 现读规则文件,手改即时生效。
-          localSuppressedIds: hubEnabled ? () => localSuppressedSourceTaskIds(rootHubDir()) : undefined,
+          localSuppressedIds: hubEnabled
+            ? () => localSuppressedSourceTaskIds(
+                rootHubDir(),
+                new Set(workerStore.listWorkers(rootHubConfig()).map((w) => w.id)),
+              )
+            : undefined,
         });
       }
 

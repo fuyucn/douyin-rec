@@ -4,7 +4,7 @@ import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { isJobAbort, resolveOutputStem, runWithJob, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
-import type { UploadOpts } from "@drec/app";
+import type { UploadOpts } from "@drec/core";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
 import { humanBytes, sumBytes } from "./format.js";
@@ -16,13 +16,18 @@ export interface PipelineSteps {
   burnLivechat?: boolean;  // 默认 true:烧聊天框版
 }
 
-/** cleanup 开关(都默认 false)。includeXmlAss 决定删除是否含 .xml/.ass(守"弹幕源不可删"硬规矩)。 */
+/**
+ * cleanup 开关(都默认 false)。**永不删 .xml/.ass**(弹幕源不可删硬约束)——
+ * 所有清理路径只处理 .ts/.mp4,写入前再经 videoOnly() 兜底过滤。
+ */
 export interface PipelineCleanup {
   stageSourceAfterMerge?: boolean; // 合并后删 stage 里拉来的源 .ts(留合成产物)
   sourceAfterDone?: boolean;       // job 安全完成后删各成员节点原录制 .ts
   stageAfterDone?: boolean;        // job done(已上传)后删 stage 合成产物
-  includeXmlAss?: boolean;         // 上述删除是否含 .xml/.ass(默认 false)
 }
+
+/** 清理路径兜底:任何情况下都不把 .xml/.ass 交给删除通道(硬约束,见 AGENTS.md)。 */
+const videoOnly = (paths: string[]): string[] => paths.filter((p) => !/\.(xml|ass)$/i.test(p));
 
 export interface PipelineCfg {
   cleanMaxGapSec: number;
@@ -259,9 +264,8 @@ async function runPipelineInner(
     plain, danmuMp4, livechatMp4, plainXml, xmlArg,
   };
 
-  // 各成员节点的待删源(.ts 总删;.xml 仅 includeXmlAss)——给 sourceAfterDone 用。
-  const sourcePathsOf = (m: (typeof winnerMembers)[number]): string[] =>
-    [...m.rec.tsFiles, ...(clean.includeXmlAss && m.rec.xmlPath ? [m.rec.xmlPath] : [])];
+  // 各成员节点的待删源:只删 .ts(弹幕源 .xml 永不删)——给 sourceAfterDone 用。
+  const sourcePathsOf = (m: (typeof winnerMembers)[number]): string[] => videoOnly(m.rec.tsFiles);
   const cleanupSources = async (): Promise<void> => {
     if (!clean.sourceAfterDone) return;
     ledger.logStep(streamKey, "clean_source", "start");
@@ -303,11 +307,9 @@ async function runPipelineInner(
   // 放在 stage/upload 分支之前:stage 模式同样享受(旧测试断言),只是不动各成员节点原始源。
   if (clean.stageSourceAfterMerge) {
     const pulledTs = winnerMembers.flatMap((m) => m.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f))));
-    const pulledXml = winnerMembers.flatMap((m) => (m.rec.xmlPath ? [path.join(stageSub, path.basename(m.rec.xmlPath))] : []));
-    const xmlVictims = clean.includeXmlAss ? pulledXml : [];
     ledger.logStep(streamKey, "clean_stage_src", "start");
-    await rmStage([...pulledTs, ...xmlVictims]);
-    ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${pulledTs.length + xmlVictims.length} 文件`);
+    await rmStage(videoOnly(pulledTs));
+    ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${pulledTs.length} 文件(不含 .xml/.ass)`);
   }
 
   const bv = ledger.get(streamKey)?.bv;
@@ -335,11 +337,8 @@ async function runPipelineInner(
   await cleanupSources();
   if (clean.stageAfterDone) {
     ledger.logStep(streamKey, "clean_stage", "start");
-    const victims = [plain, danmuMp4, livechatMp4];
-    if (clean.includeXmlAss) {
-      victims.push(plainXml, xmlArg, danmuMp4.replace(/\.mp4$/, ".ass"), livechatMp4.replace(/\.mp4$/, ".ass"));
-    }
-    const present = victims.filter(Boolean).filter(existsSync);
+    // 只删合成视频产物;.xml/.ass 永不删(弹幕源硬约束)。
+    const present = videoOnly([plain, danmuMp4, livechatMp4]).filter(Boolean).filter(existsSync);
     await rmStage(present);
     ledger.logStep(streamKey, "clean_stage", "done", `删 ${present.length} 文件`);
   }
@@ -448,14 +447,10 @@ async function resumeAppends(
   // 可选:done 后删 stage 产物(与主路径同一开关;续跑不删 slave 源)。
   if (cfg.cleanup?.stageAfterDone) {
     const rmStage = deps.rmStage ?? defaultRmStage;
-    const products = [prod.plain, prod.danmuMp4, prod.livechatMp4];
-    const xmlAss = cfg.cleanup?.includeXmlAss
-      ? [path.join(stageSub, prod.dateName + ".xml"),
-         prod.danmuMp4.replace(/\.mp4$/, ".ass"), prod.livechatMp4.replace(/\.mp4$/, ".ass")]
-      : [];
+    const products = videoOnly([prod.plain, prod.danmuMp4, prod.livechatMp4]);
     ledger.logStep(streamKey, "clean_stage", "start");
-    await rmStage([...products, ...xmlAss]);
-    ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length + xmlAss.length} 文件`);
+    await rmStage(products);
+    ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件(不含 .xml/.ass)`);
   }
   return { state: "done", bv };
 }

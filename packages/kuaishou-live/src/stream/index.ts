@@ -118,16 +118,19 @@ export function findPlayItem(state: Record<string, unknown>): KsPlayItem | null 
 export interface KsRoomInfo {
   living: boolean;
   name: string | null;
+  /** 风控/结构性错误(如「请求过快」):此时 living=false 不代表主播真下播,调用方应按「未知」处理。 */
+  throttled?: string;
 }
 
-/** 拉页解析出的房间信息(主播名 + 是否在播);页面拿不到/风控 → 安好的 null/未开播,fetch 失败抛错。 */
+/** 拉页解析出的房间信息(主播名 + 是否在播);风控时附 throttled 让调用方区分「未开播」与「未知」,fetch 失败抛错。 */
 export async function getRoomInfo(userId: string, cookies?: string): Promise<KsRoomInfo> {
   const html = await fetchRoomHtml(userId, cookies);
   const item = findPlayItem(parseInitialState(html));
   if (!item) return { living: false, name: null };
   const name = item.author?.name?.trim() || null;
   const ls = item.liveStream;
-  if (item.errorType || !ls) return { living: false, name }; // 封禁/风控/未开播
+  if (item.errorType) return { living: false, name, throttled: item.errorType.title || item.errorType.content || "未知风控" };
+  if (!ls) return { living: false, name }; // 未开播
   const hasFlv = Object.values(ls.playUrls ?? {}).some(
     (c) => (c?.adaptationSet?.representation ?? []).some((r) => r.url),
   );
@@ -171,7 +174,13 @@ export async function getStream(userId: string, quality: string, cookies?: strin
   return { living: true, url, owner, headers: STREAM_HEADERS, raw };
 }
 
-/** 判活:userId → 是否直播中;页面可达性失败抛错。 */
+/**
+ * 判活:userId → 是否直播中。
+ * 风控/接口异常时**抛错**(= 未知),而不是返回 false —— 否则录制器会把「请求过快」误判成
+ * 「主播已下播」而提前收尾/漏录(见 docs/kuaishou-rate-limit.md)。
+ */
 export async function getLiving(userId: string): Promise<boolean> {
-  return (await getRoomInfo(userId)).living;
+  const info = await getRoomInfo(userId);
+  if (info.throttled) throw new Error(`kuaishou 风控/接口异常: ${info.throttled}`);
+  return info.living;
 }

@@ -24,7 +24,6 @@ interface FormState {
   clStageSourceAfterMerge: boolean;
   clSourceAfterDone: boolean;
   clStageAfterDone: boolean;
-  clIncludeXmlAss: boolean;
   uploadMode: string; // "stage" | "upload"
   uploadPrivate: boolean; // 仅 upload 有意义:true=仅自己可见,false=公开
   uploadTag: string;
@@ -44,7 +43,6 @@ const BLANK: FormState = {
   clStageSourceAfterMerge: false,
   clSourceAfterDone: false,
   clStageAfterDone: false,
-  clIncludeXmlAss: false,
   uploadMode: "stage",
   uploadPrivate: true,
   uploadTag: "",
@@ -66,7 +64,6 @@ function fromRule(r: HubRuleDTO): FormState {
     clStageSourceAfterMerge: c.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: c.cleanup?.sourceAfterDone === true,
     clStageAfterDone: c.cleanup?.stageAfterDone === true,
-    clIncludeXmlAss: c.cleanup?.includeXmlAss === true,
     uploadMode: c.upload?.mode === "upload" ? "upload" : "stage",
     uploadPrivate: c.upload?.private !== false,
     uploadTag: c.upload?.tag ?? "",
@@ -189,7 +186,6 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           stageSourceAfterMerge: form.clStageSourceAfterMerge,
           sourceAfterDone: form.clSourceAfterDone,
           stageAfterDone: form.clStageAfterDone,
-          includeXmlAss: form.clIncludeXmlAss,
         },
         upload: {
           mode: form.uploadMode === "upload" ? "upload" : "stage",
@@ -316,7 +312,6 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
               ["clStageSourceAfterMerge", t("hub.ruleDialog.toggleClStageSourceAfterMergeLabel"), t("hub.ruleDialog.toggleClStageSourceAfterMergeSub")],
               ["clSourceAfterDone", t("hub.ruleDialog.toggleClSourceAfterDoneLabel"), t("hub.ruleDialog.toggleClSourceAfterDoneSub")],
               ["clStageAfterDone", t("hub.ruleDialog.toggleClStageAfterDoneLabel"), t("hub.ruleDialog.toggleClStageAfterDoneSub")],
-              ["clIncludeXmlAss", t("hub.ruleDialog.toggleClIncludeXmlAssLabel"), t("hub.ruleDialog.toggleClIncludeXmlAssSub")],
             ] as const).map(([key, label, sub]) => (
               <label key={key} className="switch-row">
                 <span className="flex flex-col">
