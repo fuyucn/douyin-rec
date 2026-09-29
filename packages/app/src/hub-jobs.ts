@@ -51,6 +51,8 @@ export interface HubJobView {
 
 /** 终态集合(唯一真理 = core 的 hub 台账契约,与 orchestrator SyncLedger 对齐)。 */
 const TERMINAL = new Set<string>(HUB_TERMINAL_STATES);
+/** 同一份终态集合的 SQL 形式(常量字面量,无注入面)。 */
+const TERMINAL_SQL = HUB_TERMINAL_STATES.map((s) => `'${s}'`).join(",");
 /** 历史台账表(同上;旧库缺表跳过)。 */
 const HISTORY_TABLES = HUB_TABLE_NAMES;
 /** 无历史数据时的保守「步骤耗时/视频时长」比率(按 2026-07 实测:烧录 veryfast ~0.11×,上传取决于带宽)。 */
@@ -72,7 +74,7 @@ export function activeHubJobKeys(syncDbPath: string, roomKey: string): string[] 
   const db = new DatabaseSync(syncDbPath, { readOnly: true });
   try {
     return (db.prepare(
-      "SELECT streamKey FROM sync_jobs WHERE streamKey LIKE ? AND state NOT IN ('done','failed','needs_manual') ORDER BY updatedAt DESC",
+      `SELECT streamKey FROM sync_jobs WHERE streamKey LIKE ? AND state NOT IN (${TERMINAL_SQL}) ORDER BY updatedAt DESC`,
     ).all(roomKeyToStreamPrefix(roomKey) + "%") as unknown as { streamKey: string }[]).map((r) => r.streamKey);
   } catch {
     return [];

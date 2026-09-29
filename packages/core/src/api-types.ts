@@ -345,3 +345,6 @@ export interface EventsDTO {
   events: AppEventDTO[];
   cursor: number;
 }
+
+// hub 台账契约的状态/步骤名(web 端只通过 @drec/contracts 拿类型;运行时常量在 hub-ledger-contract)
+export type { HubJobState, HubStepName } from "./hub-ledger-contract.js";

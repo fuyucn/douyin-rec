@@ -3,6 +3,7 @@ import { Check, ChevronDown, FileText, Loader2, Minus, Play, RotateCcw, Square, 
 import { ReactFlow, Background, Controls, Handle, Position, type Node, type Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api, type HubJobDTO } from "../api/client";
+import type { HubStepName } from "@drec/contracts";
 import { IconButton } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Dialog } from "./Dialog";
@@ -87,8 +88,14 @@ const NODE_STATE_TO_UI: Record<string, NodeStatus> = {
   skipped: "skipped",
 };
 
-/** 所有可能出现的子步骤 key(与布局解耦,仅供 stepStatuses 遍历取状态)。 */
+/**
+ * 所有可能出现的子步骤 key(与布局解耦,仅供 stepStatuses 遍历取状态)。
+ * 顺序=展示顺序,保持不变;成员覆盖由下面的类型断言守护(新增 core 步骤名而这里漏掉会编译失败)。
+ */
 const ALL_STEP_KEYS = ["select", "pull", "merge", "burn_danmu", "burn_livechat", "clean_stage_src", "upload_plain", "append_danmu", "append_livechat", "clean_source", "clean_stage"] as const;
+type _MissingStepKey = Exclude<HubStepName, (typeof ALL_STEP_KEYS)[number]>;
+/** 覆盖全部 HubStepName 才可赋值(漏一个 → 类型塌成 never → 编译失败)。 */
+const ALL_STEP_KEYS_TYPED: _MissingStepKey extends never ? typeof ALL_STEP_KEYS : never = ALL_STEP_KEYS;
 
 /** 从 job.steps(start/done 配对)推导每个子步骤的状态 + 耗时。 */
 function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec: number | null }> {
@@ -103,7 +110,7 @@ function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec:
   const now = Date.now();
   const nodeStates = new Map(job.nodeStates.map((n) => [n.node, n]));
   const out: Record<string, { status: NodeStatus; sec: number | null }> = {};
-  for (const key of ALL_STEP_KEYS) {
+  for (const key of ALL_STEP_KEYS_TYPED) {
     const e = pair.get(key);
     const n = nodeStates.get(key);
     if (n) {

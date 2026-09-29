@@ -73,6 +73,8 @@ export class Reconciler {
   private notify?: (e: import("@drec/core").NotifyEvent) => void;
   private resolveCfg?: (platform: string, roomSlug: string) => PipelineCfg | null;
   private loadTransports?: () => Map<string, Transport>;
+  /** 已警告过「显式 workers 过滤后无成员」的 streamKey(幽灵 worker id),避免每轮刷屏。 */
+  private readonly warnedGhostWorkers = new Set<string>();
 
   constructor(deps: ReconcilerDeps) {
     this.platform = deps.platform;
@@ -240,7 +242,17 @@ export class Reconciler {
         cfg = resolved;
       }
       if (cfg.workers?.length) {
+        const before = b.members.length;
         b.members = b.members.filter((m) => cfg.workers!.includes(m.workerId));
+        // 显式勾选却过滤到一个不剩:通常是规则里留着已删除的 worker id(API 已禁止新增/删除引用,
+        // 但手改文件绕过)。不静默 —— 否则表现为「录了却永远不合并/上传」。每个 streamKey 只报一次。
+        if (before > 0 && b.members.length === 0 && !this.warnedGhostWorkers.has(b.streamKey)) {
+          this.warnedGhostWorkers.add(b.streamKey);
+          console.warn(
+            `[reconciler] ${b.streamKey} 的规则 workers=[${cfg.workers.join(", ")}] 在节点清单里没有对应成员` +
+              `(疑似已删除的 worker id),本场不会进入后处理 —— 请检查该房间的 hub 规则。`,
+          );
+        }
       }
       cfgByKey.set(b.streamKey, cfg);   // 过滤后仍有/无成员都缓存;空成员在循环里跳过
     }
