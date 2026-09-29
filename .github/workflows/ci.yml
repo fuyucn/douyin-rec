@@ -1,0 +1,45 @@
+name: CI
+
+# PR / 分支推送门禁:typecheck + 单测 + 打包 + 前端构建。
+# tag 发布走 release-worker.yml(那里额外校验 tag 与根 package.json 版本一致)。
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+# 同一分支连推时只保留最新一次,省额度也避免旧提交的红叉刷屏。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: "Install (root)"
+        run: pnpm install --frozen-lockfile
+
+      - name: "Typecheck (root, 13 packages)"
+        run: pnpm typecheck
+
+      - name: "Unit tests (vitest, 含分层守护)"
+        run: pnpm test
+
+      - name: "Bundle (esbuild: douyin-rec.mjs + tui.mjs)"
+        run: pnpm bundle
+
+      - name: "Web UI install + typecheck + build"
+        run: cd packages/web && pnpm install --frozen-lockfile && pnpm typecheck && pnpm build
