@@ -568,7 +568,7 @@ const hubStarter: HubStarter = {
     } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, hubStore, workerStore, rootHubDir, rootHubConfig, rootStageDir, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
+    const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootStageDir, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
@@ -687,7 +687,14 @@ const hubStarter: HubStarter = {
       // 穿插上传接缝:pipeline 先 fire uploadPlain(网络)与烧录并行,再 await BV 后串行 appendGroup。
       uploadPlain: (plain: UploadOpts) => uploadPlain({ plain }),
       appendGroup: (o: { bv: string; files: string[]; cookies: string; public: boolean }) =>
-        appendGroup({ cookies: o.cookies, bv: o.bv, files: o.files, public: o.public }),
+        // countParts 让 append 具备幂等判定:失败后查分 P 数,变多=实际已成功、查不到=转人工不重试。
+        appendGroup({
+          cookies: o.cookies,
+          bv: o.bv,
+          files: o.files,
+          public: o.public,
+          countParts: () => countVideoParts(o.bv, o.cookies),
+        }),
       notify: opts.onEvent,
       // job.log 的落盘实现由组合根装配:observability 的 FileLogger,路径 = <stage>/<sanitized streamKey>/job.log
       //(sanitize 规则与 pipeline 内 sanitizeKey 一致:替换 : / 为 _)。orchestrator 只调 ScopedLogger 接口。

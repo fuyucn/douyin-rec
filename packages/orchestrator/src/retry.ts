@@ -9,6 +9,8 @@ export interface RetryOpts {
   sleep?: (ms: number) => Promise<void>;
   /** 每次失败(还会重试时)回调,attempt 从 1 计。 */
   onRetry?: (attempt: number, err: unknown) => void;
+  /** 返回 false 时不再重试,直接抛最后一次错误(用于「结果不确定、重试会重复副作用」的错误)。 */
+  shouldRetry?: (err: unknown) => boolean;
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -30,6 +32,7 @@ export async function retry<T>(fn: () => Promise<T>, opts: RetryOpts = {}): Prom
     } catch (err) {
       lastErr = err;
       if (isJobAbort(err) || attempt >= tries) break;
+      if (opts.shouldRetry && !opts.shouldRetry(err)) break;
       opts.onRetry?.(attempt, err);
       await sleep(backoffMs * 2 ** (attempt - 1));
     }

@@ -34,6 +34,50 @@ describe("P1→append", () => {
     expect(calls[1]).toContain("txa");
   });
 
+  it("appendGroup：countParts 显示分P 已增加 → 视为成功,不再换线重试(幂等)", async () => {
+    const calls: string[][] = [];
+    const run = async (argv: string[]): Promise<string> => {
+      calls.push(argv);
+      throw new Error("biliup 失败 (rc=1): connection error uploader.rs:557 start=0 end=1024");
+    };
+    const counts = [1, 2]; // before=1 → after=2:服务端其实已追加
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run, lines: ["alia", "txa"],
+      countParts: async () => counts.shift() ?? 2,
+    });
+    expect(calls).toHaveLength(1); // 没有换到第二条线路
+  });
+
+  it("appendGroup：countParts 无法确认 → 抛 ambiguous 且不换线(调用方不得重试)", async () => {
+    const calls: string[][] = [];
+    const run = async (argv: string[]): Promise<string> => {
+      calls.push(argv);
+      throw new Error("biliup 失败 (rc=1): connection error uploader.rs:557 start=0 end=1024");
+    };
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run, lines: ["alia", "txa"],
+      countParts: async () => null,
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("appendGroup：countParts 确认未提交 → 继续换线(安全重试)", async () => {
+    const calls: string[][] = [];
+    const run = async (argv: string[]): Promise<string> => {
+      calls.push(argv);
+      if (argv.includes("alia")) {
+        throw new Error("biliup 失败 (rc=1): connection error uploader.rs:557 start=0 end=1024");
+      }
+      return "appended";
+    };
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run, lines: ["alia", "txa"],
+      countParts: async () => 1, // before=after=1 → 未提交
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain("txa");
+  });
+
   it("uploadThenAppend：先传 plain 拿 BV，再 append 两个分P", async () => {
     const calls: string[][] = [];
     const run = async (argv: string[]): Promise<string> => {

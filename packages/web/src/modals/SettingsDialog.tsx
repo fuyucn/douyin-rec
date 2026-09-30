@@ -49,6 +49,8 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   });
   const [savingNotif, setSavingNotif] = useState(false);
   const [webhook, setWebhook] = useState("");
+  /** 后端是否已保存全局 webhook(原文不回显,只看这个标记)。 */
+  const [hasWebhook, setHasWebhook] = useState(false);
   const [savingHook, setSavingHook] = useState(false);
   const [testingHook, setTestingHook] = useState(false);
   const [mesioPath, setMesioPath] = useState("");
@@ -68,7 +70,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     void api.getCookies().then((r) => setCookieStatuses(r.platforms)).catch(() => {});
     void api.getBiliupStatus().then(setBiliupAuth).catch(() => setBiliupAuth(null));
     void api.getNotifSettings().then((r) => setWebhookToggles(r)).catch(() => {});
-    void api.getWebhook().then((r) => setWebhook(r.webhook)).catch(() => {});
+    void api.getWebhook().then((r) => { setHasWebhook(r.hasWebhook); setWebhook(""); }).catch(() => {});
     void api.getMesioPath().then((r) => { setMesioPath(r.mesioPath); setMesioDefault(r.default); }).catch(() => {});
     void api
       .getTimezone()
@@ -90,7 +92,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     setWebhookToggles((s) => ({ ...s, [key]: on }));
   };
 
-  const webhookConfigured = webhook.trim().length > 0;
+  const webhookConfigured = hasWebhook;
 
   const saveNotif = async (): Promise<void> => {
     setSavingNotif(true);
@@ -107,11 +109,28 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   };
 
   const saveWebhook = async (): Promise<void> => {
+    const v = webhook.trim();
+    if (!v) { toast(t("settings.webhookKeepHint"), "info"); return; } // 留空 = 保持原值(不回显,避免误清)
     setSavingHook(true);
     try {
-      const r = await api.setWebhook(webhook.trim());
-      setWebhook(r.webhook);
+      const r = await api.setWebhook(v);
+      setHasWebhook(r.hasWebhook);
+      setWebhook("");
       toast(t("settings.webhookSaved"), "success");
+    } catch (e) {
+      toast(t("settings.webhookFailed", { msg: errMessage(e) }), "error");
+    } finally {
+      setSavingHook(false);
+    }
+  };
+
+  const clearWebhook = async (): Promise<void> => {
+    setSavingHook(true);
+    try {
+      const r = await api.setWebhook("");
+      setHasWebhook(r.hasWebhook);
+      setWebhook("");
+      toast(t("settings.webhookCleared"), "info");
     } catch (e) {
       toast(t("settings.webhookFailed", { msg: errMessage(e) }), "error");
     } finally {
@@ -385,24 +404,31 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
           <div className="flex gap-2">
             <input
               className="input flex-1 font-mono text-xs"
-              placeholder={t("settings.webhookPlaceholder")}
+              placeholder={hasWebhook ? t("settings.webhookPlaceholderSet") : t("settings.webhookPlaceholder")}
               value={webhook}
               onChange={(e) => setWebhook(e.target.value)}
             />
             <Button small onClick={() => void saveWebhook()} disabled={savingHook} loading={savingHook}>
               {t("common.save")}
             </Button>
+            {hasWebhook && (
+              <Button small variant="secondary" onClick={() => void clearWebhook()} disabled={savingHook}>
+                {t("settings.webhookClear")}
+              </Button>
+            )}
             <Button
               small
               variant="secondary"
               onClick={() => void testWebhook()}
-              disabled={testingHook || !webhook.trim()}
+              disabled={testingHook || !hasWebhook}
               loading={testingHook}
             >
               {t("settings.webhookTest")}
             </Button>
           </div>
-          <p className="mt-1 text-xs text-muted-soft">{t("settings.webhookHint")}</p>
+          <p className="mt-1 text-xs text-muted-soft">
+            {hasWebhook ? t("settings.webhookHintSet") : t("settings.webhookHint")}
+          </p>
         
           </section>
 

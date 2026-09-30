@@ -29,6 +29,15 @@ describe("retry", () => {
     expect(fn).toHaveBeenCalledTimes(3);
   });
 
+  it("shouldRetry=false → 立即停止重试(用于结果不确定、重试会重复副作用的错误)", async () => {
+    const fn = vi.fn().mockRejectedValue(new Error("[append-ambiguous] 请人工核对"));
+    const onRetry = vi.fn();
+    await expect(retry(fn, { tries: 5, sleep: noSleep, onRetry, shouldRetry: (e) => !String((e as Error).message).includes("append-ambiguous") }))
+      .rejects.toThrow("append-ambiguous");
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
   it("tries<=1 → 只调一次,不重试", async () => {
     const fn = vi.fn().mockRejectedValue(new Error("boom"));
     await expect(retry(fn, { tries: 1, sleep: noSleep })).rejects.toThrow("boom");

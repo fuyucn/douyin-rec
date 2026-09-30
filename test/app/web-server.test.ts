@@ -14,7 +14,7 @@ import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
-import { createWebServer, matchRoute } from "../../packages/app/src/web/server.js";
+import { apiAuthOk, createWebServer, isLoopbackAddr, matchRoute } from "../../packages/app/src/web/server.js";
 import type { ManagerLike } from "../../packages/app/src/web/api.js";
 
 class MockManager implements ManagerLike {
@@ -52,6 +52,12 @@ class MockManager implements ManagerLike {
 }
 
 describe("matchRoute", () => {
+  it("非法 percent 编码 → 不匹配(而不是抛 URIError 崩进程)", () => {
+    expect(matchRoute("GET", "/api/hub/jobs/%/log")).toBeNull();
+    expect(matchRoute("POST", "/api/hub/jobs/%E0%A4%A/retry-node")).toBeNull();
+    expect(matchRoute("GET", "/api/hub/jobs/douyin:1:2026-01-01/log")).toMatchObject({ name: "getHubJobLog" });
+  });
+
   it("routes the api surface with :id extraction", () => {
     expect(matchRoute("GET", "/")?.name).toBe("index");
     expect(matchRoute("GET", "/api/tasks")?.name).toBe("listTasks");
@@ -140,6 +146,29 @@ describe("matchRoute", () => {
   });
 });
 
+describe("apiAuthOk(纯函数)", () => {
+  it("未配置 token → 放行(向后兼容)", () => {
+    expect(apiAuthOk({ token: "", remoteAddress: "203.0.113.9" })).toBe(true);
+  });
+  it("本机(loopback)免鉴权", () => {
+    expect(apiAuthOk({ token: "t", remoteAddress: "127.0.0.1" })).toBe(true);
+    expect(apiAuthOk({ token: "t", remoteAddress: "::ffff:127.0.0.1" })).toBe(true);
+    expect(apiAuthOk({ token: "t", remoteAddress: "::1" })).toBe(true);
+  });
+  it("非本机必须带正确的 Bearer 或 ?token=", () => {
+    const ip = "10.0.10.99";
+    expect(apiAuthOk({ token: "t", remoteAddress: ip })).toBe(false);
+    expect(apiAuthOk({ token: "t", remoteAddress: ip, authHeader: "Bearer wrong" })).toBe(false);
+    expect(apiAuthOk({ token: "t", remoteAddress: ip, authHeader: "Bearer t" })).toBe(true);
+    expect(apiAuthOk({ token: "t", remoteAddress: ip, queryToken: "t" })).toBe(true);
+  });
+  it("isLoopbackAddr 判定", () => {
+    expect(isLoopbackAddr("127.0.0.1")).toBe(true);
+    expect(isLoopbackAddr("10.0.0.2")).toBe(false);
+    expect(isLoopbackAddr(undefined)).toBe(false);
+  });
+});
+
 describe("createWebServer (live)", () => {
   let store: TaskStore;
   let server: Server;
@@ -196,6 +225,33 @@ describe("createWebServer (live)", () => {
     const t = (await res.json()) as { id: number; room: string };
     expect(t.room).toBe("https://live.douyin.com/222");
     expect(store.getTask(t.id)).not.toBeNull();
+  });
+
+  it("非法 percent 编码 → 400,且服务仍存活(修复远端 DoS)", async () => {
+    const bad = await fetch(`${base}/api/hub/jobs/%/log`);
+    expect(bad.status).toBe(400);
+    const ok = await fetch(`${base}/api/tasks`);
+    expect(ok.status).toBe(200); // 进程没被打死
+  });
+
+  it("配置了 apiToken 时,本机(loopback)仍免鉴权", async () => {
+    const srv = createWebServer({
+      store: new TaskStore(":memory:"),
+      manager: new MockManager(),
+      log: () => {},
+      resolveAnchor: async () => null,
+      resolveShortUrl: async () => null,
+      hubDir: mkdtempSync(join(tmpdir(), "web-hub-token-")),
+      apiToken: "secret-token",
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as AddressInfo).port;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/tasks`);
+      expect(res.status).toBe(200);
+    } finally {
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
   });
 
   it("POST /api/tasks with bad json → 400", async () => {

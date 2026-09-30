@@ -1,7 +1,7 @@
 // ts/src/core/upload/biliup.ts
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { registerChild, throwIfAborted, type UploadLine, type UploadOpts } from "@drec/core";
+import { APPEND_AMBIGUOUS_MARKER, registerChild, throwIfAborted, type UploadLine, type UploadOpts } from "@drec/core";
 import { rootBiliupCookies } from "../paths.js";
 
 // 契约在 core(orchestrator 也要用,不能让 L4.5 反向依赖 L4);这里 re-export 保持既有调用点不变。
@@ -181,8 +181,38 @@ export async function uploadPlain(o: {
   throw new Error(`upload plain 上传线路均失败 (${tried.join(",")}): ${String((last as Error)?.message ?? last)}`);
 }
 
-/** 追加一个逻辑组到已建稿件(空组跳过)。多组必须**串行**调用(同稿件并发 append 会撞)。
- *  public 透传给 buildAppendArgs,保证追加分 P 时保留 P1 的可见性/水印设置。 */
+/**
+ * B 站稿件当前分 P 数(append 幂等判定用)。任何异常/无权限/风控 → null(= 无法确认)。
+ * 注意:稿件是"仅自己可见"时匿名查不到,必须带上传者 cookie。
+ */
+export async function countVideoParts(bv: string, cookiesPath: string): Promise<number | null> {
+  try {
+    const cookie = readBiliupCookieHeader(cookiesPath);
+    const res = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bv)}`, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0 Safari/537.36",
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+    });
+    if (!res.ok) return null;
+    const j = (await res.json()) as { code?: number; data?: { pages?: unknown[] } };
+    if (j?.code !== 0) return null;
+    return Array.isArray(j.data?.pages) ? j.data.pages.length : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 追加一个逻辑组到已建稿件(空组跳过)。多组必须**串行**调用(同稿件并发 append 会撞)。
+ * public 透传给 buildAppendArgs,保证追加分 P 时保留 P1 的可见性/水印设置。
+ *
+ * **幂等**:传入 `countParts`(生产由此前的分 P 数查询提供)时,失败后会重新查询分 P 数:
+ *   变多 → 服务端其实已追加成功(直接返回,不再重试);
+ *   未变 → 确认未提交,安全换线;
+ *   查不到 → 结果不确定,抛 APPEND_AMBIGUOUS_MARKER(调用方不得自动重试,转人工)。
+ * 不传 countParts → 保持旧行为(仅换线,不判定)。
+ */
 export async function appendGroup(o: {
   cookies: string;
   bv: string;
@@ -191,11 +221,14 @@ export async function appendGroup(o: {
   line?: UploadLine;
   lines?: readonly UploadLine[];
   run?: (argv: string[]) => Promise<string>;
+  /** 查询当前分 P 数;返回 null = 无法确认。 */
+  countParts?: () => Promise<number | null>;
 }): Promise<void> {
   if (o.files.length === 0) return;
   const run = o.run ?? runBiliup;
   const tried: UploadLine[] = [];
   let last: unknown;
+  const before = o.countParts ? await o.countParts().catch(() => null) : null;
   for (const line of uploadLineCandidates(o.line, o.lines)) {
     tried.push(line);
     try {
@@ -204,6 +237,16 @@ export async function appendGroup(o: {
     } catch (e) {
       last = e;
       if (!isRetryableLineError(e)) throw e;
+      if (o.countParts) {
+        const after = await o.countParts().catch(() => null);
+        if (before != null && after != null) {
+          if (after > before) return;              // 服务端已追加成功(客户端只是没拿到响应)
+        } else {
+          throw new Error(
+            `${APPEND_AMBIGUOUS_MARKER} append 失败且无法确认是否已提交(可能已追加分P),请人工核对稿件: ${String((e as Error)?.message ?? e)}`,
+          );
+        }
+      }
     }
   }
   throw new Error(`append 上传线路均失败 (${tried.join(",")}): ${String((last as Error)?.message ?? last)}`);

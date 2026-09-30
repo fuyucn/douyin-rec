@@ -3,7 +3,7 @@ import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
 import { humanBytes } from "./format.js";
-import { isJobAbort, throwIfAborted, USER_STOP } from "@drec/core";
+import { isAppendAmbiguous, isJobAbort, throwIfAborted, USER_STOP } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 
@@ -315,6 +315,8 @@ async function appendGroupSafe(o: {
     tries,
     backoffMs: 60_000,
     sleep: o.deps.sleep,
+    // append 结果不确定(可能已提交)→ 绝不重试,直接转人工(否则会重复分P)。
+    shouldRetry: (err) => !isAppendAmbiguous(err),
     onRetry: (attempt, err) =>
       o.log(`append ${o.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
   });

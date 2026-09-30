@@ -175,7 +175,12 @@ export function matchRoute(method: string, pathname: string): RouteMatch | null 
     const match: RouteMatch = { name: route.name };
     if (route.needsBody) match.needsBody = true;
     if (route.param && m[1] !== undefined) {
-      const raw = route.decode ? decodeURIComponent(m[1]) : m[1];
+      let raw = m[1];
+      if (route.decode) {
+        // 非法 percent 编码(如 "%")不能让 URIError 冒泡出去 —— 调用方在 try 之外调 matchRoute,
+        // 冒泡会变成 unhandled rejection 并**终止进程**(远端 DoS)。这里当作不匹配,server 侧回 400。
+        try { raw = decodeURIComponent(m[1]); } catch { return null; }
+      }
       if (route.param === "id") match.id = Number(raw);
       else if (route.param === "sid") match.sid = raw;
       else match.slug = raw;
@@ -207,6 +212,12 @@ export interface WebServerDeps {
   syncDbPath?: string;
   /** hub.config.json 路径;省略回落 rootHubConfig()。 */
   hubConfigPath?: string;
+  /**
+   * Web API token。设置后:非本机(loopback)的 /api/* 请求必须带
+   * `Authorization: Bearer <token>` 或 `?token=<token>`;本机请求免鉴权(脚本/本地浏览器)。
+   * 省略 = 读 env DOUYIN_REC_API_TOKEN;都没有 → 不启用鉴权(会打一条警告)。
+   */
+  apiToken?: string;
   /** biliup cookies.json 路径;省略回落应用默认路径。 */
   biliupCookiesPath?: string;
   /** 连接测试(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
@@ -242,8 +253,26 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /** 本机回环调用判定:内部自动化(_apply-tasks)停受管任务的唯一可信通道。 */
-function isLoopback(addr: string | undefined): boolean {
+export function isLoopbackAddr(addr: string | undefined): boolean {
   return addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
+}
+
+/**
+ * API 鉴权判定(纯函数,便于单测):
+ * - 未配置 token → 放行(向后兼容;启动时会打警告)。
+ * - 本机(loopback)→ 放行(本地脚本/浏览器无需带 token)。
+ * - 其余来源必须带 `Authorization: Bearer <token>` 或 `?token=<token>`。
+ */
+export function apiAuthOk(i: {
+  token: string;
+  remoteAddress?: string;
+  authHeader?: string | null;
+  queryToken?: string | null;
+}): boolean {
+  if (!i.token) return true;
+  if (isLoopbackAddr(i.remoteAddress)) return true;
+  const bearer = (i.authHeader ?? "").replace(/^Bearer\s+/i, "").trim();
+  return bearer === i.token || (i.queryToken ?? "") === i.token;
 }
 
 function sendHtml(res: ServerResponse, status: number, html: string): void {
@@ -292,7 +321,7 @@ async function dispatch(
     case "startTask":
       return api.startTask(match.id!);
     case "stopTask":
-      return api.stopTask(match.id!, { internal: isLoopback(req.socket.remoteAddress) });
+      return api.stopTask(match.id!, { internal: isLoopbackAddr(req.socket.remoteAddress) });
     case "startLogin": {
       const body = (await readJson(req)) as { platform?: string };
       return api.startLogin(body ?? {});
@@ -429,6 +458,11 @@ async function dispatch(
 /** Build (but don't listen on) the http server. Caller calls .listen(). */
 export function createWebServer(deps: WebServerDeps): Server {
   const log = deps.log ?? ((m: string): void => console.log(m));
+  // API token:显式注入 > env。未配置 → 不启用鉴权(向后兼容),但启动时明确警告。
+  const apiToken = (deps.apiToken ?? process.env.DOUYIN_REC_API_TOKEN ?? "").trim();
+  if (!apiToken) {
+    log("[web_server] ⚠ DOUYIN_REC_API_TOKEN 未设置:Web API 无鉴权,能访问该端口的机器都可控制本服务");
+  }
   const api = makeApi({
     store: deps.store,
     manager: deps.manager,
@@ -458,7 +492,24 @@ export function createWebServer(deps: WebServerDeps): Server {
   return createServer((req, res) => {
     void (async (): Promise<void> => {
       const method = req.method ?? "GET";
-      const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+      let url: URL;
+      try {
+        url = new URL(req.url ?? "/", "http://localhost");
+        decodeURIComponent(url.pathname); // 非法 percent 编码 → 400,别让 URIError 崩掉进程
+      } catch {
+        sendJson(res, 400, { error: "URL 编码非法" });
+        return;
+      }
+      const pathname = url.pathname;
+      if (pathname.startsWith("/api/") && !apiAuthOk({
+        token: apiToken,
+        remoteAddress: req.socket.remoteAddress,
+        authHeader: req.headers.authorization,
+        queryToken: url.searchParams.get("token"),
+      })) {
+        sendJson(res, 401, { error: "未授权:需要 API token(Authorization: Bearer <token> 或 ?token=<token>)" });
+        return;
+      }
       const match = matchRoute(method, pathname);
 
       if (!match) {

@@ -20,3 +20,13 @@ export interface UploadOpts {
   desc?: string;
   line?: UploadLine;
 }
+
+/**
+ * append(追分P)结果**不确定**的标记:请求已发出但客户端没拿到成功响应(超时/断连),
+ * 服务端可能已经追加成功。调用方**不得自动重试**(会重复分P),应转人工核对。
+ */
+export const APPEND_AMBIGUOUS_MARKER = "[append-ambiguous]";
+
+export function isAppendAmbiguous(err: unknown): boolean {
+  return String((err as Error)?.message ?? err).includes(APPEND_AMBIGUOUS_MARKER);
+}

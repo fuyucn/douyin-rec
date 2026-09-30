@@ -771,12 +771,12 @@ describe("GET /api/events", () => {
 });
 
 describe("全局 webhook 端点", () => {
-  it("get 默认空;set 持久化 + 回读;set 空串清除", () => {
-    expect((api.getWebhook().body as { webhook: string }).webhook).toBe("");
-    expect((api.setWebhook({ webhook: " https://discord/api/webhooks/x " }).body as { webhook: string }).webhook).toBe("https://discord/api/webhooks/x");
-    expect((api.getWebhook().body as { webhook: string }).webhook).toBe("https://discord/api/webhooks/x");
-    expect(store.getSetting("discordWebhook")).toBe("https://discord/api/webhooks/x");
-    expect((api.setWebhook({ webhook: "" }).body as { webhook: string }).webhook).toBe("");
+  it("get 不回显原文(只报 hasWebhook);set 持久化;set 空串清除", () => {
+    expect(api.getWebhook().body).toEqual({ webhook: "", hasWebhook: false });
+    expect(api.setWebhook({ webhook: " https://discord/api/webhooks/x " }).body).toEqual({ webhook: "", hasWebhook: true });
+    expect(api.getWebhook().body).toEqual({ webhook: "", hasWebhook: true }); // 原文永不回显
+    expect(store.getSetting("discordWebhook")).toBe("https://discord/api/webhooks/x"); // 落库仍是原值
+    expect(api.setWebhook({ webhook: "" }).body).toEqual({ webhook: "", hasWebhook: false });
   });
 });
 

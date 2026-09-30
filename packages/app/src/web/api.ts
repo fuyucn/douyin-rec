@@ -296,9 +296,9 @@ export interface Api {
   clearCookie(platform?: string): ApiResult;
   /** GET /api/biliup/status — biliup 上传登录态(独立于录制 Cookie)。 */
   getBiliupStatus(): ApiResult;
-  /** GET /api/webhook — global Discord webhook (settings.discordWebhook). */
+  /** GET /api/webhook — 全局 Discord webhook 是否已配置(**不回显原文**,webhook URL 是凭证)。 */
   getWebhook(): ApiResult;
-  /** POST /api/webhook { webhook } — set/clear the global Discord webhook. */
+  /** POST /api/webhook { webhook } — set/clear the global Discord webhook(空串=清除)。 */
   setWebhook(input: { webhook?: string }): ApiResult;
   /** POST /api/webhook/test { content } — 把 content 发到已保存的全局 webhook(走真实 Discord POST 路径)。 */
   testWebhook(input: { content?: string }): Promise<ApiResult>;
@@ -750,14 +750,17 @@ export function makeApi(deps: ApiDeps): Api {
     },
 
     getWebhook(): ApiResult {
-      return { status: 200, body: { webhook: store.getSetting("discordWebhook") ?? "" } };
+      // webhook URL 本身是凭证:接口不回显原文,只告知是否已配置(覆盖时整段粘贴新的)。
+      const set = (store.getSetting("discordWebhook") ?? "").trim().length > 0;
+      return { status: 200, body: { webhook: "", hasWebhook: set } };
     },
 
     setWebhook(input: { webhook?: string }): ApiResult {
       // 全局 Discord webhook(任务未自带时回落)。空串=清除。注:CLI --discord-webhook / env
       // DISCORD_WEBHOOK 若设置会优先于此(见 cli-task globalHook)。
       store.setSetting("discordWebhook", (input.webhook ?? "").trim());
-      return { status: 200, body: { webhook: store.getSetting("discordWebhook") ?? "" } };
+      const set = (store.getSetting("discordWebhook") ?? "").trim().length > 0;
+      return { status: 200, body: { webhook: "", hasWebhook: set } };
     },
 
     /** GET /api/notif-settings — 每类提醒的 webhook(Discord)开关(设置表,缺省全关)。 */

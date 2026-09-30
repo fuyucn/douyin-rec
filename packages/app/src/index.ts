@@ -29,6 +29,6 @@ export {
   WEBHOOK_TOGGLES_ENV,
 } from "@drec/observability";
 export type { NotifKey, NotifWebhookToggles } from "@drec/observability";
-export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, uploadThenAppendGroups, uploadPlain, appendGroup, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
+export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, uploadThenAppendGroups, uploadPlain, appendGroup, countVideoParts, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
 export type { UploadOpts } from "./upload/biliup.js";
 export { fetchAnchorName, resolveShortUrl } from "./anchor.js";

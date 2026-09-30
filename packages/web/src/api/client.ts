@@ -58,10 +58,34 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * API token(可选的 Web API 鉴权):URL `?token=` 优先(取一次后存 localStorage 并从地址栏移除),
+ * 其次 localStorage。本机访问后端免鉴权;局域网/远程访问需带 token。
+ */
+function readApiToken(): string {
+  try {
+    const url = new URL(window.location.href);
+    const fromUrl = url.searchParams.get("token");
+    if (fromUrl) {
+      localStorage.setItem("drec_api_token", fromUrl);
+      url.searchParams.delete("token");
+      window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+      return fromUrl;
+    }
+    return localStorage.getItem("drec_api_token") ?? "";
+  } catch {
+    return "";
+  }
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers["content-type"] = "application/json";
+  const token = readApiToken();
+  if (token) headers.authorization = `Bearer ${token}`;
   const res = await fetch(path, {
     method,
-    headers: body !== undefined ? { "content-type": "application/json" } : undefined,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   let data: unknown = null;
@@ -157,8 +181,10 @@ export const api = {
   getBiliupStatus: (): Promise<BiliupAuthStatus> => request("GET", "/api/biliup/status"),
 
   // ── 全局 Discord webhook ────────────────────────────────────────────────────
-  getWebhook: (): Promise<{ webhook: string }> => request("GET", "/api/webhook"),
-  setWebhook: (webhook: string): Promise<{ webhook: string }> => request("POST", "/api/webhook", { webhook }),
+  /** webhook 原文不回显(凭证);webhook 字段恒为空,只看 hasWebhook。 */
+  getWebhook: (): Promise<{ webhook: string; hasWebhook: boolean }> => request("GET", "/api/webhook"),
+  setWebhook: (webhook: string): Promise<{ webhook: string; hasWebhook: boolean }> =>
+    request("POST", "/api/webhook", { webhook }),
   testWebhook: (content: string): Promise<{ ok: boolean; code: number }> =>
     request("POST", "/api/webhook/test", { content }),
 

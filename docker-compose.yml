@@ -61,6 +61,8 @@ services:
       BILIUP_UPLOAD_LINE: ${BILIUP_UPLOAD_LINE:-}
       BILIUP_UPLOAD_LINES: ${BILIUP_UPLOAD_LINES:-}
       DOUYIN_REC_STATIC: /app/web/dist
+      # Web API token(可选):设置后局域网/远程访问 /api/* 需带 token,本机免鉴权。
+      DOUYIN_REC_API_TOKEN: ${DOUYIN_REC_API_TOKEN:-}
       # 可选 Discord 通知 webhook。
       DISCORD_WEBHOOK: ${DISCORD_WEBHOOK:-}
     volumes:
