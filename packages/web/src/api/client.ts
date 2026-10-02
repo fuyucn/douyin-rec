@@ -58,34 +58,10 @@ export class ApiError extends Error {
   }
 }
 
-/**
- * API token(可选的 Web API 鉴权):URL `?token=` 优先(取一次后存 localStorage 并从地址栏移除),
- * 其次 localStorage。本机访问后端免鉴权;局域网/远程访问需带 token。
- */
-function readApiToken(): string {
-  try {
-    const url = new URL(window.location.href);
-    const fromUrl = url.searchParams.get("token");
-    if (fromUrl) {
-      localStorage.setItem("drec_api_token", fromUrl);
-      url.searchParams.delete("token");
-      window.history.replaceState({}, "", url.pathname + url.search + url.hash);
-      return fromUrl;
-    }
-    return localStorage.getItem("drec_api_token") ?? "";
-  } catch {
-    return "";
-  }
-}
-
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = {};
-  if (body !== undefined) headers["content-type"] = "application/json";
-  const token = readApiToken();
-  if (token) headers.authorization = `Bearer ${token}`;
   const res = await fetch(path, {
     method,
-    headers: Object.keys(headers).length > 0 ? headers : undefined,
+    headers: body !== undefined ? { "content-type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   let data: unknown = null;
