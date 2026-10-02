@@ -8,13 +8,17 @@ RUN npm install -g pnpm@10
 WORKDIR /app
 
 # 根依赖（供 esbuild 打包）。pnpm workspace：install 需要全部 packages/*/package.json
-# 才能解析 workspace 依赖(@drec/*)+ 装齐第三方(axios/sm-crypto…)，故先拷 packages 再 install。
-# (packages/web 被 pnpm-workspace.yaml 的 !packages/web 排除，根 install 不碰它，下面单独装。)
+# 才能解析 workspace 依赖(@drec/*)+ 装齐第三方(axios/sm-crypto…)。
+# **只拷清单，源码在 install 之后再拷** —— 否则改一行源码就让 pnpm install 这层失效，
+# 每次 rebuild 都要重装依赖并产出新的 ~2GB 层（持续开发空间越用越大、构建越来越慢）。
+# --parents 保留 packages/<pkg>/ 目录结构（需要 Dockerfile frontend 1.7+，见首行 syntax）。
 # 注：当前无 pnpm patch（取流/弹幕依赖均已 vendored 进各自包源码），故不再 COPY patches。
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY packages ./packages
+COPY --parents packages/*/package.json ./
 RUN pnpm install --frozen-lockfile
 
+# ---- 源码（下面的改动只影响这些层）----
+COPY packages ./packages
 # 根源码 → 打包单文件 dist/douyin-rec.mjs。
 # 版本号:容器内无 .git/git,由 GIT_SHA build-arg 注入(esbuild.config.mjs 读 ENV);
 # 部署命令传 --build-arg(见 docker-compose.yml build.args)。未传 → 版本回落 0.0.0-dev。
@@ -27,7 +31,8 @@ COPY assets ./assets
 COPY configs ./configs
 RUN pnpm bundle
 
-# 前端是独立 pnpm 工程（已随 COPY packages 拷入）：在自己目录 install + build。
+# 前端是独立 pnpm 工程(自带 lockfile,被 workspace 排除):源码随上面的 COPY 拷入后
+# install + build。web 的依赖量远小于根依赖,不额外拆层(拆开会让 node_modules 跨层丢失)。
 RUN cd packages/web && pnpm install --frozen-lockfile && pnpm build
 
 # ---- runtime ----
