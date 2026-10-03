@@ -580,8 +580,9 @@ async function runSegmentPipeline(o: {
       uploadParts.push({ index: gi, plain: members[0].plain, window: spanWindow(members), memberPlains: [members[0].plain] });
       continue;
     }
-    const stem = segmentStem(dateName, members[0].index);
-    const merged = path.join(stageSub, stem + ".mp4");
+    // 组产物用独立 `_g{N}` 命名,绝不能与成员段同名 —— 否则 existsSync 命中第一个成员段,
+    // 合并被静默跳过、实际只传了那一小段(踩过坑:组 0 的合并被跳到,传了 438s 的 seg000)。
+    const merged = path.join(stageSub, `${dateName}_g${String(gi).padStart(3, "0")}.mp4`);
     if (!existsSync(merged)) {
       jlog(`合并组 ${gi}: ${members.length} 段(≈${Math.round(members.reduce((n, m) => n + (m.durSec ?? 0), 0))}s)→ ${path.basename(merged)}`);
       await mergeGroup(members.map((m) => m.plain), merged);

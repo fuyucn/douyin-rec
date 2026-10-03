@@ -223,6 +223,28 @@ describe("runPipeline", () => {
       expect(allFiles.filter((f) => /_seg\d+\.mp4$/.test(f)).length).toBe(1); // 只剩 seg001 plain
       deps.ledger.close();
     });
+
+    it("segmentGroupSec:按目标时长聚组,组产物名不与成员段冲突(回归)", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"] }) }]);
+      const deps = segmentDeps();
+      const merges: Array<{ inputs: string[]; out: string }> = [];
+      (deps as { mergeSegments: (i: string[], o: string) => Promise<void> }).mergeSegments =
+        async (inputs: string[], out: string) => { merges.push({ inputs, out }); writeFileSync(out, "x"); };
+      (deps as { cfg: PipelineCfg }).cfg = { ...deps.cfg, segmentGroupSec: 3600 }; // 3×60s 全并成 1 组
+      deps.ledger.upsertPending(broadcast.streamKey);
+
+      const result = await runPipeline(broadcast, deps);
+
+      expect(result.state).toBe("done");
+      // 合并确实发生了(而不是被 existsSync 跳过)
+      expect(merges).toHaveLength(1);
+      expect(merges[0].inputs).toHaveLength(3);
+      // 组产物名含 _g000,不与成员段 seg000.mp4 同名
+      expect(merges[0].out).toMatch(/_g000\.mp4$/);
+      // 上传的是合并产物,不是单个成员段
+      expect((deps.uploadPlain as Mock).mock.calls[0][0].video).toMatch(/_g000\.mp4$/);
+      deps.ledger.close();
+    });
   });
 
   it("makeRunLogger 注入 → job.log 经该 ScopedLogger 写入(不直接 appendFileSync)", async () => {
