@@ -26,8 +26,7 @@ jobs:
           node-version: 24
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
+        # 版本不写死在这里：pnpm/action-setup@v4 自动读 package.json 的 packageManager 字段。
 
       - name: "Install (root)"
         run: pnpm install --frozen-lockfile

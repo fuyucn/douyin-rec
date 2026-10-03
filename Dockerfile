@@ -4,8 +4,11 @@
 
 # ---- builder ----
 FROM node:24-bookworm-slim AS builder
-RUN npm install -g pnpm@10
 WORKDIR /app
+# pnpm 版本只在 root package.json 的 packageManager 字段声明一处（CI 也读它），corepack 按需取用。
+# 非 TTY 下必须关掉 corepack 的下载确认提示，否则它会直接报错退出。
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable
 
 # 根依赖（供 esbuild 打包）。pnpm workspace：install 需要全部 packages/*/package.json
 # 才能解析 workspace 依赖(@drec/*)+ 装齐第三方(axios/sm-crypto…)。
@@ -15,7 +18,7 @@ WORKDIR /app
 # 注：当前无 pnpm patch（取流/弹幕依赖均已 vendored 进各自包源码），故不再 COPY patches。
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY --parents packages/*/package.json ./
-RUN pnpm install --frozen-lockfile
+RUN corepack install && pnpm install --frozen-lockfile
 
 # ---- 源码（下面的改动只影响这些层）----
 COPY packages ./packages

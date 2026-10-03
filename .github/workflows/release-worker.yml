@@ -1,5 +1,8 @@
 name: Release worker
 
+# tag 发布门禁:先跑与 ci.yml 相同的 typecheck + 单测,再校验 tag 与 package.json 版本一致,
+# 最后打包 + 建 Release。任一步失败 → 不产出 Release(避免发布坏产物)。
+
 on:
   push:
     tags:
@@ -18,9 +21,11 @@ jobs:
         with:
           node-version: 24
 
+      # 版本由 package.json 的 packageManager 字段决定(与 ci.yml 同源,不再两处各写一个)。
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Verify tag matches package version
         run: |
@@ -31,14 +36,17 @@ jobs:
             exit 1
           }
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: "Typecheck (root, 13 packages)"
+        run: pnpm typecheck
+
+      - name: "Unit tests (vitest, 含分层守护)"
+        run: pnpm test
 
       - name: Build bundle
         run: pnpm bundle
 
       - name: Build web UI
-        run: cd packages/web && pnpm install --frozen-lockfile && pnpm build
+        run: cd packages/web && pnpm install --frozen-lockfile && pnpm typecheck && pnpm build
 
       - name: Build worker archives
         run: scripts/build-worker-release.sh --version "${GITHUB_REF_NAME#v}" --arch all
