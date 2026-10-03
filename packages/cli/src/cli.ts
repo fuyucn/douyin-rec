@@ -600,6 +600,10 @@ const hubStarter: HubStarter = {
         minBurnFreeMemMB?: number;
         memWaitTimeoutMs?: number;
         staleMs?: number;
+        /** 全局上传队列:B 站按提交次数限流(601)。窗口内最多 uploadRateLimit 次,命中后冷却 uploadCooldownMs。 */
+        uploadRateLimit?: number;
+        uploadRateWindowMs?: number;
+        uploadCooldownMs?: number;
       };
     };
     if (!hubCfg) {
@@ -663,6 +667,9 @@ const hubStarter: HubStarter = {
       maxNetParallel: hubCfg.resources?.maxNetParallel ?? 1,
       minBurnFreeMemMB: hubCfg.resources?.minBurnFreeMemMB ?? 2048,
       memWaitTimeoutMs: hubCfg.resources?.memWaitTimeoutMs ?? 600_000,
+      uploadRateLimit: hubCfg.resources?.uploadRateLimit ?? 5,
+      uploadRateWindowMs: hubCfg.resources?.uploadRateWindowMs ?? 600_000,
+      uploadCooldownMs: hubCfg.resources?.uploadCooldownMs ?? 1_800_000,
     });
     const pipelineDeps = {
       transports,
@@ -735,6 +742,8 @@ const hubStarter: HubStarter = {
         timeZone: (opts.store.getSetting("timezone") ?? "").trim() || process.env.TZ || "Asia/Shanghai",
         steps: p.steps,
         cleanup: p.cleanup,
+        uploadBatchSize: p.uploadBatchSize,
+        minSegmentSec: p.minSegmentSec,
         // worker 硬过滤:reconciler 据此把 broadcast members 收窄到选中的 worker。
         // 缺省/空(老规则)→ reconciler 不过滤 = 全部 worker(向后兼容)。
         workers: rule.workers,

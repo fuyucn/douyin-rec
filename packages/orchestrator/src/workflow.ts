@@ -3,7 +3,7 @@ import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
 import { humanBytes } from "./format.js";
-import { isAppendAmbiguous, isJobAbort, throwIfAborted, USER_STOP } from "@drec/core";
+import { isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 
@@ -15,7 +15,7 @@ export type WorkflowNodeKey = Extract<
   "merge" | "burn_danmu" | "burn_livechat" | "upload_plain" | "append_danmu" | "append_livechat"
 >;
 
-export type ResourceKind = "cpu" | "net" | "none";
+export type ResourceKind = "cpu" | "net" | "upload" | "none";
 export type ArtifactKind = "file" | "dir" | "ref";
 
 /** 节点输入/输出契约;file/dir 检查存在与大小,ref 只检查非空。 */
@@ -217,7 +217,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
       disabled: !willUpload,
       inputs: [{ name: "plain.mp4", kind: "file", required: true, minBytes: 1 }],
       outputs: [{ name: "bv", kind: "ref", required: true }],
-      resource: "net",
+      resource: "upload",
       run: async (c: NodeRunContext): Promise<void> => {
         const bv = await deps.uploadPlain({
           video: products.plain,
@@ -244,7 +244,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         { name: "bv", kind: "ref", required: true },
       ],
       outputs: [{ name: "p2", kind: "ref", required: true }],
-      resource: "net",
+      resource: "upload",
       run: async (c: NodeRunContext): Promise<void> => {
         await runAppendGroup(c, "append_danmu", products.danmuMp4, "p2");
       },
@@ -258,7 +258,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         { name: "p2", kind: "ref", required: appendDanmuOn },
       ],
       outputs: [{ name: "p3", kind: "ref", required: true }],
-      resource: "net",
+      resource: "upload",
       run: async (c: NodeRunContext): Promise<void> => {
         await runAppendGroup(c, "append_livechat", products.livechatMp4, "p3");
       },
@@ -307,7 +307,8 @@ async function appendGroupSafe(o: {
   if (o.files.length === 0) return;
   // B站追加分 P 后稿件会短暂锁定(code 10010),退避 60s*2^n 等锁释放,避免几分钟的
   // 上传白跑 3 次就转人工。多段组无 per-part checkpoint,仍不自动重试(可能已 append 部分)。
-  const tries = o.files.length === 1 ? 5 : 1;
+  // 601(频率限制)与 append 结果无关,应重试;其余多文件组不重试(可能已部分提交)。
+  const tries = o.files.length === 1 ? 5 : 3;
   const fn = (): Promise<void> => o.deps.appendGroup({
     bv: o.bv, files: o.files, cookies: o.deps.cfg.cookies, public: o.isPublic,
   });
@@ -316,7 +317,8 @@ async function appendGroupSafe(o: {
     backoffMs: 60_000,
     sleep: o.deps.sleep,
     // append 结果不确定(可能已提交)→ 绝不重试,直接转人工(否则会重复分P)。
-    shouldRetry: (err) => !isAppendAmbiguous(err),
+    // 601 频率限制 → 重试(队列会先冷却);其余按原规则(不确定结果不重试)。
+    shouldRetry: (err) => isUploadRateLimited(err) || !isAppendAmbiguous(err),
     onRetry: (attempt, err) =>
       o.log(`append ${o.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
   });
@@ -348,6 +350,18 @@ export interface ResourcePoolCfg {
   maxNetParallel?: number;
   minBurnFreeMemMB?: number;
   memWaitTimeoutMs?: number;
+  /**
+   * **全局上传队列**:B 站按「提交次数」限流(`code 601 上传视频过快`),与并发数无关。
+   * 故队列对「每一次提交」做限速:
+   *   - `uploadRateLimit`:窗口内最多提交次数(缺省 5)。
+   *   - `uploadRateWindowMs`:窗口长度 ms(缺省 600000 = 10 分钟)。
+   *   - `uploadCooldownMs`:命中 601 后的冷却 ms(缺省 1800000 = 30 分钟),之后自动重试。
+   * 池子在整个 master 进程内共享 → 多 hub 任务同时收播时上传统一排队,不会叠加打爆频率。
+   * 0/负 关闭该限制。
+   */
+  uploadRateLimit?: number;
+  uploadRateWindowMs?: number;
+  uploadCooldownMs?: number;
 }
 
 class Semaphore {
@@ -386,11 +400,21 @@ export class ResourcePool {
   private cpu: Semaphore;
   private net: Semaphore;
   private streamLocks = new Map<string, Promise<unknown>>();
+  /** 全局上传队列:一条跨所有 streamKey 的串行链 + 上次提交时刻(算最小间隔)。 */
+  private uploadChain: Promise<unknown> = Promise.resolve();
   private minBurnFreeMemMB: number;
   private memWaitTimeoutMs: number;
   private now: () => number;
   private sleep: (ms: number) => Promise<void>;
   private freeMemMB: () => number;
+  /** 上传限速:每次提交时刻滑动窗口(算是否超频)。 */
+  private uploadRateLimit: number;
+  private uploadRateWindowMs: number;
+  private uploadCooldownMs: number;
+  /** 最近若干次提交时刻(窗口内)。 */
+  private uploadTimes: number[] = [];
+  /** 命中 601 后的静默截止时刻(此前的提交一律等到此刻,给 B 站冷却)。 */
+  private uploadBlockedUntil = 0;
 
   constructor(
     cfg: ResourcePoolCfg = {},
@@ -400,6 +424,9 @@ export class ResourcePool {
     this.net = new Semaphore(Math.max(1, cfg.maxNetParallel ?? 1));
     this.minBurnFreeMemMB = cfg.minBurnFreeMemMB ?? 2048;
     this.memWaitTimeoutMs = cfg.memWaitTimeoutMs ?? 600_000;
+    this.uploadRateLimit = Math.max(0, cfg.uploadRateLimit ?? 5);
+    this.uploadRateWindowMs = Math.max(0, cfg.uploadRateWindowMs ?? 600_000);
+    this.uploadCooldownMs = Math.max(0, cfg.uploadCooldownMs ?? 1_800_000);
     this.now = inject.now ?? Date.now;
     this.sleep = inject.sleep ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
     this.freeMemMB = inject.freeMemMB ?? systemFreeMemMB;
@@ -429,6 +456,51 @@ export class ResourcePool {
 
   async withNet<T>(fn: () => Promise<T>): Promise<T> {
     return this.withSemaphore(this.net, fn);
+  }
+
+  /**
+   * **全局上传队列**:所有 hub 任务共用一条串行链,并对「提交次数」限速
+   * (窗口 uploadRateWindowMs 内最多 uploadRateLimit 次);命中 601 后全局冷却 uploadCooldownMs。
+   * 用于 upload_plain / append_*。提交前等足配额;单次提交失败但非 601 → 不惩罚后续提交。
+   */
+  async withUpload<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.uploadChain.then(async (): Promise<T> => {
+      await this._awaitUploadSlot();
+      try {
+        return await fn();
+      } catch (e) {
+        // 601:记录全局冷却,让后续提交(含本次重试)等够时间再打。
+        if (isUploadRateLimited(e)) this.uploadBlockedUntil = Math.max(this.uploadBlockedUntil, this.now() + this.uploadCooldownMs);
+        throw e;
+      }
+    });
+    // 链尾吞掉异常,避免单个失败毒化后续排队者(排队者拿到的仍是原 promise 的 reject)。
+    this.uploadChain = run.catch(() => undefined);
+    return run;
+  }
+
+  /** 等一个上传配额:先过冷却期,再保证滑动窗口内不超过 uploadRateLimit 次。 */
+  private async _awaitUploadSlot(): Promise<void> {
+    // 冷却期独立于次数限制:即使限速关闭,命中 601 后也要等冷却。
+    while (this.uploadBlockedUntil > this.now()) {
+      throwIfAborted();
+      await this.sleep(this.uploadBlockedUntil - this.now());
+    }
+    if (this.uploadRateLimit <= 0) return;
+    for (;;) {
+      throwIfAborted();
+      const now = this.now();
+      if (this.uploadBlockedUntil > now) { await this.sleep(this.uploadBlockedUntil - now); continue; }
+      // 丢弃窗口外的历史提交时刻。
+      const winStart = now - this.uploadRateWindowMs;
+      this.uploadTimes = this.uploadTimes.filter((t) => t > winStart);
+      if (this.uploadTimes.length < this.uploadRateLimit) {
+        this.uploadTimes.push(now);
+        return;
+      }
+      // 超频:睡到最早那次的窗口滑出为止。
+      await this.sleep(this.uploadTimes[0] + this.uploadRateWindowMs - now);
+    }
   }
 
   /** 同一 streamKey 的 pipeline / retryNode 串行,杜绝 reconciler 与手动重跑并发同场。 */
@@ -564,6 +636,7 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
         validateArtifacts(node.outputs, "输出");
       };
       if (node.resource === "cpu") await pool.withCpu(body);
+      else if (node.resource === "upload") await pool.withUpload(body);
       else if (node.resource === "net") await pool.withNet(body);
       else await body();
       ctx.ledger.syncNodeState(streamKey, node.key, "done", { error: null });

@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { isAppendAmbiguous, isJobAbort, resolveOutputStem, runWithJob, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { isAppendAmbiguous, isJobAbort, isUploadRateLimited, resolveOutputStem, runWithJob, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/core";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
@@ -46,6 +46,14 @@ export interface PipelineCfg {
   timeZone?: string;
   steps?: PipelineSteps;
   cleanup?: PipelineCleanup;
+  /** 分段上传:每批 append 的文件数上限(缺省 1 = 单个文件一次提交 → 失败可安全重试)。 */
+  uploadBatchSize?: number;
+  /**
+   * 分段上传:跳过短于该秒数的分段(缺省 2s)。mesio 的 `--fix` 在流不连续时会切出
+   * 0.2s 级、且分辨率不同的初始化残片(无有效内容)——过滤掉,避免污染分 P、白跑上传。
+   * 0 = 不过滤。
+   */
+  minSegmentSec?: number;
   /** reconciler 硬过滤用:非空 → 只处理这些 worker 的录像;缺省/空 = 全部(向后兼容)。pipeline 本身不读。 */
   workers?: string[];
 }
@@ -59,6 +67,8 @@ export interface PipelineDeps {
   sh: (cmd: string) => Promise<void | string>;
   /** 仅上传 plain(P1)拿 BV —— **穿插上传接缝**:pipeline 先 fire 它(网络),与烧录(CPU)并行。 */
   uploadPlain: (plain: UploadOpts) => Promise<string>;
+  /** 分段模式的 P1 建稿(可选):给定时优先于 `uploadPlain`(便于测试注入)。 */
+  uploadPlainRaw?: (plain: UploadOpts) => Promise<string>;
   /** 追加一个逻辑组到稿件(空组跳过)。多组**串行**调用(同稿件并发 append 会撞)。
    *  public 透传 → append 保留 P1 的水印关/可见性(防 append 重置)。 */
   appendGroup: (o: { bv: string; files: string[]; cookies: string; public: boolean }) => Promise<void>;
@@ -118,6 +128,15 @@ async function defaultRmStage(paths: string[]): Promise<void> {
   for (const p of paths) {
     try { rmSync(p, { force: true }); } catch { /* 忽略 */ }
   }
+}
+
+/**
+ * 经**全局上传队列**执行一次上传/append 提交。队列 = master 进程内共享(ResourcePool),
+ * 串行 + 相邻提交最小间隔(uploadMinGapMs)→ 多任务同时收播时排队,且不会瞬时打爆 B 站频率限制。
+ * 无 pool(测试/兼容)则直连。
+ */
+function runUpload<T>(deps: PipelineDeps, fn: () => Promise<T>): Promise<T> {
+  return deps.pool ? deps.pool.withUpload(fn) : fn();
 }
 
 /**
@@ -191,7 +210,8 @@ async function runPipelineInner(
 
   // 续跑:job 已有 bv ⇒ P1 已建稿(不可逆),绝不重传。跳过 select/pull/merge/burn/uploadPlain,只补 append。
   const existing = ledger.get(streamKey);
-  if (cfg.uploadMode === "upload" && existing?.bv) {
+  // 分段模式(bv 已存在)有自己的续跑(含 plain 段 checkpoint),不要走合并路径的 resumeAppends。
+  if (cfg.uploadMode === "upload" && existing?.bv && cfg.steps?.mergeSegments !== false) {
     return await resumeAppends(streamKey, existing.bv, stageSub, deps, jlog);
   }
 
@@ -425,9 +445,6 @@ async function runSegmentPipeline(o: {
 
   // 续跑:已建稿(bv 已落库)→ 只补没做完的 append,绝不重传 plain 组(会重复建稿)。
   const existing = ledger.get(streamKey);
-  if (cfg.uploadMode === "upload" && existing?.bv) {
-    return await resumeSegmentAppends(streamKey, existing.bv, stageSub, deps, jlog, burnDanmu, burnLivechat, isPublic, splitForUpload);
-  }
 
   // 该场各段的 remux 输入(按会话序 → 段序,已由 winnerMembers.tsFiles 保证)。
   const srcSegments = winnerMembers.flatMap((m) => m.rec.tsFiles);
@@ -435,6 +452,26 @@ async function runSegmentPipeline(o: {
     jlog(`分段模式:无可用分段`);
     ledger.markFailed(streamKey, "无可用分段");
     return { state: "failed" };
+  }
+  // 先按碎片阈值算出**本次允许的段号白名单**(原始段序)——主路径与续跑共用,
+  // 确保续跑不会把 stage 里残留的碎片 seg mp4 也当成分段上传(踩过坑)。
+  const probeDurationScan = deps.segmentDuration ?? defaultSegmentDuration;
+  const minSegSecScan = cfg.minSegmentSec ?? 2;
+  const allowedIndices = new Set<number>();
+  {
+    let off = 0;
+    for (let i = 0; i < srcSegments.length; i++) {
+      const localSrc = path.join(stageSub, path.basename(srcSegments[i]));
+      let d = 0;
+      try { d = await probeDurationScan(localSrc); } catch { d = 0; }
+      off += d;
+      if (minSegSecScan > 0 && d > 0 && d < minSegSecScan) continue; // 碎片:不进白名单
+      allowedIndices.add(i);
+    }
+  }
+
+  if (cfg.uploadMode === "upload" && existing?.bv) {
+    return await resumeSegmentAppends(streamKey, existing.bv, stageSub, deps, jlog, burnDanmu, burnLivechat, isPublic, splitForUpload, allowedIndices);
   }
 
   // ── 逐段 remux(merge 节点语义)──
@@ -447,18 +484,29 @@ async function runSegmentPipeline(o: {
   let globalOffset = 0;
   const remux = deps.remuxSegment ?? defaultRemuxSegment;
   const probeDuration = deps.segmentDuration ?? defaultSegmentDuration;
+  const minSegSec = cfg.minSegmentSec ?? 2;
+  let skippedFragments = 0;
   for (let i = 0; i < srcSegments.length; i++) {
     throwIfAborted();
     const remoteSrc = srcSegments[i];
     // pull 后源在 stage 内同名;remux 读本地副本(remote 路径只在 pull 时用过)。
     const localSrc = path.join(stageSub, path.basename(remoteSrc));
-    const stem = segmentStem(dateName, i);
-    const plain = path.join(stageSub, stem + ".mp4");
     let durSec = 0;
     try { durSec = await probeDuration(localSrc); } catch { durSec = 0; }
     // 段窗口(相对整场):从 globalOffset 起 durSec 秒。源缺失时长按 0 计(弹幕可能漂移,但不静默)。
     const startSec = globalOffset;
     globalOffset += durSec;
+    // 碎片过滤:mesio `--fix` 切出的 0.2s 级初始化残片(分辨率不同、无有效内容)→ 不产出。
+    // 仍累加 globalOffset(时长约 0),保证后续段的弹幕窗口对齐。
+    if (minSegSec > 0 && durSec > 0 && durSec < minSegSec) {
+      skippedFragments++;
+      jlog(`跳过碎片段 ${i}: ${path.basename(localSrc)}(${durSec.toFixed(2)}s < ${minSegSec}s)`);
+      continue;
+    }
+    // 文件名保留**原始段序**(不做过滤后重编号):① 重跑/续跑能正确复用已产出的 seg mp4,
+    // 不会因为碎片被跳过后序号前移而去复用一个碎片文件;② 分 P 顺序仍由 parts 数组顺序保证。
+    const stem = segmentStem(dateName, i);
+    const plain = path.join(stageSub, stem + ".mp4");
     if (!existsSync(plain)) {
       jlog(`remux 段 ${i}: ${path.basename(localSrc)} → ${path.basename(plain)}`);
       await remux(localSrc, plain);
@@ -480,7 +528,7 @@ async function runSegmentPipeline(o: {
       danmu: "", livechat: "",
     });
   }
-  ledger.logStep(streamKey, "merge", "done", `${parts.length} 段`);
+  ledger.logStep(streamKey, "merge", "done", `${parts.length} 段${skippedFragments ? `(跳过 ${skippedFragments} 碎片)` : ""}`);
   ledger.syncNodeState(streamKey, "merge", "done", { error: null });
 
   // ── 逐段烧录(burn_danmu / burn_livechat 节点语义)──
@@ -536,20 +584,58 @@ async function runSegmentPipeline(o: {
     notify({ kind: "error", stage: "上传", message: `${streamKey} 分段上传无 plain 段产物` });
     return { state: "failed" };
   }
-  jlog(`多文件建稿: ${plainFiles.length} 个 plain 段`);
-  const bv = await deps.uploadPlain({
-    videos: plainFiles,
-    cookies: cfg.cookies,
-    title: dateName,
-    tag: cfg.uploadMeta.tag,
-    tid: cfg.uploadMeta.tid,
-    public: isPublic,
-    desc: cfg.uploadMeta.desc,
-  });
-  ledger.setBv(streamKey, bv); // 建稿成功即刻落库(与合并路径同一幂等边界)
-  ledger.logStep(streamKey, "upload_plain", "done", `${plainFiles.length} 段`);
+  // 提交频率硬上限:一次 `biliup upload` 提交太多文件会触发 B 站 601(上传过快)。
+  // 故 P1 单文件建稿拿 BV → 其余 plain 段分批 append(每批 ≤uploadBatchSize,批间走全局上传队列的间隔)。
+  const batchSize = Math.max(1, cfg.uploadBatchSize ?? 1);
+  const plainOpts = {
+    cookies: cfg.cookies, tag: cfg.uploadMeta.tag, tid: cfg.uploadMeta.tid,
+    public: isPublic, desc: cfg.uploadMeta.desc,
+  };
+  // 分 P checkpoint:每个已成功提交的段都落库(组名 "plain"),续跑据此精确跳过 → 不漏段、不重复。
+  const donePlain = ledger.doneParts(streamKey, "plain");
+  let bv = "";
+  let p1Done = donePlain.has(0) || ledger.get(streamKey)?.bv != null;
+  if (!p1Done) {
+    jlog(`建稿 P1: ${path.basename(plainFiles[0])}(${plainFiles.length} 个 plain 段待传)`);
+    // P1 建稿:可用 `uploadPlain` 建稿接缝(有线路换线),也可注入 `uploadPlainRaw`(测试用)。
+    // 601 频率限制 → 重试(队列会先冷却);其余错误不重试(避免重复建稿)。
+    bv = await retry(
+      () => runUpload(deps, () => deps.uploadPlainRaw
+        ? deps.uploadPlainRaw({ ...plainOpts, video: plainFiles[0], title: dateName })
+        : deps.uploadPlain({ ...plainOpts, video: plainFiles[0], title: dateName })),
+      { tries: 3, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) },
+    );
+    ledger.setBv(streamKey, bv); // 建稿成功即刻落库(与合并路径同一幂等边界)
+    ledger.markPartDone(streamKey, "plain", 0); // P1 = 第 0 段
+    jlog(`建稿完成: ${bv}`);
+  } else {
+    bv = ledger.get(streamKey)?.bv ?? "";
+    jlog(`建稿 P1 已存在,跳过(bv=${bv})`);
+  }
+  if (!bv) {
+    jlog(`分段上传:已标 P1 完成但 bv 为空,转人工`);
+    ledger.setState(streamKey, "needs_manual", { error: "分段上传:P1 已完成但 bv 为空" });
+    return { state: "needs_manual" };
+  }
+  // 其余 plain 段逐个 append(顺序 = 段序)。每个成功即 checkpoint;601 由队列冷却 + retry 吸收。
+  for (let i = 1; i < plainFiles.length; i += batchSize) {
+    const batch: string[] = [];
+    const idxs: number[] = [];
+    for (let j = i; j < Math.min(i + batchSize, plainFiles.length); j++) {
+      if (donePlain.has(j)) continue; // 续跑:已提交的段跳过
+      batch.push(plainFiles[j]); idxs.push(j);
+    }
+    if (batch.length === 0) continue;
+    jlog(`append plain 段 ${idxs.join(",")}: ${batch.length} 文件`);
+    const tries = batch.length === 1 ? 5 : 1;
+    await retry(
+      () => runUpload(deps, () => deps.appendGroup({ ...plainOpts, bv, files: batch })),
+      { tries, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
+    );
+    for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);
+  }
+  ledger.logStep(streamKey, "upload_plain", "done", `P1 + ${plainFiles.length - 1} 段`);
   ledger.syncNodeState(streamKey, "upload_plain", "done", { error: null });
-  jlog(`建稿完成: ${bv}`);
 
   // ── 逐组 append:danmu 各段一组、livechat 各段一组(组内多段一次 append,顺序 = 段序)──
   await appendSegmentGroup(streamKey, bv, "append_danmu", parts.map((p) => p.danmu).filter(existsSync), burnDanmu, deps, jlog, isPublic, splitForUpload);
@@ -607,21 +693,40 @@ async function appendSegmentGroup(
   // 每个产物段再按 16GB 上限切(罕见),展平成最终 append 文件列表(顺序保持)。
   const finalFiles: string[] = [];
   for (const f of files) finalFiles.push(...await splitForUpload(f));
-  jlog(`append ${step}: ${files.length} 段 → ${finalFiles.length} 文件`);
   ledger.logStep(streamKey, step, "start");
   ledger.syncNodeState(streamKey, step, "running");
-  // 单段组就地重试安全;多段组(>16GB 罕见)不重试(可能已部分提交)。分段模式常见多文件 → 保守不重试。
-  const tries = finalFiles.length === 1 ? 5 : 1;
-  await retry(() => deps.appendGroup({ bv, files: finalFiles, cookies: deps.cfg.cookies, public: isPublic }), {
-    tries,
-    backoffMs: 60_000,
-    sleep: deps.sleep,
-    shouldRetry: (err) => !isAppendAmbiguous(err),
-    onRetry: (attempt, err) => jlog(`append ${step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
-  });
-  ledger.logStep(streamKey, step, "done", `${finalFiles.length} 文件`);
+  // 分批 append(每批 ≤uploadBatchSize):每次提交走全局上传队列(限速 + 601 冷却)。
+  // 每组按段号落 checkpoint(sync_parts),续跑精确跳过 → 不漏段、不重复分 P。
+  const batchSize = Math.max(1, deps.cfg.uploadBatchSize ?? 1);
+  const doneParts = ledger.doneParts(streamKey, step);
+  let batches = 0;
+  for (let i = 0; i < finalFiles.length; i += batchSize) {
+    const batch: string[] = []; const idxs: number[] = [];
+    for (let j = i; j < Math.min(i + batchSize, finalFiles.length); j++) {
+      if (doneParts.has(j)) continue;
+      batch.push(finalFiles[j]); idxs.push(j);
+    }
+    if (batch.length === 0) continue;
+    batches++;
+    jlog(`append ${step} 批 ${batches}: ${batch.length} 文件(段 ${idxs.join(",")})`);
+    // 单文件批(默认)→ 601 可安全重试(最多 5 次,每次重新排队 = 走冷却);多文件批不重试(可能已部分提交)。
+    const tries = batch.length === 1 ? 5 : 1;
+    // retry 包在 runUpload 外:每次重试都重新获取上传配额(命中 601 后队列已记冷却)。
+    await retry(
+      () => runUpload(deps, () => deps.appendGroup({ bv, files: batch, cookies: deps.cfg.cookies, public: isPublic })),
+      {
+        tries,
+        backoffMs: 60_000,
+        sleep: deps.sleep,
+        shouldRetry: (err) => isUploadRateLimited(err) || !isAppendAmbiguous(err),
+        onRetry: (attempt, err) => jlog(`append ${step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
+      },
+    );
+    for (const k of idxs) ledger.markPartDone(streamKey, step, k);
+  }
+  ledger.logStep(streamKey, step, "done", `${finalFiles.length} 文件 · ${batches} 批`);
   ledger.syncNodeState(streamKey, step, "done", { error: null });
-  jlog(`append ${step} 完成`);
+  jlog(`append ${step} 完成(${finalFiles.length} 文件,${batches} 批)`);
 }
 
 /** 分段模式续跑:已建稿 → 只补没做完的 append(从 stage 反推各段产物)。 */
@@ -635,16 +740,38 @@ async function resumeSegmentAppends(
   burnLivechat: boolean,
   isPublic: boolean,
   splitForUpload: (mp4: string) => Promise<string[]>,
+  allowedIndices?: ReadonlySet<number>,
 ): Promise<{ state: JobState; bv?: string }> {
   const { ledger, notify, cfg } = deps;
   jlog(`分段续跑:已建稿 bv=${bv},只补 append`);
-  const plan = deriveSegmentPlan(stageSub);
+  // 只认本次(碎片过滤后)允许的段号,否则会把 stage 残留的碎片 seg mp4 也传上去。
+  const plan = deriveSegmentPlan(stageSub, allowedIndices);
   if (!plan) {
     jlog(`分段续跑失败:stage 无分段产物`);
     ledger.setState(streamKey, "needs_manual", { error: `分段续跑失败:bv=${bv} 但 stage 无分段产物` });
     notify({ kind: "error", stage: "上传", message: `分段续跑失败:${bv} 产物缺失,请人工核对分 P` });
     return { state: "needs_manual", bv };
   }
+  // 先补 plain 组:已建稿但其余 plain 段可能还没传完(上次在 append plain 中途失败)。
+  const plainFiles = plan.parts.map((p) => p.plain).filter((f) => f && existsSync(f));
+  const donePlain = ledger.doneParts(streamKey, "plain");
+  const batchSize = Math.max(1, cfg.uploadBatchSize ?? 1);
+  const plainOpts = { cookies: cfg.cookies, public: isPublic };
+  for (let i = 0; i < plainFiles.length; i += batchSize) {
+    const batch: string[] = []; const idxs: number[] = [];
+    for (let j = i; j < Math.min(i + batchSize, plainFiles.length); j++) {
+      if (donePlain.has(j)) continue;
+      batch.push(plainFiles[j]); idxs.push(j);
+    }
+    if (batch.length === 0) continue;
+    jlog(`续跑 append plain 段 ${idxs.join(",")}`);
+    await retry(
+      () => runUpload(deps, () => deps.appendGroup({ bv, files: batch, cookies: plainOpts.cookies, public: plainOpts.public })),
+      { tries: batch.length === 1 ? 5 : 1, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
+    );
+    for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);
+  }
+  ledger.syncNodeState(streamKey, "upload_plain", "done", { error: null });
   const danmuFiles = plan.parts.map((p) => p.danmu).filter((f) => f && existsSync(f));
   const livechatFiles = plan.parts.map((p) => p.livechat).filter((f) => f && existsSync(f));
   await appendSegmentGroup(streamKey, bv, "append_danmu", danmuFiles, burnDanmu, deps, jlog, isPublic, splitForUpload);

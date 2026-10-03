@@ -119,9 +119,14 @@ const SEG_FILE_RE = /^(.*)_seg(\d{3})(?:_(danmu|livechat))?\.mp4$/;
 
 /**
  * 从 stageSub 目录反推分段产物(续跑用)。识别 `{stem}_segNNN[_danmu|_livechat].mp4`。
- * 至少要有 plain 段(seg000.mp4);否则 null(没跑过分段产出)。
+ * 至少要有 plain 段;否则 null(没跑过分段产出)。
+ *
+ * `allowedIndices`:**必须**由调用方传入本次(过滤碎片后)的段号白名单。
+ * 关键:stage 目录里可能残留**上一版逻辑(或未过滤时)产出的碎片 seg mp4**——
+ * 若不过滤就会把 0.2s 碎片也当成分段上传(踩过坑:续跑误传 seg001/003/…)。
+ * 传 undefined 表示不过滤(仅用于纯反推 stem 等场景)。
  */
-export function deriveSegmentPlan(stageSub: string): SegmentPlan | null {
+export function deriveSegmentPlan(stageSub: string, allowedIndices?: ReadonlySet<number>): SegmentPlan | null {
   let files: string[];
   try { files = readdirSync(stageSub); } catch { return null; }
   const byIdx = new Map<number, { dateName: string; plain?: string; danmu?: string; livechat?: string }>();
@@ -130,6 +135,7 @@ export function deriveSegmentPlan(stageSub: string): SegmentPlan | null {
     if (!m) continue;
     const [, dateName, num, kind] = m;
     const idx = Number(num);
+    if (allowedIndices && !allowedIndices.has(idx)) continue;
     const e = byIdx.get(idx) ?? { dateName };
     if (kind === "danmu") e.danmu = joinPath(stageSub, f);
     else if (kind === "livechat") e.livechat = joinPath(stageSub, f);

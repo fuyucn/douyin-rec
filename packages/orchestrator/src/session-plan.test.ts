@@ -138,4 +138,13 @@ describe("segmentStem / deriveSegmentPlan（分段上传）", () => {
     expect(deriveSegmentPlan(empty)).toBeNull();
     expect(deriveSegmentPlan(join(empty, "nope"))).toBeNull();
   });
+
+  it("allowedIndices 白名单:忽略 stage 里残留的碎片 seg mp4(续跑误传回归)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "segment-plan-allow-"));
+    const name = "主播A_2026-08-14";
+    // stage 里 0..4 都有 mp4,但只有 0/2/4 是有效段(1/3 是残留碎片)
+    for (const i of [0, 1, 2, 3, 4]) writeFileSync(join(dir, `${name}_seg00${i}.mp4`), "x");
+    const plan = deriveSegmentPlan(dir, new Set([0, 2, 4]))!;
+    expect(plan.parts.map((p) => p.index)).toEqual([0, 2, 4]);
+  });
 });

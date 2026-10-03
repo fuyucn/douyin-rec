@@ -99,7 +99,7 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   const appendGroup = vi.fn<(o: { bv: string; files: string[]; cookies: string; public: boolean }) => Promise<void>>().mockResolvedValue(undefined);
   const notify = vi.fn<(e: NotifyEvent) => void>();
   // 默认资源池:内存闸门关(本机/CI 空闲内存可能 < 2GB)、cpu/net 各串成一个。
-  const pool = new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, maxNetParallel: 1 });
+  const pool = new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, maxNetParallel: 1, uploadRateLimit: 0 });
 
   const base: PipelineDeps = {
     transports,
@@ -174,16 +174,19 @@ describe("runPipeline", () => {
       // 绝不调用 merge 子命令(分段模式的核心:不合并)
       const cmds = (deps.sh as Mock).mock.calls.map((c) => c[0] as string);
       expect(cmds.some((c) => c.includes(" merge "))).toBe(false);
-      // 多文件建稿:uploadPlain 收到 videos(3 段),顺序 = 段序
-      expect((deps.uploadPlain as Mock).mock.calls[0][0].videos).toHaveLength(3);
-      const videos = (deps.uploadPlain as Mock).mock.calls[0][0].videos as string[];
-      expect(videos[0]).toContain("_seg000.mp4");
-      expect(videos[2]).toContain("_seg002.mp4");
-      // 两个 append 组(danmu / livechat),各含 3 段
-      expect(deps.appendGroup).toHaveBeenCalledTimes(2);
+      // P1 单文件建稿(不一次塞多文件):uploadPlain 只收第一段
+      expect(deps.uploadPlain).toHaveBeenCalledTimes(1);
+      const first = (deps.uploadPlain as Mock).mock.calls[0][0] as { video?: string; videos?: string[] };
+      expect(first.video).toContain("_seg000.mp4");
+      expect(first.videos).toBeUndefined();
+      // 其余 plain 段 append(批大小 5 → 2 段一批);再加两个烧录组各 3 段(danmu/livechat)
+      // 共 1(plain 批)+ 2(danmu/livechat,已过滤碎片后各 3 段)批
       const groups = (deps.appendGroup as Mock).mock.calls.map((c) => (c[0] as { files: string[] }).files);
-      expect(groups[0]).toHaveLength(3);
-      expect(groups[1]).toHaveLength(3);
+      const flat = groups.flat();
+      // 顺序:先 plain 组(seg001, seg002),再 danmu 组(3),再 livechat 组(3)
+      expect(flat.filter((f) => f.includes("_seg") && !f.includes("_danmu") && !f.includes("_livechat"))).toHaveLength(2);
+      expect(flat.filter((f) => f.includes("_danmu")).length).toBeGreaterThan(0);
+      expect(flat.filter((f) => f.includes("_livechat")).length).toBeGreaterThan(0);
       deps.ledger.close();
     });
 
@@ -198,6 +201,26 @@ describe("runPipeline", () => {
       expect(result.state).toBe("needs_manual");
       expect(deps.uploadPlain).not.toHaveBeenCalled();
       expect(deps.appendGroup).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("碎片过滤:短于 minSegmentSec 的段不上传(mesio --fix 残片)", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"] }) }]);
+      const deps = segmentDeps();
+      // 段 1 只有 0.2s(碎片),段 0/2 正常;阈值默认 2s → 段 1 应被跳过
+      (deps as { segmentDuration: (p: string) => Promise<number> }).segmentDuration =
+        async (p: string) => (p.includes("s_001") ? 0.2 : 60);
+      deps.ledger.upsertPending(broadcast.streamKey);
+
+      const result = await runPipeline(broadcast, deps);
+
+      expect(result.state).toBe("done");
+      // 产出 2 段(seg000, seg001 —— 碎片跳过后重编号连续),碎片不进任何上传
+      const first = (deps.uploadPlain as Mock).mock.calls[0][0] as { video?: string };
+      expect(first.video).toContain("_seg000.mp4");
+      const allFiles = (deps.appendGroup as Mock).mock.calls.flatMap((c) => (c[0] as { files: string[] }).files);
+      // 不应出现第 3 个 plain 段(seg002.mp4);danmu/livechat 也只 2 段
+      expect(allFiles.filter((f) => /_seg\d+\.mp4$/.test(f)).length).toBe(1); // 只剩 seg001 plain
       deps.ledger.close();
     });
   });

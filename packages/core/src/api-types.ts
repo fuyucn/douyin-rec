@@ -16,6 +16,16 @@ export interface HubPipelineConfig {
    * - `burnDanmu` / `burnLivechat`:是否产出对应烧录版(合并模式下 = 整场烧,分段模式下 = 逐段烧)。
    */
   steps?: { mergeSegments?: boolean; burnDanmu?: boolean; burnLivechat?: boolean };
+  /**
+   * 分段上传(mergeSegments=false)调优:
+   * - `uploadBatchSize`:每批 append 的文件数上限(缺省 1)。B 站按「提交次数」限流(601),
+   *   且 biliup 多文件 upload/append 是每文件一次提交——设 1 使每次只提交一个文件,
+   *   失败可安全重试;配合全局上传队列的限速。
+   * - `minSegmentSec`:跳过短于该秒数的分段(缺省 2)。mesio `--fix` 在流不连续时会切出
+   *   0.2s 级、分辨率不同的初始化残片(无有效内容)→ 过滤,避免污染分 P。
+   */
+  uploadBatchSize?: number;
+  minSegmentSec?: number;
   /** 断流重连合并窗(ms):结束距现在不足该窗的场先不处理,等可能的重连并成一簇。缺省 10 分钟。 */
   reconnectWindowMs?: number;
   /** 清理开关(都默认 false)。**永不删 .xml/.ass**(弹幕源硬约束),清理只处理 .ts/.mp4。 */

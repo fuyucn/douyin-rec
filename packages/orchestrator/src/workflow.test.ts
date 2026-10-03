@@ -85,7 +85,7 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
     sh,
     uploadPlain,
     appendGroup,
-    pool: new ResourcePool({ minBurnFreeMemMB: 0 }),
+    pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 }),
     splitForUpload: async (mp4: string) => [mp4],
     notify: vi.fn(),
     cfg,
@@ -111,7 +111,7 @@ function build(t: TestDeps, opts: { burnDanmu?: boolean; burnLivechat?: boolean;
 
 function makeControlledNode(
   key: WorkflowNodeKey,
-  resource: "cpu" | "net",
+  resource: "cpu" | "net" | "upload",
   events: Array<{ key: string; at: "start" | "end"; ts: number }>,
   active: { n: number; max: number },
 ): WorkflowNode {
@@ -247,7 +247,7 @@ describe("buildWorkflow — 断流重连多会话合并", () => {
 describe("ResourcePool — cpu/net 串行与内存闸门", () => {
   it("cpu max=1:第二个 cpu 节点等第一个完成才起跑(不并发烧录)", async () => {
     const t = makeDeps();
-    const pool = new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1 });
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, uploadRateLimit: 0 });
     const events: Array<{ key: string; at: "start" | "end"; ts: number }> = [];
     const active = { n: 0, max: 0 };
     const nodes = [
@@ -268,7 +268,7 @@ describe("ResourcePool — cpu/net 串行与内存闸门", () => {
   });
 
   it("cpu 排队任务释放后许可不泄漏(后续批次可复用)", async () => {
-    const pool = new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1 });
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, uploadRateLimit: 0 });
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     let entered = 0;
@@ -289,7 +289,7 @@ describe("ResourcePool — cpu/net 串行与内存闸门", () => {
     let mem = 500; // MB
     let slept = 0;
     const pool = new ResourcePool(
-      { minBurnFreeMemMB: 2048, memWaitTimeoutMs: 60_000 },
+      { minBurnFreeMemMB: 2048, memWaitTimeoutMs: 60_000, uploadRateLimit: 0 },
       {
         sleep: async (ms) => { slept += ms; mem = 4096; },
         freeMemMB: () => mem,
@@ -315,10 +315,68 @@ describe("ResourcePool — cpu/net 串行与内存闸门", () => {
   });
 });
 
+describe("ResourcePool — 全局上传队列(withUpload)", () => {
+  it("跨 streamKey 串行 + 窗口内提交次数限速(超频则排队等到窗口滑出)", async () => {
+    // 假时钟:sleep 只推进虚拟时间,不真等。窗口 10min 内最多 3 次提交。
+    let now = 1_000_000;
+    const at: number[] = [];
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 0, uploadRateLimit: 3, uploadRateWindowMs: 600_000, uploadCooldownMs: 0 },
+      { now: () => now, sleep: async (ms) => { now += ms; } },
+    );
+    const upload = async (): Promise<void> => { at.push(now); };
+    await Promise.all([1, 2, 3, 4, 5].map(() => pool.withUpload(upload)));
+    expect(at).toHaveLength(5);
+    // 前 3 次立即放行(同刻)
+    expect(at[0]).toBe(at[1]);
+    expect(at[1]).toBe(at[2]);
+    // 第 4、5 次必须等到首个窗口滑出(≈ +600s)
+    expect(at[3] - at[0]).toBeGreaterThanOrEqual(600_000);
+    expect(at[4] - at[1]).toBeGreaterThanOrEqual(600_000);
+  });
+
+  it("命中 601 → 记录全局冷却,后续提交等冷却后再打", async () => {
+    let now = 0;
+    const at: number[] = [];
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 0, uploadRateLimit: 0, uploadCooldownMs: 900_000 },
+      { now: () => now, sleep: async (ms) => { now += ms; } },
+    );
+    // 第一次提交命中 601(队列记冷却 15min)
+    await expect(pool.withUpload(async () => { throw new Error("upload rate limit (code: 601)"); })).rejects.toThrow();
+    // 第二次提交必须被推迟到冷却结束后
+    await pool.withUpload(async () => { at.push(now); });
+    expect(at[0]).toBeGreaterThanOrEqual(900_000);
+  });
+
+  it("队列不并发:第二个 withUpload 必须等第一个的 fn 完成", async () => {
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let active = 0, max = 0;
+    const job = async (): Promise<void> => { active++; max = Math.max(max, active); await gate; active--; };
+    const p1 = pool.withUpload(job);
+    const p2 = pool.withUpload(job);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(max).toBe(1); // 第二个还在排队
+    release();
+    await Promise.all([p1, p2]);
+    expect(max).toBe(1);
+  });
+
+  it("单个上传失败不毒化队列(后续提交仍可执行)", async () => {
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 });
+    await expect(pool.withUpload(async () => { throw new Error("601"); })).rejects.toThrow("601");
+    let ran = false;
+    await pool.withUpload(async () => { ran = true; });
+    expect(ran).toBe(true);
+  });
+});
+
 describe("runWorkflowNodes — 用户停止", () => {
   it("节点 abort 标 blocked+用户停止并抛出,不标 failed;不再起下游", async () => {
     const t = makeDeps();
-    const pool = new ResourcePool({ minBurnFreeMemMB: 0 });
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 });
     const started: string[] = [];
     const merge: WorkflowNode = {
       key: "merge",
@@ -354,7 +412,7 @@ describe("runWorkflowNodes — 用户停止", () => {
   it("内存闸门等待中 abort → 立刻抛,不标 failed", async () => {
     const t = makeDeps();
     const pool = new ResourcePool(
-      { minBurnFreeMemMB: 2048, memWaitTimeoutMs: 60_000 },
+      { minBurnFreeMemMB: 2048, memWaitTimeoutMs: 60_000, uploadRateLimit: 0 },
       { sleep: async () => { abortJob(STREAM_KEY); }, freeMemMB: () => 100 },
     );
     const node: WorkflowNode = {
@@ -377,7 +435,7 @@ describe("runWorkflowNodes — 用户停止", () => {
 describe("runWorkflowNodes — 重跑语义", () => {
   it("上一轮 skipped 的节点重新执行时不再永久跳过(enabled 后真正跑)", async () => {
     const t = makeDeps();
-    const pool = new ResourcePool({ minBurnFreeMemMB: 0 });
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 });
     t.ledger.syncNodeState(STREAM_KEY, "upload_plain", "skipped");
     let ran = 0;
     const node: WorkflowNode = {

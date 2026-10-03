@@ -89,6 +89,11 @@ export class SyncLedger {
       streamKey TEXT NOT NULL, node TEXT NOT NULL, state TEXT NOT NULL,
       error TEXT, attempts INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL,
       PRIMARY KEY(streamKey, node))`);
+    // 分段模式的分 P checkpoint:记录每个已成功 append 的文件(段号 + 该段名),
+    // 供续跑精确跳过已提交的段,避免重复分 P 或漏段(mergeSegments=false 时用)。
+    this.db.exec(`CREATE TABLE IF NOT EXISTS sync_parts(
+      streamKey TEXT NOT NULL, groupName TEXT NOT NULL, partIndex INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL, PRIMARY KEY(streamKey, groupName, partIndex))`);
   }
   private logEvent(streamKey: string, state: JobState, at: number): void {
     this.db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(streamKey, state, at);
@@ -164,6 +169,21 @@ export class SyncLedger {
       .prepare("SELECT phase FROM sync_job_steps WHERE streamKey=? AND step=? ORDER BY at DESC, rowid DESC LIMIT 1")
       .get(streamKey, step) as { phase?: string } | undefined;
     return r?.phase === "done";
+  }
+
+  /** 分段模式:记录某个分 P(组 + 段号)已成功提交(append 成功即写,续跑据此跳过)。 */
+  markPartDone(streamKey: string, groupName: string, partIndex: number): void {
+    this.db.prepare(
+      "INSERT INTO sync_parts(streamKey,groupName,partIndex,updatedAt) VALUES(?,?,?,?) " +
+      "ON CONFLICT(streamKey,groupName,partIndex) DO UPDATE SET updatedAt=excluded.updatedAt",
+    ).run(streamKey, groupName, partIndex, this.now());
+  }
+  /** 分段模式:该组已成功提交的段号集合(续跑跳过它们)。 */
+  doneParts(streamKey: string, groupName: string): Set<number> {
+    const rows = this.db
+      .prepare("SELECT partIndex FROM sync_parts WHERE streamKey=? AND groupName=?")
+      .all(streamKey, groupName) as unknown as Array<{ partIndex: number }>;
+    return new Set(rows.map((r) => r.partIndex));
   }
   /** 记录/覆盖单节点状态(workflow 执行器 + retryNode 用)。 */
   syncNodeState(

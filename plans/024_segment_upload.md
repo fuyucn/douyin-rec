@@ -59,3 +59,33 @@ hub 后处理此前只有一条路径:**整场合并成一片**再烧录/上传(
 - 多段组 append 无 per-part checkpoint,中途失败转人工(与合并路径 >16GB 多段组同)。
 - 分段模式要求录制时已按想要的粒度切段(`--segment`);段太碎会导致分 P 很多。
 - 水印关闭 / 仅自己可见 / copyright 1 等硬性上传设置沿用既有 `buildUploadArgs`(多文件路径同)。
+
+## 跟进:全局上传队列 + B站 601 + mesio 碎片(2026-10-03)
+
+线上首跑分段模式撞 B 站 `code 601 上传视频过快`。复盘:
+
+- **根因不是多任务并发**,而是**一次 `biliup upload` 提交太多文件**(某场 21 个 plain 段一次建稿)。
+  biliup 每个文件过一次投稿提交,短时间 21 次 → 触发频率限制。
+- 同时该场(mesio 引擎)因 `--fix` 的 `SplitOperator` 在流不连续时切出 **10 个 0.2s 级、
+  分辨率不同的初始化残片**(`Detected different init segment, splitting the stream`),
+  这些残片也是独立分 P → 段数虚高。mesio 无 CLI 开关关掉该切割(除非不用 `--fix`,那就失去意义)。
+
+改动:
+
+1. **全局上传队列 + 提交限速**(`ResourcePool.withUpload`):master 进程内共享,**串行**所有
+   hub 任务的上传/append 提交,并对「提交次数」滑动窗口限速(`uploadRateLimit` 缺省 5 次 /
+   `uploadRateWindowMs` 缺省 10min);命中 601 后全局冷却 `uploadCooldownMs`(缺省 30min)再自动重试。
+   合并路径的上传节点新增 `resource: "upload"` 走此队列;分段路径的每次提交也经 `runUpload` 走它。
+   → 多任务同时收播时上传统一排队,不会叠加打爆 B 站频率限制。
+2. **分段上传:P1 建稿 + 逐文件 append**:`uploadBatchSize` 缺省 **1**——biliup 的
+   `upload/append a b c` 实质是**每个文件一次提交**,故每次只提交一个文件:
+   ① 提交次数可控(不会一次打 21 次);② 失败可安全重试(单文件未提交即无副作用);
+   ③ 601 由队列冷却 + retry 吸收,不再整场转人工。
+3. **碎片过滤**:分段模式下跳过短于 `minSegmentSec`(缺省 2s)的段(不 remux、不上传),
+   产出序号跳过碎片后连续(分 P 无空洞)。
+
+**实测(2026-10-03)**:21 段(含 10 碎片)→ 过滤后 11 段;P1 建稿成功,第 6 次提交撞 601 →
+证实 B 站限的是**提交次数**(与并发无关,`--limit` 只管单文件分块并发)。故最终以
+「窗口限速 + 601 冷却重试 + 单文件提交」为解,而非单纯拉开间隔。
+
+以上三项均可经 hub 规则 pipeline 或 hub.config.json 覆盖(0 = 关闭)。
