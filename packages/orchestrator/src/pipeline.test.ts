@@ -2,7 +2,7 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { xmlKeepRule, runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
 import type { Broadcast } from "./identity.js";
@@ -136,6 +136,17 @@ function writePlainArtifacts(deps: TestDeps): void {
 }
 
 describe("runPipeline", () => {
+  describe("xmlKeepRule(.xml/.ass 副本不变量:两处不能同时删光)", () => {
+    it("保留 stage(stageAfterDone=false):可删节点源 .xml,不删 stage .xml", () => {
+      expect(xmlKeepRule("node", false)).toBe(true);   // 节点源可删(副本在 stage)
+      expect(xmlKeepRule("stage", false)).toBe(false); // stage 保留 → 不删
+    });
+    it("清空 stage(stageAfterDone=true):不删节点源 .xml(成最后一份),可删 stage .xml", () => {
+      expect(xmlKeepRule("node", true)).toBe(false);   // 节点是最后一份 → 保留
+      expect(xmlKeepRule("stage", true)).toBe(true);   // stage 可删
+    });
+  });
+
   describe("分段产出(steps.mergeSegments=false)", () => {
     /** 造一个分段模式的 deps:段源文件落在 stage(模拟已 pull),并拦截 remux/burn 调用。 */
     function segmentDeps(): TestDeps {
@@ -455,19 +466,16 @@ describe("runPipeline", () => {
     const shCalls = deps.sh.mock.calls.map((c) => c[0] as string);
     expect(shCalls[0]).toContain("merge --in");
     expect(shCalls[0]).toContain("--merge-sessions");
-    // sourceAfterDone + stageSourceAfterMerge 都执行:两个会话的源 .ts 全部清
+    // sourceAfterDone + stageSourceAfterMerge(未开 stageAfterDone → 保留 stage)。
+    // 新口径:保留 stage 时,节点源 .ts + .xml 一起删(xml 副本在 stage)。
     expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
     const cleaned = (deps.transports.get("node-1")!.cleanup as Mock).mock.calls.flatMap((c) => c[0] as string[]);
-    expect(cleaned).toEqual([...s1.tsFiles, ...s2.tsFiles]); // 硬约束:只删 .ts,弹幕源 .xml 永不删
+    expect(cleaned).toEqual([...s1.tsFiles, s1.xmlPath, ...s2.tsFiles, s2.xmlPath]);
+    // 未开 stageAfterDone → 保留 stage → stage 里的 .xml/.ass 不删
     expect(deps.ledger.getNodeState(broadcast.streamKey, "merge")?.state).toBe("done");
-    // 拉下来的 stage 源清掉(不含 xml)
     const stageCleaned = rmStage.mock.calls.flatMap((c) => c[0] as string[]);
-    expect(stageCleaned).toEqual([
-      expect.stringContaining("主播名_2026-06-27_08-00-00-PART000.ts"),
-      expect.stringContaining("主播名_2026-06-27_08-00-00-PART001.ts"),
-      expect.stringContaining("主播名_2026-06-27_08-02-00-PART000.ts"),
-      expect.stringContaining("主播名_2026-06-27_08-02-00-PART001.ts"),
-    ]);
+    expect(stageCleaned).toHaveLength(4); // 只清 4 个 stage 源 .ts
+    expect(stageCleaned.every((p) => /\.ts$/.test(p))).toBe(true);
     deps.ledger.close();
   });
 
@@ -651,23 +659,22 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
-  it("场景9(硬约束): stageAfterDone 只删 mp4 产物,.xml/.ass 一律保留", async () => {
+  it("场景9(新口径): stageAfterDone 删 mp4 产物 + stage 内 .xml/.ass(节点源保留,不两处删光)", async () => {
     const rmStage = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
     const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
-    const legacyCleanup = { stageAfterDone: true, includeXmlAss: true } as unknown as NonNullable<PipelineCfg["cleanup"]>;
+    const cleanup = { stageAfterDone: true } as NonNullable<PipelineCfg["cleanup"]>;
     const deps = makeDeps({
       rmStage,
-      cfg: { ...makeDeps().cfg, uploadMode: "upload", cleanup: legacyCleanup },
+      cfg: { ...makeDeps().cfg, uploadMode: "upload", cleanup },
     });
     deps.ledger.upsertPending(broadcast.streamKey);
     const result = await runPipeline(broadcast, deps);
     expect(result.state).toBe("done");
     const stageSub = stageSubOf(deps);
-    const PLAIN_XML = join(stageSub, "主播名_2026-06-27.xml");
     const deleted = rmStage.mock.calls.flatMap((c) => c[0]);
-    expect(deleted.some((p) => /\.mp4$/i.test(p))).toBe(true);   // 合成 mp4 照删
-    expect(deleted.some((p) => /\.(xml|ass)$/i.test(p))).toBe(false); // xml/ass 一律不删
-    expect(deleted).not.toContain(PLAIN_XML);
+    expect(deleted.some((p) => /\.mp4$/i.test(p))).toBe(true);      // 合成 mp4 照删
+    // stageAfterDone=true → 不保留 stage → stage 内 .xml/.ass 一并删(节点源那份保留)
+    expect(deleted.some((p) => /\.(xml|ass)$/i.test(p))).toBe(true);
     deps.ledger.close();
   });
 
