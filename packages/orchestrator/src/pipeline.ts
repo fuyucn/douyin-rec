@@ -581,8 +581,9 @@ async function runSegmentPipeline(o: {
       continue;
     }
     // 组产物用独立 `_g{N}` 命名,绝不能与成员段同名 —— 否则 existsSync 命中第一个成员段,
-    // 合并被静默跳过、实际只传了那一小段(踩过坑:组 0 的合并被跳到,传了 438s 的 seg000)。
-    const merged = path.join(stageSub, `${dateName}_g${String(gi).padStart(3, "0")}.mp4`);
+    // 产物名 = {dateName}_{NNN}.mp4,与 hub 名称约定一致(段号补零 3 位)。
+    // 不能用 segmentStem(dateName, members[0].index)(会与逐段 remux 的 seg 文件冲突 → existsSync 命中成员段跳过合并)。
+    const merged = path.join(stageSub, `${dateName}_${String(gi).padStart(3, "0")}.mp4`);
     if (!existsSync(merged)) {
       jlog(`合并组 ${gi}: ${members.length} 段(≈${Math.round(members.reduce((n, m) => n + (m.durSec ?? 0), 0))}s)→ ${path.basename(merged)}`);
       await mergeGroup(members.map((m) => m.plain), merged);

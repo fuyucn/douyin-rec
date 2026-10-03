@@ -239,10 +239,11 @@ describe("runPipeline", () => {
       // 合并确实发生了(而不是被 existsSync 跳过)
       expect(merges).toHaveLength(1);
       expect(merges[0].inputs).toHaveLength(3);
-      // 组产物名含 _g000,不与成员段 seg000.mp4 同名
-      expect(merges[0].out).toMatch(/_g000\.mp4$/);
+      // 组产物名含 _000(hub 约定),不与成员段 seg000.mp4 同名
+      expect(merges[0].out).toMatch(/_000\.mp4$/);
+      expect(merges[0].out).not.toContain("_seg");
       // 上传的是合并产物,不是单个成员段
-      expect((deps.uploadPlain as Mock).mock.calls[0][0].video).toMatch(/_g000\.mp4$/);
+      expect((deps.uploadPlain as Mock).mock.calls[0][0].video).toMatch(/_000\.mp4$/);
       deps.ledger.close();
     });
   });
