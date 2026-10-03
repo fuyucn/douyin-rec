@@ -65,7 +65,7 @@ export interface WorkflowBuildInput {
   burnDanmu: boolean;
   burnLivechat: boolean;
   /** 该场拉下来的源段数(merge 完成 detail 用)。 */
-  mergeSegments: number;
+  segmentCount: number;
 }
 
 export interface Workflow {
@@ -79,7 +79,7 @@ export interface Workflow {
  * append_danmu → append_livechat(B 站 P2/P3 顺序)。禁用步骤 = disabled,由 executor 标 skipped 并放行下游。
  */
 export function buildWorkflow(input: WorkflowBuildInput): Workflow {
-  const { streamKey, stageSub, products, deps, cfg, log, willUpload, burnDanmu, burnLivechat, mergeSegments } = input;
+  const { streamKey, stageSub, products, deps, cfg, log, willUpload, burnDanmu, burnLivechat, segmentCount } = input;
   const ledger = deps.ledger;
   const artifacts = new Map<string, string>();
   const details = new Map<string, string>();
@@ -164,7 +164,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         }
         if (products.plainXml && existsSync(products.plainXml)) c.set("plain.xml", products.plainXml);
         const bytes = fileBytes(products.plain);
-        const detail = bytes > 0 ? `${mergeSegments} 段 → ${humanBytes(bytes)}` : "";
+        const detail = bytes > 0 ? `${segmentCount} 段 → ${humanBytes(bytes)}` : "";
         if (integrityAlerts.length > 0) {
           c.stepDetail("merge", `${detail}${detail ? " " : ""}❗ 体检告警`);
           c.deps.notify({

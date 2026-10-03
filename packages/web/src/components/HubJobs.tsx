@@ -296,7 +296,8 @@ function PipelineFlowInner({
     ...graph.nodes.filter((n) => n.key !== "__term__").map((n) => ({
       id: n.key, type: "step", position: { x: n.x, y: n.y },
       data: {
-        label: t(`hub.jobs.stepNode.${n.key}`),
+        // 分段模式:merge 节点实际是「逐段 remux 产出 plain 段」,标签区分开,避免误读成整场合并。
+        label: n.key === "merge" && cfg?.steps?.mergeSegments === false ? t("hub.jobs.stepNode.merge_segments") : t(`hub.jobs.stepNode.${n.key}`),
         status: st[n.key]?.status ?? "todo",
         sec: st[n.key]?.sec ?? null,
         detail: nodeErrorOf(n.key) ?? detailOf(n.key),

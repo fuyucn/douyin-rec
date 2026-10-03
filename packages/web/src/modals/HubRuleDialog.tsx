@@ -21,6 +21,8 @@ interface FormState {
   workers: string[];
   burnDanmu: boolean;
   burnLivechat: boolean;
+  /** 合并分段成一片(默认 true);false = 不合并,按录制分段逐个上传(每段一个分 P)。 */
+  mergeSegments: boolean;
   clStageSourceAfterMerge: boolean;
   clSourceAfterDone: boolean;
   clStageAfterDone: boolean;
@@ -40,6 +42,7 @@ const BLANK: FormState = {
   workers: [],
   burnDanmu: true,
   burnLivechat: true,
+  mergeSegments: true,
   clStageSourceAfterMerge: false,
   clSourceAfterDone: false,
   clStageAfterDone: false,
@@ -61,6 +64,7 @@ function fromRule(r: HubRuleDTO): FormState {
     workers: r.workers ?? [],
     burnDanmu: c.steps?.burnDanmu !== false,
     burnLivechat: c.steps?.burnLivechat !== false,
+    mergeSegments: c.steps?.mergeSegments !== false,
     clStageSourceAfterMerge: c.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: c.cleanup?.sourceAfterDone === true,
     clStageAfterDone: c.cleanup?.stageAfterDone === true,
@@ -181,7 +185,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
       workers: form.workers,
       recording: { sourceTaskId: form.sourceTaskId },
       pipeline: {
-        steps: { burnDanmu: form.burnDanmu, burnLivechat: form.burnLivechat },
+        steps: { mergeSegments: form.mergeSegments, burnDanmu: form.burnDanmu, burnLivechat: form.burnLivechat },
         cleanup: {
           stageSourceAfterMerge: form.clStageSourceAfterMerge,
           sourceAfterDone: form.clSourceAfterDone,
@@ -307,6 +311,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           <h3 className="form-section">{t("hub.ruleDialog.pipelineSection")}</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {([
+              ["mergeSegments", t("hub.ruleDialog.toggleMergeSegmentsLabel"), t("hub.ruleDialog.toggleMergeSegmentsSub")],
               ["burnDanmu", t("hub.ruleDialog.toggleBurnDanmuLabel"), t("hub.ruleDialog.toggleBurnDanmuSub")],
               ["burnLivechat", t("hub.ruleDialog.toggleBurnLivechatLabel"), t("hub.ruleDialog.toggleBurnLivechatSub")],
               ["clStageSourceAfterMerge", t("hub.ruleDialog.toggleClStageSourceAfterMergeLabel"), t("hub.ruleDialog.toggleClStageSourceAfterMergeSub")],

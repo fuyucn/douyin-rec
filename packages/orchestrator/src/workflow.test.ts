@@ -105,7 +105,7 @@ function build(t: TestDeps, opts: { burnDanmu?: boolean; burnLivechat?: boolean;
     willUpload: opts.willUpload ?? true,
     burnDanmu: opts.burnDanmu ?? true,
     burnLivechat: opts.burnLivechat ?? true,
-    mergeSegments: 2,
+    segmentCount: 2,
   });
 }
 

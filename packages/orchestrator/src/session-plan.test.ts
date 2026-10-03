@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deriveStageProducts, sessionBaseOfFile, sessionBasesOfFiles } from "./session-plan.js";
+import { deriveSegmentPlan, deriveStageProducts, segmentStem, sessionBaseOfFile, sessionBasesOfFiles } from "./session-plan.js";
 
 describe("sessionBaseOfFile", () => {
   it("ts/flv/xml/mp4 与 PART 分段归一到同一会话 base", () => {
@@ -103,5 +103,39 @@ describe("deriveStageProducts", () => {
     expect(deriveStageProducts(join(empty, "nope"))).toBeNull();
     writeFileSync(join(empty, "random.txt"), "x");
     expect(deriveStageProducts(empty)).toBeNull();
+  });
+});
+
+describe("segmentStem / deriveSegmentPlan（分段上传）", () => {
+  it("segmentStem 补零 3 位，保证字典序 = 段序", () => {
+    expect(segmentStem("主播A_2026-08-14", 0)).toBe("主播A_2026-08-14_seg000");
+    expect(segmentStem("主播A_2026-08-14", 12)).toBe("主播A_2026-08-14_seg012");
+  });
+
+  it("从 stage 反推分段产物：plain/danmu/livechat 按段号归并、跳过无 plain 的段", () => {
+    const dir = mkdtempSync(join(tmpdir(), "segment-plan-"));
+    const name = "主播A_2026-08-14";
+    for (const f of [
+      `${name}_seg000.mp4`,
+      `${name}_seg000_danmu.mp4`,
+      `${name}_seg000_livechat.mp4`,
+      `${name}_seg001.mp4`,
+      `${name}_seg002_danmu.mp4`, // 无 plain → 该段不算
+      "random.txt",
+    ]) writeFileSync(join(dir, f), "x");
+
+    const plan = deriveSegmentPlan(dir)!;
+    expect(plan.dateName).toBe(name);
+    expect(plan.parts.map((p) => p.index)).toEqual([0, 1]);
+    expect(plan.parts[0].plain).toBe(join(dir, `${name}_seg000.mp4`));
+    expect(plan.parts[0].danmu).toBe(join(dir, `${name}_seg000_danmu.mp4`));
+    expect(plan.parts[0].livechat).toBe(join(dir, `${name}_seg000_livechat.mp4`));
+    expect(plan.parts[1].danmu).toBe("");
+  });
+
+  it("无分段产物 → null", () => {
+    const empty = mkdtempSync(join(tmpdir(), "segment-plan-empty-"));
+    expect(deriveSegmentPlan(empty)).toBeNull();
+    expect(deriveSegmentPlan(join(empty, "nope"))).toBeNull();
   });
 });

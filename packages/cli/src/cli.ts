@@ -896,6 +896,11 @@ const hubStarter: HubStarter = {
               ledger.setState(streamKey, "failed", { error: `房间未开 hub: ${streamKey}` });
               return { ok: false, error: `房间未开 hub: ${streamKey}`, code: 400 };
             }
+            // 分段模式:产出/烧录/上传是一个整体(逐段 remux + 多文件建稿),不做单节点重跑
+            // (单段重烧会与已建稿的分 P 错位)。用「重新运行」整场重跑(幂等:已建稿只补 append)。
+            if (cfg.steps?.mergeSegments === false) {
+              return { ok: false, error: "分段上传模式不支持单节点重跑,请用「重新运行」整场重跑", code: 400 };
+            }
             ledger.backfillNodeStates(streamKey);
             const derived = deriveStageProducts(stageSub);
             if (!derived) {
@@ -908,7 +913,7 @@ const hubStarter: HubStarter = {
               willUpload: cfg.uploadMode === "upload",
               burnDanmu: cfg.steps?.burnDanmu !== false,
               burnLivechat: cfg.steps?.burnLivechat !== false,
-              mergeSegments: 0,
+              segmentCount: 0,
             });
             const r = await runWorkflowNodes({
               streamKey, nodes: workflow.nodes, edges: workflow.edges, ctx: workflow.ctx,

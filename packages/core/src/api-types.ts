@@ -8,8 +8,14 @@ export type { NotifyEvent, NotifKey, NotifWebhookToggles };
  * hub 是全局管理器,对每个 enabled 的 HubRule(按 roomSlug)执行这份 pipeline。
  */
 export interface HubPipelineConfig {
-  /** 产出哪些(merge plain 是基础总做)。默认全 true。 */
-  steps?: { burnDanmu?: boolean; burnLivechat?: boolean };
+  /**
+   * 产出哪些(默认全 true)。
+   * - `mergeSegments`(默认 true):整场所有会话/分段合并成**一片** plain 再烧录/上传。
+   *   置 false = **不合并**,按录制分段(--segment 时长切出的每个 .ts)逐个产出并上传,
+   *   每段 = 一个独立分 P(段间不拼接);开烧录时逐段烧各自那段弹幕。
+   * - `burnDanmu` / `burnLivechat`:是否产出对应烧录版(合并模式下 = 整场烧,分段模式下 = 逐段烧)。
+   */
+  steps?: { mergeSegments?: boolean; burnDanmu?: boolean; burnLivechat?: boolean };
   /** 断流重连合并窗(ms):结束距现在不足该窗的场先不处理,等可能的重连并成一簇。缺省 10 分钟。 */
   reconnectWindowMs?: number;
   /** 清理开关(都默认 false)。**永不删 .xml/.ass**(弹幕源硬约束),清理只处理 .ts/.mp4。 */

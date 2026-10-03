@@ -34,6 +34,17 @@ describe("biliup 包装", () => {
     });
     expect(a.join(" ")).toContain("--line alia");
   });
+  it("buildUploadArgs：videos 多文件 → 一次 upload 多个分 P(分段上传建稿)", () => {
+    const a = buildUploadArgs({
+      videos: ["/o/seg000.mp4", "/o/seg001.mp4", "/o/seg002.mp4"],
+      cookies: "/c/c.json", title: "t", tag: "x", tid: 21, public: false,
+    });
+    const s = a.join(" ");
+    expect(s).toContain("-u /c/c.json upload /o/seg000.mp4 /o/seg001.mp4 /o/seg002.mp4");
+    // 顺序 = 分 P 顺序,且仍带关水印/仅自己可见
+    expect(s).toContain('--extra-fields {"watermark":{"state":0}}');
+    expect(s).toContain("--is-only-self 1");
+  });
   it("uploadPlain：分块连接错误时自动换线，成功后返回 BV", async () => {
     const calls: string[][] = [];
     const run = async (argv: string[]): Promise<string> => {

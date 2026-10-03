@@ -2,7 +2,7 @@
 export interface FlowNode { key: string; x: number; y: number }
 export interface FlowGraph { nodes: FlowNode[]; edges: Array<[string, string]> }
 export type FlowCfg = {
-  steps?: { burnDanmu?: boolean; burnLivechat?: boolean };
+  steps?: { mergeSegments?: boolean; burnDanmu?: boolean; burnLivechat?: boolean };
   upload?: { mode?: string };
   cleanup?: { stageSourceAfterMerge?: boolean; sourceAfterDone?: boolean; stageAfterDone?: boolean };
 };
@@ -47,6 +47,7 @@ export function buildFlow(
 ): FlowGraph {
   const p = presentSet(job, cfg);
   const keep = (arr: string[]): string[] => arr.filter((k) => p.has(k));
+  // 分段模式仍走 select → pull → merge(此处 merge 节点 = 逐段 remux 产出 plain 段)。
   const spine = ["select", "pull", "merge"];
   // 并行轨:merge 后同时起跑。danmu/livechat 各自 burn → append,upload_plain(P1)独立轨,
   // clean_stage_src 也可选并行(拆 pipeline 后结构:烧录与上传互不等,append 串行在轨内)。

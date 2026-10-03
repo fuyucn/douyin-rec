@@ -77,8 +77,10 @@ function isRetryableLineError(err: unknown): boolean {
 
 /** 构造 biliup upload 参数（纯函数）。照搬 merge-best-today 的命令。 */
 export function buildUploadArgs(o: UploadOpts): string[] {
+  // 多文件 = 同一稿件多个分 P(分段上传模式);单文件 = 传统 P1。顺序 = 分 P 顺序。
+  const files = o.videos && o.videos.length > 0 ? o.videos : o.video ? [o.video] : [];
   const args = [
-    "-u", o.cookies, "upload", o.video,
+    "-u", o.cookies, "upload", ...files,
     "--title", o.title, "--tid", String(o.tid), "--tag", o.tag, "--copyright", "1",
     // 关昵称水印:硬性 —— 投稿后无法修改(CLAUDE.md);与 upload-recording-today skill 默认一致。
     "--extra-fields", '{"watermark":{"state":0}}',

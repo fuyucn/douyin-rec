@@ -11,7 +11,13 @@ export type UploadLine =
   | "tx" | "cntx" | "antx" | "attx" | "bda" | "txa" | "alia";
 
 export interface UploadOpts {
-  video: string;
+  /** 单个视频(P1 建稿)。**多文件建稿**(分段上传)时改用 `videos`。 */
+  video?: string;
+  /**
+   * 多文件建稿:一次 `biliup upload` 提交多个文件 → 同一稿件多个分 P(分段上传模式)。
+   * 非空时优先于 `video`。与 append 一样,单次多文件 upload 是 biliup 的正常用法。
+   */
+  videos?: string[];
   cookies: string;
   title: string;
   tag: string;

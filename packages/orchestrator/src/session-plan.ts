@@ -83,3 +83,74 @@ export function withOutputStem(p: StageProducts, stem: string): StageProducts {
     plainXml: `${dir}${s}.xml`,
   };
 }
+
+// ─── 分段产出(steps.mergeSegments=false):不合并,逐段产出 ─────────────────────
+
+/** 一个录制分段(一个 .ts/.flv)在 stage 内的产出计划。 */
+export interface SegmentPart {
+  /** 全场段序号(0 基,跨会话连续),决定分 P 顺序与文件名。 */
+  index: number;
+  /** 该段拉进 stage 的源(remux 输入)。 */
+  src: string;
+  /** 该段 remux 后的 plain mp4(stage 内)。 */
+  plain: string;
+  /** 该段所属会话的弹幕 xml(stage 内);该会话无 xml 则 ""。 */
+  xmlPath: string;
+  /** 该段在该会话 xml 时间轴上的窗口(秒);无 xml 则 null。 */
+  window: { startSec: number; endSec: number } | null;
+  /** 烧录产物;未烧(无 xml / 关烧录)则 ""。 */
+  danmu: string;
+  livechat: string;
+}
+
+/** 分段模式的产出计划(替代 StageProducts)。 */
+export interface SegmentPlan {
+  /** 全场 stem / 稿件标题(= P1 标题)。 */
+  dateName: string;
+  parts: SegmentPart[];
+}
+
+/** 段文件名 stem:`{dateName}_seg{NNN}`(NNN 补零 3 位,保证字典序 = 时间序)。 */
+export function segmentStem(dateName: string, index: number): string {
+  return `${dateName}_seg${String(index).padStart(3, "0")}`;
+}
+
+const SEG_FILE_RE = /^(.*)_seg(\d{3})(?:_(danmu|livechat))?\.mp4$/;
+
+/**
+ * 从 stageSub 目录反推分段产物(续跑用)。识别 `{stem}_segNNN[_danmu|_livechat].mp4`。
+ * 至少要有 plain 段(seg000.mp4);否则 null(没跑过分段产出)。
+ */
+export function deriveSegmentPlan(stageSub: string): SegmentPlan | null {
+  let files: string[];
+  try { files = readdirSync(stageSub); } catch { return null; }
+  const byIdx = new Map<number, { dateName: string; plain?: string; danmu?: string; livechat?: string }>();
+  for (const f of files) {
+    const m = SEG_FILE_RE.exec(f);
+    if (!m) continue;
+    const [, dateName, num, kind] = m;
+    const idx = Number(num);
+    const e = byIdx.get(idx) ?? { dateName };
+    if (kind === "danmu") e.danmu = joinPath(stageSub, f);
+    else if (kind === "livechat") e.livechat = joinPath(stageSub, f);
+    else e.plain = joinPath(stageSub, f);
+    byIdx.set(idx, e);
+  }
+  if (byIdx.size === 0) return null;
+  const parts: SegmentPart[] = [];
+  for (const idx of [...byIdx.keys()].sort((a, b) => a - b)) {
+    const e = byIdx.get(idx)!;
+    if (!e.plain) continue; // 没有 plain 的段不算(未产出完整)
+    parts.push({
+      index: idx,
+      src: "",
+      plain: e.plain,
+      xmlPath: "",
+      window: null,
+      danmu: e.danmu ?? "",
+      livechat: e.livechat ?? "",
+    });
+  }
+  if (parts.length === 0) return null;
+  return { dateName: byIdx.get(parts[0].index)!.dateName, parts };
+}

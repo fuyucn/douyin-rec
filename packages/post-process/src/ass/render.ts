@@ -23,6 +23,12 @@ export interface ExtractOpts {
   giftValueFilter?: number;
   types?: Set<"danmaku" | "gift" | "member">;
   offset?: number;
+  /**
+   * 时间窗（秒，相对该 xml 的 video_start_time）：只保留 [startSec, endSec) 的条目，
+   * 并把时间重定基到 0。分段烧录用（一份会话 xml 切成每段一份弹幕）。
+   * 给了 window 就忽略 offset。
+   */
+  window?: { startSec: number; endSec: number };
 }
 
 /**
@@ -37,15 +43,21 @@ export function extractItems(xml: string, opts: ExtractOpts = {}): ChatItem[] {
   const types = opts.types ?? new Set(["danmaku", "gift", "member"] as const);
   const giftFilter = opts.giftValueFilter ?? 0;
   const offset = opts.offset ?? 0;
+  const win = opts.window;
   const root = parser.parse(xml).i ?? {};
   const seg = Number(root?.metadata?.video_start_time ?? 0) / 1000;
   const items: ChatItem[] = [];
+  // 原始时间（相对视频起点）→ 输出时间：window 命中窗外 → null（丢弃）；否则按 offset 平移（旧行为）。
+  const place = (raw: number): number | null => {
+    if (!win) return raw + offset;
+    return raw >= win.startSec && raw < win.endSec ? raw - win.startSec : null;
+  };
 
   if (types.has("danmaku")) {
     for (const d of arr<Record<string, unknown>>(root.d)) {
       const p = String(d["@_p"] ?? "0").split(",");
-      const t = Number(p[0] ?? 0) + offset;
-      if (!(t >= 0)) continue;
+      const t = place(Number(p[0] ?? 0));
+      if (t === null || !(t >= 0)) continue;
       const content = String(d["#text"] ?? "").trim();
       if (!content) continue;
       items.push({ timeSec: t, kind: "danmaku", uname: String(d["@_user"] ?? ""), content, color: "ffffff" });
@@ -54,7 +66,9 @@ export function extractItems(xml: string, opts: ExtractOpts = {}): ChatItem[] {
 
   if (types.has("gift")) {
     for (const g of arr<Record<string, unknown>>(root.gift)) {
-      let t = Number(g["@_ts"] ?? 0) / 1000 - seg + offset;
+      const placed = place(Number(g["@_ts"] ?? 0) / 1000 - seg);
+      if (placed === null) continue;
+      let t = placed;
       if (!(t >= 0)) t = 0;
       const price = Number(g["@_price"] ?? 0);
       if (giftFilter > 0 && price <= giftFilter) continue; // 不含阈值:--gift-value 0.9 = 只留 >0.9(正好 0.9 的为你闪耀/星光闪耀排除)
@@ -68,7 +82,9 @@ export function extractItems(xml: string, opts: ExtractOpts = {}): ChatItem[] {
 
   if (types.has("member")) {
     for (const m of arr<Record<string, unknown>>(root.member)) {
-      let t = Number(m["@_ts"] ?? 0) / 1000 - seg + offset;
+      const placed = place(Number(m["@_ts"] ?? 0) / 1000 - seg);
+      if (placed === null) continue;
+      let t = placed;
       if (!(t >= 0)) t = 0;
       items.push({ timeSec: t, kind: "member", uname: String(m["@_user"] ?? ""), color: "aaaaaa" });
     }

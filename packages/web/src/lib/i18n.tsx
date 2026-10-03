@@ -198,7 +198,7 @@ const DICT = {
       },
       jobs: {
         step: { pending: "排队中", settling: "等待收播", syncing: "拉取文件", merging: "合并 / 烧录", uploading: "上传 B 站", retrying: "单节点重跑", done: "已完成", failed: "失败", needsManual: "待人工" },
-        stepNode: { select: "选优", pull: "拉取", merge: "合并 plain", burn_danmu: "烧 danmu", burn_livechat: "烧 livechat", upload_plain: "传 plain P1", append_danmu: "追 danmu P2", append_livechat: "追 livechat P3", clean_stage_src: "清理暂存源", clean_source: "清理节点源", clean_stage: "清理产物" },
+        stepNode: { select: "选优", pull: "拉取", merge: "合并 plain", merge_segments: "分段产出", burn_danmu: "烧 danmu", burn_livechat: "烧 livechat", upload_plain: "传 plain P1", append_danmu: "追 danmu P2", append_livechat: "追 livechat P3", clean_stage_src: "清理暂存源", clean_source: "清理节点源", clean_stage: "清理产物" },
         termDone: "完成", skipped: "跳过", noStepRecord: "（无流程记录;旧版本任务）",
         candComplete: "完整", candCoverage: "覆盖 {pct}%", candWinner: "最优",
         tipStatus: { done: "已完成", active: "进行中", skipped: "已跳过", todo: "待运行", failed: "失败", blocked: "上游失败" },
@@ -220,6 +220,7 @@ const DICT = {
         roomFromTaskLabel: "房间 / room（取自所选 master 任务）", roomFromTaskHint: "选择下面的 master 任务后自动填充",
         enabledLabel: "规则启用 / enabled", enabledHint: "关闭 = hub 暂停处理此房间(录制不受影响)",
         pipelineSection: "流水线 / pipeline",
+        toggleMergeSegmentsLabel: "合并分段 / merge segments", toggleMergeSegmentsSub: "开=整场各分段合成一片再上传(默认);关=不合并,按录制分段(--segment 每段)逐个上传,每段一个分 P,开烧录则逐段烧",
         toggleBurnDanmuLabel: "烧 danmu / 飞屏弹幕", toggleBurnDanmuSub: "合成飞屏弹幕版",
         toggleBurnLivechatLabel: "烧 livechat / 聊天框", toggleBurnLivechatSub: "合成聊天框版",
         toggleClStageSourceAfterMergeLabel: "合并后删 stage 源 .ts", toggleClStageSourceAfterMergeSub: "留合成产物,删拉来的源片",
@@ -412,7 +413,7 @@ const DICT = {
       },
       jobs: {
         step: { pending: "Queued", settling: "Waiting for stream to end", syncing: "Pulling files", merging: "Merging / burning", uploading: "Uploading to Bilibili", retrying: "Retrying node", done: "Done", failed: "Failed", needsManual: "Needs review" },
-        stepNode: { select: "Select", pull: "Pull", merge: "Merge plain", burn_danmu: "Burn danmu", burn_livechat: "Burn livechat", upload_plain: "Upload plain P1", append_danmu: "Append danmu P2", append_livechat: "Append livechat P3", clean_stage_src: "Clean staged src", clean_source: "Clean node src", clean_stage: "Clean products" },
+        stepNode: { select: "Select", pull: "Pull", merge: "Merge plain", merge_segments: "Segments", burn_danmu: "Burn danmu", burn_livechat: "Burn livechat", upload_plain: "Upload plain P1", append_danmu: "Append danmu P2", append_livechat: "Append livechat P3", clean_stage_src: "Clean staged src", clean_source: "Clean node src", clean_stage: "Clean products" },
         termDone: "Done", skipped: "Skipped", noStepRecord: "(no step record; legacy job)",
         candComplete: "complete", candCoverage: "{pct}% cover", candWinner: "winner",
         tipStatus: { done: "Done", active: "In progress", skipped: "Skipped", todo: "Pending", failed: "Failed", blocked: "Upstream failed" },
@@ -434,6 +435,7 @@ const DICT = {
         roomFromTaskLabel: "Room (from selected source task)", roomFromTaskHint: "Pick the source task below; the room is filled in automatically.",
         enabledLabel: "Rule enabled", enabledHint: "Off = hub pauses processing for this room (recording unaffected)",
         pipelineSection: "Pipeline",
+        toggleMergeSegmentsLabel: "Merge segments", toggleMergeSegmentsSub: "On = merge all segments into one video (default); off = no merge — upload each recording segment (--segment chunk) as its own part P, burning each segment when burning is on",
         toggleBurnDanmuLabel: "Burn danmu / scrolling", toggleBurnDanmuSub: "Produce the scrolling-danmu cut",
         toggleBurnLivechatLabel: "Burn livechat / chat panel", toggleBurnLivechatSub: "Produce the chat-panel cut",
         toggleClStageSourceAfterMergeLabel: "Delete staged source .ts after merge", toggleClStageSourceAfterMergeSub: "Keep the merged output, delete the pulled source",

@@ -136,6 +136,72 @@ function writePlainArtifacts(deps: TestDeps): void {
 }
 
 describe("runPipeline", () => {
+  describe("分段产出(steps.mergeSegments=false)", () => {
+    /** 造一个分段模式的 deps:段源文件落在 stage(模拟已 pull),并拦截 remux/burn 调用。 */
+    function segmentDeps(): TestDeps {
+      const deps = makeDeps({
+        // 注入 remux/时长/烧录接缝(否则会 spawn 真 ffmpeg)。
+        remuxSegment: async (src: string, out: string) => { writeFileSync(out, "x"); },
+        segmentDuration: async () => 60,
+        burnSegment: async ({ out }: { out: string }) => { writeFileSync(out, "x"); },
+      });
+      // 覆盖 cfg:分段模式 + upload。
+      (deps as { cfg: PipelineCfg }).cfg = {
+        cleanMaxGapSec: 30,
+        stageDir: deps.cfg.stageDir,
+        cookies: "/tmp/cookies.json",
+        uploadMode: "upload",
+        uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像" },
+        steps: { mergeSegments: false },
+      };
+      const sub = stageSubOf(deps);
+      mkdirSync(sub, { recursive: true });
+      // 3 个源段 + 会话级 xml(模拟 pull 后的 stage)。
+      // xml 名与 makeRec 的 xmlPath(/remote/danmu.xml)一致 → 段窗口可用。
+      for (const f of ["s_000.ts", "s_001.ts", "s_002.ts", "danmu.xml"]) writeFileSync(join(sub, f), "x");
+      return deps;
+    }
+
+    it("不合并:逐段 remux → 多文件 upload 建稿 → 逐组 append(顺序=段序)", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"] }) }]);
+      const deps = segmentDeps();
+      deps.ledger.upsertPending(broadcast.streamKey);
+
+      const result = await runPipeline(broadcast, deps);
+
+      expect(result.state).toBe("done");
+      expect(result.bv).toBe("BV123");
+      // 绝不调用 merge 子命令(分段模式的核心:不合并)
+      const cmds = (deps.sh as Mock).mock.calls.map((c) => c[0] as string);
+      expect(cmds.some((c) => c.includes(" merge "))).toBe(false);
+      // 多文件建稿:uploadPlain 收到 videos(3 段),顺序 = 段序
+      expect((deps.uploadPlain as Mock).mock.calls[0][0].videos).toHaveLength(3);
+      const videos = (deps.uploadPlain as Mock).mock.calls[0][0].videos as string[];
+      expect(videos[0]).toContain("_seg000.mp4");
+      expect(videos[2]).toContain("_seg002.mp4");
+      // 两个 append 组(danmu / livechat),各含 3 段
+      expect(deps.appendGroup).toHaveBeenCalledTimes(2);
+      const groups = (deps.appendGroup as Mock).mock.calls.map((c) => (c[0] as { files: string[] }).files);
+      expect(groups[0]).toHaveLength(3);
+      expect(groups[1]).toHaveLength(3);
+      deps.ledger.close();
+    });
+
+    it("stage 模式:逐段产出落盘待人工,不建稿", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"] }) }]);
+      const deps = segmentDeps();
+      (deps as { cfg: PipelineCfg }).cfg = { ...deps.cfg, uploadMode: "stage" };
+      deps.ledger.upsertPending(broadcast.streamKey);
+
+      const result = await runPipeline(broadcast, deps);
+
+      expect(result.state).toBe("needs_manual");
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect(deps.appendGroup).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+  });
+
   it("makeRunLogger 注入 → job.log 经该 ScopedLogger 写入(不直接 appendFileSync)", async () => {
     const lines: string[] = [];
     const fakeLogger = { info: (...a: unknown[]) => lines.push(a.join(" ")), warn: () => {}, error: () => {} };
