@@ -115,3 +115,13 @@ mesio 的 `SplitOperator`(二进制字符串 `Detected different init segment, s
 
 **实测对比**(同场 11 有效段,合 4111s):`segmentGroupSec=3600` → 1 个分 P(1.14h);
 `1800` → 3 个分 P(1538s / 2066s / 507s)。
+
+## 约定:segmentGroupSec = segmentSec(2026-10-03)
+
+分 P 目标时长与录制分段时长是**同一个值**:录制按 segmentSec 切段,上传就按它
+聚合成分 P。CLI 的 resolveCfg 从源任务(规则 recording.sourceTaskId)读
+segmentSec 注入 PipelineCfg.segmentGroupSec,**不在 hub 规则里单独配置**
+(规则里的值仅作历史兼容/个别微调的覆盖)。
+
+各房间实际值(来自任务表):不想卷了 3600、什么鱼 3600、yyoo 3600、呆呆蒽 3600、
+一勺小苏打 1800、爱馬人士 1800、你的狂野饼干 1800、马语花香 1800。

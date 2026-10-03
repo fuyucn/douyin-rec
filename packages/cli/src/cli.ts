@@ -744,7 +744,13 @@ const hubStarter: HubStarter = {
         cleanup: p.cleanup,
         uploadBatchSize: p.uploadBatchSize,
         minSegmentSec: p.minSegmentSec,
-        segmentGroupSec: p.segmentGroupSec,
+        // 分 P 目标时长 = 录制任务创建时的分段时长(segmentSec)。
+        // 两者是同一个值:录制按它切段,上传就按它聚合成分 P。不单独在 hub 规则里配。
+        // 规则里的 segmentGroupSec 若存在(历史遗留)仍作覆盖,便于个别房间微调。
+        segmentGroupSec: p.segmentGroupSec
+          ?? (rule.recording?.sourceTaskId
+            ? opts.store.getTask(rule.recording.sourceTaskId)?.segmentSec
+            : undefined),
         // worker 硬过滤:reconciler 据此把 broadcast members 收窄到选中的 worker。
         // 缺省/空(老规则)→ reconciler 不过滤 = 全部 worker(向后兼容)。
         workers: rule.workers,
