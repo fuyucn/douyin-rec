@@ -9,7 +9,7 @@ import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
 import { humanBytes, sumBytes } from "./format.js";
 import { buildWorkflow, deriveStageProducts, runWorkflowNodes, ResourcePool, type StageProducts, type WorkflowNodeKey } from "./workflow.js";
-import { deriveSegmentPlan, segmentStem, type SegmentPlan } from "./session-plan.js";
+import { deriveSegmentPlan, segmentStem, segWorkPath, type SegmentPlan } from "./session-plan.js";
 import { planSegmentGroups } from "@drec/post-process";
 
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。 */
@@ -536,10 +536,9 @@ async function runSegmentPipeline(o: {
       jlog(`跳过碎片段 ${i}: ${path.basename(localSrc)}(${durSec.toFixed(2)}s < ${minSegSec}s)`);
       continue;
     }
-    // 文件名用**有效段序**(碎片跳过后的连续序号):mesio 碎片很多时避免文件名出现大量空洞,
-    // 也让"近似分段时长合并"后的产物集合稳定。分 P 顺序仍由 parts 数组顺序保证。
-    const stem = segmentStem(dateName, parts.length);
-    const plain = path.join(stageSub, stem + ".mp4");
+    // 逐段 remux 是**中间产物**,落在 stageSub/.work/ 下的纯段号文件(不与上传产物撞名)。
+    const plain = segWorkPath(stageSub, i);
+    mkdirSync(path.dirname(plain), { recursive: true });
     if (!existsSync(plain)) {
       jlog(`remux 段 ${i}: ${path.basename(localSrc)} → ${path.basename(plain)}`);
       await remux(localSrc, plain);
@@ -575,22 +574,21 @@ async function runSegmentPipeline(o: {
   for (let gi = 0; gi < planGroups.length; gi++) {
     const memberIdxs = planGroups[gi];
     const members = memberIdxs.map((k) => parts[k]);
-    if (groupTargetSec <= 0 || members.length === 1) {
-      // 不合并 / 单段组:直接就是该段产物
-      uploadParts.push({ index: gi, plain: members[0].plain, window: spanWindow(members), memberPlains: [members[0].plain] });
-      continue;
-    }
-    // 组产物用独立 `_g{N}` 命名,绝不能与成员段同名 —— 否则 existsSync 命中第一个成员段,
-    // 产物名 = {dateName}_{NNN}.mp4,与 hub 名称约定一致(段号补零 3 位)。
-    // 不能用 segmentStem(dateName, members[0].index)(会与逐段 remux 的 seg 文件冲突 → existsSync 命中成员段跳过合并)。
-    const merged = path.join(stageSub, `${dateName}_${String(gi).padStart(3, "0")}.mp4`);
-    if (!existsSync(merged)) {
-      jlog(`合并组 ${gi}: ${members.length} 段(≈${Math.round(members.reduce((n, m) => n + (m.durSec ?? 0), 0))}s)→ ${path.basename(merged)}`);
-      await mergeGroup(members.map((m) => m.plain), merged);
+    // 上传产物统一命名 {dateName}_{NNN}.mp4(NNN=分 P 序号,与 hub 命名约定一致)。
+    const out = path.join(stageSub, `${segmentStem(dateName, gi)}.mp4`);
+    if (members.length === 1) {
+      // 不合并 / 单段组:中间产物直接复制/改名成规范上传名(不能直接引用 .work 里的文件)。
+      if (!existsSync(out)) {
+        const { copyFileSync } = await import("node:fs");
+        copyFileSync(members[0].plain, out);
+      }
+    } else if (!existsSync(out)) {
+      jlog(`合并组 ${gi}: ${members.length} 段(≈${Math.round(members.reduce((n, m) => n + (m.durSec ?? 0), 0))}s)→ ${path.basename(out)}`);
+      await mergeGroup(members.map((m) => m.plain), out);
     } else {
-      jlog(`合并组 ${gi}: 已存在,跳过 ${path.basename(merged)}`);
+      jlog(`合并组 ${gi}: 已存在,跳过 ${path.basename(out)}`);
     }
-    uploadParts.push({ index: gi, plain: merged, window: spanWindow(members), memberPlains: members.map((m) => m.plain) });
+    uploadParts.push({ index: gi, plain: out, window: spanWindow(members), memberPlains: members.map((m) => m.plain) });
   }
   jlog(`产出: ${parts.length} 有效段 → ${uploadParts.length} 个分 P(目标 ${groupTargetSec || "未设"}s)`);
   ledger.logStep(streamKey, "merge", "done", `${parts.length} 段 → ${uploadParts.length} 个分 P${skippedFragments ? `(跳过 ${skippedFragments} 碎片)` : ""}`);

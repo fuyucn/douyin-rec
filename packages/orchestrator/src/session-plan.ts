@@ -114,28 +114,42 @@ export interface SegmentPlan {
   parts: SegmentPart[];
 }
 
-/** 段文件名 stem:`{dateName}_seg{NNN}`(NNN 补零 3 位,保证字典序 = 时间序)。 */
+/**
+ * **上传用**分 P 产物文件名 stem:`{dateName}_{NNN}`,`{NNN}` 补零 3 位(字典序 = 段序)。
+ * 这是唯一会出现在 B站分 P 名里的格式;逐段 remux 的**中间产物**放在 `SEG_WORK_DIR`
+ * 子目录里(命名随意),绝不外泄成上传名(`_segNNN` / `_gNNN` 均已废弃)。
+ */
 export function segmentStem(dateName: string, index: number): string {
-  return `${dateName}_seg${String(index).padStart(3, "0")}`;
+  return `${dateName}_${String(index).padStart(3, "0")}`;
 }
 
-const SEG_FILE_RE = /^(.*)_seg(\d{3})(?:_(danmu|livechat))?\.mp4$/;
+/**
+ * 逐段 remux 中间产物的**工作子目录**(位于 stageSub 下)。放子目录是为了:
+ * ① 内部命名(纯段号)不会与上传产物 `{dateName}_{NNN}.mp4` 撞名;
+ * ② stage 根目录只留「待上传/已上传」的规范产物,目录一目了然。
+ */
+export const SEG_WORK_DIR = ".work";
+
+/** 内部段文件路径:`<stageSub>/.work/<origIdx>.mp4`(origIdx = 源段在整场中的原始序号)。 */
+export function segWorkPath(stageSub: string, origIdx: number): string {
+  return `${stageSub}/${SEG_WORK_DIR}/${String(origIdx).padStart(3, "0")}.mp4`;
+}
+
+/** 规范上传产物名:`{dateName}_{NNN}[_danmu|_livechat].mp4`。 */
+const UPLOAD_FILE_RE = /^(.*)_(\d{3})(?:_(danmu|livechat))?\.mp4$/;
 
 /**
- * 从 stageSub 目录反推分段产物(续跑用)。识别 `{stem}_segNNN[_danmu|_livechat].mp4`。
- * 至少要有 plain 段;否则 null(没跑过分段产出)。
- *
- * `allowedIndices`:**必须**由调用方传入本次(过滤碎片后)的段号白名单。
- * 关键:stage 目录里可能残留**上一版逻辑(或未过滤时)产出的碎片 seg mp4**——
- * 若不过滤就会把 0.2s 碎片也当成分段上传(踩过坑:续跑误传 seg001/003/…)。
- * 传 undefined 表示不过滤(仅用于纯反推 stem 等场景)。
+ * 从 stageSub 反推**已产出的分 P 产物**(续跑幂等用)。
+ * 只认规范命名 `{dateName}_{NNN}[_danmu|_livechat].mp4`(即真正上传的那种);
+ * 旧版内部名 `_segNNN` / `_gNNN` 一律忽略(不再产、也绝不当作上传产物)。
+ * `allowedIndices` = 本次有效段号白名单(调用方按碎片阈值算好),防止把历史残留当分 P。
  */
 export function deriveSegmentPlan(stageSub: string, allowedIndices?: ReadonlySet<number>): SegmentPlan | null {
   let files: string[];
   try { files = readdirSync(stageSub); } catch { return null; }
   const byIdx = new Map<number, { dateName: string; plain?: string; danmu?: string; livechat?: string }>();
   for (const f of files) {
-    const m = SEG_FILE_RE.exec(f);
+    const m = UPLOAD_FILE_RE.exec(f);
     if (!m) continue;
     const [, dateName, num, kind] = m;
     const idx = Number(num);
@@ -150,7 +164,7 @@ export function deriveSegmentPlan(stageSub: string, allowedIndices?: ReadonlySet
   const parts: SegmentPart[] = [];
   for (const idx of [...byIdx.keys()].sort((a, b) => a - b)) {
     const e = byIdx.get(idx)!;
-    if (!e.plain) continue; // 没有 plain 的段不算(未产出完整)
+    if (!e.plain) continue; // 没有 plain 的不算(未产出完整)
     parts.push({
       index: idx,
       src: "",

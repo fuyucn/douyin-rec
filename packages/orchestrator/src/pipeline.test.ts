@@ -177,14 +177,14 @@ describe("runPipeline", () => {
       // P1 单文件建稿(不一次塞多文件):uploadPlain 只收第一段
       expect(deps.uploadPlain).toHaveBeenCalledTimes(1);
       const first = (deps.uploadPlain as Mock).mock.calls[0][0] as { video?: string; videos?: string[] };
-      expect(first.video).toContain("_seg000.mp4");
+      expect(first.video).toContain("_000.mp4"); // 规范上传名
       expect(first.videos).toBeUndefined();
       // 其余 plain 段 append(批大小 5 → 2 段一批);再加两个烧录组各 3 段(danmu/livechat)
       // 共 1(plain 批)+ 2(danmu/livechat,已过滤碎片后各 3 段)批
       const groups = (deps.appendGroup as Mock).mock.calls.map((c) => (c[0] as { files: string[] }).files);
       const flat = groups.flat();
-      // 顺序:先 plain 组(seg001, seg002),再 danmu 组(3),再 livechat 组(3)
-      expect(flat.filter((f) => f.includes("_seg") && !f.includes("_danmu") && !f.includes("_livechat"))).toHaveLength(2);
+      // 顺序:先 plain 组(_001, _002),再 danmu 组(3),再 livechat 组(3)
+      expect(flat.filter((f) => /_\d{3}\.mp4$/.test(f))).toHaveLength(2);
       expect(flat.filter((f) => f.includes("_danmu")).length).toBeGreaterThan(0);
       expect(flat.filter((f) => f.includes("_livechat")).length).toBeGreaterThan(0);
       deps.ledger.close();
@@ -217,10 +217,10 @@ describe("runPipeline", () => {
       expect(result.state).toBe("done");
       // 产出 2 段(seg000, seg001 —— 碎片跳过后重编号连续),碎片不进任何上传
       const first = (deps.uploadPlain as Mock).mock.calls[0][0] as { video?: string };
-      expect(first.video).toContain("_seg000.mp4");
+      expect(first.video).toContain("_000.mp4"); // 规范上传名
       const allFiles = (deps.appendGroup as Mock).mock.calls.flatMap((c) => (c[0] as { files: string[] }).files);
       // 不应出现第 3 个 plain 段(seg002.mp4);danmu/livechat 也只 2 段
-      expect(allFiles.filter((f) => /_seg\d+\.mp4$/.test(f)).length).toBe(1); // 只剩 seg001 plain
+      expect(allFiles.filter((f) => /_\d{3}\.mp4$/.test(f)).length).toBe(1); // 只剩 _001 plain
       deps.ledger.close();
     });
 
@@ -244,6 +244,22 @@ describe("runPipeline", () => {
       expect(merges[0].out).not.toContain("_seg");
       // 上传的是合并产物,不是单个成员段
       expect((deps.uploadPlain as Mock).mock.calls[0][0].video).toMatch(/_000\.mp4$/);
+      deps.ledger.close();
+    });
+
+    it("segmentGroupSec=0(不合并)也产出规范上传名,不泄漏 _seg 内部名", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"] }) }]);
+      const deps = segmentDeps(); // 默认 cfg 无 segmentGroupSec → 逐段上传
+      deps.ledger.upsertPending(broadcast.streamKey);
+
+      const result = await runPipeline(broadcast, deps);
+
+      expect(result.state).toBe("done");
+      const first = (deps.uploadPlain as Mock).mock.calls[0][0] as { video?: string };
+      expect(first.video).toMatch(/_000\.mp4$/);
+      expect(first.video).not.toContain("_seg");
+      const allFiles = (deps.appendGroup as Mock).mock.calls.flatMap((c) => (c[0] as { files: string[] }).files);
+      expect(allFiles.some((f) => f.includes("_seg"))).toBe(false);
       deps.ledger.close();
     });
   });

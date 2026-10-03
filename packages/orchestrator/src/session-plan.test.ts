@@ -108,28 +108,28 @@ describe("deriveStageProducts", () => {
 
 describe("segmentStem / deriveSegmentPlan（分段上传）", () => {
   it("segmentStem 补零 3 位，保证字典序 = 段序", () => {
-    expect(segmentStem("主播A_2026-08-14", 0)).toBe("主播A_2026-08-14_seg000");
-    expect(segmentStem("主播A_2026-08-14", 12)).toBe("主播A_2026-08-14_seg012");
+    expect(segmentStem("主播A_2026-08-14", 0)).toBe("主播A_2026-08-14_000");
+    expect(segmentStem("主播A_2026-08-14", 12)).toBe("主播A_2026-08-14_012");
   });
 
   it("从 stage 反推分段产物：plain/danmu/livechat 按段号归并、跳过无 plain 的段", () => {
     const dir = mkdtempSync(join(tmpdir(), "segment-plan-"));
     const name = "主播A_2026-08-14";
     for (const f of [
-      `${name}_seg000.mp4`,
-      `${name}_seg000_danmu.mp4`,
-      `${name}_seg000_livechat.mp4`,
-      `${name}_seg001.mp4`,
-      `${name}_seg002_danmu.mp4`, // 无 plain → 该段不算
+      `${name}_000.mp4`,
+      `${name}_000_danmu.mp4`,
+      `${name}_000_livechat.mp4`,
+      `${name}_001.mp4`,
+      `${name}_002_danmu.mp4`, // 无 plain → 该段不算
       "random.txt",
     ]) writeFileSync(join(dir, f), "x");
 
     const plan = deriveSegmentPlan(dir)!;
     expect(plan.dateName).toBe(name);
     expect(plan.parts.map((p) => p.index)).toEqual([0, 1]);
-    expect(plan.parts[0].plain).toBe(join(dir, `${name}_seg000.mp4`));
-    expect(plan.parts[0].danmu).toBe(join(dir, `${name}_seg000_danmu.mp4`));
-    expect(plan.parts[0].livechat).toBe(join(dir, `${name}_seg000_livechat.mp4`));
+    expect(plan.parts[0].plain).toBe(join(dir, `${name}_000.mp4`));
+    expect(plan.parts[0].danmu).toBe(join(dir, `${name}_000_danmu.mp4`));
+    expect(plan.parts[0].livechat).toBe(join(dir, `${name}_000_livechat.mp4`));
     expect(plan.parts[1].danmu).toBe("");
   });
 
@@ -139,12 +139,21 @@ describe("segmentStem / deriveSegmentPlan（分段上传）", () => {
     expect(deriveSegmentPlan(join(empty, "nope"))).toBeNull();
   });
 
-  it("allowedIndices 白名单:忽略 stage 里残留的碎片 seg mp4(续跑误传回归)", () => {
+  it("allowedIndices 白名单:只认本次有效段号(续跑防误传历史残留)", () => {
     const dir = mkdtempSync(join(tmpdir(), "segment-plan-allow-"));
     const name = "主播A_2026-08-14";
-    // stage 里 0..4 都有 mp4,但只有 0/2/4 是有效段(1/3 是残留碎片)
-    for (const i of [0, 1, 2, 3, 4]) writeFileSync(join(dir, `${name}_seg00${i}.mp4`), "x");
+    // stage 里 0..4 都有规范 mp4,但只有 0/2/4 是本次有效分 P
+    for (const i of [0, 1, 2, 3, 4]) writeFileSync(join(dir, `${name}_00${i}.mp4`), "x");
     const plan = deriveSegmentPlan(dir, new Set([0, 2, 4]))!;
     expect(plan.parts.map((p) => p.index)).toEqual([0, 2, 4]);
+  });
+
+  it("只认规范命名:旧内部名 _segNNN / _gNNN 一律忽略", () => {
+    const dir = mkdtempSync(join(tmpdir(), "segment-plan-legacy-"));
+    const name = "主播A_2026-08-14";
+    for (const f of [`${name}_seg000.mp4`, `${name}_g000.mp4`, `${name}_000.mp4`]) writeFileSync(join(dir, f), "x");
+    const plan = deriveSegmentPlan(dir)!;
+    expect(plan.parts).toHaveLength(1);
+    expect(plan.parts[0].plain).toBe(join(dir, `${name}_000.mp4`));
   });
 });
