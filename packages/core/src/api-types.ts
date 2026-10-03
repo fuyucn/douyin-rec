@@ -26,6 +26,12 @@ export interface HubPipelineConfig {
    */
   uploadBatchSize?: number;
   minSegmentSec?: number;
+  /**
+   * 分段上传:把连续段按目标时长聚组成"分 P"的秒数(缺省 0 = 逐段上传)。>0 时,
+   * 累计接近该值(最多超 20%)的连续段合并成一个 mp4 再上传 —— 抵消 mesio `--fix`
+   * 把一场切成长短不一的碎段导致分 P 爆炸。典型设成录制时的 `--segment`(如 3600)。
+   */
+  segmentGroupSec?: number;
   /** 断流重连合并窗(ms):结束距现在不足该窗的场先不处理,等可能的重连并成一簇。缺省 10 分钟。 */
   reconnectWindowMs?: number;
   /** 清理开关(都默认 false)。**永不删 .xml/.ass**(弹幕源硬约束),清理只处理 .ts/.mp4。 */

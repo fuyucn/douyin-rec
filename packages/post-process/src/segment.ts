@@ -16,6 +16,9 @@ export function buildRemuxArgs(input: string, outMp4: string): string[] {
     "-map", "0:v:0",
     "-map", "0:a:0?",
     "-c", "copy",
+    // FLV(1000Hz 时基)直接 -c copy 进 mp4 会得到 time_base=1/16000(非 H.264 标准),
+    // B站转码器拒收 → state=-16 转码失败。显式钉成 90000(视频标准时基)。
+    "-video_track_timescale", "90000",
     "-movflags", "+faststart",
     resolve(outMp4),
   ];
@@ -28,6 +31,40 @@ export async function remuxSegment(input: string, outMp4: string): Promise<void>
 
 /** 分段烧录样式:danmu(飞屏滚动)| livechat(聊天框)。 */
 export type SegmentStyle = "danmu" | "livechat";
+
+/**
+ * 把一串段(时长)按目标时长聚成若干组 —— 每组拼成**一个分 P**。
+ *
+ * 动机:mesio 的 `--fix` 会在流不连续时切出大量碎段(0.2s 初始化残片 + 时长不一的真实段),
+ * 导致分 P 数量爆炸且长短参差。这里把连续段按累计时长聚成接近 `targetSec` 的组,
+ * 使每个分 P 的时长接近录制时设置的分段时长。
+ *
+ * 纯函数(不依赖 ffprobe)。`maxRatio` 允许超出目标的比例(默认 1.2 = 最多超 20%),
+ * 避免为凑整把一小段并进已经快满的组里。单个段自身超过上限时独占一组(不切它)。
+ */
+export function planSegmentGroups(
+  durations: number[],
+  targetSec: number,
+  maxRatio = 1.2,
+): number[][] {
+  if (targetSec <= 0 || durations.length === 0) return durations.map((_, i) => [i]);
+  const limit = targetSec * Math.max(1, maxRatio);
+  const groups: number[][] = [];
+  let cur: number[] = [];
+  let sum = 0;
+  for (let i = 0; i < durations.length; i++) {
+    const d = durations[i];
+    if (cur.length > 0 && sum + d > limit) {
+      groups.push(cur);
+      cur = [];
+      sum = 0;
+    }
+    cur.push(i);
+    sum += d;
+  }
+  if (cur.length > 0) groups.push(cur);
+  return groups;
+}
 
 export interface SegmentWindowRenderOpts extends RenderOpts {
   width?: number;

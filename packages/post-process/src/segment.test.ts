@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRemuxArgs, renderXmlWindowToAss } from "./segment.js";
+import { buildRemuxArgs, planSegmentGroups, renderXmlWindowToAss } from "./segment.js";
 
 /** 最小 biliLive XML:video_start_time=0,弹幕 p[0]=相对秒。 */
 function xmlWith(danmaku: Array<{ sec: number; text: string }>): string {
@@ -20,6 +20,43 @@ describe("buildRemuxArgs", () => {
     expect(args).toContain("+faststart");
     // 不含 segment/concat 等拼接标志
     expect(args.join(" ")).not.toMatch(/-f\s+segment|concat/);
+  });
+
+  it("显式钉视频时基 90000(FLV 源否则得 1/16000 → B站转码失败)", () => {
+    const args = buildRemuxArgs("/in/a.flv", "/out/a.mp4");
+    expect(args[args.indexOf("-video_track_timescale") + 1]).toBe("90000");
+  });
+});
+
+describe("planSegmentGroups（按目标时长聚组成分 P）", () => {
+  it("mesio 实测:11 个长短不一的段 + 目标 3600 → 合并成 1 组(整场 4111s)", () => {
+    const durations = [438, 86, 469, 24, 521, 1494, 313, 114, 60, 85, 507];
+    expect(planSegmentGroups(durations, 3600)).toEqual([[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]);
+  });
+
+  it("目标 1800 → 超额(>1.2x)才切组", () => {
+    const durations = [438, 86, 469, 24, 521, 1494, 313, 114, 60, 85, 507];
+    const g = planSegmentGroups(durations, 1800);
+    expect(g.length).toBeGreaterThan(1);
+    // 每个非末组的累计时长 ≤ 1800*1.2
+    for (const grp of g.slice(0, -1)) {
+      const sum = grp.reduce((n, i) => n + durations[i], 0);
+      expect(sum).toBeLessThanOrEqual(1800 * 1.2);
+    }
+    // 覆盖全部段、不重不漏
+    expect(g.flat().sort((a, b) => a - b)).toEqual(durations.map((_, i) => i));
+  });
+
+  it("单个超长段独占一组(不切它)", () => {
+    expect(planSegmentGroups([5000, 10], 1800)).toEqual([[0], [1]]);
+  });
+
+  it("target<=0 → 逐段各成一组(不合并)", () => {
+    expect(planSegmentGroups([10, 20, 30], 0)).toEqual([[0], [1], [2]]);
+  });
+
+  it("空输入 → 空", () => {
+    expect(planSegmentGroups([], 1800)).toEqual([]);
   });
 });
 

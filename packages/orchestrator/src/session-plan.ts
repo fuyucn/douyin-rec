@@ -90,6 +90,10 @@ export function withOutputStem(p: StageProducts, stem: string): StageProducts {
 export interface SegmentPart {
   /** 全场段序号(0 基,跨会话连续),决定分 P 顺序与文件名。 */
   index: number;
+  /** 原始源段序号(过滤碎片前);排序/窗口对齐用。 */
+  srcSegIndex?: number;
+  /** 该段时长(秒;反推场景为 0)。 */
+  durSec?: number;
   /** 该段拉进 stage 的源(remux 输入)。 */
   src: string;
   /** 该段 remux 后的 plain mp4(stage 内)。 */

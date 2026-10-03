@@ -4,7 +4,7 @@ export { burn } from "./burn.js";
 export { FONTS_DIR } from "./fonts.js";
 export { renderXmlToAss, renderXmlToLivechat } from "./ass/render.js";
 export { renderSegmentsToAss } from "./ass/multi.js";
-export { remuxSegment, buildRemuxArgs, renderXmlWindowToAss, type SegmentStyle } from "./segment.js";
+export { remuxSegment, buildRemuxArgs, renderXmlWindowToAss, planSegmentGroups, type SegmentStyle } from "./segment.js";
 export { mergeXmlContents, type MergeXmlSession } from "./merge-xml.js";
 export { mergeSessions, type MergeSessionInput } from "./merge.js";
 export { runFfmpeg, ffprobeDuration, ffprobeVideo } from "./ffmpeg.js";

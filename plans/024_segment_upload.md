@@ -89,3 +89,29 @@ hub 后处理此前只有一条路径:**整场合并成一片**再烧录/上传(
 「窗口限速 + 601 冷却重试 + 单文件提交」为解,而非单纯拉开间隔。
 
 以上三项均可经 hub 规则 pipeline 或 hub.config.json 覆盖(0 = 关闭)。
+
+## 跟进 2:mesio 碎段聚合 + FLV 时基修复(2026-10-03)
+
+线上分段上传撞两个更深的问题:
+
+### A. 稿件 `-16 转码失败`(根因 = FLV 时基)
+`biliup append` 每次返回「稿件修改成功」,但 B站分 P 数不涨 —— 稿件卡在 `state=-16 转码失败`。
+根因:mesio 的 `.flv`(时基 1/1000)直接 `-c copy` 进 mp4 得到 **`time_base=1/16000`**
+(非 H.264 标准的 1/90000),B站转码器拒收。合并路径没暴露此问题,是因为 `mergeSession`
+会先逐段 `-f mpegts` 规范化再拼,顺手修正了时基。
+
+**修复**:`remuxSegment` 显式加 `-video_track_timescale 90000`。实测:同素材重封装后
+`time_base=1/90000`,上传后稿件状态 `-30 审核中`(而非 `-16 转码失败`)→ 已修复。
+
+### B. mesio 把一场切成 11+ 个长短不一的段
+mesio 的 `SplitOperator`(二进制字符串 `Detected different init segment, splitting the stream`)
+在流不连续时强制切段,**无 CLI 开关可关**;产物是「大段 + 0.2s 碎片」交替,且都短于录制
+时设置的 `--segment`。
+
+**修复**:新增 `segmentGroupSec`(hub 规则 pipeline 可配)。>0 时按累计时长把连续段聚组
+(最多超 20%),每组用 `mergeSession`(逐段 mpegts 规范化 + concat `-c copy`,顺带修时基)
+合成一个 mp4 → 每组 = 一个分 P,时长接近录制时的分段设置。缺省 0 = 不合并(逐段上传)。
+纯函数 `planSegmentGroups` 带单测(11 段/3600s → 1 组;1800s → 多组;超长段独占)。
+
+**实测对比**(同场 11 有效段,合 4111s):`segmentGroupSec=3600` → 1 个分 P(1.14h);
+`1800` → 3 个分 P(1538s / 2066s / 507s)。
