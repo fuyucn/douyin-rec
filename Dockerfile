@@ -84,11 +84,21 @@ RUN if [ "$IMAGE_ROLE" = "master" ]; then BILIUP_LIBC=gnu sh /tmp/install-biliup
 # (dist/douyin-rec.mjs 在 /app/dist → node 向上找到 /app/node_modules,能解析裸 "playwright")。
 # 浏览器落 /root/.cache/ms-playwright;--with-deps 顺带装 chromium 的系统库。
 # 版本与根 package.json 对齐(playwright ^1.60.0):npm 包与浏览器构建号必须同版本。
-# 代价:镜像 +~500MB。不想要就删这两行,扫码登录回落到「本地扫 + 手动粘贴 cookie」。
+#
+# --only-shell(= 只装 headless_shell,不装完整版 chromium):
+#   playwright 1.60 的 `headless:true` 默认用 chromium_headless_shell;完整版 chromium 只在
+#   headless:false / channel 指定时用。我们的扫码登录**恒为 headless**(qr-login.ts `headless ?? true`)。
+#   实测(2026-10-05):仅保留 headless_shell(移走完整版)后,扫码登录仍能正常加载抖音页面、
+#   跑通反爬 JS(webmssdk)、提取出二维码 PNG。省 ~620MB。
+#   playwright 自带的 ffmpeg(录屏用,我们不用系统外的那份)一并删除,再省 ~3MB。
+# 代价:如需 headed 调试(本地开发机,非本镜像)再装完整版。不想要 playwright 则删这两行,
+#       扫码登录回落「本地扫 + 手动粘贴 cookie」。
 ARG PLAYWRIGHT_VERSION=1.60.0
 RUN if [ "$IMAGE_ROLE" = "master" ]; then \
       npm install --no-save --no-package-lock playwright@${PLAYWRIGHT_VERSION} \
-      && npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium \
+      && npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps --only-shell chromium \
+      && rm -rf /root/.cache/ms-playwright/ffmpeg-* \
+      && apt-get purge -y --auto-remove fonts-unifont fonts-ipafont-gothic \
       && npm cache clean --force; \
     fi \
  && rm -rf /var/lib/apt/lists/*
