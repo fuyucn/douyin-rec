@@ -28,6 +28,12 @@ export const ALERT_REPEAT = 20;       // 持续失败每隔此次数再提醒(�
 export const STALL_CHECK_MS = 15_000; // 卡死看门狗检查间隔
 export const STALL_TIMEOUT_MS = 60_000; // 输出停滞 ≥ 此时长 → 判定卡死
 export const STALL_GRACEFUL_EXIT_MS = 5_000; // 主播已下播但进程吊着 → SIGINT 后等它收尾的宽限
+/**
+ * 输出停滞达到该秒数即**提前**查一次权威 living(不必等满 STALL_TIMEOUT_MS)。
+ * 只用于「确认已下播 → 立刻收尾」这一条加速路径;仍在播/未知则完全不动(等看门狗原逻辑)。
+ * 不依赖弹幕(弹幕关闭时同样生效)。取值 = STALL_CHECK_MS 的一拍,保证第一次检查就能触发。
+ */
+export const STALL_EARLY_PROBE_SEC = 15;
 
 export type { PlatformStream };
 export { ffmpegEngine, buildFfmpegArgs } from "./engines/ffmpeg.js";
@@ -85,6 +91,8 @@ export class PollingRecorder implements Recorder {
   private stallInFlight = false;
   /** 「疑似本场结束」提示的复核进行中标志(防重入;与 stallInFlight 分开,语义不同)。 */
   private hintInFlight = false;
+  /** 停滞未达阈值时的提前探活进行中标志(防每 15s 重复打 API)。 */
+  private earlyProbeInFlight = false;
   /** 最近 stderr 尾(断链诊断;引擎按需 push)。 */
   protected stderrTail: string[] = [];
   /** 平台建议的基础探测间隔(缺省 30s;快手页面限流紧 → 5 分钟)。 */
@@ -321,12 +329,47 @@ export class PollingRecorder implements Recorder {
       if (this.stopped || this.proc !== proc || this.stallInFlight) return;
       // 进程已 exit 但 close 还没收 stdio → 不判卡死,等 close 收尾。
       if (proc.exitCode !== null || proc.signalCode !== null) return;
-      if (Date.now() - this.lastAdvanceAt <= STALL_TIMEOUT_MS) return;
       const secs = Math.round((Date.now() - this.lastAdvanceAt) / 1000);
+      // 未达停滞阈值:常规情况直接返回。但**输出停止本身**很可能意味着主播下播(流已断),
+      // 若等满 60s 才查会白等 —— 故超过「提前探活阈值」就先查一次权威 living:
+      //   living=false → 立刻收尾(把 65~80s 缩短到 ~10s);true/未知 → 什么都不做,继续等满阈值。
+      // 这条路径**不依赖弹幕**(danmu 关闭 / 快手无弹幕时同样生效),安全性由「只有 false 才收尾」保证。
+      if (Date.now() - this.lastAdvanceAt <= STALL_TIMEOUT_MS) {
+        if (secs >= STALL_EARLY_PROBE_SEC && !this.earlyProbeInFlight) {
+          this.earlyProbeInFlight = true;
+          void this.probeEarlyEnd(proc, secs);
+        }
+        return;
+      }
       this.stallInFlight = true;
       void this.handleStall(proc, secs);
     }, STALL_CHECK_MS);
     this.stallTimer.unref?.();
+  }
+
+  /**
+   * 停滞未达阈值时的**提前权威探活**:只为「已下播」这一种情况加速收尾,其余一律不动。
+   * 与 hintStreamEnded 同策略(先 SIGINT 优雅收尾),但由输出停滞触发而非弹幕提示。
+   */
+  private async probeEarlyEnd(proc: ChildProcess, secs: number): Promise<void> {
+    try {
+      let living: boolean | null = null;
+      try { living = await this.platform.getLiving(this.channelId); } catch { living = null; }
+      if (this.stopped || this.proc !== proc || proc.exitCode !== null || proc.signalCode !== null) return;
+      if (living !== false) return; // 仍在播/未知 → 不干预,等看门狗按原逻辑处理
+      log.info(
+        `输出停滞 ${secs}s 且权威判活=下播 → 提前收尾(SIGINT,${STALL_GRACEFUL_EXIT_MS / 1000}s 未退再强杀)`,
+      );
+      this.clearStallWatch();
+      const killTimer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* 已退出 */ } }, STALL_GRACEFUL_EXIT_MS);
+      killTimer.unref?.();
+      const cancelKill = (): void => clearTimeout(killTimer);
+      proc.once("exit", cancelKill);
+      proc.once("close", cancelKill);
+      try { proc.kill("SIGINT"); } catch { /* close 事件会收尾 */ }
+    } finally {
+      this.earlyProbeInFlight = false;
+    }
   }
 
   /**

@@ -149,6 +149,38 @@ describe("卡死看门狗(正常下播不误报)", () => {
   });
 });
 
+describe("停滞提前探活(不依赖弹幕:弹幕关闭/无弹幕平台同样生效)", () => {
+  it("停滞达提前阈值且已下播 → 提前 SIGINT 收尾(不必等满 60s)", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(false)); // getLiving=false
+    const proc = new FakeProc();
+    const { rec, ev, outDir } = await startRecorder(proc);
+    // 停滞 20s:未达 STALL_TIMEOUT_MS(60s),但已达提前阈值(15s)
+    (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = Date.now() - 20_000;
+
+    await vi.advanceTimersByTimeAsync(STALL_CHECK_MS); // 看门狗 tick
+    await vi.advanceTimersByTimeAsync(0);              // 冲掉 getLiving 微任务
+
+    expect(proc.killCalls).toEqual(["SIGINT"]);        // 提前收尾
+    expect(ev.onProbeError).not.toHaveBeenCalled();    // 不是卡死,不告警
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("停滞达提前阈值但仍在播 → 不干预(等看门狗原逻辑,不杀进程)", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(true)); // getLiving=true(流抖动)
+    const proc = new FakeProc();
+    const { rec, outDir } = await startRecorder(proc);
+    (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = Date.now() - 20_000;
+
+    await vi.advanceTimersByTimeAsync(STALL_CHECK_MS);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(proc.killCalls).toHaveLength(0); // 仍在播 → 什么都不做
+    rmSync(outDir, { recursive: true, force: true });
+  });
+});
+
 describe("hintStreamEnded(弹幕旁路提示 → 权威复核)", () => {
   it("权威判活=下播 → 立刻 SIGINT 收尾(不等看门狗 60s)", async () => {
     vi.useFakeTimers();
