@@ -49,6 +49,12 @@ interface ClientEvents {
   chat: (m: DyChatMessage) => void;
   gift: (m: DyGiftMessage) => void;
   member: (m: DyMemberMessage) => void;
+  /**
+   * 控制消息:`WebcastControlMessage` 的 `action === 3` = 平台宣告本场**疑似结束**(下播)。
+   * ⚠️ 只作**提示**:可能是主播真下播,也可能是平台/风控主动断流 —— 调用方**不得**据此直接收播,
+   * 必须以权威 `getLiving` 复核后才决定(否则网络抖动会被误判成下播、把一场切成多段)。
+   */
+  control: (e: { action: number; tips: string }) => void;
 }
 
 export interface DanmaClientOptions {
@@ -283,6 +289,14 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
           case "WebcastGiftMessage":
             this.emit("gift", douyin.GiftMessage.decode(msg.payload).toJSON() as DyGiftMessage);
             break;
+          case "WebcastControlMessage": {
+            // 上游语义:action === 3 = 本场疑似结束(下播)。仅作提示 → 交给上层用 getLiving 复核。
+            const c = douyin.ControlMessage.decode(msg.payload);
+            if (Number(c.action) === 3) {
+              this.emit("control", { action: Number(c.action), tips: String(c.tips ?? "") });
+            }
+            break;
+          }
           default:
             break; // like / social / roomStats / roomRank / screenChat … 不消费
         }

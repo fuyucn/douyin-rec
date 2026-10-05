@@ -22195,7 +22195,8 @@ export const douyin = ($root.douyin = (() => {
          * @memberof douyin
          * @interface IControlMessage
          * @property {douyin.ICommon|null} [common] ControlMessage common
-         * @property {number|null} [status] ControlMessage status
+         * @property {number|Long|null} [action] ControlMessage action
+         * @property {string|null} [tips] ControlMessage tips
          */
         /**
          * Constructs a new ControlMessage.
@@ -22219,12 +22220,19 @@ export const douyin = ($root.douyin = (() => {
          */
         ControlMessage.prototype.common = null;
         /**
-         * ControlMessage status.
-         * @member {number} status
+         * ControlMessage action.
+         * @member {number|Long} action
          * @memberof douyin.ControlMessage
          * @instance
          */
-        ControlMessage.prototype.status = 0;
+        ControlMessage.prototype.action = 0;
+        /**
+         * ControlMessage tips.
+         * @member {string} tips
+         * @memberof douyin.ControlMessage
+         * @instance
+         */
+        ControlMessage.prototype.tips = "";
         /**
          * Creates a new ControlMessage instance using the specified properties.
          * @function create
@@ -22250,8 +22258,10 @@ export const douyin = ($root.douyin = (() => {
                 writer = $Writer.create();
             if (message.common != null && Object.hasOwnProperty.call(message, "common"))
                 $root.douyin.Common.encode(message.common, writer.uint32(/* id 1, wireType 2 =*/ 10).fork()).ldelim();
-            if (message.status != null && Object.hasOwnProperty.call(message, "status"))
-                writer.uint32(/* id 2, wireType 0 =*/ 16).int32(message.status);
+            if (message.action != null && Object.hasOwnProperty.call(message, "action"))
+                writer.uint32(/* id 2, wireType 0 =*/ 16).uint64(message.action);
+            if (message.tips != null && Object.hasOwnProperty.call(message, "tips"))
+                writer.uint32(/* id 3, wireType 2 =*/ 26).string(message.tips);
             return writer;
         };
         /**
@@ -22289,7 +22299,11 @@ export const douyin = ($root.douyin = (() => {
                         break;
                     }
                     case 2: {
-                        message.status = reader.int32();
+                        message.action = reader.uint64();
+                        break;
+                    }
+                    case 3: {
+                        message.tips = reader.string();
                         break;
                     }
                     default:

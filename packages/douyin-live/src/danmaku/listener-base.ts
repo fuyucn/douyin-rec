@@ -59,6 +59,8 @@ export interface DanmaClient {
   on(event: "gift", cb: (m: _GiftMsg) => void): unknown;
   on(event: "member", cb: (m: _MemberMsg) => void): unknown;
   on(event: "error", cb: (e: Error) => void): unknown;
+  /** WebcastControlMessage action===3(疑似下播)。仅提示,须由权威 getLiving 复核。 */
+  on(event: "control", cb: (e: { action: number; tips: string }) => void): unknown;
   connect(): Promise<void>;
   close(): void;
 }
@@ -124,8 +126,10 @@ export abstract class ListenerDanmuSource implements DanmuSource {
     opts: RecordOpts,
     onMessage: (m: DanmuMessage) => void,
     onAlert?: (msg: string) => void,
+    onStreamEndHint?: (info: { tips?: string }) => void,
   ): Promise<void> {
     const alert = (msg: string): void => { try { onAlert?.(msg); } catch { /* ignore */ } };
+    const hintEnd = (tips?: string): void => { try { onStreamEndHint?.({ tips }); } catch { /* ignore */ } };
     // 本场 liveId 由子类(平台专属)解析。拿不到 → 解析失败(此时已 onLive 确认开播)→ 告警 + 本场不抓。
     const liveId = await this.resolveLiveId(roomUrl);
     if (!liveId) {
@@ -215,6 +219,14 @@ export abstract class ListenerDanmuSource implements DanmuSource {
         this.wsErrorAlerted = true;
         alert(`弹幕 WS 错误(后续重连错误不再重复告警): ${err?.message ?? err}`);
       }
+    });
+
+    // WebcastControlMessage action===3:平台宣告本场疑似结束。**只作提示**——可能是主播真下播,
+    // 也可能是平台/风控主动断流。这里不直接收播(避免网络抖动被误判成下播、把一场切成多段),
+    // 仅记日志;真正的收播判定仍由 recorder 的权威 getLiving 完成。
+    client.on("control", (e) => {
+      log.info(`${this.name} 收到控制消息 action=${e.action}(疑似本场结束)${e.tips ? ` tips=${e.tips}` : ""} —— 交由权威判活复核`);
+      hintEnd(e.tips || undefined);
     });
 
     // connect 拒绝必须告警后再抛 —— 否则越过下方看门狗 + error 事件,只剩调用方日志 = 静默无弹幕。

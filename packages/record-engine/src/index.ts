@@ -83,6 +83,8 @@ export class PollingRecorder implements Recorder {
   private stallTimer: ReturnType<typeof setInterval> | null = null;
   /** 卡死判定中的异步 living 查询;防止 interval 重入并发处理。 */
   private stallInFlight = false;
+  /** 「疑似本场结束」提示的复核进行中标志(防重入;与 stallInFlight 分开,语义不同)。 */
+  private hintInFlight = false;
   /** 最近 stderr 尾(断链诊断;引擎按需 push)。 */
   protected stderrTail: string[] = [];
   /** 平台建议的基础探测间隔(缺省 30s;快手页面限流紧 → 5 分钟)。 */
@@ -271,6 +273,45 @@ export class PollingRecorder implements Recorder {
   /** 录制有前进时调用(刷新看门狗健康时刻)。ffmpeg=time= 推进;mesio=输出文件增长。 */
   protected markProgress(): void {
     this.lastAdvanceAt = Date.now();
+  }
+
+  /**
+   * 「疑似本场结束」旁路提示(弹幕 ControlMessage / 上层信号)→ **立刻用权威 getLiving 复核**。
+   * 目的是把「等看门狗 60s 才判定收尾」缩短到秒级。**只有确认 living=false 才收尾**;
+   * true/未知一律忽略(网络抖动、风控断流都不能当收播,否则会把一场切成多段)。
+   */
+  hintStreamEnded(tips?: string): void {
+    const proc = this.proc;
+    if (this.stopped || !proc || this.hintInFlight) return;
+    if (proc.exitCode !== null || proc.signalCode !== null) return; // 已退出 → 走正常 close 收尾
+    this.hintInFlight = true;
+    void (async () => {
+      try {
+        let living: boolean | null = null;
+        try { living = await this.platform.getLiving(this.channelId); } catch { living = null; }
+        if (this.stopped || this.proc !== proc || proc.exitCode !== null || proc.signalCode !== null) return;
+        if (living === false) {
+          // 与看门狗「已下播但进程吊着」同路径:先 SIGINT 让下载器正常收尾,宽限后再 SIGKILL。
+          const secs = Math.round((Date.now() - this.lastAdvanceAt) / 1000);
+          log.info(
+            `收到本场结束提示${tips ? `(${tips})` : ""}且权威判活=下播 → 立即收尾(SIGINT,${STALL_GRACEFUL_EXIT_MS / 1000}s 未退再强杀)`,
+          );
+          this.clearStallWatch();
+          const killTimer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* 已退出 */ } }, STALL_GRACEFUL_EXIT_MS);
+          killTimer.unref?.();
+          const cancelKill = (): void => clearTimeout(killTimer);
+          proc.once("exit", cancelKill);
+          proc.once("close", cancelKill);
+          try { proc.kill("SIGINT"); } catch { /* close 事件会收尾 */ }
+        } else {
+          log.info(
+            `收到本场结束提示${tips ? `(${tips})` : ""}但权威判活=${living === true ? "仍在播" : "未知"} → 忽略(疑似断流/风控,不误判收播)`,
+          );
+        }
+      } finally {
+        this.hintInFlight = false;
+      }
+    })();
   }
 
   /** 卡死看门狗:lastAdvanceAt 停滞 ≥ STALL_TIMEOUT_MS 且进程仍在 → 告警 + 杀(→ onOffline → 重连)。 */

@@ -33,4 +33,30 @@ describe("弹幕监听共享基类 ListenerDanmuSource", () => {
     }
     await expect(new NullLiveId().stop()).resolves.toBeUndefined();
   });
+
+  it("ControlMessage(action=3) → 转成 onStreamEndHint 提示(不是收播结论)", async () => {
+    // 假 client:start 后立刻触发 open + control(action=3),模拟平台宣告本场结束。
+    class FakeClient {
+      private h: Record<string, ((...a: unknown[]) => void)[]> = {};
+      on(ev: string, cb: (...a: unknown[]) => void): void { (this.h[ev] ??= []).push(cb); }
+      async connect(): Promise<void> { this.h.open?.forEach((f) => f()); this.h.control?.forEach((f) => f({ action: 3, tips: "直播已结束" })); }
+      close(): void { /* noop */ }
+    }
+    class Sub extends ListenerDanmuSource {
+      readonly name = "test-hint";
+      protected async resolveLiveId(): Promise<string | null> { return "live-1"; }
+      protected async loadClientCtor(): Promise<never> { return FakeClient as unknown as never; }
+    }
+    const s = new Sub();
+    const hints: Array<{ tips?: string }> = [];
+    await s.start(
+      "https://live.douyin.com/123",
+      { quality: "origin", outDir: ".", segmentSec: 0 },
+      () => {},
+      () => {},
+      (info) => hints.push(info),
+    );
+    expect(hints).toHaveLength(1);
+    expect(hints[0].tips).toBe("直播已结束");
+  });
 });

@@ -74,6 +74,12 @@ export interface Recorder {
    * 未实现时 session 只依赖 RecordStop / onOffline 事件。
    */
   isLive?(): Promise<boolean>;
+  /**
+   * 「疑似本场结束」提示(来自弹幕 ControlMessage 等旁路信号)。实现方**必须**用权威 `getLiving`
+   * 复核:false → 立刻收尾(把「等看门狗 60s」缩短到秒级);true/未知 → 忽略(网络抖动)。
+   * 未实现时无影响(仅少一条加速路径)。
+   */
+  hintStreamEnded?(tips?: string): void;
 }
 
 export interface DanmuSource {
@@ -87,6 +93,12 @@ export interface DanmuSource {
     opts: RecordOpts,
     onMessage: (m: DanmuMessage) => void,
     onAlert?: (msg: string) => void,
+    /**
+     * 平台宣告「本场疑似结束」的**提示**(可选)。抖音 = WebcastControlMessage action===3。
+     * ⚠️ 仅提示,不是收播结论:可能是主播真下播,也可能是平台/风控主动断流。
+     * 接收方必须用权威 `getLiving` 复核后才可收尾 —— 否则网络抖动会被误判成下播(一场切成多段)。
+     */
+    onStreamEndHint?: (info: { tips?: string }) => void,
   ): Promise<void>;
   stop(): Promise<void>;
 }

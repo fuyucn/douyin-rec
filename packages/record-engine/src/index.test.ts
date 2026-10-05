@@ -149,6 +149,50 @@ describe("卡死看门狗(正常下播不误报)", () => {
   });
 });
 
+describe("hintStreamEnded(弹幕旁路提示 → 权威复核)", () => {
+  it("权威判活=下播 → 立刻 SIGINT 收尾(不等看门狗 60s)", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(false)); // getLiving = false
+    const proc = new FakeProc();
+    const { rec, ev, outDir } = await startRecorder(proc);
+    (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = Date.now() - 1_000; // 刚还在推进,看门狗远未触发
+
+    rec.hintStreamEnded?.("直播已结束");
+    await vi.advanceTimersByTimeAsync(0); // 冲掉 getLiving 微任务
+
+    expect(proc.killCalls).toEqual(["SIGINT"]); // 秒级收尾
+    expect(ev.onProbeError).not.toHaveBeenCalled(); // 不是卡死,不告警
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("权威判活=仍在播 → 忽略(网络抖动不误判收播,不杀进程)", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(true)); // getLiving = true(只是断流)
+    const proc = new FakeProc();
+    const { rec, ev, outDir } = await startRecorder(proc);
+
+    rec.hintStreamEnded?.("疑似断流");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(proc.killCalls).toHaveLength(0); // 绝不动进程
+    expect(ev.onOffline).not.toHaveBeenCalled();
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("判活 API 不可达 → 忽略(未知不当收播)", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform("error")); // getLiving 抛错
+    const proc = new FakeProc();
+    const { rec, outDir } = await startRecorder(proc);
+
+    rec.hintStreamEnded?.();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(proc.killCalls).toHaveLength(0);
+    rmSync(outDir, { recursive: true, force: true });
+  });
+});
+
 describe("风控降频轮询(platform.getStream 返回 throttledReason)", () => {
   it("探到风控 → 降频 + 不算取流失败告警;解除后恢复正常间隔", async () => {
     vi.useFakeTimers();

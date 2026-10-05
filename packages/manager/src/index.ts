@@ -180,6 +180,9 @@ export class RecordingSession {
                 log.error("弹幕告警:", msg);
                 this.notify({ kind: "error", stage: "弹幕", message: msg });
               },
+              // 旁路提示(抖音 ControlMessage action=3:疑似本场结束)→ 交 recorder 用权威 getLiving 复核。
+              // 复核为「已下播」才立刻收尾(把等看门狗 60s 缩短到秒级);仍在下播则忽略,绝不误判收播。
+              (info) => { this.recorder.hintStreamEnded?.(info?.tips); },
             )
             .catch((e) => {
               // 硬失败(connect 拒绝 / 模块加载失败等)同样上报,不只埋日志 → 避免静默无弹幕。
