@@ -21,6 +21,29 @@ export interface NodeInventory { workerId: string; recordings: NodeRecording[]; 
 /** `_tasks` 远端输出:该节点全部任务的隐私安全投影(无 cookies)。 */
 export interface NodeTasks { workerId: string; tasks: NodeTaskDTO[]; }
 
+export interface ActiveRecordingRoom {
+  platform: string;
+  roomSlug: string;
+}
+
+/**
+ * 哪些 worker 需要为控制台状态去查询「当前正在录制的房间」。
+ * 只有被「绑定了 sourceTaskId 的 hub 规则」选中的 worker 才需要探测;未被任何规则选中的
+ * worker 没有房间要展示,省掉每轮 SSH。规则未写 workers(旧配置)时视为选中全部。
+ */
+export function recordingStatusWorkerIds(
+  rules: readonly { workers?: string[]; recording?: { sourceTaskId?: number | null } | null }[],
+  allWorkerIds: readonly string[],
+): Set<string> {
+  const out = new Set<string>();
+  for (const rule of rules) {
+    if (!rule.recording?.sourceTaskId) continue;
+    if (rule.workers?.length) for (const id of rule.workers) out.add(id);
+    else for (const id of allWorkerIds) out.add(id);
+  }
+  return out;
+}
+
 export interface Transport {
   readonly id: string;
   listInventory(): Promise<NodeInventory>;
@@ -38,6 +61,8 @@ export interface Transport {
    * 不扫 recordings(区别于 listInventory)。可选:无此能力的 transport 视为「不支持探针」。
    */
   ping?(): Promise<void>;
+  /** 当前有媒体下载子进程的房间,供 master 控制台显示远端录制状态。 */
+  activeRecordingRooms?(): Promise<ActiveRecordingRoom[]>;
   /** 读取该节点的任务清单(隐藏 `_tasks` 子命令;可选:无此能力 = 不支持任务同步)。 */
   listTasks?(): Promise<NodeTasks>;
   /** 把 master 期望任务下发到该节点(隐藏 `_apply-tasks` 子命令;可选:无此能力 = 不支持任务同步)。 */

@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { registerChild, throwIfAborted, type RemoteTaskSpec } from "@drec/core";
-import type { ApplyTasksResult, NodeInventory, NodeRecording, NodeTasks, Transport } from "./transport.js";
+import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeTasks, Transport } from "./transport.js";
 
 export interface SshOpts {
   id: string; host: string; dataRoot: string;
@@ -53,13 +53,25 @@ function defaultRun(host: string, timeoutMs = 45_000) {
   });
 }
 
+/**
+ * 判断一次失败是否为「远端 bundle 还没有这个隐藏命令」(commander 的 unknown command)。
+ * 只认这一明确信号才允许降级;网络/权限/超时等错误必须抛给调用方,避免把可达性故障
+ * 误报成「节点不支持状态查询」。
+ */
+function isUnknownCommandError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /unknown command|未知命令|commander(\.js)?:?\s*unknown/i.test(msg);
+}
+
 export class SshTransport implements Transport {
   readonly id: string;
   private run: (argv: string[]) => Promise<string>;
+  private runStatus: (argv: string[]) => Promise<string>;
   private rsync: (remote: string, localDir: string) => Promise<void>;
   constructor(private o: SshOpts) {
     this.id = o.id;
     this.run = o.run ?? defaultRun(o.host);
+    this.runStatus = o.run ?? defaultRun(o.host, 8_000);
     this.rsync = o.rsync ?? ((remote, localDir) => new Promise((res, rej) => {
       // 免交互(BatchMode)+ ConnectTimeout,避免 auth 提示/连不上时挂死;进度输出作为心跳。
       const p = spawn("rsync", buildRsyncArgs(o.host, remote, localDir));
@@ -107,6 +119,36 @@ export class SshTransport implements Transport {
     const out = await this.run([`${nodePrefix} _tasks ${this.o.dataRoot}`]);
     const parsed = JSON.parse(out) as { tasks: NodeTasks["tasks"] };
     return { workerId: this.id, tasks: parsed.tasks };
+  }
+
+  /** 查询 worker 当前正在录制的房间,仅做轻量 /proc 扫描,不读录像目录。 */
+  async activeRecordingRooms(): Promise<ActiveRecordingRoom[]> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    try {
+      const out = await this.runStatus([`${nodePrefix} _recording-status ${this.o.dataRoot}`]);
+      const parsed = JSON.parse(out) as { rooms?: ActiveRecordingRoom[] };
+      return Array.isArray(parsed.rooms) ? parsed.rooms : [];
+    } catch (e) {
+      // 只在「命令确实不存在」时降级;网络抖动/ssh 失败要让调用方看到 error(节点不可达),
+      // 否则一次抖动就把该节点永久误标成「不支持状态查询」。
+      if (!isUnknownCommandError(e)) throw e;
+    }
+    // 兼容尚未更新的 worker bundle:退回现有 _tasks + _is-done 查询(每轮 1 + N 次 ssh)。
+    const taskOut = await this.runStatus([`${nodePrefix} _tasks ${this.o.dataRoot}`]);
+    const parsed = JSON.parse(taskOut) as { tasks: NodeTasks["tasks"] };
+    const candidates = [...new Map(
+      parsed.tasks.filter((task) => task.enabled).map((task) => [
+        `${task.platform}:${task.roomSlug}`,
+        { platform: task.platform, roomSlug: task.roomSlug },
+      ]),
+    ).values()];
+    const done = await Promise.all(candidates.map(async (room) => ({
+      room,
+      done: await this.runStatus([`${nodePrefix} _is-done ${this.o.dataRoot} '${room.roomSlug.replace(/'/g, "'\\''")}'`])
+        .then((out) => out.trim().toLowerCase() !== "false")
+        .catch(() => true),
+    })));
+    return done.filter((entry) => !entry.done).map((entry) => entry.room);
   }
 
   /** 下发 master 期望任务(base64 防引号/换行问题;cookies 只走可信 ssh 通道)。 */

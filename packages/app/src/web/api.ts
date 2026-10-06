@@ -28,6 +28,7 @@ import {
   type WorkerDTO,
   type WorkerTestResult,
   type WorkerStatus,
+  type RecordingWorkerStatusDTO,
   type BiliupAuthStatus,
 } from "@drec/core";
 import * as hubStore from "../hub-store.js";
@@ -118,6 +119,8 @@ export interface ApiDeps {
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<WorkerTestResult>;
   /** 批量存活探针(CLI 注入)。省略(hub 未开)→ status 端点返回 []。 */
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  /** 录制节点状态缓存读取;避免每次列任务都同步 SSH。 */
+  recordingWorkers?: (platform: string, roomSlug: string) => RecordingWorkerStatusDTO[];
   /** 立即触发一次 hub 任务同步(hub 规则/worker 变更后由 web API 调用;省略=只等周期 tick)。 */
   requestSyncTasks?: () => void;
   /**
@@ -155,6 +158,7 @@ export interface TaskView extends Task {
   anchorName: string | null;
   /** true=真正在录视频；false 且 running=true → 进程在跑但「等待开播中」。 */
   recording: boolean;
+  recordingWorkers?: RecordingWorkerStatusDTO[];
 }
 
 /** A single-task view enriched with full live runtime (详情 page). */
@@ -412,12 +416,23 @@ export function makeApi(deps: ApiDeps): Api {
   };
 
   // 显示用主播名：运行时(录制中 `[主播]` 日志解析) 优先，否则持久化的(创建时抓的)。
-  const view = (t: Task): TaskView => ({
-    ...t,
-    running: manager.isRunning(t.id),
-    anchorName: manager.getAnchorName(t.id) ?? t.anchorName,
-    recording: manager.isRecording(t.id),
-  });
+  const view = (t: Task): TaskView => {
+    // 平台/roomSlug 解析含正则匹配,任务列表每 2s 轮询 → 只在 hub 注入回调时解析。
+    // 非 master 无 recordingWorkers,保持原行为且不付解析成本。
+    let workers: RecordingWorkerStatusDTO[] | undefined;
+    if (deps.recordingWorkers) {
+      const platform = platformForRoom(t.room);
+      workers = deps.recordingWorkers(platform.id, platform.extractRoomSlug(t.room));
+    }
+    return {
+      ...t,
+      running: manager.isRunning(t.id),
+      anchorName: manager.getAnchorName(t.id) ?? t.anchorName,
+      recording: manager.isRecording(t.id),
+      // 空数组不下发:前端 `recordingWorkers?.length` 判定依赖它,发空数组与缺省等价但徒增 payload。
+      ...(workers && workers.length > 0 ? { recordingWorkers: workers } : {}),
+    };
+  };
   const detailView = (t: Task): TaskDetailView => ({
     ...view(t),
     runtime: manager.getRuntime(t.id),

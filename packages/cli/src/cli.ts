@@ -24,7 +24,7 @@ import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
-import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec } from "@drec/core";
+import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
@@ -534,6 +534,10 @@ let hubStopJob:
 let hubRunNow:
   | ((opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>)
   | undefined;
+let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
+const recordingSnapshotKey = (platform: string, roomSlug: string): string => `${platform}:${roomSlug}`;
+const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWorkerStatusDTO[] =>
+  hubRecordingSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
 /** web API → hubStarter.retryNode 的统一入口(hub 未启动 → 400)。 */
 const requestHubRetryNode = async (
   streamKey: string,
@@ -558,12 +562,13 @@ const requestHubRunNow = async (
 
 const hubStarter: HubStarter = {
   requestSyncTasks: requestHubSync,
+  recordingWorkers: readRecordingWorkers,
   retryNode: requestHubRetryNode,
   stopJob: requestHubStopJob,
   runNow: requestHubRunNow,
   async start(opts) {
     const {
-      registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport,
+      registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport, recordingStatusWorkerIds,
       buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool,
     } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
@@ -640,6 +645,11 @@ const hubStarter: HubStarter = {
       ffprobe,
       taskRooms: buildTaskRooms,
       isRoomRecording,
+      activeRecordingRooms: () => opts.store.listTasks().flatMap((t) => {
+        if (!opts.manager.isRecording(t.id)) return [];
+        const platform = platformForRoom(t.room);
+        return [{ platform: platform.id, roomSlug: platform.extractRoomSlug(t.room) }];
+      }),
       // local worker = master 自身:hub 任务同步直接落在本机 store(与远端 `_tasks` / `_apply-tasks` 同路径)。
       listTasks: () => listNodeTasks(opts.store),
       // adopt=false:本机源任务保持用户可编辑(managedBy 不置 hub),只有远端节点的同步任务才锁编辑。
@@ -651,6 +661,79 @@ const hubStarter: HubStarter = {
     const loadWorkers = (): Array<{ id: string; kind: string; host?: string; dataRoot?: string; name?: string }> => {
       const fromFile = workerStore.listWorkers(rootHubConfig());
       return fromFile.length ? fromFile : workers;
+    };
+    let refreshingRecordingStatus = false;
+    /** 状态探测与 pipeline 共用同一批 transport 实例(避免每 5s 重建 SshTransport)。 */
+    let statusTransports: Map<string, ReturnType<typeof getTransport>> | null = null;
+    let statusTransportsFingerprint = "";
+    const refreshRecordingStatus = async (): Promise<void> => {
+      if (refreshingRecordingStatus) return;
+      refreshingRecordingStatus = true;
+      try {
+        const configuredWorkers = loadWorkers();
+        // 只查询「至少被一条绑定源任务的规则选中」的 worker;未被任何规则选中的 worker
+        // 没有房间需要展示状态,每 5s 对其发 SSH 纯属浪费。
+        const boundWorkerIds = recordingStatusWorkerIds(
+          hubStore.listHubRules(rootHubDir()),
+          configuredWorkers.map((w) => w.id),
+        );
+        // worker 配置可能刚被改(增删/换 kind)→ 指纹变了就重建,否则复用。
+        const fingerprint = configuredWorkers.map((w) => `${w.id}:${w.kind}:${w.host ?? ""}:${w.dataRoot ?? ""}`).join("|");
+        if (!statusTransports || statusTransportsFingerprint !== fingerprint) {
+          statusTransports = buildTransports();
+          statusTransportsFingerprint = fingerprint;
+        }
+        const probed = configuredWorkers.filter((w) => boundWorkerIds.has(w.id));
+        const results = await Promise.all(probed.map(async (worker) => {
+          try {
+            const transport = statusTransports!.get(worker.id);
+            if (!transport) throw new Error(`未注册的 worker transport: ${worker.id}`);
+            if (!transport.activeRecordingRooms) throw new Error("worker 不支持录制状态查询");
+            return { worker, rooms: await transport.activeRecordingRooms(), error: null };
+          } catch (e) {
+            return { worker, rooms: [], error: (e as Error).message };
+          }
+        }));
+        const byWorker = new Map(results.map((r) => [r.worker.id, r]));
+        const next = new Map<string, RecordingWorkerStatusDTO[]>();
+        for (const rule of hubStore.listHubRules(rootHubDir())) {
+          const sourceId = rule.recording?.sourceTaskId;
+          if (sourceId == null) continue;
+          const source = opts.store.getTask(sourceId);
+          if (!source) continue;
+          const platform = platformForRoom(source.room);
+          const roomSlug = platform.extractRoomSlug(source.room);
+          if (roomSlug !== rule.roomSlug || platform.id !== rule.platform) continue;
+          const selectedIds = rule.workers?.length
+            ? rule.workers
+            : configuredWorkers.map((worker) => worker.id);
+          const rows = selectedIds.flatMap((workerId) => {
+            const result = byWorker.get(workerId);
+            if (!result) return [];
+            return [{
+              workerId,
+              workerName: result.worker.name ?? workerId,
+              state: result.error
+                ? "unavailable" as const
+                : result.rooms.some((room) => room.platform === platform.id && room.roomSlug === roomSlug)
+                  ? "recording" as const
+                  : "not_recording" as const,
+            }];
+          });
+          // 「房间是否要展示状态」与「当前是否已探到该房间」是独立维度：
+          // 一条规则先探到、后被改成未探到（或源任务删除）时，若直接覆盖会留下陈旧状态。
+          // 因此先清空该房间的旧条目,再写入本次结果。
+          const key = recordingSnapshotKey(platform.id, roomSlug);
+          next.set(key, rows);
+        }
+        // `next` 每次从空 Map 重建,天然丢掉「源任务已删除/解绑」的房间,
+        // 不需要也不能在遍历 hubRecordingSnapshot 时删它(会边迭代边改)。
+        hubRecordingSnapshot = next;
+      } catch (e) {
+        opts.warn(`[hub] 刷新 worker 录制状态失败: ${(e as Error).message}`);
+      } finally {
+        refreshingRecordingStatus = false;
+      }
     };
     const buildTransports = (): Map<string, ReturnType<typeof getTransport>> =>
       new Map(loadWorkers().map((w) => [w.id, getTransport(w)]));
@@ -991,9 +1074,13 @@ const hubStarter: HubStarter = {
       syncIntervalMs: hubCfg.syncIntervalMs ?? 60_000,
     });
 
+    void refreshRecordingStatus();
+    const recordingStatusTimer = setInterval(() => void refreshRecordingStatus(), 5_000);
     opts.log(`[hub] 已启用，${loadWorkers().length} 个 worker`);
     return () => {
       stop();
+      clearInterval(recordingStatusTimer);
+      hubRecordingSnapshot = new Map();
       hubSyncTasks = undefined;
       hubRetryNode = undefined;
       hubStopJob = undefined;
@@ -1070,11 +1157,17 @@ program.addCommand(
 // ─── cookie 子命令组：管理全局抖音账号 cookie（所有任务共享）────────────────────
 program.addCommand(buildCookieCommand());
 
-// ─── _is-done <dataRoot> <roomSlug>（隐藏子命令，供 master 通过 SSH 调用）────────
-// 只查「该房间」是否还有活着的下载进程(ffmpeg/mesio 子进程)在写盘,不再数全机 ffmpeg:
-// 之前用全局 ffmpeg 计数,别的房间还在录会把本房间也当成未收播,settle 一直空等。
-// record 子进程命令含 `--room <URL/房间号>`;有孙进程(ffmpeg/mesio)= 正在录;仅轮询等开播无子进程 = 已收播。
-function roomRecordingAlive(roomSlug: string): boolean {
+/**
+ * 扫 `/proc`,找出「有媒体下载孙进程(ffmpeg/mesio)」的 record 子进程,返回其房间身份。
+ *
+ * 唯一真理:`_is-done`(某房间是否仍在录)与 `_recording-status`(全部在录房间)共用这一个扫描,
+ * 避免两处 `/proc` 解析逻辑各自漂移。非 Linux(本地 macOS 开发)无 `/proc` → 返回空数组。
+ *
+ * 判据:record 子进程命令行含 `--room <URL/房间号>`,且 `/proc/<pid>/task/<pid>/children`
+ * 非空(= 正在写盘的 ffmpeg/mesio)。只在轮询等开播、无下载子进程 = 未在录。
+ */
+function scanRecordingRooms(): { platform: string; roomSlug: string }[] {
+  const rooms = new Map<string, { platform: string; roomSlug: string }>();
   try {
     for (const entry of readdirSync("/proc", { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
@@ -1086,24 +1179,26 @@ function roomRecordingAlive(roomSlug: string): boolean {
       }
       const roomIdx = cmdline.indexOf("--room");
       if (roomIdx < 0 || roomIdx + 1 >= cmdline.length) continue;
-      let slug: string;
       try {
-        slug = platformForRoom(cmdline[roomIdx + 1]).extractRoomSlug(cmdline[roomIdx + 1]);
-      } catch {
-        continue;
-      }
-      if (slug !== roomSlug) continue;
-      try {
+        const platform = platformForRoom(cmdline[roomIdx + 1]);
+        const roomSlug = platform.extractRoomSlug(cmdline[roomIdx + 1]);
         const children = readFileSync(`/proc/${entry.name}/task/${entry.name}/children`, "utf8").trim();
-        if (children.length > 0) return true;
+        if (children) rooms.set(`${platform.id}:${roomSlug}`, { platform: platform.id, roomSlug });
       } catch {
-        /* 进程刚退出,忽略 */
+        /* 进程刚退出,或房间无法解析 */
       }
     }
   } catch {
     /* 非 Linux(本地开发)无 /proc → 视为无进程 */
   }
-  return false;
+  return [...rooms.values()];
+}
+
+// ─── _is-done <dataRoot> <roomSlug>（隐藏子命令，供 master 通过 SSH 调用）────────
+// 只查「该房间」是否还有活着的下载进程(ffmpeg/mesio 子进程)在写盘,不再数全机 ffmpeg:
+// 之前用全局 ffmpeg 计数,别的房间还在录会把本房间也当成未收播,settle 一直空等。
+function roomRecordingAlive(roomSlug: string): boolean {
+  return scanRecordingRooms().some((room) => room.roomSlug === roomSlug);
 }
 
 program
@@ -1111,6 +1206,13 @@ program
   .description("(内部) 判断该房间是否已收播(供 master ssh settle)")
   .action((_dataRoot: string, roomSlug: string) => {
     process.stdout.write((roomRecordingAlive(roomSlug) ? "false" : "true") + "\n");
+  });
+
+program
+  .command("_recording-status <dataRoot>", { hidden: true })
+  .description("(内部) 输出当前正在录制的房间,供 master 控制台轮询")
+  .action((_dataRoot: string) => {
+    process.stdout.write(JSON.stringify({ rooms: scanRecordingRooms() }) + "\n");
   });
 
 // ─── _inventory <dataRoot>（隐藏子命令，供多节点编排 master 通过 SSH 调用）──────────

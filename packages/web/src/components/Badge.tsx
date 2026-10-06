@@ -32,12 +32,14 @@ export function StatusBadge({
   status,
   enabled = true,
   recording,
+  recordingWorkers,
 }: {
   running: boolean;
   status: string;
   enabled?: boolean;
   /** true=真正在录视频；running 但未录(等开播/重连) → 显示「等待开播中」。 */
   recording?: boolean;
+  recordingWorkers?: Task["recordingWorkers"];
 }): ReactNode {
   const t = useT();
   // 已停用优先：用户主动关掉，daemon 不会再拉起。
@@ -56,6 +58,34 @@ export function StatusBadge({
       <Badge tone="badge-orange">
         <Dot color="var(--warning)" pulse />
         {t("badge.draining")}
+      </Badge>
+    );
+  }
+  // 远端 worker 在录 → 显示实际录制节点。
+  // 必须排在 draining 之后：排空期间 isRecording 仍为 true,否则会把「排空中」误显示成「录制中」。
+  const activeWorkers = recordingWorkers?.filter((worker) => worker.state === "recording") ?? [];
+  if (activeWorkers.length) {
+    return (
+      <Badge tone="badge-success">
+        <Dot color="var(--success)" pulse />
+        {t("badge.recordingOn", { nodes: activeWorkers.map((worker) => worker.workerName).join(" + ") })}
+      </Badge>
+    );
+  }
+  if (recordingWorkers?.length) {
+    const unavailable = recordingWorkers.filter((worker) => worker.state === "unavailable");
+    if (unavailable.length) {
+      return (
+        <Badge tone="badge-error">
+          <Dot color="var(--error)" />
+          {t("badge.workersUnavailable", { nodes: unavailable.map((worker) => worker.workerName).join(" + ") })}
+        </Badge>
+      );
+    }
+    return (
+      <Badge tone="badge-neutral">
+        <Dot color="var(--muted-soft)" pulse />
+        {t("badge.workersIdle", { nodes: recordingWorkers.map((worker) => worker.workerName).join(" + ") })}
       </Badge>
     );
   }

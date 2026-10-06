@@ -4,8 +4,85 @@ import { existsSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SshTransport, buildRsyncArgs } from "./transport-ssh.js";
+import { recordingStatusWorkerIds } from "./transport.js";
+
+describe("recordingStatusWorkerIds", () => {
+  const all = ["local", "vps2", "vps3"];
+  it("只选被绑定源任务的规则选中的 worker", () => {
+    expect([...recordingStatusWorkerIds(
+      [{ workers: ["vps2"], recording: { sourceTaskId: 70 } }],
+      all,
+    )]).toEqual(["vps2"]);
+  });
+  it("未绑定 sourceTaskId 的规则不贡献任何 worker", () => {
+    expect([...recordingStatusWorkerIds([{ workers: ["vps2", "vps3"] }], all)]).toEqual([]);
+  });
+  it("旧规则未写 workers → 视为选中全部(向后兼容)", () => {
+    expect([...recordingStatusWorkerIds([{ recording: { sourceTaskId: 1 } }], all)].sort())
+      .toEqual(["local", "vps2", "vps3"]);
+  });
+  it("多条规则取并集", () => {
+    expect([...recordingStatusWorkerIds([
+      { workers: ["vps2"], recording: { sourceTaskId: 70 } },
+      { workers: ["local", "vps3"], recording: { sourceTaskId: 65 } },
+    ], all)].sort()).toEqual(["local", "vps2", "vps3"]);
+  });
+  it("sourceTaskId=0 / null 不算绑定(0 不是有效 task id)", () => {
+    expect([...recordingStatusWorkerIds([{ workers: ["vps2"], recording: { sourceTaskId: 0 } }], all)]).toEqual([]);
+    expect([...recordingStatusWorkerIds([{ workers: ["vps2"], recording: { sourceTaskId: null } }], all)]).toEqual([]);
+  });
+});
 
 describe("SshTransport", () => {
+  describe("activeRecordingRooms", () => {
+    const okOut = JSON.stringify({ rooms: [{ platform: "douyin", roomSlug: "123" }] });
+
+    it("新 bundle:单次 _recording-status 即返回活动房间", async () => {
+      const captured: string[][] = [];
+      const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec",
+        run: async (argv) => { captured.push(argv); return okOut; }, rsync: async () => {} });
+      await expect(t.activeRecordingRooms()).resolves.toEqual([{ platform: "douyin", roomSlug: "123" }]);
+      expect(captured).toHaveLength(1);
+      expect(captured[0].join(" ")).toContain("_recording-status");
+    });
+
+    it("旧 bundle(unknown command)→ 降级到 _tasks + _is-done", async () => {
+      const calls: string[] = [];
+      const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {},
+        run: async (argv) => {
+          const cmd = argv.join(" ");
+          calls.push(cmd);
+          if (cmd.includes("_recording-status")) throw new Error("ssh rc=1: error: unknown command '_recording-status'");
+          if (cmd.includes("_tasks")) return JSON.stringify({ tasks: [
+            { platform: "douyin", roomSlug: "111", enabled: true },
+            { platform: "douyin", roomSlug: "222", enabled: true },
+            { platform: "douyin", roomSlug: "333", enabled: false },
+          ] });
+          if (cmd.includes("'111'")) return "false\n";  // 仍在录
+          if (cmd.includes("'222'")) return "true\n";   // 已收播
+          return "true\n";
+        } });
+      // enabled=false 的 333 不该被查询
+      await expect(t.activeRecordingRooms()).resolves.toEqual([{ platform: "douyin", roomSlug: "111" }]);
+      expect(calls.some((c) => c.includes("'333'"))).toBe(false);
+    });
+
+    it("网络/ssh 故障必须抛出,不能被当成「不支持命令」而降级", async () => {
+      const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec",
+        run: async () => { throw new Error("ssh 超时 8000ms 被杀"); }, rsync: async () => {} });
+      await expect(t.activeRecordingRooms()).rejects.toThrow(/超时/);
+    });
+
+    it("非 Linux(/proc 不存在)→ 返回空数组而不是抛错", async () => {
+      const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec",
+        run: async () => okOut, rsync: async () => {} });
+      // worker 侧返回 {rooms:[]} 表示无活动录制
+      const empty = new SshTransport({ id: "v", host: "h", dataRoot: "/d",
+        run: async () => JSON.stringify({ rooms: [] }), rsync: async () => {} });
+      await expect(empty.activeRecordingRooms()).resolves.toEqual([]);
+    });
+  });
+
   it("buildRsyncArgs:免交互 + 连接超时 + 心跳参数(防 auth 挂起/死连接占锁)", () => {
     const args = buildRsyncArgs("vps", "/data/rec/a.ts", "/stage/x");
     const sshOpts = args[args.indexOf("-e") + 1];

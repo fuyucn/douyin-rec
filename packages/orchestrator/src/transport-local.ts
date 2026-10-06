@@ -2,7 +2,7 @@
 import { mkdirSync, copyFileSync, existsSync, rmSync } from "node:fs";
 import { join, basename } from "node:path";
 import type { NodeTaskDTO, RemoteTaskSpec } from "@drec/core";
-import type { ApplyTasksResult, NodeInventory, NodeTasks, Transport } from "./transport.js";
+import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeTasks, Transport } from "./transport.js";
 import { scanRecordings } from "./scan.js";
 
 export interface LocalOpts {
@@ -17,6 +17,8 @@ export interface LocalOpts {
    * 否则 isDone 恒 true → settle 不等录完 → 周期对账边录边合并残片(踩过)。
    */
   isRoomRecording?: (roomSlug: string) => boolean;
+  /** 当前正在写流的 room identities;区分同 roomSlug 的不同平台。 */
+  activeRecordingRooms?: () => ActiveRecordingRoom[];
   /** hub 任务同步:读本机任务清单(local worker = master 自身)。缺省 = 不支持。 */
   listTasks?: () => NodeTaskDTO[];
   /** hub 任务同步:把期望任务应用到本机 store。缺省 = 不支持。 */
@@ -50,6 +52,10 @@ export class LocalTransport implements Transport {
   /** 该 room 还在本机录制 → 未收播(false);否则已收播(true)。注入 isRoomRecording 才生效,否则恒 true(旧行为)。 */
   async isDone(roomSlug: string): Promise<boolean> {
     return !(this.o.isRoomRecording?.(roomSlug) ?? false);
+  }
+
+  async activeRecordingRooms(): Promise<ActiveRecordingRoom[]> {
+    return this.o.activeRecordingRooms?.() ?? [];
   }
 
   /** 轻量探针:recordings 目录存在即视为就绪(不扫内容)。 */

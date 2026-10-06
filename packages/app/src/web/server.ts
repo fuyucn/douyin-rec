@@ -218,6 +218,8 @@ export interface WebServerDeps {
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
   /** 批量存活探针(CLI 注入)。省略 → status 端点返回 []。 */
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  /** worker 录制状态快照(CLI 注入;不在请求路径上同步 SSH)。 */
+  recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
   /** 立即触发一次 hub 任务同步(规则/worker 变更后调用,不用等周期 tick)。 */
   requestSyncTasks?: () => void;
   /** master 本机抑制名单(源任务切到远端录制→本机不实跑);透传给 web API。 */
@@ -449,6 +451,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     biliupCookiesPath: deps.biliupCookiesPath,
     testWorker: deps.testWorker,
     probeAllWorkers: deps.probeAllWorkers,
+    recordingWorkers: deps.recordingWorkers,
     requestSyncTasks: deps.requestSyncTasks,
     localSuppressedIds: deps.localSuppressedIds,
     retryNode: deps.retryNode,

@@ -94,9 +94,22 @@ export function TaskList(): ReactNode {
   };
 
   // 顶部指标带:总数 / 录制中 / 待命 / 错误,一眼看当前机群状态。
-  const recording = tasks.filter((t) => t.enabled && t.running && t.recording !== false).length;
-  const waiting = tasks.filter((t) => t.enabled && !t.running && t.status !== "error").length;
-  const errors = tasks.filter((t) => t.status === "error").length;
+  const recording = tasks.filter((t) =>
+    t.enabled && (
+      t.recordingWorkers?.some((worker) => worker.state === "recording") ||
+      (t.running && t.recording !== false)
+    ),
+  ).length;
+  const waiting = tasks.filter((t) =>
+    t.enabled &&
+    !t.recordingWorkers?.some((worker) => worker.state === "recording") &&
+    !t.recordingWorkers?.some((worker) => worker.state === "unavailable") &&
+    !t.running &&
+    t.status !== "error",
+  ).length;
+  const errors = tasks.filter((t) =>
+    t.status === "error" || t.recordingWorkers?.some((worker) => worker.state === "unavailable"),
+  ).length;
 
   return (
     <>
@@ -273,7 +286,13 @@ export function TaskList(): ReactNode {
                       )}
                     </td>
                     <td>
-                      <StatusBadge running={task.running} status={task.status} enabled={task.enabled} recording={task.recording} />
+                      <StatusBadge
+                        running={task.running}
+                        status={task.status}
+                        enabled={task.enabled}
+                        recording={task.recording}
+                        recordingWorkers={task.recordingWorkers}
+                      />
                     </td>
                     <td className="text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1.5 justify-end">

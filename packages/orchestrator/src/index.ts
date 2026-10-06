@@ -27,7 +27,7 @@ export { SshTransport } from "./transport-ssh.js";
 export { startHub } from "./hub.js";
 
 import { registerTransport } from "./transport.js";
-import type { ApplyTasksResult } from "./transport.js";
+import type { ActiveRecordingRoom, ApplyTasksResult } from "./transport.js";
 import { LocalTransport } from "./transport-local.js";
 import { SshTransport } from "./transport-ssh.js";
 import type { NodeTaskDTO, RemoteTaskSpec } from "@drec/core";
@@ -38,6 +38,8 @@ export function registerBuiltinTransports(deps: {
   taskRooms?: Record<string, string> | (() => Record<string, string>);
   /** 某 roomSlug 此刻是否还在本机录制(local transport 的 isDone 用;不传 → isDone 恒 true)。 */
   isRoomRecording?: (roomSlug: string) => boolean;
+  /** local worker 当前正在写流的房间。 */
+  activeRecordingRooms?: () => ActiveRecordingRoom[];
   /** hub 任务同步:读本机任务清单(local worker = master 自身)。 */
   listTasks?: () => NodeTaskDTO[];
   /** hub 任务同步:把期望任务应用到本机 store。 */
@@ -51,6 +53,7 @@ export function registerBuiltinTransports(deps: {
       taskRooms,
       ffprobe: deps.ffprobe,
       isRoomRecording: deps.isRoomRecording,
+      activeRecordingRooms: deps.activeRecordingRooms,
       listTasks: deps.listTasks,
       applyTasks: deps.applyTasks,
     }),

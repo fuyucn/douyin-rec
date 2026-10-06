@@ -296,6 +296,8 @@ export interface TaskDTO {
   anchorName: string | null;
   /** 是否真正在录视频(区分 running 但等待开播)。 */
   recording: boolean;
+  /** Hub 源任务在被选中 worker 上的录制状态;普通任务为空数组。 */
+  recordingWorkers?: RecordingWorkerStatusDTO[];
   /** 任务专属 Discord webhook;null = 回落全局。 */
   webhook: string | null;
 }
@@ -306,6 +308,13 @@ export interface TaskRuntime {
   startedAt: number | null;
   elapsedMs: number | null;
   anchorName: string | null;
+}
+
+/** Hub 任务在每个目标录制节点上的实时状态。 */
+export interface RecordingWorkerStatusDTO {
+  workerId: string;
+  workerName: string;
+  state: "recording" | "not_recording" | "unavailable";
 }
 
 /** GET /api/tasks/:id → 任务 + runtime。 */
