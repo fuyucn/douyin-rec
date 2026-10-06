@@ -144,6 +144,15 @@ node dist/douyin-rec.mjs task add URL                       # CLI 加任务
 
 ## 硬性约束
 
+- **部署安全 guard（长期规则,除非用户明确 override)：任何重新部署(本地 docker / VPS worker)前,
+  必须先确认没有正在录制的任务;有则等待。**
+  - 判定依据:`GET /api/tasks` 里 `recording === true`(真正在录)。`running: true` 只表示任务已启用/在等开播,
+    不代表正在录 —— 等开播状态下重启安全;`recording: true` 才不能打断。
+  - 部署前查**两个节点**(任一在录就等)：本地 `curl -s http://127.0.0.1:7860/api/tasks`;
+    VPS `ssh ubuntu@100.97.21.80 'curl -s http://127.0.0.1:7860/api/tasks'`。
+  - 有录制 → **不要重启**;等录制结束或先告知用户可部署时机。
+  - 只有用户**明确要求**(如"强制部署""现在就部署""override")才可无视此 guard。
+  - 原因:重启会杀掉录制子进程 → 当前分段被截断,可能丢流且 hub 侧留下不完整产物。
 - **删 `.xml` / `.ass` 前必须人工确认**（`.claude/hooks/block_xml_ass_delete.py` 对疑似删除它们的命令**弹确认 ask**，不再硬 block）。原则上清理只删 `.ts`/`.mp4` 大文件；`.xml`/`.ass` 不可再生，确认确实要删再放行。
 - **不要破坏 VPS 生产录制**：VPS 只读检查，不杀进程/不删文件。
 - 测试录制只用 VPS，本地仅验证 TS（本地 macOS 有 rc-11 fork 污染）。
