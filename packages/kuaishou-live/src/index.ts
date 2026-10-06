@@ -13,9 +13,18 @@ import { getStream, getLiving, getRoomInfo, KUAISHOU_QUALITIES } from "./stream/
 
 export { KUAISHOU_QUALITIES, STREAM_HEADERS } from "./stream/index.js";
 
-/** URL / 用户 id → 用户 id(live.kuaishou.com/u/{userId});已是 id 则原样。 */
+/**
+ * URL / 用户 id → 用户 id;已是 id 则原样。
+ * 覆盖快手三种直播页路径(同 biliup):
+ *   - `live.kuaishou.com/u/{id}`(标准)
+ *   - `live.kuaishou.com/profile/{id}`(旧版个人主页路径)
+ *   - `live.kuaishou.com/fw/live/{id}`(短链跳转后的落地路径)
+ * 以及企业号域名 `*.m.chenzhongtech.com`。
+ */
 export function extractRoomSlug(url: string): string {
-  const m = url.match(/live\.kuaishou\.com\/u\/([\w-]+)/);
+  const m =
+    url.match(/(?:live|www|v)\.kuaishou\.com\/(?:u|profile|fw\/live)\/([\w-]+)/) ??
+    url.match(/livev\.m\.chenzhongtech\.com\/(?:u|profile|fw\/live)\/([\w-]+)/);
   if (m) return m[1];
   const plain = url.trim().replace(/[?#].*$/, "");
   return /^[\w-]+$/.test(plain) ? plain : url;
@@ -29,8 +38,10 @@ export function roomToUrl(room: string): string {
 
 export const kuaishouPlatform: Platform = {
   id: "kuaishou",
-  matchUrl: (url) => /live\.kuaishou\.com\//.test(url),
-  urlPattern: "live\\.kuaishou\\.com\\/",
+  matchUrl: (url) =>
+    /(?:live|www|v)\.kuaishou\.com\//.test(url) || /livev\.m\.chenzhongtech\.com\//.test(url),
+  // 前端用它 new RegExp 判平台,必须与 matchUrl 同口径(否则快手任务落不到正确表单)。
+  urlPattern: "(?:live|www|v)\\.kuaishou\\.com/|livev\\.m\\.chenzhongtech\\.com/",
   roomToUrl,
   extractRoomSlug,
   async fetchAnchorName(room) {
