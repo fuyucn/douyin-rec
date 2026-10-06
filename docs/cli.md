@@ -308,7 +308,20 @@ node dist/douyin-rec.mjs task serve --port 7860 --host 127.0.0.1 # worker：仅�
 node dist/douyin-rec.mjs task serve --port 7860 --hub           # master：Web + 调度 + 多节点编排
 ```
 
-**master 模式（`--hub`）**：本机是 master（通常同时是录制节点），读取 `hub.config.json`（workers）与 `config/hub/{platform}.{roomSlug}.json`（每房间规则）。规则绑定 source task 后，master 把任务定义下发到选中 worker（远端受管任务只读）；收播后做覆盖度选优 → 拉取 → 合并/烧录 → 上传。slave/VPS 跑普通 `task serve`（无 `--hub`），由 master 经 SSH 主动够到（隐藏命令 `_tasks` / `_apply-tasks`）。详见 [multi-node-sync.md](./multi-node-sync.md)。
+**master 模式（`--hub`）**：本机是 master，同时注册一个可选的 `local` 录制 worker；读 `hub.config.json`（workers）与 `config/hub/{platform}.{roomSlug}.json`（每房间规则）。每条规则的 `workers` 决定该房间实际在哪些节点录制：只选远端时 master 保留源任务但不本机录，选 `local` + 远端才双录。规则绑定 source task 后，master 把任务定义下发到选中 worker（远端受管任务只读）；收播后做覆盖度选优 → 拉取 → 合并/烧录 → 上传。VPS 跑普通 `task serve`（无 `--hub`），由 master 经 SSH 主动够到（隐藏命令 `_tasks` / `_apply-tasks` / `_inventory` / `_recording-status`）。详见 [multi-node-sync.md](./multi-node-sync.md)。
+
+**master → worker 的隐藏命令**（非用户可见，由 master 经 SSH 调用）：
+
+| 命令 | 用途 |
+|---|---|
+| `_tasks <dataRoot>` | 输出该节点任务清单（无 cookies 的隐私投影），用于任务对账与录制状态回退查询 |
+| `_apply-tasks <dataRoot> <base64>` | 按 `(platform, roomSlug)` 对账 master 的期望任务（新建/收编/两阶段删除） |
+| `_inventory <dataRoot>` | 扫描 `recordings/` 输出录像清单（会话基名、分段、时长、缺口） |
+| `_is-done <dataRoot> <roomSlug>` | 判断该房间是否仍在录（有媒体下载子进程 = 未收播） |
+| `_disk <dataRoot>` | 输出数据根剩余空间 GB（master 磁盘看门狗） |
+| `_recording-status <dataRoot>` | 输出当前正在录制的房间 `[{ platform, roomSlug }]`，供主控控制台显示远端录制状态 |
+
+`_recording-status` 需要较新的 worker bundle；旧 bundle 会自动回退到 `_tasks` + `_is-done` 查询（结果一致，多几次 SSH）。
 
 REST API、SPA 功能、SPA 静态文件解析详见 [app.md Web 控制台](./app.md#web-控制台-task-serve)。
 

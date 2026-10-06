@@ -11,7 +11,7 @@
 
 分层(`test/arch/layering.test.ts` 守护依赖只能向下;新增包须在该测试 RANKS 登记)。架构=**2 个可插拔接缝**:
 **平台轴**(各 `<平台>-live`,平台专属:取流 + 弹幕)+ **引擎轴**(`record-engine`,平台无关下载)。其余全通用。
-另有**多节点编排层**(`orchestrator`,master/slave 跨节点选优合并上传,见「多节点 hub」)。
+另有**多节点编排层**(`orchestrator`,master/worker 跨节点任务分配、选优、合并与上传,见「多节点 hub」)。
 esbuild 把 cli 打包成 `dist/douyin-rec.mjs`(+ `dist/tui.mjs`),录制必须跑这个打包产物(sm-crypto interop)。
 当前 **13 包**(架构图见 `docs/architecture.html`;多节点设计见 `docs/multi-node-sync.md`)。
 
@@ -95,15 +95,17 @@ remote/                       # 已移出仓库(.gitignore;含 VPS IP/SSH 个人
 ### Web UI（React）
 - `web/`：Vite + React19 + react-router + jotai（tasksAtom/cookieStatusAtom/hubEnabledAtom）+ @base-ui/react + Tailwind v4 + lucide。Cal.com 风格设计 token。
 - `app/web/server.ts`：http server + REST api + SPA fallback，托管 `web/dist`。
-- 列表页 + 任务详情/日志页（状态、录制时长、SSE 日志）+ Hub 页(master 才显示;slave 显示 child node 提示)。
+- 列表页 + 任务详情/日志页（状态、录制时长、SSE 日志）+ Hub 页(master 才显示;worker 显示 child node 提示)。
 
-### 多节点 hub（`@drec/orchestrator`,master/slave 跨节点同步编排）
-- **形态**:一个 **master**(`task serve --hub`,如 docker)编排多个 **slave**(`task serve`,无 `--hub`,如 VPS);各节点匿名各录各的,master 选优合并上传。slave **不需要 `--hub`**——master 经 **SSH** 主动够到它:`_inventory`(一次性扫 `recordings/` 输出 JSON 清单)+ rsync 拉文件 + ssh 清理。
+### 多节点 hub（`@drec/orchestrator`,master/worker 跨节点同步编排）
+- **角色与节点分配**:Docker `task serve --hub` 同时是控制台/master 和一个可选的 `local` 录制 worker；VPS 跑普通 `task serve`，不带 `--hub`。Web「Hub」页将规则绑定到任务并选择每个房间的 `workers`；任务页的 enabled/启动状态表达录制意图并同步给选中节点。只选 VPS 时，本机 daemon 抑制源任务的录制进程；选 `local` 和 VPS 才会双录。远端受管任务只读，所有任务与节点分配通过 master 控制台操作。
+- **数据流**:选中的节点各自录制；master 主动读取清单（local scan / SSH `_inventory`），按房间聚类并选优，再将胜出录像经 rsync 拉到 master 的 stage，执行合并/烧录/上传。master 本机 `recordEnd` 可即时触发对账；远端收播事件不直接转发，远端独录由周期 reconcile 扫描发现。
+- **状态回传**:master 每 5s 经 Transport 查所选 worker 的活动录制房间（SSH `_recording-status`，旧 bundle 回退 `_tasks`+`_is-done`），缓存后随 `GET /api/tasks` 的 `recordingWorkers` 返回；只探测被绑定规则选中的 worker（`recordingStatusWorkerIds`）。任务页/详情页据此显示节点名，未开 hub 时该字段缺省。
 - **身份/聚类**:录制端写 `{base}.session.json`(roomSlug=web_rid + platform + gaps)。`identity` 按 **(platform, roomSlug)** 聚成一场(streamKey=`{platform}:{roomSlug}:{date}`)→ douyin/bilibili 同房间号不撞、跨节点一致(不靠主播名)。
 - **选优**:`select` 覆盖度优先(coverage=1−gap/span)→ **完整录全(单会话无断流)优先**,多个完整取最长;**所有节点都断流(没人录全)→ 中断 + 通知 + 绝不删源**(留人工)。
 - **pipeline**(`pipeline.ts`,复用 post-process + biliup):选优 winner → pull 到 stage → merge plain → burn danmu/livechat → **穿插上传**(merge 完即后台 fire P1 上传、与烧录并行,await BV 后串行 append;append 也带关水印+仅自己可见,防重置)。
-- **配置 = 文件**(对标 DLR,文件=唯一真理源,现读不缓存→UI↔手改文件天然同步):全局 `<root>/config/hub.config.json`(workers,旧名 tenants 兼容;stageDir/时序 + uploadDefaults)+ 每房间 `<root>/config/hub/{platform}.{roomSlug}.json`(`{room,enabled,pipeline:{steps,upload,cleanup}}`)。`upload.mode`=stage(只合成)|upload(传);`private` 布尔(默认仅自己可见)。**hub-store** 文件版 CRUD;Web Hub 页增删改 = 建/写/删文件。**hub 规则不在 DB**。
-- **SyncLedger**(`<db>-sync.db`)幂等台账:sync_jobs(状态机 pending→syncing→merging→uploading→done/needs_manual/failed)+ sync_candidates(选优明细)。reconciler:recordEnd 触发 + 周期 reconcileAll(in-flight 守卫 + settle 等收播,仍在录的场跳过)。
+- **配置 = 文件**(对标 DLR,文件=唯一真理源,现读不缓存→UI↔手改文件天然同步):全局 `<root>/config/hub.config.json`(workers,旧名 tenants 兼容;stageDir/时序 + uploadDefaults)+ 每房间 `<root>/config/hub/{platform}.{roomSlug}.json`(`{room,enabled,pipeline:{steps,upload,cleanup}}`)。`upload.mode`=stage(只合成)|upload(传);`private` 布尔(默认仅自己可见)。**hub-store** 文件版 CRUD;日常从 Web Hub 页维护规则、从任务页维护任务/启停;**hub 规则不在 DB**。
+- **SyncLedger**(`<db>-sync.db`)幂等台账:sync_jobs(状态机 pending→syncing→merging→uploading→done/needs_manual/failed)+ sync_candidates(选优明细)。reconciler:本机 `recordEnd` 可即时触发 + 周期 `reconcileAll`（默认 30min；远端收播由扫描发现；in-flight 守卫 + settle 等收播,仍在录的场跳过）。
 - **硬标准代码常量**(`biliup.ts`,不可配、绝不漏):关水印 `--extra-fields watermark.state=0`、copyright=1、`--is-only-self`(private 时)。可配的只有 tag/tid/desc(主播专属,写任务文件)。
 - 详见 `docs/multi-node-sync.md` + `docs/multi-node-sync-followups.md`(实测记录 + per-平台 cookie 等 followup)。
 
@@ -119,7 +121,7 @@ cd packages/web && pnpm build # 构建前端 → packages/web/dist（独立 Vite
 
 # 运行
 node dist/douyin-rec.mjs record --room URL --segment 1800   # 单次录制
-node dist/douyin-rec.mjs task serve --port 7860 --db douyin-rec.db   # Web UI（端口 7860）/ slave 节点
+node dist/douyin-rec.mjs task serve --port 7860 --db douyin-rec.db   # Web UI（端口 7860）/ worker 节点
 node dist/douyin-rec.mjs task serve --port 7860 --hub        # master:Web UI + 多节点 hub(读 <root>/config/hub.config.json)
 node dist/douyin-rec.mjs task add URL                       # CLI 加任务
 ```

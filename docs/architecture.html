@@ -130,11 +130,11 @@
     <b>加新引擎(如 yt-dlp)= 只在 <span class="mono">record-engine</span> 里加一个实现 Engine 接口的策略</b>,所有平台立即可用。
   </div>
 
-  <h2>多节点 hub(master 编排 slave)</h2>
+  <h2>多节点 hub(master 控制 + 按房间分配录制节点)</h2>
   <div class="flow">
-    <div class="step"><div class="t">master 下发受管任务</div><div class="d">规则绑定源任务 → _tasks/_apply-tasks(启动 + 周期1min + 变更即同步)</div></div>
+    <div class="step"><div class="t">控制台设置意图与节点</div><div class="d">任务页启动/停用 + Hub 页选择 workers</div></div>
     <div class="sep">→</div>
-    <div class="step"><div class="t">各节点录制</div><div class="d">recordings/ + {base}.session.json(受管任务只读)</div></div>
+    <div class="step"><div class="t">选中 worker 录制</div><div class="d">Docker local、VPS 或同时选择两者</div></div>
     <div class="sep">→</div>
     <div class="step"><div class="t">master 拿清单</div><div class="d">local 直接 scan / 远端 ssh _inventory</div></div>
     <div class="sep">→</div>
@@ -147,10 +147,10 @@
     <div class="step" style="background:#e0e7ff;border-color:#c7d2fe;color:#312e81;"><div class="t">穿插上传</div><div class="d">P1 ∥ 烧录, append 分P</div></div>
   </div>
   <div class="note">
-    <b>master = <span class="mono">task serve --hub</span></b>(编排 + 自己也录);<b>slave = 普通 <span class="mono">task serve</span></b>(只录,master 经 SSH 够到,<b>不需要 --hub</b>)。
-    受管任务下发:hub 规则绑定 master 本地任务(<span class="mono">recording.sourceTaskId</span>)并勾选节点(<span class="mono">workers</span>,旧名 tenants 兼容),远端任务标 <span class="mono">managedBy='hub'</span> 只读、禁止改删启停;本机源任务保持可编辑。
-    每房间配置 = 一个文件 <span class="mono">config/hub/{platform}.{roomSlug}.json</span>(文件=唯一真理源,UI 与手改天然同步),全局配置 = <span class="mono">config/hub.config.json</span>(workers / cookies / stageDir / uploadDefaults)。
-    所有节点都断流(没人录全)→ 中断 + 通知 + <b>不删源</b>。关水印 / 仅自己可见 / copyright 是代码常量。详见
+    <b>Docker master = <span class="mono">task serve --hub</span></b>(控制台 + 编排 + 可选 local worker);<b>VPS worker = 普通 <span class="mono">task serve</span></b>(不需要 <span class="mono">--hub</span>)。
+    Hub 规则绑定 master 源任务(<span class="mono">recording.sourceTaskId</span>)并选择节点(<span class="mono">workers</span>)；只选 VPS 时，master 保留任务意图但抑制本机录制，选 local+VPS 才双录。源任务启停状态同步给被选节点。
+    远端任务标 <span class="mono">managedBy='hub'</span> 只读，须在 master 控制台操作。master 任务页每 5 秒刷新 worker 的房间录制状态；master 扫描节点录像、选优并拉取到本机，负责合并/烧录/上传；远端收播由周期 reconcile 发现。
+    每房间规则文件为 <span class="mono">config/hub/{platform}.{roomSlug}.json</span>，全局配置为 <span class="mono">config/hub.config.json</span>。所有被选节点都断流(没人录全)→ 中断 + 通知 + <b>不删源</b>。详见
     <span class="mono">docs/multi-node-sync.md</span>。
   </div>
 </div>

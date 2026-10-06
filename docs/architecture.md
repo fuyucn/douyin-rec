@@ -4,7 +4,7 @@ pnpm workspace monorepo，13 个包，收敛成 **2 个可插拔接缝** + **1 �
 
 - **平台轴**（`<平台>-live`）—— 平台专属的一切：取流（`getStream`）+ 弹幕（`connectDanmu`）+ 开播判定（`getLiving`）。接新平台 = 写一个 `<平台>-live` 实现 `Platform` 接口 + `registerPlatform` 一行。
 - **引擎轴**（`record-engine`）—— 平台无关的下载：通用 `PollingRecorder` + 下载引擎策略（`ffmpeg` / `mesio`）。加新引擎 = 写一个 `DownloadEngine` 策略 + `registerEngine` 一行，所有平台立即可用。
-- **多节点 hub**（`orchestrator`）—— master/slave 跨节点：hub 规则**绑定 master 本地任务**（`recording.sourceTaskId`）并**自动下发到选中 worker 节点**（远端受管任务只读），各节点共录冗余副本；master 经 SSH 拿各节点录像清单 → 按 (platform, roomSlug) 聚成一场 → 覆盖度选优（选最完整副本）→ 拉取 → 合并/烧录 → 穿插上传 B 站。配置文件化（`config/hub/{platform}.{roomSlug}.json` + `hub.config.json`）。详见 [multi-node-sync.md](./multi-node-sync.md)。
+- **多节点 hub**（`orchestrator`）—— Docker `task serve --hub` 同时提供控制台、master 编排和 `local` 录制 worker；录制落在哪个节点由每个房间的 Hub 规则选择。规则绑定 master 上的源任务（`recording.sourceTaskId`）并将启用状态同步给选中的 worker；选 VPS 且不选 `local` 时，master 仍保存任务配置与启停意图，但抑制该房间的本机录制。选中多个 worker 会产生多份录制副本。master 读取节点清单、按 `(platform, roomSlug)` 聚类、覆盖度选优、拉取胜出文件到本机，再执行合并/烧录/上传。VPS worker 运行普通 `task serve`，不运行 Hub。任务与 Hub 配置通过 Web 控制台维护。详见 [multi-node-sync.md](./multi-node-sync.md)。
 
 依赖**只能向下**（`test/arch/layering.test.ts` 守护：每个包的 rank 必须严格大于它依赖的任何包；新增包须在 `RANKS` 登记）。esbuild 把 `cli` 打成自包含单文件 `dist/douyin-rec.mjs`（+ 独立的 `dist/tui.mjs`）。
 
@@ -112,28 +112,38 @@ flowchart LR
 - **平台轴**只回答「这个房间在播吗 / 流地址是什么 / 弹幕从哪连」——`getLiving` / `getStream` / `connectDanmu`。换平台不动录制逻辑。
 - **引擎轴**只负责「把 `getStream` 给的 `url + headers` 下载到磁盘」——`ffmpeg`（`-c copy` → `.ts`）或 `mesio`（rust-srec `--fix` → `.flv`），并透传平台给的 headers（如 bilibili CDN 的 Referer/UA）。换引擎所有平台立即生效。
 
-## 多节点 hub 数据流（直播结束 → 选优 → 上传）
+## 多节点 hub 数据流（节点录制 → master 后处理）
 
-**master**（`task serve --hub`）编排多个 **slave**（`task serve`，无 `--hub`）。**心智模型 = 受管任务下发 + 多副本冗余 + read-repair**：在 master 建好录制任务后，hub 规则绑定该任务（`recording.sourceTaskId`）并勾选 worker 节点，master 把任务定义下发到各节点（远端任务 `managedBy='hub'`，Web 只读、不可改删启停；本机源任务保持可编辑），各节点各自录一份全量副本；master 经 SSH 主动够到 slave（不需要 slave 跑 hub 服务），选最完整那份 → 合并发布。
+**角色由运行进程决定，不代表机器只能承担一种角色。** Docker 运行 `task serve --hub`，既是 master 控制器，也是 `local` worker；它可以录制分配给本机的房间。VPS 运行普通 `task serve`，作为远端 worker，由 master 同步任务并读取录制清单。每个房间的 Hub 规则 `workers` 决定实际录制节点：
+
+- `["local"]`：仅 Docker 本机录制。
+- `["vps2"]`：仅 VPS 录制；master 上的源任务是控制台中的配置与启停意图，本地 daemon 不会启动该房间的录制进程。
+- `["local", "vps2"]`：两个节点都会录制，形成冗余副本，收播后由 master 选优。
+
+启用源任务代表“该房间需要录制”，不单独指定本地录制。通过控制台启动或停用源任务，Hub 会把 enabled 状态同步给规则选中的 worker。Hub 页负责绑定源任务和选择节点；任务页负责房间任务及启停。远端受管任务标记为 `managedBy='hub'`，只能在 master 控制台操作。
+
+实际流程是：master 下发任务期望 → 被选 worker 各自录制 → master 扫描节点清单并等待录制结束 → 按覆盖度选优 → 从胜出节点拉取到 master 的 `stage/` → 合并/烧录/上传。master 是后处理和上传的控制点；VPS 不运行 Hub，也不负责这条后处理管线。master 任务页同时显示所选 worker 的实时录制状态，约每 5 秒刷新一次；不会把本机任务进程状态误当成远端状态。
 
 ```mermaid
 flowchart TB
-  subgraph nodes["各节点(受管任务·各录冗余副本)"]
-    dk["docker(local)<br/>recordings/ + {base}.session.json"]
-    vps["VPS(slave)<br/>recordings/ + {base}.session.json"]
+  subgraph nodes["按每个房间规则选择的录制节点"]
+    dk["Docker local worker<br/>可选录制"]
+    vps["VPS worker<br/>可选录制"]
   end
-  subgraph master["master = docker 的 orchestrator"]
-    sync["任务同步<br/>_apply-tasks(local/ssh)"]
+  subgraph master["Docker master = 控制台 + Hub + 可选 local worker"]
+    intent["Web 控制台<br/>任务意图 + Hub workers 规则"]
+    sync["任务同步<br/>local store / SSH _apply-tasks"]
     inv["listInventory<br/>local 直接 scan / 远端 ssh _inventory"]
     cluster["identity 聚类<br/>(platform, roomSlug) → streamKey"]
     sel["select 选优<br/>覆盖度优先(完整录全)"]
-    pull["pull 到 stage<br/>(winner 远端→rsync)"]
+    pull["pull 到 stage<br/>(胜出节点→master)"]
     merge["merge plain → burn danmu/livechat<br/>(复用 post-process)"]
     up["穿插上传<br/>P1 上传 ∥ 烧录, append 分P"]
     led[("SyncLedger<br/>sync_jobs / candidates")]
   end
-  sync -->|"受管任务(只读)"| dk
-  sync -->|"受管任务(只读)"| vps
+  intent --> sync
+  sync -->|"规则选择 local 时"| dk
+  sync -->|"规则选择 vps2 时"| vps
   dk --> inv
   vps -->|ssh| inv
   inv --> cluster --> sel --> pull --> merge --> up
@@ -145,6 +155,7 @@ flowchart TB
   class inv,cluster,sel,pull,merge,up hub;
 ```
 
-- **触发**：master 自录的 recordEnd + 周期 reconcileAll（settle 等各节点收播，仍在录的场跳过）。
+- **触发**：master 本机录制产生的 `recordEnd` 可即时触发；远端收播事件不会作为本地 `recordEnd` 直接转发，远端录制场景由周期 `reconcileAll` 扫描发现。pipeline 会等待 settle，并跳过仍在录制的场。
 - **选优**：完整录全（单会话无断流）优先；**所有节点都断流 → 中断 + 通知 + 不删源**。
-- **配置 = 文件**：每房间一份 `config/hub/{platform}.{roomSlug}.json`（`upload.mode`=stage|upload + `private`），现读不缓存 → UI 与手改文件天然同步。关水印/仅自己可见/copyright 是 `biliup.ts` 代码常量（不可配、绝不漏）。
+- **配置与操作**：每房间一份 `config/hub/{platform}.{roomSlug}.json`（`upload.mode`=stage|upload + `private`），由 Web 控制台 Hub 页维护；录制任务在任务页管理。规则文件是配置真源，API 现读，控制台变更会反映到同步与调度。
+- **录制范围**：只有规则选中的节点会参与该房间录制与选优；Docker 运行 Hub 不会默认使它再录一份。选择 `local` 与远端 worker 才是显式双录。关水印/仅自己可见/copyright 是 `biliup.ts` 代码常量（不可配）。

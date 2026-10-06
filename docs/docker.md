@@ -95,7 +95,7 @@ TS_AUTHKEY=tskey-auth-xxxx
 - **定时调度**（默认开，`--no-schedule` 关）：按各任务 `schedule` 窗口（本地时区，支持跨夜）自动启停录制。
   - 进窗口 → 启动录制子进程（每任务独立 `record` 进程，崩溃自动重启）。
   - **出窗口 → 优雅排空（不腰斩直播）**：停开播轮询，当前这场录到自然收播再停；状态 `draining`，UI 显示「⏳ 超窗录制中」。详见 [app.md](./app.md#daemonts--taskdaemon)。
-- **多节点 hub（`--hub`）**：容器共享 tailscale sidecar 的 netns，经 SSH 够到 VPS 等 worker（`remote/vps.key` 只读挂载）。hub 规则绑定源任务后自动下发受管任务到选中 worker；收播后做覆盖度选优 → 拉取 → 合并/烧录 → 上传。worker（VPS）跑普通 `task serve`（无 `--hub`），由 master 主动够它。
+- **多节点 hub（`--hub`）**：容器共享 tailscale sidecar 的 netns，经 SSH 够到 VPS 等 worker（`remote/vps.key` 只读挂载）。Docker 同时是 master 控制器和可选的 `local` 录制 worker；Hub 页按房间选择录制节点。只选 VPS 时，本机保留源任务配置但不启动该房间的本地录制；选择 local 与 VPS 才会双录。任务页的启停状态同步到所选节点。收播后 master 扫描清单、选优并拉取录像，再负责合并/烧录/上传。VPS 跑普通 `task serve`（无 `--hub`），由 master 管理任务并主动读取录像。
 
 ---
 

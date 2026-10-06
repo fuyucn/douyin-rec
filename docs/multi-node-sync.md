@@ -1,41 +1,41 @@
-# 多节点同步编排（master/slave）设计
+# 多节点同步编排（master/worker）设计
 
 > **状态:已实现并实测通过(2026-06-30,双节点双平台 douyin+bilibili)。** 本文是原始设计稿;
 > 实现过程中的若干演进 —— **配置文件化**(`config/hub/{platform}.{roomSlug}.json`,非 DB)、**多平台**(按 platform,roomSlug 聚类)、
-> **session.json sidecar**(合并 meta+gaps)、**穿插上传**、**完整录全优先选优**、**slave UI 区分**、**受管任务下发**(绑定 source task → 按 worker 下发,远端只读,2026-08) —— 见
+> **session.json sidecar**(合并 meta+gaps)、**穿插上传**、**完整录全优先选优**、**worker UI 区分**、**受管任务下发**(绑定 source task → 按 worker 下发,远端只读,2026-08) —— 见
 > [multi-node-sync-followups.md](./multi-node-sync-followups.md)(最终状态 + 实测记录),架构总览见 [architecture.md](./architecture.md)「多节点 hub」。
 > 下文设计与最终实现大方向一致,细节以 followups + 代码为准。
 
 ## 目标
 
-多台录制节点（本地 docker、VPS 等）**对等共录**同一批直播间。任一场直播**真下播**后，自动在所有节点间挑出**覆盖最全**的一份，同步到 master，合并 + 烧录弹幕/聊天，按「P1→append」规则投稿 B 站。没有干净版本（都断）时不自动投，发 webhook 交人工。
+由 master 控制台为每个房间选择一个或多个录制节点。节点（Docker 本地 worker、VPS 等）各自运行普通录制服务；选中多个节点时才会产生冗余副本。收播后 master 发现节点录像，选出覆盖最完整的一份，拉取到 master 后合并、烧录弹幕/聊天，并按既定分 P 流程投稿 B 站。没有干净版本时不自动投，通知人工处理。
 
-## 心智模型：受管任务下发 + 多副本冗余 + read-repair
+## 心智模型：受管任务下发 + 按需副本 + read-repair
 
 容易误当成数据库 **master-slave 复制**，但要拆成两个方向看，**两侧都已实现**：
 
-- **写侧（已实现，2026-08）= 受管任务下发**：hub 规则绑定 master 本地任务（`recording.sourceTaskId`）并勾选参与节点（`workers`）；master 对每个 worker 计算期望任务，按 `(platform, roomSlug)` 全量对账下发（local 直接写本机 store，ssh/tailscale-ssh 走隐藏 `_apply-tasks`）。远端任务收编为 `managedBy='hub'`，Web 只读、禁止改删启停；本机 local worker `adopt=false`，源任务保持用户可编辑。cookies 只单向下发，节点本地 override（cookies/useCookie/outDir/webhook）保留；不再期望的任务两阶段删除（先停、收播后删）。同步 = 启动即跑 + 周期 1min + 规则/worker/源任务变更即触发，失败下轮自愈。
-- **读侧（已实现）= 多副本冗余 + read-repair / anti-entropy**：各节点各自录一份**全量副本**；master 是**读侧协调者**——收播/周期触发去各节点扫清单，按覆盖度选「最完整那份副本」（挑没 gap 的 replica），merge/burn/发布；都断流没人录全 → 不删源、挂起交人工（= anti-entropy 不敢自动 resolve 冲突时的挂起）。且是 master **主动 pull**（SSH inventory + rsync），不是 slave 主动 report。
+- **写侧（已实现，2026-08）= 受管任务下发**：Hub 规则绑定 master 上的源任务（`recording.sourceTaskId`），`workers` 明确该房间要在哪些 worker 录制；master 对每个选中 worker 计算期望任务并对账（local 直接写本机 store，ssh/tailscale-ssh 走隐藏 `_apply-tasks`）。远端任务标记为 `managedBy='hub'`，Web 只读、禁止改删启停；master 的源任务保持用户可编辑。任务页的启停状态表达录制意图，Hub 按规则把该状态同步给选中节点。若 worker 只选 VPS、不含 `local`，master daemon 会抑制源任务的本机录制；选 `local` 与 VPS 则两边都录。cookies 单向下发，节点本地 override（cookies/useCookie/outDir/webhook）保留；移除任务时先停，再于后续对账清理。同步在启动、周期 1min、规则/worker/源任务变更时执行，失败下轮重试。
+- **读侧（已实现）= 按规则收集副本并 read-repair**：master 扫描注册 worker 的录像清单，但每个房间只保留规则选中节点的成员参与 settle 和选优。只有多个 worker 被选中时才有副本可选；单 worker 场景直接使用该节点录像。master 按覆盖度选择最完整副本，拉取后 merge/burn/发布；都断流时保留源文件并挂起交人工。文件由 master 主动读取（SSH inventory + rsync），worker 不主动 report。
 
-所以一句话：**master 下发受管任务 + 各节点共录冗余副本，master 做 read-repair 选优 + 发布**。
+所以一句话：**master 通过控制台管理录制意图与节点分配，选中节点负责录制，master 负责发现、拉取、后处理与发布；冗余录制是按需选择的。**
 
 ## 角色
 
-- **slave** = 现有 `serve`（已具备：录制 + REST API + `recordEnd`/`recordReconnect` 事件 + getLiving 权威判活）。受管任务由 master 下发，远端 Web 只读（`managedBy='hub'` 禁止改删启停）。本设计对 slave **零或极小改动**。
-- **master** = 新增角色，**本身也是一个录制节点**（对等共录），额外承担：租户注册表 + 对账引擎 + 合并/烧录/上传。**一台 slave 可兼任 master**；master 可跑在任何设备上。
+- **worker** = 普通 `task serve` 进程，具备任务调度、录制和 REST API。VPS worker 不带 `--hub`，受管任务只能由 master 控制台管理。
+- **master** = `task serve --hub` 进程，提供 Web 控制台、任务同步、跨节点清单/选优、合并/烧录/上传。Docker master 同时注册一个 `local` worker，因此可以录制分配给本机的房间；但这不是必选行为。角色是进程职责，不要求不同职责必须部署在不同机器上。
 
-> master 只需在「自己录制时」在线（它录的时候本来就在线），不要求 7×24 —— 漏掉的触发由周期性兜底对账补回（见下）。
+> master 需要在线才能同步任务、发现录像并运行后处理。VPS 可独立按已同步的 enabled 状态调度录制；master 离线期间的远端录制会留在 VPS，master 恢复后由周期对账发现并处理。
 
 ### 启动方式：集成进 serve（`task serve --hub`）
 
-master **本就共录**（要跑 serve 才能录 + 才有 EventCenter/recordEnd），而**触发器正是它自己进程内的 `recordEnd` 事件**。因此编排器**集成进同一个 serve 进程**（`task serve --hub` 开启），**直接订阅进程内 EventCenter**，零 IPC、不轮询自己；本地节点即 `transport: local`。
+编排器集成在 `task serve --hub` 进程中，直接订阅该进程的 EventCenter；本机录像由 `local` transport 读取。即使该房间只分配给远端 worker，master 仍可同步配置、扫描远端、拉取并后处理，不要求 master 为该房间启动本地录制。
 
 - merge/burn/upload 均为 spawn 的子进程（不占 serve 主线程），且只在「那场已收播之后」执行，不与该场录制抢资源。
 - 需要进程隔离时可后续加独立 `task hub`（经 API 订阅本地 + Transport 连远端）；v1 用集成最简。
 
 ## 可插拔接缝：Transport 轴
 
-沿用现有 **平台轴（`<平台>-live`）+ 引擎轴（`record-engine`）** 的风格，新增 **Transport 轴**：master 通过 Transport 访问各 slave。
+沿用现有 **平台轴（`<平台>-live`）+ 引擎轴（`record-engine`）** 的风格，新增 **Transport 轴**：master 通过 Transport 访问各远端 worker。
 
 ```
 interface Transport {
@@ -45,17 +45,41 @@ interface Transport {
   isDone(streamKey): Promise<boolean>
   /** 把指定文件拉到 master 本地目录。 */
   pull(remotePaths: string[], localDir: string): Promise<void>
+  /** 该节点当前正在写流的房间(供控制台展示实际录制位置)。 */
+  activeRecordingRooms?(): Promise<{ platform: string; roomSlug: string }[]>
 }
 ```
 
 实现：`local`（master 自己）/ `ssh` / `tailscale-ssh`。认证（ssh key / tailscale 身份）封装在各实现内。
 
-**Worker 注册表**（master 配置）：`workers: [{ id, name?, kind: "local"|"ssh"|"tailscale-ssh", host?, dataRoot?, ... }]`（旧名 `tenants` 兼容，读取时 `workers ?? tenants`，首次写入迁移为 `workers`）。`dataRoot` 即该节点的 `DOUYIN_REC_ROOT`（录像在 `<dataRoot>/recordings`，cookie 等见 [biliup 认证]）。
+**远端走 SSH 隐藏命令**，不要求 worker 跑额外服务：`_tasks`（任务清单，无 cookies）、
+`_apply-tasks`（下发期望任务）、`_inventory`（扫描录像清单）、`_is-done`（该房间是否仍在录）、
+`_disk`（数据根剩余空间）、`_recording-status`（当前正在录制的房间集合，仅轻量扫 `/proc`）。
+`_recording-status` 用于主控控制台显示远端录制状态；尚未更新 bundle 的旧 worker 会回退到
+`_tasks` + `_is-done` 查询，功能不变。
 
-## 触发模型：自录 recordEnd + 兜底对账
+**Worker 注册表**（master 配置）：`workers: [{ id, name?, kind: "local"|"ssh"|"tailscale-ssh", host?, dataRoot?, ... }]`（旧名 `tenants` 兼容，读取时 `workers ?? tenants`，首次写入迁移为 `workers`）。`local` 是运行 master 的本机；Docker 部署时即 Docker 容器。`dataRoot` 即该节点的 `DOUYIN_REC_ROOT`（录像在 `<dataRoot>/recordings`，cookie 等见 [biliup 认证]）。
 
-1. **主触发**：master **自己的 `recordEnd`**，且 `reason ∈ {主播下播, 手动停止, 窗口结束收播}`（**排除 `recordReconnect`** —— 抖动重连不是结束）。这利用「master 也共录」的事实，一收播立刻触发，不依赖 master 常在线。
-2. **兜底对账**：master 周期性（如每 30min）扫描各租户清单，找出「已收播但 master 没处理过」的 streamKey（台账里没有 done/failed 记录）→ 补处理。覆盖「master 那次自录触发漏了」（本机崩溃/断网）的情况。
+## 触发模型：本地 recordEnd + 周期对账
+
+1. **本地即时触发**：如果 master 的 `local` worker 正在录该房间，本机 `recordEnd` 可在结束后即时启动对账；`recordReconnect` 不代表整场结束。
+2. **远端与恢复触发**：远端 worker 的 `recordEnd` 事件不会直接作为 master 本地事件转发。master 通过周期 `reconcileAll` 扫描已收播录像，并在 settle 确认成员已结束后处理。因此远端单节点录制的最终处理时机受 `reconcileIntervalMs` 影响；master 离线期间录制的内容也会在恢复后扫描。
+
+**收播后的重连窗**：一场结束后不足 `reconnectWindowMs`（默认 10 分钟）时，对账会跳过该场，
+避免同一房间短时间内的第二场撞上同一个 `streamKey`，也避免边录边合并残片。测试时可用
+Hub 房间页的「立即执行」跳过等待。
+
+## 控制台如何显示远端录制状态
+
+master 侧任务 API 不再只反映本机进程。`startHub` 启动后，master 每 **5 秒** 通过
+Transport 查询各 worker 的活动录制房间，按房间规则选出参与节点，结果缓存后随
+`GET /api/tasks` 的 `recordingWorkers` 字段返回（`{ workerId, workerName, state }`，
+`state ∈ recording | not_recording | unavailable`）。因此：
+
+- 源任务只分配给 VPS 时，主控任务列表与详情页显示「录制中 · <节点名>」，顶部「录制中」
+  统计也计入远端房间；
+- 节点不可达时显示「节点离线」并计入错误统计；
+- 页面每 2 秒轮询任务 API，但 SSH 查询只每 5 秒发生一次，且不阻塞请求。
 
 ### 跨节点状态如何一致（断链处理的核心）
 
@@ -63,10 +87,10 @@ interface Transport {
 
 | 场景 | 各节点行为 | master 触发？ |
 |---|---|---|
-| 真下播 | 各节点 `getLiving→false`，各发 `recordEnd(主播下播)`（±秒级） | ✅ settle 窗口吸收时间差 |
-| 某节点抖动（流还在） | 该节点 `getLiving→true` → `recordReconnect`（非 recordEnd） | ❌ 不触发 |
-| master 自己断网 | master `getLiving` **失败** → 不下「下播」结论（当 error/重连） | ❌ 不误触发；兜底对账后补 |
-| slave 多扛一次重连、晚收 | slave 晚几十秒 `recordEnd` | settle + 校验该 slave done，等它或超时跳过 |
+| 真下播 | 各选中节点 `getLiving→false`；各自结束本地录制 | local 的 `recordEnd` 可即时触发；远端结果由周期扫描发现 |
+| 某节点抖动（流还在） | 该节点 `getLiving→true` → `recordReconnect`（非整场结束） | 等本地结束事件或周期扫描；settle 校验仍在录制的节点 |
+| master 本机断网 | 若 local 正在录制，`getLiving` 失败按错误/重连处理，不误判下播 | 后续本地事件或周期对账补处理 |
+| 远端节点晚结束 | worker 继续重连，直到本节点确认结束 | master 周期扫描发现，settle 等待节点录制结束或超时 |
 
 ### 识别一致性：跨节点如何认定「同一场」
 
@@ -125,7 +149,7 @@ hub 全局配置为 **JSON**，路径 `<root>/config/hub.config.json`（旧名 `
 | 字段 | 类型 | 默认 | 含义 |
 |---|---|---|---|
 | `platform` | string | `"douyin"` | 默认平台（聚类 / 取 roomSlug） |
-| `workers` | `Worker[]` | `[]` | **所有录制节点**（含 master 自己；旧名 `tenants` 兼容） |
+| `workers` | `Worker[]` | `[]` | 注册的录制节点（含可选的 master 本机 `local`；旧名 `tenants` 兼容）。房间规则未设置 worker 列表时，为兼容旧规则会匹配全部 worker |
 | `cookies` | string | `""` | biliup cookie 路径（投稿用；指 `<root>/config/biliup/cookies.json`） |
 | `stageDir` | string | `"./stage"` | 拉取 / 合并暂存目录 |
 | `cleanMaxGapSec` | number | `30` | 「干净」阈值；winner 缺口 > 此 → 都断逃生口（webhook+人工） |
@@ -157,18 +181,71 @@ hub 全局配置为 **JSON**，路径 `<root>/config/hub.config.json`（旧名 `
 }
 ```
 
-> ⚠️ 全局兜底 = `stage`（只合成不投）。要让某房间全链路投稿，在其 `config/hub/{platform}.{roomSlug}.json` 的 `pipeline.upload.mode` 设 `"upload"`（`private` 默认 true = 仅自己可见），并把 `cookies` 指向 config 那份。master 自己也要在 `workers` 里列为 `kind:"local"`（它共录，要参与选优）。
+> ⚠️ 全局兜底 = `stage`（只合成不投）。要让某房间全链路投稿，在其 `config/hub/{platform}.{roomSlug}.json` 的 `pipeline.upload.mode` 设 `"upload"`（`private` 默认 true = 仅自己可见），并把 `cookies` 指向 config 那份。Docker master 的 `local` worker 由 Hub 使用；只有规则将 `local` 选入 `workers`，该房间才会在 Docker 本机录制。
 
 ## 受管任务下发（hub → worker，2026-08）
 
-hub 规则（`config/hub/{platform}.{roomSlug}.json`）新增 `recording.sourceTaskId` + `workers` 后，master 自动把录制任务下发给选中节点：
+hub 规则（`config/hub/{platform}.{roomSlug}.json`）新增 `recording.sourceTaskId` + `workers` 后，master 自动把录制任务下发给选中节点。日常操作从 master Web 控制台的任务页和 Hub 页完成：
 
-1. master 建普通录制任务（本机也录）。
-2. Web「Hub」页建/编辑规则时绑定该任务（`recording.sourceTaskId`，房间身份从任务派生，不再手填房间 URL）并勾选参与节点（`workers`）。
-3. master 对每个 worker 计算期望任务：启用的规则 + 绑定的源任务 + worker 在规则 `workers` 里（缺省 = 全部）。
-4. 下发走 Transport 轴：local = 直接写本机 store（`adopt=false`，源任务保持可编辑）；ssh/tailscale-ssh = 远端隐藏命令 `_tasks` / `_apply-tasks`（`_tasks` 输出无 cookies 的隐私投影；cookies 只随下发通道单向传递）。
-5. 远端按 `(platform, roomSlug)` 对账：新建或收编更新受管任务（`managedBy='hub'`），不再期望的任务两阶段删除（先在录/启用的置停，等 daemon 收播后下一轮删）。受管任务 Web API/UI 禁止改删启停，只能在 master 操作。
-6. 同步触发：启动即跑 + 周期 `syncIntervalMs`（默认 1min）+ 规则/worker/源任务变更后立即触发；节点离线只 warn，下轮对账自愈。
+1. 在任务页创建房间任务；该任务在 master 上作为可编辑的源任务。
+2. 在 Web「Hub」页建/编辑规则时绑定该任务（`recording.sourceTaskId`，房间身份从任务派生，不再手填房间 URL）并选择参与节点（`workers`）。
+3. master 对每个 worker 计算期望任务：启用的规则 + 绑定的源任务 + worker 在房间规则 `workers` 里。旧规则若未写 `workers`，为兼容行为会同步给全部 worker；控制台编辑规则时应明确选择目标节点。
+4. 源任务的 enabled 状态表示录制意图，并同步到选中的节点。规则选 `["vps2"]` 时，本机 daemon 抑制对应源任务，避免 master 与 VPS 双重录制；规则选 `["local","vps2"]` 时才会两边都录。
+5. 下发走 Transport 轴：local = 直接写本机 store（`adopt=false`，源任务保持可编辑）；ssh/tailscale-ssh = 远端隐藏命令 `_tasks` / `_apply-tasks`（`_tasks` 输出无 cookies 的隐私投影；cookies 只随下发通道单向传递）。
+6. 远端按 `(platform, roomSlug)` 对账：新建或收编更新受管任务（`managedBy='hub'`），不再期望的任务两阶段删除（先停，等 daemon 收播后下一轮删）。受管任务 Web API/UI 禁止改删启停，只能在 master 操作。
+7. 同步触发：启动即跑 + 周期 `syncIntervalMs`（默认 1min）+ 规则/worker/源任务变更后立即触发；节点离线只 warn，下轮对账自愈。
+
+## 清理开关语义（2026-10 实测确认）
+
+### 文件名 / 稿件名 / 分 P 名（三个独立概念，2026-10-06）
+
+**背景**：biliup 的分 P 标题没有 CLI 参数可指定 —— `crates/biliup/src/uploader/line.rs` 里写死
+「`video.title` 为空 → 取**文件名 stem**」。而稿件标题(`uploader.rs`)只在 `--title` 为空时才回退到
+第一个文件的 stem。所以过去「稿件名 = 第一个视频的文件名」不是巧合，是这套机制的必然结果。
+
+**现在三个概念彻底拆开**(`pipeline.upload`)，**三项都空 = 历史行为**：
+
+| 字段 | 作用 | 缺省（空） |
+|---|---|---|
+| `titleTemplate` | **文件名规则** —— 磁盘上的 stage 产物 stem（也是下面两项的默认值） | `{name}_{date}` |
+| `submissionTitleTemplate` | **B 站稿件标题** —— 整稿总标题，可含空格/标点，不参与文件名 | 回落文件名规则 |
+| `partTitleTemplate` | **分 P 视频标题** —— 点进去后 P1/P2/P3 各自的名字 | 回落文件名规则（= 现在的行为） |
+
+`partTitleTemplate` 额外可用 `{part}`(序号)、`{parts}`(总数)、`{kind}`(plain/danmu/livechat)：
+
+```jsonc
+{
+  "upload": {
+    "titleTemplate": "{name}_{date}_{HH}-{mm}-{ss}",   // 文件名 → 某某_2026-10-06_12-08-22.mp4
+    "submissionTitleTemplate": "{name}_{date} 直播回放", // 稿件名 → 某某_2026-10-06 直播回放
+    "partTitleTemplate": "{name}_P{part}"               // 分P名 → 某某_P1 / 某某_P2 / 某某_P3
+  }
+}
+```
+
+**实现方式**：
+
+- **稿件名**：直接作为 `biliup upload --title` 传入（biliup 只在 `--title` 为空时才回退文件名，
+  所以传了就生效）。走宽松渲染，允许空格/标点/emoji。
+- **分P名**：没有 CLI 参数，故上传前把产物**硬链接**到 `<stage>/.upload/<分P标题>.mp4`，
+  再把该路径交给 biliup。要点：
+
+- 硬链接，不是改名 —— **规范产物名从不移动**，所以 `deriveStageProducts` 的续跑幂等推导、
+  `stageSourceAfterMerge` / `stageAfterDone` 的清理逻辑都不受影响。
+- 硬链接不可用时(跨设备)回落复制。
+- 别名目录在 `stageAfterDone` 时整体删除；保留 stage 时也不额外占盘(硬链接共享 inode)。
+- 未配置 `partTitleTemplate` → 完全不建别名，走原路径，行为与改动前一致。
+
+`pipeline.cleanup` 三个开关彼此独立，实测口径如下（房间 什么佳 50620112379，双节点链路）：
+
+| stageSourceAfterMerge | sourceAfterDone | stageAfterDone | 结果 |
+|---|---|---|---|
+| on | on | on | 合并/烧录完成后删 stage 里的拉来源 `.ts`（含 `.xml`/`.ass` 副本）；上传成功后删各节点原始 `.ts`，**保留节点源 `.xml`**（成为最后一份）；最后清空 stage 产物。实测 BV11WHZ6tENt。 |
+| on | on | **off** | 同样删除拉来源与节点源 `.ts`，但**保留 stage 里的合并/烧录产物与 `.xml`/`.ass`**，节点源 `.xml` 被删（副本在 stage）。实测 BV1C4HZ6xEbi。 |
+| on | off | off | 节点源录像保留，stage 保留；仅删 stage 里的拉来源。 |
+
+不变量：**stage 保留 → 节点源 `.xml` 可删（副本在 stage）；stage 不保留 → 节点源 `.xml` 必留**。
+`xmlKeepRule()` 是唯一判定点，任何组合都不会出现 `.xml`/`.ass` 两处同时被删空。
 
 ## 失败处理
 
@@ -183,14 +260,14 @@ hub 规则（`config/hub/{platform}.{roomSlug}.json`）新增 `recording.sourceT
 
 ## 决策（默认值，已在脑暴中确认）
 
-- **D1 slave 清单接口**：v1 用 `ssh + ffprobe + 读 gaps.json`（slave 零改动，等于现在手动做的）；后续加 `GET /api/recordings` 干净接口。
+- **D1 worker 清单接口**：v1 用 `ssh + ffprobe + 读 gaps.json`（worker 无需单独实现清单 API）；后续加 `GET /api/recordings` 干净接口。
 - **D2 上传**：默认 `auto-private`（自动投「仅自己可见」，你后台 review）；可切 `stage-only`（只暂存 + 通知等批）。
-- **D3 清理**：成功投稿后删租户 `.ts`（留 `.xml`），**默认关**。
+- **D3 清理**：成功投稿后删租户 `.ts`（留 `.xml`），**默认关**；清理开关语义见上文表格，2026-10-06 已实测两组组合。
 
 ## 不在 v1（v2）
 
 - **跨节点拼接**：不同节点在不同时刻断 → 跨节点按绝对时间轴拼接、重叠去重，拼出谁都做不到的无洞版本。强大但需跨节点 PTS/墙钟对齐，复杂度高 → v2。
-- slave `GET /api/recordings` 专用清单接口（v1 先 ssh+ffprobe）。
+- worker `GET /api/recordings` 专用清单接口（v1 先 ssh+ffprobe）。
 
 ## 复用现有资产
 

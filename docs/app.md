@@ -227,6 +227,12 @@ interface ExitInfo { code: number | null; signal: NodeJS.Signals | null; expecte
 
 所有响应 `application/json; charset=utf-8`。任务对象在响应里带 `running: boolean`（由 `manager.isRunning` 注入，称 `TaskView`）。`GET /api/tasks/:id` 额外带 `runtime: { running, startedAt, elapsedMs }`（由 `manager.getRuntime` 注入，称 `TaskDetailView`），供详情页显示开始时间 + 已录时长。
 
+**多节点字段**：`running` / `recording` 只反映 **master 本机** 的进程；房间被分配给远端
+worker 时，源任务在本机被抑制，这两项会显示为未录制。真实录制位置通过
+`recordingWorkers?: { workerId, workerName, state }[]`（`state ∈ recording | not_recording | unavailable`）
+返回，master 每 5 秒刷新一次；前端据此显示「录制中 · <节点名>」/「节点离线」。未开 hub
+（非 master）时该字段缺省，前端退回本机状态显示。
+
 | 方法 | 路径 | 请求体 | 成功响应 | 状态码 |
 |---|---|---|---|---|
 | GET | `/` 或 `/index.html` | - | SPA HTML | 200 |
@@ -263,7 +269,13 @@ interface ExitInfo { code: number | null; signal: NodeJS.Signals | null; expecte
 - **全局「抖音账号 Cookie」面板**（页面顶部）：状态徽标（✅ 已登录 / ⚠️ 未设置，基于 `GET /api/cookie` 的 `set`+`hasSession`）+ 三个按钮：**扫码登录**（QR 对话框，成功后刷新状态）· **手动粘贴**（textarea → `POST /api/cookie`）· **清除**（`DELETE /api/cookie`）。所有任务共享此 cookie。
 - **新建/编辑任务模态**（共用一个表单）：直播间(room) / 主播名 / 画质 / 分段时长 / 定时窗口 `HH:MM-HH:MM` / 弹幕开关 / 使用 cookie 开关。JS 用 `editingId`（`null`=新建模式）区分：新建→`POST /api/tasks`，编辑→`PATCH /api/tasks/:id`。编辑模式标题「编辑任务」、按钮「保存修改」、表单从该任务当前值预填（schedule 由 `scheduleStart`+`scheduleEnd` 拼回），运行中任务额外提示「下次启动生效」。**无 per-task cookie 文本字段**（cookie 全局）。
 - **任务表格**：id / 直播间+主播 / 画质 / 弹幕 / cookie / 定时 / 状态（运行中带脉冲点 + badge）/ 操作（启动·停止·**详情 📄**·**编辑 ✏️**·删除）。主播名/房间是指向详情页的链接；编辑按钮从最近一次 `GET /api/tasks` 的缓存（`lastTasks`）取该任务预填模态，无需二次请求。
-- 每 **2 秒**轮询 `GET /api/tasks` 刷新（仅在列表页）；顶部显示连接状态。
+- **状态徽章**（`StatusBadge`）优先级：已停用 > 排空中 > **远端 worker 状态** > 本机运行中 > 错误 > 待命。
+  有 `recordingWorkers` 时显示「录制中 · 节点名」「等待开播 · 节点名」「节点离线 · 节点名」，
+  让只操作 master 网页的用户也能看到 VPS 上的真实录制情况。
+- **顶部统计**：录制中 = 远端 worker 处于 `recording` 的房间 ∪ 本机 `recording=true` 的任务；
+  节点离线计入错误。待命 = 已启用、无任何节点在录、且本机未运行的普通任务。
+- 每 **2 秒**轮询 `GET /api/tasks` 刷新（仅在列表页）；顶部显示连接状态。worker 状态由 master
+  服务端每 5 秒刷新，页面轮询不直接触发 SSH。
 - 注意：表单暴露的字段不含 `engine`（创建时走平台默认引擎 `ffmpeg`）。
 
 #### Hash 路由 + 详情/日志页

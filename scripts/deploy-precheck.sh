@@ -23,7 +23,13 @@ rc=0
 check "本地 docker" "$(curl -s -m 10 "$LOCAL_API/api/tasks" 2>/dev/null)" || rc=$?
 vps_json="$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$VPS_HOST" 'curl -s -m 10 http://127.0.0.1:7860/api/tasks' 2>/dev/null)" || vps_json=""
 vrc=0; check "VPS worker" "$vps_json" || vrc=$?
-[ "$vrc" -gt "$rc" ] && rc=$vrc
+# 取「最严重」:1(有录制) 优先于 2(未知)?不 —— 未知也要阻止,但 1 更明确。
+# 只要任一侧为 1(BLOCK)就返回 1;否则取较大值(2=未知)。
+if [ "$vrc" -eq 1 ] || [ "$rc" -eq 1 ]; then
+  rc=1
+elif [ "$vrc" -gt "$rc" ]; then
+  rc=$vrc
+fi
 
 echo
 case "$rc" in
