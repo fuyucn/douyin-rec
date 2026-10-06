@@ -120,6 +120,12 @@ export interface ApiDeps {
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
   /** 立即触发一次 hub 任务同步(hub 规则/worker 变更后由 web API 调用;省略=只等周期 tick)。 */
   requestSyncTasks?: () => void;
+  /**
+   * master 本机抑制名单:返回「由 hub 规则切到远端节点录制,本机不应实跑」的源任务 id。
+   * `startTask` 据此决定只置 enabled(意图)还是真的起子进程 —— 否则手动启动会绕过
+   * daemon 的抑制,造成本机与远端同场重复录制。省略=不抑制(单机/slave 行为不变)。
+   */
+  localSuppressedIds?: () => ReadonlySet<number>;
   /** 手动重跑单个 workflow 节点(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
   retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 停一场后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
@@ -652,8 +658,14 @@ export function makeApi(deps: ApiDeps): Api {
       if (t.managedBy === "hub") return err(403, `任务 id=${id} 由 hub 管理，请在 master 上操作`);
       try {
         store.setEnabled(id, true);
-        const eligible = inWindow(nowMinutesLocal(new Date()), t.scheduleStart, t.scheduleEnd);
-        if (eligible && !manager.isRunning(id)) manager.start(id);
+        // hub 语义:该任务是某条规则的源任务、且规则已把录制切给远端节点(workers 不含 local)
+        // → 本机**不要**实跑(源任务在此只作配置模板)。否则「启动」会绕过 daemon 的抑制名单,
+        // 造成本机与远端同场重复录制(实测踩到:本地 recording=true 而规则 workers=[vps2])。
+        const suppressed = deps.localSuppressedIds?.();
+        if (!suppressed?.has(id)) {
+          const eligible = inWindow(nowMinutesLocal(new Date()), t.scheduleStart, t.scheduleEnd);
+          if (eligible && !manager.isRunning(id)) manager.start(id);
+        }
       } catch (e) {
         // 启动失败要把 enabled 回滚，避免下一轮周期同步把失败状态传到节点。
         try { store.setEnabled(id, false); } catch { /* 回滚失败以原始错误为准 */ }

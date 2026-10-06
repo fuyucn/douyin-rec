@@ -220,6 +220,8 @@ export interface WebServerDeps {
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
   /** 立即触发一次 hub 任务同步(规则/worker 变更后调用,不用等周期 tick)。 */
   requestSyncTasks?: () => void;
+  /** master 本机抑制名单(源任务切到远端录制→本机不实跑);透传给 web API。 */
+  localSuppressedIds?: () => ReadonlySet<number>;
   /** 手动重跑单个 workflow 节点(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 停一场后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
@@ -448,6 +450,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     testWorker: deps.testWorker,
     probeAllWorkers: deps.probeAllWorkers,
     requestSyncTasks: deps.requestSyncTasks,
+    localSuppressedIds: deps.localSuppressedIds,
     retryNode: deps.retryNode,
     stopJob: deps.stopJob,
     runNow: deps.runNow,

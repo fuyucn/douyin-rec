@@ -441,6 +441,30 @@ describe("startTask", () => {
     expect(requestSyncTasks).not.toHaveBeenCalled();
   });
 
+  it("源任务被 hub 规则切到远端(workers 不含 local)→ 手动启动只置 enabled,本机不起子进程", () => {
+    // 回归:_startTask 直接 manager.start 会绕过 daemon 的抑制名单 → 本机与远端同场重复录制。
+    const localSuppressedIds = vi.fn(() => new Set<number>());
+    const a = makeApi({ store, manager, ...hubDeps("start-suppressed-", { localSuppressedIds }) });
+    const t = store.addTask({ room: "111" });
+    localSuppressedIds.mockReturnValue(new Set([t.id])); // 已切到远端
+    manager.startCalls.length = 0;
+
+    const res = a.startTask(t.id);
+    expect(res.status).toBe(200);
+    expect(store.getTask(t.id)!.enabled).toBe(true);            // 意图仍是「录」
+    expect(manager.startCalls).toEqual([]);                     // 但本机不实跑
+    expect(manager.isRunning(t.id)).toBe(false);
+  });
+
+  it("未被抑制的源任务 → 手动启动照常立即起(不回归单机/本机行为)", () => {
+    const localSuppressedIds = vi.fn(() => new Set<number>()); // 空名单
+    const a = makeApi({ store, manager, ...hubDeps("start-unsuppressed-", { localSuppressedIds }) });
+    const t = store.addTask({ room: "111" });
+    manager.startCalls.length = 0;
+    expect(a.startTask(t.id).status).toBe(200);
+    expect(manager.startCalls).toEqual([t.id]);
+  });
+
   it("manager.start 抛错 → 500、enabled 回滚、不触发同步", () => {
     const requestSyncTasks = vi.fn();
     const a = makeApi({ store, manager, ...hubDeps("start-error-", { requestSyncTasks }) });

@@ -117,6 +117,15 @@ export class SshTransport implements Transport {
     return JSON.parse(out) as ApplyTasksResult;
   }
 
+  /** 远端数据根剩余空间 GB(隐藏 `_disk`;master 侧磁盘看门狗用,不依赖 worker webhook 配置)。 */
+  async diskFreeGB(): Promise<number> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const out = await this.run([`${nodePrefix} _disk ${this.o.dataRoot}`]);
+    const parsed = JSON.parse(out) as { freeGB?: number; error?: string };
+    if (parsed.error || typeof parsed.freeGB !== "number") throw new Error(`_disk 失败: ${parsed.error ?? "无 freeGB"}`);
+    return parsed.freeGB;
+  }
+
   async isDone(roomSlug: string): Promise<boolean> {
     // 每房间判定:远端 `_is-done <dataRoot> <roomSlug>` 只查该房间 record 进程是否还有
     // ffmpeg/mesio 孙进程。旧实现 `grep -ic ffmpeg` 是全机计数 —— 别的房间还在录会把

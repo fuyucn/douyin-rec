@@ -76,4 +76,11 @@ export class LocalTransport implements Transport {
       copyFileSync(src, join(localDir, basename(src)));
     }
   }
+
+  /** 同机:数据根所在卷剩余空间 GB(master 侧磁盘看门狗用)。 */
+  async diskFreeGB(): Promise<number> {
+    const { statfs } = await import("node:fs/promises");
+    const st = await statfs(this.o.recordingsDir);
+    return (Number(st.bavail) * Number(st.bsize)) / 1e9;
+  }
 }

@@ -600,6 +600,8 @@ const hubStarter: HubStarter = {
         minBurnFreeMemMB?: number;
         memWaitTimeoutMs?: number;
         staleMs?: number;
+        /** 磁盘看门狗阈值(GB):节点数据根剩余低于此值 → master 告警。缺省 10,0=关。 */
+        diskMinGB?: number;
         /** 全局上传队列:B 站按提交次数限流(601)。窗口内最多 uploadRateLimit 次,命中后冷却 uploadCooldownMs。 */
         uploadRateLimit?: number;
         uploadRateWindowMs?: number;
@@ -767,6 +769,8 @@ const hubStarter: HubStarter = {
       loadTransports: buildTransports,
       notify: pipelineDeps.notify, // 达重试上限升级 needs_manual 时,复用 pipeline 同源 EventCenter 通知(站内+webhook)
       staleMs: hubCfg.resources?.staleMs ?? 600_000,
+      // 磁盘看门狗:节点数据根剩余 < 阈值 → master 告警(worker 常没配 webhook,靠这边兜底)。缺省 10GB。
+      diskMinGB: hubCfg.resources?.diskMinGB ?? 10,
       ...(hubCfg.maxWaitSec != null || hubCfg.settleSec != null
         ? {
             settle: {
@@ -1138,6 +1142,24 @@ program
     const recordingsDir = pathJoin(dataRoot, "recordings");
     const recordings = await scanRecordings(recordingsDir, taskRooms, ffprobe);
     process.stdout.write(JSON.stringify({ recordings }) + "\n");
+  });
+
+// ─── _disk <dataRoot>（隐藏子命令，供 master 通过 SSH 调用）──────────────────────
+// 输出该节点录制数据根所在卷的剩余空间(GB)。master 侧磁盘看门狗用 —— 不依赖 worker
+// 自身 webhook 是否配置(worker 常不配 DISCORD_WEBHOOK,告警发不出去)。
+program
+  .command("_disk <dataRoot>", { hidden: true })
+  .description("(内部) 输出数据根剩余空间 GB(供 master ssh 调用)")
+  .action(async (dataRoot: string) => {
+    const { statfs } = await import("node:fs/promises");
+    try {
+      const st = await statfs(dataRoot);
+      const freeGB = (Number(st.bavail) * Number(st.bsize)) / 1e9;
+      process.stdout.write(JSON.stringify({ freeGB: Number(freeGB.toFixed(2)) }) + "\n");
+    } catch (e) {
+      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
+      process.exitCode = 1;
+    }
   });
 
 // ─── _tasks <dataRoot>（隐藏子命令，供 master 通过 SSH 调用）──────────────────────

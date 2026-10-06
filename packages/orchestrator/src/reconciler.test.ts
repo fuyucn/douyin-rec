@@ -991,3 +991,68 @@ describe("Reconciler.stopJob / runNow", () => {
     ledger.close();
   });
 });
+
+describe("磁盘看门狗(节点剩余空间告警)", () => {
+  function depsWith(transports: Map<string, Transport>, notify = vi.fn()) {
+    const ledger = freshLedger();
+    return {
+      deps: {
+        platform: "douyin",
+        transports,
+        ledger,
+        pipelineDeps: makePipelineDeps(ledger, transports),
+        notify,
+        resolveCfg: () => ({ ...makePipelineDeps(ledger, transports).cfg, workers: [] }),
+      },
+      ledger,
+      notify,
+    };
+  }
+
+  it("节点剩余低于阈值 → 发一次告警;回升后复位可再报", async () => {
+    let free = 3; // GB,低于默认阈值 10
+    const t: Transport = { ...makeTransport("vps2", []), diskFreeGB: async () => free };
+    const { deps, notify } = depsWith(new Map([["vps2", t]]));
+    const r = new Reconciler({ ...deps, diskMinGB: 10, reconnectWindowMs: 0 });
+
+    await r.reconcileAll();
+    await new Promise((res) => setTimeout(res, 10)); // checkDiskSpace 是 fire-and-forget
+    expect(notify).toHaveBeenCalledTimes(1);
+    const msg = (notify.mock.calls[0][0] as { message: string }).message;
+    expect(msg).toContain("vps2");
+    expect(msg).toContain("低于阈值");
+
+    // 仍低 → 不重复报
+    await r.reconcileAll();
+    await new Promise((res) => setTimeout(res, 10));
+    expect(notify).toHaveBeenCalledTimes(1);
+
+    // 回升 → 复位;再低 → 再报一次
+    free = 50;
+    await r.reconcileAll();
+    await new Promise((res) => setTimeout(res, 10));
+    free = 2;
+    await r.reconcileAll();
+    await new Promise((res) => setTimeout(res, 10));
+    expect(notify).toHaveBeenCalledTimes(2);
+  });
+
+  it("diskMinGB<=0 → 关闭看门狗(不告警)", async () => {
+    const t: Transport = { ...makeTransport("vps2", []), diskFreeGB: async () => 0 };
+    const { deps, notify } = depsWith(new Map([["vps2", t]]));
+    const r = new Reconciler({ ...deps, diskMinGB: 0, reconnectWindowMs: 0 });
+    await r.reconcileAll();
+    await new Promise((res) => setTimeout(res, 10));
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("transport 不支持 / 查询抛错 → 静默跳过(不误报)", async () => {
+    const noCap = makeTransport("a", []); // 无 diskFreeGB
+    const throws: Transport = { ...makeTransport("b", []), diskFreeGB: async () => { throw new Error("ssh down"); } };
+    const { deps, notify } = depsWith(new Map([["a", noCap], ["b", throws]]));
+    const r = new Reconciler({ ...deps, diskMinGB: 10, reconnectWindowMs: 0 });
+    await r.reconcileAll();
+    await new Promise((res) => setTimeout(res, 10));
+    expect(notify).not.toHaveBeenCalled();
+  });
+});

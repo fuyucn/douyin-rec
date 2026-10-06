@@ -40,6 +40,11 @@ export interface Transport {
   listTasks?(): Promise<NodeTasks>;
   /** 把 master 期望任务下发到该节点(隐藏 `_apply-tasks` 子命令;可选:无此能力 = 不支持任务同步)。 */
   applyTasks?(input: { desired: RemoteTaskSpec[] }): Promise<ApplyTasksResult>;
+  /**
+   * 该节点录制数据根所在卷的剩余空间(GB)。可选:无此能力则不参与磁盘看门狗。
+   * reconciler 每轮对账时查一次 → 低于阈值由 **master 自己**告警(不依赖 worker 侧 webhook 配置)。
+   */
+  diskFreeGB?(): Promise<number>;
 }
 
 type Factory = (cfg: WorkerConfig) => Transport;

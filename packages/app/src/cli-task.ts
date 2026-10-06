@@ -233,6 +233,11 @@ export interface HubStarter {
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
   /** 立即触发一次 hub 任务同步(规则/worker 变更后由 web API 调用;hub 未就绪时排队,start 后补跑)。 */
   requestSyncTasks?: () => void;
+  /**
+   * master 本机抑制名单:「源任务已由 hub 规则切到远端节点录制」→ 本机不应实跑。
+   * 供 web API 的 startTask 判断(手动启动不得绕过 daemon 的抑制,否则双节点重复录制)。
+   */
+  localSuppressedIds?: () => ReadonlySet<number>;
   /** 手动重跑单个 workflow 节点(hub 未启用 → web API 返回 400)。 */
   retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 停一场后处理(rsync/ffmpeg/biliup),不动录制。hub 未启用 → web API 返回 400。 */
@@ -588,6 +593,13 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         testWorker: hubEnabled ? hubStarter?.testWorker : undefined,
         probeAllWorkers: hubEnabled ? hubStarter?.probeAllWorkers : undefined,
         requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
+        // 与 daemon 同源:规则把源任务交给远端(workers 不含 local)时,本机不实跑。
+        localSuppressedIds: hubEnabled
+          ? () => localSuppressedSourceTaskIds(
+              rootHubDir(),
+              new Set(workerStore.listWorkers(rootHubConfig()).map((w) => w.id)),
+            )
+          : undefined,
         retryNode: hubEnabled ? hubStarter?.retryNode : undefined,
         stopJob: hubEnabled ? hubStarter?.stopJob : undefined,
         runNow: hubEnabled ? hubStarter?.runNow : undefined,

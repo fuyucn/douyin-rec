@@ -39,6 +39,11 @@ export interface ReconcilerDeps {
    * 同时作为同房间聚类容差(窗口内开播的新会话并入同一场)。默认 10 分钟。
    */
   reconnectWindowMs?: number;
+  /**
+   * 磁盘看门狗阈值(GB):节点数据根剩余低于此值 → master 发告警。0/负 = 关闭。默认 10。
+   * 目的:worker 常不配 DISCORD_WEBHOOK(告警发不出去),由 master 统一兜底 → 防爆盘无人知。
+   */
+  diskMinGB?: number;
   /** 达重试上限升级 needs_manual 时发一次通知(webhook/UI)。省略 → 只转状态不通知。 */
   notify?: (e: import("@drec/core").NotifyEvent) => void;
   /**
@@ -70,11 +75,15 @@ export class Reconciler {
   private maxRetries: number;
   private staleMs: number;
   private reconnectWindowMs: number;
+  /** 磁盘看门狗:节点数据根剩余 < 阈值(GB) → 告警。0/负 = 关闭。缺省 10。 */
+  private diskMinGB: number;
   private notify?: (e: import("@drec/core").NotifyEvent) => void;
   private resolveCfg?: (platform: string, roomSlug: string) => PipelineCfg | null;
   private loadTransports?: () => Map<string, Transport>;
   /** 已警告过「显式 workers 过滤后无成员」的 streamKey(幽灵 worker id),避免每轮刷屏。 */
   private readonly warnedGhostWorkers = new Set<string>();
+  /** 已告警过的低磁盘节点 id(回升后复位,避免每轮刷屏)。 */
+  private readonly diskAlerted = new Set<string>();
 
   constructor(deps: ReconcilerDeps) {
     this.platform = deps.platform;
@@ -88,9 +97,41 @@ export class Reconciler {
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.staleMs = deps.staleMs ?? DEFAULT_STALE_MS;
     this.reconnectWindowMs = deps.reconnectWindowMs ?? DEFAULT_RECONNECT_WINDOW_MS;
+    this.diskMinGB = deps.diskMinGB ?? 10;
     this.notify = deps.notify;
     this.resolveCfg = deps.resolveCfg;
     this.loadTransports = deps.loadTransports;
+  }
+
+  /**
+   * 磁盘看门狗:并发查各节点数据根剩余空间,低于 diskMinGB 时由 **master** 发告警
+   * (`notify({kind:"error",stage:"磁盘"})`)。每节点只在「进入低水位」时报一次,回升复位。
+   * 任何失败(transport 无此能力 / ssh 不通)静默跳过 —— 看门狗绝不反噬主流程。
+   */
+  private async checkDiskSpace(transports: Map<string, Transport>): Promise<void> {
+    if (this.diskMinGB <= 0) return;
+    await Promise.all([...transports.values()].map(async (t) => {
+      if (!t.diskFreeGB) return;
+      let freeGB: number;
+      try {
+        freeGB = await t.diskFreeGB();
+      } catch {
+        return; // 查不到(不支持/网络问题)→ 跳过,不误报
+      }
+      if (!Number.isFinite(freeGB)) return;
+      if (freeGB < this.diskMinGB) {
+        if (!this.diskAlerted.has(t.id)) {
+          this.diskAlerted.add(t.id);
+          this.notify?.({
+            kind: "error",
+            stage: "磁盘",
+            message: `节点 ${t.id} 剩余 ${freeGB.toFixed(1)}GB,低于阈值 ${this.diskMinGB}GB —— 继续录制可能写满导致损坏,pull/清理后恢复`,
+          });
+        }
+      } else {
+        this.diskAlerted.delete(t.id);
+      }
+    }));
   }
 
   /** listInventory 包超时:挂起超过 inventoryTimeoutMs 即降级为空(该 worker 本轮缺席),不锁死整轮。 */
@@ -263,6 +304,10 @@ export class Reconciler {
     // 实时重载:重建 transports(反映 hub.config.json 最新 workers);同步给 pipeline 用的那份。
     if (this.loadTransports) this.transports = this.loadTransports();
     const transports = this.transports;
+    // 磁盘看门狗:每轮对账顺带查各节点剩余空间 → 低了由 **master 自己**告警。
+    // 不依赖 worker 侧 DISCORD_WEBHOOK(worker 常不配,告警发不出去 → 爆盘无人知)。
+    // 与主流程并行、不阻塞:查不到(transport 不支持/ssh 失败)就跳过该节点。
+    void this.checkDiskSpace(transports);
     // 崩溃恢复:retrying job / running 节点超过 staleMs → 标 failed(「进程重启中断」),下一段逻辑决定重跑/人工。
     // 本进程正在跑的场(长 merge/burn/上传超过 staleMs 属正常)不误杀;重启后无活动才清理。
     this.ledger.sweepStale(this.staleMs, (streamKey) => this.pipelineDeps.pool?.hasStreamLock(streamKey) ?? false);
