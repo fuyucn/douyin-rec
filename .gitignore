@@ -42,3 +42,9 @@ venv/
 # VPS merge 管线(含个人 IP/SSH)+ AI 工具配置 —— 本地保留,不入库
 remote/
 .claude/
+
+# AI 编码工具产物(本地专属,非项目代码)
+.agents/
+.hallmark/
+skills-lock.json
+logs/
