@@ -20,6 +20,7 @@ import {
   listPlatforms,
   platformForRoom,
   validateTitleTemplate,
+  validateLooseTitleTemplate,
   type RecordingSessionDTO,
   type HubRulePayload,
   type HubRuleDTO,
@@ -454,8 +455,17 @@ export function makeApi(deps: ApiDeps): Api {
   };
   const validatePipeline = (input: HubRulePayload): string | null => {
     const tmpl = input.pipeline?.upload?.titleTemplate;
-    if (tmpl == null || !String(tmpl).trim()) return null;
-    return validateTitleTemplate(String(tmpl));
+    if (tmpl != null && String(tmpl).trim()) {
+      const err = validateTitleTemplate(String(tmpl));
+      if (err) return err;
+    }
+    // 宽松模板(B站稿件名 / 分P名)也校验占位符,尽早暴露已移除的 {kind}。
+    for (const loose of [input.pipeline?.upload?.submissionTitleTemplate, input.pipeline?.upload?.partTitleTemplate]) {
+      if (loose == null || !String(loose).trim()) continue;
+      const err = validateLooseTitleTemplate(String(loose));
+      if (err) return err;
+    }
+    return null;
   };
 
   // hub 规则 → DTO:补 anchorName(若有同 roomSlug 的录制任务,显示其主播名/任务名)。

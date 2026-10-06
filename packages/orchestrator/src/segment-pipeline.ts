@@ -107,9 +107,18 @@ export async function runSegmentPipeline(o: {
   const { streamKey, deps, jlog, stageSub, winnerMembers, allMembers, dateName } = o;
   const uploadTitle = o.uploadTitle ?? dateName;
   const renderPartTitle = o.renderPartTitle;
+  // 别名去重:分段模式下同类分P有 N 个,类型后缀由 formatPartTitle 自动加(plain 无),
+  // 若模板没带 {part} 会算出同名 → 硬链接互相覆盖、重复上传同一段。撞名时补 `-P{idx}` 兜底。
+  const usedAliasStems = new Set<string>();
   /** 按分P标题建上传别名(硬链接);未配置渲染器/返回 null → 原名。 */
   const aliasFor = (kind: "plain" | "danmu" | "livechat", canonical: string, idx: number, total: number): string => {
-    const title = renderPartTitle?.(kind, idx, total) ?? null;
+    let title = renderPartTitle?.(kind, idx, total) ?? null;
+    if (title) {
+      const base = title;
+      for (let n = 0; usedAliasStems.has(title); n++) title = `${base}-P${idx}${n > 0 ? `-${n}` : ""}`;
+      if (title !== base) jlog(`分P标题「${base}」在分段模式下重名 → 改用「${title}」(模板需含 {part} 才能区分同类型的多个分P)`);
+      usedAliasStems.add(title);
+    }
     return prepareUploadAlias(stageSub, `${kind}-${idx}`, canonical, title);
   };
   const { ledger, notify, cfg } = deps;

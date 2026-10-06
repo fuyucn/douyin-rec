@@ -9,6 +9,7 @@ import {
   parseSessionStamp,
   resolveOutputStem,
   sanitizeLiveTitle,
+  validateLooseTitleTemplate,
   validateTitleTemplate,
   zonedStamp,
 } from "./title-template.js";
@@ -173,15 +174,44 @@ describe("分 P 标题(与稿件名分开)", () => {
     expect(formatPartTitle("   ", ctx)).toBeNull();
   });
 
-  it("formatPartTitle: {part}/{parts}/{kind} 渲染", () => {
-    expect(formatPartTitle("{name}_P{part}", { ...ctx, partIndex: 2, partTotal: 3, kind: "danmu" }))
+  it("formatPartTitle: {part}/{parts} 渲染", () => {
+    expect(formatPartTitle("{name}_P{part}", { ...ctx, partIndex: 2, partTotal: 3 }))
       .toBe("某某_P2");
-    expect(formatPartTitle("{name}_{part}of{parts}_{kind}", { ...ctx, partIndex: 3, partTotal: 3, kind: "livechat" }))
-      .toBe("某某_3of3_livechat");
+    expect(formatPartTitle("{name}_{part}of{parts}", { ...ctx, partIndex: 3, partTotal: 3 }))
+      .toBe("某某_3of3");
   });
 
-  it("formatPartTitle: 无分P上下文时 {part}/{parts}/{kind} 渲染成空", () => {
-    expect(formatPartTitle("[{kind}]{name}", ctx)).toBe("[]某某");
+  it("formatPartTitle: 类型后缀自动追加(plain 无 / _danmu / _livechat)", () => {
+    expect(formatPartTitle("{name}_{date}", { ...ctx, partIndex: 1, partTotal: 3 }, "plain"))
+      .toBe("某某_2026-09-12");
+    expect(formatPartTitle("{name}_{date}", { ...ctx, partIndex: 2, partTotal: 3 }, "danmu"))
+      .toBe("某某_2026-09-12_danmu");
+    expect(formatPartTitle("{name}_{date}", { ...ctx, partIndex: 3, partTotal: 3 }, "livechat"))
+      .toBe("某某_2026-09-12_livechat");
+    // 与「不配模板」时 stage 默认命名完全一致
+    expect(formatPartTitle("{name}_{date}", ctx)).toBe("某某_2026-09-12");
+  });
+
+  it("formatPartTitle: 截断时为类型后缀留位,不会切掉 _livechat", () => {
+    const longName = "字".repeat(90);
+    const out = formatPartTitle("{name}", { sessionBase: `${longName}_2026-09-12_14-30-05`, liveTitle: null }, "livechat")!;
+    expect(out.endsWith("_livechat")).toBe(true);
+    expect(out.length).toBe(80);
+  });
+
+  it("formatPartTitle: 模板已带后缀时不重复追加(幂等)", () => {
+    expect(formatPartTitle("{name}_danmu", ctx, "danmu")).toBe("某某_danmu");
+    expect(formatPartTitle("{name}_livechat", ctx, "livechat")).toBe("某某_livechat");
+  });
+
+  it("partTitleToFilename: 截断时保留类型后缀", () => {
+    const out = partTitleToFilename("a".repeat(80) + "_livechat")!;
+    expect(out.length).toBe(60);
+    expect(out.endsWith("_livechat")).toBe(true);
+  });
+
+  it("formatPartTitle: 无分P上下文时 {part}/{parts} 渲染成空", () => {
+    expect(formatPartTitle("[{part}/{parts}]{name}", ctx)).toBe("[/]某某");
   });
 
   it("partTitleToFilename: 清洗成合法文件名,空了返回 null", () => {
@@ -197,9 +227,17 @@ describe("分 P 标题(与稿件名分开)", () => {
     expect(out.length).toBe(60);
   });
 
-  it("{part}/{parts}/{kind} 是合法占位符", () => {
+  it("{part}/{parts} 是合法占位符;{kind} 已移除", () => {
     expect(validateTitleTemplate("{name}_P{part}")).toBeNull();
-    expect(validateTitleTemplate("{name}_{parts}_{kind}")).toBeNull();
+    expect(validateTitleTemplate("{name}_{parts}")).toBeNull();
+    expect(validateTitleTemplate("{name}_{kind}")).toContain("未知占位符");
+  });
+
+  it("validateLooseTitleTemplate: 宽松模板也拒绝已移除的 {kind}", () => {
+    expect(validateLooseTitleTemplate("{name}_{date} 直播回放")).toBeNull();
+    expect(validateLooseTitleTemplate("{name}_P{part}")).toBeNull();
+    expect(validateLooseTitleTemplate("{name}_{kind}")).toContain("未知占位符");
+    expect(validateLooseTitleTemplate("{name")).toContain("未闭合");
   });
 
   it("三者独立:文件名严格、稿件名宽松可含空格标点", () => {
@@ -209,8 +247,8 @@ describe("分 P 标题(与稿件名分开)", () => {
     // 稿件名:可含空格(文件名侧会拒绝,这里必须允许)
     expect(formatBiliTitle("{name}_{date} 直播回放", ctx)).toBe("某某_2026-09-12 直播回放");
     expect(() => formatUploadTitle("{name}_{date} 直播回放", ctx)).toThrow();
-    // 分P名:可含空格,渲染成宽松标题
-    expect(formatPartTitle("P{part} 弹幕版", { ...ctx, partIndex: 2, partTotal: 3, kind: "danmu" }))
-      .toBe("P2 弹幕版");
+    // 分P名:可含空格,渲染成宽松标题;类型后缀自动加
+    expect(formatPartTitle("P{part} 弹幕版", { ...ctx, partIndex: 2, partTotal: 3 }, "danmu"))
+      .toBe("P2 弹幕版_danmu");
   });
 });

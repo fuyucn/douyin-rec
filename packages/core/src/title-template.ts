@@ -6,7 +6,7 @@ export const DEFAULT_TITLE_TEMPLATE = "{name}_{date}";
 export const MAX_TITLE_LEN = 80;
 export const TITLE_TOKENS = [
   "name", "user", "owner", "title",
-  "part", "parts", "kind",
+  "part", "parts",
   "date", "time", "datetime",
   "yyyy", "YYYY", "year",
   "MM", "month",
@@ -36,8 +36,6 @@ export interface TitleParts {
   part?: string;
   /** 分P总数字符串;`{parts}` 用。 */
   parts?: string;
-  /** 分P类型标签(plain / 弹幕 / 聊天 / 等);`{kind}` 用。 */
-  kind?: string;
 }
 
 export interface TitleContext {
@@ -50,8 +48,6 @@ export interface TitleContext {
   partIndex?: number | null;
   /** 分P总数;`{parts}` 用。 */
   partTotal?: number | null;
-  /** 分P类型标签(plain / danmu / livechat);`{kind}` 用。 */
-  kind?: string;
 }
 
 export function isSafeStem(s: string): boolean {
@@ -121,7 +117,6 @@ export function resolveTitlePartsWithLiveTitle(ctx: TitleContext): TitleParts {
     liveTitle: sanitizeLiveTitle(ctx.liveTitle),
     part,
     parts,
-    kind: ctx.kind ?? "",
   };
 }
 
@@ -136,7 +131,6 @@ export function applyTitleTemplate(template: string | null | undefined, parts: T
     title: parts.liveTitle ?? "",
     part: parts.part ?? "",
     parts: parts.parts ?? "",
-    kind: parts.kind ?? "",
     date: parts.date,
     time,
     datetime: `${parts.date}_${time}`,
@@ -198,6 +192,26 @@ export function validateTitleTemplate(template: string): string | null {
   return null;
 }
 
+/**
+ * 宽松模板(稿件名 / 分P名)的校验:只查占位符是否已知,不限制字符集
+ * (B 站标题允许空格/标点/emoji)。用于在保存时尽早暴露 `{kind}` 这类已移除的占位符,
+ * 而不是等到渲染时被当成字面量 `kind` 悄悄写进标题。
+ */
+export function validateLooseTitleTemplate(template: string): string | null {
+  const t = template.trim();
+  if (!t) return null;
+  const unknown: string[] = [];
+  t.replace(TOKEN_RE, (_, key: string) => {
+    if (!(TITLE_TOKENS as readonly string[]).includes(key)) unknown.push(key);
+    return "x";
+  });
+  if (unknown.length) {
+    return `未知占位符: ${[...new Set(unknown)].map((k) => `{${k}}`).join(", ")}`;
+  }
+  if (/[{}]/.test(t.replace(TOKEN_RE, ""))) return "标题模板含未闭合的大括号";
+  return null;
+}
+
 export function formatUploadTitle(template: string | null | undefined, ctx: TitleContext): string {
   const rendered = applyTitleTemplate(template, resolveTitlePartsWithLiveTitle(ctx));
   if (!rendered) throw new Error("标题渲染结果为空");
@@ -231,17 +245,35 @@ export function formatBiliTitle(template: string | null | undefined, ctx: TitleC
  * 不同,就必须在调用 biliup 之前把文件重命名成想要的分 P 名(见 orchestrator 侧)。
  *
  * 这里只负责渲染出那个名字:宽松(B 站标题允许空格/标点),截断到 80 字。
+ * **类型后缀由本函数自动追加**(plain 无、danmu → `_danmu`、livechat → `_livechat`),
+ * 与不配模板时 stage 产物的默认命名(`{stem}` / `{stem}_danmu` / `{stem}_livechat`)完全一致,
+ * 所以模板里不再需要(也没有)`{kind}` 占位符。
  * 未配置 `partTitleTemplate` 时返回 null → 调用方回落到原文件名(行为不变)。
  */
+export type PartKind = "plain" | "danmu" | "livechat";
+
+/** 分 P 类型 → 自动追加的标题后缀(plain 无后缀)。 */
+export function partKindSuffix(kind: PartKind): string {
+  return kind === "danmu" ? "_danmu" : kind === "livechat" ? "_livechat" : "";
+}
+
 export function formatPartTitle(
   template: string | null | undefined,
   ctx: TitleContext,
+  kind: PartKind = "plain",
 ): string | null {
   const t = (template ?? "").trim();
   if (!t) return null;
   const rendered = applyTitleTemplate(t, resolveTitlePartsWithLiveTitle(ctx));
   if (!rendered.trim()) return null;
-  return rendered.length > MAX_TITLE_LEN ? rendered.slice(0, MAX_TITLE_LEN) : rendered;
+  const suffix = partKindSuffix(kind);
+  // 幂等:模板里若已手写了后缀(迁移自旧 `{kind}` 用法),不重复追加。
+  if (suffix && rendered.endsWith(suffix)) return rendered.slice(0, MAX_TITLE_LEN);
+  // 先给后缀留位再截断基础名,避免 `_livechat` 被切掉。
+  const base = rendered.length > MAX_TITLE_LEN - suffix.length
+    ? rendered.slice(0, MAX_TITLE_LEN - suffix.length)
+    : rendered;
+  return `${base}${suffix}`;
 }
 
 /**
@@ -260,7 +292,10 @@ export function partTitleToFilename(title: string | null | undefined, maxLen = 6
     .replace(/^-+|-+$/g, "")
     .trim();
   if (!kept) return null;
-  return kept.length > maxLen ? kept.slice(0, maxLen).replace(/-+$/, "") : kept;
+  if (kept.length <= maxLen) return kept;
+  // 截断时为类型后缀留位,避免把 `_danmu` / `_livechat` 切掉。
+  const suffix = kept.endsWith("_livechat") ? "_livechat" : kept.endsWith("_danmu") ? "_danmu" : "";
+  return `${kept.slice(0, maxLen - suffix.length).replace(/-+$/, "")}${suffix}`;
 }
 
 /** 一场 job 的 stem:已落盘的优先,否则按模板渲染。 */

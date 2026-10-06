@@ -44,7 +44,8 @@ export interface HubPipelineConfig {
    *   2. `submissionTitleTemplate` —— **B 站稿件标题**(整稿的总标题)。空 = 回落 1。
    *   3. `partTitleTemplate` —— **分 P 的视频标题**(P1/P2/P3 各自)。空 = 回落 1(即用文件名当分P名)。
    * 2 与 3 走宽松渲染(B 站标题允许空格/标点/emoji);1 必须是合法文件名。
-   * 3 额外可用 `{part}`(序号)/`{parts}`(总数)/`{kind}`(plain/danmu/livechat)。
+   * 3 额外可用 `{part}`(序号)/`{parts}`(总数);**类型后缀自动追加**(plain 无 / `_danmu` / `_livechat`),
+   *   模板里不需要写类型。
    */
   upload?: {
     mode?: "stage" | "upload"; private?: boolean; tag?: string; tid?: number; desc?: string;

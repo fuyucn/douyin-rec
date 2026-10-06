@@ -211,7 +211,14 @@ hub 规则（`config/hub/{platform}.{roomSlug}.json`）新增 `recording.sourceT
 | `submissionTitleTemplate` | **B 站稿件标题** —— 整稿总标题，可含空格/标点，不参与文件名 | 回落文件名规则 |
 | `partTitleTemplate` | **分 P 视频标题** —— 点进去后 P1/P2/P3 各自的名字 | 回落文件名规则（= 现在的行为） |
 
-`partTitleTemplate` 额外可用 `{part}`(序号)、`{parts}`(总数)、`{kind}`(plain/danmu/livechat)：
+`partTitleTemplate` 额外可用 `{part}`(序号)、`{parts}`(总数)。**类型后缀由 pipeline 自动追加**，
+模板里不需要(也没有)`{kind}`：
+
+- `plain` → 无后缀；`danmu` → `_danmu`；`livechat` → `_livechat`。
+- 后缀与「不配 `partTitleTemplate`」时 stage 产物的默认命名完全一致，所以一条模板
+  (`{name}_{date}`)就能让 P1 无后缀、P2/P3 自动带后缀，不需要为 plain 单独写规则。
+- 分段模式(`mergeSegments=false`)同类分 P 有多个，必须带 `{part}` 才能区分；否则同名会
+  触发兜底改名(`-P{n}`)并在 job 日志告警。
 
 ```jsonc
 {

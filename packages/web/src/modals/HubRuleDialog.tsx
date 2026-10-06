@@ -105,7 +105,6 @@ function previewTitle(template: string, name: string, partSample?: { part: strin
     // 分P相关:未传样例(稿件名模板)时渲染成空,与后端一致。
     part: partSample?.part ?? "",
     parts: partSample?.parts ?? "",
-    kind: partSample?.kind ?? "",
     date: "2026-09-12",
     time: "14-30-05",
     datetime: "2026-09-12_14-30-05",
@@ -118,7 +117,11 @@ function previewTitle(template: string, name: string, partSample?: { part: strin
     HHmm: "1430",
     HHmmss: "143005",
   };
-  return t.replace(TITLE_TOKEN_RE, (raw, key: string) => parts[key] ?? raw);
+  const base = t.replace(TITLE_TOKEN_RE, (raw, key: string) => parts[key] ?? raw);
+  // 类型后缀由后端自动追加(plain 无 / _danmu / _livechat),预览同口径。
+  const kind = partSample?.kind;
+  const suffix = kind === "danmu" ? "_danmu" : kind === "livechat" ? "_livechat" : "";
+  return `${base}${suffix}`;
 }
 
 /** Hub 规则的创建/编辑弹窗:按房间(roomSlug)配置后处理 pipeline。 */
@@ -438,7 +441,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
                   onChange={(e) => set("uploadPartTitle", e.target.value)}
                 />
                 <div className="flex flex-wrap gap-1.5 mt-1.5">
-                  {(["{name}_P{part}", "{name}_{date}_P{part}", "{name}_{date}_{kind}"] as const).map((preset) => (
+                  {(["{name}_P{part}", "{name}_{date}_P{part}", "{name}_{date}"] as const).map((preset) => (
                     <button
                       key={preset}
                       type="button"
@@ -453,7 +456,17 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
                   {t("hub.ruleDialog.partTitleTemplateHint")}
                   {form.uploadPartTitle.trim() && (
                     <span className="font-mono text-body ml-1">
-                      {previewTitle(form.uploadPartTitle, selectedTask?.name || rule?.anchorName || "主播名", { part: "1", parts: "3", kind: "plain" })}
+                      {([
+                        { part: "1", kind: "plain" },
+                        { part: "2", kind: "danmu" },
+                        { part: "3", kind: "livechat" },
+                      ] as const)
+                        .map((s) => previewTitle(
+                          form.uploadPartTitle,
+                          selectedTask?.name || rule?.anchorName || "主播名",
+                          { part: s.part, parts: "3", kind: s.kind },
+                        ))
+                        .join(" / ")}
                     </span>
                   )}
                 </p>

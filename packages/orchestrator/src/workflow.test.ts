@@ -479,9 +479,9 @@ describe("稿件名 / 分P名 / 文件名 分离(端到端参数验证)", () => 
     const products = {
       ...t.products,
       partTitles: {
-        plain: formatPartTitle("{name}_P{part}", { ...titleCtx, partIndex: 1, partTotal: 3, kind: "plain" }),
-        danmu: formatPartTitle("{name}_P{part}", { ...titleCtx, partIndex: 2, partTotal: 3, kind: "danmu" }),
-        livechat: formatPartTitle("{name}_P{part}", { ...titleCtx, partIndex: 3, partTotal: 3, kind: "livechat" }),
+        plain: formatPartTitle("{name}_P{part}", { ...titleCtx, partIndex: 1, partTotal: 3 }, "plain"),
+        danmu: formatPartTitle("{name}_P{part}", { ...titleCtx, partIndex: 2, partTotal: 3 }, "danmu"),
+        livechat: formatPartTitle("{name}_P{part}", { ...titleCtx, partIndex: 3, partTotal: 3 }, "livechat"),
       },
     };
     const wf = buildWorkflow({

@@ -404,11 +404,12 @@ async function runPipelineInner(
     { kind: "livechat", on: burnLivechat },
   ];
   const enabledKinds = partKinds.filter((k) => k.on);
+  // 类型后缀由 formatPartTitle 自动追加(plain 无 / _danmu / _livechat),模板里不再有 {kind}。
   const partTitles: StageProducts["partTitles"] = pt
     ? Object.fromEntries(
         enabledKinds.map((k, i) => [
           k.kind,
-          formatPartTitle(pt, { ...titleCtx, partIndex: i + 1, partTotal: enabledKinds.length, kind: k.kind }),
+          formatPartTitle(pt, { ...titleCtx, partIndex: i + 1, partTotal: enabledKinds.length }, k.kind),
         ]),
       ) as StageProducts["partTitles"]
     : undefined;
@@ -418,7 +419,7 @@ async function runPipelineInner(
     return await runSegmentPipeline({
       streamKey, deps, jlog, stageSub, winnerMembers, allMembers: candidates.members, dateName, uploadTitle,
       renderPartTitle: pt
-        ? (kind, partIndex, partTotal) => formatPartTitle(pt, { ...titleCtx, kind, partIndex, partTotal })
+        ? (kind, partIndex, partTotal) => formatPartTitle(pt, { ...titleCtx, partIndex, partTotal }, kind)
         : undefined,
     });
   }
