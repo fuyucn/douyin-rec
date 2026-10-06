@@ -150,11 +150,14 @@ describe("runPipeline", () => {
   describe("分段产出(steps.mergeSegments=false)", () => {
     /** 造一个分段模式的 deps:段源文件落在 stage(模拟已 pull),并拦截 remux/burn 调用。 */
     function segmentDeps(): TestDeps {
+      const rmStage = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
       const deps = makeDeps({
         // 注入 remux/时长/烧录接缝(否则会 spawn 真 ffmpeg)。
         remuxSegment: async (src: string, out: string) => { writeFileSync(out, "x"); },
         segmentDuration: async () => 60,
         burnSegment: async ({ out }: { out: string }) => { writeFileSync(out, "x"); },
+        // 拦截 stage 删除(否则真删 tmp 目录里的模拟文件;断言也需要)。
+        rmStage,
       });
       // 覆盖 cfg:分段模式 + upload。
       (deps as { cfg: PipelineCfg }).cfg = {
@@ -212,6 +215,112 @@ describe("runPipeline", () => {
       expect(result.state).toBe("needs_manual");
       expect(deps.uploadPlain).not.toHaveBeenCalled();
       expect(deps.appendGroup).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("stage 模式 + sourceAfterDone:只删节点源,**绝不碰 stage**(回归:分P成品即交付物)", async () => {
+      const tsFiles = ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"];
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles }) }]);
+      const deps = segmentDeps();
+      // 未开 stageAfterDone → 保留 stage → 节点源 .ts + .xml 一起删(xml 副本在 stage)。
+      (deps as { cfg: PipelineCfg }).cfg = {
+        ...deps.cfg, uploadMode: "stage",
+        cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true },
+      };
+      deps.ledger.upsertPending(broadcast.streamKey);
+
+      const result = await runPipeline(broadcast, deps);
+
+      expect(result.state).toBe("needs_manual");
+      // 节点源被清(否则 VPS 上源 .ts 永久残留)。
+      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+      const cleaned = (deps.transports.get("node-1")!.cleanup as Mock).mock.calls.flatMap((c) => c[0] as string[]);
+      expect(cleaned).toEqual([...tsFiles, "/remote/danmu.xml"]);
+      // **关键**:分P模式下 stage 里的文件就是交付物 → 删源时绝不从 stage 删。
+      expect(deps.rmStage).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("stage 模式 + 无 cleanup:落盘后不动任何文件(不误删)", async () => {
+      const tsFiles = ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"];
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles }) }]);
+      const deps = segmentDeps();
+      // stage 模式且 cleanup 全关 → 只落盘待人工,节点源/stage 源都保留。
+      (deps as { cfg: PipelineCfg }).cfg = { ...deps.cfg, uploadMode: "stage" };
+      deps.ledger.upsertPending(broadcast.streamKey);
+
+      const result = await runPipeline(broadcast, deps);
+
+      expect(result.state).toBe("needs_manual");
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      expect(deps.rmStage).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("stage 模式 + cleanup 全开:只删节点源,stage 完全保留(未上传 → 不删 stage)", async () => {
+      const tsFiles = ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"];
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles }) }]);
+      const deps = segmentDeps();
+      // 复刻真实规则(douyin.27471901912):stage 模式 + 三开关全开。
+      (deps as { cfg: PipelineCfg }).cfg = {
+        ...deps.cfg, uploadMode: "stage",
+        cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true, stageAfterDone: true },
+      };
+      deps.ledger.upsertPending(broadcast.streamKey);
+
+      const result = await runPipeline(broadcast, deps);
+
+      expect(result.state).toBe("needs_manual");
+      // 节点源全删(.ts;stageAfterDone=true → 节点 .xml 保留,那是弹幕源最后一份)。
+      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+      const nodeCleaned = (deps.transports.get("node-1")!.cleanup as Mock).mock.calls.flatMap((c) => c[0] as string[]);
+      expect(nodeCleaned).toEqual(tsFiles);
+      // **关键**:未上传 → stage 一律不删(即使 stageAfterDone=true 也不清,因为没上传成功)。
+      expect(deps.rmStage).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("stage 模式 + 全碎片:无任何分P产物 → 绝不删源(完整性优先)", async () => {
+      const tsFiles = ["/remote/s_000.ts", "/remote/s_001.ts"];
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles }) }]);
+      const deps = segmentDeps();
+      (deps as { cfg: PipelineCfg }).cfg = {
+        ...deps.cfg, uploadMode: "stage",
+        cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true, stageAfterDone: true },
+      };
+      // 所有段都 < minSegmentSec(2s) → 全判碎片 → uploadParts=[]
+      (deps as { segmentDuration: (p: string) => Promise<number> }).segmentDuration = async () => 0.2;
+      deps.ledger.upsertPending(broadcast.streamKey);
+
+      const result = await runPipeline(broadcast, deps);
+
+      expect(result.state).toBe("needs_manual");
+      // 零产物 → 源和 stage 都不许删(否则「源和副本全删、零成品」)。
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      expect(deps.rmStage).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("分段续跑(已建稿):markDone 后补做删源 + 清 stage 源/.work(回归:续跑曾漏清理)", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts"] }) }]);
+      const deps = segmentDeps();
+      (deps as { cfg: PipelineCfg }).cfg = {
+        ...deps.cfg,
+        cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true, stageAfterDone: true },
+      };
+      deps.ledger.upsertPending(broadcast.streamKey);
+      deps.ledger.setState(broadcast.streamKey, "uploading");
+      deps.ledger.setBv(broadcast.streamKey, "BVseg");  // 已建稿 → 走分段续跑
+
+      const result = await runPipeline(broadcast, deps);
+
+      expect(result.state).toBe("done");
+      expect(deps.uploadPlain).not.toHaveBeenCalled();  // 绝不重传 P1
+      // 续跑 done → 节点源被删。
+      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+      // 且 stage 里拉来的源 .ts 被清(有合并?分P模式不删交付物,但拉来源段副本可清)。
+      const stageCleaned = (deps.rmStage as Mock).mock.calls.flatMap((c) => c[0] as string[]);
+      expect(stageCleaned.some((p) => /s_00[01]\.ts$/.test(p))).toBe(true);
       deps.ledger.close();
     });
 
@@ -778,6 +887,33 @@ describe("runPipeline", () => {
       expect(deps.appendGroup.mock.calls.every((c) => c[0].bv === "BVexisting")).toBe(true);
       expect(r).toEqual({ state: "done", bv: "BVexisting" });
       expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
+      deps.ledger.close();
+    });
+
+    it("续跑:markDone 后补做删源(回归:续跑曾完全不删节点源 → 残留)", async () => {
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const stageDir = mkdtempSync(join(tmpdir(), "resume-clean-"));
+      const tsFiles = ["/remote/a.ts", "/remote/b.ts"];
+      const deps = makeDeps({
+        cfg: { ...makeDeps().cfg, stageDir, cleanup: { sourceAfterDone: true, stageSourceAfterMerge: true } },
+      });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec({ tsFiles }) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      deps.ledger.setState(b.streamKey, "uploading");
+      deps.ledger.setBv(b.streamKey, "BVexisting");
+      const dateName = "主播名_2026-06-27";
+      const sub = join(stageDir, "douyin_test-room_2026-06-27");
+      mkdirSync(sub, { recursive: true });
+      for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, dateName + suf), "x");
+
+      const r = await runPipeline(b, deps);
+
+      expect(r).toEqual({ state: "done", bv: "BVexisting" });
+      // 续跑到 done → 节点源被删(否则 VPS 上源 .ts 永久残留)。
+      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+      const cleaned = (deps.transports.get("node-1")!.cleanup as Mock).mock.calls.flatMap((c) => c[0] as string[]);
+      // 未开 stageAfterDone → 保留 stage → 节点 .xml 一并删(副本在 stage)。
+      expect(cleaned).toEqual([...tsFiles, "/remote/danmu.xml"]);
       deps.ledger.close();
     });
 

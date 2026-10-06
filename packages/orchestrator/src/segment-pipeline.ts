@@ -14,8 +14,8 @@ import { planSegmentGroups } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
 import { retry } from "./retry.js";
-import { defaultRmStage, defaultSplitForUpload, readdirSyncSafe, videoOnly, xmlKeepRule, type PipelineDeps } from "./pipeline.js";
 import { prepareUploadAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
+import { cleanupSourcesShared, defaultRmStage, defaultSplitForUpload, readdirSyncSafe, videoOnly, xmlKeepRule, type PipelineDeps } from "./pipeline.js";
 
 /** 默认单段 remux(ts/flv → mp4,无损,-c copy + 时基钉 90000)。 */
 const defaultRemuxSegment = (src: string, out: string): Promise<void> =>
@@ -244,7 +244,7 @@ export async function runSegmentPipeline(o: {
 
   // 续跑:已建稿(bv 已落库)→ 只补没做完的 append(plain 剩余段 / danmu / livechat)。
   if (cfg.uploadMode === "upload" && existing?.bv) {
-    return await resumeSegmentAppends(streamKey, existing.bv, stageSub, uploadParts, deps, jlog, burnDanmu, burnLivechat, isPublic, splitForUpload);
+    return await resumeSegmentAppends(streamKey, existing.bv, stageSub, uploadParts, deps, jlog, burnDanmu, burnLivechat, isPublic, splitForUpload, allMembers, srcSegments);
   }
 
   // ── 逐段烧录(burn_danmu / burn_livechat 节点语义)──
@@ -280,10 +280,32 @@ export async function runSegmentPipeline(o: {
   await burnAll("danmu", "burn_danmu");
   await burnAll("livechat", "burn_livechat");
 
+  // 「删源」= 各节点 recordings 源。**分P模式不传 stagePulledSources**:
+  // stage 里的 {name}_{NNN}.mp4 就是交付物本身(无合并,逐段无损 remux),删源时绝不从 stage 删。
+  // 分P的 stage 文件统一留到上传成功后由 stageAfterDone 清(见下)。
+  const cleanupNodeSources = async (): Promise<void> =>
+    cleanupSourcesShared({
+      streamKey, ledger, transports: deps.transports, members: allMembers,
+      cleanup: clean, rmStage, log: jlog,
+    });
+  // stage 里拉来的源段副本 + 逐段 remux 中间产物(.work) —— 只在**上传成功后**清(见下)。
+  const stageScratchPaths = (): string[] => [
+    ...srcSegments.map((f) => path.join(stageSub, path.basename(f))),
+    ...(existsSync(path.join(stageSub, SEG_WORK_DIR)) ? [path.join(stageSub, SEG_WORK_DIR)] : []),
+  ];
+
   // ── stage 模式:逐段产物落盘待人工,不建稿 ──
   if (cfg.uploadMode !== "upload") {
     jlog(`分段 stage 模式:${uploadParts.length} 个分 P 已合成待人工上传`);
     ledger.setState(streamKey, "needs_manual");
+    // 完整性优先:没有任何分P产物(整场被判碎片)→ 绝不删源,否则「源和副本全删、零成品」。
+    if (uploadParts.length === 0) {
+      jlog(`分段 stage 模式:无任何分 P 产物,保留全部源与 stage(转人工)`);
+      notify({ kind: "error", stage: "同步", message: `${streamKey} 分段 stage 模式无任何分 P 产物,已保留全部源,请人工检查` });
+      return { state: "needs_manual" };
+    }
+    // 产物已落盘待人工上传 → 删各节点源(stage 里的分P交付物保留,不能删)。
+    await cleanupNodeSources();
     notify({ kind: "stageReady", streamKey });
     return { state: "needs_manual" };
   }
@@ -373,28 +395,14 @@ export async function runSegmentPipeline(o: {
   ledger.markDone(streamKey, bv);
   notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
 
-  // 可选清理:各成员节点原录制。.ts 总删;.xml 仅当 stage 保留时一起删(xmlKeepRule(node,...))。
-  if (clean.sourceAfterDone) {
-    const delNodeXml = xmlKeepRule("node", clean.stageAfterDone === true);
-    ledger.logStep(streamKey, "clean_source", "start");
-    let fileCount = 0;
-    for (const m of allMembers) {
-      const paths = videoOnly(m.rec.tsFiles);
-      if (delNodeXml && m.rec.xmlPath) paths.push(m.rec.xmlPath);
-      fileCount += paths.length;
-      await deps.transports.get(m.workerId)?.cleanup?.(paths).catch(() => {});
-    }
-    ledger.logStep(streamKey, "clean_source", "done", `删 ${allMembers.length} 节点 · ${fileCount} 文件`);
-  }
-  // 可选清理:stage 里拉来的源 .ts;不保留 stage 时连 .xml/.ass 副本一起删。
+  // 上传成功 → 删各节点源(分P模式不碰 stage 交付物)。
+  await cleanupNodeSources();
+  // 上传成功 → stage 里的「拉来源段副本 + .work 中间产物」已是冗余,可清。
+  // 注意:这里只清**非交付物**;分P成品/烧录产物由下面的 stageAfterDone 决定是否清。
   if (clean.stageSourceAfterMerge) {
-    const srcStage = srcSegments.map((f) => path.join(stageSub, path.basename(f)));
-    if (xmlKeepRule("stage", clean.stageAfterDone === true)) {
-      srcStage.push(...readdirSyncSafe(stageSub).filter((f) => /\.(xml|ass)$/i.test(f)).map((f) => path.join(stageSub, f)));
-    }
     ledger.logStep(streamKey, "clean_stage_src", "start");
-    await rmStage(srcStage);
-    ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${srcStage.length} 文件`);
+    await rmStage(stageScratchPaths());
+    ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${stageScratchPaths().length} 文件`);
   }
   if (clean.stageAfterDone) {
     // 组产物(合并 mp4 / 烧录 mp4)+ 组成员的逐段 plain(若合并成组则逐段 plain 可一并清)。
@@ -486,6 +494,8 @@ async function resumeSegmentAppends(
   burnLivechat: boolean,
   isPublic: boolean,
   splitForUpload: (mp4: string) => Promise<string[]>,
+  allMembers: Broadcast["members"],
+  srcSegments: string[],
 ): Promise<{ state: JobState; bv?: string }> {
   const { ledger, notify, cfg } = deps;
   jlog(`分段续跑:已建稿 bv=${bv},只补 append`);
@@ -520,12 +530,29 @@ async function resumeSegmentAppends(
   await appendSegmentGroup(streamKey, bv, "append_livechat", livechatFiles, burnLivechat, deps, jlog, isPublic, splitForUpload);
   ledger.markDone(streamKey, bv);
   notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+  // 上传成功 → 补做「删源」(续跑此前漏了 sourceAfterDone)。分P模式不碰 stage 交付物。
+  const rmStage = deps.rmStage ?? defaultRmStage;
+  await cleanupSourcesShared({
+    streamKey, ledger, transports: deps.transports, members: allMembers,
+    cleanup: cfg.cleanup, rmStage, log: jlog,
+  });
+  // 上传成功 → stage 里的「拉来源段副本 + .work 中间产物」已冗余,可清(非交付物)。
+  if (cfg.cleanup?.stageSourceAfterMerge) {
+    const scratch = [
+      ...srcSegments.map((f) => path.join(stageSub, path.basename(f))),
+      ...(existsSync(path.join(stageSub, SEG_WORK_DIR)) ? [path.join(stageSub, SEG_WORK_DIR)] : []),
+    ];
+    ledger.logStep(streamKey, "clean_stage_src", "start");
+    await rmStage(scratch);
+    ledger.logStep(streamKey, "clean_stage_src", "done", `删 ${scratch.length} 文件`);
+  }
   if (cfg.cleanup?.stageAfterDone) {
-    const rmStage = deps.rmStage ?? defaultRmStage;
     const products = videoOnly([
       ...uploadParts.flatMap((p) => [p.plain, p.danmu, p.livechat].filter(Boolean) as string[]),
       ...uploadParts.flatMap((p) => p.memberPlains),
     ]).filter(existsSync);
+    const aliasDir = path.join(stageSub, UPLOAD_ALIAS_DIR);
+    if (existsSync(aliasDir)) products.push(aliasDir);
     if (xmlKeepRule("stage", true)) {
       products.push(...readdirSyncSafe(stageSub).filter((f) => /\.(xml|ass)$/i.test(f)).map((f) => path.join(stageSub, f)));
     }
