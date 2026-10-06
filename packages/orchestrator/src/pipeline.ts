@@ -3,13 +3,13 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { isAppendAmbiguous, isJobAbort, isUploadRateLimited, resolveOutputStem, runWithJob, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, resolveOutputStem, runWithJob, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/core";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
 import { humanBytes, sumBytes } from "./format.js";
 import { buildWorkflow, deriveStageProducts, runWorkflowNodes, ResourcePool, type StageProducts, type WorkflowNodeKey } from "./workflow.js";
-import { deriveSegmentPlan } from "./session-plan.js";
+import { deriveSegmentPlan, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 import { runSegmentPipeline } from "./segment-pipeline.js";
 
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。 */
@@ -65,7 +65,12 @@ export interface PipelineCfg {
   uploadMode: "stage" | "upload";
   /** 仅 upload 时有意义:true(默认)= 仅自己可见,false = 公开。 */
   uploadPrivate?: boolean;
-  uploadMeta: { tag: string; tid: number; desc?: string; titleTemplate?: string };
+  uploadMeta: {
+    tag: string; tid: number; desc?: string;
+    titleTemplate?: string;
+    submissionTitleTemplate?: string;
+    partTitleTemplate?: string;
+  };
   /** 渲染 {date}/{time} 回退用(sessionBase 解析不到时);缺省 Asia/Shanghai。 */
   timeZone?: string;
   steps?: PipelineSteps;
@@ -311,14 +316,58 @@ async function runPipelineInner(
     sessionBase: earliest.rec.sessionBase,
     startMs: earliest.rec.startMs || b.startMs,
     timeZone: cfg.timeZone,
+    liveTitle: earliest.rec.title,
     existingStem,
   });
+  // 投稿标题单独渲染:stage 文件名要严格字符集,B 站标题可含空格/标点/emoji。
+  // 稿件名解析顺序:
+  //   1. submissionTitleTemplate(独立配置)—— 用 sessionBase 重渲染,不受文件名快照影响;
+  //   2. 没配 → 回落文件名规则(历史行为):模板含 {title} 且无锁定 stem 时走宽松渲染,
+  //      否则直接用已锁定的文件名 stem(保证续跑稳定)。
+  const subTpl = (cfg.uploadMeta.submissionTitleTemplate ?? "").trim();
+  const titleCtx = {
+    sessionBase: earliest.rec.sessionBase,
+    startMs: earliest.rec.startMs || b.startMs,
+    timeZone: cfg.timeZone,
+    liveTitle: earliest.rec.title,
+  };
+  const usesLiveTitle = (cfg.uploadMeta.titleTemplate ?? "").includes("{title}");
+  const uploadTitle = subTpl
+    ? formatBiliTitle(subTpl, titleCtx)
+    : usesLiveTitle && !existingStem
+      ? formatBiliTitle(cfg.uploadMeta.titleTemplate, titleCtx)
+      : dateName;
   ledger.setOutputStem(streamKey, dateName);
-  jlog(`产物 stem / 标题: ${dateName}`);
+  jlog(`产物 stem: ${dateName}`);
+  if (uploadTitle !== dateName) jlog(`投稿标题: ${uploadTitle}`);
+
+  // 分 P 视频标题(可选):与稿件标题分开渲染。未配置 partTitleTemplate 时不改名(行为不变)。
+  const pt = cfg.uploadMeta.partTitleTemplate;
+  // 只有真正会产出的分 P 参与编号:{part}/{parts} 必须反映实际分 P 数,
+  // 否则关了 burnDanmu 时 {parts} 会虚报(例如 P2 其实是 livechat 却显示 2/3)。
+  const partKinds: Array<{ kind: "plain" | "danmu" | "livechat"; on: boolean }> = [
+    { kind: "plain", on: true },
+    { kind: "danmu", on: burnDanmu },
+    { kind: "livechat", on: burnLivechat },
+  ];
+  const enabledKinds = partKinds.filter((k) => k.on);
+  const partTitles: StageProducts["partTitles"] = pt
+    ? Object.fromEntries(
+        enabledKinds.map((k, i) => [
+          k.kind,
+          formatPartTitle(pt, { ...titleCtx, partIndex: i + 1, partTotal: enabledKinds.length, kind: k.kind }),
+        ]),
+      ) as StageProducts["partTitles"]
+    : undefined;
 
   // 分段上传模式:不合并,逐段 remux(+逐段烧录)→ 逐段上传。走独立分支,与合并路径互斥。
   if (cfg.steps?.mergeSegments === false) {
-    return await runSegmentPipeline({ streamKey, deps, jlog, stageSub, winnerMembers, allMembers: candidates.members, dateName });
+    return await runSegmentPipeline({
+      streamKey, deps, jlog, stageSub, winnerMembers, allMembers: candidates.members, dateName, uploadTitle,
+      renderPartTitle: pt
+        ? (kind, partIndex, partTotal) => formatPartTitle(pt, { ...titleCtx, kind, partIndex, partTotal })
+        : undefined,
+    });
   }
 
   // Merge and burn from the stageSub directory
@@ -430,6 +479,9 @@ async function runPipelineInner(
     // 合成视频产物总删;.xml/.ass 按 xmlKeepRule(stage)=true(=stageAfterDone 开)一并删
     // —— 此时节点源 .xml 已保留,不会两处同时删光。
     const present = videoOnly([plain, danmuMp4, livechatMp4]).filter(Boolean).filter(existsSync);
+    // 分P标题别名目录(硬链接)也在这里清掉,否则会随 stage 长期残留。
+    const aliasDir = path.join(stageSub, UPLOAD_ALIAS_DIR);
+    if (existsSync(aliasDir)) present.push(aliasDir);
     if (xmlKeepRule("stage", true)) {
       present.push(...readdirSyncSafe(stageSub)
         .filter((f) => /\.(xml|ass)$/i.test(f))

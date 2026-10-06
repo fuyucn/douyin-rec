@@ -1,8 +1,24 @@
 import { readdirSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, mkdirSync, rmSync } from "node:fs";
+import { partTitleToFilename } from "@drec/core";
 
 /** 该场 stage 合成产物的确定性路径(merge 后 / 续跑反推)。 */
 export interface StageProducts {
   dateName: string;
+  /**
+   * B 站投稿标题(可含空格/标点/emoji)。与 `dateName` 分开:
+   * `dateName` 是 stage 文件名 stem(严格字符集),本字段只用于投稿,可宽松。
+   * 未配置含 `{title}` 的模板时两者相同。
+   */
+  uploadTitle?: string;
+  /**
+   * 各分 P 期望的**视频标题**(渲染后,宽松);缺省/undefined = 不改名,沿用原文件名 stem。
+   *
+   * 用途:biliup 分 P 标题取自文件名 stem,没有 CLI 参数单独指定 → 上传前把文件
+   * 硬链接成该标题的名字(见 `prepareUploadAlias`)。原产物名从不移动,
+   * 幂等推导与清理逻辑不受影响。
+   */
+  partTitles?: Partial<Record<"plain" | "danmu" | "livechat", string | null>>;
   /** merge 命令 --base 用的完整会话 base(含时间戳),如 `主播名_2026-08-10_23-08-10`。 */
   sessionBase: string;
   /** 断流重连多会话时全部会话 base(按时间序);单会话 = [sessionBase]。 */
@@ -121,6 +137,76 @@ export interface SegmentPlan {
  */
 export function segmentStem(dateName: string, index: number): string {
   return `${dateName}_${String(index).padStart(3, "0")}`;
+}
+
+/**
+ * 给 stage 产物改出「分 P 视频标题」用的文件名。
+ *
+ * biliup 的分 P 标题取自**文件名 stem**(见 `uploader/line.rs`:`video.title` 为空时用
+ * `file_stem()`)。所以要让分 P 显示成自定义标题,唯一办法是**在上传前把文件改成那个名字**。
+ *
+ * 返回新文件名(含扩展名);不需要改时返回 null(调用方保持原样)。
+ * 同目录同名冲突 → 加 `-2`、`-3` 后缀,绝不覆盖已有文件。
+ */
+export function planPartFilename(
+  dir: string,
+  originalBasename: string,
+  desiredStem: string | null,
+  takenNames: ReadonlySet<string>,
+): string | null {
+  if (!desiredStem) return null;
+  const ext = originalBasename.slice(originalBasename.lastIndexOf("."));
+  const currentStem = originalBasename.slice(0, originalBasename.length - ext.length);
+  if (currentStem === desiredStem) return null; // 已经一致,不用动
+  let candidate = `${desiredStem}${ext}`;
+  let n = 2;
+  while (takenNames.has(candidate) || existsSync(joinPath(dir, candidate))) {
+    candidate = `${desiredStem}-${n}${ext}`;
+    n++;
+  }
+  return candidate;
+}
+
+/** 上传别名集中放这里(stage 内子目录),收尾时整体删除。 */
+export const UPLOAD_ALIAS_DIR = ".upload";
+
+/**
+ * 按期望的**分 P 标题**给产物建一个可上传的别名文件(硬链接),返回要传给 biliup 的路径。
+ *
+ * 为什么必须这样做:biliup 的分 P 标题取自**文件名 stem**(`uploader/line.rs`:title 为空时
+ * 用 `file_stem()`),而 `upload`/`append` 都没有「指定分 P 标题」的 CLI 参数。所以要让分 P
+ * 显示成自定义名字,唯一办法是给它一个文件名就是该标题的路径。
+ *
+ * 用**硬链接**:同盘零拷贝、不移动规范产物名 → `deriveStageProducts` 幂等推导、各类
+ * stage 清理逻辑完全不受影响。硬链接不可用(跨设备)时回落复制。
+ *
+ * @returns 上传用路径;`desiredTitle` 为空/清洗后为空/构建失败 → 返回 `canonical`(不改名)。
+ */
+export function prepareUploadAlias(
+  stageSub: string,
+  kind: string,
+  canonical: string,
+  desiredTitle: string | null | undefined,
+): string {
+  if (!desiredTitle) return canonical;
+  const stem = partTitleToFilename(desiredTitle);
+  if (!stem) return canonical;
+  const ext = canonical.slice(canonical.lastIndexOf("."));
+  const dir = joinPath(stageSub, UPLOAD_ALIAS_DIR);
+  const dst = joinPath(dir, `${stem}${ext}`);
+  try {
+    mkdirSync(dir, { recursive: true });
+    // 续跑:上一次留下的别名先移除,保证指向最新产物(同名不同内容时不会串)。
+    if (existsSync(dst)) rmSync(dst, { force: true });
+    try {
+      linkSync(canonical, dst);
+    } catch {
+      copyFileSync(canonical, dst); // 跨设备/不支持硬链接 → 复制
+    }
+    return dst;
+  } catch {
+    return canonical; // 别名失败不影响上传(回落原名)
+  }
 }
 
 /**

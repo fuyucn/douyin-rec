@@ -587,8 +587,8 @@ const hubStarter: HubStarter = {
       /** 断流重连合并窗(ms);缺省 10 分钟。 */
       reconnectWindowMs?: number;
       /** 投稿默认(per-task 文件留空时回退);旧字段 uploadMeta 也认(迁移兼容)。 */
-      uploadDefaults?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string };
-      uploadMeta?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string };
+      uploadDefaults?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string };
+      uploadMeta?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string };
       /** Max settle wait before reconciler proceeds regardless (seconds). */
       maxWaitSec?: number;
       /** Settle poll interval (seconds). */
@@ -715,7 +715,12 @@ const hubStarter: HubStarter = {
         cookies: hubCfg.cookies ?? "",
         uploadMode: "stage" as const, // 全局兜底 = 不自动传;每任务文件按需 mode:"upload"
         uploadPrivate: true,
-        uploadMeta: { tag: defaultTag, tid: defaultTid, desc: uploadDefaults.desc, titleTemplate: uploadDefaults.titleTemplate },
+        uploadMeta: {
+          tag: defaultTag, tid: defaultTid, desc: uploadDefaults.desc,
+          titleTemplate: uploadDefaults.titleTemplate,
+          submissionTitleTemplate: uploadDefaults.submissionTitleTemplate,
+          partTitleTemplate: uploadDefaults.partTitleTemplate,
+        },
         timeZone: (opts.store.getSetting("timezone") ?? "").trim() || process.env.TZ || "Asia/Shanghai",
       },
     };
@@ -740,6 +745,8 @@ const hubStarter: HubStarter = {
           tid: p.upload?.tid ?? defaultTid,
           desc: p.upload?.desc ?? uploadDefaults.desc,
           titleTemplate: (p.upload?.titleTemplate ?? "").trim() || uploadDefaults.titleTemplate,
+          submissionTitleTemplate: (p.upload?.submissionTitleTemplate ?? "").trim() || uploadDefaults.submissionTitleTemplate,
+          partTitleTemplate: (p.upload?.partTitleTemplate ?? "").trim() || uploadDefaults.partTitleTemplate,
         },
         timeZone: (opts.store.getSetting("timezone") ?? "").trim() || process.env.TZ || "Asia/Shanghai",
         steps: p.steps,

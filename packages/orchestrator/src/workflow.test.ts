@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
 import { JobAbortedError, USER_STOP, abortJob, runWithJob, throwIfAborted } from "@drec/core";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -454,6 +454,69 @@ describe("runWorkflowNodes — 重跑语义", () => {
     });
     expect(ran).toBe(1);
     expect(t.ledger.getNodeState(STREAM_KEY, "upload_plain")?.state).toBe("done");
+    t.ledger.close();
+  });
+});
+
+/**
+ * 端到端验证:稿件名 / 分P名 / 文件名 三者的分离真的落到了 biliup 调用参数上。
+ *
+ * 这是「biliup 分P标题取自文件名 stem」这个约束的唯一可信验证点 ——
+ * 我们无法在单测里跑真实投稿,但可以断言**传给 biliup 的东西**:
+ *   1. --title 用的是稿件名模板(与文件名 stem 不同);
+ *   2. 分P 上传的路径,其文件名 stem 就是渲染后的分P标题。
+ */
+describe("稿件名 / 分P名 / 文件名 分离(端到端参数验证)", () => {
+  it("--title = 稿件名;分P 用硬链接路径,其 stem = 分P标题", async () => {
+    const t = makeDeps();
+    const { formatBiliTitle, formatPartTitle } = await import("@drec/core");
+    const titleCtx = { sessionBase: SESSION_BASE };
+    const submissionTitle = formatBiliTitle("{name}_{date} 直播回放", titleCtx);
+    expect(submissionTitle).toBe("主播名_2026-06-27 直播回放");
+    // 文件名 stem 仍是严格的 dateName(与稿件名不同)
+    expect(t.products.dateName).toBe("主播名_2026-06-27");
+
+    const products = {
+      ...t.products,
+      partTitles: {
+        plain: formatPartTitle("{name}_P{part}", { ...titleCtx, partIndex: 1, partTotal: 3, kind: "plain" }),
+        danmu: formatPartTitle("{name}_P{part}", { ...titleCtx, partIndex: 2, partTotal: 3, kind: "danmu" }),
+        livechat: formatPartTitle("{name}_P{part}", { ...titleCtx, partIndex: 3, partTotal: 3, kind: "livechat" }),
+      },
+    };
+    const wf = buildWorkflow({
+      streamKey: STREAM_KEY, stageSub: t.stageSub, products, deps: t.deps, cfg: t.deps.cfg,
+      log: () => {}, willUpload: true, burnDanmu: true, burnLivechat: true, segmentCount: 2,
+    });
+    await runWorkflowNodes({
+      streamKey: STREAM_KEY, nodes: wf.nodes, edges: wf.edges, ctx: wf.ctx,
+      pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 }),
+    });
+
+    // P1 建稿:路径被换成 .upload 下的硬链接,stem = 分P标题
+    const uploadArg = t.uploadPlain.mock.calls[0]![0] as { video?: string };
+    expect(uploadArg.video).toBe(join(t.stageSub, ".upload", "主播名_P1.mp4"));
+    // 规范产物名没被动过(幂等/清理依赖它)
+    expect(existsSync(t.products.plain)).toBe(true);
+
+    // P2/P3 append:同样按分P标题改名
+    const danmuAppend = t.appendGroup.mock.calls.find((c) => (c[0] as { files: string[] }).files.some((f) => f.includes("P2")));
+    const livechatAppend = t.appendGroup.mock.calls.find((c) => (c[0] as { files: string[] }).files.some((f) => f.includes("P3")));
+    expect(danmuAppend).toBeDefined();
+    expect(livechatAppend).toBeDefined();
+    t.ledger.close();
+  });
+
+  it("不配 partTitles → 上传路径就是规范产物名(历史行为不变)", async () => {
+    const t = makeDeps();
+    const wf = build(t);
+    await runWorkflowNodes({
+      streamKey: STREAM_KEY, nodes: wf.nodes, edges: wf.edges, ctx: wf.ctx,
+      pool: new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 }),
+    });
+    const uploadArg = t.uploadPlain.mock.calls[0]![0] as { video?: string };
+    expect(uploadArg.video).toBe(t.products.plain); // 原路径,无 .upload 别名
+    expect(existsSync(join(t.stageSub, ".upload"))).toBe(false);
     t.ledger.close();
   });
 });

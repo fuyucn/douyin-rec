@@ -14,14 +14,15 @@ interface GapInterval { startMs: number; endMs: number }
  * 旧格式回落:`{base}.meta.json`(身份)+ `{base}.gaps.json`(缺口)—— 兼容历史录像。
  * 全缺失/损坏 → totalGapSec=0、roomSlug/platform=undefined。
  */
-function readSession(dir: string, base: string): { roomSlug?: string; platform?: string; totalGapSec: number } {
+function readSession(dir: string, base: string): { roomSlug?: string; platform?: string; totalGapSec: number; title?: string } {
   try {
     const d = JSON.parse(readFileSync(join(dir, `${base}.session.json`), "utf-8")) as
-      { roomSlug?: string; platform?: string; totalGapSec?: number; gaps?: GapInterval[] };
+      { roomSlug?: string; platform?: string; totalGapSec?: number; gaps?: GapInterval[]; title?: string };
     return {
       roomSlug: d.roomSlug || undefined,
       platform: d.platform || undefined,
       totalGapSec: d.totalGapSec ?? (d.gaps ? totalGapSecOf(d.gaps) : 0),
+      title: d.title || undefined,
     };
   } catch { /* 无 session.json → 回落旧 meta+gaps */ }
   let roomSlug: string | undefined, platform: string | undefined;
@@ -84,6 +85,7 @@ export async function scanRecordings(
         startMs: startMs === Infinity ? 0 : startMs,
         endMs,
         totalGapSec: sess.totalGapSec,
+        title: sess.title,
       });
     }
   }

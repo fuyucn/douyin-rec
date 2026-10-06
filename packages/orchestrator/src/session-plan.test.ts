@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deriveSegmentPlan, deriveStageProducts, segmentStem, sessionBaseOfFile, sessionBasesOfFiles } from "./session-plan.js";
+import { deriveSegmentPlan, deriveStageProducts, prepareUploadAlias, segmentStem, sessionBaseOfFile, sessionBasesOfFiles, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 
 describe("sessionBaseOfFile", () => {
   it("ts/flv/xml/mp4 与 PART 分段归一到同一会话 base", () => {
@@ -155,5 +155,48 @@ describe("segmentStem / deriveSegmentPlan（分段上传）", () => {
     const plan = deriveSegmentPlan(dir)!;
     expect(plan.parts).toHaveLength(1);
     expect(plan.parts[0].plain).toBe(join(dir, `${name}_000.mp4`));
+  });
+});
+
+describe("prepareUploadAlias(分P标题 → 文件名)", () => {
+  it("建硬链接到 .upload/<标题>.mp4,原文件不动(同步数,零拷贝)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-"));
+    const canonical = join(dir, "主播_2026-09-12_x.mp4");
+    writeFileSync(canonical, "video-bytes");
+    const out = prepareUploadAlias(dir, "plain", canonical, "主播_P1");
+    expect(out).toBe(join(dir, UPLOAD_ALIAS_DIR, "主播_P1.mp4"));
+    expect(existsSync(out)).toBe(true);
+    expect(readdirSync(dir)).toContain("主播_2026-09-12_x.mp4"); // 规范名不动
+    // 硬链接:同 inode → 不额外占盘(内容相同即证明)
+    expect(statSync(out).ino).toBe(statSync(canonical).ino);
+  });
+
+  it("desiredTitle 为空/清洗后为空 → 返回 canonical(不改名)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-"));
+    const canonical = join(dir, "a.mp4");
+    writeFileSync(canonical, "x");
+    expect(prepareUploadAlias(dir, "plain", canonical, null)).toBe(canonical);
+    expect(prepareUploadAlias(dir, "plain", canonical, "")).toBe(canonical);
+    expect(prepareUploadAlias(dir, "plain", canonical, "!!!")).toBe(canonical);
+    expect(existsSync(join(dir, UPLOAD_ALIAS_DIR))).toBe(false); // 没建任何目录
+  });
+
+  it("重复调用(续跑)覆盖旧别名,不报错", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-"));
+    const canonical = join(dir, "a.mp4");
+    writeFileSync(canonical, "x");
+    const first = prepareUploadAlias(dir, "plain", canonical, "标题P1");
+    const second = prepareUploadAlias(dir, "plain", canonical, "标题P1");
+    expect(second).toBe(first);
+    expect(existsSync(second)).toBe(true);
+  });
+
+  it("标题含非法文件名字符 → 清洗后落盘", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-"));
+    const canonical = join(dir, "a.mp4");
+    writeFileSync(canonical, "x");
+    const out = prepareUploadAlias(dir, "plain", canonical, "主播/第1场:part");
+    expect(existsSync(out)).toBe(true);
+    expect(out).toContain("主播-第1场-part");
   });
 });

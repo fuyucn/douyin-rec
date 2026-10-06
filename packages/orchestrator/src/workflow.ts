@@ -6,6 +6,7 @@ import { humanBytes } from "./format.js";
 import { isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
+import { prepareUploadAlias } from "./session-plan.js";
 
 export { deriveStageProducts, withOutputStem, type StageProducts } from "./session-plan.js";
 
@@ -220,9 +221,10 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
       resource: "upload",
       run: async (c: NodeRunContext): Promise<void> => {
         const bv = await deps.uploadPlain({
-          video: products.plain,
+          video: prepareUploadAlias(stageSub, "plain", products.plain, products.partTitles?.plain),
           cookies: cfg.cookies,
-          title: products.dateName,
+          // 投稿标题用宽松渲染(含空格/标点);stage 文件名 stem 仍是严格的 dateName。
+          title: products.uploadTitle ?? products.dateName,
           tag: cfg.uploadMeta.tag,
           tid: cfg.uploadMeta.tid,
           public: isPublic,
@@ -246,7 +248,11 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
       outputs: [{ name: "p2", kind: "ref", required: true }],
       resource: "upload",
       run: async (c: NodeRunContext): Promise<void> => {
-        await runAppendGroup(c, "append_danmu", products.danmuMp4, "p2");
+        await runAppendGroup(
+          c, "append_danmu",
+          prepareUploadAlias(stageSub, "danmu", products.danmuMp4, products.partTitles?.danmu),
+          "p2",
+        );
       },
     },
     {
@@ -260,7 +266,11 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
       outputs: [{ name: "p3", kind: "ref", required: true }],
       resource: "upload",
       run: async (c: NodeRunContext): Promise<void> => {
-        await runAppendGroup(c, "append_livechat", products.livechatMp4, "p3");
+        await runAppendGroup(
+          c, "append_livechat",
+          prepareUploadAlias(stageSub, "livechat", products.livechatMp4, products.partTitles?.livechat),
+          "p3",
+        );
       },
     },
   ];

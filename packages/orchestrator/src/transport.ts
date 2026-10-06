@@ -13,6 +13,8 @@ export interface NodeRecording {
   startMs: number;           // 首段开录 epoch ms
   endMs: number;             // 末段收录 epoch ms
   totalGapSec: number;       // 断流缺口总秒数(来自 gaps sidecar)
+  /** 本场直播标题(来自 `{base}.session.json`);无则 undefined。 */
+  title?: string;
 }
 export interface NodeInventory { workerId: string; recordings: NodeRecording[]; }
 

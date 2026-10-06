@@ -14,8 +14,8 @@ import { planSegmentGroups } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
 import { retry } from "./retry.js";
-import { segmentStem, segWorkPath, type SegmentPlan } from "./session-plan.js";
 import { defaultRmStage, defaultSplitForUpload, readdirSyncSafe, videoOnly, xmlKeepRule, type PipelineDeps } from "./pipeline.js";
+import { prepareUploadAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
 
 /** 默认单段 remux(ts/flv → mp4,无损,-c copy + 时基钉 90000)。 */
 const defaultRemuxSegment = (src: string, out: string): Promise<void> =>
@@ -96,8 +96,22 @@ export async function runSegmentPipeline(o: {
   winnerMembers: Broadcast["members"];
   allMembers: Broadcast["members"];
   dateName: string;
+  /** B 站投稿标题(宽松渲染);缺省 = dateName。 */
+  uploadTitle?: string;
+  /**
+   * 分P标题渲染器(可选):给定分P类型与「第几个/共几个」返回标题;返回 null = 不改名。
+   * 分段模式下每类分P有 N 个,所以用回调而非固定字符串。
+   */
+  renderPartTitle?: (kind: "plain" | "danmu" | "livechat", partIndex: number, partTotal: number) => string | null;
 }): Promise<{ state: JobState; bv?: string }> {
   const { streamKey, deps, jlog, stageSub, winnerMembers, allMembers, dateName } = o;
+  const uploadTitle = o.uploadTitle ?? dateName;
+  const renderPartTitle = o.renderPartTitle;
+  /** 按分P标题建上传别名(硬链接);未配置渲染器/返回 null → 原名。 */
+  const aliasFor = (kind: "plain" | "danmu" | "livechat", canonical: string, idx: number, total: number): string => {
+    const title = renderPartTitle?.(kind, idx, total) ?? null;
+    return prepareUploadAlias(stageSub, `${kind}-${idx}`, canonical, title);
+  };
   const { ledger, notify, cfg } = deps;
   const burnDanmu = cfg.steps?.burnDanmu !== false;
   const burnLivechat = cfg.steps?.burnLivechat !== false;
@@ -295,16 +309,22 @@ export async function runSegmentPipeline(o: {
   };
   // 分 P checkpoint:每个已成功提交的段都落库(组名 "plain"),续跑据此精确跳过 → 不漏段、不重复。
   const donePlain = ledger.doneParts(streamKey, "plain");
+  // 分P总数(用于 {parts}):plain 各段 + 各开启的烧录类各段。
+  const totalParts = plainFiles.length
+    + (burnDanmu ? uploadParts.filter((p) => p.danmu).length : 0)
+    + (burnLivechat ? uploadParts.filter((p) => p.livechat).length : 0);
   let bv = "";
   let p1Done = donePlain.has(0) || ledger.get(streamKey)?.bv != null;
   if (!p1Done) {
     jlog(`建稿 P1: ${path.basename(plainFiles[0])}(${plainFiles.length} 个 plain 段待传)`);
+    // 分P标题(可选):P1 是整稿第一个分P → partIndex=1,总数=plain+danmu+livechat 全部段数。
+    const p1Path = aliasFor("plain", plainFiles[0], 1, totalParts);
     // P1 建稿:可用 `uploadPlain` 建稿接缝(有线路换线),也可注入 `uploadPlainRaw`(测试用)。
     // 601 频率限制 → 重试(队列会先冷却);其余错误不重试(避免重复建稿)。
     bv = await retry(
       () => runUpload(deps, () => deps.uploadPlainRaw
-        ? deps.uploadPlainRaw({ ...plainOpts, video: plainFiles[0], title: dateName })
-        : deps.uploadPlain({ ...plainOpts, video: plainFiles[0], title: dateName })),
+        ? deps.uploadPlainRaw({ ...plainOpts, video: p1Path, title: uploadTitle })
+        : deps.uploadPlain({ ...plainOpts, video: p1Path, title: uploadTitle })),
       { tries: 3, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) },
     );
     ledger.setBv(streamKey, bv); // 建稿成功即刻落库(与合并路径同一幂等边界)
@@ -325,7 +345,8 @@ export async function runSegmentPipeline(o: {
     const idxs: number[] = [];
     for (let j = i; j < Math.min(i + batchSize, plainFiles.length); j++) {
       if (donePlain.has(j)) continue; // 续跑:已提交的段跳过
-      batch.push(plainFiles[j]); idxs.push(j);
+      // B 站分P序号从 1 起;plain 组内第 j 段 = 整稿第 j+1 个分P。
+      batch.push(aliasFor("plain", plainFiles[j], j + 1, totalParts)); idxs.push(j);
     }
     if (batch.length === 0) continue;
     jlog(`append plain 段 ${idxs.join(",")}: ${batch.length} 文件`);
@@ -340,8 +361,14 @@ export async function runSegmentPipeline(o: {
   ledger.syncNodeState(streamKey, "upload_plain", "done", { error: null });
 
   // ── 逐组 append:danmu 各段一组、livechat 各段一组(组内多段一次 append,顺序 = 段序)──
-  await appendSegmentGroup(streamKey, bv, "append_danmu", uploadParts.map((p) => p.danmu).filter((f): f is string => !!f && existsSync(f)), burnDanmu, deps, jlog, isPublic, splitForUpload);
-  await appendSegmentGroup(streamKey, bv, "append_livechat", uploadParts.map((p) => p.livechat).filter((f): f is string => !!f && existsSync(f)), burnLivechat, deps, jlog, isPublic, splitForUpload);
+  // 分P标题按「整稿分P序号」渲染:plain 占 1..N,danmu 接着 N+1..,livechat 再接着。
+  const plainCount = plainFiles.length;
+  const danmuFiles = uploadParts.map((p) => p.danmu).filter((f): f is string => !!f && existsSync(f));
+  const livechatFiles = uploadParts.map((p) => p.livechat).filter((f): f is string => !!f && existsSync(f));
+  const danmuPaths = danmuFiles.map((f, i) => aliasFor("danmu", f, plainCount + i + 1, totalParts));
+  const livechatPaths = livechatFiles.map((f, i) => aliasFor("livechat", f, plainCount + danmuFiles.length + i + 1, totalParts));
+  await appendSegmentGroup(streamKey, bv, "append_danmu", danmuPaths, burnDanmu, deps, jlog, isPublic, splitForUpload);
+  await appendSegmentGroup(streamKey, bv, "append_livechat", livechatPaths, burnLivechat, deps, jlog, isPublic, splitForUpload);
 
   ledger.markDone(streamKey, bv);
   notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
@@ -375,6 +402,9 @@ export async function runSegmentPipeline(o: {
       ...uploadParts.flatMap((p) => [p.plain, p.danmu, p.livechat].filter(Boolean) as string[]),
       ...(groupTargetSec > 0 ? uploadParts.flatMap((p) => p.memberPlains) : []),
     ]).filter(existsSync);
+    // 分P标题别名目录(硬链接)一并清掉,否则随 stage 长期残留。
+    const aliasDir = path.join(stageSub, UPLOAD_ALIAS_DIR);
+    if (existsSync(aliasDir)) products.push(aliasDir);
     if (xmlKeepRule("stage", true)) {
       products.push(...readdirSyncSafe(stageSub).filter((f) => /\.(xml|ass)$/i.test(f)).map((f) => path.join(stageSub, f)));
     }

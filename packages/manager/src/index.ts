@@ -29,6 +29,8 @@ export class RecordingSession {
   /** Session-level danmu xml path currently open (DLR mode). Null = none open. */
   private currentXmlPath: string | null = null;
   private anchor = "";
+  /** 本场直播标题(主播当场设的);落进 session sidecar,供 hub 后处理渲染 `{title}`。 */
+  private liveTitle = "";
   /** Set to true once stop() is called by the user — suppresses reconnect. */
   private userStopped = false;
   /** Guards against overlapping reconnect attempts. */
@@ -113,6 +115,8 @@ export class RecordingSession {
     this.opts = opts;
     this.streamInfo = info;
     this.anchor = info.anchorName;
+    // 直播标题也进 sidecar:hub 后处理在录制进程退出后才跑,内存里的值那时已失效。
+    this.liveTitle = (info.title ?? "").trim();
     this.userStopped = false;
 
     mkdirSync(opts.outDir, { recursive: true });
@@ -319,6 +323,7 @@ export class RecordingSession {
       roomSlug: plat.extractRoomSlug(this.roomUrl),
       platform: plat.id,
     };
+    if (this.liveTitle) data.title = this.liveTitle;
     if (withGaps) {
       data.gaps = this.gaps;
       data.totalGapSec = Math.round(this.gaps.reduce((s, g) => s + (g.endMs - g.startMs), 0) / 1000);

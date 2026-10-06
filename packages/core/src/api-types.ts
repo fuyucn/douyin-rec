@@ -39,9 +39,19 @@ export interface HubPipelineConfig {
   /**
    * 上传:`mode` = stage(只合成不传)/ upload(传 B站);缺省 stage。
    * `private` 仅 mode=upload 时有意义:true(默认)= 仅自己可见,false = 公开。tag/tid/desc 为该稿 metadata。
-   * `titleTemplate` 同时用于 B 站标题和 stage 产物 stem;空 = `{name}_{date}`。
+   * 三者相互独立,**都空着就是现在(历史)的行为**:
+   *   1. `titleTemplate`  —— **文件名规则**(stage 产物 stem)。空 = `{name}_{date}`。
+   *   2. `submissionTitleTemplate` —— **B 站稿件标题**(整稿的总标题)。空 = 回落 1。
+   *   3. `partTitleTemplate` —— **分 P 的视频标题**(P1/P2/P3 各自)。空 = 回落 1(即用文件名当分P名)。
+   * 2 与 3 走宽松渲染(B 站标题允许空格/标点/emoji);1 必须是合法文件名。
+   * 3 额外可用 `{part}`(序号)/`{parts}`(总数)/`{kind}`(plain/danmu/livechat)。
    */
-  upload?: { mode?: "stage" | "upload"; private?: boolean; tag?: string; tid?: number; desc?: string; titleTemplate?: string };
+  upload?: {
+    mode?: "stage" | "upload"; private?: boolean; tag?: string; tid?: number; desc?: string;
+    titleTemplate?: string;
+    submissionTitleTemplate?: string;
+    partTitleTemplate?: string;
+  };
 }
 
 /** hub 规则里「录制下发」的配置:绑定 master 本地 task,自动同步到选中的 worker 节点。 */
