@@ -409,7 +409,11 @@ async function dispatch(
         return all.length > 0 ? all : undefined;
       };
       const search = q.get("q")?.trim() || undefined;
-      return api.hubQueue({ phase: multi("phase"), states: multi("states"), platform: multi("platform"), q: search });
+      const sortParam = q.get("sort");
+      return api.hubQueue({
+        phase: multi("phase"), states: multi("states"), platform: multi("platform"), q: search,
+        sort: sortParam === "oldest" ? "oldest" : "newest",
+      });
     }
     case "retryHubNode": {
       const body = (await readJson(req)) as { node?: string; force?: boolean };

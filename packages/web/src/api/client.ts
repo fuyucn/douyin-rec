@@ -130,16 +130,17 @@ export const api = {
   },
   /**
    * 处理队列视图:进行中(做了什么/正在做什么/下面做什么)+ 最近完成 + 资源池占用。
-   * 排序固定为真实 FIFO(入队时刻升序)。phase/states/platform 传数组(逗号亦可),q 为子串。
+   * 排序:sort=newest(缺省,入队时间倒序=最新在前)| oldest(升序=FIFO 谁等最久谁在前)。
    */
   getHubQueue: (
-    opts: { phase?: string[]; states?: string[]; platform?: string[]; q?: string } = {},
+    opts: { phase?: string[]; states?: string[]; platform?: string[]; q?: string; sort?: "newest" | "oldest" } = {},
   ): Promise<HubQueueDTO> => {
     const q = new URLSearchParams();
     if (opts.phase?.length) q.set("phase", opts.phase.join(","));
     if (opts.states?.length) q.set("states", opts.states.join(","));
     if (opts.platform?.length) q.set("platform", opts.platform.join(","));
     if (opts.q) q.set("q", opts.q);
+    if (opts.sort) q.set("sort", opts.sort);
     const qs = q.toString();
     return request("GET", `/api/hub/queue${qs ? "?" + qs : ""}`);
   },

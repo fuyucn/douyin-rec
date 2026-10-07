@@ -363,7 +363,7 @@ export interface Api {
    * + 最近完成 + 资源池占用。phase/platform 可重复传(逗号分隔亦可);q = 主播名/房间号/streamKey 子串。
    * 排序固定为真实 FIFO(入队时刻升序);筛选在服务端做,前端拿到即所见。
    */
-  hubQueue(opts?: { phase?: string[]; states?: string[]; platform?: string[]; q?: string }): ApiResult;
+  hubQueue(opts?: { phase?: string[]; states?: string[]; platform?: string[]; q?: string; sort?: "newest" | "oldest" }): ApiResult;
   /** GET /api/hub/jobs/:key/log — 该场 job.log 尾部(key=streamKey,URL-encoded)。 */
   getHubJobLog(streamKey: string): ApiResult;
   /** POST /api/hub/jobs/:key/retry-node { node, force? } — 手动重跑单个 workflow 节点。 */
@@ -1049,7 +1049,7 @@ export function makeApi(deps: ApiDeps): Api {
       if (log == null) return err(404, `该场无 job.log(旧版本产生的任务没有,或 stage 已清理): ${streamKey}`);
       return { status: 200, body: { streamKey, log } };
     },
-    hubQueue(opts: { phase?: string[]; states?: string[]; platform?: string[]; q?: string } = {}): ApiResult {
+    hubQueue(opts: { phase?: string[]; states?: string[]; platform?: string[]; q?: string; sort?: "newest" | "oldest" } = {}): ApiResult {
       if (!deps.syncDbPath) {
         // slave/hub 未开 → 空队列(+ 空资源池),前端显示空态。
         return {
@@ -1094,6 +1094,8 @@ export function makeApi(deps: ApiDeps): Api {
         return { status: 200, body: buildQueueView(deps.syncDbPath, {
           anchorOf, disabledOf, pool: deps.poolSnapshot?.(),
           phase: phaseFilter, states: stateFilter, platform: opts.platform, q: opts.q,
+          // sort 白名单:只认 newest / oldest,其它回落 newest(不静默改变语义)。
+          sort: opts.sort === "oldest" ? "oldest" : "newest",
         }) };
       } catch (e) {
         return err(500, `读 hub 队列失败: ${String((e as Error)?.message ?? e)}`);

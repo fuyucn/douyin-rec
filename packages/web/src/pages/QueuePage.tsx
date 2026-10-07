@@ -6,7 +6,7 @@
  * (来自 master ResourcePool 的 waiting 快照)—— 两者是两个维度:行序=整体先后,位次=某池内先后。
  */
 import {
-  Activity, AlertTriangle, Check, ChevronRight, Cpu, Loader2, Search, UploadCloud, X,
+  Activity, AlertTriangle, Check, ChevronDown, ChevronRight, Cpu, Loader2, Search, UploadCloud, X,
 } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
@@ -223,6 +223,8 @@ export function QueuePage(): ReactNode {
   const [states, setStates] = useState<string[]>([]);
   const [platform, setPlatform] = useState<string[]>([]);
   const [q, setQ] = useState("");
+  // 排序方向:newest(默认,最新入队在前)| oldest(FIFO,等最久的在前)。点表头切换。
+  const [sort, setSort] = useState<"newest" | "oldest">("newest");
   // 输入框每键都触发 → 延迟 250ms 再请求,避免逐字打请求。
   const [debouncedQ, setDebouncedQ] = useState("");
   useEffect(() => {
@@ -231,8 +233,8 @@ export function QueuePage(): ReactNode {
   }, [q]);
 
   const query = useMemo(
-    () => ({ phase, states, platform, q: debouncedQ || undefined }),
-    [phase, states, platform, debouncedQ],
+    () => ({ phase, states, platform, q: debouncedQ || undefined, sort }),
+    [phase, states, platform, debouncedQ, sort],
   );
   // refresh 依赖 query:筛选一变就换新函数,usePolling 内部 ref 立即生效(下次 tick 用新筛选)。
   const refresh = useMemo(
@@ -250,6 +252,7 @@ export function QueuePage(): ReactNode {
   usePolling(() => void refresh(), 3000);
 
   const reset = (): void => { setPhase([]); setStates([]); setPlatform([]); setQ(""); };
+  const onToggleSort = (): void => setSort((v) => (v === "newest" ? "oldest" : "newest"));
   const active = data?.active ?? [];
   const recent = data?.recent ?? [];
   const pool = data?.pool;
@@ -271,7 +274,9 @@ export function QueuePage(): ReactNode {
       <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
         <div>
           <h1 className="headline text-[26px] sm:text-[30px] leading-tight">{t("queue.title")}</h1>
-          <p className="text-muted text-sm mt-1.5">{t("queue.subtitle")}</p>
+          <p className="text-muted text-sm mt-1.5">
+            {sort === "newest" ? t("queue.subtitle") : t("queue.subtitleOldest")}
+          </p>
         </div>
       </div>
 
@@ -296,7 +301,21 @@ export function QueuePage(): ReactNode {
                     <th>{t("queue.col.room")}</th>
                     <th className="w-44">{t("queue.col.status")}</th>
                     <th>{t("queue.col.flow")}</th>
-                    <th className="w-24">{t("queue.col.enqueued")}</th>
+                    <th className="w-28">
+                      <button
+                        type="button"
+                        onClick={onToggleSort}
+                        className="inline-flex items-center gap-1 cursor-pointer"
+                        style={{ color: "inherit", font: "inherit" }}
+                        title={sort === "newest" ? t("queue.sort.newestTip") : t("queue.sort.oldestTip")}
+                      >
+                        {t("queue.col.enqueued")}
+                        <ChevronDown
+                          className={`w-3 h-3 transition-transform ${sort === "oldest" ? "" : "rotate-180"}`}
+                          style={{ opacity: 0.75 }}
+                        />
+                      </button>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -304,7 +323,7 @@ export function QueuePage(): ReactNode {
                     <tr>
                       <td colSpan={5}>
                         <div className="text-center text-muted-soft text-sm py-10">
-                          {filtered ? t("queue.filter.noMatch") : t("queue.emptyHint")}
+                          {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
                         </div>
                       </td>
                     </tr>

@@ -272,7 +272,10 @@ const DICT = {
       },
     },
     queue: {
-      title: "处理队列", subtitle: "所有直播间的后处理一屏可见,按入队时间先后排序:做了什么 → 正在做什么 → 下面做什么。",
+      title: "处理队列",
+      subtitle: "所有直播间的后处理一屏可见,最新的在最前:做了什么 → 正在做什么 → 下面做什么。",
+      subtitleOldest: "所有直播间的后处理一屏可见,等最久的在最前(先进先出)。",
+      sort: { newestTip: "当前:最新入队在前。点击切换为「等最久在前」", oldestTip: "当前:等最久在前(FIFO)。点击切换为「最新在前」" },
       childDesc: "处理队列只在 master(启用 hub)上可用。本节点为录制节点,后处理由 master 统一编排。",
       empty: "队列空闲", emptyHint: "有直播收播后,后处理会自动出现在这里。",
       nothingDone: "尚未开始", currentUnknown: "准备中", next: "下一步",
@@ -509,7 +512,10 @@ const DICT = {
       },
     },
     queue: {
-      title: "Processing queue", subtitle: "Every room's post-processing in one view, ordered by enqueue time: done → doing → next.",
+      title: "Processing queue",
+      subtitle: "Every room's post-processing in one view, newest first: done → doing → next.",
+      subtitleOldest: "Every room's post-processing in one view, longest-waiting first (FIFO).",
+      sort: { newestTip: "Currently: newest enqueued first. Click for longest-waiting first", oldestTip: "Currently: longest-waiting first (FIFO). Click for newest first" },
       childDesc: "The processing queue is only available on master (hub enabled). This node records; master orchestrates post-processing.",
       empty: "Queue idle", emptyHint: "Post-processing shows up here once a stream ends.",
       nothingDone: "Not started", currentUnknown: "Preparing", next: "Next",

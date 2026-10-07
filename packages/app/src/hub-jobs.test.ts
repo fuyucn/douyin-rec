@@ -278,8 +278,8 @@ describe("buildQueueView", () => {
     expect(q.resource).toBe("cpu");
     const m = active.find((a) => a.streamKey === "douyin:200:2026-07-10")!;
     expect(m.phase).toBe("waiting_manual");
-    // 排序:running/queued 在 waiting_manual 之前
-    expect(active[0].streamKey).toBe("douyin:100:2026-07-10");
+    // 默认 newest:200 入队(now-10s)比 100(now-30s)晚 → 200 排最前
+    expect(active[0].streamKey).toBe("douyin:200:2026-07-10");
   });
 
   it("终态 done 落 recent;active 按 phase 排序", () => {
@@ -375,25 +375,55 @@ describe("buildQueueView", () => {
     expect(b.nextSteps).toContain("append_livechat");
   });
 
-  it("排序:真实 FIFO —— 按入队时刻升序(先入队的排前),与 phase/updatedAt 无关", () => {
+  it("排序:默认 newest —— 入队时间倒序(最新在前),与 updatedAt 无关", () => {
     const { dbPath, db } = makeSyncDb();
-    const stage = mkdtempSync(join(tmpdir(), "queue-fifo-"));
+    const stage = mkdtempSync(join(tmpdir(), "queue-sort-"));
     const base = T0 + 10_000_000;
-    // C 先入队(最早)但 updatedAt 最新;A 最后入队但 updatedAt 最旧。
-    // 若仍按 updatedAt 或 phase 排序就会错;FIFO 必须 C → B → A。
-    seedJob(db, "douyin:C:2026-10-06", [["merging", base + 10]], 100);
+    // C 最早入队但 updatedAt 最新;A 最后入队但 updatedAt 最旧 —— updatedAt 排序会把顺序反过来。
+    seedJob(db, "douyin:C:2026-10-06", [["merging", base + 1_000]], 100);
     seedJob(db, "douyin:B:2026-10-06", [["pending", base + 5_000]], 100);
     seedJob(db, "douyin:A:2026-10-06", [["pending", base + 9_000]], 100);
     db.prepare("UPDATE sync_jobs SET updatedAt=? WHERE streamKey=?").run(base + 99_000, "douyin:C:2026-10-06");
     db.prepare("UPDATE sync_jobs SET updatedAt=? WHERE streamKey=?").run(base + 1, "douyin:A:2026-10-06");
     db.close();
 
-    const { active } = buildQueueView(dbPath, { now: base + 200_000, stageDir: stage, pool: POOL_EMPTY });
+    // 缺省 = newest:最后入队的 A 排最前
+    const dflt = buildQueueView(dbPath, { now: base + 200_000, stageDir: stage, pool: POOL_EMPTY });
+    expect(dflt.active.map((a) => a.streamKey)).toEqual([
+      "douyin:A:2026-10-06", "douyin:B:2026-10-06", "douyin:C:2026-10-06",
+    ]);
+    expect(dflt.active[0].enqueuedAt).toBe(base + 9_000);
+  });
+
+  it("排序:sort=oldest 切到 FIFO(等最久的最前)", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-sort2-"));
+    const base = T0 + 10_000_000;
+    seedJob(db, "douyin:C:2026-10-06", [["merging", base + 1_000]], 100);
+    seedJob(db, "douyin:B:2026-10-06", [["pending", base + 5_000]], 100);
+    seedJob(db, "douyin:A:2026-10-06", [["pending", base + 9_000]], 100);
+    db.close();
+
+    const { active } = buildQueueView(dbPath, { now: base + 200_000, stageDir: stage, pool: POOL_EMPTY, sort: "oldest" });
     expect(active.map((a) => a.streamKey)).toEqual([
       "douyin:C:2026-10-06", "douyin:B:2026-10-06", "douyin:A:2026-10-06",
     ]);
-    // seedJob 不插 pending 事件,首个事件即入队时刻 → C 的入队时刻就是它的首个事件 base+10。
-    expect(active[0].enqueuedAt).toBe(base + 10);
+  });
+
+  it("排序:入队时间缺失(极老 run)回落 updatedAt,不排到最前", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-sort3-"));
+    const now = T0 + 10_000_000;
+    // 无 events 行 → startedAt/enqueuedAt = null(旧库缺表或没事件)。
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,fails,updatedAt) VALUES(?,?,?,?,0,?)")
+      .run("douyin:OLD:2026-10-06", "pending", "local", null, now - 50_000);
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,fails,updatedAt) VALUES(?,?,?,?,0,?)")
+      .run("douyin:NEW:2026-10-06", "pending", "local", null, now - 1_000);
+    db.close();
+    const { active } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
+    expect(active[0].enqueuedAt).toBeNull();
+    // NEW(updatedAt 更新)应排前 —— 缺失回落 updatedAt 后倒序
+    expect(active[0].streamKey).toBe("douyin:NEW:2026-10-06");
   });
 
   it("筛选:phase / states / platform / q 各自生效,可叠加", () => {
@@ -408,13 +438,14 @@ describe("buildQueueView", () => {
     const view = (o: Parameters<typeof buildQueueView>[1]): string[] =>
       buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY, ...o }).active.map((a) => a.streamKey);
 
-    expect(view({ phase: ["running"] })).toEqual(["douyin:100:2026-10-06", "douyin:300:2026-10-06"]);
-    expect(view({ phase: ["waiting_settle"] })).toEqual(["douyin:200:2026-10-06", "bilibili:400:2026-10-06"]);
+    // 默认 newest:入队越晚越靠前(400 最后入队 → 第 1)
+    expect(view({ phase: ["running"] })).toEqual(["douyin:300:2026-10-06", "douyin:100:2026-10-06"]);
+    expect(view({ phase: ["waiting_settle"] })).toEqual(["bilibili:400:2026-10-06", "douyin:200:2026-10-06"]);
     expect(view({ states: ["syncing"] })).toEqual(["douyin:300:2026-10-06"]);
     expect(view({ platform: ["bilibili"] })).toEqual(["bilibili:400:2026-10-06"]);
     expect(view({ q: "300" })).toEqual(["douyin:300:2026-10-06"]);
     expect(view({ phase: ["running"], platform: ["douyin"] })).toEqual([
-      "douyin:100:2026-10-06", "douyin:300:2026-10-06",
+      "douyin:300:2026-10-06", "douyin:100:2026-10-06",
     ]);
     expect(view({ phase: ["queued"], platform: ["bilibili"] })).toEqual([]);
   });

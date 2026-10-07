@@ -343,6 +343,13 @@ export interface BuildQueueOpts {
   /** 按主播名 / 房间号 / streamKey 子串过滤(大小写不敏感;不传 = 全部)。 */
   q?: string;
   /**
+   * 排序方向(仅作用于 active):
+   * - `newest`(缺省):入队时间**倒序** —— 刚进队列的排最前,像日志一样看「最新动态」。
+   * - `oldest`:入队时间**升序** —— 真正的 FIFO 视角,谁等最久谁排最前。
+   * 两种方向都必须**确定性**(同刻用 streamKey 兜底),否则前端每次轮询顺序会跳动。
+   */
+  sort?: "newest" | "oldest";
+  /**
    * 「待人工」最多列几条(默认 20)。needs_manual 是终态、却要留在进行中列表;
    * stage 模式的正常收口也是它(pipeline.ts:480)→ 长期 master 会堆积,必须 cap 否则淹没进行中区。
    */
@@ -443,13 +450,15 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     });
   }
 
-  // 排序:**真实 FIFO 队列** —— 按入队时刻(enqueuedAt)升序,谁先进队列谁排前。
-  // 不再按 phase 分组:用户要的是「排队顺序」,不是「状态分类」。入队时间缺失(极老 run)→ 回落
-  // updatedAt;完全同刻 → streamKey 字典序兜底,保证多次轮询间顺序稳定不跳动。
+  // 排序:按入队时刻。默认 `newest`(倒序,刚进队列的排最前 —— 看「最新动态」最直观);
+  // `oldest` 才是 FIFO 视角(谁等最久谁排最前)。两者都按入队时间,**不再按 phase 分组**
+  // (用户要的是队列顺序,不是状态分类)。入队时间缺失(极老 run)→ 回落 updatedAt;
+  // 完全同刻 → streamKey 字典序兜底,保证多次轮询间顺序稳定不跳动。
+  const dir = opts.sort === "oldest" ? 1 : -1;
   active.sort((a, b) => {
     const ea = a.enqueuedAt ?? a.updatedAt;
     const eb = b.enqueuedAt ?? b.updatedAt;
-    if (ea !== eb) return ea - eb;
+    if (ea !== eb) return (ea - eb) * dir;
     return a.streamKey < b.streamKey ? -1 : a.streamKey > b.streamKey ? 1 : 0;
   });
   recent.sort((a, b) => b.updatedAt - a.updatedAt);
