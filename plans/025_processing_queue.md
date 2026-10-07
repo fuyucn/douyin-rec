@@ -162,3 +162,33 @@ HubPage / RoomDetail / WorkersPanel 各自 3s 轮询同批端点。队列页新�
   删除、`hub-jobs.ts` 的 re-export 删除。
 - `HUB_FLOW_EDGES` 里 `append_danmu→append_livechat` 在 `buildWorkflow` 中是**条件边**
   (仅 upload+burnDanmu),注释已标注差异来源。
+
+## 追加:真实 FIFO 排序 + datatable 筛选(2026-10-07)
+
+用户反馈:队列要按**实际队列时间**排序,并像 datatable 一样能 filter。
+
+### 排序
+原按 `phase` 分组(running → queued → waiting_settle → waiting_manual),组内 `updatedAt` 倒序。
+问题:这不是真实队列顺序 —— 用户要的是「谁先进队列谁排前」。
+
+改为 **FIFO**:`QueueItemDTO` 新增 `enqueuedAt`(= 该场首个事件 `pending` 的时刻,取 `startedAt`),
+`buildQueueView` 按 `enqueuedAt` **升序**;缺失(极老 run 无事件表)回落 `updatedAt`;完全同刻用
+`streamKey` 字典序兜底,保证多次轮询顺序稳定不跳动。
+
+> 实测证明:构造 `updatedAt` 与入队序**完全相反**的数据(3400000→3100000),
+> 返回仍按 `enqueuedAt` 升序 —— 旧的 updatedAt 排序会得到相反结果,回归测试已锁死。
+
+### 筛选(datatable)
+- `GET /api/hub/queue?phase=&states=&platform=&q=`(均可重复或逗号分隔)。
+- **服务端筛选**:phase/states/platform/q 在 `buildQueueView` 里过滤,前端拿到即所见
+  (不必全量回前端再筛)。phase/states 走**契约白名单**(`QUEUE_PHASES` / `HUB_JOB_STATES`),
+  非法值被丢弃 → 不过滤,防前端拼错静默返回空。
+- 「拉取中」是**前端派生相**(`state=syncing` 且不占资源闸门),不在 `QUEUE_PHASES` 里,
+  故筛选它用 `states=syncing`。
+- 前端:筛选栏(相位 chip / 平台 chip / 搜索框 250ms 防抖 / 清除)+ `<table class="tasks">` 五列
+  (`#` 行序=入队序,排队行带橙色 `等N` chip=资源队列位次 / 直播间·场次 / 状态 / 做了什么→正在做→下面做 /
+  入队时间)。复用 TaskList 的 `.table-shell` + `table.tasks` 样式,视觉与既有表格一致。
+
+### 测试(802)
+FIFO 排序、三类筛选各自生效与叠加、`q` 命中主播名(大小写不敏感)。全部反向验证过
+(改回旧排序 → 测试 fail)。
