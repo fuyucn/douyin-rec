@@ -198,3 +198,32 @@ HubPage / RoomDetail / WorkersPanel 各自 3s 轮询同批端点。队列页新�
 ### 测试(802)
 FIFO 排序、三类筛选各自生效与叠加、`q` 命中主播名(大小写不敏感)。全部反向验证过
 (改回旧排序 → 测试 fail)。
+
+## 追加 2:已完成与进行中同表(日志式,2026-10-07)
+
+用户:「finish 的应该在同一个 table 就和日志一样」。
+
+原实现:进行中一张表 + 「最近完成」另一张表(区块式)。改为**一张表连续排列**。
+
+### 后端
+- `QueuePhase` 扩 `done` / `failed`(加入 `QUEUE_PHASES` 白名单,前端可筛)。
+- `QueueItemDTO` 补三个字段供终态行渲染:`bv`(B 站号)、`videoDurationSec`、`finishedAt`(收尾时刻)。
+- `buildQueueView` 抽出 `toRow(job)` —— active 与 finished **共用同一构造**,避免两份字段漂移;
+  终态行的 `nextSteps` 强制 `[]`(已完成的事没有「下面要做」)。
+- **新增 `rows` 字段** = active + finished 合并的单一时间轴(按 sort 方向排好)。
+  `active` / `recent` 保留为兼容字段(RoomDetail 等旧调用方仍用)。
+- **排序键分两段**(关键):finished 行用 `finishedAt`(收尾时刻),进行中用 `enqueuedAt`。
+  否则「今天早上录、刚上传完」的稿会因入队早沉到列表底 —— 用户关心的是「刚刚发生了什么」。
+  > 实测:`NEWLY_UPLOADED` 入队 2h 前但 8s 前才 done → newest 下排第 1 行。
+
+### 前端
+- 单表五列不变;`QueueRow` 按 `finished` 分支渲染:
+  终态行:✓/✗ 图标 + 已完成步骤串 + BV 可点链接,**不显示「正在做/下面做」**
+  (否则会出现「Not started → Preparing」这种对已完成行的误导文案);
+  时间列显示 `finishedAt`(日志视角:刚刚发生的时间)而非入队时间。
+- 筛选栏加 `Done` / `Failed` 两个 chip;表上方加「进行中 N · 已完成 M」摘要。
+- 删掉独立的「最近完成」区块(及其 4 列表格)。
+
+### 测试(806)
+`rows` 含完成行且字段正确(bv/finishedAt/nextSteps 空/currentStepSec null)、
+完成行按 finishedAt 排最前、`phase=done`/`failed` 各自筛选与叠加。
