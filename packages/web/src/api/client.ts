@@ -120,11 +120,12 @@ export const api = {
 
   // ── hub 任务(运行态:step/进度/ETA/日志)──────────────────────────────────────
   // room 给定=只列该房间的历次 run(独立历史页);省略=全房间最近 N(规则行取最近一条)。
-  listHubJobs: (opts: { room?: string; limit?: number; offset?: number } = {}): Promise<HubJobsDTO> => {
+  listHubJobs: (opts: { room?: string; limit?: number; offset?: number; states?: string[] } = {}): Promise<HubJobsDTO> => {
     const q = new URLSearchParams();
     if (opts.room) q.set("room", opts.room);
     if (opts.limit != null) q.set("limit", String(opts.limit));
     if (opts.offset != null) q.set("offset", String(opts.offset));
+    if (opts.states?.length) q.set("states", opts.states.join(","));
     const qs = q.toString();
     return request("GET", `/api/hub/jobs${qs ? "?" + qs : ""}`);
   },
@@ -132,6 +133,9 @@ export const api = {
    * 处理队列视图:进行中(做了什么/正在做什么/下面做什么)+ 最近完成 + 资源池占用。
    * 排序:sort=newest(缺省,入队时间倒序=最新在前)| oldest(升序=FIFO 谁等最久谁在前)。
    */
+  /** 每个房间最新一条 run(房间列表徽标用;不受分页影响)。 */
+  getLatestRuns: (): Promise<{ rooms: Array<{ roomKey: string; streamKey: string; state: string; bv: string | null; updatedAt: number }> }> =>
+    request("GET", "/api/hub/latest-runs"),
   getHubQueue: (
     opts: { phase?: string[]; states?: string[]; platform?: string[]; q?: string; sort?: "newest" | "oldest" } = {},
   ): Promise<HubQueueDTO> => {

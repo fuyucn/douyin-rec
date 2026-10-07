@@ -125,7 +125,7 @@ function FilterBar({
       {/* 状态组(带标签,与平台组区分) */}
       <span className="text-[11px] text-muted-soft mr-0.5">{t("queue.filter.byStatus")}</span>
       {phaseChips.map((c) => (
-        <button key={c.key} onClick={c.toggle} aria-pressed={c.on} className="chip" style={chipStyle(c.on)}>
+        <button key={c.key} type="button" role="button" onClick={c.toggle} aria-pressed={c.on} className="chip" style={chipStyle(c.on)}>
           {c.on && <Check className="w-3 h-3" />}
           {c.label}
         </button>
@@ -135,6 +135,8 @@ function FilterBar({
       {["douyin", "bilibili", "kuaishou"].map((p) => (
         <button
           key={p}
+          type="button"
+          role="button"
           onClick={() => toggle(platform, p, onPlatform)}
           aria-pressed={platform.includes(p)}
           className="chip"
@@ -154,7 +156,7 @@ function FilterBar({
         />
       </div>
       {activeCount > 0 && (
-        <button onClick={onReset} className="chip" style={{ cursor: "pointer" }} title={t("queue.filter.reset")}>
+        <button type="button" role="button" onClick={onReset} className="chip" style={{ cursor: "pointer" }} title={t("queue.filter.reset")}>
           <X className="w-3 h-3" /> {t("queue.filter.clear")} ({activeCount})
         </button>
       )}

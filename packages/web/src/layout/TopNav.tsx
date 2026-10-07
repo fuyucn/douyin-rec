@@ -88,12 +88,13 @@ export function TopNav(): ReactNode {
         </div>
 
         <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-          {/* 登录状态一目了然(操作收进设置 → 账号 tab)。点 pill 也开设置。 */}
+          {/* 登录状态 pill:点它开设置(账号 tab)。title 说清「账号与设置」,避免以为只是状态展示。 */}
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
             className="status-pill"
-            title={t("settings.title")}
+            title={t("settings.accountAndSettings")}
+            aria-label={t("settings.accountAndSettings")}
           >
             <span className="dot" style={{ background: pillColor }} />
             <span>{pillText}</span>

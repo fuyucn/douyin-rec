@@ -4,6 +4,7 @@ import {
   FileText,
   FolderOpen,
   LayoutGrid,
+  Network,
   Pencil,
   Play,
   Plus,
@@ -17,6 +18,7 @@ import { Link } from "react-router-dom";
 import { api, type Task } from "../api/client";
 import { connAtom, serverTimezoneAtom, tasksAtom } from "../atoms";
 import { DanmuBadge, StatusBadge } from "../components/Badge";
+import { stateColor } from "../components/HubJobs";
 import { Button, IconButton } from "../components/Button";
 import { Tooltip } from "../components/Tooltip";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
@@ -183,27 +185,28 @@ export function TaskList(): ReactNode {
           <table className="tasks">
             <thead>
               <tr>
-                <th className="w-12">ID</th>
-                <th>{t("tasks.colName")}</th>
-                <th>{t("tasks.colQuality")}</th>
-                <th>{t("tasks.colDanmu")}</th>
-                <th>{t("tasks.colSchedule")}</th>
-                <th>{t("tasks.colStatus")}</th>
-                <th className="text-right">{t("tasks.colAction")}</th>
+                <th className="hidden sm:table-cell w-10 sm:w-12">ID</th>
+                {/* 名称列给足最小宽度,否则窄屏会被固定宽的 Status/Actions 挤成一字一行。 */}
+                <th className="sm:min-w-[200px]">{t("tasks.colName")}</th>
+                <th className="hidden md:table-cell w-[90px]">{t("tasks.colQuality")}</th>
+                <th className="hidden md:table-cell w-[90px]">{t("tasks.colDanmu")}</th>
+                <th className="hidden lg:table-cell w-[110px]">{t("tasks.colSchedule")}</th>
+                <th className="w-[150px] sm:w-[220px]">{t("tasks.colStatus")}</th>
+                <th className="w-[56px] sm:w-[130px] text-right">{t("tasks.colAction")}</th>
               </tr>
             </thead>
             <tbody>
               {!loaded &&
                 [0, 1, 2].map((i) => (
                   <tr key={i} aria-hidden="true">
-                    <td><span className="skeleton block h-4 w-8" /></td>
+                    <td className="hidden sm:table-cell"><span className="skeleton block h-4 w-8" /></td>
                     <td>
                       <span className="skeleton block h-4 w-40 max-w-full" />
                       <span className="skeleton block h-3 w-28 max-w-full mt-2" />
                     </td>
-                    <td><span className="skeleton block h-4 w-12" /></td>
-                    <td><span className="skeleton block h-4 w-16" /></td>
-                    <td><span className="skeleton block h-4 w-20" /></td>
+                    <td className="hidden md:table-cell"><span className="skeleton block h-4 w-12" /></td>
+                    <td className="hidden md:table-cell"><span className="skeleton block h-4 w-16" /></td>
+                    <td className="hidden lg:table-cell"><span className="skeleton block h-4 w-20" /></td>
                     <td><span className="skeleton block h-4 w-24" /></td>
                     <td>
                       <div className="flex justify-end gap-1.5">
@@ -229,7 +232,7 @@ export function TaskList(): ReactNode {
               {loaded &&
                 tasks.map((task) => (
                   <tr key={task.id}>
-                    <td className="font-mono text-muted-soft">{task.id}</td>
+                    <td className="hidden sm:table-cell font-mono text-muted-soft">{task.id}</td>
                     <td>
                       <Link to={`/task/${task.id}`} className="group block cursor-pointer">
                         {task.name || task.anchorName ? (
@@ -245,6 +248,35 @@ export function TaskList(): ReactNode {
                               )}
                             </div>
                             <div className="font-mono text-xs text-muted mt-0.5 break-all">{roomId(task.room)}</div>
+                            {/* hub 关联:该任务的后处理配了什么 + 上次结果,可点进 hub 房间页。 */}
+                            {task.hubRule && (
+                              <Link
+                                to={`/hub/${encodeURIComponent(task.hubRule.key)}`}
+                                className="inline-flex items-center gap-1.5 mt-1.5 text-[11px] text-muted hover:text-ink"
+                                onClick={(e) => e.stopPropagation()}
+                                title={t("tasks.hubLinked")}
+                              >
+                                <Network className="w-3 h-3 shrink-0" />
+                                <span className="chip !h-5 !text-[10px]">
+                                  {task.hubRule.uploadMode === "upload" ? t("tasks.hubUpload") : t("tasks.hubStage")}
+                                </span>
+                                <span className="font-mono text-muted-soft">{task.hubRule.steps.join(" · ")}</span>
+                                {!task.hubRule.enabled && <span className="text-muted-soft">({t("tasks.hubDisabled")})</span>}
+                                {task.hubRule.lastRun && (
+                                  <span className="font-mono" style={{ color: stateColor(task.hubRule.lastRun.state) }}>
+                                    {task.hubRule.lastRun.bv ?? task.hubRule.lastRun.state}
+                                  </span>
+                                )}
+                              </Link>
+                            )}
+                            {/* 窄屏:Quality/Danmu/Schedule 列已隐藏,这里以紧凑 meta 行补上,信息不丢。 */}
+                            <div className="flex items-center gap-2 flex-wrap mt-1.5 md:hidden">
+                              <span className="chip !h-5 !text-[10px]">{QUALITY_SHORT[task.quality] ?? task.quality}</span>
+                              <DanmuBadge task={task} />
+                              {scheduleText(task) && (
+                                <span className="font-mono text-[11px] text-muted-soft tabular-nums">{scheduleText(task)}</span>
+                              )}
+                            </div>
                           </>
                         ) : (
                           <div className="flex items-center gap-2 flex-wrap">
@@ -260,15 +292,15 @@ export function TaskList(): ReactNode {
                         )}
                       </Link>
                     </td>
-                    <td>
+                    <td className="hidden md:table-cell">
                       <span className="chip">
                         {QUALITY_SHORT[task.quality] ?? task.quality}
                       </span>
                     </td>
-                    <td>
+                    <td className="hidden md:table-cell">
                       <DanmuBadge task={task} />
                     </td>
-                    <td>
+                    <td className="hidden lg:table-cell">
                       {scheduleText(task) ? (
                         <Tooltip
                           content={
@@ -296,6 +328,9 @@ export function TaskList(): ReactNode {
                     </td>
                     <td className="text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1.5 justify-end">
+                        {/* 窄屏(<sm):只留「详情」入口,避免 4 个图标挤爆手机宽度;
+                            完整操作在详情页可用。 */}
+                        <div className="hidden sm:flex items-center gap-1.5">
                         {task.enabled ? (
                           <IconButton
                             title={task.managedBy === "hub" ? t("tasks.managedHint") : t("tasks.titleStop")}
@@ -331,6 +366,12 @@ export function TaskList(): ReactNode {
                             </IconButton>
                           </>
                         )}
+                        </div>
+                        <span className="sm:hidden inline-flex">
+                          <Link className="btn-icon" to={`/task/${task.id}`} title={t("tasks.titleDetail")}>
+                            <FileText className="w-4 h-4" />
+                          </Link>
+                        </span>
                       </div>
                     </td>
                   </tr>

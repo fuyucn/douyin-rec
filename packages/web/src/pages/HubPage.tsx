@@ -1,8 +1,8 @@
-import { Activity, GripVertical, Network, Plus, Radio, Server } from "lucide-react";
+import { Activity, ChevronLeft, GripVertical, Network, Plus, Radio, Server } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAtomValue } from "jotai";
-import { api, type HubRuleDTO, type HubJobDTO, type WorkerDTO, type WorkerStatus } from "../api/client";
+import { api, type HubRuleDTO, type WorkerDTO, type WorkerStatus } from "../api/client";
 import { hubEnabledAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { LatestRunBadge } from "../components/HubJobs";
@@ -15,13 +15,19 @@ import { roomId } from "../lib/labels";
 import { useT } from "../lib/i18n";
 
 /** Hub 管理页(/hub 与 /hub/:key 共用):左房间列表 + 右详情(RoomDetail)。 */
+/** 非终态 run 状态(Active 指标口径;与后端 HubJobState 契约对齐)。 */
+const ACTIVE_STATES = ["pending", "settling", "syncing", "merging", "uploading", "retrying"];
+
 export function HubPage(): ReactNode {
   const t = useT();
   const hubEnabled = useAtomValue(hubEnabledAtom);
   const { key } = useParams<{ key?: string }>();
   const navigate = useNavigate();
   const [rules, setRules] = useState<HubRuleDTO[]>([]);
-  const [jobs, setJobs] = useState<HubJobDTO[]>([]);
+  /** 全部非终态 run 的**数量**(Active 指标;用后端 total 权威计数,不受分页 limit 截断)。 */
+  const [activeRuns, setActiveRuns] = useState(0);
+  /** 每个房间最新一条 run(徽标用;权威来源,不受「最近 N 条」分页影响)。 */
+  const [latestByRoom, setLatestByRoom] = useState<Record<string, { streamKey: string; state: string; bv: string | null; updatedAt: number }>>({});
   const [loaded, setLoaded] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
@@ -36,8 +42,17 @@ export function HubPage(): ReactNode {
     } finally {
       setLoaded(true);
     }
+    // Active 指标必须统计**全部**非终态 run,不能用上面「最近 20 条」的 jobs(数据一多会恒为 0)。
+    // 用 states 精确过滤 + 读后端 total(权威计数,不受 limit 截断)。
     try {
-      setJobs((await api.listHubJobs()).jobs);
+      setActiveRuns((await api.listHubJobs({ states: ACTIVE_STATES, limit: 1 })).total);
+    } catch {
+      /* 忽略 */
+    }
+    // 房间徽标:每房间最新一条 run(单独端点,不受分页影响 —— 否则有历史 run 的房间会误显示「尚无运行」)。
+    try {
+      const { rooms } = await api.getLatestRuns();
+      setLatestByRoom(Object.fromEntries(rooms.map((r) => [r.roomKey, r])));
     } catch {
       /* 忽略 */
     }
@@ -65,10 +80,9 @@ export function HubPage(): ReactNode {
   usePolling(() => void fetchWorkerStatus(), 300_000, hubEnabled === true);
 
   /** 某规则(房间)的历次 run,新→旧:streamKey 前缀 `{platform}:{roomSlug}:` 匹配。 */
-  const runsOf = (r: HubRuleDTO): HubJobDTO[] => {
-    const prefix = `${r.platform}:${r.roomSlug}:`;
-    return jobs.filter((j) => j.streamKey.startsWith(prefix));
-  };
+  /** 房间徽标用的「最新一条 run」:走 latestByRoom(权威端点),而不是 jobs(受最近 N 条分页限制)。 */
+  const latestRunOf = (r: HubRuleDTO): { state: string; currentStepSec?: number | null } | undefined =>
+    latestByRoom[`${r.platform}:${r.roomSlug}`];
 
   const toast = useToast();
   // 房间列表拖拽排序:drop 后整体顺序持久化到 {key}.json,服务端返回权威顺序回显。
@@ -101,7 +115,9 @@ export function HubPage(): ReactNode {
   }
 
   // 选中房间:URL param 命中则用之,否则默认第一个。
-  const selectedKey = key && rules.some((r) => r.key === key) ? key : rules[0]?.key;
+  // explicitKey = URL 真的指定了房间(用于窄屏 master-detail:没选就只看列表)。
+  const explicitKey = key && rules.some((r) => r.key === key) ? key : null;
+  const selectedKey = explicitKey ?? rules[0]?.key;
   const selectedRule = rules.find((r) => r.key === selectedKey) ?? null;
   const selectRoom = (r: HubRuleDTO): void => {
     navigate(`/hub/${encodeURIComponent(r.key)}`);
@@ -113,7 +129,6 @@ export function HubPage(): ReactNode {
   const allOk = statuses.length > 0 && statuses.every((s) => s.ok);
   const pillDot = anyFail ? "var(--error)" : allOk ? "var(--success)" : "var(--muted-soft)";
   const pillTitle = anyFail ? t("hub.workers.statusMixed") : allOk ? t("hub.workers.statusOk") : t("hub.workers.statusChecking");
-  const activeRuns = jobs.filter((j) => !["done", "failed", "needs_manual"].includes(j.state)).length;
 
   return (
     <>
@@ -175,8 +190,8 @@ export function HubPage(): ReactNode {
         </section>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-[288px_1fr] gap-6 items-start">
-          {/* 左:房间列表 */}
-          <aside className="lg:pr-2">
+          {/* 左:房间列表。窄屏(<lg)未选中任何房间时才显示(选中后让位给详情,避免要滚过 14 个房间)。 */}
+          <aside className={`lg:pr-2 ${explicitKey ? "hidden lg:block" : ""}`}>
             <div className="run-list-shell">
               <div className="px-3 py-2.5 border-b border-hairline flex items-center justify-between gap-3">
                 <span className="section-label">{t("hub.page.roomsHeading")}</span>
@@ -215,7 +230,7 @@ export function HubPage(): ReactNode {
                       </div>
                       <div className="flex items-center gap-1.5">
                         <span className="dot" style={{ background: r.enabled ? "var(--success)" : "var(--muted-soft)" }} />
-                        <LatestRunBadge run={runsOf(r)[0]} />
+                        <LatestRunBadge run={latestRunOf(r)} />
                       </div>
                     </button>
                   );
@@ -224,8 +239,17 @@ export function HubPage(): ReactNode {
             </div>
           </aside>
 
-          {/* 右:选中房间详情 */}
-          <section className="min-w-0">
+          {/* 右:选中房间详情。窄屏未选中时隐藏(只显示列表)。 */}
+          <section className={`min-w-0 ${explicitKey ? "" : "hidden lg:block"}`}>
+            {/* 窄屏返回列表入口(宽屏不需要,列表一直在左)。 */}
+            <button
+              type="button"
+              onClick={() => navigate("/hub")}
+              className="lg:hidden inline-flex items-center gap-1.5 text-[13px] text-muted hover:text-ink mb-3 cursor-pointer"
+            >
+              <ChevronLeft className="w-4 h-4" />
+              {t("hub.page.backToList")}
+            </button>
             {selectedRule ? (
               <RoomDetail
                 key={selectedRule.key}

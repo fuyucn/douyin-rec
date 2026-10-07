@@ -51,7 +51,7 @@ import { readBiliupCookieHeader } from "../upload/biliup.js";
 import type { TaskRuntime } from "../task-manager.js";
 import { inWindow, nowMinutesLocal } from "../scheduler.js";
 import type { MergeJobStore } from "../merge-jobs.js";
-import { activeHubJobKeys, buildQueueView, deleteHubJobHistory, listHubJobs, readHubJobLog } from "../hub-jobs.js";
+import { activeHubJobKeys, buildQueueView, deleteHubJobHistory, latestRunPerRoom, listHubJobs, readHubJobLog } from "../hub-jobs.js";
 
 /** Uniform handler result. status = HTTP status, body = JSON-serialisable. */
 export interface ApiResult {
@@ -166,6 +166,14 @@ export interface TaskView extends Task {
   /** true=真正在录视频；false 且 running=true → 进程在跑但「等待开播中」。 */
   recording: boolean;
   recordingWorkers?: RecordingWorkerStatusDTO[];
+  /** hub 规则摘要(仅 master、房间有规则时);列表用它显示 hub 关联并跳转。 */
+  hubRule?: {
+    key: string;
+    enabled: boolean;
+    steps: string[];
+    uploadMode: "stage" | "upload";
+    lastRun: { state: string; bv: string | null } | null;
+  };
 }
 
 /** A single-task view enriched with full live runtime (详情 page). */
@@ -356,8 +364,10 @@ export interface Api {
   deleteHubRule(key: string): ApiResult;
   /** POST /api/hub/rules/reorder { keys } — 按给定顺序整体重排规则列表(拖拽排序持久化)。 */
   reorderHubRules(input: { keys?: string[] }): ApiResult;
-  /** GET /api/hub/jobs[?room=&limit=&offset=] — hub run 列表(状态/时间线/ETA/hasLog + total 分页)。 */
-  listHubJobs(opts?: { room?: string; limit?: number; offset?: number }): ApiResult;
+  /** GET /api/hub/jobs[?room=&limit=&offset=&states=] — hub run 列表(状态/时间线/ETA/hasLog + total 分页)。 */
+  listHubJobs(opts?: { room?: string; limit?: number; offset?: number; states?: string[] }): ApiResult;
+  /** GET /api/hub/latest-runs — 每个房间最新一条 run 摘要(Hub 房间列表徽标用,不受分页影响)。 */
+  latestRuns(): ApiResult;
   /**
    * GET /api/hub/queue[?phase=&platform=&q=] — 处理队列视图:进行中(做了什么/正在做什么/下面做什么)
    * + 最近完成 + 资源池占用。phase/platform 可重复传(逗号分隔亦可);q = 主播名/房间号/streamKey 子串。
@@ -433,9 +443,35 @@ export function makeApi(deps: ApiDeps): Api {
     // 平台/roomSlug 解析含正则匹配,任务列表每 2s 轮询 → 只在 hub 注入回调时解析。
     // 非 master 无 recordingWorkers,保持原行为且不付解析成本。
     let workers: RecordingWorkerStatusDTO[] | undefined;
-    if (deps.recordingWorkers) {
+    let hubRule: TaskView["hubRule"];
+    if (deps.recordingWorkers || deps.hubEnabled) {
       const platform = platformForRoom(t.room);
-      workers = deps.recordingWorkers(platform.id, platform.extractRoomSlug(t.room));
+      const roomSlug = platform.extractRoomSlug(t.room);
+      if (deps.recordingWorkers) workers = deps.recordingWorkers(platform.id, roomSlug);
+      // hub 关联摘要(仅 master):该房间有规则时,把「后处理配了什么 + 上次结果」带给任务列表,
+      // 使列表能一眼看出哪些任务接了 hub、并从列表跳过去。
+      if (deps.hubEnabled) {
+        const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug));
+        if (rule) {
+          const p = rule.pipeline ?? {};
+          const steps = ["plain"];
+          if (p.steps?.burnDanmu !== false) steps.push("danmu");
+          if (p.steps?.burnLivechat !== false) steps.push("livechat");
+          // 最近一次 run 从 hub 台账取(只读;无台账 → null)。列表每 2s 轮询,故这里只查一条。
+          let lastRun: { state: string; bv: string | null } | null = null;
+          if (deps.syncDbPath) {
+            const r = listHubJobs(deps.syncDbPath, { room: rule.key, limit: 1 }).jobs[0];
+            if (r) lastRun = { state: r.state, bv: r.bv };
+          }
+          hubRule = {
+            key: rule.key,
+            enabled: rule.enabled,
+            steps,
+            uploadMode: p.upload?.mode === "upload" ? "upload" : "stage",
+            lastRun,
+          };
+        }
+      }
     }
     return {
       ...t,
@@ -444,6 +480,7 @@ export function makeApi(deps: ApiDeps): Api {
       recording: manager.isRecording(t.id),
       // 空数组不下发:前端 `recordingWorkers?.length` 判定依赖它,发空数组与缺省等价但徒增 payload。
       ...(workers && workers.length > 0 ? { recordingWorkers: workers } : {}),
+      ...(hubRule ? { hubRule } : {}),
     };
   };
   const detailView = (t: Task): TaskDetailView => ({
@@ -1031,13 +1068,18 @@ export function makeApi(deps: ApiDeps): Api {
         return err(400, (e as Error).message);
       }
     },
-    listHubJobs(opts: { room?: string; limit?: number; offset?: number } = {}): ApiResult {
+    listHubJobs(opts: { room?: string; limit?: number; offset?: number; states?: string[] } = {}): ApiResult {
       if (!deps.syncDbPath) return { status: 200, body: { jobs: [], total: 0 } }; // slave/hub 未开 → 空
+      // states 走契约白名单(防任意串;非法值丢弃 → 不过滤)。
+      const states = (opts.states ?? [])
+        .flatMap((x) => x.split(",")).map((x) => x.trim()).filter(Boolean)
+        .filter((st) => (HUB_JOB_STATES as readonly string[]).includes(st));
       try {
         const { jobs, total } = listHubJobs(deps.syncDbPath, {
           room: opts.room,
           limit: opts.limit ?? 20,
           offset: opts.offset ?? 0,
+          states: states.length > 0 ? states : undefined,
         });
         return { status: 200, body: { jobs, total } };
       } catch (e) {
@@ -1048,6 +1090,14 @@ export function makeApi(deps: ApiDeps): Api {
       const log = readHubJobLog(streamKey);
       if (log == null) return err(404, `该场无 job.log(旧版本产生的任务没有,或 stage 已清理): ${streamKey}`);
       return { status: 200, body: { streamKey, log } };
+    },
+    latestRuns(): ApiResult {
+      if (!deps.syncDbPath) return { status: 200, body: { rooms: [] } };
+      try {
+        return { status: 200, body: { rooms: latestRunPerRoom(deps.syncDbPath) } };
+      } catch (e) {
+        return err(500, `读 hub 台账失败: ${String((e as Error)?.message ?? e)}`);
+      }
     },
     hubQueue(opts: { phase?: string[]; states?: string[]; platform?: string[]; q?: string; sort?: "newest" | "oldest" } = {}): ApiResult {
       if (!deps.syncDbPath) {

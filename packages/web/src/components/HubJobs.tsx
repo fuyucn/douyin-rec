@@ -531,7 +531,7 @@ export function JobLogDialog({ logKey, onClose }: { logKey: string | null; onClo
 }
 
 /** 规则行内的「最近一次运行」紧凑徽标(在跑=当前步 spinner;终态=状态)。无 run → 提示。 */
-export function LatestRunBadge({ run }: { run: HubJobDTO | undefined }): ReactNode {
+export function LatestRunBadge({ run }: { run: { state: string; currentStepSec?: number | null } | undefined }): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
   if (!run) return <span className="text-muted-soft text-xs">{t("hub.jobs.noRunYet")}</span>;

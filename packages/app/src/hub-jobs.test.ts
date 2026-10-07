@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { activeHubJobKeys, buildQueueView, deleteHubJobHistory, listHubJobs, readHubJobLog, jobLogPath } from "./hub-jobs.js";
+import { activeHubJobKeys, buildQueueView, deleteHubJobHistory, latestRunPerRoom, listHubJobs, readHubJobLog, jobLogPath } from "./hub-jobs.js";
 
 /** 手工建台账 fixture(表结构与 orchestrator SyncLedger 对齐——结构即契约,不 import 它保分层)。 */
 function makeSyncDb(): { dbPath: string; db: DatabaseSync } {
@@ -96,6 +96,31 @@ describe("listHubJobs", () => {
     const { jobs } = listHubJobs(dbPath, { now, stageDir: stage });
     expect(jobs[0].currentStepSec).toBe(300);
     expect(jobs[0].etaSec).toBeNull();
+  });
+
+  it("states 过滤:只返回指定状态,total 是过滤后总数(不受 limit 截断)", () => {
+    // 回归:Hub 页 Active 指标曾用「最近 20 条里数非终态」→ 数据一多恒为 0。
+    // 现在用 states 精确过滤 + 读 total,故必须验证「非终态被更新的终态挤出 limit 窗口」时 total 仍正确。
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "hubjobs-states-"));
+    const base = T0 + 10_000_000;
+    // 25 条更新的 done(会占满任何 limit≤25 的窗口)+ 3 条更旧的非终态
+    for (let i = 0; i < 25; i++) {
+      seedJob(db, `douyin:D${i}:2026-10-01`, [["done", base + i]], 100, { bv: `BV${i}` });
+    }
+    seedJob(db, "douyin:ACT1:2026-10-01", [["merging", base - 9000]], 100);
+    seedJob(db, "douyin:ACT2:2026-10-01", [["uploading", base - 8000]], 100);
+    seedJob(db, "douyin:ACT3:2026-10-01", [["pending", base - 7000]], 100);
+    db.close();
+
+    const active = ["pending", "settling", "syncing", "merging", "uploading", "retrying"];
+    // limit=1:返回 1 条,但 total 必须是权威的 3
+    const r = listHubJobs(dbPath, { states: active, limit: 1, now: base + 1000, stageDir: stage });
+    expect(r.total).toBe(3);
+    expect(r.jobs).toHaveLength(1);
+    // 对照:不带 states 的默认查询(最近 20 条)一条非终态都看不到
+    const dflt = listHubJobs(dbPath, { now: base + 1000, stageDir: stage });
+    expect(dflt.jobs.filter((j) => active.includes(j.state))).toHaveLength(0);
   });
 
   it("按房间过滤 + 分页:room 只返回该房间的 run,total 是过滤后总数,limit/offset 翻页", () => {
@@ -203,6 +228,32 @@ describe("deleteHubJobHistory / activeHubJobKeys", () => {
     expect(r).toEqual({ deleted: 1, streamKeys: ["douyin:100:2026-08-01"] });
     expect(activeHubJobKeys(dbPath, "douyin.100")).toEqual([]);
     expect(deleteHubJobHistory("/nonexistent/x-sync.db", "douyin.100")).toEqual({ deleted: 0, streamKeys: [] });
+  });
+});
+
+describe("latestRunPerRoom", () => {
+  it("每房间返回最新一条 run;roomKey 无尾冒号;不受「最近 N 条」影响", () => {
+    // 回归:Hub 房间列表曾用「最近 20 条 run 再按房间过滤」→ 有历史 run 的房间显示「No runs yet」。
+    const { dbPath, db } = makeSyncDb();
+    const base = T0 + 10_000_000;
+    // 房间 A:2 条(旧的 + 新的);房间 B:1 条。
+    seedJob(db, "douyin:100:2026-10-01", [["done", base - 5000]], 100, { bv: "A-old" });
+    seedJob(db, "douyin:100:2026-10-02", [["done", base + 1000]], 100, { bv: "A-new" });
+    seedJob(db, "douyin:200:2026-10-01", [["merging", base]], 100);
+    db.close();
+
+    const rooms = latestRunPerRoom(dbPath);
+    const byKey = Object.fromEntries(rooms.map((r) => [r.roomKey, r]));
+    // roomKey 无尾冒号(与前端 `${platform}:${roomSlug}` 对齐)
+    expect(Object.keys(byKey).sort()).toEqual(["douyin:100", "douyin:200"]);
+    // A 取最新那条
+    expect(byKey["douyin:100"].bv).toBe("A-new");
+    expect(byKey["douyin:100"].streamKey).toBe("douyin:100:2026-10-02");
+    expect(byKey["douyin:200"].state).toBe("merging");
+  });
+
+  it("无 sync db / 空表 → 空数组,不炸", () => {
+    expect(latestRunPerRoom("/nonexistent/x-sync.db")).toEqual([]);
   });
 });
 

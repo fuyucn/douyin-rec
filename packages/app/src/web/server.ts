@@ -71,6 +71,7 @@ export interface RouteMatch {
     | "reorderHubRules"
     | "listHubJobs"
     | "hubQueue"
+    | "latestRuns"
     | "getHubJobLog"
     | "retryHubNode"
     | "stopHubJob"
@@ -136,6 +137,7 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "hubStatus", methods: ["GET"], pattern: /^\/api\/hub\/status$/ },
   { name: "listHubJobs", methods: ["GET"], pattern: /^\/api\/hub\/jobs$/ },
   { name: "hubQueue", methods: ["GET"], pattern: /^\/api\/hub\/queue$/ },
+  { name: "latestRuns", methods: ["GET"], pattern: /^\/api\/hub\/latest-runs$/ },
   { name: "runHubJob", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/run$/, needsBody: true },
   { name: "getHubJobLog", methods: ["GET"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/log$/, param: "sid", decode: true },
   { name: "retryHubNode", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/retry-node$/, param: "sid", decode: true, needsBody: true },
@@ -397,10 +399,15 @@ async function dispatch(
       const room = q.get("room") ?? undefined;
       const limit = q.get("limit") ? Number(q.get("limit")) : undefined;
       const offset = q.get("offset") ? Number(q.get("offset")) : undefined;
-      return api.listHubJobs({ room, limit, offset });
+      // states 可重复或逗号分隔(原始串交 api 层做白名单校验)。
+      const states = [...q.getAll("states"), ...(q.get("states") ?? "").split(",")]
+        .map((st) => st.trim()).filter(Boolean);
+      return api.listHubJobs({ room, limit, offset, states: states.length > 0 ? states : undefined });
     }
     case "getHubJobLog":
       return api.getHubJobLog(match.sid!);
+    case "latestRuns":
+      return api.latestRuns();
     case "hubQueue": {
       // phase/states/platform 可重复或逗号分隔;q 为子串。原始串交给 api 层做白名单校验。
       const q = new URL(req.url ?? "/", "http://localhost").searchParams;

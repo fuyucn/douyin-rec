@@ -419,6 +419,23 @@ export interface TaskDTO {
   recording: boolean;
   /** Hub 源任务在被选中 worker 上的录制状态;普通任务为空数组。 */
   recordingWorkers?: RecordingWorkerStatusDTO[];
+  /**
+   * 该任务绑定的 hub 规则摘要(仅 master、且该房间有规则时才有)。
+   * 让任务列表能显示「这个任务的后处理配了什么 / 上次结果」,并从列表跳到 hub 房间页。
+   * 省略 = 未绑定 / 非 master。
+   */
+  hubRule?: {
+    /** hub 规则 key(`{platform}.{roomSlug}`),用于跳 `/hub/{key}`。 */
+    key: string;
+    /** 规则是否启用。 */
+    enabled: boolean;
+    /** 产出哪些步骤(plain 恒有;danmu/livechat 按配置)。 */
+    steps: string[];
+    /** 上传模式:stage(仅合成)/ upload(传 B 站)。 */
+    uploadMode: "stage" | "upload";
+    /** 最近一次 run 的状态 + BV(无 run = null)。 */
+    lastRun: { state: string; bv: string | null } | null;
+  };
   /** 任务专属 Discord webhook;null = 回落全局。 */
   webhook: string | null;
 }

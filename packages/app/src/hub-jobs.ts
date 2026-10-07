@@ -293,6 +293,58 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
   }
 }
 
+/**
+ * 每个房间的最新一条 run 摘要(按 streamKey 前缀 `{platform}:{roomSlug}:` 分组)。
+ *
+ * **为什么单独做**:Hub 房间列表原用「最近 N 条 run 再按房间过滤」→ 一个房间若最近 N 条里
+ * 没出现(它最近的 run 较早),列表会显示「No runs yet」,但它其实有历史 run
+ * (实测:一勺小苏打有 18 runs 却显示「尚无运行」)。这里用 SQL 的「每组取最新一行」,
+ * 不受任何 limit 影响。
+ *
+ * 用窗口函数(row_number)取每组最新,单条 SQL 搞定,不 N+1。
+ */
+export interface LatestRunPerRoom {
+  /** `{platform}:{roomSlug}`(= streamKey 前两段)。 */
+  roomKey: string;
+  streamKey: string;
+  state: string;
+  bv: string | null;
+  updatedAt: number;
+}
+
+export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
+  if (!existsSync(syncDbPath)) return [];
+  const db = new DatabaseSync(syncDbPath, { readOnly: true });
+  try {
+    // 注意:streamKey 形如 `{platform}:{roomSlug}:{date}[_HHMM]`,前两段是房间身份。
+    // SQLite 无内置 split,用两次 instr + substr 取前两段作为分组键。
+    const rows = db.prepare(`
+      SELECT
+        substr(streamKey, 1,
+          instr(substr(streamKey, instr(streamKey, ':') + 1), ':') + instr(streamKey, ':')
+        ) AS roomKey,
+        streamKey, state, bv, updatedAt
+      FROM (
+        SELECT streamKey, state, bv, updatedAt,
+               ROW_NUMBER() OVER (
+                 PARTITION BY substr(streamKey, 1,
+                   instr(substr(streamKey, instr(streamKey, ':') + 1), ':') + instr(streamKey, ':')
+                 )
+                 ORDER BY updatedAt DESC
+               ) AS rn
+        FROM sync_jobs
+      )
+      WHERE rn = 1
+    `).all() as unknown as LatestRunPerRoom[];
+    // SQL 切出的 roomKey 带尾冒号(`douyin:123:`);统一去掉,与前端 `${platform}:${roomSlug}` 对齐。
+    return rows.map((r) => ({ ...r, roomKey: r.roomKey.replace(/:$/, ""), updatedAt: Number(r.updatedAt) }));
+  } catch {
+    return []; // 旧库无表
+  } finally {
+    db.close();
+  }
+}
+
 /** 读该场 job.log 尾部(默认 64KB;不存在 → null)。 */
 export function readHubJobLog(streamKey: string, tailBytes = 65536, stageDir = hubStageDir()): string | null {
   const p = jobLogPath(streamKey, stageDir);
