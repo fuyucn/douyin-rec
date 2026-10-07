@@ -227,3 +227,44 @@ FIFO 排序、三类筛选各自生效与叠加、`q` 命中主播名(大小写�
 ### 测试(806)
 `rows` 含完成行且字段正确(bv/finishedAt/nextSteps 空/currentStepSec null)、
 完成行按 finishedAt 排最前、`phase=done`/`failed` 各自筛选与叠加。
+
+## 追加 3:审核反馈整改(2026-10-07)
+
+用户要求对整体流程/UI 认真审核并给反馈。审核用**生产数据实测**(docker master 的真实台账),
+发现的核心问题是「状态语义」与「可操作性」,按优先级整改:
+
+### P0 · 会误导判断
+1. **正常收口被渲染成告警**:10 条 `needs_manual` 全显示红色 ⚠,但台账里 8 条 `error=''`
+   (stage 模式正常收口,`pipeline.ts` 只 setState 不置 error + 发 `stageReady`),
+   只有 2 条是真故障(`用户停止` / `进程重启中断`)。同色 → 告警疲劳,真问题被淹。
+   **修**:`QueuePhase` 细分 `waiting_upload`(正常收口,中性色)/ `stopped`(灰)/ `waiting_manual`(红)。
+2. **`error` 没透出**:`HubJobView` 有 `error` 但 `QueueItemDTO` 没有 → UI 只显示「待人工」不知为何。
+   **修**:`QueueItemDTO.error` 透出,行内显示原因。
+
+### P1 · 影响使用
+3. **筛选延迟 3s**:`usePolling` 只按 `[ms, enabled]` 重建,换闭包不立即重跑 → 点筛选干等一个 tick。
+   **修**:QueuePage 用 `queryKey` + 独立 `useEffect` 变更即拉(首次跳过避免 mount 双请求)。
+   > 注意:不能改 `usePolling` 依赖 `fn` —— 其它 6 处调用方传内联箭头(每帧新引用)→ 会无限重拉。
+4. **同锚点多场分不清**:4 条「爱馬人士」只有 11px 小字日期不同。
+   **修**:场次时间提到主行(`sessionTime()` 解析 `_HHMM`)。
+5. **`fails` 丢了**:重试 5 次的场看不出来(旧版 RunCard 有)。
+   **修**:行内显示「已重试 N 次」。
+6. **没有出口**:队列页只读死胡同。
+   **修**:每行加操作列 —— 查看日志(复用 `JobLogDialog`)+ 跳 Hub 房间页。
+
+### P2 · 打磨
+7. **移动端溢出**:390px 实测表格横向溢出、行高爆炸。
+   **修**:`<sm` 改卡片式布局(`QueueCard`),表格 `hidden sm:block`。
+8. **摘要不准**:「进行中 10」但 0 条在跑(全是待人工)。
+   **修**:拆「处理中 N / 待上传 N / 需处理 N / 已停止 N / 已完成 N」。
+9. **`winnerWorker` 没显示** → done 行补「Winner: vps2」。
+10. **「做了什么」一长串灰字** → 加 ✓ 前缀 + 绿色,与当前步/后续区分层次。
+11. **筛选栏无分组** → 加「状态 / 平台」标签。
+
+### 顺带修
+- 终态/待人工行不再显示「Not started → Preparing」(已完成的事没有「正在」)。
+- 筛选 chip「失败待处理」与 state=failed 的「失败」撞名 → 改「需处理」。
+
+### 测试(807)
+新增「needs_manual 三态细分」用例;两处旧用例按新语义更新。
+反向验证:改回不细分 → 3 个测试 fail。
