@@ -10,7 +10,6 @@ import {
 } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import { Link } from "react-router-dom";
 import { api, type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO } from "../api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, runDate, stateColor } from "../components/HubJobs";
@@ -100,6 +99,8 @@ function FilterBar({
     { key: "pulling", label: t("queue.filter.pulling"), on: states.includes("syncing"), toggle: () => toggle(states, "syncing", onStates) },
     { key: "waiting_settle", label: t("queue.filter.settle"), on: phase.includes("waiting_settle"), toggle: () => toggle(phase, "waiting_settle", onPhase) },
     { key: "waiting_manual", label: t("queue.filter.manual"), on: phase.includes("waiting_manual"), toggle: () => toggle(phase, "waiting_manual", onPhase) },
+    { key: "done", label: t("queue.filter.done"), on: phase.includes("done"), toggle: () => toggle(phase, "done", onPhase) },
+    { key: "failed", label: t("queue.filter.failed"), on: phase.includes("failed"), toggle: () => toggle(phase, "failed", onPhase) },
   ];
   return (
     <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -147,9 +148,11 @@ function QueueRow({ item, index, tz }: { item: QueueItemDTO; index: number; tz: 
   const manual = item.phase === "waiting_manual";
   const waitingSettle = item.phase === "waiting_settle";
   const pulling = item.state === "syncing";
-  const busy = !queued && !manual && !waitingSettle;
+  const finished = item.phase === "done" || item.phase === "failed";
+  const busy = !queued && !manual && !waitingSettle && !finished;
   let phaseText = t("queue.phase.running");
-  if (manual) phaseText = t("queue.phase.manual");
+  if (finished) phaseText = t(item.phase === "done" ? "queue.phase.done" : "queue.phase.failed");
+  else if (manual) phaseText = t("queue.phase.manual");
   else if (waitingSettle) phaseText = t("queue.phase.settle");
   else if (queued) phaseText = t("queue.phase.queued");
   else if (pulling) phaseText = t("queue.phase.pulling");
@@ -178,19 +181,36 @@ function QueueRow({ item, index, tz }: { item: QueueItemDTO; index: number; tz: 
           {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
           {queued && <span>⏳</span>}
           {manual && <AlertTriangle className="w-3.5 h-3.5" />}
+          {item.phase === "done" && <Check className="w-3.5 h-3.5" />}
+          {item.phase === "failed" && <X className="w-3.5 h-3.5" />}
           {phaseText}
         </span>
         <div className="text-[11px] text-muted-soft mt-0.5">
-          {item.currentStepSec != null ? t("hub.jobs.runningFor", { time: humanSec(item.currentStepSec) }) : ""}
-          {!queued && item.etaSec != null && " "}
-          {!queued && item.etaSec != null && t("hub.jobs.etaRemaining", { time: humanSec(item.etaSec) })}
+          {finished
+            ? item.videoDurationSec != null
+              ? t("queue.col.videoDuration", { time: humanSecFull(Math.round(item.videoDurationSec)) })
+              : ""
+            : <>
+              {item.currentStepSec != null ? t("hub.jobs.runningFor", { time: humanSec(item.currentStepSec) }) : ""}
+              {!queued && item.etaSec != null && " "}
+              {!queued && item.etaSec != null && t("hub.jobs.etaRemaining", { time: humanSec(item.etaSec) })}
+            </>}
         </div>
       </td>
       <td>
         <div className="flex items-center gap-1.5 flex-wrap text-[12px]">
+          {finished ? (
+            // 终态行:只列已完成的步骤 + BV,**不显示「正在做/下面做」**(已完成的事没有「正在」)。
+            item.doneSteps.length > 0 ? (
+              <span className="text-muted-soft">{item.doneSteps.map((st) => stepLabel(t, st.step)).join(" · ")}</span>
+            ) : (
+              <span className="text-muted-soft">{t("queue.doneNoStepRecord")}</span>
+            )
+          ) : (
+            <>
           <span className="inline-flex items-center gap-1 text-muted-soft">
             {item.doneSteps.length > 0
-              ? item.doneSteps.map((s) => stepLabel(t, s.step)).join(" · ")
+              ? item.doneSteps.map((st) => stepLabel(t, st.step)).join(" · ")
               : t("queue.nothingDone")}
           </span>
           <ChevronRight className="w-3 h-3 text-muted-soft shrink-0" />
@@ -203,10 +223,28 @@ function QueueRow({ item, index, tz }: { item: QueueItemDTO; index: number; tz: 
               <span className="text-muted-soft">{item.nextSteps.map((s) => stepLabel(t, s)).join(" / ")}</span>
             </>
           )}
+            </>
+          )}
+          {finished && item.bv && (
+            <>
+              <ChevronRight className="w-3 h-3 text-muted-soft shrink-0" />
+              <a
+                className="font-mono text-[11px] hover:text-ink"
+                style={{ color: "var(--muted)" }}
+                href={`https://www.bilibili.com/video/${item.bv}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {item.bv}
+              </a>
+            </>
+          )}
         </div>
       </td>
       <td className="text-[12px] text-muted tabular-nums" style={{ width: 92 }}>
-        {item.enqueuedAt ? fmtTimeInTz(new Date(item.enqueuedAt), tz) : "-"}
+        {finished
+          ? (item.finishedAt ? fmtTimeInTz(new Date(item.finishedAt), tz) : "-")
+          : (item.enqueuedAt ? fmtTimeInTz(new Date(item.enqueuedAt), tz) : "-")}
       </td>
     </tr>
   );
@@ -253,8 +291,9 @@ export function QueuePage(): ReactNode {
 
   const reset = (): void => { setPhase([]); setStates([]); setPlatform([]); setQ(""); };
   const onToggleSort = (): void => setSort((v) => (v === "newest" ? "oldest" : "newest"));
-  const active = data?.active ?? [];
-  const recent = data?.recent ?? [];
+  // rows = 进行中 + 已完成,**同一张表**(像日志的时间轴)。前端只渲染它。
+  const rows = data?.rows ?? [];
+  const inFlight = rows.filter((r) => r.phase !== "done" && r.phase !== "failed").length;
   const pool = data?.pool;
   const filtered = phase.length + states.length + platform.length + (debouncedQ ? 1 : 0) > 0;
 
@@ -286,6 +325,12 @@ export function QueuePage(): ReactNode {
         <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>
       ) : (
         <>
+          <div className="flex items-baseline justify-between mb-2.5">
+            <span className="section-label">{t("queue.section.all")}</span>
+            <span className="font-mono text-[11px] text-muted-soft">
+              {t("queue.summary", { active: inFlight, done: rows.length - inFlight })}
+            </span>
+          </div>
           <FilterBar
             phase={phase} states={states} platform={platform} q={q}
             onPhase={setPhase} onStates={setStates} onPlatform={setPlatform}
@@ -319,7 +364,7 @@ export function QueuePage(): ReactNode {
                   </tr>
                 </thead>
                 <tbody>
-                  {active.length === 0 ? (
+                  {rows.length === 0 ? (
                     <tr>
                       <td colSpan={5}>
                         <div className="text-center text-muted-soft text-sm py-10">
@@ -328,7 +373,7 @@ export function QueuePage(): ReactNode {
                       </td>
                     </tr>
                   ) : (
-                    active.map((it, i) => <QueueRow key={it.streamKey} item={it} index={i + 1} tz={tz} />)
+                    rows.map((it, i) => <QueueRow key={it.streamKey} item={it} index={i + 1} tz={tz} />)
                   )}
                 </tbody>
               </table>
@@ -337,53 +382,6 @@ export function QueuePage(): ReactNode {
         </>
       )}
 
-      {recent.length > 0 && (
-        <>
-          <div className="flex items-baseline justify-between mt-8 mb-2.5">
-            <h2 className="section-label">{t("queue.section.recent")}</h2>
-            <span className="font-mono text-[11px] text-muted-soft">{recent.length}</span>
-          </div>
-          <section className="table-shell">
-            <div className="overflow-x-auto">
-              <table className="tasks">
-                <thead>
-                  <tr>
-                    <th>{t("queue.col.room")}</th>
-                    <th className="w-32">{t("queue.col.status")}</th>
-                    <th className="w-40">{t("queue.col.duration")}</th>
-                    <th className="w-32">{t("queue.col.result")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recent.map((j) => (
-                    <tr key={j.streamKey}>
-                      <td>
-                        <div className="font-mono text-[12px] text-ink truncate">{runDate(j.streamKey)}</div>
-                        <div className="font-mono text-[11px] text-muted-soft mt-0.5">{j.streamKey.split(":")[0]}</div>
-                      </td>
-                      <td>
-                        <span className="text-[13px] font-medium" style={{ color: stateColor(j.state) }}>
-                          {t(`hub.jobs.step.${j.state === "needs_manual" ? "needsManual" : j.state}`)}
-                        </span>
-                      </td>
-                      <td className="text-[12px] text-muted tabular-nums">
-                        {j.videoDurationSec != null ? humanSecFull(Math.round(j.videoDurationSec)) : "-"}
-                      </td>
-                      <td className="text-[12px]">
-                        {j.bv ? (
-                          <a className="text-muted hover:text-ink font-mono" href={`https://www.bilibili.com/video/${j.bv}`} target="_blank" rel="noreferrer">{j.bv}</a>
-                        ) : (
-                          <Link to="/hub" className="text-muted hover:text-ink">{t("queue.col.detail")}</Link>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </>
-      )}
     </>
   );
 }

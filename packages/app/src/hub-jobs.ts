@@ -397,20 +397,26 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   const active: QueueItemDTO[] = [];
   const recent = [...recentRows.jobs];
 
-  for (const job of [...activeRows.jobs, ...manualRows.jobs]) {
+  /** 把一个 job 视图转成一行队列记录(active 与 finished 共用,保证字段口径一致)。 */
+  const toRow = (job: HubJobView): QueueItemDTO => {
     const { platform, roomSlug } = splitStreamKey(job.streamKey);
     // 当前节点:优先 nodeStates 里 running 的节点,回落用 state 名映射。
     const runningNode = job.nodeStates.find((n) => n.state === "running")?.node ?? null;
     const currentNode = runningNode ?? stateToNode(job.state);
     const resource = resourceOfNode(currentNode);
     const waiting = waitingByKey.get(job.streamKey);
-    const phase: QueuePhase = job.state === "needs_manual"
-      ? "waiting_manual"
-      : waiting
-        ? "queued"
-        : job.state === "pending" || job.state === "settling"
-          ? "waiting_settle"
-          : "running";
+    // 终态(done/failed)也成行(同表渲染):phase 直接取终态名,无「正在做/下面做」概念。
+    const phase: QueuePhase = job.state === "done"
+      ? "done"
+      : job.state === "failed"
+        ? "failed"
+        : job.state === "needs_manual"
+          ? "waiting_manual"
+          : waiting
+            ? "queued"
+            : job.state === "pending" || job.state === "settling"
+              ? "waiting_settle"
+              : "running";
     // 已完成子步骤(做了什么):doneSteps = 有 done 事件的节点(去重,保序)。
     const doneSteps = doneStepsOf(job);
     // 下面做什么:DAG 中所有前驱已 done/skipped 的 pending 节点。
@@ -425,10 +431,14 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     //  - **正在跑**(running/queued,currentNode!=null):列 DAG 里尚未完成、且不是当前节点的其余节点
     //    (当前节点自己由 currentNode 展示)。burn 与 upload 是并行轨,故这里是并集而非单链。
     const settled = new Set<string>([...doneOrSkipped, ...(disabled ?? [])]);
-    const nextSteps = currentNode
-      ? HUB_FLOW_ORDER.filter((n) => !doneOrSkipped.has(n) && !disabled?.has(n) && n !== currentNode)
-      : readyNodes(settled);
-    active.push({
+    // 终态行没有「下面要做」→ 空;进行中按两种口径(见上)。
+    const terminal = phase === "done" || phase === "failed";
+    const nextSteps = terminal
+      ? []
+      : currentNode
+        ? HUB_FLOW_ORDER.filter((n) => !doneOrSkipped.has(n) && !disabled?.has(n) && n !== currentNode)
+        : readyNodes(settled);
+    return {
       streamKey: job.streamKey,
       platform,
       roomSlug,
@@ -445,10 +455,21 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
       winnerWorker: job.winnerWorker,
       fails: job.fails,
       updatedAt: job.updatedAt,
+      bv: job.bv ?? null,
+      videoDurationSec: job.videoDurationSec,
+      // 收尾时刻 = 末个事件(终态那次的时刻);非终态 null。
+      finishedAt: TERMINAL.has(job.state) && job.events.length > 0
+        ? job.events[job.events.length - 1].at
+        : null,
       // 入队时刻 = 首个事件(pending);startedAt 即 events[0].at,台账有事件就必有。
       enqueuedAt: job.startedAt,
-    });
-  }
+    };
+  };
+
+  for (const job of [...activeRows.jobs, ...manualRows.jobs]) active.push(toRow(job));
+  // 已完成/失败的场也进 rows —— 前端渲染**一张表**(像日志),完成的行 phase=done/failed。
+  // 独立拉一批终态(数量 = recentLimit),与 active 合并成单一时间轴。
+  const finishedRows = recentRows.jobs.map(toRow);
 
   // 排序:按入队时刻。默认 `newest`(倒序,刚进队列的排最前 —— 看「最新动态」最直观);
   // `oldest` 才是 FIFO 视角(谁等最久谁排最前)。两者都按入队时间,**不再按 phase 分组**
@@ -463,12 +484,24 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   });
   recent.sort((a, b) => b.updatedAt - a.updatedAt);
 
+  // rows:进行中 + 已完成,**同一时间轴、同一张表**(像日志)。finished 段的排序键用
+  // finishedAt(收尾时刻)而非 enqueuedAt —— 否则「今天早上录、刚上传完」的稿会因入队早
+  // 沉到列表底部,而用户关心的是「刚刚发生了什么」。进行中段仍用 enqueuedAt(队列语义)。
+  const rows: QueueItemDTO[] = [...active, ...finishedRows];
+  rows.sort((a, b) => {
+    const key = (r: QueueItemDTO): number =>
+      r.phase === "done" || r.phase === "failed" ? (r.finishedAt ?? r.updatedAt) : (r.enqueuedAt ?? r.updatedAt);
+    const ka = key(a), kb = key(b);
+    if (ka !== kb) return (ka - kb) * dir;
+    return a.streamKey < b.streamKey ? -1 : a.streamKey > b.streamKey ? 1 : 0;
+  });
+
   // 筛选(datatable 式):全部筛完再返回,前端拿到即所见。
   const phaseSet = opts.phase && opts.phase.length > 0 ? new Set(opts.phase) : null;
   const stateSet = opts.states && opts.states.length > 0 ? new Set(opts.states) : null;
   const platSet = opts.platform && opts.platform.length > 0 ? new Set(opts.platform) : null;
   const q = (opts.q ?? "").trim().toLowerCase();
-  const filtered = active.filter((it) => {
+  const keep = (it: QueueItemDTO): boolean => {
     if (phaseSet && !phaseSet.has(it.phase)) return false;
     if (stateSet && !stateSet.has(it.state)) return false;
     if (platSet && !platSet.has(it.platform)) return false;
@@ -477,9 +510,14 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
       if (!hay.includes(q)) return false;
     }
     return true;
-  });
+  };
 
-  return { active: filtered, recent: recent.slice(0, recentLimit), pool };
+  return {
+    active: active.filter(keep),
+    rows: rows.filter(keep),
+    recent: recent.slice(0, recentLimit),
+    pool,
+  };
 }
 
 /** 已完成子步骤(done 事件,按 step 去重、保首次完成序)。 */

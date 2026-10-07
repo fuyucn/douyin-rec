@@ -206,14 +206,19 @@ export interface HubPoolSnapshotDTO {
   waiting: Array<{ streamKey: string; resource: "cpu" | "net" | "upload"; position: number; since: number }>;
 }
 
-/** 队列页一场的「正在做什么」相位。 */
-export type QueuePhase = "queued" | "running" | "waiting_settle" | "waiting_manual";
 /**
- * 相位常量数组(API 侧校验 query 的白名单;前端筛选器也用它渲染选项)。
+ * 队列页一行的相位。**进行中与已完成同表**(像日志一样一条时间轴连续排列):
+ * - `running` / `queued` / `waiting_settle` / `waiting_manual`:进行中(未完成)
+ * - `done`:已完成(`state=done`,成功收口)
+ * - `failed`:失败终态(与 done 同表,红色区分)
  * 注意:UI 的「拉取中」是**前端派生**显示相(`state=syncing` 且不占资源闸门),不属于后端相位 ——
  * 要筛它请用 `states=syncing`。
  */
-export const QUEUE_PHASES = ["running", "queued", "waiting_settle", "waiting_manual"] as const;
+export type QueuePhase = "queued" | "running" | "waiting_settle" | "waiting_manual" | "done" | "failed";
+/**
+ * 相位常量数组(API 侧校验 query 的白名单;前端筛选器也用它渲染选项)。
+ */
+export const QUEUE_PHASES = ["running", "queued", "waiting_settle", "waiting_manual", "done", "failed"] as const;
 
 /**
  * 处理队列里的一场直播(GET /api/hub/queue → active[])。
@@ -244,6 +249,12 @@ export interface QueueItemDTO {
   winnerWorker: string | null;
   fails: number;
   updatedAt: number;
+  /** 完成态(`phase=done`)才有:B 站 BV 号 —— 已上传的稿可直接点开。 */
+  bv: string | null;
+  /** 完成态才有:winner 视频时长秒(展示用)。 */
+  videoDurationSec: number | null;
+  /** **收尾时刻**(epoch ms)= 终态事件的时刻;非终态 = null。日志按时间轴排时用它。 */
+  finishedAt: number | null;
   /**
    * **入队时刻**(epoch ms)= 该场 job 首个事件(`pending`)的时刻,台账里有就一定有。
    * 队列页的默认排序键:真实 FIFO —— 谁先进队列谁排前面,与 phase/updatedAt 无关。
@@ -252,9 +263,20 @@ export interface QueueItemDTO {
   enqueuedAt: number | null;
 }
 
-/** GET /api/hub/queue 响应:进行中 + 最近完成 + 资源池占用。 */
+/**
+ * GET /api/hub/queue 响应。
+ *
+ * **rows 是唯一列表**:进行中与已完成同表(像日志一条时间轴),`rows` 已按 sort 方向排好。
+ * 前端渲染一张表即可,不必分区块 —— 完成的行带 `phase=done`/`failed` + bv。
+ *
+ * `recent` 保留为**兼容字段**(RoomDetail 等旧调用方仍用),内容 = 最近完成的完整 HubJobDTO。
+ */
 export interface HubQueueDTO {
+  /** 进行中(非终态 ∪ needs_manual)—— 与 `rows` 中 phase 非 done/failed 的部分一致。 */
   active: QueueItemDTO[];
+  /** 统一列表:进行中 + 已完成,按 sort(newest 缺省=最新在前)排好,前端渲染一张表。 */
+  rows: QueueItemDTO[];
+  /** 最近完成的完整视图(兼容旧调用方;与 rows 里 phase=done/failed 的部分同源)。 */
   recent: HubJobDTO[];
   pool: HubPoolSnapshotDTO;
 }

@@ -213,9 +213,9 @@ describe("buildQueueView", () => {
     waiting: [],
   };
 
-  it("无 sync db → active/recent 空,pool 原样透出", () => {
+  it("无 sync db → active/rows/recent 空,pool 原样透出", () => {
     const v = buildQueueView("/nonexistent/x-sync.db", { pool: POOL_EMPTY });
-    expect(v).toEqual({ active: [], recent: [], pool: POOL_EMPTY });
+    expect(v).toEqual({ active: [], rows: [], recent: [], pool: POOL_EMPTY });
   });
 
   it("进行中 job:doneSteps=已完成(做了什么),nextSteps=DAG 后继(下面做什么),phase=running", () => {
@@ -448,6 +448,54 @@ describe("buildQueueView", () => {
       "douyin:300:2026-10-06", "douyin:100:2026-10-06",
     ]);
     expect(view({ phase: ["queued"], platform: ["bilibili"] })).toEqual([]);
+  });
+
+  it("rows:进行中与已完成同表,完成行带 bv/finishedAt 且 nextSteps 为空", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-rows-"));
+    const now = T0 + 10_000_000;
+    // 进行中(入队 20s 前)
+    seedJob(db, "douyin:LIVE:2026-10-06", [["merging", now - 20_000]], 1000);
+    // 已完成(入队早,但刚刚才收尾 —— finishedAt 应让它排在最前)
+    seedJob(db, "douyin:DONE:2026-10-06", [["pending", now - 900_000], ["done", now - 5_000]], 1000, { bv: "BVdone1" });
+    db.close();
+
+    const { rows, active, recent } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
+    // 一张表:进行中 + 已完成都在
+    expect(rows.map((r) => r.streamKey).sort()).toEqual(["douyin:DONE:2026-10-06", "douyin:LIVE:2026-10-06"]);
+    // 完成行字段
+    const done = rows.find((r) => r.streamKey === "douyin:DONE:2026-10-06")!;
+    expect(done.phase).toBe("done");
+    expect(done.bv).toBe("BVdone1");
+    expect(done.finishedAt).toBe(now - 5_000);
+    expect(done.nextSteps).toEqual([]);
+    expect(done.currentStepSec).toBeNull(); // 终态无「已运行」
+    // 进行中行字段
+    const live = rows.find((r) => r.streamKey === "douyin:LIVE:2026-10-06")!;
+    expect(live.phase).toBe("running");
+    expect(live.finishedAt).toBeNull();
+    // active 只含进行中(不含 done),recent 只含完成
+    expect(active.map((a) => a.streamKey)).toEqual(["douyin:LIVE:2026-10-06"]);
+    expect(recent.map((j) => j.streamKey)).toEqual(["douyin:DONE:2026-10-06"]);
+    // 排序:完成的按 finishedAt(刚刚=最前),newest 缺省 → DONE 在 LIVE 前
+    expect(rows[0].streamKey).toBe("douyin:DONE:2026-10-06");
+  });
+
+  it("筛选 phase=done 只留完成行;与 platform/q 叠加", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-rows2-"));
+    const now = T0 + 10_000_000;
+    seedJob(db, "douyin:LIVE:2026-10-06", [["merging", now - 20_000]], 1000);
+    seedJob(db, "douyin:DONE:2026-10-06", [["pending", now - 900_000], ["done", now - 5_000]], 1000, { bv: "B1" });
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,fails,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("bilibili:FAIL:2026-10-06", "failed", "vps2", null, 2, now - 1_000);
+    db.close();
+    const view = (o: Parameters<typeof buildQueueView>[1]): string[] =>
+      buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY, ...o }).rows.map((r) => r.streamKey);
+    expect(view({ phase: ["done"] })).toEqual(["douyin:DONE:2026-10-06"]);
+    expect(view({ phase: ["failed"] })).toEqual(["bilibili:FAIL:2026-10-06"]);
+    expect(view({ phase: ["done", "failed"] }).sort()).toEqual(["bilibili:FAIL:2026-10-06", "douyin:DONE:2026-10-06"]);
+    expect(view({ platform: ["bilibili"] })).toEqual(["bilibili:FAIL:2026-10-06"]);
   });
 
   it("筛选 q 命中主播名(经 anchorOf),大小写不敏感", () => {
