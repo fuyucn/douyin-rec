@@ -272,7 +272,7 @@ const DICT = {
       },
     },
     queue: {
-      title: "处理队列", subtitle: "所有直播间的后处理一屏可见:做了什么 → 正在做什么 → 下面做什么。",
+      title: "处理队列", subtitle: "所有直播间的后处理一屏可见,按入队时间先后排序:做了什么 → 正在做什么 → 下面做什么。",
       childDesc: "处理队列只在 master(启用 hub)上可用。本节点为录制节点,后处理由 master 统一编排。",
       empty: "队列空闲", emptyHint: "有直播收播后,后处理会自动出现在这里。",
       nothingDone: "尚未开始", currentUnknown: "准备中", next: "下一步",
@@ -280,6 +280,11 @@ const DICT = {
       doing: { preparing: "准备中", settle: "等待收播后开始", manual: "等待人工处理" },
       phase: { running: "执行中", queued: "排队中", pulling: "拉取中", settle: "等待收播", manual: "待人工" },
       section: { running: "进行中", pending: "待处理", recent: "最近完成", noneRunning: "当前没有正在执行的后处理" },
+      col: { room: "直播间 / 场次", status: "状态", flow: "做了什么 → 正在做 → 下面做", enqueued: "入队时间", duration: "时长", result: "结果", detail: "查看详情" },
+      filter: {
+        running: "执行中", queued: "排队中", pulling: "拉取中", settle: "等待收播", manual: "待人工",
+        search: "搜主播 / 房间号", clear: "清除筛选", reset: "清除全部筛选条件", noMatch: "没有符合筛选条件的任务", waitNo: "等{n}",
+      },
       pool: { cpu: "CPU / 合并烧录", upload: "上传窗口", cooldown: "上传冷却", queued: "排队 {n}", unlimited: "不限速", noCooldown: "正常" },
     },
   },
@@ -504,7 +509,7 @@ const DICT = {
       },
     },
     queue: {
-      title: "Processing queue", subtitle: "Every room's post-processing in one view: done → doing → next.",
+      title: "Processing queue", subtitle: "Every room's post-processing in one view, ordered by enqueue time: done → doing → next.",
       childDesc: "The processing queue is only available on master (hub enabled). This node records; master orchestrates post-processing.",
       empty: "Queue idle", emptyHint: "Post-processing shows up here once a stream ends.",
       nothingDone: "Not started", currentUnknown: "Preparing", next: "Next",
@@ -512,6 +517,11 @@ const DICT = {
       doing: { preparing: "Preparing", settle: "Waiting for stream to end", manual: "Needs manual action" },
       phase: { running: "Running", queued: "Queued", pulling: "Pulling", settle: "Waiting to end", manual: "Needs manual" },
       section: { running: "In progress", pending: "Pending", recent: "Recently finished", noneRunning: "No post-processing running right now" },
+      col: { room: "Room / session", status: "Status", flow: "Done → Doing → Next", enqueued: "Enqueued", duration: "Duration", result: "Result", detail: "Details" },
+      filter: {
+        running: "Running", queued: "Queued", pulling: "Pulling", settle: "Waiting to end", manual: "Needs manual",
+        search: "Search anchor / room", clear: "Clear", reset: "Clear all filters", noMatch: "No tasks match the filters", waitNo: "wait {n}",
+      },
       pool: { cpu: "CPU / merge+burn", upload: "Upload window", cooldown: "Upload cooldown", queued: "queued {n}", unlimited: "unlimited", noCooldown: "Clear" },
     },
   },

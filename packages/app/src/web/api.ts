@@ -32,6 +32,9 @@ import {
   type RecordingWorkerStatusDTO,
   type BiliupAuthStatus,
   type HubPoolSnapshotDTO,
+  QUEUE_PHASES,
+  HUB_JOB_STATES,
+  type QueuePhase,
 } from "@drec/core";
 import * as hubStore from "../hub-store.js";
 import type { HubRule } from "../hub-store.js";
@@ -355,8 +358,12 @@ export interface Api {
   reorderHubRules(input: { keys?: string[] }): ApiResult;
   /** GET /api/hub/jobs[?room=&limit=&offset=] — hub run 列表(状态/时间线/ETA/hasLog + total 分页)。 */
   listHubJobs(opts?: { room?: string; limit?: number; offset?: number }): ApiResult;
-  /** GET /api/hub/queue — 处理队列视图:进行中(做了什么/正在做什么/下面做什么)+ 最近完成 + 资源池占用。 */
-  hubQueue(): ApiResult;
+  /**
+   * GET /api/hub/queue[?phase=&platform=&q=] — 处理队列视图:进行中(做了什么/正在做什么/下面做什么)
+   * + 最近完成 + 资源池占用。phase/platform 可重复传(逗号分隔亦可);q = 主播名/房间号/streamKey 子串。
+   * 排序固定为真实 FIFO(入队时刻升序);筛选在服务端做,前端拿到即所见。
+   */
+  hubQueue(opts?: { phase?: string[]; states?: string[]; platform?: string[]; q?: string }): ApiResult;
   /** GET /api/hub/jobs/:key/log — 该场 job.log 尾部(key=streamKey,URL-encoded)。 */
   getHubJobLog(streamKey: string): ApiResult;
   /** POST /api/hub/jobs/:key/retry-node { node, force? } — 手动重跑单个 workflow 节点。 */
@@ -1042,7 +1049,7 @@ export function makeApi(deps: ApiDeps): Api {
       if (log == null) return err(404, `该场无 job.log(旧版本产生的任务没有,或 stage 已清理): ${streamKey}`);
       return { status: 200, body: { streamKey, log } };
     },
-    hubQueue(): ApiResult {
+    hubQueue(opts: { phase?: string[]; states?: string[]; platform?: string[]; q?: string } = {}): ApiResult {
       if (!deps.syncDbPath) {
         // slave/hub 未开 → 空队列(+ 空资源池),前端显示空态。
         return {
@@ -1064,6 +1071,13 @@ export function makeApi(deps: ApiDeps): Api {
           );
           return t ? manager.getAnchorName(t.id) ?? t.anchorName ?? t.name ?? null : null;
         };
+        // query 过滤白名单校验:只认契约里的常量(防任意串进 Set;也防前端拼错静默返回空)。
+        const csv = (v?: string[]): string[] =>
+          (v ?? []).flatMap((x) => x.split(",")).map((x) => x.trim()).filter(Boolean);
+        const phaseFilter = csv(opts.phase).filter((p): p is QueuePhase =>
+          (QUEUE_PHASES as readonly string[]).includes(p));
+        const stateFilter = csv(opts.states).filter((s) => (HUB_JOB_STATES as readonly string[]).includes(s));
+
         // 该房间规则禁用的节点 → 从 nextSteps 剔除(upload 类只在 upload 模式;burn_* 按 steps 开关)。
         const disabledOf = (platform: string, roomSlug: string): ReadonlySet<string> | null => {
           const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform, roomSlug));
@@ -1077,7 +1091,10 @@ export function makeApi(deps: ApiDeps): Api {
           }
           return out;
         };
-        return { status: 200, body: buildQueueView(deps.syncDbPath, { anchorOf, disabledOf, pool: deps.poolSnapshot?.() }) };
+        return { status: 200, body: buildQueueView(deps.syncDbPath, {
+          anchorOf, disabledOf, pool: deps.poolSnapshot?.(),
+          phase: phaseFilter, states: stateFilter, platform: opts.platform, q: opts.q,
+        }) };
       } catch (e) {
         return err(500, `读 hub 队列失败: ${String((e as Error)?.message ?? e)}`);
       }

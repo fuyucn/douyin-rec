@@ -128,8 +128,21 @@ export const api = {
     const qs = q.toString();
     return request("GET", `/api/hub/jobs${qs ? "?" + qs : ""}`);
   },
-  /** 处理队列视图:进行中(做了什么/正在做什么/下面做什么)+ 最近完成 + 资源池占用。 */
-  getHubQueue: (): Promise<HubQueueDTO> => request("GET", "/api/hub/queue"),
+  /**
+   * 处理队列视图:进行中(做了什么/正在做什么/下面做什么)+ 最近完成 + 资源池占用。
+   * 排序固定为真实 FIFO(入队时刻升序)。phase/states/platform 传数组(逗号亦可),q 为子串。
+   */
+  getHubQueue: (
+    opts: { phase?: string[]; states?: string[]; platform?: string[]; q?: string } = {},
+  ): Promise<HubQueueDTO> => {
+    const q = new URLSearchParams();
+    if (opts.phase?.length) q.set("phase", opts.phase.join(","));
+    if (opts.states?.length) q.set("states", opts.states.join(","));
+    if (opts.platform?.length) q.set("platform", opts.platform.join(","));
+    if (opts.q) q.set("q", opts.q);
+    const qs = q.toString();
+    return request("GET", `/api/hub/queue${qs ? "?" + qs : ""}`);
+  },
   getHubJobLog: (streamKey: string): Promise<{ streamKey: string; log: string }> =>
     request("GET", `/api/hub/jobs/${encodeURIComponent(streamKey)}/log`),
   /** 手动重跑单个 workflow 节点(force=true 表示已确认,放行上传类节点)。 */

@@ -330,6 +330,19 @@ export interface BuildQueueOpts {
   /** 最近完成条数(默认 8)。 */
   recentLimit?: number;
   /**
+   * 按 phase 过滤 active(不传 = 全部)。前端筛选器下拉用 —— 大数据量下不必全量回前端再过滤。
+   */
+  phase?: readonly QueuePhase[];
+  /**
+   * 按 **pipeline 状态**过滤(`syncing` / `merging` / `uploading` / `pending` / `needs_manual` …),
+   * 用于筛 UI 派生相(「拉取中」= state=syncing,它不在 QUEUE_PHASES 里)。不传 = 全部。
+   */
+  states?: readonly string[];
+  /** 按平台过滤(不传 = 全部)。 */
+  platform?: readonly string[];
+  /** 按主播名 / 房间号 / streamKey 子串过滤(大小写不敏感;不传 = 全部)。 */
+  q?: string;
+  /**
    * 「待人工」最多列几条(默认 20)。needs_manual 是终态、却要留在进行中列表;
    * stage 模式的正常收口也是它(pipeline.ts:480)→ 长期 master 会堆积,必须 cap 否则淹没进行中区。
    */
@@ -425,23 +438,39 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
       winnerWorker: job.winnerWorker,
       fails: job.fails,
       updatedAt: job.updatedAt,
+      // 入队时刻 = 首个事件(pending);startedAt 即 events[0].at,台账有事件就必有。
+      enqueuedAt: job.startedAt,
     });
   }
 
-  // 排序:**执行中在前**(先看在跑的)→ 排队中(按资源队列位次)→ 等待收播 → 待人工。
-  // 各段内按 updatedAt 倒序(新的在前)。null queuePosition 排到末尾(不占用「第 1 位」视觉位)。
-  const phaseRank: Record<QueuePhase, number> = { running: 0, queued: 1, waiting_settle: 2, waiting_manual: 3 };
+  // 排序:**真实 FIFO 队列** —— 按入队时刻(enqueuedAt)升序,谁先进队列谁排前。
+  // 不再按 phase 分组:用户要的是「排队顺序」,不是「状态分类」。入队时间缺失(极老 run)→ 回落
+  // updatedAt;完全同刻 → streamKey 字典序兜底,保证多次轮询间顺序稳定不跳动。
   active.sort((a, b) => {
-    const ra = phaseRank[a.phase], rb = phaseRank[b.phase];
-    if (ra !== rb) return ra - rb;
-    if (a.phase === "queued" && b.phase === "queued") {
-      return (a.queuePosition ?? Number.MAX_SAFE_INTEGER) - (b.queuePosition ?? Number.MAX_SAFE_INTEGER);
-    }
-    return b.updatedAt - a.updatedAt;
+    const ea = a.enqueuedAt ?? a.updatedAt;
+    const eb = b.enqueuedAt ?? b.updatedAt;
+    if (ea !== eb) return ea - eb;
+    return a.streamKey < b.streamKey ? -1 : a.streamKey > b.streamKey ? 1 : 0;
   });
   recent.sort((a, b) => b.updatedAt - a.updatedAt);
 
-  return { active, recent: recent.slice(0, recentLimit), pool };
+  // 筛选(datatable 式):全部筛完再返回,前端拿到即所见。
+  const phaseSet = opts.phase && opts.phase.length > 0 ? new Set(opts.phase) : null;
+  const stateSet = opts.states && opts.states.length > 0 ? new Set(opts.states) : null;
+  const platSet = opts.platform && opts.platform.length > 0 ? new Set(opts.platform) : null;
+  const q = (opts.q ?? "").trim().toLowerCase();
+  const filtered = active.filter((it) => {
+    if (phaseSet && !phaseSet.has(it.phase)) return false;
+    if (stateSet && !stateSet.has(it.state)) return false;
+    if (platSet && !platSet.has(it.platform)) return false;
+    if (q) {
+      const hay = `${it.anchorName ?? ""} ${it.roomSlug} ${it.streamKey}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  return { active: filtered, recent: recent.slice(0, recentLimit), pool };
 }
 
 /** 已完成子步骤(done 事件,按 step 去重、保首次完成序)。 */

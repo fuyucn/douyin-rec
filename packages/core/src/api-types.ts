@@ -208,6 +208,12 @@ export interface HubPoolSnapshotDTO {
 
 /** 队列页一场的「正在做什么」相位。 */
 export type QueuePhase = "queued" | "running" | "waiting_settle" | "waiting_manual";
+/**
+ * 相位常量数组(API 侧校验 query 的白名单;前端筛选器也用它渲染选项)。
+ * 注意:UI 的「拉取中」是**前端派生**显示相(`state=syncing` 且不占资源闸门),不属于后端相位 ——
+ * 要筛它请用 `states=syncing`。
+ */
+export const QUEUE_PHASES = ["running", "queued", "waiting_settle", "waiting_manual"] as const;
 
 /**
  * 处理队列里的一场直播(GET /api/hub/queue → active[])。
@@ -238,6 +244,12 @@ export interface QueueItemDTO {
   winnerWorker: string | null;
   fails: number;
   updatedAt: number;
+  /**
+   * **入队时刻**(epoch ms)= 该场 job 首个事件(`pending`)的时刻,台账里有就一定有。
+   * 队列页的默认排序键:真实 FIFO —— 谁先进队列谁排前面,与 phase/updatedAt 无关。
+   * null = 旧库缺事件表(极老 run),此时回落 updatedAt。
+   */
+  enqueuedAt: number | null;
 }
 
 /** GET /api/hub/queue 响应:进行中 + 最近完成 + 资源池占用。 */

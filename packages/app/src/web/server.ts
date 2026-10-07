@@ -401,8 +401,16 @@ async function dispatch(
     }
     case "getHubJobLog":
       return api.getHubJobLog(match.sid!);
-    case "hubQueue":
-      return api.hubQueue();
+    case "hubQueue": {
+      // phase/states/platform 可重复或逗号分隔;q 为子串。原始串交给 api 层做白名单校验。
+      const q = new URL(req.url ?? "/", "http://localhost").searchParams;
+      const multi = (key: string): string[] | undefined => {
+        const all = [...q.getAll(key), ...(q.get(key) ?? "").split(",")].map((s) => s.trim()).filter(Boolean);
+        return all.length > 0 ? all : undefined;
+      };
+      const search = q.get("q")?.trim() || undefined;
+      return api.hubQueue({ phase: multi("phase"), states: multi("states"), platform: multi("platform"), q: search });
+    }
     case "retryHubNode": {
       const body = (await readJson(req)) as { node?: string; force?: boolean };
       return api.retryHubNode(match.sid!, body ?? {});
