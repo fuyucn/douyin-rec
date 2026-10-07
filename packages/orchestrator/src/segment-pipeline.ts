@@ -51,8 +51,8 @@ async function defaultBurnSegment(o: {
  * 串行 + 相邻提交最小间隔(uploadMinGapMs)→ 多任务同时收播时排队,且不会瞬时打爆 B 站频率限制。
  * 无 pool(测试/兼容)则直连。
  */
-function runUpload<T>(deps: PipelineDeps, fn: () => Promise<T>): Promise<T> {
-  return deps.pool ? deps.pool.withUpload(fn) : fn();
+function runUpload<T>(deps: PipelineDeps, fn: () => Promise<T>, streamKey?: string): Promise<T> {
+  return deps.pool ? deps.pool.withUpload(fn, streamKey) : fn();
 }
 
 /** 分段上传的一个"分 P"产物(单段直接 remux 或若干段合并成组)。 */
@@ -355,7 +355,7 @@ export async function runSegmentPipeline(o: {
     bv = await retry(
       () => runUpload(deps, () => deps.uploadPlainRaw
         ? deps.uploadPlainRaw({ ...plainOpts, video: p1Path, title: uploadTitle })
-        : deps.uploadPlain({ ...plainOpts, video: p1Path, title: uploadTitle })),
+        : deps.uploadPlain({ ...plainOpts, video: p1Path, title: uploadTitle }), streamKey),
       { tries: 3, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) },
     );
     ledger.setBv(streamKey, bv); // 建稿成功即刻落库(与合并路径同一幂等边界)
@@ -383,7 +383,7 @@ export async function runSegmentPipeline(o: {
     jlog(`append plain 段 ${idxs.join(",")}: ${batch.length} 文件`);
     const tries = batch.length === 1 ? 5 : 1;
     await retry(
-      () => runUpload(deps, () => deps.appendGroup({ ...plainOpts, bv, files: batch })),
+      () => runUpload(deps, () => deps.appendGroup({ ...plainOpts, bv, files: batch }), streamKey),
       { tries, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
     );
     for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);
@@ -475,7 +475,7 @@ async function appendSegmentGroup(
     const tries = batch.length === 1 ? 5 : 1;
     // retry 包在 runUpload 外:每次重试都重新获取上传配额(命中 601 后队列已记冷却)。
     await retry(
-      () => runUpload(deps, () => deps.appendGroup({ bv, files: batch, cookies: deps.cfg.cookies, public: isPublic })),
+      () => runUpload(deps, () => deps.appendGroup({ bv, files: batch, cookies: deps.cfg.cookies, public: isPublic }), streamKey),
       {
         tries,
         backoffMs: 60_000,
@@ -527,7 +527,7 @@ async function resumeSegmentAppends(
     if (batch.length === 0) continue;
     jlog(`续跑 append plain 分 P ${idxs.join(",")}`);
     await retry(
-      () => runUpload(deps, () => deps.appendGroup({ bv, files: batch, cookies: cfg.cookies, public: isPublic })),
+      () => runUpload(deps, () => deps.appendGroup({ bv, files: batch, cookies: cfg.cookies, public: isPublic }), streamKey),
       { tries: batch.length === 1 ? 5 : 1, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
     );
     for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);

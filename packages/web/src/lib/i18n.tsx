@@ -53,7 +53,7 @@ export function useT(): (key: string, vars?: Record<string, string | number>) =>
 const DICT = {
   zh: {
     common: { cancel: "取消", confirm: "确定", save: "保存", delete: "删除", refresh: "刷新", close: "关闭", optional: "可选", on: "开", off: "关", yes: "是", no: "否", localTimeTooltip: "当前时区：{serverTz}\n你的本地时间：{local}" },
-    nav: { title: "抖音录制控制台", tasksList: "录制任务", login: "扫码登录", paste: "手动粘贴", clear: "清除", notif: "站内提醒设置" },
+    nav: { title: "抖音录制控制台", tasksList: "录制任务", queue: "处理队列", login: "扫码登录", paste: "手动粘贴", clear: "清除", notif: "站内提醒设置" },
     theme: { toDark: "切换到暗色", toLight: "切换到亮色", darkMode: "暗色模式", lightMode: "亮色模式" },
     cookie: {
       checking: "检查中…", loggedIn: "已登录", expired: "登录已过期", expiresIn: "剩 {days} 天过期",
@@ -271,10 +271,21 @@ const DICT = {
         created: "Worker 已创建", updated: "Worker 已更新",
       },
     },
+    queue: {
+      title: "处理队列", subtitle: "所有直播间的后处理一屏可见:做了什么 → 正在做什么 → 下面做什么。",
+      childDesc: "处理队列只在 master(启用 hub)上可用。本节点为录制节点,后处理由 master 统一编排。",
+      empty: "队列空闲", emptyHint: "有直播收播后,后处理会自动出现在这里。",
+      nothingDone: "尚未开始", currentUnknown: "准备中", next: "下一步",
+      queuedAt: "等锁 · 第 {n} 位",
+      doing: { preparing: "准备中", settle: "等待收播后开始", manual: "等待人工处理" },
+      phase: { running: "执行中", queued: "排队中", pulling: "拉取中", settle: "等待收播", manual: "待人工" },
+      section: { running: "进行中", pending: "待处理", recent: "最近完成", noneRunning: "当前没有正在执行的后处理" },
+      pool: { cpu: "CPU / 合并烧录", upload: "上传窗口", cooldown: "上传冷却", queued: "排队 {n}", unlimited: "不限速", noCooldown: "正常" },
+    },
   },
   en: {
     common: { cancel: "Cancel", confirm: "Confirm", save: "Save", delete: "Delete", refresh: "Refresh", close: "Close", optional: "optional", on: "On", off: "Off", yes: "Yes", no: "No", localTimeTooltip: "Current timezone: {serverTz}\nYour local time: {local}" },
-    nav: { title: "Douyin Recorder", tasksList: "Tasks", login: "QR Login", paste: "Paste Cookie", clear: "Clear", notif: "Notification settings" },
+    nav: { title: "Douyin Recorder", tasksList: "Tasks", queue: "Queue", login: "QR Login", paste: "Paste Cookie", clear: "Clear", notif: "Notification settings" },
     theme: { toDark: "Switch to dark", toLight: "Switch to light", darkMode: "Dark mode", lightMode: "Light mode" },
     cookie: {
       checking: "Checking…", loggedIn: "Logged in", expired: "Login expired", expiresIn: "{days}d left",
@@ -491,6 +502,17 @@ const DICT = {
         testOk: "Connected · dataRoot reachable", testFailed: "Connection failed: {error}", unknownError: "Unknown error",
         created: "Worker created", updated: "Worker updated",
       },
+    },
+    queue: {
+      title: "Processing queue", subtitle: "Every room's post-processing in one view: done → doing → next.",
+      childDesc: "The processing queue is only available on master (hub enabled). This node records; master orchestrates post-processing.",
+      empty: "Queue idle", emptyHint: "Post-processing shows up here once a stream ends.",
+      nothingDone: "Not started", currentUnknown: "Preparing", next: "Next",
+      queuedAt: "waiting · #{n}",
+      doing: { preparing: "Preparing", settle: "Waiting for stream to end", manual: "Needs manual action" },
+      phase: { running: "Running", queued: "Queued", pulling: "Pulling", settle: "Waiting to end", manual: "Needs manual" },
+      section: { running: "In progress", pending: "Pending", recent: "Recently finished", noneRunning: "No post-processing running right now" },
+      pool: { cpu: "CPU / merge+burn", upload: "Upload window", cooldown: "Upload cooldown", queued: "queued {n}", unlimited: "unlimited", noCooldown: "Clear" },
     },
   },
 };

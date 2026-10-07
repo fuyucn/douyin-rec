@@ -284,6 +284,92 @@ describe("ResourcePool — cpu/net 串行与内存闸门", () => {
     await pool.withCpu(async () => {});
   });
 
+  it("snapshot():暴露 cpu/net/upload 占用、排队数、等待场位次", async () => {
+    let now = 1_000_000;
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 0, maxCpuParallel: 1, uploadRateLimit: 5, uploadRateWindowMs: 600_000 },
+      { now: () => now },
+    );
+    // 初始:全空闲
+    expect(pool.snapshot()).toMatchObject({
+      cpu: { active: 0, queued: 0, max: 1 },
+      upload: { active: 0, queued: 0, cooldownUntil: 0, windowUsed: 0, windowLimit: 5 },
+      waiting: [],
+    });
+    // A 持 CPU 锁,记「A 在等 cpu」的语义由 runNode 传入 streamKey 决定;这里直接断言持锁后 active=1。
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const a = pool.withCpu(async () => { await gate; }, "douyin:1:d");
+    await vi.waitFor(() => expect(pool.snapshot().cpu.active).toBe(1));
+    // B 排队:queued=1,A 在锁内(不 wait 状态,故 waiting 里只有 A 进闸门前? A 已 clear),B 排队中登记 waiting。
+    const b = pool.withCpu(async () => {}, "douyin:2:d");
+    await vi.waitFor(() => expect(pool.snapshot().cpu.queued).toBe(1));
+    const w = pool.snapshot().waiting;
+    expect(w.map((x) => x.streamKey)).toContain("douyin:2:d");
+    expect(w.find((x) => x.streamKey === "douyin:2:d")?.position).toBe(1);
+    release();
+    await Promise.all([a, b]);
+    expect(pool.snapshot()).toMatchObject({ cpu: { active: 0, queued: 0 }, waiting: [] });
+  });
+
+  it("snapshot():上传窗口计数与 601 冷却透出", async () => {
+    let now = 1_000_000;
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 0, maxCpuParallel: 1, uploadRateLimit: 5, uploadRateWindowMs: 600_000, uploadCooldownMs: 1_800_000 },
+      { now: () => now },
+    );
+    await pool.withUpload(async () => {}, "douyin:1:d");
+    expect(pool.snapshot().upload).toMatchObject({ active: 0, queued: 0, windowUsed: 1, windowLimit: 5 });
+    // 命中 601 → 全局冷却
+    await expect(pool.withUpload(async () => { throw new Error("upload rate limit (code: 601)"); }, "douyin:2:d")).rejects.toThrow();
+    const up = pool.snapshot().upload;
+    expect(up.cooldownUntil).toBe(now + 1_800_000);
+  });
+
+  it("snapshot():同场 cpu 排队 + upload 节点完成 → cpu 的 waiting 不能被误清(回归)", async () => {
+    // 审核实测过的 bug:waiting 曾以 streamKey 单键存储,upload 的 clear() 会删掉同场 cpu 的登记
+    // → 队列页把「正在等 CPU」显示成「执行中」,恰是本功能要修的失真。
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, uploadRateLimit: 0 });
+    const K = "douyin:1:d";
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const holder = pool.withCpu(async () => { await gate; }, "douyin:OTHER:d");
+    await vi.waitFor(() => expect(pool.snapshot().cpu.active).toBe(1));
+    const burn = pool.withCpu(async () => {}, K); // K 在 cpu 队列
+    await vi.waitFor(() => expect(pool.snapshot().cpu.queued).toBe(1));
+    await pool.withUpload(async () => {}, K); // 同场 upload 走上传链并完成 → 只应清 upload 那条
+    const s = pool.snapshot();
+    expect(s.cpu.queued).toBe(1);
+    expect(s.waiting.map((w) => `${w.streamKey}/${w.resource}`)).toContain(`${K}/cpu`);
+    release();
+    await Promise.all([holder, burn]);
+  });
+
+  it("snapshot():同场两个节点同抢 cpu → 两条都在,各自 clear 不影响同伴(回归)", async () => {
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, uploadRateLimit: 0 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const holder = pool.withCpu(async () => { await gate; }, "douyin:OTHER:d");
+    await vi.waitFor(() => expect(pool.snapshot().cpu.active).toBe(1));
+    const K = "douyin:2:d";
+    const b1 = pool.withCpu(async () => {}, K);
+    const b2 = pool.withCpu(async () => {}, K);
+    await vi.waitFor(() => expect(pool.snapshot().cpu.queued).toBe(2));
+    expect(pool.snapshot().waiting.filter((w) => w.streamKey === K)).toHaveLength(2);
+    release();
+    await Promise.all([holder, b1, b2]);
+    expect(pool.snapshot().waiting).toHaveLength(0);
+  });
+
+  it("snapshot():等待登记在 fn 抛错后一定清除(不泄漏幽灵条目)", async () => {
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, uploadRateLimit: 0 });
+    await expect(pool.withCpu(async () => { throw new Error("boom"); }, "douyin:3:d")).rejects.toThrow("boom");
+    await expect(pool.withUpload(async () => { throw new Error("boom"); }, "douyin:3:d")).rejects.toThrow("boom");
+    expect(pool.snapshot().waiting).toHaveLength(0);
+    expect(pool.snapshot().upload.queued).toBe(0);
+    expect(pool.snapshot().upload.active).toBe(0);
+  });
+
   it("内存闸门:可用内存不足时 cpu 节点等待,充足后放行", async () => {
     const t = makeDeps();
     let mem = 500; // MB

@@ -11,7 +11,10 @@
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { HUB_TABLE_NAMES, HUB_TERMINAL_STATES } from "@drec/core";
+import {
+  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, readyNodes,
+  type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO, type QueuePhase,
+} from "@drec/core";
 import { rootHubConfig, rootStageDir } from "./paths.js";
 
 export interface HubJobEvent { state: string; at: number; }
@@ -170,6 +173,13 @@ function historicalRates(db: DatabaseSync): Map<string, number> {
 export interface ListHubJobsOpts {
   /** 只列某房间的 run(key=`{platform}.{roomSlug}`;streamKey 前缀 `{platform}:{roomSlug}:` 过滤)。省略=全部房间。 */
   room?: string;
+  /**
+   * 只列这些状态;省略=不限。与 `excludeStates` 互斥。
+   * 队列页用它精确取「进行中」(`NOT IN 终态` ∪ `needs_manual`),**不受最近 N 条分页截断**。
+   */
+  states?: readonly string[];
+  /** 排除这些状态(如终态);省略=不限。与 `states` 互斥。 */
+  excludeStates?: readonly string[];
   /** 分页:返回条数(默认 10)。 */
   limit?: number;
   /** 分页:跳过条数(默认 0)。 */
@@ -198,16 +208,23 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
     let jobs: RawJob[];
     let total = 0;
     try {
-      if (prefix) {
-        total = Number((db.prepare("SELECT COUNT(*) AS n FROM sync_jobs WHERE streamKey LIKE ?")
-          .get(prefix + "%") as unknown as { n: number }).n);
-        jobs = db.prepare("SELECT * FROM sync_jobs WHERE streamKey LIKE ? ORDER BY updatedAt DESC LIMIT ? OFFSET ?")
-          .all(prefix + "%", limit, offset) as unknown as RawJob[];
-      } else {
-        total = Number((db.prepare("SELECT COUNT(*) AS n FROM sync_jobs").get() as unknown as { n: number }).n);
-        jobs = db.prepare("SELECT * FROM sync_jobs ORDER BY updatedAt DESC LIMIT ? OFFSET ?")
-          .all(limit, offset) as unknown as RawJob[];
+      // WHERE 子句统一拼:room 前缀 + 状态过滤(常量占位符,无注入面)。
+      const where: string[] = [];
+      const params: Array<string | number> = [];
+      if (prefix) { where.push("streamKey LIKE ?"); params.push(prefix + "%"); }
+      // states 与 excludeStates 互斥(同时给以 excludeStates 为准 —— 调用方不该这么用)。
+      if (opts.states && opts.states.length > 0) {
+        where.push(`state IN (${opts.states.map(() => "?").join(",")})`);
+        params.push(...opts.states);
+      } else if (opts.excludeStates && opts.excludeStates.length > 0) {
+        where.push(`state NOT IN (${opts.excludeStates.map(() => "?").join(",")})`);
+        params.push(...opts.excludeStates);
       }
+      const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
+      total = Number((db.prepare(`SELECT COUNT(*) AS n FROM sync_jobs${whereSql}`)
+        .get(...params) as unknown as { n: number }).n);
+      jobs = db.prepare(`SELECT * FROM sync_jobs${whereSql} ORDER BY updatedAt DESC LIMIT ? OFFSET ?`)
+        .all(...params, limit, offset) as unknown as RawJob[];
     } catch { return { jobs: [], total: 0 }; } // 旧库无表
     const rates = historicalRates(db);
     const views = jobs.map((j) => {
@@ -283,4 +300,168 @@ export function readHubJobLog(streamKey: string, tailBytes = 65536, stageDir = h
   const size = statSync(p).size;
   const buf = readFileSync(p);
   return buf.subarray(Math.max(0, size - tailBytes)).toString("utf-8");
+}
+
+/** `{platform}:{roomSlug}:{date...}` → 前两段(platform + roomSlug)。残缺 → 安全兜底。 */
+function splitStreamKey(streamKey: string): { platform: string; roomSlug: string } {
+  const parts = streamKey.split(":");
+  return { platform: parts[0] ?? "", roomSlug: parts[1] ?? "" };
+}
+
+/** 资源节点判定(与 orchestrator workflow 的 node.resource 对齐):merge/burn=占用 CPU,上传类=占用上传队列。 */
+function resourceOfNode(node: string | null): "cpu" | "net" | "upload" | null {
+  if (!node) return null;
+  if (node === "upload_plain" || node === "append_danmu" || node === "append_livechat") return "upload";
+  if (node === "merge" || node === "burn_danmu" || node === "burn_livechat") return "cpu";
+  return null;
+}
+
+export interface BuildQueueOpts {
+  /** room key(`{platform}.{roomSlug}`)→ 主播显示名;省略 → anchorName=null。 */
+  anchorOf?: (platform: string, roomSlug: string) => string | null;
+  /**
+   * 该房间被规则禁用的 pipeline 节点(如 stage 模式无 upload_plain/append_*)。
+   * 用于把 nextSteps 里「本就不会跑」的节点剔除(否则 pending 场会显示不会发生的下一步)。
+   * 省略 → 按全开推导(workflow 真跑起来后 nodeStates 的 skipped 会自纠)。
+   */
+  disabledOf?: (platform: string, roomSlug: string) => ReadonlySet<string> | null;
+  /** master 资源池快照;省略(slave/未注入)→ 全 0(不影响列表,只是没有排队位次)。 */
+  pool?: HubPoolSnapshotDTO;
+  /** 最近完成条数(默认 8)。 */
+  recentLimit?: number;
+  /**
+   * 「待人工」最多列几条(默认 20)。needs_manual 是终态、却要留在进行中列表;
+   * stage 模式的正常收口也是它(pipeline.ts:480)→ 长期 master 会堆积,必须 cap 否则淹没进行中区。
+   */
+  manualLimit?: number;
+  now?: number;
+  stageDir?: string;
+}
+
+const EMPTY_POOL: HubPoolSnapshotDTO = {
+  cpu: { active: 0, queued: 0, max: 0 },
+  net: { active: 0, queued: 0, max: 0 },
+  upload: { active: 0, queued: 0, cooldownUntil: 0, windowUsed: 0, windowLimit: 0, windowResetAt: 0 },
+  waiting: [],
+};
+
+/**
+ * 处理队列聚合视图(GET /api/hub/queue):一屏回答「做了什么 / 正在做什么 / 下面做什么」。
+ *
+ * - active:所有非终态 job(`pending/settling/syncing/merging/uploading/retrying`),按状态分组排序。
+ * - 排队判定:资源池快照里该 streamKey 在 `waiting` 中 → phase=queued + queuePosition(第 N 位);
+ *   否则若当前 state 是资源节点 → phase=running;pending/settling → waiting_settle;其他 → running。
+ * - doneSteps:该场已完成子步骤(做了什么);nextSteps:按 core DAG 推导(下面做什么)。
+ */
+export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): HubQueueDTO {
+  const { pool = EMPTY_POOL, recentLimit = 8, manualLimit = 20, stageDir = hubStageDir() } = opts;
+  // **不要**用「取最近 N 条再客户端过滤」:台账超过 N 行后,updatedAt 较旧的**正在处理**场
+  // 会被新完成的历史挤出结果 → 队列页整场消失(实测 1 active + 520 done → active=[])。
+  // 故分两条精确查询:①非终态 ∪ needs_manual(=active) ②终态按 updatedAt 倒序取 recentLimit(=recent)。
+  const activeRows = listHubJobs(syncDbPath, {
+    excludeStates: [...TERMINAL], limit: 200, offset: 0, now: opts.now, stageDir,
+  });
+  const manualRows = listHubJobs(syncDbPath, {
+    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir,
+  });
+  const recentRows = listHubJobs(syncDbPath, {
+    states: ["done", "failed"], limit: recentLimit, offset: 0, now: opts.now, stageDir,
+  });
+  // 同一场可能登记多条 waiting(两个 burn 同抢 cpu + upload)→ 取**最早**那条(最急)作代表,
+  // 其余忽略(位次取该资源队列内的真实序号)。
+  const waitingByKey = new Map<string, (typeof pool.waiting)[number]>();
+  for (const w of [...pool.waiting].sort((a, b) => a.since - b.since)) {
+    if (!waitingByKey.has(w.streamKey)) waitingByKey.set(w.streamKey, w);
+  }
+
+  const active: QueueItemDTO[] = [];
+  const recent = [...recentRows.jobs];
+
+  for (const job of [...activeRows.jobs, ...manualRows.jobs]) {
+    const { platform, roomSlug } = splitStreamKey(job.streamKey);
+    // 当前节点:优先 nodeStates 里 running 的节点,回落用 state 名映射。
+    const runningNode = job.nodeStates.find((n) => n.state === "running")?.node ?? null;
+    const currentNode = runningNode ?? stateToNode(job.state);
+    const resource = resourceOfNode(currentNode);
+    const waiting = waitingByKey.get(job.streamKey);
+    const phase: QueuePhase = job.state === "needs_manual"
+      ? "waiting_manual"
+      : waiting
+        ? "queued"
+        : job.state === "pending" || job.state === "settling"
+          ? "waiting_settle"
+          : "running";
+    // 已完成子步骤(做了什么):doneSteps = 有 done 事件的节点(去重,保序)。
+    const doneSteps = doneStepsOf(job);
+    // 下面做什么:DAG 中所有前驱已 done/skipped 的 pending 节点。
+    const doneOrSkipped = new Set<string>(
+      job.nodeStates.filter((n) => n.state === "done" || n.state === "skipped").map((n) => n.node),
+    );
+    const disabled = opts.disabledOf?.(platform, roomSlug) ?? null;
+    // 「下面做什么」分两种口径,避免对还没开跑的场过度承诺:
+    //  - **未在跑**(waiting_settle / waiting_manual,currentNode=null):只列**立即可跑**的节点
+    //    (readyNodes = 所有前驱已 done/skipped)。否则 settling 场会一直挂着
+    //    「下一步:烧 danmu / 传 plain / 追 P2 / 追 P3」,读起来像马上要跑(实际可能等几小时收播窗)。
+    //  - **正在跑**(running/queued,currentNode!=null):列 DAG 里尚未完成、且不是当前节点的其余节点
+    //    (当前节点自己由 currentNode 展示)。burn 与 upload 是并行轨,故这里是并集而非单链。
+    const settled = new Set<string>([...doneOrSkipped, ...(disabled ?? [])]);
+    const nextSteps = currentNode
+      ? HUB_FLOW_ORDER.filter((n) => !doneOrSkipped.has(n) && !disabled?.has(n) && n !== currentNode)
+      : readyNodes(settled);
+    active.push({
+      streamKey: job.streamKey,
+      platform,
+      roomSlug,
+      anchorName: opts.anchorOf ? opts.anchorOf(platform, roomSlug) : null,
+      state: job.state,
+      phase,
+      resource,
+      queuePosition: waiting ? waiting.position : null,
+      currentNode,
+      doneSteps,
+      nextSteps,
+      currentStepSec: job.currentStepSec,
+      etaSec: job.etaSec,
+      winnerWorker: job.winnerWorker,
+      fails: job.fails,
+      updatedAt: job.updatedAt,
+    });
+  }
+
+  // 排序:**执行中在前**(先看在跑的)→ 排队中(按资源队列位次)→ 等待收播 → 待人工。
+  // 各段内按 updatedAt 倒序(新的在前)。null queuePosition 排到末尾(不占用「第 1 位」视觉位)。
+  const phaseRank: Record<QueuePhase, number> = { running: 0, queued: 1, waiting_settle: 2, waiting_manual: 3 };
+  active.sort((a, b) => {
+    const ra = phaseRank[a.phase], rb = phaseRank[b.phase];
+    if (ra !== rb) return ra - rb;
+    if (a.phase === "queued" && b.phase === "queued") {
+      return (a.queuePosition ?? Number.MAX_SAFE_INTEGER) - (b.queuePosition ?? Number.MAX_SAFE_INTEGER);
+    }
+    return b.updatedAt - a.updatedAt;
+  });
+  recent.sort((a, b) => b.updatedAt - a.updatedAt);
+
+  return { active, recent: recent.slice(0, recentLimit), pool };
+}
+
+/** 已完成子步骤(done 事件,按 step 去重、保首次完成序)。 */
+function doneStepsOf(job: HubJobView): HubJobStep[] {
+  const seen = new Set<string>();
+  const out: HubJobStep[] = [];
+  for (const s of job.steps) {
+    if (s.phase !== "done" || seen.has(s.step)) continue;
+    seen.add(s.step);
+    out.push(s);
+  }
+  return out;
+}
+
+/** 粗粒度 state → 当前 pipeline 节点名(回落;更准的来自 nodeStates running)。 */
+function stateToNode(state: string): string | null {
+  switch (state) {
+    case "merging": return "merge";
+    case "uploading": return "upload_plain";
+    case "syncing": return "pull";
+    default: return null;
+  }
 }

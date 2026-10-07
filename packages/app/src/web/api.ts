@@ -31,6 +31,7 @@ import {
   type WorkerStatus,
   type RecordingWorkerStatusDTO,
   type BiliupAuthStatus,
+  type HubPoolSnapshotDTO,
 } from "@drec/core";
 import * as hubStore from "../hub-store.js";
 import type { HubRule } from "../hub-store.js";
@@ -47,7 +48,7 @@ import { readBiliupCookieHeader } from "../upload/biliup.js";
 import type { TaskRuntime } from "../task-manager.js";
 import { inWindow, nowMinutesLocal } from "../scheduler.js";
 import type { MergeJobStore } from "../merge-jobs.js";
-import { activeHubJobKeys, deleteHubJobHistory, listHubJobs, readHubJobLog } from "../hub-jobs.js";
+import { activeHubJobKeys, buildQueueView, deleteHubJobHistory, listHubJobs, readHubJobLog } from "../hub-jobs.js";
 
 /** Uniform handler result. status = HTTP status, body = JSON-serialisable. */
 export interface ApiResult {
@@ -136,6 +137,8 @@ export interface ApiDeps {
   stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 立刻跑一场已有录像的后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
+  /** master 资源池快照(CLI 注入,读同一 ResourcePool 实例)。省略/未就绪 → 队列页无排队位次(全 0)。 */
+  poolSnapshot?: () => HubPoolSnapshotDTO | undefined;
 }
 
 /**
@@ -352,6 +355,8 @@ export interface Api {
   reorderHubRules(input: { keys?: string[] }): ApiResult;
   /** GET /api/hub/jobs[?room=&limit=&offset=] — hub run 列表(状态/时间线/ETA/hasLog + total 分页)。 */
   listHubJobs(opts?: { room?: string; limit?: number; offset?: number }): ApiResult;
+  /** GET /api/hub/queue — 处理队列视图:进行中(做了什么/正在做什么/下面做什么)+ 最近完成 + 资源池占用。 */
+  hubQueue(): ApiResult;
   /** GET /api/hub/jobs/:key/log — 该场 job.log 尾部(key=streamKey,URL-encoded)。 */
   getHubJobLog(streamKey: string): ApiResult;
   /** POST /api/hub/jobs/:key/retry-node { node, force? } — 手动重跑单个 workflow 节点。 */
@@ -1036,6 +1041,46 @@ export function makeApi(deps: ApiDeps): Api {
       const log = readHubJobLog(streamKey);
       if (log == null) return err(404, `该场无 job.log(旧版本产生的任务没有,或 stage 已清理): ${streamKey}`);
       return { status: 200, body: { streamKey, log } };
+    },
+    hubQueue(): ApiResult {
+      if (!deps.syncDbPath) {
+        // slave/hub 未开 → 空队列(+ 空资源池),前端显示空态。
+        return {
+          status: 200,
+          body: {
+            active: [], recent: [],
+            pool: { cpu: { active: 0, queued: 0, max: 0 }, net: { active: 0, queued: 0, max: 0 },
+              upload: { active: 0, queued: 0, cooldownUntil: 0, windowUsed: 0, windowLimit: 0, windowResetAt: 0 }, waiting: [] },
+          },
+        };
+      }
+      try {
+        // 一次 listTasks 建 roomSlug+platform → 主播名映射(hubRuleView 也是这个优先级)。
+        const tasks = store.listTasks();
+        const anchorOf = (platform: string, roomSlug: string): string | null => {
+          const t = tasks.find(
+            (task) => platformForRoom(task.room).id === platform
+              && platformForRoom(task.room).extractRoomSlug(task.room) === roomSlug,
+          );
+          return t ? manager.getAnchorName(t.id) ?? t.anchorName ?? t.name ?? null : null;
+        };
+        // 该房间规则禁用的节点 → 从 nextSteps 剔除(upload 类只在 upload 模式;burn_* 按 steps 开关)。
+        const disabledOf = (platform: string, roomSlug: string): ReadonlySet<string> | null => {
+          const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform, roomSlug));
+          if (!rule) return null; // 无规则:未知 → 不剔除(nodeStates 的 skipped 会自纠)
+          const p = rule.pipeline ?? {};
+          const out = new Set<string>();
+          if (p.steps?.burnDanmu === false) out.add("burn_danmu");
+          if (p.steps?.burnLivechat === false) out.add("burn_livechat");
+          if (p.upload?.mode !== "upload") {
+            out.add("upload_plain").add("append_danmu").add("append_livechat");
+          }
+          return out;
+        };
+        return { status: 200, body: buildQueueView(deps.syncDbPath, { anchorOf, disabledOf, pool: deps.poolSnapshot?.() }) };
+      } catch (e) {
+        return err(500, `读 hub 队列失败: ${String((e as Error)?.message ?? e)}`);
+      }
     },
     async retryHubNode(streamKey, input): Promise<ApiResult> {
       if (!deps.syncDbPath || !deps.retryNode) return err(400, "hub 未启用(单节点重跑未注入)");

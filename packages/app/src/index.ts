@@ -14,8 +14,8 @@ export type { HubRule } from "./hub-store.js";
 // 文件版 worker(录制节点)配置(hub.config.json 的 workers 数组):cli reconciler + api 用。
 export * as workerStore from "./worker-store.js";
 export type { WorkerConfig } from "./worker-store.js";
-export { listHubJobs, readHubJobLog, jobLogPath, hubStageDir } from "./hub-jobs.js";
-export type { HubJobView, HubJobEvent } from "./hub-jobs.js";
+export { listHubJobs, readHubJobLog, jobLogPath, hubStageDir, buildQueueView } from "./hub-jobs.js";
+export type { HubJobView, HubJobEvent, BuildQueueOpts } from "./hub-jobs.js";
 export { rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, DEFAULT_ROOT } from "./paths.js";
 export { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
 /** 应用版本号({root package.json version}-{commit6},由 pnpm bundle 注入;非打包环境回落 dev)。 */

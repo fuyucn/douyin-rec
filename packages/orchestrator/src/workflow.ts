@@ -374,10 +374,22 @@ export interface ResourcePoolCfg {
   uploadCooldownMs?: number;
 }
 
+/** ResourcePool.snapshot() 的返回:各资源占用 / 排队 / 上传窗口 / 冷却 + 正在等锁的场。 */
+export interface PoolSnapshot {
+  cpu: { active: number; queued: number; max: number };
+  net: { active: number; queued: number; max: number };
+  upload: { active: number; queued: number; cooldownUntil: number; windowUsed: number; windowLimit: number; windowResetAt: number };
+  waiting: Array<{ streamKey: string; resource: "cpu" | "net" | "upload"; position: number; since: number }>;
+}
+
 class Semaphore {
   private active = 0;
   private queue: Array<() => void> = [];
   constructor(private max: number) {}
+  /** 只读快照:当前持锁数 / 等待队列长度 / 上限。 */
+  snapshot(): { active: number; queued: number; max: number } {
+    return { active: this.active, queued: this.queue.length, max: this.max };
+  }
   async acquire(): Promise<void> {
     if (this.active < this.max) { this.active++; return; }
     await new Promise<void>((resolve) => this.queue.push(resolve));
@@ -412,6 +424,22 @@ export class ResourcePool {
   private streamLocks = new Map<string, Promise<unknown>>();
   /** 全局上传队列:一条跨所有 streamKey 的串行链 + 上次提交时刻(算最小间隔)。 */
   private uploadChain: Promise<unknown> = Promise.resolve();
+  /** 在途上传提交数(进入链 +1、结算 -1);用于队列页区分「排队」与「执行」。 */
+  private uploadActive = 0;
+  private uploadQueued = 0;
+  /**
+   * 正在等资源闸门的场(streamKey → {resource, since})。runNode 进闸门前登记、进闸门后清除。
+   * 队列页据此把「状态=merging 但其实在等 CPU」显示成「排队中(第 N 位)」而非「执行中」。
+   *
+   * **键必须是 (streamKey, resource) 而不是 streamKey** —— 同一场常同时有多个节点等不同闸门
+   * (burn_danmu/burn_livechat 在 cpu 队列 + upload_plain 在上传链,见 runWorkflowNodes 同 tick 派发)。
+   * 用 streamKey 单键会互相覆盖:后登记者顶掉前者,且任一 clear() 会误删另一条 → 排队位次丢失。
+   * 值用数组(Set 不便按 token 精确删除):同一 (key,resource) 可能有多条(两个 burn 同抢 cpu)。
+   */
+  private waiting = new Map<
+    string,
+    Array<{ streamKey: string; resource: "cpu" | "net" | "upload"; since: number; token: symbol }>
+  >();
   private minBurnFreeMemMB: number;
   private memWaitTimeoutMs: number;
   private now: () => number;
@@ -447,25 +475,98 @@ export class ResourcePool {
     try { return await fn(); } finally { s.release(); }
   }
 
-  /** CPU 锁(merge/burn 共用,max=1)+ 内存闸门;内存长期不足 → 抛错由节点标 failed。 */
-  async withCpu<T>(fn: () => Promise<T>): Promise<T> {
-    return this.withSemaphore(this.cpu, async () => {
-      if (this.minBurnFreeMemMB > 0) {
-        const deadline = this.now() + this.memWaitTimeoutMs;
-        while (this.freeMemMB() < this.minBurnFreeMemMB) {
-          throwIfAborted();
-          if (this.now() >= deadline) {
-            throw new Error(`内存不足(可用 ${Math.round(this.freeMemMB())}MB < ${this.minBurnFreeMemMB}MB),等待超时`);
-          }
-          await this.sleep(2000);
-        }
-      }
-      return fn();
-    });
+  /**
+   * 登记「某场在等某资源」;返回**只清除自己那一条**的函数。
+   * token 唯一标识本次登记 —— 同 (key,resource) 可能有多条并发(两个 burn 同时抢 cpu),
+   * clear 只能删自己那条,不能 `delete(key)` 把同伴一起清掉。
+   */
+  private markWaiting(streamKey: string | undefined, resource: "cpu" | "net" | "upload"): () => void {
+    if (!streamKey) return () => {};
+    const key = `${resource}:${streamKey}`; // 资源前缀 → 同一场的不同资源天然分开
+    const token = Symbol(resource);
+    const entry = { streamKey, resource, since: this.now(), token };
+    const list = this.waiting.get(key);
+    if (list) list.push(entry);
+    else this.waiting.set(key, [entry]);
+    return () => {
+      const cur = this.waiting.get(key);
+      if (!cur) return;
+      const i = cur.findIndex((e) => e.token === token);
+      if (i >= 0) cur.splice(i, 1);
+      if (cur.length === 0) this.waiting.delete(key);
+    };
   }
 
-  async withNet<T>(fn: () => Promise<T>): Promise<T> {
-    return this.withSemaphore(this.net, fn);
+  /**
+   * 只读快照:各资源占用 / 排队 / 上传窗口 / 冷却 + 正在等锁的场。
+   * 队列页(GET /api/hub/queue)用。绝不修改内部状态。
+   */
+  snapshot(): PoolSnapshot {
+    const now = this.now();
+    const winStart = now - this.uploadRateWindowMs;
+    const inWindow = this.uploadTimes.filter((t) => t > winStart);
+    // 位次按资源分组:每个资源队列内先到的排前(1-based)。
+    const byResource = new Map<string, Array<{ streamKey: string; since: number }>>();
+    for (const entries of this.waiting.values()) {
+      for (const e of entries) {
+        const list = byResource.get(e.resource) ?? [];
+        list.push({ streamKey: e.streamKey, since: e.since });
+        byResource.set(e.resource, list);
+      }
+    }
+    const waiting: PoolSnapshot["waiting"] = [];
+    for (const [resource, list] of byResource) {
+      list.sort((a, b) => a.since - b.since);
+      list.forEach((e, i) =>
+        waiting.push({ streamKey: e.streamKey, resource: resource as "cpu" | "net" | "upload", position: i + 1, since: e.since }),
+      );
+    }
+    waiting.sort((a, b) => a.since - b.since);
+    return {
+      cpu: this.cpu.snapshot(),
+      net: this.net.snapshot(),
+      upload: {
+        active: this.uploadActive,
+        queued: this.uploadQueued,
+        cooldownUntil: this.uploadBlockedUntil > now ? this.uploadBlockedUntil : 0,
+        windowUsed: inWindow.length,
+        windowLimit: this.uploadRateLimit,
+        windowResetAt: inWindow.length > 0 ? inWindow[0] + this.uploadRateWindowMs : 0,
+      },
+      waiting,
+    };
+  }
+
+  /** CPU 锁(merge/burn 共用,max=1)+ 内存闸门;内存长期不足 → 抛错由节点标 failed。 */
+  async withCpu<T>(fn: () => Promise<T>, streamKey?: string): Promise<T> {
+    const clear = this.markWaiting(streamKey, "cpu");
+    try {
+      return await this.withSemaphore(this.cpu, async () => {
+        clear(); // 已进闸门 → 不再算「排队」
+        if (this.minBurnFreeMemMB > 0) {
+          const deadline = this.now() + this.memWaitTimeoutMs;
+          while (this.freeMemMB() < this.minBurnFreeMemMB) {
+            throwIfAborted();
+            if (this.now() >= deadline) {
+              throw new Error(`内存不足(可用 ${Math.round(this.freeMemMB())}MB < ${this.minBurnFreeMemMB}MB),等待超时`);
+            }
+            await this.sleep(2000);
+          }
+        }
+        return fn();
+      });
+    } finally {
+      clear();
+    }
+  }
+
+  async withNet<T>(fn: () => Promise<T>, streamKey?: string): Promise<T> {
+    const clear = this.markWaiting(streamKey, "net");
+    try {
+      return await this.withSemaphore(this.net, async () => { clear(); return fn(); });
+    } finally {
+      clear();
+    }
   }
 
   /**
@@ -473,15 +574,23 @@ export class ResourcePool {
    * (窗口 uploadRateWindowMs 内最多 uploadRateLimit 次);命中 601 后全局冷却 uploadCooldownMs。
    * 用于 upload_plain / append_*。提交前等足配额;单次提交失败但非 601 → 不惩罚后续提交。
    */
-  async withUpload<T>(fn: () => Promise<T>): Promise<T> {
+  async withUpload<T>(fn: () => Promise<T>, streamKey?: string): Promise<T> {
+    this.uploadQueued++; // 进入上传链即算排队;轮到它时转为 active
     const run = this.uploadChain.then(async (): Promise<T> => {
-      await this._awaitUploadSlot();
+      this.uploadQueued--;
+      this.uploadActive++;
+      const clear = this.markWaiting(streamKey, "upload");
       try {
+        await this._awaitUploadSlot();
+        clear(); // 配额已拿到 → 不再算「排队等锁」(可能仍在冷却期,由 cooldownUntil 表达)
         return await fn();
       } catch (e) {
         // 601:记录全局冷却,让后续提交(含本次重试)等够时间再打。
         if (isUploadRateLimited(e)) this.uploadBlockedUntil = Math.max(this.uploadBlockedUntil, this.now() + this.uploadCooldownMs);
         throw e;
+      } finally {
+        this.uploadActive--;
+        clear();
       }
     });
     // 链尾吞掉异常,避免单个失败毒化后续排队者(排队者拿到的仍是原 promise 的 reject)。
@@ -645,9 +754,9 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
         await node.run(ctx);
         validateArtifacts(node.outputs, "输出");
       };
-      if (node.resource === "cpu") await pool.withCpu(body);
-      else if (node.resource === "upload") await pool.withUpload(body);
-      else if (node.resource === "net") await pool.withNet(body);
+      if (node.resource === "cpu") await pool.withCpu(body, streamKey);
+      else if (node.resource === "upload") await pool.withUpload(body, streamKey);
+      else if (node.resource === "net") await pool.withNet(body, streamKey);
       else await body();
       ctx.ledger.syncNodeState(streamKey, node.key, "done", { error: null });
       const detail = ctx.stepDetail(node.key);

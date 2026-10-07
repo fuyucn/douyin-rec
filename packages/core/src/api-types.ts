@@ -180,6 +180,73 @@ export interface HubJobsDTO {
   total: number;
 }
 
+/**
+ * master 资源池的实时占用快照(GET /api/hub/queue 内嵌)。
+ * 目的:区分「执行中」与「排队等锁」——`state=merging` 的 job 可能实际还阻塞在 cpu/upload 闸门。
+ * 数据来自 orchestrator 的 ResourcePool(进程内共享),由 CLI 注入;slave/未开 hub → 全 0。
+ */
+export interface HubPoolSnapshotDTO {
+  cpu: { active: number; queued: number; max: number };
+  net: { active: number; queued: number; max: number };
+  upload: {
+    /** 正在执行的提交数(0/1,上传链串行)。 */
+    active: number;
+    /** 已进入上传链、等待执行的提交数。 */
+    queued: number;
+    /** 601 冷却截止(epoch ms;0=无冷却)。 */
+    cooldownUntil: number;
+    /** 当前窗口内已提交次数。 */
+    windowUsed: number;
+    /** 窗口提交上限(0=不限速)。 */
+    windowLimit: number;
+    /** 最早一次提交滑出窗口的时刻(epoch ms;0=窗口空)。 */
+    windowResetAt: number;
+  };
+  /** 正在等锁的场(streamKey + 资源 + 该资源队列内的位次,1-based)。 */
+  waiting: Array<{ streamKey: string; resource: "cpu" | "net" | "upload"; position: number; since: number }>;
+}
+
+/** 队列页一场的「正在做什么」相位。 */
+export type QueuePhase = "queued" | "running" | "waiting_settle" | "waiting_manual";
+
+/**
+ * 处理队列里的一场直播(GET /api/hub/queue → active[])。
+ * 一屏回答:做了什么(doneSteps)/ 正在做什么(state + phase + 时长 + ETA)/ 下面做什么(nextSteps)。
+ */
+export interface QueueItemDTO {
+  streamKey: string;
+  platform: string;
+  roomSlug: string;
+  anchorName: string | null;
+  /** 当前 pipeline 状态(= 当前粗粒度 step)。 */
+  state: string;
+  phase: QueuePhase;
+  /** 当前节点使用的资源(排队判定/展示用);非资源节点/未知 → null。 */
+  resource: "cpu" | "net" | "upload" | null;
+  /** phase=queued 时该资源队列内的位次(1-based);否则 null。 */
+  queuePosition: number | null;
+  /** 当前节点名(merge / burn_danmu / upload_plain …);未知 → null。 */
+  currentNode: string | null;
+  /** 已完成子步骤(升序;做了什么)。 */
+  doneSteps: HubJobStepDTO[];
+  /** 后续待跑节点(按 DAG 顺序;下面做什么)。 */
+  nextSteps: string[];
+  /** 当前步已运行秒数(终态 = null)。 */
+  currentStepSec: number | null;
+  /** 当前步预计剩余秒数(粗估;无依据 = null)。 */
+  etaSec: number | null;
+  winnerWorker: string | null;
+  fails: number;
+  updatedAt: number;
+}
+
+/** GET /api/hub/queue 响应:进行中 + 最近完成 + 资源池占用。 */
+export interface HubQueueDTO {
+  active: QueueItemDTO[];
+  recent: HubJobDTO[];
+  pool: HubPoolSnapshotDTO;
+}
+
 /** POST /api/hub/rules + PATCH /api/hub/rules/:roomSlug 的请求体。 */
 export interface HubRulePayload {
   /** 遗留兼容:旧创建接口传 room。新创建不再需要,房间由 recording.sourceTaskId 派生。 */

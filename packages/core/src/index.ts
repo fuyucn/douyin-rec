@@ -11,3 +11,4 @@ export * from "./title-template.js";
 export * from "./upload-contract.js";
 export * from "./worker-contract.js";
 export * from "./hub-ledger-contract.js";
+export * from "./hub-flow.js";

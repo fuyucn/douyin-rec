@@ -70,6 +70,7 @@ export interface RouteMatch {
     | "deleteHubRule"
     | "reorderHubRules"
     | "listHubJobs"
+    | "hubQueue"
     | "getHubJobLog"
     | "retryHubNode"
     | "stopHubJob"
@@ -134,6 +135,7 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "getEvents", methods: ["GET"], pattern: /^\/api\/events$/ },
   { name: "hubStatus", methods: ["GET"], pattern: /^\/api\/hub\/status$/ },
   { name: "listHubJobs", methods: ["GET"], pattern: /^\/api\/hub\/jobs$/ },
+  { name: "hubQueue", methods: ["GET"], pattern: /^\/api\/hub\/queue$/ },
   { name: "runHubJob", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/run$/, needsBody: true },
   { name: "getHubJobLog", methods: ["GET"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/log$/, param: "sid", decode: true },
   { name: "retryHubNode", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/retry-node$/, param: "sid", decode: true, needsBody: true },
@@ -230,6 +232,8 @@ export interface WebServerDeps {
   stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 立刻跑一场已有录像的后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
+  /** master 资源池快照(CLI 注入)。省略/hub 未就绪 → 队列页无排队位次/占用(全 0)。 */
+  poolSnapshot?: () => import("@drec/core").HubPoolSnapshotDTO | undefined;
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {}). */
@@ -397,6 +401,8 @@ async function dispatch(
     }
     case "getHubJobLog":
       return api.getHubJobLog(match.sid!);
+    case "hubQueue":
+      return api.hubQueue();
     case "retryHubNode": {
       const body = (await readJson(req)) as { node?: string; force?: boolean };
       return api.retryHubNode(match.sid!, body ?? {});
@@ -457,6 +463,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     retryNode: deps.retryNode,
     stopJob: deps.stopJob,
     runNow: deps.runNow,
+    poolSnapshot: deps.poolSnapshot,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);
       const n = mj.recoverOrphans(); // 启动:清理上次重启腰斩的合成 job

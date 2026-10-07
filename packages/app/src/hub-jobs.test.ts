@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { activeHubJobKeys, deleteHubJobHistory, listHubJobs, readHubJobLog, jobLogPath } from "./hub-jobs.js";
+import { activeHubJobKeys, buildQueueView, deleteHubJobHistory, listHubJobs, readHubJobLog, jobLogPath } from "./hub-jobs.js";
 
 /** 手工建台账 fixture(表结构与 orchestrator SyncLedger 对齐——结构即契约,不 import 它保分层)。 */
 function makeSyncDb(): { dbPath: string; db: DatabaseSync } {
@@ -203,5 +203,175 @@ describe("deleteHubJobHistory / activeHubJobKeys", () => {
     expect(r).toEqual({ deleted: 1, streamKeys: ["douyin:100:2026-08-01"] });
     expect(activeHubJobKeys(dbPath, "douyin.100")).toEqual([]);
     expect(deleteHubJobHistory("/nonexistent/x-sync.db", "douyin.100")).toEqual({ deleted: 0, streamKeys: [] });
+  });
+});
+
+describe("buildQueueView", () => {
+  const POOL_EMPTY = {
+    cpu: { active: 0, queued: 0, max: 0 }, net: { active: 0, queued: 0, max: 0 },
+    upload: { active: 0, queued: 0, cooldownUntil: 0, windowUsed: 0, windowLimit: 0, windowResetAt: 0 },
+    waiting: [],
+  };
+
+  it("无 sync db → active/recent 空,pool 原样透出", () => {
+    const v = buildQueueView("/nonexistent/x-sync.db", { pool: POOL_EMPTY });
+    expect(v).toEqual({ active: [], recent: [], pool: POOL_EMPTY });
+  });
+
+  it("进行中 job:doneSteps=已完成(做了什么),nextSteps=DAG 后继(下面做什么),phase=running", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage-"));
+    const now = T0 + 100_000;
+    seedJob(db, "douyin:100:2026-07-10", [["syncing", now - 90_000], ["merging", now - 60_000]], 1000);
+    // merge 已 done、burn_danmu 进行中。
+    for (const [step, phase, at] of [
+      ["select", "start", now - 90_000], ["select", "done", now - 88_000],
+      ["pull", "start", now - 88_000], ["pull", "done", now - 70_000],
+      ["merge", "start", now - 70_000], ["merge", "done", now - 60_000],
+      ["burn_danmu", "start", now - 60_000],
+    ] as const) {
+      db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at) VALUES(?,?,?,?)").run("douyin:100:2026-07-10", step, phase, at);
+    }
+    db.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("douyin:100:2026-07-10", "merge", "done", null, 1, now - 60_000);
+    db.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("douyin:100:2026-07-10", "burn_danmu", "running", null, 1, now - 60_000);
+    db.close();
+
+    const { active, recent } = buildQueueView(dbPath, {
+      now, stageDir: stage, pool: POOL_EMPTY,
+      anchorOf: (p, r) => (p === "douyin" && r === "100" ? "一勺小苏打" : null),
+    });
+    expect(recent).toHaveLength(0);
+    expect(active).toHaveLength(1);
+    const it0 = active[0];
+    expect(it0.anchorName).toBe("一勺小苏打");
+    expect(it0.platform).toBe("douyin");
+    expect(it0.roomSlug).toBe("100");
+    expect(it0.phase).toBe("running");
+    expect(it0.currentNode).toBe("burn_danmu");
+    expect(it0.resource).toBe("cpu");
+    // 做了什么:merge 已 done(select/pull 不是 pipeline 节点,仍在 doneSteps 里但 nextSteps 只算 DAG 节点)
+    expect(it0.doneSteps.map((s) => s.step)).toContain("merge");
+    // 下面做什么:merge 的 done → 其后继 burn_livechat / upload_plain 立即可跑(burn_danmu 在跑)
+    expect(it0.nextSteps).toContain("upload_plain");
+    expect(it0.nextSteps).toContain("burn_livechat");
+  });
+
+  it("资源池 waiting 命中 → phase=queued + queuePosition;needs_manual 留进行中", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage2-"));
+    const now = T0 + 100_000;
+    seedJob(db, "douyin:100:2026-07-10", [["merging", now - 30_000]], 1000);
+    seedJob(db, "douyin:200:2026-07-10", [["needs_manual", now - 10_000]], 1000);
+    db.close();
+    const { active, recent } = buildQueueView(dbPath, {
+      now, stageDir: stage,
+      pool: { ...POOL_EMPTY, cpu: { active: 1, queued: 1, max: 1 },
+        waiting: [{ streamKey: "douyin:100:2026-07-10", resource: "cpu", position: 1, since: now - 30_000 }] },
+    });
+    // needs_manual 不落 recent(属待人工,留进行中)
+    expect(recent).toHaveLength(0);
+    const q = active.find((a) => a.streamKey === "douyin:100:2026-07-10")!;
+    expect(q.phase).toBe("queued");
+    expect(q.queuePosition).toBe(1);
+    expect(q.resource).toBe("cpu");
+    const m = active.find((a) => a.streamKey === "douyin:200:2026-07-10")!;
+    expect(m.phase).toBe("waiting_manual");
+    // 排序:running/queued 在 waiting_manual 之前
+    expect(active[0].streamKey).toBe("douyin:100:2026-07-10");
+  });
+
+  it("终态 done 落 recent;active 按 phase 排序", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage3-"));
+    const now = T0 + 100_000;
+    seedJob(db, "douyin:100:2026-07-01", [["done", now - 50_000]], 100, { bv: "BVx" });
+    seedJob(db, "douyin:200:2026-07-01", [["pending", now - 20_000]], 100);
+    db.close();
+    const { active, recent } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
+    expect(recent.map((j) => j.streamKey)).toEqual(["douyin:100:2026-07-01"]);
+    expect(active).toHaveLength(1);
+    expect(active[0].phase).toBe("waiting_settle");
+  });
+
+  it("回归:台账超 500 行时,updatedAt 较旧的 active 场不能从队列页消失", () => {
+    // 审核实测的 bug:旧实现用 listHubJobs(limit:500) 再客户端过滤 → ORDER BY updatedAt DESC
+    // 会把「正在处理但 updatedAt 很旧」的场挤出结果,队列页整场消失(1 active + 520 done → active=[])。
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage4-"));
+    const now = T0 + 10_000_000;
+    // 520 个更新的 done(会占满任何「取最近 N 条」的窗口)。
+    for (let i = 0; i < 520; i++) {
+      seedJob(db, `douyin:r${i}:2026-10-01`, [["done", now - 1_000 + i]], 100, { bv: `BV${i}` });
+    }
+    // 一个更旧的 active(卡住不动 → updatedAt 最小)。
+    seedJob(db, "douyin:STUCK:2026-10-06", [["merging", now - 500_000]], 1000);
+    db.close();
+
+    const { active } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
+    expect(active.map((a) => a.streamKey)).toContain("douyin:STUCK:2026-10-06");
+  });
+
+  it("needs_manual cap:长期 stage 收口堆积时只列最近 manualLimit 条", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage5-"));
+    const now = T0 + 10_000_000;
+    for (let i = 0; i < 40; i++) {
+      seedJob(db, `douyin:m${i}:2026-10-01`, [["needs_manual", now - 40_000 + i]], 100);
+    }
+    db.close();
+    const { active, recent } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY, manualLimit: 20 });
+    const manual = active.filter((a) => a.phase === "waiting_manual");
+    expect(manual).toHaveLength(20);
+    // cap 的是最近 20(updatedAt 最大的 = m19..m0)
+    expect(manual.map((a) => a.streamKey)).toContain("douyin:m39:2026-10-01");
+    expect(manual.map((a) => a.streamKey)).not.toContain("douyin:m0:2026-10-01");
+    // needs_manual 不进 recent
+    expect(recent).toHaveLength(0);
+  });
+
+  it("waiting 多条登记取最早一条(最急)作代表", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage6-"));
+    const now = T0 + 100_000;
+    seedJob(db, "douyin:100:2026-07-10", [["merging", now - 30_000]], 1000);
+    db.close();
+    const { active } = buildQueueView(dbPath, {
+      now, stageDir: stage,
+      pool: { ...POOL_EMPTY, waiting: [
+        { streamKey: "douyin:100:2026-07-10", resource: "upload", position: 2, since: now - 5_000 },
+        { streamKey: "douyin:100:2026-07-10", resource: "cpu", position: 1, since: now - 30_000 },
+      ] },
+    });
+    expect(active).toHaveLength(1);
+    // 最早 = cpu(position 1)—— 位次更靠前才是用户关心的
+    expect(active[0].phase).toBe("queued");
+    expect(active[0].resource).toBe("cpu");
+    expect(active[0].queuePosition).toBe(1);
+  });
+
+  it("nextSteps 口径:未在跑只列立即可跑节点;在跑则列当前之后的其余节点", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage7-"));
+    const now = T0 + 100_000;
+    // A:pending(currentNode=null)→ 只列 ready(merge 已 done → burn/upload 可跑),不该列 append_*。
+    seedJob(db, "douyin:A:2026-07-10", [["pending", now - 10_000]], 1000);
+    db.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("douyin:A:2026-07-10", "merge", "done", null, 1, now - 10_000);
+    // B:merging 且 merge 在跑 → nextSteps 是「除当前节点外尚未完成」。
+    seedJob(db, "douyin:B:2026-07-10", [["merging", now - 10_000]], 1000);
+    db.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("douyin:B:2026-07-10", "merge", "running", null, 1, now - 10_000);
+    db.close();
+    const { active } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
+    const a = active.find((x) => x.streamKey.startsWith("douyin:A"))!;
+    expect(a.nextSteps).toContain("burn_danmu");
+    expect(a.nextSteps).toContain("upload_plain");
+    expect(a.nextSteps).not.toContain("append_danmu"); // 前驱未完成,不该预告
+    const b = active.find((x) => x.streamKey.startsWith("douyin:B"))!;
+    expect(b.currentNode).toBe("merge");
+    expect(b.nextSteps).not.toContain("merge");
+    expect(b.nextSteps).toContain("append_livechat");
   });
 });

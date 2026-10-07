@@ -9,6 +9,7 @@ import { TopNav } from "./layout/TopNav";
 import { useRefreshCookie } from "./lib/hooks";
 import { useEventNotifications } from "./lib/notifications";
 import { HubPage } from "./pages/HubPage";
+import { QueuePage } from "./pages/QueuePage";
 import { TaskDetail } from "./pages/TaskDetail";
 import { TaskList } from "./pages/TaskList";
 
@@ -34,6 +35,7 @@ export function App(): ReactNode {
         <Routes>
           <Route path="/" element={<TaskList />} />
           <Route path="/task/:id" element={<TaskDetail />} />
+          <Route path="/queue" element={<QueuePage />} />
           <Route path="/hub" element={<HubPage />} />
           <Route path="/hub/:key" element={<HubPage />} />
           <Route path="*" element={<TaskList />} />

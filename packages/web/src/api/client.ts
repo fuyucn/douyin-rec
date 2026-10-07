@@ -23,6 +23,11 @@ import type {
   HubJobCandidateDTO,
   HubJobEventDTO,
   HubJobsDTO,
+  HubQueueDTO,
+  QueueItemDTO,
+  HubPoolSnapshotDTO,
+  QueuePhase,
+  HubJobStepDTO,
   RecordingsDTO,
   MergeJobDTO,
   EventsDTO,
@@ -34,7 +39,7 @@ import type {
   WorkerTestResult,
   WorkerStatus,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, QueueItemDTO, HubPoolSnapshotDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -123,6 +128,8 @@ export const api = {
     const qs = q.toString();
     return request("GET", `/api/hub/jobs${qs ? "?" + qs : ""}`);
   },
+  /** 处理队列视图:进行中(做了什么/正在做什么/下面做什么)+ 最近完成 + 资源池占用。 */
+  getHubQueue: (): Promise<HubQueueDTO> => request("GET", "/api/hub/queue"),
   getHubJobLog: (streamKey: string): Promise<{ streamKey: string; log: string }> =>
     request("GET", `/api/hub/jobs/${encodeURIComponent(streamKey)}/log`),
   /** 手动重跑单个 workflow 节点(force=true 表示已确认,放行上传类节点)。 */

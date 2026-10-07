@@ -606,7 +606,13 @@ async function resumeAppends(
     ledger.logStep(streamKey, g.step, "start");
     // 与主 workflow 一致:B站追加分 P 后稿件短暂锁定,60s*2^n 退避等锁释放。
     const tries = files.length === 1 ? 5 : 1;
-    await retry(() => appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic }), {
+    // 经**全局上传队列**执行(与主 workflow / 分段路径同一口径):否则续跑补 append 会绕过
+    // 提交限速与 601 冷却,多场同时续跑时直接打爆 B 站频率限制。
+    const submit = (): Promise<void> =>
+      deps.pool
+        ? deps.pool.withUpload(() => appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic }), streamKey)
+        : appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic });
+    await retry(submit, {
       tries,
       backoffMs: 60_000,
       sleep: deps.sleep,

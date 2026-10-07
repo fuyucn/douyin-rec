@@ -233,6 +233,8 @@ export interface HubStarter {
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
   /** master 控制台读取 hub 源任务的 worker 录制状态快照。 */
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
+  /** master 资源池快照(读同一 ResourcePool 实例);队列页显示 CPU/上传占用与排队位次。省略 → 全 0。 */
+  poolSnapshot?: () => import("@drec/core").HubPoolSnapshotDTO | undefined;
   /** 立即触发一次 hub 任务同步(规则/worker 变更后由 web API 调用;hub 未就绪时排队,start 后补跑)。 */
   requestSyncTasks?: () => void;
   /**
@@ -595,6 +597,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         testWorker: hubEnabled ? hubStarter?.testWorker : undefined,
         probeAllWorkers: hubEnabled ? hubStarter?.probeAllWorkers : undefined,
         recordingWorkers: hubEnabled ? hubStarter?.recordingWorkers : undefined,
+        poolSnapshot: hubEnabled ? hubStarter?.poolSnapshot : undefined,
         requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
         // 与 daemon 同源:规则把源任务交给远端(workers 不含 local)时,本机不实跑。
         localSuppressedIds: hubEnabled

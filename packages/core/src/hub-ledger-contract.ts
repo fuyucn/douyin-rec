@@ -33,5 +33,5 @@ export type HubNodeStateName = (typeof HUB_NODE_STATE_NAMES)[number];
 
 /** 台账表名(历史读取方按此探测旧库缺表)。 */
 export const HUB_TABLE_NAMES = [
-  "sync_jobs", "sync_job_events", "sync_job_steps", "sync_candidates", "sync_node_states",
+  "sync_jobs", "sync_job_events", "sync_job_steps", "sync_candidates", "sync_node_states", "sync_parts",
 ] as const;

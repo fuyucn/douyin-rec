@@ -24,7 +24,7 @@ import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
-import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO } from "@drec/core";
+import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type HubPoolSnapshotDTO } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
@@ -538,6 +538,9 @@ let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
 const recordingSnapshotKey = (platform: string, roomSlug: string): string => `${platform}:${roomSlug}`;
 const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWorkerStatusDTO[] =>
   hubRecordingSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
+/** master 资源池快照提供者(由 hubStarter.start 注入,读同一 ResourcePool 实例);未启动 → undefined。 */
+let hubPoolSnapshot: (() => HubPoolSnapshotDTO) | undefined;
+const readPoolSnapshot = (): HubPoolSnapshotDTO | undefined => hubPoolSnapshot?.();
 /** web API → hubStarter.retryNode 的统一入口(hub 未启动 → 400)。 */
 const requestHubRetryNode = async (
   streamKey: string,
@@ -563,6 +566,7 @@ const requestHubRunNow = async (
 const hubStarter: HubStarter = {
   requestSyncTasks: requestHubSync,
   recordingWorkers: readRecordingWorkers,
+  poolSnapshot: readPoolSnapshot,
   retryNode: requestHubRetryNode,
   stopJob: requestHubStopJob,
   runNow: requestHubRunNow,
@@ -1062,6 +1066,8 @@ const hubStarter: HubStarter = {
       retryNode(streamKey, node, o?.force === true);
     hubStopJob = (streamKey: string) => reconciler.stopJob(streamKey);
     hubRunNow = (opts) => reconciler.runNow(opts);
+    // 队列页的「排队位次 / 资源占用」来源:读同一 ResourcePool 实例(进程内共享)。
+    hubPoolSnapshot = () => pool.snapshot();
 
     const stop = startHub({
       tasks: () => opts.store.listTasks(),
@@ -1085,6 +1091,7 @@ const hubStarter: HubStarter = {
       hubRetryNode = undefined;
       hubStopJob = undefined;
       hubRunNow = undefined;
+      hubPoolSnapshot = undefined;
     };
   },
   async testWorker(cfg) {
