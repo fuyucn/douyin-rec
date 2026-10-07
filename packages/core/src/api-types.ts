@@ -214,11 +214,22 @@ export interface HubPoolSnapshotDTO {
  * 注意:UI 的「拉取中」是**前端派生**显示相(`state=syncing` 且不占资源闸门),不属于后端相位 ——
  * 要筛它请用 `states=syncing`。
  */
-export type QueuePhase = "queued" | "running" | "waiting_settle" | "waiting_manual" | "done" | "failed";
+export type QueuePhase =
+  | "queued" | "running" | "waiting_settle" | "waiting_manual" | "done" | "failed"
+  /**
+   * `needs_manual` 细分三态(避免「正常收口」和「真故障」同色 → 告警疲劳):
+   * - `waiting_upload`:stage 模式正常收口(合成完待人工上传),**非故障**,中性色;
+   * - `stopped`:用户主动停止,灰;
+   * - `waiting_manual`:其他 needs_manual(重试耗尽 / 进程重启中断 / 上传失败…),红。
+   */
+  | "waiting_upload" | "stopped";
 /**
  * 相位常量数组(API 侧校验 query 的白名单;前端筛选器也用它渲染选项)。
  */
-export const QUEUE_PHASES = ["running", "queued", "waiting_settle", "waiting_manual", "done", "failed"] as const;
+export const QUEUE_PHASES = [
+  "running", "queued", "waiting_settle", "waiting_manual", "done", "failed",
+  "waiting_upload", "stopped",
+] as const;
 
 /**
  * 处理队列里的一场直播(GET /api/hub/queue → active[])。
@@ -249,6 +260,14 @@ export interface QueueItemDTO {
   winnerWorker: string | null;
   fails: number;
   updatedAt: number;
+  /**
+   * 失败/待人工的原因(台账 `sync_jobs.error`)。null/空 = 无错误。
+   * **语义区分靠它**:
+   *  - `error` 空 + `state=needs_manual` → **stage 模式正常收口**(合成完待人工上传,非故障);
+   *  - `error === "用户停止"` → 用户主动停止;
+   *  - 其他非空 → 真故障(重试耗尽 / 进程重启中断 / 上传失败…)。
+   */
+  error: string | null;
   /** 完成态(`phase=done`)才有:B 站 BV 号 —— 已上传的稿可直接点开。 */
   bv: string | null;
   /** 完成态才有:winner 视频时长秒(展示用)。 */

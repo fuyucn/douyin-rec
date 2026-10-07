@@ -277,7 +277,8 @@ describe("buildQueueView", () => {
     expect(q.queuePosition).toBe(1);
     expect(q.resource).toBe("cpu");
     const m = active.find((a) => a.streamKey === "douyin:200:2026-07-10")!;
-    expect(m.phase).toBe("waiting_manual");
+    // seedJob 不写 error → needs_manual 细分为 waiting_upload(stage 正常收口)
+    expect(m.phase).toBe("waiting_upload");
     // 默认 newest:200 入队(now-10s)比 100(now-30s)晚 → 200 排最前
     expect(active[0].streamKey).toBe("douyin:200:2026-07-10");
   });
@@ -313,7 +314,7 @@ describe("buildQueueView", () => {
     expect(active.map((a) => a.streamKey)).toContain("douyin:STUCK:2026-10-06");
   });
 
-  it("needs_manual cap:长期 stage 收口堆积时只列最近 manualLimit 条", () => {
+  it("needs_manual cap:长期堆积时只列最近 manualLimit 条(无 error = waiting_upload)", () => {
     const { dbPath, db } = makeSyncDb();
     const stage = mkdtempSync(join(tmpdir(), "queue-stage5-"));
     const now = T0 + 10_000_000;
@@ -322,13 +323,36 @@ describe("buildQueueView", () => {
     }
     db.close();
     const { active, recent } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY, manualLimit: 20 });
-    const manual = active.filter((a) => a.phase === "waiting_manual");
-    expect(manual).toHaveLength(20);
-    // cap 的是最近 20(updatedAt 最大的 = m19..m0)
-    expect(manual.map((a) => a.streamKey)).toContain("douyin:m39:2026-10-01");
-    expect(manual.map((a) => a.streamKey)).not.toContain("douyin:m0:2026-10-01");
-    // needs_manual 不进 recent
+    // 无 error 的 needs_manual = stage 正常收口 → waiting_upload
+    const upload = active.filter((a) => a.phase === "waiting_upload");
+    expect(upload).toHaveLength(20);
+    expect(upload.map((a) => a.streamKey)).toContain("douyin:m39:2026-10-01");
+    expect(upload.map((a) => a.streamKey)).not.toContain("douyin:m0:2026-10-01");
     expect(recent).toHaveLength(0);
+  });
+
+  it("needs_manual 细分三态:无 error→waiting_upload / 用户停止→stopped / 其他→waiting_manual", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-manual3-"));
+    const now = T0 + 10_000_000;
+    const put = (k: string, error: string | null, at: number): void => {
+      db.prepare("INSERT INTO sync_jobs(streamKey,state,winnerWorker,bv,error,fails,updatedAt) VALUES(?,?,?,?,?,0,?)")
+        .run(k, "needs_manual", "local", null, error, at);
+      db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(k, "pending", at - 1000);
+      db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(k, "needs_manual", at);
+    };
+    put("douyin:UPLOAD:2026-10-06", null, now - 3_000);              // stage 正常收口
+    put("douyin:STOPPED:2026-10-06", "用户停止", now - 2_000);        // 用户停止
+    put("douyin:BROKEN:2026-10-06", "进程重启中断", now - 1_000);     // 真故障
+    db.close();
+    const { rows } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
+    const by = (k: string): string => rows.find((r) => r.streamKey === k)!.phase;
+    expect(by("douyin:UPLOAD:2026-10-06")).toBe("waiting_upload");
+    expect(by("douyin:STOPPED:2026-10-06")).toBe("stopped");
+    expect(by("douyin:BROKEN:2026-10-06")).toBe("waiting_manual");
+    // error 透出到行
+    expect(rows.find((r) => r.streamKey === "douyin:BROKEN:2026-10-06")!.error).toBe("进程重启中断");
+    expect(rows.find((r) => r.streamKey === "douyin:UPLOAD:2026-10-06")!.error).toBeNull();
   });
 
   it("waiting 多条登记取最早一条(最急)作代表", () => {

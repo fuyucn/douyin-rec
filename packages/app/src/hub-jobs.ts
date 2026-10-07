@@ -12,7 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
-  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, readyNodes,
+  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, readyNodes, USER_STOP,
   type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO, type QueuePhase,
 } from "@drec/core";
 import { rootHubConfig, rootStageDir } from "./paths.js";
@@ -406,12 +406,20 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     const resource = resourceOfNode(currentNode);
     const waiting = waitingByKey.get(job.streamKey);
     // 终态(done/failed)也成行(同表渲染):phase 直接取终态名,无「正在做/下面做」概念。
+    // needs_manual 细分三态 —— 用 error 区分「正常收口(stage 待上传)/ 用户停止 / 真故障」,
+    // 否则 8 条正常态和 2 条故障同色,告警疲劳(实测踩过)。
+    const needsManualPhase = (): QueuePhase => {
+      const err = (job.error ?? "").trim();
+      if (!err) return "waiting_upload"; // 无错误 = stage 模式正常收口(pipeline.ts 只 setState 不置 error)
+      if (err === USER_STOP) return "stopped";
+      return "waiting_manual"; // 真故障
+    };
     const phase: QueuePhase = job.state === "done"
       ? "done"
       : job.state === "failed"
         ? "failed"
         : job.state === "needs_manual"
-          ? "waiting_manual"
+          ? needsManualPhase()
           : waiting
             ? "queued"
             : job.state === "pending" || job.state === "settling"
@@ -455,6 +463,7 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
       winnerWorker: job.winnerWorker,
       fails: job.fails,
       updatedAt: job.updatedAt,
+      error: job.error ?? null,
       bv: job.bv ?? null,
       videoDurationSec: job.videoDurationSec,
       // 收尾时刻 = 末个事件(终态那次的时刻);非终态 null。
