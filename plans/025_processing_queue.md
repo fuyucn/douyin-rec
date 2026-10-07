@@ -268,3 +268,44 @@ FIFO 排序、三类筛选各自生效与叠加、`q` 命中主播名(大小写�
 ### 测试(807)
 新增「needs_manual 三态细分」用例;两处旧用例按新语义更新。
 反向验证:改回不细分 → 3 个测试 fail。
+
+## 追加 4:全 App 审核 + 响应式整改(2026-10-07)
+
+用户要求审核**整个 app** 并「同时考虑 responsive」。用生产数据(15 任务 / 14 hub 规则 / 61 run)
+在 390 / 768 / 1440 三档视口实测,发现 3 个真 bug + 一批一致性问题,全部整改。
+
+### P0 真 bug
+1. **任务列表窄屏 NAME 列被压成一字一行**:Status(262px)+Actions(178px) 固定宽不收缩,
+   窗口一窄唯一有弹性的 Name 被挤到 62px(实测 768px 下表宽 803 > 视口)。
+   **修**:Name 列 `sm:min-w-[200px]`;Quality/Danmu(<md)、Schedule/ID(<lg/<sm) 响应式隐藏,
+   隐藏项以紧凑 meta 行补进名称单元格(信息不丢);<sm 操作列只留「详情」入口。
+   实测 390px 表宽 356 ≤ 390,无溢出。
+2. **Hub 窄屏(≤1024px)右侧详情面板完全消失**:`lg:grid-cols-[288px_1fr]` 在 lg 以下退化成单列,
+   列表占满全宽、点房间看不到详情 → 整页不可用。
+   **修**:改 master-detail —— <lg 未选中只显列表;选中后列表让位、详情带「返回列表」按钮。
+3. **Hub「Active」指标口径错(恒为 0)**:`activeRuns` 基于 `listHubJobs()` 默认 limit=20,
+   生产 61 条 run 时最近 20 条恰好全终态 → 恒 0(与队列页的 10 条待处理自相矛盾)。
+   **修**:新增 `states` 精确过滤 + 读后端 `total` 权威计数(不受 limit 截断)。
+
+### 顺带发现的同类 bug(第 3 处)
+4. **Hub 房间列表「No runs yet」误报**:房间徽标用「最近 20 条 run 再按房间过滤」→
+   有历史 run 的房间(如「一勺小苏打」18 runs)显示「尚无运行」。
+   **修**:新增 `latestRunPerRoom()`(SQL 窗口函数,每组取最新一行,单条查询不 N+1)
+   + `GET /api/hub/latest-runs` 端点。
+
+### P1 一致性/可用性
+5. 按钮 title 暴露内部术语(`Stop (disable)`/`Start (enable)`)→ 改「停止录制 / 开始录制」。
+6. 任务列表看不到 hub 关联 → `TaskDTO.hubRule` 摘要(步骤/上传模式/上次结果),
+   名称下方显示可点的 hub chip,直达房间页。
+7. 队列筛选 chip 无障碍:`role="button"` + `aria-pressed`。
+8. 顶栏登录 pill 点开设置语义意外 → title/aria-label 明确「账号与设置」。
+
+### P2 打磨
+9. Hub 标题「Hub」→「Hub 编排」(与「录制任务」「处理队列」并列,不再笼统)。
+
+### 响应式验收
+390 / 768 / 1440 × 3 页面 = 9 组,全部 `scrollWidth ≤ innerWidth`(零横向溢出)。
+
+### 测试(810)
+新增 `latestRunPerRoom`(每房间最新一条 + roomKey 无尾冒号 + 无库不炸)、
+`states` 过滤(非终态被更新的终态挤出 limit 窗口时 total 仍正确)。
