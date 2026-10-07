@@ -169,11 +169,17 @@ HubPage / RoomDetail / WorkersPanel 各自 3s 轮询同批端点。队列页新�
 
 ### 排序
 原按 `phase` 分组(running → queued → waiting_settle → waiting_manual),组内 `updatedAt` 倒序。
-问题:这不是真实队列顺序 —— 用户要的是「谁先进队列谁排前」。
 
-改为 **FIFO**:`QueueItemDTO` 新增 `enqueuedAt`(= 该场首个事件 `pending` 的时刻,取 `startedAt`),
-`buildQueueView` 按 `enqueuedAt` **升序**;缺失(极老 run 无事件表)回落 `updatedAt`;完全同刻用
-`streamKey` 字典序兜底,保证多次轮询顺序稳定不跳动。
+改为按**入队时刻**排:`QueueItemDTO` 新增 `enqueuedAt`(= 该场首个事件 `pending` 的时刻,取 `startedAt`),
+不再按 phase 分组(用户要的是队列顺序,不是状态分类)。
+
+**方向可切换**(datatable 惯例,点表头「入队时间」切):
+- `newest`(**缺省**):入队时间**倒序** —— 最新进队列的排最前,像日志一样看最新动态。
+- `oldest`:**升序** —— 真正的 FIFO 视角,谁等最久谁排最前。
+
+> 修正记录:最初实现为「只按 FIFO 升序」,用户指出应为「最新在前」→ 改为 newest 缺省 + 可切换。
+> 两种方向都**确定性**(同刻用 `streamKey` 兜底),否则前端每次轮询顺序会跳动。
+> 缺失(极老 run 无事件表)回落 `updatedAt`,不排到最前/最后造成误读。
 
 > 实测证明:构造 `updatedAt` 与入队序**完全相反**的数据(3400000→3100000),
 > 返回仍按 `enqueuedAt` 升序 —— 旧的 updatedAt 排序会得到相反结果,回归测试已锁死。
