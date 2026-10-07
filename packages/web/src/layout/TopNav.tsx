@@ -66,10 +66,10 @@ export function TopNav(): ReactNode {
           <nav className="hidden sm:flex items-center gap-1 ml-2">
             {(([
               ["/", t("nav.tasksList")],
-              // 处理队列:master 才能看到 hub 后处理进度。
-              ...(hubEnabled ? [["/queue", t("nav.queue")] as const] : []),
-              // Hub 仅 master(启用 hub)显示;slave/未开不显示。
+              // Hub 与处理队列都仅 master(启用 hub)显示;slave/未开不显示。
+              // 顺序:录制任务 → Hub(配置编排)→ 处理队列(运行观测),从「配」到「看」。
               ...(hubEnabled ? [["/hub", "Hub"] as const] : []),
+              ...(hubEnabled ? [["/queue", t("nav.queue")] as const] : []),
             ]) as const).map(([to, label]) => (
               <NavLink
                 key={to}
