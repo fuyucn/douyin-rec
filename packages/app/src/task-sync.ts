@@ -81,6 +81,10 @@ export function applyRemoteTasks(
       // 远端:收编为受管;master 本地:保持用户可编辑(顺带清掉历史遗留的 hub 标记)。
       // 保留 node 本地 cookies/useCookie/outDir/webhook。
       store.setManagedBy(existing.id, adopt ? "hub" : null);
+      // **不下发 anchorName**(T-4):主播名由各节点**自行维护**——worker 录制时从
+      // `[主播] xxx` 日志抓取并持久化(task-manager),master 侧只在创建/改房间时抓一次、
+      // 之后可能长期为 null。若这里带 `anchorName: spec.anchorName ?? null`,master 的 null
+      // 会覆盖 worker 已抓到的正确值,界面上主播名凭空消失。故更新时**完全不动**该字段。
       store.updateTask(existing.id, {
         room: spec.room,
         name: spec.name ?? null,
@@ -91,7 +95,6 @@ export function applyRemoteTasks(
         scheduleStart: spec.scheduleStart,
         scheduleEnd: spec.scheduleEnd,
         enabled: spec.enabled,
-        anchorName: spec.anchorName ?? null,
       });
       log?.(`[task-sync] 收编任务 ${existing.id}: ${key}`);
       // 期望任务已禁用但节点上还在录/待起:必须硬停,不能等 daemon 排空到自然收播。
@@ -116,6 +119,10 @@ export function applyRemoteTasks(
         webhook: spec.webhook,
         enabled: spec.enabled,
         managedBy: adopt ? "hub" : null,
+        // 新建时预置 master 的 anchorName(如非 null),避免 Waiting 阶段一直显示房间号。
+        // 录制开始后 worker 会从 [主播] 日志抓取真实值并覆盖,不影响精度。
+        // 注意:这只对新建生效;更新现有任务时刻意不动 anchorName(见上方注释),
+        // 防止 master 的 null 覆盖 worker 已抓到的正确值。
         anchorName: spec.anchorName ?? null,
       });
       log?.(`[task-sync] ${adopt ? "新建受管任务" : "新建本机任务"}: ${key}`);

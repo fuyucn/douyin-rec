@@ -49,6 +49,25 @@ describe("applyRemoteTasks", () => {
     expect(t.name).toBe("新名");
   });
 
+  // T-4:worker 录制时会自抓主播名并持久化;master 侧该值常为 null(只在建/改房间时抓一次)。
+  // 若下发时带 `anchorName: null`,会把 worker 抓到的正确值覆盖成空 → 界面主播名消失。
+  it("T-4: 更新已有任务时不下发 anchorName(null 不覆盖 worker 自抓的值)", () => {
+    const existing = store.addTask({ room: "123456", name: "旧名" });
+    store.setAnchorName(existing.id, "worker 抓到的名");   // 模拟 worker 录制时自抓
+    applyRemoteTasks(store, [spec({ anchorName: null })]);
+    expect(store.getTask(existing.id)!.anchorName).toBe("worker 抓到的名");   // 未被 null 覆盖
+  });
+  it("T-4: 新建受管任务预置 master 的 anchorName(非 null)", () => {
+    applyRemoteTasks(store, [spec({ anchorName: "master 侧的名字" })]);
+    const t = store.listTasks().find((x) => x.room.includes("123456"))!;
+    expect(t.anchorName).toBe("master 侧的名字");   // 预置,避免 Waiting 阶段显示房间号
+  });
+  it("T-4: 新建受管任务 anchorName 为 null 时不出错", () => {
+    applyRemoteTasks(store, [spec({ anchorName: null })]);
+    const t = store.listTasks().find((x) => x.room.includes("123456"))!;
+    expect(t.anchorName).toBeNull();
+  });
+
   it("远端默认:不在期望列表的受管任务被删除", () => {
     const doomed = store.addTask({ room: "555", managedBy: "hub" });
     const r = applyRemoteTasks(store, []);
