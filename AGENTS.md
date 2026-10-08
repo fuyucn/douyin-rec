@@ -339,11 +339,16 @@ docker 固定 `/output-data`（映射宿主机 `docker-data/`）。专用 env（
 
 ## 版本规则（package.json `version`）
 
-每完成一个 `feat` 或 `fix`（不含纯 `docs`/`test`/`chore`），必须在代码 commit **之前** 将
-根目录 `package.json` 的 `version` 字段 patch +1（`0.0.X` → `0.0.X+1`），并重新执行 `pnpm bundle`
-使 `dist/douyin-rec.mjs` 内嵌的 `APP_VERSION` 同步更新。version bump 与代码变更合入**同一个 commit**
-（用 `chore: bump version` 作为附加说明写进同一 commit，或作为独立紧随其后的 chore commit 均可）。
-部署时用 bundle 产物（`dist/douyin-rec.mjs`）校验版本是否已更新再发。
+**每个 `feat` / `fix` 都必须 bump 一次 version，与是否部署无关。** 版本号是变更的标记，
+不是部署的标记——一个版本可以只 commit/push 而不部署；也可以攒几个版本后一起部署。
+
+- 完成一个 `feat` 或 `fix`（不含纯 `docs`/`test`/`chore`）→ 在 commit **之前** 把根目录
+  `package.json` 的 `version` patch +1（`0.0.X` → `0.0.X+1`），并重新执行 `pnpm bundle`
+  使 `dist/douyin-rec.mjs` 内嵌的 `APP_VERSION` 同步更新。
+- version bump 与代码变更合入**同一个 commit**（`chore: bump version` 写进该 commit 的正文，
+  或作为紧随其后的独立 chore commit 均可）。
+- **部署不是强制的**：不需要每次 bump 都部署；部署时只需用 bundle 产物
+  （`dist/douyin-rec.mjs`）的 `APP_VERSION` 确认节点上跑的是哪个版本。
 
 ## 提交规范（约定式提交 / Conventional Commits）
 
