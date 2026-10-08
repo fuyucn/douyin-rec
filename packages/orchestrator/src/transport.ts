@@ -1,4 +1,4 @@
-import type { ApplyTasksResult, NodeTaskDTO, RemoteTaskSpec, WorkerConfig } from "@drec/core";
+import type { ApplyTasksResult, NodeCapabilities, NodePipelineResult, NodePipelineSpec, NodeTaskDTO, RemoteTaskSpec, WorkerConfig } from "@drec/core";
 
 // 契约在 core(app 的 worker-store 用同一形状);这里 re-export 保持既有调用点不变。
 export type { ApplyTasksResult, WorkerConfig } from "@drec/core";
@@ -72,6 +72,16 @@ export interface Transport {
    * reconciler 每轮对账时查一次 → 低于阈值由 **master 自己**告警(不依赖 worker 侧 webhook 配置)。
    */
   diskFreeGB?(): Promise<number>;
+  /**
+   * 节点侧上传能力探测(experimental,见 plans/027)。无此能力(旧 bundle)= 不支持 → flag on 的房间回落现状。
+   * 查:biliup 可用 + B站 cookie 存在 + 磁盘剩余。
+   */
+  nodeCapabilities?(): Promise<NodeCapabilities>;
+  /**
+   * 在该节点本地执行「remux → biliup 上传」并把 BV 回传(experimental,见 plans/027)。
+   * 录像**不回传 master** —— 这正是省掉 rsync 的关键。无此能力 = 不支持 → 回落现状。
+   */
+  nodePipeline?(spec: NodePipelineSpec): Promise<NodePipelineResult>;
 }
 
 type Factory = (cfg: WorkerConfig) => Transport;

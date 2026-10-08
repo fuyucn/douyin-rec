@@ -15,7 +15,19 @@ export interface HubPipelineConfig {
    *   每段 = 一个独立分 P(段间不拼接);开烧录时逐段烧各自那段弹幕。
    * - `burnDanmu` / `burnLivechat`:是否产出对应烧录版(合并模式下 = 整场烧,分段模式下 = 逐段烧)。
    */
-  steps?: { mergeSegments?: boolean; burnDanmu?: boolean; burnLivechat?: boolean };
+  steps?: {
+    mergeSegments?: boolean;
+    burnDanmu?: boolean;
+    burnLivechat?: boolean;
+    /**
+     * **(实验,缺省 false)** 节点侧上传:该房间**不烧录**时,winner 节点本地 remux →
+     * 节点 biliup 直接上传,master 只收 BV 号 → 省掉整场录像 rsync 回传(pull 步)。
+     * 需要烧录(burnDanmu/burnLivechat)时本开关**无效**,回落现状(录像回传 master 集中处理)
+     * —— burn 是全量重编码,需 11 核 + 中文字体,弱节点(2 vCPU)烧不动(实测 0.38x 实时)。
+     * 节点缺 biliup / B站 cookie / 磁盘时也回落现状,并在 job.log 记明原因(不静默失败)。
+     */
+    nodeSideUpload?: boolean;
+  };
   /**
    * 分段上传(mergeSegments=false)调优:
    * - `uploadBatchSize`:每批 append 的文件数上限(缺省 1)。B 站按「提交次数」限流(601),
@@ -373,6 +385,61 @@ export interface RemoteTaskSpec {
   outDir: string | null;
   webhook: string | null;
   anchorName: string | null;
+}
+
+/**
+ * 节点侧上传(experimental,见 plans/027):master → 节点 的隐藏子命令 `_node-pipeline` 入参。
+ * 节点本地 remux(可选逐段)→ biliup 上传 → 回传 BV。**不含视频回传**(这正是省掉 rsync 的关键)。
+ */
+export interface NodePipelineSpec {
+  streamKey: string;
+  /** winner 节点上该场的源文件(绝对路径,节点本地):.ts/.flv 段 + 可选 .xml。 */
+  tsFiles: string[];
+  xmlPath?: string;
+  /** 分 P 目标时长(秒);>0 = 按累计时长聚组(与 master 侧 segmentGroupSec 同义)。 */
+  segmentGroupSec?: number;
+  /** 分段模式(不合并,逐段产出):与 master 侧 steps.mergeSegments=false 同义。 */
+  mergeSegments: boolean;
+  /** 上传模式:upload = 建稿上传;stage = 只合成不上传(留节点)。 */
+  uploadMode: "stage" | "upload";
+  /** 节点上产物落地目录(节点本地,通常 = 该节点 dataRoot/stage)。 */
+  stageDir: string;
+  uploadMeta: {
+    tag: string; tid: number; desc?: string;
+    titleTemplate?: string;
+    submissionTitleTemplate?: string;
+    partTitleTemplate?: string;
+  };
+  uploadPrivate: boolean;
+  timeZone?: string;
+  minSegmentSec?: number;
+  /** master 下发的 B站 cookie(可选兜底);节点本地已有 cookies.json 时优先用本地的。 */
+  cookies?: string;
+  /** 完成后是否清理节点源文件(与 master 侧 cleanup.sourceAfterDone 同义)。 */
+  cleanSourceAfterDone?: boolean;
+}
+
+/** 节点侧上传结果(`_node-pipeline` 的 JSON 输出)。 */
+export interface NodePipelineResult {
+  ok: boolean;
+  /** 建稿成功后的 BV 号(ok 且 uploadMode=upload 时非空)。 */
+  bv?: string;
+  /** 产物路径(节点本地;stage 模式或调试用)。 */
+  products?: string[];
+  /** 失败原因(ok=false)。 */
+  error?: string;
+}
+
+/** 节点侧上传能力探测(`_node-capabilities` 的 JSON 输出)。 */
+export interface NodeCapabilities {
+  /** 节点上 biliup 可用? */
+  biliup: boolean;
+  /** 节点上有可用 B站 cookie? */
+  cookies: boolean;
+  /** 节点 dataRoot 所在卷剩余 GB。 */
+  diskFreeGB: number;
+  /** 节点上是否有中文字体(烧录用;节点侧分支不烧,仅诊断展示)。 */
+  cjkFonts?: boolean;
 }
 
 /** POST /api/tasks + PATCH /api/tasks/:id 的请求体(部分字段;录制专属,hub 配置见 HubRule)。 */

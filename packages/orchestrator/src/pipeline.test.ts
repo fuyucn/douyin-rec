@@ -979,4 +979,104 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
   });
+
+  // ── 节点侧上传(experimental,见 plans/027)──────────────────────────────────
+  describe("nodeSideUpload", () => {
+    /** 给 transport 挂上节点侧能力(默认:支持 + biliup + cookie)。 */
+    function withNodePipeline(t: Transport, over: Partial<{
+      caps: { biliup: boolean; cookies: boolean; diskFreeGB: number };
+      result: { ok: boolean; bv?: string; products?: string[]; error?: string };
+      throwOnCall: boolean;
+    }> = {}): { nodePipeline: Mock; nodeCapabilities: Mock } {
+      const caps = over.caps ?? { biliup: true, cookies: true, diskFreeGB: 50 };
+      const result = over.result ?? { ok: true, bv: "BVnode" };
+      const nodeCapabilities = vi.fn().mockResolvedValue(caps);
+      const nodePipeline = vi.fn().mockImplementation(async () => {
+        if (over.throwOnCall) throw new Error("ssh 超时");
+        return result;
+      });
+      (t as Transport).nodeCapabilities = nodeCapabilities;
+      (t as Transport).nodePipeline = nodePipeline;
+      return { nodePipeline, nodeCapabilities };
+    }
+
+    it("flag off(默认)→ 行为与现状一致:走 pull 回 master,不调 nodePipeline", async () => {
+      const deps = makeDeps();
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t);
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      await runPipeline(b, deps);
+      expect(nodePipeline).not.toHaveBeenCalled();
+      expect(t.pull).toHaveBeenCalled(); // 现状:仍 pull 回 master
+      deps.ledger.close();
+    });
+
+    it("flag on + 不烧录 → 节点侧处理,不 pull,markDone 带 BV", async () => {
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false } } });
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t);
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 真实路径由 reconciler 先建行(直接调 runPipeline 需自建)
+      const r = await runPipeline(b, deps);
+      expect(nodePipeline).toHaveBeenCalledTimes(1);
+      expect(t.pull).not.toHaveBeenCalled();           // **关键:没有录像回传**
+      expect(r).toEqual({ state: "done", bv: "BVnode" });
+      expect(deps.ledger.get(b.streamKey)?.bv).toBe("BVnode");
+      deps.ledger.close();
+    });
+
+    it("flag on + 要烧录 → 回落现状(pull 回 master),不调 nodePipeline", async () => {
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { nodeSideUpload: true, burnDanmu: true } } });
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t);
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      await runPipeline(b, deps);
+      expect(nodePipeline).not.toHaveBeenCalled();
+      expect(t.pull).toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("flag on 但节点不支持(旧 bundle)→ 回落现状,不静默", async () => {
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false } } });
+      const t = deps.transports.get("node-1")!; // 无 nodePipeline/nodeCapabilities
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      const r = await runPipeline(b, deps);
+      expect(t.pull).toHaveBeenCalled();
+      expect(r.state).not.toBe("done"); // 走常规路径(此测试环境无真产物 → 安全阀)
+      deps.ledger.close();
+    });
+
+    it("flag on 但节点无 biliup(upload 模式)→ 回落现状", async () => {
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false } } });
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t, { caps: { biliup: false, cookies: true, diskFreeGB: 50 } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      await runPipeline(b, deps);
+      expect(nodePipeline).not.toHaveBeenCalled();
+      expect(t.pull).toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("节点侧执行失败(ok=false)→ 标 failed + 通知,绝不静默", async () => {
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false } } });
+      const t = deps.transports.get("node-1")!;
+      withNodePipeline(t, { result: { ok: false, error: "biliup 退出码 1" } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      const r = await runPipeline(b, deps);
+      expect(r.state).toBe("failed");
+      expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
+      deps.ledger.close();
+    });
+
+    it("节点侧抛错(ssh 失败)→ 标 failed + 通知", async () => {
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false } } });
+      const t = deps.transports.get("node-1")!;
+      withNodePipeline(t, { throwOnCall: true });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      const r = await runPipeline(b, deps);
+      expect(r.state).toBe("failed");
+      expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
+      deps.ledger.close();
+    });
+  });
 });

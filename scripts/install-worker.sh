@@ -18,6 +18,8 @@
 set -eu
 
 REPO="${DREC_REPO:-fuyucn/douyin-rec}"
+# 从 GitHub raw 拉辅助脚本(install-biliup.sh)用的 ref;默认 main(与本脚本自身的文档 URL 同源)。
+RELEASE_REF="${DREC_REF:-main}"
 VERSION="${DREC_VERSION:-latest}"
 ROOT="${DREC_ROOT:-/srv/drec}"
 PORT="${DREC_PORT:-7860}"
@@ -33,6 +35,8 @@ PACKAGES_EXPLICIT=0
 ROLE_EXPLICIT=0
 DRY_RUN=0
 START=1
+# 节点侧上传(experimental,见 plans/027):装 biliup 二进制到 <root>/bin。默认关(worker 保持轻量)。
+WITH_UPLOAD="${DREC_WITH_UPLOAD:-0}"
 
 usage() {
   cat <<'EOF'
@@ -52,6 +56,7 @@ Options:
   --archive <path|url>    Custom worker tar.gz (development/private mirror)
   --tz <name>             Timezone (default: Asia/Shanghai)
   --no-start              Install without starting the service
+  --with-upload           Also install biliup (needed for node-side upload, experimental)
   --dry-run               Validate arguments and archive without writing to the system
   -h, --help              Show help
 EOF
@@ -83,6 +88,7 @@ while [ "$#" -gt 0 ]; do
     --tunnel) need_value "$@"; TUNNEL="$2"; shift 2 ;;
     --archive) need_value "$@"; ARCHIVE="$2"; shift 2 ;;
     --tz) need_value "$@"; TIMEZONE="$2"; shift 2 ;;
+    --with-upload) WITH_UPLOAD=1; shift ;;
     --no-start) START=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -210,9 +216,17 @@ if [ "$DRY_RUN" -eq 0 ]; then
   command -v ffprobe >/dev/null 2>&1 || fail "ffprobe not found; install a complete ffmpeg package"
   id "$SERVICE_USER" >/dev/null 2>&1 || fail "User does not exist: $SERVICE_USER"
 
+  # rsync 是**两种角色都必需**的硬依赖(不是可选):
+  #   - worker:master 拉录像时,远端要跑 `rsync --server`。缺它 → 每场 pull 都 rc=12,
+  #     整个后处理管线卡在 needs_manual(2026-10-08 VPS2 实测踩到,排查成本极高)。
+  #   - master:本机要跑 `rsync` 客户端。
+  # 故这里 fail 而不是 warn —— 缺了它 worker 装了也是白装。
+  if ! command -v rsync >/dev/null 2>&1; then
+    fail "rsync not found; it is required for recording transfer (master pulls via rsync over ssh). Install it first: apt-get install -y rsync"
+  fi
+
   if [ "$ROLE" = "master" ]; then
     command -v ssh >/dev/null 2>&1 || warn "ssh not found; SSH workers will be unavailable"
-    command -v rsync >/dev/null 2>&1 || warn "rsync not found; remote recording transfer may be unavailable"
     command -v biliup >/dev/null 2>&1 || warn "biliup not found; upload nodes will fail"
     command -v fc-list >/dev/null 2>&1 || warn "fontconfig not found; subtitle burning may fail"
   fi
@@ -424,6 +438,32 @@ TimeoutStopSec=30
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# 节点侧上传(experimental):装 biliup 到 <root>/bin。失败只 warn(不阻断安装;缺 biliup 时
+# master 的能力探测会判定不支持 → 自动回落「pull 回 master」,不会静默丢场)。
+if [ "$WITH_UPLOAD" -eq 1 ]; then
+  if [ -x "$ROOT/bin/biliup" ]; then
+    printf '==> biliup already present at %s/bin/biliup\n' "$ROOT"
+  elif [ -f "$TMP/packages/base/bin/biliup" ]; then
+    install -m 0755 "$TMP/packages/base/bin/biliup" "$ROOT/bin/biliup"
+    printf '==> Installed biliup from archive\n'
+  else
+    printf '==> Installing biliup (node-side upload)\n'
+    # 归档里没有 install-biliup.sh → 从 GitHub 拉(与 install-worker.sh 自身同源)。
+    BILIUP_INSTALLER="$TMP/install-biliup.sh"
+    if [ -n "${DREC_INSTALL_BILIUP_SH:-}" ] && [ -f "$DREC_INSTALL_BILIUP_SH" ]; then
+      cp "$DREC_INSTALL_BILIUP_SH" "$BILIUP_INSTALLER"
+    else
+      download "https://raw.githubusercontent.com/${REPO}/${RELEASE_REF}/scripts/install-biliup.sh" "$BILIUP_INSTALLER" 2>/dev/null || true
+    fi
+    if [ -f "$BILIUP_INSTALLER" ]; then
+      BILIUP_DEST="$ROOT/bin" sh "$BILIUP_INSTALLER" "$ROOT/bin" \
+        || warn "biliup install failed; node-side upload will be unavailable on this node"
+    else
+      warn "could not fetch install-biliup.sh; node-side upload will be unavailable on this node"
+    fi
+  fi
+fi
 
 if [ "$TUNNEL" = "tailscale" ] && ! command -v tailscale >/dev/null 2>&1; then
   printf '==> Installing Tailscale client (does not run tailscale up)\n'

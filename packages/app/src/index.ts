@@ -32,3 +32,5 @@ export type { NotifKey, NotifWebhookToggles } from "@drec/observability";
 export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, uploadThenAppendGroups, uploadPlain, appendGroup, countVideoParts, buildAppendArgs, buildUploadArgs, parseBV } from "./upload/biliup.js";
 export type { UploadOpts } from "./upload/biliup.js";
 export { fetchAnchorName, resolveShortUrl } from "./anchor.js";
+// 节点侧上传(experimental,见 plans/027):_node-pipeline / _node-capabilities 的节点侧执行体。
+export { runNodeSidePipeline, probeNodeCapabilities, listNodeProducts } from "./node-pipeline.js";

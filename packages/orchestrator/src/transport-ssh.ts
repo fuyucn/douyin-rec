@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { registerChild, throwIfAborted, type RemoteTaskSpec } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeTasks, Transport } from "./transport.js";
+import type { NodeCapabilities, NodePipelineResult, NodePipelineSpec } from "@drec/core";
 
 export interface SshOpts {
   id: string; host: string; dataRoot: string;
@@ -166,6 +167,37 @@ export class SshTransport implements Transport {
     const parsed = JSON.parse(out) as { freeGB?: number; error?: string };
     if (parsed.error || typeof parsed.freeGB !== "number") throw new Error(`_disk 失败: ${parsed.error ?? "无 freeGB"}`);
     return parsed.freeGB;
+  }
+
+  /** 节点侧上传能力探测(experimental,见 plans/027)。旧 bundle 无 `_node-capabilities` → 抛错,调用方按不支持处理。 */
+  async nodeCapabilities(): Promise<NodeCapabilities> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const out = await this.run([`${nodePrefix} _node-capabilities ${this.o.dataRoot}`]);
+    const parsed = JSON.parse(out) as Partial<NodeCapabilities>;
+    return {
+      biliup: parsed.biliup === true,
+      cookies: parsed.cookies === true,
+      diskFreeGB: typeof parsed.diskFreeGB === "number" ? parsed.diskFreeGB : 0,
+      cjkFonts: parsed.cjkFonts === true,
+    };
+  }
+
+  /**
+   * 在节点本地执行「remux → biliup 上传」并把 BV 回传(experimental,见 plans/027)。
+   * spec 经 base64 传递(含 cookie,只走可信 ssh 通道,与 `_apply-tasks` 同一路径)。
+   * 录像**不回传 master** —— 这正是省掉 rsync 的关键。
+   */
+  async nodePipeline(spec: NodePipelineSpec): Promise<NodePipelineResult> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const b64 = Buffer.from(JSON.stringify(spec), "utf-8").toString("base64");
+    const out = await this.run([`${nodePrefix} _node-pipeline ${this.o.dataRoot} ${b64}`]);
+    const parsed = JSON.parse(out) as Partial<NodePipelineResult>;
+    return {
+      ok: parsed.ok === true,
+      bv: parsed.bv,
+      products: parsed.products,
+      error: parsed.error,
+    };
   }
 
   async isDone(roomSlug: string): Promise<boolean> {

@@ -23,6 +23,8 @@ interface FormState {
   burnLivechat: boolean;
   /** 合并分段成一片(默认 true);false = 不合并,按录制分段逐个上传(每段一个分 P)。 */
   mergeSegments: boolean;
+  /** (实验)节点侧上传:不烧录时 winner 节点本地 remux + 上传,省掉录像回传。默认 false。 */
+  nodeSideUpload: boolean;
   clStageSourceAfterMerge: boolean;
   clSourceAfterDone: boolean;
   clStageAfterDone: boolean;
@@ -45,6 +47,7 @@ const BLANK: FormState = {
   burnDanmu: true,
   burnLivechat: true,
   mergeSegments: true,
+  nodeSideUpload: false,
   clStageSourceAfterMerge: false,
   clSourceAfterDone: false,
   clStageAfterDone: false,
@@ -69,6 +72,7 @@ function fromRule(r: HubRuleDTO): FormState {
     burnDanmu: c.steps?.burnDanmu !== false,
     burnLivechat: c.steps?.burnLivechat !== false,
     mergeSegments: c.steps?.mergeSegments !== false,
+    nodeSideUpload: c.steps?.nodeSideUpload === true,
     clStageSourceAfterMerge: c.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: c.cleanup?.sourceAfterDone === true,
     clStageAfterDone: c.cleanup?.stageAfterDone === true,
@@ -200,7 +204,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
       workers: form.workers,
       recording: { sourceTaskId: form.sourceTaskId },
       pipeline: {
-        steps: { mergeSegments: form.mergeSegments, burnDanmu: form.burnDanmu, burnLivechat: form.burnLivechat },
+        steps: { mergeSegments: form.mergeSegments, burnDanmu: form.burnDanmu, burnLivechat: form.burnLivechat, nodeSideUpload: form.nodeSideUpload },
         cleanup: {
           stageSourceAfterMerge: form.clStageSourceAfterMerge,
           sourceAfterDone: form.clSourceAfterDone,
@@ -329,6 +333,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {([
               ["mergeSegments", t("hub.ruleDialog.toggleMergeSegmentsLabel"), t("hub.ruleDialog.toggleMergeSegmentsSub")],
+              ["nodeSideUpload", t("hub.ruleDialog.toggleNodeSideUploadLabel"), t("hub.ruleDialog.toggleNodeSideUploadSub")],
               ["burnDanmu", t("hub.ruleDialog.toggleBurnDanmuLabel"), t("hub.ruleDialog.toggleBurnDanmuSub")],
               ["burnLivechat", t("hub.ruleDialog.toggleBurnLivechatLabel"), t("hub.ruleDialog.toggleBurnLivechatSub")],
               ["clStageSourceAfterMerge", t("hub.ruleDialog.toggleClStageSourceAfterMergeLabel"), t("hub.ruleDialog.toggleClStageSourceAfterMergeSub")],
