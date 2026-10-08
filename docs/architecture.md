@@ -8,7 +8,10 @@ pnpm workspace monorepo，13 个包，收敛成 **2 个可插拔接缝** + **1 �
 
 依赖**只能向下**（`test/arch/layering.test.ts` 守护：每个包的 rank 必须严格大于它依赖的任何包；新增包须在 `RANKS` 登记）。esbuild 把 `cli` 打成自包含单文件 `dist/douyin-rec.mjs`（+ 独立的 `dist/tui.mjs`）。
 
-> 同时维护一份等价的可交互图：[architecture.html](./architecture.html)。CLI / app 层细节见 [cli.md](./cli.md) · [app.md](./app.md)。
+> **热图(自动生成)**:[architecture.html](./architecture.html) —— 包热图(语义角色 + 变更热度)、运行流程图、依赖边。
+> 它由 `scripts/gen-architecture.mjs` 从仓库真实数据(包依赖 / LOC / git 变更 / 分层表)生成,**不要手改**
+> (会被下次生成覆盖)。改了架构后跑 `pnpm arch:gen` 重新生成;`pnpm arch:check` 校验是否与仓库一致。
+> 本文(`architecture.md`)是**叙述性真相源**,`architecture.html` 是其可视化快照。CLI / app 层细节见 [cli.md](./cli.md) · [app.md](./app.md)。
 
 ## 依赖分层图
 

@@ -1,6 +1,6 @@
 {
   "name": "douyin-rec",
-  "version": "0.0.34",
+  "version": "0.0.35",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.33.2",
@@ -14,6 +14,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "bundle": "node esbuild.config.mjs && chmod +x dist/douyin-rec.mjs",
+    "arch:gen": "node scripts/gen-architecture.mjs",
+    "arch:check": "node scripts/gen-architecture.mjs --check",
     "dev": "tsx packages/cli/src/cli.ts",
     "tui": "node dist/douyin-rec.mjs task tui",
     "tui:local": "node dist/douyin-rec.mjs task tui --api http://localhost:7861",
