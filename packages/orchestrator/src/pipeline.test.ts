@@ -1000,6 +1000,33 @@ describe("runPipeline", () => {
       return { nodePipeline, nodeCapabilities };
     }
 
+    it("stage 模式 + flag on → 必须回落 pull 回 master(产物需落 master,节点侧无收益)", async () => {
+      // stage 模式的产物必须出现在 master 的 stage 目录;省回传会让该模式失去意义。
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, uploadMode: "stage", steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false } } });
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t);
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      await runPipeline(b, deps);
+      expect(nodePipeline).not.toHaveBeenCalled(); // 绝不走节点侧
+      expect(t.pull).toHaveBeenCalled();           // 现状:pull 回 master
+      deps.ledger.close();
+    });
+
+    it("shouldUseNodeSideUpload:纯判定(全局开关/stage/烧录/未开启)", async () => {
+      const { shouldUseNodeSideUpload } = await import("./node-side-upload.js");
+      const burnOff = { burnDanmu: false, burnLivechat: false };
+      const burnOn = { burnDanmu: true, burnLivechat: false };
+      // 未开启
+      expect(shouldUseNodeSideUpload({ uploadMode: "upload", steps: {} }, burnOff).ok).toBe(false);
+      // stage 模式
+      const stageR = shouldUseNodeSideUpload({ uploadMode: "stage", steps: { nodeSideUpload: true } }, burnOff);
+      expect(stageR.ok).toBe(false);
+      // 需烧录
+      expect(shouldUseNodeSideUpload({ uploadMode: "upload", steps: { nodeSideUpload: true } }, burnOn).ok).toBe(false);
+      // 全部满足
+      expect(shouldUseNodeSideUpload({ uploadMode: "upload", steps: { nodeSideUpload: true } }, burnOff).ok).toBe(true);
+    });
+
     it("flag off(默认)→ 行为与现状一致:走 pull 回 master,不调 nodePipeline", async () => {
       const deps = makeDeps();
       const t = deps.transports.get("node-1")!;

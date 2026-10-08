@@ -11,6 +11,8 @@ import { humanBytes, sumBytes } from "./format.js";
 import { buildWorkflow, deriveStageProducts, runWorkflowNodes, ResourcePool, type StageProducts, type WorkflowNodeKey } from "./workflow.js";
 import { deriveSegmentPlan, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 import { runSegmentPipeline } from "./segment-pipeline.js";
+// 节点侧上传(experimental,plans/027):全部逻辑隔离在 node-side-upload.ts,便于快速开关/回退。
+import { shouldUseNodeSideUpload, tryNodeSideUpload } from "./node-side-upload.js";
 
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。 */
 export interface PipelineSteps {
@@ -227,101 +229,6 @@ function makeJobLog(stageSub: string): (msg: string) => void {
   };
 }
 
-/**
- * 节点侧上传(experimental,见 plans/027)。返回非 null 表示已由节点完成(调用方直接 return);
- * 返回 null 表示**回落现状**(能力不足等)—— 调用方继续走 pull 回 master 的常规路径。
- *
- * 前置:调用方已判定 flag on 且本场不烧录。本函数只负责能力探测 + 下发 + 结果落库。
- */
-async function tryNodeSideUpload(o: {
-  streamKey: string;
-  cfg: PipelineCfg;
-  winner: { workerId: string; rec: { tsFiles: string[]; xmlPath?: string } };
-  winnerMembers: readonly { workerId: string; rec: { tsFiles: string[]; xmlPath?: string } }[];
-  transport: Transport;
-  ledger: SyncLedger;
-  jlog: (m: string) => void;
-  notify: (e: NotifyEvent) => void;
-  deps: PipelineDeps;
-}): Promise<{ state: JobState; bv?: string } | null> {
-  const { streamKey, cfg, winner, winnerMembers, transport, ledger, jlog, notify } = o;
-
-  // 能力探测:旧 bundle 无 _node-capabilities / 节点缺 biliup / 无 cookie → 回落现状。
-  if (!transport.nodeCapabilities || !transport.nodePipeline) {
-    jlog(`节点侧上传不可用:节点 ${winner.workerId} 的 bundle 不支持(_node-pipeline 缺失) → 回落 pull 回 master`);
-    return null;
-  }
-  let caps;
-  try {
-    caps = await transport.nodeCapabilities();
-  } catch (e) {
-    jlog(`节点侧上传能力探测失败(${(e as Error)?.message ?? e}) → 回落 pull 回 master`);
-    return null;
-  }
-  const uploadMode = cfg.uploadMode === "upload" ? "upload" : "stage";
-  if (uploadMode === "upload" && !caps.biliup) {
-    jlog(`节点侧上传不可用:节点 ${winner.workerId} 无 biliup → 回落 pull 回 master`);
-    return null;
-  }
-  if (uploadMode === "upload" && !caps.cookies && !cfg.cookies) {
-    jlog(`节点侧上传不可用:节点 ${winner.workerId} 无 B站 cookie 且 master 未下发 → 回落 pull 回 master`);
-    return null;
-  }
-  jlog(`节点侧上传可用(biliup=${caps.biliup} cookies=${caps.cookies} 磁盘=${caps.diskFreeGB.toFixed(1)}GB)→ 节点本地处理,省掉回传`);
-
-  const spec: NodePipelineSpec = {
-    streamKey,
-    tsFiles: winnerMembers.flatMap((m) => m.rec.tsFiles),
-    xmlPath: winner.rec.xmlPath,
-    segmentGroupSec: cfg.segmentGroupSec,
-    mergeSegments: cfg.steps?.mergeSegments !== false,
-    uploadMode,
-    stageDir: cfg.stageDir,
-    uploadMeta: cfg.uploadMeta,
-    uploadPrivate: cfg.uploadPrivate !== false,
-    timeZone: cfg.timeZone,
-    minSegmentSec: cfg.minSegmentSec,
-    cookies: cfg.cookies || undefined,
-    cleanSourceAfterDone: cfg.cleanup?.sourceAfterDone === true,
-  };
-
-  ledger.logStep(streamKey, "pull", "start");
-  jlog(`节点侧执行: remux${uploadMode === "upload" ? " + 上传" : ""}(无录像回传)`);
-  const t0 = Date.now();
-  let result;
-  try {
-    result = await transport.nodePipeline(spec);
-  } catch (e) {
-    const msg = String((e as Error)?.message ?? e);
-    jlog(`节点侧执行失败: ${msg}`);
-    ledger.logStep(streamKey, "pull", "done", `节点侧执行失败: ${msg.slice(0, 120)}`);
-    // 节点侧失败 → 不静默:标 failed 让 reconciler 决定重试/人工。绝不吞掉。
-    ledger.markFailed(streamKey, `节点侧上传失败: ${msg.slice(0, 200)}`);
-    notify({ kind: "error", stage: "同步", message: `节点侧上传失败 ${streamKey}: ${msg.slice(0, 200)}` });
-    return { state: "failed" };
-  }
-  const elapsed = Math.round((Date.now() - t0) / 1000);
-  if (!result.ok) {
-    const msg = result.error ?? "未知错误";
-    jlog(`节点侧执行失败: ${msg}(${elapsed}s)`);
-    ledger.logStep(streamKey, "pull", "done", `节点侧失败: ${msg.slice(0, 120)}`);
-    ledger.markFailed(streamKey, `节点侧上传失败: ${msg.slice(0, 200)}`);
-    notify({ kind: "error", stage: "同步", message: `节点侧上传失败 ${streamKey}: ${msg.slice(0, 200)}` });
-    return { state: "failed" };
-  }
-
-  ledger.logStep(streamKey, "pull", "done", `节点侧完成 ${elapsed}s${result.products?.length ? ` · ${result.products.length} 产物` : ""}`);
-  jlog(`节点侧完成(${elapsed}s)${result.bv ? ` BV=${result.bv}` : ""}`);
-
-  if (uploadMode !== "upload") {
-    // stage 模式:产物留节点,master 无产物可管 → 直接收口(与 master stage 模式同语义)。
-    ledger.markDone(streamKey, "");
-    return { state: "done" };
-  }
-  ledger.markDone(streamKey, result.bv ?? "");
-  return { state: "done", bv: result.bv };
-}
-
 export async function runPipeline(
   b: Broadcast,
   deps: PipelineDeps,
@@ -442,16 +349,18 @@ async function runPipelineInner(
   const transport = transports.get(winner.workerId);
   if (!transport) throw new Error(`No transport for worker: ${winner.workerId}`);
 
-  // ── 节点侧上传(experimental,见 plans/027)────────────────────────────────────
-  // flag on + **本场不烧录** → 让 winner 节点本地 remux + biliup 上传,省掉整场录像回传。
-  // 需烧录时开关无效(burn 需 11 核 + 中文字体,弱节点烧不动)。节点缺能力 → 回落现状,记明原因。
-  if (cfg.steps?.nodeSideUpload && !burnDanmu && !burnLivechat) {
+  // ── 节点侧上传(experimental,plans/027)──────────────────────────────────────
+  // 全部逻辑隔离在 node-side-upload.ts(含 kill switch);这里只做「是否该走」的判定 + 调用。
+  // 不满足条件(未开启/全局停用/stage 模式/需烧录) → 记明原因后继续走下面的 pull 回 master。
+  const nodeSide = shouldUseNodeSideUpload(cfg, { burnDanmu, burnLivechat });
+  if (nodeSide.ok) {
     const nodeResult = await tryNodeSideUpload({
       streamKey, cfg, winner, winnerMembers, transport, ledger, jlog, notify, deps,
     });
     if (nodeResult) return nodeResult;
   } else if (cfg.steps?.nodeSideUpload) {
-    jlog(`节点侧上传已开启,但本场需烧录(danmu=${burnDanmu} livechat=${burnLivechat}) → 回落 master 集中处理`);
+    // 只有规则显式开启却没走成时才记日志(避免默认关闭的房间刷屏)。
+    jlog(`节点侧上传已开启但本场不适用:${nodeSide.reason} → 回落 pull 回 master`);
   }
 
   // stageSub 已在入口声明(续跑分支复用)——stageDir/<sanitized-streamKey>,隔离各场文件。

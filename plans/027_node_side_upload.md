@@ -29,13 +29,31 @@ remux + 上传,**省掉整场录像回传**(pull 步)。
 新增 hub 规则级开关 `pipeline.steps.nodeSideUpload`(boolean,**缺省 false = 旧行为**):
 
 - `false`(默认)= 现状:全部房间 pull 回 master 处理。
-- `true` = **实验**:该房间**不烧录时**,在 winner 节点本地 remux → 节点直接上传 B 站,
+- `true` = **实验**:该房间**不烧录 + upload 模式**时,在 winner 节点本地 remux → 节点直接上传 B 站,
   master 只接收元数据(BV 号)。**需要烧录时该开关无效**(回落现状,pull 回 master),
-  因为 burn 不能在弱节点上跑。
+  因为 burn 不能在弱节点上跑。**stage 模式也无效** —— stage 的产物必须落到 master 的
+  `stage/` 目录(用户要拿这些文件),省回传会让该模式失去意义;且 stage 不上传,节点侧无任何收益。
 
 **为什么是 feature flag**:改动跨 transport 协议(新增节点侧执行命令)、上传路径
 (节点需 biliup + B站 cookie)、错误语义(节点上传失败 = 场级失败)。风险面大,
 先在一个房间试,验证稳定后再考虑推广/设为默认。
+
+## 代码隔离与快速开关(kill switch)
+
+实验功能全部逻辑**隔离在 3 个独立文件**,与主线代码解耦,便于快速开关/回退:
+
+| 文件 | 角色 |
+|---|---|
+| `packages/orchestrator/src/node-side-upload.ts` | master 侧全部逻辑 + **`NODE_SIDE_UPLOAD_ENABLED` kill switch** |
+| `packages/app/src/node-pipeline.ts` | 节点侧执行体(remux/聚组/建稿/append) |
+| `packages/cli/src/node-pipeline-commands.ts` | 节点侧隐藏子命令 `_node-capabilities` / `_node-pipeline` |
+
+`pipeline.ts` / `cli.ts` 里只保留**最小接线**(一次 import + 一次调用),不掺实验逻辑。
+
+**开关方式**:
+- **一键停用**:把 `node-side-upload.ts` 的 `NODE_SIDE_UPLOAD_ENABLED` 改成 `false`
+  → 即使规则里开了 `steps.nodeSideUpload` 也一律回落现状(不动任何规则文件/数据库)。
+- **彻底移除**:删上述 3 个文件 + `pipeline.ts` 的接线 + `cli.ts` 的 `registerNodePipelineCommands` 调用。
 
 ## 约束(硬性)
 
@@ -43,6 +61,7 @@ remux + 上传,**省掉整场录像回传**(pull 步)。
    master 需能探测节点能力(见「改动 · 能力探测」)。缺能力 → 该房间回落现状(pull 回 master),
    并在 job.log 记明原因,**不静默失败**。
 2. **烧录房间永不启用**:`burnDanmu || burnLivechat` 为真时开关被忽略。
+   **stage 模式永不启用**:产物必须落 master(`uploadMode !== "upload"` 时开关被忽略)。
 3. **`mergeSegments=false`(分段上传)也适用**:节点侧逐段 remux → 逐段上传,同样省回传。
 4. **水印/可见性/copyright 常量不变**(`biliup.ts` 硬标准),节点上传复用同一套参数构造。
 5. **幂等**:节点上传仍是 P1 建稿 → append 分 P;沿用现有「上传类节点不自动重跑」的语义

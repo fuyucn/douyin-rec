@@ -12,6 +12,8 @@
 import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌 env(如 DOUYIN_REC_ROOT),
                          // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
 import { Command } from "commander";
+// 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
+import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { loadConfig } from "@drec/core";
@@ -1279,43 +1281,6 @@ program
   });
 
 // ─── _tasks <dataRoot>（隐藏子命令，供 master 通过 SSH 调用）──────────────────────
-// ─── _node-capabilities <dataRoot>（隐藏,experimental 见 plans/027）─────────────
-// 节点侧上传能力探测:master 在 flag on 的房间上调用,决定走节点侧还是回落现状。
-// 输出 JSON { biliup, cookies, diskFreeGB, cjkFonts }。旧 bundle 无此命令 → master 按不支持处理。
-program
-  .command("_node-capabilities <dataRoot>", { hidden: true })
-  .description("(内部) 输出节点侧上传能力 JSON(biliup/cookies/磁盘/字体;供 master ssh 调用)")
-  .action(async (dataRoot: string) => {
-    const { probeNodeCapabilities } = await import("@drec/app");
-    process.env.DOUYIN_REC_ROOT = dataRoot;
-    try {
-      process.stdout.write(JSON.stringify(await probeNodeCapabilities(dataRoot)) + "\n");
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
-      process.exitCode = 1;
-    }
-  });
-
-// ─── _node-pipeline <dataRoot> <base64>（隐藏,experimental 见 plans/027）─────────
-// 节点本地 remux(+可选聚组)→ biliup 上传 → 回传 BV。**不含视频回传**(省掉 rsync 的关键)。
-// base64 = JSON NodePipelineSpec。输出 JSON NodePipelineResult。
-program
-  .command("_node-pipeline <dataRoot> <base64>", { hidden: true })
-  .description("(内部) 在节点本地执行 remux + biliup 上传并回传 BV(experimental;供 master ssh 调用)")
-  .action(async (dataRoot: string, b64: string) => {
-    const { runNodeSidePipeline } = await import("@drec/app");
-    process.env.DOUYIN_REC_ROOT = dataRoot;
-    const spec = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as import("@drec/core").NodePipelineSpec;
-    try {
-      const result = await runNodeSidePipeline(spec, (m) => process.stderr.write(`[node-pipeline] ${m}\n`));
-      process.stdout.write(JSON.stringify(result) + "\n");
-      if (!result.ok) process.exitCode = 1;
-    } catch (e) {
-      process.stdout.write(JSON.stringify({ ok: false, error: String((e as Error)?.message ?? e) }) + "\n");
-      process.exitCode = 1;
-    }
-  });
-
 // 输出本节点全部任务的隐私安全投影(无 cookies)。master 的任务同步对账用。
 program
   .command("_tasks <dataRoot>", { hidden: true })
@@ -1387,6 +1352,9 @@ program
     );
     process.stdout.write(JSON.stringify(result) + "\n");
   });
+
+// 节点侧上传(experimental,plans/027)的隐藏子命令隔离在独立文件,便于快速开关/回退。
+registerNodePipelineCommands(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   // 运行期错误统一走这里：干净的一行写 stderr + 退出码 1（参数/校验错由各命令 exit 2）。
