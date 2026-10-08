@@ -353,7 +353,7 @@ docker 固定 `/output-data`（映射宿主机 `docker-data/`）。专用 env（
   - 例：`fix(recorder): 预建主播子目录，消除「开播首段 ffmpeg 失败一次」`、`feat(hub): 受管任务按房间同步到选中 workers`。
 - **不要用** 旧的 `v0.0.X: 描述` 格式（已废弃，与现有 git 历史不一致）。
 - 计划文件 `plans/NNN_*.md` 单独 commit，代码变更单独 commit。
-- commit 正文末尾附：`Co-Authored-By: Kiro <noreply@kiro.dev>`。
+- **不要加任何 AI 署名 trailer**（`Co-Authored-By: …` / `Claude-Session` / 类似行）—— commit 只写变更本身。
 - 只 `git add` 本次相关文件，别带上无关的未跟踪文件；仅在用户要求时才 commit/push。
 
 ## 保留的 Python 部分
