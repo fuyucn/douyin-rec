@@ -76,6 +76,11 @@ export interface HubRuleDTO {
   pipeline: HubPipelineConfig;
   /** 选中参与该房间 hub 处理的 worker id;缺省/空 = 全部 worker(向后兼容)。 */
   workers?: string[];
+  /**
+   * 该房间需要的 worker 能力(能力门控);非空时只派给 `capabilities ⊇ requires` 的 worker,
+   * 与 `workers` 取交集。缺省/空 = 无要求。例:`["danmu:douyin"]`。
+   */
+  requires?: string[];
   /** 录制下发配置(sourceTaskId 非空 → hub 把该 task 同步到 workers 勾选的节点)。 */
   recording?: HubRecordingConfig;
   /** 关联的 master 录制任务显示投影(由后端按 recording.sourceTaskId 解析;无则 null)。 */
@@ -88,6 +93,8 @@ export interface HubRuleDTO {
   } | null;
   /** 主播名(若有同 roomSlug 的录制任务/录像可关联显示);未知 null。 */
   anchorName?: string | null;
+  /** 用户自定义的任务名称(task.name;主播名称);与 anchorName 独立,用于「名称 · 主播名」双行显示。未配置则 null。 */
+  taskName?: string | null;
 }
 
 /** hub 任务的一次状态转换事件(时间线;GET /api/hub/jobs 内嵌)。 */
@@ -128,6 +135,8 @@ export interface HubJobCandidateDTO {
   coverage: number;
   /** 该节点录到的视频总时长(秒)。 */
   durationSec: number;
+  /** 该节点本场弹幕条目数(弹幕+礼物+入场)。0 = 无弹幕/仅表头空 xml;null/缺省 = 未统计(旧库)。 */
+  danmuCount?: number | null;
   /** 是否完整录全(单会话无断流缺口)。 */
   complete: boolean;
   /** 是否本场胜出节点。 */
@@ -167,10 +176,20 @@ export interface HubJobDTO {
 }
 
 /** 一个录制 worker(节点)的展示投影。id 内部稳定主键(UI 不展示);name 友好名。 */
-export interface WorkerDTO { id: string; name: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string }
+export interface WorkerDTO { id: string; name: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[] }
 
 /** worker 连接测试结果(POST /api/hub/workers/test)——轻量 ping:可达 + dataRoot 存在。 */
-export interface WorkerTestResult { ok: boolean; error?: string; }
+export interface WorkerTestResult {
+  ok: boolean;
+  error?: string;
+  /**
+   * 被探测节点的稳定身份 id(`_node-id` → `<dataRoot>/config/node.json`)。旧 bundle / 不可达 → 缺省。
+   * UI「添加节点」用它作为 worker id(而非自分配 `worker-N`)→ 同机器永远同一 id。
+   */
+  nodeId?: string;
+  /** 节点主机名(仅显示提示)。 */
+  hostname?: string;
+}
 /** GET /api/hub/workers/status 的单个 worker 健康结果(批量 ping)。 */
 export interface WorkerStatus { id: string; ok: boolean; error?: string; }
 
@@ -308,6 +327,8 @@ export interface HubRulePayload {
   pipeline?: HubPipelineConfig;
   /** 选中的 worker id;present 时后端校验必须为非空 string[]。缺省 = 全部 worker。 */
   workers?: string[];
+  /** 房间需要的 worker 能力(能力门控);present 时与 workers 取交集。缺省 = 无要求。 */
+  requires?: string[];
   /** 录制下发配置(sourceTaskId → hub 自动同步到选中节点)。 */
   recording?: HubRecordingConfig;
 }
@@ -388,6 +409,32 @@ export interface PlatformDTO {
 /** GET /api/platforms 响应。platforms[0] = 默认平台(URL 无命中时回落)。 */
 export interface PlatformsDTO {
   platforms: PlatformDTO[];
+}
+
+/**
+ * 抖音取流/弹幕用的 API 模式(全局设置 `settings.douyinApiMode`)。
+ *
+ * ⚠️ **值域的唯一真理源就是本文件的 `DOUYIN_API_MODES`。** 消费方(设置 API、UI 下拉、
+ * `douyin-live` 的 env 读取)一律走 `normalizeDouyinApiMode`,**不得各自再写一份白名单** ——
+ * 否则新增模式时会出现「这里加了、那里没加」的静默不一致。
+ *
+ * - `balance`(**默认**):自动挑 api type(按 priority + 加权随机),失败端点自动禁用/自愈。
+ *   实测三环境(家宽/VPS1/VPS2)均能拿到 liveId + 流,VPS 上会自动摘掉被风控的 `webHTML`。
+ * - `web`:固定走 `webcast/room/web/enter`(带 a_bogus 签名)。最稳、不依赖房间 HTML 页;
+ *   但在开播切换瞬间可能返回**陈旧 liveId**(历史踩坑)。
+ * - `webHTML`:固定走房间 HTML 页(render_data)。liveId 最准(始终当前场),但**出口 IP 被
+ *   argus 风控时返回验证码中间页** → 整场拿不到 liveId(且取流恒 streams=0,只能用于弹幕)。
+ * - `mobile`:固定走 `webcast.amemv.com reflow/info`。需 sec_uid(自己拿不到,靠其他端点缓存)。
+ * - `random`:每次调用随机挑一个(等权)。调试用,不建议长期。
+ */
+export const DOUYIN_API_MODES = ["balance", "web", "webHTML", "mobile", "random"] as const;
+export type DouyinApiMode = (typeof DOUYIN_API_MODES)[number];
+/** 默认 API 模式(未设置时)。 */
+export const DEFAULT_DOUYIN_API_MODE: DouyinApiMode = "balance";
+/** 校验:任意输入 → 合法 DouyinApiMode(非法/空 → 默认值)。 */
+export function normalizeDouyinApiMode(v: unknown): DouyinApiMode {
+  const s = String(v ?? "").trim();
+  return (DOUYIN_API_MODES as readonly string[]).includes(s) ? (s as DouyinApiMode) : DEFAULT_DOUYIN_API_MODE;
 }
 
 /** GET /api/tasks[] 的任务响应(含 live 运行态;不含敏感 cookies)。 */

@@ -34,6 +34,9 @@ import {
   type HubPoolSnapshotDTO,
   QUEUE_PHASES,
   HUB_JOB_STATES,
+  DOUYIN_API_MODES,
+  DEFAULT_DOUYIN_API_MODE,
+  normalizeDouyinApiMode,
   type QueuePhase,
 } from "@drec/core";
 import * as hubStore from "../hub-store.js";
@@ -337,6 +340,11 @@ export interface Api {
   getMesioPath(): ApiResult;
   /** POST /api/mesio-path { mesioPath } — set/clear mesio 路径(空串=清除→回落 bin/mesio 默认)。 */
   setMesioPath(input: { mesioPath?: string }): ApiResult;
+  /** GET /api/douyin-api-mode — 抖音 API 模式设置(settings.douyinApiMode)+ 默认 + 可选值。 */
+  getDouyinApiMode(): ApiResult;
+  /** POST /api/douyin-api-mode { mode } — 设抖音 API 模式(balance/web/webHTML/mobile/random);
+   *  非法值回落默认 balance。改设置下次 spawn 生效(经 env 注入录制子进程)。 */
+  setDouyinApiMode(input: { mode?: string }): ApiResult;
   /** GET /api/timezone — 当前生效时区(settings.timezone,留空=默认)+ 默认值。 */
   getTimezone(): ApiResult;
   /** POST /api/timezone { timezone } — 设时区(config 驱动,覆盖 host 环境变量,立即生效不用重启);
@@ -385,9 +393,9 @@ export interface Api {
   /** GET /api/hub/workers — 列出录制 worker(hub 未启用 → 400)。 */
   listWorkers(): ApiResult;
   /** POST /api/hub/workers — 新建 worker。 */
-  createWorker(input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string }): ApiResult;
+  createWorker(input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[]; id?: string }): ApiResult;
   /** PATCH /api/hub/workers/:id — 部分更新。 */
-  updateWorker(id: string, input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string }): ApiResult;
+  updateWorker(id: string, input: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[] }): ApiResult;
   /** DELETE /api/hub/workers/:id — 删除(local 保护)。 */
   deleteWorker(id: string): ApiResult;
   /** POST /api/hub/workers/reorder { ids } — 按给定顺序整体重排 worker 列表(拖拽排序持久化)。 */
@@ -405,12 +413,17 @@ export function makeApi(deps: ApiDeps): Api {
   const hubDir = deps.hubDir ?? rootHubDir();
   // hub.config.json 路径(worker 数组的真理源);注入 > rootHubConfig()。
   const hubConfigPath = deps.hubConfigPath ?? rootHubConfig();
-  // 该任务是否被任一启用中的 hub 规则绑定为 source task。只有这类任务的手动启停
-  // 成功后才需要立即同步到节点；普通任务启停不触发 hub 对账。
+  // 该任务是否被任一 hub 规则绑定为 source task。只有这类任务变更后才需要立即同步到节点；
+  // 普通任务不触发 hub 对账。
+  //
+  // **不按 rule.enabled 过滤**：规则停用时 sourceTaskId 仍指向该任务；若按 enabled 过滤，
+  // 用户改了任务(如关弹幕)却不同步，远端会一直保留旧值，直到下次 start/stop 才纠正。
+  // 是否真的下发由 desiredFor 决定(它自己会跳过停用规则)，这里只负责「有绑定就通知同步」。
   const isHubSourceTask = (id: number): boolean =>
-    hubStore.listHubRules(hubDir).some((r) => r.enabled && r.recording?.sourceTaskId === id);
+    hubStore.listHubRules(hubDir).some((r) => r.recording?.sourceTaskId === id);
   const workerToDto = (w: workerStore.WorkerConfig): WorkerDTO => ({
     id: w.id, name: w.name ?? w.id, kind: w.kind, host: w.host, dataRoot: w.dataRoot, apiUrl: w.apiUrl,
+    capabilities: w.capabilities,
   });
 
   // 后台抓主播名写回 store（创建/改房间号时）。fire-and-forget：不阻塞响应，
@@ -529,7 +542,8 @@ export function makeApi(deps: ApiDeps): Api {
     const t = srcTask ?? store.listTasks().find(
       (task) => platformForRoom(task.room).extractRoomSlug(task.room) === r.roomSlug,
     );
-    const anchorName = t ? manager.getAnchorName(t.id) ?? t.anchorName ?? t.name ?? null : null;
+    const anchorName = t ? manager.getAnchorName(t.id) ?? t.anchorName ?? null : null;
+    const taskName = t?.name ?? null;
     return {
       key: r.key,
       roomSlug: r.roomSlug,
@@ -539,6 +553,7 @@ export function makeApi(deps: ApiDeps): Api {
       enabled: r.enabled,
       pipeline: r.pipeline,
       workers: r.workers,
+      requires: r.requires,
       recording: r.recording,
       sourceTask: srcTask
         ? {
@@ -550,6 +565,7 @@ export function makeApi(deps: ApiDeps): Api {
           }
         : null,
       anchorName,
+      taskName,
     };
   };
 
@@ -688,11 +704,18 @@ export function makeApi(deps: ApiDeps): Api {
 
       const updated = store.updateTask(id, patch);
       if (!updated) return err(404, `未找到任务 id=${id}`);
-      // 改了房间号 → 主播可能变了，清旧名并重新抓。
-      if ("room" in patch && patch.room) {
-        store.setAnchorName(id, null);
+      // **房间号真的变了** → 主播可能不同了，重新抓。
+      // 注意必须比对旧值：前端编辑时总会带上 room 字段(即使没改)，只看 `"room" in patch`
+      // 会导致「只改弹幕开关也把主播名清空」。
+      // **不要先清空再抓**(T-4)：抓取可能失败(如房间 HTML 被风控拦 / 新房间暂不可达)，
+      // 先清会让 anchorName 永久变 null、界面主播信息凭空消失。改为「抓到才替换」——
+      // 抓失败就保留旧名(略陈旧好过空白)。
+      if (patch.room && patch.room !== existing.room) {
         resolveAnchorBg(id, patch.room);
       }
+      // 该任务是 hub 源任务 → 改动(如 danmu/quality/segmentSec/useCookie/outDir…)立即同步到节点。
+      // 漏了这句会导致「改了主节点任务但远端仍是旧值」，直到下次 start/stop 才纠正。
+      if (isHubSourceTask(id)) deps.requestSyncTasks?.();
       return { status: 200, body: view(updated) };
     },
 
@@ -887,6 +910,27 @@ export function makeApi(deps: ApiDeps): Api {
       };
     },
 
+    getDouyinApiMode(): ApiResult {
+      // 空 = 未设置 → 用默认(balance)。UI 用 default 提示当前生效值。
+      const raw = (store.getSetting("douyinApiMode") ?? "").trim();
+      return {
+        status: 200,
+        body: { mode: raw, default: DEFAULT_DOUYIN_API_MODE, effective: normalizeDouyinApiMode(raw), options: [...DOUYIN_API_MODES] },
+      };
+    },
+
+    setDouyinApiMode(input: { mode?: string }): ApiResult {
+      // 非法值回落默认(balance),不报错 —— 与 mesioPath 的「宽松存、用时归一」一致。
+      const mode = normalizeDouyinApiMode(input.mode);
+      // 存归一后的值(而非原样):避免设置里留非法串、UI 回显与生效值不一致。
+      store.setSetting("douyinApiMode", mode);
+      // 改设置下次 spawn 生效(env 注入,无需重启 serve)。
+      return {
+        status: 200,
+        body: { mode, default: DEFAULT_DOUYIN_API_MODE, effective: mode, options: [...DOUYIN_API_MODES] },
+      };
+    },
+
     getTimezone(): ApiResult {
       return {
         status: 200,
@@ -1016,6 +1060,7 @@ export function makeApi(deps: ApiDeps): Api {
           pipeline: input.pipeline,
           recording: input.recording,
           workers: input.workers,
+          requires: input.requires,
         });
         deps.requestSyncTasks?.();
         return { status: 201, body: hubRuleView(rule) };
@@ -1032,11 +1077,12 @@ export function makeApi(deps: ApiDeps): Api {
       const ruleSlug = dot < 0 ? key : key.slice(dot + 1);
       const rerr = recordingError(input.recording?.sourceTaskId, ruleSlug);
       if (rerr) return err(400, rerr);
-      const patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[] } = {};
+      const patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[]; requires?: string[] } = {};
       if ("enabled" in input) patch.enabled = input.enabled;
       if ("pipeline" in input) patch.pipeline = input.pipeline;
       if ("recording" in input) patch.recording = input.recording;
       if ("workers" in input) patch.workers = input.workers;
+      if ("requires" in input) patch.requires = input.requires;
       const updated = hubStore.updateHubRule(hubDir, key, patch);
       if (!updated) return err(404, `未找到 hub 规则 key=${key}`);
       deps.requestSyncTasks?.();
@@ -1182,6 +1228,9 @@ export function makeApi(deps: ApiDeps): Api {
       try {
         const w = workerStore.createWorker(hubConfigPath, {
           name: input.name ?? undefined, kind: input.kind ?? "", host: input.host, dataRoot: input.dataRoot, apiUrl: input.apiUrl,
+          capabilities: input.capabilities,
+          // 显式 id:UI「测试连接」探测到的节点稳定身份(nodeId),用它替代自分配 worker-N。
+          id: input.id,
         });
         deps.requestSyncTasks?.();
         return { status: 201, body: workerToDto(w) };

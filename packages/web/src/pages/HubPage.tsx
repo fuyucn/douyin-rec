@@ -218,14 +218,18 @@ export function HubPage(): ReactNode {
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5">
                           <span className="rail-grip" title={t("hub.common.dragTip")}><GripVertical className="w-3.5 h-3.5 shrink-0" /></span>
-                          {r.anchorName ? (
+                          {r.taskName ? (
+                            <div className="font-medium text-ink truncate">{r.taskName}</div>
+                          ) : r.anchorName ? (
                             <div className="font-medium text-ink truncate">{r.anchorName}</div>
                           ) : (
                             <div className="font-mono text-[13px] font-medium text-ink truncate">{roomId(r.room)}</div>
                           )}
                         </div>
-                        {r.anchorName && (
-                          <div className="font-mono text-[11px] text-muted-soft mt-0.5 truncate pl-5">{roomId(r.room)}</div>
+                        {(r.taskName || r.anchorName) && (
+                          <div className="font-mono text-[11px] text-muted-soft mt-0.5 truncate pl-5">
+                            {r.taskName && r.anchorName ? `${r.anchorName} · ` : ""}{roomId(r.room)}
+                          </div>
                         )}
                       </div>
                       <div className="flex items-center gap-1.5">
