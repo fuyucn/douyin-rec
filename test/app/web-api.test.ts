@@ -139,6 +139,54 @@ describe("createTask → resolveAnchor 创建即抓主播名", () => {
     expect(created.anchorName).toBeNull();
   });
 
+  it("refreshTaskAnchor:anchorName 为空时补抓并持久化", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const calls: string[] = [];
+    const api2 = makeApi({
+      store: s,
+      manager: m,
+      resolveAnchor: async (room) => {
+        calls.push(room);
+        return "补抓的主播";
+      },
+    });
+    // 模拟 VPS 上「同步建出来但 anchorName=null」的受管任务。
+    const t = s.addTask({ room: "https://live.douyin.com/123456", managedBy: "hub" });
+    expect(s.getTask(t.id)?.anchorName).toBeNull();
+    const r = api2.refreshTaskAnchor(t.id);
+    expect(r.status).toBe(200);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toEqual(["https://live.douyin.com/123456"]);
+    expect(s.getTask(t.id)?.anchorName).toBe("补抓的主播");
+  });
+
+  it("refreshTaskAnchor:已有 anchorName 时不重复抓（省平台 API）", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const calls: string[] = [];
+    const api2 = makeApi({
+      store: s,
+      manager: m,
+      resolveAnchor: async (room) => {
+        calls.push(room);
+        return "新名字";
+      },
+    });
+    const t = s.addTask({ room: "https://live.douyin.com/123456", managedBy: "hub" });
+    s.setAnchorName(t.id, "已有名字");
+    api2.refreshTaskAnchor(t.id);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toEqual([]);                       // 未发起抓取
+    expect(s.getTask(t.id)?.anchorName).toBe("已有名字"); // 未被覆盖
+  });
+
+  it("refreshTaskAnchor:任务不存在 → 404", () => {
+    expect(api.refreshTaskAnchor(9999).status).toBe(404);
+  });
+
   it("v.douyin.com 短链 → 创建后台转成 https://live.douyin.com/<web_rid> 入库", async () => {
     const s = new TaskStore(":memory:");
     const m = new MockManager();

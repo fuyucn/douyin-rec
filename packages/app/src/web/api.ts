@@ -308,6 +308,8 @@ export interface Api {
   /** GET /api/tasks/:id/logs — captured recorder log lines. 404 if missing. */
   getTaskLogs(id: number): ApiResult;
   deleteTask(id: number): Promise<ApiResult>;
+  /** POST /api/tasks/:id/refresh-anchor — 触发后台重新抓取主播名(匿名,fire-and-forget)。供 _apply-tasks 在 VPS 侧调用。 */
+  refreshTaskAnchor(id: number): ApiResult;
   startTask(id: number): ApiResult;
   stopTask(id: number, opts?: { internal?: boolean }): Promise<ApiResult>;
   /** POST /api/login/qr { platform? } — start a QR-login → { sessionId, qrPng }. */
@@ -428,7 +430,18 @@ export function makeApi(deps: ApiDeps): Api {
 
   // 后台抓主播名写回 store（创建/改房间号时）。fire-and-forget：不阻塞响应，
   // UI 下次轮询列表即可看到。失败静默（保留房间号显示）。
-  const resolveAnchorBg = (taskId: number, room: string): void => {
+  // 去重/节流:同一任务抓取进行中则跳过;带 throttleMs 的调用(同步驱动)在窗口内不重复抓,
+  // 避免每轮 60s 对账都打平台 API(风控敏感)。
+  const anchorInFlight = new Set<number>();
+  const anchorLastAttempt = new Map<number, number>();
+  const resolveAnchorBg = (taskId: number, room: string, opts: { throttleMs?: number } = {}): void => {
+    if (anchorInFlight.has(taskId)) return;
+    if (opts.throttleMs && opts.throttleMs > 0) {
+      const last = anchorLastAttempt.get(taskId) ?? 0;
+      if (Date.now() - last < opts.throttleMs) return;
+    }
+    anchorInFlight.add(taskId);
+    anchorLastAttempt.set(taskId, Date.now());
     void (async () => {
       let r = room;
       // 短链/用户名入库即转换 → 数字 web_rid(写回 DB)。
@@ -448,7 +461,9 @@ export function makeApi(deps: ApiDeps): Api {
         const name = await deps.resolveAnchor(r, cookies).catch(() => null);
         if (name) store.setAnchorName(taskId, name);
       }
-    })().catch(() => {});
+    })()
+      .catch(() => {})
+      .finally(() => anchorInFlight.delete(taskId));
   };
 
   // 显示用主播名：运行时(录制中 `[主播]` 日志解析) 优先，否则持久化的(创建时抓的)。
@@ -743,6 +758,17 @@ export function makeApi(deps: ApiDeps): Api {
       }
       store.removeTask(id);
       return { status: 200, body: { ok: true, id } };
+    },
+
+    /**
+     * 补抓主播名(供 hub 同步/`_apply-tasks` 调用):任务缺 anchorName 时后台抓一次并持久化。
+     * 已有值直接返回(名字不常变,省平台 API);节流 5 分钟防同步周期反复打平台。
+     */
+    refreshTaskAnchor(id: number): ApiResult {
+      const t = store.getTask(id);
+      if (!t) return err(404, `未找到任务 id=${id}`);
+      if (!t.anchorName) resolveAnchorBg(id, t.room, { throttleMs: 5 * 60_000 });
+      return { status: 200, body: { ok: true } };
     },
 
     /**

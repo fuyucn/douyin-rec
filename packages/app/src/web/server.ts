@@ -36,6 +36,7 @@ export interface RouteMatch {
     | "getTask"
     | "getTaskLogs"
     | "deleteTask"
+    | "refreshTaskAnchor"
     | "startTask"
     | "stopTask"
     | "startLogin"
@@ -155,6 +156,7 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "updateHubRule", methods: ["PATCH"], pattern: /^\/api\/hub\/rules\/([A-Za-z0-9_.-]+)$/, param: "slug", needsBody: true },
   { name: "deleteHubRule", methods: ["DELETE"], pattern: /^\/api\/hub\/rules\/([A-Za-z0-9_.-]+)$/, param: "slug" },
   { name: "getMerge", methods: ["GET"], pattern: /^\/api\/merges\/([A-Za-z0-9_-]+)$/, param: "sid" },
+  { name: "refreshTaskAnchor", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/refresh-anchor$/, param: "id" },
   { name: "startTask", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/start$/, param: "id" },
   { name: "stopTask", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/stop$/, param: "id" },
   { name: "getTaskLogs", methods: ["GET"], pattern: /^\/api\/tasks\/(\d+)\/logs$/, param: "id" },
@@ -304,6 +306,8 @@ async function dispatch(
       return api.getTaskLogs(match.id!);
     case "deleteTask":
       return api.deleteTask(match.id!);
+    case "refreshTaskAnchor":
+      return api.refreshTaskAnchor(match.id!);
     case "startTask":
       return api.startTask(match.id!);
     case "stopTask":

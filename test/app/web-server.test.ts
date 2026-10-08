@@ -65,6 +65,7 @@ describe("matchRoute", () => {
     expect(matchRoute("GET", "/api/tasks/7")).toMatchObject({ name: "getTask", id: 7 });
     expect(matchRoute("PATCH", "/api/tasks/7")).toMatchObject({ name: "updateTask", id: 7, needsBody: true });
     expect(matchRoute("DELETE", "/api/tasks/7")).toMatchObject({ name: "deleteTask", id: 7 });
+    expect(matchRoute("POST", "/api/tasks/7/refresh-anchor")).toMatchObject({ name: "refreshTaskAnchor", id: 7 });
     expect(matchRoute("POST", "/api/tasks/7/start")).toMatchObject({ name: "startTask", id: 7 });
     expect(matchRoute("POST", "/api/tasks/7/stop")).toMatchObject({ name: "stopTask", id: 7 });
     expect(matchRoute("GET", "/api/tasks/7/logs")).toMatchObject({ name: "getTaskLogs", id: 7 });

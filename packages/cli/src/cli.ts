@@ -1330,6 +1330,24 @@ program
         }
       }
     }
+    // 新建或已有但 anchorName 仍为 null 的受管任务:通知本机 serve 后台重抓主播名。
+    // 短命进程无法自行调用 fetchAnchorName(依赖平台 vendor 包),转交给 serve 进程做(有完整运行时)。
+    // fire-and-forget:失败只 warn,下次 enable/disable 或开播时会再次触发。
+    // 逐个 await 会拖慢本命令(ssh 往返),故并发发 + 短超时:serve 慢/挂时不能阻塞同步对账。
+    const apiBase = process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860";
+    const needsAnchor = store.listTasks().filter((t) => t.managedBy === "hub" && !t.anchorName);
+    await Promise.allSettled(
+      needsAnchor.map(async (t) => {
+        try {
+          await fetch(`${apiBase}/api/tasks/${t.id}/refresh-anchor`, {
+            method: "POST",
+            signal: AbortSignal.timeout(3000),
+          });
+        } catch {
+          // serve 未起/超时 → 忽略,开播时 task-manager 会从日志抓名字兜底。
+        }
+      }),
+    );
     process.stdout.write(JSON.stringify(result) + "\n");
   });
 
