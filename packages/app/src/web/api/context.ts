@@ -42,7 +42,6 @@ export interface ApiCtx {
   platformCookie: (platform: string) => { value: string | null; source: CookieStatus["source"] };
   biliupStatus: () => BiliupAuthStatus;
   validCookiePlatform: (platform: string) => boolean;
-  sanitizeSeg: (name: string) => string;
   normWebhook: (v: string | null | undefined) => string | null;
   toUseCookie: (v: number | boolean | undefined) => boolean;
   cookieStatus: (platform: string, value: string | null, source?: CookieStatus["source"]) => CookieStatus;
@@ -244,6 +243,6 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     err, isHubSourceTask, workerToDto, resolveAnchorBg, view, detailView,
     validateWorkers, validatePipeline, hubRuleView, recordingError, recordingsDir,
     platformCookie, biliupStatus, validCookiePlatform,
-    sanitizeSeg, normWebhook, toUseCookie, cookieStatus,
+    normWebhook, toUseCookie, cookieStatus,
   };
 }
