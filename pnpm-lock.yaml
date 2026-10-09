@@ -78,9 +78,6 @@ importers:
       '@drec/record-engine':
         specifier: workspace:*
         version: link:../record-engine
-      '@drec/tui':
-        specifier: workspace:*
-        version: link:../tui
       commander:
         specifier: ^12.0.0
         version: 12.1.0
@@ -212,7 +209,14 @@ importers:
         specifier: workspace:*
         version: link:../post-process
 
-  packages/post-process: {}
+  packages/post-process:
+    dependencies:
+      eastasianwidth:
+        specifier: ^0.3.0
+        version: 0.3.0
+      fast-xml-parser:
+        specifier: ^5.8.0
+        version: 5.8.0
 
   packages/record-engine:
     dependencies:
