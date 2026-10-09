@@ -57,9 +57,13 @@ WORKDIR /app
 
 # SSH 到 VPS 用挂载进来的 key(compose 挂 /root/.ssh/vps.key);SshTransport 不带 -i,靠此 config 指定。
 # host 用 tailnet IP(经 sidecar 可达);User/Key/免交互全在这。known_hosts 走 /dev/null + accept-new。
+#
+# 用通配而非逐个列举:新增 worker 只改 hub.config.json 即可,不必回来改 Dockerfile 重建镜像。
+# 之前写死 'Host 100.97.21.80' 导致后加的 worker 走了 ssh 默认用户(root)→ Permission denied。
+# 覆盖 tailnet 的 IPv4 CGNAT 段(100.64.0.0/10)与 MagicDNS 名(*.ts.net)。
 RUN if [ "$IMAGE_ROLE" = "master" ]; then \
       mkdir -p /root/.ssh && chmod 700 /root/.ssh && printf '%s\n' \
-        'Host 100.97.21.80' \
+        'Host 100.* *.ts.net' \
         '  User ubuntu' \
         '  IdentityFile /root/.ssh/vps.key' \
         '  IdentitiesOnly yes' \

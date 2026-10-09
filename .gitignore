@@ -31,7 +31,6 @@ cookies.json
 venv/
 
 # 本地专属 / 一次性调试产物(非本项目产物,勿带入 main)
-/AGENTS.md
 /.codex/
 /.orka/
 /icloud
