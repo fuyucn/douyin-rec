@@ -19,7 +19,8 @@ export * as workerStore from "./worker-store.js";
 export type { WorkerConfig } from "./worker-store.js";
 export { listHubJobs, readHubJobLog, jobLogPath, hubStageDir, buildQueueView, latestRunPerRoom } from "./hub-jobs.js";
 export type { HubJobView, HubJobEvent, BuildQueueOpts, LatestRunPerRoom } from "./hub-jobs.js";
-export { rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, DEFAULT_ROOT } from "./paths.js";
+export { rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, DEFAULT_ROOT, ensureNodeIdentity, rootNodeIdentityPath } from "./paths.js";
+export type { NodeIdentity } from "./paths.js";
 export { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
 /** 应用版本号({root package.json version}-{commit6},由 pnpm bundle 注入;非打包环境回落 dev)。 */
 export { APP_VERSION } from "./version.js";

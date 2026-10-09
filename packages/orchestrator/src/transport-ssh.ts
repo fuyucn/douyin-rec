@@ -122,6 +122,18 @@ export class SshTransport implements Transport {
     return { workerId: this.id, tasks: parsed.tasks };
   }
 
+  /** 读远端稳定身份(隐藏 `_node-id` 子命令;旧 bundle 无该命令 → 返回 null,调用方回落旧行为)。 */
+  async nodeId(): Promise<{ nodeId: string; hostname?: string } | null> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    try {
+      const out = await this.run([`${nodePrefix} _node-id ${this.o.dataRoot}`]);
+      const parsed = JSON.parse(out) as { nodeId?: string; hostname?: string };
+      return parsed?.nodeId ? { nodeId: parsed.nodeId, hostname: parsed.hostname } : null;
+    } catch {
+      return null; // 旧 bundle(无 _node-id)/ ssh 失败 → 不阻断添加流程
+    }
+  }
+
   /** 查询 worker 当前正在录制的房间,仅做轻量 /proc 扫描,不读录像目录。 */
   async activeRecordingRooms(): Promise<ActiveRecordingRoom[]> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;

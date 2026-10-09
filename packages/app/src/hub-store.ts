@@ -30,6 +30,12 @@ export interface HubRule {
   recording?: HubRecordingConfig;
   /** 选中参与该房间 hub 处理的 worker id;缺省/空 = 全部(向后兼容)。 */
   workers?: string[];
+  /**
+   * 该房间需要的 worker 能力(能力门控)。非空时,只有 `capabilities ⊇ requires` 的 worker 才参与
+   * 该房间的录制下发与后处理;**与 workers 是交集**(先按 workers 勾选,再按 requires 过滤)。
+   * 缺省/空 = 无能力要求(向后兼容)。例:`["danmu:douyin"]` → 只派给出口能拿到弹幕的节点。
+   */
+  requires?: string[];
   /** 列表自定义排序(可拖拽调整);越小越靠前,缺省 = 未排过序(按 key 兜底)。 */
   order?: number;
 }
@@ -41,6 +47,7 @@ interface HubFile {
   pipeline?: HubPipelineConfig;
   recording?: HubRecordingConfig;
   workers?: string[];
+  requires?: string[];
   order?: number;
 }
 
@@ -78,6 +85,8 @@ function fileToRule(stem: string, raw: HubFile): HubRule {
     recording: raw.recording,
     // workers 缺省 = undefined(= 全部 worker,向后兼容)。只在文件显式含时透出。
     workers: raw.workers,
+    // requires 缺省 = undefined(= 无能力要求)。空数组视为无要求(等价缺省)。
+    requires: raw.requires?.length ? raw.requires : undefined,
     order: raw.order,
   };
 }
@@ -162,6 +171,7 @@ export function upsertHubRule(
     pipeline?: HubPipelineConfig;
     recording?: HubRecordingConfig;
     workers?: string[];
+    requires?: string[];
   },
 ): HubRule {
   const key = hubKey(input.platform, input.roomSlug);
@@ -173,17 +183,19 @@ export function upsertHubRule(
     recording: input.recording ?? existing?.recording,
     // workers 缺省沿用已有(undefined = 全部);显式传才覆盖。
     workers: input.workers ?? existing?.workers,
+    // requires 缺省沿用已有(undefined = 无能力要求);显式传才覆盖(空数组 = 清空要求)。
+    requires: input.requires ?? existing?.requires,
     // order 同理:只在 reorderHubRules 显式写入;upsert/update 均沿用。
     order: existing?.order,
   });
   return getHubRule(dir, key)!;
 }
 
-/** 部分更新(enabled / pipeline / workers);不存在返回 null。 */
+/** 部分更新(enabled / pipeline / workers / requires);不存在返回 null。 */
 export function updateHubRule(
   dir: string,
   key: string,
-  patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[] },
+  patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[]; requires?: string[] },
 ): HubRule | null {
   const existing = readRule(dir, key);
   if (!existing) return null;
@@ -194,6 +206,7 @@ export function updateHubRule(
     recording: patch.recording ?? existing.recording,
     // 部分更新:未传 workers 沿用已有;传了(UI 总传非空列表)才覆盖。
     workers: patch.workers ?? existing.workers,
+    requires: patch.requires ?? existing.requires,
     order: existing.order,
   });
   return getHubRule(dir, key);
@@ -214,6 +227,7 @@ export function reorderHubRules(dir: string, keys: string[]): HubRule[] {
       pipeline: r.pipeline,
       recording: r.recording,
       workers: r.workers,
+      requires: r.requires,
       order: i,
     });
   }

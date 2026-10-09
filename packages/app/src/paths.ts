@@ -16,6 +16,8 @@
  */
 import { join } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { hostname as osHostname } from "node:os";
 
 /** 未设 DOUYIN_REC_ROOT 时的默认数据根(相对启动 cwd)。db/recordings/stage/config 都收在这一个目录下。 */
 export const DEFAULT_ROOT = "./output-data";
@@ -99,6 +101,66 @@ export function rootStageDir(): string {
 /** <root>/config/biliup/cookies.json。 */
 export function rootBiliupCookies(): string {
   return join(drecRoot(), "config", "biliup", "cookies.json");
+}
+
+/**
+ * <root>/config/node.json —— 本节点的**稳定身份**(nodeId/hostname/createdAt)。
+ * `root` 可选:省略用 {@link drecRoot}(本进程数据根);显式传用于「探测别的数据根」(如 master
+ * 从 UI 探测 local worker 时 cfg.dataRoot 与自身 drecRoot 可能不同)。
+ */
+export function rootNodeIdentityPath(root?: string): string {
+  return join(root ? join(root, "config") : rootConfigDir(), "node.json");
+}
+
+/** 节点身份文件的内容。nodeId 首次生成后**永久不变**(跨重启/换 master/迁移都保持)。 */
+export interface NodeIdentity {
+  /**
+   * 稳定唯一 id:**16 字符小写 hex**(8 字节随机 = 64 位),首次启动生成并持久化。
+   *
+   * 为什么不是 uuid v4:uuid 36 字符带连字符,在 UI/日志/URL 里偏长。8 字节 hex 同样够用
+   * (碰撞概率 2^-64 量级,节点数远小于此),且只含 `[0-9a-f]` —— 满足 worker id 路由
+   * `/api/hub/workers/([A-Za-z0-9_-]+)` 与日志可读性(一眼认出是 id 而非人写的昵称)。
+   */
+  nodeId: string;
+  /** 生成时的主机名(仅作显示提示,可被 master 覆盖 name)。 */
+  hostname: string;
+  /** 首次生成时间(ISO)。 */
+  createdAt: string;
+}
+
+/**
+ * 读本节点身份;不存在则**首次自动生成并落盘**(`<root>/config/node.json`)。
+ *
+ * 为什么要它:此前 worker 的 id 由 **master** 按 `workerSeq` 分配(`worker-1`/`worker-2`…)——
+ * 删了重建就换号 → hub 规则里引用的 id 变幽灵、身份丢失。改为节点**自生成稳定 id**,
+ * master 只读不改:同一台机器永远同一个 id,换 master / 重启 / 迁移都不变。
+ *
+ * 幂等:已存在则原样返回(绝不重写 nodeId)。坏 JSON → 重新生成(容错,不抛)。
+ */
+function safeHostname(): string {
+  try { return osHostname(); } catch { return ""; }
+}
+
+export function ensureNodeIdentity(root?: string): NodeIdentity {
+  const path = rootNodeIdentityPath(root);
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf-8")) as Partial<NodeIdentity>;
+    if (raw?.nodeId && typeof raw.nodeId === "string" && raw.nodeId.trim()) {
+      return { nodeId: raw.nodeId, hostname: raw.hostname ?? "", createdAt: raw.createdAt ?? "" };
+    }
+  } catch { /* 缺失/坏 JSON → 下面重新生成 */ }
+  const id: NodeIdentity = {
+    // 8 字节 → 16 字符 hex(短、随机、URL/路径安全,见 NodeIdentity.nodeId 注释)。
+    nodeId: randomBytes(8).toString("hex"),
+    // `process.env.HOSTNAME` 在 ssh 非登录 shell 里常为空 → 用 os.hostname() 兜底(仅显示用,失败不致命)。
+    hostname: ((process.env.HOSTNAME ?? "").trim() || safeHostname()),
+    createdAt: new Date().toISOString(),
+  };
+  try {
+    mkdirSync(root ? join(root, "config") : rootConfigDir(), { recursive: true });
+    writeFileSync(path, JSON.stringify(id, null, 2) + "\n", "utf-8");
+  } catch { /* 只读环境 → 内存里仍返回可用 id;下次启动会再试 */ }
+  return id;
 }
 
 /**

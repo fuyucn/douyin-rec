@@ -40,26 +40,62 @@ function validate(kind: string, host: string | undefined, dataRoot: string | und
   if ((kind === "ssh" || kind === "tailscale-ssh") && !host) throw new Error(`${kind} 类型需要 host`);
 }
 
+/**
+ * 归一能力标签:去空白、去空串、去重(保持首次出现顺序)。空/全空 → undefined(= 不写该字段,
+ * 保持 hub.config.json 干净;向后兼容没有该字段的旧配置)。
+ */
+function normalizeCapabilities(caps: string[] | undefined): string[] | undefined {
+  if (!caps) return undefined;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of caps) {
+    const c = String(raw ?? "").trim();
+    if (!c || seen.has(c)) continue;
+    seen.add(c);
+    out.push(c);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 export function listWorkers(configPath: string): WorkerConfig[] {
   return workersOf(readConfig(configPath));
 }
 
 export function createWorker(
   configPath: string,
-  input: { name?: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string },
+  input: {
+    name?: string; kind: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[];
+    /**
+     * 显式指定 worker id(通常是节点自报的稳定 nodeId)。给了就用它,不再自分配 `worker-N`。
+     * 已存在同 id → 抛错(防重复添加),由调用方提示用户。
+     */
+    id?: string;
+  },
 ): WorkerConfig {
   validate(input.kind, input.host, input.dataRoot);
   const cfg = readConfig(configPath);
   const workers = [...workersOf(cfg)];
   // 单调 seq:cfg.workerSeq 起,跳过任何已存在的 worker-N(绝不复用/碰撞)。
-  let seq = (cfg.workerSeq ?? 0) + 1;
+  const prevSeq = cfg.workerSeq ?? 0;
+  let seq = prevSeq + 1;
   const has = (id: string): boolean => workers.some((w) => w.id === id);
-  while (has(`worker-${seq}`)) seq++;
-  const id = `worker-${seq}`;
-  const name = (input.name ?? "").trim() || input.host || `Worker ${seq}`;
+  let id: string;
+  const explicit = (input.id ?? "").trim();
+  if (explicit) {
+    if (explicit === "local") throw new Error("id 'local' 是 master 自身保留 id");
+    if (has(explicit)) throw new Error(`worker id 已存在: ${explicit}`);
+    id = explicit;
+    seq = prevSeq; // 显式 id 不占序号 → 不推进 workerSeq(否则白白跳号)
+  } else {
+    while (has(`worker-${seq}`)) seq++;
+    id = `worker-${seq}`;
+  }
+  const name = (input.name ?? "").trim() || input.host || (explicit ? id : `Worker ${seq}`);
   const w: WorkerConfig = { id, name, kind: input.kind, dataRoot: input.dataRoot };
   if (input.host) w.host = input.host;
   if (input.apiUrl) w.apiUrl = input.apiUrl;
+  const caps = normalizeCapabilities(input.capabilities);
+  if (caps) w.capabilities = caps;
   workers.push(w);
   writeConfig(configPath, cfg, workers, seq);
   return w;
@@ -68,7 +104,7 @@ export function createWorker(
 export function updateWorker(
   configPath: string,
   id: string,
-  patch: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string },
+  patch: { name?: string; kind?: string; host?: string; dataRoot?: string; apiUrl?: string; capabilities?: string[] },
 ): WorkerConfig | null {
   const cfg = readConfig(configPath);
   const workers = [...workersOf(cfg)];
@@ -83,6 +119,12 @@ export function updateWorker(
   if (patch.host != null) next.host = patch.host || undefined;
   if (patch.dataRoot != null) next.dataRoot = patch.dataRoot;
   if (patch.apiUrl != null) next.apiUrl = patch.apiUrl || undefined;
+  // capabilities:显式传才覆盖(空数组 = 清空能力);未传沿用。
+  if (patch.capabilities != null) {
+    const caps = normalizeCapabilities(patch.capabilities);
+    if (caps) next.capabilities = caps;
+    else delete next.capabilities;
+  }
   validate(next.kind, next.host, next.dataRoot);
   workers[i] = next;
   writeConfig(configPath, cfg, workers, cfg.workerSeq ?? 0);

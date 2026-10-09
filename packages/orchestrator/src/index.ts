@@ -2,6 +2,8 @@ export * from "./transport.js";
 export { scanRecordings } from "./scan.js";
 export type { FfprobeAdapter } from "./scan.js";
 export { Reconciler } from "./reconciler.js";
+export { satisfiesCapabilities, gateWorkers, explainRejections } from "./capabilities.js";
+export type { CapabilityRejection } from "./capabilities.js";
 export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";
 export type { PipelineDeps, PipelineCfg, PipelineSteps, PipelineCleanup } from "./pipeline.js";

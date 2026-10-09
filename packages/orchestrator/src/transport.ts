@@ -9,6 +9,12 @@ export interface NodeRecording {
   sessionBase: string;       // 如 一勺小苏打_2026-06-27_07-54-33
   tsFiles: string[];         // 绝对/相对该节点路径
   xmlPath?: string;
+  /**
+   * 该场弹幕 xml 里的条目数(弹幕+礼物+入场)。**仅表头的空 xml**(WS 被风控/未连上)记 0。
+   * 选优用:烧录取 winner 自己的 xml,故「视频覆盖更高但没弹幕」的节点不该赢过有弹幕的
+   * (否则上传弹幕为空,哪怕同组另一节点弹幕完好)。缺省(旧录像/未统计)= undefined,按 0 处理。
+   */
+  danmuCount?: number;
   durationSec: number;       // 实录总时长(各段之和)
   startMs: number;           // 首段开录 epoch ms
   endMs: number;             // 末段收录 epoch ms
@@ -56,6 +62,12 @@ export interface Transport {
   exists?(paths: string[]): Promise<boolean>;
   /** 删除该节点上的这些文件(cleanup 配置用;删失败应吞掉不抛)。无此能力则跳过清理。 */
   cleanup?(paths: string[]): Promise<void>;
+  /**
+   * 读该节点的**稳定身份**(隐藏 `_node-id` 子命令 → `<dataRoot>/config/node.json` 的 nodeId)。
+   * master 首次添加节点时用它作为 worker id(而非自分配 `worker-N`)→ 同机器永远同一 id,
+   * 换 master/重启/迁移都不丢身份。无此能力(旧 bundle)→ 返回 null,调用方回落旧行为。
+   */
+  nodeId?(): Promise<{ nodeId: string; hostname?: string } | null>;
   /**
    * 轻量存活探针:可达 + dataRoot 存在 → resolve;不可达 / dataRoot 不存在 → reject(带 message)。
    * 不扫 recordings(区别于 listInventory)。可选:无此能力的 transport 视为「不支持探针」。

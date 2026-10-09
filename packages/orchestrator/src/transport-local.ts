@@ -23,6 +23,8 @@ export interface LocalOpts {
   listTasks?: () => NodeTaskDTO[];
   /** hub 任务同步:把期望任务应用到本机 store。缺省 = 不支持。 */
   applyTasks?: (input: { desired: RemoteTaskSpec[] }) => ApplyTasksResult;
+  /** 本节点稳定身份(<root>/config/node.json)。缺省 → nodeId() 返 null。 */
+  nodeIdentity?: () => { nodeId: string; hostname?: string } | null;
 }
 
 export class LocalTransport implements Transport {
@@ -47,6 +49,11 @@ export class LocalTransport implements Transport {
   async applyTasks(input: { desired: RemoteTaskSpec[] }): Promise<ApplyTasksResult> {
     if (!this.o.applyTasks) throw new Error("LocalTransport: 未注入 applyTasks 回调(hub 任务同步未启用)");
     return this.o.applyTasks(input);
+  }
+
+  /** 本机稳定身份(有注入才返回;否则 null —— master 本机通常 id 固定为 "local")。 */
+  async nodeId(): Promise<{ nodeId: string; hostname?: string } | null> {
+    return this.o.nodeIdentity?.() ?? null;
   }
 
   /** 该 room 还在本机录制 → 未收播(false);否则已收播(true)。注入 isRoomRecording 才生效,否则恒 true(旧行为)。 */

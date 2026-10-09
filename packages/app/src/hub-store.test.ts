@@ -100,6 +100,21 @@ describe("hub-store(文件版,按平台限定 key)", () => {
     expect(bare.workers).toBeUndefined();
   });
 
+  it("requires 字段创建/更新往返;空数组视为无要求(不落盘)", () => {
+    const r = upsertHubRule(dir, { platform: "douyin", roomSlug: "123456", requires: ["danmu:douyin"] });
+    expect(r.requires).toEqual(["danmu:douyin"]);
+    expect(getHubRule(dir, "douyin.123456")!.requires).toEqual(["danmu:douyin"]);
+    // update 改 requires
+    const u = updateHubRule(dir, "douyin.123456", { requires: ["danmu:douyin", "burn"] })!;
+    expect(u.requires).toEqual(["danmu:douyin", "burn"]);
+    // 空数组 → 清空(undefined)
+    const cleared = updateHubRule(dir, "douyin.123456", { requires: [] })!;
+    expect(cleared.requires).toBeUndefined();
+    // 缺省 = 无要求
+    const bare = upsertHubRule(dir, { platform: "douyin", roomSlug: "999" });
+    expect(bare.requires).toBeUndefined();
+  });
+
   it("reorder:整体重排写 order;upsert/update 沿用 order;集合不匹配则拒绝", () => {
     upsertHubRule(dir, { platform: "douyin", roomSlug: "aaa" });
     upsertHubRule(dir, { platform: "douyin", roomSlug: "bbb" });

@@ -13,6 +13,19 @@ export interface WorkerConfig {
   host?: string;
   dataRoot?: string;
   apiUrl?: string;
+  /**
+   * 该节点具备的能力标签(自由字符串,缺省 = 无特殊能力)。hub 规则用 `requires` 声明房间需要的
+   * 能力,reconciler/任务同步据此**硬过滤**:不满足的节点不参与该房间的录制与后处理。
+   *
+   * 约定词表(不强校验,便于扩展):
+   *   - `record`            —— 能录制(所有 worker 事实上都具备,通常不必标)
+   *   - `danmu:<platform>`  —— 该出口能拿到弹幕(如 `danmu:douyin`)。**出口 IP 被风控拿不到弹幕的节点不要标**
+   *   - `burn` / `upload`   —— 能烧录 / 能传 B 站(仅对后处理阶段有意义的节点标)
+   *
+   * 典型用法:某 VPS 出口被抖音风控 → 不给它标 `danmu:douyin`;要弹幕的房间写
+   * `requires: ["danmu:douyin"]` → 该 VPS 自动被排除,不再出现「勾了它却整场 0 弹幕」的静默失败。
+   */
+  capabilities?: string[];
 }
 
 /** master 下发期望任务后,节点侧对账结果(_apply-tasks / local transport 返回)。 */

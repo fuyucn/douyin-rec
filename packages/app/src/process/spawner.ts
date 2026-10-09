@@ -60,6 +60,12 @@ export interface NodeRecordSpawnerOpts {
    */
   mesioPath?: () => string | undefined;
   /**
+   * 抖音 API 模式(app 设置 settings.douyinApiMode)。**每次 spawn 时读取**(getter,改设置无需重启)。
+   * 返回非空 → 作 `DOUYIN_REC_API_MODE` 注入子进程环境,douyin-live 读取它决定用哪个端点取流/解析 liveId。
+   * 空/undefined → 不注入,子进程用默认(balance)。
+   */
+  douyinApiMode?: () => string | undefined;
+  /**
    * 每类提醒的 webhook 开关(getter,每次 spawn 时读取 settings 表)。经
    * `DREC_WEBHOOK_TOGGLES` 环境变量注入子进程,子进程发 Discord 前按类型过滤。
    * 省略=不注入,子进程全开(向后兼容)。
@@ -78,6 +84,7 @@ export class NodeRecordSpawner implements Spawner {
   private readonly cwd: string | undefined;
   private readonly webhook: string | (() => string | undefined) | undefined;
   private readonly mesioPath: (() => string | undefined) | undefined;
+  private readonly douyinApiMode: (() => string | undefined) | undefined;
   private readonly webhookToggles: (() => NotifWebhookToggles) | undefined;
   private readonly onLog: ((msg: string) => void) | undefined;
   private readonly killTimeoutMs: number | undefined;
@@ -88,6 +95,7 @@ export class NodeRecordSpawner implements Spawner {
     this.cwd = opts.cwd;
     this.webhook = opts.webhook;
     this.mesioPath = opts.mesioPath;
+    this.douyinApiMode = opts.douyinApiMode;
     this.webhookToggles = opts.webhookToggles;
     this.onLog = opts.onLog;
     this.killTimeoutMs = opts.killTimeoutMs;
@@ -101,12 +109,15 @@ export class NodeRecordSpawner implements Spawner {
     const args = [this.cliEntry, ...globals, ...buildRecordArgs(task)];
     // mesio 路径设置(若配置)→ 注入 MESIO_PATH;否则继承父 env(引擎自行兜底 bin/mesio)。
     const mesio = this.mesioPath?.()?.trim();
+    // 抖音 API 模式设置(若配置)→ 注入 DOUYIN_REC_API_MODE;否则继承父 env(douyin-live 用默认 balance)。
+    const apiMode = this.douyinApiMode?.()?.trim();
     const toggles = this.webhookToggles?.();
     const env =
-      mesio || toggles
+      mesio || apiMode || toggles
         ? {
             ...process.env,
             ...(mesio ? { MESIO_PATH: mesio } : {}),
+            ...(apiMode ? { DOUYIN_REC_API_MODE: apiMode } : {}),
             ...(toggles ? { [WEBHOOK_TOGGLES_ENV]: JSON.stringify(toggles) } : {}),
           }
         : undefined;
