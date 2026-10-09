@@ -17,9 +17,11 @@ function makeOpts(outDir: string): RecordOpts {
 class MockDlrRecorder implements Recorder {
   name = "mock-dlr"; providesDanmu = false;
   ev!: RecorderEvents;
+  /** 测试可设:onLive 时携带的标题(模拟「开播才知道标题」)。 */
+  liveTitle?: string;
   async start(_url: string, _opts: RecordOpts, ev: RecorderEvents) {
     this.ev = ev;
-    ev.onLive({ anchorName: "主播X" });
+    ev.onLive({ anchorName: "主播X", title: this.liveTitle });
     ev.onSegment(join(_opts.outDir, "seg_000.ts"));
   }
   async stop() {}
@@ -108,6 +110,32 @@ describe("RecordingSession", () => {
     const sj = JSON.parse(readFileSync(join(dir, sessFiles[0]), "utf-8"));
     expect(sj.roomSlug).toBe("123");
     expect(sj.platform).toBe("douyin");
+  });
+
+  it("T-20:开播时才拿到的直播标题写进 session.json({title} 渲染依赖它)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-title-"));
+    const rec = new MockDlrRecorder();
+    rec.liveTitle = "今晚八点开播";   // 开播回调才带 title(平台 getStream 只在 living 时返回)
+    const sess = new RecordingSession(rec);
+    // start 时 title 未知(空)→ sidecar 起初无 title
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "主播X" });
+    await sess.stop();
+    const sj = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")))
+      .find((d) => d.title);
+    expect(sj?.title).toBe("今晚八点开播");
+  });
+
+  it("T-20:start 时已知 title 也写进 sidecar(两条路径都要有)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-title2-"));
+    const rec = new MockDlrRecorder();
+    const sess = new RecordingSession(rec);
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "主播X", title: "开播前已知标题" });
+    await sess.stop();
+    const sj = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")))
+      .find((d) => d.title);
+    expect(sj?.title).toBe("开播前已知标题");
   });
 
   it("弹幕只在 onLive 后启动：recorder 未 fire onLive(等开播)→ 弹幕不连(防开播前陈旧 liveId)", async () => {

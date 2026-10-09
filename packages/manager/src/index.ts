@@ -148,6 +148,15 @@ export class RecordingSession {
         // 只在首次拿到非空主播名、且与上次不同时打，避免重连刷屏。
         if (resolved && resolved !== this.anchor) console.log(`[主播] ${resolved}`);
         this.anchor = resolved;
+        // 直播标题同理:开播前拿不到(平台 getStream 只在 living 时返回 title),故开播回调里补。
+        // 只取首个非空值(标题在录制中途改动极少;重连时保留首值,避免被后续空值清掉)。
+        const title = (i.title ?? "").trim();
+        if (title && !this.liveTitle) {
+          this.liveTitle = title;
+          // 立刻刷新 sidecar(开录时 title 还空 → 此刻补写,保证 {title} 能渲染)。
+          const base = (this.currentXmlPath ?? this.lastXmlPath);
+          if (base) { try { this._writeSession(base.replace(/\.xml$/i, "")); } catch { /* 不影响录制 */ } }
+        }
         // 通知:首次开播 / 下播后重新开播 → recordStart;**抖动断流后重连成功** → 一条 recordReconnect
         // warning(报中断时长),不重复发「开播」。offlineNotified=true(已发过「主播下播」)的那次 onLive
         // 是下播后重新开播 → 走正常 recordStart。
