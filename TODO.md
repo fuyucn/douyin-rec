@@ -89,6 +89,9 @@
   - 自审修复:重复常量 `DEFAULT_COOKIES_KEY` 去重(删新 consts.ts,统一从 login-manager 导入);
     删除 types.ts 残留死代码 `sanitizeSeg`
   - 验证:`pnpm test` 869 passed / typecheck / bundle / `task serve` 实测起服务 / `task tui` 在
+  - **审计(2026-10-08,逐项实测,非自述)**:53 handler 函数体逐字节一致 / 域间零互相 import /
+    serve 装配体与拆分前一致(仅多一行注入)/ tui·serve 命令定义一致 / 命令树完整 /
+    app 对外导出仅 +3 行无删除。审计发现并修复:`sanitizeSeg` 多余暴露在 ApiCtx → 改私有。
 - [ ] **T-21 拆分 app「上帝包」**(架构/认知税) — **问题**:`packages/app` 是 7215 LOC / 30 文件的
   单一包,同时承担 ≥8 个不相干职责:sqlite store、任务调度 daemon、子进程生命周期、hub 规则文件 CRUD、
   hub 台账读取、扫码登录(3 平台)、**web HTTP API(api.ts 1321 行,单个对象 51 个方法)**、biliup 上传、
