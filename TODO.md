@@ -153,6 +153,69 @@
 
 ## 已完成
 
+- [x] **T-29 分段模式下多会话(断流重连)的烧录分 P 丢失(真缺陷)** — 2026-10-09 用户发现
+  `douyin.63171491268`(什么鱼)稿件 P1-P6 齐全但 livechat 只有 P7-P9(会话1 的 3 段),会话2 的 3 段
+  livechat 全丢。
+  **根因(读源码 + 真实 xml 复现)**:`segment-pipeline.ts` 的弹幕窗口用**整场单一 `globalOffset`** 累计,
+  而窗口是相对**该段所属会话**的 xml 切的(`video_start_time` = 该会话起点)。断流重连产生**新会话 + 新 xml**
+  (时间轴从 0 重起),沿用整场 offset → 新会话各段窗口整体错位到该会话时长之外 → 窗口内 0 条弹幕 →
+  `窗口内无弹幕,跳过` → 这些分 P 的 livechat 全不产出。实测复现:会话1 三段 10128s、会话2 三段;
+  旧代码给会话2 的窗口是 [10128,13729]/[13729,17330]/[17330,20178],而会话2 xml 只覆盖 ~10050s → 0 命中;
+  按会话累计后 [0,3601]/[3601,7202]/[7202,10050] → 命中 140/302/307 条。
+  **同类风险(一并修)**:分组计划可能把**跨会话**的段合进同一个分 P(只有一份 xml,窗口并集却用其中一个 xml)
+  → 同样错位。已按会话边界切开分组。
+  **修**:抽两个纯函数 `sessionWindowOffsets()`(按 xml 路径分桶累计)与 `splitGroupsBySession()`(按会话切组),
+  pipeline 接入;删除整场 `globalOffset`。
+  **验收**:新增 `packages/orchestrator/src/segment-pipeline.test.ts`(7 用例;已验证「还原旧实现即 2 例失败」);
+  `pnpm test` **902 全过**、`tsc --noEmit`、`pnpm bundle`(`0.0.47`,产物已无 `globalOffset`)。
+  **部署**:`0.0.47` 已上线 master + VPS1 + VPS2(三节点 ok)。
+  **受影响的历史稿件**:`63171491268` 10-07 与 10-09 两场(10-07 稿件 `BV12ipK6HEBb` 3 个 livechat 全丢)。
+  源 `.ts` 已被 cleanup 删除 → **无法补烧**,只能保留现状(弹幕 xml 仍在节点,但视频已删)。
+  **另一类同症状但不同根因**:`68133201791`(凌晴)10-09 两场 `danmuCount:0`(xml 全空,取不到弹幕)
+  → livechat 也无产物;那是弹幕采集问题(见 T-9),非本 bug。（2026-10-09）
+- [x] **T-27 hub 上传撞 `21566 投稿过于频繁` → 整场转人工（真缺陷）** — 2026-10-09 实况:
+  `douyin.76601480575`（汪汪想不到）hub 建稿两次均报 `code: 21566`,重试 1 次后转 `needs_manual`,
+  白等一场;人工补传成功（`BV12Zp86sEN2`,3 分 P）。
+  **根因(读源码 + 实测双向确认)**:`packages/app/src/upload/biliup.ts` 调 `biliup upload` **未指定
+  `--submit`** → biliup CLI **默认走 app 提交接口**(`entry.rs`:`submit.unwrap_or(SubmitOption::App)`),
+  而 app 接口(`member.bilibili.com/x/vu/app/add`)**更易触发 21566 风控**(biliup 自己的 server 端因此
+  在 `server/common/upload.rs` 把默认改成 web;issue biliup#1609 / #1762)。叠加第二处缺陷:
+  `core/src/upload-contract.ts` 的 `isUploadRateLimited` 只认 `601`,**不认 21566** → 命中后只退避
+  60s 重试(仍处风控窗)→ 二次失败 → 转人工。
+  **修**:①`buildUploadArgs`/`buildAppendArgs` 显式 `--submit web`(env `BILIUP_SUBMIT` 可覆盖,
+  非法值回落 web);②`isUploadRateLimited` 加认 `code: 21566`/`投稿过于频繁`;③compose/.env.example
+  加 `BILIUP_SUBMIT` 透传;④`upload-recording-today` skill 同步加 `--submit web`(唯一权威)。
+  **验收**:`pnpm test` 894 全过(+6 用例:submit 默认/覆盖/非法回落 + 21566/601/普通错误识别)、
+  `tsc --noEmit` 通过、`pnpm bundle` 产物含 `BILIUP_SUBMIT` 与 21566;本机实测
+  `biliup ... --submit web upload P1 P2 P3` 建稿成功拿 `BV12Zp86sEN2`(水印 `state:0` 已确认)。（2026-10-09）
+
+- [x] **T-28 `{title}` 渲染为空的真凶 = 录制节点跑的是**旧 bundle**(非代码缺陷)+ 跨场标题串台(真缺陷)**
+  — 2026-10-09 实况:`BV12Zp86sEN2` 稿件名 `汪汪想不到_2026-10-09_ 直播回放`(双下划线 = `{title}` 空),
+  当天 12 场 hub 上传**全部**如此。
+  **根因 ①(部署滞后,非代码 bug)**:T-20 的侧car `title` 修复(`f8e7543`,10-08 23:00 PDT)**只存在于
+  master 容器 + VPS 源码**,而该场由 VPS2 录制;VPS2 当时跑的进程 `PID 465892` **启动于 10-08 20:09 UTC**
+  (早于修复),直到 10-09 15:59 UTC 才重启换新 bundle。该场(UTC 12:36:30→15:32:31)整段落在旧进程上 →
+  `session.json` 无 `title`。**证据**:同一 VPS2 重启后新录的场(如 15:59 之后的 session)已带 title;
+  VPS1 当前录制中(新 bundle)`不想卷了` 的 session.json `title:"天蝎"` 与抖音 API 一致。
+  **根因 ②(真缺陷,已修)**:同一录制进程**跨场**(下播 → 主播重新开播)时,`RecordingSession.liveTitle`
+  不清空 → 第二场的 `session.json` 沿用**第一场**的标题。**复现**:`video-rec-2 task 11` 20:36 那场收播后
+  进程继续轮询等下一场(日志 15:32:50「主播已下播…等待下次开播」),若第二场开播即张冠李戴。
+  **修**:`packages/manager/src/index.ts` 的 `onLive` 里,`offlineNotified`(onOffline 已查权威
+  `getLiving=false` 确认下播)时清空 `liveTitle`;抖动断流(仍在播)不清,保留同场首值。
+  同时删掉 onLive 里的 sidecar 补写(onLive 恒先于 onSegment,补写会误用 `lastXmlPath` 覆盖**上一场**
+  的 sidecar —— 实测踩到)。
+  **验收**:`pnpm test` **895 全过**(+1 用例 `T-20b`:下播→第二场用第二场标题;已验证「移除修复即失败」)、
+  `tsc --noEmit` 通过、`pnpm bundle`(`0.0.46`,产物含 `offlineNotified&&(this.liveTitle="")`)。
+  **线上修复**:`BV12Zp86sEN2` 稿件名经 web edit 接口改为
+  `汪汪想不到_2026-10-09_养着不烧心 直播回放`(`{title}=养着不烧心`,与抖音 API 一致;水印仍 `state:0`,
+  仅自己可见未变)。
+  **遗留**:其余 11 场当天上传(10-09)同样 `{title}` 空,均系旧 bundle 所致 → 待 `0.0.46` 部署后不再复现;
+  **已完成(2026-10-09)**:① 11 场标题全部修正(`{title}` 用抖音 API 当场标题填充);② `0.0.46`
+  已部署到 master + VPS1 + VPS2(三节点 `0.0.46`,hub worker status 全 ok)。批量改标题的实现注意点:
+  `x/vupre/web/archive/view` 对本机 IP 返 **412 风控** → 改走 biliup 同款 **app 接口**
+  (`x/client/archive/view` 读 + `x/vu/app/edit/full` 写,access_key 签名);payload 只传 Studio 字段
+  且必须带 `aid`(否则 21001/-400)。水印 `state:0` 逐稿复核未被 edit 改动。（2026-10-09）
+
 - [x] **T-10 本机抑制也要走能力门控** — `localSuppressedSourceTaskIds` 原只看 `workers` 勾选,不看
   `requires`:若远端缺能力(reconciler 会排除它)而本机又被抑制 → **两头都不录**的静默漏录。
   **修复**:能力门控纯函数(`satisfiesCapabilities` 等)**从 orchestrator 下沉 @drec/core**(app L4 不能依赖
