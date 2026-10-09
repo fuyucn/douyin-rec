@@ -54,6 +54,23 @@
 
 ## 待办（Next）
 
+- [!] **T-23 仓库状态对齐(HEAD 断裂 / 生产跑未提交代码)** — 计划 `plans/028_repo_state_reconciliation.md`。
+  **阻塞原因**:61 个未提交文件里有 12 个**未跟踪**(`capabilities.ts`/`api-mode.ts`/`node-identity.test.ts` 等**实现**),
+  需用户先裁决 3 个未决问题(见 plan「未决问题」:哪些 WIP 是故意不提交的本地脚本?`plans/026` 是否提交?
+  T-17 脚本是否现在提交?)—— 裁决前不敢动 `git add`,以免把调试产物提交进 main。
+  **做什么**:把 WIP 按「定义侧 / 消费侧」切分提交(实测该切法每个 commit 都 typecheck 绿),
+  使 `git clone` 后 `pnpm i && pnpm typecheck && pnpm test && pnpm bundle` 全绿。
+  **为什么(P0,实测 2026-10-08)**:
+  ① **HEAD 单独 checkout 有 7 个真实类型错误**(用真实 `pnpm install` 验证)——
+     `web/api/*.ts`(已提交)引用 `HubRule.requires`/`WorkerConfig.capabilities`,但**定义侧全在 WIP 里**;
+     `serve.ts` 引用 `paths.ensureNodeIdentity`、`NodeRecordSpawnerOpts.douyinApiMode` 同样缺失。
+  ② **生产跑的是未提交的构建**:生产 `GET /api/version` = `0.0.32-661663`,其 bundle 内含
+     `satisfiesCapabilities`/`requires`;而 HEAD 里这些定义不存在 → 任何人 clone 重建都会拿到**功能更少**的产物。
+  ③ **台账与代码不符**:TODO 把 T-1/T-13/T-15 标 `[x]` 已完成,但三者定义侧代码**全未提交**
+     (`git show HEAD:...hub-store.ts | grep -c requires` = 0)。
+  ④ **误删风险**:`git clean -fd` 会永久删掉 12 个未跟踪文件(含 capabilities.ts 实现)。
+  **验收**:见 plan「验收标准」——clone 全绿 / 工作区干净 / 生产版本 ∈ 仓库历史 / TODO 每个 [x] 可追溯。
+
 - [ ] **T-18 节点侧上传（experimental:不烧录房间跳过 rsync 回传）** — 计划 `plans/027_node_side_upload.md`。
   **做什么**：hub 规则加 `pipeline.steps.nodeSideUpload`（缺省 false）。为 true 且**该房间不烧录**时，
   winner 节点本地 remux → 节点 biliup 直接上传，master 只收 BV 号，**省掉整场录像 rsync 回传**。
