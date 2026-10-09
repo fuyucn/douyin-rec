@@ -59,11 +59,15 @@
 - [ ] **T-18 节点侧上传（experimental:不烧录房间跳过 rsync 回传）** — 计划 `plans/027_node_side_upload.md`。
   **做什么**：hub 规则加 `pipeline.steps.nodeSideUpload`（缺省 false）。为 true 且**该房间不烧录**时，
   winner 节点本地 remux → 节点 biliup 直接上传，master 只收 BV 号，**省掉整场录像 rsync 回传**。
-  需要烧录的房间开关无效（burn 要 11 核 + 中文字体，节点烧不动，实测 vps2 仅 0.38x 实时）。
-  **为什么**：实测 pull(rsync) 165s~4198s 是主要耗时，而 9/16 房间不烧录（merge 只是 `-c copy` 纯 I/O）。
-  **验收**：见 plan 的验收清单（flag off 零回归 / flag on 不烧录实测无 pull 步 / 缺能力回落不静默）。
-  **前置**：需新增 `_node-pipeline` + `_node-capabilities` 隐藏子命令、Transport 可选方法、
-  pipeline 分支、节点侧 biliup（install-worker.sh 加 `--with-upload`）。
+  **⚠️ 2026-10-09 收益复核（真实台账 + 实测带宽，见 plan 文末「收益复核」）—— 原估算偏高**：
+  ① T-18 只覆盖**总 pull 字节的 30%**（48GB/157.5GB，7 天）；② pull **不占端到端关键路径**
+  （`maxNetParallel=1` 但实测净闸门并发度仅 **0.10x**，几乎不排队）→ 省 8h ≠ 快 8h；
+  ③ 实测 master **下行 26Mbps / 上行仅 12Mbps** → 省的是「上行那一半」（约 24GB），不是全部；
+  ④ **发现更大更便宜的目标**：local winner 的 pull 是**同盘 `copyFileSync`（7 天 51GB > 48GB）**，
+  修法只是硬链接/跳过拷贝，零协议改动。
+  **建议**：先做「local winner 硬链接」；T-18 若要做得**只做最小版**（就地 remux+上传，不做
+  `_node-capabilities`/节点侧状态机）并只开 1 个房间；完整版暂缓。**待用户决策**。
+  **验收**：见 plan 验收清单（flag off 零回归 / flag on 不烧录实测无 pull 步 / 缺能力回落不静默）。
 - [~] **T-19 worker 安装脚本补 rsync 硬依赖** — ② **已完成(2026-10-08)**:`transport-ssh.ts` 的
   rsync 失败现带 stderr 尾部(新纯函数 `summarizeRsyncStderr` 丢弃进度行、留真错误、限长),错误形如
   `rsync rc=12: rsync: command not found(host:remote)`;+4 测试。① **待办**:合并 T-5 部署后
