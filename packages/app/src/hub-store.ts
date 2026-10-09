@@ -14,7 +14,7 @@
  */
 import { readdirSync, readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { platformForRoom, type HubPipelineConfig, type HubRecordingConfig } from "@drec/core";
+import { platformForRoom, satisfiesCapabilities, type HubPipelineConfig, type HubRecordingConfig } from "@drec/core";
 import { normalizeRoom } from "./store.js";
 
 /** 一条 hub 规则(内存表示;持久化为 {key}.json)。 */
@@ -146,15 +146,26 @@ export function getHubRule(dir: string, key: string): HubRule | null {
  *
  * 传入 knownWorkerIds(= 当前 hub.config.json 的 worker id 集合):规则里若只剩已删除的
  * 幽灵 id,则**不抑制**本机 —— 否则会出现「本机不录、远端也没人接」的静默漏录。
+ *
+ * **能力门控(T-10)**:候选远端 worker 还要满足规则的 `requires`(能力 ⊇ 要求)才算「有人接」。
+ * 否则会出现「本机被抑制、远端因缺能力被 reconciler 排除」→ 两头都不录的静默漏录。
+ * 与 reconciler 用**同一套判定**(core 的 `satisfiesCapabilities`,单一真理源)。
  */
-export function localSuppressedSourceTaskIds(dir: string, knownWorkerIds: ReadonlySet<string>): Set<number> {
+export function localSuppressedSourceTaskIds(
+  dir: string,
+  knownWorkerIds: ReadonlySet<string>,
+  capabilitiesOf?: (workerId: string) => readonly string[] | undefined,
+): Set<number> {
   const out = new Set<number>();
   for (const rule of listHubRules(dir)) {
     if (!rule.enabled) continue;
     const tid = rule.recording?.sourceTaskId;
     if (tid == null) continue;
     const ws = rule.workers;
-    const hasRemote = !!ws?.some((id) => id !== "local" && knownWorkerIds.has(id));
+    // 远端必须「存在 + 能力满足 requires」才算有人接(缺能力 → reconciler 也会排除它)。
+    const hasRemote = !!ws?.some(
+      (id) => id !== "local" && knownWorkerIds.has(id) && satisfiesCapabilities(capabilitiesOf?.(id), rule.requires),
+    );
     if (ws && ws.length > 0 && !ws.includes("local") && hasRemote) out.add(tid);
   }
   return out;

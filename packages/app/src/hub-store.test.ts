@@ -144,4 +144,21 @@ describe("hub-store(文件版,按平台限定 key)", () => {
     upsertHubRule(dir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 10 }, workers: ["ghost"] });
     expect([...localSuppressedSourceTaskIds(dir, new Set(["local"]))]).toEqual([]);
   });
+
+  it("T-10 能力门控:远端存在但缺 requires 能力 → 不抑制本机(否则两头都不录)", () => {
+    // vps2 存在,但规则要求 danmu:douyin,而 vps2 无此能力 → reconciler 会排除它 → 本机必须实跑。
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 10 }, workers: ["vps2"], requires: ["danmu:douyin"] });
+    const capsNoDanmu = () => undefined;                                  // vps2 无能力
+    expect([...localSuppressedSourceTaskIds(dir, new Set(["local", "vps2"]), capsNoDanmu)]).toEqual([]);
+    // 同一规则:vps2 具备 danmu:douyin → 远端能接 → 本机抑制。
+    const capsWithDanmu = (id: string) => (id === "vps2" ? ["danmu:douyin"] : undefined);
+    expect([...localSuppressedSourceTaskIds(dir, new Set(["local", "vps2"]), capsWithDanmu)]).toEqual([10]);
+  });
+
+  it("T-10:无能力信息时不抑制(安全默认:宁可本机实跑,也不冒「两头都不录」的风险)", () => {
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 10 }, workers: ["vps2"], requires: ["danmu:douyin"] });
+    // 不传第 3 参(拿不到能力)→ 无法证明远端合格 → 不抑制本机(与 reconciler 同判定:
+    // requires 非空时 satisfiesCapabilities(undefined, requires)=false)。
+    expect([...localSuppressedSourceTaskIds(dir, new Set(["local", "vps2"]))]).toEqual([]);
+  });
 });

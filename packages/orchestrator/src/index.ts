@@ -2,8 +2,10 @@ export * from "./transport.js";
 export { scanRecordings } from "./scan.js";
 export type { FfprobeAdapter } from "./scan.js";
 export { Reconciler } from "./reconciler.js";
-export { satisfiesCapabilities, gateWorkers, explainRejections } from "./capabilities.js";
-export type { CapabilityRejection } from "./capabilities.js";
+// 能力门控纯函数已下沉 @drec/core(app L4 的「本机抑制」也要用;见 core/src/capabilities.ts)。
+// 这里 re-export 保持 orchestrator 现有消费方(cli/reconciler)导入路径不变。
+export { satisfiesCapabilities, gateWorkers, explainRejections } from "@drec/core";
+export type { CapabilityRejection } from "@drec/core";
 export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";
 export type { PipelineDeps, PipelineCfg, PipelineSteps, PipelineCleanup } from "./pipeline.js";

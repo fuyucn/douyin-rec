@@ -4,7 +4,7 @@ import type { JobState, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
-import { gateWorkers, explainRejections } from "./capabilities.js";
+import { gateWorkers, explainRejections } from "@drec/core";
 
 export interface SettleConfig {
   maxWaitMs: number;

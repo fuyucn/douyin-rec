@@ -149,11 +149,13 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       poolSnapshot: hubEnabled ? hubStarter?.poolSnapshot : undefined,
       requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
       // 与 daemon 同源:规则把源任务交给远端(workers 不含 local)时,本机不实跑。
+      // 能力门控(T-10):远端还需满足规则的 requires 才算「有人接」(与 reconciler 同判定)。
       localSuppressedIds: hubEnabled
-        ? () => localSuppressedSourceTaskIds(
-            rootHubDir(),
-            new Set(workerStore.listWorkers(rootHubConfig()).map((w) => w.id)),
-          )
+        ? () => {
+            const workers = workerStore.listWorkers(rootHubConfig());
+            const caps = new Map(workers.map((w) => [w.id, w.capabilities]));
+            return localSuppressedSourceTaskIds(rootHubDir(), new Set(caps.keys()), (id) => caps.get(id));
+          }
         : undefined,
       retryNode: hubEnabled ? hubStarter?.retryNode : undefined,
       stopJob: hubEnabled ? hubStarter?.stopJob : undefined,
@@ -266,11 +268,13 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         log: (m) => console.log(m),
         // master(--hub)有效:规则把源任务交给远端节点(workers 不含 local)时,本机不再实跑该任务,
         // 避免本机持续轮询(触发风控)或双节点重复录制。daemon tick 现读规则文件,手改即时生效。
+        // 能力门控(T-10):远端还要满足规则的 requires 才算「有人接」,否则本机不抑制(防两头不录)。
         localSuppressedIds: hubEnabled
-          ? () => localSuppressedSourceTaskIds(
-              rootHubDir(),
-              new Set(workerStore.listWorkers(rootHubConfig()).map((w) => w.id)),
-            )
+          ? () => {
+              const workers = workerStore.listWorkers(rootHubConfig());
+              const caps = new Map(workers.map((w) => [w.id, w.capabilities]));
+              return localSuppressedSourceTaskIds(rootHubDir(), new Set(caps.keys()), (id) => caps.get(id));
+            }
           : undefined,
       });
     }
