@@ -114,10 +114,6 @@
   当前 tailscale 组网下 SSH 方案可用。**触发条件**：① 要频繁加节点；② worker 在 NAT 后 SSH 不可达；
   ③ 需要在线态/心跳实时性。**参考**：biliup Fleet（控制面/节点/relay,ticket 加入,私钥鉴权）。
 
-- [ ] **T-10 本机抑制也要走能力门控** — `localSuppressedSourceTaskIds`（`packages/app/src/hub-store.ts`）只看
-  `workers` 勾选，不看 `requires`。若某规则 `workers` 不含 local 但 local 也不满足 `requires`，本机仍会实跑
-  该源任务（白轮询、可能触发风控）。**验收**：本机抑制与 reconciler 用同一套「能力 ⊇ 要求」判定；
-  注意与「幽灵 worker id」的兜底（不抑制 → 防静默漏录）保持一致。
 - [ ] **T-6 docker tailscale 版本升级** — sidecar `1.98.4`（落后 5 个月），其他节点 `1.104.1`。
   `docker compose up -d --build` 不会拉新镜像，需 `docker compose pull && docker compose up -d --build`。
 - [ ] **T-7 清理 VPS1 exit node 残留** — VPS1 曾 `advertise-routes 0.0.0.0/0`，健康检查报
@@ -134,6 +130,13 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-10 本机抑制也要走能力门控** — `localSuppressedSourceTaskIds` 原只看 `workers` 勾选,不看
+  `requires`:若远端缺能力(reconciler 会排除它)而本机又被抑制 → **两头都不录**的静默漏录。
+  **修复**:能力门控纯函数(`satisfiesCapabilities` 等)**从 orchestrator 下沉 @drec/core**(app L4 不能依赖
+  orchestrator L4.5,且两处判定必须同一真理源;orchestrator 保留 re-export);本机抑制改为「远端存在 +
+  能力 ⊇ requires」才算有人接;拿不到能力信息时**不抑制**(安全默认)。
+  **验收**:hub-store +2 用例 / `pnpm test` 886 全过 / typecheck / bundle(`0.0.43`);layering 通过。(2026-10-08)
 
 - [x] **T-20 直播间标题未采集 → 稿件 `{title}` 渲染为空**（bug） — **根因(2026-10-08 实测)**:
   ① 录制侧 `session.start` 只传 anchorName(平台 `getStream` 只在 living 时才有 title,开播前无从得知);
