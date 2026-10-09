@@ -17,66 +17,80 @@ pnpm workspace monorepo，13 个包，收敛成 **2 个可插拔接缝** + **1 �
 
 箭头 = 「依赖」（A → B 表示 A 用 B）。层级越低越通用，只能被上层依赖。**绿色 = 平台轴**接缝、**橙色 = 引擎轴**接缝。
 
+<!-- BEGIN GENERATED: deps -->
+
 ```mermaid
 flowchart TB
   subgraph L5["L5 · 入口"]
-    cli["<b>cli</b><br/>record / merge / burn / probe + task<br/>providers-register: 注册平台 + 引擎"]
+    cli["<b>cli</b><br/>record / merge / burn / probe + task 命令组<br/>providers-register: 注册平台 + 引擎"]
   end
-  subgraph L45["L4.5 · 多节点 hub (master 编排)"]
-    orch["<b>orchestrator</b><br/>Transport(local/ssh/tailscale-ssh)<br/>identity(按 platform,roomSlug 聚类) / select(覆盖度选优)<br/>reconciler / pipeline(选优→pull→merge→burn→穿插上传) / SyncLedger<br/>受管任务下发(_tasks/_apply-tasks)"]
+  subgraph L45["L4.5 · 多节点 hub"]
+    orch["<b>orchestrator</b><br/>Transport(local/ssh/tailscale-ssh) / identity 聚类<br/>select 选优 / reconciler / pipeline / SyncLedger"]
   end
   subgraph L4["L4 · 有状态应用"]
-    app["<b>app</b><br/>db / store(房间归一化+平台校验) / hub-store(文件版 hub 规则)<br/>task-manager / daemon(定时) / scheduler<br/>web(api+server) / login(扫码) / upload / events / notify"]
+    app["<b>app</b><br/>db/store/hub-store(文件版规则)/ daemon/scheduler/task-manager<br/>web(api+server)/ login(扫码)/ upload / anchor"]
   end
-  subgraph L3["L3 · 编排"]
-    manager["<b>manager</b><br/>RecordingSession 会话生命周期<br/>onLive→connectDanmu / 断流重连 / drain<br/>danmu-xml(XmlDanmuWriter)"]
+  subgraph L3["L3 · 会话编排"]
+    manager["<b>manager</b><br/>RecordingSession 会话生命周期<br/>onLive→connectDanmu / 断流重连 / drain"]
   end
-  subgraph L15["L1.5 · 平台轴 (可插拔接缝 ①)"]
-    douyin["<b>douyin-live</b><br/>douyinPlatform<br/>stream(a_bogus 取流) + danmaku(自有 TS WS 客户端)"]
+  subgraph L15["L1.5 · 平台轴(可插拔)"]
     bilibili["<b>bilibili-live</b><br/>bilibiliPlatform<br/>getStream + connectDanmu(WBI + 二进制 WS)"]
+    douyin["<b>douyin-live</b><br/>douyinPlatform<br/>stream(a_bogus 取流) + danmaku(自有 TS WS)"]
+    kuaishou["<b>kuaishou-live</b><br/>kuaishouPlatform<br/>取流 = 直播页 __INITIAL_STATE__(无弹幕)"]
   end
-  subgraph L1["L1 · 引擎轴 (可插拔接缝 ②)"]
+  subgraph L1["L1 · 引擎轴(共享)"]
     engine["<b>record-engine</b><br/>通用 PollingRecorder<br/>下载引擎: ffmpeg(.ts) / mesio(.flv)"]
   end
-  subgraph L0["L0 · 基础叶子"]
-    core["<b>core</b><br/>Platform / DownloadEngine 契约<br/>+ 注册表 + types/config/notify/api-types + log"]
+  subgraph L05["L0.5 · 可观测性"]
     observ["<b>observability</b><br/>Notifier / EventCenter / 日志"]
-    post["<b>post-process</b><br/>concat / burn / ass / merge / ffmpeg / fonts"]
+  end
+  subgraph L0["L0 · 基础叶子"]
+    core["<b>core</b><br/>Platform / DownloadEngine 契约<br/>+ 注册表 + types/config/notify/api-types"]
     extra["<b>ffmpeg-recorder-extra</b><br/>logStreamMeta + detectDevice"]
+    post["<b>post-process</b><br/>concat / burn / ass / merge / ffmpeg / fonts"]
     tui["<b>tui</b><br/>Ink 终端控制台 (独立 bundle)"]
   end
 
-  cli --> orch
-  orch --> app
-  orch --> post
-  orch --> core
   cli --> app
-  cli --> observ
-  cli --> manager
-  cli --> douyin
   cli --> bilibili
-  cli --> engine
-  cli --> post
   cli --> core
+  cli --> douyin
+  cli --> kuaishou
+  cli --> manager
+  cli --> observ
+  cli --> orch
+  cli --> post
+  cli --> engine
+  orch --> core
+  orch --> post
+  app --> core
+  app --> douyin
   app --> manager
   app --> observ
-  app --> douyin
-  app --> engine
   app --> post
+  app --> engine
   app --> tui
-  app --> core
   manager --> core
+  bilibili --> core
   douyin --> core
   douyin --> extra
-  bilibili --> core
+  kuaishou --> core
   engine --> core
   engine --> extra
+  observ --> core
 
   classDef axisPlat fill:#dcfce7,stroke:#16a34a,color:#14532d;
   classDef axisEng fill:#ffedd5,stroke:#ea580c,color:#7c2d12;
-  class douyin,bilibili axisPlat;
+  class bilibili,douyin,kuaishou axisPlat;
   class engine axisEng;
 ```
+
+<!-- END GENERATED: deps -->
+
+> **`app` 与 `orchestrator` 是平级 peer(不是栈)**:`orchestrator` 的真实依赖只有 `core` + `post-process`,
+> **不依赖 `app`**(反之亦然)。两者由 `cli`(组合根)用 `hubStarter` 回调缝在一起 —— app 定义
+> `HubStarter` 接口,cli 提供 orchestrator 的实现并注入。故上图无 `orch → app` 边;rank 4.5 只表示
+> 「比 app 更靠上」,不代表依赖它。这条关系**无法从 package.json 看出**,只能从注入点得知。
 
 > `web/`（React19 + jotai + @base-ui/react + Tailwind v4）是**独立 Vite 工程**，构建产物 `packages/web/dist` 由 `app` 的 web server 托管，不参与上面的 `@drec/*` 依赖图。
 

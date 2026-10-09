@@ -251,6 +251,79 @@ function flowSvg(flow) {
 
 const legend = Object.entries(ROLE).map(([k, v]) => `<span class="lg"><i style="background:${v.c}"></i>${esc(v.name)}</span>`).join("");
 
+// ── 生成 architecture.md 里的 mermaid 依赖图(从真实 package.json 算,消除文档漂移)──────
+// 段落用标记锚定,重复运行幂等。手改这段会被下次生成覆盖。
+const MD_PATH = join(ROOT, "docs", "architecture.md");
+const MD_BEGIN = "<!-- BEGIN GENERATED: deps -->";
+const MD_END = "<!-- END GENERATED: deps -->";
+
+/** 每包一句话职责(手写:语义无法从代码算出;包新增时这里必须补,否则生成时抛错提醒)。 */
+const PKG_BLURB = {
+  "@drec/core": "Platform / DownloadEngine 契约<br/>+ 注册表 + types/config/notify/api-types",
+  "@drec/observability": "Notifier / EventCenter / 日志",
+  "@drec/post-process": "concat / burn / ass / merge / ffmpeg / fonts",
+  "@drec/tui": "Ink 终端控制台 (独立 bundle)",
+  "@drec/ffmpeg-recorder-extra": "logStreamMeta + detectDevice",
+  "@drec/record-engine": "通用 PollingRecorder<br/>下载引擎: ffmpeg(.ts) / mesio(.flv)",
+  "@drec/douyin-live": "douyinPlatform<br/>stream(a_bogus 取流) + danmaku(自有 TS WS)",
+  "@drec/bilibili-live": "bilibiliPlatform<br/>getStream + connectDanmu(WBI + 二进制 WS)",
+  "@drec/kuaishou-live": "kuaishouPlatform<br/>取流 = 直播页 __INITIAL_STATE__(无弹幕)",
+  "@drec/manager": "RecordingSession 会话生命周期<br/>onLive→connectDanmu / 断流重连 / drain",
+  "@drec/app": "db/store/hub-store(文件版规则)/ daemon/scheduler/task-manager<br/>web(api+server)/ login(扫码)/ upload / anchor",
+  "@drec/orchestrator": "Transport(local/ssh/tailscale-ssh) / identity 聚类<br/>select 选优 / reconciler / pipeline / SyncLedger",
+  "@drec/cli": "record / merge / burn / probe + task 命令组<br/>providers-register: 注册平台 + 引擎",
+};
+const NODE_ID = {
+  "@drec/core": "core", "@drec/observability": "observ", "@drec/post-process": "post",
+  "@drec/tui": "tui", "@drec/ffmpeg-recorder-extra": "extra", "@drec/record-engine": "engine",
+  "@drec/douyin-live": "douyin", "@drec/bilibili-live": "bilibili", "@drec/kuaishou-live": "kuaishou",
+  "@drec/manager": "manager", "@drec/app": "app", "@drec/orchestrator": "orch", "@drec/cli": "cli",
+};
+
+function buildMermaid() {
+  // 包 → 分组合并(同 rank 的包放一个 subgraph)。
+  const byRank = new Map();
+  for (const p of pkgs) {
+    if (!PKG_BLURB[p.name]) throw new Error(`PKG_BLURB 缺 ${p.name} 的职责描述(新增包必须补)`);
+    if (!NODE_ID[p.name]) throw new Error(`NODE_ID 缺 ${p.name} 的 mermaid 节点 id`);
+    const arr = byRank.get(p.rank) ?? [];
+    arr.push(p);
+    byRank.set(p.rank, arr);
+  }
+  const ranksSorted = [...byRank.keys()].sort((a, b) => b - a); // 高层在上
+  const lines = ["flowchart TB"];
+  for (const r of ranksSorted) {
+    const label = (RANK_LABEL[r] ?? `rank ${r}`).replace(" · ", " · ");
+    const gid = `L${String(r).replace(".", "")}`;
+    lines.push(`  subgraph ${gid}["${label}"]`);
+    for (const p of byRank.get(r)) {
+      lines.push(`    ${NODE_ID[p.name]}["<b>${p.dir}</b><br/>${PKG_BLURB[p.name]}"]`);
+    }
+    lines.push("  end");
+  }
+  lines.push("");
+  // 边:从真实依赖算(不写死)。按源包 rank 降序便于阅读。
+  const edgeLines = [];
+  for (const p of [...pkgs].sort((a, b) => b.rank - a.rank)) {
+    for (const d of [...p.deps].sort()) {
+      if (!NODE_ID[d]) continue; // 忽略非本图包
+      edgeLines.push(`  ${NODE_ID[p.name]} --> ${NODE_ID[d]}`);
+    }
+  }
+  lines.push(...edgeLines);
+  lines.push("");
+  // 接缝着色。
+  const platIds = pkgs.filter((p) => SEMANTIC[p.name] === "platform").map((p) => NODE_ID[p.name]);
+  const engIds = pkgs.filter((p) => SEMANTIC[p.name] === "engine").map((p) => NODE_ID[p.name]);
+  lines.push("  classDef axisPlat fill:#dcfce7,stroke:#16a34a,color:#14532d;");
+  lines.push("  classDef axisEng fill:#ffedd5,stroke:#ea580c,color:#7c2d12;");
+  if (platIds.length) lines.push(`  class ${platIds.join(",")} axisPlat;`);
+  if (engIds.length) lines.push(`  class ${engIds.join(",")} axisEng;`);
+  return lines.join("\n");
+}
+
+const MERMAID = buildMermaid();
+
 const html = `<!doctype html>
 <html lang="zh-CN" data-theme="dark">
 <head>
@@ -406,15 +479,36 @@ const html = `<!doctype html>
 </html>
 `;
 
+/** 把 mermaid 依赖图写进 architecture.md 的锚定段落(幂等)。 */
+function patchMarkdown(checkOnly) {
+  const md = readFileSync(MD_PATH, "utf-8");
+  const i = md.indexOf(MD_BEGIN);
+  const j = md.indexOf(MD_END);
+  if (i < 0 || j < 0) {
+    console.error(`architecture.md 缺锚定标记 ${MD_BEGIN} / ${MD_END}`);
+    process.exit(1);
+  }
+  const body = `${MD_BEGIN}\n\n\`\`\`mermaid\n${MERMAID}\n\`\`\`\n\n${MD_END}`;
+  const next = md.slice(0, i) + body + md.slice(j + MD_END.length);
+  if (next === md) return false;
+  if (!checkOnly) writeFileSync(MD_PATH, next);
+  return true;
+}
+
 if (CHECK) {
   const cur = existsSync(OUT) ? readFileSync(OUT, "utf-8") : "";
   const strip = (s) => s.replace(/生成 · 热度窗口近 \d+ 天 · [^<]*/, "");
-  if (strip(cur) !== strip(html)) {
-    console.error("architecture.html 与仓库不一致,请跑: node scripts/gen-architecture.mjs");
+  const htmlDrift = strip(cur) !== strip(html);
+  const mdDrift = patchMarkdown(true);
+  if (htmlDrift || mdDrift) {
+    const which = [htmlDrift && "architecture.html", mdDrift && "architecture.md"].filter(Boolean).join(" / ");
+    console.error(`${which} 与仓库不一致,请跑: node scripts/gen-architecture.mjs`);
     process.exit(1);
   }
-  console.log("architecture.html 与仓库一致 ✓");
+  console.log("architecture.html + architecture.md 与仓库一致 ✓");
 } else {
   writeFileSync(OUT, html);
+  const mdChanged = patchMarkdown(false);
   console.log(`wrote ${OUT} (${all.length} 包, ${edges.length} 依赖边, 热度窗口 ${DAYS}d)`);
+  console.log(`patched ${MD_PATH}${mdChanged ? " (mermaid 已更新)" : " (mermaid 无变化)"}`);
 }
