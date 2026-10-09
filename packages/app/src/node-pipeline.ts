@@ -16,7 +16,7 @@
  */
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { formatBiliTitle, formatPartTitle, resolveOutputStem, type NodePipelineResult, type NodePipelineSpec } from "@drec/core";
+import { formatBiliTitle, formatPartTitle, resolveOutputStem, sanitizeStreamKey, type NodePipelineResult, type NodePipelineSpec } from "@drec/core";
 import { ffprobeDuration, mergeSession, remuxSegment } from "@drec/post-process";
 import { appendGroup, uploadPlain } from "./upload/biliup.js";
 import { rootBiliupCookies } from "./paths.js";
@@ -89,7 +89,7 @@ async function produceParts(
 
 /** 由源文件推导输出 stem / 稿件标题(与 master pipeline 同源,保证命名一致)。 */
 function deriveTitles(spec: NodePipelineSpec, log: (m: string) => void): { stem: string; title: string; partTitle?: (i: number, n: number) => string | null } {
-  const base = sessionBaseOfFile(path.basename(spec.tsFiles[0] ?? "")) ?? spec.streamKey.replace(/[:/]/g, "_");
+  const base = sessionBaseOfFile(path.basename(spec.tsFiles[0] ?? "")) ?? sanitizeStreamKey(spec.streamKey);
   // startMs:用首段文件的 mtime 兜底(节点侧无 inventory 的精确 startMs;命名用日期即可)。
   const startMs = Date.now();
   const stem = resolveOutputStem({
@@ -121,7 +121,7 @@ export async function runNodeSidePipeline(
   const missing = spec.tsFiles.filter((f) => !existsSync(f));
   if (missing.length > 0) return { ok: false, error: `源文件不存在: ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? " …" : ""}` };
 
-  const stageSub = path.join(spec.stageDir, spec.streamKey.replace(/[:/]/g, "_"));
+  const stageSub = path.join(spec.stageDir, sanitizeStreamKey(spec.streamKey));
   log(`=== 节点侧管线 start ${spec.streamKey} 段数=${spec.tsFiles.length} mode=${spec.uploadMode} ===`);
 
   const { title, partTitle } = deriveTitles(spec, log);

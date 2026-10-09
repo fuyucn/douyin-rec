@@ -16,7 +16,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { loadConfig } from "@drec/core";
+import { loadConfig, sanitizeStreamKey } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { getEngine, platformForRoom } from "@drec/core";
@@ -796,9 +796,9 @@ const hubStarter: HubStarter = {
         }),
       notify: opts.onEvent,
       // job.log 的落盘实现由组合根装配:observability 的 FileLogger,路径 = <stage>/<sanitized streamKey>/job.log
-      //(sanitize 规则与 pipeline 内 sanitizeKey 一致:替换 : / 为 _)。orchestrator 只调 ScopedLogger 接口。
+      //(目录名 = core 的 sanitizeStreamKey,与 pipeline/hub-jobs 同一真理源)。orchestrator 只调 ScopedLogger 接口。
       makeRunLogger: (streamKey: string) =>
-        new FileLogger(`${hubCfg.stageDir ?? rootStageDir()}/${streamKey.replace(/[:/]/g, "_")}/job.log`),
+        new FileLogger(`${hubCfg.stageDir ?? rootStageDir()}/${sanitizeStreamKey(streamKey)}/job.log`),
       cfg: {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         stageDir: hubCfg.stageDir ?? rootStageDir(),
@@ -992,7 +992,7 @@ const hubStarter: HubStarter = {
       if (parts.length < 3) return { ok: false, error: `非法 streamKey: ${streamKey}`, code: 400 };
       const platform = parts[0];
       const roomSlug = parts[1];
-      const stageSub = join(hubCfg.stageDir ?? rootStageDir(), streamKey.replace(/[:/]/g, "_"));
+      const stageSub = join(hubCfg.stageDir ?? rootStageDir(), sanitizeStreamKey(streamKey));
       const job = ledger.get(streamKey);
       // 同场 pipeline 正在跑(持流锁 / live job)→ 不排队,直接 409。
       // 否则会静默等在锁后,等当前上传完成又重跑一次,造成重复烧录/重复分 P。

@@ -35,3 +35,14 @@ export type HubNodeStateName = (typeof HUB_NODE_STATE_NAMES)[number];
 export const HUB_TABLE_NAMES = [
   "sync_jobs", "sync_job_events", "sync_job_steps", "sync_candidates", "sync_node_states", "sync_parts",
 ] as const;
+
+/**
+ * streamKey(`{platform}:{roomSlug}:{date}`) → 安全目录名:把 `:` `/` 换成 `_`。
+ *
+ * **必须单一真理源**:job 日志/舞台目录由 orchestrator 写(pipeline),又被 app(hub-jobs 读日志)
+ * 与 cli(hubStarter 建目录)按同一规则算出路径。任何一处手抄不一致 → 定位错位、读不到日志。
+ * 故收口在此,所有消费方都调它,不再各写一份 `key.replace(/[:/]/g, "_")`。
+ */
+export function sanitizeStreamKey(key: string): string {
+  return key.replace(/[:/]/g, "_");
+}

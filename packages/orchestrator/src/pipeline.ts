@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, resolveOutputStem, runWithJob, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, resolveOutputStem, runWithJob, sanitizeStreamKey, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/core";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
@@ -141,11 +141,6 @@ export interface PipelineDeps {
   cfg: PipelineCfg;
 }
 
-/** streamKey(例 "douyin:767116735823:2026-06-27") → 安全目录名：替换 : / 为 _ */
-function sanitizeKey(key: string): string {
-  return key.replace(/[:/]/g, "_");
-}
-
 /** 默认按 16GB 上限切分(给上传用)。分段模块也用到。 */
 export const defaultSplitForUpload = (mp4: string): Promise<string[]> =>
   import("@drec/post-process").then((m) => m.splitToSizeLimit(mp4));
@@ -242,7 +237,7 @@ export async function runPipeline(
   const injected = deps.makeRunLogger?.(b.streamKey);
   const jlog = injected
     ? (msg: string): void => injected.info(msg)
-    : makeJobLog(path.join(deps.cfg.stageDir, sanitizeKey(b.streamKey)));
+    : makeJobLog(path.join(deps.cfg.stageDir, sanitizeStreamKey(b.streamKey)));
   jlog(`=== pipeline start ${b.streamKey} 成员=[${b.members.map((m) => m.workerId).join(",")}] mode=${deps.cfg.uploadMode} ===`);
   return runWithJob(b.streamKey, async () => {
     try {
@@ -286,7 +281,7 @@ async function runPipelineInner(
   const burnLivechat = cfg.steps?.burnLivechat !== false;  // 默认开
   const clean = cfg.cleanup ?? {};
   const { streamKey } = b;
-  const stageSub = path.join(cfg.stageDir, sanitizeKey(streamKey));
+  const stageSub = path.join(cfg.stageDir, sanitizeStreamKey(streamKey));
 
   // 续跑:job 已有 bv ⇒ P1 已建稿(不可逆),绝不重传。跳过 select/pull/merge/burn/uploadPlain,只补 append。
   const existing = ledger.get(streamKey);

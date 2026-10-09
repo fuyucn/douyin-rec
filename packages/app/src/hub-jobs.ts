@@ -13,6 +13,7 @@ import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, readyNodes, USER_STOP,
+  sanitizeStreamKey,
   type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO, type QueuePhase,
 } from "@drec/core";
 import { rootHubConfig, rootStageDir } from "./paths.js";
@@ -61,7 +62,6 @@ const HISTORY_TABLES = HUB_TABLE_NAMES;
 /** 无历史数据时的保守「步骤耗时/视频时长」比率(按 2026-07 实测:烧录 veryfast ~0.11×,上传取决于带宽)。 */
 const FALLBACK_RATE: Record<string, number> = { pending: 0.01, settling: 0.05, syncing: 0.1, merging: 0.3, uploading: 0.6 };
 
-function sanitizeKey(key: string): string { return key.replace(/[:/]/g, "_"); }
 
 /** room key `{platform}.{roomSlug}` → streamKey 前缀 `{platform}:{roomSlug}:`(仅替换首个点)。 */
 function roomKeyToStreamPrefix(roomKey: string): string {
@@ -137,7 +137,7 @@ export function hubStageDir(): string {
 
 /** 该场 job.log 的绝对路径(不保证存在)。 */
 export function jobLogPath(streamKey: string, stageDir = hubStageDir()): string {
-  return join(stageDir, sanitizeKey(streamKey), "job.log");
+  return join(stageDir, sanitizeStreamKey(streamKey), "job.log");
 }
 
 interface RawJob { streamKey: string; state: string; winnerWorker: string | null; bv: string | null; error: string | null; fails: number; updatedAt: number; }
