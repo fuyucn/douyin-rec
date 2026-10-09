@@ -51,6 +51,24 @@ function isUploadLine(value: string): value is UploadLine {
   return UPLOAD_LINES.has(value as UploadLine);
 }
 
+/**
+ * B站投稿**提交接口**。`app`(biliup CLI 的默认)会拿第一个标签自动参加活动(转载稿 → 21071),
+ * 且**更易触发 21566「投稿过于频繁」**——biliup 自己的 server 端因此把默认改成 web(见
+ * `crates/biliup-cli/src/server/common/upload.rs` 注释 + issue #1762/#1609)。CLI 默认仍是 app,
+ * 故这里显式指定 web,与上游 server 行为对齐。
+ *
+ * 可用 env `BILIUP_SUBMIT` 覆盖(app|web|b-cut-android);非法值回落 web。要回退到 CLI 旧默认
+ * (app)不必改代码:`BILIUP_SUBMIT=app`。
+ */
+export type UploadSubmit = "app" | "web" | "b-cut-android";
+
+const UPLOAD_SUBMITS = new Set<UploadSubmit>(["app", "web", "b-cut-android"]);
+
+export function uploadSubmit(): UploadSubmit {
+  const raw = (process.env.BILIUP_SUBMIT ?? "").trim().toLowerCase();
+  return UPLOAD_SUBMITS.has(raw as UploadSubmit) ? (raw as UploadSubmit) : "web";
+}
+
 /** 显式传入 > BILIUP_UPLOAD_LINE > BILIUP_UPLOAD_LINES > 内置线路。 */
 export function uploadLineCandidates(explicit?: UploadLine, override?: readonly UploadLine[]): UploadLine[] {
   const envLine = (process.env.BILIUP_UPLOAD_LINE ?? "").trim();
@@ -81,6 +99,8 @@ export function buildUploadArgs(o: UploadOpts): string[] {
   const files = o.videos && o.videos.length > 0 ? o.videos : o.video ? [o.video] : [];
   const args = [
     "-u", o.cookies, "upload", ...files,
+    // 提交接口:biliup CLI 默认 app,但 app 接口更易触发 21566 风控(见 uploadSubmit 注释)。
+    "--submit", uploadSubmit(),
     "--title", o.title, "--tid", String(o.tid), "--tag", o.tag, "--copyright", "1",
     // 关昵称水印:硬性 —— 投稿后无法修改(CLAUDE.md);与 upload-recording-today skill 默认一致。
     "--extra-fields", '{"watermark":{"state":0}}',
@@ -149,7 +169,9 @@ export function buildAppendArgs(o: { cookies: string; bv: string; files: string[
   // 防御:append 重新提交稿件元数据时可能重置「水印/可见性」(biliLive-tools v3.9.0 修过
   // 「续传水印不被继承」的同类 bug)。故 append 也带上关水印 + 仅自己可见,与 P1 upload 保持一致,
   // 避免追加分 P 后整稿被翻成「带水印 / 公开」。两者均为不可逆/隐私关键项。
-  const args = ["-u", o.cookies, "append", "--vid", o.bv, "--extra-fields", '{"watermark":{"state":0}}'];
+  // 提交接口与 upload 同口径(--submit web):biliup append 的默认也是 app(→ edit_by_app),
+  // 与 upload 一样更易被风控;web 走 edit_by_web,是上游 server 的既定选择。
+  const args = ["-u", o.cookies, "append", "--vid", o.bv, "--submit", uploadSubmit(), "--extra-fields", '{"watermark":{"state":0}}'];
   if (!o.public) args.push("--is-only-self", "1");
   if (o.line) args.push("--line", o.line);
   args.push(...o.files);

@@ -4,19 +4,21 @@ import { appendGroup, buildAppendArgs, uploadThenAppend, uploadThenAppendGroups 
 
 // 防御:append 也带关水印 + 仅自己可见(防 append 重置稿件设置,见 biliup.ts 注释)。
 const WM = '{"watermark":{"state":0}}';
+// 提交接口显式 web(app 默认更易触发 21566 风控,见 uploadSubmit 注释)。
+const SUBMIT = ["--submit", "web"];
 
 describe("P1→append", () => {
   it("buildAppendArgs 带关水印 + 仅自己可见(public 省略=私有)", () => {
     expect(buildAppendArgs({ cookies: "c.json", bv: "BV1", files: ["d.mp4", "l.mp4"] }))
-      .toEqual(["-u", "c.json", "append", "--vid", "BV1", "--extra-fields", WM, "--is-only-self", "1", "d.mp4", "l.mp4"]);
+      .toEqual(["-u", "c.json", "append", "--vid", "BV1", ...SUBMIT, "--extra-fields", WM, "--is-only-self", "1", "d.mp4", "l.mp4"]);
   });
   it("buildAppendArgs public:true → 关水印但不加 is-only-self", () => {
     expect(buildAppendArgs({ cookies: "c.json", bv: "BV1", files: ["d.mp4"], public: true }))
-      .toEqual(["-u", "c.json", "append", "--vid", "BV1", "--extra-fields", WM, "d.mp4"]);
+      .toEqual(["-u", "c.json", "append", "--vid", "BV1", ...SUBMIT, "--extra-fields", WM, "d.mp4"]);
   });
   it("buildAppendArgs 显式线路加 --line", () => {
     expect(buildAppendArgs({ cookies: "c.json", bv: "BV1", files: ["d.mp4"], line: "alia" }))
-      .toEqual(["-u", "c.json", "append", "--vid", "BV1", "--extra-fields", WM, "--is-only-self", "1", "--line", "alia", "d.mp4"]);
+      .toEqual(["-u", "c.json", "append", "--vid", "BV1", ...SUBMIT, "--extra-fields", WM, "--is-only-self", "1", "--line", "alia", "d.mp4"]);
   });
   it("appendGroup：分块连接错误时自动换线", async () => {
     const calls: string[][] = [];
@@ -94,7 +96,7 @@ describe("P1→append", () => {
     expect(calls[0].includes("upload")).toBe(true);
     expect(calls[0].includes("p.mp4")).toBe(true);
     // second call should be the append call(public:false → 带 is-only-self)
-    expect(calls[1]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", "--extra-fields", WM, "--is-only-self", "1", "d.mp4", "l.mp4"]);
+    expect(calls[1]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", ...SUBMIT, "--extra-fields", WM, "--is-only-self", "1", "d.mp4", "l.mp4"]);
   });
 
   it("uploadThenAppend：无 extras 时不调 append，返回 BV", async () => {
@@ -139,8 +141,8 @@ describe("uploadThenAppendGroups（每逻辑组一条 append）", () => {
     expect(bv).toBe("BV9Ab4y1C7xY");
     expect(calls).toHaveLength(3); // upload + 2 appends（不是把 3 文件塞一条）
     expect(calls[0].includes("upload")).toBe(true);
-    expect(calls[1]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", "--extra-fields", WM, "--is-only-self", "1", "d0.mp4", "d1.mp4"]);
-    expect(calls[2]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", "--extra-fields", WM, "--is-only-self", "1", "l.mp4"]);
+    expect(calls[1]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", ...SUBMIT, "--extra-fields", WM, "--is-only-self", "1", "d0.mp4", "d1.mp4"]);
+    expect(calls[2]).toEqual(["-u", "c.json", "append", "--vid", "BV9Ab4y1C7xY", ...SUBMIT, "--extra-fields", WM, "--is-only-self", "1", "l.mp4"]);
   });
 
   it("空组被跳过（不发空 append）", async () => {
@@ -155,6 +157,6 @@ describe("uploadThenAppendGroups（每逻辑组一条 append）", () => {
       run,
     });
     expect(calls).toHaveLength(2); // upload + 仅 livechat 那一条
-    expect(calls[1][4]).toBe("BV1Ab4y1C7xY");
+    expect(calls[1]).toContain("BV1Ab4y1C7xY");
   });
 });
