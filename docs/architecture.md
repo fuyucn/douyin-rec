@@ -69,7 +69,6 @@ flowchart TB
   app --> observ
   app --> post
   app --> engine
-  app --> tui
   manager --> core
   bilibili --> core
   douyin --> core

@@ -83,7 +83,7 @@
     <div>
       <h1>直播录制 · 架构图</h1>
       <p class="sub">抖音 / B站 / 快手直播录制 + 弹幕 + 多节点 hub 后处理。两个可插拔接缝:平台轴 + 引擎轴。</p>
-      <p class="gen">由 scripts/gen-architecture.mjs 生成 · 热度窗口近 90 天 · 2026-10-09 00:47</p>
+      <p class="gen">由 scripts/gen-architecture.mjs 生成 · 热度窗口近 90 天 · 2026-10-09 01:48</p>
     </div>
     <div class="tools">
       <button class="tbtn" id="theme">◐ 主题</button>
@@ -178,12 +178,12 @@
     </div>
   <div class="band">
       <div class="blabel">L4 · 有状态应用</div>
-      <div class="grid"><div class="card" style="--role:#34d399;--mix:29%" title="@drec/app · 7245 LOC · 30 文件 · 26 测试 · 近 90 天 34 次提交">
+      <div class="grid"><div class="card" style="--role:#34d399;--mix:30%" title="@drec/app · 7417 LOC · 42 文件 · 26 测试 · 近 90 天 35 次提交">
           <span class="rail" style="background:#34d399"></span>
           <div class="t">app</div>
           <div class="pkg">@drec/app</div>
-          <div class="m"><span><b>7245</b> LOC</span><span><b>30</b> 文件</span><span><b>26</b> 测试</span><span><b>34</b> Δ</span></div>
-          <div class="hbar"><i style="width:81%;background:#34d399"></i></div>
+          <div class="m"><span><b>7417</b> LOC</span><span><b>42</b> 文件</span><span><b>26</b> 测试</span><span><b>35</b> Δ</span></div>
+          <div class="hbar"><i style="width:83%;background:#34d399"></i></div>
         </div><div class="card" style="--role:#34d399;--mix:29%" title="@drec/web (独立 Vite) · 6941 LOC · 38 文件 · 0 测试 · 近 90 天 34 次提交">
           <span class="rail" style="background:#34d399"></span>
           <div class="t">web</div>
@@ -204,11 +204,11 @@
     </div>
   <div class="band">
       <div class="blabel">L5 · 入口</div>
-      <div class="grid"><div class="card" style="--role:#f472b6;--mix:23%" title="@drec/cli · 1502 LOC · 4 文件 · 0 测试 · 近 90 天 24 次提交">
+      <div class="grid"><div class="card" style="--role:#f472b6;--mix:23%" title="@drec/cli · 1539 LOC · 4 文件 · 0 测试 · 近 90 天 24 次提交">
           <span class="rail" style="background:#f472b6"></span>
           <div class="t">cli</div>
           <div class="pkg">@drec/cli</div>
-          <div class="m"><span><b>1502</b> LOC</span><span><b>4</b> 文件</span><span><b>0</b> 测试</span><span><b>24</b> Δ</span></div>
+          <div class="m"><span><b>1539</b> LOC</span><span><b>4</b> 文件</span><span><b>0</b> 测试</span><span><b>24</b> Δ</span></div>
           <div class="hbar"><i style="width:57%;background:#f472b6"></i></div>
         </div></div>
     </div>
@@ -385,7 +385,7 @@
       <td><code>app</code></td>
       <td>L4 · 有状态应用</td>
       <td><span style="color:#34d399">●</span> 应用/前端</td>
-      <td class="n">7245</td><td class="n">30</td><td class="n">26</td><td class="n">34</td>
+      <td class="n">7417</td><td class="n">42</td><td class="n">26</td><td class="n">35</td>
     </tr>
     <tr>
       <td><code>web</code></td>
@@ -403,12 +403,12 @@
       <td><code>cli</code></td>
       <td>L5 · 入口</td>
       <td><span style="color:#f472b6">●</span> 入口</td>
-      <td class="n">1502</td><td class="n">4</td><td class="n">0</td><td class="n">24</td>
+      <td class="n">1539</td><td class="n">4</td><td class="n">0</td><td class="n">24</td>
     </tr></tbody>
   </table>
 
   <h2>依赖边</h2>
-  <div class="edge"><span>app <em>→</em> core</span><span>app <em>→</em> observability</span><span>app <em>→</em> douyin-live</span><span>app <em>→</em> manager</span><span>app <em>→</em> post-process</span><span>app <em>→</em> record-engine</span><span>app <em>→</em> tui</span><span>bilibili-live <em>→</em> core</span><span>cli <em>→</em> core</span><span>cli <em>→</em> observability</span><span>cli <em>→</em> manager</span><span>cli <em>→</em> post-process</span><span>cli <em>→</em> app</span><span>cli <em>→</em> record-engine</span><span>cli <em>→</em> douyin-live</span><span>cli <em>→</em> bilibili-live</span><span>cli <em>→</em> kuaishou-live</span><span>cli <em>→</em> orchestrator</span><span>douyin-live <em>→</em> core</span><span>douyin-live <em>→</em> ffmpeg-recorder-extra</span><span>kuaishou-live <em>→</em> core</span><span>manager <em>→</em> core</span><span>observability <em>→</em> core</span><span>orchestrator <em>→</em> core</span><span>orchestrator <em>→</em> post-process</span><span>record-engine <em>→</em> core</span><span>record-engine <em>→</em> ffmpeg-recorder-extra</span></div>
+  <div class="edge"><span>app <em>→</em> core</span><span>app <em>→</em> observability</span><span>app <em>→</em> douyin-live</span><span>app <em>→</em> manager</span><span>app <em>→</em> post-process</span><span>app <em>→</em> record-engine</span><span>bilibili-live <em>→</em> core</span><span>cli <em>→</em> core</span><span>cli <em>→</em> observability</span><span>cli <em>→</em> manager</span><span>cli <em>→</em> post-process</span><span>cli <em>→</em> app</span><span>cli <em>→</em> record-engine</span><span>cli <em>→</em> douyin-live</span><span>cli <em>→</em> bilibili-live</span><span>cli <em>→</em> kuaishou-live</span><span>cli <em>→</em> orchestrator</span><span>douyin-live <em>→</em> core</span><span>douyin-live <em>→</em> ffmpeg-recorder-extra</span><span>kuaishou-live <em>→</em> core</span><span>manager <em>→</em> core</span><span>observability <em>→</em> core</span><span>orchestrator <em>→</em> core</span><span>orchestrator <em>→</em> post-process</span><span>record-engine <em>→</em> core</span><span>record-engine <em>→</em> ffmpeg-recorder-extra</span></div>
 
   <div class="note">
     <b>接新平台</b> = 写一个 <code>&lt;平台&gt;-live</code>(实现 Platform:getStream / getLiving / connectDanmu? / matchUrl)+ providers-register.ts 注册一行 → 引擎白嫖 record-engine。<br>

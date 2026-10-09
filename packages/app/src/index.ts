@@ -1,6 +1,9 @@
 // @drec/app — 有状态服务层(db/store/任务调度/web)+ 通知/上传/主播名解析。
 // cli 从这里取命令构造器与工具;app 内部模块互引保持相对。
-export { buildTaskCommand, buildCookieCommand } from "./cli-task.js";
+export { buildTaskCommand, buildCookieCommand, resolveHubConfigJson } from "./cli-task.js";
+// `task serve` 的运行时装配(T-22 第 4 步):命令定义在 cli,装配在 app。
+export { runServe } from "./serve.js";
+export type { ServeOpts, ServeDeps } from "./serve.js";
 export type { HubStarter } from "./cli-task.js";
 export { TaskStore } from "./store.js";
 export { resolveTaskCookies } from "./store.js";

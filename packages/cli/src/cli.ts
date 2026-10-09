@@ -1153,15 +1153,52 @@ const hubStarter: HubStarter = {
 // 用 `||` 而非 `??`:env `DISCORD_WEBHOOK=`(set-but-empty,docker .env 常见)会让 `??` 透出空串,
 // 进而毒化下游 `getWebhook() ?? settings.discordWebhook` 链(?? 不接空串)→ UI 设的全局 webhook
 // 永远读不到。空串一律归一为 undefined,下游 `??` 才能正确回落到 settings 表。
-program.addCommand(
-  buildTaskCommand(
-    () =>
-      (program.opts() as { discordWebhook?: string }).discordWebhook ||
-      process.env.DISCORD_WEBHOOK ||
-      undefined,
-    hubStarter,
-  ),
+const taskCmd = buildTaskCommand(
+  () =>
+    (program.opts() as { discordWebhook?: string }).discordWebhook ||
+    process.env.DISCORD_WEBHOOK ||
+    undefined,
+  hubStarter,
 );
+
+// ─── serve：Web 控制台（T-22 第 4 步:命令定义回归 cli,装配在 app/serve.ts）─────────
+taskCmd
+  .command("serve")
+  .description("启动 Web 控制台：HTTP 服务 + SPA + 定时调度守护（默认开；--no-schedule 关）")
+  .option("--port <n>", "监听端口（默认 7860）")
+  .option("--host <host>", "监听地址（默认所有网卡；worker 建议 127.0.0.1）")
+  .option("--db <path>", "数据库路径")
+  // 调度默认开：启用的任务无窗口=24h 录、有窗口=窗口内录。--no-schedule 退化为纯手动控制台。
+  .option("--no-schedule", "关闭定时调度，仅手动启停（默认开启调度）")
+  .option("--hub", "启用多节点同步编排(默认关)")
+  .option("--hub-config <json|path>", "hub 配置(JSON 串或文件路径);省略则自动读 <root>/config/hub-config.json")
+  .action(async (o: { port?: string; host?: string; db?: string; schedule?: boolean; hub?: boolean; hubConfig?: string }) => {
+    const { runServe } = await import("@drec/app");
+    await runServe(o, {
+      getWebhook: () =>
+        (program.opts() as { discordWebhook?: string }).discordWebhook ||
+        process.env.DISCORD_WEBHOOK ||
+        undefined,
+      hubStarter,
+    });
+  });
+
+// ─── tui：终端交互界面（连 task serve 的 REST API）─────────────────────────────
+// T-22 第 3 步:从 app/cli-task.ts 挪到 cli —— 命令定义属入口层,且 app(L4) 不该依赖 @drec/tui(L0)。
+taskCmd
+  .command("tui")
+  .description("终端交互界面：列表/启停/日志（连 task serve 的 REST API，默认 :7860）")
+  .option("--api <url>", "serve API 地址", "http://localhost:7860")
+  .action(async (o: { api: string }) => {
+    // 加载独立的 TUI bundle（dist/tui.mjs）。用变量 specifier，让 esbuild 不要把
+    // 它(及 react/ink)静态打进主 bundle —— 否则主 bundle 顶层 import react 会让
+    // docker 里的 `task serve` 启动即崩(无 node_modules)。运行时相对 dist/douyin-rec.mjs 解析。
+    const tuiMod = "./tui.mjs";
+    const { launchTui } = (await import(tuiMod)) as typeof import("@drec/tui");
+    await launchTui({ api: o.api });
+  });
+
+program.addCommand(taskCmd);
 
 // ─── cookie 子命令组：管理全局抖音账号 cookie（所有任务共享）────────────────────
 program.addCommand(buildCookieCommand());
