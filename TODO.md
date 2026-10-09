@@ -18,8 +18,10 @@
 - [!] **T-5 部署未上线改动** — **阻塞原因**：部署 guard 要求两节点 `recording===true` 为 0，
   当前 VPS1 正在录「yyoo」、VPS2 正在录「凌晴」（2026-10-07 实测）。**解除条件**：两节点都收播
   （周期性 `curl /api/tasks` 复查）。**内容**：弹幕重连熔断、`resolveDouyinLiveId` 三级回落、
-  `updateTask` 变更即同步、`anchorName` 比对、web 移动端 nav、T-1 能力门控、T-3 弹幕选优。
-  **验收**：重建 docker master + 更新 VPS worker 后，`pnpm test` / `typecheck` 全绿且线上生效。
+  `updateTask` 变更即同步、`anchorName` 比对、web 移动端 nav、T-1 能力门控、T-3 弹幕选优、
+  **T-24 快手取流修复(页面优先 + 递进退避,`0.0.38`)**。
+  **验收**：重建 docker master + 更新 VPS worker 后，`pnpm test` / `typecheck` 全绿且线上生效；
+  快手任务在干净出口能真正取到流（不再「等待开播」）。
 - [~] **T-17 分区录制 A/B 对比（VPS1 vs VPS2）** — 2026-10-08 10:21 起：cookie 已复制到 VPS2；
   5 个房间（呆呆蒽/什么鱼/潘潘不困/yyoo/忘忧时枫）分到 VPS2 且**全开弹幕**，VPS1 保留 7 个（含任务 1）。
   每天 10:30 cron 自动分析 → `logs/split-analysis-YYYYMMDD.log`（`scripts/daily-split-analysis.sh`）。
@@ -53,23 +55,6 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
-
-- [!] **T-23 仓库状态对齐(HEAD 断裂 / 生产跑未提交代码)** — 计划 `plans/028_repo_state_reconciliation.md`。
-  **阻塞原因**:61 个未提交文件里有 12 个**未跟踪**(`capabilities.ts`/`api-mode.ts`/`node-identity.test.ts` 等**实现**),
-  需用户先裁决 3 个未决问题(见 plan「未决问题」:哪些 WIP 是故意不提交的本地脚本?`plans/026` 是否提交?
-  T-17 脚本是否现在提交?)—— 裁决前不敢动 `git add`,以免把调试产物提交进 main。
-  **做什么**:把 WIP 按「定义侧 / 消费侧」切分提交(实测该切法每个 commit 都 typecheck 绿),
-  使 `git clone` 后 `pnpm i && pnpm typecheck && pnpm test && pnpm bundle` 全绿。
-  **为什么(P0,实测 2026-10-08)**:
-  ① **HEAD 单独 checkout 有 7 个真实类型错误**(用真实 `pnpm install` 验证)——
-     `web/api/*.ts`(已提交)引用 `HubRule.requires`/`WorkerConfig.capabilities`,但**定义侧全在 WIP 里**;
-     `serve.ts` 引用 `paths.ensureNodeIdentity`、`NodeRecordSpawnerOpts.douyinApiMode` 同样缺失。
-  ② **生产跑的是未提交的构建**:生产 `GET /api/version` = `0.0.32-661663`,其 bundle 内含
-     `satisfiesCapabilities`/`requires`;而 HEAD 里这些定义不存在 → 任何人 clone 重建都会拿到**功能更少**的产物。
-  ③ **台账与代码不符**:TODO 把 T-1/T-13/T-15 标 `[x]` 已完成,但三者定义侧代码**全未提交**
-     (`git show HEAD:...hub-store.ts | grep -c requires` = 0)。
-  ④ **误删风险**:`git clean -fd` 会永久删掉 12 个未跟踪文件(含 capabilities.ts 实现)。
-  **验收**:见 plan「验收标准」——clone 全绿 / 工作区干净 / 生产版本 ∈ 仓库历史 / TODO 每个 [x] 可追溯。
 
 - [ ] **T-18 节点侧上传（experimental:不烧录房间跳过 rsync 回传）** — 计划 `plans/027_node_side_upload.md`。
   **做什么**：hub 规则加 `pipeline.steps.nodeSideUpload`（缺省 false）。为 true 且**该房间不烧录**时，
@@ -164,6 +149,28 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-23 仓库状态对齐(HEAD 断裂 / 生产跑未提交代码)** — 计划 `plans/028_repo_state_reconciliation.md`。
+  **实测确认**:HEAD 单独 checkout 有 7 个真实类型错误(`requires`/`capabilities`/`ensureNodeIdentity`/
+  `douyinApiMode` 定义侧全在 WIP);生产 `0.0.32-661663` 跑的是仓库里不存在的构建。
+  **做法(按 plan 的「定义侧→消费侧」切分,实测每个 commit 都 typecheck 绿)**:
+  ① `dfc659e` 定义侧(能力门控/节点身份/API 模式类型与实现 + 新模块);
+  ② `552d792` 消费侧(reconciler/cli/web/danmu 引用 + 测试);
+  ③ `f10e25b` 归档(审计文档/plans/026/运维脚本/架构图再生成/AGENTS.md 可提交)。
+  **用户裁决 3 个未决问题**:脚本提交(非 gitignore)、`plans/026` 提交、T-17 脚本现在提交 —— 均按「提交」处理。
+  **验收**:干净 worktree(真实 `pnpm install`)`tsc` ✅ / `pnpm test` **869 全过** ✅ / `pnpm bundle` ✅;
+  工作区干净(`git status` 空);TODO 每个 `[x]` 可追溯。(2026-10-08)
+
+- [x] **T-24 快手「无法获取直播」根因修复(取流改回页面优先 + 递进退避)** — **真凶与 IP 无关**:
+  `livedetail` API **已被平台下线**(2026-10-08 实测:对真房间号/主播 id/乱码/空参数都返回同一 634 字节桩,
+  `result:2`+`living:false`+`playUrls` 全空)→ 旧「API 优先且说没在播就不回退页面」让**任何节点**
+  (含 IP 干净的 VPS1/VPS2)都报 `living:false`、永不回退页面 → 任务 75 一直「等待开播」。
+  **修复**(`9db3d31`):`getStream`/`getLiving` 改回**页面优先、API 仅兜底**;API 只认「拿到可播流 URL」,
+  拿不到一律 `null`(绝不 `{living:false}`);页面失败+API 桩 → **抛错**(未知,不静默);HTML 含限流文案 → `throttledReason`;
+  持续风控探测间隔**递进退避** 5→10→20→30 分钟封顶(record-engine)。
+  **实测**:同一在播房间,旧代码在 VPS1/VPS2 = `{living:false}` → 新代码 `{living:true, url:hw-origin...flv}`;
+  本机(被限流)= `{living:false, throttledReason:"请求过快，请稍后重试"}`。
+  **验收**:`pnpm test` 876 全过 / typecheck / bundle(`APP_VERSION 0.0.38`);文档 `docs/kuaishou-rate-limit.md` 补「修复 3」。(2026-10-08)
 
 - [x] **T-15 节点自报稳定身份（nodeId）** — worker 首次 `serve`/`_node-id` 时生成并持久化
   `<root>/config/node.json`（**nodeId = 16 字符 hex 短 hash**（8 字节随机）+ hostname + createdAt），
