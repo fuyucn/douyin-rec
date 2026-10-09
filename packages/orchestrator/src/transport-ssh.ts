@@ -26,6 +26,29 @@ const SSH_KEEPALIVE = ["-o", "BatchMode=yes", "-o", "ServerAliveInterval=5", "-o
  *  (rsync 自身没有本地超时;不设的话坏连接会一直占着 pipeline 的 stream lock。) */
 export const RSYNC_IDLE_TIMEOUT_MS = 300_000;
 
+/** 保留的 rsync stderr 字节数(只留尾部,足够覆盖真正的报错)。 */
+export const RSYNC_STDERR_KEEP = 2_000;
+
+/**
+ * 把 rsync stderr 尾部整理成一行可读诊断(纯函数,便于单测)。
+ *
+ * 背景(T-19):rsync 失败原先只报 `rc=12`,丢掉了 stderr —— 2026-10-08 vps2 缺 rsync
+ * 导致每场 pull 失败却只看到退出码,排查成本极高。这里:
+ *   - 丢弃 `--info=progress2` 的进度行(含 `%`/纯数字/`xfr#`)——它们是心跳噪声,不是错误;
+ *   - 保留其余行(如 `rsync: command not found`、`No space left on device`、`Permission denied`);
+ *   - 只取最后 3 行 + 限长,避免长输出灌进错误消息。
+ */
+export function summarizeRsyncStderr(raw: string): string {
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    // 进度行:如 "  1,234,567  45%  1.23MB/s  0:00:12" / "xfr#3" / 纯数字统计。
+    .filter((l) => !/^\s*[\d,.]+\s+\d+%/.test(l) && !/^xfr#\d/.test(l) && !/^to-chk=/.test(l));
+  if (lines.length === 0) return "";
+  return lines.slice(-3).join(" | ").slice(-400);
+}
+
 /** rsync 参数(纯函数,便于单测):免交互 ssh + 进度输出(给静默看门狗当心跳)。 */
 export function buildRsyncArgs(host: string, remote: string, localDir: string): string[] {
   return [
@@ -90,13 +113,25 @@ export class SshTransport implements Transport {
         idleTimer.unref?.();
       };
       const finish = (fn: () => void): void => { if (settled) return; settled = true; clearTimeout(idleTimer); fn(); };
+      /**
+       * 收集 stderr 尾部(诊断用)。背景(T-19):rsync 失败原先只报 `rc=12`,没有 stderr ——
+       * 2026-10-08 vps2 缺 rsync 导致每场 pull 失败却只看到退出码,排查成本极高。
+       * 只留尾部 N 行/限长,避免长传输把整段进度输出灌进错误消息。
+       */
+      let stderrTail = "";
       bump();
       p.stdout?.on("data", bump);
-      p.stderr?.on("data", bump);
+      p.stderr?.on("data", (d: Buffer) => {
+        bump();
+        stderrTail = (stderrTail + d.toString()).slice(-RSYNC_STDERR_KEEP);
+      });
       p.on("close", (c) => finish(() => {
         if (killed) { rej(new Error(`rsync 静默 ${Math.round(RSYNC_IDLE_TIMEOUT_MS / 1000)}s 无输出,已中止: ${o.host}:${remote}`)); return; }
         try { throwIfAborted(); } catch (e) { rej(e); return; }
-        c === 0 ? res() : rej(new Error(`rsync rc=${c}`));
+        if (c === 0) { res(); return; }
+        // 尾部若干行(去掉 rsync 进度行,只留有信息量的),附到错误里。
+        const detail = summarizeRsyncStderr(stderrTail);
+        rej(new Error(`rsync rc=${c}${detail ? `: ${detail}` : ""}(${o.host}:${remote})`));
       }));
       p.on("error", (e) => finish(() => rej(e)));
     }));

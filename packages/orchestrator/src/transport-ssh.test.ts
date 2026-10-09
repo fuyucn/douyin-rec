@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SshTransport, buildRsyncArgs } from "./transport-ssh.js";
 import { recordingStatusWorkerIds } from "./transport.js";
+import { summarizeRsyncStderr } from "./transport-ssh.js";
 
 describe("recordingStatusWorkerIds", () => {
   const all = ["local", "vps2", "vps3"];
@@ -92,6 +93,41 @@ describe("SshTransport", () => {
     expect(args).toContain("--info=progress2");            // 进度输出 = 静默看门狗的心跳
     expect(args).toContain("vps:/data/rec/a.ts");
     expect(args).toContain("/stage/x");
+  });
+
+  it("summarizeRsyncStderr:丢弃进度行,保留真正的错误(T-19:失败要能看到原因)", () => {
+    // 典型:进度行 + 真错误混在 stderr 里。
+    const raw =
+      "  1,234,567  45%  1.23MB/s    0:00:12 (xfr#3, to-chk=10/20)\n" +
+      "rsync: [sender] change_dir \"/data/rec\" failed: No such file or directory (2)\n" +
+      "rsync error: some files/attrs were not transferred (see previous errors) (code 23)\n";
+    const s = summarizeRsyncStderr(raw);
+    expect(s).not.toContain("%");                       // 进度行被丢弃
+    expect(s).toContain("No such file or directory");   // 真错误保留
+    expect(s).toContain("code 23");
+  });
+
+  it("summarizeRsyncStderr:只剩进度行 → 空串(不输出噪声)", () => {
+    const raw = "  1,000  10%  0.5MB/s  0:00:01\n  2,000  20%  0.6MB/s  0:00:02\nxfr#4\n";
+    expect(summarizeRsyncStderr(raw)).toBe("");
+  });
+
+  it("summarizeRsyncStderr:只保留最后 3 行并限长(防长输出灌爆错误消息)", () => {
+    const raw = Array.from({ length: 10 }, (_, i) => `err line ${i}`).join("\n");
+    const s = summarizeRsyncStderr(raw);
+    expect(s).toContain("err line 9");
+    expect(s).not.toContain("err line 6");   // 只留最后 3 行
+    expect(s.length).toBeLessThanOrEqual(400);
+  });
+
+  it("pull:rsync 失败时错误消息带上 stderr 尾部(T-19:不再只报退出码)", async () => {
+    // 注入的 rsync 直接抛带 stderr 的错误(模拟真实失败路径),断言 pull 不吞掉该信息。
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "~/drec",
+      run: async () => "{}",
+      rsync: async () => { throw new Error(`rsync rc=12: rsync: command not found(vps:/x)`); } });
+    const dir = mkdtempSync(join(tmpdir(), "rsync-err-"));
+    await expect(t.pull(["a.ts"], dir)).rejects.toThrow(/command not found/);
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("listInventory 解析远端 JSON 输出", async () => {
