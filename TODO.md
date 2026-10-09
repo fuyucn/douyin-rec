@@ -172,6 +172,16 @@
   本机(被限流)= `{living:false, throttledReason:"请求过快，请稍后重试"}`。
   **验收**:`pnpm test` 876 全过 / typecheck / bundle(`APP_VERSION 0.0.38`);文档 `docs/kuaishou-rate-limit.md` 补「修复 3」。(2026-10-08)
 
+- [x] **T-25 快手限流:对照外部同类问题 + 补全浏览器请求头** — 参考 48tools#128(症状与我们 task 75
+  一致,作者判定风控/被拉黑、建议国内 IP + 不要频繁刷新)、48tools v4.17.0(称「浏览器 fetch 替代 got
+  解决请求过快」)、ordinaryroad live-chat-client(`livedetail` 的 `result:2`=请求过快、`400002`=需要验证,
+  仅 1 正常 / 671·677 未开播,其余抛异常)。
+  **我们的 A/B 实测(同一被限流出口,证伪)**:浏览器 fetch 的收益**不可复现**(第 2/3 轮 Node 与浏览器
+  均被限流)→ 决定性变量是**请求速率**(48tools 是点击时请求一次,不轮询;我们已用 5 分钟 + 递进退避覆盖)。
+  **采纳**:补全真实 Chrome 请求头(`Accept`/`Accept-Language`/`sec-ch-ua`/`sec-fetch-*`/
+  `Upgrade-Insecure-Requests`,不手写 `Accept-Encoding`)。**未采纳**:浏览器 fetch 兜底(收益不可复现 + 成本高)。
+  **验收**:`pnpm test` 878 全过 / typecheck / bundle(`0.0.40`);文档补「外部同类问题与解法对照」。(2026-10-08)
+
 - [x] **T-15 节点自报稳定身份（nodeId）** — worker 首次 `serve`/`_node-id` 时生成并持久化
   `<root>/config/node.json`（**nodeId = 16 字符 hex 短 hash**（8 字节随机）+ hostname + createdAt），
   **此后永久不变**（跨重启/换 master/迁移）。短 hash 而非 uuid v4：36 字符在 UI/日志/URL 偏长；
