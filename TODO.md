@@ -67,6 +67,18 @@
   → 后处理全卡 needs_manual，排查成本极高（错误只报退出码，无 stderr）。
   **待办**：① 合并 T-5 部署后**重建/重装 VPS** 验证脚本；② `transport-ssh.ts` 把 rsync stderr 尾部
   带进错误消息（现在只 `rsync rc=12`）。
+- [ ] **T-21 拆分 app「上帝包」**(架构/认知税) — **问题**:`packages/app` 是 7215 LOC / 30 文件的
+  单一包,同时承担 ≥8 个不相干职责:sqlite store、任务调度 daemon、子进程生命周期、hub 规则文件 CRUD、
+  hub 台账读取、扫码登录(3 平台)、**web HTTP API(api.ts 1321 行,单个对象 51 个方法)**、biliup 上传、
+  TUI 启动、时区、路径。它还是全仓依赖最宽的包(7 个 @drec + 5 个第三方)。
+  **证据(2026-10-08 实测)**:见 `docs/architecture.html` 热图 —— app 与 web 并列改动热点(各 34 次/90 天);
+  `app/src/web/` = 2005 行、`app/src/login/` = 686 行,均为**内聚、可独立**的子域。
+  **另**:`app`(L4)依赖 `@drec/tui`(L0)只为 `cli-task.ts:813` 一处动态 import;
+  `app` 里还有 `new Command("task")`(命令定义本应属 cli)—— 两个跨层味道。
+  **建议顺序**(每步独立可验证):① 拆 `web/` → `@drec/web-server`(api+server+static);② 拆 `login/` →
+  `@drec/login`;③ hub 领域(`hub-store`/`hub-jobs`/`worker-store`)考虑挪到 orchestrator 或独立包;
+  ④ `cli-task.ts` 的命令定义回归 `cli`。**验收**:每拆一个包 `test/arch/layering.test.ts` 的 RANKS 登记 +
+  `pnpm test`/`typecheck`/`bundle` 全绿 + 架构图重新生成。**注意**:纯重构,行为零变更。
 - [ ] **T-20 直播间标题未采集 → 稿件 `{title}` 渲染为空**（bug） — **现象**：hub 稿件标题/文件名里
   用 `{title}` 占位符时渲染为空（拿不到主播当场设的直播标题）。**根因（已定位，2026-10-08 实测）**：
   1. 录制侧从不传 title：`packages/app/src/cli-task.ts:859` 是 `session.start(url, opts, { anchorName: t.name ?? "" })`
