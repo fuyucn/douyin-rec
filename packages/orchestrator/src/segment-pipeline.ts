@@ -68,6 +68,45 @@ interface SegmentUploadPart {
   livechat?: string;
 }
 
+/**
+ * 逐段弹幕窗口(相对**该段所属会话** xml 起点)的累计器。
+ *
+ * **必须按会话分开累计** —— 每个 xml 的 `video_start_time` = 该会话起点,时间轴从 0 起;
+ * 断流重连产生新会话 + 新 xml。若整场累计,新会话各段的窗口会整体错位到该会话时长之外 →
+ * 窗口内 0 条弹幕 → 那些分 P 的烧录全丢(实测 2026-10-09 什么鱼:会话1 的 P1-P3 有 livechat,
+ * 会话2 的 P4-P6 livechat 全空,稿件只剩 3 个 livechat 分 P)。
+ *
+ * 键 = 会话 xml 路径(空 xml 的段不参与,窗口恒为 null)。纯函数,便于单测。
+ */
+export function sessionWindowOffsets(): (xmlPath: string, durSec: number) => { startSec: number; endSec: number } {
+  const offsets = new Map<string, number>();
+  return (xmlPath: string, durSec: number) => {
+    const startSec = offsets.get(xmlPath) ?? 0;
+    offsets.set(xmlPath, startSec + durSec);
+    return { startSec, endSec: startSec + durSec };
+  };
+}
+
+/**
+ * 按会话边界切分聚组计划:**一个分 P 只能属于一个会话**(只有一份 xml,窗口相对它的起点)。
+ * 跨会话的组会把两个会话的窗口并成一个却只用其中一个 xml → 时间轴错位/弹幕丢失。
+ * 入参 xmlPathOf(i) 返回第 i 段所属会话的 xml(空串 = 无 xml)。纯函数,便于单测。
+ */
+export function splitGroupsBySession(groups: number[][], xmlPathOf: (i: number) => string): number[][] {
+  const out: number[][] = [];
+  for (const g of groups) {
+    let cur: number[] = [];
+    let curXml = "";
+    for (const k of g) {
+      const xml = xmlPathOf(k) ?? "";
+      if (cur.length > 0 && xml !== curXml) { out.push(cur); cur = []; }
+      cur.push(k); curXml = xml;
+    }
+    if (cur.length > 0) out.push(cur);
+  }
+  return out;
+}
+
 /** 组内各段的弹幕窗口并集([min start, max end)),xml 取组内首个有 xml 的段。 */
 function spanWindow(members: Array<{ window: { startSec: number; endSec: number } | null; xmlPath: string }>): { startSec: number; endSec: number; xmlPath: string } | null {
   const withWin = members.filter((m) => m.window && m.xmlPath);
@@ -170,8 +209,8 @@ export async function runSegmentPipeline(o: {
   ledger.syncNodeState(streamKey, "merge", "running");
   const parts: SegmentPlan["parts"] = [];
   const xmlCache = new Map<string, string>();
-  // 每个会话内累计时长 = 该会话后续段的窗口起点(与合并路径的弹幕偏移口径一致)。
-  let globalOffset = 0;
+  // 各会话内累计时长 → 该会话后续段的弹幕窗口(按会话分开,见 sessionWindowOffsets 注释)。
+  const windowOffset = sessionWindowOffsets();
   const remux = deps.remuxSegment ?? defaultRemuxSegment;
   const probeDuration = deps.segmentDuration ?? defaultSegmentDuration;
   const minSegSec = cfg.minSegmentSec ?? 2;
@@ -183,11 +222,12 @@ export async function runSegmentPipeline(o: {
     const localSrc = path.join(stageSub, path.basename(remoteSrc));
     let durSec = 0;
     try { durSec = await probeDuration(localSrc); } catch { durSec = 0; }
-    // 段窗口(相对整场):从 globalOffset 起 durSec 秒。源缺失时长按 0 计(弹幕可能漂移,但不静默)。
-    const startSec = globalOffset;
-    globalOffset += durSec;
+    // 该段所属会话的 xml(stage 内同名)。窗口相对**本会话**累计;源缺失时长按 0 计(弹幕可能漂移,但不静默)。
+    const sessionXml = winnerMembers.find((m) => m.rec.tsFiles.includes(remoteSrc))?.rec.xmlPath;
+    const xmlStage = sessionXml ? path.join(stageSub, path.basename(sessionXml)) : "";
+    const win = xmlStage ? windowOffset(xmlStage, durSec) : null;
     // 碎片过滤:mesio `--fix` 切出的 0.2s 级初始化残片(分辨率不同、无有效内容)→ 不产出。
-    // 仍累加 globalOffset(时长约 0),保证后续段的弹幕窗口对齐。
+    // 仍累加会话 offset(时长约 0),保证后续段的弹幕窗口对齐。
     if (minSegSec > 0 && durSec > 0 && durSec < minSegSec) {
       skippedFragments++;
       jlog(`跳过碎片段 ${i}: ${path.basename(localSrc)}(${durSec.toFixed(2)}s < ${minSegSec}s)`);
@@ -202,9 +242,7 @@ export async function runSegmentPipeline(o: {
     } else {
       jlog(`remux 段 ${i}: 已存在,跳过 ${path.basename(plain)}`);
     }
-    // 该段所属会话的 xml(stage 内同名);按会话缓存内容,避免重复读。
-    const sessionXml = winnerMembers.find((m) => m.rec.tsFiles.includes(remoteSrc))?.rec.xmlPath;
-    const xmlStage = sessionXml ? path.join(stageSub, path.basename(sessionXml)) : "";
+    // 按会话缓存 xml 内容,避免重复读。
     let xmlText = "";
     if (xmlStage && existsSync(xmlStage)) {
       xmlText = xmlCache.get(xmlStage) ?? "";
@@ -213,7 +251,7 @@ export async function runSegmentPipeline(o: {
     parts.push({
       index: parts.length, src: localSrc, plain, srcSegIndex: i, durSec,
       xmlPath: xmlText ? xmlStage : "",
-      window: xmlText ? { startSec, endSec: startSec + durSec } : null,
+      window: xmlText ? win : null,
       danmu: "", livechat: "",
     });
   }
@@ -223,9 +261,11 @@ export async function runSegmentPipeline(o: {
   // 逐段上传会产生十几个分 P,且都短于录制时设置的 segmentSec。这里按 segmentSec 把
   // 连续段合并成接近目标时长的组 → 每组 = 一个分 P(与合并路径的产出形态一致)。
   const groupTargetSec = cfg.segmentGroupSec ?? 0; // <=0 = 不合并(逐段上传)
-  const planGroups = groupTargetSec > 0
+  const plannedGroups = groupTargetSec > 0
     ? planSegmentGroups(parts.map((p) => p.durSec ?? 0), groupTargetSec)
     : parts.map((_, i) => [i]);
+  // 禁止分组跨会话(每个分 P 只能有一份 xml;见 splitGroupsBySession 注释)。
+  const planGroups = splitGroupsBySession(plannedGroups, (k) => parts[k]?.xmlPath ?? "");
   const mergeGroup = deps.mergeSegments ?? defaultMergeSegments;
   const uploadParts: SegmentUploadPart[] = [];
   for (let gi = 0; gi < planGroups.length; gi++) {
