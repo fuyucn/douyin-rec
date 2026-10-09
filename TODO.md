@@ -67,6 +67,19 @@
   → 后处理全卡 needs_manual，排查成本极高（错误只报退出码，无 stderr）。
   **待办**：① 合并 T-5 部署后**重建/重装 VPS** 验证脚本；② `transport-ssh.ts` 把 rsync stderr 尾部
   带进错误消息（现在只 `rsync rc=12`）。
+- [~] **T-22 app 解耦 1–4 步(api.ts 拆域 / 修反向依赖 / tui 归位 / serve 归位)** — 2026-10-08 起。
+  **背景**:T-21 原计划「先拆 web/ 成独立包」经复核**是错的** —— `web/api.ts` 值导入 12 个 app 模块
+  (hub-store/hub-jobs/worker-store/store/scheduler/task-input/timezone/paths/version/upload/biliup/
+  task-manager/merge-jobs),拆包必成 `@drec/app ↔ @drec/web-server` 循环,layering 测试必红。
+  故改为**先拆文件、修反向依赖**,拆包(T-21 第 5 步)留到最后且可能不必做。
+  **四步**(每步独立提交 + 全量验证):
+  1. `app/src/web/api.ts`(1321 行,`makeApi` 单函数 909 行、51 方法)→ 按域拆 `web/api/*.ts`:
+     tasks / hub-rules / hub-jobs / workers / cookies / settings / login / merge / events。`makeApi` 只做组装。
+  2. `parseCookieExpiry` 从 `web/api.ts` 下沉(命令层 `cli-task.ts:674` 反向 import 了它)→ 消除反向依赖。
+  3. tui 启动从 `app/cli-task.ts:813` 挪到 `cli` → 断掉 `app`(L4) → `@drec/tui`(L0) 的怪依赖。
+  4. `serve` 命令从 `app/cli-task.ts`(508..805, 298 行)挪到 `cli` → 命令定义回归 cli。
+  **验收**:`pnpm test`(现 119 个 web-api 用例 + 16 个 web-server 用例必须全绿)/ `typecheck` / `bundle`;
+  `test/arch/layering.test.ts` 通过;`pnpm arch:gen` 重新生成架构图。**纯重构,行为零变更**。
 - [ ] **T-21 拆分 app「上帝包」**(架构/认知税) — **问题**:`packages/app` 是 7215 LOC / 30 文件的
   单一包,同时承担 ≥8 个不相干职责:sqlite store、任务调度 daemon、子进程生命周期、hub 规则文件 CRUD、
   hub 台账读取、扫码登录(3 平台)、**web HTTP API(api.ts 1321 行,单个对象 51 个方法)**、biliup 上传、
