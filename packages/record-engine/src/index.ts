@@ -23,6 +23,12 @@ const log = createLogger("stream_recorder");
 
 export const POLL_MS = 30_000;        // 开播探测间隔
 export const THROTTLE_POLL_MS = 5 * 60_000; // 风控降频探测间隔(冷却期少打扰平台,代价是开播检测延迟)
+/**
+ * 风控**持续**时的探测间隔上限:每次连续探到风控就翻倍(5→10→20→30 分钟封顶),
+ * 一旦探到正常即复位。依据:平台限流是「越打越冷」——被限后继续高频请求会延长冷却
+ * (见 docs/kuaishou-rate-limit.md「运营注意」),所以要**递进退避**而非固定频率。
+ */
+export const THROTTLE_MAX_POLL_MS = 30 * 60_000;
 export const FAIL_ALERT = 3;          // 连续「取流+判活均失败」首次告警阈值(≈1.5 分钟)
 export const ALERT_REPEAT = 20;       // 持续失败每隔此次数再提醒(≈10 分钟)
 export const STALL_CHECK_MS = 15_000; // 卡死看门狗检查间隔
@@ -101,6 +107,8 @@ export class PollingRecorder implements Recorder {
   private pollDelayMs = POLL_MS;
   /** 最近一次风控提示(去重:同一文案只在进入时打一次,解除时再打恢复日志)。 */
   private lastThrottledReason: string | null = null;
+  /** 连续探到风控的次数(递进退避用;探到正常即清零)。 */
+  private throttleHits = 0;
 
   /** 注入下载引擎(ffmpeg / mesio)。name 取引擎 id,便于日志/识别。 */
   constructor(engine: DownloadEngine) {
@@ -189,15 +197,19 @@ export class PollingRecorder implements Recorder {
       this.probeFails = 0; // 取流成功 → 清零
       if (this.stopped) return;
       if (probe.throttledReason) {
-        // 风控(平台页可达但被限流)→ 显式日志 + 降频轮询,避免把风控伪装成「主播没开播」掩盖漏录。
-        this.pollDelayMs = Math.max(this.basePollMs, THROTTLE_POLL_MS);
+        // 风控(平台页可达但被限流)→ 显式日志 + **递进退避**降频,避免把风控伪装成「主播没开播」掩盖漏录。
+        // 持续被限时探测间隔逐次翻倍(5→10→20→30 分钟封顶):越打越冷,必须真正降下来才可能恢复。
+        this.throttleHits++;
+        const backoff = Math.min(THROTTLE_POLL_MS * 2 ** (this.throttleHits - 1), THROTTLE_MAX_POLL_MS);
+        this.pollDelayMs = Math.max(this.basePollMs, backoff);
         if (probe.throttledReason !== this.lastThrottledReason) {
           this.lastThrottledReason = probe.throttledReason;
-          log.warn(`平台风控:${probe.throttledReason} —— ${Math.round(this.pollDelayMs / 60000)} 分钟一探(冷却期少打扰平台;解除前若在播会漏录)`);
+          log.warn(`平台风控:${probe.throttledReason} —— ${Math.round(this.pollDelayMs / 60000)} 分钟一探(持续被限会逐次退避;冷却期少打扰平台,解除前若在播会漏录)`);
         }
       } else if (this.lastThrottledReason) {
         log.info(`风控解除,恢复正常轮询`);
         this.lastThrottledReason = null;
+        this.throttleHits = 0;
         this.pollDelayMs = this.basePollMs;
       }
       if (probe.living && probe.url) {

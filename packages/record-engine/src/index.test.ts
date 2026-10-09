@@ -7,6 +7,7 @@ import type { ChildProcess } from "node:child_process";
 import { registerPlatform, type DownloadEngine, type Platform, type RecorderEvents } from "@drec/core";
 import {
   PollingRecorder, POLL_MS, STALL_CHECK_MS, STALL_GRACEFUL_EXIT_MS, STALL_TIMEOUT_MS, THROTTLE_POLL_MS,
+  THROTTLE_MAX_POLL_MS,
 } from "./index.js";
 
 /** 可控退出状态的假下载子进程(不真 spawn)。 */
@@ -247,7 +248,8 @@ describe("风控降频轮询(platform.getStream 返回 throttledReason)", () => 
     expect(calls).toBe(2);
 
     state.throttled = false;                               // 风控解除
-    await vi.advanceTimersByTimeAsync(THROTTLE_POLL_MS);   // 本次仍按降频间隔到点,届时报解除
+    // 第 2 次探测时已退避到 10 分钟(递进退避),故要等 10 分钟才到下一次探测点。
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(calls).toBe(3);
     await vi.advanceTimersByTimeAsync(POLL_MS);            // 之后恢复 30s 间隔
     expect(calls).toBe(4);
@@ -268,6 +270,44 @@ describe("风控降频轮询(platform.getStream 返回 throttledReason)", () => 
     expect(calls).toBe(1);
     await vi.advanceTimersByTimeAsync(5 * 60_000 - POLL_MS); // 满 5 分钟才探第二次
     expect(calls).toBe(2);
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("持续风控 → 探测间隔递进退避(5→10→20 分钟翻倍,封顶 30 分钟)", async () => {
+    vi.useFakeTimers();
+    const at: number[] = []; // 每次探测的 (虚拟) 时刻
+    const p = makePlatform(false);
+    // 用 30s 基础间隔,便于观察退避(快手常态 5 分钟会让第一次退避不显形)。
+    p.getStream = async () => { at.push(Date.now()); return { living: false, throttledReason: "请求过快，请稍后重试" }; };
+    registerPlatform(p);
+    const { outDir } = await startRecorder(new FakeProc());
+    // 每次都推进「够久」(> 最大间隔),到点自然探测;用探测时刻的**间隔**验证退避曲线。
+    for (let i = 0; i < 6; i++) await vi.advanceTimersByTimeAsync(THROTTLE_MAX_POLL_MS + 1);
+    // 相邻间隔:第 1→2 次 = 5 分钟(首次风控),之后逐次翻倍 10→20→30(封顶),不再增长。
+    const gaps = at.slice(1).map((t, i) => Math.round((t - at[i]) / 60_000));
+    expect(gaps.slice(0, 4)).toEqual([5, 10, 20, 30]);     // 递进退避曲线
+    expect(Math.max(...gaps)).toBe(30);                    // 封顶 30 分钟,不无限翻倍
+    expect(gaps.slice(4).every((g) => g === 30)).toBe(true);
+    expect(THROTTLE_MAX_POLL_MS).toBe(30 * 60_000);
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("递进退避后风控解除 → 计数清零,间隔回落到基础值", async () => {
+    vi.useFakeTimers();
+    const state = { throttled: true };
+    const p = makePlatform(false);
+    p.getStream = async () => (state.throttled ? { living: false, throttledReason: "请求过快" } : { living: false });
+    registerPlatform(p);
+    const { outDir } = await startRecorder(new FakeProc());
+    await vi.advanceTimersByTimeAsync(1);                  // 进风控(1)
+    await vi.advanceTimersByTimeAsync(THROTTLE_POLL_MS);   // 风控(2)→ 退避到 10 分钟
+    state.throttled = false;
+    await vi.advanceTimersByTimeAsync(10 * 60_000);        // 解除 → 复位到 basePollMs
+    // 解除后再等一个基础间隔即应再探(说明已回落到 30s,而非仍按 10 分钟)
+    let calls = 0;
+    p.getStream = async () => { calls++; return { living: false }; };
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(calls).toBe(1);
     rmSync(outDir, { recursive: true, force: true });
   });
 });
