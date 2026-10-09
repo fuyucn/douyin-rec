@@ -237,3 +237,56 @@ describe("取流:页面优先、API 兜底(2026-10-08 修正)", () => {
     await expect(getLiving("abc")).rejects.toThrow(/network down/);
   });
 });
+
+describe("请求头:补全真实 Chrome 头(降低被判定为爬虫的概率)", () => {
+  beforeAll(() => { (globalThis as { __KS_WARMUP_DELAY_MS__?: number }).__KS_WARMUP_DELAY_MS__ = 0; });
+  afterAll(() => { delete (globalThis as { __KS_WARMUP_DELAY_MS__?: number }).__KS_WARMUP_DELAY_MS__; });
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** 记录每次请求的 (url, headers),用于断言头部内容。 */
+  const captureFetch = (html: string): Array<{ url: string; headers: Record<string, string> }> => {
+    const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+    vi.stubGlobal("fetch", async (input: string, init?: { headers?: Record<string, string> }) => {
+      const url = String(input);
+      seen.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
+      const body = url.includes("/u/abc") ? html : "";
+      return { ok: true, status: 200, json: async () => ({}), text: async () => body } as unknown as Response;
+    });
+    return seen;
+  };
+
+  it("页面请求带全套浏览器头(sec-ch-ua / sec-fetch-* / Upgrade-Insecure-Requests / Accept-Language)", async () => {
+    const { getStream } = await import("./index.js");
+    const seen = captureFetch(
+      `window.__INITIAL_STATE__={"liveroom":{"playList":[{"isLiving":true,"author":{"name":"A"},` +
+        `"liveStream":{"playUrls":{"h264":{"adaptationSet":{"representation":[{"bitrate":2000,"url":"https://cdn/x.flv"}]}}}}}]}};`,
+    );
+    await getStream("abc", "OD");
+    const page = seen.find((s) => s.url.includes("/u/abc"))!;
+    expect(page).toBeDefined();
+    expect(page.headers["User-Agent"]).toMatch(/Chrome\/124/);
+    expect(page.headers["Accept-Language"]).toContain("zh-CN");
+    expect(page.headers["sec-ch-ua"]).toContain("Chromium");
+    expect(page.headers["sec-ch-ua-platform"]).toBe('"Windows"');
+    expect(page.headers["Upgrade-Insecure-Requests"]).toBe("1");
+    // 页面是导航 → navigate/document 语义
+    expect(page.headers["sec-fetch-mode"]).toBe("navigate");
+    expect(page.headers["sec-fetch-dest"]).toBe("document");
+    expect(page.headers["Referer"]).toBe("https://live.kuaishou.com/");
+    // 不手写 Accept-Encoding(交给 fetch 协商)
+    expect(page.headers["Accept-Encoding"]).toBeUndefined();
+  });
+
+  it("首页预热用 document/none 语义;cookie 透传到 Cookie 头", async () => {
+    const { getStream } = await import("./index.js");
+    const seen = captureFetch(
+      `window.__INITIAL_STATE__={"liveroom":{"playList":[{"isLiving":false,"liveStream":{}}]}};`,
+    );
+    await getStream("abc", "OD", "did=web_abc; kwssectoken=xyz");
+    const home = seen.find((s) => s.url === "https://live.kuaishou.com/")!;
+    expect(home).toBeDefined();
+    expect(home.headers["sec-fetch-site"]).toBe("none");
+    expect(home.headers["sec-fetch-mode"]).toBe("navigate");
+    expect(home.headers.Cookie).toBe("did=web_abc; kwssectoken=xyz");
+  });
+});

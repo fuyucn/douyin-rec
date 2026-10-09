@@ -125,3 +125,67 @@ GET /live_api/liveroom/livedetail?principalId={任意值}
 2. 冷却期把快手任务交给干净出口(VPS);hub 规则 `workers` **只勾 1 台**,不要多节点冗余
    (每多一个节点轮询就多一份请求量,是限流主因之一)。
 3. 恢复后常态轮询已放宽到 5 分钟 + 风控时递进退避(见上),不会再按 30s 猛打。
+
+---
+
+## 外部同类问题与解法对照(2026-10-08)
+
+### 48tools #128 —— 症状与我们完全相同
+
+[duan602728596/48tools#128](https://github.com/duan602728596/48tools/issues/128):
+「快手直播手动录制一直显示**录制失败或者直播未开启**,自动录制也不起作用」——
+与我们 task 75「一直等待开播」一字不差。作者(duan602728596)的判定与建议:
+
+> 建议检查当前的网络环境,很有可能是**风控了,被拉黑了**。
+> 这个就是风控,**一般海外 IP 容易出现**。尽量用**国内 IP**,还有就是**不要太频繁刷新**。
+
+⚠️ 对我们的意义:本地(Comcast San Jose)与 VPS1/VPS2(Oracle San Jose)**三个出口全在美国**,
+按作者经验属于「容易触发风控」的 IP 段 —— 这是结构性劣势,当前无法改变。
+
+**48tools v4.17.0 的修复**(commit `b5154dd`,2025-03-06)changelog 原文:
+
+> 修复由于快手直播的 initialState 数据结构变化,导致无法获得直播流地址的问题。
+> **使用浏览器的 fetch 替代 got 来请求快手直播的数据,解决请求过快的风控问题。**
+
+三处改动:
+1. `requestLiveHtml` 由 `got` 换成 **Electron 渲染进程的浏览器 `fetch`**;
+2. 请求头写 `Cookie1` → 主进程 `onBeforeSendHeaders` 拦截器改写成 `Cookie`
+   (浏览器 fetch 禁止直接设 `Cookie` 头),并补 `Host`/`Referer`/`User-Agent`;
+3. `errorType` 显式当错误抛出(不再静默当「未开播」)—— 与我们「修复 3」同向。
+
+### 我们的 A/B 实测:浏览器 fetch 的收益**不可复现**(证伪)
+
+2026-10-08 在**同一被限流出口**(本地家宽)做浏览器 fetch vs Node fetch 对照:
+
+| 轮次 | Node fetch | 浏览器 fetch(48tools 方案) |
+|---|---|---|
+| 第 1 轮(2 个在播房间) | 限流 | **成功**(93KB / `isLiving:true` + 真实流 URL) |
+| 第 2 轮(同房间各 5 次) | OK=3 / 限流=2 | **限流=5** |
+| 第 3 轮(带/不带 cookie 对照) | 全限流 | 全限流 |
+
+**结论:决定性变量是请求速率,不是「浏览器 vs Node」。** 第 2/3 轮是我自己连续测试把 IP
+重新打回限流后跑的,三组全 57569 字节风控页。48tools 之所以「有效」,更可能是因为
+**它只在点击录制时请求一次(不轮询)**——我们已用「5 分钟 + 递进退避」覆盖了这一点。
+
+次要因素(**推断,未证实**):Chromium 的 TLS/HTTP2 指纹比 Node undici 更接近真实浏览器。
+
+### 采纳的动作(本仓库)
+
+**补全浏览器请求头**(`packages/kuaishou-live/src/stream/index.ts` 的 `chromeHeaders`):
+原先只发 `User-Agent` + `Referer`,现补齐 `Accept`/`Accept-Language`(zh-CN)/`sec-ch-ua`/
+`sec-ch-ua-mobile`/`sec-ch-ua-platform`/`Upgrade-Insecure-Requests`/`sec-fetch-site|mode|dest|user`。
+- 文档导航(首页预热、直播间页)→ `navigate` + `document` + `Upgrade-Insecure-Requests:1`;
+- XHR(`livedetail`)→ `cors` + `empty`;
+- **不手写 `Accept-Encoding`**(交给 fetch/undici 自行协商,避免拿到未解压响应体)。
+- 补 2 条测试锁定头部内容(`stream/index.test.ts`)。
+
+**未采纳**:浏览器 fetch 兜底(需引入 Playwright 常驻,收益实测不可复现、成本高);
+换国内 IP(结构性,非代码可解)。
+
+### 另一处佐证:`result:2` 的语义
+
+[KByteArray/ordinaryroad-live-chat-client](https://github.com/KByteArray/ordinaryroad-live-chat-client-old)
+的 `KuaishouApis.responseInterceptor` 把 `livedetail` 的 `result` 明确分派:
+`2 → "请求过快，请稍后重试"`、`400002 → "需要进行验证"`,仅 `1` 为正常、`671/677` 为未开播,
+**其余一律抛异常**(绝不静默当未开播)。这独立印证了我们「修复 3」的判断:`result:2` 是限流,
+不是「未开播」——旧代码把它当权威结论正是全节点漏录的根因。

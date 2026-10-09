@@ -38,6 +38,34 @@ const QUALITY_MAX_BITRATE: Record<string, number> = {
 export const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
+/**
+ * 补全「真实 Chrome(Windows)」常见请求头,降低被判定为爬虫的概率。
+ *
+ * 依据:48tools #128 / ordinaryroad 的快手实现都发全套浏览器头(而我们原先只有 UA + Referer)。
+ * 快手按出口 IP + 行为特征限流,头部过于精简(缺 `sec-*`/`Upgrade-Insecure-Requests`)会放大
+ * 与真实浏览器的差异。**注意**:不要手写 `Accept-Encoding` —— 交给 fetch(undici) 自行协商,
+ * 否则可能拿到未解压的响应体。
+ */
+function chromeHeaders(accept: string, referer: string, opts?: { cookies?: string; fetchDest?: string; fetchSite?: string }): Record<string, string> {
+  const headers: Record<string, string> = {
+    "User-Agent": UA,
+    "Accept": accept,
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Upgrade-Insecure-Requests": "1",
+    Referer: referer,
+  };
+  // 文档类请求(导航到页面)带 sec-fetch-*;XHR/JSON 请求用 same-origin + empty。
+  headers["sec-fetch-site"] = opts?.fetchSite ?? "same-origin";
+  headers["sec-fetch-mode"] = opts?.fetchDest === "document" ? "navigate" : "cors";
+  headers["sec-fetch-dest"] = opts?.fetchDest ?? "empty";
+  if (opts?.fetchDest === "document") headers["sec-fetch-user"] = "?1";
+  if (opts?.cookies) headers.Cookie = opts.cookies;
+  return headers;
+}
+
 /** 录制拉流要带的头(yximgs CDN 宽松,带上 UA/Referer 更稳)。 */
 export const STREAM_HEADERS: Record<string, string> = {
   Referer: "https://live.kuaishou.com/",
@@ -101,8 +129,12 @@ function randomWarmupDelayMs(): number {
  */
 async function warmup(cookies?: string): Promise<void> {
   try {
-    const headers: Record<string, string> = { "User-Agent": UA, Referer: `${KS_HOME}/` };
-    if (cookies) headers.Cookie = cookies;
+    // 首页是文档导航 → 用 navigate/document 语义的头(与真实浏览器打开首页一致)。
+    const headers = chromeHeaders(
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      `${KS_HOME}/`,
+      { cookies, fetchDest: "document", fetchSite: "none" },
+    );
     await fetch(`${KS_HOME}/`, { headers, signal: AbortSignal.timeout(10_000) });
   } catch {
     /* 预热失败不阻断取流 */
@@ -112,13 +144,7 @@ async function warmup(cookies?: string): Promise<void> {
 
 /** 拉 livedetail JSON。返回 null = 网络/解析失败(调用方回退页面刮取)。 */
 async function fetchLiveDetail(userId: string, cookies?: string): Promise<KsLiveDetail | null> {
-  const headers: Record<string, string> = {
-    "User-Agent": UA,
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    Referer: `${KS_HOME}/`,
-  };
-  if (cookies) headers.Cookie = cookies;
+  const headers = chromeHeaders("application/json, text/plain, */*", `${KS_HOME}/`, { cookies });
   const res = await fetch(
     `${KS_HOME}/live_api/liveroom/livedetail?principalId=${encodeURIComponent(userId)}`,
     { headers, signal: AbortSignal.timeout(15_000) },
@@ -129,12 +155,12 @@ async function fetchLiveDetail(userId: string, cookies?: string): Promise<KsLive
 
 /** fetch 直播间页 HTML。带 UA/语言头;cookies 可选(风控场景可带登录 Cookie)。 */
 async function fetchRoomHtml(userId: string, cookies?: string): Promise<string> {
-  const headers: Record<string, string> = {
-    "User-Agent": UA,
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    Referer: "https://live.kuaishou.com/",
-  };
-  if (cookies) headers.Cookie = cookies;
+  // 直播间页是文档导航 → document 语义;Referer 用首页(模拟「从首页点进直播间」)。
+  const headers = chromeHeaders(
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    `${KS_HOME}/`,
+    { cookies, fetchDest: "document", fetchSite: "same-origin" },
+  );
   const res = await fetch(`${KS_HOME}/u/${encodeURIComponent(userId)}`, {
     headers,
     signal: AbortSignal.timeout(15_000),
