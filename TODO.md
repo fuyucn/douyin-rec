@@ -56,24 +56,23 @@
 
 ## 待办（Next）
 
-- [!] **T-26 房间配置统一 + 队列并行度 + 节点韧性** — 计划 `plans/029_room_config_and_resilience.md`。
-  **来源**:2026-10-09 三轮审计 + 用户讨论(用户提出「hub 与 tasks 配置是否重复、该合并 + 队列」)。
-  **三项结论(均实测)**:
-  - **A(🔴 P0,数据丢失)**:master `config/hub/` 丢失/不可读 → `listHubRules` 把「读不到」当「没有」
-    → `desired=[]` → `applyRemoteTasks` **两阶段删除** → **所有节点受管任务被清空**(实测复现:
-    第1轮停用、第2轮删除、剩余 0)。节点**零规则副本**(VPS2 `config/hub/` 为空),无法自愈。
-    **修**:① 节点落盘期望状态副本(`config/managed/rooms.json`)② 期望骤减安全阀
-    ③ 删除改显式意图(缺席只停用)。
-  - **B(🟡 P1)**:房间配置分两处(task + hub 规则),`enabled` 两个语义未在 UI 说明。
-    **历史**:`6636952`(2026-06-29)是**按当时用户要求**「录制只管录、hub 另开一页」拆的
-    → 属**需求反转**,非设计事故。**目标**:`config/rooms/*.json` 一份配置(record/process/place)。
-  - **C(🟡 P1)**:实测**单次 burn 只用 5.3/11 核(48%)**;`maxCpuParallel` 默认 1 且 **UI 改不了**;
-    内存闸门 2048MB 卡住第 3 个并行位(容器仅 4GB)。**注意**:7 天 burn 总量仅 5.6h → 提并行度
-    **削峰不提吞吐**。
-  **明确不做**:worker claim/lease 队列(Fleet 54 个 .rs 中 queue/claim/job/task **零命中**;
+- [!] **T-26 节点韧性 + 房间配置统一 + 队列并行度** — 计划 `plans/029_room_config_and_resilience.md`(实施计划)。
+  **来源**:2026-10-09 三轮审计 + 用户讨论。结论均以真实台账 + 实测验证(plan §9 附复现命令)。
+  **三组工作(按优先级)**:
+  - **P0 节点韧性(🔴 数据丢失)**:master `config/hub/` 丢失/不可读 → `listHubRules` 把「读不到」当「没有」
+    → `desired=[]` → `applyRemoteTasks` **两阶段删除** → **所有节点受管任务被清空**(实测复现:第1轮停用、
+    第2轮删除、剩余 0);节点**零规则副本**。**修**:① 期望状态副本(`config/managed/rooms.json`)
+    ② 期望骤减安全阀(空期望拒绝 / 骤减只停不删)③ 删除改**显式意图**(缺席只停用)。
+  - **P1/P2 配置统一(🟡)**:房间配置分两处(task + hub 规则)。历史 `6636952`(2026-06-29)显示是
+    **按当时用户要求**拆的 → 需求反转,非设计事故。**目标**:一个房间一份配置(record/process/place),
+    一个入口配完。分 Phase 1(清死代码 + 弹窗内联录制配置)→ 2(统一 `/api/rooms`)→ 3(合并存储,可选)。
+  - **C 并行度(🟡)**:实测**单次 burn 只用 5.3/11 核(48%)**;`maxCpuParallel` 默认 1 且 **UI 改不了**;
+    内存闸门 2048MB 卡住第 3 位(容器仅 4GB)。**注意**:7 天 burn 仅 5.6h → 提并行度**削峰不提吞吐**。
+  **明确不做**:worker claim/lease 队列(Fleet 54 个 `.rs` 中 queue/claim/job/task **零命中**;
   房间是常驻监控,非一次性 job)。
-  **⚠️ 阻塞原因**:4 个决策待用户裁决(见 plan §6:Phase 0 优先级 / 删除语义 / Phase 3 是否做 /
-  master 机器物理配置)。**解除条件**:用户答复后按 Phase 0 → 1 → 2 → 3 推进。
+  **⚠️ 阻塞原因**:4 个决策待裁决(plan §2 D1~D4)。**推荐**:D1=是(韧性最先)、D2=显式删除、
+  D3=先做 Phase 1+2、D4=需你提供 master VM 配额能否调大。
+  **解除条件**:用户答复 D1~D4 → 按 P0 → P1 → P2 →(可选 P3)+ C 组推进。
 
 - [ ] **T-18 节点侧上传（experimental:不烧录房间跳过 rsync 回传）** — 计划 `plans/027_node_side_upload.md`。
   **做什么**：hub 规则加 `pipeline.steps.nodeSideUpload`（缺省 false）。为 true 且**该房间不烧录**时，
