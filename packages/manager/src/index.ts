@@ -142,20 +142,24 @@ export class RecordingSession {
         this.live = true;
         this.everLive = true;
         this.reconnectFails = 0; // 录制成功恢复 → 清零重连失败计数(退避复位)
+        // 新一场开播(下播后重新开播):清掉上一场的标题,否则第二场会沿用第一场的 title。
+        // 判据 = offlineNotified(offline 时查权威 getLiving=false → 已确认下播);
+        // 抖动断流(仍在播)不清 —— 同一场重连保留首值,避免被后续空值清掉。
+        if (this.offlineNotified) this.liveTitle = "";
         console.log(`[状态] 录制中`); // 真正拿到流、开始录视频
         const resolved = i.anchorName || this.anchor;
         // 抓到主播名后打一行可解析日志（父进程 TaskManager 解析 → UI 显示主播名）。
         // 只在首次拿到非空主播名、且与上次不同时打，避免重连刷屏。
         if (resolved && resolved !== this.anchor) console.log(`[主播] ${resolved}`);
         this.anchor = resolved;
-        // 直播标题同理:开播前拿不到(平台 getStream 只在 living 时返回 title),故开播回调里补。
-        // 只取首个非空值(标题在录制中途改动极少;重连时保留首值,避免被后续空值清掉)。
+        // 直播标题:开播前拿不到(平台 getStream 只在 living 时返回 title),故在 onLive 记下。
+        // onLive 恒先于 onSegment(beginRecording 里先 fire onLive 再 fire onSegment),所以随后
+        // openWriterForSegment → _writeSession 落 sidecar 时 liveTitle 已就位 —— 无需在此补写
+        // (补写会误用 lastXmlPath 覆盖**上一场**的 sidecar,见实测。)
+        // 只取首个非空值(重连时保留首值,避免被后续空值清掉)。
         const title = (i.title ?? "").trim();
         if (title && !this.liveTitle) {
           this.liveTitle = title;
-          // 立刻刷新 sidecar(开录时 title 还空 → 此刻补写,保证 {title} 能渲染)。
-          const base = (this.currentXmlPath ?? this.lastXmlPath);
-          if (base) { try { this._writeSession(base.replace(/\.xml$/i, "")); } catch { /* 不影响录制 */ } }
         }
         // 通知:首次开播 / 下播后重新开播 → recordStart;**抖动断流后重连成功** → 一条 recordReconnect
         // warning(报中断时长),不重复发「开播」。offlineNotified=true(已发过「主播下播」)的那次 onLive

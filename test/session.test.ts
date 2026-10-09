@@ -138,6 +138,40 @@ describe("RecordingSession", () => {
     expect(sj?.title).toBe("开播前已知标题");
   });
 
+  // 缺陷:同一录制进程跨场(下播 → 主播重新开播)时,第二场沿用第一场的标题 → 稿件 {title} 张冠李戴。
+  // 复现于 2026-10-09(video-rec-2 task 11:20:36 那场收播后进程继续轮询等下一场)。
+  it("T-20b:下播后第二场 → sidecar 用**第二场**的标题(不沿用第一场)", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-title-rebroadcast-"));
+    let title = "第一场标题";
+    let stampSeq = 0;
+    const stamps = ["00-00-01", "01-00-00", "02-00-00"];
+    class ReBroadcastRecorder implements Recorder {
+      name = "mock-rebroadcast"; providesDanmu = false;
+      ev!: RecorderEvents;
+      isLive = async () => false;              // 每次 onOffline 都判「主播已下播」→ 第二场
+      async start(_u: string, o: RecordOpts, ev: RecorderEvents) {
+        this.ev = ev;
+        ev.onLive({ anchorName: "主播T", title });
+        ev.onSegment(join(o.outDir, `主播T_2026-10-09_${stamps[stampSeq++]}_000.ts`));
+      }
+      async stop() {}
+    }
+    const sess = new RecordingSession(new ReBroadcastRecorder(), { reconnectDelaySec: 0.01 });
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "" });
+    await vi.advanceTimersByTimeAsync(1);       // 第一场 onLive/onSegment
+    title = "第二场标题";                        // 下一场标题变了
+    (sess as unknown as { recorder: ReBroadcastRecorder }).recorder.ev.onOffline();
+    await vi.advanceTimersByTimeAsync(200);      // 下播 → 重连 → 第二场 onLive/onSegment
+    await sess.stop();
+    const rows = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")) as { sessionBase: string; title?: string })
+      .sort((a, b) => a.sessionBase.localeCompare(b.sessionBase));
+    expect(rows.length).toBe(2);
+    expect(rows[0]!.title).toBe("第一场标题");
+    expect(rows[1]!.title).toBe("第二场标题");   // 修复前这里会是「第一场标题」
+  });
+
   it("弹幕只在 onLive 后启动：recorder 未 fire onLive(等开播)→ 弹幕不连(防开播前陈旧 liveId)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sess-"));
     // 模拟 daemon 定时起、但房间还没开播:recorder 在轮询,不 fire onLive。
