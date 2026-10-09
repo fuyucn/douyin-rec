@@ -26,6 +26,8 @@ export interface CandidateRow {
   startMs: number;
   endMs: number;
   totalGapSec: number;
+  /** 该 worker 本场弹幕条目数(0 = 无弹幕/仅表头空 xml;旧库/未统计为 NULL)。 */
+  danmuCount?: number | null;
   isWinner: number; // 0/1（sqlite 无 bool）
   updatedAt: number;
 }
@@ -68,6 +70,8 @@ export class SyncLedger {
       startMs INTEGER NOT NULL, endMs INTEGER NOT NULL, totalGapSec REAL NOT NULL,
       isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
       PRIMARY KEY(streamKey, workerId))`);
+    // 既有库迁移:补 danmuCount 列(选优「为什么这台赢」的弹幕维度;已存在则忽略)。
+    try { this.db.exec("ALTER TABLE sync_candidates ADD COLUMN danmuCount INTEGER"); } catch { /* 列已存在 */ }
     // 既有库列改名 tenant→worker(fresh DB 上旧列不存在会抛 → 吞掉;SQLite ≥3.25 支持 PK 列改名)。
     try { this.db.exec("ALTER TABLE sync_jobs RENAME COLUMN winnerTenant TO winnerWorker"); } catch { /* 已是新列名或 fresh */ }
     try { this.db.exec("ALTER TABLE sync_candidates RENAME COLUMN tenantId TO workerId"); } catch { /* 已是新列名或 fresh */ }
@@ -313,20 +317,21 @@ export class SyncLedger {
   /** 记录某场各节点的选优候选指标(幂等覆盖)。winnerWorkerId 标记哪台胜出。 */
   recordCandidates(
     streamKey: string,
-    cands: Array<{ workerId: string; coverage: number; durationSec: number; startMs: number; endMs: number; totalGapSec: number }>,
+    cands: Array<{ workerId: string; coverage: number; durationSec: number; startMs: number; endMs: number; totalGapSec: number; danmuCount?: number }>,
     winnerWorkerId?: string,
   ): void {
     const now = this.now();
     const stmt = this.db.prepare(
-      `INSERT INTO sync_candidates(streamKey,workerId,coverage,durationSec,startMs,endMs,totalGapSec,isWinner,updatedAt)
-       VALUES(?,?,?,?,?,?,?,?,?)
+      `INSERT INTO sync_candidates(streamKey,workerId,coverage,durationSec,startMs,endMs,totalGapSec,danmuCount,isWinner,updatedAt)
+       VALUES(?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(streamKey,workerId) DO UPDATE SET
          coverage=excluded.coverage, durationSec=excluded.durationSec,
          startMs=excluded.startMs, endMs=excluded.endMs, totalGapSec=excluded.totalGapSec,
+         danmuCount=excluded.danmuCount,
          isWinner=excluded.isWinner, updatedAt=excluded.updatedAt`,
     );
     for (const c of cands) {
-      stmt.run(streamKey, c.workerId, c.coverage, c.durationSec, c.startMs, c.endMs, c.totalGapSec,
+      stmt.run(streamKey, c.workerId, c.coverage, c.durationSec, c.startMs, c.endMs, c.totalGapSec, c.danmuCount ?? null,
         c.workerId === winnerWorkerId ? 1 : 0, now);
     }
   }

@@ -46,6 +46,11 @@ interface ClientEvents {
   open: () => void;
   close: () => void;
   error: (err: Error) => void;
+  /**
+   * 自动重连次数耗尽(连续闪断且已达 autoReconnect 上限)→ 永久放弃本场。
+   * 上层据此停掉弹幕采集并告警,避免无限重连把出口 IP 刷进风控名单。
+   */
+  exhausted: (attempts: number) => void;
   chat: (m: DyChatMessage) => void;
   gift: (m: DyGiftMessage) => void;
   member: (m: DyMemberMessage) => void;
@@ -106,6 +111,15 @@ const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 
 /**
+ * 连接稳定阈值(ms):WS 存活超过此时长才认定「真的连上了」并清零重连计数。
+ *
+ * 修复的历史缺陷:原先 `open` 里立即 `reconnectAttempts = 0`,而风控会「接受握手但很快踢掉」,
+ * 于是「连上→被踢→重连」永不触及 autoReconnect 上限 → 无限重连(实测某房间 4 小时约 1000 次
+ * 连接、平均存活 5 秒),持续给风控喂信号,最终把整个出口 IP 拉黑。
+ */
+const STABLE_CONNECTION_MS = 60_000;
+
+/**
  * 抖音弹幕 WS 客户端。`roomId` 必须是本场直播的 **liveId**(不是房间 web_rid/slug,
  * 传 slug 能连上却收不到弹幕 —— 见 listener-base 注释)。事件:open/close/error/chat/gift/member。
  */
@@ -122,10 +136,14 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
   private reconnectAttempts = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private timeoutTimer: ReturnType<typeof setInterval> | undefined;
+  /** 连接稳定计时器:存活满 STABLE_MS 才认定连接可用(重置重连计数)。 */
+  private stableTimer: ReturnType<typeof setTimeout> | undefined;
   private lastMessageTime = Date.now();
   private isReconnecting = false;
   /** close() 主动关闭后置 true,阻止 close/error 触发的自动重连。 */
   private closed = false;
+  /** 重连次数耗尽后置 true,永久停止本场的自动重连。 */
+  private exhausted = false;
 
   constructor(roomId: string, options: DanmaClientOptions = {}) {
     super();
@@ -157,10 +175,12 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
     this.ws = ws;
 
     ws.on("open", () => {
-      this.reconnectAttempts = 0;
       this.emit("open");
       this.startHeartbeat();
       this.startTimeoutCheck();
+      // 不在这里直接清零重连计数 —— 风控会「接受握手但立刻踢掉」,立即清零会让 autoReconnect
+      // 上限永远不触发(无限重连)。改为存活满 STABLE_CONNECTION_MS 才认定连接稳定并清零。
+      this.startStableCheck();
     });
     ws.on("message", (data: WebSocket.RawData) => {
       this.lastMessageTime = Date.now();
@@ -185,6 +205,7 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
     this.closed = true;
     this.stopHeartbeat();
     this.stopTimeoutCheck();
+    this.stopStableCheck();
     if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.close();
   }
 
@@ -221,11 +242,34 @@ export class DouYinDanmaClient extends TypedEmitter<ClientEvents> {
     }
   }
 
+  /** 连接稳定计时:存活满 STABLE_CONNECTION_MS → 认定可用,清零重连计数(闪断则不计)。 */
+  private startStableCheck(): void {
+    this.stopStableCheck();
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = undefined;
+      this.reconnectAttempts = 0;
+    }, STABLE_CONNECTION_MS);
+    this.stableTimer.unref?.();
+  }
+
+  private stopStableCheck(): void {
+    if (this.stableTimer) {
+      clearTimeout(this.stableTimer);
+      this.stableTimer = undefined;
+    }
+  }
+
   private reconnect(): void {
-    if (this.isReconnecting || this.closed) return;
+    if (this.isReconnecting || this.closed || this.exhausted) return;
     this.stopHeartbeat();
     this.stopTimeoutCheck();
-    if (this.reconnectAttempts >= this.autoReconnect) return;
+    this.stopStableCheck();
+    if (this.reconnectAttempts >= this.autoReconnect) {
+      // 上限已到:永久停止本场重连并通知上层(避免无限重连刷爆出口 IP 的风控)。
+      this.exhausted = true;
+      this.emit("exhausted", this.reconnectAttempts);
+      return;
+    }
     this.isReconnecting = true;
     this.reconnectAttempts++;
     setTimeout(() => {

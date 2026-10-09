@@ -57,6 +57,8 @@ export interface RouteMatch {
     | "getVersion"
     | "getMesioPath"
     | "setMesioPath"
+    | "getDouyinApiMode"
+    | "setDouyinApiMode"
     | "getTimezone"
     | "setTimezone"
     | "listRecordings"
@@ -132,6 +134,8 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "getVersion", methods: ["GET"], pattern: /^\/api\/version$/ },
   { name: "getMesioPath", methods: ["GET"], pattern: /^\/api\/mesio-path$/ },
   { name: "setMesioPath", methods: ["POST"], pattern: /^\/api\/mesio-path$/, needsBody: true },
+  { name: "getDouyinApiMode", methods: ["GET"], pattern: /^\/api\/douyin-api-mode$/ },
+  { name: "setDouyinApiMode", methods: ["POST"], pattern: /^\/api\/douyin-api-mode$/, needsBody: true },
   { name: "getTimezone", methods: ["GET"], pattern: /^\/api\/timezone$/ },
   { name: "setTimezone", methods: ["POST"], pattern: /^\/api\/timezone$/, needsBody: true },
   { name: "getEvents", methods: ["GET"], pattern: /^\/api\/events$/ },
@@ -361,6 +365,12 @@ async function dispatch(
     case "setMesioPath": {
       const body = (await readJson(req)) as { mesioPath?: string };
       return api.setMesioPath(body ?? {});
+    }
+    case "getDouyinApiMode":
+      return api.getDouyinApiMode();
+    case "setDouyinApiMode": {
+      const body = (await readJson(req)) as { mode?: string };
+      return api.setDouyinApiMode(body ?? {});
     }
     case "getTimezone":
       return api.getTimezone();

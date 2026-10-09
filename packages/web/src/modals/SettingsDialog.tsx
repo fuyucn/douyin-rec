@@ -56,6 +56,11 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const [mesioPath, setMesioPath] = useState("");
   const [mesioDefault, setMesioDefault] = useState("");
   const [savingMesio, setSavingMesio] = useState(false);
+  /** 抖音 API 模式(取流 + 弹幕 liveId 用哪个端点)。 */
+  const [apiMode, setApiMode] = useState("");
+  const [apiModeDefault, setApiModeDefault] = useState("balance");
+  const [apiModeOptions, setApiModeOptions] = useState<string[]>([]);
+  const [savingApiMode, setSavingApiMode] = useState(false);
   const [timezone, setTimezone] = useState("");
   const [tzDefault, setTzDefault] = useState("");
   const [tzEffective, setTzEffective] = useState("");
@@ -72,6 +77,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     void api.getNotifSettings().then((r) => setWebhookToggles(r)).catch(() => {});
     void api.getWebhook().then((r) => { setHasWebhook(r.hasWebhook); setWebhook(""); }).catch(() => {});
     void api.getMesioPath().then((r) => { setMesioPath(r.mesioPath); setMesioDefault(r.default); }).catch(() => {});
+    void api.getDouyinApiMode().then((r) => { setApiMode(r.mode); setApiModeDefault(r.default); setApiModeOptions(r.options); }).catch(() => {});
     void api
       .getTimezone()
       .then((r) => {
@@ -165,6 +171,22 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       toast(t("settings.mesioFailed", { msg: errMessage(e) }), "error");
     } finally {
       setSavingMesio(false);
+    }
+  };
+
+  const saveApiMode = async (mode: string): Promise<void> => {
+    setApiMode(mode); // 乐观更新(下拉立即反映选择)
+    setSavingApiMode(true);
+    try {
+      const r = await api.setDouyinApiMode(mode);
+      setApiMode(r.mode);
+      setApiModeDefault(r.default);
+      setApiModeOptions(r.options);
+      toast(t("settings.apiModeSaved"), "success");
+    } catch (e) {
+      toast(t("settings.apiModeFailed", { msg: errMessage(e) }), "error");
+    } finally {
+      setSavingApiMode(false);
     }
   };
 
@@ -362,6 +384,24 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
           <p className="mt-1 text-xs text-muted-soft">
             {t("settings.mesioHint", { path: mesioDefault || "bin/mesio" })}
           </p>
+
+          <h4 className="form-section mt-6">{t("settings.apiModeSection")}</h4>
+          <label className="field-label" htmlFor="settings-douyin-api-mode">
+            {t("settings.apiModeLabel")}
+          </label>
+          <select
+            id="settings-douyin-api-mode"
+            className="input text-xs font-mono"
+            value={apiMode || apiModeDefault}
+            disabled={savingApiMode}
+            onChange={(e) => void saveApiMode(e.target.value)}
+          >
+            {(apiModeOptions.length > 0 ? apiModeOptions : [apiModeDefault]).map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-muted-soft">{t("settings.apiModeHint")}</p>
+          <p className="mt-1 text-xs text-muted-soft">{t("settings.apiModeDetail")}</p>
 
           <h4 className="form-section mt-6">{t("settings.tzSection")}</h4>
           <label className="field-label">{t("settings.tzLabel")}</label>

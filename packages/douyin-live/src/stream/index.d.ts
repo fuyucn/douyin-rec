@@ -8,6 +8,8 @@ export interface SourceProfile {
 export interface GetStreamResult {
   currentStream: { name: string; source: string; url: string; onlyAudio: boolean };
   living: boolean;
+  /** 是否直播电台(音频直播);上游 1.17.x 加。 */
+  isLiveRadio?: boolean;
   roomId: string;
   owner: string;
   title: string;
@@ -21,6 +23,8 @@ export interface GetStreamResult {
 }
 export interface GetInfoResult {
   living: boolean;
+  /** 是否直播电台(音频直播);上游 1.17.x 加。 */
+  isLiveRadio?: boolean;
   owner: string;
   title: string;
   roomId: string;

@@ -4,7 +4,7 @@ import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, resolveOutputStem, runWithJob, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
-import type { NodePipelineSpec, UploadOpts } from "@drec/core";
+import type { UploadOpts } from "@drec/core";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
 import { humanBytes, sumBytes } from "./format.js";
@@ -99,6 +99,11 @@ export interface PipelineCfg {
   segmentGroupSec?: number;
   /** reconciler 硬过滤用:非空 → 只处理这些 worker 的录像;缺省/空 = 全部(向后兼容)。pipeline 本身不读。 */
   workers?: string[];
+  /**
+   * reconciler 能力门控用:非空 → 只处理具备这些能力标签的 worker(能力 ⊇ requires);缺省/空 = 无要求。
+   * 与 `workers` 取交集(先按 workers 勾选,再按 requires 过滤)。pipeline 本身不读。
+   */
+  requires?: string[];
 }
 
 export interface PipelineDeps {
@@ -315,8 +320,11 @@ async function runPipelineInner(
   const candidates = { ...b, members: presentMembers };
 
   // Select the best recording across all (present) nodes
+  // requireDanmu:本场要烧弹幕(danmu/livechat)时,别让「视频覆盖高但 xml 空」的节点赢过有弹幕的
+  // (烧录只取 winner 自己的 xml)。关掉两个烧录步 → 弹幕无关,不参与排序。
+  const requireDanmu = burnDanmu || burnLivechat;
   ledger.logStep(streamKey, "select", "start");
-  const selection = selectWinner(candidates, cfg.cleanMaxGapSec);
+  const selection = selectWinner(candidates, cfg.cleanMaxGapSec, requireDanmu);
   ledger.logStep(streamKey, "select", "done");
 
   if (!selection.winner) {

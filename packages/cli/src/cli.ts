@@ -575,6 +575,7 @@ const hubStarter: HubStarter = {
   async start(opts) {
     const {
       registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport, recordingStatusWorkerIds,
+      satisfiesCapabilities,
       buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool,
     } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
@@ -664,7 +665,7 @@ const hubStarter: HubStarter = {
 
     const workers = hubCfg.workers ?? hubCfg.tenants ?? [];
     // loadWorkers 现读 hub.config.json(现读不缓存→UI/手改即时生效)。首启无文件时回落 --hub-config 里的 workers。
-    const loadWorkers = (): Array<{ id: string; kind: string; host?: string; dataRoot?: string; name?: string }> => {
+    const loadWorkers = (): Array<{ id: string; kind: string; host?: string; dataRoot?: string; name?: string; capabilities?: string[] }> => {
       const fromFile = workerStore.listWorkers(rootHubConfig());
       return fromFile.length ? fromFile : workers;
     };
@@ -852,6 +853,8 @@ const hubStarter: HubStarter = {
         // worker 硬过滤:reconciler 据此把 broadcast members 收窄到选中的 worker。
         // 缺省/空(老规则)→ reconciler 不过滤 = 全部 worker(向后兼容)。
         workers: rule.workers,
+        // 能力门控:reconciler 据此把 members 再收窄到能力满足的 worker(与 workers 取交集)。
+        requires: rule.requires,
       };
     };
 
@@ -861,6 +864,8 @@ const hubStarter: HubStarter = {
       ledger,
       pipelineDeps,
       resolveCfg,
+      // 能力门控:按 worker id 取能力标签(hub.config.json 的 workers[].capabilities)。
+      workerCapabilities: (id) => loadWorkers().find((w) => w.id === id)?.capabilities,
       reconnectWindowMs: hubCfg.reconnectWindowMs,
       loadTransports: buildTransports,
       notify: pipelineDeps.notify, // 达重试上限升级 needs_manual 时,复用 pipeline 同源 EventCenter 通知(站内+webhook)
@@ -882,9 +887,12 @@ const hubStarter: HubStarter = {
     // 节点侧 applyRemoteTasks 按 (platform, roomSlug) 对账(收编/更新/两阶段删除)。
     const desiredFor = (workerId: string): RemoteTaskSpec[] => {
       const out: RemoteTaskSpec[] = [];
+      const capsOfThis = loadWorkers().find((w) => w.id === workerId)?.capabilities;
       for (const rule of hubStore.listHubRules(hubDir)) {
         if (!rule.enabled || !rule.recording?.sourceTaskId) continue;
         if (rule.workers && rule.workers.length > 0 && !rule.workers.includes(workerId)) continue;
+        // 能力门控:该 worker 缺房间要求的能力 → 不下发该房间的录制任务(与 workers 勾选取交集)。
+        if (!satisfiesCapabilities(capsOfThis, rule.requires)) continue;
         const src = opts.store.getTask(rule.recording.sourceTaskId);
         if (!src) continue;
         const p = platformForRoom(src.room);
@@ -1103,6 +1111,7 @@ const hubStarter: HubStarter = {
     // 探测只需一次性、不进 registry 的 scoped transport 实例,直接按 cfg.kind 构造。
     const { LocalTransport, SshTransport } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
+    const { ensureNodeIdentity } = await import("@drec/app");
     const { statSync } = await import("node:fs");
     const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
       const { durationMs } = await ffprobeVideo(file).catch(() => ({ durationMs: 0 }));
@@ -1111,12 +1120,19 @@ const hubStarter: HubStarter = {
     };
     const id = cfg.id ?? "test";
     const t = cfg.kind === "local"
-      ? new LocalTransport({ id, recordingsDir: `${cfg.dataRoot}/recordings`, taskRooms: {}, ffprobe })
+      // 本机探测也带上身份(local 通常 id 固定 "local",但探测时也返回 nodeId 供 UI 展示一致性)。
+      ? new LocalTransport({
+          id, recordingsDir: `${cfg.dataRoot}/recordings`, taskRooms: {}, ffprobe,
+          nodeIdentity: () => { const i = ensureNodeIdentity(cfg.dataRoot); return { nodeId: i.nodeId, hostname: i.hostname }; },
+        })
       : new SshTransport({ id, host: cfg.host!, dataRoot: cfg.dataRoot! });
     try {
       // ping 内置超时(local 瞬时;ssh 6s)。这里不再额外包 20s——探针本就轻量。
       await t.ping!();
-      return { ok: true };
+      // 顺带读节点稳定身份(local 无身份注入 → null;ssh 读 _node-id)。旧 bundle 无该命令 → 也返 null。
+      // UI 用它作为 worker id,免去 master 自分配 worker-N(删了重建就换号的幽灵 id 问题)。
+      const ident = await t.nodeId?.().catch(() => null) ?? null;
+      return ident ? { ok: true, nodeId: ident.nodeId, hostname: ident.hostname } : { ok: true };
     } catch (e) {
       return { ok: false, error: (e as Error).message };
     }
@@ -1318,6 +1334,18 @@ program
   });
 
 // ─── _tasks <dataRoot>（隐藏子命令，供 master 通过 SSH 调用）──────────────────────
+// 读/建该节点的稳定身份(node.json):master 首次配置该节点时据此拿到 nodeId,而非自分配 worker-N。
+// 副作用:文件不存在则生成 —— 与 serve 启动时的 ensureNodeIdentity 同一份文件、同一逻辑。
+program
+  .command("_node-id <dataRoot>", { hidden: true })
+  .description("(内部) 输出节点稳定身份 JSON(供 master ssh 调用;不存在则生成)")
+  .action(async (dataRoot: string) => {
+    const { ensureNodeIdentity } = await import("@drec/app");
+    // 让 paths 的函数按该 dataRoot 工作(_node-id 传的是 worker 的数据根)。
+    process.env.DOUYIN_REC_ROOT = dataRoot;
+    process.stdout.write(JSON.stringify(ensureNodeIdentity()) + "\n");
+  });
+
 // 输出本节点全部任务的隐私安全投影(无 cookies)。master 的任务同步对账用。
 program
   .command("_tasks <dataRoot>", { hidden: true })

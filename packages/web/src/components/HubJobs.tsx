@@ -193,15 +193,19 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
 }
 
 /** select 步的 fan-in 候选节点:录制节点 + 覆盖度;winner 绿框 + ✔ + 「最优」。hover 出详情(覆盖/时长/完整/胜出)。 */
-function CandidateNode({ data }: { data: { name: string; coveragePct: number; durationSec: number; complete: boolean; isWinner: boolean } }): ReactNode {
+function CandidateNode({ data }: { data: { name: string; coveragePct: number; durationSec: number; complete: boolean; isWinner: boolean; danmuCount?: number | null } }): ReactNode {
   const t = useT();
   const win = data.isWinner;
+  // danmuCount 为 null(旧库/未统计)时不显示;0 明确显示「无弹幕」——这正是选优要看的关键差异。
+  const danmuText = data.danmuCount == null
+    ? ""
+    : ` · ${data.danmuCount > 0 ? t("hub.jobs.candDanmu", { n: data.danmuCount }) : t("hub.jobs.candNoDanmu")}`;
   const tip = (
     <div className="text-left leading-snug">
       <div className="font-medium text-[12px]">{data.name}{win ? ` · ${t("hub.jobs.candWinner")}` : ""}</div>
       <div className="text-[11px] text-muted-soft mt-0.5">
         {t("hub.jobs.candCoverage", { pct: data.coveragePct })} · {humanSecFull(data.durationSec)}
-        {data.complete ? ` · ${t("hub.jobs.candComplete")}` : ""}
+        {data.complete ? ` · ${t("hub.jobs.candComplete")}` : ""}{danmuText}
       </div>
     </div>
   );
@@ -267,6 +271,7 @@ function PipelineFlowInner({
       durationSec: c.durationSec,
       complete: c.complete,
       isWinner: c.isWinner,
+      danmuCount: c.danmuCount ?? null,
     },
   }));
   const candEdges: Edge[] = cands.map((c) => ({
@@ -358,7 +363,7 @@ function PipelineFlowInner({
 /** graph 的稳定签名:由 steps + state + 候选(节点/胜出)决定。轮询每 3s 传入新 job 对象,但只要
  *  签名不变就跳过重渲染 —— 避免每次轮询用全新 nodes/edges 数组冲刷 React Flow、触发 fitView 重算导致偶发空白。 */
 function pipelineSig(j: HubJobDTO, cfg?: FlowCfg): string {
-  const cand = j.candidates.map((c) => `${c.worker}:${c.isWinner ? 1 : 0}`).join(",");
+  const cand = j.candidates.map((c) => `${c.worker}:${c.isWinner ? 1 : 0}:${c.danmuCount ?? ""}`).join(",");
   const steps = j.steps.map((s) => `${s.step}:${s.phase}:${s.at}:${s.detail ?? ""}`).join(",");
   const nodes = j.nodeStates.map((n) => `${n.node}:${n.state}:${n.error ?? ""}:${n.updatedAt}`).join(",");
   const c = cfg ? JSON.stringify([cfg.steps, cfg.upload?.mode, cfg.cleanup]) : "";

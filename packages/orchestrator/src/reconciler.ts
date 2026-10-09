@@ -4,6 +4,7 @@ import type { JobState, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
+import { gateWorkers, explainRejections } from "./capabilities.js";
 
 export interface SettleConfig {
   maxWaitMs: number;
@@ -47,6 +48,11 @@ export interface ReconcilerDeps {
   /** 达重试上限升级 needs_manual 时发一次通知(webhook/UI)。省略 → 只转状态不通知。 */
   notify?: (e: import("@drec/core").NotifyEvent) => void;
   /**
+   * 取某 worker 的能力标签(能力门控用)。配合规则 `requires` 过滤成员:能力不满足的房间要求
+   * → 该 worker 不参与本场。省略 → 视为所有 worker 无能力(只对写了 requires 的规则有影响)。
+   */
+  workerCapabilities?: (workerId: string) => string[] | undefined;
+  /**
    * 实时重载(Approach A):每轮 reconcileAll 开头调用重建 transports Map。
    * 无状态 transport 重建极廉价。省略 → 用构造时的 transports(旧行为/测试)。
    */
@@ -79,9 +85,12 @@ export class Reconciler {
   private diskMinGB: number;
   private notify?: (e: import("@drec/core").NotifyEvent) => void;
   private resolveCfg?: (platform: string, roomSlug: string) => PipelineCfg | null;
+  private workerCapabilities?: (workerId: string) => string[] | undefined;
   private loadTransports?: () => Map<string, Transport>;
   /** 已警告过「显式 workers 过滤后无成员」的 streamKey(幽灵 worker id),避免每轮刷屏。 */
   private readonly warnedGhostWorkers = new Set<string>();
+  /** 已警告过「能力门控过滤后无成员」的 streamKey,避免每轮刷屏。 */
+  private readonly warnedCapabilityWorkers = new Set<string>();
   /** 已告警过的低磁盘节点 id(回升后复位,避免每轮刷屏)。 */
   private readonly diskAlerted = new Set<string>();
 
@@ -100,6 +109,7 @@ export class Reconciler {
     this.diskMinGB = deps.diskMinGB ?? 10;
     this.notify = deps.notify;
     this.resolveCfg = deps.resolveCfg;
+    this.workerCapabilities = deps.workerCapabilities;
     this.loadTransports = deps.loadTransports;
   }
 
@@ -292,6 +302,26 @@ export class Reconciler {
           console.warn(
             `[reconciler] ${b.streamKey} 的规则 workers=[${cfg.workers.join(", ")}] 在节点清单里没有对应成员` +
               `(疑似已删除的 worker id),本场不会进入后处理 —— 请检查该房间的 hub 规则。`,
+          );
+        }
+      }
+      // 能力门控:房间要求的能力(requires)未满足的 worker 不参与本场。
+      // 与 workers 勾选取交集 —— 只做过滤,不做去重,不改变「多节点冗余录制」语义。
+      if (cfg.requires?.length) {
+        const before = b.members.length;
+        const { eligible, rejected } = gateWorkers(
+          b.members.map((m) => m.workerId),
+          (id) => this.workerCapabilities?.(id),
+          cfg.requires,
+        );
+        const keep = new Set(eligible);
+        b.members = b.members.filter((m) => keep.has(m.workerId));
+        // 有人被能力门控排除、且过滤后一个不剩 → 不静默(否则表现为「录了却永远不合并/上传」)。
+        if (before > 0 && b.members.length === 0 && !this.warnedCapabilityWorkers.has(b.streamKey)) {
+          this.warnedCapabilityWorkers.add(b.streamKey);
+          console.warn(
+            `[reconciler] ${b.streamKey} 需要能力 [${cfg.requires.join(", ")}],` +
+              `${explainRejections(rejected, (id) => id)} —— 本场不会进入后处理,请检查 hub 规则/worker 能力配置。`,
           );
         }
       }

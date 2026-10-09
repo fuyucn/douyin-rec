@@ -21,7 +21,7 @@ export interface HubJobEvent { state: string; at: number; }
 /** 细粒度子步骤事件(start/done)—— 驱动前端 fork/join 流程图。 */
 export interface HubJobStep { step: string; phase: string; at: number; detail?: string }
 /** 选优候选(流程图 select 步 fan-in 节点)。 */
-export interface HubJobCandidate { worker: string; coverage: number; durationSec: number; complete: boolean; isWinner: boolean; }
+export interface HubJobCandidate { worker: string; coverage: number; durationSec: number; complete: boolean; isWinner: boolean; danmuCount?: number | null; }
 /** 单个 workflow 节点的安全阀状态(空=旧 run,前端回落 steps 推导)。 */
 export interface HubJobNodeState { node: string; state: string; error: string | null; attempts: number; updatedAt: number }
 export interface HubJobView {
@@ -246,12 +246,13 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
       let candidates: HubJobCandidate[] = [];
       try {
         const rows = db.prepare(
-          "SELECT workerId, coverage, durationSec, totalGapSec, isWinner FROM sync_candidates WHERE streamKey=? ORDER BY isWinner DESC, coverage DESC",
-        ).all(j.streamKey) as unknown as { workerId: string; coverage: number; durationSec: number; totalGapSec: number; isWinner: number }[];
+          "SELECT workerId, coverage, durationSec, totalGapSec, danmuCount, isWinner FROM sync_candidates WHERE streamKey=? ORDER BY isWinner DESC, coverage DESC",
+        ).all(j.streamKey) as unknown as { workerId: string; coverage: number; durationSec: number; totalGapSec: number; danmuCount: number | null; isWinner: number }[];
         candidates = rows.map((c) => ({
           worker: c.workerId,
           coverage: Number(c.coverage),
           durationSec: Number(c.durationSec),
+          danmuCount: c.danmuCount == null ? null : Number(c.danmuCount),
           complete: Number(c.totalGapSec) <= 0,
           isWinner: Number(c.isWinner) === 1,
         }));

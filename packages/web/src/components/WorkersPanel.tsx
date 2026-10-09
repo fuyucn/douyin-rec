@@ -144,6 +144,13 @@ export function WorkersPanel({
                 <div className="font-mono text-[11px] text-muted-soft truncate">
                   {w.kind}{w.host ? ` · ${w.host}` : ""}
                 </div>
+                {w.capabilities && w.capabilities.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {w.capabilities.map((c) => (
+                      <span key={c} className="font-mono text-[10px] px-1.5 py-0.5 border border-hairline text-muted-soft" style={{ borderRadius: "var(--r-pill, 999px)" }}>{c}</span>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="inline-flex items-center gap-2 shrink-0">
                 <IconButton title={t("hub.common.edit")} onClick={() => openEdit(w)}>

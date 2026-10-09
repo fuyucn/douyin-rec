@@ -56,6 +56,45 @@ describe("scanRecordings", () => {
     expect(withXml[0].xmlPath).toBe(join(dir, "主播A_2026-06-27_08-00.xml"));
   });
 
+  it("danmuCount:数 <d>/<gift>/<member>;仅表头的空 xml → 0", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00_000.ts"), "x");
+    writeFileSync(
+      join(dir, "主播A_2026-06-27_08-00.xml"),
+      `<?xml version="1.0"?><i><metadata><video_start_time>0</video_start_time></metadata>` +
+        `<d p="1,1,25,16777215,1000,0,u,1,0" user="a">hi</d>` +
+        `<d p="2,1,25,16777215,2000,0,u,1,0" user="b">yo</d>` +
+        `<gift user="a" ts="3000"/>` +
+        `<member user="c" ts="4000"/>` +
+        `</i>`,
+    );
+    const r = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1, endMs: 2 }));
+    expect(r[0].danmuCount).toBe(4); // 2 d + 1 gift + 1 member
+  });
+
+  it("danmuCount:仅表头(只有样式表,无消息)→ 0", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00_000.ts"), "x");
+    // 表头 + 样式表(含 <html>/<style> 等,但无 <d /<gift /<member)
+    writeFileSync(
+      join(dir, "主播A_2026-06-27_08-00.xml"),
+      `<i><metadata><video_start_time>1791437768885</video_start_time></metadata>` +
+        `<RecorderXmlStyle><z:stylesheet><html><style>body{margin:0}</style></html></z:stylesheet></RecorderXmlStyle></i>`,
+    );
+    const r = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1, endMs: 2 }));
+    expect(r[0].danmuCount).toBe(0);
+  });
+
+  it("danmuCount:无 xml → 0", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00_000.ts"), "x");
+    const r = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1, endMs: 2 }));
+    expect(r[0].danmuCount).toBe(0);
+  });
+
   it("recordings 目录不存在时返回空数组（不抛异常）", async () => {
     const recordings = await scanRecordings(
       "/does/not/exist",

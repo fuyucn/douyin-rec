@@ -19,6 +19,8 @@ interface FormState {
   enabled: boolean;
   /** 选中的 worker id 列表;新建默认空(需用户选 ≥1);编辑无 workers 的老规则预勾全部当前 worker。 */
   workers: string[];
+  /** 能力门控:本房间需要的 worker 能力标签(与 workers 取交集)。空 = 无要求。 */
+  requires: string[];
   burnDanmu: boolean;
   burnLivechat: boolean;
   /** 合并分段成一片(默认 true);false = 不合并,按录制分段逐个上传(每段一个分 P)。 */
@@ -44,6 +46,7 @@ const BLANK: FormState = {
   room: "",
   enabled: true,
   workers: [],
+  requires: [],
   burnDanmu: true,
   burnLivechat: true,
   mergeSegments: true,
@@ -69,6 +72,7 @@ function fromRule(r: HubRuleDTO): FormState {
     enabled: r.enabled,
     // 显式列表回显;无 workers(老规则)先给空,加载 worker 列表后在 effect 里预勾全部。
     workers: r.workers ?? [],
+    requires: r.requires ?? [],
     burnDanmu: c.steps?.burnDanmu !== false,
     burnLivechat: c.steps?.burnLivechat !== false,
     mergeSegments: c.steps?.mergeSegments !== false,
@@ -180,6 +184,22 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
       ...f,
       workers: f.workers.includes(id) ? f.workers.filter((x) => x !== id) : [...f.workers, id],
     }));
+  const toggleRequire = (cap: string): void =>
+    setForm((f) => ({
+      ...f,
+      requires: f.requires.includes(cap) ? f.requires.filter((x) => x !== cap) : [...f.requires, cap],
+    }));
+  // 所有 worker 能力标签的并集(去重保序)→ 门控多选候选。
+  const allCapabilities: string[] = (() => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const w of workers) for (const c of w.capabilities ?? []) if (!seen.has(c)) { seen.add(c); out.push(c); }
+    return out;
+  })();
+  // 已勾选、但缺少 requires 里某项能力的 worker → 会被门控排除,提前提示用户。
+  const filteredOutWorkers = workers.filter(
+    (w) => form.workers.includes(w.id) && form.requires.some((r) => !(w.capabilities ?? []).includes(r)),
+  );
   // 新建必须选 ≥1;编辑同理(编辑老规则已预勾全部,用户主动清空也要拦)。
   const workersInvalid = form.workers.length === 0;
   const selectedTask = tasks.find((task) => task.id === form.sourceTaskId) ?? null;
@@ -202,6 +222,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     const payload: HubRulePayload = {
       enabled: form.enabled,
       workers: form.workers,
+      requires: form.requires,
       recording: { sourceTaskId: form.sourceTaskId },
       pipeline: {
         steps: { mergeSegments: form.mergeSegments, burnDanmu: form.burnDanmu, burnLivechat: form.burnLivechat, nodeSideUpload: form.nodeSideUpload },
@@ -293,6 +314,34 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           )}
           {workersInvalid && !workersError && workers.length > 0 && (
             <p className="text-xs mt-2 text-error-fg">{t("hub.ruleDialog.workersRequired")}</p>
+          )}
+        </div>
+
+        {/* ── Section: 能力门控(requires;与上面的 workers 取交集)── */}
+        <div className="sm:col-span-2">
+          <h3 className="form-section">{t("hub.ruleDialog.capsSection")}</h3>
+          <p className="text-xs text-muted mb-2">{t("hub.ruleDialog.capsHint")}</p>
+          {allCapabilities.length === 0 ? (
+            <p className="text-xs text-muted">{t("hub.ruleDialog.capsNone")}</p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {allCapabilities.map((c) => (
+                <label key={c} className="inline-flex items-center gap-1.5 text-xs border border-hairline px-2 py-1 cursor-pointer" style={{ borderRadius: "var(--r-pill, 999px)" }}>
+                  <input
+                    type="checkbox"
+                    checked={form.requires.includes(c)}
+                    onChange={() => toggleRequire(c)}
+                  />
+                  <span className="font-mono text-muted-soft">{c}</span>
+                </label>
+              ))}
+            </div>
+          )}
+          {/* 选中但会被能力门控排除的 worker → 提前警告(否则表现为「勾了却不录」)。 */}
+          {filteredOutWorkers.length > 0 && (
+            <p className="text-xs mt-2 text-error-fg">
+              {t("hub.ruleDialog.capsFiltered", { workers: filteredOutWorkers.map((w) => w.name).join("、") })}
+            </p>
           )}
         </div>
 

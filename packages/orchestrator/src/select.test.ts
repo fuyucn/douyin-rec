@@ -122,3 +122,62 @@ describe("覆盖度选优", () => {
     expect(local?.totalGapSec).toBeGreaterThan(70);
   });
 });
+
+describe("选优:弹幕完整度(requireDanmu)", () => {
+  it("有弹幕的次优视频 胜 无弹幕的更优视频(两者都录全;烧录只取 winner 自己的 xml)", () => {
+    // 两台都 clean(缺口 ≤ 阈值):n0 视频更干净(coverage 更高)但没弹幕;n1 有弹幕、视频略差 → 开弹幕时选 n1。
+    const b = bc([
+      rec({ sessionBase: "a", totalGapSec: 0, danmuCount: 0 }),
+      rec({ sessionBase: "b", totalGapSec: 20, danmuCount: 500 }),
+    ]);
+    expect(selectWinner(b, 30, true).winner?.workerId).toBe("n1");
+  });
+  it("requireDanmu=false(默认)→ 行为不变:仍选视频最优(无弹幕那台)", () => {
+    const b = bc([
+      rec({ sessionBase: "a", totalGapSec: 0, danmuCount: 0 }),
+      rec({ sessionBase: "b", totalGapSec: 120, danmuCount: 500 }),
+    ]);
+    expect(selectWinner(b, 30).winner?.workerId).toBe("n0");
+  });
+  it("组内谁都没弹幕 → 「弹幕优先」失效,退回视频排序(不会因为全 0 而乱序)", () => {
+    const b = bc([
+      rec({ sessionBase: "a", totalGapSec: 0, danmuCount: 0 }),
+      rec({ sessionBase: "b", totalGapSec: 120, danmuCount: 0 }),
+    ]);
+    expect(selectWinner(b, 30, true).winner?.workerId).toBe("n0");
+  });
+  it("clean(视频录全)仍是第一优先级:有弹幕但没录全 不能胜过 无弹幕但录全", () => {
+    const startMs = 1_700_000_000_000;
+    // n0 单会话录全整场、无弹幕;n1 有弹幕但只录到前半场(不覆盖整场)。
+    const b: Broadcast = {
+      streamKey: "k", platform: "douyin", roomSlug: "411", startMs,
+      members: [
+        { workerId: "n0", rec: rec({ sessionBase: "a", startMs, endMs: startMs + 3600_000, durationSec: 3600, totalGapSec: 0, danmuCount: 0 }) },
+        { workerId: "n1", rec: rec({ sessionBase: "b", startMs, endMs: startMs + 1800_000, durationSec: 1800, totalGapSec: 0, danmuCount: 900 }) },
+      ],
+    };
+    const s = selectWinner(b, 30, true);
+    expect(s.winner?.workerId).toBe("n0"); // 录全优先于弹幕
+    expect(s.clean).toBe(true);
+  });
+  it("perNode 暴露 danmuCount(供复盘「为什么这台赢」)", () => {
+    const b = bc([
+      rec({ sessionBase: "a", danmuCount: 0 }),
+      rec({ sessionBase: "b", danmuCount: 500 }),
+    ]);
+    const s = selectWinner(b, 30, true);
+    expect(s.perNode.find((n) => n.workerId === "n1")?.danmuCount).toBe(500);
+    expect(s.perNode.find((n) => n.workerId === "n0")?.danmuCount).toBe(0);
+  });
+  it("同 worker 多会话 → danmuCount 求和", () => {
+    const b: Broadcast = {
+      streamKey: "k", platform: "douyin", roomSlug: "411", startMs: 0,
+      members: [
+        { workerId: "A", rec: rec({ sessionBase: "a1", danmuCount: 300 }) },
+        { workerId: "A", rec: rec({ sessionBase: "a2", danmuCount: 200 }) },
+      ],
+    };
+    const s = selectWinner(b, 30, true);
+    expect(s.perNode[0]?.danmuCount).toBe(500);
+  });
+});

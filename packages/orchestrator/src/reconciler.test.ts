@@ -689,6 +689,83 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
+  it("能力门控: requires=[danmu:douyin] → 无该能力的 worker 被排除,有能力者保留(冗余语义不变)", async () => {
+    const ledger = freshLedger();
+    const t1 = makeTransport("local", [makeRec()]);   // local 有能力
+    const t2 = makeTransport("vps2", [makeRec()]);     // vps2 出口拿不到弹幕 → 无能力
+    const transports = new Map([["local", t1], ["vps2", t2]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV"); return { state: "done", bv: "BV" }; },
+    );
+    const caps: Record<string, string[]> = { local: ["danmu:douyin"], vps2: ["record"] };
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+      workerCapabilities: (id) => caps[id],
+      resolveCfg: () => ({
+        cleanMaxGapSec: 30, stageDir: "/s", cookies: "/c",
+        uploadMode: "stage" as const, uploadMeta: { tag: "t", tid: 21 },
+        requires: ["danmu:douyin"],
+      }),
+    });
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    const members = spyRunPipeline.mock.calls[0][0].members;
+    expect(members).toHaveLength(1);
+    expect(members[0].workerId).toBe("local");   // vps2 被能力门控排除
+    ledger.close();
+  });
+
+  it("能力门控是过滤不是去重: 多台都有能力 → 全部保留(与冗余选优并存)", async () => {
+    const ledger = freshLedger();
+    const t1 = makeTransport("local", [makeRec()]);
+    const t2 = makeTransport("vps2", [makeRec()]);
+    const transports = new Map([["local", t1], ["vps2", t2]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV"); return { state: "done", bv: "BV" }; },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+      workerCapabilities: () => ["danmu:douyin"],   // 两台都有能力
+      resolveCfg: () => ({
+        cleanMaxGapSec: 30, stageDir: "/s", cookies: "/c",
+        uploadMode: "stage" as const, uploadMeta: { tag: "t", tid: 21 },
+        requires: ["danmu:douyin"],
+      }),
+    });
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline.mock.calls[0][0].members).toHaveLength(2);
+    ledger.close();
+  });
+
+  it("能力门控过滤到一个不剩 → 不建 job/不跑 pipeline(不静默漏处理)", async () => {
+    const ledger = freshLedger();
+    const t1 = makeTransport("local", [makeRec()]);
+    const t2 = makeTransport("vps2", [makeRec()]);
+    const transports = new Map([["local", t1], ["vps2", t2]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV"); return { state: "done", bv: "BV" }; },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+      workerCapabilities: () => ["record"],   // 都没弹幕能力
+      resolveCfg: () => ({
+        cleanMaxGapSec: 30, stageDir: "/s", cookies: "/c",
+        uploadMode: "stage" as const, uploadMeta: { tag: "t", tid: 21 },
+        requires: ["danmu:douyin"],
+      }),
+    });
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(0);
+    expect(ledger.listActive()).toHaveLength(0);
+    ledger.close();
+  });
+
   it("场景K(选中的没人录): workers=[local] 但只有 vps2 录到 → 不建 job/不跑 pipeline", async () => {
     const ledger = freshLedger();
     const t2 = makeTransport("vps2", [makeRec()]);   // 只有 vps2 录了

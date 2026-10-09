@@ -9,6 +9,23 @@ import { readGaps, totalGapSecOf } from "./gaps.js";
 interface GapInterval { startMs: number; endMs: number }
 
 /**
+ * 统计一份弹幕 xml 的条目数(弹幕 `<d>` + 礼物 `<gift>` + 入场 `<member>`)。
+ * **仅表头的空 xml**(WS 被风控/未连上,只有 metadata + 样式表)返回 0 —— 这正是选优要区分的
+ * 「有文件但没弹幕」。样式表里不含 `<d `/`<gift `/`<member `(实测表头段 0 命中),故纯计数安全。
+ * 读文件失败(缺失/权限)→ 0(视为无弹幕,不影响选优其余维度)。
+ */
+function countDanmuEntries(xmlPath: string): number {
+  let text: string;
+  try {
+    text = readFileSync(xmlPath, "utf-8");
+  } catch {
+    return 0;
+  }
+  const count = (re: RegExp): number => (text.match(re) ?? []).length;
+  return count(/<d /g) + count(/<gift /g) + count(/<member /g);
+}
+
+/**
  * 读会话 sidecar,取 roomSlug + platform + totalGapSec。
  * 新格式:`{base}.session.json`(身份+缺口合一,录制端 manager 写)。
  * 旧格式回落:`{base}.meta.json`(身份)+ `{base}.gaps.json`(缺口)—— 兼容历史录像。
@@ -72,6 +89,7 @@ export async function scanRecordings(
       // 弹幕源 .xml 是**可选**产物:缺失(异常中断/历史录像)时不能把不存在的路径交给 pull
       // (本地 copyFileSync 会 ENOENT、rsync 会 rc≠0,整场后处理直接失败)。
       const xmlAbs = join(dir, `${base}.xml`);
+      const hasXml = existsSync(xmlAbs);
       recordings.push({
         // slug = 房间号(web_rid)唯一 ID。优先级:session.json/旧 sidecar(随录像走、跨节点一致)
         // > taskRooms[主播名] > 目录名(后两者不可靠回退)。
@@ -80,7 +98,9 @@ export async function scanRecordings(
         platform: sess.platform ?? "douyin",
         sessionBase: base,
         tsFiles: g.ts.map((f) => join(dir, f)),
-        xmlPath: existsSync(xmlAbs) ? xmlAbs : undefined,
+        xmlPath: hasXml ? xmlAbs : undefined,
+        // 弹幕条目数(0 = 仅表头的空 xml,或文件缺失)。选优据此避免选中「视频全但弹幕空」的节点。
+        danmuCount: hasXml ? countDanmuEntries(xmlAbs) : 0,
         durationSec,
         startMs: startMs === Infinity ? 0 : startMs,
         endMs,

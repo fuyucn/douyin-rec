@@ -8,6 +8,7 @@
 import { createLogger } from "@drec/core";
 import { detectDevice } from "@drec/ffmpeg-recorder-extra";
 import { getStream, extractRoomSlug, resolveShortURL } from "./index.js";
+import { resolveApiMode } from "./api-mode.js";
 
 const log = createLogger("stream_processor");
 
@@ -53,9 +54,13 @@ export async function probeStream(roomUrl: string): Promise<StreamProbe> {
   }
   let res: Awaited<ReturnType<typeof getStream>>;
   try {
+    // ⚠️ 必须显式传 api:"balance"(与录制路径一致)——不传会回落 stream.ts 默认的 "web",
+    // 而 VPS 出口的 web 端点常被风控(validate 不过)→ probe 误报「未开播」。均衡模式会
+    // 自动换端点 + 失败自愈(见 SOURCE.md「我们的扩展」)。
     res = await getStream({
       channelId: slug,
       quality: "origin",
+      api: resolveApiMode(),
       formatPriorities: ["flv", "hls"],
     } as Parameters<typeof getStream>[0]);
   } catch {

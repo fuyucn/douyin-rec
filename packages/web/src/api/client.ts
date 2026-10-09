@@ -203,6 +203,13 @@ export const api = {
   setMesioPath: (mesioPath: string): Promise<{ mesioPath: string; default: string }> =>
     request("POST", "/api/mesio-path", { mesioPath }),
 
+  // ── 抖音 API 模式(取流 + 弹幕 liveId 用哪个端点)───────────────────────────
+  // mode = 用户配置值(空=未设);default = 未配置时的默认值;effective = 实际生效值(归一后);options = 可选值。
+  getDouyinApiMode: (): Promise<{ mode: string; default: string; effective: string; options: string[] }> =>
+    request("GET", "/api/douyin-api-mode"),
+  setDouyinApiMode: (mode: string): Promise<{ mode: string; default: string; effective: string; options: string[] }> =>
+    request("POST", "/api/douyin-api-mode", { mode }),
+
   // ── 时区(config 驱动,覆盖 host/容器 TZ)─────────────────────────────────────
   // timezone = 用户配置值(空=用默认);default = 未配置时的默认值;effective = 当前进程实际生效值。
   getTimezone: (): Promise<{ timezone: string; default: string; effective: string }> =>

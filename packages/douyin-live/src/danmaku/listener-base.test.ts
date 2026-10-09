@@ -59,4 +59,32 @@ describe("弹幕监听共享基类 ListenerDanmuSource", () => {
     expect(hints).toHaveLength(1);
     expect(hints[0].tips).toBe("直播已结束");
   });
+
+  it("重连耗尽(exhausted) → 告警提示已停止重连,不无限刷", async () => {
+    // 假 client:connect 后立刻触发 exhausted(模拟连续闪断达上限)。
+    class FakeClient {
+      private h: Record<string, ((...a: unknown[]) => void)[]> = {};
+      on(ev: string, cb: (...a: unknown[]) => void): void { (this.h[ev] ??= []).push(cb); }
+      async connect(): Promise<void> {
+        this.h.open?.forEach((f) => f());
+        this.h.exhausted?.forEach((f) => f(5));
+      }
+      close(): void { /* noop */ }
+    }
+    class Sub extends ListenerDanmuSource {
+      readonly name = "test-exhausted";
+      protected async resolveLiveId(): Promise<string | null> { return "live-1"; }
+      protected async loadClientCtor(): Promise<never> { return FakeClient as unknown as never; }
+    }
+    const s = new Sub();
+    const alerts: string[] = [];
+    await s.start(
+      "https://live.douyin.com/123",
+      { quality: "origin", outDir: ".", segmentSec: 0 },
+      () => {},
+      (m) => alerts.push(m),
+    );
+    expect(alerts.some((a) => a.includes("已停止重连"))).toBe(true);
+    expect(alerts.some((a) => a.includes("不影响视频录制"))).toBe(true);
+  });
 });

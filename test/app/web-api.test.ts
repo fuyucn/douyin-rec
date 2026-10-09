@@ -90,6 +90,37 @@ beforeEach(() => {
   api = makeApi(deps);
 });
 
+describe("抖音 API 模式设置端点", () => {
+  it("未设置 → mode 空,effective 回落默认 balance,options 含全部可选值", () => {
+    const r = api.getDouyinApiMode();
+    expect(r.status).toBe(200);
+    const b = r.body as { mode: string; default: string; effective: string; options: string[] };
+    expect(b.mode).toBe("");
+    expect(b.default).toBe("balance");
+    expect(b.effective).toBe("balance");
+    expect(b.options).toEqual(["balance", "web", "webHTML", "mobile", "random"]);
+  });
+  it("设置合法值 → 存归一值并回显", () => {
+    const r = api.setDouyinApiMode({ mode: "web" });
+    expect(r.status).toBe(200);
+    expect((r.body as { mode: string }).mode).toBe("web");
+    // 落盘 + 再读一致
+    expect((api.getDouyinApiMode().body as { mode: string }).mode).toBe("web");
+    expect(store.getSetting("douyinApiMode")).toBe("web");
+  });
+  it("非法值 → 回落默认 balance(不报错)", () => {
+    const r = api.setDouyinApiMode({ mode: "bogus" });
+    expect(r.status).toBe(200);
+    expect((r.body as { mode: string }).mode).toBe("balance");
+    expect(store.getSetting("douyinApiMode")).toBe("balance");
+  });
+  it("空值/缺省 → 回落默认 balance", () => {
+    api.setDouyinApiMode({ mode: "web" });
+    const r = api.setDouyinApiMode({});
+    expect((r.body as { mode: string }).mode).toBe("balance");
+  });
+});
+
 /**
  * 建一个带 worker 配置的临时 hub 环境。
  * hub 规则里的 worker id 现在必须真实存在(防幽灵 id 导致本机抑制 + 远端没人接的静默漏录),
@@ -472,6 +503,19 @@ describe("startTask", () => {
     expect(requestSyncTasks).toHaveBeenCalledTimes(1);
   });
 
+  it("hub 规则 requires 往返(create → DTO 透出 → PATCH 清空)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("req-") });
+    const t = a.createTask({ room: "111" }).body as { id: number };
+    const created = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], requires: ["danmu:douyin"] });
+    expect(created.status).toBe(201);
+    expect((created.body as { requires?: string[] }).requires).toEqual(["danmu:douyin"]);
+    const key = (created.body as { key: string }).key;
+    // PATCH 传空数组 → 清空要求
+    const cleared = a.updateHubRule(key, { requires: [] });
+    expect(cleared.status).toBe(200);
+    expect((cleared.body as { requires?: string[] }).requires).toBeUndefined();
+  });
+
   it("非 hub 任务启动成功 → 不触发同步", () => {
     const requestSyncTasks = vi.fn();
     const a = makeApi({ store, manager, hubDir: mkdtempSync(join(tmpdir(), "start-nohub-")), requestSyncTasks });
@@ -487,6 +531,39 @@ describe("startTask", () => {
     expect(a.startTask(t.id).status).toBe(403);
     expect(store.getTask(t.id)!.enabled).toBe(false);
     expect(requestSyncTasks).not.toHaveBeenCalled();
+  });
+
+  it("hub 源任务被编辑(如关弹幕) → 触发立即任务同步", () => {
+    // 回归:updateTask 原先不触发同步 → 主节点改了 danmu/quality 等,远端一直是旧值,
+    // 必须手动 start/stop 一次才纠正。
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({ store, manager, ...hubDeps("update-sync-", { requestSyncTasks }) });
+    const t = a.createTask({ room: "111", danmu: 1 }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["vps2"] });
+    requestSyncTasks.mockClear(); // 建规则本身已触发过一次同步
+
+    expect(a.updateTask(t.id, { danmu: 0 }).status).toBe(200);
+    expect(requestSyncTasks).toHaveBeenCalledTimes(1);
+    expect(store.getTask(t.id)!.danmu).toBe(0);
+  });
+
+  it("非 hub 任务被编辑 → 不触发同步", () => {
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({ store, manager, hubDir: mkdtempSync(join(tmpdir(), "update-nohub-")), requestSyncTasks });
+    const t = a.createTask({ room: "111" }).body as { id: number };
+    expect(a.updateTask(t.id, { danmu: 0 }).status).toBe(200);
+    expect(requestSyncTasks).not.toHaveBeenCalled();
+  });
+
+  it("规则被停用但仍是源任务 → 编辑照样触发同步(否则远端保留旧值)", () => {
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({ store, manager, ...hubDeps("update-disabled-", { requestSyncTasks }) });
+    const t = a.createTask({ room: "111", danmu: 1 }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["vps2"], enabled: false });
+    requestSyncTasks.mockClear();
+
+    expect(a.updateTask(t.id, { danmu: 0 }).status).toBe(200);
+    expect(requestSyncTasks).toHaveBeenCalledTimes(1);
   });
 
   it("源任务被 hub 规则切到远端(workers 不含 local)→ 手动启动只置 enabled,本机不起子进程", () => {
@@ -891,6 +968,15 @@ describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
     expect(a.updateWorker("worker-1", { name: "港2" }).status).toBe(200);
     expect(a.deleteWorker("worker-1").status).toBe(200);
     expect(a.deleteWorker("worker-1").status).toBe(404);   // 已删
+  });
+  it("createWorker/updateWorker:capabilities 往返(DTO 透出,去重去空白)", () => {
+    const { api: a } = apiWith(true);
+    const c = a.createWorker({ kind: "ssh", host: "h", dataRoot: "/d", capabilities: [" danmu:douyin ", "danmu:douyin", "burn"] });
+    expect((c.body as any).capabilities).toEqual(["danmu:douyin", "burn"]);
+    // list 回读含 capabilities
+    expect((a.listWorkers().body as any[]).find((w) => w.id === "worker-1").capabilities).toEqual(["danmu:douyin", "burn"]);
+    const u = a.updateWorker("worker-1", { capabilities: ["upload"] });
+    expect((u.body as any).capabilities).toEqual(["upload"]);
   });
   it("create 校验错 → 400;local 保护 → 400", () => {
     const { api: a } = apiWith(true);

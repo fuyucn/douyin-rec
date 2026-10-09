@@ -489,6 +489,20 @@ body {
   overflow: hidden;
   background: var(--raised);
 }
+.task-compact + .task-compact {
+  border-top: 1px solid var(--hairline);
+}
+/* Long worker names must wrap inside the row; nowrap badges otherwise clip
+   against the shell's overflow:hidden. */
+.task-compact .badge {
+  max-width: 100%;
+  height: auto;
+  min-height: 22px;
+  white-space: normal;
+  line-height: 1.35;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
 table.tasks {
   width: 100%;
   border-collapse: collapse;
@@ -706,6 +720,27 @@ table.tasks tbody tr:last-child td {
 .topbar-link-active {
   color: var(--ink);
   background: var(--surface);
+}
+/* Phone: the 56px rail cannot fit CJK page labels next to the brand.
+   Keep them visible as a second row instead of `hidden sm:flex`. */
+.topbar-mobile-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 16px 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.topbar-mobile-nav::-webkit-scrollbar {
+  display: none;
+}
+.topbar-mobile-nav .topbar-link {
+  height: 40px;
+}
+@media (min-width: 640px) {
+  .topbar-mobile-nav {
+    display: none;
+  }
 }
 .status-pill {
   display: none;
