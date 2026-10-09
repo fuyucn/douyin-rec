@@ -64,11 +64,12 @@
   **验收**：见 plan 的验收清单（flag off 零回归 / flag on 不烧录实测无 pull 步 / 缺能力回落不静默）。
   **前置**：需新增 `_node-pipeline` + `_node-capabilities` 隐藏子命令、Transport 可选方法、
   pipeline 分支、节点侧 biliup（install-worker.sh 加 `--with-upload`）。
-- [ ] **T-19 worker 安装脚本补 rsync 硬依赖** — 已改 `scripts/install-worker.sh`：rsync 改为
-  **两种角色都 fail**（原先仅 master warn）。**背景**：2026-10-08 vps2 缺 rsync → 每场 pull `rc=12`
-  → 后处理全卡 needs_manual，排查成本极高（错误只报退出码，无 stderr）。
-  **待办**：① 合并 T-5 部署后**重建/重装 VPS** 验证脚本；② `transport-ssh.ts` 把 rsync stderr 尾部
-  带进错误消息（现在只 `rsync rc=12`）。
+- [~] **T-19 worker 安装脚本补 rsync 硬依赖** — ② **已完成(2026-10-08)**:`transport-ssh.ts` 的
+  rsync 失败现带 stderr 尾部(新纯函数 `summarizeRsyncStderr` 丢弃进度行、留真错误、限长),错误形如
+  `rsync rc=12: rsync: command not found(host:remote)`;+4 测试。① **待办**:合并 T-5 部署后
+  **重建/重装 VPS** 验证 `install-worker.sh` 的 rsync 硬依赖 fail 行为。
+  **背景**:2026-10-08 vps2 缺 rsync → 每场 pull `rc=12` → 后处理全卡 needs_manual,
+  错误只报退出码无 stderr,排查成本极高。
 - [x] **T-22 app 解耦 1–4 步(api.ts 拆域 / 修反向依赖 / tui 归位 / serve 归位)** — 2026-10-08 起。
   **背景**:T-21 原计划「先拆 web/ 成独立包」经复核**是错的** —— `web/api.ts` 值导入 12 个 app 模块
   (hub-store/hub-jobs/worker-store/store/scheduler/task-input/timezone/paths/version/upload/biliup/
@@ -106,22 +107,6 @@
   `@drec/login`;③ hub 领域(`hub-store`/`hub-jobs`/`worker-store`)考虑挪到 orchestrator 或独立包;
   ④ `cli-task.ts` 的命令定义回归 `cli`。**验收**:每拆一个包 `test/arch/layering.test.ts` 的 RANKS 登记 +
   `pnpm test`/`typecheck`/`bundle` 全绿 + 架构图重新生成。**注意**:纯重构,行为零变更。
-- [ ] **T-20 直播间标题未采集 → 稿件 `{title}` 渲染为空**（bug） — **现象**：hub 稿件标题/文件名里
-  用 `{title}` 占位符时渲染为空（拿不到主播当场设的直播标题）。**根因（已定位，2026-10-08 实测）**：
-  1. 录制侧从不传 title：`packages/app/src/cli-task.ts:859` 是 `session.start(url, opts, { anchorName: t.name ?? "" })`
-     —— `StreamInfo.title` 字段没传（`packages/core/src/types.ts:19` 有该字段，但调用点漏了）。
-     `packages/cli/src/cli.ts:224` 同样只传 `{ anchorName: "" }`。
-  2. `RecordingSession.start()` 用 `info.title` 设 `liveTitle`（`packages/manager/src/index.ts:119`），
-     只有非空才写进 session.json（`:326`）；`onLive` 回调（`:141`）**也不更新 liveTitle**
-     —— 即使 recorder 侧 `ev.onLive({ title })` 带了 title（`record-engine/src/index.ts:251` 确实带了），
-     manager 也没接收。
-  3. 结果：`<recordings>/*.session.json` 里**永远没有 `title` 字段**（实测 vps2 全部 session.json 无 title）。
-  4. 下游 `scan.ts:42` 读 `d.title` → `NodeRecording.title` → pipeline 的 `titleCtx.liveTitle`
-     （`pipeline.ts:389`）→ `{title}` 渲染为空。
-  **修复方向**：① `cli-task.ts` / `cli.ts` 的 `session.start` 传入真实 title（需从平台取：抖音
-  `getStream().title` 已有，或在开播后经 `getInfo()` 补）；② `manager.onLive` 里用 `i.title` 更新
-  `liveTitle`（覆盖「开播时才知道标题」的时序）；③ 补 vitest：session.json 含 title、`{title}` 渲染非空。
-  **验收**：新录一场后 session.json 有 `title`，hub 稿件标题 `{title}` 正确渲染出主播直播标题。
 - [ ] **T-16 节点「主动加入」+ ticket 机制**（架构级，暂不做） — 现状：master 主动 SSH 拨 worker，
   加节点要手填 host/dataRoot（id 现由 T-15 改为节点自报）。**要做的是 biliup Fleet 那套**：worker 侧
   `task join <ticket>` + master 签发一次性票据（+ 节点私钥）+ 节点主动连 master（可穿 NAT）+ ticket
@@ -149,6 +134,15 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-20 直播间标题未采集 → 稿件 `{title}` 渲染为空**（bug） — **根因(2026-10-08 实测)**:
+  ① 录制侧 `session.start` 只传 anchorName(平台 `getStream` 只在 living 时才有 title,开播前无从得知);
+  ② manager 的 `onLive` 收到 `ev.onLive({title})` 但**不更新 `liveTitle`** → `<recordings>/*.session.json`
+  永远无 `title` 字段;③ `scan.ts` 读不到 → pipeline `titleCtx.liveTitle` 空 → `{title}` 渲染为空。
+  **修复**:manager `onLive` 里接收 `i.title`,首个非空值写入 `liveTitle` 并**立刻刷新 sidecar**;
+  保留首值(重连不被空值清掉)。全链路 `getStream().title → probe.title → onLive({title}) → sidecar` 打通。
+  **验收**:`test/session.test.ts` +2(开播时才拿到标题 / start 时已知标题 → sidecar 均有 title);
+  `pnpm test` 884 全过 / typecheck / bundle(`0.0.42`)。(2026-10-08)
 
 - [x] **T-23 仓库状态对齐(HEAD 断裂 / 生产跑未提交代码)** — 计划 `plans/028_repo_state_reconciliation.md`。
   **实测确认**:HEAD 单独 checkout 有 7 个真实类型错误(`requires`/`capabilities`/`ensureNodeIdentity`/
