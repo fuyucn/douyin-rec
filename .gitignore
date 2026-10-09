@@ -16,7 +16,10 @@ output/
 recordings/
 data-local/
 docker-data/
-output-data/     # 未设 DOUYIN_REC_ROOT 时的默认数据根(见 packages/app/src/paths.ts DEFAULT_ROOT)
+# 未设 DOUYIN_REC_ROOT 时的默认数据根(见 packages/app/src/paths.ts DEFAULT_ROOT)。
+# 注意:注释必须独立成行 —— 行内注释会让 git 把整行当 pattern,导致忽略失效(踩过)。
+output-data/
+stage/
 *.db
 *.log
 mesio.log*
