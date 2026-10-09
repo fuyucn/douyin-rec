@@ -15,7 +15,7 @@ import { TaskStore, resolveTaskWebhook, type Task, type EngineKind } from "./sto
 import { resolveTaskStreamCookies } from "./stream-cookies.js";
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
-import { resolveOutputDir, ensureHubConfigExample, rootHubConfig, rootHubDir } from "./paths.js";
+import { resolveOutputDir, ensureHubConfigExample, rootHubConfig, rootHubDir, ensureNodeIdentity } from "./paths.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
 import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
@@ -457,6 +457,8 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         webhook: () => getWebhook() ?? store.getSetting("discordWebhook") ?? undefined,
         // mesio 路径设置:每次 spawn 读 settings.mesioPath(空=引擎兜底 bin/mesio)→ 注入 MESIO_PATH。
         mesioPath: () => store.getSetting("mesioPath") || undefined,
+        // 抖音 API 模式设置:每次 spawn 读 settings.douyinApiMode(空=默认 balance)→ 注入 DOUYIN_REC_API_MODE。
+        douyinApiMode: () => store.getSetting("douyinApiMode") || undefined,
         // webhook 类型开关:每次 spawn 读 settings → DREC_WEBHOOK_TOGGLES 注入子进程。
         webhookToggles: () => resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
         onLog: (m) => console.log(m),
@@ -528,6 +530,11 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
       const seeded = ensureHubConfigExample();
       if (seeded) console.log(`[hub] 已生成配置模板: ${seeded}(复制成同目录 hub-config.json 并改 host/cookies/uploadMode → serve --hub 自动加载)`);
 
+      // 本节点稳定身份(<root>/config/node.json):首次启动生成,之后永久不变。
+      // master 经 SSH `_node-id` 读到它作为 worker id(替代自分配 worker-N)—— 换 master/重启都不丢身份。
+      const node = ensureNodeIdentity();
+      console.log(`[node] 身份 = ${node.nodeId}${node.hostname ? ` (${node.hostname})` : ""}`);
+
       // ONE manager drives both the web (manual start/stop) and, if requested,
       // the scheduler (automatic start/stop). They share the same subprocess
       // lifecycle + crash auto-restart.
@@ -537,6 +544,8 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         webhook: () => getWebhook() ?? store.getSetting("discordWebhook") ?? undefined,
         // mesio 路径设置:每次 spawn 读 settings.mesioPath(空=引擎兜底 bin/mesio)→ 注入 MESIO_PATH。
         mesioPath: () => store.getSetting("mesioPath") || undefined,
+        // 抖音 API 模式设置:每次 spawn 读 settings.douyinApiMode(空=默认 balance)→ 注入 DOUYIN_REC_API_MODE。
+        douyinApiMode: () => store.getSetting("douyinApiMode") || undefined,
         // webhook 类型开关:每次 spawn 读 settings → DREC_WEBHOOK_TOGGLES 注入子进程。
         webhookToggles: () => resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
         onLog: (m) => console.log(m),
@@ -662,7 +671,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
       let cookieWarned = false;
       const checkCookieExpiry = async (): Promise<void> => {
         try {
-          const { parseCookieExpiry } = await import("./web/api.js");
+          const { parseCookieExpiry } = await import("./cookie-utils.js");
           const c = store.getDefaultCookies();
           if (!c) return;
           const exp = parseCookieExpiry(c);

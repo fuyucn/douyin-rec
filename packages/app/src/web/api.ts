@@ -51,6 +51,9 @@ import { resolveOutputDir } from "../paths.js";
 import type { Task, TaskStore } from "../store.js";
 import { resolveTaskCookies } from "../store.js";
 import { readBiliupCookieHeader } from "../upload/biliup.js";
+// cookie 纯解析工具已下沉(T-22 第 2 步):命令层不必反向依赖 web 层。这里 re-export 兼容既有引用。
+import { hasSessionCookie, parseCookieExpiry } from "../cookie-utils.js";
+export { parseCookieExpiry } from "../cookie-utils.js";
 import type { TaskRuntime } from "../task-manager.js";
 import { inWindow, nowMinutesLocal } from "../scheduler.js";
 import type { MergeJobStore } from "../merge-jobs.js";
@@ -232,30 +235,6 @@ function err(status: number, message: string): ApiResult {
 
 /** Settings key for the GLOBAL Douyin account cookie (shared by all tasks). */
 export const DEFAULT_COOKIES_KEY = "defaultCookies";
-
-/** A cookie string has a usable login session for the target platform. */
-function hasSessionCookie(cookie: string, platform: string): boolean {
-  if (platform === "bilibili") return /(?:^|;\s*)SESSDATA=/.test(cookie);
-  if (platform === "kuaishou")
-    return /(?:^|;\s*)kuaishou\.web\.cp\.api_st=|(?:^|;\s*)passToken=|(?:^|;\s*)userId=/.test(cookie);
-  return /(?:^|;\s*)sessionid(?:_ss)?=/.test(cookie);
-}
-
-/**
- * 抖音登录态过期时间（epoch ms）从 `sid_guard` 字段解析。
- * sid_guard = `<token>|<登录时间戳秒>|<有效期秒>|<过期GMT串>`（`|` 可能被 URL 编码为 %7C）。
- * 取 (登录时间戳 + 有效期) ；解析不出返回 null。
- */
-export function parseCookieExpiry(cookie: string): number | null {
-  const m = cookie.match(/(?:^|;\s*)sid_guard=([^;]+)/);
-  if (!m) return null;
-  const parts = decodeURIComponent(m[1]).split(/\||%7C/i);
-  if (parts.length < 3) return null;
-  const loginTs = Number(parts[1]);
-  const maxAge = Number(parts[2]);
-  if (!Number.isFinite(loginTs) || !Number.isFinite(maxAge) || loginTs <= 0) return null;
-  return (loginTs + maxAge) * 1000;
-}
 
 /** Public status of one platform cookie (never leaks the raw value). */
 export interface CookieStatus {
