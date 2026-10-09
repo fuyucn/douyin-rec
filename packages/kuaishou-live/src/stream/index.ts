@@ -331,7 +331,9 @@ async function getStreamViaPage(userId: string, quality: string, cookies?: strin
     if (rep) break;
   }
   const url = rep?.url ?? ls.hlsPlayUrl;
-  if (!url || !item.isLiving) return { living: false, owner, raw };
+  // **以「拿到可播流 URL」为唯一在播依据**(与 biliup / DouyinLiveRecorder 一致,不依赖 isLiving 字段):
+  // 有 URL 就能录;离线样本实测 playUrls 全空(自然 url 为空)→ 判未开播,与 isLiving:false 一致。
+  if (!url) return { living: false, owner, raw };
   return { living: true, url, owner, headers: STREAM_HEADERS, raw };
 }
 

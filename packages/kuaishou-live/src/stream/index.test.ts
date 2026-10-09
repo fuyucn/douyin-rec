@@ -173,6 +173,19 @@ describe("取流:页面优先、API 兜底(2026-10-08 修正)", () => {
     expect(s.url).toBeUndefined();
   });
 
+  it("有可播流即判在播(不依赖 isLiving 字段;与 biliup/DouyinLiveRecorder 一致,防字段缺失漏录)", async () => {
+    const { getStream } = await import("./index.js");
+    stubFetch((url) => {
+      if (url.includes("/u/abc"))
+        return `window.__INITIAL_STATE__={"liveroom":{"playList":[{"author":{"name":"A"},` + // 无 isLiving 字段
+          `"liveStream":{"playUrls":{"h264":{"adaptationSet":{"representation":[{"bitrate":2000,"url":"https://cdn/x.flv"}]}}}}}]}};`;
+      return "";
+    });
+    const s = await getStream("abc", "OD");
+    expect(s.living).toBe(true);
+    expect(s.url).toBe("https://cdn/x.flv");
+  });
+
   it("页面风控(errorType.type=2「请求过快」)→ throttledReason 透出(不是「未开播」)", async () => {
     const { getStream } = await import("./index.js");
     stubFetch((url) => {
