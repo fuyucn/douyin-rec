@@ -55,9 +55,17 @@ export type { ApplyTasksResult } from "@drec/core";
 const SHRINK_RATIO = 0.5;
 
 /** 本节点是否已有该 (platform, roomSlug) 的 hub 受管任务(跨平台同名房间号不撞)。 */
-function hasManaged(store: TaskStore, spec: RemoteTaskSpec): boolean {
+/**
+ * 本节点是否**已有**该 (platform, roomSlug) 的任务 —— 用于「enabled:false 只更新不新建」。
+ *
+ * ⚠️ **必须同时认「hub 受管任务」和「本机源任务」**(自审发现的历史 bug):
+ * master 本机走 `adopt=false`,源任务的 `managedBy` 恒为 null。若这里只看 `managedBy==='hub'`,
+ * 那么「把 local 从某房间的 workers 里移除」时,本机会被误判成「从未有过该房间」而**跳过停用**,
+ * 于是 master 继续录 —— 用户以为已经切到单节点,实际还在双录(实测:老目录持续增长 459MB)。
+ * 判据必须是「这个房间在本节点有没有任务」,与它是否受管无关。
+ */
+function hasLocalTask(store: TaskStore, spec: RemoteTaskSpec): boolean {
   return store.listTasks().some((t) => {
-    if (t.managedBy !== "hub") return false;
     const s = slugOf(t.room);
     return s.platform === spec.platform && s.roomSlug === spec.roomSlug;
   });
@@ -298,7 +306,7 @@ export function applyRemoteTasks(
     for (const spec of desired) {
       // deleted 条目不下发(它是删除提示、不是配置);enabled:false 只更新不新建(见正常路径注释)。
       if (deletedKeys.has(`${spec.platform}:${spec.roomSlug}`)) continue;
-      if (spec.enabled === false && !hasManaged(store, spec)) continue;
+      if (spec.enabled === false && !hasLocalTask(store, spec)) continue;
       upsert(spec, `${spec.platform}:${spec.roomSlug}`);
     }
     writeSnapshot(opts, desired, log);
@@ -313,7 +321,7 @@ export function applyRemoteTasks(
     // (自审发现:master 对每个 worker 都发 enabled:false,包括没被派发过的那些),
     // 这些幽灵任务会长期占着 UI 列表、还让 T2 的 totalManaged 基线虚高。
     // 语义 = upsert,但**只更新不新建**。
-    if (spec.enabled === false && !hasManaged(store, spec)) continue;
+    if (spec.enabled === false && !hasLocalTask(store, spec)) continue;
     upsert(spec, `${spec.platform}:${spec.roomSlug}`);
   }
 

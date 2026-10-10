@@ -19,7 +19,7 @@ import path from "node:path";
 import { biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, openUploadLimitStore, resolveOutputStem, sanitizeStreamKey, UploadGate, type NodePipelineResult, type NodePipelineSpec, type UploadGateStore } from "@drec/core";
 import { ffprobeDuration, mergeSession, remuxSegment } from "@drec/post-process";
 import { appendGroup, uploadPlain } from "./upload/biliup.js";
-import { rootBiliupCookies, rootDbPath } from "./paths.js";
+import { rootBiliupCookies, rootDbPath, rootStageDir } from "./paths.js";
 
 /** 会话 base(与 orchestrator/session-plan 同规则:剥 -PART###/_PART###/_### 后缀)。 */
 function sessionBaseOfFile(name: string): string | undefined {
@@ -168,7 +168,14 @@ export async function runNodeSidePipeline(
   const missing = spec.tsFiles.filter((f) => !existsSync(f));
   if (missing.length > 0) return { ok: false, error: `源文件不存在: ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? " …" : ""}` };
 
-  const stageSub = path.join(spec.stageDir, sanitizeStreamKey(spec.streamKey));
+  // ⚠️ **产物目录必须用节点本地的**,不能用 master 传下来的 spec.stageDir。
+  // spec.stageDir 来自 master 的 cfg.stageDir(如 /output-data/stage),那是 **master 的路径**;
+  // 节点上通常不存在,而且语义也不对 —— 这是「节点本地 remux」,产物当然落节点。
+  // 曾经直接 path.join(spec.stageDir, …) → 节点上报 `path argument must be of type string`
+  // (master 侧某些配置下 stageDir 为空),整条节点侧上传必然失败(线上实测 3 次全挂转人工)。
+  // 现改为:优先 spec.stageDir(仅在它确实存在时,兼容手工/测试场景),否则落节点自己的 stage。
+  const stageRoot = spec.stageDir && existsSync(spec.stageDir) ? spec.stageDir : rootStageDir();
+  const stageSub = path.join(stageRoot, sanitizeStreamKey(spec.streamKey));
   log(`=== 节点侧管线 start ${spec.streamKey} 段数=${spec.tsFiles.length} mode=${spec.uploadMode} ===`);
 
   const { title, partTitle } = deriveTitles(spec, log);
@@ -180,9 +187,14 @@ export async function runNodeSidePipeline(
     return { ok: true, products };
   }
 
-  // 上传:节点本地 cookies 优先,master 下发的兜底。
-  const cookiesPath = process.env.BILIUP_COOKIE ?? rootBiliupCookies();
-  const cookies = existsSync(cookiesPath) ? "" : (spec.cookies ?? "");
+  // 上传:节点本地 cookies.json 优先,master 下发的兜底。
+  //
+  // ⚠️ `cookies` 是**传给 biliup `-u` 的路径**(不是内容),所以它必须始终是一个**可用路径**。
+  // 曾经写成「本地存在 → 空串」(想表达「用本地默认」),结果 `biliup -u "" upload` 直接报
+  // `a value is required for '--user-cookie'` → 整条节点侧上传必然失败(线上实测)。
+  // 正确:本地有就用本地路径,否则用 master 下发的路径;两者都没有则交给 biliup 自己报错(带原因)。
+  const localCookies = process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+  const cookies = existsSync(localCookies) ? localCookies : (spec.cookies ?? localCookies);
   const publicUpload = !spec.uploadPrivate;
   const meta = { cookies, tag: spec.uploadMeta.tag, tid: spec.uploadMeta.tid, desc: spec.uploadMeta.desc, public: publicUpload };
 
@@ -191,7 +203,7 @@ export async function runNodeSidePipeline(
   // 限流:先过 core UploadGate(冷却 + 滑动窗口 + 占额),命中 601/21566 自动记冷却(跨重启保留)。
   // accountKey = 本机 biliup 账号 → 与 master 侧同一个限流桶(键算法唯一真理在 core)。
   const uploadGate = gate ?? openNodeUploadGate({ warn: log });
-  const accountKey = resolveUploadAccountKey(cookiesPath);
+  const accountKey = resolveUploadAccountKey(localCookies);
   const bv = await uploadGate.run(accountKey, () =>
     uploadPlain({
       plain: {

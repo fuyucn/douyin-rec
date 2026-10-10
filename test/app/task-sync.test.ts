@@ -335,4 +335,31 @@ describe("T3 删除语义", () => {
     const r2 = applyRemoteTasks(store, [], undefined, { force: true });
     expect(r2.removed).toEqual(["douyin:555"]);
   });
+  // 回归:master 本机(adopt=false)的源任务 managedBy 恒为 null。
+  // 曾经「enabled:false 只更新不新建」的守卫只看 managedBy==='hub',
+  // 于是「把 local 从某房间 workers 里移除」时本机被误判为「从未有过该房间」→ 跳过停用
+  // → 用户以为切到单节点,实际 master 还在录(线上实测老目录持续增长)。
+  describe("T3 回归:被移出 workers 时本机源任务必须停用", () => {
+    it("adopt=false + 已有本机源任务 + enabled:false → 停用该任务(不是跳过)", () => {
+      const local = store.addTask({ room: "123456", enabled: true });   // managedBy = null
+      expect(store.getTask(local.id)!.managedBy).toBeNull();
+
+      const r = applyRemoteTasks(store, [spec({ enabled: false })], undefined, { adopt: false });
+
+      expect(r.applied).toEqual(["douyin:123456"]);
+      expect(store.getTask(local.id)!.enabled).toBe(false);   // 关键:真的停用了
+    });
+
+    it("adopt=false + 本机从未有过该房间 + enabled:false → 仍不新建(不产生幽灵任务)", () => {
+      const r = applyRemoteTasks(store, [spec({ roomSlug: "888", room: "https://live.douyin.com/888", enabled: false })], undefined, { adopt: false });
+      expect(r.applied).toEqual([]);
+      expect(store.listTasks()).toHaveLength(0);
+    });
+
+    it("远端(adopt=true)+ 已有 hub 受管任务 + enabled:false → 照常停用", () => {
+      const t = store.addTask({ room: "123456", managedBy: "hub", enabled: true });
+      applyRemoteTasks(store, [spec({ enabled: false })]);
+      expect(store.getTask(t.id)!.enabled).toBe(false);
+    });
+  });
 });
