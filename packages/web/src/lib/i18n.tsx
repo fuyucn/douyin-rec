@@ -331,7 +331,7 @@ const DICT = {
         title: "Workers / 录制节点", subtitle: "选优合并的数据来源,local = master 自身。", add: "添加 Worker",
         colName: "名称", colKind: "类型", colHost: "host", colStatus: "状态", colAction: "操作",
         empty: "还没有 Worker", testConn: "测试连接", deleteConfirmTitle: "删除该 Worker?", deleted: "Worker 已删除",
-        statusOk: "在线 · dataRoot 可达", statusChecking: "检测中…",
+        statusOk: "在线 · dataRoot 可达", versionDrift: "节点版本 v{node},master 是 v{master} —— 节点可能没更新到最新版", syncLag: "期望版本 {expected} 未应用(停在 {applied})", statusChecking: "检测中…",
         pill: "Workers · {count}", close: "关闭 Workers 面板", statusFail: "离线", statusMixed: "部分离线",
       },
       workerDialog: {
@@ -650,7 +650,7 @@ const DICT = {
         title: "Workers / recording nodes", subtitle: "Data sources for selection & merge; local = master itself.", add: "Add worker",
         colName: "Name", colKind: "Kind", colHost: "Host", colStatus: "Status", colAction: "Actions",
         empty: "No workers yet", testConn: "Test connection", deleteConfirmTitle: "Delete this worker?", deleted: "Worker deleted",
-        statusOk: "Online · dataRoot reachable", statusChecking: "Checking…",
+        statusOk: "Online · dataRoot reachable", statusChecking: "Checking…", versionDrift: "Node runs v{node}, master is v{master} — node may be stale", syncLag: "Expected version {expected} not applied (stuck at {applied})",
         pill: "Workers · {count}", close: "Close Workers panel", statusFail: "Offline", statusMixed: "Some offline",
       },
       workerDialog: {

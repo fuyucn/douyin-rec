@@ -8,6 +8,7 @@
  */
 import { platformForRoom, type ApplyTasksResult, type NodeTaskDTO, type RemoteTaskSpec } from "@drec/core";
 import { writeManagedState } from "./managed-state.js";
+import { APP_VERSION } from "./version.js";
 import type { TaskStore } from "./store.js";
 
 function slugOf(room: string): { platform: string; roomSlug: string } {
@@ -368,6 +369,8 @@ function writeSnapshot(
   try {
     writeManagedState(opts.managedStateDir, {
       version: opts.expectedVersion ?? 0,
+      // T16:同时记下「是哪个 bundle 版本应用了这份期望」,供 _node-status 回吐做版本漂移告警。
+      appVersion: APP_VERSION,
       desired: [...desired],
     });
   } catch (e) {

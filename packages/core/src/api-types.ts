@@ -283,7 +283,45 @@ export interface WorkerTestResult {
   hostname?: string;
 }
 /** GET /api/hub/workers/status 的单个 worker 健康结果(批量 ping)。 */
-export interface WorkerStatus { id: string; ok: boolean; error?: string; }
+/**
+ * 节点应用回执(T16):`_node-status` 的输出。
+ *
+ * 为什么需要:master 只能看到「我下发了什么」,看不到「节点应用了没有、用的哪个版本的应用」。
+ * 三种故障落在盲区里 —— ① master 发了第 7 版期望,节点只应用到第 5 版(中间某轮失败);
+ * ② 节点 bundle 是旧版(部署漏了一台),新语义在它上面不生效;
+ * ③ 同步一直失败,只有一行 warn 日志,UI 毫无痕迹。
+ */
+export interface NodeStatus {
+  /** 该节点**当前运行**的 bundle 版本。 */
+  appVersion: string;
+  /** 已应用的期望版本号;null = 从未成功同步过。 */
+  appliedVersion: number | null;
+  /** 该次应用的时间(epoch ms);null = 从未成功同步过。 */
+  appliedAt: number | null;
+  /** 应用那版期望时节点跑的 bundle 版本(与 appVersion 不同 → 之后升级过)。 */
+  appVersionAtApply: string | null;
+  /** 节点任务总数 / 其中 hub 受管数。 */
+  taskCount: number;
+  managedCount: number;
+}
+
+export interface WorkerStatus {
+  id: string;
+  ok: boolean;
+  error?: string;
+  /**
+   * 节点应用回执(T16,可选;旧 bundle / 探测失败 → 省略)。
+   * `appliedVersion` 与 `expectedVersion` 不一致 → 期望没应用到;
+   * `appVersion` 与 master 版本不一致 → 节点 bundle 版本漂移(部署漏了一台)。
+   */
+  appVersion?: string;
+  appliedVersion?: number | null;
+  appliedAt?: number | null;
+  /** master 侧本轮下发的期望版本(单调递增)。 */
+  expectedVersion?: number;
+  /** 同步失败原因(有则说明「下发到了但应用失败」)。 */
+  syncError?: string;
+}
 
 /** GET /api/hub/jobs 响应(total = 满足过滤的 run 总数,分页用)。 */
 export interface HubJobsDTO {

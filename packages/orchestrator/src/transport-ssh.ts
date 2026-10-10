@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { registerChild, throwIfAborted, type RemoteTaskSpec } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeTasks, Transport } from "./transport.js";
-import type { NodeCapabilities, NodePipelineResult, NodePipelineSpec } from "@drec/core";
+import type { NodeCapabilities, NodeStatus, NodePipelineResult, NodePipelineSpec } from "@drec/core";
 
 export interface SshOpts {
   id: string; host: string; dataRoot: string;
@@ -232,6 +232,24 @@ export class SshTransport implements Transport {
     const parsed = JSON.parse(out) as { freeGB?: number; error?: string };
     if (parsed.error || typeof parsed.freeGB !== "number") throw new Error(`_disk 失败: ${parsed.error ?? "无 freeGB"}`);
     return parsed.freeGB;
+  }
+
+  /**
+   * 节点应用回执(T16)。**旧 bundle 没有 `_node-status` → 返回 null**(UI 显示 unknown)。
+   *
+   * 与 nodeCapabilities 的区别:那个「不支持就抛错」,因为能力探测是**决策依据**
+   * (决定走不走节点侧上传),拿不到就必须回落。而版本回执只是**可观测性**,
+   * 拿不到不该打断任何流程 —— 所以这里吞掉「未知命令」并返回 null。
+   */
+  async nodeStatus(): Promise<NodeStatus | null> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    try {
+      const out = await this.run([`${nodePrefix} _node-status ${this.o.dataRoot}`]);
+      return JSON.parse(out) as NodeStatus;
+    } catch (e) {
+      // 旧 bundle(unknown command)/ 节点不可达 / 输出非法 JSON → 一律 null,不抛。
+      return null;
+    }
   }
 
   /** 节点侧上传能力探测(experimental,见 plans/027)。旧 bundle 无 `_node-capabilities` → 抛错,调用方按不支持处理。 */

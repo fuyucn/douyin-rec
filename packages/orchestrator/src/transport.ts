@@ -1,4 +1,4 @@
-import type { ApplyTasksResult, NodeCapabilities, NodePipelineResult, NodePipelineSpec, NodeTaskDTO, RemoteTaskSpec, WorkerConfig } from "@drec/core";
+import type { ApplyTasksResult, NodeCapabilities, NodePipelineResult, NodePipelineSpec, NodeStatus, NodeTaskDTO, RemoteTaskSpec, WorkerConfig } from "@drec/core";
 
 // 契约在 core(app 的 worker-store 用同一形状);这里 re-export 保持既有调用点不变。
 export type { ApplyTasksResult, WorkerConfig } from "@drec/core";
@@ -85,6 +85,11 @@ export interface Transport {
    * 两种情况看成同一件事;force 是后者的唯一合法出口。
    */
   applyTasks?(input: { desired: RemoteTaskSpec[]; force?: boolean }): Promise<ApplyTasksResult>;
+  /**
+   * 节点应用回执(T16):这台节点应用了哪一版期望、跑的是哪个 bundle。
+   * **可选**:旧 bundle 没有 `_node-status` → 返回 null(UI 显示 unknown,不报错)。
+   */
+  nodeStatus?(): Promise<NodeStatus | null>;
   /**
    * 该节点录制数据根所在卷的剩余空间(GB)。可选:无此能力则不参与磁盘看门狗。
    * reconciler 每轮对账时查一次 → 低于阈值由 **master 自己**告警(不依赖 worker 侧 webhook 配置)。

@@ -22,6 +22,15 @@ export interface ManagedState {
   savedAt: number;
   /** 本轮成功应用后的完整期望任务集。 */
   desired: RemoteTaskSpec[];
+  /**
+   * 应用这份期望的**节点 bundle 版本**（T16）。
+   *
+   * 为什么记它:master 只能看到「我发了什么」,看不到「节点用什么版本的应用了我发的」。
+   * 节点跑着旧 bundle(部署漏了一台)时,新字段/新语义在它上面不生效,但 master 侧毫无痕迹。
+   * 记下 appVersion 后,`_node-status` 能回吐,UI 可对「节点版本 ≠ master 版本」告警。
+   * 缺省 undefined = 老快照(向后兼容,读回时视为 unknown)。
+   */
+  appVersion?: string;
 }
 
 /**

@@ -30,7 +30,7 @@ import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type HubPoolSnapshotDTO } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
-import { buildTaskCommand, buildCookieCommand, resolveHubConfig, APP_VERSION } from "@drec/app";
+import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
@@ -1309,15 +1309,36 @@ const hubStarter: HubStarter = {
     const workers = workerStore.listWorkers(rootHubConfig());
     const results = await Promise.allSettled(workers.map(async (w) => {
       const t = w.kind === "local"
-        ? new LocalTransport({ id: w.id, recordingsDir: `${w.dataRoot}/recordings`, taskRooms: {}, ffprobe })
+        ? new LocalTransport({
+            id: w.id, recordingsDir: `${w.dataRoot}/recordings`, taskRooms: {}, ffprobe,
+            // T16:本机也要能报版本,否则漂移告警漏掉 master 自己那台。
+            nodeStatus: () => {
+              let appliedVersion: number | null = null;
+              let appliedAt: number | null = null;
+              try {
+                const st = readManagedState(join(w.dataRoot ?? "", "config", "managed"));
+                appliedVersion = st?.version ?? null;
+                appliedAt = st?.savedAt ?? null;
+              } catch { /* 未同步过 → null */ }
+              return { appVersion: APP_VERSION, appliedVersion, appliedAt, appVersionAtApply: null, taskCount: 0, managedCount: 0 };
+            },
+          })
         : new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
       await t.ping!();
+      // 版本回执:可选能力,拿不到(旧 bundle/不可达)就当没有 —— **绝不能因此让 status 失败**。
+      let status = null;
+      try { status = (await t.nodeStatus?.()) ?? null; } catch { status = null; }
+      return status;
     }));
     return workers.map((w, i) => {
       const r = results[i];
-      return r.status === "fulfilled"
-        ? { id: w.id, ok: true }
-        : { id: w.id, ok: false, error: (r.reason as Error)?.message ?? String(r.reason) };
+      if (r.status !== "fulfilled") {
+        return { id: w.id, ok: false, error: (r.reason as Error)?.message ?? String(r.reason) };
+      }
+      const ns = r.value;
+      return ns
+        ? { id: w.id, ok: true, appVersion: ns.appVersion, appliedVersion: ns.appliedVersion, appliedAt: ns.appliedAt }
+        : { id: w.id, ok: true };
     });
   },
 };
@@ -1579,6 +1600,50 @@ program
       }),
     );
     process.stdout.write(JSON.stringify(result) + "\n");
+  });
+
+// (内部) 节点状态回执(T16):master 想知道「这台节点应用了哪一版期望、跑的是哪个 bundle」。
+// 输出 {appVersion, appliedVersion, appliedAt, taskCount, managedCount};没有快照(从未同步过)→ 字段为 null。
+// 只读、不碰任务、不写盘 —— 旧 bundle 没有本命令时,master 侧按「unknown」处理(不报错)。
+program
+  .command("_node-status <dataRoot>", { hidden: true })
+  .description("(内部) 输出节点应用回执 JSON(appVersion/appliedVersion/appliedAt/任务数;供 master ssh 调用)")
+  .action(async (dataRoot: string) => {
+    const { join: pathJoin } = await import("node:path");
+    const { TaskStore, readManagedState } = await import("@drec/app");
+    const { APP_VERSION } = await import("@drec/app");
+    let appliedVersion: number | null = null;
+    let appliedAt: number | null = null;
+    let appVersionAtApply: string | null = null;
+    try {
+      // 快照目录与 _apply-tasks 同一推导(显式传 dataRoot,不从 env 推导)。
+      const st = readManagedState(pathJoin(dataRoot, "config", "managed"));
+      if (st) {
+        appliedVersion = st.version;
+        appliedAt = st.savedAt;
+        appVersionAtApply = st.appVersion ?? null;
+      }
+    } catch {
+      /* 读不到 = 从未同步过 / 目录缺失 → 保持 null(不是错误) */
+    }
+    let taskCount = 0;
+    let managedCount = 0;
+    try {
+      const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
+      const tasks = store.listTasks();
+      taskCount = tasks.length;
+      managedCount = tasks.filter((t) => t.managedBy === "hub").length;
+    } catch {
+      /* db 打不开 → 计数保持 0;不因此让整条命令失败(版本信息仍然有用) */
+    }
+    process.stdout.write(JSON.stringify({
+      appVersion: APP_VERSION,
+      appliedVersion,
+      appliedAt,
+      appVersionAtApply,
+      taskCount,
+      managedCount,
+    }) + "\n");
   });
 
 // 节点侧上传(experimental,plans/027)的隐藏子命令隔离在独立文件,便于快速开关/回退。

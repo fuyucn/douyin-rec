@@ -1,7 +1,7 @@
 // packages/orchestrator/src/transport-local.ts
 import { mkdirSync, copyFileSync, existsSync, rmSync } from "node:fs";
 import { join, basename } from "node:path";
-import type { NodeTaskDTO, RemoteTaskSpec } from "@drec/core";
+import type { NodeTaskDTO, RemoteTaskSpec, NodeStatus } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeTasks, Transport } from "./transport.js";
 import { scanRecordings } from "./scan.js";
 
@@ -25,6 +25,13 @@ export interface LocalOpts {
   applyTasks?: (input: { desired: RemoteTaskSpec[]; force?: boolean }) => ApplyTasksResult;
   /** 本节点稳定身份(<root>/config/node.json)。缺省 → nodeId() 返 null。 */
   nodeIdentity?: () => { nodeId: string; hostname?: string } | null;
+  /**
+   * 本机应用回执(T16)。缺省 → nodeStatus() 返 null(UI 显示 unknown)。
+   *
+   * 本机也要有:master 自身是 local worker,「本机应用了哪一版期望」同样需要可见 ——
+   * 否则版本漂移告警会漏掉 master 自己那台。
+   */
+  nodeStatus?: () => NodeStatus | null;
 }
 
 export class LocalTransport implements Transport {
@@ -49,6 +56,11 @@ export class LocalTransport implements Transport {
   async applyTasks(input: { desired: RemoteTaskSpec[]; force?: boolean }): Promise<ApplyTasksResult> {
     if (!this.o.applyTasks) throw new Error("LocalTransport: 未注入 applyTasks 回调(hub 任务同步未启用)");
     return this.o.applyTasks(input);
+  }
+
+  /** 本机应用回执(T16);未注入 → null(unknown)。 */
+  async nodeStatus(): Promise<NodeStatus | null> {
+    return this.o.nodeStatus?.() ?? null;
   }
 
   /** 本机稳定身份(有注入才返回;否则 null —— master 本机通常 id 固定为 "local")。 */
