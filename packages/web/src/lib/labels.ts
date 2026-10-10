@@ -1,5 +1,5 @@
 /** Shared display-label helpers (quality, schedule, clock formatting). */
-import type { Task } from "../api/client";
+import type { PlatformDTO, Task } from "../api/client";
 import { fmtDateTimeInTz } from "./tz";
 
 export const QUALITY_SHORT: Record<string, string> = {
@@ -117,3 +117,26 @@ export function fmtStartedAt(epochMs: number | null | undefined, tz: string): st
   if (epochMs == null) return "-";
   return fmtDateTimeInTz(new Date(epochMs), tz);
 }
+
+/**
+ * 按直播间地址判平台(客户端):http(s) URL 用各平台 urlPattern 匹配;裸房间号或无命中
+ * → 回落 platforms[0](默认平台,与后端 platformForRoom 一致)。平台决定画质/录制器/弹幕选项。
+ *
+ * **放在这里而不是各自 dialog 里**:CreateEditTaskDialog 与 HubRuleDialog(T10)都要用,
+ * 两份拷贝迟早会漂移(某一处加了新平台的兼容处理,另一处没加 → 同一房间两个页面显示不同画质)。
+ */
+export function pickPlatform(room: string, platforms: PlatformDTO[]): PlatformDTO | undefined {
+  if (!platforms.length) return undefined;
+  if (/^https?:\/\//.test(room)) {
+    for (const p of platforms) {
+      if (!p.urlPattern) continue;
+      try {
+        if (new RegExp(p.urlPattern).test(room)) return p;
+      } catch {
+        /* 坏 pattern 跳过 */
+      }
+    }
+  }
+  return platforms[0];
+}
+

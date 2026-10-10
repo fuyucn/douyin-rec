@@ -1,5 +1,5 @@
 import { Pencil, Play, Trash2 } from "lucide-react";
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type HubJobDTO, type HubRuleDTO, type WorkerDTO } from "../api/client";
 import { RunCard, JobLogDialog, runDate } from "./HubJobs";
 import { Dialog } from "./Dialog";
@@ -7,7 +7,7 @@ import { Button, IconButton } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Switch } from "./Switch";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
-import { errMessage, useToast, usePolling } from "../lib/hooks";
+import { errMessage, useToast, useHubStream, usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
 import { useT } from "../lib/i18n";
 import type { FlowCfg } from "./flow-build";
@@ -82,24 +82,36 @@ export function RoomDetail({
   const [runNew, setRunNew] = useState(true);
 
   const refresh = async (): Promise<void> => {
+    // worker 列表与 run 列表**解耦**:run 刷新是推送驱动的热路径(每次 changed 都跑),
+    // 若把 listWorkers 挂在同一个函数里,每次台账变化都会多打一个无用请求,
+    // 而且它的 401 会把整次刷新变成失败 → 误报「数据可能已过期」。worker 单独慢速兜底。
+    try {
+      const r = await api.listHubJobs({ room: rule.key, limit: pages * PAGE, offset: 0 });
+      setRuns(r.jobs);
+      setTotal(r.total);
+    } finally {
+      setLoaded(true);
+    }
+  };
+  // 推送驱动:run 状态变化由 /api/hub/stream 推;推送不可用自动退化为有界退避轮询。
+  useHubStream(refresh);
+  // 「加载更多」改 pages → 立即多拉一页(推送只在台账变化时来,不会因为本地翻页而触发)。
+  const firstPageRun = useRef(true);
+  useEffect(() => {
+    if (firstPageRun.current) { firstPageRun.current = false; return; } // 首拉已由 useHubStream 发起
+    void refresh().catch(() => {});
+  }, [pages]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** worker 名单:独立慢速兜底(5 分钟)+ 首次加载;失败静默(workerName 本就会回落成 id)。 */
+  const refreshWorkers = async (): Promise<void> => {
     try {
       setWorkers(await api.listWorkers());
     } catch {
       /* 忽略:workerName 回落展示 id */
     }
-    try {
-      const r = await api.listHubJobs({ room: rule.key, limit: pages * PAGE, offset: 0 });
-      setRuns(r.jobs);
-      setTotal(r.total);
-    } catch {
-      /* 轮询重试 */
-    } finally {
-      setLoaded(true);
-    }
   };
-  const anyActive = runs.some((j) => !["done", "failed", "needs_manual"].includes(j.state));
-  // 有进行中的 run → 3s;空闲 5s(与原 HubDetailPage 一致,避免像「没实时更新」)。
-  usePolling(() => void refresh(), anyActive ? 3000 : 5000);
+  // usePolling 挂载即拉一次,不必再写首拉 effect(否则 mount 会双请求)。
+  usePolling(() => void refreshWorkers(), 300_000);
 
   // 稳定引用(仅 workers 变化时才换):PipelineFlow memo 用它比较,防每帧新引用击穿 memo。
   const workerName = useCallback((id: string): string => workers.find((w) => w.id === id)?.name ?? id, [workers]);
@@ -141,7 +153,7 @@ export function RoomDetail({
     try {
       await api.stopHubJob(streamKey);
       toast(t("hub.jobs.stopped"), "info");
-      void refresh();
+      void refresh().catch(() => {}); // 交互后主动刷新;失败由 stale 提示呈现
     } catch (e) {
       toast(errMessage(e), "error");
     }
@@ -150,7 +162,7 @@ export function RoomDetail({
     try {
       await api.runHubJob({ streamKey, winnerWorker });
       toast(t("hub.jobs.started"), "info");
-      void refresh();
+      void refresh().catch(() => {}); // 交互后主动刷新;失败由 stale 提示呈现
     } catch (e) {
       toast(errMessage(e), "error");
     }
@@ -277,7 +289,7 @@ export function RoomDetail({
         </div>
       )}
 
-      <HubRuleDialog open={editOpen} onClose={() => setEditOpen(false)} rule={rule} onSaved={() => { onChanged(); void refresh(); }} />
+      <HubRuleDialog open={editOpen} onClose={() => setEditOpen(false)} rule={rule} onSaved={() => { onChanged(); void refresh().catch(() => {}); }} />
       <JobLogDialog logKey={logKey} onClose={() => setLogKey(null)} />
       <Dialog
         open={runOpen}

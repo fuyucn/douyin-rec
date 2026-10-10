@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { api, type HubRuleDTO, type HubRulePayload, type Task, type WorkerDTO } from "../api/client";
+import { api, type HubRuleDTO, type HubRulePayload, type PlatformDTO, type Task, type WorkerDTO } from "../api/client";
+import { pickPlatform, qualityLabel, scheduleInput } from "../lib/labels";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { Switch } from "../components/Switch";
@@ -40,6 +41,21 @@ interface FormState {
   uploadPartTitle: string;
   /** 绑定的 master 任务 id;null = 不下发录制。 */
   sourceTaskId: number | null;
+  // ── 录制半边(T10:与处理半边在同一个弹窗里一次保存)────────────────────────────
+  /** 录制开关 = 「这个房间录不录」;与上面的 enabled(处理开关「录完做什么」)是两件事。 */
+  recEnabled: boolean;
+  quality: string;
+  engine: string;
+  danmu: boolean;
+  useCookie: boolean;
+  segmentSec: string;
+  /** 录制窗口 "HH:MM-HH:MM";空 = 全天。 */
+  schedule: string;
+  /**
+   * 用户是否已手动改过录制字段。用来阻止「tasks 迟到 → 回显覆盖用户正在填的值」。
+   * 这是**表单草稿态**,不参与提交 payload(自审:第一版没有这个标记,tasks 晚到就会冲掉输入)。
+   */
+  recordingTouched: boolean;
 }
 
 const BLANK: FormState = {
@@ -63,7 +79,31 @@ const BLANK: FormState = {
   uploadSubmissionTitle: "",
   uploadPartTitle: "",
   sourceTaskId: null,
+  recEnabled: true,
+  quality: "",
+  engine: "",
+  danmu: true,
+  useCookie: true,
+  segmentSec: "1800",
+  schedule: "",
+  recordingTouched: false,
 };
+
+/** 录制半边从「已绑定的 task」回显(T10)。没有 task 时给一个保守默认,不改全局默认。 */
+function recordingFromTask(task: Task | null): Pick<FormState, "recEnabled" | "quality" | "engine" | "danmu" | "useCookie" | "segmentSec" | "schedule"> {
+  if (!task) {
+    return { recEnabled: true, quality: "", engine: "", danmu: true, useCookie: true, segmentSec: "1800", schedule: "" };
+  }
+  return {
+    recEnabled: task.enabled,
+    quality: task.quality,
+    engine: task.engine,
+    danmu: !!task.danmu,
+    useCookie: !!task.useCookie,
+    segmentSec: String(task.segmentSec ?? 1800),
+    schedule: scheduleInput(task),
+  };
+}
 
 function fromRule(r: HubRuleDTO): FormState {
   const c = r.pipeline ?? {};
@@ -89,6 +129,15 @@ function fromRule(r: HubRuleDTO): FormState {
     uploadSubmissionTitle: c.upload?.submissionTitleTemplate ?? "",
     uploadPartTitle: c.upload?.partTitleTemplate ?? "",
     sourceTaskId: r.recording?.sourceTaskId ?? null,
+    // 录制半边由调用方按绑定的 task 覆盖(recordingFromTask);这里给占位保证类型完整。
+    recEnabled: true,
+    quality: "",
+    engine: "",
+    danmu: true,
+    useCookie: true,
+    segmentSec: "1800",
+    schedule: "",
+    recordingTouched: false,
   };
 }
 
@@ -143,11 +192,24 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
   const [workersError, setWorkersError] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [tasksError, setTasksError] = useState(false);
+  /** 平台能力表(quality/engine 合法值):决定录制区块的下拉候选,避免手写一份平台清单。 */
+  const [platforms, setPlatforms] = useState<PlatformDTO[]>([]);
 
+  // 打开时用「规则 + 它绑定的 task」初始化整个表单(含 T10 新增的录制半边)。
+  // 录制字段**从 task 回显**而不是从 rule 读 —— rule 里根本没有画质/分段这些字段,
+  // 凭空造默认值会覆盖用户真实设置(自审发现:第一版只 fromRule(rule),录制区块全是空白默认)。
   useEffect(() => {
-    if (open) setForm(rule ? fromRule(rule) : BLANK);
+    if (!open) return;
+    if (!rule) { setForm(BLANK); return; }
+    setForm({ ...fromRule(rule), ...recordingFromTask(taskById(rule.recording?.sourceTaskId ?? null)), recordingTouched: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, rule?.key]);
+
+  /** 按 id 取 task;tasks 尚未加载完时返回 null(稍后由下面的 effect 补回显)。 */
+  function taskById(id: number | null): Task | null {
+    if (id === null) return null;
+    return tasks.find((x) => x.id === id) ?? null;
+  }
 
   // 打开时拉 worker 列表(name 显示 / id 存储)。失败给提示不崩。
   useEffect(() => {
@@ -168,12 +230,32 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, rule?.key]);
 
+  // 平台清单:quality/engine 的合法值随平台而变(白嫖 Platform 注册表,不在前端硬编码)。
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    api.getPlatforms()
+      .then((r) => { if (alive) setPlatforms(r.platforms ?? []); })
+      .catch(() => { if (alive) setPlatforms([]); });   // 拉不到就退化成自由输入,别让弹窗打不开
+    return () => { alive = false; };
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     let alive = true;
     setTasksError(false);
     api.listTasks()
-      .then((ts) => { if (alive) setTasks(ts); })
+      .then((ts) => {
+        if (!alive) return;
+        setTasks(ts);
+        // 编辑模式下 tasks 是**后到**的:此刻才能把录制半边按真实 task 回显。
+        // 只在「用户还没手动改过录制字段」时覆盖,否则会把用户正在填的值冲掉。
+        if (rule) {
+          setForm((f) => (f.recordingTouched
+            ? f
+            : { ...f, ...recordingFromTask(ts.find((x) => x.id === (rule.recording?.sourceTaskId ?? -1)) ?? null) }));
+        }
+      })
       .catch(() => { if (alive) setTasksError(true); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -203,13 +285,23 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
   // 新建必须选 ≥1;编辑同理(编辑老规则已预勾全部,用户主动清空也要拦)。
   const workersInvalid = form.workers.length === 0;
   const selectedTask = tasks.find((task) => task.id === form.sourceTaskId) ?? null;
+  // 画质/引擎候选 = **该房间所属平台**的白名单(与任务编辑弹窗共用 pickPlatform,
+  // 不在这里写第二份平台匹配逻辑)。
+  const boundPlatform = pickPlatform(selectedTask?.room ?? "", platforms);
+  const qualityOptions = boundPlatform?.qualities ?? [];
+  const engineOptions = boundPlatform?.engines ?? [];
   // 新建:任务决定房间,候选 = 全部任务;编辑:房间已固定,只允许同房间任务。
   const sourceCandidates = rule
     ? tasks.filter((task) => slugOfRoom(task.room) === rule.roomSlug)
     : tasks;
 
+  /** 录制半边的字段名(改动它们即视为「用户动过」,不再被迟到回显覆盖)。 */
+  const RECORDING_KEYS = new Set<keyof FormState>([
+    "recEnabled", "quality", "engine", "danmu", "useCookie", "segmentSec", "schedule",
+  ]);
+
   function set<K extends keyof FormState>(key: K, value: FormState[K]): void {
-    setForm((f) => ({ ...f, [key]: value }));
+    setForm((f) => ({ ...f, [key]: value, ...(RECORDING_KEYS.has(key) ? { recordingTouched: true } : {}) }));
   }
 
   async function submit(ev: FormEvent): Promise<void> {
@@ -243,12 +335,75 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
         },
       },
     };
+    // T9 统一房间:编辑模式一次 PUT 两半(后端第二步失败会回滚第一步,不留半成功)。
+    // 新建仍走 createHubRule —— 房间里还没有 task,统一房间 PUT 要求房间已存在。
+    const recording = form.sourceTaskId === null
+      ? undefined
+      : {
+          enabled: form.recEnabled,
+          ...(form.quality.trim() ? { quality: form.quality.trim() } : {}),
+          ...(form.engine.trim() ? { engine: form.engine.trim() } : {}),
+          danmu: form.danmu ? 1 : 0,
+          useCookie: form.useCookie,
+          ...(Number(form.segmentSec) > 0 ? { segmentSec: Number(form.segmentSec) } : {}),
+          ...(form.schedule.trim() ? { schedule: form.schedule.trim() } : {}),
+        };
+
+    // 编辑模式下换了源任务 → 规则也必须重新绑定,否则「换了任务,配置还挂在旧任务上」。
+    // 第一版没处理:updateRoom 的 processing 不含 sourceTaskId,换下拉框看起来生效了
+    // (录制字段写到了新任务),但规则仍绑着旧任务 → 两边对不上(自审发现)。
+    const sourceTaskChanged = isEdit && rule.recording?.sourceTaskId !== form.sourceTaskId;
+
     setBusy(true);
     try {
-      if (isEdit) await api.updateHubRule(rule.key, payload);
-      else await api.createHubRule(payload);
+      if (isEdit) {
+        // 编辑:一次 PUT 两半(后端第二步失败会回滚第一步,不留半成功)。
+        //
+        // ⚠️ enabled 属于 **processing** 内部(不是顶层)。第一版我把它写在顶层并用
+        // `as RoomPayload` 强转 —— 断言把「后端会忽略这个字段」这件事藏了起来,
+        // 表现为「处理开关拨了没反应」。断言不是类型检查,别用它压掉真实错误。
+        await api.updateRoom(rule.key, {
+          processing: {
+            enabled: payload.enabled,
+            pipeline: payload.pipeline,
+            workers: payload.workers,
+            requires: payload.requires,
+          },
+          ...(recording ? { recording } : {}),
+        });
+        if (sourceTaskChanged) {
+          // 换绑必须走规则端点(PUT rooms 的 processing 不含 sourceTaskId)。
+          // 失败要说清楚:配置已改、但规则仍绑着旧任务。
+          try {
+            await api.updateHubRule(rule.key, { recording: { sourceTaskId: form.sourceTaskId } });
+          } catch (e2) {
+            toast(t("hub.ruleDialog.reboundFailed", { error: errMessage(e2) }), "error");
+            onSaved();
+            return;
+          }
+        }
+        onClose();
+        toast(t("hub.ruleDialog.updated"), "success");
+        onSaved();
+        return;
+      }
+
+      // 新建:先建规则(createHubRule 必须绑 sourceTaskId,拿不到房间就没有 key)。
+      // 拿到 key 才能 PUT 录制半边 —— 所以这里是**两步**,与编辑的一次 PUT 不同。
+      const created = await api.createHubRule(payload);
+      if (recording) {
+        try {
+          await api.updateRoom(created.key, { recording });
+        } catch (e2) {
+          // 规则**已经建成了**,只有录制配置没写上。必须说清楚是哪半边失败,
+          // 否则用户以为整个保存失败了、重试再建一条规则(自审发现)。
+          toast(t("hub.ruleDialog.createdButRecordingFailed", { error: errMessage(e2) }), "error");
+          onSaved();
+          return;   // 保持弹窗打开:用户改完录制字段可以直接再保存,不会重复建规则
+        }
+      }
       onClose();
-      toast(isEdit ? t("hub.ruleDialog.updated") : t("hub.ruleDialog.created"), "success");
+      toast(t("hub.ruleDialog.created"), "success");
       onSaved();
     } catch (e) {
       toast(errMessage(e), "error");
@@ -373,6 +528,67 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
                 </option>
               ))}
             </select>
+          )}
+        </div>
+
+        {/* ── Section: 录制配置(T10:与处理配置在同一个弹窗里一次保存)─────────────
+            字段读写的是**绑定的 source task**,不是 hub 规则(规则文件里没有画质/分段)。
+            上面的开关管「录完做什么」(处理),这里的开关管「这个房间录不录」(录制),两者独立。 */}
+        <div className="sm:col-span-2">
+          <h3 className="form-section">{t("hub.ruleDialog.recordingConfigSection")}</h3>
+          <p className="text-xs text-muted mb-2">{t("hub.ruleDialog.recordingConfigHint")}</p>
+          {!form.sourceTaskId ? (
+            <p className="text-xs text-muted">{t("hub.ruleDialog.recordingNoTask")}</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="flex items-center gap-2 sm:col-span-2">
+                <Switch checked={form.recEnabled} onCheckedChange={(v: boolean) => set("recEnabled", v)} />
+                <span className="text-sm">{t("hub.ruleDialog.recordingEnabled")}</span>
+              </label>
+              <div>
+                <label className="field-label">{t("hub.ruleDialog.quality")}</label>
+                {qualityOptions.length > 0 ? (
+                  <select className="input" value={form.quality} onChange={(e) => set("quality", e.target.value)}>
+                    {/* 当前值不在平台白名单里(老配置/平台改过)时补一个选项,否则 select 显示空白 */}
+                    {!qualityOptions.includes(form.quality) && <option value={form.quality}>{form.quality || "-"}</option>}
+                    {qualityOptions.map((q) => <option key={q} value={q}>{qualityLabel(q)}</option>)}
+                  </select>
+                ) : (
+                  <input className="input" value={form.quality} onChange={(e) => set("quality", e.target.value)} />
+                )}
+              </div>
+              <div>
+                <label className="field-label">{t("hub.ruleDialog.engine")}</label>
+                {engineOptions.length > 0 ? (
+                  <select className="input" value={form.engine} onChange={(e) => set("engine", e.target.value)}>
+                    {!engineOptions.includes(form.engine) && <option value={form.engine}>{form.engine || "-"}</option>}
+                    {engineOptions.map((q) => <option key={q} value={q}>{q}</option>)}
+                  </select>
+                ) : (
+                  <input className="input" value={form.engine} onChange={(e) => set("engine", e.target.value)} />
+                )}
+              </div>
+              <div>
+                <label className="field-label">{t("hub.ruleDialog.segmentSec")}</label>
+                <input className="input" type="number" min={60} value={form.segmentSec}
+                       onChange={(e) => set("segmentSec", e.target.value)} />
+                <p className="text-xs text-muted mt-1">{t("hub.ruleDialog.segmentSecHint")}</p>
+              </div>
+              <div>
+                <label className="field-label">{t("hub.ruleDialog.schedule")}</label>
+                <input className="input" value={form.schedule} onChange={(e) => set("schedule", e.target.value)}
+                       placeholder="HH:MM-HH:MM" />
+                <p className="text-xs text-muted mt-1">{t("hub.ruleDialog.scheduleHint")}</p>
+              </div>
+              <label className="flex items-center gap-2">
+                <Switch checked={form.danmu} onCheckedChange={(v: boolean) => set("danmu", v)} />
+                <span className="text-sm">{t("hub.ruleDialog.danmu")}</span>
+              </label>
+              <label className="flex items-center gap-2">
+                <Switch checked={form.useCookie} onCheckedChange={(v: boolean) => set("useCookie", v)} />
+                <span className="text-sm">{t("hub.ruleDialog.useCookie")}</span>
+              </label>
+            </div>
           )}
         </div>
 

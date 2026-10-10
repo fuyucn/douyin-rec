@@ -8,6 +8,7 @@ import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 import { prepareUploadAlias } from "./session-plan.js";
 import { PART_GROUP_CANONICAL } from "./verify.js";
+import { sanitizeUploadLimitState, type UploadLimitStore } from "./upload-limits.js";
 
 export { deriveStageProducts, withOutputStem, type StageProducts } from "./session-plan.js";
 
@@ -429,6 +430,8 @@ function readFileSyncSafe(p: string): string | undefined {
 }
 
 export class ResourcePool {
+  /** 限流状态存储不可用时的兜底冷却下限(ms);防止配置 cooldown=0 时 fail-closed 退化成无限速。 */
+  static readonly UPLOAD_FAILCLOSED_MS = 30 * 60_000;
   private cpu: Semaphore;
   private net: Semaphore;
   private streamLocks = new Map<string, Promise<unknown>>();
@@ -463,10 +466,22 @@ export class ResourcePool {
   private uploadTimes: number[] = [];
   /** 命中 601 后的静默截止时刻(此前的提交一律等到此刻,给 B 站冷却)。 */
   private uploadBlockedUntil = 0;
+  /** 限流状态持久化后端(T8);缺省 = 纯内存。 */
+  private limitStore?: UploadLimitStore;
+  /** 诊断日志(持久化失败等);缺省 console.error。 */
+  private warn: (msg: string) => void;
 
   constructor(
     cfg: ResourcePoolCfg = {},
-    inject: { now?: () => number; sleep?: (ms: number) => Promise<void>; freeMemMB?: () => number } = {},
+    inject: {
+      now?: () => number;
+      sleep?: (ms: number) => Promise<void>;
+      freeMemMB?: () => number;
+      /** 上传限流状态的跨重启持久化后端(T8)。缺省 = 纯内存(旧行为)。 */
+      limitStore?: UploadLimitStore;
+      /** 持久化失败等诊断日志;缺省 console.error。**绝不静默**。 */
+      warn?: (msg: string) => void;
+    } = {},
   ) {
     this.cpu = new Semaphore(Math.max(1, cfg.maxCpuParallel ?? 1));
     this.net = new Semaphore(Math.max(1, cfg.maxNetParallel ?? 1));
@@ -478,6 +493,37 @@ export class ResourcePool {
     this.now = inject.now ?? Date.now;
     this.sleep = inject.sleep ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
     this.freeMemMB = inject.freeMemMB ?? systemFreeMemMB;
+    this.limitStore = inject.limitStore;
+    this.warn = inject.warn ?? ((m: string) => console.error(m));
+    this.restoreUploadLimits();
+  }
+
+  /** 构造时读回冷却/窗口状态。**存储不可用 = fail-closed**:先冷却一个完整 cooldown 再放行。 */
+  private restoreUploadLimits(): void {
+    if (!this.limitStore) return;
+    const now = this.now();
+    const state = this.limitStore.load();
+    if (state === null) {
+      // 无法确认上次打到哪 → 按「刚命中 601」处理,宁可多等,不能重启即打爆。
+      // 配置把 cooldown 显式设成 0(关冷却)时,fail-closed 不能退化成无限速 → 用兜底下限。
+      const cooldown = this.uploadCooldownMs > 0 ? this.uploadCooldownMs : ResourcePool.UPLOAD_FAILCLOSED_MS;
+      this.uploadBlockedUntil = now + cooldown;
+      this.warn("[upload-limits] 限流状态不可用,本进程按保守冷却启动");
+      return;
+    }
+    const clean = sanitizeUploadLimitState(state, now, this.uploadRateWindowMs);
+    this.uploadBlockedUntil = clean.blockedUntil;
+    this.uploadTimes = clean.times;
+  }
+
+  /** 落盘当前限流状态;失败只 warn(不阻断上传),但必须留痕。 */
+  private persistUploadLimits(): void {
+    if (!this.limitStore) return;
+    try {
+      this.limitStore.save({ blockedUntil: this.uploadBlockedUntil, times: [...this.uploadTimes] });
+    } catch (e) {
+      this.warn(`[upload-limits] 持久化失败(限流状态仅存内存): ${(e as Error).message}`);
+    }
   }
 
   private async withSemaphore<T>(s: Semaphore, fn: () => Promise<T>): Promise<T> {
@@ -596,7 +642,10 @@ export class ResourcePool {
         return await fn();
       } catch (e) {
         // 601:记录全局冷却,让后续提交(含本次重试)等够时间再打。
-        if (isUploadRateLimited(e)) this.uploadBlockedUntil = Math.max(this.uploadBlockedUntil, this.now() + this.uploadCooldownMs);
+        if (isUploadRateLimited(e)) {
+          this.uploadBlockedUntil = Math.max(this.uploadBlockedUntil, this.now() + this.uploadCooldownMs);
+          this.persistUploadLimits(); // 冷却必须在重启后仍在,否则重启即再打 601
+        }
         throw e;
       } finally {
         this.uploadActive--;
@@ -625,6 +674,7 @@ export class ResourcePool {
       this.uploadTimes = this.uploadTimes.filter((t) => t > winStart);
       if (this.uploadTimes.length < this.uploadRateLimit) {
         this.uploadTimes.push(now);
+        this.persistUploadLimits(); // 占额即落盘,重启后窗口不归零
         return;
       }
       // 超频:睡到最早那次的窗口滑出为止。

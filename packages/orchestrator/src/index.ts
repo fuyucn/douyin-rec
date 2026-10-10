@@ -26,6 +26,8 @@ export type {
   ResourcePoolCfg,
   StageProducts,
 } from "./workflow.js";
+export { openUploadLimitStore, sanitizeUploadLimitState } from "./upload-limits.js";
+export type { UploadLimitState, UploadLimitStore } from "./upload-limits.js";
 export { LocalTransport } from "./transport-local.js";
 export { SshTransport } from "./transport-ssh.js";
 export { startHub } from "./hub.js";

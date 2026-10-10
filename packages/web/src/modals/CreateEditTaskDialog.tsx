@@ -8,7 +8,7 @@ import { Switch } from "../components/Switch";
 import { Tooltip } from "../components/Tooltip";
 import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { qualityLabel, scheduleInput } from "../lib/labels";
+import { pickPlatform, qualityLabel, scheduleInput } from "../lib/labels";
 import { fmtTimeInTz, localTimeTooltip } from "../lib/tz";
 
 interface Props {
@@ -56,25 +56,6 @@ function fromTask(t: Task): FormState {
     useCookie: !!t.useCookie,
     webhook: t.webhook ?? "",
   };
-}
-
-/**
- * 按直播间地址判平台(客户端,最简单):http(s) URL 用各平台 urlPattern 匹配;裸房间号或无命中
- * → 回落 platforms[0](默认平台,与后端 platformForRoom 一致)。平台决定画质/录制器/弹幕选项。
- */
-function pickPlatform(room: string, platforms: PlatformDTO[]): PlatformDTO | undefined {
-  if (!platforms.length) return undefined;
-  if (/^https?:\/\//.test(room)) {
-    for (const p of platforms) {
-      if (!p.urlPattern) continue;
-      try {
-        if (new RegExp(p.urlPattern).test(room)) return p;
-      } catch {
-        /* 坏 pattern 跳过 */
-      }
-    }
-  }
-  return platforms[0];
 }
 
 /** 时区后缀(" · Asia/Shanghai"),{tz} 插值。 */

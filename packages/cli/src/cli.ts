@@ -575,7 +575,7 @@ const hubStarter: HubStarter = {
     const {
       registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport, recordingStatusWorkerIds,
       satisfiesCapabilities,
-      buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool,
+      buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool, openUploadLimitStore,
     } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
@@ -768,6 +768,11 @@ const hubStarter: HubStarter = {
       uploadRateLimit: hubCfg.resources?.uploadRateLimit ?? 5,
       uploadRateWindowMs: hubCfg.resources?.uploadRateWindowMs ?? 600_000,
       uploadCooldownMs: hubCfg.resources?.uploadCooldownMs ?? 1_800_000,
+    }, {
+      // T8:冷却/滑动窗口跨重启保留(同 sync 库单行 upload_limits)。
+      // 复用 ledger 的 dbPath —— 两边同一文件,不额外造库;pool 只借用,不拥有生命周期。
+      limitStore: openUploadLimitStore(dbPath, { log: opts.warn }),
+      warn: opts.warn,
     });
     const pipelineDeps = {
       transports,

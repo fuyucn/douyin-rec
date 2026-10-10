@@ -15,7 +15,8 @@ import { api, type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO } fro
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/HubJobs";
 import { roomId } from "../lib/labels";
-import { usePolling } from "../lib/hooks";
+import { useHubStream, useTicker } from "../lib/hooks";
+import { HubStreamBanner } from "../components/HubStreamBanner";
 import { useT } from "../lib/i18n";
 import { fmtTimeInTz } from "../lib/tz";
 
@@ -44,7 +45,9 @@ function stepLabel(t: TFunc, step: string): string {
 /** 资源占用条:CPU / 上传窗口 / 冷却。 */
 function PoolBar({ pool }: { pool: HubPoolSnapshotDTO }): ReactNode {
   const t = useT();
-  const cooldownSec = pool.upload.cooldownUntil > Date.now() ? Math.round((pool.upload.cooldownUntil - Date.now()) / 1000) : 0;
+  // 冷却倒数走**本地 tick**:服务端只在状态变化时推,靠 Date.now() 直接算不会自己走字。
+  const now = useTicker(1000);
+  const cooldownSec = pool.upload.cooldownUntil > now ? Math.round((pool.upload.cooldownUntil - now) / 1000) : 0;
   return (
     <div className="telemetry-bar telemetry-bar-cols-3 mb-5">
       <div className="telemetry-cell">
@@ -79,6 +82,35 @@ function PoolBar({ pool }: { pool: HubPoolSnapshotDTO }): ReactNode {
         </span>
       </div>
     </div>
+  );
+}
+
+/** 行内计时:已运行 / 预计剩余,本地每秒递增(快照只在下一次重拉时刷新)。 */
+function rowTiming(
+  item: QueueItemDTO,
+  now: number,
+  dataAt: number,
+  t: TFunc,
+): ReactNode {
+  const finished = item.phase === "done" || item.phase === "failed";
+  if (finished) {
+    return item.videoDurationSec != null
+      ? t("queue.col.videoDuration", { time: humanSecFull(Math.round(item.videoDurationSec)) })
+      : "";
+  }
+  // 以「收到这份快照的时刻」为基准做本地递增,不把 Date.now() 和服务端字段直接相加。
+  const drift = Math.max(0, Math.round((now - dataAt) / 1000));
+  const elapsed = item.currentStepSec != null
+    ? Math.max(0, Math.round(item.currentStepSec + drift))
+    : null;
+  const eta = item.etaSec != null ? Math.max(0, item.etaSec - drift) : null;
+  const queued = item.phase === "queued";
+  return (
+    <>
+      {elapsed != null && t("hub.jobs.runningFor", { time: humanSec(elapsed) })}
+      {!queued && eta != null && (elapsed != null ? " " : "")}
+      {!queued && eta != null && t("hub.jobs.etaRemaining", { time: humanSec(eta) })}
+    </>
   );
 }
 
@@ -258,7 +290,7 @@ function QueueCard({ item, index, tz, onOpenLog }: { item: QueueItemDTO; index: 
 }
 
 /** 一行队列项:位置/场次/状态/做了什么→正在做什么→下面做什么/入队时间。 */
-function QueueRow({ item, index, tz, onOpenLog }: { item: QueueItemDTO; index: number; tz: string; onOpenLog: (key: string) => void }): ReactNode {
+function QueueRow({ item, index, tz, now, dataAt, onOpenLog }: { item: QueueItemDTO; index: number; tz: string; now: number; dataAt: number; onOpenLog: (key: string) => void }): ReactNode {
   const t = useT();
   const info = phaseInfo(item);
   const queued = info.kind === "queued";
@@ -297,15 +329,7 @@ function QueueRow({ item, index, tz, onOpenLog }: { item: QueueItemDTO; index: n
           {t(info.textKey)}
         </span>
         <div className="text-[11px] text-muted-soft mt-0.5">
-          {finished
-            ? item.videoDurationSec != null
-              ? t("queue.col.videoDuration", { time: humanSecFull(Math.round(item.videoDurationSec)) })
-              : ""
-            : <>
-              {item.currentStepSec != null ? t("hub.jobs.runningFor", { time: humanSec(item.currentStepSec) }) : ""}
-              {!queued && item.etaSec != null && " "}
-              {!queued && item.etaSec != null && t("hub.jobs.etaRemaining", { time: humanSec(item.etaSec) })}
-            </>}
+          {rowTiming(item, now, dataAt, t)}
           {finished && item.winnerWorker && <span> · {t("hub.jobs.selected", { worker: item.winnerWorker })}</span>}
         </div>
         {/* 真故障/已停止:把台账里的 error 亮出来(否则只看到「待人工」不知为何)。 */}
@@ -407,6 +431,8 @@ export function QueuePage(): ReactNode {
   const hubEnabled = useAtomValue(hubEnabledAtom);
   const tz = useAtomValue(serverTimezoneAtom);
   const [data, setData] = useState<HubQueueDTO | null>(null);
+  /** 收到当前这份快照的本地时刻 —— 本地计时以它为基准递增。 */
+  const [dataAt, setDataAt] = useState(() => Date.now());
   const [loaded, setLoaded] = useState(false);
   const [phase, setPhase] = useState<string[]>([]);
   const [states, setStates] = useState<string[]>([]);
@@ -426,30 +452,33 @@ export function QueuePage(): ReactNode {
     () => ({ phase, states, platform, q: debouncedQ || undefined, sort }),
     [phase, states, platform, debouncedQ, sort],
   );
-  // 轮询:usePolling 只按 [ms, enabled] 重建,换闭包不会立即重跑 → 筛选变更时干等 3s。
-  // 这里显式补一次「筛选变更即拉」:用 queryKey 做依赖,变更后立即 fetch,轮询照旧。
+  // queryKey 稳定标识筛选条件:它变 → poll 换新闭包 → 下面的 effect 立即重拉一次。
   const queryKey = useMemo(() => JSON.stringify(query), [query]);
   const poll = useMemo(
     () => async (): Promise<void> => {
+      // 失败**不吞**:reject 让 useHubStream 置 stale 标记(页面显示「数据可能已过期」)。
       try {
-        setData(await api.getHubQueue(JSON.parse(queryKey) as typeof query));
-      } catch {
-        /* 轮询会重试 */
+        const d = await api.getHubQueue(JSON.parse(queryKey) as typeof query);
+        setData(d);
+        setDataAt(Date.now());
       } finally {
+        // 首拉就失败也要结束 loading 态,否则页面永远停在「加载中」(静默失败)。
         setLoaded(true);
       }
     },
     [queryKey],
   );
-  usePolling(() => void poll(), 3000);
-  // 筛选一变立刻重拉(不等下一个 3s tick)。首次跳过 —— usePolling 挂载时已拉过一次,
-  // 否则 mount 会双请求。poll 由 queryKey 稳定,不会造成每帧重拉。
+  // 推送驱动:master 走 /api/hub/stream,changed 即重拉;推送不可用自动退化为有界退避轮询。
+  const stream = useHubStream(poll, { enabled: hubEnabled === true });
+  // 计时/冷却本地每秒递增:服务端只在状态变化时推,不能指望它每秒重算。
+  const now = useTicker(1000);
+  // 筛选一变立刻重拉(不必等下一次推送/兜底 tick)。首次跳过 —— useHubStream 挂载时已拉过一次,
+  // 否则 mount 会双请求。
   const firstRun = useRef(true);
   useEffect(() => {
     if (firstRun.current) { firstRun.current = false; return; }
     void poll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryKey]);
+  }, [poll]);
 
   const reset = (): void => { setPhase([]); setStates([]); setPlatform([]); setQ(""); };
   const onToggleSort = (): void => setSort((v) => (v === "newest" ? "oldest" : "newest"));
@@ -487,6 +516,7 @@ export function QueuePage(): ReactNode {
         </div>
       </div>
 
+      <HubStreamBanner handle={stream} />
       {pool && <PoolBar pool={pool} />}
 
       {!loaded ? (
@@ -511,15 +541,17 @@ export function QueuePage(): ReactNode {
             onQ={setQ}
             onReset={reset}
           />
-          {/* 窄屏(<sm):表格 5+ 列在手机上必然横向溢出且行高爆炸 → 改卡片式,信息不丢。 */}
-          <div className="sm:hidden space-y-2">
-            {rows.length === 0 ? (
-              <div className="card p-8 text-center text-muted-soft text-sm">
-                {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
-              </div>
-            ) : (
-              rows.map((it, i) => <QueueCard key={it.streamKey} item={it} index={i + 1} tz={tz} onOpenLog={setLogKey} />)
-            )}
+        {/* 窄屏(<sm):表格 5+ 列在手机上必然横向溢出且行高爆炸 → 改卡片式,信息不丢。 */}
+        <div className="sm:hidden space-y-2">
+          {rows.length === 0 ? (
+            <div className="card p-8 text-center text-muted-soft text-sm">
+              {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
+            </div>
+          ) : (
+            rows.map((it, i) => (
+              <QueueCard key={it.streamKey} item={it} index={i + 1} tz={tz} onOpenLog={setLogKey} />
+            ))
+          )}
           </div>
           <section className="table-shell hidden sm:block">
             <div className="overflow-x-auto">
@@ -558,7 +590,17 @@ export function QueuePage(): ReactNode {
                       </td>
                     </tr>
                   ) : (
-                    rows.map((it, i) => <QueueRow key={it.streamKey} item={it} index={i + 1} tz={tz} onOpenLog={setLogKey} />)
+                    rows.map((it, i) => (
+                      <QueueRow
+                        key={it.streamKey}
+                        item={it}
+                        index={i + 1}
+                        tz={tz}
+                        now={now}
+                        dataAt={dataAt}
+                        onOpenLog={setLogKey}
+                      />
+                    ))
                   )}
                 </tbody>
               </table>

@@ -10,7 +10,8 @@ import { RoomDetail } from "../components/RoomDetail";
 import { WorkersPanel } from "../components/WorkersPanel";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
 import { useDragReorder } from "../lib/dragReorder";
-import { usePolling, useToast, errMessage } from "../lib/hooks";
+import { useHubStream, usePolling, useToast, errMessage } from "../lib/hooks";
+import { HubStreamBanner } from "../components/HubStreamBanner";
 import { roomId } from "../lib/labels";
 import { useT } from "../lib/i18n";
 
@@ -37,10 +38,11 @@ export function HubPage(): ReactNode {
   const refresh = async (): Promise<void> => {
     try {
       setRules(await api.listHubRules());
-    } catch {
-      /* 静默:轮询会重试 */
-    } finally {
       setLoaded(true);
+    } catch (e) {
+      // 不静默:reject 让 useHubStream 置 stale(页面显示「数据可能已过期」),规则列表不会悄悄停在旧值。
+      setLoaded(true);
+      throw e;
     }
     // Active 指标必须统计**全部**非终态 run,不能用上面「最近 20 条」的 jobs(数据一多会恒为 0)。
     // 用 states 精确过滤 + 读后端 total(权威计数,不受 limit 截断)。
@@ -57,7 +59,8 @@ export function HubPage(): ReactNode {
       /* 忽略 */
     }
   };
-  usePolling(() => void refresh(), 3000);
+  // 推送驱动:run 状态变化由 /api/hub/stream 推;推送不可用自动退化为有界退避轮询。
+  const stream = useHubStream(refresh, { enabled: hubEnabled === true });
 
   const refreshWorkers = async (): Promise<void> => {
     try {
@@ -76,7 +79,8 @@ export function HubPage(): ReactNode {
       /* 保留上次 status */
     }
   };
-  // worker 存活轮询周期(ms):5 分钟(沿用原 WorkersCard 常量)。
+  // worker 存活轮询周期(ms):5 分钟(沿用原 WorkersCard 常量)。与规则/run 刷新**解耦**:
+  // worker 健康变化与 hub 台账无关,不该跟着每次 changed 一起重拉。
   usePolling(() => void fetchWorkerStatus(), 300_000, hubEnabled === true);
 
   /** 某规则(房间)的历次 run,新→旧:streamKey 前缀 `{platform}:{roomSlug}:` 匹配。 */
@@ -95,7 +99,7 @@ export function HubPage(): ReactNode {
         setRules(await api.reorderHubRules(keys));
       } catch (e) {
         toast(errMessage(e), "error");
-        void refresh();
+        void refresh().catch(() => {}); // 交互后主动刷新:失败已由 stale 提示呈现
       }
     },
   });
@@ -154,6 +158,7 @@ export function HubPage(): ReactNode {
         </div>
       </div>
 
+      <HubStreamBanner handle={stream} />
       <div className="telemetry-bar telemetry-bar-cols-3 mb-5">
         <div className="telemetry-cell">
           <div className="flex flex-col gap-1.5 min-w-0">
@@ -258,7 +263,7 @@ export function HubPage(): ReactNode {
               <RoomDetail
                 key={selectedRule.key}
                 rule={selectedRule}
-                onChanged={() => void refresh()}
+                onChanged={() => void refresh().catch(() => {})}
                 onDeleted={() => navigate("/hub")}
               />
             ) : (
@@ -268,7 +273,7 @@ export function HubPage(): ReactNode {
         </div>
       )}
 
-      <HubRuleDialog open={dialogOpen} onClose={() => setDialogOpen(false)} rule={null} onSaved={() => void refresh()} />
+      <HubRuleDialog open={dialogOpen} onClose={() => setDialogOpen(false)} rule={null} onSaved={() => void refresh().catch(() => {})} />
 
       <WorkersPanel
         open={panelOpen}
