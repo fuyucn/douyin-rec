@@ -1,5 +1,5 @@
 // packages/orchestrator/src/transport-local.ts
-import { mkdirSync, copyFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, copyFileSync, existsSync, linkSync, rmSync } from "node:fs";
 import { join, basename } from "node:path";
 import type { NodeTaskDTO, RemoteTaskSpec, NodeStatus } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeTasks, Transport } from "./transport.js";
@@ -94,11 +94,31 @@ export class LocalTransport implements Transport {
     for (const p of paths) { try { rmSync(p, { force: true }); } catch { /* 忽略 */ } }
   }
 
-  /** 同机 pull：mkdir -p localDir，然后把每个文件复制进去（保留文件名）。 */
+  /**
+   * 同机 pull：mkdir -p localDir，然后把每个文件**硬链接**进去（保留文件名）。
+   *
+   * 为什么用硬链接而不是复制:winner 是 master 本机时,源与 stage 在**同一块盘**上,
+   * 复制等于把同一份数据存两遍 —— 白占磁盘 + 白费 IO(实测 4.6GB 的场次要读写各 4.6GB,
+   * 台账统计 7 天 local winner 的 pull 达 51GB,比所有 VPS 回传加起来还多)。
+   * 硬链接是同一 inode 的第二个名字:瞬间完成、零额外空间。
+   *
+   * 安全性:清理逻辑删 stage 的「副本」时,`recordings/` 的原文件仍在(反之亦然)——
+   * 删一个名字只是把引用计数减一,不会丢数据。这与 `session-plan.ts` 的 upload 别名
+   * 是同一套语义(那里也先 linkSync、失败再 copy)。
+   *
+   * 回落:跨设备/文件系统不支持硬链接(EXDEV/EPERM/EMLINK 等)→ 退回复制,行为与从前一致。
+   */
   async pull(remotePaths: string[], localDir: string): Promise<void> {
     mkdirSync(localDir, { recursive: true });
     for (const src of remotePaths) {
-      copyFileSync(src, join(localDir, basename(src)));
+      const dst = join(localDir, basename(src));
+      // 目标已存在(续跑/重跑)→ 先删,否则 linkSync 直接 EEXIST。
+      if (existsSync(dst)) rmSync(dst, { force: true });
+      try {
+        linkSync(src, dst);
+      } catch {
+        copyFileSync(src, dst); // 跨设备/不支持硬链接 → 复制(与从前行为一致)
+      }
     }
   }
 

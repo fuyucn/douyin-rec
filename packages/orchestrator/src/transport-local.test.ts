@@ -126,4 +126,47 @@ describe("LocalTransport.pull", () => {
     expect(existsSync(join(target, "a.ts"))).toBe(true);
     expect(readFileSync(join(target, "a.ts"), "utf-8")).toBe("video-data");
   });
+
+  // T18-optim:同机 pull 用硬链接(省磁盘 + 省 IO)。必须证明三件事:
+  //   ① 真的共享 inode(没白复制);② 删 stage 的副本不影响 recordings 原件;
+  //   ③ 目标已存在时能覆盖(续跑/重跑场景)。
+  it("硬链接:源与 stage 副本共享同一 inode(没有白复制一份)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pull-link-"));
+    const src = join(root, "a.ts");
+    writeFileSync(src, "video-data");
+    const target = join(root, "stage", "bc-1");
+    const t = new LocalTransport({ id: "local", recordingsDir: root, taskRooms: {}, ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }) });
+    await t.pull([src], target);
+    const { statSync } = await import("node:fs");
+    const a = statSync(src);
+    const b = statSync(join(target, "a.ts"));
+    expect(b.ino).toBe(a.ino);       // 同一 inode = 硬链接成立
+    expect(b.nlink).toBe(2);         // 两个名字指向它
+  });
+
+  it("硬链接:删掉 stage 副本后,recordings 原件仍在且内容完整", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pull-link2-"));
+    const src = join(root, "a.ts");
+    writeFileSync(src, "video-data");
+    const target = join(root, "stage", "bc-2");
+    const t = new LocalTransport({ id: "local", recordingsDir: root, taskRooms: {}, ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }) });
+    await t.pull([src], target);
+    const { rmSync, readFileSync, existsSync } = await import("node:fs");
+    rmSync(join(target, "a.ts"), { force: true });          // 模拟清理 stage
+    expect(existsSync(src)).toBe(true);                     // 原件没被牵连
+    expect(readFileSync(src, "utf-8")).toBe("video-data");
+  });
+
+  it("硬链接:目标已存在时覆盖(续跑/重跑不会因 EEXIST 失败)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pull-link3-"));
+    const src = join(root, "a.ts");
+    writeFileSync(src, "new-data");
+    const target = join(root, "stage", "bc-3");
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, "a.ts"), "stale");
+    const t = new LocalTransport({ id: "local", recordingsDir: root, taskRooms: {}, ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }) });
+    await t.pull([src], target);
+    const { readFileSync } = await import("node:fs");
+    expect(readFileSync(join(target, "a.ts"), "utf-8")).toBe("new-data");
+  });
 });
