@@ -21,7 +21,7 @@ import { Badge, Dot } from "../components/Badge";
 import { useHubStream, usePolling, errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { roomId, qualityLabel } from "../lib/labels";
-import { RoomEditDialog } from "../modals/RoomEditDialog";
+import { RoomEditPanel } from "../modals/RoomEditPanel";
 
 void _api; // (保持 import 形状与其它页面一致)
 
@@ -89,7 +89,7 @@ export function RoomsPage(): ReactNode {
       )}
 
       {editing && (
-        <RoomEditDialog
+        <RoomEditPanel
           open
           room={editing}
           onClose={() => setEditing(null)}
@@ -121,10 +121,10 @@ function RoomCard({ room, onEdit }: { room: RoomDTO; onEdit: () => void }): Reac
 
   return (
     <div className="card p-4">
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="font-medium text-ink truncate">{name}</span>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="font-medium text-ink truncate max-w-full">{name}</span>
             <Badge tone="badge-muted">{room.platform}</Badge>
             {/* 录制开关(用户意图)—— 与 Hub 的「处理开关」是两件事,这里分别用独立标记,不混用 */}
             {rec
@@ -136,7 +136,7 @@ function RoomCard({ room, onEdit }: { room: RoomDTO; onEdit: () => void }): Reac
           </div>
           <div className="font-mono text-[11px] text-muted-soft mt-1 truncate" title={room.room}>{room.room}</div>
         </div>
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 self-start">
           {rec && (
             <Link to={`/task/${rec.taskId}`} className="btn-icon" title={t("rooms.openTaskDetail")}>
               <Dot color={rec.enabled ? "var(--success)" : "var(--muted-soft)"} />
@@ -150,31 +150,42 @@ function RoomCard({ room, onEdit }: { room: RoomDTO; onEdit: () => void }): Reac
       </div>
 
       <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2 text-[12px]">
-        <div>
-          <div className="section-label mb-1">{t("rooms.recordingSection")}</div>
+        <div className="min-w-0">
+          <div className="section-label mb-1.5">{t("rooms.recordingSection")}</div>
           {rec ? (
-            <div className="text-body space-y-0.5">
-              <div>{t("rooms.quality")}: {qualityLabel(rec.quality)} · {rec.engine} · {rec.segmentSec}s</div>
-              <div className="text-muted">
-                {rec.danmu ? t("rooms.danmuOn") : t("rooms.danmuOff")} ·{" "}
-                {rec.scheduleStart && rec.scheduleEnd ? `${rec.scheduleStart}-${rec.scheduleEnd}` : t("rooms.allDay")}
+            <div className="space-y-1 text-[12px]">
+              <div className="flex gap-2 min-w-0">
+                <span className="text-muted-soft shrink-0 w-14">{t("rooms.quality")}</span>
+                <span className="text-body truncate">{qualityLabel(rec.quality)} · {rec.engine} · {rec.segmentSec}s</span>
+              </div>
+              <div className="flex gap-2">
+                <span className="text-muted-soft shrink-0 w-14">{t("rooms.danmu")}</span>
+                <span className="text-body">{rec.danmu ? t("rooms.danmuOn") : t("rooms.danmuOff")}</span>
+              </div>
+              <div className="flex gap-2">
+                <span className="text-muted-soft shrink-0 w-14">{t("rooms.schedule")}</span>
+                <span className="text-body">{rec.scheduleStart && rec.scheduleEnd ? `${rec.scheduleStart}-${rec.scheduleEnd}` : t("rooms.allDay")}</span>
               </div>
             </div>
           ) : (
-            <div className="text-muted">{t("rooms.noRecordingHint")}</div>
+            <div className="text-muted text-[12px]">{t("rooms.noRecordingHint")}</div>
           )}
         </div>
-        <div>
-          <div className="section-label mb-1">{t("rooms.processingSection")}</div>
+        <div className="min-w-0">
+          <div className="section-label mb-1.5">{t("rooms.processingSection")}</div>
           {proc ? (
-            <div className="text-body space-y-0.5">
-              <div>{procBits.join(" → ")}</div>
-              <div className="text-muted">
-                {t("rooms.nodes")}: {proc.workers && proc.workers.length > 0 ? proc.workers.join(", ") : t("rooms.allNodes")}
+            <div className="space-y-1 text-[12px]">
+              <div className="flex gap-2 min-w-0">
+                <span className="text-muted-soft shrink-0 w-14">{t("rooms.pipeline")}</span>
+                <span className="text-body truncate" title={procBits.join(" → ")}>{procBits.join(" → ")}</span>
+              </div>
+              <div className="flex gap-2 min-w-0">
+                <span className="text-muted-soft shrink-0 w-14">{t("rooms.nodes")}</span>
+                <span className="text-body truncate">{proc.workers && proc.workers.length > 0 ? proc.workers.join(", ") : t("rooms.allNodes")}</span>
               </div>
             </div>
           ) : (
-            <div className="text-muted">{t("rooms.noProcessingHint")}</div>
+            <div className="text-muted text-[12px]">{t("rooms.noProcessingHint")}</div>
           )}
         </div>
       </div>
