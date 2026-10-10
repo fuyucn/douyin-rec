@@ -133,6 +133,8 @@ const DICT = {
       stepNodeUpload: "节点侧上传", stepUploadPrivate: "上传(私)", stepUploadPublic: "上传(公开)", stepStageOnly: "仅合成",
       openTaskDetail: "打开任务详情",
       colRoom: "房间", colRecording: "录制", colPipeline: "处理管线", colNodes: "参与节点", colAction: "操作",
+      colQuality: "画质", colDanmu: "弹幕", colSchedule: "窗口", colStatus: "状态",
+      metricTotal: "房间", metricRecording: "录制中", metricWaiting: "待命", metricAttention: "需注意",
     },
     settings: {
         notifSaved: "通知设置已保存",
@@ -485,6 +487,8 @@ const DICT = {
       stepNodeUpload: "node upload", stepUploadPrivate: "upload (private)", stepUploadPublic: "upload (public)", stepStageOnly: "compose only",
       openTaskDetail: "Open task detail",
       colRoom: "Room", colRecording: "Recording", colPipeline: "Pipeline", colNodes: "Nodes", colAction: "Actions",
+      colQuality: "Quality", colDanmu: "Danmu", colSchedule: "Window", colStatus: "Status",
+      metricTotal: "Rooms", metricRecording: "Recording", metricWaiting: "Standby", metricAttention: "Attention",
     },
     settings: {
         notifSaved: "Notification settings saved",
