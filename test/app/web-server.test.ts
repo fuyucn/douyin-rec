@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
@@ -213,6 +213,37 @@ describe("createWebServer (live)", () => {
     const slave = await fetch(`${base}/api/hub/apply?force=1`, { method: "POST" });
     expect(slave.status).toBe(400);
     expect(requestSyncTasks).toHaveBeenCalledTimes(2);
+  });
+
+  // 回归:资源端点必须**经由 server.ts 的 deps 转发**生效。
+  // 之前我在 WebServerDeps 加了 hubConfigSource 却忘了转进 makeApi,
+  // 而 web-api.test 直接往 makeApi 注入 → 两端各自绿,线上却是「hub 未启用」(自审发现)。
+  it("GET /api/hub/resources 经由 server deps 转发(hubConfigSource 不能只加在类型上)", async () => {
+    const cfgPath = join(hubDir, "hub.config.json");
+    writeFileSync(cfgPath, JSON.stringify({ resources: { maxCpuParallel: 1 } }), "utf-8");
+    const s2 = createWebServer({
+      store, manager: new MockManager(), log: () => {},
+      resolveAnchor: async () => null, resolveShortUrl: async () => null,
+      hubDir, hubEnabled: true,
+      hubConfigSource: () => ({ json: readFileSync(cfgPath, "utf-8"), path: cfgPath, source: "root-file" }),
+    });
+    await new Promise<void>((r) => s2.listen(0, "127.0.0.1", r));
+    const b2 = `http://127.0.0.1:${(s2.address() as AddressInfo).port}`;
+    try {
+      const got = await fetch(`${b2}/api/hub/resources`);
+      expect(got.status).toBe(200);
+      const body = (await got.json()) as { source: string; resources: { maxCpuParallel: number } };
+      expect(body.source).toBe("root-file");
+      const put = await fetch(`${b2}/api/hub/resources`, {
+        method: "PUT", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ maxCpuParallel: 4 }),
+      });
+      expect(put.status).toBe(200);
+      expect((JSON.parse(readFileSync(cfgPath, "utf-8")) as { resources: { maxCpuParallel: number } })
+        .resources.maxCpuParallel).toBe(4);
+    } finally {
+      await new Promise<void>((r) => s2.close(() => r()));
+    }
   });
 
   it("GET /api/tasks → json list", async () => {
