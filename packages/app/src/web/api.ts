@@ -8,7 +8,7 @@
  * ⚠️ **本文件只做组装**(T-22 第 1 步):原 1321 行 / 单函数 909 行 / 53 个方法,现按域拆到
  * `web/api/*.ts`,这里只 buildCtx + 合并各域方法对象。加/改端点请去对应域文件:
  *   tasks.ts(任务 CRUD/启停/平台) · cookies.ts · login.ts · settings.ts · merge.ts
- *   hub-rules.ts · hub-jobs.ts · workers.ts
+ *   hub-rules.ts · hub-jobs.ts · workers.ts · rooms.ts(统一房间视图,读写两半)
  * 公共类型在 `web/api/types.ts`,共享辅助在 `web/api/context.ts`。
  */
 import { buildCtx } from "./api/context.js";
@@ -20,6 +20,7 @@ import { buildMerge } from "./api/merge.js";
 import { buildHubRules } from "./api/hub-rules.js";
 import { buildHubJobs } from "./api/hub-jobs.js";
 import { buildWorkers } from "./api/workers.js";
+import { buildRooms } from "./api/rooms.js";
 import type { Api, ApiDeps } from "./api/types.js";
 
 // 公共类型/常量 re-export:既有引用(`web/api.js` 的 makeApi / ApiDeps / ManagerLike …)不变。
@@ -41,5 +42,6 @@ export function makeApi(deps: ApiDeps): Api {
     ...buildHubRules(ctx),
     ...buildHubJobs(ctx),
     ...buildWorkers(ctx),
+    ...buildRooms(ctx),
   };
 }

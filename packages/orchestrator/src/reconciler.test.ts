@@ -1235,4 +1235,152 @@ describe("磁盘看门狗(节点剩余空间告警)", () => {
     });
   });
 
+  describe("T7 非阻塞派发(两阶段:job 先行 + 有界并发)", () => {
+    /** 两个房间(不同 roomSlug/sessionBase),同一 worker 一次报上来。 */
+    function twoRooms(): { ledger: SyncLedger; transports: Map<string, Transport>; keys: string[] } {
+      const ledger = freshLedger();
+      const recA = makeRec({ roomSlug: "room-a", sessionBase: "主播A_2026-06-22_08-00-00" });
+      const recB = makeRec({ roomSlug: "room-b", sessionBase: "主播B_2026-06-22_08-00-00" });
+      const transports = new Map([["node-1", makeTransport("node-1", [recA, recB])]]);
+      const keys = clusterBroadcasts(
+        [{ workerId: "node-1", recordings: [recA, recB] }], 0, "douyin",
+      ).map((b) => b.streamKey);
+      return { ledger, transports, keys };
+    }
+
+    it("房间 A 的 pipeline 还在跑 → 房间 B 的 job 行**已经**建好(不再被 N+1 阻塞)", async () => {
+      const { ledger, transports, keys } = twoRooms();
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const started: string[] = [];
+      const runPipeline = vi.fn(async (b: Broadcast) => {
+        started.push(b.roomSlug);
+        if (b.roomSlug === "room-a") await gate;   // A 挂住,B 应该照样被派发
+        ledger.markDone(b.streamKey, "BV");
+        return { state: "done" as const, bv: "BV" };
+      });
+      const r = new Reconciler({
+        platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+        runPipeline: runPipeline as never,
+        settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0,
+        maxConcurrentPipelines: 2,
+      });
+
+      const done = r.reconcileAll();
+      // 等 A 真的开始跑(B 是否已派发取决于 pump 顺序,但两行 job 必须已建)
+      while (started.length === 0) await new Promise((res) => setImmediate(res));
+      const rowsAtA = ledger.listKeys().map((k) => k.streamKey);
+      expect(rowsAtA).toEqual(expect.arrayContaining(keys));  // 两行都在
+      release();
+      await done;
+      expect(runPipeline).toHaveBeenCalledTimes(2);
+      ledger.close();
+    });
+
+    it("maxConcurrentPipelines=1 → 两场严格串行(与旧行为一致,不夸大收益)", async () => {
+      const { ledger, transports } = twoRooms();
+      const order: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const runPipeline = vi.fn(async (b: Broadcast) => {
+        order.push(`start:${b.roomSlug}`);
+        if (order.length === 1) await gate;
+        order.push(`end:${b.roomSlug}`);
+        ledger.markDone(b.streamKey, "BV");
+        return { state: "done" as const, bv: "BV" };
+      });
+      const r = new Reconciler({
+        platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+        runPipeline: runPipeline as never,
+        settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0,
+        maxConcurrentPipelines: 1,
+      });
+      const done = r.reconcileAll();
+      while (order.length === 0) await new Promise((res) => setImmediate(res));
+      await new Promise((res) => setImmediate(res));
+      expect(order).toEqual(["start:room-a"]);   // 第二个还在排队
+      release();
+      await done;
+      expect(order).toEqual(["start:room-a", "end:room-a", "start:room-b", "end:room-b"]);
+      ledger.close();
+    });
+
+    it("同一房间被信号两次(并发两轮 reconcileAll)→ 只跑一次,不重复建稿", async () => {
+      const ledger = freshLedger();
+      const rec = makeRec();
+      const transports = new Map([["node-1", makeTransport("node-1", [rec])]]);
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      let calls = 0;
+      const runPipeline = vi.fn(async (b: Broadcast) => {
+        calls++;
+        await gate;
+        ledger.markDone(b.streamKey, "BV");
+        return { state: "done" as const, bv: "BV" };
+      });
+      const r = new Reconciler({
+        platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+        runPipeline: runPipeline as never,
+        settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0,
+        maxConcurrentPipelines: 2,
+      });
+      // 第一轮还挂在 pipeline 里时(hub 的 running 守卫之外的直接重入)第二轮到达
+      const first = r.reconcileAll();
+      while (calls === 0) await new Promise((res) => setImmediate(res));
+      await r.reconcileAll();
+      release();
+      await first;
+      expect(calls).toBe(1);
+      expect(ledger.listKeys()).toHaveLength(1);
+      ledger.close();
+    });
+
+    it("上一轮 failed(fails<maxRetries)→ 下一轮重新派发(dedup 不压合法重试)", async () => {
+      const ledger = freshLedger();
+      const rec = makeRec();
+      const transports = new Map([["node-1", makeTransport("node-1", [rec])]]);
+      const key = clusterBroadcasts([{ workerId: "node-1", recordings: [rec] }], 0, "douyin")[0].streamKey;
+      let n = 0;
+      const runPipeline = vi.fn(async (b: Broadcast) => {
+        n++;
+        if (n === 1) { ledger.markFailed(b.streamKey, "第一次炸了"); return { state: "failed" as const }; }
+        ledger.markDone(b.streamKey, "BV");
+        return { state: "done" as const, bv: "BV" };
+      });
+      const r = new Reconciler({
+        platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+        runPipeline: runPipeline as never,
+        settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0,
+      });
+      await r.reconcileAll();
+      expect(ledger.get(key)?.state).toBe("failed");
+      await r.reconcileAll();          // drain 后 active 集合已清空 → 必须能再派发
+      expect(runPipeline).toHaveBeenCalledTimes(2);
+      expect(ledger.get(key)?.state).toBe("done");
+      ledger.close();
+    });
+
+    it("某场 pipeline 抛错 → 只标该场 failed,另一场照常完成", async () => {
+      const { ledger, transports, keys } = twoRooms();
+      const runPipeline = vi.fn(async (b: Broadcast) => {
+        if (b.roomSlug === "room-a") throw new Error("ffmpeg 挂了");
+        ledger.markDone(b.streamKey, "BV");
+        return { state: "done" as const, bv: "BV" };
+      });
+      const r = new Reconciler({
+        platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+        runPipeline: runPipeline as never,
+        settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0,
+        maxConcurrentPipelines: 2,
+      });
+      await r.reconcileAll();
+      const keyA = keys.find((k) => k.includes("room-a"))!;
+      const keyB = keys.find((k) => k.includes("room-b"))!;
+      expect(ledger.get(keyA)?.state).toBe("failed");
+      expect(ledger.get(keyB)?.state).toBe("done");
+      expect(ledger.get(keyA)?.fails).toBe(1);   // 失败计数仍要自增(重试上限靠它)
+      ledger.close();
+    });
+  });
+
 });

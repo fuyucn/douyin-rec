@@ -1,0 +1,266 @@
+/**
+ * web/api/rooms.ts — **统一房间读写**(T9 / plans/030 c5)。
+ *
+ * 一个房间的配置物理上分两处:tasks 表(录制半边)+ `config/hub/{key}.json`(处理半边)。
+ * 本域把两半聚合成一个可读写的单元,**不改物理存储** —— 旧 `/api/tasks` 与
+ * `/api/hub/rules` 端点全部保留,前端可以逐步迁移。
+ *
+ * ## 为什么要有它
+ * 前端改一个房间的画质+处理步骤,今天必须**连写两个接口**。中间任何一步失败都会留下
+ * 半成功(「画质改了、处理没改」),而用户看不出是哪半边生效、也没法只重试那一半。
+ *
+ * ## 写入顺序与回滚
+ * 先写 task、再写 hub 规则。第二步失败时**回滚第一步**(把 task 恢复成写之前的值),
+ * 然后返回 500 + 原因。代价是:若回滚本身也失败,仍可能留下半成功 —— 这种情况下
+ * 错误信息必须**明说哪半边可能已改**,让用户能自己核对(静默留半成功是不可接受的)。
+ */
+import { platformForRoom, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
+import type { ApiCtx } from "./context.js";
+import type { ApiResult } from "./types.js";
+import * as hubStore from "../../hub-store.js";
+import type { Task } from "../../store.js";
+import { toDanmuFlag } from "../../task-input.js";
+
+/** 从 HubRuleDTO 里剥掉身份四元组(key/platform/roomSlug/room)——RoomDTO 顶层已有。 */
+function stripIdentity(dto: RoomDTO["processing"] & { key?: string }): NonNullable<RoomDTO["processing"]> {
+  const { key: _k, platform: _p, roomSlug: _r, room: _room, ...rest } = dto as Record<string, unknown>;
+  void _k; void _p; void _r; void _room;
+  return rest as NonNullable<RoomDTO["processing"]>;
+}
+
+export function buildRooms(ctx: ApiCtx) {
+  const { deps, store, hubDir, err, normWebhook } = ctx;
+
+  /**
+   * 解析 `{platform}.{roomSlug}`;格式非法 → null(调用方回 400)。
+   *
+   * 只做**语法**校验,不校验平台是否已注册 —— key 里的 platform 只是用来与
+   * `platformForRoom(task.room).id` 做字符串比对的,不会驱动任何平台实现,
+   * 所以未知平台只会「查不到房间 → 404」,不需要在这里拦。
+   * (自审:第一版在这里写了个 `platformForRoom(douyin…)` 的空 try/catch 想「校验平台」,
+   *  实际什么都没校验,纯误导,删掉。)
+   */
+  const parseKey = (key: string): { platform: string; roomSlug: string } | null => {
+    const i = key.indexOf(".");
+    if (i <= 0 || i === key.length - 1) return null;
+    const platform = key.slice(0, i);
+    const roomSlug = key.slice(i + 1);
+    if (!platform || !roomSlug) return null;
+    return { platform, roomSlug };
+  };
+
+  const recordingOf = (t: Task | null): RoomRecordingDTO | null =>
+    t
+      ? {
+          taskId: t.id,
+          room: t.room,
+          name: t.name,
+          anchorName: t.anchorName,
+          quality: t.quality,
+          engine: t.engine,
+          danmu: t.danmu,
+          segmentSec: t.segmentSec,
+          scheduleStart: t.scheduleStart,
+          scheduleEnd: t.scheduleEnd,
+          enabled: t.enabled,
+          useCookie: t.useCookie,
+          // cookies 是敏感值:DTO 恒不外发。要改用 PUT。
+          cookies: null,
+          outDir: t.outDir,
+          webhook: t.webhook,
+        }
+      : null;
+
+  /**
+   * 找该房间的录制任务。**先按 sourceTaskId 精确找,再按 (platform, roomSlug) 反查** ——
+   * 后者覆盖「任务先建好、还没绑到 hub 规则」的常见情况(前端加房间就是这个顺序)。
+   */
+  const findTask = (platform: string, roomSlug: string, sourceTaskId: number | null): Task | null => {
+    if (sourceTaskId) {
+      const t = store.getTask(sourceTaskId);
+      if (t) {
+        const p = platformForRoom(t.room);
+        if (p.id === platform && p.extractRoomSlug(t.room) === roomSlug) return t;
+      }
+    }
+    return (
+      store.listTasks().find((t) => {
+        try {
+          const p = platformForRoom(t.room);
+          return p.id === platform && p.extractRoomSlug(t.room) === roomSlug;
+        } catch {
+          return false;
+        }
+      }) ?? null
+    );
+  };
+
+  const view = (key: string): RoomDTO | null => {
+    const k = parseKey(key);
+    if (!k) return null;
+    const rule = hubStore.listHubRules(hubDir).find((r) => r.key === key) ?? null;
+    const task = findTask(k.platform, k.roomSlug, rule?.recording?.sourceTaskId ?? null);
+    const room = rule?.room || task?.room || "";
+    // 没有规则 → processing 必须是 null(而不是一个 enabled:false 的空壳),
+    // 否则前端分不清「配了处理但停用」和「根本没配处理」。
+    // 自审:第一版为了拿 processing 字段,给无规则的情况**造了个假 rule** 传进 hubRuleView,
+    // 那条路径会顺手触发 anchorName 反查等无意义工作,且读起来像「有规则」——已改成只读真规则。
+    const processing = rule ? stripIdentity(ctx.hubRuleView(rule)) : null;
+    return {
+      key,
+      platform: k.platform,
+      roomSlug: k.roomSlug,
+      room,
+      recording: recordingOf(task),
+      processing: rule ? processing : null,
+    };
+  };
+
+  return {
+    /** GET /api/rooms —— 全部房间(有规则的 + 有录制任务的),供「一个房间一个入口」列表用。 */
+    listRooms(): ApiResult {
+      const keys = new Set<string>();
+      for (const r of hubStore.listHubRules(hubDir)) keys.add(r.key);
+      for (const t of store.listTasks()) {
+        try {
+          const p = platformForRoom(t.room);
+          keys.add(`${p.id}.${p.extractRoomSlug(t.room)}`);
+        } catch {
+          /* 房间地址异常的任务不进房间列表(与旧接口一致:该任务自己仍可在 /api/tasks 看到) */
+        }
+      }
+      const rooms = [...keys].map(view).filter((r): r is RoomDTO => r !== null);
+      return { status: 200, body: rooms };
+    },
+
+    /** GET /api/rooms/:key —— 录制 + 处理两半合并视图。 */
+    getRoom(key: string): ApiResult {
+      const k = parseKey(key);
+      if (!k) return err(400, `房间 key 非法: ${key}(应为 {platform}.{roomSlug})`);
+      const dto = view(key);
+      // 两半都没有 = 这个房间不存在(而不是「存在但都空」——那没有意义)。
+      if (!dto || (!dto.recording && !dto.processing)) return err(404, `未找到房间 ${key}`);
+      return { status: 200, body: dto };
+    },
+
+    /**
+     * PUT /api/rooms/:key —— 一次改两半(各自可选)。
+     *
+     * 顺序:校验 → 写 task → 写规则 → (规则失败则回滚 task)。
+     * 「两半都没传」按 400 拒:那是一次无意义的写,静默成功会掩盖前端 bug。
+     */
+    updateRoom(key: string, input: RoomPayload): ApiResult {
+      const k = parseKey(key);
+      if (!k) return err(400, `房间 key 非法: ${key}(应为 {platform}.{roomSlug})`);
+      if (input.recording === undefined && input.processing === undefined) {
+        return err(400, "recording 与 processing 至少传一个");
+      }
+
+      const before = view(key);
+      if (!before) return err(404, `未找到房间 ${key}`);
+
+      // ── 录制半边 ──────────────────────────────────────────────────────────────
+      const rec = input.recording;
+      let taskId = before.recording?.taskId ?? null;
+      if (rec) {
+        const patch: Parameters<typeof store.updateTask>[1] = {};
+        if ("room" in rec) {
+          const room = (rec.room ?? "").trim();
+          if (!room) return err(400, "recording.room 不能为空");
+          patch.room = room;
+        }
+        if ("name" in rec) patch.name = rec.name ?? null;
+        if ("quality" in rec) patch.quality = rec.quality;
+        if ("engine" in rec) patch.engine = rec.engine;
+        // 归一化复用 task-input 的权威实现(自审:第一版我自己写了 `rec.danmu ? 1 : 0`,
+        // 与 tasks.ts 的 toDanmuFlag 成了第二套 —— undefined 语义会不一致)。
+        if ("danmu" in rec) patch.danmu = toDanmuFlag(rec.danmu);
+        if ("segmentSec" in rec) patch.segmentSec = rec.segmentSec;
+        if ("useCookie" in rec) patch.useCookie = ctx.toUseCookie(rec.useCookie);
+        if ("cookies" in rec) patch.cookies = rec.cookies ?? null;
+        if ("outDir" in rec) patch.outDir = rec.outDir ?? null;
+        if ("webhook" in rec) patch.webhook = normWebhook(rec.webhook);
+
+        if (taskId === null) {
+          // 没有任务可改:要么忽略(只改处理),要么 400 让用户知道得先建任务。
+          // 静默忽略 = 「我以为改了画质其实没改」,是最坏的一种。
+          const hasRealField = Object.keys(patch).some((key2) => key2 !== "webhook");
+          if (hasRealField) return err(400, "该房间还没有绑定录制任务,请先创建任务再改录制配置");
+        } else {
+          const t = store.getTask(taskId);
+          if (!t) return err(404, `房间 ${key} 绑定的录制任务已不存在(id=${taskId})`);
+          if (t.managedBy === "hub") return err(403, `任务 id=${taskId} 由 hub 管理,请在 master 上修改`);
+          const updated = store.updateTask(taskId, patch);
+          if (!updated) return err(500, `写入录制配置失败(id=${taskId})`);
+        }
+      }
+
+      // ── 处理半边 ──────────────────────────────────────────────────────────────
+      const proc = input.processing;
+      if (proc) {
+        const ruleInput: HubRulePayload = {
+          enabled: proc.enabled,
+          pipeline: proc.pipeline,
+          workers: proc.workers,
+          requires: proc.requires,
+        };
+        // 复用 hub-rules 的同一套校验(判定逻辑只写一份):worker 必须已配置、标题模板合法。
+        const werr = ctx.validateWorkers(ruleInput);
+        if (werr) return err(400, werr);
+        const perr = ctx.validatePipeline(ruleInput);
+        if (perr) return err(400, perr);
+        // 「要改 processing 但没有 sourceTaskId」→ 规则建了也没法下发,必须让用户补。
+        const sourceTaskId = before.processing
+          ? ((before.processing as { recording?: { sourceTaskId?: number | null } }).recording?.sourceTaskId ?? taskId)
+          : taskId;
+        const rerr = ctx.recordingError(sourceTaskId, k.roomSlug);
+        if (rerr) return err(400, rerr);
+
+        try {
+          hubStore.upsertHubRule(hubDir, {
+            platform: k.platform,
+            roomSlug: k.roomSlug,
+            room: before.room,
+            enabled: proc.enabled,
+            pipeline: proc.pipeline,
+            workers: proc.workers,
+            requires: proc.requires,
+            recording: sourceTaskId ? { sourceTaskId } : undefined,
+          });
+        } catch (e) {
+          // 回滚第一步:不留半成功。这是本域存在的核心原因。
+          if (rec && taskId !== null) {
+            const prev = before.recording;
+            if (prev) {
+              const ok = store.updateTask(taskId, {
+                room: prev.room,
+                name: prev.name,
+                quality: prev.quality,
+                engine: prev.engine,
+                danmu: prev.danmu,
+                segmentSec: prev.segmentSec,
+                useCookie: prev.useCookie,
+                outDir: prev.outDir,
+                webhook: prev.webhook,
+              });
+              if (!ok) {
+                return err(500, `写入处理配置失败(${(e as Error).message});`
+                  + `**且录制配置的回滚也失败了** —— 该房间 ${key} 的录制半边可能已被改动,请手工核对`);
+              }
+            }
+          }
+          return err(500, `写入处理配置失败,已回滚录制配置: ${(e as Error).message}`);
+        }
+        // 处理半边变了 → 立刻下发一次(不等 60s 周期 tick)。
+        deps.requestSyncTasks?.();
+      } else if (rec) {
+        // 只改了录制:若该任务是 hub 源任务,同样要立刻下发(T3:停用保留 ≠ 删除,靠这里生效)。
+        if (taskId !== null && ctx.isHubSourceTask(taskId)) deps.requestSyncTasks?.();
+      }
+
+      const after = view(key);
+      if (!after) return err(500, "写入后房间读不回来(store/hub 目录不一致?)");
+      return { status: 200, body: after };
+    },
+  };
+}

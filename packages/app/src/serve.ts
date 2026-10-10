@@ -22,6 +22,7 @@ import { TaskManager } from "./task-manager.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { createWebServer } from "./web/server.js";
+import { HubWatch } from "./hub-watch.js";
 import { QrLoginManager } from "./login/login-manager.js";
 import { PlaywrightQrLogin } from "./login/qr-login.js";
 import { BiliQrLogin } from "./login/bili-qr-login.js";
@@ -140,6 +141,11 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     const hubEnabled = !!(o.hub && hubStarter && resolveHubConfigJson(o.hubConfig, store));
     // hub 台账路径与 cli hubStarter 同一推导(<db>-sync.db)——「hub 任务」端点读它展示进度/ETA/日志。
     const syncDbPath = resolveDbPath(o.db).replace(/\.db$/, "-sync.db");
+    // T4:台账变更监视 → SSE(/api/hub/stream)。
+    // **只在 master 起**:sync 台账的唯一写端是本节点的 orchestrator,slave 上那份文件永远不变
+    // → 白白空转 1s 定时器、永远不推。不注入则该路由显式 503(而非静默 404/空流)。
+    const hubWatch = hubEnabled ? new HubWatch(syncDbPath, { log: (m) => serveLog.info(m) }) : null;
+    hubWatch?.start();
     const server = createWebServer({
       store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(),
       // hub 未启用不注入 → 端点回落 400(与 hub.start 一致的开关逻辑)。
@@ -160,6 +166,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       retryNode: hubEnabled ? hubStarter?.retryNode : undefined,
       stopJob: hubEnabled ? hubStarter?.stopJob : undefined,
       runNow: hubEnabled ? hubStarter?.runNow : undefined,
+      hubWatch: hubWatch ?? undefined,
       log: (m) => console.log(m),
     });
 
@@ -309,6 +316,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       clearInterval(diskWatch);
       clearInterval(cookieWatch);
       if (canaryWatch) clearInterval(canaryWatch);
+      hubWatch?.stop();
       if (stopHub) stopHub();
       serveLog.info(`\n收到 ${sig}，正在关闭…`);
       // Stop scheduler ticks first (so it won't re-start a task), then stop

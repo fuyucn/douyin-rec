@@ -73,6 +73,60 @@ export interface HubRecordingConfig {
   sourceTaskId?: number | null;
 }
 
+/**
+ * **统一房间视图**(T9):一次读写「录制(task)+ 处理(hub 规则)」两半。
+ *
+ * 为什么要它:同一个房间的配置今天分散在 `GET /api/tasks` 和 `GET /api/hub/rules` 两个域,
+ * 前端改一个房间要**连写两个接口** —— 中间任何一步失败就留下「画质改了但处理没改」的
+ * 半成功状态,且用户看不出是哪半边生效了。本 DTO 让一个房间成为**一个可读写单元**。
+ *
+ * ⚠️ 物理存储**不变**:两半仍分别落在 tasks 表与 `config/hub/{key}.json`(不迁数据、不动 schema),
+ * 本 DTO 只是读写的**聚合视图**。旧的 `/api/tasks` 与 `/api/hub/rules` 端点全部保留可用。
+ */
+export interface RoomRecordingDTO {
+  /** master 本地任务 id;null = 尚未绑定录制任务(只配了处理)。 */
+  taskId: number | null;
+  room: string;
+  name: string | null;
+  anchorName: string | null;
+  quality: string;
+  engine: string;
+  danmu: number;
+  segmentSec: number;
+  scheduleStart: string | null;
+  scheduleEnd: string | null;
+  enabled: boolean;
+  useCookie: boolean;
+  /** cookies 是敏感值:**永远不外发**,仅 PUT 时可写。DTO 里恒为 null。 */
+  cookies: null;
+  outDir: string | null;
+  webhook: string | null;
+}
+
+export interface RoomDTO {
+  /** `{platform}.{roomSlug}`,与 hub 规则 key 同形(跨平台不撞)。 */
+  key: string;
+  platform: string;
+  roomSlug: string;
+  room: string;
+  /** 录制半边。 */
+  recording: RoomRecordingDTO | null;
+  /** 处理半边(与 HubRuleDTO 同字段;没有规则时 = null,而不是一个空对象)。 */
+  processing: Omit<HubRuleDTO, "key" | "platform" | "roomSlug" | "room"> | null;
+}
+
+/**
+ * PUT /api/rooms/:key 的入参。**两半都是可选的** —— 只传 `recording` 就只改录制,
+ * 只传 `processing` 就只改处理(前端可以分步保存)。
+ *
+ * 写入顺序与原子性见 web/api/rooms.ts:**先写 task,再写规则;第二步失败回滚第一步**,
+ * 绝不留下半成功。
+ */
+export interface RoomPayload {
+  recording?: Partial<Omit<RoomRecordingDTO, "taskId" | "cookies">> & { cookies?: string | null };
+  processing?: Partial<Pick<HubRuleDTO, "enabled" | "pipeline" | "workers" | "requires">>;
+}
+
 /** 一条 hub 规则(GET /api/hub/rules)。按平台限定,持久化为 <root>/config/hub/{platform}.{roomSlug}.json。 */
 export interface HubRuleDTO {
   /** `{platform}.{roomSlug}` —— 全局唯一 id(文件名 stem + API 路由参数;跨平台不撞)。 */

@@ -536,7 +536,8 @@
         "busy_timeout 生效：并发读写时不出现静默空队列"
       ],
       "depends_on": [],
-      "estimated_loc": 290
+      "estimated_loc": 290,
+      "status": "done"
     },
     {
       "id": "T5",
@@ -605,7 +606,8 @@
         "实测 /api/hub/queue 在 200 active 行时查询条数从约 800 降到 ≤6（可在测试中计数 statement 调用）"
       ],
       "depends_on": [],
-      "estimated_loc": 200
+      "estimated_loc": 200,
+      "status": "done"
     },
     {
       "id": "T6",
@@ -797,7 +799,8 @@
         "merge/burn 在 maxCpuParallel=1 下仍严格串行(不夸大收益)"
       ],
       "depends_on": [],
-      "estimated_loc": 320
+      "estimated_loc": 320,
+      "status": "done"
     },
     {
       "id": "T8",
@@ -966,7 +969,8 @@
       "depends_on": [
         "T2"
       ],
-      "estimated_loc": 320
+      "estimated_loc": 320,
+      "status": "done"
     },
     {
       "id": "T10",

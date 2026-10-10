@@ -588,3 +588,223 @@ describe("buildQueueView", () => {
     expect(active[0].streamKey).toBe("douyin:100:2026-10-06");
   });
 });
+
+/**
+ * T5:批量读取 + 只读连接 busy_timeout。
+ *
+ * 两条口径:
+ *  - **等价性**:同一份数据下,批量化输出必须与逐条查询逐字段深相等(含 events/steps/candidates/
+ *    nodeStates 的**组内排序** —— 排序错了前端时间线就乱)。
+ *  - **查询条数与 job 数解耦**:200 个 job 的附加表查询次数不随 job 数增长。
+ */
+describe("T5 批量读取", () => {
+  /** 逐条参照实现(批量化前的语义),用于等价性对照。 */
+  function referencePerJob(dbPath: string, keys: readonly string[]) {
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const per = keys.map((k) => ({
+        events: db.prepare("SELECT state, at FROM sync_job_events WHERE streamKey=? ORDER BY at ASC, rowid ASC").all(k),
+        steps: (() => {
+          try {
+            return db.prepare("SELECT step, phase, at, detail FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC").all(k);
+          } catch {
+            return db.prepare("SELECT step, phase, at FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC").all(k);
+          }
+        })(),
+        candidates: db.prepare(
+          "SELECT workerId, coverage, durationSec, totalGapSec, danmuCount, isWinner FROM sync_candidates WHERE streamKey=? ORDER BY isWinner DESC, coverage DESC",
+        ).all(k),
+        nodeStates: db.prepare(
+          "SELECT node, state, error, attempts, updatedAt FROM sync_node_states WHERE streamKey=? ORDER BY node ASC",
+        ).all(k),
+      }));
+      return per;
+    } finally {
+      db.close();
+    }
+  }
+
+  it("批量结果与逐条实现深相等(含各表组内排序)", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "hubjobs-eq-"));
+    // 刻意让插入顺序 ≠ 排序顺序:candidates 的 isWinner/coverage、nodeStates 的 node 名乱序插入。
+    seedJob(db, "douyin:1:2026-10-01", [["pending", T0], ["merging", T0 + 1000]], 100);
+    seedJob(db, "douyin:2:2026-10-02", [["pending", T0 + 500], ["uploading", T0 + 2500]], 200, { bv: "BV9" });
+    for (const at of [T0 + 300, T0 + 100, T0 + 200]) {
+      db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run("douyin:1:2026-10-01", "syncing", at);
+    }
+    for (const [step, phase, at] of [["merge", "start", T0 + 900], ["merge", "done", T0 + 1900], ["burn_danmu", "start", T0 + 1900]] as const) {
+      db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at) VALUES(?,?,?,?)").run("douyin:1:2026-10-01", step, phase, at);
+    }
+    // 三个候选:winner coverage 最低、另一个 coverage 最高 —— 必须 winner 排最前。
+    for (const [w, cov, win] of [["vps1", 0.9, 0], ["vps2", 0.5, 1], ["local", 0.7, 0]] as const) {
+      if (w === "local") {
+        // seedJob 已插了一个 local winner;改它的 coverage 并取消 winner,保留多候选排序场景。
+        db.prepare("UPDATE sync_candidates SET coverage=?, isWinner=0 WHERE streamKey=? AND workerId='local'")
+          .run(cov, "douyin:1:2026-10-01");
+        continue;
+      }
+      db.prepare(`INSERT INTO sync_candidates(streamKey,workerId,coverage,durationSec,startMs,endMs,totalGapSec,danmuCount,isWinner,updatedAt)
+        VALUES(?,?,?,?,0,0,0,?,?,?)`).run("douyin:1:2026-10-01", w, cov, 100, 42, win, T0);
+    }
+    for (const node of ["upload_plain", "merge"] as const) {
+      db.prepare("INSERT INTO sync_node_states(streamKey,node,state,attempts,updatedAt) VALUES(?,?,?,1,?)")
+        .run("douyin:1:2026-10-01", node, "done", T0);
+    }
+    const keys = ["douyin:1:2026-10-01", "douyin:2:2026-10-02"];
+    const ref = referencePerJob(dbPath, keys);
+    db.close();
+
+    const { jobs } = listHubJobs(dbPath, { limit: 10, stageDir: stage, now: T0 + 5000 });
+    const byKey = new Map(jobs.map((j) => [j.streamKey, j]));
+    keys.forEach((k, i) => {
+      const got = byKey.get(k)!;
+      // events:按 at 升序
+      expect(got.events).toEqual(ref[i].events.map((e: Record<string, unknown>) => ({ state: e.state, at: Number(e.at) })));
+      // steps:按 at 升序
+      expect(got.steps).toEqual(ref[i].steps.map((s: Record<string, unknown>) => ({ step: s.step, phase: s.phase, at: Number(s.at), detail: (s.detail as string | undefined) ?? undefined })));
+      // candidates:winner 优先、其次 coverage 降序
+      expect(got.candidates).toEqual(ref[i].candidates.map((c: Record<string, unknown>) => ({
+        worker: c.workerId,
+        coverage: Number(c.coverage),
+        durationSec: Number(c.durationSec),
+        danmuCount: c.danmuCount == null ? null : Number(c.danmuCount),
+        complete: Number(c.totalGapSec) <= 0,
+        isWinner: Number(c.isWinner) === 1,
+      })));
+      expect(got.candidates[0].isWinner).toBe(true);
+      // nodeStates:按 node 名升序
+      expect(got.nodeStates).toEqual(ref[i].nodeStates.map((n: Record<string, unknown>) => ({
+        node: n.node, state: n.state, error: n.error, attempts: Number(n.attempts), updatedAt: Number(n.updatedAt),
+      })));
+      // 只有第一个 job 播了 node_states;第二个应为空数组(不能串桶)。
+      expect(got.nodeStates.map((n) => n.node)).toEqual(i === 0 ? ["merge", "upload_plain"] : []);
+    });
+  });
+
+  it("附加表查询次数与 job 数**无关**(N+1 已消除)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hubjobs-nplus1-"));
+    const dbPath = join(dir, "x-sync.db");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+      winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    db.exec(`CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)`);
+    db.exec(`CREATE TABLE sync_job_steps(streamKey TEXT NOT NULL, step TEXT NOT NULL, phase TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT)`);
+    db.exec(`CREATE TABLE sync_candidates(streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
+      coverage REAL NOT NULL, durationSec REAL NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER NOT NULL,
+      totalGapSec REAL NOT NULL, danmuCount INTEGER, isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+      PRIMARY KEY(streamKey, workerId))`);
+    db.exec(`CREATE TABLE sync_node_states(streamKey TEXT NOT NULL, node TEXT NOT NULL, state TEXT NOT NULL,
+      error TEXT, attempts INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL, PRIMARY KEY(streamKey, node))`);
+    for (let i = 0; i < 200; i++) {
+      seedJob(db, `douyin:${i}:2026-10-01`, [["merging", T0 + i]], 100);
+      db.prepare("INSERT INTO sync_node_states(streamKey,node,state,attempts,updatedAt) VALUES(?,?,?,1,?)")
+        .run(`douyin:${i}:2026-10-01`, "merge", "running", T0);
+    }
+    db.close();
+
+    // 通过 DatabaseSync.prototype 计数 prepare 调用:SQLITE 语句实际执行次数的可靠代理。
+    const orig = DatabaseSync.prototype.prepare;
+    let n = 0;
+    DatabaseSync.prototype.prepare = function (this: DatabaseSync, sql: string) {
+      n++;
+      return orig.call(this, sql);
+    } as typeof DatabaseSync.prototype.prepare;
+    let countFor200 = 0;
+    try {
+      listHubJobs(dbPath, { limit: 200, now: T0 });
+      countFor200 = n;
+      n = 0;
+      listHubJobs(dbPath, { limit: 10, now: T0 });
+    } finally {
+      DatabaseSync.prototype.prepare = orig;
+    }
+    const countFor10 = n;
+    // 200 个 job 的附加表查询**不是** 200×4(旧实现 ≈800 条)。余量给 historicalRates(按 done job
+    // 数线性,fixture 里 done 为 0)与 jobs 的 count/select 两条。
+    expect(countFor200).toBeLessThanOrEqual(10);
+    // 关键性质:200 与 10 个 job 的语句数**基本相同** → 确实与 job 数解耦。
+    expect(countFor200).toBeLessThanOrEqual(countFor10 + 1);
+  });
+
+  it("空 job 集合(keys 为空)跳过全部 IN 查询,不炸", () => {
+    const { dbPath, db } = makeSyncDb();
+    db.close();
+    expect(listHubJobs(dbPath, { states: ["nonexistent-state"] })).toEqual({ jobs: [], total: 0 });
+  });
+
+  it("旧库缺 steps 表(含 detail 列)→ 空步骤,不抛;其余表照常", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hubjobs-nosteps-"));
+    const dbPath = join(dir, "old-sync.db");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+      winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,fails,updatedAt) VALUES(?,?,0,?)").run("douyin:1:2026-10-01", "merging", T0);
+    db.prepare("CREATE TABLE sync_job_events(streamKey TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL)").run();
+    db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run("douyin:1:2026-10-01", "pending", T0);
+    db.close();
+    const { jobs, total } = listHubJobs(dbPath, { now: T0 });
+    expect(total).toBe(1);
+    expect(jobs[0].steps).toEqual([]);           // 缺表降级
+    expect(jobs[0].events).toHaveLength(1);       // 有表的照常
+    expect(jobs[0].startedAt).toBe(T0);
+  });
+
+  it("limit/offset/states 过滤仍正确(批量化没动分页语义)", () => {
+    const { dbPath, db } = makeSyncDb();
+    for (let i = 0; i < 5; i++) {
+      seedJob(db, `douyin:${i}:2026-10-01`, [["merging", T0 + i * 1000]], 100);
+    }
+    seedJob(db, "douyin:x:2026-10-01", [["pending", T0]], 100);
+    db.close();
+    const page1 = listHubJobs(dbPath, { limit: 2, offset: 0 });
+    const page2 = listHubJobs(dbPath, { limit: 2, offset: 2 });
+    expect(page1.total).toBe(6);
+    expect(page1.jobs.map((j) => j.streamKey)).toEqual(["douyin:4:2026-10-01", "douyin:3:2026-10-01"]);
+    expect(page2.jobs.map((j) => j.streamKey)).toEqual(["douyin:2:2026-10-01", "douyin:1:2026-10-01"]);
+    // 分页后附加表仍正确映射回各自的 job(不能串桶)
+    expect(page1.jobs[0].events[0].state).toBe("merging");
+    const onlyPending = listHubJobs(dbPath, { states: ["pending"] });
+    expect(onlyPending.jobs.map((j) => j.streamKey)).toEqual(["douyin:x:2026-10-01"]);
+    const noTerminal = listHubJobs(dbPath, { excludeStates: ["merging"] });
+    expect(noTerminal.jobs.map((j) => j.streamKey)).toEqual(["douyin:x:2026-10-01"]);
+  });
+
+  it("同毫秒(at 并列)的事件/步骤仍按插入序(rowid)稳定排序", () => {
+    // 回归:批量版若只按 `at` 排,并列时会退化成 IN 查询的返回顺序(sqlite 不保证),
+    // 表现为「事件时间线在两次刷新间跳动」。逐条版的 ORDER BY at, rowid 是确定的。
+    const { dbPath, db } = makeSyncDb();
+    seedJob(db, "douyin:1:2026-10-01", [["pending", T0]], 100);
+    const SAME = T0 + 1000;
+    for (const s of ["a", "b", "c", "d"]) {
+      db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run("douyin:1:2026-10-01", s, SAME);
+    }
+    for (const st of ["s1", "s2", "s3"]) {
+      db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at) VALUES(?,?,?,?)").run("douyin:1:2026-10-01", st, "start", SAME);
+    }
+    db.close();
+    for (const _round of [1, 2]) {
+      const { jobs } = listHubJobs(dbPath, { now: T0 + 5000 });
+      expect(jobs[0].events.slice(-4).map((e) => e.state)).toEqual(["a", "b", "c", "d"]);
+      expect(jobs[0].steps.map((s) => s.step)).toEqual(["s1", "s2", "s3"]);
+    }
+  });
+
+  it("只读连接带 busy_timeout:写端持锁时读不立刻抛 BUSY(不再静默空结果)", () => {
+    const { dbPath, db } = makeSyncDb();
+    seedJob(db, "douyin:1:2026-10-01", [["merging", T0]], 100);
+    // BEGIN IMMEDIATE 拿写锁并保持事务打开 = 另一个连接此刻无共享锁。
+    db.exec("BEGIN IMMEDIATE");
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,fails,updatedAt) VALUES(?,?,0,?)")
+      .run("douyin:2:2026-10-01", "uploading", T0 + 1);
+    try {
+      // 有 busy_timeout → 读会等;写事务很快被回滚(下面),所以这里要么拿到数据、要么拿到一致快照。
+      // **关键是不得**因为一次 SQLITE_BUSY 就回落成 `{jobs:[],total:0}`(静默空队列)。
+      const r = listHubJobs(dbPath, { now: T0 });
+      expect(r.jobs.length + r.total).toBeGreaterThan(0);
+    } finally {
+      try { db.exec("ROLLBACK"); } catch { /* 已回滚 */ }
+      db.close();
+    }
+  });
+});

@@ -611,6 +611,8 @@ const hubStarter: HubStarter = {
         minBurnFreeMemMB?: number;
         memWaitTimeoutMs?: number;
         staleMs?: number;
+        /** T7:跨房间的调度并发上限(同时派发几场后处理流程)。缺省 2;与 maxCpuParallel 无关。 */
+        maxConcurrentPipelines?: number;
         /** 磁盘看门狗阈值(GB):节点数据根剩余低于此值 → master 告警。缺省 10,0=关。 */
         diskMinGB?: number;
         /** 全局上传队列:B 站按提交次数限流(601)。窗口内最多 uploadRateLimit 次,命中后冷却 uploadCooldownMs。 */
@@ -881,6 +883,9 @@ const hubStarter: HubStarter = {
       staleMs: hubCfg.resources?.staleMs ?? 600_000,
       // 磁盘看门狗:节点数据根剩余 < 阈值 → master 告警(worker 常没配 webhook,靠这边兜底)。缺省 10GB。
       diskMinGB: hubCfg.resources?.diskMinGB ?? 10,
+      // T7:跨房间的调度并发(同时派发几场 pull/merge/burn/upload 流程)。
+      // 不等于 CPU 并行度 —— merge/burn 仍由 maxCpuParallel 闸住(上面那一行,缺省 1)。
+      maxConcurrentPipelines: hubCfg.resources?.maxConcurrentPipelines ?? 2,
       ...(hubCfg.maxWaitSec != null || hubCfg.settleSec != null
         ? {
             settle: {

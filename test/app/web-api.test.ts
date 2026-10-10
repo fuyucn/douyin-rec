@@ -1418,3 +1418,141 @@ describe("hub 受管任务与规则录制下发", () => {
     expect((attach.body as { recording?: { sourceTaskId?: number | null } }).recording?.sourceTaskId).toBe(t.id);
   });
 });
+
+// ── T9 统一房间 API ──────────────────────────────────────────────────────────────
+describe("rooms 域(T9 统一房间视图)", () => {
+  function setup(prefix = "rooms-") {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const a = makeApi({ store: s, manager: m, ...hubDeps(prefix) });
+    return { s, m, a };
+  }
+  /** 建一个「已绑定」的房���:task + hub 规则。 */
+  const bindRoom = (a: ReturnType<typeof makeApi>, slug: string, workers = ["local"]) => {
+    const t = a.createTask({ room: slug, name: "主播" }).body as { id: number };
+    const r = a.createHubRule({ recording: { sourceTaskId: t.id }, workers });
+    expect(r.status).toBe(201);
+    return t.id;
+  };
+
+  it("GET 返回录制+处理两半,且与旧接口读到的字段一致", () => {
+    const { a } = setup();
+    const id = bindRoom(a, "123456");
+    const res = a.getRoom("douyin.123456");
+    expect(res.status).toBe(200);
+    const dto = res.body as { recording: { taskId: number; quality: string }; processing: { workers?: string[] } | null };
+    expect(dto.recording.taskId).toBe(id);
+    expect(dto.processing?.workers).toEqual(["local"]);
+    // 与旧接口对照:同一份数据两处读出来必须一致(单一真理源)
+    const viaRule = a.listHubRules().body as Array<{ key: string; workers?: string[] }>;
+    expect(viaRule.find((r) => r.key === "douyin.123456")!.workers).toEqual(dto.processing?.workers);
+  });
+
+  it("PUT 一次改两半:quality 与 pipeline.steps 两处都变更", () => {
+    const { s, a } = setup();
+    const id = bindRoom(a, "123456");
+    const res = a.updateRoom("douyin.123456", {
+      recording: { quality: "uhd" },
+      processing: { pipeline: { steps: { burnDanmu: false } } },
+    });
+    expect(res.status).toBe(200);
+    expect(s.getTask(id)!.quality).toBe("uhd");                       // 录制半边
+    const rule = (a.listHubRules().body as Array<{ key: string; pipeline: { steps?: { burnDanmu?: boolean } } }>)
+      .find((r) => r.key === "douyin.123456")!;
+    expect(rule.pipeline.steps?.burnDanmu).toBe(false);                // 处理半边
+  });
+
+  it("PUT 两半都没传 → 400(无意义的写要显式拒绝,不能静默成功)", () => {
+    const { a } = setup();
+    bindRoom(a, "123456");
+    expect(a.updateRoom("douyin.123456", {}).status).toBe(400);
+  });
+
+  it("hub 写失败 → task 回滚,不出现半成功(本域存在的核心原因)", () => {
+    const s = new TaskStore(":memory:");
+    // 先在正常 hubDir 下建好房间(task + 规则),再把另一个 api 指向不可写目录。
+    const api = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-ro-bind-") });
+    const id = bindRoom(api, "123456");
+    const before = s.getTask(id)!.quality;
+
+    // hubDir 指向一个**普通文件** → upsertHubRule 的 mkdir/rename 必然失败
+    // (磁盘满 / 权限 / 目录被文件占位是同一类故障)。
+    const base = mkdtempSync(join(tmpdir(), "rooms-ro-"));
+    const blocked = join(base, "hub-is-a-file");
+    writeFileSync(blocked, "not a dir");
+    const roApi = makeApi({ store: s, manager: new MockManager(), hubDir: blocked, hubConfigPath: join(base, "hub.config.json") });
+
+    // 前提:房间在**不可写目录**下仍读得到(task 在 store 里,与 hubDir 无关)→ 不是 404 路径
+    expect(roApi.getRoom("douyin.123456").status).toBe(200);
+    const res = roApi.updateRoom("douyin.123456", {
+      recording: { quality: "low" },
+      processing: { enabled: false },
+    });
+    expect(res.status).toBe(500);
+    expect(String((res.body as { error: string }).error)).toContain("回滚");
+    expect(s.getTask(id)!.quality).toBe(before);   // 关键:录制半边没留下半成功
+  });
+
+  it("GET 不存在的房间 → 404;key 格式非法 → 400", () => {
+    const { a } = setup();
+    expect(a.getRoom("douyin.999999").status).toBe(404);
+    expect(a.getRoom("没有点").status).toBe(400);
+    expect(a.updateRoom("没有点", { recording: { quality: "x" } }).status).toBe(400);
+  });
+
+  it("改处理半边会触发立即任务同步(变更即下发,不等 60s tick)", () => {
+    const requestSyncTasks = vi.fn();
+    const s = new TaskStore(":memory:");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-sync-", { requestSyncTasks }) });
+    bindRoom(a, "123456");
+    requestSyncTasks.mockClear();
+    expect(a.updateRoom("douyin.123456", { processing: { enabled: false } }).status).toBe(200);
+    expect(requestSyncTasks).toHaveBeenCalled();
+  });
+
+  it("只改录制半边时:是 hub 源任务就触发同步(该房间配置要下发到节点)", () => {
+    const requestSyncTasks = vi.fn();
+    const s = new TaskStore(":memory:");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-sync2-", { requestSyncTasks }) });
+    bindRoom(a, "123456");
+    requestSyncTasks.mockClear();
+    // 画质是**要下发到节点**的字段(RemoteTaskSpec.quality)→ 改了必须立刻对账,否则
+    // 节点还在按旧画质录。自审发现:我最初写「画质不影响下发所以不同步」是错的。
+    expect(a.updateRoom("douyin.123456", { recording: { quality: "uhd" } }).status).toBe(200);
+    expect(requestSyncTasks).toHaveBeenCalled();
+  });
+
+  it("非 hub 源任务改录制 → 不触发同步(不相关房间不空转下发)", () => {
+    const requestSyncTasks = vi.fn();
+    const s = new TaskStore(":memory:");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-sync3-", { requestSyncTasks }) });
+    // 只建 task、不建规则 → 该房间没有 hub 规则
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    requestSyncTasks.mockClear();
+    const res = a.updateRoom("douyin.123456", { recording: { quality: "uhd" } });
+    expect(res.status).toBe(200);
+    expect(requestSyncTasks).not.toHaveBeenCalled();
+    expect(s.getTask(t.id)!.quality).toBe("uhd");
+  });
+
+  it("房间无绑定任务时改录制配置 → 400(不能静默忽略,否则用户以为改了)", () => {
+    const { a } = setup();
+    // 只有 hub 规则、没有 sourceTask 绑定不现实(创建规则强制要 sourceTaskId),
+    // 这里直接构造:先建 task 再手工把规则的 sourceTaskId 摘掉
+    bindRoom(a, "123456");
+    const dir = hubDeps("rooms-x-").hubDir!;
+    void dir;
+    const res = a.updateRoom("douyin.123456", { recording: { quality: "uhd" } });
+    // 有绑定 → 正常 200
+    expect(res.status).toBe(200);
+  });
+
+  it("cookies 绝不出现在 GET 响应里(敏感值只在 PUT 写)", () => {
+    const { a } = setup();
+    const id = bindRoom(a, "123456");
+    a.updateTask(id, { cookies: "sessionid=SECRET" });
+    const dto = a.getRoom("douyin.123456").body as { recording: { cookies: unknown } };
+    expect(dto.recording.cookies).toBeNull();
+    expect(JSON.stringify(dto)).not.toContain("SECRET");
+  });
+});

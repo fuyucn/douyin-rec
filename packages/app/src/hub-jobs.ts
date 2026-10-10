@@ -61,7 +61,28 @@ const TERMINAL_SQL = HUB_TERMINAL_STATES.map((s) => `'${s}'`).join(",");
 const HISTORY_TABLES = HUB_TABLE_NAMES;
 /** 无历史数据时的保守「步骤耗时/视频时长」比率(按 2026-07 实测:烧录 veryfast ~0.11×,上传取决于带宽)。 */
 const FALLBACK_RATE: Record<string, number> = { pending: 0.01, settling: 0.05, syncing: 0.1, merging: 0.3, uploading: 0.6 };
+/** 只读连接等写锁的预算(ms)。见 openLedger 注释 —— 不设会静默空队列。 */
+const LEDGER_BUSY_TIMEOUT_MS = 3000;
 
+
+/**
+ * 打开台账只读连接。
+ *
+ * **`PRAGMA busy_timeout` 是必需的,不是优化**:orchestrator SyncLedger 是唯一写端,
+ * 它在写事务里时,任何只读连接拿不到共享锁就立刻 `SQLITE_BUSY` 抛错。没有这条 pragma 时
+ * 上层 catch 会**静默回落成空结果** → 表现为「队列页莫名其妙空了 / hub 任务列表清零」,
+ * 而且越是台账忙(上传高峰)越发,极难定位。3s 预算覆盖一次短写事务。
+ *
+ * 注意:这里**只**加 busy_timeout,不动 `DatabaseSync` 的 `readOnly` 开关 —— node:sqlite 的
+ * readOnly 已拒绝写语句,再加 `PRAGMA query_only` 是重复的。
+ */
+function openLedger(syncDbPath: string): DatabaseSync {
+  const db = new DatabaseSync(syncDbPath, { readOnly: true });
+  try {
+    db.exec(`PRAGMA busy_timeout=${LEDGER_BUSY_TIMEOUT_MS}`);
+  } catch { /* 极老 sqlite 不支持该 pragma → 保持默认 */ }
+  return db;
+}
 
 /** room key `{platform}.{roomSlug}` → streamKey 前缀 `{platform}:{roomSlug}:`(仅替换首个点)。 */
 function roomKeyToStreamPrefix(roomKey: string): string {
@@ -74,7 +95,7 @@ function roomKeyToStreamPrefix(roomKey: string): string {
  */
 export function activeHubJobKeys(syncDbPath: string, roomKey: string): string[] {
   if (!existsSync(syncDbPath)) return [];
-  const db = new DatabaseSync(syncDbPath, { readOnly: true });
+  const db = openLedger(syncDbPath);
   try {
     return (db.prepare(
       `SELECT streamKey FROM sync_jobs WHERE streamKey LIKE ? AND state NOT IN (${TERMINAL_SQL}) ORDER BY updatedAt DESC`,
@@ -195,13 +216,127 @@ export interface HubJobsResult {
 }
 
 /**
+ * 批量取一批 job 的附属表(events/steps/candidates/nodeStates),按 streamKey 分桶。
+ *
+ * **为什么批量**:逐条查询是典型 N+1 —— 队列页 `limit:200` 就是 800 次 prepare+all,
+ * 每次都要在 VDBE 里重新过一遍 B-tree 查找。改成 `streamKey IN (...)` 一条语句,
+ * 查询条数与 job 数解耦(4 条常数),摊到 O(1) 次全表/索引扫描。
+ *
+ * **保持逐条语义不变**(T5 的等价性要求):
+ *   - 排序在**内存**里按原 SQL 的 ORDER BY 重做(全局排序后分桶 == 每组各自排序,
+ *     因为 key 是分组键,组内相对序由 ORDER BY 决定,与组间无关);
+ *   - 每张表独立 try/catch:旧库缺某张表只影响该表,不牵连其他表(逐条版的降级粒度是「每 job 每表」,
+ *     批量版是「全批每表」—— 因为缺表是**库级**事实(同一个 db 文件),粒度差异不会改变结果);
+ *   - steps 的 `detail` 列:新库有、旧库没有 → 先试带 detail,失败再试不带(与逐条版同款回退)。
+ *
+ * **IN 的规模**:keys 来自 `LIMIT ?`(队列页上限 200、详情页个位数),远小于 sqlite 默认
+ * SQLITE_MAX_VARIABLE_NUMBER(999/32766),无需分批切片。若将来 limit 被放大到千级,
+ * 需要按 900 一组切片 —— 这里加一道保护,超限时切片而不是让 sqlite 报 `too many SQL variables`。
+ */
+const IN_CHUNK = 900;
+
+interface AttachedBuckets {
+  events: Map<string, (HubJobEvent & { rid: number })[]>;
+  steps: Map<string, (HubJobStep & { rid: number })[]>;
+  candidates: Map<string, HubJobCandidate[]>;
+  nodeStates: Map<string, HubJobNodeState[]>;
+}
+/** events/steps 桶带内部 `rid`(rowid)仅用于组内稳定排序,组装 view 时剥掉。 */
+type AttachedTables = AttachedBuckets;
+
+function batchAttached(db: DatabaseSync, keys: readonly string[]): AttachedTables {
+  const out: AttachedTables = { events: new Map(), steps: new Map(), candidates: new Map(), nodeStates: new Map() };
+  const uniq = [...new Set(keys)];
+  if (uniq.length === 0) return out;
+
+  /** 把一批 streamKey 的行按 streamKey 分桶;每行映射函数负责字段语义。 */
+  const group = <T>(rows: readonly Record<string, unknown>[], map: (r: Record<string, unknown>) => T): Map<string, T[]> => {
+    const m = new Map<string, T[]>();
+    for (const r of rows) {
+      const k = r.streamKey as string;
+      const arr = m.get(k);
+      if (arr) arr.push(map(r));
+      else m.set(k, [map(r)]);
+    }
+    return m;
+  };
+
+  /**
+   * 按 IN 切片执行一次查询;返回全部命中行(各片自行排序,组内序在下面统一重排)。
+   * `ok=false` = 查询本身失败(旧库缺表/缺列/被锁)→ 调用方据此决定回退还是降级为空。
+   * 区分「查询失败」与「查询成功但 0 行」是必须的:steps 的 detail 回退要靠它判断
+   * (0 行可能是这张表本来就空,不能当成「列不存在」).
+   */
+  const queryIn = (sql: (ph: string) => string): { rows: Record<string, unknown>[]; ok: boolean } => {
+    const rows: Record<string, unknown>[] = [];
+    for (let i = 0; i < uniq.length; i += IN_CHUNK) {
+      const chunk = uniq.slice(i, i + IN_CHUNK);
+      try {
+        rows.push(...(db.prepare(sql(chunk.map(() => "?").join(",")))
+          .all(...chunk) as unknown as Record<string, unknown>[]));
+      } catch { return { rows, ok: false }; /* 旧库缺表/缺列 → 该表降级 */ }
+    }
+    return { rows, ok: true };
+  };
+
+  // events:ORDER BY at ASC, rowid ASC。
+  // **rowid 必须带上**:at 是 ms 精度,一次 pipeline 推进的多个事件可以同毫秒;
+  // 只按 at 排会在并列时退化成「IN 查询的返回顺序」(sqlite 不保证该顺序),事件顺序会在两次刷新间跳动。
+  out.events = group(
+    queryIn((ph) => `SELECT streamKey, state, at, rowid AS rid FROM sync_job_events WHERE streamKey IN (${ph})`).rows,
+    (r) => ({ state: r.state as string, at: Number(r.at), rid: Number(r.rid) }),
+  );
+  for (const arr of out.events.values()) arr.sort((a, b) => a.at - b.at || a.rid - b.rid);
+
+  // steps:ORDER BY at ASC, rowid ASC;detail 列旧库可能没有。
+  let stepRows = queryIn((ph) => `SELECT streamKey, step, phase, at, detail, rowid AS rid FROM sync_job_steps WHERE streamKey IN (${ph})`);
+  if (!stepRows.ok) {
+    // 带 detail 的查询失败(列不存在)→ 回退不带 detail。
+    stepRows = queryIn((ph) => `SELECT streamKey, step, phase, at, rowid AS rid FROM sync_job_steps WHERE streamKey IN (${ph})`);
+  }
+  out.steps = group(stepRows.rows, (r) => ({
+    step: r.step as string, phase: r.phase as string, at: Number(r.at), rid: Number(r.rid),
+    detail: (r.detail as string | undefined) ?? undefined,
+  }));
+  for (const arr of out.steps.values()) arr.sort((a, b) => a.at - b.at || a.rid - b.rid);
+
+  // candidates:ORDER BY isWinner DESC, coverage DESC
+  out.candidates = group(
+    queryIn((ph) => `SELECT streamKey, workerId, coverage, durationSec, totalGapSec, danmuCount, isWinner
+                     FROM sync_candidates WHERE streamKey IN (${ph})`).rows,
+    (r) => ({
+      worker: r.workerId as string,
+      coverage: Number(r.coverage),
+      durationSec: Number(r.durationSec),
+      danmuCount: r.danmuCount == null ? null : Number(r.danmuCount),
+      complete: Number(r.totalGapSec) <= 0,
+      isWinner: Number(r.isWinner) === 1,
+    }),
+  );
+  for (const arr of out.candidates.values()) {
+    arr.sort((a, b) => (a.isWinner === b.isWinner ? b.coverage - a.coverage : a.isWinner ? -1 : 1));
+  }
+
+  // nodeStates:ORDER BY node ASC
+  out.nodeStates = group(
+    queryIn((ph) => `SELECT streamKey, node, state, error, attempts, updatedAt FROM sync_node_states WHERE streamKey IN (${ph})`).rows,
+    (r) => ({
+      node: r.node as string, state: r.state as string, error: (r.error as string | null) ?? null,
+      attempts: Number(r.attempts), updatedAt: Number(r.updatedAt),
+    }),
+  );
+  for (const arr of out.nodeStates.values()) arr.sort((a, b) => (a.node < b.node ? -1 : a.node > b.node ? 1 : 0));
+  return out;
+}
+
+/**
  * hub run 列表(分页 + 可按房间过滤)。无 sync db / 表还没建 → 空(slave/hub 未开过属正常)。
  * room 给定 → 只列该房间的历次 run(GitHub「某 workflow 的 run 列表」);省略 → 全房间最近 N。
  */
 export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): HubJobsResult {
   const { room, limit = 10, offset = 0, now = Date.now(), stageDir = hubStageDir() } = opts;
   if (!existsSync(syncDbPath)) return { jobs: [], total: 0 };
-  const db = new DatabaseSync(syncDbPath, { readOnly: true });
+  const db = openLedger(syncDbPath);
   // room key `{platform}.{roomSlug}` → streamKey 前缀 `{platform}:{roomSlug}:`(仅替换首个点)。
   const prefix = room ? room.replace(".", ":") + ":" : null;
   try {
@@ -227,42 +362,14 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         .all(...params, limit, offset) as unknown as RawJob[];
     } catch { return { jobs: [], total: 0 }; } // 旧库无表
     const rates = historicalRates(db);
+    // T5:附属表**一次性批量取**,内存分桶 —— 原实现是每个 job 4 条查询(limit 200 active
+    // = 800+ 次 prepare/all),实测拖慢队列页。批量化后查询条数与 job 数**无关**。
+    const attached = batchAttached(db, jobs.map((j) => j.streamKey));
     const views = jobs.map((j) => {
-      let events: HubJobEvent[] = [];
-      try {
-        events = db.prepare("SELECT state, at FROM sync_job_events WHERE streamKey=? ORDER BY at ASC, rowid ASC")
-          .all(j.streamKey) as unknown as HubJobEvent[];
-      } catch { /* 旧库无 events 表 → 空时间线 */ }
-      let steps: HubJobStep[] = [];
-      try {
-        steps = db.prepare("SELECT step, phase, at, detail FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
-          .all(j.streamKey) as unknown as HubJobStep[];
-      } catch {
-        try {
-          steps = db.prepare("SELECT step, phase, at FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
-            .all(j.streamKey) as unknown as HubJobStep[];
-        } catch { /* 旧库无表 → 空(前端回落粗粒度) */ }
-      }
-      let candidates: HubJobCandidate[] = [];
-      try {
-        const rows = db.prepare(
-          "SELECT workerId, coverage, durationSec, totalGapSec, danmuCount, isWinner FROM sync_candidates WHERE streamKey=? ORDER BY isWinner DESC, coverage DESC",
-        ).all(j.streamKey) as unknown as { workerId: string; coverage: number; durationSec: number; totalGapSec: number; danmuCount: number | null; isWinner: number }[];
-        candidates = rows.map((c) => ({
-          worker: c.workerId,
-          coverage: Number(c.coverage),
-          durationSec: Number(c.durationSec),
-          danmuCount: c.danmuCount == null ? null : Number(c.danmuCount),
-          complete: Number(c.totalGapSec) <= 0,
-          isWinner: Number(c.isWinner) === 1,
-        }));
-      } catch { /* 旧库无表 → 无候选(前端 select 步不画 fan-in) */ }
-      let nodeStates: HubJobNodeState[] = [];
-      try {
-        nodeStates = db.prepare(
-          "SELECT node, state, error, attempts, updatedAt FROM sync_node_states WHERE streamKey=? ORDER BY node ASC",
-        ).all(j.streamKey) as unknown as HubJobNodeState[];
-      } catch { /* 旧库无表 → 空(前端回落 steps) */ }
+      const events = attached.events.get(j.streamKey) ?? [];
+      const steps = attached.steps.get(j.streamKey) ?? [];
+      const candidates = attached.candidates.get(j.streamKey) ?? [];
+      const nodeStates = attached.nodeStates.get(j.streamKey) ?? [];
       const videoDurationSec = candidates.find((c) => c.isWinner)?.durationSec ?? null;
       const terminal = TERMINAL.has(j.state);
       const stepStart = events.length ? events[events.length - 1].at : j.updatedAt;
@@ -281,6 +388,7 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         winnerWorker: j.winnerWorker ?? null, candidates, bv: j.bv ?? null, error: j.error ?? null,
         fails: Number(j.fails ?? 0), updatedAt: Number(j.updatedAt),
         startedAt: events.length ? Number(events[0].at) : null,
+        // rid 只是组内排序用的内部字段,不外泄(HubJobView 是公开 DTO 契约)。
         events: events.map((e) => ({ state: e.state, at: Number(e.at) })),
         steps: steps.map((s) => ({ step: s.step, phase: s.phase, at: Number(s.at), detail: s.detail ?? undefined })),
         nodeStates,
@@ -315,7 +423,7 @@ export interface LatestRunPerRoom {
 
 export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
   if (!existsSync(syncDbPath)) return [];
-  const db = new DatabaseSync(syncDbPath, { readOnly: true });
+  const db = openLedger(syncDbPath);
   try {
     // 注意:streamKey 形如 `{platform}:{roomSlug}:{date}[_HHMM]`,前两段是房间身份。
     // SQLite 无内置 split,用两次 instr + substr 取前两段作为分组键。

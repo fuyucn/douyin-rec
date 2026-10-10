@@ -25,6 +25,8 @@ import { fetchAnchorName, resolveShortUrl } from "../anchor.js";
 import type { TaskStore } from "../store.js";
 import { MergeJobStore } from "../merge-jobs.js";
 import type { EventCenter } from "@drec/observability";
+import type { RoomPayload } from "@drec/core";
+import { sseComment, sseFrame, type HubWatch } from "../hub-watch.js";
 import { buildMaintenance } from "./api/maintenance.js";
 import type { MaintenanceDeps } from "./api/maintenance.js";
 
@@ -73,6 +75,9 @@ export interface RouteMatch {
     | "listPlatforms"
     | "hubStatus"
     | "applyHubTasks"
+    | "listRooms"
+    | "getRoom"
+    | "updateRoom"
     | "listHubRules"
     | "createHubRule"
     | "updateHubRule"
@@ -94,6 +99,7 @@ export interface RouteMatch {
     | "workersStatus"
     | "previewOrphans"
     | "cleanupOrphans"
+    | "hubStream"
     | "index";
   /** Path param when the route has /:id. */
   id?: number;
@@ -151,8 +157,13 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "cleanupOrphans", methods: ["POST"], pattern: /^\/api\/maintenance\/orphans$/, needsBody: true },
   { name: "hubStatus", methods: ["GET"], pattern: /^\/api\/hub\/status$/ },
   { name: "applyHubTasks", methods: ["POST"], pattern: /^\/api\/hub\/apply$/ },
+  { name: "listRooms", methods: ["GET"], pattern: /^\/api\/rooms$/ },
+  { name: "getRoom", methods: ["GET"], pattern: /^\/api\/rooms\/([^/]+)$/, param: "slug", decode: true },
+  { name: "updateRoom", methods: ["PUT"], pattern: /^\/api\/rooms\/([^/]+)$/, param: "slug", decode: true, needsBody: true },
   { name: "listHubJobs", methods: ["GET"], pattern: /^\/api\/hub\/jobs$/ },
   { name: "hubQueue", methods: ["GET"], pattern: /^\/api\/hub\/queue$/ },
+  // SSE(T4):常驻流,不进 dispatch(那会经 sendJson 序列化)。createServer 特判处理。
+  { name: "hubStream", methods: ["GET"], pattern: /^\/api\/hub\/stream$/ },
   { name: "latestRuns", methods: ["GET"], pattern: /^\/api\/hub\/latest-runs$/ },
   { name: "runHubJob", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/run$/, needsBody: true },
   { name: "getHubJobLog", methods: ["GET"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/log$/, param: "sid", decode: true },
@@ -253,6 +264,12 @@ export interface WebServerDeps {
   runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
   /** master 资源池快照(CLI 注入)。省略/hub 未就绪 → 队列页无排队位次/占用(全 0)。 */
   poolSnapshot?: () => import("@drec/core").HubPoolSnapshotDTO | undefined;
+  /**
+   * hub 台账变更监视(T4):`GET /api/hub/stream` 的 SSE 通道。
+   * **注入 WebServerDeps 而非 ApiDeps** —— SSE 不是 ApiResult,不能进 dispatch/sendJson。
+   * 省略 → 该路由回 503(功能显式不可用,而非静默 404/空流)。
+   */
+  hubWatch?: HubWatch;
 }
 
 /** Read the whole request body and JSON.parse it (empty body → {}). */
@@ -410,6 +427,14 @@ async function dispatch(
     }
     case "hubStatus":
       return api.hubStatus();
+    case "listRooms":
+      return api.listRooms();
+    case "getRoom":
+      return api.getRoom(match.slug!);
+    case "updateRoom": {
+      const body = (await readJson(req)) as RoomPayload;
+      return api.updateRoom(match.slug!, body ?? {});
+    }
     case "applyHubTasks": {
       // force 走 query(POST 无 body):`?force=1`。语义与 retry-node 的 force 保持一致。
       const q = new URL(req.url ?? "/", "http://localhost").searchParams;
@@ -492,10 +517,56 @@ async function dispatch(
     }
     case "workersStatus":
       return api.workersStatus();
+    case "hubStream":
+      // handled by caller (SSE, not json) —— 到这里说明没注入 hubWatch。
+      return { status: 503, body: { error: "hub 变更流不可用(未注入 hubWatch)" } };
     case "index":
       // handled by caller (html, not json)
       return { status: 200, body: null };
   }
+}
+
+/** SSE 心跳间隔(ms):15s。短到能及时发现代理掐连接,长到不产生可观测噪音。 */
+const SSE_HEARTBEAT_MS = 15_000;
+
+/**
+ * 接管一条 `GET /api/hub/stream` 连接:写 SSE 头 → 订阅 hubWatch → 周期心跳 → 关闭即退订。
+ *
+ * **退订必须挂在 `res.on("close")`**:EventSource 断开会触发 close;不退订就是监听器泄漏
+ * (每个重连的浏览器标签泄漏一个回调,进程常驻内存无上限增长)。
+ * `req.on("close")` 不够 —— 它在**请求体读完**时就触发(GET 无体,几乎立即),会导致订阅立刻被撤。
+ */
+function startHubStream(watch: HubWatch, res: ServerResponse, log: (m: string) => void): void {
+  res.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    // nginx 反代下 X-Accel-Buffering:no 才能即时 flush,否则会被攒在代理缓冲里。
+    "x-accel-buffering": "no",
+  });
+  // 首帧:让前端 EventSource 立刻 onopen,不必等第一次真实变更才知道连上了。
+  res.write(sseFrame("open", { at: Date.now() }));
+  const unsubscribe = watch.subscribe(() => {
+    try {
+      res.write(sseFrame("changed", { at: Date.now() }));
+    } catch (e) {
+      // 写失败(客户端已断但 close 尚未到达)只记录,不抛:抛出会变成 unhandled。
+      log(`[web_server] SSE 写 changed 失败: ${String(e)}`);
+    }
+  });
+  const hb = setInterval(() => {
+    try {
+      res.write(sseComment("hb"));
+    } catch { /* 同上:断开竞态,交由 close 清理 */ }
+  }, SSE_HEARTBEAT_MS);
+  hb.unref?.();
+  let closed = false;
+  res.on("close", () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(hb);
+    unsubscribe();
+  });
 }
 
 /** Build (but don't listen on) the http server. Caller calls .listen(). */
@@ -573,6 +644,15 @@ export function createWebServer(deps: WebServerDeps): Server {
       }
       if (match.name === "index") {
         sendHtml(res, 200, loadIndexHtml());
+        return;
+      }
+      // SSE(T4):**必须**在 dispatch/sendJson 之前特判 —— dispatch 返回 ApiResult 会被 JSON 序列化。
+      if (match.name === "hubStream") {
+        if (!deps.hubWatch) {
+          sendJson(res, 503, { error: "hub 变更流不可用(未注入 hubWatch)" });
+          return;
+        }
+        startHubStream(deps.hubWatch, res, log);
         return;
       }
       try {

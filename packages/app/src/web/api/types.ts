@@ -10,7 +10,7 @@ import type { MergeJobStore } from "../../merge-jobs.js";
 import type { Task, TaskStore } from "../../store.js";
 import type { EventCenter, NotifWebhookToggles } from "@drec/observability";
 import type {
-  RecordingWorkerStatusDTO, HubRulePayload, HubPoolSnapshotDTO, WorkerTestResult,
+  RecordingWorkerStatusDTO, HubRulePayload, HubPoolSnapshotDTO, WorkerTestResult, RoomPayload,
 } from "@drec/core";
 
 export interface ApiResult {
@@ -246,6 +246,12 @@ export interface Api {
   listPlatforms(): ApiResult;
   /** GET /api/hub/status — 本节点是否 master(启用了 hub)。前端据此显示/隐藏 Hub 页。 */
   hubStatus(): ApiResult;
+  /** GET /api/rooms —— 全部房间(录制+处理两半合并视图)。 */
+  listRooms(): ApiResult;
+  /** GET /api/rooms/:key — 单个房间;两半都没有 → 404。 */
+  getRoom(key: string): ApiResult;
+  /** PUT /api/rooms/:key — 一次改两半(各自可选);第二步失败回滚第一步,不留半成功。 */
+  updateRoom(key: string, input: RoomPayload): ApiResult;
   /** POST /api/hub/apply[?force=1] — 立刻触发一次全节点任务同步;force=跳过节点骤减安全阀(T-2)。 */
   applyHubTasks(opts?: { force?: boolean }): ApiResult;
   /** GET /api/hub/rules — 所有多节点 hub 后处理规则(按 {platform}.{roomSlug})。 */

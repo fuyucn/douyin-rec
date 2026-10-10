@@ -5,6 +5,7 @@ import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
 import { gateWorkers, explainRejections } from "@drec/core";
+import { JobDispatcher } from "./job-dispatcher.js";
 
 export interface SettleConfig {
   maxWaitMs: number;
@@ -62,6 +63,12 @@ export interface ReconcilerDeps {
    * (磁盘满 / ssh 不通 / 权限不足)—— 每轮对账重试只会刷屏且无收益。
    */
   cleanupBackfillThrottleMs?: number;
+  /**
+   * T7:跨房间的**调度**并发上限(同时派发几场的 pull/merge/burn/upload 流程)。
+   * 缺省 2。不等于 CPU 并行度 —— merge/burn 仍由 ResourcePool 的 maxCpuParallel
+   * 闸住(缺省 1 = 串行),上传链全局串行是设计如此(防 601)。
+   */
+  maxConcurrentPipelines?: number;
 }
 
 const DEFAULT_SETTLE: SettleConfig = { maxWaitMs: 600_000, pollMs: 15_000 };
@@ -70,6 +77,7 @@ const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_STALE_MS = 600_000;
 const DEFAULT_RECONNECT_WINDOW_MS = 10 * 60_000;
 const DEFAULT_CLEANUP_BACKFILL_THROTTLE_MS = 15 * 60_000;
+const DEFAULT_MAX_CONCURRENT_PIPELINES = 2;
 const DEFAULT_SLEEP = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const RETRYABLE = new Set<JobState>(["pending", "failed"]);
@@ -107,6 +115,12 @@ export class Reconciler {
   private readonly diskAlerted = new Set<string>();
   /** T12:同一场两次收尾补跑的最小间隔(ms);持续性故障(磁盘满/ssh 不通)不该每轮重试。 */
   private cleanupBackfillThrottleMs: number;
+  /**
+   * T7:有界并发派发器。作为**实例字段**(不是每次 reconcileAll 新建)——
+   * 活动 key 集合必须跨调用存活,否则并发跑的两轮 reconcileAll 各自去重,
+   * 同一场会被派发两次(withStreamLock 只串行不 dedup → 重复投稿 P1)。
+   */
+  private readonly dispatcher: JobDispatcher;
 
   constructor(deps: ReconcilerDeps) {
     this.platform = deps.platform;
@@ -126,6 +140,15 @@ export class Reconciler {
     this.workerCapabilities = deps.workerCapabilities;
     this.loadTransports = deps.loadTransports;
     this.cleanupBackfillThrottleMs = deps.cleanupBackfillThrottleMs ?? DEFAULT_CLEANUP_BACKFILL_THROTTLE_MS;
+    this.dispatcher = new JobDispatcher({
+      maxConcurrent: deps.maxConcurrentPipelines ?? DEFAULT_MAX_CONCURRENT_PIPELINES,
+      log: (m) => jlogInfo(m),
+    });
+  }
+
+  /** 调度并发上限(只读,便于测试/诊断)。 */
+  get maxConcurrentPipelines(): number {
+    return this.dispatcher.maxConcurrent;
   }
 
   /**
@@ -401,7 +424,22 @@ private cleanupBackfillDue(streamKey: string): string | null {
     // 第二份快照才发现刚开播的分段)。现查 isDone,未收播则本轮跳过,防边录边合并残片。
     await this.settleLateMembers(first.broadcasts, broadcasts, stillRecording);
 
-    // 4. For each broadcast: idempotent upsert + run pipeline if needed.
+    // 4. For each broadcast: 建 job 行(快)→ 派发给有界并发调度器(慢 IO 在那边)。
+    //
+    // T7 两阶段:旧实现是在这个循环里 `await this._runPipeline(b, …)`,于是**房间 N+1 的
+    // job 行要等房间 N 的 merge/burn/upload 全跑完才创建**(队列/UI 假死),后一场的
+    // pull(网络 IO)也没机会与前一场的 CPU 编码重叠。现在 ①同步建全部 job 行;
+    // ②执行交给 JobDispatcher 有界并发。
+    //
+    // `await dispatcher.drain()` **保留在本方法内**:startHub 的 running 守卫只覆盖
+    // reconcileAll 返回前的 promise;提前返回会让 recordEnd 触发的下一轮重复派发
+    // 「state 还是 pending」的房间(withStreamLock 只串行不 dedup → 同一场跑两次 = 重复投稿 P1)。
+    // 赢的是**跨房间并发派发**,不是「提前返回」。
+    //
+    // 诚实边界:ResourcePool 的 maxCpuParallel 缺省仍是 1 → merge/burn **依旧串行**;
+    // 上传链全局串行是设计如此(防 601)。T7 真正交付的是「后一场的 job 行立即可见」
+    // + 后一场的 pull/net/upload 可与前一场的 CPU 工作重叠。
+    const dispatched: Promise<void>[] = [];
     for (const b of broadcasts) {
       try {
         // 过滤后无成员 → 房间没开 hub / 选中 worker 没人录到 → 跳过(不建 job)。
@@ -428,14 +466,16 @@ private cleanupBackfillDue(streamKey: string): string | null {
           const due = this.cleanupBackfillDue(b.streamKey);
           if (due) {
             jlogInfo(`[reconciler] ${b.streamKey} 上传后收尾未完成(${due}) → 补跑`);
-            try {
-              await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
-            } catch (err) {
-              if (isJobAbort(err)) { this.ledger.setState(b.streamKey, "needs_manual", { error: USER_STOP }); continue; }
-              console.error(`[reconciler] ${b.streamKey} 收尾补跑失败:`, err);
-              // 补跑失败**不改终态**:上传已成功,不该把 job 打成 failed(会诱导重传 = 重复稿)。
-              // 只记日志 + 下轮再来;节点自身的 failed/pending 状态已由 pipeline 写好。
-            }
+            // 也派发出去(收尾补跑同样是长 IO)—— 失败**不改终态**:上传已成功,
+            // 不该把 job 打成 failed(会诱导重传 = 重复稿)。只记日志 + 下轮再来。
+            dispatched.push(this.dispatcher.dispatch(b.streamKey, async () => {
+              try {
+                await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
+              } catch (err) {
+                if (isJobAbort(err)) { this.ledger.setState(b.streamKey, "needs_manual", { error: USER_STOP }); return; }
+                console.error(`[reconciler] ${b.streamKey} 收尾补跑失败:`, err);
+              }
+            }));
           }
           continue;
         }
@@ -482,8 +522,29 @@ private cleanupBackfillDue(streamKey: string): string | null {
         // Don't re-enter an in-progress job unless it was retryable.
         if (!isNew && job && !RETRYABLE.has(job.state)) continue;
 
-        await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
+        // 执行阶段:有界并发派发(同 key 活动去重 → 同一场永不并发、不重复建稿)。
+        // 失败语义**必须随执行一起搬进派发闭包**:旧实现在循环的 try/catch 里 markFailed,
+        // 一旦把 await 挪进 dispatcher 就落到 dispatcher 的兜底日志上 → job 卡在
+        // pending/retrying 且不计入 fails,重试上限形同虚设。所以在这里自己处理。
+        const settled = this.dispatcher.dispatch(b.streamKey, async () => {
+          try {
+            await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
+          } catch (err) {
+            // 用户停止 → 转人工,绝不能 markFailed(failed 会自动重试)。
+            if (isJobAbort(err)) {
+              this.ledger.setState(b.streamKey, "needs_manual", { error: USER_STOP });
+              return;
+            }
+            // Per-broadcast 出错:置 job=failed(可见 + 重试上限内自动重试),不中止其余 broadcast。
+            console.error(`[reconciler] broadcast ${b.streamKey} failed:`, err);
+            this.ledger.markFailed(b.streamKey, String((err as Error)?.message ?? err).slice(0, 300));
+          }
+        });
+        // 去重命中时 dispatch 返回 resolved promise(活动 key 已在跑,本轮不必等它)——
+        // dispatcher 内部已打日志说明跳过,不静默。
+        dispatched.push(settled);
       } catch (err) {
+        // 下面这层 catch 现在只覆盖「建 job / 判定阶段」的异常(执行期异常已在派发闭包内处理)。
         // 用户停止 → 转人工,绝不能 markFailed(failed 会自动重试)。
         if (isJobAbort(err)) {
           this.ledger.setState(b.streamKey, "needs_manual", { error: USER_STOP });
@@ -494,6 +555,9 @@ private cleanupBackfillDue(streamKey: string): string | null {
         this.ledger.markFailed(b.streamKey, String((err as Error)?.message ?? err).slice(0, 300));
       }
     }
+    // 等**本轮派发出去**的场全部跑完(保留 running 守卫语义,见上方说明)。
+    // 只等自己派发的那些:并发进来的另一轮所派的活跟本轮无关,不该把本轮卡住。
+    await Promise.all(dispatched);
   }
 
   /**
