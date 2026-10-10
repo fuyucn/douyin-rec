@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
@@ -1583,6 +1583,81 @@ describe("T17 recordingWorkers.checkedAt 透出", () => {
     const list = a.listTasks().body as Array<{ recordingWorkers?: Array<{ checkedAt: number | null }> }>;
     const row = list.find((x) => (x as { id?: number }).id === (created.body as { id: number }).id);
     expect(row?.recordingWorkers?.[0]?.checkedAt).toBeNull();
+    s.close();
+  });
+});
+
+// ── T15 资源闸门端点:写回「真正在用的那份」配置,inline 必须 400 ──────────────────
+describe("T15 /api/hub/resources", () => {
+  function setup(source: "root-file" | "settings" | "inline" | "arg-file") {
+    const s = new TaskStore(":memory:");
+    const dir = mkdtempSync(join(tmpdir(), "hubres-api-"));
+    const cfgPath = join(dir, "hub.config.json");
+    writeFileSync(cfgPath, JSON.stringify({ workers: [{ id: "local", kind: "local", dataRoot: "/d" }] }), "utf-8");
+    const resolved = source === "settings"
+      ? { json: JSON.stringify({ workers: [], resources: { maxCpuParallel: 1 } }), source: "settings" as const }
+      : source === "inline"
+        ? { json: JSON.stringify({ workers: [] }), source: "inline" as const }
+        : { json: readFileSync(cfgPath, "utf-8"), path: cfgPath, source };
+    const a = makeApi({
+      store: s, manager: new MockManager(),
+      hubDir: dir, hubConfigPath: cfgPath,
+      hubConfigSource: () => resolved,
+    });
+    return { s, a, cfgPath, dir };
+  }
+
+  it("GET 返回当前值 + 来源", () => {
+    const { s, a } = setup("root-file");
+    const r = a.getHubResources();
+    expect(r.status).toBe(200);
+    const body = r.body as { resources: { maxCpuParallel: number }; source: string };
+    expect(body.source).toBe("root-file");
+    expect(body.resources.maxCpuParallel).toBeGreaterThanOrEqual(1);
+    s.close();
+  });
+
+  it("PUT 写回文件且**保留 workers**(不把节点列表写坏)", () => {
+    const { s, a, cfgPath } = setup("root-file");
+    expect(a.putHubResources({ maxCpuParallel: 4 }).status).toBe(200);
+    const raw = JSON.parse(readFileSync(cfgPath, "utf-8")) as { resources: { maxCpuParallel: number }; workers: unknown[] };
+    expect(raw.resources.maxCpuParallel).toBe(4);
+    expect(raw.workers).toHaveLength(1);
+    s.close();
+  });
+
+  it("PUT 非法值 → 400 且**不改文件**(先校验后落盘)", () => {
+    const { s, a, cfgPath } = setup("root-file");
+    const before = readFileSync(cfgPath, "utf-8");
+    expect(a.putHubResources({ maxCpuParallel: 0 }).status).toBe(400);
+    expect(readFileSync(cfgPath, "utf-8")).toBe(before);
+    s.close();
+  });
+
+  it("source=settings → 写回 settings 表而不是文件", () => {
+    const { s, a, cfgPath } = setup("settings");
+    expect(a.putHubResources({ maxCpuParallel: 3 }).status).toBe(200);
+    const saved = s.getSetting("hubConfig");
+    expect(saved).toContain("maxCpuParallel");
+    expect(JSON.parse(saved!).resources.maxCpuParallel).toBe(3);
+    // 文件没被动
+    expect(readFileSync(cfgPath, "utf-8")).not.toContain("maxCpuParallel");
+    s.close();
+  });
+
+  it("source=inline → 400 且**明确说明无法持久化**(不假装保存成功)", () => {
+    const { s, a } = setup("inline");
+    const r = a.putHubResources({ maxCpuParallel: 3 });
+    expect(r.status).toBe(400);
+    expect(String((r.body as { error: string }).error)).toContain("内联");
+    s.close();
+  });
+
+  it("未注入 hubConfigSource(非 master)→ 400,不假装能改", () => {
+    const s = new TaskStore(":memory:");
+    const a = makeApi({ store: s, manager: new MockManager(), hubDir: mkdtempSync(join(tmpdir(), "hubres-no-")) });
+    expect(a.getHubResources().status).toBe(400);
+    expect(a.putHubResources({ maxCpuParallel: 2 }).status).toBe(400);
     s.close();
   });
 });

@@ -7,6 +7,32 @@ export type { NotifyEvent, NotifKey, NotifWebhookToggles };
  * 多节点 hub 后处理配置(按房间)。**独立于录制任务**——录制任务只管录,hub 规则管后处理。
  * hub 是全局管理器,对每个 enabled 的 HubRule(按 roomSlug)执行这份 pipeline。
  */
+/**
+ * 资源闸门(T15)。真理源 = hub 配置的 `resources` 段(app 的 hub-config-store 负责读写)。
+ *
+ * **声明放 core**:core 是唯一被 app(L4) 与 orchestrator(L4.5) 都能依赖的层,
+ * 放这里才能让「读配置的 app」与「用配置的 orchestrator」共用同一份类型 ——
+ * 各写一份必然漂移(字段名/默认值/下限各说各话)。
+ */
+export interface HubResources {
+  /** 烧录/CPU 密集步骤并行度。≥1。默认 1。 */
+  maxCpuParallel?: number;
+  /** 拉取/上传等网络步骤并行度。≥0(0 = 禁网络并发)。默认 1。 */
+  maxNetParallel?: number;
+  /** 烧录前要求的最小可用内存 MB。≥0。默认 2048。 */
+  minBurnFreeMemMB?: number;
+  /** 等内存门的时间上限 ms。≥0。默认 600_000。 */
+  memWaitTimeoutMs?: number;
+  /** 上传滑动窗口内允许次数。≥1。默认 5。 */
+  uploadRateLimit?: number;
+  /** 上传滑动窗口长度 ms。≥1。默认 600_000。 */
+  uploadRateWindowMs?: number;
+  /** 命中 601 后冷却 ms。0 = 显式关(存储不可用时仍有 fail-closed 兜底)。默认 1_800_000。 */
+  uploadCooldownMs?: number;
+  /** 同时处理的后处理场次上限(T7 派发器消费)。≥1。默认 2。 */
+  maxConcurrentPipelines?: number;
+}
+
 export interface HubPipelineConfig {
   /**
    * 产出哪些(默认全 true)。

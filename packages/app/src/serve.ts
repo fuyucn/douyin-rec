@@ -27,7 +27,7 @@ import { QrLoginManager } from "./login/login-manager.js";
 import { PlaywrightQrLogin } from "./login/qr-login.js";
 import { BiliQrLogin } from "./login/bili-qr-login.js";
 import { KuaishouQrLogin } from "./login/kuaishou-qr-login.js";
-import { resolveHubConfigJson, type HubStarter } from "./cli-task.js";
+import { resolveHubConfig, resolveHubConfigJson, type HubStarter } from "./cli-task.js";
 
 /** `task serve` 已解析的选项。 */
 // serve 命令的日志 scope(与拆分前 cli-task.ts 一致)。
@@ -157,6 +157,10 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     hubWatch?.start();
     const server = createWebServer({
       store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(),
+      // T15:告诉 API「master 实际在用哪份 hub 配置」—— UI 改 resources 必须写回那一份,
+      // 而不是盲目写 rootHubConfig()(用户用 --hub-config / settings 时那是另一份文件)。
+      // 用**函数**而非快照:配置来源不随运行变,但保持与 resolveHubConfig 同一口径、不缓存。
+      hubConfigSource: () => resolveHubConfig(o.hubConfig, store),
       // hub 未启用不注入 → 端点回落 400(与 hub.start 一致的开关逻辑)。
       testWorker: hubEnabled ? hubStarter?.testWorker : undefined,
       probeAllWorkers: hubEnabled ? hubStarter?.probeAllWorkers : undefined,
@@ -302,6 +306,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     if (o.hub && hubStarter) {
       void hubStarter.start({
         hubConfigJson: resolveHubConfigJson(o.hubConfig, store),
+        // T15:传原始入参,让 hubStarter 能热读「当前生效的那份」配置(见 HubStarter 注释)。
+        hubConfigArg: o.hubConfig,
         // 解析后的 db 路径(--db 省略+DOUYIN_REC_ROOT 时 → <root>/db/douyin-rec.db),
         // 使 hub 台账 <…>-sync.db 落数据根而非 cwd。
         dbPath: resolveDbPath(o.db),

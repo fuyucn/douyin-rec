@@ -23,6 +23,11 @@
 export interface JobDispatcherOptions {
   /** 同时执行的任务上限。<1 视为 1(不提供并发度 = 串行,与旧行为一致)。 */
   maxConcurrent?: number;
+  /**
+   * **热读取值器**(T15):传函数则每次派发取当前值,UI 改完立即生效、无需重启。
+   * 不传则退回 maxConcurrent(行为不变)。
+   */
+  maxConcurrentLive?: () => number;
   /** 便于测试/日志注入;默认 console。 */
   log?: (msg: string) => void;
 }
@@ -33,7 +38,10 @@ export interface JobDispatcherStats {
 }
 
 export class JobDispatcher {
-  readonly maxConcurrent: number;
+  /** 热读取值器;无则退化为常量闭包。 */
+  private readonly resolveMaxConcurrent: () => number;
+  /** 上一次解析出的上限(snapshot / 日志用;非法值夹到 1)。 */
+  maxConcurrent: number;
   private readonly log: (msg: string) => void;
   /** 正在执行的 key(活动去重集合;settle 即删)。 */
   private readonly active = new Set<string>();
@@ -46,8 +54,9 @@ export class JobDispatcher {
   private idleWaiters: (() => void)[] = [];
 
   constructor(opts: JobDispatcherOptions = {}) {
-    const n = opts.maxConcurrent ?? 1;
-    this.maxConcurrent = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
+    const clamp = (v: number): number => (Number.isFinite(v) && v >= 1 ? Math.floor(v) : 1);
+    this.resolveMaxConcurrent = opts.maxConcurrentLive ?? ((): number => clamp(opts.maxConcurrent ?? 1));
+    this.maxConcurrent = clamp(opts.maxConcurrent ?? 1);
     this.log = opts.log ?? ((m) => console.info(m));
   }
 
@@ -105,6 +114,8 @@ export class JobDispatcher {
   }
 
   private pump(): void {
+    // 每轮派发前重取一次上限:UI 改了并行度后,下一场就用新值(无需重启 master)。
+    this.maxConcurrent = this.resolveMaxConcurrent();
     while (this.inFlight < this.maxConcurrent && this.queue.length > 0) {
       const item = this.queue.shift()!;
       this.inFlight++;

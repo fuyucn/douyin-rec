@@ -69,6 +69,11 @@ export interface ReconcilerDeps {
    * 闸住(缺省 1 = 串行),上传链全局串行是设计如此(防 601)。
    */
   maxConcurrentPipelines?: number;
+  /**
+   * 并发上限的**热读取值器**(T15):传函数则每轮对账取当前值,UI 改完立即生效。
+   * 与 `maxConcurrentPipelines` 二选一,getter 优先(它是唯一「唯一消费点」)。
+   */
+  maxConcurrentPipelinesLive?: () => number;
 }
 
 const DEFAULT_SETTLE: SettleConfig = { maxWaitMs: 600_000, pollMs: 15_000 };
@@ -142,6 +147,10 @@ export class Reconciler {
     this.cleanupBackfillThrottleMs = deps.cleanupBackfillThrottleMs ?? DEFAULT_CLEANUP_BACKFILL_THROTTLE_MS;
     this.dispatcher = new JobDispatcher({
       maxConcurrent: deps.maxConcurrentPipelines ?? DEFAULT_MAX_CONCURRENT_PIPELINES,
+      // 热读优先:没传 getter 才用上面的静态值(T7 行为不变)。
+      ...(deps.maxConcurrentPipelinesLive
+        ? { maxConcurrentLive: deps.maxConcurrentPipelinesLive }
+        : {}),
       log: (m) => jlogInfo(m),
     });
   }

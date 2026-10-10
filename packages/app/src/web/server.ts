@@ -74,6 +74,8 @@ export interface RouteMatch {
     | "getEvents"
     | "listPlatforms"
     | "hubStatus"
+    | "getHubResources"
+    | "putHubResources"
     | "applyHubTasks"
     | "listRooms"
     | "getRoom"
@@ -143,6 +145,8 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "testWebhook", methods: ["POST"], pattern: /^\/api\/webhook\/test$/, needsBody: true },
   { name: "getWebhook", methods: ["GET"], pattern: /^\/api\/webhook$/ },
   { name: "setWebhook", methods: ["POST"], pattern: /^\/api\/webhook$/, needsBody: true },
+  { name: "getHubResources", methods: ["GET"], pattern: /^\/api\/hub\/resources$/ },
+  { name: "putHubResources", methods: ["PUT"], pattern: /^\/api\/hub\/resources$/, needsBody: true },
   { name: "getNotifSettings", methods: ["GET"], pattern: /^\/api\/notif-settings$/ },
   { name: "setNotifSettings", methods: ["PUT"], pattern: /^\/api\/notif-settings$/, needsBody: true },
   { name: "getVersion", methods: ["GET"], pattern: /^\/api\/version$/ },
@@ -244,6 +248,14 @@ export interface WebServerDeps {
   syncDbPath?: string;
   /** hub.config.json 路径;省略回落 rootHubConfig()。 */
   hubConfigPath?: string;
+  /**
+   * master **实际解析到的** hub 配置来源(T15)。
+   *
+   * 为什么不能只靠 hubConfigPath:用户可以用 `--hub-config <别的文件>` 或把配置存在 settings 表里,
+   * 此时 rootHubConfig() 指向的文件**根本没被使用**。UI 若盲目写它,表现为「改了不生效」——
+   * 这正是 T15 要消灭的那类假成功。省略 = 不提供(资源端点返回 400,不假装能改)。
+   */
+  hubConfigSource?: () => { json: string | undefined; path?: string; source: "arg-file" | "settings" | "root-file" | "inline" };
   /** biliup cookies.json 路径;省略回落应用默认路径。 */
   biliupCookiesPath?: string;
   /** 连接测试(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
@@ -427,6 +439,12 @@ async function dispatch(
     }
     case "hubStatus":
       return api.hubStatus();
+    case "getHubResources":
+      return api.getHubResources();
+    case "putHubResources": {
+      const body = (await readJson(req)) as Record<string, unknown>;
+      return api.putHubResources(body ?? {});
+    }
     case "listRooms":
       return api.listRooms();
     case "getRoom":

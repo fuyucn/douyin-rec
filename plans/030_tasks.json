@@ -1606,7 +1606,8 @@
       "depends_on": [
         "T7"
       ],
-      "estimated_loc": 320
+      "estimated_loc": 320,
+      "status": "done"
     },
     {
       "id": "T16",

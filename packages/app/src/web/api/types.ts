@@ -77,6 +77,14 @@ export interface ApiDeps {
   syncDbPath?: string;
   /** hub.config.json 路径;省略回落 rootHubConfig()。 */
   hubConfigPath?: string;
+  /**
+   * master **实际解析到的** hub 配置来源(T15)。
+   *
+   * 为什么不能只靠 hubConfigPath:用户可以用 `--hub-config <别的文件>` 或在 settings 里存配置,
+   * 此时 rootHubConfig() 指向的文件**根本没被使用**。UI 若盲目写它,表现为「改了不生效」。
+   * 省略 = 不提供(资源端点返回 400)。
+   */
+  hubConfigSource?: () => { json: string | undefined; path?: string; source: "arg-file" | "settings" | "root-file" | "inline" };
   /** biliup cookies.json 路径;省略回落 DEFAULT_COOKIES(测试注入用)。 */
   biliupCookiesPath?: string;
   /** 连接测试(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
@@ -246,6 +254,10 @@ export interface Api {
   listPlatforms(): ApiResult;
   /** GET /api/hub/status — 本节点是否 master(启用了 hub)。前端据此显示/隐藏 Hub 页。 */
   hubStatus(): ApiResult;
+  /** GET /api/hub/resources — 资源闸门当前值 + 来源(改写回哪)。 */
+  getHubResources(): ApiResult;
+  /** PUT /api/hub/resources — 改并行度等,立即生效;非法值 400 且不写坏配置。 */
+  putHubResources(patch: Record<string, unknown>): ApiResult;
   /** GET /api/rooms —— 全部房间(录制+处理两半合并视图)。 */
   listRooms(): ApiResult;
   /** GET /api/rooms/:key — 单个房间;两半都没有 → 404。 */

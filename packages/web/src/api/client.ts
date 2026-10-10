@@ -40,8 +40,9 @@ import type {
   WorkerStatus,
   RoomDTO,
   RoomPayload,
+  HubResources,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, QueueItemDTO, HubPoolSnapshotDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, RoomDTO, RoomPayload };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, QueueItemDTO, HubPoolSnapshotDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, RoomDTO, RoomPayload, HubResources };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -117,6 +118,12 @@ export const api = {
     request("PATCH", `/api/hub/rules/${encodeURIComponent(key)}`, input),
   deleteHubRule: (key: string): Promise<{ ok: boolean; key: string }> =>
     request("DELETE", `/api/hub/rules/${encodeURIComponent(key)}`),
+  // ── 资源闸门(T15):改完**立即生效**,无需重启 master ──────────────────────────
+  getHubResources: (): Promise<{ resources: HubResources; source: string; path: string | null; defaults: HubResources }> =>
+    request("GET", "/api/hub/resources"),
+  putHubResources: (patch: Partial<HubResources>): Promise<{ resources: HubResources; source: string }> =>
+    request("PUT", "/api/hub/resources", patch),
+
   // ── 统一房间(T9):一次读写「录制 + 处理」两半 ────────────────────────────────
   listRooms: (): Promise<RoomDTO[]> => request("GET", "/api/rooms"),
   getRoom: (key: string): Promise<RoomDTO> => request("GET", `/api/rooms/${encodeURIComponent(key)}`),

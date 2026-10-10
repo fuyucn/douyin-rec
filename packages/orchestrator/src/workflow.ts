@@ -373,6 +373,17 @@ export interface ResourcePoolCfg {
   minBurnFreeMemMB?: number;
   memWaitTimeoutMs?: number;
   /**
+   * **热读取值器**(T15):传函数则每次判定都用它取当前值,改配置**立即生效、无需重启**。
+   * 不传则退回上面的数字字段(行为不变)。
+   *
+   * 为什么用 getter 而不是「每 tick 重建 pool」:重建会把 T8/T19 持久化的
+   * `uploadTimes`/`uploadBlockedUntil`/限流账本**静默清空** —— 那等于每次改配置
+   * 都重新放行一次上传,正是 601 风控最怕的(自审:评审点名过这条捷径)。
+   */
+  maxCpuParallelLive?: () => number;
+  maxNetParallelLive?: () => number;
+  minBurnFreeMemMBLive?: () => number;
+  /**
    * **全局上传队列**:B 站按「提交次数」限流(`code 601 上传视频过快`),与并发数无关。
    * 故队列对「每一次提交」做限速:
    *   - `uploadRateLimit`:窗口内最多提交次数(缺省 5)。
@@ -397,16 +408,28 @@ export interface PoolSnapshot {
 class Semaphore {
   private active = 0;
   private queue: Array<() => void> = [];
-  constructor(private max: number) {}
+  /** 上限的**取值器**:T15 起可为 getter(每 tick 热读配置),也可为常量(默认)。 */
+  private readonly resolveMax: () => number;
+  constructor(max: number | (() => number)) {
+    this.resolveMax = typeof max === "function" ? max : (): number => max;
+  }
+  /** 当前上限;非法值夹到 1(0 个并行 = 永远排队 = 看起来像卡死)。 */
+  private max(): number {
+    const n = this.resolveMax();
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
+  }
   /** 只读快照:当前持锁数 / 等待队列长度 / 上限。 */
   snapshot(): { active: number; queued: number; max: number } {
-    return { active: this.active, queued: this.queue.length, max: this.max };
+    return { active: this.active, queued: this.queue.length, max: this.max() };
   }
   async acquire(): Promise<void> {
-    if (this.active < this.max) { this.active++; return; }
+    if (this.active < this.max()) { this.active++; return; }
+    // 排队。**拿到让渡的许可就算数,不再回到上面重新核对上限** ——
+    // release() 让渡时已经 active++ 了,回去重判会看到 active>=max 于是**再排一次队**,
+    // 造成「许可已让渡但没人接手」的活锁(实测 pipeline 全部超时)。
+    // 并发上限在等待期间被调低时,已在队列里的人按**让渡时刻**的判定生效 ——
+    // 这是一致且可解释的口径(不会超发:release 只让渡一个)。
     await new Promise<void>((resolve) => this.queue.push(resolve));
-    // release() 让渡时已 active++,这里不能再加,否则排队者持锁数会多 1,
-    // 永久泄漏一个许可(后续同资源任务全部卡死)。
   }
   release(): void {
     this.active--;
@@ -462,6 +485,8 @@ export class ResourcePool {
     Array<{ streamKey: string; resource: "cpu" | "net" | "upload"; since: number; token: symbol }>
   >();
   private minBurnFreeMemMB: number;
+  /** 热读的内存下限(T15);无 getter 时是构造值的常量闭包。 */
+  private minBurnFreeMemMBLive: () => number;
   private memWaitTimeoutMs: number;
   private now: () => number;
   private sleep: (ms: number) => Promise<void>;
@@ -498,8 +523,11 @@ export class ResourcePool {
       warn?: (msg: string) => void;
     } = {},
   ) {
-    this.cpu = new Semaphore(Math.max(1, cfg.maxCpuParallel ?? 1));
-    this.net = new Semaphore(Math.max(1, cfg.maxNetParallel ?? 1));
+    // 有 live getter 就热读它,否则用构造时的数字(后者保持向后兼容)。
+    this.cpu = new Semaphore(cfg.maxCpuParallelLive ?? ((): number => Math.max(1, cfg.maxCpuParallel ?? 1)));
+    this.net = new Semaphore(cfg.maxNetParallelLive ?? ((): number => Math.max(1, cfg.maxNetParallel ?? 1)));
+    // 热读版:每次等内存门前取当前值(UI 改完立即生效);无 getter 时退回构造值。
+    this.minBurnFreeMemMBLive = cfg.minBurnFreeMemMBLive ?? ((): number => cfg.minBurnFreeMemMB ?? 2048);
     this.minBurnFreeMemMB = cfg.minBurnFreeMemMB ?? 2048;
     this.memWaitTimeoutMs = cfg.memWaitTimeoutMs ?? 600_000;
     this.uploadRateLimit = Math.max(0, cfg.uploadRateLimit ?? 5);
@@ -616,12 +644,13 @@ export class ResourcePool {
     try {
       return await this.withSemaphore(this.cpu, async () => {
         clear(); // 已进闸门 → 不再算「排队」
-        if (this.minBurnFreeMemMB > 0) {
+        const memFloor = this.minBurnFreeMemMBLive();
+        if (memFloor > 0) {
           const deadline = this.now() + this.memWaitTimeoutMs;
-          while (this.freeMemMB() < this.minBurnFreeMemMB) {
+          while (this.freeMemMB() < memFloor) {
             throwIfAborted();
             if (this.now() >= deadline) {
-              throw new Error(`内存不足(可用 ${Math.round(this.freeMemMB())}MB < ${this.minBurnFreeMemMB}MB),等待超时`);
+              throw new Error(`内存不足(可用 ${Math.round(this.freeMemMB())}MB < ${memFloor}MB),等待超时`);
             }
             await this.sleep(2000);
           }

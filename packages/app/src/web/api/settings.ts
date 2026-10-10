@@ -12,11 +12,67 @@ import { DOUYIN_API_MODES, DEFAULT_DOUYIN_API_MODE, normalizeDouyinApiMode } fro
 import { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "../../timezone.js";
 import type { NotifWebhookToggles } from "@drec/observability";
 import { resolveWebhookToggles, DEFAULT_WEBHOOK_TOGGLES } from "@drec/observability";
+import { readResources, writeResources, validateResources, DEFAULT_HUB_RESOURCES, type HubResources } from "../../hub-config-store.js";
 
 export function buildSettings(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
     err } = ctx;
   return {
+    /**
+     * GET /api/hub/resources —— 资源闸门当前生效值(T15)。
+     *
+     * 回 `source` 让 UI 知道「改完会写去哪」:arg-file/root-file 写文件、settings 写 settings 表、
+     * inline 无法持久化(此时 PUT 直接 400,而不是假装保存成功)。
+     */
+    getHubResources(): ApiResult {
+      const resolved = deps.hubConfigSource?.();
+      if (!resolved) return err(400, "hub 未启用或未配置");
+      return {
+        status: 200,
+        body: {
+          resources: readResources(resolved.path ?? hubConfigPath),
+          source: resolved.source,
+          path: resolved.path ?? null,
+          defaults: DEFAULT_HUB_RESOURCES,
+        },
+      };
+    },
+
+    /**
+     * PUT /api/hub/resources —— 改并行度等,**立即生效**(ResourcePool 每轮热读,无需重启)。
+     *
+     * 写回按 source 分派:
+     *   - arg-file / root-file → 原子写那个文件(只覆盖 resources 键,workers 等原样保留)
+     *   - settings            → 写回 settings 表的 hubConfig(保留其中其它键)
+     *   - inline              → 400。**内联配置无法持久化**,假装成功等于骗用户:
+     *     重启后配置消失,而他以为生效了。
+     */
+    putHubResources(patch: Partial<HubResources>): ApiResult {
+      const resolved = deps.hubConfigSource?.();
+      if (!resolved) return err(400, "hub 未启用或未配置");
+      const verr = validateResources(patch ?? {});
+      if (verr) return err(400, verr);            // 先校验,不写坏配置
+      if (resolved.source === "inline") {
+        return err(400, "当前 hub 配置是 --hub-config 内联 JSON,无法持久化修改;请改为配置文件");
+      }
+      if (resolved.source === "settings") {
+        try {
+          const cfg = JSON.parse(resolved.json ?? "{}") as Record<string, unknown>;
+          cfg.resources = { ...(cfg.resources as object ?? {}), ...patch };
+          store.setSetting("hubConfig", JSON.stringify(cfg, null, 2));
+        } catch (e) {
+          return err(400, `settings 里的 hub 配置不是合法 JSON,拒绝覆写: ${(e as Error).message}`);
+        }
+      } else {
+        if (!resolved.path) return err(400, "无法定位 hub 配置文件");
+        writeResources(resolved.path, patch);
+      }
+      return {
+        status: 200,
+        body: { resources: readResources(resolved.path ?? hubConfigPath), source: resolved.source },
+      };
+    },
+
     getWebhook(): ApiResult {
       // webhook URL 本身是凭证:接口不回显原文,只告知是否已配置(覆盖时整段粘贴新的)。
       const set = (store.getSetting("discordWebhook") ?? "").trim().length > 0;

@@ -22,13 +22,35 @@ import { parseSchedule, toDanmuFlag, parseBoolFlag } from "./task-input.js";
  *   --hub-config(存在的文件路径→读文件;否则当内联 JSON 串) > settings 表 hubConfig > <root>/config/hub-config.json(自动读)。
  * 即:把 hub-config.example.json 复制成 hub-config.json 改完,`serve --hub` 即自动加载(无需 --hub-config)。都没有 → undefined(跳过)。
  */
-export function resolveHubConfigJson(arg: string | undefined, store: TaskStore): string | undefined {
-  if (arg) return existsSync(arg) ? readFileSync(arg, "utf-8") : arg;
+export interface ResolvedHubConfig {
+  /** 配置 JSON 串(可直接 JSON.parse);undefined = 没配置。 */
+  json: string | undefined;
+  /**
+   * 这份配置**存放在哪**(文件路径);inline 时为 undefined。
+   * UI 改 resources 时必须写回这里 —— 盲目写 rootHubConfig() 会改到一份
+   * **根本没被使用**的文件(用户用 --hub-config 指定了别的路径时),表现为「改了没生效」。
+   */
+  path?: string;
+  /** 来源。决定写回方式:arg-file/root-file 写文件,settings 写 settings 表,inline 无法持久化(400)。 */
+  source: "arg-file" | "settings" | "root-file" | "inline";
+}
+
+export function resolveHubConfig(arg: string | undefined, store: TaskStore): ResolvedHubConfig {
+  if (arg) {
+    return existsSync(arg)
+      ? { json: readFileSync(arg, "utf-8"), path: arg, source: "arg-file" }
+      : { json: arg, source: "inline" };
+  }
   const fromDb = store.getSetting("hubConfig");
-  if (fromDb) return fromDb;
+  if (fromDb) return { json: fromDb, source: "settings" };
   const p = rootHubConfig();
-  if (existsSync(p)) return readFileSync(p, "utf-8");
-  return undefined;
+  if (existsSync(p)) return { json: readFileSync(p, "utf-8"), path: p, source: "root-file" };
+  return { json: undefined, source: "root-file" };
+}
+
+/** 只要 JSON 串的既有调用点(保持原签名不变,避免无关改动扩散)。 */
+export function resolveHubConfigJson(arg: string | undefined, store: TaskStore): string | undefined {
+  return resolveHubConfig(arg, store).json;
 }
 import { RecordingSession } from "@drec/manager";
 import { createLogger, getEngine, getPlatform, platformForRoom } from "@drec/core";
@@ -206,6 +228,14 @@ interface AddOpts {
 export interface HubStarter {
   start(opts: {
     hubConfigJson: string | undefined;
+    /**
+     * `--hub-config` 的**原始入参**(可能是文件路径,也可能是内联 JSON 串)。
+     *
+     * T15 需要它来「热读当前生效的那份配置」:只有拿到原始入参,才能重新走
+     * `resolveHubConfig` 判定到底是 arg-file / settings / root-file / inline,
+     * 只给一个 JSON 快照的话,UI 改完资源后我们读的还是启动时那一份(改了不生效)。
+     */
+    hubConfigArg?: string | undefined;
     dbPath: string | undefined;
     store: TaskStore;
     manager: {

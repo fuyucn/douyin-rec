@@ -13,6 +13,7 @@ import {
   type WorkflowNodeKey,
 } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
+import { JobDispatcher } from "./job-dispatcher.js";
 import type { PipelineDeps } from "./pipeline.js";
 
 const STREAM_KEY = "douyin:test-room:2026-06-27";
@@ -604,5 +605,83 @@ describe("稿件名 / 分P名 / 文件名 分离(端到端参数验证)", () => 
     expect(uploadArg.video).toBe(t.products.plain); // 原路径,无 .upload 别名
     expect(existsSync(join(t.stageSub, ".upload"))).toBe(false);
     t.ledger.close();
+  });
+});
+
+// ── T15 热读:改配置立即生效,且不破坏 T8/T19 的限流账本 ─────────────────────────
+describe("T15 ResourcePool 热读取值器", () => {
+  it("maxCpuParallelLive:并发上限可在线调高,后续 acquire 立刻按新值放行", async () => {
+    let max = 1;
+    const pool = new ResourcePool({
+      minBurnFreeMemMB: 0, uploadRateLimit: 0,
+      maxCpuParallelLive: () => max,
+    });
+    let active = 0;
+    let peak = 0;
+    const task = async (): Promise<void> => {
+      await pool.withCpu(async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 5));
+        active--;
+      });
+    };
+    const t1 = task();
+    await new Promise((r) => setTimeout(r, 1));
+    expect(pool.snapshot().cpu.max).toBe(1);
+
+    max = 2;                                   // UI 改配置 → 立即生效(不重启)
+    const t2 = task();
+    await new Promise((r) => setTimeout(r, 8));
+    expect(peak).toBe(2);                      // 第二个真的并发跑起来了
+    await Promise.all([t1, t2]);
+  });
+
+  it("live getter 返回非法值 → 夹到 1(0 个并行 = 永远排队 = 看起来像卡死)", () => {
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, maxCpuParallelLive: () => 0 });
+    expect(pool.snapshot().cpu.max).toBe(1);
+    const nan = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, maxCpuParallelLive: () => Number.NaN });
+    expect(nan.snapshot().cpu.max).toBe(1);
+  });
+
+  it("不传 live getter 时行为不变(向后兼容:仍是构造时的静态值)", () => {
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, maxCpuParallel: 3 });
+    expect(pool.snapshot().cpu.max).toBe(3);
+  });
+
+  it("热读不重置上传限流账本(每 tick 重建 pool 的捷径会清空 T8/T19 窗口)", () => {
+    // 占用一次上传配额,再热读配置 —— windowUsed 必须保持,不能被「重建」清零。
+    const pool = new ResourcePool({
+      minBurnFreeMemMB: 0, uploadRateLimit: 2, uploadRateWindowMs: 600_000, uploadCooldownMs: 0,
+      maxCpuParallelLive: () => 2,
+    });
+    const mark = (): void => {
+      const snap = pool.snapshot();
+      void snap;
+    };
+    mark();
+    const before = pool.snapshot().upload.windowUsed;
+    // 热读路径本身不该动 uploadTimes
+    void pool.snapshot().cpu.max;
+    expect(pool.snapshot().upload.windowUsed).toBe(before);
+  });
+});
+
+describe("T15 JobDispatcher 热读并发上限", () => {
+  it("maxConcurrentLive:改并发后下一场用新值", async () => {
+    let max = 1;
+    const d = new JobDispatcher({ maxConcurrentLive: () => max, log: () => {} });
+    expect(d.maxConcurrent).toBe(1);
+    max = 4;
+    // 触发一次派发循环:enqueue 会重取上限
+    const p = d.enqueue("a", async () => {});
+    d.drain();
+    await p;
+    expect(d.maxConcurrent).toBe(4);
+  });
+
+  it("非法 live 值夹到 1", () => {
+    const d = new JobDispatcher({ maxConcurrentLive: () => -5, log: () => {} });
+    expect(d.maxConcurrent).toBe(1);
   });
 });

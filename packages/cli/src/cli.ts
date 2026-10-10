@@ -18,6 +18,7 @@ import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { biliAccountKey, loadConfig, sanitizeStreamKey } from "@drec/core";
+import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { getEngine, platformForRoom } from "@drec/core";
@@ -29,7 +30,7 @@ import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type HubPoolSnapshotDTO } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
-import { buildTaskCommand, buildCookieCommand, APP_VERSION } from "@drec/app";
+import { buildTaskCommand, buildCookieCommand, resolveHubConfig, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
@@ -778,10 +779,41 @@ const hubStarter: HubStarter = {
     const defaultTid = uploadDefaults.tid ?? 21;
 
     const { spawn } = await import("node:child_process");
+    // T15:并行度/内存门槛**每轮热读**(UI 改完立即生效,无需重启)。
+    // 读的是「当前真正生效的那份来源」(arg-file / settings / root-file 每次现解析),
+    // 而不是构造时读一次的 hubCfg 快照 —— 否则 UI 改的是另一份文件,或改了要等重启。
+    //
+    // 上传限流三项**故意不给 live getter**:它们由 T8/T19 的持久化账本 + UploadGate 实时判定,
+    // 热读配置反而会在改配置时**清掉已积累的窗口**,等于「每次改配置都重新放行一次」,
+    // 正是 601 最怕的。构造值只作为冷启动基线。
+    const liveResources = (): HubResources => {
+      try {
+        const resolved = resolveHubConfig(opts.hubConfigArg, opts.store);
+        const cfg = resolved.json ? (JSON.parse(resolved.json) as { resources?: Partial<HubResources> }) : null;
+        const r = cfg?.resources ?? {};
+        return {
+          maxCpuParallel: r.maxCpuParallel ?? hubCfg.resources?.maxCpuParallel ?? 1,
+          maxNetParallel: r.maxNetParallel ?? hubCfg.resources?.maxNetParallel ?? 1,
+          minBurnFreeMemMB: r.minBurnFreeMemMB ?? hubCfg.resources?.minBurnFreeMemMB ?? 2048,
+          maxConcurrentPipelines: r.maxConcurrentPipelines ?? hubCfg.resources?.maxConcurrentPipelines ?? 2,
+        };
+      } catch {
+        // 配置在两次读取之间被改坏(JSON 解析失败)→ 沿用构造值,不能因为手滑就把闸门打不开。
+        return {
+          maxCpuParallel: hubCfg.resources?.maxCpuParallel ?? 1,
+          maxNetParallel: hubCfg.resources?.maxNetParallel ?? 1,
+          minBurnFreeMemMB: hubCfg.resources?.minBurnFreeMemMB ?? 2048,
+          maxConcurrentPipelines: hubCfg.resources?.maxConcurrentPipelines ?? 2,
+        };
+      }
+    };
     const pool = new ResourcePool({
       maxCpuParallel: hubCfg.resources?.maxCpuParallel ?? 1,
       maxNetParallel: hubCfg.resources?.maxNetParallel ?? 1,
       minBurnFreeMemMB: hubCfg.resources?.minBurnFreeMemMB ?? 2048,
+      maxCpuParallelLive: () => liveResources().maxCpuParallel ?? 1,
+      maxNetParallelLive: () => liveResources().maxNetParallel ?? 1,
+      minBurnFreeMemMBLive: () => liveResources().minBurnFreeMemMB ?? 2048,
       memWaitTimeoutMs: hubCfg.resources?.memWaitTimeoutMs ?? 600_000,
       uploadRateLimit: hubCfg.resources?.uploadRateLimit ?? 5,
       uploadRateWindowMs: hubCfg.resources?.uploadRateWindowMs ?? 600_000,
@@ -911,7 +943,8 @@ const hubStarter: HubStarter = {
       diskMinGB: hubCfg.resources?.diskMinGB ?? 10,
       // T7:跨房间的调度并发(同时派发几场 pull/merge/burn/upload 流程)。
       // 不等于 CPU 并行度 —— merge/burn 仍由 maxCpuParallel 闸住(上面那一行,缺省 1)。
-      maxConcurrentPipelines: hubCfg.resources?.maxConcurrentPipelines ?? 2,
+      // T15:热读当前生效的那份配置(T7 的 dispatcher 每轮取),UI 改完立即生效、无需重启。
+      maxConcurrentPipelinesLive: () => liveResources().maxConcurrentPipelines ?? 2,
       ...(hubCfg.maxWaitSec != null || hubCfg.settleSec != null
         ? {
             settle: {
