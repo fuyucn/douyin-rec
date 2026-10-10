@@ -190,6 +190,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                   </span>
                   <Switch checked={form.recEnabled} onCheckedChange={(v: boolean) => set("recEnabled", v)} />
                 </label>
+                {/* 名称 + 画质/引擎:字段短,窄屏两列不截断 */}
                 <div className="grid grid-cols-2 gap-3">
                   <label className="block col-span-2">
                     <span className="field-label">{t("rooms.name")}</span>
@@ -213,13 +214,19 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                     <span className="field-label">{t("rooms.segmentSec")}</span>
                     <input className="input" type="number" min={60} value={form.segmentSec} onChange={(e) => set("segmentSec", e.target.value)} />
                   </label>
-                  {/* 这两个开关文字短,窄屏也并排 —— 独占整行会浪费一半高度 */}
-                  <label className="switch-row">
-                    <span className="text-sm truncate">{t("rooms.danmu")}</span>
+                  {/* 这两个开关带说明文字(两行标准),说明是长句 → 单列全宽,避免截断 */}
+                  <label className="switch-row col-span-2">
+                    <span className="flex flex-col min-w-0">
+                      <span className="text-sm font-medium text-ink">{t("rooms.danmu")}</span>
+                      <span className="text-xs text-muted mt-0.5">{t("rooms.danmuHint")}</span>
+                    </span>
                     <Switch checked={form.danmu} onCheckedChange={(v: boolean) => set("danmu", v)} />
                   </label>
-                  <label className="switch-row">
-                    <span className="text-sm truncate">{t("rooms.useCookie")}</span>
+                  <label className="switch-row col-span-2">
+                    <span className="flex flex-col min-w-0">
+                      <span className="text-sm font-medium text-ink">{t("rooms.useCookie")}</span>
+                      <span className="text-xs text-muted mt-0.5">{t("rooms.useCookieHint")}</span>
+                    </span>
                     <Switch checked={form.useCookie} onCheckedChange={(v: boolean) => set("useCookie", v)} />
                   </label>
                 </div>
@@ -238,26 +245,36 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                 </span>
                 <Switch checked={form.procEnabled} onCheckedChange={(v: boolean) => set("procEnabled", v)} />
               </label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* 步骤开关:说明是长句(如合并的取舍),**一律单列全宽** —— 两列会把说明截成 「...each」看不清 */}
+              <div className="space-y-3">
                 <label className="switch-row">
-                  <span className="text-sm truncate">{t("rooms.mergeSegments")}</span>
+                  <span className="flex flex-col min-w-0">
+                    <span className="text-sm font-medium text-ink">{t("rooms.mergeSegments")}</span>
+                    <span className="text-xs text-muted mt-0.5">{t("hub.ruleDialog.toggleMergeSegmentsSub")}</span>
+                  </span>
                   <Switch checked={form.mergeSegments} onCheckedChange={(v: boolean) => set("mergeSegments", v)} />
                 </label>
                 <label className="switch-row">
-                  <span className="text-sm truncate">{t("rooms.burnDanmu")}</span>
+                  <span className="flex flex-col min-w-0">
+                    <span className="text-sm font-medium text-ink">{t("rooms.burnDanmu")}</span>
+                    <span className="text-xs text-muted mt-0.5">{t("hub.ruleDialog.toggleBurnDanmuSub")}</span>
+                  </span>
                   <Switch checked={form.burnDanmu} onCheckedChange={(v: boolean) => set("burnDanmu", v)} />
                 </label>
                 <label className="switch-row">
-                  <span className="text-sm truncate">{t("rooms.burnLivechat")}</span>
+                  <span className="flex flex-col min-w-0">
+                    <span className="text-sm font-medium text-ink">{t("rooms.burnLivechat")}</span>
+                    <span className="text-xs text-muted mt-0.5">{t("hub.ruleDialog.toggleBurnLivechatSub")}</span>
+                  </span>
                   <Switch checked={form.burnLivechat} onCheckedChange={(v: boolean) => set("burnLivechat", v)} />
                 </label>
                 <label className="switch-row" data-disabled={form.burnDanmu || form.burnLivechat ? "true" : undefined}>
                   <span className="flex flex-col min-w-0">
-                    <span className="text-sm truncate">{t("rooms.nodeSideUpload")}</span>
-                    {/* 与烧录互斥(弱节点烧不动):开烧录时禁用并说明,不让用户开了却静默不生效 */}
-                    {(form.burnDanmu || form.burnLivechat) && (
-                      <span className="text-xs text-muted mt-0.5 truncate">{t("rooms.nodeSideUploadDisabled")}</span>
-                    )}
+                    <span className="text-sm font-medium text-ink">{t("rooms.nodeSideUpload")}</span>
+                    {/* 与烧录互斥(弱节点烧不动):开烧录时该说明换成禁用原因,不让用户开了却静默不生效 */}
+                    <span className="text-xs text-muted mt-0.5">
+                      {(form.burnDanmu || form.burnLivechat) ? t("rooms.nodeSideUploadDisabled") : t("hub.ruleDialog.toggleNodeSideUploadSub")}
+                    </span>
                   </span>
                   <Switch checked={form.nodeSideUpload} onCheckedChange={(v: boolean) => set("nodeSideUpload", v)} disabled={form.burnDanmu || form.burnLivechat} />
                 </label>
@@ -271,7 +288,12 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                   </select>
                 </label>
                 <label className="switch-row">
-                  <span className="text-sm">{t("rooms.uploadPrivate")}</span>
+                  <span className="flex flex-col min-w-0">
+                    <span className="text-sm font-medium text-ink truncate">{t("rooms.uploadPrivate")}</span>
+                    <span className="text-xs text-muted mt-0.5">
+                      {form.uploadPrivate ? t("hub.ruleDialog.privateHint") : t("hub.ruleDialog.publicHint")}
+                    </span>
+                  </span>
                   <Switch checked={form.uploadPrivate} onCheckedChange={(v: boolean) => set("uploadPrivate", v)} />
                 </label>
                 <label className="block">
@@ -300,9 +322,9 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {workers.map((w) => (
                   <label key={w.id} className="switch-row">
-                    <span className="flex flex-col">
-                      <span className="text-sm font-medium text-ink">{w.name}</span>
-                      <span className="text-xs text-muted mt-0.5 font-mono">{w.kind}{w.host ? ` · ${w.host}` : ""}</span>
+                    <span className="flex flex-col min-w-0">
+                      <span className="text-sm font-medium text-ink truncate">{w.name}</span>
+                      <span className="text-xs text-muted mt-0.5 font-mono truncate">{w.kind}{w.host ? ` · ${w.host}` : ""}</span>
                     </span>
                     <Switch checked={form.workers.includes(w.id)} onCheckedChange={() => toggleWorker(w.id)} />
                   </label>
