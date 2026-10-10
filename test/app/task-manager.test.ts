@@ -339,3 +339,53 @@ describe("TaskManager", () => {
     expect(store.getTask(b)!.status).toBe("stopped");
   });
 });
+
+// ── T17 录制状态变化 → notifyChanged(房间页实时化的关键一跳)──────────────────────
+describe("T17 录制状态变化通知", () => {
+  it("start / 退出 / 开播 / 收播各触发一次 onRecordingStateChanged", () => {
+    const id = addTask();
+    const spawner = new MockSpawner();
+    const changed: number[] = [];
+    const mgr = new TaskManager(store, spawner, { log: () => {}, onRecordingStateChanged: (tid) => changed.push(tid) });
+
+    mgr.start(id);
+    expect(changed).toEqual([id]);                 // 起播
+
+    const proc = spawner.last(id);
+    proc.emitLog("[状态] 录制中");
+    expect(changed).toEqual([id, id]);             // 开播(等待→录制中)
+
+    proc.emitLog("[状态] 录制中");                   // 重复行:不该再推
+    expect(changed).toEqual([id, id]);
+
+    proc.emitLog("[状态] 等待开播");
+    expect(changed).toEqual([id, id, id]);         // 收播(录制中→等待)
+
+    proc.emitExit({ code: 0, signal: null, expected: true });
+    expect(changed).toEqual([id, id, id, id]);     // 正常停止
+  });
+
+  it("未注入回调时状态变更不报错(向后兼容:老调用方照常工作)", () => {
+    const id = addTask();
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {} });   // 不传 onRecordingStateChanged
+    expect(() => {
+      mgr.start(id);
+      spawner.last(id).emitLog("[状态] 录制中");
+      spawner.last(id).emitExit({ code: 0, signal: null, expected: true });
+    }).not.toThrow();
+  });
+
+  it("回调抛错不影响录制主流程(旁路信号不能把录制搞挂),但要留下日志", () => {
+    const id = addTask();
+    const spawner = new MockSpawner();
+    const logs: string[] = [];
+    const mgr = new TaskManager(store, spawner, {
+      log: (m) => logs.push(m),
+      onRecordingStateChanged: () => { throw new Error("boom"); },
+    });
+    expect(() => mgr.start(id)).not.toThrow();
+    expect(mgr.isRunning(id)).toBe(true);           // 录制照常起来了
+    expect(logs.some((l) => l.includes("notifyRecordingState"))).toBe(true);  // 但不静默
+  });
+});

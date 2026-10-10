@@ -127,6 +127,33 @@ export class HubWatch {
     return this.subs.size;
   }
 
+  /**
+   * **外部主动触发一次变更通知**(T17)。
+   *
+   * 为什么需要:SSE 的指纹只覆盖 **sync 台账**(hub 后处理)。但用户看的「房间页」还关心
+   * **录制状态** —— 开播/收播那一刻,台账可能毫无变化(后处理还没开始),指纹不变 → 不推 →
+   * 页面在最该刷新的几秒里是陈旧的。录制状态在 tasks 表 / TaskManager 内存里,不在台账里,
+   * 所以指纹看不见,只能由**状态变更方主动喊一声**。
+   *
+   * 语义与轮询路径完全一致:走去抖,不绕过 debounce(否则一次开播会连推十几帧)。
+   * 未 start 时调用是安全的空操作(没有订阅者可通知)。
+   */
+  notifyChanged(): void {
+    if (this.subs.size === 0) return;        // 没人听 → 不排(否则定时器白转)
+    if (this.pendingSince !== null) return;  // 已在去抖窗口里 → 不重复排
+    this.pendingSince = this.now();
+    if (this.debounceMs <= 0) {
+      this.pendingSince = null;
+      this.flush();
+      return;
+    }
+    setTimeout(() => {
+      if (this.pendingSince == null) return;
+      this.pendingSince = null;
+      this.flush();
+    }, this.debounceMs).unref?.();
+  }
+
   /** 订阅变更。返回退订函数;重复调用退订是安全的。 */
   subscribe(fn: () => void): () => void {
     this.subs.add(fn);

@@ -36,6 +36,17 @@ export interface TaskManagerOpts {
   maxRestarts?: number;
   /** 任务崩溃重启耗尽、彻底放弃时回调(serve 接到 → 发告警 webhook)。 */
   onTaskDown?: (taskId: number, reason: string) => void;
+  /**
+   * 录制状态变化回调(T17 → HubWatch.notifyChanged)。
+   *
+   * 为什么录制状态要主动通知:HubWatch 的指纹只覆盖 **sync 台账**,而「开播/收播」这件事
+   * 在台账里可能毫无变化(后处理还没开始)→ 指纹不变 → SSE 不推 → 房间页在最该刷新的
+   * 几秒里是陈旧的。录制状态住在 tasks 表 / 本类内存里,指纹看不见,只能由状态变更方喊一声。
+   *
+   * 只在**用户可见的状态**变化时触发(起停/开播/收播/崩溃),**不是**每条日志都触发 ——
+   * 否则一次录制会每秒推一次,退化成轮询还多付 SSE 帧的钱。
+   */
+  onRecordingStateChanged?: (taskId: number) => void;
   /** 子进程结构化告警(@@DREC_ALERT@@)回调(serve 接到 → EventCenter 站内 toast;webhook 子进程已发)。 */
   onAlert?: (taskId: number, stage: string, message: string) => void;
   /** Logger. Default console.log. */
@@ -62,6 +73,7 @@ export class TaskManager {
   private readonly restartDelayMs: number;
   private readonly maxRestarts: number;
   private readonly onTaskDown?: (taskId: number, reason: string) => void;
+  private readonly onRecordingStateChanged?: (taskId: number) => void;
   private readonly onAlert?: (taskId: number, stage: string, message: string) => void;
   private readonly log: (m: string) => void;
   private readonly schedule: (cb: () => void, ms: number) => void;
@@ -88,6 +100,7 @@ export class TaskManager {
     this.restartDelayMs = opts.restartDelayMs ?? 5_000;
     this.maxRestarts = opts.maxRestarts ?? 5;
     this.onTaskDown = opts.onTaskDown;
+    this.onRecordingStateChanged = opts.onRecordingStateChanged;
     this.onAlert = opts.onAlert;
     this.log = opts.log ?? ((m): void => console.log(m));
     this.schedule =
@@ -128,6 +141,19 @@ export class TaskManager {
     return this.anchorNames.get(taskId) ?? null;
   }
 
+  /**
+   * 通知外部「录制状态变了」。回调本身抛错不能影响录制主流程(它是**旁路**信号),
+   * 所以吞掉异常但打一行日志 —— 不静默,也不让观测链路把录制搞挂。
+   */
+  private notifyRecordingState(taskId: number): void {
+    if (!this.onRecordingStateChanged) return;
+    try {
+      this.onRecordingStateChanged(taskId);
+    } catch (e) {
+      this.log(`[task_manager] notifyRecordingState(id=${taskId}) 出错(忽略): ${(e as Error)?.message ?? e}`);
+    }
+  }
+
   /** 是否真正在录视频（true=录制中；false=进程在跑但等待开播/重连中）。 */
   isRecording(taskId: number): boolean {
     return this.recordingPhase.get(taskId) ?? false;
@@ -144,6 +170,7 @@ export class TaskManager {
     this.restarts.set(taskId, 0);
     this.spawnFor(taskId);
     this.store.setStatus(taskId, "running");
+    this.notifyRecordingState(taskId);
     this.logTask(taskId, `[task_manager] ▶ 启动任务 id=${taskId}（${task.name ?? task.room}）`);
     return true;
   }
@@ -173,6 +200,7 @@ export class TaskManager {
     this.draining.add(taskId);
     this.restarts.delete(taskId);            // a drained natural exit isn't a crash
     this.store.setStatus(taskId, "draining");
+    this.notifyRecordingState(taskId);
     this.logTask(
       taskId,
       `[task_manager] ⏳ 任务 id=${taskId} 窗口结束，进入排空：当前直播录完(自然收播)后停止，不强制中断`,
@@ -234,8 +262,14 @@ export class TaskManager {
         this.anchorNames.set(taskId, name);
         this.store.setAnchorName(taskId, name); // 持久化，重启后仍显示
       }
-      if (msg.includes("[状态] 录制中")) this.recordingPhase.set(taskId, true);
-      else if (msg.includes("[状态] 等待开播")) this.recordingPhase.set(taskId, false);
+      // 开播/等待开播是用户最关心的一跳:只在**真的翻转**时通知(子进程会重复打这两行)。
+      if (msg.includes("[状态] 录制中")) {
+        if (!this.recordingPhase.get(taskId)) this.notifyRecordingState(taskId);
+        this.recordingPhase.set(taskId, true);
+      } else if (msg.includes("[状态] 等待开播")) {
+        if (this.recordingPhase.get(taskId)) this.notifyRecordingState(taskId);
+        this.recordingPhase.set(taskId, false);
+      }
     });
     proc.onExit((info) => this.handleExit(taskId, info));
     proc.start();
@@ -251,6 +285,7 @@ export class TaskManager {
 
     if (info.expected) {
       this.store.setStatus(taskId, "stopped");
+      this.notifyRecordingState(taskId);
       this.logTask(
         taskId,
         wasDraining
@@ -262,6 +297,7 @@ export class TaskManager {
 
     // Unexpected exit (crash).
     this.store.setStatus(taskId, "error");
+    this.notifyRecordingState(taskId);
     this.logTask(
       taskId,
       `[task_manager] ✗ 任务 id=${taskId} 异常退出 (code=${info.code} signal=${info.signal})`,

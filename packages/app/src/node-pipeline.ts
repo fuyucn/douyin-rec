@@ -14,17 +14,62 @@
  *   - @drec/app 的 uploadPlain / appendGroup(biliup)
  *   - core 的 title-template(与 master 同源的产物命名/稿件标题)
  */
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { formatBiliTitle, formatPartTitle, resolveOutputStem, sanitizeStreamKey, type NodePipelineResult, type NodePipelineSpec } from "@drec/core";
+import { biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, openUploadLimitStore, resolveOutputStem, sanitizeStreamKey, UploadGate, type NodePipelineResult, type NodePipelineSpec, type UploadGateStore } from "@drec/core";
 import { ffprobeDuration, mergeSession, remuxSegment } from "@drec/post-process";
 import { appendGroup, uploadPlain } from "./upload/biliup.js";
-import { rootBiliupCookies } from "./paths.js";
+import { rootBiliupCookies, rootDbPath } from "./paths.js";
 
 /** 会话 base(与 orchestrator/session-plan 同规则:剥 -PART###/_PART###/_### 后缀)。 */
 function sessionBaseOfFile(name: string): string | undefined {
   const m = /^(.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:-PART\d+|_PART\d+|_\d{3,})?\.(?:ts|flv|xml|mp4)$/i.exec(name);
   return m?.[1];
+}
+
+/**
+ * 节点侧上传的**限流闸门**(030 T19,T-18 房间不上传风暴)。
+ *
+ * 为什么必须有:节点侧上传**绕过** master 的 ResourcePool(没有上传链、没有冷却、没有滑动窗口),
+ * 历史上等于「不限速投稿」→ 与 master 侧互不感知地猛传 → 反复撞 601/21566 风控。
+ * 现在节点侧走 **core 的 UploadGate(与 master 同一判定实现)**,并用**同一个账号键**
+ * (`bilibili:<DedeUserID>`,从本机 biliup cookies 解析)—— 同账号在 master 与节点上是**同一个限流桶**;
+ * 状态落在**节点本地** `<dataRoot>/db/douyin-rec.db` 的 `upload_limits` 表(跨重启保留)。
+ *
+ * 诚实边界:master 与节点是两台机器,**不共享文件系统** → 各持久化各的;跨节点的**即时**互斥
+ * 需要 master→节点下发冷却(后续里程碑)。本任务保证:两侧都不再无限速、各自重启不丢冷却、
+ * 同一账号的判定口径完全一致 —— 不再出现「一边冷却、一边猛传」的长期失衡。
+ */
+export interface NodeUploadGateOpts {
+  /** 限流状态存储;缺省 = 节点本地 db 的 upload_limits 表。 */
+  store?: UploadGateStore;
+  accountKey?: string;
+  rateLimit?: number;
+  windowMs?: number;
+  cooldownMs?: number;
+  warn?: (msg: string) => void;
+}
+
+/** 从本机 biliup cookies.json 解析限流账号键(唯一真理 = core 的 biliAccountKey*;解析不出 → unknown 桶)。 */
+export function resolveUploadAccountKey(cookiesPath?: string): string {
+  const p = cookiesPath ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+  try {
+    return biliAccountKeyFromCookiesJson(readFileSync(p, "utf-8"));
+  } catch {
+    return biliAccountKey(null);
+  }
+}
+
+/** 装配节点侧 UploadGate;store 缺省打开 `<dataRoot>/db/douyin-rec.db`。 */
+export function openNodeUploadGate(opts: NodeUploadGateOpts = {}): UploadGate {
+  const warn = opts.warn ?? ((m: string) => console.error(m));
+  return new UploadGate({
+    store: opts.store ?? openUploadLimitStore(rootDbPath(), { log: warn }),
+    rateLimit: opts.rateLimit ?? 5,
+    windowMs: opts.windowMs ?? 600_000,
+    cooldownMs: opts.cooldownMs ?? 1_800_000,
+    warn,
+  });
 }
 
 /** 节点侧上传的一个「分 P」产物(与 master 分段模式同义:单段 remux 或若干段合并)。 */
@@ -116,6 +161,8 @@ function deriveTitles(spec: NodePipelineSpec, log: (m: string) => void): { stem:
 export async function runNodeSidePipeline(
   spec: NodePipelineSpec,
   log: (m: string) => void = () => {},
+  /** 限流闸门;缺省按 {@link openNodeUploadGate}(节点本地库 + 本机账号键)惰性装配。 */
+  gate?: UploadGate,
 ): Promise<NodePipelineResult> {
   if (spec.tsFiles.length === 0) return { ok: false, error: "无源文件(tsFiles 为空)" };
   const missing = spec.tsFiles.filter((f) => !existsSync(f));
@@ -141,14 +188,20 @@ export async function runNodeSidePipeline(
 
   const files = parts.map((p) => p.plain);
   log(`上传 ${files.length} 个分 P → B站`);
-  const bv = await uploadPlain({
-    plain: {
-      ...meta,
-      // 单分 P 用 video;多分 P 一次多文件建稿(videos)。
-      ...(files.length === 1 ? { video: files[0] } : { videos: files }),
-      title,
-    },
-  });
+  // 限流:先过 core UploadGate(冷却 + 滑动窗口 + 占额),命中 601/21566 自动记冷却(跨重启保留)。
+  // accountKey = 本机 biliup 账号 → 与 master 侧同一个限流桶(键算法唯一真理在 core)。
+  const uploadGate = gate ?? openNodeUploadGate({ warn: log });
+  const accountKey = resolveUploadAccountKey(cookiesPath);
+  const bv = await uploadGate.run(accountKey, () =>
+    uploadPlain({
+      plain: {
+        ...meta,
+        // 单分 P 用 video;多分 P 一次多文件建稿(videos)。
+        ...(files.length === 1 ? { video: files[0] } : { videos: files }),
+        title,
+      },
+    }),
+  );
   log(`建稿成功 BV=${bv}`);
 
   // 分 P 标题(可选):master 侧为每个分 P 单独 append 时设名;此处一次性多文件建稿,

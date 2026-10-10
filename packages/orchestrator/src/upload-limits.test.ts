@@ -10,21 +10,23 @@ function dbPath(): string {
   return join(mkdtempSync(join(tmpdir(), "upload-limits-")), "test-sync.db");
 }
 const silence = (): void => {};
+/** T19:限流状态按账号键分行;本组用例沿用 default 键。 */
+const KEY = "default";
 
 describe("upload-limits store", () => {
   it("首次运行无文件 → 空窗口(不是不可用)", () => {
     const store = openUploadLimitStore(dbPath(), { log: silence });
-    expect(store.load()).toEqual({ blockedUntil: 0, times: [] });
+    expect(store.load(KEY)).toEqual({ blockedUntil: 0, times: [] });
     store.close();
   });
 
   it("save → 另一个 store 实例读回同一状态", () => {
     const p = dbPath();
     const a = openUploadLimitStore(p, { log: silence });
-    a.save({ blockedUntil: 123, times: [1, 2, 3] });
+    a.save(KEY, { blockedUntil: 123, times: [1, 2, 3] });
     a.close();
     const b = openUploadLimitStore(p, { log: silence });
-    expect(b.load()).toEqual({ blockedUntil: 123, times: [1, 2, 3] });
+    expect(b.load(KEY)).toEqual({ blockedUntil: 123, times: [1, 2, 3] });
     b.close();
   });
 
@@ -32,22 +34,22 @@ describe("upload-limits store", () => {
     const p = dbPath();
     writeFileSync(p, "this is not sqlite at all");
     const store = openUploadLimitStore(p, { log: silence });
-    expect(store.load()).toBeNull();
+    expect(store.load(KEY)).toBeNull();
     store.close();
   });
 
   it("times 是坏 JSON → 保住 blockedUntil,窗口归零", () => {
     const p = dbPath();
     const store = openUploadLimitStore(p, { log: silence });
-    store.save({ blockedUntil: 999, times: [1] });
+    store.save(KEY, { blockedUntil: 999, times: [1] });
     // 直接改坏 times 列(模拟半截写入/外部损坏)。
     const db = (store as unknown as { close(): void });
     db.close();
     const raw = new DatabaseSync(p);
-    raw.exec("UPDATE upload_limits SET times='{oops' WHERE id=1");
+    raw.exec("UPDATE upload_limits SET times='{oops' WHERE key='default'");
     raw.close();
     const reopened = openUploadLimitStore(p, { log: silence });
-    expect(reopened.load()).toEqual({ blockedUntil: 999, times: [] });
+    expect(reopened.load(KEY)).toEqual({ blockedUntil: 999, times: [] });
     reopened.close();
   });
 
@@ -72,11 +74,11 @@ describe("upload-limits store", () => {
     const p = dbPath();
     const stores = Array.from({ length: 5 }, () => openUploadLimitStore(p, { log: silence }));
     for (let i = 0; i < 50; i++) {
-      for (const s of stores) s.save({ blockedUntil: i, times: [i, i + 1] });
+      for (const s of stores) s.save(KEY, { blockedUntil: i, times: [i, i + 1] });
     }
     for (const s of stores) s.close();
     const final = openUploadLimitStore(p, { log: silence });
-    const state = final.load();
+    const state = final.load(KEY);
     expect(state).not.toBeNull();
     expect(state!.times).toEqual([49, 50]);
     final.close();

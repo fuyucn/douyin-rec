@@ -3,12 +3,13 @@ import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
 import { humanBytes } from "./format.js";
-import { isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP } from "@drec/core";
+import { isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 import { prepareUploadAlias } from "./session-plan.js";
 import { PART_GROUP_CANONICAL } from "./verify.js";
 import { sanitizeUploadLimitState, type UploadLimitStore } from "./upload-limits.js";
+import { UPLOAD_GATE_DEFAULT_KEY } from "@drec/core";
 
 export { deriveStageProducts, withOutputStem, type StageProducts } from "./session-plan.js";
 
@@ -430,8 +431,15 @@ function readFileSyncSafe(p: string): string | undefined {
 }
 
 export class ResourcePool {
-  /** 限流状态存储不可用时的兜底冷却下限(ms);防止配置 cooldown=0 时 fail-closed 退化成无限速。 */
-  static readonly UPLOAD_FAILCLOSED_MS = 30 * 60_000;
+  /**
+   * 限流状态存储不可用时的兜底冷却下限(ms);防止配置 cooldown=0 时 fail-closed 退化成无限速。
+   *
+   * **引用 core 的同名常量,不再自己写一份 30min**:这是 T19 之后 master 侧与节点侧
+   * 唯一的 fail-closed 口径。两处各写 `30 * 60_000` 时,改了一处另一边不会跟着变,
+   * 且不会有任何报错 —— 表现为「某条路径的 fail-closed 悄悄变成别的值」。
+   * (跨任务审计发现)
+   */
+  static readonly UPLOAD_FAILCLOSED_MS = UPLOAD_FAIL_CLOSED_MS;
   private cpu: Semaphore;
   private net: Semaphore;
   private streamLocks = new Map<string, Promise<unknown>>();
@@ -468,6 +476,11 @@ export class ResourcePool {
   private uploadBlockedUntil = 0;
   /** 限流状态持久化后端(T8);缺省 = 纯内存。 */
   private limitStore?: UploadLimitStore;
+  /**
+   * 限流状态的分键(030 T19)。默认 `UPLOAD_GATE_DEFAULT_KEY`;**master 与节点侧节点上传
+   * 必须传同一个账号键**(`bilibili:<DedeUserID>`)才能共享冷却 —— 键算法唯一真理在 core。
+   */
+  private limitKey: string;
   /** 诊断日志(持久化失败等);缺省 console.error。 */
   private warn: (msg: string) => void;
 
@@ -479,6 +492,8 @@ export class ResourcePool {
       freeMemMB?: () => number;
       /** 上传限流状态的跨重启持久化后端(T8)。缺省 = 纯内存(旧行为)。 */
       limitStore?: UploadLimitStore;
+      /** 限流分键;缺省 `UPLOAD_GATE_DEFAULT_KEY`。 */
+      limitKey?: string;
       /** 持久化失败等诊断日志;缺省 console.error。**绝不静默**。 */
       warn?: (msg: string) => void;
     } = {},
@@ -494,6 +509,7 @@ export class ResourcePool {
     this.sleep = inject.sleep ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
     this.freeMemMB = inject.freeMemMB ?? systemFreeMemMB;
     this.limitStore = inject.limitStore;
+    this.limitKey = (inject.limitKey ?? "").trim() || UPLOAD_GATE_DEFAULT_KEY;
     this.warn = inject.warn ?? ((m: string) => console.error(m));
     this.restoreUploadLimits();
   }
@@ -502,7 +518,7 @@ export class ResourcePool {
   private restoreUploadLimits(): void {
     if (!this.limitStore) return;
     const now = this.now();
-    const state = this.limitStore.load();
+    const state = this.limitStore.load(this.limitKey);
     if (state === null) {
       // 无法确认上次打到哪 → 按「刚命中 601」处理,宁可多等,不能重启即打爆。
       // 配置把 cooldown 显式设成 0(关冷却)时,fail-closed 不能退化成无限速 → 用兜底下限。
@@ -520,7 +536,7 @@ export class ResourcePool {
   private persistUploadLimits(): void {
     if (!this.limitStore) return;
     try {
-      this.limitStore.save({ blockedUntil: this.uploadBlockedUntil, times: [...this.uploadTimes] });
+      this.limitStore.save(this.limitKey, { blockedUntil: this.uploadBlockedUntil, times: [...this.uploadTimes] });
     } catch (e) {
       this.warn(`[upload-limits] 持久化失败(限流状态仅存内存): ${(e as Error).message}`);
     }
@@ -560,7 +576,8 @@ export class ResourcePool {
   snapshot(): PoolSnapshot {
     const now = this.now();
     const winStart = now - this.uploadRateWindowMs;
-    const inWindow = this.uploadTimes.filter((t) => t > winStart);
+    // 与判定侧(`_awaitUploadSlot` / core UploadGate)同一窗口口径 `>=`;仅展示用,差一毫秒无碍。
+    const inWindow = this.uploadTimes.filter((t) => t >= winStart);
     // 位次按资源分组:每个资源队列内先到的排前(1-based)。
     const byResource = new Map<string, Array<{ streamKey: string; since: number }>>();
     for (const entries of this.waiting.values()) {
@@ -657,8 +674,32 @@ export class ResourcePool {
     return run;
   }
 
+  /**
+   * 与**共享 store 同步**(T19):master 与节点侧上传写同一张 upload_limits 表(各自进程、各自库路径时
+   * 不共享,同机同库时共享)。内存窗口只在本进程内权威 → 每次判定前重读 store 并**并集**,
+   * 否则会把别的进程刚占的额/刚记的冷却当成不存在(实测:节点侧记了冷却、master 照样打)。
+   * 单调合并:blockedUntil 取晚、times 取并集 → 不会用自己的旧值覆盖更新的状态。
+   */
+  private syncFromLimitStore(): void {
+    if (!this.limitStore) return;
+    const state = this.limitStore.load(this.limitKey);
+    if (state === null) return; // 不可用:已在构造时 fail-closed,运行期保持内存值
+    const clean = sanitizeUploadLimitState(state, this.now(), this.uploadRateWindowMs);
+    this.uploadBlockedUntil = Math.max(this.uploadBlockedUntil, clean.blockedUntil);
+    // **按多重集取 max,不能用 Set**:同一毫秒内的两次提交时间戳相同,Set 去重会把两次占额
+    // 并成一次 → 窗口计数偏小 → 真实超频被放行(自审发现;回归用例:并发窗口计数跨重启保留)。
+    // 逐刻取两边出现次数的较大者 = 「落盘(权威并集) ∪ 内存(本进程尚未落盘的增量)」。
+    const countOf = (arr: number[], t: number): number => arr.reduce((n, x) => (x === t ? n + 1 : n), 0);
+    const all = [...new Set([...this.uploadTimes, ...clean.times])].sort((a, b) => a - b);
+    this.uploadTimes = all.flatMap((t) => Array.from(
+      { length: Math.max(countOf(this.uploadTimes, t), countOf(clean.times, t)) },
+      () => t,
+    ));
+  }
+
   /** 等一个上传配额:先过冷却期,再保证滑动窗口内不超过 uploadRateLimit 次。 */
   private async _awaitUploadSlot(): Promise<void> {
+    this.syncFromLimitStore();
     // 冷却期独立于次数限制:即使限速关闭,命中 601 后也要等冷却。
     while (this.uploadBlockedUntil > this.now()) {
       throwIfAborted();
@@ -668,17 +709,28 @@ export class ResourcePool {
     for (;;) {
       throwIfAborted();
       const now = this.now();
-      if (this.uploadBlockedUntil > now) { await this.sleep(this.uploadBlockedUntil - now); continue; }
-      // 丢弃窗口外的历史提交时刻。
+      if (this.uploadBlockedUntil > now) { await this.sleep(this.uploadBlockedUntil - now); this.syncFromLimitStore(); continue; }
+      // 丢弃窗口外的历史提交时刻。边界 `>=`(滑出边界那一毫秒仍算在窗口内)——
+      // 与 core UploadGate / store.tryClaim 的判定**逐字一致**,否则两侧会在边界处各多放一格。
       const winStart = now - this.uploadRateWindowMs;
-      this.uploadTimes = this.uploadTimes.filter((t) => t > winStart);
+      this.uploadTimes = this.uploadTimes.filter((t) => t >= winStart);
       if (this.uploadTimes.length < this.uploadRateLimit) {
-        this.uploadTimes.push(now);
-        this.persistUploadLimits(); // 占额即落盘,重启后窗口不归零
-        return;
+        // T19:store 支持原子占额时走它(master 与节点侧上传共享同一行时不会各占一格)。
+        if (this.limitStore?.tryClaim) {
+          if (this.limitStore.tryClaim(this.limitKey, now, this.uploadRateWindowMs, this.uploadRateLimit)) {
+            this.syncFromLimitStore();
+            return;
+          }
+          this.syncFromLimitStore(); // 没抢到 → 用真实状态重算该等多久
+          if (this.uploadTimes.length < this.uploadRateLimit) continue;
+        } else {
+          this.uploadTimes.push(now);
+          this.persistUploadLimits(); // 占额即落盘,重启后窗口不归零
+          return;
+        }
       }
       // 超频:睡到最早那次的窗口滑出为止。
-      await this.sleep(this.uploadTimes[0] + this.uploadRateWindowMs - now);
+      await this.sleep(Math.max(1, this.uploadTimes[0] + this.uploadRateWindowMs - now));
     }
   }
 

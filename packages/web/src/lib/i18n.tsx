@@ -78,7 +78,7 @@ const DICT = {
       scheduleLocalTooltip: "当前时区：{serverTz}\n你的本地时间窗口：{local}",
       titleStart: "开始录制", titleStop: "停止录制", titleDetail: "详情", titleEdit: "编辑",
     },
-    badge: { disabled: "已停用", draining: "排空中", recording: "录制中", recordingOn: "录制中 · {nodes}", workersIdle: "等待开播 · {nodes}", workersUnavailable: "节点离线 · {nodes}", waiting: "等待开播中", idle: "已启用·待命", error: "错误" },
+    badge: { disabled: "已停用", draining: "排空中", recording: "录制中", recordingOn: "录制中 · {nodes}", workersIdle: "等待开播 · {nodes}", workersUnavailable: "节点离线 · {nodes}", checkedAgo: "{ago}前核对", checkedAgoTitle: "远端录制状态是定时探测的缓存,这一结论来自 {ago} 前的探测", waiting: "等待开播中", idle: "已启用·待命", error: "错误" },
     danmuKind: { off: "关闭", gift: "含礼物", anon: "匿名" },
     dialog: {
       createTitle: "新建录制任务", editTitle: "编辑任务", desc: "填写直播间与录制参数，全局 Cookie 在右上角统一管理。",
@@ -358,7 +358,7 @@ const DICT = {
       scheduleLocalTooltip: "Current timezone: {serverTz}\nYour local window: {local}",
       titleStart: "Start recording", titleStop: "Stop recording", titleDetail: "Details", titleEdit: "Edit",
     },
-    badge: { disabled: "Disabled", draining: "Draining", recording: "Recording", recordingOn: "Recording · {nodes}", workersIdle: "Waiting · {nodes}", workersUnavailable: "Offline · {nodes}", waiting: "Waiting", idle: "Idle", error: "Error" },
+    badge: { disabled: "Disabled", draining: "Draining", recording: "Recording", recordingOn: "Recording · {nodes}", workersIdle: "Waiting · {nodes}", workersUnavailable: "Offline · {nodes}", checkedAgo: "checked {ago} ago", checkedAgoTitle: "Remote recording state is a polled cache; this result is from a probe {ago} ago", waiting: "Waiting", idle: "Idle", error: "Error" },
     danmuKind: { off: "Off", gift: "Gifts", anon: "Anonymous" },
     dialog: {
       createTitle: "New recording task", editTitle: "Edit task", desc: "Set the room and recording options. The global cookie is managed at the top-right.",

@@ -94,10 +94,19 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // Per-task log ring buffer shared with the manager so the Web 详情/日志
     // 页面 can tail each recorder subprocess's captured output.
     const logStore = new TaskLogStore();
+    // T17:HubWatch 必须**在 manager 之前**构造 —— TaskManager 的录制状态回调要打到这里,
+    // 而 SSE 路由也要注入同一个实例(两处必须是同一个,否则「推了但没人听」)。
+    // hubWatch 自身要在后面 hubEnabled 确定后再 start(见下),构造与 start 分开是为了这个顺序。
+    let hubWatch: HubWatch | null = null;
+
     const manager = new TaskManager(store, spawner, {
       autoRestart: true,
       log: (m) => console.log(m),
       logStore,
+      // 录制状态(起停/开播/收播/崩溃)→ 立刻推一次 changed。
+      // 台账指纹看不见这些变化(见 TaskManager.onRecordingStateChanged 注释),
+      // 少了这一跳,房间页在开播/收播那几秒会是陈旧的。
+      onRecordingStateChanged: () => hubWatch?.notifyChanged(),
       // 重启耗尽彻底停 → 告警(events 在下方初始化,回调在崩溃时才触发,届时已就绪)。
       onTaskDown: (taskId, reason) => {
         const t = store.getTask(taskId);
@@ -144,7 +153,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // T4:台账变更监视 → SSE(/api/hub/stream)。
     // **只在 master 起**:sync 台账的唯一写端是本节点的 orchestrator,slave 上那份文件永远不变
     // → 白白空转 1s 定时器、永远不推。不注入则该路由显式 503(而非静默 404/空流)。
-    const hubWatch = hubEnabled ? new HubWatch(syncDbPath, { log: (m) => serveLog.info(m) }) : null;
+    hubWatch = hubEnabled ? new HubWatch(syncDbPath, { log: (m) => serveLog.info(m) }) : null;
     hubWatch?.start();
     const server = createWebServer({
       store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(),

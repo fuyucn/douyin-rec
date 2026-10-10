@@ -1556,3 +1556,33 @@ describe("rooms 域(T9 统一房间视图)", () => {
     expect(JSON.stringify(dto)).not.toContain("SECRET");
   });
 });
+
+// ── T17 远端录制状态的「何时核对的」必须透出 ────────────────────────────────────
+describe("T17 recordingWorkers.checkedAt 透出", () => {
+  it("checkedAt 原样出现在 /api/tasks 的 recordingWorkers 里(前端据此显示「N 秒前核对」)", () => {
+    const s = new TaskStore(":memory:");
+    const at = 1_700_000_000_000;
+    const a = makeApi({
+      store: s, manager: new MockManager(),
+      recordingWorkers: () => [{ workerId: "vps", workerName: "VPS1", state: "recording", checkedAt: at }],
+    });
+    const created = a.createTask({ room: "123456" });
+    const list = a.listTasks().body as Array<{ recordingWorkers?: Array<{ checkedAt: number | null }> }>;
+    const row = list.find((x) => (x as { id?: number }).id === (created.body as { id: number }).id);
+    expect(row?.recordingWorkers?.[0]?.checkedAt).toBe(at);
+    s.close();
+  });
+
+  it("探测尚未成功过 → checkedAt 为 null,前端不显示「N 秒前」(而不是显示 0 秒前)", () => {
+    const s = new TaskStore(":memory:");
+    const a = makeApi({
+      store: s, manager: new MockManager(),
+      recordingWorkers: () => [{ workerId: "vps", workerName: "VPS1", state: "unavailable", checkedAt: null }],
+    });
+    const created = a.createTask({ room: "123456" });
+    const list = a.listTasks().body as Array<{ recordingWorkers?: Array<{ checkedAt: number | null }> }>;
+    const row = list.find((x) => (x as { id?: number }).id === (created.body as { id: number }).id);
+    expect(row?.recordingWorkers?.[0]?.checkedAt).toBeNull();
+    s.close();
+  });
+});

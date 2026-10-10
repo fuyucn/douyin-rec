@@ -629,6 +629,14 @@ export interface RecordingWorkerStatusDTO {
   workerId: string;
   workerName: string;
   state: "recording" | "not_recording" | "unavailable";
+  /**
+   * 本条状态**实际核对时刻**(epoch ms);缺省/null = 未知(尚未探测成功过)。
+   *
+   * 为什么必须透出(T17):远端录制状态是**SSH 探测**出来的缓存,不是实时的。
+   * 不带这个时间戳,前端只能把缓存当实时显示 —— 用户看到「未在录」却不知道这是 3 秒前
+   * 还是 3 分钟前的结论(节点探测失败时缓存会一直是旧值)。有了它才能显示「N 秒前核对」。
+   */
+  checkedAt: number | null;
 }
 
 /** GET /api/tasks/:id → 任务 + runtime。 */

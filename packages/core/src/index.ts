@@ -15,3 +15,5 @@ export * from "./worker-contract.js";
 export * from "./capabilities.js";
 export * from "./hub-ledger-contract.js";
 export * from "./hub-flow.js";
+// 上传配额闸门(冷却 + 滑动窗口)唯一判定实现:master ResourcePool(L4.5)与节点侧上传(L4)共用。
+export * from "./upload-gate.js";

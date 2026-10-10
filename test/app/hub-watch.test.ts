@@ -101,6 +101,56 @@ describe("computeVersionFingerprint", () => {
 });
 
 describe("HubWatch", () => {
+  // T17:台账指纹看不见「录制状态」变化(那在 tasks 表 / TaskManager 内存里),
+  // 所以录制侧必须能主动喊一声 —— 否则房间页在开播/收播那几秒是陈旧的。
+  describe("notifyChanged(外部主动触发)", () => {
+    it("台账**无**任何变化时,notifyChanged 仍能推动一次通知", async () => {
+      const { dbPath } = makeDb();
+      const watch = new HubWatch(dbPath, { debounceMs: 5 });
+      const fn = vi.fn();
+      watch.subscribe(fn);
+      // 不写台账 —— 这正是录制状态变化的典型情形
+      watch.notifyChanged();
+      await sleep(30);
+      expect(fn).toHaveBeenCalledTimes(1);
+      watch.stop();
+    });
+
+    it("走去抖:窗口内连喊多次只推一次(否则一次开播会连推十几帧)", async () => {
+      const { dbPath } = makeDb();
+      const watch = new HubWatch(dbPath, { debounceMs: 30 });
+      const fn = vi.fn();
+      watch.subscribe(fn);
+      watch.notifyChanged();
+      watch.notifyChanged();
+      watch.notifyChanged();
+      await sleep(60);
+      expect(fn).toHaveBeenCalledTimes(1);
+      watch.stop();
+    });
+
+    it("无订阅者时不排定时器(没人听就别白转)", async () => {
+      const { dbPath } = makeDb();
+      const watch = new HubWatch(dbPath, { debounceMs: 5 });
+      // 不 subscribe 直接调:不得抛错(否则 TaskManager 的状态变更会被带崩)
+      expect(() => watch.notifyChanged()).not.toThrow();
+      watch.stop();
+    });
+
+    it("退订后再 notify 不再通知(没有幽灵订阅者)", async () => {
+      const { dbPath } = makeDb();
+      const watch = new HubWatch(dbPath, { debounceMs: 5 });
+      const fn = vi.fn();
+      const off = watch.subscribe(fn);
+      off();
+      watch.notifyChanged();
+      await sleep(30);
+      expect(fn).not.toHaveBeenCalled();
+      expect(watch.subscriberCount).toBe(0);
+      watch.stop();
+    });
+  });
+
   it("变更推送一次;无变更不推", async () => {
     const { dbPath, db } = makeDb();
     const watch = new HubWatch(dbPath, { debounceMs: 10 });

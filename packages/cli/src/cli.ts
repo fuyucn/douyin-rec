@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { loadConfig, sanitizeStreamKey } from "@drec/core";
+import { biliAccountKey, loadConfig, sanitizeStreamKey } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { getEngine, platformForRoom } from "@drec/core";
@@ -28,11 +28,25 @@ import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type HubPoolSnapshotDTO } from "@drec/core";
-import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, type NotifWebhookToggles } from "@drec/app";
+import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
+
+/**
+ * master 侧上传限流的**账号分键**(030 T19):从本机 biliup cookies 解析 DedeUserID →
+ * `bilibili:<mid>`。节点侧上传(node-pipeline)用**同一个**键 → 同账号的冷却/窗口跨节点共享
+ * (B 站按账号限流)。解析不出 → `bilibili:unknown`(保守并桶)。键算法唯一真理 = core/upload-gate.ts。
+ */
+function masterUploadAccountKey(warn: (m: string) => void): string {
+  try {
+    return resolveUploadAccountKey();
+  } catch (e) {
+    warn(`[upload-gate] 读取本机 biliup cookies 失败,限流并入 unknown 桶: ${(e as Error).message}`);
+    return biliAccountKey(null);
+  }
+}
 
 /** 从 CLI 全局选项 → config → env 三层解析 Discord webhook URL。 */
 function webhookOf(localCfg?: { discordWebhook?: string }): string | undefined {
@@ -708,6 +722,9 @@ const hubStarter: HubStarter = {
           }
         }));
         const byWorker = new Map(results.map((r) => [r.worker.id, r]));
+        // 本轮探测的完成时刻:整轮共用一个值(不是每行各自 now()),否则同一批行的
+        // checkedAt 会差几毫秒,UI 上「N 秒前核对」会显示得参差不齐。
+        const checkedAt = Date.now();
         const next = new Map<string, RecordingWorkerStatusDTO[]>();
         for (const rule of hubStore.listHubRules(rootHubDir())) {
           const sourceId = rule.recording?.sourceTaskId;
@@ -731,6 +748,7 @@ const hubStarter: HubStarter = {
                 : result.rooms.some((room) => room.platform === platform.id && room.roomSlug === roomSlug)
                   ? "recording" as const
                   : "not_recording" as const,
+              checkedAt,
             }];
           });
           // 「房间是否要展示状态」与「当前是否已探到该房间」是独立维度：
@@ -769,9 +787,12 @@ const hubStarter: HubStarter = {
       uploadRateWindowMs: hubCfg.resources?.uploadRateWindowMs ?? 600_000,
       uploadCooldownMs: hubCfg.resources?.uploadCooldownMs ?? 1_800_000,
     }, {
-      // T8:冷却/滑动窗口跨重启保留(同 sync 库单行 upload_limits)。
+      // T8:冷却/滑动窗口跨重启保留(同 sync 库 upload_limits 表)。
       // 复用 ledger 的 dbPath —— 两边同一文件,不额外造库;pool 只借用,不拥有生命周期。
+      // T19:分键 = `bilibili:<DedeUserID>`(从本机 biliup cookies 解析)→ 节点侧上传用同一个键,
+      // master 与节点的同账号冷却/窗口互相生效(键算法唯一真理 = core/upload-gate.ts)。
       limitStore: openUploadLimitStore(dbPath, { log: opts.warn }),
+      limitKey: masterUploadAccountKey(opts.warn),
       warn: opts.warn,
     });
     const pipelineDeps = {
@@ -1122,11 +1143,43 @@ const hubStarter: HubStarter = {
     });
 
     void refreshRecordingStatus();
-    const recordingStatusTimer = setInterval(() => void refreshRecordingStatus(), 5_000);
+    // T17:探测周期自适应 —— 有节点在录时 2s(用户最关心「录到没录到」的时刻),
+    // 全空闲时 10s(没人录的时段不必频繁 SSH)。固定 5s 是两头都不讨好:
+    // 开播瞬间那几秒仍显陈旧,而空闲时又在白跑 SSH。
+    // 用**递归 setTimeout** 而非 setInterval:自适应周期在 setInterval 里做不到
+    // (间隔在创建时就固定了),而且 setInterval 会在上一轮 SSH 还没回来时叠加下一轮。
+    const RECORDING_BUSY_POLL_MS = 2_000;
+    const RECORDING_IDLE_POLL_MS = 10_000;
+    let recordingStatusTimer: ReturnType<typeof setTimeout> | null = null;
+    // stop() 之后不许再排下一轮。
+    // 自审发现:stop 只 clearTimeout 了**已排定**的那一次,但如果那一刻 refreshRecordingStatus()
+    // 正在 SSH 途中,它的 .finally 会在 stop 之后**再排一轮** → hub 停了、探测还在跑,
+    // 而且会一直跑下去(unref 只保证不挡进程退出,不代表逻辑停了)。这个泄漏没有任何症状,
+    // 除非你恰好在 stop 的时候看了一眼 SSH 次数。
+    let recordingProbeStopped = false;
+    const scheduleRecordingStatusProbe = (delayMs: number): void => {
+      if (recordingProbeStopped) return;
+      recordingStatusTimer = setTimeout(() => {
+        void refreshRecordingStatus().finally(() => {
+          if (recordingProbeStopped) return;
+          // 任何在录/不可达的节点 → 下一轮用快周期;全空闲 → 慢周期。
+          // 用 finally:refreshRecordingStatus 内部已自己吞异常,这里只是保证
+          // 「无论成功失败都继续排下一轮」——否则一次意外会让状态探测**永久停摆**
+          // (自审发现:第一版把调度放在 then 里,失败路径直接断链,且没人会发现)。
+          const busy = [...hubRecordingSnapshot.values()].some(
+            (rows) => rows.some((r) => r.state === "recording" || r.state === "unavailable"),
+          );
+          scheduleRecordingStatusProbe(busy ? RECORDING_BUSY_POLL_MS : RECORDING_IDLE_POLL_MS);
+        });
+      }, delayMs);
+      recordingStatusTimer.unref?.();
+    };
+    scheduleRecordingStatusProbe(RECORDING_IDLE_POLL_MS);
     opts.log(`[hub] 已启用，${loadWorkers().length} 个 worker`);
     return () => {
       stop();
-      clearInterval(recordingStatusTimer);
+      recordingProbeStopped = true;
+      if (recordingStatusTimer) clearTimeout(recordingStatusTimer);
       hubRecordingSnapshot = new Map();
       hubSyncTasks = undefined;
       hubSyncGate.unbind(); // 必须解绑:否则 stop 之后的同步请求会打到已停的旧 runner(自审发现)

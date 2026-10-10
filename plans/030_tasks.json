@@ -1827,7 +1827,8 @@
         "T4",
         "T6"
       ],
-      "estimated_loc": 260
+      "estimated_loc": 260,
+      "status": "done"
     },
     {
       "id": "T18",
@@ -1985,7 +1986,8 @@
       "depends_on": [
         "T8"
       ],
-      "estimated_loc": 300
+      "estimated_loc": 300,
+      "status": "done"
     },
     {
       "id": "T20",
