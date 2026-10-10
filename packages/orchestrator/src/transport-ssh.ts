@@ -16,6 +16,16 @@ export interface SshOpts {
   remoteNode?: string;
   /** ping() 硬超时(ms),默认 6000。测试注入小值验证超时路径。 */
   pingTimeoutMs?: number;
+  /**
+   * `_node-pipeline`(节点侧 remux + 上传)的硬超时(ms),默认 30 分钟。
+   *
+   * **必须远大于默认的 45s**:这条命令要在节点上 remux 整场录像并**上传到 B站**,
+   * 单是上传 470MB 就远超 45s(实测 45s 被杀 → job 失败转人工)。
+   * 它仍是**有界**的:30 分钟到点 SIGKILL,不会让 reconciler 永久挂死。
+   * 与 rsync 的「静默看门狗」不同,这里用总时长上限 —— biliup 上传期间进度走 stderr,
+   * 但 ssh 的 stdout/stderr 可能长时间无输出,按静默判死会误杀正常上传。
+   */
+  nodePipelineTimeoutMs?: number;
 }
 
 // SSH 心跳 + 免交互:ServerAlive 5s×3≈15s 检测死连接自动断(tailscale 偶发 stall 不再永久挂);
@@ -92,10 +102,14 @@ export class SshTransport implements Transport {
   private run: (argv: string[]) => Promise<string>;
   private runStatus: (argv: string[]) => Promise<string>;
   private rsync: (remote: string, localDir: string) => Promise<void>;
+  /** 长任务专用 run(节点侧上传),超时预算独立于默认 45s。 */
+  private runLong: (argv: string[]) => Promise<string>;
   constructor(private o: SshOpts) {
     this.id = o.id;
     this.run = o.run ?? defaultRun(o.host);
     this.runStatus = o.run ?? defaultRun(o.host, 8_000);
+    // 注入的 fake run(测试)沿用同一个,只有真实 ssh 才用更长的预算。
+    this.runLong = o.run ?? defaultRun(o.host, o.nodePipelineTimeoutMs ?? 30 * 60_000);
     this.rsync = o.rsync ?? ((remote, localDir) => new Promise((res, rej) => {
       // 免交互(BatchMode)+ ConnectTimeout,避免 auth 提示/连不上时挂死;进度输出作为心跳。
       const p = spawn("rsync", buildRsyncArgs(o.host, remote, localDir));
@@ -241,7 +255,8 @@ export class SshTransport implements Transport {
   async nodePipeline(spec: NodePipelineSpec): Promise<NodePipelineResult> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const b64 = Buffer.from(JSON.stringify(spec), "utf-8").toString("base64");
-    const out = await this.run([`${nodePrefix} _node-pipeline ${this.o.dataRoot} ${b64}`]);
+    // 用 runLong:上传整场录像远超默认 45s 预算(见 SshOpts.nodePipelineTimeoutMs)。
+    const out = await this.runLong([`${nodePrefix} _node-pipeline ${this.o.dataRoot} ${b64}`]);
     const parsed = JSON.parse(out) as Partial<NodePipelineResult>;
     return {
       ok: parsed.ok === true,
