@@ -104,6 +104,9 @@ const DICT = {
       jobRunning: "合成任务 {id}:进行中…", jobDone: "合成任务 {id}:完成 → {file}", jobError: "合成任务 {id}:失败：{msg}",
     },
     settings: {
+        notifSaved: "通知设置已保存",
+        notifFailed: "保存失败:{msg}",
+        saving: "保存中…",
       resourcesSection: "资源闸门（后处理并行度与上传限流）",
       resourcesHint: "保存后**立即生效**，不需要重启 master。烧录并行度建议 1：实测烧录吃满多核，盲目并行会互相拖慢还吃内存。",
       resourcesUnavailable: "本节点未启用 hub，或未配置 hub 配置文件。",
@@ -211,6 +214,7 @@ const DICT = {
         staleHint: "数据可能已过期:实时推送已断开,正在降级轮询。",
         staleHintFetch: "数据可能已过期:最近一次刷新失败,稍后自动重试。",
         lastUpdate: "上次更新 {time}",
+        refresh: "立即刷新",
       },
       page: {
         title: "Hub 编排", subtitle: "多节点选优合并 → 烧录 → 上传。按直播间配置,独立于录制任务。",
@@ -421,6 +425,9 @@ const DICT = {
       jobRunning: "Merge {id}: running…", jobDone: "Merge {id}: done → {file}", jobError: "Merge {id}: failed: {msg}",
     },
     settings: {
+        notifSaved: "Notification settings saved",
+        notifFailed: "Save failed: {msg}",
+        saving: "Saving…",
       resourcesSection: "Resource limits (post-process concurrency & upload rate)",
       resourcesHint: "Changes take effect immediately — no master restart needed. Keep CPU parallelism at 1: burning is CPU-bound, extra parallelism just makes everything slower and eats RAM.",
       resourcesUnavailable: "This node is not a hub master, or has no hub config file.",
@@ -527,6 +534,7 @@ const DICT = {
         staleHint: "Data may be stale: the live push is disconnected; polling with backoff.",
         staleHintFetch: "Data may be stale: the last refresh failed; retrying shortly.",
         lastUpdate: "updated {time}",
+        refresh: "Refresh now",
       },
       page: {
         title: "Hub orchestration", subtitle: "Multi-node selection → merge → burn → upload. Configured per room, independent of recording tasks.",
