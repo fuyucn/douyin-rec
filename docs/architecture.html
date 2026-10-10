@@ -83,7 +83,7 @@
     <div>
       <h1>直播录制 · 架构图</h1>
       <p class="sub">抖音 / B站 / 快手直播录制 + 弹幕 + 多节点 hub 后处理。两个可插拔接缝:平台轴 + 引擎轴。</p>
-      <p class="gen">由 scripts/gen-architecture.mjs 生成 · 热度窗口近 90 天 · 2026-10-10 04:07</p>
+      <p class="gen">由 scripts/gen-architecture.mjs 生成 · 热度窗口近 90 天 · 2026-10-10 06:28</p>
     </div>
     <div class="tools">
       <button class="tbtn" id="theme">◐ 主题</button>
@@ -98,12 +98,12 @@
 
   <div class="band">
       <div class="blabel">L0 · 基础叶子</div>
-      <div class="grid"><div class="card" style="--role:#94a3b8;--mix:27%" title="@drec/core · 1855 LOC · 15 文件 · 5 测试 · 近 90 天 34 次提交">
+      <div class="grid"><div class="card" style="--role:#94a3b8;--mix:27%" title="@drec/core · 1876 LOC · 15 文件 · 5 测试 · 近 90 天 35 次提交">
           <span class="rail" style="background:#94a3b8"></span>
           <div class="t">core</div>
           <div class="pkg">@drec/core</div>
-          <div class="m"><span><b>1855</b> LOC</span><span><b>15</b> 文件</span><span><b>5</b> 测试</span><span><b>34</b> Δ</span></div>
-          <div class="hbar"><i style="width:72%;background:#94a3b8"></i></div>
+          <div class="m"><span><b>1876</b> LOC</span><span><b>15</b> 文件</span><span><b>5</b> 测试</span><span><b>35</b> Δ</span></div>
+          <div class="hbar"><i style="width:73%;background:#94a3b8"></i></div>
         </div><div class="card" style="--role:#94a3b8;--mix:11%" title="@drec/post-process · 1753 LOC · 15 文件 · 13 测试 · 近 90 天 6 次提交">
           <span class="rail" style="background:#94a3b8"></span>
           <div class="t">post-process</div>
@@ -136,11 +136,11 @@
     </div>
   <div class="band">
       <div class="blabel">L1 · 引擎轴(共享)</div>
-      <div class="grid"><div class="card" style="--role:#fb923c;--mix:11%" title="@drec/record-engine · 645 LOC · 3 文件 · 3 测试 · 近 90 天 6 次提交">
+      <div class="grid"><div class="card" style="--role:#fb923c;--mix:11%" title="@drec/record-engine · 660 LOC · 3 文件 · 3 测试 · 近 90 天 6 次提交">
           <span class="rail" style="background:#fb923c"></span>
           <div class="t">record-engine<span class="seam" style="color:#fb923c">引擎轴</span></div>
           <div class="pkg">@drec/record-engine</div>
-          <div class="m"><span><b>645</b> LOC</span><span><b>3</b> 文件</span><span><b>3</b> 测试</span><span><b>6</b> Δ</span></div>
+          <div class="m"><span><b>660</b> LOC</span><span><b>3</b> 文件</span><span><b>3</b> 测试</span><span><b>6</b> Δ</span></div>
           <div class="hbar"><i style="width:13%;background:#fb923c"></i></div>
         </div></div>
     </div>
@@ -151,7 +151,7 @@
           <div class="t">douyin-live<span class="seam" style="color:#22d3ee">平台轴</span></div>
           <div class="pkg">@drec/douyin-live</div>
           <div class="m"><span><b>1231</b> LOC</span><span><b>9</b> 文件</span><span><b>1</b> 测试</span><span><b>4</b> Δ</span></div>
-          <div class="hbar"><i style="width:9%;background:#22d3ee"></i></div>
+          <div class="hbar"><i style="width:8%;background:#22d3ee"></i></div>
         </div><div class="card" style="--role:#22d3ee;--mix:10%" title="@drec/bilibili-live · 712 LOC · 5 文件 · 4 测试 · 近 90 天 3 次提交">
           <span class="rail" style="background:#22d3ee"></span>
           <div class="t">bilibili-live<span class="seam" style="color:#22d3ee">平台轴</span></div>
@@ -168,48 +168,48 @@
     </div>
   <div class="band">
       <div class="blabel">L3 · 会话编排</div>
-      <div class="grid"><div class="card" style="--role:#a78bfa;--mix:10%" title="@drec/manager · 593 LOC · 4 文件 · 3 测试 · 近 90 天 4 次提交">
+      <div class="grid"><div class="card" style="--role:#a78bfa;--mix:10%" title="@drec/manager · 689 LOC · 4 文件 · 3 测试 · 近 90 天 4 次提交">
           <span class="rail" style="background:#a78bfa"></span>
           <div class="t">manager</div>
           <div class="pkg">@drec/manager</div>
-          <div class="m"><span><b>593</b> LOC</span><span><b>4</b> 文件</span><span><b>3</b> 测试</span><span><b>4</b> Δ</span></div>
-          <div class="hbar"><i style="width:9%;background:#a78bfa"></i></div>
+          <div class="m"><span><b>689</b> LOC</span><span><b>4</b> 文件</span><span><b>3</b> 测试</span><span><b>4</b> Δ</span></div>
+          <div class="hbar"><i style="width:8%;background:#a78bfa"></i></div>
         </div></div>
     </div>
   <div class="band">
       <div class="blabel">L4 · 有状态应用</div>
-      <div class="grid"><div class="card" style="--role:#34d399;--mix:32%" title="@drec/app · 7683 LOC · 43 文件 · 27 测试 · 近 90 天 44 次提交">
+      <div class="grid"><div class="card" style="--role:#34d399;--mix:32%" title="@drec/app · 8246 LOC · 45 文件 · 28 测试 · 近 90 天 45 次提交">
           <span class="rail" style="background:#34d399"></span>
           <div class="t">app</div>
           <div class="pkg">@drec/app</div>
-          <div class="m"><span><b>7683</b> LOC</span><span><b>43</b> 文件</span><span><b>27</b> 测试</span><span><b>44</b> Δ</span></div>
+          <div class="m"><span><b>8246</b> LOC</span><span><b>45</b> 文件</span><span><b>28</b> 测试</span><span><b>45</b> Δ</span></div>
           <div class="hbar"><i style="width:94%;background:#34d399"></i></div>
-        </div><div class="card" style="--role:#34d399;--mix:27%" title="@drec/web (独立 Vite) · 6941 LOC · 38 文件 · 0 测试 · 近 90 天 34 次提交">
+        </div><div class="card" style="--role:#34d399;--mix:26%" title="@drec/web (独立 Vite) · 6973 LOC · 38 文件 · 0 测试 · 近 90 天 34 次提交">
           <span class="rail" style="background:#34d399"></span>
           <div class="t">web</div>
           <div class="pkg">@drec/web (独立 Vite)</div>
-          <div class="m"><span><b>6941</b> LOC</span><span><b>38</b> 文件</span><span><b>0</b> 测试</span><span><b>34</b> Δ</span></div>
-          <div class="hbar"><i style="width:72%;background:#34d399"></i></div>
+          <div class="m"><span><b>6973</b> LOC</span><span><b>38</b> 文件</span><span><b>0</b> 测试</span><span><b>34</b> Δ</span></div>
+          <div class="hbar"><i style="width:71%;background:#34d399"></i></div>
         </div></div>
     </div>
   <div class="band">
       <div class="blabel">L4.5 · 多节点 hub</div>
-      <div class="grid"><div class="card" style="--role:#fbbf24;--mix:34%" title="@drec/orchestrator · 4510 LOC · 19 文件 · 18 测试 · 近 90 天 47 次提交">
+      <div class="grid"><div class="card" style="--role:#fbbf24;--mix:34%" title="@drec/orchestrator · 4989 LOC · 20 文件 · 19 测试 · 近 90 天 48 次提交">
           <span class="rail" style="background:#fbbf24"></span>
           <div class="t">orchestrator</div>
           <div class="pkg">@drec/orchestrator</div>
-          <div class="m"><span><b>4510</b> LOC</span><span><b>19</b> 文件</span><span><b>18</b> 测试</span><span><b>47</b> Δ</span></div>
+          <div class="m"><span><b>4989</b> LOC</span><span><b>20</b> 文件</span><span><b>19</b> 测试</span><span><b>48</b> Δ</span></div>
           <div class="hbar"><i style="width:100%;background:#fbbf24"></i></div>
         </div></div>
     </div>
   <div class="band">
       <div class="blabel">L5 · 入口</div>
-      <div class="grid"><div class="card" style="--role:#f472b6;--mix:24%" title="@drec/cli · 1643 LOC · 5 文件 · 1 测试 · 近 90 天 29 次提交">
+      <div class="grid"><div class="card" style="--role:#f472b6;--mix:24%" title="@drec/cli · 1658 LOC · 5 文件 · 1 测试 · 近 90 天 30 次提交">
           <span class="rail" style="background:#f472b6"></span>
           <div class="t">cli</div>
           <div class="pkg">@drec/cli</div>
-          <div class="m"><span><b>1643</b> LOC</span><span><b>5</b> 文件</span><span><b>1</b> 测试</span><span><b>29</b> Δ</span></div>
-          <div class="hbar"><i style="width:62%;background:#f472b6"></i></div>
+          <div class="m"><span><b>1658</b> LOC</span><span><b>5</b> 文件</span><span><b>1</b> 测试</span><span><b>30</b> Δ</span></div>
+          <div class="hbar"><i style="width:63%;background:#f472b6"></i></div>
         </div></div>
     </div>
 
@@ -689,7 +689,7 @@
       <td><code>core</code></td>
       <td>L0 · 基础叶子</td>
       <td><span style="color:#94a3b8">●</span> 基础/契约</td>
-      <td class="n">1855</td><td class="n">15</td><td class="n">5</td><td class="n">34</td>
+      <td class="n">1876</td><td class="n">15</td><td class="n">5</td><td class="n">35</td>
     </tr>
     <tr>
       <td><code>post-process</code></td>
@@ -719,7 +719,7 @@
       <td><code>record-engine</code></td>
       <td>L1 · 引擎轴(共享)</td>
       <td><span style="color:#fb923c">●</span> 引擎轴</td>
-      <td class="n">645</td><td class="n">3</td><td class="n">3</td><td class="n">6</td>
+      <td class="n">660</td><td class="n">3</td><td class="n">3</td><td class="n">6</td>
     </tr>
     <tr>
       <td><code>douyin-live</code></td>
@@ -743,31 +743,31 @@
       <td><code>manager</code></td>
       <td>L3 · 会话编排</td>
       <td><span style="color:#a78bfa">●</span> 会话编排</td>
-      <td class="n">593</td><td class="n">4</td><td class="n">3</td><td class="n">4</td>
+      <td class="n">689</td><td class="n">4</td><td class="n">3</td><td class="n">4</td>
     </tr>
     <tr>
       <td><code>app</code></td>
       <td>L4 · 有状态应用</td>
       <td><span style="color:#34d399">●</span> 应用/前端</td>
-      <td class="n">7683</td><td class="n">43</td><td class="n">27</td><td class="n">44</td>
+      <td class="n">8246</td><td class="n">45</td><td class="n">28</td><td class="n">45</td>
     </tr>
     <tr>
       <td><code>web</code></td>
       <td>L4 · 有状态应用</td>
       <td><span style="color:#34d399">●</span> 应用/前端</td>
-      <td class="n">6941</td><td class="n">38</td><td class="n">0</td><td class="n">34</td>
+      <td class="n">6973</td><td class="n">38</td><td class="n">0</td><td class="n">34</td>
     </tr>
     <tr>
       <td><code>orchestrator</code></td>
       <td>L4.5 · 多节点 hub</td>
       <td><span style="color:#fbbf24">●</span> 多节点 hub</td>
-      <td class="n">4510</td><td class="n">19</td><td class="n">18</td><td class="n">47</td>
+      <td class="n">4989</td><td class="n">20</td><td class="n">19</td><td class="n">48</td>
     </tr>
     <tr>
       <td><code>cli</code></td>
       <td>L5 · 入口</td>
       <td><span style="color:#f472b6">●</span> 入口</td>
-      <td class="n">1643</td><td class="n">5</td><td class="n">1</td><td class="n">29</td>
+      <td class="n">1658</td><td class="n">5</td><td class="n">1</td><td class="n">30</td>
     </tr></tbody>
   </table>
 

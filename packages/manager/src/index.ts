@@ -9,6 +9,15 @@ import type { Notifier, NotifyEvent } from "@drec/core";
 
 const log = createLogger("session");
 
+/**
+ * T14 —— 「录稳了」的最短录制时长(ms)。低于它就断开 = **短命录制**(起得来但录不成)。
+ * 取 120s:既越过绝大多数「起播瞬间抖动/签名失败」的秒退,又不让真正录了 3 分钟的直播
+ * 因一次断流而背上退避(不误伤)。
+ */
+export const STABLE_RECORD_MS = 120_000;
+/** 连续短命录制达此次数 → 发一次 error 告警(仍继续按封顶退避重连,不放弃)。 */
+export const SHORT_LIVED_ALARM = 10;
+
 export interface SessionOpts {
   /** Seconds to wait before reconnecting after an unexpected stream drop. Default: 5. */
   reconnectDelaySec?: number;
@@ -74,6 +83,19 @@ export class RecordingSession {
   private danmu: DanmuSource | null = null;
   /** 连续「重连(_startInner)抛错」次数;成功恢复(onLive)清零。用于指数退避 + 告警。 */
   private reconnectFails = 0;
+  /**
+   * T14:本次「onLive 起录」的时刻(epoch ms);null = 还没起过。
+   * 用来算本场录制时长 —— **只有时长够(≥ STABLE_RECORD_MS)才允许复位退避**,
+   * 否则「起得来但几秒退出」会以固定 5s 无限重连(实测上千次)。
+   */
+  private onLiveAt: number | null = null;
+  /**
+   * T14:连续「短命录制」次数(起播确认后 < STABLE_RECORD_MS 就断流)。
+   * 达 SHORT_LIVED_ALARM 发一次 error 告警(继续按封顶退避,不放弃重连)。
+   */
+  private shortLivedCount = 0;
+  /** 已就发过短命熔断告警的次数档位(每跨一档再报一次,不刷屏)。 */
+  private shortLivedAlarmAt = 0;
 
   // Store these so reconnect can call recorder.start() again with the same args.
   private roomUrl = "";
@@ -118,6 +140,11 @@ export class RecordingSession {
     // 直播标题也进 sidecar:hub 后处理在录制进程退出后才跑,内存里的值那时已失效。
     this.liveTitle = (info.title ?? "").trim();
     this.userStopped = false;
+    // 全新一轮(用户 start / 进程重启):健康计数从零开始,不继承上一轮的短命/失败计数。
+    this.reconnectFails = 0;
+    this.shortLivedCount = 0;
+    this.shortLivedAlarmAt = 0;
+    this.onLiveAt = null;
 
     mkdirSync(opts.outDir, { recursive: true });
     await this._startInner();
@@ -141,7 +168,10 @@ export class RecordingSession {
       onLive: (i) => {
         this.live = true;
         this.everLive = true;
-        this.reconnectFails = 0; // 录制成功恢复 → 清零重连失败计数(退避复位)
+        // T14:**不再**无条件清零 reconnectFails。开播确认 ≠ 录成了;「起得来但几秒退出」
+        // 正是靠这里无条件清零导致固定 5s 无限重连(实测 1650 次)。真正的复位判据在
+        // _handleOffline:本场「时长够 + 进度新鲜」才算录稳了(见 STABLE_RECORD_MS)。
+        this.onLiveAt = Date.now();
         // 新一场开播(下播后重新开播):清掉上一场的标题,否则第二场会沿用第一场的 title。
         // 判据 = offlineNotified(offline 时查权威 getLiving=false → 已确认下播);
         // 抖动断流(仍在播)不清 —— 同一场重连保留首值,避免被后续空值清掉。
@@ -262,6 +292,15 @@ export class RecordingSession {
       this.notify({ kind: "recordEnd", anchor: this.anchor, room: this.roomUrl, outDir: this.opts.outDir, reason: "主播下播" });
       this.offlineNotified = true;
     }
+    // T14:**异常断流这一刻**才判定「这一场到底录稳了没」—— 这是唯一同时握有
+    //   「onLiveAt(起录时刻)」+「recorder 进度信号」的时刻(onLive 时进度还新鲜,判不出短命)。
+    //   录稳(duration ≥ STABLE_RECORD_MS 且进度新鲜)→ 退避复位;
+    //   短命 → 记一次失败让退避真递增,并在达阈值时熔断告警(仍继续重连,不放弃)。
+    // ⚠️ **只对 stillLive=true(流抖动/异常断流)判** —— 主播正常下播不是「起播即断」,
+    //   混进去会让一天正常结束的直播攒够 10 次后误报「疑似签名失效/风控」,告警失去意义。
+    //   真下播时这里只清健康计数(状态归零,下一场从零算)。
+    if (stillLive) this.judgeStability();
+    else { this.reconnectFails = 0; this.shortLivedCount = 0; this.shortLivedAlarmAt = 0; this.onLiveAt = null; }
 
     // Tear down the current recorder/danmu before restarting (下一场会重新 connectDanmu 拿当场 liveId)。
     if (!this.recorder.providesDanmu && this.danmu) {
@@ -295,6 +334,63 @@ export class RecordingSession {
         this.notify({ kind: "error", stage: "重连", message: `连续 ${this.reconnectFails} 次重连失败,房间可能持续不可达:${this.roomUrl}` });
       }
       void this._handleOffline();
+    }
+  }
+
+  /**
+   * T14.3–T14.5:断流瞬间的稳定性判定(纯同步,只改计数器/发告警)。
+   *
+   * 判据(有进度信号时):`时长 ≥ STABLE_RECORD_MS` **且** `lastProgressAgeMs()` 新鲜
+   *   —— 「久到不像起播抖动」+ 「退出前还在落盘」才算真录成。
+   * 回落(无 `lastProgressAgeMs` 的 recorder,向后兼容):只要时长 ≥ STABLE_RECORD_MS 即算成功。
+   *
+   * ⚠️ 时序注意:`lastProgressAgeMs()` 在进程 close 后可能已返 `null`(recorder 已摘 proc),
+   * 那属于「无信号」→ 走回落分支。这不是缺陷:close 事件路径拿不到进度是必然的,
+   * 而「时长够」本身已能区分秒退与真录(真正的卡死由 recorder 自己的看门狗负责杀)。
+   */
+  private judgeStability(): void {
+    const startedAt = this.onLiveAt;
+    this.onLiveAt = null;
+    // 从未 onLive(取流/初始化就抛了)→ 不是「短命录制」,退避由 reconnectFails 既有逻辑管。
+    if (startedAt == null) return;
+
+    const durationMs = Date.now() - startedAt;
+    const age = this.recorder.lastProgressAgeMs?.() ?? null;
+    const progressFresh = age == null ? true : age < STABLE_RECORD_MS; // null=无信号 → 不因缺信号而误判
+    const stable = durationMs >= STABLE_RECORD_MS && progressFresh;
+
+    if (stable) {
+      if (this.reconnectFails > 0 || this.shortLivedCount > 0) {
+        log.info(
+          `本场录了 ${Math.round(durationMs / 1000)}s(进度${
+            age == null ? "无信号" : `${Math.round(age / 1000)}s 前`
+          })→ 判定录稳,退避复位`,
+        );
+      }
+      this.reconnectFails = 0;
+      this.shortLivedCount = 0;
+      this.shortLivedAlarmAt = 0;
+      return;
+    }
+
+    // 短命:起得来,但没录够就断了。
+    this.shortLivedCount++;
+    // 让退避**真的**递增(此前 onLive 无条件清零 → 永远 5s)。
+    this.reconnectFails++;
+    log.warn(
+      `短命录制(第 ${this.shortLivedCount} 次):开播确认后仅 ${Math.round(durationMs / 1000)}s 就断开` +
+        `${age == null ? "(无进度信号)" : `(退出前 ${Math.round(age / 1000)}s 未见落盘前进)`}` +
+        ` → 退避加深,不立即重试`,
+    );
+    if (this.shortLivedCount >= SHORT_LIVED_ALARM && this.shortLivedCount >= this.shortLivedAlarmAt + SHORT_LIVED_ALARM) {
+      this.shortLivedAlarmAt = this.shortLivedCount;
+      this.notify({
+        kind: "error",
+        stage: "录制健康",
+        message:
+          `连续 ${this.shortLivedCount} 次「起播即断」(${Math.round(durationMs / 1000)}s 内退出):` +
+          `疑似签名失效/平台风控/取流被拒。将继续按封顶退避重试,请检查取流与风控状态。room=${this.roomUrl}`,
+      });
     }
   }
 

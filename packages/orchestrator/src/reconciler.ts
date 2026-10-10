@@ -57,6 +57,11 @@ export interface ReconcilerDeps {
    * 无状态 transport 重建极廉价。省略 → 用构造时的 transports(旧行为/测试)。
    */
   loadTransports?: () => Map<string, Transport>;
+  /**
+   * T12:同一场两次「上传后收尾补跑」的最小间隔(ms,默认 15 分钟)。用于节流持续性清理故障
+   * (磁盘满 / ssh 不通 / 权限不足)—— 每轮对账重试只会刷屏且无收益。
+   */
+  cleanupBackfillThrottleMs?: number;
 }
 
 const DEFAULT_SETTLE: SettleConfig = { maxWaitMs: 600_000, pollMs: 15_000 };
@@ -64,10 +69,17 @@ const DEFAULT_INVENTORY_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_STALE_MS = 600_000;
 const DEFAULT_RECONNECT_WINDOW_MS = 10 * 60_000;
+const DEFAULT_CLEANUP_BACKFILL_THROTTLE_MS = 15 * 60_000;
 const DEFAULT_SLEEP = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const RETRYABLE = new Set<JobState>(["pending", "failed"]);
 const UNSAFE_RETRY_NODES = new Set(["upload_plain", "append_danmu", "append_livechat"]);
+
+/** 收尾补跑日志(统一前缀,便于 grep)。 */
+const jlogInfo = (msg: string): void => console.info(msg);
+
+/** 收尾待补的节点:清理失败(clean_*) 与核验待重试(clean_verify=pending)。 */
+const CLEANUP_BACKFILL_NODES = new Set(["clean_source", "clean_stage_src", "clean_stage"]);
 
 export class Reconciler {
   private platform: string;
@@ -93,6 +105,8 @@ export class Reconciler {
   private readonly warnedCapabilityWorkers = new Set<string>();
   /** 已告警过的低磁盘节点 id(回升后复位,避免每轮刷屏)。 */
   private readonly diskAlerted = new Set<string>();
+  /** T12:同一场两次收尾补跑的最小间隔(ms);持续性故障(磁盘满/ssh 不通)不该每轮重试。 */
+  private cleanupBackfillThrottleMs: number;
 
   constructor(deps: ReconcilerDeps) {
     this.platform = deps.platform;
@@ -111,6 +125,7 @@ export class Reconciler {
     this.resolveCfg = deps.resolveCfg;
     this.workerCapabilities = deps.workerCapabilities;
     this.loadTransports = deps.loadTransports;
+    this.cleanupBackfillThrottleMs = deps.cleanupBackfillThrottleMs ?? DEFAULT_CLEANUP_BACKFILL_THROTTLE_MS;
   }
 
   /**
@@ -330,6 +345,35 @@ export class Reconciler {
     return { broadcasts, cfgByKey };
   }
 
+
+/**
+ * T12:该 job 是否**到点该补跑收尾**(清理失败 / 核验软状态)。
+ *
+ * 节流:同一场两次补跑之间至少 `cleanupBackfillThrottleMs`(默认 15 分钟)——
+ * 清理失败往往是「磁盘满 / 节点 ssh 不通 / 权限」这类**持续性**故障,每 30 分钟对账轮
+ * 反复重试只会刷屏且无收益。
+ *
+ * @returns 可补跑的节点名(供日志);null = 无需补跑。
+ */
+private cleanupBackfillDue(streamKey: string): string | null {
+  const nodes = this.ledger.getNodeStates(streamKey);
+  if (nodes.length === 0) return null;
+  const now = Date.now();
+  const due: string[] = [];
+  for (const n of nodes) {
+    const isVerify = n.node === "clean_verify";
+    const matches = isVerify ? n.state === "pending" : (CLEANUP_BACKFILL_NODES.has(n.node) && n.state === "failed");
+    if (!matches) continue;
+    // `Math.max(0, ...)`:台账的 now() 是**进程内单调递增**(同毫秒多次调用会 +1 递推),
+    // 而这里用 Date.now() 读墙钟 → 同一 tick 内 `Date.now() - updatedAt` 可能是**负数**
+    // (updatedAt 是未来 1ms 的递推值)。不夹到 0 的话,throttleMs=0 也会被当成「刚失败」而跳过。
+    const age = Math.max(0, now - n.updatedAt);
+    if (age < this.cleanupBackfillThrottleMs) continue;
+    due.push(n.node);
+  }
+  return due.length > 0 ? due.join(",") : null;
+}
+
   async reconcileAll(): Promise<void> {
     // 实时重载:重建 transports(反映 hub.config.json 最新 workers);同步给 pipeline 用的那份。
     if (this.loadTransports) this.transports = this.loadTransports();
@@ -376,8 +420,28 @@ export class Reconciler {
 
         const job = this.ledger.get(b.streamKey);
 
-        // Skip terminal states.
-        if (job?.state === "done" || job?.state === "needs_manual") continue;
+        // T12 补跑:done 但「清理失败 / 核验待重试」的 job —— **在终态短路之前**判定,
+        // 否则永远看不到这些 job(它们已经是终态,不会走下面的失败重试逻辑)。
+        // 复用 pipeline 已有的幂等续跑(bv 已在库 → 只补 append + 收尾闸门),
+        // 成员清单来自本轮 inventory —— 清理失败的源文件**仍在节点上**(没删成),故能被扫到。
+        if (job?.state === "done") {
+          const due = this.cleanupBackfillDue(b.streamKey);
+          if (due) {
+            jlogInfo(`[reconciler] ${b.streamKey} 上传后收尾未完成(${due}) → 补跑`);
+            try {
+              await this._runPipeline(b, { ...this.pipelineDeps, transports, cfg });
+            } catch (err) {
+              if (isJobAbort(err)) { this.ledger.setState(b.streamKey, "needs_manual", { error: USER_STOP }); continue; }
+              console.error(`[reconciler] ${b.streamKey} 收尾补跑失败:`, err);
+              // 补跑失败**不改终态**:上传已成功,不该把 job 打成 failed(会诱导重传 = 重复稿)。
+              // 只记日志 + 下轮再来;节点自身的 failed/pending 状态已由 pipeline 写好。
+            }
+          }
+          continue;
+        }
+
+        // Skip terminal states(needs_manual 属人工决策,reconciler 不自动推进)。
+        if (job?.state === "needs_manual") continue;
 
         // failed 且已达重试上限 → 升级 needs_manual(终态)+ 通知一次人工,不再重入。
         const failedNodes = job?.state === "failed" ? this.ledger.getFailedNodes(b.streamKey) : [];

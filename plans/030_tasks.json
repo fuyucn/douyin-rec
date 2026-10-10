@@ -439,7 +439,8 @@
       "depends_on": [
         "T2"
       ],
-      "estimated_loc": 300
+      "estimated_loc": 300,
+      "status": "done"
     },
     {
       "id": "T4",
@@ -1167,7 +1168,8 @@
         "新增 StepName 后 根 tsc 与 web tsc 均通过（两处清单同步）"
       ],
       "depends_on": [],
-      "estimated_loc": 330
+      "estimated_loc": 330,
+      "status": "done"
     },
     {
       "id": "T12",
@@ -1269,7 +1271,8 @@
       "depends_on": [
         "T11"
       ],
-      "estimated_loc": 280
+      "estimated_loc": 280,
+      "status": "done"
     },
     {
       "id": "T13",
@@ -1350,7 +1353,8 @@
       "depends_on": [
         "T12"
       ],
-      "estimated_loc": 240
+      "estimated_loc": 240,
+      "status": "done"
     },
     {
       "id": "T14",
@@ -1435,7 +1439,8 @@
         "正常长直播断流后仍能快速恢复（不误伤）"
       ],
       "depends_on": [],
-      "estimated_loc": 300
+      "estimated_loc": 300,
+      "status": "done"
     },
     {
       "id": "T15",

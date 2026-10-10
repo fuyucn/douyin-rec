@@ -71,8 +71,13 @@
   冷却跨重启保留;`PUT /api/rooms/:key` 一次改两半;分 P 不符不删源;短命录制退避递增。
   全程 `pnpm test`/`typecheck`/`bundle`/web build 绿 + 架构图一致 + 每个 `feat|fix` bump version。
   **取代** `plans/029` 的 P0/P2/C 工作(029 保留为历史;D4 内存决策仍未决)。
-  **进度**:M1 的 **T1(节点审计快照 `0.0.48`)、T2(期望骤减安全阀 + force 通道 `0.0.49`)已完成**(均待部署验证);
+  **进度**:**M1 全部完成**(`0.0.50`,待部署验证):T1 节点审计快照 / T2 期望骤减安全阀 + force 通道 /
+  T3 删除语义收敛(禁用≠删除)/ T11 产物完整性核验 + 延迟删源 / T12 清理独立化(可重试、失败不影响终态)/
+  T13 孤儿与中间产物维护清理(可预览可审计)/ T14 录制健康(有效落盘判成功 + 短命录制熔断)。
   其余任务见 plans/030_tasks.json 的 status 字段。
+  M1 跨任务审计:核验接缝 `countParts` 由 cli 注入(orchestrator 不 import app,分层测试过);
+  `clean_verify` 在 core/web/前端文案三处都已接上;xml「不得删最后一份」判据落在 orphan-cleanup 的
+  非空副本索引上;T13 只动了 server.ts 的路由段,未覆盖 T2 的 `POST /api/hub/apply`。
   T2 自审修复记录:①TDZ(守卫引用未初始化的 upsert/writeSnapshot)→ 移到 upsert 之后、快照抽 `writeSnapshot`;
   ②空期望分支曾先跑「只停用」→ 「一个没删却全被停用」,比原 bug 更隐蔽 → 判定/执行按分支隔离;
   ③force 在同步在途时被合并丢失(用户点「强制应用」没反应且 master 侧无痕)→ 抽 `SyncGate` 累积标志 + 6 用例;

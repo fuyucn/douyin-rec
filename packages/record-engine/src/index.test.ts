@@ -311,3 +311,65 @@ describe("风控降频轮询(platform.getStream 返回 throttledReason)", () => 
     rmSync(outDir, { recursive: true, force: true });
   });
 });
+
+/**
+ * T14:`lastProgressAgeMs()` 契约 —— **复用**卡死看门狗的 lastAdvanceAt(不引入第二套时钟)。
+ * 关键语义:无活跃进程 / 从未 markProgress → `null`(绝不能返回 ~epoch 的巨大年龄,
+ * 否则上层会把「没在录」误判成「卡死」)。
+ */
+describe("lastProgressAgeMs(T14 进度信号)", () => {
+  it("无活跃进程(未 start / 已 stop)→ null", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(false));
+    const engine: DownloadEngine = { id: "fake", spawn: () => ({ proc: new FakeProc() as unknown as ChildProcess, sessionFirstPath: "/out/a.ts" }) };
+    const rec = new PollingRecorder(engine);
+    expect(rec.lastProgressAgeMs()).toBeNull();   // 还没 start
+    const ev: RecorderEvents = { onLive: vi.fn(), onSegment: vi.fn(), onOffline: vi.fn(), onError: vi.fn() };
+    const outDir = mkdtempSync(join(tmpdir(), "rec-age-"));
+    await rec.start("https://test.local/live/9", { quality: "origin", outDir, segmentSec: 0 }, ev);
+    void rec.stop();              // stop 有 SIGINT→8s SIGKILL 宽限(真等会超时);fake timer 下摘 proc 即生效
+    await vi.advanceTimersByTimeAsync(8_001); // 走完 SIGINT→SIGKILL 宽限 → proc 摘掉
+    expect(rec.lastProgressAgeMs()).toBeNull();   // 已停 → 无活跃录制
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("录制中且从未 markProgress(lastAdvanceAt=0)→ null,不是 ~epoch 巨龄", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(false));
+    const proc = new FakeProc();
+    const { rec, outDir } = await startRecorder(proc);
+    (rec as unknown as { lastAdvanceAt: number }).lastAdvanceAt = 0; // 极端态:从未有进度
+    expect(rec.lastProgressAgeMs()).toBeNull();
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("录制中:进程已 exit(close 未到)也算无活跃进程 → null", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(false));
+    const proc = new FakeProc();
+    const { rec, outDir } = await startRecorder(proc);
+    proc.exitCode = 0;
+    proc.emit("exit", 0, null);
+    expect(rec.lastProgressAgeMs()).toBeNull();
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("录制中:随 markProgress 刷新,龄随时间增长", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(false));
+    const proc = new FakeProc();
+    const { rec, outDir } = await startRecorder(proc);
+    // startRecorder 里已 advance(1) 让 poll 完成 spawn;从此刻起算龄。
+    const t0 = Date.now();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(rec.lastProgressAgeMs()).toBeGreaterThanOrEqual(Date.now() - t0); // lastAdvanceAt 可能早 t0 ≤1ms
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(rec.lastProgressAgeMs()).toBeGreaterThanOrEqual(Date.now() - t0);
+    expect(rec.lastProgressAgeMs()).toBeLessThanOrEqual(8_001);
+    (rec as unknown as { markProgress: () => void }).markProgress(); // 引擎报前进 → 龄归零
+    expect(rec.lastProgressAgeMs()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(rec.lastProgressAgeMs()).toBe(1_000);
+    rmSync(outDir, { recursive: true, force: true });
+  });
+});

@@ -7,6 +7,7 @@ import { isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USE
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 import { prepareUploadAlias } from "./session-plan.js";
+import { PART_GROUP_CANONICAL } from "./verify.js";
 
 export { deriveStageProducts, withOutputStem, type StageProducts } from "./session-plan.js";
 
@@ -233,6 +234,10 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         // checkpoint:P1 建稿成功即刻落库 bv —— 必须在这里(不能等 burn/split 完),
         // 否则 P1 成功后若后续节点失败,bv 丢失 → 重试重传 P1 → 重复稿。
         ledger.setBv(streamKey, bv);
+        // 分P核验基线(T11):P1 = plain 组第 0 段。合并路径此前**完全不写** sync_parts →
+        // 期望段数恒 0、核验恒跳过(等于没核验),而分段路径有 —— 两条路径基线口径必须一致。
+        // 合并路径的 plain 是单文件(不切分),故恒 1 个分 P;段号 0 起(与分段路径同一口径)。
+        ledger.markPartDone(streamKey, PART_GROUP_CANONICAL.plain, 0);
         c.set("bv", bv);
         const d3 = bytesDetail(products.plain);
         if (d3) c.stepDetail("upload_plain", d3);
@@ -350,6 +355,11 @@ async function runAppendGroup(
     step,
     log: c.log,
   });
+  // 分P核验基线(T11):**append 成功后**才记 checkpoint —— 失败/未提交的分 P 不进基线。
+  // 组名用步骤名(`append_danmu`/`append_livechat`),与分段路径 `appendSegmentGroup` 完全一致
+  // (不能另起 `danmu`/`livechat`:那会让核验读不到分段路径写的行,恒 mismatch)。
+  const group = step === "append_danmu" ? PART_GROUP_CANONICAL.danmu : PART_GROUP_CANONICAL.livechat;
+  for (let i = 0; i < files.length; i++) c.ledger.markPartDone(c.streamKey, group, i);
   c.set(out, "done");
   c.stepDetail(step, `${files.length} 段${files.length ? ` · ${humanBytes(sumBytesOf(files))}` : ""}`);
 }

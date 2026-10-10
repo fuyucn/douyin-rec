@@ -23,6 +23,8 @@ export const HUB_STEP_NAMES = [
   "select", "pull", "merge",
   "burn_danmu", "burn_livechat",
   "upload_plain", "append_danmu", "append_livechat",
+  // 上传后完整性核验(T11):与 clean_* 同为收尾节点,判定「实际分 P 数 == 期望」才删源。
+  "clean_verify",
   "clean_stage_src", "clean_source", "clean_stage",
 ] as const;
 export type HubStepName = (typeof HUB_STEP_NAMES)[number];

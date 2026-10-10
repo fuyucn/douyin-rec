@@ -296,6 +296,21 @@ export class PollingRecorder implements Recorder {
   }
 
   /**
+   * T14 契约实现:**复用**卡死看门狗的 `lastAdvanceAt`(不引入第二套时钟/看门狗)。
+   *   - 没有活跃进程 → `null`(此刻没有录制,「进度年龄」无意义)
+   *   - 有进程但 `lastAdvanceAt===0`(从未 markProgress,理论上 beginRecording 会先置,兜底)
+   *     → `null`(**绝不能**返回 `Date.now()-0` 的 ~56 年,会被上层误判成「卡死」)
+   *   - 否则 `Date.now() - lastAdvanceAt`
+   * 上层只在 `null` 时回落到「无信号规则」,故这里宁保守不冒进。
+   */
+  lastProgressAgeMs(): number | null {
+    const proc = this.proc;
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return null; // 无活跃录制
+    if (this.lastAdvanceAt <= 0) return null;
+    return Math.max(0, Date.now() - this.lastAdvanceAt);
+  }
+
+  /**
    * 「疑似本场结束」旁路提示(弹幕 ControlMessage / 上层信号)→ **立刻用权威 getLiving 复核**。
    * 目的是把「等看门狗 60s 才判定收尾」缩短到秒级。**只有确认 living=false 才收尾**;
    * true/未知一律忽略(网络抖动、风控断流都不能当收播,否则会把一场切成多段)。

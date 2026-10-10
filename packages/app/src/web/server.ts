@@ -25,6 +25,11 @@ import { fetchAnchorName, resolveShortUrl } from "../anchor.js";
 import type { TaskStore } from "../store.js";
 import { MergeJobStore } from "../merge-jobs.js";
 import type { EventCenter } from "@drec/observability";
+import { buildMaintenance } from "./api/maintenance.js";
+import type { MaintenanceDeps } from "./api/maintenance.js";
+
+/** T13 维护端点 handler(`buildMaintenance` 返回的两方法)。 */
+type MaintenanceApi = ReturnType<typeof buildMaintenance>;
 
 /** A matched route: the api method to call + extracted :id (if any). */
 export interface RouteMatch {
@@ -87,6 +92,8 @@ export interface RouteMatch {
     | "reorderWorkers"
     | "testWorker"
     | "workersStatus"
+    | "previewOrphans"
+    | "cleanupOrphans"
     | "index";
   /** Path param when the route has /:id. */
   id?: number;
@@ -140,6 +147,8 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "getTimezone", methods: ["GET"], pattern: /^\/api\/timezone$/ },
   { name: "setTimezone", methods: ["POST"], pattern: /^\/api\/timezone$/, needsBody: true },
   { name: "getEvents", methods: ["GET"], pattern: /^\/api\/events$/ },
+  { name: "previewOrphans", methods: ["GET"], pattern: /^\/api\/maintenance\/orphans$/ },
+  { name: "cleanupOrphans", methods: ["POST"], pattern: /^\/api\/maintenance\/orphans$/, needsBody: true },
   { name: "hubStatus", methods: ["GET"], pattern: /^\/api\/hub\/status$/ },
   { name: "applyHubTasks", methods: ["POST"], pattern: /^\/api\/hub\/apply$/ },
   { name: "listHubJobs", methods: ["GET"], pattern: /^\/api\/hub\/jobs$/ },
@@ -292,8 +301,15 @@ async function dispatch(
   api: Api,
   match: RouteMatch,
   req: IncomingMessage,
+  maintenance: MaintenanceApi,
 ): Promise<ApiResult> {
   switch (match.name) {
+    case "previewOrphans":
+      return maintenance.previewOrphans();
+    case "cleanupOrphans": {
+      const body = (await readJson(req)) as { confirm?: boolean };
+      return maintenance.cleanupOrphans(body ?? {});
+    }
     case "listTasks":
       return api.listTasks();
     case "listPlatforms":
@@ -513,6 +529,13 @@ export function createWebServer(deps: WebServerDeps): Server {
     })(),
     events: deps.events,
   });
+  // T13 维护清理端点:自带活动路径推导(正在录制 / 非终态 hub job),无需 CLI 注入回调。
+  const maintenanceDeps: MaintenanceDeps = {
+    store: deps.store,
+    manager: deps.manager,
+    syncDbPath: deps.syncDbPath,
+  };
+  const maintenance = buildMaintenance(maintenanceDeps);
 
   return createServer((req, res) => {
     void (async (): Promise<void> => {
@@ -553,7 +576,7 @@ export function createWebServer(deps: WebServerDeps): Server {
         return;
       }
       try {
-        const result = await dispatch(api, match, req);
+        const result = await dispatch(api, match, req, maintenance);
         sendJson(res, result.status, result.body);
       } catch (e) {
         if (e instanceof SyntaxError) {

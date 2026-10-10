@@ -6,7 +6,7 @@ import { Reconciler, type ReconcilerDeps } from "./reconciler.js";
 import { SyncLedger } from "./ledger.js";
 import type { Transport, NodeRecording, NodeInventory } from "./transport.js";
 import type { PipelineDeps } from "./pipeline.js";
-import type { Broadcast } from "./identity.js";
+import { clusterBroadcasts, type Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
 import { JobAbortedError, USER_STOP, _resetJobAbort, beginJob, endJob, isJobLive } from "@drec/core";
 import type { NotifyEvent } from "@drec/core";
@@ -1132,4 +1132,107 @@ describe("磁盘看门狗(节点剩余空间告警)", () => {
     await new Promise((res) => setTimeout(res, 10));
     expect(notify).not.toHaveBeenCalled();
   });
+  // ── T12:上传后收尾补跑(清理失败 / 核验待重试的 done job)────────────────────
+  describe("收尾补跑(T12:done job 的 clean_* failed / clean_verify pending)", () => {
+    /** 造一个已 done 的 job + 一份节点清单(源仍在 → 能被扫到)。 */
+    async function doneJobWith(depsExtra: {
+      /** 待补的节点名;undefined = 无待补(对照组)。 */
+      node?: "clean_source" | "clean_stage" | "clean_verify";
+      nodeState?: "failed" | "pending" | "done";
+    }): Promise<{ ledger: SyncLedger; runPipeline: ReturnType<typeof vi.fn>; reconciler: Reconciler }> {
+      const ledger = freshLedger();
+      const rec = makeRec();
+      // key 必须与 reconciler 实际聚出来的 streamKey 一致:已有 job 会让聚类强制加 _HHMM 后缀
+      // (否则测试里的 job 永远匹配不上,看起来像"补跑没触发")。
+      const key = clusterBroadcasts(
+        [{ workerId: "node-1", recordings: [rec] }], 0, "douyin",
+      )[0].streamKey;
+      ledger.upsertPending(key, rec.startMs);
+      ledger.setBv(key, "BV1");
+      ledger.markDone(key, "BV1");
+      if (depsExtra.node) {
+        ledger.syncNodeState(key, depsExtra.node, depsExtra.nodeState ?? "failed", { error: "清理失败" });
+      }
+      const transports = new Map([["node-1", makeTransport("node-1", [rec])]]);
+      const pipelineDeps = makePipelineDeps(ledger, transports);
+      const runPipeline = vi.fn(async () => ({ state: "done" as const, bv: "BV1" }));
+      // reconnectWindowMs=0:跳过「刚结束先不处理」的门,让本轮直接走到补跑判定。
+      const reconciler = new Reconciler({
+        platform: "douyin", transports, ledger, pipelineDeps,
+        runPipeline: runPipeline as never,
+        settle: fastSettle, sleep: fastSleep,
+        reconnectWindowMs: 0,
+        cleanupBackfillThrottleMs: 0, // 0 = 无节流,便于测试
+      });
+      return { ledger, runPipeline, reconciler };
+    }
+
+    it("done + clean_source=failed → 补跑一次(终态短路之前!)", async () => {
+      const { ledger, runPipeline, reconciler } = await doneJobWith({ node: "clean_source" });
+      await reconciler.reconcileAll();
+      expect(runPipeline).toHaveBeenCalledTimes(1);
+      // 补跑**不改终态**:上传已成功,不能变 failed(否则自动重跑 = 重复投稿)。
+      const [job] = ledger.listKeys();
+      expect(ledger.get(job.streamKey)?.state).toBe("done");
+      ledger.close();
+    });
+
+    it("done + clean_verify=pending(核验软状态)→ 同样补跑", async () => {
+      const { ledger, runPipeline, reconciler } = await doneJobWith({ node: "clean_verify", nodeState: "pending" });
+      await reconciler.reconcileAll();
+      expect(runPipeline).toHaveBeenCalledTimes(1);
+      ledger.close();
+    });
+
+    it("台账单调时钟 vs 墙钟(updatedAt 可能比 Date.now() 大 1ms)→ throttle=0 也必须补跑", async () => {
+      // 回归:SyncLedger.now() 进程内单调递增,同一毫秒内多次写入会 +1 递推,
+      // 于是 `Date.now() - updatedAt` 可能是负数 → 未夹到 0 时 throttleMs=0 也被判「刚失败」而跳过。
+      const { ledger, runPipeline, reconciler } = await doneJobWith({ node: "clean_source" });
+      await reconciler.reconcileAll();
+      expect(runPipeline).toHaveBeenCalledTimes(1);
+      ledger.close();
+    });
+
+    it("done + 无待补节点 → 不补跑(幂等:不会每轮空转)", async () => {
+      const { ledger, runPipeline, reconciler } = await doneJobWith({});
+      await reconciler.reconcileAll();
+      expect(runPipeline).not.toHaveBeenCalled();
+      ledger.close();
+    });
+
+    it("节流:刚 failed 的 clean_* 在 throttle 窗口内不补跑", async () => {
+      const ledger = freshLedger();
+      const rec = makeRec();
+      const key = `douyin:test-room:${new Date(rec.endMs).toISOString().slice(0, 10)}`;
+      ledger.upsertPending(key, rec.startMs);
+      ledger.markDone(key, "BV1");
+      ledger.syncNodeState(key, "clean_source", "failed", { error: "x" });
+      const transports = new Map([["node-1", makeTransport("node-1", [rec])]]);
+      const runPipeline = vi.fn(async () => ({ state: "done" as const, bv: "BV1" }));
+      const reconciler = new Reconciler({
+        platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+        runPipeline: runPipeline as never, settle: fastSettle, sleep: fastSleep,
+        reconnectWindowMs: 0,
+        cleanupBackfillThrottleMs: 60_000, // 刚写的 failed 落在窗口内 → 不补跑
+      });
+      await reconciler.reconcileAll();
+      expect(runPipeline).not.toHaveBeenCalled();
+      ledger.close();
+    });
+
+    it("补跑抛错 → job 仍 done(不改 failed),下轮再试", async () => {
+      const { ledger } = await doneJobWith({ node: "clean_source" });
+      const [jobRow] = ledger.listKeys();
+      const boom = new Reconciler({
+        platform: "douyin", transports: new Map([["node-1", makeTransport("node-1", [makeRec()])]]),
+        ledger, pipelineDeps: makePipelineDeps(ledger, new Map()),
+        runPipeline: (async () => { throw new Error("ssh 不通"); }) as never,
+        settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0, cleanupBackfillThrottleMs: 0,
+      });
+      await boom.reconcileAll();
+      expect(ledger.get(jobRow.streamKey)?.state).toBe("done");   // 绝不被补跑失败改成 failed
+      ledger.close();
+    });
+  });
+
 });

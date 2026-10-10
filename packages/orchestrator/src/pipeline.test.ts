@@ -2,7 +2,7 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { xmlKeepRule, runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, xmlKeepRule, runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
 import type { Broadcast } from "./identity.js";
@@ -202,6 +202,77 @@ describe("runPipeline", () => {
       expect(flat.filter((f) => f.includes("_danmu")).length).toBeGreaterThan(0);
       expect(flat.filter((f) => f.includes("_livechat")).length).toBeGreaterThan(0);
       deps.ledger.close();
+    });
+
+    // ── T11/T12 在分段路径上的同口径行为 ────────────────────────────────────────
+    describe("分段路径的核验与清理(T11/T12)", () => {
+      const SEG_BC = () => makeBroadcast([{
+        workerId: "node-1",
+        rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"] }),
+      }]);
+
+      /** 分段模式 + 删源开启。 */
+      function segUploadDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
+        const deps = segmentDeps();
+        (deps as { cfg: PipelineCfg }).cfg = {
+          ...deps.cfg,
+          cleanup: { sourceAfterDone: true },
+          ...(overrides.cfg ? { cfg: overrides.cfg } : {}),
+        } as PipelineCfg;
+        const o = { ...overrides };
+        delete o.cfg;
+        Object.assign(deps, o);
+        return deps;
+      }
+      async function runSeg(deps: TestDeps) {
+        const b = SEG_BC();
+        deps.ledger.upsertPending(b.streamKey);
+        return runPipeline(b, deps);
+      }
+
+      it("核验通过(期望 9 实际 9)→ 删源;分组名沿用既有 append_danmu/append_livechat", async () => {
+        const deps = segUploadDeps({ countParts: async () => 9 });
+        const r = await runSeg(deps);
+        expect(r.state).toBe("done");
+        // 向后兼容:分段路径的既有组名(步骤名)必须被核验读到 → 期望算得出 9。
+        expect(deps.ledger.doneParts(STREAM_KEY, "append_danmu").size).toBe(3);
+        expect(deps.ledger.doneParts(STREAM_KEY, "plain").size).toBe(3);
+        expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("done");
+        expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+      });
+
+      it("期望 9 实际 8 → needs_manual + 源保留(cleanup 未被调)", async () => {
+        const deps = segUploadDeps({ countParts: async () => 8 });
+        const r = await runSeg(deps);
+        expect(r.state).toBe("needs_manual");
+        expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      });
+
+      it("未注入 countParts → 核验关闭,分段路径照常删源(与现状一致)", async () => {
+        const deps = segUploadDeps();
+        const r = await runSeg(deps);
+        expect(r.state).toBe("done");
+        expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+      });
+
+      it("countParts=null → 软状态:源保留、clean_verify=pending、job 仍 done", async () => {
+        const deps = segUploadDeps({ countParts: async () => null });
+        const r = await runSeg(deps);
+        expect(r.state).toBe("done");
+        expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("pending");
+        expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      });
+
+      it("分段路径 rmStage 抛错 → job 仍 done(不因清理失败变 failed)", async () => {
+        const deps = segUploadDeps({
+          countParts: async () => 9,
+          rmStage: async () => { throw new Error("stage 只读"); },
+          cfg: { ...segUploadDeps().cfg, cleanup: { sourceAfterDone: true, stageAfterDone: true } },
+        } as Partial<PipelineDeps>);
+        const r = await runSeg(deps);
+        expect(r.state).toBe("done");
+        expect(deps.ledger.get(STREAM_KEY)?.state).toBe("done");
+      });
     });
 
     it("stage 模式:逐段产出落盘待人工,不建稿", async () => {
@@ -1106,4 +1177,126 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
   });
+
+  // ── T11/T12:上传后收尾(产物核验 + 延迟删源 + 清理失败可见)────────────────────
+  describe("上传后收尾(T11 产物核验 / T12 清理独立化)", () => {
+    const CLEANUP_CFG = { sourceAfterDone: true } as const;
+
+    /** 合并路径跑到 done 的 deps(sourceAfterDone 开启,便于观察删源)。 */
+    function uploadDeps(overrides: Partial<PipelineDeps> = {}, cfgExtra: Partial<PipelineCfg> = {}): TestDeps {
+      const deps = makeDeps(overrides);
+      (deps as { cfg: PipelineCfg }).cfg = { ...deps.cfg, cleanup: CLEANUP_CFG, ...cfgExtra };
+      return deps;
+    }
+    /** pipeline 假定 job 行已由 reconciler 建好;直接调 runPipeline 的用例需先 upsert。 */
+    function run(deps: TestDeps, members = [{ workerId: "node-1", rec: makeRec() }]) {
+      const b = makeBroadcast(members);
+      deps.ledger.upsertPending(b.streamKey, b.startMs);
+      return runPipeline(b, deps);
+    }
+
+    it("合并路径核验通过(期望 3 实际 3)→ 删源(transport.cleanup 被调)", async () => {
+      const deps = uploadDeps({ countParts: async () => 3 });
+      const r = await run(deps);
+      expect(r.state).toBe("done");
+      // 合并路径此前不写 sync_parts → 期望恒 0;现在写了 → 期望 3(P1+danmu+livechat)。
+      expect(deps.ledger.doneParts(STREAM_KEY, "plain").size).toBe(1);
+      expect(deps.ledger.doneParts(STREAM_KEY, "append_danmu").size).toBe(1);
+      expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("done");
+      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+    });
+
+    it("合并路径 分P数不符(期望 3 实际 2)→ needs_manual 且**源保留**(cleanup 未被调)", async () => {
+      const deps = uploadDeps({ countParts: async () => 2 });
+      const r = await run(deps);
+      expect(r.state).toBe("needs_manual");
+      expect(r.bv).toBe("BV123");                    // 上传确实成功了
+      expect(deps.ledger.get(STREAM_KEY)?.state).toBe("needs_manual");
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled(); // 源必须保留
+      expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
+    });
+
+    it("countParts 返回 null → 软状态:clean_verify=pending、源保留、**不转人工**(下轮重试)", async () => {
+      const deps = uploadDeps({ countParts: async () => null });
+      const r = await run(deps);
+      expect(r.state).toBe("done");                   // 上传成功的事实不被回滚
+      expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("pending");
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      expect(deps.ledger.get(STREAM_KEY)?.state).not.toBe("needs_manual");
+    });
+
+    it("未注入 countParts → 核验关闭,清理行为与现状一致(照常删源)", async () => {
+      const deps = uploadDeps();
+      const r = await run(deps);
+      expect(r.state).toBe("done");
+      expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("done"); // 走 skipped 分支
+      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+    });
+
+    it("清理失败(transport.cleanup 抛错)→ job 仍 done + clean_source=failed(可补跑)", async () => {
+      const t1 = makeTransport("node-1");
+      (t1.cleanup as Mock).mockRejectedValue(new Error("磁盘只读"));
+      const deps = uploadDeps({ transports: new Map([["node-1", t1]]), countParts: async () => 3 });
+      const r = await run(deps);
+      expect(r.state).toBe("done");                                            // 终态不被清理失败改写
+      expect(deps.ledger.get(STREAM_KEY)?.state).toBe("done");
+      expect(deps.ledger.getNodeState(STREAM_KEY, "clean_source")?.state).toBe("failed");
+      expect(deps.ledger.getNodeState(STREAM_KEY, "clean_source")?.error).toContain("磁盘只读");
+    });
+
+    it("清理重试幂等:文件已不存在时再次清理不报错、clean_source 转 done", async () => {
+      const t1 = makeTransport("node-1");
+      const deps = uploadDeps({ transports: new Map([["node-1", t1]]), countParts: async () => 3 });
+      await run(deps);
+      expect(deps.ledger.getNodeState(STREAM_KEY, "clean_source")?.state).not.toBe("failed");
+      // 第二次 cleanup 抛「文件已不存在」类错误(rm force 的常见表现)→ 仍如实记账但不炸。
+      (t1.cleanup as Mock).mockRejectedValue(new Error("ENOENT: no such file"));
+      const out = await cleanupSourcesShared({
+        streamKey: STREAM_KEY, ledger: deps.ledger, transports: deps.transports,
+        members: [{ workerId: "node-1", rec: makeRec() }], cleanup: CLEANUP_CFG,
+        rmStage: async () => {}, log: () => {},
+      });
+      expect(out.ok).toBe(false);
+      expect(out.failed[0].error).toContain("ENOENT");
+    });
+
+    it("transport 无 cleanup 能力 → 如实记 failed(不静默:否则磁盘涨了没人知道)", async () => {
+      const t1 = makeTransport("node-1");
+      delete (t1 as { cleanup?: unknown }).cleanup;
+      const deps = uploadDeps({ transports: new Map([["node-1", t1]]), countParts: async () => 3 });
+      const r = await run(deps);
+      expect(r.state).toBe("done");
+      expect(deps.ledger.getNodeState(STREAM_KEY, "clean_source")?.error).toContain("无 cleanup 能力");
+    });
+
+    it("已 done 的 job 收尾补跑:stage 产物已清 → **只补清理**,绝不转 needs_manual", async () => {
+      // 回归:T12 补跑走 resumeAppends 时,若 stageAfterDone 已把 stage 清空,老逻辑会判
+      // 「stage 产物缺失 → 转人工」,把一个**上传早已成功**的 done job 打成 needs_manual
+      // (UI 显示待人工,而稿件好好的)。补跑必须只清理。
+      const deps = uploadDeps({ countParts: async () => 3 }, { cleanup: { sourceAfterDone: true, stageAfterDone: true } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey, b.startMs);
+      deps.ledger.setBv(b.streamKey, "BV123");
+      deps.ledger.markDone(b.streamKey, "BV123");
+      deps.ledger.syncNodeState(b.streamKey, "clean_source", "failed", { error: "上一轮磁盘满" });
+      // stage 目录里没有产物(已清理)。
+      const r = await runPipeline(b, deps);
+      expect(r.state).toBe("done");
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
+      // 补清理真的跑了。
+      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+      expect(deps.uploadPlain).not.toHaveBeenCalled();   // 绝不重复投稿
+    });
+
+    it("stage 清理失败(rmStage 抛错)→ job 仍 done + clean_stage=failed", async () => {
+      const deps = uploadDeps({
+        countParts: async () => 3,
+        rmStage: async () => { throw new Error("stage 挂载掉了"); },
+      }, { cleanup: { ...CLEANUP_CFG, stageAfterDone: true } });
+      const r = await run(deps);
+      expect(r.state).toBe("done");
+      expect(deps.ledger.get(STREAM_KEY)?.state).toBe("done");
+    });
+  });
 });
+

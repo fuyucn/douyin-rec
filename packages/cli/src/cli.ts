@@ -798,6 +798,11 @@ const hubStarter: HubStarter = {
           public: o.public,
           countParts: () => countVideoParts(o.bv, o.cookies),
         }),
+      // T11 核验接缝:取该稿件在 B站的**实际分 P 数**。核验的期望值来自上传时写下的
+      // sync_parts 检查点(实际提交了几段),不用「文件大小上界」—— 那是评审明确否决的做法。
+      // 缺省不注入 = 核验关闭;这里注入 = 上传完成后比对,不符则**保留源文件**并标记待人工。
+      // cookies 用 hubCfg.cookies(与 appendGroup 同源;per-job override 已在 pipeline 内传下去)。
+      countParts: (bv: string) => countVideoParts(bv, hubCfg.cookies ?? ""),
       notify: opts.onEvent,
       // job.log 的落盘实现由组合根装配:observability 的 FileLogger,路径 = <stage>/<sanitized streamKey>/job.log
       //(目录名 = core 的 sanitizeStreamKey,与 pipeline/hub-jobs 同一真理源)。orchestrator 只调 ScopedLogger 接口。
@@ -893,14 +898,22 @@ const hubStarter: HubStarter = {
       const out: RemoteTaskSpec[] = [];
       const capsOfThis = loadWorkers().find((w) => w.id === workerId)?.capabilities;
       for (const rule of hubStore.listHubRules(hubDir)) {
-        if (!rule.enabled || !rule.recording?.sourceTaskId) continue;
-        if (rule.workers && rule.workers.length > 0 && !rule.workers.includes(workerId)) continue;
-        // 能力门控:该 worker 缺房间要求的能力 → 不下发该房间的录制任务(与 workers 勾选取交集)。
-        if (!satisfiesCapabilities(capsOfThis, rule.requires)) continue;
-        const src = opts.store.getTask(rule.recording.sourceTaskId);
-        if (!src) continue;
+        // T3 语义:「规则还在但被禁用 / 不再派给这个 worker」= 停用保留,**不是**删除。
+        // 所以这两种情况都要继续产出 enabled:false 条目,让节点把已有任务停掉;
+        // 只有「规则文件消失 / sourceTaskId 解绑 / 源任务不存在」才是缺席 → 两阶段删除。
+        //
+        // 早前这里对 !rule.enabled / 不在 workers / 能力不满足 都是 continue(直接缺席),
+        // 于是「停用」和「删除」在节点侧无法区分 —— 取消勾选一个 worker 就把它的房间删了。
+        const targeted = !rule.workers || rule.workers.length === 0 || rule.workers.includes(workerId);
+        const capable = satisfiesCapabilities(capsOfThis, rule.requires);
+        const src = rule.recording?.sourceTaskId ? opts.store.getTask(rule.recording.sourceTaskId) : null;
+        if (!src) continue;                        // 真删除意图:规则没绑源任务 / 源任务已删
         const p = platformForRoom(src.room);
         if (p.extractRoomSlug(src.room) !== rule.roomSlug) continue; // 绑定必须同房间
+        // 该 worker 不再被派发这个房间(规则禁用 / 未勾选 / 能力不满足)→ 产 enabled:false,
+        // 让节点**停用但保留**(T3)。字段与正常路径**同源构造**:早前写成两个 push 各抄一遍字段,
+        // 抄漏一个字段就是「禁用路径丢配置」的静默 bug(自审发现,已合为一条)。
+        const dispatching = rule.enabled && targeted && capable;
         out.push({
           platform: p.id,
           roomSlug: rule.roomSlug,
@@ -912,7 +925,9 @@ const hubStarter: HubStarter = {
           segmentSec: src.segmentSec,
           scheduleStart: src.scheduleStart,
           scheduleEnd: src.scheduleEnd,
-          enabled: src.enabled,
+          // 停用保留时**强制 false**,不能沿用 src.enabled:源任务自己可能是启用的
+          // (用户在任务页开着),而「这个房间不派给本 worker」才是这里要表达的意思。
+          enabled: dispatching && src.enabled,
           useCookie: src.useCookie,
           cookies: resolveTaskStreamCookies(src, opts.store),
           outDir: src.outDir,

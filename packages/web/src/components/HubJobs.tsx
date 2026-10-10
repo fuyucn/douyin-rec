@@ -92,10 +92,27 @@ const NODE_STATE_TO_UI: Record<string, NodeStatus> = {
  * 所有可能出现的子步骤 key(与布局解耦,仅供 stepStatuses 遍历取状态)。
  * 顺序=展示顺序,保持不变;成员覆盖由下面的类型断言守护(新增 core 步骤名而这里漏掉会编译失败)。
  */
-const ALL_STEP_KEYS = ["select", "pull", "merge", "burn_danmu", "burn_livechat", "clean_stage_src", "upload_plain", "append_danmu", "append_livechat", "clean_source", "clean_stage"] as const;
+const ALL_STEP_KEYS = ["select", "pull", "merge", "burn_danmu", "burn_livechat", "clean_stage_src", "upload_plain", "append_danmu", "append_livechat", "clean_verify", "clean_source", "clean_stage"] as const;
 type _MissingStepKey = Exclude<HubStepName, (typeof ALL_STEP_KEYS)[number]>;
 /** 覆盖全部 HubStepName 才可赋值(漏一个 → 类型塌成 never → 编译失败)。 */
 const ALL_STEP_KEYS_TYPED: _MissingStepKey extends never ? typeof ALL_STEP_KEYS : never = ALL_STEP_KEYS;
+
+/**
+ * 上传后收尾未完成的节点(T12):清理失败(clean_* = failed)与核验待重试(clean_verify = pending)。
+ *
+ * **从 nodeStates 派生**而不是新增 DTO 字段 —— nodeStates 已是这些状态的唯一真理源
+ * (orchestrator 的 syncNodeState 写、app 的 hub-jobs 只读同一张库),派生可避免两份真相漂移。
+ */
+const CLEANUP_BACKFILL_KEYS = new Set(["clean_source", "clean_stage_src", "clean_stage"]);
+export function pendingFinalizeNodes(job: HubJobDTO): string[] {
+  const out: string[] = [];
+  for (const n of job.nodeStates) {
+    if (n.state === "done" || n.state === "skipped") continue;
+    const isVerifyPending = n.node === "clean_verify" && n.state === "pending";
+    if (isVerifyPending || (CLEANUP_BACKFILL_KEYS.has(n.node) && n.state === "failed")) out.push(n.node);
+  }
+  return out;
+}
 
 /** 从 job.steps(start/done 配对)推导每个子步骤的状态 + 耗时。 */
 function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec: number | null }> {
@@ -289,7 +306,9 @@ function PipelineFlowInner({
     job.steps.filter((s) => s.step === key && s.phase === "done").map((s) => s.detail).filter(Boolean).pop();
   const nodeErrorOf = (key: string): string | undefined =>
     job.nodeStates.find((n) => n.node === key && n.state !== "done")?.error ?? undefined;
-  const RETRYABLE = new Set(["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat"]);
+  // clean_*/clean_verify 的重跑 = 「补跑收尾」(删源/核验,幂等,不会重传)→ 与核心节点同口径可重试。
+  const RETRYABLE = new Set(["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat",
+    "clean_verify", "clean_source", "clean_stage_src", "clean_stage"]);
   // 运行中 run 的失败节点可能是上一轮崩溃残留,而续跑已经在处理该轨道(append 中);
   // 此刻点重跑会排队/与续跑冲突,故只在终态(failed / needs_manual)才显示节点级重跑。
   const nodeRetryVisible = TERMINAL.has(job.state) && onRetry != null;
@@ -465,6 +484,19 @@ export function RunCard({
               }}
             >
               <Play className="w-3.5 h-3.5" />
+            </IconButton>
+          )}
+          {/* 上传已完成但收尾(清理/核验)没做完:源或 stage 还占着磁盘,reconciler 会按节流自动补跑,
+              这里也给出手动入口(补跑是幂等的,不会重传)。 */}
+          {job.state === "done" && pendingFinalizeNodes(job).length > 0 && onRunNow && (
+            <IconButton
+              title={t("hub.jobs.retryFinalize")}
+              onClick={(e) => {
+                e.stopPropagation();
+                void onRunNow(job.streamKey);
+              }}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
             </IconButton>
           )}
           {job.hasLog && (

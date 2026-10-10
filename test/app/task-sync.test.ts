@@ -237,3 +237,102 @@ describe("applyRemoteTasks", () => {
     });
   });
 });
+
+// ── T3 删除语义收敛:禁用 ≠ 删除 ──────────────────────────────────────────────────
+describe("T3 删除语义", () => {
+  let dir: string;
+  let store: TaskStore;
+  const spec = (over: Partial<RemoteTaskSpec> = {}): RemoteTaskSpec => ({
+    platform: "douyin", roomSlug: "123456", room: "https://live.douyin.com/123456",
+    name: "主播A", quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
+    scheduleStart: null, scheduleEnd: null, enabled: true, useCookie: true,
+    cookies: null, outDir: null, webhook: null, anchorName: null, ...over,
+  });
+
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "t3-")); store = new TaskStore(join(dir, "tasks.db")); });
+  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  it("期望含 enabled:false → 停用但保留,不是删除", () => {
+    const t = store.addTask({ room: "123456", managedBy: "hub", enabled: true });
+    const r = applyRemoteTasks(store, [spec({ enabled: false })]);
+    expect(r.removed).toEqual([]);
+    expect(r.applied).toEqual(["douyin:123456"]);
+    expect(store.getTask(t.id)!.enabled).toBe(false);   // 停用
+    expect(store.getTask(t.id)).not.toBeNull();          // 但保留
+  });
+
+  it("enabled:false 且本节点从未有过该房间 → 不新建幽灵任务", () => {
+    const r = applyRemoteTasks(store, [spec({ enabled: false })]);
+    expect(r.applied).toEqual([]);
+    expect(store.listTasks()).toHaveLength(0);
+  });
+
+  it("enabled:false 不触发骤减守卫的删除语义(停用保留,任务仍在)", () => {
+    for (const s of ["1", "2", "3", "4"]) store.addTask({ room: s, managedBy: "hub", enabled: true });
+    const keep = spec({ roomSlug: "1", room: "https://live.douyin.com/1" });
+    const off = spec({ roomSlug: "2", room: "https://live.douyin.com/2", enabled: false });
+    applyRemoteTasks(store, [keep, off], undefined, { adopt: true });
+    expect(store.listTasks()).toHaveLength(4);          // 一个都没删
+    expect(store.listTasks().filter((t) => t.enabled)).toHaveLength(1);
+  });
+
+  it("缺席(规则消失)→ 两阶段删除:第 1 轮停用、第 2 轮真删", () => {
+    const a = store.addTask({ room: "555", managedBy: "hub", enabled: true });
+    const keep = spec({ roomSlug: "90", room: "https://live.douyin.com/90" });
+    const r1 = applyRemoteTasks(store, [keep], undefined, { adopt: true });
+    expect(r1.removed).toEqual([]);
+    expect(store.getTask(a.id)!.enabled).toBe(false);     // 第 1 轮:只停用
+    const r2 = applyRemoteTasks(store, [keep], undefined, { adopt: true });
+    expect(r2.removed).toEqual(["douyin:555"]);          // 第 2 轮:真删
+    expect(store.getTask(a.id)).toBeNull();
+  });
+
+  it("DREC_EXPLICIT_DELETE 默认关 → deleted:true 被忽略(仍走两阶段)", () => {
+    const a = store.addTask({ room: "555", managedBy: "hub", enabled: true });
+    const keep = spec({ roomSlug: "90", room: "https://live.douyin.com/90" });
+    const hinted = spec({ roomSlug: "555", room: "https://live.douyin.com/555", deleted: true, enabled: true });
+    const r1 = applyRemoteTasks(store, [keep, hinted], undefined, { adopt: true });
+    expect(r1.removed).toEqual([]);                       // 提示被忽略
+    expect(store.getTask(a.id)!.enabled).toBe(false);
+    expect(store.getTask(a.id)).not.toBeNull();
+  });
+
+  it("DREC_EXPLICIT_DELETE=1 → deleted:true 跳过第 1 轮直接删,且不会先复活", () => {
+    process.env.DREC_EXPLICIT_DELETE = "1";
+    try {
+      const a = store.addTask({ room: "555", managedBy: "hub", enabled: true });
+      const keep = spec({ roomSlug: "90", room: "https://live.douyin.com/90" });
+      const hinted = spec({ roomSlug: "555", room: "https://live.douyin.com/555", deleted: true, enabled: true });
+      const r = applyRemoteTasks(store, [keep, hinted], undefined, { adopt: true });
+      expect(r.removed).toEqual(["douyin:555"]);          // 直接删
+      expect(store.getTask(a.id)).toBeNull();
+      // 关键:不能被 upsert 先「复活」再删(applied 里不该出现它)
+      expect(r.applied).toEqual(["douyin:90"]);
+    } finally {
+      delete process.env.DREC_EXPLICIT_DELETE;
+    }
+  });
+
+  it("deleted:true + 骤减 → 守卫不把它当「缺席」反复 disableOnly(开关语义自洽)", () => {
+    process.env.DREC_EXPLICIT_DELETE = "1";
+    try {
+      for (const s of ["1", "2", "3", "4"]) store.addTask({ room: s, managedBy: "hub", enabled: true });
+      const keep = spec({ roomSlug: "1", room: "https://live.douyin.com/1" });
+      const hinted = spec({ roomSlug: "4", room: "https://live.douyin.com/4", deleted: true, enabled: true });
+      const r = applyRemoteTasks(store, [keep, hinted], undefined, { adopt: true });
+      // 显式删除是比骤减更强的意图:该删的直接删,不该被守卫拦成「只停用」
+      expect(r.removed).toEqual(["douyin:4"]);
+    } finally {
+      delete process.env.DREC_EXPLICIT_DELETE;
+    }
+  });
+
+  it("force → 缺席的房间照常两阶段删除(合法缩容不受 deleted 开关影响)", () => {
+    const a = store.addTask({ room: "555", managedBy: "hub", enabled: true });
+    const r1 = applyRemoteTasks(store, [], undefined, { force: true });
+    expect(r1.removed).toEqual([]);
+    expect(store.getTask(a.id)!.enabled).toBe(false);
+    const r2 = applyRemoteTasks(store, [], undefined, { force: true });
+    expect(r2.removed).toEqual(["douyin:555"]);
+  });
+});

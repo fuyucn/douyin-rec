@@ -203,7 +203,7 @@ const DICT = {
       },
       jobs: {
         step: { pending: "排队中", settling: "等待收播", syncing: "拉取文件", merging: "合并 / 烧录", uploading: "上传 B 站", retrying: "单节点重跑", done: "已完成", failed: "失败", needsManual: "待人工" },
-        stepNode: { select: "选优", pull: "拉取", merge: "合并 plain", merge_segments: "分段产出", burn_danmu: "烧 danmu", burn_livechat: "烧 livechat", upload_plain: "传 plain P1", append_danmu: "追 danmu P2", append_livechat: "追 livechat P3", clean_stage_src: "清理暂存源", clean_source: "清理节点源", clean_stage: "清理产物" },
+        stepNode: { select: "选优", pull: "拉取", merge: "合并 plain", merge_segments: "分段产出", burn_danmu: "烧 danmu", burn_livechat: "烧 livechat", upload_plain: "传 plain P1", append_danmu: "追 danmu P2", append_livechat: "追 livechat P3", clean_verify: "核验分P", clean_stage_src: "清理暂存源", clean_source: "清理节点源", clean_stage: "清理产物" },
         termDone: "完成", skipped: "跳过", noStepRecord: "（无流程记录;旧版本任务）",
         candComplete: "完整", candCoverage: "覆盖 {pct}%", candWinner: "最优",
         candDanmu: "弹幕 {n} 条", candNoDanmu: "无弹幕",
@@ -218,7 +218,7 @@ const DICT = {
         runNowMode: "执行方式", runNowResume: "续跑同任务（同 id 补传）", runNowNew: "新建任务（-1/-2 完整重跑）",
         runNowNewHint: "将以 {key} 新建 hub 任务并完整重跑；原任务保留。若原任务已上传，B 站会另建一份稿件。",
         runNowWorker: "选优节点", runNowWorkerAuto: "自动选优",
-        started: "已启动后处理", rerun: "重跑此场",
+        started: "已启动后处理", rerun: "重跑此场", retryFinalize: "补跑收尾(清理/核验,可安全重试)",
       },
       ruleDialog: {
         createTitle: "新建 Hub 规则", editTitle: "编辑 Hub 规则", desc: "按直播间配置多节点选优合并 → 烧录 → 上传的后处理流程",
@@ -462,7 +462,7 @@ const DICT = {
       },
       jobs: {
         step: { pending: "Queued", settling: "Waiting for stream to end", syncing: "Pulling files", merging: "Merging / burning", uploading: "Uploading to Bilibili", retrying: "Retrying node", done: "Done", failed: "Failed", needsManual: "Needs review" },
-        stepNode: { select: "Select", pull: "Pull", merge: "Merge plain", merge_segments: "Segments", burn_danmu: "Burn danmu", burn_livechat: "Burn livechat", upload_plain: "Upload plain P1", append_danmu: "Append danmu P2", append_livechat: "Append livechat P3", clean_stage_src: "Clean staged src", clean_source: "Clean node src", clean_stage: "Clean products" },
+        stepNode: { select: "Select", pull: "Pull", merge: "Merge plain", merge_segments: "Segments", burn_danmu: "Burn danmu", burn_livechat: "Burn livechat", upload_plain: "Upload plain P1", append_danmu: "Append danmu P2", append_livechat: "Append livechat P3", clean_verify: "Verify parts", clean_stage_src: "Clean staged src", clean_source: "Clean node src", clean_stage: "Clean products" },
         termDone: "Done", skipped: "Skipped", noStepRecord: "(no step record; legacy job)",
         candComplete: "complete", candCoverage: "{pct}% cover", candWinner: "winner",
         candDanmu: "{n} danmu", candNoDanmu: "no danmu",
@@ -477,7 +477,7 @@ const DICT = {
         runNowMode: "Run mode", runNowResume: "Resume same task (same id)", runNowNew: "New task (-1/-2 full rerun)",
         runNowNewHint: "Will create a new hub task as {key} and run fully; the old task stays. If the old task already uploaded, Bilibili gets a new submission.",
         runNowWorker: "Winner node", runNowWorkerAuto: "Auto-select",
-        started: "Post-process started", rerun: "Rerun this broadcast",
+        started: "Post-process started", rerun: "Rerun this broadcast", retryFinalize: "Retry finalize (cleanup/verify, safe)",
       },
       ruleDialog: {
         createTitle: "New Hub rule", editTitle: "Edit Hub rule", desc: "Configure the multi-node select → merge → burn → upload pipeline for this room",

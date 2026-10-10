@@ -385,6 +385,14 @@ export interface RemoteTaskSpec {
   outDir: string | null;
   webhook: string | null;
   anchorName: string | null;
+  /**
+   * **可选提示**:master 明确要求「这个房间可以删了」(规则文件已消失 / sourceTaskId 解绑)。
+   *
+   * 默认**忽略**(DREC_EXPLICIT_DELETE 默认关):删除判定仍以「节点 store 受管任务 − 期望 keys」
+   * 为准(T3),这样 master 一次配置读失败不会立刻清空节点。只有在节点上设
+   * `DREC_EXPLICIT_DELETE=1` 时才采信本字段 —— 用于「规则已删,不必等两阶段」的显式场景。
+   */
+  deleted?: boolean;
 }
 
 /**
