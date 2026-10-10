@@ -1,6 +1,6 @@
-import { Pencil, Play, Trash2 } from "lucide-react";
+import { Pencil, Play, Square, Timer, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, type HubJobDTO, type HubRuleDTO, type WorkerDTO } from "../api/client";
+import { api, type HubJobDTO, type HubRuleDTO, type Task, type WorkerDTO } from "../api/client";
 import { RunCard, JobLogDialog, runDate } from "./HubJobs";
 import { Dialog } from "./Dialog";
 import { Button, IconButton } from "./Button";
@@ -65,6 +65,14 @@ export function RoomDetail({
   const t = useT();
   const toast = useToast();
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
+  /**
+   * 绑定的 master 录制任务(T18 动作要作用在它上面)。
+   *
+   * 为什么这里自己拉而不从 props 传:RoomDetail 是全页唯一的房间详情面板,
+   * 上层 HubPage 并不需要任务列表;为一处动作把状态提升上去会让 HubPage 也绑上任务轮询。
+   * 与 workers 同样走**慢速兜底**,不进推送热路径(listTasks 与台账无关,挂在热路径只会白打请求)。
+   */
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [runs, setRuns] = useState<HubJobDTO[]>([]);
   const [total, setTotal] = useState(0);
   const [loaded, setLoaded] = useState(false);
@@ -80,6 +88,9 @@ export function RoomDetail({
   const [runBusy, setRunBusy] = useState(false);
   // 立即执行默认新建任务(id 自动 -1/-2),避免复用同一天旧任务导致“重试不像重试”。
   const [runNew, setRunNew] = useState(true);
+  // T18 房间级**动作**。与配置(编辑弹窗)分离:动作会改运行时状态,危险的要二次确认。
+  const [drainBusy, setDrainBusy] = useState(false);
+  const [stopOpen, setStopOpen] = useState(false);
 
   const refresh = async (): Promise<void> => {
     // worker 列表与 run 列表**解耦**:run 刷新是推送驱动的热路径(每次 changed 都跑),
@@ -110,8 +121,17 @@ export function RoomDetail({
       /* 忽略:workerName 回落展示 id */
     }
   };
+  /** 任务列表:同上慢速兜底;失败静默(动作按钮会因拿不到任务而禁用,并给出说明)。 */
+  const refreshTasks = async (): Promise<void> => {
+    try {
+      setTasks(await api.listTasks());
+    } catch {
+      /* 忽略:sourceTask 为 null → 动作禁用 */
+    }
+  };
   // usePolling 挂载即拉一次,不必再写首拉 effect(否则 mount 会双请求)。
   usePolling(() => void refreshWorkers(), 300_000);
+  usePolling(() => void refreshTasks(), 300_000);
 
   // 稳定引用(仅 workers 变化时才换):PipelineFlow memo 用它比较,防每帧新引用击穿 memo。
   const workerName = useCallback((id: string): string => workers.find((w) => w.id === id)?.name ?? id, [workers]);
@@ -125,6 +145,45 @@ export function RoomDetail({
   const toggle = async (): Promise<void> => {
     try {
       await api.updateHubRule(rule.key, { enabled: !rule.enabled });
+      onChanged();
+    } catch (e) {
+      toast(errMessage(e), "error");
+    }
+  };
+
+  /** 该房间绑定的 master 录制任务(动作都作用在它上面);未绑定 → 动作不可用。 */
+  const sourceTaskId = rule.recording?.sourceTaskId ?? null;
+  const sourceTask = sourceTaskId === null ? null : (tasks ?? []).find((x) => x.id === sourceTaskId) ?? null;
+  const recRunning = sourceTask?.running === true;
+  const recRecording = sourceTask?.recording === true;
+
+  /**
+   * 排空:停止接新场,当前这场录完自然收播(不腰斩)。
+   * 与「立即停止」的区别对用户是可感知的:硬停会截断当前录像。
+   */
+  const doDrain = async (): Promise<void> => {
+    if (sourceTaskId === null) return;
+    setDrainBusy(true);
+    try {
+      await api.drainTask(sourceTaskId);
+      toast(t("hub.detail.drained"), "info");
+      await refresh();
+      onChanged();
+    } catch (e) {
+      toast(errMessage(e), "error");
+    } finally {
+      setDrainBusy(false);
+    }
+  };
+
+  /** 硬停:立即杀录制子进程(会截断当前分段)—— 必须二次确认。 */
+  const doHardStop = async (): Promise<void> => {
+    setStopOpen(false);
+    if (sourceTaskId === null) return;
+    try {
+      await api.stopTask(sourceTaskId);
+      toast(t("hub.detail.stopped"), "info");
+      await refresh();
       onChanged();
     } catch (e) {
       toast(errMessage(e), "error");
@@ -227,6 +286,48 @@ export function RoomDetail({
           </IconButton>
         </div>
       </div>
+
+      {/* ── T18 房间动作条 ────────────────────────────────────────────────────
+          动作作用在**绑定的录制任务**上(不是规则)。刻意与上面的 Switch(规则启用=是否做后处理)
+          分开:两者是不同的事 —— 「停处理后」不该顺手把录制也停了,反之亦然。
+          没有绑定任务时整条禁用并说明原因,而不是给一堆点了没反应的按钮。 */}
+      <div className="flex flex-wrap items-center gap-2 mb-6">
+        {sourceTaskId === null ? (
+          <span className="text-xs text-muted">{t("hub.detail.actionsNoTask")}</span>
+        ) : (
+          <>
+            <Button small variant="secondary" disabled={drainBusy || !recRunning} onClick={() => void doDrain()}>
+              <Timer className="w-3.5 h-3.5" />
+              {drainBusy ? t("hub.detail.draining") : t("hub.detail.drain")}
+            </Button>
+            <Button small variant="secondary" disabled={!recRunning} onClick={() => setStopOpen(true)}>
+              <Square className="w-3.5 h-3.5" />
+              {t("hub.detail.stopNow")}
+            </Button>
+            {/* 「立即处理本场」**不在这里重复**:房间头已有同名按钮(openRun,带日期/worker 选择)。
+                同一个动作放两个入口只会让两处文案与确认逻辑各自漂移(自审发现,已删)。 */}
+            {/* 状态提示:动作按钮的可用性依赖它,给出依据比灰按钮更好懂 */}
+            <span className="text-xs text-muted ml-1">
+              {recRecording
+                ? t("hub.detail.stateRecording")
+                : recRunning
+                  ? t("hub.detail.stateWaiting")
+                  : t("hub.detail.stateIdle")}
+            </span>
+          </>
+        )}
+      </div>
+
+      {/* 硬停二次确认:会截断当前分段,必须讲清楚后果 */}
+      <ConfirmDialog
+        open={stopOpen}
+        onCancel={() => setStopOpen(false)}
+        onConfirm={() => void doHardStop()}
+        title={t("hub.detail.stopConfirmTitle")}
+        message={t("hub.detail.stopConfirmDesc")}
+        confirmLabel={t("hub.detail.stopNow")}
+        destructive
+      />
 
       {/* 配置 + 参与 worker:并排 label+chips,无盒中盒 */}
       <div className="flex flex-wrap items-start gap-x-12 gap-y-4">

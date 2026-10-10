@@ -68,6 +68,8 @@ describe("matchRoute", () => {
     expect(matchRoute("POST", "/api/tasks/7/refresh-anchor")).toMatchObject({ name: "refreshTaskAnchor", id: 7 });
     expect(matchRoute("POST", "/api/tasks/7/start")).toMatchObject({ name: "startTask", id: 7 });
     expect(matchRoute("POST", "/api/tasks/7/stop")).toMatchObject({ name: "stopTask", id: 7 });
+    // T18:排空是独立路由(不是 stop 的一个参数)—— 语义不同,不能靠 body 区分
+    expect(matchRoute("POST", "/api/tasks/7/drain")).toMatchObject({ name: "drainTask", id: 7 });
     expect(matchRoute("GET", "/api/tasks/7/logs")).toMatchObject({ name: "getTaskLogs", id: 7 });
     expect(matchRoute("POST", "/api/login/qr")).toMatchObject({ name: "startLogin", needsBody: true });
     expect(matchRoute("GET", "/api/login/qr/login-abc_1")).toMatchObject({

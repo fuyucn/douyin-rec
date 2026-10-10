@@ -1661,3 +1661,52 @@ describe("T15 /api/hub/resources", () => {
     s.close();
   });
 });
+
+// ── T18 drain:优雅排空 vs 硬停 ─────────────────────────────────────────────────
+describe("T18 drainTask(优雅排空)", () => {
+  it("在录的任务 → 置停用 + stopGraceful(不是硬停),并触发同步", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({
+      store: s, manager: m, ...hubDeps("drain-", { requestSyncTasks }),
+    });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });   // 使其成为 hub 源任务
+    m.forceRunning(t.id);
+    requestSyncTasks.mockClear();
+
+    const r = await a.drainTask(t.id);
+    expect(r.status).toBe(200);
+    expect(m.gracefulCalls).toContain(t.id);
+    expect(m.stopCalls).toEqual([]);                 // **不能**走硬停(会截断录像)
+    expect(s.getTask(t.id)!.enabled).toBe(false);    // 置停用:不再接新场
+    expect(requestSyncTasks).toHaveBeenCalled();     // 源任务变更 → 立即下发
+    s.close();
+  });
+
+  it("没在跑 → 409,不假装成功", async () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const a = makeApi({ store: s, manager: m, ...hubDeps("drain-idle-") });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    const r = await a.drainTask(t.id);
+    expect(r.status).toBe(409);
+    s.close();
+  });
+
+  it("受管任务 → 403(hub 受管只能回 master 操作)", async () => {
+    const s = new TaskStore(":memory:");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("drain-managed-") });
+    const t = s.addTask({ room: "123456", managedBy: "hub" });
+    expect((await a.drainTask(t.id)).status).toBe(403);
+    s.close();
+  });
+
+  it("不存在的任务 → 404", async () => {
+    const s = new TaskStore(":memory:");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("drain-404-") });
+    expect((await a.drainTask(999)).status).toBe(404);
+    s.close();
+  });
+});

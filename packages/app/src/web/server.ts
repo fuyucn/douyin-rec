@@ -46,6 +46,7 @@ export interface RouteMatch {
     | "refreshTaskAnchor"
     | "startTask"
     | "stopTask"
+    | "drainTask"
     | "startLogin"
     | "pollLogin"
     | "listCookies"
@@ -189,6 +190,7 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "refreshTaskAnchor", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/refresh-anchor$/, param: "id" },
   { name: "startTask", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/start$/, param: "id" },
   { name: "stopTask", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/stop$/, param: "id" },
+  { name: "drainTask", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/drain$/, param: "id" },
   { name: "getTaskLogs", methods: ["GET"], pattern: /^\/api\/tasks\/(\d+)\/logs$/, param: "id" },
   { name: "listRecordings", methods: ["GET"], pattern: /^\/api\/tasks\/(\d+)\/recordings$/, param: "id" },
   { name: "startMerge", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/merge$/, param: "id", needsBody: true },
@@ -363,6 +365,8 @@ async function dispatch(
       return api.startTask(match.id!);
     case "stopTask":
       return api.stopTask(match.id!, { internal: isLoopbackAddr(req.socket.remoteAddress) });
+    case "drainTask":
+      return api.drainTask(match.id!);
     case "startLogin": {
       const body = (await readJson(req)) as { platform?: string };
       return api.startLogin(body ?? {});

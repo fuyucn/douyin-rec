@@ -171,6 +171,32 @@ export function buildTasks(ctx: ApiCtx) {
       return { status: 200, body: view(store.getTask(id)!) };
     },
 
+    /**
+     * POST /api/tasks/:id/drain —— **优雅排空**:停止寻找新开播,让当前这场录到自然收播。
+     *
+     * 与 stopTask 的区别是本任务存在的原因:硬停会**截断当前录像**(子进程被杀,分段不完整),
+     * 而广播通常还在进行。窗口结束/临时停用时想要的是「不再接新场,但别腰斩现在这场」。
+     */
+    async drainTask(id: number): Promise<ApiResult> {
+      const t = store.getTask(id);
+      if (!t) return err(404, `未找到任务 id=${id}`);
+      if (t.managedBy === "hub") return err(403, `任务 id=${id} 由 hub 管理,请在 master 上操作`);
+      if (!manager.isRunning(id)) {
+        // 没在跑就没什么可排空的:说清楚,别给一个「成功」让人以为改了状态。
+        return err(409, "该任务当前没有在录制,无需排空");
+      }
+      try {
+        // 排空的下游语义 = 「窗口结束」:置停用 + 优雅停(不会再被 daemon 拉起)。
+        store.setEnabled(id, false);
+        await manager.stopGraceful(id);
+      } catch (e) {
+        try { store.setEnabled(id, true); } catch { /* 回滚失败以原始错误为准 */ }
+        return err(500, `排空失败: ${(e as Error).message}`);
+      }
+      if (isHubSourceTask(id)) deps.requestSyncTasks?.();
+      return { status: 200, body: view(store.getTask(id)!) };
+    },
+
     async stopTask(id: number, opts: { internal?: boolean } = {}): Promise<ApiResult> {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);

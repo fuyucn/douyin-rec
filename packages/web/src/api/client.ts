@@ -100,6 +100,8 @@ export const api = {
   deleteTask: (id: number): Promise<{ ok: boolean; id: number }> => request("DELETE", `/api/tasks/${id}`),
   startTask: (id: number): Promise<Task> => request("POST", `/api/tasks/${id}/start`),
   stopTask: (id: number): Promise<Task> => request("POST", `/api/tasks/${id}/stop`),
+  /** 优雅排空:当前这场录到自然收播再停,不截断(与 stopTask 的硬停相对)。 */
+  drainTask: (id: number): Promise<Task> => request("POST", `/api/tasks/${id}/drain`),
 
   // ── 会话合成 ───────────────────────────────────────────────────────────────
   listRecordings: (id: number): Promise<RecordingsDTO> => request("GET", `/api/tasks/${id}/recordings`),

@@ -202,6 +202,8 @@ export interface Api {
   refreshTaskAnchor(id: number): ApiResult;
   startTask(id: number): ApiResult;
   stopTask(id: number, opts?: { internal?: boolean }): Promise<ApiResult>;
+  /** POST /api/tasks/:id/drain — 优雅排空:当前这场录完再停(不腰斩)。 */
+  drainTask(id: number): Promise<ApiResult>;
   /** POST /api/login/qr { platform? } — start a QR-login → { sessionId, qrPng }. */
   startLogin(input?: { platform?: string }): Promise<ApiResult>;
   /** GET /api/login/qr/:sid — poll → { state, cookie? }. */
