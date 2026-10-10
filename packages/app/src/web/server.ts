@@ -67,6 +67,7 @@ export interface RouteMatch {
     | "getEvents"
     | "listPlatforms"
     | "hubStatus"
+    | "applyHubTasks"
     | "listHubRules"
     | "createHubRule"
     | "updateHubRule"
@@ -140,6 +141,7 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "setTimezone", methods: ["POST"], pattern: /^\/api\/timezone$/, needsBody: true },
   { name: "getEvents", methods: ["GET"], pattern: /^\/api\/events$/ },
   { name: "hubStatus", methods: ["GET"], pattern: /^\/api\/hub\/status$/ },
+  { name: "applyHubTasks", methods: ["POST"], pattern: /^\/api\/hub\/apply$/ },
   { name: "listHubJobs", methods: ["GET"], pattern: /^\/api\/hub\/jobs$/ },
   { name: "hubQueue", methods: ["GET"], pattern: /^\/api\/hub\/queue$/ },
   { name: "latestRuns", methods: ["GET"], pattern: /^\/api\/hub\/latest-runs$/ },
@@ -230,8 +232,8 @@ export interface WebServerDeps {
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
   /** worker 录制状态快照(CLI 注入;不在请求路径上同步 SSH)。 */
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
-  /** 立即触发一次 hub 任务同步(规则/worker 变更后调用,不用等周期 tick)。 */
-  requestSyncTasks?: () => void;
+  /** 立即触发一次 hub 任务同步(规则/worker 变更后调用,不用等周期 tick)。force=跳过节点骤减安全阀。 */
+  requestSyncTasks?: (opts?: { force?: boolean }) => void;
   /** master 本机抑制名单(源任务切到远端录制→本机不实跑);透传给 web API。 */
   localSuppressedIds?: () => ReadonlySet<number>;
   /** 手动重跑单个 workflow 节点(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
@@ -392,6 +394,12 @@ async function dispatch(
     }
     case "hubStatus":
       return api.hubStatus();
+    case "applyHubTasks": {
+      // force 走 query(POST 无 body):`?force=1`。语义与 retry-node 的 force 保持一致。
+      const q = new URL(req.url ?? "/", "http://localhost").searchParams;
+      const force = q.get("force") === "1" || q.get("force") === "true";
+      return api.applyHubTasks({ force });
+    }
     case "listHubRules":
       return api.listHubRules();
     case "createHubRule": {

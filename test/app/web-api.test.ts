@@ -503,6 +503,27 @@ describe("startTask", () => {
     expect(requestSyncTasks).toHaveBeenCalledTimes(1);
   });
 
+  // T-2:force 是「用户确认缩容/清空」的唯一合法出口,必须能从 API 端到端送到同步层。
+  it("T-2: applyHubTasks 把 force 透传到 requestSyncTasks(不 force 时显式 false)", () => {
+    const requestSyncTasks = vi.fn();
+    const a = makeApi({ store, manager, hubEnabled: true, ...hubDeps("apply-force-", { requestSyncTasks }) });
+    expect(a.applyHubTasks({ force: true }).status).toBe(202);
+    expect(requestSyncTasks).toHaveBeenLastCalledWith({ force: true });
+    a.applyHubTasks({});
+    expect(requestSyncTasks).toHaveBeenLastCalledWith({ force: false });
+    a.applyHubTasks();
+    expect(requestSyncTasks).toHaveBeenLastCalledWith({ force: false });
+  });
+
+  it("T-2: 非 master / 未就绪 → 400,不假装成功", () => {
+    const requestSyncTasks = vi.fn();
+    const slave = makeApi({ store, manager, ...hubDeps("apply-slave-", { requestSyncTasks }) });
+    expect(slave.applyHubTasks({ force: true }).status).toBe(400);
+    expect(requestSyncTasks).not.toHaveBeenCalled();
+    const noDep = makeApi({ store, manager, hubEnabled: true, ...hubDeps("apply-nodep-") });
+    expect(noDep.applyHubTasks({ force: true }).status).toBe(400);
+  });
+
   it("hub 规则 requires 往返(create → DTO 透出 → PATCH 清空)", () => {
     const a = makeApi({ store, manager, ...hubDeps("req-") });
     const t = a.createTask({ room: "111" }).body as { id: number };

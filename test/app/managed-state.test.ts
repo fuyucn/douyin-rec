@@ -106,15 +106,20 @@ describe("managed-state 审计快照", () => {
     const store = new TaskStore(join(dir, "tasks.db"));
     const msDir = join(dir, "managed");
     try {
-      // 先建一个受管任务,再用空 desired 触发两阶段删除
-      applyRemoteTasks(store, [spec()], undefined, { managedStateDir: msDir });
+      // 先一轮建 4 个受管任务,再用「期望只剩 1 个」触发骤减 → 只停用不删除
+      applyRemoteTasks(store, ["1", "2", "3", "4"].map((roomSlug) => spec({ roomSlug, room: `https://live.douyin.com/${roomSlug}` })),
+        undefined, { managedStateDir: msDir });
       const st1 = readManagedState(msDir);
-      expect(st1?.desired).toHaveLength(1);
-      // 空期望:本轮 desired 为空 → 快照也为空(但删除判定用的是 store,不是快照)
-      applyRemoteTasks(store, [], undefined, { managedStateDir: msDir });
-      expect(readManagedState(msDir)?.desired).toHaveLength(0);
+      expect(st1?.desired).toHaveLength(4);
+      // 快照恒等于本轮 desired:删了 3 个期望,快照里就没有它们(与 store 里的任务行无关)
+      const r = applyRemoteTasks(store, [spec({ roomSlug: "1", room: "https://live.douyin.com/1" })], undefined,
+        { managedStateDir: msDir });
+      expect(r.rejected).toBe("mass-shrink");
+      expect(readManagedState(msDir)?.desired.map((d) => d.roomSlug)).toEqual(["1"]);
+      // 守卫只停用、不删除 —— 4 个受管任务仍在(证明删除判定用的是 store 受管集,不是快照)
       const stillThere = store.listTasks().filter((t) => t.managedBy === "hub");
-      expect(stillThere.length).toBeGreaterThan(0); // 第一轮只停用,不删(两阶段)
+      expect(stillThere).toHaveLength(4);
+      expect(stillThere.filter((t) => t.enabled)).toHaveLength(1);
     } finally { store.close(); }
   });
 });

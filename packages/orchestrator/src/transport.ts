@@ -77,8 +77,14 @@ export interface Transport {
   activeRecordingRooms?(): Promise<ActiveRecordingRoom[]>;
   /** 读取该节点的任务清单(隐藏 `_tasks` 子命令;可选:无此能力 = 不支持任务同步)。 */
   listTasks?(): Promise<NodeTasks>;
-  /** 把 master 期望任务下发到该节点(隐藏 `_apply-tasks` 子命令;可选:无此能力 = 不支持任务同步)。 */
-  applyTasks?(input: { desired: RemoteTaskSpec[] }): Promise<ApplyTasksResult>;
+  /**
+   * 把 master 期望任务下发到该节点(隐藏 `_apply-tasks` 子命令;可选:无此能力 = 不支持任务同步)。
+   *
+   * `force=true` = 显式确认缩容/清空,让节点侧跳过 T-2 期望骤减安全阀。**不能省**:
+   * 守卫会把「master 读不到规则」(desired 突然为空)与「用户真的要把房间从 A 节点改派到 B 节点」
+   * 两种情况看成同一件事;force 是后者的唯一合法出口。
+   */
+  applyTasks?(input: { desired: RemoteTaskSpec[]; force?: boolean }): Promise<ApplyTasksResult>;
   /**
    * 该节点录制数据根所在卷的剩余空间(GB)。可选:无此能力则不参与磁盘看门狗。
    * reconciler 每轮对账时查一次 → 低于阈值由 **master 自己**告警(不依赖 worker 侧 webhook 配置)。

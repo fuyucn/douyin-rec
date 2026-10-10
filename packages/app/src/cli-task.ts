@@ -225,8 +225,11 @@ export interface HubStarter {
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
   /** master 资源池快照(读同一 ResourcePool 实例);队列页显示 CPU/上传占用与排队位次。省略 → 全 0。 */
   poolSnapshot?: () => import("@drec/core").HubPoolSnapshotDTO | undefined;
-  /** 立即触发一次 hub 任务同步(规则/worker 变更后由 web API 调用;hub 未就绪时排队,start 后补跑)。 */
-  requestSyncTasks?: () => void;
+  /**
+   * 立即触发一次 hub 任务同步(规则/worker 变更后由 web API 调用;hub 未就绪时排队,start 后补跑)。
+   * `force=true` = 显式确认缩容/清空,让节点跳过 T-2 安全阀;force 会被**累积**到合并补跑那一轮。
+   */
+  requestSyncTasks?: (opts?: { force?: boolean }) => void;
   /**
    * master 本机抑制名单:「源任务已由 hub 规则切到远端节点录制」→ 本机不应实跑。
    * 供 web API 的 startTask 判断(手动启动不得绕过 daemon 的抑制,否则双节点重复录制)。

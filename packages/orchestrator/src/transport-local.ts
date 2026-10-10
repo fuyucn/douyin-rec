@@ -22,7 +22,7 @@ export interface LocalOpts {
   /** hub 任务同步:读本机任务清单(local worker = master 自身)。缺省 = 不支持。 */
   listTasks?: () => NodeTaskDTO[];
   /** hub 任务同步:把期望任务应用到本机 store。缺省 = 不支持。 */
-  applyTasks?: (input: { desired: RemoteTaskSpec[] }) => ApplyTasksResult;
+  applyTasks?: (input: { desired: RemoteTaskSpec[]; force?: boolean }) => ApplyTasksResult;
   /** 本节点稳定身份(<root>/config/node.json)。缺省 → nodeId() 返 null。 */
   nodeIdentity?: () => { nodeId: string; hostname?: string } | null;
 }
@@ -46,7 +46,7 @@ export class LocalTransport implements Transport {
     return { workerId: this.id, tasks: this.o.listTasks() };
   }
 
-  async applyTasks(input: { desired: RemoteTaskSpec[] }): Promise<ApplyTasksResult> {
+  async applyTasks(input: { desired: RemoteTaskSpec[]; force?: boolean }): Promise<ApplyTasksResult> {
     if (!this.o.applyTasks) throw new Error("LocalTransport: 未注入 applyTasks 回调(hub 任务同步未启用)");
     return this.o.applyTasks(input);
   }

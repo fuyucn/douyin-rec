@@ -47,7 +47,7 @@ export function registerBuiltinTransports(deps: {
   /** hub 任务同步:读本机任务清单(local worker = master 自身)。 */
   listTasks?: () => NodeTaskDTO[];
   /** hub 任务同步:把期望任务应用到本机 store。 */
-  applyTasks?: (input: { desired: RemoteTaskSpec[] }) => ApplyTasksResult;
+  applyTasks?: (input: { desired: RemoteTaskSpec[]; force?: boolean }) => ApplyTasksResult;
 }): void {
   const taskRooms = deps.taskRooms ?? {};
   registerTransport("local", (cfg) =>

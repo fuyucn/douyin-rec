@@ -36,4 +36,16 @@ export interface ApplyTasksResult {
   removed: string[];
   /** 需硬停(受管任务被移出期望集且仍在运行)。 */
   pending: string[];
+  /**
+   * 本轮期望被**安全阀拒绝**的原因(向后兼容:旧字段为 `undefined`)。
+   *
+   * 为什么需要:master 读不到 `config/hub/`(目录缺失/坏 JSON/权限)时,`listHubRules` 历史上
+   * catch → `[]` → 「没有房间」→ desired 为空 → 节点按「缺席即删」把**所有受管任务两阶段删光**
+   * (2026-10-09 实测复现,plans/029 §9.2)。守卫命中时返回而不删,并把原因透出到日志/UI,
+   * 避免「master 一次异常 = 全节点任务被清空」这类静默数据丢失。
+   *
+   * - `empty-desired`  期望为空但本地有受管任务 → 整轮拒绝(疑似 master 配置不可读)
+   * - `mass-shrink`    期望骤减超过阈值 → 只停用不删除
+   */
+  rejected?: string;
 }

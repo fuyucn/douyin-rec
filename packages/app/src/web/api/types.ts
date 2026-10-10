@@ -85,8 +85,11 @@ export interface ApiDeps {
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
   /** 录制节点状态缓存读取;避免每次列任务都同步 SSH。 */
   recordingWorkers?: (platform: string, roomSlug: string) => RecordingWorkerStatusDTO[];
-  /** 立即触发一次 hub 任务同步(hub 规则/worker 变更后由 web API 调用;省略=只等周期 tick)。 */
-  requestSyncTasks?: () => void;
+  /**
+   * 立即触发一次 hub 任务同步(hub 规则/worker 变更后由 web API 调用;省略=只等周期 tick)。
+   * `force=true` 让节点跳过 T-2 期望骤减安全阀(用户显式确认缩容/清空)。
+   */
+  requestSyncTasks?: (opts?: { force?: boolean }) => void;
   /**
    * master 本机抑制名单:返回「由 hub 规则切到远端节点录制,本机不应实跑」的源任务 id。
    * `startTask` 据此决定只置 enabled(意图)还是真的起子进程 —— 否则手动启动会绕过
@@ -243,6 +246,8 @@ export interface Api {
   listPlatforms(): ApiResult;
   /** GET /api/hub/status — 本节点是否 master(启用了 hub)。前端据此显示/隐藏 Hub 页。 */
   hubStatus(): ApiResult;
+  /** POST /api/hub/apply[?force=1] — 立刻触发一次全节点任务同步;force=跳过节点骤减安全阀(T-2)。 */
+  applyHubTasks(opts?: { force?: boolean }): ApiResult;
   /** GET /api/hub/rules — 所有多节点 hub 后处理规则(按 {platform}.{roomSlug})。 */
   listHubRules(): ApiResult;
   /** POST /api/hub/rules { room, enabled?, pipeline? } — 新建/覆盖一条 hub 规则。 */

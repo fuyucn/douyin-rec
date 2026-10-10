@@ -11,6 +11,7 @@
  */
 import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌 env(如 DOUYIN_REC_ROOT),
                          // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
+import { SyncGate } from "./sync-gate.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
@@ -517,14 +518,12 @@ program
 // ─── Hub starter: 多节点同步编排（cli L5 注入到 app L4，避免循环依赖）──────────────
 // app 不直接依赖 @drec/orchestrator（orchestrator 依赖 app），由 cli 作为 L5 入口注入。
 // web API 在 hub 规则/worker 变更后立即触发一次任务同步(不等 60s 周期 tick)。
-let hubSyncTasks: (() => Promise<void>) | undefined;
-let hubSyncPending = false;
-const requestHubSync = (): void => {
-  if (hubSyncTasks) {
-    void hubSyncTasks();
-    return;
-  }
-  hubSyncPending = true; // start 尚未就绪:等 syncTasks 定义后补跑一次
+let hubSyncTasks: ((opts?: { force?: boolean }) => Promise<void>) | undefined;
+
+const hubSyncGate = new SyncGate();
+const requestHubSync = (opts?: { force?: boolean }): void => {
+  // 返回 true = 现在就跑一轮(force 由 beginRun 消费);false = 已合并进补跑 / 等就绪。
+  if (hubSyncGate.request(opts?.force)) void hubSyncTasks!({ force: hubSyncGate.beginRun() });
 };
 
 let hubRetryNode:
@@ -662,6 +661,7 @@ const hubStarter: HubStarter = {
       // adopt=false:本机源任务保持用户可编辑(managedBy 不置 hub),只有远端节点的同步任务才锁编辑。
       applyTasks: (input) => applyRemoteTasks(opts.store, input.desired, opts.log, {
         adopt: false,
+        force: input.force === true,
         // 审计快照落 <数据根>/config/managed/(显式传目录,不从 DOUYIN_REC_ROOT 推导)。
         managedStateDir: join(rootConfigDir(), "managed"),
       }),
@@ -924,21 +924,21 @@ const hubStarter: HubStarter = {
     };
     // 周期 tick 与 web API 的「变更即同步」共用同一函数:内部守卫防重入,
     // 期间再有请求则合并成一轮补跑(期望任务是全量对账,不丢变更)。
-    let syncRunning = false;
-    let syncRequested = false;
-    const syncTasks = async (): Promise<void> => {
-      if (syncRunning) {
-        syncRequested = true;
+    const syncTasks = async (req?: { force?: boolean }): Promise<void> => {
+      // force 从 SyncGate 的累积标志取(在途请求的 force 必须落在**这一轮**,见 SyncGate 注释)。
+      const force = hubSyncGate.beginRun(req?.force);
+      if (hubSyncGate.running) {
+        hubSyncGate.rerunRequested = true;
         return;
       }
-      syncRunning = true;
+      hubSyncGate.running = true;
       try {
         for (const w of loadWorkers()) {
           const t = buildTransports().get(w.id);
           if (!t?.applyTasks) continue; // 该 transport 不支持任务同步 → 跳过(下轮再试)
           try {
             const desired = desiredFor(w.id);
-            const r = await t.applyTasks({ desired });
+            const r = await t.applyTasks({ desired, force });
             // 本机(local worker)的 pending 任务直接走同一进程里的 TaskManager 硬停,
             // 与远端 `_apply-tasks` 的 serve API 硬停语义一致:停源任务/删规则要立即停,
             // 不能等排空(否则 hub settle 会一直等这场直播自然收播,迟迟不建 job)。
@@ -956,7 +956,16 @@ const hubStarter: HubStarter = {
               }
             }
             if (r.applied.length > 0 || r.removed.length > 0 || r.pending.length > 0) {
-              opts.log(`[hub] 任务同步 ${w.id}: applied=${r.applied.length} removed=${r.removed.length} pending=${r.pending.length}`);
+              opts.log(`[hub] 任务同步 ${w.id}: applied=${r.applied.length} removed=${r.removed.length}`
+                + ` pending=${r.pending.length}${force ? " (forced)" : ""}`);
+            }
+            // 节点侧安全阀命中(T-2):必须让 master 侧看得见,否则「下发被拒」在 UI 上是静默的 ——
+            // 用户只会看到任务没变,却不知道是节点在保护自己。
+            if (r.rejected) {
+              opts.warn(`[hub] 任务同步 ${w.id} 被节点安全阀拒绝(rejected=${r.rejected}, force=${force}):`
+                + `本轮期望未完整生效(节点受管任务保持原状)。`
+                + `若确认要缩容/清空该节点,在节点上设 DREC_ALLOW_SHRINK=1 后重试;`
+                + `若 master 侧配置读取异常,先检查 config/hub/ 目录。`);
             }
           } catch (e) {
             // 节点离线/命令失败 → 只 warn,下轮对账自愈,不打断 reconcile。
@@ -964,18 +973,11 @@ const hubStarter: HubStarter = {
           }
         }
       } finally {
-        syncRunning = false;
-        if (syncRequested) {
-          syncRequested = false;
-          void syncTasks();
-        }
+        if (hubSyncGate.endRun()) void syncTasks();
       }
     };
     hubSyncTasks = syncTasks;
-    if (hubSyncPending) {
-      hubSyncPending = false;
-      void syncTasks();
-    }
+    hubSyncGate.bind(syncTasks);
 
     // 正在进行的重跑(streamKey):检查与占用必须同步完成,否则并发请求会双双通过
     // isJobLive/hasStreamLock 检查、再被 withStreamLock 排队串行执行两次(上传类节点会重复投稿)。
@@ -1102,6 +1104,7 @@ const hubStarter: HubStarter = {
       clearInterval(recordingStatusTimer);
       hubRecordingSnapshot = new Map();
       hubSyncTasks = undefined;
+      hubSyncGate.unbind(); // 必须解绑:否则 stop 之后的同步请求会打到已停的旧 runner(自审发现)
       hubRetryNode = undefined;
       hubStopJob = undefined;
       hubRunNow = undefined;
@@ -1370,11 +1373,13 @@ program
   .action(async (dataRoot: string, b64: string) => {
     const { join: pathJoin } = await import("node:path");
     const { TaskStore, applyRemoteTasks } = await import("@drec/app");
-    const input = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as { desired: RemoteTaskSpec[] };
+    const input = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as { desired: RemoteTaskSpec[]; force?: boolean };
     const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
     const result = applyRemoteTasks(store, Array.isArray(input.desired) ? input.desired : [], undefined, {
       // 审计快照:目录由 dataRoot 显式派生(本命令只带 dataRoot,无 DOUYIN_REC_ROOT —— 见 managed-state.ts)。
       managedStateDir: pathJoin(dataRoot, "config", "managed"),
+      // force 来自 master payload(POST /api/hub/apply?force=1)或节点 env DREC_ALLOW_SHRINK=1。
+      force: input.force === true,
     });
     // 不再期望的受管任务必须**硬停**(而非排空):这是「用户停源任务/删规则」的明确意图,
     // 排空会等到直播自然收播,hub 的 settle 因而一直卡着不建 job。

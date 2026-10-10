@@ -338,7 +338,8 @@
       "depends_on": [
         "T1"
       ],
-      "estimated_loc": 210
+      "estimated_loc": 210,
+      "status": "done"
     },
     {
       "id": "T3",

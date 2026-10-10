@@ -19,6 +19,26 @@ export function buildHubRules(ctx: ApiCtx) {
       return { status: 200, body: { enabled: deps.hubEnabled ?? false } };
     },
 
+    /**
+     * POST /api/hub/apply?force=1 — 立刻触发一次全节点任务同步。
+     *
+     * `force=1` 让节点跳过 T-2 期望骤减安全阀:这是「用户确认要把房间从某节点撤下 /
+     * 清空某节点受管任务」的唯一合法出口(没有它,合法缩容与「master 读不到规则」这两种
+     * 情况在节点侧无法区分,守卫会一直拦 → 旧节点继续双录)。
+     *
+     * 语义要点:
+     * - **异步**:只触发不等待节点往返(节点可能离线);结果看 serve 日志的
+     *   `[hub] 任务同步 …` / `被节点安全阀拒绝` 行。
+     * - **非 master 返回 400**:单机/worker 节点没有 hub 编排,假装成功会让 UI 显示「已同步」。
+     * - force 由 cli 侧**累积**到合并补跑那一轮,同步在途时点也不会丢(见 cli requestHubSync)。
+     */
+    applyHubTasks(opts?: { force?: boolean }): ApiResult {
+      if (!(deps.hubEnabled ?? false)) return err(400, "本节点未启用 hub(master)");
+      if (!deps.requestSyncTasks) return err(400, "hub 任务同步未就绪");
+      deps.requestSyncTasks({ force: opts?.force === true });
+      return { status: 202, body: { triggered: true, force: opts?.force === true } };
+    },
+
     listHubRules(): ApiResult {
       return { status: 200, body: hubStore.listHubRules(hubDir).map(hubRuleView) };
     },

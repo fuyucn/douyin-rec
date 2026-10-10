@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { startHub } from "@drec/orchestrator";
+import { startHub, LocalTransport, SshTransport } from "@drec/orchestrator";
 
 describe("startHub", () => {
   beforeEach(() => vi.useFakeTimers());
@@ -68,5 +68,45 @@ describe("startHub", () => {
     await vi.advanceTimersByTimeAsync(25000);
     expect(reconcileAll.mock.calls.length).toBeGreaterThanOrEqual(2);
     stop();
+  });
+});
+
+// ── T-2:force 必须端到端送达**节点侧**(在 master 侧生效等于没做:拒绝删除的是远端进程)──
+describe("T-2 applyTasks force 透传", () => {
+  const spec = { platform: "douyin", roomSlug: "123", room: "https://live.douyin.com/123" };
+
+  /** SshTransport 的 run 收到的是**拼好的单串命令**(node <bundle> _apply-tasks <dataRoot> <b64>)。 */
+  const payloadOf = (cmd: string): unknown =>
+    JSON.parse(Buffer.from(cmd.trim().split(/\s+/).pop()!, "base64").toString("utf-8"));
+
+  it("SshTransport: force 编入 _apply-tasks 的 base64 payload", async () => {
+    const seen: string[] = [];
+    const t = new SshTransport({
+      id: "vps", host: "h", dataRoot: "/drec",
+      run: async (argv) => {
+        seen.push(argv.join(" "));
+        return JSON.stringify({ applied: [], removed: [], pending: [] });
+      },
+    });
+    await t.applyTasks({ desired: [spec as never], force: true });
+    expect(seen[0]).toContain("_apply-tasks /drec");
+    expect(payloadOf(seen[0]!)).toEqual({ desired: [spec], force: true });
+  });
+
+  it("SshTransport: 不 force 时 payload 不带 force 键(远端按默认守卫走)", async () => {
+    const seen: string[] = [];
+    const t = new SshTransport({
+      id: "vps", host: "h", dataRoot: "/drec",
+      run: async (argv) => { seen.push(argv.join(" ")); return JSON.stringify({ applied: [], removed: [], pending: [] }); },
+    });
+    await t.applyTasks({ desired: [] });
+    expect(payloadOf(seen[0]!)).toEqual({ desired: [] });
+  });
+
+  it("LocalTransport: force 原样传给注入的 applyTasks 回调", async () => {
+    const applyTasks = vi.fn().mockResolvedValue({ applied: [], removed: [], pending: [] });
+    const t = new LocalTransport({ id: "local", recordingsDir: "/rec", applyTasks });
+    await t.applyTasks({ desired: [spec as never], force: true });
+    expect(applyTasks).toHaveBeenCalledWith({ desired: [spec], force: true });
   });
 });

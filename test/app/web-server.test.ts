@@ -7,7 +7,7 @@
  *
  * Uses a real in-memory TaskStore + a trivial mock manager (no subprocess).
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { mkdtempSync, existsSync } from "node:fs";
@@ -83,6 +83,9 @@ describe("matchRoute", () => {
     expect(matchRoute("POST", "/api/cookies/bilibili")).toMatchObject({ name: "setCookiePlatform", slug: "bilibili", needsBody: true });
     expect(matchRoute("DELETE", "/api/cookies/bilibili")).toMatchObject({ name: "clearCookiePlatform", slug: "bilibili" });
     expect(matchRoute("GET", "/api/hub/status")?.name).toBe("hubStatus");
+    // T-2:force 通道入口(POST + query,无 body)
+    expect(matchRoute("POST", "/api/hub/apply")?.name).toBe("applyHubTasks");
+    expect(matchRoute("GET", "/api/hub/apply")).toBeNull();
     expect(matchRoute("GET", "/api/hub/rules")?.name).toBe("listHubRules");
     expect(matchRoute("POST", "/api/hub/rules")).toMatchObject({ name: "createHubRule", needsBody: true });
     expect(matchRoute("PATCH", "/api/hub/rules/douyin.123456")).toMatchObject({ name: "updateHubRule", slug: "douyin.123456", needsBody: true });
@@ -182,6 +185,32 @@ describe("createWebServer (live)", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/text\/html/);
     expect(await res.text()).toMatch(/<!DOCTYPE html>/i);
+  });
+
+  // T-2 端到端:HTTP → 路由 → api → requestSyncTasks({force})。
+  // 只在 master(hubEnabled)且注入了 requestSyncTasks 时才 202,否则 400 —— 语义见 hub-rules.applyHubTasks。
+  it("POST /api/hub/apply?force=1 → 202 且 requestSyncTasks 收到 force", async () => {
+    const requestSyncTasks = vi.fn();
+    const s2 = createWebServer({
+      store, manager: new MockManager(), log: () => {},
+      resolveAnchor: async () => null, resolveShortUrl: async () => null,
+      hubDir, hubEnabled: true, requestSyncTasks,
+    });
+    await new Promise<void>((r) => s2.listen(0, "127.0.0.1", r));
+    const b2 = `http://127.0.0.1:${(s2.address() as AddressInfo).port}`;
+    try {
+      const forced = await fetch(`${b2}/api/hub/apply?force=1`, { method: "POST" });
+      expect(forced.status).toBe(202);
+      expect(requestSyncTasks).toHaveBeenLastCalledWith({ force: true });
+      await fetch(`${b2}/api/hub/apply`, { method: "POST" });
+      expect(requestSyncTasks).toHaveBeenLastCalledWith({ force: false });
+    } finally {
+      await new Promise<void>((r) => s2.close(() => r()));
+    }
+    // 非 master(默认 beforeEach 没注入 hubEnabled)→ 400,不触发同步
+    const slave = await fetch(`${base}/api/hub/apply?force=1`, { method: "POST" });
+    expect(slave.status).toBe(400);
+    expect(requestSyncTasks).toHaveBeenCalledTimes(2);
   });
 
   it("GET /api/tasks → json list", async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
@@ -68,9 +68,11 @@ describe("applyRemoteTasks", () => {
     expect(t.anchorName).toBeNull();
   });
 
+  // 注意:期望为空现在会被 empty-desired 守卫拦下(T-2),删除语义用「期望非空但不含它」来测。
   it("远端默认:不在期望列表的受管任务被删除", () => {
     const doomed = store.addTask({ room: "555", managedBy: "hub" });
-    const r = applyRemoteTasks(store, []);
+    const keep = spec({ roomSlug: "123456", room: "https://live.douyin.com/123456" });
+    const r = applyRemoteTasks(store, [keep]);
     expect(r.removed).toEqual(["douyin:555"]);
     expect(store.getTask(doomed.id)).toBeNull();
   });
@@ -113,5 +115,125 @@ describe("applyRemoteTasks", () => {
     const tasks = store.listTasks();
     expect(tasks).toHaveLength(1);
     expect(tasks[0].managedBy).toBeNull();
+  });
+
+  // ── T-2 期望骤减安全阀(plans/030)────────────────────────────────────────────────
+  describe("T-2 骤减守卫", () => {
+    /** 造 n 个 enabled 的 hub 受管任务(store.addTask 默认 enabled=false,必须显式开)。 */
+    const seed = (n: number, prefix = "9"): number[] =>
+      Array.from({ length: n }, (_, i) =>
+        store.addTask({ room: `${prefix}${i}`, managedBy: "hub", enabled: true }).id);
+
+    it("空期望 + 本地有受管任务:整轮拒发,一个都不删(rejected=empty-desired)", () => {
+      seed(3);
+      const r = applyRemoteTasks(store, []);
+      expect(r.rejected).toBe("empty-desired");
+      expect(r.removed).toEqual([]);
+      expect(r.applied).toEqual([]);
+      expect(store.listTasks()).toHaveLength(3);
+      // 受管任务不该被顺手停用——守卫是「什么都不做」,不是「先停再说」。
+      expect(store.listTasks().every((t) => t.enabled)).toBe(true);
+    });
+
+    it("空期望 + 本地无受管任务:正常返回(全新节点首轮不该被拦)", () => {
+      const r = applyRemoteTasks(store, []);
+      expect(r.rejected).toBeUndefined();
+      expect(r.removed).toEqual([]);
+    });
+
+    it("空期望但受管任务全是 disabled:仍然拒发(totalManaged 口径含停用)", () => {
+      const ids = seed(2);
+      for (const id of ids) store.setEnabled(id, false);
+      const r = applyRemoteTasks(store, []);
+      expect(r.rejected).toBe("empty-desired");
+      expect(store.listTasks()).toHaveLength(2);
+    });
+
+    it("骤减(4→1):只停用不删除,且停用的期望内任务照常应用", () => {
+      const ids = seed(4);
+      const r = applyRemoteTasks(store, [spec()], undefined, { adopt: true });
+      expect(r.rejected).toBe("mass-shrink");
+      expect(r.removed).toEqual([]);
+      for (const id of ids) expect(store.getTask(id)!.enabled).toBe(false);
+      expect(r.applied).toEqual(["douyin:123456"]);
+    });
+
+    it("骤减时已在录的任务进 pending(供上层硬停),纯停用的不进", () => {
+      const ids = seed(4);
+      store.setStatus(ids[0], "running");
+      const r = applyRemoteTasks(store, [spec()], undefined, { adopt: true });
+      // 骤减走「只停用」通道,pending = 所有被停用的受管任务(上层据此硬停,语义同两阶段删除)
+      expect(r.pending.sort()).toEqual(["douyin:90", "douyin:91", "douyin:92", "douyin:93"]);
+    });
+
+    // 计划定稿口径:2→1 也算骤减(最常见于「master 只读到部分规则」)。不卡死:
+    // 本轮只停用,下一轮 enabledManaged=1 → 守卫放行 → 真删。
+    it("边界 totalManaged=2 → 期望 1:本轮只停用,下一轮真删(收敛,不卡死)", () => {
+      const ids = seed(2);          // 房间 "90"(留在期望)与 "91"(被移出)
+      const doomed = ids[1];
+      const r = applyRemoteTasks(store, [spec({ roomSlug: "90", room: "https://live.douyin.com/90" })], undefined, { adopt: true });
+      expect(r.rejected).toBe("mass-shrink");
+      expect(r.removed).toEqual([]);
+      expect(r.applied).toEqual(["douyin:90"]);
+      expect(store.getTask(doomed)!.enabled).toBe(false);
+      // 下一轮:enabledManaged 降到 1 → 不再是骤减 → 走两阶段删除并真删
+      const r2 = applyRemoteTasks(store, [spec({ roomSlug: "90", room: "https://live.douyin.com/90" })], undefined, { adopt: true });
+      expect(r2.rejected).toBeUndefined();
+      expect(r2.removed).toEqual(["douyin:91"]);
+      expect(store.getTask(doomed)).toBeNull();
+    });
+
+    it("force=true:空期望照常执行删除(合法清空,如房间改派到别的节点)", () => {
+      const doomed = store.addTask({ room: "555", managedBy: "hub" });
+      const r = applyRemoteTasks(store, [], undefined, { force: true });
+      expect(r.rejected).toBeUndefined();
+      expect(r.removed).toEqual(["douyin:555"]);
+      expect(store.getTask(doomed.id)).toBeNull();
+    });
+
+    it("force=true:骤减照常执行删除", () => {
+      seed(4);
+      const r = applyRemoteTasks(store, [spec()], undefined, { adopt: true, force: true });
+      expect(r.rejected).toBeUndefined();
+      // 两阶段删除:仍在 enabled 的先停用,所以本轮 removed=0,下一轮才真删。
+      expect(r.removed).toEqual([]);
+      expect(r.pending.sort()).toEqual(["douyin:90", "douyin:91", "douyin:92", "douyin:93"]);
+    });
+
+    it("DREC_ALLOW_SHRINK=1 等价于 force(env 逃生门)", () => {
+      process.env.DREC_ALLOW_SHRINK = "1";
+      try {
+        const doomed = store.addTask({ room: "555", managedBy: "hub" });
+        const r = applyRemoteTasks(store, []);
+        expect(r.rejected).toBeUndefined();
+        expect(r.removed).toEqual(["douyin:555"]);
+        expect(store.getTask(doomed.id)).toBeNull();
+      } finally {
+        delete process.env.DREC_ALLOW_SHRINK;
+      }
+    });
+
+    it("骤减被拦时也写审计快照(便于 UI 显示 master 真实期望)", () => {
+      seed(4);
+      const msDir = join(dir, "managed-state");
+      applyRemoteTasks(store, [spec()], undefined, { adopt: true, managedStateDir: msDir, expectedVersion: 7 });
+      expect(readFileSync(join(msDir, "rooms.json"), "utf8")).toContain("123456");
+    });
+
+    it("空期望被拒时**不**写快照(快照必须等于真正下发过的期望)", () => {
+      seed(2);
+      const msDir = join(dir, "managed-state");
+      applyRemoteTasks(store, [], undefined, { managedStateDir: msDir });
+      expect(existsSync(join(msDir, "rooms.json"))).toBe(false);
+    });
+
+    it("master 本地(adopt=false):期望骤减不牵连本机非受管任务", () => {
+      const local = store.addTask({ room: "888", enabled: true });           // 非受管
+      const ids = seed(4);
+      const r = applyRemoteTasks(store, [spec()], undefined, { adopt: false });
+      expect(r.rejected).toBe("mass-shrink");
+      expect(store.getTask(local.id)!.enabled).toBe(true);   // 本机任务不归 hub 管
+      for (const id of ids) expect(store.getTask(id)!.enabled).toBe(false);
+    });
   });
 });
