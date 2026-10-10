@@ -168,7 +168,8 @@
         "两个生产调用点（_apply-tasks / local 同步）都传 managedStateDir；T16 的版本回执依赖它，因此这两处为必需（其它测试调用可不传）"
       ],
       "depends_on": [],
-      "estimated_loc": 190
+      "estimated_loc": 190,
+      "status": "done"
     },
     {
       "id": "T2",
@@ -2072,15 +2073,9 @@
   "milestones": [
     {
       "id": "M1",
-      "name": "P0 止血(首要)",
+      "name": "P0 止血(T1 已完成)",
       "tasks": [
-        "T1",
-        "T2",
-        "T3",
-        "T11",
-        "T12",
-        "T13",
-        "T14"
+        "T1"
       ],
       "ship_gate": "节点任务不再被误删;分P不符不删源;清理失败可见可重试;短命录制退避递增。每个任务独立可发布。"
     },

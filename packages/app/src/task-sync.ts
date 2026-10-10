@@ -7,6 +7,7 @@
  * 下一轮再 removeTask。
  */
 import { platformForRoom, type ApplyTasksResult, type NodeTaskDTO, type RemoteTaskSpec } from "@drec/core";
+import { writeManagedState } from "./managed-state.js";
 import type { TaskStore } from "./store.js";
 
 function slugOf(room: string): { platform: string; roomSlug: string } {
@@ -50,6 +51,18 @@ export interface ApplyTasksOptions {
    * 远端节点默认 true；master 本地(local worker)传 false → 本机任务保持用户可编辑(managedBy=null)。
    */
   adopt?: boolean;
+  /**
+   * 「上次成功应用」审计快照的落盘目录（`<dir>/rooms.json`）。
+   *
+   * **必须由调用方显式传入**：远端 `_apply-tasks <dataRoot>` 只带 dataRoot、不带
+   * DOUYIN_REC_ROOT，从环境推导会把快照写到错误的根，使可观测/版本回执失效。
+   *
+   * 省略 = 不写快照（既有调用点零副作用）。快照**仅供审计与版本回执**，
+   * 删除判定用的是「store 受管任务 − 期望 keys」，不是快照 diff（快照 ≡ 期望，diff 恒空）。
+   */
+  managedStateDir?: string;
+  /** 期望版本号（master 单调递增）；随快照一起落盘，供 UI 显示版本漂移。 */
+  expectedVersion?: number;
 }
 
 /**
@@ -146,6 +159,19 @@ export function applyRemoteTasks(
       store.removeTask(t.id);
       removed.push(key);
       log?.(`[task-sync] 删除受管任务 ${t.id}: ${key}`);
+    }
+  }
+
+  // 审计快照（可选）：记录本轮成功应用后的期望。**失败只 warn，绝不影响任务下发结果**
+  // ——快照是运维可观测产物，不是应用成功的前提。
+  if (opts.managedStateDir) {
+    try {
+      writeManagedState(opts.managedStateDir, {
+        version: opts.expectedVersion ?? 0,
+        desired: [...desired],
+      });
+    } catch (e) {
+      log?.(`[task-sync] 写审计快照失败(忽略): ${(e as Error)?.message ?? e}`);
     }
   }
 

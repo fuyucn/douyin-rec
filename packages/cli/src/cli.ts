@@ -580,7 +580,7 @@ const hubStarter: HubStarter = {
     } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootStageDir, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
+    const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
@@ -660,7 +660,11 @@ const hubStarter: HubStarter = {
       // local worker = master 自身:hub 任务同步直接落在本机 store(与远端 `_tasks` / `_apply-tasks` 同路径)。
       listTasks: () => listNodeTasks(opts.store),
       // adopt=false:本机源任务保持用户可编辑(managedBy 不置 hub),只有远端节点的同步任务才锁编辑。
-      applyTasks: (input) => applyRemoteTasks(opts.store, input.desired, opts.log, { adopt: false }),
+      applyTasks: (input) => applyRemoteTasks(opts.store, input.desired, opts.log, {
+        adopt: false,
+        // 审计快照落 <数据根>/config/managed/(显式传目录,不从 DOUYIN_REC_ROOT 推导)。
+        managedStateDir: join(rootConfigDir(), "managed"),
+      }),
     });
 
     const workers = hubCfg.workers ?? hubCfg.tenants ?? [];
@@ -1368,7 +1372,10 @@ program
     const { TaskStore, applyRemoteTasks } = await import("@drec/app");
     const input = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as { desired: RemoteTaskSpec[] };
     const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
-    const result = applyRemoteTasks(store, Array.isArray(input.desired) ? input.desired : []);
+    const result = applyRemoteTasks(store, Array.isArray(input.desired) ? input.desired : [], undefined, {
+      // 审计快照:目录由 dataRoot 显式派生(本命令只带 dataRoot,无 DOUYIN_REC_ROOT —— 见 managed-state.ts)。
+      managedStateDir: pathJoin(dataRoot, "config", "managed"),
+    });
     // 不再期望的受管任务必须**硬停**(而非排空):这是「用户停源任务/删规则」的明确意图,
     // 排空会等到直播自然收播,hub 的 settle 因而一直卡着不建 job。
     // `_apply-tasks` 是独立短命进程,没有 TaskManager 引用,只能走本机 serve 的

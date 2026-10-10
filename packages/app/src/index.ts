@@ -21,6 +21,9 @@ export { listHubJobs, readHubJobLog, jobLogPath, hubStageDir, buildQueueView, la
 export type { HubJobView, HubJobEvent, BuildQueueOpts, LatestRunPerRoom } from "./hub-jobs.js";
 export { rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, DEFAULT_ROOT, ensureNodeIdentity, rootNodeIdentityPath } from "./paths.js";
 export type { NodeIdentity } from "./paths.js";
+export { rootConfigDir } from "./paths.js";
+export { readManagedState, writeManagedState, clearManagedState, MANAGED_STATE_FILE } from "./managed-state.js";
+export type { ManagedState } from "./managed-state.js";
 export { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
 /** 应用版本号({root package.json version}-{commit6},由 pnpm bundle 注入;非打包环境回落 dev)。 */
 export { APP_VERSION } from "./version.js";

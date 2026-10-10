@@ -56,7 +56,7 @@
 
 ## 待办（Next）
 
-- [ ] **T-30 hub/tasks 协作 + 编排/队列/多节点优化** — 计划 `plans/030_hub_tasks_optimization.md`
+- [~] **T-30 hub/tasks 协作 + 编排/队列/多节点优化**(分支 `feat/hub-optimization`;M1 进行中) — 计划 `plans/030_hub_tasks_optimization.md`
   (结构化任务 `plans/030_tasks.json`,唯一执行源;20 任务 / 8 组件,plan-loop 校验 ok)。
   **来源**:2026-10-09 用户三轮提问(队列/workflow 不实时、hub 与 tasks 是否融合、编排/队列/多节点优化)
   + **7 轮独立 principal-engineer 评审**(score 55 → 56 → 58 → 72 → 70;循环 11 次、blocking 6 项 / major 21 项
@@ -71,6 +71,7 @@
   冷却跨重启保留;`PUT /api/rooms/:key` 一次改两半;分 P 不符不删源;短命录制退避递增。
   全程 `pnpm test`/`typecheck`/`bundle`/web build 绿 + 架构图一致 + 每个 `feat|fix` bump version。
   **取代** `plans/029` 的 P0/P2/C 工作(029 保留为历史;D4 内存决策仍未决)。
+  **进度**:M1 的 **T1(节点审计快照)已完成**(`0.0.48`,待部署验证);其余任务见 plans/030_tasks.json 的 status 字段。
   **分四个里程碑发版**(避免大爆炸):M1 止血(T1-T3/T11-T14)→ M2 实时与吞吐(T4-T8/T15/T19)
   → M3 房间入口**低风险版**(T9/T10/T18:在既有 Hub 页一处配完 + 房间级动作,**不新建页/不退役旧入口**)
   → M4 可选/需确认(T16 运维可见性按需;**T20 完整单页合并属需求反转,需你确认后才立项**)。

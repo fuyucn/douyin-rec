@@ -83,7 +83,7 @@
     <div>
       <h1>直播录制 · 架构图</h1>
       <p class="sub">抖音 / B站 / 快手直播录制 + 弹幕 + 多节点 hub 后处理。两个可插拔接缝:平台轴 + 引擎轴。</p>
-      <p class="gen">由 scripts/gen-architecture.mjs 生成 · 热度窗口近 90 天 · 2026-10-10 03:13</p>
+      <p class="gen">由 scripts/gen-architecture.mjs 生成 · 热度窗口近 90 天 · 2026-10-10 03:52</p>
     </div>
     <div class="tools">
       <button class="tbtn" id="theme">◐ 主题</button>
@@ -178,11 +178,11 @@
     </div>
   <div class="band">
       <div class="blabel">L4 · 有状态应用</div>
-      <div class="grid"><div class="card" style="--role:#34d399;--mix:32%" title="@drec/app · 7453 LOC · 42 文件 · 26 测试 · 近 90 天 43 次提交">
+      <div class="grid"><div class="card" style="--role:#34d399;--mix:32%" title="@drec/app · 7551 LOC · 43 文件 · 27 测试 · 近 90 天 43 次提交">
           <span class="rail" style="background:#34d399"></span>
           <div class="t">app</div>
           <div class="pkg">@drec/app</div>
-          <div class="m"><span><b>7453</b> LOC</span><span><b>42</b> 文件</span><span><b>26</b> 测试</span><span><b>43</b> Δ</span></div>
+          <div class="m"><span><b>7551</b> LOC</span><span><b>43</b> 文件</span><span><b>27</b> 测试</span><span><b>43</b> Δ</span></div>
           <div class="hbar"><i style="width:91%;background:#34d399"></i></div>
         </div><div class="card" style="--role:#34d399;--mix:27%" title="@drec/web (独立 Vite) · 6941 LOC · 38 文件 · 0 测试 · 近 90 天 34 次提交">
           <span class="rail" style="background:#34d399"></span>
@@ -204,11 +204,11 @@
     </div>
   <div class="band">
       <div class="blabel">L5 · 入口</div>
-      <div class="grid"><div class="card" style="--role:#f472b6;--mix:23%" title="@drec/cli · 1539 LOC · 4 文件 · 0 测试 · 近 90 天 28 次提交">
+      <div class="grid"><div class="card" style="--role:#f472b6;--mix:23%" title="@drec/cli · 1546 LOC · 4 文件 · 0 测试 · 近 90 天 28 次提交">
           <span class="rail" style="background:#f472b6"></span>
           <div class="t">cli</div>
           <div class="pkg">@drec/cli</div>
-          <div class="m"><span><b>1539</b> LOC</span><span><b>4</b> 文件</span><span><b>0</b> 测试</span><span><b>28</b> Δ</span></div>
+          <div class="m"><span><b>1546</b> LOC</span><span><b>4</b> 文件</span><span><b>0</b> 测试</span><span><b>28</b> Δ</span></div>
           <div class="hbar"><i style="width:60%;background:#f472b6"></i></div>
         </div></div>
     </div>
@@ -420,8 +420,8 @@
     <thead><tr><th>里程碑</th><th>名称</th><th>任务</th><th>发布门槛</th></tr></thead>
     <tbody><tr>
       <td><code>M1</code></td>
-      <td>P0 止血(首要)</td>
-      <td>T1 T2 T3 T11 T12 T13 T14</td>
+      <td>P0 止血(T1 已完成)</td>
+      <td>T1</td>
       <td>节点任务不再被误删;分P不符不删源;清理失败可见可重试;短命录制退避递增。每个任务独立可发布。</td>
     </tr>
     <tr>
@@ -511,7 +511,7 @@
     </tr>
     <tr>
       <td><code>T2</code></td>
-      <td>M1</td>
+      <td>-</td>
       <td>期望骤减安全阀（空期望拒绝 / 骤减只停不删）</td>
       <td>c1</td>
       <td>T1</td>
@@ -520,7 +520,7 @@
     </tr>
     <tr>
       <td><code>T3</code></td>
-      <td>M1</td>
+      <td>-</td>
       <td>删除语义收敛：节点 store 减期望（T2 守卫保护）+ 禁用与删除分离</td>
       <td>c1</td>
       <td>T2</td>
@@ -592,7 +592,7 @@
     </tr>
     <tr>
       <td><code>T11</code></td>
-      <td>M1</td>
+      <td>-</td>
       <td>产物完整性核验 + 延迟删源</td>
       <td>c6</td>
       <td>—</td>
@@ -601,7 +601,7 @@
     </tr>
     <tr>
       <td><code>T12</code></td>
-      <td>M1</td>
+      <td>-</td>
       <td>清理独立化：可重试、与上传解耦、失败不影响终态</td>
       <td>c6,c7</td>
       <td>T11</td>
@@ -610,7 +610,7 @@
     </tr>
     <tr>
       <td><code>T13</code></td>
-      <td>M1</td>
+      <td>-</td>
       <td>孤儿与中间产物维护清理（可预览、可审计）</td>
       <td>c7</td>
       <td>T12</td>
@@ -619,7 +619,7 @@
     </tr>
     <tr>
       <td><code>T14</code></td>
-      <td>M1</td>
+      <td>-</td>
       <td>录制健康：以有效落盘判成功 + 短命录制熔断</td>
       <td>c8</td>
       <td>—</td>
@@ -749,7 +749,7 @@
       <td><code>app</code></td>
       <td>L4 · 有状态应用</td>
       <td><span style="color:#34d399">●</span> 应用/前端</td>
-      <td class="n">7453</td><td class="n">42</td><td class="n">26</td><td class="n">43</td>
+      <td class="n">7551</td><td class="n">43</td><td class="n">27</td><td class="n">43</td>
     </tr>
     <tr>
       <td><code>web</code></td>
@@ -767,7 +767,7 @@
       <td><code>cli</code></td>
       <td>L5 · 入口</td>
       <td><span style="color:#f472b6">●</span> 入口</td>
-      <td class="n">1539</td><td class="n">4</td><td class="n">0</td><td class="n">28</td>
+      <td class="n">1546</td><td class="n">4</td><td class="n">0</td><td class="n">28</td>
     </tr></tbody>
   </table>
 
