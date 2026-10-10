@@ -373,3 +373,41 @@ describe("lastProgressAgeMs(T14 进度信号)", () => {
     rmSync(outDir, { recursive: true, force: true });
   });
 });
+
+// ── 引擎可运行性自检(mesio 在旧 glibc 上「存在但跑不起来」的兜底) ────────────────
+describe("mesioEngine.probe(可运行性自检)", () => {
+  it("mesio 二进制不存在 → 返回原因(不是 null)", async () => {
+    const { probeMesio } = await import("./engines/mesio.js");
+    const old = process.env.MESIO_PATH;
+    process.env.MESIO_PATH = "/definitely/not/here/mesio";
+    try {
+      const why = probeMesio();
+      expect(why).not.toBeNull();
+      expect(String(why)).toContain("mesio");
+    } finally {
+      if (old === undefined) delete process.env.MESIO_PATH; else process.env.MESIO_PATH = old;
+    }
+  });
+
+  it("mesio 是一个不可执行的假文件 → 返回原因(不是 null)", async () => {
+    const { probeMesio } = await import("./engines/mesio.js");
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const fake = join(mkdtempSync(join(tmpdir(), "mesio-")), "mesio");
+    // 非 ELF 内容 → 执行必然失败(模拟「GLIBC 缺失」这类启动失败)
+    writeFileSync(fake, "not a real binary", { mode: 0o755 });
+    const old = process.env.MESIO_PATH;
+    process.env.MESIO_PATH = fake;
+    try {
+      expect(probeMesio()).not.toBeNull();
+    } finally {
+      if (old === undefined) delete process.env.MESIO_PATH; else process.env.MESIO_PATH = old;
+    }
+  });
+
+  it("引擎契约:mesio 暴露 probe,ffmpeg 可以不暴露(向后兼容)", async () => {
+    const { mesioEngine } = await import("./engines/mesio.js");
+    expect(typeof mesioEngine.probe).toBe("function");
+  });
+});

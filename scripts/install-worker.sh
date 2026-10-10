@@ -66,6 +66,26 @@ fail() {
   printf 'Error: %s\n' "$*" >&2
   exit 1
 }
+# mesio 可运行性校验:**文件存在 + 可执行位**并不等于「跑得起来」。
+# 实测踩坑:发布包里的 mesio 是 linux-gnu(动态链接 glibc),需要 GLIBC 2.38/2.39,
+# 而 Ubuntu 22.04 只有 2.35 → 二进制存在、权限正确,但一执行就报 GLIBC 缺失并退出。
+# 只检查文件属性会放它过去,后果是录制反复失败(短命录制 → 退避到 300s),
+# 表现为「界面显示录制中、磁盘一个字节不涨」,用户很久才发现。
+# 故安装时**真的执行一次**;不通过则警告(不 fail:ffmpeg 是默认引擎,mesio 属可选能力,
+# 装不上不该让整个 worker 安装失败)。同时给出可执行的修复建议。
+check_mesio_runs() {
+  _bin="$1"
+  if out="$("$_bin" --version 2>&1)"; then
+    printf 'mesio 自检通过: %s\n' "$out"
+    return 0
+  fi
+  warn "mesio 无法运行(安装继续,录制会回落到 ffmpeg):"
+  warn "  $out"
+  warn "  常见原因:该二进制是 linux-gnu 动态链接版,系统 GLIBC 过旧(需 2.38+)。"
+  warn "  修复:用静态 musl 版重建发布包(MESIO_LIBC=musl sh scripts/install-mesio.sh <dir>)。"
+  return 0
+}
+
 
 warn() {
   printf 'Warning: %s\n' "$*" >&2
@@ -320,6 +340,7 @@ fi
 if [ "$LAYOUT" = "packages" ]; then
   [ -f "$TMP/packages/base/dist/douyin-rec.mjs" ] || fail "Package base is missing dist/douyin-rec.mjs"
   [ -x "$TMP/packages/base/bin/mesio" ] || fail "Package base is missing executable bin/mesio"
+  check_mesio_runs "$TMP/packages/base/bin/mesio"
   if [ "$PKG_WEB" -eq 1 ] && [ ! -f "$TMP/packages/web/dist/index.html" ]; then
     fail "Package web is requested but archive is missing packages/web/dist/index.html"
   fi
@@ -329,6 +350,7 @@ if [ "$LAYOUT" = "packages" ]; then
 else
   [ -f "$TMP/dist/douyin-rec.mjs" ] || fail "Archive is missing dist/douyin-rec.mjs"
   [ -x "$TMP/bin/mesio" ] || fail "Archive is missing executable bin/mesio"
+  check_mesio_runs "$TMP/bin/mesio"
   if [ "$PKG_WEB" -eq 1 ] && [ ! -f "$TMP/web/dist/index.html" ] && [ ! -f "$ROOT/web/dist/index.html" ]; then
     fail "Package web is requested but archive has no web/dist/index.html"
   fi

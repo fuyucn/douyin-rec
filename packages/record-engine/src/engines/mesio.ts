@@ -10,7 +10,7 @@
  */
 import { join } from "node:path";
 import { readdirSync, statSync, existsSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import type { DownloadEngine, EngineSpawnArgs, EngineSpawnResult } from "@drec/core";
 
 /**
@@ -42,8 +42,39 @@ export function buildMesioArgs(a: Pick<EngineSpawnArgs, "url" | "headers" | "dir
   return args;
 }
 
+/**
+ * mesio 可运行性自检:跑 `--version`,2 秒超时。
+ *
+ * 为什么不能只看「文件存在 + 可执行」:实测 VPS 上的 mesio 需要 GLIBC 2.38/2.39,
+ * 而 Ubuntu 22.04 只有 2.35 → 二进制存在、权限也对,但**一执行就报 GLIBC 缺失并退出**。
+ * 只看文件属性会放它过去,然后录制反复失败(短命录制 → 退避到 300s),用户很久才发现
+ * 「看起来在录、实际没落盘」。所以这里**真的执行一次**。
+ *
+ * 只判「能否启动」,不判版本是否符合预期 —— 版本是 install 脚本的职责(单一真理源),
+ * 这里只回答「这台机器上跑不跑得起来」。
+ */
+export function probeMesio(): string | null {
+  const bin = resolveMesioBin();
+  try {
+    const r = spawnSync(bin, ["--version"], { timeout: 2000, encoding: "utf-8" });
+    if (r.error) {
+      const e = r.error as NodeJS.ErrnoException;
+      return e.code === "ENOENT" ? `mesio 不存在: ${bin}` : `mesio 无法启动(${e.code ?? "error"}): ${e.message}`;
+    }
+    if (r.status !== 0) {
+      // 最常见的失败:GLIBC 版本不足。把 stderr 首行带出来,别让用户去猜。
+      const why = String(r.stderr ?? "").trim().split("\n")[0] || `退出码 ${r.status}`;
+      return `mesio 启动失败: ${why}`;
+    }
+    return null;
+  } catch (e) {
+    return `mesio 自检异常: ${(e as Error)?.message ?? e}`;
+  }
+}
+
 export const mesioEngine: DownloadEngine = {
   id: "mesio",
+  probe: probeMesio,
   spawn(a: EngineSpawnArgs): EngineSpawnResult {
     const args = buildMesioArgs(a);
     const proc = spawn(MESIO, args, { stdio: ["ignore", "ignore", "pipe"] });

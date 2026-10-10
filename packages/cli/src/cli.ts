@@ -21,7 +21,7 @@ import { biliAccountKey, loadConfig, sanitizeStreamKey } from "@drec/core";
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
-import { getEngine, platformForRoom } from "@drec/core";
+import { getEngine, platformForRoom, type DownloadEngine } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
 import { groupSessions, mergeSession, mergeSessions } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
@@ -122,6 +122,33 @@ program
   );
 
 // ─── record 子命令 ───────────────────────────────────────────────────────────
+/**
+ * 选下载引擎,并在**引擎不可运行**时回落到 ffmpeg(兜底引擎)。
+ *
+ * 为什么需要回落:`mesio` 是外部二进制,可能「文件在、可执行位也对」但跑不起来
+ * (实测 VPS:需要 GLIBC 2.38/2.39,系统只有 2.35 → 每次 spawn 立即退出 code=1)。
+ * 没有回落时表现为:会话判定「短命录制」→ 指数退避(最长 300s)→ **界面显示录制中、
+ * 磁盘一个字节不涨**,用户要很久才发现。有回落则在起播前就切到 ffmpeg,录制照常。
+ *
+ * 只回落一次(不回落到自己),避免「mesio 坏了 → 回落 mesio」的死循环。
+ * 回落时**必须留日志**(stderr),不能静默 —— 否则用户不知道自己的引擎选择没生效。
+ */
+function pickEngine(requestedId: string, platformDefaultId: string): DownloadEngine {
+  const requested = getEngine(requestedId) ?? getEngine(platformDefaultId);
+  if (!requested) throw new Error(`没有可用引擎(请求 ${requestedId},平台默认 ${platformDefaultId})`);
+  if (!requested.probe) return requested;
+  const why = requested.probe();
+  if (why === null) return requested;
+  const fallback = getEngine("ffmpeg");
+  if (!fallback || fallback.id === requested.id) {
+    // 没有可回落的引擎(或本身就是 ffmpeg):**明确报错**,不能带着坏引擎继续录。
+    throw new Error(`录制引擎 ${requested.id} 不可用: ${why};且无可回落的 ffmpeg 引擎`);
+  }
+  // 回落是**重要**的状态变更:用 stderr 让它在 serve 日志/任务日志里可见。
+  process.stderr.write(`[rec] 引擎 ${requested.id} 不可用(${why})→ 已回落到 ${fallback.id}\n`);
+  return fallback;
+}
+
 program
   .command("record")
   .description("录制抖音直播（含弹幕捕获）")
@@ -177,7 +204,7 @@ program
 
     // 通用录制器 + 选中的下载引擎(无字符串字面量分支)。非法/旧值回落平台默认引擎。
     // 弹幕来源由平台 connectDanmu 在 onLive 时提供(manager 内部),不再在此构造独立源。
-    const engine = getEngine(engineId) ?? getEngine(platform.defaultEngine)!;
+    const engine = pickEngine(engineId, platform.defaultEngine);
     const recorder: Recorder = new PollingRecorder(engine);
 
     const webhook = (program.opts() as { discordWebhook?: string }).discordWebhook ?? cfg.discordWebhook ?? process.env.DISCORD_WEBHOOK;
