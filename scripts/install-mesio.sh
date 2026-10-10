@@ -4,7 +4,7 @@
 # 用法:
 #   scripts/install-mesio.sh [目标目录]      # 默认 ./bin → ./bin/mesio
 #   MESIO_VERSION=mesio-v0.4.1 scripts/install-mesio.sh
-#   MESIO_LIBC=musl scripts/install-mesio.sh  # linux 上选 musl(默认 gnu;alpine 用 musl)
+#   MESIO_LIBC=gnu scripts/install-mesio.sh   # linux 上选 gnu(默认 musl 静态;仅特殊场景需要)
 #
 # docker 里:RUN sh scripts/install-mesio.sh /usr/local/bin   (装到 PATH)
 # 本机:装到 ./bin 后,跑录制时设 MESIO_PATH=<repo>/bin/mesio,或把 ./bin 加进 PATH。
@@ -20,7 +20,10 @@ PINNED_VERSION="mesio-v0.4.1"
 VERSION="${MESIO_VERSION:-$PINNED_VERSION}"
 
 DEST="${1:-${MESIO_DEST:-./bin}}"
-LIBC="${MESIO_LIBC:-gnu}"   # linux: gnu | musl
+# linux 默认 **musl**(静态链接):gnu 版动态依赖系统 glibc,实测在 Ubuntu 22.04
+# (glibc 2.35)上会因需要 GLIBC 2.38/2.39 而**存在但跑不起来**(线上踩坑)。
+# 需要动态版时显式 `MESIO_LIBC=gnu`。
+LIBC="${MESIO_LIBC:-musl}"   # linux: musl(默认,静态) | gnu
 
 os="$(uname -s)"
 arch="$(uname -m)"

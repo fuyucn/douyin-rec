@@ -113,9 +113,24 @@ build_one() {
 }
 EOF
 
-  mesio_url="https://github.com/hua0512/rust-srec/releases/download/${MESIO_VERSION}/mesio-${ra}-unknown-linux-gnu"
-  echo "==> 下载 mesio ($arch): $mesio_url"
+  # 用 **musl 静态链接版**,不用 gnu(动态链接)版。
+  # 原因(线上踩坑):gnu 版依赖系统 glibc,实测需要 GLIBC 2.38/2.39,
+  # 而目标机 Ubuntu 22.04 只有 2.35 → 二进制「存在且可执行」但一跑就报 GLIBC 缺失退出,
+  # 录制反复失败(短命录制→退避到 300s),表现为「界面显示录制中、磁盘不涨」。
+  # musl 版是静态链接,不挑系统 glibc,同架构机器通吃。
+  mesio_url="https://github.com/hua0512/rust-srec/releases/download/${MESIO_VERSION}/mesio-${ra}-unknown-linux-musl"
+  echo "==> 下载 mesio ($arch, musl 静态): $mesio_url"
   download "$mesio_url" "$arch_tmp/mesio"
+  # 打包前**真的执行一次**:包里塞一个跑不起来的二进制是最难查的故障(装完不报错、用起来才炸)。
+  if ! "$arch_tmp/mesio" --version >/dev/null 2>&1; then
+    # 本机架构与目标架构不同时无法在此执行(交叉打包),此时跳过自检 —— 目标机上由
+    # install-worker.sh 的 check_mesio_runs 兜底。能执行就必须能跑通。
+    case "$(uname -m)" in
+      x86_64|amd64) [ "$arch" = "x86_64" ] && { echo "✗ 打包的 mesio 无法运行(架构匹配却跑不起来)" >&2; exit 1; } ;;
+      arm64|aarch64) [ "$arch" = "arm64" ] && { echo "✗ 打包的 mesio 无法运行(架构匹配却跑不起来)" >&2; exit 1; } ;;
+    esac
+    echo "  (交叉打包,跳过本机自检;目标机安装时会再校验)"
+  fi
   install -m 0755 "$arch_tmp/mesio" "$stage/packages/base/bin/mesio"
 
   mkdir -p "$OUT_DIR"

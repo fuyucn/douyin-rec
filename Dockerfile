@@ -75,7 +75,10 @@ RUN if [ "$IMAGE_ROLE" = "master" ]; then \
 # mesio 录制引擎(可选 recorder)：build 时按平台拉 linux 二进制到 /app/bin（与本机 ./bin 约定一致，
 # 不污染系统 /usr/local/bin）。版本由脚本内 PINNED_VERSION 存档；升级改脚本即可。bookworm=glibc → gnu。
 COPY scripts/install-mesio.sh /tmp/install-mesio.sh
-RUN MESIO_LIBC=gnu sh /tmp/install-mesio.sh /app/bin && rm /tmp/install-mesio.sh
+# 用 musl(静态链接):gnu 版依赖系统 glibc,实测在 Ubuntu 22.04(glibc 2.35)上
+# 会因需要 GLIBC 2.38/2.39 而无法启动(线上踩坑:录制显示"进行中"但不落盘)。
+# 静态版不挑系统 glibc。
+RUN MESIO_LIBC=musl sh /tmp/install-mesio.sh /app/bin && rm /tmp/install-mesio.sh
 
 # biliup:docker 当 master 时 auto-private 上传用(orchestrator runBiliup spawn 裸 "biliup")。
 # 装到 /usr/local/bin 上 PATH;cookies 走挂载卷 /output-data/config/biliup/cookies.json(BILIUP_COOKIE env)。
