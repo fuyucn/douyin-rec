@@ -92,6 +92,8 @@ describe("finalizeAfterUpload:观察期核验只记录,不阻塞", () => {
       on: ALL_ON, notify,
     });
     expect(notify).toHaveBeenCalledTimes(1);
-    expect(String((notify.mock.calls[0][0] as { message: string }).message)).toContain("观察期仅记录");
+    // 期望3/实际1 = **少了**分 P → 措辞是「疑似缺失,已保留节点源」(比原「仅记录」更严:
+    // 少分P 时观察期也不销毁最后一份源,见 T33 ②)。
+    expect(String((notify.mock.calls[0][0] as { message: string }).message)).toContain("疑似缺失");
   });
 });

@@ -246,17 +246,17 @@ describe("runPipeline", () => {
         expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
       });
 
-      it("期望 9 实际 8 → **观察期:仅记录,仍 done + 照常删源**(T32 核验不再阻塞)", async () => {
-        // 依据:全 61 个 job 里判过 mismatch 的只有 2 个,且经实查 B站分P **都齐全** ——
-        // 核验从未抓到真失败,只在 append 成功后 ~0.5s 读到 B站未同步的旧值。
-        // 代价(永久 needs_manual + 源永不删)却是实的,故观察期只记录不阻塞。
+      it("期望 9 实际 8(**少**分P)→ 观察期:仍 done,但**保住节点源**(T33 ②)", async () => {
+        // 观察期放宽 mismatch 不等于「随便删」。**少了**分 P 时两种可能都要不得:
+        //   ①B站 pages 还没同步(假失败);②真的丢片 —— 都不能销毁最后一份源。
+        // 故只清 stage,节点源留给 reconciler 收尾补跑在确认一致后再删(T33 ①)。
         const deps = segUploadDeps({ countParts: async () => 8 });
         const r = await runSeg(deps);
         expect(r.state).toBe("done");
-        expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
-        // 但必须留痕:clean_verify 步骤记下期望/实际 + 「仅记录」,供观察期统计。
+        expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled(); // 节点源保住
+        // 留痕:clean_verify 记下期望/实际 + 「疑似缺失」,供观察期统计与补跑。
         expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.error ?? "")
-          .toContain("观察期仅记录");
+          .toContain("疑似缺失");
       });
 
       it("未注入 countParts → 核验关闭,分段路径照常删源(与现状一致)", async () => {
@@ -1217,14 +1217,14 @@ describe("runPipeline", () => {
       expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
     });
 
-    it("合并路径 分P数不符(期望 3 实际 2)→ **观察期:仅记录 + 照常删源**(T32 核验不再阻塞)", async () => {
-      // 观察期(verifyBlocksOnMismatch()=false):mismatch 只留痕,不转 needs_manual、不保留源。
+    it("合并路径 分P数不符(期望 3 **实际 2 = 少了**)→ 观察期:仍 done,但**保住节点源**(T33 ②)", async () => {
+      // 观察期不阻塞,但「少了」分 P 时不能销毁最后一份源(可能丢片 / 可能没同步完)。
       const deps = uploadDeps({ countParts: async () => 2 });
       const r = await run(deps);
       expect(r.state).toBe("done");
       expect(r.bv).toBe("BV123");                    // 上传确实成功了
       expect(deps.ledger.get(STREAM_KEY)?.state).toBe("done");
-      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled(); // 照常删源
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled(); // 节点源保住
       expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
     });
 

@@ -387,9 +387,8 @@ export class Reconciler {
  *
  * @returns 可补跑的节点名(供日志);null = 无需补跑。
  */
-private cleanupBackfillDue(streamKey: string): string | null {
+private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string | null {
   const nodes = this.ledger.getNodeStates(streamKey);
-  if (nodes.length === 0) return null;
   const now = Date.now();
   const due: string[] = [];
   for (const n of nodes) {
@@ -402,6 +401,30 @@ private cleanupBackfillDue(streamKey: string): string | null {
     const age = Math.max(0, now - n.updatedAt);
     if (age < this.cleanupBackfillThrottleMs) continue;
     due.push(n.node);
+  }
+  // 「done 但 clean_source **从未存在**」也要补跑 —— 这是本函数此前够不着的漏网之鱼。
+  //
+  // 背景(实测):上传成功后被核验误判 mismatch 的 job 会**在 mismatch 分支提前 return**,
+  // `cleanupSources()` 根本不被调用 → 台账里连 `clean_source` 这一行都没有
+  // (不是 failed,是**缺失**)。而原判定只认「节点存在且 failed」→ 这类 job 永远轮不到,
+  // 源录像一直堆着:实测 6 个房间 ~28G,最终把磁盘撑爆并导致 master 崩溃(ENOSPC)。
+  //
+  // 触发条件只限定「该不该做这件事」,不做语义判断 —— 语义交给 pipeline 重跑时**重新核验**:
+  //   ①房间**开了** `cleanup.sourceAfterDone`(没开就不该删源);
+  //   ②该场**已上传**(有 bv;= upload_plain 完成,不是半途中断);
+  //   ③`clean_source` 节点**完全不存在**(存在即 failed 走上面分支 / 已 done 则无需补)。
+  // 补跑会走 runPipeline → resumeAppends → **重新核验**;核验不通过时(见 pipeline 的
+  // 观察期分支)只清 stage、保住节点源,所以这里放宽条件**不会**导致误删。
+  //
+  // 注:此前用 `clean_verify=done` 当条件,**过窄** —— 实测积压的那批恰恰是
+  // `clean_verify=failed`(旧语义留下),条件不满足 → 一条都补不上。改用「有 bv」更贴近事实。
+  const job = this.ledger.get(streamKey);
+  if (sourceAfterDone && job?.bv && !nodes.some((n) => n.node === "clean_source")) {
+    // 节流锚点:最近一条节点状态时间(没有节点则用 job 更新时间),避免每轮反复派发同一场。
+    const anchor = nodes.reduce((mx, n) => Math.max(mx, n.updatedAt), job.updatedAt ?? 0);
+    if (Math.max(0, now - anchor) >= this.cleanupBackfillThrottleMs) {
+      due.push("clean_source(缺失)");
+    }
   }
   return due.length > 0 ? due.join(",") : null;
 }
@@ -472,7 +495,8 @@ private cleanupBackfillDue(streamKey: string): string | null {
         // 复用 pipeline 已有的幂等续跑(bv 已在库 → 只补 append + 收尾闸门),
         // 成员清单来自本轮 inventory —— 清理失败的源文件**仍在节点上**(没删成),故能被扫到。
         if (job?.state === "done") {
-          const due = this.cleanupBackfillDue(b.streamKey);
+          // sourceAfterDone 从**该房间当前配置**读:没开清理就不该补删源(与 cleanupSources 同口径)。
+          const due = this.cleanupBackfillDue(b.streamKey, cfg.cleanup?.sourceAfterDone === true);
           if (due) {
             jlogInfo(`[reconciler] ${b.streamKey} 上传后收尾未完成(${due}) → 补跑`);
             // 也派发出去(收尾补跑同样是长 IO)—— 失败**不改终态**:上传已成功,

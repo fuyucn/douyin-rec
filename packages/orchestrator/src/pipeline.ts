@@ -211,6 +211,12 @@ export async function cleanupSourcesShared(o: {
   stagePulledSources?: string[];
   rmStage: (paths: string[]) => Promise<void>;
   log: (msg: string) => void;
+  /**
+   * **跳过节点源清理**(只做 stage 侧)。用于「核验疑似少分 P」时:
+   * 那种情况不能销毁最后一份源(可能真丢片 / 也可能只是 B站还没同步),
+   * 留源给 reconciler 的收尾补跑在**确认一致**后再删。
+   */
+  skipNodeSources?: boolean;
 }): Promise<CleanupOutcome> {
   const clean = o.cleanup ?? {};
   const failed: CleanupFailure[] = [];
@@ -224,7 +230,7 @@ export async function cleanupSourcesShared(o: {
   };
 
   // ① 各节点 recordings 源(与 stage 侧独立;两开关可单独开)。
-  if (clean.sourceAfterDone) {
+  if (clean.sourceAfterDone && !o.skipNodeSources) {
     const delNodeXml = xmlKeepRule("node", clean.stageAfterDone === true);
     o.ledger.logStep(o.streamKey, "clean_source", "start");
     let fileCount = 0;
@@ -322,8 +328,11 @@ export async function finalizeAfterUpload(o: {
   bv: string;
   deps: PipelineDeps;
   log: (msg: string) => void;
-  /** 清理各节点源(+ 可选 stage 拉来源段);收尾闸门决定要不要调。 */
-  cleanupSources: () => Promise<CleanupOutcome>;
+  /**
+   * 清理各节点源(+ 可选 stage 拉来源段);收尾闸门决定要不要调。
+   * `skipNodeSources` 供「核验疑似少分 P」时只清 stage、**保住节点源**。
+   */
+  cleanupSources: (opts?: { skipNodeSources?: boolean }) => Promise<CleanupOutcome>;
   on: { plain: boolean; danmu: boolean; livechat: boolean };
   notify: (e: NotifyEvent) => void;
 }): Promise<CleanupOutcome & { verifyBlocked?: boolean }> {
@@ -343,16 +352,26 @@ export async function finalizeAfterUpload(o: {
     // **不**阻止删源。理由见 verify.ts 的 DEFAULT_VERIFY_BLOCKING 注释(核验从未抓到真失败,
     // 只在 append 成功后 0.5 秒读到 B站未同步的旧值 → 误伤成功的上传 + 源永不删)。
     if (!verifyBlocksOnMismatch()) {
+      // 观察期只放宽 **多出** 分 P 的情形(B站比我们提交的多 = 我们没丢东西,源可安全删)。
+      //
+      // **少了** 分 P(actual < expected)一律**不删节点源**:两种可能 ——
+      //   ①B站 pages 还没同步(假失败,实测 0.5~0.6s 就核验时高发);②真的丢片。
+      // 两种都不该在这种情况下**销毁最后一份源**(不可逆)。源留着,由 reconciler 的
+      // 收尾补跑(clean_source 缺失 → 补跑)在**确认一致**之后再删,见 cleanupBackfillDue。
+      const lostParts = v.actual < v.expected;
       ledger.syncNodeState(streamKey, "clean_verify", "done", {
-        error: `分 P 数不符:期望 ${v.expected} 实际 ${v.actual}(观察期仅记录)`,
+        error: `分 P 数不符:期望 ${v.expected} 实际 ${v.actual}`
+          + (lostParts ? "(观察期:疑似缺失,**保留节点源**,待补跑确认)" : "(观察期仅记录,多出分 P 不影响删源)"),
       });
       // 告警仍走 error 通道(NotifyEvent 没有 warn 档):观察期不该为「读早了」刷 error 通知,
       // 但**必须留痕** —— job.log 与台账已记,这里只把措辞标成「仅记录」便于日后区分。
       o.notify({
         kind: "error", stage: "上传",
-        message: `${verifyMessage(v, streamKey, bv)}(观察期仅记录,未阻塞)`,
+        message: `${verifyMessage(v, streamKey, bv)}`
+          + (lostParts ? "(观察期:疑似缺失,已保留节点源)" : "(观察期仅记录,未阻塞)"),
       });
-      return await o.cleanupSources();
+      // 疑似缺失 → 只做 stage 侧清理,跳过节点源(sourceAfterDone 置 false);其余照常。
+      return lostParts ? await o.cleanupSources({ skipNodeSources: true }) : await o.cleanupSources();
     }
     // 返回值也要改:调用方直接把本函数返回的 state 交给 reconciler/UI,
     // 只改台账不改返回值 → UI 显示 done、实际 needs_manual,两处真相打架。
@@ -636,10 +655,11 @@ async function runPipelineInner(
   const stagePulledSources = winnerMembers.flatMap((m) =>
     m.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f))));
   // 「删源」:节点 recordings 源 + (合并模式的)stage 拉来源段。调用点保证在安全点(stage 收尾 / markDone 后)。
-  const cleanupSources = async (): Promise<CleanupOutcome> =>
+  const cleanupSources = async (opts?: { skipNodeSources?: boolean }): Promise<CleanupOutcome> =>
     cleanupSourcesShared({
       streamKey, ledger, transports, members: candidates.members,
       cleanup: clean, stagePulledSources, rmStage, log: jlog,
+      skipNodeSources: opts?.skipNodeSources,
     });
 
   const workflow = buildWorkflow({
@@ -852,12 +872,13 @@ async function resumeAppends(
   // 上传成功 → 与主路径同一收口闸门:核验分 P 数 → 才删源(T11/T12)。
   // 续跑此前漏了 sourceAfterDone,是节点源残留的来源之一,这里一并补上。
   const rmStageFn = deps.rmStage ?? defaultRmStage;
-  const cleanupSources = async (): Promise<CleanupOutcome> =>
+  const cleanupSources = async (opts?: { skipNodeSources?: boolean }): Promise<CleanupOutcome> =>
     cleanupSourcesShared({
       streamKey, ledger, transports: deps.transports, members,
       cleanup: cfg.cleanup,
       stagePulledSources: members.flatMap((m) => m.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f)))),
       rmStage: rmStageFn, log: jlog,
+      skipNodeSources: opts?.skipNodeSources,
     });
   const finalize = await finalizeAfterUpload({
     streamKey, bv, deps, log: jlog, notify, cleanupSources,
