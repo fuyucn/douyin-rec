@@ -56,6 +56,33 @@
 
 ## 待办（Next）
 
+- [~] **T-32 分P 核验假 mismatch → 13 个 job 卡 needs_manual + 源不删(磁盘持续涨)** — 2026-10-10 实测发现。
+  **根因(台账时间戳 + B站实查双向取证)**:`finalizeAfterUpload` 在**最后一个 append 成功后 0.5~0.6 秒**
+  就去查 `view?bvid=`,而 B站 `pages` 列表此刻**还没同步** → 只看到 P1 → 判「期望3/实际1」→
+  永久 `needs_manual` + 保留全部源。**上传其实全对**:实查 `BV1pqpL6kEeH`=3 分P、`BV1hWpL6HEWr`=2 分P。
+  **影响**:13/61 个 job(21%)卡人工待办;每场源几个 GB 不删 → 磁盘持续涨;reconciler **不重跑
+  `needs_manual`**(设计如此,防重传重复稿)→ 不会自愈。
+  **修**:①核验前等 B站数据可见并重查(`verify.ts` 加带重试的最终一致:mismatch 不立刻转人工,
+  间隔重查,稳定不一致才判 mismatch);②重试耗尽 → 判 `unknown`(软,可被 reconciler 补跑)**而非**
+  `mismatch`(不污染待人工列表);③一次性重核工具,把假 mismatch 翻回 done 并正常删源。
+  **验收**:复现竞态的测试(append 成功但 view 少一个分P → 必须重查到一致,不转人工);
+  工具跑一遍后 13 个里「B站分P 实际够」的翻回 done、真故障(如 `68133201791` `rsync rc=12`)
+  保持 needs_manual 不被误伤;`pnpm test`/`typecheck`/`bundle` 绿。
+  **进行中**:2026-10-10 已定位根因,开始写复现测试。
+  **已修**(`0.0.72`,**未部署**):①`verify.ts` 加一致性重查(5 次 × 3s 退避,稳定不一致才判 mismatch);
+  ②**核验降级为非阻塞**(`DEFAULT_VERIFY_BLOCKING=false`):mismatch 只记录(台账 `clean_verify` + job.log
+  + 一条「观察期仅记录」通知),**不再**转 needs_manual、**不再**阻止删源;`unknown` 不放宽(仍保留源)。
+  开关单一(`verifyBlocksOnMismatch()`),传 `blocking:true` 即恢复旧行为。
+  ③新增 `finalize-verify.test.ts`:核验真正的收口闸门 `finalizeAfterUpload` **此前无任何测试**
+  (「核验阻塞删源」一直裸奔);新增 4 例,已验证改回 true → 2 例失败。
+  ④一次性重核工具 `hub recheck-verify`(默认 dry-run):识别出 **2 个**可翻转
+  (`347071634383:2026-10-11`、`63171491268:2026-10-11`),跳过 11 个非核验失败者。
+  **观察期要攒的数据** = 「biliup 退出码 0 但 B站分P 最终不符」的真实发生率 + 重查耗时分布,
+  攒够后用**真实分布**回答「要等多久」,再决定是否升回硬验收。
+  **遗留(未查)**:今早 `kuaishou:myhx123456789:2026-10-10` 与 `douyin:391647909803:2026-10-10`
+  两个 needs_manual **error 为空**,台账轨迹 `pending→syncing→merging→needs_manual`,
+  `upload` 及 burn/append 全 `skipped`、**bv=null** —— 合并成功但**从未上传**,是**另一个问题**。
+
 - [~] **T-31 `/rooms` 完整替代 Tasks + Hub**(2026-10-10 用户定调:「新的 room 是为了替换掉 tasks 和 hub,
   必须做到完整更改时有效,如果没有提升就没有意义」)。**做什么**:把 `/rooms` 从「并存实验页」推进到
   「可替代」—— ①录/处理两半的**每个字段都能配**(对齐 CreateEditTaskDialog + HubRuleDialog);
