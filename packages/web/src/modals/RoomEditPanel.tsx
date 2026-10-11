@@ -11,8 +11,10 @@
  * 旧弹窗(CreateEditTaskDialog / HubRuleDialog)一律不动;本面板只服务 /rooms 页。
  */
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useAtomValue } from "jotai";
 import { X } from "lucide-react";
 import { api, type PlatformDTO, type RoomDTO, type WorkerDTO } from "../api/client";
+import { cookieStatusAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
 import { Switch } from "../components/Switch";
 import { errMessage, useToast } from "../lib/hooks";
@@ -93,6 +95,9 @@ function fromRoom(r: RoomDTO): FormState {
 export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNode {
   const t = useT();
   const toast = useToast();
+  // 没登录账号时「弹幕带 Cookie」根本给不出礼物/入场 —— 明说,而不是让人以为开了就生效
+  // (与任务弹窗 CreateEditTaskDialog 同口径:那边是直接禁用开关,这边保留开关 + 给原因)。
+  const cookieReady = !!useAtomValue(cookieStatusAtom)?.hasSession;
   const [form, setForm] = useState<FormState>(() => fromRoom(room));
   const [busy, setBusy] = useState(false);
   const [platforms, setPlatforms] = useState<PlatformDTO[]>([]);
@@ -116,6 +121,15 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
     void api.listWorkers().then((ws) => { if (alive) setWorkers(ws); }).catch(() => {});
     return () => { alive = false; };
   }, [open]);
+
+  // Cookie 开关的说明**按平台给**(单一真理 = 各平台 `getStream` 是否用 cookie):
+  //   - 抖音:getStream **故意忽略** cookie(传会话 cookie 会异地登录踢手机主号,
+  //     见 docs/douyin-kick-investigation.md)→ cookie 只影响弹幕(礼物/入场弹幕);
+  //   - B站/快手:getStream 用 cookie 登录态取流 → 关掉会掉到匿名基础画质。
+  // 原文案一句「关 = 匿名取流」在抖音上是**错的**(它永远匿名取流),故不给统一文案。
+  const useCookieHint = room.platform === "douyin"
+    ? t("rooms.useCookieHintDouyin")
+    : t("rooms.useCookieHintOther");
 
   const plat = pickPlatform(room.room, platforms);
   const qualityOptions = plat?.qualities ?? [];
@@ -295,10 +309,13 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                     </span>
                     <Switch checked={form.danmu} onCheckedChange={(v: boolean) => set("danmu", v)} />
                   </label>
+                  {/* Cookie 的含义**按平台不同**(见上方 useCookieHint) */}
                   <label className="switch-row col-span-2">
                     <span className="flex flex-col min-w-0">
                       <span className="text-sm font-medium text-ink">{t("rooms.useCookie")}</span>
-                      <span className="text-xs text-muted mt-0.5">{t("rooms.useCookieHint")}</span>
+                      <span className="text-xs text-muted mt-0.5">
+                        {!cookieReady ? t("rooms.useCookieNeedCookie") : useCookieHint}
+                      </span>
                     </span>
                     <Switch checked={form.useCookie} onCheckedChange={(v: boolean) => set("useCookie", v)} />
                   </label>
