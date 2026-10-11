@@ -70,6 +70,11 @@
   回归用例);③**P1 能力缺口**:面板补齐定时窗口/webhook/三清理开关/三标题模板/能力门控 requires,
   列表页加行内动作(启停/排空/详情/编辑/删除)+ 新建房间。真实浏览器验证保存往返 + 未提交字段不被抹掉。
   **剩余**:是否把 `/rooms` 设为主入口、旧页降为只读/重定向(**待用户拍板**,即原 T20 的 ①②③④)。
+  **追加**(`0.0.71`,用户反馈「看不到 hub 的 workflows、队列进程」):补 **Hub 运行态半边** ——
+  `RoomRunsPanel`/`RoomRunsDrawer`(**复用 Hub 的 `RunCard`**,不重写流程图)→ workflow DAG +
+  运行记录 + job 日志 + 单节点重试 + 失败重跑 + 停止,行内时钟图标入口,推送驱动刷新。
+  至此 `/rooms` = Tasks(录)+ Hub(配)+ Hub(看)。**仍未做**:跨房间的处理队列视图
+  (现 `/queue` 页独有,「队列的进程」要并进来需再评估是否同页共存或合并)。
 
 - [~] **T-30 hub/tasks 协作 + 编排/队列/多节点优化**(分支 `feat/hub-optimization`;M1 进行中) — 计划 `plans/030_hub_tasks_optimization.md`
   (结构化任务 `plans/030_tasks.json`,唯一执行源;20 任务 / 8 组件,plan-loop 校验 ok)。
