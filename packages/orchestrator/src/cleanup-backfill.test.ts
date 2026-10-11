@@ -32,56 +32,34 @@ function due(ledger: SyncLedger, sourceAfterDone: boolean): string | null {
     .cleanupBackfillDue("douyin:test:2026-10-11", sourceAfterDone);
 }
 
-describe("cleanupBackfillDue:done 且 clean_source 缺失 → 必须补跑(T33 ①)", () => {
-  it("**已上传(bv)、没有** clean_source、房间开了 sourceAfterDone → 判为待补跑", () => {
-    const l = new SyncLedger(":memory:");
-    l.upsertPending("douyin:test:2026-10-11");
-    l.markDone("douyin:test:2026-10-11", "BV1");
-    // 复现线上:核验误判 → 只在 mismatch 分支 return,没有 clean_source。
-    l.syncNodeState("douyin:test:2026-10-11", "clean_verify", "failed");
-    expect(due(l, true)).toContain("clean_source");
-  });
-
-  it("clean_verify=failed(线上积压那批的真实形态)也必须补跑 —— 旧条件要求 done 导致一条都补不上", () => {
+describe("cleanupBackfillDue:**不再**因「clean_source 缺失」补跑(2026-10-11 撤回了这条)", () => {
+  // 撤回原因:补跑走的是整条 runPipeline(不是只删源)。mergeSegments=false 的房间会走
+  // runSegmentPipeline,那条路径即使 bv 已存在也**先 select + pull 源回 stage** ——
+  // 实测把 14G 从节点拉回 master(磁盘不降反升),且有重复 append/重复投稿风险。
+  // 「为省空间反而更费空间、还可能重传」→ 撤回。删源需要独立的收口入口(留 T33 后续)。
+  it("done + 有 bv + clean_source 缺失 → **仍返回 null**(不派发,避免 pull 回灌/重传)", () => {
     const l = new SyncLedger(":memory:");
     l.upsertPending("douyin:test:2026-10-11");
     l.markDone("douyin:test:2026-10-11", "BV1");
     l.syncNodeState("douyin:test:2026-10-11", "clean_verify", "failed");
     l.syncNodeState("douyin:test:2026-10-11", "upload_plain", "done");
-    expect(due(l, true)).toContain("clean_source");
-  });
-
-  it("**没有 bv**(未上传成功)→ 不补跑(避免对没上传的场做清理)", () => {
-    const l = new SyncLedger(":memory:");
-    l.upsertPending("douyin:test:2026-10-11");
-    l.setState("douyin:test:2026-10-11", "done");
-    l.syncNodeState("douyin:test:2026-10-11", "clean_verify", "failed");
     expect(due(l, true)).toBeNull();
   });
 
-  it("房间**没开** sourceAfterDone → 不补跑(不该删源)", () => {
+  it("clean_source=failed → 仍走原分支补跑(回归:这条本来就有,没被撤回影响)", () => {
     const l = new SyncLedger(":memory:");
     l.upsertPending("douyin:test:2026-10-11");
     l.markDone("douyin:test:2026-10-11", "BV1");
-    expect(due(l, false)).toBeNull();
-  });
-
-  it("clean_source 已 done → 不重复补跑(幂等)", () => {
-    const l = new SyncLedger(":memory:");
-    l.upsertPending("douyin:test:2026-10-11");
-    l.markDone("douyin:test:2026-10-11", "BV1");
-    l.syncNodeState("douyin:test:2026-10-11", "clean_verify", "done");
-    l.syncNodeState("douyin:test:2026-10-11", "clean_source", "done");
-    expect(due(l, true)).toBeNull();
-  });
-
-  it("clean_source=failed → 仍走原分支补跑(回归:没被新逻辑挤掉)", () => {
-    const l = new SyncLedger(":memory:");
-    l.upsertPending("douyin:test:2026-10-11");
-    l.markDone("douyin:test:2026-10-11", "BV1");
-    l.syncNodeState("douyin:test:2026-10-11", "clean_verify", "done");
     l.syncNodeState("douyin:test:2026-10-11", "clean_source", "failed", { error: "磁盘满" });
     expect(due(l, true)).toContain("clean_source");
+  });
+
+  it("clean_verify=pending → 仍补跑(软状态重试,原行为不变)", () => {
+    const l = new SyncLedger(":memory:");
+    l.upsertPending("douyin:test:2026-10-11");
+    l.markDone("douyin:test:2026-10-11", "BV1");
+    l.syncNodeState("douyin:test:2026-10-11", "clean_verify", "pending");
+    expect(due(l, true)).toContain("clean_verify");
   });
 });
 

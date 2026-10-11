@@ -402,30 +402,18 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     if (age < this.cleanupBackfillThrottleMs) continue;
     due.push(n.node);
   }
-  // 「done 但 clean_source **从未存在**」也要补跑 —— 这是本函数此前够不着的漏网之鱼。
+  // ⚠️ **已撤回**「done + clean_source 缺失 → 补跑」这条(2026-10-11 实测发现它有害)。
   //
-  // 背景(实测):上传成功后被核验误判 mismatch 的 job 会**在 mismatch 分支提前 return**,
-  // `cleanupSources()` 根本不被调用 → 台账里连 `clean_source` 这一行都没有
-  // (不是 failed,是**缺失**)。而原判定只认「节点存在且 failed」→ 这类 job 永远轮不到,
-  // 源录像一直堆着:实测 6 个房间 ~28G,最终把磁盘撑爆并导致 master 崩溃(ENOSPC)。
+  // 原本想用它回收「上传成功却没删源」的积压(实测 ~28G,撑爆过磁盘)。但实测发现:
+  // 补跑走的是 **整条 runPipeline**,不是「只删源」。对 `mergeSegments=false` 的房间会走
+  // `runSegmentPipeline`,那条路径在 `existing?.bv` 时仍**先 select + pull 源回 stage**
+  // (实测正把 14G 从节点拉回 master)→ ①磁盘不降反升 ②存在**重复 append / 重复投稿**风险。
+  // 「为了省空间反而更费空间、还可能重传」—— 必须撤回,不能留着。
   //
-  // 触发条件只限定「该不该做这件事」,不做语义判断 —— 语义交给 pipeline 重跑时**重新核验**:
-  //   ①房间**开了** `cleanup.sourceAfterDone`(没开就不该删源);
-  //   ②该场**已上传**(有 bv;= upload_plain 完成,不是半途中断);
-  //   ③`clean_source` 节点**完全不存在**(存在即 failed 走上面分支 / 已 done 则无需补)。
-  // 补跑会走 runPipeline → resumeAppends → **重新核验**;核验不通过时(见 pipeline 的
-  // 观察期分支)只清 stage、保住节点源,所以这里放宽条件**不会**导致误删。
-  //
-  // 注:此前用 `clean_verify=done` 当条件,**过窄** —— 实测积压的那批恰恰是
-  // `clean_verify=failed`(旧语义留下),条件不满足 → 一条都补不上。改用「有 bv」更贴近事实。
-  const job = this.ledger.get(streamKey);
-  if (sourceAfterDone && job?.bv && !nodes.some((n) => n.node === "clean_source")) {
-    // 节流锚点:最近一条节点状态时间(没有节点则用 job 更新时间),避免每轮反复派发同一场。
-    const anchor = nodes.reduce((mx, n) => Math.max(mx, n.updatedAt), job.updatedAt ?? 0);
-    if (Math.max(0, now - anchor) >= this.cleanupBackfillThrottleMs) {
-      due.push("clean_source(缺失)");
-    }
-  }
+  // 正确做法(留 T33 后续):删源**不该借道 pipeline**,应有一个**只删源、不做 select/pull/
+  // append/上传**的独立收尾入口(或 pipeline 支持「只跑 cleanup」的收尾模式)。
+  // 在那之前,积压源录像**保持现状**(安全第一:源不能因为清理动作本身被重复上传)。
+  void sourceAfterDone;
   return due.length > 0 ? due.join(",") : null;
 }
 
