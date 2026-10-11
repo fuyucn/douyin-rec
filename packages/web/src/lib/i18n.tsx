@@ -145,6 +145,8 @@ const DICT = {
       stopNow: "立即停止", deleted: "房间已删除",
       stopConfirm: "立即停止「{name}」的录制?当前分段会被截断。", deleteConfirm: "删除房间「{name}」的录制任务?",
       addRoom: "新建房间",
+      runsHeading: "处理运行态", runsEmpty: "还没有处理记录",
+      runsEmptyHint: "录完一场并收播后,这里会显示该房间的处理流程(合并 → 烧录 → 上传)与结果。",
     },
     settings: {
         notifSaved: "通知设置已保存",
@@ -509,6 +511,8 @@ const DICT = {
       stopNow: "Stop now", deleted: "Room deleted",
       stopConfirm: "Stop recording for \"{name}\"? The current segment will be truncated.", deleteConfirm: "Delete the recording task for room \"{name}\"?",
       addRoom: "New room",
+      runsHeading: "Processing runs", runsEmpty: "No processing runs yet",
+      runsEmptyHint: "After a stream ends, this room's pipeline (merge → burn → upload) and results show up here.",
     },
     settings: {
         notifSaved: "Notification settings saved",

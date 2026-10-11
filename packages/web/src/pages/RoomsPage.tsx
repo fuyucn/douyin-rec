@@ -25,6 +25,7 @@ import {
   Activity,
   FileText,
   FolderOpen,
+  History,
   LayoutGrid,
   Pencil,
   Play,
@@ -44,6 +45,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { Button } from "../components/Button";
 import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
+import { RoomRunsDrawer } from "../components/RoomRunsPanel";
 import { useHubStream, usePolling, errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { QUALITY_SHORT, qualityLabel, roomId, scheduleText } from "../lib/labels";
@@ -60,6 +62,8 @@ export function RoomsPage(): ReactNode {
   /** 待确认的破坏性动作(硬停会截断当前分段 → 必须二次确认)。 */
   const [confirm, setConfirm] = useState<{ kind: "stop" | "delete"; room: RoomDTO } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  /** 打开运行态抽屉的房间(workflow / 运行记录 / 日志 / 重跑)。 */
+  const [runsRoom, setRunsRoom] = useState<RoomDTO | null>(null);
   const [q, setQ] = useState("");
 
   const refresh = async (): Promise<void> => {
@@ -258,6 +262,7 @@ export function RoomsPage(): ReactNode {
                 workerName={workerName}
                 onEdit={() => setEditing(r)}
                 onAction={(a) => (a === "delete" ? setConfirm({ kind: "delete", room: r }) : a === "stop" ? setConfirm({ kind: "stop", room: r }) : void runTaskAction(r, a))}
+                onShowRuns={() => setRunsRoom(r)}
               />
             ))}
         </div>
@@ -318,12 +323,23 @@ export function RoomsPage(): ReactNode {
                     workerName={workerName}
                     onEdit={() => setEditing(r)}
                     onAction={(a) => (a === "delete" ? setConfirm({ kind: "delete", room: r }) : a === "stop" ? setConfirm({ kind: "stop", room: r }) : void runTaskAction(r, a))}
+                    onShowRuns={() => setRunsRoom(r)}
                   />
                 ))}
             </tbody>
           </table>
         </div>
       </section>
+
+      {/* 运行态抽屉:该房间的 workflow 流程图 + 运行记录 + 日志 + 重跑。 */}
+      {runsRoom && (
+        <RoomRunsDrawer
+          room={runsRoom}
+          workers={workers}
+          onClose={() => setRunsRoom(null)}
+          onEdit={() => { setEditing(runsRoom); }}
+        />
+      )}
 
       {editing && (
         <RoomEditPanel
@@ -475,11 +491,13 @@ function RowActions({
   task,
   onAction,
   onEdit,
+  onShowRuns,
 }: {
   room: RoomDTO;
   task?: Task;
   onAction: RowAction;
   onEdit: () => void;
+  onShowRuns: () => void;
 }): ReactNode {
   const t = useT();
   const managed = task?.managedBy === "hub";
@@ -488,6 +506,9 @@ function RowActions({
     // 纯规则房间:没有录制任务可启停,只留「编辑」(处理半边仍可配)。
     return (
       <div className="inline-flex items-center gap-1.5 justify-end">
+        <IconButton title={t("rooms.runsHeading")} onClick={onShowRuns}>
+          <History className="w-4 h-4" />
+        </IconButton>
         <IconButton title={t("rooms.edit")} onClick={onEdit}>
           <Pencil className="w-4 h-4" />
         </IconButton>
@@ -508,6 +529,10 @@ function RowActions({
       )}
       <IconButton title={tip(t("rooms.actionDrain"))} disabled={managed || !enabled} onClick={() => onAction("drain")}>
         <Timer className="w-4 h-4" />
+      </IconButton>
+      {/* 运行态:该房间的 workflow 流程图 / 运行记录 / 日志 / 重跑(复用 Hub 的 RunCard)。 */}
+      <IconButton title={t("rooms.runsHeading")} onClick={onShowRuns}>
+        <History className="w-4 h-4" />
       </IconButton>
       {room.recording.taskId != null && (
         <Link className="btn-icon" to={`/task/${room.recording.taskId}`} title={t("tasks.titleDetail")}>
@@ -533,12 +558,14 @@ function RoomRow({
   workerName,
   onEdit,
   onAction,
+  onShowRuns,
 }: {
   room: RoomDTO;
   task?: Task;
   workerName: Map<string, string>;
   onEdit: () => void;
   onAction: RowAction;
+  onShowRuns: () => void;
 }): ReactNode {
   const t = useT();
   const rec = room.recording;
@@ -598,7 +625,7 @@ function RoomRow({
         </div>
       </td>
       <td className="text-right whitespace-nowrap">
-        <RowActions room={room} task={task} onAction={onAction} onEdit={onEdit} />
+        <RowActions room={room} task={task} onAction={onAction} onEdit={onEdit} onShowRuns={onShowRuns} />
       </td>
     </tr>
   );
@@ -611,12 +638,14 @@ function RoomCompactRow({
   workerName,
   onEdit,
   onAction,
+  onShowRuns,
 }: {
   room: RoomDTO;
   task?: Task;
   workerName: Map<string, string>;
   onEdit: () => void;
   onAction: RowAction;
+  onShowRuns: () => void;
 }): ReactNode {
   const t = useT();
   const rec = room.recording;
@@ -653,7 +682,7 @@ function RoomCompactRow({
       </p>
       {/* 动作条(与桌面表格同一组按钮):窄屏也要能启停/排空/编辑,否则手机上做不了事 */}
       <div className="mt-2.5 flex justify-end">
-        <RowActions room={room} task={task} onAction={onAction} onEdit={onEdit} />
+        <RowActions room={room} task={task} onAction={onAction} onEdit={onEdit} onShowRuns={onShowRuns} />
       </div>
     </div>
   );
