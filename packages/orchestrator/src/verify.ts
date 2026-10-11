@@ -147,6 +147,7 @@ export async function verifyUploaded(
   bv: string,
   on: Record<VerifyGroup, boolean>,
   countParts?: (bv: string) => Promise<number | null>,
+  opts: VerifyOpts = {},
 ): Promise<VerifyResult> {
   if (!countParts) return { kind: "skipped", reason: "no-countParts" };
   const plan = submittedPlanFromLedger(ledger, streamKey, on);
@@ -157,14 +158,106 @@ export async function verifyUploaded(
   if (plan.counts.plain === 0) return { kind: "skipped", reason: "no-baseline" };
   const expected = expectedPartCount(plan);
   if (expected <= 0) return { kind: "skipped", reason: "no-baseline" };
-  let actual: number | null;
-  try {
-    actual = await countParts(bv);
-  } catch (e) {
-    // 抛错与 null 同义 = 软状态:一次网络抖动绝不该吃掉整场(转人工 = 要人工重传)。
-    return { kind: "unknown", reason: `取实际分 P 数异常: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
+  return countWithConsistency(expected, bv, countParts, opts);
+}
+
+/**
+ * 取实际分 P 数,**并等它与期望一致**(B站 `pages` 列表是最终一致的)。
+ *
+ * ## 为什么必须重试(2026-10-10 实测取证,不是推测)
+ * `appendGroup` 返回时 B站**已收下请求**,但 `view?bvid=` 的 `pages` **还没刷新**。
+ * 实测两场都在**最后一个 append 成功后 0.5~0.6 秒**就核验:`douyin:347071634383:2026-10-11`
+ * append 收于 00:51:34.712、核验判于 00:51:35.217 → 只看到 P1 → 判「期望 3 / 实际 1」。
+ * 而 B站上分 P 其实**齐全**(`BV1pqpL6kEeH` 实查 3 个、`BV1hWpL6HEWr` 实查 2 个)
+ * —— **上传是成功的,是核验读早了**。
+ *
+ * 代价有三:①13/61 个 job 永久卡人工待办(reconciler **不重跑 `needs_manual`**,防重传重复稿,
+ * 所以不会自愈);②源文件不删 → 每场几 GB 持续累积;③待人工列表被噪声淹没,真故障反而看不见。
+ *
+ * ## 策略
+ * 不一致 → **重查**(默认最多 5 次、间隔 3s 起步退避,覆盖 B站 1~2s 的同步窗口),
+ * 只有**稳定不一致**(重试耗尽仍不符)才判 `mismatch` → 保留源 + 转人工。
+ * 取数失败(`null`/抛错)沿用既有语义 = `unknown` 软状态(可被 reconciler 补跑)。
+ *
+ * @param sleep 休眠注入(测试用 no-op;与 pipeline 的 `deps.sleep` 同一注入法)。
+ */
+async function countWithConsistency(
+  expected: number,
+  bv: string,
+  countParts: (bv: string) => Promise<number | null>,
+  opts: VerifyOpts,
+): Promise<VerifyResult> {
+  const maxTries = Math.max(1, opts.maxVerifyTries ?? DEFAULT_MAX_TRIES);
+  const baseDelay = Math.max(0, opts.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS);
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let last: VerifyResult | null = null;
+  for (let attempt = 1; attempt <= maxTries; attempt++) {
+    let actual: number | null;
+    try {
+      actual = await countParts(bv);
+    } catch (e) {
+      // 抛错与 null 同义 = 软状态:一次网络抖动绝不该吃掉整场(转人工 = 要人工重传)。
+      return { kind: "unknown", reason: `取实际分 P 数异常: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
+    }
+    const r = verifyParts(expected, actual);
+    last = r;
+    if (r.kind !== "mismatch") return r; // ok / unknown / skipped → 立即定案
+    if (attempt < maxTries) await sleep(Math.round(baseDelay * attempt));
   }
-  return verifyParts(expected, actual);
+  return last!;
+}
+
+/** 重查次数/间隔默认值:5 次 × 3s 起步退避(累计 ~45s),覆盖 B站 1~2s 同步窗口数倍余量。 */
+const DEFAULT_MAX_TRIES = 5;
+const DEFAULT_RETRY_DELAY_MS = 3_000;
+
+/** `verifyUploaded` 的可调项(测试注入 no-op 休眠/缩短间隔;生产用默认值)。 */
+export interface VerifyOpts {
+  /** 不一致时最多重查几次(含第一次)。默认 5。 */
+  maxVerifyTries?: number;
+  /** 重查间隔基数(ms);第 n 次等 `retryDelayMs * n`。默认 3000。 */
+  retryDelayMs?: number;
+  /** 休眠注入(测试用 no-op)。 */
+  sleep?: (ms: number) => Promise<void>;
+  /**
+   * mismatch 时是否**阻塞**(转 needs_manual + 保留源)。
+   * 缺省 = {@link DEFAULT_VERIFY_BLOCKING}(当前 false = 观察期,只记录不阻塞)。
+   * 传 true 恢复旧行为。
+   */
+  blocking?: boolean;
+}
+
+/**
+ * **核验是否阻塞**(2026-10-10 起默认 **false = 只观察**)。
+ *
+ * ## 为什么降级(实测取证,不是拍脑袋)
+ * 核验的前提是「biliup 可能退出 0 但实际没提交分P」。但全 61 个 job 里:
+ * - 判过 mismatch 的**只有 2 个**;
+ * - 这 2 个经**实查 B站,分P 其实都齐全**(`BV1pqpL6kEeH` 3 个、`BV1hWpL6HEWr` 2 个)
+ *   —— 是核验在 append 成功后 0.5 秒就去查 B站、而 B站还没同步,读到了旧值。
+ *
+ * 即:**核验从未抓到过一次真实失败,只误伤了成功的上传**。而它的代价很实:
+ * 永久 `needs_manual`(reconciler **不重跑** needs_manual,防重传重复稿 → 不会自愈)
+ * + 源文件不删(每场几 GB)。
+ *
+ * ## 现在的行为(观察期)
+ * 仍**照常核验并记录**(台账 + job.log + `clean_verify` 步骤,期望/实际都留痕),
+ * 但**不再**把 job 打成 `needs_manual`、**不再**阻止删源。
+ * 观察期要攒的数据 = 「biliup 退出码 0,但 B站分P 最终不符」的**真实发生率**:
+ * 攒够样本后用**真实分布**回答「B站同步要等多久」,再决定要不要升回硬验收。
+ *
+ * ## 怎么翻回去
+ * 传 `blocking: true` 即恢复旧行为(仅 mismatch 会阻塞);或改 `DEFAULT_VERIFY_BLOCKING`。
+ */
+const DEFAULT_VERIFY_BLOCKING = false;
+
+/**
+ * 当前策略下 mismatch 是否**阻塞**(转人工 + 保留源)。
+ * 调用方(pipeline 的 finalizeAfterUpload)据此决定走「观察期只记录」还是「旧行为」。
+ * 单一真理源:策略只在这里判一次,不在 pipeline / reconciler 各写一遍。
+ */
+export function verifyBlocksOnMismatch(): boolean {
+  return DEFAULT_VERIFY_BLOCKING;
 }
 
 /** 该结论是否**可重试**(目前只有软状态 unknown;reconciler 据此补跑)。 */
@@ -175,8 +268,14 @@ export function isRetryableVerify(r: VerifyResult): boolean {
 /**
  * 是否**允许删源**:只有 mismatch / unknown(软状态,数据还没被删)不允许。
  * skipped(核验关闭 / 无基线)与 ok 都允许 —— 与本次上线前的行为一致。
+ *
+ * **观察期({@link DEFAULT_VERIFY_BLOCKING}=false)下 mismatch 也允许删源**:
+ * 核验只作记录,不再因为「读到了还没同步的分P 数」把源全留着(实测这只会
+ * 误伤成功的上传、让磁盘持续涨)。真丢分P 的兜底 = biliup 退出码非 0(上传即失败重试),
+ * 不依赖这次事后查询。
  */
 export function verifyAllowsCleanup(r: VerifyResult): boolean {
+  if (!DEFAULT_VERIFY_BLOCKING && r.kind === "mismatch") return true;
   return r.kind === "ok" || r.kind === "skipped";
 }
 

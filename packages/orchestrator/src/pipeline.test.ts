@@ -60,6 +60,8 @@ type TestDeps = Omit<PipelineDeps, "sh" | "uploadPlain" | "appendGroup" | "notif
 
 function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
   const ledger = freshLedger();
+  // 核验的「重查等 B站 pages 同步」默认 5 次 × 3s 退避(≈45s);测试全局注入 no-op 免真等。
+  // (与 append 重试同一注入点;生产走真实 setTimeout。)
   const t1 = makeTransport("node-1");
   const t2 = makeTransport("node-2");
   const transports = new Map([["node-1", t1], ["node-2", t2]]);
@@ -112,6 +114,9 @@ function makeDeps(overrides: Partial<PipelineDeps> = {}): TestDeps {
     splitForUpload: async (mp4: string) => [mp4],
     notify,
     cfg,
+    // 核验重查(B站 pages 同步)默认 5 次 × 3s 退避 ≈45s;测试统一 no-op 免真等。
+    // 个别用例若显式覆盖 sleep 则以覆盖值为准。
+    sleep: async () => {},
     ...overrides,
   };
   return base as unknown as TestDeps;
@@ -241,11 +246,17 @@ describe("runPipeline", () => {
         expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
       });
 
-      it("期望 9 实际 8 → needs_manual + 源保留(cleanup 未被调)", async () => {
+      it("期望 9 实际 8 → **观察期:仅记录,仍 done + 照常删源**(T32 核验不再阻塞)", async () => {
+        // 依据:全 61 个 job 里判过 mismatch 的只有 2 个,且经实查 B站分P **都齐全** ——
+        // 核验从未抓到真失败,只在 append 成功后 ~0.5s 读到 B站未同步的旧值。
+        // 代价(永久 needs_manual + 源永不删)却是实的,故观察期只记录不阻塞。
         const deps = segUploadDeps({ countParts: async () => 8 });
         const r = await runSeg(deps);
-        expect(r.state).toBe("needs_manual");
-        expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+        expect(r.state).toBe("done");
+        expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+        // 但必须留痕:clean_verify 步骤记下期望/实际 + 「仅记录」,供观察期统计。
+        expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.error ?? "")
+          .toContain("观察期仅记录");
       });
 
       it("未注入 countParts → 核验关闭,分段路径照常删源(与现状一致)", async () => {
@@ -1206,13 +1217,14 @@ describe("runPipeline", () => {
       expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
     });
 
-    it("合并路径 分P数不符(期望 3 实际 2)→ needs_manual 且**源保留**(cleanup 未被调)", async () => {
+    it("合并路径 分P数不符(期望 3 实际 2)→ **观察期:仅记录 + 照常删源**(T32 核验不再阻塞)", async () => {
+      // 观察期(verifyBlocksOnMismatch()=false):mismatch 只留痕,不转 needs_manual、不保留源。
       const deps = uploadDeps({ countParts: async () => 2 });
       const r = await run(deps);
-      expect(r.state).toBe("needs_manual");
+      expect(r.state).toBe("done");
       expect(r.bv).toBe("BV123");                    // 上传确实成功了
-      expect(deps.ledger.get(STREAM_KEY)?.state).toBe("needs_manual");
-      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled(); // 源必须保留
+      expect(deps.ledger.get(STREAM_KEY)?.state).toBe("done");
+      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled(); // 照常删源
       expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
     });
 

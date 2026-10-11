@@ -13,7 +13,7 @@ import { deriveSegmentPlan, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 import { runSegmentPipeline } from "./segment-pipeline.js";
 // 节点侧上传(experimental,plans/027):全部逻辑隔离在 node-side-upload.ts,便于快速开关/回退。
 import { shouldUseNodeSideUpload, tryNodeSideUpload } from "./node-side-upload.js";
-import { PART_GROUP_CANONICAL, verifyMessage, verifyUploaded } from "./verify.js";
+import { PART_GROUP_CANONICAL, verifyBlocksOnMismatch, verifyMessage, verifyUploaded } from "./verify.js";
 
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。 */
 export interface PipelineSteps {
@@ -329,14 +329,31 @@ export async function finalizeAfterUpload(o: {
 }): Promise<CleanupOutcome & { verifyBlocked?: boolean }> {
   const { deps, streamKey, bv, log } = o;
   const ledger = deps.ledger;
-  const v = await verifyUploaded(ledger, streamKey, bv, o.on, deps.countParts);
+  // 核验的重查退避复用 deps.sleep(与 append 重试同一注入点):测试注入 no-op 即免真等 45s。
+  const v = await verifyUploaded(ledger, streamKey, bv, o.on, deps.countParts,
+    deps.sleep ? { sleep: deps.sleep } : {});
   ledger.logStep(streamKey, "clean_verify", "done", v.kind === "mismatch"
-    ? `不符:期望 ${v.expected} 实际 ${v.actual} · 保留全部源`
+    ? `不符:期望 ${v.expected} 实际 ${v.actual}${verifyBlocksOnMismatch() ? " · 保留全部源" : " · 仅记录(观察期)"}`
     : v.kind === "unknown" ? `待重试:${v.reason}`
     : v.kind === "ok" ? `${v.actual} 个分 P` : `跳过:${v.reason}`);
   log(verifyMessage(v, streamKey, bv));
 
   if (v.kind === "mismatch") {
+    // **观察期默认走这里**(verifyBlocksOnMismatch()=false):只记录 + 告警,**不**转人工、
+    // **不**阻止删源。理由见 verify.ts 的 DEFAULT_VERIFY_BLOCKING 注释(核验从未抓到真失败,
+    // 只在 append 成功后 0.5 秒读到 B站未同步的旧值 → 误伤成功的上传 + 源永不删)。
+    if (!verifyBlocksOnMismatch()) {
+      ledger.syncNodeState(streamKey, "clean_verify", "done", {
+        error: `分 P 数不符:期望 ${v.expected} 实际 ${v.actual}(观察期仅记录)`,
+      });
+      // 告警仍走 error 通道(NotifyEvent 没有 warn 档):观察期不该为「读早了」刷 error 通知,
+      // 但**必须留痕** —— job.log 与台账已记,这里只把措辞标成「仅记录」便于日后区分。
+      o.notify({
+        kind: "error", stage: "上传",
+        message: `${verifyMessage(v, streamKey, bv)}(观察期仅记录,未阻塞)`,
+      });
+      return await o.cleanupSources();
+    }
     // 返回值也要改:调用方直接把本函数返回的 state 交给 reconciler/UI,
     // 只改台账不改返回值 → UI 显示 done、实际 needs_manual,两处真相打架。
     // 唯一会「不删源 + 转人工」的结论:分 P 丢了 = 交付不完整,必须人工补传/核对。

@@ -28,6 +28,21 @@ export type {
 } from "./workflow.js";
 export { openUploadLimitStore, sanitizeUploadLimitState } from "./upload-limits.js";
 export type { UploadLimitState, UploadLimitStore } from "./upload-limits.js";
+// verify.ts 的纯判定/推导函数(T32 重核工具也要用;单一真理源,不在工具里另写一份)。
+export {
+  expectedPartCount,
+  submittedPlanFromLedger,
+  partCountOf,
+  verifyParts,
+  verifyUploaded,
+  verifyAllowsCleanup,
+  verifyBlocksOnMismatch,
+  isRetryableVerify,
+  verifyMessage,
+  PART_GROUP_ALIASES,
+  PART_GROUP_CANONICAL,
+} from "./verify.js";
+export type { VerifyGroup, VerifyResult, VerifyOpts, PartsReader, SubmittedPlan } from "./verify.js";
 export { LocalTransport } from "./transport-local.js";
 export { SshTransport } from "./transport-ssh.js";
 export { startHub } from "./hub.js";

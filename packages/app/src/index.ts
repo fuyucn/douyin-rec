@@ -22,6 +22,7 @@ export type { HubJobView, HubJobEvent, BuildQueueOpts, LatestRunPerRoom } from "
 export { rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, DEFAULT_ROOT, ensureNodeIdentity, rootNodeIdentityPath } from "./paths.js";
 export type { NodeIdentity } from "./paths.js";
 export { rootConfigDir } from "./paths.js";
+export { resolveDbPath } from "./db.js";
 export { readManagedState, writeManagedState, clearManagedState, MANAGED_STATE_FILE } from "./managed-state.js";
 export type { ManagedState } from "./managed-state.js";
 export { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";

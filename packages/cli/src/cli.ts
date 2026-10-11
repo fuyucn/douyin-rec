@@ -1435,6 +1435,24 @@ function scanRecordingRooms(): { platform: string; roomSlug: string }[] {
   return [...rooms.values()];
 }
 
+// ─── hub recheck-verify（T32 一次性重核工具）────────────────────────────
+// 把「B站 pages 还没同步就核验」导致的假 mismatch(needs_manual)按 B站实况翻回 done。
+// 默认 dry-run;必须显式 --apply 才落库。护栏见 packages/cli/src/hub-recheck-verify.ts。
+program
+  .command("hub recheck-verify")
+  .description("重核 needs_manual 的分P 核验假失败(默认 dry-run,--apply 才落库)")
+  .option("--apply", "真的把判定一致的 job 翻回 done(默认只打印)")
+  .option("--key <streamKey>", "只查某一场(如 douyin:123:2026-10-11)")
+  .option("--cookies <path>", "biliup cookies.json 路径")
+  .action(async (o: { apply?: boolean; key?: string; cookies?: string }) => {
+    const { runRecheck } = await import("./hub-recheck-run.js");
+    await runRecheck({
+      apply: o.apply === true,
+      ...(o.key ? { keys: [o.key] } : {}),
+      ...(o.cookies ? { cookies: o.cookies } : {}),
+    });
+  });
+
 // ─── _is-done <dataRoot> <roomSlug>（隐藏子命令，供 master 通过 SSH 调用）────────
 // 只查「该房间」是否还有活着的下载进程(ffmpeg/mesio 子进程)在写盘,不再数全机 ffmpeg:
 // 之前用全局 ffmpeg 计数,别的房间还在录会把本房间也当成未收播,settle 一直空等。

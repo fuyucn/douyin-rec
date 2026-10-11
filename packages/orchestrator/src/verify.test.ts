@@ -10,6 +10,7 @@ import {
   verifyParts,
   verifyUploaded,
   verifyAllowsCleanup,
+  verifyBlocksOnMismatch,
   isRetryableVerify,
   PART_GROUP_ALIASES,
   PART_GROUP_CANONICAL,
@@ -85,10 +86,11 @@ describe("verifyParts(判定)", () => {
     expect(verifyParts(9, 9)).toEqual({ kind: "ok", expected: 9, actual: 9 });
   });
 
-  it("合并路径 期望 3 实际 2 → mismatch(转人工 + 保留源)", () => {
+  it("合并路径 期望 3 实际 2 → mismatch(观察期:判定仍是 mismatch,但**不再**因此保留源)", () => {
+    // 判定逻辑(verifyParts)与阻塞策略(verifyAllowsCleanup)刻意分开:观察期只放宽后者。
     const r = verifyParts(3, 2);
     expect(r.kind).toBe("mismatch");
-    expect(verifyAllowsCleanup(r)).toBe(false);
+    expect(verifyAllowsCleanup(r)).toBe(verifyBlocksOnMismatch() ? false : true);
   });
 
   it("实际多于期望(重复提交/分 P 被人工加过)也是 mismatch", () => {
@@ -125,9 +127,13 @@ describe("verifyUploaded(端到端 + 接缝)", () => {
 
   it("期望 3 实际 2 → mismatch → 不删源", async () => {
     const l = fakeLedger({ plain: [0], append_danmu: [0], append_livechat: [0] });
-    const r = await verifyUploaded(l, "k", "BV1", ALL_ON, async () => 2);
+    // 注入 no-op 休眠 + 缩短间隔:核验现在会**重查**(B站 pages 最终一致),
+    // 用真实 3s 退避会让本例等 ~45s。生产默认即 5 次 × 3s 起步。
+    const r = await verifyUploaded(l, "k", "BV1", ALL_ON, async () => 2,
+      { sleep: async () => {}, retryDelayMs: 0, maxVerifyTries: 2 });
     expect(r.kind).toBe("mismatch");
-    expect(verifyAllowsCleanup(r)).toBe(false);
+    // 观察期:仍判 mismatch(留痕),但允许删源。传 blocking=true 即恢复「保留源」。
+    expect(verifyAllowsCleanup(r)).toBe(!verifyBlocksOnMismatch());
   });
 
   it("countParts 返回 null → unknown:不删源、不转人工;下轮正常后转 ok", async () => {
@@ -161,5 +167,77 @@ describe("verifyUploaded(端到端 + 接缝)", () => {
     const r = await verifyUploaded(fakeLedger({}), "k", "BV1", ALL_ON, async () => { called++; return 9; });
     expect(r.kind).toBe("skipped");
     expect(called).toBe(0);
+  });
+});
+
+/**
+ * T32 回归:**B站 pages 列表最终一致**(append 返回 ≠ view 立刻可见)。
+ *
+ * 线上实测(2026-10-10):`douyin:347071634383:2026-10-11` 最后一个 append 完成于
+ * 00:51:34.712,核验判定在 00:51:35.217 —— **间隔 0.5 秒**,此刻查 `view?bvid=` 只看到 P1,
+ * 于是判「期望 3 / 实际 1」→ 永久 needs_manual + 保留全部源。而 B站上其实**有 3 个分 P**
+ * (`BV1pqpL6kEeH` 实查 3 个)。同理 `douyin:63171491268:2026-10-11` 间隔 0.6 秒、实际 2 个。
+ *
+ * 所以「不匹配」必须先**重查确认是稳定事实**,而不是刚 append 完那一刻的快照。
+ */
+describe("verifyUploaded:pages 列表最终一致(重试后才判 mismatch)", () => {
+  it("第一次查少一个分P(append 刚返回)、重查后一致 → 必须 ok,绝不转人工", async () => {
+    const l = fakeLedger({ plain: [0, 1, 2], append_danmu: [0, 1, 2], append_livechat: [0, 1, 2] });
+    let calls = 0;
+    const r = await verifyUploaded(l, "k", "BV1", ALL_ON, async () => {
+      calls++;
+      // 前两次模拟 B站 还没同步完(只看到 1 个),第三次才真的齐 —— 实测 ~1~2 秒内同步。
+      return calls < 3 ? 1 : 9;
+    }, { sleep: async () => {}, retryDelayMs: 0 });
+    expect(calls).toBe(3);
+    expect(r.kind).toBe("ok");
+    expect(verifyAllowsCleanup(r)).toBe(true);
+  });
+
+  it("**稳定不一致**(重试到耗尽都少一个)→ 才判 mismatch(观察期:不阻塞,但仍留痕)", async () => {
+    const l = fakeLedger({ plain: [0, 1, 2] });
+    let calls = 0;
+    const r = await verifyUploaded(l, "k", "BV1", ALL_ON, async () => { calls++; return 1; },
+      { sleep: async () => {}, retryDelayMs: 0, maxVerifyTries: 3 });
+    expect(calls).toBe(3);
+    expect(r).toEqual({ kind: "mismatch", expected: 3, actual: 1 });
+    // 「重试到耗尽才判」是判定层;「是否保留源」是策略层(观察期=false → 照常删源)。
+    expect(verifyAllowsCleanup(r)).toBe(!verifyBlocksOnMismatch());
+  });
+
+  it("实际数**超过**期望(如 B站多出历史分P)也要重查稳定后才判 —— 同样不立刻转人工", async () => {
+    const l = fakeLedger({ plain: [0, 1] });
+    let calls = 0;
+    const r = await verifyUploaded(l, "k", "BV1", ALL_ON, async () => { calls++; return calls < 2 ? 3 : 2; },
+      { sleep: async () => {}, retryDelayMs: 0 });
+    expect(r.kind).toBe("ok");
+  });
+});
+
+/**
+ * T32 观察期:**核验不再阻塞**(只记录)。
+ *
+ * 依据(实测):全 61 个 job 里判过 mismatch 的只有 2 个,而这 2 个经实查 B站分P **都齐全**
+ * —— 核验从未抓到真失败,只在 append 成功后 ~0.5 秒读到 B站未同步的旧值。
+ * 代价却是实的:永久 needs_manual(reconciler 不重跑 → 不自愈)+ 源永不删。
+ */
+describe("观察期:核验只记录,不阻塞删源/不转人工", () => {
+  it("verifyAllowsCleanup(mismatch) 在观察期为 true(照常删源)", () => {
+    expect(verifyParts(3, 1).kind).toBe("mismatch");
+    expect(verifyAllowsCleanup({ kind: "mismatch", expected: 3, actual: 1 })).toBe(true);
+  });
+
+  it("策略谓词当前为 false(= 不阻塞)", () => {
+    expect(verifyBlocksOnMismatch()).toBe(false);
+  });
+
+  it("ok / skipped 仍允许删源(行为不变)", () => {
+    expect(verifyAllowsCleanup({ kind: "ok", expected: 3, actual: 3 })).toBe(true);
+    expect(verifyAllowsCleanup({ kind: "skipped", reason: "no-baseline" })).toBe(true);
+  });
+
+  it("unknown 仍**不允许**删源(取不到实际数 = 不能确认交付完整,这条不放宽)", () => {
+    // 观察期只放宽 mismatch;unknown 是「查不到」而非「不符」,源仍保留。
+    expect(verifyAllowsCleanup({ kind: "unknown", reason: "x" })).toBe(false);
   });
 });
