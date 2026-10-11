@@ -1435,11 +1435,16 @@ function scanRecordingRooms(): { platform: string; roomSlug: string }[] {
   return [...rooms.values()];
 }
 
-// ─── hub recheck-verify（T32 一次性重核工具）────────────────────────────
+// ─── recheck-verify（T32 一次性重核工具）────────────────────────────────
 // 把「B站 pages 还没同步就核验」导致的假 mismatch(needs_manual)按 B站实况翻回 done。
 // 默认 dry-run;必须显式 --apply 才落库。护栏见 packages/cli/src/hub-recheck-verify.ts。
+//
+// ⚠️ 用**单段命令名** `recheck-verify`,不用 `hub recheck-verify`:
+// commander 会把两段式名字按空格拆成「命令 hub + 位置参数 recheck-verify」,
+// 于是 action 的第一个参数被当成那个字符串而不是 options 对象 → `--apply` **静默失效**
+// (dry-run 假装成功,实际什么都没写)。这类「看起来跑了但没生效」必须避免。
 program
-  .command("hub recheck-verify")
+  .command("recheck-verify")
   .description("重核 needs_manual 的分P 核验假失败(默认 dry-run,--apply 才落库)")
   .option("--apply", "真的把判定一致的 job 翻回 done(默认只打印)")
   .option("--key <streamKey>", "只查某一场(如 douyin:123:2026-10-11)")
