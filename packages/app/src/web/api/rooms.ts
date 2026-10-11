@@ -19,7 +19,7 @@ import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
 import * as hubStore from "../../hub-store.js";
 import type { Task } from "../../store.js";
-import { toDanmuFlag } from "../../task-input.js";
+import { parseSchedule, toDanmuFlag } from "../../task-input.js";
 
 /** 从 HubRuleDTO 里剥掉身份四元组(key/platform/roomSlug/room)——RoomDTO 顶层已有。 */
 function stripIdentity(dto: RoomDTO["processing"] & { key?: string }): NonNullable<RoomDTO["processing"]> {
@@ -176,6 +176,35 @@ export function buildRooms(ctx: ApiCtx) {
         // 与 tasks.ts 的 toDanmuFlag 成了第二套 —— undefined 语义会不一致)。
         if ("danmu" in rec) patch.danmu = toDanmuFlag(rec.danmu);
         if ("segmentSec" in rec) patch.segmentSec = rec.segmentSec;
+        // schedule:RoomPayload 是 Partial<RoomRecordingDTO>,窗口是**两个字段**(scheduleStart/End)。
+        // 单独改一个端点会造出半个窗口 —— 必须成对,否则 400 让用户看到,而不是静默存坏。
+        // (自审发现:此前这里根本没有 schedule,前端表单改窗口提交后**静默丢失**。)
+        const hasSchedStart = "scheduleStart" in rec;
+        const hasSchedEnd = "scheduleEnd" in rec;
+        if (hasSchedStart !== hasSchedEnd) {
+          return err(400, "定时窗口需同时提供 scheduleStart 与 scheduleEnd(或都传 null 清空)");
+        }
+        if (hasSchedStart && hasSchedEnd) {
+          const s = rec.scheduleStart;
+          const e = rec.scheduleEnd;
+          const empty = (v: string | null | undefined): boolean => v == null || v.trim() === "";
+          if (empty(s) && empty(e)) {
+            patch.scheduleStart = null;
+            patch.scheduleEnd = null;
+          } else if (empty(s) !== empty(e)) {
+            return err(400, "定时窗口的起止需同时填写或同时留空");
+          } else {
+            // 格式校验复用唯一真理 parseSchedule(/api/tasks 用的同一份),不自己再写一套正则
+            // —— 两套迟早漂移(某处放宽了另一处没跟)。
+            try {
+              const [ss, ee] = parseSchedule(`${s}-${e}`);
+              patch.scheduleStart = ss;
+              patch.scheduleEnd = ee;
+            } catch (err2) {
+              return err(400, (err2 as Error).message);
+            }
+          }
+        }
         if ("useCookie" in rec) patch.useCookie = ctx.toUseCookie(rec.useCookie);
         if ("cookies" in rec) patch.cookies = rec.cookies ?? null;
         if ("outDir" in rec) patch.outDir = rec.outDir ?? null;

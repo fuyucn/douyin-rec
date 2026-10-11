@@ -31,6 +31,8 @@ interface FormState {
   quality: string;
   engine: string;
   segmentSec: string;
+  schedule: string;
+  webhook: string;
   danmu: boolean;
   useCookie: boolean;
   recEnabled: boolean;
@@ -39,11 +41,18 @@ interface FormState {
   burnLivechat: boolean;
   mergeSegments: boolean;
   nodeSideUpload: boolean;
+  clStageSourceAfterMerge: boolean;
+  clSourceAfterDone: boolean;
+  clStageAfterDone: boolean;
   uploadMode: string;
   uploadPrivate: boolean;
   uploadTag: string;
   uploadTid: string;
   uploadDesc: string;
+  titleTemplate: string;
+  submissionTitleTemplate: string;
+  partTitleTemplate: string;
+  requires: string[];
   workers: string[];
 }
 
@@ -55,6 +64,8 @@ function fromRoom(r: RoomDTO): FormState {
     quality: rec?.quality ?? "",
     engine: rec?.engine ?? "",
     segmentSec: String(rec?.segmentSec ?? 1800),
+    schedule: rec?.scheduleStart && rec?.scheduleEnd ? `${rec.scheduleStart}-${rec.scheduleEnd}` : "",
+    webhook: rec?.webhook ?? "",
     danmu: !!rec?.danmu,
     useCookie: rec?.useCookie ?? true,
     recEnabled: rec?.enabled ?? true,
@@ -63,11 +74,18 @@ function fromRoom(r: RoomDTO): FormState {
     burnLivechat: p.steps?.burnLivechat === true,
     mergeSegments: p.steps?.mergeSegments !== false,
     nodeSideUpload: p.steps?.nodeSideUpload === true,
+    clStageSourceAfterMerge: p.cleanup?.stageSourceAfterMerge === true,
+    clSourceAfterDone: p.cleanup?.sourceAfterDone === true,
+    clStageAfterDone: p.cleanup?.stageAfterDone === true,
     uploadMode: p.upload?.mode === "upload" ? "upload" : "stage",
     uploadPrivate: p.upload?.private !== false,
     uploadTag: p.upload?.tag ?? "",
     uploadTid: String(p.upload?.tid ?? 21),
     uploadDesc: p.upload?.desc ?? "",
+    titleTemplate: p.upload?.titleTemplate ?? "",
+    submissionTitleTemplate: p.upload?.submissionTitleTemplate ?? "",
+    partTitleTemplate: p.upload?.partTitleTemplate ?? "",
+    requires: r.processing?.requires ?? [],
     workers: r.processing?.workers ?? [],
   };
 }
@@ -105,11 +123,40 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
   const set = <K extends keyof FormState>(k: K, v: FormState[K]): void => setForm((f) => ({ ...f, [k]: v }));
   const toggleWorker = (id: string): void =>
     setForm((f) => ({ ...f, workers: f.workers.includes(id) ? f.workers.filter((x) => x !== id) : [...f.workers, id] }));
+  const toggleRequire = (cap: string): void =>
+    setForm((f) => ({ ...f, requires: f.requires.includes(cap) ? f.requires.filter((x) => x !== cap) : [...f.requires, cap] }));
+
+  // 所有 worker 能力标签的并集(去重保序)→ 门控多选候选(与 HubRuleDialog 同口径)。
+  const allCapabilities: string[] = (() => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const w of workers) for (const c of w.capabilities ?? []) if (!seen.has(c)) { seen.add(c); out.push(c); }
+    return out;
+  })();
+  // 勾选参与、但被能力门控排除的 worker → 提前警告(否则表现为「勾了却不录」)。
+  const filteredOutWorkers = workers.filter(
+    (w) => form.workers.includes(w.id) && form.requires.some((c) => !(w.capabilities ?? []).includes(c)),
+  );
 
   async function submit(ev: FormEvent): Promise<void> {
     ev.preventDefault();
     setBusy(true);
     try {
+      // 定时窗口 "HH:MM-HH:MM" → 成对端点;空串 = 全天(两端都 null)。
+      // 前端这里只做「成对/留空」的粗分,真正的格式校验在后端(parseSchedule 单一真理)。
+      const sched = form.schedule.trim();
+      let scheduleStart: string | null = null;
+      let scheduleEnd: string | null = null;
+      if (sched) {
+        const m = /^(.+?)-(.+)$/.exec(sched);
+        if (!m) {
+          toast(t("rooms.scheduleInvalid"), "error");
+          setBusy(false);
+          return;
+        }
+        scheduleStart = m[1].trim();
+        scheduleEnd = m[2].trim();
+      }
       // recording 只在有录制任务时才发 —— 纯规则房间不该被造出 task(后端也会挡)。
       const recording = room.recording
         ? {
@@ -120,6 +167,9 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
             danmu: form.danmu ? 1 : 0,
             useCookie: form.useCookie,
             enabled: form.recEnabled,
+            scheduleStart,
+            scheduleEnd,
+            webhook: form.webhook.trim() || null,
           }
         : undefined;
 
@@ -128,6 +178,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
         processing: {
           enabled: form.procEnabled,
           workers: form.workers,
+          requires: form.requires,
           pipeline: {
             steps: {
               mergeSegments: form.mergeSegments,
@@ -135,12 +186,20 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
               burnLivechat: form.burnLivechat,
               nodeSideUpload: form.nodeSideUpload,
             },
+            cleanup: {
+              stageSourceAfterMerge: form.clStageSourceAfterMerge,
+              sourceAfterDone: form.clSourceAfterDone,
+              stageAfterDone: form.clStageAfterDone,
+            },
             upload: {
               mode: form.uploadMode === "upload" ? "upload" : "stage",
               private: form.uploadPrivate,
               tag: form.uploadTag.trim() || undefined,
               tid: Number(form.uploadTid) || 21,
               desc: form.uploadDesc.trim() || undefined,
+              titleTemplate: form.titleTemplate.trim() || undefined,
+              submissionTitleTemplate: form.submissionTitleTemplate.trim() || undefined,
+              partTitleTemplate: form.partTitleTemplate.trim() || undefined,
             },
           },
         },
@@ -214,6 +273,20 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                     <span className="field-label">{t("rooms.segmentSec")}</span>
                     <input className="input" type="number" min={60} value={form.segmentSec} onChange={(e) => set("segmentSec", e.target.value)} />
                   </label>
+                  {/* 定时窗口 + 专属 webhook:与任务弹窗(CreateEditTaskDialog)字段对齐 ——
+                      否则「房间页配不完录制」,用户还得回任务页改。 */}
+                  <label className="block col-span-2">
+                    <span className="field-label">{t("rooms.scheduleWindow")}</span>
+                    <input className="input" placeholder="HH:MM-HH:MM" value={form.schedule}
+                           onChange={(e) => set("schedule", e.target.value)} />
+                    <p className="text-xs text-muted mt-1">{t("rooms.scheduleHint")}</p>
+                  </label>
+                  <label className="block col-span-2">
+                    <span className="field-label">{t("rooms.webhook")}</span>
+                    <input className="input" placeholder={t("dialog.webhookPlaceholder")} value={form.webhook}
+                           onChange={(e) => set("webhook", e.target.value)} />
+                    <p className="text-xs text-muted mt-1">{t("rooms.webhookHint")}</p>
+                  </label>
                   {/* 这两个开关带说明文字(两行标准),说明是长句 → 单列全宽,避免截断 */}
                   <label className="switch-row col-span-2">
                     <span className="flex flex-col min-w-0">
@@ -278,6 +351,29 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                   </span>
                   <Switch checked={form.nodeSideUpload} onCheckedChange={(v: boolean) => set("nodeSideUpload", v)} disabled={form.burnDanmu || form.burnLivechat} />
                 </label>
+                {/* 清理开关(默认全关)。与 HubRuleDialog 同一组三个 —— 房间页必须能配全,
+                    否则「保存一次就把清理策略改回默认」或「改不了清理」。 */}
+                <label className="switch-row">
+                  <span className="flex flex-col min-w-0">
+                    <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.toggleClStageSourceAfterMergeLabel")}</span>
+                    <span className="text-xs text-muted mt-0.5">{t("hub.ruleDialog.toggleClStageSourceAfterMergeSub")}</span>
+                  </span>
+                  <Switch checked={form.clStageSourceAfterMerge} onCheckedChange={(v: boolean) => set("clStageSourceAfterMerge", v)} />
+                </label>
+                <label className="switch-row">
+                  <span className="flex flex-col min-w-0">
+                    <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.toggleClSourceAfterDoneLabel")}</span>
+                    <span className="text-xs text-muted mt-0.5">{t("hub.ruleDialog.toggleClSourceAfterDoneSub")}</span>
+                  </span>
+                  <Switch checked={form.clSourceAfterDone} onCheckedChange={(v: boolean) => set("clSourceAfterDone", v)} />
+                </label>
+                <label className="switch-row">
+                  <span className="flex flex-col min-w-0">
+                    <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.toggleClStageAfterDoneLabel")}</span>
+                    <span className="text-xs text-muted mt-0.5">{t("hub.ruleDialog.toggleClStageAfterDoneSub")}</span>
+                  </span>
+                  <Switch checked={form.clStageAfterDone} onCheckedChange={(v: boolean) => set("clStageAfterDone", v)} />
+                </label>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <label className="block">
@@ -308,6 +404,23 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                   <span className="field-label">{t("rooms.uploadDesc")}</span>
                   <textarea className="input" rows={3} value={form.uploadDesc} onChange={(e) => set("uploadDesc", e.target.value)} />
                 </label>
+                {/* 三个标题模板:空 = 回落默认(文件名 {name}_{date} / 稿件标题 / 分P名)。 */}
+                <label className="block">
+                  <span className="field-label">{t("hub.ruleDialog.titleTemplateLabel")}</span>
+                  <input className="input" placeholder="{name}_{date}" value={form.titleTemplate}
+                         onChange={(e) => set("titleTemplate", e.target.value)} />
+                </label>
+                <label className="block">
+                  <span className="field-label">{t("hub.ruleDialog.submissionTitleTemplateLabel")}</span>
+                  <input className="input" placeholder="{name}_{date}_{title} 直播回放" value={form.submissionTitleTemplate}
+                         onChange={(e) => set("submissionTitleTemplate", e.target.value)} />
+                </label>
+                <label className="block sm:col-span-2">
+                  <span className="field-label">{t("hub.ruleDialog.partTitleTemplateLabel")}</span>
+                  <input className="input" placeholder="P{part}" value={form.partTitleTemplate}
+                         onChange={(e) => set("partTitleTemplate", e.target.value)} />
+                  <p className="text-xs text-muted mt-1">{t("hub.ruleDialog.partTitleTemplateHint")}</p>
+                </label>
               </div>
             </div>
           </section>
@@ -330,6 +443,27 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                   </label>
                 ))}
               </div>
+            )}
+            {/* 能力门控(requires):与上面的 workers 取交集。缺了它,「只派给能拿到弹幕的节点」
+                这类规则就没法在房间页维护(得回 Hub 弹窗),保存一次还会把它清空。 */}
+            <h4 className="form-section mt-5">{t("hub.ruleDialog.capsSection")}</h4>
+            <p className="text-xs text-muted mb-2">{t("hub.ruleDialog.capsHint")}</p>
+            {allCapabilities.length === 0 ? (
+              <p className="text-xs text-muted">{t("hub.ruleDialog.capsNone")}</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {allCapabilities.map((c) => (
+                  <label key={c} className="inline-flex items-center gap-1.5 text-xs border border-hairline px-2 py-1 cursor-pointer" style={{ borderRadius: "var(--r-pill, 999px)" }}>
+                    <input type="checkbox" checked={form.requires.includes(c)} onChange={() => toggleRequire(c)} />
+                    <span className="font-mono text-muted-soft">{c}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+            {filteredOutWorkers.length > 0 && (
+              <p className="text-xs mt-2 text-error-fg">
+                {t("hub.ruleDialog.capsFiltered", { workers: filteredOutWorkers.map((w) => w.name).join("、") })}
+              </p>
             )}
           </section>
 

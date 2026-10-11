@@ -23,18 +23,27 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   Activity,
+  FileText,
   FolderOpen,
   LayoutGrid,
   Pencil,
+  Play,
+  Plus,
   RefreshCw,
   Search,
+  Square,
+  Timer,
+  Trash2,
   TriangleAlert,
   Workflow,
 } from "lucide-react";
 import { api, type RoomDTO, type Task, type WorkerDTO } from "../api/client";
 import { IconButton } from "../components/Button";
 import { Badge, DanmuBadge, StatusBadge } from "../components/Badge";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { HubStreamBanner } from "../components/HubStreamBanner";
+import { Button } from "../components/Button";
+import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
 import { useHubStream, usePolling, errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { QUALITY_SHORT, qualityLabel, roomId, scheduleText } from "../lib/labels";
@@ -48,6 +57,9 @@ export function RoomsPage(): ReactNode {
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState<RoomDTO | null>(null);
+  /** 待确认的破坏性动作(硬停会截断当前分段 → 必须二次确认)。 */
+  const [confirm, setConfirm] = useState<{ kind: "stop" | "delete"; room: RoomDTO } | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
   const [q, setQ] = useState("");
 
   const refresh = async (): Promise<void> => {
@@ -80,6 +92,37 @@ export function RoomsPage(): ReactNode {
     () => new Map(workers.map((w) => [w.id, w.name || w.id])),
     [workers],
   );
+
+  // ── 行内动作(启停/排空/删除)──────────────────────────────────────────────
+  // 复用 Tasks 页同一批 API(不是另写一套):/rooms 要能**替代**任务页日常操作。
+  const sourceTaskIdOf = (r: RoomDTO): number | null => r.recording?.taskId ?? null;
+  const runTaskAction = async (
+    r: RoomDTO,
+    action: "start" | "stop" | "drain",
+  ): Promise<void> => {
+    const id = sourceTaskIdOf(r);
+    if (id === null) return;
+    try {
+      if (action === "start") await api.startTask(id);
+      else if (action === "drain") await api.drainTask(id);
+      else await api.stopTask(id);
+      await refresh().catch(() => {});
+    } catch (e) {
+      toast(errMessage(e), "error");
+    }
+  };
+  const doDeleteRoom = async (r: RoomDTO): Promise<void> => {
+    setConfirm(null);
+    try {
+      // 删除录制任务(后端两阶段处理 hub 绑定;纯规则房间没有 task 时跳过)。
+      const id = sourceTaskIdOf(r);
+      if (id !== null) await api.deleteTask(id);
+      await refresh().catch(() => {});
+      toast(t("rooms.deleted"), "info");
+    } catch (e) {
+      toast(errMessage(e), "error");
+    }
+  };
 
   const filtered = useMemo(() => {
     const k = q.trim().toLowerCase();
@@ -139,6 +182,11 @@ export function RoomsPage(): ReactNode {
           >
             <RefreshCw className="w-4 h-4" />
           </IconButton>
+          {/* 新建房间 = 新建录制任务(房间由任务派生);处理半边保存后再配。复用既有任务弹窗。 */}
+          <Button onClick={() => setCreateOpen(true)}>
+            <Plus className="w-4 h-4" />
+            {t("rooms.addRoom")}
+          </Button>
         </div>
       </div>
 
@@ -209,6 +257,7 @@ export function RoomsPage(): ReactNode {
                 task={r.recording ? taskById.get(r.recording.taskId ?? -1) : undefined}
                 workerName={workerName}
                 onEdit={() => setEditing(r)}
+                onAction={(a) => (a === "delete" ? setConfirm({ kind: "delete", room: r }) : a === "stop" ? setConfirm({ kind: "stop", room: r }) : void runTaskAction(r, a))}
               />
             ))}
         </div>
@@ -224,7 +273,7 @@ export function RoomsPage(): ReactNode {
                 <th className="w-[104px]">{t("rooms.colSchedule")}</th>
                 <th className="w-[176px]">{t("rooms.colStatus")}</th>
                 <th>{t("rooms.colPipeline")}</th>
-                <th className="w-[96px] text-right">{t("rooms.colAction")}</th>
+                <th className="w-[196px] text-right">{t("rooms.colAction")}</th>
               </tr>
             </thead>
             <tbody>
@@ -268,6 +317,7 @@ export function RoomsPage(): ReactNode {
                     task={r.recording ? taskById.get(r.recording.taskId ?? -1) : undefined}
                     workerName={workerName}
                     onEdit={() => setEditing(r)}
+                    onAction={(a) => (a === "delete" ? setConfirm({ kind: "delete", room: r }) : a === "stop" ? setConfirm({ kind: "stop", room: r }) : void runTaskAction(r, a))}
                   />
                 ))}
             </tbody>
@@ -286,8 +336,45 @@ export function RoomsPage(): ReactNode {
           }}
         />
       )}
+
+      {/* 破坏性动作二次确认(硬停截断当前分段 / 删除任务) */}
+      <CreateEditTaskDialog
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        task={null}
+        onSaved={() => {
+          setCreateOpen(false);
+          void refresh().catch(() => {});
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirm !== null}
+        title={
+          confirm?.kind === "delete"
+            ? t("rooms.deleteConfirm", { name: roomLabel(confirm.room) })
+            : t("rooms.stopConfirm", { name: confirm ? roomLabel(confirm.room) : "" })
+        }
+        confirmLabel={confirm?.kind === "delete" ? t("common.delete") : t("rooms.stopNow")}
+        destructive
+        onConfirm={() => {
+          if (!confirm) return;
+          if (confirm.kind === "delete") void doDeleteRoom(confirm.room);
+          else {
+            const r = confirm.room;
+            setConfirm(null);
+            void runTaskAction(r, "stop");
+          }
+        }}
+        onCancel={() => setConfirm(null)}
+      />
     </>
   );
+}
+
+/** 房间显示名(确认框用):任务名 > 主播名 > 房间号。 */
+function roomLabel(r: RoomDTO): string {
+  return r.recording?.name || r.recording?.anchorName || roomId(r.room);
 }
 
 /** 处理管线摘要(纯展示;可写入口只有编辑面板 —— 避免两处可写)。 */
@@ -374,17 +461,84 @@ function nodesText(room: RoomDTO, workerName: Map<string, string>, all: string):
   return ids.map((id) => workerName.get(id) ?? id).join(", ");
 }
 
+/** 行内动作回调:start/drain 直接执行;stop/delete 由父级弹二次确认。 */
+type RowAction = (a: "start" | "stop" | "drain" | "delete") => void;
+
+/**
+ * 行内动作按钮组(表格行与紧凑行共用)。
+ *
+ * 与 Tasks 页同一套规则:enabled → 显示「停」;未启用 → 显示「启」;
+ * 另加「排空」(当前场录完自然收播,不截断)。受管(hub 远端)任务只读 → 禁用并说明。
+ */
+function RowActions({
+  room,
+  task,
+  onAction,
+  onEdit,
+}: {
+  room: RoomDTO;
+  task?: Task;
+  onAction: RowAction;
+  onEdit: () => void;
+}): ReactNode {
+  const t = useT();
+  const managed = task?.managedBy === "hub";
+  const enabled = task?.enabled ?? room.recording?.enabled ?? false;
+  if (!room.recording) {
+    // 纯规则房间:没有录制任务可启停,只留「编辑」(处理半边仍可配)。
+    return (
+      <div className="inline-flex items-center gap-1.5 justify-end">
+        <IconButton title={t("rooms.edit")} onClick={onEdit}>
+          <Pencil className="w-4 h-4" />
+        </IconButton>
+      </div>
+    );
+  }
+  const tip = (fallback: string): string => (managed ? t("tasks.managedHint") : fallback);
+  return (
+    <div className="inline-flex items-center gap-1.5 justify-end">
+      {enabled ? (
+        <IconButton title={tip(t("rooms.actionStop"))} disabled={managed} onClick={() => onAction("stop")}>
+          <Square className="w-4 h-4" style={{ color: "var(--warning-fg)" }} fill="currentColor" />
+        </IconButton>
+      ) : (
+        <IconButton title={tip(t("rooms.actionStart"))} disabled={managed} onClick={() => onAction("start")}>
+          <Play className="w-4 h-4" style={{ color: "var(--success-fg)" }} fill="currentColor" />
+        </IconButton>
+      )}
+      <IconButton title={tip(t("rooms.actionDrain"))} disabled={managed || !enabled} onClick={() => onAction("drain")}>
+        <Timer className="w-4 h-4" />
+      </IconButton>
+      {room.recording.taskId != null && (
+        <Link className="btn-icon" to={`/task/${room.recording.taskId}`} title={t("tasks.titleDetail")}>
+          <FileText className="w-4 h-4" />
+        </Link>
+      )}
+      <IconButton title={t("rooms.edit")} onClick={onEdit}>
+        <Pencil className="w-4 h-4" />
+      </IconButton>
+      {!managed && (
+        <IconButton title={t("common.delete")} style={{ color: "var(--error-fg)" }} onClick={() => onAction("delete")}>
+          <Trash2 className="w-4 h-4" />
+        </IconButton>
+      )}
+    </div>
+  );
+}
+
 /** 桌面表格行。 */
 function RoomRow({
   room,
   task,
   workerName,
   onEdit,
+  onAction,
 }: {
   room: RoomDTO;
   task?: Task;
   workerName: Map<string, string>;
   onEdit: () => void;
+  onAction: RowAction;
 }): ReactNode {
   const t = useT();
   const rec = room.recording;
@@ -444,11 +598,7 @@ function RoomRow({
         </div>
       </td>
       <td className="text-right whitespace-nowrap">
-        <div className="inline-flex items-center gap-1.5 justify-end">
-          <IconButton title={t("rooms.edit")} onClick={onEdit}>
-            <Pencil className="w-4 h-4" />
-          </IconButton>
-        </div>
+        <RowActions room={room} task={task} onAction={onAction} onEdit={onEdit} />
       </td>
     </tr>
   );
@@ -460,11 +610,13 @@ function RoomCompactRow({
   task,
   workerName,
   onEdit,
+  onAction,
 }: {
   room: RoomDTO;
   task?: Task;
   workerName: Map<string, string>;
   onEdit: () => void;
+  onAction: RowAction;
 }): ReactNode {
   const t = useT();
   const rec = room.recording;
@@ -481,9 +633,6 @@ function RoomCompactRow({
         ) : (
           <div className="min-w-0"><RoomName room={room} /></div>
         )}
-        <IconButton title={t("rooms.edit")} onClick={onEdit}>
-          <Pencil className="w-4 h-4" />
-        </IconButton>
       </div>
       <div className="mt-2 max-w-full">
         <RecStatus room={room} task={task} />
@@ -502,6 +651,10 @@ function RoomCompactRow({
       <p className="font-mono text-[11px] text-muted-soft mt-2 break-all">
         {t("rooms.nodes")}: {nodesText(room, workerName, t("rooms.allNodes"))}
       </p>
+      {/* 动作条(与桌面表格同一组按钮):窄屏也要能启停/排空/编辑,否则手机上做不了事 */}
+      <div className="mt-2.5 flex justify-end">
+        <RowActions room={room} task={task} onAction={onAction} onEdit={onEdit} />
+      </div>
     </div>
   );
 }

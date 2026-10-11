@@ -1468,6 +1468,32 @@ describe("rooms 域(T9 统一房间视图)", () => {
     expect(a.updateRoom("douyin.123456", {}).status).toBe(400);
   });
 
+  // 回归:此前 PUT 的 recording 分支**没有 schedule 处理** —— 前端表单改定时窗口提交后
+  // 静默丢失(字段在 RoomRecordingDTO 里,但写入路径没读)。这里锁死成对写入 + 校验。
+  it("PUT 定时窗口:成对写入 + 成对清空 + 半个窗口/坏格式 → 400", () => {
+    const { s, a } = setup();
+    const id = bindRoom(a, "123456");
+
+    const ok = a.updateRoom("douyin.123456", { recording: { scheduleStart: "22:00", scheduleEnd: "01:30" } });
+    expect(ok.status).toBe(200);
+    expect(s.getTask(id)!.scheduleStart).toBe("22:00");
+    expect(s.getTask(id)!.scheduleEnd).toBe("01:30");
+
+    // 只传一个端点 → 拒绝(否则留下半个窗口)
+    expect(a.updateRoom("douyin.123456", { recording: { scheduleStart: "22:00" } }).status).toBe(400);
+    // 一端空一端非空 → 拒绝
+    expect(a.updateRoom("douyin.123456", { recording: { scheduleStart: "", scheduleEnd: "01:30" } }).status).toBe(400);
+    // 坏格式(缺分钟)→ 拒绝
+    expect(a.updateRoom("douyin.123456", { recording: { scheduleStart: "22", scheduleEnd: "01:30" } }).status).toBe(400);
+    // 窗口未被上面的失败请求污染
+    expect(s.getTask(id)!.scheduleStart).toBe("22:00");
+
+    // 两端都空 → 清空(回到全天)
+    expect(a.updateRoom("douyin.123456", { recording: { scheduleStart: null, scheduleEnd: null } }).status).toBe(200);
+    expect(s.getTask(id)!.scheduleStart).toBeNull();
+    expect(s.getTask(id)!.scheduleEnd).toBeNull();
+  });
+
   it("hub 写失败 → task 回滚,不出现半成功(本域存在的核心原因)", () => {
     const s = new TaskStore(":memory:");
     // 先在正常 hubDir 下建好房间(task + 规则),再把另一个 api 指向不可写目录。

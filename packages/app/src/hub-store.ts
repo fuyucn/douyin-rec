@@ -56,6 +56,36 @@ export function hubKey(platform: string, roomSlug: string): string {
   return `${platform}.${roomSlug}`;
 }
 
+/**
+ * **深合并** pipeline 补丁(不整体替换)。
+ *
+ * 为什么必须合并:前端只能提交它**知道的**字段。若这里整体替换,一次只改画质/步骤的保存
+ * 就会把规则里其它 pipeline 字段(`cleanup` 清理开关、`titleTemplate` 等标题模板、
+ * `uploadBatchSize`/`minSegmentSec` 分段调优)静默抹掉 —— 而它们不在该表单里,
+ * 用户看不出「我只是点了个保存,清理策略就没了」。这是**静默数据丢失**,必须避免。
+ *
+ * 语义:标量/字符串直接覆盖;`steps` 与 `upload` 这两层对象再合并一层
+ * (这样「只改 steps 里的一个开关」不会把 upload 的 tag/tid/desc 清空)。
+ * 显式传 `undefined` 的键**跳过**(= 不改该字段),保留其它键。
+ * 注意:因此**无法**用本函数清空单个字段(需清空就传空串/null,不要传 undefined)。
+ */
+export function mergePipeline(
+  prev: HubPipelineConfig | undefined,
+  patch: HubPipelineConfig | undefined,
+): HubPipelineConfig {
+  const base: HubPipelineConfig = { ...(prev ?? {}) };
+  if (!patch) return base;
+  for (const [k, v] of Object.entries(patch) as [keyof HubPipelineConfig, unknown][]) {
+    if (v === undefined) continue;
+    if ((k === "steps" || k === "upload") && v && typeof v === "object") {
+      base[k] = { ...(base[k] as object), ...(v as object) } as never;
+    } else {
+      (base as Record<string, unknown>)[k] = v;
+    }
+  }
+  return base;
+}
+
 /** 由 room 派生 platform + roomSlug + key(唯一真理 = 平台的 extractRoomSlug)。 */
 function deriveKey(room: string): { platform: string; roomSlug: string; key: string } {
   const norm = normalizeRoom(room);
@@ -190,7 +220,9 @@ export function upsertHubRule(
   writeRule(dir, key, {
     ...(input.room ? { room: normalizeRoom(input.room) } : {}),
     enabled: input.enabled ?? existing?.enabled ?? true,
-    pipeline: input.pipeline ?? existing?.pipeline ?? {},
+    // pipeline **深合并**(不是整体替换):调用方(尤其 web 表单)只提交它知道的字段,
+    // 整体替换会静默抹掉 cleanup / 标题模板等它没提交的字段。见 mergePipeline 注释。
+    pipeline: mergePipeline(existing?.pipeline, input.pipeline),
     recording: input.recording ?? existing?.recording,
     // workers 缺省沿用已有(undefined = 全部);显式传才覆盖。
     workers: input.workers ?? existing?.workers,
@@ -213,7 +245,7 @@ export function updateHubRule(
   writeRule(dir, key, {
     ...(existing.room ? { room: existing.room } : {}),
     enabled: patch.enabled ?? existing.enabled,
-    pipeline: patch.pipeline ?? existing.pipeline,
+    pipeline: mergePipeline(existing.pipeline, patch.pipeline),
     recording: patch.recording ?? existing.recording,
     // 部分更新:未传 workers 沿用已有;传了(UI 总传非空列表)才覆盖。
     workers: patch.workers ?? existing.workers,
