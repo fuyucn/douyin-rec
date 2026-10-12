@@ -39,6 +39,7 @@ export function listNodeTasks(store: TaskStore): NodeTaskDTO[] {
       webhook: t.webhook,
       managedBy: t.managedBy,
       anchorName: t.anchorName,
+      rollingUpload: t.rollingUpload,
     };
   });
 }
@@ -204,6 +205,8 @@ export function applyRemoteTasks(
         scheduleStart: spec.scheduleStart,
         scheduleEnd: spec.scheduleEnd,
         enabled: spec.enabled,
+        // 边录边传开关随 master 下发(任务级意图,不属 per-node override)。
+        rollingUpload: spec.rollingUpload,
       });
       log?.(`[task-sync] 收编任务 ${existing.id}: ${key}`);
       // 期望任务已禁用但节点上还在录/待起:必须硬停,不能等 daemon 排空到自然收播。
@@ -233,6 +236,7 @@ export function applyRemoteTasks(
         // 注意:这只对新建生效;更新现有任务时刻意不动 anchorName(见上方注释),
         // 防止 master 的 null 覆盖 worker 已抓到的正确值。
         anchorName: spec.anchorName ?? null,
+        rollingUpload: spec.rollingUpload,
       });
       log?.(`[task-sync] ${adopt ? "新建受管任务" : "新建本机任务"}: ${key}`);
     }

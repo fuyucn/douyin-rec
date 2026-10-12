@@ -127,6 +127,8 @@ export interface RoomRecordingDTO {
   cookies: null;
   outDir: string | null;
   webhook: string | null;
+  /** 边录边传开关(T-33,默认 false)。 */
+  rollingUpload: boolean;
 }
 
 export interface RoomDTO {
@@ -483,6 +485,8 @@ export interface NodeTaskDTO {
   webhook: string | null;
   managedBy: string | null;
   anchorName: string | null;
+  /** 边录边传开关(默认 false,见 plans/031 / T-33)。 */
+  rollingUpload: boolean;
 }
 
 /** master → node 的期望任务(applyTasks;含 cookies,只走可信 ssh/本地通道)。 */
@@ -503,6 +507,8 @@ export interface RemoteTaskSpec {
   outDir: string | null;
   webhook: string | null;
   anchorName: string | null;
+  /** 边录边传开关(默认 false,见 plans/031 / T-33);随任务下发到节点。 */
+  rollingUpload: boolean;
   /**
    * **可选提示**:master 明确要求「这个房间可以删了」(规则文件已消失 / sourceTaskId 解绑)。
    *
@@ -583,6 +589,8 @@ export interface TaskPayload {
   schedule?: string | null;
   /** 任务专属 Discord webhook(开播/录完/合并完成/错误);空/省略 = 回落全局。 */
   webhook?: string | null;
+  /** 边录边传开关(T-33,默认 false):录制中每封口一段就上传并删该段源。 */
+  rollingUpload?: boolean;
 }
 
 /** GET /api/platforms 的单个平台配置投影(前端按 urlPattern 判平台 + 动态填表单选项)。 */
@@ -678,6 +686,8 @@ export interface TaskDTO {
   };
   /** 任务专属 Discord webhook;null = 回落全局。 */
   webhook: string | null;
+  /** 边录边传开关(T-33,默认 false)。 */
+  rollingUpload: boolean;
 }
 
 /** 详情页 live runtime(GET /api/tasks/:id)。 */

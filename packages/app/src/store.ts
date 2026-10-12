@@ -61,6 +61,13 @@ export interface Task {
    * 配置由 hub 同步维护，Web UI/API 禁止编辑、删除。普通录制/调度路径不关心该字段。
    */
   managedBy: string | null;
+  /**
+   * 边录边传开关(T-33,默认 false):true → 录制中每产生一个**已封口**分段就单独上传并
+   * 删该段源视频(见 plans/031)。开关**只在任务上**(用户明确要求)—— 录制端据此边录边传;
+   * master 侧按 hub 规则的 workers 做「单节点才下发」的重复投稿闸门(见 cli.desiredFor)。
+   * false(缺省)= 整场录完再处理,行为与改动前完全一致。
+   */
+  rollingUpload: boolean;
 }
 
 /** Fields accepted when adding a task. Defaults applied for omitted values. */
@@ -91,6 +98,8 @@ export interface TaskInput {
   managedBy?: string | null;
   /** 主播名(收编/下发时同步 master 侧);省略 = null。仅内部同步路径可写,Web 不暴露。 */
   anchorName?: string | null;
+  /** 边录边传开关(T-33,默认 false);见 Task.rollingUpload。 */
+  rollingUpload?: boolean;
 }
 
 /** Raw row shape as returned by node:sqlite (danmu/segmentSec are bigint-or-number). */
@@ -114,6 +123,7 @@ interface TaskRow {
   anchorName: string | null;
   webhook: string | null;
   managedBy: string | null;
+  rollingUpload: number;
 }
 
 /**
@@ -173,6 +183,7 @@ function rowToTask(r: TaskRow): Task {
     anchorName: r.anchorName ?? null,
     webhook: r.webhook ?? null,
     managedBy: r.managedBy ?? null,
+    rollingUpload: Number(r.rollingUpload) !== 0,
   };
 }
 
@@ -221,8 +232,9 @@ export class TaskStore {
     const stmt = this.db.prepare(
       `INSERT INTO tasks
          (room, platform, name, quality, engine, danmu, segmentSec, cookies, outDir,
-          scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook, managedBy, anchorName)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook, managedBy, anchorName,
+          rollingUpload)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       room,
@@ -243,6 +255,7 @@ export class TaskStore {
       input.webhook ?? null,
       input.managedBy ?? null,
       input.anchorName ?? null,
+      (input.rollingUpload ?? false) ? 1 : 0,
     );
     const id = Number(info.lastInsertRowid);
     const task = this.getTask(id);
@@ -277,6 +290,7 @@ export class TaskStore {
         | "useCookie"
         | "enabled"
         | "webhook"
+        | "rollingUpload"
       > & {
         /** 自动抓取的主播名(收编时同步 master 侧名称;不在 TaskInput 上,仅 updateTask 可写)。 */
         anchorName?: string | null;
@@ -328,6 +342,7 @@ export class TaskStore {
     if ("enabled" in patch) set("enabled", patch.enabled ? 1 : 0);
     if ("webhook" in patch) set("webhook", patch.webhook ?? null);
     if ("anchorName" in patch) set("anchorName", patch.anchorName ?? null);
+    if ("rollingUpload" in patch) set("rollingUpload", patch.rollingUpload ? 1 : 0);
 
     if (cols.length === 0) return this.getTask(id); // nothing to change
 

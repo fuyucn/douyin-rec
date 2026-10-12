@@ -66,6 +66,7 @@ import type { Recorder, RecordOpts, NotifyEvent, Notifier } from "@drec/core";
 import { TaskDaemon } from "./daemon.js";
 import { TaskManager } from "./task-manager.js";
 import { NodeRecordSpawner } from "./process/spawner.js";
+import { makeRollingUploadHookFactory } from "./rolling-upload.js";
 
 // 本文件含多个命令组,日志按命令归属 scope:task→task_manager、daemon→scheduler、serve→web_server。
 const log = createLogger("task_manager");
@@ -117,7 +118,13 @@ export function buildSessionForTask(
     name: task.name ?? undefined,
   };
 
-  const session = new RecordingSession(recorder, { notifier, danmuEnabled });
+  // 边录边传(T-33,默认关):开启时注入「每会话一个」上传钩子工厂(metadata 读 hub 规则/hub.config)。
+  const makeRolling = makeRollingUploadHookFactory({
+    enabled: task.rollingUpload,
+    platform: task.platform,
+    roomSlug: platformForRoom(task.room).extractRoomSlug(task.room),
+  });
+  const session = new RecordingSession(recorder, { notifier, danmuEnabled, makeRolling });
   return { session, opts, url: roomToUrl(task.room) };
 }
 
@@ -218,6 +225,7 @@ interface AddOpts {
   useCookie?: string;
   out?: string;
   schedule?: string;
+  rollingUpload?: string;
   db?: string;
 }
 
@@ -291,6 +299,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .option("--use-cookie <0|1>", "弹幕含礼物: 1=含礼物(需账号cookie) 0=仅评论(匿名) (默认 1)")
     .option("--out <dir>", "输出目录")
     .option("--schedule <HH:MM-HH:MM>", "定时窗口（仅存储，本骨架不自动启停）")
+    .option("--rolling-upload <0|1>", "边录边传: 1=录制中每封口一段就上传并删该段源 0=整场录完再处理 (默认 0)")
     .option("--db <path>", "数据库路径（默认 ./douyin-rec.db 或 env DOUYIN_REC_DB）")
     .action(async (o: AddOpts) => {
       const store = new TaskStore(o.db);
@@ -331,6 +340,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         outDir: o.out ?? null,
         scheduleStart,
         scheduleEnd,
+        rollingUpload: parseBoolFlag(o.rollingUpload, false),
       });
       store.close();
       log.info(`已创建任务 id=${t.id}（${t.name ?? t.room}）`);
@@ -351,6 +361,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .option("--use-cookie <0|1>", "弹幕含礼物: 1=含礼物(需账号cookie) 0=仅评论(匿名)")
     .option("--out <dir>", "输出目录")
     .option("--schedule <HH:MM-HH:MM>", "定时窗口（仅存储，本骨架不自动启停）")
+    .option("--rolling-upload <0|1>", "边录边传: 1=开 0=关（默认不改）")
     .option("--db <path>", "数据库路径（默认 ./douyin-rec.db 或 env DOUYIN_REC_DB）")
     .action((id: string, o: AddOpts & { id?: string }) => {
       const store = new TaskStore(o.db);
@@ -387,6 +398,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
       }
       if (o.useCookie !== undefined) patch.useCookie = parseBoolFlag(o.useCookie, true);
       if (o.out !== undefined) patch.outDir = o.out;
+      if (o.rollingUpload !== undefined) patch.rollingUpload = parseBoolFlag(o.rollingUpload, false);
       if (o.schedule !== undefined) {
         const [s, e] = parseSchedule(o.schedule);
         patch.scheduleStart = s;

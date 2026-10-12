@@ -56,6 +56,7 @@ export function migrate(db: DatabaseSync): void {
       status       TEXT DEFAULT 'stopped',
       useCookie    INTEGER NOT NULL DEFAULT 1,
       enabled      INTEGER NOT NULL DEFAULT 0,
+      rollingUpload INTEGER NOT NULL DEFAULT 0,
       createdAt    TEXT
     );
     CREATE TABLE IF NOT EXISTS settings (
@@ -108,6 +109,9 @@ export function migrate(db: DatabaseSync): void {
   ensureColumn(db, "tasks", "webhook", "TEXT");
   // hub 受管标记:NULL=手动任务,'hub'=由 master hub 下发/管理的任务(Web 禁止编辑/删除)。
   ensureColumn(db, "tasks", "managedBy", "TEXT");
+  // 边录边传开关(T-33):1=录制中每封口一段就上传并删该段源;0/缺省=整场录完再处理(现状)。
+  // 默认 0 → 老库/老配置行为完全不变(向后兼容)。
+  ensureColumn(db, "tasks", "rollingUpload", "INTEGER NOT NULL DEFAULT 0");
   // 注:多节点 hub 配置已独立成 hub_rules 表(按 roomSlug),不再放 tasks 上。
 }
 

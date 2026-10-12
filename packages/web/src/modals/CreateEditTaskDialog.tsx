@@ -29,6 +29,7 @@ interface FormState {
   schedule: string;
   danmu: boolean;
   useCookie: boolean;
+  rollingUpload: boolean;
   webhook: string;
 }
 
@@ -41,6 +42,7 @@ const BLANK: FormState = {
   schedule: "",
   danmu: true,
   useCookie: true,
+  rollingUpload: false,
   webhook: "",
 };
 
@@ -54,6 +56,7 @@ function fromTask(t: Task): FormState {
     schedule: scheduleInput(t),
     danmu: !!t.danmu,
     useCookie: !!t.useCookie,
+    rollingUpload: t.rollingUpload === true,
     webhook: t.webhook ?? "",
   };
 }
@@ -130,6 +133,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
       useCookie: cookieReady && form.useCookie,
       schedule: form.schedule.trim() || null,
       webhook: form.webhook.trim() || null,
+      rollingUpload: form.rollingUpload,
     };
     setBusy(true);
     try {
@@ -276,6 +280,14 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
               name="useCookie"
               disabled={!cookieReady || !danmuAvailable}
             />
+          </label>
+          {/* 边录边传(T-33):录制中每封口一段就上传并删该段源。默认关 = 整场录完再处理。 */}
+          <label className="switch-row">
+            <span className="flex flex-col">
+              <span className="text-sm font-medium text-ink">{t("rooms.rollingUpload")}</span>
+              <span className="text-xs text-muted mt-0.5">{t("rooms.rollingUploadHint")}</span>
+            </span>
+            <Switch checked={form.rollingUpload} onCheckedChange={(v) => set("rollingUpload", v)} name="rollingUpload" />
           </label>
         </div>
 

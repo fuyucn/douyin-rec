@@ -18,6 +18,7 @@ function mkTask(over: Partial<Task> = {}): Task {
     scheduleEnd: null,
     status: "stopped",
     useCookie: true,
+    rollingUpload: false,
     createdAt: "2026-06-12T00:00:00.000Z",
     ...over,
   };
@@ -62,6 +63,14 @@ describe("buildRecordArgs", () => {
     const args = buildRecordArgs(mkTask({ name: "一勺小苏打" }));
     expect(args).toContain("--name");
     expect(args[args.indexOf("--name") + 1]).toBe("一勺小苏打");
+  });
+
+  it("T-33:rollingUpload=true → 追加 --rolling-upload 1(默认关 = 不带该 flag)", () => {
+    expect(buildRecordArgs(mkTask())).not.toContain("--rolling-upload");
+    const args = buildRecordArgs(mkTask({ rollingUpload: true }));
+    const i = args.indexOf("--rolling-upload");
+    expect(i).toBeGreaterThan(-1);
+    expect(args[i + 1]).toBe("1");
   });
 
   it("omits --name when task.name is null", () => {

@@ -47,6 +47,7 @@ export function buildTasks(ctx: ApiCtx) {
         scheduleStart,
         scheduleEnd,
         webhook: normWebhook(input.webhook),
+        rollingUpload: input.rollingUpload === true,
       });
       // 创建即抓主播名（不等开始录制）；后台写回，UI 轮询即显示。
       resolveAnchorBg(task.id, task.room);
@@ -78,6 +79,7 @@ export function buildTasks(ctx: ApiCtx) {
       if ("cookies" in input) patch.cookies = input.cookies ?? null;
       if ("outDir" in input) patch.outDir = input.outDir ?? null;
       if ("webhook" in input) patch.webhook = normWebhook(input.webhook);
+      if ("rollingUpload" in input) patch.rollingUpload = input.rollingUpload === true;
 
       // schedule "HH:MM-HH:MM" wins over explicit scheduleStart/End if present.
       if (input.schedule !== undefined) {

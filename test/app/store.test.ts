@@ -328,5 +328,14 @@ describe("TaskStore", () => {
     expect(store.getTask(t.id)!.room).toBe("external-db");
     db.close();
   });
+  it("T-33:rollingUpload 默认 false,可加/可改,持久化回读", () => {
+    const store = new TaskStore(dbPath);
+    const t = store.addTask({ room: "rolling-1" });
+    expect(t.rollingUpload).toBe(false); // 默认关(向后兼容)
+    const u = store.updateTask(t.id, { rollingUpload: true })!;
+    expect(u.rollingUpload).toBe(true);
+    expect(store.getTask(t.id)!.rollingUpload).toBe(true);
+    store.close();
+  });
   // hub 规则现为文件版 → 测试在 packages/app/src/hub-store.test.ts。
 });

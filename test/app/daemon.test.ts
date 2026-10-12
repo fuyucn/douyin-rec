@@ -25,6 +25,7 @@ function mkTask(
     scheduleEnd,
     status: "stopped",
     useCookie: true,
+    rollingUpload: false,
     enabled,
     createdAt: "2026-06-12T00:00:00.000Z",
   };
@@ -175,6 +176,45 @@ describe("TaskDaemon — composition with TaskManager", () => {
     await daemon.tick();
     expect(spawner.spawned).toHaveLength(0);
     expect(daemon.activeIds()).toEqual(new Set());
+  });
+
+  it("T-33:磁盘低于水位 → 拒绝启动新任务,但已在录的场照常停/不收影响", async () => {
+    const store = new TaskStore(":memory:");
+    store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true });
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {} });
+    // 剩余 2GB < 水位 10GB → 拒绝启动。
+    const daemon = new TaskDaemon(store, mgr, {
+      now: () => localAt(7), log: () => {},
+      freeBytes: () => 2e9, diskWatermarkBytes: 10e9,
+    });
+    await daemon.tick();
+    expect(spawner.spawned).toHaveLength(0);
+    expect(daemon.activeIds()).toEqual(new Set());
+  });
+
+  it("T-33:磁盘达到水位 → 启动新任务;查不到剩余(返回 null)→ 不拦(保守放行,已有看门狗告警)", async () => {
+    const store = new TaskStore(":memory:");
+    store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true });
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {} });
+    // 达到水位(2GB == 2GB)→ 放行。
+    const daemonOk = new TaskDaemon(store, mgr, {
+      now: () => localAt(7), log: () => {},
+      freeBytes: () => 2e9, diskWatermarkBytes: 2e9,
+    });
+    await daemonOk.tick();
+    expect(spawner.spawned).toHaveLength(1);
+
+    // 新实例:查不到剩余 → 不拦(避免把「探测失败」当「爆盘」误停)。
+    const spawner2 = new MockSpawner();
+    const mgr2 = new TaskManager(store, spawner2, { log: () => {} });
+    const daemonUnknown = new TaskDaemon(store, mgr2, {
+      now: () => localAt(7), log: () => {},
+      freeBytes: () => null, diskWatermarkBytes: 10e9,
+    });
+    await daemonUnknown.tick();
+    expect(spawner2.spawned).toHaveLength(1);
   });
 
   it("stops a running task once it leaves its window", async () => {

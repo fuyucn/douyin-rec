@@ -21,6 +21,12 @@ export interface NodeRecording {
   totalGapSec: number;       // 断流缺口总秒数(来自 gaps sidecar)
   /** 本场直播标题(来自 `{base}.session.json`);无则 undefined。 */
   title?: string;
+  /**
+   * 边录边传(T-33)结果 sidecar(`{base}.rolling.json`,录制端写):该会话由录制节点**自己**
+   * 建稿/append 的分 P 与 BV。存在 = master **不得重复建稿**(否则重复投稿)。
+   * 缺省 undefined = 未启用边录边传 / 老录像。
+   */
+  rolling?: { bv?: string; confirmed?: number[]; ambiguous?: number[] };
 }
 export interface NodeInventory { workerId: string; recordings: NodeRecording[]; }
 

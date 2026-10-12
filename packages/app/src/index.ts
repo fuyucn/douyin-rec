@@ -43,3 +43,6 @@ export { fetchAnchorName, resolveShortUrl } from "./anchor.js";
 // 节点侧上传(experimental,见 plans/027):_node-pipeline / _node-capabilities 的节点侧执行体。
 export { runNodeSidePipeline, probeNodeCapabilities, listNodeProducts, openNodeUploadGate, resolveUploadAccountKey } from "./node-pipeline.js";
 export type { NodeUploadGateOpts } from "./node-pipeline.js";
+// 边录边传(T-33,见 plans/031):录制端「封口段上传 → 确认后删该段源」的执行体 + 钩子工厂。
+export { RollingUploader, makeRollingUploadHookFactory } from "./rolling-upload.js";
+export type { RollingUploaderOpts } from "./rolling-upload.js";

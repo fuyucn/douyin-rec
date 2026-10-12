@@ -37,6 +37,7 @@ interface FormState {
   webhook: string;
   danmu: boolean;
   useCookie: boolean;
+  rollingUpload: boolean;
   recEnabled: boolean;
   procEnabled: boolean;
   burnDanmu: boolean;
@@ -70,6 +71,7 @@ function fromRoom(r: RoomDTO): FormState {
     webhook: rec?.webhook ?? "",
     danmu: !!rec?.danmu,
     useCookie: rec?.useCookie ?? true,
+    rollingUpload: rec?.rollingUpload === true,
     recEnabled: rec?.enabled ?? true,
     procEnabled: r.processing?.enabled ?? true,
     burnDanmu: p.steps?.burnDanmu === true,
@@ -180,6 +182,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
             segmentSec: Number(form.segmentSec) || 1800,
             danmu: form.danmu ? 1 : 0,
             useCookie: form.useCookie,
+            rollingUpload: form.rollingUpload,
             enabled: form.recEnabled,
             scheduleStart,
             scheduleEnd,
@@ -318,6 +321,14 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                       </span>
                     </span>
                     <Switch checked={form.useCookie} onCheckedChange={(v: boolean) => set("useCookie", v)} />
+                  </label>
+                  {/* 边录边传(T-33):录制中每封口一段就上传并删该段源。默认关 = 整场录完再处理。 */}
+                  <label className="switch-row col-span-2">
+                    <span className="flex flex-col min-w-0">
+                      <span className="text-sm font-medium text-ink">{t("rooms.rollingUpload")}</span>
+                      <span className="text-xs text-muted mt-0.5">{t("rooms.rollingUploadHint")}</span>
+                    </span>
+                    <Switch checked={form.rollingUpload} onCheckedChange={(v: boolean) => set("rollingUpload", v)} />
                   </label>
                 </div>
               </div>
