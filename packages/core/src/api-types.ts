@@ -522,6 +522,24 @@ export interface NodePipelineSpec {
   /** winner 节点上该场的源文件(绝对路径,节点本地):.ts/.flv 段 + 可选 .xml。 */
   tsFiles: string[];
   xmlPath?: string;
+  /**
+   * 本场**直播标题**(master 从 `{base}.session.json` 读到的最早会话标题)。
+   *
+   * 为什么要下发:节点侧同样需要渲染 `{title}`(`submissionTitleTemplate` 常用),
+   * 而节点上**没有** inventory / session.json(那些在 master 的 recordings 里),
+   * 只靠文件名推不出来 → 不发就会出现 `"114275050882_2026-10-11_ 直播回放"` 这种空标题。
+   */
+  liveTitle?: string;
+  /**
+   * 本场**开播时刻**(epoch ms,取最早会话;master 的 inventory 权威值)。
+   * 节点侧没有精确 startMs,兜底用文件 mtime 会让 `{HH}-{mm}-{ss}` 渲染成**上传时刻**。
+   */
+  startMs?: number;
+  /**
+   * 本场各会话 base(按会话序)。节点侧据此渲染与 master 同源的 `{name}/{date}`;
+   * 缺省 = 从文件名推第一个段所属会话。
+   */
+  sessionBase?: string;
   /** 分 P 目标时长(秒);>0 = 按累计时长聚组(与 master 侧 segmentGroupSec 同义)。 */
   segmentGroupSec?: number;
   /** 分段模式(不合并,逐段产出):与 master 侧 steps.mergeSegments=false 同义。 */
@@ -543,6 +561,16 @@ export interface NodePipelineSpec {
   cookies?: string;
   /** 完成后是否清理节点源文件(与 master 侧 cleanup.sourceAfterDone 同义)。 */
   cleanSourceAfterDone?: boolean;
+  /**
+   * master 侧 `cleanup.stageAfterDone` —— 决定节点源 `.xml` 的**去留**。
+   *
+   * `.xml` 不可再生,规则是**「两处永不同时删光」**(见 pipeline.ts `xmlKeepRule`):
+   *   - stageAfterDone=true(清空 stage)→ 节点源 xml 是**最后一份** → **必须保留**;
+   *   - stageAfterDone=false(stage 保留副本)→ 节点源 xml 可随源一起删。
+   * 节点侧**不传 stagePulledSources**(录像从不回传 master)⇒ stage 侧永远没有副本,
+   * 所以节点分支**只有** `stageAfterDone=false` 才允许删 xml。漏了这条会把唯一一份弹幕删掉。
+   */
+  cleanStageAfterDone?: boolean;
 }
 
 /** 节点侧上传结果(`_node-pipeline` 的 JSON 输出)。 */
@@ -554,6 +582,33 @@ export interface NodePipelineResult {
   products?: string[];
   /** 失败原因(ok=false)。 */
   error?: string;
+}
+
+/**
+ * 节点侧上传的**落盘结果文件**(`<root>/stage/<sanitizeStreamKey>/.drec-node-result.json`)。
+ *
+ * 为什么需要它(master 侧「假失败」的根因修复):`_node-pipeline` 是一条**长命令**
+ * (整场 remux + 上传,实测 >30min)。ssh 连接在命令跑完前**断开**(tailscale stall /
+ * ServerAlive 判死)时,master 只看到 `ssh rc=255`,而节点上的上传**其实已经建稿成功**
+ * (实测:BV 已建、private、4 分 P)—— master 误判 failed → reconciler 翻 `needs_manual`
+ * → 源不删、人工待办堆积。**回读这个文件**才能把「真失败」与「回传断了但已成功」分开。
+ *
+ * 与 `NodePipelineResult` 的区别:那个是命令 stdout 的**即时回包**(断了就没有);
+ * 这个是节点**落盘**的权威结果,不依赖 ssh 是否还活着。
+ */
+export interface NodePipelineResultFile {
+  /** 上传前先写 `uploading`(此时若 master 回读到它,说明**结果不确定**,绝不自动重传);收尾覆写 `done`/`failed`。 */
+  phase: "uploading" | "done" | "failed";
+  /** phase=done 时是否成功(与 NodePipelineResult.ok 同义)。 */
+  ok: boolean;
+  /** 建稿成功后的 BV 号(ok 时非空)。 */
+  bv?: string;
+  /** 产物路径(节点本地)。 */
+  products?: string[];
+  /** 失败原因(ok=false)。 */
+  error?: string;
+  /** 结果写入时刻(epoch ms;master 用它判断结果是否属于本次执行)。 */
+  atMs: number;
 }
 
 /** 节点侧上传能力探测(`_node-capabilities` 的 JSON 输出)。 */

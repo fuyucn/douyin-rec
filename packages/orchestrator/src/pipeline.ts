@@ -217,6 +217,14 @@ export async function cleanupSourcesShared(o: {
    * 留源给 reconciler 的收尾补跑在**确认一致**后再删。
    */
   skipNodeSources?: boolean;
+  /**
+   * **强制保留节点源 .xml**(节点侧上传路径专用)。
+   *
+   * 常规路径里 `xmlKeepRule("node", stageAfterDone)` 的前提是「stage 里有 xml 副本」(pull 会带上),
+   * 故 `stageAfterDone=false` 时允许删节点 xml。但**节点侧上传从不把 xml 拉回/复制进 stage**
+   * ⇒ 节点源 xml 恒为**最后一份**,任何情况下都不能删(否则弹幕永久丢失,AGENTS.md 明令禁止)。
+   */
+  keepNodeXml?: boolean;
 }): Promise<CleanupOutcome> {
   const clean = o.cleanup ?? {};
   const failed: CleanupFailure[] = [];
@@ -231,7 +239,7 @@ export async function cleanupSourcesShared(o: {
 
   // ① 各节点 recordings 源(与 stage 侧独立;两开关可单独开)。
   if (clean.sourceAfterDone && !o.skipNodeSources) {
-    const delNodeXml = xmlKeepRule("node", clean.stageAfterDone === true);
+    const delNodeXml = o.keepNodeXml ? false : xmlKeepRule("node", clean.stageAfterDone === true);
     o.ledger.logStep(o.streamKey, "clean_source", "start");
     let fileCount = 0;
     const srcFailed: CleanupFailure[] = [];
@@ -542,9 +550,16 @@ async function runPipelineInner(
   // 全部逻辑隔离在 node-side-upload.ts(含 kill switch);这里只做「是否该走」的判定 + 调用。
   // 不满足条件(未开启/全局停用/stage 模式/需烧录) → 记明原因后继续走下面的 pull 回 master。
   const nodeSide = shouldUseNodeSideUpload(cfg, { burnDanmu, burnLivechat });
+  // earliest = 本场最早会话:开播时刻 / 直播标题 / 会话 base 的唯一口径。
+  // 节点侧上传与 pull 回 master 的常规路径共用同一取值(否则节点侧渲染会偏)。
+  const earliestRec = winnerMembers.reduce((a, m) => (m.rec.startMs < a.rec.startMs ? m : a));
   if (nodeSide.ok) {
     const nodeResult = await tryNodeSideUpload({
       streamKey, cfg, winner, winnerMembers, transport, ledger, jlog, notify, deps,
+      // 收尾删源按**全部在场成员**(含落败节点)—— 与常规路径的 `candidates.members` 同口径。
+      members: presentMembers,
+      earliest: earliestRec,
+      broadcastStartMs: b.startMs,
     });
     if (nodeResult) return nodeResult;
   } else if (cfg.steps?.nodeSideUpload) {
@@ -568,7 +583,8 @@ async function runPipelineInner(
   jlog(`pull 完成(${Math.round((Date.now() - tPull) / 1000)}s)`);
 
   // 产物 stem / 标题:首次锁定(改模板不影响重跑)。合并与分段两条路径共用。
-  const earliest = winnerMembers.reduce((a, m) => (m.rec.startMs < a.rec.startMs ? m : a));
+  // earliestRec 已在上面节点侧上传判定前算好(同一口径),这里复用,避免两处各减一次(改坏一处不报错)。
+  const earliest = earliestRec;
   const derived = deriveStageProducts(stageSub);
   const existingStem = (ledger.get(streamKey)?.outputStem ?? "").trim()
     || (cfg.steps?.mergeSegments === false

@@ -229,6 +229,19 @@ describe("openUploadLimitStore(sqlite)", () => {
     s.close();
   });
 
+  it("父目录不存在 → 自动创建,不退回 fail-closed(null)", () => {
+    // 线上实测:节点侧上传首次跑时数据根的 db/ 尚未建 → sqlite 报 unable to open database file
+    // → load() 恒 null → UploadGate 静默冷却 30 分钟。必须主动建父目录。
+    const dbPath = join(mkdtempSync(join(tmpdir(), "gate-")), "nested", "deep", "x.db");
+    const s = openUploadLimitStore(dbPath, { log: silence });
+    expect(s.load("k")).toEqual({ blockedUntil: 0, times: [] });
+    s.save("k", { blockedUntil: 7, times: [3] });
+    s.close();
+    const again = openUploadLimitStore(dbPath, { log: silence });
+    expect(again.load("k")).toEqual({ blockedUntil: 7, times: [3] });
+    again.close();
+  });
+
   it("库损坏 → load null(fail-closed 由 UploadGate 兜)", () => {
     const db = p();
     writeFileSync(db, "not sqlite at all");

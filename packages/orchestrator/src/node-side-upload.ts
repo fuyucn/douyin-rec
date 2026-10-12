@@ -20,7 +20,7 @@
  */
 import type { NodePipelineSpec } from "@drec/core";
 import type { JobState, SyncLedger } from "./ledger.js";
-import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, defaultRmStage, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import type { Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
 
@@ -49,11 +49,124 @@ export interface NodeSideUploadArgs {
   cfg: PipelineCfg;
   winner: { workerId: string; rec: { tsFiles: string[]; xmlPath?: string } };
   winnerMembers: readonly { workerId: string; rec: { tsFiles: string[]; xmlPath?: string } }[];
+  /**
+   * 本场**全部**在场成员(含落败节点)。收尾删源要按它来 —— 与 master 常规路径的
+   * `candidates.members` 同口径:落败节点的源同样是冗余副本,不删就永远占着磁盘。
+   * 缺省回落 `winnerMembers`(旧调用方/单测兼容)。
+   */
+  members?: readonly { workerId: string; rec: { tsFiles: string[]; xmlPath?: string } }[];
   transport: Transport;
   ledger: SyncLedger;
   jlog: (m: string) => void;
   notify: (e: NotifyEvent) => void;
   deps: PipelineDeps;
+  /**
+   * 本场最早会话(开播时刻 + 直播标题 + 会话 base 的来源)。
+   * 与 master 常规路径的 `earliest` 同一取值口径,保证节点侧渲染与 master **逐字一致**
+   * (否则 `{title}` 空 → 稿件标题不一致、`{HH}-{mm}-{ss}` 渲染成上传时刻)。
+   */
+  earliest?: { rec: { sessionBase?: string; startMs?: number; title?: string } };
+  /** 本场开播时刻兜底(broadcast.startMs);earliest 缺失时用。 */
+  broadcastStartMs?: number;
+}
+
+/**
+ * 节点侧上传**已确认成功**后的共同收尾:标记 done + 删各成员节点的原始录像。
+ *
+ * 成功路径与「假失败回读确认成功」两条分支**共用这一份** —— 收尾只有一处实现,
+ * 不会出现「一条分支删源、另一条忘了删」的漂移(那正是本次泄漏的成因)。
+ *
+ * 只做「节点源」这一段:节点侧**没有 pull** ⇒ stage 里不存在拉来的源副本,故
+ * `stagePulledSources` 不传(② 那段自然不触发);节点 stage 里的成品由节点自己的
+ * `cleanStageAfterDone` 清(见 app/node-pipeline.ts)。
+ * `.xml` 一律保留(`keepNodeXml`):节点侧**从不把 xml 拉回/复制进 stage**(没有 pull)⇒
+ * 节点源 xml 恒为**最后一份**。常规路径的 `xmlKeepRule("node", stageAfterDone)` 不适用 ——
+ * 它的前提是「stage 里有 xml 副本」,而这里没有,照搬会在 stageAfterDone=false 时删掉唯一副本。
+ *
+ * 时序与 master 一致:先 `markDone`(上传确已成功)再删源;删失败只把 `clean_source`
+ * 标 failed 供 reconciler 补跑,**不改终态**(否则会诱导重传 → 重复稿)。
+ */
+async function finalizeNodeSuccess(
+  o: NodeSideUploadArgs,
+  bv: string,
+  note?: string,
+): Promise<{ state: JobState; bv?: string }> {
+  const { streamKey, cfg, winnerMembers, ledger, jlog } = o;
+  ledger.markDone(streamKey, bv);
+  if (note) ledger.logStep(streamKey, "pull", "done", note);
+  const cleanOutcome = await cleanupSourcesShared({
+    streamKey, ledger, transports: o.deps.transports,
+    members: o.members ?? winnerMembers,
+    cleanup: cfg.cleanup, keepNodeXml: true,
+    rmStage: o.deps.rmStage ?? defaultRmStage, log: jlog,
+  });
+  if (!cleanOutcome.ok) {
+    jlog(`节点侧收尾清理部分失败(${cleanOutcome.failed.length}):`
+      + `${cleanOutcome.failed.map((f) => f.target).join(",")}(已记 clean_source failed,待 reconciler 补跑)`);
+  }
+  return { state: "done", bv };
+}
+
+/**
+ * 节点侧上传**失败路径的统一收口**(catch / `!result.ok` 共用,避免两处各写一份判定)。
+ *
+ * 核心:失败**不代表没成功**。`_node-pipeline` 是长命令,ssh 可能在节点跑完上传之前断开
+ * (实测 rc=255,而节点上的稿件其实已建好:private + 多分 P)。所以先**回读节点落盘结果**:
+ *
+ *   - `phase:"done"` + `ok` + bv → 其实成功了 → `markDone` + 删源(与成功路径同一份收尾),
+ *     返回 `{state:"done"}` —— 这就是「假失败」的修复;
+ *   - `phase:"done"` + `ok` 但 **无 bv**(如多分 P 上传中/漏记)→ 已建稿但证明不全 → 转人工,不重传;
+ *   - `phase:"uploading"` → 命令跑了但没写终态 ⇒ **结果不确定** ⇒ 转人工(绝不自动重传);
+ *   - `phase:"failed"` / `null` → 确认没成 → 按原失败路径(failed + 不安全重试标记)。
+ *
+ * 关键安全不变量:**任何「可能已建稿」的分支都不得让 reconciler 自动重试** —— 重复投稿不可逆
+ * (B站不支持改稿件视频内容)。故 `uploading` / 成功但无 bv / failed 且带 bv 一律 `needs_manual`。
+ */
+async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedSec?: number): Promise<{ state: JobState; bv?: string }> {
+  const { streamKey, transport, ledger, jlog, notify } = o;
+  const suffix = elapsedSec === undefined ? "" : `(${elapsedSec}s)`;
+  jlog(`节点侧执行失败: ${errMsg}${suffix} → 回读节点落盘结果判定是否其实已成功`);
+  ledger.logStep(streamKey, "pull", "done", `节点侧失败: ${errMsg.slice(0, 120)}`);
+
+  let node = null;
+  try {
+    node = await transport.nodeResult?.(streamKey) ?? null;
+  } catch {
+    node = null; // 回读本身失败 → 按「确认没成」处理(与原行为一致,安全:只是保守不自动重试)
+  }
+
+  if (node?.phase === "done" && node.ok && node.bv) {
+    jlog(`节点侧**其实已成功**(ssh 回传失败/超时,但节点落盘结果 ok=true BV=${node.bv})→ 收口 done,不重传`);
+    return await finalizeNodeSuccess(o, node.bv, `节点侧已完成(回传失败,落盘回读 BV=${node.bv})`);
+  }
+
+  // 「可能已建稿」的三个分支 → needs_manual,绝不自动重试(自动重试 = 重复投稿)。
+  const maybePublished = node?.phase === "uploading"
+    || (node?.phase === "done" && !node.bv)
+    || (node?.phase === "failed" && !!node.bv);
+  if (maybePublished) {
+    const why = node?.phase === "uploading"
+      ? `节点已开始上传但结果未知(可能已建稿${node.bv ? ` BV=${node.bv}` : ""})`
+      : node?.bv ? `节点已建稿 BV=${node.bv} 但未确认完成` : `节点上报完成但缺 BV,无法确认分 P`;
+    const note = `${why};已禁止自动重试,请人工核对 B站稿件后处理`;
+    jlog(`节点侧结果不确定: ${note}`);
+    ledger.logStep(streamKey, "pull", "done", `节点侧结果不确定: ${why.slice(0, 120)}`);
+    // sync_node_states 行必须写:reconciler 的自动重试闸门看的是它(= 不安全重试标记)。
+    ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: note.slice(0, 200) });
+    ledger.setState(streamKey, "needs_manual", { error: note.slice(0, 200) });
+    notify({ kind: "error", stage: "上传", message: `节点侧上传结果不确定 ${streamKey}: ${note}` });
+    return { state: "needs_manual", bv: node?.bv };
+  }
+
+  // 确认没成(phase=failed / 无落盘 / 读不到)→ 原失败路径。
+  const detail = node?.phase === "failed" && node.error ? `,节点结果: ${node.error.slice(0, 120)}` : "";
+  jlog(`节点侧确认未完成(落盘=${node?.phase ?? "无"})${detail}`);
+  // 节点侧一旦执行过上传就可能已建稿、只是回传失败/超时 ⇒ 一律按「不安全重试」上报
+  // (节点名与 reconciler 的 UNSAFE_RETRY_NODES 同名),reconciler 会翻 needs_manual,绝不自动重传。
+  ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: `节点侧上传失败: ${errMsg.slice(0, 200)}` });
+  ledger.markFailed(streamKey, `节点侧上传失败: ${errMsg.slice(0, 200)}`);
+  notify({ kind: "error", stage: "同步", message: `节点侧上传失败 ${streamKey}: ${errMsg.slice(0, 200)}` });
+  return { state: "failed" };
 }
 
 /**
@@ -62,6 +175,18 @@ export interface NodeSideUploadArgs {
  */
 export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state: JobState; bv?: string } | null> {
   const { streamKey, cfg, winner, winnerMembers, transport, ledger, jlog, notify } = o;
+
+  // 幂等护栏:已建稿(bv 已落库)→ 绝不再建一次。节点侧上传绕过 master 的 append 续跑接缝,
+  // 重跑会**重复投稿**(B站不支持改稿件视频内容,只能删稿重传)。宁可转人工,也不冒重复稿的险。
+  const existingBv = (ledger.get(streamKey)?.bv ?? "").trim();
+  if (existingBv) {
+    jlog(`节点侧上传跳过:本场已建稿(bv=${existingBv}),绝不重复投稿 → 转人工核对`);
+    ledger.setState(streamKey, "needs_manual", {
+      error: `已建稿 bv=${existingBv},节点侧不重复上传;请人工核对分 P`,
+    });
+    notify({ kind: "error", stage: "上传", message: `${streamKey} 已建稿(${existingBv}),节点侧跳过上传,请人工核对` });
+    return { state: "needs_manual", bv: existingBv };
+  }
 
   // 能力探测:旧 bundle 无 _node-capabilities / 节点缺 biliup / 无 cookie → 回落现状。
   if (!transport.nodeCapabilities || !transport.nodePipeline) {
@@ -90,6 +215,9 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
     streamKey,
     tsFiles: winnerMembers.flatMap((m) => m.rec.tsFiles),
     xmlPath: winner.rec.xmlPath,
+    liveTitle: o.earliest?.rec.title,
+    startMs: o.earliest?.rec.startMs || o.broadcastStartMs,
+    sessionBase: o.earliest?.rec.sessionBase,
     segmentGroupSec: cfg.segmentGroupSec,
     mergeSegments: cfg.steps?.mergeSegments !== false,
     uploadMode: "upload",
@@ -100,6 +228,7 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
     minSegmentSec: cfg.minSegmentSec,
     cookies: cfg.cookies || undefined,
     cleanSourceAfterDone: cfg.cleanup?.sourceAfterDone === true,
+    cleanStageAfterDone: cfg.cleanup?.stageAfterDone === true,
   };
 
   ledger.logStep(streamKey, "pull", "start");
@@ -110,26 +239,18 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
     result = await transport.nodePipeline(spec);
   } catch (e) {
     const msg = String((e as Error)?.message ?? e);
-    jlog(`节点侧执行失败: ${msg}`);
-    ledger.logStep(streamKey, "pull", "done", `节点侧执行失败: ${msg.slice(0, 120)}`);
-    // 节点侧失败 → 不静默:标 failed 让 reconciler 决定重试/人工。绝不吞掉。
-    ledger.markFailed(streamKey, `节点侧上传失败: ${msg.slice(0, 200)}`);
-    notify({ kind: "error", stage: "同步", message: `节点侧上传失败 ${streamKey}: ${msg.slice(0, 200)}` });
-    return { state: "failed" };
+    // ssh rc≠0 / 超时 ≠ 节点没成功:统一收口(handleNodeFailure 会先回读节点落盘结果)。
+    return await handleNodeFailure(o, msg);
   }
   const elapsed = Math.round((Date.now() - t0) / 1000);
   if (!result.ok) {
     const msg = result.error ?? "未知错误";
-    jlog(`节点侧执行失败: ${msg}(${elapsed}s)`);
-    ledger.logStep(streamKey, "pull", "done", `节点侧失败: ${msg.slice(0, 120)}`);
-    ledger.markFailed(streamKey, `节点侧上传失败: ${msg.slice(0, 200)}`);
-    notify({ kind: "error", stage: "同步", message: `节点侧上传失败 ${streamKey}: ${msg.slice(0, 200)}` });
-    return { state: "failed" };
+    return await handleNodeFailure(o, msg, elapsed);
   }
 
   ledger.logStep(streamKey, "pull", "done", `节点侧完成 ${elapsed}s${result.products?.length ? ` · ${result.products.length} 产物` : ""}`);
   jlog(`节点侧完成(${elapsed}s)${result.bv ? ` BV=${result.bv}` : ""}`);
 
-  ledger.markDone(streamKey, result.bv ?? "");
-  return { state: "done", bv: result.bv };
+  // 收口(标记 done + 删各成员节点源):与「假失败回读确认成功」共用同一份实现。
+  return await finalizeNodeSuccess(o, result.bv ?? "");
 }

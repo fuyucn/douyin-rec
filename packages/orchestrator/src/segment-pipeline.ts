@@ -332,10 +332,11 @@ export async function runSegmentPipeline(o: {
   // 「删源」= 各节点 recordings 源。**分P模式不传 stagePulledSources**:
   // stage 里的 {name}_{NNN}.mp4 就是交付物本身(无合并,逐段无损 remux),删源时绝不从 stage 删。
   // 分P的 stage 文件统一留到上传成功后由 stageAfterDone 清(见下)。
-  const cleanupNodeSources = async (): Promise<CleanupOutcome> =>
+  const cleanupNodeSources = async (opts?: { skipNodeSources?: boolean }): Promise<CleanupOutcome> =>
     cleanupSourcesShared({
       streamKey, ledger, transports: deps.transports, members: allMembers,
       cleanup: clean, rmStage, log: jlog,
+      skipNodeSources: opts?.skipNodeSources,
     });
   // stage 里拉来的源段副本 + 逐段 remux 中间产物(.work) —— 只在**上传成功后**清(见下)。
   const stageScratchPaths = (): string[] => [

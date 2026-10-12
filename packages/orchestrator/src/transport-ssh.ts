@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { registerChild, throwIfAborted, type RemoteTaskSpec } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeTasks, Transport } from "./transport.js";
-import type { NodeCapabilities, NodeStatus, NodePipelineResult, NodePipelineSpec } from "@drec/core";
+import type { NodeCapabilities, NodeStatus, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec } from "@drec/core";
 
 export interface SshOpts {
   id: string; host: string; dataRoot: string;
@@ -282,6 +282,33 @@ export class SshTransport implements Transport {
       products: parsed.products,
       error: parsed.error,
     };
+  }
+
+  /**
+   * 回读节点侧落盘结果(experimental,见 plans/027)。**读不到一律返回 null,绝不抛错** ——
+   * 它只在失败路径上被调用(ssh 已 rc≠0),再用异常盖掉原始错误只会让人更难排查。
+   * 用短预算 runStatus(8s):只是读一个小文件,不该拖住 master 的失败处理。
+   */
+  async nodeResult(streamKey: string): Promise<NodePipelineResultFile | null> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const q = streamKey.replace(/'/g, "'\\''");
+    try {
+      const out = await this.runStatus([`${nodePrefix} _node-result ${this.o.dataRoot} '${q}'`]);
+      const parsed = JSON.parse(out) as Partial<NodePipelineResultFile> | null;
+      if (!parsed || typeof parsed !== "object") return null;
+      const phase = parsed.phase;
+      if (phase !== "uploading" && phase !== "done" && phase !== "failed") return null;
+      return {
+        phase,
+        ok: parsed.ok === true,
+        bv: typeof parsed.bv === "string" ? parsed.bv : undefined,
+        products: Array.isArray(parsed.products) ? parsed.products : undefined,
+        error: typeof parsed.error === "string" ? parsed.error : undefined,
+        atMs: typeof parsed.atMs === "number" ? parsed.atMs : 0,
+      };
+    } catch {
+      return null; // 旧 bundle 无 `_node-result` / 文件不存在 / 节点不可达
+    }
   }
 
   async isDone(roomSlug: string): Promise<boolean> {

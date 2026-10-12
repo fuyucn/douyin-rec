@@ -1,4 +1,4 @@
-import type { ApplyTasksResult, NodeCapabilities, NodePipelineResult, NodePipelineSpec, NodeStatus, NodeTaskDTO, RemoteTaskSpec, WorkerConfig } from "@drec/core";
+import type { ApplyTasksResult, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, RemoteTaskSpec, WorkerConfig } from "@drec/core";
 
 // 契约在 core(app 的 worker-store 用同一形状);这里 re-export 保持既有调用点不变。
 export type { ApplyTasksResult, WorkerConfig } from "@drec/core";
@@ -105,6 +105,19 @@ export interface Transport {
    * 录像**不回传 master** —— 这正是省掉 rsync 的关键。无此能力 = 不支持 → 回落现状。
    */
   nodePipeline?(spec: NodePipelineSpec): Promise<NodePipelineResult>;
+  /**
+   * 回读节点侧**落盘结果文件**(experimental,见 plans/027)。
+   *
+   * 为什么需要:`nodePipeline` 是长命令,ssh 可能在命令跑完前断开(实测 rc=255),此时
+   * **不知道节点上的上传到底成没成**。落盘结果是独立于 ssh 生命周期的权威来源:
+   *   - `phase:"done"` + `ok:true` + bv → 其实成功了(修复「假失败」);
+   *   - `phase:"uploading"` → 结果不确定 → **绝不自动重传**(可能已建稿);
+   *   - `null`(文件不存在/损坏)→ 按原失败路径处理。
+   *
+   * 返回 null = 读不到(旧 bundle 无该命令 / 文件不存在 / 节点不可达)。**不抛错** ——
+   * 它只在失败路径上被调用,不该再用一个异常盖掉原始错误。
+   */
+  nodeResult?(streamKey: string): Promise<NodePipelineResultFile | null>;
 }
 
 type Factory = (cfg: WorkerConfig) => Transport;

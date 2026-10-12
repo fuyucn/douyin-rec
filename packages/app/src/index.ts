@@ -19,7 +19,7 @@ export * as workerStore from "./worker-store.js";
 export type { WorkerConfig } from "./worker-store.js";
 export { listHubJobs, readHubJobLog, jobLogPath, hubStageDir, buildQueueView, latestRunPerRoom } from "./hub-jobs.js";
 export type { HubJobView, HubJobEvent, BuildQueueOpts, LatestRunPerRoom } from "./hub-jobs.js";
-export { rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, DEFAULT_ROOT, ensureNodeIdentity, rootNodeIdentityPath } from "./paths.js";
+export { drecRoot, rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, rootBiliupCookies, DEFAULT_ROOT, ensureNodeIdentity, rootNodeIdentityPath } from "./paths.js";
 export type { NodeIdentity } from "./paths.js";
 export { rootConfigDir } from "./paths.js";
 export { resolveDbPath } from "./db.js";
@@ -41,5 +41,9 @@ export { upload, checkBiliup, DEFAULT_COOKIES, uploadThenAppend, uploadThenAppen
 export type { UploadOpts } from "./upload/biliup.js";
 export { fetchAnchorName, resolveShortUrl } from "./anchor.js";
 // 节点侧上传(experimental,见 plans/027):_node-pipeline / _node-capabilities 的节点侧执行体。
-export { runNodeSidePipeline, probeNodeCapabilities, listNodeProducts, openNodeUploadGate, resolveUploadAccountKey } from "./node-pipeline.js";
+export {
+  runNodeSidePipeline, probeNodeCapabilities, listNodeProducts, openNodeUploadGate, resolveUploadAccountKey,
+  planGroups, splitGroupsBySession, prepareNodeUploadAlias, nodeStageCleanupTargets,
+  readNodeResult, nodeResultPath,
+} from "./node-pipeline.js";
 export type { NodeUploadGateOpts } from "./node-pipeline.js";

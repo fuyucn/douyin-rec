@@ -50,3 +50,7 @@ remote/
 .hallmark/
 skills-lock.json
 logs/
+
+# Python 字节码缓存
+__pycache__/
+*.pyc

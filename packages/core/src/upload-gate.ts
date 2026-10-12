@@ -18,6 +18,8 @@
  * 本模块**不做 IO**:store 由调用方注入(orchestrator 与 app 各自用自己的 sqlite 行)。
  */
 import { DatabaseSync } from "node:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { isUploadRateLimited } from "./upload-contract.js";
 
 /** 闸门的两个状态字段(与 ResourcePool 内部字段、upload_limits 表列一一对应)。 */
@@ -174,6 +176,9 @@ export function openUploadLimitStore(dbPath: string, opts: OpenUploadLimitStoreO
   const now = opts.now ?? Date.now;
   let db: DatabaseSync;
   try {
+    // 父目录不存在时 sqlite 报 `unable to open database file`,退化成 fail-closed 静默冷却
+    // (实测节点首次跑时数据根尚未建库 → 整场卡在 30min 冷却)。主动建父目录,消除该静默失败。
+    mkdirSync(dirname(dbPath), { recursive: true });
     db = new DatabaseSync(dbPath);
     db.exec("PRAGMA busy_timeout=3000");
     migrateLegacyUploadLimits(db, log);

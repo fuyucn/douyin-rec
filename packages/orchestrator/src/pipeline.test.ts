@@ -1187,6 +1187,91 @@ describe("runPipeline", () => {
       expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
       deps.ledger.close();
     });
+
+    it("分段模式(mergeSegments=false)+ flag on → 同样走节点侧,不 pull(9 个房间的实际形态)", async () => {
+      // 线上 flip 的房间全是「不分段合并(逐段产出)+ 不烧录 + upload」:分段与合并在节点侧
+      // 是同一条路(节点自己逐段 remux/聚组),所以绝不能因为 mergeSegments=false 就回落 pull。
+      const deps = makeDeps({
+        cfg: { ...makeDeps().cfg, uploadMode: "upload", steps: { nodeSideUpload: true, mergeSegments: false, burnDanmu: false, burnLivechat: false } },
+      });
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t);
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      const r = await runPipeline(b, deps);
+      expect(nodePipeline).toHaveBeenCalledTimes(1);
+      expect(t.pull).not.toHaveBeenCalled();          // **关键:没有录像回传**
+      expect(r).toEqual({ state: "done", bv: "BVnode" });
+      deps.ledger.close();
+    });
+
+    it("flag on + cleanup.sourceAfterDone → 节点侧成功后必须调 transport.cleanup 删节点源", async () => {
+      // 回归:节点侧路径**提前 return**,常规路径的 cleanupSources() 走不到 → 节点上的 .ts
+      // 永远没人删(线上实测泄漏)。收尾必须在节点侧这条路上补一次。
+      const deps = makeDeps({
+        cfg: {
+          ...makeDeps().cfg,
+          steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false },
+          cleanup: { sourceAfterDone: true, stageAfterDone: true },
+        },
+      });
+      const t = deps.transports.get("node-1")!;
+      withNodePipeline(t);
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      const r = await runPipeline(b, deps);
+      expect(r).toEqual({ state: "done", bv: "BVnode" });
+      expect(t.cleanup).toHaveBeenCalledTimes(1);
+      const paths = (t.cleanup as Mock).mock.calls[0]![0] as string[];
+      expect(paths).toEqual(["/remote/a.ts", "/remote/b.ts"]);
+      expect(paths).not.toContain("/remote/danmu.xml"); // stageAfterDone=true → 节点 .xml 是最后一份
+      deps.ledger.close();
+    });
+
+    it("落败节点的源也要删(收尾按全部在场成员,不只 winner)", async () => {
+      // 与常规路径同口径:落败节点那份源同样是冗余副本,不删就永远占磁盘。
+      const deps = makeDeps({
+        cfg: {
+          ...makeDeps().cfg,
+          steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false },
+          cleanup: { sourceAfterDone: true, stageAfterDone: true },
+        },
+      });
+      const t1 = deps.transports.get("node-1")!;
+      const t2 = deps.transports.get("node-2")!;
+      withNodePipeline(t1);
+      const now = Date.now();
+      const b = makeBroadcast([
+        // node-1 录满整场(winner);node-2 只录到前半场(落败)
+        { workerId: "node-1", rec: makeRec({ startMs: now - 3_600_000, endMs: now }) },
+        { workerId: "node-2", rec: makeRec({ startMs: now - 3_600_000, endMs: now - 1_800_000, durationSec: 1800, tsFiles: ["/remote2/c.ts"], xmlPath: "/remote2/danmu.xml" }) },
+      ]);
+      deps.ledger.upsertPending(b.streamKey);
+      const r = await runPipeline(b, deps);
+      expect(r).toEqual({ state: "done", bv: "BVnode" });
+      expect(t1.cleanup).toHaveBeenCalledTimes(1);
+      expect(t2.cleanup).toHaveBeenCalledTimes(1); // 落败节点同样被清
+      expect((t2.cleanup as Mock).mock.calls[0]![0]).toEqual(["/remote2/c.ts"]);
+      deps.ledger.close();
+    });
+
+    it("已建稿(bv 已落库)→ 走节点侧前先拦下,转人工、绝不重复投稿", async () => {
+      // 节点侧上传绕过 master 的 append 续跑接缝:若本场已建过稿,再执行一次 = 重复投稿
+      // (B站不支持改稿件视频内容,只能删稿重传)。护栏必须挡在**调用节点之前**。
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false } } });
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t);
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      deps.ledger.setBv(b.streamKey, "BVold");
+      const r = await runPipeline(b, deps);
+      expect(nodePipeline).not.toHaveBeenCalled();     // 绝不在已建稿后再执行一次
+      expect(t.pull).not.toHaveBeenCalled();           // 也不 pull(源可能在清理中/已清)
+      expect(r.state).toBe("needs_manual");
+      expect(deps.ledger.get(b.streamKey)?.bv).toBe("BVold");
+      expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
+      deps.ledger.close();
+    });
   });
 
   // ── T11/T12:上传后收尾(产物核验 + 延迟删源 + 清理失败可见)────────────────────
