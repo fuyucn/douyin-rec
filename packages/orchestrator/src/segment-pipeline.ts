@@ -8,7 +8,7 @@
  * 幂等/续跑:sync_node_states(merge / burn_* / upload_plain / append_*)+ sync_parts(每分 P checkpoint)。
  */
 import path from "node:path";
-import { existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, mkdirSync } from "node:fs";
 import { isAppendAmbiguous, isUploadRateLimited, throwIfAborted } from "@drec/core";
 import { planSegmentGroups } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
@@ -20,6 +20,31 @@ import { cleanupSourcesShared, defaultRmStage, defaultSplitForUpload, finalizeAf
 /** 默认单段 remux(ts/flv → mp4,无损,-c copy + 时基钉 90000)。 */
 const defaultRemuxSegment = (src: string, out: string): Promise<void> =>
   import("@drec/post-process").then((m) => m.remuxSegment(src, out));
+
+/**
+ * 中间产物 → 规范上传名:同盘**硬链接**优先,失败回落复制。
+ *
+ * 为什么:逐段 remux 的中间产物(`.work/<段号>.mp4`)与规范上传名(`{dateName}_{NNN}.mp4`)
+ * 同在 stage 子目录、同一文件系统 —— 真拷贝等于把同一份数据存两遍,上传进行中峰值磁盘翻倍
+ * (实测某场:源 ≈5.1G + `.work/` ≈4.9G + 顶层规范名 ≈4.9G ≈ 15.5G,节点盘 49G)。
+ * 硬链接是同一 inode 的第二个名字:瞬间完成、零额外空间。
+ *
+ * 为什么**不**改名(renameSync/mv):`.work/<段号>.mp4` 的存在与否是**续跑判定依据**
+ * (下一轮靠它跳过重复 remux/合并),改名会让重跑重新 remux 一遍。
+ *
+ * 安全性:清理路径会把 `.work/` 与顶层产物一起删(见 pipeline 的 clean_stage /
+ * 节点侧 nodeStageCleanupTargets);删任一个名字只是把引用计数减一,不会丢数据。
+ * 与 `session-plan.prepareUploadAlias`、`transport-local.pull` 同一套语义。
+ *
+ * 回落:跨设备/文件系统不支持硬链接(EXDEV/EPERM/EMLINK 等)→ 退回复制,行为与从前一致。
+ */
+function linkOrCopySync(src: string, dst: string): void {
+  try {
+    linkSync(src, dst);
+  } catch {
+    copyFileSync(src, dst); // 跨设备/不支持硬链接 → 复制(与从前行为一致)
+  }
+}
 
 /** 默认单段时长探测(ffprobe)。 */
 const defaultSegmentDuration = (src: string): Promise<number> =>
@@ -274,11 +299,9 @@ export async function runSegmentPipeline(o: {
     // 上传产物统一命名 {dateName}_{NNN}.mp4(NNN=分 P 序号,与 hub 命名约定一致)。
     const out = path.join(stageSub, `${segmentStem(dateName, gi)}.mp4`);
     if (members.length === 1) {
-      // 不合并 / 单段组:中间产物直接复制/改名成规范上传名(不能直接引用 .work 里的文件)。
-      if (!existsSync(out)) {
-        const { copyFileSync } = await import("node:fs");
-        copyFileSync(members[0].plain, out);
-      }
+      // 不合并 / 单段组:中间产物 → 规范上传名(不能直接引用 .work 里的文件,它下轮会被清理)。
+      // 硬链接优先(同一 inode,零拷贝);`out` 已存在 = 续跑,跳过(与 remux 的跳过判定一致)。
+      if (!existsSync(out)) linkOrCopySync(members[0].plain, out);
     } else if (!existsSync(out)) {
       jlog(`合并组 ${gi}: ${members.length} 段(≈${Math.round(members.reduce((n, m) => n + (m.durSec ?? 0), 0))}s)→ ${path.basename(out)}`);
       await mergeGroup(members.map((m) => m.plain), out);

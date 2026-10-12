@@ -265,6 +265,31 @@ function planGroupIndices(groupSec: number, durations: number[], xmlPathOf: (i: 
 }
 
 /**
+ * 中间产物 → 规范上传名:同盘**硬链接**优先,失败回落复制。
+ *
+ * 为什么:逐段 remux 的中间产物(`.work/<段号>.mp4`)与规范上传名(`{stem}_{NNN}.mp4`)
+ * 同在 stage 子目录、同一文件系统 —— 真拷贝等于把同一份数据存两遍,上传进行中峰值磁盘翻倍
+ * (实测某场:源 ≈5.1G + `.work/` ≈4.9G + 顶层规范名 ≈4.9G ≈ 15.5G,节点盘 49G)。
+ * 硬链接是同一 inode 的第二个名字:瞬间完成、零额外空间。
+ *
+ * 为什么**不**改名(renameSync/mv):`.work/<段号>.mp4` 的存在与否是**续跑判定依据**
+ * (下一轮靠它跳过重复 remux/合并),改名会让重跑重新 remux 一遍。
+ *
+ * 安全性:节点 stage 收尾会把顶层产物与 `.work/` 一起删(见 {@link nodeStageCleanupTargets});
+ * 删任一个名字只是把引用计数减一,不会丢数据。与 {@link prepareNodeUploadAlias} 同一套语义
+ * (app(L4)不能 import orchestrator(L4.5)的 `linkOrCopySync`,故按同一语义本地复刻)。
+ *
+ * 回落:跨设备/文件系统不支持硬链接(EXDEV/EPERM/EMLINK 等)→ 退回复制,行为与从前一致。
+ */
+function linkOrCopySync(src: string, dst: string): void {
+  try {
+    linkSync(src, dst);
+  } catch {
+    copyFileSync(src, dst); // 跨设备/不支持硬链接 → 复制(与从前行为一致)
+  }
+}
+
+/**
  * 逐段 remux / 组内合并 → 每个分 P 的 plain mp4(落在 stageSub)。
  *
  * 命名与 master 分段模式**逐字一致**:`{stem}_{NNN}.mp4` —— 这个名字会直接变成 B 站分 P 的
@@ -316,10 +341,9 @@ async function produceParts(
     } else {
       if (!existsSync(work)) await mergeSession(files, work);
     }
-    // 中间产物 → 规范上传名(与 master 同款:不能直接把 .work 里的文件当上传物)。
-    if (!existsSync(out)) {
-      copyFileSync(work, out);
-    }
+    // 中间产物 → 规范上传名(与 master 同款:不能直接把 .work 里的文件当上传物,它下轮会被清理)。
+    // 硬链接优先(同一 inode,零拷贝);`out` 已存在 = 续跑,跳过(与上面 remux 的跳过判定一致)。
+    if (!existsSync(out)) linkOrCopySync(work, out);
     parts.push({ plain: out, sources: files, durSec: groupDur });
     log(`分 P ${parts.length}: ${group.length} 段(${Math.round(groupDur)}s)→ ${path.basename(out)}`);
   }
