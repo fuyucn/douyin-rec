@@ -66,8 +66,13 @@
   本轮只改文档 / 脚本 / 模板，未改任何录制、上传、删除、部署行为，未部署、未 commit。
   **自动化已注册（2026-10-12）**：环 5「指标回写」heartbeat（`FREQ=DAILY;INTERVAL=2`，9:00）
   跑 `--days 7 --write` 并追加「指标记录」，退步/复发才通知；环 1 值班 Audit（120min）与
-  环 2 issue 监听（5min，只读）已在跑；环 4 部署 guard 由既有部署 heartbeat 承担。
-  **闭环现状**：1/2/5 自动，3/4 由人指定实现会话触发（符合「不自动派活」约定）。
+  环 2 issue 监听（5min）、环 4 部署 guard 由既有部署 heartbeat 承担。
+  **自动 gate 升级（2026-10-12，用户拍板方案 1）**：环 2 改为**自动 triage**（危险类 → `needs-decision`
+  等人；证据充分 + 低风险 + 可测试 → 自动 `accept`；证据不足 → 自动 `decline` 写原因）；
+  环 3 新增**自动实现** heartbeat（10min，消费 `accept` 且无 `in-progress` 的票 → 打 `in-progress` +
+  留言认领 → 分支 + **开 PR**，串行一次一条）。**人只做三件事：合并 PR、部署、危险类拍板。**
+  边界写进 `docs/agent-workflow.md`「自动 gate」与 `docs/self-reinforcing-dev.md` 环 2/3 + §5。
+  **闭环现状**：1/2/3/5 自动，4（合并 + 部署）由人做。
   issue [#4](https://github.com/fuyucn/douyin-rec/issues/4) 已留言（实现完成 + 自审清单 + 证据），**未 close**，等合并。
 
 ## 待办（Next）
@@ -373,6 +378,12 @@
   `pnpm bundle` 出 `0.0.75`。**版本**：本 worktree 基线 0.0.74 → bump 0.0.75；与主工作区未提交的 0.0.76–0.0.79
   合并后统一为 **0.0.80**（合并提交里改的，见 package.json）。
   **合并完成（2026-10-12）**：合并进 `feat/hub-optimization`（merge commit `37cbade`，与主工作区 0.0.76–0.0.79 汇合，版本统一 **0.0.80**）；合并后整树 `pnpm test` **1270 passed**、`pnpm typecheck` 通过、`pnpm bundle` 出 0.0.80。**未部署、未 push**（远程无 `feat/hub-optimization`，是否 push 待用户决定）。
+  **部署完成（2026-10-12）**：三节点均升到 **0.0.80**（local `0.0.80-66feff`、两台 VPS `0.0.80-88d10e`），
+  经 `scripts/auto-deploy.sh`（stage first → vps1 → migrate）在部署 guard 全空闲时执行；worker id → nodeId 迁移完成（无改动，已备份）。
+  **部署后无回归**：`/api/hub/workers/status` 三节点全 `ok`、`/api/tasks` 16 任务正常、`/api/hub/queue` 正常；
+  部署产物内含本次 `rollingUpload`（grep 12 处）与 0.0.76–0.0.79 节点侧修复（`_node-result`）。
+  **仍待办**：边录边传的**真实链路**验证需一场开了该开关的录制（未做——需用户指定一个房间开开关）。
+  **仍未 push**（远程无 `feat/hub-optimization`）。
 
 - [x] **T-29 分段模式下多会话(断流重连)的烧录分 P 丢失(真缺陷)** — 2026-10-09 用户发现
   `douyin.63171491268`(什么鱼)稿件 P1-P6 齐全但 livechat 只有 P7-P9(会话1 的 3 段),会话2 的 3 段
