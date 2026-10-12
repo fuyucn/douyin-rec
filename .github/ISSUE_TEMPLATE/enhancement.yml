@@ -1,0 +1,32 @@
+name: 优化
+description: 增强建议，不是当前故障
+title: "[enhancement] "
+labels: ["enhancement", "needs-decision"]
+body:
+  - type: textarea
+    id: cost
+    attributes:
+      label: 现在的代价
+      description: 只写可验证的代价（磁盘、时间、人工次数）。不要写主播名、房间号、streamKey、路径、IP。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议
+      description: 写清改什么、代价是什么。默认关闭的开关优先。
+    validations:
+      required: true
+  - type: textarea
+    id: accept
+    attributes:
+      label: 验收标准
+      description: |
+        可测量的结果，例如「已封口分段上传成功后该段 .ts 被删，整场结束前不删 .xml」。
+        修复类 issue 还需默认带上「验证 + 回写」（见 docs/self-reinforcing-dev.md 环 4/5）：
+        - 部署后核对各节点版本号；
+        - 尽量实跑一场真实链路验证，写明台账终态 + 文件系统证据；
+        - 至少一项回写资产：回归测试 / 规则沉淀 / 指标。
+        做不到实跑就如实留作待办，不伪造结论。
+    validations:
+      required: true

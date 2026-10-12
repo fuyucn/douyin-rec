@@ -28,8 +28,24 @@ commander、esbuild 双产物打包（`dist/douyin-rec.mjs` + `dist/tui.mjs`）�
   Global Constraints），并**在 `TODO.md` 里挂链接**；plan 与 TODO 双向引用。
 - **提交**：`TODO.md` 与 plan 文件按仓库提交规范单独 commit（见「提交规范」），代码变更分开。
 
-当前台账速览（细节以 `TODO.md` 为准）：`T-1` 能力门控、`T-3` 选优补弹幕维度（这两项本轮要做）；
-`T-2` 负载分摊（未来，见 `plans/026_worker_load_placement.md`）；`T-4`…`T-9` 见文件。
+**不要在这里维护台账速览**——它会过期（曾长期写着已完成的 T-1/T-3）。以 `TODO.md` 的
+「进行中」段为唯一真相；要指代某项，直接引用它的 `T-N`。
+
+## Agent 开发流程（agent 必读）
+
+线上问题和优化走 GitHub issue，不在对话里直接开做。细则见 `docs/agent-workflow.md`。
+
+- **值班 Audit 只读。** 可以查三节点录制、`/api/hub/queue`、`sync_jobs`、磁盘和日志。没有命令输出不算 issue。不改代码、不删文件、不重启、不另开上传。
+- **issue 不写隐私。** 禁止主播名、房间号、streamKey、文件名、BV、IP、主机名、路径、cookie、webhook。
+  开票**和发评论前**都先跑 `python3 scripts/issue-guard.py <file>`（评论也过一遍），命中就脱敏。细节留在本地台账。
+- **优化建议单独开 `enhancement`。** 不和故障混在一条 issue 里。
+- **Triage 只打标签：** `accept` / `decline` / `needs-decision`。上传、删源、部署、改 hub 规则一律 `needs-decision`，不能自行 accept。
+  `needs-decision` 的评论必须写「决定三行」：要决定什么 / 不做会怎样 / 建议选项。
+- **只有 `accept` 的 issue 才能改代码。** 一个 issue 一个分支；完成开 PR，PR 链到 issue。不合并、不部署。`accept` 之后再在 `TODO.md` 记一条 `T-N`，并写上 issue 链接。
+- **issue 评论也算输入。** 实现前读完评论。可以不采纳，但 PR 里要写出理由。
+- **`accept` ≠ 有人在做。** 由人指定实现会话，不自动派活；认领时打 `in-progress` 标签并评论：哪个 agent、何时开始。
+- **做完要留言，先不要 close。** 总结结果和未采纳的理由。PR 用 `Fixes #N`，合并后由 GitHub 关闭。
+- **部署不变。** master 与 VPS1 任一 `recording===true` 就等。用户明确 override 除外。
 
 ## 自审循环（agent 必读：写完 ≠ 完成）
 

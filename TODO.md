@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-08
+> 最后更新：2026-10-12
 
 ## 状态约定
 
@@ -54,7 +54,29 @@
     50/50，家宽实测 web7/webHTML3 印证）。真正影响概率的是 `weight`。所以「调 priority 让 web 优先」
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
+- [~] **T-34 自强化循环开发落地** — 提案 issue [#4](https://github.com/fuyucn/douyin-rec/issues/4)。
+  文档部分已完成：`docs/self-reinforcing-dev.md`（五环闭环 + 每环门禁 + 指标口径）、
+  `docs/agent-workflow.md`（五环总览 + 四不 close + 指标与闭环回写）。
+  **本轮补齐剩余**：①新增只读指标脚本 `scripts/reinforce-metrics.py`（默认不写文件，
+  `--write` 落 `docs/metrics/<date>.md`），聚合 done/needs_manual/failed、疑似假失败率、
+  master stage 与（可选）节点卡死残留、近 30 天已关闭 issue 的开单→收口时长；②首个基线
+  报告 `docs/metrics/2026-10-12.md` + 文档「指标记录」表；③`.github/ISSUE_TEMPLATE/`
+  的 enhancement/incident 模板在「验收标准」默认写入「部署核对版本 + 实跑验证 + 至少一项回写资产」。
+  **验收**：指标能自动计算并写入文档（已跑通）；新增修复类 issue 的验收标准默认含「验证 + 回写」。
+  本轮只改文档 / 脚本 / 模板，未改任何录制、上传、删除、部署行为，未部署、未 commit。
+  **自动化已注册（2026-10-12）**：环 5「指标回写」heartbeat（`FREQ=DAILY;INTERVAL=2`，9:00）
+  跑 `--days 7 --write` 并追加「指标记录」，退步/复发才通知；环 1 值班 Audit（120min）与
+  环 2 issue 监听（5min，只读）已在跑；环 4 部署 guard 由既有部署 heartbeat 承担。
+  **闭环现状**：1/2/5 自动，3/4 由人指定实现会话触发（符合「不自动派活」约定）。
+  issue [#4](https://github.com/fuyucn/douyin-rec/issues/4) 已留言（实现完成 + 自审清单 + 证据），**未 close**，等合并。
+
 ## 待办（Next）
+
+- [~] **T-33 边录边传：已封口分段确认上传后再删源** — 2026-10-12 09:26 PDT 认领（GitHub #3）。计划 `plans/031_rolling_segment_upload.md`。
+  评论约束：做成任务配置里的开关，类似节点侧上传，默认关闭。可以不照单全收，但要在 PR 里写理由。
+  **为什么**：整场录完才上传，多房间同时在录时节点盘会先满（VPS2 2026-10-12 49G 写满，yyoo 两场 `needs_manual` 无 BV）。
+  **做什么**：只处理已经封口的分段；胜出段上传确认（BV/分P ack）后才删该段视频；落败节点的同一段立刻删；不碰 ffmpeg 正在写的文件；低于水位拒绝新开录，不删未确认源。`.xml`/`.ass` 留到整场结束。
+  **验收**：计划里的不变量有对应测试设计；实现前不改线上行为。与 `plans/024_segment_upload.md`（不合并、整场一次建稿）分开，本项解决的是磁盘，不是产出形态。
 
 - [~] **T-32 分P 核验假 mismatch → 13 个 job 卡 needs_manual + 源不删(磁盘持续涨)** — 2026-10-10 实测发现。
   **根因(台账时间戳 + B站实查双向取证)**:`finalizeAfterUpload` 在**最后一个 append 成功后 0.5~0.6 秒**
@@ -173,7 +195,84 @@
   D3=先做 Phase 1+2、D4=需你提供 master VM 配额能否调大。
   **解除条件**:用户答复 D1~D4 → 按 P0 → P1 → P2 →(可选 P3)+ C 组推进。
 
-- [ ] **T-18 节点侧上传（experimental:不烧录房间跳过 rsync 回传）** — 计划 `plans/027_node_side_upload.md`。
+- [~] **T-18 节点侧上传（experimental:不烧录房间跳过 rsync 回传）** — 计划 `plans/027_node_side_upload.md`。
+  **本轮施工（2026-10-11）**：用户要求「把分P 无烧录的全改成节点上传,然后测试」。范围 = 9 个
+  `mergeSegments=false` + 不烧录 + `mode=upload` 的房间全开 `steps.nodeSideUpload`。
+  开做前先修节点侧既有缺陷：**删最后一份 .xml**、`{title}` 渲染空、`partTitleTemplate` 被忽略、
+  失败不落 `sync_node_states`（会无限重试 → 重复投稿风险）、缺 `minSegmentSec` 碎片过滤、
+  `startMs` 用节点当下时间（命名漂移）、能力探测对 `DOUYIN_REC_ROOT` 未生效导致 cookie/cookies 判定错误。
+  **2026-10-11 实测（真实直播 task 79 = douyin/249293641318，VPS1+VPS2 双录）**：
+  首跑**卡住**——节点侧产物落到 `<cwd>/output-data/stage`（错根）而非 `<root>/stage`，
+  `限流库 <cwd>/output-data/db/douyin-rec.db` 父目录不存在 → `openUploadLimitStore` 打不开 →
+  UploadGate **fail-closed 静默冷却 30 分钟**。**根因**：`applyNodeDataRoot` 曾写
+  `process.env.DOUYIN_REC_ROOT = drecRoot()`，而 ssh 会话 env 为空时 `drecRoot()` 回落默认根
+  `./output-data`，把数据根错设。**修复**（0.0.76）：入参 `dataRoot` 才是权威，直接绝对化写进 env；
+  另 `openUploadLimitStore` 主动 `mkdirSync` 父目录（消除同类静默失败）。两处均补测试。
+  修复后自审另发现**渲染上下文静默丢失**：`NodeSideUploadArgs.earliest` 声明成
+  `{ rec: { n?: string } }` 却读 `o.earliest?.rec.n`，真实字段是 `NodeRecording.sessionBase` ——
+  因 `n?` 可选故 TS 不报错，`sessionBase` **永远不下发**，节点侧退回按文件名推 base，
+  `{title}` / `{HH}-{mm}-{ss}` 与 master 常规路径**漂移**。**修复**（0.0.77）：改用
+  `rec.sessionBase`；`pipeline.ts` 两处重复的 `earliest` reduce 合并为一份口径；新增
+  `test/orchestrator/node-side-upload.test.ts` 钉死三个渲染字段。
+  **修复后复测（VPS2 节点本地实跑 `_node-pipeline`）**：产物落**正确根** → 建稿
+  `BV11fpD65EU7`（「Lilt_2026-10-12 直播回放」）→ 逐条 append P2/P3/P4 → 源 `.ts` 清理、
+  **`.xml` 保留**（最后一份）、`.upload` 别名清理。**全链路通过**。
+  **2026-10-12 复核（线上台账 + 两节点实测）—— 自动化路径仍全败 + 发现删源/清 stage 漏网**：
+  ① **两次自动跑全失败**（`sync_node_states` 两条 `upload_plain=failed`）：test room/Lilt 那次是
+  **VPS2 跑的是 pre-0.0.76 旧 bundle** → `applyNodeDataRoot` 错根 → 限流库 `output-data/db/…`
+  打不开 → ssh rc=255；`douyin:347071634383:2026-10-12_0523` 那次 winner 是 **VPS1 0.0.75**
+  （同样错根）→ 产物落 `~/output-data/stage/…`、`ssh rc=1`。**根因都是没部署到 0.0.76+**。
+  唯一成功的仍是**手动** `_node-pipeline`（VPS2，`BV11fpD65EU7`，private 4 分 P）。
+  ② **删源漏网（本轮修复）**：节点侧路径**提前 return**，`runPipelineInner` 走不到常规
+  `cleanupSources()` ⇒ `transport.cleanup` 永不调用 ⇒ 节点 `recordings/` 的 `.ts` 永远不删。
+  实测残留：VPS1 `~/output-data/` 5.8G（错根 stage + db）、VPS1 `~/drec/stage/douyin_32353809778_2026-10-11/`
+  434M、VPS2 `~/drec/stage/douyin_249293641318_2026-10-12/` 3.4G（mp4 + `.work/` 双份）。
+  **修复**：`node-side-upload.ts` 在 `markDone` 后调 `cleanupSourcesShared`（与 master 常规路径
+  **同一份删源实现**，按**全部在场成员**含落败节点，`keepNodeXml:true`）；失败写
+  `sync_node_states(upload_plain)=failed` → reconciler 走 `UNSAFE_RETRY_NODES` 转人工，**绝不自动重传**。
+  ③ **自审发现（删最后一份 .xml）**：`xmlKeepRule("node", stageAfterDone=false)=true` 的前提是
+  「stage 里有 pull 来的 xml 副本」，而节点侧**从不 pull xml** ⇒ 照搬会删掉**唯一一份**弹幕。
+  已在 3 处按「节点源 xml 恒为最后一份」收紧：`keepNodeXml:true`、`nodeStageCleanupTargets` 不带
+  `deleteXml`、`app/node-pipeline.ts` 源清理只删 `.ts`。新增 `test/orchestrator/node-side-upload.test.ts`（5 例）
+  + `nodeStageCleanupTargets` 3 例 + `pipeline.test.ts` 2 例钉死。
+  **待办**：部署 0.0.78 到 **master/VPS1**（VPS2 已部署，2026-10-12；master 有 task 74、VPS1 有 task 35 在录，
+  受部署 guard 阻塞，等空闲），再实跑一场验证「自动建稿 + 删源 + 清 stage」。
+  **手工清理已完成（2026-10-12，用户授权）**：VPS1 `~/output-data/`（错根 stage+db，5.8G）+
+  VPS1 `~/drec/stage/douyin_32353809778_2026-10-11`（434M）+ VPS2 `~/drec/stage/douyin_249293641318_2026-10-12`（3.4G）；
+  删前确认这些路径内 `.xml`/`.ass`/`.ts` 为 0（只剩 mp4 + `.work` + db）→ 不触「最后一份弹幕」口径。
+  **本轮施工（2026-10-12，0.0.79）—— 修「假失败」+ 删源漏网的另一半**：
+  **缺陷**：`_node-pipeline` 是**长命令**，ssh 可能在节点**跑完上传之后**才断开/超时。实测两条台账
+  全是**假失败**：`douyin:249293641318:2026-10-12`（`rc=255`，VPS2，稿件其实已建好 private/4 分 P）、
+  `douyin:347071634383:2026-10-12_0523`（`rc=1`，VPS1）。旧实现只在 catch / `!result.ok` 里**无条件**
+  `markFailed` → ① 台账/UI 误报；② **收尾删源永不执行** ⇒ 落败/winner 节点源 `.ts` 永久泄漏
+  （实测 VPS1 `~/drec/recordings/Lilt/` 4 个 `.ts` 约 1.8G 残留）。
+  **修复**：节点侧把结果**落盘** `<root>/stage/<sanitizeStreamKey>/.drec-node-result.json`
+  （`phase`=uploading→done→failed，上传**前**先落 `uploading`）；master 失败时经隐藏命令
+  `_node-result <dataRoot> <streamKey>` **回读权威结果**，统一收口 `handleNodeFailure`：
+  - `done`+bv → **其实已成功** → `markDone` + 与成功路径**共用** `finalizeNodeSuccess`（`cleanupSourcesShared` 删源）→ `done`；
+  - `uploading` / `done` 无 bv / `failed` 带 bv → **结果不确定** → `needs_manual` + 写 `sync_node_states(upload_plain)=failed`，**绝不自动重传**（重复投稿不可逆）；
+  - `failed` / `null`（确认没成）→ 原失败路径。
+  另加**幂等护栏**：`ledger.bv` 已存在 → 直接 `needs_manual`，节点侧绝不重复建稿。
+  收尾实现收敛为单一 `finalizeNodeSuccess`（成功路径与假失败回读共用），消除「一条分支删源、另一条忘了删」的漂移。
+  **测试**：`test/orchestrator/node-side-upload.test.ts` +7 例（假失败回读四态 + 两条失败分支共用收口 + 回读抛错保守）；
+  `test/app/node-pipeline.test.ts` +6 例（结果文件往返/损坏/空态/上传前 uploading/failed 带 bv）；
+  `test/cli/node-pipeline-commands.test.ts` +1 例。全量 `pnpm test` 1219 通过、`pnpm typecheck` 通过、`pnpm bundle` 出 0.0.79。
+  **2026-10-12 收尾复核（本机 master 0.0.76 + VPS1 0.0.75，均为 pre-0.0.79）——「播种假录像 + jobs/run」实测全链路**：
+  用 `runNow` 跳过 settle/断连窗，对**已在盘录像**直接点火后处理，无需等真收播：
+  `POST /api/hub/jobs/run {streamKey}`。本次对 test room 249293641318 的**真实残留**（VPS1 Lilt 1.8G
+  4×`.ts`，即缺陷 A 的现场）点火 → 节点侧 remux 4 分 P → 上传成功 → 台账 `done` + **`BV1ovpX6BEXM`**（private）。
+  **证实「节点侧上传」功能本身 OK，但 pre-0.0.79 的 master 不跑收尾清理** ⇒
+  ① VPS1 `recordings/Lilt/*.ts`（1.8G）**未删**、节点 stage mp4 4 个（1.8G）**未清**；
+  ② `sync_node_states` 行**陈旧**（仍 `upload_plain=failed`，与新 `done` 不一致）；
+  ③ 节点 stage 落 `~/output-data/stage/…`（master 绝对 `stageDir:/output-data/stage` 被原样下发，
+  节点上不存在 → 相对 HOME 落错根）。**三项均已含在 0.0.79 未部署的 diff 里**
+  （`finalizeNodeSuccess`→`cleanupSourcesShared` 删源；`node-pipeline.ts:395` 节点本地 stage 回落）。
+  **结论**：无需再等真收播验证 —— 用「播种假录像/复用残留 + `jobs/run`」即可随时回归节点侧上传；
+  部署 0.0.79 后再跑一次同一场，预期 ①②③ 全部消失。
+  **streamKey 口径备忘**：`streamKey = {platform}:{roomSlug}:{yyy-MM-dd}`（同日同房间多簇加 `_HHMM`），
+  日期用 **config timezone（Asia/Shanghai，已覆盖 host env，启动日志有 `[tz]` 行）**，**不是 host TZ**；
+  `jobs/run` 传**裸 base key** 会按同日前缀匹配多个簇并取 startMs 最新者，故点错场不报错要当心 ——
+  精确点火请用 reconciler 日志里那串**带 `_HHMM` 的完整 key**。
   **做什么**：hub 规则加 `pipeline.steps.nodeSideUpload`（缺省 false）。为 true 且**该房间不烧录**时，
   winner 节点本地 remux → 节点 biliup 直接上传，master 只收 BV 号，**省掉整场录像 rsync 回传**。
   **⚠️ 2026-10-09 收益复核（真实台账 + 实测带宽，见 plan 文末「收益复核」）—— 原估算偏高**：

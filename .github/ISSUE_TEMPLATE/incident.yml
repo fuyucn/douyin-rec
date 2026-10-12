@@ -1,0 +1,39 @@
+name: 录制故障
+description: 录制、上传、磁盘或 hub 台账异常
+title: "[incident] "
+labels: ["incident", "needs-decision"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: 现象
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 证据
+      description: 只写节点角色、时间、state、错误类型、磁盘和进程是否还在。不要写主播名、房间号、streamKey、路径、IP、cookie。
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: 为什么还不能自动处理
+      description: |
+        危险类（上传 / 删源 / 删稿 / 部署 / 改 hub 规则）请按「决定三行」写：
+        ① 要决定什么 ② 不做会怎样 ③ 建议选项。
+        提交前先跑 `python3 scripts/issue-guard.py <body-file>`，命中就先脱敏。
+    validations:
+      required: true
+  - type: textarea
+    id: accept
+    attributes:
+      label: 验收标准（修复类必填）
+      description: |
+        修复类 issue 默认带「验证 + 回写」（见 docs/self-reinforcing-dev.md 环 4/5）：
+        - 部署后核对各节点版本号；
+        - 尽量实跑一场真实链路验证，写明台账终态 + 文件系统证据（没开播 / 时间不够就如实留待办）；
+        - 至少一项回写资产：回归测试 / 规则沉淀 / 指标。
+    validations:
+      required: false
