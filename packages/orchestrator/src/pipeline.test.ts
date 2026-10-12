@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupSourcesShared, xmlKeepRule, runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
@@ -8,6 +8,10 @@ import { SyncLedger } from "./ledger.js";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
+
+// node:fs 走 spy(默认透传真实实现)—— 只有需要覆盖「硬链接不可用」分支的用例才
+// 临时把 linkSync 打桩成抛错;其余用例行为与未 mock 时完全一致。
+vi.mock("node:fs", { spy: true });
 
 function freshLedger(): SyncLedger {
   return new SyncLedger(join(mkdtempSync(join(tmpdir(), "pipeline-test-")), "test.db"));
@@ -463,6 +467,94 @@ describe("runPipeline", () => {
       const allFiles = (deps.appendGroup as Mock).mock.calls.flatMap((c) => (c[0] as { files: string[] }).files);
       expect(allFiles.some((f) => f.includes("_seg"))).toBe(false);
       deps.ledger.close();
+    });
+
+    /**
+     * issue #6:中间产物(`.work/<段号>.mp4`)→ 规范上传名(`{dateName}_{NNN}.mp4`)改「同盘硬链接优先」。
+     *
+     * 改前是真拷贝:同一份数据在 stage 存两遍,上传进行中峰值磁盘翻倍(实测某场 15.5G / 盘 49G)。
+     * 两者同在 stage 子目录、同一文件系统 ⇒ 硬链接零额外空间。不可用(跨设备/不支持)时回落复制。
+     */
+    describe("中间产物 → 规范上传名:同盘硬链接(issue #6)", () => {
+      const SEG_TS = ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"];
+      const canonicalOf = (sub: string, i: number): string =>
+        join(sub, `主播名_2026-06-27_${String(i).padStart(3, "0")}.mp4`);
+      const workOf = (sub: string, i: number): string =>
+        join(sub, ".work", `${String(i).padStart(3, "0")}.mp4`);
+
+      it("逐段(单段组)产出与 .work 中间产物**同 inode**(零额外空间)", async () => {
+        const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: SEG_TS }) }]);
+        const deps = segmentDeps(); // 默认 cfg 无 segmentGroupSec → 全是单段组(走 link 分支)
+        deps.ledger.upsertPending(broadcast.streamKey);
+
+        const result = await runPipeline(broadcast, deps);
+
+        expect(result.state).toBe("done");
+        const sub = stageSubOf(deps);
+        for (let i = 0; i < SEG_TS.length; i++) {
+          const canonical = canonicalOf(sub, i);
+          const work = workOf(sub, i);
+          expect(existsSync(canonical)).toBe(true);
+          // 同一 inode = 同一份数据(改前是两个不同 inode 的真副本)。
+          expect(statSync(canonical).ino).toBe(statSync(work).ino);
+          expect(statSync(canonical).nlink).toBe(2); // .work 与规范名各一个名字
+        }
+        deps.ledger.close();
+      });
+
+      it("linkSync 抛错(跨设备/不支持硬链接)→ 回落复制:内容一致、inode 不同", async () => {
+        const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: SEG_TS }) }]);
+        const deps = segmentDeps();
+        deps.ledger.upsertPending(broadcast.streamKey);
+        // 只让「硬链接」这一步失败(其余 fs 调用保持真实,否则测试自身读写也会挂)。
+        vi.mocked(linkSync).mockImplementation(() => {
+          throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" });
+        });
+        try {
+          const result = await runPipeline(broadcast, deps);
+
+          expect(result.state).toBe("done");
+          const sub = stageSubOf(deps);
+          for (let i = 0; i < SEG_TS.length; i++) {
+            const canonical = canonicalOf(sub, i);
+            const work = workOf(sub, i);
+            expect(existsSync(canonical)).toBe(true);
+            expect(statSync(canonical).ino).not.toBe(statSync(work).ino); // 真复制
+            expect(readFileSync(canonical, "utf-8")).toBe(readFileSync(work, "utf-8"));
+          }
+        } finally {
+          vi.mocked(linkSync).mockRestore(); // 还原透传,别把打桩泄漏给后面的用例
+        }
+        deps.ledger.close();
+      });
+
+      it("续跑:规范名已存在 → 不重复 remux、不重复 link(硬链接是第二个名字,重跑零成本)", async () => {
+        const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: SEG_TS }) }]);
+        const deps = segmentDeps();
+        const remux = vi.fn(async (_src: string, out: string) => { writeFileSync(out, "x"); });
+        (deps as { remuxSegment: (s: string, o: string) => Promise<void> }).remuxSegment = remux;
+        deps.ledger.upsertPending(broadcast.streamKey);
+        await runPipeline(broadcast, deps);
+        const sub = stageSubOf(deps);
+        const inosBefore = SEG_TS.map((_, i) => statSync(canonicalOf(sub, i)).ino);
+        expect(remux).toHaveBeenCalledTimes(SEG_TS.length);
+
+        // 「中断重跑」:新账本(无 bv)→ 走完整路径,但 stage 里产物都在 → 必须全部跳过。
+        const firstLedger = deps.ledger;
+        (deps as { ledger: SyncLedger }).ledger = freshLedger();
+        firstLedger.close(); // 旧账本句柄别泄漏(它已落过 bv,本轮不再用)
+        deps.ledger.upsertPending(broadcast.streamKey);
+        const result = await runPipeline(broadcast, deps);
+
+        expect(result.state).toBe("done");
+        expect(remux).toHaveBeenCalledTimes(SEG_TS.length); // 没多 remux 一次(若改成 rename/mv 这里会翻倍)
+        for (let i = 0; i < SEG_TS.length; i++) {
+          // 规范名与 .work 仍是同一 inode(未被重建成第二份真副本)
+          expect(statSync(canonicalOf(sub, i)).ino).toBe(inosBefore[i]);
+          expect(statSync(canonicalOf(sub, i)).ino).toBe(statSync(workOf(sub, i)).ino);
+        }
+        deps.ledger.close();
+      });
     });
   });
 

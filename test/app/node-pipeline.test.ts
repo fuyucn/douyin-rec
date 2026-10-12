@@ -5,12 +5,25 @@
  *      ② 冷却期内节点侧上传被阻塞;③ 账号键解析(与 master 同键/异键);
  *      ④ master 与节点共享同一限流状态文件时,总提交数不超 rateLimit(并发场景)。
  */
-import { describe, it, expect } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { describe, it, expect, vi } from "vitest";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson } from "@drec/core";
-import { nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, splitGroupsBySession, writeNodeResult } from "../../packages/app/src/node-pipeline.js";
+import { nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, runNodeSidePipeline, splitGroupsBySession, writeNodeResult } from "../../packages/app/src/node-pipeline.js";
+
+// node:fs 走 spy(默认透传真实实现)—— 只有「硬链接不可用」用例才临时打桩 linkSync 抛错。
+vi.mock("node:fs", { spy: true });
+// 逐段 remux/合并/时长探测是外部进程调用,这里换成可控替身(只影响本文件的节点侧用例)。
+vi.mock("@drec/post-process", async (orig) => {
+  const actual = await orig<typeof import("@drec/post-process")>();
+  return {
+    ...actual,
+    ffprobeDuration: async () => 60,
+    remuxSegment: async (_src: string, out: string) => { writeFileSync(out, "REMUXED"); },
+    mergeSession: async (_inputs: string[], out: string) => { writeFileSync(out, "MERGED"); },
+  };
+});
 
 const silence = (): void => {};
 const tmp = (): string => join(mkdtempSync(join(tmpdir(), "node-gate-")), "x.db");
@@ -291,5 +304,101 @@ describe("节点侧结果文件 writeNodeResult / readNodeResult", () => {
     expect(r?.phase).toBe("failed");
     expect(r?.bv).toBe("BV1PART");
     expect(r?.error).toContain("append");
+  });
+});
+
+/**
+ * issue #6:节点侧「中间产物 → 规范上传名」也改「同盘硬链接优先」。
+ *
+ * 改前 `copyFileSync(work, out)`:同一份数据在 stage 存两遍,上传进行中峰值磁盘翻倍
+ * (实测某场:源 ≈5.1G + `.work/` ≈4.9G + 顶层规范名 ≈4.9G ≈ 15.5G,节点盘 49G)。
+ * 中间产物(`.work/<段号>.mp4`)与规范名同在 stage 子目录、同一文件系统 ⇒ 硬链接零额外空间。
+ *
+ * 这里跑**真的** `runNodeSidePipeline`(stage 模式,不触发 biliup),用真文件系统验证落盘形态;
+ * remux/时长探测换成可控替身(见文件顶部 vi.mock)。
+ */
+describe("节点侧:中间产物 → 规范上传名改同盘硬链接(issue #6)", () => {
+  /** 造一个「节点本地录制目录 + stage 目录」的临时场景,返回 spec(不烧录、不上传)。 */
+  function scene(): { stageDir: string; sub: string; spec: Parameters<typeof runNodeSidePipeline>[0] } {
+    const root = mkdtempSync(join(tmpdir(), "node-hl-"));
+    const recDir = join(root, "recordings");
+    mkdirSync(recDir, { recursive: true });
+    const tsFiles = [0, 1, 2].map((i) => {
+      const p = join(recDir, `Lilt_2026-10-12_05-18-36_${String(i).padStart(3, "0")}.ts`);
+      writeFileSync(p, "src");
+      return p;
+    });
+    const stageDir = join(root, "stage");
+    mkdirSync(stageDir, { recursive: true });
+    return {
+      stageDir,
+      sub: join(stageDir, "douyin_123_2026-10-12"),
+      spec: {
+        streamKey: "douyin:123:2026-10-12",
+        tsFiles,
+        sessionBase: "Lilt_2026-10-12_05-18-36",
+        startMs: 1_750_000_000_000,
+        liveTitle: "开播啦",
+        mergeSegments: false,
+        uploadMode: "stage",
+        stageDir,
+        uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像", titleTemplate: "{name}_{date}" },
+        uploadPrivate: true,
+      },
+    };
+  }
+  const workOf = (sub: string, i: number): string => join(sub, ".work", `${String(i).padStart(3, "0")}.mp4`);
+  const canonicalOf = (sub: string, i: number): string => join(sub, `Lilt_2026-10-12_${String(i).padStart(3, "0")}.mp4`);
+
+  it("逐段产出与 .work 中间产物**同 inode**(零额外空间),上传物 = 规范名", async () => {
+    const { sub, spec } = scene();
+    const r = await runNodeSidePipeline(spec, silence);
+
+    expect(r.ok).toBe(true);
+    expect(r.products).toHaveLength(3);
+    for (let i = 0; i < 3; i++) {
+      const canonical = canonicalOf(sub, i);
+      expect(existsSync(canonical)).toBe(true);
+      expect(r.products![i]).toBe(canonical);
+      // 同一 inode = 同一份数据(改前是两个不同 inode 的真副本)。
+      expect(statSync(canonical).ino).toBe(statSync(workOf(sub, i)).ino);
+      expect(statSync(canonical).nlink).toBe(2);
+      expect(readFileSync(canonical, "utf-8")).toBe("REMUXED");
+    }
+  });
+
+  it("linkSync 抛错(跨设备/不支持硬链接)→ 回落复制:内容一致、inode 不同", async () => {
+    const { sub, spec } = scene();
+    vi.mocked(linkSync).mockImplementation(() => {
+      throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" });
+    });
+    try {
+      const r = await runNodeSidePipeline(spec, silence);
+
+      expect(r.ok).toBe(true);
+      for (let i = 0; i < 3; i++) {
+        const canonical = canonicalOf(sub, i);
+        expect(existsSync(canonical)).toBe(true);
+        expect(statSync(canonical).ino).not.toBe(statSync(workOf(sub, i)).ino); // 真复制
+        expect(readFileSync(canonical, "utf-8")).toBe("REMUXED");
+      }
+    } finally {
+      vi.mocked(linkSync).mockRestore(); // 还原透传,别把打桩泄漏给后面的用例
+    }
+  });
+
+  it("续跑:规范名已存在 → 不重复 remux、inode 不变(改成 rename/mv 会让重跑重做一遍)", async () => {
+    const { sub, spec } = scene();
+    const r1 = await runNodeSidePipeline(spec, silence);
+    expect(r1.ok).toBe(true);
+    const inos = [0, 1, 2].map((i) => statSync(canonicalOf(sub, i)).ino);
+
+    // 再跑一遍(等价「中断重跑」):.work 与规范名都在 → 全部跳过。
+    const r2 = await runNodeSidePipeline(spec, silence);
+    expect(r2.ok).toBe(true);
+    for (let i = 0; i < 3; i++) {
+      expect(statSync(canonicalOf(sub, i)).ino).toBe(inos[i]); // 没被重建
+      expect(statSync(canonicalOf(sub, i)).ino).toBe(statSync(workOf(sub, i)).ino);
+    }
   });
 });
