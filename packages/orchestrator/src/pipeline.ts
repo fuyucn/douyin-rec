@@ -409,6 +409,64 @@ export async function finalizeAfterUpload(o: {
 }
 
 /**
+ * 边录边传(T-33)识别短路:若本场录像来自「录制节点已边录边传」的会话(`{base}.rolling.json`
+ * 带 bv),则 master **绝不重复建稿** —— 直接收口为 done(带该 BV),并按 sourceAfterDone 删源。
+ *
+ * 为什么必须在**最早**短路:节点上传确认后已删该段源视频,覆盖率/选优会失真(可能误报未录全),
+ * 不能靠下游判定。这里只看 sidecar 的权威事实(录制节点自己写的 BV)。
+ *
+ * 边界:
+ *   - 没有任何成员带 rolling.bv → 返回 null,走常规路径(未启用边录边传 = 行为不变)。
+ *   - 有 rolling.bv 但存在 ambiguous 段(结果不确定)→ **转人工**(保留源,不自动重传)。
+ *   - 有 rolling.bv 但**磁盘上仍剩未确认分段**(进程在 onSessionEnd 前被杀)→ **转人工**:
+ *     那些段的画面没进 BV,静默 done 会**丢片**。确认段会被删,故「还剩 ts」= 未确认。
+ *   - stage 模式:边录边传只在上传模式有意义;stage 模式仍照常合成(此处仅认 upload 模式)。
+ *   - 多个成员都带 rolling.bv 且 **BV 不一致** → 说明多节点各建稿(不该发生,闸门已挡)→ 转人工。
+ */
+function tryRollingShortCircuit(o: {
+  streamKey: string;
+  members: Broadcast["members"];
+  ledger: SyncLedger;
+  transports: Map<string, Transport>;
+  notify: (e: NotifyEvent) => void;
+  jlog: (m: string) => void;
+}): { state: JobState; bv?: string } | null {
+  const { streamKey, members, ledger, jlog } = o;
+  if (ledger.get(streamKey)?.bv) return null; // 已有 BV(续跑) → 交给既有续跑路径
+  const rolled = members.filter((m) => m.rec.rolling?.bv);
+  if (rolled.length === 0) return null;
+  const bvs = [...new Set(rolled.map((m) => m.rec.rolling!.bv!))];
+  if (bvs.length > 1) {
+    jlog(`边录边传识别:多个节点各自建稿(${bvs.join(",")})→ 转人工(绝不自动重传,防重复投稿)`);
+    ledger.setState(streamKey, "needs_manual", { error: `边录边传:多节点各建稿(${bvs.join(",")}),请人工核对删重复稿` });
+    o.notify({ kind: "error", stage: "上传", message: `${streamKey} 边录边传:多节点各建稿,已转人工核对` });
+    return { state: "needs_manual" };
+  }
+  const bv = bvs[0];
+  const ambiguous = rolled.flatMap((m) => m.rec.rolling?.ambiguous ?? []);
+  if (ambiguous.length > 0) {
+    jlog(`边录边传识别:BV=${bv} 但存在结果不确定段(${ambiguous.join(",")})→ 转人工(保留源,不自动重传)`);
+    ledger.setState(streamKey, "needs_manual", { error: `边录边传:BV=${bv} 有不确定段 ${ambiguous.join(",")},请人工核对分 P` });
+    o.notify({ kind: "error", stage: "上传", message: `${streamKey} 边录边传:存在不确定分 P,已转人工` });
+    return { state: "needs_manual", bv };
+  }
+  // 磁盘上仍剩分段 = 进程在 onSessionEnd 前被杀(确认段会被删,故「还剩 ts」= 未确认)→ 丢片风险,转人工。
+  const residual = rolled.flatMap((m) => m.rec.tsFiles);
+  if (residual.length > 0) {
+    jlog(`边录边传识别:BV=${bv} 但磁盘仍剩 ${residual.length} 个未确认分段 → 转人工(不静默 done,防丢片)`);
+    ledger.setState(streamKey, "needs_manual", { error: `边录边传:BV=${bv} 仍有 ${residual.length} 个未确认分段,请人工核对补传` });
+    o.notify({ kind: "error", stage: "上传", message: `${streamKey} 边录边传:仍有未确认分段,已转人工` });
+    return { state: "needs_manual", bv };
+  }
+  // 录制节点已建稿且全部确认 → master 直接收口 done。节点侧已删各确认段源视频,这里只标记完成。
+  jlog(`边录边传识别:录制节点已建稿 BV=${bv}(确认 ${rolled.flatMap((m) => m.rec.rolling?.confirmed ?? []).length} 段)→ 直接 done,绝不重复建稿`);
+  ledger.setBv(streamKey, bv);
+  ledger.markDone(streamKey, bv);
+  o.notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+  return { state: "done", bv };
+}
+
+/**
  * 每场专属日志(`<stageSub>/job.log`,append-only,随 stage 产物持久保留)。
  * 记录选优明细/每步起止耗时/子命令输出摘尾/致命错误——补上「容器日志混杂且重启即丢」的复盘缺口。
  * 写失败静默(日志绝不反噬 pipeline)。
@@ -499,6 +557,12 @@ async function runPipelineInner(
   const presentMembers = [];
   for (const m of b.members) {
     const tp = transports.get(m.workerId);
+    // 边录边传(T-33):已建稿(rolling.bv)且 tsFiles 已被删空的成员 —— 文件「不存在」是**预期**的,
+    // 不能按「已归档」剔除,否则 rolling 短路看不到它(漏收口)。只认「有 tsFiles 但确实缺失」为剔除。
+    if (m.rec.rolling?.bv && m.rec.tsFiles.length === 0) {
+      presentMembers.push(m);
+      continue;
+    }
     const ok = tp?.exists ? await tp.exists(m.rec.tsFiles).catch(() => false) : true;
     if (ok) presentMembers.push(m);
     else {
@@ -507,6 +571,13 @@ async function runPipelineInner(
     }
   }
   const candidates = { ...b, members: presentMembers };
+
+  // ── 边录边传(T-33)识别:录制节点已自己建稿 → **绝不重复建稿** ─────────────────────
+  // 该会话由录制节点边录边传(`{base}.rolling.json` 带 bv)。master 若再走 pull→merge→upload
+  // 就是**重复投稿**(B 站不可逆)。这里**最早**短路(在 selectWinner/覆盖率判定之前)——因为段可能
+  // 已被节点删掉,覆盖率会失真(误报「未录全」),不能靠下游判定。
+  const rollingShort = tryRollingShortCircuit({ streamKey, members: presentMembers, ledger, notify, transports, jlog });
+  if (rollingShort) return rollingShort;
 
   // Select the best recording across all (present) nodes
   // requireDanmu:本场要烧弹幕(danmu/livechat)时,别让「视频覆盖高但 xml 空」的节点赢过有弹幕的

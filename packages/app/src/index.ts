@@ -47,3 +47,6 @@ export {
   readNodeResult, nodeResultPath,
 } from "./node-pipeline.js";
 export type { NodeUploadGateOpts } from "./node-pipeline.js";
+// 边录边传(T-33,见 plans/031):录制端「封口段上传 → 确认后删该段源」的执行体 + 钩子工厂。
+export { RollingUploader, makeRollingUploadHookFactory } from "./rolling-upload.js";
+export type { RollingUploaderOpts } from "./rolling-upload.js";

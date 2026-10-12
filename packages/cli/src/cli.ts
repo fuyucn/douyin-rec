@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, loadConfig, sanitizeStreamKey } from "@drec/core";
+import { biliAccountKey, loadConfig, rollingUploadSingleNode, sanitizeStreamKey } from "@drec/core";
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -83,6 +83,7 @@ interface RecordCliOpts {
   segment?: string;
   danmuXmlMode?: string;
   reconnect?: string;
+  rollingUpload?: string;
   config?: string;
 }
 
@@ -171,6 +172,7 @@ program
   .option("--segment <sec>", "分段时长(秒), 0=不分段 (默认 1800)")
   .option("--danmu-xml-mode <mode>", "弹幕 xml 粒度: session(整场一个,默认) | segment(逐段一个)")
   .option("--reconnect <sec>", "断流快速重连等待(秒) (默认 5)")
+  .option("--rolling-upload <0|1>", "边录边传: 1=录制中每封口一段就上传并删该段源 0=整场录完再处理 (默认 0)")
   .option("--config <path>", "YAML 配置文件 (命令行选项优先覆盖)")
   .action(async (o: RecordCliOpts) => {
     const cfg = loadConfig(o.config);
@@ -224,7 +226,23 @@ program
         }
       },
     };
-    const session = new RecordingSession(recorder, { reconnectDelaySec, notifier, danmuEnabled });
+    // 边录边传(T-33,默认关):开启时注入「每会话一个」上传钩子工厂(metadata 读 hub 规则/hub.config);
+    // 关闭时 undefined → session 完全不启用,行为与改动前一致。开关 0/1/on/off/true/false(与 task-input 同套假值)。
+    const rollingEnabled = o.rollingUpload !== undefined
+      && !["0", "off", "false", "no", "none"].includes(o.rollingUpload.trim().toLowerCase());
+    let makeRolling: (() => import("@drec/manager").RollingUploadHook) | undefined;
+    if (rollingEnabled) {
+      const { makeRollingUploadHookFactory } = await import("@drec/app");
+      const slug = platform.extractRoomSlug(roomToUrl(o.room));
+      makeRolling = makeRollingUploadHookFactory({
+        enabled: true,
+        platform: platform.id,
+        roomSlug: slug,
+        log: (m: string) => console.log(m),
+      });
+      console.log(`[rec] 边录边传已开启:每封口一段上传后删该段源(room=${slug})`);
+    }
+    const session = new RecordingSession(recorder, { reconnectDelaySec, notifier, danmuEnabled, makeRolling });
 
     // 优雅停止 — 同时处理 SIGINT (Ctrl-C) 和 SIGTERM (kill / 进程管理器)。
     // 缺 SIGTERM handler 会导致 kill 时 node 直接退、不跑 stop()，孤儿 ffmpeg 继续录。
@@ -1037,6 +1055,16 @@ const hubStarter: HubStarter = {
           outDir: src.outDir,
           webhook: src.webhook,
           anchorName: src.anchorName,
+          // 边录边传开关随任务下发到节点(节点录制端据此边录边传);缺省 false。
+          // **跨节点重复投稿闸门**:边录边传是录制节点自己建稿,多节点同录 → 各建一稿 = 重复投稿。
+          //   - 远端节点:节点上**没有** hub 规则文件,判不了 → 必须在 master 这里收窄:
+          //     规则勾选恰好 1 个节点才下发 true,否则 false(回落整场管线,master 选优后只传 winner)。
+          //   - 本机(local):local 的 applyTasks 写的是**源任务本身**,而源任务的 rollingUpload 是
+          //     **用户意图**(不是本节点是否被选中),这里**不能**改它(同 enabled 的特例)。本机的
+          //     实际收窄由录制端工厂完成 —— 它跑在 master 本机,能读到 hub 规则(见 makeRollingUploadHookFactory)。
+          rollingUpload: isLocalWorker
+            ? src.rollingUpload
+            : (src.rollingUpload && rollingUploadSingleNode(true, rule.workers)),
         });
       }
       return out;

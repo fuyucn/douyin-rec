@@ -121,4 +121,32 @@ describe("scanRecordings", () => {
     const slugs = recordings.map((r) => r.roomSlug).sort();
     expect(slugs).toEqual(["111", "222"]);
   });
+
+  it("T-33:段被删空但留下 .rolling.json → 仍产出(带 rolling.bv),供 master 收口", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    // 边录边传:各段确认后已被删,只剩 session sidecar + rolling sidecar + xml。
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.session.json"),
+      JSON.stringify({ sessionBase: "主播A_2026-06-27_08-00-00", roomSlug: "888", platform: "douyin" }));
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.xml"), "x");
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"),
+      JSON.stringify({ bv: "BV1rollingX", confirmed: [0, 1], ambiguous: [] }));
+
+    const recordings = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    expect(recordings).toHaveLength(1);
+    expect(recordings[0].roomSlug).toBe("888");
+    expect(recordings[0].tsFiles).toEqual([]);
+    expect(recordings[0].rolling?.bv).toBe("BV1rollingX");
+    expect(recordings[0].rolling?.confirmed).toEqual([0, 1]);
+    // startMs 从会话 base 时间戳兜底(不是 0,否则聚类算出 1970-01-01 的 streamKey)。
+    expect(recordings[0].startMs).toBe(new Date(2026, 5, 27, 8, 0, 0).getTime());
+  });
+
+  it("T-33:无 rolling.json 且无 ts 的目录不产出(不误报空会话)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.xml"), "x"); // 只有 xml,无 ts 无 rolling
+    const recordings = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    expect(recordings).toHaveLength(0);
+  });
 });

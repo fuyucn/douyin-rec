@@ -7,12 +7,12 @@
  * **命令定义**(`task serve` 的选项/描述)在 cli(T-22 第 4 步:命令定义属入口层);
  * 本文件只负责「拿到已解析的选项后怎么把服务跑起来」。cli 通过 `runServe(opts, deps)` 调它。
  */
-import { mkdirSync } from "node:fs";
+import { mkdirSync, statfsSync } from "node:fs";
 import { createLogger } from "@drec/core";
 import { TaskStore, resolveTaskWebhook } from "./store.js";
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
-import { ensureHubConfigExample, ensureNodeIdentity, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
+import { drecRoot, ensureHubConfigExample, ensureNodeIdentity, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
 import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
@@ -296,6 +296,25 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
               return localSuppressedSourceTaskIds(rootHubDir(), new Set(caps.keys()), (id) => caps.get(id));
             }
           : undefined,
+        // 磁盘低水位闸门(T-33 不变量 6):剩余低于水位 → 拒绝启动新任务(绝不用删未确认源腾空间,
+        // 也不截断已在录的场)。阈值取 hub.config resources.diskMinGB(与 master 磁盘看门狗同源)。
+        freeBytes: () => {
+          // 数据根与录像目录同卷;录像目录可能尚未创建(全新部署)→ 依次回退数据根。
+          // 都取不到(异常)→ null = 不拦(避免把探测失败当爆盘误停,已有磁盘看门狗告警兜底)。
+          for (const p of [resolveOutputDir(undefined), drecRoot()]) {
+            try { const st = statfsSync(p); return Number(st.bavail) * Number(st.bsize); } catch { /* 试下一个 */ }
+          }
+          return null;
+        },
+        diskWatermarkBytes: (() => {
+          try {
+            const cfg = JSON.parse(resolveHubConfigJson(o.hubConfig, store) ?? "{}") as {
+              resources?: { diskMinGB?: number };
+            };
+            const gb = cfg.resources?.diskMinGB;
+            return gb && gb > 0 ? gb * 1e9 : 0;
+          } catch { return 0; }
+        })(),
       });
     }
 

@@ -155,6 +155,8 @@ export interface CreateTaskInput {
   scheduleEnd?: string | null;
   /** 任务专属 Discord webhook;空/省略 = 回落全局。 */
   webhook?: string | null;
+  /** 边录边传开关(T-33,默认 false)。 */
+  rollingUpload?: boolean;
 }
 
 /**
@@ -177,6 +179,8 @@ export interface UpdateTaskInput {
   scheduleEnd?: string | null;
   /** 任务专属 Discord webhook;空/省略 = 回落全局。 */
   webhook?: string | null;
+  /** 边录边传开关(T-33,默认 false)。 */
+  rollingUpload?: boolean;
 }
 
 /** Public status of one platform cookie (never leaks the raw value). */

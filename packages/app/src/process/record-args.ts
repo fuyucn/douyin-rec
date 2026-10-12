@@ -43,5 +43,9 @@ export function buildRecordArgs(task: Task): string[] {
   if (task.cookies) {
     args.push("--cookies", task.cookies);
   }
+  // 边录边传(T-33):仅开启时下发(默认关 = 不带该 flag,行为不变)。
+  if (task.rollingUpload) {
+    args.push("--rolling-upload", "1");
+  }
   return args;
 }

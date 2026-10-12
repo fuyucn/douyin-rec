@@ -1397,3 +1397,81 @@ describe("runPipeline", () => {
   });
 });
 
+// ── 边录边传(T-33)识别短路:录制节点已自己建稿 → 绝不重复建稿 ─────────────────
+describe("runPipeline — 边录边传识别短路", () => {
+  it("rolling.bv 存在且无不确定段 → 直接 done,绝不 pull/upload", async () => {
+    const rec = makeRec({ totalGapSec: 0, tsFiles: [] }); // 段已被节点删空
+    rec.rolling = { bv: "BV1rolling", confirmed: [0, 1], ambiguous: [] };
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec }]);
+    // 成员「文件已不存在」不被剔除(rolling.bv 且 tsFiles 空 → 预期)。
+    const deps = makeDeps();
+    deps.transports.get("node-1")!.exists = vi.fn().mockResolvedValue(false);
+    deps.ledger.upsertPending(broadcast.streamKey);
+
+    const r = await runPipeline(broadcast, deps);
+    expect(r.state).toBe("done");
+    expect(r.bv).toBe("BV1rolling");
+    expect(deps.uploadPlain).not.toHaveBeenCalled(); // 绝不重复建稿
+    expect(deps.sh).not.toHaveBeenCalled();          // 也不该走 merge/burn
+  });
+
+  it("rolling.bv 但存在不确定段(ambiguous)→ needs_manual,保留源,不自动重传", async () => {
+    const rec = makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts"] });
+    rec.rolling = { bv: "BV1rolling2", confirmed: [0], ambiguous: [1] };
+    const broadcast = makeBroadcast([{ workerId: "node-2", rec }]);
+    const deps = makeDeps();
+    deps.ledger.upsertPending(broadcast.streamKey);
+
+    const r = await runPipeline(broadcast, deps);
+    expect(r.state).toBe("needs_manual");
+    expect(deps.uploadPlain).not.toHaveBeenCalled();
+  });
+
+  it("rolling.bv 但磁盘仍剩未确认分段 → needs_manual(不静默 done,防丢片)", async () => {
+    const rec = makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_005.ts"] });
+    rec.rolling = { bv: "BV1rolling3", confirmed: [0, 1], ambiguous: [] };
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec }]);
+    const deps = makeDeps();
+    deps.transports.get("node-1")!.exists = vi.fn().mockResolvedValue(true);
+    deps.ledger.upsertPending(broadcast.streamKey);
+    const r = await runPipeline(broadcast, deps);
+    expect(r.state).toBe("needs_manual");
+    expect(deps.uploadPlain).not.toHaveBeenCalled();
+  });
+
+  it("多节点各建稿(BV 不一致)→ needs_manual(防重复稿隐患)", async () => {
+    const r1 = makeRec({ totalGapSec: 0, tsFiles: [] });
+    r1.rolling = { bv: "BV1aaa", confirmed: [0], ambiguous: [] };
+    const r2 = makeRec({ totalGapSec: 0, tsFiles: [] });
+    r2.rolling = { bv: "BV1bbb", confirmed: [0], ambiguous: [] };
+    const broadcast = makeBroadcast([
+      { workerId: "node-1", rec: r1 },
+      { workerId: "node-2", rec: r2 },
+    ]);
+    const deps = makeDeps();
+    deps.ledger.upsertPending(broadcast.streamKey);
+
+    const r = await runPipeline(broadcast, deps);
+    expect(r.state).toBe("needs_manual");
+    expect(deps.uploadPlain).not.toHaveBeenCalled();
+  });
+
+  it("无 rolling.bv → 走常规路径(边录边传未启用,行为不变)", async () => {
+    const rec = makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts"] });
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec }]);
+    const deps = makeDeps();
+    // 模拟 merge/burn 产物,让常规 workflow 通过(与既有 runDeps 同口径)。
+    const stageSub = join(deps.cfg.stageDir, "douyin_test-room_2026-06-27");
+    mkdirSync(stageSub, { recursive: true });
+    writeFileSync(join(stageSub, "src.ts"), "x");
+    writeFileSync(join(stageSub, "danmu.xml"), "x");
+    writeFileSync(join(stageSub, "主播名_2026-06-27.mp4"), "x");
+    writeFileSync(join(stageSub, "主播名_2026-06-27.xml"), "x");
+    deps.ledger.upsertPending(broadcast.streamKey);
+    const r = await runPipeline(broadcast, deps);
+    // 常规路径:uploadPlain 被调用(建稿),未触发 rolling 短路。
+    expect(deps.uploadPlain).toHaveBeenCalled();
+    expect(r.state).toBe("done");
+  });
+});
+

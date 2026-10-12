@@ -30,6 +30,25 @@ export interface SessionOpts {
    * false → 不抓。弹幕来源不再由外部注入,而是运行时按 roomUrl 命中的平台提供。默认 true。
    */
   danmuEnabled?: boolean;
+  /**
+   * 边录边传(T-33)的可选钩子**工厂**:每次 `_startInner`(首次开录 / 断流重连)调一次,
+   * 返回**本会话专属**的钩子。必须是工厂而非单例 —— 断流重连会产生新会话(新文件名 base),
+   * 复用同一实例会把两个会话的段混在一起(重复建稿 / 分 P 串台)。
+   * **不注入 = 完全不启用**(默认,行为不变)。钩子只负责「通知」,上传/删源/失败转人工都在实现里;
+   * session 不阻塞录制(除会话收尾时等其结束)。
+   */
+  makeRolling?: () => RollingUploadHook;
+}
+
+/**
+ * 边录边传钩子(manager ↔ app 的接缝)。manager 只做「通知」:
+ *   - {@link onSegment}:一个新分段产生(尚未封口;实现自己按封口规则决定何时上传);
+ *   - {@link onSessionEnd}:本会话即将收尾(停录 / 断流重连前)—— 实现应处理最后一段并**等待完成**,
+ *     返回后 session 才继续。实现必须**吞掉自身异常**(不得反噬录制),但要在自己的日志里留痕。
+ */
+export interface RollingUploadHook {
+  onSegment(filePath: string): void;
+  onSessionEnd(): Promise<void>;
 }
 
 export class RecordingSession {
@@ -76,6 +95,10 @@ export class RecordingSession {
   private readonly drainPollSec: number;
   private readonly notifier: Notifier | undefined;
   private readonly danmuEnabled: boolean;
+  /** 边录边传钩子工厂(T-33);undefined = 未启用(默认,行为不变)。 */
+  private readonly makeRolling?: () => RollingUploadHook;
+  /** 本会话的边录边传钩子(每次 _startInner 新建)。 */
+  private rolling?: RollingUploadHook;
   /**
    * 当前这场的弹幕源(onLive 时经 platform.connectDanmu 取得、start;onOffline/stop 时 stop)。
    * 每场重新取一个(重连/下一场要重新解析 liveId)。null = 本场未抓弹幕。
@@ -110,6 +133,7 @@ export class RecordingSession {
     this.drainPollSec = sessionOpts?.drainPollSec ?? 30;
     this.notifier = sessionOpts?.notifier;
     this.danmuEnabled = sessionOpts?.danmuEnabled ?? true;
+    this.makeRolling = sessionOpts?.makeRolling;
   }
 
   /** Fire-and-forget notifier call — swallows errors so notifications never affect recording. */
@@ -159,6 +183,8 @@ export class RecordingSession {
     // 弹幕只在「确认开播(onLive)」后才连(见下),不在 recorder.start() 后立即连——否则开播前
     // (轮询等待期)解析到的是陈旧/上一场 liveId,WS 连上却整场 0 弹幕(本地空弹幕根因 2026-06-19)。
     let danmuStarted = false;
+    // 边录边传(T-33):本会话专属钩子(工厂每次 _startInner 新建)。undefined = 未启用。
+    this.rolling = this.makeRolling?.();
 
     // 进程已起、录制器在轮询开播但尚未拿到流 → 「等待开播」。父进程 TaskManager 解析
     // `[状态] X` → UI 区分「等待开播中」vs「录制中」（避免未开播也显示录制中）。
@@ -244,6 +270,9 @@ export class RecordingSession {
       onSegment: (tsPath) => {
         if (ownWriter) this.openWriterForSegment(tsPath);
         else log.info(`新分段 (biliLive 自管 xml): ${tsPath}`);
+        // 边录边传(T-33):通知钩子有新分段(未封口;由钩子自己按封口规则决定何时上传)。
+        // 钩子异常绝不反噬录制(录制优先);失败/不确定由钩子内部转人工(保留源)。
+        try { this.rolling?.onSegment(tsPath); } catch (e) { log.error("边录边传钩子 onSegment 抛错(忽略):", (e as Error)?.message ?? e); }
       },
       // biliLive fires onDanmu but writes its own xml — we do NOT intercept here.
       // DLR does not fire onDanmu (providesDanmu=false); danmu comes via DanmuSource below.
@@ -309,6 +338,16 @@ export class RecordingSession {
     }
     await this.recorder.stop().catch(() => {});
     if (this.writerOpen) { this.writer.close(); this.writerOpen = false; this.currentXmlPath = null; }
+
+    // 边录边传(T-33):本会话已收尾(进程已停、最后一段不再增长)→ 处理最后一段并等它上传完成,
+    // 再重连。**必须在 recorder.stop() 之后**调(否则最后一段还在写,封口判定不成立)。
+    // 钩子异常绝不反噬重连;失败/不确定由钩子内部转人工(保留源)。
+    if (this.rolling) {
+      const rolling = this.rolling;
+      this.rolling = undefined; // 幂等:同一会话只收尾一次(stop 与 offline 竞态不重复处理)
+      try { await rolling.onSessionEnd(); }
+      catch (e) { log.error("边录边传钩子 onSessionEnd 抛错(忽略):", (e as Error)?.message ?? e); }
+    }
 
     // Check again after async teardown — user may have called stop() during teardown
     if (this.userStopped) { this.reconnecting = false; return; }
@@ -456,6 +495,14 @@ export class RecordingSession {
     }
     await this.recorder.stop().catch(() => {});
     if (this.writerOpen) { this.writer.close(); this.writerOpen = false; this.currentXmlPath = null; }
+    // 边录边传(T-33):停录后处理最后一段并等上传完成(在写 session sidecar 之前;失败/不确定
+    // 由钩子内部转人工)。钩子异常绝不反噬停止。
+    if (this.rolling) {
+      const rolling = this.rolling;
+      this.rolling = undefined;
+      try { await rolling.onSessionEnd(); }
+      catch (e) { log.error("边录边传钩子 onSessionEnd 抛错(忽略):", (e as Error)?.message ?? e); }
+    }
     // 停录:同名覆盖 session.json,补上缺口(身份字段不变)。供多节点选优用。
     try {
       if (this.currentXmlPath || this.lastXmlPath) {

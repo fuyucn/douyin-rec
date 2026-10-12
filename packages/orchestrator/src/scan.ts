@@ -51,7 +51,41 @@ function readSession(dir: string, base: string): { roomSlug?: string; platform?:
   return { roomSlug: roomSlug ?? g?.roomSlug, platform, totalGapSec: g?.totalGapSec ?? 0 };
 }
 
+/**
+ * 读边录边传(T-33)结果 sidecar `{base}.rolling.json`(录制端写)。
+ * 存在且带 bv = 该会话已由录制节点自己建稿 → master **不得重复建稿**(否则重复投稿)。
+ * 缺失/损坏 → undefined(老录像/未启用;不抛)。
+ */
+function readRolling(dir: string, base: string): { bv?: string; confirmed?: number[]; ambiguous?: number[] } | undefined {
+  try {
+    const d = JSON.parse(readFileSync(join(dir, `${base}.rolling.json`), "utf-8")) as
+      { bv?: string; confirmed?: unknown; ambiguous?: unknown };
+    return {
+      bv: typeof d.bv === "string" && d.bv ? d.bv : undefined,
+      confirmed: Array.isArray(d.confirmed) ? d.confirmed.filter((n): n is number => typeof n === "number") : undefined,
+      ambiguous: Array.isArray(d.ambiguous) ? d.ambiguous.filter((n): n is number => typeof n === "number") : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export type FfprobeAdapter = (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;
+
+/**
+ * 从会话 base(`{name}_{YYYY-MM-DD}_{HH}-{mm}-{ss}`)解析录制起点 epoch ms。
+ *
+ * 为什么需要:边录边传(T-33)的会话可能**一个 .ts 都不剩**(确认后全删),此时没有任何
+ * ffprobe 结果可推 startMs —— 若留 0,聚类会算出 `1970-01-01` 的 streamKey,收口写错场。
+ * 会话 base 尾部的 `YYYY-MM-DD_HH-mm-ss` 就是录制起点(本地时区),用它兜底。
+ * 解析不出 → 0(调用方按旧行为处理)。
+ */
+function startMsFromSessionBase(base: string): number {
+  const m = /_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/.exec(base);
+  if (!m) return 0;
+  const [, y, mo, d, h, mi, s] = m;
+  return new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)).getTime();
+}
 
 /**
  * 扫描 recordingsDir 下所有主播子目录，聚合会话分段，返回 NodeRecording[]。
@@ -75,9 +109,20 @@ export async function scanRecordings(
 
   for (const anchor of anchors) {
     const dir = join(recordingsDir, anchor);
-    const groups = groupSessions(readdirSync(dir));
+    const files = readdirSync(dir);
+    const groups = groupSessions(files);
+    // 边录边传(T-33):已确认段被节点删空后,该会话在 groupSessions 里**没有条目**
+    // (只有 .xml + .rolling.json 存活)。补出来,否则 master 看不到「已建稿」事实 → 漏收口。
+    for (const f of files) {
+      const m = /^(.+)\.rolling\.json$/.exec(f);
+      if (m && !groups[m[1]]) groups[m[1]] = { ts: [], xml: null, segmentXmls: [] };
+    }
     for (const [base, g] of Object.entries(groups)) {
-      if (!g.ts.length) continue;
+      const rolling = readRolling(dir, base);
+      // 边录边传(T-33):已确认的段被录制节点删掉后,该会话可能 **一个 .ts 都不剩**。
+      // 但它是**已完成上传**的场(rolling.bv 存在)—— 必须照样出现在清单里,否则 master 收不到
+      // 「已建稿」事实,reconciler 会把它当没有录像而漏掉收口。故:无 ts 但 rolling.bv 存在 → 仍产出。
+      if (!g.ts.length && !rolling?.bv) continue;
       let durationSec = 0, startMs = Infinity, endMs = 0;
       for (const f of g.ts) {
         const p = await ffprobe(join(dir, f));
@@ -86,6 +131,9 @@ export async function scanRecordings(
         endMs = Math.max(endMs, p.endMs);
       }
       const sess = readSession(dir, base);
+      // 无 ts 的会话(边录边传全删)→ startMs 用会话 base 时间戳兜底;endMs 未知取 = startMs。
+      const baseMs = startMsFromSessionBase(base);
+      if (startMs === Infinity) { startMs = baseMs; endMs = baseMs; }
       // 弹幕源 .xml 是**可选**产物:缺失(异常中断/历史录像)时不能把不存在的路径交给 pull
       // (本地 copyFileSync 会 ENOENT、rsync 会 rc≠0,整场后处理直接失败)。
       const xmlAbs = join(dir, `${base}.xml`);
@@ -106,6 +154,7 @@ export async function scanRecordings(
         endMs,
         totalGapSec: sess.totalGapSec,
         title: sess.title,
+        rolling,
       });
     }
   }

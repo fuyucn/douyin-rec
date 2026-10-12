@@ -27,6 +27,7 @@ describe("applyRemoteTasks", () => {
     outDir: null,
     webhook: null,
     anchorName: null,
+    rollingUpload: false,
     ...over,
   });
 
@@ -66,6 +67,16 @@ describe("applyRemoteTasks", () => {
     applyRemoteTasks(store, [spec({ anchorName: null })]);
     const t = store.listTasks().find((x) => x.room.includes("123456"))!;
     expect(t.anchorName).toBeNull();
+  });
+  it("T-33: spec.rollingUpload 传播到节点任务(update + 新建)", () => {
+    // 更新已有任务:rollingUpload 随 master 意图下发。
+    const existing = store.addTask({ room: "123456" });
+    applyRemoteTasks(store, [spec({ rollingUpload: true })]);
+    expect(store.getTask(existing.id)!.rollingUpload).toBe(true);
+    // 新建任务:预置 rollingUpload。
+    applyRemoteTasks(store, [spec({ roomSlug: "888", room: "https://live.douyin.com/888", rollingUpload: true })], undefined, { adopt: true });
+    const t = store.listTasks().find((x) => x.room.includes("888"))!;
+    expect(t.rollingUpload).toBe(true);
   });
 
   // 注意:期望为空现在会被 empty-desired 守卫拦下(T-2),删除语义用「期望非空但不含它」来测。
@@ -246,7 +257,7 @@ describe("T3 删除语义", () => {
     platform: "douyin", roomSlug: "123456", room: "https://live.douyin.com/123456",
     name: "主播A", quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
     scheduleStart: null, scheduleEnd: null, enabled: true, useCookie: true,
-    cookies: null, outDir: null, webhook: null, anchorName: null, ...over,
+    cookies: null, outDir: null, webhook: null, anchorName: null, rollingUpload: false, ...over,
   });
 
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "t3-")); store = new TaskStore(join(dir, "tasks.db")); });

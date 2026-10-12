@@ -16,6 +16,7 @@
 import { TaskStore, type Task } from "./store.js";
 import { inWindow, nowMinutesLocal } from "./scheduler.js";
 import { TaskManager } from "./task-manager.js";
+import { shouldRefuseNewRecording } from "@drec/core";
 
 export interface DaemonOpts {
   /**
@@ -36,6 +37,16 @@ export interface DaemonOpts {
    * 跟随规则文件手改即时生效;缺省 = 不抑制(单机/worker 行为完全不变)。
    */
   localSuppressedIds?: () => ReadonlySet<number>;
+  /**
+   * 数据根剩余空间(字节)。返回 null/undefined = 查不到(不拦)。
+   * 低于 {@link DaemonOpts.diskWatermarkBytes} → **拒绝启动新录制**(见 T-33 不变量 6)。
+   */
+  freeBytes?: () => number | null;
+  /**
+   * 磁盘低水位(字节):剩余低于它时**不启动新任务**。0/缺省 = 关闭该闸门。
+   * **只拦「新开一场」**;已在录的任务**不受影响**(绝不截断当前录制腾空间)。
+   */
+  diskWatermarkBytes?: number;
 }
 
 /** Result of a pure scheduling decision: which task ids to start / stop. */
@@ -75,6 +86,10 @@ export class TaskDaemon {
   private readonly now: () => Date;
   private readonly log: (msg: string) => void;
   private readonly localSuppressedIds?: () => ReadonlySet<number>;
+  private readonly freeBytes?: () => number | null;
+  private readonly diskWatermarkBytes: number;
+  /** 已因低水位拒绝启动而告警过的任务 id(回升后复位,避免每 tick 刷屏)。 */
+  private readonly diskRefused = new Set<number>();
 
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Guards against overlapping ticks (a slow start/stop spanning intervals). */
@@ -90,6 +105,8 @@ export class TaskDaemon {
     this.now = opts.now ?? ((): Date => new Date());
     this.log = opts.log ?? ((m): void => console.log(m));
     this.localSuppressedIds = opts.localSuppressedIds;
+    this.freeBytes = opts.freeBytes;
+    this.diskWatermarkBytes = Math.max(0, opts.diskWatermarkBytes ?? 0);
   }
 
   /** Currently-active task ids (for tests / introspection). */
@@ -131,8 +148,24 @@ export class TaskDaemon {
         // ends naturally. Idempotent → safe to re-issue every tick while drained.
         await this.manager.stopGraceful(id);
       }
+      // 磁盘低水位闸门(T-33 不变量 6):剩余低于水位 → **拒绝启动新任务**,绝不用「删未确认源」
+      // 腾空间。**只拦新开一场**;已在录的当前场不受影响(它们的 stop 已在上面按窗口处理)。
+      const free = this.freeBytes?.() ?? null;
+      const refuseStart = free != null && shouldRefuseNewRecording(free, this.diskWatermarkBytes);
       for (const id of start) {
         const t = tasks.find((x) => x.id === id);
+        if (refuseStart) {
+          // 同一任务只在首次拒绝时告警(回升后复位),避免每 tick 刷屏。
+          if (!this.diskRefused.has(id)) {
+            this.diskRefused.add(id);
+            this.log(
+              `[scheduler] ⛔ 磁盘剩余 ${(free! / 1e9).toFixed(1)}GB 低于水位 ${(this.diskWatermarkBytes / 1e9).toFixed(1)}GB,` +
+                `拒绝启动新任务 id=${id}${t ? `（${t.name ?? t.room}）` : ""}（已在录的场不受影响;清理/上传删源后自动恢复）`,
+            );
+          }
+          continue;
+        }
+        this.diskRefused.delete(id);
         this.log(
           `[scheduler] ▶ 进入窗口，启动任务 id=${id}` +
             (t ? `（${t.name ?? t.room}）window=${t.scheduleStart ?? "—"}-${t.scheduleEnd ?? "—"}` : ""),

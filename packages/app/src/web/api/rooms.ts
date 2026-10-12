@@ -68,6 +68,7 @@ export function buildRooms(ctx: ApiCtx) {
           cookies: null,
           outDir: t.outDir,
           webhook: t.webhook,
+          rollingUpload: t.rollingUpload,
         }
       : null;
 
@@ -209,6 +210,7 @@ export function buildRooms(ctx: ApiCtx) {
         if ("cookies" in rec) patch.cookies = rec.cookies ?? null;
         if ("outDir" in rec) patch.outDir = rec.outDir ?? null;
         if ("webhook" in rec) patch.webhook = normWebhook(rec.webhook);
+        if ("rollingUpload" in rec) patch.rollingUpload = rec.rollingUpload === true;
 
         if (taskId === null) {
           // 没有任务可改:要么忽略(只改处理),要么 400 让用户知道得先建任务。
@@ -271,6 +273,7 @@ export function buildRooms(ctx: ApiCtx) {
                 useCookie: prev.useCookie,
                 outDir: prev.outDir,
                 webhook: prev.webhook,
+                rollingUpload: prev.rollingUpload,
               });
               if (!ok) {
                 return err(500, `写入处理配置失败(${(e as Error).message});`
