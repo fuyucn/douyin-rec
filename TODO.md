@@ -72,25 +72,6 @@
 
 ## 待办（Next）
 
-- [~] **T-33 边录边传：已封口分段确认上传后再删源** — 2026-10-12 认领（GitHub #3）。计划 `plans/031_rolling_segment_upload.md`。
-  评论约束：做成任务配置里的开关，类似节点侧上传，默认关闭。可以不照单全收，但要在 PR / issue 里写理由。
-  **为什么**：整场录完才上传，多房间同时在录时节点盘会先满（某 worker 49G 写满，两场 `needs_manual` 无 BV）。
-  **做什么**：任务配置加 `rollingUpload`（默认 false）；只处理已封口分段；winner 段确认（BV / 分 P ack）
-  后才删该段视频；落败节点同一段在 winner 封口胜出后删；不碰正在写的文件；低水位拒绝新开录、
-  不删未确认源腾空间；`.xml`/`.ass` 留到整场结束。
-  **验收**：计划里的不变量有对应测试；实现前不改线上行为；与 `plans/024`（产出形态）开关独立。
-  **实现完成（2026-10-12，未 commit/未部署/待 review）**：分支 `codex/issue-3-rolling-upload`（worktree）。
-  core 纯判定 `packages/core/src/rolling.ts`；录制端执行体 `packages/app/src/rolling-upload.ts`（每会话一实例，
-  封口才传、ack 才删、失败转人工不重传、sidecar 重启幂等 + 段号单调续号）；manager 加 `makeRolling` 工厂接缝；
-  master 识别短路（scan 读 `.rolling.json`、pipeline 见 `rolling.bv` 直接 done 绝不重复建稿）；
-  daemon 磁盘水位闸门（拒绝新开录、不截断当前）；CLI/`record`/web 开关 + `Task`/`RemoteTaskSpec`/DTO 全链路透传。
-  **不采纳**原文「落败节点同段立刻删」（理由见 plan：边录边传在选优前发生，跨节点删会丢唯一副本；
-  单节点闸门下不存在落败节点、多节点不启用）。
-  **验证**：`pnpm test` 1230 passed（仅 2 个与本次无关的基线固有失败：`architecture-docs` 生成物漂移、
-  pipeline 分段核验观察期用例——均在基线 `4dbbaec` 上同样失败）；`pnpm typecheck` 通过；web `pnpm build` 通过；
-  `pnpm bundle` 出 `0.0.75`。**版本**：本 worktree 基线 0.0.74 → bump 0.0.75；与主工作区未提交的 0.0.76–0.0.79
-  合并后统一为 **0.0.80**（合并提交里改的，见 package.json）。
-
 - [~] **T-32 分P 核验假 mismatch → 13 个 job 卡 needs_manual + 源不删(磁盘持续涨)** — 2026-10-10 实测发现。
   **根因(台账时间戳 + B站实查双向取证)**:`finalizeAfterUpload` 在**最后一个 append 成功后 0.5~0.6 秒**
   就去查 `view?bvid=`,而 B站 `pages` 列表此刻**还没同步** → 只看到 P1 → 判「期望3/实际1」→
@@ -372,6 +353,26 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-33 边录边传：已封口分段确认上传后再删源** — 2026-10-12 认领（GitHub #3）。计划 `plans/031_rolling_segment_upload.md`。
+  评论约束：做成任务配置里的开关，类似节点侧上传，默认关闭。可以不照单全收，但要在 PR / issue 里写理由。
+  **为什么**：整场录完才上传，多房间同时在录时节点盘会先满（某 worker 49G 写满，两场 `needs_manual` 无 BV）。
+  **做什么**：任务配置加 `rollingUpload`（默认 false）；只处理已封口分段；winner 段确认（BV / 分 P ack）
+  后才删该段视频；落败节点同一段在 winner 封口胜出后删；不碰正在写的文件；低水位拒绝新开录、
+  不删未确认源腾空间；`.xml`/`.ass` 留到整场结束。
+  **验收**：计划里的不变量有对应测试；实现前不改线上行为；与 `plans/024`（产出形态）开关独立。
+  **实现完成（2026-10-12）**：分支 `codex/issue-3-rolling-upload`（worktree）。
+  core 纯判定 `packages/core/src/rolling.ts`；录制端执行体 `packages/app/src/rolling-upload.ts`（每会话一实例，
+  封口才传、ack 才删、失败转人工不重传、sidecar 重启幂等 + 段号单调续号）；manager 加 `makeRolling` 工厂接缝；
+  master 识别短路（scan 读 `.rolling.json`、pipeline 见 `rolling.bv` 直接 done 绝不重复建稿）；
+  daemon 磁盘水位闸门（拒绝新开录、不截断当前）；CLI/`record`/web 开关 + `Task`/`RemoteTaskSpec`/DTO 全链路透传。
+  **不采纳**原文「落败节点同段立刻删」（理由见 plan：边录边传在选优前发生，跨节点删会丢唯一副本；
+  单节点闸门下不存在落败节点、多节点不启用）。
+  **验证**：`pnpm test` 1230 passed（仅 2 个与本次无关的基线固有失败：`architecture-docs` 生成物漂移、
+  pipeline 分段核验观察期用例——均在基线 `4dbbaec` 上同样失败）；`pnpm typecheck` 通过；web `pnpm build` 通过；
+  `pnpm bundle` 出 `0.0.75`。**版本**：本 worktree 基线 0.0.74 → bump 0.0.75；与主工作区未提交的 0.0.76–0.0.79
+  合并后统一为 **0.0.80**（合并提交里改的，见 package.json）。
+  **合并完成（2026-10-12）**：合并进 `feat/hub-optimization`（merge commit `37cbade`，与主工作区 0.0.76–0.0.79 汇合，版本统一 **0.0.80**）；合并后整树 `pnpm test` **1270 passed**、`pnpm typecheck` 通过、`pnpm bundle` 出 0.0.80。**未部署、未 push**（远程无 `feat/hub-optimization`，是否 push 待用户决定）。
 
 - [x] **T-29 分段模式下多会话(断流重连)的烧录分 P 丢失(真缺陷)** — 2026-10-09 用户发现
   `douyin.63171491268`(什么鱼)稿件 P1-P6 齐全但 livechat 只有 P7-P9(会话1 的 3 段),会话2 的 3 段
