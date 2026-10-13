@@ -19,7 +19,7 @@
  */
 import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, dirname } from "node:path";
+import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -88,7 +88,10 @@ for (const dir of readdirSync(PKG_DIR)) {
 // 顶层 test/ 目录里的用例按「文件名含包名」归类(粗粒度,够热图用)。
 const topTests = walk(join(ROOT, "test")).filter((f) => /\.test\.ts$/.test(f));
 for (const t of topTests) {
-  const base = t.toLowerCase();
+  // 必须用**相对 ROOT 的路径**归类:绝对路径含仓库目录名(如 CI 检出目录
+  // `douyin-rec/douyin-rec`),会让每个顶层用例被误算进同名包(issue #11:
+  // douyin-live 在 CI 上算成 42 个测试、本地算成 1 个 → 守护在 CI 恒红)。
+  const base = relative(ROOT, t).toLowerCase();
   for (const p of pkgs) {
     const short = p.dir.replace(/-live$/, "").replace(/-/g, "");
     if (base.includes(p.dir) || base.includes(short)) p.srcTests += 1;
