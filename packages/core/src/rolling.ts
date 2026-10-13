@@ -37,6 +37,10 @@ export interface SealOpts {
   /**
    * 收尾后最后一段的「稳定宽限」ms:进程刚退出时文件可能还在 flush,等这么久再认定封口。
    * 录制中(有新段存在)不受此限 —— ffmpeg 滚动到新段即已关闭旧段。缺省 {@link DEFAULT_SEAL_GRACE_MS}。
+   *
+   * ⚠️ 仅在调用方**无法确知**写入是否已停止时才需要宽限;调用方**确知**进程已退出(如录制端
+   * 收尾:`await recorder.stop()` 之后)→ 必须传 **0**,否则「刚写完就收尾」的末段永远判不出封口
+   * = 永不上传(实测踩过:整场残段、master 转人工)。
    */
   sealGraceMs?: number;
 }
@@ -82,6 +86,27 @@ export function planRollingUploads(
   return segments
     .filter((s) => sealed.has(s.index) && !confirmed.has(s.index))
     .sort((a, b) => a.index - b.index);
+}
+
+/**
+ * **头阻塞（head-of-line）过滤**：按段号升序，返回**首个阻塞段之前**的全部段。
+ *
+ * 为什么必须：B 站 append 只能追加到末尾，分 P 必须连续、不能有洞。若第 `k` 段结果未定
+ * （`ambiguous` / 失败待重试），还继续上传后面的段，缺口将**永久无法填补** —— 分 P 出现
+ * 不可逆空洞/乱序。因此「阻塞段及其之后」的段一律不外发，直到 `k` 结清。
+ *
+ * `blocking` = 已卡住的段号集合（结果不确定、保留源、转人工）。不传 = 空集 = 不阻塞。
+ */
+export function headOfLineFilter(
+  pending: readonly RollingSegment[],
+  blocking: ReadonlySet<number> = new Set(),
+): RollingSegment[] {
+  const out: RollingSegment[] = [];
+  for (const s of [...pending].sort((a, b) => a.index - b.index)) {
+    if (blocking.has(s.index)) break;
+    out.push(s);
+  }
+  return out;
 }
 
 /**
