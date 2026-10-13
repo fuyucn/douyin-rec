@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Scenario } from "./harness/scenario.js";
@@ -109,5 +109,67 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
     expect(s.jobState(s.onlyKey())).toBe("done");
     expect(keep(s)).toEqual(kept);
     expect(existsSync(join(s.stageSubOf(s.onlyKey()), "job.log"))).toBe(true);
+  });
+
+  // ── 删除路径反向用例:续跑 / 分段主路径 / 分段续跑,核验未真正通过时 stage 源段必须保留 ──
+  const tsCount = (sc: Scenario): number => stageVideos(sc).filter((f) => f.endsWith(".ts")).length;
+  // .work 目录本身(基线行为会在 stageAfterDone 时删其中的分P plain 文件,但目录属「中间产物」,核验未过必须留)
+  const hasWork = (sc: Scenario): boolean => existsSync(join(sc.stageSubOf(sc.onlyKey()), ".work"));
+  // 核验未真正通过的两种形态:待重试(取不到分P数) / 被跳过(未注入分P查询,无基线)
+  const UNVERIFIED = [
+    { name: "核验待重试", mk: (sc: Scenario): void => { sc.fake.countAvailable = false; }, deps: {} },
+    { name: "核验被跳过", mk: (): void => {}, deps: { countParts: undefined } },
+  ] as const;
+
+  describe.each(UNVERIFIED)("核验未通过($name)", ({ name, mk, deps }) => {
+    it("合并续跑(烧录中断、稿件号已落库、成品仍在)→ 拉回的源段副本保留,节点源保留", async () => {
+      let boom = true;
+      s = await Scenario.create({
+        cfg: { cleanup: { ...COMMON } }, deps,
+        shellFault: (cmd) => boom && /\bburn\b/.test(cmd) && /--style\s+livechat/.test(cmd),
+      });
+      mk(s);
+      record(s);
+      await s.reconcile();
+      const key = s.onlyKey();
+      expect(s.jobState(key)).toBe("failed");           // 中途中断
+      expect(s.ledger.get(key)?.bv).toBeTruthy();       // 稿件号已落库
+      expect(tsCount(s)).toBe(6);
+      boom = false;
+      await s.reconcile();                              // 续跑(resumeAppends)
+      expect(s.jobState(key)).toBe("done");
+      expect(tsCount(s), "续跑核验未通过,不得清 stage 源段副本").toBe(6);
+      if (name === "核验待重试") expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+    });
+
+    it("分段主路径 → stage 源段副本与 .work 保留,节点源保留", async () => {
+      s = await Scenario.create({ cfg: { steps: { mergeSegments: false }, cleanup: { ...COMMON } }, deps });
+      mk(s);
+      record(s);
+      await s.reconcile();
+      expect(s.jobState(s.onlyKey())).toBe("done");
+      expect(tsCount(s)).toBe(6);
+      expect(hasWork(s), ".work 中间产物应保留").toBe(true);
+      if (name === "核验待重试") expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+    });
+
+    it("分段续跑(上传已完成、markDone 前中断,稿件号已落库、成品仍在)→ stage 源段副本与 .work 保留", async () => {
+      s = await Scenario.create({ cfg: { steps: { mergeSegments: false }, cleanup: { ...COMMON, sourceAfterDone: false } }, deps }); // 节点源保留,下一轮才能重新发现该场续跑
+      mk(s);
+      record(s);
+      await s.reconcile();
+      const key = s.onlyKey();
+      expect(s.ledger.get(key)?.bv).toBeTruthy();
+      // 模拟「进程重启中断」:job 退回 failed(稿件号与 stage 产物保留),下一轮对账走 resumeSegmentAppends。
+      // merge 节点标 failed(而非全部 done)= 不走「所有节点已完成 → 仅收尾」的幂等捷径。
+      s.ledger.setState(key, "failed", { error: "进程重启中断" }, { force: true });
+      s.ledger.syncNodeState(key, "merge", "failed", { error: "进程重启中断" });
+      const calls = s.fake.calls.length;
+      await s.reconcile();
+      expect(s.jobState(key)).toBe("done");
+      expect(s.fake.calls, "续跑不得重复上传").toHaveLength(calls);
+      expect(tsCount(s), "分段续跑核验未通过,不得清 stage 源段副本").toBe(6);
+      expect(hasWork(s), ".work 中间产物应保留").toBe(true);
+    });
   });
 });
