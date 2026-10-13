@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Scenario } from "./harness/scenario.js";
 import { pastStartMs } from "./harness/fake-recordings.js";
@@ -60,5 +62,52 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
     await s.reconcile();
     expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
     expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+  });
+
+  // ── 核验语义收紧:stage 视频类清理只在核验真正通过时执行 ──
+  it("B站分P数少于提交数 → stage 源段副本保留,节点源也保留", async () => {
+    s = await Scenario.create({ cfg: { cleanup: { ...COMMON } }, deps: { countParts: async () => 1 } });
+    record(s);
+    await s.reconcile();
+    expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+    expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+  });
+
+  it("核验被跳过(未注入分P查询)→ stage 源段副本保留(旧行为)", async () => {
+    s = await Scenario.create({ cfg: { cleanup: { ...COMMON } }, deps: { countParts: undefined } });
+    record(s);
+    await s.reconcile();
+    expect(s.jobState(s.onlyKey())).toBe("done");
+    expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+  });
+
+  // ── 收尾补跑 ──
+  const keep = (sc: Scenario): string[] => sc.stageResidue().filter((f) => /\.(xml|ass)$|\.session\.json$/.test(f));
+
+  it("收尾补跑:核验仍待重试 → 补跑不清 stage", async () => {
+    s = await Scenario.create({ cfg: { cleanup: { ...COMMON } }, cleanupBackfillThrottleMs: 0 });
+    s.fake.countAvailable = false;
+    record(s);
+    await s.reconcile();
+    const before = s.stageResidue();
+    await s.reconcile(); // 仍取不到分P数 → 仍是待重试
+    expect(s.stageResidue()).toEqual(before);
+    expect(s.jobState(s.onlyKey())).toBe("done");
+    expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+  });
+
+  it("收尾补跑:核验通过后补清视频类,.xml/.session.json/job.log 保留", async () => {
+    s = await Scenario.create({ cfg: { cleanup: { ...COMMON } }, cleanupBackfillThrottleMs: 0 });
+    s.fake.countAvailable = false;
+    record(s);
+    await s.reconcile();
+    const kept = keep(s);
+    expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+    s.fake.countAvailable = true;
+    await s.reconcile();
+    expect(stageVideos(s)).toEqual([]);
+    expect(s.jobState(s.onlyKey())).toBe("done");
+    expect(keep(s)).toEqual(kept);
+    expect(existsSync(join(s.stageSubOf(s.onlyKey()), "job.log"))).toBe(true);
   });
 });

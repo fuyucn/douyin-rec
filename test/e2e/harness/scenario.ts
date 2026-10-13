@@ -40,6 +40,8 @@ export interface ScenarioOpts {
   wrapTransport?: (base: LocalTransport, s: Scenario) => Transport;
   /** 崩溃恢复 sweep 的 stale 阈值(缺省沿用生产 600s)。「重启后续跑」场景传 0 = 视作重启已过去足够久。 */
   staleMs?: number;
+  /** 收尾补跑节流(缺省沿用生产 15 分钟);补跑场景传 0 = 立即可补跑。 */
+  cleanupBackfillThrottleMs?: number;
   /** 额外覆盖 PipelineDeps(如分段模式接缝)。 */
   deps?: Partial<PipelineDeps>;
 }
@@ -139,6 +141,7 @@ export class Scenario {
       settle: { maxWaitMs: 5_000, pollMs: 1 },
       sleep: async () => {},
       ...(this.opts.staleMs !== undefined ? { staleMs: this.opts.staleMs } : {}),
+      ...(this.opts.cleanupBackfillThrottleMs !== undefined ? { cleanupBackfillThrottleMs: this.opts.cleanupBackfillThrottleMs } : {}),
       resolveCfg: () => this.cfg,
       notify: (e) => this.notifications.push(e),
     });

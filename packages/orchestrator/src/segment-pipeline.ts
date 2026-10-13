@@ -609,7 +609,7 @@ export async function runSegmentPipeline(o: {
       products.push(...readdirSyncSafe(stageSub).filter((f) => /\.(xml|ass)$/i.test(f)).map((f) => path.join(stageSub, f)));
     }
     // 整稿核验通过后:stage 内其余视频类内容(拉回的源段副本、.work 中间产物)一并清(#60)。
-    if (finalize.cleanConfirmed) products.push(...stageVideoLeftovers(stageSub));
+    if (finalize.stageCleanConfirmed) products.push(...stageVideoLeftovers(stageSub));
     products.splice(0, products.length, ...new Set(products));
     ledger.logStep(streamKey, "clean_stage", "start");
     try { await rmStage(products); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件`); }
@@ -762,7 +762,7 @@ async function resumeSegmentAppends(
     if (xmlKeepRule("stage", true)) {
       products.push(...readdirSyncSafe(stageSub).filter((f) => /\.(xml|ass)$/i.test(f)).map((f) => path.join(stageSub, f)));
     }
-    if (finalize.cleanConfirmed) products.push(...stageVideoLeftovers(stageSub));
+    if (finalize.stageCleanConfirmed) products.push(...stageVideoLeftovers(stageSub));
     products.splice(0, products.length, ...new Set(products));
     try { await rmStage(products); }
     catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.syncNodeState(streamKey, "clean_stage", "failed", { error: msg }); jlog(`清理失败(clean_stage):${msg}`); }
