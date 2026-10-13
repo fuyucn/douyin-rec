@@ -49,6 +49,26 @@ export interface DaemonOpts {
   diskWatermarkBytes?: number;
 }
 
+/** 磁盘水位缺省值(GB):与 master 的 reconciler 看门狗、节点侧上传闸门同一口径(`diskMinGB ?? 10`)。 */
+export const DEFAULT_DISK_MIN_GB = 10;
+
+/**
+ * 由 hub 配置 JSON 解出 daemon 的磁盘水位(字节)。纯函数。
+ *
+ * worker 节点没有 hub 全局配置(只有 example 模板)→ 读不到 `resources.diskMinGB` 时
+ * **回落默认 10GB**,而不是 0(= 静默关闭闸门:恰是最易写满的 worker 无闸门)。
+ * 显式 `diskMinGB <= 0` 仍表示关闭(与 reconciler 同语义);JSON 损坏 → 同样回落默认(宁可拦)。
+ */
+export function resolveDiskWatermarkBytes(hubConfigJson: string | undefined): number {
+  let gb: number = DEFAULT_DISK_MIN_GB;
+  try {
+    const cfg = JSON.parse(hubConfigJson ?? "{}") as { resources?: { diskMinGB?: unknown } };
+    const v = cfg.resources?.diskMinGB;
+    if (typeof v === "number" && Number.isFinite(v)) gb = v;
+  } catch { /* 配置损坏 → 用默认水位 */ }
+  return gb > 0 ? gb * 1e9 : 0;
+}
+
 /** Result of a pure scheduling decision: which task ids to start / stop. */
 export interface Decision {
   start: number[];

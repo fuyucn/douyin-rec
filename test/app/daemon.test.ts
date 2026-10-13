@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { decide, TaskDaemon } from "../../packages/app/src/daemon.js";
+import { decide, TaskDaemon, resolveDiskWatermarkBytes } from "../../packages/app/src/daemon.js";
 import { TaskManager } from "../../packages/app/src/task-manager.js";
 import { TaskStore, type Task } from "../../packages/app/src/store.js";
 import type { Spawner } from "../../packages/app/src/process/spawner.js";
@@ -330,5 +330,26 @@ describe("TaskDaemon — composition with TaskManager", () => {
     await daemon.stop();
     expect(mgr.runningIds()).toEqual([]);
     await daemon.stop(); // idempotent
+  });
+});
+
+describe("resolveDiskWatermarkBytes — worker 无 hub 配置时水位不得静默为 0", () => {
+  it("无配置(worker)→ 默认 10GB", () => {
+    expect(resolveDiskWatermarkBytes(undefined)).toBe(10e9);
+  });
+  it("配置里没有 resources.diskMinGB → 默认 10GB", () => {
+    expect(resolveDiskWatermarkBytes("{}")).toBe(10e9);
+    expect(resolveDiskWatermarkBytes('{"resources":{}}')).toBe(10e9);
+  });
+  it("配置值照常生效", () => {
+    expect(resolveDiskWatermarkBytes('{"resources":{"diskMinGB":25}}')).toBe(25e9);
+  });
+  it("显式 <=0 = 关闭(与 reconciler 同语义)", () => {
+    expect(resolveDiskWatermarkBytes('{"resources":{"diskMinGB":0}}')).toBe(0);
+    expect(resolveDiskWatermarkBytes('{"resources":{"diskMinGB":-1}}')).toBe(0);
+  });
+  it("非数字 / JSON 损坏 → 回落默认(宁可拦)", () => {
+    expect(resolveDiskWatermarkBytes('{"resources":{"diskMinGB":"abc"}}')).toBe(10e9);
+    expect(resolveDiskWatermarkBytes("{not json")).toBe(10e9);
   });
 });

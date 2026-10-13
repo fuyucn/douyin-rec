@@ -17,7 +17,7 @@ import { localSuppressedSourceTaskIds } from "./hub-store.js";
 import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
 import { makeNotifier, resolveWebhookToggles } from "@drec/observability";
-import { TaskDaemon } from "./daemon.js";
+import { TaskDaemon, resolveDiskWatermarkBytes } from "./daemon.js";
 import { TaskManager } from "./task-manager.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
@@ -306,15 +306,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
           }
           return null;
         },
-        diskWatermarkBytes: (() => {
-          try {
-            const cfg = JSON.parse(resolveHubConfigJson(o.hubConfig, store) ?? "{}") as {
-              resources?: { diskMinGB?: number };
-            };
-            const gb = cfg.resources?.diskMinGB;
-            return gb && gb > 0 ? gb * 1e9 : 0;
-          } catch { return 0; }
-        })(),
+        diskWatermarkBytes: resolveDiskWatermarkBytes(resolveHubConfigJson(o.hubConfig, store)),
       });
     }
 
