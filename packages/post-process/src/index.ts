@@ -5,7 +5,12 @@ export { FONTS_DIR } from "./fonts.js";
 export { renderXmlToAss, renderXmlToLivechat } from "./ass/render.js";
 export { renderSegmentsToAss } from "./ass/multi.js";
 export { remuxSegment, buildRemuxArgs, renderXmlWindowToAss, planSegmentGroups, type SegmentStyle } from "./segment.js";
-export { mergeXmlContents, type MergeXmlSession } from "./merge-xml.js";
+export {
+  mergeXmlContents,
+  renderXmlWindowToXml,
+  type MergeXmlSession,
+  type XmlWindowRenderResult,
+} from "./merge-xml.js";
 export { mergeSessions, type MergeSessionInput } from "./merge.js";
 export { runFfmpeg, ffprobeDuration, ffprobeVideo } from "./ffmpeg.js";
 export {

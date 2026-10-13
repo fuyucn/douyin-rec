@@ -1,6 +1,14 @@
 // 分段上传路径的弹幕窗口/分组纯函数回归(2026-10-09「什么鱼」livechat 分 P 缺失根因)。
 import { describe, it, expect } from "vitest";
-import { sessionWindowOffsets, splitGroupsBySession } from "./segment-pipeline.js";
+import { sessionWindowOffsets, splitGroupsBySession, derivePartXmlPath, planPartXmlDerivation } from "./segment-pipeline.js";
+
+/** 供 planPartXmlDerivation 的构造件(window 为 null = 无弹幕段)。 */
+const part = (index: number, window: { startSec: number; endSec: number; xmlPath: string } | null) => ({
+  index,
+  plain: `plain-${index}.mp4`,
+  window,
+  memberPlains: [`plain-${index}.mp4`],
+});
 
 describe("sessionWindowOffsets：弹幕窗口按会话分开累计", () => {
   it("单会话:窗口连续累计(与旧行为一致)", () => {
@@ -54,5 +62,54 @@ describe("splitGroupsBySession：分 P 不跨会话", () => {
 
   it("空计划 → 空", () => {
     expect(splitGroupsBySession([], () => "a")).toEqual([]);
+  });
+});
+
+describe("planPartXmlDerivation：派生 per-分P 弹幕 xml 的命名/窗口/探测失败", () => {
+  it("命名为 {dateName}_{NNN}.xml,且与分P mp4 同名 stem 对齐", () => {
+    expect(derivePartXmlPath("/stage", "show_2026-10-09", 2)).toBe("/stage/show_2026-10-09_002.xml");
+    expect(derivePartXmlPath("/stage", "show", 0)).toBe("/stage/show_000.xml");
+  });
+
+  it("透传窗口并按分P索引命名;无窗口的分P不派生", () => {
+    const plans = planPartXmlDerivation("/stage", "show", [
+      part(0, { startSec: 0, endSec: 100, xmlPath: "/stage/show.xml" }),
+      part(1, null), // 无弹幕窗口 → 跳过
+      part(2, { startSec: 100, endSec: 200, xmlPath: "/stage/show.xml" }),
+    ]);
+    expect(plans).toHaveLength(2);
+    expect(plans[0]).toEqual({
+      index: 0,
+      out: "/stage/show_000.xml",
+      window: { startSec: 0, endSec: 100 },
+      sourceXml: "/stage/show.xml",
+      ok: true,
+    });
+    expect(plans[1]).toEqual({
+      index: 2,
+      out: "/stage/show_002.xml",
+      window: { startSec: 100, endSec: 200 },
+      sourceXml: "/stage/show.xml",
+      ok: true,
+    });
+  });
+
+  it("会话内任一时长探测失败 → 该会话全部分P标记 ok=false(整会话跳过派生)", () => {
+    const plans = planPartXmlDerivation("/stage", "show", [
+      part(0, { startSec: 0, endSec: 100, xmlPath: "/stage/s1.xml" }),
+      part(1, { startSec: 100, endSec: 200, xmlPath: "/stage/s1.xml" }),
+      part(2, { startSec: 0, endSec: 90, xmlPath: "/stage/s2.xml" }),
+    ], new Set(["/stage/s1.xml"]));
+    expect(plans.find((p) => p.index === 0)?.ok).toBe(false);
+    expect(plans.find((p) => p.index === 1)?.ok).toBe(false);
+    // 未受影响的会话仍 ok
+    expect(plans.find((p) => p.index === 2)?.ok).toBe(true);
+  });
+
+  it("未传 probeFailedSessions → 默认全部 ok=true", () => {
+    const plans = planPartXmlDerivation("/stage", "show", [
+      part(0, { startSec: 0, endSec: 100, xmlPath: "/stage/show.xml" }),
+    ]);
+    expect(plans[0].ok).toBe(true);
   });
 });

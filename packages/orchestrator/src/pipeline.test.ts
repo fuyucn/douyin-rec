@@ -290,6 +290,98 @@ describe("runPipeline", () => {
       });
     });
 
+    // ── issue #7:分段模式**派生** per-分P 弹幕 xml(「A 同时存在」附加产物)────────
+    describe("per-分P 弹幕 xml 派生(issue #7)", () => {
+      const DATE_NAME = "主播名_2026-06-27";
+      const SEG_TS = ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"];
+      const VST = 1_700_000_000_000;
+      /** 会话级 xml:video_start_time=VST;条目相对时间 10/65/70/100s(跨 3 个分P窗口)。 */
+      const sessionXml = (): string =>
+        `<?xml version="1.0" encoding="utf-8"?>\n<i>\n  <metadata><video_start_time>${VST}</video_start_time></metadata>\n`
+        + [
+          `<d p="10.000,1,25,16777215,${VST + 10_000},0,9,9,0" user="a">十秒</d>`,
+          `<d p="65.000,1,25,16777215,${VST + 65_000},0,8,8,0" user="b">六五</d>`,
+          `<d p="70.000,1,25,16777215,${VST + 70_000},0,7,7,0" user="c">七十</d>`,
+          `<d p="100.000,1,25,16777215,${VST + 100_000},0,6,6,0" user="d">一百</d>`,
+        ].join("\n")
+        + "\n</i>\n";
+      /** 段时长 60/30/60 → 分P窗口 [0,60) / [60,90) / [90,150)。 */
+      const unevenDurations = async (p: string): Promise<number> => (p.includes("s_001") ? 30 : 60);
+
+      it("每个分P落一份 {dateName}_{NNN}.xml,时间轴按该分P窗口重定基(与烧录同一口径)", async () => {
+        const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: SEG_TS }) }]);
+        const deps = segmentDeps();
+        const sub = stageSubOf(deps);
+        writeFileSync(join(sub, "danmu.xml"), sessionXml());
+        (deps as { segmentDuration: (p: string) => Promise<number> }).segmentDuration = unevenDurations;
+        deps.ledger.upsertPending(broadcast.streamKey);
+
+        const result = await runPipeline(broadcast, deps);
+        expect(result.state).toBe("done");
+
+        // 派生 xml 与分P mp4 同名 stem(`{base}_NNN.xml` 命名,既有消费点可直接识别)。
+        expect(existsSync(join(sub, `${DATE_NAME}_000.mp4`))).toBe(true);
+        const p0 = readFileSync(join(sub, `${DATE_NAME}_000.xml`), "utf-8");
+        const p1 = readFileSync(join(sub, `${DATE_NAME}_001.xml`), "utf-8");
+        const p2 = readFileSync(join(sub, `${DATE_NAME}_002.xml`), "utf-8");
+        // P1 窗 [0,60):只有 10s 那条,原样(重定基 -0)。
+        expect(p0).toContain(`p="10.000,`);
+        expect(p0).toContain("十秒");
+        expect(p0).not.toContain("六五");
+        // P2 窗 [60,90):65/70 → 重定基 -60 得 5/10;窗口外的 10s/100s 不收。
+        expect(p1).toContain(`p="5.000,`);
+        expect(p1).toContain(`p="10.000,`);
+        expect(p1).toContain("六五");
+        expect(p1).toContain("七十");
+        expect(p1).not.toContain("十秒");
+        expect(p1).not.toContain("一百");
+        // P3 窗 [90,150):100s → 重定基 -90 得 10。
+        expect(p2).toContain(`p="10.000,`);
+        expect(p2).toContain("一百");
+        expect(p2).not.toContain("七十");
+        // 每份都是结构完整的 biliLive xml(保留 video_start_time、仅一个 </i>)。
+        for (const x of [p0, p1, p2]) {
+          expect(x).toContain(`<video_start_time>${VST}</video_start_time>`);
+          expect((x.match(/<\/i>/g) ?? []).length).toBe(1);
+        }
+        // 会话级 xml 原样保留(唯一权威源,既有行为未变)。
+        expect(readFileSync(join(sub, "danmu.xml"), "utf-8")).toBe(sessionXml());
+        deps.ledger.close();
+      });
+
+      it("幂等:目标已存在 → 跳过,不覆盖(重跑不产出/不改成错位文件)", async () => {
+        const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: SEG_TS }) }]);
+        const deps = segmentDeps();
+        const sub = stageSubOf(deps);
+        writeFileSync(join(sub, "danmu.xml"), sessionXml());
+        writeFileSync(join(sub, `${DATE_NAME}_000.xml`), "SENTINEL");
+        deps.ledger.upsertPending(broadcast.streamKey);
+
+        await runPipeline(broadcast, deps);
+
+        expect(readFileSync(join(sub, `${DATE_NAME}_000.xml`), "utf-8")).toBe("SENTINEL");
+        deps.ledger.close();
+      });
+
+      it("时长探测失败 → 该会话整场不派生(不静默产出错位文件)+ 显式告警", async () => {
+        const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: SEG_TS }) }]);
+        const deps = segmentDeps();
+        const sub = stageSubOf(deps);
+        writeFileSync(join(sub, "danmu.xml"), sessionXml());
+        (deps as { segmentDuration: (p: string) => Promise<number> }).segmentDuration =
+          async (p) => { if (p.includes("s_001")) throw new Error("ffprobe 失败"); return 60; };
+        deps.ledger.upsertPending(broadcast.streamKey);
+
+        await runPipeline(broadcast, deps);
+
+        for (let i = 0; i < 3; i++) {
+          expect(existsSync(join(sub, `${DATE_NAME}_00${i}.xml`))).toBe(false);
+        }
+        expect((deps.notify as Mock).mock.calls.some((c) => (c[0] as { stage?: string }).stage === "分段派生")).toBe(true);
+        deps.ledger.close();
+      });
+    });
+
     it("stage 模式:逐段产出落盘待人工,不建稿", async () => {
       const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts", "/remote/s_002.ts"] }) }]);
       const deps = segmentDeps();
