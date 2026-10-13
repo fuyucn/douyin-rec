@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { RollingUploader } from "./rolling-upload.js";
@@ -283,6 +283,77 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     expect(u.ambiguousIndices).toContain(1);
     expect(ap).not.toHaveBeenCalled();
     expect(r.uploaded).toEqual([]);
+  });
+
+  // 分 P 数**查不到**（接口抖动/审核中/解析失败）≠「未提交」:绝不能据此重试 append,
+  // 否则可能重复投稿。必须保守转人工。
+  it("崩溃恢复:append 分P数查不到(null)→ 转人工,不猜重传", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    writeSidecar(dir, {
+      segments: [{ index: 0, path: paths[0] }, { index: 1, path: paths[1] }],
+      confirmed: [0],
+      bv: "BV1nnnnnnnnnn",
+      uploading: { index: 1, kind: "append" },
+    });
+    const ap = vi.fn(async () => {});
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1nnnnnnnnnn", appendGroupRaw: ap, countPartsRaw: async () => null, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    u.noteSegment(paths[0]);
+    const r = await u.flush({ recordingActive: false });
+    expect(u.ambiguousIndices).toContain(1);
+    expect(ap).not.toHaveBeenCalled();
+    expect(r.uploaded).toEqual([]);
+  });
+
+  // 崩溃窗口:「已确认(acked)但删源前被杀」→ 重启首轮必须补删该段源,否则磁盘水位闸门
+  // 会被已传完的段长期占住(边录边传的核心目的落空)。
+  it("崩溃恢复:确认后未删源 → 重启补删(不重传)", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    writeSidecar(dir, {
+      segments: [{ index: 0, path: paths[0] }, { index: 1, path: paths[1] }],
+      confirmed: [0, 1],
+      bv: "BV1cccccccccc",
+      uploading: { index: 1, kind: "append" }, // 确认后、销标记前被杀
+    });
+    const up = vi.fn(async () => "BV1cccccccccc");
+    const ap = vi.fn(async () => {});
+    const remove = vi.fn(() => true);
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove, now: futureNow, minSegmentSec: 0 });
+    u.noteSegment(paths[0]);
+    const r = await u.flush({ recordingActive: false });
+    expect(u.confirmedIndices).toEqual([0, 1]); // 不重复确认
+    expect(up).not.toHaveBeenCalled();          // 已有 BV → 绝不重建稿
+    expect(ap).not.toHaveBeenCalled();          // 已提交 → 绝不重复 append
+    expect(remove).toHaveBeenCalledTimes(2);    // 两个已确认段的源都补删
+    expect(r.uploaded).toEqual([]);
+  });
+
+  // sidecar 是「已传/已确认」的唯一持久化证据。原子写失败 → 幂等状态不可信:此后**绝不**外发
+  // 上传、绝不删源(否则重复投稿 + 销毁唯一副本都不可逆),只能转人工。
+  // 用真实的目录权限故障注入(把分段目录设为只读 → WAL 临时文件 openSync 必失败),不靠假接缝。
+  it("sidecar 写失败 → 状态不可信:不建稿、不 append、不删源,并明示转人工", async () => {
+    const { dir, paths } = mkSession(segNames(1));
+    const up = vi.fn(async () => "BV1uuuuuuuuuu");
+    const ap = vi.fn(async () => {});
+    const remove = vi.fn(noRemove);
+    const logs: string[] = [];
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove, now: futureNow, minSegmentSec: 0, log: (m) => logs.push(m) });
+    u.noteSegment(paths[0]); // 此时目录仍可写:正常落 sidecar
+    const recDir = path.join(dir, "rec");
+    chmodSync(recDir, 0o500); // 只读 → 之后的原子写必然失败
+    try {
+      const r = await u.flush({ recordingActive: false });
+      expect(r.uploaded).toEqual([]);
+      expect(up).not.toHaveBeenCalled();   // WAL 意图落盘失败 → 绝不允许外发建稿
+      expect(ap).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled(); // 源必须保留
+      expect(logs.some((m) => m.includes("sidecar 原子写失败") && m.includes("转人工"))).toBe(true);
+      // 后续轮次保持停摆(不会「下一轮又试一次」造成重复投稿)。
+      const r2 = await u.flush({ recordingActive: false });
+      expect(r2.uploaded).toEqual([]);
+      expect(up).not.toHaveBeenCalled();
+    } finally {
+      chmodSync(recDir, 0o755); // 恢复权限,留待系统清理 tmp
+    }
   });
 });
 
