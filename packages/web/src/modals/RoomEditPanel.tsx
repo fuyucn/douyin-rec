@@ -28,6 +28,12 @@ interface Props {
   onSaved: () => void;
 }
 
+/** 提交的上传模式:rolling 与烧录互斥(issue #48),开着烧录时一律降为 upload,避免被后端 400。 */
+function effectiveUploadMode(f: { uploadMode: string; burnDanmu: boolean; burnLivechat: boolean }): "stage" | "upload" | "rolling" {
+  if (f.uploadMode === "rolling") return f.burnDanmu || f.burnLivechat ? "upload" : "rolling";
+  return f.uploadMode === "upload" ? "upload" : "stage";
+}
+
 interface FormState {
   name: string;
   quality: string;
@@ -37,7 +43,6 @@ interface FormState {
   webhook: string;
   danmu: boolean;
   useCookie: boolean;
-  rollingUpload: boolean;
   recEnabled: boolean;
   procEnabled: boolean;
   burnDanmu: boolean;
@@ -71,17 +76,17 @@ function fromRoom(r: RoomDTO): FormState {
     webhook: rec?.webhook ?? "",
     danmu: !!rec?.danmu,
     useCookie: rec?.useCookie ?? true,
-    rollingUpload: rec?.rollingUpload === true,
     recEnabled: rec?.enabled ?? true,
     procEnabled: r.processing?.enabled ?? true,
-    burnDanmu: p.steps?.burnDanmu === true,
-    burnLivechat: p.steps?.burnLivechat === true,
+    // 烧录缺省 = 开(与后端 burnFlags 同口径 `!== false`);按 `=== true` 读会把「没写 steps」显示成关,保存即静默写入烧录关。
+    burnDanmu: p.steps?.burnDanmu !== false,
+    burnLivechat: p.steps?.burnLivechat !== false,
     mergeSegments: p.steps?.mergeSegments !== false,
     nodeSideUpload: p.steps?.nodeSideUpload === true,
     clStageSourceAfterMerge: p.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: p.cleanup?.sourceAfterDone === true,
     clStageAfterDone: p.cleanup?.stageAfterDone === true,
-    uploadMode: p.upload?.mode === "upload" ? "upload" : "stage",
+    uploadMode: p.upload?.mode === "upload" || p.upload?.mode === "rolling" ? p.upload.mode : "stage",
     uploadPrivate: p.upload?.private !== false,
     uploadTag: p.upload?.tag ?? "",
     uploadTid: String(p.upload?.tid ?? 21),
@@ -136,7 +141,14 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
   const plat = pickPlatform(room.room, platforms);
   const qualityOptions = plat?.qualities ?? [];
   const engineOptions = plat?.engines ?? [];
-  const set = <K extends keyof FormState>(k: K, v: FormState[K]): void => setForm((f) => ({ ...f, [k]: v }));
+  const set = <K extends keyof FormState>(k: K, v: FormState[K]): void =>
+    setForm((f) => ({
+      ...f,
+      [k]: v,
+      // 打开烧录 → 边录边传自动退回「合成并上传」(二者互斥,后端也会 400,issue #48)。
+      ...((k === "burnDanmu" || k === "burnLivechat") && v === true && f.uploadMode === "rolling" ? { uploadMode: "upload" } : {}),
+    }));
+  const burning = form.burnDanmu || form.burnLivechat;
   const toggleWorker = (id: string): void =>
     setForm((f) => ({ ...f, workers: f.workers.includes(id) ? f.workers.filter((x) => x !== id) : [...f.workers, id] }));
   const toggleRequire = (cap: string): void =>
@@ -182,7 +194,6 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
             segmentSec: Number(form.segmentSec) || 1800,
             danmu: form.danmu ? 1 : 0,
             useCookie: form.useCookie,
-            rollingUpload: form.rollingUpload,
             enabled: form.recEnabled,
             scheduleStart,
             scheduleEnd,
@@ -209,7 +220,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
               stageAfterDone: form.clStageAfterDone,
             },
             upload: {
-              mode: form.uploadMode === "upload" ? "upload" : "stage",
+              mode: effectiveUploadMode(form),
               private: form.uploadPrivate,
               tag: form.uploadTag.trim() || undefined,
               tid: Number(form.uploadTid) || 21,
@@ -322,14 +333,6 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                     </span>
                     <Switch checked={form.useCookie} onCheckedChange={(v: boolean) => set("useCookie", v)} />
                   </label>
-                  {/* 边录边传(T-33):录制中每封口一段就上传并删该段源。默认关 = 整场录完再处理。 */}
-                  <label className="switch-row col-span-2">
-                    <span className="flex flex-col min-w-0">
-                      <span className="text-sm font-medium text-ink">{t("rooms.rollingUpload")}</span>
-                      <span className="text-xs text-muted mt-0.5">{t("rooms.rollingUploadHint")}</span>
-                    </span>
-                    <Switch checked={form.rollingUpload} onCheckedChange={(v: boolean) => set("rollingUpload", v)} />
-                  </label>
                 </div>
               </div>
             )}
@@ -406,10 +409,12 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <label className="block">
                   <span className="field-label">{t("rooms.uploadMode")}</span>
-                  <select className="input" value={form.uploadMode} onChange={(e) => set("uploadMode", e.target.value)}>
+                  <select className="input" value={form.uploadMode === "rolling" && burning ? "upload" : form.uploadMode} onChange={(e) => set("uploadMode", e.target.value)}>
                     <option value="stage">{t("rooms.uploadStage")}</option>
                     <option value="upload">{t("rooms.uploadUpload")}</option>
+                    <option value="rolling" disabled={burning}>{t("rooms.uploadRolling")}</option>
                   </select>
+                  {burning && <span className="text-xs text-muted mt-1 block">{t("rooms.rollingNeedsBurn")}</span>}
                 </label>
                 <label className="switch-row">
                   <span className="flex flex-col min-w-0">

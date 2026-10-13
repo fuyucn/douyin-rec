@@ -21,3 +21,5 @@ export * from "./upload-gate.js";
 export * from "./rolling.js";
 // 磁盘水位(GB)解析口径:daemon / reconciler / 节点侧上传闸门 / cli 共用(issue #38)。
 export * from "./disk-watermark.js";
+// 边录边传生效判定(issue #40):规则 mode=rolling + 旧 task 开关迁移 + 单节点闸门;仅 master 调用。
+export * from "./rolling-policy.js";

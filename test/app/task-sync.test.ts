@@ -27,7 +27,7 @@ describe("applyRemoteTasks", () => {
     outDir: null,
     webhook: null,
     anchorName: null,
-    rollingUpload: false,
+    rollingUpload: false, rollingEffective: false,
     ...over,
   });
 
@@ -257,7 +257,7 @@ describe("T3 删除语义", () => {
     platform: "douyin", roomSlug: "123456", room: "https://live.douyin.com/123456",
     name: "主播A", quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
     scheduleStart: null, scheduleEnd: null, enabled: true, useCookie: true,
-    cookies: null, outDir: null, webhook: null, anchorName: null, rollingUpload: false, ...over,
+    cookies: null, outDir: null, webhook: null, anchorName: null, rollingUpload: false, rollingEffective: false, ...over,
   });
 
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "t3-")); store = new TaskStore(join(dir, "tasks.db")); });

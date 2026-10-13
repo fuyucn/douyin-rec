@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, resolveOutputStem, runWithJob, sanitizeStreamKey, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, resolveOutputStem, runWithJob, sanitizeStreamKey, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/core";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
@@ -332,11 +332,7 @@ export async function finalizeOnly(
       stagePulledSources: members.flatMap((m) => m.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f)))),
       rmStage: rmStageFn, log: jlog,
     }),
-    on: {
-      plain: true,
-      danmu: cfg.steps?.burnDanmu !== false,
-      livechat: cfg.steps?.burnLivechat !== false,
-    },
+    on: { plain: true, danmu: burnFlags(cfg.steps).burnDanmu, livechat: burnFlags(cfg.steps).burnLivechat },
   });
   return { state: "done", bv };
 }
@@ -540,8 +536,7 @@ async function runPipelineInner(
   };
   const splitForUpload = deps.splitForUpload ?? defaultSplitForUpload;
   const rmStage = deps.rmStage ?? defaultRmStage;
-  const burnDanmu = cfg.steps?.burnDanmu !== false;        // 默认开
-  const burnLivechat = cfg.steps?.burnLivechat !== false;  // 默认开
+  const { burnDanmu, burnLivechat } = burnFlags(cfg.steps); // 默认开
   const clean = cfg.cleanup ?? {};
   const { streamKey } = b;
   const stageSub = path.join(cfg.stageDir, sanitizeStreamKey(streamKey));
@@ -862,8 +857,7 @@ async function resumeAppends(
   const { ledger, appendGroup, notify, cfg } = deps;
   jlog(`续跑:已建稿 bv=${bv},跳过 select/pull/merge/burn/uploadPlain,只补 append`);
   const splitForUpload = deps.splitForUpload ?? defaultSplitForUpload;
-  const burnDanmu = cfg.steps?.burnDanmu !== false;
-  const burnLivechat = cfg.steps?.burnLivechat !== false;
+  const { burnDanmu, burnLivechat } = burnFlags(cfg.steps);
   const isPublic = cfg.uploadPrivate === false;
 
   // done 场的收尾补跑若在下面三处转人工:done 无出边,普通 setState 会被白名单拒绝 →

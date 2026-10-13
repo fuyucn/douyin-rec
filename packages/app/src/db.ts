@@ -112,6 +112,9 @@ export function migrate(db: DatabaseSync): void {
   // 边录边传开关(T-33):1=录制中每封口一段就上传并删该段源;0/缺省=整场录完再处理(现状)。
   // 默认 0 → 老库/老配置行为完全不变(向后兼容)。
   ensureColumn(db, "tasks", "rollingUpload", "INTEGER NOT NULL DEFAULT 0");
+  // 边录边传**生效值**(issue #40,master 按 hub 规则 + 旧开关派生,录制端只读):
+  // NULL = 尚未派生(旧库/无规则单机任务)→ 读取时按旧 rollingUpload 迁移;0/1 = master 已算定。
+  ensureColumn(db, "tasks", "rollingEffective", "INTEGER");
   // 注:多节点 hub 配置已独立成 hub_rules 表(按 roomSlug),不再放 tasks 上。
 }
 

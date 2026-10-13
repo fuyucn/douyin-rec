@@ -36,7 +36,6 @@ import {
   headOfLineFilter,
   planRollingUploads,
   resolveOutputStem,
-  rollingUploadSingleNode,
   sealedSegmentIndices,
   segmentSessionBase,
   UploadGate,
@@ -578,16 +577,17 @@ function resolveRollingUploadMeta(
 /**
  * **装配边录边传钩子工厂**(供 `record` 子命令 / serve 注入 session)。
  *
- * 语义:任务 `rollingUpload=true` 时返回一个工厂,每次 `_startInner` 造一个**本会话专属**的
- * {@link RollingUploader} 钩子;否则返回 undefined(**完全不启用**,行为不变)。
+ * 语义:`enabled=true`(= 任务的**派生字段 `rollingEffective`**)时返回一个工厂,每次 `_startInner`
+ * 造一个**本会话专属**的 {@link RollingUploader} 钩子;否则返回 undefined(**完全不启用**,行为不变)。
  *
  * 为什么在 app 而非 cli:metadata 来自 hub 规则 + hub.config(文件),app 已有 hub-store/paths,
  * 且 manager(录制端)只认 `makeRolling` 接口 —— 上传/删源实现全在 app,manager 零依赖。
  *
- * ⚠️ **多节点重复投稿**:边录边传是**录制节点自己**建稿,多节点同录一个房间会各建一个稿
- * (B 站不可逆)。闸门**必须在 master 下发时**判定(worker 节点上没有 hub 规则文件,判不了):
- * 见 cli 的 `desiredFor` —— 仅当该房间选中**恰好 1 个** worker 时才把 `rollingUpload: true`
- * 下发。本工厂只信 `o.enabled`(已由 master 收窄),不在此重复判定。
+ * ⚠️ **判定不在这里**(issue #40):是否边录边传、以及「多节点重复投稿闸门」(边录边传是**录制节点
+ * 自己**建稿,多节点同录一个房间会各建一稿,B 站不可逆)全部由 master 用 core `resolveRollingPolicy`
+ * 一次算定,写进任务派生字段 `rollingEffective` 下发(见 cli 的 `desiredFor` 与 app 的
+ * `refreshLocalRollingEffective`)。本工厂**只信 `o.enabled`**,不读 hub 规则做判定。
+ * (上传 metadata 仍在 `resolveRollingUploadMeta` 读规则 —— 下发 metadata 属 S9,本 PR 未做。)
  */
 export function makeRollingUploadHookFactory(o: {
   enabled: boolean;
@@ -606,17 +606,6 @@ export function makeRollingUploadHookFactory(o: {
   gate?: UploadGate;
 }): (() => RollingUploadHook) | undefined {
   if (!o.enabled) return undefined;
-  // 跨节点重复投稿闸门(本机/master 侧现读 hub 规则;见 core.rollingUploadSingleNode 注释):
-  //   - 本机 local 录制:能读到 hub 规则 → 规则勾选恰好 1 个节点(或无规则=单机)才允许;
-  //   - 远端 worker:节点上**没有** hub 规则文件 → `getHubRule` 返回 null → 视为「无规则」放行,
-  //     但那是安全的 —— master 下发时已按同一闸门收窄过 `enabled`(远端拿到 true 才可能到这里)。
-  const rule = getHubRule(rootHubDir(), hubKey(o.platform, o.roomSlug));
-  if (!rollingUploadSingleNode(rule != null, rule?.workers)) {
-    (o.log ?? ((m: string) => console.error(m)))(
-      `[rolling] 边录边传未启用:hub 规则选了 ${rule?.workers?.length ?? 0} 个节点(= 全部或多节点),多节点各建稿会重复投稿 → 回落整场管线`,
-    );
-    return undefined;
-  }
   return () => {
     const { meta, private: isPrivate } = resolveRollingUploadMeta(o.platform, o.roomSlug);
     const uploader = new RollingUploader({

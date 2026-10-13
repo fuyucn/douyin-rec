@@ -14,6 +14,7 @@ import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
 import { drecRoot, ensureHubConfigExample, ensureNodeIdentity, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
+import { refreshLocalRollingEffective } from "./rolling-effective.js";
 import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
 import { makeNotifier, resolveWebhookToggles } from "@drec/observability";
@@ -99,8 +100,14 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // hubWatch 自身要在后面 hubEnabled 确定后再 start(见下),构造与 start 分开是为了这个顺序。
     let hubWatch: HubWatch | null = null;
 
+    // hub 是否启用在 manager 之后才确定(见下),起录兜底用可变标志读取。
+    let rollingGuardOn = false;
     const manager = new TaskManager(store, spawner, {
       autoRestart: true,
+      // 边录边传 S3 兜底:master 起录前对该本机任务按当前规则现算一次生效值,再构造 record 参数。
+      beforeSpawn: (taskId) => {
+        if (rollingGuardOn) refreshLocalRollingEffective(store, rootHubDir(), [taskId], (m) => console.log(m));
+      },
       log: (m) => console.log(m),
       logStore,
       // 录制状态(起停/开播/收播/崩溃)→ 立刻推一次 changed。
@@ -148,6 +155,17 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // hub 是否在本节点启用(master)?= --hub + 有 hubStarter + 能解析出 hub 配置。
     // slave(无 --hub)= false → 前端据此隐藏 Hub 页 / 显示 child node 提示。
     const hubEnabled = !!(o.hub && hubStarter && resolveHubConfigJson(o.hubConfig, store));
+    // 边录边传生效值(issue #40):首轮 hub 同步前,先用唯一判定刷新绑定了规则的本机任务,
+    // 堵住「同步未跑完、daemon 已起录」窗口里按旧开关放行而绕过多节点重复投稿闸门。失败只告警(回落旧开关迁移)。
+    rollingGuardOn = hubEnabled;
+    if (hubEnabled) {
+      try {
+        const n = refreshLocalRollingEffective(store, rootHubDir(), undefined, (m) => console.log(m));
+        console.log(`[rolling] 启动刷新边录边传生效值:${n} 个任务绑定 hub 规则`);
+      } catch (e) {
+        console.warn(`[rolling] 启动刷新边录边传生效值失败(回落旧开关迁移):${String((e as Error)?.message ?? e)}`);
+      }
+    }
     // hub 台账路径与 cli hubStarter 同一推导(<db>-sync.db)——「hub 任务」端点读它展示进度/ETA/日志。
     const syncDbPath = resolveDbPath(o.db).replace(/\.db$/, "-sync.db");
     // T4:台账变更监视 → SSE(/api/hub/stream)。
