@@ -157,14 +157,23 @@ async function finalizeNodeSuccess(
  * 核心:失败**不代表没成功**。`_node-pipeline` 是长命令,ssh 可能在节点跑完上传之前断开
  * (实测 rc=255,而节点上的稿件其实已建好:private + 多分 P)。所以先**回读节点落盘结果**:
  *
+ * 收口顺序:**先终止节点执行体(A2),再回读落盘结果**。先杀后读,执行体不会在「读之后」又写
+ * 新阶段/偷偷建稿 —— 这正是 issue #2 静默分裂的根因(台账说 failed,节点稍后才建出第二份稿)。
+ *
  *   - `phase:"done"` + `ok` + bv → 其实成功了 → `markDone` + 删源(与成功路径同一份收尾),
  *     返回 `{state:"done"}` —— 这就是「假失败」的修复;
  *   - `phase:"done"` + `ok` 但 **无 bv**(如多分 P 上传中/漏记)→ 已建稿但证明不全 → 转人工,不重传;
- *   - `phase:"uploading"` → 命令跑了但没写终态 ⇒ **结果不确定** ⇒ 转人工(绝不自动重传);
- *   - `phase:"failed"` / `null` → 确认没成 → 按原失败路径(failed + 不安全重试标记)。
+ *   - `phase:"uploading"` → 已进入 biliup 上传循环 ⇒ **结果不确定** ⇒ 转人工(绝不自动重传);
+ *   - `phase:"started"`(A1「尽早落盘」)→ 节点已接管、进入 remux,但**尚未调用 biliup**(无建稿风险):
+ *       · master **已确认终止执行体**(`abort.aborted === true`)→ 执行体不可能再建稿 → **确认没成**走
+ *         failed 路径(不堆人工,人工重触发安全);
+ *       · **无法确认终止**(旧 bundle 无 `_node-abort` / 不可达 → `aborted === false`)→ 执行体可能仍在跑、
+ *         稍后会写 uploading 并建稿 → **结果不确定**转人工,禁自动重试(避免「台账 failed、节点偷偷建稿」);
+ *   - `phase:"failed"`(无 bv) / `null` → 确认没成 → 按原失败路径(failed + 不安全重试标记)。
  *
  * 关键安全不变量:**任何「可能已建稿」的分支都不得让 reconciler 自动重试** —— 重复投稿不可逆
- * (B站不支持改稿件视频内容)。故 `uploading` / 成功但无 bv / failed 且带 bv 一律 `needs_manual`。
+ * (B站不支持改稿件视频内容)。故 `uploading` / 成功但无 bv / failed 且带 bv / started 且未确认终止
+ * 一律 `needs_manual`。反过来 `started` 且**已确认终止** = 真的没建稿 → `failed`(既不自动重试也允许人工安全重投)。
  */
 async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedSec?: number): Promise<{ state: JobState; bv?: string }> {
   const { streamKey, transport, ledger, jlog, notify } = o;
@@ -174,6 +183,24 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
   // 注意:此处**不**立刻把节点表标 failed —— node_upload 的 running 标记留着,直到下面某条
   // 终态分支(回读成功→done / 不确定→failed / 确认没成→failed)。否则回读这段窗口内
   // nodeStates 无 running 节点,队列页会回落到 stateToNode("syncing")="pull"(又误报)。
+
+  // A2:**先主动终止节点执行体,再回读**。否则执行体可能在我们读完之后、收口之前又写新阶段/建稿
+  // (ssh 超时只杀本地 ssh 客户端,远端 node + biliup/ffmpeg 不受控)→ 「台账 failed、节点仍在建稿」的
+  // 静默分裂(重复投稿,不可逆)。`abortNodePipeline` 自身**绝不抛**(旧 bundle 降级为 aborted:false);
+  // 这里再包一层 .catch 兜底,确保**任何情况下都不掩盖原始失败原因**(errMsg 仍是本次失败的权威记录)。
+  let executorStopped = false; // 是否「确认执行体已停」—— 决定 started 走 failed 还是 needs_manual
+  if (transport.abortNodePipeline) {
+    try {
+      const abort = await transport.abortNodePipeline(streamKey);
+      executorStopped = abort?.aborted === true;
+      jlog(`已请求终止节点执行体(${streamKey}):${executorStopped ? "确认已停" : `无法确认(${abort?.detail ?? "未知"})`}`);
+    } catch (e) {
+      jlog(`终止节点执行体异常(忽略,按未确认处理):${String((e as Error)?.message ?? e)}`);
+      executorStopped = false;
+    }
+  } else {
+    jlog(`transport 不支持 _node-abort(旧 bundle)→ 无法终止执行体,结果按保守口径处理`);
+  }
 
   let node = null;
   try {
@@ -187,14 +214,19 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
     return await finalizeNodeSuccess(o, node.bv, `节点侧已完成(回传失败,落盘回读 BV=${node.bv})`);
   }
 
-  // 「可能已建稿」的三个分支 → needs_manual,绝不自动重试(自动重试 = 重复投稿)。
+  // 「可能已建稿」的分支 → needs_manual,绝不自动重试(自动重试 = 重复投稿)。
+  // `started` 且**未能确认终止执行体**也归此类(执行体可能稍后偷偷建稿);`started` 且已确认终止
+  // 落到下面「确认没成」分支(执行体被杀掉时还没调 biliup → 真的没建稿)。
   const maybePublished = node?.phase === "uploading"
     || (node?.phase === "done" && !node.bv)
-    || (node?.phase === "failed" && !!node.bv);
+    || (node?.phase === "failed" && !!node.bv)
+    || (node?.phase === "started" && !executorStopped);
   if (maybePublished) {
     const why = node?.phase === "uploading"
       ? `节点已开始上传但结果未知(可能已建稿${node.bv ? ` BV=${node.bv}` : ""})`
-      : node?.bv ? `节点已建稿 BV=${node.bv} 但未确认完成` : `节点上报完成但缺 BV,无法确认分 P`;
+      : node?.phase === "started"
+        ? `节点已接管(remux 阶段)但未能确认终止执行体(旧 bundle 不支持终止 / 不可达):执行体可能仍在跑并稍后建稿`
+        : node?.bv ? `节点已建稿 BV=${node.bv} 但未确认完成` : `节点上报完成但缺 BV,无法确认分 P`;
     const note = `${why};已禁止自动重试,请人工核对 B站稿件后处理`;
     jlog(`节点侧结果不确定: ${note}`);
     ledger.logStep(streamKey, "node_upload", "done", `节点侧结果不确定: ${why.slice(0, 120)}`);

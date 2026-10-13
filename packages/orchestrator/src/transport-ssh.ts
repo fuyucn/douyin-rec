@@ -1,7 +1,7 @@
 // packages/orchestrator/src/transport-ssh.ts
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { registerChild, throwIfAborted, type RemoteTaskSpec } from "@drec/core";
+import { normalizeNodeResultFile, registerChild, throwIfAborted, type RemoteTaskSpec } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeTasks, Transport } from "./transport.js";
 import type { NodeCapabilities, NodeStatus, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec } from "@drec/core";
 
@@ -294,20 +294,35 @@ export class SshTransport implements Transport {
     const q = streamKey.replace(/'/g, "'\\''");
     try {
       const out = await this.runStatus([`${nodePrefix} _node-result ${this.o.dataRoot} '${q}'`]);
-      const parsed = JSON.parse(out) as Partial<NodePipelineResultFile> | null;
-      if (!parsed || typeof parsed !== "object") return null;
-      const phase = parsed.phase;
-      if (phase !== "uploading" && phase !== "done" && phase !== "failed") return null;
-      return {
-        phase,
-        ok: parsed.ok === true,
-        bv: typeof parsed.bv === "string" ? parsed.bv : undefined,
-        products: Array.isArray(parsed.products) ? parsed.products : undefined,
-        error: typeof parsed.error === "string" ? parsed.error : undefined,
-        atMs: typeof parsed.atMs === "number" ? parsed.atMs : 0,
-      };
+      // 归一口径与 app 侧 `readNodeResult` **共用 core 的 `normalizeNodeResultFile`**(唯一真理):
+      // phase 白名单新增一处即可,两处不再各写一份而漂移(issue #2)。
+      return normalizeNodeResultFile(JSON.parse(out));
     } catch {
       return null; // 旧 bundle 无 `_node-result` / 文件不存在 / 节点不可达
+    }
+  }
+
+  /**
+   * 主动终止该场 `_node-pipeline` 执行体(issue #2 A2)。隐藏命令 `_node-abort <dataRoot> <streamKey>`。
+   *
+   * **绝不抛错** —— 它在失败收口路径上被调用,异常只会掩盖原始错误。旧 bundle 无该命令
+   * (`isUnknownCommandError`)/ 不可达 → 返回 `{ aborted: false }`(调用方据此**保守转人工**,
+   * 因为无法确认执行体已停,started 标记也可能稍后变 uploading 建稿)。
+   * 用 runStatus(8s):节点侧 abort 内部 SIGTERM→2s 宽限→SIGKILL,远小于预算。
+   */
+  async abortNodePipeline(streamKey: string): Promise<{ aborted: boolean; detail?: string }> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const q = streamKey.replace(/'/g, "'\\''");
+    try {
+      const out = await this.runStatus([`${nodePrefix} _node-abort ${this.o.dataRoot} '${q}'`]);
+      const parsed = JSON.parse(out) as { aborted?: unknown; detail?: unknown };
+      return {
+        aborted: parsed?.aborted === true,
+        detail: typeof parsed?.detail === "string" ? parsed.detail : undefined,
+      };
+    } catch (e) {
+      // 旧 bundle(unknown command)/ 网络/超时 → 一律视为「无法确认已终止」,不抛(掩盖原始错误更糟)。
+      return { aborted: false, detail: isUnknownCommandError(e) ? "节点 bundle 不支持 _node-abort(旧版本)" : "终止命令失败(不可达/超时)" };
     }
   }
 

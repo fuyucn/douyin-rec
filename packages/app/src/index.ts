@@ -45,6 +45,7 @@ export {
   runNodeSidePipeline, probeNodeCapabilities, listNodeProducts, openNodeUploadGate, resolveUploadAccountKey,
   planGroups, splitGroupsBySession, prepareNodeUploadAlias, nodeStageCleanupTargets,
   readNodeResult, nodeResultPath,
+  abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath, readNodeExecutorPid,
 } from "./node-pipeline.js";
 export type { NodeUploadGateOpts } from "./node-pipeline.js";
 // 边录边传(T-33,见 plans/031):录制端「封口段上传 → 确认后删该段源」的执行体 + 钩子工厂。
