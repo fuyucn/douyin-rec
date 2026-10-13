@@ -16,7 +16,7 @@
 import { TaskStore, type Task } from "./store.js";
 import { inWindow, nowMinutesLocal } from "./scheduler.js";
 import { TaskManager } from "./task-manager.js";
-import { shouldRefuseNewRecording } from "@drec/core";
+import { DEFAULT_DISK_MIN_GB, resolveDiskMinGB, shouldRefuseNewRecording, type DiskMinGBSource } from "@drec/core";
 
 export interface DaemonOpts {
   /**
@@ -49,8 +49,7 @@ export interface DaemonOpts {
   diskWatermarkBytes?: number;
 }
 
-/** 磁盘水位缺省值(GB):与 master 的 reconciler 看门狗、节点侧上传闸门同一口径(`diskMinGB ?? 10`)。 */
-export const DEFAULT_DISK_MIN_GB = 10;
+export { DEFAULT_DISK_MIN_GB };
 
 /**
  * 由 hub 配置 JSON 解出 daemon 的磁盘水位(字节)。纯函数。
@@ -66,7 +65,7 @@ export function resolveDiskWatermarkBytes(
   return resolveDiskWatermark(hubConfigJson, warn).bytes;
 }
 
-export type DiskWatermarkSource = "配置" | "默认" | "关闭";
+export type DiskWatermarkSource = DiskMinGBSource;
 
 /**
  * 同 {@link resolveDiskWatermarkBytes},额外返回来源(供启动日志)。
@@ -76,20 +75,17 @@ export function resolveDiskWatermark(
   hubConfigJson: string | undefined,
   warn?: (msg: string) => void,
 ): { bytes: number; source: DiskWatermarkSource } {
-  let gb: number = DEFAULT_DISK_MIN_GB;
-  let source: DiskWatermarkSource = "默认";
+  let raw: unknown;
+  let parseFailed = false;
   try {
     const cfg = JSON.parse(hubConfigJson ?? "{}") as { resources?: { diskMinGB?: unknown } };
-    const v = cfg.resources?.diskMinGB;
-    if (typeof v === "number" && Number.isFinite(v)) {
-      gb = v;
-      source = v > 0 ? "配置" : "关闭";
-    } else if (v !== undefined && v !== null) {
-      warn?.(`[disk] resources.diskMinGB=${JSON.stringify(v)} 不是有效数字,回落默认 ${DEFAULT_DISK_MIN_GB}GB`);
-    }
+    raw = cfg.resources?.diskMinGB;
   } catch (e) {
+    parseFailed = true;
     warn?.(`[disk] hub 配置 JSON 解析失败(${(e as Error).message}),磁盘水位回落默认 ${DEFAULT_DISK_MIN_GB}GB`);
   }
+  // 数值口径(缺省/非数字/<=0)统一走 core 的 resolveDiskMinGB,与 reconciler / 上传闸门同源。
+  const { gb, source } = parseFailed ? { gb: DEFAULT_DISK_MIN_GB, source: "默认" as const } : resolveDiskMinGB(raw, warn);
   return { bytes: gb > 0 ? gb * 1e9 : 0, source };
 }
 

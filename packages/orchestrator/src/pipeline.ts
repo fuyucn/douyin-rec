@@ -73,7 +73,8 @@ export interface PipelineCfg {
    *
    * 消费点:节点侧上传选路(节点剩余空间低于阈值 → **不选节点侧**,回落 pull 回 master)——
    * 盘满会让节点本地 remux 写盘 `ENOSPC` → 节点进程非 0 退出 → ssh rc≠0 → 保守转人工。
-   * 未注入(undefined)/ 非有限数 / `<=0` = 闸门关闭(向后兼容,测试与旧调用方不受影响)。
+   * 未注入(undefined)= 闸门关闭(向后兼容,测试与旧调用方不受影响);`<=0` = 关闭;非数字(字符串/NaN)按 core `resolveDiskMinGB` 回落 10GB。
+   * 解析口径唯一真理源:core `resolveDiskMinGB`(daemon / reconciler / 本闸门 / cli 共用)。
    */
   diskMinGB?: number;
   stageDir: string;
