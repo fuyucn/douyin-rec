@@ -88,7 +88,10 @@ export function uploadLineCandidates(explicit?: UploadLine, override?: readonly 
 function isRetryableLineError(err: unknown): boolean {
   const msg = String((err as Error)?.message ?? err);
   return (
-    /connection error|error sending request|connection reset|unexpected eof|broken pipe|timed? out/i.test(msg)
+    // `timed? out` 只匹配 "timed out"/"time out";biliup 上游 504 文案是 "Gateway Time-out"
+    // (带连字符)→ 之前漏判为不可重试,504 直接抛错、**不换线路**,整场转 needs_manual(线上实测)。
+    // 补 `gateway time-?out` 与 HTTP `50[234]` 服务端错误(5xx 均为线路/网关侧瞬时故障,可换线重试)。
+    /connection error|error sending request|connection reset|unexpected eof|broken pipe|timed? out|gateway time-?out|http status server error|\b50[234]\b/i.test(msg)
     && /start=\d+.*end=\d+|uploader\.rs:\d+/i.test(msg)
   );
 }
