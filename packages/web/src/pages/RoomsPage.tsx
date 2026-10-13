@@ -401,8 +401,9 @@ function pipelineBits(t: ReturnType<typeof useT>, r: RoomDTO): string[] {
   const up = p.pipeline?.upload ?? {};
   const out: string[] = [];
   if (steps.mergeSegments !== false) out.push(t("rooms.stepMerge"));
-  if (steps.burnDanmu) out.push(t("rooms.stepBurnDanmu"));
-  if (steps.burnLivechat) out.push(t("rooms.stepBurnLivechat"));
+  // 烧录缺省 = 开(同后端 burnFlags 口径)。
+  if (steps.burnDanmu !== false) out.push(t("rooms.stepBurnDanmu"));
+  if (steps.burnLivechat !== false) out.push(t("rooms.stepBurnLivechat"));
   if (steps.nodeSideUpload) out.push(t("rooms.stepNodeUpload"));
   out.push(
     up.mode === "upload" || up.mode === "rolling"

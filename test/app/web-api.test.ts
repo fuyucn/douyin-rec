@@ -1921,6 +1921,15 @@ describe("issue #48:rolling 与烧录互斥(API 层后端守卫,不依赖 UI)", 
     expect((stored(a).pipeline.steps as { burnDanmu?: boolean }).burnDanmu).toBe(false);
   });
 
+  it("更新:已存 rolling+不烧录,PATCH steps:null(置空=默认烧录开)→ 400,规则不变", () => {
+    const { a, id } = setup();
+    a.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"], pipeline: { steps: NB, upload: { mode: "rolling" } } });
+    const r = a.updateHubRule(KEY, { pipeline: { steps: null as never } });
+    expect(r.status).toBe(400);
+    expect(body(r).error).toContain("烧录");
+    expect((stored(a).pipeline.steps as { burnDanmu?: boolean }).burnDanmu).toBe(false);
+  });
+
   it("更新:已存 upload+烧录开,PATCH 只把 mode 改成 rolling → 400;同时关掉烧录 → 200", () => {
     const { a, id } = setup();
     a.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } });

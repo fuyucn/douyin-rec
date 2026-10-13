@@ -78,8 +78,9 @@ function fromRoom(r: RoomDTO): FormState {
     useCookie: rec?.useCookie ?? true,
     recEnabled: rec?.enabled ?? true,
     procEnabled: r.processing?.enabled ?? true,
-    burnDanmu: p.steps?.burnDanmu === true,
-    burnLivechat: p.steps?.burnLivechat === true,
+    // 烧录缺省 = 开(与后端 burnFlags 同口径 `!== false`);按 `=== true` 读会把「没写 steps」显示成关,保存即静默写入烧录关。
+    burnDanmu: p.steps?.burnDanmu !== false,
+    burnLivechat: p.steps?.burnLivechat !== false,
     mergeSegments: p.steps?.mergeSegments !== false,
     nodeSideUpload: p.steps?.nodeSideUpload === true,
     clStageSourceAfterMerge: p.cleanup?.stageSourceAfterMerge === true,

@@ -154,6 +154,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     // 按**合并后**的结果判(PATCH 只改烧录开关、mode 沿用已存的 rolling 也要拦);
     // 本次没碰 mode / 烧录开关则不判,避免存量坏规则卡死无关的编辑(它在生效判定里已是 needs-burn)。
     const touched = input.pipeline?.upload?.mode !== undefined
+      || input.pipeline?.steps === null // steps 置空 = 回到默认(烧录开),同样要过守卫
       || input.pipeline?.steps?.burnDanmu !== undefined || input.pipeline?.steps?.burnLivechat !== undefined;
     if (touched) {
       const merged = hubStore.mergePipeline(existing, input.pipeline);
