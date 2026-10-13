@@ -217,6 +217,18 @@ export class SyncLedger {
     return this.transition(streamKey, state, "winnerWorker=COALESCE(?,winnerWorker), error=?",
       [patch.winnerWorker ?? null, patch.error ?? null], opts.force === true);
   }
+  /**
+   * 流程内推进(syncing/merging/uploading):done 场的收尾补跑会重入这些阶段,
+   * done 是终态 → 静默跳过(不 warn、不改库),流程照常往下走到收尾。
+   */
+  advanceState(
+    streamKey: string,
+    state: JobState,
+    patch: { winnerWorker?: string; error?: string } = {},
+  ): boolean {
+    if (this.get(streamKey)?.state === "done") return false;
+    return this.setState(streamKey, state, patch);
+  }
   markDone(streamKey: string, bv: string): boolean {
     return this.transition(streamKey, "done", "bv=?, error=NULL", [bv]);
   }

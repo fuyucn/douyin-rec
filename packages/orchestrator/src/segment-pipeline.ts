@@ -334,7 +334,7 @@ export async function runSegmentPipeline(o: {
   }
 
   // ── 逐段 remux(merge 节点语义)──
-  ledger.setState(streamKey, "merging");
+  ledger.advanceState(streamKey, "merging"); // done 场补跑:跳过
   ledger.logStep(streamKey, "merge", "start");
   ledger.syncNodeState(streamKey, "merge", "running");
   const parts: SegmentPlan["parts"] = [];
@@ -502,7 +502,7 @@ export async function runSegmentPipeline(o: {
   }
 
   // ── 上传:全部 plain 段一次多文件 upload 建稿(P1..Pn 顺序 = 段序)──
-  ledger.setState(streamKey, "uploading");
+  ledger.advanceState(streamKey, "uploading");
   ledger.logStep(streamKey, "upload_plain", "start");
   ledger.syncNodeState(streamKey, "upload_plain", "running");
   const plainFiles = uploadParts.map((p) => p.plain).filter(existsSync);

@@ -397,9 +397,10 @@ export async function finalizeAfterUpload(o: {
     ledger.syncNodeState(streamKey, "clean_verify", "failed", {
       error: `分 P 数不符:期望 ${v.expected} 实际 ${v.actual}`,
     });
+    // 前面 markDone 已把台账置 done,done 无出边 → 必须 force 才能转人工(与返回值 needs_manual 一致)。
     ledger.setState(streamKey, "needs_manual", {
       error: `产物核验失败:期望 ${v.expected} 个分 P、实际 ${v.actual} 个(bv=${bv}),已保留全部源`,
-    });
+    }, { force: true });
     o.notify({
       kind: "error", stage: "上传",
       message: verifyMessage(v, streamKey, bv),
@@ -622,7 +623,7 @@ async function runPipelineInner(
   }
 
   // Mark syncing and pull files from winner node into a per-broadcast sub-directory
-  ledger.setState(streamKey, "syncing", { winnerWorker: winner.workerId });
+  ledger.advanceState(streamKey, "syncing", { winnerWorker: winner.workerId }); // done 场补跑:跳过
   const transport = transports.get(winner.workerId);
   if (!transport) throw new Error(`No transport for worker: ${winner.workerId}`);
 
@@ -731,7 +732,7 @@ async function runPipelineInner(
   }
 
   // Merge and burn from the stageSub directory
-  ledger.setState(streamKey, "merging");
+  ledger.advanceState(streamKey, "merging");
   const plain = path.join(stageSub, dateName + ".mp4");
   const danmuMp4 = path.join(stageSub, dateName + "_danmu.mp4");
   const livechatMp4 = path.join(stageSub, dateName + "_livechat.mp4");

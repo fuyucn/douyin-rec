@@ -487,7 +487,7 @@ describe("runPipeline", () => {
         cleanup: { stageSourceAfterMerge: true, sourceAfterDone: true, stageAfterDone: true },
       };
       deps.ledger.upsertPending(broadcast.streamKey);
-      deps.ledger.setState(broadcast.streamKey, "uploading");
+      deps.ledger.setState(broadcast.streamKey, "retrying"); // 真实续跑入口:runNow/reconciler 先置 retrying,pipeline 自己再推进
       deps.ledger.setBv(broadcast.streamKey, "BVseg");  // 已建稿 → 走分段续跑
 
       const result = await runPipeline(broadcast, deps);
@@ -499,6 +499,25 @@ describe("runPipeline", () => {
       // 且 stage 里拉来的源 .ts 被清(有合并?分P模式不删交付物,但拉来源段副本可清)。
       const stageCleaned = (deps.rmStage as Mock).mock.calls.flatMap((c) => c[0] as string[]);
       expect(stageCleaned.some((p) => /s_00[01]\.ts$/.test(p))).toBe(true);
+      deps.ledger.close();
+    });
+
+    it("分段 done 场收尾补跑:不 warn 非法转换、台账仍 done、照常补删源(done 是终态)", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts"] }) }]);
+      const deps = segmentDeps();
+      (deps as { cfg: PipelineCfg }).cfg = { ...deps.cfg, cleanup: { sourceAfterDone: true } };
+      deps.ledger.upsertPending(broadcast.streamKey);
+      deps.ledger.setBv(broadcast.streamKey, "BVseg");
+      deps.ledger.markDone(broadcast.streamKey, "BVseg"); // 已 done,reconciler 补跑收尾
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const result = await runPipeline(broadcast, deps);
+
+      expect(result.state).toBe("done");
+      expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("done");
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes("[ledger] 拒绝"))).toEqual([]);
+      warn.mockRestore();
       deps.ledger.close();
     });
 
@@ -1133,6 +1152,8 @@ describe("runPipeline", () => {
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
       // 预置:已建稿 + danmu 已 append 完
       deps.ledger.upsertPending(b.streamKey);
+      deps.ledger.setState(b.streamKey, "syncing");
+      deps.ledger.setState(b.streamKey, "merging");
       deps.ledger.setState(b.streamKey, "uploading");
       deps.ledger.setBv(b.streamKey, "BVexisting");
       deps.ledger.logStep(b.streamKey, "append_danmu", "start");
@@ -1165,6 +1186,8 @@ describe("runPipeline", () => {
       });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec({ tsFiles }) }]);
       deps.ledger.upsertPending(b.streamKey);
+      deps.ledger.setState(b.streamKey, "syncing");
+      deps.ledger.setState(b.streamKey, "merging");
       deps.ledger.setState(b.streamKey, "uploading");
       deps.ledger.setBv(b.streamKey, "BVexisting");
       const dateName = "主播名_2026-06-27";
@@ -1272,6 +1295,7 @@ describe("runPipeline", () => {
       const t = deps.transports.get("node-1")!;
       const { nodePipeline } = withNodePipeline(t);
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       await runPipeline(b, deps);
       expect(nodePipeline).not.toHaveBeenCalled(); // 绝不走节点侧
       expect(t.pull).toHaveBeenCalled();           // 现状:pull 回 master
@@ -1320,6 +1344,7 @@ describe("runPipeline", () => {
       const t = deps.transports.get("node-1")!;
       const { nodePipeline } = withNodePipeline(t);
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       await runPipeline(b, deps);
       expect(nodePipeline).not.toHaveBeenCalled();
       expect(t.pull).toHaveBeenCalled(); // 现状:仍 pull 回 master
@@ -1345,6 +1370,7 @@ describe("runPipeline", () => {
       const t = deps.transports.get("node-1")!;
       const { nodePipeline } = withNodePipeline(t);
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       await runPipeline(b, deps);
       expect(nodePipeline).not.toHaveBeenCalled();
       expect(t.pull).toHaveBeenCalled();
@@ -1355,9 +1381,11 @@ describe("runPipeline", () => {
       const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false } } });
       const t = deps.transports.get("node-1")!; // 无 nodePipeline/nodeCapabilities
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       const r = await runPipeline(b, deps);
       expect(t.pull).toHaveBeenCalled();
-      expect(r.state).not.toBe("done"); // 走常规路径(此测试环境无真产物 → 安全阀)
+      // 台账有行后,常规路径在 mock 下能跑通:旧断言 not.toBe("done") 只是因缺行而碰巧成立。
+      expect(r).toEqual({ state: "done", bv: "BV123" });
       deps.ledger.close();
     });
 
@@ -1366,6 +1394,7 @@ describe("runPipeline", () => {
       const t = deps.transports.get("node-1")!;
       const { nodePipeline } = withNodePipeline(t, { caps: { biliup: false, cookies: true, diskFreeGB: 50 } });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       await runPipeline(b, deps);
       expect(nodePipeline).not.toHaveBeenCalled();
       expect(t.pull).toHaveBeenCalled();
@@ -1404,6 +1433,7 @@ describe("runPipeline", () => {
       const t = deps.transports.get("node-1")!;
       const { nodePipeline } = withNodePipeline(t, { caps: { biliup: true, cookies: true, diskFreeGB: 10 } });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       const r = await runPipeline(b, deps);
       expect(nodePipeline).toHaveBeenCalledTimes(1);
       expect(t.pull).not.toHaveBeenCalled();
@@ -1416,6 +1446,7 @@ describe("runPipeline", () => {
       const t = deps.transports.get("node-1")!;
       const { nodePipeline } = withNodePipeline(t, { caps: { biliup: true, cookies: true, diskFreeGB: 50 } });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       const r = await runPipeline(b, deps);
       expect(nodePipeline).toHaveBeenCalledTimes(1);
       expect(r).toEqual({ state: "done", bv: "BVnode" });
@@ -1428,6 +1459,7 @@ describe("runPipeline", () => {
       const t = deps.transports.get("node-1")!;
       const { nodePipeline } = withNodePipeline(t, { caps: { biliup: true, cookies: true, diskFreeGB: 0.1 } });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       const r = await runPipeline(b, deps);
       expect(nodePipeline).toHaveBeenCalledTimes(1);
       expect(t.pull).not.toHaveBeenCalled();
@@ -1440,6 +1472,7 @@ describe("runPipeline", () => {
       const t = deps.transports.get("node-1")!;
       const { nodePipeline } = withNodePipeline(t, { caps: { biliup: true, cookies: true, diskFreeGB: 0.1 } });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       await runPipeline(b, deps);
       expect(nodePipeline).toHaveBeenCalledTimes(1);
       deps.ledger.close();
@@ -1452,6 +1485,7 @@ describe("runPipeline", () => {
       const caps = { biliup: true, cookies: true } as unknown as { biliup: boolean; cookies: boolean; diskFreeGB: number };
       const { nodePipeline } = withNodePipeline(t, { caps });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       const r = await runPipeline(b, deps);
       expect(nodePipeline).toHaveBeenCalledTimes(1);
       expect(t.pull).not.toHaveBeenCalled();
@@ -1464,6 +1498,7 @@ describe("runPipeline", () => {
       const t = deps.transports.get("node-1")!;
       withNodePipeline(t, { result: { ok: false, error: "biliup 退出码 1" } });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       const r = await runPipeline(b, deps);
       expect(r.state).toBe("failed");
       expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
@@ -1475,6 +1510,7 @@ describe("runPipeline", () => {
       const t = deps.transports.get("node-1")!;
       withNodePipeline(t, { throwOnCall: true });
       const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey); // 直接调 runPipeline 需自建行(真实路径由 reconciler 建)
       const r = await runPipeline(b, deps);
       expect(r.state).toBe("failed");
       expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
