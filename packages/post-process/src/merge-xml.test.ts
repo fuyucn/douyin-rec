@@ -58,6 +58,18 @@ describe("renderXmlWindowToXml — 窗口切分派生 xml(与烧录 extractItems
     expect(res.count).toBe(extractItems(xml, { window: win }).length);
   });
 
+  it("绝对时间回代一致:派生 xml 相对时间 + 窗口起点 = 源 xml 的绝对时间(与合并 offset 同源)", () => {
+    const xml = sess(VST, lines, []);
+    const win = { startSec: 2, endSec: 8 };
+    // 独立路径:不用 extractItems 自己的 window 逻辑 —— 取源 xml **无窗口**(=绝对时间)再手动筛窗,
+    // 与「派生 xml 抽 + startSec 回代」逐条对齐。这正是「派生 xml 与合并模式算出的绝对时间一致」。
+    const derived = renderXmlWindowToXml(xml, win);
+    const rebased = extractItems(derived.xml).map((x) => ({ ...x, timeSec: x.timeSec + win.startSec }));
+    const srcInWin = extractItems(xml).filter((x) => x.timeSec >= win.startSec && x.timeSec < win.endSec);
+    expect(view(rebased)).toEqual(view(srcInWin));
+    expect(rebased.length).toBeGreaterThan(0); // 非平凡:确有窗内条目
+  });
+
   it("烧录口径(排除 member + gift>0.9)从派生 xml 抽 = 从会话 xml 按窗口抽", () => {
     const xml = sess(VST, lines, []);
     const win = { startSec: 2, endSec: 8 };
