@@ -37,9 +37,15 @@ function sessionTime(streamKey: string): string {
   return `${short} ${hh}:${mm}`;
 }
 
-/** 步骤名 → 展示标签(与 HubJobs 的 stepNode 同源)。 */
+/**
+ * 步骤名 → 展示标签(与 HubJobs 的 stepNode 同源)。
+ * 未知步骤名(新版本加的步骤、旧前端没这条 i18n)→ 安全回落成**步骤名原文**,
+ * 不渲染成空白、也不把 `hub.jobs.stepNode.xxx` 这种键名糊到 UI 上。
+ */
 function stepLabel(t: TFunc, step: string): string {
-  return t(`hub.jobs.stepNode.${step}`);
+  const key = `hub.jobs.stepNode.${step}`;
+  const label = t(key);
+  return label === key ? step : label;
 }
 
 /** 资源占用条:CPU / 上传窗口 / 冷却。 */

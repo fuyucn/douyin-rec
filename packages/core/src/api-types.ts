@@ -201,7 +201,11 @@ export interface HubJobEventDTO {
 
 /** 细粒度子步骤事件(start/done),驱动 fork/join 流程图。 */
 export interface HubJobStepDTO {
-  /** select / pull / merge / burn_danmu / burn_livechat / upload_plain / append_danmu / append_livechat。 */
+  /**
+   * select / pull / node_upload / merge / burn_danmu / burn_livechat / upload_plain /
+   * append_danmu / append_livechat / clean_*。
+   * `node_upload` = 节点侧上传(节点本地 remux + 上传,无回传),与常规 pull 区分开。
+   */
   step: string;
   /** start | done。 */
   phase: string;
@@ -212,7 +216,7 @@ export interface HubJobStepDTO {
 
 /** 单个 workflow 节点的安全阀状态(UI 单节点重跑入口的数据源)。 */
 export interface HubJobNodeStateDTO {
-  /** merge / burn_danmu / burn_livechat / upload_plain / append_danmu / append_livechat。 */
+  /** merge / burn_danmu / burn_livechat / upload_plain / append_danmu / append_livechat / clean_* / node_upload。 */
   node: string;
   /** pending / running / done / failed / blocked / skipped。 */
   state: string;
@@ -398,7 +402,7 @@ export interface QueueItemDTO {
   resource: "cpu" | "net" | "upload" | null;
   /** phase=queued 时该资源队列内的位次(1-based);否则 null。 */
   queuePosition: number | null;
-  /** 当前节点名(merge / burn_danmu / upload_plain …);未知 → null。 */
+  /** 当前节点名(merge / burn_danmu / upload_plain / node_upload …);未知 → null。 */
   currentNode: string | null;
   /** 已完成子步骤(升序;做了什么)。 */
   doneSteps: HubJobStepDTO[];

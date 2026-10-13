@@ -18,9 +18,15 @@ export type HubJobState = (typeof HUB_JOB_STATES)[number];
 export const HUB_TERMINAL_STATES = ["done", "failed", "needs_manual"] as const satisfies readonly HubJobState[];
 export type HubTerminalState = (typeof HUB_TERMINAL_STATES)[number];
 
-/** 细粒度子步骤规范名(流程图节点;upload/append 仅 upload 模式打点)。 */
+/**
+ * 细粒度子步骤规范名(流程图节点;upload/append 仅 upload 模式打点)。
+ *
+ * `node_upload` = **节点侧上传**(experimental)的步骤名:节点本地 remux + 上传,不回传录像。
+ * 它是 `pull` 的**替代路径**,必须与常规 pull 回 master 分开,否则队列/台账把「节点本地处理」
+ * 误记成 pull,值班会以为「还在 rsync 回传」。
+ */
 export const HUB_STEP_NAMES = [
-  "select", "pull", "merge",
+  "select", "pull", "node_upload", "merge",
   "burn_danmu", "burn_livechat",
   "upload_plain", "append_danmu", "append_livechat",
   // 上传后完整性核验(T11):与 clean_* 同为收尾节点,判定「实际分 P 数 == 期望」才删源。

@@ -49,6 +49,24 @@ describe("buildFlow — 终态按 job.steps", () => {
     expect(g.edges).toContainEqual(["merge", "clean_stage_src"]);
     expect(g.edges).toContainEqual(["clean_stage_src", "__term__"]);
   });
+
+  // 回归(issue #12):节点侧上传是 pull 的替代前奏 —— spine 换成 select → node_upload,
+  // 不再画 pull / merge(它们在这条路径上根本不跑)。
+  it("节点侧上传场:spine = select → node_upload(无 pull / merge 节点)", () => {
+    const g = buildFlow(doneJob(["select", "node_upload", "clean_source"]), undefined);
+    expect(keys(g)).toEqual(["select", "node_upload", "clean_source", "__term__"]);
+    expect(keys(g)).not.toContain("pull");
+    expect(keys(g)).not.toContain("merge");
+    expect(g.edges).toContainEqual(["select", "node_upload"]);
+    expect(g.edges).toContainEqual(["node_upload", "clean_source"]);
+    expect(g.edges).toContainEqual(["clean_source", "__term__"]);
+  });
+
+  // 安全回落:未知步骤名不该炸、也不该把已知节点挤掉(未知名只是不进图)。
+  it("未知步骤名:不炸、已知节点照常渲染", () => {
+    const g = buildFlow(doneJob(["select", "pull", "merge", "__unknown_step__"]), undefined);
+    expect(keys(g)).toEqual(["select", "pull", "merge", "__term__"]);
+  });
 });
 
 describe("buildFlow — 进行中按 cfg", () => {
@@ -59,6 +77,17 @@ describe("buildFlow — 进行中按 cfg", () => {
     expect(keys(g)).toContain("burn_danmu");
     expect(keys(g)).not.toContain("burn_livechat");
     expect(keys(g)).not.toContain("upload_plain");
+    expect(keys(g)).toContain("clean_source");
+  });
+
+  it("in-progress 节点侧上传场:不按 cfg 臆造 pull/upload/append(nodeSide 分支)", () => {
+    const job = { state: "syncing", steps: [{ step: "select" }, { step: "node_upload" }] };
+    const cfg = { steps: { burnDanmu: false, burnLivechat: false }, upload: { mode: "upload" }, cleanup: { sourceAfterDone: true } };
+    const g = buildFlow(job, cfg);
+    expect(keys(g)).toContain("node_upload");
+    expect(keys(g)).not.toContain("pull");
+    expect(keys(g)).not.toContain("upload_plain");
+    expect(keys(g)).not.toContain("append_danmu");
     expect(keys(g)).toContain("clean_source");
   });
 });
