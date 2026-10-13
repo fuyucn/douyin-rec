@@ -397,9 +397,10 @@ export async function finalizeAfterUpload(o: {
     ledger.syncNodeState(streamKey, "clean_verify", "failed", {
       error: `分 P 数不符:期望 ${v.expected} 实际 ${v.actual}`,
     });
+    // 前面 markDone 已把台账置 done,done 无出边 → 必须 force 才能转人工(与返回值 needs_manual 一致)。
     ledger.setState(streamKey, "needs_manual", {
       error: `产物核验失败:期望 ${v.expected} 个分 P、实际 ${v.actual} 个(bv=${bv}),已保留全部源`,
-    });
+    }, { force: true });
     o.notify({
       kind: "error", stage: "上传",
       message: verifyMessage(v, streamKey, bv),
@@ -622,7 +623,7 @@ async function runPipelineInner(
   }
 
   // Mark syncing and pull files from winner node into a per-broadcast sub-directory
-  ledger.setState(streamKey, "syncing", { winnerWorker: winner.workerId });
+  ledger.advanceState(streamKey, "syncing", { winnerWorker: winner.workerId }); // done 场补跑:跳过
   const transport = transports.get(winner.workerId);
   if (!transport) throw new Error(`No transport for worker: ${winner.workerId}`);
 
@@ -731,7 +732,7 @@ async function runPipelineInner(
   }
 
   // Merge and burn from the stageSub directory
-  ledger.setState(streamKey, "merging");
+  ledger.advanceState(streamKey, "merging");
   const plain = path.join(stageSub, dateName + ".mp4");
   const danmuMp4 = path.join(stageSub, dateName + "_danmu.mp4");
   const livechatMp4 = path.join(stageSub, dateName + "_livechat.mp4");
@@ -864,6 +865,8 @@ async function resumeAppends(
   const burnLivechat = cfg.steps?.burnLivechat !== false;
   const isPublic = cfg.uploadPrivate === false;
 
+  // done 场的收尾补跑若在下面三处转人工:done 无出边,普通 setState 会被白名单拒绝 →
+  // job 仍 done、告警照发、cleanupBackfillDue 周期性重复补跑刷告警。wasDone 时必须 force(同 verifyBlocked 分支)。
   const wasDone = ledger.get(streamKey)?.state === "done";
   const prod = deriveStageProducts(stageSub);
   if (!prod) {
@@ -904,7 +907,7 @@ async function resumeAppends(
     if (!repaired.ok) {
       const err = ledger.getNodeState(streamKey, br.step)?.error ?? `重烧失败: ${br.step}`;
       jlog(`续跑重烧 ${br.step} 失败,转人工: ${err}`);
-      ledger.setState(streamKey, "needs_manual", { error: err });
+      ledger.setState(streamKey, "needs_manual", { error: err }, { force: wasDone });
       notify({ kind: "error", stage: "上传", message: `续跑重烧 ${br.step} 失败,请人工处理: ${err}` });
       return { state: "needs_manual", bv };
     }
@@ -915,7 +918,7 @@ async function resumeAppends(
   ].filter((f): f is string => !!f);
   if (need.some((f) => !existsSync(f))) {
     jlog(`续跑失败:stage 产物缺失(可能已清理),转人工。need=${JSON.stringify(need)}`);
-    ledger.setState(streamKey, "needs_manual", { error: `续跑失败:bv=${bv} 但 stage 产物缺失,请人工补 append` });
+    ledger.setState(streamKey, "needs_manual", { error: `续跑失败:bv=${bv} 但 stage 产物缺失,请人工补 append` }, { force: wasDone });
     notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });
     return { state: "needs_manual", bv };
   }
@@ -932,7 +935,7 @@ async function resumeAppends(
     // 多段组(>16GB)无法安全续跑:上一轮可能已 append 部分段,重跑会重复分 P(无 per-part checkpoint)→ 转人工。
     if (files.length > 1) {
       jlog(`续跑无法安全处理多段组 ${g.step}(${files.length} 段,可能已 append 部分)→ 转人工`);
-      ledger.setState(streamKey, "needs_manual", { error: `续跑遇多段组 ${g.step}(${files.length} 段),无法安全续传,请人工核对分 P` });
+      ledger.setState(streamKey, "needs_manual", { error: `续跑遇多段组 ${g.step}(${files.length} 段),无法安全续传,请人工核对分 P` }, { force: wasDone });
       notify({ kind: "error", stage: "上传", message: `${bv} 续跑遇多段组 ${g.step},无法安全续传,请人工核对分 P` });
       return { state: "needs_manual", bv };
     }
