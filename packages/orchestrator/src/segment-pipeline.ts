@@ -8,9 +8,9 @@
  * 幂等/续跑:sync_node_states(merge / burn_* / upload_plain / append_*)+ sync_parts(每分 P checkpoint)。
  */
 import path from "node:path";
-import { copyFileSync, existsSync, linkSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, mkdirSync, writeFileSync } from "node:fs";
 import { isAppendAmbiguous, isUploadRateLimited, throwIfAborted } from "@drec/core";
-import { planSegmentGroups } from "@drec/post-process";
+import { planSegmentGroups, renderXmlWindowToXml } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
 import { retry } from "./retry.js";
@@ -141,6 +141,111 @@ function spanWindow(members: Array<{ window: { startSec: number; endSec: number 
   const xmlPath = withWin[0].xmlPath;
   return { startSec, endSec, xmlPath };
 }
+
+/**
+ * 派生分P弹幕 xml 的 stage 路径:`{dateName}_{NNN}.xml` —— 与分P mp4 同名 stem,
+ * 既有消费点按 `{base}_NNN.xml` 命名即可识别(会话级 xml 是 `{dateName}.xml` 时同时存在)。
+ */
+export function derivePartXmlPath(stageSub: string, dateName: string, partIndex: number): string {
+  return path.join(stageSub, `${segmentStem(dateName, partIndex)}.xml`);
+}
+
+/** 一个分P的派生 xml 计划(纯函数产出,写入方按 ok/存在性跳过)。 */
+export interface DerivedPartXml {
+  index: number;
+  /** 派生产物路径(stage 内)。 */
+  out: string;
+  /** 该分P在会话 xml 时间轴上的窗口(与烧录、与合并路径同一口径)。 */
+  window: { startSec: number; endSec: number };
+  /** 派生源:会话级 xml(stage 内路径)。 */
+  sourceXml: string;
+  /**
+   * false = 该会话内有时长探测失败的段,累计窗口可能漂移 → 调用方**跳过派生并告警**,
+   * 不静默产出错位文件。烧录仍是既有行为,不在本阶段变更。
+   */
+  ok: boolean;
+}
+
+/**
+ * 规划哪些分P要派生弹幕 xml:无窗口(无弹幕)的不派生;
+ * 会话内任一时长探测失败 → 该会话全部窗口都可能漂移(offset 从失败段起错位)→ 整会话跳过。
+ * 纯函数,便于单测钉住命名/窗口透传/探测失败的跳过行为。
+ */
+export function planPartXmlDerivation(
+  stageSub: string,
+  dateName: string,
+  uploadParts: SegmentUploadPart[],
+  probeFailedSessions?: ReadonlySet<string>,
+): DerivedPartXml[] {
+  const plans: DerivedPartXml[] = [];
+  for (const p of uploadParts) {
+    if (!p.window) continue;
+    plans.push({
+      index: p.index,
+      out: derivePartXmlPath(stageSub, dateName, p.index),
+      window: { startSec: p.window.startSec, endSec: p.window.endSec },
+      sourceXml: p.window.xmlPath,
+      ok: !probeFailedSessions?.has(p.window.xmlPath),
+    });
+  }
+  return plans;
+}
+
+/**
+ * 派生每个有窗口的分P弹幕 xml(与烧录、与合并模式**同一窗口口径**)写入 stage。
+ *
+ * 这是用户选的「A 同时存在」——附加产物:会话级单 xml 行为/语义完全不变(仍唯一权威源、
+ * 仍受「最后一份」不变量保护),派生文件仅作 stage 附加产物,**不进稿件、不参与清理判定**。
+ *
+ * 内容 = 会话 xml 的**无损窗口切片**(类型全留、不做礼物阈值过滤;过滤是烧录自己的事),
+ * 故「从派生 xml 烧」与「从会话 xml 烧」完全一致,可直接当迁移候选做 A/B 比对。
+ *
+ * 幂等/续跑:目标文件已存在 → 跳过(不覆盖,避免把好文件改坏)。
+ * 每个有窗口的分P都落一份,窗口内无弹幕也落(空但结构完整)→ 分P序号与文件序号一一对应,
+ * 不会因跳过而在 `{base}_NNN` 命名里留洞。
+ * 时长探测失败的会话 → 该会话整场跳过派生并显式告警(不静默产出错位文件);烧录仍走既有行为。
+ */
+async function derivePartDanmuXml(o: {
+  streamKey: string;
+  stageSub: string;
+  dateName: string;
+  uploadParts: SegmentUploadPart[];
+  probeFailedSessions: ReadonlySet<string>;
+  /** 主流程已按会话缓存的 xml 内容,避免重复读盘。 */
+  xmlCache: Map<string, string>;
+  jlog: (msg: string) => void;
+  notify: PipelineDeps["notify"];
+}): Promise<void> {
+  const plans = planPartXmlDerivation(o.stageSub, o.dateName, o.uploadParts, o.probeFailedSessions);
+  if (plans.length === 0) return;
+  const { readFileSync } = await import("node:fs");
+  const notified = new Set<string>();
+  for (const plan of plans) {
+    if (!plan.ok) {
+      if (!notified.has(plan.sourceXml)) {
+        notified.add(plan.sourceXml);
+        o.jlog(`分段派生: 会话 ${path.basename(plan.sourceXml)} 时长探测失败,跳过其分P弹幕 xml(防错位)`);
+        o.notify({ kind: "error", stage: "分段派生", message: `${o.streamKey} 存在时长探测失败会话,已跳过该会话分P弹幕 xml 派生` });
+      }
+      continue;
+    }
+    if (existsSync(plan.out)) { o.jlog(`分段派生: ${path.basename(plan.out)} 已存在,跳过`); continue; }
+    let xmlText = o.xmlCache.get(plan.sourceXml) ?? "";
+    if (!xmlText && existsSync(plan.sourceXml)) {
+      xmlText = readFileSync(plan.sourceXml, "utf-8");
+      o.xmlCache.set(plan.sourceXml, xmlText);
+    }
+    if (!xmlText) {
+      o.jlog(`分段派生: 源弹幕 ${path.basename(plan.sourceXml)} 不存在,跳过 ${path.basename(plan.out)}`);
+      continue;
+    }
+    // 无损切片(不传 opts):保持与 extractItems 缺省同口径,烧录侧的 member/礼物阈值过滤在消费时生效。
+    const res = renderXmlWindowToXml(xmlText, plan.window);
+    writeFileSync(plan.out, res.xml);
+    o.jlog(`分段派生: ${path.basename(plan.out)} (${res.count} 条,窗口 ${plan.window.startSec.toFixed(3)}-${plan.window.endSec.toFixed(3)}s)`);
+  }
+}
+
 /**
  * 分段产出流水线(steps.mergeSegments=false):**不合并**。
  *
@@ -240,16 +345,18 @@ export async function runSegmentPipeline(o: {
   const probeDuration = deps.segmentDuration ?? defaultSegmentDuration;
   const minSegSec = cfg.minSegmentSec ?? 2;
   let skippedFragments = 0;
+  // 时长探测失败的会话:窗口累计会从失败段起错位 → 派生 xml 必须跳过(显式告警,不静默产出错位文件)。
+  const probeFailedSessions = new Set<string>();
   for (let i = 0; i < srcSegments.length; i++) {
     throwIfAborted();
     const remoteSrc = srcSegments[i];
     // pull 后源在 stage 内同名;remux 读本地副本(remote 路径只在 pull 时用过)。
     const localSrc = path.join(stageSub, path.basename(remoteSrc));
-    let durSec = 0;
-    try { durSec = await probeDuration(localSrc); } catch { durSec = 0; }
     // 该段所属会话的 xml(stage 内同名)。窗口相对**本会话**累计;源缺失时长按 0 计(弹幕可能漂移,但不静默)。
     const sessionXml = winnerMembers.find((m) => m.rec.tsFiles.includes(remoteSrc))?.rec.xmlPath;
     const xmlStage = sessionXml ? path.join(stageSub, path.basename(sessionXml)) : "";
+    let durSec = 0;
+    try { durSec = await probeDuration(localSrc); } catch { durSec = 0; if (xmlStage) probeFailedSessions.add(xmlStage); }
     const win = xmlStage ? windowOffset(xmlStage, durSec) : null;
     // 碎片过滤:mesio `--fix` 切出的 0.2s 级初始化残片(分辨率不同、无有效内容)→ 不产出。
     // 仍累加会话 offset(时长约 0),保证后续段的弹幕窗口对齐。
@@ -313,6 +420,17 @@ export async function runSegmentPipeline(o: {
   jlog(`产出: ${parts.length} 有效段 → ${uploadParts.length} 个分 P(目标 ${groupTargetSec || "未设"}s)`);
   ledger.logStep(streamKey, "merge", "done", `${parts.length} 段 → ${uploadParts.length} 个分 P${skippedFragments ? `(跳过 ${skippedFragments} 碎片)` : ""}`);
   ledger.syncNodeState(streamKey, "merge", "done", { error: null });
+
+  // ── 派生 per-分P 弹幕 xml(「A 同时存在」附加产物,不改上传/交付口径)──
+  // 会话级单 xml 的既有行为与语义完全不变(仍唯一权威源、仍受「最后一份」保护);
+  // 这里按与烧录同一窗口口径,为每个有窗口的分P派生一份 stage 级 xml(时间轴对齐该分P)。
+  // 仅作附加产物,不进稿件;清理时仍由 xmlKeepRule 判定(派生文件可删,节点源 xml 保留)。
+  // **必须在续跑分叉之前**:续跑(已建稿)不重跑烧录,若派生放在烧录之后会被整段跳过 →
+  // 重跑过的场永远缺派生 xml。派生只读 uploadParts 的窗口(与烧录同源),不依赖烧录产物。
+  // 幂等:目标已存在 → 跳过,不会覆盖成错位文件。
+  await derivePartDanmuXml({
+    streamKey, stageSub, dateName, uploadParts, probeFailedSessions, xmlCache, jlog, notify,
+  });
 
   // 续跑:已建稿(bv 已落库)→ 只补没做完的 append(plain 剩余段 / danmu / livechat)。
   if (cfg.uploadMode === "upload" && existing?.bv) {
