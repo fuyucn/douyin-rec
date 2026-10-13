@@ -1269,6 +1269,57 @@ describe("runPipeline", () => {
     });
   });
 
+  // 回归(issue #26 review P1):done 场收尾补跑转人工必须 force —— done 无出边,
+  // 普通 setState 被白名单拒 → job 仍 done、告警照发、周期补跑反复刷告警。真实 SyncLedger,不 mock。
+  describe("resumeAppends:done 场补跑转人工(force)", () => {
+    async function doneResume(over: Partial<PipelineDeps>, files: string[]) {
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const stageDir = mkdtempSync(join(tmpdir(), "resume-done-"));
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir }, ...over });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
+      deps.ledger.markDone(b.streamKey, "BVdone");
+      const sub = join(stageDir, "douyin_test-room_2026-06-27");
+      mkdirSync(sub, { recursive: true });
+      for (const f of files) writeFileSync(join(sub, "主播名_2026-06-27" + f), "x");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const r = await runPipeline(b, deps);
+      const rejected = warn.mock.calls.filter((c) => String(c[0]).includes("[ledger]"));
+      warn.mockRestore();
+      return { r, deps, b, rejected };
+    }
+
+    it("done + 有稿件编号 + 弹幕产物缺失 → 台账真转 needs_manual,无非法转换 warn,不重传", async () => {
+      const { r, deps, b, rejected } = await doneResume({}, [".mp4"]); // 只有 plain,缺 danmu/livechat
+      expect(r.state).toBe("needs_manual");
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
+      expect(deps.ledger.get(b.streamKey)?.bv).toBe("BVdone");
+      expect(rejected).toEqual([]);
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect(deps.appendGroup).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("done + 多段组 → 台账真转 needs_manual,无非法转换 warn,不 append", async () => {
+      const { r, deps, b, rejected } = await doneResume(
+        { splitForUpload: async (mp4: string) => [mp4, mp4 + ".part2"] },
+        [".mp4", "_danmu.mp4", "_livechat.mp4"],
+      );
+      expect(r.state).toBe("needs_manual");
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
+      expect(rejected).toEqual([]);
+      expect(deps.appendGroup).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("转人工后不再是 done:ledger 不会被后续 done 守卫当作已完成而重复补跑", async () => {
+      const { deps, b } = await doneResume({}, [".mp4"]);
+      expect(deps.ledger.get(b.streamKey)?.state).not.toBe("done");
+      deps.ledger.close();
+    });
+  });
+
   // ── 节点侧上传(experimental,见 plans/027)──────────────────────────────────
   describe("nodeSideUpload", () => {
     /** 给 transport 挂上节点侧能力(默认:支持 + biliup + cookie)。 */
