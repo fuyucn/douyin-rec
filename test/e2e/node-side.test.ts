@@ -86,11 +86,8 @@ describe("e2e: 节点侧上传(experimental,真实 runNodeSidePipeline)", () => 
     expect(s.fake.calls.filter((c) => c.op === "upload")).toHaveLength(1);
   });
 
-  // 已知缺陷 #59:节点侧(`runNodeSidePipeline`)调 appendGroup 不传 countParts,没有「分P数核对」。
-  // 生产实测:append 已提交但响应丢失 → 换线重复追加分P、场次收口 done、节点源被删。
-  // 本用例写的是「应有」行为(转人工、保留源、不重复追加);预期失败(it.fails),
-  // 待 #59 修复后会开始通过 → 去掉 `.fails`。https://github.com/fuyucn/douyin-rec/issues/59
-  it.fails("节点上传中途结果不确定(append 已提交但分P数不可查)→ 转人工:保留源、不重传、不重复追加分P(已知缺陷 #59)", async () => {
+  // #59:节点侧追加传入 countParts → 结果不确定(分P数不可查)时转人工,不重复追加。
+  it("节点上传中途结果不确定(append 已提交但分P数不可查)→ 转人工:保留源、不重传、不重复追加分P", async () => {
     await mk(); rec(s);
     s.fake.inject({ op: "append", mode: "ambiguous" });
     s.fake.countAvailable = false;

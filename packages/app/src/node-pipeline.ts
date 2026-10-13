@@ -684,7 +684,12 @@ export async function runNodeSidePipeline(
       // 单文件 append → 安全重试(601 冷却后重试;其余错误只要「结果不确定」就不重试)。
       await withGate(uploadGate, accountKey, () =>
         withRetry(
-          () => appendGroup({ ...meta, bv, files: [aliasFor(p.plain, i + 1, totalParts)] }),
+          // countParts 与 master 路径同一装配:失败后回读分 P 数 → 变多=已提交(跳过)、没变=安全重试、
+          // 查不到=抛 ambiguous 转人工;缺它则「已提交但响应丢失」会换线重复追加分 P(#59)。
+          () => appendGroup({
+            ...meta, bv, files: [aliasFor(p.plain, i + 1, totalParts)],
+            countParts: () => countVideoParts(bv, cookies),
+          }),
           { tries: 5, backoffMs: 60_000, shouldRetry: (e) => isUploadRateLimited(e) || !isAppendAmbiguous(e) },
         ),
       );
