@@ -20,6 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # 架构文档漂移守护(test/arch/architecture-docs.test.ts → scripts/gen-architecture.mjs
+        # --check)用 `git log --since` 统计每包近 90 天提交数当热图数据。默认浅克隆
+        # (fetch-depth:1) 下每包只剩 1 条历史 → 与生成物里写死的数值必然不符 → 守护在所有
+        # 分支恒红。拉全历史是该守护成立的前提(issue #11)。仓库仅数百提交，全量克隆代价可忽略。
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
