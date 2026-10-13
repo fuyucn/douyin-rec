@@ -607,8 +607,18 @@ export interface NodePipelineResult {
  * 这个是节点**落盘**的权威结果,不依赖 ssh 是否还活着。
  */
 export interface NodePipelineResultFile {
-  /** 上传前先写 `uploading`(此时若 master 回读到它,说明**结果不确定**,绝不自动重传);收尾覆写 `done`/`failed`。 */
-  phase: "uploading" | "done" | "failed";
+  /**
+   * 阶段。**单调**:started → uploading → done/failed(一旦推进不回退)。
+   *   - `started` —— 节点执行体**刚接管、进入 remux 之前**就落盘(issue #2「尽早落盘」)。
+   *     此刻**尚未调用 biliup**,故无 建稿 风险。master 据此区分「真的没开始建稿」与
+   *     「已进入上传窗口(可能已建稿)」:
+   *       · 读到 `started` 且 master **已确认终止节点执行体**(abort 非降级)→ 判「确认没成」;
+   *       · 读到 `started` 但 **无法确保终止**(旧 bundle / 不可达,降级)→ 执行体可能仍在跑、
+   *         稍后会写 `uploading` 并建稿 → 保守判「结果不确定」转人工,**绝不自动重传**。
+   *   - `uploading` —— 已进入 biliup 上传循环前落盘(可能已建稿)→ **结果不确定**,绝不自动重传;
+   *   - `done` / `failed` —— 收尾终态(done 带 bv 即成功;failed 带 bv 即「已建稿、绝不重传」)。
+   */
+  phase: "started" | "uploading" | "done" | "failed";
   /** phase=done 时是否成功(与 NodePipelineResult.ok 同义)。 */
   ok: boolean;
   /** 建稿成功后的 BV 号(ok 时非空)。 */
@@ -619,6 +629,36 @@ export interface NodePipelineResultFile {
   error?: string;
   /** 结果写入时刻(epoch ms;master 用它判断结果是否属于本次执行)。 */
   atMs: number;
+}
+
+/**
+ * 节点侧落盘结果文件**合法的 phase 白名单**(唯一真理)。
+ *
+ * ⚠️ issue #2:phase 判定曾在**两处各写一份**(app 的 `readNodeResult` 与 ssh transport 的
+ * `nodeResult`),新增 phase 时漏改一处就会被「当 null 吞掉」→ 回读失效。现统一走
+ * {@link normalizeNodeResultFile},两处共用同一实现,新 phase 只需加到本数组。
+ */
+export const NODE_RESULT_PHASES: readonly NodePipelineResultFile["phase"][] = ["started", "uploading", "done", "failed"];
+
+/**
+ * 把**任意来源**的节点结果对象(JSON.parse 出的 partial / null / 非对象)归一为可信的
+ * {@link NodePipelineResultFile},或 `null`(phase 非法 / 不是对象 → 绝不当成权威结果)。
+ *
+ * 单一真理:字段裁剪口径(bv/products/error 类型守卫、atMs 缺省 0)在此**唯一实现**;
+ * app 侧读盘与 master 侧 ssh 回读都调用它,杜绝两处判定漂移。
+ */
+export function normalizeNodeResultFile(parsed: unknown): NodePipelineResultFile | null {
+  if (!parsed || typeof parsed !== "object") return null;
+  const p = parsed as Partial<NodePipelineResultFile>;
+  if (!NODE_RESULT_PHASES.includes(p.phase as NodePipelineResultFile["phase"])) return null;
+  return {
+    phase: p.phase as NodePipelineResultFile["phase"],
+    ok: p.ok === true,
+    bv: typeof p.bv === "string" ? p.bv : undefined,
+    products: Array.isArray(p.products) ? p.products : undefined,
+    error: typeof p.error === "string" ? p.error : undefined,
+    atMs: typeof p.atMs === "number" ? p.atMs : 0,
+  };
 }
 
 /** 节点侧上传能力探测(`_node-capabilities` 的 JSON 输出)。 */

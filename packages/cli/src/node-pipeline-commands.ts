@@ -8,6 +8,8 @@
  *   - `_node-capabilities <dataRoot>` → 探测 biliup/cookies/磁盘/字体(决定 master 是否走节点侧)。
  *   - `_node-pipeline <dataRoot> <base64>` → 节点本地 remux + biliup 上传,回传 BV(不含视频回传)。
  *   - `_node-result <dataRoot> <streamKey>` → 回读节点侧**落盘结果文件**(ssh 断线后的权威结果)。
+ *   - `_node-abort <dataRoot> <streamKey>` → 终止该场的**节点执行体**(issue #2:master 判失败/收口后
+ *     主动杀掉仍在跑的本场 `_node-pipeline` 及其 biliup/ffmpeg 子进程,杜绝「台账 failed、节点仍在建稿」)。
  */
 import path from "node:path";
 import type { Command } from "commander";
@@ -94,5 +96,35 @@ export function registerNodePipelineCommands(program: Command): void {
       const stageSub = path.join(rootStageDir(), sanitizeStreamKey(streamKey));
       const r = readNodeResult(stageSub);
       process.stdout.write(JSON.stringify(r ?? null) + "\n");
+    });
+
+  /**
+   * 终止某 `streamKey` 的**节点执行体**(issue #2 A2)。
+   *
+   * 为什么需要:`_node-pipeline` 是 ssh 长命令,master 的 `runLong` 超时**只杀本地 ssh 客户端**,
+   * 远端 node 进程及其 biliup/ffmpeg 子进程不受控继续 —— master 已把台账标 failed/needs_manual,
+   * 节点却可能稍后**继续建稿**(重复投稿,B站不可逆)。master 判定终态失败后调用本命令把执行体收掉。
+   *
+   * 安全:`abortNodeExecutor` **先校验 pid 的 cmdline 确为本场 `_node-pipeline`**(防 pid 回收误杀),
+   * 再 SIGTERM→宽限→SIGKILL 连子进程一并终止。非 Linux(本机开发)无 `/proc` → 返回不确定,绝不盲杀。
+   *
+   * 输出:`{ aborted, killed, detail }` JSON。**始终 exit 0** —— 终止失败/进程本就不在都是正常收口,
+   * master 据 `aborted` 字段区分「确已停」与「无法确认」(后者保守转人工)。
+   */
+  program
+    .command("_node-abort <dataRoot> <streamKey>", { hidden: true })
+    .description("(内部) 终止该场的节点执行体及子进程(experimental;供 master ssh 调用)")
+    .action(async (dataRoot: string, streamKey: string) => {
+      await applyNodeDataRoot(dataRoot);
+      const { abortNodeExecutor, rootStageDir } = await import("@drec/app");
+      const { sanitizeStreamKey } = await import("@drec/core");
+      const stageSub = path.join(rootStageDir(), sanitizeStreamKey(streamKey));
+      try {
+        const res = await abortNodeExecutor(stageSub, streamKey);
+        process.stdout.write(JSON.stringify(res) + "\n");
+      } catch (e) {
+        // 任何异常也按「未确认终止」回报,绝不抛(不能掩盖 master 侧的原始失败原因)。
+        process.stdout.write(JSON.stringify({ aborted: false, killed: [], detail: String((e as Error)?.message ?? e) }) + "\n");
+      }
     });
 }

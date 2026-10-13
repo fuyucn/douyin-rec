@@ -255,3 +255,49 @@ describe("SshTransport", () => {
     });
   });
 });
+
+/**
+ * issue #2 A2:master 主动终止节点执行体 + started 回读白名单。
+ *
+ * 钉死两条:① `abortNodePipeline` 把 `_node-abort <dataRoot> <streamKey>` 发到节点并按 JSON 解析
+ * `aborted`,任何异常(旧 bundle unknown command / 不可达 / 超时)一律降级 `{ aborted:false }`
+ * **绝不抛** —— 它在失败收口路径上,异常只会掩盖原始错误;② ssh 回读 `nodeResult` 接受新增的
+ * `started` phase(与 app 侧共用 core 的归一白名单,杜绝两处漂移把 started 当 null 吞掉)。
+ */
+describe("SshTransport.abortNodePipeline / nodeResult(started)", () => {
+  it("abortNodePipeline 发 _node-abort + streamKey,解析 aborted=true", async () => {
+    const captured: string[][] = [];
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec",
+      run: async (argv) => { captured.push(argv); return JSON.stringify({ aborted: true, killed: [4242], detail: "已终止" }); },
+      rsync: async () => {} });
+    await expect(t.abortNodePipeline!("douyin:123:2026-10-12")).resolves.toMatchObject({ aborted: true });
+    const cmd = captured[0].join(" ");
+    expect(cmd).toContain("_node-abort");
+    expect(cmd).toContain("/data/drec");
+    expect(cmd).toContain("'douyin:123:2026-10-12'");
+  });
+
+  it("旧 bundle(unknown command)→ aborted=false + 旧版本说明,**不抛**", async () => {
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {},
+      run: async () => { throw new Error("ssh rc=1: error: unknown command '_node-abort'"); } });
+    const r = await t.abortNodePipeline!("douyin:1:2");
+    expect(r.aborted).toBe(false);
+    expect(r.detail).toContain("旧版本");
+  });
+
+  it("网络/超时 → aborted=false + 不可达说明,不抛(掩盖原始错误更糟)", async () => {
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {},
+      run: async () => { throw new Error("ssh 超时 8000ms 被杀"); } });
+    const r = await t.abortNodePipeline!("douyin:1:2");
+    expect(r.aborted).toBe(false);
+    expect(r.detail).toContain("不可达");
+  });
+
+  it("nodeResult 接受 started(白名单与 app 共用 core 归一,不再各写一份)", async () => {
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {},
+      run: async () => JSON.stringify({ phase: "started", ok: false, atMs: 1 }) });
+    const r = await t.nodeResult!("douyin:1:2");
+    expect(r).not.toBeNull();
+    expect(r?.phase).toBe("started");
+  });
+});

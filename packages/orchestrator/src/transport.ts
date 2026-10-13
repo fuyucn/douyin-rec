@@ -124,6 +124,19 @@ export interface Transport {
    * 它只在失败路径上被调用,不该再用一个异常盖掉原始错误。
    */
   nodeResult?(streamKey: string): Promise<NodePipelineResultFile | null>;
+  /**
+   * **主动终止**该节点上某 `streamKey` 的节点执行体(issue #2 A2,experimental)。
+   *
+   * 为什么:`nodePipeline` 是 ssh 长命令,master 的 `runLong` 超时只杀**本地 ssh 客户端**,
+   * 远端 `_node-pipeline` 及其 biliup/ffmpeg 子进程会继续跑 → master 已把台账判 failed/needs_manual,
+   * 节点稍后却可能**偷偷建稿**(重复投稿,B站不可逆)。master 在**终态失败收口时**调用本方法把执行体收掉,
+   * 确保「台账一旦说失败,节点不会在其后继续建稿」。
+   *
+   * **可选**:旧 bundle 无 `_node-abort` 子命令 → 实现方**必须优雅降级**(不抛、记日志、返回
+   * `{ aborted: false }`),不得用异常掩盖 master 侧的原始失败原因。调用方据 `aborted` 区分
+   * 「确认已终止(可读 started → failed)」与「无法确认(保守 → needs_manual)」。
+   */
+  abortNodePipeline?(streamKey: string): Promise<{ aborted: boolean; detail?: string }>;
 }
 
 type Factory = (cfg: WorkerConfig) => Transport;

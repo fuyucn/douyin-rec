@@ -57,3 +57,34 @@ describe("_node-result 读结果文件的空态", () => {
     expect(readNodeResult(missing)).toBeNull();
   });
 });
+
+/**
+ * issue #2 A2:`_node-abort <dataRoot> <streamKey>` 命令的**注册/契约**(不触发 action 体)。
+ *
+ * action 体 `import("@drec/app")` 在 vitest 下不可解析(平台包 ESM 坑,见 AGENTS.md),故这里只钉
+ * 命令**确实挂上、参数签名与 hidden 正确、且带 action** —— 这是 master 经 ssh 调用能否命中命令的前提。
+ * 终止逻辑本身(`abortNodeExecutor` 安全杀进程/cmdline 校验)在 app 侧单测覆盖(见 node-pipeline.test.ts)。
+ */
+import { Command } from "commander";
+import { registerNodePipelineCommands } from "../../packages/cli/src/node-pipeline-commands.js";
+
+describe("_node-abort 命令注册(issue #2 A2)", () => {
+  it("注册后存在 _node-abort,参数 <dataRoot> <streamKey> 必填、hidden、带 action", () => {
+    const program = new Command();
+    registerNodePipelineCommands(program);
+    const cmd = program.commands.find((c) => c.name() === "_node-abort");
+    expect(cmd, "`_node-abort` 未注册(master 的 ssh 调用会 unknown command)").toBeDefined();
+    expect(cmd!.registeredArguments.map((a) => a.name())).toEqual(["dataRoot", "streamKey"]);
+    expect(cmd!.registeredArguments.map((a) => a.required)).toEqual([true, true]);
+    expect(cmd!._hidden).toBe(true); // 隐藏命令:不在 --help 出现
+    // 必须有 .action 处理器,否则命令注册了也什么都不做(静默失败)。
+    expect((cmd as unknown as { _actionHandler?: unknown })._actionHandler).toBeTypeOf("function");
+  });
+
+  it("既有节点侧命令仍在(新增 _node-abort 不挤掉 _node-result/_node-pipeline)", () => {
+    const program = new Command();
+    registerNodePipelineCommands(program);
+    const names = program.commands.map((c) => c.name());
+    expect(names).toEqual(expect.arrayContaining(["_node-capabilities", "_node-pipeline", "_node-result", "_node-abort"]));
+  });
+});

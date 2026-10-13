@@ -435,3 +435,102 @@ describe("节点侧上传台账步骤名 = node_upload(非 pull)", () => {
     expect(ledger.syncNodeState.mock.calls).toContainEqual(["douyin:123:2026-10-12", "node_upload", "done"]);
   });
 });
+
+
+/**
+ * issue #2 A1/A2：节点已接管(started)但执行体可能仍在跑 → master 必须**先终止再回读**，
+ * 并据「能否确认终止」分流：确认停了 → failed(真没建稿、允许人工安全重投)；
+ * 无法确认(旧 bundle 无 `_node-abort` / 不可达)→ needs_manual(可能稍后偷偷建稿,禁自动重试)。
+ * 这钉死「台账说 failed、节点却仍在建稿」的静默分裂已被关闭。
+ */
+describe("issue #2:started + 主动终止节点执行体(A1 尽早落盘 + A2 收口)", () => {
+  const rec = { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" };
+  const cfgUpload = { ...cfg, cleanup: { sourceAfterDone: true, stageAfterDone: true } } as unknown as PipelineCfg;
+
+  // 本 describe 自带的替身(上层 describe 的 sshFailTransport/fakeLedgerSpy 是其块内作用域,不可复用)。
+  function sshFail(nodeResult: unknown, cleanup = vi.fn(async () => {})) {
+    return {
+      nodeCapabilities: async () => ({ biliup: "/biliup", cookies: true, diskFreeGB: 100 }),
+      nodePipeline: vi.fn(async () => { throw new Error("ssh: remote command exited with rc=255"); }),
+      nodeResult: vi.fn(async () => nodeResult),
+      cleanup,
+    };
+  }
+  function ledgerSpy() {
+    return {
+      get: () => ({ bv: "" }),
+      logStep: vi.fn(),
+      setState: vi.fn(),
+      syncNodeState: vi.fn(),
+      markFailed: vi.fn(),
+      markDone: vi.fn(),
+    };
+  }
+
+  async function run(t: unknown, ledger = ledgerSpy()) {
+    const result = await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12",
+      cfg: cfgUpload,
+      winner: { workerId: "w1", rec },
+      winnerMembers: [{ workerId: "w1", rec }],
+      transport: t as never,
+      ledger: ledger as never,
+      jlog: () => {},
+      notify: () => {},
+      deps: fakeDeps(t as { id?: string }),
+    });
+    return { result, ledger };
+  }
+
+  it("started + 已确认终止 → failed(真没建稿、不堆人工)+ **终止调用先于回读**", async () => {
+    const order: string[] = [];
+    const abort = vi.fn(async () => { order.push("abort"); return { aborted: true }; });
+    const nodeResult = vi.fn(async () => { order.push("read"); return { phase: "started", ok: false, atMs: 1 }; });
+    const t = { ...sshFail(null), abortNodePipeline: abort, nodeResult };
+    const { result, ledger } = await run(t);
+    expect(result).toEqual({ state: "failed" });      // 已确认停 → 走「确认没成」,不是 needs_manual
+    expect(ledger.markFailed).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith("douyin:123:2026-10-12"); // 以 streamKey 定位执行体
+    // 关键顺序:先杀后读 —— 否则执行体可能在读完之后又写新阶段/建稿(静默分裂根因)。
+    expect(order).toEqual(["abort", "read"]);
+    expect(t.cleanup).not.toHaveBeenCalled(); // failed 仍不删源(由 reconciler/人工按既有 failed 语义处理)
+  });
+
+  it("started + 无法确认终止(abort=false)→ needs_manual,禁自动重试、不删源", async () => {
+    const abort = vi.fn(async () => ({ aborted: false, detail: "非 Linux/权限,读不到 cmdline" }));
+    const t = { ...sshFail({ phase: "started", ok: false, atMs: 1 }), abortNodePipeline: abort };
+    const { result, ledger } = await run(t);
+    expect(result).toEqual({ state: "needs_manual", bv: undefined });
+    expect(ledger.markFailed).not.toHaveBeenCalled();
+    // reconciler 自动重试闸门看 sync_node_states → 必须写不安全重试标记(禁自动重传)。
+    expect(ledger.syncNodeState).toHaveBeenCalledWith("douyin:123:2026-10-12", "upload_plain", "failed", expect.anything());
+  });
+
+  it("旧 bundle 无 abortNodePipeline(方法缺失)→ started 保守 needs_manual(绝不假设已停)", async () => {
+    const t = sshFail({ phase: "started", ok: false, atMs: 1 }); // 不含 abortNodePipeline
+    expect("abortNodePipeline" in t).toBe(false);
+    const { result, ledger } = await run(t);
+    expect(result!.state).toBe("needs_manual");
+    expect(ledger.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("abortNodePipeline 抛错 → **不掩盖原始失败原因**(errMsg 仍是失败记录)", async () => {
+    const abort = vi.fn(async () => { throw new Error("ssh 也断了"); });
+    const t = { ...sshFail({ phase: "uploading", ok: false, atMs: 1 }), abortNodePipeline: abort };
+    const { result, ledger } = await run(t);
+    // uploading 本身就 needs_manual;abort 抛错被吞,不改变判定、不把异常上抛。
+    expect(result!.state).toBe("needs_manual");
+    // 原始 ssh 失败原因仍进了 markFailed 路径?不 —— uploading→needs_manual 用 setState/notify,
+    // 关键是 handleNodeFailure 没有因 abort 抛错而整体 reject。result 正常返回即证明未掩盖。
+    expect(ledger.setState).toHaveBeenCalled();
+  });
+
+  it("无落盘(null)+ 已确认终止 → 原失败路径 failed(无 started 可区分,保持既有行为)", async () => {
+    const abort = vi.fn(async () => ({ aborted: true }));
+    const t = { ...sshFail(null), abortNodePipeline: abort };
+    const { result, ledger } = await run(t);
+    expect(result).toEqual({ state: "failed" });
+    expect(ledger.markFailed).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith("douyin:123:2026-10-12"); // 终态失败一律先尝试终止
+  });
+});
