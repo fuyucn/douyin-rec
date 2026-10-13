@@ -15,9 +15,12 @@ import { resolveOutputDir } from "../paths.js";
  *   ["record", "--room", room, "--quality", q, "--engine", e,
  *    "--danmu", "1"|"0", "--out", dir, "--segment", String(sec),
  *    ...(name ? ["--name", name] : []),
- *    ...(cookies ? ["--cookies", cookies] : [])]
+ *    ...(cookiesFile ? ["--cookies-file", cookiesFile] : [])]
+ *
+ * 登录凭证(task.cookies)**永不**进 argv:调用方先把它写进 0600 文件(credential-file.ts),
+ * 再把路径作 `cookiesFile` 传入。无文件路径 = 不带凭证 flag。
  */
-export function buildRecordArgs(task: Task): string[] {
+export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
   const args = [
     "record",
     "--room",
@@ -40,8 +43,8 @@ export function buildRecordArgs(task: Task): string[] {
     // per-streamer output subfolder + filename prefix
     args.push("--name", task.name);
   }
-  if (task.cookies) {
-    args.push("--cookies", task.cookies);
+  if (cookiesFile) {
+    args.push("--cookies-file", cookiesFile);
   }
   // 边录边传(T-33):仅开启时下发(默认关 = 不带该 flag,行为不变)。
   if (task.rollingUpload) {

@@ -10,6 +10,7 @@
  * MockSpawner and never spawn a real child.
  */
 import { buildRecordArgs } from "./record-args.js";
+import { writeCredentialFile } from "./credential-file.js";
 import {
   ChildRecorderProcess,
   type RecorderProcess,
@@ -106,7 +107,10 @@ export class NodeRecordSpawner implements Spawner {
     // 子进程的开播/录完通知推到该 webhook。
     const hook = resolveSpawnWebhook(task.webhook, this.webhook);
     const globals = hook ? ["--discord-webhook", hook] : [];
-    const args = [this.cliEntry, ...globals, ...buildRecordArgs(task)];
+    // 登录凭证写 0600 文件、argv 只带路径;写失败直接抛(不回退 argv)。
+    // task.cookies 为空(useCookie=false / 未配置)→ 不生成文件。
+    const credFile = task.cookies ? writeCredentialFile(task.id, task.cookies) : undefined;
+    const args = [this.cliEntry, ...globals, ...buildRecordArgs(task, credFile)];
     // mesio 路径设置(若配置)→ 注入 MESIO_PATH;否则继承父 env(引擎自行兜底 bin/mesio)。
     const mesio = this.mesioPath?.()?.trim();
     // 抖音 API 模式设置(若配置)→ 注入 DOUYIN_REC_API_MODE;否则继承父 env(douyin-live 用默认 balance)。
@@ -129,6 +133,7 @@ export class NodeRecordSpawner implements Spawner {
       env,
       onLog: this.onLog,
       killTimeoutMs: this.killTimeoutMs,
+      cleanupFiles: credFile ? [credFile] : undefined,
     });
   }
 }

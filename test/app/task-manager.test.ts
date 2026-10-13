@@ -101,6 +101,25 @@ describe("TaskManager", () => {
     expect(store.getTask(id)!.status).toBe("running");
   });
 
+  it("spawn 前置步骤(写凭证文件)抛错 → start 返回 false、status=error、onTaskDown 告警,不抛出", () => {
+    const id = addTask();
+    const down: string[] = [];
+    const failing: Spawner = {
+      spawn(): RecorderProcess {
+        throw new Error("写入录制登录凭证文件失败(EACCES)");
+      },
+    };
+    const mgr = new TaskManager(store, failing, {
+      log: () => {},
+      onTaskDown: (_id, reason) => down.push(reason),
+    });
+    expect(mgr.start(id)).toBe(false);
+    expect(mgr.isRunning(id)).toBe(false);
+    expect(store.getTask(id)!.status).toBe("error");
+    expect(down).toHaveLength(1);
+    expect(down[0]).toContain("EACCES");
+  });
+
   it("double-start returns false and does not respawn", () => {
     const id = addTask();
     const spawner = new MockSpawner();

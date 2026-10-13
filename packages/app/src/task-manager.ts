@@ -168,7 +168,7 @@ export class TaskManager {
       return false;
     }
     this.restarts.set(taskId, 0);
-    this.spawnFor(taskId);
+    if (!this.trySpawn(taskId)) return false;
     this.store.setStatus(taskId, "running");
     this.notifyRecordingState(taskId);
     this.logTask(taskId, `[task_manager] ▶ 启动任务 id=${taskId}（${task.name ?? task.room}）`);
@@ -225,6 +225,25 @@ export class TaskManager {
 
   runningIds(): number[] {
     return [...this.procs.keys()];
+  }
+
+  /**
+   * spawnFor 的失败护栏:spawn 前置步骤(如写 0600 登录凭证文件)抛错时,**明确报错**——
+   * 置 error、写任务日志、走 onTaskDown 告警,不留「看似在跑」的状态,也不让异常逃出重启定时器。
+   */
+  private trySpawn(taskId: number): boolean {
+    try {
+      this.spawnFor(taskId);
+      return true;
+    } catch (e) {
+      const reason = `启动失败:${(e as Error)?.message ?? e}`;
+      this.restarts.delete(taskId);
+      this.store.setStatus(taskId, "error");
+      this.notifyRecordingState(taskId);
+      this.logTask(taskId, `[task_manager] ✗ 任务 id=${taskId} ${reason}`);
+      this.onTaskDown?.(taskId, reason);
+      return false;
+    }
   }
 
   /** Spawn a fresh process for the task and wire its exit handling. */
@@ -324,7 +343,7 @@ export class TaskManager {
       // Guard: a stop() between scheduling and firing clears the budget.
       if (!this.restarts.has(taskId)) return;
       if (this.procs.has(taskId)) return;
-      this.spawnFor(taskId);
+      if (!this.trySpawn(taskId)) return;
       this.store.setStatus(taskId, "running");
     }, this.restartDelayMs);
   }

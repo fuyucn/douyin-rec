@@ -12,6 +12,7 @@
  * the cli path or how a Task maps to args. That belongs to the Spawner.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { removeCredentialFile } from "./credential-file.js";
 
 /** Info passed to onExit listeners. */
 export interface ExitInfo {
@@ -61,6 +62,8 @@ export interface ChildRecorderProcessOpts {
   onLog?: (msg: string) => void;
   /** ms to wait after SIGTERM before SIGKILL. Default 10_000. */
   killTimeoutMs?: number;
+  /** 子进程退出(正常/崩溃/spawn 失败)后删除的文件,如 0600 登录凭证文件。 */
+  cleanupFiles?: string[];
 }
 
 export class ChildRecorderProcess implements RecorderProcess {
@@ -73,6 +76,7 @@ export class ChildRecorderProcess implements RecorderProcess {
    * registers ADDITIONAL listeners (e.g. the manager's ring-buffer). */
   private readonly injectedLog: (msg: string) => void;
   private readonly killTimeoutMs: number;
+  private readonly cleanupFiles: string[];
 
   private child: ChildProcess | null = null;
   private expected = false;
@@ -93,6 +97,7 @@ export class ChildRecorderProcess implements RecorderProcess {
     this.env = opts.env;
     this.injectedLog = opts.onLog ?? ((): void => {});
     this.killTimeoutMs = opts.killTimeoutMs ?? 10_000;
+    this.cleanupFiles = opts.cleanupFiles ?? [];
   }
 
   get pid(): number | undefined {
@@ -118,6 +123,7 @@ export class ChildRecorderProcess implements RecorderProcess {
 
     this.child.on("exit", (code, signal) => {
       this.exited = true;
+      this.cleanup();
       const info: ExitInfo = { code, signal, expected: this.expected };
       for (const cb of this.exitListeners) cb(info);
       this.resolveExit?.();
@@ -127,11 +133,23 @@ export class ChildRecorderProcess implements RecorderProcess {
       // 'error' may fire without 'exit' (e.g. ENOENT) — synthesize an exit.
       if (!this.exited) {
         this.exited = true;
+        this.cleanup();
         const info: ExitInfo = { code: null, signal: null, expected: this.expected };
         for (const cb of this.exitListeners) cb(info);
         this.resolveExit?.();
       }
     });
+  }
+
+  /** 删 cleanupFiles;失败只记日志(不能因清理失败吞掉退出事件),但不静默。 */
+  private cleanup(): void {
+    for (const f of this.cleanupFiles) {
+      try {
+        removeCredentialFile(f);
+      } catch (e) {
+        this.emitLog(`[task ${this.taskId}] 清理临时文件失败(${f}): ${String(e)}`);
+      }
+    }
   }
 
   async stop(): Promise<void> {
