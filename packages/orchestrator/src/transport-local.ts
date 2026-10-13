@@ -1,6 +1,7 @@
 // packages/orchestrator/src/transport-local.ts
-import { mkdirSync, copyFileSync, existsSync, linkSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { join, basename } from "node:path";
+import { linkOrCopy } from "@drec/core";
 import type { NodeTaskDTO, RemoteTaskSpec, NodeStatus } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeTasks, Transport } from "./transport.js";
 import { scanRecordings } from "./scan.js";
@@ -114,11 +115,7 @@ export class LocalTransport implements Transport {
       const dst = join(localDir, basename(src));
       // 目标已存在(续跑/重跑)→ 先删,否则 linkSync 直接 EEXIST。
       if (existsSync(dst)) rmSync(dst, { force: true });
-      try {
-        linkSync(src, dst);
-      } catch {
-        copyFileSync(src, dst); // 跨设备/不支持硬链接 → 复制(与从前行为一致)
-      }
+      linkOrCopy(src, dst); // 硬链接优先;跨设备/不支持 → 复制并提示一次(与从前行为一致)
     }
   }
 

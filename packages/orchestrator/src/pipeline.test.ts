@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupSourcesShared, xmlKeepRule, runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
@@ -12,6 +12,26 @@ import type { NotifyEvent } from "@drec/core";
 // node:fs 走 spy(默认透传真实实现)—— 只有需要覆盖「硬链接不可用」分支的用例才
 // 临时把 linkSync 打桩成抛错;其余用例行为与未 mock 时完全一致。
 vi.mock("node:fs", { spy: true });
+
+// 全局 setup 已先于本文件加载 @drec/core(其 node:fs 绑定不受上面的 spy 影响),
+// 故「硬链接不可用」改经 linkOrCopy 的注入口(fs)模拟 EXDEV。
+const linkFail = vi.hoisted(() => ({ on: false }));
+vi.mock("@drec/core", async (orig) => {
+  const m = await orig<typeof import("@drec/core")>();
+  const fs = await import("node:fs");
+  return {
+    ...m,
+    linkOrCopy: (s: string, d: string, o?: Parameters<typeof m.linkOrCopy>[2]) =>
+      m.linkOrCopy(s, d, linkFail.on ? {
+        ...o,
+        fs: {
+          linkSync: () => { throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" }); },
+          copyFileSync: fs.copyFileSync,
+          statSync: fs.statSync,
+        },
+      } : o),
+  };
+});
 
 function freshLedger(): SyncLedger {
   return new SyncLedger(join(mkdtempSync(join(tmpdir(), "pipeline-test-")), "test.db"));
@@ -618,9 +638,7 @@ describe("runPipeline", () => {
         const deps = segmentDeps();
         deps.ledger.upsertPending(broadcast.streamKey);
         // 只让「硬链接」这一步失败(其余 fs 调用保持真实,否则测试自身读写也会挂)。
-        vi.mocked(linkSync).mockImplementation(() => {
-          throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" });
-        });
+        linkFail.on = true;
         try {
           const result = await runPipeline(broadcast, deps);
 
@@ -634,7 +652,7 @@ describe("runPipeline", () => {
             expect(readFileSync(canonical, "utf-8")).toBe(readFileSync(work, "utf-8"));
           }
         } finally {
-          vi.mocked(linkSync).mockRestore(); // 还原透传,别把打桩泄漏给后面的用例
+          linkFail.on = false; // 别把打桩泄漏给后面的用例
         }
         deps.ledger.close();
       });

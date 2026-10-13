@@ -14,10 +14,10 @@
  *   - @drec/app 的 uploadPlain / appendGroup(biliup)
  *   - core 的 title-template(与 master 同源的产物命名/稿件标题)
  */
-import { copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync } from "node:fs";
 import path from "node:path";
 import {
-  biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, isAppendAmbiguous,
+  linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, isAppendAmbiguous,
   isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, partTitleToFilename, resolveOutputStem, sanitizeStreamKey,
   stampedSessionBaseOf as sessionBaseOfFile, UploadGate, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
 } from "@drec/core";
@@ -290,11 +290,7 @@ export function prepareNodeUploadAlias(stageSub: string, desiredStem: string | n
   try {
     mkdirSync(dir, { recursive: true });
     if (existsSync(dst)) rmSync(dst, { force: true }); // 续跑:旧别名先删,保证指向最新产物
-    try {
-      linkSync(canonical, dst);
-    } catch {
-      copyFileSync(canonical, dst);
-    }
+    linkOrCopy(canonical, dst);
     return dst;
   } catch {
     return canonical;
@@ -427,11 +423,7 @@ function planGroupIndices(groupSec: number, durations: number[], xmlPathOf: (i: 
  * 回落:跨设备/文件系统不支持硬链接(EXDEV/EPERM/EMLINK 等)→ 退回复制,行为与从前一致。
  */
 function linkOrCopySync(src: string, dst: string): void {
-  try {
-    linkSync(src, dst);
-  } catch {
-    copyFileSync(src, dst); // 跨设备/不支持硬链接 → 复制(与从前行为一致)
-  }
+  linkOrCopy(src, dst);
 }
 
 /**

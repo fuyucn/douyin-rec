@@ -6,7 +6,7 @@
  *      ④ master 与节点共享同一限流状态文件时,总提交数不超 rateLimit(并发场景)。
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson } from "@drec/core";
@@ -16,6 +16,26 @@ import { uploadPlain, appendGroup, countVideoParts } from "../../packages/app/sr
 
 // node:fs 走 spy(默认透传真实实现)—— 只有「硬链接不可用」用例才临时打桩 linkSync 抛错。
 vi.mock("node:fs", { spy: true });
+
+// 全局 setup 已先于本文件加载 @drec/core(其 node:fs 绑定不受上面的 spy 影响),
+// 故「硬链接不可用」改经 linkOrCopy 的注入口(fs)模拟 EXDEV。
+const linkFail = vi.hoisted(() => ({ on: false }));
+vi.mock("@drec/core", async (orig) => {
+  const m = await orig<typeof import("@drec/core")>();
+  const fs = await import("node:fs");
+  return {
+    ...m,
+    linkOrCopy: (s: string, d: string, o?: Parameters<typeof m.linkOrCopy>[2]) =>
+      m.linkOrCopy(s, d, linkFail.on ? {
+        ...o,
+        fs: {
+          linkSync: () => { throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" }); },
+          copyFileSync: fs.copyFileSync,
+          statSync: fs.statSync,
+        },
+      } : o),
+  };
+});
 // 逐段 remux/合并/时长探测是外部进程调用,这里换成可控替身(只影响本文件的节点侧用例)。
 vi.mock("@drec/post-process", async (orig) => {
   const actual = await orig<typeof import("@drec/post-process")>();
@@ -387,9 +407,7 @@ describe("节点侧:中间产物 → 规范上传名改同盘硬链接(issue #6)
 
   it("linkSync 抛错(跨设备/不支持硬链接)→ 回落复制:内容一致、inode 不同", async () => {
     const { sub, spec } = scene();
-    vi.mocked(linkSync).mockImplementation(() => {
-      throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" });
-    });
+    linkFail.on = true;
     try {
       const r = await runNodeSidePipeline(spec, silence);
 
@@ -401,7 +419,7 @@ describe("节点侧:中间产物 → 规范上传名改同盘硬链接(issue #6)
         expect(readFileSync(canonical, "utf-8")).toBe("REMUXED");
       }
     } finally {
-      vi.mocked(linkSync).mockRestore(); // 还原透传,别把打桩泄漏给后面的用例
+      linkFail.on = false; // 别把打桩泄漏给后面的用例
     }
   });
 

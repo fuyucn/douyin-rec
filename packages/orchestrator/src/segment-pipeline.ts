@@ -8,8 +8,8 @@
  * 幂等/续跑:sync_node_states(merge / burn_* / upload_plain / append_*)+ sync_parts(每分 P checkpoint)。
  */
 import path from "node:path";
-import { copyFileSync, existsSync, linkSync, mkdirSync, writeFileSync } from "node:fs";
-import { burnFlags, isAppendAmbiguous, isUploadRateLimited, throwIfAborted } from "@drec/core";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, throwIfAborted } from "@drec/core";
 import { planSegmentGroups, renderXmlWindowToXml } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
@@ -39,11 +39,7 @@ const defaultRemuxSegment = (src: string, out: string): Promise<void> =>
  * 回落:跨设备/文件系统不支持硬链接(EXDEV/EPERM/EMLINK 等)→ 退回复制,行为与从前一致。
  */
 function linkOrCopySync(src: string, dst: string): void {
-  try {
-    linkSync(src, dst);
-  } catch {
-    copyFileSync(src, dst); // 跨设备/不支持硬链接 → 复制(与从前行为一致)
-  }
+  linkOrCopy(src, dst);
 }
 
 /** 默认单段时长探测(ffprobe)。 */
