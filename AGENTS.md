@@ -125,7 +125,7 @@ pnpm serve:local                                           # 本地开发（port
 ## 仓库布局（pnpm workspace monorepo，`packages/*`）
 
 分层由 `test/arch/layering.test.ts` 守护：依赖只能向下，**新增包必须在该测试 `RANKS` 登记**。
-当前 rank：core=0、observability=0.5、post-process/tui/ffmpeg-recorder-extra=0、
+当前 rank：core=0、observability=0.5、post-process=0.2、tui/ffmpeg-recorder-extra=0、
 record-engine=1、douyin-live/bilibili-live/kuaishou-live=1.5、manager=3、app=4、orchestrator=4.5、cli=5。
 
 ```
