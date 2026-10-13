@@ -49,10 +49,12 @@ flowchart TB
   subgraph L05["L0.5 · 可观测性"]
     observ["<b>observability</b><br/>Notifier / EventCenter / 日志"]
   end
+  subgraph L02["rank 0.2"]
+    post["<b>post-process</b><br/>concat / burn / ass / merge / ffmpeg / fonts"]
+  end
   subgraph L0["L0 · 基础叶子"]
     core["<b>core</b><br/>Platform / DownloadEngine 契约<br/>+ 注册表 + types/config/notify/api-types"]
     extra["<b>ffmpeg-recorder-extra</b><br/>logStreamMeta + detectDevice"]
-    post["<b>post-process</b><br/>concat / burn / ass / merge / ffmpeg / fonts"]
     tui["<b>tui</b><br/>Ink 终端控制台 (独立 bundle)"]
   end
 
@@ -82,6 +84,7 @@ flowchart TB
   engine --> core
   engine --> extra
   observ --> core
+  post --> core
 
   classDef axisPlat fill:#dcfce7,stroke:#16a34a,color:#14532d;
   classDef axisEng fill:#ffedd5,stroke:#ea580c,color:#7c2d12;
