@@ -4,7 +4,7 @@ import type {
   Recorder, DanmuSource, RecorderEvents, RecordOpts, DanmuMessage, StreamInfo,
 } from "@drec/core";
 import { XmlDanmuWriter } from "./danmu-xml/index.js";
-import { createLogger, platformForRoom } from "@drec/core";
+import { createLogger, platformForRoom, sessionBaseOf } from "@drec/core";
 import type { Notifier, NotifyEvent } from "@drec/core";
 
 const log = createLogger("session");
@@ -589,12 +589,11 @@ export class RecordingSession {
  *   biliLive: {base}-PART000.ts / -PART001.ts … → {base}.xml
  *   DLR:      {base}_000.ts / _001.ts …         → {base}.xml   ({主播}_{date}_{HH-MM-SS}[_%03d].ts)
  *   不分段:   {base}.ts                          → {base}.xml
- * 段后缀仅匹配 `-PART<n>` 或 `_<3+位数字>`；会话基名里的时间 `HH-MM-SS` 用连字符，不会误剥。
+ *   _PART000 变体: {base}_PART000.ts → {base}.xml
+ * 规则见 core `sessionBaseOf`(issue #50:此处原先漏认 `_PART<n>`,与其余调用点不一致,已对齐)。
  */
 export function sessionXmlPath(tsPath: string): string {
-  const stem = basename(tsPath).replace(/\.(ts|flv)$/i, "");
-  const base = stem.replace(/(?:-PART\d+|_\d{3,})$/, "");
-  return join(dirname(tsPath), `${base}.xml`);
+  return join(dirname(tsPath), `${sessionBaseOf(tsPath)}.xml`);
 }
 
 /** Promisified setTimeout — can be injected in tests via the reconnectDelaySec=0 trick. */

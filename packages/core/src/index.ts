@@ -19,6 +19,8 @@ export * from "./hub-flow.js";
 export * from "./upload-gate.js";
 // 边录边传(T-33):封口判定 / 水位闸门 / 删源证据(唯一真理源,app L4 与 orchestrator L4.5 共用)。
 export * from "./rolling.js";
+// 会话基名 / 段号(issue #50):全仓唯一实现,守护测试禁止第二份同类正则。
+export * from "./session-name.js";
 // 磁盘水位(GB)解析口径:daemon / reconciler / 节点侧上传闸门 / cli 共用(issue #38)。
 export * from "./disk-watermark.js";
 // 边录边传生效判定(issue #40):规则 mode=rolling + 旧 task 开关迁移 + 单节点闸门;仅 master 调用。

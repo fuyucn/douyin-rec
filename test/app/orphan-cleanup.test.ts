@@ -243,3 +243,37 @@ describe("maintenance 端点(T13 API 层)", () => {
     rmSync(root, { recursive: true, force: true });
   });
 });
+
+describe("scanOrphans 分段后缀大小写口径(issue #50)", () => {
+  let root: string;
+  beforeEach(() => { root = mkdtempSync(join(tmpdir(), "orphan-case-")); });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+  const put = (p: string, body = ""): void => {
+    mkdirSync(join(p.slice(0, p.lastIndexOf("/"))), { recursive: true });
+    writeFileSync(p, body, "utf-8");
+  };
+  const base = "主播_2026-10-09_20-00-00";
+
+  it("混写大小写的 part 后缀与 PART 同属一个会话:sidecar 不误判孤儿", () => {
+    put(join(root, "recordings", "主播", `${base}-part000.ts`), "v");
+    put(join(root, "recordings", "主播", `${base}.session.json`), "{}");
+    const r = scanOrphans(root);
+    expect(r.orphanSession).toHaveLength(1);
+    expect(r.orphanSession[0]!.keepReason).not.toBeNull(); // 有视频 → 保留
+  });
+
+  it("空壳 xml 与别处非空 xml 后缀大小写不同仍归同一会话:空壳可删,非空永不进删除集", () => {
+    put(join(root, "recordings", "主播", `${base}_PART000.xml`), EMPTY);
+    put(join(root, "stage", `${base}_part001.xml`), NONEMPTY);
+    const r = scanOrphans(root);
+    const empty = r.emptyXml.find((i) => i.path.endsWith("_PART000.xml"));
+    expect(empty?.keepReason).toBeNull();
+    expect(r.emptyXml.some((i) => i.path.endsWith("_part001.xml"))).toBe(false);
+  });
+
+  it("唯一一份空壳(别处无非空 xml)即使后缀大小写不同也保留", () => {
+    put(join(root, "recordings", "主播", `${base}-Part000.xml`), EMPTY);
+    const r = scanOrphans(root);
+    expect(r.emptyXml[0]!.keepReason).not.toBeNull();
+  });
+});

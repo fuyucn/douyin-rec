@@ -17,6 +17,8 @@
  * 但 app 不能 import orchestrator(test/arch/layering.test.ts 守护)。判定下沉到 core 即两侧可共用。
  */
 
+import { stampedSessionBaseOf } from "./session-name.js";
+
 /** 一个录制分段(节点本地文件)在「边录边传」里的最小投影。 */
 export interface RollingSegment {
   /** 节点本地绝对/相对路径(.ts / .flv)。 */
@@ -195,15 +197,9 @@ export function rollingUploadSingleNode(
   return workers.length === 1;
 }
 
-/**
- * 从分段文件名推**会话 base**(如 `主播_2026-10-12_09-30-00`)。
- * 识别三种分段后缀:`-PART01`(biliLive)、`_PART001`、`_000`(本项目录制器/DLR/ffmpeg 裸段号)。
- * 规则与 `orchestrator/session-plan.ts` 的 `sessionBaseOfFile` 一致(本函数供 rolling 路径使用,
- * 避免在 app 侧再抄一份正则)。
- */
+/** 从分段文件名推**会话 base**(如 `主播_2026-10-12_09-30-00`);语义见 `stampedSessionBaseOf`。 */
 export function segmentSessionBase(fileName: string): string | undefined {
-  const m = /^(.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:-PART\d+|_PART\d+|_\d{3,})?\.(?:ts|flv|mp4|xml)$/i.exec(fileName);
-  return m?.[1];
+  return stampedSessionBaseOf(fileName);
 }
 
 /** 是否视频源分段(可删/可传);`.xml`/`.ass` 恒为 false(弹幕源不可再生,绝不随分段删)。 */

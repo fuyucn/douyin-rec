@@ -258,6 +258,9 @@ describe("RecordingSession", () => {
     expect(sessionXmlPath(`${b}-PART012.ts`)).toBe(`${b}.xml`);
     expect(sessionXmlPath(`${b}_000.ts`)).toBe(`${b}.xml`);      // DLR 分段
     expect(sessionXmlPath(`${b}.ts`)).toBe(`${b}.xml`);          // 不分段
+    // issue #50:manager 原先漏认 _PART<n>(得到 {base}_PART000.xml),现与其余调用点对齐
+    expect(sessionXmlPath(`${b}_PART000.ts`)).toBe(`${b}.xml`);
+    expect(sessionXmlPath(`${b}_PART012.flv`)).toBe(`${b}.xml`);
     // 会话基名里的时间 HH-MM-SS 用连字符，不会被 _\d{3,} 误剥
   });
 
