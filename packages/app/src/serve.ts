@@ -100,8 +100,14 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // hubWatch 自身要在后面 hubEnabled 确定后再 start(见下),构造与 start 分开是为了这个顺序。
     let hubWatch: HubWatch | null = null;
 
+    // hub 是否启用在 manager 之后才确定(见下),起录兜底用可变标志读取。
+    let rollingGuardOn = false;
     const manager = new TaskManager(store, spawner, {
       autoRestart: true,
+      // 边录边传 S3 兜底:master 起录前对该本机任务按当前规则现算一次生效值,再构造 record 参数。
+      beforeSpawn: (taskId) => {
+        if (rollingGuardOn) refreshLocalRollingEffective(store, rootHubDir(), [taskId]);
+      },
       log: (m) => console.log(m),
       logStore,
       // 录制状态(起停/开播/收播/崩溃)→ 立刻推一次 changed。
@@ -151,6 +157,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     const hubEnabled = !!(o.hub && hubStarter && resolveHubConfigJson(o.hubConfig, store));
     // 边录边传生效值(issue #40):首轮 hub 同步前,先用唯一判定刷新绑定了规则的本机任务,
     // 堵住「同步未跑完、daemon 已起录」窗口里按旧开关放行而绕过多节点重复投稿闸门。失败只告警(回落旧开关迁移)。
+    rollingGuardOn = hubEnabled;
     if (hubEnabled) {
       try {
         const n = refreshLocalRollingEffective(store, rootHubDir());

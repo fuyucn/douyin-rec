@@ -27,8 +27,13 @@ export function rollingSpecFields(
   return { rollingUpload: isLocalWorker ? legacyTaskFlag : effective, rollingEffective: effective };
 }
 
-/** 返回写入了派生值的任务数(无规则任务清为 NULL 不计)。 */
-export function refreshLocalRollingEffective(store: TaskStore, hubDir: string): number {
+/**
+ * 重算本机(非 hub 受管)源任务的派生值并写库。**唯一的本机重算入口**,调用点:
+ *   serve 启动 / 每个 hub 同步 tick / 规则增删改 / 起录前兜底(S3,`taskIds` 限定单个任务)。
+ * 规则被删、解绑、停用都在这里落到「回落」:无绑定规则 → 写 NULL(读取按旧开关迁移,不再残留旧的 true);
+ * 规则停用 → 唯一判定直接给 false。返回写入了派生值的任务数(无规则任务清为 NULL 不计)。
+ */
+export function refreshLocalRollingEffective(store: TaskStore, hubDir: string, taskIds?: readonly number[]): number {
   const bySource = new Map<number, ReturnType<typeof listHubRules>[number]>();
   for (const rule of listHubRules(hubDir)) {
     const id = rule.recording?.sourceTaskId;
@@ -36,6 +41,7 @@ export function refreshLocalRollingEffective(store: TaskStore, hubDir: string): 
   }
   let n = 0;
   for (const t of store.listTasks()) {
+    if (taskIds && !taskIds.includes(t.id)) continue;
     if (t.managedBy === "hub") continue; // 受管任务的生效值由 master 下发,不在本机重算
     const rule = bySource.get(t.id);
     // 绑定必须同房间(与 cli desiredFor 同口径)。
@@ -46,7 +52,7 @@ export function refreshLocalRollingEffective(store: TaskStore, hubDir: string): 
     }
     store.updateTask(t.id, {
       rollingEffective: resolveRollingPolicy(
-        { mode: bound.pipeline?.upload?.mode, workers: bound.workers },
+        { enabled: bound.enabled, mode: bound.pipeline?.upload?.mode, workers: bound.workers },
         t.rollingUpload,
       ).effective,
     });

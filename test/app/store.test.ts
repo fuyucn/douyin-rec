@@ -152,6 +152,33 @@ describe("TaskStore", () => {
     store.close();
   });
 
+  it("migrates an OLD db file (has rollingUpload, no rollingEffective) → 可空列自动补上,NULL 按旧开关迁移", () => {
+    const raw = new DatabaseSync(dbPath);
+    raw.exec(`
+      CREATE TABLE tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, room TEXT NOT NULL, name TEXT, quality TEXT DEFAULT 'origin',
+        danmu INTEGER DEFAULT 1, segmentSec INTEGER DEFAULT 1800, status TEXT DEFAULT 'stopped',
+        rollingUpload INTEGER DEFAULT 0, createdAt TEXT
+      );
+      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+    `);
+    raw.prepare(`INSERT INTO tasks (room, rollingUpload, createdAt) VALUES (?, ?, ?)`).run("on", 1, "2026-06-12T00:00:00.000Z");
+    raw.prepare(`INSERT INTO tasks (room, rollingUpload, createdAt) VALUES (?, ?, ?)`).run("off", 0, "2026-06-12T00:00:00.000Z");
+    const cols = (): string[] => (raw.prepare(`PRAGMA table_info(tasks)`).all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols()).not.toContain("rollingEffective");
+    migrate(raw);
+    migrate(raw); // 幂等
+    expect(cols()).toContain("rollingEffective");
+    raw.close();
+
+    const store = new TaskStore(dbPath);
+    const byRoom = (r: string) => store.listTasks().find((t) => t.room === r)!;
+    expect(byRoom("on").rollingEffective).toBe(true); // NULL → 旧开关迁移
+    expect(byRoom("off").rollingEffective).toBe(false);
+    expect(byRoom("on").rollingUpload).toBe(true); // 旧列不动
+    store.close();
+  });
+
   it("migrates an OLD db (no useCookie column) → adds it with default 1 for existing rows", () => {
     // Hand-build a pre-feature db: tasks table WITHOUT the useCookie column,
     // plus an existing row. Then run migrate() and confirm the column is

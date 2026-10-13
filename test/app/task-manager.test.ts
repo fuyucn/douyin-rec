@@ -87,6 +87,33 @@ function addTask(): number {
   return store.addTask({ room: "12345" }).id;
 }
 
+describe("TaskManager beforeSpawn(边录边传起录兜底)", () => {
+  it("每次 spawn 前调用,且 spawner 拿到的是 hook 重算后的最新任务值", () => {
+    const id = addTask();
+    store.updateTask(id, { rollingEffective: true }); // 陈旧的 true
+    const seen: boolean[] = [];
+    const spawner: Spawner = {
+      spawn: (task) => {
+        seen.push((task as { rollingEffective: boolean }).rollingEffective);
+        return new FakeRecorderProcess(task.id);
+      },
+    } as Spawner;
+    const mgr = new TaskManager(store, spawner, {
+      log: () => {},
+      beforeSpawn: (tid) => { store.updateTask(tid, { rollingEffective: false }); },
+    });
+    mgr.start(id);
+    expect(seen).toEqual([false]);
+  });
+  it("hook 抛错不拦启动", () => {
+    const id = addTask();
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {}, beforeSpawn: () => { throw new Error("boom"); } });
+    expect(mgr.start(id)).toBe(true);
+    expect(spawner.spawned).toHaveLength(1);
+  });
+});
+
 describe("TaskManager", () => {
   it("start spawns, marks running, isRunning true", () => {
     const id = addTask();

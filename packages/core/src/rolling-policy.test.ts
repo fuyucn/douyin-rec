@@ -51,3 +51,16 @@ describe("resolveRollingPolicy — 唯一判定(规则优先级 / 旧开关迁�
     expect(resolveRollingPolicy(null, true).effective).toBe(true);
   });
 });
+
+describe("resolveRollingPolicy — 规则停用视为关闭(issue #40 返工)", () => {
+  it("enabled=false:mode=rolling / 旧开关 true / mode=upload 一律不生效", () => {
+    expect(resolveRollingPolicy({ enabled: false, mode: "rolling", workers: ["a"] }, false)).toEqual({ effective: false, reason: "rule-disabled" });
+    expect(resolveRollingPolicy({ enabled: false, workers: ["a"] }, true).effective).toBe(false);
+    expect(resolveRollingPolicy({ enabled: false, mode: "upload", workers: ["a"] }, true).effective).toBe(false);
+  });
+  it("enabled=true / 未给 enabled(旧调用方)照常判定", () => {
+    expect(resolveRollingPolicy({ enabled: true, mode: "rolling", workers: ["a"] }, false).effective).toBe(true);
+    expect(resolveRollingPolicy({ mode: "rolling", workers: ["a"] }, false).effective).toBe(true);
+  });
+});
+

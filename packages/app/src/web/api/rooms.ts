@@ -17,6 +17,7 @@
 import { platformForRoom, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
+import { refreshLocalRollingEffective } from "../../rolling-effective.js";
 import * as hubStore from "../../hub-store.js";
 import type { Task } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
@@ -286,6 +287,7 @@ export function buildRooms(ctx: ApiCtx) {
         }
         // 规则此前已存在(表单展示的是读取时迁移后的 mode)才收口旧开关;新建规则同 createHubRule 不收口。
         if (before.processing) ctx.settleLegacyRolling(sourceTaskId, proc.pipeline?.upload?.mode);
+        refreshLocalRollingEffective(store, hubDir); // 停用/换 mode/解绑 → 本机派生值立刻重算
         // 处理半边变了 → 立刻下发一次(不等 60s 周期 tick)。
         deps.requestSyncTasks?.();
       } else if (rec) {

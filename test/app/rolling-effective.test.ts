@@ -3,7 +3,7 @@
  * 旧配置读取时迁移、录制端只读派生字段、旧 master/旧 worker 的兼容。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
@@ -148,5 +148,70 @@ describe("录制端只读派生字段", () => {
     } finally {
       if (prev === undefined) delete process.env.DOUYIN_REC_ROOT; else process.env.DOUYIN_REC_ROOT = prev;
     }
+  });
+});
+
+describe("refreshLocalRollingEffective — 规则删除 / 解绑 / 停用后回落(issue #40 返工)", () => {
+  const rollingRule = (taskId: number | null, over: Record<string, unknown> = {}) => ({
+    enabled: true, workers: ["local"], recording: taskId == null ? {} : { sourceTaskId: taskId },
+    pipeline: { upload: { mode: "rolling" } }, ...over,
+  });
+  const hasFlag = (s: TaskStore, id: number): boolean => buildRecordArgs(s.getTask(id)!).includes("--rolling-upload");
+
+  it("规则 rolling → 删除规则文件 → 派生值回落 false,record 参数不再带 --rolling-upload", () => {
+    const s = new TaskStore(":memory:");
+    const t = s.addTask({ room: "111" });
+    writeRule("111", rollingRule(t.id));
+    refreshLocalRollingEffective(s, hubDir);
+    expect(hasFlag(s, t.id)).toBe(true);
+    unlinkSync(join(hubDir, "douyin.111.json"));
+    refreshLocalRollingEffective(s, hubDir);
+    expect(s.getTask(t.id)!.rollingEffective).toBe(false);
+    expect(hasFlag(s, t.id)).toBe(false);
+  });
+  it("规则 rolling → 解绑(sourceTaskId 清空)→ 回落 false", () => {
+    const s = new TaskStore(":memory:");
+    const t = s.addTask({ room: "111" });
+    writeRule("111", rollingRule(t.id));
+    refreshLocalRollingEffective(s, hubDir);
+    expect(s.getTask(t.id)!.rollingEffective).toBe(true);
+    writeRule("111", rollingRule(null));
+    refreshLocalRollingEffective(s, hubDir);
+    expect(s.getTask(t.id)!.rollingEffective).toBe(false);
+    expect(hasFlag(s, t.id)).toBe(false);
+  });
+  it("规则 rolling → 停用(enabled=false)→ false;重新启用 → 恢复 true", () => {
+    const s = new TaskStore(":memory:");
+    const t = s.addTask({ room: "111" });
+    writeRule("111", rollingRule(t.id, { enabled: false }));
+    refreshLocalRollingEffective(s, hubDir);
+    expect(s.getTask(t.id)!.rollingEffective).toBe(false);
+    expect(hasFlag(s, t.id)).toBe(false);
+    writeRule("111", rollingRule(t.id));
+    refreshLocalRollingEffective(s, hubDir);
+    expect(s.getTask(t.id)!.rollingEffective).toBe(true);
+  });
+  it("规则停用时旧开关 true 也不放行", () => {
+    const s = new TaskStore(":memory:");
+    const t = s.addTask({ room: "111", rollingUpload: true });
+    writeRule("111", rollingRule(t.id, { enabled: false }));
+    refreshLocalRollingEffective(s, hubDir);
+    expect(hasFlag(s, t.id)).toBe(false);
+  });
+  it("taskIds 只重算指定任务(起录兜底用),其它任务保持原样", () => {
+    const s = new TaskStore(":memory:");
+    const a = s.addTask({ room: "111" });
+    const b = s.addTask({ room: "222" });
+    s.updateTask(a.id, { rollingEffective: true });
+    s.updateTask(b.id, { rollingEffective: true });
+    refreshLocalRollingEffective(s, hubDir, [a.id]); // 无规则 → a 回落
+    expect(s.getTask(a.id)!.rollingEffective).toBe(false);
+    expect(s.getTask(b.id)!.rollingEffective).toBe(true);
+  });
+});
+
+describe("rollingSpecFields — 停用规则下发 false", () => {
+  it("enabled=false → 生效值 false,远端旧字段同为 false", () => {
+    expect(rollingSpecFields({ enabled: false, mode: "rolling", workers: ["vps2"] }, true, false)).toEqual({ rollingUpload: false, rollingEffective: false });
   });
 });

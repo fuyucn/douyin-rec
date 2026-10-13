@@ -28,6 +28,11 @@ export interface TaskRuntime {
 }
 
 export interface TaskManagerOpts {
+  /**
+   * 每次 spawn 子进程前调用(同步,抛错只记日志不拦启动)。边录边传 S3 兜底:起录时对本机任务现算一次
+   * 生效值,即便同步 tick 还没跑到(规则刚删/刚停用)也不会按陈旧的 true 起 `--rolling-upload 1`。
+   */
+  beforeSpawn?: (taskId: number) => void;
   /** Respawn a process that exits UNEXPECTEDLY (crash). Default false. */
   autoRestart?: boolean;
   /** Delay before a restart respawn, ms. Default 5000. */
@@ -75,6 +80,7 @@ export class TaskManager {
   private readonly onTaskDown?: (taskId: number, reason: string) => void;
   private readonly onRecordingStateChanged?: (taskId: number) => void;
   private readonly onAlert?: (taskId: number, stage: string, message: string) => void;
+  private readonly beforeSpawn?: (taskId: number) => void;
   private readonly log: (m: string) => void;
   private readonly schedule: (cb: () => void, ms: number) => void;
   private readonly logStore: TaskLogStore;
@@ -96,6 +102,7 @@ export class TaskManager {
   constructor(store: TaskStore, spawner: Spawner, opts: TaskManagerOpts = {}) {
     this.store = store;
     this.spawner = spawner;
+    this.beforeSpawn = opts.beforeSpawn;
     this.autoRestart = opts.autoRestart ?? false;
     this.restartDelayMs = opts.restartDelayMs ?? 5_000;
     this.maxRestarts = opts.maxRestarts ?? 5;
@@ -248,6 +255,11 @@ export class TaskManager {
 
   /** Spawn a fresh process for the task and wire its exit handling. */
   private spawnFor(taskId: number): void {
+    try {
+      this.beforeSpawn?.(taskId);
+    } catch (e) {
+      this.logTask(taskId, `[task_manager] beforeSpawn 失败(忽略,按库内现值起录): ${(e as Error)?.message ?? e}`);
+    }
     const task = this.store.getTask(taskId)!;
     // Platform-aware cookie resolution, shared with buildSessionForTask.
     const effective = {

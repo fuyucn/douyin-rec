@@ -9,6 +9,7 @@ import type { ApiResult } from "./types.js";
 import type { HubRulePayload, HubPipelineConfig, HubRecordingConfig } from "@drec/core";
 import { platformForRoom } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
+import { refreshLocalRollingEffective } from "../../rolling-effective.js";
 import { activeHubJobKeys, deleteHubJobHistory } from "../../hub-jobs.js";
 
 export function buildHubRules(ctx: ApiCtx) {
@@ -66,6 +67,7 @@ export function buildHubRules(ctx: ApiCtx) {
           requires: input.requires,
         });
         // 新建规则不收口旧开关:此前没有规则可展示「迁移后的 rolling」,旧开关 true 的任务保持 rolling(同改前)。
+        refreshLocalRollingEffective(store, hubDir);
         deps.requestSyncTasks?.();
         return { status: 201, body: hubRuleView(rule) };
       } catch (e) {
@@ -91,6 +93,8 @@ export function buildHubRules(ctx: ApiCtx) {
       const updated = hubStore.updateHubRule(hubDir, key, patch);
       if (!updated) return err(404, `未找到 hub 规则 key=${key}`);
       ctx.settleLegacyRolling(updated.recording?.sourceTaskId, input.pipeline?.upload?.mode);
+      // 解绑(sourceTaskId 清空)/停用/换 mode 后立刻重算本机派生值,不等下一个同步 tick。
+      refreshLocalRollingEffective(store, hubDir);
       deps.requestSyncTasks?.();
       return { status: 200, body: hubRuleView(updated) };
     },
@@ -107,6 +111,7 @@ export function buildHubRules(ctx: ApiCtx) {
       const history = deps.syncDbPath ? deleteHubJobHistory(deps.syncDbPath, key) : { deleted: 0, streamKeys: [] };
       const ok = hubStore.removeHubRule(hubDir, key);
       if (!ok) return err(404, `未找到 hub 规则 key=${key}`);
+      refreshLocalRollingEffective(store, hubDir); // 规则已删:本机源任务派生值回落,不再边传
       deps.requestSyncTasks?.();
       return { status: 200, body: { ok: true, key, deletedHistory: history.deleted } };
     },

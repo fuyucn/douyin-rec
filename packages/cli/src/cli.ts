@@ -30,7 +30,7 @@ import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type HubPoolSnapshotDTO } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
-import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, rollingSpecFields, APP_VERSION } from "@drec/app";
+import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
@@ -1037,7 +1037,7 @@ const hubStarter: HubStarter = {
         // startTask 只置意图不起子进程),不在这条路径上表达。
         const isLocalWorker = workerId === "local";
         const rollingFields = rollingSpecFields(
-          { mode: rule.pipeline?.upload?.mode, workers: rule.workers },
+          { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers },
           src.rollingUpload,
           isLocalWorker,
         );
@@ -1088,6 +1088,13 @@ const hubStarter: HubStarter = {
       }
       hubSyncGate.running = true;
       try {
+        // 边录边传(issue #40):本机源任务的派生值每轮都重算 —— 规则被删/解绑/停用时 desiredFor 里
+        // 已没有该任务的条目,applyTasks 不会再写它,不在这里回落就会残留旧的 true。
+        try {
+          refreshLocalRollingEffective(opts.store, hubDir);
+        } catch (e) {
+          opts.warn(`[rolling] 同步 tick 重算边录边传生效值失败: ${(e as Error).message}`);
+        }
         for (const w of loadWorkers()) {
           const t = buildTransports().get(w.id);
           if (!t?.applyTasks) continue; // 该 transport 不支持任务同步 → 跳过(下轮再试)

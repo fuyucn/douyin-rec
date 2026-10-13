@@ -6,6 +6,7 @@
  * real in-memory TaskStore and a mock TaskManager (just records runningIds +
  * start/stop calls) so assertions stay deterministic.
  */
+import { buildRecordArgs } from "../../packages/app/src/process/record-args.js";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
@@ -1841,5 +1842,36 @@ describe("issue #40:新建规则不吞掉旧开关", () => {
     expect(a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } }).status).toBe(201);
     expect(s.getTask(t.id)!.rollingUpload).toBe(true);
     expect(s.getTask(t.id)!.rollingEffective).toBe(true);
+  });
+});
+
+describe("issue #40 返工:规则 删除/解绑/停用 后本机派生值立刻回落", () => {
+  function setup() {
+    const s = new TaskStore(":memory:");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rolling40c-") });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    expect(a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "rolling" } } }).status).toBe(201);
+    return { s, a, id: t.id };
+  }
+  const flag = (s: TaskStore, id: number): boolean => buildRecordArgs(s.getTask(id)!).includes("--rolling-upload");
+
+  it("新建 rolling 规则即刻生效;删除规则 → 不再边传", () => {
+    const { s, a, id } = setup();
+    expect(flag(s, id)).toBe(true);
+    expect(a.deleteHubRule("douyin.123456").status).toBe(200);
+    expect(s.getTask(id)!.rollingEffective).toBe(false);
+    expect(flag(s, id)).toBe(false);
+  });
+  it("停用规则 → 不再边传;重新启用 → 恢复", () => {
+    const { s, a, id } = setup();
+    expect(a.updateHubRule("douyin.123456", { enabled: false }).status).toBe(200);
+    expect(flag(s, id)).toBe(false);
+    expect(a.updateHubRule("douyin.123456", { enabled: true }).status).toBe(200);
+    expect(flag(s, id)).toBe(true);
+  });
+  it("解绑(recording.sourceTaskId 清空)→ 不再边传", () => {
+    const { s, a, id } = setup();
+    expect(a.updateHubRule("douyin.123456", { recording: {} }).status).toBe(200);
+    expect(flag(s, id)).toBe(false);
   });
 });

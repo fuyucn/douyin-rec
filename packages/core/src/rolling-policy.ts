@@ -31,6 +31,7 @@ export function isUploadingMode(mode: unknown): boolean {
 export type RollingReason =
   | "rule-rolling"      // 规则 mode=rolling
   | "legacy-task-flag"  // 旧 task.rollingUpload=true,规则未配置 mode / 无规则 / mode=upload → 等价 rolling
+  | "rule-disabled"     // 规则 enabled=false(停用)→ 视为关闭,旧开关与 mode 都不得放行
   | "rule-stage"        // 规则显式 mode=stage(只合成)→ 即便旧开关为 true 也不边录边传
   | "not-requested"     // 规则非 rolling 且旧开关为 false
   | "multi-node";       // 请求了 rolling,但规则不是「恰好 1 个节点」→ 回落整场管线(防重复投稿)
@@ -42,6 +43,8 @@ export interface RollingPolicy {
 
 /** 判定所需的规则最小投影(HubRule 的子集;无规则传 null/undefined)。 */
 export interface RollingPolicyRule {
+  /** 规则是否启用;`false` = 停用 → 边录边传关闭(undefined 视为启用,兼容旧调用方)。 */
+  enabled?: boolean;
   /** `pipeline.upload.mode` 原值。 */
   mode?: unknown;
   /** 规则选中的 worker id;undefined/空 = 全部节点。 */
@@ -50,6 +53,7 @@ export interface RollingPolicyRule {
 
 /**
  * 优先级(高 → 低):
+ *   0. 规则 enabled=false(停用)→ 一律关闭。
  *   1. 规则 mode=rolling → 请求 rolling。
  *   2. 规则 mode=stage(显式只合成)→ 不 rolling(旧开关不得绕过规则去上传)。
  *   3. 旧 task 开关 true(规则无 mode / mode=upload / 无规则)→ 请求 rolling(读取时迁移,行为同改前)。
@@ -63,6 +67,7 @@ export function resolveRollingPolicy(
   rule: RollingPolicyRule | null | undefined,
   legacyTaskFlag: boolean,
 ): RollingPolicy {
+  if (rule?.enabled === false) return { effective: false, reason: "rule-disabled" };
   const mode = normalizeUploadMode(rule?.mode);
   let reason: RollingReason;
   if (mode === "rolling") reason = "rule-rolling";
