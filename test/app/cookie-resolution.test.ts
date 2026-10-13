@@ -64,25 +64,26 @@ describe("subprocess path — effective task + buildRecordArgs", () => {
     const store = new TaskStore(":memory:");
     store.setSetting("defaultCookies", GLOBAL);
     const t = store.addTask({ room: "111", useCookie: false });
-    expect(buildRecordArgs(effective(t, store))).not.toContain("--cookies");
+    // useCookie=false → 解析为 null → spawner 不生成凭证文件;argv 也无任何凭证 flag。
+    const eff = effective(t, store);
+    expect(eff.cookies).toBeNull();
+    expect(buildRecordArgs(eff)).not.toContain("--cookies-file");
     store.close();
   });
 
-  it("useCookie=true + global set → --cookies <global>", () => {
+  it("useCookie=true + global set → effective.cookies = global", () => {
     const store = new TaskStore(":memory:");
     store.setSetting("defaultCookies", GLOBAL);
     const t = store.addTask({ room: "111", useCookie: true });
-    const args = buildRecordArgs(effective(t, store));
-    expect(args[args.indexOf("--cookies") + 1]).toBe(GLOBAL);
+    expect(effective(t, store).cookies).toBe(GLOBAL);
     store.close();
   });
 
-  it("useCookie=true + task.cookies override → --cookies <override>", () => {
+  it("useCookie=true + task.cookies override → effective.cookies = override", () => {
     const store = new TaskStore(":memory:");
     store.setSetting("defaultCookies", GLOBAL);
     const t = store.addTask({ room: "111", useCookie: true, cookies: "sessionid=OVERRIDE" });
-    const args = buildRecordArgs(effective(t, store));
-    expect(args[args.indexOf("--cookies") + 1]).toBe("sessionid=OVERRIDE");
+    expect(effective(t, store).cookies).toBe("sessionid=OVERRIDE");
     store.close();
   });
 

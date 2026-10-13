@@ -77,14 +77,21 @@ describe("buildRecordArgs", () => {
     expect(buildRecordArgs(mkTask({ name: null }))).not.toContain("--name");
   });
 
-  it("appends --cookies only when present", () => {
+  it("凭证永不进 argv:task.cookies 有值也不出现 --cookies / 原文", () => {
     const args = buildRecordArgs(mkTask({ cookies: "sessionid=abc" }));
-    expect(args).toContain("--cookies");
-    expect(args[args.indexOf("--cookies") + 1]).toBe("sessionid=abc");
+    expect(args).not.toContain("--cookies");
+    expect(args.join("\0")).not.toContain("sessionid=abc");
   });
 
-  it("omits --cookies when null", () => {
-    expect(buildRecordArgs(mkTask({ cookies: null }))).not.toContain("--cookies");
+  it("传入 cookiesFile → 追加 --cookies-file <path>,且不含凭证原文", () => {
+    const args = buildRecordArgs(mkTask({ cookies: "sessionid=abc" }), "/root/run/record-1.cred");
+    expect(args[args.indexOf("--cookies-file") + 1]).toBe("/root/run/record-1.cred");
+    expect(args).not.toContain("--cookies");
+    expect(args.join("\0")).not.toContain("sessionid=abc");
+  });
+
+  it("未传 cookiesFile → 不带 --cookies-file", () => {
+    expect(buildRecordArgs(mkTask({ cookies: null }))).not.toContain("--cookies-file");
   });
 
   it("uses task.outDir when set", () => {
