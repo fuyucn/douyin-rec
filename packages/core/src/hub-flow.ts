@@ -72,7 +72,10 @@ export function readyNodes(doneOrSkipped: ReadonlySet<string>): HubFlowNode[] {
   });
 }
 
-/** 步骤名 → 是否 pipeline 节点(供 web 过滤 select/pull/clean_*)。 */
+/**
+ * 步骤名 → 是否 pipeline 节点(供 web 过滤前奏/收尾)。
+ * `node_upload` 是 pull 的替代前奏(节点本地 remux + 上传),**不是** DAG 节点 → 恒返回 false。
+ */
 export function isHubFlowNode(step: string): step is HubFlowNode {
   return (["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat"] as const)
     .includes(step as HubFlowNode);

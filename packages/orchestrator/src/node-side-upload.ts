@@ -134,7 +134,10 @@ async function finalizeNodeSuccess(
 ): Promise<{ state: JobState; bv?: string }> {
   const { streamKey, cfg, winnerMembers, ledger, jlog } = o;
   ledger.markDone(streamKey, bv);
-  if (note) ledger.logStep(streamKey, "pull", "done", note);
+  if (note) ledger.logStep(streamKey, "node_upload", "done", note);
+  // 节点表也记一笔:队列页「当前节点」优先取 nodeStates 里 running/done 的节点,
+  // 只有 steps 记 node_upload 而节点表没有 → 仍会回落到 stateToNode("syncing")="pull"(旧误报)。
+  ledger.syncNodeState(streamKey, "node_upload", "done");
   const cleanOutcome = await cleanupSourcesShared({
     streamKey, ledger, transports: o.deps.transports,
     members: o.members ?? winnerMembers,
@@ -167,7 +170,10 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
   const { streamKey, transport, ledger, jlog, notify } = o;
   const suffix = elapsedSec === undefined ? "" : `(${elapsedSec}s)`;
   jlog(`节点侧执行失败: ${errMsg}${suffix} → 回读节点落盘结果判定是否其实已成功`);
-  ledger.logStep(streamKey, "pull", "done", `节点侧失败: ${errMsg.slice(0, 120)}`);
+  ledger.logStep(streamKey, "node_upload", "done", `节点侧失败: ${errMsg.slice(0, 120)}`);
+  // 注意:此处**不**立刻把节点表标 failed —— node_upload 的 running 标记留着,直到下面某条
+  // 终态分支(回读成功→done / 不确定→failed / 确认没成→failed)。否则回读这段窗口内
+  // nodeStates 无 running 节点,队列页会回落到 stateToNode("syncing")="pull"(又误报)。
 
   let node = null;
   try {
@@ -191,7 +197,8 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
       : node?.bv ? `节点已建稿 BV=${node.bv} 但未确认完成` : `节点上报完成但缺 BV,无法确认分 P`;
     const note = `${why};已禁止自动重试,请人工核对 B站稿件后处理`;
     jlog(`节点侧结果不确定: ${note}`);
-    ledger.logStep(streamKey, "pull", "done", `节点侧结果不确定: ${why.slice(0, 120)}`);
+    ledger.logStep(streamKey, "node_upload", "done", `节点侧结果不确定: ${why.slice(0, 120)}`);
+    ledger.syncNodeState(streamKey, "node_upload", "failed", { error: note.slice(0, 200) });
     // sync_node_states 行必须写:reconciler 的自动重试闸门看的是它(= 不安全重试标记)。
     ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: note.slice(0, 200) });
     ledger.setState(streamKey, "needs_manual", { error: note.slice(0, 200) });
@@ -204,6 +211,7 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
   jlog(`节点侧确认未完成(落盘=${node?.phase ?? "无"})${detail}`);
   // 节点侧一旦执行过上传就可能已建稿、只是回传失败/超时 ⇒ 一律按「不安全重试」上报
   // (节点名与 reconciler 的 UNSAFE_RETRY_NODES 同名),reconciler 会翻 needs_manual,绝不自动重传。
+  ledger.syncNodeState(streamKey, "node_upload", "failed", { error: `节点侧上传失败: ${errMsg.slice(0, 200)}` });
   ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: `节点侧上传失败: ${errMsg.slice(0, 200)}` });
   ledger.markFailed(streamKey, `节点侧上传失败: ${errMsg.slice(0, 200)}`);
   notify({ kind: "error", stage: "同步", message: `节点侧上传失败 ${streamKey}: ${errMsg.slice(0, 200)}` });
@@ -280,7 +288,10 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
     cleanStageAfterDone: cfg.cleanup?.stageAfterDone === true,
   };
 
-  ledger.logStep(streamKey, "pull", "start");
+  // 步骤名用独立的 `node_upload`(不是 `pull`):节点本地 remux + 上传,无录像回传 →
+  // 记成 pull 会让队列/台账误报「还在 rsync 回传」。同时写节点表 running,让队列「当前节点」对得上。
+  ledger.logStep(streamKey, "node_upload", "start");
+  ledger.syncNodeState(streamKey, "node_upload", "running");
   jlog(`节点侧执行: remux + 上传(无录像回传)`);
   const t0 = Date.now();
   let result;
@@ -297,7 +308,7 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
     return await handleNodeFailure(o, msg, elapsed);
   }
 
-  ledger.logStep(streamKey, "pull", "done", `节点侧完成 ${elapsed}s${result.products?.length ? ` · ${result.products.length} 产物` : ""}`);
+  ledger.logStep(streamKey, "node_upload", "done", `节点侧完成 ${elapsed}s${result.products?.length ? ` · ${result.products.length} 产物` : ""}`);
   jlog(`节点侧完成(${elapsed}s)${result.bv ? ` BV=${result.bv}` : ""}`);
 
   // 收口(标记 done + 删各成员节点源):与「假失败回读确认成功」共用同一份实现。

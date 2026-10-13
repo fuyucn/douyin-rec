@@ -92,7 +92,7 @@ const NODE_STATE_TO_UI: Record<string, NodeStatus> = {
  * 所有可能出现的子步骤 key(与布局解耦,仅供 stepStatuses 遍历取状态)。
  * 顺序=展示顺序,保持不变;成员覆盖由下面的类型断言守护(新增 core 步骤名而这里漏掉会编译失败)。
  */
-const ALL_STEP_KEYS = ["select", "pull", "merge", "burn_danmu", "burn_livechat", "clean_stage_src", "upload_plain", "append_danmu", "append_livechat", "clean_verify", "clean_source", "clean_stage"] as const;
+const ALL_STEP_KEYS = ["select", "pull", "node_upload", "merge", "burn_danmu", "burn_livechat", "clean_stage_src", "upload_plain", "append_danmu", "append_livechat", "clean_verify", "clean_source", "clean_stage"] as const;
 type _MissingStepKey = Exclude<HubStepName, (typeof ALL_STEP_KEYS)[number]>;
 /** 覆盖全部 HubStepName 才可赋值(漏一个 → 类型塌成 never → 编译失败)。 */
 const ALL_STEP_KEYS_TYPED: _MissingStepKey extends never ? typeof ALL_STEP_KEYS : never = ALL_STEP_KEYS;

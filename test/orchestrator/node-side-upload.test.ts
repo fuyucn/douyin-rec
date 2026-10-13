@@ -348,3 +348,90 @@ describe("tryNodeSideUpload 失败收口(回读节点落盘结果,区分假失�
     expect(t.cleanup).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * 回归(issue #12):节点侧上传的台账埋点必须用**独立步骤名 `node_upload`**,不是历史的 `pull`。
+ *
+ * `pull` 的语义是「rsync 把录像回传 master」;节点侧是**本地 remux + 上传(无回传)** —— 记成 pull
+ * 会让队列页/台账误报「还在回传录像」。这里把「节点侧路径 ≠ pull」钉死,防止将来又写回去。
+ * (常规 pull 回 master 的路径在 pipeline.ts 里仍写 pull,不在此文件,故不受影响。)
+ */
+describe("节点侧上传台账步骤名 = node_upload(非 pull)", () => {
+  const rec = { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" };
+  const cfgUpload = { ...cfg, cleanup: { sourceAfterDone: true, stageAfterDone: true } } as unknown as PipelineCfg;
+
+  /** 可断言调用参数的 ledger 替身(与 fakeLedger 同形,但不 as never,便于读 mock.calls)。 */
+  function spyLedger() {
+    return {
+      get: () => ({ bv: "" }),
+      logStep: vi.fn(),
+      setState: vi.fn(),
+      syncNodeState: vi.fn(),
+      markFailed: vi.fn(),
+      markDone: vi.fn(),
+    };
+  }
+
+  async function run(ledger: ReturnType<typeof spyLedger>, t: unknown) {
+    return tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12",
+      cfg: cfgUpload,
+      winner: { workerId: "w1", rec },
+      winnerMembers: [{ workerId: "w1", rec }],
+      transport: t as never,
+      ledger: ledger as never,
+      jlog: () => {},
+      notify: () => {},
+      deps: fakeDeps(t as { id?: string }),
+    });
+  }
+
+  it("成功路径:logStep 只出现 node_upload,绝不出现 pull;节点表记 node_upload running→done", async () => {
+    const t = fakeTransport();
+    const ledger = spyLedger();
+    const result = await run(ledger, t);
+    expect(result).toEqual({ state: "done", bv: "BV1TEST" });
+    const steps = ledger.logStep.mock.calls.map((c) => c[1]);
+    expect(steps).toContain("node_upload");
+    expect(steps).not.toContain("pull");
+    // 队列页「当前节点」取自 nodeStates 的 running/done 节点 → 必须也记成 node_upload,
+    // 否则会回落到 stateToNode("syncing")="pull"(旧误报来源)。
+    const nodeUploadStates = ledger.syncNodeState.mock.calls.filter((c) => c[1] === "node_upload").map((c) => c[2]);
+    expect(nodeUploadStates).toContain("running");
+    expect(nodeUploadStates).toContain("done");
+  });
+
+  it("失败路径(确认没成 → failed):步骤名仍是 node_upload,绝不出现 pull", async () => {
+    const t = {
+      nodeCapabilities: async () => ({ biliup: "/biliup", cookies: true, diskFreeGB: 100 }),
+      nodePipeline: vi.fn(async () => { throw new Error("ssh: rc=255"); }),
+      nodeResult: vi.fn(async () => null),
+      cleanup: vi.fn(async () => {}),
+    };
+    const ledger = spyLedger();
+    const result = await run(ledger, t);
+    expect(result).toEqual({ state: "failed" });
+    const steps = ledger.logStep.mock.calls.map((c) => c[1]);
+    expect(steps).toContain("node_upload");
+    expect(steps).not.toContain("pull");
+    // 失败也要在节点表标 node_upload(failed),让队列页显示「节点本地上传 失败」而非 pull。
+    expect(ledger.syncNodeState.mock.calls).toContainEqual([
+      "douyin:123:2026-10-12", "node_upload", "failed", expect.anything(),
+    ]);
+  });
+
+  it("假失败回读确认成功 → 步骤名 node_upload(done),节点表 node_upload 收口 done", async () => {
+    const t = {
+      nodeCapabilities: async () => ({ biliup: "/biliup", cookies: true, diskFreeGB: 100 }),
+      nodePipeline: vi.fn(async () => { throw new Error("ssh: rc=255"); }),
+      nodeResult: vi.fn(async () => ({ phase: "done", ok: true, bv: "BV1REAL", atMs: 1 })),
+      cleanup: vi.fn(async () => {}),
+    };
+    const ledger = spyLedger();
+    const result = await run(ledger, t);
+    expect(result).toEqual({ state: "done", bv: "BV1REAL" });
+    const steps = ledger.logStep.mock.calls.map((c) => c[1]);
+    expect(steps).not.toContain("pull");
+    expect(ledger.syncNodeState.mock.calls).toContainEqual(["douyin:123:2026-10-12", "node_upload", "done"]);
+  });
+});

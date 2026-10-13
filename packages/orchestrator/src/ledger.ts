@@ -231,7 +231,10 @@ export class SyncLedger {
     const last = new Map<string, { phase: string; at: number }>();
     for (const s of steps) last.set(s.step, { phase: s.phase, at: s.at });
     for (const [step, e] of last) {
-      if (step === "select" || step === "pull") continue; // 前奏不进节点表(UI 仍按 steps 画)
+      // 前奏不进节点表(UI 仍按 steps 画)。node_upload 与 pull 同为「拉取/处理后上传」的前奏:
+      // 回填它 = 给旧 job 造一个可能被 reconciler 当成可重试的节点 —— 而节点侧一旦跑过就可能已建稿,
+      // 故与 pull 同口径排除(真正的闸门仍是失败路径写的 upload_plain failed)。
+      if (step === "select" || step === "pull" || step === "node_upload") continue;
       const name = step as StepName;
       this.syncNodeState(streamKey, name, e.phase === "done" ? "done" : "failed", {
         error: e.phase === "done" ? undefined : "上次中断/失败",

@@ -469,7 +469,12 @@ function splitStreamKey(streamKey: string): { platform: string; roomSlug: string
   return { platform: parts[0] ?? "", roomSlug: parts[1] ?? "" };
 }
 
-/** 资源节点判定(与 orchestrator workflow 的 node.resource 对齐):merge/burn=占用 CPU,上传类=占用上传队列。 */
+/**
+ * 资源节点判定(与 orchestrator workflow 的 node.resource 对齐):merge/burn=占用 CPU,上传类=占用上传队列。
+ *
+ * `node_upload`(节点侧上传)不占 **master** 的任何资源:remux + 上传都在节点本地跑,不消耗
+ * master 的 CPU 闸门,也不占用 master 的上传窗口 → 返回 null(否则会虚占队列位次,误导排队判定)。
+ */
 function resourceOfNode(node: string | null): "cpu" | "net" | "upload" | null {
   if (!node) return null;
   if (node === "upload_plain" || node === "append_danmu" || node === "append_livechat") return "upload";

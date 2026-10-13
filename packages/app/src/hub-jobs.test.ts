@@ -309,6 +309,41 @@ describe("buildQueueView", () => {
     expect(it0.nextSteps).toContain("burn_livechat");
   });
 
+  /**
+   * 回归(issue #12):节点侧上传(本地 remux + 上传,无回传)的**当前节点**必须显示 `node_upload`,
+   * 不能回落到 stateToNode("syncing")="pull"(否则队列页误报「还在 rsync 回传」)。
+   * 常规 pull 回 master 的场仍显示 `pull`(向后兼容)。
+   */
+  it("节点侧上传场:currentNode=node_upload(非 pull);常规 pull 场仍为 pull", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage-nodeupload-"));
+    const now = T0 + 100_000;
+    // ① 节点侧上传场:state=syncing、steps 记 select + node_upload、节点表 node_upload=running。
+    seedJob(db, "douyin:300:2026-07-10", [["syncing", now - 20_000]], 1000);
+    for (const [step, phase, at] of [
+      ["select", "start", now - 20_000], ["select", "done", now - 18_000],
+      ["node_upload", "start", now - 18_000],
+    ] as const) {
+      db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at) VALUES(?,?,?,?)").run("douyin:300:2026-07-10", step, phase, at);
+    }
+    db.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
+      .run("douyin:300:2026-07-10", "node_upload", "running", null, 1, now - 18_000);
+    // ② 常规 pull 回 master 场:state=syncing、steps 记 pull,无 running 节点 → 回落 pull。
+    seedJob(db, "douyin:400:2026-07-10", [["syncing", now - 15_000]], 1000);
+    db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at) VALUES(?,?,?,?)").run("douyin:400:2026-07-10", "pull", "start", now - 15_000);
+    db.close();
+
+    const { active } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
+    const nodeSide = active.find((a) => a.roomSlug === "300")!;
+    const regular = active.find((a) => a.roomSlug === "400")!;
+    expect(nodeSide.currentNode).toBe("node_upload");
+    expect(nodeSide.currentNode).not.toBe("pull");
+    expect(nodeSide.resource).toBeNull(); // 节点本地跑,不占 master 资源闸门
+    expect(nodeSide.doneSteps.map((s) => s.step)).toContain("select");
+    // 常规路径语义不变。
+    expect(regular.currentNode).toBe("pull");
+  });
+
   it("资源池 waiting 命中 → phase=queued + queuePosition;needs_manual 留进行中", () => {
     const { dbPath, db } = makeSyncDb();
     const stage = mkdtempSync(join(tmpdir(), "queue-stage2-"));
