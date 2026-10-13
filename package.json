@@ -23,6 +23,7 @@
     "mesio:install": "sh scripts/install-mesio.sh",
     "biliup:install": "sh scripts/install-biliup.sh",
     "test": "vitest run",
+    "test:e2e": "vitest run test/e2e",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
