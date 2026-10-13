@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canDeleteRollingSource,
   DEFAULT_SEAL_GRACE_MS,
+  headOfLineFilter,
   isVideoSegment,
   planRollingUploads,
   rollingUploadSingleNode,
@@ -75,6 +76,29 @@ describe("planRollingUploads — 只列未确认的封口段,按段序", () => {
     const segs = [seg(2, 0), seg(0, 0), seg(1, 0)];
     const plan = planRollingUploads(segs, { recordingActive: true, nowMs: 1 }, new Set());
     expect(plan.map((s) => s.index)).toEqual([0, 1]);
+  });
+});
+
+describe("headOfLineFilter — 头阻塞:阻塞段及其后的段避免形成不可逆空洞", () => {
+  const mk = (indices: number[]): RollingSegment[] => indices.map((i) => seg(i, 0));
+  it("无阻塞 → 全量放行(按段号升序)", () => {
+    expect(headOfLineFilter(mk([2, 0, 1])).map((s) => s.index)).toEqual([0, 1, 2]);
+    expect(headOfLineFilter(mk([0, 1, 2]), new Set()).map((s) => s.index)).toEqual([0, 1, 2]);
+  });
+  it("阻塞段存在 → 其及之后全部截断(乱序输入也升序后从阻塞处断)", () => {
+    // 段 1 卡住(ambiguous)→ 段 2/3 不得上传(否则分 P 出现洞)。
+    const out = headOfLineFilter(mk([0, 1, 2, 3]), new Set([1]));
+    expect(out.map((s) => s.index)).toEqual([0]);
+  });
+  it("阻塞段是最新一段 → 仅截断它自己", () => {
+    expect(headOfLineFilter(mk([0, 1, 2]), new Set([2])).map((s) => s.index)).toEqual([0, 1]);
+  });
+  it("阻塞段号不在本轮 pending → 不误伤已列出的段", () => {
+    const out = headOfLineFilter(mk([1, 2]), new Set([0])); // 段 0 不在 pending(未列出)
+    expect(out.map((s) => s.index)).toEqual([1, 2]);
+  });
+  it("空 pending → 空", () => {
+    expect(headOfLineFilter([], new Set([0])).length).toBe(0);
   });
 });
 

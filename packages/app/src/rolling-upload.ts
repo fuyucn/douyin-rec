@@ -18,20 +18,31 @@
  * ⚠️ 为什么按**会话**隔离:断流重连会产生新会话(新文件名 base)+ 新 xml;不同会话的段各自独立
  * 建稿/append,绝不跨会话混在一起(与 orchestrator 的「分 P 只能属于一个会话」同口径)。
  */
-import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path, { join } from "node:path";
 import {
   canDeleteRollingSource,
-  DEFAULT_SEAL_GRACE_MS,
   formatBiliTitle,
+  headOfLineFilter,
   planRollingUploads,
   resolveOutputStem,
   rollingUploadSingleNode,
+  sealedSegmentIndices,
   segmentSessionBase,
   UploadGate,
   type RollingSegment,
 } from "@drec/core";
-import { appendGroup, uploadPlain } from "./upload/biliup.js";
+import { appendGroup, countVideoParts, uploadPlain } from "./upload/biliup.js";
 import { rootBiliupCookies } from "./paths.js";
 import { openNodeUploadGate, resolveUploadAccountKey } from "./node-pipeline.js";
 import { getHubRule, hubKey } from "./hub-store.js";
@@ -40,6 +51,8 @@ import type { RollingUploadHook } from "@drec/manager";
 
 /** 一个会话的持久化确认状态(防重启后重复投稿)。 */
 interface RollingState {
+  /** sidecar schema 版本;老文件(0.0.82 之前)无此字段 = v1,读时兼容。 */
+  schemaVersion?: number;
   streamKey: string;
   sessionBase: string;
   /**
@@ -53,8 +66,24 @@ interface RollingState {
   bv?: string;
   /** 结果不确定的段号(append 失败但可能已提交)—— 转人工,绝不自动重传。 */
   ambiguous?: number[];
+  /**
+   * **WAL 意图标记**:开始上传前先落盘(`create` = P1 建稿中,`append` = 追加第 index 段中)。
+   * 进程崩溃后凭它恢复:create 无 BV 可查 → 保守转人工(绝不自动重创建稿);append 用分 P 数核对。
+   */
+  uploading?: { index: number; kind: "create" | "append" };
+  /**
+   * 会话第一段写入时刻(epoch ms)。**必须持久化**:建稿标题里的 `{HH}-{mm}-{ss}` 用它渲染,
+   * 若重启后按「本进程首个上报的段」现算(崩溃恢复常见:重启时只见尾段)→ 标题时间漂到收尾时刻,
+   * 与文件名/实际开播时间不一致。老文件无此字段 → 回落现算(行为不变)。
+   */
+  startMs?: number;
   updatedAt: number;
 }
+
+/** sidecar schema 版本(WAL 字段演进;老文件无此字段 = v1,读时兼容)。 */
+const ROLLING_STATE_SCHEMA_VERSION = 2;
+/** 碎片段阈值:预计时长低于该秒数的封口段不上传(默认 2s,源保留)。 */
+const DEFAULT_MIN_SEGMENT_SEC = 2;
 
 function statePathFor(dir: string, sessionBase: string): string {
   // sidecar 必须与分段文件同目录(下一个会话/重启能读到);base 不含目录,需拼上 dirname。
@@ -66,14 +95,6 @@ function readState(dir: string, sessionBase: string): RollingState | null {
     return JSON.parse(readFileSync(statePathFor(dir, sessionBase), "utf-8")) as RollingState;
   } catch {
     return null;
-  }
-}
-
-function writeState(dir: string, s: RollingState): void {
-  try {
-    writeFileSync(statePathFor(dir, s.sessionBase), JSON.stringify(s), "utf-8");
-  } catch {
-    /* sidecar 写失败不影响上传(仅影响重启幂等,不静默改上传行为) */
   }
 }
 
@@ -98,8 +119,10 @@ export interface RollingUploaderOpts {
   uploadPrivate?: boolean;
   /** biliup cookies 路径;缺省 env/数据根默认。 */
   cookies?: string;
-  /** 收尾后最后一段的封口宽限(ms)。缺省 {@link DEFAULT_SEAL_GRACE_MS}。 */
-  sealGraceMs?: number;
+  /** 封口段「预计时长」低于该秒数 → 不上传(碎片段;源保留,不阻塞后续段)。默认 2。 */
+  minSegmentSec?: number;
+  /** 分 P 数查询接缝(append 幂等核对 / 崩溃恢复);缺省 {@link countVideoParts}。 */
+  countPartsRaw?: (bv: string, cookies: string) => Promise<number | null>;
   /** 限流闸门;缺省按节点本地库装配(与节点侧上传同一账号键)。 */
   gate?: UploadGate;
   log?: (msg: string) => void;
@@ -124,6 +147,7 @@ export class RollingUploader {
   private readonly gate: UploadGate;
   private readonly accountKey: string;
   private readonly now: () => number;
+  private readonly minSegmentSec: number;
   /** 段文件所在目录(首个段确定;sidecar 写在这里)。 */
   private segDir = "";
   private state: RollingState;
@@ -133,11 +157,20 @@ export class RollingUploader {
   private chain: Promise<unknown> = Promise.resolve();
   /** 会话第一段写入时刻(epoch ms)—— 标题 `{HH}-{mm}-{ss}` 用它,避免用上传时刻漂移。 */
   private firstSegMtimeMs = 0;
+  /** sidecar 原子写失败 → true:停止上传/删源(保留源,状态不可信,转人工)。 */
+  private stateUntrusted = false;
+  /** 从磁盘读到「已确认」段 → 恢复后补删「确认了但没删成」(崩溃窗口)的源。 */
+  private needsConfirmCleanup = false;
+  /** 崩溃恢复只应跑一次(读盘所得状态一次性结算,避免重复 query 分 P 数)。 */
+  private recoveryDone = false;
+  /** 已记过「碎片段跳过」日志的段号(避免每轮 flush 刷屏)。 */
+  private readonly loggedSkipped = new Set<number>();
 
   constructor(o: RollingUploaderOpts) {
     this.o = o;
     this.log = o.log ?? ((m: string): void => console.error(m));
     this.now = o.now ?? Date.now;
+    this.minSegmentSec = Math.max(0, o.minSegmentSec ?? DEFAULT_MIN_SEGMENT_SEC);
     const cookiesPath = o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
     this.gate = o.gate ?? openNodeUploadGate({ warn: this.log });
     this.accountKey = resolveUploadAccountKey(cookiesPath);
@@ -164,6 +197,12 @@ export class RollingUploader {
         confirmed: [],
         updatedAt: this.now(),
       };
+      // 重启读回建稿时刻:标题时间锚定**会话首段**,不受「重启后先看到哪个段」影响。
+      if (Number.isFinite(this.state.startMs) && (this.state.startMs ?? 0) > 0) {
+        this.firstSegMtimeMs = this.state.startMs as number;
+      }
+      // 重启/换进程读到「已确认」段 → 需要补删「确认了但没删成」的源(崩溃窗口:确认后、删前被杀)。
+      if (this.state.confirmed.length > 0) this.needsConfirmCleanup = true;
       // 从持久化状态重建「路径 → 段号」映射(重启后段号续号,不漏传、不重复建稿)。
       for (const s of this.state.segments ?? []) {
         if (s && typeof s.path === "string" && typeof s.index === "number") this.indexByPath.set(s.path, s.index);
@@ -181,9 +220,11 @@ export class RollingUploader {
     this.state = {
       ...this.state,
       segments: [...(this.state.segments ?? []), { index: idx, path: filePath }],
+      // 首段时刻一旦确定就落盘(此后不覆盖):崩溃恢复的建稿标题必须用原始开播时刻。
+      startMs: this.state.startMs ?? (Number.isFinite(this.firstSegMtimeMs) && this.firstSegMtimeMs > 0 ? this.firstSegMtimeMs : this.now()),
       updatedAt: this.now(),
     };
-    writeState(this.segDir, this.state);
+    this.persist();
     return idx;
   }
 
@@ -193,6 +234,140 @@ export class RollingUploader {
   get confirmedIndices(): number[] { return [...this.state.confirmed]; }
   /** 结果不确定段号(转人工;诊断/测试)。 */
   get ambiguousIndices(): number[] { return [...(this.state.ambiguous ?? [])]; }
+
+  /**
+   * 原子写 sidecar(WAL 语义):先写临时文件 → fsync → rename 原子替换。失败**不静默**:
+   * 置 `stateUntrusted`(保留源、停止自动上传/删源,转人工)并打日志。
+   */
+  private persist(): boolean {
+    if (this.stateUntrusted) return false;
+    // 防御:还没上报过任何分段就没有 sessionBase → 没有可写的 sidecar 路径(拼出来会落到进程 cwd
+    // 的 `.rolling.json`)。此时无事可持久化,直接跳过,绝不写脏文件。
+    if (!this.state.sessionBase || !this.segDir) return true;
+    const target = statePathFor(this.segDir, this.state.sessionBase);
+    const tmp = `${target}.tmp.${process.pid}.${Date.now().toString(36)}`;
+    try {
+      const fd = openSync(tmp, "w", 0o644);
+      try {
+        writeFileSync(fd, JSON.stringify({ ...this.state, schemaVersion: ROLLING_STATE_SCHEMA_VERSION }), "utf-8");
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, target);
+      return true;
+    } catch (e) {
+      try { unlinkSync(tmp); } catch { /* best-effort 清理临时文件 */ }
+      this.stateUntrusted = true;
+      this.log(
+        `[rolling] ⚠️ sidecar 原子写失败(${target}),会话幂等状态不可信 → 停止自动上传并保留源(转人工): ` +
+        String((e as Error)?.message ?? e).slice(0, 200),
+      );
+      return false;
+    }
+  }
+
+  /** 查询 BV 当前分 P 数(append 幂等核对 / 崩溃恢复)。 */
+  private countPartsInner(bv: string, cookies: string): Promise<number | null> {
+    return (this.o.countPartsRaw ?? countVideoParts)(bv, cookies);
+  }
+
+  /**
+   * **崩溃恢复**:读盘到 `uploading` 意图标记(进程在「开始上传 → 落结果」之间被杀)时结算一次。
+   *   - `create` 且无 BV:无法查证是否已建稿 → 保守转人工,**绝不自动重建稿**(避免重复投稿)。
+   *   - `append` 且有 BV:用分 P 数核对 —— 比 `confirmed.length` 多 1 → 其实已追加成功(补确认);
+   *     等于 `confirmed.length` → 未提交(安全,让正常循环重试);查不到/异常 → 转人工。
+   */
+  private async recoverDanglingUpload(): Promise<void> {
+    if (this.recoveryDone || !this.state.uploading) return;
+    this.recoveryDone = true;
+    const { index, kind } = this.state.uploading;
+    const confirmed = new Set(this.state.confirmed);
+    if (confirmed.has(index)) {
+      // 已在确认后、销标记前被杀:仅清标记,源由 needsConfirmCleanup 补删。
+      this.state = { ...this.state, uploading: undefined, updatedAt: this.now() };
+      this.persist();
+      return;
+    }
+    if (kind === "create") {
+      this.log(`[rolling] ⚠️ 上次会话在 P1 建稿过程中中断(BV 未知),段 ${index} 转人工核对,绝不自动重建稿`);
+      this.state = {
+        ...this.state,
+        uploading: undefined,
+        ambiguous: [...(this.state.ambiguous ?? []), index],
+        updatedAt: this.now(),
+      };
+      this.persist();
+      return;
+    }
+    if (kind === "append" && this.state.bv) {
+      const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+      let parts: number | null = null;
+      try {
+        parts = await this.gate.run(this.accountKey, () => this.countPartsInner(this.state.bv!, cookies));
+      } catch { parts = null; }
+      const expected = this.state.confirmed.length;
+      // 用**分 P 数**做唯一证据(不额外要求段号连续):碎片段会被跳过(minSegmentSec),
+      // 那时 confirmed 天然非连续(如 0,1,3)但分 P 数**仍然** = 已上传段数 = confirmed.length
+      // —— 再要求连续会把这种正常情况误判成「历史/人工干预」→ 无谓转人工。
+      if (parts == null) {
+        this.log(`[rolling] ⚠️ 上电恢复失败(parts=${String(parts)} confirmed=${this.state.confirmed.join(",")}),段 ${index} 转人工核对`);
+        this.state = {
+          ...this.state,
+          uploading: undefined,
+          ambiguous: [...(this.state.ambiguous ?? []), index],
+          updatedAt: this.now(),
+        };
+        this.persist();
+        return;
+      }
+      if (parts === expected + 1) {
+        // 上次 append 其实已成功(客户端没拿到响应即被杀)→ 补确认,源交 needsConfirmCleanup 删除。
+        confirmed.add(index);
+        this.state = { ...this.state, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
+        this.persist();
+        this.log(`[rolling] 上电恢复:段 ${index} 上次 append 已提交(分P数=${parts}),补确认`);
+        return;
+      }
+      if (parts === expected) {
+        // 未提交 → 安全,清意图标记;正常循环会重试该段。
+        this.state = { ...this.state, uploading: undefined, updatedAt: this.now() };
+        this.persist();
+        this.log(`[rolling] 上电恢复:段 ${index} 上次 append 未提交(分P数=${parts}),安全重试`);
+        return;
+      }
+      this.log(`[rolling] ⚠️ 上电恢复:段 ${index} 分P数异常(${parts} != 期望 ${expected}/${expected + 1}),转人工核对`);
+      this.state = {
+        ...this.state,
+        uploading: undefined,
+        ambiguous: [...(this.state.ambiguous ?? []), index],
+        updatedAt: this.now(),
+      };
+      this.persist();
+      return;
+    }
+    // append 意图但无 BV(状态不一致)→ 保守转人工。
+    this.log(`[rolling] ⚠️ 上电恢复:append 意图但无 BV,段 ${index} 转人工核对`);
+    this.state = {
+      ...this.state,
+      uploading: undefined,
+      ambiguous: [...(this.state.ambiguous ?? []), index],
+      updatedAt: this.now(),
+    };
+    this.persist();
+  }
+
+  /**
+   * 判断封口段是否为「碎片段」(时长小于 {@link minSegmentSec})。
+   * 时长用「本段 mtime − 上一段 mtime」近似(上一段关闭 ≈ 本段开始)。段 0 无前驱 → 恒非碎片
+   * (P1 必传)。碎片段不上传、不删、不阻塞后续段(内容缺口极小,交给人工)。
+   */
+  private isFragment(seg: RollingSegment, rolling: readonly RollingSegment[]): boolean {
+    if (this.minSegmentSec <= 0 || seg.index === 0) return false;
+    const prev = rolling.find((s) => s.index === seg.index - 1);
+    if (!prev || prev.mtimeMs <= 0 || seg.mtimeMs <= prev.mtimeMs) return false;
+    return seg.mtimeMs - prev.mtimeMs < this.minSegmentSec * 1000;
+  }
 
   /**
    * 处理当前已知分段:算封口段 → 上传未确认者 → 确认后删该段源视频。
@@ -209,49 +384,87 @@ export class RollingUploader {
 
   private async _flush(recordingActive: boolean): Promise<{ uploaded: number[]; deleted: string[]; ambiguous: number[] }> {
     const nowMs = this.now();
+    if (this.stateUntrusted) {
+      // 失败已在 persist() 日志明示;此后不做任何上传/删源(保留源,转人工)。
+      return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
+    }
     const rolling: RollingSegment[] = [...this.indexByPath.entries()].map(([p, index]) => {
       let mtimeMs = 0;
       try { mtimeMs = statSync(p).mtimeMs; } catch { mtimeMs = 0; }
       return { path: p, index, mtimeMs };
     });
+    // 崩溃恢复:结算上次进程留下的 uploading 意图(可能补确认 / 安全重试 / 转人工)。
+    await this.recoverDanglingUpload();
+    if (this.stateUntrusted) return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
     const confirmed = new Set(this.state.confirmed);
     const ambiguous = new Set(this.state.ambiguous ?? []);
-    const pending = planRollingUploads(rolling, {
-      recordingActive, nowMs, sealGraceMs: this.o.sealGraceMs ?? DEFAULT_SEAL_GRACE_MS,
-    }, confirmed).filter((s) => !ambiguous.has(s.index));
+    // 封口判定(唯一真理 = core.sealedSegmentIndices),grace 恒为 0:
+    //   - 录制中:最新段**恒不封口**(只有「出现后继段」才封口),grace 根本不参与判定;
+    //   - 收尾(recordingActive=false):调用方契约是**录制进程已退出** —— manager 在
+    //     `await recorder.stop()`(SIGINT + 8s SIGKILL 兜底)之后才调 `onSessionEnd`,最后一段不会再增长。
+    //   ⚠️ 这里曾经沿用 `DEFAULT_SEAL_GRACE_MS`(3s):而「刚写完就收尾」的末段 mtime 距今 < 3s
+    //   → 判不出封口 → **末段永不上传、源永残留**(master 见「有 rolling.bv 但仍有 ts」→ 整场转人工)。
+    //   收尾是**一次性**调用(不重试),所以这个宽限没有任何补救机会,只有害处。见 rolling-upload.test.ts
+    //   「默认收尾 flush 上传末段」回归用例。
+    const sealOpts = { recordingActive, nowMs, sealGraceMs: 0 };
+    const sealed = sealedSegmentIndices(rolling, sealOpts);
+    const planned = planRollingUploads(rolling, sealOpts, confirmed);
+    // 头阻塞:ambiguous 段及其后的段一律不外发(B 站 append 只能追加末尾,缺口不可逆)。
+    const headBlocked = headOfLineFilter(planned, ambiguous);
+    const pending: RollingSegment[] = [];
+    for (const s of headBlocked) {
+      if (this.isFragment(s, rolling)) {
+        if (this.loggedSkipped.has(s.index)) continue;
+        this.loggedSkipped.add(s.index);
+        this.log(`[rolling] 段 ${s.index} 时长过短(< ${this.minSegmentSec}s),不上传、保留源(转人工处理)`);
+        continue;
+      }
+      pending.push(s);
+    }
 
     const uploaded: number[] = [];
     const deleted: string[] = [];
+    // 崩溃窗口补删:上次「确认后、删源前」被杀留下的源(幂等;仅重启后首轮执行)。
+    if (this.needsConfirmCleanup) {
+      this.needsConfirmCleanup = false;
+      for (const s of rolling) {
+        if (confirmed.has(s.index) && sealed.has(s.index)) this.deleteConfirmedSource(s, confirmed, sealed.has(s.index));
+      }
+    }
     for (const seg of pending) {
       // 不确定段绝不重传(可能已提交分 P)。
       if (ambiguous.has(seg.index) || confirmed.has(seg.index)) continue;
       try {
-        await this.uploadSegment(seg);
-        confirmed.add(seg.index);
-        this.state = { ...this.state, confirmed: [...confirmed], updatedAt: this.now() };
-        writeState(this.segDir, this.state);
+        // 成功时把 confirmed 并入**同一次** sidecar 写(见 uploadSegment):
+        // 避免「uploadSegment 落 bv 后、_flush 再落 confirmed」之间崩溃 → 重启漏确认 → 重复 append。
+        await this.uploadSegment(seg, confirmed);
         uploaded.push(seg.index);
-        if (this.deleteConfirmedSource(seg, confirmed)) deleted.push(seg.path);
+        if (this.deleteConfirmedSource(seg, confirmed, sealed.has(seg.index))) deleted.push(seg.path);
       } catch (e) {
         const msg = String((e as Error)?.message ?? e);
         // 结果不确定(限流重试耗尽 / 网络) → 转人工:保留源,记 ambiguous,不自动重传。
         ambiguous.add(seg.index);
-        this.state = { ...this.state, ambiguous: [...ambiguous], updatedAt: this.now() };
-        writeState(this.segDir, this.state);
+        this.state = { ...this.state, uploading: undefined, ambiguous: [...ambiguous], updatedAt: this.now() };
+        this.persist();
         this.log(`[rolling] 段 ${seg.index} 上传失败/不确定,保留源并转人工(不自动重传): ${msg.slice(0, 200)}`);
+        // **头阻塞**:段号升序处理,一旦第 k 段失败,之后所有段(>k)若继续上传将形成不可逆的空洞
+        // (B 站 append 只能末尾追加,缺口补不回)。立即停下,等 k 结清(headOfLineFilter 在下一轮
+        // 会把 k 及其后全部挡回)。
+        break;
       }
     }
     return { uploaded, deleted, ambiguous: [...ambiguous] };
   }
 
   /** 上传一个封口段:P1(无 bv)建稿 → 落 BV;其余 append。 */
-  private async uploadSegment(seg: RollingSegment): Promise<void> {
+  private async uploadSegment(seg: RollingSegment, confirmed: Set<number>): Promise<void> {
     const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
     const meta = {
       cookies,
       tag: this.o.uploadMeta.tag,
       tid: this.o.uploadMeta.tid,
       desc: this.o.uploadMeta.desc,
+      // 边录边传默认「仅自己可见」(公开不可逆);唯一显式 override = hub 规则 upload.private:false。
       public: this.o.uploadPrivate === false,
     };
     if (!this.state.bv) {
@@ -266,25 +479,48 @@ export class RollingUploader {
       });
       const subTpl = (this.o.uploadMeta.submissionTitleTemplate ?? "").trim();
       const title = subTpl ? formatBiliTitle(subTpl, { sessionBase: base, startMs, timeZone: this.o.timeZone }) : stem;
+      // WAL:先落「建稿中」意图,再真正建稿。崩溃后据此转人工,绝不自动重建稿(重复投稿不可逆)。
+      this.state = { ...this.state, uploading: { index: seg.index, kind: "create" }, updatedAt: this.now() };
+      if (!this.persist()) throw new Error("sidecar 写失败(建稿意图),中止上传并保留源");
       const up = this.o.uploadPlainRaw ?? uploadPlain;
       const bv = await this.gate.run(this.accountKey, () => up({ plain: { ...meta, video: seg.path, title } }));
-      this.state = { ...this.state, bv, updatedAt: this.now() };
-      writeState(this.segDir, this.state);
+      // 把「当段已确认」并入同一次写:建稿成功即确认段 0,防止 bv 与 confirmed 分两次写之间崩溃。
+      confirmed.add(seg.index);
+      this.state = { ...this.state, bv, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
+      if (!this.persist()) throw new Error(`sidecar 写失败(建稿结果 BV=${bv}),状态不可信,保留源`);
       this.log(`[rolling] 段 ${seg.index} 建稿 BV=${bv}`);
       return;
     }
+    const bv = this.state.bv;
+    // WAL:先落「追加第 index 段中」意图。崩溃后凭分 P 数核对是否已提交(见 recoverDanglingUpload)。
+    this.state = { ...this.state, uploading: { index: seg.index, kind: "append" }, updatedAt: this.now() };
+    if (!this.persist()) throw new Error("sidecar 写失败(append 意图),中止上传并保留源");
     const ap = this.o.appendGroupRaw ?? appendGroup;
-    await this.gate.run(this.accountKey, () => ap({ ...meta, bv: this.state.bv!, files: [seg.path] }));
-    this.log(`[rolling] 段 ${seg.index} append 到 ${this.state.bv}`);
+    await this.gate.run(this.accountKey, () =>
+      ap({
+        ...meta,
+        bv,
+        files: [seg.path],
+        // 幂等核对:失败后重查分 P 数,变多 = 其实已成功;查不到 → 抛 ambiguous 标记转人工。
+        countParts: () => this.countPartsInner(bv, cookies),
+      }),
+    );
+    // 与建稿同口径:确认并入同一次写,防止 append 成功后、补 confirmed 前崩溃导致重复 append。
+    confirmed.add(seg.index);
+    this.state = { ...this.state, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
+    if (!this.persist()) throw new Error(`sidecar 写失败(append 结果段 ${seg.index}),状态不可信,保留源`);
+    this.log(`[rolling] 段 ${seg.index} append 到 ${bv}`);
   }
 
   /**
    * 删除该段**源视频**(仅当 core 的删源三重证据齐备:封口 + 已确认 + 房间身份一致)。
    * `.xml`/`.ass` 不在此路径(绝不删弹幕源)。
    */
-  private deleteConfirmedSource(seg: RollingSegment, confirmed: ReadonlySet<number>): boolean {
+  private deleteConfirmedSource(seg: RollingSegment, confirmed: ReadonlySet<number>, sealed: boolean): boolean {
     const evidence = {
-      sealed: true, // 仅由 _flush 对「已封口」段调用
+      // 证据**派生自** core 的封口判定,绝不硬编码 true —— 硬编码一旦被将来的新调用点复用,
+      // 就可能删掉「正在写」的段(不可逆)。调用方必须把当前轮的封口集合算出来传进来。
+      sealed,
       ack: confirmed.has(seg.index),
       segmentRoom: this.o.room,
       targetRoom: this.o.room,
@@ -360,10 +596,11 @@ export function makeRollingUploadHookFactory(o: {
   timeZone?: string;
   uploadPrivate?: boolean;
   cookies?: string;
-  sealGraceMs?: number;
+  minSegmentSec?: number;
   log?: (msg: string) => void;
   uploadPlainRaw?: typeof uploadPlain;
   appendGroupRaw?: typeof appendGroup;
+  countPartsRaw?: (bv: string, cookies: string) => Promise<number | null>;
   removeFile?: (p: string) => boolean;
   now?: () => number;
   gate?: UploadGate;
@@ -388,10 +625,11 @@ export function makeRollingUploadHookFactory(o: {
       timeZone: o.timeZone,
       uploadPrivate: o.uploadPrivate ?? isPrivate,
       cookies: o.cookies,
-      sealGraceMs: o.sealGraceMs,
+      minSegmentSec: o.minSegmentSec,
       log: o.log,
       uploadPlainRaw: o.uploadPlainRaw,
       appendGroupRaw: o.appendGroupRaw,
+      countPartsRaw: o.countPartsRaw,
       removeFile: o.removeFile,
       now: o.now,
       gate: o.gate,
