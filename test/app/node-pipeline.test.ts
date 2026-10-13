@@ -598,6 +598,40 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
     expect(vi.mocked(uploadPlain)).toHaveBeenCalledTimes(1); // 没建过稿 → 安全新建
     expect(readNodeResult(sub)?.phase).toBe("done"); // started 已推进为终态
   });
+
+  it("#59:每次 appendGroup 都带 countParts,且回读的是本稿件 bv + 本机 cookies 路径", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(appendGroup).mockClear();
+    vi.mocked(countVideoParts).mockClear();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1CNT");
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    const calls = vi.mocked(appendGroup).mock.calls as unknown as Array<[{ bv: string; countParts?: () => Promise<number | null> }]>;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [o] of calls) {
+      expect(o.bv).toBe("BV1CNT");
+      expect(typeof o.countParts, "缺 countParts 则追加结果不确定时无法幂等核对").toBe("function");
+    }
+    await calls[0]![0].countParts!();
+    expect(vi.mocked(countVideoParts)).toHaveBeenLastCalledWith("BV1CNT", expect.any(String));
+    expect(readNodeResult(sub)?.phase).toBe("done");
+  });
+
+  it("#59:append 结果不确定(抛 ambiguous)→ 不重试、落 failed+bv 转人工,只调一次", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1AMB");
+    const err = new Error("[append-ambiguous] append 结果不确定,需人工核对");
+    vi.mocked(appendGroup).mockRejectedValueOnce(err);
+    await expect(runNodeSidePipeline(spec, silence, gate)).rejects.toThrow(/不确定|人工/);
+    expect(vi.mocked(appendGroup)).toHaveBeenCalledTimes(1); // 绝不重复追加
+    const r = readNodeResult(sub);
+    expect(r?.phase).toBe("failed");
+    expect(r?.bv).toBe("BV1AMB");
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+  });
 });
 
 describe("issue #2 A2:abortNodeExecutor(经注入 deps 安全终止,绝不误杀)", () => {
