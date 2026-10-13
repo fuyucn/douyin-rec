@@ -46,8 +46,9 @@ export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
   if (cookiesFile) {
     args.push("--cookies-file", cookiesFile);
   }
-  // 边录边传(T-33):仅开启时下发(默认关 = 不带该 flag,行为不变)。
-  if (task.rollingUpload) {
+  // 边录边传(T-33):录制端**只读 master 派生的 `rollingEffective`**(issue #40),不读旧开关/规则;
+  // 仅生效时下发(默认关 = 不带该 flag,行为不变)。
+  if (task.rollingEffective) {
     args.push("--rolling-upload", "1");
   }
   return args;

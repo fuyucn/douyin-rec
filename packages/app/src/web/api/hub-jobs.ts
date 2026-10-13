@@ -6,7 +6,7 @@
  */
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
-import { HUB_JOB_STATES, QUEUE_PHASES, platformForRoom, type QueuePhase } from "@drec/core";
+import { HUB_JOB_STATES, QUEUE_PHASES, isUploadingMode, platformForRoom, type QueuePhase } from "@drec/core";
 import { listHubJobs, readHubJobLog, latestRunPerRoom, buildQueueView } from "../../hub-jobs.js";
 import * as hubStore from "../../hub-store.js";
 
@@ -85,7 +85,7 @@ export function buildHubJobs(ctx: ApiCtx) {
           const out = new Set<string>();
           if (p.steps?.burnDanmu === false) out.add("burn_danmu");
           if (p.steps?.burnLivechat === false) out.add("burn_livechat");
-          if (p.upload?.mode !== "upload") {
+          if (!isUploadingMode(p.upload?.mode)) {
             out.add("upload_plain").add("append_danmu").add("append_livechat");
           }
           return out;

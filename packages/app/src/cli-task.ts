@@ -120,7 +120,7 @@ export function buildSessionForTask(
 
   // 边录边传(T-33,默认关):开启时注入「每会话一个」上传钩子工厂(metadata 读 hub 规则/hub.config)。
   const makeRolling = makeRollingUploadHookFactory({
-    enabled: task.rollingUpload,
+    enabled: task.rollingEffective, // 只读 master 派生的生效值(issue #40)
     platform: task.platform,
     roomSlug: platformForRoom(task.room).extractRoomSlug(task.room),
   });
@@ -299,7 +299,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .option("--use-cookie <0|1>", "弹幕含礼物: 1=含礼物(需账号cookie) 0=仅评论(匿名) (默认 1)")
     .option("--out <dir>", "输出目录")
     .option("--schedule <HH:MM-HH:MM>", "定时窗口（仅存储，本骨架不自动启停）")
-    .option("--rolling-upload <0|1>", "边录边传: 1=录制中每封口一段就上传并删该段源 0=整场录完再处理 (默认 0)")
+    .option("--rolling-upload <0|1>", "[已弃用] 旧边录边传开关;请改在 hub 规则设 pipeline.upload.mode=rolling(旧值 1 且规则未配置 ≡ rolling)")
     .option("--db <path>", "数据库路径（默认 ./douyin-rec.db 或 env DOUYIN_REC_DB）")
     .action(async (o: AddOpts) => {
       const store = new TaskStore(o.db);
@@ -361,7 +361,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .option("--use-cookie <0|1>", "弹幕含礼物: 1=含礼物(需账号cookie) 0=仅评论(匿名)")
     .option("--out <dir>", "输出目录")
     .option("--schedule <HH:MM-HH:MM>", "定时窗口（仅存储，本骨架不自动启停）")
-    .option("--rolling-upload <0|1>", "边录边传: 1=开 0=关（默认不改）")
+    .option("--rolling-upload <0|1>", "[已弃用] 旧边录边传开关(1=开 0=关,默认不改);请改在 hub 规则设 pipeline.upload.mode=rolling")
     .option("--db <path>", "数据库路径（默认 ./douyin-rec.db 或 env DOUYIN_REC_DB）")
     .action((id: string, o: AddOpts & { id?: string }) => {
       const store = new TaskStore(o.db);

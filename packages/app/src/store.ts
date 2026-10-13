@@ -6,7 +6,7 @@
  * All operations are synchronous (node:sqlite is sync).
  */
 import type { DatabaseSync } from "node:sqlite";
-import { getPlatform, platformForRoom } from "@drec/core";
+import { getPlatform, platformForRoom, resolveRollingPolicy } from "@drec/core";
 import { openDb } from "./db.js";
 
 export type TaskStatus = "stopped" | "running" | "error" | "pending" | "draining";
@@ -62,12 +62,17 @@ export interface Task {
    */
   managedBy: string | null;
   /**
-   * 边录边传开关(T-33,默认 false):true → 录制中每产生一个**已封口**分段就单独上传并
-   * 删该段源视频(见 plans/031)。开关**只在任务上**(用户明确要求)—— 录制端据此边录边传;
-   * master 侧按 hub 规则的 workers 做「单节点才下发」的重复投稿闸门(见 cli.desiredFor)。
-   * false(缺省)= 整场录完再处理,行为与改动前完全一致。
+   * **旧**边录边传开关(T-33):issue #40 起配置入口迁到 hub 规则 `pipeline.upload.mode="rolling"`,
+   * task 只保留录制参数。该列保留不删,仅作**迁移来源**(旧值 true 且规则未配置 ≡ rolling,
+   * 见 core `resolveRollingPolicy`)与旧值只读展示;新建/编辑 Web 表单不再暴露。
    */
   rollingUpload: boolean;
+  /**
+   * 边录边传**生效值**(只读派生字段):master 用 `resolveRollingPolicy` 算出并写入;**录制端只读它**,
+   * 不再自行读规则/判定。列为 NULL(尚未派生:旧库、无 hub 规则的单机任务)→ 读取时按旧开关迁移
+   * (旧开关 true ≡ rolling)。见 plans/031 的不变量 —— 本字段只改配置归属,不改上传/删源行为。
+   */
+  rollingEffective: boolean;
 }
 
 /** Fields accepted when adding a task. Defaults applied for omitted values. */
@@ -98,7 +103,7 @@ export interface TaskInput {
   managedBy?: string | null;
   /** 主播名(收编/下发时同步 master 侧);省略 = null。仅内部同步路径可写,Web 不暴露。 */
   anchorName?: string | null;
-  /** 边录边传开关(T-33,默认 false);见 Task.rollingUpload。 */
+  /** **旧**边录边传开关(T-33,默认 false);见 Task.rollingUpload(新配置入口在 hub 规则)。 */
   rollingUpload?: boolean;
 }
 
@@ -124,6 +129,7 @@ interface TaskRow {
   webhook: string | null;
   managedBy: string | null;
   rollingUpload: number;
+  rollingEffective: number | null;
 }
 
 /**
@@ -184,6 +190,10 @@ function rowToTask(r: TaskRow): Task {
     webhook: r.webhook ?? null,
     managedBy: r.managedBy ?? null,
     rollingUpload: Number(r.rollingUpload) !== 0,
+    // 派生值缺失(NULL)→ 读取时迁移:无规则信息可用,等价「规则未配置」→ 旧开关 true ≡ rolling。
+    rollingEffective: r.rollingEffective == null
+      ? resolveRollingPolicy(null, Number(r.rollingUpload) !== 0).effective
+      : Number(r.rollingEffective) !== 0,
   };
 }
 
@@ -292,6 +302,8 @@ export class TaskStore {
         | "webhook"
         | "rollingUpload"
       > & {
+        /** 派生生效值(仅 master 同步/启动刷新可写);null = 清空,回落旧开关迁移。 */
+        rollingEffective?: boolean | null;
         /** 自动抓取的主播名(收编时同步 master 侧名称;不在 TaskInput 上,仅 updateTask 可写)。 */
         anchorName?: string | null;
       }
@@ -343,6 +355,12 @@ export class TaskStore {
     if ("webhook" in patch) set("webhook", patch.webhook ?? null);
     if ("anchorName" in patch) set("anchorName", patch.anchorName ?? null);
     if ("rollingUpload" in patch) set("rollingUpload", patch.rollingUpload ? 1 : 0);
+    if ("rollingEffective" in patch) {
+      set("rollingEffective", patch.rollingEffective == null ? null : patch.rollingEffective ? 1 : 0);
+    } else if ("rollingUpload" in patch) {
+      // 旧开关被改写而没带派生值 → 旧派生值已过时,清空回落旧开关迁移(hub 源任务下一轮同步会重算)。
+      set("rollingEffective", null);
+    }
 
     if (cols.length === 0) return this.getTask(id); // nothing to change
 

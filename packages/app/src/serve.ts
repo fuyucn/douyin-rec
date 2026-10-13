@@ -14,6 +14,7 @@ import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
 import { drecRoot, ensureHubConfigExample, ensureNodeIdentity, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
+import { refreshLocalRollingEffective } from "./rolling-effective.js";
 import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
 import { makeNotifier, resolveWebhookToggles } from "@drec/observability";
@@ -148,6 +149,16 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // hub 是否在本节点启用(master)?= --hub + 有 hubStarter + 能解析出 hub 配置。
     // slave(无 --hub)= false → 前端据此隐藏 Hub 页 / 显示 child node 提示。
     const hubEnabled = !!(o.hub && hubStarter && resolveHubConfigJson(o.hubConfig, store));
+    // 边录边传生效值(issue #40):首轮 hub 同步前,先用唯一判定刷新绑定了规则的本机任务,
+    // 堵住「同步未跑完、daemon 已起录」窗口里按旧开关放行而绕过多节点重复投稿闸门。失败只告警(回落旧开关迁移)。
+    if (hubEnabled) {
+      try {
+        const n = refreshLocalRollingEffective(store, rootHubDir());
+        console.log(`[rolling] 启动刷新边录边传生效值:${n} 个任务绑定 hub 规则`);
+      } catch (e) {
+        console.warn(`[rolling] 启动刷新边录边传生效值失败(回落旧开关迁移):${String((e as Error)?.message ?? e)}`);
+      }
+    }
     // hub 台账路径与 cli hubStarter 同一推导(<db>-sync.db)——「hub 任务」端点读它展示进度/ETA/日志。
     const syncDbPath = resolveDbPath(o.db).replace(/\.db$/, "-sync.db");
     // T4:台账变更监视 → SSE(/api/hub/stream)。

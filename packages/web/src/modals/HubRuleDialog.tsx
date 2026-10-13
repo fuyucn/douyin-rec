@@ -31,7 +31,7 @@ interface FormState {
   clStageSourceAfterMerge: boolean;
   clSourceAfterDone: boolean;
   clStageAfterDone: boolean;
-  uploadMode: string; // "stage" | "upload"
+  uploadMode: string; // "stage" | "upload" | "rolling"
   uploadPrivate: boolean; // 仅 upload 有意义:true=仅自己可见,false=公开
   uploadTag: string;
   uploadTid: string;
@@ -120,7 +120,7 @@ function fromRule(r: HubRuleDTO): FormState {
     clStageSourceAfterMerge: c.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: c.cleanup?.sourceAfterDone === true,
     clStageAfterDone: c.cleanup?.stageAfterDone === true,
-    uploadMode: c.upload?.mode === "upload" ? "upload" : "stage",
+    uploadMode: c.upload?.mode === "upload" || c.upload?.mode === "rolling" ? c.upload.mode : "stage",
     uploadPrivate: c.upload?.private !== false,
     uploadTag: c.upload?.tag ?? "",
     uploadTid: String(c.upload?.tid ?? 21),
@@ -324,7 +324,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           stageAfterDone: form.clStageAfterDone,
         },
         upload: {
-          mode: form.uploadMode === "upload" ? "upload" : "stage",
+          mode: form.uploadMode === "upload" || form.uploadMode === "rolling" ? form.uploadMode : "stage",
           private: form.uploadPrivate,
           tag: form.uploadTag.trim() || undefined,
           tid: Number(form.uploadTid) || 21,
@@ -623,17 +623,33 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           <label className="switch-row">
             <span className="flex flex-col">
               <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.uploadToggleLabel")}</span>
-              <span className="text-xs text-muted mt-0.5">{form.uploadMode === "upload" ? t("hub.ruleDialog.uploadOnHint") : t("hub.ruleDialog.uploadOffHint")}</span>
+              <span className="text-xs text-muted mt-0.5">{form.uploadMode !== "stage" ? t("hub.ruleDialog.uploadOnHint") : t("hub.ruleDialog.uploadOffHint")}</span>
             </span>
             <Switch
-              checked={form.uploadMode === "upload"}
-              onCheckedChange={(v) => set("uploadMode", v ? "upload" : "stage")}
+              checked={form.uploadMode !== "stage"}
+              onCheckedChange={(v) => set("uploadMode", v ? (form.uploadMode === "rolling" ? "rolling" : "upload") : "stage")}
               name="uploadOn"
             />
           </label>
 
+          {/* 边录边传(issue #40):配置入口在 hub 规则 —— mode=rolling = 合成并上传 + 录制端每封口一段就传、
+              确认后删该段源;仅当本规则恰好勾选 1 个节点时生效,否则回落整场管线(防重复投稿)。 */}
+          {form.uploadMode !== "stage" && (
+            <label className="switch-row mt-3">
+              <span className="flex flex-col">
+                <span className="text-sm font-medium text-ink">{t("rooms.rollingUpload")}</span>
+                <span className="text-xs text-muted mt-0.5">{t("rooms.rollingUploadHint")}</span>
+              </span>
+              <Switch
+                checked={form.uploadMode === "rolling"}
+                onCheckedChange={(v) => set("uploadMode", v ? "rolling" : "upload")}
+                name="uploadRolling"
+              />
+            </label>
+          )}
+
           {/* 只有开了上传才显示后面的投稿明细 */}
-          {form.uploadMode === "upload" && (
+          {form.uploadMode !== "stage" && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
               <label className="switch-row">
                 <span className="flex flex-col">

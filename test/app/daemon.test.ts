@@ -25,7 +25,7 @@ function mkTask(
     scheduleEnd,
     status: "stopped",
     useCookie: true,
-    rollingUpload: false,
+    rollingUpload: false, rollingEffective: false,
     enabled,
     createdAt: "2026-06-12T00:00:00.000Z",
   };

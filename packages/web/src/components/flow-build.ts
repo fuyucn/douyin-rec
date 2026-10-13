@@ -33,7 +33,7 @@ export function presentSet(
   // 但其收尾仍会删节点源(cleanupSourcesShared → clean_source),这一步要如实画出来。
   if (!TERMINAL.has(job.state) && cfg) {
     const st = cfg.steps ?? {};
-    const up = cfg.upload?.mode === "upload";
+    const up = cfg.upload?.mode === "upload" || cfg.upload?.mode === "rolling";
     const cl = cfg.cleanup ?? {};
     if (!nodeSide) {
       if (st.burnDanmu !== false) p.add("burn_danmu");

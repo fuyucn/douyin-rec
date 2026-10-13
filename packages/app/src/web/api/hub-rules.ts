@@ -65,6 +65,7 @@ export function buildHubRules(ctx: ApiCtx) {
           workers: input.workers,
           requires: input.requires,
         });
+        // 新建规则不收口旧开关:此前没有规则可展示「迁移后的 rolling」,旧开关 true 的任务保持 rolling(同改前)。
         deps.requestSyncTasks?.();
         return { status: 201, body: hubRuleView(rule) };
       } catch (e) {
@@ -89,6 +90,7 @@ export function buildHubRules(ctx: ApiCtx) {
       if ("requires" in input) patch.requires = input.requires;
       const updated = hubStore.updateHubRule(hubDir, key, patch);
       if (!updated) return err(404, `未找到 hub 规则 key=${key}`);
+      ctx.settleLegacyRolling(updated.recording?.sourceTaskId, input.pipeline?.upload?.mode);
       deps.requestSyncTasks?.();
       return { status: 200, body: hubRuleView(updated) };
     },

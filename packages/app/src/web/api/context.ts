@@ -6,7 +6,7 @@
  */
 import { join } from "node:path";
 import {
-  listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
+  isUploadingMode, normalizeUploadMode, listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
   type WorkerDTO, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO,
 } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
@@ -38,6 +38,7 @@ export interface ApiCtx {
   validatePipeline: (input: HubRulePayload) => string | null;
   hubRuleView: (r: hubStore.HubRule) => HubRuleDTO;
   recordingError: (sourceTaskId: number | null | undefined, roomSlug: string) => string | null;
+  settleLegacyRolling: (sourceTaskId: number | null | undefined, mode: unknown) => void;
   recordingsDir: (t: Task) => string | null;
   platformCookie: (platform: string) => { value: string | null; source: CookieStatus["source"] };
   biliupStatus: () => BiliupAuthStatus;
@@ -115,7 +116,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
           }
           hubRule = {
             key: rule.key, enabled: rule.enabled, steps,
-            uploadMode: p.upload?.mode === "upload" ? "upload" : "stage", lastRun,
+            uploadMode: isUploadingMode(p.upload?.mode) ? "upload" : "stage", lastRun,
           };
         }
       }
@@ -144,6 +145,11 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     return null;
   };
   const validatePipeline = (input: HubRulePayload): string | null => {
+    // upload.mode 只认 stage/upload/rolling(issue #40);未给 = 沿用,不校验。
+    const mode = input.pipeline?.upload?.mode as unknown;
+    if (mode != null && String(mode).trim() && !["stage", "upload", "rolling"].includes(String(mode))) {
+      return `upload.mode 只能是 stage / upload / rolling,收到 ${JSON.stringify(mode)}`;
+    }
     const tmpl = input.pipeline?.upload?.titleTemplate;
     if (tmpl != null && String(tmpl).trim()) {
       const e = validateTitleTemplate(String(tmpl));
@@ -173,13 +179,29 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     return {
       key: r.key, roomSlug: r.roomSlug,
       room: r.room || srcTask?.room || "",
-      platform: r.platform, enabled: r.enabled, pipeline: r.pipeline,
+      platform: r.platform, enabled: r.enabled,
+      // 读取时迁移(issue #40):规则已是 upload、而源任务还带旧边录边传开关 → 对外按 rolling 展示
+      // (与 resolveRollingPolicy 的生效语义一致);保存时才写回规则文件。
+      pipeline: normalizeUploadMode(r.pipeline?.upload?.mode) === "upload" && srcTask?.rollingUpload
+        ? { ...r.pipeline, upload: { ...r.pipeline.upload, mode: "rolling" } }
+        : r.pipeline,
       workers: r.workers, requires: r.requires, recording: r.recording,
       sourceTask: srcTask
         ? { id: srcTask.id, room: srcTask.room, name: srcTask.name, anchorName: srcTask.anchorName, enabled: srcTask.enabled }
         : null,
       anchorName, taskName,
     };
+  };
+
+  /**
+   * 规则 mode 被**显式保存**后收口旧 task 开关(issue #40):保存的是 stage/upload(非 rolling)→ 源任务旧开关
+   * 清为 false,否则「规则选了 upload 却因旧开关仍边录边传」。保存 rolling 不动旧开关(便于回滚)。
+   * 未给 mode(沿用)→ 不动。
+   */
+  const settleLegacyRolling = (sourceTaskId: number | null | undefined, mode: unknown): void => {
+    if (!sourceTaskId || normalizeUploadMode(mode) === undefined || normalizeUploadMode(mode) === "rolling") return;
+    const t = store.getTask(Number(sourceTaskId));
+    if (t?.rollingUpload) store.updateTask(t.id, { rollingUpload: false });
   };
 
   const recordingError = (sourceTaskId: number | null | undefined, roomSlug: string): string | null => {
@@ -241,7 +263,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
   return {
     deps, store, manager, hubDir, hubConfigPath,
     err, isHubSourceTask, workerToDto, resolveAnchorBg, view, detailView,
-    validateWorkers, validatePipeline, hubRuleView, recordingError, recordingsDir,
+    validateWorkers, validatePipeline, hubRuleView, recordingError, settleLegacyRolling, recordingsDir,
     platformCookie, biliupStatus, validCookiePlatform,
     normWebhook, toUseCookie, cookieStatus,
   };

@@ -3,6 +3,9 @@
 import type { NotifyEvent, NotifKey, NotifWebhookToggles } from "./notify.js";
 export type { NotifyEvent, NotifKey, NotifWebhookToggles };
 
+/** hub 规则 `pipeline.upload.mode` 的取值。`rolling` = 合成并上传 + 录制端边录边传(issue #40)。 */
+export type UploadMode = "stage" | "upload" | "rolling";
+
 /**
  * 多节点 hub 后处理配置(按房间)。**独立于录制任务**——录制任务只管录,hub 规则管后处理。
  * hub 是全局管理器,对每个 enabled 的 HubRule(按 roomSlug)执行这份 pipeline。
@@ -75,7 +78,7 @@ export interface HubPipelineConfig {
   /** 清理开关(都默认 false)。**永不删 .xml/.ass**(弹幕源硬约束),清理只处理 .ts/.mp4。 */
   cleanup?: { stageSourceAfterMerge?: boolean; sourceAfterDone?: boolean; stageAfterDone?: boolean };
   /**
-   * 上传:`mode` = stage(只合成不传)/ upload(传 B站);缺省 stage。
+   * 上传:`mode` = stage(只合成不传)/ upload(传 B站)/ rolling(upload + 录制端边录边传,issue #40);缺省 stage。
    * `private` 仅 mode=upload 时有意义:true(默认)= 仅自己可见,false = 公开。tag/tid/desc 为该稿 metadata。
    * 三者相互独立,**都空着就是现在(历史)的行为**:
    *   1. `titleTemplate`  —— **文件名规则**(stage 产物 stem)。空 = `{name}_{date}`。
@@ -86,7 +89,7 @@ export interface HubPipelineConfig {
    *   模板里不需要写类型。
    */
   upload?: {
-    mode?: "stage" | "upload"; private?: boolean; tag?: string; tid?: number; desc?: string;
+    mode?: UploadMode; private?: boolean; tag?: string; tid?: number; desc?: string;
     titleTemplate?: string;
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
@@ -127,8 +130,10 @@ export interface RoomRecordingDTO {
   cookies: null;
   outDir: string | null;
   webhook: string | null;
-  /** 边录边传开关(T-33,默认 false)。 */
+  /** **旧**边录边传开关(T-33):已迁到 hub 规则 `pipeline.upload.mode="rolling"`(issue #40);仅作旧值只读/迁移来源。 */
   rollingUpload: boolean;
+  /** 边录边传**实际生效值**(master 按规则 + 旧开关算出的只读派生字段;见 core `resolveRollingPolicy`)。 */
+  rollingEffective: boolean;
 }
 
 export interface RoomDTO {
@@ -489,8 +494,10 @@ export interface NodeTaskDTO {
   webhook: string | null;
   managedBy: string | null;
   anchorName: string | null;
-  /** 边录边传开关(默认 false,见 plans/031 / T-33)。 */
+  /** **旧**边录边传开关(见 plans/031 / T-33;已迁到 hub 规则,issue #40)。 */
   rollingUpload: boolean;
+  /** 边录边传实际生效值(派生,只读)。 */
+  rollingEffective: boolean;
 }
 
 /** master → node 的期望任务(applyTasks;含 cookies,只走可信 ssh/本地通道)。 */
@@ -511,8 +518,16 @@ export interface RemoteTaskSpec {
   outDir: string | null;
   webhook: string | null;
   anchorName: string | null;
-  /** 边录边传开关(默认 false,见 plans/031 / T-33);随任务下发到节点。 */
+  /**
+   * 边录边传开关(旧字段,见 plans/031 / T-33)。**远端节点:恒等于 `rollingEffective`**(兼容尚不认识
+   * 新字段的旧节点包 —— 它们只读这个字段,行为同改前);本机(local)任务:原样透传源任务的旧开关(用户旧值)。
+   */
   rollingUpload: boolean;
+  /**
+   * 边录边传**实际生效值**(master 用 core `resolveRollingPolicy` 一次算出,issue #40);录制端只读它。
+   * 可选:旧 master 不下发 → 节点回落 `rollingUpload`(旧行为)。
+   */
+  rollingEffective?: boolean;
   /**
    * **可选提示**:master 明确要求「这个房间可以删了」(规则文件已消失 / sourceTaskId 解绑)。
    *
@@ -688,7 +703,10 @@ export interface TaskPayload {
   schedule?: string | null;
   /** 任务专属 Discord webhook(开播/录完/合并完成/错误);空/省略 = 回落全局。 */
   webhook?: string | null;
-  /** 边录边传开关(T-33,默认 false):录制中每封口一段就上传并删该段源。 */
+  /**
+   * **已弃用**(issue #40):边录边传开关改在 hub 规则 `pipeline.upload.mode="rolling"`。
+   * 仍接受旧客户端写入(迁移来源:旧开关 true 且规则未配置 ≡ rolling),Web 表单不再提交。
+   */
   rollingUpload?: boolean;
 }
 
@@ -778,15 +796,17 @@ export interface TaskDTO {
     enabled: boolean;
     /** 产出哪些步骤(plain 恒有;danmu/livechat 按配置)。 */
     steps: string[];
-    /** 上传模式:stage(仅合成)/ upload(传 B 站)。 */
+    /** 上传模式:stage(仅合成)/ upload(传 B 站;rolling 也计 upload —— 只是上传时机提前)。 */
     uploadMode: "stage" | "upload";
     /** 最近一次 run 的状态 + BV(无 run = null)。 */
     lastRun: { state: string; bv: string | null } | null;
   };
   /** 任务专属 Discord webhook;null = 回落全局。 */
   webhook: string | null;
-  /** 边录边传开关(T-33,默认 false)。 */
+  /** **旧**边录边传开关(T-33):已迁到 hub 规则 `pipeline.upload.mode="rolling"`(issue #40),仅作旧值只读。 */
   rollingUpload: boolean;
+  /** 边录边传实际生效值(派生,只读)。 */
+  rollingEffective: boolean;
 }
 
 /** 详情页 live runtime(GET /api/tasks/:id)。 */

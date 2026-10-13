@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, loadConfig, resolveDiskMinGB, rollingUploadSingleNode, sanitizeStreamKey } from "@drec/core";
+import { biliAccountKey, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey } from "@drec/core";
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -30,7 +30,7 @@ import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type HubPoolSnapshotDTO } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
-import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, APP_VERSION } from "@drec/app";
+import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, rollingSpecFields, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
@@ -948,7 +948,7 @@ const hubStarter: HubStarter = {
         reconnectWindowMs: p.reconnectWindowMs ?? hubCfg.reconnectWindowMs,
         stageDir: hubCfg.stageDir ?? rootStageDir(),
         cookies: hubCfg.cookies ?? "",
-        uploadMode: p.upload?.mode === "upload" ? "upload" : "stage", // 其它值(含旧 stage-only)→ stage
+        uploadMode: isUploadingMode(p.upload?.mode) ? "upload" : "stage", // upload/rolling → 传(rolling 只是上传时机提前,未建稿则整场管线兜底);其它值(含旧 stage-only)→ stage
         uploadPrivate: p.upload?.private !== false,                    // 缺省 / true → 仅自己可见
         uploadMeta: {
           tag: p.upload?.tag || defaultTag,
@@ -1036,6 +1036,11 @@ const hubStarter: HubStarter = {
         // 本机的「不该录」由**专门的抑制机制**处理(localSuppressedSourceTaskIds →
         // startTask 只置意图不起子进程),不在这条路径上表达。
         const isLocalWorker = workerId === "local";
+        const rollingFields = rollingSpecFields(
+          { mode: rule.pipeline?.upload?.mode, workers: rule.workers },
+          src.rollingUpload,
+          isLocalWorker,
+        );
         out.push({
           platform: p.id,
           roomSlug: rule.roomSlug,
@@ -1061,16 +1066,13 @@ const hubStarter: HubStarter = {
           outDir: src.outDir,
           webhook: src.webhook,
           anchorName: src.anchorName,
-          // 边录边传开关随任务下发到节点(节点录制端据此边录边传);缺省 false。
-          // **跨节点重复投稿闸门**:边录边传是录制节点自己建稿,多节点同录 → 各建一稿 = 重复投稿。
-          //   - 远端节点:节点上**没有** hub 规则文件,判不了 → 必须在 master 这里收窄:
-          //     规则勾选恰好 1 个节点才下发 true,否则 false(回落整场管线,master 选优后只传 winner)。
-          //   - 本机(local):local 的 applyTasks 写的是**源任务本身**,而源任务的 rollingUpload 是
-          //     **用户意图**(不是本节点是否被选中),这里**不能**改它(同 enabled 的特例)。本机的
-          //     实际收窄由录制端工厂完成 —— 它跑在 master 本机,能读到 hub 规则(见 makeRollingUploadHookFactory)。
-          rollingUpload: isLocalWorker
-            ? src.rollingUpload
-            : (src.rollingUpload && rollingUploadSingleNode(true, rule.workers)),
+          // 边录边传(issue #40):**唯一判定 = core resolveRollingPolicy**,只在 master 这里算一次
+          // (规则 mode=rolling / 旧任务开关迁移 / 规则 stage 优先 / 多节点重复投稿闸门),
+          // 结果作为只读派生字段 `rollingEffective` 下发;录制端只读它,不再自行读规则判定。
+          //   - 远端节点:`rollingUpload`(旧字段)同样下发生效值 —— 旧节点包只认它,行为与改前一致。
+          //   - 本机(local):applyTasks 写的是**源任务本身**,其旧 `rollingUpload` 是用户旧值
+          //     (迁移来源,不能被覆盖,同 enabled 的特例),故只更新派生字段 `rollingEffective`。
+          ...rollingFields,
         });
       }
       return out;

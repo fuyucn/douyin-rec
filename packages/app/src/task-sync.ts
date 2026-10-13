@@ -40,6 +40,7 @@ export function listNodeTasks(store: TaskStore): NodeTaskDTO[] {
       managedBy: t.managedBy,
       anchorName: t.anchorName,
       rollingUpload: t.rollingUpload,
+      rollingEffective: t.rollingEffective,
     };
   });
 }
@@ -205,8 +206,10 @@ export function applyRemoteTasks(
         scheduleStart: spec.scheduleStart,
         scheduleEnd: spec.scheduleEnd,
         enabled: spec.enabled,
-        // 边录边传开关随 master 下发(任务级意图,不属 per-node override)。
+        // 边录边传:旧开关随 master 下发(远端 = 生效值,兼容旧节点包;本机 = 用户旧值),
+        // 生效值由 master 算好下发(issue #40),节点只存不判;旧 master 不带该字段 → 回落旧开关(旧行为)。
         rollingUpload: spec.rollingUpload,
+        rollingEffective: spec.rollingEffective ?? spec.rollingUpload,
       });
       log?.(`[task-sync] 收编任务 ${existing.id}: ${key}`);
       // 期望任务已禁用但节点上还在录/待起:必须硬停,不能等 daemon 排空到自然收播。
@@ -216,7 +219,7 @@ export function applyRemoteTasks(
         log?.(`[task-sync] 停用运行中任务 ${existing.id}: ${key}`);
       }
     } else {
-      store.addTask({
+      const created = store.addTask({
         room: spec.room,
         name: spec.name ?? null,
         quality: spec.quality,
@@ -238,6 +241,7 @@ export function applyRemoteTasks(
         anchorName: spec.anchorName ?? null,
         rollingUpload: spec.rollingUpload,
       });
+      store.updateTask(created.id, { rollingEffective: spec.rollingEffective ?? spec.rollingUpload });
       log?.(`[task-sync] ${adopt ? "新建受管任务" : "新建本机任务"}: ${key}`);
     }
     applied.push(key);

@@ -1769,3 +1769,77 @@ describe("T16 workers/status 版本回执", () => {
     s.close();
   });
 });
+
+describe("issue #40:rolling 开关迁到 hub 规则(API 层)", () => {
+  function setup() {
+    const s = new TaskStore(":memory:");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rolling40-") });
+    return { s, a };
+  }
+  type RuleView = { key: string; pipeline: { upload?: { mode?: string } } };
+  const ruleOf = (a: ReturnType<typeof makeApi>): RuleView =>
+    (a.listHubRules().body as RuleView[]).find((r) => r.key === "douyin.123456")!;
+
+  it("规则 upload.mode 接受 rolling;非法值 → 400", () => {
+    const { a } = setup();
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    expect(a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "bogus" as never } } }).status).toBe(400);
+    const ok = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "rolling" } } });
+    expect(ok.status).toBe(201);
+    expect(ruleOf(a).pipeline.upload?.mode).toBe("rolling");
+  });
+
+  it("读取时迁移:规则 upload + 源任务旧开关 true → 对外按 rolling 展示;文件本身不改", () => {
+    const { s, a } = setup();
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } });
+    s.updateTask(t.id, { rollingUpload: true }); // 旧配置:规则早已存在,任务旧开关为 true
+    expect(ruleOf(a).pipeline.upload?.mode).toBe("rolling");
+    // 旧开关 false → 仍是 upload
+    s.updateTask(t.id, { rollingUpload: false });
+    expect(ruleOf(a).pipeline.upload?.mode).toBe("upload");
+  });
+
+  it("显式保存非 rolling 的 mode → 清掉旧开关(显式决定覆盖旧迁移);保存 rolling 不动旧开关", () => {
+    const { s, a } = setup();
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } });
+    s.updateTask(t.id, { rollingUpload: true });
+    expect(a.updateHubRule("douyin.123456", { recording: { sourceTaskId: t.id }, pipeline: { upload: { mode: "rolling" } } }).status).toBe(200);
+    expect(s.getTask(t.id)!.rollingUpload).toBe(true);
+    expect(a.updateHubRule("douyin.123456", { recording: { sourceTaskId: t.id }, pipeline: { upload: { mode: "upload" } } }).status).toBe(200);
+    expect(s.getTask(t.id)!.rollingUpload).toBe(false);
+    expect(ruleOf(a).pipeline.upload?.mode).toBe("upload");
+  });
+
+  it("rooms PUT 同样收口旧开关;recording DTO 暴露只读 rollingEffective", () => {
+    const { s, a } = setup();
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } });
+    s.updateTask(t.id, { rollingUpload: true });
+    const before = a.getRoom("douyin.123456").body as { recording: { rollingUpload: boolean; rollingEffective: boolean } };
+    expect(before.recording.rollingUpload).toBe(true);
+    expect(before.recording.rollingEffective).toBe(true); // 无 master 派生值 → 旧开关迁移
+    const res = a.updateRoom("douyin.123456", { processing: { pipeline: { upload: { mode: "upload" } } } });
+    expect(res.status).toBe(200);
+    expect(s.getTask(t.id)!.rollingUpload).toBe(false);
+  });
+
+  it("任务视图带 rollingEffective(只读派生),旧开关仍可读", () => {
+    const { a } = setup();
+    const t = a.createTask({ room: "123456", rollingUpload: true }).body as { rollingUpload: boolean; rollingEffective: boolean };
+    expect(t.rollingUpload).toBe(true);
+    expect(t.rollingEffective).toBe(true);
+  });
+});
+
+describe("issue #40:新建规则不吞掉旧开关", () => {
+  it("源任务旧开关 true、新建规则 mode=upload → 旧开关保留(仍 rolling,同改前)", () => {
+    const s = new TaskStore(":memory:");
+    const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rolling40b-") });
+    const t = a.createTask({ room: "123456", rollingUpload: true }).body as { id: number };
+    expect(a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } }).status).toBe(201);
+    expect(s.getTask(t.id)!.rollingUpload).toBe(true);
+    expect(s.getTask(t.id)!.rollingEffective).toBe(true);
+  });
+});

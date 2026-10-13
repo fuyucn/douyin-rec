@@ -37,7 +37,6 @@ interface FormState {
   webhook: string;
   danmu: boolean;
   useCookie: boolean;
-  rollingUpload: boolean;
   recEnabled: boolean;
   procEnabled: boolean;
   burnDanmu: boolean;
@@ -71,7 +70,6 @@ function fromRoom(r: RoomDTO): FormState {
     webhook: rec?.webhook ?? "",
     danmu: !!rec?.danmu,
     useCookie: rec?.useCookie ?? true,
-    rollingUpload: rec?.rollingUpload === true,
     recEnabled: rec?.enabled ?? true,
     procEnabled: r.processing?.enabled ?? true,
     burnDanmu: p.steps?.burnDanmu === true,
@@ -81,7 +79,7 @@ function fromRoom(r: RoomDTO): FormState {
     clStageSourceAfterMerge: p.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: p.cleanup?.sourceAfterDone === true,
     clStageAfterDone: p.cleanup?.stageAfterDone === true,
-    uploadMode: p.upload?.mode === "upload" ? "upload" : "stage",
+    uploadMode: p.upload?.mode === "upload" || p.upload?.mode === "rolling" ? p.upload.mode : "stage",
     uploadPrivate: p.upload?.private !== false,
     uploadTag: p.upload?.tag ?? "",
     uploadTid: String(p.upload?.tid ?? 21),
@@ -182,7 +180,6 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
             segmentSec: Number(form.segmentSec) || 1800,
             danmu: form.danmu ? 1 : 0,
             useCookie: form.useCookie,
-            rollingUpload: form.rollingUpload,
             enabled: form.recEnabled,
             scheduleStart,
             scheduleEnd,
@@ -209,7 +206,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
               stageAfterDone: form.clStageAfterDone,
             },
             upload: {
-              mode: form.uploadMode === "upload" ? "upload" : "stage",
+              mode: form.uploadMode === "upload" || form.uploadMode === "rolling" ? form.uploadMode : "stage",
               private: form.uploadPrivate,
               tag: form.uploadTag.trim() || undefined,
               tid: Number(form.uploadTid) || 21,
@@ -322,14 +319,6 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                     </span>
                     <Switch checked={form.useCookie} onCheckedChange={(v: boolean) => set("useCookie", v)} />
                   </label>
-                  {/* 边录边传(T-33):录制中每封口一段就上传并删该段源。默认关 = 整场录完再处理。 */}
-                  <label className="switch-row col-span-2">
-                    <span className="flex flex-col min-w-0">
-                      <span className="text-sm font-medium text-ink">{t("rooms.rollingUpload")}</span>
-                      <span className="text-xs text-muted mt-0.5">{t("rooms.rollingUploadHint")}</span>
-                    </span>
-                    <Switch checked={form.rollingUpload} onCheckedChange={(v: boolean) => set("rollingUpload", v)} />
-                  </label>
                 </div>
               </div>
             )}
@@ -409,6 +398,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                   <select className="input" value={form.uploadMode} onChange={(e) => set("uploadMode", e.target.value)}>
                     <option value="stage">{t("rooms.uploadStage")}</option>
                     <option value="upload">{t("rooms.uploadUpload")}</option>
+                    <option value="rolling">{t("rooms.uploadRolling")}</option>
                   </select>
                 </label>
                 <label className="switch-row">

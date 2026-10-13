@@ -48,6 +48,7 @@ function outputChips(r: HubRuleDTO): string[] {
 /** 上传模式 chip 文案。 */
 function uploadChip(r: HubRuleDTO, t: TFunc): string {
   const c = r.pipeline ?? {};
+  if (c.upload?.mode === "rolling") return t("hub.detail.chipUploadRolling");
   if (c.upload?.mode === "upload") return c.upload.private === false ? t("hub.detail.chipUploadPublic") : t("hub.detail.chipUploadPrivate");
   return t("hub.detail.chipStageOnly");
 }

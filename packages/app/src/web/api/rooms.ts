@@ -69,6 +69,7 @@ export function buildRooms(ctx: ApiCtx) {
           outDir: t.outDir,
           webhook: t.webhook,
           rollingUpload: t.rollingUpload,
+          rollingEffective: t.rollingEffective,
         }
       : null;
 
@@ -283,6 +284,8 @@ export function buildRooms(ctx: ApiCtx) {
           }
           return err(500, `写入处理配置失败,已回滚录制配置: ${(e as Error).message}`);
         }
+        // 规则此前已存在(表单展示的是读取时迁移后的 mode)才收口旧开关;新建规则同 createHubRule 不收口。
+        if (before.processing) ctx.settleLegacyRolling(sourceTaskId, proc.pipeline?.upload?.mode);
         // 处理半边变了 → 立刻下发一次(不等 60s 周期 tick)。
         deps.requestSyncTasks?.();
       } else if (rec) {
