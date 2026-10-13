@@ -44,6 +44,47 @@ export function shouldUseNodeSideUpload(
   return { ok: true };
 }
 
+/**
+ * **磁盘水位闸门**(issue #8,纯函数:executor 与将来的消费点共用同一份实现,避免口径漂移)。
+ *
+ * 为什么需要:节点侧上传在选路时只看 biliup / cookie,不看剩余磁盘 ⇒ 节点盘写满时仍走节点侧
+ * → 节点本地 remux 写盘 `ENOSPC` → 节点进程非 0 退出 → ssh rc≠0 → 保守转人工(线上实测一整簇)。
+ *
+ * 阈值口径与 reconciler 的**磁盘看门狗同源**:同一个配置键(hub.config `resources.diskMinGB`,
+ * 经 `PipelineCfg.diskMinGB` 传下来),同一个默认值 10、同一条「`<=0` = 关闭」语义 ——
+ * 这里不新增第二套阈值。
+ *
+ * 边界(想清楚了才写的):
+ *   - 阈值 `undefined` / 非有限数 / `<=0` → **闸门关闭**(不拦):与 reconciler
+ *     `diskMinGB <= 0 → return`(关闭看门狗)一致,也是向后兼容路径(旧调用方不传阈值)。
+ *   - `freeGB` **完全没有**(`null`/`undefined`/非有限数,旧或自定义 transport 不给该字段)
+ *     → **不因磁盘拦**:拿不到读数不等于盘满,拦下等于把「探测异常」当「盘满」白放弃省回传;
+ *     与 serve.ts 里 `freeBytes()` 取不到返回 `null`(不拦)同一口径,靠 reconciler 看门狗告警兜底。
+ *   - `freeGB` **读数为 0/接近 0** → **拦下**。注意 SSH 路径上「探测失败」会被
+ *     transport-ssh 归一成 `0`(既有口径),与「盘真满」不可区分;两者都该回落 pull 回 master
+ *     (那是节点侧上传出现前的原有路径,不丢任何东西)。线上实测的 `磁盘=0.0GB` 正是此列。
+ *   - 两者都有效且 `freeGB < 阈值` → 拦住,返回原因字符串(**调用方必须记进日志,绝不静默**)。
+ */
+export function diskWatermarkGate(
+  freeGB: number | null | undefined,
+  minGB: number | null | undefined,
+): { ok: true } | { ok: false; reason: string } {
+  if (minGB == null || !Number.isFinite(minGB) || minGB <= 0) return { ok: true };
+  if (freeGB == null || !Number.isFinite(freeGB)) return { ok: true };
+  if (freeGB < minGB) {
+    return {
+      ok: false,
+      reason: `剩余磁盘 ${freeGB.toFixed(1)}GB < 阈值 ${minGB}GB(盘满会让本地 remux 写盘 ENOSPC)`,
+    };
+  }
+  return { ok: true };
+}
+
+/** 能力探测里的磁盘读数展示:探测失败(null/缺失)→ `未知`(不谎报 0GB;也不拼出「未知GB」)。 */
+function fmtFreeGB(freeGB: number | null | undefined): string {
+  return freeGB == null || !Number.isFinite(freeGB) ? "未知" : `${freeGB.toFixed(1)}GB`;
+}
+
 export interface NodeSideUploadArgs {
   streamKey: string;
   cfg: PipelineCfg;
@@ -209,7 +250,15 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
     jlog(`节点侧上传不可用:节点 ${winner.workerId} 无 B站 cookie 且 master 未下发 → 回落 pull 回 master`);
     return null;
   }
-  jlog(`节点侧上传可用(biliup=${caps.biliup} cookies=${caps.cookies} 磁盘=${caps.diskFreeGB.toFixed(1)}GB)→ 节点本地处理,省掉回传`);
+  // 磁盘水位闸门(issue #8):阈值与 reconciler 的磁盘看门狗同源(cfg.diskMinGB ← hub.config
+  // resources.diskMinGB)。低于阈值 → 不选节点侧,回落 pull 回 master 并**记明原因**(绝不静默)。
+  // 探测失败(caps.diskFreeGB 缺失/非有限数)→ 不拦(见 diskWatermarkGate 注释:靠看门狗告警兜底)。
+  const diskGate = diskWatermarkGate(caps.diskFreeGB, cfg.diskMinGB);
+  if (!diskGate.ok) {
+    jlog(`节点侧上传不可用:节点 ${winner.workerId} ${diskGate.reason} → 回落 pull 回 master`);
+    return null;
+  }
+  jlog(`节点侧上传可用(biliup=${caps.biliup} cookies=${caps.cookies} 磁盘=${fmtFreeGB(caps.diskFreeGB)})→ 节点本地处理,省掉回传`);
 
   const spec: NodePipelineSpec = {
     streamKey,

@@ -67,6 +67,15 @@ export interface PipelineCfg {
   cleanMaxGapSec: number;
   /** 断流重连合并窗(ms):结束距现在不足该窗的场暂不处理;聚类容差同窗。缺省 reconciler 默认 10 分钟。 */
   reconnectWindowMs?: number;
+  /**
+   * **磁盘水位闸门阈值(GB)** —— 与 reconciler 的磁盘看门狗**同一个配置键 / 同一个默认值**
+   * (hub.config 的 `resources.diskMinGB`,缺省 10;`<=0` = 关闭)。
+   *
+   * 消费点:节点侧上传选路(节点剩余空间低于阈值 → **不选节点侧**,回落 pull 回 master)——
+   * 盘满会让节点本地 remux 写盘 `ENOSPC` → 节点进程非 0 退出 → ssh rc≠0 → 保守转人工。
+   * 未注入(undefined)/ 非有限数 / `<=0` = 闸门关闭(向后兼容,测试与旧调用方不受影响)。
+   */
+  diskMinGB?: number;
   stageDir: string;
   cookies: string;
   /** stage = 只合成不传;upload = 传 B站。 */
