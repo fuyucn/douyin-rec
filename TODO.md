@@ -47,23 +47,6 @@
   **边界**：不改上传/交付口径、不改 hub 规则、不删任何 `.xml`/`.ass`；派生文件不参与「最后一份」不变量判定。
   **待确认（不阻塞）**：这份 per-分P xml 最终是交付物还是仅中间产物，迁移阶段再定。
 
-- [~] **T-36 节点侧上传补磁盘水位闸门（issue [#8](https://github.com/fuyucn/douyin-rec/issues/8)）**
-  — 2026-10-12 认领，PR [#10](https://github.com/fuyucn/douyin-rec/pull/10)（分支
-  `codex/issue-8-node-upload-disk-gate`，base `feat/hub-optimization`，sub-agent 独立 worktree 实现，
-  **已由 review agent 合并（2026-10-13，merge commit `c7b34bc`）；未部署 / 未 close**）。
-  **做什么**：`shouldUseNodeSideUpload` 或其 executor 增加一道磁盘水位闸门 —— 节点剩余空间低于阈值时不选
-  节点侧、回落 pull 回 master，并记明回落原因。**为什么**：节点盘满时仍走节点侧 → remux 写盘 ENOSPC →
-  ssh rc≠0 → 保守转人工（2026-10-12 多场即该簇）。**验收**：阈值与 reconciler `diskMinGB` 同源；
-  vitest 覆盖「低于阈值回落 / 等于高于阈值照常 / 阈值未配置向后兼容」；`pnpm test` + `typecheck` + `bundle` 绿。
-  **边界**：不自动重传、不删源、不改 hub 规则 —— 仅新增一道「不选节点侧」的判定。
-  **实现完成**：纯判定 `diskWatermarkGate` + 执行器插入闸门 + 组合根两处注入 `resources.diskMinGB ?? 10`
-  （与 reconciler 同表达式同源）；自审修 2 项（读数缺失展示串、执行器层覆盖缺口），另核查边界 / 一致性 / 分层。
-  验证 101 文件 / 1283 用例通过、typecheck exit 0、bundle `0.0.82`、架构文档 check 一致。
-  **rebase 收敛**：与已合并的 #6（`0.0.81`）在架构文档与版本号撞车 → 重放到最新 base，架构文档重新生成、
-  测试文件两边用例都保留、版本推进到 `0.0.82`；分支现为单提交 `73dfaf6`，PR `mergeable=MERGEABLE`。
-  **收口**：**不 close** —— 已由 review agent 合并，但**未部署**，真实链路（低水位确实回落 pull）无线上实跑证据，
-  不满足「不验证不 close」。等部署后由人实跑验证再收口。
-
 - [!] **T-5 部署未上线改动** — **阻塞原因**：部署 guard 要求两节点 `recording===true` 为 0，
   当前 VPS1 正在录「yyoo」、VPS2 正在录「凌晴」（2026-10-07 实测）。**解除条件**：两节点都收播
   （周期性 `curl /api/tasks` 复查）。**内容**：弹幕重连熔断、`resolveDouyinLiveId` 三级回落、
@@ -395,6 +378,23 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-36 节点侧上传补磁盘水位闸门（issue [#8](https://github.com/fuyucn/douyin-rec/issues/8)，已 close 2026-10-13）**
+  — 2026-10-12 认领，PR [#10](https://github.com/fuyucn/douyin-rec/pull/10)（分支
+  `codex/issue-8-node-upload-disk-gate`，base `feat/hub-optimization`，sub-agent 独立 worktree 实现，
+  **已由 review agent 合并（2026-10-13，merge commit `c7b34bc`），0.0.87 已部署，issue 已 close**）。
+  **做什么**：`shouldUseNodeSideUpload` 或其 executor 增加一道磁盘水位闸门 —— 节点剩余空间低于阈值时不选
+  节点侧、回落 pull 回 master，并记明回落原因。**为什么**：节点盘满时仍走节点侧 → remux 写盘 ENOSPC →
+  ssh rc≠0 → 保守转人工（2026-10-12 多场即该簇）。**验收**：阈值与 reconciler `diskMinGB` 同源；
+  vitest 覆盖「低于阈值回落 / 等于高于阈值照常 / 阈值未配置向后兼容」；`pnpm test` + `typecheck` + `bundle` 绿。
+  **边界**：不自动重传、不删源、不改 hub 规则 —— 仅新增一道「不选节点侧」的判定。
+  **实现完成**：纯判定 `diskWatermarkGate` + 执行器插入闸门 + 组合根两处注入 `resources.diskMinGB ?? 10`
+  （与 reconciler 同表达式同源）；自审修 2 项（读数缺失展示串、执行器层覆盖缺口），另核查边界 / 一致性 / 分层。
+  验证 101 文件 / 1283 用例通过、typecheck exit 0、bundle `0.0.82`、架构文档 check 一致。
+  **rebase 收敛**：与已合并的 #6（`0.0.81`）在架构文档与版本号撞车 → 重放到最新 base，架构文档重新生成、
+  测试文件两边用例都保留、版本推进到 `0.0.82`；分支现为单提交 `73dfaf6`，PR `mergeable=MERGEABLE`。
+  **收口**：已 close（2026-10-13）。线上实跑：master job.log 出现 `剩余磁盘 4.4GB < 阈值 10GB → 回落 pull 回 master`
+  （16:12Z/16:39Z/16:49Z 三次），该场改走 master 拉取后正常 done；高于阈值（12.1–21.7GB）照常节点侧。（2026-10-13）
 
 - [x] **T-39 流程补 review 环节：PR 独立审查通过后由 agent 自动合并（issue [#14](https://github.com/fuyucn/douyin-rec/issues/14)，2026-10-13）**
   — 2026-10-12 用户要求（「流程中增加一个 review agent，他 review 完提交的 PR 之后通过了，就可以合并了，
