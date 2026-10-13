@@ -41,11 +41,13 @@ commander、esbuild 双产物打包（`dist/douyin-rec.mjs` + `dist/tui.mjs`）�
 - **优化建议单独开 `enhancement`。** 不和故障混在一条 issue 里。
 - **Triage 只打标签：** `accept` / `decline` / `needs-decision`。上传、删源、部署、改 hub 规则一律 `needs-decision`，不能自行 accept。
   `needs-decision` 的评论必须写「决定三行」：要决定什么 / 不做会怎样 / 建议选项。
-- **只有 `accept` 的 issue 才能改代码。** 一个 issue 一个分支；完成开 PR，PR 链到 issue。不合并、不部署。`accept` 之后再在 `TODO.md` 记一条 `T-N`，并写上 issue 链接。
+- **只有 `accept` 的 issue 才能改代码。** 一个 issue 一个分支；完成开 PR，PR 链到 issue。**不合并 PR（合并归 review 会话）、不部署。** `accept` 之后再在 `TODO.md` 记一条 `T-N`，并写上 issue 链接。
 - **issue 评论也算输入。** 实现前读完评论。可以不采纳，但 PR 里要写出理由。
-- **`accept` ≠ 有人在做。** 由人指定实现会话，不自动派活；认领时打 `in-progress` 标签并评论：哪个 agent、何时开始。
-- **做完要留言，先不要 close。** 总结结果和未采纳的理由。PR 用 `Fixes #N`，合并后由 GitHub 关闭。
-- **部署不变。** master 与 VPS1 任一 `recording===true` 就等。用户明确 override 除外。
+- **`accept` ≠ 有人在做。** 实现 heartbeat 自动认领：扫到 `accept` 且无 `in-progress` 的票即打 `in-progress` 并评论「哪个 agent、何时开始」；人只在想指定别的会话做时手动接管。
+- **做完要留言，然后可以 close。** 先总结结果和未采纳的理由，再按「四不 close」门禁自查（有证据 / 已验证 / 有回归测试 / 已回写经验）；**四条全过，agent 可直接 `gh issue close` 并写明关闭依据**，不必等人。缺任一条就不 close，改成在 issue 里写清缺口并保持 open。
+- **PR 由自动 review 会话审查，门禁全过即由 agent 合并**（`gh pr merge --merge`，base 保持
+  `feat/hub-optimization`）——不必等人手动合并；review 只打回、不代改代码。
+- **部署仍由人做（部署不变）。** master 与 VPS1 任一 `recording===true` 就等；用户明确 override 除外。
 
 ## 自审循环（agent 必读：写完 ≠ 完成）
 

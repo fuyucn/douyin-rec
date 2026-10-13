@@ -8,24 +8,66 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 | --- | --- | --- |
 | 值班 Audit | 读 master 与各 worker 的录制状态、queue、`sync_jobs`、磁盘、日志；有证据才开 `incident` | 改代码、删文件、重启、重传、部署 |
 | 优化 Audit | 低频开 `enhancement`，写清代价和验收标准 | 把优化伪装成故障，或直接改代码 |
-| Triage | 打 `accept` / `decline` / `needs-decision`，`decline` 写原因 | 写代码；对危险类自行 accept |
-| 实现 | 领一个 `accept` issue，开分支和 PR | 合并、部署、顺手做无关改动 |
+| 自动 Triage（heartbeat） | 自动打 `accept` / `decline` / `needs-decision`，`decline` 写原因 | 对危险类自行 accept；替人拍板 |
+| 自动实现（heartbeat） | 领一个 `accept` issue，开分支和 **开 PR**（`Fixes #N`）；过「四不 close」门禁后可 **close issue** | 合并 PR、部署、顺手做无关改动 |
+| 自动 Review（heartbeat） | 对每个 open PR 派**独立会话**审查（门禁见下）；**审查通过即合并 PR**；不通过打回并列出缺口 | 改实现代码（只打回，不代改）、部署、跳过门禁合并 |
+| 人 | 部署、危险类拍板（`needs-decision`） | —— |
 
 危险类永远是 `needs-decision`，等人点头：上传、删源、删稿、部署、改 hub 规则、清理录像。
+
+## 自动 gate（2026-10-12 起）
+
+**不是每张票都等人 accept。** 低风险、有证据的票由自动 triage 直接进开发流程；只有真正需要
+人拍板的才拦下来。**合并也不再等人**：PR 由独立 review 会话审查，通过即自动合并。这一层由
+三个 heartbeat 承担（配置在 `~/.codex/automations/`）：
+
+| heartbeat | 节奏 | 做什么 | 禁止 |
+| --- | --- | --- | --- |
+| issue 自动 triage | 5min | 对新票自动打标签（规则见下） | 写代码、开分支、开 PR、close |
+| issue 自动实现 | 10min | 领 `accept` 且无 `in-progress` 的票 → 分支 + PR；过门禁后 close issue | 合并 PR、部署、同时做第二条 |
+| PR 自动 review + 合并 | 10min（与实现错开） | 派独立会话审 open PR；**门禁全过 → `gh pr merge --merge`**；不过 → 打回并列缺口 | 改实现代码、部署、跳过门禁合并 |
+
+**自动 triage 判定规则**：
+
+1. **危险类 → `needs-decision`**（永不自动 accept）：上传、删源、删稿、部署、改 hub 规则、清理录像，
+   以及任何「不确定影响面」的票。评论必须写「决定三行」。
+2. **证据充分 + 低风险 + 可测试 → `accept`**：能按正文复现/定位（故障类有命令输出与节点角色；
+   优化类有明确现象、影响、验收标准），且改动局限在单个模块、有回归测试可钉。
+3. **证据不足 / 明确不做 → `decline`**：缺命令输出、无节点角色/时间、描述无法验证、重复票已在
+   开着的 issue 里，或与仓库方向冲突（如绕过 guard）。评论写清原因。
+4. **拿不准 → `needs-decision`**，不猜。
+
+**自动实现约束**：同时最多一条**正在写代码**的票（= 已认领但还没开出 PR）；认领时先打 `in-progress`
+并评论「哪个 agent、何时开始」；只开 PR——**合并交给 review 心跳**（审查通过即自动合并），
+部署仍不自动；**close 见下方「四不 close」——四条门禁全过才允许自动 close**；
+危险类哪怕已误标 `accept` 也要退回 `needs-decision` 再停手。
 
 ## 流转
 
 1. **开票前过隐私闸门**：`python3 scripts/issue-guard.py <body-file>`（评论同样要过）。
    命中就先脱敏。不合格（没有命令输出、没有节点角色 / 时间）直接 `decline`。
 2. **Audit 开 issue**，挂 `incident` 或 `enhancement`。
-3. **Triage 打标签**：`accept` / `decline` / `needs-decision`。`accept` 后在 `TODO.md` 加 `T-N`，链到 issue。
-4. **人指定实现会话**（不是 triage 自动派）。实现会话认领时打 `in-progress` 并留言「哪个 agent、何时开始」。
-5. **实现 agent 只做这一条**，开分支和 PR，PR 正文写 `Fixes #N`。不合并、不部署、不顺手做无关改动。
-6. **代码做完先在 issue 留言**：做了什么、评论里哪条没采纳、为什么。不要这时 close。
-7. **另一个 agent 只 review**，不改实现；review 结论回帖到 issue 或 PR。
-8. **人合并**。PR 用 `Fixes #N`，合并后由 GitHub 关闭。部署仍走「无 `recording===true` 才重启」。
+3. **自动 Triage 打标签**（无需人工介入）：`accept` / `decline` / `needs-decision`，判定规则见上。
+   `accept` 后在 `TODO.md` 加 `T-N`，链到 issue；`needs-decision` 才需要人回一句结论。
+4. **自动实现认领**：实现 heartbeat 扫到 `accept` 且无 `in-progress` 的票即认领，打 `in-progress`
+   并留言「哪个 agent、何时开始」。**人不需要点名派活**；只在想指定别的会话做时手动接管。
+5. **实现会话只做这一条**，开分支和 PR，PR 正文写 `Fixes #N`。不合并 PR（合并归 review 会话）、
+   不部署、不顺手做无关改动。
+6. **代码做完先在 issue 留言**：做了什么、评论里哪条没采纳、为什么，然后按「四不 close」自查。
+7. **自动 Review 派独立会话审查**（`fork_context: false` 的新会话，只读审查、不改实现），
+   按下方「review 门禁」逐条核；结论回帖到 PR。
+8. **审查通过 → review agent 直接合并 PR**（`gh pr merge <N> --merge`，base 保持
+   `feat/hub-optimization`）——**不再等人操作**；不通过 → 打回并列缺口，保持 `in-progress`。
+   合并后按「四不 close」收口：门禁全过就 `gh issue close` 并写明关闭依据
+   （验证命令与结果 / 回归测试 / 回写位置）。**部署仍由人做**（走「无 `recording===true` 才重启」）。
+
+> **注意 `Fixes #N` 在这里不会自动关票**：所有 agent PR 的 base 都是 `feat/hub-optimization`，
+> 不是仓库默认分支 `main`，GitHub 的 closing keyword 只在合进默认分支时生效。所以 close 必须显式执行，
+> 不能指望 PR 合并顺带关掉。
 
 `accept` 只是「可以做」，不等于「有人在做」——看板上区分这两件事靠 `in-progress` 标签。
+自 2026-10-12 起，`accept` → `in-progress` 这一步由实现 heartbeat 自动完成，不再等人指定；
+`in-progress` → **合并 → close** 由 review heartbeat 自动完成，人只在危险类拍板时出场。
 
 ## 自强化闭环总览
 
@@ -34,16 +76,16 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 | 环 | 承担者 / 机制 | 门禁 |
 | --- | --- | --- |
 | 1 观察 | 值班 Audit + 自动巡检 | 有命令输出、节点角色、查询时间才开票；无证据不开 |
-| 2 决策 | Triage | 危险类 `needs-decision` 等人；`accept`/`decline` 留痕；不自动派活 |
-| 3 开发 | 实现 agent | 一个 issue 一个分支；行为变更必有回归测试；自审清单 |
-| 4 发布+验证 | 部署 guard + 实跑验证 | 无 `recording===true` 才部署；验证达标才算完成 |
+| 2 决策 | 自动 Triage heartbeat | 危险类 `needs-decision` 等人才拦；`accept`/`decline` 自动打标并留痕 |
+| 3 开发 | 自动实现 heartbeat + 自动 Review heartbeat | 自动认领 `accept`；一个 issue 一个分支 + PR；行为变更必有回归测试；自审清单；独立 review 会话按门禁审查，**通过即合并** |
+| 4 发布+验证 | review 合并 + 部署 guard + 实跑验证 | review 门禁全过才合并；无 `recording===true` 才部署；验证达标才算完成 |
 | 5 回写强化 | 回归测试 + 规则 + 指标 | 不回写经验、无回归测试不 close |
 
 `accept` 不是环的终点：它只表示「可以做」，真正收口要等环 4 的验证 + 环 5 的回写。
 
 ## 四不 close
 
-close 一个 issue 前，四个门禁全过才算真正完成：
+**close 由实现 agent 自己做，不等人**——但四个门禁全过才算真正完成：
 
 1. **无证据不开**——开票/评论必须有命令输出和节点角色、时间；没有就补，补不了就不开。
 2. **不验证不 close**——声称修复前必须实跑验证（或由人在评论里写明由谁、何时验证）。
@@ -51,6 +93,32 @@ close 一个 issue 前，四个门禁全过才算真正完成：
 4. **不回写经验不 close**——根因与教训写入设计文档/规则/指标，让下一轮不再重复踩。
 
 违反任一条而 close 的，视为把「自强化环 5」断掉；review 时发现可直接打回。
+
+执行方式：四条全过 → `gh issue close N` + 评论写明依据（哪条验证命令、什么结果；回归测试文件；
+回写落在哪个文档 / 规则 / 指标）；缺任一条 → **不 close**，在 issue 里写清缺什么、谁来补、什么时候补。
+危险类（`needs-decision`）的票等人拍板后才动，拍板后同样按这四条收口。
+
+## review 门禁（PR 自动审查 + 合并）
+
+**review 由独立会话做，不自我审查**：实现 sub-agent 开完 PR 后，review heartbeat 另起一个
+`fork_context: false` 的新会话（只读审查、不改实现代码），逐条核下面的门禁。**门禁全过 → review
+agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等人操作**；缺任一条 → 打回，
+在 PR 里列出缺口，保持 `in-progress`，等实现会话补。review 结论一律回帖到 PR（评论也过隐私闸门）。
+
+1. **PR 形态**：base = `feat/hub-optimization`，分支名 `codex/issue-N-<slug>`，正文有 `Fixes #N`；
+   diff 尽量小、单一插入点。用 `gh pr view` / `gh pr diff --name-only` /
+   `git log --oneline origin/feat/hub-optimization..<branch>` 核对确实存在且对得上 issue。
+2. **验证有实际结果**：`pnpm test` 全量 + `pnpm typecheck`；动前端加 `cd packages/web && pnpm build`；
+   动运行时加 `pnpm bundle`。**不许只信自述**——review 要复核命令与输出（必要时在 PR 分支 worktree 重跑）。
+3. **行为变更有回归测试**：新分支 / 新边界 / 修 bug 都有 vitest 用例钉住；无法自动化的写明人工验证步骤。
+4. **自审清单可查**：PR 里有「自审发现 → 修复」清单；issue 评论里哪条没采纳及理由写清楚。
+5. **CI 状态**：除**已知基线红**（架构文档漂移守护，见 issue #11 浅克隆 + `git log` 热图互斥）外
+   不得有红；其它红必须打回。
+6. **版本号**：feat/fix 已 bump 根 `package.json` patch，且 `dist/douyin-rec.mjs` 的 `APP_VERSION` 同步。
+7. **隐私闸门**：PR 正文与评论都过 `python3 scripts/issue-guard.py`。
+
+合并后：**不删分支**（repo 设 `delete_branch_on_merge=false`）；按「四不 close」收口 issue；
+**部署仍由人做**（走 `recording===true` guard）。review agent 只合并，不改代码、不部署。
 
 ## 指标与闭环回写
 
@@ -112,5 +180,8 @@ close 一个 issue 前，四个门禁全过才算真正完成：
 ## 现在不要做的
 
 - 不常驻四个 agent 互相派活。
-- 不让 triage 自动开实现 agent。
+- 自动实现**不部署**（部署仍走 `recording===true` guard，永远是人做）；**PR 由 review heartbeat
+  派独立会话审查，通过即由 review agent 合并**，人不必手动合并。
+  **close issue 不是禁忌**——过了「四不 close」四条门禁就由 agent 直接关；缺一条才留 open。
+- 危险类（上传、删源、删稿、部署、改 hub 规则、清理录像）不得自动 accept。
 - master 把 job 标成 `failed`，但节点进程还在时，禁止再开一场上传。

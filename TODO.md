@@ -15,6 +15,35 @@
 
 ## 进行中
 
+- [~] **T-37 分段模式派生 per-分P 弹幕 xml（issue [#7](https://github.com/fuyucn/douyin-rec/issues/7)）**
+  — 2026-10-12 认领（用户拍板选 **A「同时存在」**：会话级单 xml 保持完整，per-分P xml 作为附加产物并存，
+  通过后再谈迁移）。实现由 sub-agent 独立会话 / 独立 worktree 完成，分支
+  `codex/issue-7-per-part-danmu-xml`，base `feat/hub-optimization`，**未合并 / 未部署 / 未 close**。
+  **做什么**：在分段流水线里由会话级 xml **派生**每个分 P 的 xml —— 复用既有「窗口累计（按会话分开）
+  + 窗口切片 + 时间重定基到 0」逻辑，条目集合与烧录切出的窗口一致，命名沿用下游已识别的约定。
+  **为什么**：分段模式下分 P 与弹幕没有一一对应的可交付文件，外部工具想按分 P 校对/二次渲染只能自己切窗口；
+  合并模式已有对齐的整片 xml，两种模式能力不对称。**验收**：派生 xml 与合并模式算出的绝对时间一致（回归测试钉住）；
+  会话级 xml 行为与清理不变量不变；`pnpm test` + `typecheck` + `bundle` 绿。
+  **边界**：不改上传/交付口径、不改 hub 规则、不删任何 `.xml`/`.ass`；派生文件不参与「最后一份」不变量判定。
+  **待确认（不阻塞）**：这份 per-分P xml 最终是交付物还是仅中间产物，迁移阶段再定。
+
+- [~] **T-36 节点侧上传补磁盘水位闸门（issue [#8](https://github.com/fuyucn/douyin-rec/issues/8)）**
+  — 2026-10-12 认领，PR [#10](https://github.com/fuyucn/douyin-rec/pull/10)（分支
+  `codex/issue-8-node-upload-disk-gate`，base `feat/hub-optimization`，sub-agent 独立 worktree 实现，
+  **已由 review agent 合并（2026-10-13，merge commit `c7b34bc`）；未部署 / 未 close**）。
+  **做什么**：`shouldUseNodeSideUpload` 或其 executor 增加一道磁盘水位闸门 —— 节点剩余空间低于阈值时不选
+  节点侧、回落 pull 回 master，并记明回落原因。**为什么**：节点盘满时仍走节点侧 → remux 写盘 ENOSPC →
+  ssh rc≠0 → 保守转人工（2026-10-12 多场即该簇）。**验收**：阈值与 reconciler `diskMinGB` 同源；
+  vitest 覆盖「低于阈值回落 / 等于高于阈值照常 / 阈值未配置向后兼容」；`pnpm test` + `typecheck` + `bundle` 绿。
+  **边界**：不自动重传、不删源、不改 hub 规则 —— 仅新增一道「不选节点侧」的判定。
+  **实现完成**：纯判定 `diskWatermarkGate` + 执行器插入闸门 + 组合根两处注入 `resources.diskMinGB ?? 10`
+  （与 reconciler 同表达式同源）；自审修 2 项（读数缺失展示串、执行器层覆盖缺口），另核查边界 / 一致性 / 分层。
+  验证 101 文件 / 1283 用例通过、typecheck exit 0、bundle `0.0.82`、架构文档 check 一致。
+  **rebase 收敛**：与已合并的 #6（`0.0.81`）在架构文档与版本号撞车 → 重放到最新 base，架构文档重新生成、
+  测试文件两边用例都保留、版本推进到 `0.0.82`；分支现为单提交 `73dfaf6`，PR `mergeable=MERGEABLE`。
+  **收口**：**不 close** —— 已由 review agent 合并，但**未部署**，真实链路（低水位确实回落 pull）无线上实跑证据，
+  不满足「不验证不 close」。等部署后由人实跑验证再收口。
+
 - [!] **T-5 部署未上线改动** — **阻塞原因**：部署 guard 要求两节点 `recording===true` 为 0，
   当前 VPS1 正在录「yyoo」、VPS2 正在录「凌晴」（2026-10-07 实测）。**解除条件**：两节点都收播
   （周期性 `curl /api/tasks` 复查）。**内容**：弹幕重连熔断、`resolveDouyinLiveId` 三级回落、
@@ -54,28 +83,16 @@
     50/50，家宽实测 web7/webHTML3 印证）。真正影响概率的是 `weight`。所以「调 priority 让 web 优先」
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
-- [~] **T-34 自强化循环开发落地** — 提案 issue [#4](https://github.com/fuyucn/douyin-rec/issues/4)。
-  文档部分已完成：`docs/self-reinforcing-dev.md`（五环闭环 + 每环门禁 + 指标口径）、
-  `docs/agent-workflow.md`（五环总览 + 四不 close + 指标与闭环回写）。
-  **本轮补齐剩余**：①新增只读指标脚本 `scripts/reinforce-metrics.py`（默认不写文件，
-  `--write` 落 `docs/metrics/<date>.md`），聚合 done/needs_manual/failed、疑似假失败率、
-  master stage 与（可选）节点卡死残留、近 30 天已关闭 issue 的开单→收口时长；②首个基线
-  报告 `docs/metrics/2026-10-12.md` + 文档「指标记录」表；③`.github/ISSUE_TEMPLATE/`
-  的 enhancement/incident 模板在「验收标准」默认写入「部署核对版本 + 实跑验证 + 至少一项回写资产」。
-  **验收**：指标能自动计算并写入文档（已跑通）；新增修复类 issue 的验收标准默认含「验证 + 回写」。
-  本轮只改文档 / 脚本 / 模板，未改任何录制、上传、删除、部署行为，未部署、未 commit。
-  **自动化已注册（2026-10-12）**：环 5「指标回写」heartbeat（`FREQ=DAILY;INTERVAL=2`，9:00）
-  跑 `--days 7 --write` 并追加「指标记录」，退步/复发才通知；环 1 值班 Audit（120min）与
-  环 2 issue 监听（5min）、环 4 部署 guard 由既有部署 heartbeat 承担。
-  **自动 gate 升级（2026-10-12，用户拍板方案 1）**：环 2 改为**自动 triage**（危险类 → `needs-decision`
-  等人；证据充分 + 低风险 + 可测试 → 自动 `accept`；证据不足 → 自动 `decline` 写原因）；
-  环 3 新增**自动实现** heartbeat（10min，消费 `accept` 且无 `in-progress` 的票 → 打 `in-progress` +
-  留言认领 → 分支 + **开 PR**，串行一次一条）。**人只做三件事：合并 PR、部署、危险类拍板。**
-  边界写进 `docs/agent-workflow.md`「自动 gate」与 `docs/self-reinforcing-dev.md` 环 2/3 + §5。
-  **闭环现状**：1/2/3/5 自动，4（合并 + 部署）由人做。
-  issue [#4](https://github.com/fuyucn/douyin-rec/issues/4) 已留言（实现完成 + 自审清单 + 证据），**未 close**，等合并。
-
 ## 待办（Next）
+
+- [ ] **T-38 CI 架构文档漂移守护恒红（issue [#11](https://github.com/fuyucn/douyin-rec/issues/11)）**
+  — 2026-10-12 开票（incident）。**做什么**：让 CI 的架构文档守护能变绿。**根因**：CI 工作流用
+  `actions/checkout@v4` 默认浅克隆（`fetch-depth: 1`），而架构文档生成脚本用 `git log --since="90 days ago"`
+  统计每包近 90 天提交数当热图数据 → 浅克隆里每包只剩 1 条提交 → `--check` 恒 exit 1（全历史下通过）。
+  **影响**：任何分支 CI 都无法变绿，门禁形同虚设，每次开 PR 都是红叉（#8 实现会话为此多花一轮定位）。
+  **验收**：CI `Unit tests` 步骤全绿；不改生成物语义。**路线**：①（首选）checkout 加 `fetch-depth: 0`；
+  ②生成脚本检测浅克隆时跳过热图维度并补测试。**归属**：改 CI 工作流属基础设施改动 → 按规则走
+  `needs-decision` 等人拍板，agent 不自动 accept。
 
 - [~] **T-32 分P 核验假 mismatch → 13 个 job 卡 needs_manual + 源不删(磁盘持续涨)** — 2026-10-10 实测发现。
   **根因(台账时间戳 + B站实查双向取证)**:`finalizeAfterUpload` 在**最后一个 append 成功后 0.5~0.6 秒**
@@ -358,6 +375,50 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-39 流程补 review 环节：PR 独立审查通过后由 agent 自动合并（issue [#14](https://github.com/fuyucn/douyin-rec/issues/14)，2026-10-13）**
+  — 2026-10-12 用户要求（「流程中增加一个 review agent，他 review 完提交的 PR 之后通过了，就可以合并了，
+  不需要我来操作」）。**做什么**：在自动流程里加「PR 自动 review + 合并」heartbeat —— 对每个 open PR
+  派 `fork_context:false` 的**新会话**只读审查，按「review 门禁」逐条核；**门禁全过 → review agent 直接
+  `gh pr merge --merge`**（base 保持 `feat/hub-optimization`，不删分支）；不通过 → 打回并列缺口，保持
+  `in-progress`。合并后按「四不 close」收口 issue。**为什么**：实现 heartbeat 只开 PR，合并一直留给人，
+  闭环断在环 4 入口，且实现与审查同会话 = 自我审查不可信。**验收**：三份文档口径一致
+  （实现只开 PR / review 通过即合并 / **部署仍由人做**）；review heartbeat 配置落盘并 ACTIVE；
+  首个样本 PR 走通「审查 → 合并」。**边界**：review agent 不改实现代码、不部署、不跳过门禁；
+  不删任何 `.xml`/`.ass`；不碰 `recording===true` 的任务。
+
+- [x] **T-35 中间产物→规范上传名改同盘硬链接（issue [#6](https://github.com/fuyucn/douyin-rec/issues/6)，已 close 2026-10-12）**
+  — 2026-10-12 认领，PR [#9](https://github.com/fuyucn/douyin-rec/pull/9)（分支 `codex/issue-6-stage-hardlink`，
+  base `feat/hub-optimization`），**已由人合并**（merge commit `d21d408`，版本 `0.0.81`），issue 已按
+  「四不 close」门禁收口 close。
+  **做什么**：节点侧分段管线 + master 分段管线的「中间产物 → 规范上传名」由真拷贝改同盘硬链接优先、
+  失败回落复制（`linkOrCopySync`），降低上传期 stage 峰值占用。**为什么**：真拷贝使峰值翻倍，
+  盘满时 remux ENOSPC 转人工。**验收**：同 inode 断言 + 硬链接失败回落 + 续跑不重复 remux 的回归用例；
+  `pnpm test` / `typecheck` / `bundle` 绿。
+  **实现完成**：sub-agent 独立 worktree（`fork_context: false`），自审修 3 项（架构文档漂移、账本句柄泄漏、
+  排除就地写入风险）；验证 101 文件 / 1276 用例通过、typecheck exit 0、bundle `0.0.81`。
+  **仍未部署**：部署后需人工实跑一场（不烧录 + 节点侧上传的房间）核对上传期 inode 与整场峰值。
+
+- [x] **T-34 自强化循环开发落地** — 完成 2026-10-12（issue [#4](https://github.com/fuyucn/douyin-rec/issues/4) 已 close） — 提案 issue [#4](https://github.com/fuyucn/douyin-rec/issues/4)。
+  文档部分已完成：`docs/self-reinforcing-dev.md`（五环闭环 + 每环门禁 + 指标口径）、
+  `docs/agent-workflow.md`（五环总览 + 四不 close + 指标与闭环回写）。
+  **本轮补齐剩余**：①新增只读指标脚本 `scripts/reinforce-metrics.py`（默认不写文件，
+  `--write` 落 `docs/metrics/<date>.md`），聚合 done/needs_manual/failed、疑似假失败率、
+  master stage 与（可选）节点卡死残留、近 30 天已关闭 issue 的开单→收口时长；②首个基线
+  报告 `docs/metrics/2026-10-12.md` + 文档「指标记录」表；③`.github/ISSUE_TEMPLATE/`
+  的 enhancement/incident 模板在「验收标准」默认写入「部署核对版本 + 实跑验证 + 至少一项回写资产」。
+  **验收**：指标能自动计算并写入文档（已跑通）；新增修复类 issue 的验收标准默认含「验证 + 回写」。
+  本轮只改文档 / 脚本 / 模板，未改任何录制、上传、删除、部署行为，未部署、未 commit。
+  **自动化已注册（2026-10-12）**：环 5「指标回写」heartbeat（`FREQ=DAILY;INTERVAL=2`，9:00）
+  跑 `--days 7 --write` 并追加「指标记录」，退步/复发才通知；环 1 值班 Audit（120min）与
+  环 2 issue 监听（5min）、环 4 部署 guard 由既有部署 heartbeat 承担。
+  **自动 gate 升级（2026-10-12，用户拍板方案 1）**：环 2 改为**自动 triage**（危险类 → `needs-decision`
+  等人；证据充分 + 低风险 + 可测试 → 自动 `accept`；证据不足 → 自动 `decline` 写原因）；
+  环 3 新增**自动实现** heartbeat（10min，消费 `accept` 且无 `in-progress` 的票 → 打 `in-progress` +
+  留言认领 → 分支 + **开 PR**，串行一次一条）。**人只做三件事：合并 PR、部署、危险类拍板。**
+  边界写进 `docs/agent-workflow.md`「自动 gate」与 `docs/self-reinforcing-dev.md` 环 2/3 + §5。
+  **闭环现状**：1/2/3/5 自动；4 拆开——合并 PR 与部署由人做，**close 由实现 agent 按「四不 close」门禁执行**。
+  issue [#4](https://github.com/fuyucn/douyin-rec/issues/4) 已按新门禁收口 **close（2026-10-12）**。
 
 - [x] **T-33 边录边传：已封口分段确认上传后再删源** — 2026-10-12 认领（GitHub #3）。计划 `plans/031_rolling_segment_upload.md`。
   评论约束：做成任务配置里的开关，类似节点侧上传，默认关闭。可以不照单全收，但要在 PR / issue 里写理由。

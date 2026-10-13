@@ -26,15 +26,26 @@
 - 打 `accept` / `decline` / `needs-decision`，`decline` 必须写原因。
 - 危险类（上传、删源、删稿、部署、改 hub 规则、清理录像）**一律 `needs-decision`，等人拍板**，
   评论写「决定三行」：要决定什么 / 不做会怎样 / 建议选项。
-- **门禁：`needs-decision` 缺一行不算准备好；`accept` 不自动派活。**
+- **自动 triage（2026-10-12 起）**：低风险 + 证据充分 + 可测试 → 自动 `accept`；
+  证据不足 / 明确不做 → 自动 `decline`（写原因）；危险类或拿不准 → `needs-decision`。
+  不是每张票都等人拍板，只有危险类才拦。
+- **门禁：`needs-decision` 缺一行不算准备好；危险类永不自动 `accept`；拿不准就 `needs-decision`，不猜。**
 - `accept` 后同步到 `TODO.md` 记 `T-N` 并链 issue，成为真正的开发契约。
 
 ### 环 3：开发（实现）
 
-- 一个 `accept` issue 一个分支，PR 写 `Fixes #N`；不合并、不部署、不顺手做无关改动。
+- **自动实现（2026-10-12 起）**：实现 heartbeat 扫到 `accept` 且无 `in-progress` 的票即认领，
+  打 `in-progress` 并评论「哪个 agent、何时开始」；同时最多一条串行。不再需要人点名派活。
+- 一个 `accept` issue 一个分支，PR 写 `Fixes #N`；实现会话**只开 PR，不合并**（合并归 review 会话）、
+  不部署、不顺手做无关改动。
 - 行为变更必须有回归测试钉住（无法自动化的，写明人工验证步骤）。
 - 自审循环照旧：实现 → 自审找缺陷 → 修复 → 复审；`pnpm test` / `typecheck` / `bundle` 全绿。
 - issue 评论也算输入：可以不采纳，但 PR 里必须写理由。
+- **合并 PR 由 review agent 做（2026-10-12 起）**：实现会话只开 PR，不合并；独立 review 会话按
+  「review 门禁」审查，**通过即 `gh pr merge --merge` 自动合并**，不等人操作。**部署永远是人做**。
+- **close 由实现 agent 做**（2026-10-12 起）：过完「四不 close」四条门禁就 `gh issue close` 并写明依据；
+  缺任一条就留 open 并写清缺口。注意 PR 的 base 是 `feat/hub-optimization` 而非默认分支 `main`，
+  `Fixes #N` 不会自动关票，close 必须显式执行。
 
 ### 环 4：发布 + 验证（Release & Verify）
 
@@ -87,6 +98,14 @@
 - [ ] 有回归测试（或写明人工验证步骤）
 - [ ] 自审发现 → 修复清单可查
 - [ ] PR 里说明评论哪些采纳 / 哪些不采纳及理由
+- [ ] 自动认领前先打 `in-progress` + 留言「哪个 agent、何时开始」
+
+自动化的边界（2026-10-12 起）：
+- [ ] 自动 triage 只打标签，不写代码；危险类一律 `needs-decision`
+- [ ] 自动实现只开 PR，不合并、不部署
+- [ ] 自动 review 派独立会话只读审查，门禁全过即合并 PR，不部署
+- [ ] 自动实现过「四不 close」后可自行 close issue，并写明关闭依据
+- [ ] 同时最多一条 `in-progress`（串行，避免多个会话互相打架）
 
 发布与验证：
 - [ ] 部署前 guard 0 在录（或用户 override）
@@ -135,9 +154,12 @@ python3 scripts/reinforce-metrics.py --node vps --node vps2
 
 ## 5. 边界与不做
 
-- 不常驻四个 agent 互相派活；五环由「值班 Audit + Triage + 人指定实现会话 + review + 自动巡检」
-  承担，需要自动化时用 heartbeat / cron，不默认开一堆长驻 agent。
-- 不碰线上行为：本文件只定义流程与门禁；具体修复仍走 issue → 分支 → PR → 人合并。
+- 不常驻四个 agent 互相派活；五环由 heartbeat / cron 承担：环 1 值班 Audit、环 2 自动 triage、
+  环 3 自动实现（开 PR）+ 自动 review（审查通过即合并）、环 4 部署 guard、环 5 指标回写。
+  不默认开一堆长驻 agent。
+- 环 2 / 环 3 已自动化（2026-10-12）：`accept` 不再等人点名，自动 triage 出的 `accept` 会直接进
+  实现流程开出 PR；**PR 由独立 review 会话审查，通过即自动合并**。人只负责**部署 / 危险类拍板**。
+- 不碰线上行为：本文件只定义流程与门禁；具体修复仍走 issue → 分支 → PR → review 合并。
 - issue 永不写隐私；编辑过的 issue 旧版本仍公开，第一版就要过闸门。
 - 环 4 的「实跑一场」不是每次都必须全流程；但**收口类**（上传/删源/分P）必须有实跑证据或
   明确的待办，否则第 5 环无从回写。
