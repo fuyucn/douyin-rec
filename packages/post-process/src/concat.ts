@@ -2,50 +2,25 @@
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
+import { segmentIndexOf, sessionBaseOf } from "@drec/core";
 import { runFfmpeg } from "./ffmpeg.js";
 
 /**
- * 从视频分段文件名取会话基名（剥分段后缀 + 容器后缀）。
- * 支持容器 .ts（ffmpeg/DLR/biliLive）与 .flv（mesio 引擎，低配无 ffmpeg 路径）。
- * 分段后缀三种格式：
- *   - biliLive: {base}-PART000  → 剥 -PART\d+
- *   - biliLive/_PART: {base}_PART000 → 剥 _PART\d+
- *   - DLR/mesio: {base}_000     → 剥 _\d{3,}
- * 与一期 sessionXmlPath 同规则。
+ * 从视频分段文件名取会话基名(剥分段后缀 + 容器后缀);规则见 core `sessionBaseOf`。
+ * 容器 .ts(ffmpeg/DLR/biliLive)与 .flv(mesio)均认。
  */
 export function sessionBase(tsName: string): string {
-  return basename(tsName)
-    .replace(/\.(ts|flv)$/i, "")
-    .replace(/(?:-PART\d+|_PART\d+|_\d{3,})$/, "");
+  return sessionBaseOf(tsName);
 }
 
-/**
- * 段号（无后缀 = -1，使单文件排在所有分段之前）。
- * 匹配 -PART000（biliLive 带短横线）、_PART000（biliLive 带下划线）或 _000（DLR/mesio 3+位）。
- * 容器 .ts / .flv 均认。
- */
-function segIndex(name: string): number {
-  // 与 sessionBase 剥离口径一致:PART<n> 任意位,裸 _<n> 须 3+ 位(避免把 base 尾部短数字误当段号)。
-  const m = name.match(/(?:-PART(\d+)|_PART(\d+)|_(\d{3,}))\.(ts|flv)$/i);
-  return m ? Number(m[1] ?? m[2] ?? m[3]) : -1;
-}
-
-/** .xml 文件的段号（无段号 = -1），用于 DLR per-segment xml（{base}_NNN.xml）排序。 */
-function xmlSegIndex(name: string): number {
-  const m = name.match(/(?:-PART(\d+)|_PART(\d+)|_(\d{3,}))\.xml$/i);
-  return m ? Number(m[1] ?? m[2] ?? m[3]) : -1;
-}
-
-/** 取 .xml 文件名的会话基名（剥分段后缀 + .xml），与 sessionBase 同规则。 */
+/** 取 .xml 文件名的会话基名(剥分段后缀 + .xml),与 sessionBase 同规则。 */
 export function xmlSessionBase(xmlName: string): string {
-  return basename(xmlName)
-    .replace(/\.xml$/i, "")
-    .replace(/(?:-PART\d+|_PART\d+|_\d{3,})$/, "");
+  return sessionBaseOf(xmlName);
 }
 
 /** 按段号数字排序（非字典序）；无段号的文件（单 {base}.ts）排最前。 */
 export function sortSegments(files: string[]): string[] {
-  return [...files].sort((a, b) => segIndex(a) - segIndex(b));
+  return [...files].sort((a, b) => segmentIndexOf(a) - segmentIndexOf(b));
 }
 
 export interface SessionGroup {
@@ -81,7 +56,7 @@ export function groupSessions(files: string[]): Record<string, SessionGroup> {
   //   - {base}_NNN.xml / -PARTNNN.xml → per-segment segmentXmls
   for (const f of files) {
     if (!/\.xml$/i.test(f)) continue;
-    const seg = xmlSegIndex(f);
+    const seg = segmentIndexOf(f);
     if (seg < 0) {
       // 会话级：basename 去掉 .xml 即为 base
       const b = basename(f).replace(/\.xml$/i, "");
@@ -95,7 +70,7 @@ export function groupSessions(files: string[]): Record<string, SessionGroup> {
   // Sort each session's ts + segmentXmls array by segment index
   for (const b of Object.keys(out)) {
     out[b].ts = sortSegments(out[b].ts);
-    out[b].segmentXmls.sort((a, c) => xmlSegIndex(a) - xmlSegIndex(c));
+    out[b].segmentXmls.sort((a, c) => segmentIndexOf(a) - segmentIndexOf(c));
   }
 
   return out;

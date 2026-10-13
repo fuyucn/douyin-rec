@@ -22,6 +22,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, type Dirent } from "node:fs";
 import { join } from "node:path";
+import { sessionBaseOf } from "@drec/core";
 
 /** 视频容器扩展名(会话基名索引用;视频本身不在清理集内 —— 由 cleanup-recording-today 管)。 */
 const VIDEO_EXT = [".ts", ".flv", ".mp4", ".mkv", ".webm"];
@@ -97,17 +98,6 @@ export interface CleanupResult extends ScanResult {
 function extOf(name: string): string {
   const i = name.lastIndexOf(".");
   return i < 0 ? "" : name.slice(i).toLowerCase();
-}
-
-/**
- * 会话基名:剥掉分段后缀与扩展名。**规则必须与 `@drec/post-process` 的 `sessionBase` 一致**
- * (biliLive `-PART000` / `_PART000`、DLR/mesio `_000` 三种分段后缀)。
- * post-process 未导出该函数(其 concat.ts 是私有),故此处同规则复刻一份 —— 改动时两边同步。
- */
-function sessionBaseOf(name: string): string {
-  return name
-    .replace(/\.(ts|flv|mp4|mkv|webm|xml|ass)$/i, "")
-    .replace(/(?:-PART\d+|_PART\d+|_\d{3,})$/, "");
 }
 
 /** 视频/弹幕/scratch/sidecar 之外的文件(log 等)不归本任务 —— 不枚举「可能有用」的东西。 */

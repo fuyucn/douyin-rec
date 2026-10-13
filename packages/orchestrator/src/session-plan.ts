@@ -1,6 +1,6 @@
 import { readdirSync } from "node:fs";
 import { copyFileSync, existsSync, linkSync, mkdirSync, rmSync } from "node:fs";
-import { partTitleToFilename } from "@drec/core";
+import { partTitleToFilename, stampedSessionBaseOf } from "@drec/core";
 
 /** 该场 stage 合成产物的确定性路径(merge 后 / 续跑反推)。 */
 export interface StageProducts {
@@ -30,13 +30,9 @@ export interface StageProducts {
   xmlArg: string;
 }
 
-/**
- * `主播名_2026-08-10_23-08-10` 的会话文件 → 会话 base。识别三种分段后缀:
- * `-PART01`(biliLive)、`_PART001`(biliLive 下划线)、`_000`(本项目录制器/DLR/ffmpeg 的裸段号)。
- */
+/** `主播名_2026-08-10_23-08-10` 的会话文件 → 会话 base;规则见 core `stampedSessionBaseOf`。 */
 export function sessionBaseOfFile(name: string): string | undefined {
-  const m = /^(.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:-PART\d+|_PART\d+|_\d{3,})?\.(?:ts|flv|xml|mp4)$/i.exec(name);
-  return m?.[1];
+  return stampedSessionBaseOf(name);
 }
 
 /** 从文件名集合提取全部会话 base，排序并去重(同一场多分段只算一次)。 */

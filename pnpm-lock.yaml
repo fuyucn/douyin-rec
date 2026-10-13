@@ -202,6 +202,9 @@ importers:
 
   packages/post-process:
     dependencies:
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
       eastasianwidth:
         specifier: ^0.3.0
         version: 0.3.0

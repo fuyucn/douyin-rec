@@ -19,17 +19,11 @@ import path from "node:path";
 import {
   biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, isAppendAmbiguous,
   isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, partTitleToFilename, resolveOutputStem, sanitizeStreamKey,
-  UploadGate, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
+  stampedSessionBaseOf as sessionBaseOfFile, UploadGate, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
 } from "@drec/core";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment } from "@drec/post-process";
 import { appendGroup, countVideoParts, uploadPlain } from "./upload/biliup.js";
 import { rootBiliupCookies, rootDbPath, rootStageDir } from "./paths.js";
-
-/** 会话 base(与 orchestrator/session-plan 同规则:剥 -PART###/_PART###/_### 后缀)。 */
-function sessionBaseOfFile(name: string): string | undefined {
-  const m = /^(.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:-PART\d+|_PART\d+|_\d{3,})?\.(?:ts|flv|xml|mp4)$/i.exec(name);
-  return m?.[1];
-}
 
 /**
  * 节点侧上传的**限流闸门**(030 T19,T-18 房间不上传风暴)。
