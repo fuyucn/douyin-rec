@@ -99,7 +99,8 @@ describe("e2e: 节点侧上传(experimental,真实 runNodeSidePipeline)", () => 
     expect(s.jobState(key)).toBe("needs_manual");
     expect(s.ledger.get(key)?.error).toContain("人工");
     expect(s.fake.draftCount).toBe(1);
-    expect(s.fake.onlyArchive.parts, "不得重复追加分P").toHaveLength(3);
+    // P2 已提交;正确修复(#59)后应转人工且不得发送 P3,故稿件应为 2 个分P(不是 3)。
+    expect(s.fake.onlyArchive.parts, "不得重复追加分P").toHaveLength(2);
     expect(tsLeft(s), "不确定时不得删源").toBe(3);
     expectSourceSidecarsKept(s);
     // 再来一轮(含重启):needs_manual 不被推进,不产生新上传。
