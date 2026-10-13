@@ -15,7 +15,7 @@ import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
 import { retry } from "./retry.js";
 import { prepareUploadAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
-import { cleanupSourcesShared, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, stageVideoLeftovers, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineDeps } from "./pipeline.js";
 
 /** 默认单段 remux(ts/flv → mp4,无损,-c copy + 时基钉 90000)。 */
 const defaultRemuxSegment = (src: string, out: string): Promise<void> =>
@@ -608,6 +608,9 @@ export async function runSegmentPipeline(o: {
     if (xmlKeepRule("stage", true)) {
       products.push(...readdirSyncSafe(stageSub).filter((f) => /\.(xml|ass)$/i.test(f)).map((f) => path.join(stageSub, f)));
     }
+    // 整稿核验通过后:stage 内其余视频类内容(拉回的源段副本、.work 中间产物)一并清(#60)。
+    if (finalize.cleanConfirmed) products.push(...stageVideoLeftovers(stageSub));
+    products.splice(0, products.length, ...new Set(products));
     ledger.logStep(streamKey, "clean_stage", "start");
     try { await rmStage(products); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件`); }
     catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件 · 失败`); ledger.syncNodeState(streamKey, "clean_stage", "failed", { error: msg }); jlog(`清理失败(clean_stage):${msg}`); }
@@ -759,6 +762,8 @@ async function resumeSegmentAppends(
     if (xmlKeepRule("stage", true)) {
       products.push(...readdirSyncSafe(stageSub).filter((f) => /\.(xml|ass)$/i.test(f)).map((f) => path.join(stageSub, f)));
     }
+    if (finalize.cleanConfirmed) products.push(...stageVideoLeftovers(stageSub));
+    products.splice(0, products.length, ...new Set(products));
     try { await rmStage(products); }
     catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.syncNodeState(streamKey, "clean_stage", "failed", { error: msg }); jlog(`清理失败(clean_stage):${msg}`); }
   }
