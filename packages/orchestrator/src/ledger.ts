@@ -3,6 +3,39 @@ import type { HubJobState, HubNodeStateName, HubStepName } from "@drec/core";
 
 // 状态/步骤名的**唯一真理 = core 的只读契约**(app 的 hub 任务页只读同一张库,靠它对齐)。
 export type JobState = HubJobState;
+
+/**
+ * job 状态转换白名单(from → 允许的 to)。**由现有调用点推导**,不是凭空设计:
+ * - 主线 pending → syncing(pipeline 选优后)→ merging → uploading(仅分段上传)→ done / needs_manual;
+ * - 任意非终态可 → failed(markFailed / sweepStale)、→ needs_manual(停止 / 转人工)、→ done(上传成功是事实);
+ * - 重入:failed → syncing(reconciler 自动重试)、{非 done} → retrying(runNow / retryNode);
+ * - needs_manual 只能被人工 → retrying / done(hub-recheck 翻正);**不得 → failed**,否则
+ *   「用户已停止」的场被还在跑的 pipeline 迟到的 markFailed 改回 failed,reconciler 会自动重跑。
+ * - done 是终态,无出边;人工重跑须显式 `{ force: true }`(runNow / retryNode)。
+ * 同态(含 done → done 的幂等收尾、failed → failed 的 fails 自增)恒允许,不列在表里。
+ */
+export const ALLOWED_TRANSITIONS: Readonly<Record<JobState, readonly JobState[]>> = {
+  pending: ["settling", "syncing", "retrying", "failed", "needs_manual", "done"],
+  settling: ["syncing", "retrying", "failed", "needs_manual", "done"],
+  syncing: ["merging", "retrying", "failed", "needs_manual", "done"],
+  merging: ["uploading", "retrying", "failed", "needs_manual", "done"],
+  uploading: ["retrying", "failed", "needs_manual", "done"],
+  retrying: ["syncing", "failed", "needs_manual", "done"],
+  failed: ["syncing", "retrying", "needs_manual", "done"],
+  needs_manual: ["retrying", "done"],
+  done: [],
+};
+
+/** from→to 是否合法。库里不认识的旧状态一律放行:行仍可读,也允许被改写回合法状态自愈。 */
+export function isTransitionAllowed(from: string, to: JobState): boolean {
+  if (from === to) return true;
+  const allowed = (ALLOWED_TRANSITIONS as Record<string, readonly JobState[] | undefined>)[from];
+  return allowed === undefined || allowed.includes(to);
+}
+
+/** 状态写入的显式覆盖:仅供人工重跑(runNow / retryNode)把 done 拨回进行中。 */
+export interface TransitionOpts { force?: boolean }
+
 export interface JobRow {
   streamKey: string;
   state: JobState;
@@ -144,16 +177,48 @@ export class SyncLedger {
     const r = this.db.prepare("SELECT * FROM sync_jobs WHERE streamKey=?").get(streamKey) as unknown as JobRow | undefined;
     return r ?? null;
   }
-  setState(streamKey: string, state: JobState, patch: { winnerWorker?: string; error?: string } = {}): void {
+  /**
+   * 受白名单约束的状态写入:合法才写库 + 记事件,返回 true;
+   * 非法(含无此 job、并发下已被别处改走)→ 不写库、不动 updatedAt、console.warn、返回 false,**不 throw**。
+   * 用「按读到的旧状态比较再写」(CAS)而非先查后盲写,并发/重入下也不会覆盖终态。
+   */
+  private transition(
+    streamKey: string,
+    to: JobState,
+    set: string,
+    args: Array<string | number | null>,
+    force = false,
+  ): boolean {
+    const cur = this.get(streamKey);
+    if (!cur) {
+      console.warn(`[ledger] 拒绝状态转换 ${streamKey}: → ${to}(无此 job)`);
+      return false;
+    }
+    if (!force && !isTransitionAllowed(cur.state, to)) {
+      console.warn(`[ledger] 拒绝非法状态转换 ${streamKey}: ${cur.state} → ${to}`);
+      return false;
+    }
     const at = this.now();
-    this.db.prepare("UPDATE sync_jobs SET state=?, winnerWorker=COALESCE(?,winnerWorker), error=?, updatedAt=? WHERE streamKey=?")
-      .run(state, patch.winnerWorker ?? null, patch.error ?? null, at, streamKey);
-    this.logEvent(streamKey, state, at);
+    const r = this.db.prepare(`UPDATE sync_jobs SET state=?, ${set}, updatedAt=? WHERE streamKey=? AND state=?`)
+      .run(to, ...args, at, streamKey, cur.state);
+    if (Number(r.changes) === 0) {
+      console.warn(`[ledger] 拒绝状态转换 ${streamKey}: ${cur.state} → ${to}(状态已被并发改写)`);
+      return false;
+    }
+    this.logEvent(streamKey, to, at);
+    return true;
   }
-  markDone(streamKey: string, bv: string): void {
-    const at = this.now();
-    this.db.prepare("UPDATE sync_jobs SET state='done', bv=?, error=NULL, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
-    this.logEvent(streamKey, "done", at);
+  setState(
+    streamKey: string,
+    state: JobState,
+    patch: { winnerWorker?: string; error?: string } = {},
+    opts: TransitionOpts = {},
+  ): boolean {
+    return this.transition(streamKey, state, "winnerWorker=COALESCE(?,winnerWorker), error=?",
+      [patch.winnerWorker ?? null, patch.error ?? null], opts.force === true);
+  }
+  markDone(streamKey: string, bv: string): boolean {
+    return this.transition(streamKey, "done", "bv=?, error=NULL", [bv]);
   }
   /** checkpoint:P1 上传成功即落 bv 列(不改 state、不写事件)。续跑靠它判断"已建稿"。 */
   setBv(streamKey: string, bv: string): void {
@@ -291,11 +356,8 @@ export class SyncLedger {
     }
   }
   /** pipeline 抛错时:置 failed + 记 error + fails 自增(供重试上限判定)。 */
-  markFailed(streamKey: string, error: string): void {
-    const at = this.now();
-    this.db.prepare("UPDATE sync_jobs SET state='failed', error=?, fails=fails+1, updatedAt=? WHERE streamKey=?")
-      .run(error, at, streamKey);
-    this.logEvent(streamKey, "failed", at);
+  markFailed(streamKey: string, error: string): boolean {
+    return this.transition(streamKey, "failed", "error=?, fails=fails+1", [error]);
   }
   /** 某场的状态转换时间线(升序)。 */
   getEvents(streamKey: string): JobEvent[] {

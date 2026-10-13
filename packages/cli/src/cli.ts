@@ -1171,7 +1171,7 @@ const hubStarter: HubStarter = {
         try {
           return await pool.withStreamLock(streamKey, async () => {
             throwIfAborted();
-            ledger.setState(streamKey, "retrying");
+            ledger.setState(streamKey, "retrying", {}, { force: true }); // 人工重跑:允许 done 场重跑单节点
             const cfg = resolveCfg(platform, roomSlug);
             if (!cfg) {
               ledger.setState(streamKey, "failed", { error: `房间未开 hub: ${streamKey}` });

@@ -642,7 +642,7 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
 
     this.ledger.upsertPending(key, b.startMs);
     this.ledger.resetActiveNodes(key);
-    this.ledger.setState(key, "retrying");
+    this.ledger.setState(key, "retrying", {}, { force: true }); // 人工重跑:允许把 done(无 bv)拨回进行中
 
     // 配置按广播身份(found.streamKey)缓存;新建任务 key 带 -N 后缀,直接按任务 key 查会
     // miss 而回落成全局 stage 默认 → 上传节点全 skip。必须按 found 的原始广播身份查。

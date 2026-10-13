@@ -71,7 +71,7 @@ describe("SyncLedger", () => {
   it("listRecent 按 updatedAt 倒序返回最近 N 个 job", () => {
     const l = fresh();
     l.upsertPending("a"); l.upsertPending("b"); l.upsertPending("c");
-    l.setState("b", "merging");                  // b 最新
+    l.setState("b", "syncing"); l.setState("b", "merging"); // b 最新
     const rows = l.listRecent(2);
     expect(rows).toHaveLength(2);
     expect(rows[0].streamKey).toBe("b");
@@ -160,7 +160,7 @@ describe("ledger 列迁移 tenant→worker(幂等 RENAME COLUMN)", () => {
   it("setBv 只落 bv 列,不改 state、不产生新事件", () => {
     const l = fresh();
     l.upsertPending("k1");                 // pending
-    l.setState("k1", "uploading");         // uploading
+    l.setState("k1", "syncing"); l.setState("k1", "merging"); l.setState("k1", "uploading"); // uploading
     const before = l.getEvents("k1").length;
     l.setBv("k1", "BVabc");
     expect(l.get("k1")?.bv).toBe("BVabc");
