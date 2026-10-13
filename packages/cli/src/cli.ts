@@ -915,6 +915,8 @@ const hubStarter: HubStarter = {
         new FileLogger(`${hubCfg.stageDir ?? rootStageDir()}/${sanitizeStreamKey(streamKey)}/job.log`),
       cfg: {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
+        // 磁盘水位闸门(issue #8):与下面的 Reconciler 看门狗**同源同表达式**(resources.diskMinGB)。
+        diskMinGB: hubCfg.resources?.diskMinGB ?? 10,
         stageDir: hubCfg.stageDir ?? rootStageDir(),
         cookies: hubCfg.cookies ?? "",
         uploadMode: "stage" as const, // 全局兜底 = 不自动传;每任务文件按需 mode:"upload"
@@ -939,6 +941,8 @@ const hubStarter: HubStarter = {
       const p = rule.pipeline ?? {};
       return {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
+        // 磁盘水位闸门(issue #8):同上,与 reconciler 看门狗同一个配置键与默认值(不新增第二套口径)。
+        diskMinGB: hubCfg.resources?.diskMinGB ?? 10,
         reconnectWindowMs: p.reconnectWindowMs ?? hubCfg.reconnectWindowMs,
         stageDir: hubCfg.stageDir ?? rootStageDir(),
         cookies: hubCfg.cookies ?? "",

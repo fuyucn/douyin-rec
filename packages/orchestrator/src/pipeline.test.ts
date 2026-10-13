@@ -1201,6 +1201,28 @@ describe("runPipeline", () => {
       expect(shouldUseNodeSideUpload({ uploadMode: "upload", steps: { nodeSideUpload: true } }, burnOff).ok).toBe(true);
     });
 
+    it("diskWatermarkGate:纯判定(低于拦 / 等于高于放行 / 阈值缺失或<=0 关闭)", async () => {
+      const { diskWatermarkGate } = await import("./node-side-upload.js");
+      // 低于阈值 → 拦下 + 原因字符串(调用方据此写日志,绝不静默)
+      const blocked = diskWatermarkGate(3.2, 10);
+      expect(blocked.ok).toBe(false);
+      expect(blocked.ok === false && blocked.reason).toContain("3.2GB");
+      expect(blocked.ok === false && blocked.reason).toContain("10GB");
+      // 等于 / 高于 → 放行(边界取「低于」,与 reconciler 的 `freeGB < diskMinGB` 同口径)
+      expect(diskWatermarkGate(10, 10).ok).toBe(true);
+      expect(diskWatermarkGate(50, 10).ok).toBe(true);
+      // 阈值未配置 / <=0 / NaN → 关闭闸门(向后兼容,与 reconciler 看门狗同语义)
+      expect(diskWatermarkGate(0.1, undefined).ok).toBe(true);
+      expect(diskWatermarkGate(0.1, 0).ok).toBe(true);
+      expect(diskWatermarkGate(0.1, -1).ok).toBe(true);
+      expect(diskWatermarkGate(0.1, Number.NaN).ok).toBe(true);
+      // 读数完全拿不到(旧/自定义 transport 不给该字段)→ 不因磁盘拦,靠 reconciler 看门狗兜底
+      expect(diskWatermarkGate(undefined, 10).ok).toBe(true);
+      expect(diskWatermarkGate(Number.NaN, 10).ok).toBe(true);
+      // 读数为 0(真·盘满,线上实测形态)→ 拦下
+      expect(diskWatermarkGate(0, 10).ok).toBe(false);
+    });
+
     it("flag off(默认)→ 行为与现状一致:走 pull 回 master,不调 nodePipeline", async () => {
       const deps = makeDeps();
       const t = deps.transports.get("node-1")!;
@@ -1255,6 +1277,93 @@ describe("runPipeline", () => {
       await runPipeline(b, deps);
       expect(nodePipeline).not.toHaveBeenCalled();
       expect(t.pull).toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    /**
+     * 磁盘水位闸门(issue #8)。节点盘写满时仍走节点侧 → 本地 remux 写盘 ENOSPC → 节点进程非 0
+     * 退出 → ssh rc≠0 → 保守转人工(线上实测一整簇)。阈值与 reconciler 看门狗同源(cfg.diskMinGB)。
+     */
+    function nodeSideDeps(cfgExtra: Partial<PipelineCfg> = {}): { deps: TestDeps; lines: string[] } {
+      const lines: string[] = [];
+      const deps = makeDeps({
+        cfg: { ...makeDeps().cfg, steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false }, ...cfgExtra },
+        makeRunLogger: () => ({ info: (...a: unknown[]) => lines.push(a.join(" ")), warn: () => {}, error: () => {} }),
+      });
+      deps.ledger.upsertPending(STREAM_KEY); // 真实路径由 reconciler 先建行(直接调 runPipeline 需自建)
+      return { deps, lines };
+    }
+
+    it("① 节点剩余磁盘 < 阈值 → 不选节点侧,回落 pull 回 master,并记明回落原因", async () => {
+      const { deps, lines } = nodeSideDeps({ diskMinGB: 10 });
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t, { caps: { biliup: true, cookies: true, diskFreeGB: 0.5 } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      await runPipeline(b, deps);
+      expect(nodePipeline).not.toHaveBeenCalled(); // 绝不走节点侧(盘满会让 remux 写盘 ENOSPC)
+      expect(t.pull).toHaveBeenCalled();           // 现状:pull 回 master(节点侧出现前的原有路径)
+      // 绝不静默:必须写明「低于阈值」这个原因
+      expect(lines.some((l) => l.includes("节点侧上传不可用") && l.includes("0.5GB") && l.includes("阈值 10GB"))).toBe(true);
+      deps.ledger.close();
+    });
+
+    it("② 剩余磁盘 == 阈值 → 照常节点侧(边界取「低于」才拦,与 reconciler 的 `< diskMinGB` 同口径)", async () => {
+      const { deps } = nodeSideDeps({ diskMinGB: 10 });
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t, { caps: { biliup: true, cookies: true, diskFreeGB: 10 } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      const r = await runPipeline(b, deps);
+      expect(nodePipeline).toHaveBeenCalledTimes(1);
+      expect(t.pull).not.toHaveBeenCalled();
+      expect(r).toEqual({ state: "done", bv: "BVnode" });
+      deps.ledger.close();
+    });
+
+    it("② 剩余磁盘 > 阈值 → 照常节点侧", async () => {
+      const { deps } = nodeSideDeps({ diskMinGB: 10 });
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t, { caps: { biliup: true, cookies: true, diskFreeGB: 50 } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      const r = await runPipeline(b, deps);
+      expect(nodePipeline).toHaveBeenCalledTimes(1);
+      expect(r).toEqual({ state: "done", bv: "BVnode" });
+      deps.ledger.close();
+    });
+
+    it("③ 阈值未配置(向后兼容)→ 不因磁盘拦:盘再小也照常节点侧", async () => {
+      // 老配置 / 老调用方不带 diskMinGB ⇒ 行为与本次改动前完全一致(闸门关闭)。
+      const { deps } = nodeSideDeps(); // 无 diskMinGB
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t, { caps: { biliup: true, cookies: true, diskFreeGB: 0.1 } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      const r = await runPipeline(b, deps);
+      expect(nodePipeline).toHaveBeenCalledTimes(1);
+      expect(t.pull).not.toHaveBeenCalled();
+      expect(r).toEqual({ state: "done", bv: "BVnode" });
+      deps.ledger.close();
+    });
+
+    it("③ 阈值 <=0(显式关闸,与 reconciler 看门狗同语义)→ 不拦", async () => {
+      const { deps } = nodeSideDeps({ diskMinGB: 0 });
+      const t = deps.transports.get("node-1")!;
+      const { nodePipeline } = withNodePipeline(t, { caps: { biliup: true, cookies: true, diskFreeGB: 0.1 } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      await runPipeline(b, deps);
+      expect(nodePipeline).toHaveBeenCalledTimes(1);
+      deps.ledger.close();
+    });
+
+    it("③b 磁盘读数缺失(旧/自定义 transport 不给该字段)→ 不因磁盘拦(靠 reconciler 看门狗兜底)", async () => {
+      // 拿不到读数 ≠ 盘满:拦下等于把「探测异常」当「盘满」白放弃省回传。与 serve.ts freeBytes 返 null 同口径。
+      const { deps } = nodeSideDeps({ diskMinGB: 10 });
+      const t = deps.transports.get("node-1")!;
+      const caps = { biliup: true, cookies: true } as unknown as { biliup: boolean; cookies: boolean; diskFreeGB: number };
+      const { nodePipeline } = withNodePipeline(t, { caps });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      const r = await runPipeline(b, deps);
+      expect(nodePipeline).toHaveBeenCalledTimes(1);
+      expect(t.pull).not.toHaveBeenCalled();
+      expect(r).toEqual({ state: "done", bv: "BVnode" });
       deps.ledger.close();
     });
 
