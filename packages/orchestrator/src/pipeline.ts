@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, resolveOutputStem, runWithJob, sanitizeStreamKey, throwIfAborted, USER_STOP, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, resolveOutputStem, runWithJob, sanitizeStreamKey, throwIfAborted, USER_STOP, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/core";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
@@ -422,23 +422,26 @@ export async function finalizeAfterUpload(o: {
  * 为什么必须在**最早**短路:节点上传确认后已删该段源视频,覆盖率/选优会失真(可能误报未录全),
  * 不能靠下游判定。这里只看 sidecar 的权威事实(录制节点自己写的 BV)。
  *
+ * 配置变更对正在进行的一场不生效(下一场起生效):若收口时当前规则已开烧录(`pipelineBurns(cfg.steps)`),
+ * 该场仍按起录时(边录边传)配置收口 done,仅写 job.log 并通知「新配置下一场生效」,不转人工、不改上传/删源行为。
+ *
  * 边界:
  *   - 没有任何成员带 rolling.bv → 返回 null,走常规路径(未启用边录边传 = 行为不变)。
  *   - 有 rolling.bv 但存在 ambiguous 段(结果不确定)→ **转人工**(保留源,不自动重传)。
  *   - 有 rolling.bv 但**磁盘上仍剩未确认分段**(进程在 onSessionEnd 前被杀)→ **转人工**:
  *     那些段的画面没进 BV,静默 done 会**丢片**。确认段会被删,故「还剩 ts」= 未确认。
- *   - stage 模式:边录边传只在上传模式有意义;stage 模式仍照常合成(此处仅认 upload 模式)。
  *   - 多个成员都带 rolling.bv 且 **BV 不一致** → 说明多节点各建稿(不该发生,闸门已挡)→ 转人工。
  */
-function tryRollingShortCircuit(o: {
+export function tryRollingShortCircuit(o: {
   streamKey: string;
+  cfg: { steps?: BurnSteps | null };
   members: Broadcast["members"];
   ledger: SyncLedger;
   transports: Map<string, Transport>;
   notify: (e: NotifyEvent) => void;
   jlog: (m: string) => void;
 }): { state: JobState; bv?: string } | null {
-  const { streamKey, members, ledger, jlog } = o;
+  const { streamKey, members, ledger, jlog, cfg } = o;
   if (ledger.get(streamKey)?.bv) return null; // 已有 BV(续跑) → 交给既有续跑路径
   const rolled = members.filter((m) => m.rec.rolling?.bv);
   if (rolled.length === 0) return null;
@@ -465,8 +468,14 @@ function tryRollingShortCircuit(o: {
     o.notify({ kind: "error", stage: "上传", message: `${streamKey} 边录边传:仍有未确认分段,已转人工` });
     return { state: "needs_manual", bv };
   }
-  // 录制节点已建稿且全部确认 → master 直接收口 done。节点侧已删各确认段源视频,这里只标记完成。
+  // 录制节点已建稿且全部确认 → master 直接收口 done。节点侧已删各确认段源视频,这里只标记完成
+  // (本函数不删源、不看 uploadMode/sourceAfterDone)。
   jlog(`边录边传识别:录制节点已建稿 BV=${bv}(确认 ${rolled.flatMap((m) => m.rec.rolling?.confirmed ?? []).length} 段)→ 直接 done,绝不重复建稿`);
+  if (pipelineBurns(cfg.steps)) {
+    const msg = `${streamKey} 该场按起录时配置收口,新配置(烧录)下一场生效`;
+    jlog(`边录边传识别:当前规则烧录已开启,与起录时配置不一致 → ${msg}(仍按 rolling 收口 done,BV=${bv})`);
+    o.notify({ kind: "error", stage: "边录边传", message: `${msg}(BV=${bv})` });
+  }
   ledger.setBv(streamKey, bv);
   ledger.markDone(streamKey, bv);
   o.notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
@@ -582,7 +591,7 @@ async function runPipelineInner(
   // 该会话由录制节点边录边传(`{base}.rolling.json` 带 bv)。master 若再走 pull→merge→upload
   // 就是**重复投稿**(B 站不可逆)。这里**最早**短路(在 selectWinner/覆盖率判定之前)——因为段可能
   // 已被节点删掉,覆盖率会失真(误报「未录全」),不能靠下游判定。
-  const rollingShort = tryRollingShortCircuit({ streamKey, members: presentMembers, ledger, notify, transports, jlog });
+  const rollingShort = tryRollingShortCircuit({ streamKey, cfg, members: presentMembers, ledger, notify, transports, jlog });
   if (rollingShort) return rollingShort;
 
   // Select the best recording across all (present) nodes
