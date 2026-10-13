@@ -1,4 +1,4 @@
-import { abortJob, isJobAbort, isJobLive, USER_STOP } from "@drec/core";
+import { abortJob, isJobAbort, isJobLive, resolveDiskMinGB, USER_STOP } from "@drec/core";
 import type { Transport, NodeInventory } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
@@ -139,7 +139,8 @@ export class Reconciler {
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.staleMs = deps.staleMs ?? DEFAULT_STALE_MS;
     this.reconnectWindowMs = deps.reconnectWindowMs ?? DEFAULT_RECONNECT_WINDOW_MS;
-    this.diskMinGB = deps.diskMinGB ?? 10;
+    // 与 daemon / 上传闸门同一解析(core):缺省 10、非数字回落 10 并告警、<=0 关闭。
+    this.diskMinGB = resolveDiskMinGB(deps.diskMinGB, (m) => console.warn(m)).gb;
     this.notify = deps.notify;
     this.resolveCfg = deps.resolveCfg;
     this.workerCapabilities = deps.workerCapabilities;

@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, loadConfig, rollingUploadSingleNode, sanitizeStreamKey } from "@drec/core";
+import { biliAccountKey, loadConfig, resolveDiskMinGB, rollingUploadSingleNode, sanitizeStreamKey } from "@drec/core";
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -820,6 +820,8 @@ const hubStarter: HubStarter = {
 
     // 投稿默认:uploadDefaults(新)> uploadMeta(旧,迁移兼容)> 硬兜底。
     const uploadDefaults = hubCfg.uploadDefaults ?? hubCfg.uploadMeta ?? {};
+    // 磁盘水位(GB)统一口径(core resolveDiskMinGB):上传闸门 / reconciler 看门狗共用同一解析结果,非数字回落 10 并告警一次。
+    const diskMinGB = resolveDiskMinGB(hubCfg.resources?.diskMinGB, (m) => console.warn(m)).gb;
     const defaultTag = uploadDefaults.tag ?? "直播,录像";
     const defaultTid = uploadDefaults.tid ?? 21;
 
@@ -915,8 +917,8 @@ const hubStarter: HubStarter = {
         new FileLogger(`${hubCfg.stageDir ?? rootStageDir()}/${sanitizeStreamKey(streamKey)}/job.log`),
       cfg: {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
-        // 磁盘水位闸门(issue #8):与下面的 Reconciler 看门狗**同源同表达式**(resources.diskMinGB)。
-        diskMinGB: hubCfg.resources?.diskMinGB ?? 10,
+        // 磁盘水位闸门(issue #8):与下面的 Reconciler 看门狗**同源同解析**(core resolveDiskMinGB)。
+        diskMinGB,
         stageDir: hubCfg.stageDir ?? rootStageDir(),
         cookies: hubCfg.cookies ?? "",
         uploadMode: "stage" as const, // 全局兜底 = 不自动传;每任务文件按需 mode:"upload"
@@ -942,7 +944,7 @@ const hubStarter: HubStarter = {
       return {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         // 磁盘水位闸门(issue #8):同上,与 reconciler 看门狗同一个配置键与默认值(不新增第二套口径)。
-        diskMinGB: hubCfg.resources?.diskMinGB ?? 10,
+        diskMinGB,
         reconnectWindowMs: p.reconnectWindowMs ?? hubCfg.reconnectWindowMs,
         stageDir: hubCfg.stageDir ?? rootStageDir(),
         cookies: hubCfg.cookies ?? "",
@@ -989,7 +991,7 @@ const hubStarter: HubStarter = {
       notify: pipelineDeps.notify, // 达重试上限升级 needs_manual 时,复用 pipeline 同源 EventCenter 通知(站内+webhook)
       staleMs: hubCfg.resources?.staleMs ?? 600_000,
       // 磁盘看门狗:节点数据根剩余 < 阈值 → master 告警(worker 常没配 webhook,靠这边兜底)。缺省 10GB。
-      diskMinGB: hubCfg.resources?.diskMinGB ?? 10,
+      diskMinGB,
       // T7:跨房间的调度并发(同时派发几场 pull/merge/burn/upload 流程)。
       // 不等于 CPU 并行度 —— merge/burn 仍由 maxCpuParallel 闸住(上面那一行,缺省 1)。
       // T15:热读当前生效的那份配置(T7 的 dispatcher 每轮取),UI 改完立即生效、无需重启。

@@ -1123,6 +1123,24 @@ describe("磁盘看门狗(节点剩余空间告警)", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it("diskMinGB 缺省 / 非数字(字符串)→ 回落 10GB,看门狗仍生效(issue #38)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const v of [undefined, "abc" as unknown as number]) {
+        const t: Transport = { ...makeTransport("vps2", []), diskFreeGB: async () => 3 };
+        const { deps, notify } = depsWith(new Map([["vps2", t]]));
+        const r = new Reconciler({ ...deps, diskMinGB: v, reconnectWindowMs: 0 });
+        await r.reconcileAll();
+        await new Promise((res) => setTimeout(res, 10));
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect((notify.mock.calls[0][0] as { message: string }).message).toContain("阈值 10GB");
+      }
+      expect(warn).toHaveBeenCalledTimes(1); // 仅非数字那次告警,缺省不告警
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("transport 不支持 / 查询抛错 → 静默跳过(不误报)", async () => {
     const noCap = makeTransport("a", []); // 无 diskFreeGB
     const throws: Transport = { ...makeTransport("b", []), diskFreeGB: async () => { throw new Error("ssh down"); } };

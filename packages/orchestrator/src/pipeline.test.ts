@@ -1382,7 +1382,10 @@ describe("runPipeline", () => {
       expect(diskWatermarkGate(0.1, undefined).ok).toBe(true);
       expect(diskWatermarkGate(0.1, 0).ok).toBe(true);
       expect(diskWatermarkGate(0.1, -1).ok).toBe(true);
-      expect(diskWatermarkGate(0.1, Number.NaN).ok).toBe(true);
+      // 非数字(NaN/字符串)→ 回落默认 10GB(issue #38:不得静默绕过)
+      expect(diskWatermarkGate(0.1, Number.NaN).ok).toBe(false);
+      expect(diskWatermarkGate(0.1, "abc" as unknown as number).ok).toBe(false);
+      expect(diskWatermarkGate(50, "abc" as unknown as number).ok).toBe(true);
       // 读数完全拿不到(旧/自定义 transport 不给该字段)→ 不因磁盘拦,靠 reconciler 看门狗兜底
       expect(diskWatermarkGate(undefined, 10).ok).toBe(true);
       expect(diskWatermarkGate(Number.NaN, 10).ok).toBe(true);

@@ -18,7 +18,7 @@
  *     实测仅 0.38x 实时,烧不动。
  *   - 节点缺能力(biliup / B站 cookie / 旧 bundle)→ 回落现状,**记明原因,绝不静默**。
  */
-import type { NodePipelineSpec } from "@drec/core";
+import { resolveDiskMinGB, type NodePipelineSpec } from "@drec/core";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { cleanupSourcesShared, defaultRmStage, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import type { Transport } from "./transport.js";
@@ -55,8 +55,9 @@ export function shouldUseNodeSideUpload(
  * 这里不新增第二套阈值。
  *
  * 边界(想清楚了才写的):
- *   - 阈值 `undefined` / 非有限数 / `<=0` → **闸门关闭**(不拦):与 reconciler
+ *   - 阈值 `undefined` / `<=0` → **闸门关闭**(不拦):与 reconciler
  *     `diskMinGB <= 0 → return`(关闭看门狗)一致,也是向后兼容路径(旧调用方不传阈值)。
+ *     非数字(字符串/NaN)→ 不静默绕过,经 core `resolveDiskMinGB` 回落默认 10GB(issue #38)。
  *   - `freeGB` **完全没有**(`null`/`undefined`/非有限数,旧或自定义 transport 不给该字段)
  *     → **不因磁盘拦**:拿不到读数不等于盘满,拦下等于把「探测异常」当「盘满」白放弃省回传;
  *     与 serve.ts 里 `freeBytes()` 取不到返回 `null`(不拦)同一口径,靠 reconciler 看门狗告警兜底。
@@ -69,12 +70,15 @@ export function diskWatermarkGate(
   freeGB: number | null | undefined,
   minGB: number | null | undefined,
 ): { ok: true } | { ok: false; reason: string } {
-  if (minGB == null || !Number.isFinite(minGB) || minGB <= 0) return { ok: true };
+  // 未注入(旧调用方/测试)= 关闭;注入了但非数字(字符串/NaN)→ 不得静默绕过,按 core 统一口径回落 10GB。
+  if (minGB == null) return { ok: true };
+  const { gb: min } = resolveDiskMinGB(minGB);
+  if (min <= 0) return { ok: true };
   if (freeGB == null || !Number.isFinite(freeGB)) return { ok: true };
-  if (freeGB < minGB) {
+  if (freeGB < min) {
     return {
       ok: false,
-      reason: `剩余磁盘 ${freeGB.toFixed(1)}GB < 阈值 ${minGB}GB(盘满会让本地 remux 写盘 ENOSPC)`,
+      reason: `剩余磁盘 ${freeGB.toFixed(1)}GB < 阈值 ${min}GB(盘满会让本地 remux 写盘 ENOSPC)`,
     };
   }
   return { ok: true };
