@@ -1,6 +1,6 @@
 import { readdirSync } from "node:fs";
-import { copyFileSync, existsSync, linkSync, mkdirSync, rmSync } from "node:fs";
-import { partTitleToFilename, stampedSessionBaseOf } from "@drec/core";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { linkOrCopy, partTitleToFilename, stampedSessionBaseOf } from "@drec/core";
 
 /** 该场 stage 合成产物的确定性路径(merge 后 / 续跑反推)。 */
 export interface StageProducts {
@@ -194,11 +194,7 @@ export function prepareUploadAlias(
     mkdirSync(dir, { recursive: true });
     // 续跑:上一次留下的别名先移除,保证指向最新产物(同名不同内容时不会串)。
     if (existsSync(dst)) rmSync(dst, { force: true });
-    try {
-      linkSync(canonical, dst);
-    } catch {
-      copyFileSync(canonical, dst); // 跨设备/不支持硬链接 → 复制
-    }
+    linkOrCopy(canonical, dst);
     return dst;
   } catch {
     return canonical; // 别名失败不影响上传(回落原名)
