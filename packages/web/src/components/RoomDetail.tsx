@@ -340,6 +340,13 @@ export function RoomDetail({
             ))}
             <span className="text-muted-soft text-xs">→</span>
             <span className="chip chip-accent">{uploadChip(rule, t)}</span>
+            {/* 规则选了 rolling 却没生效(烧录开着 / 节点数不对):界面直接写明原因(issue #48) */}
+            {rule.pipeline?.upload?.mode === "rolling" && rule.rollingPolicy && !rule.rollingPolicy.effective
+              && (rule.rollingPolicy.reason === "needs-burn" || rule.rollingPolicy.reason === "multi-node") && (
+              <span className="chip" title={t("rooms.rollingNeedsBurn")}>
+                {rule.rollingPolicy.reason === "needs-burn" ? t("rooms.rollingReasonNeedsBurn") : t("rooms.rollingReasonMultiNode")}
+              </span>
+            )}
           </div>
         </div>
         <div>

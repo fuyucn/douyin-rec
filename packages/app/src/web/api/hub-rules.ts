@@ -47,14 +47,15 @@ export function buildHubRules(ctx: ApiCtx) {
     createHubRule(input: HubRulePayload): ApiResult {
       const werr = validateWorkers(input);
       if (werr) return err(400, werr);
-      const perr = validatePipeline(input);
-      if (perr) return err(400, perr);
       const sourceTaskId = input.recording?.sourceTaskId;
       if (!sourceTaskId) return err(400, "新建 hub 规则必须绑定 source task（房间取自该任务）");
       const task = store.getTask(Number(sourceTaskId));
       if (!task) return err(400, "recording.sourceTaskId 指向的任务不存在");
       const platform = platformForRoom(task.room);
       const roomSlug = platform.extractRoomSlug(task.room);
+      // 同房间规则已存在时 upsert 会深合并 pipeline → 按合并后校验。
+      const perr = validatePipeline(input, hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug))?.pipeline);
+      if (perr) return err(400, perr);
       try {
         const rule = hubStore.upsertHubRule(hubDir, {
           platform: platform.id,
@@ -78,7 +79,7 @@ export function buildHubRules(ctx: ApiCtx) {
     updateHubRule(key: string, input: HubRulePayload): ApiResult {
       const werr = validateWorkers(input);
       if (werr) return err(400, werr);
-      const perr = validatePipeline(input);
+      const perr = validatePipeline(input, hubStore.getHubRule(hubDir, key)?.pipeline);
       if (perr) return err(400, perr);
       const dot = key.indexOf(".");
       const ruleSlug = dot < 0 ? key : key.slice(dot + 1);

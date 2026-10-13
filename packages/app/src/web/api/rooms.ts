@@ -240,7 +240,7 @@ export function buildRooms(ctx: ApiCtx) {
         // 复用 hub-rules 的同一套校验(判定逻辑只写一份):worker 必须已配置、标题模板合法。
         const werr = ctx.validateWorkers(ruleInput);
         if (werr) return err(400, werr);
-        const perr = ctx.validatePipeline(ruleInput);
+        const perr = ctx.validatePipeline(ruleInput, hubStore.getHubRule(hubDir, key)?.pipeline);
         if (perr) return err(400, perr);
         // 「要改 processing 但没有 sourceTaskId」→ 规则建了也没法下发,必须让用户补。
         const sourceTaskId = before.processing

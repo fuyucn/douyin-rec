@@ -173,6 +173,8 @@ export interface HubRuleDTO {
   enabled: boolean;
   /** 流水线配置(steps / upload / cleanup);upload 是 pipeline 的一个阶段。 */
   pipeline: HubPipelineConfig;
+  /** 边录边传判定结果 + 原因(core `resolveRollingPolicy`,issue #48:烧录开着 → needs-burn)。 */
+  rollingPolicy?: { effective: boolean; reason: string };
   /** 选中参与该房间 hub 处理的 worker id;缺省/空 = 全部 worker(向后兼容)。 */
   workers?: string[];
   /**

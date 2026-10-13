@@ -28,6 +28,12 @@ interface Props {
   onSaved: () => void;
 }
 
+/** 提交的上传模式:rolling 与烧录互斥(issue #48),开着烧录时一律降为 upload,避免被后端 400。 */
+function effectiveUploadMode(f: { uploadMode: string; burnDanmu: boolean; burnLivechat: boolean }): "stage" | "upload" | "rolling" {
+  if (f.uploadMode === "rolling") return f.burnDanmu || f.burnLivechat ? "upload" : "rolling";
+  return f.uploadMode === "upload" ? "upload" : "stage";
+}
+
 interface FormState {
   name: string;
   quality: string;
@@ -134,7 +140,14 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
   const plat = pickPlatform(room.room, platforms);
   const qualityOptions = plat?.qualities ?? [];
   const engineOptions = plat?.engines ?? [];
-  const set = <K extends keyof FormState>(k: K, v: FormState[K]): void => setForm((f) => ({ ...f, [k]: v }));
+  const set = <K extends keyof FormState>(k: K, v: FormState[K]): void =>
+    setForm((f) => ({
+      ...f,
+      [k]: v,
+      // 打开烧录 → 边录边传自动退回「合成并上传」(二者互斥,后端也会 400,issue #48)。
+      ...((k === "burnDanmu" || k === "burnLivechat") && v === true && f.uploadMode === "rolling" ? { uploadMode: "upload" } : {}),
+    }));
+  const burning = form.burnDanmu || form.burnLivechat;
   const toggleWorker = (id: string): void =>
     setForm((f) => ({ ...f, workers: f.workers.includes(id) ? f.workers.filter((x) => x !== id) : [...f.workers, id] }));
   const toggleRequire = (cap: string): void =>
@@ -206,7 +219,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
               stageAfterDone: form.clStageAfterDone,
             },
             upload: {
-              mode: form.uploadMode === "upload" || form.uploadMode === "rolling" ? form.uploadMode : "stage",
+              mode: effectiveUploadMode(form),
               private: form.uploadPrivate,
               tag: form.uploadTag.trim() || undefined,
               tid: Number(form.uploadTid) || 21,
@@ -395,11 +408,12 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <label className="block">
                   <span className="field-label">{t("rooms.uploadMode")}</span>
-                  <select className="input" value={form.uploadMode} onChange={(e) => set("uploadMode", e.target.value)}>
+                  <select className="input" value={form.uploadMode === "rolling" && burning ? "upload" : form.uploadMode} onChange={(e) => set("uploadMode", e.target.value)}>
                     <option value="stage">{t("rooms.uploadStage")}</option>
                     <option value="upload">{t("rooms.uploadUpload")}</option>
-                    <option value="rolling">{t("rooms.uploadRolling")}</option>
+                    <option value="rolling" disabled={burning}>{t("rooms.uploadRolling")}</option>
                   </select>
+                  {burning && <span className="text-xs text-muted mt-1 block">{t("rooms.rollingNeedsBurn")}</span>}
                 </label>
                 <label className="switch-row">
                   <span className="flex flex-col min-w-0">

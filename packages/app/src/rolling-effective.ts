@@ -8,9 +8,25 @@
  *
  * 判定仍只在 master 做;录制端只读 `rollingEffective`。无规则的任务写 NULL(= 回落旧开关迁移,单机行为不变)。
  */
-import { platformForRoom, resolveRollingPolicy, type RollingPolicyRule } from "@drec/core";
+import { platformForRoom, resolveRollingPolicy, rollingReasonText, type RollingPolicy, type RollingPolicyRule } from "@drec/core";
 import { listHubRules } from "./hub-store.js";
 import type { TaskStore } from "./store.js";
+
+/** 「请求了边录边传却被拦下」的原因只在变化时打一行日志(同步 tick 每分钟重算,不能刷屏)。 */
+const loggedReasons = new WeakMap<TaskStore, Map<number, string>>(); // 按 store 隔离:任务 id 只在同一库内唯一
+function noteRollingReason(store: TaskStore, taskId: number, policy: RollingPolicy, log?: (msg: string) => void): void {
+  let loggedReason = loggedReasons.get(store);
+  if (!loggedReason) loggedReasons.set(store, (loggedReason = new Map()));
+  const blocked = policy.reason === "needs-burn" || policy.reason === "multi-node";
+  const prev = loggedReason.get(taskId);
+  if (!blocked) {
+    loggedReason.delete(taskId);
+    return;
+  }
+  if (prev === policy.reason) return;
+  loggedReason.set(taskId, policy.reason);
+  log?.(`[rolling] 任务 ${taskId} 的边录边传未生效: ${rollingReasonText(policy.reason)}`);
+}
 
 /**
  * master 下发给某节点的任务规格里,边录边传两个字段怎么填(cli `desiredFor` 调用;抽成纯函数以便单测):
@@ -33,7 +49,12 @@ export function rollingSpecFields(
  * 规则被删、解绑、停用都在这里落到「回落」:无绑定规则 → 写 NULL(读取按旧开关迁移,不再残留旧的 true);
  * 规则停用 → 唯一判定直接给 false。返回写入了派生值的任务数(无规则任务清为 NULL 不计)。
  */
-export function refreshLocalRollingEffective(store: TaskStore, hubDir: string, taskIds?: readonly number[]): number {
+export function refreshLocalRollingEffective(
+  store: TaskStore,
+  hubDir: string,
+  taskIds?: readonly number[],
+  log?: (msg: string) => void,
+): number {
   const bySource = new Map<number, ReturnType<typeof listHubRules>[number]>();
   for (const rule of listHubRules(hubDir)) {
     const id = rule.recording?.sourceTaskId;
@@ -50,12 +71,13 @@ export function refreshLocalRollingEffective(store: TaskStore, hubDir: string, t
       store.updateTask(t.id, { rollingEffective: null });
       continue;
     }
-    store.updateTask(t.id, {
-      rollingEffective: resolveRollingPolicy(
-        { enabled: bound.enabled, mode: bound.pipeline?.upload?.mode, workers: bound.workers },
-        t.rollingUpload,
-      ).effective,
-    });
+    // 与 cli `desiredFor`(master 下发)传**同一组**入参(含 steps → 烧录互斥),两处判定结果恒一致。
+    const policy = resolveRollingPolicy(
+      { enabled: bound.enabled, mode: bound.pipeline?.upload?.mode, workers: bound.workers, steps: bound.pipeline?.steps },
+      t.rollingUpload,
+    );
+    store.updateTask(t.id, { rollingEffective: policy.effective });
+    noteRollingReason(store, t.id, policy, log);
     n++;
   }
   return n;

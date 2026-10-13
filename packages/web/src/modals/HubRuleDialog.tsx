@@ -301,7 +301,13 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
   ]);
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]): void {
-    setForm((f) => ({ ...f, [key]: value, ...(RECORDING_KEYS.has(key) ? { recordingTouched: true } : {}) }));
+    setForm((f) => ({
+      ...f,
+      [key]: value,
+      ...(RECORDING_KEYS.has(key) ? { recordingTouched: true } : {}),
+      // 打开烧录 → 边录边传自动退回「合成并上传」(二者互斥,后端也会 400,issue #48)。
+      ...((key === "burnDanmu" || key === "burnLivechat") && value === true && f.uploadMode === "rolling" ? { uploadMode: "upload" } : {}),
+    }));
   }
 
   async function submit(ev: FormEvent): Promise<void> {
@@ -324,7 +330,8 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           stageAfterDone: form.clStageAfterDone,
         },
         upload: {
-          mode: form.uploadMode === "upload" || form.uploadMode === "rolling" ? form.uploadMode : "stage",
+          mode: form.uploadMode === "rolling" && !(form.burnDanmu || form.burnLivechat) ? "rolling"
+            : form.uploadMode === "upload" || form.uploadMode === "rolling" ? "upload" : "stage",
           private: form.uploadPrivate,
           tag: form.uploadTag.trim() || undefined,
           tid: Number(form.uploadTid) || 21,
@@ -635,14 +642,18 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           {/* 边录边传(issue #40):配置入口在 hub 规则 —— mode=rolling = 合成并上传 + 录制端每封口一段就传、
               确认后删该段源;仅当本规则恰好勾选 1 个节点时生效,否则回落整场管线(防重复投稿)。 */}
           {form.uploadMode !== "stage" && (
-            <label className="switch-row mt-3">
+            <label className="switch-row mt-3" data-disabled={form.burnDanmu || form.burnLivechat ? "true" : undefined}>
               <span className="flex flex-col">
                 <span className="text-sm font-medium text-ink">{t("rooms.rollingUpload")}</span>
-                <span className="text-xs text-muted mt-0.5">{t("rooms.rollingUploadHint")}</span>
+                {/* 与烧录互斥(issue #48):开着烧录时禁用,并把说明换成禁用原因 */}
+                <span className="text-xs text-muted mt-0.5">
+                  {(form.burnDanmu || form.burnLivechat) ? t("rooms.rollingNeedsBurn") : t("rooms.rollingUploadHint")}
+                </span>
               </span>
               <Switch
-                checked={form.uploadMode === "rolling"}
+                checked={form.uploadMode === "rolling" && !(form.burnDanmu || form.burnLivechat)}
                 onCheckedChange={(v) => set("uploadMode", v ? "rolling" : "upload")}
+                disabled={form.burnDanmu || form.burnLivechat}
                 name="uploadRolling"
               />
             </label>

@@ -16,6 +16,7 @@ import { TaskStore } from "../../packages/app/src/store.js";
 import { MergeJobStore } from "../../packages/app/src/merge-jobs.js";
 import { EventCenter } from "../../packages/observability/src/bus.js";
 import { listHubJobs } from "../../packages/app/src/hub-jobs.js";
+import { upsertHubRule } from "../../packages/app/src/hub-store.js";
 import {
   makeApi,
   type ApiDeps,
@@ -1771,6 +1772,9 @@ describe("T16 workers/status 版本回执", () => {
   });
 });
 
+/** 不烧录:rolling 生效的前提(issue #48);#40 旧用例测的是别的闸门,统一关烧录。 */
+const NB = { burnDanmu: false, burnLivechat: false };
+
 describe("issue #40:rolling 开关迁到 hub 规则(API 层)", () => {
   function setup() {
     const s = new TaskStore(":memory:");
@@ -1784,8 +1788,8 @@ describe("issue #40:rolling 开关迁到 hub 规则(API 层)", () => {
   it("规则 upload.mode 接受 rolling;非法值 → 400", () => {
     const { a } = setup();
     const t = a.createTask({ room: "123456" }).body as { id: number };
-    expect(a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "bogus" as never } } }).status).toBe(400);
-    const ok = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "rolling" } } });
+    expect(a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { steps: NB, upload: { mode: "bogus" as never } } }).status).toBe(400);
+    const ok = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { steps: NB, upload: { mode: "rolling" } } });
     expect(ok.status).toBe(201);
     expect(ruleOf(a).pipeline.upload?.mode).toBe("rolling");
   });
@@ -1793,7 +1797,7 @@ describe("issue #40:rolling 开关迁到 hub 规则(API 层)", () => {
   it("读取时迁移:规则 upload + 源任务旧开关 true → 对外按 rolling 展示;文件本身不改", () => {
     const { s, a } = setup();
     const t = a.createTask({ room: "123456" }).body as { id: number };
-    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } });
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { steps: NB, upload: { mode: "upload" } } });
     s.updateTask(t.id, { rollingUpload: true }); // 旧配置:规则早已存在,任务旧开关为 true
     expect(ruleOf(a).pipeline.upload?.mode).toBe("rolling");
     // 旧开关 false → 仍是 upload
@@ -1804,11 +1808,11 @@ describe("issue #40:rolling 开关迁到 hub 规则(API 层)", () => {
   it("显式保存非 rolling 的 mode → 清掉旧开关(显式决定覆盖旧迁移);保存 rolling 不动旧开关", () => {
     const { s, a } = setup();
     const t = a.createTask({ room: "123456" }).body as { id: number };
-    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } });
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { steps: NB, upload: { mode: "upload" } } });
     s.updateTask(t.id, { rollingUpload: true });
-    expect(a.updateHubRule("douyin.123456", { recording: { sourceTaskId: t.id }, pipeline: { upload: { mode: "rolling" } } }).status).toBe(200);
+    expect(a.updateHubRule("douyin.123456", { recording: { sourceTaskId: t.id }, pipeline: { steps: NB, upload: { mode: "rolling" } } }).status).toBe(200);
     expect(s.getTask(t.id)!.rollingUpload).toBe(true);
-    expect(a.updateHubRule("douyin.123456", { recording: { sourceTaskId: t.id }, pipeline: { upload: { mode: "upload" } } }).status).toBe(200);
+    expect(a.updateHubRule("douyin.123456", { recording: { sourceTaskId: t.id }, pipeline: { steps: NB, upload: { mode: "upload" } } }).status).toBe(200);
     expect(s.getTask(t.id)!.rollingUpload).toBe(false);
     expect(ruleOf(a).pipeline.upload?.mode).toBe("upload");
   });
@@ -1816,12 +1820,12 @@ describe("issue #40:rolling 开关迁到 hub 规则(API 层)", () => {
   it("rooms PUT 同样收口旧开关;recording DTO 暴露只读 rollingEffective", () => {
     const { s, a } = setup();
     const t = a.createTask({ room: "123456" }).body as { id: number };
-    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } });
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { steps: NB, upload: { mode: "upload" } } });
     s.updateTask(t.id, { rollingUpload: true });
     const before = a.getRoom("douyin.123456").body as { recording: { rollingUpload: boolean; rollingEffective: boolean } };
     expect(before.recording.rollingUpload).toBe(true);
     expect(before.recording.rollingEffective).toBe(true); // 无 master 派生值 → 旧开关迁移
-    const res = a.updateRoom("douyin.123456", { processing: { pipeline: { upload: { mode: "upload" } } } });
+    const res = a.updateRoom("douyin.123456", { processing: { pipeline: { steps: NB, upload: { mode: "upload" } } } });
     expect(res.status).toBe(200);
     expect(s.getTask(t.id)!.rollingUpload).toBe(false);
   });
@@ -1839,7 +1843,7 @@ describe("issue #40:新建规则不吞掉旧开关", () => {
     const s = new TaskStore(":memory:");
     const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rolling40b-") });
     const t = a.createTask({ room: "123456", rollingUpload: true }).body as { id: number };
-    expect(a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } }).status).toBe(201);
+    expect(a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { steps: NB, upload: { mode: "upload" } } }).status).toBe(201);
     expect(s.getTask(t.id)!.rollingUpload).toBe(true);
     expect(s.getTask(t.id)!.rollingEffective).toBe(true);
   });
@@ -1850,7 +1854,7 @@ describe("issue #40 返工:规则 删除/解绑/停用 后本机派生值立刻�
     const s = new TaskStore(":memory:");
     const a = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rolling40c-") });
     const t = a.createTask({ room: "123456" }).body as { id: number };
-    expect(a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { upload: { mode: "rolling" } } }).status).toBe(201);
+    expect(a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"], pipeline: { steps: NB, upload: { mode: "rolling" } } }).status).toBe(201);
     return { s, a, id: t.id };
   }
   const flag = (s: TaskStore, id: number): boolean => buildRecordArgs(s.getTask(id)!).includes("--rolling-upload");
@@ -1873,5 +1877,91 @@ describe("issue #40 返工:规则 删除/解绑/停用 后本机派生值立刻�
     const { s, a, id } = setup();
     expect(a.updateHubRule("douyin.123456", { recording: {} }).status).toBe(200);
     expect(flag(s, id)).toBe(false);
+  });
+});
+
+describe("issue #48:rolling 与烧录互斥(API 层后端守卫,不依赖 UI)", () => {
+  function setup() {
+    const s = new TaskStore(":memory:");
+    const deps = hubDeps("rolling48-");
+    const a = makeApi({ store: s, manager: new MockManager(), ...deps });
+    const t = a.createTask({ room: "123456" }).body as { id: number };
+    return { s, a, id: t.id, hubDir: deps.hubDir! };
+  }
+  const KEY = "douyin.123456";
+  const body = (r: { body: unknown }) => r.body as { error?: string };
+  const stored = (a: ReturnType<typeof makeApi>) =>
+    (a.listHubRules().body as { key: string; pipeline: { upload?: { mode?: string }; steps?: object } }[]).find((r) => r.key === KEY)!;
+
+  it("新建:rolling + 烧录开(显式 true 或缺省)→ 400 带原因,且不落规则", () => {
+    const { a, id } = setup();
+    for (const steps of [undefined, {}, { burnDanmu: true }, { burnLivechat: true, burnDanmu: false }]) {
+      const r = a.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"], pipeline: { ...(steps ? { steps } : {}), upload: { mode: "rolling" } } });
+      expect(r.status).toBe(400);
+      expect(body(r).error).toContain("烧录");
+    }
+    // (hubDir 里的 hub.config.json 会被当成一条伪规则列出,与本测无关,按 key 过滤)
+    expect((a.listHubRules().body as { key: string }[]).filter((r) => r.key === KEY)).toHaveLength(0);
+  });
+
+  it("新建:rolling + 两种烧录都关 → 201;烧录开 + upload/stage → 201(互斥只针对 rolling)", () => {
+    const { a, id } = setup();
+    expect(a.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"], pipeline: { steps: NB, upload: { mode: "rolling" } } }).status).toBe(201);
+    const { a: b, id: idb } = setup();
+    expect(b.createHubRule({ recording: { sourceTaskId: idb }, workers: ["local"], pipeline: { upload: { mode: "upload" } } }).status).toBe(201);
+  });
+
+  it("更新:已存 rolling+不烧录,PATCH 只打开烧录 → 400(按合并后判),规则不变", () => {
+    const { a, id } = setup();
+    a.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"], pipeline: { steps: NB, upload: { mode: "rolling" } } });
+    const r = a.updateHubRule(KEY, { pipeline: { steps: { burnDanmu: true } } });
+    expect(r.status).toBe(400);
+    expect(body(r).error).toContain("烧录");
+    expect(stored(a).pipeline.upload?.mode).toBe("rolling");
+    expect((stored(a).pipeline.steps as { burnDanmu?: boolean }).burnDanmu).toBe(false);
+  });
+
+  it("更新:已存 upload+烧录开,PATCH 只把 mode 改成 rolling → 400;同时关掉烧录 → 200", () => {
+    const { a, id } = setup();
+    a.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } });
+    expect(a.updateHubRule(KEY, { pipeline: { upload: { mode: "rolling" } } }).status).toBe(400);
+    expect(a.updateHubRule(KEY, { pipeline: { steps: NB, upload: { mode: "rolling" } } }).status).toBe(200);
+  });
+
+  it("更新:存量 rolling+烧录开的坏规则(守卫上线前写入),无关编辑不被卡住;生效判定为 needs-burn", () => {
+    const { a, id, hubDir } = setup();
+    // 绕过 API 直接写规则文件,模拟守卫上线前已存在的坏规则。
+    upsertHubRule(hubDir, {
+      platform: "douyin", roomSlug: "123456", room: "123456", enabled: true, workers: ["local"],
+      recording: { sourceTaskId: id }, pipeline: { upload: { mode: "rolling" } },
+    });
+    expect(a.updateHubRule(KEY, { enabled: true }).status).toBe(200);
+    const view = (a.listHubRules().body as { rollingPolicy?: { effective: boolean; reason: string } }[])[0];
+    expect(view.rollingPolicy).toEqual({ effective: false, reason: "needs-burn" });
+    // 想改动 mode/烧录开关时才判:保持 rolling 却不关烧录 → 400
+    expect(a.updateHubRule(KEY, { pipeline: { upload: { mode: "rolling" } } }).status).toBe(400);
+  });
+
+  it("rooms PUT 的 processing 同样拒绝", () => {
+    const { a, id } = setup();
+    a.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } });
+    const r = a.updateRoom(KEY, { processing: { pipeline: { upload: { mode: "rolling" } } } });
+    expect(r.status).toBe(400);
+    expect(body(r).error).toContain("烧录");
+    expect(a.updateRoom(KEY, { processing: { pipeline: { steps: NB, upload: { mode: "rolling" } } } }).status).toBe(200);
+  });
+
+  it("读取:旧开关 true + 规则 upload + 烧录开 → 不迁成 rolling(否则表单会带被禁用的值保存而被 400)", () => {
+    const { s, a, id } = setup();
+    a.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"], pipeline: { upload: { mode: "upload" } } });
+    s.updateTask(id, { rollingUpload: true });
+    expect(stored(a).pipeline.upload?.mode).toBe("upload");
+  });
+
+  it("DTO 暴露 rollingPolicy:关烧录 → rule-rolling 生效;存量坏规则见上一条(needs-burn)", () => {
+    const { a, id } = setup();
+    a.createHubRule({ recording: { sourceTaskId: id }, workers: ["local"], pipeline: { steps: NB, upload: { mode: "rolling" } } });
+    const pol = (a.listHubRules().body as { rollingPolicy?: { effective: boolean; reason: string } }[])[0].rollingPolicy;
+    expect(pol).toEqual({ effective: true, reason: "rule-rolling" });
   });
 });

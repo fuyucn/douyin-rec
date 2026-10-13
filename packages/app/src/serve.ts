@@ -106,7 +106,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       autoRestart: true,
       // 边录边传 S3 兜底:master 起录前对该本机任务按当前规则现算一次生效值,再构造 record 参数。
       beforeSpawn: (taskId) => {
-        if (rollingGuardOn) refreshLocalRollingEffective(store, rootHubDir(), [taskId]);
+        if (rollingGuardOn) refreshLocalRollingEffective(store, rootHubDir(), [taskId], (m) => console.log(m));
       },
       log: (m) => console.log(m),
       logStore,
@@ -160,7 +160,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     rollingGuardOn = hubEnabled;
     if (hubEnabled) {
       try {
-        const n = refreshLocalRollingEffective(store, rootHubDir());
+        const n = refreshLocalRollingEffective(store, rootHubDir(), undefined, (m) => console.log(m));
         console.log(`[rolling] 启动刷新边录边传生效值:${n} 个任务绑定 hub 规则`);
       } catch (e) {
         console.warn(`[rolling] 启动刷新边录边传生效值失败(回落旧开关迁移):${String((e as Error)?.message ?? e)}`);

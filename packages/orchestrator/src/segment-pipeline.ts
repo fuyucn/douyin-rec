@@ -9,7 +9,7 @@
  */
 import path from "node:path";
 import { copyFileSync, existsSync, linkSync, mkdirSync, writeFileSync } from "node:fs";
-import { isAppendAmbiguous, isUploadRateLimited, throwIfAborted } from "@drec/core";
+import { burnFlags, isAppendAmbiguous, isUploadRateLimited, throwIfAborted } from "@drec/core";
 import { planSegmentGroups, renderXmlWindowToXml } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
@@ -291,8 +291,7 @@ export async function runSegmentPipeline(o: {
     return prepareUploadAlias(stageSub, `${kind}-${idx}`, canonical, title);
   };
   const { ledger, notify, cfg } = deps;
-  const burnDanmu = cfg.steps?.burnDanmu !== false;
-  const burnLivechat = cfg.steps?.burnLivechat !== false;
+  const { burnDanmu, burnLivechat } = burnFlags(cfg.steps);
   const isPublic = cfg.uploadPrivate === false;
   const clean = cfg.cleanup ?? {};
   const rmStage = deps.rmStage ?? defaultRmStage;

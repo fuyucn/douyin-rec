@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey } from "@drec/core";
+import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey } from "@drec/core";
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -1037,7 +1037,7 @@ const hubStarter: HubStarter = {
         // startTask 只置意图不起子进程),不在这条路径上表达。
         const isLocalWorker = workerId === "local";
         const rollingFields = rollingSpecFields(
-          { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers },
+          { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers, steps: rule.pipeline?.steps },
           src.rollingUpload,
           isLocalWorker,
         );
@@ -1091,7 +1091,7 @@ const hubStarter: HubStarter = {
         // 边录边传(issue #40):本机源任务的派生值每轮都重算 —— 规则被删/解绑/停用时 desiredFor 里
         // 已没有该任务的条目,applyTasks 不会再写它,不在这里回落就会残留旧的 true。
         try {
-          refreshLocalRollingEffective(opts.store, hubDir);
+          refreshLocalRollingEffective(opts.store, hubDir, undefined, opts.warn);
         } catch (e) {
           opts.warn(`[rolling] 同步 tick 重算边录边传生效值失败: ${(e as Error).message}`);
         }
@@ -1203,8 +1203,7 @@ const hubStarter: HubStarter = {
             const workflow = buildWorkflow({
               streamKey, stageSub, products, deps: pipelineDeps, cfg, log: opts.log,
               willUpload: cfg.uploadMode === "upload",
-              burnDanmu: cfg.steps?.burnDanmu !== false,
-              burnLivechat: cfg.steps?.burnLivechat !== false,
+              ...burnFlags(cfg.steps),
               segmentCount: 0,
             });
             const r = await runWorkflowNodes({
