@@ -16,14 +16,16 @@
 ## 进行中
 
 - [~] **T-41 边录边传硬化：崩溃恢复 + 头阻塞 + 原子写 + 末段封口（issue [#3](https://github.com/fuyucn/douyin-rec/issues/3)，T-33 后续）**
-  — 2026-10-13 认领，PR（分支 `codex/issue-3-rolling-upload-harden`，base `feat/hub-optimization`，
-  独立 worktree 实现，**未合并 / 未部署 / 未 close**）。
+  — 2026-10-13 认领，PR [#18](https://github.com/fuyucn/douyin-rec/pull/18)（分支
+  `codex/issue-3-rolling-upload-harden`，base `feat/hub-optimization`，独立 worktree 实现，
+  **未合并 / 未部署 / 未 close**）。
   **做什么**：对已部署的 T-33 骨架补容错：①sidecar 原子写（openSync→fsync→rename，WAL 意图标记
   `uploading`），写失败即 `stateUntrusted` 停上传/删源转人工；②崩溃恢复 `recoverDanglingUpload`
   （create 无 BV → 人工绝不重建稿；append 用分 P 数核对补确认/安全重试）；③头阻塞
   `headOfLineFilter`（段 k 不确定则 >k 一律不外发，防不可逆分 P 空洞）；④收尾封口 `sealGraceMs=0`
   回归修复（旧 3s 宽限 × 一次性收尾 = 末段永不上传、源永残留，e2e 实测复现）；⑤`minSegmentSec`
-  碎片段过滤；⑥append 强制 `countParts` 幂等核对；⑦确认后未删源的重启补删。
+  碎片段过滤；⑥append 强制 `countParts` 幂等核对；⑦确认后未删源的重启补删；⑧建稿时刻 `startMs`
+  持久化（重启后投稿标题不漂到尾段时间）。
   **为什么**：dev 隔离环境 e2e（5 分钟段真实直播间）暴露：a) 末段宽限 bug（整场残段、master 转人工）；
   b) 手动停止与在途 append 竞态：父进程 10s SIGKILL 兜底腰斩 biliup → sidecar 悬空 `uploading`。
   **验收**：上述不变量各有 vitest（封口才传/ack 才删/头阻塞/恢复三分支/原子写失败停摆/末段收尾）；
