@@ -15,6 +15,24 @@
 
 ## 进行中
 
+- [~] **T-41 边录边传硬化：崩溃恢复 + 头阻塞 + 原子写 + 末段封口（issue [#3](https://github.com/fuyucn/douyin-rec/issues/3)，T-33 后续）**
+  — 2026-10-13 认领，PR（分支 `codex/issue-3-rolling-upload-harden`，base `feat/hub-optimization`，
+  独立 worktree 实现，**未合并 / 未部署 / 未 close**）。
+  **做什么**：对已部署的 T-33 骨架补容错：①sidecar 原子写（openSync→fsync→rename，WAL 意图标记
+  `uploading`），写失败即 `stateUntrusted` 停上传/删源转人工；②崩溃恢复 `recoverDanglingUpload`
+  （create 无 BV → 人工绝不重建稿；append 用分 P 数核对补确认/安全重试）；③头阻塞
+  `headOfLineFilter`（段 k 不确定则 >k 一律不外发，防不可逆分 P 空洞）；④收尾封口 `sealGraceMs=0`
+  回归修复（旧 3s 宽限 × 一次性收尾 = 末段永不上传、源永残留，e2e 实测复现）；⑤`minSegmentSec`
+  碎片段过滤；⑥append 强制 `countParts` 幂等核对；⑦确认后未删源的重启补删。
+  **为什么**：dev 隔离环境 e2e（5 分钟段真实直播间）暴露：a) 末段宽限 bug（整场残段、master 转人工）；
+  b) 手动停止与在途 append 竞态：父进程 10s SIGKILL 兜底腰斩 biliup → sidecar 悬空 `uploading`。
+  **验收**：上述不变量各有 vitest（封口才传/ack 才删/头阻塞/恢复三分支/原子写失败停摆/末段收尾）；
+  `pnpm test` + `typecheck` + `bundle` 绿。**边界**：不改多节点闸门与 hub 短路语义；不删 `.xml`/`.ass`。
+  **遗留（本 PR 不做，已在 PR 正文记为残余风险）**：①「孤儿 sidecar 无人接管」——恢复逻辑只在活跃会话内跑，
+  会话中断后无扫描者重新认领补传（待用户拍板 Q-2：自动补传 vs 仅上报）；②停录 SIGKILL 10s 超时 vs
+  在途上传（待拍板 Q-1/Q-B：解耦方案）；③`runBiliup` 无超时是有意为之（上传中日志静默数分钟=正常态，
+  固定超时会误杀），风险由 WAL + ambiguous 转人工兜底。
+
 - [~] **T-37 分段模式派生 per-分P 弹幕 xml（issue [#7](https://github.com/fuyucn/douyin-rec/issues/7)）**
   — 2026-10-12 认领（用户拍板选 **A「同时存在」**：会话级单 xml 保持完整，per-分P xml 作为附加产物并存，
   通过后再谈迁移）。实现由 sub-agent 独立会话 / 独立 worktree 完成，分支
