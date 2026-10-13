@@ -71,6 +71,12 @@ interface RollingState {
    * 进程崩溃后凭它恢复:create 无 BV 可查 → 保守转人工(绝不自动重创建稿);append 用分 P 数核对。
    */
   uploading?: { index: number; kind: "create" | "append" };
+  /**
+   * 会话第一段写入时刻(epoch ms)。**必须持久化**:建稿标题里的 `{HH}-{mm}-{ss}` 用它渲染,
+   * 若重启后按「本进程首个上报的段」现算(崩溃恢复常见:重启时只见尾段)→ 标题时间漂到收尾时刻,
+   * 与文件名/实际开播时间不一致。老文件无此字段 → 回落现算(行为不变)。
+   */
+  startMs?: number;
   updatedAt: number;
 }
 
@@ -191,6 +197,10 @@ export class RollingUploader {
         confirmed: [],
         updatedAt: this.now(),
       };
+      // 重启读回建稿时刻:标题时间锚定**会话首段**,不受「重启后先看到哪个段」影响。
+      if (Number.isFinite(this.state.startMs) && (this.state.startMs ?? 0) > 0) {
+        this.firstSegMtimeMs = this.state.startMs as number;
+      }
       // 重启/换进程读到「已确认」段 → 需要补删「确认了但没删成」的源(崩溃窗口:确认后、删前被杀)。
       if (this.state.confirmed.length > 0) this.needsConfirmCleanup = true;
       // 从持久化状态重建「路径 → 段号」映射(重启后段号续号,不漏传、不重复建稿)。
@@ -210,6 +220,8 @@ export class RollingUploader {
     this.state = {
       ...this.state,
       segments: [...(this.state.segments ?? []), { index: idx, path: filePath }],
+      // 首段时刻一旦确定就落盘(此后不覆盖):崩溃恢复的建稿标题必须用原始开播时刻。
+      startMs: this.state.startMs ?? (Number.isFinite(this.firstSegMtimeMs) && this.firstSegMtimeMs > 0 ? this.firstSegMtimeMs : this.now()),
       updatedAt: this.now(),
     };
     this.persist();

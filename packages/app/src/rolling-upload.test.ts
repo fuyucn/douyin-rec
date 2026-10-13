@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { RollingUploader } from "./rolling-upload.js";
@@ -325,6 +325,28 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     expect(ap).not.toHaveBeenCalled();          // 已提交 → 绝不重复 append
     expect(remove).toHaveBeenCalledTimes(2);    // 两个已确认段的源都补删
     expect(r.uploaded).toEqual([]);
+  });
+
+  // 建稿时刻(startMs)是投稿标题的渲染依据,**必须持久化**:原先只在「本进程首个上报的段」上
+  // 现算 mtime,崩溃恢复时进程往往只剩尾段 → 时刻漂到收尾时间,与实际开播时间不符。
+  it("建稿时刻锚定会话首段并持久化(重启后不漂到尾段时间)", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    const t0 = Date.now() - 120_000;
+    utimesSync(paths[0], new Date(t0), new Date(t0));
+    utimesSync(paths[1], new Date(t0 + 60_000), new Date(t0 + 60_000));
+    const up = vi.fn(async () => "BV1aaaaaaaaaa");
+    // 实例 1:只有段 0 且仍在录(不封口 → 不建稿),但 startMs 已随段号落盘。
+    const u1 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    u1.noteSegment(paths[0]);
+    await u1.flush({ recordingActive: true });
+    expect(up).not.toHaveBeenCalled();
+    // 实例 2 = 重启:**先**上报尾段(它的 mtime 晚 60s)→ 读回 sidecar 的 startMs,仍锚定首段时刻。
+    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    u2.noteSegment(paths[1]);
+    await u2.flush({ recordingActive: false });
+    expect(up).toHaveBeenCalledTimes(1); // 建稿发生在段 0 上,时刻 = 会话首段
+    const saved = JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { startMs?: number };
+    expect(Math.abs((saved.startMs ?? 0) - t0)).toBeLessThanOrEqual(1_000);
   });
 
   // sidecar 是「已传/已确认」的唯一持久化证据。原子写失败 → 幂等状态不可信:此后**绝不**外发
