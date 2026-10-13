@@ -38,6 +38,8 @@ export interface ScenarioOpts {
   cfg?: Partial<Omit<PipelineCfg, "steps" | "cleanup">> & { steps?: PipelineCfg["steps"]; cleanup?: PipelineCfg["cleanup"] };
   /** 自定义 transport(节点侧场景要加 nodePipeline 等能力)。缺省 = 纯 LocalTransport。 */
   wrapTransport?: (base: LocalTransport, s: Scenario) => Transport;
+  /** 崩溃恢复 sweep 的 stale 阈值(缺省沿用生产 600s)。「重启后续跑」场景传 0 = 视作重启已过去足够久。 */
+  staleMs?: number;
   /** 额外覆盖 PipelineDeps(如分段模式接缝)。 */
   deps?: Partial<PipelineDeps>;
 }
@@ -136,6 +138,7 @@ export class Scenario {
       pipelineDeps,
       settle: { maxWaitMs: 5_000, pollMs: 1 },
       sleep: async () => {},
+      ...(this.opts.staleMs !== undefined ? { staleMs: this.opts.staleMs } : {}),
       resolveCfg: () => this.cfg,
       notify: (e) => this.notifications.push(e),
     });
@@ -160,7 +163,8 @@ export class Scenario {
       pool: new ResourcePool({ minBurnFreeMemMB: 0, maxCpuParallel: 1, maxNetParallel: 1, uploadRateLimit: 0 }),
       sh,
       uploadPlain: (plain) => fake.uploadPlain(plain),
-      appendGroup: (o) => fake.appendGroup(o),
+      // 与 cli.ts master 路径一致:countParts 由装配方注入(失败后查分P数做幂等判定)。
+      appendGroup: (o) => fake.appendGroup({ ...o, countParts: () => fake.countVideoParts(o.bv) }),
       countParts: (bv) => fake.countVideoParts(bv),
       splitForUpload: async (mp4) => [mp4],
       remuxSegment: async (src, out) => writeMp4(out, src),

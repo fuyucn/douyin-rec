@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UploadGate } from "@drec/core";
@@ -29,12 +29,14 @@ vi.mock("@drec/post-process", async (orig) => {
 });
 
 let s: Scenario;
+let ckDir = "";
 beforeEach(() => {
-  const cookies = join(mkdtempSync(join(tmpdir(), "e2e-ck-")), "cookies.json");
+  ckDir = mkdtempSync(join(tmpdir(), "e2e-ck-"));
+  const cookies = join(ckDir, "cookies.json");
   writeFileSync(cookies, JSON.stringify({ cookie_info: { cookies: [{ name: "DedeUserID", value: "42" }] } }));
   process.env.BILIUP_COOKIE = cookies;
 });
-afterEach(() => { s?.dispose(); delete process.env.BILIUP_COOKIE; });
+afterEach(() => { s?.dispose(); delete process.env.BILIUP_COOKIE; rmSync(ckDir, { recursive: true, force: true }); });
 
 const gate = (): UploadGate => new UploadGate({ rateLimit: 1000, sleep: async () => {}, warn: () => {} });
 
@@ -84,7 +86,11 @@ describe("e2e: 节点侧上传(experimental,真实 runNodeSidePipeline)", () => 
     expect(s.fake.calls.filter((c) => c.op === "upload")).toHaveLength(1);
   });
 
-  it("节点上传中途结果不确定(append 已提交但分P数不可查)→ 转人工:保留源、不重传、不重复建稿", async () => {
+  // 已知缺陷 #59:节点侧(`runNodeSidePipeline`)调 appendGroup 不传 countParts,没有「分P数核对」。
+  // 生产实测:append 已提交但响应丢失 → 换线重复追加分P、场次收口 done、节点源被删。
+  // 本用例写的是「应有」行为(转人工、保留源、不重复追加);预期失败(it.fails),
+  // 待 #59 修复后会开始通过 → 去掉 `.fails`。https://github.com/fuyucn/douyin-rec/issues/59
+  it.fails("节点上传中途结果不确定(append 已提交但分P数不可查)→ 转人工:保留源、不重传、不重复追加分P(已知缺陷 #59)", async () => {
     await mk(); rec(s);
     s.fake.inject({ op: "append", mode: "ambiguous" });
     s.fake.countAvailable = false;
@@ -93,6 +99,7 @@ describe("e2e: 节点侧上传(experimental,真实 runNodeSidePipeline)", () => 
     expect(s.jobState(key)).toBe("needs_manual");
     expect(s.ledger.get(key)?.error).toContain("人工");
     expect(s.fake.draftCount).toBe(1);
+    expect(s.fake.onlyArchive.parts, "不得重复追加分P").toHaveLength(3);
     expect(tsLeft(s), "不确定时不得删源").toBe(3);
     expectSourceSidecarsKept(s);
     // 再来一轮(含重启):needs_manual 不被推进,不产生新上传。

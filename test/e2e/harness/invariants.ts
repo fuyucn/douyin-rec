@@ -48,6 +48,12 @@ export function expectHealthyDone(s: Scenario, key: string, e: DoneExpect): void
   // 硬标准:关水印 + 默认仅自己可见(append 同口径不会翻回去:稿件级标志取 P1 建稿 argv)。
   expect(a.watermarkOff).toBe(true);
   expect(a.onlySelf).toBe(true);
+  // 追加调用的 argv 同样必须带关水印 + 仅自己可见(append 会重提交元数据,漏带会把整稿翻回带水印/公开)。
+  for (const c of s.fake.calls.filter((x) => x.op === "append")) {
+    expect(c.argv, `append 缺关水印: ${c.argv.join(" ")}`).toContain('{"watermark":{"state":0}}');
+    const i = c.argv.indexOf("--is-only-self");
+    expect(i >= 0 && c.argv[i + 1] === "1", `append 缺仅自己可见: ${c.argv.join(" ")}`).toBe(true);
+  }
   expectSourceSidecarsKept(s);
   if (e.stageClean !== false) expect(s.stageResidue(), "stage 残留").toEqual([]);
 }

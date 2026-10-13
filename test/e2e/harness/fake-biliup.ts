@@ -30,7 +30,9 @@ export type FaultMode =
   /** 结果不确定:**服务端已提交**,但客户端只收到可重试错误(没拿到响应)。 */
   | "ambiguous"
   /** 进程被杀(SIGKILL):`applied` 决定被杀前服务端是否已提交。非重试类错误,直接冒泡。 */
-  | "killed";
+  | "killed"
+  /** 挂起:run 永不返回(模拟进程在该调用中途整体死亡;配合 `Scenario.restart()` 做「崩溃续跑」)。 */
+  | "hang";
 
 export interface Fault {
   op: "upload" | "append";
@@ -58,8 +60,10 @@ export interface FakeCall {
   files: string[];
   bv?: string;
   line?: string;
-  /** ok = 已提交且成功返回;lost = 已提交但客户端没拿到响应;rejected = 未提交。 */
-  outcome: "ok" | "lost" | "rejected";
+  /** 完整 argv(断言关水印 / 仅自己可见等硬标准用)。 */
+  argv: string[];
+  /** ok = 已提交且成功返回;lost = 已提交但客户端没拿到响应;rejected = 未提交;hung = 调用被挂起(进程死亡)。 */
+  outcome: "ok" | "lost" | "rejected" | "hung";
 }
 
 function parseFlags(argv: string[]): { op: "upload" | "append"; files: string[]; flags: Map<string, string> } {
@@ -128,9 +132,13 @@ export class FakeBiliup {
       return a;
     };
     const record = (outcome: FakeCall["outcome"], bv?: string): void => {
-      this.calls.push({ op, files, bv: bv ?? flags.get("--vid"), line, outcome });
+      this.calls.push({ op, files, bv: bv ?? flags.get("--vid"), line, argv: [...argv], outcome });
     };
     if (fault) {
+      if (fault.mode === "hang") {
+        record("hung");
+        return new Promise<string>(() => {});
+      }
       if (fault.mode === "gateway-timeout" || fault.mode === "timeout") {
         record("rejected");
         const why = fault.mode === "gateway-timeout" ? "Gateway Time-out" : "operation timed out";
@@ -160,13 +168,15 @@ export class FakeBiliup {
   /** 与真实 `uploadPlain` 同签名(`{ plain }` → 由调用方包成 `(plain) => ...` 注入)。 */
   readonly uploadPlain = (plain: UploadOpts): Promise<string> => this.real.uploadPlain({ plain, run: this.run });
 
-  /** 与真实 `appendGroup` 同形(带 countParts 幂等核对,与 cli 装配一致)。 */
+  /**
+   * 与真实 `appendGroup` 同形。`countParts` **原样透传**调用方传入的(不传就是不传):
+   * 各生产调用点装配不同(master 管线由 cli 注入、RollingUploader 自带、节点侧不传),
+   * 默认补上会让 E2E 比生产多一道幂等核对而假绿。
+   */
   readonly appendGroup = (o: {
     bv: string; files: string[]; cookies: string; public?: boolean;
-    /** 调用方(如 RollingUploader)自带的分 P 数查询优先;缺省走假「B站」。 */
     countParts?: () => Promise<number | null>;
-  }): Promise<void> =>
-    this.real.appendGroup({ ...o, run: this.run, countParts: o.countParts ?? ((): Promise<number | null> => this.countVideoParts(o.bv)) });
+  }): Promise<void> => this.real.appendGroup({ ...o, run: this.run });
 
   // ── 断言用视图 ──
   /** 建稿次数(= upload 且已提交的稿件数)。 */
