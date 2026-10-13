@@ -59,14 +59,38 @@ export const DEFAULT_DISK_MIN_GB = 10;
  * **回落默认 10GB**,而不是 0(= 静默关闭闸门:恰是最易写满的 worker 无闸门)。
  * 显式 `diskMinGB <= 0` 仍表示关闭(与 reconciler 同语义);JSON 损坏 → 同样回落默认(宁可拦)。
  */
-export function resolveDiskWatermarkBytes(hubConfigJson: string | undefined): number {
+export function resolveDiskWatermarkBytes(
+  hubConfigJson: string | undefined,
+  warn?: (msg: string) => void,
+): number {
+  return resolveDiskWatermark(hubConfigJson, warn).bytes;
+}
+
+export type DiskWatermarkSource = "配置" | "默认" | "关闭";
+
+/**
+ * 同 {@link resolveDiskWatermarkBytes},额外返回来源(供启动日志)。
+ * 回落默认的两种异常(JSON 损坏 / `diskMinGB` 非数字)经 `warn` 告警,不静默;正常配置与「未配置」不告警。
+ */
+export function resolveDiskWatermark(
+  hubConfigJson: string | undefined,
+  warn?: (msg: string) => void,
+): { bytes: number; source: DiskWatermarkSource } {
   let gb: number = DEFAULT_DISK_MIN_GB;
+  let source: DiskWatermarkSource = "默认";
   try {
     const cfg = JSON.parse(hubConfigJson ?? "{}") as { resources?: { diskMinGB?: unknown } };
     const v = cfg.resources?.diskMinGB;
-    if (typeof v === "number" && Number.isFinite(v)) gb = v;
-  } catch { /* 配置损坏 → 用默认水位 */ }
-  return gb > 0 ? gb * 1e9 : 0;
+    if (typeof v === "number" && Number.isFinite(v)) {
+      gb = v;
+      source = v > 0 ? "配置" : "关闭";
+    } else if (v !== undefined && v !== null) {
+      warn?.(`[disk] resources.diskMinGB=${JSON.stringify(v)} 不是有效数字,回落默认 ${DEFAULT_DISK_MIN_GB}GB`);
+    }
+  } catch (e) {
+    warn?.(`[disk] hub 配置 JSON 解析失败(${(e as Error).message}),磁盘水位回落默认 ${DEFAULT_DISK_MIN_GB}GB`);
+  }
+  return { bytes: gb > 0 ? gb * 1e9 : 0, source };
 }
 
 /** Result of a pure scheduling decision: which task ids to start / stop. */

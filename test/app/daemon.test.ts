@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { decide, TaskDaemon, resolveDiskWatermarkBytes } from "../../packages/app/src/daemon.js";
+import { describe, it, expect, vi } from "vitest";
+import { decide, TaskDaemon, resolveDiskWatermarkBytes, resolveDiskWatermark } from "../../packages/app/src/daemon.js";
 import { TaskManager } from "../../packages/app/src/task-manager.js";
 import { TaskStore, type Task } from "../../packages/app/src/store.js";
 import type { Spawner } from "../../packages/app/src/process/spawner.js";
@@ -351,5 +351,29 @@ describe("resolveDiskWatermarkBytes — worker 无 hub 配置时水位不得静�
   it("非数字 / JSON 损坏 → 回落默认(宁可拦)", () => {
     expect(resolveDiskWatermarkBytes('{"resources":{"diskMinGB":"abc"}}')).toBe(10e9);
     expect(resolveDiskWatermarkBytes("{not json")).toBe(10e9);
+  });
+  it("JSON 损坏 / 非数字 → warn 被调用(不静默)", () => {
+    const warn = vi.fn();
+    expect(resolveDiskWatermarkBytes("{not json", warn)).toBe(10e9);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("JSON");
+    warn.mockClear();
+    expect(resolveDiskWatermarkBytes('{"resources":{"diskMinGB":"abc"}}', warn)).toBe(10e9);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("diskMinGB");
+  });
+  it("正常配置 / 缺省 / 显式关闭 → 不告警", () => {
+    const warn = vi.fn();
+    resolveDiskWatermarkBytes('{"resources":{"diskMinGB":25}}', warn);
+    resolveDiskWatermarkBytes(undefined, warn);
+    resolveDiskWatermarkBytes("{}", warn);
+    resolveDiskWatermarkBytes('{"resources":{"diskMinGB":0}}', warn);
+    expect(warn).not.toHaveBeenCalled();
+  });
+  it("来源:配置 / 默认 / 关闭", () => {
+    expect(resolveDiskWatermark('{"resources":{"diskMinGB":25}}').source).toBe("配置");
+    expect(resolveDiskWatermark(undefined).source).toBe("默认");
+    expect(resolveDiskWatermark("{not json").source).toBe("默认");
+    expect(resolveDiskWatermark('{"resources":{"diskMinGB":0}}')).toEqual({ bytes: 0, source: "关闭" });
   });
 });
