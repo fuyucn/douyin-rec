@@ -7,6 +7,9 @@
     python3 scripts/reinforce-metrics.py --days 7        # 统计窗口
     python3 scripts/reinforce-metrics.py --since 2026-10-06
     python3 scripts/reinforce-metrics.py --node vps      # 额外扫节点卡死残留(只读)
+    python3 scripts/reinforce-metrics.py --loop --days 7 # 只出「PR 流程」纯文本表(供 loop 通知贴;无台账/无 gh 也能跑)
+    ... --ledger-log FILE | --ledger-container NAME      # 统计 `[ledger] 拒绝` 行数(日志不可得则跳过并标注)
+    ... --fixture FILE.json                              # 离线喂 {prs,issues}(测试用,不调 gh)
 
 指标口径见 docs/self-reinforcing-dev.md「指标记录」。本脚本只做聚合与只读文件系统扫描，
 不会删除任何 .ts/.xml/.ass/.drec-node-result.json。所有节点路径按隐私口径在产出中脱敏。
@@ -17,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -126,6 +130,165 @@ def residue_by_component(hits: list[dict], done_keys: set[str]) -> list[dict]:
     ]
 
 
+# ---------------------------------------------------------------- PR 流程指标(issue #78)
+STOP_TOKENS = {"incident", "enhancement", "修复", "问题", "失败", "录制", "issue", "this", "that", "with", "from"}
+ISSUE_STATE_RE = re.compile(r"<!--\s*issue-state:\s*from=(\S+)\s+to=(\S+)[^>]*?at=(\S+)\s*-->")
+
+
+def parse_ts(v: str | None) -> datetime | None:
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def tokens(text: str) -> set[str]:
+    """粗匹关键词: ascii 词(>=4) + CJK 二元组;去掉通用词。"""
+    out: set[str] = set()
+    for w in re.findall(r"[A-Za-z][A-Za-z0-9_\-]{3,}", text or ""):
+        out.add(w.lower())
+    for run in re.findall(r"[\u4e00-\u9fff]+", text or ""):
+        out.update(run[i:i + 2] for i in range(len(run) - 1))
+    return {t for t in out if t not in STOP_TOKENS}
+
+
+def label_names(obj: dict) -> set[str]:
+    return {l.get("name", "") if isinstance(l, dict) else str(l) for l in obj.get("labels", [])}
+
+
+def linked_issue(pr: dict) -> int | None:
+    m = re.search(r"(?im)^\s*(?:fixes|closes|resolves)\s+#(\d+)", pr.get("body") or "")
+    return int(m.group(1)) if m else None
+
+
+def pr_rework_rounds(pr: dict, issue: dict | None) -> int:
+    """打回轮数: CHANGES_REQUESTED review + 含「打回」的 PR 评论 + issue 上迁到 rework-N 的状态标记(取最大者, 避免重复计)。"""
+    reviews = sum(1 for r in pr.get("reviews", []) if (r.get("state") or "").upper() == "CHANGES_REQUESTED")
+    comments = sum(1 for c in pr.get("comments", []) if "打回" in (c.get("body") or ""))
+    markers = 0
+    if issue:
+        for c in issue.get("comments", []):
+            m = ISSUE_STATE_RE.search(c.get("body") or "")
+            if m and m.group(2).startswith("rework-"):
+                markers += 1
+    return max(reviews + comments, markers)
+
+
+def compute_pr_metrics(prs: list[dict], issues: list[dict], now: datetime, days: int) -> dict:
+    since = now - timedelta(days=max(days, 1))
+    by_num = {i.get("number"): i for i in issues}
+    done = [p for p in prs if (parse_ts(p.get("mergedAt")) or parse_ts(p.get("closedAt")) or since - timedelta(days=1)) >= since]
+    dist = {"0": 0, "1": 0, "2": 0, "3+": 0}
+    for p in done:
+        r = pr_rework_rounds(p, by_num.get(linked_issue(p)))
+        dist["3+" if r >= 3 else str(r)] += 1
+    reworked = len(done) - dist["0"]
+
+    incidents = [i for i in issues if "incident" in label_names(i)]
+    escaped: list[tuple[int, int]] = []
+    merged = [p for p in done if parse_ts(p.get("mergedAt"))]
+    for p in merged:
+        t0 = parse_ts(p["mergedAt"])
+        src = by_num.get(linked_issue(p)) or {}
+        ptok = tokens(src.get("title", "") + " " + p.get("title", ""))
+        for inc in incidents:
+            ct = parse_ts(inc.get("createdAt"))
+            if inc.get("number") == src.get("number") or not ct or not (t0 < ct <= t0 + timedelta(hours=48)):
+                continue
+            if len(ptok & tokens(inc.get("title", ""))) >= 3:
+                escaped.append((p["number"], inc["number"]))
+                break
+
+    waiting: list[tuple[int, float]] = []
+    merged_at = {linked_issue(p): parse_ts(p.get("mergedAt")) for p in prs if linked_issue(p)}
+    for i in issues:
+        if (i.get("state") or "").upper() != "OPEN" or "待验证" not in label_names(i):
+            continue
+        since_t = None
+        for c in i.get("comments", []):
+            m = ISSUE_STATE_RE.search(c.get("body") or "")
+            if m and m.group(2) == "待验证":
+                since_t = parse_ts(m.group(3)) or since_t
+        since_t = since_t or merged_at.get(i.get("number")) or parse_ts(i.get("updatedAt"))
+        if since_t:
+            waiting.append((i["number"], (now - since_t).total_seconds() / 3600))
+    return {"total": len(done), "reworked": reworked, "dist": dist, "merged": len(merged),
+            "escaped": escaped, "waiting": sorted(waiting, key=lambda x: -x[1])}
+
+
+def count_ledger_rejects(log_file: str | None, container: str | None, days: int) -> tuple[int | None, str]:
+    """返回 (计数, 来源说明);日志不可得 → (None, 原因)。"""
+    text = None
+    if log_file:
+        try:
+            text = Path(log_file).read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            return None, f"日志文件不可读: {e.strerror}"
+        src = "日志文件"
+    elif container:
+        p = subprocess.run(["docker", "logs", "--since", f"{max(days, 1) * 24}h", container], capture_output=True, text=True) \
+            if shutil.which("docker") else None
+        if p is None or p.returncode != 0:
+            return None, "docker logs 不可用"
+        text, src = p.stdout + p.stderr, "docker logs"
+    else:
+        return None, "未提供 --ledger-log / --ledger-container"
+    return sum(1 for ln in text.splitlines() if "[ledger] 拒绝" in ln), src
+
+
+def render_pr_metrics(m: dict, days: int, ledger: tuple[int | None, str] | None, gh_ok: bool = True) -> str:
+    if not gh_ok:
+        return f"PR 流程指标(近 {days} 天): 跳过 —— gh 不可用或无网络(降级, 非 0 值)\n"
+    total = m["total"]
+    rate = f"{m['reworked'] / total * 100:.0f}%" if total else "n/a"
+    esc = f"{len(m['escaped'])}/{m['merged']} ({len(m['escaped']) / m['merged'] * 100:.0f}%)" if m["merged"] else "n/a"
+    rows = [
+        ("返工率(打回>=1 轮 / 已结 PR)", f"{m['reworked']}/{total} ({rate})" if total else "n/a(窗口内无已结 PR)"),
+        ("打回轮数分布 0/1/2/3+", "/".join(str(m["dist"][k]) for k in ("0", "1", "2", "3+"))),
+        ("逃逸率(合并 48h 内同根因新 incident)", esc),
+    ]
+    if m["escaped"]:
+        rows.append(("  逃逸明细(PR→incident)", ", ".join(f"#{a}→#{b}" for a, b in m["escaped"])))
+    if m["waiting"]:
+        w = ", ".join(f"#{n} {h:.0f}h" for n, h in m["waiting"][:5])
+        rows.append(("待验证 停留", f"{len(m['waiting'])} 张: {w}"))
+    else:
+        rows.append(("待验证 停留", "0 张"))
+    if ledger is not None:
+        n, note = ledger
+        rows.append(("台账 `[ledger] 拒绝` 计数", f"{n}({note})" if n is not None else f"跳过 —— {note}"))
+    width = max(len(r[0]) for r in rows)
+    head = f"PR 流程指标 · 近 {days} 天\n" + "-" * 40 + "\n"
+    return head + "\n".join(f"{k.ljust(width)}  {v}" for k, v in rows) + "\n"
+
+
+def fetch_gh_data(repo: str) -> tuple[list[dict], list[dict]] | None:
+    if not shutil.which("gh"):
+        return None
+    pr_out = run(["gh", "pr", "list", "--repo", repo, "--state", "all", "--limit", "200", "--json",
+                  "number,title,body,createdAt,mergedAt,closedAt,labels,reviews,comments"], timeout=60)
+    is_out = run(["gh", "issue", "list", "--repo", repo, "--state", "all", "--limit", "300", "--json",
+                  "number,title,state,createdAt,updatedAt,labels,comments"], timeout=60)
+    try:
+        return json.loads(pr_out), json.loads(is_out)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def pr_flow_section(args, now: datetime) -> str:
+    if args.fixture:
+        d = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
+        data = (d.get("prs", []), d.get("issues", []))
+    else:
+        data = fetch_gh_data(args.repo)
+    ledger = count_ledger_rejects(args.ledger_log, args.ledger_container, args.days)
+    if data is None:
+        return render_pr_metrics({}, args.days, ledger, gh_ok=False)
+    return render_pr_metrics(compute_pr_metrics(data[0], data[1], now, args.days), args.days, ledger)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="自强化循环开发指标巡检(只读)")
     ap.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -134,6 +297,10 @@ def main() -> int:
     ap.add_argument("--since", default=None, help="YYYY-MM-DD 覆盖 --days")
     ap.add_argument("--node", action="append", default=[], help="额外 ssh 扫描的节点")
     ap.add_argument("--repo", default="fuyucn/douyin-rec")
+    ap.add_argument("--loop", action="store_true", help="只输出 PR 流程纯文本表(不读台账/磁盘)")
+    ap.add_argument("--ledger-log", default=None, help="含 `[ledger] 拒绝` 的日志文件")
+    ap.add_argument("--ledger-container", default=None, help="docker 容器名(读 docker logs)")
+    ap.add_argument("--fixture", default=None, help="离线 {prs,issues} JSON(测试用)")
     ap.add_argument("--write", action="store_true", help="写 docs/metrics/<date>.md")
     ap.add_argument("--metrics-dir", type=Path, default=DEFAULT_METRICS_DIR)
     args = ap.parse_args()
@@ -145,6 +312,10 @@ def main() -> int:
         )
     else:
         since_dt = now - timedelta(days=max(args.days, 1))
+
+    if args.loop:
+        print(pr_flow_section(args, now), end="")
+        return 0
 
     jobs = read_sync_jobs(args.db)
     window = [j for j in jobs if is_in_window(j.get("updatedAt", 0), since_dt)]
@@ -282,6 +453,12 @@ def main() -> int:
     lines.append("")
     lines.append("- 复发数：由三根因关键词（节点侧上传 / 分P核验 / 磁盘写满）人工归类后回填，本轮未做自动归类。")
     lines.append("- 验证覆盖：待修复类 issue 收口时回填「已部署核对版本 + 实跑验证」记录。")
+    lines.append("")
+    lines.append("## 5. PR 流程(返工率 / 逃逸率 / 待验证 / 台账拒绝)")
+    lines.append("")
+    lines.append("```")
+    lines.append(pr_flow_section(args, now).rstrip("\n"))
+    lines.append("```")
     lines.append("")
     lines.append("> 本报告由 `scripts/reinforce-metrics.py` 生成，只做只读聚合。")
 

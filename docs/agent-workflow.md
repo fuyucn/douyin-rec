@@ -69,8 +69,9 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 7. **自动 Review 派独立会话审查**（`fork_context: false` 的新会话，只读审查、不改实现），
    按下方「review 门禁」逐条核；结论回帖到 PR。
 8. **审查通过 → review agent 直接合并 PR**（`gh pr merge <N> --merge`，base 保持
-   `feat/hub-optimization`）——**不再等人操作**，并把票由 `in-progress` 转 **`待验证`**；
-   不通过 → 打回并列缺口，保持 `in-progress`（返工回路见「review 门禁」）。
+   `feat/hub-optimization`）——**不再等人操作**，并把票由 `in-review` 转 **`待验证`**；
+   不通过 → 打回并列缺口，票转 `rework-N`（N=第几轮；返工回路见「review 门禁」）。
+   所有状态标签变化一律经 `scripts/issue-state.py`（见「循环工具」）。
 9. **部署后实跑 → 收口**：**部署仍由人做**（走「无 `recording===true` 才重启」）；部署后实跑验证，
    再按「四不 close」收口：门禁全过就 `gh issue close` 并写明关闭依据（验证命令与结果 / 回归测试 /
    回写位置）。**close 的单一负责方 = 实现心跳的收口步骤**；review 心跳只做合并与转标签，不 close。
@@ -81,7 +82,7 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 
 `accept` 只是「可以做」，不等于「有人在做」——看板上区分这两件事靠 `in-progress` 标签。
 自 2026-10-12 起，`accept` → `in-progress` 这一步由实现 heartbeat 自动完成，不再等人指定；
-`in-progress` → **合并 → `待验证`** 由 review heartbeat 自动完成，`待验证` → **close** 由实现 heartbeat
+`in-progress` → `in-review`（PR 已开，实现侧打）→ **合并 → `待验证`** 由 review heartbeat 自动完成，`待验证` → **close** 由实现 heartbeat
 在部署实跑后收口，人只在危险类拍板与部署时出场。
 **文档/测试类票**（无需部署实跑）合并后，由实现心跳当轮按「四不 close」收口，无需等部署。
 
@@ -119,7 +120,7 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 **review 由独立会话做，不自我审查**：实现 sub-agent 开完 PR 后，review heartbeat 另起一个
 `fork_context: false` 的新会话（只读审查、不改实现代码），逐条核下面的门禁。**门禁全过 → review
 agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等人操作**；缺任一条 → 打回，
-在 PR 里列出缺口，保持 `in-progress`，等实现会话补。review 结论一律回帖到 PR（评论也过隐私闸门）。
+在 PR 里列出缺口，票转 `rework-N`，等实现会话补。review 结论一律回帖到 PR（评论也过隐私闸门）。
 
 1. **PR 形态**：base = `feat/hub-optimization`，分支名 `codex/issue-N-<slug>`，正文有 `Fixes #N`；
    diff 尽量小、单一插入点。用 `gh pr view` / `gh pr diff --name-only` /
@@ -148,16 +149,50 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
    建议选项),等人拍板。issue 即使是 `accept`,diff 命中 RISK 也一样拦。`PASS` 只表示没命中这些
    规则,不代替第 1–8 条。
 
-**打回后的回路**:review 打回(任一门禁不过)→ PR 保持 open、issue 保持 `in-progress`,review 在 PR
-评论里列出缺口;**由实现 heartbeat 下一轮扫到「有打回评论的 `in-progress` PR」时派会话(返工 sub =
+**打回后的回路**:review 打回(任一门禁不过)→ PR 保持 open、issue 转 `rework-1`(第 2 次转 `rework-2`),
+review 在 PR 评论里列出缺口;**由实现 heartbeat 下一轮扫到「带 `rework-N` 的 PR」时派会话(返工 sub =
 `claude/claude-sonnet-5-5`)在原分支(`codex/issue-N-<slug>`)继续修复并 push**,不另开分支、不另开 PR;
-修完后 review 心跳下一轮重新审。**返工最多 2 轮,仍不过 → 转 `needs-decision`**(评论按「决定三行」写)。
+修完后实现侧把票转回 `in-review`,review 心跳下一轮重新审。**返工最多 2 轮(`rework-1`、`rework-2`),
+第 3 次仍不过 → 转 `needs-decision`**(评论按「决定三行」写)。
 版本号冲突导致的 rebase 顺延不计入轮次。review 只打回、不代改。危险类(第 9 条)打回后不进此回路,
 等人在 issue/PR 上回「决定」后再动。
 
 合并后：**不删分支**（repo 设 `delete_branch_on_merge=false`）；票转 **`待验证`**（PR 已合并、等部署后线上实跑，
 不占并行位）；部署后实跑，再由实现心跳按「四不 close」收口。
 **部署仍由人做**（走 `recording===true` guard）。review agent 只合并并转标签，不改代码、不部署、不 close。
+
+## 循环工具（审查第 0 步与状态迁移唯一入口）
+
+issue #78 起，循环里的「状态变更」和「审查前检查」不再靠提示词散文，统一走仓库内可测的脚本：
+
+| 工具 | 用途 | 谁调 |
+| --- | --- | --- |
+| `scripts/issue-state.py <issue> <to> [--reason-file F]` + `scripts/issue-state.json` | **状态标签迁移的唯一入口**：状态标签唯一化（一次删光旧状态标签再加新标签）、按迁移表校验合法性、评论先过 `issue-guard.py`、评论末行带机器可读标记 | 所有心跳；**禁止直接 `gh issue edit` 改状态标签** |
+| `.github/pull_request_template.md` | PR 硬字段：`Fixes #N`、改动范围、验证方式、自审五项、变异验证（撤修复 FAIL + 复原 PASS 两段输出）、验证命令与输出、评论采纳、回写位置、残余风险、版本 | 实现 agent 开 PR 时按模板填 |
+| `scripts/pr-gate.py <PR>` | **审查第 0 步**：机械检查模板字段齐全、变异两段、版本声明、正文过隐私闸门；缺项输出清单、退出码非 0 | review 心跳，派 Opus 之前 |
+| `scripts/reinforce-metrics.py --loop --days N` | 只读 PR 流程指标：返工率与打回轮数分布、逃逸率（合并 48h 内同根因新 incident，按标题关键词粗匹）、`待验证` 停留时长、台账 `[ledger] 拒绝` 计数（`--ledger-log` / `--ledger-container`，日志不可得则标注跳过）；无 gh / 无网络时降级 | 巡检与周报，纯文本表可直接贴 loop 通知 |
+
+**状态集**：(无) / `accept` / `in-progress` / `in-review` / `rework-1` / `rework-2` / `待验证` / `needs-decision` / `decline` / `blocked`，同一时刻最多一个。新标签 `in-review`、`rework-1`、`rework-2` 用 `issue-state.py --ensure-labels` 补建。
+
+**合法迁移**（唯一真相 = `scripts/issue-state.json`，改表必须同步改本文）：
+
+- `accept → in-progress`（认领）→ `in-review`（PR 已开）→ PASS：`待验证` ｜ FAIL：`rework-1` → `in-review` → 再 FAIL：`rework-2` → `in-review` → 再 FAIL：`needs-decision`。
+- `待验证 → closed`（实现侧收口）；`decline → closed`（不做的票收口，需 `--reason-file`）。
+- 任意活跃状态 → `needs-decision` / `blocked`；`needs-decision` 由人改回 `accept` / `decline`。
+- 非法迁移（如 `accept → 待验证`、跳过 `in-review`）退出码 1，不发任何远端写调用；当前同时挂多个状态标签时退出码 3，须 `--from <真实状态>` 指明后才会清理。
+- `needs-decision` 的评论必须带「决定三行」（脚本校验）；`rework-N` / `decline` / `blocked` / `closed` 必须带 `--reason-file`。
+- **close 只归实现侧**：`issue-state.py <N> closed --close --reason-file F`，默认 `--role impl`；`--role review` 调 close 会被拒。review 心跳永远不调 close。
+
+**存量票过渡**：已挂 `accept` + `in-progress`（旧口径、PR 已开或在做）的票会同时带两个状态标签，脚本按歧义退出码 3。
+迁移方法：对 PR 已开的票 `python3 scripts/issue-state.py <N> in-review --from in-progress --reason-file F`
+（一次删光 `accept`、`in-progress` 等旧状态标签再加 `in-review`），此后走新流程；PR 未开的票在开 PR 时同样用
+`--from in-progress` 迁到 `in-review`。先 `--ensure-labels` 补建新标签，再用 `--dry-run` 预检。
+
+**心跳将引用这些工具（本 PR 不改 automations 文件，由人在合并后改提示词）**：
+
+1. 实现心跳：认领、开 PR、返工、收口里所有标签变化改为调 `issue-state.py`（认领 `in-progress`、开 PR 后 `in-review`、打回后回到 `in-review`、收口 `closed --close`）；PR 正文按模板填。
+2. review 心跳：每个 open PR 先跑 `scripts/pr-gate.py <PR>`；**缺项不派 Opus、直接 `issue-state.py <N> rework-N` 打回并把缺项清单贴到 PR**；通过才进入上文 review 门禁 1–9；结论经 `issue-state.py` 转 `待验证` 或 `rework-N`，不 close。
+3. 巡检/周报：附 `reinforce-metrics.py --loop --days 7` 的输出。
 
 ## 指标与闭环回写
 
@@ -188,7 +223,10 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
 - `enhancement`：优化，不修当前故障。
 - `accept`：可以做。
 - `decline`：不做。评论里写原因。
-- `in-progress`：已认领，正在做。实现会话认领时打，PR 打开后保留到合并（合并时换成 `待验证`）。
+- `in-progress`：已认领，正在做。实现会话认领时打；PR 打开后换成 `in-review`。
+- `in-review`：PR 已开，等独立 review 会话审查。审查通过合并后换成 `待验证`，打回则换成 `rework-N`。
+- `rework-1` / `rework-2`：review 打回第 1 / 2 轮，等实现会话在原分支返工；修完转回 `in-review`。第 3 次仍不过转 `needs-decision`。
+- `blocked`：被外部条件阻塞，评论写明阻塞原因与解除条件；解除后由人或实现心跳迁回原状态。
 - `待验证`：PR 已合并，等部署后线上实跑；**不占并行位**。实跑通过并满足「四不 close」后由实现心跳 close（文档/测试类票合并后当轮收口，无需等部署）。
 - `needs-decision`：危险类，或证据不够。见下方「决定三行」。
 
