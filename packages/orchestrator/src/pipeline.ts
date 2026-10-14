@@ -338,6 +338,8 @@ export async function finalizeOnly(
   notify: (e: NotifyEvent) => void,
   members: Broadcast["members"],
   stageSub: string,
+  /** `keepNodeXml`:节点侧上传的场没有 stage 里的 xml 副本,节点源 xml 是最后一份 → 必须保留。 */
+  opts: { keepNodeXml?: boolean } = {},
 ): Promise<{ state: JobState; bv?: string }> {
   const rmStageFn = deps.rmStage ?? defaultRmStage;
   const cfg = deps.cfg;
@@ -346,6 +348,7 @@ export async function finalizeOnly(
     cleanupSources: () => cleanupSourcesShared({
       streamKey, ledger: deps.ledger, transports: deps.transports, members,
       cleanup: cfg.cleanup,
+      ...(opts.keepNodeXml ? { keepNodeXml: true } : {}),
       stagePulledSources: members.flatMap((m) => m.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f)))),
       rmStage: rmStageFn, log: jlog,
     }),
@@ -441,8 +444,10 @@ export async function finalizeAfterUpload(o: {
   }
   if (v.kind === "unknown") {
     // 软状态:pending(可重试),由 reconciler 下一轮补跑核验;源也保留。
+    // 补跑每轮都可能再次读不到 → 只在**首次**转 pending 时通知,否则每个补跑周期刷一条(issue #91)。
+    const alreadyPending = ledger.getNodeStates(streamKey).some((n) => n.node === "clean_verify" && n.state === "pending");
     ledger.syncNodeState(streamKey, "clean_verify", "pending", { error: v.reason });
-    o.notify({ kind: "error", stage: "上传", message: verifyMessage(v, streamKey, bv) });
+    if (!alreadyPending) o.notify({ kind: "error", stage: "上传", message: verifyMessage(v, streamKey, bv) });
     return cleanupOk();
   }
   ledger.syncNodeState(streamKey, "clean_verify", "done", { error: null });
@@ -654,6 +659,16 @@ async function runPipelineInner(
 
   // 续跑:job 已有 bv ⇒ P1 已建稿(不可逆),绝不重传。跳过 select/pull/merge/burn/uploadPlain,只补 append。
   const existing = ledger.get(streamKey);
+  // issue #91:节点侧上传的 done 场收尾补跑 —— 只补核验 + 删源,**不重新选优/拉回/上传**。
+  // 必须排在下面「合并模式续跑」之前:否则合并模式的 done 场走 resumeAppends → finalizeOnly(不带 keepNodeXml),
+  // 会把节点上**最后一份** .xml 一并删掉。
+  // 此前补跑会重入整条管线,在节点侧入口撞「已建稿」护栏,刷「请人工核对」告警且收尾永不收敛。
+  if (existing?.state === "done" && existing.bv
+      && shouldUseNodeSideUpload(cfg, { burnDanmu, burnLivechat }).ok) {
+    jlog(`节点侧上传的 done 场补跑收尾:只补核验 + 删源(bv=${existing.bv}),不重传`);
+    return await finalizeOnly(streamKey, existing.bv, deps, jlog, notify, b.members, stageSub, { keepNodeXml: true });
+  }
+
   // 分段模式(bv 已存在)有自己的续跑(含 plain 段 checkpoint),不要走合并路径的 resumeAppends。
   if (cfg.uploadMode === "upload" && existing?.bv && cfg.steps?.mergeSegments !== false) {
     return await resumeAppends(streamKey, existing.bv, stageSub, deps, jlog, b.members);

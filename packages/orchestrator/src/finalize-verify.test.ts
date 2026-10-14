@@ -21,6 +21,8 @@ function fakeLedger(parts: Record<string, number[]>) {
     doneParts: (_k: string, g: string) => new Set(parts[g] ?? []),
     setState: (k: string, state: string, patch?: { error?: string }) => { calls.setState.push({ state, error: patch?.error }); },
     syncNodeState: (k: string, node: string, state: string) => { calls.nodeState.push({ node, state }); },
+    // 与真实台账同语义:每个节点只保留最近一次状态。
+    getNodeStates: () => [...new Map(calls.nodeState.map((n) => [n.node, n])).values()],
     logStep: (k: string, step: string, phase: string, detail?: string) => { calls.logStep.push({ step, phase, detail }); },
   } as unknown as SyncLedger;
   return { ledger, calls };
@@ -69,6 +71,21 @@ describe("finalizeAfterUpload:观察期核验只记录,不阻塞", () => {
     expect(r.verifyBlocked).toBeUndefined();
     expect(cleaned).toBe(1);
     expect(calls.setState).toHaveLength(0);
+  });
+
+  it("issue #91:unknown 反复补跑 → 只在首次转 pending 时通知,不每轮刷屏;恢复后可再通知", async () => {
+    const { ledger, calls } = fakeLedger({ plain: [0, 1, 2] });
+    const notify = vi.fn();
+    const run = async (actual: number | null) => finalizeAfterUpload({
+      streamKey: "k", bv: "BV1", deps: deps(ledger, actual), log: () => {},
+      cleanupSources: async () => ({ ok: true, failed: [] }), on: ALL_ON, notify,
+    });
+    await run(null); await run(null); await run(null);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(calls.nodeState.filter((n) => n.state === "pending")).toHaveLength(3); // 状态照常每轮记
+    await run(3); // 核验通过 → clean_verify=done
+    await run(null);
+    expect(notify).toHaveBeenCalledTimes(2); // 恢复后再次 unknown 视为新故障,允许再通知一次
   });
 
   it("unknown(查不到实际数)→ **仍然不删源**(观察期只放宽 mismatch,不放宽 unknown)", async () => {

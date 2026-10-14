@@ -265,11 +265,18 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
   // 重跑会**重复投稿**(B站不支持改稿件视频内容,只能删稿重传)。宁可转人工,也不冒重复稿的险。
   const existingBv = (ledger.get(streamKey)?.bv ?? "").trim();
   if (existingBv) {
+    // issue #91:本场已 done(收尾补跑重入)——稿件是好的,不该转人工也不该告警。
+    // 状态机会拒绝 done → needs_manual,但通知不依赖它 → 状态不变、告警每轮照发(刷屏)。
+    if (ledger.get(streamKey)?.state === "done") {
+      jlog(`节点侧上传跳过:本场已 done 且已建稿(bv=${existingBv}),不重复投稿,不转人工`);
+      return { state: "done", bv: existingBv };
+    }
     jlog(`节点侧上传跳过:本场已建稿(bv=${existingBv}),绝不重复投稿 → 转人工核对`);
-    ledger.setState(streamKey, "needs_manual", {
+    const moved = ledger.setState(streamKey, "needs_manual", {
       error: `已建稿 bv=${existingBv},节点侧不重复上传;请人工核对分 P`,
     });
-    notify({ kind: "error", stage: "上传", message: `${streamKey} 已建稿(${existingBv}),节点侧跳过上传,请人工核对` });
+    // 状态转换被拒(并发下已被别处改走)→ 不通知:告警必须与台账状态一致。
+    if (moved) notify({ kind: "error", stage: "上传", message: `${streamKey} 已建稿(${existingBv}),节点侧跳过上传,请人工核对` });
     return { state: "needs_manual", bv: existingBv };
   }
 

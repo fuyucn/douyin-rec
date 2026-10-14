@@ -534,3 +534,47 @@ describe("issue #2:started + 主动终止节点执行体(A1 尽早落盘 + A2 �
     expect(abort).toHaveBeenCalledWith("douyin:123:2026-10-12"); // 终态失败一律先尝试终止
   });
 });
+
+// issue #91:建稿护栏——done 场(收尾补跑重入)不转人工、不告警;告警必须与台账状态一致。
+describe("tryNodeSideUpload 已建稿护栏(issue #91)", () => {
+  const run = (ledger: unknown, notify: () => void) => {
+    const t = fakeTransport();
+    return tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12",
+      cfg,
+      winner: { workerId: "w1", rec: { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" } },
+      winnerMembers: [{ workerId: "w1", rec: { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" } }],
+      transport: t as never,
+      ledger: ledger as never,
+      jlog: () => {},
+      notify,
+      deps: fakeDeps(t),
+    }).then((r) => ({ r, t }));
+  };
+
+  it("本场已 done:返回 done,不 setState、不通知、不下发节点侧上传", async () => {
+    const setState = vi.fn(() => false);
+    const notify = vi.fn();
+    const { r, t } = await run({ get: () => ({ bv: "BV1X", state: "done" }), setState }, notify);
+    expect(r).toEqual({ state: "done", bv: "BV1X" });
+    expect(setState).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+    expect(t.nodePipeline).not.toHaveBeenCalled();
+  });
+
+  it("未 done 且已建稿:转人工并通知一次(不放宽重复投稿保护)", async () => {
+    const setState = vi.fn(() => true);
+    const notify = vi.fn();
+    const { r, t } = await run({ get: () => ({ bv: "BV1X", state: "syncing" }), setState }, notify);
+    expect(r).toEqual({ state: "needs_manual", bv: "BV1X" });
+    expect(setState).toHaveBeenCalledWith("douyin:123:2026-10-12", "needs_manual", expect.anything());
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(t.nodePipeline).not.toHaveBeenCalled();
+  });
+
+  it("状态转换被台账拒绝(并发下已被改走):不通知,避免告警与台账不一致", async () => {
+    const notify = vi.fn();
+    await run({ get: () => ({ bv: "BV1X", state: "syncing" }), setState: () => false }, notify);
+    expect(notify).not.toHaveBeenCalled();
+  });
+});

@@ -1437,6 +1437,103 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
 
+    // issue #91:节点侧上传的 done 场被收尾补跑重入时,不得再撞「已建稿」护栏刷告警。
+    describe("done 场收尾补跑(issue #91)", () => {
+      const nodeSideCfg = (): Partial<PipelineCfg> => ({
+        ...makeDeps().cfg,
+        steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false },
+        cleanup: { sourceAfterDone: true },
+      });
+      const doneJob = (deps: TestDeps, key: string): void => {
+        deps.ledger.upsertPending(key);
+        deps.ledger.setBv(key, "BVdone");
+        deps.ledger.markDone(key, "BVdone");
+      };
+
+      it("不重新选优/拉回/上传、不转人工、不发告警;台账仍 done,照常补删源", async () => {
+        const deps = makeDeps({ cfg: nodeSideCfg() as PipelineCfg });
+        const t = deps.transports.get("node-1")!;
+        const { nodePipeline } = withNodePipeline(t);
+        const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+        doneJob(deps, b.streamKey);
+
+        const r = await runPipeline(b, deps);
+
+        expect(r).toEqual({ state: "done", bv: "BVdone" });
+        expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
+        expect(nodePipeline).not.toHaveBeenCalled();
+        expect(t.pull).not.toHaveBeenCalled();
+        expect(deps.uploadPlain).not.toHaveBeenCalled();
+        expect(deps.notify.mock.calls.filter((c) => c[0].kind === "error")).toEqual([]);
+        expect(t.cleanup).toHaveBeenCalled(); // 收尾删源仍执行
+        deps.ledger.close();
+      });
+
+      it("补跑删源时保留节点源 .xml(节点侧没有 stage 副本,它是最后一份)", async () => {
+        const deps = makeDeps({ cfg: nodeSideCfg() as PipelineCfg });
+        const t = deps.transports.get("node-1")!;
+        withNodePipeline(t);
+        const rec = makeRec();
+        const b = makeBroadcast([{ workerId: "node-1", rec }]);
+        doneJob(deps, b.streamKey);
+
+        await runPipeline(b, deps);
+
+        const removed = (t.cleanup as Mock).mock.calls.flatMap((c) => c[0] as string[]);
+        expect(removed.length).toBeGreaterThan(0);
+        expect(removed.some((p) => /\.(xml|ass)$/i.test(p))).toBe(false);
+        deps.ledger.close();
+      });
+
+      it("分段模式(mergeSegments=false,线上形态)同样:不告警、不重传、保留 xml", async () => {
+        const deps = makeDeps({ cfg: { ...nodeSideCfg(), steps: { nodeSideUpload: true, mergeSegments: false, burnDanmu: false, burnLivechat: false } } as PipelineCfg });
+        const t = deps.transports.get("node-1")!;
+        const { nodePipeline } = withNodePipeline(t);
+        const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+        doneJob(deps, b.streamKey);
+
+        const r = await runPipeline(b, deps);
+
+        expect(r).toEqual({ state: "done", bv: "BVdone" });
+        expect(nodePipeline).not.toHaveBeenCalled();
+        expect(t.pull).not.toHaveBeenCalled();
+        expect(deps.notify).not.toHaveBeenCalled();
+        const removed = (t.cleanup as Mock).mock.calls.flatMap((c) => c[0] as string[]);
+        expect(removed.length).toBeGreaterThan(0);
+        expect(removed.some((p) => /\.(xml|ass)$/i.test(p))).toBe(false);
+        deps.ledger.close();
+      });
+
+      it("连续补跑多轮:始终不告警、不改状态(此前每轮刷一条)", async () => {
+        const deps = makeDeps({ cfg: nodeSideCfg() as PipelineCfg });
+        const t = deps.transports.get("node-1")!;
+        withNodePipeline(t);
+        const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+        doneJob(deps, b.streamKey);
+        for (let i = 0; i < 3; i++) await runPipeline(b, deps);
+        expect(deps.notify).not.toHaveBeenCalled();
+        expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
+        deps.ledger.close();
+      });
+
+      it("未 done 但已有 bv(非补跑)→ 护栏照旧转人工并通知(不放宽重复投稿保护)", async () => {
+        const deps = makeDeps({ cfg: nodeSideCfg() as PipelineCfg });
+        const t = deps.transports.get("node-1")!;
+        const { nodePipeline } = withNodePipeline(t);
+        const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+        deps.ledger.upsertPending(b.streamKey);
+        deps.ledger.setBv(b.streamKey, "BVhalf");
+
+        const r = await runPipeline(b, deps);
+
+        expect(r.state).toBe("needs_manual");
+        expect(nodePipeline).not.toHaveBeenCalled();
+        expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
+        expect(deps.notify.mock.calls.filter((c) => c[0].kind === "error")).toHaveLength(1);
+        deps.ledger.close();
+      });
+    });
+
     it("flag on + 要烧录 → 回落现状(pull 回 master),不调 nodePipeline", async () => {
       const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps: { nodeSideUpload: true, burnDanmu: true } } });
       const t = deps.transports.get("node-1")!;
