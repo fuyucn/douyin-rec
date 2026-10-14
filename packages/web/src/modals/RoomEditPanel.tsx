@@ -17,6 +17,7 @@ import { api, type PlatformDTO, type RoomDTO, type WorkerDTO } from "../api/clie
 import { cookieStatusAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
 import { Switch } from "../components/Switch";
+import { ExperimentalBadge } from "../components/ExperimentalBadge";
 import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
@@ -353,7 +354,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
               <div className="space-y-3">
                 <label className="switch-row">
                   <span className="flex flex-col min-w-0">
-                    <span className="text-sm font-medium text-ink">{t("rooms.mergeSegments")}</span>
+                    <span className="text-sm font-medium text-ink inline-flex items-center gap-1.5">{t("rooms.mergeSegments")}<ExperimentalBadge id="segment-part-xml" /></span>
                     <span className="text-xs text-muted mt-0.5">{t("hub.ruleDialog.toggleMergeSegmentsSub")}</span>
                   </span>
                   <Switch checked={form.mergeSegments} onCheckedChange={(v: boolean) => set("mergeSegments", v)} />
@@ -374,7 +375,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
                 </label>
                 <label className="switch-row" data-disabled={form.burnDanmu || form.burnLivechat ? "true" : undefined}>
                   <span className="flex flex-col min-w-0">
-                    <span className="text-sm font-medium text-ink">{t("rooms.nodeSideUpload")}</span>
+                    <span className="text-sm font-medium text-ink inline-flex items-center gap-1.5">{t("rooms.nodeSideUpload")}<ExperimentalBadge id="node-side-upload" /></span>
                     {/* 与烧录互斥(弱节点烧不动):开烧录时该说明换成禁用原因,不让用户开了却静默不生效 */}
                     <span className="text-xs text-muted mt-0.5">
                       {(form.burnDanmu || form.burnLivechat) ? t("rooms.nodeSideUploadDisabled") : t("hub.ruleDialog.toggleNodeSideUploadSub")}
@@ -408,11 +409,11 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <label className="block">
-                  <span className="field-label">{t("rooms.uploadMode")}</span>
+                  <span className="field-label inline-flex items-center gap-1.5">{t("rooms.uploadMode")}<ExperimentalBadge id="rolling-upload" /></span>
                   <select className="input" value={form.uploadMode === "rolling" && burning ? "upload" : form.uploadMode} onChange={(e) => set("uploadMode", e.target.value)}>
                     <option value="stage">{t("rooms.uploadStage")}</option>
                     <option value="upload">{t("rooms.uploadUpload")}</option>
-                    <option value="rolling" disabled={burning}>{t("rooms.uploadRolling")}</option>
+                    <option value="rolling" disabled={burning}>{t("rooms.uploadRolling")} · {t("experimental.badge")}</option>
                   </select>
                   {burning && <span className="text-xs text-muted mt-1 block">{t("rooms.rollingNeedsBurn")}</span>}
                 </label>

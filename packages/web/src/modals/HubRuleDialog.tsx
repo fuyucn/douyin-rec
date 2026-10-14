@@ -4,6 +4,7 @@ import { pickPlatform, qualityLabel, scheduleInput } from "../lib/labels";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { Switch } from "../components/Switch";
+import { ExperimentalBadge } from "../components/ExperimentalBadge";
 import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 
@@ -603,6 +604,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
         <div className="sm:col-span-2">
           <h3 className="form-section">{t("hub.ruleDialog.pipelineSection")}</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* 实验功能徽标挂在原控件旁(issue #43):节点侧上传 / 分段(mergeSegments=false)派生分P弹幕 xml */}
             {([
               ["mergeSegments", t("hub.ruleDialog.toggleMergeSegmentsLabel"), t("hub.ruleDialog.toggleMergeSegmentsSub")],
               ["nodeSideUpload", t("hub.ruleDialog.toggleNodeSideUploadLabel"), t("hub.ruleDialog.toggleNodeSideUploadSub")],
@@ -614,7 +616,11 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
             ] as const).map(([key, label, sub]) => (
               <label key={key} className="switch-row">
                 <span className="flex flex-col">
-                  <span className="text-sm font-medium text-ink">{label}</span>
+                  <span className="text-sm font-medium text-ink inline-flex items-center gap-1.5">
+                    {label}
+                    {key === "nodeSideUpload" && <ExperimentalBadge id="node-side-upload" />}
+                    {key === "mergeSegments" && <ExperimentalBadge id="segment-part-xml" />}
+                  </span>
                   <span className="text-xs text-muted mt-0.5">{sub}</span>
                 </span>
                 <Switch checked={form[key]} onCheckedChange={(v) => set(key, v)} name={key} />
@@ -644,7 +650,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           {form.uploadMode !== "stage" && (
             <label className="switch-row mt-3" data-disabled={form.burnDanmu || form.burnLivechat ? "true" : undefined}>
               <span className="flex flex-col">
-                <span className="text-sm font-medium text-ink">{t("rooms.rollingUpload")}</span>
+                <span className="text-sm font-medium text-ink inline-flex items-center gap-1.5">{t("rooms.rollingUpload")}<ExperimentalBadge id="rolling-upload" /></span>
                 {/* 与烧录互斥(issue #48):开着烧录时禁用,并把说明换成禁用原因 */}
                 <span className="text-xs text-muted mt-0.5">
                   {(form.burnDanmu || form.burnLivechat) ? t("rooms.rollingNeedsBurn") : t("rooms.rollingUploadHint")}

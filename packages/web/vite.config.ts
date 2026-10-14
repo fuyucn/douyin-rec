@@ -7,7 +7,13 @@ import tailwindcss from "@tailwindcss/vite";
 // During dev, proxy /api to a locally-running `task serve` (default :7860).
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  resolve: { alias: { "@drec/contracts": fileURLToPath(new URL("../core/src/api-types.ts", import.meta.url)) } },
+  resolve: {
+    alias: {
+      "@drec/contracts": fileURLToPath(new URL("../core/src/api-types.ts", import.meta.url)),
+      // 实验性功能注册表(纯数据,无 import):徽标文案的单一来源(issue #43)
+      "@drec/experimental": fileURLToPath(new URL("../core/src/experimental.ts", import.meta.url)),
+    },
+  },
   build: {
     outDir: "dist",
     emptyOutDir: true,
