@@ -118,6 +118,8 @@ export interface ApiDeps {
   /** 立刻跑一场已有录像的后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
   /** master 资源池快照(CLI 注入,读同一 ResourcePool 实例)。省略/未就绪 → 队列页无排队位次(全 0)。 */
+  /** 边录边传的实时进度(F1;省略 = 不展示)。 */
+  rollingDelivery?: () => import("@drec/core").RollingDeliveryDTO[];
   poolSnapshot?: () => HubPoolSnapshotDTO | undefined;
 }
 

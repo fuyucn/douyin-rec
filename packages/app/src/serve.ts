@@ -186,6 +186,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       recordingWorkers: hubEnabled ? hubStarter?.recordingWorkers : undefined,
       // issue #73:与 `_apply-tasks` 同目录(<数据根>/config/managed),节点列表据快照里的 assigned 标记过滤。
       managedStateDir: join(rootConfigDir(), "managed"),
+      rollingDelivery: hubEnabled ? hubStarter?.rollingDelivery : undefined,
       poolSnapshot: hubEnabled ? hubStarter?.poolSnapshot : undefined,
       requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
       // 与 daemon 同源:规则把源任务交给远端(workers 不含 local)时,本机不实跑。

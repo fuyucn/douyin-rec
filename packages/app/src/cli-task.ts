@@ -262,6 +262,8 @@ export interface HubStarter {
   /** master 控制台读取 hub 源任务的 worker 录制状态快照。 */
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
   /** master 资源池快照(读同一 ResourcePool 实例);队列页显示 CPU/上传占用与排队位次。省略 → 全 0。 */
+  /** 边录边传的实时进度(F1;controller 队列页展示)。 */
+  rollingDelivery?: () => import("@drec/core").RollingDeliveryDTO[];
   poolSnapshot?: () => import("@drec/core").HubPoolSnapshotDTO | undefined;
   /**
    * 立即触发一次 hub 任务同步(规则/worker 变更后由 web API 调用;hub 未就绪时排队,start 后补跑)。

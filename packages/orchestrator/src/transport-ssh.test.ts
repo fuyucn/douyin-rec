@@ -35,6 +35,48 @@ describe("recordingStatusWorkerIds", () => {
 });
 
 describe("SshTransport", () => {
+  describe("recordingStatus(F1:在录房间 + 边录边传进度)", () => {
+    const sess = { platform: "douyin", roomSlug: "123", sessionBase: "A_1", bv: "BV1X", confirmed: 2, total: 3, ambiguous: 0, recording: true };
+    const mkT = (run: (argv: string[]) => Promise<string>) =>
+      new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+
+    it("新 bundle:一次命令同时拿到 rooms 与 rolling", async () => {
+      const calls: string[] = [];
+      const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ rooms: [{ platform: "douyin", roomSlug: "123" }], rolling: [sess] }); });
+      await expect(t.recordingStatus()).resolves.toEqual({ rooms: [{ platform: "douyin", roomSlug: "123" }], rolling: [sess] });
+      expect(calls).toHaveLength(1);
+    });
+
+    it("旧 bundle(只有 rooms)→ rolling=[],不报错", async () => {
+      const t = mkT(async () => JSON.stringify({ rooms: [{ platform: "douyin", roomSlug: "123" }] }));
+      await expect(t.recordingStatus()).resolves.toEqual({ rooms: [{ platform: "douyin", roomSlug: "123" }], rolling: [] });
+    });
+
+    it("rolling 里形状不合法的条目被丢弃(不让脏数据进 UI)", async () => {
+      const noCounts = { platform: "douyin", roomSlug: "1", sessionBase: "s" };           // 缺 confirmed / total
+      const noBase = { platform: "douyin", roomSlug: "1", confirmed: 1, total: 2 };       // 缺 sessionBase
+      const t = mkT(async () => JSON.stringify({ rooms: [], rolling: [sess, { platform: "douyin" }, noCounts, noBase, null, "x"] }));
+      expect((await t.recordingStatus()).rolling).toEqual([sess]);
+    });
+
+    it("网络类错误照常抛(不被当成「不支持」吞掉)", async () => {
+      let n = 0;
+      const t = mkT(async () => { n++; throw new Error("ssh 超时 8000ms 被杀"); });
+      await expect(t.recordingStatus()).rejects.toThrow(/超时/);
+      expect(n).toBe(1); // 不得再走降级回退路径(否则一次抖动会多打一轮 ssh,且可能掩盖原错误)
+    });
+
+    it("命令不存在 → 降级到 activeRecordingRooms 回退路径,rolling=[]", async () => {
+      const t = mkT(async (argv) => {
+        const cmd = argv.join(" ");
+        if (cmd.includes("_recording-status")) throw new Error("error: unknown command '_recording-status'");
+        if (cmd.includes("_tasks")) return JSON.stringify({ tasks: [] });
+        return "true";
+      });
+      await expect(t.recordingStatus()).resolves.toEqual({ rooms: [], rolling: [] });
+    });
+  });
+
   describe("activeRecordingRooms", () => {
     const okOut = JSON.stringify({ rooms: [{ platform: "douyin", roomSlug: "123" }] });
 
