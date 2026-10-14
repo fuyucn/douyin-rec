@@ -47,10 +47,11 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 
 - **编排 = 主会话**；**实现 / 返工 sub = `claude/claude-sonnet-5-5`**；**审查 sub = `claude/claude-opus-5-5`**。
   所有 sub 都以 `fork_context: false` 派出（不继承主会话上下文，评审尤其要独立）。
-- **派子会话前先清理已完成的子会话**（归档/关闭），避免撞线程上限。
-- **版本号预留**：认领时在评论里声明预留版本 = `max(base 当前版本, 所有 open PR 已预留版本) + 1`。
-  后合并的 PR 因版本号冲突，机械 rebase 并顺延 patch，`dist/douyin-rec.mjs` 重新 `pnpm bundle`；
-  这类顺延**不算返工轮次**。
+- **线程清理**：实现、review 两个心跳都在**每轮开头先清理已完成/空闲的子会话**（归档/关闭），再派新会话；
+  清理后线程仍满，本轮只做免派生工作。
+- **版本号撞号（现行做法）**：并行 PR 各自 bump 版本撞号时，后合并的一方机械 rebase 到最新 base 并顺延 patch，
+  `dist/douyin-rec.mjs` 重新 `pnpm bundle`（dist 不手工合并）；这类顺延**不计返工轮次**。
+  （提案，心跳暂未执行：认领时在评论里预留版本号，以免撞号。）
 
 ## 流转
 
@@ -60,7 +61,7 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 3. **自动 Triage 打标签**（无需人工介入）：`accept` / `decline` / `needs-decision`，判定规则见上。
    `accept` 后在 `TODO.md` 加 `T-N`，链到 issue；`needs-decision` 才需要人回一句结论。
 4. **自动实现认领**：实现 heartbeat 扫到 `accept` 且无 `in-progress` 的票即认领（并行 ≤2、范围不重叠），
-   打 `in-progress` 并留言「哪个 agent、何时开始、范围、模型、预留版本」。**人不需要点名派活**；
+   打 `in-progress` 并留言「哪个 agent、何时开始、范围、模型」。**人不需要点名派活**；
    只在想指定别的会话做时手动接管。
 5. **实现会话只做这一条**，开分支和 PR，PR 正文写 `Fixes #N`。不合并 PR（合并归 review 会话）、
    不部署、不顺手做无关改动。
@@ -82,6 +83,7 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 自 2026-10-12 起，`accept` → `in-progress` 这一步由实现 heartbeat 自动完成，不再等人指定；
 `in-progress` → **合并 → `待验证`** 由 review heartbeat 自动完成，`待验证` → **close** 由实现 heartbeat
 在部署实跑后收口，人只在危险类拍板与部署时出场。
+**文档/测试类票**（无需部署实跑）合并后，由实现心跳当轮按「四不 close」收口，无需等部署。
 
 ## 自强化闭环总览
 
@@ -187,7 +189,7 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
 - `accept`：可以做。
 - `decline`：不做。评论里写原因。
 - `in-progress`：已认领，正在做。实现会话认领时打，PR 打开后保留到合并（合并时换成 `待验证`）。
-- `待验证`：PR 已合并，等部署后线上实跑；**不占并行位**。实跑通过并满足「四不 close」后由实现心跳 close。
+- `待验证`：PR 已合并，等部署后线上实跑；**不占并行位**。实跑通过并满足「四不 close」后由实现心跳 close（文档/测试类票合并后当轮收口，无需等部署）。
 - `needs-decision`：危险类，或证据不够。见下方「决定三行」。
 
 ## 决定三行（`needs-decision` 必填）
