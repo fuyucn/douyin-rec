@@ -56,11 +56,14 @@ export function StatusBadge({
   status,
   enabled = true,
   recording,
+  stopping,
   recordingWorkers,
 }: {
   running: boolean;
   status: string;
   enabled?: boolean;
+  /** true=正在硬停收尾(rolling 末段上传中)；优先于其他状态显示。 */
+  stopping?: boolean;
   /** true=真正在录视频；running 但未录(等开播/重连) → 显示「等待开播中」。 */
   recording?: boolean;
   recordingWorkers?: Task["recordingWorkers"];
@@ -75,6 +78,15 @@ export function StatusBadge({
       <Badge tone="badge-neutral">
         <Dot color="var(--muted-soft)" />
         {t("badge.disabled")}
+      </Badge>
+    );
+  }
+  // 硬停收尾中（rolling 任务末段上传）优先：进程还在，但用户已经点了停止，不该显示「录制中」。
+  if (stopping) {
+    return (
+      <Badge tone="badge-orange">
+        <Dot color="var(--warning)" pulse />
+        {t("badge.stopping")}
       </Badge>
     );
   }

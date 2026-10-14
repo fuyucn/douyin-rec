@@ -26,6 +26,8 @@ export interface ManagerLike {
   stop(id: number): Promise<void>;
   /** 硬停并最多等 ms:true = 已退出,false = 超时仍在收尾(停止进行中)。 */
   stopWithin(id: number, ms: number): Promise<boolean>;
+  /** 该任务是否正在硬停收尾(rolling 任务末段上传中)。 */
+  isStopping(id: number): boolean;
   /** Window-end / disable drain: stop looking for new streams, let current finish. */
   stopGraceful(id: number): Promise<void>;
   /** Live runtime (running + startedAt + elapsedMs) for the 详情 page. */
@@ -132,6 +134,8 @@ export interface TaskView extends Task {
   anchorName: string | null;
   /** true=真正在录视频；false 且 running=true → 进程在跑但「等待开播中」。 */
   recording: boolean;
+  /** 硬停收尾中(rolling 任务在传末段,最长约 10 分钟)。UI 用它显示「停止中」并禁用按钮。 */
+  stopping?: boolean;
   recordingWorkers?: RecordingWorkerStatusDTO[];
   /**
    * issue #73:master 判定「本节点是否被派发这个受管任务」。false=停用保留的未分配残留。

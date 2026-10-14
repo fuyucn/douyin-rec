@@ -245,6 +245,11 @@ export class TaskManager {
     });
   }
 
+  /** 该任务是否正在硬停收尾(已发停止信号、进程尚未退出)。 */
+  isStopping(taskId: number): boolean {
+    return this.stopping.has(taskId);
+  }
+
   /**
    * 硬停并最多等 `ms`:返回 true = 已退出,false = 超时仍在收尾(进程仍在停止中,不再回滚)。
    * 供同步 API(Web 停止 / 远端 `_apply-tasks` 硬停通道)用:普通任务几秒内退出,行为与之前一致;
