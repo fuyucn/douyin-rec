@@ -1,8 +1,25 @@
 # 包拆分与架构整理设计
 
+> **部分内容已过期**：执行计划以总票 #49（含评论修订）为准，边传韧性以 #57 为准。本文保留为设计参考。
+> S1、S3、S4 已由 #40/#42/#50/#54 完成；其余步骤状态见下方「步骤状态映射」。
 > 状态：设计稿（仅文档，不改代码）。对应计划 [plans/032_package-split.md](../plans/032_package-split.md)。
-> 基线：`feat/hub-optimization` 本地引用 `633edbe`（拉取远端失败，未能确认与远端最新一致）。`main` 为稳定版，本文所有改动只以开发分支为 base。
-> 引用约定：`路径:行号` 省略 `.ts` 后缀（隐私闸门会把源码文件名当作文件名命中）。行号取自上述基线。
+> 基线：本文撰写于 `feat/hub-optimization` 的 `633edbe`。`main` 为稳定版，本文所有改动只以开发分支为 base。
+> 引用约定：`路径:行号` 省略 `.ts` 后缀（隐私闸门会把源码文件名当作文件名命中）。**行号属 `633edbe` 基线，仅作历史证据，不代表当前代码位置。**
+
+## 步骤状态映射
+
+| 步骤 | 状态 | 对应总票 #49 的 U 编号 | #57 的 R 编号 / 备注 |
+| --- | --- | --- | --- |
+| S1 会话命名收口 | 已完成（#50 / #54） | U1 | — |
+| S2 manager 通用化为 `SegmentSink` | 仍有效，待 #57 R2–R5 落地后再做 | — | R2–R5 |
+| S3 `resolveRollingPolicy` 唯一判定 | 已完成（#40 / #42） | — | — |
+| S4 规则 `mode="rolling"` | 已完成（#40 / #42） | — | — |
+| S5 抽出 `@drec/uploader` | 仍有效 | U4 | — |
+| S6 执行体搬入 orchestrator | 仍有效，待 #57 R2–R5 落地后再做 | U9 | R2–R5 |
+| S7 拆分 cli 的 hub 装配 | 仍有效 | — | — |
+| S8 hub 状态存储搬入 orchestrator | 仍有效 | — | — |
+| S9 master 下发 `rollingUploadMeta` | 仍有效 | U8 | — |
+| S10 孤儿清理搬迁 / 分段事件化 | 部分被取代：与 U2、U12 重叠，以 #49 为准 | U2 / U12 | — |
 
 ## 0. 结论先行：为什么 rolling upload 开关挂在 task 内是错位的
 
@@ -34,7 +51,7 @@
 
 ### 1.2 串层之处（含证据）
 
-1. **rolling 开关挂 task，且在三处判定**
+1. **【历史（已修复，#42）】rolling 开关挂 task，且在三处判定**
    - 存储：`packages/app/src/store:70`（Task 字段）、`packages/app/src/db:59,114`（DB 列）、`packages/core/src/api-types:131,493,515,692,789`（DTO）、`packages/web/src/modals/CreateEditTaskDialog:287`（UI 在任务弹窗）。
    - 判定 A（master 下发）：`packages/cli/src/cli:1069-1071`。远端节点按 `rollingUploadSingleNode` 收窄，**本机 local 原样透传** `src.rollingUpload`。
    - 判定 B（录制子进程）：`packages/app/src/rolling-upload:609-620` 工厂内再次读 hub 规则并调用同一函数。同文件注释 `:586-590` 却写「本工厂只信 `o.enabled`，不在此重复判定」——注释与实现矛盾。
@@ -47,7 +64,7 @@
    - 同一功能「节点侧上传」有两半：orchestrator 的派发（`packages/orchestrator/src/node-side-upload`、`pipeline:630-645`）与 app 的执行体（`node-pipeline`），也靠 cli 的隐藏子命令连接。
    - 后果：orchestrator 只依赖 core 与 post-process（包清单 实测），却被定在 rank 4.5，只因为「看起来在 app 之上」；实际耦合都在 cli。
 4. **cli 入口 共 1712 行，其中 hub 装配占约 760 行**：`hubStarter` 从 `packages/cli/src/cli:627` 开始，到 `serve` 命令 `:1393` 之前才结束；内含传输层构造（`:1314-1358`）、资源池、对账器（`:979`）、上传接缝、任务同步 desired 计算（`:1030-1085`）。commander 入口与业务装配混在同一文件。
-5. **会话基名/分段后缀规则重复 7 份（6 个文件）**
+5. **【历史（已修复，#54）】会话基名/分段后缀规则重复 7 份（6 个文件）**
    - `packages/manager/src/index:596`
    - `packages/post-process/src/concat:19`、`:29`、`:35`、`:43`（含 `sessionBase`、`xmlSessionBase`、分段序号）
    - `packages/core/src/rolling:205`
@@ -55,7 +72,7 @@
    - `packages/app/src/orphan-cleanup:110`
    - `packages/orchestrator/src/session-plan:38`
    - `core/rolling` 的注释（`:201-203`）明确要求「避免在 app 侧再抄一份」，而 `node-pipeline:28` 恰恰抄了。
-6. **manager 与 post-process 基名规则不一致**：manager 只剥 `-PART<n>` 与 `_<3+位>`（`manager/src/index:596`），其余五处还剥 `_PART<n>`。当前 ffmpeg 引擎不产生 `_PART` 命名，属**潜伏不一致**而非线上 bug；一旦引入该命名，弹幕 sidecar 路径会与合并侧推出的基名不同。
+6. **【历史（已修复，#54）】manager 与 post-process 基名规则不一致**：manager 只剥 `-PART<n>` 与 `_<3+位>`（`manager/src/index:596`），其余五处还剥 `_PART<n>`。当前 ffmpeg 引擎不产生 `_PART` 命名，属**潜伏不一致**而非线上 bug；一旦引入该命名，弹幕 sidecar 路径会与合并侧推出的基名不同。
 7. **hub-store 反向依赖 app 内部**：`packages/app/src/hub-store:3` 引入任务存储的 `normalizeRoom`，使 hub 规则存储无法独立搬出 app。
 
 ## 2. 目标架构
@@ -76,7 +93,7 @@ rolling 的位置：hub 规则 `pipeline.upload.mode = "rolling"`。master 用�
 | 包 | 职责 | 目标 rank | 依赖 |
 | --- | --- | --- | --- |
 | core | 契约、纯判定、会话命名、sidecar 类型、规则类型 | 0 | — |
-| post-process | 纯后处理 | 0 → **0.2** | core（用会话命名，需新增依赖） |
+| post-process | 纯后处理 | 0 → **0.2**（历史，已完成，#54） | core（用会话命名，需新增依赖） |
 | observability | 日志/通知实现 | 0.5 | core |
 | **uploader（新）** | biliup 封装与上传限流接缝；去掉对 app 路径模块的依赖（路径由调用方传入） | **0.8** | core |
 | record-engine / 各平台 live | 录制引擎与平台 | 1 / 1.5 | core |
@@ -85,7 +102,7 @@ rolling 的位置：hub 规则 `pipeline.upload.mode = "rolling"`。master 用�
 | app | 节点应用壳 + 任务同步粘合 | 4 | 以上各包 |
 | cli | 组合根 | 5 | 全部 |
 
-说明：rank 只约束方向。orchestrator 降到 2.5 后仍低于 manager(3)，二者**互不依赖**，由新增的「侧向隔离」测试守护：录制侧（record-engine、各平台、manager）不得依赖 hub 侧（uploader、orchestrator），反之亦然。post-process 与 core 现在同为 rank 0，同层不能互相依赖，故 post-process 必须上调。需改 分层守护测试 的 `RANKS`，并重跑 `pnpm arch:gen` 更新生成物。
+说明：rank 只约束方向。orchestrator 降到 2.5 后仍低于 manager(3)，二者**互不依赖**，由新增的「侧向隔离」测试守护：录制侧（record-engine、各平台、manager）不得依赖 hub 侧（uploader、orchestrator），反之亦然。post-process 与 core 曾同为 rank 0（历史：#54 已将 post-process 上调至 0.2），同层不能互相依赖。需改 分层守护测试 的 `RANKS`，并重跑 `pnpm arch:gen` 更新生成物。
 
 ### 2.3 公共契约（放 core）
 
@@ -126,7 +143,7 @@ rolling 的位置：hub 规则 `pipeline.upload.mode = "rolling"`。master 用�
 | S9 | 元数据由 master 下发（`rollingUploadMeta`），录制端不再读规则文件 | 中；涉及新旧节点包版本偏移，需能力门控 |
 | S10（可选） | 孤儿清理搬迁；录制端改为输出分段事件而非进程内钩子 | **危险类（删源）；建议单独评估** |
 
-依赖顺序：S1、S2、S5、S7 互相独立可先行；S3 → S4 → S9；S6 依赖 S3、S5。
+依赖顺序（**以 #49 修订为准**）：S1、S2、S5、S7 互相独立可先行；S3 → S4 → S9；S6 依赖 S3、S5。S2、S6 待 #57 的 R2–R5 落地后再做。S1、S3、S4 已完成。
 
 ### 风险
 
