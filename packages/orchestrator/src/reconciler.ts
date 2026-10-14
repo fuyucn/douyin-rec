@@ -25,6 +25,8 @@ export interface ReconcilerDeps {
   sleep?: (ms: number) => Promise<void>;
   /** 单个租户 listInventory 的超时(ms);挂起即降级为空,防一个 hung 节点锁死整轮对账。默认 60s。 */
   inventoryTimeoutMs?: number;
+  /** 节点连续多少轮清单失联(超时/报错)后发一次「节点失联」通知。默认 6;<=0 关闭。 */
+  unreachableAlertRounds?: number;
   /**
    * 按平台 + 房间解析该场的 pipeline 配置(来自 hub 任务文件 config/hub/{platform}.{roomSlug}.json)。
    * 返回 null → 该房间没开 hub(无配置文件 / 已禁用)→ **跳过不处理**。
@@ -78,6 +80,15 @@ export interface ReconcilerDeps {
 
 const DEFAULT_SETTLE: SettleConfig = { maxWaitMs: 600_000, pollMs: 15_000 };
 const DEFAULT_INVENTORY_TIMEOUT_MS = 60_000;
+const DEFAULT_UNREACHABLE_ALERT_ROUNDS = 6;
+
+/**
+ * 单节点清单结果三态:ok=有录像;empty=可达但确实没录像;unreachable=超时/报错(**不知道**有没有)。
+ * unreachable 绝不能当 empty —— 否则会拿剩余节点错误选优、推进、删源。
+ */
+export type InventoryResult =
+  | { status: "ok" | "empty"; workerId: string; recordings: NodeInventory["recordings"] }
+  | { status: "unreachable"; workerId: string; recordings: []; reason: string };
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_STALE_MS = 600_000;
 const DEFAULT_RECONNECT_WINDOW_MS = 10 * 60_000;
@@ -103,6 +114,11 @@ export class Reconciler {
   private settle: SettleConfig;
   private sleep: (ms: number) => Promise<void>;
   private inventoryTimeoutMs: number;
+  private unreachableAlertRounds: number;
+  /** 节点 → 连续失联轮数(仅 reconcileAll 每轮更新一次;恢复即清零)。 */
+  private readonly unreachableStreak = new Map<string, number>();
+  /** 已发过「失联」通知的节点(恢复后复位 → 再次失联可再报),保证一次失联期只发一条。 */
+  private readonly unreachableAlerted = new Set<string>();
   private maxRetries: number;
   private staleMs: number;
   private reconnectWindowMs: number;
@@ -136,6 +152,7 @@ export class Reconciler {
     this.settle = deps.settle ?? DEFAULT_SETTLE;
     this.sleep = deps.sleep ?? DEFAULT_SLEEP;
     this.inventoryTimeoutMs = deps.inventoryTimeoutMs ?? DEFAULT_INVENTORY_TIMEOUT_MS;
+    this.unreachableAlertRounds = deps.unreachableAlertRounds ?? DEFAULT_UNREACHABLE_ALERT_ROUNDS;
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.staleMs = deps.staleMs ?? DEFAULT_STALE_MS;
     this.reconnectWindowMs = deps.reconnectWindowMs ?? DEFAULT_RECONNECT_WINDOW_MS;
@@ -192,22 +209,71 @@ export class Reconciler {
     }));
   }
 
-  /** listInventory 包超时:挂起超过 inventoryTimeoutMs 即降级为空(该 worker 本轮缺席),不锁死整轮。 */
-  private async inventoryWithTimeout(t: Transport): Promise<NodeInventory> {
+  /**
+   * listInventory 包超时,返回三态:挂起超过 inventoryTimeoutMs 或 reject → unreachable
+   * (该节点本轮「不知道有没有录像」,不是「没录像」);正常返回按有无录像分 ok / empty。
+   */
+  private async inventoryWithTimeout(t: Transport): Promise<InventoryResult> {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<NodeInventory>((resolve) => {
+    const timeout = new Promise<InventoryResult>((resolve) => {
       timer = setTimeout(() => {
-        console.warn(`[reconciler] worker ${t.id} listInventory 超时 ${this.inventoryTimeoutMs}ms,本轮按空处理`);
-        resolve({ workerId: t.id, recordings: [] });
+        resolve({ status: "unreachable", workerId: t.id, recordings: [], reason: `listInventory 超时 ${this.inventoryTimeoutMs}ms` });
       }, this.inventoryTimeoutMs);
     });
     try {
       return await Promise.race([
-        t.listInventory().catch(() => ({ workerId: t.id, recordings: [] })),
+        (async (): Promise<InventoryResult> => {
+          try {
+            const inv = await t.listInventory();
+            return { status: inv.recordings.length > 0 ? "ok" : "empty", workerId: t.id, recordings: inv.recordings };
+          } catch (err) {
+            return { status: "unreachable", workerId: t.id, recordings: [], reason: String((err as Error)?.message ?? err).slice(0, 200) };
+          }
+        })(),
         timeout,
       ]);
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 本场「规则选中」的节点里当前失联的那些(未被规则选中的节点失联不影响本场)。
+   * 选中集 = cfg.workers(显式非空)或全部 transport,再按 requires 能力门控过滤 —— 与成员过滤同口径。
+   */
+  private blockingUnreachable(
+    cfg: PipelineCfg,
+    transports: Map<string, Transport>,
+    unreachable: Map<string, string>,
+  ): string[] {
+    if (unreachable.size === 0) return [];
+    let ids = cfg.workers?.length ? cfg.workers : [...transports.keys()];
+    ids = ids.filter((id) => unreachable.has(id));
+    if (ids.length > 0 && cfg.requires?.length) {
+      ids = gateWorkers(ids, (id) => this.workerCapabilities?.(id), cfg.requires).eligible;
+    }
+    return ids;
+  }
+
+  /** 每轮对账更新一次失联轮数;连续达阈值发一条通知(只通知,不转人工、不删任何东西)。 */
+  private trackUnreachable(transports: Map<string, Transport>, unreachable: Map<string, string>): void {
+    for (const id of [...this.unreachableStreak.keys()]) {
+      if (!transports.has(id) || !unreachable.has(id)) {
+        this.unreachableStreak.delete(id);
+        this.unreachableAlerted.delete(id);
+      }
+    }
+    for (const [id, reason] of unreachable) {
+      const n = (this.unreachableStreak.get(id) ?? 0) + 1;
+      this.unreachableStreak.set(id, n);
+      if (this.unreachableAlertRounds > 0 && n >= this.unreachableAlertRounds && !this.unreachableAlerted.has(id)) {
+        this.unreachableAlerted.add(id);
+        this.notify?.({
+          kind: "error",
+          stage: "同步",
+          message: `节点 ${id} 清单已连续 ${n} 轮失联(${reason}),涉及该节点的场暂停选优/收口,恢复后自动继续`,
+        });
+      }
     }
   }
 
@@ -306,8 +372,8 @@ export class Reconciler {
 
   /**
    * 收一份权威清单并聚类:
-   * 1. Concurrently fetch all inventories; 挂起的租户经 inventoryWithTimeout 降级为空(不锁死整轮),
-   *    出错的租户也降级为空,均不中止其余节点。
+   * 1. Concurrently fetch all inventories; 超时/报错的节点标 unreachable(不当空清单,
+   *    不锁死整轮、不中止其余节点),由调用方决定涉及它的场如何处理。
    * 2. Cluster recordings across nodes into broadcasts —— 按每条录像的 platform 聚类(多平台)。
    *    this.platform 仅作旧录像(meta 无 platform)的兜底默认。
    * 2.5 按每场规则解析 cfg + **worker 硬过滤**(单一插入点:聚类后、settle 前)。
@@ -320,10 +386,18 @@ export class Reconciler {
   ): Promise<{
     broadcasts: ReturnType<typeof clusterBroadcasts>;
     cfgByKey: Map<string, PipelineCfg>;
+    /** 本轮清单失联的节点 id → 原因(超时/报错)。 */
+    unreachable: Map<string, string>;
   }> {
     const invs = await Promise.all(
       [...transports.values()].map((t) => this.inventoryWithTimeout(t)),
     );
+    const unreachable = new Map<string, string>();
+    for (const i of invs) {
+      if (i.status !== "unreachable") continue;
+      unreachable.set(i.workerId, i.reason);
+      console.warn(`[reconciler] worker ${i.workerId} 清单失联(${i.reason}),不当作「无录像」;涉及它的场本轮不选优`);
+    }
 
     const broadcasts = clusterBroadcasts(
       invs.map((i) => ({ workerId: i.workerId, recordings: i.recordings })),
@@ -375,7 +449,7 @@ export class Reconciler {
       }
       cfgByKey.set(b.streamKey, cfg);   // 过滤后仍有/无成员都缓存;空成员在循环里跳过
     }
-    return { broadcasts, cfgByKey };
+    return { broadcasts, cfgByKey, unreachable };
   }
 
 
@@ -439,7 +513,8 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
 
     // 已知 job key 传给聚类:同一天已有 base key 的 job(哪怕已 done)→ 本簇强制 _HHMM,
     // 否则第二场直播会复用 base key 被幂等跳过。
-    const { broadcasts, cfgByKey } = await this.collect(transports, this.ledger.listKeys());
+    const { broadcasts, cfgByKey, unreachable } = await this.collect(transports, this.ledger.listKeys());
+    this.trackUnreachable(transports, unreachable);
 
     // 3.5 第一份快照之后才出现的成员没经过 settle 等待(典型:首快照为空 → settle 秒回 →
     // 第二份快照才发现刚开播的分段)。现查 isDone,未收播则本轮跳过,防边录边合并残片。
@@ -525,6 +600,17 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
             stage: "同步",
             message: `${b.streamKey} 上传重试 ${job.fails} 次仍失败,已转人工(needs_manual)。最后错误:${(job.error ?? "").slice(0, 200)}`,
           });
+          continue;
+        }
+
+        // 三态:规则选中的节点里有失联的 → 本场不知道缺了谁的录像,选优可能选错 → 本轮跳过选优与收口,
+        // 下一轮重试。放在 done/needs_manual 短路之后(已收口的场不受影响)、建 job 之前(不留半截状态)。
+        const lost = this.blockingUnreachable(cfg, transports, unreachable);
+        if (lost.length > 0) {
+          console.warn(
+            `[reconciler] ${b.streamKey} 参与节点 ${lost.map((id) => `${id}(${unreachable.get(id)})`).join(", ")} 清单失联,` +
+              `本轮跳过选优与收口,下轮重试`,
+          );
           continue;
         }
 
