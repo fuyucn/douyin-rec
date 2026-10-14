@@ -15,6 +15,14 @@
 
 ## 进行中
 
+- [~] **T-43 边录边传 R2：清单 v3 + 启动接管（issue [#57](https://github.com/fuyucn/douyin-rec/issues/57) 第二步，解决 [#46](https://github.com/fuyucn/douyin-rec/issues/46)）**
+  — 2026-10-14 认领，分支 `codex/issue-57-r2-takeover`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**；T 号若与并行 PR 冲突，合并前顺延）。
+  **做什么**：清单 schemaVersion 3（segs 状态机 / intent / lease / policy，旧字段镜像）；读取区分不存在与损坏；
+  启动 + 新会话首段接管遗留会话（租约过期或 pid 不存在才接管，回读两次稳定后只续传到已有稿件号，其余转人工，绝不建稿）；
+  断流重连不再等上传。设计见 `docs/rolling-manifest.md`。
+  **验收**：#46 的 it.fails 转真实通过；e2e 覆盖被杀后重启接管 / 两次稳定回读 / 清单损坏 / 租约有效不接管；变异自验见 PR。
+  **部署顺序**：先主控后节点。
+
 - [~] **T-42 节点清单三态：失联/超时不再当「无录像」（issue [#27](https://github.com/fuyucn/douyin-rec/issues/27)）**
   — 2026-10-14 认领，分支 `codex/issue-27-inventory-tristate`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：reconciler 清单结果分 ok / empty / unreachable，超时与 reject 都算 unreachable；规则选中的节点里有
