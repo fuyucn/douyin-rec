@@ -15,6 +15,13 @@
 
 ## 进行中
 
+- [~] **T-46 dev 多节点 e2e 环境（issue [#82](https://github.com/fuyucn/douyin-rec/issues/82)，P0+P1+P4）**
+  — 2026-10-14 认领，分支 `codex/issue-82-dev-multinode`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：容器内 sshd 的 dev worker 镜像层 + compose 覆盖（`drec-devnet` internal）+ `scripts/e2e-verify.sh`
+  （up/down/keep/doctor/smoke，内置隔离断言）+ `docs/dev-multi-node.md` 设计稿与场景手册骨架。
+  **验收**：`doctor` 正反例通过；`up` 后 controller 内 ssh 到 worker 只读命令通；外网不可达；全量 vitest + typecheck 通过。
+  P2（S1 归属隐藏 / S2 失联三态 / S3 收口清理自动化）随后单独 PR；S4 重启接管挂 #72 / #57。
+
 - [~] **T-45 节点只显示归属自己的任务（issue [#73](https://github.com/fuyucn/douyin-rec/issues/73)，低风险部分）**
   — 2026-10-14 认领，分支 `codex/issue-73-assigned-filter`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：归属判定收口 core `isWorkerAssigned`；`RemoteTaskSpec.assigned` 下发并存入节点快照；节点 `/api/tasks` 带 assigned，
