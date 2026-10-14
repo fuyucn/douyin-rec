@@ -8,7 +8,7 @@
  * 与 master 常规路径的稿件标题产生漂移。故这里把三个渲染字段钉死。
  */
 import { describe, it, expect, vi } from "vitest";
-import { tryNodeSideUpload, estimateNodeUploadTimeoutMs, NODE_UPLOAD_MIN_TIMEOUT_MS, NODE_UPLOAD_MAX_TIMEOUT_MS } from "../../packages/orchestrator/src/node-side-upload.js";
+import { tryNodeSideUpload, errBrief, estimateNodeUploadTimeoutMs, NODE_UPLOAD_MIN_TIMEOUT_MS, NODE_UPLOAD_MAX_TIMEOUT_MS } from "../../packages/orchestrator/src/node-side-upload.js";
 import type { PipelineCfg } from "../../packages/orchestrator/src/pipeline.js";
 
 const cfg = {
@@ -684,5 +684,43 @@ describe("tryNodeSideUpload 按字节估算的超时下发给 transport", () => 
     expect(big).toHaveBeenCalledWith(expect.anything(), { timeoutMs: estimateNodeUploadTimeoutMs(2.4e9) });
     const unknown = await run(undefined);
     expect(unknown).toHaveBeenCalledWith(expect.anything(), { timeoutMs: 30 * 60_000 });
+  });
+});
+
+describe("errBrief:失败原因保留末尾、去掉 known_hosts 噪声", () => {
+  const warn = "Warning: Permanently added '10.0.0.1' (ED25519) to the list of known hosts.\r\n";
+  it("去掉 known_hosts 提示与 \\r,换行合并", () => {
+    expect(errBrief(`ssh rc=1: ${warn}[node-pipeline] a\n[node-pipeline] b`)).toBe("ssh rc=1: [node-pipeline] a | [node-pipeline] b");
+  });
+  it("过长保留**末尾**(真正的报错在末尾),并以省略号标记", () => {
+    const long = `${warn}${"开头噪声 ".repeat(100)}\nffmpeg 失败: 真正的原因`;
+    const r = errBrief(long, 60);
+    expect(r.startsWith("…")).toBe(true);
+    expect(r.endsWith("ffmpeg 失败: 真正的原因")).toBe(true);
+    expect(r.length).toBeLessThanOrEqual(61);
+  });
+  it("短文本原样返回", () => {
+    expect(errBrief("rc=255")).toBe("rc=255");
+  });
+});
+
+describe("节点侧失败原因写进台账时保留末尾", () => {
+  it("ssh 报错很长:markFailed 收到的是带真正原因的末尾,而不是开头噪声", async () => {
+    const long = "ssh rc=1: Warning: Permanently added 'h' (ED25519) to the list of known hosts.\r\n" + "[node-pipeline] 起手日志 ".repeat(40) + "\nffmpeg 失败: Invalid data found";
+    const t = {
+      nodeCapabilities: async () => ({ biliup: "/b", cookies: true, diskFreeGB: 100 }),
+      nodePipeline: vi.fn(async () => { throw new Error(long); }),
+      readNodeResult: vi.fn(async () => null),
+      cleanup: vi.fn(async () => {}),
+    };
+    const ledger = { get: () => ({ bv: "" }), logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), setBv: vi.fn() };
+    const rec = { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" };
+    await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12", cfg, winner: { workerId: "w1", rec }, winnerMembers: [{ workerId: "w1", rec }],
+      transport: t as never, ledger: ledger as never, jlog: () => {}, notify: () => {}, deps: fakeDeps(t),
+    });
+    const msg = String(ledger.markFailed.mock.calls[0]?.[1] ?? "");
+    expect(msg).toContain("ffmpeg 失败: Invalid data found");
+    expect(msg).not.toContain("Permanently added");
   });
 });
