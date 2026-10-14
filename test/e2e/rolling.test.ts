@@ -170,4 +170,42 @@ describe("e2e: rolling(边录边传)", () => {
       for (const i of [0, 1, 2]) expect(settled.has(i), `旧会话段 ${i} 既未确认也未转人工(被孤立)`).toBe(true);
     });
   });
+
+  // ── #57 R1 主控止血:建稿中被杀、无稿件号 → 主控绝不走常规整场管线(否则重复建稿),转人工 ──────
+  // 注:这是「主控判定」收紧;录制端重启后接管孤立分段(#46)属 R2,上面的 it.fails 仍保持预期失败。
+  describe("建稿中被杀(#57 R1)", () => {
+    async function crashMidCreate(): Promise<{ base: string; files: string[] }> {
+      const start = pastStartMs(0, 10, 0);
+      writeSidecars(start);
+      // 建稿(create)永不返回 = 进程在「建稿中」被杀:意图标记已落盘,稿件号没有。
+      const u = uploader([], { uploadPlainRaw: () => new Promise(() => {}) });
+      const files: string[] = [];
+      for (let i = 0; i < 2; i++) { const p = writeSegment(start, i); files.push(p); u.noteSegment(p); }
+      void u.flush({ recordingActive: false });
+      await new Promise((r) => setTimeout(r, 50));
+      return { base: sessionBaseOf(ANCHOR, start), files };
+    }
+
+    it("无稿件号 + uploading=create → 主控转人工,不建稿、不 pull、不删源、通知", async () => {
+      s = await Scenario.create();
+      const { base, files } = await crashMidCreate();
+      const st = readRolling(base);
+      expect(st.bv).toBeUndefined();
+      expect(st.uploading).toMatchObject({ kind: "create" });
+      await s.restart();
+
+      await s.reconcile();
+      const key = s.onlyKey();
+      expect(s.jobState(key)).toBe("needs_manual");
+      expect(s.ledger.get(key)?.error).toContain("无稿件号");
+      expect(s.fake.draftCount, "主控不得走常规管线建稿").toBe(0);
+      expect(s.fake.calls.filter((c) => c.op === "upload")).toHaveLength(0);
+      for (const f of files) expect(existsSync(f), `源必须保留 ${f}`).toBe(true);
+      expect(s.notifications.some((n) => n.kind === "error" && String((n as { message?: string }).message).includes("无稿件号"))).toBe(true);
+      expect(s.ledgerRejections()).toEqual([]);
+      // 再对账:needs_manual 不被自动推进。
+      await s.reconcile();
+      expect(s.fake.draftCount).toBe(0);
+    });
+  });
 });

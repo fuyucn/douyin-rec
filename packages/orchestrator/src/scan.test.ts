@@ -149,4 +149,34 @@ describe("scanRecordings", () => {
     const recordings = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
     expect(recordings).toHaveLength(0);
   });
+
+  it("#57 R1:完整透传边传进度(含 uploading 意图);非法形状/旧文件缺字段按缺省", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    const put = (base: string, rolling: unknown): void => {
+      writeFileSync(join(dir, `${base}.ts`), "x");
+      writeFileSync(join(dir, `${base}.rolling.json`), JSON.stringify(rolling));
+    };
+    put("主播A_2026-06-27_08-00-00", { confirmed: [], uploading: { index: 0, kind: "create" } });
+    put("主播A_2026-06-27_09-00-00", { bv: "BV1x", confirmed: [0], uploading: { index: 1, kind: "append" } });
+    put("主播A_2026-06-27_10-00-00", { bv: "BV1y", confirmed: [0] }); // 旧节点:无 uploading
+    put("主播A_2026-06-27_11-00-00", { confirmed: [], uploading: { index: "0", kind: "weird" } }); // 非法
+    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 1, startMs: 1, endMs: 2 }));
+    const by = (h: string) => recs.find((r) => r.sessionBase.includes(`_${h}-`))!.rolling!;
+    expect(by("08").uploading).toEqual({ index: 0, kind: "create" });
+    expect(by("08").bv).toBeUndefined();
+    expect(by("09").uploading).toEqual({ index: 1, kind: "append" });
+    expect(by("10").uploading).toBeUndefined();
+    expect(by("11").uploading).toBeUndefined();
+  });
+
+  it("#57 R1:无 ts、无 bv 但留有建稿意图 → 仍产出(主控才能转人工)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"),
+      JSON.stringify({ confirmed: [], uploading: { index: 0, kind: "create" } }));
+    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    expect(recs).toHaveLength(1);
+    expect(recs[0].rolling?.uploading?.kind).toBe("create");
+  });
 });
