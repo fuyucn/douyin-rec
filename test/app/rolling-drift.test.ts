@@ -236,8 +236,12 @@ describe("TaskDaemon 边录边传漂移收敛", () => {
     store.updateTask(id, { rollingEffective: true });
     const proc = spawner.last;
     const realStop = proc.stop.bind(proc);
+    let signalled = false;
     proc.stop = async (): Promise<void> => {
-      void d.stop(); // 关停信号在 stop 退出等待期间到达
+      if (!signalled) {
+        signalled = true;
+        void d.stop(); // 关停信号在 stop 退出等待期间到达(只发一次:stopAll 会再调到本 stop,不设闸会无限递归)
+      }
       await realStop();
     };
     await ticks(d, ROLLING_DRIFT_IDLE_TICKS);
