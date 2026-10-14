@@ -817,6 +817,10 @@ export interface TaskDTO {
   rollingUpload: boolean;
   /** 边录边传实际生效值(派生,只读)。 */
   rollingEffective: boolean;
+  /** 在跑录制进程 spawn 时实际带的边录边传值(issue #89);进程没在跑则省略。 */
+  rollingApplied?: boolean;
+  /** 在跑进程的启动参数与 `rollingEffective` 不一致 → 待(空闲后)重启生效(issue #89);无漂移/没在跑则省略。 */
+  rollingPending?: boolean;
 }
 
 /** 详情页 live runtime(GET /api/tasks/:id)。 */

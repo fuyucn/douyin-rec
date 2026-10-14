@@ -32,6 +32,8 @@ export interface ManagerLike {
   getAnchorName(id: number): string | null;
   /** 是否真正在录视频（区分「录制中」vs running 但「等待开播中」）。 */
   isRecording(id: number): boolean;
+  /** 边录边传「实际生效 vs 期望」(issue #89);不在跑 → null。可选:旧的测试替身可不实现。 */
+  rollingStatus?(id: number): { applied: boolean; desired: boolean; drift: boolean } | null;
   /** Per-task captured log lines (oldest → newest) for the 日志 console. */
   getLogs(id: number): string[];
 }
