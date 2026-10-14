@@ -26,3 +26,5 @@ export * from "./session-name.js";
 export * from "./disk-watermark.js";
 // 边录边传生效判定(issue #40):规则 mode=rolling + 旧 task 开关迁移 + 单节点闸门;仅 master 调用。
 export * from "./rolling-policy.js";
+// 实验性功能注册表(issue #43):纯数据,仅驱动 Web 徽标/文案,不参与任何行为判定。
+export * from "./experimental.js";
