@@ -10,11 +10,23 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useAtomValue } from "jotai";
 import { hubEnabledAtom } from "../atoms";
 import { api, type RollingDeliveryDTO, type Task, type WorkerStatus } from "../api/client";
-import { baseVersion, fmtBytes, summarizeNodes } from "../lib/nodes-summary";
+import { baseVersion, fmtBytes, summarizeNodes, type NodeRoomState } from "../lib/nodes-summary";
 import { usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { Button } from "./Button";
 import { NodeLogsDialog } from "./NodeLogsDialog";
+
+const ROOM_DOT: Record<NodeRoomState, string> = {
+  recording: "var(--success)", waiting: "var(--muted-soft)", unavailable: "var(--warning)", disabled: "var(--hairline)",
+};
+
+/** 「N 分钟前」式相对时间(只给粗粒度,卡片不需要秒级)。 */
+function agoLabel(ms: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 90) return `${s}s`;
+  if (s < 5400) return `${Math.round(s / 60)}m`;
+  return `${Math.round(s / 3600)}h`;
+}
 
 export function NodesStrip({ delivering }: { delivering: readonly RollingDeliveryDTO[] }): ReactNode {
   const t = useT();
@@ -75,6 +87,43 @@ export function NodesStrip({ delivering }: { delivering: readonly RollingDeliver
                 {n.lockedBytes > 0 && <span className="font-mono">{t("queue.nodes.locked", { size: fmtBytes(n.lockedBytes) })}</span>}
                 {n.ambiguous > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.delivering.unknown")} {n.ambiguous}</span>}
               </div>
+              {/* 分配到该节点的房间:状态 + 边录边传进度,不用点进别处才知道节点在干什么。 */}
+              {n.rooms.length > 0 && (
+                <ul className="pt-1 space-y-1">
+                  {/* 已停用且没有未收口会话的房间只计数,不逐条占版面。 */}
+                  {n.rooms.filter((r) => r.state !== "disabled" || r.sessions.length > 0).map((r) => (
+                    <li key={r.key} className="text-[12px]">
+                      <div className="flex items-center gap-2">
+                        <span className="dot shrink-0" style={{ background: ROOM_DOT[r.state] }} />
+                        <span className="truncate">{r.label}</span>
+                        <span className="ml-auto text-muted-soft shrink-0">{t(`queue.nodes.state.${r.state}`)}</span>
+                      </div>
+                      {r.sessions.map((s) => (
+                        <div key={s.sessionBase} className="pl-4 text-muted font-mono text-[11px] flex flex-wrap gap-x-2">
+                          <span>{t("queue.delivering.progress", { c: s.confirmed, n: s.total })}</span>
+                          {s.uploading && <span>{t("queue.delivering.pending")}</span>}
+                          {typeof s.lockedBytes === "number" && s.lockedBytes > 0 && <span>{fmtBytes(s.lockedBytes)}</span>}
+                          {s.ambiguous > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.delivering.unknown")} {s.ambiguous}</span>}
+                          {s.bv && <a className="hover:text-ink" href={`https://www.bilibili.com/video/${s.bv}`} target="_blank" rel="noreferrer">{s.bv}</a>}
+                        </div>
+                      ))}
+                    </li>
+                  ))}
+                  {n.rooms.some((r) => r.state === "disabled" && r.sessions.length === 0) && (
+                    <li className="text-[11px] text-muted-soft">
+                      {t("queue.nodes.disabledCount", { n: n.rooms.filter((r) => r.state === "disabled" && r.sessions.length === 0).length })}
+                    </li>
+                  )}
+                </ul>
+              )}
+              {/* 任务配置同步:最近一次应用时间;期望版本没应用上则告警。 */}
+              {n.ok !== false && (n.appliedAt || n.syncLag || n.syncError) && (
+                <div className="text-[11px]" style={{ color: n.syncLag || n.syncError ? "var(--warning)" : "var(--muted-soft)" }}>
+                  {n.syncLag
+                    ? t("queue.nodes.syncLag", { applied: String(n.appliedVersion), expected: String(n.expectedVersion) })
+                    : n.syncError ?? t("queue.nodes.synced", { ago: agoLabel(n.appliedAt!) })}
+                </div>
+              )}
               {/* F3:master 代查该节点日志(只读),排查不用登节点看网页;本机节点由后端回提示。 */}
               <div className="pt-1">
                 <Button small variant="secondary" onClick={() => setLogsFor({ id: n.id, name: n.name })}>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { summarizeNodes, fmtBytes } from "../../packages/web/src/lib/nodes-summary.js";
+import { summarizeNodes, fmtBytes, roomSlugOf } from "../../packages/web/src/lib/nodes-summary.js";
 import type { RollingDeliveryDTO, Task, WorkerStatus } from "../../packages/web/src/api/client.js";
 
 const task = (...ws: Array<[string, "recording" | "not_recording" | "unavailable"]>): Pick<Task, "recordingWorkers"> => ({
@@ -65,5 +65,52 @@ describe("fmtBytes", () => {
     expect(fmtBytes(49_350_000)).toBe("49.4 MB");
     expect(fmtBytes(3_400_000_000)).toBe("3.4 GB");
     expect(fmtBytes(10)).toBe("0.1 MB");
+  });
+});
+
+describe("节点卡片的房间行", () => {
+  const rt = (room: string, anchorName: string | null, enabled: boolean, ...ws: Array<[string, "recording" | "not_recording" | "unavailable"]>) => ({
+    room, anchorName, name: null, enabled,
+    recordingWorkers: ws.map(([workerId, state]) => ({ workerId, workerName: `N-${workerId}`, state })),
+  }) as unknown as Parameters<typeof summarizeNodes>[0][number];
+
+  it("roomSlugOf:抖音 URL / 纯数字 / 带查询串", () => {
+    expect(roomSlugOf("https://live.douyin.com/123456")).toBe("123456");
+    expect(roomSlugOf("123456")).toBe("123456");
+    expect(roomSlugOf("https://live.bilibili.com/77?x=1")).toBe("77");
+    expect(roomSlugOf(undefined)).toBe("");
+  });
+
+  it("每个节点列出分配的房间:在录优先、停用靠后;状态按 recordingWorkers + enabled 判定", () => {
+    const r = summarizeNodes([
+      rt("https://live.douyin.com/1", "甲", true, ["a", "not_recording"]),
+      rt("https://live.douyin.com/2", "乙", true, ["a", "recording"]),
+      rt("https://live.douyin.com/3", "丙", false, ["a", "not_recording"]),
+      rt("https://live.douyin.com/4", "丁", true, ["a", "unavailable"]),
+    ], {}, [], "");
+    expect(r[0]!.rooms.map((x) => [x.label, x.state])).toEqual([["乙", "recording"], ["丁", "unavailable"], ["甲", "waiting"], ["丙", "disabled"]]);
+  });
+
+  it("边录边传会话挂到同节点同房间;别的节点的同房间不串", () => {
+    const r = summarizeNodes([rt("https://live.douyin.com/1", "甲", true, ["a", "recording"], ["b", "not_recording"])], {}, [
+      del("a", { roomSlug: "1", sessionBase: "s1", bv: "BV1" }), del("b", { roomSlug: "1", sessionBase: "s2" }),
+    ], "");
+    expect(r.find((n) => n.id === "a")!.rooms[0]!.sessions.map((s) => s.sessionBase)).toEqual(["s1"]);
+    expect(r.find((n) => n.id === "b")!.rooms[0]!.sessions.map((s) => s.sessionBase)).toEqual(["s2"]);
+  });
+
+  it("任务清单里没有的遗留会话也列出(未确认分段不能消失)", () => {
+    const r = summarizeNodes([rt("https://live.douyin.com/1", "甲", true, ["a", "recording"])], {}, [del("a", { roomSlug: "999", anchorName: "遗留" })], "");
+    expect(r[0]!.rooms.map((x) => x.label)).toContain("遗留");
+  });
+
+  it("配置同步:期望≠已应用 → syncLag;相等/缺字段 → 不告警", () => {
+    const t = [rt("https://live.douyin.com/1", "甲", true, ["a", "recording"], ["b", "recording"], ["c", "recording"])];
+    const r = summarizeNodes(t, {
+      a: st({ id: "a", appliedVersion: 5, expectedVersion: 7 }),
+      b: st({ id: "b", appliedVersion: 7, expectedVersion: 7 }),
+      c: st({ id: "c" }),
+    }, [], "");
+    expect(r.map((n) => n.syncLag)).toEqual([true, false, false]);
   });
 });
