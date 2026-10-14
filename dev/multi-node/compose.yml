@@ -1,0 +1,71 @@
+# dev 多节点 e2e 环境(issue #82)。**只由 scripts/e2e-verify.sh 调用**(它在任何 docker 操作前先跑隔离断言,
+# 且恒带 -p drec-dev-e2e*)。不要手敲 `docker compose -f 本文件 up`:没有断言保护,也不带 -p。
+#
+# 拓扑:controller(serve --hub)+ 2 个 worker(sshd + serve),全部只接 drec-devnet(internal:true,无外网出口)。
+# 无 tailscale sidecar、不 publish 端口(internal 网络下 ports 本就无效);看 UI/API 用
+#   docker exec drec-dev curl -s http://localhost:7860/api/tasks
+# 不碰线上:容器名 drec-dev*、卷只在 ${E2E_ROOT}(= <repo>/data-dev/e2e*)、不挂 remote/vps.key、不挂 docker-data。
+#
+# 必填 env(e2e-verify 注入):E2E_ROOT。可选:DREC_DEV_SUFFIX(如 -t1,与已存在的 drec-dev 并存)、DEV_SSH_TZ。
+
+x-dev-env: &dev-env
+  DREC_DEV: "1"
+  DOUYIN_REC_ROOT: /output-data
+  BILIUP_COOKIE: /output-data/config/biliup/cookies.json
+  TZ: ${DEV_TZ:-Asia/Shanghai}
+  DISCORD_WEBHOOK: ""
+
+services:
+  controller:
+    image: drec-dev-node:local${DREC_DEV_SUFFIX:-}
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        BASE: drec-dev-base:local${DREC_DEV_SUFFIX:-}
+    container_name: drec-dev${DREC_DEV_SUFFIX:-}
+    hostname: drec-dev${DREC_DEV_SUFFIX:-}
+    restart: "no"
+    entrypoint: ["/usr/local/bin/dev-controller-entrypoint.sh"]
+    command: ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860", "--hub"]
+    environment: *dev-env
+    volumes:
+      - ${E2E_ROOT:?由 scripts/e2e-verify.sh 注入}/controller:/output-data
+      - ${E2E_ROOT}/keys/dev_ed25519:/dev-keys/dev_ed25519:ro
+    networks: [drec-devnet]
+    depends_on: [node-1, node-2]
+
+  node-1:
+    image: drec-dev-node:local${DREC_DEV_SUFFIX:-}
+    container_name: drec-dev${DREC_DEV_SUFFIX:-}-node-1
+    hostname: drec-dev${DREC_DEV_SUFFIX:-}-node-1
+    restart: "no"
+    entrypoint: ["/usr/local/bin/dev-worker-entrypoint.sh"]
+    command: ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860"]
+    environment:
+      <<: *dev-env
+      DEV_SSH_TZ: ${DEV_SSH_TZ-Asia/Shanghai}
+    volumes:
+      - ${E2E_ROOT}/node-1:/output-data
+      - ${E2E_ROOT}/keys/dev_ed25519.pub:/dev-keys/dev_ed25519.pub:ro
+    networks: [drec-devnet]
+
+  node-2:
+    image: drec-dev-node:local${DREC_DEV_SUFFIX:-}
+    container_name: drec-dev${DREC_DEV_SUFFIX:-}-node-2
+    hostname: drec-dev${DREC_DEV_SUFFIX:-}-node-2
+    restart: "no"
+    entrypoint: ["/usr/local/bin/dev-worker-entrypoint.sh"]
+    command: ["node", "dist/douyin-rec.mjs", "task", "serve", "--port", "7860"]
+    environment:
+      <<: *dev-env
+      DEV_SSH_TZ: ${DEV_SSH_TZ-Asia/Shanghai}
+    volumes:
+      - ${E2E_ROOT}/node-2:/output-data
+      - ${E2E_ROOT}/keys/dev_ed25519.pub:/dev-keys/dev_ed25519.pub:ro
+    networks: [drec-devnet]
+
+networks:
+  drec-devnet:
+    name: drec-devnet${DREC_DEV_SUFFIX:-}
+    internal: true

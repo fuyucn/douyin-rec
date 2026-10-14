@@ -1,0 +1,9 @@
+# controller 的 dev SSH 配置段(issue #82)。SshTransport 的 ssh/rsync 不带 -i,全靠这里。
+# Host 只匹配 dev 容器名(drec-dev[-后缀]-node-N);线上 100.* / *.ts.net 段在这个镜像里根本不存在。
+# accept-new + 专用 known_hosts(落在 controller 数据卷,与 worker 主机密钥同生共死,见 e2e-verify down)。
+Host drec-dev*-node-*
+  User root
+  IdentityFile /root/.ssh/dev_ed25519
+  IdentitiesOnly yes
+  StrictHostKeyChecking accept-new
+  UserKnownHostsFile /output-data/.dev-ssh/known_hosts

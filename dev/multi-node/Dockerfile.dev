@@ -1,0 +1,25 @@
+# dev 多节点 e2e 镜像层(issue #82)。只在 dev 用,不改生产镜像行为。
+#
+# BASE 必须是「worker 档」生产镜像(`IMAGE_ROLE=worker` 构建,由 scripts/e2e-verify.sh up 现建并打
+# 标 drec-dev-base:local)。worker 档不装 biliup/playwright/ssh/rsync/字体 —— 这正是我们要的:
+# 假 biliup 顶替真路径,绝不让真 biliup 进 dev 镜像(误投稿不可逆)。
+ARG BASE=drec-dev-base:local
+FROM ${BASE}
+
+# openssh-server:worker 的 sshd(真 SSH 通道,SshTransport 零改动)
+# openssh-client + rsync:controller 侧 ssh/rsync(master 档才有,worker 档没有);worker 侧 rsync 供 pull
+# procps:`_is-done`/`_recording-status` 的进程扫描健壮性
+# fonts-noto-cjk:controller 烧弹幕字幕用(同 master 档)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssh-server openssh-client rsync procps fonts-noto-cjk \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /run/sshd
+
+# 假 biliup:模仿真实 BV 输出;只认 FAKE-DEV 假 cookies,绝不联网。
+COPY fake-biliup.js /usr/local/bin/biliup
+COPY dev-worker-entrypoint.sh dev-controller-entrypoint.sh /usr/local/bin/
+COPY ssh_config.dev /etc/drec-dev/ssh_config.dev
+RUN chmod 0755 /usr/local/bin/biliup /usr/local/bin/dev-worker-entrypoint.sh /usr/local/bin/dev-controller-entrypoint.sh
+
+ENV DREC_DEV=1
+# 默认入口留给 compose 按角色覆盖(controller / worker)。
