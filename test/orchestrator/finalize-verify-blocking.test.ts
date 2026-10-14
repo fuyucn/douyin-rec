@@ -3,12 +3,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// 强制「核验阻塞」策略(生产默认=观察期 false):覆盖 finalizeAfterUpload 的 done → needs_manual 分支。
-vi.mock("../../packages/orchestrator/src/verify.js", async (orig) => ({
-  ...(await orig<typeof import("../../packages/orchestrator/src/verify.js")>()),
-  verifyBlocksOnMismatch: () => true,
-}));
-
 import { SyncLedger } from "../../packages/orchestrator/src/ledger.js";
 import { finalizeAfterUpload, type PipelineDeps } from "../../packages/orchestrator/src/pipeline.js";
 
@@ -28,8 +22,8 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe("finalizeAfterUpload 核验阻塞 × 真实 SyncLedger", () => {
-  it("已 markDone 的场,分 P 不符 → 台账真转 needs_manual(force),返回 verifyBlocked,无非法转换 warn", async () => {
+describe("finalizeAfterUpload 回读不阻塞 × 真实 SyncLedger(#92)", () => {
+  it("已 markDone 的场,回读分 P 与期望不符 → 台账仍 done、照常清理,无非法转换 warn;clean_verify 记 done", async () => {
     ledger.upsertPending(KEY);
     for (const s of ["syncing", "merging", "uploading"] as const) ledger.setState(KEY, s);
     ledger.markPartDone(KEY, "plain", 0);          // 基线:期望 1 个分 P
@@ -40,15 +34,15 @@ describe("finalizeAfterUpload 核验阻塞 × 真实 SyncLedger", () => {
     const notify = vi.fn();
     const r = await finalizeAfterUpload({
       streamKey: KEY, bv: "BV1", log: () => {}, notify, cleanupSources,
-      deps: { ledger, countParts: async () => 3, sleep: async () => {} } as unknown as PipelineDeps,
+      deps: { ledger, countParts: async () => 3, sleep: async () => {}, scheduleSideCheck: () => {} } as unknown as PipelineDeps,
       on: { plain: true, danmu: false, livechat: false },
     });
 
-    expect(r.verifyBlocked).toBe(true);
-    expect(ledger.get(KEY)?.state).toBe("needs_manual");   // 台账与返回值一致
-    expect(ledger.get(KEY)?.error).toContain("产物核验失败");
-    expect(cleanupSources).not.toHaveBeenCalled();          // 保留全部源
-    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
+    expect(r.verifyBlocked).toBeUndefined();
+    expect(ledger.get(KEY)?.state).toBe("done");            // 不再转人工
+    expect(cleanupSources).toHaveBeenCalledTimes(1);        // 照常清理
+    expect(ledger.getNodeStates(KEY).find((n) => n.node === "clean_verify")?.state).toBe("done");
+    expect(notify).not.toHaveBeenCalled();                  // 告警只在延迟后的旁路校验里发
     expect(warn).not.toHaveBeenCalled();
   });
 });

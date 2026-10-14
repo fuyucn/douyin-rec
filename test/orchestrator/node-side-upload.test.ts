@@ -534,3 +534,56 @@ describe("issue #2:started + 主动终止节点执行体(A1 尽早落盘 + A2 �
     expect(abort).toHaveBeenCalledWith("douyin:123:2026-10-12"); // 终态失败一律先尝试终止
   });
 });
+
+describe("tryNodeSideUpload:已建稿护栏 / 旁路校验(issue #92)", () => {
+  const args = (ledger: unknown, notify: ReturnType<typeof vi.fn>, deps: unknown, t = fakeTransport()) => ({
+    streamKey: "douyin:123:2026-10-12",
+    cfg,
+    winner: { workerId: "w1", rec: { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" } },
+    winnerMembers: [{ workerId: "w1", rec: { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" } }],
+    transport: t as never,
+    ledger: ledger as never,
+    jlog: () => {},
+    notify,
+    deps: deps as never,
+  });
+
+  it("本场已 done 且已建稿(收尾补跑再次进入)→ 静默返回 done:不重复投稿、不告警、不改台账状态", async () => {
+    const setState = vi.fn();
+    const ledger = { get: () => ({ bv: "BV1OLD", state: "done" }), setState, logStep: vi.fn(), syncNodeState: vi.fn() };
+    const notify = vi.fn();
+    const t = fakeTransport();
+    const r = await tryNodeSideUpload(args(ledger, notify, fakeDeps({ id: "w1" }), t));
+    expect(r).toEqual({ state: "done", bv: "BV1OLD" });
+    expect(notify).not.toHaveBeenCalled();
+    expect(setState).not.toHaveBeenCalled();
+    expect(t.nodePipeline).not.toHaveBeenCalled(); // 绝不重新上传
+  });
+
+  it("本场未 done 但已建稿 → 仍转人工并告警(防重复投稿的护栏不变)", async () => {
+    const setState = vi.fn();
+    const ledger = { get: () => ({ bv: "BV1OLD", state: "failed" }), setState, logStep: vi.fn(), syncNodeState: vi.fn() };
+    const notify = vi.fn();
+    const t = fakeTransport();
+    const r = await tryNodeSideUpload(args(ledger, notify, fakeDeps({ id: "w1" }), t));
+    expect(r?.state).toBe("needs_manual");
+    expect(setState).toHaveBeenCalledWith(expect.any(String), "needs_manual", expect.anything());
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(t.nodePipeline).not.toHaveBeenCalled();
+  });
+
+  it("节点侧上传成功(返回 ok)→ 照常删节点源,并排一次延迟的旁路校验(默认 10 分钟)", async () => {
+    const ledger = { get: () => ({ bv: "" }), logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), doneParts: () => new Set<number>() };
+    const t = fakeTransport();
+    const scheduled: number[] = [];
+    const deps = {
+      transports: new Map([["w1", t]]), rmStage: vi.fn(async () => {}),
+      countParts: async () => 1,
+      scheduleSideCheck: (_fn: () => void, ms: number) => { scheduled.push(ms); },
+    };
+    const r = await tryNodeSideUpload({ ...args(ledger, vi.fn(), deps, t), cfg: { ...cfg, cleanup: { sourceAfterDone: true } } as never });
+    expect(r?.state).toBe("done");
+    expect(t.cleanup).toHaveBeenCalled();     // 返回码 0 即成功:立刻按配置删源
+    expect(scheduled).toEqual([600_000]);     // 旁路校验延迟 10 分钟
+  });
+});

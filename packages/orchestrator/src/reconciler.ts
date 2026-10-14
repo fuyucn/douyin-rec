@@ -102,7 +102,7 @@ const UNSAFE_RETRY_NODES = new Set(["upload_plain", "append_danmu", "append_live
 /** 收尾补跑日志(统一前缀,便于 grep)。 */
 const jlogInfo = (msg: string): void => console.info(msg);
 
-/** 收尾待补的节点:清理失败(clean_*) 与核验待重试(clean_verify=pending)。 */
+/** 收尾待补的节点:清理失败(clean_*)。核验不再产生待补跑状态(issue #92)。 */
 const CLEANUP_BACKFILL_NODES = new Set(["clean_source", "clean_stage_src", "clean_stage"]);
 
 export class Reconciler {
@@ -465,8 +465,9 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
   const now = Date.now();
   const due: string[] = [];
   for (const n of nodes) {
-    const isVerify = n.node === "clean_verify";
-    const matches = isVerify ? n.state === "pending" : (CLEANUP_BACKFILL_NODES.has(n.node) && n.state === "failed");
+    // clean_verify=pending 是旧版遗留的软状态(issue #92 起核验改为旁路、不再产生 pending):
+    // 不再据它补跑,否则存量 pending 的 job 会每轮重入一遍整条 pipeline 且无法收敛。
+    const matches = CLEANUP_BACKFILL_NODES.has(n.node) && n.state === "failed";
     if (!matches) continue;
     // `Math.max(0, ...)`:台账的 now() 是**进程内单调递增**(同毫秒多次调用会 +1 递推),
     // 而这里用 Date.now() 读墙钟 → 同一 tick 内 `Date.now() - updatedAt` 可能是**负数**

@@ -657,6 +657,8 @@ const hubStarter: HubStarter = {
       cleanMaxGapSec?: number;
       /** 断流重连合并窗(ms);缺省 10 分钟。 */
       reconnectWindowMs?: number;
+      /** 上传确认后旁路校验(回读分 P 数)的延迟(ms);缺省 10 分钟。只记录/告警,不影响清理(issue #92)。 */
+      sideCheckDelayMs?: number;
       /** 投稿默认(per-task 文件留空时回退);旧字段 uploadMeta 也认(迁移兼容)。 */
       uploadDefaults?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string };
       uploadMeta?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string };
@@ -910,6 +912,8 @@ const hubStarter: HubStarter = {
       // 缺省不注入 = 核验关闭;这里注入 = 上传完成后比对,不符则**保留源文件**并标记待人工。
       // cookies 用 hubCfg.cookies(与 appendGroup 同源;per-job override 已在 pipeline 内传下去)。
       countParts: (bv: string) => countVideoParts(bv, hubCfg.cookies ?? ""),
+      // 旁路校验延迟(issue #92):上传确认后多久回读分 P 数;只记录/告警,不影响清理。缺省 10 分钟。
+      sideCheckDelayMs: hubCfg.sideCheckDelayMs,
       notify: opts.onEvent,
       // job.log 的落盘实现由组合根装配:observability 的 FileLogger,路径 = <stage>/<sanitized streamKey>/job.log
       //(目录名 = core 的 sanitizeStreamKey,与 pipeline/hub-jobs 同一真理源)。orchestrator 只调 ScopedLogger 接口。

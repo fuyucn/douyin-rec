@@ -13,7 +13,7 @@ import { deriveSegmentPlan, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 import { runSegmentPipeline } from "./segment-pipeline.js";
 // 节点侧上传(experimental,plans/027):全部逻辑隔离在 node-side-upload.ts,便于快速开关/回退。
 import { shouldUseNodeSideUpload, tryNodeSideUpload } from "./node-side-upload.js";
-import { PART_GROUP_CANONICAL, verifyBlocksOnMismatch, verifyMessage, verifyParts, verifyUploaded } from "./verify.js";
+import { PART_GROUP_CANONICAL, verifyMessage, verifyParts, verifyUploaded } from "./verify.js";
 
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。 */
 export interface PipelineSteps {
@@ -174,6 +174,10 @@ export interface PipelineDeps {
   makeRunLogger?: (streamKey: string) => ScopedLogger;
   /** append 就地重试的退避 sleep(可注入测试,免真等 5s)。省略 → retry 内置 setTimeout。 */
   sleep?: (ms: number) => Promise<void>;
+  /** 旁路校验(issue #92)延迟多久再回读分 P 数(ms)。缺省 10 分钟;**只记录/告警,绝不影响清理**。 */
+  sideCheckDelayMs?: number;
+  /** 旁路校验的定时器注入(测试用:捕获/立即执行)。缺省 setTimeout(unref,不阻止进程退出)。 */
+  scheduleSideCheck?: (fn: () => void, ms: number) => void;
   cfg: PipelineCfg;
 }
 
@@ -311,18 +315,16 @@ export async function cleanupSourcesShared(o: {
 
 
 /**
- * **上传后的收口闸门(单一插入点,合并路径 / 分段路径 / 两条续跑共用)**。
+ * **上传后的收口(单一插入点,合并路径 / 分段路径 / 两条续跑共用)**。
  *
  * 顺序是硬标准,不可调换:
  *   1. `markDone` —— **先**把 job 标成功(上传确实成功了);
- *   2. 产物核验(T11):实际分 P 数 vs 台账期望 → 不一致/取数失败 → **不删源**,记 `clean_verify`;
- *   3. 清理(T12):只在 1、2 都允许时执行;清理失败**绝不**改终态,只把 `clean_*` 标 failed 供补跑。
+ *   2. 清理(T12):走到这里 = 上传已确认(biliup 返回 0),按配置**无条件**清理;清理失败**绝不**改终态,
+ *      只把 `clean_*` 标 failed 供补跑;
+ *   3. 旁路校验(issue #92):延迟(默认 10 分钟)回读 B站分 P 数,**只记录/告警,不影响清理**。
  *
- * 为什么先 markDone 再核验:核验/清理都不是上传的前置条件,上传成功的事实不该
- * 因为「核验取数失败」而被回滚成 needs_manual(那会诱导用户重传 → 重复稿)。
- *
- * 返回是否执行了清理(供调用方决定 stageAfterDone 那一段还要不要跑:
- * 没删源时 stage 产物仍是有用副本,照 `stageAfterDone` 开关处理即可,不受影响)。
+ * 为什么回读不再是清理的闸门:B站分 P 列表是最终一致的,回读反复把已成功的上传判成「疑似缺失」,
+ * 据此保留源只会让磁盘持续涨(见 issue #66 / #92)。真丢分 P 的兜底 = biliup 退出码非 0。
  */
 /**
  * **只清理**收口(T12 补跑专用):该场已 done、stage 产物已被清空,再跑一遍上传流程毫无意义
@@ -368,87 +370,74 @@ export async function finalizeOnly(
   return { state: "done", bv };
 }
 
+/** 旁路校验默认延迟:B站追加分 P 后列表刷新有延迟,读太早会误报(issue #92)。 */
+export const DEFAULT_SIDE_CHECK_DELAY_MS = 10 * 60_000;
+
+/**
+ * **旁路校验**(issue #92):上传确认(biliup 返回 0)后,延迟一段时间回读 B站分 P 数,
+ * **只写日志 / 台账备注 / 告警,绝不改变清理结果、不转人工、不重传**。
+ *
+ * 为什么降级为旁路:回读读到的是 B站最终一致的列表,实测反复把已成功的上传判成「疑似缺失」
+ * (见 issue #66 / #92),据此保留源只会让磁盘持续涨。真丢分 P 的兜底 = biliup 退出码非 0。
+ *
+ * 定时器只在内存里:进程重启则丢这一次校验——它只是旁路观察,丢了不影响任何数据。
+ * 任何异常一律吞掉(只记日志):旁路绝不能把主线搞挂。
+ */
+export function scheduleSideCheck(o: {
+  deps: PipelineDeps;
+  streamKey: string;
+  bv: string;
+  on: { plain: boolean; danmu: boolean; livechat: boolean };
+  log: (msg: string) => void;
+  notify: (e: NotifyEvent) => void;
+}): void {
+  const { deps, streamKey, bv, on, log } = o;
+  if (!deps.countParts || !bv) return;
+  const run = async (): Promise<void> => {
+    try {
+      const v = await verifyUploaded(deps.ledger, streamKey, bv, on, deps.countParts,
+        deps.sleep ? { sleep: deps.sleep } : {});
+      const text = verifyMessage(v, streamKey, bv);
+      if (v.kind === "mismatch") {
+        const note = `旁路校验:期望 ${v.expected} 个分 P、B站回读 ${v.actual} 个(仅记录;源已按 biliup 返回码清理)`;
+        deps.ledger.logStep(streamKey, "clean_verify", "done", note);
+        deps.ledger.syncNodeState(streamKey, "clean_verify", "done", { error: note });
+        log(`${note} bv=${bv}`);
+        o.notify({ kind: "error", stage: "上传", message: `${streamKey} ${note}(bv=${bv}),请在创作中心确认分 P` });
+      } else if (v.kind === "ok") {
+        deps.ledger.logStep(streamKey, "clean_verify", "done", `旁路校验通过:${v.actual} 个分 P`);
+        log(text);
+      } else {
+        log(`旁路校验未得出结论:${text}`);
+      }
+    } catch (e) {
+      log(`旁路校验异常(忽略,不影响清理):${String((e as Error)?.message ?? e)}`);
+    }
+  };
+  const delay = Math.max(0, deps.sideCheckDelayMs ?? DEFAULT_SIDE_CHECK_DELAY_MS);
+  const schedule = deps.scheduleSideCheck
+    ?? ((fn: () => void, ms: number): void => { setTimeout(fn, ms).unref?.(); });
+  schedule(() => { void run(); }, delay);
+}
+
 export async function finalizeAfterUpload(o: {
   streamKey: string;
   bv: string;
   deps: PipelineDeps;
   log: (msg: string) => void;
-  /**
-   * 清理各节点源(+ 可选 stage 拉来源段);收尾闸门决定要不要调。
-   * `skipNodeSources` 供「核验疑似少分 P」时只清 stage、**保住节点源**。
-   */
+  /** 清理各节点源(+ 可选 stage 拉来源段);上传确认后无条件调用。 */
   cleanupSources: (opts?: { skipNodeSources?: boolean }) => Promise<CleanupOutcome>;
   on: { plain: boolean; danmu: boolean; livechat: boolean };
   notify: (e: NotifyEvent) => void;
 }): Promise<CleanupOutcome & { verifyBlocked?: boolean; cleanConfirmed?: boolean; stageCleanConfirmed?: boolean }> {
   const { deps, streamKey, bv, log } = o;
-  const ledger = deps.ledger;
-  // 核验的重查退避复用 deps.sleep(与 append 重试同一注入点):测试注入 no-op 即免真等 45s。
-  const v = await verifyUploaded(ledger, streamKey, bv, o.on, deps.countParts,
-    deps.sleep ? { sleep: deps.sleep } : {});
-  ledger.logStep(streamKey, "clean_verify", "done", v.kind === "mismatch"
-    ? `不符:期望 ${v.expected} 实际 ${v.actual}${verifyBlocksOnMismatch() ? " · 保留全部源" : " · 仅记录(观察期)"}`
-    : v.kind === "unknown" ? `待重试:${v.reason}`
-    : v.kind === "ok" ? `${v.actual} 个分 P` : `跳过:${v.reason}`);
-  log(verifyMessage(v, streamKey, bv));
-
-  if (v.kind === "mismatch") {
-    // **观察期默认走这里**(verifyBlocksOnMismatch()=false):只记录 + 告警,**不**转人工、
-    // **不**阻止删源。理由见 verify.ts 的 DEFAULT_VERIFY_BLOCKING 注释(核验从未抓到真失败,
-    // 只在 append 成功后 0.5 秒读到 B站未同步的旧值 → 误伤成功的上传 + 源永不删)。
-    if (!verifyBlocksOnMismatch()) {
-      // 观察期只放宽 **多出** 分 P 的情形(B站比我们提交的多 = 我们没丢东西,源可安全删)。
-      //
-      // **少了** 分 P(actual < expected)一律**不删节点源**:两种可能 ——
-      //   ①B站 pages 还没同步(假失败,实测 0.5~0.6s 就核验时高发);②真的丢片。
-      // 两种都不该在这种情况下**销毁最后一份源**(不可逆)。源留着,由 reconciler 的
-      // 收尾补跑(clean_source 缺失 → 补跑)在**确认一致**之后再删,见 cleanupBackfillDue。
-      const lostParts = v.actual < v.expected;
-      ledger.syncNodeState(streamKey, "clean_verify", "done", {
-        error: `分 P 数不符:期望 ${v.expected} 实际 ${v.actual}`
-          + (lostParts ? "(观察期:疑似缺失,**保留节点源**,待补跑确认)" : "(观察期仅记录,多出分 P 不影响删源)"),
-      });
-      // 告警仍走 error 通道(NotifyEvent 没有 warn 档):观察期不该为「读早了」刷 error 通知,
-      // 但**必须留痕** —— job.log 与台账已记,这里只把措辞标成「仅记录」便于日后区分。
-      o.notify({
-        kind: "error", stage: "上传",
-        message: `${verifyMessage(v, streamKey, bv)}`
-          + (lostParts ? "(观察期:疑似缺失,已保留节点源)" : "(观察期仅记录,未阻塞)"),
-      });
-      // 疑似缺失 → 只做 stage 侧清理,跳过节点源(sourceAfterDone 置 false);其余照常。
-      // stageCleanConfirmed(stage 视频类清理的唯一闸门)只在「有基线且分 P 只多不少」时为真。
-      return lostParts
-        ? await o.cleanupSources({ skipNodeSources: true })
-        : { ...(await o.cleanupSources()), cleanConfirmed: true, stageCleanConfirmed: true };
-    }
-    // 返回值也要改:调用方直接把本函数返回的 state 交给 reconciler/UI,
-    // 只改台账不改返回值 → UI 显示 done、实际 needs_manual,两处真相打架。
-    // 唯一会「不删源 + 转人工」的结论:分 P 丢了 = 交付不完整,必须人工补传/核对。
-    // 标 needs_manual 而非 failed:failed 会被 reconciler 自动重跑 → 重传 = 重复稿。
-    ledger.syncNodeState(streamKey, "clean_verify", "failed", {
-      error: `分 P 数不符:期望 ${v.expected} 实际 ${v.actual}`,
-    });
-    // 前面 markDone 已把台账置 done,done 无出边 → 必须 force 才能转人工(与返回值 needs_manual 一致)。
-    ledger.setState(streamKey, "needs_manual", {
-      error: `产物核验失败:期望 ${v.expected} 个分 P、实际 ${v.actual} 个(bv=${bv}),已保留全部源`,
-    }, { force: true });
-    o.notify({
-      kind: "error", stage: "上传",
-      message: verifyMessage(v, streamKey, bv),
-    });
-    // verifyBlocked:调用方据此把返回值也改成 needs_manual(返回值与台账必须一致)。
-    return { ...cleanupOk(), verifyBlocked: true };
-  }
-  if (v.kind === "unknown") {
-    // 软状态:pending(可重试),由 reconciler 下一轮补跑核验;源也保留。
-    ledger.syncNodeState(streamKey, "clean_verify", "pending", { error: v.reason });
-    o.notify({ kind: "error", stage: "上传", message: verifyMessage(v, streamKey, bv) });
-    return cleanupOk();
-  }
-  ledger.syncNodeState(streamKey, "clean_verify", "done", { error: null });
-  // cleanConfirmed = 允许删节点源的旧口径(含核验被跳过);stageCleanConfirmed = 核验真正通过才为真,
-  // 核验跳过(未注入分P查询 / 无基线)不算通过 → stage 视频类内容保持旧行为(不清)。
-  return { ...(await o.cleanupSources()), cleanConfirmed: true, stageCleanConfirmed: v.kind === "ok" };
+  // **上传是否成功只看 biliup 返回码**(issue #92):走到这里 = 上传已确认(返回 0),按配置清理。
+  // 回读分 P 数不再是清理的闸门,只作旁路校验(延迟回读,见 scheduleSideCheck)。
+  // clean_verify 记为 done:不再产生 pending 软状态,收尾补跑不会因它反复重入。
+  deps.ledger.syncNodeState(streamKey, "clean_verify", "done", { error: null });
+  const outcome = await o.cleanupSources();
+  scheduleSideCheck({ deps, streamKey, bv, on: o.on, log, notify: o.notify });
+  return { ...outcome, cleanConfirmed: true, stageCleanConfirmed: true };
 }
 
 /**

@@ -269,7 +269,7 @@ flowchart TB
 
 ```
 产物： 上传后按「实际上传的批次数」核验 countVideoParts(bv) —— 分段路径与合并路径都写 sync_parts 基线
-        mismatch → needs_manual + 不删源;unknown → clean_verify=pending 下轮重验;ok → 才清理
+        biliup 返回 0 即成功 → 无条件清理;延迟 10 分钟旁路回读分 P 数(只记录/告警,不影响清理)
         清理失败不再吞错 → clean_* = failed(可见、可重试);job 终态仍为 done
 
 录制： 只有「录制时长 ≥ 120s 且进度新鲜」才清零重连退避(现状 onLive 无条件清零 → 1650 次 5s 风暴)

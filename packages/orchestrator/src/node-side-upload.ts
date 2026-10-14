@@ -20,7 +20,7 @@
  */
 import { resolveDiskMinGB, type NodePipelineSpec } from "@drec/core";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { cleanupSourcesShared, defaultRmStage, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, defaultRmStage, scheduleSideCheck, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import type { Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
 
@@ -152,6 +152,11 @@ async function finalizeNodeSuccess(
     jlog(`节点侧收尾清理部分失败(${cleanOutcome.failed.length}):`
       + `${cleanOutcome.failed.map((f) => f.target).join(",")}(已记 clean_source failed,待 reconciler 补跑)`);
   }
+  // 旁路校验(issue #92):延迟回读分 P 数,只记录/告警,不影响上面的清理结果。
+  scheduleSideCheck({
+    deps: o.deps, streamKey, bv, log: jlog, notify: o.notify,
+    on: { plain: true, danmu: false, livechat: false },
+  });
   return { state: "done", bv };
 }
 
@@ -265,6 +270,12 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
   // 重跑会**重复投稿**(B站不支持改稿件视频内容,只能删稿重传)。宁可转人工,也不冒重复稿的险。
   const existingBv = (ledger.get(streamKey)?.bv ?? "").trim();
   if (existingBv) {
+    // 本场已 done(收尾补跑再次进入):上传早已成功,这里只是被补跑路径带进来。静默返回 done ——
+    // 转人工会被台账拒绝(done 无出边),却仍每轮发一条「已建稿,请人工核对」告警(issue #92)。
+    if (ledger.get(streamKey)?.state === "done") {
+      jlog(`节点侧上传跳过:本场已 done 且已建稿(bv=${existingBv}),不重复投稿、不告警`);
+      return { state: "done", bv: existingBv };
+    }
     jlog(`节点侧上传跳过:本场已建稿(bv=${existingBv}),绝不重复投稿 → 转人工核对`);
     ledger.setState(streamKey, "needs_manual", {
       error: `已建稿 bv=${existingBv},节点侧不重复上传;请人工核对分 P`,

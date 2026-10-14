@@ -54,16 +54,16 @@ describe("cleanupBackfillDue:**不再**因「clean_source 缺失」补跑(2026-1
     expect(due(l, true)).toContain("clean_source");
   });
 
-  it("clean_verify=pending → 仍补跑(软状态重试,原行为不变)", () => {
+  it("clean_verify=pending(旧版遗留软状态)→ 不再补跑(issue #92:核验改旁路,据它补跑会反复重入且无法收敛)", () => {
     const l = new SyncLedger(":memory:");
     l.upsertPending("douyin:test:2026-10-11");
     l.markDone("douyin:test:2026-10-11", "BV1");
     l.syncNodeState("douyin:test:2026-10-11", "clean_verify", "pending");
-    expect(due(l, true)).toContain("clean_verify");
+    expect(due(l, true)).toBeNull();
   });
 });
 
-describe("观察期:核验**少**分 P 时保住节点源(T33 ②)", () => {
+describe("上传确认后回读数与期望不符也不保源(issue #92,取代 T33 ② 的保源口径)", () => {
   function deps(actual: number | null, cleanupCalls: Array<{ skipNodeSources?: boolean }>) {
     const dir = mkdtempSync(join(tmpdir(), "t33-"));
     mkdirSync(join(dir, "sub"), { recursive: true });
@@ -86,7 +86,7 @@ describe("观察期:核验**少**分 P 时保住节点源(T33 ②)", () => {
     } as unknown as PipelineDeps & { __calls?: unknown };
   }
 
-  it("actual < expected(疑似缺失)→ cleanupSources 收到 skipNodeSources=true", async () => {
+  it("actual < expected(回读少)→ 照常清理,cleanupSources 不带 skipNodeSources", async () => {
     const calls: Array<{ skipNodeSources?: boolean }> = [];
     const { finalizeAfterUpload } = await import("./pipeline.js");
     const d = deps(1, calls);
@@ -100,8 +100,9 @@ describe("观察期:核验**少**分 P 时保住节点源(T33 ②)", () => {
       cleanupSources: async (o) => { calls.push(o ?? {}); return { ok: true, failed: [] }; },
       on: { plain: true, danmu: false, livechat: false }, notify: () => {},
     });
-    expect(r.verifyBlocked).toBeUndefined();       // 观察期不阻塞
-    expect(calls[0]?.skipNodeSources).toBe(true);  // 但保住节点源
+    expect(r.verifyBlocked).toBeUndefined();       // 不阻塞
+    expect(calls).toHaveLength(1);                 // 照常清理
+    expect(calls[0]?.skipNodeSources).toBeUndefined(); // 不再保住节点源(返回码 0 即成功)
   });
 
   it("actual === expected → 正常删源(不带 skipNodeSources)", async () => {
