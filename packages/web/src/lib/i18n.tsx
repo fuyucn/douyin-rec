@@ -68,14 +68,14 @@ const DICT = {
       nodeSideUpload: {
         name: "节点侧上传",
         desc: "不烧录的房间由录制节点本地合成并上传,省掉录像回传 master。",
-        risk: "节点缺 biliup 或 B 站 cookie 时该房间的上传直接失败,录像留在节点需人工补传;开着烧录的房间此开关无效。",
+        risk: "仅在上传模式且不烧录时生效。上传阶段 ssh 断开会导致结果不确定,该场转人工处理,不会自动重传;上传确认成功后,若开启了「完成后删源节点录制」,节点上的源录像会被删除。节点缺 biliup 或 B 站 cookie 时自动回落为拉回 master 处理,不会失败。",
         where: "在 hub 规则「流水线」里开关。",
         graduation: "线上观察满 48 小时无新增 incident 后摘除徽标(无独立 issue,按 TODO 台账 T-18 收口)。",
       },
       segmentPartXml: {
         name: "分段分P弹幕 xml",
         desc: "关闭「合并分段」时,从会话总 xml 同步派生每个分 P 的单独弹幕 xml,与总 xml 一同存放。",
-        risk: "某会话时长探测失败会整场跳过派生并告警,分 P 不会有对应 xml;窗口错位不会被自动发现。派生文件只新增,不会替换或据此删除总 xml;关闭或回退只回收派生文件。",
+        risk: "某会话时长探测失败会整场跳过派生并告警,分 P 不会有对应 xml;窗口错位不会被自动发现。总 xml 不会被替换或删除;派生文件回收见 #84。",
         where: "在 hub 规则「流水线」的「合并分段」处切换。",
         graduation: "跟踪票关闭且线上观察满 48 小时无新增 incident 后摘除徽标。",
       },
@@ -467,14 +467,14 @@ const DICT = {
       nodeSideUpload: {
         name: "Node-side upload",
         desc: "For rooms without burning, the recording node remuxes and uploads locally, skipping the transfer back to master.",
-        risk: "If the node lacks biliup or the Bilibili cookie, uploads for that room fail outright and the recording stays on the node for a manual re-upload; ignored for rooms that burn.",
+        risk: "Only effective in upload mode with burning off. If ssh drops during the upload phase the outcome is uncertain, so the session is handed to manual handling and is never re-uploaded automatically; once the upload is confirmed, the node's source recording is deleted if \"Delete source-node recordings when done\" cleanup is enabled. If the node lacks biliup or the Bilibili cookie, it automatically falls back to pulling back to master instead of failing.",
         where: "Toggle it under \"Pipeline\" in the hub rule.",
         graduation: "The badge is removed after 48 hours in production without a new incident (no standalone issue; closed out via T-18 in the TODO ledger).",
       },
       segmentPartXml: {
         name: "Per-part danmu xml (segment mode)",
         desc: "With \"Merge segments\" off, derives one danmu xml per part from the session xml and stores it alongside the session xml.",
-        risk: "If a session's duration probe fails, derivation is skipped for the whole session with an alert and its parts get no xml; window misalignment is not detected automatically. Derived files are only added, never replace or cause deletion of the session xml; turning it off only reclaims the derived files.",
+        risk: "If a session's duration probe fails, derivation is skipped for the whole session with an alert and its parts get no xml; window misalignment is not detected automatically. The session xml is never replaced or deleted; reclaiming derived files is tracked in #84.",
         where: "Switch it via \"Merge segments\" under \"Pipeline\" in the hub rule.",
         graduation: "The badge is removed once the tracking issue is closed and production has run 48 hours without a new incident.",
       },
