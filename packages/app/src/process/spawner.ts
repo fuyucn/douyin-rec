@@ -125,7 +125,7 @@ export class NodeRecordSpawner implements Spawner {
     this.rollingKillTimeoutMs = opts.rollingKillTimeoutMs ?? ROLLING_STOP_GRACE_MS;
   }
 
-  spawn(task: Task): RecorderProcess {
+  spawn(task: Task): ChildRecorderProcess {
     // 每任务 webhook 优先,回落全局(getter 时每次 spawn 读取,带上 settings 表 webhook)→
     // 子进程的开播/录完通知推到该 webhook。
     const hook = resolveSpawnWebhook(task.webhook, this.webhook);
@@ -156,6 +156,7 @@ export class NodeRecordSpawner implements Spawner {
       env,
       onLog: this.onLog,
       killTimeoutMs: resolveKillTimeoutMs(task, this.killTimeoutMs, this.rollingKillTimeoutMs),
+      termChildOnly: !!task.rollingEffective,
       cleanupFiles: credFile ? [credFile] : undefined,
     });
   }

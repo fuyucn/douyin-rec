@@ -62,6 +62,12 @@ export interface ChildRecorderProcessOpts {
   onLog?: (msg: string) => void;
   /** ms to wait after SIGTERM before SIGKILL. Default 10_000. */
   killTimeoutMs?: number;
+  /**
+   * SIGTERM 只发子进程本身,不发整个进程组(SIGKILL 兜底仍打进程组)。
+   * 边录边传任务需要:组内还有正在上传上一段的 biliup,吃到 SIGTERM 会立刻死、上一段变「结果未知」,
+   * 并因头阻塞把末段也挡住;子进程自己会走 stop() 收 ffmpeg 并等上传完成。默认 false。
+   */
+  termChildOnly?: boolean;
   /** 子进程退出(正常/崩溃/spawn 失败)后删除的文件,如 0600 登录凭证文件。 */
   cleanupFiles?: string[];
 }
@@ -75,7 +81,8 @@ export class ChildRecorderProcess implements RecorderProcess {
   /** Constructor-injected log sink (spawner → console). The `onLog()` METHOD
    * registers ADDITIONAL listeners (e.g. the manager's ring-buffer). */
   private readonly injectedLog: (msg: string) => void;
-  private readonly killTimeoutMs: number;
+  readonly killTimeoutMs: number;
+  readonly termChildOnly: boolean;
   private readonly cleanupFiles: string[];
 
   private child: ChildProcess | null = null;
@@ -97,6 +104,7 @@ export class ChildRecorderProcess implements RecorderProcess {
     this.env = opts.env;
     this.injectedLog = opts.onLog ?? ((): void => {});
     this.killTimeoutMs = opts.killTimeoutMs ?? 10_000;
+    this.termChildOnly = opts.termChildOnly ?? false;
     this.cleanupFiles = opts.cleanupFiles ?? [];
   }
 
@@ -157,7 +165,11 @@ export class ChildRecorderProcess implements RecorderProcess {
     const child = this.child;
     if (!child || this.exited) return;
 
-    this.killGroup("SIGTERM");
+    if (this.termChildOnly) {
+      try { child.kill("SIGTERM"); } catch { /* already gone */ }
+    } else {
+      this.killGroup("SIGTERM");
+    }
     const timer = setTimeout(() => {
       if (!this.exited) this.killGroup("SIGKILL");
     }, this.killTimeoutMs);
