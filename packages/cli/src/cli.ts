@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey } from "@drec/core";
+import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync } from "@drec/core";
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -598,6 +598,8 @@ let hubRunNow:
 let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
 /** 各节点边录边传的实时进度(F1;随 5 秒状态轮询整体替换,只读展示)。 */
 let hubDeliverySnapshot: RollingDeliveryDTO[] = [];
+/** probeAllWorkers 的结果缓存 TTL。 */
+const PROBE_CACHE_MS = 30_000;
 const readRollingDelivery = (): RollingDeliveryDTO[] => hubDeliverySnapshot;
 const recordingSnapshotKey = (platform: string, roomSlug: string): string => `${platform}:${roomSlug}`;
 const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWorkerStatusDTO[] =>
@@ -1417,6 +1419,10 @@ const hubStarter: HubStarter = {
     });
   },
 };
+
+// 全部 worker 的存活/版本/磁盘探测:每个 ssh worker 要 3 条 ssh,多个浏览器标签页会各自轮询 →
+// 包 30 秒 TTL 缓存 + 并发合并,探测成本与标签页数量无关(新增/删除节点后最多 30 秒内状态滞后)。
+hubStarter.probeAllWorkers = ttlMemoAsync(hubStarter.probeAllWorkers!.bind(hubStarter), PROBE_CACHE_MS);
 
 // ─── task 子命令组（stateful app 层：sqlite 持久化 + 运行任务）─────────────────
 // webhook 解析复用全局 --discord-webhook / env DISCORD_WEBHOOK（settings 表在 runTask 内兜底）。

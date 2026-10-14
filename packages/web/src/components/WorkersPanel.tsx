@@ -92,7 +92,7 @@ export function WorkersPanel({
     const s = status[w.id];
     if (!s?.ok) return null;
     if (!s.appVersion) return null;   // 旧 bundle 不回执 → 不判(避免假告警)
-    if (masterVersion && s.appVersion !== masterVersion) {
+    if (masterVersion && s.appVersion.split("-")[0] !== masterVersion) {
       return { text: t("hub.workers.versionDrift", { node: s.appVersion, master: masterVersion }), warn: true };
     }
     if (s.expectedVersion != null && s.appliedVersion != null && s.expectedVersion !== s.appliedVersion) {
