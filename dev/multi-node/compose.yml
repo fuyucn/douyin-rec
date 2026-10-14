@@ -19,7 +19,7 @@ services:
   controller:
     image: drec-dev-node:local${DREC_DEV_SUFFIX:-}
     build:
-      context: ./dev/multi-node
+      context: .
       dockerfile: Dockerfile.dev
       args:
         BASE: drec-dev-base:local${DREC_DEV_SUFFIX:-}

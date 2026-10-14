@@ -23,7 +23,7 @@ NET="drec-devnet${SUFFIX}"
 BASE_TAG="drec-dev-base:local${SUFFIX}"
 NODE_TAG="drec-dev-node:local${SUFFIX}"
 E2E_ROOT=${DREC_DEV_ROOT:-"$REPO/data-dev/e2e${SUFFIX}"}
-COMPOSE_FILE="$REPO/docker-compose.dev-multi-node.yml"
+COMPOSE_FILE="$REPO/dev/multi-node/compose.yml"
 HUB_TEMPLATE="$REPO/dev/multi-node/hub.config.dev.json"
 # 线上容器名:只允许对它们做只读 docker inspect(取挂载源以断言不重叠),绝不做其它操作。
 PROD_CONTAINERS=(douyin-rec drec-tailscale)

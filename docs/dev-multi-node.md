@@ -5,7 +5,7 @@
 本文是设计稿 + 使用手册;场景用例(S1–S3 的自动化)由随后的 P2 PR 落地,S4 挂 #72 / #57 解锁后。
 
 入口:`scripts/e2e-verify.sh {up|down|keep|doctor|smoke}`;构建物在 `dev/multi-node/` 与
-`docker-compose.dev-multi-node.yml`。**不改任何生产镜像/compose/`packages/` 行为。**
+`dev/multi-node/compose.yml`。**不改任何生产镜像/compose/`packages/` 行为。**
 
 ## 1. 拓扑
 
