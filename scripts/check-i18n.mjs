@@ -33,8 +33,13 @@ const files = [];
 (function walk(d) { for (const f of readdirSync(d)) { const p = join(d, f);
   if (statSync(p).isDirectory()) walk(p); else if (/\.tsx?$/.test(p) && !p.includes("i18n.tsx")) files.push(p); } })(WEB);
 const missing = new Map();
+// 实验性功能注册表(core/src/experimental.ts)里的 *Key 字面量也是 i18n key(徽标组件动态 t(f.nameKey)),单独核对。
+const expSrc = readFileSync(pjoin(WEB, "..", "..", "core", "src", "experimental.ts"), "utf-8");
+for (const mm of expSrc.matchAll(/\b\w+Key:\s*"([^"]+)"/g))
+  if (!known.has(mm[1])) { if (!missing.has(mm[1])) missing.set(mm[1], []); missing.get(mm[1]).push("core/src/experimental.ts"); }
 for (const f of files) for (const mm of readFileSync(f, "utf-8").matchAll(/\bt\(\s*"([^"]+)"\s*[,)]/g))
   if (!known.has(mm[1])) { if (!missing.has(mm[1])) missing.set(mm[1], []); missing.get(mm[1]).push(f); }
+for (const k of ["experimental.badge","experimental.riskPrefix","experimental.defaultPrefix","experimental.defaultOff","experimental.defaultOn","experimental.truthNote","experimental.graduationPrefix","experimental.trackingPrefix"]) if (!known.has(k)) missing.set(k, ["ExperimentalBadge.tsx"]);
 console.log("检查文件数:", files.length, "| key 总数:", zh.size);
 const onlyZh2 = [...zh].filter(k => !en.has(k) && !en.has(base(k)));
 const onlyEn2 = [...en].filter(k => !zh.has(k) && !zh.has(base(k)));

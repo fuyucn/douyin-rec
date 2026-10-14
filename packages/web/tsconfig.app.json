@@ -9,7 +9,7 @@
 
     "moduleResolution": "bundler",
     "baseUrl": ".",
-    "paths": { "@drec/contracts": ["../core/src/api-types.ts"] },
+    "paths": { "@drec/contracts": ["../core/src/api-types.ts"], "@drec/experimental": ["../core/src/experimental.ts"] },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",

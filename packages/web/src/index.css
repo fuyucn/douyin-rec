@@ -863,6 +863,29 @@ table.tasks tbody tr:last-child td {
   background: var(--accent-soft);
   color: var(--ink);
 }
+/* 「实验性」徽标:比普通 chip 更小,用 warning 色边框,一眼可辨但不抢控件标题 */
+.chip-experimental {
+  height: 18px;
+  padding: 0 6px;
+  font-size: 10px;
+  border-color: var(--warning);
+  color: var(--warning);
+  background: transparent;
+  cursor: pointer;
+  vertical-align: middle;
+}
+/* 可点击展开的说明:允许选中/点链接,比 tooltip 稍宽 */
+.experimental-popup {
+  max-width: 320px;
+  user-select: text;
+}
+.experimental-popup a {
+  color: inherit;
+}
+.chip-experimental:focus-visible {
+  outline: 2px solid var(--warning);
+  outline-offset: 1px;
+}
 .section-label {
   font-family: var(--font-mono);
   font-size: 11px;
