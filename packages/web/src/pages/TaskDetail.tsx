@@ -12,9 +12,10 @@ import { useT } from "../lib/i18n";
 import { classifyLogLine, LOG_LINE_STYLE } from "../lib/logLevel";
 import { QUALITY_FULL, fmtClock, fmtStartedAt, platformLabel, roomHref, roomId, scheduleText } from "../lib/labels";
 import { localScheduleTooltip, localTimeTooltip } from "../lib/tz";
-import { fmtBytes } from "../lib/nodes-summary";
+import { fmtBytes, roomSlugOf } from "../lib/nodes-summary";
 import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
 import { MergePanel } from "../components/MergePanel";
+import { jobStateLabel } from "../components/HubJobs";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
 /** Detail page (#/task/:id): info card + live logs console, 2s polling. */
@@ -40,10 +41,6 @@ export function TaskDetail(): ReactNode {
       const [tk, l] = await Promise.all([api.getTask(taskId), api.getTaskLogs(taskId)]);
       setTask(tk);
       setLogs(l.lines ?? []);
-      // 边录边传进度来自 master 的队列快照(按房间过滤);节点模式/失败时静默留空,不影响主数据。
-      const slug = roomId(tk.room);
-      const q = await api.getHubQueue({ q: slug || undefined }).catch(() => null);
-      setRolling((q?.delivering ?? []).filter((d) => !slug || d.roomSlug === slug));
     } catch {
       toast(t("tasks.unavailable"), "warning");
       navigate("/");
@@ -51,6 +48,21 @@ export function TaskDetail(): ReactNode {
   }, [taskId, navigate, toast, t]);
 
   usePolling(() => void poll(), 2000, Number.isFinite(taskId));
+  // 边录边传快照另走 10 秒一轮:它由 master 5 秒级状态轮询产生,2 秒重拉只是重复扫台账,
+  // 而节点模式下该端点固定 400 —— 没必要跟着任务详情的高频轮询。
+  // 房间匹配必须用与后端 extractRoomSlug 同口径的 roomSlugOf:roomId 只在抖音返回房间号,
+  // B站/快手会返回整段 URL → 与快照里的 roomSlug 永远不相等,进度区恒空。
+  const pollRolling = useCallback(async (): Promise<void> => {
+    try {
+      const tk = await api.getTask(taskId);
+      const slug = roomSlugOf(tk.room);
+      const q = await api.getHubQueue({ q: slug || undefined });
+      setRolling((q.delivering ?? []).filter((d) => !slug || d.roomSlug === slug));
+    } catch {
+      /* 非 master / 队列不可用 → 保持上次结果(不把已知进度清成空) */
+    }
+  }, [taskId]);
+  usePolling(() => void pollRolling(), 10_000, Number.isFinite(taskId));
 
   // Stick to the bottom unless the user scrolled away.
   useEffect(() => {
@@ -311,7 +323,7 @@ export function TaskDetail(): ReactNode {
                   }
                 />
                 <Row
-                  label={t("tasks.logs")}
+                  label={t("tasks.pipelineSteps")}
                   value={task.hubRule.enabled
                     ? task.hubRule.steps.map((st) => stepLabel(t, st)).join(" · ")
                     : t("tasks.hubDisabled")}
@@ -321,7 +333,7 @@ export function TaskDetail(): ReactNode {
                   value={
                     task.hubRule.lastRun ? (
                       <Link to={`/hub/${encodeURIComponent(task.hubRule.key)}`} className="text-ink hover:underline">
-                        {t(`hub.jobs.step.${task.hubRule.lastRun.state}`)}
+                        {jobStateLabel(t, task.hubRule.lastRun.state)}
                         {task.hubRule.lastRun.bv ? ` · ${task.hubRule.lastRun.bv}` : ""}
                       </Link>
                     ) : t("hub.jobs.noRunYet")

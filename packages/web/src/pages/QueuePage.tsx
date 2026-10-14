@@ -194,21 +194,24 @@ function FilterBar({
   const toggle = (arr: string[], v: string, set: (x: string[]) => void): void =>
     set(arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
   const activeCount = phase.length + states.length + platform.length + (q ? 1 : 0);
-  // 快捷态:点击即精确切到那一组相位(auto=false = 清空筛选)。
+  // 快捷态:只替换「相位/子状态」这一组,**不动搜索词与平台筛选** ——
+  // 否则「搜主播 + 只看需处理」这种组合会被一次点击清掉(老 chip 交互是能的,不能退化)。
   const quick: Array<{ key: string; label: string; on: boolean; apply: () => void }> = [
     {
-      key: "all", label: t("queue.filter.quickAll"), on: activeCount === 0,
-      apply: () => onReset(),
+      key: "all", label: t("queue.filter.quickAll"),
+      on: phase.length === 0 && states.length === 0,
+      apply: () => { onPhase([]); onStates([]); },
     },
     {
       key: "active", label: t("queue.filter.quickActive"),
-      on: phase.length === 3 && phase.includes("running") && phase.includes("queued") && phase.includes("waiting_settle"),
-      apply: () => { onReset(); onPhase(["running", "queued", "waiting_settle"]); },
+      on: phase.length === 3 && phase.includes("running") && phase.includes("queued") && phase.includes("waiting_settle") && states.length === 0,
+      apply: () => { onStates([]); onPhase(["running", "queued", "waiting_settle"]); },
     },
     {
       key: "attention", label: t("queue.filter.quickAttention"),
-      on: (phase.length === 2 && phase.includes("waiting_manual") && phase.includes("failed")) || (phase.length === 1 && phase.includes("waiting_manual")),
-      apply: () => { onReset(); onPhase(["waiting_manual", "failed"]); },
+      // 口径与 active 对齐:只有恰好是这一组相位时才高亮,避免「子集也亮」的两个真相。
+      on: phase.length === 2 && phase.includes("waiting_manual") && phase.includes("failed") && states.length === 0,
+      apply: () => { onStates([]); onPhase(["waiting_manual", "failed"]); },
     },
   ];
   // 相位选项:后端相位 + 前端派生的「拉取中」(state=syncing,不在 QUEUE_PHASES 里)。

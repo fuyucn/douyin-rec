@@ -21,14 +21,19 @@ export interface NodeRoom {
   sessions: RollingDeliveryDTO[];
 }
 
-/** 房间 URL / 纯数字 → 房间标识(与后端 extractRoomSlug 对齐的最小子集:抖音数字 id / 末段路径)。 */
+/**
+ * 房间 URL / 纯数字 → 房间标识。**必须与后端 `platform.extractRoomSlug` 同口径**:
+ * 抖音取 live.douyin.com/<数字> 的数字段,B站/快手取 URL 末段(去掉查询串)。取错会让
+ * 「按房间匹配」永远不命中(例如把整段 URL 当 slug 去比对房间号)。
+ */
 export function roomSlugOf(room: string | undefined): string {
   const r = (room ?? "").trim();
-  const m = /live\.douyin\.com\/(\d+)/.exec(r) ?? /\/(\d+)(?:[/?]|$)/.exec(r);
-  if (m) return m[1]!;
+  const dy = /live\.douyin\.com\/(\d+)/.exec(r);
+  if (dy) return dy[1]!;
+  if (/^\d+$/.test(r)) return r;
   const q = r.indexOf("?");
-  const base = q >= 0 ? r.slice(0, q) : r;
-  return base.replace(/\/+$/, "").split("/").pop() ?? base;
+  const base = (q >= 0 ? r.slice(0, q) : r).replace(/\/+$/, "");
+  return base.split("/").pop() ?? base;
 }
 
 export type NodeTaskInput = Pick<Task, "recordingWorkers"> & Partial<Pick<Task, "room" | "name" | "anchorName" | "enabled">>;

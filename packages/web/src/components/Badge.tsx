@@ -3,7 +3,7 @@ import type { Task } from "../api/client";
 import { DANMU_BADGE_CLASS, danmuKind } from "../lib/labels";
 import { useT } from "../lib/i18n";
 import { useTicker } from "../lib/hooks";
-import { taskPhase } from "../lib/task-status";
+import { PHASE_STYLE, taskPhase } from "../lib/task-status";
 
 interface BadgeProps {
   /** One of the badge-* modifier classes (e.g. "badge-violet"). */
@@ -53,8 +53,7 @@ function recordingAgeLabel(workers: Task["recordingWorkers"], now: number): stri
  *   已启用·待命           → 蓝，已启用但不在窗口/未开播
  */
 export function StatusBadge({
-  // running 不再参与判定(taskPhase 用 status/recording/stopping 覆盖),但调用方仍在传 —— 显式忽略以免误用。
-  running: _running,
+  running,
   status,
   enabled = true,
   recording,
@@ -74,30 +73,22 @@ export function StatusBadge({
   // 本地每秒走一次:否则「N 秒前核对」会冻结在渲染那一刻的数字 —— 推送驱动的页面
   // 恰恰很少重渲染,不自带 ticker 就会出现「永远显示 12s 前」。
   const now = useTicker(1_000);
-  // 判定顺序(停用 > 收尾 > 在录 > 等待 > 错误 > 待命)只写在 taskPhase 一处,徽标与详情页共用同一口径。
-  const phase = taskPhase({ enabled, status, recording: recording ?? false, stopping, recordingWorkers });
+  // 判定顺序与配色只写在 taskPhase / PHASE_STYLE 一处(与任务详情页共用),徽标不再自带分支。
+  const phase = taskPhase({ enabled, status, running, recording, stopping, recordingWorkers });
   // T17:远端状态是 SSH 探测的**缓存**,不是实时的。带出「N 秒前核对」,
   // 否则用户把一个 3 分钟前的旧结论当成实时(节点探测失败时缓存会一直是旧值)。
   const staleness = recordingAgeLabel(recordingWorkers, now);
-  const stale = staleness ? <span className="ml-1 opacity-70">{staleness}</span> : null;
-  const title = staleness ? t("badge.checkedAgoTitle", { ago: staleness }) : undefined;
-  const tone = phase.kind === "recording" ? "badge-success"
-    : phase.kind === "stopping" || phase.kind === "draining" ? "badge-orange"
-      : phase.kind === "error" ? "badge-error" : "badge-neutral";
-  const dot = phase.kind === "recording" ? "var(--success)"
-    : phase.kind === "stopping" || phase.kind === "draining" ? "var(--warning)"
-      : phase.kind === "error" ? "var(--error)" : "var(--muted-soft)";
-  // 脉冲只给「正在进行」的态(在录 / 收尾 / 等待),终态静止。
-  const pulse = phase.kind === "recording" || phase.kind === "stopping" || phase.kind === "draining";
+  const style = PHASE_STYLE[phase.kind];
+  const allWorkers = (recordingWorkers ?? []).map((w) => w.workerName);
   const nodes = phase.kind === "recording" && phase.recordingNodes.length > 0 ? phase.recordingNodes
-    : phase.kind === "waiting" && phase.unavailableNodes.length > 0 ? phase.unavailableNodes
-      : phase.kind === "waiting" ? (recordingWorkers ?? []).map((w) => w.workerName)
+    : phase.kind === "offline" ? phase.unavailableNodes
+      : phase.kind === "waiting" && allWorkers.length > 0 ? allWorkers
         : [];
   return (
-    <Badge tone={tone} title={title}>
-      <Dot color={dot} pulse={pulse} />
+    <Badge tone={style.tone} title={staleness ? t("badge.checkedAgoTitle", { ago: staleness }) : undefined}>
+      <Dot color={style.dot} pulse={style.pulse} />
       {nodes.length > 0 ? t(phase.textKey, { nodes: nodes.join(" + ") }) : t(phase.textKey)}
-      {stale}
+      {staleness ? <span className="ml-1 opacity-70">{staleness}</span> : null}
     </Badge>
   );
 }
