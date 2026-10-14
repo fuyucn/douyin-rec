@@ -8,9 +8,9 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 | --- | --- | --- |
 | 值班 Audit | 读 master 与各 worker 的录制状态、queue、`sync_jobs`、磁盘、日志；有证据才开 `incident` | 改代码、删文件、重启、重传、部署 |
 | 优化 Audit | 低频开 `enhancement`，写清代价和验收标准 | 把优化伪装成故障，或直接改代码 |
-| 自动 Triage（heartbeat） | 自动打 `accept` / `decline` / `needs-decision`，`decline` 写原因 | 对危险类自行 accept；替人拍板 |
-| 自动实现（heartbeat） | 领一个 `accept` issue，开分支和 **开 PR**（`Fixes #N`）；过「四不 close」门禁后可 **close issue** | 合并 PR、部署、顺手做无关改动 |
-| 自动 Review（heartbeat） | 对每个 open PR 派**独立会话**审查（门禁见下）；**审查通过即合并 PR**；不通过打回并列出缺口 | 改实现代码（只打回，不代改）、部署、跳过门禁合并 |
+| 自动 Triage（heartbeat） | 自动打 `accept` / `decline` / `needs-decision`，`decline` 写原因。**当前 PAUSED，由实现心跳或人代跑** | 对危险类自行 accept；替人拍板 |
+| 自动实现（heartbeat） | 领 `accept` issue（并行 ≤2，见下），开分支和 **开 PR**（`Fixes #N`）；打回后在原分支返工；`待验证` 票部署实跑后按「四不 close」**close issue**（close 的单一负责方） | 合并 PR、部署、顺手做无关改动 |
+| 自动 Review（heartbeat） | 对每个 open PR 派**独立会话**审查（门禁见下）；**审查通过即合并 PR 并把票转 `待验证`**；不通过打回并列出缺口 | 改实现代码（只打回，不代改）、部署、跳过门禁合并、close issue |
 | 人 | 部署、危险类拍板（`needs-decision`） | —— |
 
 危险类永远是 `needs-decision`，等人点头：上传、删源、删稿、部署、改 hub 规则、清理录像。
@@ -23,9 +23,9 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 
 | heartbeat | 节奏 | 做什么 | 禁止 |
 | --- | --- | --- | --- |
-| issue 自动 triage | 5min | 对新票自动打标签（规则见下） | 写代码、开分支、开 PR、close |
-| issue 自动实现 | 10min | 领 `accept` 且无 `in-progress` 的票 → 分支 + PR；过门禁后 close issue | 合并 PR、部署、同时做第二条 |
-| PR 自动 review + 合并 | 10min（与实现错开） | 派独立会话审 open PR；**门禁全过 → `gh pr merge --merge`**；不过 → 打回并列缺口 | 改实现代码、部署、跳过门禁合并 |
+| issue 自动 triage（当前 PAUSED，由实现心跳或人代跑） | 5min | 对新票自动打标签（规则见下） | 写代码、开分支、开 PR、close |
+| issue 自动实现 | 10min | 领 `accept` 且无 `in-progress` 的票 → 分支 + PR；打回票原分支返工；`待验证` 票收口 close | 合并 PR、部署、并行超过 2 张 |
+| PR 自动 review + 合并 | 10min（与实现错开） | 派独立会话审 open PR；**门禁全过 → `gh pr merge --merge`，票转 `待验证`**；不过 → 打回并列缺口 | 改实现代码、部署、跳过门禁合并、close issue |
 
 **自动 triage 判定规则**：
 
@@ -37,10 +37,21 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
    开着的 issue 里，或与仓库方向冲突（如绕过 guard）。评论写清原因。
 4. **拿不准 → `needs-decision`**，不猜。
 
-**自动实现约束**：同时最多一条**正在写代码**的票（= 已认领但还没开出 PR）；认领时先打 `in-progress`
-并评论「哪个 agent、何时开始」；只开 PR——**合并交给 review 心跳**（审查通过即自动合并），
-部署仍不自动；**close 见下方「四不 close」——四条门禁全过才允许自动 close**；
+**自动实现约束**：并行**最多 2 张**活跃票（已认领、PR 未合并），且两张票的改动范围（文件/模块）
+**不重叠**才可并行，重叠的第二张等第一张合并；认领时先打 `in-progress`
+并评论「哪个 agent、何时开始、范围（要改哪些文件/模块）、模型」；只开 PR——**合并交给 review 心跳**
+（审查通过即自动合并），部署仍不自动；**close 见下方「四不 close」——四条门禁全过才允许 close**；
 危险类哪怕已误标 `accept` 也要退回 `needs-decision` 再停手。
+
+**模型分工与会话管理**：
+
+- **编排 = 主会话**；**实现 / 返工 sub = `claude/claude-sonnet-5-5`**；**审查 sub = `claude/claude-opus-5-5`**。
+  所有 sub 都以 `fork_context: false` 派出（不继承主会话上下文，评审尤其要独立）。
+- **线程清理**：实现、review 两个心跳都在**每轮开头先清理已完成/空闲的子会话**（归档/关闭），再派新会话；
+  清理后线程仍满，本轮只做免派生工作。
+- **版本号撞号（现行做法）**：并行 PR 各自 bump 版本撞号时，后合并的一方机械 rebase 到最新 base 并顺延 patch，
+  `dist/douyin-rec.mjs` 重新 `pnpm bundle`（dist 不手工合并）；这类顺延**不计返工轮次**。
+  （提案，心跳暂未执行：认领时在评论里预留版本号，以免撞号。）
 
 ## 流转
 
@@ -49,17 +60,20 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 2. **Audit 开 issue**，挂 `incident` 或 `enhancement`。
 3. **自动 Triage 打标签**（无需人工介入）：`accept` / `decline` / `needs-decision`，判定规则见上。
    `accept` 后在 `TODO.md` 加 `T-N`，链到 issue；`needs-decision` 才需要人回一句结论。
-4. **自动实现认领**：实现 heartbeat 扫到 `accept` 且无 `in-progress` 的票即认领，打 `in-progress`
-   并留言「哪个 agent、何时开始」。**人不需要点名派活**；只在想指定别的会话做时手动接管。
+4. **自动实现认领**：实现 heartbeat 扫到 `accept` 且无 `in-progress` 的票即认领（并行 ≤2、范围不重叠），
+   打 `in-progress` 并留言「哪个 agent、何时开始、范围、模型」。**人不需要点名派活**；
+   只在想指定别的会话做时手动接管。
 5. **实现会话只做这一条**，开分支和 PR，PR 正文写 `Fixes #N`。不合并 PR（合并归 review 会话）、
    不部署、不顺手做无关改动。
 6. **代码做完先在 issue 留言**：做了什么、评论里哪条没采纳、为什么，然后按「四不 close」自查。
 7. **自动 Review 派独立会话审查**（`fork_context: false` 的新会话，只读审查、不改实现），
    按下方「review 门禁」逐条核；结论回帖到 PR。
 8. **审查通过 → review agent 直接合并 PR**（`gh pr merge <N> --merge`，base 保持
-   `feat/hub-optimization`）——**不再等人操作**；不通过 → 打回并列缺口，保持 `in-progress`。
-   合并后按「四不 close」收口：门禁全过就 `gh issue close` 并写明关闭依据
-   （验证命令与结果 / 回归测试 / 回写位置）。**部署仍由人做**（走「无 `recording===true` 才重启」）。
+   `feat/hub-optimization`）——**不再等人操作**，并把票由 `in-progress` 转 **`待验证`**；
+   不通过 → 打回并列缺口，保持 `in-progress`（返工回路见「review 门禁」）。
+9. **部署后实跑 → 收口**：**部署仍由人做**（走「无 `recording===true` 才重启」）；部署后实跑验证，
+   再按「四不 close」收口：门禁全过就 `gh issue close` 并写明关闭依据（验证命令与结果 / 回归测试 /
+   回写位置）。**close 的单一负责方 = 实现心跳的收口步骤**；review 心跳只做合并与转标签，不 close。
 
 > **注意 `Fixes #N` 在这里不会自动关票**：所有 agent PR 的 base 都是 `feat/hub-optimization`，
 > 不是仓库默认分支 `main`，GitHub 的 closing keyword 只在合进默认分支时生效。所以 close 必须显式执行，
@@ -67,7 +81,9 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 
 `accept` 只是「可以做」，不等于「有人在做」——看板上区分这两件事靠 `in-progress` 标签。
 自 2026-10-12 起，`accept` → `in-progress` 这一步由实现 heartbeat 自动完成，不再等人指定；
-`in-progress` → **合并 → close** 由 review heartbeat 自动完成，人只在危险类拍板时出场。
+`in-progress` → **合并 → `待验证`** 由 review heartbeat 自动完成，`待验证` → **close** 由实现 heartbeat
+在部署实跑后收口，人只在危险类拍板与部署时出场。
+**文档/测试类票**（无需部署实跑）合并后，由实现心跳当轮按「四不 close」收口，无需等部署。
 
 ## 自强化闭环总览
 
@@ -85,7 +101,7 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 
 ## 四不 close
 
-**close 由实现 agent 自己做，不等人**——但四个门禁全过才算真正完成：
+**close 由实现 agent（实现心跳的收口步骤）自己做，不等人**——但四个门禁全过才算真正完成：
 
 1. **无证据不开**——开票/评论必须有命令输出和节点角色、时间；没有就补，补不了就不开。
 2. **不验证不 close**——声称修复前必须实跑验证（或由人在评论里写明由谁、何时验证）。
@@ -109,7 +125,9 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
    diff 尽量小、单一插入点。用 `gh pr view` / `gh pr diff --name-only` /
    `git log --oneline origin/feat/hub-optimization..<branch>` 核对确实存在且对得上 issue。
 2. **验证有实际结果**：`pnpm test` 全量 + `pnpm typecheck`；动前端加 `cd packages/web && pnpm build`；
-   动运行时加 `pnpm bundle`。**不许只信自述**——review 要复核命令与输出（必要时在 PR 分支 worktree 重跑）。
+   动运行时加 `pnpm bundle`；**动运行时的改动还须本地 dev 实跑**（`pnpm serve:local` 端口 7861，或
+   `drec-dev` 容器端口 7871），实跑步骤与结果写进 PR 正文。**不许只信自述**——review 要复核命令与输出
+   （必要时在 PR 分支 worktree 重跑）。
 3. **行为变更有回归测试**：新分支 / 新边界 / 修 bug 都有 vitest 用例钉住；无法自动化的写明人工验证步骤。
 4. **自审清单可查**：PR 里有「自审发现 → 修复」清单；issue 评论里哪条没采纳及理由写清楚。
 5. **CI 状态**:不得有红,没有豁免项。架构文档漂移守护(`gen-architecture.mjs --check`)只比结构
@@ -131,12 +149,15 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
    规则,不代替第 1–8 条。
 
 **打回后的回路**:review 打回(任一门禁不过)→ PR 保持 open、issue 保持 `in-progress`,review 在 PR
-评论里列出缺口;**由实现 heartbeat 下一轮扫到「有打回评论的 `in-progress` PR」时派会话在原分支
-(`codex/issue-N-<slug>`)继续修复并 push**,不另开分支、不另开 PR;修完后 review 心跳下一轮重新审。
-review 只打回、不代改。危险类(第 9 条)打回后不进此回路,等人在 issue/PR 上回「决定」后再动。
+评论里列出缺口;**由实现 heartbeat 下一轮扫到「有打回评论的 `in-progress` PR」时派会话(返工 sub =
+`claude/claude-sonnet-5-5`)在原分支(`codex/issue-N-<slug>`)继续修复并 push**,不另开分支、不另开 PR;
+修完后 review 心跳下一轮重新审。**返工最多 2 轮,仍不过 → 转 `needs-decision`**(评论按「决定三行」写)。
+版本号冲突导致的 rebase 顺延不计入轮次。review 只打回、不代改。危险类(第 9 条)打回后不进此回路,
+等人在 issue/PR 上回「决定」后再动。
 
-合并后：**不删分支**（repo 设 `delete_branch_on_merge=false`）；按「四不 close」收口 issue；
-**部署仍由人做**（走 `recording===true` guard）。review agent 只合并，不改代码、不部署。
+合并后：**不删分支**（repo 设 `delete_branch_on_merge=false`）；票转 **`待验证`**（PR 已合并、等部署后线上实跑，
+不占并行位）；部署后实跑，再由实现心跳按「四不 close」收口。
+**部署仍由人做**（走 `recording===true` guard）。review agent 只合并并转标签，不改代码、不部署、不 close。
 
 ## 指标与闭环回写
 
@@ -167,7 +188,8 @@ review 只打回、不代改。危险类(第 9 条)打回后不进此回路,等�
 - `enhancement`：优化，不修当前故障。
 - `accept`：可以做。
 - `decline`：不做。评论里写原因。
-- `in-progress`：已认领，正在做。实现会话认领时打，PR 打开后保留到合并。
+- `in-progress`：已认领，正在做。实现会话认领时打，PR 打开后保留到合并（合并时换成 `待验证`）。
+- `待验证`：PR 已合并，等部署后线上实跑；**不占并行位**。实跑通过并满足「四不 close」后由实现心跳 close（文档/测试类票合并后当轮收口，无需等部署）。
 - `needs-decision`：危险类，或证据不够。见下方「决定三行」。
 
 ## 决定三行（`needs-decision` 必填）
@@ -200,6 +222,12 @@ review 只打回、不代改。危险类(第 9 条)打回后不进此回路,等�
 - 不常驻四个 agent 互相派活。
 - 自动实现**不部署**（部署仍走 `recording===true` guard，永远是人做）；**PR 由 review heartbeat
   派独立会话审查，通过即由 review agent 合并**，人不必手动合并。
-  **close issue 不是禁忌**——过了「四不 close」四条门禁就由 agent 直接关；缺一条才留 open。
+  **close issue 不是禁忌**——过了「四不 close」四条门禁就由实现心跳的收口步骤直接关；缺一条才留 open。
+- **分支角色**：`main` = 最稳定版本，其余分支（含 `feat/hub-optimization`）= 开发版。agent 的 PR 一律以
+  `feat/hub-optimization` 为 base，**agent 不得向 `main` 开 PR、合并或推送**；`main` 只由人在开发分支
+  长时间实测稳定后合并。
+- **提交身份只能用自己的账号**：`git config` 的 `user.name/user.email` 必须是仓库所有者
+  （`fuyucn` + GitHub noreply 邮箱），禁止占位值（如 `t@主机名`）——会泄漏主机名并把作者映射到错误账号。
+  commit 也不加 AI 署名 trailer。
 - 危险类（上传、删源、删稿、部署、改 hub 规则、清理录像）不得自动 accept。
 - master 把 job 标成 `failed`，但节点进程还在时，禁止再开一场上传。
