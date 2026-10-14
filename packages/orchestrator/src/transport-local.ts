@@ -2,7 +2,7 @@
 import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { join, basename } from "node:path";
 import { linkOrCopy } from "@drec/core";
-import type { NodeTaskDTO, RemoteTaskSpec, NodeStatus } from "@drec/core";
+import { freeGBOf, type NodeTaskDTO, type RemoteTaskSpec, type NodeStatus } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecordingStatus, NodeTasks, Transport } from "./transport.js";
 import { scanRecordings, scanRollingSessions } from "./scan.js";
 
@@ -128,6 +128,6 @@ export class LocalTransport implements Transport {
   async diskFreeGB(): Promise<number> {
     const { statfs } = await import("node:fs/promises");
     const st = await statfs(this.o.recordingsDir);
-    return (Number(st.bavail) * Number(st.bsize)) / 1e9;
+    return freeGBOf(st);
   }
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { DEFAULT_DISK_MIN_GB, resolveDiskMinGB } from "../../packages/core/src/disk-watermark.js";
+import { DEFAULT_DISK_MIN_GB, freeBytesOf, freeGBOf, resolveDiskMinGB } from "../../packages/core/src/disk-watermark.js";
 import { resolveDiskWatermarkBytes } from "../../packages/app/src/daemon.js";
 import { diskWatermarkGate } from "../../packages/orchestrator/src/node-side-upload.js";
 
@@ -55,5 +55,26 @@ describe("resolveDiskMinGB — 磁盘水位统一解析口径(issue #38)", () =>
     if (v !== undefined) {
       expect(diskWatermarkGate(5, v as number).ok).toBe(!(gb > 5));
     }
+  });
+});
+
+describe("freeBytesOf / freeGBOf — 必须用 frsize(macOS bind mount 的 bsize 是 1MiB)", () => {
+  it("frsize 存在且与 bsize 不同 → 用 frsize(否则放大 256 倍,水位闸门失效)", () => {
+    // master 实测:Docker/OrbStack bind mount bsize=1MiB、frsize=4096、bavail=9427379。
+    const bytes = freeBytesOf({ bavail: 9_427_379, bsize: 1_048_576, frsize: 4096 });
+    expect(bytes).toBe(9_427_379 * 4096);
+    expect(freeGBOf({ bavail: 9_427_379, bsize: 1_048_576, frsize: 4096 })).toBeCloseTo(38.6, 1);
+  });
+
+  it("Linux:bsize == frsize → 与旧口径一致", () => {
+    expect(freeBytesOf({ bavail: 10_871_071, bsize: 4096, frsize: 4096 })).toBe(10_871_071 * 4096);
+  });
+
+  it("没有 frsize(旧 Node / 未知 fs)→ 回落 bsize", () => {
+    expect(freeBytesOf({ bavail: 1000, bsize: 4096 })).toBe(4_096_000);
+  });
+
+  it("空值/0 不产生 NaN(bsize=0 且无 frsize → 0)", () => {
+    expect(freeBytesOf({ bavail: 5, bsize: 0 })).toBe(0);
   });
 });
