@@ -86,7 +86,9 @@ export function buildWorkers(ctx: ApiCtx) {
       if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可读节点任务)");
       if (!deps.nodeTasks) return err(400, "节点任务读取未注入");
       try {
-        return { status: 200, body: await deps.nodeTasks(workerId) };
+        const r = await deps.nodeTasks(workerId);
+        // 不把 webhook 送到浏览器(F3 只需要 id/名字来选任务;凭证类字段一律不透出)。
+        return { status: 200, body: { ...r, tasks: r.tasks.map(({ webhook: _w, ...rest }) => rest) } };
       } catch (e) {
         return { status: 200, body: { workerId, tasks: [], error: (e as Error)?.message ?? String(e) } };
       }

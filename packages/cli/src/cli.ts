@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf } from "@drec/core";
+import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -1784,7 +1784,8 @@ program
       }
       const body = (await res.json()) as { lines?: unknown };
       const all = Array.isArray(body.lines) ? body.lines.filter((x): x is string => typeof x === "string") : [];
-      process.stdout.write(JSON.stringify({ lines: all.slice(-lines) }) + "\n");
+      // 脱敏后才出节点:日志里可能带 cookie(vendored 取流代码在异常信息里打印整串)。
+      process.stdout.write(JSON.stringify({ lines: redactLogLines(all.slice(-lines)) }) + "\n");
     } catch (e) {
       process.stdout.write(JSON.stringify({ lines: [], error: `读本机 serve 失败: ${(e as Error)?.message ?? e}` }) + "\n");
     }
