@@ -232,8 +232,13 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
       : node?.phase === "started"
         ? `节点已接管(remux 阶段)但未能确认终止执行体(旧 bundle 不支持终止 / 不可达):执行体可能仍在跑并稍后建稿`
         : node?.bv ? `节点已建稿 BV=${node.bv} 但未确认完成` : `节点上报完成但缺 BV,无法确认分 P`;
-    const note = `${why};已禁止自动重试,请人工核对 B站稿件后处理`;
+    const progress = node?.confirmedParts != null
+      ? `(已确认 ${node.confirmedParts} 个分 P${node.intentPart ? `,第 ${node.intentPart} 个追加结果未知` : ""})`
+      : "";
+    const note = `${why}${progress};已禁止自动重试,请人工核对 B站稿件后处理`;
     jlog(`节点侧结果不确定: ${note}`);
+    // issue #25 ②:回读到 BV 就记进台账(此前超时被杀后台账无任何 BV,人工只能去 B站翻稿件)。
+    if (node?.bv) ledger.setBv(streamKey, node.bv);
     ledger.logStep(streamKey, "node_upload", "done", `节点侧结果不确定: ${why.slice(0, 120)}`);
     ledger.syncNodeState(streamKey, "node_upload", "failed", { error: note.slice(0, 200) });
     // sync_node_states 行必须写:reconciler 的自动重试闸门看的是它(= 不安全重试标记)。
