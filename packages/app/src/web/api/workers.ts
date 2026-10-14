@@ -81,6 +81,34 @@ export function buildWorkers(ctx: ApiCtx) {
       }
     },
 
+    /** master 读某节点的任务清单(F3;只读,隐私投影无凭证)。失败回 200 + error,不让页面报错。 */
+    async nodeTasks(workerId: string): Promise<ApiResult> {
+      if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可读节点任务)");
+      if (!deps.nodeTasks) return err(400, "节点任务读取未注入");
+      try {
+        return { status: 200, body: await deps.nodeTasks(workerId) };
+      } catch (e) {
+        return { status: 200, body: { workerId, tasks: [], error: (e as Error)?.message ?? String(e) } };
+      }
+    },
+
+    /**
+     * master 代查节点任务日志(F3)。只读;fleet 模式下节点网页日常不看,排查不必登节点。
+     * 行数夹取(默认 200 / 上限 1000),防一次调用把上千行拖过 ssh 再灌进浏览器。
+     */
+    async nodeTaskLogs(workerId: string, taskId: number, lines?: number): Promise<ApiResult> {
+      if (!deps.hubEnabled) return err(400, "hub 未启用(仅 master 可代查节点日志)");
+      if (!deps.nodeTaskLogs) return err(400, "节点日志代查未注入");
+      if (!Number.isFinite(taskId) || taskId <= 0) return err(400, "taskId 非法");
+      const n = Number.isFinite(lines) ? Math.min(1000, Math.max(1, Math.trunc(lines as number))) : 200;
+      try {
+        return { status: 200, body: await deps.nodeTaskLogs(workerId, taskId, n) };
+      } catch (e) {
+        // 探测失败也是**可观测性结果**:回 200 + error,让 UI 显示原因,而不是让页面报错。
+        return { status: 200, body: { workerId, taskId, lines: [], error: (e as Error)?.message ?? String(e) } };
+      }
+    },
+
     async workersStatus(): Promise<ApiResult> {
       // 未注入(hub 未开)→ 空数组(卡片显示灰/无点,不报错)。
       if (!deps.probeAllWorkers) return { status: 200, body: [] as WorkerStatus[] };

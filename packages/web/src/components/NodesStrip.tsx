@@ -13,12 +13,15 @@ import { api, type RollingDeliveryDTO, type Task, type WorkerStatus } from "../a
 import { baseVersion, fmtBytes, summarizeNodes } from "../lib/nodes-summary";
 import { usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
+import { Button } from "./Button";
+import { NodeLogsDialog } from "./NodeLogsDialog";
 
 export function NodesStrip({ delivering }: { delivering: readonly RollingDeliveryDTO[] }): ReactNode {
   const t = useT();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [status, setStatus] = useState<Record<string, WorkerStatus | undefined>>({});
   const [masterVersion, setMasterVersion] = useState("");
+  const [logsFor, setLogsFor] = useState<{ id: string; name: string } | null>(null);
   // 只在确认是 master(hub 已启用)时才轮询;加载中/节点模式不发请求。
   const enabled = useAtomValue(hubEnabledAtom) === true;
 
@@ -72,10 +75,21 @@ export function NodesStrip({ delivering }: { delivering: readonly RollingDeliver
                 {n.lockedBytes > 0 && <span className="font-mono">{t("queue.nodes.locked", { size: fmtBytes(n.lockedBytes) })}</span>}
                 {n.ambiguous > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.delivering.unknown")} {n.ambiguous}</span>}
               </div>
+              {/* F3:master 代查该节点日志(只读),排查不用登节点看网页;本机节点由后端回提示。 */}
+              <div className="pt-1">
+                <Button small variant="secondary" onClick={() => setLogsFor({ id: n.id, name: n.name })}>
+                  {t("hub.workers.logs")}
+                </Button>
+              </div>
             </div>
           );
         })}
       </div>
+      <NodeLogsDialog
+        workerId={logsFor?.id ?? null}
+        workerName={logsFor?.name ?? ""}
+        onClose={() => setLogsFor(null)}
+      />
     </div>
   );
 }

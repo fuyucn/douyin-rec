@@ -146,6 +146,13 @@ export interface Transport {
    */
   diskFreeGB?(): Promise<number>;
   /**
+   * 读该节点上**某个任务**最近的录制日志尾巴(隐藏 `_task-logs` 子命令,F3)。
+   *
+   * 为什么:节点网页在 fleet 模式下日常不看,排查却要登到节点上。master 代查即可,
+   * 不用给节点开公网入口。旧 bundle 无该命令 → 抛 unknown command,调用方按「不支持」处理。
+   */
+  taskLogs?(taskId: number, lines: number): Promise<{ lines: string[]; error?: string }>;
+  /**
    * 节点侧上传能力探测(experimental,见 plans/027)。无此能力(旧 bundle)= 不支持 → flag on 的房间回落现状。
    * 查:biliup 可用 + B站 cookie 存在 + 磁盘剩余。
    */

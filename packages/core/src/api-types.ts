@@ -539,6 +539,29 @@ export interface NodeTaskDTO {
   rollingEffective: boolean;
 }
 
+/**
+ * GET /api/hub/workers/:id/tasks 的响应(F3):该节点上的任务清单(node 的隐私安全投影,无凭证)。
+ * 供 controller 的「节点日志」对话框列出可查的任务。
+ */
+export interface NodeTasksDTO {
+  workerId: string;
+  tasks: NodeTaskDTO[];
+  /** 拿不到清单的原因(节点不可达 / 该节点类型不支持)。有值时 tasks 为空。 */
+  error?: string;
+}
+
+/** GET /api/hub/workers/:id/tasks/:taskId/logs 的响应(F3,只读)。 */
+export interface NodeTaskLogsDTO {
+  workerId: string;
+  taskId: number;
+  lines: string[];
+  /**
+   * 拿不到日志的原因(节点不可达 / 旧 bundle 无该命令 / 节点 serve 未起 / 节点上无此任务)。
+   * 有值时 `lines` 为空 —— UI 原样展示,不当成「无日志」。
+   */
+  error?: string;
+}
+
 /** master → node 的期望任务(applyTasks;含 cookies,只走可信 ssh/本地通道)。 */
 export interface RemoteTaskSpec {
   platform: string;

@@ -377,3 +377,25 @@ describe("nodePipeline 按调用传入的超时(issue #25 ①,真实 spawn,PATH 
     expect((await mk().nodePipeline(spec)).bv).toBe("BV1FAKE");
   });
 });
+
+describe("SshTransport.taskLogs(F3:master 代查节点日志)", () => {
+  const mkT = (run: (argv: string[]) => Promise<string>) =>
+    new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+
+  it("透传行数并原样返回行;带 error 时也返回(不当失败抛错)", async () => {
+    const calls: string[] = [];
+    const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ lines: ["x", "y"] }); });
+    await expect(t.taskLogs(7, 200)).resolves.toEqual({ lines: ["x", "y"] });
+    expect(calls[0]).toContain("_task-logs /data/drec 7 200");
+
+    const t2 = mkT(async () => JSON.stringify({ lines: [], error: "serve 未起" }));
+    await expect(t2.taskLogs(7, 50)).resolves.toEqual({ lines: [], error: "serve 未起" });
+  });
+
+  it("脏数据清洗:非字符串行丢弃、非字符串 error 忽略", async () => {
+    const t = mkT(async () => JSON.stringify({ lines: ["ok", 1, null, "ok2"], error: 42 }));
+    await expect(t.taskLogs(1, 10)).resolves.toEqual({ lines: ["ok", "ok2"] });
+    const t2 = mkT(async () => JSON.stringify({ lines: "not-an-array" }));
+    await expect(t2.taskLogs(1, 10)).resolves.toEqual({ lines: [] });
+  });
+});

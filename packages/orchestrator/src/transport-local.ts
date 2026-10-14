@@ -33,6 +33,8 @@ export interface LocalOpts {
    * 否则版本漂移告警会漏掉 master 自己那台。
    */
   nodeStatus?: () => NodeStatus | null;
+  /** 本机任务日志尾巴(F3);缺省 → taskLogs() 返回不支持。 */
+  taskLogs?: (taskId: number, lines: number) => { lines: string[]; error?: string };
 }
 
 export class LocalTransport implements Transport {
@@ -81,6 +83,12 @@ export class LocalTransport implements Transport {
   async recordingStatus(): Promise<NodeRecordingStatus> {
     const rooms = this.o.activeRecordingRooms?.() ?? [];
     return { rooms, rolling: scanRollingSessions(this.o.recordingsDir, rooms) };
+  }
+
+  /** 本机任务日志尾巴(F3):由组合根注入读取(本地 serve 自己的环形缓冲)。 */
+  async taskLogs(taskId: number, lines: number): Promise<{ lines: string[]; error?: string }> {
+    if (!this.o.taskLogs) return { lines: [], error: "本机未注入日志读取(单机模式)" };
+    return this.o.taskLogs(taskId, lines);
   }
 
   /** 轻量探针:recordings 目录存在即视为就绪(不扫内容)。 */

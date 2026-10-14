@@ -277,6 +277,20 @@ export class SshTransport implements Transport {
     }
   }
 
+  /**
+   * 读远端某任务的日志尾巴(F3)。日志来自节点 serve 的**内存环形缓冲**,节点重启即空 →
+   * 返回 `error` 由调用方原样展示,不当成失败抛错(可观测性不能反过来打断任何东西)。
+   */
+  async taskLogs(taskId: number, lines: number): Promise<{ lines: string[]; error?: string }> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const out = await this.runStatus([`${nodePrefix} _task-logs ${this.o.dataRoot} ${taskId} ${lines}`]);
+    const parsed = JSON.parse(out) as { lines?: unknown; error?: unknown };
+    return {
+      lines: Array.isArray(parsed.lines) ? parsed.lines.filter((x): x is string => typeof x === "string") : [],
+      ...(typeof parsed.error === "string" ? { error: parsed.error } : {}),
+    };
+  }
+
   /** 节点侧上传能力探测(experimental,见 plans/027)。旧 bundle 无 `_node-capabilities` → 抛错,调用方按不支持处理。 */
   async nodeCapabilities(): Promise<NodeCapabilities> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;

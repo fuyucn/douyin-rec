@@ -183,6 +183,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       // hub 未启用不注入 → 端点回落 400(与 hub.start 一致的开关逻辑)。
       testWorker: hubEnabled ? hubStarter?.testWorker : undefined,
       probeAllWorkers: hubEnabled ? hubStarter?.probeAllWorkers : undefined,
+      nodeTaskLogs: hubEnabled ? hubStarter?.nodeTaskLogs : undefined,
+      nodeTasks: hubEnabled ? hubStarter?.nodeTasks : undefined,
       recordingWorkers: hubEnabled ? hubStarter?.recordingWorkers : undefined,
       // issue #73:与 `_apply-tasks` 同目录(<数据根>/config/managed),节点列表据快照里的 assigned 标记过滤。
       managedStateDir: join(rootConfigDir(), "managed"),

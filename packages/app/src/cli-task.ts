@@ -260,6 +260,10 @@ export interface HubStarter {
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
   /** 批量存活探针(cli L5 用 orchestrator scoped transport ping 实现)。省略 → status 端点返回 []。 */
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  /** master 读某节点的任务清单(F3,只读)。省略 → 端点返回 400。 */
+  nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
+  /** master 代查某节点的任务日志尾巴(F3)。省略 → 端点返回 400(hub 未启用)。 */
+  nodeTaskLogs?: (workerId: string, taskId: number, lines: number) => Promise<import("@drec/core").NodeTaskLogsDTO>;
   /** master 控制台读取 hub 源任务的 worker 录制状态快照。 */
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
   /** master 资源池快照(读同一 ResourcePool 实例);队列页显示 CPU/上传占用与排队位次。省略 → 全 0。 */
