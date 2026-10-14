@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync } from "@drec/core";
+import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf } from "@drec/core";
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -1616,7 +1616,7 @@ program
     const { statfs } = await import("node:fs/promises");
     try {
       const st = await statfs(dataRoot);
-      const freeGB = (Number(st.bavail) * Number(st.bsize)) / 1e9;
+      const freeGB = freeGBOf(st);
       process.stdout.write(JSON.stringify({ freeGB: Number(freeGB.toFixed(2)) }) + "\n");
     } catch (e) {
       process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");

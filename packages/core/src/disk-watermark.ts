@@ -11,6 +11,22 @@
 /** 磁盘水位缺省值(GB)。 */
 export const DEFAULT_DISK_MIN_GB = 10;
 
+/**
+ * 从 `statfs` 结果算可用字节。**必须优先用 `frsize`**:macOS 上的 Docker/OrbStack
+ * bind mount 会把 `bsize` 报成 1MiB(而 `frsize` 仍是 4096),用 `bsize` 会把可用空间放大 256 倍 ——
+ * master 的数据根就挂在这种卷上,水位闸门因此永不触发(实测报 9.8TB,真实只有 38GB)。
+ * Linux 上两者相等,行为不变。两者都拿不到时回落 `bsize`。
+ */
+export function freeBytesOf(st: { bavail: number | bigint; bsize: number | bigint; frsize?: number | bigint }): number {
+  const unit = Number(st.frsize ?? st.bsize) || Number(st.bsize) || 0;
+  return Number(st.bavail) * unit;
+}
+
+/** 可用空间(GB),口径与 {@link freeBytesOf} 一致。 */
+export function freeGBOf(st: Parameters<typeof freeBytesOf>[0]): number {
+  return freeBytesOf(st) / 1e9;
+}
+
 export type DiskMinGBSource = "配置" | "默认" | "关闭";
 
 export function resolveDiskMinGB(

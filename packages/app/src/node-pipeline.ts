@@ -19,7 +19,7 @@ import path from "node:path";
 import {
   linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, isAppendAmbiguous,
   isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, partTitleToFilename, resolveOutputStem, sanitizeStreamKey,
-  stampedSessionBaseOf as sessionBaseOfFile, UploadGate, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
+  stampedSessionBaseOf as sessionBaseOfFile, UploadGate, freeGBOf, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
 } from "@drec/core";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment } from "@drec/post-process";
 import { appendGroup, countVideoParts, uploadPlain } from "./upload/biliup.js";
@@ -779,7 +779,7 @@ export async function probeNodeCapabilities(dataRoot: string): Promise<{
   try {
     const { statfs } = await import("node:fs/promises");
     const st = await statfs(dataRoot);
-    diskFreeGB = (Number(st.bavail) * Number(st.bsize)) / 1e9;
+    diskFreeGB = freeGBOf(st);
   } catch { /* 目录不存在等 → 0 */ }
   // 中文字体(烧录用;节点侧分支不烧,仅诊断展示)。fc-list 缺失 = 无。
   const cjkFonts = spawnSync("sh", ["-c", "fc-list 2>/dev/null | grep -qi 'noto sans cjk'"], { stdio: "ignore" }).status === 0;

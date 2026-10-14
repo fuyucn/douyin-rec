@@ -9,7 +9,7 @@
  */
 import { mkdirSync, statfsSync } from "node:fs";
 import { join } from "node:path";
-import { createLogger } from "@drec/core";
+import { createLogger, freeBytesOf, freeGBOf } from "@drec/core";
 import { TaskStore, resolveTaskWebhook } from "./store.js";
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
@@ -235,7 +235,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
           const dir = resolveOutputDir(null);
           mkdirSync(dir, { recursive: true }); // 确保存在,statfs 才能查到该卷
           const st = await statfs(dir);
-          const freeGB = (Number(st.bavail) * Number(st.bsize)) / 1e9;
+          const freeGB = freeGBOf(st);
           if (freeGB < DISK_MIN_GB) {
             if (!diskAlerted) {
               diskAlerted = true;
@@ -326,7 +326,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
           // 数据根与录像目录同卷;录像目录可能尚未创建(全新部署)→ 依次回退数据根。
           // 都取不到(异常)→ null = 不拦(避免把探测失败当爆盘误停,已有磁盘看门狗告警兜底)。
           for (const p of [resolveOutputDir(undefined), drecRoot()]) {
-            try { const st = statfsSync(p); return Number(st.bavail) * Number(st.bsize); } catch { /* 试下一个 */ }
+            try { return freeBytesOf(statfsSync(p)); } catch { /* 试下一个 */ }
           }
           return null;
         },
