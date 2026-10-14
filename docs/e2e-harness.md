@@ -41,6 +41,7 @@ expectHealthyDone(s, s.onlyKey(), { parts: 3 });
 ## 口径说明
 
 - 「stage 无残留」按 `FULL_CLEANUP`(三个清理开关全开)判定;只开 `sourceAfterDone`+`stageAfterDone` 时,
-  stage 里拉回的源段副本仍会留下(`stageSourceAfterMerge` 才删它们)。
+  整稿核验通过后 stage 内视频类(`.ts/.flv/.mp4`、`.work/`、`.upload/`,含拉回的源段副本)也会一并清(#60,
+  见 `stage-clean.test.ts`);核验未过/待重试、无稿件号(stage 模式)的场一律不动。
 - `job.log` 与 `.drec-node-result.json`(节点侧结果凭据)是有意保留的小文件,不算残留。
 - ffmpeg 产物只是占位文件;转码/烧录正确性不在本脚手架范围(由 post-process 各自单测覆盖)。

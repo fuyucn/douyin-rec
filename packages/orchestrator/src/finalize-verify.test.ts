@@ -97,3 +97,41 @@ describe("finalizeAfterUpload:观察期核验只记录,不阻塞", () => {
     expect(String((notify.mock.calls[0][0] as { message: string }).message)).toContain("疑似缺失");
   });
 });
+
+describe("finalizeAfterUpload:stageCleanConfirmed(stage 视频类清理的唯一闸门,#60)", () => {
+  const run = async (parts: Record<string, number[]>, actual: number | null | "no-count") => {
+    const { ledger } = fakeLedger(parts);
+    const d = deps(ledger, actual === "no-count" ? null : actual) as unknown as { countParts?: unknown };
+    if (actual === "no-count") delete d.countParts; // 未注入分P查询 → 核验被跳过
+    return finalizeAfterUpload({
+      streamKey: "k", bv: "BV1", deps: d as Parameters<typeof finalizeAfterUpload>[0]["deps"], log: () => {},
+      cleanupSources: async () => ({ ok: true, failed: [] }),
+      on: ALL_ON, notify: () => {},
+    });
+  };
+
+  it("核验通过(期望3/实际3)→ 为真", async () => {
+    expect((await run({ plain: [0, 1, 2] }, 3)).stageCleanConfirmed).toBe(true);
+  });
+  it("疑似少分P(期望3/实际1)→ 不为真(且不删节点源的口径 cleanConfirmed 也不为真)", async () => {
+    const r = await run({ plain: [0, 1, 2] }, 1);
+    expect(r.stageCleanConfirmed).not.toBe(true);
+    expect(r.cleanConfirmed).not.toBe(true);
+  });
+  it("观察期分P只多不少且有基线(期望3/实际5)→ 为真", async () => {
+    expect((await run({ plain: [0, 1, 2] }, 5)).stageCleanConfirmed).toBe(true);
+  });
+  it("核验被跳过:未注入分P查询 → 不为真,但旧口径 cleanConfirmed 保持为真", async () => {
+    const r = await run({ plain: [0, 1, 2] }, "no-count");
+    expect(r.stageCleanConfirmed).not.toBe(true);
+    expect(r.cleanConfirmed).toBe(true);
+  });
+  it("核验被跳过:无基线(没有已传分P)→ 不为真,旧口径 cleanConfirmed 保持为真", async () => {
+    const r = await run({}, 3);
+    expect(r.stageCleanConfirmed).not.toBe(true);
+    expect(r.cleanConfirmed).toBe(true);
+  });
+  it("取不到分P数(待重试)→ 不为真", async () => {
+    expect((await run({ plain: [0, 1, 2] }, null)).stageCleanConfirmed).not.toBe(true);
+  });
+});

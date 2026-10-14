@@ -1,5 +1,5 @@
 import path from "node:path";
-import { appendFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
@@ -45,6 +45,23 @@ export interface PipelineCleanup {
 /** 清理路径兜底:只处理视频(.ts/.mp4/.flv 等);.xml/.ass 走下面的 keep 规则单独判定。 */
 /** 清理路径兜底:只处理视频(.ts/.mp4/.flv 等);.xml/.ass 走 xmlKeepRule 单独判定。 */
 export const videoOnly = (paths: string[]): string[] => paths.filter((p) => !/\.(xml|ass)$/i.test(p));
+
+/**
+ * stage 目录顶层的「视频类内容」(`.ts/.flv/.mp4` + `.work/` `.upload/` 中间产物目录)。
+ * 用于 `stageAfterDone` 的整场清空:拉回的源段副本(本机胜出时是硬链接)、续跑残留、中间产物都在其中。
+ * **绝不包含** `.xml/.ass/.session.json/job.log`;只看顶层、不递归未知目录;不返回 stageSub 本身。
+ * 调用方必须自己保证「整稿核验通过 + 有稿件号」(见 finalizeAfterUpload 的 stageCleanConfirmed)。
+ */
+export function stageVideoLeftovers(stageSub: string): string[] {
+  const out: string[] = [];
+  for (const name of readdirSyncSafe(stageSub)) {
+    const p = path.join(stageSub, name);
+    let isDir: boolean;
+    try { isDir = lstatSync(p).isDirectory(); } catch { continue; }
+    if (isDir ? name === ".work" || name === ".upload" : /\.(ts|flv|mp4)$/i.test(name)) out.push(p);
+  }
+  return out;
+}
 
 /**
  * **弹幕源/渲染文件(.xml/.ass)的删除规则**——唯一不变量:两处不能同时删光,至少留一份。
@@ -324,7 +341,7 @@ export async function finalizeOnly(
 ): Promise<{ state: JobState; bv?: string }> {
   const rmStageFn = deps.rmStage ?? defaultRmStage;
   const cfg = deps.cfg;
-  await finalizeAfterUpload({
+  const fin = await finalizeAfterUpload({
     streamKey, bv, deps, log: jlog, notify,
     cleanupSources: () => cleanupSourcesShared({
       streamKey, ledger: deps.ledger, transports: deps.transports, members,
@@ -334,6 +351,20 @@ export async function finalizeOnly(
     }),
     on: { plain: true, danmu: burnFlags(cfg.steps).burnDanmu, livechat: burnFlags(cfg.steps).burnLivechat },
   });
+  // 收尾补跑:此前因核验未过而留下的 stage 视频类内容,在核验通过后补清(同一口径)。
+  if (cfg.cleanup?.stageAfterDone && fin.stageCleanConfirmed) {
+    const left = stageVideoLeftovers(stageSub);
+    if (left.length > 0) {
+      deps.ledger.logStep(streamKey, "clean_stage", "start");
+      try { await rmStageFn(left); deps.ledger.logStep(streamKey, "clean_stage", "done", `删 ${left.length} 文件(补清 stage 视频类)`); }
+      catch (e) {
+        const msg = String((e as Error)?.message ?? e).slice(0, 200);
+        deps.ledger.logStep(streamKey, "clean_stage", "done", `删 ${left.length} 文件 · 失败`);
+        deps.ledger.syncNodeState(streamKey, "clean_stage", "failed", { error: msg });
+        jlog(`清理失败(clean_stage):${msg}`);
+      }
+    }
+  }
   return { state: "done", bv };
 }
 
@@ -349,7 +380,7 @@ export async function finalizeAfterUpload(o: {
   cleanupSources: (opts?: { skipNodeSources?: boolean }) => Promise<CleanupOutcome>;
   on: { plain: boolean; danmu: boolean; livechat: boolean };
   notify: (e: NotifyEvent) => void;
-}): Promise<CleanupOutcome & { verifyBlocked?: boolean }> {
+}): Promise<CleanupOutcome & { verifyBlocked?: boolean; cleanConfirmed?: boolean; stageCleanConfirmed?: boolean }> {
   const { deps, streamKey, bv, log } = o;
   const ledger = deps.ledger;
   // 核验的重查退避复用 deps.sleep(与 append 重试同一注入点):测试注入 no-op 即免真等 45s。
@@ -385,7 +416,10 @@ export async function finalizeAfterUpload(o: {
           + (lostParts ? "(观察期:疑似缺失,已保留节点源)" : "(观察期仅记录,未阻塞)"),
       });
       // 疑似缺失 → 只做 stage 侧清理,跳过节点源(sourceAfterDone 置 false);其余照常。
-      return lostParts ? await o.cleanupSources({ skipNodeSources: true }) : await o.cleanupSources();
+      // stageCleanConfirmed(stage 视频类清理的唯一闸门)只在「有基线且分 P 只多不少」时为真。
+      return lostParts
+        ? await o.cleanupSources({ skipNodeSources: true })
+        : { ...(await o.cleanupSources()), cleanConfirmed: true, stageCleanConfirmed: true };
     }
     // 返回值也要改:调用方直接把本函数返回的 state 交给 reconciler/UI,
     // 只改台账不改返回值 → UI 显示 done、实际 needs_manual,两处真相打架。
@@ -412,7 +446,9 @@ export async function finalizeAfterUpload(o: {
     return cleanupOk();
   }
   ledger.syncNodeState(streamKey, "clean_verify", "done", { error: null });
-  return await o.cleanupSources();
+  // cleanConfirmed = 允许删节点源的旧口径(含核验被跳过);stageCleanConfirmed = 核验真正通过才为真,
+  // 核验跳过(未注入分P查询 / 无基线)不算通过 → stage 视频类内容保持旧行为(不清)。
+  return { ...(await o.cleanupSources()), cleanConfirmed: true, stageCleanConfirmed: v.kind === "ok" };
 }
 
 /**
@@ -824,6 +860,8 @@ async function runPipelineInner(
     // 合成视频产物总删;.xml/.ass 按 xmlKeepRule(stage)=true(=stageAfterDone 开)一并删
     // —— 此时节点源 .xml 已保留,不会两处同时删光。
     const present = videoOnly([plain, danmuMp4, livechatMp4]).filter(Boolean).filter(existsSync);
+    // 整稿核验通过后:stage 内其余视频类内容(拉回的源段副本、.work/.upload 中间产物)一并清(#60)。
+    if (finalize.stageCleanConfirmed) present.push(...stageVideoLeftovers(stageSub));
     // 分P标题别名目录(硬链接)也在这里清掉,否则会随 stage 长期残留。
     const aliasDir = path.join(stageSub, UPLOAD_ALIAS_DIR);
     if (existsSync(aliasDir)) present.push(aliasDir);
@@ -832,6 +870,8 @@ async function runPipelineInner(
         .filter((f) => /\.(xml|ass)$/i.test(f))
         .map((f) => path.join(stageSub, f)));
     }
+    const presentUniq = [...new Set(present)];
+    present.length = 0; present.push(...presentUniq);
     // 清理失败(T12)绝不外抛:抛出去会被 reconciler 当成 pipeline 失败 → job 变 failed →
     // 自动重跑整场 = **重复投稿**。只把 clean_stage 标 failed 供补跑。
     const stageFailed: CleanupFailure[] = [];
@@ -921,6 +961,13 @@ async function resumeAppends(
     ...(burnLivechat ? [prod?.livechatMp4] : []),
   ].filter((f): f is string => !!f);
   if (need.some((f) => !existsSync(f))) {
+    // 本来就 done 的场(收尾补跑)+ 分P成品(plain/danmu/livechat mp4)已被 stageAfterDone **全部**清掉
+    // = 上传早已完成,只补收尾;stage 里还剩拉回的源段(使 deriveStageProducts 非空)时同理,
+    // 不能把 done 打成 needs_manual。成品只缺一部分(如有 plain 缺 danmu)= 真不一致,仍转人工。
+    if (wasDone && ![prod.plain, prod.danmuMp4, prod.livechatMp4].some((f) => existsSync(f))) {
+      jlog(`续跑:job 已 done 且 stage 分P产物已清理 → 只补收尾清理(不重跑上传)`);
+      return await finalizeOnly(streamKey, bv, deps, jlog, notify, members, stageSub);
+    }
     jlog(`续跑失败:stage 产物缺失(可能已清理),转人工。need=${JSON.stringify(need)}`);
     ledger.setState(streamKey, "needs_manual", { error: `续跑失败:bv=${bv} 但 stage 产物缺失,请人工补 append` }, { force: wasDone });
     notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });
@@ -991,7 +1038,10 @@ async function resumeAppends(
 
   // 可选:done 后删 stage 产物(与主路径同一开关;续跑不删 slave 源)。
   if (cfg.cleanup?.stageAfterDone) {
-    const products = videoOnly([prod.plain, prod.danmuMp4, prod.livechatMp4]);
+    const products = [...new Set([
+      ...videoOnly([prod.plain, prod.danmuMp4, prod.livechatMp4]),
+      ...(finalize.stageCleanConfirmed ? stageVideoLeftovers(stageSub) : []),
+    ])];
     ledger.logStep(streamKey, "clean_stage", "start");
     try { await rmStageFn(products); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件(不含 .xml/.ass)`); }
     catch (e) {   // 同上:清理失败不外抛(否则整场被判 failed → 重跑 = 重复投稿)

@@ -40,6 +40,10 @@ export interface ScenarioOpts {
   wrapTransport?: (base: LocalTransport, s: Scenario) => Transport;
   /** 崩溃恢复 sweep 的 stale 阈值(缺省沿用生产 600s)。「重启后续跑」场景传 0 = 视作重启已过去足够久。 */
   staleMs?: number;
+  /** 收尾补跑节流(缺省沿用生产 15 分钟);补跑场景传 0 = 立即可补跑。 */
+  cleanupBackfillThrottleMs?: number;
+  /** 合并模式:命中的 merge/burn 子命令抛错(模拟烧录中途失败/中断,job 带稿件号转 failed 待续跑)。 */
+  shellFault?: (cmd: string) => boolean;
   /** 额外覆盖 PipelineDeps(如分段模式接缝)。 */
   deps?: Partial<PipelineDeps>;
 }
@@ -139,6 +143,7 @@ export class Scenario {
       settle: { maxWaitMs: 5_000, pollMs: 1 },
       sleep: async () => {},
       ...(this.opts.staleMs !== undefined ? { staleMs: this.opts.staleMs } : {}),
+      ...(this.opts.cleanupBackfillThrottleMs !== undefined ? { cleanupBackfillThrottleMs: this.opts.cleanupBackfillThrottleMs } : {}),
       resolveCfg: () => this.cfg,
       notify: (e) => this.notifications.push(e),
     });
@@ -182,6 +187,7 @@ export class Scenario {
 
   /** merge / burn 子命令的替身:只写占位产物(足以让 workflow 的输入/输出安全阀通过)。 */
   private fakeShell(cmd: string): string {
+    if (this.opts.shellFault?.(cmd)) throw new Error("injected shell fault");
     const dir = /--in\s+(\S+)/.exec(cmd)?.[1];
     if (/\bmerge\b/.test(cmd) && dir) {
       const stem = unquote(/--out-base\s+('[^']+'|\S+)/.exec(cmd)?.[1] ?? "out");
