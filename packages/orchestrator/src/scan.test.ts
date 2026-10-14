@@ -179,4 +179,25 @@ describe("scanRecordings", () => {
     expect(recs).toHaveLength(1);
     expect(recs[0].rolling?.uploading?.kind).toBe("create");
   });
+  it("#57 R2:清单损坏 → rolling.corrupt=true(无 ts 也产出);不存在才是 undefined", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"), '{"schemaVersion":3,"segs":[{"ind'); // 截断,无 ts
+    writeFileSync(join(dir, "主播A_2026-06-27_09-00-00.ts"), "x"); // 有 ts、无清单 → 未启用
+    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 1, startMs: 1, endMs: 2 }));
+    const by = (h: string) => recs.find((r) => r.sessionBase.includes(`_${h}-`))!;
+    expect(by("08").rolling).toEqual({ corrupt: true });
+    expect(by("09").rolling).toBeUndefined();
+  });
+
+  it("#57 R2:v3 清单经旧字段镜像被主控照常读到(bv/confirmed/ambiguous/uploading)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"), JSON.stringify({
+      schemaVersion: 3, sessionBase: "x", bv: "BV1v3", segs: [{ index: 0, path: "p", status: "acked" }, { index: 1, path: "q", status: "needs_manual" }],
+      segments: [], confirmed: [0], ambiguous: [1], intent: { attemptId: "a", kind: "append", index: 2, startedAt: 1 }, uploading: { index: 2, kind: "append" },
+    }));
+    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    expect(recs[0].rolling).toMatchObject({ bv: "BV1v3", confirmed: [0], ambiguous: [1], uploading: { index: 2, kind: "append" } });
+  });
 });

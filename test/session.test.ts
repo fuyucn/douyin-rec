@@ -364,6 +364,41 @@ describe("RecordingSession", () => {
     expect(startCount).toBe(2);   // still 2 — no extra reconnect after user stop
   });
 
+  it("边录边传(#57 R2):断流重连不等最后一段上传完成(onSessionEnd wait=false,上传后台继续);停止路径 wait=true", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-rolling-reconnect-"));
+    let startCount = 0;
+    let capturedEv: RecorderEvents | null = null;
+    class R implements Recorder {
+      name = "mock-rolling"; providesDanmu = false;
+      async start(_u: string, o: RecordOpts, ev: RecorderEvents) {
+        startCount++; capturedEv = ev;
+        ev.onLive({ anchorName: "主播Z" });
+        ev.onSegment(join(o.outDir, `seg_${startCount.toString().padStart(3, "0")}.ts`));
+      }
+      async stop() {}
+    }
+    const ends: Array<{ wait?: boolean } | undefined> = [];
+    // 钩子的「上传」永不结束:若 session 仍在等它,重连将永远卡住。
+    const makeRolling = () => ({
+      onSegment: () => {},
+      onSessionEnd: (o?: { wait?: boolean }): Promise<void> => {
+        ends.push(o);
+        return o?.wait === false ? Promise.resolve() : new Promise<void>(() => {});
+      },
+    });
+    const sess = new RecordingSession(new R(), { reconnectDelaySec: 0.01, makeRolling });
+    await sess.start("https://live.douyin.com/790", makeOpts(dir), { anchorName: "" });
+    capturedEv!.onOffline();
+    await vi.runAllTimersAsync();
+    expect(startCount, "上传未完成也必须重连").toBe(2);
+    expect(ends[0]).toEqual({ wait: false });
+    // 停止路径:wait=true(钩子自己有限等待);这里钩子永不返回,不 await stop 以免挂住测试。
+    void sess.stop();
+    await vi.runAllTimersAsync();
+    expect(ends[1]).toEqual({ wait: true });
+  });
+
   it("onOffline 期间已在重连：重复事件被忽略，只重连一次", async () => {
     vi.useFakeTimers();
 

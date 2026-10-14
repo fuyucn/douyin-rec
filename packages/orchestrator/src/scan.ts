@@ -54,12 +54,21 @@ function readSession(dir: string, base: string): { roomSlug?: string; platform?:
 /**
  * 读边录边传(T-33)结果 sidecar `{base}.rolling.json`(录制端写)。
  * 存在且带 bv = 该会话已由录制节点自己建稿 → master **不得重复建稿**(否则重复投稿)。
- * 缺失/损坏 → undefined(老录像/未启用;不抛)。
+ * 文件不存在 → undefined(老录像/未启用;不抛)。**存在但读不出/解析失败 → `{corrupt:true}`**:
+ * 不可信 ≠ 未启用,主控据此转人工,绝不走常规管线(防重复建稿)。v3 清单的旧字段镜像由录制端每次写同步,这里照读。
  */
 function readRolling(dir: string, base: string): NodeRollingProgress | undefined {
+  let text: string;
   try {
-    const d = JSON.parse(readFileSync(join(dir, `${base}.rolling.json`), "utf-8")) as
+    text = readFileSync(join(dir, `${base}.rolling.json`), "utf-8");
+  } catch (e) {
+    // 不存在 = 老录像/未启用;其它读失败(权限/IO)= 不可信,不得当未启用(防重复建稿)。
+    return (e as NodeJS.ErrnoException)?.code === "ENOENT" ? undefined : { corrupt: true };
+  }
+  try {
+    const d = JSON.parse(text) as
       { bv?: string; confirmed?: unknown; ambiguous?: unknown; uploading?: { index?: unknown; kind?: unknown } | null };
+    if (!d || typeof d !== "object" || Array.isArray(d)) return { corrupt: true };
     const u = d.uploading;
     // 意图标记原样透传给主控(主控据此区分「建稿中被杀」);形状不合法 → 当作无(不抛)。
     const uploading: NodeRollingProgress["uploading"] = u && typeof u.index === "number" && (u.kind === "create" || u.kind === "append")
@@ -72,7 +81,7 @@ function readRolling(dir: string, base: string): NodeRollingProgress | undefined
       ambiguous: Array.isArray(d.ambiguous) ? d.ambiguous.filter((n): n is number => typeof n === "number") : undefined,
     };
   } catch {
-    return undefined;
+    return { corrupt: true };
   }
 }
 
@@ -129,7 +138,7 @@ export async function scanRecordings(
       // 但它是**已完成上传**的场(rolling.bv 存在)—— 必须照样出现在清单里,否则 master 收不到
       // 「已建稿」事实,reconciler 会把它当没有录像而漏掉收口。故:无 ts 但 rolling.bv 存在 → 仍产出。
       // 同理:无 ts、无 bv,但留有建稿意图/不确定段 → 也要产出,主控才能转人工而不是装作没这场。
-      if (!g.ts.length && !rolling?.bv && !rolling?.uploading && !rolling?.ambiguous?.length) continue;
+      if (!g.ts.length && !rolling?.bv && !rolling?.uploading && !rolling?.ambiguous?.length && !rolling?.corrupt) continue;
       let durationSec = 0, startMs = Infinity, endMs = 0;
       for (const f of g.ts) {
         const p = await ffprobe(join(dir, f));

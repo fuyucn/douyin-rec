@@ -553,12 +553,15 @@ export function tryRollingShortCircuit(o: {
 
 /** 无稿件号、但留有建稿意图(create)或不确定段 = 建稿可能已提交而稿件号丢失。 */
 function rollingUnsettledWithoutBv(r: NodeRecording["rolling"]): boolean {
-  if (!r || r.bv) return false;
+  if (!r) return false;
+  if (r.corrupt) return true; // 清单损坏:可能已建稿而稿件号不可知 → 同样不得走常规管线
+  if (r.bv) return false;
   return r.uploading?.kind === "create" || (r.ambiguous?.length ?? 0) > 0;
 }
 
 function describeUnsettled(r: NonNullable<NodeRecording["rolling"]>): string {
   const parts: string[] = [];
+  if (r.corrupt) parts.push("进度清单损坏");
   if (r.uploading?.kind === "create") parts.push(`建稿中 段${r.uploading.index}`);
   if (r.ambiguous?.length) parts.push(`不确定段 ${r.ambiguous.join(",")}`);
   return parts.join(" + ");

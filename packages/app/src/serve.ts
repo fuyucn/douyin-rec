@@ -15,6 +15,7 @@ import { EventCenter } from "@drec/observability";
 import { drecRoot, ensureHubConfigExample, ensureNodeIdentity, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
 import { refreshLocalRollingEffective } from "./rolling-effective.js";
+import { startRollingTakeoverWatcher } from "./rolling-takeover.js";
 import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
 import { makeNotifier, resolveWebhookToggles } from "@drec/observability";
@@ -354,10 +355,20 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       serveLog.warn("[hub] --hub 已设置但未提供 hubStarter 实现，跳过");
     }
 
+    // 边录边传启动接管(#57 R2 / #46):服务启动扫一次录像目录,接管上次进程被杀遗留的会话
+    // (租约过期 / pid 不存在才接管;回读核对后只续传到已有稿件号,损坏/不确定一律转人工并通知,绝不建稿)。
+    // 之后低频复扫,覆盖「启动时租约尚未过期」。通知走站内事件 + webhook。
+    const takeoverWatch = startRollingTakeoverWatcher({
+      roots: () => [...new Set([resolveOutputDir(null), ...store.listTasks().map((t) => resolveOutputDir(t.outDir))])],
+      log: (m) => console.log(m),
+      notify: (stage, message) => { events.emit(null, { kind: "error", stage, message }); },
+    });
+
     let stopping = false;
     const shutdown = (sig: string): void => {
       if (stopping) return;
       stopping = true;
+      takeoverWatch.stop();
       clearInterval(recWatch);
       clearInterval(diskWatch);
       clearInterval(cookieWatch);

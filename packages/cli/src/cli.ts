@@ -239,6 +239,8 @@ program
         platform: platform.id,
         roomSlug: slug,
         log: (m: string) => console.log(m),
+        // 转人工 / 清单损坏 / 租约丢失:走与录制告警同一通道(webhook + @@DREC_ALERT@@ → 站内 toast)。
+        notify: (stage: string, message: string) => { void notifier.notify({ kind: "error", stage, message }); },
       });
       console.log(`[rec] 边录边传已开启:每封口一段上传后删该段源(room=${slug})`);
     }
