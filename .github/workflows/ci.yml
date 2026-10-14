@@ -20,10 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        # 架构文档漂移守护(test/arch/architecture-docs.test.ts → scripts/gen-architecture.mjs
-        # --check)用 `git log --since` 统计每包近 90 天提交数当热图数据。默认浅克隆
-        # (fetch-depth:1) 下每包只剩 1 条历史 → 与生成物里写死的数值必然不符 → 守护在所有
-        # 分支恒红。拉全历史是该守护成立的前提(issue #11)。仓库仅数百提交，全量克隆代价可忽略。
+        # 拉全历史:issue-guard --diff 要用 merge-base 算出 PR 新增行(浅克隆算不出)。
+        # 架构文档守护(gen-architecture.mjs --check)现在只比结构、不再依赖 git log 热度(issue #29)。
         with:
           fetch-depth: 0
 
@@ -33,6 +31,9 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         # 版本不写死在这里：pnpm/action-setup@v4 自动读 package.json 的 packageManager 字段。
+
+      - name: "Privacy gate (issue-guard --diff,只扫 PR 新增行)"
+        run: python3 scripts/issue-guard.py --diff origin/feat/hub-optimization
 
       - name: "Install (root)"
         run: pnpm install --frozen-lockfile

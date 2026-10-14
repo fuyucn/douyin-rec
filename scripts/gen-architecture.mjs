@@ -15,7 +15,12 @@
  * 用法:
  *   node scripts/gen-architecture.mjs            # 生成 docs/architecture.html
  *   node scripts/gen-architecture.mjs --days 30  # 换热度窗口
- *   node scripts/gen-architecture.mjs --check    # 只校验现有产物是否与仓库一致(CI/自审用)
+ *   node scripts/gen-architecture.mjs --check    # 只校验「结构」是否与仓库一致(CI/自审用)
+ *
+ * --check 只比对结构性内容(包清单 / 依赖边 / 层级 / 角色 / 流程图 / mermaid 图),
+ * **不比对**生成时间与热度统计(各包 LOC、文件数、测试数、近 N 天提交数)——后者每次提交都会变,
+ * 计入比对会让任何提交都变红(issue #29)。生成物里内嵌一份结构 JSON(#arch-structure),
+ * --check 拿它与仓库现算的结构比对;生成行为本身(热图数字照常写入)不变。
  */
 import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -373,6 +378,22 @@ const planTasks = PLAN ? PLAN.tasks : [];
 
 const MERMAID = buildMermaid();
 
+// ── 结构指纹:--check 只比这份(无时间戳、无热度数字、与排序无关)─────────────────────
+const STRUCTURE = {
+  packages: all.map((p) => ({ dir: p.dir, name: p.name, rank: p.rank, role: roleOf(p.name).name, deps: [...p.deps].sort() }))
+    .sort((a, b) => a.name.localeCompare(b.name)),
+  edges: edges.map(([a, b]) => `${a} -> ${b}`).sort(),
+  rankLabels: Object.fromEntries([...new Set(all.map((p) => p.rank))].map((r) => [r, RANK_LABEL[r] ?? `rank ${r}`])),
+  flows: FLOWS,
+  planned: PLANNED,
+  milestones: PLAN?.milestones ?? [],
+  tasks: planTasks,
+  mermaid: MERMAID,
+};
+// 放进 <script type="application/json">:转义 < 防止提前闭合标签。
+const STRUCTURE_JSON = JSON.stringify(STRUCTURE, null, 1).replace(/</g, "\\u003c");
+const STRUCTURE_RE = /<script type="application\/json" id="arch-structure">([\s\S]*?)<\/script>/;
+
 const html = `<!doctype html>
 <html lang="zh-CN" data-theme="dark">
 <head>
@@ -555,6 +576,7 @@ const html = `<!doctype html>
     <b>本图自动生成</b>,不会与 architecture.md 漂移;手改会被下次生成覆盖。
   </div>
 </div>
+<script type="application/json" id="arch-structure">${STRUCTURE_JSON}</script>
 <script>
   const root = document.documentElement;
   document.getElementById("theme").onclick = () => {
@@ -583,15 +605,18 @@ function patchMarkdown(checkOnly) {
 
 if (CHECK) {
   const cur = existsSync(OUT) ? readFileSync(OUT, "utf-8") : "";
-  const strip = (s) => s.replace(/生成 · 热度窗口近 \d+ 天 · [^<]*/, "");
-  const htmlDrift = strip(cur) !== strip(html);
+  const m = STRUCTURE_RE.exec(cur);
+  let htmlDrift = true;
+  if (m) {
+    try { htmlDrift = JSON.stringify(JSON.parse(m[1])) !== JSON.stringify(STRUCTURE); } catch { /* 损坏 → 视为漂移 */ }
+  }
   const mdDrift = patchMarkdown(true);
   if (htmlDrift || mdDrift) {
     const which = [htmlDrift && "architecture.html", mdDrift && "architecture.md"].filter(Boolean).join(" / ");
-    console.error(`${which} 与仓库不一致,请跑: node scripts/gen-architecture.mjs`);
+    console.error(`${which} 的结构(包/依赖边/层级/流程图)与仓库不一致,请跑: node scripts/gen-architecture.mjs`);
     process.exit(1);
   }
-  console.log("architecture.html + architecture.md 与仓库一致 ✓");
+  console.log("architecture.html + architecture.md 结构与仓库一致 ✓(热度统计不参与比对)");
 } else {
   writeFileSync(OUT, html);
   const mdChanged = patchMarkdown(false);

@@ -112,10 +112,28 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
    动运行时加 `pnpm bundle`。**不许只信自述**——review 要复核命令与输出（必要时在 PR 分支 worktree 重跑）。
 3. **行为变更有回归测试**：新分支 / 新边界 / 修 bug 都有 vitest 用例钉住；无法自动化的写明人工验证步骤。
 4. **自审清单可查**：PR 里有「自审发现 → 修复」清单；issue 评论里哪条没采纳及理由写清楚。
-5. **CI 状态**：除**已知基线红**（架构文档漂移守护，见 issue #11 浅克隆 + `git log` 热图互斥）外
-   不得有红；其它红必须打回。
-6. **版本号**：feat/fix 已 bump 根 `package.json` patch，且 `dist/douyin-rec.mjs` 的 `APP_VERSION` 同步。
-7. **隐私闸门**：PR 正文与评论都过 `python3 scripts/issue-guard.py`。
+5. **CI 状态**:不得有红,没有豁免项。架构文档漂移守护(`gen-architecture.mjs --check`)只比结构
+   (包清单 / 依赖边 / 层级 / 流程图 / mermaid),不比生成时间与热度统计,所以任何红都是真红,
+   一律打回。结构漂移的修法:`node scripts/gen-architecture.mjs` 重新生成并提交产物。
+6. **版本号**:feat/fix 已 bump 根 `package.json` patch,且 `dist/douyin-rec.mjs` 的 `APP_VERSION` 同步。
+7. **隐私闸门**:PR 正文与评论都过 `python3 scripts/issue-guard.py`;diff 本身由 CI 跑
+   `issue-guard.py --diff origin/feat/hub-optimization`(只扫新增行,历史内容不计)。
+   源码文件名误报口径见该脚本头部说明:源码类文件不套「文件名 / 凭证类 / 主机名 / streamKey」语义词规则,
+   文档里的文件名若是仓库已跟踪文件则放行;确属夹具的行加 `issue-guard: allow` 并在评审中说明。
+8. **关联 issue 必须是 `accept`**:合并前 `gh issue view N --json labels` 核对 PR 的 `Fixes #N` 对应
+   issue 带 `accept` 标签(且无 `needs-decision` / `decline`)。没有 `Fixes #N`、issue 不是
+   `accept`(含被人改回 `needs-decision`)→ 不合并,打回并在 PR 里写明。
+9. **diff 触及危险类 → 强制 `needs-decision`,不自动合并**:合并前跑
+   `scripts/pr-risk-scan.sh`(默认对 `origin/feat/hub-optimization...HEAD`),输出 `RISK`(退出码 1)
+   即命中上传 / biliup / 清理 / 删除(rm、unlink)/ ledger 状态转换。命中后 review agent
+   **不得自动合并**:给 PR 打 `needs-decision`,评论按「决定三行」写清(要决定什么 / 不做会怎样 /
+   建议选项),等人拍板。issue 即使是 `accept`,diff 命中 RISK 也一样拦。`PASS` 只表示没命中这些
+   规则,不代替第 1–8 条。
+
+**打回后的回路**:review 打回(任一门禁不过)→ PR 保持 open、issue 保持 `in-progress`,review 在 PR
+评论里列出缺口;**由实现 heartbeat 下一轮扫到「有打回评论的 `in-progress` PR」时派会话在原分支
+(`codex/issue-N-<slug>`)继续修复并 push**,不另开分支、不另开 PR;修完后 review 心跳下一轮重新审。
+review 只打回、不代改。危险类(第 9 条)打回后不进此回路,等人在 issue/PR 上回「决定」后再动。
 
 合并后：**不删分支**（repo 设 `delete_branch_on_merge=false`）；按「四不 close」收口 issue；
 **部署仍由人做**（走 `recording===true` guard）。review agent 只合并，不改代码、不部署。
