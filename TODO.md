@@ -15,6 +15,13 @@
 
 ## 进行中
 
+- [~] **T-42 节点清单三态：失联/超时不再当「无录像」（issue [#27](https://github.com/fuyucn/douyin-rec/issues/27)）**
+  — 2026-10-14 认领，分支 `codex/issue-27-inventory-tristate`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：reconciler 清单结果分 ok / empty / unreachable，超时与 reject 都算 unreachable；规则选中的节点里有
+  unreachable 的场本轮跳过选优与收口并记日志、下轮重试；连续 6 轮失联发一条通知（不转人工、不删任何东西）。
+  **验收**：vitest 覆盖空 / reject / 挂起超时、unreachable 不推进、无关场照常、恢复后收口、阈值通知只发一次；e2e 场景；
+  不改 Transport 接口。
+
 - [~] **T-41 边录边传硬化：崩溃恢复 + 头阻塞 + 原子写 + 末段封口（issue [#3](https://github.com/fuyucn/douyin-rec/issues/3)，T-33 后续）**
   — 2026-10-13 认领，PR [#18](https://github.com/fuyucn/douyin-rec/pull/18)（分支
   `codex/issue-3-rolling-upload-harden`，base `feat/hub-optimization`，独立 worktree 实现，
