@@ -1,0 +1,30 @@
+{
+  "_doc": "issue 状态标签与合法迁移表。唯一真相源是 docs/agent-workflow.md;改这里必须同步改文档。键 \"\" = 无状态标签;\"closed\" = 关闭(仅 --close)。",
+  "states": ["accept", "in-progress", "in-review", "rework-1", "rework-2", "待验证", "needs-decision", "decline", "blocked"],
+  "labels": {
+    "accept": {"color": "0e8a16", "description": "可以做"},
+    "in-progress": {"color": "fbca04", "description": "已认领,正在做"},
+    "in-review": {"color": "1d76db", "description": "PR 已开,等独立 review"},
+    "rework-1": {"color": "d93f0b", "description": "review 打回第 1 轮"},
+    "rework-2": {"color": "b60205", "description": "review 打回第 2 轮(再不过转 needs-decision)"},
+    "待验证": {"color": "5319e7", "description": "PR 已合并,等部署后实跑"},
+    "needs-decision": {"color": "e99695", "description": "危险类或证据不足,等人拍板"},
+    "decline": {"color": "cfd3d7", "description": "不做"},
+    "blocked": {"color": "000000", "description": "被外部条件阻塞"}
+  },
+  "transitions": {
+    "": ["accept", "needs-decision", "decline", "blocked"],
+    "accept": ["in-progress", "needs-decision", "decline", "blocked"],
+    "in-progress": ["in-review", "needs-decision", "blocked"],
+    "in-review": ["待验证", "rework-1", "rework-2", "needs-decision", "blocked"],
+    "rework-1": ["in-review", "needs-decision", "blocked"],
+    "rework-2": ["in-review", "needs-decision", "blocked"],
+    "待验证": ["closed", "needs-decision", "blocked"],
+    "needs-decision": ["accept", "decline", "blocked"],
+    "decline": ["closed", "needs-decision"],
+    "blocked": ["accept", "in-progress", "in-review", "needs-decision", "decline"]
+  },
+  "reasonRequired": ["rework-1", "rework-2", "needs-decision", "decline", "blocked", "closed"],
+  "needsDecisionMarkers": ["要决定什么", "不做会怎样", "建议选项"],
+  "closeRoles": ["impl"]
+}
