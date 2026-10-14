@@ -208,7 +208,19 @@ describe("scanRollingSessions(F1:边录边传实时进度,只读 sidecar)", () =
     const root = mkdtempSync(join(tmpdir(), "rs-"));
     mk(root, "A", "A_2026-10-15_03-00-00", { segments: seg(9), confirmed: [0, 1, 2, 3, 4, 5, 6, 7], bv: "BV1X", startMs: 2000 });
     const r = scanRollingSessions(root, active);
-    expect(r).toEqual([{ platform: "douyin", roomSlug: "777", sessionBase: "A_2026-10-15_03-00-00", bv: "BV1X", confirmed: 8, total: 9, ambiguous: 0, uploading: undefined, recording: true }]);
+    expect(r).toEqual([{ platform: "douyin", roomSlug: "777", sessionBase: "A_2026-10-15_03-00-00", bv: "BV1X", confirmed: 8, total: 9, ambiguous: 0, uploading: undefined, lockedBytes: 0, recording: true }]);
+  });
+
+  it("lockedBytes = 序号不在 confirmed 且文件仍在的分段字节之和;已确认/已删的不算", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    const dir = join(root, "A"); mkdirSync(dir);
+    writeFileSync(join(dir, "s0.ts"), Buffer.alloc(100)); // 已确认但文件还在(尚未删):不算
+    writeFileSync(join(dir, "s1.ts"), Buffer.alloc(300)); // 未确认:算
+    writeFileSync(join(dir, "s2.ts"), Buffer.alloc(50));  // 未确认:算
+    // s3 未确认但文件已不存在:不算
+    const segments = [0, 1, 2, 3].map((i) => ({ index: i, path: join(dir, `s${i}.ts`) }));
+    mk(root, "A", "A_lock", { segments, confirmed: [0], bv: "BV1", startMs: 1 });
+    expect(scanRollingSessions(root, active)[0]!.lockedBytes).toBe(350);
   });
 
   it("同房间旧会话(已收口、无未决项)不纳入;只认在录房间的最新会话", () => {

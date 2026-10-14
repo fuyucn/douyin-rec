@@ -63,6 +63,8 @@ export interface NodeRollingSession {
   uploading?: { index: number; kind: "create" | "append" };
   /** 该房间此刻是否仍在录制。 */
   recording: boolean;
+  /** 未确认分段在磁盘上仍占用的字节数(只统计仍存在的文件);旧 bundle 无该字段。 */
+  lockedBytes?: number;
 }
 
 /** `_recording-status` 的完整结果:在录房间 + 边录边传进度(旧 bundle 无 rolling → [])。 */

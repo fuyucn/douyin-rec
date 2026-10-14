@@ -823,6 +823,7 @@ const hubStarter: HubStarter = {
           sessionBase: s.sessionBase, bv: s.bv ?? null,
           confirmed: s.confirmed, total: s.total, ambiguous: s.ambiguous,
           uploading: s.uploading ?? null, recording: s.recording, checkedAt,
+          ...(s.lockedBytes !== undefined ? { lockedBytes: s.lockedBytes } : {}),
         })));
       } catch (e) {
         opts.warn(`[hub] 刷新 worker 录制状态失败: ${(e as Error).message}`);
@@ -1386,20 +1387,33 @@ const hubStarter: HubStarter = {
           })
         : new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
       await t.ping!();
-      // 版本回执:可选能力,拿不到(旧 bundle/不可达)就当没有 —— **绝不能因此让 status 失败**。
-      let status = null;
-      try { status = (await t.nodeStatus?.()) ?? null; } catch { status = null; }
-      return status;
+      // 版本回执 / 磁盘剩余都是可选观测:拿不到(旧 bundle/不可达)就当没有 —— **绝不能因此让 status 失败**。
+      // 两者并行,避免慢节点上串行叠加 ssh 超时。
+      const [status, diskFreeGB] = await Promise.all([
+        (async () => { try { return (await t.nodeStatus?.()) ?? null; } catch { return null; } })(),
+        (async (): Promise<number | undefined> => {
+          try {
+            const g = await t.diskFreeGB?.();
+            return typeof g === "number" && Number.isFinite(g) ? g : undefined;
+          } catch { return undefined; }
+        })(),
+      ]);
+      return { status, diskFreeGB };
     }));
+    // 水位与磁盘看门狗同源(hub.config resources.diskMinGB);读不到/损坏 → 缺省口径,不抛。
+    let rawMin: unknown;
+    try { rawMin = (JSON.parse(readFileSync(rootHubConfig(), "utf-8")) as { resources?: { diskMinGB?: unknown } }).resources?.diskMinGB; } catch { rawMin = undefined; }
+    const diskMinGB = resolveDiskMinGB(rawMin, (m) => console.warn(m)).gb;
     return workers.map((w, i) => {
       const r = results[i];
       if (r.status !== "fulfilled") {
         return { id: w.id, ok: false, error: (r.reason as Error)?.message ?? String(r.reason) };
       }
-      const ns = r.value;
+      const { status: ns, diskFreeGB } = r.value;
+      const disk = diskFreeGB !== undefined ? { diskFreeGB, diskMinGB } : {};
       return ns
-        ? { id: w.id, ok: true, appVersion: ns.appVersion, appliedVersion: ns.appliedVersion, appliedAt: ns.appliedAt }
-        : { id: w.id, ok: true };
+        ? { id: w.id, ok: true, appVersion: ns.appVersion, appliedVersion: ns.appliedVersion, appliedAt: ns.appliedAt, ...disk }
+        : { id: w.id, ok: true, ...disk };
     });
   },
 };

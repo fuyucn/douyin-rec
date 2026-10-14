@@ -198,6 +198,8 @@ export class SshTransport implements Transport {
           return !!x && typeof x.platform === "string" && typeof x.roomSlug === "string"
             && typeof x.sessionBase === "string" && typeof x.confirmed === "number" && typeof x.total === "number";
         });
+        // lockedBytes 非有限数字(脏数据)→ 丢掉该字段,不让 NaN 流到 UI。
+        for (const r of rolling) if (r.lockedBytes !== undefined && !(typeof r.lockedBytes === "number" && Number.isFinite(r.lockedBytes) && r.lockedBytes >= 0)) delete r.lockedBytes;
         return { rooms: parsed.rooms, rolling };
       }
     } catch (e) {

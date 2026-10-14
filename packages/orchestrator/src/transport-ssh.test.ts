@@ -47,6 +47,16 @@ describe("SshTransport", () => {
       expect(calls).toHaveLength(1);
     });
 
+    it("lockedBytes:合法数字原样透传;脏值(负数/NaN/字符串)丢字段、条目保留", async () => {
+      const good = { ...sess, lockedBytes: 1234 };
+      const t = mkT(async () => JSON.stringify({ rooms: [], rolling: [good, { ...sess, sessionBase: "B", lockedBytes: -5 }, { ...sess, sessionBase: "C", lockedBytes: "9" }] }));
+      const r = (await t.recordingStatus()).rolling;
+      expect(r[0]!.lockedBytes).toBe(1234);
+      expect(r).toHaveLength(3);
+      expect(r[1]!.lockedBytes).toBeUndefined();
+      expect(r[2]!.lockedBytes).toBeUndefined();
+    });
+
     it("旧 bundle(只有 rooms)→ rolling=[],不报错", async () => {
       const t = mkT(async () => JSON.stringify({ rooms: [{ platform: "douyin", roomSlug: "123" }] }));
       await expect(t.recordingStatus()).resolves.toEqual({ rooms: [{ platform: "douyin", roomSlug: "123" }], rolling: [] });

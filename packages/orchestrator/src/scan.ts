@@ -105,6 +105,15 @@ export function scanRollingSessions(recordingsDir: string, active: readonly Acti
         if (!sess.roomSlug) continue;
         const platform = sess.platform ?? "douyin";
         const num = (a: unknown): number => (Array.isArray(a) ? a.filter((n) => typeof n === "number").length : 0);
+        // 未确认分段仍压在盘上的字节:sidecar 登记的分段里,序号不在 confirmed 且文件还在的那些。
+        const confirmedIdx = new Set(Array.isArray(d.confirmed) ? d.confirmed.filter((n): n is number => typeof n === "number") : []);
+        let lockedBytes = 0;
+        if (Array.isArray(d.segments)) {
+          for (const sg of d.segments as Array<{ index?: unknown; path?: unknown }>) {
+            if (typeof sg?.index !== "number" || typeof sg.path !== "string" || confirmedIdx.has(sg.index)) continue;
+            try { lockedBytes += statSync(sg.path).size; } catch { /* 已删/不存在:不占盘 */ }
+          }
+        }
         const u = d.uploading;
         const uploading = u && typeof u.index === "number" && (u.kind === "create" || u.kind === "append")
           ? { index: u.index, kind: u.kind as "create" | "append" } : undefined;
@@ -112,7 +121,7 @@ export function scanRollingSessions(recordingsDir: string, active: readonly Acti
           platform, roomSlug: sess.roomSlug, sessionBase: base,
           bv: typeof d.bv === "string" && d.bv ? d.bv : undefined,
           confirmed: num(d.confirmed), total: Array.isArray(d.segments) ? d.segments.length : 0,
-          ambiguous: num(d.ambiguous), uploading,
+          ambiguous: num(d.ambiguous), uploading, lockedBytes,
           recording: active.some((r) => r.platform === platform && r.roomSlug === sess.roomSlug),
           startMs: typeof d.startMs === "number" ? d.startMs : 0,
         });
