@@ -52,7 +52,7 @@ export interface DaemonOpts {
 export { DEFAULT_DISK_MIN_GB };
 
 /**
- * 边录边传漂移(issue #89)重启前要求的**连续空闲 tick 数**。tick=60s,故至少空闲 ~2 分钟:
+ * 边录边传漂移(issue #89)重启前要求的**连续空闲 tick 数**。tick=60s,故真实空闲约 1–2 分钟:
  * 避开「刚收播 / 断流重连退避中」这种 recording 暂时为 false 的瞬态,免得把还会续上的一场腰斩成两个会话。
  */
 export const ROLLING_DRIFT_IDLE_TICKS = 2;
@@ -295,7 +295,8 @@ export class TaskDaemon {
       }
       this.driftIdle.delete(t.id);
       this.warnedDriftDisk.delete(t.id);
-      if (await this.manager.stopIdleForConfig(t.id, change)) this.manager.start(t.id);
+      // stop 可能等到子进程退出;期间若收到关停信号(stopped),绝不能再拉起新进程(stopAll 已取过快照,管不到它)。
+      if (await this.manager.stopIdleForConfig(t.id, change) && !this.stopped) this.manager.start(t.id);
     }
   }
 

@@ -218,6 +218,33 @@ describe("TaskDaemon 边录边传漂移收敛", () => {
     expect(spawner.last.stopCalls).toBe(0);
   });
 
+  it("阈值至少 2 个 tick:仅 1 个空闲 tick 绝不重启(避开收播/重连瞬态)", async () => {
+    expect(ROLLING_DRIFT_IDLE_TICKS).toBeGreaterThanOrEqual(2);
+    const id = addTask(false);
+    const d = mkDaemon();
+    await d.tick();
+    store.updateTask(id, { rollingEffective: true });
+    await d.tick(); // 仅 1 个空闲 tick
+    expect(spawner.spawned).toHaveLength(1);
+    expect(spawner.last.stopCalls).toBe(0);
+  });
+
+  it("stop 等待期间 daemon 已被停止:不再拉起新进程", async () => {
+    const id = addTask(false);
+    const d = mkDaemon();
+    await d.tick();
+    store.updateTask(id, { rollingEffective: true });
+    const proc = spawner.last;
+    const realStop = proc.stop.bind(proc);
+    proc.stop = async (): Promise<void> => {
+      void d.stop(); // 关停信号在 stop 退出等待期间到达
+      await realStop();
+    };
+    await ticks(d, ROLLING_DRIFT_IDLE_TICKS);
+    expect(spawner.spawned).toHaveLength(1);
+    expect(mgr.isRunning(id)).toBe(false);
+  });
+
   it("无漂移:不动", async () => {
     addTask(true);
     const d = mkDaemon();
