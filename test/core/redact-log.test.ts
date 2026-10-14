@@ -3,8 +3,9 @@ import { redactLogLine, redactLogLines } from "../../packages/core/src/redact-lo
 
 describe("redactLogLine(日志脱敏)", () => {
   it("vendored 取流异常里的整串 cookie 被遮掉(实测形态)", () => {
-    // issue-guard: allow (测试夹具:假房间号与假凭证,全部是编造值)
-    const line = `API web failed: Unexpected resp, code 4001038, msg {"prompts":"x"}, id 999000111222, cookies: ttwid=1%7CAREnbnZL; UIFID_TEMP=f2b2871c02; UIFID=f2b2871c02`;
+    // 全部是编造的夹具值;issue-guard: allow (假房间号 + 假凭证)
+    const line = `API web failed: Unexpected resp, code 4001038, msg {"prompts":"x"}, id 999000111222, cookies: ttwid=1%7CAREnbnZL; UIFID_TEMP=f2b2871c02; UIFID=f2b2871c02`; // issue-guard: allow (夹具)
+
     const out = redactLogLine(line);
     expect(out).not.toContain("ttwid=1%7CAREnbnZL");
     expect(out).not.toContain("UIFID_TEMP=f2b2871c02");
