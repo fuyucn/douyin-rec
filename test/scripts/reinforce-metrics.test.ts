@@ -56,6 +56,17 @@ describe("reinforce-metrics.py --loop", () => {
     expect(r.out).not.toContain("#21");
     expect(r.out).toMatch(/待验证 停留\s+1 张: #12 1\dh|待验证 停留\s+1 张: #12 \dh/);
   });
+  it("逃逸阈值:两词重叠不算逃逸,三词算", () => {
+    const mk = (incTitle: string) => ({
+      prs: [{ number: 7, title: "fix(app): zyxwv qrstu lmnop", body: "Fixes #40", mergedAt: hoursAgo(30), reviews: [], comments: [] }],
+      issues: [
+        { number: 40, title: "src", state: "CLOSED", createdAt: hoursAgo(60), labels: [], comments: [] },
+        { number: 41, title: incTitle, state: "OPEN", createdAt: hoursAgo(10), labels: [{ name: "incident" }], comments: [] },
+      ],
+    });
+    expect(run(["--days", "7"], mk("zyxwv qrstu again")).out).not.toContain("#7→#41");
+    expect(run(["--days", "7"], mk("zyxwv qrstu lmnop again")).out).toContain("#7→#41");
+  });
   it("issue 上的 rework 状态标记也计入打回轮数", () => {
     const fx = {
       prs: [{ number: 5, title: "x", body: "Fixes #30", mergedAt: hoursAgo(5), reviews: [], comments: [] }],

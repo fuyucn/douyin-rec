@@ -29,7 +29,13 @@ GUARD = HERE / "issue-guard.py"
 REQUIRED_SECTIONS = ["改动范围", "验证方式", "自审五项", "变异验证", "验证命令与输出", "评论采纳情况", "回写位置", "残余风险", "版本"]
 SELF_REVIEW_ITEMS = ["边界", "并发", "静默失败", "一致性", "分层"]
 RUNTIME_PATHS = ("packages/", "package.json", "Dockerfile", "docker-compose", "dist/")
-PLACEHOLDER = re.compile(r"待填|TODO|TBD|<填写>|…{2,}|\.{3,}")
+# 独立占位词才算:TODO/TBD 前后不是路径/单词字符(放行 TODO.md、T-90 之类),
+# 三个以上句点两侧都是 ASCII 路径字符时是 git 范围(origin/x...HEAD),不算省略号。
+PLACEHOLDER = re.compile(
+    r"待填|<填写>|…{2,}"
+    r"|(?<![\w/.\-])(?:TODO|TBD)(?![\w/\-]|\.\w)"
+    r"|(?<![A-Za-z0-9_/\-])\.{3,}|\.{3,}(?![A-Za-z0-9_/\-])"
+)
 
 
 def strip_comments(text: str) -> str:
@@ -58,7 +64,7 @@ def has_content(text: str) -> bool:
 def check_self_review(sec: str) -> list[str]:
     errs: list[str] = []
     for item in SELF_REVIEW_ITEMS:
-        m = re.search(rf"^\s*[-*]\s*\**{item}\**\s*[:：]\s*(.*)$", sec, re.M)
+        m = re.search(rf"^[ \t]*[-*][ \t]*\**{item}\**[ \t]*[:：][ \t]*(.*)$", sec, re.M)
         if not m or not m.group(1).strip():
             errs.append(f"自审五项缺「{item}」(格式 `- {item}: 发现→修复` 或 `- {item}: 无(理由)`)")
             continue

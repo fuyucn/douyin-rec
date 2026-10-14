@@ -86,6 +86,28 @@ describe("pr-gate.py", () => {
     expect(out).toContain("自审「并发」写了「无」但没给理由");
     expect(out).toContain("自审五项缺「分层」");
   });
+  it("自审:「- 并发:」留空且下一行含 → 不得吞下一行 → FAIL", () => {
+    const mutated = GOOD.replace("- 并发: 无(脚本单次执行,不持有跨进程状态)", "- 并发:");
+    expect(mutated).not.toBe(GOOD);
+    const r = gate(mutated);
+    expect(r.status).toBe(1);
+    expect(r.lines.join("\n")).toContain("自审五项缺「并发」");
+    const spaced = gate(GOOD.replace("- 并发: 无(脚本单次执行,不持有跨进程状态)", "- 并发:   "));
+    expect(spaced.lines.join("\n")).toContain("自审五项缺「并发」");
+  });
+  it("占位符:路径里的 TODO.md / git 范围 ... 不算占位 → PASS", () => {
+    const body = GOOD.replace("无评论", "TODO.md 记 T-90;对照 origin/feat/hub-optimization...HEAD 的 diff");
+    expect(body).not.toBe(GOOD);
+    expect(gate(body).lines).toEqual(["PASS"]);
+  });
+  it("占位符:独立 TODO / TBD / 待填... 仍算占位 → FAIL", () => {
+    for (const ph of ["TODO 补充", "TBD", "待填...", "稍后补..."]) {
+      const r = gate(GOOD.replace("无评论", ph));
+      expect(r.lines.join("\n"), ph).toContain("「评论采纳情况」为空或仍是占位");
+    }
+    const sr = gate(GOOD.replace("- 边界: 发现空标签起步 → 修复为允许从无状态迁移", "- 边界: TODO 修复"));
+    expect(sr.lines.join("\n")).toContain("自审「边界」仍是占位内容");
+  });
   it("变异验证:只有 FAIL 没有 PASS → FAIL", () => {
     const r = gate(GOOD.replace(/### 复原\(PASS\)[\s\S]*?(?=## 验证命令)/, "### 复原(PASS)\n\n"));
     expect(r.lines.join("\n")).toContain("缺「复原」段的 PASS 输出");

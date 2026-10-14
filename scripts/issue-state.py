@@ -11,7 +11,7 @@
 <to> ∈ accept / in-progress / in-review / rework-1 / rework-2 / 待验证 / needs-decision / decline / blocked / closed。
 迁移表在 scripts/issue-state.json。流程:读当前状态标签 → 校验迁移 → reason 文件过
 issue-guard.py → 一次 `gh issue edit` 删全部旧状态标签 + 加新标签 → 评论(末行带机器可读标记)。
-任何一步失败都在改标签之前退出,不会留下半截状态。
+校验与隐私闸门失败都在改标签之前退出;标签改成功但评论失败时,可能留下没有评论的标签变更,可先用 --dry-run 预检。
 
 退出码: 0 成功 | 1 非法迁移/参数 | 2 用法错误 | 3 当前状态歧义(多个状态标签,用 --from 指明)
         4 隐私闸门命中 | 5 gh 调用失败。
