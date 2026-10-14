@@ -189,6 +189,18 @@ export function WorkersPanel({
                     </div>
                   );
                 })()}
+                {(() => {
+                  // F2:磁盘剩余(旧 bundle/探测失败时没有该字段 → 不显示)。低于 master 水位标红。
+                  const s = status[w.id];
+                  if (!s?.ok || typeof s.diskFreeGB !== "number") return null;
+                  const low = typeof s.diskMinGB === "number" && s.diskMinGB > 0 && s.diskFreeGB < s.diskMinGB;
+                  return (
+                    <div className="text-[11px] mt-1" style={{ color: low ? "var(--error-fg)" : "var(--muted-soft)" }}>
+                      {low ? "⚠ " : ""}{t("hub.workers.diskFree", { gb: s.diskFreeGB.toFixed(1) })}
+                      {low ? ` · ${t("hub.workers.diskLow", { min: String(s.diskMinGB) })}` : ""}
+                    </div>
+                  );
+                })()}
                 {w.capabilities && w.capabilities.length > 0 && (
                   <div className="flex flex-wrap gap-1 mt-1">
                     {w.capabilities.map((c) => (

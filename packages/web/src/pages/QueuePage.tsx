@@ -48,6 +48,11 @@ function stepLabel(t: TFunc, step: string): string {
   return label === key ? step : label;
 }
 
+/** 字节 → 人类可读(1 位小数,MB/GB)。 */
+function fmtBytes(n: number): string {
+  return n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(0.1, n / 1e6).toFixed(1)} MB`;
+}
+
 /**
  * 边录边传实时进度(F1):节点自己建稿 / 追加 / 删源,master 要等收播后才建 job,
  * 这段时间队列原本是空的。数据来自节点 5 秒状态轮询,只读。
@@ -68,6 +73,9 @@ function DeliveringPanel({ items, now }: { items: RollingDeliveryDTO[]; now: num
               <span className="text-muted">{d.recording ? t("queue.delivering.recording") : t("queue.delivering.ended")}</span>
               <span className="font-mono text-[12px]">{t("queue.delivering.progress", { c: d.confirmed, n: d.total })}</span>
               {d.uploading && <span>{t("queue.delivering.pending")}</span>}
+              {typeof d.lockedBytes === "number" && d.lockedBytes > 0 && (
+                <span className="text-muted font-mono text-[12px]">{t("queue.delivering.locked", { size: fmtBytes(d.lockedBytes) })}</span>
+              )}
               {d.ambiguous > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.delivering.unknown")} {d.ambiguous}</span>}
               {d.bv ? (
                 <a className="font-mono text-[11px] text-muted hover:text-ink" href={`https://www.bilibili.com/video/${d.bv}`} target="_blank" rel="noreferrer">{d.bv}</a>

@@ -334,6 +334,10 @@ export interface WorkerStatus {
   expectedVersion?: number;
   /** 同步失败原因(有则说明「下发到了但应用失败」)。 */
   syncError?: string;
+  /** 节点数据根所在卷剩余空间(GB,F2;旧 bundle / 探测失败 → 省略)。 */
+  diskFreeGB?: number;
+  /** master 的磁盘水位(GB,与磁盘看门狗同源);0 = 已关闭。 */
+  diskMinGB?: number;
 }
 
 /** GET /api/hub/jobs 响应(total = 满足过滤的 run 总数,分页用)。 */
@@ -479,6 +483,8 @@ export interface RollingDeliveryDTO {
   recording: boolean;
   /** 本条状态的核对时刻(epoch ms)。 */
   checkedAt: number;
+  /** 未确认分段仍占用的磁盘字节(F2;旧节点 bundle 缺省 = 未知)。 */
+  lockedBytes?: number;
 }
 
 export interface HubQueueDTO {
