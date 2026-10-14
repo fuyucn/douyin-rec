@@ -3,7 +3,7 @@
 #
 # 拓扑:controller(serve --hub)+ 2 个 worker(sshd + serve),全部只接 drec-devnet(internal:true,无外网出口)。
 # 无 tailscale sidecar、不 publish 端口(internal 网络下 ports 本就无效);看 UI/API 用
-#   docker exec drec-dev curl -s http://127.0.0.1:7860/api/tasks
+#   docker exec drec-dev curl -s http://localhost:7860/api/tasks
 # 不碰线上:容器名 drec-dev*、卷只在 ${E2E_ROOT}(= <repo>/data-dev/e2e*)、不挂 remote/vps.key、不挂 docker-data。
 #
 # 必填 env(e2e-verify 注入):E2E_ROOT。可选:DREC_DEV_SUFFIX(如 -t1,与已存在的 drec-dev 并存)、DEV_SSH_TZ。

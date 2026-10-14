@@ -16,7 +16,7 @@
  │  drec-dev  (controller)            ssh -i dev_ed25519 + rsync            drec-dev-node-1 (worker)          │
  │  task serve --hub        ───────────────────────────────────────────▶   sshd:22 + task serve(无 --hub)    │
  │  /output-data ← data-dev/e2e/controller                                 /output-data ← data-dev/e2e/node-1 │
- │  hub.config.json: workers =                                              dist -> /app/dist(启动时刷新)     │
+ │  hub 配置: workers =                                                      dist -> /app/dist(启动时刷新)     │
  │   local / node-1 / node-2                                               假 biliup + FAKE-DEV cookies       │
  │  ssh config: Host drec-dev*-node-*                                                                          │
  │   dev 专用密钥 + known_hosts(accept-new)         ───────────────────▶   drec-dev-node-2 (同上,node-2 卷)  │
@@ -27,7 +27,7 @@
 - 三个容器共用一个镜像 `drec-dev-node:local`(`dev/multi-node/Dockerfile.dev`),按 compose `entrypoint` 分 controller / worker 角色。
 - 镜像底座 = 生产 Dockerfile 的 **worker 档**(`IMAGE_ROLE=worker`,无 biliup/playwright/ssh),由 `up` 现建并打标
   `drec-dev-base:local`。dev 层再叠 openssh-server / openssh-client / rsync / procps / fonts-noto-cjk + 假 biliup。
-- 访问 UI/API:internal 网络上 `ports:` 不生效,所以走 `docker exec drec-dev curl -s http://127.0.0.1:7860/api/tasks`。
+- 访问 UI/API:internal 网络上 `ports:` 不生效,所以走 `docker exec drec-dev curl -s http://localhost:7860/api/tasks`。
 
 ### 与已存在的 `drec-dev` 并存
 
@@ -52,12 +52,12 @@ SshTransport/LocalTransport 的代码路径零改动即可真跑,但**环境**�
 | --- | --- | --- | --- |
 | 1 | **worker 数据根里要有 `dist`**:建软链 `<dataRoot>/dist -> /app/dist`,且**每次启动刷新**(防镜像更新后指向旧程序) | `packages/orchestrator/src/transport-ssh.ts` 所有远端命令默认 `node ${dataRoot}/dist/douyin-rec.mjs …`(`remoteNode` 缺省值);镜像里程序在 `/app/dist`,生产 worker 是把 bundle 部署到 `<dataRoot>/dist`(`docs/worker-install.md`) | `dev/multi-node/dev-worker-entrypoint.sh`(`ln -sfn /app/dist "$DATA/dist"`,若 `dist` 是真目录则拒绝覆盖) |
 | 2 | **worker 镜像要有 rsync(和 sshd)** | worker 档 Dockerfile 只装 `ffmpeg ca-certificates curl xz-utils`(`Dockerfile` runtime 段 `else` 分支);`SshTransport.pull` 经 `rsync -e ssh host:path` 拉流,worker 端缺 rsync 报 `rsync: command not found`(T-19 的真实事故) | `dev/multi-node/Dockerfile.dev`(`openssh-server openssh-client rsync procps fonts-noto-cjk`) |
-| 3 | **controller 的 dev SSH Host 配置** | `SshTransport` 的 ssh/rsync **不带 `-i`**(`defaultRun`/`buildRsyncArgs`),身份与 User 全靠 `~/.ssh/config`;生产镜像里的 Host 段只匹配 `100.* *.ts.net`,容器名不命中 → 会以 root + 默认密钥去连 | `dev/multi-node/ssh_config.dev`(`Host drec-dev*-node-*`,专用密钥,`accept-new`,known_hosts 落 controller 数据卷);由 `dev-controller-entrypoint.sh` 装入 `/root/.ssh/` |
+| 3 | **controller 的 dev SSH Host 配置** | `SshTransport` 的 ssh/rsync **不带 `-i`**(`defaultRun`/`buildRsyncArgs`),身份与 User 全靠 `~/.ssh/config`;生产镜像里的 Host 段只匹配 `100.* *.ts.net`,容器名不命中 → 会以 root + 默认密钥去连 | `dev/multi-node/ssh_config.dev`(`Host drec-dev*-node-*`,专用密钥,`accept-new`,known_hosts 落 controller 数据卷);由 `dev-controller-entrypoint.sh` 装入 `/root/.ssh/` <!-- issue-guard: allow --> |
 | 4 | **worker 要 sshd + node 双进程启动脚本** | 生产 worker 的 CMD 只有 `task serve`;SshTransport 需要同一容器里还有 sshd。sshd 会话**不继承容器 ENV**,故脚本显式 `SetEnv PATH`(node 在 `/usr/local/bin`)与 `TZ`;主机密钥持久化到数据卷(重启不变,known_hosts 不报警,S4 要用) | `dev/multi-node/dev-worker-entrypoint.sh`(生成主机密钥 → `/run/sshd` → `authorized_keys` → `sshd -t` → 起 sshd → `exec node … task serve`,不带 `--hub`) |
 
 另:**假 biliup**(`dev/multi-node/fake-biliup.js`)与 FAKE-DEV 假 cookies 是第 5 个 dev 层物件,不是必修但必需:
-- `_node-capabilities` 探测 `biliup`/`cookies`(`probeNodeCapabilities`,`packages/app/src/node-pipeline.ts`)要求 PATH 里有 `biliup` 且 `<dataRoot>/config/biliup/cookies.json` 存在,否则节点侧上传回落现状;
-- 假 biliup 模仿真实输出(`投稿成功 BV1xxxxxxxxx`,10 位 `[0-9A-Za-z]`,满足 `parseBV`),`-V` 可用(`checkBiliup`),
+- `_node-capabilities` 探测 `biliup`/`cookies`(`probeNodeCapabilities`,`packages/app/src/node-pipeline.ts`)要求 PATH 里有 `biliup` 且 `<dataRoot>/config/biliup/cookies.json` 存在,否则节点侧上传回落现状; <!-- issue-guard: allow -->
+- 假 biliup 模仿真实输出(`投稿成功 BV…`,BV 后 10 位 `[0-9A-Za-z]`,满足 `parseBV`),`-V` 可用(`checkBiliup`),
   `upload`/`append` 把文件名、关水印、仅自己可见写入 `<cookies 目录>/fake-archive.jsonl` 供场景断言「硬标准」;
 - **只认含 `FAKE-DEV` 的 cookies,否则拒绝**(防误挂真凭证);全程不联网。
 
@@ -74,8 +74,8 @@ SshTransport/LocalTransport 的代码路径零改动即可真跑,但**环境**�
 | 数据根 | 绝对路径、无 `..`、路径含 `data-dev/` | `/srv/docker-data/e2e`、含 `..` |
 | 与线上数据根不重叠 | realpath 后不相等、不互为父子;候选 = `<repo>/docker-data`、主 checkout 的 `docker-data`、`.env` 的 `DATA_ROOT`、**线上容器 `douyin-rec` 的 `/output-data` 挂载源(docker inspect 只读)** | 相等 / 子目录 / 父目录 三种 |
 | `workers[].host` | 只允许 `<controller 名>-node-N`;并且整份 hub 配置不得出现 IPv4 或 `*.ts.net` 字样、`dataRoot` 必须 `/output-data` | IPv4(tailnet 形态)、`*.ts.net`、普通主机名、非法 dataRoot |
-| dev 密钥指纹 | `ssh-keygen -lf` 指纹 ≠ `<repo>/remote/vps.key`、主 checkout 的 `vps.key`、`~/.ssh/id_*`、线上容器挂载的 `vps.key` | 与自身相同指纹 |
-| dev 数据根无真实凭证 | 禁 `vps.key`/`*.pem`/`.env`/`id_*`/`config.yaml`;`cookies.json` 必须含 `FAKE-DEV`;`keys/` 下只允许 dev 密钥对 | 无 FAKE-DEV 的 cookies、`vps.key` |
+| dev 密钥指纹 | `ssh-keygen -lf` 指纹 ≠ `<repo>/remote/vps.key`、主 checkout 的 `vps.key`、`~/.ssh/id_*`、线上容器挂载的 `vps.key` | 与自身相同指纹 <!-- issue-guard: allow --> |
+| dev 数据根无真实凭证 | 禁 `vps.key`/`*.pem`/`.env`/`id_*`/`config.yaml`;`cookies.json` 必须含 `FAKE-DEV`;`keys/` 下只允许 dev 密钥对 | 无 FAKE-DEV 的 cookies、`vps.key` <!-- issue-guard: allow --> |
 | compose 渲染(`config --format json`) | 无 `ports`/`network_mode`/`privileged`/`pid`;每个服务 networks 恰为 `[drec-devnet]`;网络 `internal:true` 且名字正确;所有挂载源在 dev 数据根内且不含 `docker-data`/`vps.key` | 含 publish 端口、多网络且非 internal、挂线上数据根 |
 | 同名容器归属 | 同名容器必须带 `com.docker.compose.project=<本项目>` 标签,否则拒绝(不覆盖别人的 `drec-dev`) | — |
 | 网络 internal(**起栈后复检**) | `docker network inspect` 的 `Internal==true`,且每个容器只接入 `drec-devnet*`;不满足立即 `down` | `Internal=false` |
@@ -96,7 +96,7 @@ PASS   与线上容器 douyin-rec 的数据根(/output-data)不重叠
 PASS   compose 渲染:无 ports/network_mode/privileged,仅接 drec-devnet-t1(internal),挂载全在 dev 数据根
 == 反例自检(每条都必须被拒绝)
 REJECT 线上容器名 douyin-rec  <- REFUSE 容器名 'douyin-rec' 不匹配 ^drec-dev(-后缀)?(-node-N)?$
-REJECT worker host = IPv4(tailnet 形态)  <- REFUSE worker host '100.64.0.1' 不是 dev 容器名(…);疑似线上形态
+REJECT worker host = IPv4(tailnet 形态)  <- REFUSE worker host '<ipv4>' 不是 dev 容器名(…);疑似线上形态
 REJECT 网络 internal=false  <- REFUSE 网络 drec-devnet-t1 不是 internal(Internal=false)
 ```
 
@@ -112,7 +112,7 @@ scripts/e2e-verify.sh down        # 拆容器+网络,清空 dev 数据(保留 da
 ```
 
 数据根默认 `<repo>/data-dev/e2e[后缀]/{controller,node-1,node-2,keys}`(`data-dev/` 已进 `.gitignore`),可用 `DREC_DEV_ROOT` 改,
-但必须仍含 `data-dev/` 段并过上面的重叠断言。`up` 首次会生成 dev 专用 ed25519 密钥与 `controller/config/hub.config.json`
+但必须仍含 `data-dev/` 段并过上面的重叠断言。`up` 首次会生成 dev 专用 ed25519 密钥与 `controller/config/hub.config.json` <!-- issue-guard: allow -->
 (模板 `dev/multi-node/hub.config.dev.json`,`settleMs/reconcileIntervalMs` 调小以便场景秒级触发)。
 
 可调:`DEV_TZ`(容器 TZ,默认 Asia/Shanghai)、`DEV_SSH_TZ`(ssh 会话 TZ,默认同;**设为空串则 ssh 会话为 UTC**,用来复现 §6.2 的风险)。
@@ -135,7 +135,7 @@ scripts/e2e-verify.sh down        # 拆容器+网络,清空 dev 数据(保留 da
 1. **有人给容器再接一个有出口的网络**,真录制就会起来。compose 静态断言(仅接 `drec-devnet`、internal)与起栈后复检(每个容器只接入 devnet)挡住这条;手工 `docker network connect` 不在断言范围内,doctor 不是持续监控。
 2. 在窗口内的启用任务会让 daemon 持续尝试取流 → worker 日志刷「取流失败」重试;无害但嘈杂。**场景播种的任务一律 `enabled:false` 或把窗口设在当前时间之外**,需要「在录」状态时用 `recording` 字段的构造方式而不是真录。
 3. `countVideoParts`(append 幂等核对)用 `fetch https://api.bilibili.com`(`packages/app/src/upload/biliup.ts`),不走 biliup 二进制,**假 biliup 拦不住**;internal 网络下它恒返回 `null`(=无法确认),所以 dev 里 append 幂等核对只能走「无法确认」分支。要覆盖「分 P 数可查」分支需要在 P2 里为该接缝注入替身(现有 `test/e2e` 已覆盖),不是本环境的目标。
-4. 邮件/webhook:`DISCORD_WEBHOOK` 置空;其它外发通知通道无出口,会静默失败(日志可见)。
+4. 邮件/webhook:`DISCORD_WEBHOOK` 置空;其它外发通知通道无出口,会静默失败(日志可见)。 <!-- issue-guard: allow -->
 
 ### 6.2 隐藏命令在 SSH 会话下的 UTC/日期语义风险(逐点)
 
@@ -151,7 +151,7 @@ scripts/e2e-verify.sh down        # 拆容器+网络,清空 dev 数据(保留 da
 4. **`_node-pipeline` 的标题日期**:`formatBiliTitle` 优先取 session base 里的 stamp 原样,否则用 `spec.timeZone`(master 下发)按 `Intl` 渲染,**不依赖进程 TZ**——此项低风险。
 5. **调度窗口**(`inWindow`/`nowMinutesLocal`)只在 serve 进程里用,已 applyTimezone;隐藏命令不涉及。
 6. **`_is-done`/`_recording-status`** 只扫 `/proc`,无日期语义。
-7. **rolling sidecar / `.rolling.json`** 的时间戳是 epoch,与 TZ 无关。
+7. **rolling sidecar / `.rolling.json`** 的时间戳是 epoch,与 TZ 无关。 <!-- issue-guard: allow -->
 
 dev 环境的处理:worker 的 sshd 默认 `SetEnv TZ=Asia/Shanghai`(与 serve 默认一致,免得第 1/3 点的偏差污染场景结论);
 想专门验证偏差时 `DEV_SSH_TZ= scripts/e2e-verify.sh up`(ssh 会话变 UTC)。**这不是 dev 层的锅,是生产也存在的隐患**:生产 VPS 的 ssh 会话 TZ 取决于主机登录环境。
@@ -175,11 +175,11 @@ dev 环境的处理:worker 的 sshd 默认 `SetEnv TZ=Asia/Shanghai`(与 serve �
 > 「预期输出」是按代码路径推出的**样例**,P2 PR 把它们变成自动化用例时以实测输出为准。S4 阻塞,不在此列。
 > 下文 `$CTRL`/`$N1`/`$N2` = `drec-dev` / `drec-dev-node-1` / `drec-dev-node-2`(带后缀时相应加后缀)。
 
-### 8.1 播种:真 .ts + session.json(节点扫描跑真 ffprobe)
+### 8.1 播种:真 .ts + session.json(节点扫描跑真 ffprobe) <!-- issue-guard: allow -->
 
 要点:
 - `.ts` 必须是 ffprobe 读得出时长的真文件——`_inventory` 里 `ffprobeVideo` 真跑(不是 fake);用 ffmpeg 的 lavfi `testsrc` 生成,**video-only**(录制端本就无音轨)。
-- 会话 base = `{anchor}_{YYYY-MM-DD}_{HH-mm-ss}`,分段 `{base}_{NNN}.ts`,旁边放 `{base}.xml`(弹幕)与 `{base}.session.json`(`roomSlug`=房间号、`platform`、`gaps`)。
+- 会话 base = `{anchor}_{YYYY-MM-DD}_{HH-mm-ss}`,分段 `{base}_{NNN}.ts`,旁边放 `{base}.xml`(弹幕)与 `{base}.session.json`(`roomSlug`=房间号、`platform`、`gaps`)。 <!-- issue-guard: allow -->
 - **`startMs/endMs` 来自 mtime 与时长**:`touch -d @<epoch>` 把 mtime 设成「收播时刻」(比现在早一小时,过了 settle 窗口)。base 里的时间用同一 epoch 在容器 TZ 下渲染。
 - 同一场要在 node-1 / node-2 都放(同 `roomSlug`、起止时间重叠 5 分钟容差内),才会被聚成一场、进选优。想造「node-2 有断流」就把 node-2 的 `totalGapSec` 写成 > 0。
 
@@ -200,21 +200,22 @@ seed() { # seed <容器> <anchor> <roomSlug> [段数] [每段秒] [gapSec]
       touch -d @$(( START + (i+1)*SEG )) "$F"          # mtime = 该段 endMs
       i=$((i+1))
     done
-    printf "{\"roomSlug\":\"%s\",\"platform\":\"douyin\",\"gaps\":[],\"totalGapSec\":%s,\"title\":\"dev-title\"}\n" "$ROOM" "$GAP" > "$D/$B.session.json"
-    printf "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<i>\n<d p=\"1,1,25,16777215,1700000000,0,1,0\" user=\"u1\">dev</d>\n</i>\n" > "$D/$B.xml"
+    printf "{\"roomSlug\":\"%s\",\"platform\":\"douyin\",\"gaps\":[],\"totalGapSec\":%s,\"title\":\"dev-title\"}\n" "$ROOM" "$GAP" > "$D/$B.session.json"  # issue-guard: allow
+    printf "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<i>\n<d p=\"1,1,25,16777215,1700000000,0,1,0\" user=\"u1\">dev</d>\n</i>\n" > "$D/$B.xml"  # issue-guard: allow
   ' _ "$ANCHOR" "$ROOM" "$SEGS" "$SEG" "$GAP"
 }
-seed drec-dev-node-1 dev-anchor-a 900000001
-seed drec-dev-node-2 dev-anchor-a 900000001 2 20 30      # node-2 有 30s 缺口
+ROOM=900000001   # 假房间号 # issue-guard: allow
+seed drec-dev-node-1 dev-anchor-a "$ROOM"
+seed drec-dev-node-2 dev-anchor-a "$ROOM" 2 20 30      # node-2 有 30s 缺口
 # 读回(节点扫描=真 ffprobe):
 docker exec drec-dev ssh drec-dev-node-1 -- 'node /output-data/dist/douyin-rec.mjs _inventory /output-data' \
   | jq -c '.recordings[] | {roomSlug, sessionBase, durationSec, danmuCount, files: (.tsFiles|length)}'
 ```
 
-实测输出(1 段 20s 的最小用例):
+实测输出(1 段 20s 的最小用例,数值脱敏为占位):
 
 ```
-{"roomSlug":"900000001","platform":"douyin","sessionBase":"dev-anchor-a_2026-10-14_10-23-24","durationSec":20,"danmuCount":1,"startMs":1791944604000,"endMs":1791944624000,"files":1}
+{"roomSlug":"<room>","platform":"douyin","sessionBase":"dev-anchor-a_<日期>_<时分秒>","durationSec":20,"danmuCount":1,"startMs":<ms>,"endMs":<ms+20000>,"files":1}
 ```
 
 在 controller 上建源任务与 hub 规则(播种的任务 `enabled:false`,避免 daemon 尝试取流,见 §6.1):
@@ -222,12 +223,13 @@ docker exec drec-dev ssh drec-dev-node-1 -- 'node /output-data/dist/douyin-rec.m
 > 下面两条 API 的 payload **本 PR 未实跑**(字段取自 `AGENTS.md` 的 hub 规则格式与 `hub-rules.ts`),P2 PR 落地用例时校准。
 
 ```bash
+API=http://localhost:7860
 api() { docker exec drec-dev curl -s -H 'content-type: application/json' "$@"; }
-api -X POST http://127.0.0.1:7860/api/tasks -d '{"room":"https://live.douyin.com/900000001","name":"dev-anchor-a","enabled":false}'
+api -X POST $API/api/tasks -d "{\"room\":\"https://live.douyin.com/$ROOM\",\"name\":\"dev-anchor-a\",\"enabled\":false}"
 # 取返回的 task id → 建规则(workers 勾选决定 S1;pipeline 缺省走默认合并+上传,上传用假 biliup)
-api -X POST http://127.0.0.1:7860/api/hub/rules \
+api -X POST $API/api/hub/rules \
   -d '{"enabled":true,"workers":["node-1","node-2"],"recording":{"sourceTaskId":<id>},"pipeline":{"steps":{"mergeSegments":true,"burnDanmu":false,"burnLivechat":false},"upload":{"mode":"upload","private":true},"cleanup":{"sourceAfterDone":true,"stageAfterDone":true}}}'
-api -X POST http://127.0.0.1:7860/api/hub/apply            # 立刻同步任务到所选节点
+api -X POST $API/api/hub/apply            # 立刻同步任务到所选节点
 ```
 
 ### 8.2 三路断言(每个场景都要三路对上)
@@ -235,7 +237,7 @@ api -X POST http://127.0.0.1:7860/api/hub/apply            # 立刻同步任务�
 | 路 | 取法 | 看什么 |
 | --- | --- | --- |
 | **台账状态** | controller 的 sync 库(`<db>-sync.db` = `/output-data/db/douyin-rec-sync.db`):`docker exec drec-dev node -e "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('/output-data/db/douyin-rec-sync.db',{readOnly:true});console.log(JSON.stringify(d.prepare('select streamKey,state,winnerWorker,bv,error from sync_jobs').all()));console.log(JSON.stringify(d.prepare('select streamKey,workerId,coverage,isWinner from sync_candidates').all()))"` | `sync_jobs.state`(pending→syncing→merging→uploading→done / needs_manual / failed)、`winnerWorker`、`bv`;`sync_candidates` 里每节点的 coverage/是否胜出 |
-| **文件在位** | `docker exec <节点> ls -l /output-data/recordings/<anchor>`、`docker exec $CTRL ls -R /output-data/stage` | 源录像/`.xml`/`.session.json` 是否仍在;stage 是否有残留;`fake-archive.jsonl`(`/output-data/config/biliup/`)里的 `watermarkOff:true`、`onlySelf:true` |
+| **文件在位** | `docker exec <节点> ls -l /output-data/recordings/<anchor>`、`docker exec $CTRL ls -R /output-data/stage` | 源录像/`.xml`/`.session.json` 是否仍在;stage 是否有残留;`fake-archive.jsonl`(`/output-data/config/biliup/`)里的 `watermarkOff:true`、`onlySelf:true` <!-- issue-guard: allow --> |
 | **API / 界面字段** | `GET /api/hub/jobs`、`/api/hub/queue`、`/api/hub/workers/status`、各节点 `GET /api/tasks`(经 `docker exec <节点> curl …`) | job 状态/ETA/步骤时间线、worker 三态点、节点任务的 `assigned`/`recording` 字段 |
 
 ### 8.3 S1 归属隐藏
@@ -266,7 +268,7 @@ api -X POST http://127.0.0.1:7860/api/hub/apply            # 立刻同步任务�
 
 预期(样例):
 - 台账:`sync_jobs`:`state=done`、`bv` 形如 `BV1…`(假 biliup 产出)、`sync_candidates` 里 winner 为完整录全的节点;`sync_job_steps` 有 pull→merge→upload→verify。
-- 文件:stage 已清空(`job.log` 与 `.drec-node-result.json` 是有意保留的小文件);节点源**视频**已删,但 `.xml` 按 `xmlKeepRule` **至少保留一份**(清空 stage 时保留节点源 .xml)。
+- 文件:stage 已清空(`job.log` 与 `.drec-node-result.json` 是有意保留的小文件);节点源**视频**已删,但 `.xml` 按 `xmlKeepRule` **至少保留一份**(清空 stage 时保留节点源 .xml)。 <!-- issue-guard: allow -->
 - 假 biliup 凭据:`/output-data/config/biliup/fake-archive.jsonl` 每行 `watermarkOff:true`、`onlySelf:true`,`upload` 一行含 plain 文件,`append` 行含其余分 P(顺序 P1=plain → P2=danmu → P3=livechat,按 pipeline 开关)。
 - API:`/api/hub/jobs` 该场 `done`,`/api/hub/queue` 无在途。
 

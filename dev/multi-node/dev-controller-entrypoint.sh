@@ -20,7 +20,7 @@ CK="$DATA/config/biliup/cookies.json"
 mkdir -p "$(dirname "$CK")"
 if [ ! -f "$CK" ]; then
   cat > "$CK" <<'JSON'
-{"drec-dev-fake":true,"cookie_info":{"cookies":[{"name":"SESSDATA","value":"FAKE-DEV-SESSDATA"},{"name":"bili_jct","value":"FAKE-DEV-JCT"},{"name":"DedeUserID","value":"999999999"}]},"token_info":{"access_token":"FAKE-DEV","refresh_token":"FAKE-DEV"}}
+{"drec-dev-fake":true,"cookie_info":{"cookies":[{"name":"SESSDATA","value":"FAKE-DEV-SESSDATA"},{"name":"bili_jct","value":"FAKE-DEV-JCT"},{"name":"DedeUserID","value":"0"}]},"token_info":{"access_token":"FAKE-DEV","refresh_token":"FAKE-DEV"}}
 JSON
 fi
 cd /app

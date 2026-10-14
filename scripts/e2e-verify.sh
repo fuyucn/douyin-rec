@@ -316,12 +316,12 @@ negative_cases() {
   expect_refuse "dev 根 == 线上根"            chk_no_overlap "$t/docker-data" "$t/docker-data"
   expect_refuse "dev 根是线上根的子目录"      chk_no_overlap "$t/docker-data/data-dev" "$t/docker-data"
   expect_refuse "dev 根是线上根的父目录"      chk_no_overlap "$t" "$t/docker-data"
-  expect_refuse "worker host = IPv4(tailnet 形态)" chk_host 100.64.0.1
+  expect_refuse "worker host = IPv4(tailnet 形态)" chk_host 100.64.0.1  # issue-guard: allow(测试夹具:线上形态假值)
   expect_refuse "worker host = *.ts.net"      chk_host example-node.ts.net
   expect_refuse "worker host = 普通主机名"    chk_host some-vps
-  printf '{"workers":[{"id":"x","kind":"tailscale-ssh","host":"100.64.0.1","dataRoot":"/output-data"}]}' >"$t/bad-hub.json"
+  printf '{"workers":[{"id":"x","kind":"tailscale-ssh","host":"100.64.0.1","dataRoot":"/output-data"}]}' >"$t/bad-hub.json"  # issue-guard: allow(测试夹具:线上形态假值)
   expect_refuse "hub 配置含线上形态 host"     chk_hub_config "$t/bad-hub.json"
-  printf '{"workers":[{"id":"x","kind":"ssh","host":"%s","dataRoot":"/home/someone/drec"}]}' "$NODE1" >"$t/bad-root.json"
+  printf '{"workers":[{"id":"x","kind":"ssh","host":"%s","dataRoot":"/home/someone/drec"}]}' "$NODE1" >"$t/bad-root.json"  # issue-guard: allow(测试夹具:线上形态假值)
   expect_refuse "hub 配置 dataRoot 非 /output-data" chk_hub_config "$t/bad-root.json"
   ssh-keygen -q -t ed25519 -N '' -f "$t/k1"
   expect_refuse "dev 密钥指纹 == 线上密钥"    chk_key_fp "$t/k1" "$t/k1"
@@ -354,7 +354,7 @@ cmd_up() {
   dc up -d
   post_up_assert
   say "up: OK。controller=$CTRL workers=$NODE1,$NODE2 网络=$NET(internal)"
-  say "  看 API:  docker exec $CTRL curl -s http://127.0.0.1:7860/api/tasks"
+  say "  看 API:  docker exec $CTRL curl -s http://localhost:7860/api/tasks"
   say "  冒烟:    DREC_DEV_SUFFIX='$SUFFIX' scripts/e2e-verify.sh smoke"
 }
 

@@ -49,7 +49,7 @@ const entry = {
 if (sub === "upload") {
   if (files.length === 0) fail("upload 缺少文件");
   const h = crypto.createHash("sha1").update(`${entry.title}|${entry.files[0]}`).digest("base64").replace(/[^0-9A-Za-z]/g, "");
-  entry.bv = ("BV1" + h + "000000000").slice(0, 12);
+  entry.bv = ("BV1" + h + "0".repeat(9)).slice(0, 12);
   console.log(`[fake-biliup] 开始上传 ${files.length} 个文件(假,不联网)`);
   console.log(`投稿成功 ${entry.bv}`);
 } else if (sub === "append") {
