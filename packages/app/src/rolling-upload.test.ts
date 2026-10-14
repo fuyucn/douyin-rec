@@ -84,6 +84,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     const s2 = mkSession(segNames(2));
     const ap = vi.fn(async () => {});
     const remove2 = vi.fn(() => true);
+    u.abandon(); // 模拟进程被杀(同进程内旧实例退出存活表,否则租约仍有效)
     const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove2, minSegmentSec: 0 });
     for (const p of s2.paths) u2.noteSegment(p);
     const r2 = await u2.flush({ recordingActive: false });
@@ -101,6 +102,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     expect(up).toHaveBeenCalledTimes(1);
 
     // 新实例 = 进程重启:sidecar 已记录确认,绝不再建稿。
+    u1.abandon(); // 模拟进程被杀(同进程内旧实例退出存活表,否则租约仍有效)
     const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u2.noteSegment(paths[0]);
     const r2 = await u2.flush({ recordingActive: false });
@@ -136,6 +138,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     expect(u1.confirmedIndices).toEqual([0]);
 
     // 重启(新实例,读 sidecar):新段 s_001 必须分到段号 1 并 append(而不是复用 0 被跳过)。
+    u1.abandon(); // 模拟进程被杀(同进程内旧实例退出存活表,否则租约仍有效)
     const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u2.noteSegment(paths[1]);
     const r2 = await u2.flush({ recordingActive: false });
@@ -192,6 +195,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     // 独立会话(另一 sidecar),避免读到上一实例的已确认状态而走 append(不建稿)。
     const { paths: paths2 } = mkSession(segNames(1));
     const up2 = vi.fn(async (_o: { plain: { public?: boolean } }) => "BV1qqqqqqqqqq");
+    u.abandon(); // 模拟进程被杀(同进程内旧实例退出存活表,否则租约仍有效)
     const u2 = new RollingUploader({ room, uploadMeta, uploadPrivate: false, gate: new FakeGate(), uploadPlainRaw: up2, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u2.noteSegment(paths2[0]);
     await u2.flush({ recordingActive: false });
@@ -219,7 +223,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
       uploading: { index: 1, kind: "append" },
     });
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1rrrrrrrrrr", appendGroupRaw: ap, countPartsRaw: async () => 2, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1rrrrrrrrrr", appendGroupRaw: ap, countPartsRaw: async () => 2, removeFile: noRemove, readbackGapMs: 0, now: futureNow, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
     expect(u.confirmedIndices).toEqual([0, 1]); // 补确认
@@ -236,7 +240,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
       uploading: { index: 1, kind: "append" },
     });
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1ssssssssss", appendGroupRaw: ap, countPartsRaw: async () => 1, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1ssssssssss", appendGroupRaw: ap, countPartsRaw: async () => 1, removeFile: noRemove, readbackGapMs: 0, now: futureNow, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
     expect(ap).toHaveBeenCalledTimes(1); // 未提交 → 正常重试
@@ -260,7 +264,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
       uploading: { index: 3, kind: "append" },
     });
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1ffffragment", appendGroupRaw: ap, countPartsRaw: async () => 3, removeFile: noRemove, now: futureNow, minSegmentSec: 5 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1ffffragment", appendGroupRaw: ap, countPartsRaw: async () => 3, removeFile: noRemove, readbackGapMs: 0, now: futureNow, minSegmentSec: 5 });
     u.noteSegment(paths[0]);
     await u.flush({ recordingActive: false });
     expect(u.confirmedIndices).toEqual([0, 2, 3]); // 分P数=3=已确认数+1 → 段 3 其实已提交
@@ -277,7 +281,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
       uploading: { index: 1, kind: "append" },
     });
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1tttttttttt", appendGroupRaw: ap, countPartsRaw: async () => 5, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1tttttttttt", appendGroupRaw: ap, countPartsRaw: async () => 5, removeFile: noRemove, readbackGapMs: 0, now: futureNow, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
     expect(u.ambiguousIndices).toContain(1);
@@ -296,7 +300,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
       uploading: { index: 1, kind: "append" },
     });
     const ap = vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1nnnnnnnnnn", appendGroupRaw: ap, countPartsRaw: async () => null, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1nnnnnnnnnn", appendGroupRaw: ap, countPartsRaw: async () => null, removeFile: noRemove, readbackGapMs: 0, now: futureNow, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
     expect(u.ambiguousIndices).toContain(1);
@@ -341,6 +345,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     await u1.flush({ recordingActive: true });
     expect(up).not.toHaveBeenCalled();
     // 实例 2 = 重启:**先**上报尾段(它的 mtime 晚 60s)→ 读回 sidecar 的 startMs,仍锚定首段时刻。
+    u1.abandon(); // 模拟进程被杀(同进程内旧实例退出存活表,否则租约仍有效)
     const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
     u2.noteSegment(paths[1]);
     await u2.flush({ recordingActive: false });
@@ -376,6 +381,212 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     } finally {
       chmodSync(recDir, 0o755); // 恢复权限,留待系统清理 tmp
     }
+  });
+});
+
+describe("RollingUploader — 清单 v3 / 租约 / 接管(#57 R2)", () => {
+  const manifestFile = (dir: string): string => sidecarPath(dir);
+  const readJson = (dir: string): Record<string, any> => JSON.parse(readFileSync(manifestFile(dir), "utf-8"));
+  const fast = { readbackGapMs: 0, sleep: async (): Promise<void> => {} };
+  const writeV3 = (dir: string, over: Record<string, unknown>): void => writeFileSync(manifestFile(dir), JSON.stringify({
+    schemaVersion: 3, streamKey: `douyin:123:${SESSION_BASE}`, sessionBase: SESSION_BASE, updatedAt: Date.now(), ...over,
+  }));
+  const segsOf = (paths: string[], statuses: string[]): unknown[] =>
+    paths.map((p, i) => ({ index: i, path: p, status: statuses[i] ?? "sealed" }));
+
+  it("每次写 = schemaVersion 3 + segs + 同步的旧字段镜像 + 租约", async () => {
+    const { dir, paths } = mkSession(segNames(3));
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1mmmmmmmmm", appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    for (const p of paths) u.noteSegment(p);
+    await u.flush({ recordingActive: false });
+    const j = readJson(dir);
+    expect(j.schemaVersion).toBe(3);
+    expect(j.segs.map((s: { status: string }) => s.status)).toEqual(["acked", "acked", "acked"]); // removeFile 失败 → 仍 acked
+    expect(j.confirmed).toEqual([0, 1, 2]);
+    expect(j.segments).toHaveLength(3);
+    expect(j.bv).toBe("BV1mmmmmmmmm");
+    expect(j.uploading).toBeUndefined();
+    expect(j.lease).toMatchObject({ pid: process.pid });
+    expect(j.room).toEqual(room);
+    expect(j.policy).toEqual({ private: true });
+    u.abandon();
+  });
+
+  it("删源成功 → acked→sourceDeleted;镜像 confirmed 仍含该段;close 释放租约", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1ddddddddd", appendGroupRaw: noopAppend, removeFile: () => true, now: futureNow, minSegmentSec: 0 });
+    for (const p of paths) u.noteSegment(p);
+    await u.flush({ recordingActive: false });
+    u.close();
+    const j = readJson(dir);
+    expect(j.segs.map((s: { status: string }) => s.status)).toEqual(["sourceDeleted", "sourceDeleted"]);
+    expect(j.confirmed).toEqual([0, 1]);
+    expect(j.lease).toBeUndefined();
+  });
+
+  it("读到 v2 清单:按旧字段重建 segs,续传后以 v3 写回(旧字段保持一致)", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    writeSidecar(dir, { bv: "BV1vvvvvvvvv", schemaVersion: 2, segments: [{ index: 0, path: paths[0] }], confirmed: [0] });
+    const ap = vi.fn(async () => {});
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => { throw new Error("不得建稿"); }, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0 });
+    u.noteSegment(paths[0]); u.noteSegment(paths[1]);
+    await u.flush({ recordingActive: false });
+    expect(ap).toHaveBeenCalledTimes(1);
+    const j = readJson(dir);
+    expect(j.schemaVersion).toBe(3);
+    expect(j.confirmed).toEqual([0, 1]);
+    expect(j.bv).toBe("BV1vvvvvvvvv");
+    u.abandon();
+  });
+
+  it("自己的清单损坏 → 不可信:不建稿/不 append/不删源、不覆盖原文件、日志+通知(不当新会话)", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    writeFileSync(manifestFile(dir), '{"schemaVersion":3,"segs":[{"ind');
+    const before = readFileSync(manifestFile(dir), "utf-8");
+    const up = vi.fn(async () => "BV1xxxxxxxxx"); const remove = vi.fn(noRemove);
+    const logs: string[] = []; const notes: string[] = [];
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: remove, now: futureNow, minSegmentSec: 0, log: (m) => logs.push(m), notify: (_s, m) => notes.push(m), takeoverSiblings: false });
+    for (const p of paths) u.noteSegment(p);
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([]);
+    expect(up).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(readFileSync(manifestFile(dir), "utf-8")).toBe(before);
+    expect(logs.some((m) => m.includes("清单损坏"))).toBe(true);
+    expect(notes.some((m) => m.includes("损坏"))).toBe(true);
+  });
+
+  it("租约被其它存活进程持有 → 本实例不写、不上传", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    // 用父进程 pid 充当「另一个存活进程」。
+    writeV3(dir, { segs: segsOf(paths, ["uploading", "sealed"]), lease: { pid: process.ppid, until: Date.now() + 600_000, holder: "other" }, intent: { attemptId: "a", kind: "create", index: 0, startedAt: 1 } });
+    const before = readFileSync(manifestFile(dir), "utf-8");
+    const up = vi.fn(async () => "BV1xxxxxxxxx");
+    const notes: string[] = [];
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, minSegmentSec: 0, log: () => {}, notify: (_s, m) => notes.push(m), takeoverSiblings: false });
+    for (const p of paths) u.noteSegment(p);
+    await u.flush({ recordingActive: false });
+    expect(up).not.toHaveBeenCalled();
+    expect(readFileSync(manifestFile(dir), "utf-8")).toBe(before);
+    expect(notes.some((m) => m.includes("租约"))).toBe(true);
+  });
+
+  it("租约已过期 / pid 不存在 → 允许续用(旧写者已死)", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    writeV3(dir, { bv: "BV1eeeeeeeee", segs: segsOf(paths, ["acked", "sealed"]), lease: { pid: process.ppid, until: 1, holder: "dead" } });
+    const ap = vi.fn(async () => {});
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "x", appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0, takeoverSiblings: false });
+    for (const p of paths) u.noteSegment(p);
+    await u.flush({ recordingActive: false });
+    expect(ap).toHaveBeenCalledTimes(1);
+    expect(readJson(dir).lease.holder).not.toBe("dead");
+    u.abandon();
+  });
+
+  it("写前复核:租约被接管者夺走后,原写者(僵尸)停手,不再上传/不覆盖清单", async () => {
+    const { dir, paths } = mkSession(segNames(3));
+    const gateRelease: { fn?: () => void } = {};
+    const ap = vi.fn(() => new Promise<void>((r) => { gateRelease.fn = r; }));
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1zzzzzzzzz", appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0, takeoverSiblings: false, log: () => {} });
+    for (const p of paths) u.noteSegment(p);
+    const run = u.flush({ recordingActive: false });
+    await vi.waitFor(() => expect(ap).toHaveBeenCalledTimes(1));
+    // 另一写者(接管者)夺走租约。
+    const j = readJson(dir);
+    writeFileSync(manifestFile(dir), JSON.stringify({ ...j, lease: { pid: process.ppid, until: Date.now() + 600_000, holder: "usurper" } }));
+    const stolen = readFileSync(manifestFile(dir), "utf-8");
+    gateRelease.fn?.(); // 僵尸的 append「成功返回」
+    const r = await run;
+    expect(readFileSync(manifestFile(dir), "utf-8"), "僵尸不得覆盖接管者的清单").toBe(stolen);
+    expect(ap).toHaveBeenCalledTimes(1); // 后续段不再外发
+    void r;
+  });
+
+  it("心跳:长时间上传期间租约被续期(until 前移)", async () => {
+    const { dir, paths } = mkSession(segNames(1));
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: async () => "BV1", appendGroupRaw: noopAppend, removeFile: noRemove, minSegmentSec: 0, heartbeatMs: 20, leaseMs: 60_000, takeoverSiblings: false });
+    u.noteSegment(paths[0]);
+    const t1 = readJson(dir).lease.until as number;
+    await new Promise((r) => setTimeout(r, 120));
+    expect(readJson(dir).lease.until as number).toBeGreaterThan(t1);
+    u.abandon();
+  });
+
+  it("endSession(wait=false):封口落盘即返回,上传在后台继续;wait=true 有限等待", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    const rel: { fn?: () => void } = {};
+    const up = vi.fn(() => new Promise<string>((r) => { rel.fn = () => r("BV1bbbbbbbbb"); }));
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, takeoverSiblings: false });
+    for (const p of paths) u.noteSegment(p);
+    await u.endSession({ wait: false }); // 不等上传
+    expect(readJson(dir).segs.every((s: { status: string }) => s.status !== "open")).toBe(true);
+    await vi.waitFor(() => expect(up).toHaveBeenCalledTimes(1));
+    rel.fn?.();
+    await vi.waitFor(() => expect(readJson(dir).confirmed).toEqual([0, 1]));
+    await vi.waitFor(() => expect(readJson(dir).lease).toBeUndefined()); // 后台收尾后释放租约
+
+    // wait=true + 上传永不返回 → 到 waitMs 放弃等待(留待接管),不挂死
+    const { paths: p2 } = mkSession(segNames(1).map((n) => n.replace("08-00-00", "09-00-00")));
+    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: () => new Promise<string>(() => {}), appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, takeoverSiblings: false, log: () => {} });
+    u2.noteSegment(p2[0]);
+    const t0 = Date.now();
+    await u2.endSession({ wait: true, waitMs: 80 });
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    u2.abandon();
+  });
+
+  describe("runTakeover(接管遗留会话)", () => {
+    const mkTakeover = (over: Record<string, unknown> = {}) => ({
+      room, uploadMeta, gate: new FakeGate(), removeFile: noRemove, minSegmentSec: 0, takeover: true, takeoverSiblings: false, ...fast, ...over,
+    }) as ConstructorParameters<typeof RollingUploader>[0];
+
+    it("无稿件号且所有段确定未提交 → 交主控常规管线:不建稿、不改清单、不删源", async () => {
+      const { dir, paths } = mkSession(segNames(2));
+      writeV3(dir, { segs: segsOf(paths, ["sealed", "sealed"]), lease: { pid: 99999999, until: 1, holder: "dead" } });
+      const up = vi.fn(async () => "BV1nope");
+      const u = new RollingUploader(mkTakeover({ uploadPlainRaw: up, appendGroupRaw: noopAppend }));
+      const r = await u.runTakeover(path.join(dir, "rec"), SESSION_BASE);
+      expect(r.outcome).toBe("handoff");
+      expect(up, "接管全程不得建稿").not.toHaveBeenCalled();
+    });
+
+    it("create 意图 + 无稿件号 → 转人工(日志+通知),绝不重建稿,源保留", async () => {
+      const { dir, paths } = mkSession(segNames(2));
+      writeV3(dir, { segs: segsOf(paths, ["uploading", "sealed"]), intent: { attemptId: "a", kind: "create", index: 0, startedAt: 1 }, lease: { pid: 99999999, until: 1, holder: "dead" } });
+      const up = vi.fn(async () => "BV1nope"); const notes: string[] = [];
+      const u = new RollingUploader(mkTakeover({ uploadPlainRaw: up, appendGroupRaw: noopAppend, notify: (_s: string, m: string) => notes.push(m), log: () => {} }));
+      const r = await u.runTakeover(path.join(dir, "rec"), SESSION_BASE);
+      expect(r.outcome).toBe("manual");
+      expect(up).not.toHaveBeenCalled();
+      const j = readJson(dir);
+      expect(j.ambiguous).toEqual([0]);
+      expect(j.intent).toBeUndefined();
+      expect(notes.some((m) => m.includes("人工"))).toBe(true);
+    });
+
+    it("有稿件号:两次稳定回读一致 → 只 append 剩余段(不建稿)", async () => {
+      const { dir, paths } = mkSession(segNames(3));
+      writeV3(dir, { bv: "BV1ttttttttt", segs: segsOf(paths, ["acked", "uploading", "sealed"]), intent: { attemptId: "a", kind: "append", index: 1, startedAt: 1 }, lease: { pid: 99999999, until: 1, holder: "dead" } });
+      const ap = vi.fn(async () => {}); const reads: number[] = []; const sleeps: number[] = [];
+      const u = new RollingUploader(mkTakeover({
+        uploadPlainRaw: async () => { throw new Error("不得建稿"); }, appendGroupRaw: ap,
+        countPartsRaw: async () => { reads.push(1); return 1; }, sleep: async (ms: number) => { sleeps.push(ms); }, readbackGapMs: 180_000, now: futureNow,
+      }));
+      const r = await u.runTakeover(path.join(dir, "rec"), SESSION_BASE);
+      expect(r).toMatchObject({ outcome: "resumed", uploaded: [1, 2] });
+      expect(reads).toHaveLength(2);
+      expect(sleeps).toEqual([180_000]);
+      expect(ap).toHaveBeenCalledTimes(2);
+      expect(readJson(dir).confirmed).toEqual([0, 1, 2]);
+    });
+
+    it("清单损坏 → corrupt,不动文件", async () => {
+      const { dir } = mkSession(segNames(1));
+      writeFileSync(manifestFile(dir), "{oops");
+      const u = new RollingUploader(mkTakeover({ uploadPlainRaw: async () => "x", appendGroupRaw: noopAppend, log: () => {} }));
+      expect((await u.runTakeover(path.join(dir, "rec"), SESSION_BASE)).outcome).toBe("corrupt");
+      expect(readFileSync(manifestFile(dir), "utf-8")).toBe("{oops");
+    });
   });
 });
 

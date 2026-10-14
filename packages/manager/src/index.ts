@@ -43,12 +43,16 @@ export interface SessionOpts {
 /**
  * 边录边传钩子(manager ↔ app 的接缝)。manager 只做「通知」:
  *   - {@link onSegment}:一个新分段产生(尚未封口;实现自己按封口规则决定何时上传);
- *   - {@link onSessionEnd}:本会话即将收尾(停录 / 断流重连前)—— 实现应处理最后一段并**等待完成**,
- *     返回后 session 才继续。实现必须**吞掉自身异常**(不得反噬录制),但要在自己的日志里留痕。
+ *   - {@link onSessionEnd}:本会话即将收尾(停录 / 断流重连前)—— 实现应封口并处理最后一段;
+ *     重连路径不等上传完成,停止路径有限等待。实现必须**吞掉自身异常**(不得反噬录制),但要在自己的日志里留痕。
  */
 export interface RollingUploadHook {
   onSegment(filePath: string): void;
-  onSessionEnd(): Promise<void>;
+  /**
+   * `wait=false`(断流重连):实现应把最后一段**封口并落盘**后立即返回,上传在后台继续 —— 不能因上传
+   * 耽误重连而丢直播画面;`wait=true`/缺省(停止):有限等待上传完成(超时由实现自行放弃并留待下次接管)。
+   */
+  onSessionEnd(opts?: { wait?: boolean }): Promise<void>;
 }
 
 export class RecordingSession {
@@ -339,13 +343,14 @@ export class RecordingSession {
     await this.recorder.stop().catch(() => {});
     if (this.writerOpen) { this.writer.close(); this.writerOpen = false; this.currentXmlPath = null; }
 
-    // 边录边传(T-33):本会话已收尾(进程已停、最后一段不再增长)→ 处理最后一段并等它上传完成,
-    // 再重连。**必须在 recorder.stop() 之后**调(否则最后一段还在写,封口判定不成立)。
+    // 边录边传(T-33):本会话已收尾(进程已停、最后一段不再增长)→ 封口并落盘后**立即**重连,
+    // 最后一段的上传在钩子内后台继续(#57 R2:不再等上传完成,避免直播中途丢画面)。
+    // **必须在 recorder.stop() 之后**调(否则最后一段还在写,封口判定不成立)。
     // 钩子异常绝不反噬重连;失败/不确定由钩子内部转人工(保留源)。
     if (this.rolling) {
       const rolling = this.rolling;
       this.rolling = undefined; // 幂等:同一会话只收尾一次(stop 与 offline 竞态不重复处理)
-      try { await rolling.onSessionEnd(); }
+      try { await rolling.onSessionEnd({ wait: false }); }
       catch (e) { log.error("边录边传钩子 onSessionEnd 抛错(忽略):", (e as Error)?.message ?? e); }
     }
 
@@ -500,7 +505,7 @@ export class RecordingSession {
     if (this.rolling) {
       const rolling = this.rolling;
       this.rolling = undefined;
-      try { await rolling.onSessionEnd(); }
+      try { await rolling.onSessionEnd({ wait: true }); }
       catch (e) { log.error("边录边传钩子 onSessionEnd 抛错(忽略):", (e as Error)?.message ?? e); }
     }
     // 停录:同名覆盖 session.json,补上缺口(身份字段不变)。供多节点选优用。

@@ -39,6 +39,11 @@ export interface NodeRollingProgress {
   confirmed?: number[];
   ambiguous?: number[];
   uploading?: { index: number; kind: "create" | "append" };
+  /**
+   * 清单读不出来(文件存在但解析失败 / 读失败)。**不可信 ≠ 不存在**:主控必须转人工,
+   * 绝不当「未启用边录边传」走常规整场管线(否则可能重复建稿)。旧节点 bundle 不会产出此字段。
+   */
+  corrupt?: boolean;
 }
 export interface NodeInventory { workerId: string; recordings: NodeRecording[]; }
 
