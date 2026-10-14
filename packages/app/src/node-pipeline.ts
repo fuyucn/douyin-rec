@@ -599,8 +599,20 @@ export async function runNodeSidePipeline(
   }
   if (!prior?.bv) writeNodeResult(stageSub, { phase: "started", ok: false }, log);
 
+  // 0 字节分段(写满盘 / 开播即断的残留)不含任何内容,却会让 ffmpeg 失败、整场转人工且源永不删,
+  // 磁盘越堆越满。跳过并记录;清理阶段仍按原始清单删掉它们。全是空段 → 明确报错(没有可传内容)。
+  const emptySegs = spec.tsFiles.filter((f) => { try { return statSync(f).size === 0; } catch { return false; } });
+  if (emptySegs.length > 0) {
+    log(`跳过 ${emptySegs.length} 个 0 字节分段: ${emptySegs.map((f) => path.basename(f)).join(",")}`);
+    if (emptySegs.length === spec.tsFiles.length) {
+      removeNodeExecutorPid(stageSub);
+      return { ok: false, error: "所有分段均为 0 字节,无可上传内容" };
+    }
+  }
+  const usable = emptySegs.length > 0 ? { ...spec, tsFiles: spec.tsFiles.filter((f) => !emptySegs.includes(f)) } : spec;
+
   const { stem, title, partTitle } = deriveTitles(spec, log);
-  const parts = await produceParts(spec, stageSub, stem, log);
+  const parts = await produceParts(usable, stageSub, stem, log);
   const products = parts.map((p) => p.plain);
 
   if (spec.uploadMode !== "upload") {

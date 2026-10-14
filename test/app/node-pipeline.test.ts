@@ -633,6 +633,32 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
     vi.mocked(appendGroup).mockImplementation(async () => {});
   });
 
+  it("0 字节分段:跳过不让整场失败,其余照常上传;成功后源清理仍删掉空段", async () => {
+    const { spec, gate } = scene();
+    vi.mocked(remuxSegment).mockClear();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1EMPTY");
+    writeFileSync(spec.tsFiles[1]!, ""); // 写满盘 / 开播即断留下的 0 字节段
+    const r = await runNodeSidePipeline({ ...spec, cleanSourceAfterDone: true }, silence, gate);
+    expect(r.ok).toBe(true);
+    expect(r.bv).toBe("BV1EMPTY");
+    const remuxedSrc = vi.mocked(remuxSegment).mock.calls.map((c) => c[0] as string);
+    expect(remuxedSrc).not.toContain(spec.tsFiles[1]);
+    expect(remuxedSrc).toHaveLength(2);
+    expect(existsSync(spec.tsFiles[1]!)).toBe(false); // 清理按原始清单,空段也删
+  });
+
+  it("全是 0 字节分段 → 明确报错、不建稿、不落 failed(留 started,重入不被永久卡死)", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(uploadPlain).mockClear();
+    for (const f of spec.tsFiles) writeFileSync(f, "");
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/0 字节/);
+    expect(vi.mocked(uploadPlain)).not.toHaveBeenCalled();
+    expect(readNodeResult(sub)?.phase).toBe("started");
+  });
+
   // issue #25 ②:BV / 进度在建稿、追加成功的**当下**落盘;执行体被杀(不经 catch)时 master 仍能回读到。
   it("#25②:建稿后、首次 append 起就已落盘 BV+confirmedParts=1+意图(此刻被杀也读得到 BV)", async () => {
     const { sub, spec, gate } = scene();
