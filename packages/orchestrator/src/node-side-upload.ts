@@ -92,7 +92,7 @@ function fmtFreeGB(freeGB: number | null | undefined): string {
 export interface NodeSideUploadArgs {
   streamKey: string;
   cfg: PipelineCfg;
-  winner: { workerId: string; rec: { tsFiles: string[]; xmlPath?: string } };
+  winner: { workerId: string; rec: { tsFiles: string[]; xmlPath?: string; totalBytes?: number } };
   winnerMembers: readonly { workerId: string; rec: { tsFiles: string[]; xmlPath?: string } }[];
   /**
    * 本场**全部**在场成员(含落败节点)。收尾删源要按它来 —— 与 master 常规路径的
@@ -260,6 +260,26 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
   return { state: "failed" };
 }
 
+/** 节点侧上传超时下限:与此前固定值一致(30 分钟),小场次行为不变。 */
+export const NODE_UPLOAD_MIN_TIMEOUT_MS = 30 * 60_000;
+/** 上限:再大的场次也不无限等(6 小时),防执行体挂死占住对账轮。 */
+export const NODE_UPLOAD_MAX_TIMEOUT_MS = 6 * 3_600_000;
+/** 保守上传吞吐(字节/秒):线上实测约 1.7MB/s,取 1MB/s 留余量(弱上行节点)。 */
+const NODE_UPLOAD_CONSERVATIVE_BPS = 1_000_000;
+/** remux + 逐个建稿 / 追加接口耗时的固定余量。 */
+const NODE_UPLOAD_OVERHEAD_MS = 20 * 60_000;
+
+/**
+ * 节点侧上传的 ssh 超时(issue #25 ①):按场次字节数估算,而不是固定 30 分钟。
+ * `max(30min, 字节 / 保守带宽 + 余量)`,封顶 6 小时;字节数未知(旧 bundle 清单 / 统计失败)→ 回落下限。
+ * 多分 P 的整场约 2.4GB 就要 ~60 分钟,固定 30 分钟必然在上传中途被杀 → 转人工、源不删、磁盘只涨不降。
+ */
+export function estimateNodeUploadTimeoutMs(totalBytes?: number): number {
+  if (!(typeof totalBytes === "number" && totalBytes > 0 && Number.isFinite(totalBytes))) return NODE_UPLOAD_MIN_TIMEOUT_MS;
+  const est = Math.ceil(totalBytes / NODE_UPLOAD_CONSERVATIVE_BPS) * 1000 + NODE_UPLOAD_OVERHEAD_MS;
+  return Math.min(NODE_UPLOAD_MAX_TIMEOUT_MS, Math.max(NODE_UPLOAD_MIN_TIMEOUT_MS, est));
+}
+
 /**
  * 执行节点侧上传。返回非 null = 已由节点完成(调用方直接 return);
  * 返回 null = **回落现状**(能力不足等),调用方继续走 pull 回 master 的常规路径。
@@ -345,7 +365,9 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
   const t0 = Date.now();
   let result;
   try {
-    result = await transport.nodePipeline(spec);
+    const timeoutMs = estimateNodeUploadTimeoutMs(winner.rec.totalBytes);
+    jlog(`节点侧超时预算 ${Math.round(timeoutMs / 60_000)} 分钟(场次 ${winner.rec.totalBytes != null ? (winner.rec.totalBytes / 1e9).toFixed(2) + "GB" : "大小未知"})`);
+    result = await transport.nodePipeline(spec, { timeoutMs });
   } catch (e) {
     const msg = String((e as Error)?.message ?? e);
     // ssh rc≠0 / 超时 ≠ 节点没成功:统一收口(handleNodeFailure 会先回读节点落盘结果)。

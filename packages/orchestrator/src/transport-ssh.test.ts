@@ -1,6 +1,6 @@
 // packages/orchestrator/src/transport-ssh.test.ts
 import { describe, it, expect, afterEach } from "vitest";
-import { existsSync, rmSync, mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, rmSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SshTransport, buildRsyncArgs } from "./transport-ssh.js";
@@ -299,5 +299,29 @@ describe("SshTransport.abortNodePipeline / nodeResult(started)", () => {
     const r = await t.nodeResult!("douyin:1:2");
     expect(r).not.toBeNull();
     expect(r?.phase).toBe("started");
+  });
+});
+
+describe("nodePipeline 按调用传入的超时(issue #25 ①,真实 spawn,PATH 上放假 ssh)", () => {
+  const savedPath = process.env.PATH;
+  afterEach(() => { process.env.PATH = savedPath; });
+  const withFakeSsh = (sleepSec: number): void => {
+    const bin = mkdtempSync(join(tmpdir(), "fake-ssh-"));
+    writeFileSync(join(bin, "ssh"), `#!/bin/sh\nsleep ${sleepSec}\necho '{"ok":true,"bv":"BV1FAKE"}'\n`);
+    chmodSync(join(bin, "ssh"), 0o755);
+    process.env.PATH = `${bin}:${savedPath}`;
+  };
+  const spec = { streamKey: "k" } as never;
+  const mk = () => new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {} });
+
+  it("传入的 timeoutMs 生效:远端比预算慢 → 按该预算被杀(而不是默认 30 分钟)", async () => {
+    withFakeSsh(5);
+    await expect(mk().nodePipeline(spec, { timeoutMs: 150 })).rejects.toThrow(/ssh 超时 150ms/);
+  });
+
+  it("预算足够 → 正常返回 BV;不传 opts → 仍走默认通道", async () => {
+    withFakeSsh(0);
+    expect((await mk().nodePipeline(spec, { timeoutMs: 5000 })).bv).toBe("BV1FAKE");
+    expect((await mk().nodePipeline(spec)).bv).toBe("BV1FAKE");
   });
 });

@@ -17,6 +17,11 @@ export interface NodeRecording {
    */
   danmuCount?: number;
   durationSec: number;       // 实录总时长(各段之和)
+  /**
+   * 本场所有 .ts 分段的字节数之和(issue #25 ①:节点侧上传超时按字节估算,此前 master 拿不到场次大小)。
+   * 缺省 undefined = 旧 bundle 的清单 / 统计失败 → 调用方回落固定下限。
+   */
+  totalBytes?: number;
   startMs: number;           // 首段开录 epoch ms
   endMs: number;             // 末段收录 epoch ms
   totalGapSec: number;       // 断流缺口总秒数(来自 gaps sidecar)
@@ -125,7 +130,7 @@ export interface Transport {
    * 在该节点本地执行「remux → biliup 上传」并把 BV 回传(experimental,见 plans/027)。
    * 录像**不回传 master** —— 这正是省掉 rsync 的关键。无此能力 = 不支持 → 回落现状。
    */
-  nodePipeline?(spec: NodePipelineSpec): Promise<NodePipelineResult>;
+  nodePipeline?(spec: NodePipelineSpec, opts?: { timeoutMs?: number }): Promise<NodePipelineResult>;
   /**
    * 回读节点侧**落盘结果文件**(experimental,见 plans/027)。
    *

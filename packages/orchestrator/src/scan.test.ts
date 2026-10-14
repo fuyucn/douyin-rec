@@ -28,6 +28,20 @@ describe("scanRecordings", () => {
     expect(recordings[0].endMs).toBe(1_700_001_800_000);
   });
 
+  it("totalBytes = 本场所有 .ts 的字节数之和(issue #25 ①);无 ts 的会话不上报", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播B"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播B_2026-06-27_09-00_000.ts"), Buffer.alloc(1000));
+    writeFileSync(join(dir, "主播B_2026-06-27_09-00_001.ts"), Buffer.alloc(2500));
+    // 另一场:ts 已被边录边传删空,只剩 rolling.json(带 bv)
+    writeFileSync(join(dir, "主播B_2026-06-27_12-00.rolling.json"), JSON.stringify({ bv: "BV1X", parts: [] }));
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 10, startMs: 1_700_000_000_000, endMs: 1_700_000_010_000 }));
+    const withTs = rs.find((r) => r.tsFiles.length === 2)!;
+    expect(withTs.totalBytes).toBe(3500);
+    const noTs = rs.find((r) => r.tsFiles.length === 0);
+    if (noTs) expect(noTs.totalBytes).toBeUndefined();
+  });
+
   it("未命中 taskRooms 时 fallback 使用目录名作 roomSlug", async () => {
     const root = mkdtempSync(join(tmpdir(), "scan-"));
     const dir = join(root, "主播A"); mkdirSync(dir);
