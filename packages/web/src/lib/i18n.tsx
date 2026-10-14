@@ -441,7 +441,7 @@ const DICT = {
       doing: { preparing: "准备中" },
       phase: { running: "执行中", queued: "排队中", pulling: "拉取中", settle: "等待收播", manual: "失败·待处理", uploadWait: "待上传", stopped: "已停止", done: "已完成", failed: "失败" },
       section: { all: "全部记录", delivering: "边录边传中" },
-      delivering: { recording: "录制中", ended: "已收播", pending: "传输中", unknown: "待人工核对", noBv: "尚未建稿", progress: "已确认 {c} / {n} 段", updated: "{s} 秒前核对", locked: "待传占盘 {size}" },
+      delivering: { recording: "录制中", ended: "已收播", pending: "传输中", unknown: "待人工核对", noBv: "尚未建稿", progress: "已确认 {c} / {n} 段", updated: "{s} 秒前核对", locked: "未确认占盘 {size}" },
       summary: { running: "处理中 {n}", upload: "待上传 {n}", attention: "需处理 {n}", stopped: "已停止 {n}", done: "已完成 {n}" },
       col: { room: "直播间 / 场次", status: "状态", flow: "做了什么 → 正在做 → 下面做", enqueued: "时间", videoDuration: "时长 {time}", actions: "操作" },
       filter: {
@@ -841,7 +841,7 @@ const DICT = {
       doing: { preparing: "Preparing" },
       phase: { running: "Running", queued: "Queued", pulling: "Pulling", settle: "Waiting to end", manual: "Failed · needs action", uploadWait: "Ready to upload", stopped: "Stopped", done: "Done", failed: "Failed" },
       section: { all: "All records", delivering: "Uploading while recording" },
-      delivering: { recording: "Recording", ended: "Ended", pending: "Uploading", unknown: "Needs manual check", noBv: "No submission yet", progress: "{c} / {n} segments confirmed", updated: "checked {s}s ago", locked: "{size} on disk pending" },
+      delivering: { recording: "Recording", ended: "Ended", pending: "Uploading", unknown: "Needs manual check", noBv: "No submission yet", progress: "{c} / {n} segments confirmed", updated: "checked {s}s ago", locked: "{size} unconfirmed on disk" },
       summary: { running: "{n} running", upload: "{n} to upload", attention: "{n} need action", stopped: "{n} stopped", done: "{n} done" },
       col: { room: "Room / session", status: "Status", flow: "Done → Doing → Next", enqueued: "Time", videoDuration: "{time}", actions: "Actions" },
       filter: {

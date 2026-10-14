@@ -1387,21 +1387,23 @@ const hubStarter: HubStarter = {
           })
         : new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
       await t.ping!();
-      // 版本回执:可选能力,拿不到(旧 bundle/不可达)就当没有 —— **绝不能因此让 status 失败**。
-      let status = null;
-      try { status = (await t.nodeStatus?.()) ?? null; } catch { status = null; }
-      // F2:磁盘剩余同样是可选观测(与看门狗共用 diskFreeGB);拿不到就省略。
-      let diskFreeGB: number | undefined;
-      try {
-        const g = await t.diskFreeGB?.();
-        if (typeof g === "number" && Number.isFinite(g)) diskFreeGB = g;
-      } catch { diskFreeGB = undefined; }
+      // 版本回执 / 磁盘剩余都是可选观测:拿不到(旧 bundle/不可达)就当没有 —— **绝不能因此让 status 失败**。
+      // 两者并行,避免慢节点上串行叠加 ssh 超时。
+      const [status, diskFreeGB] = await Promise.all([
+        (async () => { try { return (await t.nodeStatus?.()) ?? null; } catch { return null; } })(),
+        (async (): Promise<number | undefined> => {
+          try {
+            const g = await t.diskFreeGB?.();
+            return typeof g === "number" && Number.isFinite(g) ? g : undefined;
+          } catch { return undefined; }
+        })(),
+      ]);
       return { status, diskFreeGB };
     }));
     // 水位与磁盘看门狗同源(hub.config resources.diskMinGB);读不到/损坏 → 缺省口径,不抛。
     let rawMin: unknown;
     try { rawMin = (JSON.parse(readFileSync(rootHubConfig(), "utf-8")) as { resources?: { diskMinGB?: unknown } }).resources?.diskMinGB; } catch { rawMin = undefined; }
-    const diskMinGB = resolveDiskMinGB(rawMin).gb;
+    const diskMinGB = resolveDiskMinGB(rawMin, (m) => console.warn(m)).gb;
     return workers.map((w, i) => {
       const r = results[i];
       if (r.status !== "fulfilled") {
