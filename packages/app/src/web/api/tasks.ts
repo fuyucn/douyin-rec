@@ -154,6 +154,10 @@ export function buildTasks(ctx: ApiCtx) {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
       if (t.managedBy === "hub") return err(403, `任务 id=${id} 由 hub 管理，请在 master 上操作`);
+      // 磁盘水位准入(issue #96):手动启动此前绕过闸门。低于水位 → 明确报错且**不改任务状态**
+      // (不置 enabled):否则会留下「已启用却不会录」的假象;空间恢复后再点启动即可。
+      const admit = deps.admitStart?.();
+      if (admit && !admit.ok) return err(409, `磁盘空间不足,未启动任务 id=${id}:${admit.reason}`);
       try {
         store.setEnabled(id, true);
         // hub 语义:该任务是某条规则的源任务、且规则已把录制切给远端节点(workers 不含 local)

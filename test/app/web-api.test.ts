@@ -305,6 +305,26 @@ describe("listTasks", () => {
   });
 });
 
+describe("startTask 磁盘水位准入(issue #96)", () => {
+  it("低于水位 → 409 明确报错,且不改任务状态(不置 enabled、不启动)", () => {
+    const t = store.addTask({ room: "111" });
+    const a = makeApi({ store, manager, admitStart: () => ({ ok: false, reason: "磁盘剩余 1.0GB,低于水位 10.0GB" }) });
+    const r = a.startTask(t.id);
+    expect(r.status).toBe(409);
+    expect(JSON.stringify(r.body)).toContain("低于水位");
+    expect(store.getTask(t.id)!.enabled).toBe(false);
+    expect(manager.startCalls).toEqual([]);
+  });
+
+  it("空间充足 / 不注入准入 → 照常启动(默认行为不变)", () => {
+    const t1 = store.addTask({ room: "222" });
+    const ok = makeApi({ store, manager, admitStart: () => ({ ok: true }) });
+    expect(ok.startTask(t1.id).status).toBe(200);
+    const t2 = store.addTask({ room: "333" });
+    expect(api.startTask(t2.id).status).toBe(200);
+  });
+});
+
 describe("createTask", () => {
   it("creates a task and returns it (201)", () => {
     const res = api.createTask({ room: "333", name: "tester", quality: "hd", danmu: 0 });

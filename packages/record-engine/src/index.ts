@@ -16,7 +16,7 @@
 import { resolve, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { createLogger, platformForRoom, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
+import { createLogger, platformForRoom, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
 import { logStreamMeta, type StreamMetaSource } from "@drec/ffmpeg-recorder-extra";
 
 const log = createLogger("stream_recorder");
@@ -82,6 +82,10 @@ export class PollingRecorder implements Recorder {
   protected ev: RecorderEvents | null = null;
 
   protected stopped = false;
+  /** 新一场开播的准入闸门(issue #96);undefined = 放行。 */
+  private admit?: () => AdmitDecision;
+  /** 上一次被拒绝的原因(同一原因只在首次打日志,放行后复位;避免每 30s 轮询刷屏)。 */
+  private lastAdmitDenied: string | null = null;
   /** drain:停开播轮询、不再录下一场,但不腰斩当前进程。 */
   protected noNewSession = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -171,6 +175,7 @@ export class PollingRecorder implements Recorder {
     this.outDir = resolve(opts.outDir);
     this.outName = opts.name?.trim() || undefined;
     this.segSec = opts.segmentSec > 0 ? opts.segmentSec : 0;
+    this.admit = opts.admit;
 
     let slug = this.platform.extractRoomSlug(roomUrl);
     // extractRoomSlug 没把 URL 解析成房间号(仍是 URL)→ 多半是短链,试平台短链解析。
@@ -213,6 +218,19 @@ export class PollingRecorder implements Recorder {
         this.pollDelayMs = this.basePollMs;
       }
       if (probe.living && probe.url) {
+        // 新一场开播的准入闸门(issue #96):拒绝 → 不起录、保持等待开播、下一轮再试(空间恢复后自动开始)。
+        // 判定抛错视为放行:探测失败绝不能误拦录制(与磁盘看门狗「查不到不拦」同口径)。
+        let decision: AdmitDecision = { ok: true };
+        try { decision = this.admit?.() ?? decision; } catch { /* 放行 */ }
+        if (!decision.ok) {
+          if (decision.reason !== this.lastAdmitDenied) {
+            this.lastAdmitDenied = decision.reason;
+            log.warn(`新一场开播被准入闸门拒绝:${decision.reason}(保持等待,条件恢复后自动开始)`);
+          }
+          this.scheduleNextPoll();
+          return;
+        }
+        if (this.lastAdmitDenied) { log.info(`准入闸门放行,开始录制新一场`); this.lastAdmitDenied = null; }
         this.spawnRecording(probe.url, probe, String(probe.owner ?? ""), String(probe.title ?? ""));
         return;
       }

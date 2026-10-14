@@ -38,7 +38,18 @@ export interface RecordOpts {
    *   "segment"        — 每个视频分段一个 xml（{base}_NNN.xml），配对好看但断流可能位移。
    */
   danmuXmlMode?: "session" | "segment";
+  /**
+   * **新一场开播的准入闸门**(磁盘水位,issue #96)。录制器在确认开播、**即将起录一场新直播之前**调用:
+   * `{ok:false}` → 本轮不起录、保持「等待开播」,下一轮轮询再试(空间恢复后自动开始,无需重启);
+   * 不实现 / 返回 `{ok:true}` = 放行(默认,行为不变)。
+   * 只用于**新一场**:同场断流重连由会话层放行(绝不据此打断/拒绝同场重连,见 plans/033 I2 与 D6)。
+   * 实现必须便宜且不抛错(抛错视为放行,不能因探测失败误拦录制)。
+   */
+  admit?: () => AdmitDecision;
 }
+
+/** 准入判定:放行,或带原因拒绝(原因会进日志与告警)。 */
+export type AdmitDecision = { ok: true } | { ok: false; reason: string };
 
 export interface RecorderEvents {
   /**

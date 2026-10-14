@@ -20,6 +20,7 @@ import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
 import { makeNotifier, resolveWebhookToggles } from "@drec/observability";
 import { TaskDaemon, resolveDiskWatermark } from "./daemon.js";
+import { checkNewBroadcastAdmission } from "./disk-gate.js";
 import { TaskManager } from "./task-manager.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
@@ -188,6 +189,12 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       managedStateDir: join(rootConfigDir(), "managed"),
       poolSnapshot: hubEnabled ? hubStarter?.poolSnapshot : undefined,
       requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
+      // 手动启动的磁盘水位准入(issue #96):与 daemon 同源的水位配置,每次现读(热改生效);测默认输出目录所在卷。
+      admitStart: () => checkNewBroadcastAdmission({
+        outDir: resolveOutputDir(undefined),
+        hubConfigPath: rootHubConfig(),
+        readConfig: () => resolveHubConfigJson(o.hubConfig, store),
+      }),
       // 与 daemon 同源:规则把源任务交给远端(workers 不含 local)时,本机不实跑。
       // 能力门控(T-10):远端还需满足规则的 requires 才算「有人接」(与 reconciler 同判定)。
       localSuppressedIds: hubEnabled
