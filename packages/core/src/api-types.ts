@@ -521,6 +521,12 @@ export interface RemoteTaskSpec {
   webhook: string | null;
   anchorName: string | null;
   /**
+   * 归属标记(issue #73):master 按 core `isWorkerAssigned` 判定「该房间是否派给本节点」。
+   * false = 已停用保留(取消勾选/规则停用/能力不满足),节点列表默认隐藏(在录除外);
+   * 缺省(旧 master)= 视为归属,全显示(旧行为)。旧节点包忽略此字段。
+   */
+  assigned?: boolean;
+  /**
    * 边录边传开关(旧字段,见 plans/031 / T-33)。**远端节点:恒等于 `rollingEffective`**(兼容尚不认识
    * 新字段的旧节点包 —— 它们只读这个字段,行为同改前);本机(local)任务:原样透传源任务的旧开关(用户旧值)。
    */
@@ -786,6 +792,8 @@ export interface TaskDTO {
   recording: boolean;
   /** Hub 源任务在被选中 worker 上的录制状态;普通任务为空数组。 */
   recordingWorkers?: RecordingWorkerStatusDTO[];
+  /** issue #73:master 判定的归属标记。false=受管但未派给本节点(停用保留);省略=视为归属。 */
+  assigned?: boolean;
   /**
    * 该任务绑定的 hub 规则摘要(仅 master、且该房间有规则时才有)。
    * 让任务列表能显示「这个任务的后处理配了什么 / 上次结果」,并从列表跳到 hub 房间页。

@@ -266,6 +266,8 @@ export interface WebServerDeps {
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
   /** worker 录制状态快照(CLI 注入;不在请求路径上同步 SSH)。 */
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
+  /** 节点侧 master 下发快照目录(见 ApiDeps.managedStateDir);serve 在非 hub 模式注入。 */
+  managedStateDir?: string;
   /** 立即触发一次 hub 任务同步(规则/worker 变更后调用,不用等周期 tick)。force=跳过节点骤减安全阀。 */
   requestSyncTasks?: (opts?: { force?: boolean }) => void;
   /** master 本机抑制名单(源任务切到远端录制→本机不实跑);透传给 web API。 */
@@ -609,6 +611,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     testWorker: deps.testWorker,
     probeAllWorkers: deps.probeAllWorkers,
     recordingWorkers: deps.recordingWorkers,
+    managedStateDir: deps.managedStateDir,
     requestSyncTasks: deps.requestSyncTasks,
     localSuppressedIds: deps.localSuppressedIds,
     retryNode: deps.retryNode,

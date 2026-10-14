@@ -15,6 +15,7 @@ import { rootHubDir, rootHubConfig, resolveOutputDir } from "../../paths.js";
 import { resolveTaskCookies, type Task } from "../../store.js";
 import { readBiliupCookieHeader } from "../../upload/biliup.js";
 import { listHubJobs } from "../../hub-jobs.js";
+import { readManagedState } from "../../managed-state.js";
 import { hasSessionCookie, parseCookieExpiry } from "../../cookie-utils.js";
 import type { ApiDeps, ApiResult, CookieStatus, TaskView, TaskDetailView } from "./types.js";
 
@@ -94,6 +95,22 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     })().catch(() => {}).finally(() => anchorInFlight.delete(taskId));
   };
 
+  // 节点侧归属标记(issue #73):读 master 下发快照 rooms.json(现读,1s 缓存摊薄列表 N 次读)。
+  // 缺快照/损坏/旧 master 不带字段 → 空 map → 视为归属(旧行为,全显示)。
+  let assignedCache: { at: number; map: Map<string, boolean> } | null = null;
+  const assignedMap = (): Map<string, boolean> => {
+    const dir = deps.managedStateDir;
+    if (!dir) return new Map();
+    const now = Date.now();
+    if (assignedCache && now - assignedCache.at < 1000) return assignedCache.map;
+    const map = new Map<string, boolean>();
+    for (const s of readManagedState(dir)?.desired ?? []) {
+      if (typeof s.assigned === "boolean") map.set(`${s.platform}:${s.roomSlug}`, s.assigned);
+    }
+    assignedCache = { at: now, map };
+    return map;
+  };
+
   // 显示用主播名:运行时(录制中 [主播] 日志解析)优先,否则持久化的(创建时抓的)。
   const view = (t: Task): TaskView => {
     let workers: RecordingWorkerStatusDTO[] | undefined;
@@ -121,8 +138,16 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
         }
       }
     }
+    // 只对受管任务带 assigned;非受管任务(用户自建)永远归属本节点。
+    const assigned = t.managedBy === "hub" && deps.managedStateDir
+      ? (() => {
+          const platform = platformForRoom(t.room);
+          return assignedMap().get(`${platform.id}:${platform.extractRoomSlug(t.room)}`);
+        })()
+      : undefined;
     return {
       ...t,
+      ...(assigned !== undefined ? { assigned } : {}),
       running: manager.isRunning(t.id),
       anchorName: manager.getAnchorName(t.id) ?? t.anchorName,
       recording: manager.isRecording(t.id),

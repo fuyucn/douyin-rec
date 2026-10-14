@@ -1063,6 +1063,8 @@ const hubStarter: HubStarter = {
           outDir: src.outDir,
           webhook: src.webhook,
           anchorName: src.anchorName,
+          // 归属标记(issue #73):节点据此默认隐藏「受管且未分配且未在录」的任务。旧节点忽略该字段。
+          assigned,
           // 边录边传(issue #40):**唯一判定 = core resolveRollingPolicy**,只在 master 这里算一次
           // (规则 mode=rolling / 旧任务开关迁移 / 规则 stage 优先 / 多节点重复投稿闸门),
           // 结果作为只读派生字段 `rollingEffective` 下发;录制端只读它,不再自行读规则判定。
