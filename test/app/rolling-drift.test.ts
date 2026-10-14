@@ -63,8 +63,10 @@ let mgr: TaskManager;
 let logs: string[];
 let free: number | null;
 
+let suppressedIds: Set<number>;
 function mkDaemon(watermarkGB = 0): TaskDaemon {
   return new TaskDaemon(store, mgr, {
+    localSuppressedIds: () => suppressedIds,
     log: (m) => logs.push(m),
     freeBytes: () => free,
     diskWatermarkBytes: watermarkGB * 1e9,
@@ -81,6 +83,7 @@ beforeEach(() => {
   mgr = new TaskManager(store, spawner, { log: () => {} });
   logs = [];
   free = null;
+  suppressedIds = new Set();
 });
 
 function addTask(rolling: boolean, extra: Record<string, unknown> = {}): number {
@@ -242,6 +245,58 @@ describe("TaskDaemon 边录边传漂移收敛", () => {
         signalled = true;
         void d.stop(); // 关停信号在 stop 退出等待期间到达(只发一次:stopAll 会再调到本 stop,不设闸会无限递归)
       }
+      await realStop();
+    };
+    await ticks(d, ROLLING_DRIFT_IDLE_TICKS);
+    expect(spawner.spawned).toHaveLength(1);
+    expect(mgr.isRunning(id)).toBe(false);
+  });
+
+  it("stop 等待期间任务被用户停用:不再按旧快照拉起(下个 tick 由原有排空逻辑接管)", async () => {
+    const id = addTask(false);
+    const d = mkDaemon();
+    await d.tick();
+    store.updateTask(id, { rollingEffective: true });
+    const proc = spawner.last;
+    const realStop = proc.stop.bind(proc);
+    proc.stop = async (): Promise<void> => {
+      store.setEnabled(id, false); // 用户在 stop 退出等待期间点了「停止」
+      await realStop();
+    };
+    await ticks(d, ROLLING_DRIFT_IDLE_TICKS);
+    expect(spawner.spawned).toHaveLength(1);
+    expect(mgr.isRunning(id)).toBe(false);
+    expect(store.getTask(id)!.enabled).toBe(false);
+  });
+
+  it("stop 等待期间 hub 规则把录制切到别的节点(被抑制):不拉起,避免与远端双录", async () => {
+    const id = addTask(false);
+    const d = mkDaemon();
+    await d.tick();
+    store.updateTask(id, { rollingEffective: true });
+    const proc = spawner.last;
+    const realStop = proc.stop.bind(proc);
+    proc.stop = async (): Promise<void> => {
+      suppressedIds = new Set([id]);
+      await realStop();
+    };
+    await ticks(d, ROLLING_DRIFT_IDLE_TICKS);
+    expect(spawner.spawned).toHaveLength(1);
+    expect(mgr.isRunning(id)).toBe(false);
+  });
+
+  it("stop 等待期间窗口刚结束:不拉起", async () => {
+    const id = addTask(false);
+    const d = mkDaemon();
+    await d.tick();
+    store.updateTask(id, { rollingEffective: true });
+    const proc = spawner.last;
+    const realStop = proc.stop.bind(proc);
+    proc.stop = async (): Promise<void> => {
+      const now = new Date();
+      const startMin = (now.getHours() * 60 + now.getMinutes() + 120) % 1440; // 窗口改到 2 小时后
+      const hhmm = (m: number): string => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+      store.updateTask(id, { scheduleStart: hhmm(startMin), scheduleEnd: hhmm(startMin + 30) });
       await realStop();
     };
     await ticks(d, ROLLING_DRIFT_IDLE_TICKS);

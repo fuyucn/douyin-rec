@@ -295,8 +295,17 @@ export class TaskDaemon {
       }
       this.driftIdle.delete(t.id);
       this.warnedDriftDisk.delete(t.id);
-      // stop 可能等到子进程退出;期间若收到关停信号(stopped),绝不能再拉起新进程(stopAll 已取过快照,管不到它)。
-      if (await this.manager.stopIdleForConfig(t.id, change) && !this.stopped) this.manager.start(t.id);
+      if (!(await this.manager.stopIdleForConfig(t.id, change))) continue;
+      // stop 可能等到子进程退出(最长一个 kill 超时);期间状态可能已变,**按现值重新判定**再拉起,
+      // 绝不沿用上面的 tasks 快照:关停信号(stopAll 已取过快照,管不到新进程)、用户刚停用、
+      // 窗口刚结束、hub 规则刚把录制切到别的节点(会与远端双录)——任一成立都不能拉起。
+      const cur = this.store.getTask(t.id);
+      const suppressed = this.localSuppressedIds?.() ?? new Set<number>();
+      if (
+        this.stopped || !cur || !cur.enabled || suppressed.has(t.id)
+        || !inWindow(nowMinutesLocal(this.now()), cur.scheduleStart, cur.scheduleEnd)
+      ) continue;
+      this.manager.start(t.id);
     }
   }
 
