@@ -198,6 +198,7 @@ describe("tryNodeSideUpload 失败收口(回读节点落盘结果,区分假失�
       syncNodeState: vi.fn(),
       markFailed: vi.fn(),
       markDone: vi.fn(),
+      setBv: vi.fn(),
     };
   }
 
@@ -241,6 +242,45 @@ describe("tryNodeSideUpload 失败收口(回读节点落盘结果,区分假失�
     expect(ledger.syncNodeState).toHaveBeenCalledWith("douyin:123:2026-10-12", "upload_plain", "failed", expect.anything());
     expect(ledger.markFailed).not.toHaveBeenCalled();
     expect(t.cleanup).not.toHaveBeenCalled(); // 结果不确定 → 保住源给人工
+  });
+
+  it("#25②:uploading 带 bv + 进度(被杀时回读)→ needs_manual,BV 记进台账,说明里带已确认分 P 数", async () => {
+    const t = sshFailTransport({ phase: "uploading", ok: false, bv: "BV1KILLED", confirmedParts: 1, intentPart: 2, atMs: 1 });
+    const ledger = fakeLedgerSpy();
+    const result = await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12",
+      cfg: cfgUpload,
+      winner: { workerId: "w1", rec },
+      winnerMembers: [{ workerId: "w1", rec }],
+      transport: t as never,
+      ledger: ledger as never,
+      jlog: () => {},
+      notify: () => {},
+      deps: fakeDeps(t),
+    });
+    expect(result).toEqual({ state: "needs_manual", bv: "BV1KILLED" });
+    expect(ledger.setBv).toHaveBeenCalledWith("douyin:123:2026-10-12", "BV1KILLED");
+    const err = String((ledger.setState.mock.calls.at(-1) as unknown[])[2] && ((ledger.setState.mock.calls.at(-1) as unknown[])[2] as { error: string }).error);
+    expect(err).toContain("已确认 1 个分 P");
+    expect(err).toContain("第 2 个追加结果未知");
+    expect(t.cleanup).not.toHaveBeenCalled(); // 仍不删源、不重传
+  });
+
+  it("#25②:uploading 无 bv(旧 bundle / 建稿前被杀)→ 不写 setBv(向后兼容)", async () => {
+    const t = sshFailTransport({ phase: "uploading", ok: false, atMs: 1 });
+    const ledger = fakeLedgerSpy();
+    await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12",
+      cfg: cfgUpload,
+      winner: { workerId: "w1", rec },
+      winnerMembers: [{ workerId: "w1", rec }],
+      transport: t as never,
+      ledger: ledger as never,
+      jlog: () => {},
+      notify: () => {},
+      deps: fakeDeps(t),
+    });
+    expect(ledger.setBv).not.toHaveBeenCalled();
   });
 
   it("phase=done 但无 bv(建稿证据不全)→ needs_manual,不删源", async () => {

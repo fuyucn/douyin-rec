@@ -648,6 +648,14 @@ export interface NodePipelineResultFile {
   bv?: string;
   /** 产物路径(节点本地)。 */
   products?: string[];
+  /**
+   * 已**确认**落到稿件里的分 P 数(建稿成功 = 1,每次 append 成功后 +1)。issue #25 ②:BV 与进度在
+   * 建稿 / 追加成功的**当下**就落盘,执行体被 ssh 超时 / SIGKILL 杀掉时 master 仍能回读到 BV 与进度,
+   * 不再出现「B站已有稿件而台账没有任何 BV」。旧 bundle 不写 → 缺省 = 未知。
+   */
+  confirmedParts?: number;
+  /** 正要追加的分 P 序号(1 起):**追加前**先写意图;`intentPart > confirmedParts` 表示该次追加结果未知。 */
+  intentPart?: number;
   /** 失败原因(ok=false)。 */
   error?: string;
   /** 结果写入时刻(epoch ms;master 用它判断结果是否属于本次执行)。 */
@@ -679,6 +687,8 @@ export function normalizeNodeResultFile(parsed: unknown): NodePipelineResultFile
     ok: p.ok === true,
     bv: typeof p.bv === "string" ? p.bv : undefined,
     products: Array.isArray(p.products) ? p.products : undefined,
+    confirmedParts: Number.isInteger(p.confirmedParts) && (p.confirmedParts as number) >= 0 ? p.confirmedParts : undefined,
+    intentPart: Number.isInteger(p.intentPart) && (p.intentPart as number) >= 1 ? p.intentPart : undefined,
     error: typeof p.error === "string" ? p.error : undefined,
     atMs: typeof p.atMs === "number" ? p.atMs : 0,
   };

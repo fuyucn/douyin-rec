@@ -632,6 +632,62 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
     expect(r?.bv).toBe("BV1AMB");
     vi.mocked(appendGroup).mockImplementation(async () => {});
   });
+
+  // issue #25 ②:BV / 进度在建稿、追加成功的**当下**落盘;执行体被杀(不经 catch)时 master 仍能回读到。
+  it("#25②:建稿后、首次 append 起就已落盘 BV+confirmedParts=1+意图(此刻被杀也读得到 BV)", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1KILL");
+    let snap: ReturnType<typeof readNodeResult> = null;
+    // 在第一次 append 调用的瞬间读盘 = 模拟「建稿后、append 期间被 SIGKILL」时盘上的样子。
+    vi.mocked(appendGroup).mockImplementationOnce(async () => { snap = readNodeResult(sub); throw new Error("[append-ambiguous] killed"); });
+    await expect(runNodeSidePipeline(spec, silence, gate)).rejects.toThrow();
+    expect(snap).not.toBeNull();
+    expect(snap!.phase).toBe("uploading");
+    expect(snap!.bv).toBe("BV1KILL");
+    expect(snap!.confirmedParts).toBe(1);
+    expect(snap!.intentPart).toBe(2);     // 追加前已写意图:第 2 分 P 结果未知
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+  });
+
+  it("#25②:每次 append 成功后进度推进,意图被清掉;整场完成落 done", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1PROG");
+    const seen: Array<[number | undefined, number | undefined]> = [];
+    vi.mocked(appendGroup).mockImplementation(async () => { const r = readNodeResult(sub); seen.push([r?.confirmedParts, r?.intentPart]); });
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    expect(seen).toEqual([[1, 2], [2, 3]]); // 第 2 次 append 时:已确认 2、意图 3
+    expect(readNodeResult(sub)?.phase).toBe("done");
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+  });
+
+  it("#25②:append 抛错 → failed 结果里带 bv 与已确认进度", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1FAIL");
+    vi.mocked(appendGroup).mockRejectedValueOnce(new Error("[append-ambiguous] x"));
+    await expect(runNodeSidePipeline(spec, silence, gate)).rejects.toThrow();
+    const r = readNodeResult(sub);
+    expect(r?.phase).toBe("failed");
+    expect(r?.bv).toBe("BV1FAIL");
+    expect(r?.confirmedParts).toBe(1);
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+  });
+
+  it("#25②:旧结果文件(无 confirmedParts/intentPart)照常解析;非法值被丢弃", () => {
+    const { sub } = scene();
+    writeNodeResult(sub, { phase: "uploading", ok: false, bv: "BV1OLD" }, silence);
+    const old = readNodeResult(sub);
+    expect(old?.bv).toBe("BV1OLD");
+    expect(old?.confirmedParts).toBeUndefined();
+    expect(old?.intentPart).toBeUndefined();
+    writeFileSync(join(sub, ".drec-node-result.json"), JSON.stringify({ phase: "uploading", ok: false, confirmedParts: -3, intentPart: 0 }));
+    const bad = readNodeResult(sub);
+    expect(bad?.confirmedParts).toBeUndefined();
+    expect(bad?.intentPart).toBeUndefined();
+  });
 });
 
 describe("issue #2 A2:abortNodeExecutor(经注入 deps 安全终止,绝不误杀)", () => {

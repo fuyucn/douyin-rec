@@ -660,6 +660,7 @@ export async function runNodeSidePipeline(
   // 查不到分 P 数(null)或数为 0(自相矛盾:有稿件却无分 P = 风控/权限异常)→ 无法安全续传:
   //   既不能盲目 append(可能重复)也不能重建稿 → 抛错,master 据此转人工核对分 P。
   let bv = (prior?.bv ?? "").trim();
+  let confirmedParts = 0;
   try {
     let nextIdx = 1; // 下一个待 append 的 parts 下标(parts[0]=P1,由建稿或已确认覆盖)
     if (bv) {
@@ -668,6 +669,7 @@ export async function runNodeSidePipeline(
         throw new Error(`幂等重入:稿件 ${bv} 已建但无法确认已追加分 P 数(countVideoParts=${confirmed ?? "null"}),不盲目续传 → 转人工核对`);
       }
       nextIdx = confirmed;
+      confirmedParts = confirmed;
       log(`幂等重入:稿件 ${bv} 已有 ${confirmed} 个分 P → 跳过建稿,从分 P ${nextIdx + 1}/${totalParts} 续 append`);
     } else {
       bv = await withGate(uploadGate, accountKey, () =>
@@ -677,10 +679,15 @@ export async function runNodeSidePipeline(
         ),
       );
       log(`建稿成功 BV=${bv}`);
+      confirmedParts = 1;
     }
 
     for (let i = nextIdx; i < parts.length; i++) {
       const p = parts[i]!;
+      // issue #25 ②:追加**前**先把 BV + 已确认进度 + 本次意图落盘(建稿后到此刻只隔一行代码)。此前 BV 只在整场
+      // 收尾 / 抛错时才写,执行体被 ssh 超时 / SIGKILL 杀掉就丢 BV → 「B站已有稿件、台账无任何 BV」;
+      // 此后被杀,回读 `intentPart > confirmedParts` = 这次追加结果未知,其余已确认。
+      writeNodeResult(stageSub, { phase: "uploading", ok: false, bv, products, confirmedParts, intentPart: i + 1 }, log);
       // 单文件 append → 安全重试(601 冷却后重试;其余错误只要「结果不确定」就不重试)。
       await withGate(uploadGate, accountKey, () =>
         withRetry(
@@ -694,6 +701,7 @@ export async function runNodeSidePipeline(
         ),
       );
       log(`已 append 分 P ${i + 1}/${totalParts}: ${path.basename(p.plain)}`);
+      confirmedParts = i + 1;
     }
   } catch (e) {
     const msg = String((e as Error)?.message ?? e);
@@ -701,7 +709,7 @@ export async function runNodeSidePipeline(
     // 建稿前失败(无 bv)不回退到 failed:留 `uploading` —— biliup 可能已建稿只是没拿到 BV,
     // 属「结果不确定」→ master 保守转人工(写 failed 会让 master 误判「确认没成」)。
     writeNodeResult(stageSub, { phase: bv ? "failed" : "uploading", ok: false, error: msg,
-      bv: bv || undefined, products }, log);
+      bv: bv || undefined, products, confirmedParts: confirmedParts || undefined }, log);
     removeNodeExecutorPid(stageSub); // 本场执行体已收口(失败)→ 注销 pid,避免 `_node-abort` 误判仍活
     throw e;
   }
