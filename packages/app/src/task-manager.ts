@@ -269,6 +269,9 @@ export class TaskManager {
   async stopGraceful(taskId: number): Promise<void> {
     const proc = this.procs.get(taskId);
     if (!proc) return;
+    // 硬停在途(例如 rolling 任务在给末段上传留宽限):硬停优先,不能再转成排空——否则 status 会被改成 draining、
+    // 日志写成「自然收播」,且 daemon tick 会重新卡到进程退出。
+    if (this.stopping.has(taskId)) return;
     if (this.draining.has(taskId)) return;   // already draining — no-op
     this.draining.add(taskId);
     this.restarts.delete(taskId);            // a drained natural exit isn't a crash

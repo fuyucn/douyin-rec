@@ -21,7 +21,11 @@ class SlowStopProcess implements RecorderProcess {
     await this.gate;
     for (const cb of this.listeners) cb({ code: 0, signal: null, expected: true });
   }
-  async stopGraceful(): Promise<void> {}
+  gracefulCalls = 0;
+  async stopGraceful(): Promise<void> {
+    this.gracefulCalls++;
+    await this.gate; // 与真实实现一致:排空要等到进程退出
+  }
   finish(): void { this.release(); }
   onExit(cb: (i: ExitInfo) => void): void { this.listeners.push(cb); }
   onLog(): void {}
@@ -88,6 +92,16 @@ describe("TaskManager 停止不阻塞调用方", () => {
   it("stopWithin:停止本身失败 → 抛出(让 API 层回滚 enabled)", async () => {
     proc.failWith = new Error("boom");
     await expect(mgr.stopWithin(id, 1000)).rejects.toThrow("boom");
+  });
+
+  it("硬停在途时 stopGraceful 让位:不改 draining 状态、不发 SIGUSR2、不重新阻塞", async () => {
+    store.setStatus(id, "running");
+    mgr.requestStop(id);
+    await mgr.stopGraceful(id); // 若被当成排空,会 await 到进程退出 → 这里直接挂住
+    expect(mgr.isDraining(id)).toBe(false);
+    expect(store.getTask(id)!.status).toBe("running");
+    expect(proc.gracefulCalls).toBe(0);
+    proc.finish();
   });
 
   it("daemon tick:被 hub 抑制而本机硬停的任务不再卡住整个 tick", async () => {
