@@ -84,8 +84,8 @@ controller 的队列 = 台账 job ∪ 各节点上报的 `Delivery.snapshot`。�
 | 步 | 内容（含范围） | 风险 | 验收 |
 |---|---|---|---|
 | F1 | fleet 视图（只读）：节点 `_recording-status` 额外扫 边录边传进度文件与节点结果文件，返回每房间的 已确认/未知/BV；master 现有 5 秒状态轮询缓存它；`HubQueueDTO` 增 `delivering` 列表；队列页渲染一行 | 低 | dev 里边录边传时队列有实时行；旧节点 bundle 不带字段时不报错 |
-| L1 | 手动停止/重启时封口并传完最后一段（范围：节点+单机）。背景：dev 实测硬停（SIGTERM）后最后一段未封口、未上传，10 分钟后 master 建 job 为 `needs_manual`，源保留、无重复建稿——安全但需人工。要先实测优雅排空（SIGUSR2）路径是否自动传完，再决定 SIGTERM 是否也要「封口→传→再退出」，且不得违反 I1（确认前不删源）、I2（不打断录制，硬停是用户主动操作除外） | 中 | dev 里停任务后无 `needs_manual`；变异：去掉封口步骤测试转红 |
-| F2 | controller「节点」视图（只读，范围：controller）。**已有数据**（实测）：`/api/hub/workers/status` 已返回 `ok/error/appVersion/appliedVersion/syncError`，`WorkersPanel` 已显示版本漂移；`Transport.diskFreeGB()` 已存在但只在对账轮（默认 30 分钟）由看门狗用、没进 UI。**缺**：磁盘剩余、被未确认分段锁定的字节、各节点录制数。做法：5 秒 `_recording-status` 返回里顺带 `diskFreeGB` 与 `lockedBytes`（节点本地读进度文件 + stat，不扫清单），并入 `WorkerStatus`；`WorkersPanel` 加两列 | 低 | 旧 bundle 缺字段不报错；磁盘接近水位时该节点标黄 |
+| L1 | 停止路径不再 SIGKILL 掉进行中的末段上传（范围：节点+单机）。**根因已定位**（第 3 轮审计）：会话 `stop()` 本已「封口→传末段」，但进程管理器 `stop()` 发 SIGTERM 后 10 秒无条件 SIGKILL 整个进程组，末段上传超过 10 秒必被杀，留下「上传中」意图，10 分钟后 master 建 job 为 `needs_manual`（源保留、无重复建稿，安全但需人工）。排空（SIGUSR2）路径本就没有 SIGKILL 计时器。做法：任务开了边录边传时，硬停的 SIGKILL 宽限改为上传超时预算（上限内），其余任务保持 10 秒 | 低 | 回归测试：rolling 任务 stop 宽限 > 默认；非 rolling 不变；dev 停任务后无 `needs_manual` |
+| F2 | controller「节点」视图（只读，范围：controller）。**已有数据**（实测）：`/api/hub/workers/status` 已返回 `ok/error/appVersion/appliedVersion/appliedAt`（类型里的 `syncError` 全仓无人写入，不算已有），`WorkersPanel` 已显示版本漂移；`Transport.diskFreeGB()` 已存在但只在对账轮（默认 30 分钟）由看门狗用、没进 UI。**缺**：磁盘剩余、被未确认分段锁定的字节、各节点录制数。做法：**复用 `Transport.diskFreeGB()`**（ssh 走 `_disk`、local 走 LocalTransport，不再造第三处磁盘来源）；`lockedBytes` 由 `_recording-status` 的 rolling 进度（节点本地读进度文件 + stat，不扫清单）顺带返回；二者并入 `WorkerStatus`。注意轮询范围：现有 5 秒轮询只探「被规则选中」的节点，且 local worker 不经 cli 隐藏命令——F2 要显式覆盖本机与未绑定节点（磁盘探测按较低频率，如 60 秒）。`WorkersPanel` 加两列 | 低 | 旧 bundle 缺字段不报错；磁盘接近水位时该节点标黄 |
 | F3 | 日志代查（范围：controller）：节点隐藏命令 `_log-tail <taskId> <n>`，controller 经 ssh 取最近 n 行（限长、过滤凭证类字段）。是「节点网页可降级」的前置 | 低 | 不泄露凭证；旧 bundle 回落「不支持」 |
 | S1 | core 新增 Delivery 类型 + 纯状态机 + 全分支测试；不接线 | 无 | 崩溃/重入/乱序测试 |
 | S2 | 节点三处双写（旧文件照写） | 低 | 双写一致性断言 |
@@ -109,4 +109,18 @@ F1 已上线（#103）。F2/F3 只读、可立即开始；L1 先在 dev 实测�
 - 分段管线：是 `mergeSegments=false` 的正常分支，原稿「并入或删除」不成立。已修正。
 - 远端删源：master 经 ssh `rm -f` 删节点源，原稿的「唯一入口」做不到，需 `_release-source` + 旧 bundle 兼容。已补 §2.1、S4。
 - fleet 视图：生产 `reconcileIntervalMs` 默认 30 分钟，若靠清单扫描则进度最多滞后 30 分钟，必须走 5 秒状态轮询。已补 F1，并提到最前。
-- 仍未验证：烧录版（弹幕/互动版）如何记入 Delivery（rolling 目前只传 plain），S1 前必须定；独立 Opus 复审未做（当前会话无子代理工具）。
+- 仍未验证：烧录版（弹幕/互动版）如何记入 Delivery（rolling 目前只传 plain），S1 前必须定；独立复审已由第 3 轮完成。
+
+**第 3 轮（独立审计：fable-5.1，只读，对照代码）** 结论：可开工 L1/F2/F3；S1 前须补两项设计决定。
+- L1 根因定位（见上）：不是缺封口，是硬停 10 秒 SIGKILL 与上传时长冲突。已改写 L1。
+- `syncError` 论断错误（类型有声明、无人写入）：已修正 F2。
+- F2 轮询范围缺口（未绑定节点、本机）与磁盘来源重复：已修正 F2，复用 `diskFreeGB()`。
+- **S1 前置决定 A**：stage 模式（只合成不上传）现在「无 BV 即删节点源」（交付物在 stage）。Delivery 若只认 BV 为确认，S4 后 stage 模式要么永不删源要么绕闸门；S1 必须把「交付物已落 stage 且校验通过」定义为一种确认。
+- **S1 前置决定 B**：烧录版（弹幕/互动版）如何记入（已知，原已列）。
+- S1 不另造状态机：抽取边录边传的 intent→confirm 与节点执行体的落盘结果两处语义的并集。
+- S3 须定义核对时点（以进度文件 `updatedAt` 为准，过期即保守），否则与节点删源并发有 TOCTOU。
+- S5 移除 `rollingEffective` 时须继续下发旧字段 `rollingUpload`（旧 bundle 只认它）；单机模式没有 master，「一处解析」的来源在单机是任务自身，验收需分别写。
+- S4 拆分顺序调整：边录边传（已有闸门）→ 节点执行体 → master 共享清理函数（需 `_release-source` 与旧 bundle 回落），每条一个 PR。
+- 单机模式的 rolling 异常（`ambiguous`/转人工）目前无人看：§1.5 的「本机可见」需落到具体步骤（候选：单机任务页显示交付状态），列为 S1 之后的待办。
+- 顺手：边录边传短路处的注释与代码自相矛盾（注释说按 sourceAfterDone 删源，代码明示不删）；同场节点执行体与 master 清理函数会各删一遍（幂等，但清理记账有虚数）。
+- 论断复核属实：视频删源 3 条路径、`_recording-status` 返回结构与旧 bundle 回退、`WorkerStatus` 无磁盘/锁定字节字段。
