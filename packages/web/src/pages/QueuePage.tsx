@@ -16,6 +16,8 @@ import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/HubJobs";
 import { roomId } from "../lib/labels";
 import { useHubStream, useTicker } from "../lib/hooks";
+import { NodesStrip } from "../components/NodesStrip";
+import { fmtBytes } from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { useT } from "../lib/i18n";
 import { fmtTimeInTz } from "../lib/tz";
@@ -46,11 +48,6 @@ function stepLabel(t: TFunc, step: string): string {
   const key = `hub.jobs.stepNode.${step}`;
   const label = t(key);
   return label === key ? step : label;
-}
-
-/** 字节 → 人类可读(1 位小数,MB/GB)。 */
-function fmtBytes(n: number): string {
-  return n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(0.1, n / 1e6).toFixed(1)} MB`;
 }
 
 /**
@@ -566,6 +563,7 @@ export function QueuePage(): ReactNode {
       </div>
 
       <HubStreamBanner handle={stream} />
+      <NodesStrip delivering={data?.delivering ?? []} />
       {pool && <PoolBar pool={pool} />}
       <DeliveringPanel items={data?.delivering ?? []} now={now} />
 
