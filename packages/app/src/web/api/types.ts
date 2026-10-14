@@ -97,6 +97,13 @@ export interface ApiDeps {
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<WorkerTestResult>;
   /** 批量存活探针(CLI 注入)。省略(hub 未开)→ status 端点返回 []。 */
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  /**
+   * master 代查某节点的任务日志尾巴(F3;CLI 注入,内部走 Transport)。
+   * 省略 → 该端点返回 400(hub 未启用),不静默 404/空表。
+   */
+  nodeTaskLogs?: (workerId: string, taskId: number, lines: number) => Promise<import("@drec/core").NodeTaskLogsDTO>;
+  /** master 读某节点的任务清单(F3;CLI 注入,内部走 Transport)。省略 → 端点 400。 */
+  nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
   /** 录制节点状态缓存读取;避免每次列任务都同步 SSH。 */
   recordingWorkers?: (platform: string, roomSlug: string) => RecordingWorkerStatusDTO[];
   /**
@@ -334,4 +341,8 @@ export interface Api {
   testWorker(input: { kind?: string; host?: string; dataRoot?: string; apiUrl?: string }): Promise<ApiResult>;
   /** GET /api/hub/workers/status — 并行 ping 所有已配置 worker(未注入 probeAllWorkers → [])。 */
   workersStatus(): Promise<ApiResult>;
+  /** GET /api/hub/workers/:id/tasks — master 读该节点的任务清单(F3,只读)。 */
+  nodeTasks(workerId: string): Promise<ApiResult>;
+  /** GET /api/hub/workers/:id/tasks/:taskId/logs — master 代查该节点某任务的日志尾巴(F3)。 */
+  nodeTaskLogs(workerId: string, taskId: number, lines?: number): Promise<ApiResult>;
 }

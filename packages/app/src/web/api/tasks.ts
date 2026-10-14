@@ -11,6 +11,7 @@ import { inWindow, nowMinutesLocal } from "../../scheduler.js";
 import type { CreateTaskInput, UpdateTaskInput, TaskView } from "./types.js";
 import type { TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
+import { redactLogLines } from "@drec/core";
 
 /** Web 停止请求最多同步等待的时间(ms)。普通任务几秒内退出;rolling 任务可能在传末段,超时先返回。 */
 const STOP_WAIT_MS = 15_000;
@@ -130,7 +131,9 @@ export function buildTasks(ctx: ApiCtx) {
     getTaskLogs(id: number): ApiResult {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
-      return { status: 200, body: { lines: manager.getLogs(id) } };
+      // 出网前脱敏:日志里可能带 cookie(vendored 取流代码在异常信息里打印整串)。
+      // 这里覆盖「节点自己的网页」与「master 代查(F3)」两条出口。
+      return { status: 200, body: { lines: redactLogLines(manager.getLogs(id)) } };
     },
 
     async deleteTask(id: number): Promise<ApiResult> {

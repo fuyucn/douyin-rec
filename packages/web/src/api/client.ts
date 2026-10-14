@@ -39,11 +39,13 @@ import type {
   WorkerDTO,
   WorkerTestResult,
   WorkerStatus,
+  NodeTasksDTO,
+  NodeTaskLogsDTO,
   RoomDTO,
   RoomPayload,
   HubResources,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, RollingDeliveryDTO, QueueItemDTO, HubPoolSnapshotDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, RoomDTO, RoomPayload, HubResources };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, RollingDeliveryDTO, QueueItemDTO, HubPoolSnapshotDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, NodeTasksDTO, NodeTaskLogsDTO, RoomDTO, RoomPayload, HubResources };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {
@@ -191,6 +193,11 @@ export const api = {
   testWorker: (cfg: Partial<WorkerDTO>): Promise<WorkerTestResult> => request("POST", "/api/hub/workers/test", cfg),
   /** 批量存活状态(卡片轮询):每 worker {id,ok,error?};hub 未开 → []。 */
   getWorkersStatus: (): Promise<WorkerStatus[]> => request("GET", "/api/hub/workers/status"),
+  /** F3:master 读某节点的任务清单(只读,无凭证)。 */
+  getNodeTasks: (workerId: string): Promise<NodeTasksDTO> => request("GET", `/api/hub/workers/${encodeURIComponent(workerId)}/tasks`),
+  /** F3:master 代查某节点某任务的日志尾巴(只读)。 */
+  getNodeTaskLogs: (workerId: string, taskId: number, lines = 200): Promise<NodeTaskLogsDTO> =>
+    request("GET", `/api/hub/workers/${encodeURIComponent(workerId)}/tasks/${taskId}/logs?lines=${lines}`),
 
   // ── Per-platform cookies ─────────────────────────────────────────────────
   getCookies: (): Promise<{ platforms: CookieStatus[] }> => request("GET", "/api/cookies"),

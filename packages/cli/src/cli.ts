@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf } from "@drec/core";
+import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -28,7 +28,7 @@ import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
-import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO } from "@drec/core";
+import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type NodeTaskLogsDTO, type NodeTasksDTO } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
@@ -622,6 +622,49 @@ const requestHubStopJob = async (
   if (!hubStopJob) return { ok: false, error: "hub 未启动", code: 400 };
   return hubStopJob(streamKey);
 };
+/**
+ * web API → 节点日志代查的统一入口(F3)。
+ *
+ * 每次现读 hub.config.json 找 worker(与 probeAllWorkers 同源)→ 建 scoped transport → 读日志。
+ * **刻意不缓存结果**:日志就是要看最新的;一次点击一条 ssh,代价可接受。
+ *
+ * 本机(local)worker 直接回提示:它的日志就在 master 自己的任务详情页,F3 要解决的是
+ * 「远端节点要登机器看网页」,本机代查没有意义。
+ */
+const requestNodeTaskLogs = async (workerId: string, taskId: number, lines: number): Promise<NodeTaskLogsDTO> => {
+  const { SshTransport } = await import("@drec/orchestrator");
+  const { workerStore, rootHubConfig } = await import("@drec/app");
+  const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
+  if (!w) return { workerId, taskId, lines: [], error: `未配置的 worker id: ${workerId}` };
+  if (w.kind === "local") return { workerId, taskId, lines: [], error: "本机节点:日志就在 master 的任务详情页" };
+  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+  try {
+    const r = await t.taskLogs(taskId, lines);
+    return { workerId, taskId, lines: r.lines, ...(r.error ? { error: r.error } : {}) };
+  } catch (e) {
+    const msg = (e as Error)?.message ?? String(e);
+    // 旧 bundle 没有该隐藏命令 → 说清楚是「节点版本旧」,别让用户以为是网络问题。
+    const unsupported = /unknown command|未知命令/i.test(msg);
+    return { workerId, taskId, lines: [], error: unsupported ? "节点 bundle 过旧,不支持日志代查(需升级节点)" : msg };
+  }
+};
+
+/** web API → 读某节点的任务清单(F3)。与日志代查同一取舍:现读配置、不缓存。 */
+const requestNodeTasks = async (workerId: string): Promise<NodeTasksDTO> => {
+  const { SshTransport } = await import("@drec/orchestrator");
+  const { workerStore, rootHubConfig } = await import("@drec/app");
+  const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
+  if (!w) return { workerId, tasks: [], error: `未配置的 worker id: ${workerId}` };
+  if (w.kind === "local") return { workerId, tasks: [], error: "本机节点:日志就在 master 的任务详情页" };
+  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+  try {
+    const r = await t.listTasks();
+    return { workerId, tasks: r.tasks };
+  } catch (e) {
+    return { workerId, tasks: [], error: (e as Error)?.message ?? String(e) };
+  }
+};
+
 const requestHubRunNow = async (
   opts: { streamKey: string; winnerWorker?: string; wait?: boolean },
 ): Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }> => {
@@ -632,6 +675,8 @@ const requestHubRunNow = async (
 const hubStarter: HubStarter = {
   requestSyncTasks: requestHubSync,
   recordingWorkers: readRecordingWorkers,
+  nodeTaskLogs: requestNodeTaskLogs,
+  nodeTasks: requestNodeTasks,
   rollingDelivery: readRollingDelivery,
   poolSnapshot: readPoolSnapshot,
   retryNode: requestHubRetryNode,
@@ -1712,6 +1757,38 @@ program
       }),
     );
     process.stdout.write(JSON.stringify(result) + "\n");
+  });
+
+// (内部) 读本节点某任务的日志尾巴(F3):master 在 fleet 模式下代查节点日志,不必登节点看网页。
+// 日志在 serve 进程的内存环形缓冲里,短命 CLI 进程读不到 → 转问本机 serve(与 _apply-tasks 同一手法)。
+// 只读:serve 未起/任务不存在都返回 {lines:[],error} 且**退出码 0**,可观测性不能反过来打断调用方。
+program
+  .command("_task-logs <dataRoot> <taskId> <lines>", { hidden: true })
+  .description("(内部) 输出某任务最近 n 行日志 JSON(供 master ssh 代查)")
+  .action(async (dataRoot: string, taskIdRaw: string, linesRaw: string) => {
+    void dataRoot; // 数据根只用于与其它隐藏命令保持同一签名;日志来自 serve 进程,不经这里读盘。
+    const taskId = Number(taskIdRaw);
+    // 行数夹取:防一个调用把整段日志(上千行)拖过 ssh。默认 200,上限 1000。
+    const asked = Number(linesRaw);
+    const lines = Number.isFinite(asked) ? Math.min(1000, Math.max(1, Math.trunc(asked))) : 200;
+    const apiBase = process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860"; // issue-guard: allow (回环地址,与 _apply-tasks 同一约定)
+    if (!Number.isFinite(taskId)) {
+      process.stdout.write(JSON.stringify({ lines: [], error: `taskId 非法: ${taskIdRaw}` }) + "\n");
+      return;
+    }
+    try {
+      const res = await fetch(`${apiBase}/api/tasks/${taskId}/logs`, { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) {
+        process.stdout.write(JSON.stringify({ lines: [], error: `serve HTTP ${res.status}` }) + "\n");
+        return;
+      }
+      const body = (await res.json()) as { lines?: unknown };
+      const all = Array.isArray(body.lines) ? body.lines.filter((x): x is string => typeof x === "string") : [];
+      // 脱敏后才出节点:日志里可能带 cookie(vendored 取流代码在异常信息里打印整串)。
+      process.stdout.write(JSON.stringify({ lines: redactLogLines(all.slice(-lines)) }) + "\n");
+    } catch (e) {
+      process.stdout.write(JSON.stringify({ lines: [], error: `读本机 serve 失败: ${(e as Error)?.message ?? e}` }) + "\n");
+    }
   });
 
 // (内部) 节点状态回执(T16):master 想知道「这台节点应用了哪一版期望、跑的是哪个 bundle」。

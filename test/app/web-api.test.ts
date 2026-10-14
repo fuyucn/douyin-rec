@@ -2100,3 +2100,89 @@ describe("hubQueue.delivering(F1:边录边传实时进度)", () => {
     expect(queue({ rollingDelivery: () => items }, { phase: ["done"] }).delivering).toHaveLength(2);
   });
 });
+
+describe("任务日志出口脱敏", () => {
+  it("日志行里的 cookie 在 API 出口被遮掉(节点网页与代查共用)", () => {
+    const s = new TaskStore(":memory:");
+    const m = new MockManager();
+    const id = s.addTask({ room: "777" }).id;
+    m.logs.set(id, ['API failed, cookies: ttwid=secret1; UIFID=secret2', 'sessionid=secret3']);
+    const r = makeApi({ store: s, manager: m }).getTaskLogs(id);
+    const lines = (r.body as { lines: string[] }).lines;
+    expect(lines.join("\n")).not.toContain("secret");
+    expect(lines[0]).toContain("cookies: <redacted>");
+  });
+});
+
+describe("F3:master 代查节点任务与日志", () => {
+  const mkApi = (deps: Partial<ApiDeps> = {}): ReturnType<typeof makeApi> => {
+    const s = new TaskStore(":memory:");
+    return makeApi({ store: s, manager: new MockManager(), hubEnabled: true, ...deps });
+  };
+
+  it("未启用 hub / 未注入 → 400(不静默返回空表)", async () => {
+    const s = new TaskStore(":memory:");
+    const noHub = makeApi({ store: s, manager: new MockManager() });
+    expect((await noHub.nodeTasks("x")).status).toBe(400);
+    expect((await noHub.nodeTaskLogs("x", 1, 200)).status).toBe(400);
+    const hubNoDep = mkApi();
+    expect((await hubNoDep.nodeTasks("x")).status).toBe(400);
+    expect((await hubNoDep.nodeTaskLogs("x", 1, 200)).status).toBe(400);
+  });
+
+  it("taskId 非法 → 400;合法 → 透传注入结果", async () => {
+    const calls: Array<[string, number, number]> = [];
+    const a = mkApi({
+      nodeTaskLogs: async (workerId, taskId, lines) => {
+        calls.push([workerId, taskId, lines]);
+        return { workerId, taskId, lines: ["a", "b"] };
+      },
+    });
+    expect((await a.nodeTaskLogs("n1", 0, 200)).status).toBe(400);
+    expect((await a.nodeTaskLogs("n1", Number.NaN, 200)).status).toBe(400);
+    const ok = await a.nodeTaskLogs("n1", 7, 200);
+    expect(ok.status).toBe(200);
+    expect((ok.body as { lines: string[] }).lines).toEqual(["a", "b"]);
+    expect(calls).toEqual([["n1", 7, 200]]);
+  });
+
+  it("行数夹取:非数字 → 200;超大 → 1000;0/负数 → 1", async () => {
+    const seen: number[] = [];
+    const a = mkApi({
+      nodeTaskLogs: async (workerId, taskId, lines) => { seen.push(lines); return { workerId, taskId, lines: [] }; },
+    });
+    await a.nodeTaskLogs("n1", 1, undefined);
+    await a.nodeTaskLogs("n1", 1, 99_999);
+    await a.nodeTaskLogs("n1", 1, 0);
+    await a.nodeTaskLogs("n1", 1, -5);
+    expect(seen).toEqual([200, 1000, 1, 1]);
+  });
+
+  it("任务清单不透出 webhook(凭证类字段不进浏览器)", async () => {
+    const a = mkApi({
+      nodeTasks: async (workerId) => ({
+        workerId,
+        tasks: [{ id: 1, platform: "douyin", roomSlug: "1", room: "r", name: "n", quality: "origin", engine: "ffmpeg",
+          danmu: 1, segmentSec: 1800, scheduleStart: null, scheduleEnd: null, status: "stopped", useCookie: true,
+          enabled: true, outDir: null, webhook: "https://discord.com/api/webhooks/secret", managedBy: "hub",
+          anchorName: "a", rollingUpload: false, rollingEffective: false }],
+      }),
+    });
+    const r = await a.nodeTasks("n1");
+    expect(JSON.stringify(r.body)).not.toContain("webhooks/secret");
+    expect((r.body as { tasks: Array<{ id: number }> }).tasks[0]!.id).toBe(1);
+  });
+
+  it("注入实现抛错 → 200 + error(可观测性结果,不让页面报错)", async () => {
+    const a = mkApi({
+      nodeTaskLogs: async () => { throw new Error("ssh 超时"); },
+      nodeTasks: async () => { throw new Error("节点不可达"); },
+    });
+    const l = await a.nodeTaskLogs("n1", 1, 200);
+    expect(l.status).toBe(200);
+    expect((l.body as { error?: string }).error).toContain("ssh 超时");
+    const t = await a.nodeTasks("n1");
+    expect(t.status).toBe(200);
+    expect((t.body as { error?: string }).error).toContain("节点不可达");
+  });
+});

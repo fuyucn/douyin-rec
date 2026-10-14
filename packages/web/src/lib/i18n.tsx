@@ -413,6 +413,7 @@ const DICT = {
         empty: "还没有 Worker", testConn: "测试连接", deleteConfirmTitle: "删除该 Worker?", deleted: "Worker 已删除",
         statusOk: "在线 · dataRoot 可达", diskFree: "磁盘剩余 {gb} GB", diskLow: "低于水位 {min} GB", versionDrift: "节点版本 v{node},master 是 v{master} —— 节点可能没更新到最新版", syncLag: "期望版本 {expected} 未应用(停在 {applied})", statusChecking: "检测中…",
         pill: "Workers · {count}", close: "关闭 Workers 面板", statusFail: "离线", statusMixed: "部分离线",
+        logs: "查看日志", nodeLogs: { title: "节点日志 · {node}", desc: "由 master 经 SSH 代查:不用登节点,也不给节点开公网入口。日志来自节点 serve 的内存缓冲,节点重启即空。", tasks: "任务", log: "#{id} 日志(末尾 200 行)", noTasks: "该节点没有任务" },
       },
       workerDialog: {
         createTitle: "新建 Worker", editTitle: "编辑 Worker", desc: "录制节点(选优合并的数据来源)",
@@ -814,6 +815,7 @@ const DICT = {
         empty: "No workers yet", testConn: "Test connection", deleteConfirmTitle: "Delete this worker?", deleted: "Worker deleted",
         statusOk: "Online · dataRoot reachable", diskFree: "Disk free {gb} GB", diskLow: "below {min} GB watermark", statusChecking: "Checking…", versionDrift: "Node runs v{node}, master is v{master} — node may be stale", syncLag: "Expected version {expected} not applied (stuck at {applied})",
         pill: "Workers · {count}", close: "Close Workers panel", statusFail: "Offline", statusMixed: "Some offline",
+        logs: "View logs", nodeLogs: { title: "Node logs · {node}", desc: "Fetched by master over SSH: no need to log into the node or expose it publicly. Logs come from the node serve process memory and are lost on restart.", tasks: "Tasks", log: "#{id} logs (last 200 lines)", noTasks: "This node has no tasks" },
       },
       workerDialog: {
         createTitle: "New worker", editTitle: "Edit worker", desc: "Recording node (a data source for selection & merge)",
