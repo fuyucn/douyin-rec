@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { normalizeNodeResultFile, registerChild, throwIfAborted, type RemoteTaskSpec } from "@drec/core";
-import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeTasks, Transport } from "./transport.js";
+import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeRecordingStatus, NodeRollingSession, NodeTasks, Transport } from "./transport.js";
 import type { NodeCapabilities, NodeStatus, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec } from "@drec/core";
 
 export interface SshOpts {
@@ -81,7 +81,7 @@ function defaultRun(host: string, timeoutMs = 45_000) {
     p.stdout.on("data", (b) => (out += b)); p.stderr.on("data", (b) => (err += b));
     p.on("close", (c) => finish(() => {
       try { throwIfAborted(); } catch (e) { reject(e); return; }
-      c === 0 ? resolve(out) : reject(new Error(`ssh rc=${c}: ${err.slice(-300)}`));
+      c === 0 ? resolve(out) : reject(new Error(`ssh rc=${c}: ${err.slice(-1500)}`));
     }));
     p.on("error", (e) => finish(() => reject(e)));
   });
@@ -181,6 +181,29 @@ export class SshTransport implements Transport {
     } catch {
       return null; // 旧 bundle(无 _node-id)/ ssh 失败 → 不阻断添加流程
     }
+  }
+
+  /**
+   * 在录房间 + 边录边传进度(F1)。同一条 `_recording-status` 命令:旧 bundle 只有 rooms → rolling=[];
+   * 命令不存在才降级到 activeRecordingRooms(其内部有 `_tasks`+`_is-done` 回退),其它错误照常抛。
+   */
+  async recordingStatus(): Promise<NodeRecordingStatus> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    try {
+      const out = await this.runStatus([`${nodePrefix} _recording-status ${this.o.dataRoot}`]);
+      const parsed = JSON.parse(out) as { rooms?: ActiveRecordingRoom[]; rolling?: unknown };
+      if (Array.isArray(parsed.rooms)) {
+        const rolling = (Array.isArray(parsed.rolling) ? parsed.rolling : []).filter((r): r is NodeRollingSession => {
+          const x = r as Partial<NodeRollingSession> | null;
+          return !!x && typeof x.platform === "string" && typeof x.roomSlug === "string"
+            && typeof x.sessionBase === "string" && typeof x.confirmed === "number" && typeof x.total === "number";
+        });
+        return { rooms: parsed.rooms, rolling };
+      }
+    } catch (e) {
+      if (!isUnknownCommandError(e)) throw e;
+    }
+    return { rooms: await this.activeRecordingRooms(), rolling: [] };
   }
 
   /** 查询 worker 当前正在录制的房间,仅做轻量 /proc 扫描,不读录像目录。 */

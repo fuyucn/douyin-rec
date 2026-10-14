@@ -3,7 +3,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { groupSessions } from "@drec/post-process";
-import type { NodeRecording, NodeRollingProgress } from "./transport.js";
+import type { ActiveRecordingRoom, NodeRecording, NodeRollingProgress, NodeRollingSession } from "./transport.js";
 import { readGaps, totalGapSecOf } from "./gaps.js";
 
 interface GapInterval { startMs: number; endMs: number }
@@ -74,6 +74,65 @@ function readRolling(dir: string, base: string): NodeRollingProgress | undefined
   } catch {
     return undefined;
   }
+}
+
+/**
+ * 扫边录边传会话的**实时进度**(F1,只读)。
+ * 纳入:①该房间此刻在录,且是它最新的一个会话;②任何会话只要有「正在传 / 结果未知」的未决项(收播后仍需关注)。
+ * 已收口的旧会话不纳入。不读 .ts、不 ffprobe,只读 sidecar,可以每 5 秒调一次。
+ */
+export function scanRollingSessions(recordingsDir: string, active: readonly ActiveRecordingRoom[]): NodeRollingSession[] {
+  type Cand = NodeRollingSession & { startMs: number };
+  const cands: Cand[] = [];
+  let anchors: string[] = [];
+  try {
+    anchors = readdirSync(recordingsDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch { return []; }
+  for (const anchor of anchors) {
+    const dir = join(recordingsDir, anchor);
+    let files: string[] = [];
+    try { files = readdirSync(dir); } catch { continue; }
+    for (const f of files) {
+      const m = /^(.+)\.rolling\.json$/.exec(f);
+      if (!m) continue;
+      const base = m[1]!;
+      try {
+        const d = JSON.parse(readFileSync(join(dir, f), "utf-8")) as {
+          bv?: unknown; segments?: unknown; confirmed?: unknown; ambiguous?: unknown; startMs?: unknown;
+          uploading?: { index?: unknown; kind?: unknown } | null;
+        };
+        const sess = readSession(dir, base);
+        if (!sess.roomSlug) continue;
+        const platform = sess.platform ?? "douyin";
+        const num = (a: unknown): number => (Array.isArray(a) ? a.filter((n) => typeof n === "number").length : 0);
+        const u = d.uploading;
+        const uploading = u && typeof u.index === "number" && (u.kind === "create" || u.kind === "append")
+          ? { index: u.index, kind: u.kind as "create" | "append" } : undefined;
+        cands.push({
+          platform, roomSlug: sess.roomSlug, sessionBase: base,
+          bv: typeof d.bv === "string" && d.bv ? d.bv : undefined,
+          confirmed: num(d.confirmed), total: Array.isArray(d.segments) ? d.segments.length : 0,
+          ambiguous: num(d.ambiguous), uploading,
+          recording: active.some((r) => r.platform === platform && r.roomSlug === sess.roomSlug),
+          startMs: typeof d.startMs === "number" ? d.startMs : 0,
+        });
+      } catch { /* 损坏的 sidecar 跳过,绝不抛 */ }
+    }
+  }
+  // 在录的房间只认其最新会话(startMs 最大),避免把同房间昨天没清的旧会话也标成「在录」。
+  const latest = new Map<string, number>();
+  for (const c of cands) {
+    if (!c.recording) continue;
+    const k = `${c.platform}:${c.roomSlug}`;
+    latest.set(k, Math.max(latest.get(k) ?? 0, c.startMs));
+  }
+  return cands
+    .filter((c) => {
+      const pending = c.ambiguous > 0 || !!c.uploading;
+      const isLatestRecording = c.recording && c.startMs === latest.get(`${c.platform}:${c.roomSlug}`);
+      return pending || isLatestRecording;
+    })
+    .map(({ startMs: _s, ...rest }) => rest);
 }
 
 export type FfprobeAdapter = (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;

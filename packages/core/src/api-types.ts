@@ -452,7 +452,38 @@ export interface QueueItemDTO {
  *
  * `recent` 保留为**兼容字段**(RoomDetail 等旧调用方仍用),内容 = 最近完成的完整 HubJobDTO。
  */
+/**
+ * 边录边传的实时交付进度(controller 视图,F1)。由各节点的状态轮询带回,**不经过台账**:
+ * 边录边传由录制节点自己建稿 / 追加 / 删源,master 要等收播后的对账才建 job,期间队列页原本一片空白。
+ * 只读展示,不参与任何上传 / 删源判定。
+ */
+export interface RollingDeliveryDTO {
+  workerId: string;
+  workerName: string;
+  platform: string;
+  roomSlug: string;
+  /** 主播名(master 侧按房间补;未知 = null)。 */
+  anchorName: string | null;
+  sessionBase: string;
+  /** 已建稿的 BV;尚未建稿 = null。 */
+  bv: string | null;
+  /** 已确认上传的分 P 数。 */
+  confirmed: number;
+  /** 本会话已封口 / 登记的分段总数(含已确认并删源的)。 */
+  total: number;
+  /** 结果未知、需人工核对的分段数。 */
+  ambiguous: number;
+  /** 正在传的分段(无 = null)。 */
+  uploading: { index: number; kind: "create" | "append" } | null;
+  /** 该房间此刻是否仍在录制(false = 已收播但仍有未决项)。 */
+  recording: boolean;
+  /** 本条状态的核对时刻(epoch ms)。 */
+  checkedAt: number;
+}
+
 export interface HubQueueDTO {
+  /** 边录边传的实时进度(F1;旧 master / 无节点上报时缺省)。 */
+  delivering?: RollingDeliveryDTO[];
   /** 进行中(非终态 ∪ needs_manual)—— 与 `rows` 中 phase 非 done/failed 的部分一致。 */
   active: QueueItemDTO[];
   /** 统一列表:进行中 + 已完成,按 sort(newest 缺省=最新在前)排好,前端渲染一张表。 */

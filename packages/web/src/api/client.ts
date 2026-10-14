@@ -24,6 +24,7 @@ import type {
   HubJobEventDTO,
   HubJobsDTO,
   HubQueueDTO,
+  RollingDeliveryDTO,
   QueueItemDTO,
   HubPoolSnapshotDTO,
   QueuePhase,
@@ -42,7 +43,7 @@ import type {
   RoomPayload,
   HubResources,
 } from "@drec/contracts";
-export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, QueueItemDTO, HubPoolSnapshotDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, RoomDTO, RoomPayload, HubResources };
+export type { Task, TaskDetail, TaskRuntime, CookieStatus, BiliupAuthStatus, TaskPayload, HubPipelineConfig, HubRuleDTO, HubRulePayload, HubJobDTO, HubJobNodeStateDTO, HubJobCandidateDTO, HubJobEventDTO, HubJobsDTO, HubQueueDTO, RollingDeliveryDTO, QueueItemDTO, HubPoolSnapshotDTO, QueuePhase, HubJobStepDTO, RecordingsDTO, MergeJobDTO, EventsDTO, AppEventDTO, NotifWebhookToggles, PlatformDTO, PlatformsDTO, WorkerDTO, WorkerTestResult, WorkerStatus, RoomDTO, RoomPayload, HubResources };
 
 /** POST /api/login/qr → start a QR-login session. */
 export interface QrStart {

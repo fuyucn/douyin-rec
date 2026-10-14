@@ -2042,3 +2042,33 @@ describe("issue #73 节点 /api/tasks 的 assigned 视图", () => {
     } finally { s.close(); rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+describe("hubQueue.delivering(F1:边录边传实时进度)", () => {
+  const d = (over: Record<string, unknown> = {}) => ({
+    workerId: "n1", workerName: "node 1", platform: "douyin", roomSlug: "111", anchorName: null,
+    sessionBase: "S1", bv: "BV1X", confirmed: 2, total: 3, ambiguous: 0, uploading: null, recording: true, checkedAt: 1, ...over,
+  });
+  const queue = (deps: Partial<ApiDeps>, opts: Parameters<ReturnType<typeof makeApi>["hubQueue"]>[0] = {}) =>
+    (makeApi({ store, manager, syncDbPath: "/nonexistent/x-sync.db", ...deps }).hubQueue(opts).body as { delivering?: Array<Record<string, unknown>> });
+
+  it("带回节点上报的进度,并按房间补主播名", () => {
+    store.addTask({ room: "111", name: "小苏" });
+    const b = queue({ rollingDelivery: () => [d() as never] });
+    expect(b.delivering).toHaveLength(1);
+    expect(b.delivering![0]).toMatchObject({ roomSlug: "111", anchorName: "小苏", bv: "BV1X", confirmed: 2, total: 3 });
+  });
+
+  it("未注入 rollingDelivery(旧 master / 无节点)→ 空数组,队列其余字段不受影响", () => {
+    const b = queue({});
+    expect(b.delivering).toEqual([]);
+    expect(b).toHaveProperty("pool");
+  });
+
+  it("平台与关键字筛选对进度同样生效;phase 筛选不影响", () => {
+    store.addTask({ room: "111", name: "小苏" });
+    const items = [d(), d({ platform: "bilibili", roomSlug: "222", sessionBase: "S2" })] as never[];
+    expect(queue({ rollingDelivery: () => items }, { platform: ["bilibili"] }).delivering!.map((x) => x.sessionBase)).toEqual(["S2"]);
+    expect(queue({ rollingDelivery: () => items }, { q: "小苏" }).delivering!.map((x) => x.sessionBase)).toEqual(["S1"]);
+    expect(queue({ rollingDelivery: () => items }, { phase: ["done"] }).delivering).toHaveLength(2);
+  });
+});

@@ -253,11 +253,26 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
   jlog(`节点侧确认未完成(落盘=${node?.phase ?? "无"})${detail}`);
   // 节点侧一旦执行过上传就可能已建稿、只是回传失败/超时 ⇒ 一律按「不安全重试」上报
   // (节点名与 reconciler 的 UNSAFE_RETRY_NODES 同名),reconciler 会翻 needs_manual,绝不自动重传。
-  ledger.syncNodeState(streamKey, "node_upload", "failed", { error: `节点侧上传失败: ${errMsg.slice(0, 200)}` });
-  ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: `节点侧上传失败: ${errMsg.slice(0, 200)}` });
-  ledger.markFailed(streamKey, `节点侧上传失败: ${errMsg.slice(0, 200)}`);
-  notify({ kind: "error", stage: "同步", message: `节点侧上传失败 ${streamKey}: ${errMsg.slice(0, 200)}` });
+  ledger.syncNodeState(streamKey, "node_upload", "failed", { error: `节点侧上传失败: ${errBrief(errMsg)}` });
+  ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: `节点侧上传失败: ${errBrief(errMsg)}` });
+  ledger.markFailed(streamKey, `节点侧上传失败: ${errBrief(errMsg)}`);
+  notify({ kind: "error", stage: "同步", message: `节点侧上传失败 ${streamKey}: ${errBrief(errMsg)}` });
   return { state: "failed" };
+}
+
+/**
+ * 把 ssh / 节点执行体的失败文本压成给人看的简要原因(写进台账 error 与告警)。
+ * 此前是 `slice(0, 200)`:取的是**开头**,而开头恒是 ssh 的 known_hosts 提示与节点日志的起手几行,
+ * 真正的失败原因在**末尾**被截掉(线上 24 条 needs_manual 里一大半只剩「Permanently added …」)。
+ * 现在:去掉 known_hosts 提示、合并空白,过长时保留**末尾** `max` 个字符。
+ */
+export function errBrief(msg: string, max = 240): string {
+  const clean = msg
+    .replace(/Warning: Permanently added[^\n]*(\n|$)/g, "")
+    .replace(/\r/g, "")
+    .replace(/\s*\n\s*/g, " | ")
+    .trim();
+  return clean.length <= max ? clean : `…${clean.slice(-max)}`;
 }
 
 /** 节点侧上传超时下限:与此前固定值一致(30 分钟),小场次行为不变。 */
