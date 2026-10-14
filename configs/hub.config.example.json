@@ -9,6 +9,7 @@
   "stageDir": "/data/stage",
   "cleanMaxGapSec": 30,
   "reconnectWindowMs": 600000,
+  "sideCheckDelayMs": 600000,
   "settleMs": 90000, "pollMs": 3000, "reconcileIntervalMs": 1800000,
   "maxWaitSec": 600, "settleSec": 15,
   "resources": { "maxCpuParallel": 1, "maxNetParallel": 1, "uploadRateLimit": 5, "uploadRateWindowMs": 600000, "uploadCooldownMs": 1800000 },

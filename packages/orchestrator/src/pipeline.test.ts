@@ -270,17 +270,13 @@ describe("runPipeline", () => {
         expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
       });
 
-      it("期望 9 实际 8(**少**分P)→ 观察期:仍 done,但**保住节点源**(T33 ②)", async () => {
-        // 观察期放宽 mismatch 不等于「随便删」。**少了**分 P 时两种可能都要不得:
-        //   ①B站 pages 还没同步(假失败);②真的丢片 —— 都不能销毁最后一份源。
-        // 故只清 stage,节点源留给 reconciler 收尾补跑在确认一致后再删(T33 ①)。
+      it("期望 9 实际 8(回读少)→ 仍 done,**照常删节点源**(issue #92:上传是否成功只看 biliup 返回码)", async () => {
+        // 收口时不再同步回读;回读由延迟的旁路校验承担(只记录/告警,不影响清理),见 finalize-verify.test.ts。
         const deps = segUploadDeps({ countParts: async () => 8 });
         const r = await runSeg(deps);
         expect(r.state).toBe("done");
-        expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled(); // 节点源保住
-        // 留痕:clean_verify 记下期望/实际 + 「疑似缺失」,供观察期统计与补跑。
-        expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.error ?? "")
-          .toContain("疑似缺失");
+        expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+        expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("done");
       });
 
       it("未注入 countParts → 核验关闭,分段路径照常删源(与现状一致)", async () => {
@@ -290,12 +286,12 @@ describe("runPipeline", () => {
         expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
       });
 
-      it("countParts=null → 软状态:源保留、clean_verify=pending、job 仍 done", async () => {
+      it("countParts=null → 不影响清理:照常删源、clean_verify 记 done(不再留 pending)、job 仍 done", async () => {
         const deps = segUploadDeps({ countParts: async () => null });
         const r = await runSeg(deps);
         expect(r.state).toBe("done");
-        expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("pending");
-        expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+        expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("done");
+        expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
       });
 
       it("分段路径 rmStage 抛错 → job 仍 done(不因清理失败变 failed)", async () => {
@@ -1820,23 +1816,22 @@ describe("runPipeline", () => {
       expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
     });
 
-    it("合并路径 分P数不符(期望 3 **实际 2 = 少了**)→ 观察期:仍 done,但**保住节点源**(T33 ②)", async () => {
-      // 观察期不阻塞,但「少了」分 P 时不能销毁最后一份源(可能丢片 / 可能没同步完)。
+    it("合并路径 回读少于期望(期望 3 实际 2)→ 仍 done,**照常删节点源**(issue #92)", async () => {
+      // 收口不再同步回读;回读在延迟后旁路执行(只记录/告警)。
       const deps = uploadDeps({ countParts: async () => 2 });
       const r = await run(deps);
       expect(r.state).toBe("done");
       expect(r.bv).toBe("BV123");                    // 上传确实成功了
       expect(deps.ledger.get(STREAM_KEY)?.state).toBe("done");
-      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled(); // 节点源保住
-      expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
+      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
     });
 
-    it("countParts 返回 null → 软状态:clean_verify=pending、源保留、**不转人工**(下轮重试)", async () => {
+    it("countParts 返回 null → 不影响清理:照常删源、clean_verify 记 done(不再留 pending)、不转人工", async () => {
       const deps = uploadDeps({ countParts: async () => null });
       const r = await run(deps);
       expect(r.state).toBe("done");                   // 上传成功的事实不被回滚
-      expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("pending");
-      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("done");
+      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
       expect(deps.ledger.get(STREAM_KEY)?.state).not.toBe("needs_manual");
     });
 

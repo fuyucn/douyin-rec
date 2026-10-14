@@ -578,3 +578,30 @@ describe("tryNodeSideUpload 已建稿护栏(issue #91)", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 });
+
+describe("tryNodeSideUpload 成功收尾(issue #92)", () => {
+  it("节点侧上传成功(返回 ok)→ 立刻按配置删节点源;节点侧无 sync_parts 基线,不排旁路校验", async () => {
+    const ledger = { get: () => ({ bv: "" }), logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), doneParts: () => new Set<number>() };
+    const t = fakeTransport();
+    const scheduled: number[] = [];
+    const deps = {
+      transports: new Map([["w1", t]]), rmStage: vi.fn(async () => {}),
+      countParts: async () => 1,
+      scheduleSideCheck: (_fn: () => void, ms: number) => { scheduled.push(ms); },
+    };
+    const r = await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12",
+      cfg: { ...cfg, cleanup: { sourceAfterDone: true } } as never,
+      winner: { workerId: "w1", rec: { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" } },
+      winnerMembers: [{ workerId: "w1", rec: { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" } }],
+      transport: t as never,
+      ledger: ledger as never,
+      jlog: () => {},
+      notify: vi.fn(),
+      deps: deps as never,
+    });
+    expect(r?.state).toBe("done");
+    expect(t.cleanup).toHaveBeenCalled();     // 返回码 0 即成功:立刻按配置删源
+    expect(scheduled).toEqual([]);            // 无基线,回读无从比对,不排
+  });
+});

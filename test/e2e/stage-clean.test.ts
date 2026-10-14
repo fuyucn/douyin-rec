@@ -55,74 +55,72 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
     expect(stageVideos(s).some((f) => f.endsWith(".mp4"))).toBe(true);
   });
 
-  it("核验取不到分P数(待重试)→ 源段副本保留,弹幕/session 保留,节点源也不删", async () => {
+  // ── issue #92:上传是否成功只看 biliup 返回码;回读分 P 数不再是清理的闸门(只做延迟的旁路校验)──
+  it("回读取不到分P数 → 照常清:stage 源段副本与节点源都删,弹幕/session 保留", async () => {
     s = await Scenario.create({ cfg: { cleanup: { ...COMMON } } });
     s.fake.countAvailable = false;
     record(s);
     await s.reconcile();
-    expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
-    expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+    expect(s.jobState(s.onlyKey())).toBe("done");
+    expect(stageVideos(s)).toEqual([]);
+    expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(0);
+    expect(s.recordingFiles().some((f) => /\.(xml|session\.json)$/.test(f))).toBe(true);
   });
 
-  // ── 核验语义收紧:stage 视频类清理只在核验真正通过时执行 ──
-  it("B站分P数少于提交数 → stage 源段副本保留,节点源也保留", async () => {
+  it("B站回读分P数少于提交数 → 照常清:stage 源段副本与节点源都删(不再保源)", async () => {
     s = await Scenario.create({ cfg: { cleanup: { ...COMMON } }, deps: { countParts: async () => 1 } });
     record(s);
     await s.reconcile();
-    expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
-    expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+    expect(s.jobState(s.onlyKey())).toBe("done");
+    expect(stageVideos(s)).toEqual([]);
+    expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(0);
   });
 
-  it("核验被跳过(未注入分P查询)→ stage 源段副本保留(旧行为)", async () => {
+  it("未注入分P查询 → 同样照常清", async () => {
     s = await Scenario.create({ cfg: { cleanup: { ...COMMON } }, deps: { countParts: undefined } });
     record(s);
     await s.reconcile();
     expect(s.jobState(s.onlyKey())).toBe("done");
-    expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+    expect(stageVideos(s)).toEqual([]);
   });
 
   // ── 收尾补跑 ──
   const keep = (sc: Scenario): string[] => sc.stageResidue().filter((f) => /\.(xml|ass)$|\.session\.json$/.test(f));
 
-  it("收尾补跑:核验仍待重试 → 补跑不清 stage", async () => {
+  it("回读取不到分P数:首轮已清完,再对账一轮不产生变化、不再有 clean_verify=pending 让补跑反复重入", async () => {
     s = await Scenario.create({ cfg: { cleanup: { ...COMMON } }, cleanupBackfillThrottleMs: 0 });
     s.fake.countAvailable = false;
     record(s);
     await s.reconcile();
     const before = s.stageResidue();
-    await s.reconcile(); // 仍取不到分P数 → 仍是待重试
+    const calls = s.fake.calls.length;
+    await s.reconcile();
     expect(s.stageResidue()).toEqual(before);
+    expect(s.fake.calls, "补跑不得重复上传").toHaveLength(calls);
     expect(s.jobState(s.onlyKey())).toBe("done");
-    expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+    expect(s.ledger.getNodeState(s.onlyKey(), "clean_verify")?.state).toBe("done");
   });
 
-  it("收尾补跑:核验通过后补清视频类,.xml/.session.json/job.log 保留", async () => {
+  it("清理后 .xml/.session.json/job.log 保留(不删最后一份弹幕)", async () => {
     s = await Scenario.create({ cfg: { cleanup: { ...COMMON } }, cleanupBackfillThrottleMs: 0 });
-    s.fake.countAvailable = false;
     record(s);
-    await s.reconcile();
-    const kept = keep(s);
-    expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
-    s.fake.countAvailable = true;
     await s.reconcile();
     expect(stageVideos(s)).toEqual([]);
     expect(s.jobState(s.onlyKey())).toBe("done");
-    expect(keep(s)).toEqual(kept);
     expect(existsSync(join(s.stageSubOf(s.onlyKey()), "job.log"))).toBe(true);
+    // xmlKeepRule:stage 清空时保留节点源 xml,绝不两处同时删光。
+    expect(s.recordingFiles().some((f) => f.endsWith(".xml"))).toBe(true);
   });
 
-  // ── 删除路径反向用例:续跑 / 分段主路径 / 分段续跑,核验未真正通过时 stage 源段必须保留 ──
+  // ── 续跑 / 分段主路径 / 分段续跑:回读无结论(取不到 / 未注入)也照常清 stage 源段 ──
   const tsCount = (sc: Scenario): number => stageVideos(sc).filter((f) => f.endsWith(".ts")).length;
-  // .work 目录本身(基线行为会在 stageAfterDone 时删其中的分P plain 文件,但目录属「中间产物」,核验未过必须留)
-  const hasWork = (sc: Scenario): boolean => existsSync(join(sc.stageSubOf(sc.onlyKey()), ".work"));
-  // 核验未真正通过的两种形态:待重试(取不到分P数) / 被跳过(未注入分P查询,无基线)
-  const UNVERIFIED = [
-    { name: "核验待重试", mk: (sc: Scenario): void => { sc.fake.countAvailable = false; }, deps: {} },
-    { name: "核验被跳过", mk: (): void => {}, deps: { countParts: undefined } },
+  const NO_READBACK = [
+    { name: "回读取不到", mk: (sc: Scenario): void => { sc.fake.countAvailable = false; }, deps: {} },
+    { name: "未注入分P查询", mk: (): void => {}, deps: { countParts: undefined } },
   ] as const;
 
-  describe.each(UNVERIFIED)("核验未通过($name)", ({ name, mk, deps }) => {
-    it("合并续跑(烧录中断、稿件号已落库、成品仍在)→ 拉回的源段副本保留,节点源保留", async () => {
+  describe.each(NO_READBACK)("$name", ({ mk, deps }) => {
+    it("合并续跑(烧录中断、稿件号已落库、成品仍在)→ 续跑完成后 stage 源段副本清空,节点源删除", async () => {
       let boom = true;
       s = await Scenario.create({
         cfg: { cleanup: { ...COMMON } }, deps,
@@ -138,22 +136,21 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
       boom = false;
       await s.reconcile();                              // 续跑(resumeAppends)
       expect(s.jobState(key)).toBe("done");
-      expect(tsCount(s), "续跑核验未通过,不得清 stage 源段副本").toBe(6);
-      if (name === "核验待重试") expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+      expect(tsCount(s)).toBe(0);
+      expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(0);
     });
 
-    it("分段主路径 → stage 源段副本与 .work 保留,节点源保留", async () => {
+    it("分段主路径 → stage 源段副本清空,节点源删除", async () => {
       s = await Scenario.create({ cfg: { steps: { mergeSegments: false }, cleanup: { ...COMMON } }, deps });
       mk(s);
       record(s);
       await s.reconcile();
       expect(s.jobState(s.onlyKey())).toBe("done");
-      expect(tsCount(s)).toBe(6);
-      expect(hasWork(s), ".work 中间产物应保留").toBe(true);
-      if (name === "核验待重试") expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+      expect(tsCount(s)).toBe(0);
+      expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(0);
     });
 
-    it("分段续跑(上传已完成、markDone 前中断,稿件号已落库、成品仍在)→ stage 源段副本与 .work 保留", async () => {
+    it("分段续跑(上传已完成、markDone 前中断,稿件号已落库)→ 续跑不重复上传,完成后 stage 源段副本清空", async () => {
       s = await Scenario.create({ cfg: { steps: { mergeSegments: false }, cleanup: { ...COMMON, sourceAfterDone: false } }, deps }); // 节点源保留,下一轮才能重新发现该场续跑
       mk(s);
       record(s);
@@ -168,8 +165,48 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
       await s.reconcile();
       expect(s.jobState(key)).toBe("done");
       expect(s.fake.calls, "续跑不得重复上传").toHaveLength(calls);
-      expect(tsCount(s), "分段续跑核验未通过,不得清 stage 源段副本").toBe(6);
-      expect(hasWork(s), ".work 中间产物应保留").toBe(true);
+      expect(tsCount(s)).toBe(0);
     });
   });
 });
+
+// ── 回读不再是闸门后,「biliup 返回非 0 → 不 markDone、不删源」是唯一护栏:续跑路径必须有测试钉住 ──
+describe("e2e: 续跑里 append 返回非 0 → 不 markDone、不清 stage / 节点源(#92)", () => {
+  const stageTs = (sc: Scenario): number => sc.stageResidue().filter((f) => f.endsWith(".ts")).length;
+
+  it("合并续跑:append 持续失败 → job 不为 done,stage 源段副本与节点源都保留", async () => {
+    let boom = true;
+    s = await Scenario.create({
+      cfg: { cleanup: { ...COMMON } },
+      shellFault: (cmd) => boom && /\bburn\b/.test(cmd) && /--style\s+livechat/.test(cmd),
+    });
+    record(s);
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.jobState(key)).toBe("failed");
+    expect(s.ledger.get(key)?.bv).toBeTruthy();
+    boom = false;
+    s.fake.inject({ op: "append", mode: "timeout", times: 50 });
+    await s.reconcile();                               // 续跑(resumeAppends),append 全部失败
+    expect(s.jobState(key)).not.toBe("done");
+    expect(stageTs(s), "append 失败不得清 stage 源段").toBe(6);
+    expect(s.recordingFiles().filter((f) => f.endsWith(".ts")), "append 失败不得删节点源").toHaveLength(6);
+  });
+
+  it("分段续跑:plain 分P append 持续失败 → job 不为 done(不 markDone、不清理)", async () => {
+    s = await Scenario.create({ cfg: { steps: { mergeSegments: false }, cleanup: { ...COMMON, sourceAfterDone: false } } });
+    record(s);
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.ledger.get(key)?.bv).toBeTruthy();
+    s.ledger.setState(key, "failed", { error: "进程重启中断" }, { force: true });
+    s.ledger.syncNodeState(key, "merge", "failed", { error: "进程重启中断" });
+    // 让已记录的 plain 分P检查点失效,迫使续跑重新 append 这些分P(否则幂等跳过,看不到 append 失败)
+    (s.ledger as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).db
+      .prepare("DELETE FROM sync_parts WHERE streamKey = ?").run(key);
+    s.fake.inject({ op: "append", mode: "timeout", times: 200 });
+    await s.reconcile();
+    expect(s.jobState(key)).not.toBe("done");
+  });
+});
+

@@ -1198,10 +1198,10 @@ describe("磁盘看门狗(节点剩余空间告警)", () => {
       ledger.close();
     });
 
-    it("done + clean_verify=pending(核验软状态)→ 同样补跑", async () => {
+    it("done + clean_verify=pending(旧版遗留软状态)→ 不再补跑(issue #92:核验改旁路,据它补跑无法收敛)", async () => {
       const { ledger, runPipeline, reconciler } = await doneJobWith({ node: "clean_verify", nodeState: "pending" });
       await reconciler.reconcileAll();
-      expect(runPipeline).toHaveBeenCalledTimes(1);
+      expect(runPipeline).not.toHaveBeenCalled();
       ledger.close();
     });
 

@@ -221,7 +221,8 @@ export interface VerifyOpts {
   sleep?: (ms: number) => Promise<void>;
   /**
    * mismatch 时是否**阻塞**(转 needs_manual + 保留源)。
-   * 缺省 = {@link DEFAULT_VERIFY_BLOCKING}(当前 false = 观察期,只记录不阻塞)。
+   * 缺省 = {@link DEFAULT_VERIFY_BLOCKING}(false)。注意:issue #92 起收口(finalizeAfterUpload)不再读取该策略,
+   * 回读只做延迟旁路校验;此开关仅保留给 verify 模块自身的纯函数与测试。
    * 传 true 恢复旧行为。
    */
   blocking?: boolean;
@@ -247,7 +248,7 @@ export interface VerifyOpts {
  * 攒够样本后用**真实分布**回答「B站同步要等多久」,再决定要不要升回硬验收。
  *
  * ## 怎么翻回去
- * 传 `blocking: true` 即恢复旧行为(仅 mismatch 会阻塞);或改 `DEFAULT_VERIFY_BLOCKING`。
+ * (issue #92 起收口不再据此阻塞:改 `DEFAULT_VERIFY_BLOCKING` 不会让清理重新被回读卡住。)
  */
 const DEFAULT_VERIFY_BLOCKING = false;
 
@@ -282,10 +283,10 @@ export function verifyAllowsCleanup(r: VerifyResult): boolean {
 /** 统一措辞(单一真理源:pipeline 与 reconciler 都调它,不在两处各写一份)。 */
 export function verifyMessage(r: VerifyResult, streamKey: string, bv: string): string {
   switch (r.kind) {
-    case "ok": return `${streamKey} 产物核验通过(${r.actual} 个分 P),已删源`;
-    case "skipped": return `${streamKey} 跳过产物核验(${r.reason}),按现状清理`;
+    case "ok": return `${streamKey} 产物核验通过(${r.actual} 个分 P)`;
+    case "skipped": return `${streamKey} 跳过产物核验(${r.reason})`;
     case "mismatch":
-      return `${streamKey} 分 P 数不符:期望 ${r.expected} 实际 ${r.actual}(bv=${bv}) —— 已保留全部源,请人工核对`;
-    case "unknown": return `${streamKey} 产物核验待重试:${r.reason}`;
+      return `${streamKey} 分 P 数不符:期望 ${r.expected} 实际 ${r.actual}(bv=${bv}) —— 请人工核对`;
+    case "unknown": return `${streamKey} 产物核验未得出结论:${r.reason}`;
   }
 }
