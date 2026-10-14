@@ -221,7 +221,8 @@ export interface VerifyOpts {
   sleep?: (ms: number) => Promise<void>;
   /**
    * mismatch 时是否**阻塞**(转 needs_manual + 保留源)。
-   * 缺省 = {@link DEFAULT_VERIFY_BLOCKING}(当前 false = 观察期,只记录不阻塞)。
+   * 缺省 = {@link DEFAULT_VERIFY_BLOCKING}(false)。注意:issue #92 起收口(finalizeAfterUpload)不再读取该策略,
+   * 回读只做延迟旁路校验;此开关仅保留给 verify 模块自身的纯函数与测试。
    * 传 true 恢复旧行为。
    */
   blocking?: boolean;
@@ -247,7 +248,7 @@ export interface VerifyOpts {
  * 攒够样本后用**真实分布**回答「B站同步要等多久」,再决定要不要升回硬验收。
  *
  * ## 怎么翻回去
- * 传 `blocking: true` 即恢复旧行为(仅 mismatch 会阻塞);或改 `DEFAULT_VERIFY_BLOCKING`。
+ * (issue #92 起收口不再据此阻塞:改 `DEFAULT_VERIFY_BLOCKING` 不会让清理重新被回读卡住。)
  */
 const DEFAULT_VERIFY_BLOCKING = false;
 

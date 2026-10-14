@@ -64,7 +64,7 @@ describe("cleanupBackfillDue:**不再**因「clean_source 缺失」补跑(2026-1
 });
 
 describe("上传确认后回读数与期望不符也不保源(issue #92,取代 T33 ② 的保源口径)", () => {
-  function deps(actual: number | null, cleanupCalls: Array<{ skipNodeSources?: boolean }>) {
+  function deps(actual: number | null) {
     const dir = mkdtempSync(join(tmpdir(), "t33-"));
     mkdirSync(join(dir, "sub"), { recursive: true });
     writeFileSync(join(dir, "sub", "a.ts"), "x");
@@ -83,79 +83,36 @@ describe("上传确认后回读数与期望不符也不保源(issue #92,取代 T
       cfg,
       countParts: async () => actual,
       sleep: async () => {},
-    } as unknown as PipelineDeps & { __calls?: unknown };
+      scheduleSideCheck: () => {}, // 旁路校验不在本组用例范围(见 finalize-verify.test.ts)
+    } as unknown as PipelineDeps;
   }
 
-  it("actual < expected(回读少)→ 照常清理,cleanupSources 不带 skipNodeSources", async () => {
-    const calls: Array<{ skipNodeSources?: boolean }> = [];
+  const finalizeWith = async (actual: number | null, parts: number) => {
     const { finalizeAfterUpload } = await import("./pipeline.js");
-    const d = deps(1, calls);
-    // 期望 3(plain 3 段),实际 1 → 疑似缺失
+    const d = deps(actual);
     d.ledger.upsertPending("k");
-    d.ledger.markPartDone("k", "plain", 0);
-    d.ledger.markPartDone("k", "plain", 1);
-    d.ledger.markPartDone("k", "plain", 2);
-    const r = await finalizeAfterUpload({
-      streamKey: "k", bv: "BV1", deps: d, log: () => {},
-      cleanupSources: async (o) => { calls.push(o ?? {}); return { ok: true, failed: [] }; },
-      on: { plain: true, danmu: false, livechat: false }, notify: () => {},
-    });
-    expect(r.verifyBlocked).toBeUndefined();       // 不阻塞
-    expect(calls).toHaveLength(1);                 // 照常清理
-    expect(calls[0]?.skipNodeSources).toBeUndefined(); // 不再保住节点源(返回码 0 即成功)
-  });
-
-  it("actual === expected → 正常删源(不带 skipNodeSources)", async () => {
-    const calls: Array<{ skipNodeSources?: boolean }> = [];
-    const { finalizeAfterUpload } = await import("./pipeline.js");
-    const d = deps(3, calls);
-    d.ledger.upsertPending("k");
-    d.ledger.markPartDone("k", "plain", 0);
-    d.ledger.markPartDone("k", "plain", 1);
-    d.ledger.markPartDone("k", "plain", 2);
+    for (let i = 0; i < parts; i++) d.ledger.markPartDone("k", "plain", i);
+    let cleaned = 0;
     await finalizeAfterUpload({
       streamKey: "k", bv: "BV1", deps: d, log: () => {},
-      cleanupSources: async (o) => { calls.push(o ?? {}); return { ok: true, failed: [] }; },
+      cleanupSources: async () => { cleaned++; return { ok: true, failed: [] }; },
       on: { plain: true, danmu: false, livechat: false }, notify: () => {},
     });
-    expect(calls[0]?.skipNodeSources).toBeUndefined();
+    return { cleaned, state: d.ledger.get("k")?.state };
+  };
+
+  it("actual < expected(回读少,期望 3 实际 1)→ 照常清理一次,不转人工(返回码 0 即成功)", async () => {
+    const r = await finalizeWith(1, 3);
+    expect(r.cleaned).toBe(1);
+    expect(r.state).not.toBe("needs_manual");
   });
 
-  it("actual > expected(多出分 P)→ 不保源(我们没丢东西,源可安全删)", async () => {
-    const calls: Array<{ skipNodeSources?: boolean }> = [];
-    const { finalizeAfterUpload } = await import("./pipeline.js");
-    const d = deps(5, calls);
-    d.ledger.upsertPending("k");
-    d.ledger.markPartDone("k", "plain", 0);
-    const r = await finalizeAfterUpload({
-      streamKey: "k", bv: "BV1", deps: d, log: () => {},
-      cleanupSources: async (o) => { calls.push(o ?? {}); return { ok: true, failed: [] }; },
-      on: { plain: true, danmu: false, livechat: false }, notify: () => {},
-    });
-    expect(r.verifyBlocked).toBeUndefined();
-    expect(calls[0]?.skipNodeSources).toBeUndefined();
+  it("actual === expected → 正常清理", async () => {
+    expect((await finalizeWith(3, 3)).cleaned).toBe(1);
+  });
+
+  it("actual > expected(多出分 P)→ 正常清理", async () => {
+    expect((await finalizeWith(5, 1)).cleaned).toBe(1);
   });
 });
 
-describe("cleanupSourcesShared:skipNodeSources 只跳节点源,不跳 stage", () => {
-  it("skipNodeSources=true → 不调 transport.cleanup(节点源),但仍按配置清 stage", async () => {
-    const { cleanupSourcesShared } = await import("./pipeline.js");
-    let nodeCleaned = 0;
-    const dir = mkdtempSync(join(tmpdir(), "t33b-"));
-    writeFileSync(join(dir, "s.ts"), "x");
-    const l = new SyncLedger(":memory:");
-    l.upsertPending("k");
-    const out = await cleanupSourcesShared({
-      streamKey: "k", ledger: l,
-      transports: new Map([["n1", { cleanup: async () => { nodeCleaned++; } } as never]]),
-      members: [{ workerId: "n1", rec: { tsFiles: ["/remote/a.ts"] } }],
-      cleanup: { sourceAfterDone: true, stageSourceAfterMerge: true },
-      stagePulledSources: [join(dir, "s.ts")],
-      rmStage: async () => { writeFileSync(join(dir, "s.ts"), ""); }, // 模拟删除
-      log: () => {},
-      skipNodeSources: true,
-    });
-    expect(nodeCleaned).toBe(0);   // 节点源**没**被碰
-    expect(out.ok).toBe(true);
-  });
-});

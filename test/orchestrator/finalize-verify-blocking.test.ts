@@ -32,13 +32,12 @@ describe("finalizeAfterUpload 回读不阻塞 × 真实 SyncLedger(#92)", () => 
 
     const cleanupSources = vi.fn(async () => ({ ok: true }) as never);
     const notify = vi.fn();
-    const r = await finalizeAfterUpload({
+    await finalizeAfterUpload({
       streamKey: KEY, bv: "BV1", log: () => {}, notify, cleanupSources,
       deps: { ledger, countParts: async () => 3, sleep: async () => {}, scheduleSideCheck: () => {} } as unknown as PipelineDeps,
       on: { plain: true, danmu: false, livechat: false },
     });
 
-    expect(r.verifyBlocked).toBeUndefined();
     expect(ledger.get(KEY)?.state).toBe("done");            // 不再转人工
     expect(cleanupSources).toHaveBeenCalledTimes(1);        // 照常清理
     expect(ledger.getNodeStates(KEY).find((n) => n.node === "clean_verify")?.state).toBe("done");

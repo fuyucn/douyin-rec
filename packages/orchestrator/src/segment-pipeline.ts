@@ -468,11 +468,10 @@ export async function runSegmentPipeline(o: {
   // 「删源」= 各节点 recordings 源。**分P模式不传 stagePulledSources**:
   // stage 里的 {name}_{NNN}.mp4 就是交付物本身(无合并,逐段无损 remux),删源时绝不从 stage 删。
   // 分P的 stage 文件统一留到上传成功后由 stageAfterDone 清(见下)。
-  const cleanupNodeSources = async (opts?: { skipNodeSources?: boolean }): Promise<CleanupOutcome> =>
+  const cleanupNodeSources = async (): Promise<CleanupOutcome> =>
     cleanupSourcesShared({
       streamKey, ledger, transports: deps.transports, members: allMembers,
       cleanup: clean, rmStage, log: jlog,
-      skipNodeSources: opts?.skipNodeSources,
     });
   // stage 里拉来的源段副本 + 逐段 remux 中间产物(.work) —— 只在**上传成功后**清(见下)。
   const stageScratchPaths = (): string[] => [
@@ -581,13 +580,11 @@ export async function runSegmentPipeline(o: {
   ledger.markDone(streamKey, bv);
   notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
 
-  // 收口闸门(与合并路径同一实现):核验分 P 数 → 才删源(T11);清理失败只标 clean_*(T12),终态恒为 done。
-  const finalize = await finalizeAfterUpload({
+  // 收口(与合并路径同一实现):上传确认后按配置清理(issue #92);清理失败只标 clean_*(T12),终态恒为 done。
+  await finalizeAfterUpload({
     streamKey, bv, deps, log: jlog, notify, cleanupSources: cleanupNodeSources,
     on: { plain: true, danmu: burnDanmu, livechat: burnLivechat },
   });
-  // 核验判定不完整 → 返回值也必须转 needs_manual(返回值与台账/UI 一致,不能还报 done)。
-  if (finalize.verifyBlocked) return { state: "needs_manual", bv };
   // 上传成功 → stage 里的「拉来源段副本 + .work 中间产物」已是冗余,可清。
   // 注意:这里只清**非交付物**;分P成品/烧录产物由下面的 stageAfterDone 决定是否清。
   if (clean.stageSourceAfterMerge) {
@@ -608,8 +605,8 @@ export async function runSegmentPipeline(o: {
     if (xmlKeepRule("stage", true)) {
       products.push(...readdirSyncSafe(stageSub).filter((f) => /\.(xml|ass)$/i.test(f)).map((f) => path.join(stageSub, f)));
     }
-    // 整稿核验通过后:stage 内其余视频类内容(拉回的源段副本、.work 中间产物)一并清(#60)。
-    if (finalize.stageCleanConfirmed) products.push(...stageVideoLeftovers(stageSub));
+    // 上传确认后:stage 内其余视频类内容(拉回的源段副本、.work 中间产物)一并清(#60)。
+    products.push(...stageVideoLeftovers(stageSub));
     products.splice(0, products.length, ...new Set(products));
     ledger.logStep(streamKey, "clean_stage", "start");
     try { await rmStage(products); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件`); }
@@ -733,7 +730,7 @@ async function resumeSegmentAppends(
   notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
   // 上传成功 → 同一收口闸门(补做「删源」:续跑此前漏了 sourceAfterDone)。分P模式不碰 stage 交付物。
   const rmStage = deps.rmStage ?? defaultRmStage;
-  const finalize = await finalizeAfterUpload({
+  await finalizeAfterUpload({
     streamKey, bv, deps, log: jlog, notify,
     cleanupSources: () => cleanupSourcesShared({
       streamKey, ledger, transports: deps.transports, members: allMembers,
@@ -741,7 +738,6 @@ async function resumeSegmentAppends(
     }),
     on: { plain: true, danmu: burnDanmu, livechat: burnLivechat },
   });
-  if (finalize.verifyBlocked) return { state: "needs_manual", bv };
   // 上传成功 → stage 里的「拉来源段副本 + .work 中间产物」已冗余,可清(非交付物)。
   if (cfg.cleanup?.stageSourceAfterMerge) {
     const scratch = [
@@ -762,7 +758,7 @@ async function resumeSegmentAppends(
     if (xmlKeepRule("stage", true)) {
       products.push(...readdirSyncSafe(stageSub).filter((f) => /\.(xml|ass)$/i.test(f)).map((f) => path.join(stageSub, f)));
     }
-    if (finalize.stageCleanConfirmed) products.push(...stageVideoLeftovers(stageSub));
+    products.push(...stageVideoLeftovers(stageSub));
     products.splice(0, products.length, ...new Set(products));
     try { await rmStage(products); }
     catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.syncNodeState(streamKey, "clean_stage", "failed", { error: msg }); jlog(`清理失败(clean_stage):${msg}`); }

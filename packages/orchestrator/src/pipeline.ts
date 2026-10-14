@@ -50,7 +50,7 @@ export const videoOnly = (paths: string[]): string[] => paths.filter((p) => !/\.
  * stage 目录顶层的「视频类内容」(`.ts/.flv/.mp4` + `.work/` `.upload/` 中间产物目录)。
  * 用于 `stageAfterDone` 的整场清空:拉回的源段副本(本机胜出时是硬链接)、续跑残留、中间产物都在其中。
  * **绝不包含** `.xml/.ass/.session.json/job.log`;只看顶层、不递归未知目录;不返回 stageSub 本身。
- * 调用方必须自己保证「上传已确认 + 有稿件号」(见 finalizeAfterUpload 的 stageCleanConfirmed)。
+ * 调用方必须自己保证「上传已确认 + 有稿件号」(见 finalizeAfterUpload)。
  */
 export function stageVideoLeftovers(stageSub: string): string[] {
   const out: string[] = [];
@@ -243,12 +243,6 @@ export async function cleanupSourcesShared(o: {
   rmStage: (paths: string[]) => Promise<void>;
   log: (msg: string) => void;
   /**
-   * **跳过节点源清理**(只做 stage 侧)。用于「核验疑似少分 P」时:
-   * 那种情况不能销毁最后一份源(可能真丢片 / 也可能只是 B站还没同步),
-   * 留源给 reconciler 的收尾补跑在**确认一致**后再删。
-   */
-  skipNodeSources?: boolean;
-  /**
    * **强制保留节点源 .xml**(节点侧上传路径专用)。
    *
    * 常规路径里 `xmlKeepRule("node", stageAfterDone)` 的前提是「stage 里有 xml 副本」(pull 会带上),
@@ -269,7 +263,7 @@ export async function cleanupSourcesShared(o: {
   };
 
   // ① 各节点 recordings 源(与 stage 侧独立;两开关可单独开)。
-  if (clean.sourceAfterDone && !o.skipNodeSources) {
+  if (clean.sourceAfterDone) {
     const delNodeXml = o.keepNodeXml ? false : xmlKeepRule("node", clean.stageAfterDone === true);
     o.ledger.logStep(o.streamKey, "clean_source", "start");
     let fileCount = 0;
@@ -354,7 +348,7 @@ export async function finalizeOnly(
     on: { plain: true, danmu: burnFlags(cfg.steps).burnDanmu, livechat: burnFlags(cfg.steps).burnLivechat },
   });
   // 收尾补跑:此前未清干净的 stage 视频类内容在这里补清(同一口径)。
-  if (cfg.cleanup?.stageAfterDone && fin.stageCleanConfirmed) {
+  if (cfg.cleanup?.stageAfterDone) {
     const left = stageVideoLeftovers(stageSub);
     if (left.length > 0) {
       deps.ledger.logStep(streamKey, "clean_stage", "start");
@@ -373,6 +367,10 @@ export async function finalizeOnly(
 /** 旁路校验默认延迟:B站追加分 P 后列表刷新有延迟,读太早会误报(issue #92)。 */
 export const DEFAULT_SIDE_CHECK_DELAY_MS = 10 * 60_000;
 
+/** 本进程已排过旁路校验的场(收尾补跑会重复走到收口,不能每次都排一遍 → 重复告警)。有界,超限丢最旧。 */
+const sideCheckScheduled = new Set<string>();
+const SIDE_CHECK_MEMO_MAX = 2000;
+
 /**
  * **旁路校验**(issue #92):上传确认(biliup 返回 0)后,延迟一段时间回读 B站分 P 数,
  * **只写日志 / 台账备注 / 告警,绝不改变清理结果、不转人工、不重传**。
@@ -383,10 +381,6 @@ export const DEFAULT_SIDE_CHECK_DELAY_MS = 10 * 60_000;
  * 定时器只在内存里:进程重启则丢这一次校验——它只是旁路观察,丢了不影响任何数据。
  * 任何异常一律吞掉(只记日志):旁路绝不能把主线搞挂。
  */
-/** 本进程已排过旁路校验的场(收尾补跑会重复走到收口,不能每次都排一遍 → 重复告警)。有界,超限丢最旧。 */
-const sideCheckScheduled = new Set<string>();
-const SIDE_CHECK_MEMO_MAX = 2000;
-
 export function scheduleSideCheck(o: {
   deps: PipelineDeps;
   streamKey: string;
@@ -434,10 +428,10 @@ export async function finalizeAfterUpload(o: {
   deps: PipelineDeps;
   log: (msg: string) => void;
   /** 清理各节点源(+ 可选 stage 拉来源段);上传确认后无条件调用。 */
-  cleanupSources: (opts?: { skipNodeSources?: boolean }) => Promise<CleanupOutcome>;
+  cleanupSources: () => Promise<CleanupOutcome>;
   on: { plain: boolean; danmu: boolean; livechat: boolean };
   notify: (e: NotifyEvent) => void;
-}): Promise<CleanupOutcome & { verifyBlocked?: boolean; cleanConfirmed?: boolean; stageCleanConfirmed?: boolean }> {
+}): Promise<CleanupOutcome> {
   const { deps, streamKey, bv, log } = o;
   // **上传是否成功只看 biliup 返回码**(issue #92):走到这里 = 上传已确认(返回 0),按配置清理。
   // 回读分 P 数不再是清理的闸门,只作旁路校验(延迟回读,见 scheduleSideCheck)。
@@ -445,7 +439,7 @@ export async function finalizeAfterUpload(o: {
   deps.ledger.syncNodeState(streamKey, "clean_verify", "done", { error: null });
   const outcome = await o.cleanupSources();
   scheduleSideCheck({ deps, streamKey, bv, on: o.on, log, notify: o.notify });
-  return { ...outcome, cleanConfirmed: true, stageCleanConfirmed: true };
+  return outcome;
 }
 
 /**
@@ -857,11 +851,10 @@ async function runPipelineInner(
   const stagePulledSources = winnerMembers.flatMap((m) =>
     m.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f))));
   // 「删源」:节点 recordings 源 + (合并模式的)stage 拉来源段。调用点保证在安全点(stage 收尾 / markDone 后)。
-  const cleanupSources = async (opts?: { skipNodeSources?: boolean }): Promise<CleanupOutcome> =>
+  const cleanupSources = async (): Promise<CleanupOutcome> =>
     cleanupSourcesShared({
       streamKey, ledger, transports, members: candidates.members,
       cleanup: clean, stagePulledSources, rmStage, log: jlog,
-      skipNodeSources: opts?.skipNodeSources,
     });
 
   const workflow = buildWorkflow({
@@ -912,20 +905,19 @@ async function runPipelineInner(
   jlog(`P1 上传完成: ${bv}`);
   ledger.markDone(streamKey, bv!);
   notify({ kind: "uploadDone", bv: bv!, url: `https://www.bilibili.com/video/${bv!}` });
-  // 收口闸门:先核验分 P 数再决定删不删源(T11);清理失败只标 clean_*(T12),终态恒为 done。
-  const finalize = await finalizeAfterUpload({
+  // 收口:上传确认(biliup 返回 0)后按配置清理(issue #92),回读分 P 数只做延迟旁路校验;
+  // 清理失败只标 clean_*(T12),终态恒为 done。
+  await finalizeAfterUpload({
     streamKey, bv: bv!, deps, log: jlog, notify, cleanupSources,
     on: { plain: true, danmu: burnDanmu, livechat: burnLivechat },
   });
-  // 核验判定「不完整」→ 该场对用户是未完成的活(转人工),返回值必须跟上,不能还报 done。
-  if (finalize.verifyBlocked) return { state: "needs_manual", bv: bv! };
   if (clean.stageAfterDone) {
     ledger.logStep(streamKey, "clean_stage", "start");
     // 合成视频产物总删;.xml/.ass 按 xmlKeepRule(stage)=true(=stageAfterDone 开)一并删
     // —— 此时节点源 .xml 已保留,不会两处同时删光。
     const present = videoOnly([plain, danmuMp4, livechatMp4]).filter(Boolean).filter(existsSync);
-    // 整稿核验通过后:stage 内其余视频类内容(拉回的源段副本、.work/.upload 中间产物)一并清(#60)。
-    if (finalize.stageCleanConfirmed) present.push(...stageVideoLeftovers(stageSub));
+    // 上传确认后:stage 内其余视频类内容(拉回的源段副本、.work/.upload 中间产物)一并清(#60)。
+    present.push(...stageVideoLeftovers(stageSub));
     // 分P标题别名目录(硬链接)也在这里清掉,否则会随 stage 长期残留。
     const aliasDir = path.join(stageSub, UPLOAD_ALIAS_DIR);
     if (existsSync(aliasDir)) present.push(aliasDir);
@@ -974,7 +966,7 @@ async function resumeAppends(
   const isPublic = cfg.uploadPrivate === false;
 
   // done 场的收尾补跑若在下面三处转人工:done 无出边,普通 setState 会被白名单拒绝 →
-  // job 仍 done、告警照发、cleanupBackfillDue 周期性重复补跑刷告警。wasDone 时必须 force(同 verifyBlocked 分支)。
+  // job 仍 done、告警照发、cleanupBackfillDue 周期性重复补跑刷告警。wasDone 时必须 force。
   const wasDone = ledger.get(streamKey)?.state === "done";
   const prod = deriveStageProducts(stageSub);
   if (!prod) {
@@ -1083,28 +1075,26 @@ async function resumeAppends(
   ledger.markDone(streamKey, bv);
   notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
 
-  // 上传成功 → 与主路径同一收口闸门:核验分 P 数 → 才删源(T11/T12)。
+  // 上传成功 → 与主路径同一收口(issue #92:按配置清理 + 延迟旁路校验)。
   // 续跑此前漏了 sourceAfterDone,是节点源残留的来源之一,这里一并补上。
   const rmStageFn = deps.rmStage ?? defaultRmStage;
-  const cleanupSources = async (opts?: { skipNodeSources?: boolean }): Promise<CleanupOutcome> =>
+  const cleanupSources = async (): Promise<CleanupOutcome> =>
     cleanupSourcesShared({
       streamKey, ledger, transports: deps.transports, members,
       cleanup: cfg.cleanup,
       stagePulledSources: members.flatMap((m) => m.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f)))),
       rmStage: rmStageFn, log: jlog,
-      skipNodeSources: opts?.skipNodeSources,
     });
-  const finalize = await finalizeAfterUpload({
+  await finalizeAfterUpload({
     streamKey, bv, deps, log: jlog, notify, cleanupSources,
     on: { plain: true, danmu: burnDanmu, livechat: burnLivechat },
   });
-  if (finalize.verifyBlocked) return { state: "needs_manual", bv };
 
   // 可选:done 后删 stage 产物(与主路径同一开关;续跑不删 slave 源)。
   if (cfg.cleanup?.stageAfterDone) {
     const products = [...new Set([
       ...videoOnly([prod.plain, prod.danmuMp4, prod.livechatMp4]),
-      ...(finalize.stageCleanConfirmed ? stageVideoLeftovers(stageSub) : []),
+      ...stageVideoLeftovers(stageSub),
     ])];
     ledger.logStep(streamKey, "clean_stage", "start");
     try { await rmStageFn(products); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件(不含 .xml/.ass)`); }

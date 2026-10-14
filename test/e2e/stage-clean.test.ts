@@ -193,7 +193,7 @@ describe("e2e: 续跑里 append 返回非 0 → 不 markDone、不清 stage / �
     expect(s.recordingFiles().filter((f) => f.endsWith(".ts")), "append 失败不得删节点源").toHaveLength(6);
   });
 
-  it("分段续跑:plain 分P append 持续失败 → job 不为 done,stage 源段副本保留", async () => {
+  it("分段续跑:plain 分P append 持续失败 → job 不为 done(不 markDone、不清理)", async () => {
     s = await Scenario.create({ cfg: { steps: { mergeSegments: false }, cleanup: { ...COMMON, sourceAfterDone: false } } });
     record(s);
     await s.reconcile();

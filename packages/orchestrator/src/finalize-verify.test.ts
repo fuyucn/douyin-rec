@@ -72,14 +72,12 @@ describe("finalizeAfterUpload:上传确认后无条件清理,回读不是闸门(
     ["回读多于期望", 5],
     ["回读抛错", "throw"],
     ["未注入分P查询", "no-count"],
-  ] as const)("%s → 照常清理源,cleanConfirmed / stageCleanConfirmed 为真,无 needs_manual", async (_n, actual) => {
+  ] as const)("%s → 照常清理源,无 needs_manual", async (_n, actual) => {
     const { ledger, calls } = fakeLedger({ plain: [0, 1, 2] });
     const h = harness(ledger, actual);
     const { r, cleaned } = await run(h);
     expect(cleaned()).toBe(1);
-    expect(r.cleanConfirmed).toBe(true);
-    expect(r.stageCleanConfirmed).toBe(true);
-    expect(r.verifyBlocked).toBeUndefined();
+    expect(r.ok).toBe(true);
     expect(calls.setState).toHaveLength(0);
   });
 
@@ -175,6 +173,24 @@ describe("旁路校验:延迟回读,只记录/告警(#92)", () => {
     await new Promise((r) => setTimeout(r, 5));
     expect(notify).not.toHaveBeenCalled();
     expect(calls.setState).toHaveLength(0);
+  });
+
+  it("旁路校验内部抛错(如台账写失败)→ 吞掉并只记日志,绝不产生未处理的 rejection(Node 24 下会让 master 进程崩)", async () => {
+    const { ledger } = fakeLedger({ plain: [0, 1, 2] });
+    const h = harness(ledger, 1); // 回读少 → 走「记台账备注」分支,下面让它抛
+    await run(h);
+    expect(h.scheduled).toHaveLength(1);
+    (ledger as unknown as { logStep: () => void }).logStep = () => { throw new Error("ledger down"); };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown): void => { unhandled.push(e); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      h.scheduled[0].fn();
+      await new Promise((r) => setTimeout(r, 30));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
   });
 
   it("无基线(台账没有已传分 P)→ 回读也不告警", async () => {
