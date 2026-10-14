@@ -1,7 +1,7 @@
 import path from "node:path";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
-import type { Transport } from "./transport.js";
+import type { NodeRecording, Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, resolveOutputStem, runWithJob, sanitizeStreamKey, throwIfAborted, USER_STOP, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { UploadOpts } from "@drec/core";
@@ -13,7 +13,7 @@ import { deriveSegmentPlan, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 import { runSegmentPipeline } from "./segment-pipeline.js";
 // 节点侧上传(experimental,plans/027):全部逻辑隔离在 node-side-upload.ts,便于快速开关/回退。
 import { shouldUseNodeSideUpload, tryNodeSideUpload } from "./node-side-upload.js";
-import { PART_GROUP_CANONICAL, verifyBlocksOnMismatch, verifyMessage, verifyUploaded } from "./verify.js";
+import { PART_GROUP_CANONICAL, verifyBlocksOnMismatch, verifyMessage, verifyParts, verifyUploaded } from "./verify.js";
 
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。 */
 export interface PipelineSteps {
@@ -476,16 +476,39 @@ export function tryRollingShortCircuit(o: {
   transports: Map<string, Transport>;
   notify: (e: NotifyEvent) => void;
   jlog: (m: string) => void;
+  /** 收口 done 后的回读核验接缝(只记录日志,不阻塞、不转人工;观察期)。缺省 = 不回读。 */
+  countParts?: (bv: string) => Promise<number | null>;
 }): { state: JobState; bv?: string } | null {
   const { streamKey, members, ledger, jlog, cfg } = o;
   if (ledger.get(streamKey)?.bv) return null; // 已有 BV(续跑) → 交给既有续跑路径
+  // #57 R1 止血:有边传进度、**无稿件号**,且留有建稿意图(uploading.kind=create)或结果不确定(ambiguous)
+  // = 建稿可能已提交、只是稿件号没落盘。此时走常规整场管线会**重复建稿**(B站不可逆)→ 转人工。
+  // 先于 rolled/bvs 判定:同场其它成员即使有 bv(或没有任何 bv)也一样。
+  const unsettled = members.filter((m) => rollingUnsettledWithoutBv(m.rec.rolling));
+  if (unsettled.length > 0) {
+    const detail = unsettled
+      .map((m) => `${m.workerId}:${m.rec.sessionBase}(${describeUnsettled(m.rec.rolling!)})`)
+      .join(";");
+    jlog(`边录边传识别:无稿件号但存在建稿意图/不确定结果 [${detail}] → 转人工(不走常规整场管线,防重复建稿)`);
+    ledger.setState(streamKey, "needs_manual", { error: `边录边传:建稿中断或结果不确定且无稿件号(${detail}),请人工核对稿件后处理` });
+    o.notify({ kind: "error", stage: "上传", message: `${streamKey} 边录边传:建稿中断/结果不确定且无稿件号,已转人工核对(未走常规管线)` });
+    return { state: "needs_manual" };
+  }
   const rolled = members.filter((m) => m.rec.rolling?.bv);
   if (rolled.length === 0) return null;
   const bvs = [...new Set(rolled.map((m) => m.rec.rolling!.bv!))];
   if (bvs.length > 1) {
-    jlog(`边录边传识别:多个节点各自建稿(${bvs.join(",")})→ 转人工(绝不自动重传,防重复投稿)`);
-    ledger.setState(streamKey, "needs_manual", { error: `边录边传:多节点各建稿(${bvs.join(",")}),请人工核对删重复稿` });
-    o.notify({ kind: "error", stage: "上传", message: `${streamKey} 边录边传:多节点各建稿,已转人工核对` });
+    // 区分根因:同一节点上的多个会话各自建稿(并列稿件)vs 不同节点各建稿。稿件号只进日志/通知,不进仓库。
+    const perNode = new Map<string, Set<string>>();
+    for (const m of rolled) (perNode.get(m.workerId) ?? perNode.set(m.workerId, new Set()).get(m.workerId)!).add(m.rec.rolling!.bv!);
+    const sameNode = [...perNode.entries()].filter(([, set]) => set.size > 1);
+    const list = bvs.join(",");
+    const why = sameNode.length > 0
+      ? `同节点多会话各自建稿(${sameNode.map(([w, set]) => `${w}:${[...set].join("/")}`).join(";")}),稿件并列`
+      : `多节点各建稿(${list})`;
+    jlog(`边录边传识别:${why} → 转人工(绝不自动重传,防重复投稿)`);
+    ledger.setState(streamKey, "needs_manual", { error: `边录边传:${why},请人工核对合并或删重复稿` });
+    o.notify({ kind: "error", stage: "上传", message: `${streamKey} 边录边传:${why},已转人工核对` });
     return { state: "needs_manual" };
   }
   const bv = bvs[0];
@@ -497,7 +520,12 @@ export function tryRollingShortCircuit(o: {
     return { state: "needs_manual", bv };
   }
   // 磁盘上仍剩分段 = 进程在 onSessionEnd 前被杀(确认段会被删,故「还剩 ts」= 未确认)→ 丢片风险,转人工。
-  const residual = rolled.flatMap((m) => m.rec.tsFiles);
+  // 同节点上**无稿件号**的成员(如同节点后一个会话尚未开始上传)的视频也算未确认:它们不在该 BV 里,
+  // 不计入 → 静默 done 会丢整个会话。其它节点的无稿件号成员是冗余录像,保持原口径不计。
+  const rolledNodes = new Set(rolled.map((m) => m.workerId));
+  const residual = members
+    .filter((m) => m.rec.rolling?.bv || rolledNodes.has(m.workerId))
+    .flatMap((m) => m.rec.tsFiles);
   if (residual.length > 0) {
     jlog(`边录边传识别:BV=${bv} 但磁盘仍剩 ${residual.length} 个未确认分段 → 转人工(不静默 done,防丢片)`);
     ledger.setState(streamKey, "needs_manual", { error: `边录边传:BV=${bv} 仍有 ${residual.length} 个未确认分段,请人工核对补传` });
@@ -515,7 +543,45 @@ export function tryRollingShortCircuit(o: {
   ledger.setBv(streamKey, bv);
   ledger.markDone(streamKey, bv);
   o.notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+  // 回读核验(#57 R1 观察期):只记日志,不阻塞、不转人工、不影响 done。fire-and-forget,任何异常吞掉。
+  const confirmed = new Set(rolled.flatMap((m) => m.rec.rolling?.confirmed ?? []));
+  if (o.countParts && confirmed.size > 0) {
+    void readbackRollingParts(o.countParts, bv, confirmed.size, streamKey, jlog);
+  }
   return { state: "done", bv };
+}
+
+/** 无稿件号、但留有建稿意图(create)或不确定段 = 建稿可能已提交而稿件号丢失。 */
+function rollingUnsettledWithoutBv(r: NodeRecording["rolling"]): boolean {
+  if (!r || r.bv) return false;
+  return r.uploading?.kind === "create" || (r.ambiguous?.length ?? 0) > 0;
+}
+
+function describeUnsettled(r: NonNullable<NodeRecording["rolling"]>): string {
+  const parts: string[] = [];
+  if (r.uploading?.kind === "create") parts.push(`建稿中 段${r.uploading.index}`);
+  if (r.ambiguous?.length) parts.push(`不确定段 ${r.ambiguous.join(",")}`);
+  return parts.join(" + ");
+}
+
+/** rolling 收口 done 后读回稿件分 P 数与已确认段数对照,**仅**写 job.log。 */
+async function readbackRollingParts(
+  countParts: (bv: string) => Promise<number | null>,
+  bv: string,
+  expected: number,
+  streamKey: string,
+  jlog: (m: string) => void,
+): Promise<void> {
+  try {
+    const v = verifyParts(expected, await countParts(bv));
+    const msg = v.kind === "ok" ? `分 P 数与已确认段数一致(${v.actual})`
+      : v.kind === "mismatch" ? `分 P 数不符:已确认 ${v.expected} 段、稿件实际 ${v.actual}(观察期仅记录,未阻塞)`
+      : v.kind === "unknown" ? `读取分 P 数失败(${v.reason}),未核验`
+      : `跳过核验(${v.reason})`;
+    jlog(`边录边传回读核验 ${streamKey} BV=${bv}: ${msg}`);
+  } catch (e) {
+    jlog(`边录边传回读核验 ${streamKey} BV=${bv}: 异常(${String((e as Error)?.message ?? e)}),未核验`);
+  }
 }
 
 /**
@@ -610,7 +676,8 @@ async function runPipelineInner(
     const tp = transports.get(m.workerId);
     // 边录边传(T-33):已建稿(rolling.bv)且 tsFiles 已被删空的成员 —— 文件「不存在」是**预期**的,
     // 不能按「已归档」剔除,否则 rolling 短路看不到它(漏收口)。只认「有 tsFiles 但确实缺失」为剔除。
-    if (m.rec.rolling?.bv && m.rec.tsFiles.length === 0) {
+    // 无稿件号但留有建稿意图/不确定段的成员也必须保留:剔除会让 rolling 短路看不到它 → 误走常规管线重复建稿。
+    if ((m.rec.rolling?.bv && m.rec.tsFiles.length === 0) || rollingUnsettledWithoutBv(m.rec.rolling)) {
       presentMembers.push(m);
       continue;
     }
@@ -627,7 +694,7 @@ async function runPipelineInner(
   // 该会话由录制节点边录边传(`{base}.rolling.json` 带 bv)。master 若再走 pull→merge→upload
   // 就是**重复投稿**(B 站不可逆)。这里**最早**短路(在 selectWinner/覆盖率判定之前)——因为段可能
   // 已被节点删掉,覆盖率会失真(误报「未录全」),不能靠下游判定。
-  const rollingShort = tryRollingShortCircuit({ streamKey, cfg, members: presentMembers, ledger, notify, transports, jlog });
+  const rollingShort = tryRollingShortCircuit({ streamKey, cfg, members: presentMembers, ledger, notify, transports, jlog, countParts: deps.countParts });
   if (rollingShort) return rollingShort;
 
   // Select the best recording across all (present) nodes

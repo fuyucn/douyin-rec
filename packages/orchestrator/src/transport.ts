@@ -26,7 +26,19 @@ export interface NodeRecording {
    * 建稿/append 的分 P 与 BV。存在 = master **不得重复建稿**(否则重复投稿)。
    * 缺省 undefined = 未启用边录边传 / 老录像。
    */
-  rolling?: { bv?: string; confirmed?: number[]; ambiguous?: number[] };
+  rolling?: NodeRollingProgress;
+}
+
+/**
+ * 边录边传进度(`{base}.rolling.json` 的主控可见投影)。`uploading` 是 WAL 意图标记:
+ * 开始建稿/追加前先落盘,进程被杀后残留 = 「建稿/追加到一半、结果未知」。
+ * 旧节点 bundle 的清单没有该字段 → 一律按缺省(undefined)处理,不得当成「无意图已完成」之外的任何事。
+ */
+export interface NodeRollingProgress {
+  bv?: string;
+  confirmed?: number[];
+  ambiguous?: number[];
+  uploading?: { index: number; kind: "create" | "append" };
 }
 export interface NodeInventory { workerId: string; recordings: NodeRecording[]; }
 
