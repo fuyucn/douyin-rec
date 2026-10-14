@@ -4,6 +4,17 @@
 用法:
     python3 scripts/issue-guard.py <body-file> [more-files ...]
     gh issue view 12 --json body -q .body | python3 scripts/issue-guard.py -
+    python3 scripts/issue-guard.py --diff origin/feat/hub-optimization   # 只扫 PR 新增行(CI 用)
+
+--diff <base> 模式:对 `git diff -U0 <base>...HEAD` 只扫**新增行**(历史内容不会把 CI 卡红)。
+规则与上面一致,额外三条约定(只为让源码里的正常引用不误报,隐私向的规则不放松):
+  - 源码类文件(.ts/.tsx/.mjs/.js/.py/.sh/.yml/.yaml/.json)的新增行不套「文件名」「凭证类」
+    「主机名」「streamKey」四条语义词规则(代码和测试夹具里写 foo.ts / cookie / vps2 /
+    douyin:xxx 是这个仓库的日常);房间号长数字 / BV / IP / 本机路径仍然拦。
+  - 文档等非源码文件全规则生效,但「文件名」命中的名字若是仓库已跟踪文件的 basename
+    (`git ls-files`,即源码/文档文件名)视为源码文件名放行;录像/字幕/产物类文件名
+    (仓库里不存在的)仍然拦。
+  - 行内含 `issue-guard: allow` 标记的新增行整行跳过(确属测试夹具/假数据时用,须在评审中说明)。
 
 命中任何规则就打印行号和命中的片段，并以非 0 退出 —— 不要带着这些内容
 `gh issue create`。issue 正文和评论都要过一遍，评论是事后补的，最容易漏。
@@ -12,8 +23,20 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
+
+CODE_SUFFIXES = (".ts", ".tsx", ".mjs", ".js", ".py", ".sh", ".yml", ".yaml", ".json")
+ALLOW_MARK = "issue-guard: allow"
+FILENAME_RULE = "文件名"
+# 源码里是语义词/夹具、不是泄露的规则:--diff 模式下对源码类文件不生效。
+CODE_SKIP_RULES = {FILENAME_RULE, "主机名", "streamKey", "cookie/webhook"}
+
+
+def tracked_basenames() -> set[str]:
+    proc = subprocess.run(["git", "ls-files"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return {Path(f).name for f in proc.stdout.splitlines()} if proc.returncode == 0 else set()
 
 # (名字, 正则, 说明)。宁可变红让人确认，也不要默认放过。
 RULES: list[tuple[str, str, str]] = [
@@ -40,10 +63,63 @@ def scan(text: str, source: str) -> list[str]:
     return hits
 
 
+def added_lines(base: str) -> list[tuple[str, int, str]]:
+    """解析 `git diff -U0 <base>...HEAD`,返回 (文件, 新文件行号, 行内容) 的新增行。"""
+    proc = subprocess.run(
+        ["git", "diff", "-U0", "--no-color", "--no-ext-diff", f"{base}...HEAD"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if proc.returncode != 0:
+        print(f"git diff 失败(base={base!r}): {proc.stderr.strip()}", file=sys.stderr)
+        raise SystemExit(2)
+    out: list[tuple[str, int, str]] = []
+    path, lineno = "", 0
+    for raw in proc.stdout.splitlines():
+        if raw.startswith("+++ "):
+            path = raw[4:].removeprefix("b/") if raw != "+++ /dev/null" else ""
+        elif raw.startswith("@@"):
+            m = re.search(r"\+(\d+)", raw)
+            lineno = int(m.group(1)) if m else 0
+        elif raw.startswith("+") and not raw.startswith("+++") and path:
+            out.append((path, lineno, raw[1:]))
+            lineno += 1
+    return out
+
+
+def scan_diff(base: str) -> list[str]:
+    hits: list[str] = []
+    known = tracked_basenames()
+    for path, lineno, line in added_lines(base):
+        if ALLOW_MARK in line:
+            continue
+        is_code = path.endswith(CODE_SUFFIXES)
+        for name, pattern, why in RULES:
+            if is_code and name in CODE_SKIP_RULES:
+                continue
+            for match in re.finditer(pattern, line):
+                if name == FILENAME_RULE and Path(match.group(0)).name in known:
+                    continue
+                hits.append(f"{path}:{lineno}: [{name}] {why} -> {match.group(0)!r}")
+    return hits
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(__doc__, file=sys.stderr)
         return 2
+
+    if argv[0] == "--diff":
+        if len(argv) != 2:
+            print("用法: issue-guard.py --diff <base>", file=sys.stderr)
+            return 2
+        diff_hits = scan_diff(argv[1])
+        if diff_hits:
+            print("diff 新增行发现疑似隐私，先脱敏再提交：", file=sys.stderr)
+            for hit in diff_hits:
+                print("  " + hit, file=sys.stderr)
+            return 1
+        print("diff 新增行未发现疑似隐私。")
+        return 0
 
     all_hits: list[str] = []
     for arg in argv:
