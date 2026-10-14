@@ -159,6 +159,34 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
 不占并行位）；部署后实跑，再由实现心跳按「四不 close」收口。
 **部署仍由人做**（走 `recording===true` guard）。review agent 只合并并转标签，不改代码、不部署、不 close。
 
+## 循环工具（审查第 0 步与状态迁移唯一入口）
+
+issue #78 起，循环里的「状态变更」和「审查前检查」不再靠提示词散文，统一走仓库内可测的脚本：
+
+| 工具 | 用途 | 谁调 |
+| --- | --- | --- |
+| `scripts/issue-state.py <issue> <to> [--reason-file F]` + `scripts/issue-state.json` | **状态标签迁移的唯一入口**：状态标签唯一化（一次删光旧状态标签再加新标签）、按迁移表校验合法性、评论先过 `issue-guard.py`、评论末行带机器可读标记 | 所有心跳；**禁止直接 `gh issue edit` 改状态标签** |
+| `.github/pull_request_template.md` | PR 硬字段：`Fixes #N`、改动范围、验证方式、自审五项、变异验证（撤修复 FAIL + 复原 PASS 两段输出）、验证命令与输出、评论采纳、回写位置、残余风险、版本 | 实现 agent 开 PR 时按模板填 |
+| `scripts/pr-gate.py <PR>` | **审查第 0 步**：机械检查模板字段齐全、变异两段、版本声明、正文过隐私闸门；缺项输出清单、退出码非 0 | review 心跳，派 Opus 之前 |
+| `scripts/reinforce-metrics.py --loop --days N` | 只读 PR 流程指标：返工率与打回轮数分布、逃逸率（合并 48h 内同根因新 incident，按标题关键词粗匹）、`待验证` 停留时长、台账 `[ledger] 拒绝` 计数（`--ledger-log` / `--ledger-container`，日志不可得则标注跳过）；无 gh / 无网络时降级 | 巡检与周报，纯文本表可直接贴 loop 通知 |
+
+**状态集**：(无) / `accept` / `in-progress` / `in-review` / `rework-1` / `rework-2` / `待验证` / `needs-decision` / `decline` / `blocked`，同一时刻最多一个。新标签 `in-review`、`rework-1`、`rework-2` 用 `issue-state.py --ensure-labels` 补建。
+
+**合法迁移**（唯一真相 = `scripts/issue-state.json`，改表必须同步改本文）：
+
+- `accept → in-progress`（认领）→ `in-review`（PR 已开）→ PASS：`待验证` ｜ FAIL：`rework-1` → `in-review` → 再 FAIL：`rework-2` → `in-review` → 再 FAIL：`needs-decision`。
+- `待验证 → closed`（实现侧收口）。
+- 任意活跃状态 → `needs-decision` / `blocked`；`needs-decision` 由人改回 `accept` / `decline`。
+- 非法迁移（如 `accept → 待验证`、跳过 `in-review`）退出码 1，不发任何远端写调用；当前同时挂多个状态标签时退出码 3，须 `--from <真实状态>` 指明后才会清理。
+- `needs-decision` 的评论必须带「决定三行」（脚本校验）；`rework-N` / `decline` / `blocked` / `closed` 必须带 `--reason-file`。
+- **close 只归实现侧**：`issue-state.py <N> closed --close --reason-file F`，默认 `--role impl`；`--role review` 调 close 会被拒。review 心跳永远不调 close。
+
+**心跳将引用这些工具（本 PR 不改 automations 文件，由人在合并后改提示词）**：
+
+1. 实现心跳：认领、开 PR、返工、收口里所有标签变化改为调 `issue-state.py`（认领 `in-progress`、开 PR 后 `in-review`、打回后回到 `in-review`、收口 `closed --close`）；PR 正文按模板填。
+2. review 心跳：每个 open PR 先跑 `scripts/pr-gate.py <PR>`；**缺项不派 Opus、直接 `issue-state.py <N> rework-N` 打回并把缺项清单贴到 PR**；通过才进入上文 review 门禁 1–9；结论经 `issue-state.py` 转 `待验证` 或 `rework-N`，不 close。
+3. 巡检/周报：附 `reinforce-metrics.py --loop --days 7` 的输出。
+
 ## 指标与闭环回写
 
 五环的「可衡量」由 `scripts/reinforce-metrics.py` 承担（默认只读，`--write` 才落
