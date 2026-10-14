@@ -909,7 +909,7 @@ const hubStarter: HubStarter = {
         }),
       // T11 核验接缝:取该稿件在 B站的**实际分 P 数**。核验的期望值来自上传时写下的
       // sync_parts 检查点(实际提交了几段),不用「文件大小上界」—— 那是评审明确否决的做法。
-      // 缺省不注入 = 核验关闭;这里注入 = 上传完成后比对,不符则**保留源文件**并标记待人工。
+      // 缺省不注入 = 不做旁路校验;这里注入 = 上传确认后延迟回读分 P 数,**只记录/告警,不影响清理**(issue #92)。
       // cookies 用 hubCfg.cookies(与 appendGroup 同源;per-job override 已在 pipeline 内传下去)。
       countParts: (bv: string) => countVideoParts(bv, hubCfg.cookies ?? ""),
       // 旁路校验延迟(issue #92):上传确认后多久回读分 P 数;只记录/告警,不影响清理。缺省 10 分钟。

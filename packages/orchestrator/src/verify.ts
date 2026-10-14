@@ -282,10 +282,10 @@ export function verifyAllowsCleanup(r: VerifyResult): boolean {
 /** 统一措辞(单一真理源:pipeline 与 reconciler 都调它,不在两处各写一份)。 */
 export function verifyMessage(r: VerifyResult, streamKey: string, bv: string): string {
   switch (r.kind) {
-    case "ok": return `${streamKey} 产物核验通过(${r.actual} 个分 P),已删源`;
-    case "skipped": return `${streamKey} 跳过产物核验(${r.reason}),按现状清理`;
+    case "ok": return `${streamKey} 产物核验通过(${r.actual} 个分 P)`;
+    case "skipped": return `${streamKey} 跳过产物核验(${r.reason})`;
     case "mismatch":
-      return `${streamKey} 分 P 数不符:期望 ${r.expected} 实际 ${r.actual}(bv=${bv}) —— 已保留全部源,请人工核对`;
-    case "unknown": return `${streamKey} 产物核验待重试:${r.reason}`;
+      return `${streamKey} 分 P 数不符:期望 ${r.expected} 实际 ${r.actual}(bv=${bv}) —— 请人工核对`;
+    case "unknown": return `${streamKey} 产物核验未得出结论:${r.reason}`;
   }
 }

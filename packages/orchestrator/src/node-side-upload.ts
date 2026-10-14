@@ -20,7 +20,7 @@
  */
 import { resolveDiskMinGB, type NodePipelineSpec } from "@drec/core";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { cleanupSourcesShared, defaultRmStage, scheduleSideCheck, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, defaultRmStage, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import type { Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
 
@@ -152,11 +152,7 @@ async function finalizeNodeSuccess(
     jlog(`节点侧收尾清理部分失败(${cleanOutcome.failed.length}):`
       + `${cleanOutcome.failed.map((f) => f.target).join(",")}(已记 clean_source failed,待 reconciler 补跑)`);
   }
-  // 旁路校验(issue #92):延迟回读分 P 数,只记录/告警,不影响上面的清理结果。
-  scheduleSideCheck({
-    deps: o.deps, streamKey, bv, log: jlog, notify: o.notify,
-    on: { plain: true, danmu: false, livechat: false },
-  });
+  // 注意:节点侧路径从不写 sync_parts 基线,回读分 P 数无从比对,故这里**不排**旁路校验(issue #92)。
   return { state: "done", bv };
 }
 
@@ -263,6 +259,9 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
  * 执行节点侧上传。返回非 null = 已由节点完成(调用方直接 return);
  * 返回 null = **回落现状**(能力不足等),调用方继续走 pull 回 master 的常规路径。
  */
+/** 已 done 场的「节点源需人工清理」提示去重(进程内,每场一次)。 */
+const doneGuardNotified = new Set<string>();
+
 export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state: JobState; bv?: string } | null> {
   const { streamKey, cfg, winner, winnerMembers, transport, ledger, jlog, notify } = o;
 
@@ -273,7 +272,13 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
     // 本场已 done(收尾补跑再次进入):上传早已成功,这里只是被补跑路径带进来。静默返回 done ——
     // 转人工会被台账拒绝(done 无出边),却仍每轮发一条「已建稿,请人工核对」告警(issue #92)。
     if (ledger.get(streamKey)?.state === "done") {
-      jlog(`节点侧上传跳过:本场已 done 且已建稿(bv=${existingBv}),不重复投稿、不告警`);
+      jlog(`节点侧上传跳过:本场已 done 且已建稿(bv=${existingBv}),不重复投稿`);
+      // 能走到这里的 done 场 = 节点源清理失败(clean_source=failed)后被补跑带进来;节点侧模式下补跑清不了源。
+      // 每个进程每场只提示一次(此前每轮补跑都发一条「已建稿,请人工核对」= 刷屏),让人知道需手动清源。
+      if (!doneGuardNotified.has(streamKey)) {
+        doneGuardNotified.add(streamKey);
+        notify({ kind: "error", stage: "上传", message: `${streamKey} 已上传完成(bv=${existingBv}),但节点源录像清理未成功且补跑无法自动清理,请人工清理源录像(本进程仅提示一次)` });
+      }
       return { state: "done", bv: existingBv };
     }
     jlog(`节点侧上传跳过:本场已建稿(bv=${existingBv}),绝不重复投稿 → 转人工核对`);

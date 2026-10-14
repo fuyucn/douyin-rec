@@ -50,7 +50,7 @@ export const videoOnly = (paths: string[]): string[] => paths.filter((p) => !/\.
  * stage 目录顶层的「视频类内容」(`.ts/.flv/.mp4` + `.work/` `.upload/` 中间产物目录)。
  * 用于 `stageAfterDone` 的整场清空:拉回的源段副本(本机胜出时是硬链接)、续跑残留、中间产物都在其中。
  * **绝不包含** `.xml/.ass/.session.json/job.log`;只看顶层、不递归未知目录;不返回 stageSub 本身。
- * 调用方必须自己保证「整稿核验通过 + 有稿件号」(见 finalizeAfterUpload 的 stageCleanConfirmed)。
+ * 调用方必须自己保证「上传已确认 + 有稿件号」(见 finalizeAfterUpload 的 stageCleanConfirmed)。
  */
 export function stageVideoLeftovers(stageSub: string): string[] {
   const out: string[] = [];
@@ -328,7 +328,7 @@ export async function cleanupSourcesShared(o: {
  */
 /**
  * **只清理**收口(T12 补跑专用):该场已 done、stage 产物已被清空,再跑一遍上传流程毫无意义
- * 且危险(可能重复投稿)。这里只做两件事:核验(有基线才核)+ 删源。
+ * 且危险(可能重复投稿)。这里只做收尾:按配置删源,并走一遍统一收口(含延迟的旁路校验)。
  *
  * 返回值恒为 done —— 上传早已成功,清理结果不该把它降级。
  */
@@ -353,7 +353,7 @@ export async function finalizeOnly(
     }),
     on: { plain: true, danmu: burnFlags(cfg.steps).burnDanmu, livechat: burnFlags(cfg.steps).burnLivechat },
   });
-  // 收尾补跑:此前因核验未过而留下的 stage 视频类内容,在核验通过后补清(同一口径)。
+  // 收尾补跑:此前未清干净的 stage 视频类内容在这里补清(同一口径)。
   if (cfg.cleanup?.stageAfterDone && fin.stageCleanConfirmed) {
     const left = stageVideoLeftovers(stageSub);
     if (left.length > 0) {
@@ -383,6 +383,10 @@ export const DEFAULT_SIDE_CHECK_DELAY_MS = 10 * 60_000;
  * 定时器只在内存里:进程重启则丢这一次校验——它只是旁路观察,丢了不影响任何数据。
  * 任何异常一律吞掉(只记日志):旁路绝不能把主线搞挂。
  */
+/** 本进程已排过旁路校验的场(收尾补跑会重复走到收口,不能每次都排一遍 → 重复告警)。有界,超限丢最旧。 */
+const sideCheckScheduled = new Set<string>();
+const SIDE_CHECK_MEMO_MAX = 2000;
+
 export function scheduleSideCheck(o: {
   deps: PipelineDeps;
   streamKey: string;
@@ -393,6 +397,10 @@ export function scheduleSideCheck(o: {
 }): void {
   const { deps, streamKey, bv, on, log } = o;
   if (!deps.countParts || !bv) return;
+  const memo = `${streamKey}|${bv}`;
+  if (sideCheckScheduled.has(memo)) return;
+  sideCheckScheduled.add(memo);
+  if (sideCheckScheduled.size > SIDE_CHECK_MEMO_MAX) sideCheckScheduled.delete(sideCheckScheduled.values().next().value as string);
   const run = async (): Promise<void> => {
     try {
       const v = await verifyUploaded(deps.ledger, streamKey, bv, on, deps.countParts,

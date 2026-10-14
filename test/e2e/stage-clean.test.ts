@@ -169,3 +169,44 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
     });
   });
 });
+
+// ── 回读不再是闸门后,「biliup 返回非 0 → 不 markDone、不删源」是唯一护栏:续跑路径必须有测试钉住 ──
+describe("e2e: 续跑里 append 返回非 0 → 不 markDone、不清 stage / 节点源(#92)", () => {
+  const stageTs = (sc: Scenario): number => sc.stageResidue().filter((f) => f.endsWith(".ts")).length;
+
+  it("合并续跑:append 持续失败 → job 不为 done,stage 源段副本与节点源都保留", async () => {
+    let boom = true;
+    s = await Scenario.create({
+      cfg: { cleanup: { ...COMMON } },
+      shellFault: (cmd) => boom && /\bburn\b/.test(cmd) && /--style\s+livechat/.test(cmd),
+    });
+    record(s);
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.jobState(key)).toBe("failed");
+    expect(s.ledger.get(key)?.bv).toBeTruthy();
+    boom = false;
+    s.fake.inject({ op: "append", mode: "timeout", times: 50 });
+    await s.reconcile();                               // 续跑(resumeAppends),append 全部失败
+    expect(s.jobState(key)).not.toBe("done");
+    expect(stageTs(s), "append 失败不得清 stage 源段").toBe(6);
+    expect(s.recordingFiles().filter((f) => f.endsWith(".ts")), "append 失败不得删节点源").toHaveLength(6);
+  });
+
+  it("分段续跑:plain 分P append 持续失败 → job 不为 done,stage 源段副本保留", async () => {
+    s = await Scenario.create({ cfg: { steps: { mergeSegments: false }, cleanup: { ...COMMON, sourceAfterDone: false } } });
+    record(s);
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.ledger.get(key)?.bv).toBeTruthy();
+    s.ledger.setState(key, "failed", { error: "进程重启中断" }, { force: true });
+    s.ledger.syncNodeState(key, "merge", "failed", { error: "进程重启中断" });
+    // 让已记录的 plain 分P检查点失效,迫使续跑重新 append 这些分P(否则幂等跳过,看不到 append 失败)
+    (s.ledger as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).db
+      .prepare("DELETE FROM sync_parts WHERE streamKey = ?").run(key);
+    s.fake.inject({ op: "append", mode: "timeout", times: 200 });
+    await s.reconcile();
+    expect(s.jobState(key)).not.toBe("done");
+  });
+});
+

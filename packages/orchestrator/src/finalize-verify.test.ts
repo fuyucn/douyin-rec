@@ -25,7 +25,10 @@ function fakeLedger(parts: Record<string, number[]>) {
 
 const ALL_ON = { plain: true, danmu: true, livechat: true };
 
+let seq = 0;
 interface Harness {
+  /** 每个 harness 独立的 streamKey(旁路校验按 streamKey 去重,不能跨用例串)。 */
+  key: string;
   deps: Parameters<typeof finalizeAfterUpload>[0]["deps"];
   countCalls: () => number;
   scheduled: Array<{ fn: () => void; ms: number }>;
@@ -47,13 +50,13 @@ function harness(ledger: SyncLedger, actual: number | null | "throw" | "no-count
       return actual;
     };
   }
-  return { deps: d as unknown as Harness["deps"], countCalls: () => n, scheduled };
+  return { key: `k${++seq}`, deps: d as unknown as Harness["deps"], countCalls: () => n, scheduled };
 }
 
 async function run(h: Harness, notify: (e: unknown) => void = () => {}) {
   let cleaned = 0;
   const r = await finalizeAfterUpload({
-    streamKey: "k", bv: "BV1", deps: h.deps, log: () => {},
+    streamKey: h.key, bv: "BV1", deps: h.deps, log: () => {},
     cleanupSources: async () => { cleaned++; return { ok: true, failed: [] }; },
     on: ALL_ON,
     notify: notify as never,
@@ -114,6 +117,15 @@ describe("旁路校验:延迟回读,只记录/告警(#92)", () => {
     expect(h2.scheduled[0].ms).toBe(42);
   });
 
+  it("同一场多次走到收口(收尾补跑)→ 只排一次旁路校验,不重复告警", async () => {
+    const { ledger } = fakeLedger({ plain: [0, 1, 2] });
+    const h = harness(ledger, 1);
+    await run(h);
+    await run(h);
+    await run(h);
+    expect(h.scheduled).toHaveLength(1);
+  });
+
   it("未注入分 P 查询 → 不排旁路校验", async () => {
     const { ledger } = fakeLedger({ plain: [0, 1, 2] });
     const h = harness(ledger, "no-count");
@@ -137,6 +149,10 @@ describe("旁路校验:延迟回读,只记录/告警(#92)", () => {
     expect(step?.detail).toContain("仅记录");
     expect(calls.setState).toHaveLength(0);
     expect(cleaned()).toBe(1); // 旁路不触发第二次清理
+    // 旁路校验不得改节点表:不能把 clean_* 标 failed(会触发收尾补跑重入)、不能留 pending
+    const after = calls.nodeState.slice(1); // [0] 是收口时写的 clean_verify=done
+    expect(after.filter((n) => n.node !== "clean_verify")).toEqual([]);
+    expect(after.every((n) => n.state === "done")).toBe(true);
   });
 
   it("到点回读一致 → 只记日志,不告警", async () => {

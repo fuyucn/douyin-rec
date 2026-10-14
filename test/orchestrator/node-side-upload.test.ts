@@ -548,14 +548,18 @@ describe("tryNodeSideUpload:已建稿护栏 / 旁路校验(issue #92)", () => {
     deps: deps as never,
   });
 
-  it("本场已 done 且已建稿(收尾补跑再次进入)→ 静默返回 done:不重复投稿、不告警、不改台账状态", async () => {
+  it("本场已 done 且已建稿(收尾补跑再次进入)→ 返回 done:不重复投稿、不改台账状态;每场只提示一次「需人工清源」", async () => {
     const setState = vi.fn();
     const ledger = { get: () => ({ bv: "BV1OLD", state: "done" }), setState, logStep: vi.fn(), syncNodeState: vi.fn() };
     const notify = vi.fn();
     const t = fakeTransport();
-    const r = await tryNodeSideUpload(args(ledger, notify, fakeDeps({ id: "w1" }), t));
-    expect(r).toEqual({ state: "done", bv: "BV1OLD" });
-    expect(notify).not.toHaveBeenCalled();
+    const a = { ...args(ledger, notify, fakeDeps({ id: "w1" }), t), streamKey: "douyin:777:2026-10-14" };
+    for (let i = 0; i < 4; i++) {
+      const r = await tryNodeSideUpload(a);
+      expect(r).toEqual({ state: "done", bv: "BV1OLD" });
+    }
+    expect(notify).toHaveBeenCalledTimes(1);                                     // 去重:4 次补跑只提示一次
+    expect(String((notify.mock.calls[0][0] as { message: string }).message)).toContain("人工清理");
     expect(setState).not.toHaveBeenCalled();
     expect(t.nodePipeline).not.toHaveBeenCalled(); // 绝不重新上传
   });
@@ -572,7 +576,7 @@ describe("tryNodeSideUpload:已建稿护栏 / 旁路校验(issue #92)", () => {
     expect(t.nodePipeline).not.toHaveBeenCalled();
   });
 
-  it("节点侧上传成功(返回 ok)→ 照常删节点源,并排一次延迟的旁路校验(默认 10 分钟)", async () => {
+  it("节点侧上传成功(返回 ok)→ 立刻按配置删节点源;节点侧无 sync_parts 基线,不排旁路校验", async () => {
     const ledger = { get: () => ({ bv: "" }), logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), doneParts: () => new Set<number>() };
     const t = fakeTransport();
     const scheduled: number[] = [];
@@ -584,6 +588,6 @@ describe("tryNodeSideUpload:已建稿护栏 / 旁路校验(issue #92)", () => {
     const r = await tryNodeSideUpload({ ...args(ledger, vi.fn(), deps, t), cfg: { ...cfg, cleanup: { sourceAfterDone: true } } as never });
     expect(r?.state).toBe("done");
     expect(t.cleanup).toHaveBeenCalled();     // 返回码 0 即成功:立刻按配置删源
-    expect(scheduled).toEqual([600_000]);     // 旁路校验延迟 10 分钟
+    expect(scheduled).toEqual([]);            // 无基线,回读无从比对,不排
   });
 });
