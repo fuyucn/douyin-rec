@@ -270,11 +270,13 @@ export class SshTransport implements Transport {
    * spec 经 base64 传递(含 cookie,只走可信 ssh 通道,与 `_apply-tasks` 同一路径)。
    * 录像**不回传 master** —— 这正是省掉 rsync 的关键。
    */
-  async nodePipeline(spec: NodePipelineSpec): Promise<NodePipelineResult> {
+  async nodePipeline(spec: NodePipelineSpec, opts?: { timeoutMs?: number }): Promise<NodePipelineResult> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const b64 = Buffer.from(JSON.stringify(spec), "utf-8").toString("base64");
     // 用 runLong:上传整场录像远超默认 45s 预算(见 SshOpts.nodePipelineTimeoutMs)。
-    const out = await this.runLong([`${nodePrefix} _node-pipeline ${this.o.dataRoot} ${b64}`]);
+    // 调用方按场次字节数估算的超时(issue #25 ①)优先;注入的 run(测试)不受影响。
+    const argv = [`${nodePrefix} _node-pipeline ${this.o.dataRoot} ${b64}`];
+    const out = opts?.timeoutMs && !this.o.run ? await defaultRun(this.o.host, opts.timeoutMs)(argv) : await this.runLong(argv);
     const parsed = JSON.parse(out) as Partial<NodePipelineResult>;
     return {
       ok: parsed.ok === true,

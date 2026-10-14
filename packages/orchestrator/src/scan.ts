@@ -1,6 +1,6 @@
 // packages/orchestrator/src/scan.ts
 // 共享录像扫描函数：被 LocalTransport 和 _inventory CLI 子命令复用。
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { groupSessions } from "@drec/post-process";
 import type { NodeRecording, NodeRollingProgress } from "./transport.js";
@@ -131,7 +131,9 @@ export async function scanRecordings(
       // 同理:无 ts、无 bv,但留有建稿意图/不确定段 → 也要产出,主控才能转人工而不是装作没这场。
       if (!g.ts.length && !rolling?.bv && !rolling?.uploading && !rolling?.ambiguous?.length) continue;
       let durationSec = 0, startMs = Infinity, endMs = 0;
+      let totalBytes = 0, bytesKnown = true;
       for (const f of g.ts) {
+        try { totalBytes += statSync(join(dir, f)).size; } catch { bytesKnown = false; }
         const p = await ffprobe(join(dir, f));
         durationSec += p.durationSec;
         startMs = Math.min(startMs, p.startMs);
@@ -157,6 +159,8 @@ export async function scanRecordings(
         // 弹幕条目数(0 = 仅表头的空 xml,或文件缺失)。选优据此避免选中「视频全但弹幕空」的节点。
         danmuCount: hasXml ? countDanmuEntries(xmlAbs) : 0,
         durationSec,
+        // 统计不全(某段 stat 失败)→ 不上报,调用方按未知处理,不拿偏小的数估超时。
+        ...(g.ts.length && bytesKnown ? { totalBytes } : {}),
         startMs: startMs === Infinity ? 0 : startMs,
         endMs,
         totalGapSec: sess.totalGapSec,

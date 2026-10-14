@@ -8,7 +8,7 @@
  * 与 master 常规路径的稿件标题产生漂移。故这里把三个渲染字段钉死。
  */
 import { describe, it, expect, vi } from "vitest";
-import { tryNodeSideUpload } from "../../packages/orchestrator/src/node-side-upload.js";
+import { tryNodeSideUpload, estimateNodeUploadTimeoutMs, NODE_UPLOAD_MIN_TIMEOUT_MS, NODE_UPLOAD_MAX_TIMEOUT_MS } from "../../packages/orchestrator/src/node-side-upload.js";
 import type { PipelineCfg } from "../../packages/orchestrator/src/pipeline.js";
 
 const cfg = {
@@ -643,5 +643,46 @@ describe("tryNodeSideUpload 成功收尾(issue #92)", () => {
     expect(r?.state).toBe("done");
     expect(t.cleanup).toHaveBeenCalled();     // 返回码 0 即成功:立刻按配置删源
     expect(scheduled).toEqual([]);            // 无基线,回读无从比对,不排
+  });
+});
+
+describe("estimateNodeUploadTimeoutMs(issue #25 ①:超时按字节估算)", () => {
+  const MIN = 30 * 60_000;
+  it("字节数未知 / 非法 → 回落下限 30 分钟(旧 bundle 清单不带字节数)", () => {
+    for (const v of [undefined, 0, -5, NaN, Infinity]) expect(estimateNodeUploadTimeoutMs(v as number)).toBe(MIN);
+    expect(NODE_UPLOAD_MIN_TIMEOUT_MS).toBe(MIN);
+  });
+  it("小场次不低于下限", () => {
+    expect(estimateNodeUploadTimeoutMs(100e6)).toBe(MIN);
+  });
+  it("线上出事的 2.4GB 多分 P 场次:预算 ≥ 60 分钟(固定 30 分钟必被杀)", () => {
+    expect(estimateNodeUploadTimeoutMs(2.4e9)).toBeGreaterThanOrEqual(60 * 60_000);
+  });
+  it("预算随字节单调增长,并封顶 6 小时", () => {
+    expect(estimateNodeUploadTimeoutMs(5e9)).toBeGreaterThan(estimateNodeUploadTimeoutMs(2.4e9));
+    expect(estimateNodeUploadTimeoutMs(1e12)).toBe(NODE_UPLOAD_MAX_TIMEOUT_MS);
+    expect(NODE_UPLOAD_MAX_TIMEOUT_MS).toBe(6 * 3_600_000);
+  });
+});
+
+describe("tryNodeSideUpload 按字节估算的超时下发给 transport", () => {
+  async function run(totalBytes: number | undefined) {
+    const t = {
+      nodeCapabilities: async () => ({ biliup: "/b", cookies: true, diskFreeGB: 100 }),
+      nodePipeline: vi.fn(async () => ({ ok: true, bv: "BV1T" })),
+      cleanup: vi.fn(async () => {}),
+    };
+    const rec = { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml", ...(totalBytes != null ? { totalBytes } : {}) };
+    await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12", cfg, winner: { workerId: "w1", rec }, winnerMembers: [{ workerId: "w1", rec }],
+      transport: t as never, ledger: fakeLedger(), jlog: () => {}, notify: () => {}, deps: fakeDeps(t),
+    });
+    return t.nodePipeline;
+  }
+  it("带字节数 → timeoutMs 按估算;不带 → 下限", async () => {
+    const big = await run(2.4e9);
+    expect(big).toHaveBeenCalledWith(expect.anything(), { timeoutMs: estimateNodeUploadTimeoutMs(2.4e9) });
+    const unknown = await run(undefined);
+    expect(unknown).toHaveBeenCalledWith(expect.anything(), { timeoutMs: 30 * 60_000 });
   });
 });
