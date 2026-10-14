@@ -3,8 +3,8 @@ import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { join, basename } from "node:path";
 import { linkOrCopy } from "@drec/core";
 import type { NodeTaskDTO, RemoteTaskSpec, NodeStatus } from "@drec/core";
-import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeTasks, Transport } from "./transport.js";
-import { scanRecordings } from "./scan.js";
+import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecordingStatus, NodeTasks, Transport } from "./transport.js";
+import { scanRecordings, scanRollingSessions } from "./scan.js";
 
 export interface LocalOpts {
   id: string;
@@ -76,6 +76,11 @@ export class LocalTransport implements Transport {
 
   async activeRecordingRooms(): Promise<ActiveRecordingRoom[]> {
     return this.o.activeRecordingRooms?.() ?? [];
+  }
+
+  async recordingStatus(): Promise<NodeRecordingStatus> {
+    const rooms = this.o.activeRecordingRooms?.() ?? [];
+    return { rooms, rolling: scanRollingSessions(this.o.recordingsDir, rooms) };
   }
 
   /** 轻量探针:recordings 目录存在即视为就绪(不扫内容)。 */

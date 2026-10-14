@@ -90,12 +90,20 @@ export function buildHubJobs(ctx: ApiCtx) {
           }
           return out;
         };
-        return { status: 200, body: buildQueueView(deps.syncDbPath, {
+        const view = buildQueueView(deps.syncDbPath, {
           anchorOf, disabledOf, pool: deps.poolSnapshot?.(),
           phase: phaseFilter, states: stateFilter, platform: opts.platform, q: opts.q,
           // sort 白名单:只认 newest / oldest,其它回落 newest(不静默改变语义)。
           sort: opts.sort === "oldest" ? "oldest" : "newest",
-        }) };
+        });
+        // 边录边传实时进度(F1):节点状态轮询的快照,补主播名;不受 phase/states 筛选影响,平台与关键字筛选照常生效。
+        const q = (opts.q ?? "").trim().toLowerCase();
+        const plats = csv(opts.platform);
+        const delivering = (deps.rollingDelivery?.() ?? [])
+          .map((d) => ({ ...d, anchorName: anchorOf(d.platform, d.roomSlug) }))
+          .filter((d) => plats.length === 0 || plats.includes(d.platform))
+          .filter((d) => !q || `${d.anchorName ?? ""} ${d.roomSlug} ${d.sessionBase} ${d.bv ?? ""}`.toLowerCase().includes(q));
+        return { status: 200, body: { ...view, delivering } };
       } catch (e) {
         return err(500, `读 hub 队列失败: ${String((e as Error)?.message ?? e)}`);
       }

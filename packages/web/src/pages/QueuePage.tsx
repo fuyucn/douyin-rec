@@ -11,7 +11,7 @@ import {
 import { useAtomValue } from "jotai";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO } from "../api/client";
+import { api, type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO, type RollingDeliveryDTO } from "../api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/HubJobs";
 import { roomId } from "../lib/labels";
@@ -46,6 +46,41 @@ function stepLabel(t: TFunc, step: string): string {
   const key = `hub.jobs.stepNode.${step}`;
   const label = t(key);
   return label === key ? step : label;
+}
+
+/**
+ * 边录边传实时进度(F1):节点自己建稿 / 追加 / 删源,master 要等收播后才建 job,
+ * 这段时间队列原本是空的。数据来自节点 5 秒状态轮询,只读。
+ */
+function DeliveringPanel({ items, now }: { items: RollingDeliveryDTO[]; now: number }): ReactNode {
+  const t = useT();
+  if (items.length === 0) return null;
+  return (
+    <div className="mb-5">
+      <div className="section-label mb-2.5">{t("queue.section.delivering")}</div>
+      <div className="space-y-2">
+        {items.map((d) => {
+          const sec = Math.max(0, Math.round((now - d.checkedAt) / 1000));
+          return (
+            <div key={`${d.workerId}:${d.sessionBase}`} className="card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+              <span className="font-medium">{d.anchorName ?? d.roomSlug}</span>
+              <span className="text-muted-soft font-mono text-[11px]">{d.workerName}</span>
+              <span className="text-muted">{d.recording ? t("queue.delivering.recording") : t("queue.delivering.ended")}</span>
+              <span className="font-mono text-[12px]">{t("queue.delivering.progress", { c: d.confirmed, n: d.total })}</span>
+              {d.uploading && <span>{t("queue.delivering.pending")}</span>}
+              {d.ambiguous > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.delivering.unknown")} {d.ambiguous}</span>}
+              {d.bv ? (
+                <a className="font-mono text-[11px] text-muted hover:text-ink" href={`https://www.bilibili.com/video/${d.bv}`} target="_blank" rel="noreferrer">{d.bv}</a>
+              ) : (
+                <span className="text-muted-soft text-[12px]">{t("queue.delivering.noBv")}</span>
+              )}
+              <span className="ml-auto text-muted-soft font-mono text-[11px]">{t("queue.delivering.updated", { s: sec })}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 /** 资源占用条:CPU / 上传窗口 / 冷却。 */
@@ -524,6 +559,7 @@ export function QueuePage(): ReactNode {
 
       <HubStreamBanner handle={stream} />
       {pool && <PoolBar pool={pool} />}
+      <DeliveringPanel items={data?.delivering ?? []} now={now} />
 
       {!loaded ? (
         <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>

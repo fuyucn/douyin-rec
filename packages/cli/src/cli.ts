@@ -28,7 +28,7 @@ import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
-import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type HubPoolSnapshotDTO } from "@drec/core";
+import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
@@ -596,6 +596,9 @@ let hubRunNow:
   | ((opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>)
   | undefined;
 let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
+/** 各节点边录边传的实时进度(F1;随 5 秒状态轮询整体替换,只读展示)。 */
+let hubDeliverySnapshot: RollingDeliveryDTO[] = [];
+const readRollingDelivery = (): RollingDeliveryDTO[] => hubDeliverySnapshot;
 const recordingSnapshotKey = (platform: string, roomSlug: string): string => `${platform}:${roomSlug}`;
 const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWorkerStatusDTO[] =>
   hubRecordingSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
@@ -627,6 +630,7 @@ const requestHubRunNow = async (
 const hubStarter: HubStarter = {
   requestSyncTasks: requestHubSync,
   recordingWorkers: readRecordingWorkers,
+  rollingDelivery: readRollingDelivery,
   poolSnapshot: readPoolSnapshot,
   retryNode: requestHubRetryNode,
   stopJob: requestHubStopJob,
@@ -764,9 +768,12 @@ const hubStarter: HubStarter = {
             const transport = statusTransports!.get(worker.id);
             if (!transport) throw new Error(`未注册的 worker transport: ${worker.id}`);
             if (!transport.activeRecordingRooms) throw new Error("worker 不支持录制状态查询");
-            return { worker, rooms: await transport.activeRecordingRooms(), error: null };
+            const st = transport.recordingStatus
+              ? await transport.recordingStatus()
+              : { rooms: await transport.activeRecordingRooms(), rolling: [] };
+            return { worker, rooms: st.rooms, rolling: st.rolling, error: null };
           } catch (e) {
-            return { worker, rooms: [], error: (e as Error).message };
+            return { worker, rooms: [], rolling: [], error: (e as Error).message };
           }
         }));
         const byWorker = new Map(results.map((r) => [r.worker.id, r]));
@@ -808,6 +815,15 @@ const hubStarter: HubStarter = {
         // `next` 每次从空 Map 重建,天然丢掉「源任务已删除/解绑」的房间,
         // 不需要也不能在遍历 hubRecordingSnapshot 时删它(会边迭代边改)。
         hubRecordingSnapshot = next;
+        // F1:边录边传进度。节点探测失败 → 该节点的进度整体丢弃(不展示陈旧数字冒充实时)。
+        hubDeliverySnapshot = results.flatMap((r) => r.error ? [] : r.rolling.map((s): RollingDeliveryDTO => ({
+          workerId: r.worker.id,
+          workerName: r.worker.name ?? r.worker.id,
+          platform: s.platform, roomSlug: s.roomSlug, anchorName: null,
+          sessionBase: s.sessionBase, bv: s.bv ?? null,
+          confirmed: s.confirmed, total: s.total, ambiguous: s.ambiguous,
+          uploading: s.uploading ?? null, recording: s.recording, checkedAt,
+        })));
       } catch (e) {
         opts.warn(`[hub] 刷新 worker 录制状态失败: ${(e as Error).message}`);
       } finally {
@@ -1520,8 +1536,16 @@ program
 program
   .command("_recording-status <dataRoot>", { hidden: true })
   .description("(内部) 输出当前正在录制的房间,供 master 控制台轮询")
-  .action((_dataRoot: string) => {
-    process.stdout.write(JSON.stringify({ rooms: scanRecordingRooms() }) + "\n");
+  .action(async (dataRoot: string) => {
+    const rooms = scanRecordingRooms();
+    // F1:同时带回边录边传的实时进度(只读 sidecar;失败不影响 rooms,旧 master 忽略多出的字段)。
+    let rolling: unknown[] = [];
+    try {
+      const { join: pathJoin } = await import("node:path");
+      const { scanRollingSessions } = await import("@drec/orchestrator");
+      rolling = scanRollingSessions(pathJoin(dataRoot, "recordings"), rooms);
+    } catch { /* 进度是附加信息,拿不到就空 */ }
+    process.stdout.write(JSON.stringify({ rooms, rolling }) + "\n");
   });
 
 // ─── _inventory <dataRoot>（隐藏子命令，供多节点编排 master 通过 SSH 调用）──────────

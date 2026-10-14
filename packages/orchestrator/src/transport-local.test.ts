@@ -170,3 +170,25 @@ describe("LocalTransport.pull", () => {
     expect(readFileSync(join(target, "a.ts"), "utf-8")).toBe("new-data");
   });
 });
+
+describe("LocalTransport.recordingStatus(F1)", () => {
+  it("在录房间来自注入,rolling 来自本机 recordings 目录的进度文件", async () => {
+    const root = mkdtempSync(join(tmpdir(), "loc-rs-"));
+    const dir = join(root, "A"); mkdirSync(dir);
+    writeFileSync(join(dir, "A_1.rolling.json"), JSON.stringify({ segments: [{ index: 0 }, { index: 1 }], confirmed: [0], bv: "BV1L", startMs: 9 }));
+    writeFileSync(join(dir, "A_1.session.json"), JSON.stringify({ roomSlug: "555", platform: "douyin" }));
+    const t = new LocalTransport({
+      id: "l", recordingsDir: root, taskRooms: {},
+      ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }),
+      activeRecordingRooms: () => [{ platform: "douyin", roomSlug: "555" }],
+    });
+    const st = await t.recordingStatus();
+    expect(st.rooms).toEqual([{ platform: "douyin", roomSlug: "555" }]);
+    expect(st.rolling).toMatchObject([{ roomSlug: "555", bv: "BV1L", confirmed: 1, total: 2, recording: true }]);
+  });
+
+  it("未注入在录房间 / 目录不存在 → 空,不抛", async () => {
+    const t = new LocalTransport({ id: "l", recordingsDir: "/nonexistent-dir-x", taskRooms: {}, ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }) });
+    expect(await t.recordingStatus()).toEqual({ rooms: [], rolling: [] });
+  });
+});

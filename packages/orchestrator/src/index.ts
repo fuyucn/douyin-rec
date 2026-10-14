@@ -1,5 +1,5 @@
 export * from "./transport.js";
-export { scanRecordings } from "./scan.js";
+export { scanRecordings, scanRollingSessions } from "./scan.js";
 export type { FfprobeAdapter } from "./scan.js";
 export { Reconciler } from "./reconciler.js";
 // 能力门控纯函数已下沉 @drec/core(app L4 的「本机抑制」也要用;见 core/src/capabilities.ts)。

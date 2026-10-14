@@ -51,6 +51,26 @@ export interface NodeInventory { workerId: string; recordings: NodeRecording[]; 
 /** `_tasks` 远端输出:该节点全部任务的隐私安全投影(无 cookies)。 */
 export interface NodeTasks { workerId: string; tasks: NodeTaskDTO[]; }
 
+/** 节点上一个边录边传会话的实时进度(`_recording-status` 的 rolling 字段,F1)。 */
+export interface NodeRollingSession {
+  platform: string;
+  roomSlug: string;
+  sessionBase: string;
+  bv?: string;
+  confirmed: number;
+  total: number;
+  ambiguous: number;
+  uploading?: { index: number; kind: "create" | "append" };
+  /** 该房间此刻是否仍在录制。 */
+  recording: boolean;
+}
+
+/** `_recording-status` 的完整结果:在录房间 + 边录边传进度(旧 bundle 无 rolling → [])。 */
+export interface NodeRecordingStatus {
+  rooms: ActiveRecordingRoom[];
+  rolling: NodeRollingSession[];
+}
+
 export interface ActiveRecordingRoom {
   platform: string;
   roomSlug: string;
@@ -101,6 +121,8 @@ export interface Transport {
   ping?(): Promise<void>;
   /** 当前有媒体下载子进程的房间,供 master 控制台显示远端录制状态。 */
   activeRecordingRooms?(): Promise<ActiveRecordingRoom[]>;
+  /** 在录房间 + 边录边传进度(F1;可选,缺省时调用方回落 activeRecordingRooms 且无进度)。 */
+  recordingStatus?(): Promise<NodeRecordingStatus>;
   /** 读取该节点的任务清单(隐藏 `_tasks` 子命令;可选:无此能力 = 不支持任务同步)。 */
   listTasks?(): Promise<NodeTasks>;
   /**
