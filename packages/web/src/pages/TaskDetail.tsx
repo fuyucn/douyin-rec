@@ -109,6 +109,7 @@ export function TaskDetail(): ReactNode {
                   status={task.status}
                   enabled={task.enabled}
                   recording={task.recording}
+                  stopping={task.stopping}
                   recordingWorkers={task.recordingWorkers}
                 />
                 {task.managedBy === "hub" && (
@@ -126,8 +127,8 @@ export function TaskDetail(): ReactNode {
             <Button
               small
               onClick={() => action("start")}
-              disabled={task.managedBy === "hub"}
-              title={task.managedBy === "hub" ? t("tasks.managedHint") : undefined}
+              disabled={task.managedBy === "hub" || task.stopping}
+              title={task.stopping ? t("tasks.stoppingHint") : task.managedBy === "hub" ? t("tasks.managedHint") : undefined}
             >
               {t("tasks.start")}
             </Button>

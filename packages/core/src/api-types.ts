@@ -837,6 +837,11 @@ export interface TaskDTO {
   anchorName: string | null;
   /** 是否真正在录视频(区分 running 但等待开播)。 */
   recording: boolean;
+  /**
+   * 硬停收尾中(已发停止信号、进程尚未退出;rolling 任务在传末段,最长约 10 分钟)。
+   * UI 用它显示「停止中」并禁用「启动」,避免超时返回后被误当成没停。
+   */
+  stopping?: boolean;
   /** Hub 源任务在被选中 worker 上的录制状态;普通任务为空数组。 */
   recordingWorkers?: RecordingWorkerStatusDTO[];
   /** issue #73:master 判定的归属标记。false=受管但未派给本节点(停用保留);省略=视为归属。 */

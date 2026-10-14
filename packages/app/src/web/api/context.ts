@@ -114,6 +114,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
   // 显示用主播名:运行时(录制中 [主播] 日志解析)优先,否则持久化的(创建时抓的)。
   const view = (t: Task): TaskView => {
     let workers: RecordingWorkerStatusDTO[] | undefined;
+    const stopping = manager.isStopping(t.id) || undefined;
     let hubRule: TaskView["hubRule"];
     if (deps.recordingWorkers || deps.hubEnabled) {
       const platform = platformForRoom(t.room);
@@ -150,6 +151,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
       ...t,
       ...(assigned !== undefined ? { assigned } : {}),
       running: manager.isRunning(t.id),
+      ...(stopping ? { stopping } : {}),
       anchorName: manager.getAnchorName(t.id) ?? t.anchorName,
       recording: manager.isRecording(t.id),
       ...(rollingStatus ? { rollingApplied: rollingStatus.applied, ...(rollingStatus.drift ? { rollingPending: true } : {}) } : {}),

@@ -56,6 +56,11 @@ class MockManager implements ManagerLike {
     await this.stop(id);
     return true;
   }
+  /** Test-controllable:哪些任务处于硬停收尾中。 */
+  readonly stopping = new Set<number>();
+  isStopping(id: number): boolean {
+    return this.stopping.has(id);
+  }
   readonly gracefulCalls: number[] = [];
   async stopGraceful(id: number): Promise<void> {
     this.gracefulCalls.push(id);
@@ -667,6 +672,16 @@ describe("stopTask", () => {
     const res = await api.stopTask(a.id);
     expect(res.status).toBe(200);
     expect(store.getTask(a.id)!.enabled).toBe(false);
+  });
+
+  it("硬停收尾中 → 列表视图带 stopping=true(UI 显示「停止中」并禁用启动)", async () => {
+    const a = store.addTask({ room: "113", enabled: false });
+    manager.forceRunning(a.id);
+    manager.stopping.add(a.id);
+    const list = api.listTasks().body as Array<{ id: number; stopping?: boolean }>;
+    expect(list.find((x) => x.id === a.id)?.stopping).toBe(true);
+    const b = store.addTask({ room: "114" });
+    expect((api.listTasks().body as Array<{ id: number; stopping?: boolean }>).find((x) => x.id === b.id)?.stopping).toBeUndefined();
   });
 
   it("404 for missing task", async () => {
