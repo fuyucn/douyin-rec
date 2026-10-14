@@ -16,7 +16,7 @@ import { vi, type MockInstance } from "vitest";
 import type { NotifyEvent } from "@drec/core";
 import {
   LocalTransport, Reconciler, SyncLedger,
-  type PipelineCfg, type PipelineDeps, type Transport,
+  type PipelineCfg, type ReconcilerDeps, type PipelineDeps, type Transport,
 } from "@drec/orchestrator";
 import { ResourcePool } from "../../../packages/orchestrator/src/workflow.js";
 import { FakeBiliup, type RealBiliup } from "./fake-biliup.js";
@@ -46,6 +46,8 @@ export interface ScenarioOpts {
   shellFault?: (cmd: string) => boolean;
   /** 额外覆盖 PipelineDeps(如分段模式接缝)。 */
   deps?: Partial<PipelineDeps>;
+  /** 额外覆盖 Reconciler 构造参数(如 inventoryTimeoutMs,清单失联场景用)。 */
+  reconcilerOpts?: Partial<ReconcilerDeps>;
 }
 
 export class Scenario {
@@ -146,6 +148,7 @@ export class Scenario {
       ...(this.opts.cleanupBackfillThrottleMs !== undefined ? { cleanupBackfillThrottleMs: this.opts.cleanupBackfillThrottleMs } : {}),
       resolveCfg: () => this.cfg,
       notify: (e) => this.notifications.push(e),
+      ...this.opts.reconcilerOpts,
     });
   }
 

@@ -252,7 +252,7 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
-  it("死 transport 不阻断其他 transport 对账", async () => {
+  it("死 transport 不阻断其他 transport 对账(规则未选中该节点)", async () => {
     const ledger = freshLedger();
     const rec = makeRec();
     const t1: Transport = {
@@ -280,6 +280,8 @@ describe("Reconciler", () => {
       runPipeline: spyRunPipeline,
       settle: fastSettle,
       sleep: fastSleep,
+      // 规则只选 node-live:未被选中的 node-dead 失联不影响本场(三态,#27)
+      resolveCfg: () => ({ ...pipelineDeps.cfg, workers: ["node-live"] }),
     };
 
     const reconciler = new Reconciler(deps);
@@ -483,7 +485,7 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
-  it("场景E(防锁死): 一个worker listInventory 永久挂起 → 超时降级为空,reconcile 仍完成且处理其余worker", async () => {
+  it("场景E(防锁死): 一个worker listInventory 永久挂起 → 超时判 unreachable(规则未选中它),reconcile 仍完成且处理其余worker", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const ledger = freshLedger();
     const t1 = makeTransport("node-1", [makeRec()]);
@@ -504,7 +506,8 @@ describe("Reconciler", () => {
     const reconciler = new Reconciler({
       platform: "douyin", transports, ledger, pipelineDeps,
       runPipeline: spyRunPipeline, settle: { maxWaitMs: 50, pollMs: 1 }, sleep: fastSleep,
-      inventoryTimeoutMs: 30,   // 挂起的worker 30ms 后降级为空
+      inventoryTimeoutMs: 30,   // 挂起的worker 30ms 后判 unreachable
+      resolveCfg: () => ({ ...pipelineDeps.cfg, workers: ["node-1"] }),   // 规则未选中 hang 节点
     });
 
     // 不挂起、不抛错,且仍处理了 node-1 的那一簇(单成员)
@@ -1401,4 +1404,182 @@ describe("磁盘看门狗(节点剩余空间告警)", () => {
     });
   });
 
+});
+
+// ── #27:清单三态(ok / empty / unreachable)────────────────────────────────
+describe("清单三态:失联节点所在的场不选优不收口(#27)", () => {
+  type Behavior = "ok" | "reject" | "hang";
+
+  /** 可切换行为的假节点:模拟 空 / reject / 挂起超时 / 恢复。 */
+  function flaky(id: string, recordings: NodeRecording[], initial: Behavior) {
+    let mode: Behavior = initial;
+    const t: Transport = {
+      id,
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockImplementation(() => {
+        if (mode === "reject") return Promise.reject(new Error("ssh: connection refused"));
+        if (mode === "hang") return new Promise<NodeInventory>(() => {});
+        return Promise.resolve({ workerId: id, recordings });
+      }),
+      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockResolvedValue(true),
+      pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
+    };
+    return { t, set: (m: Behavior) => { mode = m; } };
+  }
+
+  function setup(opts: {
+    transports: Transport[];
+    cfgFor?: (roomSlug: string) => { workers?: string[] };
+    extra?: Partial<ReconcilerDeps>;
+  }) {
+    const ledger = freshLedger();
+    const transports = new Map(opts.transports.map((t) => [t.id, t]));
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const notify = vi.fn<(e: NotifyEvent) => void>();
+    const runPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV_OK"); return { state: "done", bv: "BV_OK" }; },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline, settle: fastSettle, sleep: fastSleep,
+      reconnectWindowMs: 0, inventoryTimeoutMs: 30, notify,
+      ...(opts.cfgFor ? { resolveCfg: (_p: string, room: string) => ({ ...pipelineDeps.cfg, ...opts.cfgFor!(room) }) } : {}),
+      ...opts.extra,
+    });
+    return { ledger, runPipeline, reconciler, notify };
+  }
+
+  const warns = (spy: ReturnType<typeof vi.spyOn>): string => spy.mock.calls.map((c) => String(c[0])).join("\n");
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("empty(可达但无录像)≠ unreachable:空节点不阻塞本场", async () => {
+    const live = flaky("live", [makeRec()], "ok");
+    const empty = flaky("empty", [], "ok");
+    const { ledger, runPipeline, reconciler } = setup({ transports: [live.t, empty.t] });
+    await reconciler.reconcileAll();
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    ledger.close();
+  });
+
+  for (const mode of ["reject", "hang"] as const) {
+    it(`${mode}:参与节点失联 → 本轮不选优不建 job、日志含节点;恢复后下一轮正常收口`, async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const live = flaky("live", [makeRec()], "ok");
+      const lost = flaky("lost", [makeRec()], mode);
+      const { ledger, runPipeline, reconciler } = setup({ transports: [live.t, lost.t] });
+
+      await reconciler.reconcileAll();
+      expect(runPipeline).not.toHaveBeenCalled();
+      expect(ledger.listKeys()).toHaveLength(0);          // 没留半截 job
+      expect(warns(warnSpy)).toContain("lost");            // 日志指出是哪个节点
+
+      await reconciler.reconcileAll();                      // 仍失联 → 仍不推进、不锁死
+      expect(runPipeline).not.toHaveBeenCalled();
+
+      lost.set("ok");                                       // 节点恢复
+      await reconciler.reconcileAll();
+      expect(runPipeline).toHaveBeenCalledTimes(1);
+      expect(runPipeline.mock.calls[0][0].members.map((m) => m.workerId).sort()).toEqual(["live", "lost"]);
+      const [k] = ledger.listKeys();
+      expect(ledger.get(k.streamKey)?.state).toBe("done");
+      ledger.close();
+    });
+  }
+
+  it("无关场照常:失联节点只挡住规则选中它的房间,其它房间照常收口", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const live = flaky("live", [makeRec({ roomSlug: "room-a" }), makeRec({ roomSlug: "room-b" })], "ok");
+    const lost = flaky("lost", [], "reject");
+    const { ledger, runPipeline, reconciler } = setup({
+      transports: [live.t, lost.t],
+      cfgFor: (room) => (room === "room-a" ? { workers: ["live"] } : { workers: ["live", "lost"] }),
+    });
+    await reconciler.reconcileAll();
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    expect(runPipeline.mock.calls[0][0].roomSlug).toBe("room-a");
+    ledger.close();
+  });
+
+  it("规则未选中的节点失联不影响本场", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const live = flaky("live", [makeRec()], "ok");
+    const lost = flaky("lost", [], "hang");
+    const { ledger, runPipeline, reconciler } = setup({
+      transports: [live.t, lost.t],
+      cfgFor: () => ({ workers: ["live"] }),
+    });
+    await reconciler.reconcileAll();
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    ledger.close();
+  });
+
+  it("已 done 的场不受影响:失联期间仍可做收尾补跑,状态不变", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const rec = makeRec();
+    const live = flaky("live", [rec], "ok");
+    const lost = flaky("lost", [rec], "reject");
+    const { ledger, runPipeline, reconciler } = setup({
+      transports: [live.t, lost.t],
+      extra: { cleanupBackfillThrottleMs: 0 },
+    });
+    const key = clusterBroadcasts([{ workerId: "live", recordings: [rec] }], 0, "douyin")[0].streamKey;
+    ledger.upsertPending(key, rec.startMs);
+    ledger.setBv(key, "BV1");
+    ledger.markDone(key, "BV1");
+    ledger.syncNodeState(key, "clean_source", "failed", { error: "清理失败" });
+
+    await reconciler.reconcileAll();
+    expect(runPipeline).toHaveBeenCalledTimes(1);            // 补跑照常
+    expect(ledger.get(key)?.state).toBe("done");
+    ledger.close();
+  });
+
+  it("失联阈值通知:连续 N 轮才发、一次失联期只发一条;恢复后再失联可再报", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const live = flaky("live", [makeRec()], "ok");
+    const lost = flaky("lost", [makeRec()], "reject");
+    const { ledger, runPipeline, reconciler, notify } = setup({
+      transports: [live.t, lost.t],
+      extra: { unreachableAlertRounds: 3 },
+    });
+    const alerts = (): NotifyEvent[] => notify.mock.calls.map((c) => c[0]).filter((e) => e.kind === "error");
+
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    expect(alerts()).toHaveLength(0);                         // 2 轮 < 阈值
+    await reconciler.reconcileAll();
+    expect(alerts()).toHaveLength(1);                         // 第 3 轮发
+    expect(JSON.stringify(alerts()[0])).toContain("lost");
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    expect(alerts()).toHaveLength(1);                         // 之后不重复
+    expect(runPipeline).not.toHaveBeenCalled();               // 不转人工、不推进、不删
+    expect(ledger.listKeys()).toHaveLength(0);
+
+    lost.set("ok");
+    await reconciler.reconcileAll();                           // 恢复 → 计数清零并正常收口
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    lost.set("reject");
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    expect(alerts()).toHaveLength(2);                          // 新一轮失联期可再报
+    ledger.close();
+  });
+
+  it("单轮抖动不累计:失联—恢复—失联 交替不触发通知", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const live = flaky("live", [], "ok");
+    const flap = flaky("flap", [], "reject");
+    const { ledger, reconciler, notify } = setup({
+      transports: [live.t, flap.t],
+      extra: { unreachableAlertRounds: 2 },
+    });
+    for (let i = 0; i < 6; i++) {
+      flap.set(i % 2 === 0 ? "reject" : "ok");
+      await reconciler.reconcileAll();
+    }
+    expect(notify.mock.calls.filter((c) => c[0].kind === "error")).toHaveLength(0);
+    ledger.close();
+  });
 });
