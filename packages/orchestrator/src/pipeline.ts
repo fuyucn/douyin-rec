@@ -663,8 +663,11 @@ async function runPipelineInner(
   // 必须排在下面「合并模式续跑」之前:否则合并模式的 done 场走 resumeAppends → finalizeOnly(不带 keepNodeXml),
   // 会把节点上**最后一份** .xml 一并删掉。
   // 此前补跑会重入整条管线,在节点侧入口撞「已建稿」护栏,刷「请人工核对」告警且收尾永不收敛。
+  // 判据 = 「这场实际走过节点侧上传(台账 node_upload=done)」或「当前配置走节点侧」:只看当前配置的话,
+  // 规则后来改了(关节点侧/开烧录)再补跑,会落到 resumeAppends → finalizeOnly 不带 keepNodeXml,删掉最后一份 .xml。
+  const ranNodeSide = ledger.getNodeState(streamKey, "node_upload")?.state === "done";
   if (existing?.state === "done" && existing.bv
-      && shouldUseNodeSideUpload(cfg, { burnDanmu, burnLivechat }).ok) {
+      && (ranNodeSide || shouldUseNodeSideUpload(cfg, { burnDanmu, burnLivechat }).ok)) {
     jlog(`节点侧上传的 done 场补跑收尾:只补核验 + 删源(bv=${existing.bv}),不重传`);
     return await finalizeOnly(streamKey, existing.bv, deps, jlog, notify, b.members, stageSub, { keepNodeXml: true });
   }

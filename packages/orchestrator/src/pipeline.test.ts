@@ -1504,6 +1504,26 @@ describe("runPipeline", () => {
         deps.ledger.close();
       });
 
+      it("首轮走过节点侧、之后规则改成不走节点侧(关开关/开烧录)→ 补跑仍保留节点源 .xml", async () => {
+        // 只看当前配置会落到 resumeAppends → finalizeOnly(无 keepNodeXml),在 stageAfterDone=false 时删掉最后一份 xml。
+        const deps = makeDeps({ cfg: { ...nodeSideCfg(), steps: { nodeSideUpload: false, burnDanmu: true, burnLivechat: false }, cleanup: { sourceAfterDone: true, stageAfterDone: false } } as PipelineCfg });
+        const t = deps.transports.get("node-1")!;
+        const { nodePipeline } = withNodePipeline(t);
+        const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+        doneJob(deps, b.streamKey);
+        deps.ledger.syncNodeState(b.streamKey, "node_upload", "done"); // 首轮确实由节点侧上传
+
+        const r = await runPipeline(b, deps);
+
+        expect(r).toEqual({ state: "done", bv: "BVdone" });
+        expect(nodePipeline).not.toHaveBeenCalled();
+        expect(t.pull).not.toHaveBeenCalled();
+        const removed = (t.cleanup as Mock).mock.calls.flatMap((c) => c[0] as string[]);
+        expect(removed.length).toBeGreaterThan(0);
+        expect(removed.some((p) => /\.(xml|ass)$/i.test(p))).toBe(false);
+        deps.ledger.close();
+      });
+
       it("连续补跑多轮:始终不告警、不改状态(此前每轮刷一条)", async () => {
         const deps = makeDeps({ cfg: nodeSideCfg() as PipelineCfg });
         const t = deps.transports.get("node-1")!;
