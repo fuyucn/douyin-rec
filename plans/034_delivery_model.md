@@ -69,7 +69,7 @@ controller 的队列 = 台账 job ∪ 各节点上报的 `Delivery.snapshot`。�
 
 | 步 | 内容 | 风险 | 验收 |
 |---|---|---|---|
-| F1 | fleet 视图（只读）：节点 `_recording-status` 额外扫 `*.rolling.json` 与节点结果文件，返回每房间的 已确认/未知/BV；master 现有 5 秒状态轮询缓存它；`HubQueueDTO` 增 `delivering` 列表；队列页渲染一行 | 低 | dev 里边录边传时队列有实时行；旧节点 bundle 不带字段时不报错 |
+| F1 | fleet 视图（只读）：节点 `_recording-status` 额外扫 边录边传进度文件与节点结果文件，返回每房间的 已确认/未知/BV；master 现有 5 秒状态轮询缓存它；`HubQueueDTO` 增 `delivering` 列表；队列页渲染一行 | 低 | dev 里边录边传时队列有实时行；旧节点 bundle 不带字段时不报错 |
 | S1 | core 新增 Delivery 类型 + 纯状态机 + 全分支测试；不接线 | 无 | 崩溃/重入/乱序测试 |
 | S2 | 节点三处双写（旧文件照写） | 低 | 双写一致性断言 |
 | S3 | master 删源前核对（先告警不拦截，观察期） | 低 | 线上无误报 |
