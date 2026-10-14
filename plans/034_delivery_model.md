@@ -17,6 +17,20 @@
 
 结论：**不是要加功能，是要收口。** 每个新需求（磁盘安全、fleet 视图、重试分类）现在都得在 4 条路径、4 份证据、5 个删除点上各做一遍。
 
+## 1.5 两种运行模式（本文所有步骤都要标适用范围）
+
+- **单机模式**：`task serve` 不带 `--hub`。一台机器自己录、自己传、自己删，没有 controller。
+- **fleet 模式**：controller（`--hub`，可兼 local worker）+ N 个节点。节点本身就是单机模式的进程，只是策略由 controller 下发。
+
+| 维度 | 单机 | fleet 节点 | fleet controller |
+|---|---|---|---|
+| 策略来源 | 任务自身 | controller 下发（DeliveryPlan） | hub 全局配置 + 房间规则 |
+| 可见性 | 本机网页 | 仅首次配置时看；日常不看 | **唯一观察入口**（F1 已做进度，F2 做节点健康，F3 做日志） |
+| 上传 | 边录边传 | 边录边传 / 节点侧批量 | 整场管线（烧录/多节点选优） |
+| 删源 | 只由边录边传闸门删 | 同左，另有 master 经 ssh 删 | 经 ssh 或 `_release-source` |
+
+约定：单机模式只保证「边录边传 + 本机可见 + 删源有闸门」，**不**做整场合成上传（用户未反对此建议，若要改需单独决定）。步骤表「范围」列写明 单机 / 节点 / controller。
+
 ## 2. 目标：一个深模块 + 三个适配器
 
 按 codebase-design 的词汇：
@@ -67,9 +81,12 @@ controller 的队列 = 台账 job ∪ 各节点上报的 `Delivery.snapshot`。�
 
 顺序依据第 2 轮审计调整：fleet 视图不依赖 Delivery，提到最前。
 
-| 步 | 内容 | 风险 | 验收 |
+| 步 | 内容（含范围） | 风险 | 验收 |
 |---|---|---|---|
 | F1 | fleet 视图（只读）：节点 `_recording-status` 额外扫 边录边传进度文件与节点结果文件，返回每房间的 已确认/未知/BV；master 现有 5 秒状态轮询缓存它；`HubQueueDTO` 增 `delivering` 列表；队列页渲染一行 | 低 | dev 里边录边传时队列有实时行；旧节点 bundle 不带字段时不报错 |
+| L1 | 手动停止/重启时封口并传完最后一段（范围：节点+单机）。背景：dev 实测硬停（SIGTERM）后最后一段未封口、未上传，10 分钟后 master 建 job 为 `needs_manual`，源保留、无重复建稿——安全但需人工。要先实测优雅排空（SIGUSR2）路径是否自动传完，再决定 SIGTERM 是否也要「封口→传→再退出」，且不得违反 I1（确认前不删源）、I2（不打断录制，硬停是用户主动操作除外） | 中 | dev 里停任务后无 `needs_manual`；变异：去掉封口步骤测试转红 |
+| F2 | controller「节点」视图（只读，范围：controller）。**已有数据**（实测）：`/api/hub/workers/status` 已返回 `ok/error/appVersion/appliedVersion/syncError`，`WorkersPanel` 已显示版本漂移；`Transport.diskFreeGB()` 已存在但只在对账轮（默认 30 分钟）由看门狗用、没进 UI。**缺**：磁盘剩余、被未确认分段锁定的字节、各节点录制数。做法：5 秒 `_recording-status` 返回里顺带 `diskFreeGB` 与 `lockedBytes`（节点本地读进度文件 + stat，不扫清单），并入 `WorkerStatus`；`WorkersPanel` 加两列 | 低 | 旧 bundle 缺字段不报错；磁盘接近水位时该节点标黄 |
+| F3 | 日志代查（范围：controller）：节点隐藏命令 `_log-tail <taskId> <n>`，controller 经 ssh 取最近 n 行（限长、过滤凭证类字段）。是「节点网页可降级」的前置 | 低 | 不泄露凭证；旧 bundle 回落「不支持」 |
 | S1 | core 新增 Delivery 类型 + 纯状态机 + 全分支测试；不接线 | 无 | 崩溃/重入/乱序测试 |
 | S2 | 节点三处双写（旧文件照写） | 低 | 双写一致性断言 |
 | S3 | master 删源前核对（先告警不拦截，观察期） | 低 | 线上无误报 |
@@ -77,7 +94,7 @@ controller 的队列 = 台账 job ∪ 各节点上报的 `Delivery.snapshot`。�
 | S5 | DeliveryPlan：master 一处解析并下发，移除 `rollingEffective` 派生 | 中 | 子进程/serve/手动启动读到同一份 |
 | S6 | 拆命令行入口装配；分段管线与整场管线共用交付记账 | 中 | 入口行数下降 |
 
-F1 只读、不碰上传和删源，可立即开始；S1 起等 F1 上线后再定。
+F1 已上线（#103）。F2/F3 只读、可立即开始；L1 先在 dev 实测再定方案；S1 起等 F2 与 L1 落地后再定。推荐顺序：L1 实测 → F2 → F3 → S1 → S2 → S3 → S4 → S5 → S6。
 
 ## 5. 已知未验证项
 
