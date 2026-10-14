@@ -64,7 +64,7 @@ export function recordingStatusWorkerIds(
   for (const rule of rules) {
     if (!rule.recording?.sourceTaskId) continue;
     // 勾选判定与归属同源(core isWorkerTargeted)。这里**故意不**叠加 enabled/能力:
-    // 被停用/换走的节点可能仍在收尾录制,状态必须继续可见。
+    // 规则被停用/能力不满足时,已勾选的节点仍可能在收尾录制,状态必须继续可见。
     for (const id of allWorkerIds) if (isWorkerTargeted(rule, id)) out.add(id);
     if (rule.workers?.length) for (const id of rule.workers) out.add(id);
   }

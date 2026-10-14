@@ -67,6 +67,13 @@ describe("消费点共用同一勾选/能力口径", () => {
     expect([...recordingStatusWorkerIds([{ workers: ["a"], recording: { sourceTaskId: 1 } }], all)]).toEqual(["a"]);
     expect(recordingStatusWorkerIds([{ workers: ["a"], recording: null }], all).size).toBe(0);
   });
+  it("recordingStatusWorkerIds:规则停用 / 能力不满足时仍探测已勾选节点(不叠加 enabled/能力判定)", () => {
+    const all = ["local", "a", "b"];
+    const disabled = [{ enabled: false, workers: ["a"], recording: { sourceTaskId: 1 } }];
+    expect([...recordingStatusWorkerIds(disabled, all)]).toEqual(["a"]);
+    const needCap = [{ enabled: true, requires: ["danmu:douyin"], workers: ["b"], recording: { sourceTaskId: 2 } }];
+    expect([...recordingStatusWorkerIds(needCap, all)]).toEqual(["b"]);
+  });
 
   it("localSuppressedSourceTaskIds:远端缺能力 → 不抑制本机;满足 → 抑制", () => {
     dir = mkdtempSync(join(tmpdir(), "assigned-"));
