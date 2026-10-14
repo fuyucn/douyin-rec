@@ -21,7 +21,7 @@ import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinG
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
-import { getEngine, platformForRoom, type DownloadEngine } from "@drec/core";
+import { getEngine, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
 import { groupSessions, mergeSession, mergeSessions } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
@@ -1019,8 +1019,7 @@ const hubStarter: HubStarter = {
         //
         // 早前这里对 !rule.enabled / 不在 workers / 能力不满足 都是 continue(直接缺席),
         // 于是「停用」和「删除」在节点侧无法区分 —— 取消勾选一个 worker 就把它的房间删了。
-        const targeted = !rule.workers || rule.workers.length === 0 || rule.workers.includes(workerId);
-        const capable = satisfiesCapabilities(capsOfThis, rule.requires);
+        // 归属判定 = core isWorkerAssigned(单一真理源,reconciler/状态探测/本机抑制共用)。
         const src = rule.recording?.sourceTaskId ? opts.store.getTask(rule.recording.sourceTaskId) : null;
         if (!src) continue;                        // 真删除意图:规则没绑源任务 / 源任务已删
         const p = platformForRoom(src.room);
@@ -1028,7 +1027,7 @@ const hubStarter: HubStarter = {
         // 该 worker 不再被派发这个房间(规则禁用 / 未勾选 / 能力不满足)→ 产 enabled:false,
         // 让节点**停用但保留**(T3)。字段与正常路径**同源构造**:早前写成两个 push 各抄一遍字段,
         // 抄漏一个字段就是「禁用路径丢配置」的静默 bug(自审发现,已合为一条)。
-        const dispatching = rule.enabled && targeted && capable;
+        const { assigned, enabled: specEnabled } = resolveSpecAssignment(rule, workerId, capsOfThis, src.enabled);
         // ⚠️ **local(master 本机)是特例**:它的 applyTasks 写的是**源任务本身**,
         // 而源任务的 enabled 是「用户要不要录这个房间」的**全局意图**,不是「本节点是否被选中」。
         // 若这里也按 targeted 强制 false,那么「把 local 从某房间 workers 里移除」会被写成
@@ -1057,10 +1056,8 @@ const hubStarter: HubStarter = {
           //      「规则禁用 = 暂停该房间」是全节点语义,本机不该例外。
           //   ② 规则启用、只是**没勾选本机** → 保持 src.enabled。本机的「不该录」由
           //      抑制机制(localSuppressedSourceTaskIds)表达,写成 enabled=false 会污染全局意图。
-          // 远端节点:统一 `dispatching && src.enabled`(停用保留时强制 false)。
-          enabled: isLocalWorker
-            ? (rule.enabled ? src.enabled : false)
-            : (dispatching && src.enabled),
+          // 远端节点:统一 `assigned && src.enabled`(停用保留时强制 false;见 core resolveSpecAssignment)。
+          enabled: specEnabled,
           useCookie: src.useCookie,
           cookies: resolveTaskStreamCookies(src, opts.store),
           outDir: src.outDir,

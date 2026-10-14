@@ -4,7 +4,7 @@ import type { JobState, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
-import { gateWorkers, explainRejections } from "@drec/core";
+import { gateWorkers, explainRejections, isWorkerAssigned, isWorkerTargeted } from "@drec/core";
 import { JobDispatcher } from "./job-dispatcher.js";
 
 export interface SettleConfig {
@@ -249,10 +249,8 @@ export class Reconciler {
     if (unreachable.size === 0) return [];
     let ids = cfg.workers?.length ? cfg.workers : [...transports.keys()];
     ids = ids.filter((id) => unreachable.has(id));
-    if (ids.length > 0 && cfg.requires?.length) {
-      ids = gateWorkers(ids, (id) => this.workerCapabilities?.(id), cfg.requires).eligible;
-    }
-    return ids;
+    // 选中 ∧ 能力满足:与 master 下发同一判定(core isWorkerAssigned;cfg 无 enabled → 视为启用)。
+    return ids.filter((id) => isWorkerAssigned(cfg, id, this.workerCapabilities?.(id)));
   }
 
   /** 每轮对账更新一次失联轮数;连续达阈值发一条通知(只通知,不转人工、不删任何东西)。 */
@@ -416,7 +414,7 @@ export class Reconciler {
       }
       if (cfg.workers?.length) {
         const before = b.members.length;
-        b.members = b.members.filter((m) => cfg.workers!.includes(m.workerId));
+        b.members = b.members.filter((m) => isWorkerTargeted(cfg, m.workerId));
         // 显式勾选却过滤到一个不剩:通常是规则里留着已删除的 worker id(API 已禁止新增/删除引用,
         // 但手改文件绕过)。不静默 —— 否则表现为「录了却永远不合并/上传」。每个 streamKey 只报一次。
         if (before > 0 && b.members.length === 0 && !this.warnedGhostWorkers.has(b.streamKey)) {
