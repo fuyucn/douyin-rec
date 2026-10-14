@@ -76,6 +76,27 @@ export interface NodeRecordSpawnerOpts {
   onLog?: (msg: string) => void;
   /** ms to wait after SIGTERM before SIGKILL. */
   killTimeoutMs?: number;
+  /**
+   * 开了边录边传的任务,硬停(SIGTERM)后到 SIGKILL 的宽限。默认 {@link ROLLING_STOP_GRACE_MS}。
+   * 会话 stop() 会「封口→上传末段」,上传常超过普通 10 秒宽限;被 SIGKILL 会留下「上传中」意图,
+   * 10 分钟后 master 转 needs_manual(源保留,安全但要人工)。
+   */
+  rollingKillTimeoutMs?: number;
+}
+
+/** 边录边传任务硬停时留给「末段封口+上传」的最长时间;超时仍 SIGKILL(源保留,转人工)。 */
+export const ROLLING_STOP_GRACE_MS = 10 * 60_000;
+
+/**
+ * 一个任务硬停的 SIGKILL 宽限。显式配置优先(测试/运维覆盖);否则开了边录边传的任务用更长宽限,
+ * 其余返回 undefined(进程默认 10s)。
+ */
+export function resolveKillTimeoutMs(
+  task: Pick<Task, "rollingEffective">,
+  explicitMs: number | undefined,
+  rollingMs: number,
+): number | undefined {
+  return explicitMs ?? (task.rollingEffective ? rollingMs : undefined);
 }
 
 /** Spawns `node <cliEntry> [--discord-webhook ...] record ...` per task. */
@@ -89,6 +110,7 @@ export class NodeRecordSpawner implements Spawner {
   private readonly webhookToggles: (() => NotifWebhookToggles) | undefined;
   private readonly onLog: ((msg: string) => void) | undefined;
   private readonly killTimeoutMs: number | undefined;
+  private readonly rollingKillTimeoutMs: number;
 
   constructor(opts: NodeRecordSpawnerOpts = {}) {
     this.command = opts.command ?? process.execPath;
@@ -100,6 +122,7 @@ export class NodeRecordSpawner implements Spawner {
     this.webhookToggles = opts.webhookToggles;
     this.onLog = opts.onLog;
     this.killTimeoutMs = opts.killTimeoutMs;
+    this.rollingKillTimeoutMs = opts.rollingKillTimeoutMs ?? ROLLING_STOP_GRACE_MS;
   }
 
   spawn(task: Task): RecorderProcess {
@@ -132,7 +155,7 @@ export class NodeRecordSpawner implements Spawner {
       cwd: this.cwd,
       env,
       onLog: this.onLog,
-      killTimeoutMs: this.killTimeoutMs,
+      killTimeoutMs: resolveKillTimeoutMs(task, this.killTimeoutMs, this.rollingKillTimeoutMs),
       cleanupFiles: credFile ? [credFile] : undefined,
     });
   }
