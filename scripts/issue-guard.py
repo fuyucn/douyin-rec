@@ -14,6 +14,8 @@
   - 文档等非源码文件全规则生效,但「文件名」命中的名字若是仓库已跟踪文件的 basename
     (`git ls-files`,即源码/文档文件名)视为源码文件名放行;录像/字幕/产物类文件名
     (仓库里不存在的)仍然拦。
+  - 生成物 docs/architecture.html 整个跳过(由 scripts/gen-architecture.mjs 从包清单、plans/ 现算,
+    内容含 vps1 / rooms.json 这类角色名与文件名;隐私应在生成源头把关,不在产物上重复扫)。
   - 行内含 `issue-guard: allow` 标记的新增行整行跳过(确属测试夹具/假数据时用,须在评审中说明)。
 
 命中任何规则就打印行号和命中的片段，并以非 0 退出 —— 不要带着这些内容
@@ -29,6 +31,7 @@ from pathlib import Path
 
 CODE_SUFFIXES = (".ts", ".tsx", ".mjs", ".js", ".py", ".sh", ".yml", ".yaml", ".json")
 ALLOW_MARK = "issue-guard: allow"
+GENERATED_SKIP = {"docs/architecture.html"}
 FILENAME_RULE = "文件名"
 # 源码里是语义词/夹具、不是泄露的规则:--diff 模式下对源码类文件不生效。
 CODE_SKIP_RULES = {FILENAME_RULE, "主机名", "streamKey", "cookie/webhook"}
@@ -90,7 +93,7 @@ def scan_diff(base: str) -> list[str]:
     hits: list[str] = []
     known = tracked_basenames()
     for path, lineno, line in added_lines(base):
-        if ALLOW_MARK in line:
+        if ALLOW_MARK in line or path in GENERATED_SKIP:
             continue
         is_code = path.endswith(CODE_SUFFIXES)
         for name, pattern, why in RULES:
