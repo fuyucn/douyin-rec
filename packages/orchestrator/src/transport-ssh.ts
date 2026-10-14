@@ -81,7 +81,7 @@ function defaultRun(host: string, timeoutMs = 45_000) {
     p.stdout.on("data", (b) => (out += b)); p.stderr.on("data", (b) => (err += b));
     p.on("close", (c) => finish(() => {
       try { throwIfAborted(); } catch (e) { reject(e); return; }
-      c === 0 ? resolve(out) : reject(new Error(`ssh rc=${c}: ${err.slice(-300)}`));
+      c === 0 ? resolve(out) : reject(new Error(`ssh rc=${c}: ${err.slice(-1500)}`));
     }));
     p.on("error", (e) => finish(() => reject(e)));
   });
