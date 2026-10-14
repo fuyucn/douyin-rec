@@ -7,6 +7,8 @@
  * 只显示「被某个房间选中」的节点 —— 没分配任务的节点不占版面。
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useAtomValue } from "jotai";
+import { hubEnabledAtom } from "../atoms";
 import { api, type RollingDeliveryDTO, type Task, type WorkerStatus } from "../api/client";
 import { baseVersion, fmtBytes, summarizeNodes } from "../lib/nodes-summary";
 import { usePolling } from "../lib/hooks";
@@ -17,6 +19,8 @@ export function NodesStrip({ delivering }: { delivering: readonly RollingDeliver
   const [tasks, setTasks] = useState<Task[]>([]);
   const [status, setStatus] = useState<Record<string, WorkerStatus | undefined>>({});
   const [masterVersion, setMasterVersion] = useState("");
+  // 只在确认是 master(hub 已启用)时才轮询;加载中/节点模式不发请求。
+  const enabled = useAtomValue(hubEnabledAtom) === true;
 
   useEffect(() => {
     let alive = true;
@@ -24,13 +28,13 @@ export function NodesStrip({ delivering }: { delivering: readonly RollingDeliver
     return () => { alive = false; };
   }, []);
   // 在录状态:任务接口自带 recordingWorkers(master 5 秒缓存),10 秒拉一次。失败保留上次。
-  usePolling(() => { void api.listTasks().then(setTasks).catch(() => {}); }, 10_000);
+  usePolling(() => { void api.listTasks().then(setTasks).catch(() => {}); }, 10_000, enabled);
   // 存活/版本/磁盘要 ssh 探测:60 秒一次(队列页打开期间)。
   usePolling(() => {
     void api.getWorkersStatus()
       .then((l) => setStatus(Object.fromEntries(l.map((s) => [s.id, s]))))
       .catch(() => {});
-  }, 60_000);
+  }, 60_000, enabled);
 
   const nodes = useMemo(() => summarizeNodes(tasks, status, delivering, masterVersion), [tasks, status, delivering, masterVersion]);
   if (nodes.length === 0) return null;
@@ -44,7 +48,7 @@ export function NodesStrip({ delivering }: { delivering: readonly RollingDeliver
           return (
             <div key={n.id} className="card px-4 py-3 text-sm space-y-1" data-testid={`node-${n.id}`}>
               <div className="flex items-center gap-2">
-                <span className="dot shrink-0" style={{ background: dot }} />
+                <span className="dot shrink-0" style={{ background: dot }} title={n.ok === undefined ? t("hub.workers.statusChecking") : undefined} />
                 <span className="font-medium truncate">{n.name}</span>
                 {n.version && (
                   <span className="ml-auto font-mono text-[11px]" style={{ color: n.drift ? "var(--warning)" : "var(--muted-soft)" }}
