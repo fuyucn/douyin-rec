@@ -14,7 +14,7 @@
  */
 import { readdirSync, readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { platformForRoom, satisfiesCapabilities, type HubPipelineConfig, type HubRecordingConfig } from "@drec/core";
+import { platformForRoom, isWorkerAssigned, type HubPipelineConfig, type HubRecordingConfig } from "@drec/core";
 import { normalizeRoom } from "./store.js";
 
 /** 一条 hub 规则(内存表示;持久化为 {key}.json)。 */
@@ -193,8 +193,9 @@ export function localSuppressedSourceTaskIds(
     if (tid == null) continue;
     const ws = rule.workers;
     // 远端必须「存在 + 能力满足 requires」才算有人接(缺能力 → reconciler 也会排除它)。
+    // 与 master 下发/reconciler 同一判定(core isWorkerAssigned):勾选 ∧ 规则启用 ∧ 能力满足。
     const hasRemote = !!ws?.some(
-      (id) => id !== "local" && knownWorkerIds.has(id) && satisfiesCapabilities(capabilitiesOf?.(id), rule.requires),
+      (id) => id !== "local" && knownWorkerIds.has(id) && isWorkerAssigned(rule, id, capabilitiesOf?.(id)),
     );
     if (ws && ws.length > 0 && !ws.includes("local") && hasRemote) out.add(tid);
   }

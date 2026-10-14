@@ -1,3 +1,4 @@
+import { isWorkerTargeted } from "@drec/core";
 import type { ApplyTasksResult, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, RemoteTaskSpec, WorkerConfig } from "@drec/core";
 
 // 契约在 core(app 的 worker-store 用同一形状);这里 re-export 保持既有调用点不变。
@@ -62,8 +63,10 @@ export function recordingStatusWorkerIds(
   const out = new Set<string>();
   for (const rule of rules) {
     if (!rule.recording?.sourceTaskId) continue;
+    // 勾选判定与归属同源(core isWorkerTargeted)。这里**故意不**叠加 enabled/能力:
+    // 规则被停用/能力不满足时,已勾选的节点仍可能在收尾录制,状态必须继续可见。
+    for (const id of allWorkerIds) if (isWorkerTargeted(rule, id)) out.add(id);
     if (rule.workers?.length) for (const id of rule.workers) out.add(id);
-    else for (const id of allWorkerIds) out.add(id);
   }
   return out;
 }

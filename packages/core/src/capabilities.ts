@@ -26,6 +26,47 @@ export function satisfiesCapabilities(
   return requires.every((r) => have.has(r));
 }
 
+/** 规则的 workers 勾选是否包含该 worker。workers 缺省/空 = 全选(旧配置语义)。 */
+export function isWorkerTargeted(rule: { workers?: readonly string[] }, workerId: string): boolean {
+  return !rule.workers || rule.workers.length === 0 || rule.workers.includes(workerId);
+}
+
+/**
+ * 「房间规则是否把这个房间派给该 worker」—— **归属判定的单一真理源**(issue #73)。
+ * = 规则启用(缺省视为启用)∧ workers 勾选含该节点(空 = 全选)∧ 该节点能力满足 `requires`。
+ *
+ * 消费点必须共用它,不得各写一份:master 下发(cli desiredFor → `assigned`/`enabled`)、
+ * reconciler 的失联判定与成员过滤、状态探测范围(recordingStatusWorkerIds)、
+ * 本机抑制名单(localSuppressedSourceTaskIds)。
+ * 注意:「未派给」≠「删除」—— 节点上对应任务只停用保留(T3),真删见 #75。
+ */
+export function isWorkerAssigned(
+  rule: { enabled?: boolean; workers?: readonly string[]; requires?: readonly string[] },
+  workerId: string,
+  workerCapabilities: readonly string[] | undefined,
+): boolean {
+  return rule.enabled !== false && isWorkerTargeted(rule, workerId) && satisfiesCapabilities(workerCapabilities, rule.requires);
+}
+
+/**
+ * master 下发给某节点的任务规格里,`assigned` 与 `enabled` 怎么填(cli `desiredFor` 调用;纯函数便于单测)。
+ *
+ * - 远端节点:`enabled = assigned ∧ 源任务 enabled`;未派给 → enabled:false「停用保留」(T3,不是删除)。
+ * - 本机(`local`):applyTasks 写的是**源任务本身**,其 enabled 是全局录制意图,不能因「没勾选本机」
+ *   写成 false(否则连远端一起停);仅「规则停用」才停。本机的「不该录」由 localSuppressedSourceTaskIds 表达。
+ *   `assigned` 对本机仍如实计算(master 总览不据此过滤)。
+ */
+export function resolveSpecAssignment(
+  rule: { enabled?: boolean; workers?: readonly string[]; requires?: readonly string[] },
+  workerId: string,
+  workerCapabilities: readonly string[] | undefined,
+  srcEnabled: boolean,
+): { assigned: boolean; enabled: boolean } {
+  const assigned = isWorkerAssigned(rule, workerId, workerCapabilities);
+  const enabled = workerId === "local" ? (rule.enabled !== false ? srcEnabled : false) : assigned && srcEnabled;
+  return { assigned, enabled };
+}
+
 /**
  * 从候选 worker 里筛出满足 `requires` 的,并列出被排除者及缺失能力。
  *

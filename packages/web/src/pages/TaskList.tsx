@@ -15,7 +15,8 @@ import {
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, type Task } from "../api/client";
-import { connAtom, serverTimezoneAtom, tasksAtom } from "../atoms";
+import { connAtom, hubEnabledAtom, serverTimezoneAtom, tasksAtom } from "../atoms";
+import { isUnassignedHidden } from "../lib/assigned";
 import { DanmuBadge, StatusBadge } from "../components/Badge";
 import { Button, IconButton } from "../components/Button";
 import { Tooltip } from "../components/Tooltip";
@@ -78,7 +79,12 @@ function TaskCompactRow({ task }: { task: Task }): ReactNode {
 /** The list page (#/): create form trigger + task table, 2s polling refresh. */
 export function TaskList(): ReactNode {
   const t = useT();
-  const [tasks, setTasks] = useAtom(tasksAtom);
+  const [allTasks, setTasks] = useAtom(tasksAtom);
+  const hubEnabled = useAtomValue(hubEnabledAtom);
+  const [showUnassigned, setShowUnassigned] = useState(false);
+  // 仅节点(非 master)过滤;master 总览不变。hubEnabled 未知(null)时也不过滤,避免闪烁式误藏。
+  const hiddenCount = hubEnabled === false ? allTasks.filter(isUnassignedHidden).length : 0;
+  const tasks = hubEnabled === false && !showUnassigned ? allTasks.filter((x) => !isUnassignedHidden(x)) : allTasks;
   const [conn, setConn] = useAtom(connAtom);
   const serverTz = useAtomValue(serverTimezoneAtom);
   const toast = useToast();
@@ -189,6 +195,11 @@ export function TaskList(): ReactNode {
               </span>
             </Tooltip>
           )}
+          {hiddenCount > 0 || showUnassigned ? (
+            <Button small variant="secondary" onClick={() => setShowUnassigned((v) => !v)}>
+              {t(showUnassigned ? "tasks.hideUnassigned" : "tasks.showUnassigned", { n: allTasks.filter(isUnassignedHidden).length })}
+            </Button>
+          ) : null}
           <Button onClick={openCreate}>
             <Plus className="w-4 h-4" />
             {t("tasks.add")}

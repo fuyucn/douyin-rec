@@ -1974,3 +1974,53 @@ describe("issue #48:rolling 与烧录互斥(API 层后端守卫,不依赖 UI)", 
     expect(pol).toEqual({ effective: true, reason: "rule-rolling" });
   });
 });
+
+describe("issue #73 节点 /api/tasks 的 assigned 视图", () => {
+  const spec = (over: Record<string, unknown>) => ({
+    platform: "douyin", roomSlug: "111", room: "https://live.douyin.com/111",
+    name: null, quality: "origin", engine: "ffmpeg", danmu: 1, segmentSec: 1800,
+    scheduleStart: null, scheduleEnd: null, enabled: true, useCookie: false,
+    cookies: null, outDir: null, webhook: null, anchorName: null, ...over,
+  });
+  type Row = { room: string; assigned?: boolean; managedBy: string | null };
+
+  it("受管任务带快照里的 assigned;缺字段(旧 master)/无快照/非受管 → 省略", async () => {
+    const { applyRemoteTasks, } = await import("../../packages/app/src/task-sync.js");
+    const { writeManagedState } = await import("../../packages/app/src/managed-state.js");
+    const dir = mkdtempSync(join(tmpdir(), "assigned-api-"));
+    const s = new TaskStore(":memory:");
+    try {
+      const desired = [
+        spec({ roomSlug: "111", room: "https://live.douyin.com/111", assigned: false }),
+        spec({ roomSlug: "222", room: "https://live.douyin.com/222", assigned: true }),
+        spec({ roomSlug: "333", room: "https://live.douyin.com/333" }), // 旧 master:无字段
+      ];
+      applyRemoteTasks(s, desired as never, undefined, { adopt: true });
+      s.addTask({ room: "https://live.douyin.com/444" }); // 用户自建,非受管
+      writeManagedState(dir, { version: 1, desired: desired as never });
+      const a = makeApi({ store: s, manager: new MockManager(), managedStateDir: dir });
+      const rows = a.listTasks().body as Row[];
+      const by = (slug: string): Row => rows.find((r) => r.room.endsWith(`/${slug}`))!;
+      expect(by("111").assigned).toBe(false);
+      expect(by("222").assigned).toBe(true);
+      expect(by("333").assigned).toBeUndefined();
+      expect(by("444").assigned).toBeUndefined();
+      // 未注入 managedStateDir(master/单机)→ 全部省略
+      const rows2 = makeApi({ store: s, manager: new MockManager() }).listTasks().body as Row[];
+      expect(rows2.every((r) => r.assigned === undefined)).toBe(true);
+    } finally { s.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("快照损坏 → 不抛,全部省略(视为归属)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "assigned-api-"));
+    writeFileSync(join(dir, "rooms.json"), "{坏");
+    const s = new TaskStore(":memory:");
+    try {
+      const { applyRemoteTasks } = await import("../../packages/app/src/task-sync.js");
+      applyRemoteTasks(s, [spec({})] as never, undefined, { adopt: true });
+      const rows = makeApi({ store: s, manager: new MockManager(), managedStateDir: dir }).listTasks().body as Row[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.assigned).toBeUndefined();
+    } finally { s.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+});

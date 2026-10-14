@@ -94,6 +94,11 @@ export interface ApiDeps {
   /** 录制节点状态缓存读取;避免每次列任务都同步 SSH。 */
   recordingWorkers?: (platform: string, roomSlug: string) => RecordingWorkerStatusDTO[];
   /**
+   * 节点侧 master 下发快照目录(`<数据根>/config/managed`)。提供时,受管任务视图带 `assigned`
+   * (取自快照里 master 算好的归属标记;缺失/旧 master 不带 → 省略 = 视为归属)。省略 = 不带(master/单机)。
+   */
+  managedStateDir?: string;
+  /**
    * 立即触发一次 hub 任务同步(hub 规则/worker 变更后由 web API 调用;省略=只等周期 tick)。
    * `force=true` 让节点跳过 T-2 期望骤减安全阀(用户显式确认缩容/清空)。
    */
@@ -122,6 +127,11 @@ export interface TaskView extends Task {
   /** true=真正在录视频；false 且 running=true → 进程在跑但「等待开播中」。 */
   recording: boolean;
   recordingWorkers?: RecordingWorkerStatusDTO[];
+  /**
+   * issue #73:master 判定「本节点是否被派发这个受管任务」。false=停用保留的未分配残留。
+   * 仅受管任务且快照里有标记时才有;省略 = 视为归属(旧 master / 非受管 / 无快照)。
+   */
+  assigned?: boolean;
   /** hub 规则摘要(仅 master、房间有规则时);列表用它显示 hub 关联并跳转。 */
   hubRule?: {
     key: string;

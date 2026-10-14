@@ -8,11 +8,12 @@
  * 本文件只负责「拿到已解析的选项后怎么把服务跑起来」。cli 通过 `runServe(opts, deps)` 调它。
  */
 import { mkdirSync, statfsSync } from "node:fs";
+import { join } from "node:path";
 import { createLogger } from "@drec/core";
 import { TaskStore, resolveTaskWebhook } from "./store.js";
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
-import { drecRoot, ensureHubConfigExample, ensureNodeIdentity, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
+import { drecRoot, ensureHubConfigExample, ensureNodeIdentity, rootConfigDir, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
 import { refreshLocalRollingEffective } from "./rolling-effective.js";
 import * as workerStore from "./worker-store.js";
@@ -183,6 +184,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       testWorker: hubEnabled ? hubStarter?.testWorker : undefined,
       probeAllWorkers: hubEnabled ? hubStarter?.probeAllWorkers : undefined,
       recordingWorkers: hubEnabled ? hubStarter?.recordingWorkers : undefined,
+      // issue #73:与 `_apply-tasks` 同目录(<数据根>/config/managed),节点列表据快照里的 assigned 标记过滤。
+      managedStateDir: join(rootConfigDir(), "managed"),
       poolSnapshot: hubEnabled ? hubStarter?.poolSnapshot : undefined,
       requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
       // 与 daemon 同源:规则把源任务交给远端(workers 不含 local)时,本机不实跑。

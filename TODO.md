@@ -15,6 +15,12 @@
 
 ## 进行中
 
+- [~] **T-45 节点只显示归属自己的任务（issue [#73](https://github.com/fuyucn/douyin-rec/issues/73)，低风险部分）**
+  — 2026-10-14 认领，分支 `codex/issue-73-assigned-filter`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：归属判定收口 core `isWorkerAssigned`；`RemoteTaskSpec.assigned` 下发并存入节点快照；节点 `/api/tasks` 带 assigned，
+  worker 模式 Web 默认隐藏「受管 ∧ 未分配 ∧ 未在录」。**验收**：全量 vitest + typecheck + bundle + web build 通过；新旧混跑兼容。
+  真删未分配残留（危险类）见 #75，不在本条。
+
 - [~] **T-42 节点清单三态：失联/超时不再当「无录像」（issue [#27](https://github.com/fuyucn/douyin-rec/issues/27)）**
   — 2026-10-14 认领，分支 `codex/issue-27-inventory-tristate`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：reconciler 清单结果分 ok / empty / unreachable，超时与 reject 都算 unreachable；规则选中的节点里有

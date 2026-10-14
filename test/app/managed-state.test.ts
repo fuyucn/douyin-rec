@@ -122,4 +122,23 @@ describe("managed-state 审计快照", () => {
       expect(stillThere.filter((t) => t.enabled)).toHaveLength(1);
     } finally { store.close(); }
   });
+
+  it("issue #73:assigned 随 desired 落入快照;旧 master 不带字段 → 读回为 undefined(全显示)", () => {
+    writeManagedState(dir, { version: 1, desired: [spec({ assigned: false }), spec({ roomSlug: "2", assigned: true }), spec({ roomSlug: "3" })] });
+    const d = readManagedState(dir)!.desired;
+    expect(d.map((x) => x.assigned)).toEqual([false, true, undefined]);
+  });
+
+  it("issue #73:applyRemoteTasks 带 assigned:false → 任务只停用保留(不删),快照记录 assigned", () => {
+    const store = new TaskStore(":memory:");
+    try {
+      applyRemoteTasks(store, [spec({ assigned: true })], undefined, { adopt: true, managedStateDir: dir });
+      applyRemoteTasks(store, [spec({ assigned: false, enabled: false })], undefined, { adopt: true, managedStateDir: dir });
+      const tasks = store.listTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!.enabled).toBe(false);
+      expect(tasks[0]!.managedBy).toBe("hub");
+      expect(readManagedState(dir)!.desired[0]!.assigned).toBe(false);
+    } finally { store.close(); }
+  });
 });
