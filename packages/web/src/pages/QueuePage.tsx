@@ -167,15 +167,22 @@ function chipStyle(on: boolean): CSSProperties {
     : { cursor: "pointer" };
 }
 
-/** 筛选栏:相位 / 平台 / 搜索(受控,变更即重新拉)。datatable 顶栏。 */
+/**
+ * 筛选栏:一行放「常用」+ 搜索,「更多筛选」展开全部相位与平台。
+ *
+ * 原来 11 个相位 chip + 3 个平台 chip + 搜索挤在一行,窄屏要折三行、挤压表格。
+ * 常用只有三种意图(全部 / 进行中 / 需处理),其余收进展开区(状态默认不折叠逻辑,只是视觉收起)。
+ */
 function FilterBar({
-  phase, states, platform, q,
+  phase, states, platform, q, summary,
   onPhase, onStates, onPlatform, onQ, onReset,
 }: {
   phase: string[];
   states: string[];
   platform: string[];
   q: string;
+  /** 右端摘要(进行中 / 需处理 / 已完成…),与筛选同一行,省掉一行标题。 */
+  summary: ReactNode;
   onPhase: (v: string[]) => void;
   onStates: (v: string[]) => void;
   onPlatform: (v: string[]) => void;
@@ -183,9 +190,27 @@ function FilterBar({
   onReset: () => void;
 }): ReactNode {
   const t = useT();
+  const [more, setMore] = useState(false);
   const toggle = (arr: string[], v: string, set: (x: string[]) => void): void =>
     set(arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
   const activeCount = phase.length + states.length + platform.length + (q ? 1 : 0);
+  // 快捷态:点击即精确切到那一组相位(auto=false = 清空筛选)。
+  const quick: Array<{ key: string; label: string; on: boolean; apply: () => void }> = [
+    {
+      key: "all", label: t("queue.filter.quickAll"), on: activeCount === 0,
+      apply: () => onReset(),
+    },
+    {
+      key: "active", label: t("queue.filter.quickActive"),
+      on: phase.length === 3 && phase.includes("running") && phase.includes("queued") && phase.includes("waiting_settle"),
+      apply: () => { onReset(); onPhase(["running", "queued", "waiting_settle"]); },
+    },
+    {
+      key: "attention", label: t("queue.filter.quickAttention"),
+      on: (phase.length === 2 && phase.includes("waiting_manual") && phase.includes("failed")) || (phase.length === 1 && phase.includes("waiting_manual")),
+      apply: () => { onReset(); onPhase(["waiting_manual", "failed"]); },
+    },
+  ];
   // 相位选项:后端相位 + 前端派生的「拉取中」(state=syncing,不在 QUEUE_PHASES 里)。
   const phaseChips: Array<{ key: string; label: string; on: boolean; toggle: () => void }> = [
     { key: "running", label: t("queue.filter.running"), on: phase.includes("running"), toggle: () => toggle(phase, "running", onPhase) },
@@ -199,44 +224,60 @@ function FilterBar({
     { key: "failed", label: t("queue.filter.failed"), on: phase.includes("failed"), toggle: () => toggle(phase, "failed", onPhase) },
   ];
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-2 mb-3">
-      {/* 状态组(带标签,与平台组区分) */}
-      <span className="text-[11px] text-muted-soft mr-0.5">{t("queue.filter.byStatus")}</span>
-      {phaseChips.map((c) => (
-        <button key={c.key} type="button" role="button" onClick={c.toggle} aria-pressed={c.on} className="chip" style={chipStyle(c.on)}>
-          {c.on && <Check className="w-3 h-3" />}
-          {c.label}
+    <div className="mb-3">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
+        <span className="text-[11px] text-muted-soft mr-0.5">{t("queue.filter.byStatus")}</span>
+        {quick.map((c) => (
+          <button key={c.key} type="button" role="button" onClick={c.apply} aria-pressed={c.on} className="chip" style={chipStyle(c.on)}>
+            {c.on && <Check className="w-3 h-3" />}
+            {c.label}
+          </button>
+        ))}
+        <button type="button" role="button" onClick={() => setMore((v) => !v)} aria-expanded={more} className="chip" style={{ cursor: "pointer" }}>
+          {more ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          {t(more ? "queue.filter.less" : "queue.filter.more")}
         </button>
-      ))}
-      <span className="w-px h-4 mx-1.5" style={{ background: "var(--hairline)" }} />
-      <span className="text-[11px] text-muted-soft mr-0.5">{t("queue.filter.byPlatform")}</span>
-      {["douyin", "bilibili", "kuaishou"].map((p) => (
-        <button
-          key={p}
-          type="button"
-          role="button"
-          onClick={() => toggle(platform, p, onPlatform)}
-          aria-pressed={platform.includes(p)}
-          className="chip"
-          style={chipStyle(platform.includes(p))}
-        >
-          {platform.includes(p) && <Check className="w-3 h-3" />}
-          {p}
-        </button>
-      ))}
-      <div className="relative ml-auto">
-        <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--muted-soft)" }} />
-        <input
-          value={q}
-          onChange={(e) => onQ(e.target.value)}
-          placeholder={t("queue.filter.search")}
-          className="input !pl-8 !h-7 !text-[12px] w-44"
-        />
+        {activeCount > 0 && (
+          <button type="button" role="button" onClick={onReset} className="chip" style={{ cursor: "pointer" }} title={t("queue.filter.reset")}>
+            <X className="w-3 h-3" /> {t("queue.filter.clear")} ({activeCount})
+          </button>
+        )}
+        <div className="relative ml-auto">
+          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--muted-soft)" }} />
+          <input
+            value={q}
+            onChange={(e) => onQ(e.target.value)}
+            placeholder={t("queue.filter.search")}
+            className="input !pl-8 !h-7 !text-[12px] w-44"
+          />
+        </div>
+        {summary && <span className="flex items-center gap-2.5 font-mono text-[11px] text-muted-soft">{summary}</span>}
       </div>
-      {activeCount > 0 && (
-        <button type="button" role="button" onClick={onReset} className="chip" style={{ cursor: "pointer" }} title={t("queue.filter.reset")}>
-          <X className="w-3 h-3" /> {t("queue.filter.clear")} ({activeCount})
-        </button>
+      {more && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-2 mt-2 pt-2" style={{ borderTop: "1px solid var(--hairline)" }}>
+          {phaseChips.map((c) => (
+            <button key={c.key} type="button" role="button" onClick={c.toggle} aria-pressed={c.on} className="chip" style={chipStyle(c.on)}>
+              {c.on && <Check className="w-3 h-3" />}
+              {c.label}
+            </button>
+          ))}
+          <span className="w-px h-4 mx-1.5" style={{ background: "var(--hairline)" }} />
+          <span className="text-[11px] text-muted-soft mr-0.5">{t("queue.filter.byPlatform")}</span>
+          {["douyin", "bilibili", "kuaishou"].map((p) => (
+            <button
+              key={p}
+              type="button"
+              role="button"
+              onClick={() => toggle(platform, p, onPlatform)}
+              aria-pressed={platform.includes(p)}
+              className="chip"
+              style={chipStyle(platform.includes(p))}
+            >
+              {platform.includes(p) && <Check className="w-3 h-3" />}
+              {p}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -362,12 +403,15 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog }: { item: QueueItem
         </div>
       </td>
       <td>
+        {/* 主播名与场次时间同行、房间号与平台同行:原来两行各自折行(reason:「douyin ·」+ 换行的长数字)。
+            房间号是定长标识,用 nowrap 保证不被拆成两行。 */}
         <div className="flex items-baseline gap-2 min-w-0">
           <span className="font-medium text-ink truncate">{item.anchorName ?? roomId(item.roomSlug)}</span>
-          {/* 场次时间是与「时间」列不同的维度(开播时刻),提到主行 —— 同锚点多场靠它区分。 */}
           <span className="font-mono text-[11px] text-muted tabular-nums shrink-0">{sessionTime(item.streamKey)}</span>
         </div>
-        <div className="font-mono text-[11px] text-muted-soft mt-0.5">{item.platform} · {roomId(item.roomSlug)}</div>
+        <div className="font-mono text-[11px] text-muted-soft mt-0.5 truncate">
+          {item.platform} · <span className="whitespace-nowrap">{roomId(item.roomSlug)}</span>
+        </div>
       </td>
       <td style={{ width: 168 }}>
         <span className="inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: phaseColor(info.kind, item.state) }}>
@@ -378,9 +422,14 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog }: { item: QueueItem
           {rowTiming(item, now, dataAt, t)}
           {finished && item.winnerWorker && <span> · {t("hub.jobs.selected", { worker: item.winnerWorker })}</span>}
         </div>
-        {/* 真故障/已停止:把台账里的 error 亮出来(否则只看到「待人工」不知为何)。 */}
-        {(manual || stopped) && item.error && (
-          <div className="text-[11px] mt-0.5 truncate" style={{ color: "var(--error-fg)" }} title={item.error}>
+        {/* 真故障/已停止:把台账里的 error 亮出来(否则只看到「待人工」不知为何)。
+            两行截断 + 完整内容进 title:错误文本可能很长,不截断会把整行撑成小作文、挤掉同屏其它场次。 */}
+        {((manual || stopped) && item.error) && (
+          <div
+            className="text-[11px] mt-0.5"
+            style={{ color: "var(--error-fg)", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+            title={item.error}
+          >
             {item.error}
           </div>
         )}
@@ -395,33 +444,33 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog }: { item: QueueItem
           {settledRow ? (
             // 终态/待人工行:只列已完成的步骤 + BV,**不显示「正在做/下面做」**(没有「正在」可言)。
             item.doneSteps.length > 0 ? (
-              <span className="inline-flex items-center gap-1 text-muted-soft">
+              <span className="inline-flex items-center gap-1 text-muted-soft min-w-0">
                 <Check className="w-3 h-3 shrink-0" style={{ color: "var(--success-fg)" }} />
-                {item.doneSteps.map((st) => stepLabel(t, st.step)).join(" · ")}
+                <span className="truncate">{item.doneSteps.map((st) => stepLabel(t, st.step)).join(" · ")}</span>
               </span>
             ) : (
               <span className="text-muted-soft">{t("queue.doneNoStepRecord")}</span>
             )
           ) : (
             <>
-          <span className="inline-flex items-center gap-1 text-muted-soft">
+          <span className="inline-flex items-center gap-1 text-muted-soft min-w-0">
             {item.doneSteps.length > 0 ? (
               <>
                 <Check className="w-3 h-3 shrink-0" style={{ color: "var(--success-fg)" }} />
-                {item.doneSteps.map((st) => stepLabel(t, st.step)).join(" · ")}
+                <span className="truncate">{item.doneSteps.map((st) => stepLabel(t, st.step)).join(" · ")}</span>
               </>
             ) : (
               t("queue.nothingDone")
             )}
           </span>
           <ChevronRight className="w-3 h-3 text-muted-soft shrink-0" />
-          <span className="font-medium" style={{ color: "var(--ink)" }}>
+          <span className="font-medium whitespace-nowrap" style={{ color: "var(--ink)" }}>
             {item.currentNode ? stepLabel(t, item.currentNode) : t("queue.doing.preparing")}
           </span>
           {item.nextSteps.length > 0 && (
             <>
               <ChevronRight className="w-3 h-3 text-muted-soft shrink-0" />
-              <span className="text-muted-soft">{item.nextSteps.map((s) => stepLabel(t, s)).join(" / ")}</span>
+              <span className="text-muted-soft truncate">{item.nextSteps.map((s) => stepLabel(t, s)).join(" / ")}</span>
             </>
           )}
             </>
@@ -563,32 +612,36 @@ export function QueuePage(): ReactNode {
       </div>
 
       <HubStreamBanner handle={stream} />
+
+      {/* 节点健康独立一块:它按分钟级刷新,和秒级队列混在一起会让人以为节点也在实时变。 */}
       <NodesStrip delivering={data?.delivering ?? []} />
-      {pool && <PoolBar pool={pool} />}
-      <DeliveringPanel items={data?.delivering ?? []} now={now} />
 
       {!loaded ? (
         <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>
       ) : (
         <>
-          <div className="flex items-baseline justify-between mb-2.5">
-            <span className="section-label">{t("queue.section.all")}</span>
-            <span className="flex items-center gap-2.5 font-mono text-[11px] text-muted-soft">
-              <span>{t("queue.summary.running", { n: runningCount })}</span>
-              {uploadCount > 0 && <span>{t("queue.summary.upload", { n: uploadCount })}</span>}
-              {attentionCount > 0 && (
-                <span style={{ color: "var(--error-fg)" }}>{t("queue.summary.attention", { n: attentionCount })}</span>
-              )}
-              {stoppedCount > 0 && <span>{t("queue.summary.stopped", { n: stoppedCount })}</span>}
-              <span>{t("queue.summary.done", { n: doneCount })}</span>
-            </span>
-          </div>
+          {/* 运行态 + 筛选合到一行:资源占用、边录边传、筛选器同属「现在在发生什么」。 */}
+          <div className="section-label mb-2.5">{t("queue.filter.groupRuntime")}</div>
+          {pool && <PoolBar pool={pool} />}
+          <DeliveringPanel items={data?.delivering ?? []} now={now} />
           <FilterBar
             phase={phase} states={states} platform={platform} q={q}
             onPhase={setPhase} onStates={setStates} onPlatform={setPlatform}
             onQ={setQ}
             onReset={reset}
+            summary={
+              <>
+                <span>{t("queue.summary.running", { n: runningCount })}</span>
+                {uploadCount > 0 && <span>{t("queue.summary.upload", { n: uploadCount })}</span>}
+                {attentionCount > 0 && (
+                  <span style={{ color: "var(--error-fg)" }}>{t("queue.summary.attention", { n: attentionCount })}</span>
+                )}
+                {stoppedCount > 0 && <span>{t("queue.summary.stopped", { n: stoppedCount })}</span>}
+                <span>{t("queue.summary.done", { n: doneCount })}</span>
+              </>
+            }
           />
+          <div className="section-label mb-2.5">{t("queue.section.all")}</div>
         {/* 窄屏(<sm):表格 5+ 列在手机上必然横向溢出且行高爆炸 → 改卡片式,信息不丢。 */}
         <div className="sm:hidden space-y-2">
           {rows.length === 0 ? (

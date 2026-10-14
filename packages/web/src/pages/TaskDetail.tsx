@@ -1,8 +1,8 @@
-import { CalendarClock, CalendarRange, ChevronLeft, Clock3, ExternalLink, MonitorPlay, Terminal } from "lucide-react";
+import { CalendarRange, ChevronLeft, Clock3, ExternalLink, MonitorPlay, Terminal, UploadCloud } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, type Task, type TaskDetail as TaskDetailModel } from "../api/client";
+import { api, type RollingDeliveryDTO, type Task, type TaskDetail as TaskDetailModel } from "../api/client";
 import { serverTimezoneAtom } from "../atoms";
 import { DanmuBadge, StatusBadge } from "../components/Badge";
 import { Button } from "../components/Button";
@@ -12,6 +12,7 @@ import { useT } from "../lib/i18n";
 import { classifyLogLine, LOG_LINE_STYLE } from "../lib/logLevel";
 import { QUALITY_FULL, fmtClock, fmtStartedAt, platformLabel, roomHref, roomId, scheduleText } from "../lib/labels";
 import { localScheduleTooltip, localTimeTooltip } from "../lib/tz";
+import { fmtBytes } from "../lib/nodes-summary";
 import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
 import { MergePanel } from "../components/MergePanel";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -28,6 +29,8 @@ export function TaskDetail(): ReactNode {
   const [logs, setLogs] = useState<string[]>([]);
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
+  /** 该房间的边录边传实时进度(master 队列快照里按房间筛;非 master / 无会话 → 空)。 */
+  const [rolling, setRolling] = useState<RollingDeliveryDTO[]>([]);
 
   const preRef = useRef<HTMLPreElement>(null);
   const autoScrollRef = useRef(true);
@@ -37,6 +40,10 @@ export function TaskDetail(): ReactNode {
       const [tk, l] = await Promise.all([api.getTask(taskId), api.getTaskLogs(taskId)]);
       setTask(tk);
       setLogs(l.lines ?? []);
+      // 边录边传进度来自 master 的队列快照(按房间过滤);节点模式/失败时静默留空,不影响主数据。
+      const slug = roomId(tk.room);
+      const q = await api.getHubQueue({ q: slug || undefined }).catch(() => null);
+      setRolling((q?.delivering ?? []).filter((d) => !slug || d.roomSlug === slug));
     } catch {
       toast(t("tasks.unavailable"), "warning");
       navigate("/");
@@ -85,6 +92,8 @@ export function TaskDetail(): ReactNode {
   // The edit dialog wants a plain Task (no runtime); fall through gracefully.
   const editTask: Task | null = task;
   const sched = task ? scheduleText(task) : null;
+  // 该任务被派到哪些节点(远端受管任务才带 recordingWorkers;无 → 本机自录)。
+  const nodeNames = (task?.recordingWorkers ?? []).map((w) => w.workerName);
 
   return (
     <>
@@ -168,24 +177,31 @@ export function TaskDetail(): ReactNode {
       <div className="telemetry-bar mb-6">
         <div className="telemetry-cell">
           <div className="flex flex-col gap-1.5 min-w-0">
-            <span className="telemetry-label">{t("tasks.quality")}</span>
-            <span className="telemetry-value-sm">{task ? QUALITY_FULL[task.quality] ?? task.quality : "-"}</span>
+            <span className="telemetry-label">{t("tasks.elapsed")}</span>
+            <span className="telemetry-value tabular-nums" style={{ color: task?.recording || task?.running ? "var(--success-fg)" : "var(--muted)" }}>
+              {fmtClock(task?.runtime?.elapsedMs)}
+            </span>
+          </div>
+          <span className="telemetry-icon" style={{ color: task?.recording || task?.running ? "var(--success-fg)" : undefined }}><Clock3 className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <span className="telemetry-label">{t("tasks.nodesBound")}</span>
+            <span className="telemetry-value-sm truncate" title={nodeNames.join(" + ")}>
+              {nodeNames.length > 0 ? nodeNames.join(" + ") : t("tasks.nodesNone")}
+            </span>
           </div>
           <span className="telemetry-icon"><MonitorPlay className="w-4 h-4" /></span>
         </div>
         <div className="telemetry-cell">
           <div className="flex flex-col gap-1.5 min-w-0">
-            <span className="telemetry-label">{t("tasks.elapsed")}</span>
-            <span className="telemetry-value tabular-nums" style={{ color: "var(--success-fg)" }}>{fmtClock(task?.runtime?.elapsedMs)}</span>
+            <span className="telemetry-label">{t("tasks.rollingUpload")}</span>
+            <span className="telemetry-value-sm truncate" style={{ color: task?.rollingPending ? "var(--warning-fg)" : undefined }}
+              title={task?.rollingPending ? t("tasks.rollingPendingHint") : undefined}>
+              {task?.rollingPending ? `⚠ ${t("tasks.rollingPending")}` : task?.rollingEffective ? t("tasks.rollingOn") : t("tasks.rollingOff")}
+            </span>
           </div>
-          <span className="telemetry-icon" style={{ color: "var(--success-fg)" }}><Clock3 className="w-4 h-4" /></span>
-        </div>
-        <div className="telemetry-cell">
-          <div className="flex flex-col gap-1.5 min-w-0">
-            <span className="telemetry-label">{t("tasks.startedAt")}</span>
-            <span className="telemetry-value-mono truncate">{fmtStartedAt(task?.runtime?.startedAt, serverTz)}</span>
-          </div>
-          <span className="telemetry-icon"><CalendarClock className="w-4 h-4" /></span>
+          <span className="telemetry-icon"><UploadCloud className="w-4 h-4" /></span>
         </div>
         <div className="telemetry-cell">
           <div className="flex flex-col gap-1.5 min-w-0">
@@ -202,36 +218,44 @@ export function TaskDetail(): ReactNode {
             <h3 className="section-label">{t("tasks.info")}</h3>
             <span className="font-mono text-[10px] text-muted-soft uppercase">#{taskId}</span>
           </div>
-          <div className="card p-5">
-            <dl className="text-sm">
+          <div className="card p-5 space-y-5">
+            <InfoGroup title={t("tasks.groupLive")}>
               <Row
                 label={t("tasks.room")}
                 mono
                 value={
                   task ? (
-                    <a
-                      href={roomHref(task.room)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-ink hover:underline"
-                      title={t("tasks.openLive")}
-                    >
+                    <a href={roomHref(task.room)} target="_blank" rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-ink hover:underline" title={t("tasks.openLive")}>
                       {roomId(task.room)}
                       <ExternalLink className="w-3.5 h-3.5 opacity-70" />
                     </a>
-                  ) : (
-                    "-"
-                  )
+                  ) : "-"
                 }
               />
               <Row label={t("tasks.anchor")} value={task?.anchorName ?? "-"} />
+              <Row label={t("tasks.savedName")} value={task?.name ?? "-"} />
               <Row label={t("tasks.platform")} mono value={task ? platformLabel(task.platform) : "-"} />
+            </InfoGroup>
+
+            <InfoGroup title={t("tasks.groupRecord")}>
               <Row label={t("tasks.quality")} value={task ? QUALITY_FULL[task.quality] ?? task.quality : "-"} />
               <Row label={t("tasks.recorder")} mono value={task?.engine ?? "-"} />
               <div className="flex justify-between gap-3 py-2.5 border-b border-hairline">
                 <dt className="text-muted">{t("tasks.danmu")}</dt>
                 <dd className="text-right">{task ? <DanmuBadge task={task} /> : "-"}</dd>
               </div>
+              <Row label={t("tasks.giftCookie")} value={task ? (task.useCookie ? t("common.yes") : t("common.no")) : "-"} />
+              <Row
+                label={t("tasks.segmentSec")}
+                mono
+                value={task ? (task.segmentSec > 0 ? t("tasks.segmentUnit", { s: String(task.segmentSec) }) : t("tasks.noSegment")) : "-"}
+              />
+              <Row label={t("tasks.outDir")} mono value={task?.outDir ?? "-"} />
+            </InfoGroup>
+
+            <InfoGroup title={t("tasks.groupRuntime")}>
+              <Row label={t("tasks.nodesBound")} value={nodeNames.length > 0 ? nodeNames.join(" + ") : t("tasks.nodesNone")} />
               <Row
                 label={t("tasks.schedule")}
                 mono
@@ -249,8 +273,6 @@ export function TaskDetail(): ReactNode {
                   )
                 }
               />
-              <Row label={t("tasks.giftCookie")} value={task ? (task.useCookie ? t("common.yes") : t("common.no")) : "-"} />
-              <Row label={t("tasks.outDir")} mono value={task?.outDir ?? "-"} />
               <Row
                 label={t("tasks.startedAt")}
                 mono
@@ -269,7 +291,70 @@ export function TaskDetail(): ReactNode {
                 }
               />
               <Row label={t("tasks.elapsed")} mono value={fmtClock(task?.runtime?.elapsedMs)} />
-            </dl>
+              <Row
+                label={t("tasks.createdAt")}
+                mono
+                value={task ? fmtStartedAt(Date.parse(task.createdAt) || null, serverTz) : "-"}
+              />
+            </InfoGroup>
+
+            {task?.hubRule && (
+              <InfoGroup title={t("tasks.groupPipeline")}>
+                <Row
+                  label={t("tasks.rollingUpload")}
+                  value={
+                    <Link to={`/hub/${encodeURIComponent(task.hubRule.key)}`} className="text-ink hover:underline">
+                      {task.hubRule.uploadMode === "upload"
+                        ? (task.rollingEffective ? t("tasks.rollingOn") : t("tasks.rollingOff"))
+                        : t("tasks.stageOnly")}
+                    </Link>
+                  }
+                />
+                <Row
+                  label={t("tasks.logs")}
+                  value={task.hubRule.enabled
+                    ? task.hubRule.steps.map((st) => stepLabel(t, st)).join(" · ")
+                    : t("tasks.hubDisabled")}
+                />
+                <Row
+                  label={t("tasks.lastRun")}
+                  value={
+                    task.hubRule.lastRun ? (
+                      <Link to={`/hub/${encodeURIComponent(task.hubRule.key)}`} className="text-ink hover:underline">
+                        {t(`hub.jobs.step.${task.hubRule.lastRun.state}`)}
+                        {task.hubRule.lastRun.bv ? ` · ${task.hubRule.lastRun.bv}` : ""}
+                      </Link>
+                    ) : t("hub.jobs.noRunYet")
+                  }
+                />
+                {task.rollingPending && (
+                  <div className="pt-2.5 text-[11px]" style={{ color: "var(--warning-fg)" }}>
+                    ⚠ {t("tasks.rollingPendingHint")}
+                  </div>
+                )}
+              </InfoGroup>
+            )}
+
+            {rolling.length > 0 && (
+              <InfoGroup title={t("tasks.progressTitle")}>
+                {rolling.map((d) => (
+                  <div key={d.sessionBase} className="py-2 border-b border-hairline last:border-0 last:pb-0">
+                    <div className="flex items-center gap-2 text-[12px]">
+                      <span className="font-mono text-muted-soft">{d.sessionBase}</span>
+                      <span className="ml-auto">{t("queue.delivering.progress", { c: d.confirmed, n: d.total })}</span>
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 text-[11px] text-muted font-mono mt-0.5">
+                      {d.uploading && <span>{t("queue.delivering.pending")}</span>}
+                      {typeof d.lockedBytes === "number" && d.lockedBytes > 0 && <span>{fmtBytes(d.lockedBytes)}</span>}
+                      {d.ambiguous > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.delivering.unknown")} {d.ambiguous}</span>}
+                      {d.bv && (
+                        <a className="hover:text-ink" href={`https://www.bilibili.com/video/${d.bv}`} target="_blank" rel="noreferrer">{d.bv}</a>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </InfoGroup>
+            )}
           </div>
         </section>
 
@@ -347,4 +432,21 @@ function Row({
       <dd className={`text-ink text-right break-all ${mono ? "font-mono" : ""}`}>{value}</dd>
     </div>
   );
+}
+
+/** info 卡片里的分组:小标题 + 一组 dl 行(详情页字段多,分组后一眼能扫)。 */
+function InfoGroup({ title, children }: { title: string; children: ReactNode }): ReactNode {
+  return (
+    <div>
+      <div className="section-label mb-1.5">{title}</div>
+      <dl className="text-sm">{children}</dl>
+    </div>
+  );
+}
+
+/** 步骤名 → 标签(与 hub 页同源 i18n key;未知步骤回落原文)。 */
+function stepLabel(t: (key: string, vars?: Record<string, string | number>) => string, step: string): string {
+  const key = `hub.jobs.stepNode.${step}`;
+  const label = t(key);
+  return label === key ? step : label;
 }
