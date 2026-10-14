@@ -3,6 +3,7 @@ import type { Task } from "../api/client";
 import { DANMU_BADGE_CLASS, danmuKind } from "../lib/labels";
 import { useT } from "../lib/i18n";
 import { useTicker } from "../lib/hooks";
+import { PHASE_STYLE, taskPhase } from "../lib/task-status";
 
 interface BadgeProps {
   /** One of the badge-* modifier classes (e.g. "badge-violet"). */
@@ -72,98 +73,22 @@ export function StatusBadge({
   // 本地每秒走一次:否则「N 秒前核对」会冻结在渲染那一刻的数字 —— 推送驱动的页面
   // 恰恰很少重渲染,不自带 ticker 就会出现「永远显示 12s 前」。
   const now = useTicker(1_000);
-  // 已停用优先：用户主动关掉，daemon 不会再拉起。
-  if (!enabled) {
-    return (
-      <Badge tone="badge-neutral">
-        <Dot color="var(--muted-soft)" />
-        {t("badge.disabled")}
-      </Badge>
-    );
-  }
-  // 硬停收尾中（rolling 任务末段上传）优先：进程还在，但用户已经点了停止，不该显示「录制中」。
-  if (stopping) {
-    return (
-      <Badge tone="badge-orange">
-        <Dot color="var(--warning)" pulse />
-        {t("badge.stopping")}
-      </Badge>
-    );
-  }
-  // draining 必须先于 running 判定（排空期间进程仍在跑，running=true）。
-  // 兼容两种来源：窗口结束自动排空 / 手动「停止」→ 都是等当前直播自然收播。
-  if (status === "draining") {
-    return (
-      <Badge tone="badge-orange">
-        <Dot color="var(--warning)" pulse />
-        {t("badge.draining")}
-      </Badge>
-    );
-  }
-  // 远端 worker 在录 → 显示实际录制节点。
-  // 必须排在 draining 之后：排空期间 isRecording 仍为 true,否则会把「排空中」误显示成「录制中」。
-  const activeWorkers = recordingWorkers?.filter((worker) => worker.state === "recording") ?? [];
+  // 判定顺序与配色只写在 taskPhase / PHASE_STYLE 一处(与任务详情页共用),徽标不再自带分支。
+  const phase = taskPhase({ enabled, status, running, recording, stopping, recordingWorkers });
   // T17:远端状态是 SSH 探测的**缓存**,不是实时的。带出「N 秒前核对」,
   // 否则用户把一个 3 分钟前的旧结论当成实时(节点探测失败时缓存会一直是旧值)。
   const staleness = recordingAgeLabel(recordingWorkers, now);
-  if (activeWorkers.length) {
-    return (
-      <Badge tone="badge-success" title={staleness ? t("badge.checkedAgoTitle", { ago: staleness }) : undefined}>
-        <Dot color="var(--success)" pulse />
-        {t("badge.recordingOn", { nodes: activeWorkers.map((worker) => worker.workerName).join(" + ") })}
-        {staleness ? <span className="ml-1 opacity-70">{staleness}</span> : null}
-      </Badge>
-    );
-  }
-  if (recordingWorkers?.length) {
-    const unavailable = recordingWorkers.filter((worker) => worker.state === "unavailable");
-    if (unavailable.length) {
-      return (
-        <Badge tone="badge-error" title={staleness ? t("badge.checkedAgoTitle", { ago: staleness }) : undefined}>
-          <Dot color="var(--error)" />
-          {t("badge.workersUnavailable", { nodes: unavailable.map((worker) => worker.workerName).join(" + ") })}
-          {staleness ? <span className="ml-1 opacity-70">{staleness}</span> : null}
-        </Badge>
-      );
-    }
-    return (
-      <Badge tone="badge-neutral" title={staleness ? t("badge.checkedAgoTitle", { ago: staleness }) : undefined}>
-        <Dot color="var(--muted-soft)" pulse />
-        {t("badge.workersIdle", { nodes: recordingWorkers.map((worker) => worker.workerName).join(" + ") })}
-        {staleness ? <span className="ml-1 opacity-70">{staleness}</span> : null}
-      </Badge>
-    );
-  }
-  if (running) {
-    // 进程在跑但还没拿到流（轮询开播 / 重连中）→ 「等待开播中」，不要误显示录制中。
-    if (recording === false) {
-      return (
-        <Badge tone="badge-neutral">
-          <Dot color="var(--muted-soft)" pulse />
-          {t("badge.waiting")}
-        </Badge>
-      );
-    }
-    return (
-      <Badge tone="badge-success">
-        <Dot color="var(--success)" pulse />
-        {t("badge.recording")}
-      </Badge>
-    );
-  }
-  if (status === "error") {
-    return (
-      <Badge tone="badge-error">
-        <Dot color="var(--error)" />
-        {t("badge.error")}
-      </Badge>
-    );
-  }
-  // 已启用但当前没在录：等窗口 / 等开播。
+  const style = PHASE_STYLE[phase.kind];
+  const allWorkers = (recordingWorkers ?? []).map((w) => w.workerName);
+  const nodes = phase.kind === "recording" && phase.recordingNodes.length > 0 ? phase.recordingNodes
+    : phase.kind === "offline" ? phase.unavailableNodes
+      : phase.kind === "waiting" && allWorkers.length > 0 ? allWorkers
+        : [];
   return (
-    <Badge tone="badge-neutral">
-      <Dot color="var(--muted-soft)" />
-      {t("badge.idle")}
+    <Badge tone={style.tone} title={staleness ? t("badge.checkedAgoTitle", { ago: staleness }) : undefined}>
+      <Dot color={style.dot} pulse={style.pulse} />
+      {nodes.length > 0 ? t(phase.textKey, { nodes: nodes.join(" + ") }) : t(phase.textKey)}
+      {staleness ? <span className="ml-1 opacity-70">{staleness}</span> : null}
     </Badge>
   );
 }

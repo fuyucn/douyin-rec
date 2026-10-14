@@ -83,8 +83,7 @@ export function NodesStrip({ delivering }: { delivering: readonly RollingDeliver
                     {n.diskLow ? "⚠ " : ""}{t("queue.nodes.disk", { gb: n.diskFreeGB.toFixed(1) })}
                   </span>
                 )}
-                {n.rollingSessions > 0 && <span>{t("queue.nodes.rolling", { n: n.rollingSessions })}</span>}
-                {n.lockedBytes > 0 && <span className="font-mono">{t("queue.nodes.locked", { size: fmtBytes(n.lockedBytes) })}</span>}
+                {/* 会话级进度已在下面的房间行里逐条给出,这里不重复「N 场 / 多少 MB」。 */}
                 {n.ambiguous > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.delivering.unknown")} {n.ambiguous}</span>}
               </div>
               {/* 分配到该节点的房间:状态 + 边录边传进度,不用点进别处才知道节点在干什么。 */}
