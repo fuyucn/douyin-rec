@@ -52,6 +52,10 @@ class MockManager implements ManagerLike {
     if (this.stopError) throw this.stopError;
     this.running.delete(id);
   }
+  async stopWithin(id: number, _ms: number): Promise<boolean> {
+    await this.stop(id);
+    return true;
+  }
   readonly gracefulCalls: number[] = [];
   async stopGraceful(id: number): Promise<void> {
     this.gracefulCalls.push(id);
@@ -654,6 +658,15 @@ describe("stopTask", () => {
     expect(manager.stopCalls).toEqual([a.id]);   // 硬停（用户主动停=立即）
     expect(manager.gracefulCalls).toEqual([]);    // 不走优雅排空
     expect(store.getTask(a.id)!.enabled).toBe(false); // 停用 → daemon 不再拉起
+  });
+
+  it("停止超时仍在收尾(rolling 末段上传中)→ 照常 200 且 enabled=false,不回滚、不报错", async () => {
+    const a = store.addTask({ room: "112", enabled: true });
+    manager.forceRunning(a.id);
+    manager.stopWithin = async () => false; // 模拟 15 秒内未退出
+    const res = await api.stopTask(a.id);
+    expect(res.status).toBe(200);
+    expect(store.getTask(a.id)!.enabled).toBe(false);
   });
 
   it("404 for missing task", async () => {

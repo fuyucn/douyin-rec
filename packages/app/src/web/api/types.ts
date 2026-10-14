@@ -24,6 +24,8 @@ export interface ManagerLike {
   isRunning(id: number): boolean;
   start(id: number): boolean;
   stop(id: number): Promise<void>;
+  /** 硬停并最多等 ms:true = 已退出,false = 超时仍在收尾(停止进行中)。 */
+  stopWithin(id: number, ms: number): Promise<boolean>;
   /** Window-end / disable drain: stop looking for new streams, let current finish. */
   stopGraceful(id: number): Promise<void>;
   /** Live runtime (running + startedAt + elapsedMs) for the 详情 page. */

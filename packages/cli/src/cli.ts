@@ -1136,7 +1136,7 @@ const hubStarter: HubStarter = {
                     return false;
                   }
                 });
-                if (task && opts.manager.isRunning(task.id)) await opts.manager.stop(task.id);
+                if (task && opts.manager.isRunning(task.id)) opts.manager.requestStop(task.id); // 不等退出,避免卡住同步 tick
               }
             }
             if (r.applied.length > 0 || r.removed.length > 0 || r.pending.length > 0) {

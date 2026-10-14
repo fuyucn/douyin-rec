@@ -190,7 +190,7 @@ export class TaskDaemon {
         this.log(
           `[scheduler] ⏹ 任务 id=${id}（${t?.name ?? t?.room ?? id}）已由 hub 规则切到其他节点录制,本机停止(源任务仅作配置模板)`,
         );
-        await this.manager.stop(id);
+        this.manager.requestStop(id); // 不等退出:rolling 任务的停止最长约 10 分钟,不能卡住整个 tick
       }
       tasks = tasks.filter((t) => !suppressed.has(t.id));
       const { start, stop } = decide(tasks, this.now(), active);

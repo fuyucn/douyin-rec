@@ -212,8 +212,19 @@ export class TaskManager {
     return true;
   }
 
+  /** 正在硬停的任务 → 共用同一个 promise(重复调用不重复发信号)。 */
+  private readonly stopping = new Map<number, Promise<void>>();
+
   /** Hard stop; marks the exit expected; status → 'stopped'. Overrides a drain. */
-  async stop(taskId: number): Promise<void> {
+  stop(taskId: number): Promise<void> {
+    const inflight = this.stopping.get(taskId);
+    if (inflight) return inflight;
+    const p = this.stopInner(taskId).finally(() => { this.stopping.delete(taskId); });
+    this.stopping.set(taskId, p);
+    return p;
+  }
+
+  private async stopInner(taskId: number): Promise<void> {
     const proc = this.procs.get(taskId);
     // Reset restart budget so an in-flight restart timer becomes a no-op.
     this.restarts.delete(taskId);
@@ -222,6 +233,31 @@ export class TaskManager {
     this.logTask(taskId, `[task_manager] ■ 停止任务 id=${taskId}`);
     await proc.stop();
     // onExit (expected) handler sets status + clears the map entry.
+  }
+
+  /**
+   * 发起硬停但**不等待退出**(边录边传任务的停止要给末段上传最长约 10 分钟,不能让 daemon tick /
+   * hub 同步 tick 同步等这么久)。退出由 onExit 收尾;失败只记日志。重复调用共用同一次停止。
+   */
+  requestStop(taskId: number): void {
+    this.stop(taskId).catch((e) => {
+      this.logTask(taskId, `[task_manager] 停止任务失败: ${(e as Error)?.message ?? e}`);
+    });
+  }
+
+  /**
+   * 硬停并最多等 `ms`:返回 true = 已退出,false = 超时仍在收尾(进程仍在停止中,不再回滚)。
+   * 供同步 API(Web 停止 / 远端 `_apply-tasks` 硬停通道)用:普通任务几秒内退出,行为与之前一致;
+   * rolling 任务不会把请求挂满整个上传宽限。
+   */
+  async stopWithin(taskId: number, ms: number): Promise<boolean> {
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = await Promise.race([
+      this.stop(taskId).then(() => false),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), ms); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    return !timedOut;
   }
 
   /**
