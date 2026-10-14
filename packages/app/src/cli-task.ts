@@ -250,6 +250,7 @@ export interface HubStarter {
       isRecording(id: number): boolean;
       isRunning(id: number): boolean;
       stop(id: number): Promise<void>;
+      requestStop(id: number): void;
     };
     onEvent: (e: import("@drec/core").NotifyEvent) => void;
     log: (msg: string) => void;

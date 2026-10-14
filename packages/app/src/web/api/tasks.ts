@@ -12,6 +12,9 @@ import type { CreateTaskInput, UpdateTaskInput, TaskView } from "./types.js";
 import type { TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
 
+/** Web 停止请求最多同步等待的时间(ms)。普通任务几秒内退出;rolling 任务可能在传末段,超时先返回。 */
+const STOP_WAIT_MS = 15_000;
+
 export function buildTasks(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
     err, isHubSourceTask, resolveAnchorBg, view, detailView, normWebhook, toUseCookie } = ctx;
@@ -209,7 +212,8 @@ export function buildTasks(ctx: ApiCtx) {
       }
       try {
         store.setEnabled(id, false);
-        if (manager.isRunning(id)) await manager.stop(id);
+        // 最多等 STOP_WAIT_MS:普通任务几秒内退出;rolling 任务要给末段上传留时间,超时就先返回(仍在停止中)。
+        if (manager.isRunning(id)) await manager.stopWithin(id, STOP_WAIT_MS);
       } catch (e) {
         try { store.setEnabled(id, true); } catch { /* 回滚失败以原始错误为准 */ }
         return err(500, `停止任务失败: ${(e as Error).message}`);
