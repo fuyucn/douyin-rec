@@ -1,0 +1,17 @@
+{
+  "platform": "douyin",
+  "workerSeq": 2,
+  "workers": [
+    { "id": "local", "name": "dev controller(本机)", "kind": "local", "dataRoot": "/output-data" },
+    { "id": "node-1", "name": "dev node 1", "kind": "tailscale-ssh", "host": "__NODE1__", "dataRoot": "/output-data" },
+    { "id": "node-2", "name": "dev node 2", "kind": "tailscale-ssh", "host": "__NODE2__", "dataRoot": "/output-data" }
+  ],
+  "cookies": "/output-data/config/biliup/cookies.json",
+  "stageDir": "/output-data/stage",
+  "cleanMaxGapSec": 30,
+  "reconnectWindowMs": 600000,
+  "settleMs": 20000, "pollMs": 3000, "reconcileIntervalMs": 60000,
+  "maxWaitSec": 120, "settleSec": 5,
+  "resources": { "maxCpuParallel": 1, "maxNetParallel": 1, "uploadRateLimit": 5, "uploadRateWindowMs": 600000, "uploadCooldownMs": 1800000 },
+  "uploadDefaults": { "tag": "dev,e2e", "tid": 21, "titleTemplate": "{name}_{date}" }
+}

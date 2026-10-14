@@ -54,3 +54,6 @@ logs/
 # Python 字节码缓存
 __pycache__/
 *.pyc
+
+# dev 多节点 e2e 数据根(issue #82)
+data-dev/
