@@ -6,7 +6,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RecordingSession } from "@drec/manager";
+import { RecordingSession, SAME_BROADCAST_WINDOW_MS } from "@drec/manager";
 import type { AdmitDecision, Notifier, NotifyEvent, Recorder, RecorderEvents, RecordOpts } from "@drec/core";
 
 /** 记录每次 start 收到的 opts(含 admit),由测试驱动「开播 / 断流」。 */
@@ -126,6 +126,65 @@ describe("新一场开播准入(会话层)", () => {
     await sess.start("https://live.douyin.com/1", makeOpts(), { anchorName: "" });
     expect(rec.opts.admit!().ok).toBe(true);
     expect(diskAlerts(events)).toHaveLength(0);
+    await sess.stop();
+  });
+});
+
+describe("同场重连标志的有效窗口 / 去重键(审计返工)", () => {
+  it("窗口内仍按同场放行;超过窗口(例如收播判活滞后,几小时后的下一场)重新问闸门", async () => {
+    vi.useFakeTimers();
+    const gate = vi.fn((): AdmitDecision => DENY);
+    const { rec, sess } = setup(gate);
+    await sess.start("https://live.douyin.com/1", makeOpts(), { anchorName: "" });
+    rec.goLive();
+    rec.isLiveResults = [true];          // 收播那刻判活滞后/抛错 → 被记成「仍在播」
+    rec.ev.onOffline();
+    await vi.runAllTimersAsync();
+    gate.mockClear();
+    expect(rec.opts.admit!().ok).toBe(true);           // 窗口内:同场,放行且不问闸门
+    expect(gate).not.toHaveBeenCalled();
+    vi.setSystemTime(Date.now() + SAME_BROADCAST_WINDOW_MS + 1_000);
+    expect(rec.opts.admit!().ok).toBe(false);          // 超窗:按新一场处理
+    expect(gate).toHaveBeenCalledTimes(1);
+    await sess.stop();
+  });
+
+  it("isLive 抛错(落成「仍在播」)后,几小时后的新一场不能绕过闸门", async () => {
+    vi.useFakeTimers();
+    const gate = vi.fn((): AdmitDecision => DENY);
+    const { rec, sess } = setup(gate);
+    rec.isLive = async () => { throw new Error("api down"); };
+    await sess.start("https://live.douyin.com/1", makeOpts(), { anchorName: "" });
+    rec.goLive();
+    rec.ev.onOffline();
+    await vi.runAllTimersAsync();
+    vi.setSystemTime(Date.now() + 3 * 3600_000);
+    expect(rec.opts.admit!().ok).toBe(false);
+    await sess.stop();
+  });
+
+  it("去重键:reason 里的实时剩余空间变化不重复告警;key 变了才再告警", async () => {
+    let free = 9.9;
+    let key = "disk-below-watermark:10.0";
+    const { rec, sess, events } = setup(() => ({ ok: false, reason: `剩余 ${free.toFixed(1)}GB`, key }));
+    await sess.start("https://live.douyin.com/1", makeOpts(), { anchorName: "" });
+    for (let i = 0; i < 4; i++) { rec.opts.admit!(); free -= 0.1; }
+    expect(diskAlerts(events)).toHaveLength(1);
+    key = "disk-below-watermark:15.0";
+    rec.opts.admit!();
+    expect(diskAlerts(events)).toHaveLength(2);
+    await sess.stop();
+  });
+
+  it("无 key 时回落按 reason 去重(旧闸门实现向后兼容)", async () => {
+    let n = 1;
+    const { rec, sess, events } = setup(() => ({ ok: false, reason: `r${n}` }));
+    await sess.start("https://live.douyin.com/1", makeOpts(), { anchorName: "" });
+    rec.opts.admit!(); rec.opts.admit!();
+    expect(diskAlerts(events)).toHaveLength(1);
+    n = 2;
+    rec.opts.admit!();
+    expect(diskAlerts(events)).toHaveLength(2);
     await sess.stop();
   });
 });

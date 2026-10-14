@@ -28,7 +28,7 @@ export type { ManagedState } from "./managed-state.js";
 export { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
 /** 应用版本号({root package.json version}-{commit6},由 pnpm bundle 注入;非打包环境回落 dev)。 */
 export { APP_VERSION } from "./version.js";
-export { makeNewBroadcastGate, checkNewBroadcastAdmission, volumeFreeBytes } from "./disk-gate.js";
+export { makeNewBroadcastGate, checkNewBroadcastAdmission, volumeFreeBytes, effectiveHubConfigPath, makeManualStartAdmit } from "./disk-gate.js";
 export type { NewBroadcastGateOpts } from "./disk-gate.js";
 export { makeNotifier, NullNotifier, formatMessage } from "@drec/observability";
 export {

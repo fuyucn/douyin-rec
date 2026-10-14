@@ -5,8 +5,9 @@
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
-import { checkNewBroadcastAdmission, makeNewBroadcastGate, volumeFreeBytes } from "../../packages/app/src/disk-gate.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { checkNewBroadcastAdmission, effectiveHubConfigPath, makeManualStartAdmit, makeNewBroadcastGate, volumeFreeBytes } from "../../packages/app/src/disk-gate.js";
+import { rootHubConfig } from "../../packages/app/src/paths.js";
 
 const GB = 1e9;
 const cfg = (diskMinGB: unknown): string => JSON.stringify({ resources: { diskMinGB } });
@@ -90,5 +91,48 @@ describe("volumeFreeBytes", () => {
     const root = mkdtempSync(join(tmpdir(), "gate-vol2-"));
     mkdirSync(join(root, "a"));
     expect(volumeFreeBytes(join(root, "a"))).toBeGreaterThan(0);
+  });
+});
+
+describe("拒绝决定带稳定去重键", () => {
+  it("key 只含水位、不含实时剩余;剩余变化 key 不变,水位变化 key 才变", () => {
+    const k = (free: number, min: number) => {
+      const d = checkNewBroadcastAdmission(base({ readConfig: () => cfg(min), freeBytes: () => free * GB }));
+      return d.ok ? null : d.key;
+    };
+    expect(k(9.9, 10)).toBe(k(9.5, 10));
+    expect(k(9.9, 10)).not.toBe(k(9.9, 15));
+    expect(k(9.9, 10)).toContain("10.0");
+  });
+});
+
+describe("hub 配置路径口径(子进程 / 手动启动 / daemon 同源)", () => {
+  const saved = process.env.DOUYIN_REC_HUB_CONFIG;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.DOUYIN_REC_HUB_CONFIG; else process.env.DOUYIN_REC_HUB_CONFIG = saved;
+  });
+
+  it("环境变量优先(serve --hub-config <文件> 传给子进程);未设 → 数据根默认文件", () => {
+    delete process.env.DOUYIN_REC_HUB_CONFIG;
+    expect(effectiveHubConfigPath()).toBe(rootHubConfig());
+    process.env.DOUYIN_REC_HUB_CONFIG = "/custom/hub.json";
+    expect(effectiveHubConfigPath()).toBe("/custom/hub.json");
+    process.env.DOUYIN_REC_HUB_CONFIG = "   ";
+    expect(effectiveHubConfigPath()).toBe(rootHubConfig());
+  });
+
+  it("makeManualStartAdmit:测任务自己的输出目录(缺省回落默认目录),并读 effectiveHubConfigPath", () => {
+    process.env.DOUYIN_REC_HUB_CONFIG = "/custom/hub.json";
+    const seen: { dir: string; cfgPath: string }[] = [];
+    const admit = makeManualStartAdmit((d) => d ?? "/default/out", {
+      readConfig: (p) => { seen.push({ dir: "", cfgPath: p }); return cfg(15); },
+      freeBytes: (dir) => { seen[seen.length - 1]!.dir = dir; return 1 * GB; },
+    });
+    expect(admit("/mnt/task-disk").ok).toBe(false);
+    expect(admit(undefined).ok).toBe(false);
+    expect(seen).toEqual([
+      { dir: "/mnt/task-disk", cfgPath: "/custom/hub.json" },
+      { dir: "/default/out", cfgPath: "/custom/hub.json" },
+    ]);
   });
 });

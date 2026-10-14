@@ -271,7 +271,7 @@ export interface WebServerDeps {
   /** 立即触发一次 hub 任务同步(规则/worker 变更后调用,不用等周期 tick)。force=跳过节点骤减安全阀。 */
   requestSyncTasks?: (opts?: { force?: boolean }) => void;
   /** 手动启动任务的磁盘水位准入(见 ApiDeps.admitStart)。省略 = 不检查。 */
-  admitStart?: () => { ok: true } | { ok: false; reason: string };
+  admitStart?: (taskOutDir?: string | null) => { ok: true } | { ok: false; reason: string };
   /** master 本机抑制名单(源任务切到远端录制→本机不实跑);透传给 web API。 */
   localSuppressedIds?: () => ReadonlySet<number>;
   /** 手动重跑单个 workflow 节点(CLI 注入)。省略 → 端点返回「hub 未启用」。 */

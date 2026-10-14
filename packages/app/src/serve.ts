@@ -20,7 +20,7 @@ import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
 import { makeNotifier, resolveWebhookToggles } from "@drec/observability";
 import { TaskDaemon, resolveDiskWatermark } from "./daemon.js";
-import { checkNewBroadcastAdmission } from "./disk-gate.js";
+import { makeManualStartAdmit } from "./disk-gate.js";
 import { TaskManager } from "./task-manager.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
@@ -175,6 +175,12 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // → 白白空转 1s 定时器、永远不推。不注入则该路由显式 503(而非静默 404/空流)。
     hubWatch = hubEnabled ? new HubWatch(syncDbPath, { log: (m) => serveLog.info(m) }) : null;
     hubWatch?.start();
+    // 录制子进程继承本进程环境:serve 用 `--hub-config <文件>` 时把该文件路径告诉子进程,
+    // 使子进程的磁盘水位闸门与 serve(手动启动 / daemon)读同一份配置(issue #96)。
+    {
+      const hubSrc = resolveHubConfig(o.hubConfig, store);
+      if (hubSrc.source === "arg-file" && hubSrc.path) process.env.DOUYIN_REC_HUB_CONFIG = hubSrc.path;
+    }
     const server = createWebServer({
       store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(),
       // T15:告诉 API「master 实际在用哪份 hub 配置」—— UI 改 resources 必须写回那一份,
@@ -190,11 +196,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       poolSnapshot: hubEnabled ? hubStarter?.poolSnapshot : undefined,
       requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
       // 手动启动的磁盘水位准入(issue #96):与 daemon 同源的水位配置,每次现读(热改生效);测默认输出目录所在卷。
-      admitStart: () => checkNewBroadcastAdmission({
-        outDir: resolveOutputDir(undefined),
-        hubConfigPath: rootHubConfig(),
-        readConfig: () => resolveHubConfigJson(o.hubConfig, store),
-      }),
+      // 与录制子进程同一份水位配置(effectiveHubConfigPath)与同一目录口径(任务自己的 outDir)。
+      admitStart: makeManualStartAdmit((d) => resolveOutputDir(d ?? undefined)),
       // 与 daemon 同源:规则把源任务交给远端(workers 不含 local)时,本机不实跑。
       // 能力门控(T-10):远端还需满足规则的 requires 才算「有人接」(与 reconciler 同判定)。
       localSuppressedIds: hubEnabled

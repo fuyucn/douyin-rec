@@ -223,8 +223,9 @@ export class PollingRecorder implements Recorder {
         let decision: AdmitDecision = { ok: true };
         try { decision = this.admit?.() ?? decision; } catch { /* 放行 */ }
         if (!decision.ok) {
-          if (decision.reason !== this.lastAdmitDenied) {
-            this.lastAdmitDenied = decision.reason;
+          const dedupeKey = decision.key ?? decision.reason;
+          if (dedupeKey !== this.lastAdmitDenied) {
+            this.lastAdmitDenied = dedupeKey;
             log.warn(`新一场开播被准入闸门拒绝:${decision.reason}(保持等待,条件恢复后自动开始)`);
           }
           this.scheduleNextPoll();

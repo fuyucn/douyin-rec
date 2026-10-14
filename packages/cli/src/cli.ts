@@ -244,10 +244,10 @@ program
     }
     // 新一场开播的磁盘水位闸门(issue #96):常驻任务的下一场开播此前不过闸门,低水位后仍会开新一场直至写满盘。
     // 每次判定现读 hub 配置(水位热改生效)并测**任务自己的输出目录**所在卷;只拦新一场,同场重连放行。
-    const { makeNewBroadcastGate, rootHubConfig } = await import("@drec/app");
+    const { makeNewBroadcastGate, effectiveHubConfigPath } = await import("@drec/app");
     const admitNewBroadcast = makeNewBroadcastGate({
       outDir: opts.outDir,
-      hubConfigPath: rootHubConfig(),
+      hubConfigPath: effectiveHubConfigPath(),
       warn: (m: string) => console.warn(m),
     });
     const session = new RecordingSession(recorder, { reconnectDelaySec, notifier, danmuEnabled, makeRolling, admitNewBroadcast });

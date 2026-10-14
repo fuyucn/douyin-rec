@@ -49,7 +49,13 @@ export interface RecordOpts {
 }
 
 /** 准入判定:放行,或带原因拒绝(原因会进日志与告警)。 */
-export type AdmitDecision = { ok: true } | { ok: false; reason: string };
+export type AdmitDecision =
+  | { ok: true }
+  /**
+   * `reason` 是给人看的完整说明(可含实时数值);`key` 是**稳定的去重键**(不含实时数值)。
+   * 告警 / 日志按 `key ?? reason` 去重:否则剩余空间每变 0.1GB 就当成新原因、每轮轮询都发一条。
+   */
+  | { ok: false; reason: string; key?: string };
 
 export interface RecorderEvents {
   /**

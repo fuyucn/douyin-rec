@@ -13,6 +13,16 @@ import { existsSync, readFileSync, statfsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { shouldRefuseNewRecording, type AdmitDecision } from "@drec/core";
 import { resolveDiskWatermark } from "./daemon.js";
+import { rootHubConfig } from "./paths.js";
+
+/**
+ * 录制子进程 / 手动启动共用的 hub 配置路径:serve 用 `--hub-config <文件>` 时会把该文件路径写进
+ * 环境变量(子进程继承),这样子进程与 serve 读同一份水位配置;否则读数据根下的默认文件。
+ * 已知限制:hub 配置存在 settings 表里时,子进程读不到(daemon 读得到)→ 子进程按默认 10GB。
+ */
+export function effectiveHubConfigPath(): string {
+  return process.env.DOUYIN_REC_HUB_CONFIG?.trim() || rootHubConfig();
+}
 
 export interface NewBroadcastGateOpts {
   /** 任务自己的输出目录(录像最终落在其下的子目录);测它所在的卷,而不是默认输出目录所在卷。 */
@@ -56,6 +66,21 @@ function defaultReadConfig(path: string): string | undefined {
   }
 }
 
+/**
+ * 手动启动(Web/API)用的准入:测**任务自己的输出目录**(缺省回落默认输出目录),
+ * 水位读 {@link effectiveHubConfigPath}——与录制子进程同一份配置、同一目录口径。
+ */
+export function makeManualStartAdmit(
+  resolveOut: (taskOutDir?: string | null) => string,
+  over: Partial<NewBroadcastGateOpts> = {},
+): (taskOutDir?: string | null) => AdmitDecision {
+  return (taskOutDir) => checkNewBroadcastAdmission({
+    outDir: resolveOut(taskOutDir),
+    hubConfigPath: effectiveHubConfigPath(),
+    ...over,
+  });
+}
+
 /** 判定:剩余低于水位 → `{ok:false, reason}`;其余(含查不到、阈值关闭)→ `{ok:true}`。 */
 export function checkNewBroadcastAdmission(o: NewBroadcastGateOpts): AdmitDecision {
   const read = o.readConfig ?? defaultReadConfig;
@@ -67,6 +92,8 @@ export function checkNewBroadcastAdmission(o: NewBroadcastGateOpts): AdmitDecisi
   return {
     ok: false,
     reason: `任务输出目录所在磁盘剩余 ${(free / 1e9).toFixed(1)}GB,低于水位 ${(watermark / 1e9).toFixed(1)}GB`,
+    // 去重键只含水位(配置值),不含实时剩余空间:剩余每变化 0.1GB 不应被当成新原因而重复告警。
+    key: `disk-below-watermark:${(watermark / 1e9).toFixed(1)}`,
   };
 }
 

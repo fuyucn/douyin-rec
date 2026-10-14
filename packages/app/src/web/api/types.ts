@@ -91,7 +91,7 @@ export interface ApiDeps {
    * 手动启动任务时的磁盘水位准入(issue #96):低于水位 → 启动接口返回明确错误,不改任务状态。
    * 常驻任务的新一场开播另由录制子进程自己的闸门拦截。省略 = 不检查(行为不变)。
    */
-  admitStart?: () => { ok: true } | { ok: false; reason: string };
+  admitStart?: (taskOutDir?: string | null) => { ok: true } | { ok: false; reason: string };
   /** biliup cookies.json 路径;省略回落 DEFAULT_COOKIES(测试注入用)。 */
   biliupCookiesPath?: string;
   /** 连接测试(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
