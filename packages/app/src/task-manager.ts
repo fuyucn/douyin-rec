@@ -98,6 +98,12 @@ export class TaskManager {
   private readonly anchorNames = new Map<number, string>();
   /** taskId → 是否真正在录视频（从 `[状态] 录制中/等待开播` 解析）。区分「录制中」vs「等待开播中」。 */
   private readonly recordingPhase = new Map<number, boolean>();
+  /**
+   * taskId → 子进程 **spawn 时** 带的边录边传值(issue #89)。`--rolling-upload` 是启动参数,进程常驻期间不会变;
+   * 库里的 `rollingEffective` 之后被 hub 同步/规则编辑改了,在跑的进程并不知道 → 必须记下「实际生效的」才能比对漂移。
+   * 仅在跑时存在。
+   */
+  private readonly appliedRolling = new Map<number, boolean>();
 
   constructor(store: TaskStore, spawner: Spawner, opts: TaskManagerOpts = {}) {
     this.store = store;
@@ -164,6 +170,30 @@ export class TaskManager {
   /** 是否真正在录视频（true=录制中；false=进程在跑但等待开播/重连中）。 */
   isRecording(taskId: number): boolean {
     return this.recordingPhase.get(taskId) ?? false;
+  }
+
+  /**
+   * 边录边传「实际生效 vs 期望」(issue #89)。**不在跑 → null**(下次 spawn 自然取最新值,无漂移可言)。
+   * `applied` = 子进程 spawn 时带的值;`desired` = 库里当前的 `rollingEffective`(与 buildRecordArgs 同一来源);
+   * `drift` = 两者不一致,即「库里说生效但进程没带参数」(或反过来)。
+   */
+  rollingStatus(taskId: number): { applied: boolean; desired: boolean; drift: boolean } | null {
+    const applied = this.appliedRolling.get(taskId);
+    if (applied === undefined || !this.procs.has(taskId)) return null;
+    const desired = !!this.store.getTask(taskId)?.rollingEffective;
+    return { applied, desired, drift: applied !== desired };
+  }
+
+  /**
+   * 为应用新的启动参数而**停掉**一个空闲任务(issue #89)。只在「进程在跑、没在录、没在排空」时才动手,
+   * 否则返回 false 且什么都不做 —— 绝不腰斩直播。**只停不起**:重新拉起由调用方(daemon)按
+   * 启用/窗口/磁盘闸门/hub 抑制统一决定,避免这里绕过那些判定把已停用的任务又起来。
+   */
+  async stopIdleForConfig(taskId: number, reason: string): Promise<boolean> {
+    if (!this.procs.has(taskId) || this.isRecording(taskId) || this.draining.has(taskId)) return false;
+    this.logTask(taskId, `[task_manager] ↻ 任务 id=${taskId} ${reason},当前空闲,重启以应用新参数`);
+    await this.stop(taskId);
+    return true;
   }
 
   /** Spawn the task if not already running. Returns false if running/missing. */
@@ -269,6 +299,7 @@ export class TaskManager {
     const proc = this.spawner.spawn(effective);
     this.procs.set(taskId, proc);
     this.startedAt.set(taskId, this.clock());
+    this.appliedRolling.set(taskId, !!task.rollingEffective);
     // 新一轮录制：清掉上轮抓到的主播名（重新解析）。若任务已设 name 则以 name 优先（见 view）。
     this.anchorNames.delete(taskId);
     // 刚启动是「等待开播」（录制器在轮询开播，还没拿到流）→ recording=false。
@@ -312,6 +343,7 @@ export class TaskManager {
     this.procs.delete(taskId);
     this.startedAt.delete(taskId);
     this.recordingPhase.delete(taskId);
+    this.appliedRolling.delete(taskId);
     const wasDraining = this.draining.delete(taskId);
 
     if (info.expected) {

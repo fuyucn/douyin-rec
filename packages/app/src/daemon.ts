@@ -52,6 +52,12 @@ export interface DaemonOpts {
 export { DEFAULT_DISK_MIN_GB };
 
 /**
+ * 边录边传漂移(issue #89)重启前要求的**连续空闲 tick 数**。tick=60s,故至少空闲 ~2 分钟:
+ * 避开「刚收播 / 断流重连退避中」这种 recording 暂时为 false 的瞬态,免得把还会续上的一场腰斩成两个会话。
+ */
+export const ROLLING_DRIFT_IDLE_TICKS = 2;
+
+/**
  * 由 hub 配置 JSON 解出 daemon 的磁盘水位(字节)。纯函数。
  *
  * worker 节点没有 hub 全局配置(只有 example 模板)→ 读不到 `resources.diskMinGB` 时
@@ -137,6 +143,12 @@ export class TaskDaemon {
   private stopped = false;
   /** taskIds already warned about overrunning into a fresh window (dedupe the log). */
   private readonly warnedReentry = new Set<number>();
+  /** 边录边传漂移:任务 id → 已连续空闲的 tick 数(录制中/排空中/无漂移即清零)。 */
+  private readonly driftIdle = new Map<number, number>();
+  /** 漂移但正在录制/排空而暂缓重启的任务(只在首次告警,漂移消失后复位)。 */
+  private readonly warnedDrift = new Set<number>();
+  /** 因磁盘低水位暂缓漂移重启而告警过的任务(同上,避免刷屏)。 */
+  private readonly warnedDriftDisk = new Set<number>();
 
   constructor(store: TaskStore, manager: TaskManager, opts: DaemonOpts = {}) {
     this.store = store;
@@ -233,10 +245,57 @@ export class TaskDaemon {
           this.warnedReentry.delete(t.id);
         }
       }
+
+      await this.reconcileRollingDrift(tasks, refuseStart);
     } catch (err) {
       this.log(`[scheduler] tick 出错: ${String(err)}`);
     } finally {
       this.ticking = false;
+    }
+  }
+
+  /**
+   * 边录边传漂移收敛(issue #89):`--rolling-upload` 是子进程启动参数,规则/同步改了库里的生效值后,
+   * 常驻进程并不知道(曾导致「界面显示生效、实际从没传」)。这里每 tick 比对「spawn 时带的 vs 库里现值」:
+   *   - 在录/排空中:**绝不重启**,只告警一次(视图同时标「待重启生效」),等本场自然收播;
+   *   - 空闲且连续 ≥ {@link ROLLING_DRIFT_IDLE_TICKS} 个 tick:停掉再按现值拉起(拉起前再过一遍磁盘低水位闸门);
+   *   - 只处理「启用且在窗口内」的任务:窗口外的由上面的 stopGraceful 收尾,停用的不该被拉起。
+   * 两个方向都收敛:关掉边录边传(如规则改多节点)后旧进程若继续按段上传,会绕过重复投稿闸门。
+   */
+  private async reconcileRollingDrift(tasks: Task[], refuseStart: boolean): Promise<void> {
+    const nowMin = nowMinutesLocal(this.now());
+    for (const t of tasks) {
+      const st = this.manager.rollingStatus(t.id);
+      if (!st || !st.drift) {
+        this.driftIdle.delete(t.id);
+        this.warnedDrift.delete(t.id);
+        this.warnedDriftDisk.delete(t.id);
+        continue;
+      }
+      if (!t.enabled || !inWindow(nowMin, t.scheduleStart, t.scheduleEnd)) continue;
+      const label = `${t.name ?? t.room}`;
+      const change = `边录边传生效值已变(进程带 ${st.applied ? "开" : "关"} → 现值 ${st.desired ? "开" : "关"})`;
+      if (this.manager.isRecording(t.id) || this.manager.isDraining(t.id)) {
+        this.driftIdle.delete(t.id);
+        if (!this.warnedDrift.has(t.id)) {
+          this.warnedDrift.add(t.id);
+          this.log(`[scheduler] ⏳ 任务 id=${t.id}（${label}）${change},正在录制/排空,本场结束后自动重启生效(不腰斩直播)`);
+        }
+        continue;
+      }
+      const idle = (this.driftIdle.get(t.id) ?? 0) + 1;
+      this.driftIdle.set(t.id, idle);
+      if (idle < ROLLING_DRIFT_IDLE_TICKS) continue;
+      if (refuseStart) {
+        if (!this.warnedDriftDisk.has(t.id)) {
+          this.warnedDriftDisk.add(t.id);
+          this.log(`[scheduler] ⛔ 任务 id=${t.id}（${label}）${change},但磁盘低于水位,暂缓重启(回升后自动应用)`);
+        }
+        continue;
+      }
+      this.driftIdle.delete(t.id);
+      this.warnedDriftDisk.delete(t.id);
+      if (await this.manager.stopIdleForConfig(t.id, change)) this.manager.start(t.id);
     }
   }
 

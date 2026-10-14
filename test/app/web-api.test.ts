@@ -285,6 +285,24 @@ describe("listTasks", () => {
     expect(tasks.find((t) => t.id === a.id)!.running).toBe(false);
     expect(tasks.find((t) => t.id === b.id)!.running).toBe(true);
   });
+
+  it("issue #89:在跑任务带 rollingApplied;启动参数落后于生效值时带 rollingPending;没在跑/无漂移不带多余字段", () => {
+    const drifted = store.addTask({ room: "111" });
+    const aligned = store.addTask({ room: "222" });
+    const idle = store.addTask({ room: "333" });
+    const status: Record<number, { applied: boolean; desired: boolean; drift: boolean } | null> = {
+      [drifted.id]: { applied: false, desired: true, drift: true },
+      [aligned.id]: { applied: true, desired: true, drift: false },
+      [idle.id]: null,
+    };
+    (manager as unknown as { rollingStatus: (id: number) => unknown }).rollingStatus = (id) => status[id] ?? null;
+    const list = api.listTasks().body as Array<{ id: number; rollingApplied?: boolean; rollingPending?: boolean }>;
+    const by = (id: number) => list.find((t) => t.id === id)!;
+    expect(by(drifted.id)).toMatchObject({ rollingApplied: false, rollingPending: true });
+    expect(by(aligned.id).rollingApplied).toBe(true);
+    expect("rollingPending" in by(aligned.id)).toBe(false);
+    expect("rollingApplied" in by(idle.id)).toBe(false);
+  });
 });
 
 describe("createTask", () => {
