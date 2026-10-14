@@ -688,7 +688,7 @@ describe("tryNodeSideUpload 按字节估算的超时下发给 transport", () => 
 });
 
 describe("errBrief:失败原因保留末尾、去掉 known_hosts 噪声", () => {
-  const warn = "Warning: Permanently added '10.0.0.1' (ED25519) to the list of known hosts.\r\n";
+  const warn = "Warning: Permanently added 'h' (ED25519) to the list of known hosts.\r\n";
   it("去掉 known_hosts 提示与 \\r,换行合并", () => {
     expect(errBrief(`ssh rc=1: ${warn}[node-pipeline] a\n[node-pipeline] b`)).toBe("ssh rc=1: [node-pipeline] a | [node-pipeline] b");
   });
