@@ -1771,6 +1771,7 @@ program
     // 行数夹取:防一个调用把整段日志(上千行)拖过 ssh。默认 200,上限 1000。
     const asked = Number(linesRaw);
     const lines = Number.isFinite(asked) ? Math.min(1000, Math.max(1, Math.trunc(asked))) : 200;
+    // issue-guard: allow (回环地址,与 _apply-tasks / refresh-anchor 的 serve 地址同一约定)
     const apiBase = process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860";
     if (!Number.isFinite(taskId)) {
       process.stdout.write(JSON.stringify({ lines: [], error: `taskId 非法: ${taskIdRaw}` }) + "\n");
