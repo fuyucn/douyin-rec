@@ -145,12 +145,14 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
           return assignedMap().get(`${platform.id}:${platform.extractRoomSlug(t.room)}`);
         })()
       : undefined;
+    const rollingStatus = manager.rollingStatus?.(t.id) ?? null;
     return {
       ...t,
       ...(assigned !== undefined ? { assigned } : {}),
       running: manager.isRunning(t.id),
       anchorName: manager.getAnchorName(t.id) ?? t.anchorName,
       recording: manager.isRecording(t.id),
+      ...(rollingStatus ? { rollingApplied: rollingStatus.applied, ...(rollingStatus.drift ? { rollingPending: true } : {}) } : {}),
       // 空数组不下发:前端 recordingWorkers?.length 判定依赖它。
       ...(workers && workers.length > 0 ? { recordingWorkers: workers } : {}),
       ...(hubRule ? { hubRule } : {}),

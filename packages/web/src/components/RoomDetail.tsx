@@ -350,6 +350,10 @@ export function RoomDetail({
                 {rule.rollingPolicy.reason === "needs-burn" ? t("rooms.rollingReasonNeedsBurn") : t("rooms.rollingReasonMultiNode")}
               </span>
             )}
+            {/* 在跑录制进程的启动参数落后于规则(进程常驻,启动参数不会自己变):标明「待重启生效」(issue #89) */}
+            {sourceTask?.rollingPending === true && (
+              <span className="chip" title={t("rooms.rollingPendingHint")}>{t("rooms.rollingPending")}</span>
+            )}
           </div>
         </div>
         <div>
