@@ -155,7 +155,7 @@ scripts/e2e-verify.sh down        # 拆容器+网络,清空 dev 数据(保留 da
 
 dev 环境的处理:worker 的 sshd 默认 `SetEnv TZ=Asia/Shanghai`(与 serve 默认一致,免得第 1/3 点的偏差污染场景结论);
 想专门验证偏差时 `DEV_SSH_TZ= scripts/e2e-verify.sh up`(ssh 会话变 UTC)。**这不是 dev 层的锅,是生产也存在的隐患**:生产 VPS 的 ssh 会话 TZ 取决于主机登录环境。
-是否在隐藏命令入口统一 `applyTimezone`(或让 master 在 ssh 命令前显式 `TZ=`)属生产代码改动,不在本 PR,建议单开 issue。
+是否在隐藏命令入口统一 `applyTimezone`(或让 master 在 ssh 命令前显式 `TZ=`)属生产代码改动,不在本 PR,已单开 issue #87 跟踪。
 
 ## 7. 场景编号与范围
 
@@ -283,3 +283,31 @@ api -X POST $API/api/hub/apply            # 立刻同步任务到所选节点
 - `known_hosts` 用 `accept-new` 仅限 devnet;线上 `StrictHostKeyChecking` 议题(#47 之外的另一话题)不在此混入。
 - `down` 的数据清理用宿主机 `rm -rf`;Linux 上若容器以 root 写出文件导致权限不足,需手动 `sudo rm -rf data-dev/e2e*/{controller,node-1,node-2}`。
 - 脚本为 bash 3.2 兼容(macOS 自带);依赖 `jq`、`ssh-keygen`、`docker compose`。
+
+## 11. mirror 档:把 dev 当「真 dev server」用(issue #88)
+
+**用途**:平时关着,测试时才起。数据根从 prd(`docker-data`)**只读复制**——真抖音 cookies、任务、hub 规则——三个节点放行外网,你在 dev UI 里把要测的任务打开,就真取流、真录制、真走 hub 链路。与 prd 互不影响。
+
+```bash
+scripts/e2e-verify.sh up --mirror            # 播种(首次)+ 起 controller + 2 worker;UI: http://127.0.0.1:7871
+scripts/e2e-verify.sh x ctrl curl -s -X POST http://localhost:7860/api/tasks/<id>/start   # 或直接在 UI 里开任务
+scripts/e2e-verify.sh keep                   # 测完停机,保留数据;再 up 可续
+scripts/e2e-verify.sh down                   # 拆容器并清空 dev 数据(下次 up 重新从 prd 复制)
+scripts/e2e-verify.sh seed --mirror          # 只播种、不起容器
+```
+
+环境变量:`DREC_MIRROR_SRC`(源数据根,默认 `<主仓库>/docker-data`)、`DREC_MIRROR_ROOMS`(逗号分隔 roomSlug,只复制这些房间的 hub 规则;空=全部)、`DREC_MIRROR_PORT`(默认 7871,不得为 7860)、`DREC_DEV_SUFFIX`(与别的 dev 集群并存)。
+
+**复制什么 / 不复制什么**
+
+| 复制(改写后) | 不复制 |
+| --- | --- |
+| 数据库快照:`settings`(平台 cookies、时区)、`tasks` | biliup cookies、`vps.key`、`.env`、录像、stage、sync 库、prd 合并历史 |
+| hub 规则文件:workers 改写成 `local`/`node-1`/`node-2`,`upload.mode` 一律 `stage` | webhook(`discordWebhook`、通知开关)、任务级 webhook/outDir |
+
+- 任务全部 `enabled=0`、`status=stopped`、`rollingUpload=0`;**controller** 带全部任务,**worker** 只带 settings(任务由 hub 同步下发)。
+- 投不了稿(物理上):镜像里是假 biliup,biliup cookies 仍是 `FAKE-DEV`。要测真投稿走 egress 档,不在 mirror 档。
+- 种子在播种时过一道断言(`chk_mirror_seed`):无 webhook 设置、无 enabled 任务、无 prd 合并历史、hub 规则 workers ⊆ {local,node-1,node-2}、upload.mode=stage;`doctor` 的反例自检覆盖这些。该断言**不进 gate**——测试时任务被打开是预期。
+- 网络:三节点都接 `drec-devnet`(internal,节点间 ssh/rsync)+ `drec-devnet-egress`(出外网);controller 只发布 `127.0.0.1:$DREC_MIRROR_PORT`。compose 断言按档位校验这些形态,其它档位发布端口/加网络仍被拒绝。
+- `run s1|s2|s3|all` 在 mirror 档被拒绝(它们用假房间造数),请在 UI 里开真实任务。
+- 注意:dev 与 prd 对同一房间**同时**录制会各拉一路流;测试时尽量只开要测的那几个任务。
