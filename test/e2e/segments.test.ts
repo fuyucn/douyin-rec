@@ -273,6 +273,64 @@ describe("e2e: 分段续跑补齐烧录轨(issue #142)", () => {
     expectHealthyDone(s, key, { parts: [...names(1), ...names(1, "_danmu")] });
   });
 
+  const probeJson142 = (f: string): number => {
+    try { return (JSON.parse(readFileSync(f, "utf-8")) as { durationSec: number }).durationSec; } catch { return 0; }
+  };
+
+  it("已 done 的历史场次(烧录轨被旧逻辑标 skipped)收尾补跑 → 绝不自动追加分 P", async () => {
+    // 伪造旧逻辑终态:P1 已建稿、job done、append_danmu 只有 skipped(无 done 记录),且有收尾失败触发补跑。
+    s = await Scenario.create({
+      cfg: { steps: { mergeSegments: false, burnDanmu: true, burnLivechat: false }, cleanup: { ...FULL_CLEANUP, sourceAfterDone: false, stageAfterDone: false } },
+      cleanupBackfillThrottleMs: 0,
+    });
+    s.record({ sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 1, segSec: 600 }] });
+    s.fake.inject({ op: "append", mode: "killed", applied: false, times: 100, match: onlyDanmu });
+    await s.reconcile();
+    s.fake.clearFaults();
+    const key = s.onlyKey();
+    s.ledger.syncNodeState(key, "append_danmu", "skipped");
+    s.ledger.markDone(key, s.ledger.get(key)!.bv!);
+    s.ledger.syncNodeState(key, "clean_source", "failed", { error: "模拟收尾失败,触发补跑" });
+    const before = s.fake.calls.filter((c) => c.op === "append").length;
+
+    await s.reconcile();
+
+    expect(s.jobState(key)).toBe("done");
+    expect(s.fake.calls.filter((c) => c.op === "append").length, "已发布稿件不得被自动追加分 P").toBe(before);
+  });
+
+  it("盘上烧录产物是半成品(读不出时长)→ 续跑重烧后再追加", async () => {
+    const key = await interruptedBeforeDanmu();
+    const danmu = join(s.stageSubOf(key), "主播甲_2026-06-27_000_danmu.mp4");
+    writeFileSync(danmu, "HALF-BURNED");
+    // 续跑这一轮换上新的替身:首次探测该文件读不出(半成品),补烧后正常。
+    const residue = new Set([danmu]);
+    const burns: string[] = [];
+    s.overrideDeps({
+      segmentDuration: async (f: string) => (residue.delete(f) ? 0 : probeJson142(f) || 60),
+      burnSegment: async (o: { plain: string; out: string }) => { burns.push(o.out); writeFileSync(o.out, readFileSync(o.plain, "utf-8")); },
+    });
+    await s.restart();
+    await s.reconcile();
+    expect(burns).toEqual([danmu]);
+    expect(s.jobState(key)).toBe("done");
+    expectHealthyDone(s, key, { parts: [...names(1), ...names(1, "_danmu")] });
+  });
+
+  it("续跑补烧出的烧录产物读不出时长 → 提交前拒绝追加、转人工", async () => {
+    const key = await interruptedBeforeDanmu();
+    rmSync(join(s.stageSubOf(key), "主播甲_2026-06-27_000_danmu.mp4"));
+    s.overrideDeps({
+      // 补烧出来的产物始终读不出时长(模拟烧录产物损坏)。
+      segmentDuration: async (f: string) => (/_danmu\.mp4$/.test(f) ? 0 : probeJson142(f)),
+    });
+    await s.restart();
+    const before = s.fake.calls.filter((c) => c.op === "append").length;
+    await s.reconcile();
+    expect(s.fake.calls.filter((c) => c.op === "append").length).toBe(before);
+    expect(s.jobState(key)).toBe("needs_manual");
+  });
+
   it("烧录产物已丢 → 续跑先补烧再追加(不得静默标 done)", async () => {
     const key = await interruptedBeforeDanmu();
     const danmu = join(s.stageSubOf(key), "主播甲_2026-06-27_000_danmu.mp4");

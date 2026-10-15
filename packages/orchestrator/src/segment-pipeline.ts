@@ -727,6 +727,7 @@ async function recoverBurnProducts(
   for (const t of tracks) {
     if (!t.on || deps.ledger.isStepDone(streamKey, t.step)) continue;
     for (const p of uploadParts) {
+      throwIfAborted();
       if (!p.window) continue;
       const out = burnOutOf(p.plain, t.style);
       if (!(await isCompleteMedia(out, probe))) {
@@ -772,7 +773,13 @@ async function resumeSegmentAppends(
   // 烧录轨:主流程的烧录循环在续跑分叉**之后**,本函数拿到的 `uploadParts[].danmu/livechat` 恒为空。
   // 不回填的话 `appendSegmentGroup(files=[])` 会把该步骤标 skipped 并随后 markDone ——
   // 台账 done、稿件却缺烧录轨分 P,全程无告警(#142)。故按规范名重新发现,缺失/读不出则补烧。
-  await recoverBurnProducts(streamKey, uploadParts, deps, jlog, burnDanmu, burnLivechat);
+  // 已 done 的场次(收尾补跑也会走到这里)绝不回填/补烧:那等于往**已发布稿件**追加分 P(上传类,需人拍板)。
+  // 旧逻辑把烧录轨标 skipped 却不写 done 记录,不加这道闸,历史场次会在补跑时被自动追加。
+  if (ledger.get(streamKey)?.state === "done") {
+    if (burnDanmu || burnLivechat) jlog(`续跑:job 已 done → 不回填/补烧烧录轨(若稿件缺烧录轨分 P 需人工决定是否补传)`);
+  } else {
+    await recoverBurnProducts(streamKey, uploadParts, deps, jlog, burnDanmu, burnLivechat);
+  }
   // 先补 plain:已建稿但其余分 P 可能还没传完(上次在 append plain 中途失败)。
   const plainFiles = uploadParts.map((p) => p.plain).filter((f) => f && existsSync(f));
   // 提交前自检:补 append 的产物同样不能是坏容器(稿件已建,绝不能追加坏分 P)→ 检出转人工。

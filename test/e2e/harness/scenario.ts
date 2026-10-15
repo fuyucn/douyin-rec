@@ -152,6 +152,11 @@ export class Scenario {
     });
   }
 
+  /** 覆盖部分管线接缝(下一次 `restart()` 起生效),用于「换一组替身再续跑」的场景。 */
+  overrideDeps(d: Partial<PipelineDeps>): void {
+    this.opts.deps = { ...this.opts.deps, ...d };
+  }
+
   /** 对账一轮(= 收播后触发一次完整后处理)。 */
   async reconcile(): Promise<void> {
     await this.reconciler.reconcileAll();
