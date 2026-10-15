@@ -6,13 +6,13 @@ import { SectionHeader, ToggleRow } from "./parts";
 export interface CleanupValue {
   clStageSourceAfterMerge: boolean;
   clSourceAfterDone: boolean;
-  clStageAfterDone: boolean;
+  clKeepArchive: boolean;
 }
 
 interface Props {
   value: CleanupValue;
   onChange: (patch: Partial<CleanupValue>) => void;
-  constraints: Pick<Constraints, "clStageSourceAfterMerge" | "clStageAfterDoneWarn">;
+  constraints: Pick<Constraints, "clStageSourceAfterMerge" | "clKeepArchive">;
   procEnabled: boolean;
 }
 
@@ -28,10 +28,9 @@ export function CleanupSection({ value: v, onChange, constraints: c, procEnabled
         <ToggleRow label={t("hub.ruleDialog.toggleClSourceAfterDoneLabel")} hint={t("hub.ruleDialog.toggleClSourceAfterDoneSub")}
                    checked={v.clSourceAfterDone} onChange={(x) => onChange({ clSourceAfterDone: x })} />
         <ToggleRow label={t("hub.ruleDialog.toggleClStageAfterDoneLabel")}
-                   hint={c.clStageAfterDoneWarn && v.clStageAfterDone
-                     ? <span className="text-warning-fg">{t("roomForm.stageAfterDoneWarn")}</span>
-                     : t("hub.ruleDialog.toggleClStageAfterDoneSub")}
-                   checked={v.clStageAfterDone} onChange={(x) => onChange({ clStageAfterDone: x })} />
+                   hint={t("hub.ruleDialog.toggleClStageAfterDoneSub")}
+                   checked={v.clKeepArchive} onChange={(x) => onChange({ clKeepArchive: x })}
+                   lock={c.clKeepArchive} lockedChecked />
       </fieldset>
     </section>
   );

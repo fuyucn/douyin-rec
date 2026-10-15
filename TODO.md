@@ -15,6 +15,11 @@
 
 ## 进行中
 
+- [~] **T-48 界面把 stage 统一称「存档」,不投稿时锁定清理存档开关（issue [#135](https://github.com/fuyucn/douyin-rec/issues/135)）**
+  — 2026-10-15 认领，swe-loop 执行，分支 `codex/issue-135-archive-wording`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：用户可见的 stage / 只合成 文案统一改为「存档」；不投稿时锁定「清理存档」并写回关（后端只合成路径本就不执行该清理）；清理开关改正向「投稿后保留存档」。存储与配置字段名不动。
+  **验收**：锁定与取反往返有 vitest + 变异；中英文案无用户可见 stage 残留；全量测试 / typecheck / web build / i18n 检查通过。
+
 - [~] **T-47 房间 / Hub 规则 / 任务三处表单按依赖重排（issue [#126](https://github.com/fuyucn/douyin-rec/issues/126)）**
   — 2026-10-15 认领，swe-loop 执行，stacked PR [#127](https://github.com/fuyucn/douyin-rec/pull/127)→[#128](https://github.com/fuyucn/douyin-rec/pull/128)→[#129](https://github.com/fuyucn/douyin-rec/pull/129)→[#130](https://github.com/fuyucn/douyin-rec/pull/130)→[#131](https://github.com/fuyucn/douyin-rec/pull/131)→[#132](https://github.com/fuyucn/douyin-rec/pull/132)，最底层 base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：前端字段依赖收口到一个纯模块（边录边传可用性直接复用 core `resolveRollingPolicy`）；三处表单共用「录制→节点→处理→上传→清理→通知」分区，上传区「上传方式」三选一（收播后 / 节点侧 / 边录边传），不可用项给原因、失效自动回落；顶部流程摘要。

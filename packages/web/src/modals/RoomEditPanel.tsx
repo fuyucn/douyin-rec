@@ -26,7 +26,7 @@ import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, splitSchedule } from "../lib/labels";
 import {
-  deriveConstraints, flowSummary, methodFromStored, settledMethod, storedFromForm, type FormFacts,
+  deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, settledMethod, storedFromForm, type FormFacts,
 } from "../lib/room-form-rules";
 
 interface Props {
@@ -64,7 +64,7 @@ function fromRoom(r: RoomDTO): FormState {
     ...methodFromStored(p.upload?.mode, p.steps?.nodeSideUpload === true),
     clStageSourceAfterMerge: p.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: p.cleanup?.sourceAfterDone === true,
-    clStageAfterDone: p.cleanup?.stageAfterDone === true,
+    clKeepArchive: keepArchiveFromStored(p.cleanup?.stageAfterDone),
     uploadPrivate: p.upload?.private !== false,
     tag: p.upload?.tag ?? "",
     tid: String(p.upload?.tid ?? 21),
@@ -166,7 +166,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
             cleanup: {
               stageSourceAfterMerge: form.clStageSourceAfterMerge,
               sourceAfterDone: form.clSourceAfterDone,
-              stageAfterDone: form.clStageAfterDone,
+              stageAfterDone: stored.stageAfterDone,
             },
             upload: {
               mode: stored.mode,

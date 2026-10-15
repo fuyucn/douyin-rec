@@ -20,13 +20,15 @@ export interface FormFacts {
   /** Cookie 是否用于取流(B站/快手 true;抖音取流恒匿名,Cookie 只影响弹幕礼物/入场 → false)。 */
   cookieForStream: boolean;
   procEnabled: boolean;
-  /** 是否上传到 B 站(false = 只合成)。 */
+  /** 是否上传到 B 站(false = 只存档)。 */
   uploadOn: boolean;
   method: UploadMethod;
   tsDirect: boolean;
   mergeSegments: boolean;
   burnDanmu: boolean;
   burnLivechat: boolean;
+  /** 「投稿后保留存档」= 存储 cleanup.stageAfterDone 取反;映射见 {@link keepArchiveFromStored} / {@link storedFromForm}。 */
+  clKeepArchive: boolean;
   /** 规则勾选的节点;空 = 全部节点。 */
   workers: readonly string[];
   /** 该房间是否有 hub 规则(无规则 = 单机任务,边录边传不受节点数约束)。 */
@@ -47,8 +49,8 @@ export interface Constraints {
   nodeSide: Lock;
   tsDirect: Lock;
   clStageSourceAfterMerge: Lock;
-  /** 只合成时「完成后清空 stage」会删掉成品:只警示不禁用。 */
-  clStageAfterDoneWarn: boolean;
+  /** 不投稿时存档就是成品,后端在清理前即返回、从不清存档:锁定为保留。 */
+  clKeepArchive: Lock;
 }
 
 const OPEN: Lock = { locked: false };
@@ -96,7 +98,7 @@ export function deriveConstraints(f: FormFacts): Constraints {
     nodeSide,
     tsDirect: f.uploadOn && effectiveMethod(f, { rolling, nodeSide }) === "nodeSide" ? OPEN : lock("roomForm.lock.needNodeSide"),
     clStageSourceAfterMerge: f.mergeSegments ? OPEN : lock("roomForm.lock.needMerge"),
-    clStageAfterDoneWarn: !f.uploadOn,
+    clKeepArchive: f.uploadOn ? OPEN : lock("roomForm.lock.needUploadForCleanArchive"),
   };
 }
 
@@ -130,19 +132,27 @@ export interface StoredFields {
   nodeSideUpload: boolean;
   burnDanmu: boolean;
   burnLivechat: boolean;
+  /** 存储 cleanup.stageAfterDone。 */
+  stageAfterDone: boolean;
+}
+
+/** 存储 cleanup.stageAfterDone → 表单「投稿后保留存档」(取反;缺省 = 不清 = 保留)。 */
+export function keepArchiveFromStored(stageAfterDone: boolean | undefined): boolean {
+  return stageAfterDone !== true;
 }
 
 /**
  * 表单 → 存储。被锁的方式按「收播后上传」写回;烧录开关**一律写回实际值**(effectiveBurn):不录弹幕就
  * 没有弹幕文件,存原值会让后端照常执行烧录并失败,表单、流程摘要、后端三方必须一致。
  * 代价:之后重新打开录弹幕时,烧录需手动重开(原值不保留)。
+ * 不投稿时「保留存档」被锁:stageAfterDone 一律写 false(后端此时从不清存档);投稿时 = !clKeepArchive。
  * tsDirect 原值由调用方提交。
  */
 export function storedFromForm(f: FormFacts): StoredFields {
   const burn = effectiveBurn(f);
-  if (!f.uploadOn) return { mode: "stage", nodeSideUpload: false, ...burn };
+  if (!f.uploadOn) return { mode: "stage", nodeSideUpload: false, ...burn, stageAfterDone: false };
   const method = effectiveMethod(f, deriveConstraints(f));
-  return { mode: method === "rolling" ? "rolling" : "upload", nodeSideUpload: method === "nodeSide", ...burn };
+  return { mode: method === "rolling" ? "rolling" : "upload", nodeSideUpload: method === "nodeSide", ...burn, stageAfterDone: !f.clKeepArchive };
 }
 
 export interface FlowStep {
