@@ -23,6 +23,7 @@ services:
       dockerfile: Dockerfile.dev
       args:
         BASE: drec-dev-base:local${DREC_DEV_SUFFIX:-}
+        REAL_BILIUP: ${REAL_BILIUP:-0}
     container_name: drec-dev${DREC_DEV_SUFFIX:-}
     hostname: drec-dev${DREC_DEV_SUFFIX:-}
     restart: "no"
