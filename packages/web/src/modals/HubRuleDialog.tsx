@@ -19,7 +19,7 @@ import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, scheduleInput, splitSchedule } from "../lib/labels";
 import {
-  deriveConstraints, flowSummary, methodFromStored, settledMethod, storedFromForm, type FormFacts,
+  deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, settledMethod, storedFromForm, type FormFacts,
 } from "../lib/room-form-rules";
 
 interface Props {
@@ -80,7 +80,7 @@ const BLANK: FormState = {
   partTitleTemplate: "",
   clStageSourceAfterMerge: false,
   clSourceAfterDone: false,
-  clStageAfterDone: false,
+  clKeepArchive: true,
   workers: [],
   requires: [],
   sourceTaskId: null,
@@ -102,7 +102,7 @@ function fromRule(r: HubRuleDTO): FormState {
     ...methodFromStored(c.upload?.mode, c.steps?.nodeSideUpload === true),
     clStageSourceAfterMerge: c.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: c.cleanup?.sourceAfterDone === true,
-    clStageAfterDone: c.cleanup?.stageAfterDone === true,
+    clKeepArchive: keepArchiveFromStored(c.cleanup?.stageAfterDone),
     uploadPrivate: c.upload?.private !== false,
     tag: c.upload?.tag ?? "",
     tid: String(c.upload?.tid ?? 21),
@@ -244,7 +244,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
         cleanup: {
           stageSourceAfterMerge: form.clStageSourceAfterMerge,
           sourceAfterDone: form.clSourceAfterDone,
-          stageAfterDone: form.clStageAfterDone,
+          stageAfterDone: stored.stageAfterDone,
         },
         upload: {
           mode: stored.mode,
