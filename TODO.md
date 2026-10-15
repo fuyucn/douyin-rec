@@ -15,6 +15,13 @@
 
 ## 进行中
 
+- [~] **T-54 分段续跑补齐烧录轨:续跑不重烧也不补烧录轨分 P（issue [#142](https://github.com/fuyucn/douyin-rec/issues/142)）**
+  — 2026-10-15 认领,分支 `codex/issue-142-resume-burn`(**未合并 / 未部署 / 未 close**)。#140 复审期间发现（不在 #140 范围，单独开票）：续跑路径拿到的烧录产物字段恒为空
+  （赋值在主流程烧录循环里，而该循环在续跑分叉之后）→ `appendSegmentGroup(files=[])` 直接把该步骤标
+  `skipped` → `markDone` ⇒ **台账 done 但稿件缺烧录轨分 P，全程无告警**。
+  **做什么**：续跑按分 P 规范名重新发现已存在的烧录产物并继续 append；缺失/坏 → 重烧或转 `needs_manual`。
+  **验收**：续跑「产物在盘」→ 追加成功且分 P 数正确；「产物缺失」→ 不标 done；烧录产物同过提交前自检。
+
 - [~] **T-53 产物落盘原子化 + 复用/提交前自检（issue [#140](https://github.com/fuyucn/douyin-rec/issues/140)）**
   — 2026-10-15 认领，dev-loop run 模式（人直接指派），分支 `codex/issue-140-atomic-part-write`，PR [#141](https://github.com/fuyucn/douyin-rec/pull/141)，base `feat/hub-optimization`。
   **状态 = needs-decision**（4 轮独立审查收敛：代码与用例 PASS、CI 绿、dev e2e 留证；唯一阻塞 = `pr-risk-scan` RISK ⇒ 合并需人拍板）。
@@ -148,13 +155,6 @@
   **验收**:计划第一期各任务测试与验收条全部通过；`pnpm test` / `pnpm typecheck` / `pnpm arch:check` 通过；处理器与任务表包内无目录推导
   （grep 验收）；规则任务处理中途从不转换、上传仍用 mp4；VPS 真实录制一场（用户安排）验证封口转换走任务表。
   **前置**:计划 PR 合入 + 决策点 D2/D4/D6/D7/D8 拍板；实现须另开 `accept` 的 issue。
-
-- [ ] **T-54 分段续跑补齐烧录轨:续跑不重烧也不补烧录轨分 P（issue [#142](https://github.com/fuyucn/douyin-rec/issues/142)）**
-  — 2026-10-15。#140 复审期间发现（不在 #140 范围，单独开票）：续跑路径拿到的烧录产物字段恒为空
-  （赋值在主流程烧录循环里，而该循环在续跑分叉之后）→ `appendSegmentGroup(files=[])` 直接把该步骤标
-  `skipped` → `markDone` ⇒ **台账 done 但稿件缺烧录轨分 P，全程无告警**。
-  **做什么**：续跑按分 P 规范名重新发现已存在的烧录产物并继续 append；缺失/坏 → 重烧或转 `needs_manual`。
-  **验收**：续跑「产物在盘」→ 追加成功且分 P 数正确；「产物缺失」→ 不标 done；烧录产物同过提交前自检。
 
 - [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
   — 2026-10-15。**做什么**:录制引擎在 spawn 前判定水位(拒绝则不起录、下轮再判),手动启动接口过同一闸门(拒绝返回 409 且不改 enabled)。**为什么**:此前只有 daemon 在窗口启停时查水位,常驻任务的下一场开播与手动启动会绕过 → 盘满导致录制损坏。**验收**:两条路径均有测试覆盖 + dev 实跑;`pnpm test`/`typecheck` 通过。分支 `codex/issue-96-new-broadcast-gate`,PR [#97](https://github.com/fuyucn/douyin-rec/pull/97)。
