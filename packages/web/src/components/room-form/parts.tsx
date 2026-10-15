@@ -12,8 +12,8 @@ export function SectionHeader({ title, toggle }: {
   toggle?: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean };
 }): ReactNode {
   return (
-    <div className="flex items-center justify-between gap-3">
-      <h3 className="form-section flex-1">{title}</h3>
+    <div className="form-section flex items-center justify-between gap-3">
+      <h3>{title}</h3>
       {toggle && <Switch checked={toggle.checked} onCheckedChange={toggle.onChange} disabled={toggle.disabled} />}
     </div>
   );

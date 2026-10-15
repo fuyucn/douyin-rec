@@ -41,18 +41,23 @@ function MethodOption({ id, labelKey, hintKey, badge, selected, lock, onSelect }
   onSelect: () => void;
 }): ReactNode {
   const t = useT();
+  const pick = (): void => { if (!lock.locked) onSelect(); };
   return (
-    <button type="button" role="radio" aria-checked={selected} aria-disabled={lock.locked} data-method={id}
-            className={`method-option${selected ? " is-active" : ""}`} onClick={() => { if (!lock.locked) onSelect(); }}>
+    // div 而非 button:选项内含实验性徽标(本身是 button),button 不能嵌套。
+    <div role="radio" tabIndex={lock.locked ? -1 : 0} aria-checked={selected} aria-disabled={lock.locked} data-method={id}
+         className={`method-option${selected ? " is-active" : ""}`} onClick={pick}
+         onKeyDown={(e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); pick(); } }}>
       <span className="method-dot" aria-hidden />
       <span className="flex flex-col min-w-0 text-left">
         <span className="text-sm font-medium text-ink inline-flex items-center gap-1.5">
-          {t(labelKey)}{badge && <ExperimentalBadge id={badge} />}
+          {t(labelKey)}
+          {/* 点徽标是看说明,不是选这个方式 */}
+          {badge && <span onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}><ExperimentalBadge id={badge} /></span>}
         </span>
         <span className="text-xs text-muted mt-0.5">{t(hintKey)}</span>
         {lock.locked && lock.reasonKey && <span className="text-xs text-warning-fg mt-0.5">{t(lock.reasonKey)}</span>}
       </span>
-    </button>
+    </div>
   );
 }
 
