@@ -1,6 +1,6 @@
 // ts/test/post/ffmpeg.test.ts
-import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync, utimesSync } from "node:fs";
+import { afterAll, describe, it, expect } from "vitest";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -81,10 +81,15 @@ describe("runFfmpeg 看门狗 + CPU 探针(端到端)", () => {
     try { return spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0; } catch { return false; }
   })();
   const FAST = { watchIntervalMs: 100 };
+  // CPU 探针依赖 /proc(macOS 没有)。没 /proc 时用例 ① 必然失败(探针恒 false = 退化成老语义),
+  // 故连同 ffmpeg 一起守护;②③ 在 macOS 上仍可跑(它们断言「被杀」,不依赖探针为 true)。
+  const hasProc = existsSync("/proc/self/stat");
+  const skipCpuProbe = !hasFfmpeg || !hasProc;
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  it.skipIf(!hasFfmpeg)("静默但烧 CPU → 不被杀(CPU 探针生效)", async () => {
+  it.skipIf(skipCpuProbe)("静默但烧 CPU → 不被杀(CPU 探针生效;需 /proc,故 macOS 跳过)", async () => {
     const out = join(dir, "cpu.mp4");
-    // -re 让进程跑 ~3s;`-v quiet` 全程无输出;stallMs=300 远小于它 → 只看 stdout/stderr 必被杀。
+    // -re 让进程跑 ~8s;`-v quiet` 全程无输出;stallMs=3s 远小于它 → 只看 stdout/stderr 必被杀。
     const args = ["-y", "-v", "quiet", "-re", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10",
                   "-t", "8", "-c:v", "libx264", "-preset", "ultrafast", out];
     // stallMs 取 3s:远大于 ffmpeg 在 -re 下的单次 CPU 停歇(~600ms),又远小于 8s 总时长。
@@ -100,7 +105,7 @@ describe("runFfmpeg 看门狗 + CPU 探针(端到端)", () => {
   }, 60_000);
 
   it.skipIf(!hasFfmpeg)("只有 CPU 转、长时间无任何输出 → 仍被杀(忙等硬上限)", async () => {
-    // -re 的 3s 素材 + cpuOnlyStallMs=500:进程在烧 CPU、无输出,超过 500ms 即判忙等卡死。
+    // -re 的 8s 素材 + cpuOnlyStallMs=2s:进程在烧 CPU、无输出,超过 2s 即判忙等卡死。
     const out = join(dir, "busy.mp4");
     const args = ["-y", "-v", "quiet", "-re", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10",
                   "-t", "8", "-c:v", "libx264", "-preset", "ultrafast", out];

@@ -96,6 +96,9 @@ export function runFfmpeg(
      * 为什么需要:若卡死表现为 CPU 空转(解复用器死循环),CPU 时间一直在涨 → 光看 CPU 就永远不会被杀。
      * 这里规定:连续这么久**只有 CPU 前进、没有任何 stdout/stderr 输出** → 仍判定卡死并杀。
      * 真进度不会踩到它:`+faststart` 收尾虽静默,但只持续几十秒~几分钟,远小于 30 分钟。
+     *
+     * ⚠️ 依赖调用方**不传** `-v quiet`/`-nostats`:本计时只被 stdout/stderr 输出清零,若调用方把
+     * ffmpeg 的 stats 也静音了,长任务会在该上限处被误杀。新增调用方时请留意。
      */
     cpuOnlyStallMs?: number;
   } = {},
@@ -108,7 +111,8 @@ export function runFfmpeg(
     let buf = "";
 
     // 卡死看门狗:ffmpeg 输入损坏可能挂起(不退出、不写进度)→ Promise 永不 settle、整个
-    // merge/burn job 卡死无自愈。任何 stdout/stderr 活动刷新计时;静默超阈值 → SIGKILL + reject。
+    // merge/burn job 卡死无自愈。存活信号 = stdout/stderr 活动 **或** 进程 CPU 时间前进(见 makeCpuProbe);
+    // 两者都没有超过 stallMs → SIGKILL + reject。
     let settled = false;
     let lastActivity = Date.now();
     const stallMs = opts.stallMs ?? 120_000;
@@ -129,8 +133,8 @@ export function runFfmpeg(
           if (idleMs <= stallMs && !cpuOnlyStuck) return;
           try { proc.kill("SIGKILL"); } catch { /* gone */ }
           const why = cpuOnlyStuck
-            ? `${Math.round(cpuOnlyMs / 1000)}s 只有 CPU 前进、无任何输出(疑忙等)`
-            : `${Math.round(stallMs / 1000)}s 无进度/输出`;
+            ? `${(cpuOnlyMs / 1000).toFixed(1)}s 只有 CPU 前进、无任何输出(疑忙等)`
+            : `${(idleMs / 1000).toFixed(1)}s 无进度/输出`;
           done(() => reject(new Error(
             `ffmpeg 卡死:${why},已杀。stderr 尾: ${stderrTail.trim().slice(-300) || "(无)"}`,
           )));
