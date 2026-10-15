@@ -132,6 +132,7 @@ export function buildSessionForTask(
   if (!makeRolling && nodeFormat !== "original") {
     makeRolling = makeNodeRemuxHookFactory({
       format: nodeFormat as StageFormat,
+      owner: platformForRoom(task.room).extractRoomSlug(task.room),
       log: (m) => console.log(m),
       alert: (message) => { void notifier.notify({ kind: "error", stage: "转封装", message }).catch(() => {}); },
     });

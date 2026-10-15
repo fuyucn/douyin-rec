@@ -12,7 +12,8 @@ export {
   type XmlWindowRenderResult,
 } from "./merge-xml.js";
 export { mergeSessions, type MergeSessionInput } from "./merge.js";
-export { runFfmpeg, ffprobeDuration, ffprobeVideo, ffprobeVideoSpan } from "./ffmpeg.js";
+export type { PacketStats } from "./ffmpeg.js";
+export { runFfmpeg, ffprobeDuration, ffprobeVideo, ffprobeVideoSpan, ffprobePacketStats, runFfprobe, FFPROBE_SCAN_TIMEOUT_MS, FFPROBE_HEADER_TIMEOUT_MS } from "./ffmpeg.js";
 export {
   scanMediaErrors,
   parseFfmpegErrors,

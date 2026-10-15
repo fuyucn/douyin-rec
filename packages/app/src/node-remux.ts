@@ -16,6 +16,7 @@
  */
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
+import { FFPROBE_HEADER_TIMEOUT_MS, FFPROBE_SCAN_TIMEOUT_MS } from "@drec/post-process";
 import {
   platformForRoom,
   sealedSegmentIndices,
@@ -75,6 +76,23 @@ export const MIN_SIZE_RATIO = 0.5;
  */
 export const STALE_TMP_MIN_AGE_MS = 2 * 60 * 60 * 1000;
 
+/**
+ * 单个文件探测的整体上界 = 两次 ffprobe(头 + 全包扫描)各自最坏(头超时 + 扫描超时,且时长兜底再扫一次)的和。
+ * ffprobe 自身已有超时并杀进程(post-process `runFfprobe`);这里再包一层是兜底:注入的 probe / 任何未来的探测
+ * 都不能让校验无限等。超时 = 无法判定 = 校验失败 = 两份都保留。
+ */
+export const PROBE_BOUND_MS = 2 * (FFPROBE_SCAN_TIMEOUT_MS + FFPROBE_HEADER_TIMEOUT_MS);
+
+/**
+ * 会话收尾(`onSessionEnd`,停录 / 断流重连前)等待转换的总时限。依据:单个 30 分钟分段 remux(`-c copy`,秒~分钟级)
+ * + 校验(两次探测,各数秒~数十秒)正常在 1 分钟内;3 分钟 ≈ 3 倍裕量。再久会拖住断流重连(丢流)与停录,
+ * 超时 = 放弃本次转换(原文件保留)并告警,转换留给下次启动的崩溃接管 / 人工。
+ */
+export const SESSION_END_BUDGET_MS = 3 * 60_000;
+
+/** 崩溃接管整体时限:接管在后台跑、不挡录制,但也不能无限占着探测进程。依据:扫描里同时存在的配对一般 ≤ 数十个,逐个校验 30 分钟绰绰有余。 */
+export const RECOVER_TOTAL_TIMEOUT_MS = 30 * 60_000;
+
 /** 存疑的新文件(接管时校验不通过 / 无法判定)改成此后缀隔离:两份都保留,但新文件不再被扫描/分组当成分段(避免与原文件重复计入)。 */
 export const NODE_REMUX_SUSPECT_SUFFIX = ".drec-suspect";
 
@@ -85,6 +103,13 @@ export interface MediaProbe {
   spanSec: number;
   /** 视频包数;0 = 无法判定(ffprobe 失败 / 无包)。 */
   packets: number;
+  /** 视频流里一个 GOP 的包数上界(缺省 = 未知,只用比例容差)。 */
+  gopPackets?: number;
+  /** 是否有音频流(缺省 = 无)。 */
+  hasAudio?: boolean;
+  audioPackets?: number;
+  /** 全包扫描的 ffprobe 告警行数(缺省 = 0)。 */
+  scanErrors?: number;
 }
 
 export interface NodeRemuxDeps {
@@ -99,6 +124,15 @@ export interface NodeRemuxDeps {
   rename?: (from: string, to: string) => void;
   /** 当前时间(ms),判定临时文件新旧用;默认 Date.now。 */
   now?: () => number;
+  /** 任务归属标识(临时文件名带它 + pid;接管只立即清「本任务 + 进程已不存在」的残留)。默认空 = 无归属。 */
+  owner?: string;
+  /** 本进程 pid(默认 process.pid);pid 存活判定(默认 kill -0)。测试接缝。 */
+  pid?: number;
+  pidAlive?: (pid: number) => boolean;
+  /** 单文件探测上界(默认 {@link PROBE_BOUND_MS});测试接缝。 */
+  probeBoundMs?: number;
+  /** 外部要求放弃(会话收尾总时限 / 接管总时限到了):在开始前与 remux 后检查,放弃则保留原文件。 */
+  shouldAbort?: () => boolean;
   /** 告警(→ 现有通道:通知 error 事件 → webhook + @@DREC_ALERT@@ + 站内 toast)。 */
   alert?: (message: string) => void;
   log?: (msg: string) => void;
@@ -110,10 +144,39 @@ async function defaultRemux(src: string, tmp: string, fmt: StageFormat): Promise
   await remuxSegment(src, tmp, fmt);
 }
 async function defaultProbe(p: string): Promise<MediaProbe> {
-  const { ffprobeVideo, ffprobeVideoSpan } = await import("@drec/post-process");
+  const { ffprobeVideo, ffprobePacketStats } = await import("@drec/post-process");
   const v = await ffprobeVideo(p);
-  const span = await ffprobeVideoSpan(p);
-  return { durationSec: v.durationMs / 1000, hasVideo: v.hasVideo, spanSec: span.spanSec, packets: span.packets };
+  const st = await ffprobePacketStats(p);
+  if (!st) throw new Error("全包扫描无法判定(ffprobe 失败 / 超时 / 无视频包)");
+  return {
+    durationSec: v.durationMs / 1000, hasVideo: v.hasVideo, spanSec: st.spanSec, packets: st.videoPackets,
+    gopPackets: st.gopPackets, hasAudio: st.hasAudio, audioPackets: st.audioPackets, scanErrors: st.errorLines,
+  };
+}
+
+/** 给探测加硬上界:超时 reject(= 无法判定)。定时器及时清掉,不拖住进程退出。 */
+async function probeBounded(probe: NonNullable<NodeRemuxDeps["probe"]>, path: string, ms: number): Promise<MediaProbe> {
+  let timer: NodeJS.Timeout | undefined;
+  const limit = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error(`探测超时(>${Math.round(ms / 1000)}s)`)), ms); timer.unref?.(); });
+  try { return await Promise.race([probe(path), limit]); } finally { if (timer) clearTimeout(timer); }
+}
+
+const ownerKey = (o?: string): string => (o ?? "").replace(/[^A-Za-z0-9_]/g, "");
+
+/** 临时文件路径:`{final}.{owner}-{pid}.drec-remux`(归属标记 = 任务标识 + 进程号;非视频扩展名,扫描不会当分段)。 */
+export function remuxTmpPath(final: string, owner: string | undefined, pid: number): string {
+  return `${final}.${ownerKey(owner)}-${pid}${NODE_REMUX_TMP_SUFFIX}`;
+}
+
+/** 解析临时文件名里的归属标记;老格式 / 无标记 → undefined。 */
+export function parseRemuxTmpName(name: string): { owner: string; pid: number } | undefined {
+  const m = /\.([A-Za-z0-9_]*)-(\d+)\.drec-remux$/.exec(name);
+  return m ? { owner: m[1] ?? "", pid: Number(m[2]) } : undefined;
+}
+
+function defaultPidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; } // ESRCH = 已不存在;EPERM = 存在但无权
 }
 
 /** `{dir}/{stem}.{old}` → 目标最终路径(原基名 + 新扩展名;带段号的保持段号,无段号保持无段号)。 */
@@ -160,7 +223,18 @@ function rmQuiet(p: string): void {
 
 export type RemuxOutcome =
   | { ok: true; path: string }
-  | { ok: false; reason: "missing" | "target-exists" | "no-space" | "mark-failed" | "remux-failed" | "verify-failed"; detail?: string };
+  | { ok: false; reason: "missing" | "target-exists" | "no-space" | "mark-failed" | "remux-failed" | "verify-failed" | "aborted"; detail?: string };
+
+/**
+ * 包数容差 = min(一个 GOP 的包数, 总包数 × 0.5%),至少 1。依据:`-c copy` 合法的丢包只有「首个关键帧之前的非关键帧」
+ * (≤ 一个 GOP),但真实中段丢失量级是百分之几十;两者取**更严**的那个(误拒只会多留一份原文件,安全方向;
+ * 漏判才丢数据)。GOP 未知(音频 / 老探测)只用 0.5%。
+ */
+export function packetAllowance(total: number, gop?: number): number {
+  const byRatio = Math.ceil(total * 0.005);
+  const a = gop && gop > 0 ? Math.min(gop, byRatio) : byRatio;
+  return Math.max(1, a);
+}
 
 /**
  * 校验新文件(**唯一校验函数**,正常转换与崩溃接管共用)。返回失败原因(通过 = undefined);
@@ -168,12 +242,18 @@ export type RemuxOutcome =
  *   ① 两边都能 ffprobe、新文件有视频流且有视频包;
  *   ② 头部时长在容差内(挡 remux 提前退出);
  *   ③ **视频包 pts 跨度在容差内**(扫包取真实末帧;挡「头部完好、尾部被截断」——mkv / faststart mp4 的头部时长不会变);
- *   ④ 新文件大小 ≥ 原文件 × {@link MIN_SIZE_RATIO}(挡跨度巧合通过的大块丢流)。
+ *   ④ **视频包数** ≥ 原文件 − {@link packetAllowance}(挡「中段被抹零、跨度/头部/体积都正常」的丢包);
+ *   ⑤ **音频**:原文件有音频流 → 新文件必须有音频流,且音频包数 ≥ 原 − 容差(挡整条音轨丢失 / 中段丢音频);
+ *   ⑥ 全包扫描的 ffprobe 告警行数不多于原文件(挡索引完好但数据被补零的 mp4);
+ *   ⑦ 新文件大小 ≥ 原文件 × {@link MIN_SIZE_RATIO}(挡跨度与包数都巧合通过的大块丢流)。
+ * 探测整体有硬上界({@link PROBE_BOUND_MS}),超时同样按无法判定处理。
  */
-export async function verifyRemuxed(src: string, out: string, probe: NonNullable<NodeRemuxDeps["probe"]>): Promise<string | undefined> {
+export async function verifyRemuxed(
+  src: string, out: string, probe: NonNullable<NodeRemuxDeps["probe"]>, boundMs: number = PROBE_BOUND_MS,
+): Promise<string | undefined> {
   let s: MediaProbe, o: MediaProbe;
-  try { s = await probe(src); } catch (e) { return `原文件无法探测: ${(e as Error).message}`; }
-  try { o = await probe(out); } catch (e) { return `新文件无法探测: ${(e as Error).message}`; }
+  try { s = await probeBounded(probe, src, boundMs); } catch (e) { return `原文件无法探测: ${(e as Error).message}`; }
+  try { o = await probeBounded(probe, out, boundMs); } catch (e) { return `新文件无法探测: ${(e as Error).message}`; }
   if (!o.hasVideo) return "新文件没有视频流";
   if (!(s.durationSec > 0)) return "原文件时长未知";
   if (!(s.packets > 0) || !(s.spanSec > 0)) return "原文件视频包无法判定";
@@ -185,6 +265,22 @@ export async function verifyRemuxed(src: string, out: string, probe: NonNullable
   const spanTol = Math.max(SPAN_TOLERANCE_SEC, s.spanSec * SPAN_TOLERANCE_RATIO);
   if (Math.abs(o.spanSec - s.spanSec) > spanTol) {
     return `视频末帧不符(疑似截断): 原跨度 ${s.spanSec.toFixed(1)}s → 新 ${o.spanSec.toFixed(1)}s(容差 ${spanTol.toFixed(1)}s)`;
+  }
+  const vAllow = packetAllowance(s.packets, s.gopPackets);
+  if (o.packets < s.packets - vAllow) {
+    return `视频包数不足(疑似中段丢失): 原 ${s.packets} → 新 ${o.packets}(容差 ${vAllow})`;
+  }
+  // 内容损坏(如中段被补零:索引完好、包数/跨度都对,但每个坏包 ffprobe 都报一行):新文件的解析告警不得多于原文件。
+  if ((o.scanErrors ?? 0) > (s.scanErrors ?? 0)) {
+    return `新文件解析告警多于原文件(疑似内容损坏): 原 ${s.scanErrors ?? 0} 行 → 新 ${o.scanErrors} 行`;
+  }
+  if (s.hasAudio) {
+    if (!o.hasAudio) return "新文件缺少音频流(原文件有音频)";
+    const sa = s.audioPackets ?? 0;
+    const aAllow = packetAllowance(sa);
+    if ((o.audioPackets ?? 0) < sa - aAllow) {
+      return `音频包数不足(疑似丢音频): 原 ${sa} → 新 ${o.audioPackets ?? 0}(容差 ${aAllow})`;
+    }
   }
   let srcSize: number, outSize: number;
   try { srcSize = statSync(src).size; outSize = statSync(out).size; } catch (e) { return `读取文件大小失败: ${(e as Error).message}`; }
@@ -218,7 +314,7 @@ export async function convertSegmentInPlace(src: string, fmt: StageFormat, deps:
   let size: number;
   try { size = statSync(src).size; } catch { return { ok: false, reason: "missing" }; } // 已被别处处理/删除:无事可做
   const final = remuxTargetPath(src, fmt);
-  const tmp = `${final}${NODE_REMUX_TMP_SUFFIX}`;
+  const tmp = remuxTmpPath(final, deps.owner, deps.pid ?? process.pid);
   // 目标已存在 = 上次崩溃留下的配对(交给启动接管)或外部同名文件;**绝不覆盖**。
   if (existsSync(final)) return fail("target-exists", `${basename(final)} 已存在,不覆盖`);
 
@@ -227,13 +323,16 @@ export async function convertSegmentInPlace(src: string, fmt: StageFormat, deps:
     return fail("no-space", `磁盘余量 ${(free / 1024 ** 3).toFixed(1)}GB 不足(需约 ${((size + REMUX_DISK_HEADROOM_BYTES) / 1024 ** 3).toFixed(1)}GB),跳过转换`);
   }
 
+  if (deps.shouldAbort?.()) return fail("aborted", "已超过总时限,放弃本次转换");
+
   try { markSessionNodeFormat(dirname(src), sessionBaseOf(src), fmt); }
   catch (e) { return fail("mark-failed", `写会话标记失败: ${(e as Error).message}`); }
 
   try { await remux(src, tmp, fmt); }
   catch (e) { return fail("remux-failed", String((e as Error)?.message ?? e).slice(-300), tmp); }
 
-  const bad = await verifyRemuxed(src, tmp, probe);
+  if (deps.shouldAbort?.()) return fail("aborted", "已超过总时限,放弃本次转换(临时文件已清理)", tmp);
+  const bad = await verifyRemuxed(src, tmp, probe, deps.probeBoundMs);
   if (bad) return fail("verify-failed", bad, tmp);
 
   try {
@@ -252,7 +351,7 @@ export async function convertSegmentInPlace(src: string, fmt: StageFormat, deps:
  * 一个任务的原地替换钩子工厂(manager 的 `makeRolling` 接缝)。**整个工厂共享一条串行队列**
  * (并发上限 1,跨会话也不并发):remux 是 CPU/IO 重活,多个分段同时转会拖垮同机录制。
  */
-export function makeNodeRemuxHookFactory(o: { format: StageFormat } & NodeRemuxDeps): () => RollingUploadHook {
+export function makeNodeRemuxHookFactory(o: { format: StageFormat; sessionEndBudgetMs?: number } & NodeRemuxDeps): () => RollingUploadHook {
   let chain: Promise<void> = Promise.resolve();
   const enqueue = (fn: () => Promise<void>): Promise<void> => {
     const run = chain.then(fn, fn);
@@ -275,12 +374,28 @@ export function makeNodeRemuxHookFactory(o: { format: StageFormat } & NodeRemuxD
       const sealed = sealedSegmentIndices(segs, { recordingActive, nowMs: Infinity, sealGraceMs: 0 });
       const todo = segs.filter((s) => sealed.has(s.index) && !handled.has(s.path)).sort((a, b) => a.index - b.index);
       for (const s of todo) handled.add(s.path); // 入队即占位:同一段绝不并发/重复转
-      return enqueue(async () => {
+      // 收尾那次(recordingActive=false)有总时限:到点置 abandoned,后续/在途转换在检查点放弃(原文件保留)。
+      const token = { abandoned: false };
+      const done = enqueue(async () => {
         for (const s of todo) {
-          try { await convertSegmentInPlace(s.path, o.format, o); }
+          try { await convertSegmentInPlace(s.path, o.format, { ...o, shouldAbort: () => token.abandoned || (o.shouldAbort?.() ?? false) }); }
           catch (e) { o.log?.(`[remux] 转换抛错(忽略,保留原文件): ${(e as Error)?.message ?? e}`); }
         }
       });
+      if (recordingActive) return done;
+      const budget = o.sessionEndBudgetMs ?? SESSION_END_BUDGET_MS;
+      let timer: NodeJS.Timeout | undefined;
+      const limit = new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          token.abandoned = true;
+          const msg = `会话收尾转 ${o.format} 超过总时限 ${Math.round(budget / 1000)}s,已放弃转换(原文件保留,留待下次启动接管/人工)`;
+          o.log?.(`[remux] ${msg}`);
+          o.alert?.(msg);
+          resolve();
+        }, budget);
+        timer.unref?.();
+      });
+      return Promise.race([done, limit]).finally(() => { if (timer) clearTimeout(timer); });
     };
 
     return {
@@ -320,6 +435,9 @@ export async function recoverNodeRemux(dir: string, fmt: StageFormat, deps: Node
   const alert = deps.alert ?? ((): void => {});
   const now = deps.now ?? Date.now;
   const probe = deps.probe ?? defaultProbe;
+  const myOwner = ownerKey(deps.owner);
+  const selfPid = deps.pid ?? process.pid;
+  const pidAlive = deps.pidAlive ?? defaultPidAlive;
   const out: RecoverSummary = { removedTmp: [], skippedFreshTmp: [], removedOriginal: [], keptBoth: [] };
   const dirs = [dir];
   try {
@@ -334,23 +452,35 @@ export async function recoverNodeRemux(dir: string, fmt: StageFormat, deps: Node
       const p = join(d, n);
       let mtimeMs: number;
       try { mtimeMs = statSync(p).mtimeMs; } catch { continue; }
-      if (now() - mtimeMs < STALE_TMP_MIN_AGE_MS) {
+      // 归属判定:本任务(owner 相同且非空)的残留,且写它的进程已不存在 → 必是上次被强杀留下的,立即删;
+      // 别的任务的新鲜残留(可能正被其 ffmpeg 写)绝不碰;其余(无归属 / 进程仍存活 / pid 被复用)只按「陈旧 > 2h」删。
+      const mark = parseRemuxTmpName(n);
+      const mine = !!mark && myOwner !== "" && mark.owner === myOwner && mark.pid !== selfPid && !pidAlive(mark.pid);
+      if (!mine && now() - mtimeMs < STALE_TMP_MIN_AGE_MS) {
         out.skippedFreshTmp.push(p);
-        log(`[remux] 接管:临时文件 ${n} 较新(可能其他任务正在转换),不碰`);
+        log(`[remux] 接管:临时文件 ${n} 较新且不属于本任务的已死进程(可能其他任务正在转换),不碰`);
         continue;
       }
       rmQuiet(p);
       out.removedTmp.push(p);
-      log(`[remux] 接管:删除陈旧孤儿临时文件 ${n}`);
+      log(`[remux] 接管:删除孤儿临时文件 ${n}(${mine ? "本任务已死进程的残留" : "陈旧"})`);
       alert(`上次转 ${fmt} 被中断(进程被强杀/崩溃),已清理残留临时文件 ${n};该段保持原容器`);
     }
     for (const n of names) {
+      if (deps.shouldAbort?.()) return out;
       if (!n.endsWith(ext)) continue;
       const stem = n.slice(0, -ext.length);
       const orig = NATIVE_EXTS.map((x) => `${stem}${x}`).find((x) => names.includes(x));
       if (!orig) continue;
       if (readNodeFormat(d, sessionBaseOf(n)) !== fmt) continue; // 无本功能标记 → 不是我们的配对,不碰
-      const bad = await verifyRemuxed(join(d, orig), join(d, n), probe);
+      const origPath = join(d, orig);
+      const bad = await verifyRemuxed(origPath, join(d, n), probe, deps.probeBoundMs);
+      // 竞态:扫的是共享输出根,可能落在另一任务「改名之后、删原文件之前」——校验期间原文件被对方删掉,
+      // 此时新文件是**唯一一份**,绝不改名隐藏、不删、不告警误导,直接跳过。
+      if (!existsSync(origPath)) {
+        log(`[remux] 接管:${orig} 已不存在(可能刚被对方任务转换完成),跳过 ${n},不隔离`);
+        continue;
+      }
       if (bad) {
         // 存疑:两份都留。新文件改名隔离(防止与原文件在扫描/分组里重复计入);改名失败也不删。
         const suspect = `${join(d, n)}${NODE_REMUX_SUSPECT_SUFFIX}`;
@@ -359,7 +489,7 @@ export async function recoverNodeRemux(dir: string, fmt: StageFormat, deps: Node
         log(`[remux] 接管:新文件 ${n} 未通过/无法完成校验(${bad}),两份都保留(新文件已隔离),不删任何一份`);
         alert(`上次转 ${fmt} 被中断,新文件 ${n} 校验未通过(${bad});该段保持原容器 ${orig},两份均已保留,请人工确认`);
       } else {
-        rmQuiet(join(d, orig));
+        rmQuiet(origPath);
         out.removedOriginal.push(join(d, orig));
         log(`[remux] 接管:新文件 ${n} 已校验,删除原文件 ${orig}`);
         alert(`上次转 ${fmt} 被中断,已接管:新文件 ${n} 校验通过,已删除原文件 ${orig}`);
@@ -405,4 +535,29 @@ export function nodeOutputFormatLock(
     if (r.recording?.sourceTaskId === task.id || r.key === key) return "hub-rule";
   }
   return undefined;
+}
+
+/**
+ * 后台接管(**不挡录制启动**):立刻返回,接管在后台跑;整体有总时限({@link RECOVER_TOTAL_TIMEOUT_MS}),
+ * 到点置放弃标记、告警并结束(未处理的配对保持原样,下次启动再接管)。单个文件的探测各自有上界,
+ * 一个文件挂死(超时 → 无法判定 → 两份都保留)不影响其它文件。**永不 reject、永不抛**。
+ */
+export function recoverNodeRemuxInBackground(
+  dir: string, fmt: StageFormat, deps: NodeRemuxDeps = {}, totalTimeoutMs: number = RECOVER_TOTAL_TIMEOUT_MS,
+): Promise<RecoverSummary | undefined> {
+  let aborted = false;
+  let timer: NodeJS.Timeout | undefined;
+  const limit = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => {
+      aborted = true;
+      const msg = `崩溃接管超过总时限 ${Math.round(totalTimeoutMs / 1000)}s,已停止(未处理的配对保持原样,两份均保留,下次启动再接管)`;
+      deps.log?.(`[remux] ${msg}`);
+      deps.alert?.(msg);
+      resolve(undefined);
+    }, totalTimeoutMs);
+    timer.unref?.();
+  });
+  const run = recoverNodeRemux(dir, fmt, { ...deps, shouldAbort: () => aborted || (deps.shouldAbort?.() ?? false) })
+    .catch((e: unknown) => { deps.log?.(`[remux] 崩溃接管失败(忽略,不影响录制): ${(e as Error)?.message ?? e}`); return undefined; });
+  return Promise.race([run, limit]).finally(() => { if (timer) clearTimeout(timer); });
 }

@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   convertSegmentInPlace, DURATION_TOLERANCE_SEC, makeNodeRemuxHookFactory, markSessionNodeFormat,
   NODE_REMUX_SUSPECT_SUFFIX, STALE_TMP_MIN_AGE_MS, NODE_REMUX_TMP_SUFFIX, recoverNodeRemux, REMUX_DISK_HEADROOM_BYTES, remuxTargetPath, resolveNodeOutputFormat, nodeOutputFormatLock,
+  parseRemuxTmpName, remuxTmpPath, verifyRemuxed, packetAllowance, recoverNodeRemuxInBackground,
   type MediaProbe, type NodeRemuxDeps,
 } from "../../packages/app/src/node-remux.js";
 import { buildRecordArgs } from "../../packages/app/src/process/record-args.js";
@@ -73,8 +74,10 @@ describe("convertSegmentInPlace — 成功路径", () => {
   it("临时文件名带明确后缀且不是视频扩展名(扫描 / 分组不会当成分段)", async () => {
     put(`${B}_000.ts`, "dur=10");
     let seenTmp = "";
-    await convertSegmentInPlace(f(`${B}_000.ts`), "mkv", deps({ remux: async (_s, tmp) => { seenTmp = tmp; writeFileSync(tmp, "dur=10"); } }));
-    expect(seenTmp).toBe(f(`${B}_000.mkv${NODE_REMUX_TMP_SUFFIX}`));
+    await convertSegmentInPlace(f(`${B}_000.ts`), "mkv", deps({ owner: "t1", pid: 4242, remux: async (_s, tmp) => { seenTmp = tmp; writeFileSync(tmp, "dur=10"); } }));
+    // 临时文件名带归属(任务标识 + pid):`{final}.{owner}-{pid}.drec-remux`
+    expect(seenTmp).toBe(f(`${B}_000.mkv.t1-4242${NODE_REMUX_TMP_SUFFIX}`));
+    expect(parseRemuxTmpName(seenTmp)).toEqual({ owner: "t1", pid: 4242 });
     expect(groupSessions([`${B}_000.mkv${NODE_REMUX_TMP_SUFFIX}`], { nodeFormats: new Map([[B, "mkv" as const]]) })).toEqual({});
   });
   it("remuxTargetPath:只换扩展名", () => {
@@ -506,5 +509,206 @@ describe("hub 绑定后识别节点替换产物(scanRecordings,只在录制目�
     const byBase = Object.fromEntries(rs.map((r) => [r.sessionBase, r.tsFiles.map((x) => x.split("/").pop())]));
     expect(byBase[B]).toEqual([`${B}.mkv`]);
     expect(byBase[B2]).toEqual([`${B2}_000.ts`]); // 与改动前一致
+  });
+});
+
+// ───────────── issue #137 返工第 2 轮 ─────────────
+
+describe("verifyRemuxed — 视频包数 / 音频 / 内容告警(假探测,边界值)", () => {
+  const base: MediaProbe = { durationSec: 1800, hasVideo: true, spanSec: 1800, packets: 45000, gopPackets: 50, hasAudio: true, audioPackets: 77000, scanErrors: 0 };
+  const run = async (o: Partial<MediaProbe>, s: Partial<MediaProbe> = {}): Promise<string | undefined> => {
+    put("a.ts", "x".repeat(100)); put("a.mkv", "x".repeat(100));
+    return verifyRemuxed(f("a.ts"), f("a.mkv"), async (p) => (p.endsWith(".ts") ? { ...base, ...s } : { ...base, ...o }));
+  };
+  it("包数容差 = min(GOP, 0.5%),至少 1:45000 包 → 50;300 包 → 2;GOP 未知只用比例", () => {
+    expect(packetAllowance(45000, 50)).toBe(50);
+    expect(packetAllowance(45000, 500)).toBe(225);
+    expect(packetAllowance(300, 50)).toBe(2);
+    expect(packetAllowance(10, 50)).toBe(1);
+    expect(packetAllowance(45000)).toBe(225);
+  });
+  it("视频包数:少一个 GOP 以内通过;多丢一个就拒;中段丢 30%(1800→1193 同量级)被拒", async () => {
+    expect(await run({ packets: 45000 - 50 })).toBeUndefined();
+    expect(await run({ packets: 45000 - 51 })).toMatch(/视频包数不足/);
+    expect(await run({ packets: 31500 })).toMatch(/视频包数不足/);
+  });
+  it("音频:原有音频而新文件无音频流 → 拒;音频包数少于容差 → 拒;在容差内通过", async () => {
+    expect(await run({ hasAudio: false, audioPackets: 0 })).toMatch(/缺少音频流/);
+    expect(await run({ audioPackets: 77000 - 386 })).toMatch(/音频包数不足/);
+    expect(await run({ audioPackets: 77000 - 385 })).toBeUndefined();
+  });
+  it("原文件无音频:新文件有无音频都不拒(只要求不丢原有的)", async () => {
+    expect(await run({ hasAudio: false, audioPackets: 0 }, { hasAudio: false, audioPackets: 0 })).toBeUndefined();
+  });
+  it("内容告警:新文件 ffprobe 告警行多于原文件 → 拒;不多于原文件通过", async () => {
+    expect(await run({ scanErrors: 50 })).toMatch(/解析告警多于原文件/);
+    expect(await run({ scanErrors: 50 }, { scanErrors: 50 })).toBeUndefined();
+  });
+  it("探测挂死(永不返回)→ 在上界内按无法判定失败,不无限等", async () => {
+    put("a.ts", "x"); put("a.mkv", "x");
+    const t0 = Date.now();
+    const r = await verifyRemuxed(f("a.ts"), f("a.mkv"), () => new Promise<MediaProbe>(() => {}), 80);
+    expect(r).toMatch(/无法探测.*探测超时/);
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+});
+
+describe("临时文件归属:任务标识 + pid", () => {
+  const sub = (n: string): string => { const d = join(dir, n); mkdirSync(d, { recursive: true }); return d; };
+  const age = (p: string, ms: number): void => { const t = new Date(Date.now() - ms); utimesSync(p, t, t); };
+  const tmpOf = (d: string, owner: string, pid: number): string => join(d, `${B}_000.mkv.${owner}-${pid}${NODE_REMUX_TMP_SUFFIX}`);
+
+  it("remuxTmpPath / parseRemuxTmpName 往返;老格式(无归属)解析为 undefined", () => {
+    const p = remuxTmpPath(f(`${B}_000.mkv`), "123456", 99);
+    expect(parseRemuxTmpName(p)).toEqual({ owner: "123456", pid: 99 });
+    expect(parseRemuxTmpName(`${B}_000.mkv.drec-remux`)).toBeUndefined();
+  });
+  it("同任务、进程已不存在的新鲜残留 → 立即删除并告警(不必等 2 小时)", async () => {
+    const d0 = sub("a"); const t = tmpOf(d0, "room1", 111); writeFileSync(t, "partial"); // mtime = 刚刚
+    const d = deps({ owner: "room1", pid: 222, pidAlive: () => false });
+    const r = await recoverNodeRemux(dir, "mkv", d);
+    expect(r.removedTmp).toEqual([t]);
+    expect(existsSync(t)).toBe(false);
+    expect(d.alerts).toHaveLength(1);
+    expect(d.alerts[0]).toContain("保持原容器");
+  });
+  it("同任务但写它的进程仍存活 → 不碰(新鲜)", async () => {
+    const d0 = sub("a"); const t = tmpOf(d0, "room1", 111); writeFileSync(t, "partial");
+    const d = deps({ owner: "room1", pid: 222, pidAlive: () => true });
+    const r = await recoverNodeRemux(dir, "mkv", d);
+    expect(r.skippedFreshTmp).toEqual([t]);
+    expect(existsSync(t)).toBe(true);
+    expect(d.alerts).toEqual([]);
+  });
+  it("别的任务的新鲜残留(即使其进程已不存在)→ 不碰、不告警", async () => {
+    const d0 = sub("a"); const t = tmpOf(d0, "other", 111); writeFileSync(t, "partial");
+    const d = deps({ owner: "room1", pid: 222, pidAlive: () => false });
+    const r = await recoverNodeRemux(dir, "mkv", d);
+    expect(r.skippedFreshTmp).toEqual([t]);
+    expect(existsSync(t)).toBe(true);
+    expect(d.alerts).toEqual([]);
+  });
+  it("别的任务的陈旧(>2h)残留仍可删", async () => {
+    const d0 = sub("a"); const t = tmpOf(d0, "other", 111); writeFileSync(t, "partial"); age(t, STALE_TMP_MIN_AGE_MS + 1000);
+    const d = deps({ owner: "room1", pid: 222, pidAlive: () => true });
+    const r = await recoverNodeRemux(dir, "mkv", d);
+    expect(r.removedTmp).toEqual([t]);
+    expect(d.alerts).toHaveLength(1);
+  });
+  it("本进程自己的临时文件(pid 相同)绝不当残留", async () => {
+    const d0 = sub("a"); const t = tmpOf(d0, "room1", 222); writeFileSync(t, "partial");
+    const r = await recoverNodeRemux(dir, "mkv", deps({ owner: "room1", pid: 222, pidAlive: () => false }));
+    expect(r.removedTmp).toEqual([]);
+    expect(existsSync(t)).toBe(true);
+  });
+});
+
+describe("接管竞态:校验失败时原文件已不存在 → 跳过、不隔离", () => {
+  it("校验期间对方任务删了原文件:新文件是唯一一份,不改名、不删、不告警", async () => {
+    const d0 = join(dir, "a"); mkdirSync(d0);
+    writeFileSync(join(d0, `${B}_000.ts`), "dur=1800");
+    writeFileSync(join(d0, `${B}_000.mkv`), "dur=1800");
+    markSessionNodeFormat(d0, B, "mkv");
+    // 探测原文件时(校验必然失败:无法探测)模拟对方任务「删原文件」
+    const d = deps({ probe: async (p) => { if (p.endsWith(".ts")) { rmSync(p); throw new Error("ENOENT"); } return probe(p); } });
+    const r = await recoverNodeRemux(dir, "mkv", d);
+    expect(r.keptBoth).toEqual([]);
+    expect(r.removedOriginal).toEqual([]);
+    expect(readdirSync(d0).sort()).toEqual([`${B}_000.mkv`, `${B}.session.json`].sort()); // 新文件原名原位,没被隔离
+    expect(d.alerts).toEqual([]);
+  });
+  it("对照:原文件仍在而校验失败 → 照旧隔离新文件、两份都留(回归)", async () => {
+    const d0 = join(dir, "a"); mkdirSync(d0);
+    writeFileSync(join(d0, `${B}_000.ts`), "dur=1800");
+    writeFileSync(join(d0, `${B}_000.mkv`), "dur=1800 unreadable");
+    markSessionNodeFormat(d0, B, "mkv");
+    const r = await recoverNodeRemux(dir, "mkv", deps());
+    expect(r.keptBoth).toHaveLength(1);
+    expect(existsSync(join(d0, `${B}_000.ts`))).toBe(true);
+    expect(existsSync(join(d0, `${B}_000.mkv${NODE_REMUX_SUSPECT_SUFFIX}`))).toBe(true);
+  });
+});
+
+describe("接管后台执行 + 总时限;收尾总时限", () => {
+  it("recoverNodeRemuxInBackground:慢探测时调用方立刻拿到 Promise(不被等待),探测放行后才完成", async () => {
+    const d0 = join(dir, "a"); mkdirSync(d0);
+    writeFileSync(join(d0, `${B}_000.ts`), "dur=10"); writeFileSync(join(d0, `${B}_000.mkv`), "dur=10");
+    markSessionNodeFormat(d0, B, "mkv");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let done = false;
+    const p = recoverNodeRemuxInBackground(dir, "mkv", deps({ probe: async (x) => { await gate; return probe(x); } })).then((r) => { done = true; return r; });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(done).toBe(false); // 探测还卡着,但调用方(开录路径)已经往下走了
+    expect(existsSync(join(d0, `${B}_000.ts`))).toBe(true);
+    release();
+    const r = await p;
+    expect(r?.removedOriginal).toEqual([join(d0, `${B}_000.ts`)]);
+  });
+  it("总时限:探测永不返回 → 到点结束并告警,不 reject;未处理的配对两份都在", async () => {
+    const d0 = join(dir, "a"); mkdirSync(d0);
+    writeFileSync(join(d0, `${B}_000.ts`), "dur=10"); writeFileSync(join(d0, `${B}_000.mkv`), "dur=10");
+    markSessionNodeFormat(d0, B, "mkv");
+    const d = deps({ probe: () => new Promise<MediaProbe>(() => {}) });
+    const r = await recoverNodeRemuxInBackground(dir, "mkv", d, 60);
+    expect(r).toBeUndefined();
+    expect(d.alerts.some((m) => m.includes("总时限"))).toBe(true);
+    expect(existsSync(join(d0, `${B}_000.ts`))).toBe(true);
+    expect(existsSync(join(d0, `${B}_000.mkv`))).toBe(true);
+  });
+  it("一个文件探测挂死不影响其它文件:挂死那份两份都留,另一份正常接管", async () => {
+    const d0 = join(dir, "a"); mkdirSync(d0);
+    const B2 = "主播_2026-10-15_22-00-00";
+    for (const b of [B, B2]) {
+      writeFileSync(join(d0, `${b}_000.ts`), "dur=10"); writeFileSync(join(d0, `${b}_000.mkv`), "dur=10");
+      markSessionNodeFormat(d0, b, "mkv");
+    }
+    const d = deps({ probeBoundMs: 50, probe: async (p) => (p.includes(B2) ? new Promise<MediaProbe>(() => {}) : probe(p)) });
+    const r = await recoverNodeRemux(dir, "mkv", d);
+    expect(r.removedOriginal).toEqual([join(d0, `${B}_000.ts`)]);
+    expect(existsSync(join(d0, `${B2}_000.ts`))).toBe(true); // 挂死的:原文件保留
+  });
+  it("会话收尾总时限:remux 挂死 → onSessionEnd 在时限内返回、告警、原文件保留;之后的转换放弃", async () => {
+    put(`${B}_000.ts`, "dur=10");
+    const d = deps({ remux: () => new Promise<void>(() => {}) });
+    const hook = makeNodeRemuxHookFactory({ format: "mkv", sessionEndBudgetMs: 80, ...d })();
+    hook.onSegment(f(`${B}_000.ts`));
+    const t0 = Date.now();
+    await hook.onSessionEnd();
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(d.alerts.some((m) => m.includes("总时限"))).toBe(true);
+    expect(existsSync(f(`${B}_000.ts`))).toBe(true);
+    expect(ls().some((n) => n.endsWith(NODE_REMUX_TMP_SUFFIX))).toBe(false);
+  });
+  it("收尾总时限内正常完成 → 不告警、转换成功(时限不影响常规路径)", async () => {
+    put(`${B}_000.ts`, "dur=10");
+    const d = deps();
+    const hook = makeNodeRemuxHookFactory({ format: "mkv", sessionEndBudgetMs: 5000, ...d })();
+    hook.onSegment(f(`${B}_000.ts`));
+    await hook.onSessionEnd();
+    expect(d.alerts).toEqual([]);
+    expect(ls()).toContain(`${B}_000.mkv`);
+  });
+  it("shouldAbort:放弃后 remux 完成也不校验、不改名,清临时文件、保留原文件", async () => {
+    put(`${B}_000.ts`, "dur=10");
+    let abort = false;
+    const d = deps({ shouldAbort: () => abort, remux: async (s, tmp) => { writeFileSync(tmp, readFileSync(s)); abort = true; } });
+    const r = await convertSegmentInPlace(f(`${B}_000.ts`), "mkv", d);
+    expect(r).toMatchObject({ ok: false, reason: "aborted" });
+    expect(ls()).toEqual([`${B}_000.ts`, `${B}.session.json`].sort());
+  });
+});
+
+describe("混合容器:同一会话部分分段已转 mkv、部分仍是 ts", () => {
+  it("groupSessions:声明 nodeFormat=mkv 的会话里 mkv 与 ts 分段按段号交错排序、同归一个会话", () => {
+    const files = [`${B}_002.ts`, `${B}_000.mkv`, `${B}_001.ts`, `${B}_003.mkv`, `${B}.xml`];
+    const g = groupSessions(files, { nodeFormats: new Map([[B, "mkv" as const]]) });
+    expect(Object.keys(g)).toEqual([B]);
+    expect(g[B].ts).toEqual([`${B}_000.mkv`, `${B}_001.ts`, `${B}_002.ts`, `${B}_003.mkv`]);
+    expect(g[B].xml).toBe(`${B}.xml`);
+  });
+  it("没有声明时 mkv 一个都不收(只剩 ts)——对照", () => {
+    const g = groupSessions([`${B}_000.mkv`, `${B}_001.ts`]);
+    expect(g[B].ts).toEqual([`${B}_001.ts`]);
   });
 });

@@ -254,15 +254,16 @@ program
       console.log(`[rec] 已开启边录边传,忽略 --output-format ${nodeFormat}(上传后删源,与原地替换互斥)`);
     } else if (nodeFormat !== "original") {
       const fmt = nodeFormat as StageFormat;
-      const { makeNodeRemuxHookFactory, recoverNodeRemux } = await import("@drec/app");
+      const { makeNodeRemuxHookFactory, recoverNodeRemuxInBackground } = await import("@drec/app");
       const remuxDeps = {
         log: (m: string) => console.log(m),
         // 失败走现有告警通道(error 事件 → webhook + @@DREC_ALERT@@ → 站内 toast),不静默。
         alert: (message: string) => { void notifier.notify({ kind: "error", stage: "转封装", message }).catch(() => {}); },
+        // 任务归属标识(临时文件名 = 归属 + pid):接管据此区分「本任务已死进程的残留」与「别的任务的新鲜残留」。
+        owner: platform.extractRoomSlug(o.room),
       };
-      // 会话开始前先接管上次崩溃留下的中间态(孤儿临时文件 / 已 rename 未删原文件的配对);失败不拦录制。
-      try { await recoverNodeRemux(opts.outDir, fmt, remuxDeps); }
-      catch (e) { console.error(`[remux] 崩溃接管失败(忽略,不影响录制): ${(e as Error).message}`); }
+      // 会话开始前接管上次崩溃留下的中间态:**后台执行、不挡开录**(探测挂死/慢盘不得拖住录制),整体有总时限。
+      void recoverNodeRemuxInBackground(opts.outDir, fmt, remuxDeps);
       makeRolling = makeNodeRemuxHookFactory({ format: fmt, ...remuxDeps });
       console.log(`[rec] 节点侧输出格式 ${fmt}:每封口一段原地 remux,校验通过后删原文件`);
     }

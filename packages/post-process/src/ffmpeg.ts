@@ -189,168 +189,190 @@ export function runFfmpeg(
 }
 
 /**
- * 末帧视频包 PTS（秒）兜底。mesio 录像被中途 SIGINT 杀停时，FLV 头 duration 字段不会回写
- * （为 0/缺失），`format.duration` 因此读 0——但内容其实完整。扫视频流取最后一个包的 pts_time
- * = 真实时长。要遍历全部包，比读头慢（大文件几百毫秒～数秒），**仅当 format.duration≤0 时兜底**。
- * 失败/无包 → 0（由调用方决定是否报错）。
+ * ffprobe 超时(毫秒)。依据:全包扫描(`-show_entries packet=...`)要读完整个文件,30 分钟分段(直播码流
+ * 1~6Mbps ≈ 0.2~1.4GB)在机械盘 / 网络盘上实测量级是数秒~数十秒;5 分钟是它的 10 倍以上裕量,保守但有限。
+ * 超过 = 文件异常(补零 / 损坏导致解复用空转)或盘卡死,一律按「无法判定」处理,绝不无限等。
  */
-function ffprobeLastVideoPts(path: string): Promise<number> {
-  return new Promise((resolve) => {
-    const proc = spawn("ffprobe", [
-      "-v", "error",
-      "-select_streams", "v:0",
-      "-show_entries", "packet=pts_time",
-      "-of", "csv=p=0",
-      path,
-    ]);
-    let out = "";
-    proc.stdout.on("data", (c) => (out += c));
-    proc.on("error", () => resolve(0));
-    proc.on("close", () => {
-      const last = out
-        .trim()
-        .split("\n")
-        .map((l) => parseFloat(l))
-        .filter((n) => Number.isFinite(n))
-        .pop();
-      resolve(last ?? 0);
-    });
-  });
+export const FFPROBE_SCAN_TIMEOUT_MS = 5 * 60_000;
+/** 只读文件头的探测(`format=duration` / `-show_streams`)超时:正常毫秒级,60 秒已极度宽松。 */
+export const FFPROBE_HEADER_TIMEOUT_MS = 60_000;
+/** stderr 只保留尾部这么多字节:被探测文件异常时 ffprobe 可能输出几十 MB 报错,不读会写满管道把进程阻塞住。 */
+const FFPROBE_STDERR_TAIL_BYTES = 4096;
+/** stdout 上限:全包扫描 30 分钟 60fps 约几 MB;超过 64MB 必是异常输出,杀掉按无法判定处理。 */
+const FFPROBE_STDOUT_MAX_BYTES = 64 * 1024 * 1024;
+
+export interface FfprobeRun {
+  /** 退出码;null = 起不来 / 被杀。 */
+  code: number | null;
+  out: string;
+  /** stderr 尾部(≤4KB)。 */
+  errTail: string;
+  timedOut: boolean;
+  /** stdout 超上限被杀。 */
+  overflow: boolean;
+  /** stderr 总行数(含被截掉的部分):内容损坏时 ffprobe 会对每个坏包报一行,是「数据坏了」的信号。 */
+  errLines: number;
 }
 
 /**
- * 视频流真实时间跨度(秒)= 全部视频包 pts_time 的 max − min(再加一帧由调用方的容差吸收)。
- * 与 `format.duration` 的本质区别:mkv / faststart 的 mp4 把时长写在**文件头**,尾部被截断时头里仍是完整时长,
- * 只有扫包才能看见真实末帧。取 max/min 而不是「最后一个包」:含 B 帧的流包序不单调。
- * 节点侧原地替换的校验用它比较新旧文件(同一口径,所以 ts 的 PCR 起点偏移 / mp4 的起点归零都被抵消)。
- * 无视频包 / 解析失败 / ffprobe 失败 → packets=0(调用方视为无法判定,不得据此删文件)。
+ * 统一的 ffprobe 运行器(本包所有探测共用):**必须**消费 stderr(只留尾部)、有超时(SIGKILL)、不抛。
+ * 任何异常都以 `code !== 0` / `timedOut` / `overflow` 表达,由调用方按「无法判定」处理。
  */
-export function ffprobeVideoSpan(path: string): Promise<{ spanSec: number; packets: number }> {
+export function runFfprobe(args: string[], timeoutMs: number): Promise<FfprobeRun> {
   return new Promise((resolve) => {
-    const proc = spawn("ffprobe", [
-      "-v", "error",
-      "-select_streams", "v:0",
-      "-show_entries", "packet=pts_time",
-      "-of", "csv=p=0",
-      path,
-    ]);
-    let out = "";
-    proc.stdout.on("data", (c) => (out += c));
-    proc.on("error", () => resolve({ spanSec: 0, packets: 0 }));
-    proc.on("close", (code) => {
-      if (code !== 0) return resolve({ spanSec: 0, packets: 0 });
-      let min = Infinity, max = -Infinity, n = 0;
-      for (const l of out.split("\n")) {
-        const v = parseFloat(l);
-        if (!Number.isFinite(v)) continue;
-        n++;
-        if (v < min) min = v;
-        if (v > max) max = v;
-      }
-      resolve(n > 0 ? { spanSec: max - min, packets: n } : { spanSec: 0, packets: 0 });
+    let proc: ReturnType<typeof spawn>;
+    try { proc = spawn("ffprobe", args); }
+    catch (e) { return resolve({ code: null, out: "", errTail: String((e as Error).message), timedOut: false, overflow: false, errLines: 0 }); }
+    const chunks: Buffer[] = [];
+    let outBytes = 0;
+    let errTail = "";
+    let timedOut = false;
+    let overflow = false;
+    let errLines = 0;
+    let settled = false;
+    const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ code, out: Buffer.concat(chunks).toString("utf-8"), errTail, timedOut, overflow, errLines });
+    };
+    const kill = (): void => { try { proc.kill("SIGKILL"); } catch { /* gone */ } };
+    const timer = setTimeout(() => { timedOut = true; kill(); finish(null); }, timeoutMs);
+    proc.stdout?.on("data", (c: Buffer) => {
+      outBytes += c.length;
+      if (outBytes > FFPROBE_STDOUT_MAX_BYTES) { overflow = true; kill(); finish(null); return; }
+      chunks.push(c);
     });
+    proc.stderr?.on("data", (c: Buffer) => {
+      for (const b of c) if (b === 10) errLines++;
+      errTail = (errTail + c.toString("utf-8")).slice(-FFPROBE_STDERR_TAIL_BYTES);
+    });
+    proc.on("error", (e) => { errTail = String(e.message); finish(null); });
+    proc.on("close", (code) => finish(code));
   });
+}
+
+const probeFailMsg = (path: string, r: FfprobeRun): string =>
+  `ffprobe ${r.timedOut ? "超时" : r.overflow ? "输出超限" : "失败"} (${path}): ${r.errTail.trim().slice(-200)}`;
+
+/**
+ * 末帧视频包 PTS（秒）兜底。mesio 录像被中途 SIGINT 杀停时，FLV 头 duration 字段不会回写
+ * （为 0/缺失），`format.duration` 因此读 0——但内容其实完整。扫视频流取最后一个包的 pts_time
+ * = 真实时长。要遍历全部包，比读头慢（大文件几百毫秒～数秒），**仅当 format.duration≤0 时兜底**。
+ * 失败/超时/无包 → 0（由调用方决定是否报错）。
+ */
+async function ffprobeLastVideoPts(path: string): Promise<number> {
+  const r = await runFfprobe(
+    ["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
+    FFPROBE_SCAN_TIMEOUT_MS,
+  );
+  if (r.code == null) return 0;
+  const last = r.out.trim().split("\n").map((l) => parseFloat(l)).filter((n) => Number.isFinite(n)).pop();
+  return last ?? 0;
+}
+
+/** 全包扫描统计(节点侧原地替换的校验用,新旧文件同口径)。 */
+export interface PacketStats {
+  /** 视频包 pts_time 的 max−min(秒)。 */
+  spanSec: number;
+  videoPackets: number;
+  audioPackets: number;
+  hasAudio: boolean;
+  /** 视频流里相邻关键帧之间的最大包数(= 一个 GOP 的包数上界)。 */
+  gopPackets: number;
+  /** 全包扫描时 ffprobe 的 stderr 行数(内容损坏的信号;新文件不得多于原文件)。 */
+  errorLines: number;
+}
+
+/**
+ * 单次全包扫描:视频跨度 + 视频/音频包数 + GOP 大小。
+ * 与 `format.duration` 的本质区别:mkv / faststart 的 mp4 把时长写在**文件头**,尾部被截断时头里仍是完整时长,
+ * 只有扫包才能看见真实末帧;包数则能抓到「中段被抹零、跨度/头部/体积都正常」的丢包。
+ * 取 max/min 而不是「最后一个包」:含 B 帧的流包序不单调。
+ * **任何无法判定**(ffprobe 失败 / 超时 / 输出超限 / 无视频流 / 无视频包)→ 返回 undefined,调用方必须按失败处理。
+ */
+export async function ffprobePacketStats(path: string, timeoutMs = FFPROBE_SCAN_TIMEOUT_MS): Promise<PacketStats | undefined> {
+  const st = await runFfprobe(["-v", "error", "-show_entries", "stream=index,codec_type", "-of", "csv=p=0", path], Math.min(timeoutMs, FFPROBE_HEADER_TIMEOUT_MS));
+  if (st.code !== 0) return undefined;
+  let videoIdx = -1;
+  const audioIdx = new Set<number>();
+  for (const l of st.out.split("\n")) {
+    const f = l.trim().split(",");
+    const kind = f.find((x) => x === "video" || x === "audio");
+    const idx = f.map((x) => Number(x)).find((x) => Number.isInteger(x) && x >= 0);
+    if (idx === undefined) continue;
+    if (kind === "video" && videoIdx < 0) videoIdx = idx;
+    else if (kind === "audio") audioIdx.add(idx);
+  }
+  if (videoIdx < 0) return undefined;
+  const r = await runFfprobe(["-v", "error", "-show_entries", "packet=stream_index,pts_time,flags", "-of", "csv=p=0", path], timeoutMs);
+  if (r.code !== 0) return undefined;
+  let min = Infinity, max = -Infinity, v = 0, a = 0, run = 0, gop = 0;
+  for (const l of r.out.split("\n")) {
+    const f = l.trim().split(",");
+    if (f.length < 3) continue;
+    const idx = Number(f[0]);
+    if (idx === videoIdx) {
+      v++;
+      const t = parseFloat(f[1] ?? "");
+      if (Number.isFinite(t)) { if (t < min) min = t; if (t > max) max = t; }
+      if ((f[2] ?? "").startsWith("K")) { gop = Math.max(gop, run); run = 1; } else run++;
+    } else if (audioIdx.has(idx)) a++;
+  }
+  gop = Math.max(gop, run);
+  if (v === 0 || !Number.isFinite(min)) return undefined;
+  return { spanSec: max - min, videoPackets: v, audioPackets: a, hasAudio: audioIdx.size > 0, gopPackets: gop, errorLines: r.errLines };
+}
+
+/** 兼容入口:视频跨度 + 视频包数;无法判定 → packets=0。 */
+export async function ffprobeVideoSpan(path: string): Promise<{ spanSec: number; packets: number }> {
+  const s = await ffprobePacketStats(path);
+  return s ? { spanSec: s.spanSec, packets: s.videoPackets } : { spanSec: 0, packets: 0 };
 }
 
 /**
  * ffprobe 取时长（秒）。移植 get_segment_duration（L140-157）。
  * format.duration≤0/缺失（mesio 硬停的 flv）→ 末帧 PTS 兜底，避免 merge 偏移按 0 算错。
  */
-export function ffprobeDuration(path: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn("ffprobe", [
-      "-v",
-      "error",
-      "-show_entries",
-      "format=duration",
-      "-of",
-      "default=noprint_wrappers=1:nokey=1",
-      path,
-    ]);
-    let out = "";
-    let err = "";
-    proc.stdout.on("data", (c) => (out += c));
-    proc.stderr.on("data", (c) => (err += c));
-    proc.on("error", reject);
-    proc.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(`ffprobe 失败 (${path}): ${err.trim().slice(0, 200)}`));
-        return;
-      }
-      const v = parseFloat(out.trim());
-      if (Number.isFinite(v) && v > 0) {
-        resolve(v);
-        return;
-      }
-      // 头部无时长（mesio 硬停的 flv）→ 末帧 PTS 兜底
-      ffprobeLastVideoPts(path).then((pts) => {
-        if (pts > 0) resolve(pts);
-        else reject(new Error(`ffprobe 无法取得时长 (${path}): format.duration 与末帧 PTS 均为 0`));
-      });
-    });
-  });
+export async function ffprobeDuration(path: string): Promise<number> {
+  const r = await runFfprobe(
+    ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path],
+    FFPROBE_HEADER_TIMEOUT_MS,
+  );
+  if (r.code !== 0) throw new Error(probeFailMsg(path, r));
+  const v = parseFloat(r.out.trim());
+  if (Number.isFinite(v) && v > 0) return v;
+  // 头部无时长（mesio 硬停的 flv）→ 末帧 PTS 兜底
+  const pts = await ffprobeLastVideoPts(path);
+  if (pts > 0) return pts;
+  throw new Error(`ffprobe 无法取得时长 (${path}): format.duration 与末帧 PTS 均为 0`);
 }
 
 /**
  * ffprobe 取视频流 fps + 码率(kbps) + 时长(ms)。
  * r_frame_rate "n/den" → n/den；bit_rate/1000；format.duration*1000。
  */
-export function ffprobeVideo(
+export async function ffprobeVideo(
   path: string,
 ): Promise<{ fps: number; kbps: number; durationMs: number; width: number; height: number; hasVideo: boolean }> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn("ffprobe", [
-      "-v",
-      "error",
-      "-print_format",
-      "json",
-      "-show_streams",
-      "-show_format",
-      path,
-    ]);
-    let out = "";
-    let err = "";
-    proc.stdout.on("data", (c) => (out += c));
-    proc.stderr.on("data", (c) => (err += c));
-    proc.on("error", reject);
-    proc.on("close", (code) => {
-      if (code !== 0)
-        return reject(
-          new Error(
-            `ffprobe 失败 (${path}): ${err.trim().slice(0, 200)}`,
-          ),
-        );
-      try {
-        const d = JSON.parse(out);
-        const v =
-          (d.streams ?? []).find(
-            (s: { codec_type?: string }) => s.codec_type === "video",
-          ) ?? {};
-        const [n, den] = String(v.r_frame_rate ?? "0/1").split("/");
-        const fps = Number(n) / Math.max(Number(den) || 1, 1);
-        const kbps = Math.floor(Number(v.bit_rate ?? 0) / 1000);
-        const durationMs = Math.floor(
-          Number(d.format?.duration ?? 0) * 1000,
-        );
-        const base = {
-          // 有无视频流(节点侧原地替换的校验用):没有 video 流的「成功 remux」不算数。
-          hasVideo: (d.streams ?? []).some((s: { codec_type?: string }) => s.codec_type === "video"),
-          fps: Number.isFinite(fps) ? fps : 0,
-          kbps,
-          width: Number(v.width) || 0,
-          height: Number(v.height) || 0,
-        };
-        if (durationMs > 0) {
-          resolve({ ...base, durationMs });
-          return;
-        }
-        // 头部无时长（mesio 硬停的 flv）→ 末帧 PTS 兜底（秒→ms）
-        ffprobeLastVideoPts(path).then((pts) =>
-          resolve({ ...base, durationMs: Math.floor(pts * 1000) }),
-        );
-      } catch (e) {
-        reject(e as Error);
-      }
-    });
-  });
+  const r = await runFfprobe(["-v", "error", "-print_format", "json", "-show_streams", "-show_format", path], FFPROBE_HEADER_TIMEOUT_MS);
+  if (r.code !== 0) throw new Error(probeFailMsg(path, r));
+  const d = JSON.parse(r.out);
+  const v = (d.streams ?? []).find((s: { codec_type?: string }) => s.codec_type === "video") ?? {};
+  const [n, den] = String(v.r_frame_rate ?? "0/1").split("/");
+  const fps = Number(n) / Math.max(Number(den) || 1, 1);
+  const kbps = Math.floor(Number(v.bit_rate ?? 0) / 1000);
+  const durationMs = Math.floor(Number(d.format?.duration ?? 0) * 1000);
+  const base = {
+    // 有无视频流(节点侧原地替换的校验用):没有 video 流的「成功 remux」不算数。
+    hasVideo: (d.streams ?? []).some((s: { codec_type?: string }) => s.codec_type === "video"),
+    fps: Number.isFinite(fps) ? fps : 0,
+    kbps,
+    width: Number(v.width) || 0,
+    height: Number(v.height) || 0,
+  };
+  if (durationMs > 0) return { ...base, durationMs };
+  // 头部无时长（mesio 硬停的 flv）→ 末帧 PTS 兜底（秒→ms）
+  const pts = await ffprobeLastVideoPts(path);
+  return { ...base, durationMs: Math.floor(pts * 1000) };
 }
