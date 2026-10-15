@@ -69,28 +69,42 @@ describe("makeCpuProbe(CPU 时间存活信号)", () => {
 /**
  * 端到端行为(需真实 ffmpeg;本机 ffmpeg 坏则跳过,CI/容器里覆盖):
  *   ① 「stdout/stderr 静默但进程在烧 CPU」→ **不被杀**(CPU 探针生效,修 faststart 误杀);
- *   ② 「真挂住(CPU 不动、也不输出)」→ **仍被杀**(证明只是放行真进度,没废掉看门狗)。
+ *   ② 「真挂住(CPU 不动、也不输出)」→ **仍被杀**;
+ *   ③ 「只有 CPU 转、长时间无任何输出」→ **仍被杀**(忙等型卡死的硬上限)。
+ *
+ * ⚠️ 看门狗默认每 15s 才检查一次,短进程(几秒)会在第一次检查前就结束 → 用例会假绿。
+ * 故这里注入 `watchIntervalMs: 100` 强制检查,并把 stallMs 设成 300ms 量级。
  */
 describe("runFfmpeg 看门狗 + CPU 探针(端到端)", () => {
   const dir = mkdtempSync(join(tmpdir(), "stall-"));
-  // 本机 ffmpeg 可能因缺动态库而不可用(macOS 常见);不可用时跳过这两条端到端用例,
-  // 纯逻辑用例(makeOutputProbe)仍然跑,保证 CI/容器(ffmpeg 可用)里覆盖真行为。
   const hasFfmpeg = (() => {
     try { return spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0; } catch { return false; }
   })();
+  const FAST = { watchIntervalMs: 100 };
 
-  it.skipIf(!hasFfmpeg)("stdout/stderr 静默但进程在烧 CPU → 不被杀(CPU 探针生效)", async () => {
+  it.skipIf(!hasFfmpeg)("静默但烧 CPU → 不被杀(CPU 探针生效)", async () => {
     const out = join(dir, "cpu.mp4");
-    // -re 拉长到 ~6s;stallMs=1500 远小于它,且 -v quiet 全程无输出 → 老语义必杀。
-    const args = ["-y", "-v", "quiet", "-re", "-f", "lavfi", "-i", "testsrc2=size=640x480:rate=15",
-                  "-t", "6", "-c:v", "libx264", "-preset", "ultrafast", out];
-    await expect(runFfmpeg(args, { stallMs: 1_500 })).resolves.toBeUndefined();
+    // -re 让进程跑 ~3s;`-v quiet` 全程无输出;stallMs=300 远小于它 → 只看 stdout/stderr 必被杀。
+    const args = ["-y", "-v", "quiet", "-re", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10",
+                  "-t", "8", "-c:v", "libx264", "-preset", "ultrafast", out];
+    // stallMs 取 3s:远大于 ffmpeg 在 -re 下的单次 CPU 停歇(~600ms),又远小于 8s 总时长。
+    await expect(runFfmpeg(args, { stallMs: 3_000, ...FAST })).resolves.toBeUndefined();
   }, 60_000);
 
-  it.skipIf(!hasFfmpeg)("真挂住(CPU 不动)仍会被杀 —— 说明只是放行真进度,没废掉看门狗", async () => {
-    // 用 sleep 冒充「不烧 CPU、也不输出」的卡死进程:探针读 /proc 得 CPU=0 → 应被杀。
-    const sleeper = join(dir, "sleep.sh");
-    writeFileSync(sleeper, "#!/bin/sh\nexec sleep 30\n", { mode: 0o755 });
-    await expect(runFfmpeg(["-y", "-v", "quiet", sleeper], { stallMs: 1_500 })).rejects.toThrow();
+  it.skipIf(!hasFfmpeg)("真挂住(不烧 CPU、不输出)→ 仍被杀,且错误是「卡死」", async () => {
+    // 读 FIFO 且写端不关闭:ffmpeg 阻塞在 open/read,CPU 不动、无输出 → 必须被杀。
+    const fifo = join(dir, "hang.fifo");
+    spawnSync("mkfifo", [fifo]);
+    const args = ["-y", "-v", "quiet", "-i", fifo, "-c", "copy", join(dir, "hang.mp4")];
+    await expect(runFfmpeg(args, { stallMs: 300, ...FAST })).rejects.toThrow(/卡死/);
+  }, 60_000);
+
+  it.skipIf(!hasFfmpeg)("只有 CPU 转、长时间无任何输出 → 仍被杀(忙等硬上限)", async () => {
+    // -re 的 3s 素材 + cpuOnlyStallMs=500:进程在烧 CPU、无输出,超过 500ms 即判忙等卡死。
+    const out = join(dir, "busy.mp4");
+    const args = ["-y", "-v", "quiet", "-re", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10",
+                  "-t", "8", "-c:v", "libx264", "-preset", "ultrafast", out];
+    await expect(runFfmpeg(args, { stallMs: 60_000, cpuOnlyStallMs: 2_000, ...FAST })).rejects.toThrow(/卡死/);
   }, 60_000);
 });
+
