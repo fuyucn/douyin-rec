@@ -219,6 +219,40 @@ function ffprobeLastVideoPts(path: string): Promise<number> {
 }
 
 /**
+ * 视频流真实时间跨度(秒)= 全部视频包 pts_time 的 max − min(再加一帧由调用方的容差吸收)。
+ * 与 `format.duration` 的本质区别:mkv / faststart 的 mp4 把时长写在**文件头**,尾部被截断时头里仍是完整时长,
+ * 只有扫包才能看见真实末帧。取 max/min 而不是「最后一个包」:含 B 帧的流包序不单调。
+ * 节点侧原地替换的校验用它比较新旧文件(同一口径,所以 ts 的 PCR 起点偏移 / mp4 的起点归零都被抵消)。
+ * 无视频包 / 解析失败 / ffprobe 失败 → packets=0(调用方视为无法判定,不得据此删文件)。
+ */
+export function ffprobeVideoSpan(path: string): Promise<{ spanSec: number; packets: number }> {
+  return new Promise((resolve) => {
+    const proc = spawn("ffprobe", [
+      "-v", "error",
+      "-select_streams", "v:0",
+      "-show_entries", "packet=pts_time",
+      "-of", "csv=p=0",
+      path,
+    ]);
+    let out = "";
+    proc.stdout.on("data", (c) => (out += c));
+    proc.on("error", () => resolve({ spanSec: 0, packets: 0 }));
+    proc.on("close", (code) => {
+      if (code !== 0) return resolve({ spanSec: 0, packets: 0 });
+      let min = Infinity, max = -Infinity, n = 0;
+      for (const l of out.split("\n")) {
+        const v = parseFloat(l);
+        if (!Number.isFinite(v)) continue;
+        n++;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      resolve(n > 0 ? { spanSec: max - min, packets: n } : { spanSec: 0, packets: 0 });
+    });
+  });
+}
+
+/**
  * ffprobe 取时长（秒）。移植 get_segment_duration（L140-157）。
  * format.duration≤0/缺失（mesio 硬停的 flv）→ 末帧 PTS 兜底，避免 merge 偏移按 0 算错。
  */

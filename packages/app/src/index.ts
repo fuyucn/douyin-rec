@@ -55,4 +55,4 @@ export { RollingUploader, makeRollingUploadHookFactory } from "./rolling-upload.
 export { refreshLocalRollingEffective, rollingSpecFields } from "./rolling-effective.js";
 export type { RollingUploaderOpts } from "./rolling-upload.js";
 // 节点侧原地替换容器(issue #137 第 2/2):封口后 remux + 校验 + 删原文件 + 崩溃接管 + 唯一判定点。
-export { makeNodeRemuxHookFactory, recoverNodeRemux, convertSegmentInPlace, resolveNodeOutputFormat, NODE_REMUX_TMP_SUFFIX } from "./node-remux.js";
+export { makeNodeRemuxHookFactory, recoverNodeRemux, convertSegmentInPlace, resolveNodeOutputFormat, nodeOutputFormatLock, verifyRemuxed, NODE_REMUX_TMP_SUFFIX } from "./node-remux.js";

@@ -65,15 +65,20 @@ describe("流程摘要", () => {
   });
 });
 
-describe("任务弹窗「输出格式」锁(节点侧原地替换只对无后处理任务)", () => {
-  it("手动任务、无规则 → 可选", () => {
-    expect(taskOutputFormatLock({ managedBy: null, hasHubRule: false })).toEqual({ locked: false });
+describe("任务弹窗「输出格式」锁(完全由后端下发的 outputFormatLock 决定)", () => {
+  it("字段缺失(旧后端)/ 空 → 不锁,不崩(降级)", () => {
+    expect(taskOutputFormatLock({})).toEqual({ locked: false });
+    expect(taskOutputFormatLock({ outputFormatLock: undefined })).toEqual({ locked: false });
+    expect(taskOutputFormatLock({ outputFormatLock: null })).toEqual({ locked: false });
+    expect(taskOutputFormatLock({ outputFormatLock: "something-new" })).toEqual({ locked: false });
   });
-  it("被 hub 管理(worker 上的受管任务)→ 锁定,原因指向 Hub 规则的存档/投稿形态", () => {
-    expect(taskOutputFormatLock({ managedBy: "hub", hasHubRule: false })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatHub" });
+  it("hub-managed / hub-rule → 锁定,原因指向 Hub 规则", () => {
+    for (const v of ["hub-managed", "hub-rule"]) {
+      expect(taskOutputFormatLock({ outputFormatLock: v })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatHub" });
+    }
   });
-  it("有 hub 规则绑定 → 锁定", () => {
-    expect(taskOutputFormatLock({ managedBy: null, hasHubRule: true })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatHub" });
+  it("rolling → 锁定,原因指向边录边传互斥", () => {
+    expect(taskOutputFormatLock({ outputFormatLock: "rolling" })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatRolling" });
   });
   it("读入缺省 = original(老任务无字段)", () => {
     expect(outputFormatFromStored(undefined)).toBe("original");

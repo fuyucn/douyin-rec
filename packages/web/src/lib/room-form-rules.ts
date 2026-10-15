@@ -91,12 +91,16 @@ export function cookieLock(f: Pick<FormFacts, "danmu" | "danmuAvailable" | "cook
 }
 
 /**
- * 任务弹窗「输出格式」的锁(issue #137 第 2/2):节点侧原地替换只对**无后处理**的任务生效。
- * 被 hub 管理(worker 上的受管任务)或已有 hub 规则绑定 → 容器由规则的存档/投稿形态决定,此处锁定。
- * 判定口径与后端 `resolveNodeOutputFormat` 一致(受管 / 有规则 → 不替换)。
+ * 任务对话框的输出格式锁:**完全由后端下发的 `outputFormatLock` 决定**(= 后端 `nodeOutputFormatLock`,
+ * 与「是否真的替换」同源),前端不再自己判 hub 状态。字段缺失(旧后端)→ 不锁,降级但不崩。
  */
-export function taskOutputFormatLock(f: { managedBy?: string | null; hasHubRule: boolean }): Lock {
-  return f.managedBy === "hub" || f.hasHubRule ? lock("roomForm.lock.outputFormatHub") : OPEN;
+export function taskOutputFormatLock(f: { outputFormatLock?: string | null }): Lock {
+  switch (f.outputFormatLock) {
+    case "hub-managed":
+    case "hub-rule": return lock("roomForm.lock.outputFormatHub");
+    case "rolling": return lock("roomForm.lock.outputFormatRolling");
+    default: return OPEN;
+  }
 }
 
 export function deriveConstraints(f: FormFacts): Constraints {

@@ -118,8 +118,8 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
     setForm((f) => ({ ...f, [key]: value }));
   }
 
-  // 输出格式只对无后处理的任务生效(节点侧原地替换);受管 / 有 hub 规则 → 锁定,不随保存提交(避免改掉规则侧的存档格式)。
-  const formatLock = taskOutputFormatLock({ managedBy: task?.managedBy, hasHubRule: !!task?.hubRule });
+  // 输出格式只对无后处理的任务生效(节点侧原地替换);后端判定不适用(受管 / 有规则 / 边录边传)→ 锁定,不随保存提交(避免改掉规则侧的存档格式)。
+  const formatLock = taskOutputFormatLock({ outputFormatLock: task?.outputFormatLock });
   const danmuAvailable = plat ? plat.hasDanmu : true;
   // 抖音取流恒匿名,Cookie 只服务弹幕;B站/快手用它取流(锁定口径见 room-form-rules)。
   const cookieForStream = plat ? plat.id !== "douyin" : false;

@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   convertSegmentInPlace, DURATION_TOLERANCE_SEC, makeNodeRemuxHookFactory, markSessionNodeFormat,
-  NODE_REMUX_TMP_SUFFIX, recoverNodeRemux, REMUX_DISK_HEADROOM_BYTES, remuxTargetPath, resolveNodeOutputFormat,
+  NODE_REMUX_SUSPECT_SUFFIX, STALE_TMP_MIN_AGE_MS, NODE_REMUX_TMP_SUFFIX, recoverNodeRemux, REMUX_DISK_HEADROOM_BYTES, remuxTargetPath, resolveNodeOutputFormat, nodeOutputFormatLock,
   type MediaProbe, type NodeRemuxDeps,
 } from "../../packages/app/src/node-remux.js";
 import { buildRecordArgs } from "../../packages/app/src/process/record-args.js";
@@ -41,7 +41,10 @@ const probe = async (p: string): Promise<MediaProbe> => {
   const body = readFileSync(p, "utf-8");
   if (body.includes("unreadable")) throw new Error("ffprobe: Invalid data");
   const m = /dur=(\d+(?:\.\d+)?)/.exec(body);
-  return { durationSec: m ? Number(m[1]) : 0, hasVideo: !body.includes("novideo") };
+  const dur = m ? Number(m[1]) : 0;
+  // 假探测:跨度默认等于头部时长;`span=NN` 单独指定(模拟「头部时长完好、尾部被截断」);`nopackets` = 扫包无结果。
+  const sp = /span=(\d+(?:\.\d+)?)/.exec(body);
+  return { durationSec: dur, hasVideo: !body.includes("novideo"), spanSec: sp ? Number(sp[1]) : dur, packets: body.includes("nopackets") || dur === 0 ? 0 : 100 };
 };
 /** 假 remux:把源内容原样复制到临时文件(内容里的标记随之传递);可按需篡改。 */
 const copyRemux = (mutate: (body: string) => string = (b) => b): NonNullable<NodeRemuxDeps["remux"]> =>
@@ -83,17 +86,20 @@ describe("convertSegmentInPlace — 成功路径", () => {
 describe("convertSegmentInPlace — 校验失败:原文件保留、无残留临时文件、告警", () => {
   const cases: [string, NodeRemuxDeps["remux"], string][] = [
     ["时长不符(截断)", copyRemux((b) => b.replace("dur=1800", "dur=900")), "verify-failed"],
+    ["头部时长完好、尾部被截断(扫包末帧不符)", copyRemux((b) => b.replace("span=1800", "span=180")), "verify-failed"],
+    ["新文件扫不到视频包", copyRemux((b) => `${b} nopackets`), "verify-failed"],
+    ["体积远小于原文件(<下限)", async (s, tmp) => { writeFileSync(tmp, "dur=1800 span=1800"); void s; }, "verify-failed"],
     ["新文件无视频流", copyRemux((b) => `${b} novideo`), "verify-failed"],
     ["新文件 ffprobe 读不了", copyRemux((b) => `${b} unreadable`), "verify-failed"],
     ["ffmpeg 失败(抛错,且已写出半截临时文件)", async (_s, tmp) => { writeFileSync(tmp, "partial"); throw new Error("ffmpeg rc=1"); }, "remux-failed"],
   ];
   for (const [name, remux, reason] of cases) {
     it(name, async () => {
-      put(`${B}_000.ts`, "dur=1800");
+      put(`${B}_000.ts`, `dur=1800 span=1800 ${"p".repeat(1000)}`);
       const d = deps({ remux });
       const r = await convertSegmentInPlace(f(`${B}_000.ts`), "mkv", d);
       expect(r).toMatchObject({ ok: false, reason });
-      expect(readFileSync(f(`${B}_000.ts`), "utf-8")).toBe("dur=1800"); // 原文件原样保留
+      expect(readFileSync(f(`${B}_000.ts`), "utf-8")).toBe(`dur=1800 span=1800 ${"p".repeat(1000)}`); // 原文件原样保留
       expect(ls().filter((n) => n.endsWith(NODE_REMUX_TMP_SUFFIX) || n.endsWith(".mkv"))).toEqual([]);
       expect(d.alerts).toHaveLength(1); // 走告警通道,不静默
       expect(d.alerts[0]).toContain("已保留原文件");
@@ -133,6 +139,29 @@ describe("convertSegmentInPlace — 校验失败:原文件保留、无残留临�
     const d = deps();
     expect(await convertSegmentInPlace(f(`${B}_000.ts`), "mkv", d)).toEqual({ ok: false, reason: "missing" });
     expect(d.alerts).toEqual([]);
+  });
+});
+
+describe("删除顺序:先校验、落盘、改名,最后才删原文件(守护:任一前序步骤抛错 → 原文件仍在)", () => {
+  for (const [name, over] of [
+    ["fsync 抛错", { fsync: () => { throw new Error("EIO"); } }],
+    ["rename 抛错", { rename: () => { throw new Error("EXDEV"); } }],
+  ] as const) {
+    it(`${name} → 原文件原样在、新文件不存在、无残留临时文件、告警`, async () => {
+      put(`${B}_000.ts`, "dur=1800");
+      const d = deps(over);
+      const r = await convertSegmentInPlace(f(`${B}_000.ts`), "mkv", d);
+      expect(r).toMatchObject({ ok: false, reason: "remux-failed" });
+      expect(readFileSync(f(`${B}_000.ts`), "utf-8")).toBe("dur=1800");
+      expect(ls().filter((n) => n.endsWith(".mkv") || n.endsWith(NODE_REMUX_TMP_SUFFIX))).toEqual([]);
+      expect(d.alerts).toHaveLength(1);
+    });
+  }
+  it("校验失败时原文件也在(删原文件不得先于校验)", async () => {
+    put(`${B}_000.ts`, "dur=1800");
+    const r = await convertSegmentInPlace(f(`${B}_000.ts`), "mkv", deps({ remux: copyRemux((b) => b.replace("dur=1800", "dur=1800 span=1")) }));
+    expect(r.ok).toBe(false);
+    expect(existsSync(f(`${B}_000.ts`))).toBe(true);
   });
 });
 
@@ -193,41 +222,84 @@ describe("makeNodeRemuxHookFactory — 封口时机 / 串行 / 收尾补转", ()
 
 describe("崩溃接管 recoverNodeRemux — 每个中断点都不删到最后一份", () => {
   const sub = (): string => { const d = join(dir, "anchor"); mkdirSync(d, { recursive: true }); return d; };
+  const EMPTY = { removedTmp: [], skippedFreshTmp: [], removedOriginal: [], keptBoth: [] };
+  const age = (p: string, ms: number): void => { const t = new Date(Date.now() - ms); utimesSync(p, t, t); };
 
-  it("中断点 1(remux 中途被杀):孤儿临时文件 → 删临时、原文件在", async () => {
+  it("中断点 1(remux 中途被杀):陈旧孤儿临时文件 → 删临时、原文件在,并告警「该段保持原容器」", async () => {
     const d0 = sub();
     writeFileSync(join(d0, `${B}_000.ts`), "dur=10");
-    writeFileSync(join(d0, `${B}_000.mkv${NODE_REMUX_TMP_SUFFIX}`), "partial");
-    const r = await recoverNodeRemux(dir, "mkv", deps());
-    expect(r.removedTmp).toHaveLength(1);
+    const tmp = join(d0, `${B}_000.mkv${NODE_REMUX_TMP_SUFFIX}`);
+    writeFileSync(tmp, "partial");
+    age(tmp, STALE_TMP_MIN_AGE_MS + 60_000);
+    const d = deps();
+    const r = await recoverNodeRemux(dir, "mkv", d);
+    expect(r.removedTmp).toEqual([tmp]);
     expect(readdirSync(d0)).toEqual([`${B}_000.ts`]);
+    expect(d.alerts).toHaveLength(1);
+    expect(d.alerts[0]).toContain("被中断");
+    expect(d.alerts[0]).toContain("保持原容器");
   });
-  it("中断点 2(rename 后、删原文件前被杀):新文件通过校验 → 删原文件、留新文件", async () => {
+  it("新鲜临时文件(可能是别的任务正在转换)不删、不告警;陈旧的才删", async () => {
+    const fresh = join(dir, "taskA"), stale = join(dir, "taskB");
+    mkdirSync(fresh); mkdirSync(stale);
+    const tf = join(fresh, `${B}_000.mkv${NODE_REMUX_TMP_SUFFIX}`), ts = join(stale, `${B}_000.mkv${NODE_REMUX_TMP_SUFFIX}`);
+    writeFileSync(tf, "being-written"); writeFileSync(ts, "dead");
+    age(ts, STALE_TMP_MIN_AGE_MS + 1000);
+    age(tf, STALE_TMP_MIN_AGE_MS - 60_000); // 差一分钟才算旧
+    const d = deps();
+    const r = await recoverNodeRemux(dir, "mkv", d);
+    expect(r.skippedFreshTmp).toEqual([tf]);
+    expect(r.removedTmp).toEqual([ts]);
+    expect(existsSync(tf)).toBe(true);
+    expect(existsSync(ts)).toBe(false);
+    expect(d.alerts).toHaveLength(1); // 只为被删的那个告警
+  });
+  it("中断点 2(rename 后、删原文件前被杀):新文件通过校验 → 删原文件、留新文件,并告警接管", async () => {
     const d0 = sub();
     writeFileSync(join(d0, `${B}_000.ts`), "dur=1800");
     writeFileSync(join(d0, `${B}_000.mkv`), "dur=1800");
     markSessionNodeFormat(d0, B, "mkv");
-    const r = await recoverNodeRemux(dir, "mkv", deps());
-    expect(r.removedOriginal).toEqual([join(d0, `${B}_000.ts`)]);
-    expect(readdirSync(d0).sort()).toEqual([`${B}_000.mkv`, `${B}.session.json`].sort());
-  });
-  it("中断点 2':新文件未通过校验(截断)→ 删新文件、保留原文件", async () => {
-    const d0 = sub();
-    writeFileSync(join(d0, `${B}_000.ts`), "dur=1800");
-    writeFileSync(join(d0, `${B}_000.mkv`), "dur=100");
-    markSessionNodeFormat(d0, B, "mkv");
     const d = deps();
     const r = await recoverNodeRemux(dir, "mkv", d);
-    expect(r.removedNew).toEqual([join(d0, `${B}_000.mkv`)]);
-    expect(readdirSync(d0).sort()).toEqual([`${B}_000.ts`, `${B}.session.json`].sort());
+    expect(r.removedOriginal).toEqual([join(d0, `${B}_000.ts`)]);
+    expect(readdirSync(d0).sort()).toEqual([`${B}_000.mkv`, `${B}.session.json`].sort());
     expect(d.alerts).toHaveLength(1);
+    expect(d.alerts[0]).toContain("被中断");
   });
+  for (const [name, newBody, origBody] of [
+    ["时长被截断", "dur=100", "dur=1800"],
+    ["头部时长完好、尾部被截断(扫包末帧不符)", "dur=1800 span=100", "dur=1800"],
+    ["新文件探测失败(无法判定)", "unreadable dur=1800", "dur=1800"],
+    ["原文件探测失败(无法判定)", "dur=1800", "unreadable dur=1800"],
+    ["新旧都不可读", "unreadable", "unreadable"],
+  ] as const) {
+    it(`中断点 2':新文件存疑(${name})→ 两份都保留(新文件改名隔离)+ 告警,绝不删任何一份`, async () => {
+      const d0 = sub();
+      writeFileSync(join(d0, `${B}_000.ts`), origBody);
+      writeFileSync(join(d0, `${B}_000.mkv`), newBody);
+      markSessionNodeFormat(d0, B, "mkv");
+      const d = deps();
+      const r = await recoverNodeRemux(dir, "mkv", d);
+      expect(r.keptBoth).toEqual([join(d0, `${B}_000.mkv`)]);
+      expect(r.removedOriginal).toEqual([]);
+      expect(readFileSync(join(d0, `${B}_000.ts`), "utf-8")).toBe(origBody);
+      expect(readFileSync(join(d0, `${B}_000.mkv${NODE_REMUX_SUSPECT_SUFFIX}`), "utf-8")).toBe(newBody);
+      expect(d.alerts).toHaveLength(1);
+      expect(d.alerts[0]).toContain("保持原容器");
+      // 隔离后不再被当成分段:分组只看到原文件,不重复计入
+      expect(groupSessions(readdirSync(d0), { nodeFormats: new Map([[B, "mkv" as const]]) })[B].ts).toEqual([`${B}_000.ts`]);
+      // 二次接管幂等:不再重复告警、不删任何东西
+      const d2 = deps();
+      expect(await recoverNodeRemux(dir, "mkv", d2)).toEqual(EMPTY);
+      expect(d2.alerts).toEqual([]);
+    });
+  }
   it("中断点 3(标记已写、尚未产生任何文件):无事可做,不动原文件", async () => {
     const d0 = sub();
     writeFileSync(join(d0, `${B}_000.ts`), "dur=10");
     markSessionNodeFormat(d0, B, "mkv");
     const r = await recoverNodeRemux(dir, "mkv", deps());
-    expect(r).toEqual({ removedTmp: [], removedOriginal: [], removedNew: [] });
+    expect(r).toEqual(EMPTY);
     expect(readdirSync(d0)).toContain(`${B}_000.ts`);
   });
   it("无本功能标记的同名配对(别的任务/手工产物)不碰", async () => {
@@ -235,19 +307,11 @@ describe("崩溃接管 recoverNodeRemux — 每个中断点都不删到最后一
     writeFileSync(join(d0, `${B}.ts`), "dur=10");
     writeFileSync(join(d0, `${B}.mkv`), "dur=10"); // 没有 session.json 标记
     const r = await recoverNodeRemux(dir, "mkv", deps());
-    expect(r).toEqual({ removedTmp: [], removedOriginal: [], removedNew: [] });
+    expect(r).toEqual(EMPTY);
     expect(readdirSync(d0).sort()).toEqual([`${B}.mkv`, `${B}.ts`].sort());
   });
-  it("配对里新旧都不可读:新文件不过校验 → 只删新文件,原文件(最后一份)在", async () => {
-    const d0 = sub();
-    writeFileSync(join(d0, `${B}_000.ts`), "unreadable dur=10");
-    writeFileSync(join(d0, `${B}_000.mkv`), "unreadable dur=10");
-    markSessionNodeFormat(d0, B, "mkv");
-    await recoverNodeRemux(dir, "mkv", deps());
-    expect(existsSync(join(d0, `${B}_000.ts`))).toBe(true);
-  });
   it("目录不存在 → 安静返回", async () => {
-    expect(await recoverNodeRemux(join(dir, "nope"), "mkv", deps())).toEqual({ removedTmp: [], removedOriginal: [], removedNew: [] });
+    expect(await recoverNodeRemux(join(dir, "nope"), "mkv", deps())).toEqual(EMPTY);
   });
 });
 
@@ -315,6 +379,18 @@ describe("判定矩阵 resolveNodeOutputFormat(spawn 前唯一判定点)", () =>
   });
   it("边录边传生效(rolling 上传后删源)→ original,二者互斥", () => {
     expect(resolveNodeOutputFormat(mk({ rollingEffective: true }), hubDir)).toBe("original");
+  });
+  it("nodeOutputFormatLock 与 resolve 同源:原因 = hub-managed / hub-rule / rolling / 无;与所选格式无关(选 original 也报锁)", () => {
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
+    expect(nodeOutputFormatLock(mk({ managedBy: "hub" }), hubDir)).toBe("hub-managed");
+    expect(nodeOutputFormatLock(mk({ rollingEffective: true }), hubDir)).toBe("rolling");
+    expect(nodeOutputFormatLock(mk({ outputFormat: "original", rollingEffective: true }), hubDir)).toBe("rolling");
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111" });
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule");
+    // 同源:凡有锁,resolve 必为 original
+    for (const over of [{ managedBy: "hub" }, { rollingEffective: true }, {}]) {
+      expect(resolveNodeOutputFormat(mk(over), hubDir)).toBe("original");
+    }
   });
   it("规则之后才绑定:下一次判定起不再替换(已在跑的进程不受影响)", () => {
     expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("mkv");
