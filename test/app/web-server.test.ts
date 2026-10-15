@@ -33,6 +33,13 @@ class MockManager implements ManagerLike {
   async stop(id: number): Promise<void> {
     this.running.delete(id);
   }
+  async stopWithin(id: number, _ms: number): Promise<boolean> {
+    await this.stop(id);
+    return true;
+  }
+  isStopping(_id: number): boolean {
+    return false;
+  }
   async stopGraceful(id: number): Promise<void> {
     this.running.delete(id);
   }

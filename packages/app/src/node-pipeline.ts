@@ -14,12 +14,12 @@
  *   - @drec/app 的 uploadPlain / appendGroup(biliup)
  *   - core 的 title-template(与 master 同源的产物命名/稿件标题)
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync } from "node:fs";
 import path from "node:path";
 import {
   linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, isAppendAmbiguous,
   isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, partTitleToFilename, resolveOutputStem, sanitizeStreamKey,
-  stampedSessionBaseOf as sessionBaseOfFile, UploadGate, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
+  stampedSessionBaseOf as sessionBaseOfFile, UploadGate, freeGBOf, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
 } from "@drec/core";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment } from "@drec/post-process";
 import { appendGroup, countVideoParts, uploadPlain } from "./upload/biliup.js";
@@ -349,7 +349,7 @@ async function withRetry<T>(
 
 /** 节点侧上传的一个「分 P」产物(与 master 分段模式同义:单段 remux 或若干段合并)。 */
 interface NodePart {
-  /** 待上传 plain mp4(stage 内规范名 `{stem}_{NNN}.mp4`)。 */
+  /** 待上传 plain(stage 内规范名 `{stem}_{NNN}.mp4`;`.ts` 直传时为 `.ts` 硬链接)。 */
   plain: string;
   /** 构成该分 P 的源文件(清理/诊断用)。 */
   sources: string[];
@@ -427,6 +427,21 @@ function linkOrCopySync(src: string, dst: string): void {
 }
 
 /**
+ * `.ts` 直传:单段独占分 P 的 `.ts`,把源**硬链接**成规范上传名(`{stem}_{NNN}.ts`),不 remux。
+ * 只硬链接、**绝不复制**(复制就又是两份);跨设备/不支持 → 返回 false,调用方回落 remux。
+ * 条件对齐 rolling 路径(它本来就直传分段源文件,B站已稳定转码)。
+ */
+export function tryDirectTsLink(src: string, dst: string): boolean {
+  try {
+    if (existsSync(dst)) return true; // 续跑:已有则复用(与 remux 的 existsSync 跳过同义)
+    linkSync(src, dst);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 逐段 remux / 组内合并 → 每个分 P 的 plain mp4(落在 stageSub)。
  *
  * 命名与 master 分段模式**逐字一致**:`{stem}_{NNN}.mp4` —— 这个名字会直接变成 B 站分 P 的
@@ -473,6 +488,18 @@ async function produceParts(
     const out = path.join(stageSub, `${dateName}_${String(parts.length).padStart(3, "0")}.mp4`);
     const work = path.join(workDir, `${String(parts.length).padStart(3, "0")}.mp4`);
     const files = group.map((idx) => spec.tsFiles[idx]!);
+    // `.ts` 直传:单段独占分 P 的 .ts 不 remux,硬链接成规范名直接上传(同一内容只占一份)。
+    // durations=0 表示 ffprobe 探不出时长(损坏/截断):remux 会让 ffmpeg 报错兜底,直传则会把坏文件静默投上去
+    // → 探不出时长的段不走直传,回落 remux。
+    if (spec.tsDirect === true && group.length === 1 && /\.ts$/i.test(files[0]!) && (durations[group[0]!] ?? 0) > 0) {
+      const outTs = out.replace(/\.mp4$/i, ".ts");
+      if (tryDirectTsLink(files[0]!, outTs)) {
+        parts.push({ plain: outTs, sources: files, durSec: groupDur });
+        log(`分 P ${parts.length}: 1 段(${Math.round(groupDur)}s)→ ${path.basename(outTs)}(.ts 直传,免 remux)`);
+        continue;
+      }
+      log(`硬链接 ${path.basename(files[0]!)} 失败(跨设备?)→ 回落 remux(不复制,避免双份)`);
+    }
     if (group.length === 1) {
       if (!existsSync(work)) await remuxSegment(files[0]!, work);
     } else {
@@ -599,8 +626,20 @@ export async function runNodeSidePipeline(
   }
   if (!prior?.bv) writeNodeResult(stageSub, { phase: "started", ok: false }, log);
 
+  // 0 字节分段(写满盘 / 开播即断的残留)不含任何内容,却会让 ffmpeg 失败、整场转人工且源永不删,
+  // 磁盘越堆越满。跳过并记录;清理阶段仍按原始清单删掉它们。全是空段 → 明确报错(没有可传内容)。
+  const emptySegs = spec.tsFiles.filter((f) => { try { return statSync(f).size === 0; } catch { return false; } });
+  if (emptySegs.length > 0) {
+    log(`跳过 ${emptySegs.length} 个 0 字节分段: ${emptySegs.map((f) => path.basename(f)).join(",")}`);
+    if (emptySegs.length === spec.tsFiles.length) {
+      removeNodeExecutorPid(stageSub);
+      return { ok: false, error: "所有分段均为 0 字节,无可上传内容" };
+    }
+  }
+  const usable = emptySegs.length > 0 ? { ...spec, tsFiles: spec.tsFiles.filter((f) => !emptySegs.includes(f)) } : spec;
+
   const { stem, title, partTitle } = deriveTitles(spec, log);
-  const parts = await produceParts(spec, stageSub, stem, log);
+  const parts = await produceParts(usable, stageSub, stem, log);
   const products = parts.map((p) => p.plain);
 
   if (spec.uploadMode !== "upload") {
@@ -660,6 +699,7 @@ export async function runNodeSidePipeline(
   // 查不到分 P 数(null)或数为 0(自相矛盾:有稿件却无分 P = 风控/权限异常)→ 无法安全续传:
   //   既不能盲目 append(可能重复)也不能重建稿 → 抛错,master 据此转人工核对分 P。
   let bv = (prior?.bv ?? "").trim();
+  let confirmedParts = 0;
   try {
     let nextIdx = 1; // 下一个待 append 的 parts 下标(parts[0]=P1,由建稿或已确认覆盖)
     if (bv) {
@@ -668,6 +708,7 @@ export async function runNodeSidePipeline(
         throw new Error(`幂等重入:稿件 ${bv} 已建但无法确认已追加分 P 数(countVideoParts=${confirmed ?? "null"}),不盲目续传 → 转人工核对`);
       }
       nextIdx = confirmed;
+      confirmedParts = confirmed;
       log(`幂等重入:稿件 ${bv} 已有 ${confirmed} 个分 P → 跳过建稿,从分 P ${nextIdx + 1}/${totalParts} 续 append`);
     } else {
       bv = await withGate(uploadGate, accountKey, () =>
@@ -677,10 +718,15 @@ export async function runNodeSidePipeline(
         ),
       );
       log(`建稿成功 BV=${bv}`);
+      confirmedParts = 1;
     }
 
     for (let i = nextIdx; i < parts.length; i++) {
       const p = parts[i]!;
+      // issue #25 ②:追加**前**先把 BV + 已确认进度 + 本次意图落盘(建稿后到此刻只隔一行代码)。此前 BV 只在整场
+      // 收尾 / 抛错时才写,执行体被 ssh 超时 / SIGKILL 杀掉就丢 BV → 「B站已有稿件、台账无任何 BV」;
+      // 此后被杀,回读 `intentPart > confirmedParts` = 这次追加结果未知,其余已确认。
+      writeNodeResult(stageSub, { phase: "uploading", ok: false, bv, products, confirmedParts, intentPart: i + 1 }, log);
       // 单文件 append → 安全重试(601 冷却后重试;其余错误只要「结果不确定」就不重试)。
       await withGate(uploadGate, accountKey, () =>
         withRetry(
@@ -694,6 +740,7 @@ export async function runNodeSidePipeline(
         ),
       );
       log(`已 append 分 P ${i + 1}/${totalParts}: ${path.basename(p.plain)}`);
+      confirmedParts = i + 1;
     }
   } catch (e) {
     const msg = String((e as Error)?.message ?? e);
@@ -701,7 +748,7 @@ export async function runNodeSidePipeline(
     // 建稿前失败(无 bv)不回退到 failed:留 `uploading` —— biliup 可能已建稿只是没拿到 BV,
     // 属「结果不确定」→ master 保守转人工(写 failed 会让 master 误判「确认没成」)。
     writeNodeResult(stageSub, { phase: bv ? "failed" : "uploading", ok: false, error: msg,
-      bv: bv || undefined, products }, log);
+      bv: bv || undefined, products, confirmedParts: confirmedParts || undefined }, log);
     removeNodeExecutorPid(stageSub); // 本场执行体已收口(失败)→ 注销 pid,避免 `_node-abort` 误判仍活
     throw e;
   }
@@ -759,7 +806,7 @@ export async function probeNodeCapabilities(dataRoot: string): Promise<{
   try {
     const { statfs } = await import("node:fs/promises");
     const st = await statfs(dataRoot);
-    diskFreeGB = (Number(st.bavail) * Number(st.bsize)) / 1e9;
+    diskFreeGB = freeGBOf(st);
   } catch { /* 目录不存在等 → 0 */ }
   // 中文字体(烧录用;节点侧分支不烧,仅诊断展示)。fc-list 缺失 = 无。
   const cjkFonts = spawnSync("sh", ["-c", "fc-list 2>/dev/null | grep -qi 'noto sans cjk'"], { stdio: "ignore" }).status === 0;
@@ -768,7 +815,7 @@ export async function probeNodeCapabilities(dataRoot: string): Promise<{
 
 /** 列出 stage 目录下的产物(stage 模式调试/展示用)。 */
 export function listNodeProducts(stageSub: string): string[] {
-  try { return readdirSync(stageSub).filter((f) => f.endsWith(".mp4")).map((f) => path.join(stageSub, f)); } catch { return []; }
+  try { return readdirSync(stageSub).filter((f) => f.endsWith(".mp4") || f.endsWith(".ts")).map((f) => path.join(stageSub, f)); } catch { return []; }
 }
 
 /**
@@ -793,7 +840,7 @@ export function nodeStageCleanupTargets(
     const p = path.join(stageSub, n);
     // 中间产物/别名目录:无论 stage 是否保留都不该留(它们不是交付物,且与成品同量级)。
     if (n === UPLOAD_ALIAS_DIR || n === ".work") out.push(p);
-    else if (opts.deleteProducts !== false && /\.mp4$/i.test(n)) out.push(p);
+    else if (opts.deleteProducts !== false && /\.(mp4|ts)$/i.test(n)) out.push(p);
     else if (opts.deleteXml && /\.(xml|ass)$/i.test(n)) out.push(p);
   }
   return out;

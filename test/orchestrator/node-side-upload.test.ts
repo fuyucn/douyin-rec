@@ -8,7 +8,7 @@
  * 与 master 常规路径的稿件标题产生漂移。故这里把三个渲染字段钉死。
  */
 import { describe, it, expect, vi } from "vitest";
-import { tryNodeSideUpload } from "../../packages/orchestrator/src/node-side-upload.js";
+import { tryNodeSideUpload, errBrief, estimateNodeUploadTimeoutMs, NODE_UPLOAD_MIN_TIMEOUT_MS, NODE_UPLOAD_MAX_TIMEOUT_MS } from "../../packages/orchestrator/src/node-side-upload.js";
 import type { PipelineCfg } from "../../packages/orchestrator/src/pipeline.js";
 
 const cfg = {
@@ -198,6 +198,7 @@ describe("tryNodeSideUpload 失败收口(回读节点落盘结果,区分假失�
       syncNodeState: vi.fn(),
       markFailed: vi.fn(),
       markDone: vi.fn(),
+      setBv: vi.fn(),
     };
   }
 
@@ -241,6 +242,45 @@ describe("tryNodeSideUpload 失败收口(回读节点落盘结果,区分假失�
     expect(ledger.syncNodeState).toHaveBeenCalledWith("douyin:123:2026-10-12", "upload_plain", "failed", expect.anything());
     expect(ledger.markFailed).not.toHaveBeenCalled();
     expect(t.cleanup).not.toHaveBeenCalled(); // 结果不确定 → 保住源给人工
+  });
+
+  it("#25②:uploading 带 bv + 进度(被杀时回读)→ needs_manual,BV 记进台账,说明里带已确认分 P 数", async () => {
+    const t = sshFailTransport({ phase: "uploading", ok: false, bv: "BV1KILLED", confirmedParts: 1, intentPart: 2, atMs: 1 });
+    const ledger = fakeLedgerSpy();
+    const result = await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12",
+      cfg: cfgUpload,
+      winner: { workerId: "w1", rec },
+      winnerMembers: [{ workerId: "w1", rec }],
+      transport: t as never,
+      ledger: ledger as never,
+      jlog: () => {},
+      notify: () => {},
+      deps: fakeDeps(t),
+    });
+    expect(result).toEqual({ state: "needs_manual", bv: "BV1KILLED" });
+    expect(ledger.setBv).toHaveBeenCalledWith("douyin:123:2026-10-12", "BV1KILLED");
+    const err = String((ledger.setState.mock.calls.at(-1) as unknown[])[2] && ((ledger.setState.mock.calls.at(-1) as unknown[])[2] as { error: string }).error);
+    expect(err).toContain("已确认 1 个分 P");
+    expect(err).toContain("第 2 个追加结果未知");
+    expect(t.cleanup).not.toHaveBeenCalled(); // 仍不删源、不重传
+  });
+
+  it("#25②:uploading 无 bv(旧 bundle / 建稿前被杀)→ 不写 setBv(向后兼容)", async () => {
+    const t = sshFailTransport({ phase: "uploading", ok: false, atMs: 1 });
+    const ledger = fakeLedgerSpy();
+    await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12",
+      cfg: cfgUpload,
+      winner: { workerId: "w1", rec },
+      winnerMembers: [{ workerId: "w1", rec }],
+      transport: t as never,
+      ledger: ledger as never,
+      jlog: () => {},
+      notify: () => {},
+      deps: fakeDeps(t),
+    });
+    expect(ledger.setBv).not.toHaveBeenCalled();
   });
 
   it("phase=done 但无 bv(建稿证据不全)→ needs_manual,不删源", async () => {
@@ -603,5 +643,84 @@ describe("tryNodeSideUpload 成功收尾(issue #92)", () => {
     expect(r?.state).toBe("done");
     expect(t.cleanup).toHaveBeenCalled();     // 返回码 0 即成功:立刻按配置删源
     expect(scheduled).toEqual([]);            // 无基线,回读无从比对,不排
+  });
+});
+
+describe("estimateNodeUploadTimeoutMs(issue #25 ①:超时按字节估算)", () => {
+  const MIN = 30 * 60_000;
+  it("字节数未知 / 非法 → 回落下限 30 分钟(旧 bundle 清单不带字节数)", () => {
+    for (const v of [undefined, 0, -5, NaN, Infinity]) expect(estimateNodeUploadTimeoutMs(v as number)).toBe(MIN);
+    expect(NODE_UPLOAD_MIN_TIMEOUT_MS).toBe(MIN);
+  });
+  it("小场次不低于下限", () => {
+    expect(estimateNodeUploadTimeoutMs(100e6)).toBe(MIN);
+  });
+  it("线上出事的 2.4GB 多分 P 场次:预算 ≥ 60 分钟(固定 30 分钟必被杀)", () => {
+    expect(estimateNodeUploadTimeoutMs(2.4e9)).toBeGreaterThanOrEqual(60 * 60_000);
+  });
+  it("预算随字节单调增长,并封顶 6 小时", () => {
+    expect(estimateNodeUploadTimeoutMs(5e9)).toBeGreaterThan(estimateNodeUploadTimeoutMs(2.4e9));
+    expect(estimateNodeUploadTimeoutMs(1e12)).toBe(NODE_UPLOAD_MAX_TIMEOUT_MS);
+    expect(NODE_UPLOAD_MAX_TIMEOUT_MS).toBe(6 * 3_600_000);
+  });
+});
+
+describe("tryNodeSideUpload 按字节估算的超时下发给 transport", () => {
+  async function run(totalBytes: number | undefined) {
+    const t = {
+      nodeCapabilities: async () => ({ biliup: "/b", cookies: true, diskFreeGB: 100 }),
+      nodePipeline: vi.fn(async () => ({ ok: true, bv: "BV1T" })),
+      cleanup: vi.fn(async () => {}),
+    };
+    const rec = { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml", ...(totalBytes != null ? { totalBytes } : {}) };
+    await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12", cfg, winner: { workerId: "w1", rec }, winnerMembers: [{ workerId: "w1", rec }],
+      transport: t as never, ledger: fakeLedger(), jlog: () => {}, notify: () => {}, deps: fakeDeps(t),
+    });
+    return t.nodePipeline;
+  }
+  it("带字节数 → timeoutMs 按估算;不带 → 下限", async () => {
+    const big = await run(2.4e9);
+    expect(big).toHaveBeenCalledWith(expect.anything(), { timeoutMs: estimateNodeUploadTimeoutMs(2.4e9) });
+    const unknown = await run(undefined);
+    expect(unknown).toHaveBeenCalledWith(expect.anything(), { timeoutMs: 30 * 60_000 });
+  });
+});
+
+describe("errBrief:失败原因保留末尾、去掉 known_hosts 噪声", () => {
+  const warn = "Warning: Permanently added 'h' (ED25519) to the list of known hosts.\r\n";
+  it("去掉 known_hosts 提示与 \\r,换行合并", () => {
+    expect(errBrief(`ssh rc=1: ${warn}[node-pipeline] a\n[node-pipeline] b`)).toBe("ssh rc=1: [node-pipeline] a | [node-pipeline] b");
+  });
+  it("过长保留**末尾**(真正的报错在末尾),并以省略号标记", () => {
+    const long = `${warn}${"开头噪声 ".repeat(100)}\nffmpeg 失败: 真正的原因`;
+    const r = errBrief(long, 60);
+    expect(r.startsWith("…")).toBe(true);
+    expect(r.endsWith("ffmpeg 失败: 真正的原因")).toBe(true);
+    expect(r.length).toBeLessThanOrEqual(61);
+  });
+  it("短文本原样返回", () => {
+    expect(errBrief("rc=255")).toBe("rc=255");
+  });
+});
+
+describe("节点侧失败原因写进台账时保留末尾", () => {
+  it("ssh 报错很长:markFailed 收到的是带真正原因的末尾,而不是开头噪声", async () => {
+    const long = "ssh rc=1: Warning: Permanently added 'h' (ED25519) to the list of known hosts.\r\n" + "[node-pipeline] 起手日志 ".repeat(40) + "\nffmpeg 失败: Invalid data found";
+    const t = {
+      nodeCapabilities: async () => ({ biliup: "/b", cookies: true, diskFreeGB: 100 }),
+      nodePipeline: vi.fn(async () => { throw new Error(long); }),
+      readNodeResult: vi.fn(async () => null),
+      cleanup: vi.fn(async () => {}),
+    };
+    const ledger = { get: () => ({ bv: "" }), logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), setBv: vi.fn() };
+    const rec = { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" };
+    await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12", cfg, winner: { workerId: "w1", rec }, winnerMembers: [{ workerId: "w1", rec }],
+      transport: t as never, ledger: ledger as never, jlog: () => {}, notify: () => {}, deps: fakeDeps(t),
+    });
+    const msg = String(ledger.markFailed.mock.calls[0]?.[1] ?? "");
+    expect(msg).toContain("ffmpeg 失败: Invalid data found");
+    expect(msg).not.toContain("Permanently added");
   });
 });

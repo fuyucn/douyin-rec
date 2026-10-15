@@ -92,7 +92,7 @@ function fmtFreeGB(freeGB: number | null | undefined): string {
 export interface NodeSideUploadArgs {
   streamKey: string;
   cfg: PipelineCfg;
-  winner: { workerId: string; rec: { tsFiles: string[]; xmlPath?: string } };
+  winner: { workerId: string; rec: { tsFiles: string[]; xmlPath?: string; totalBytes?: number } };
   winnerMembers: readonly { workerId: string; rec: { tsFiles: string[]; xmlPath?: string } }[];
   /**
    * 本场**全部**在场成员(含落败节点)。收尾删源要按它来 —— 与 master 常规路径的
@@ -232,8 +232,13 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
       : node?.phase === "started"
         ? `节点已接管(remux 阶段)但未能确认终止执行体(旧 bundle 不支持终止 / 不可达):执行体可能仍在跑并稍后建稿`
         : node?.bv ? `节点已建稿 BV=${node.bv} 但未确认完成` : `节点上报完成但缺 BV,无法确认分 P`;
-    const note = `${why};已禁止自动重试,请人工核对 B站稿件后处理`;
+    const progress = node?.confirmedParts != null
+      ? `(已确认 ${node.confirmedParts} 个分 P${node.intentPart ? `,第 ${node.intentPart} 个追加结果未知` : ""})`
+      : "";
+    const note = `${why}${progress};已禁止自动重试,请人工核对 B站稿件后处理`;
     jlog(`节点侧结果不确定: ${note}`);
+    // issue #25 ②:回读到 BV 就记进台账(此前超时被杀后台账无任何 BV,人工只能去 B站翻稿件)。
+    if (node?.bv) ledger.setBv(streamKey, node.bv);
     ledger.logStep(streamKey, "node_upload", "done", `节点侧结果不确定: ${why.slice(0, 120)}`);
     ledger.syncNodeState(streamKey, "node_upload", "failed", { error: note.slice(0, 200) });
     // sync_node_states 行必须写:reconciler 的自动重试闸门看的是它(= 不安全重试标记)。
@@ -248,11 +253,46 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
   jlog(`节点侧确认未完成(落盘=${node?.phase ?? "无"})${detail}`);
   // 节点侧一旦执行过上传就可能已建稿、只是回传失败/超时 ⇒ 一律按「不安全重试」上报
   // (节点名与 reconciler 的 UNSAFE_RETRY_NODES 同名),reconciler 会翻 needs_manual,绝不自动重传。
-  ledger.syncNodeState(streamKey, "node_upload", "failed", { error: `节点侧上传失败: ${errMsg.slice(0, 200)}` });
-  ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: `节点侧上传失败: ${errMsg.slice(0, 200)}` });
-  ledger.markFailed(streamKey, `节点侧上传失败: ${errMsg.slice(0, 200)}`);
-  notify({ kind: "error", stage: "同步", message: `节点侧上传失败 ${streamKey}: ${errMsg.slice(0, 200)}` });
+  ledger.syncNodeState(streamKey, "node_upload", "failed", { error: `节点侧上传失败: ${errBrief(errMsg)}` });
+  ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: `节点侧上传失败: ${errBrief(errMsg)}` });
+  ledger.markFailed(streamKey, `节点侧上传失败: ${errBrief(errMsg)}`);
+  notify({ kind: "error", stage: "同步", message: `节点侧上传失败 ${streamKey}: ${errBrief(errMsg)}` });
   return { state: "failed" };
+}
+
+/**
+ * 把 ssh / 节点执行体的失败文本压成给人看的简要原因(写进台账 error 与告警)。
+ * 此前是 `slice(0, 200)`:取的是**开头**,而开头恒是 ssh 的 known_hosts 提示与节点日志的起手几行,
+ * 真正的失败原因在**末尾**被截掉(线上 24 条 needs_manual 里一大半只剩「Permanently added …」)。
+ * 现在:去掉 known_hosts 提示、合并空白,过长时保留**末尾** `max` 个字符。
+ */
+export function errBrief(msg: string, max = 240): string {
+  const clean = msg
+    .replace(/Warning: Permanently added[^\n]*(\n|$)/g, "")
+    .replace(/\r/g, "")
+    .replace(/\s*\n\s*/g, " | ")
+    .trim();
+  return clean.length <= max ? clean : `…${clean.slice(-max)}`;
+}
+
+/** 节点侧上传超时下限:与此前固定值一致(30 分钟),小场次行为不变。 */
+export const NODE_UPLOAD_MIN_TIMEOUT_MS = 30 * 60_000;
+/** 上限:再大的场次也不无限等(6 小时),防执行体挂死占住对账轮。 */
+export const NODE_UPLOAD_MAX_TIMEOUT_MS = 6 * 3_600_000;
+/** 保守上传吞吐(字节/秒):线上实测约 1.7MB/s,取 1MB/s 留余量(弱上行节点)。 */
+const NODE_UPLOAD_CONSERVATIVE_BPS = 1_000_000;
+/** remux + 逐个建稿 / 追加接口耗时的固定余量。 */
+const NODE_UPLOAD_OVERHEAD_MS = 20 * 60_000;
+
+/**
+ * 节点侧上传的 ssh 超时(issue #25 ①):按场次字节数估算,而不是固定 30 分钟。
+ * `max(30min, 字节 / 保守带宽 + 余量)`,封顶 6 小时;字节数未知(旧 bundle 清单 / 统计失败)→ 回落下限。
+ * 多分 P 的整场约 2.4GB 就要 ~60 分钟,固定 30 分钟必然在上传中途被杀 → 转人工、源不删、磁盘只涨不降。
+ */
+export function estimateNodeUploadTimeoutMs(totalBytes?: number): number {
+  if (!(typeof totalBytes === "number" && totalBytes > 0 && Number.isFinite(totalBytes))) return NODE_UPLOAD_MIN_TIMEOUT_MS;
+  const est = Math.ceil(totalBytes / NODE_UPLOAD_CONSERVATIVE_BPS) * 1000 + NODE_UPLOAD_OVERHEAD_MS;
+  return Math.min(NODE_UPLOAD_MAX_TIMEOUT_MS, Math.max(NODE_UPLOAD_MIN_TIMEOUT_MS, est));
 }
 
 /**
@@ -321,6 +361,7 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
     sessionBase: o.earliest?.rec.sessionBase,
     segmentGroupSec: cfg.segmentGroupSec,
     mergeSegments: cfg.steps?.mergeSegments !== false,
+    tsDirect: cfg.steps?.tsDirect === true,
     uploadMode: "upload",
     stageDir: cfg.stageDir,
     uploadMeta: cfg.uploadMeta,
@@ -340,7 +381,9 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
   const t0 = Date.now();
   let result;
   try {
-    result = await transport.nodePipeline(spec);
+    const timeoutMs = estimateNodeUploadTimeoutMs(winner.rec.totalBytes);
+    jlog(`节点侧超时预算 ${Math.round(timeoutMs / 60_000)} 分钟(场次 ${winner.rec.totalBytes != null ? (winner.rec.totalBytes / 1e9).toFixed(2) + "GB" : "大小未知"})`);
+    result = await transport.nodePipeline(spec, { timeoutMs });
   } catch (e) {
     const msg = String((e as Error)?.message ?? e);
     // ssh rc≠0 / 超时 ≠ 节点没成功:统一收口(handleNodeFailure 会先回读节点落盘结果)。

@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey } from "@drec/core";
+import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -28,7 +28,7 @@ import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
-import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type HubPoolSnapshotDTO } from "@drec/core";
+import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type NodeTaskLogsDTO, type NodeTasksDTO } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
@@ -604,6 +604,11 @@ let hubRunNow:
   | ((opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>)
   | undefined;
 let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
+/** 各节点边录边传的实时进度(F1;随 5 秒状态轮询整体替换,只读展示)。 */
+let hubDeliverySnapshot: RollingDeliveryDTO[] = [];
+/** probeAllWorkers 的结果缓存 TTL。 */
+const PROBE_CACHE_MS = 30_000;
+const readRollingDelivery = (): RollingDeliveryDTO[] => hubDeliverySnapshot;
 const recordingSnapshotKey = (platform: string, roomSlug: string): string => `${platform}:${roomSlug}`;
 const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWorkerStatusDTO[] =>
   hubRecordingSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
@@ -625,6 +630,49 @@ const requestHubStopJob = async (
   if (!hubStopJob) return { ok: false, error: "hub 未启动", code: 400 };
   return hubStopJob(streamKey);
 };
+/**
+ * web API → 节点日志代查的统一入口(F3)。
+ *
+ * 每次现读 hub.config.json 找 worker(与 probeAllWorkers 同源)→ 建 scoped transport → 读日志。
+ * **刻意不缓存结果**:日志就是要看最新的;一次点击一条 ssh,代价可接受。
+ *
+ * 本机(local)worker 直接回提示:它的日志就在 master 自己的任务详情页,F3 要解决的是
+ * 「远端节点要登机器看网页」,本机代查没有意义。
+ */
+const requestNodeTaskLogs = async (workerId: string, taskId: number, lines: number): Promise<NodeTaskLogsDTO> => {
+  const { SshTransport } = await import("@drec/orchestrator");
+  const { workerStore, rootHubConfig } = await import("@drec/app");
+  const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
+  if (!w) return { workerId, taskId, lines: [], error: `未配置的 worker id: ${workerId}` };
+  if (w.kind === "local") return { workerId, taskId, lines: [], error: "本机节点:日志就在 master 的任务详情页" };
+  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+  try {
+    const r = await t.taskLogs(taskId, lines);
+    return { workerId, taskId, lines: r.lines, ...(r.error ? { error: r.error } : {}) };
+  } catch (e) {
+    const msg = (e as Error)?.message ?? String(e);
+    // 旧 bundle 没有该隐藏命令 → 说清楚是「节点版本旧」,别让用户以为是网络问题。
+    const unsupported = /unknown command|未知命令/i.test(msg);
+    return { workerId, taskId, lines: [], error: unsupported ? "节点 bundle 过旧,不支持日志代查(需升级节点)" : msg };
+  }
+};
+
+/** web API → 读某节点的任务清单(F3)。与日志代查同一取舍:现读配置、不缓存。 */
+const requestNodeTasks = async (workerId: string): Promise<NodeTasksDTO> => {
+  const { SshTransport } = await import("@drec/orchestrator");
+  const { workerStore, rootHubConfig } = await import("@drec/app");
+  const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
+  if (!w) return { workerId, tasks: [], error: `未配置的 worker id: ${workerId}` };
+  if (w.kind === "local") return { workerId, tasks: [], error: "本机节点:日志就在 master 的任务详情页" };
+  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+  try {
+    const r = await t.listTasks();
+    return { workerId, tasks: r.tasks };
+  } catch (e) {
+    return { workerId, tasks: [], error: (e as Error)?.message ?? String(e) };
+  }
+};
+
 const requestHubRunNow = async (
   opts: { streamKey: string; winnerWorker?: string; wait?: boolean },
 ): Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }> => {
@@ -635,6 +683,9 @@ const requestHubRunNow = async (
 const hubStarter: HubStarter = {
   requestSyncTasks: requestHubSync,
   recordingWorkers: readRecordingWorkers,
+  nodeTaskLogs: requestNodeTaskLogs,
+  nodeTasks: requestNodeTasks,
+  rollingDelivery: readRollingDelivery,
   poolSnapshot: readPoolSnapshot,
   retryNode: requestHubRetryNode,
   stopJob: requestHubStopJob,
@@ -772,9 +823,12 @@ const hubStarter: HubStarter = {
             const transport = statusTransports!.get(worker.id);
             if (!transport) throw new Error(`未注册的 worker transport: ${worker.id}`);
             if (!transport.activeRecordingRooms) throw new Error("worker 不支持录制状态查询");
-            return { worker, rooms: await transport.activeRecordingRooms(), error: null };
+            const st = transport.recordingStatus
+              ? await transport.recordingStatus()
+              : { rooms: await transport.activeRecordingRooms(), rolling: [] };
+            return { worker, rooms: st.rooms, rolling: st.rolling, error: null };
           } catch (e) {
-            return { worker, rooms: [], error: (e as Error).message };
+            return { worker, rooms: [], rolling: [], error: (e as Error).message };
           }
         }));
         const byWorker = new Map(results.map((r) => [r.worker.id, r]));
@@ -816,6 +870,16 @@ const hubStarter: HubStarter = {
         // `next` 每次从空 Map 重建,天然丢掉「源任务已删除/解绑」的房间,
         // 不需要也不能在遍历 hubRecordingSnapshot 时删它(会边迭代边改)。
         hubRecordingSnapshot = next;
+        // F1:边录边传进度。节点探测失败 → 该节点的进度整体丢弃(不展示陈旧数字冒充实时)。
+        hubDeliverySnapshot = results.flatMap((r) => r.error ? [] : r.rolling.map((s): RollingDeliveryDTO => ({
+          workerId: r.worker.id,
+          workerName: r.worker.name ?? r.worker.id,
+          platform: s.platform, roomSlug: s.roomSlug, anchorName: null,
+          sessionBase: s.sessionBase, bv: s.bv ?? null,
+          confirmed: s.confirmed, total: s.total, ambiguous: s.ambiguous,
+          uploading: s.uploading ?? null, recording: s.recording, checkedAt,
+          ...(s.lockedBytes !== undefined ? { lockedBytes: s.lockedBytes } : {}),
+        })));
       } catch (e) {
         opts.warn(`[hub] 刷新 worker 录制状态失败: ${(e as Error).message}`);
       } finally {
@@ -1125,7 +1189,7 @@ const hubStarter: HubStarter = {
                     return false;
                   }
                 });
-                if (task && opts.manager.isRunning(task.id)) await opts.manager.stop(task.id);
+                if (task && opts.manager.isRunning(task.id)) opts.manager.requestStop(task.id); // 不等退出,避免卡住同步 tick
               }
             }
             if (r.applied.length > 0 || r.removed.length > 0 || r.pending.length > 0) {
@@ -1378,23 +1442,40 @@ const hubStarter: HubStarter = {
           })
         : new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
       await t.ping!();
-      // 版本回执:可选能力,拿不到(旧 bundle/不可达)就当没有 —— **绝不能因此让 status 失败**。
-      let status = null;
-      try { status = (await t.nodeStatus?.()) ?? null; } catch { status = null; }
-      return status;
+      // 版本回执 / 磁盘剩余都是可选观测:拿不到(旧 bundle/不可达)就当没有 —— **绝不能因此让 status 失败**。
+      // 两者并行,避免慢节点上串行叠加 ssh 超时。
+      const [status, diskFreeGB] = await Promise.all([
+        (async () => { try { return (await t.nodeStatus?.()) ?? null; } catch { return null; } })(),
+        (async (): Promise<number | undefined> => {
+          try {
+            const g = await t.diskFreeGB?.();
+            return typeof g === "number" && Number.isFinite(g) ? g : undefined;
+          } catch { return undefined; }
+        })(),
+      ]);
+      return { status, diskFreeGB };
     }));
+    // 水位与磁盘看门狗同源(hub.config resources.diskMinGB);读不到/损坏 → 缺省口径,不抛。
+    let rawMin: unknown;
+    try { rawMin = (JSON.parse(readFileSync(rootHubConfig(), "utf-8")) as { resources?: { diskMinGB?: unknown } }).resources?.diskMinGB; } catch { rawMin = undefined; }
+    const diskMinGB = resolveDiskMinGB(rawMin, (m) => console.warn(m)).gb;
     return workers.map((w, i) => {
       const r = results[i];
       if (r.status !== "fulfilled") {
         return { id: w.id, ok: false, error: (r.reason as Error)?.message ?? String(r.reason) };
       }
-      const ns = r.value;
+      const { status: ns, diskFreeGB } = r.value;
+      const disk = diskFreeGB !== undefined ? { diskFreeGB, diskMinGB } : {};
       return ns
-        ? { id: w.id, ok: true, appVersion: ns.appVersion, appliedVersion: ns.appliedVersion, appliedAt: ns.appliedAt }
-        : { id: w.id, ok: true };
+        ? { id: w.id, ok: true, appVersion: ns.appVersion, appliedVersion: ns.appliedVersion, appliedAt: ns.appliedAt, ...disk }
+        : { id: w.id, ok: true, ...disk };
     });
   },
 };
+
+// 全部 worker 的存活/版本/磁盘探测:每个 ssh worker 要 3 条 ssh,多个浏览器标签页会各自轮询 →
+// 包 30 秒 TTL 缓存 + 并发合并,探测成本与标签页数量无关(新增/删除节点后最多 30 秒内状态滞后)。
+hubStarter.probeAllWorkers = ttlMemoAsync(hubStarter.probeAllWorkers!.bind(hubStarter), PROBE_CACHE_MS);
 
 // ─── task 子命令组（stateful app 层：sqlite 持久化 + 运行任务）─────────────────
 // webhook 解析复用全局 --discord-webhook / env DISCORD_WEBHOOK（settings 表在 runTask 内兜底）。
@@ -1528,8 +1609,16 @@ program
 program
   .command("_recording-status <dataRoot>", { hidden: true })
   .description("(内部) 输出当前正在录制的房间,供 master 控制台轮询")
-  .action((_dataRoot: string) => {
-    process.stdout.write(JSON.stringify({ rooms: scanRecordingRooms() }) + "\n");
+  .action(async (dataRoot: string) => {
+    const rooms = scanRecordingRooms();
+    // F1:同时带回边录边传的实时进度(只读 sidecar;失败不影响 rooms,旧 master 忽略多出的字段)。
+    let rolling: unknown[] = [];
+    try {
+      const { join: pathJoin } = await import("node:path");
+      const { scanRollingSessions } = await import("@drec/orchestrator");
+      rolling = scanRollingSessions(pathJoin(dataRoot, "recordings"), rooms);
+    } catch { /* 进度是附加信息,拿不到就空 */ }
+    process.stdout.write(JSON.stringify({ rooms, rolling }) + "\n");
   });
 
 // ─── _inventory <dataRoot>（隐藏子命令，供多节点编排 master 通过 SSH 调用）──────────
@@ -1580,7 +1669,7 @@ program
     const { statfs } = await import("node:fs/promises");
     try {
       const st = await statfs(dataRoot);
-      const freeGB = (Number(st.bavail) * Number(st.bsize)) / 1e9;
+      const freeGB = freeGBOf(st);
       process.stdout.write(JSON.stringify({ freeGB: Number(freeGB.toFixed(2)) }) + "\n");
     } catch (e) {
       process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
@@ -1676,6 +1765,38 @@ program
       }),
     );
     process.stdout.write(JSON.stringify(result) + "\n");
+  });
+
+// (内部) 读本节点某任务的日志尾巴(F3):master 在 fleet 模式下代查节点日志,不必登节点看网页。
+// 日志在 serve 进程的内存环形缓冲里,短命 CLI 进程读不到 → 转问本机 serve(与 _apply-tasks 同一手法)。
+// 只读:serve 未起/任务不存在都返回 {lines:[],error} 且**退出码 0**,可观测性不能反过来打断调用方。
+program
+  .command("_task-logs <dataRoot> <taskId> <lines>", { hidden: true })
+  .description("(内部) 输出某任务最近 n 行日志 JSON(供 master ssh 代查)")
+  .action(async (dataRoot: string, taskIdRaw: string, linesRaw: string) => {
+    void dataRoot; // 数据根只用于与其它隐藏命令保持同一签名;日志来自 serve 进程,不经这里读盘。
+    const taskId = Number(taskIdRaw);
+    // 行数夹取:防一个调用把整段日志(上千行)拖过 ssh。默认 200,上限 1000。
+    const asked = Number(linesRaw);
+    const lines = Number.isFinite(asked) ? Math.min(1000, Math.max(1, Math.trunc(asked))) : 200;
+    const apiBase = process.env.DREC_SERVE_API ?? "http://127.0.0.1:7860"; // issue-guard: allow (回环地址,与 _apply-tasks 同一约定)
+    if (!Number.isFinite(taskId)) {
+      process.stdout.write(JSON.stringify({ lines: [], error: `taskId 非法: ${taskIdRaw}` }) + "\n");
+      return;
+    }
+    try {
+      const res = await fetch(`${apiBase}/api/tasks/${taskId}/logs`, { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) {
+        process.stdout.write(JSON.stringify({ lines: [], error: `serve HTTP ${res.status}` }) + "\n");
+        return;
+      }
+      const body = (await res.json()) as { lines?: unknown };
+      const all = Array.isArray(body.lines) ? body.lines.filter((x): x is string => typeof x === "string") : [];
+      // 脱敏后才出节点:日志里可能带 cookie(vendored 取流代码在异常信息里打印整串)。
+      process.stdout.write(JSON.stringify({ lines: redactLogLines(all.slice(-lines)) }) + "\n");
+    } catch (e) {
+      process.stdout.write(JSON.stringify({ lines: [], error: `读本机 serve 失败: ${(e as Error)?.message ?? e}` }) + "\n");
+    }
   });
 
 // (内部) 节点状态回执(T16):master 想知道「这台节点应用了哪一版期望、跑的是哪个 bundle」。

@@ -100,6 +100,8 @@ export interface RouteMatch {
     | "reorderWorkers"
     | "testWorker"
     | "workersStatus"
+    | "nodeTasks"
+    | "nodeTaskLogs"
     | "previewOrphans"
     | "cleanupOrphans"
     | "hubStream"
@@ -175,6 +177,8 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "retryHubNode", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/retry-node$/, param: "sid", decode: true, needsBody: true },
   { name: "stopHubJob", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/stop$/, param: "sid", decode: true },
   { name: "testWorker", methods: ["POST"], pattern: /^\/api\/hub\/workers\/test$/, needsBody: true },
+  { name: "nodeTasks", methods: ["GET"], pattern: /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)\/tasks$/, param: "slug" },
+  { name: "nodeTaskLogs", methods: ["GET"], pattern: /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)\/tasks\/(\d+)\/logs$/, param: "slug" },
   { name: "workersStatus", methods: ["GET"], pattern: /^\/api\/hub\/workers\/status$/ },
   { name: "listWorkers", methods: ["GET"], pattern: /^\/api\/hub\/workers$/ },
   { name: "createWorker", methods: ["POST"], pattern: /^\/api\/hub\/workers$/, needsBody: true },
@@ -264,6 +268,10 @@ export interface WebServerDeps {
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
   /** 批量存活探针(CLI 注入)。省略 → status 端点返回 []。 */
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  /** master 代查节点任务日志(F3;CLI 注入)。省略 → 端点 400。 */
+  nodeTaskLogs?: (workerId: string, taskId: number, lines: number) => Promise<import("@drec/core").NodeTaskLogsDTO>;
+  /** master 读节点任务清单(F3;CLI 注入)。省略 → 端点 400。 */
+  nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
   /** worker 录制状态快照(CLI 注入;不在请求路径上同步 SSH)。 */
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
   /** 节点侧 master 下发快照目录(见 ApiDeps.managedStateDir);serve 不论是否 hub 模式都注入。 */
@@ -281,6 +289,7 @@ export interface WebServerDeps {
   /** 立刻跑一场已有录像的后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
   /** master 资源池快照(CLI 注入)。省略/hub 未就绪 → 队列页无排队位次/占用(全 0)。 */
+  rollingDelivery?: () => import("@drec/core").RollingDeliveryDTO[];
   poolSnapshot?: () => import("@drec/core").HubPoolSnapshotDTO | undefined;
   /**
    * hub 台账变更监视(T4):`GET /api/hub/stream` 的 SSE 通道。
@@ -541,6 +550,14 @@ async function dispatch(
       const body = (await readJson(req)) as Parameters<Api["testWorker"]>[0];
       return api.testWorker(body ?? {});
     }
+    case "nodeTasks":
+      return api.nodeTasks(match.slug!);
+    case "nodeTaskLogs":
+      // taskId 与 lines 直接从 URL 取(路由只把 workerId 放进 match.slug)。
+      const u = new URL(req.url ?? "/", "http://localhost");
+      const tid = Number(/\/tasks\/(\d+)\/logs$/.exec(u.pathname)?.[1] ?? NaN);
+      const asked = Number(u.searchParams.get("lines"));
+      return api.nodeTaskLogs(match.slug!, tid, Number.isFinite(asked) ? asked : undefined);
     case "workersStatus":
       return api.workersStatus();
     case "hubStream":
@@ -612,6 +629,8 @@ export function createWebServer(deps: WebServerDeps): Server {
     biliupCookiesPath: deps.biliupCookiesPath,
     testWorker: deps.testWorker,
     probeAllWorkers: deps.probeAllWorkers,
+    nodeTaskLogs: deps.nodeTaskLogs,
+    nodeTasks: deps.nodeTasks,
     recordingWorkers: deps.recordingWorkers,
     managedStateDir: deps.managedStateDir,
     requestSyncTasks: deps.requestSyncTasks,
@@ -620,6 +639,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     retryNode: deps.retryNode,
     stopJob: deps.stopJob,
     runNow: deps.runNow,
+    rollingDelivery: deps.rollingDelivery,
     poolSnapshot: deps.poolSnapshot,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);

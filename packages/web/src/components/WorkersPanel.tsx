@@ -92,7 +92,7 @@ export function WorkersPanel({
     const s = status[w.id];
     if (!s?.ok) return null;
     if (!s.appVersion) return null;   // 旧 bundle 不回执 → 不判(避免假告警)
-    if (masterVersion && s.appVersion !== masterVersion) {
+    if (masterVersion && s.appVersion.split("-")[0] !== masterVersion) {
       return { text: t("hub.workers.versionDrift", { node: s.appVersion, master: masterVersion }), warn: true };
     }
     if (s.expectedVersion != null && s.appliedVersion != null && s.expectedVersion !== s.appliedVersion) {
@@ -186,6 +186,18 @@ export function WorkersPanel({
                   return (
                     <div className="text-[11px] mt-1" style={{ color: "var(--warning)" }} title={d.text}>
                       ⚠ {d.text}
+                    </div>
+                  );
+                })()}
+                {(() => {
+                  // F2:磁盘剩余(旧 bundle/探测失败时没有该字段 → 不显示)。低于 master 水位标红。
+                  const s = status[w.id];
+                  if (!s?.ok || typeof s.diskFreeGB !== "number") return null;
+                  const low = typeof s.diskMinGB === "number" && s.diskMinGB > 0 && s.diskFreeGB < s.diskMinGB;
+                  return (
+                    <div className="text-[11px] mt-1" style={{ color: low ? "var(--error-fg)" : "var(--muted-soft)" }}>
+                      {low ? "⚠ " : ""}{t("hub.workers.diskFree", { gb: s.diskFreeGB.toFixed(1) })}
+                      {low ? ` · ${t("hub.workers.diskLow", { min: String(s.diskMinGB) })}` : ""}
                     </div>
                   );
                 })()}

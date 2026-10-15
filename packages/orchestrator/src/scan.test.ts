@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scanRecordings } from "./scan.js";
+import { scanRecordings, scanRollingSessions } from "./scan.js";
 
 describe("scanRecordings", () => {
   it("聚合会话分段时长 + 读 gaps + 映射 roomSlug", async () => {
@@ -26,6 +26,20 @@ describe("scanRecordings", () => {
     expect(recordings[0].totalGapSec).toBe(10);
     expect(recordings[0].startMs).toBe(1_700_000_000_000);
     expect(recordings[0].endMs).toBe(1_700_001_800_000);
+  });
+
+  it("totalBytes = 本场所有 .ts 的字节数之和(issue #25 ①);无 ts 的会话不上报", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播B"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播B_2026-06-27_09-00_000.ts"), Buffer.alloc(1000));
+    writeFileSync(join(dir, "主播B_2026-06-27_09-00_001.ts"), Buffer.alloc(2500));
+    // 另一场:ts 已被边录边传删空,只剩 rolling.json(带 bv)
+    writeFileSync(join(dir, "主播B_2026-06-27_12-00.rolling.json"), JSON.stringify({ bv: "BV1X", parts: [] }));
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 10, startMs: 1_700_000_000_000, endMs: 1_700_000_010_000 }));
+    const withTs = rs.find((r) => r.tsFiles.length === 2)!;
+    expect(withTs.totalBytes).toBe(3500);
+    const noTs = rs.find((r) => r.tsFiles.length === 0);
+    if (noTs) expect(noTs.totalBytes).toBeUndefined();
   });
 
   it("未命中 taskRooms 时 fallback 使用目录名作 roomSlug", async () => {
@@ -178,5 +192,67 @@ describe("scanRecordings", () => {
     const recs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
     expect(recs).toHaveLength(1);
     expect(recs[0].rolling?.uploading?.kind).toBe("create");
+  });
+});
+
+describe("scanRollingSessions(F1:边录边传实时进度,只读 sidecar)", () => {
+  const mk = (root: string, anchor: string, base: string, rolling: object, session: object | null = { roomSlug: "777", platform: "douyin" }): void => {
+    const dir = join(root, anchor); mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${base}.rolling.json`), JSON.stringify(rolling));
+    if (session) writeFileSync(join(dir, `${base}.session.json`), JSON.stringify(session));
+  };
+  const seg = (n: number) => Array.from({ length: n }, (_, i) => ({ index: i, path: `/x/${i}.ts` }));
+  const active = [{ platform: "douyin", roomSlug: "777" }];
+
+  it("在录房间的最新会话:带 BV / 已确认数 / 总段数 / recording=true", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    mk(root, "A", "A_2026-10-15_03-00-00", { segments: seg(9), confirmed: [0, 1, 2, 3, 4, 5, 6, 7], bv: "BV1X", startMs: 2000 });
+    const r = scanRollingSessions(root, active);
+    expect(r).toEqual([{ platform: "douyin", roomSlug: "777", sessionBase: "A_2026-10-15_03-00-00", bv: "BV1X", confirmed: 8, total: 9, ambiguous: 0, uploading: undefined, lockedBytes: 0, recording: true }]);
+  });
+
+  it("lockedBytes = 序号不在 confirmed 且文件仍在的分段字节之和;已确认/已删的不算", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    const dir = join(root, "A"); mkdirSync(dir);
+    writeFileSync(join(dir, "s0.ts"), Buffer.alloc(100)); // 已确认但文件还在(尚未删):不算
+    writeFileSync(join(dir, "s1.ts"), Buffer.alloc(300)); // 未确认:算
+    writeFileSync(join(dir, "s2.ts"), Buffer.alloc(50));  // 未确认:算
+    // s3 未确认但文件已不存在:不算
+    const segments = [0, 1, 2, 3].map((i) => ({ index: i, path: join(dir, `s${i}.ts`) }));
+    mk(root, "A", "A_lock", { segments, confirmed: [0], bv: "BV1", startMs: 1 });
+    expect(scanRollingSessions(root, active)[0]!.lockedBytes).toBe(350);
+  });
+
+  it("同房间旧会话(已收口、无未决项)不纳入;只认在录房间的最新会话", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    mk(root, "A", "A_old", { segments: seg(3), confirmed: [0, 1, 2], bv: "BVOLD", startMs: 1000 });
+    mk(root, "A", "A_new", { segments: seg(2), confirmed: [0], bv: "BVNEW", startMs: 2000 });
+    expect(scanRollingSessions(root, active).map((s) => s.sessionBase)).toEqual(["A_new"]);
+  });
+
+  it("房间不在录 + 无未决项 → 不纳入;不在录但有 ambiguous / uploading → 纳入(收播后仍需关注)", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    mk(root, "A", "A_done", { segments: seg(2), confirmed: [0, 1], bv: "BV1", startMs: 1 });
+    mk(root, "B", "B_amb", { segments: seg(3), confirmed: [0], ambiguous: [1], bv: "BV2", startMs: 1 }, { roomSlug: "888", platform: "douyin" });
+    mk(root, "C", "C_up", { segments: seg(1), confirmed: [], uploading: { index: 0, kind: "create" }, startMs: 1 }, { roomSlug: "999", platform: "douyin" });
+    const r = scanRollingSessions(root, []);
+    expect(r.map((s) => s.sessionBase).sort()).toEqual(["B_amb", "C_up"]);
+    expect(r.find((s) => s.sessionBase === "B_amb")).toMatchObject({ ambiguous: 1, recording: false, bv: "BV2" });
+    expect(r.find((s) => s.sessionBase === "C_up")).toMatchObject({ uploading: { index: 0, kind: "create" }, bv: undefined });
+  });
+
+  it("损坏 sidecar / 无房间身份 → 跳过,绝不抛;目录不存在 → []", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    mkdirSync(join(root, "A"));
+    writeFileSync(join(root, "A", "bad.rolling.json"), "{not json");
+    mk(root, "B", "B_nosess", { segments: seg(1), confirmed: [], startMs: 1 }, null);
+    expect(scanRollingSessions(root, active)).toEqual([]);
+    expect(scanRollingSessions(join(root, "nope"), active)).toEqual([]);
+  });
+
+  it("同 roomSlug 不同平台互不误判在录", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    mk(root, "A", "A_bili", { segments: seg(1), confirmed: [0], startMs: 5 }, { roomSlug: "777", platform: "bilibili" });
+    expect(scanRollingSessions(root, [{ platform: "douyin", roomSlug: "777" }])).toEqual([]);
   });
 });

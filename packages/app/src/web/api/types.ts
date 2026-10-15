@@ -24,6 +24,10 @@ export interface ManagerLike {
   isRunning(id: number): boolean;
   start(id: number): boolean;
   stop(id: number): Promise<void>;
+  /** 硬停并最多等 ms:true = 已退出,false = 超时仍在收尾(停止进行中)。 */
+  stopWithin(id: number, ms: number): Promise<boolean>;
+  /** 该任务是否正在硬停收尾(rolling 任务末段上传中)。 */
+  isStopping(id: number): boolean;
   /** Window-end / disable drain: stop looking for new streams, let current finish. */
   stopGraceful(id: number): Promise<void>;
   /** Live runtime (running + startedAt + elapsedMs) for the 详情 page. */
@@ -98,6 +102,13 @@ export interface ApiDeps {
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<WorkerTestResult>;
   /** 批量存活探针(CLI 注入)。省略(hub 未开)→ status 端点返回 []。 */
   probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  /**
+   * master 代查某节点的任务日志尾巴(F3;CLI 注入,内部走 Transport)。
+   * 省略 → 该端点返回 400(hub 未启用),不静默 404/空表。
+   */
+  nodeTaskLogs?: (workerId: string, taskId: number, lines: number) => Promise<import("@drec/core").NodeTaskLogsDTO>;
+  /** master 读某节点的任务清单(F3;CLI 注入,内部走 Transport)。省略 → 端点 400。 */
+  nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
   /** 录制节点状态缓存读取;避免每次列任务都同步 SSH。 */
   recordingWorkers?: (platform: string, roomSlug: string) => RecordingWorkerStatusDTO[];
   /**
@@ -123,6 +134,8 @@ export interface ApiDeps {
   /** 立刻跑一场已有录像的后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
   /** master 资源池快照(CLI 注入,读同一 ResourcePool 实例)。省略/未就绪 → 队列页无排队位次(全 0)。 */
+  /** 边录边传的实时进度(F1;省略 = 不展示)。 */
+  rollingDelivery?: () => import("@drec/core").RollingDeliveryDTO[];
   poolSnapshot?: () => HubPoolSnapshotDTO | undefined;
 }
 
@@ -133,6 +146,8 @@ export interface TaskView extends Task {
   anchorName: string | null;
   /** true=真正在录视频；false 且 running=true → 进程在跑但「等待开播中」。 */
   recording: boolean;
+  /** 硬停收尾中(rolling 任务在传末段,最长约 10 分钟)。UI 用它显示「停止中」并禁用按钮。 */
+  stopping?: boolean;
   recordingWorkers?: RecordingWorkerStatusDTO[];
   /**
    * issue #73:master 判定「本节点是否被派发这个受管任务」。false=停用保留的未分配残留。
@@ -331,4 +346,8 @@ export interface Api {
   testWorker(input: { kind?: string; host?: string; dataRoot?: string; apiUrl?: string }): Promise<ApiResult>;
   /** GET /api/hub/workers/status — 并行 ping 所有已配置 worker(未注入 probeAllWorkers → [])。 */
   workersStatus(): Promise<ApiResult>;
+  /** GET /api/hub/workers/:id/tasks — master 读该节点的任务清单(F3,只读)。 */
+  nodeTasks(workerId: string): Promise<ApiResult>;
+  /** GET /api/hub/workers/:id/tasks/:taskId/logs — master 代查该节点某任务的日志尾巴(F3)。 */
+  nodeTaskLogs(workerId: string, taskId: number, lines?: number): Promise<ApiResult>;
 }

@@ -62,6 +62,7 @@ function TaskCompactRow({ task }: { task: Task }): ReactNode {
           status={task.status}
           enabled={task.enabled}
           recording={task.recording}
+          stopping={task.stopping}
           recordingWorkers={task.recordingWorkers}
         />
       </div>
@@ -367,6 +368,7 @@ export function TaskList(): ReactNode {
                         running={task.running}
                         status={task.status}
                         enabled={task.enabled}
+                        stopping={task.stopping}
                         recording={task.recording}
                         recordingWorkers={task.recordingWorkers}
                       />

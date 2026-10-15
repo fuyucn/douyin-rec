@@ -9,7 +9,7 @@
  */
 import { mkdirSync, statfsSync } from "node:fs";
 import { join } from "node:path";
-import { createLogger } from "@drec/core";
+import { createLogger, freeBytesOf, freeGBOf } from "@drec/core";
 import { TaskStore, resolveTaskWebhook } from "./store.js";
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
@@ -190,9 +190,12 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       // hub 未启用不注入 → 端点回落 400(与 hub.start 一致的开关逻辑)。
       testWorker: hubEnabled ? hubStarter?.testWorker : undefined,
       probeAllWorkers: hubEnabled ? hubStarter?.probeAllWorkers : undefined,
+      nodeTaskLogs: hubEnabled ? hubStarter?.nodeTaskLogs : undefined,
+      nodeTasks: hubEnabled ? hubStarter?.nodeTasks : undefined,
       recordingWorkers: hubEnabled ? hubStarter?.recordingWorkers : undefined,
       // issue #73:与 `_apply-tasks` 同目录(<数据根>/config/managed),节点列表据快照里的 assigned 标记过滤。
       managedStateDir: join(rootConfigDir(), "managed"),
+      rollingDelivery: hubEnabled ? hubStarter?.rollingDelivery : undefined,
       poolSnapshot: hubEnabled ? hubStarter?.poolSnapshot : undefined,
       requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
       // 手动启动的磁盘水位准入(issue #96):与 daemon 同源的水位配置,每次现读(热改生效);测默认输出目录所在卷。
@@ -244,7 +247,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
           const dir = resolveOutputDir(null);
           mkdirSync(dir, { recursive: true }); // 确保存在,statfs 才能查到该卷
           const st = await statfs(dir);
-          const freeGB = (Number(st.bavail) * Number(st.bsize)) / 1e9;
+          const freeGB = freeGBOf(st);
           if (freeGB < DISK_MIN_GB) {
             if (!diskAlerted) {
               diskAlerted = true;
@@ -335,7 +338,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
           // 数据根与录像目录同卷;录像目录可能尚未创建(全新部署)→ 依次回退数据根。
           // 都取不到(异常)→ null = 不拦(避免把探测失败当爆盘误停,已有磁盘看门狗告警兜底)。
           for (const p of [resolveOutputDir(undefined), drecRoot()]) {
-            try { const st = statfsSync(p); return Number(st.bavail) * Number(st.bsize); } catch { /* 试下一个 */ }
+            try { return freeBytesOf(statfsSync(p)); } catch { /* 试下一个 */ }
           }
           return null;
         },

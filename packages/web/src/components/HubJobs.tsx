@@ -37,6 +37,14 @@ export function humanSecFull(sec: number | null): string {
 }
 
 /** 状态 → 步骤名(译文,渲染时按当前语言解析)。 */
+/**
+ * 后处理状态(state)→ 展示文案。导出供任务详情页复用 —— 状态名到 key 的映射必须只有一处:
+ * `needs_manual` → `needsManual` 这种下划线/驼峰差异,复制一份必然漏。
+ */
+export function jobStateLabel(t: TFunc, state: string): string {
+  return stepLabelMap(t)[state] ?? state;
+}
+
 function stepLabelMap(t: TFunc): Record<string, string> {
   return {
     pending: t("hub.jobs.step.pending"),

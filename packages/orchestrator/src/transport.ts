@@ -17,6 +17,11 @@ export interface NodeRecording {
    */
   danmuCount?: number;
   durationSec: number;       // 实录总时长(各段之和)
+  /**
+   * 本场所有 .ts 分段的字节数之和(issue #25 ①:节点侧上传超时按字节估算,此前 master 拿不到场次大小)。
+   * 缺省 undefined = 旧 bundle 的清单 / 统计失败 → 调用方回落固定下限。
+   */
+  totalBytes?: number;
   startMs: number;           // 首段开录 epoch ms
   endMs: number;             // 末段收录 epoch ms
   totalGapSec: number;       // 断流缺口总秒数(来自 gaps sidecar)
@@ -45,6 +50,28 @@ export interface NodeInventory { workerId: string; recordings: NodeRecording[]; 
 
 /** `_tasks` 远端输出:该节点全部任务的隐私安全投影(无 cookies)。 */
 export interface NodeTasks { workerId: string; tasks: NodeTaskDTO[]; }
+
+/** 节点上一个边录边传会话的实时进度(`_recording-status` 的 rolling 字段,F1)。 */
+export interface NodeRollingSession {
+  platform: string;
+  roomSlug: string;
+  sessionBase: string;
+  bv?: string;
+  confirmed: number;
+  total: number;
+  ambiguous: number;
+  uploading?: { index: number; kind: "create" | "append" };
+  /** 该房间此刻是否仍在录制。 */
+  recording: boolean;
+  /** 未确认分段在磁盘上仍占用的字节数(只统计仍存在的文件);旧 bundle 无该字段。 */
+  lockedBytes?: number;
+}
+
+/** `_recording-status` 的完整结果:在录房间 + 边录边传进度(旧 bundle 无 rolling → [])。 */
+export interface NodeRecordingStatus {
+  rooms: ActiveRecordingRoom[];
+  rolling: NodeRollingSession[];
+}
 
 export interface ActiveRecordingRoom {
   platform: string;
@@ -96,6 +123,8 @@ export interface Transport {
   ping?(): Promise<void>;
   /** 当前有媒体下载子进程的房间,供 master 控制台显示远端录制状态。 */
   activeRecordingRooms?(): Promise<ActiveRecordingRoom[]>;
+  /** 在录房间 + 边录边传进度(F1;可选,缺省时调用方回落 activeRecordingRooms 且无进度)。 */
+  recordingStatus?(): Promise<NodeRecordingStatus>;
   /** 读取该节点的任务清单(隐藏 `_tasks` 子命令;可选:无此能力 = 不支持任务同步)。 */
   listTasks?(): Promise<NodeTasks>;
   /**
@@ -117,6 +146,13 @@ export interface Transport {
    */
   diskFreeGB?(): Promise<number>;
   /**
+   * 读该节点上**某个任务**最近的录制日志尾巴(隐藏 `_task-logs` 子命令,F3)。
+   *
+   * 为什么:节点网页在 fleet 模式下日常不看,排查却要登到节点上。master 代查即可,
+   * 不用给节点开公网入口。旧 bundle 无该命令 → 抛 unknown command,调用方按「不支持」处理。
+   */
+  taskLogs?(taskId: number, lines: number): Promise<{ lines: string[]; error?: string }>;
+  /**
    * 节点侧上传能力探测(experimental,见 plans/027)。无此能力(旧 bundle)= 不支持 → flag on 的房间回落现状。
    * 查:biliup 可用 + B站 cookie 存在 + 磁盘剩余。
    */
@@ -125,7 +161,7 @@ export interface Transport {
    * 在该节点本地执行「remux → biliup 上传」并把 BV 回传(experimental,见 plans/027)。
    * 录像**不回传 master** —— 这正是省掉 rsync 的关键。无此能力 = 不支持 → 回落现状。
    */
-  nodePipeline?(spec: NodePipelineSpec): Promise<NodePipelineResult>;
+  nodePipeline?(spec: NodePipelineSpec, opts?: { timeoutMs?: number }): Promise<NodePipelineResult>;
   /**
    * 回读节点侧**落盘结果文件**(experimental,见 plans/027)。
    *

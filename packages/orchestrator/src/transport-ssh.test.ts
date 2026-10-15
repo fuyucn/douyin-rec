@@ -1,6 +1,6 @@
 // packages/orchestrator/src/transport-ssh.test.ts
 import { describe, it, expect, afterEach } from "vitest";
-import { existsSync, rmSync, mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, rmSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SshTransport, buildRsyncArgs } from "./transport-ssh.js";
@@ -35,6 +35,58 @@ describe("recordingStatusWorkerIds", () => {
 });
 
 describe("SshTransport", () => {
+  describe("recordingStatus(F1:在录房间 + 边录边传进度)", () => {
+    const sess = { platform: "douyin", roomSlug: "123", sessionBase: "A_1", bv: "BV1X", confirmed: 2, total: 3, ambiguous: 0, recording: true };
+    const mkT = (run: (argv: string[]) => Promise<string>) =>
+      new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+
+    it("新 bundle:一次命令同时拿到 rooms 与 rolling", async () => {
+      const calls: string[] = [];
+      const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ rooms: [{ platform: "douyin", roomSlug: "123" }], rolling: [sess] }); });
+      await expect(t.recordingStatus()).resolves.toEqual({ rooms: [{ platform: "douyin", roomSlug: "123" }], rolling: [sess] });
+      expect(calls).toHaveLength(1);
+    });
+
+    it("lockedBytes:合法数字原样透传;脏值(负数/NaN/字符串)丢字段、条目保留", async () => {
+      const good = { ...sess, lockedBytes: 1234 };
+      const t = mkT(async () => JSON.stringify({ rooms: [], rolling: [good, { ...sess, sessionBase: "B", lockedBytes: -5 }, { ...sess, sessionBase: "C", lockedBytes: "9" }] }));
+      const r = (await t.recordingStatus()).rolling;
+      expect(r[0]!.lockedBytes).toBe(1234);
+      expect(r).toHaveLength(3);
+      expect(r[1]!.lockedBytes).toBeUndefined();
+      expect(r[2]!.lockedBytes).toBeUndefined();
+    });
+
+    it("旧 bundle(只有 rooms)→ rolling=[],不报错", async () => {
+      const t = mkT(async () => JSON.stringify({ rooms: [{ platform: "douyin", roomSlug: "123" }] }));
+      await expect(t.recordingStatus()).resolves.toEqual({ rooms: [{ platform: "douyin", roomSlug: "123" }], rolling: [] });
+    });
+
+    it("rolling 里形状不合法的条目被丢弃(不让脏数据进 UI)", async () => {
+      const noCounts = { platform: "douyin", roomSlug: "1", sessionBase: "s" };           // 缺 confirmed / total
+      const noBase = { platform: "douyin", roomSlug: "1", confirmed: 1, total: 2 };       // 缺 sessionBase
+      const t = mkT(async () => JSON.stringify({ rooms: [], rolling: [sess, { platform: "douyin" }, noCounts, noBase, null, "x"] }));
+      expect((await t.recordingStatus()).rolling).toEqual([sess]);
+    });
+
+    it("网络类错误照常抛(不被当成「不支持」吞掉)", async () => {
+      let n = 0;
+      const t = mkT(async () => { n++; throw new Error("ssh 超时 8000ms 被杀"); });
+      await expect(t.recordingStatus()).rejects.toThrow(/超时/);
+      expect(n).toBe(1); // 不得再走降级回退路径(否则一次抖动会多打一轮 ssh,且可能掩盖原错误)
+    });
+
+    it("命令不存在 → 降级到 activeRecordingRooms 回退路径,rolling=[]", async () => {
+      const t = mkT(async (argv) => {
+        const cmd = argv.join(" ");
+        if (cmd.includes("_recording-status")) throw new Error("error: unknown command '_recording-status'");
+        if (cmd.includes("_tasks")) return JSON.stringify({ tasks: [] });
+        return "true";
+      });
+      await expect(t.recordingStatus()).resolves.toEqual({ rooms: [], rolling: [] });
+    });
+  });
+
   describe("activeRecordingRooms", () => {
     const okOut = JSON.stringify({ rooms: [{ platform: "douyin", roomSlug: "123" }] });
 
@@ -299,5 +351,51 @@ describe("SshTransport.abortNodePipeline / nodeResult(started)", () => {
     const r = await t.nodeResult!("douyin:1:2");
     expect(r).not.toBeNull();
     expect(r?.phase).toBe("started");
+  });
+});
+
+describe("nodePipeline 按调用传入的超时(issue #25 ①,真实 spawn,PATH 上放假 ssh)", () => {
+  const savedPath = process.env.PATH;
+  afterEach(() => { process.env.PATH = savedPath; });
+  const withFakeSsh = (sleepSec: number): void => {
+    const bin = mkdtempSync(join(tmpdir(), "fake-ssh-"));
+    writeFileSync(join(bin, "ssh"), `#!/bin/sh\nsleep ${sleepSec}\necho '{"ok":true,"bv":"BV1FAKE"}'\n`);
+    chmodSync(join(bin, "ssh"), 0o755);
+    process.env.PATH = `${bin}:${savedPath}`;
+  };
+  const spec = { streamKey: "k" } as never;
+  const mk = () => new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {} });
+
+  it("传入的 timeoutMs 生效:远端比预算慢 → 按该预算被杀(而不是默认 30 分钟)", async () => {
+    withFakeSsh(5);
+    await expect(mk().nodePipeline(spec, { timeoutMs: 150 })).rejects.toThrow(/ssh 超时 150ms/);
+  });
+
+  it("预算足够 → 正常返回 BV;不传 opts → 仍走默认通道", async () => {
+    withFakeSsh(0);
+    expect((await mk().nodePipeline(spec, { timeoutMs: 5000 })).bv).toBe("BV1FAKE");
+    expect((await mk().nodePipeline(spec)).bv).toBe("BV1FAKE");
+  });
+});
+
+describe("SshTransport.taskLogs(F3:master 代查节点日志)", () => {
+  const mkT = (run: (argv: string[]) => Promise<string>) =>
+    new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+
+  it("透传行数并原样返回行;带 error 时也返回(不当失败抛错)", async () => {
+    const calls: string[] = [];
+    const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ lines: ["x", "y"] }); });
+    await expect(t.taskLogs(7, 200)).resolves.toEqual({ lines: ["x", "y"] });
+    expect(calls[0]).toContain("_task-logs /data/drec 7 200");
+
+    const t2 = mkT(async () => JSON.stringify({ lines: [], error: "serve 未起" }));
+    await expect(t2.taskLogs(7, 50)).resolves.toEqual({ lines: [], error: "serve 未起" });
+  });
+
+  it("脏数据清洗:非字符串行丢弃、非字符串 error 忽略", async () => {
+    const t = mkT(async () => JSON.stringify({ lines: ["ok", 1, null, "ok2"], error: 42 }));
+    await expect(t.taskLogs(1, 10)).resolves.toEqual({ lines: ["ok", "ok2"] });
+    const t2 = mkT(async () => JSON.stringify({ lines: "not-an-array" }));
+    await expect(t2.taskLogs(1, 10)).resolves.toEqual({ lines: [] });
   });
 });

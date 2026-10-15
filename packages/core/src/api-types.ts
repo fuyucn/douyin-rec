@@ -56,6 +56,13 @@ export interface HubPipelineConfig {
      * 节点缺 biliup / B站 cookie / 磁盘时也回落现状,并在 job.log 记明原因(不静默失败)。
      */
     nodeSideUpload?: boolean;
+    /**
+     * **(缺省 false)** `.ts` 直传:节点侧上传时,ffmpeg 引擎产出的 `.ts` 若**单段独占一个分 P**
+     * (无需拼接/烧录),不再 remux 成 mp4,直接把源 `.ts`(硬链接)作为上传物。
+     * 省掉一份 mp4 与一遍写盘,同一内容在节点上只占一份。mesio 的 `.flv`(时基须钉 90000)与
+     * 需要拼接的组仍走 remux。硬链接失败(跨设备)时回落 remux,绝不复制出第二份。
+     */
+    tsDirect?: boolean;
   };
   /**
    * 分段上传(mergeSegments=false)调优:
@@ -334,6 +341,10 @@ export interface WorkerStatus {
   expectedVersion?: number;
   /** 同步失败原因(有则说明「下发到了但应用失败」)。 */
   syncError?: string;
+  /** 节点数据根所在卷剩余空间(GB,F2;旧 bundle / 探测失败 → 省略)。 */
+  diskFreeGB?: number;
+  /** master 的磁盘水位(GB,与磁盘看门狗同源);0 = 已关闭。 */
+  diskMinGB?: number;
 }
 
 /** GET /api/hub/jobs 响应(total = 满足过滤的 run 总数,分页用)。 */
@@ -452,7 +463,40 @@ export interface QueueItemDTO {
  *
  * `recent` 保留为**兼容字段**(RoomDetail 等旧调用方仍用),内容 = 最近完成的完整 HubJobDTO。
  */
+/**
+ * 边录边传的实时交付进度(controller 视图,F1)。由各节点的状态轮询带回,**不经过台账**:
+ * 边录边传由录制节点自己建稿 / 追加 / 删源,master 要等收播后的对账才建 job,期间队列页原本一片空白。
+ * 只读展示,不参与任何上传 / 删源判定。
+ */
+export interface RollingDeliveryDTO {
+  workerId: string;
+  workerName: string;
+  platform: string;
+  roomSlug: string;
+  /** 主播名(master 侧按房间补;未知 = null)。 */
+  anchorName: string | null;
+  sessionBase: string;
+  /** 已建稿的 BV;尚未建稿 = null。 */
+  bv: string | null;
+  /** 已确认上传的分 P 数。 */
+  confirmed: number;
+  /** 本会话已封口 / 登记的分段总数(含已确认并删源的)。 */
+  total: number;
+  /** 结果未知、需人工核对的分段数。 */
+  ambiguous: number;
+  /** 正在传的分段(无 = null)。 */
+  uploading: { index: number; kind: "create" | "append" } | null;
+  /** 该房间此刻是否仍在录制(false = 已收播但仍有未决项)。 */
+  recording: boolean;
+  /** 本条状态的核对时刻(epoch ms)。 */
+  checkedAt: number;
+  /** 未确认分段仍占用的磁盘字节(F2;旧节点 bundle 缺省 = 未知)。 */
+  lockedBytes?: number;
+}
+
 export interface HubQueueDTO {
+  /** 边录边传的实时进度(F1;旧 master / 无节点上报时缺省)。 */
+  delivering?: RollingDeliveryDTO[];
   /** 进行中(非终态 ∪ needs_manual)—— 与 `rows` 中 phase 非 done/failed 的部分一致。 */
   active: QueueItemDTO[];
   /** 统一列表:进行中 + 已完成,按 sort(newest 缺省=最新在前)排好,前端渲染一张表。 */
@@ -500,6 +544,29 @@ export interface NodeTaskDTO {
   rollingUpload: boolean;
   /** 边录边传实际生效值(派生,只读)。 */
   rollingEffective: boolean;
+}
+
+/**
+ * GET /api/hub/workers/:id/tasks 的响应(F3):该节点上的任务清单(node 的隐私安全投影,无凭证)。
+ * 供 controller 的「节点日志」对话框列出可查的任务。
+ */
+export interface NodeTasksDTO {
+  workerId: string;
+  tasks: NodeTaskDTO[];
+  /** 拿不到清单的原因(节点不可达 / 该节点类型不支持)。有值时 tasks 为空。 */
+  error?: string;
+}
+
+/** GET /api/hub/workers/:id/tasks/:taskId/logs 的响应(F3,只读)。 */
+export interface NodeTaskLogsDTO {
+  workerId: string;
+  taskId: number;
+  lines: string[];
+  /**
+   * 拿不到日志的原因(节点不可达 / 旧 bundle 无该命令 / 节点 serve 未起 / 节点上无此任务)。
+   * 有值时 `lines` 为空 —— UI 原样展示,不当成「无日志」。
+   */
+  error?: string;
 }
 
 /** master → node 的期望任务(applyTasks;含 cookies,只走可信 ssh/本地通道)。 */
@@ -577,6 +644,8 @@ export interface NodePipelineSpec {
   segmentGroupSec?: number;
   /** 分段模式(不合并,逐段产出):与 master 侧 steps.mergeSegments=false 同义。 */
   mergeSegments: boolean;
+  /** `.ts` 直传:见 HubPipelineConfig.steps.tsDirect。缺省 false。 */
+  tsDirect?: boolean;
   /** 上传模式:upload = 建稿上传;stage = 只合成不上传(留节点)。 */
   uploadMode: "stage" | "upload";
   /** 节点上产物落地目录(节点本地,通常 = 该节点 dataRoot/stage)。 */
@@ -648,6 +717,14 @@ export interface NodePipelineResultFile {
   bv?: string;
   /** 产物路径(节点本地)。 */
   products?: string[];
+  /**
+   * 已**确认**落到稿件里的分 P 数(建稿成功 = 1,每次 append 成功后 +1)。issue #25 ②:BV 与进度在
+   * 建稿 / 追加成功的**当下**就落盘,执行体被 ssh 超时 / SIGKILL 杀掉时 master 仍能回读到 BV 与进度,
+   * 不再出现「B站已有稿件而台账没有任何 BV」。旧 bundle 不写 → 缺省 = 未知。
+   */
+  confirmedParts?: number;
+  /** 正要追加的分 P 序号(1 起):**追加前**先写意图;`intentPart > confirmedParts` 表示该次追加结果未知。 */
+  intentPart?: number;
   /** 失败原因(ok=false)。 */
   error?: string;
   /** 结果写入时刻(epoch ms;master 用它判断结果是否属于本次执行)。 */
@@ -679,6 +756,8 @@ export function normalizeNodeResultFile(parsed: unknown): NodePipelineResultFile
     ok: p.ok === true,
     bv: typeof p.bv === "string" ? p.bv : undefined,
     products: Array.isArray(p.products) ? p.products : undefined,
+    confirmedParts: Number.isInteger(p.confirmedParts) && (p.confirmedParts as number) >= 0 ? p.confirmedParts : undefined,
+    intentPart: Number.isInteger(p.intentPart) && (p.intentPart as number) >= 1 ? p.intentPart : undefined,
     error: typeof p.error === "string" ? p.error : undefined,
     atMs: typeof p.atMs === "number" ? p.atMs : 0,
   };
@@ -790,6 +869,11 @@ export interface TaskDTO {
   anchorName: string | null;
   /** 是否真正在录视频(区分 running 但等待开播)。 */
   recording: boolean;
+  /**
+   * 硬停收尾中(已发停止信号、进程尚未退出;rolling 任务在传末段,最长约 10 分钟)。
+   * UI 用它显示「停止中」并禁用「启动」,避免超时返回后被误当成没停。
+   */
+  stopping?: boolean;
   /** Hub 源任务在被选中 worker 上的录制状态;普通任务为空数组。 */
   recordingWorkers?: RecordingWorkerStatusDTO[];
   /** issue #73:master 判定的归属标记。false=受管但未派给本节点(停用保留);省略=视为归属。 */

@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { normalizeNodeResultFile, registerChild, throwIfAborted, type RemoteTaskSpec } from "@drec/core";
-import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeTasks, Transport } from "./transport.js";
+import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeRecordingStatus, NodeRollingSession, NodeTasks, Transport } from "./transport.js";
 import type { NodeCapabilities, NodeStatus, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec } from "@drec/core";
 
 export interface SshOpts {
@@ -81,7 +81,7 @@ function defaultRun(host: string, timeoutMs = 45_000) {
     p.stdout.on("data", (b) => (out += b)); p.stderr.on("data", (b) => (err += b));
     p.on("close", (c) => finish(() => {
       try { throwIfAborted(); } catch (e) { reject(e); return; }
-      c === 0 ? resolve(out) : reject(new Error(`ssh rc=${c}: ${err.slice(-300)}`));
+      c === 0 ? resolve(out) : reject(new Error(`ssh rc=${c}: ${err.slice(-1500)}`));
     }));
     p.on("error", (e) => finish(() => reject(e)));
   });
@@ -183,6 +183,31 @@ export class SshTransport implements Transport {
     }
   }
 
+  /**
+   * 在录房间 + 边录边传进度(F1)。同一条 `_recording-status` 命令:旧 bundle 只有 rooms → rolling=[];
+   * 命令不存在才降级到 activeRecordingRooms(其内部有 `_tasks`+`_is-done` 回退),其它错误照常抛。
+   */
+  async recordingStatus(): Promise<NodeRecordingStatus> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    try {
+      const out = await this.runStatus([`${nodePrefix} _recording-status ${this.o.dataRoot}`]);
+      const parsed = JSON.parse(out) as { rooms?: ActiveRecordingRoom[]; rolling?: unknown };
+      if (Array.isArray(parsed.rooms)) {
+        const rolling = (Array.isArray(parsed.rolling) ? parsed.rolling : []).filter((r): r is NodeRollingSession => {
+          const x = r as Partial<NodeRollingSession> | null;
+          return !!x && typeof x.platform === "string" && typeof x.roomSlug === "string"
+            && typeof x.sessionBase === "string" && typeof x.confirmed === "number" && typeof x.total === "number";
+        });
+        // lockedBytes 非有限数字(脏数据)→ 丢掉该字段,不让 NaN 流到 UI。
+        for (const r of rolling) if (r.lockedBytes !== undefined && !(typeof r.lockedBytes === "number" && Number.isFinite(r.lockedBytes) && r.lockedBytes >= 0)) delete r.lockedBytes;
+        return { rooms: parsed.rooms, rolling };
+      }
+    } catch (e) {
+      if (!isUnknownCommandError(e)) throw e;
+    }
+    return { rooms: await this.activeRecordingRooms(), rolling: [] };
+  }
+
   /** 查询 worker 当前正在录制的房间,仅做轻量 /proc 扫描,不读录像目录。 */
   async activeRecordingRooms(): Promise<ActiveRecordingRoom[]> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
@@ -252,6 +277,20 @@ export class SshTransport implements Transport {
     }
   }
 
+  /**
+   * 读远端某任务的日志尾巴(F3)。日志来自节点 serve 的**内存环形缓冲**,节点重启即空 →
+   * 返回 `error` 由调用方原样展示,不当成失败抛错(可观测性不能反过来打断任何东西)。
+   */
+  async taskLogs(taskId: number, lines: number): Promise<{ lines: string[]; error?: string }> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const out = await this.runStatus([`${nodePrefix} _task-logs ${this.o.dataRoot} ${taskId} ${lines}`]);
+    const parsed = JSON.parse(out) as { lines?: unknown; error?: unknown };
+    return {
+      lines: Array.isArray(parsed.lines) ? parsed.lines.filter((x): x is string => typeof x === "string") : [],
+      ...(typeof parsed.error === "string" ? { error: parsed.error } : {}),
+    };
+  }
+
   /** 节点侧上传能力探测(experimental,见 plans/027)。旧 bundle 无 `_node-capabilities` → 抛错,调用方按不支持处理。 */
   async nodeCapabilities(): Promise<NodeCapabilities> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
@@ -270,11 +309,13 @@ export class SshTransport implements Transport {
    * spec 经 base64 传递(含 cookie,只走可信 ssh 通道,与 `_apply-tasks` 同一路径)。
    * 录像**不回传 master** —— 这正是省掉 rsync 的关键。
    */
-  async nodePipeline(spec: NodePipelineSpec): Promise<NodePipelineResult> {
+  async nodePipeline(spec: NodePipelineSpec, opts?: { timeoutMs?: number }): Promise<NodePipelineResult> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const b64 = Buffer.from(JSON.stringify(spec), "utf-8").toString("base64");
     // 用 runLong:上传整场录像远超默认 45s 预算(见 SshOpts.nodePipelineTimeoutMs)。
-    const out = await this.runLong([`${nodePrefix} _node-pipeline ${this.o.dataRoot} ${b64}`]);
+    // 调用方按场次字节数估算的超时(issue #25 ①)优先;注入的 run(测试)不受影响。
+    const argv = [`${nodePrefix} _node-pipeline ${this.o.dataRoot} ${b64}`];
+    const out = opts?.timeoutMs && !this.o.run ? await defaultRun(this.o.host, opts.timeoutMs)(argv) : await this.runLong(argv);
     const parsed = JSON.parse(out) as Partial<NodePipelineResult>;
     return {
       ok: parsed.ok === true,
