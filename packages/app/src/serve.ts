@@ -20,6 +20,7 @@ import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
 import { makeNotifier, resolveWebhookToggles } from "@drec/observability";
 import { TaskDaemon, resolveDiskWatermark } from "./daemon.js";
+import { makeManualStartAdmit } from "./disk-gate.js";
 import { TaskManager } from "./task-manager.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
@@ -174,6 +175,29 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // → 白白空转 1s 定时器、永远不推。不注入则该路由显式 503(而非静默 404/空流)。
     hubWatch = hubEnabled ? new HubWatch(syncDbPath, { log: (m) => serveLog.info(m) }) : null;
     hubWatch?.start();
+    // 录制子进程继承本进程环境:把**当前生效的那份** hub 配置交给子进程,使其磁盘水位闸门
+    // 与 serve(手动启动 / daemon)读同一份配置(issue #96)。
+    //
+    // 为什么不能只处理 arg-file:配置来源有四种(arg 文件 / inline JSON / settings 表 / 根文件),
+    // 只传 arg-file 时,settings/inline 这两种来源下子进程会**回落去读根文件** —— 那份可能根本
+    // 不是用户在用的一份(例如 UI 把 diskMinGB 设成 0 关闭闸门,却存在 settings 表里),
+    // 结果子进程按根文件/默认 10GB 继续拦录,表现为「关了闸门还在拦」。
+    // 统一做法:文件来源传路径(零拷贝、可热改);非文件来源(inline/settings)把 JSON 内容
+    // 经环境变量传给子进程,口径与 daemon 完全一致。
+    {
+      const hubSrc = resolveHubConfig(o.hubConfig, store);
+      if (hubSrc.source === "arg-file" && hubSrc.path) {
+        process.env.DOUYIN_REC_HUB_CONFIG = hubSrc.path;
+        delete process.env.DOUYIN_REC_HUB_CONFIG_JSON;
+      } else if (hubSrc.json !== undefined) {
+        process.env.DOUYIN_REC_HUB_CONFIG_JSON = hubSrc.json;
+        delete process.env.DOUYIN_REC_HUB_CONFIG;
+      } else {
+        // 完全没配置:清掉两者,让子进程按默认水位(与 daemon 的 undefined 分支一致)。
+        delete process.env.DOUYIN_REC_HUB_CONFIG;
+        delete process.env.DOUYIN_REC_HUB_CONFIG_JSON;
+      }
+    }
     const server = createWebServer({
       store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(),
       // T15:告诉 API「master 实际在用哪份 hub 配置」—— UI 改 resources 必须写回那一份,
@@ -191,6 +215,9 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       rollingDelivery: hubEnabled ? hubStarter?.rollingDelivery : undefined,
       poolSnapshot: hubEnabled ? hubStarter?.poolSnapshot : undefined,
       requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
+      // 手动启动的磁盘水位准入(issue #96):与 daemon 同源的水位配置,每次现读(热改生效);测默认输出目录所在卷。
+      // 与录制子进程同一份水位配置(effectiveHubConfigPath)与同一目录口径(任务自己的 outDir)。
+      admitStart: makeManualStartAdmit((d) => resolveOutputDir(d ?? undefined)),
       // 与 daemon 同源:规则把源任务交给远端(workers 不含 local)时,本机不实跑。
       // 能力门控(T-10):远端还需满足规则的 requires 才算「有人接」(与 reconciler 同判定)。
       localSuppressedIds: hubEnabled
