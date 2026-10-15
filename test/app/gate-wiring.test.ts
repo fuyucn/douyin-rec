@@ -24,15 +24,19 @@ describe("新一场开播闸门接线", () => {
     expect(typeof (session as unknown as { admitNewBroadcast?: unknown }).admitNewBroadcast).toBe("function");
   });
 
-  it("cli record:RecordingSession 构造处传入 admitNewBroadcast,且用 effectiveHubConfigPath", () => {
+  it("cli record:RecordingSession 构造处传入 admitNewBroadcast,且水位来源用 effectiveHubConfig()", () => {
     const s = src("packages/cli/src/cli.ts");
     expect(s).toMatch(/new RecordingSession\([^)]*admitNewBroadcast/);
-    expect(s).toContain("effectiveHubConfigPath()");
+    // 审查打回后统一走 effectiveHubConfig()(含 inline/settings 来源的 JSON),不再只用「路径」。
+    expect(s).toContain("effectiveHubConfig()");
+    expect(s).toMatch(/hubConfigJson:\s*effHub\.json/);
   });
 
-  it("serve:手动启动准入用 makeManualStartAdmit,并在 --hub-config 为文件时导出路径给子进程", () => {
+  it("serve:手动启动准入用 makeManualStartAdmit,并把当前生效的那份配置交给子进程", () => {
     const s = src("packages/app/src/serve.ts");
     expect(s).toMatch(/admitStart:\s*makeManualStartAdmit\(/);
+    // 文件来源传路径(可热改);inline/settings 来源传 JSON 内容 —— 两者都不能漏。
     expect(s).toContain("DOUYIN_REC_HUB_CONFIG");
+    expect(s).toContain("DOUYIN_REC_HUB_CONFIG_JSON");
   });
 });
