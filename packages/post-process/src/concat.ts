@@ -2,7 +2,7 @@
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
-import { segmentIndexOf, sessionBaseOf } from "@drec/core";
+import { isVideoFileName, segmentIndexOf, sessionBaseOf, stageContainerOfPath, stampedSessionBaseOf } from "@drec/core";
 import { runFfmpeg } from "./ffmpeg.js";
 
 /**
@@ -44,9 +44,25 @@ export function groupSessions(files: string[]): Record<string, SessionGroup> {
   const out: Record<string, SessionGroup> = {};
   const ensure = (b: string): SessionGroup => (out[b] ??= { ts: [], xml: null, segmentXmls: [] });
 
-  // First pass: collect video segments (.ts ffmpeg/DLR/biliLive、.flv mesio)
+  // First pass: collect video segments。录制原生容器 .ts(ffmpeg/DLR/biliLive)/.flv(mesio)恒认(与 base 一致);
+  // .mp4/.mkv(节点侧原地替换后的分段,issue #137)只认**带段号**的分段:
+  //   - 无段号单文件 `{base}.mp4/.mkv` 是合并产物(或待 PR2 处理的单段),不收,否则收口会把产物当源删掉;
+  //   - 带 part 序号的切分产物 `{stem}_part{N}.mp4`(split.ts 小写命名)不是分段,即使同目录有原生分段也不收;
+  //   - `_danmu`/`_livechat` 烧录产物、无时间戳基名的产物天然无段号/不带时间戳,同样被挡在外面。
+  const NATIVE = /\.(ts|flv)$/i;
+  // 切分产物判定不用正则(session-name-guard 禁止在 core 之外写分段序号正则):stem 末尾 `_part` + 纯数字。
+  const isSplitPart = (f: string): boolean => {
+    const stem = f.slice(0, f.lastIndexOf("."));
+    const i = stem.lastIndexOf("_part");
+    const tail = stem.slice(i + 5);
+    return i >= 0 && tail.length > 0 && [...tail].every((c) => c >= "0" && c <= "9");
+  };
   for (const f of files) {
-    if (/\.(ts|flv)$/i.test(f)) {
+    if (NATIVE.test(f)) {
+      ensure(sessionBase(f)).ts.push(f);
+    } else if (isVideoFileName(f)) {
+      if (isSplitPart(f)) continue;
+      if (!stampedSessionBaseOf(f) || segmentIndexOf(f) < 0) continue;
       ensure(sessionBase(f)).ts.push(f);
     }
   }
@@ -78,6 +94,7 @@ export function groupSessions(files: string[]): Record<string, SessionGroup> {
 
 /**
  * 合并一组分段 .ts 文件 → outMp4（同会话 -c copy 无损）。
+ * 输出容器(mp4/mkv)由 `outMp4` 扩展名决定,封装参数取自 core 注册表。
  * 写 concat 列表到临时目录，完成后清理。
  */
 export async function mergeSession(
@@ -117,7 +134,7 @@ export async function mergeSession(
       "-safe", "0",
       "-i", list,
       "-c", "copy",
-      "-movflags", "+faststart",
+      ...stageContainerOfPath(outMp4).finalizeArgs,
       outMp4,
     ]);   // faststart 收尾静默由 runFfmpeg 的 CPU 探针兜住
   } finally {

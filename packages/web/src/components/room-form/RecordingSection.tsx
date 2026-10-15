@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { OUTPUT_FORMATS, stageExt, type OutputFormat } from "@drec/output-format";
 import { useT } from "../../lib/i18n";
 import { qualityLabel } from "../../lib/labels";
 import type { Lock } from "../../lib/room-form-rules";
@@ -15,8 +16,19 @@ export interface RecordingValue {
   useCookie: boolean;
 }
 
+/** 「输出格式」下拉(选项来自 core 注册表)。不传 = 不显示(任务弹窗本期不显示)。 */
+export interface OutputFormatField {
+  /** 所选值(存储口径)。 */
+  value: OutputFormat;
+  /** 下拉实际显示的值(投稿锁定时恒为 mp4,见 rules 的 shownOutputFormat)。 */
+  shown: OutputFormat;
+  lock: Lock;
+  onChange: (v: OutputFormat) => void;
+}
+
 interface Props {
   value: RecordingValue;
+  outputFormat?: OutputFormatField;
   onChange: (patch: Partial<RecordingValue>) => void;
   qualities: readonly string[];
   engines: readonly string[];
@@ -80,6 +92,20 @@ export function RecordingSection(p: Props): ReactNode {
                  onChange={(e) => p.onChange({ schedule: e.target.value })} />
         </label>
         <p className="col-span-2 -mt-1 text-xs text-muted">{p.scheduleHint ?? t("rooms.scheduleHint")}</p>
+        {p.outputFormat && (
+          <label className="block col-span-2">
+            <span className="field-label">{t("rooms.outputFormat")}</span>
+            <select className="input" value={p.outputFormat.shown} disabled={p.outputFormat.lock.locked}
+                    onChange={(e) => p.outputFormat?.onChange(e.target.value as OutputFormat)}>
+              {OUTPUT_FORMATS.map((f) => (
+                <option key={f} value={f}>{f === "original" ? t("rooms.outputFormatOriginal") : stageExt(f).slice(1).toUpperCase()}</option>
+              ))}
+            </select>
+            <span className="block mt-1 text-xs text-muted">
+              {p.outputFormat.lock.locked && p.outputFormat.lock.reasonKey ? t(p.outputFormat.lock.reasonKey) : t("rooms.outputFormatHint")}
+            </span>
+          </label>
+        )}
       </div>
       <ToggleRow
         label={t("rooms.danmu")}

@@ -3,13 +3,13 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "n
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, resolveOutputStem, runWithJob, sanitizeStreamKey, throwIfAborted, USER_STOP, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
-import type { UploadOpts } from "@drec/core";
+import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, throwIfAborted, USER_STOP, VIDEO_EXT_ALT, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import type { OutputFormat, UploadOpts } from "@drec/core";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
 import { humanBytes, sumBytes } from "./format.js";
 import { buildWorkflow, deriveStageProducts, runWorkflowNodes, ResourcePool, type StageProducts, type WorkflowNodeKey } from "./workflow.js";
-import { deriveSegmentPlan, UPLOAD_ALIAS_DIR } from "./session-plan.js";
+import { deriveSegmentPlan, stageProductPaths, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 import { runSegmentPipeline } from "./segment-pipeline.js";
 // 节点侧上传(experimental,plans/027):全部逻辑隔离在 node-side-upload.ts,便于快速开关/回退。
 import { shouldUseNodeSideUpload, tryNodeSideUpload } from "./node-side-upload.js";
@@ -44,12 +44,13 @@ export interface PipelineCleanup {
   stageAfterDone?: boolean;        // job done(已上传)后删 stage 合成产物(+ .xml/.ass,若节点源保留)
 }
 
-/** 清理路径兜底:只处理视频(.ts/.mp4/.flv 等);.xml/.ass 走下面的 keep 规则单独判定。 */
 /** 清理路径兜底:只处理视频(.ts/.mp4/.flv 等);.xml/.ass 走 xmlKeepRule 单独判定。 */
 export const videoOnly = (paths: string[]): string[] => paths.filter((p) => !/\.(xml|ass)$/i.test(p));
 
+const STAGE_VIDEO_RE = new RegExp(`\\.(${VIDEO_EXT_ALT})$`, "i");
+
 /**
- * stage 目录顶层的「视频类内容」(`.ts/.flv/.mp4` + `.work/` `.upload/` 中间产物目录)。
+ * stage 目录顶层的「视频类内容」(视频容器全集 ts/flv/mp4/mkv,来自 core 注册表 + `.work/` `.upload/` 中间产物目录)。
  * 用于 `stageAfterDone` 的整场清空:拉回的源段副本(本机胜出时是硬链接)、续跑残留、中间产物都在其中。
  * **绝不包含** `.xml/.ass/.session.json/job.log`;只看顶层、不递归未知目录;不返回 stageSub 本身。
  * 调用方必须自己保证「上传已确认 + 有稿件号」(见 finalizeAfterUpload)。
@@ -60,7 +61,7 @@ export function stageVideoLeftovers(stageSub: string): string[] {
     const p = path.join(stageSub, name);
     let isDir: boolean;
     try { isDir = lstatSync(p).isDirectory(); } catch { continue; }
-    if (isDir ? name === ".work" || name === ".upload" : /\.(ts|flv|mp4)$/i.test(name)) out.push(p);
+    if (isDir ? name === ".work" || name === ".upload" : STAGE_VIDEO_RE.test(name)) out.push(p);
   }
   return out;
 }
@@ -100,6 +101,12 @@ export interface PipelineCfg {
   cookies: string;
   /** stage = 只合成不传;upload = 传 B站。 */
   uploadMode: "stage" | "upload";
+  /**
+   * 输出格式(issue #137),**内部**:CLI 从规则绑定的源任务读(同 `segmentGroupSec` 的做法),不在 hub 规则里配。
+   * 缺省 / original = 现状(mp4);实际容器一律经 core `effectiveStageFormat(outputFormat, uploadMode)`
+   * 算出(投稿强制 mp4),**消费点不得自己再判**。
+   */
+  outputFormat?: OutputFormat;
   /** 仅 upload 时有意义:true(默认)= 仅自己可见,false = 公开。 */
   uploadPrivate?: boolean;
   uploadMeta: {
@@ -647,6 +654,8 @@ async function runPipelineInner(
   const clean = cfg.cleanup ?? {};
   const { streamKey } = b;
   const stageSub = path.join(cfg.stageDir, sanitizeStreamKey(streamKey));
+  // 后处理产物容器:唯一出处 core effectiveStageFormat(original→mp4;投稿强制 mp4)。
+  const stageFmt = effectiveStageFormat(cfg.outputFormat, cfg.uploadMode);
 
   // 续跑:job 已有 bv ⇒ P1 已建稿(不可逆),绝不重传。跳过 select/pull/merge/burn/uploadPlain,只补 append。
   const existing = ledger.get(streamKey);
@@ -783,10 +792,10 @@ async function runPipelineInner(
   // 产物 stem / 标题:首次锁定(改模板不影响重跑)。合并与分段两条路径共用。
   // earliestRec 已在上面节点侧上传判定前算好(同一口径),这里复用,避免两处各减一次(改坏一处不报错)。
   const earliest = earliestRec;
-  const derived = deriveStageProducts(stageSub);
+  const derived = deriveStageProducts(stageSub, stageFmt);
   const existingStem = (ledger.get(streamKey)?.outputStem ?? "").trim()
     || (cfg.steps?.mergeSegments === false
-      ? (deriveSegmentPlan(stageSub)?.dateName ?? "")
+      ? (deriveSegmentPlan(stageSub, undefined, stageFmt)?.dateName ?? "")
       : (derived && existsSync(derived.plain) ? derived.dateName : ""));
   const dateName = resolveOutputStem({
     template: cfg.uploadMeta.titleTemplate,
@@ -850,9 +859,7 @@ async function runPipelineInner(
 
   // Merge and burn from the stageSub directory
   ledger.advanceState(streamKey, "merging");
-  const plain = path.join(stageSub, dateName + ".mp4");
-  const danmuMp4 = path.join(stageSub, dateName + "_danmu.mp4");
-  const livechatMp4 = path.join(stageSub, dateName + "_livechat.mp4");
+  const { plain, danmuMp4, livechatMp4 } = stageProductPaths(stageSub, dateName, stageFmt);
   const xmlArg = winner.rec.xmlPath ? path.join(stageSub, path.basename(winner.rec.xmlPath)) : "";
   const plainXml = xmlArg ? path.join(stageSub, dateName + ".xml") : "";
   const products: StageProducts = {
@@ -986,7 +993,7 @@ async function resumeAppends(
   // done 场的收尾补跑若在下面三处转人工:done 无出边,普通 setState 会被白名单拒绝 →
   // job 仍 done、告警照发、cleanupBackfillDue 周期性重复补跑刷告警。wasDone 时必须 force。
   const wasDone = ledger.get(streamKey)?.state === "done";
-  const prod = deriveStageProducts(stageSub);
+  const prod = deriveStageProducts(stageSub, effectiveStageFormat(cfg.outputFormat, cfg.uploadMode));
   if (!prod) {
     // stage 产物已不存在:若该场**本来就 done**(T12 收尾补跑:stageAfterDone 已清空),
     // 说明上传早已完成、这里只是来补清理的 → 绝不能把 done 打成 needs_manual

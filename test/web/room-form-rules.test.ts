@@ -26,6 +26,7 @@ const facts = (over: Partial<FormFacts> = {}): FormFacts => ({
   clKeepArchive: true,
   workers: ["local"],
   hasRule: true,
+  outputFormat: "original",
   ...over,
 });
 
@@ -146,15 +147,15 @@ describe("methodFromStored / storedFromForm 往返", () => {
   });
   const noBurn = { burnDanmu: false, burnLivechat: false };
   it("三种方式与上传关写回存储", () => {
-    expect(storedFromForm(facts({ method: "after" }))).toEqual({ mode: "upload", stageAfterDone: false, nodeSideUpload: false, ...noBurn });
-    expect(storedFromForm(facts({ method: "nodeSide" }))).toEqual({ mode: "upload", stageAfterDone: false, nodeSideUpload: true, ...noBurn });
-    expect(storedFromForm(facts({ method: "rolling" }))).toEqual({ mode: "rolling", stageAfterDone: false, nodeSideUpload: false, ...noBurn });
-    expect(storedFromForm(facts({ uploadOn: false, method: "rolling" }))).toEqual({ mode: "stage", stageAfterDone: false, nodeSideUpload: false, ...noBurn });
+    expect(storedFromForm(facts({ method: "after" }))).toEqual({ mode: "upload", stageAfterDone: false, outputFormat: "original", nodeSideUpload: false, ...noBurn });
+    expect(storedFromForm(facts({ method: "nodeSide" }))).toEqual({ mode: "upload", stageAfterDone: false, outputFormat: "original", nodeSideUpload: true, ...noBurn });
+    expect(storedFromForm(facts({ method: "rolling" }))).toEqual({ mode: "rolling", stageAfterDone: false, outputFormat: "original", nodeSideUpload: false, ...noBurn });
+    expect(storedFromForm(facts({ uploadOn: false, method: "rolling" }))).toEqual({ mode: "stage", stageAfterDone: false, outputFormat: "original", nodeSideUpload: false, ...noBurn });
   });
   it("被锁的方式按 after 写回(绝不把失效的 rolling 存进规则)", () => {
-    expect(storedFromForm(facts({ method: "rolling", workers: ["a", "b"] }))).toEqual({ mode: "upload", stageAfterDone: false, nodeSideUpload: false, ...noBurn });
+    expect(storedFromForm(facts({ method: "rolling", workers: ["a", "b"] }))).toEqual({ mode: "upload", stageAfterDone: false, outputFormat: "original", nodeSideUpload: false, ...noBurn });
     expect(storedFromForm(facts({ method: "nodeSide", burnDanmu: true })))
-      .toEqual({ mode: "upload", stageAfterDone: false, nodeSideUpload: false, burnDanmu: true, burnLivechat: false });
+      .toEqual({ mode: "upload", stageAfterDone: false, outputFormat: "original", nodeSideUpload: false, burnDanmu: true, burnLivechat: false });
   });
 });
 
@@ -176,7 +177,7 @@ describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定同口径;存�
   });
   it("方式 nodeSide + 不录弹幕 + 原值开:存储烧录 = false,nodeSideUpload = true", () => {
     expect(storedFromForm({ ...off, method: "nodeSide" }))
-      .toEqual({ mode: "upload", stageAfterDone: false, nodeSideUpload: true, burnDanmu: false, burnLivechat: false });
+      .toEqual({ mode: "upload", stageAfterDone: false, outputFormat: "original", nodeSideUpload: true, burnDanmu: false, burnLivechat: false });
   });
   it("nodeSide 存储结果交给后端判定 → 节点侧上传适用(表单与实际一致)", () => {
     const s = storedFromForm({ ...off, method: "nodeSide" });
@@ -186,15 +187,15 @@ describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定同口径;存�
     )).toEqual({ ok: true });
   });
   it("只合成:存储写回实际值 false", () => {
-    expect(storedFromForm({ ...off, uploadOn: false })).toEqual({ mode: "stage", stageAfterDone: false, nodeSideUpload: false, ...burnOff });
+    expect(storedFromForm({ ...off, uploadOn: false })).toEqual({ mode: "stage", stageAfterDone: false, outputFormat: "original", nodeSideUpload: false, ...burnOff });
   });
   it("方式 rolling:存储写回关,避免后端据残留烧录开关判定边录边传「需烧录」", () => {
-    expect(storedFromForm({ ...off, method: "rolling" })).toEqual({ mode: "rolling", stageAfterDone: false, nodeSideUpload: false, burnDanmu: false, burnLivechat: false });
+    expect(storedFromForm({ ...off, method: "rolling" })).toEqual({ mode: "rolling", stageAfterDone: false, outputFormat: "original", nodeSideUpload: false, burnDanmu: false, burnLivechat: false });
   });
   it("录弹幕 + 开烧录:rolling 被锁并回落 after,存储烧录 = 原值 true", () => {
     const on = facts({ method: "rolling", burnDanmu: true, burnLivechat: true });
     expect(deriveConstraints(on).rolling.locked).toBe(true);
-    expect(storedFromForm(on)).toEqual({ mode: "upload", stageAfterDone: false, nodeSideUpload: false, ...burnOn });
+    expect(storedFromForm(on)).toEqual({ mode: "upload", stageAfterDone: false, outputFormat: "original", nodeSideUpload: false, ...burnOn });
   });
   it("边录边传 / 节点侧不因残留烧录开关被锁", () => {
     const c = deriveConstraints(off);

@@ -14,7 +14,7 @@
  * 然后返回 500 + 原因。代价是:若回滚本身也失败,仍可能留下半成功 —— 这种情况下
  * 错误信息必须**明说哪半边可能已改**,让用户能自己核对(静默留半成功是不可接受的)。
  */
-import { platformForRoom, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
+import { parseOutputFormat, platformForRoom, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
@@ -71,6 +71,7 @@ export function buildRooms(ctx: ApiCtx) {
           webhook: t.webhook,
           rollingUpload: t.rollingUpload,
           rollingEffective: t.rollingEffective,
+          outputFormat: t.outputFormat,
         }
       : null;
 
@@ -213,6 +214,9 @@ export function buildRooms(ctx: ApiCtx) {
         if ("outDir" in rec) patch.outDir = rec.outDir ?? null;
         if ("webhook" in rec) patch.webhook = normWebhook(rec.webhook);
         if ("rollingUpload" in rec) patch.rollingUpload = rec.rollingUpload === true;
+        if ("outputFormat" in rec) {
+          try { patch.outputFormat = parseOutputFormat(rec.outputFormat); } catch (e) { return err(400, (e as Error).message); }
+        }
 
         if (taskId === null) {
           // 没有任务可改:要么忽略(只改处理),要么 400 让用户知道得先建任务。
@@ -276,6 +280,7 @@ export function buildRooms(ctx: ApiCtx) {
                 outDir: prev.outDir,
                 webhook: prev.webhook,
                 rollingUpload: prev.rollingUpload,
+                outputFormat: prev.outputFormat,
               });
               if (!ok) {
                 return err(500, `写入处理配置失败(${(e as Error).message});`

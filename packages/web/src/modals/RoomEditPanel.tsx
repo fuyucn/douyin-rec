@@ -26,8 +26,9 @@ import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, splitSchedule } from "../lib/labels";
 import {
-  deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, settledMethod, storedFromForm, type FormFacts,
+  deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, outputFormatFromStored, settledMethod, shownOutputFormat, storedFromForm, type FormFacts,
 } from "../lib/room-form-rules";
+import type { OutputFormat } from "@drec/output-format";
 
 interface Props {
   open: boolean;
@@ -37,6 +38,7 @@ interface Props {
 }
 
 type FormState = RecordingValue & ProcessingValue & UploadValue & CleanupValue & {
+  outputFormat: OutputFormat;
   webhook: string;
   workers: string[];
   requires: string[];
@@ -50,6 +52,7 @@ function fromRoom(r: RoomDTO): FormState {
     quality: rec?.quality ?? "",
     engine: rec?.engine ?? "",
     segmentSec: String(rec?.segmentSec ?? 1800),
+    outputFormat: outputFormatFromStored(rec?.outputFormat),
     schedule: rec?.scheduleStart && rec?.scheduleEnd ? `${rec.scheduleStart}-${rec.scheduleEnd}` : "",
     webhook: rec?.webhook ?? "",
     danmu: !!rec?.danmu,
@@ -134,6 +137,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
     if (!sched) { toast(t("rooms.scheduleInvalid"), "error"); return; }
     setBusy(true);
     try {
+      const stored = storedFromForm(facts);
       // recording 只在有录制任务时才发 —— 纯规则房间不该被造出 task(后端也会挡)。
       const recording = room.recording
         ? {
@@ -141,6 +145,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
             quality: form.quality,
             engine: form.engine,
             segmentSec: Number(form.segmentSec) || 1800,
+            outputFormat: stored.outputFormat,
             danmu: form.danmu ? 1 : 0,
             useCookie: form.useCookie,
             enabled: form.recEnabled,
@@ -148,7 +153,6 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
             webhook: form.webhook.trim() || null,
           }
         : undefined;
-      const stored = storedFromForm(facts);
       await api.updateRoom(room.key, {
         ...(recording ? { recording } : {}),
         processing: {
@@ -216,6 +220,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
           <RuleSwitch checked={form.procEnabled} onChange={(procEnabled) => update({ procEnabled })} />
           {room.recording ? (
             <RecordingSection value={form} onChange={update} showEnabled showName
+                              outputFormat={{ value: form.outputFormat, shown: shownOutputFormat(facts), lock: c.outputFormat, onChange: (outputFormat) => update({ outputFormat }) }}
                               qualities={plat?.qualities ?? []} engines={plat?.engines ?? []}
                               danmuAvailable={facts.danmuAvailable} cookie={c.cookie} cookieForStream={facts.cookieForStream} />
           ) : (

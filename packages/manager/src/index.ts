@@ -4,7 +4,7 @@ import type {
   Recorder, DanmuSource, RecorderEvents, RecordOpts, DanmuMessage, StreamInfo,
 } from "@drec/core";
 import { XmlDanmuWriter } from "./danmu-xml/index.js";
-import { createLogger, platformForRoom, sessionBaseOf } from "@drec/core";
+import { createLogger, platformForRoom, sessionBaseOf, stripVideoExt } from "@drec/core";
 import type { AdmitDecision, Notifier, NotifyEvent } from "@drec/core";
 
 const log = createLogger("session");
@@ -488,7 +488,7 @@ export class RecordingSession {
     //                      合并时按 ffprobe 时长切 ASS（避开断流位移，最稳）。
     const xmlPath =
       this.opts.danmuXmlMode === "segment"
-        ? tsPath.replace(/\.(ts|flv)$/i, ".xml")
+        ? `${stripVideoExt(tsPath)}.xml`
         : sessionXmlPath(tsPath);
     if (this.writerOpen && this.currentXmlPath === xmlPath) return;  // 同 xml 续写
     if (this.writerOpen) this.writer.close();

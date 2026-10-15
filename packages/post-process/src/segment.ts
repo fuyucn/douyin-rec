@@ -1,6 +1,7 @@
 // 分段(不合并)后处理:录制分段 .ts/.flv 各自 remux 成独立 mp4,以及把一份会话级 xml
 // 按该段在整场时间轴上的窗口切出该段的弹幕 → 该段 ASS。供 hub「分段上传」模式逐段产出。
 import { resolve } from "node:path";
+import { stageContainerOfPath } from "@drec/core";
 import { runFfmpeg } from "./ffmpeg.js";
 import { extractItems, itemsToLivechatAss, itemsToRollingAss, type RenderOpts } from "./ass/render.js";
 
@@ -10,16 +11,17 @@ import { extractItems, itemsToLivechatAss, itemsToRollingAss, type RenderOpts } 
  * `?` = 该段无音频时跳过而非报错。
  */
 export function buildRemuxArgs(input: string, outMp4: string): string[] {
+  // 容器专属输出参数(mp4:时基 90000 + faststart;mkv:无)按**输出路径扩展名**取自 core 注册表。
+  // 这些参数是 mp4 专属,mkv 不带,故不能写死。
   return [
     "-y",
     "-i", resolve(input),
     "-map", "0:v:0",
     "-map", "0:a:0?",
     "-c", "copy",
-    // FLV(1000Hz 时基)直接 -c copy 进 mp4 会得到 time_base=1/16000(非 H.264 标准),
-    // B站转码器拒收 → state=-16 转码失败。显式钉成 90000(视频标准时基)。
-    "-video_track_timescale", "90000",
-    "-movflags", "+faststart",
+    // mp4:FLV(1000Hz 时基)直接 -c copy 进 mp4 会得到 time_base=1/16000(非 H.264 标准),
+    // B站转码器拒收 → state=-16 转码失败。显式钉成 90000(视频标准时基)——见注册表 remuxArgs。
+    ...stageContainerOfPath(outMp4).remuxArgs,
     resolve(outMp4),
   ];
 }

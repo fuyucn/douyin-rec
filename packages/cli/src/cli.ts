@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, burnFlags, isUploadingMode, loadConfig, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
+import { biliAccountKey, burnFlags, effectiveStageFormat, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
 import type { HubResources } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -390,9 +390,12 @@ program
   .option("--merge-sessions", "把目录内全部会话按时间序拼成一片(断流重连合并用)")
   .option("--keep-time", "输出保留会话时间戳 {base}.mp4（默认剥成 {主播}_{日期}.mp4）")
   .option("--out-base <name>", "输出 stem(覆盖默认剥日期 / --keep-time;hub 标题模板用)")
-  .action(async (o: { in: string; base?: string; keepTime?: boolean; mergeSessions?: boolean; outBase?: string }) => {
+  .option("--format <fmt>", "输出容器 mp4|mkv(缺省 mp4;original 按 mp4)")
+  .action(async (o: { in: string; base?: string; keepTime?: boolean; mergeSessions?: boolean; outBase?: string; format?: string }) => {
     const notifier = toggledNotifier(webhookOf());
     try {
+      // 容器唯一判定 = core effectiveStageFormat(合并后只落存档,无投稿语境);非法值抛错 → 非 0 退出,不静默回落。
+      const ext = stageExt(effectiveStageFormat(parseOutputFormat(o.format), "stage"));
       const groups = groupSessions(readdirSync(o.in));
       const bases = o.base ? [o.base] : Object.keys(groups);
       if (o.mergeSessions) {
@@ -404,7 +407,7 @@ program
         }));
         const outBase = (o.outBase ?? "").trim() || (ordered[0] ? dateNameOf(ordered[0]) : "");
         if (!outBase) { console.error("[merge] --merge-sessions 目录内无会话"); process.exitCode = 2; return; }
-        const outMp4 = join(o.in, `${outBase}.mp4`);
+        const outMp4 = join(o.in, `${outBase}${ext}`);
         const outXml = join(o.in, `${outBase}.xml`);
         const segFiles = ordered.flatMap((b) => groups[b].ts.map((f) => join(o.in, f)));
         console.log(`[merge] ${ordered.join(" + ")} → ${basename(outMp4)}`);
@@ -424,7 +427,7 @@ program
         const g = groups[b];
         if (!g || g.ts.length === 0) { console.error(`[merge] 跳过 ${b}：无分段`); continue; }
         const outBase = (o.outBase ?? "").trim() || (o.keepTime || clash[dateName(b)] > 1 ? b : dateName(b));
-        const out = join(o.in, `${outBase}.mp4`);
+        const out = join(o.in, `${outBase}${ext}`);
         const segFiles = g.ts.map((f) => join(o.in, f));
         console.log(`[merge] ${b}: ${g.ts.length} 段 → ${basename(out)}`);
         await scanSegmentsIntegrity(segFiles);
@@ -502,7 +505,6 @@ program
     if (o.style !== "danmu" && o.style !== "livechat") {
       console.error("[burn] --style 仅支持 danmu | livechat"); process.exit(2); return;
     }
-    const suffix = o.style === "livechat" ? "_livechat.mp4" : "_danmu.mp4";
     try {
       let ass: string, label: string, video: string;
 
@@ -544,7 +546,8 @@ program
         process.exit(2); return;
       }
 
-      const out = o.out ?? resolve(video).replace(/\.mp4$/i, suffix);
+      // 默认输出 = {video stem}_{style}{video 扩展名}:烧录产物与 plain 同容器(mp4 → _danmu.mp4;mkv → _danmu.mkv)。
+      const out = o.out ?? resolve(video).replace(/(\.[^./\\]+)$/, `_${o.style}$1`);
       console.log(`[burn] ${basename(video)} + ${label} → ${basename(out)}`);
       await burn({ inputMp4: video, assText: ass, outMp4: out, fontsDir: FONTS_DIR, hwaccel: o.hwaccel as "auto",
         videoCodec: o.videoCodec, crf: o.crf, preset: o.preset, videoBitrate: o.videoBitrate });
@@ -1048,6 +1051,11 @@ const hubStarter: HubStarter = {
           ?? (rule.recording?.sourceTaskId
             ? opts.store.getTask(rule.recording.sourceTaskId)?.segmentSec
             : undefined),
+        // 输出格式同理读源任务(issue #137);无源任务 → undefined = original(现状)。
+        // 实际容器由 pipeline 经 core effectiveStageFormat 与 uploadMode 一并算出(投稿强制 mp4)。
+        outputFormat: rule.recording?.sourceTaskId
+          ? opts.store.getTask(rule.recording.sourceTaskId)?.outputFormat
+          : undefined,
         // worker 硬过滤:reconciler 据此把 broadcast members 收窄到选中的 worker。
         // 缺省/空(老规则)→ reconciler 不过滤 = 全部 worker(向后兼容)。
         workers: rule.workers,
@@ -1127,6 +1135,7 @@ const hubStarter: HubStarter = {
           engine: src.engine,
           danmu: src.danmu,
           segmentSec: src.segmentSec,
+          outputFormat: src.outputFormat,
           scheduleStart: src.scheduleStart,
           scheduleEnd: src.scheduleEnd,
           // 本机(local)要分两种情况,不能一刀切:
@@ -1271,7 +1280,7 @@ const hubStarter: HubStarter = {
               return { ok: false, error: "分段上传模式不支持单节点重跑,请用「重新运行」整场重跑", code: 400 };
             }
             ledger.backfillNodeStates(streamKey);
-            const derived = deriveStageProducts(stageSub);
+            const derived = deriveStageProducts(stageSub, effectiveStageFormat(cfg.outputFormat, cfg.uploadMode));
             if (!derived) {
               ledger.setState(streamKey, "failed", { error: `stage 产物缺失,无法重跑: ${stageSub}` });
               return { ok: false, error: `stage 产物缺失,无法重跑: ${stageSub}`, code: 409 };

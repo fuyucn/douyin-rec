@@ -6,7 +6,7 @@
  */
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
-import { platformForRoom, listPlatforms } from "@drec/core";
+import { parseOutputFormat, platformForRoom, listPlatforms, type OutputFormat } from "@drec/core";
 import { inWindow, nowMinutesLocal } from "../../scheduler.js";
 import type { CreateTaskInput, UpdateTaskInput, TaskView } from "./types.js";
 import type { TaskStore } from "../../store.js";
@@ -38,6 +38,8 @@ export function buildTasks(ctx: ApiCtx) {
         }
       }
 
+      let outputFormat: OutputFormat;
+      try { outputFormat = parseOutputFormat(input.outputFormat); } catch (e) { return err(400, (e as Error).message); }
       const task = store.addTask({
         room,
         name: input.name ?? null,
@@ -52,6 +54,7 @@ export function buildTasks(ctx: ApiCtx) {
         scheduleEnd,
         webhook: normWebhook(input.webhook),
         rollingUpload: input.rollingUpload === true,
+        outputFormat,
       });
       // 创建即抓主播名（不等开始录制）；后台写回，UI 轮询即显示。
       resolveAnchorBg(task.id, task.room);
@@ -84,6 +87,9 @@ export function buildTasks(ctx: ApiCtx) {
       if ("outDir" in input) patch.outDir = input.outDir ?? null;
       if ("webhook" in input) patch.webhook = normWebhook(input.webhook);
       if ("rollingUpload" in input) patch.rollingUpload = input.rollingUpload === true;
+      if ("outputFormat" in input) {
+        try { patch.outputFormat = parseOutputFormat(input.outputFormat); } catch (e) { return err(400, (e as Error).message); }
+      }
 
       // schedule "HH:MM-HH:MM" wins over explicit scheduleStart/End if present.
       if (input.schedule !== undefined) {

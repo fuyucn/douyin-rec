@@ -6,7 +6,7 @@
  * All operations are synchronous (node:sqlite is sync).
  */
 import type { DatabaseSync } from "node:sqlite";
-import { getPlatform, platformForRoom, resolveRollingPolicy } from "@drec/core";
+import { getPlatform, parseOutputFormat, platformForRoom, readOutputFormat, resolveRollingPolicy, type OutputFormat } from "@drec/core";
 import { openDb } from "./db.js";
 
 export type TaskStatus = "stopped" | "running" | "error" | "pending" | "draining";
@@ -73,6 +73,11 @@ export interface Task {
    * (旧开关 true ≡ rolling)。见 plans/031 的不变量 —— 本字段只改配置归属,不改上传/删源行为。
    */
   rollingEffective: boolean;
+  /**
+   * 输出格式(issue #137,白名单见 core `OUTPUT_FORMATS`):`original`(缺省,现状)| `mp4` | `mkv`。
+   * 本期只作用于**后处理产物容器**(存档形态);投稿形态恒 mp4(见 core `effectiveStageFormat`)。
+   */
+  outputFormat: OutputFormat;
 }
 
 /** Fields accepted when adding a task. Defaults applied for omitted values. */
@@ -105,6 +110,8 @@ export interface TaskInput {
   anchorName?: string | null;
   /** **旧**边录边传开关(T-33,默认 false);见 Task.rollingUpload(新配置入口在 hub 规则)。 */
   rollingUpload?: boolean;
+  /** 输出格式(缺省 original);白名单外的值 → addTask 抛错(API 层先校验并回 400)。 */
+  outputFormat?: OutputFormat;
 }
 
 /** Raw row shape as returned by node:sqlite (danmu/segmentSec are bigint-or-number). */
@@ -130,6 +137,7 @@ interface TaskRow {
   managedBy: string | null;
   rollingUpload: number;
   rollingEffective: number | null;
+  outputFormat: string | null;
 }
 
 /**
@@ -194,6 +202,7 @@ function rowToTask(r: TaskRow): Task {
     rollingEffective: r.rollingEffective == null
       ? resolveRollingPolicy(null, Number(r.rollingUpload) !== 0).effective
       : Number(r.rollingEffective) !== 0,
+    outputFormat: readOutputFormat(r.outputFormat),
   };
 }
 
@@ -243,8 +252,8 @@ export class TaskStore {
       `INSERT INTO tasks
          (room, platform, name, quality, engine, danmu, segmentSec, cookies, outDir,
           scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook, managedBy, anchorName,
-          rollingUpload)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          rollingUpload, outputFormat)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       room,
@@ -266,6 +275,7 @@ export class TaskStore {
       input.managedBy ?? null,
       input.anchorName ?? null,
       (input.rollingUpload ?? false) ? 1 : 0,
+      parseOutputFormat(input.outputFormat),
     );
     const id = Number(info.lastInsertRowid);
     const task = this.getTask(id);
@@ -301,6 +311,7 @@ export class TaskStore {
         | "enabled"
         | "webhook"
         | "rollingUpload"
+        | "outputFormat"
       > & {
         /** 派生生效值(仅 master 同步/启动刷新可写);null = 清空,回落旧开关迁移。 */
         rollingEffective?: boolean | null;
@@ -354,6 +365,8 @@ export class TaskStore {
     if ("enabled" in patch) set("enabled", patch.enabled ? 1 : 0);
     if ("webhook" in patch) set("webhook", patch.webhook ?? null);
     if ("anchorName" in patch) set("anchorName", patch.anchorName ?? null);
+    // undefined = 未给(沿用);非法值抛错(API 层先校验回 400)。
+    if (patch.outputFormat !== undefined) set("outputFormat", parseOutputFormat(patch.outputFormat));
     if ("rollingUpload" in patch) set("rollingUpload", patch.rollingUpload ? 1 : 0);
     if ("rollingEffective" in patch) {
       set("rollingEffective", patch.rollingEffective == null ? null : patch.rollingEffective ? 1 : 0);

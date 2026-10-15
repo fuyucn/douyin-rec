@@ -10,6 +10,7 @@ import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { CleanupSection, type CleanupValue } from "../components/room-form/CleanupSection";
 import { FlowSummary } from "../components/room-form/FlowSummary";
+import type { OutputFormat } from "@drec/output-format";
 import { NodesSection } from "../components/room-form/NodesSection";
 import { ProcessingSection, type ProcessingValue } from "../components/room-form/ProcessingSection";
 import { RecordingSection, type RecordingValue } from "../components/room-form/RecordingSection";
@@ -19,7 +20,7 @@ import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, scheduleInput, splitSchedule } from "../lib/labels";
 import {
-  deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, settledMethod, storedFromForm, type FormFacts,
+  deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, outputFormatFromStored, settledMethod, shownOutputFormat, storedFromForm, type FormFacts,
 } from "../lib/room-form-rules";
 
 interface Props {
@@ -31,6 +32,8 @@ interface Props {
 }
 
 type FormState = RecordingValue & ProcessingValue & UploadValue & CleanupValue & {
+  /** 输出格式(源任务字段;缺省 original)。 */
+  outputFormat: OutputFormat;
   /** 选中的 worker id;新建默认空(需选 ≥1);编辑无 workers 的老规则预勾全部当前 worker。 */
   workers: string[];
   /** 能力门控:与 workers 取交集。空 = 无要求。 */
@@ -43,12 +46,12 @@ type FormState = RecordingValue & ProcessingValue & UploadValue & CleanupValue &
   recordingTouched: boolean;
 };
 
-type RecordingHalf = Omit<RecordingValue, "name">;
+type RecordingHalf = Omit<RecordingValue, "name"> & { outputFormat: OutputFormat };
 
 /** 录制半边从「已绑定的 task」回显(rule 里没有画质/分段这些字段)。没有 task 时给保守默认。 */
 function recordingFromTask(task: Task | null): RecordingHalf {
   if (!task) {
-    return { recEnabled: true, quality: "", engine: "", danmu: true, useCookie: true, segmentSec: "1800", schedule: "" };
+    return { recEnabled: true, quality: "", engine: "", danmu: true, useCookie: true, segmentSec: "1800", schedule: "", outputFormat: "original" };
   }
   return {
     recEnabled: task.enabled,
@@ -57,6 +60,7 @@ function recordingFromTask(task: Task | null): RecordingHalf {
     danmu: !!task.danmu,
     useCookie: !!task.useCookie,
     segmentSec: String(task.segmentSec ?? 1800),
+    outputFormat: outputFormatFromStored(task.outputFormat),
     schedule: scheduleInput(task),
   };
 }
@@ -124,7 +128,7 @@ function slugOfRoom(room: string): string {
   return q >= 0 ? r.slice(0, q) : r;
 }
 
-const RECORDING_KEYS = new Set<string>(["recEnabled", "quality", "engine", "danmu", "useCookie", "segmentSec", "schedule"]);
+const RECORDING_KEYS = new Set<string>(["recEnabled", "quality", "engine", "danmu", "useCookie", "segmentSec", "schedule", "outputFormat"]);
 
 export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNode {
   const isEdit = rule !== null;
@@ -277,6 +281,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           danmu: form.danmu ? 1 : 0,
           useCookie: form.useCookie,
           ...(Number(form.segmentSec) > 0 ? { segmentSec: Number(form.segmentSec) } : {}),
+          outputFormat: storedFromForm(facts).outputFormat,
           ...sched,
         };
     // 编辑时换了源任务 → 规则也要重新绑定(PUT rooms 的 processing 不含 sourceTaskId)。
@@ -370,6 +375,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
         <RuleSwitch checked={form.procEnabled} onChange={(procEnabled) => update({ procEnabled })} />
         {form.sourceTaskId !== null ? (
           <RecordingSection value={form} onChange={update} showEnabled
+                            outputFormat={{ value: form.outputFormat, shown: shownOutputFormat(facts), lock: c.outputFormat, onChange: (outputFormat) => update({ outputFormat }) }}
                             qualities={plat?.qualities ?? []} engines={plat?.engines ?? []}
                             danmuAvailable={facts.danmuAvailable} cookie={c.cookie} cookieForStream={facts.cookieForStream} />
         ) : (

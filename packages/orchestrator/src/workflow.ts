@@ -3,7 +3,7 @@ import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
 import { humanBytes } from "./format.js";
-import { isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
+import { effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 import { prepareUploadAlias } from "./session-plan.js";
@@ -89,6 +89,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
   const details = new Map<string, string>();
   // append_livechat 只在 danmu 轨存在时依赖其 p2 输出(否则跳过 append_danmu 不应阻断 livechat)。
   const appendDanmuOn = willUpload && burnDanmu;
+  const stageFmt = effectiveStageFormat(cfg.outputFormat, cfg.uploadMode);
 
   // 续跑幂等:已 done 的产物直接从确定性路径回填,下游 append 无需重跑上游也能拿到输入。
   if (ledger.getNodeState(streamKey, "upload_plain")?.state === "done") {
@@ -149,9 +150,11 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         // 断流重连多会话:一次 merge --merge-sessions 拼全部会话(视频 -c copy + 弹幕偏移合并)。
         // --out-base 锁定 stem(= B 站标题),stage 与投稿同一串。
         const outBase = shSingleQuote(products.dateName);
+        // 产物容器:非 mp4 才带 --format(CLI 缺省 = mp4,默认路径的命令行与改动前逐字一致)。
+        const fmtFlag = stageFmt === "mp4" ? "" : ` --format ${stageFmt}`;
         const cmd = multi
-          ? `node dist/douyin-rec.mjs merge --in ${stageSub} --merge-sessions --out-base ${outBase}`
-          : `node dist/douyin-rec.mjs merge --in ${stageSub} --base ${c.products.sessionBase} --out-base ${outBase}`;
+          ? `node dist/douyin-rec.mjs merge --in ${stageSub} --merge-sessions --out-base ${outBase}${fmtFlag}`
+          : `node dist/douyin-rec.mjs merge --in ${stageSub} --base ${c.products.sessionBase} --out-base ${outBase}${fmtFlag}`;
         const out = await c.sh(cmd);
         // 录制产物体检:⚠ 是诊断明细(段级提示,只进 step detail),❗ 才是「成品确实有可见风险」,
         // 由 CLI 按成品尾部错误数判定阈值后打印 —— 只有 ❗ 才发通知,避免孤立坏块天天刷告警。

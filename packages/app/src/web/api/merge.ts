@@ -51,6 +51,7 @@ export function buildMerge(ctx: ApiCtx) {
         xmlPath: groups[b].xml ?? undefined,
       }));
       const outBase = `${bases[0]}_merged`;
+      // 网页手动合并本期不经过输出格式选项,仍固定产出 mp4(已知遗留,见 issue #137 PR 评论)。
       const outMp4 = join(dir, `${outBase}.mp4`);
       const outXml = join(dir, `${outBase}.xml`);
       const allXml = bases.every((b) => groups[b].xml);

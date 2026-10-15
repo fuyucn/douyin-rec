@@ -6,6 +6,7 @@
  * 边录边传是否可用直接调 core 的 `resolveRollingPolicy`,与 master 下发同一判定。
  */
 import { resolveRollingPolicy, type RollingReason } from "@drec/rolling-policy";
+import { DEFAULT_OUTPUT_FORMAT, effectiveStageFormat, isOutputFormat, outputFormatLocked, type OutputFormat } from "@drec/output-format";
 
 /** 上传方式(UI 三选一);存储映射见 {@link methodFromStored} / {@link storedFromForm}。 */
 export type UploadMethod = "after" | "nodeSide" | "rolling";
@@ -29,6 +30,8 @@ export interface FormFacts {
   burnLivechat: boolean;
   /** 「投稿后保留存档」= 存储 cleanup.stageAfterDone 取反;映射见 {@link keepArchiveFromStored} / {@link storedFromForm}。 */
   clKeepArchive: boolean;
+  /** 输出格式(缺省 original);读入见 {@link outputFormatFromStored},写回见 {@link storedFromForm}。 */
+  outputFormat: OutputFormat;
   /** 规则勾选的节点;空 = 全部节点。 */
   workers: readonly string[];
   /** 该房间是否有 hub 规则(无规则 = 单机任务,边录边传不受节点数约束)。 */
@@ -51,6 +54,8 @@ export interface Constraints {
   clStageSourceAfterMerge: Lock;
   /** 不投稿时存档就是成品,后端在清理前即返回、从不清存档:锁定为保留。 */
   clKeepArchive: Lock;
+  /** 投稿(收播后 / 节点侧 / 边录边传)一律 mp4:平台要求,选项锁定。 */
+  outputFormat: Lock;
 }
 
 const OPEN: Lock = { locked: false };
@@ -99,6 +104,8 @@ export function deriveConstraints(f: FormFacts): Constraints {
     tsDirect: f.uploadOn && effectiveMethod(f, { rolling, nodeSide }) === "nodeSide" ? OPEN : lock("roomForm.lock.needNodeSide"),
     clStageSourceAfterMerge: f.mergeSegments ? OPEN : lock("roomForm.lock.needMerge"),
     clKeepArchive: f.uploadOn ? OPEN : lock("roomForm.lock.needUploadForCleanArchive"),
+    // 是否锁、锁成什么,唯一判定 = core outputFormatLocked / effectiveStageFormat,与后端一致。
+    outputFormat: outputFormatLocked(f.uploadOn ? "upload" : "stage") ? lock("roomForm.lock.outputFormatUpload") : OPEN,
   };
 }
 
@@ -127,8 +134,20 @@ export function methodFromStored(mode: string | undefined, nodeSideUpload: boole
   return { uploadOn, method };
 }
 
+/** 存储 outputFormat → 表单;缺省 / 老数据 / 非白名单值一律按 original。 */
+export function outputFormatFromStored(v: unknown): OutputFormat {
+  return isOutputFormat(v) ? v : DEFAULT_OUTPUT_FORMAT;
+}
+
+/** 下拉里实际显示的格式:被锁(投稿)时恒为生效容器 mp4,否则为所选值。 */
+export function shownOutputFormat(f: Pick<FormFacts, "uploadOn" | "outputFormat">): OutputFormat {
+  return f.uploadOn ? effectiveStageFormat(f.outputFormat, "upload") : f.outputFormat;
+}
+
 export interface StoredFields {
   mode: "stage" | "upload" | "rolling";
+  /** 写回源任务的输出格式。投稿时被锁:original 保持 original(同为 mp4,不制造无谓改动),其余一律写 mp4。 */
+  outputFormat: OutputFormat;
   nodeSideUpload: boolean;
   burnDanmu: boolean;
   burnLivechat: boolean;
@@ -150,15 +169,23 @@ export function keepArchiveFromStored(stageAfterDone: boolean | undefined): bool
  */
 export function storedFromForm(f: FormFacts): StoredFields {
   const burn = effectiveBurn(f);
-  if (!f.uploadOn) return { mode: "stage", nodeSideUpload: false, ...burn, stageAfterDone: false };
+  if (!f.uploadOn) return { mode: "stage", outputFormat: f.outputFormat, nodeSideUpload: false, ...burn, stageAfterDone: false };
   const method = effectiveMethod(f, deriveConstraints(f));
-  return { mode: method === "rolling" ? "rolling" : "upload", nodeSideUpload: method === "nodeSide", ...burn, stageAfterDone: !f.clKeepArchive };
+  return {
+    mode: method === "rolling" ? "rolling" : "upload",
+    outputFormat: f.outputFormat === "original" ? "original" : "mp4",
+    nodeSideUpload: method === "nodeSide",
+    ...burn,
+    stageAfterDone: !f.clKeepArchive,
+  };
 }
 
 export interface FlowStep {
   /** i18n key。 */
   key: string;
   on: boolean;
+  /** i18n 插值参数。 */
+  vars?: Record<string, string>;
 }
 
 /** 顶部流程摘要:录制 → 处理步骤 → 交付。只描述「按当前表单会发生什么」。 */
@@ -173,7 +200,11 @@ export function flowSummary(f: FormFacts, recEnabled: boolean): FlowStep[] {
   steps.push({ key: f.mergeSegments ? "roomForm.flow.merge" : "roomForm.flow.split", on: true });
   if (burn.burnDanmu) steps.push({ key: "roomForm.flow.burnDanmu", on: true });
   if (burn.burnLivechat) steps.push({ key: "roomForm.flow.burnLivechat", on: true });
-  if (!f.uploadOn) steps.push({ key: "roomForm.flow.stageOnly", on: false });
+  if (!f.uploadOn) {
+    steps.push({ key: "roomForm.flow.stageOnly", on: false });
+    // 存档形态末尾带所选格式(original = 现状,不带)。
+    if (f.outputFormat !== "original") steps.push({ key: "roomForm.flow.format", on: false, vars: { fmt: f.outputFormat.toUpperCase() } });
+  }
   else steps.push({ key: method === "nodeSide" ? "roomForm.flow.nodeSide" : "roomForm.flow.upload", on: true });
   return steps;
 }

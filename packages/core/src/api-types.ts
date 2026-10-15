@@ -1,5 +1,6 @@
 // API 契约 DTO —— 纯类型,前后端单一来源(无运行时依赖,前端 build 时擦除,不拉后端代码)。
 // 后端 @drec/app 的 web/api 用它定请求/响应;前端 packages/web 经 alias import 同一份。
+import type { OutputFormat } from "./output-format.js";
 import type { NotifyEvent, NotifKey, NotifWebhookToggles } from "./notify.js";
 export type { NotifyEvent, NotifKey, NotifWebhookToggles };
 
@@ -141,6 +142,8 @@ export interface RoomRecordingDTO {
   rollingUpload: boolean;
   /** 边录边传**实际生效值**(master 按规则 + 旧开关算出的只读派生字段;见 core `resolveRollingPolicy`)。 */
   rollingEffective: boolean;
+  /** 输出格式(issue #137,缺省 original);投稿形态下后处理产物恒 mp4(见 core `effectiveStageFormat`)。 */
+  outputFormat: OutputFormat;
 }
 
 export interface RoomDTO {
@@ -544,6 +547,8 @@ export interface NodeTaskDTO {
   rollingUpload: boolean;
   /** 边录边传实际生效值(派生,只读)。 */
   rollingEffective: boolean;
+  /** 输出格式(issue #137);旧节点包不返回 → 视为 original。 */
+  outputFormat?: OutputFormat;
 }
 
 /**
@@ -603,6 +608,11 @@ export interface RemoteTaskSpec {
    * 可选:旧 master 不下发 → 节点回落 `rollingUpload`(旧行为)。
    */
   rollingEffective?: boolean;
+  /**
+   * 输出格式(issue #137)。可选:旧 master 不下发 → 节点按 `original`;旧节点包不认识该字段则忽略
+   * (继续原样输出)。非白名单值节点一律按 `original`(不抛、不拒绝整批)。
+   */
+  outputFormat?: OutputFormat;
   /**
    * **可选提示**:master 明确要求「这个房间可以删了」(规则文件已消失 / sourceTaskId 解绑)。
    *
@@ -901,6 +911,8 @@ export interface TaskDTO {
   rollingUpload: boolean;
   /** 边录边传实际生效值(派生,只读)。 */
   rollingEffective: boolean;
+  /** 输出格式(issue #137,缺省 original)。 */
+  outputFormat: OutputFormat;
   /** 在跑录制进程 spawn 时实际带的边录边传值(issue #89);进程没在跑则省略。 */
   rollingApplied?: boolean;
   /** 在跑进程的启动参数与 `rollingEffective` 不一致 → 待(空闲后)重启生效(issue #89);无漂移/没在跑则省略。 */

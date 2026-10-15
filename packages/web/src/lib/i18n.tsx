@@ -152,6 +152,8 @@ const DICT = {
       noProcessingHint: "该房间还没配处理后管线。",
       onlyRule: "该房间只有处理后规则、没有录制任务 —— 录制段不可编辑。",
       quality: "画质", engine: "引擎", segmentSec: "分段时长(s)", name: "名称",
+      outputFormat: "输出格式", outputFormatOriginal: "原始(现状)",
+      outputFormatHint: "只换容器、不并存两份。本期作用于存档形态的后处理产物(合并片 / 分段分 P / 烧录产物);原始 = 现状(仍为 mp4)。",
       schedule: "窗口", pipeline: "管线",
       danmuOn: "弹幕开", danmuOff: "弹幕关", allDay: "全天", danmu: "录制弹幕", useCookie: "弹幕带 Cookie",
       rollingUpload: "边录边传", rollingUploadHint: "开 = 录制中每封口一段就单独上传,确认后才删那一段的源(省盘);仅当本规则恰好勾选 1 个节点时生效,否则回落整场管线;关 = 整场录完再处理",
@@ -196,10 +198,10 @@ const DICT = {
       mergeOne: "合并为一个视频", mergeSplit: "按录制分段",
       outputHint: "合并为一个视频 = 整场各分段合成一片再上传(默认);按录制分段 = 每段一个分 P,开烧录则逐段烧", moreUpload: "更多:稿件名 / 分P名 / 简介", flowLabel: "处理流程",
       method: { label: "上传方式", after: "收播后上传", afterHint: "收播后由 master 合并 / 烧录再投稿(默认)" },
-      lock: { needDanmu: "需先开启「录弹幕」", needNodeSide: "仅在「节点侧上传」时生效", needMerge: "按分段产出时没有合并步骤", needUploadForCleanArchive: "不投稿时存档就是成品,不会被清理;开关已锁定为保留" },
+      lock: { needDanmu: "需先开启「录弹幕」", needNodeSide: "仅在「节点侧上传」时生效", needMerge: "按分段产出时没有合并步骤", needUploadForCleanArchive: "不投稿时存档就是成品,不会被清理;开关已锁定为保留", outputFormatUpload: "投稿固定使用 mp4(B 站要求),此项已锁定" },
       flow: {
         record: "录制", noProcess: "已暂停", rolling: "边录边传", merge: "合并", split: "按分段",
-        burnDanmu: "烧飞屏弹幕", burnLivechat: "烧聊天框", upload: "投稿 B站", nodeSide: "节点侧投稿", stageOnly: "只存档",
+        burnDanmu: "烧飞屏弹幕", burnLivechat: "烧聊天框", upload: "投稿 B站", nodeSide: "节点侧投稿", stageOnly: "只存档", format: "格式 {fmt}",
       },
     },
     settings: {
@@ -577,6 +579,8 @@ const DICT = {
       noProcessingHint: "This room has no processing pipeline configured.",
       onlyRule: "This room has only a processing rule and no recording task — the recording half is not editable.",
       quality: "Quality", engine: "Engine", segmentSec: "Segment (s)", name: "Name",
+      outputFormat: "Output format", outputFormatOriginal: "Original (as today)",
+      outputFormatHint: "Swaps the container only — never keeps two copies. For now it applies to post-processed archive outputs (merged file / per-segment parts / burned files); Original = as today (still mp4).",
       schedule: "Window", pipeline: "Pipeline",
       danmuOn: "Danmu on", danmuOff: "Danmu off", allDay: "All day", danmu: "Record danmaku", useCookie: "Danmu with cookie",
       rollingUpload: "Rolling upload", rollingUploadHint: "On = upload each sealed segment during recording and delete that segment's source only after it is confirmed; only effective when this rule selects exactly one node, otherwise falls back to the whole-session pipeline; off = process after the broadcast ends",
@@ -621,10 +625,10 @@ const DICT = {
       mergeOne: "Merge into one video", mergeSplit: "Per recorded segment",
       outputHint: "Merge = all segments become one video before upload (default); per segment = each recorded segment is its own part, burned per segment when burning is on", moreUpload: "More: submission / part titles, description", flowLabel: "Processing flow",
       method: { label: "Upload method", after: "Upload after broadcast", afterHint: "After the broadcast, master merges / burns, then uploads (default)" },
-      lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment", needUploadForCleanArchive: "Without upload the archive is the final output and is never cleaned; locked to keep" },
+      lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment", needUploadForCleanArchive: "Without upload the archive is the final output and is never cleaned; locked to keep", outputFormatUpload: "Uploads always use mp4 (Bilibili requirement); locked" },
       flow: {
         record: "Record", noProcess: "Paused", rolling: "Rolling upload", merge: "Merge", split: "Per segment",
-        burnDanmu: "Burn danmu", burnLivechat: "Burn livechat", upload: "Upload to Bilibili", nodeSide: "Node-side upload", stageOnly: "Archive only",
+        burnDanmu: "Burn danmu", burnLivechat: "Burn livechat", upload: "Upload to Bilibili", nodeSide: "Node-side upload", stageOnly: "Archive only", format: "Format {fmt}",
       },
     },
     settings: {

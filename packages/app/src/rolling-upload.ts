@@ -38,6 +38,7 @@ import {
   resolveOutputStem,
   sealedSegmentIndices,
   segmentSessionBase,
+  stripVideoExt,
   UploadGate,
   type RollingSegment,
 } from "@drec/core";
@@ -187,7 +188,7 @@ export class RollingUploader {
     // 顺序颠倒会让重启后同一路径被当新段,分到已确认段号之外的号 → 重复上传该段(丢幂等)。
     if (!this.state.sessionBase) {
       const dir = path.dirname(filePath);
-      const base = segmentSessionBase(path.basename(filePath)) ?? path.basename(filePath).replace(/\.(ts|flv)$/i, "");
+      const base = segmentSessionBase(path.basename(filePath)) ?? stripVideoExt(path.basename(filePath));
       const loaded = readState(dir, base);
       this.state = loaded ?? {
         streamKey: this.o.streamKeyOf?.(base) ?? `${this.o.room.platform}:${this.o.room.roomSlug}:${base}`,
