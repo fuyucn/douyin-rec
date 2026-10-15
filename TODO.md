@@ -122,6 +122,11 @@
 - [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
   — 2026-10-15。**做什么**:录制引擎在 spawn 前判定水位(拒绝则不起录、下轮再判),手动启动接口过同一闸门(拒绝返回 409 且不改 enabled)。**为什么**:此前只有 daemon 在窗口启停时查水位,常驻任务的下一场开播与手动启动会绕过 → 盘满导致录制损坏。**验收**:两条路径均有测试覆盖 + dev 实跑;`pnpm test`/`typecheck` 通过。分支 `codex/issue-96-new-broadcast-gate`,PR [#97](https://github.com/fuyucn/douyin-rec/pull/97)。
 
+- [ ] **T-50 水位配置注入的跟进项(#97 审查 LOW,不阻塞)** — 2026-10-15。三项:
+  ① `serve.ts` 注入环境变量的分支只有源码文本断言 → 抽 `hubConfigEnvFor(src)` 纯函数并补行为测试;
+  ② 不经 serve 直接跑 `task run`/`record` 时读不到 settings 表(会回落根文件)→ `buildSessionForTask` 手里有 store,可改调 `resolveHubConfig(undefined, store)`;
+  ③ **hub 配置 JSON 若含 `cookies` 字段,经 settings/inline 来源会整份进环境变量,被子进程(ffmpeg/mesio/ssh)继承,同用户可从 `/proc/<pid>/environ` 读到** → 改为只传水位相关字段(如仅 `diskMinGB`)。③ 建议优先做。
+
 - [ ] **T-38 CI 架构文档漂移守护恒红（issue [#11](https://github.com/fuyucn/douyin-rec/issues/11)）**
   — 2026-10-12 开票（incident）。**做什么**：让 CI 的架构文档守护能变绿。**根因**：CI 工作流用
   `actions/checkout@v4` 默认浅克隆（`fetch-depth: 1`），而架构文档生成脚本用 `git log --since="90 days ago"`
