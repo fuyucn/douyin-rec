@@ -3,6 +3,7 @@
 import { resolve } from "node:path";
 import { STAGE_CONTAINERS, stageContainerOfPath, type StageFormat } from "@drec/core";
 import { runFfmpeg } from "./ffmpeg.js";
+import { runFfmpegAtomic } from "./artifact.js";
 import { extractItems, itemsToLivechatAss, itemsToRollingAss, type RenderOpts } from "./ass/render.js";
 
 /**
@@ -30,10 +31,26 @@ export function buildRemuxArgs(input: string, outMp4: string, fmt?: StageFormat)
 }
 
 /** 单段 remux(ts/flv → mp4,无损)。调用方负责目标目录存在。 */
-export async function remuxSegment(input: string, outMp4: string, fmt?: StageFormat): Promise<void> {
-  // 看门狗用「进程 CPU 时间」判活(runFfmpeg 内默认):faststart 收尾一遍不写 stdout/stderr,
+export interface RemuxSegmentOpts {
+  /**
+   * 是否由本函数负责**原子落盘**(写 `.part` → rename),默认 true。
+   *
+   * 置 false 只给「调用方自己已经做了两阶段落盘」的场景:节点侧原地替换(`node-remux`)先写
+   * `{最终名}.{owner}-{pid}.drec-remux`、校验通过才 fsync + rename 成最终名 —— 它的中间名
+   * 本身就是崩溃接管扫描(`recoverNodeRemux`)的识别依据,套一层 `.part` 会让那个解析认不出来。
+   */
+  atomic?: boolean;
+}
+
+export async function remuxSegment(input: string, outMp4: string, fmt?: StageFormat, opts: RemuxSegmentOpts = {}): Promise<void> {
+  // 看门狗用「进程 CPU 时间」判活(runFfmpegAtomic 内默认):faststart 收尾一遍不写 stdout/stderr,
   // 但一直在烧 CPU → 不会被误判卡死(线上实测整场转人工的根因)。
-  await runFfmpeg(buildRemuxArgs(input, outMp4, fmt));
+  // 落盘走原子收尾(`.part` → rename):被强杀时不留下「最终名存在但 moov 没写完」的半成品,
+  // 否则下游的续跑判定(existsSync)会把它当成品复用并静默投稿(见 artifact.ts 注释)。
+  // `fmt` 原样透传(节点侧原地替换会传非容器扩展名的临时名,必须显式 `-f` 指定封装器)。
+  const args = buildRemuxArgs(input, outMp4, fmt);
+  if (opts.atomic === false) { await runFfmpeg(args); return; }
+  await runFfmpegAtomic(args, outMp4);
 }
 
 /** 分段烧录样式:danmu(飞屏滚动)| livechat(聊天框)。 */

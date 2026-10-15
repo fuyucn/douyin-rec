@@ -5,7 +5,7 @@
  *      ② 冷却期内节点侧上传被阻塞;③ 账号键解析(与 master 同键/异键);
  *      ④ master 与节点共享同一限流状态文件时,总提交数不超 rateLimit(并发场景)。
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as nodeFs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -994,5 +994,98 @@ describe("节点侧:.ts 直传的安全边界(审查补测)", () => {
     expect(r.ok).toBe(true);
     for (const f of spec.tsFiles) expect(readFileSync(f, "utf-8")).toBe("SRCTS");
     expect(existsSync(join(sub, "Lilt_2026-10-12_000.ts"))).toBe(false);
+  });
+});
+
+/**
+ * issue #140:产物「**存在** ≠ **完整**」。
+ *
+ * 线上 incident(2026-10-15):被看门狗强杀留下的半成品**大小正常**却读不出时长;旧逻辑只问
+ * `existsSync(work)` → 直接硬链接成上传物 → B站建稿返回 `code: 0`、到转码阶段才报 `state=-16`。
+ * 这里钉住两件事:① 半成品必须原地重做;② 提交前读不出时长的产物一律拒投。
+ */
+describe("issue #140:半成品不复用 + 提交前自检", () => {
+  beforeEach(() => {
+    vi.mocked(remuxSegment).mockClear();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(appendGroup).mockClear();
+    vi.mocked(ffprobeDuration).mockClear();
+  });
+  afterEach(() => { vi.mocked(ffprobeDuration).mockImplementation(async () => 60); });
+
+  function scene(uploadMode: "stage" | "upload"): { sub: string; spec: Parameters<typeof runNodeSidePipeline>[0] } {
+    const root = mkdtempSync(join(tmpdir(), "node-140-"));
+    const recDir = join(root, "recordings");
+    mkdirSync(recDir, { recursive: true });
+    const ts = join(recDir, "Lilt_2026-10-15_12-14-16_000.ts");
+    writeFileSync(ts, "src");
+    const stageDir = join(root, "stage");
+    mkdirSync(stageDir, { recursive: true });
+    return {
+      sub: join(stageDir, "douyin_123_2026-10-15"),
+      spec: {
+        streamKey: "douyin:123:2026-10-15",
+        tsFiles: [ts],
+        sessionBase: "Lilt_2026-10-15_12-14-16",
+        startMs: 1_760_000_000_000,
+        liveTitle: "开播啦",
+        mergeSegments: false,
+        uploadMode,
+        stageDir,
+        uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像", titleTemplate: "{name}_{date}" },
+        uploadPrivate: true,
+      },
+    };
+  }
+
+  it("已有中间产物但读不出时长(半成品)→ 原地重做,不当成品复用", async () => {
+    const { sub, spec } = scene("stage");
+    const work = join(sub, ".work", "000.mp4");
+    mkdirSync(join(sub, ".work"), { recursive: true });
+    writeFileSync(work, "HALF-WRITTEN");
+    let seen = false;
+    vi.mocked(ffprobeDuration).mockImplementation(async (f: string) => {
+      if (f === work && !seen) { seen = true; return 0; } // 残留:文件在、时长读不出
+      return 60;
+    });
+
+    const r = await runNodeSidePipeline(spec, silence);
+
+    expect(vi.mocked(remuxSegment)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(remuxSegment).mock.calls[0]?.[1]).toBe(work); // 重做在原地(保留续跑语义)
+    expect(readFileSync(work, "utf-8")).toBe("REMUXED");
+    expect(r.products).toEqual([join(sub, "Lilt_2026-10-15_000.mp4")]);
+    // 规范名与重做后的中间产物同 inode(不是新副本)。
+    expect(statSync(join(sub, "Lilt_2026-10-15_000.mp4")).ino).toBe(statSync(work).ino);
+  });
+
+  it("产物读不出时长 → 提交前拒投:不调 uploadPlain / appendGroup,结果停在 started", async () => {
+    const { sub, spec } = scene("upload");
+    vi.mocked(ffprobeDuration).mockImplementation(async (f: string) =>
+      /_000\.mp4$/.test(f) && !f.includes(".work/") ? 0 : 60);
+
+    await expect(runNodeSidePipeline(spec, silence)).rejects.toThrow(/产物自检失败/);
+
+    expect(vi.mocked(uploadPlain)).not.toHaveBeenCalled();
+    expect(vi.mocked(appendGroup)).not.toHaveBeenCalled();
+    // 与「remux 抛错」同口径:停在 started(还没跟 B站说话)→ master 可判定「确认没成」。
+    expect(readNodeResult(sub)?.phase).toBe("started");
+  });
+
+  it("规范名是陈旧产物(与 .work 不同 inode)→ 重新链到中间产物,不留下旧内容", async () => {
+    const { sub, spec } = scene("stage");
+    const work = join(sub, ".work", "000.mp4");
+    mkdirSync(join(sub, ".work"), { recursive: true });
+    writeFileSync(work, "REMUXED");
+    // 陈旧规范名:另一份文件(不同 inode)。旧实现 `if (!existsSync(out)) linkOrCopySync(...)` 会原样留着它。
+    const canonical = join(sub, "Lilt_2026-10-15_000.mp4");
+    writeFileSync(canonical, "STALE");
+
+    const r = await runNodeSidePipeline(spec, silence);
+
+    expect(r.ok).toBe(true);
+    expect(readFileSync(canonical, "utf-8")).toBe("REMUXED");       // 已被换成中间产物
+    expect(statSync(canonical).ino).toBe(statSync(work).ino);       // 同一 inode(零拷贝)
+    expect(vi.mocked(remuxSegment)).not.toHaveBeenCalled();         // 中间产物可读 → 不重做
   });
 });

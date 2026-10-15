@@ -2,7 +2,8 @@
 import { writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { stageContainerOfPath } from "@drec/core";
-import { runFfmpeg, ffprobeVideo, type Progress } from "./ffmpeg.js";
+import { ffprobeVideo, type Progress } from "./ffmpeg.js";
+import { runFfmpegAtomic } from "./artifact.js";
 
 export type Hwaccel = "auto" | "videotoolbox" | "none";
 
@@ -81,7 +82,7 @@ export interface BurnOpts extends EncodeOpts {
 
 /**
  * 写 ASS 到输出目录（与 outMp4 同目录、同 stem.ass）→ ffprobe 取 fps/durationMs
- * → buildBurnArgs → runFfmpeg(cwd=outDir)。
+ * → buildBurnArgs → runFfmpegAtomic(cwd=outDir)。
  * hwaccel "auto" → darwin=videotoolbox 否则 none（resolveHwaccel）。
  */
 export async function burn(o: BurnOpts): Promise<void> {
@@ -104,5 +105,7 @@ export async function burn(o: BurnOpts): Promise<void> {
     preset: o.preset,
     videoBitrate: o.videoBitrate,
   });
-  await runFfmpeg(args, { cwd: outDir, totalMs: durationMs, onProgress: o.onProgress });
+  // 原子收尾(`.part` → rename):烧录被强杀(看门狗/断电)时不会留下「最终名存在但没写完」的产物,
+  // 否则续跑判定(existsSync)会把它当成品复用/上传(见 artifact.ts 注释)。
+  await runFfmpegAtomic(args, o.outMp4, { cwd: outDir, totalMs: durationMs, onProgress: o.onProgress });
 }

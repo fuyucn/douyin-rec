@@ -10,7 +10,7 @@
 import path from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted } from "@drec/core";
-import { planSegmentGroups, renderXmlWindowToXml } from "@drec/post-process";
+import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadableParts } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
 import { retry } from "./retry.js";
@@ -366,7 +366,10 @@ export async function runSegmentPipeline(o: {
     // 逐段 remux 是**中间产物**,落在 stageSub/.work/ 下的纯段号文件(不与上传产物撞名)。
     const plain = segWorkPath(stageSub, i, stageFmt);
     mkdirSync(path.dirname(plain), { recursive: true });
-    if (!existsSync(plain)) {
+    // 续跑判定:**存在** ≠ **完整** —— 被强杀留下的半成品大小正常却读不出时长,当成品复用它会被
+    // 静默投稿坏分 P(B站建稿仍 `code: 0`,只在转码阶段报 `state=-16`;2026-10-15 incident)。
+    if (!(await isCompleteMedia(plain, probeDuration))) {
+      if (existsSync(plain)) jlog(`⚠️ ${path.basename(plain)} 已存在但读不出时长(疑上次被强杀留下的半成品)→ 重做`);
       jlog(`remux 段 ${i}: ${path.basename(localSrc)} → ${path.basename(plain)}`);
       await remux(localSrc, plain);
     } else {
@@ -405,9 +408,11 @@ export async function runSegmentPipeline(o: {
     const out = path.join(stageSub, `${segmentStem(dateName, gi)}${ext}`);
     if (members.length === 1) {
       // 不合并 / 单段组:中间产物 → 规范上传名(不能直接引用 .work 里的文件,它下轮会被清理)。
-      // 硬链接优先(同一 inode,零拷贝);`out` 已存在 = 续跑,跳过(与 remux 的跳过判定一致)。
-      if (!existsSync(out)) linkOrCopySync(members[0].plain, out);
-    } else if (!existsSync(out)) {
+      // 硬链接优先(同一 inode,零拷贝);`linkOrCopy` 内部走临时名 + rename **原子替换**目标 ——
+      // 不再用「`out` 已存在就跳过」:存在不代表完整(陈旧半成品与 .work 不同 inode 时会被换掉)。
+      linkOrCopySync(members[0].plain, out);
+    } else if (!(await isCompleteMedia(out, probeDuration))) {
+      if (existsSync(out)) jlog(`⚠️ 合并组 ${gi}: ${path.basename(out)} 已存在但读不出时长(疑上次被强杀留下的半成品)→ 重做`);
       jlog(`合并组 ${gi}: ${members.length} 段(≈${Math.round(members.reduce((n, m) => n + (m.durSec ?? 0), 0))}s)→ ${path.basename(out)}`);
       await mergeGroup(members.map((m) => m.plain), out);
     } else {
@@ -448,7 +453,9 @@ export async function runSegmentPipeline(o: {
       const out = p.plain.slice(0, -ext.length) + `_${style}${ext}`;
       // 无弹幕窗口 → 该组无弹幕可烧,回落 plain(不产出 *_danmu.mp4)。
       if (!p.window) { jlog(`${node} 组 ${p.index}: 无弹幕,跳过`); continue; }
-      if (!existsSync(out)) {
+      // 已存在 → 先自检是不是半成品(烧录被强杀会留下读不出时长的同名文件),读不出就重烧。
+      if (!(await isCompleteMedia(out, probeDuration))) {
+        if (existsSync(out)) jlog(`⚠️ ${node} 组 ${p.index}: ${path.basename(out)} 已存在但读不出时长(疑半成品)→ 重烧`);
         jlog(`${node} 组 ${p.index}: ${path.basename(p.plain)} → ${path.basename(out)}`);
         // 默认实现内部:窗口内无弹幕 → 不产出文件(回落 plain 段)。烧完按存在与否记产物。
         await burnOne({ plain: p.plain, xmlPath: p.window.xmlPath, window: p.window, style, out });
@@ -503,6 +510,21 @@ export async function runSegmentPipeline(o: {
   ledger.logStep(streamKey, "upload_plain", "start");
   ledger.syncNodeState(streamKey, "upload_plain", "running");
   const plainFiles = uploadParts.map((p) => p.plain).filter(existsSync);
+  // 提交前自检:读不出时长的产物**绝不提交**(plain + 烧录产物)。B站会把坏容器照收下(建稿 `code: 0`),
+  // 只在它自己的转码阶段暴露成 `state=-16 转码失败`(2026-10-15 incident)。检出即转失败、绝不删源。
+  const partFiles = [
+    ...plainFiles,
+    ...uploadParts.flatMap((p) => [p.danmu, p.livechat]).filter((f): f is string => !!f),
+  ];
+  const brokenParts = await unreadableParts(partFiles, probeDuration);
+  if (brokenParts.length > 0) {
+    const names = brokenParts.slice(0, 3).map((f) => path.basename(f)).join(",");
+    jlog(`⚠️ 产物自检失败:${brokenParts.length}/${partFiles.length} 个分 P 读不出时长 → 拒绝提交:${names}`);
+    ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: "产物读不出时长" });
+    ledger.markFailed(streamKey, "分段上传:产物自检失败(读不出时长)");
+    notify({ kind: "error", stage: "上传", message: `${streamKey} 产物自检失败:${brokenParts.length} 个分 P 读不出时长,已拒绝提交` });
+    return { state: "failed" };
+  }
   if (plainFiles.length === 0) {
     jlog(`分段上传:无 plain 段产物`);
     ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: "无 plain 段产物" });
@@ -708,6 +730,17 @@ async function resumeSegmentAppends(
   }
   // 先补 plain:已建稿但其余分 P 可能还没传完(上次在 append plain 中途失败)。
   const plainFiles = uploadParts.map((p) => p.plain).filter((f) => f && existsSync(f));
+  // 提交前自检:补 append 的产物同样不能是坏容器(稿件已建,绝不能追加坏分 P)→ 检出转人工。
+  // 只检 plain:本函数拿到的 `uploadParts[].danmu/livechat` 恒为空 —— 烧录循环在主流程里、
+  // **在续跑分叉之后**(见主流程注释),续跑路径不重烧也不追加烧录轨(该缺口另开 issue #142 跟踪)。
+  const brokenResume = await unreadableParts(plainFiles, deps.segmentDuration ?? defaultSegmentDuration);
+  if (brokenResume.length > 0) {
+    const names = brokenResume.slice(0, 3).map((f) => path.basename(f)).join(",");
+    jlog(`⚠️ 续跑产物自检失败:${brokenResume.length}/${plainFiles.length} 个分 P 读不出时长 → 拒绝 append:${names}`);
+    ledger.setState(streamKey, "needs_manual", { error: `续跑产物自检失败:${brokenResume.length} 个分 P 读不出时长` });
+    notify({ kind: "error", stage: "上传", message: `${streamKey} 续跑产物自检失败:${brokenResume.length} 个分 P 读不出时长,请人工核对` });
+    return { state: "needs_manual", bv };
+  }
   const donePlain = ledger.doneParts(streamKey, "plain");
   const batchSize = Math.max(1, cfg.uploadBatchSize ?? 1);
   for (let i = 0; i < plainFiles.length; i += batchSize) {

@@ -15,6 +15,16 @@
 
 ## 进行中
 
+- [~] **T-53 产物落盘原子化 + 复用/提交前自检（issue [#140](https://github.com/fuyucn/douyin-rec/issues/140)）**
+  — 2026-10-15 认领，dev-loop run 模式（人直接指派），分支 `codex/issue-140-atomic-part-write`，PR [#141](https://github.com/fuyucn/douyin-rec/pull/141)，base `feat/hub-optimization`。
+  **状态 = needs-decision**（4 轮独立审查收敛：代码与用例 PASS、CI 绿、dev e2e 留证；唯一阻塞 = `pr-risk-scan` RISK ⇒ 合并需人拍板）。
+  **未合并 / 未部署 / 未 close**。
+  **做什么**：产物一律先写 `.part` 再 rename（存在 ⟹ 完整）；`linkOrCopy` 改原子替换（同 inode 幂等）；
+  分段管线（master + 节点侧）续跑判定由「存在」改为「存在且探得出时长」；提交前对分 P 自检，读不出即拒投。
+  **为什么**：被强杀留下的半成品大小正常却读不出时长，旧逻辑当成品复用 → 静默投稿坏分 P（B站转码 `-16`）。
+  **验收**：三条路径（remux / merge / burn）原子落盘有回归用例；半成品必重做；坏产物拒投；全量测试 / typecheck / bundle 通过；
+  dev 三节点 e2e（S1/S2/S3 + 真 ffmpeg 端到端）留证；独立审查 PASS。
+
 - [!] **T-51 输出格式选项:按产出形态原地替换容器（issue [#137](https://github.com/fuyucn/douyin-rec/issues/137)）**
   — 2026-10-15 认领，swe-loop 执行，两个 stacked PR（存档侧 #138 → 节点侧原地替换 #139）均已合并并部署（`0.0.136`），
   base `feat/hub-optimization`（**已验证部分通过 / 未 close**）。
@@ -119,6 +129,13 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
+
+- [ ] **T-54 分段续跑补齐烧录轨:续跑不重烧也不补烧录轨分 P（issue [#142](https://github.com/fuyucn/douyin-rec/issues/142)）**
+  — 2026-10-15。#140 复审期间发现（不在 #140 范围，单独开票）：续跑路径拿到的烧录产物字段恒为空
+  （赋值在主流程烧录循环里，而该循环在续跑分叉之后）→ `appendSegmentGroup(files=[])` 直接把该步骤标
+  `skipped` → `markDone` ⇒ **台账 done 但稿件缺烧录轨分 P，全程无告警**。
+  **做什么**：续跑按分 P 规范名重新发现已存在的烧录产物并继续 append；缺失/坏 → 重烧或转 `needs_manual`。
+  **验收**：续跑「产物在盘」→ 追加成功且分 P 数正确；「产物缺失」→ 不标 done；烧录产物同过提交前自检。
 
 - [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
   — 2026-10-15。**做什么**:录制引擎在 spawn 前判定水位(拒绝则不起录、下轮再判),手动启动接口过同一闸门(拒绝返回 409 且不改 enabled)。**为什么**:此前只有 daemon 在窗口启停时查水位,常驻任务的下一场开播与手动启动会绕过 → 盘满导致录制损坏。**验收**:两条路径均有测试覆盖 + dev 实跑;`pnpm test`/`typecheck` 通过。分支 `codex/issue-96-new-broadcast-gate`,PR [#97](https://github.com/fuyucn/douyin-rec/pull/97)。

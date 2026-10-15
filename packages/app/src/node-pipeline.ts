@@ -21,7 +21,7 @@ import {
   isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, partTitleToFilename, resolveOutputStem, sanitizeStreamKey,
   stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
 } from "@drec/core";
-import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment } from "@drec/post-process";
+import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment, unreadableParts } from "@drec/post-process";
 import { appendGroup, countVideoParts, uploadPlain } from "./upload/biliup.js";
 import { rootBiliupCookies, rootDbPath, rootStageDir } from "./paths.js";
 
@@ -427,6 +427,14 @@ function linkOrCopySync(src: string, dst: string): void {
 }
 
 /**
+ * 时长探测(失败 → 0):0 = 文件缺失 / 损坏 / 读不出结构。调用方据此判定「能不能当成品用」。
+ *
+ * 判据为什么是时长而不是大小:被强杀留下的半成品**大小看着完全正常**(实测与源差 0.003%),
+ * 只是容器结构(moov)没写完 —— 见 2026-10-15 incident 与 `@drec/post-process` 的 artifact 注释。
+ */
+const probeDurationOrZero = (file: string): Promise<number> => ffprobeDuration(file).catch(() => 0);
+
+/**
  * `.ts` 直传:单段独占分 P 的 `.ts`,把源**硬链接**成规范上传名(`{stem}_{NNN}.ts`),不 remux。
  * 只硬链接、**绝不复制**(复制就又是两份);跨设备/不支持 → 返回 false,调用方回落 remux。
  * 条件对齐 rolling 路径(它本来就直传分段源文件,B站已稳定转码)。
@@ -455,9 +463,23 @@ async function produceParts(
   log: (m: string) => void,
 ): Promise<NodePart[]> {
   mkdirSync(stageSub, { recursive: true });
-  const durationOf = async (f: string): Promise<number> => ffprobeDuration(f).catch(() => 0);
+  const durationOf = probeDurationOrZero;
   const durations: number[] = [];
   for (const f of spec.tsFiles) durations.push(await durationOf(f));
+  /**
+   * 续跑判定:**存在** ≠ **完整**。
+   *
+   * 被强杀留下的半成品大小正常却读不出时长;当成品复用它会静默投稿坏分 P(B站建稿仍返回 `code: 0`,
+   * 只在转码阶段报 `state=-16`,几十分钟后才发现 —— 2026-10-15 incident)。
+   * 故:读不出 → 判定「不可复用」,调用方原地重做(重做走原子落盘,会生成**新 inode**;
+   * 规范名随后由 `linkOrCopySync` 无条件重新链到新 inode,所以旧名字不会停留在旧数据上)。
+   */
+  const reusableArtifact = async (p: string): Promise<boolean> => {
+    if (!existsSync(p)) return false;
+    if ((await durationOf(p)) > 0) return true;
+    log(`⚠️ ${path.basename(p)} 已存在但读不出时长(疑上次被强杀留下的半成品)→ 重做`);
+    return false;
+  };
   // 段 → 所属会话 xml(与会话 base 同名的兄弟文件;节点上该会话无 xml 则空串)。
   const xmlOf = (i: number): string => {
     const f = spec.tsFiles[i];
@@ -501,13 +523,14 @@ async function produceParts(
       log(`硬链接 ${path.basename(files[0]!)} 失败(跨设备?)→ 回落 remux(不复制,避免双份)`);
     }
     if (group.length === 1) {
-      if (!existsSync(work)) await remuxSegment(files[0]!, work);
+      if (!(await reusableArtifact(work))) await remuxSegment(files[0]!, work);
     } else {
-      if (!existsSync(work)) await mergeSession(files, work);
+      if (!(await reusableArtifact(work))) await mergeSession(files, work);
     }
     // 中间产物 → 规范上传名(与 master 同款:不能直接把 .work 里的文件当上传物,它下轮会被清理)。
-    // 硬链接优先(同一 inode,零拷贝);`out` 已存在 = 续跑,跳过(与上面 remux 的跳过判定一致)。
-    if (!existsSync(out)) linkOrCopySync(work, out);
+    // 硬链接优先(同一 inode,零拷贝);`linkOrCopy` 内部走临时名 + rename **原子替换**目标 ——
+    // 不再用「`out` 已存在就跳过」:存在不代表完整(陈旧半成品与 `.work` 不同 inode 时会被换掉)。
+    linkOrCopySync(work, out);
     parts.push({ plain: out, sources: files, durSec: groupDur });
     log(`分 P ${parts.length}: ${group.length} 段(${Math.round(groupDur)}s)→ ${path.basename(out)}`);
   }
@@ -648,6 +671,18 @@ export async function runNodeSidePipeline(
     writeNodeResult(stageSub, { phase: "done", ok: true, products }, log);
     removeNodeExecutorPid(stageSub);
     return { ok: true, products };
+  }
+
+  // 产物自检:读不出时长的分 P **绝不提交**。B站会把坏容器照收下(建稿返回 `code: 0`),
+  // 只在它自己的转码阶段暴露成 `state=-16 转码失败` —— 几十分钟后才被发现(2026-10-15 incident)。
+  // 检出即抛错 → master 记失败、等人工/重跑,而不是产出一份带坏分 P 的稿。
+  // 位置必须在落 `uploading` 标记**之前**:此刻还没跟 B站说过话,失败即「确认没成」。
+  const brokenParts = await unreadableParts(parts.map((p) => p.plain), probeDurationOrZero);
+  if (brokenParts.length > 0) {
+    throw new Error(
+      `产物自检失败:${brokenParts.length}/${parts.length} 个分 P 读不出时长(疑损坏),已拒绝提交:`
+      + brokenParts.slice(0, 3).map((f) => path.basename(f)).join(","),
+    );
   }
 
   // ⚠️ 上传前先落 `uploading` 标记:此后一旦 ssh 回传断开,master 回读会看到它 →
