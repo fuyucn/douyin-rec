@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { shouldUseNodeSideUpload } from "../../packages/orchestrator/src/node-side-upload";
 import {
   applyChange,
   deriveConstraints,
@@ -124,11 +125,22 @@ describe("methodFromStored / storedFromForm 往返", () => {
   });
 });
 
-describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定同口径;存储保留原值,仅 rolling 写回实际值)", () => {
+describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定同口径;存储仅 rolling / nodeSide 写回实际值)", () => {
   const off = facts({ danmu: false, burnDanmu: true, burnLivechat: true });
   const burnOn = { burnDanmu: true, burnLivechat: true };
-  it.each(["after", "nodeSide"] as const)("方式 %s:存储保留烧录原值(不静默改写)", (method) => {
-    expect(storedFromForm({ ...off, method })).toMatchObject(burnOn);
+  it("方式 after:存储保留烧录原值(不静默改写)", () => {
+    expect(storedFromForm({ ...off, method: "after" })).toMatchObject(burnOn);
+  });
+  it("方式 nodeSide + 不录弹幕 + 原值开:存储烧录 = false,nodeSideUpload = true", () => {
+    expect(storedFromForm({ ...off, method: "nodeSide" }))
+      .toEqual({ mode: "upload", nodeSideUpload: true, burnDanmu: false, burnLivechat: false });
+  });
+  it("nodeSide 存储结果交给后端判定 → 节点侧上传适用(表单与实际一致)", () => {
+    const s = storedFromForm({ ...off, method: "nodeSide" });
+    expect(shouldUseNodeSideUpload(
+      { uploadMode: s.mode as "upload", steps: { nodeSideUpload: s.nodeSideUpload } } as never,
+      { burnDanmu: s.burnDanmu, burnLivechat: s.burnLivechat },
+    )).toEqual({ ok: true });
   });
   it("只合成:存储保留烧录原值", () => {
     expect(storedFromForm({ ...off, uploadOn: false })).toEqual({ mode: "stage", nodeSideUpload: false, ...burnOn });

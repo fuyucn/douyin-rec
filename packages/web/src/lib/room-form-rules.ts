@@ -124,14 +124,15 @@ export interface StoredFields {
 
 /**
  * 表单 → 存储。被锁的方式按「收播后上传」写回;烧录开关保留用户原值(不录弹幕只是当前无从烧录,
- * 不是用户改了意图,静默改写会丢原值)。**仅最终方式为 rolling 时**写回实际值:边录边传与烧录互斥,
- * 后端按存储的烧录开关判定边录边传是否生效,残留的烧录开关会让它「需烧录」而不生效。
+ * 不是用户改了意图,静默改写会丢原值)。**仅最终方式为 rolling / nodeSide 时**写回实际值:这两种方式
+ * 都与烧录互斥,后端按存储的烧录开关判定是否生效(shouldUseNodeSideUpload / resolveRollingPolicy),
+ * 残留的烧录开关会让它们「需烧录」而静默回落。
  * tsDirect 原值由调用方提交。
  */
 export function storedFromForm(f: FormFacts): StoredFields {
   if (!f.uploadOn) return { mode: "stage", nodeSideUpload: false, burnDanmu: f.burnDanmu, burnLivechat: f.burnLivechat };
   const method = effectiveMethod(f, deriveConstraints(f));
-  const burn = method === "rolling" ? effectiveBurn(f) : { burnDanmu: f.burnDanmu, burnLivechat: f.burnLivechat };
+  const burn = method === "rolling" || method === "nodeSide" ? effectiveBurn(f) : { burnDanmu: f.burnDanmu, burnLivechat: f.burnLivechat };
   return { mode: method === "rolling" ? "rolling" : "upload", nodeSideUpload: method === "nodeSide", ...burn };
 }
 
