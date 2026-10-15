@@ -22,10 +22,10 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, type Dirent } from "node:fs";
 import { join } from "node:path";
-import { sessionBaseOf } from "@drec/core";
+import { sessionBaseOf, VIDEO_EXTS } from "@drec/core";
 
 /** 视频容器扩展名(会话基名索引用;视频本身不在清理集内 —— 由 cleanup-recording-today 管)。 */
-const VIDEO_EXT = [".ts", ".flv", ".mp4", ".mkv", ".webm"];
+const VIDEO_EXT = [...VIDEO_EXTS, ".webm"];
 /** scratch / 中间产物后缀(总删,但需过陈旧判定)。 */
 const SCRATCH_EXT = [".upload", ".work", ".part", ".tmp", ".temp", ".download"];
 /** 文件名后缀型 scratch(ffmpeg concat 列表等)。 */

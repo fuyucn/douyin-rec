@@ -30,3 +30,5 @@ export * from "./redact-log.js";
 export * from "./rolling-policy.js";
 // 实验性功能注册表(issue #43):纯数据,仅驱动 Web 徽标/文案,不参与任何行为判定。
 export * from "./experimental.js";
+// 输出格式(issue #137):白名单 + 容器注册表 + effectiveStageFormat(唯一真理源)。
+export * from "./output-format.js";

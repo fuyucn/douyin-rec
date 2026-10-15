@@ -1,6 +1,7 @@
 // ts/src/core/post/burn.ts
 import { writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
+import { stageContainerOfPath } from "@drec/core";
 import { runFfmpeg, ffprobeVideo, type Progress } from "./ffmpeg.js";
 
 export type Hwaccel = "auto" | "videotoolbox" | "none";
@@ -59,7 +60,7 @@ export function buildBurnArgs(o: BurnArgsOpts): string[] {
     "-vf", vf,
     ...videoEncodeArgs(o),
     "-c:a", "aac", "-b:a", "192k",
-    "-movflags", "+faststart",
+    ...stageContainerOfPath(o.outMp4).finalizeArgs, // mp4: faststart;mkv: 无(movflags 是 mov muxer 私有)
     resolve(o.outMp4),
   ];
 }
@@ -85,7 +86,7 @@ export interface BurnOpts extends EncodeOpts {
  */
 export async function burn(o: BurnOpts): Promise<void> {
   const outDir = dirname(resolve(o.outMp4));
-  const assName = basename(o.outMp4).replace(/\.mp4$/i, ".ass");
+  const assName = basename(o.outMp4).replace(/\.[^.]+$/, ".ass");
   writeFileSync(resolve(outDir, assName), o.assText, "utf-8");
   const { fps, durationMs } = await ffprobeVideo(o.inputMp4).catch(() => ({
     fps: 0,

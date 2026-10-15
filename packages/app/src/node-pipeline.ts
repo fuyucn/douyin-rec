@@ -19,7 +19,7 @@ import path from "node:path";
 import {
   linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, isAppendAmbiguous,
   isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, partTitleToFilename, resolveOutputStem, sanitizeStreamKey,
-  stampedSessionBaseOf as sessionBaseOfFile, UploadGate, freeGBOf, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
+  stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
 } from "@drec/core";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment } from "@drec/post-process";
 import { appendGroup, countVideoParts, uploadPlain } from "./upload/biliup.js";
@@ -813,9 +813,12 @@ export async function probeNodeCapabilities(dataRoot: string): Promise<{
   return { biliup: hasBiliup, cookies: hasCookies, diskFreeGB, cjkFonts };
 }
 
+/** 节点 stage 里的视频类产物:后处理容器(注册表 mp4/mkv)+ `.ts` 直传。 */
+const NODE_STAGE_PRODUCT_RE = new RegExp(`\\.(${STAGE_EXT_ALT}|ts)$`, "i");
+
 /** 列出 stage 目录下的产物(stage 模式调试/展示用)。 */
 export function listNodeProducts(stageSub: string): string[] {
-  try { return readdirSync(stageSub).filter((f) => f.endsWith(".mp4") || f.endsWith(".ts")).map((f) => path.join(stageSub, f)); } catch { return []; }
+  try { return readdirSync(stageSub).filter((f) => NODE_STAGE_PRODUCT_RE.test(f)).map((f) => path.join(stageSub, f)); } catch { return []; }
 }
 
 /**
@@ -840,7 +843,7 @@ export function nodeStageCleanupTargets(
     const p = path.join(stageSub, n);
     // 中间产物/别名目录:无论 stage 是否保留都不该留(它们不是交付物,且与成品同量级)。
     if (n === UPLOAD_ALIAS_DIR || n === ".work") out.push(p);
-    else if (opts.deleteProducts !== false && /\.(mp4|ts)$/i.test(n)) out.push(p);
+    else if (opts.deleteProducts !== false && NODE_STAGE_PRODUCT_RE.test(n)) out.push(p);
     else if (opts.deleteXml && /\.(xml|ass)$/i.test(n)) out.push(p);
   }
   return out;

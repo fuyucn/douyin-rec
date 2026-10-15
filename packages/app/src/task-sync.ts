@@ -6,7 +6,7 @@
  * 编辑、删除。删除走两阶段：先在录/启用的只置 enabled=false，等 daemon 自然停录后
  * 下一轮再 removeTask。
  */
-import { platformForRoom, type ApplyTasksResult, type NodeTaskDTO, type RemoteTaskSpec } from "@drec/core";
+import { platformForRoom, readOutputFormat, type ApplyTasksResult, type NodeTaskDTO, type RemoteTaskSpec } from "@drec/core";
 import { writeManagedState } from "./managed-state.js";
 import { APP_VERSION } from "./version.js";
 import type { TaskStore } from "./store.js";
@@ -41,6 +41,7 @@ export function listNodeTasks(store: TaskStore): NodeTaskDTO[] {
       anchorName: t.anchorName,
       rollingUpload: t.rollingUpload,
       rollingEffective: t.rollingEffective,
+      outputFormat: t.outputFormat,
     };
   });
 }
@@ -210,6 +211,8 @@ export function applyRemoteTasks(
         // 生效值由 master 算好下发(issue #40),节点只存不判;旧 master 不带该字段 → 回落旧开关(旧行为)。
         rollingUpload: spec.rollingUpload,
         rollingEffective: spec.rollingEffective ?? spec.rollingUpload,
+        // 旧 master 不下发 / 非白名单值 → original(现状);不抛,免得一个坏值拒掉整批同步。
+        outputFormat: readOutputFormat(spec.outputFormat),
       });
       log?.(`[task-sync] 收编任务 ${existing.id}: ${key}`);
       // 期望任务已禁用但节点上还在录/待起:必须硬停,不能等 daemon 排空到自然收播。
@@ -240,6 +243,7 @@ export function applyRemoteTasks(
         // 防止 master 的 null 覆盖 worker 已抓到的正确值。
         anchorName: spec.anchorName ?? null,
         rollingUpload: spec.rollingUpload,
+        outputFormat: readOutputFormat(spec.outputFormat),
       });
       store.updateTask(created.id, { rollingEffective: spec.rollingEffective ?? spec.rollingUpload });
       log?.(`[task-sync] ${adopt ? "新建受管任务" : "新建本机任务"}: ${key}`);

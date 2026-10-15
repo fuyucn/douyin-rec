@@ -9,7 +9,7 @@
  */
 import path from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, throwIfAborted } from "@drec/core";
+import { effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted } from "@drec/core";
 import { planSegmentGroups, renderXmlWindowToXml } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
@@ -336,6 +336,9 @@ export async function runSegmentPipeline(o: {
   const xmlCache = new Map<string, string>();
   // 各会话内累计时长 → 该会话后续段的弹幕窗口(按会话分开,见 sessionWindowOffsets 注释)。
   const windowOffset = sessionWindowOffsets();
+  // 产物容器(core 唯一出处);remux/合并/烧录的封装参数都由输出路径扩展名经注册表决定。
+  const stageFmt = effectiveStageFormat(cfg.outputFormat, cfg.uploadMode);
+  const ext = stageExt(stageFmt);
   const remux = deps.remuxSegment ?? defaultRemuxSegment;
   const probeDuration = deps.segmentDuration ?? defaultSegmentDuration;
   const minSegSec = cfg.minSegmentSec ?? 2;
@@ -361,7 +364,7 @@ export async function runSegmentPipeline(o: {
       continue;
     }
     // 逐段 remux 是**中间产物**,落在 stageSub/.work/ 下的纯段号文件(不与上传产物撞名)。
-    const plain = segWorkPath(stageSub, i);
+    const plain = segWorkPath(stageSub, i, stageFmt);
     mkdirSync(path.dirname(plain), { recursive: true });
     if (!existsSync(plain)) {
       jlog(`remux 段 ${i}: ${path.basename(localSrc)} → ${path.basename(plain)}`);
@@ -398,8 +401,8 @@ export async function runSegmentPipeline(o: {
   for (let gi = 0; gi < planGroups.length; gi++) {
     const memberIdxs = planGroups[gi];
     const members = memberIdxs.map((k) => parts[k]);
-    // 上传产物统一命名 {dateName}_{NNN}.mp4(NNN=分 P 序号,与 hub 命名约定一致)。
-    const out = path.join(stageSub, `${segmentStem(dateName, gi)}.mp4`);
+    // 上传产物统一命名 {dateName}_{NNN}.{ext}(NNN=分 P 序号,与 hub 命名约定一致)。
+    const out = path.join(stageSub, `${segmentStem(dateName, gi)}${ext}`);
     if (members.length === 1) {
       // 不合并 / 单段组:中间产物 → 规范上传名(不能直接引用 .work 里的文件,它下轮会被清理)。
       // 硬链接优先(同一 inode,零拷贝);`out` 已存在 = 续跑,跳过(与 remux 的跳过判定一致)。
@@ -442,7 +445,7 @@ export async function runSegmentPipeline(o: {
     let burned = 0;
     for (const p of uploadParts) {
       throwIfAborted();
-      const out = p.plain.replace(/\.mp4$/i, style === "danmu" ? "_danmu.mp4" : "_livechat.mp4");
+      const out = p.plain.slice(0, -ext.length) + `_${style}${ext}`;
       // 无弹幕窗口 → 该组无弹幕可烧,回落 plain(不产出 *_danmu.mp4)。
       if (!p.window) { jlog(`${node} 组 ${p.index}: 无弹幕,跳过`); continue; }
       if (!existsSync(out)) {

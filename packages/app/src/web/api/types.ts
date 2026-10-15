@@ -184,6 +184,8 @@ export interface CreateTaskInput {
   webhook?: string | null;
   /** 边录边传开关(T-33,默认 false)。 */
   rollingUpload?: boolean;
+  /** 输出格式(issue #137;白名单见 core `OUTPUT_FORMATS`,非法值 → 400;省略/空 = 不改或 original)。 */
+  outputFormat?: string;
 }
 
 /**
@@ -208,6 +210,8 @@ export interface UpdateTaskInput {
   webhook?: string | null;
   /** 边录边传开关(T-33,默认 false)。 */
   rollingUpload?: boolean;
+  /** 输出格式(issue #137;白名单见 core `OUTPUT_FORMATS`,非法值 → 400;省略/空 = 不改或 original)。 */
+  outputFormat?: string;
 }
 
 /** Public status of one platform cookie (never leaks the raw value). */

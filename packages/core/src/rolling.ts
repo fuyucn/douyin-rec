@@ -17,6 +17,7 @@
  * 但 app 不能 import orchestrator(test/arch/layering.test.ts 守护)。判定下沉到 core 即两侧可共用。
  */
 
+import { isVideoFileName } from "./output-format.js";
 import { stampedSessionBaseOf } from "./session-name.js";
 
 /** 一个录制分段(节点本地文件)在「边录边传」里的最小投影。 */
@@ -204,5 +205,5 @@ export function segmentSessionBase(fileName: string): string | undefined {
 
 /** 是否视频源分段(可删/可传);`.xml`/`.ass` 恒为 false(弹幕源不可再生,绝不随分段删)。 */
 export function isVideoSegment(fileName: string): boolean {
-  return /\.(ts|flv)$/i.test(fileName);
+  return isVideoFileName(fileName);
 }

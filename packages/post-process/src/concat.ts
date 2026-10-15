@@ -2,7 +2,7 @@
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
-import { segmentIndexOf, sessionBaseOf } from "@drec/core";
+import { isVideoFileName, segmentIndexOf, sessionBaseOf, stageContainerOfPath, stampedSessionBaseOf } from "@drec/core";
 import { runFfmpeg } from "./ffmpeg.js";
 
 /**
@@ -44,10 +44,23 @@ export function groupSessions(files: string[]): Record<string, SessionGroup> {
   const out: Record<string, SessionGroup> = {};
   const ensure = (b: string): SessionGroup => (out[b] ??= { ts: [], xml: null, segmentXmls: [] });
 
-  // First pass: collect video segments (.ts ffmpeg/DLR/biliLive、.flv mesio)
+  // First pass: collect video segments。录制原生容器 .ts(ffmpeg/DLR/biliLive)/.flv(mesio)恒认;
+  // .mp4/.mkv(节点侧原地替换后的分段,issue #137)也认,但**排除合并/烧录产物**以免合并自己吃自己:
+  //   - `_danmu`/`_livechat` 结尾的烧录产物;
+  //   - 无时间戳基名的合并产物 `{主播}_{日期}.mp4`;
+  //   - 同会话已有 .ts/.flv 分段时,无段号后缀的 `{base}.mp4/.mkv`(= 该会话的合并产物,keepTime/撞名时带时间戳)。
+  const NATIVE = /\.(ts|flv)$/i;
+  const nativeBases = new Set(files.filter((f) => NATIVE.test(f)).map(sessionBase));
   for (const f of files) {
-    if (/\.(ts|flv)$/i.test(f)) {
+    if (NATIVE.test(f)) {
       ensure(sessionBase(f)).ts.push(f);
+    } else if (isVideoFileName(f)) {
+      const stem = f.replace(/\.[^.]+$/, "");
+      if (/_(danmu|livechat)$/i.test(stem)) continue;
+      if (!stampedSessionBaseOf(f)) continue;
+      const b = sessionBase(f);
+      if (segmentIndexOf(f) < 0 && nativeBases.has(b)) continue;
+      ensure(b).ts.push(f);
     }
   }
 
@@ -78,6 +91,7 @@ export function groupSessions(files: string[]): Record<string, SessionGroup> {
 
 /**
  * 合并一组分段 .ts 文件 → outMp4（同会话 -c copy 无损）。
+ * 输出容器(mp4/mkv)由 `outMp4` 扩展名决定,封装参数取自 core 注册表。
  * 写 concat 列表到临时目录，完成后清理。
  */
 export async function mergeSession(
@@ -117,7 +131,7 @@ export async function mergeSession(
       "-safe", "0",
       "-i", list,
       "-c", "copy",
-      "-movflags", "+faststart",
+      ...stageContainerOfPath(outMp4).finalizeArgs,
       outMp4,
     ]);   // faststart 收尾静默由 runFfmpeg 的 CPU 探针兜住
   } finally {

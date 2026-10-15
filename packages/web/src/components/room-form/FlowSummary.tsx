@@ -10,7 +10,7 @@ export function FlowSummary({ steps }: { steps: FlowStep[] }): ReactNode {
       {steps.map((s, i) => (
         <Fragment key={s.key}>
           {i > 0 && <span className="text-muted-soft" aria-hidden>→</span>}
-          <span className={`chip${s.on ? " chip-accent" : " opacity-60"}`}>{t(s.key)}</span>
+          <span className={`chip${s.on ? " chip-accent" : " opacity-60"}`}>{t(s.key, s.vars)}</span>
         </Fragment>
       ))}
     </div>
