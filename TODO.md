@@ -20,6 +20,7 @@
   **做什么**：任务级字段 outputFormat（默认 original 不变，白名单 mp4 / mkv）；只换容器、原地替换、不并存两份；无后处理任务在节点封口后原地 remux，存档形态改后处理产物容器，投稿形态固定 mp4 并锁定。
   **验收**：默认行为不变有回归用例；校验失败不删原文件；下游认多扩展名；保存往返不丢；全量测试 / typecheck / web build / i18n 检查通过，每个 PR 有变异验证。
   **进度**：第 1/2（存档侧）已合并（#138）；第 2/2（节点侧原地替换：封口后 remux + 校验 + 删原文件 + 崩溃接管，识别靠会话 sidecar 的 `nodeFormat`，仅无后处理任务）分支 `codex/issue-137-output-format-b`，PR 待审（**未合并 / 未部署 / 未 close**）。
+  返工第 2 轮（2026-10-15）：探测统一运行器（消费 stderr / 超时杀进程）、校验补视频包数 + 音频 + 解析告警、接管后台执行并修临时文件归属与竞态、收尾总时限（未合并 / 未部署）。
 
 - [~] **T-48 界面把 stage 统一称「存档」,不投稿时锁定清理存档开关（issue [#135](https://github.com/fuyucn/douyin-rec/issues/135)）**
   — 2026-10-15 认领，swe-loop 执行，分支 `codex/issue-135-archive-wording`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
