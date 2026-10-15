@@ -140,3 +140,11 @@ export function pickPlatform(room: string, platforms: PlatformDTO[]): PlatformDT
   return platforms[0];
 }
 
+
+/** "HH:MM-HH:MM" → 成对端点;空串 = 全天(两端 null);拆不开 → null。真正的格式校验在后端 parseSchedule。 */
+export function splitSchedule(sched: string): { scheduleStart: string | null; scheduleEnd: string | null } | null {
+  const s = sched.trim();
+  if (!s) return { scheduleStart: null, scheduleEnd: null };
+  const m = /^(.+?)-(.+)$/.exec(s);
+  return m ? { scheduleStart: m[1].trim(), scheduleEnd: m[2].trim() } : null;
+}

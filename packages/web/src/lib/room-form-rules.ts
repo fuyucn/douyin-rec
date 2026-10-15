@@ -52,6 +52,12 @@ export interface Constraints {
 }
 
 const OPEN: Lock = { locked: false };
+
+/** 实际会烧录的版本:不录弹幕(或平台无弹幕)时无从烧录,开关原值保留但按关处理。 */
+function effectiveBurn(f: FormFacts): { burnDanmu: boolean; burnLivechat: boolean } {
+  const canBurn = f.danmu && f.danmuAvailable;
+  return { burnDanmu: canBurn && f.burnDanmu, burnLivechat: canBurn && f.burnLivechat };
+}
 const lock = (reasonKey: string): Lock => ({ locked: true, reasonKey });
 
 /** resolveRollingPolicy 的拒绝原因 → 文案 key(以 mode=rolling、规则启用调用,只会命中这两种)。 */
@@ -61,9 +67,7 @@ const ROLLING_REASON_KEY: Partial<Record<RollingReason, string>> = {
 };
 
 function rollingLock(f: FormFacts): Lock {
-  const rule = f.hasRule
-    ? { enabled: true, mode: "rolling", workers: f.workers, steps: { burnDanmu: f.burnDanmu, burnLivechat: f.burnLivechat } }
-    : null;
+  const rule = f.hasRule ? { enabled: true, mode: "rolling", workers: f.workers, steps: effectiveBurn(f) } : null;
   const policy = resolveRollingPolicy(rule, true);
   if (policy.effective) return OPEN;
   return lock(ROLLING_REASON_KEY[policy.reason] ?? "rooms.rollingReasonMultiNode");
@@ -71,7 +75,8 @@ function rollingLock(f: FormFacts): Lock {
 
 export function deriveConstraints(f: FormFacts): Constraints {
   const noDanmu = !f.danmu || !f.danmuAvailable;
-  const burning = f.burnDanmu || f.burnLivechat;
+  const burn = effectiveBurn(f);
+  const burning = burn.burnDanmu || burn.burnLivechat;
   const rolling = rollingLock(f);
   const nodeSide = burning ? lock("rooms.nodeSideUploadDisabled") : OPEN;
   return {
@@ -110,11 +115,22 @@ export function methodFromStored(mode: string | undefined, nodeSideUpload: boole
   return { uploadOn, method };
 }
 
-/** 表单 → 存储。被锁的方式按「收播后上传」写回;tsDirect 原值由调用方原样提交。 */
-export function storedFromForm(f: FormFacts): { mode: "stage" | "upload" | "rolling"; nodeSideUpload: boolean } {
-  if (!f.uploadOn) return { mode: "stage", nodeSideUpload: false };
+export interface StoredFields {
+  mode: "stage" | "upload" | "rolling";
+  nodeSideUpload: boolean;
+  burnDanmu: boolean;
+  burnLivechat: boolean;
+}
+
+/**
+ * 表单 → 存储。被锁的方式按「收播后上传」写回;烧录按实际值写回(不录弹幕 = 不烧,
+ * 否则规则里残留的烧录开关会让后端判定边录边传「需烧录」而不生效)。tsDirect 原值由调用方提交。
+ */
+export function storedFromForm(f: FormFacts): StoredFields {
+  const burn = effectiveBurn(f);
+  if (!f.uploadOn) return { mode: "stage", nodeSideUpload: false, ...burn };
   const method = effectiveMethod(f, deriveConstraints(f));
-  return { mode: method === "rolling" ? "rolling" : "upload", nodeSideUpload: method === "nodeSide" };
+  return { mode: method === "rolling" ? "rolling" : "upload", nodeSideUpload: method === "nodeSide", ...burn };
 }
 
 export interface FlowStep {
@@ -125,13 +141,16 @@ export interface FlowStep {
 
 /** 顶部流程摘要:录制 → 处理步骤 → 交付。只描述「按当前表单会发生什么」。 */
 export function flowSummary(f: FormFacts, recEnabled: boolean): FlowStep[] {
-  const steps: FlowStep[] = [{ key: "roomForm.flow.record", on: recEnabled }];
+  // 规则停用 = 暂停整个房间:各节点也停录(core isWorkerAssigned),不只是不处理。
+  const paused = f.hasRule && !f.procEnabled;
+  const steps: FlowStep[] = [{ key: "roomForm.flow.record", on: recEnabled && !paused }];
   if (!f.procEnabled) return [...steps, { key: "roomForm.flow.noProcess", on: false }];
   const method = effectiveMethod(f, deriveConstraints(f));
   if (f.uploadOn && method === "rolling") return [...steps, { key: "roomForm.flow.rolling", on: true }];
+  const burn = effectiveBurn(f);
   steps.push({ key: f.mergeSegments ? "roomForm.flow.merge" : "roomForm.flow.split", on: true });
-  if (f.burnDanmu) steps.push({ key: "roomForm.flow.burnDanmu", on: true });
-  if (f.burnLivechat) steps.push({ key: "roomForm.flow.burnLivechat", on: true });
+  if (burn.burnDanmu) steps.push({ key: "roomForm.flow.burnDanmu", on: true });
+  if (burn.burnLivechat) steps.push({ key: "roomForm.flow.burnLivechat", on: true });
   if (!f.uploadOn) steps.push({ key: "roomForm.flow.stageOnly", on: false });
   else steps.push({ key: method === "nodeSide" ? "roomForm.flow.nodeSide" : "roomForm.flow.upload", on: true });
   return steps;
