@@ -21,9 +21,7 @@ export function ProcessingSection({ value: v, onChange, burn }: Props): ReactNod
   const t = useT();
   return (
     <section className="space-y-3">
-      <SectionHeader title={t("rooms.processingSection")}
-                     toggle={{ checked: v.procEnabled, onChange: (x) => onChange({ procEnabled: x }) }} />
-      <p className="text-xs text-muted -mt-1">{t("rooms.procEnabledHint")}</p>
+      <SectionHeader title={t("rooms.processingSection")} />
       <fieldset disabled={!v.procEnabled} className="space-y-3 disabled:opacity-50">
         <div>
           <div className="flex items-center gap-1.5 mb-1.5">

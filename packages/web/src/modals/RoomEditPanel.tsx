@@ -20,10 +20,11 @@ import { NodesSection } from "../components/room-form/NodesSection";
 import { NotifySection } from "../components/room-form/NotifySection";
 import { ProcessingSection, type ProcessingValue } from "../components/room-form/ProcessingSection";
 import { RecordingSection, type RecordingValue } from "../components/room-form/RecordingSection";
+import { RuleSwitch } from "../components/room-form/parts";
 import { UploadSection, type UploadValue } from "../components/room-form/UploadSection";
 import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { pickPlatform } from "../lib/labels";
+import { pickPlatform, splitSchedule } from "../lib/labels";
 import {
   deriveConstraints, flowSummary, methodFromStored, settledMethod, storedFromForm, type FormFacts,
 } from "../lib/room-form-rules";
@@ -76,14 +77,6 @@ function fromRoom(r: RoomDTO): FormState {
   };
 }
 
-/** "HH:MM-HH:MM" → 成对端点;空串 = 全天(两端 null);格式不对 → null(真正的格式校验在后端 parseSchedule)。 */
-function splitSchedule(sched: string): { scheduleStart: string | null; scheduleEnd: string | null } | null {
-  const s = sched.trim();
-  if (!s) return { scheduleStart: null, scheduleEnd: null };
-  const m = /^(.+?)-(.+)$/.exec(s);
-  return m ? { scheduleStart: m[1].trim(), scheduleEnd: m[2].trim() } : null;
-}
-
 export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNode {
   const t = useT();
   const toast = useToast();
@@ -117,6 +110,8 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
   // 只影响弹幕礼物/入场;B站/快手用它取流。
   const factsOf = (f: FormState): FormFacts => ({
     ...f,
+    // 无录制任务 = 录弹幕由将来的任务决定,不能拿 false 锁烧录(提交给录制任务的 danmu 仍取 form.danmu,且仅有 rec 时才提交)
+    danmu: room.recording ? f.danmu : true,
     danmuAvailable: plat ? plat.hasDanmu : true,
     cookieReady,
     cookieForStream: room.platform !== "douyin",
@@ -163,8 +158,8 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
           pipeline: {
             steps: {
               mergeSegments: form.mergeSegments,
-              burnDanmu: form.burnDanmu,
-              burnLivechat: form.burnLivechat,
+              burnDanmu: stored.burnDanmu,
+              burnLivechat: stored.burnLivechat,
               nodeSideUpload: stored.nodeSideUpload,
               tsDirect: form.tsDirect,
             },
@@ -218,6 +213,7 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
 
         <form onSubmit={submit} className="px-4 sm:px-5 pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] space-y-7">
           <FlowSummary steps={flowSummary(facts, !!room.recording && form.recEnabled)} />
+          <RuleSwitch checked={form.procEnabled} onChange={(procEnabled) => update({ procEnabled })} />
           {room.recording ? (
             <RecordingSection value={form} onChange={update} showEnabled showName
                               qualities={plat?.qualities ?? []} engines={plat?.engines ?? []}

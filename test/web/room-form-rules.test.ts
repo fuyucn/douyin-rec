@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { shouldUseNodeSideUpload } from "../../packages/orchestrator/src/node-side-upload";
 import {
   applyChange,
   deriveConstraints,
@@ -110,15 +111,68 @@ describe("methodFromStored / storedFromForm 往返", () => {
   ] as const)("mode=%s nodeSide=%s", (mode, nodeSide, expected) => {
     expect(methodFromStored(mode, nodeSide)).toEqual(expected);
   });
+  const noBurn = { burnDanmu: false, burnLivechat: false };
   it("三种方式与上传关写回存储", () => {
-    expect(storedFromForm(facts({ method: "after" }))).toEqual({ mode: "upload", nodeSideUpload: false });
-    expect(storedFromForm(facts({ method: "nodeSide" }))).toEqual({ mode: "upload", nodeSideUpload: true });
-    expect(storedFromForm(facts({ method: "rolling" }))).toEqual({ mode: "rolling", nodeSideUpload: false });
-    expect(storedFromForm(facts({ uploadOn: false, method: "rolling" }))).toEqual({ mode: "stage", nodeSideUpload: false });
+    expect(storedFromForm(facts({ method: "after" }))).toEqual({ mode: "upload", nodeSideUpload: false, ...noBurn });
+    expect(storedFromForm(facts({ method: "nodeSide" }))).toEqual({ mode: "upload", nodeSideUpload: true, ...noBurn });
+    expect(storedFromForm(facts({ method: "rolling" }))).toEqual({ mode: "rolling", nodeSideUpload: false, ...noBurn });
+    expect(storedFromForm(facts({ uploadOn: false, method: "rolling" }))).toEqual({ mode: "stage", nodeSideUpload: false, ...noBurn });
   });
   it("被锁的方式按 after 写回(绝不把失效的 rolling 存进规则)", () => {
-    expect(storedFromForm(facts({ method: "rolling", workers: ["a", "b"] }))).toEqual({ mode: "upload", nodeSideUpload: false });
-    expect(storedFromForm(facts({ method: "nodeSide", burnDanmu: true }))).toEqual({ mode: "upload", nodeSideUpload: false });
+    expect(storedFromForm(facts({ method: "rolling", workers: ["a", "b"] }))).toEqual({ mode: "upload", nodeSideUpload: false, ...noBurn });
+    expect(storedFromForm(facts({ method: "nodeSide", burnDanmu: true })))
+      .toEqual({ mode: "upload", nodeSideUpload: false, burnDanmu: true, burnLivechat: false });
+  });
+});
+
+describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定同口径;存储一律写回实际值)", () => {
+  const off = facts({ danmu: false, burnDanmu: true, burnLivechat: true });
+  const burnOn = { burnDanmu: true, burnLivechat: true };
+  const burnOff = { burnDanmu: false, burnLivechat: false };
+  it("方式 after:存储写回实际值 false(无弹幕文件,存原值后端会烧录失败)", () => {
+    expect(storedFromForm({ ...off, method: "after" })).toMatchObject(burnOff);
+  });
+  it("不录弹幕 + 原值开 + after:存储烧录 false,且流程摘要不含烧录步骤(二者一致)", () => {
+    const f = { ...off, method: "after" as const };
+    const s = storedFromForm(f);
+    expect(s).toMatchObject(burnOff);
+    const keys = flowSummary(f, true).map((x) => x.key);
+    expect(keys).not.toContain("roomForm.flow.burnDanmu");
+    expect(keys).not.toContain("roomForm.flow.burnLivechat");
+    expect(flowSummary({ ...f, ...s }, true)).toEqual(flowSummary(f, true));
+  });
+  it("方式 nodeSide + 不录弹幕 + 原值开:存储烧录 = false,nodeSideUpload = true", () => {
+    expect(storedFromForm({ ...off, method: "nodeSide" }))
+      .toEqual({ mode: "upload", nodeSideUpload: true, burnDanmu: false, burnLivechat: false });
+  });
+  it("nodeSide 存储结果交给后端判定 → 节点侧上传适用(表单与实际一致)", () => {
+    const s = storedFromForm({ ...off, method: "nodeSide" });
+    expect(shouldUseNodeSideUpload(
+      { uploadMode: s.mode as "upload", steps: { nodeSideUpload: s.nodeSideUpload } } as never,
+      { burnDanmu: s.burnDanmu, burnLivechat: s.burnLivechat },
+    )).toEqual({ ok: true });
+  });
+  it("只合成:存储写回实际值 false", () => {
+    expect(storedFromForm({ ...off, uploadOn: false })).toEqual({ mode: "stage", nodeSideUpload: false, ...burnOff });
+  });
+  it("方式 rolling:存储写回关,避免后端据残留烧录开关判定边录边传「需烧录」", () => {
+    expect(storedFromForm({ ...off, method: "rolling" })).toEqual({ mode: "rolling", nodeSideUpload: false, burnDanmu: false, burnLivechat: false });
+  });
+  it("录弹幕 + 开烧录:rolling 被锁并回落 after,存储烧录 = 原值 true", () => {
+    const on = facts({ method: "rolling", burnDanmu: true, burnLivechat: true });
+    expect(deriveConstraints(on).rolling.locked).toBe(true);
+    expect(storedFromForm(on)).toEqual({ mode: "upload", nodeSideUpload: false, ...burnOn });
+  });
+  it("边录边传 / 节点侧不因残留烧录开关被锁", () => {
+    const c = deriveConstraints(off);
+    expect(c.rolling.locked).toBe(false);
+    expect(c.nodeSide.locked).toBe(false);
+  });
+  it("流程摘要不出现烧录步骤", () => {
+    expect(flowSummary(off, true).map((x) => x.key)).toEqual(["roomForm.flow.record", "roomForm.flow.merge", "roomForm.flow.upload"]);
+  });
+  it("平台无弹幕同理", () => {
+    expect(storedFromForm(facts({ danmuAvailable: false, burnDanmu: true }))).toMatchObject(burnOff);
   });
 });
 
@@ -140,5 +194,11 @@ describe("flowSummary", () => {
       { key: "roomForm.flow.record", on: false },
       { key: "roomForm.flow.noProcess", on: false },
     ]);
+  });
+  it("规则停用 = 暂停整个房间:即便任务启用,录制也显示为停(各节点停录)", () => {
+    expect(flowSummary(facts({ procEnabled: false }), true)[0]).toEqual({ key: "roomForm.flow.record", on: false });
+  });
+  it("无规则(单机任务)处理关闭时录制照常", () => {
+    expect(flowSummary(facts({ procEnabled: false, hasRule: false }), true)[0]).toEqual({ key: "roomForm.flow.record", on: true });
   });
 });

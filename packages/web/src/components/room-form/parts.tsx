@@ -44,3 +44,9 @@ export function ToggleRow({ label, hint, checked, onChange, lock, nested, badge 
     </label>
   );
 }
+
+/** 规则总开关:关掉 = 暂停整个房间(各节点停录、录完不处理),不只是「不处理」。 */
+export function RuleSwitch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }): ReactNode {
+  const t = useT();
+  return <ToggleRow label={t("roomForm.ruleEnabled")} hint={t("roomForm.ruleEnabledHint")} checked={checked} onChange={onChange} />;
+}
