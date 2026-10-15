@@ -1,0 +1,138 @@
+import { describe, it, expect } from "vitest";
+import {
+  applyChange,
+  deriveConstraints,
+  flowSummary,
+  methodFromStored,
+  storedFromForm,
+  type FormFacts,
+} from "../../packages/web/src/lib/room-form-rules";
+
+const facts = (over: Partial<FormFacts> = {}): FormFacts => ({
+  danmu: true,
+  danmuAvailable: true,
+  cookieReady: true,
+  procEnabled: true,
+  uploadOn: true,
+  method: "after",
+  tsDirect: false,
+  mergeSegments: true,
+  burnDanmu: false,
+  burnLivechat: false,
+  workers: ["local"],
+  hasRule: true,
+  ...over,
+});
+
+describe("deriveConstraints — 边录边传(复用 core resolveRollingPolicy)", () => {
+  it("有规则 + 单节点 + 不烧录 → 可选", () => {
+    expect(deriveConstraints(facts()).rolling).toEqual({ locked: false });
+  });
+  it("有规则 + 2 个节点 → 锁,原因 = 多节点", () => {
+    const c = deriveConstraints(facts({ workers: ["local", "vps1"] }));
+    expect(c.rolling).toEqual({ locked: true, reasonKey: "rooms.rollingReasonMultiNode" });
+  });
+  it("有规则 + 未勾选节点(= 全部节点)→ 锁", () => {
+    expect(deriveConstraints(facts({ workers: [] })).rolling.locked).toBe(true);
+  });
+  it("开烧录 → 锁,原因 = 烧录互斥", () => {
+    const c = deriveConstraints(facts({ burnLivechat: true }));
+    expect(c.rolling).toEqual({ locked: true, reasonKey: "rooms.rollingNeedsBurn" });
+  });
+  it("无规则(单机任务)→ 不受节点数约束", () => {
+    expect(deriveConstraints(facts({ hasRule: false, workers: [] })).rolling.locked).toBe(false);
+  });
+});
+
+describe("deriveConstraints — 其余依赖", () => {
+  it("关录弹幕 → 含礼物与烧录都锁", () => {
+    const c = deriveConstraints(facts({ danmu: false }));
+    expect(c.gift).toEqual({ locked: true, reasonKey: "roomForm.lock.needDanmu" });
+    expect(c.burn).toEqual({ locked: true, reasonKey: "roomForm.lock.needDanmu" });
+  });
+  it("平台无弹幕 → 烧录锁", () => {
+    expect(deriveConstraints(facts({ danmuAvailable: false })).burn.locked).toBe(true);
+  });
+  it("未登录 → 含礼物锁(原因 = 需登录),烧录不锁", () => {
+    const c = deriveConstraints(facts({ cookieReady: false }));
+    expect(c.gift).toEqual({ locked: true, reasonKey: "dialog.giftNeedCookie" });
+    expect(c.burn.locked).toBe(false);
+  });
+  it("开烧录 → 节点侧上传锁", () => {
+    expect(deriveConstraints(facts({ burnDanmu: true })).nodeSide.locked).toBe(true);
+  });
+  it(".ts 直传只在有效方式为节点侧上传时可用", () => {
+    expect(deriveConstraints(facts({ method: "nodeSide" })).tsDirect.locked).toBe(false);
+    expect(deriveConstraints(facts({ method: "after" })).tsDirect.locked).toBe(true);
+    expect(deriveConstraints(facts({ method: "nodeSide", burnDanmu: true })).tsDirect.locked).toBe(true);
+    expect(deriveConstraints(facts({ method: "nodeSide", uploadOn: false })).tsDirect.locked).toBe(true);
+  });
+  it("不合并 → 「合并后删 stage 源」锁;只合成 → 清空 stage 警示", () => {
+    expect(deriveConstraints(facts({ mergeSegments: false })).clStageSourceAfterMerge.locked).toBe(true);
+    expect(deriveConstraints(facts({ uploadOn: false })).clStageAfterDoneWarn).toBe(true);
+    expect(deriveConstraints(facts()).clStageAfterDoneWarn).toBe(false);
+  });
+});
+
+describe("applyChange — 当前方式失效时自动回落", () => {
+  it("rolling 选中后开烧录 → 回落 after,且保留其它字段", () => {
+    const f = { ...facts({ method: "rolling" }), extra: "keep" };
+    const next = applyChange(f, "burnDanmu", true);
+    expect(next.method).toBe("after");
+    expect(next.burnDanmu).toBe(true);
+    expect(next.extra).toBe("keep");
+  });
+  it("rolling 选中后加第二个节点 → 回落 after", () => {
+    expect(applyChange(facts({ method: "rolling" }), "workers", ["local", "vps1"]).method).toBe("after");
+  });
+  it("节点侧上传选中后开烧录 → 回落 after", () => {
+    expect(applyChange(facts({ method: "nodeSide" }), "burnLivechat", true).method).toBe("after");
+  });
+  it("未失效的改动不改变方式", () => {
+    expect(applyChange(facts({ method: "rolling" }), "mergeSegments", false).method).toBe("rolling");
+  });
+});
+
+describe("methodFromStored / storedFromForm 往返", () => {
+  it.each([
+    ["stage", false, { uploadOn: false, method: "after" }],
+    ["upload", false, { uploadOn: true, method: "after" }],
+    ["upload", true, { uploadOn: true, method: "nodeSide" }],
+    ["rolling", false, { uploadOn: true, method: "rolling" }],
+    ["rolling", true, { uploadOn: true, method: "rolling" }],
+    [undefined, false, { uploadOn: false, method: "after" }],
+  ] as const)("mode=%s nodeSide=%s", (mode, nodeSide, expected) => {
+    expect(methodFromStored(mode, nodeSide)).toEqual(expected);
+  });
+  it("三种方式与上传关写回存储", () => {
+    expect(storedFromForm(facts({ method: "after" }))).toEqual({ mode: "upload", nodeSideUpload: false });
+    expect(storedFromForm(facts({ method: "nodeSide" }))).toEqual({ mode: "upload", nodeSideUpload: true });
+    expect(storedFromForm(facts({ method: "rolling" }))).toEqual({ mode: "rolling", nodeSideUpload: false });
+    expect(storedFromForm(facts({ uploadOn: false, method: "rolling" }))).toEqual({ mode: "stage", nodeSideUpload: false });
+  });
+  it("被锁的方式按 after 写回(绝不把失效的 rolling 存进规则)", () => {
+    expect(storedFromForm(facts({ method: "rolling", workers: ["a", "b"] }))).toEqual({ mode: "upload", nodeSideUpload: false });
+    expect(storedFromForm(facts({ method: "nodeSide", burnDanmu: true }))).toEqual({ mode: "upload", nodeSideUpload: false });
+  });
+});
+
+describe("flowSummary", () => {
+  const keys = (f: FormFacts, rec = true) => flowSummary(f, rec).map((s) => s.key.replace("roomForm.flow.", ""));
+  it("合并 + 烧两版 + 投稿", () => {
+    expect(keys(facts({ burnDanmu: true, burnLivechat: true }))).toEqual(["record", "merge", "burnDanmu", "burnLivechat", "upload"]);
+  });
+  it("边录边传:录制后直接投稿,无处理步骤", () => {
+    expect(keys(facts({ method: "rolling" }))).toEqual(["record", "rolling"]);
+  });
+  it("失效的边录边传按收播后上传描述", () => {
+    expect(keys(facts({ method: "rolling", workers: [] }))).toEqual(["record", "merge", "upload"]);
+  });
+  it("按分段 + 节点侧;只合成;处理关闭", () => {
+    expect(keys(facts({ mergeSegments: false, method: "nodeSide" }))).toEqual(["record", "split", "nodeSide"]);
+    expect(keys(facts({ uploadOn: false }))).toEqual(["record", "merge", "stageOnly"]);
+    expect(flowSummary(facts({ procEnabled: false }), false)).toEqual([
+      { key: "roomForm.flow.record", on: false },
+      { key: "roomForm.flow.noProcess", on: false },
+    ]);
+  });
+});

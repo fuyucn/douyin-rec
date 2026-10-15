@@ -190,6 +190,13 @@ const DICT = {
       runsHeading: "处理运行态", runsEmpty: "还没有处理记录",
       runsEmptyHint: "录完一场并收播后,这里会显示该房间的处理流程(合并 → 烧录 → 上传)与结果。",
     },
+    roomForm: {
+      lock: { needDanmu: "需先开启「录弹幕」", needNodeSide: "仅在「节点侧上传」时生效", needMerge: "按分段产出时没有合并步骤" },
+      flow: {
+        record: "录制", noProcess: "不处理", rolling: "边录边传", merge: "合并", split: "按分段",
+        burnDanmu: "烧弹幕版", burnLivechat: "烧互动版", upload: "投稿 B站", nodeSide: "节点侧投稿", stageOnly: "只合成",
+      },
+    },
     settings: {
         notifSaved: "通知设置已保存",
         notifFailed: "保存失败:{msg}",
@@ -602,6 +609,13 @@ const DICT = {
       addRoom: "New room",
       runsHeading: "Processing runs", runsEmpty: "No processing runs yet",
       runsEmptyHint: "After a stream ends, this room's pipeline (merge → burn → upload) and results show up here.",
+    },
+    roomForm: {
+      lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment" },
+      flow: {
+        record: "Record", noProcess: "No processing", rolling: "Rolling upload", merge: "Merge", split: "Per segment",
+        burnDanmu: "Burn danmu", burnLivechat: "Burn livechat", upload: "Upload to Bilibili", nodeSide: "Node-side upload", stageOnly: "Compose only",
+      },
     },
     settings: {
         notifSaved: "Notification settings saved",
