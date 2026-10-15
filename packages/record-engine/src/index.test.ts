@@ -411,3 +411,61 @@ describe("mesioEngine.probe(可运行性自检)", () => {
     expect(typeof mesioEngine.probe).toBe("function");
   });
 });
+
+describe("新一场开播准入闸门(issue #96)", () => {
+  async function startWithAdmit(admit: (() => import("@drec/core").AdmitDecision) | undefined, spawn: () => void) {
+    const proc = new FakeProc();
+    const engine: DownloadEngine = {
+      id: "fake",
+      spawn: () => { spawn(); return { proc: proc as unknown as ChildProcess, sessionFirstPath: "/out/a.ts" }; },
+    };
+    const rec = new PollingRecorder(engine);
+    const ev: RecorderEvents = { onLive: vi.fn(), onSegment: vi.fn(), onOffline: vi.fn(), onError: vi.fn(), onProbeError: vi.fn() };
+    const outDir = mkdtempSync(join(tmpdir(), "rec-admit-"));
+    await rec.start("https://test.local/live/123", { quality: "origin", outDir, segmentSec: 0, admit }, ev);
+    await vi.advanceTimersByTimeAsync(1);
+    return { rec, ev, outDir };
+  }
+
+  it("拒绝 → 不起录、不触发 onLive、保持等待;下一轮轮询再判定,放行后自动开始(无需重启)", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(true));
+    let decision: import("@drec/core").AdmitDecision = { ok: false, reason: "磁盘剩余 1.0GB,低于水位 10.0GB" };
+    const admit = vi.fn(() => decision);
+    const spawn = vi.fn();
+    const { ev, outDir } = await startWithAdmit(admit, spawn);
+    expect(admit).toHaveBeenCalledTimes(1);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(ev.onLive).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(POLL_MS);       // 下一轮:仍拒绝,仍不起录
+    expect(admit).toHaveBeenCalledTimes(2);
+    expect(spawn).not.toHaveBeenCalled();
+
+    decision = { ok: true };                          // 空间恢复
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(ev.onLive).toHaveBeenCalledTimes(1);
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("闸门抛错 → 视为放行(探测失败不误拦录制)", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(true));
+    const spawn = vi.fn();
+    const { ev, outDir } = await startWithAdmit(() => { throw new Error("boom"); }, spawn);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(ev.onLive).toHaveBeenCalledTimes(1);
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("不提供闸门 → 行为与改动前一致(直接起录)", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(true));
+    const spawn = vi.fn();
+    const { ev, outDir } = await startWithAdmit(undefined, spawn);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(ev.onLive).toHaveBeenCalledTimes(1);
+    rmSync(outDir, { recursive: true, force: true });
+  });
+});

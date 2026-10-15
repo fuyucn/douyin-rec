@@ -15,6 +15,17 @@
 
 ## 进行中
 
+- [~] **T-48 界面把 stage 统一称「存档」,不投稿时锁定清理存档开关（issue [#135](https://github.com/fuyucn/douyin-rec/issues/135)）**
+  — 2026-10-15 认领，swe-loop 执行，分支 `codex/issue-135-archive-wording`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：用户可见的 stage / 只合成 文案统一改为「存档」；不投稿时锁定「清理存档」并写回关（后端只合成路径本就不执行该清理）；清理开关改正向「投稿后保留存档」。存储与配置字段名不动。
+  **验收**：锁定与取反往返有 vitest + 变异；中英文案无用户可见 stage 残留；全量测试 / typecheck / web build / i18n 检查通过。
+
+- [~] **T-47 房间 / Hub 规则 / 任务三处表单按依赖重排（issue [#126](https://github.com/fuyucn/douyin-rec/issues/126)）**
+  — 2026-10-15 认领，swe-loop 执行，stacked PR [#127](https://github.com/fuyucn/douyin-rec/pull/127)→[#128](https://github.com/fuyucn/douyin-rec/pull/128)→[#129](https://github.com/fuyucn/douyin-rec/pull/129)→[#130](https://github.com/fuyucn/douyin-rec/pull/130)→[#131](https://github.com/fuyucn/douyin-rec/pull/131)→[#132](https://github.com/fuyucn/douyin-rec/pull/132)，最底层 base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：前端字段依赖收口到一个纯模块（边录边传可用性直接复用 core `resolveRollingPolicy`）；三处表单共用「录制→节点→处理→上传→清理→通知」分区，上传区「上传方式」三选一（收播后 / 节点侧 / 边录边传），不可用项给原因、失效自动回落；顶部流程摘要。
+  **顺带修**（均浏览器实测复现）：Hub 规则弹窗定时窗口静默丢失；新建规则把表单默认值写到源任务；规则开关文案称「录制不受影响」实为全房间暂停；任务弹窗未登录保存会改写登录态开关。
+  **验收**：依赖矩阵 vitest 覆盖；三处表单保存往返不丢字段；`pnpm test`/`typecheck`/web build 绿。**待决**：「只关处理、录制照常」现有规则模型无法表达，是否拆独立处理开关另议。
+
 - [~] **T-46 dev 多节点 e2e 环境（issue [#82](https://github.com/fuyucn/douyin-rec/issues/82)，P0+P1+P4）**
   — 2026-10-14 认领，分支 `codex/issue-82-dev-multinode`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：容器内 sshd 的 dev worker 镜像层 + compose 覆盖（`drec-devnet` internal）+ `scripts/e2e-verify.sh`
@@ -107,6 +118,14 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
+
+- [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
+  — 2026-10-15。**做什么**:录制引擎在 spawn 前判定水位(拒绝则不起录、下轮再判),手动启动接口过同一闸门(拒绝返回 409 且不改 enabled)。**为什么**:此前只有 daemon 在窗口启停时查水位,常驻任务的下一场开播与手动启动会绕过 → 盘满导致录制损坏。**验收**:两条路径均有测试覆盖 + dev 实跑;`pnpm test`/`typecheck` 通过。分支 `codex/issue-96-new-broadcast-gate`,PR [#97](https://github.com/fuyucn/douyin-rec/pull/97)。
+
+- [ ] **T-50 水位配置注入的跟进项(#97 审查 LOW,不阻塞)** — 2026-10-15。三项:
+  ① `serve.ts` 注入环境变量的分支只有源码文本断言 → 抽 `hubConfigEnvFor(src)` 纯函数并补行为测试;
+  ② 不经 serve 直接跑 `task run`/`record` 时读不到 settings 表(会回落根文件)→ `buildSessionForTask` 手里有 store,可改调 `resolveHubConfig(undefined, store)`;
+  ③ **hub 配置 JSON 若含 `cookies` 字段,经 settings/inline 来源会整份进环境变量,被子进程(ffmpeg/mesio/ssh)继承,同用户可从 `/proc/<pid>/environ` 读到** → 改为只传水位相关字段(如仅 `diskMinGB`)。③ 建议优先做。
 
 - [ ] **T-38 CI 架构文档漂移守护恒红（issue [#11](https://github.com/fuyucn/douyin-rec/issues/11)）**
   — 2026-10-12 开票（incident）。**做什么**：让 CI 的架构文档守护能变绿。**根因**：CI 工作流用

@@ -160,6 +160,14 @@ export function buildTasks(ctx: ApiCtx) {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
       if (t.managedBy === "hub") return err(403, `任务 id=${id} 由 hub 管理，请在 master 上操作`);
+      // 磁盘水位准入(issue #96):手动启动此前绕过闸门。**只在这次点击会真的起录制进程时**才检查
+      // (已在跑 / 不在窗口内 / 被 hub 抑制时点「启动 / 启用」不会起进程,不该因低水位被拒)。
+      // 低于水位 → 明确报错且**不改任务状态**(不置 enabled),避免「已启用却不会录」的假象;测任务自己的输出目录。
+      const wouldStart = !manager.isRunning(id)
+        && !deps.localSuppressedIds?.()?.has(id)
+        && inWindow(nowMinutesLocal(new Date()), t.scheduleStart, t.scheduleEnd);
+      const admit = wouldStart ? deps.admitStart?.(t.outDir) : undefined;
+      if (admit && !admit.ok) return err(409, `磁盘空间不足,未启动任务 id=${id}:${admit.reason}`);
       try {
         store.setEnabled(id, true);
         // hub 语义:该任务是某条规则的源任务、且规则已把录制切给远端节点(workers 不含 local)

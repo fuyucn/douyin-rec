@@ -5,7 +5,7 @@ import type {
 } from "@drec/core";
 import { XmlDanmuWriter } from "./danmu-xml/index.js";
 import { createLogger, platformForRoom, sessionBaseOf } from "@drec/core";
-import type { Notifier, NotifyEvent } from "@drec/core";
+import type { AdmitDecision, Notifier, NotifyEvent } from "@drec/core";
 
 const log = createLogger("session");
 
@@ -17,6 +17,13 @@ const log = createLogger("session");
 export const STABLE_RECORD_MS = 120_000;
 /** 连续短命录制达此次数 → 发一次 error 告警(仍继续按封顶退避重连,不放弃)。 */
 export const SHORT_LIVED_ALARM = 10;
+
+/**
+ * 「同场断流重连」的有效窗口(ms):自断流起算,窗口内的重启才按同一场放行闸门;超窗后按新一场处理。
+ * 与 hub 的断流重连合并窗(默认 10 分钟)同口径。必要性:收播那刻判活可能滞后 / 抛错(都落成「仍在播」),
+ * 若标志永不过期,几小时后的**下一场**开播会被误当同场而绕过闸门(审计发现)。
+ */
+export const SAME_BROADCAST_WINDOW_MS = 10 * 60_000;
 
 export interface SessionOpts {
   /** Seconds to wait before reconnecting after an unexpected stream drop. Default: 5. */
@@ -38,6 +45,12 @@ export interface SessionOpts {
    * session 不阻塞录制(除会话收尾时等其结束)。
    */
   makeRolling?: () => RollingUploadHook;
+  /**
+   * 新一场开播的准入闸门(磁盘水位,issue #96)。会话层只在「**新一场**」开播时调用它,
+   * **同场断流重连直接放行**(重连是否受限见 plans/033 D6,不在此处理)。拒绝 → 发一条 error 告警
+   * (同一原因回升前只发一次),录制器保持等待开播并自动重试。不注入 = 不启用(行为不变)。
+   */
+  admitNewBroadcast?: () => AdmitDecision;
 }
 
 /**
@@ -97,6 +110,19 @@ export class RecordingSession {
   private readonly danmuEnabled: boolean;
   /** 边录边传钩子工厂(T-33);undefined = 未启用(默认,行为不变)。 */
   private readonly makeRolling?: () => RollingUploadHook;
+  /** 新一场开播准入闸门(issue #96);undefined = 不启用。 */
+  private readonly admitNewBroadcast?: () => AdmitDecision;
+  /**
+   * 当前是否处于「**同一场直播的断流重连**」:_handleOffline 每次重启录制器之前查权威 getLiving 并赋值
+   * (仍在播=流抖动 → true;确认下播 → false)。**但标志只在 {@link SAME_BROADCAST_WINDOW_MS} 内有效**:
+   * 重启后录制器若发现其实没在播,会一直轮询而不再触发 _handleOffline,标志不会被刷新,必须靠窗口过期。
+   * 录制引擎分不出「新一场」与「同场重连」,只有这里知道。初值 false:进程首次开播按新一场处理。
+   */
+  private sameBroadcastReconnect = false;
+  /** 同场重连标志的过期时刻(epoch ms);超过后 admit 按新一场处理。 */
+  private sameBroadcastUntil = 0;
+  /** 上一次被拒绝的原因(同一原因只告警一次;放行后复位)。 */
+  private lastAdmitDenied: string | null = null;
   /** 本会话的边录边传钩子(每次 _startInner 新建)。 */
   private rolling?: RollingUploadHook;
   /**
@@ -134,6 +160,25 @@ export class RecordingSession {
     this.notifier = sessionOpts?.notifier;
     this.danmuEnabled = sessionOpts?.danmuEnabled ?? true;
     this.makeRolling = sessionOpts?.makeRolling;
+    this.admitNewBroadcast = sessionOpts?.admitNewBroadcast;
+  }
+
+  /**
+   * 交给录制器的准入判定:同场重连一律放行;新一场才问闸门。拒绝时发告警(同原因只一次)。
+   * 闸门抛错视为放行(探测失败绝不误拦录制)。
+   */
+  private admit(): AdmitDecision {
+    if (!this.admitNewBroadcast) return { ok: true };
+    if (this.sameBroadcastReconnect && Date.now() <= this.sameBroadcastUntil) return { ok: true };
+    let d: AdmitDecision = { ok: true };
+    try { d = this.admitNewBroadcast(); } catch { return { ok: true }; }
+    if (d.ok) { this.lastAdmitDenied = null; return d; }
+    const dedupeKey = d.key ?? d.reason;
+    if (dedupeKey !== this.lastAdmitDenied) {
+      this.lastAdmitDenied = dedupeKey;
+      this.notify({ kind: "error", stage: "磁盘", message: `新一场开播被拒绝录制:${d.reason}(保持等待开播,空间恢复后自动开始)` });
+    }
+    return d;
   }
 
   /** Fire-and-forget notifier call — swallows errors so notifications never affect recording. */
@@ -291,7 +336,7 @@ export class RecordingSession {
     };
 
     // 注意:弹幕**不在此处**启动(那会在开播前连到陈旧 liveId)。改在 ev.onLive 里、确认开播后才连。
-    await this.recorder.start(this.roomUrl, this.opts, ev);
+    await this.recorder.start(this.roomUrl, { ...this.opts, admit: () => this.admit() }, ev);
   }
 
   /**
@@ -317,6 +362,9 @@ export class RecordingSession {
     //   true / 无 isLive(只是流抖动,主播还在播)→ 不发,留待 onLive 重连成功时发「抖动重连」warning。
     let stillLive = true;
     if (this.recorder.isLive) stillLive = await this.recorder.isLive().catch(() => true);
+    // 仍在播(流抖动)→ 接下来的重启是「同一场的重连」,准入闸门放行;真下播 → 下一次开播是新一场,受闸门约束。
+    this.sameBroadcastReconnect = stillLive;
+    this.sameBroadcastUntil = Date.now() + SAME_BROADCAST_WINDOW_MS;
     if (!stillLive) {
       this.notify({ kind: "recordEnd", anchor: this.anchor, room: this.roomUrl, outDir: this.opts.outDir, reason: "主播下播" });
       this.offlineNotified = true;

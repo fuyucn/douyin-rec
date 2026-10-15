@@ -314,6 +314,50 @@ describe("listTasks", () => {
   });
 });
 
+describe("startTask 磁盘水位准入(issue #96)", () => {
+  it("低于水位 → 409 明确报错,且不改任务状态(不置 enabled、不启动)", () => {
+    const t = store.addTask({ room: "111" });
+    const a = makeApi({ store, manager, admitStart: () => ({ ok: false, reason: "磁盘剩余 1.0GB,低于水位 10.0GB" }) });
+    const r = a.startTask(t.id);
+    expect(r.status).toBe(409);
+    expect(JSON.stringify(r.body)).toContain("低于水位");
+    expect(store.getTask(t.id)!.enabled).toBe(false);
+    expect(manager.startCalls).toEqual([]);
+  });
+
+  it("只在这次点击真会起进程时才检查:已在跑 / 被 hub 抑制 / 不在窗口内 → 不查闸门,不会被 409", () => {
+    const admit = vi.fn(() => ({ ok: false as const, reason: "低于水位" }));
+    const t1 = store.addTask({ room: "401" });
+    manager.forceRunning(t1.id);
+    expect(makeApi({ store, manager, admitStart: admit }).startTask(t1.id).status).toBe(200);
+    const t2 = store.addTask({ room: "402" });
+    const sup = makeApi({ store, manager, admitStart: admit, localSuppressedIds: () => new Set([t2.id]) });
+    expect(sup.startTask(t2.id).status).toBe(200);
+    const t3 = store.addTask({ room: "403" });
+    // 一个永远不含「现在」的窗口:取与当前分钟错开 12 小时的 1 分钟窗
+    const m = (new Date().getHours() * 60 + new Date().getMinutes() + 720) % 1440;
+    const hhmm = (x: number) => `${String(Math.floor(x / 60)).padStart(2, "0")}:${String(x % 60).padStart(2, "0")}`;
+    store.updateTask(t3.id, { scheduleStart: hhmm(m), scheduleEnd: hhmm((m + 1) % 1440) });
+    expect(makeApi({ store, manager, admitStart: admit }).startTask(t3.id).status).toBe(200);
+    expect(admit).not.toHaveBeenCalled();
+  });
+
+  it("把任务自己的 outDir 交给准入(不是默认输出目录)", () => {
+    const admit = vi.fn(() => ({ ok: true as const }));
+    const t = store.addTask({ room: "404", outDir: "/mnt/task-disk/rec" });
+    makeApi({ store, manager, admitStart: admit }).startTask(t.id);
+    expect(admit).toHaveBeenCalledWith("/mnt/task-disk/rec");
+  });
+
+  it("空间充足 / 不注入准入 → 照常启动(默认行为不变)", () => {
+    const t1 = store.addTask({ room: "222" });
+    const ok = makeApi({ store, manager, admitStart: () => ({ ok: true }) });
+    expect(ok.startTask(t1.id).status).toBe(200);
+    const t2 = store.addTask({ room: "333" });
+    expect(api.startTask(t2.id).status).toBe(200);
+  });
+});
+
 describe("createTask", () => {
   it("creates a task and returns it (201)", () => {
     const res = api.createTask({ room: "333", name: "tester", quality: "hd", danmu: 0 });
