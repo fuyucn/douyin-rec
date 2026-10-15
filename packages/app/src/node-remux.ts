@@ -141,7 +141,10 @@ export interface NodeRemuxDeps {
 /** 默认接缝:动态 import post-process(与 segment-pipeline 同做法,避免 app 顶层硬依赖 ffmpeg 包初始化)。 */
 async function defaultRemux(src: string, tmp: string, fmt: StageFormat): Promise<void> {
   const { remuxSegment } = await import("@drec/post-process");
-  await remuxSegment(src, tmp, fmt);
+  // atomic:false —— 本模块自己就是两阶段落盘(`{最终名}.{owner}-{pid}.drec-remux` → 校验 → fsync + rename),
+  // 且那个中间名是崩溃接管扫描(recoverNodeRemux / parseRemuxTmpName)的识别依据;
+  // 再套一层 `.part` 会让临时名匹配不上、接管逻辑认不出自己的残留。
+  await remuxSegment(src, tmp, fmt, { atomic: false });
 }
 async function defaultProbe(p: string): Promise<MediaProbe> {
   const { ffprobeVideo, ffprobePacketStats } = await import("@drec/post-process");

@@ -1071,4 +1071,21 @@ describe("issue #140:半成品不复用 + 提交前自检", () => {
     // 与「remux 抛错」同口径:停在 started(还没跟 B站说话)→ master 可判定「确认没成」。
     expect(readNodeResult(sub)?.phase).toBe("started");
   });
+
+  it("规范名是陈旧产物(与 .work 不同 inode)→ 重新链到中间产物,不留下旧内容", async () => {
+    const { sub, spec } = scene("stage");
+    const work = join(sub, ".work", "000.mp4");
+    mkdirSync(join(sub, ".work"), { recursive: true });
+    writeFileSync(work, "REMUXED");
+    // 陈旧规范名:另一份文件(不同 inode)。旧实现 `if (!existsSync(out)) linkOrCopySync(...)` 会原样留着它。
+    const canonical = join(sub, "Lilt_2026-10-15_000.mp4");
+    writeFileSync(canonical, "STALE");
+
+    const r = await runNodeSidePipeline(spec, silence);
+
+    expect(r.ok).toBe(true);
+    expect(readFileSync(canonical, "utf-8")).toBe("REMUXED");       // 已被换成中间产物
+    expect(statSync(canonical).ino).toBe(statSync(work).ino);       // 同一 inode(零拷贝)
+    expect(vi.mocked(remuxSegment)).not.toHaveBeenCalled();         // 中间产物可读 → 不重做
+  });
 });

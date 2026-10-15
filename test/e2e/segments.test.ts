@@ -102,6 +102,74 @@ describe("e2e: 半成品产物(issue #140)", () => {
     expect(existsSync(join(s.recordingsDir, "主播甲"))).toBe(true);
   });
 
+  it("规范名是陈旧半成品(与 .work 不同 inode)→ 重新链到重做后的产物,上传的是新内容", async () => {
+    // 场景:上次强杀留下「.work/000.mp4 半成品 + 已链出去的规范名」。本轮 .work 被判不可复用 → 重做,
+    // 重做生成**新 inode**;规范名必须被重新链到新 inode,否则上传的仍是那份坏文件。
+    // 反例(旧实现 `if (!existsSync(out)) linkOrCopySync(...)`)会让规范名原样留着 → 上传 STALE。
+    const uploaded: Array<{ path: string; body: string }> = [];
+    const residue = new Set<string>();
+    s = await Scenario.create({
+      cfg: { steps: { mergeSegments: false, burnDanmu: false, burnLivechat: false }, cleanup: FULL_CLEANUP },
+      deps: {
+        remuxSegment: async (src, out) => { writeFileSync(out, `NEW:${readFileSync(src, "utf-8")}`); },
+        // 残留的 .work 只对**首次**探测返回 0(半成品),重做后就正常 —— 与真实 ffprobe 口径一致。
+        // 产物(规范名)按「能读出来」算:本用例的替身 remux 写的是纯文本,不是 JSON。
+        segmentDuration: async (f) => {
+          if (residue.delete(f)) return 0;
+          return /_\d{3}\.mp4$/.test(f) && !f.includes(".work/") ? 60 : probeJson(f);
+        },
+        uploadPlain: async (o) => {
+          const p = String((o as { video?: string }).video ?? "");
+          uploaded.push({ path: p, body: existsSync(p) ? readFileSync(p, "utf-8") : "(missing)" });
+          return s.fake.uploadPlain(o);
+        },
+      },
+    });
+    s.record({ sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 1, segSec: 600 }] });
+    const work = segWorkPath(s.stageSubOf(KEY), 0);
+    mkdirSync(dirname(work), { recursive: true });
+    writeFileSync(work, "HALF"); // 半成品:首次探测读不出时长(见 segmentDuration 替身)
+    residue.add(work);
+    const stale = join(s.stageSubOf(KEY), "主播甲_2026-06-27_000.mp4");
+    writeFileSync(stale, "STALE"); // 陈旧规范名 = 另一份文件(不同 inode)
+
+    await s.reconcile();
+
+    expect(s.jobState(KEY)).toBe("done");
+    expect(uploaded).toHaveLength(1);
+    // 传的是**重做后**的产物(替身 remux 给内容加了 NEW: 前缀),不是那份 STALE。
+    expect(uploaded[0]?.body.startsWith("NEW:")).toBe(true);
+    expect(uploaded[0]?.body).not.toBe("STALE");
+  });
+
+  it("合并组:产物已存在但读不出时长 → 重新合并,不复用半成品", async () => {
+    // segmentGroupSec > 0 → 多段合成一个分 P(走 mergeSegments 而不是单段链接),
+    // 钉住「合并组的复用判定」也不能只看 existsSync。
+    const merges: string[] = [];
+    const residue = new Set<string>();
+    s = await Scenario.create({
+      cfg: { segmentGroupSec: 3600, steps: { mergeSegments: false, burnDanmu: false, burnLivechat: false }, cleanup: FULL_CLEANUP },
+      deps: {
+        mergeSegments: async (inputs, out) => { merges.push(out); writeFileSync(out, `MERGED:${inputs.length}`); },
+        // 陈旧合并产物**首次**探测读不出时长 → 必须重做;重做后正常(替身写的是纯文本,不是 JSON)。
+        segmentDuration: async (f) => {
+          if (residue.delete(f)) return 0;
+          return f.endsWith("000.mp4") && !f.includes(".work/") ? 60 : probeJson(f);
+        },
+      },
+    });
+    s.record({ sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 2, segSec: 600 }] });
+    const out0 = join(s.stageSubOf(KEY), "主播甲_2026-06-27_000.mp4");
+    mkdirSync(dirname(out0), { recursive: true });
+    writeFileSync(out0, "HALF-MERGED");
+    residue.add(out0);
+
+    await s.reconcile();
+
+    expect(merges).toEqual([out0]);          // 重做了(旧实现会跳过 → merges 为空)
+    expect(s.jobState(KEY)).toBe("done");
+  });
+
   it("续跑补 append 前自检:产物读不出时长 → 不追加分 P、转人工(不重复投稿)", async () => {
     const broken = { on: false };
     s = await Scenario.create({

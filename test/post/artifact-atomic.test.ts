@@ -82,6 +82,18 @@ describe("产物原子落盘(issue #140)", () => {
     expect(existsSync(out2)).toBe(false);
   });
 
+  it("remuxSegment({atomic:false}):调用方自己两阶段落盘时不被套 `.part`(节点侧原地替换依赖那个临时名)", async () => {
+    const dir = newDir();
+    const src = join(dir, "src2.ts");
+    writeFileSync(src, "SRC");
+    // 调用方给的 out 就是它自己的临时名(`{最终名}.{owner}-{pid}.drec-remux`),必须原样写、原样保留。
+    const tmpName = join(dir, "final.mkv.t1-4242.drec-remux");
+    await remuxSegment(src, tmpName, "mkv", { atomic: false });
+    expect(readFileSync(tmpName, "utf-8")).toBe("OK");
+    expect(existsSync(atomicPartPath(tmpName))).toBe(false); // 没有嵌套 .part
+    expect(existsSync(join(dir, ".final.mkv.t1-4242.drec-remux.part.mkv"))).toBe(false);
+  });
+
   it("mergeSession 也走原子收尾:规范化成功但 concat 失败 → 最终名不出现", async () => {
     const dir = newDir();
     const s1 = join(dir, "s1.ts");
