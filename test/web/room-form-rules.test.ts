@@ -125,10 +125,22 @@ describe("methodFromStored / storedFromForm 往返", () => {
   });
 });
 
-describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定、存储三处同口径)", () => {
+describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定同口径;存储保留原值,仅 rolling 写回实际值)", () => {
   const off = facts({ danmu: false, burnDanmu: true, burnLivechat: true });
-  it("存储写回关,避免后端据残留烧录开关判定边录边传「需烧录」", () => {
-    expect(storedFromForm(off)).toMatchObject({ burnDanmu: false, burnLivechat: false });
+  const burnOn = { burnDanmu: true, burnLivechat: true };
+  it.each(["after", "nodeSide"] as const)("方式 %s:存储保留烧录原值(不静默改写)", (method) => {
+    expect(storedFromForm({ ...off, method })).toMatchObject(burnOn);
+  });
+  it("只合成:存储保留烧录原值", () => {
+    expect(storedFromForm({ ...off, uploadOn: false })).toEqual({ mode: "stage", nodeSideUpload: false, ...burnOn });
+  });
+  it("方式 rolling:存储写回关,避免后端据残留烧录开关判定边录边传「需烧录」", () => {
+    expect(storedFromForm({ ...off, method: "rolling" })).toEqual({ mode: "rolling", nodeSideUpload: false, burnDanmu: false, burnLivechat: false });
+  });
+  it("录弹幕 + 开烧录:rolling 被锁并回落 after,存储烧录 = 原值 true", () => {
+    const on = facts({ method: "rolling", burnDanmu: true, burnLivechat: true });
+    expect(deriveConstraints(on).rolling.locked).toBe(true);
+    expect(storedFromForm(on)).toEqual({ mode: "upload", nodeSideUpload: false, ...burnOn });
   });
   it("边录边传 / 节点侧不因残留烧录开关被锁", () => {
     const c = deriveConstraints(off);
@@ -139,7 +151,7 @@ describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定、存储三�
     expect(flowSummary(off, true).map((x) => x.key)).toEqual(["roomForm.flow.record", "roomForm.flow.merge", "roomForm.flow.upload"]);
   });
   it("平台无弹幕同理", () => {
-    expect(storedFromForm(facts({ danmuAvailable: false, burnDanmu: true }))).toMatchObject({ burnDanmu: false });
+    expect(storedFromForm(facts({ danmuAvailable: false, burnDanmu: true }))).toMatchObject({ burnDanmu: true });
   });
 });
 

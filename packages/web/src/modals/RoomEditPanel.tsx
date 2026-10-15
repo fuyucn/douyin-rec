@@ -110,10 +110,13 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
   // 只影响弹幕礼物/入场;B站/快手用它取流。
   const factsOf = (f: FormState): FormFacts => ({
     ...f,
+    // 无录制任务 = 录弹幕由将来的任务决定,不能拿 false 锁烧录(提交给录制任务的 danmu 仍取 form.danmu,且仅有 rec 时才提交)
+    danmu: room.recording ? f.danmu : true,
     danmuAvailable: plat ? plat.hasDanmu : true,
     cookieReady,
     cookieForStream: room.platform !== "douyin",
-    hasRule: room.processing != null,
+    // 面板保存必经 rooms API upsert hub 规则(无规则房间保存即新建,workers 空 = 全部节点)
+    hasRule: true,
   });
   const facts = factsOf(form);
   const c = deriveConstraints(facts);
