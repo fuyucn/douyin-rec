@@ -113,7 +113,8 @@ export function RoomEditPanel({ open, room, onClose, onSaved }: Props): ReactNod
     danmuAvailable: plat ? plat.hasDanmu : true,
     cookieReady,
     cookieForStream: room.platform !== "douyin",
-    hasRule: room.processing != null,
+    // 面板保存必经 rooms API upsert hub 规则(无规则房间保存即新建,workers 空 = 全部节点)
+    hasRule: true,
   });
   const facts = factsOf(form);
   const c = deriveConstraints(facts);
