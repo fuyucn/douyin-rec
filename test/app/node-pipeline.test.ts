@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson } from "@drec/core";
 import { tryDirectTsLink, nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, runNodeSidePipeline, splitGroupsBySession, writeNodeResult, abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath } from "../../packages/app/src/node-pipeline.js";
-import { remuxSegment } from "@drec/post-process";
+import { remuxSegment, ffprobeDuration } from "@drec/post-process";
 import { uploadPlain, appendGroup, countVideoParts } from "../../packages/app/src/upload/biliup.js";
 
 // node:fs 走 spy(默认透传真实实现)—— 只有「硬链接不可用」用例才临时打桩 linkSync 抛错。
@@ -42,7 +42,7 @@ vi.mock("@drec/post-process", async (orig) => {
   const actual = await orig<typeof import("@drec/post-process")>();
   return {
     ...actual,
-    ffprobeDuration: async () => 60,
+    ffprobeDuration: vi.fn(async () => 60),
     remuxSegment: vi.fn(async (_src: string, out: string) => { writeFileSync(out, "REMUXED"); }),
     mergeSession: async (_inputs: string[], out: string) => { writeFileSync(out, "MERGED"); },
   };
@@ -901,5 +901,98 @@ describe("节点侧:.ts 直传(tsDirect)", () => {
     writeFileSync(join(dir, "Lilt_2026-10-12.xml"), "x");
     const targets = nodeStageCleanupTargets(dir).map((p) => p.replace(dir + "/", ""));
     expect(targets).toEqual(["Lilt_2026-10-12_000.ts"]);
+  });
+});
+
+describe("节点侧:.ts 直传的安全边界(审查补测)", () => {
+  beforeEach(() => {
+    vi.mocked(remuxSegment).mockClear();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(appendGroup).mockClear();
+  });
+
+  function scene(clean: { source?: boolean; stage?: boolean }): { sub: string; spec: Parameters<typeof runNodeSidePipeline>[0]; gate: UploadGate } {
+    const root = mkdtempSync(join(tmpdir(), "node-tsd-up-"));
+    const recDir = join(root, "recordings");
+    mkdirSync(recDir, { recursive: true });
+    const tsFiles = [0, 1].map((i) => {
+      const f = join(recDir, `Lilt_2026-10-12_05-18-36_${String(i).padStart(3, "0")}.ts`);
+      writeFileSync(f, "SRCTS");
+      return f;
+    });
+    const stageDir = join(root, "stage");
+    mkdirSync(stageDir, { recursive: true });
+    const c = clock();
+    const store = openUploadLimitStore(join(root, "x.db"), { log: silence });
+    const gate = new UploadGate({ store, cooldownMs: 0, rateLimit: 1000, now: c.now, sleep: c.sleep, warn: silence });
+    return {
+      sub: join(stageDir, "douyin_123_2026-10-12"),
+      spec: {
+        streamKey: "douyin:123:2026-10-12",
+        tsFiles,
+        sessionBase: "Lilt_2026-10-12_05-18-36",
+        startMs: 1_750_000_000_000,
+        liveTitle: "开播啦",
+        mergeSegments: false,
+        tsDirect: true,
+        uploadMode: "upload",
+        stageDir,
+        uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像", titleTemplate: "{name}_{date}", partTitleTemplate: "{name}_P{part}" },
+        uploadPrivate: true,
+        cleanSourceAfterDone: clean.source,
+        cleanStageAfterDone: clean.stage,
+      } as unknown as Parameters<typeof runNodeSidePipeline>[0],
+      gate,
+    };
+  }
+
+  it("ffprobe 探不出时长的段(损坏/截断)→ 不直传,回落 remux(让 ffmpeg 兜底报错,不静默上传坏文件)", async () => {
+    const { sub, spec } = scene({});
+    spec.uploadMode = "stage";
+    // 第 1 段 ffprobe 失败(durationOf 吞成 0),第 2 段正常。
+    vi.mocked(ffprobeDuration).mockRejectedValueOnce(new Error("moov atom not found"));
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(vi.mocked(remuxSegment)).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(sub, "Lilt_2026-10-12_000.ts"))).toBe(false); // 坏段没被硬链接
+    expect(existsSync(join(sub, "Lilt_2026-10-12_000.mp4"))).toBe(true);
+    expect(existsSync(join(sub, "Lilt_2026-10-12_001.ts"))).toBe(true);  // 好段照常直传
+  });
+
+  it("upload 模式:传给 biliup 的是 .ts(经分 P 标题别名,硬链接),不是 mp4", async () => {
+    const { spec, gate } = scene({});
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    const created = vi.mocked(uploadPlain).mock.calls[0]![0] as { plain: { video: string } };
+    expect(created.plain.video).toMatch(/\.ts$/);
+    expect(created.plain.video).toContain("/.upload/");
+    const appended = vi.mocked(appendGroup).mock.calls[0]![0] as { files: string[] };
+    expect(appended.files[0]).toMatch(/\.ts$/);
+    expect(vi.mocked(remuxSegment)).not.toHaveBeenCalled();
+  });
+
+  it("清理 source+stage 都开 → 上传成功后两处链接都清完(此时才释放数据)", async () => {
+    const { sub, spec, gate } = scene({ source: true, stage: true });
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    for (const f of spec.tsFiles) expect(existsSync(f)).toBe(false);
+    expect(existsSync(join(sub, "Lilt_2026-10-12_000.ts"))).toBe(false);
+    expect(existsSync(join(sub, ".upload"))).toBe(false);
+  });
+
+  it("只清 source、不清 stage → stage 链接仍持有完整数据(不丢唯一副本)", async () => {
+    const { sub, spec, gate } = scene({ source: true, stage: false });
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    for (const f of spec.tsFiles) expect(existsSync(f)).toBe(false);
+    expect(readFileSync(join(sub, "Lilt_2026-10-12_000.ts"), "utf-8")).toBe("SRCTS");
+  });
+
+  it("只清 stage、不清 source → 源完好(只删链接,不碰 recordings)", async () => {
+    const { sub, spec, gate } = scene({ source: false, stage: true });
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    for (const f of spec.tsFiles) expect(readFileSync(f, "utf-8")).toBe("SRCTS");
+    expect(existsSync(join(sub, "Lilt_2026-10-12_000.ts"))).toBe(false);
   });
 });

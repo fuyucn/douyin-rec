@@ -489,7 +489,9 @@ async function produceParts(
     const work = path.join(workDir, `${String(parts.length).padStart(3, "0")}.mp4`);
     const files = group.map((idx) => spec.tsFiles[idx]!);
     // `.ts` 直传:单段独占分 P 的 .ts 不 remux,硬链接成规范名直接上传(同一内容只占一份)。
-    if (spec.tsDirect === true && group.length === 1 && /\.ts$/i.test(files[0]!)) {
+    // durations=0 表示 ffprobe 探不出时长(损坏/截断):remux 会让 ffmpeg 报错兜底,直传则会把坏文件静默投上去
+    // → 探不出时长的段不走直传,回落 remux。
+    if (spec.tsDirect === true && group.length === 1 && /\.ts$/i.test(files[0]!) && (durations[group[0]!] ?? 0) > 0) {
       const outTs = out.replace(/\.mp4$/i, ".ts");
       if (tryDirectTsLink(files[0]!, outTs)) {
         parts.push({ plain: outTs, sources: files, durSec: groupDur });
