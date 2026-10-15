@@ -25,6 +25,8 @@ export interface PipelineSteps {
    * remux → biliup 上传,master 只收 BV,省掉整场录像 rsync 回传。需烧录时本开关无效(回落现状)。
    */
   nodeSideUpload?: boolean;
+  /** `.ts` 直传(节点侧):单段独占分 P 的 `.ts` 不 remux 直接作上传物,见 HubPipelineConfig.steps.tsDirect。 */
+  tsDirect?: boolean;
 }
 
 /**

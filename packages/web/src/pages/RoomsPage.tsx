@@ -405,6 +405,7 @@ function pipelineBits(t: ReturnType<typeof useT>, r: RoomDTO): string[] {
   if (steps.burnDanmu !== false) out.push(t("rooms.stepBurnDanmu"));
   if (steps.burnLivechat !== false) out.push(t("rooms.stepBurnLivechat"));
   if (steps.nodeSideUpload) out.push(t("rooms.stepNodeUpload"));
+  if (steps.nodeSideUpload && steps.tsDirect) out.push(t("rooms.stepTsDirect"));
   out.push(
     up.mode === "upload" || up.mode === "rolling"
       ? up.private === false

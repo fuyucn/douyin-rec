@@ -361,6 +361,7 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
     sessionBase: o.earliest?.rec.sessionBase,
     segmentGroupSec: cfg.segmentGroupSec,
     mergeSegments: cfg.steps?.mergeSegments !== false,
+    tsDirect: cfg.steps?.tsDirect === true,
     uploadMode: "upload",
     stageDir: cfg.stageDir,
     uploadMeta: cfg.uploadMeta,
