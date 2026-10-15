@@ -1,5 +1,5 @@
 // ts/src/core/post/concat.ts
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
 import { isOutputFormat, isVideoFileName, segmentIndexOf, sessionBaseOf, stageContainerOfPath, stampedSessionBaseOf, STAGE_CONTAINERS, type StageFormat } from "@drec/core";
@@ -59,6 +59,16 @@ export function readNodeFormats(dir: string, files: string[]): Map<string, Stage
     } catch { /* 缺失/损坏 → 视为未转换 */ }
   }
   return out;
+}
+
+/**
+ * 目录 → 会话分组,**带上该目录里 session.json 声明的节点侧容器**(issue #143):
+ * 所有「在真实目录上分组」的调用点共用这一个入口,避免有的认 mp4/mkv 分段、有的不认。
+ * `files` 缺省 = `readdirSync(dir)`;调用方已有列表时传入避免重复读盘。
+ * 目录里没有 session.json(或无 nodeFormat)= 与裸 `groupSessions(files)` 完全一致。
+ */
+export function groupSessionsInDir(dir: string, files: string[] = readdirSync(dir)): Record<string, SessionGroup> {
+  return groupSessions(files, { nodeFormats: readNodeFormats(dir, files) });
 }
 
 /**

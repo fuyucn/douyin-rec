@@ -10,13 +10,13 @@ const mk = (): string => (dir = mkdtempSync(path.join(tmpdir(), "stage-leftovers
 const names = (ps: string[]): string[] => ps.map((p) => path.basename(p)).sort();
 
 describe("stageVideoLeftovers(#60)", () => {
-  it("只返回 .ts/.flv/.mp4 与 .work/.upload;xml/ass/session.json/job.log 与未知目录一律不碰", () => {
+  it("返回 .ts/.flv/.mp4、拉进来的 session.json 边车副本(issue #143)与 .work/.upload;xml/ass/job.log 与未知目录一律不碰", () => {
     const d = mk();
     for (const f of ["a.ts", "b.FLV", "c.mp4", "a.xml", "a.ass", "a.session.json", "job.log", ".drec-node-result.json", "note.txt"]) writeFileSync(path.join(d, f), "x");
     mkdirSync(path.join(d, ".work")); writeFileSync(path.join(d, ".work", "000.mp4"), "x");
     mkdirSync(path.join(d, ".upload"));
     mkdirSync(path.join(d, "other")); writeFileSync(path.join(d, "other", "keep.mp4"), "x");
-    expect(names(stageVideoLeftovers(d))).toEqual([".upload", ".work", "a.ts", "b.FLV", "c.mp4"]);
+    expect(names(stageVideoLeftovers(d))).toEqual([".upload", ".work", "a.session.json", "a.ts", "b.FLV", "c.mp4"]);
   });
 
   it("目录不存在 / 空目录 → 空数组,不抛错", () => {

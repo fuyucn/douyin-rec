@@ -216,11 +216,11 @@ describe("session-plan 按容器推导", () => {
 });
 
 describe("stage 视频类清理识别 mkv(删除类:不漏删也不误删)", () => {
-  it("stageVideoLeftovers:返回 .mkv(与 ts/flv/mp4 同类);xml/ass/json/log 与其它文件不碰", () => {
+  it("stageVideoLeftovers:返回 .mkv(与 ts/flv/mp4 同类);拉进 stage 的 session.json 边车副本一并返回(issue #143);xml/ass/log 与其它文件不碰", () => {
     const d = mkdtempSync(join(tmpdir(), "of-left-"));
     for (const f of ["a.mkv", "b.MKV", "c.mp4", "d.ts", "e.flv", "a.xml", "a.ass", "a.session.json", "job.log", "notes.txt", "x.mkv.bak"]) writeFileSync(join(d, f), "x");
     const got = stageVideoLeftovers(d).map((p) => p.split("/").pop()).sort();
-    expect(got).toEqual(["a.mkv", "b.MKV", "c.mp4", "d.ts", "e.flv"]);
+    expect(got).toEqual(["a.mkv", "a.session.json", "b.MKV", "c.mp4", "d.ts", "e.flv"]);
     expect(existsSync(join(d, "a.xml"))).toBe(true);
     rmSync(d, { recursive: true });
   });

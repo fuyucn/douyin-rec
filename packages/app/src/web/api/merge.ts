@@ -8,7 +8,7 @@ import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
 import { readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { groupSessions, mergeSessions, readNodeFormats } from "@drec/post-process";
+import { groupSessionsInDir, mergeSessions } from "@drec/post-process";
 import type { RecordingSessionDTO } from "@drec/core";
 
 export function buildMerge(ctx: ApiCtx) {
@@ -21,7 +21,7 @@ export function buildMerge(ctx: ApiCtx) {
       const dir = recordingsDir(t);
       if (!dir || !existsSync(dir)) return { status: 200, body: { dir, sessions: [] } };
       const files = readdirSync(dir).map((f) => join(dir, f));
-      const groups = groupSessions(files, { nodeFormats: readNodeFormats(dir, files) }); // 任务录制目录:认节点侧原地替换后的 mp4/mkv(issue #137)
+      const groups = groupSessionsInDir(dir, files); // 任务录制目录:认节点侧原地替换后的 mp4/mkv(issue #137)
       const sessions: RecordingSessionDTO[] = Object.entries(groups)
         .filter(([, g]) => g.ts.length > 0) // 只列有视频的会话
         .map(([base, g]) => ({
@@ -43,7 +43,7 @@ export function buildMerge(ctx: ApiCtx) {
       if (bases.length === 0) return err(400, "请至少选择一个会话");
 
       const files = readdirSync(dir).map((f) => join(dir, f));
-      const groups = groupSessions(files, { nodeFormats: readNodeFormats(dir, files) }); // 任务录制目录:认节点侧原地替换后的 mp4/mkv(issue #137)
+      const groups = groupSessionsInDir(dir, files); // 任务录制目录:认节点侧原地替换后的 mp4/mkv(issue #137)
       for (const b of bases) if (!groups[b]) return err(400, `未知会话: ${b}`);
       // 入参顺序 = 时间序;每会话取分段 ts + 会话级 xml(无则不合并弹幕)。
       const inputs = bases.map((b) => ({

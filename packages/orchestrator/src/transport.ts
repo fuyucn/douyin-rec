@@ -11,6 +11,12 @@ export interface NodeRecording {
   tsFiles: string[];         // 绝对/相对该节点路径
   xmlPath?: string;
   /**
+   * 会话标识边车 `{base}.session.json` 的节点路径(存在才填;旧 bundle / 老录像无此字段)。
+   * 它声明了节点侧原地替换后的容器(`nodeFormat`),pull 时必须一起带进 stage,
+   * stage 上的合并才认得 .mkv/.mp4 分段(issue #143)。**不是视频**:清理/删源只认 `tsFiles`,绝不碰它。
+   */
+  sessionJsonPath?: string;
+  /**
    * 该场弹幕 xml 里的条目数(弹幕+礼物+入场)。**仅表头的空 xml**(WS 被风控/未连上)记 0。
    * 选优用:烧录取 winner 自己的 xml,故「视频覆盖更高但没弹幕」的节点不该赢过有弹幕的
    * (否则上传弹幕为空,哪怕同组另一节点弹幕完好)。缺省(旧录像/未统计)= undefined,按 0 处理。
