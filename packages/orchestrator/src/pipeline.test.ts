@@ -1986,5 +1986,81 @@ describe("runPipeline — 边录边传识别短路", () => {
     expect(deps.uploadPlain).toHaveBeenCalled();
     expect(r.state).toBe("done");
   });
-});
 
+  describe("issue #143:拉取的视频分段必须全被 stage 会话认领", () => {
+    const A = "主播名_2026-06-27_08-00-00";
+    const B = "主播名_2026-06-27_09-00-00";
+    /** 让 pull 把给定文件名真实落进 stage(模拟 rsync/硬链接)。 */
+    const pullWrites = (deps: TestDeps, pulledSidecar: { v?: string[] } = {}) => {
+      (deps.transports.get("node-1")!.pull as Mock).mockImplementation(async (paths: string[], dir: string) => {
+        pulledSidecar.v = paths;
+        mkdirSync(dir, { recursive: true });
+        for (const p of paths) {
+          const name = p.split("/").pop()!;
+          writeFileSync(join(dir, name), name.endsWith(".session.json") ? JSON.stringify({ nodeFormat: "mkv" }) : "x");
+        }
+      });
+    };
+    const recs = (withSidecar: boolean) => makeRec({
+      sessionBase: A,
+      tsFiles: [`/remote/${A}.mkv`, `/remote/${B}.ts`],
+      xmlPath: undefined,
+      ...(withSidecar ? { sessionJsonPath: `/remote/${A}.session.json` } : {}),
+    });
+
+    it("带边车:pull 清单含边车且不入清理清单,混合容器全部进合并", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, cleanup: { sourceAfterDone: true } } });
+      const seen: { v?: string[] } = {};
+      pullWrites(deps, seen);
+      deps.ledger.upsertPending(broadcast.streamKey);
+      const r = await runPipeline(broadcast, deps);
+      expect(seen.v).toContain(`/remote/${A}.session.json`);
+      expect(r.state).toBe("done");
+      expect(deps.sh.mock.calls.some((c) => String(c[0]).includes(" merge "))).toBe(true);
+      // 清理只认 tsFiles:边车绝不当视频删。
+      const cleaned = ((deps.transports.get("node-1")!.cleanup as Mock).mock.calls.flat(2)) as string[];
+      expect(cleaned.some((p) => p.endsWith(".session.json"))).toBe(false);
+      deps.ledger.close();
+    });
+
+    it("边车缺失(旧 bundle):mkv 无人认领 → needs_manual + 告警,不 merge、不上传、不删源", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: recs(false) }]);
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, cleanup: { sourceAfterDone: true, stageSourceAfterMerge: true } } });
+      pullWrites(deps);
+      deps.ledger.upsertPending(broadcast.streamKey);
+      const r = await runPipeline(broadcast, deps);
+      expect(r.state).toBe("needs_manual");
+      expect(deps.sh.mock.calls.some((c) => String(c[0]).includes(" merge "))).toBe(false);
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      const err = deps.notify.mock.calls.map((c) => c[0] as { kind: string; message?: string }).find((e) => e.kind === "error");
+      expect(err?.message).toContain("1 个");
+      expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("needs_manual");
+      deps.ledger.close();
+    });
+
+    it("旧 bundle 全原生 .ts(无 sessionJsonPath)→ 行为不变,照常完成", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ sessionBase: B, tsFiles: [`/remote/${B}.ts`], xmlPath: undefined }) }]);
+      const deps = makeDeps();
+      pullWrites(deps);
+      deps.ledger.upsertPending(broadcast.streamKey);
+      expect((await runPipeline(broadcast, deps)).state).toBe("done");
+      deps.ledger.close();
+    });
+
+    it("分段模式不套该检查(逐段用显式路径,不经 groupSessions):边车缺失也不转人工", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: recs(false) }]);
+      const base = makeDeps();
+      const deps = makeDeps({ cfg: { ...base.cfg, uploadMode: "stage", steps: { mergeSegments: false } } });
+      pullWrites(deps);
+      deps.ledger.upsertPending(broadcast.streamKey);
+      // 分段模式会真跑 remux(本测试不关心其结果):只断言兜底没拦它。
+      await runPipeline(broadcast, deps).catch(() => undefined);
+      const err = deps.notify.mock.calls.map((c) => c[0] as { message?: string }).find((e) => e.message?.includes("未被任何会话认领"));
+      expect(err).toBeUndefined();
+      expect(deps.ledger.get(broadcast.streamKey)?.state).not.toBe("needs_manual");
+      deps.ledger.close();
+    });
+  });
+});

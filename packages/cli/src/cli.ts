@@ -23,7 +23,7 @@ import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { getEngine, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
-import { groupSessions, mergeSession, mergeSessions } from "@drec/post-process";
+import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
@@ -421,7 +421,7 @@ program
     try {
       // 容器唯一判定 = core effectiveStageFormat(合并后只落存档,无投稿语境);非法值抛错 → 非 0 退出,不静默回落。
       const ext = stageExt(effectiveStageFormat(parseOutputFormat(o.format), "stage"));
-      const groups = groupSessions(readdirSync(o.in));
+      const groups = groupSessionsInDir(o.in);
       const bases = o.base ? [o.base] : Object.keys(groups);
       if (o.mergeSessions) {
         // 断流重连 = 同一场:全部会话按时间序无损拼成一片,弹幕按累计视频时长偏移合并。
@@ -536,7 +536,7 @@ program
       if (o.indir && o.base) {
         // ── 多段模式：每段 xml 按前序 .ts 累计时长平移 → 合并到一条时间轴 ──
         const { renderSegmentsToAss } = await import("@drec/post-process");
-        const groups = groupSessions(readdirSync(o.indir));
+        const groups = groupSessionsInDir(o.indir);
         const g = groups[o.base];
         if (!g || g.segmentXmls.length === 0) {
           console.error(`[burn] ${o.base}: 在 ${o.indir} 找不到 per-segment xml（{base}_NNN.xml）`);

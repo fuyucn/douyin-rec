@@ -136,6 +136,21 @@ describe("scanRecordings", () => {
     expect(slugs).toEqual(["111", "222"]);
   });
 
+  it("issue #143:边车存在时填 sessionJsonPath(随 pull 进 stage);缺失则不填(老录像/旧行为)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    const withSc = "主播A_2026-06-27_08-00-00", noSc = "主播A_2026-06-27_09-00-00";
+    writeFileSync(join(dir, `${withSc}.mkv`), "x");
+    writeFileSync(join(dir, `${withSc}.session.json`), JSON.stringify({ roomSlug: "888", platform: "douyin", nodeFormat: "mkv" }));
+    writeFileSync(join(dir, `${noSc}.ts`), "x");
+    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 1, startMs: 0, endMs: 1 }));
+    const a = recs.find((r) => r.sessionBase === withSc)!;
+    const b = recs.find((r) => r.sessionBase === noSc)!;
+    expect(a.tsFiles).toEqual([join(dir, `${withSc}.mkv`)]);
+    expect(a.sessionJsonPath).toBe(join(dir, `${withSc}.session.json`));
+    expect("sessionJsonPath" in b).toBe(false);
+  });
+
   it("T-33:段被删空但留下 .rolling.json → 仍产出(带 rolling.bv),供 master 收口", async () => {
     const root = mkdtempSync(join(tmpdir(), "scan-"));
     const dir = join(root, "主播A"); mkdirSync(dir);

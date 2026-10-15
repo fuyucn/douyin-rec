@@ -1,6 +1,9 @@
 // ts/test/post/concat.test.ts
 import { describe, it, expect } from "vitest";
-import { groupSessions, sortSegments } from "./concat.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { groupSessions, groupSessionsInDir, sortSegments } from "./concat.js";
 
 describe("会话分组 / 分段排序", () => {
   it("sortSegments 按段号数字排序（非字典序）", () => {
@@ -87,5 +90,29 @@ describe("会话分组 / 分段排序", () => {
       "主播_2026-06-10_00-23-33-part010.ts",
     ]);
     expect(g["主播_2026-06-10_00-23-33"].xml).toBe("主播_2026-06-10_00-23-33.xml");
+  });
+});
+
+describe("groupSessionsInDir(issue #143:目录上分组读边车声明)", () => {
+  const A = "主播_2026-06-27_08-00-00";
+  const B = "主播_2026-06-27_09-00-00";
+  const mk = (sidecarA: object | null): string => {
+    const dir = mkdtempSync(join(tmpdir(), "gsd-"));
+    writeFileSync(join(dir, `${A}.mkv`), "x");
+    writeFileSync(join(dir, `${B}.ts`), "x");
+    if (sidecarA) writeFileSync(join(dir, `${A}.session.json`), JSON.stringify(sidecarA));
+    return dir;
+  };
+
+  it("混合容器:边车声明 mkv → 已转换会话与原生 .ts 会话都被认领", () => {
+    const g = groupSessionsInDir(mk({ nodeFormat: "mkv" }));
+    expect(g[A]?.ts).toEqual([`${A}.mkv`]);
+    expect(g[B]?.ts).toEqual([`${B}.ts`]);
+  });
+
+  it("无边车 → 与裸 groupSessions 一致:mkv 不被认领(旧行为,不静默变宽)", () => {
+    const g = groupSessionsInDir(mk(null));
+    expect(g[A]).toBeUndefined();
+    expect(g[B]?.ts).toEqual([`${B}.ts`]);
   });
 });

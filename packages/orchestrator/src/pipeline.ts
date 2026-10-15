@@ -5,6 +5,7 @@ import type { NodeRecording, Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, throwIfAborted, USER_STOP, VIDEO_EXT_ALT, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
+import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
 import { humanBytes, sumBytes } from "./format.js";
@@ -47,12 +48,26 @@ export interface PipelineCleanup {
 /** 清理路径兜底:只处理视频(.ts/.mp4/.flv 等);.xml/.ass 走 xmlKeepRule 单独判定。 */
 export const videoOnly = (paths: string[]): string[] => paths.filter((p) => !/\.(xml|ass)$/i.test(p));
 
+/**
+ * 合并前自检(issue #143):`pulled`(本场拉进 stage 的视频分段,取 basename)里,哪些没被 stage 目录上的
+ * 会话分组(`groupSessionsInDir`,会读 stage 里的边车)认领。非空 = merge 会漏段。
+ */
+export function unclaimedStageSegments(stageSub: string, pulled: readonly string[]): string[] {
+  const present = readdirSyncSafe(stageSub);
+  const claimed = new Set<string>();
+  for (const g of Object.values(groupSessionsInDir(stageSub, present))) for (const f of g.ts) claimed.add(path.basename(f));
+  // 只核 stage 里确实在的文件:没拉到是 pull 自己的失败(由 pull/merge 的产物检查报),不是「未认领」。
+  return videoOnly([...pulled]).map((f) => path.basename(f)).filter((f) => present.includes(f) && !claimed.has(f));
+}
+
 const STAGE_VIDEO_RE = new RegExp(`\\.(${VIDEO_EXT_ALT})$`, "i");
 
 /**
  * stage 目录顶层的「视频类内容」(视频容器全集 ts/flv/mp4/mkv,来自 core 注册表 + `.work/` `.upload/` 中间产物目录)。
  * 用于 `stageAfterDone` 的整场清空:拉回的源段副本(本机胜出时是硬链接)、续跑残留、中间产物都在其中。
- * **绝不包含** `.xml/.ass/.session.json/job.log`;只看顶层、不递归未知目录;不返回 stageSub 本身。
+ * 另含随 pull 拉进 stage 的会话边车副本 `*.session.json`(issue #143;stage 里只有 pull 会产生它,
+ * 删的只是 stage 的名字,节点源 / 本机硬链接源不受影响)—— 否则 `stageAfterDone` 清空后会残留。
+ * **绝不包含** `.xml/.ass/job.log`;只看顶层、不递归未知目录;不返回 stageSub 本身。
  * 调用方必须自己保证「上传已确认 + 有稿件号」(见 finalizeAfterUpload)。
  */
 export function stageVideoLeftovers(stageSub: string): string[] {
@@ -61,7 +76,7 @@ export function stageVideoLeftovers(stageSub: string): string[] {
     const p = path.join(stageSub, name);
     let isDir: boolean;
     try { isDir = lstatSync(p).isDirectory(); } catch { continue; }
-    if (isDir ? name === ".work" || name === ".upload" : STAGE_VIDEO_RE.test(name)) out.push(p);
+    if (isDir ? name === ".work" || name === ".upload" : STAGE_VIDEO_RE.test(name) || name.endsWith(".session.json")) out.push(p);
   }
   return out;
 }
@@ -778,6 +793,8 @@ async function runPipelineInner(
   const filesToPull = winnerMembers.flatMap((m) => [
     ...m.rec.tsFiles,
     ...(m.rec.xmlPath ? [m.rec.xmlPath] : []),
+    // 会话边车带进 stage:stage 上的合并靠它认出节点侧已转换的 mkv/mp4 分段(issue #143)。旧 bundle 无此字段 = 不带。
+    ...(m.rec.sessionJsonPath ? [m.rec.sessionJsonPath] : []),
   ]);
   jlog(`pull 开始: ${filesToPull.length} 个文件 ← ${winner.workerId}`);
   const tPull = Date.now();
@@ -788,6 +805,28 @@ async function runPipelineInner(
   ledger.logStep(streamKey, "pull", "done",
     `${filesToPull.length} 文件${pullBytes > 0 ? ` · ${humanBytes(pullBytes)}` : ""} ← ${winner.workerId}`);
   jlog(`pull 完成(${Math.round((Date.now() - tPull) / 1000)}s)`);
+
+  // 合并路径的兜底(issue #143):拉进 stage 的视频分段必须**全部**被 stage 上的会话分组认领。
+  // 否则 merge 会静默丢掉整场会话(如边车缺失/不一致时已转换的 mkv)→ 成品缺段却照常往下走。
+  // 未认领 → 转人工 + 告警,不进 merge/上传,不删任何源。分段模式(mergeSegments=false)逐段用 winnerMembers
+  // 的显式路径、不经 groupSessions,不受此问题影响,故不套该检查。
+  if (cfg.steps?.mergeSegments !== false) {
+    const unclaimed = unclaimedStageSegments(stageSub, winnerMembers.flatMap((m) => m.rec.tsFiles));
+    if (unclaimed.length > 0) {
+      const names = unclaimed.slice(0, 5).join(", ") + (unclaimed.length > 5 ? " …" : "");
+      jlog(`拉取的 ${unclaimed.length} 个视频分段未被任何会话认领(${names}) → 转人工(绝不删源)`);
+      ledger.setState(streamKey, "needs_manual", {
+        winnerWorker: winner.workerId,
+        error: `${unclaimed.length} 个拉取的视频分段未被会话认领(会话边车缺失或与容器不符),已停止合并`,
+      });
+      notify({
+        kind: "error",
+        stage: "同步",
+        message: `${streamKey} 拉取的 ${unclaimed.length} 个视频分段未被任何会话认领(会话边车缺失或与容器不符),已转人工,未合并、未删源`,
+      });
+      return { state: "needs_manual" };
+    }
+  }
 
   // 产物 stem / 标题:首次锁定(改模板不影响重跑)。合并与分段两条路径共用。
   // earliestRec 已在上面节点侧上传判定前算好(同一口径),这里复用,避免两处各减一次(改坏一处不报错)。
