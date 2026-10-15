@@ -8,7 +8,7 @@
 //   (实测残留文件 636,622,270B vs 源 636,643,728B,差 0.003%,`ffprobe` 报 moov 缺失)。
 //   改成「先写 `.part` 再 rename」后:**存在 ⟹ 完整**,中途被杀只留临时文件。
 import { existsSync, renameSync } from "node:fs";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { runFfmpeg } from "./ffmpeg.js";
 
 /**
@@ -38,8 +38,12 @@ export async function runFfmpegAtomic(
   out: string,
   opts?: Parameters<typeof runFfmpeg>[1],
 ): Promise<void> {
-  await runFfmpeg(withAtomicOutput(args, out), opts);
-  renameSync(atomicPartPath(out), out);
+  // 统一 resolve:调用方可能传相对路径,而 ffmpeg 可能以**别的 cwd** 启动(burn 的 cwd=输出目录),
+  // 且 buildRemuxArgs/buildBurnArgs 用的本就是 resolve 后的路径 —— 不统一会让「临时名与最终名」
+  // 落在两个不同的相对基准上(相对路径调用直接失败)。
+  const target = resolve(out);
+  await runFfmpeg(withAtomicOutput(args, target), opts);
+  renameSync(atomicPartPath(target), target);
 }
 
 /**

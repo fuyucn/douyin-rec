@@ -101,4 +101,30 @@ describe("e2e: 半成品产物(issue #140)", () => {
     // 拒投 + 不删源:源段必须还在(坏产物待人工,不能连源一起丢)。
     expect(existsSync(join(s.recordingsDir, "主播甲"))).toBe(true);
   });
+
+  it("续跑补 append 前自检:产物读不出时长 → 不追加分 P、转人工(不重复投稿)", async () => {
+    const broken = { on: false };
+    s = await Scenario.create({
+      // 续跑要靠「节点源还在」被下一轮重新发现(与 stage-clean 的续跑用例同口径)。
+      cfg: { steps: { mergeSegments: false, burnDanmu: false, burnLivechat: false }, cleanup: { ...FULL_CLEANUP, sourceAfterDone: false } },
+      deps: {
+        segmentDuration: async (f) => (broken.on && /_\d{3}\.mp4$/.test(f) && !f.includes(".work/") ? 0 : probeJson(f)),
+      },
+    });
+    s.record({ sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 2, segSec: 600 }] });
+    await s.reconcile();
+    const key = s.onlyKey();
+    expect(s.jobState(key)).toBe("done");
+
+    // 模拟「进程重启中断」后磁盘上是坏产物(旧版本留下的半成品)→ 下一轮走 resumeSegmentAppends。
+    s.ledger.setState(key, "failed", { error: "进程重启中断" }, { force: true });
+    s.ledger.syncNodeState(key, "merge", "failed", { error: "进程重启中断" });
+    broken.on = true;
+    const calls = s.fake.calls.length;
+
+    await s.reconcile();
+
+    expect(s.fake.calls, "坏产物不得再追加分 P").toHaveLength(calls);
+    expect(s.jobState(key)).toBe("needs_manual");
+  });
 });

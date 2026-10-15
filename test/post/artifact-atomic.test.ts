@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  atomicPartPath, isCompleteMedia, remuxSegment, runFfmpegAtomic, unreadableParts, withAtomicOutput,
+  atomicPartPath, burn, isCompleteMedia, mergeSession, remuxSegment, runFfmpegAtomic, unreadableParts, withAtomicOutput,
 } from "@drec/post-process";
 
 describe("产物原子落盘(issue #140)", () => {
@@ -26,8 +26,10 @@ describe("产物原子落盘(issue #140)", () => {
       "#!/bin/sh",
       "out=\"\"",
       "for a in \"$@\"; do out=\"$a\"; done",
+      "fail=${FAKE_FFMPEG_FAIL:-0}",
+      "if [ -n \"${FAKE_FFMPEG_FAIL_ON:-}\" ]; then case \"$out\" in *\"$FAKE_FFMPEG_FAIL_ON\"*) fail=1 ;; esac; fi",
       "printf 'OK' > \"$out\"",
-      "if [ \"${FAKE_FFMPEG_FAIL:-0}\" = \"1\" ]; then printf 'HALF' >> \"$out\"; exit 1; fi",
+      "if [ \"$fail\" = \"1\" ]; then printf 'HALF' >> \"$out\"; exit 1; fi",
       "exit 0",
       "",
     ].join("\n"));
@@ -37,7 +39,7 @@ describe("产物原子落盘(issue #140)", () => {
   });
 
   afterAll(() => { process.env.PATH = oldPath; });
-  afterEach(() => { delete process.env.FAKE_FFMPEG_FAIL; });
+  afterEach(() => { delete process.env.FAKE_FFMPEG_FAIL; delete process.env.FAKE_FFMPEG_FAIL_ON; });
 
   it("临时名:同目录、保留扩展名、`.` 前缀", () => {
     expect(atomicPartPath("/s/主播_000.mp4")).toBe("/s/.主播_000.part.mp4");
@@ -78,6 +80,45 @@ describe("产物原子落盘(issue #140)", () => {
     process.env.FAKE_FFMPEG_FAIL = "1";
     await expect(remuxSegment(src, out2)).rejects.toThrow(/rc=1/);
     expect(existsSync(out2)).toBe(false);
+  });
+
+  it("mergeSession 也走原子收尾:规范化成功但 concat 失败 → 最终名不出现", async () => {
+    const dir = newDir();
+    const s1 = join(dir, "s1.ts");
+    writeFileSync(s1, "S1");
+    const ok = join(dir, "merged.mp4");
+    await mergeSession([s1], ok);
+    expect(readFileSync(ok, "utf-8")).toBe("OK");
+
+    // 只让 concat 那一步失败(规范化写的是 segNNN.ts,不匹配)→ 证明最终产物没落地。
+    process.env.FAKE_FFMPEG_FAIL_ON = "merged2";
+    const bad = join(dir, "merged2.mp4");
+    await expect(mergeSession([s1], bad)).rejects.toThrow(/rc=1/);
+    expect(existsSync(bad)).toBe(false);
+  });
+
+  it("burn 也走原子收尾(失败不留最终名)", async () => {
+    const dir = newDir();
+    const video = join(dir, "v.mp4");
+    writeFileSync(video, "V");
+    const ok = join(dir, "v_danmu.mp4");
+    await burn({ inputMp4: video, assText: "[Script Info]\n", outMp4: ok, fontsDir: dir });
+    expect(readFileSync(ok, "utf-8")).toBe("OK");
+
+    process.env.FAKE_FFMPEG_FAIL_ON = "v2_danmu";
+    const bad = join(dir, "v2_danmu.mp4");
+    await expect(burn({ inputMp4: video, assText: "[Script Info]\n", outMp4: bad, fontsDir: dir })).rejects.toThrow(/rc=1/);
+    expect(existsSync(bad)).toBe(false);
+  });
+
+  it("相对输出路径也走同一套临时名/rename(burn 以输出目录为 cwd)", async () => {
+    const dir = newDir();
+    const video = join(dir, "v3.mp4");
+    writeFileSync(video, "V");
+    const rel = join(dir, "rel_danmu.mp4");
+    await burn({ inputMp4: video, assText: "[Script Info]\n", outMp4: rel, fontsDir: dir });
+    expect(readFileSync(rel, "utf-8")).toBe("OK");
+    expect(existsSync(atomicPartPath(rel))).toBe(false);
   });
 });
 

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, statSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getLinkFallbackCount, linkOrCopy, resetLinkFallbackState, type LinkFs } from "./link-or-copy.js";
@@ -59,6 +59,20 @@ describe("linkOrCopy", () => {
     expect(statSync(join(dir, "a")).ino).toBe(statSync(join(dir, "b")).ino);
     expect(existsSync(join(dir, "a"))).toBe(true);
     expect(existsSync(join(dir, ".b.part"))).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+    expect(getLinkFallbackCount("r1")).toBe(0);
+  });
+
+  it("同一 inode 重复调用(续跑/601 重试):幂等返回,不留临时名、不误报回落", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loc-"));
+    writeFileSync(join(dir, "a"), "same");
+    const warn = vi.fn();
+    expect(linkOrCopy(join(dir, "a"), join(dir, "b"), { root: "r1", warn })).toBe("link");
+    // 第二次(等价「续跑再走一遍」):b 已经是 a 的硬链接 → 必须什么都不做。
+    // 若照旧 link+rename,同 inode 之间 rename 是空操作 → 临时名会永久留下(清理按扩展名扫不到 = 泄漏)。
+    expect(linkOrCopy(join(dir, "a"), join(dir, "b"), { root: "r1", warn })).toBe("link");
+    expect(readdirSync(dir).sort()).toEqual(["a", "b"]);
+    expect(statSync(join(dir, "b")).nlink).toBe(2);
     expect(warn).not.toHaveBeenCalled();
     expect(getLinkFallbackCount("r1")).toBe(0);
   });

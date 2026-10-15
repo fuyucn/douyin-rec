@@ -9,7 +9,7 @@
  * 旧口径「调用方负责目标已存在先删」已作废;复制失败照常抛出。
  */
 import { copyFileSync, linkSync, renameSync, statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { createLogger } from "./log.js";
 
 export interface LinkFs {
@@ -44,8 +44,25 @@ const counts = new Map<string, number>();
 
 const rootKey = (o?: LinkOrCopyOptions): string => o?.root ?? process.env.DOUYIN_REC_ROOT ?? "";
 
-/** 同目录临时名(rename 不跨设备;`.` 前缀隐藏,由各 stage 清理路径一并带走)。 */
-const scratchPath = (dst: string): string => join(dirname(dst), `.${basename(dst)}.part`);
+/**
+ * 同目录临时名(rename 不跨设备;`.` 前缀隐藏)。**保留原扩展名** —— 各 stage 清理按扩展名
+ * 识别视频类残留(`stageVideoLeftovers` 等),不保留扩展名的临时名会成为清理不到的磁盘泄漏。
+ */
+const scratchPath = (dst: string): string => {
+  const ext = extname(dst);
+  return join(dirname(dst), `.${basename(dst, ext)}.part${ext}`);
+};
+
+/** 两个名字是否指向同一 inode(取不到/不存在 → false;只用于幂等跳过,判不出不影响正确性)。 */
+function sameInode(a: string, b: string): boolean {
+  try {
+    const x = statSync(a);
+    const y = statSync(b);
+    return x.dev === y.dev && x.ino === y.ino;
+  } catch {
+    return false;
+  }
+}
 
 /** 某数据根累计回落复制次数。 */
 export function getLinkFallbackCount(root: string = process.env.DOUYIN_REC_ROOT ?? ""): number {
@@ -66,6 +83,11 @@ export function resetLinkFallbackState(): void {
  */
 export function linkOrCopy(src: string, dst: string, opts?: LinkOrCopyOptions): "link" | "copy" {
   const fs = opts?.fs ?? realFs;
+  // 同一 inode ⇒ 目标已经是产物本身,**什么都不要做**:再 link + rename 时 POSIX 规定
+  // 「同一文件的两个硬链接之间 rename」是空操作,临时名会永久留下(每场泄漏一整个分 P);
+  // 而第二次 link 会 EEXIST 误报「硬链接失败,回落复制」。
+  // 触发场景很常见:上传 601 重试 / master 重启续跑都会重走这一段。
+  if (sameInode(src, dst)) return "link";
   const tmp = scratchPath(dst);
   const rename = fs.renameSync ?? renameSync;
   try {
