@@ -191,6 +191,7 @@ const DICT = {
       runsEmptyHint: "录完一场并收播后,这里会显示该房间的处理流程(合并 → 烧录 → 上传)与结果。",
     },
     roomForm: {
+      useCookieStream: "带 Cookie 取流", notifySection: "通知",
       lock: { needDanmu: "需先开启「录弹幕」", needNodeSide: "仅在「节点侧上传」时生效", needMerge: "按分段产出时没有合并步骤" },
       flow: {
         record: "录制", noProcess: "不处理", rolling: "边录边传", merge: "合并", split: "按分段",
@@ -611,6 +612,7 @@ const DICT = {
       runsEmptyHint: "After a stream ends, this room's pipeline (merge → burn → upload) and results show up here.",
     },
     roomForm: {
+      useCookieStream: "Use cookie for streams", notifySection: "Notifications",
       lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment" },
       flow: {
         record: "Record", noProcess: "No processing", rolling: "Rolling upload", merge: "Merge", split: "Per segment",
