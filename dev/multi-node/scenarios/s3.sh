@@ -39,11 +39,14 @@ s3_case() {
     expect_eq "$label/文件" "node-$n 源 .xml 保留(不得删最后一份)" "$(nx $n sh -c "ls /output-data/recordings/$anchor/*.xml | wc -l" | tr -d ' ')" 1
     expect_eq "$label/文件" "node-$n 会话 session.json 保留" "$(nx $n sh -c "ls /output-data/recordings/$anchor/*.session.json | wc -l" | tr -d ' ')" 1
   done
-  if [[ $srcdone == true ]]; then
-    expect_eq "$label/文件" "node-1 源视频 .ts 已按 sourceAfterDone 清理(上传已确认)" "$(nx 1 sh -c "ls /output-data/recordings/$anchor/*.ts 2>/dev/null | wc -l" | tr -d ' ')" 0
-  else
-    expect_eq "$label/文件" "node-1 源视频 .ts 保留(sourceAfterDone=false)" "$(nx 1 sh -c "ls /output-data/recordings/$anchor/*.ts | wc -l" | tr -d ' ')" 2
-  fi
+  # 两个节点都断言(此前只断言 node-1,node-2 漏检)。
+  for n in 1 2; do
+    if [[ $srcdone == true ]]; then
+      expect_eq "$label/文件" "node-$n 源视频 .ts 已按 sourceAfterDone 清理(上传已确认)" "$(nx $n sh -c "ls /output-data/recordings/$anchor/*.ts 2>/dev/null | wc -l" | tr -d ' ')" 0
+    else
+      expect_eq "$label/文件" "node-$n 源视频 .ts 保留(sourceAfterDone=false)" "$(nx $n sh -c "ls /output-data/recordings/$anchor/*.ts | wc -l" | tr -d ' ')" 2
+    fi
+  done
   # 假 biliup 档案:1 次 upload(P1=plain)+ 1 次 append(P2=danmu),全部关水印 + 仅自己可见
   expect_eq "$label/文件" "档案 upload 次数(无重复建稿)" "$(( $(cx sh -c "grep '$anchor' $arch | grep -c '\"op\":\"upload\"'" | tr -d ' ') - ${base_up:-0} ))" 1
   expect_eq "$label/文件" "档案 append 次数(danmu 分P)" "$(( $(cx sh -c "grep '$anchor' $arch | grep -c '\"op\":\"append\"'" | tr -d ' ') - ${base_ap:-0} ))" 1

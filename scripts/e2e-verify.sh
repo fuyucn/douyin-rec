@@ -70,9 +70,9 @@ init_tier() {
   if [[ $EGRESS == 1 ]]; then
     REAL_BILIUP=1
     if [[ -z $EGRESS_COOKIES ]]; then
-      local common main
-      common=$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null || true)
-      main=$(dirname "$(cd "$common" && pwd -P)")
+      # 复用 main_checkout():它先 cd "$REPO" 再解析 git-common-dir,避免相对 `.git` 在 cwd≠仓库根时解析错。
+      local main
+      main=$(main_checkout)
       EGRESS_COOKIES="$main/data-dev/config/biliup/cookies.json"
     fi
   else
@@ -91,7 +91,8 @@ chk_egress_cookies() {
   local f=$1
   [[ -f $f ]] || { refuse "egress 真 cookies 不存在: $f(设 DREC_EGRESS_COOKIES 或放到 <主仓库>/data-dev/config/biliup/cookies.json)"; return 1; }
   [[ $(basename "$f") == cookies.json ]] || { refuse "egress cookies 文件名必须是 cookies.json: $f"; return 1; }
-  local c; c=$(canon "$f")
+  # 对**文件本身**做 realpath:canon 只解析目录,指向线上 cookies 的 symlink 能绕过路径检查。
+  local c; c=$(realpath "$f" 2>/dev/null || canon "$f")
   [[ $c != *docker-data* && $c != *vps.key* ]] || { refuse "egress cookies 路径疑似线上: $c"; return 1; }
   local -a prods; read_lines prods < <(prod_root_candidates)
   chk_no_overlap "$c" "${prods[@]}" || return 1
@@ -285,7 +286,12 @@ stage_a() {
     chk_hub_config "$tmp" && pass "hub 配置模板渲染后 host 均为 dev 容器名" || rc=1
     rm -f "$tmp"
   fi
-  chk_no_creds "$E2E_ROOT" && pass "dev 数据根内无真实凭证文件" || rc=1
+  # mirror 档 db 内**按设计**含真抖音 platformCookies → 文案说清是「无凭证**文件**」。
+  if [[ $MIRROR == 1 ]]; then
+    chk_no_creds "$E2E_ROOT" && pass "dev 数据根内无真实凭证文件(mirror 档 db 内按设计含真 platformCookies)" || rc=1
+  else
+    chk_no_creds "$E2E_ROOT" && pass "dev 数据根内无真实凭证文件" || rc=1
+  fi
   if [[ $EGRESS == 1 ]]; then
     chk_egress_cookies "$EGRESS_COOKIES" && pass "egress 真 cookies 源路径合规(仅路径检查,不读内容;只读挂载给 controller)" || rc=1
   fi
@@ -392,6 +398,8 @@ chk_mirror_seed() {
     [[ -f $db ]] || continue
     n=$(sqlite3 -readonly "$db" "SELECT count(*) FROM settings WHERE key IN ('discordWebhook','notifWebhookToggles')") || { refuse "读不到 $db"; bad=1; continue; }
     [[ $n == 0 ]] || { refuse "$d: 种子里仍有通知 webhook 设置"; bad=1; }
+    n=$(sqlite3 -readonly "$db" "SELECT count(*) FROM settings WHERE key = 'hubConfig'") || { bad=1; continue; }
+    [[ $n == 0 ]] || { refuse "$d: 种子里仍有 settings.hubConfig(会覆盖 dev 的 hub 配置)"; bad=1; }
     n=$(sqlite3 -readonly "$db" "SELECT count(*) FROM tasks WHERE enabled != 0") || { bad=1; continue; }
     [[ $n == 0 ]] || { refuse "$d: 种子里有 $n 个 enabled 任务(必须全关)"; bad=1; }
     n=$(sqlite3 -readonly "$db" "SELECT count(*) FROM tasks WHERE webhook IS NOT NULL OR rollingUpload != 0") || { bad=1; continue; }
@@ -425,6 +433,9 @@ mirror_seed() {
   sqlite3 "$tmp/seed.db" >/dev/null <<'SQL' || { rm -rf "$tmp"; die "改写种子数据库失败"; }
 PRAGMA journal_mode=DELETE;
 DELETE FROM settings WHERE key IN ('discordWebhook','notifWebhookToggles');
+-- hubConfig 在 settings 表时 resolveHubConfig 会**优先于** hub.config.json(cli-task.ts:44);
+-- prd 若写过该键,复制过来即线上 workers 配置,而 mirror 档放行外网 → 必须清掉。
+DELETE FROM settings WHERE key = 'hubConfig';
 DELETE FROM merge_jobs;
 DELETE FROM hub_rules;
 UPDATE tasks SET enabled=0, status='stopped', webhook=NULL, outDir=NULL, rollingUpload=0, rollingEffective=NULL;
@@ -545,7 +556,9 @@ negative_cases() {
   expect_refuse "mirror 种子任务带 webhook"           chk_mirror_seed "$m"
   sqlite3 "$mdb" "DELETE FROM tasks; INSERT INTO merge_jobs VALUES(1);"
   expect_refuse "mirror 种子带 prd 合并历史"          chk_mirror_seed "$m"
-  sqlite3 "$mdb" "DELETE FROM merge_jobs;"
+  sqlite3 "$mdb" "DELETE FROM merge_jobs; INSERT INTO settings VALUES('hubConfig','{\"workers\":[]}');"
+  expect_refuse "mirror 种子含 settings.hubConfig(会覆盖 dev hub 配置)" chk_mirror_seed "$m"
+  sqlite3 "$mdb" "DELETE FROM settings;"
   printf '{"workers":["local"],"pipeline":{"upload":{"mode":"upload"}}}' >"$m/controller/config/hub/douyin.1.json"
   expect_refuse "mirror hub 规则 upload.mode=upload"  chk_mirror_seed "$m"
   printf '{"workers":["db733aae48935a0a"],"pipeline":{"upload":{"mode":"stage"}}}' >"$m/controller/config/hub/douyin.1.json"
@@ -646,7 +659,8 @@ cmd_down() {
     if [[ -f $E2E_ROOT/$d/.drec-dev-e2e ]]; then rm -rf "${E2E_ROOT:?}/$d"
     else note "跳过 $E2E_ROOT/$d(无 dev 标记或不存在)"; fi
   done
-  rm -f "$E2E_ROOT/.tier"
+  # 一并清掉档位与 mirror 播种标记:否则下次 up 认为「种子已就绪」而跳过播种 → mirror 拿到空库。
+  rm -f "$E2E_ROOT/.tier" "$E2E_ROOT/.mirror-seeded"
   say "down: OK(容器/网络已拆,dev 数据已清;dev 密钥保留在 $E2E_ROOT/keys)"
 }
 
@@ -705,12 +719,14 @@ cmd_run() {
     case $sc in
       s1|s2|s3)
         [[ $MIRROR == 0 ]] || die "$sc 用假房间造数,只在 internal 档跑;mirror 档请在 dev UI 里开任务实测"
+        [[ $EGRESS == 0 ]] || die "$sc 只在 internal 档跑;egress 档会真连外网/真上传,只允许 egress-record|egress-submit(需显式确认)"
         list="$list $sc" ;;
       egress-record|egress-submit)
         [[ $EGRESS == 1 ]] || die "$sc 只在 egress 档可用(DREC_EGRESS=1 或 --egress)"
         list="$list $sc" ;;
       all)
         [[ $MIRROR == 0 ]] || die "all 含 s1–s3(假房间造数),只在 internal 档跑;mirror 档请在 dev UI 里开任务实测"
+        [[ $EGRESS == 0 ]] || die "all 含 s1–s3,egress 档不允许(会真连外网/真上传);请逐个显式跑 egress-record|egress-submit"
         list="s1 s2 s3" ;;
       *) die "未知场景 '$sc'(s1|s2|s3|all)" ;;
     esac
