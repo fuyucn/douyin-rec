@@ -15,6 +15,11 @@
 
 ## 进行中
 
+- [~] **T-49 输出格式选项:按产出形态原地替换容器（issue [#137](https://github.com/fuyucn/douyin-rec/issues/137)）**
+  — 2026-10-15 认领，swe-loop 执行，两个 stacked PR（存档侧 → 节点侧原地替换），base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：任务级字段 outputFormat（默认 original 不变，白名单 mp4 / mkv）；只换容器、原地替换、不并存两份；无后处理任务在节点封口后原地 remux，存档形态改后处理产物容器，投稿形态固定 mp4 并锁定。
+  **验收**：默认行为不变有回归用例；校验失败不删原文件；下游认多扩展名；保存往返不丢；全量测试 / typecheck / web build / i18n 检查通过，每个 PR 有变异验证。
+
 - [~] **T-48 界面把 stage 统一称「存档」,不投稿时锁定清理存档开关（issue [#135](https://github.com/fuyucn/douyin-rec/issues/135)）**
   — 2026-10-15 认领，swe-loop 执行，分支 `codex/issue-135-archive-wording`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：用户可见的 stage / 只合成 文案统一改为「存档」；不投稿时锁定「清理存档」并写回关（后端只合成路径本就不执行该清理）；清理开关改正向「投稿后保留存档」。存储与配置字段名不动。
