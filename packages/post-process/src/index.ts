@@ -5,6 +5,7 @@ export { FONTS_DIR } from "./fonts.js";
 export { renderXmlToAss, renderXmlToLivechat } from "./ass/render.js";
 export { renderSegmentsToAss } from "./ass/multi.js";
 export { remuxSegment, buildRemuxArgs, renderXmlWindowToAss, planSegmentGroups, type SegmentStyle } from "./segment.js";
+export { atomicPartPath, withAtomicOutput, runFfmpegAtomic, unreadableParts, isCompleteMedia } from "./artifact.js";
 export {
   mergeXmlContents,
   renderXmlWindowToXml,

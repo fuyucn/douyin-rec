@@ -4,15 +4,20 @@
  * 硬链接零拷贝;跨设备/挂载卷不支持(EXDEV/EPERM/EMLINK 等)时回落复制 —— 此前回落完全静默,
  * 每场多占一份整场体积却无人知晓。现在回落时上报 {原因错误码, 字节数},并按数据根只提示一次、之后计数。
  *
- * 行为不变:调用方负责「目标已存在先删」;复制失败照常抛出。
+ * **原子替换目标**:目标可能已存在(续跑 / 上次被强杀留下的同名产物),先落同目录临时名再 rename ——
+ * 读者(下游靠 `existsSync` 做续跑判定、以及上传)永远看不到「写了一半的最终名」。
+ * 旧口径「调用方负责目标已存在先删」已作废;复制失败照常抛出。
  */
-import { copyFileSync, linkSync, statSync } from "node:fs";
+import { copyFileSync, linkSync, renameSync, statSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { createLogger } from "./log.js";
 
 export interface LinkFs {
   linkSync(src: string, dst: string): void;
   copyFileSync(src: string, dst: string): void;
   statSync(p: string): { size: number };
+  /** 原子替换用;**未注入时走真实 fs.renameSync**(注入只用于模拟 link/copy 失败的场景)。 */
+  renameSync?(src: string, dst: string): void;
 }
 
 export interface LinkFallbackInfo {
@@ -39,6 +44,9 @@ const counts = new Map<string, number>();
 
 const rootKey = (o?: LinkOrCopyOptions): string => o?.root ?? process.env.DOUYIN_REC_ROOT ?? "";
 
+/** 同目录临时名(rename 不跨设备;`.` 前缀隐藏,由各 stage 清理路径一并带走)。 */
+const scratchPath = (dst: string): string => join(dirname(dst), `.${basename(dst)}.part`);
+
 /** 某数据根累计回落复制次数。 */
 export function getLinkFallbackCount(root: string = process.env.DOUYIN_REC_ROOT ?? ""): number {
   return counts.get(root) ?? 0;
@@ -49,15 +57,25 @@ export function resetLinkFallbackState(): void {
   counts.clear();
 }
 
-/** 硬链接优先,失败回落复制。返回实际采用的方式。 */
+/**
+ * 硬链接优先,失败回落复制。返回实际采用的方式。
+ *
+ * 两步落盘:硬链接/复制都先落 {@link scratchPath},再 `renameSync` 原子替换目标。
+ * 为什么(2026-10-15 incident):被强杀的产物会以「最终名存在但内容不完整」的形态留下,
+ * 下游把它当已完成产物复用 → 静默投稿坏分 P。目标名只允许出现「完整内容」。
+ */
 export function linkOrCopy(src: string, dst: string, opts?: LinkOrCopyOptions): "link" | "copy" {
   const fs = opts?.fs ?? realFs;
+  const tmp = scratchPath(dst);
+  const rename = fs.renameSync ?? renameSync;
   try {
-    fs.linkSync(src, dst);
+    fs.linkSync(src, tmp);
+    rename(tmp, dst);
     return "link";
   } catch (err) {
     const code = String((err as NodeJS.ErrnoException)?.code ?? "UNKNOWN");
-    fs.copyFileSync(src, dst);
+    fs.copyFileSync(src, tmp);
+    rename(tmp, dst);
     let bytes = 0;
     try { bytes = fs.statSync(dst).size; } catch { /* 取不到大小不影响主流程 */ }
     const key = rootKey(opts);

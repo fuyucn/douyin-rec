@@ -2,7 +2,7 @@
 // 按该段在整场时间轴上的窗口切出该段的弹幕 → 该段 ASS。供 hub「分段上传」模式逐段产出。
 import { resolve } from "node:path";
 import { STAGE_CONTAINERS, stageContainerOfPath, type StageFormat } from "@drec/core";
-import { runFfmpeg } from "./ffmpeg.js";
+import { runFfmpegAtomic } from "./artifact.js";
 import { extractItems, itemsToLivechatAss, itemsToRollingAss, type RenderOpts } from "./ass/render.js";
 
 /**
@@ -31,9 +31,12 @@ export function buildRemuxArgs(input: string, outMp4: string, fmt?: StageFormat)
 
 /** 单段 remux(ts/flv → mp4,无损)。调用方负责目标目录存在。 */
 export async function remuxSegment(input: string, outMp4: string, fmt?: StageFormat): Promise<void> {
-  // 看门狗用「进程 CPU 时间」判活(runFfmpeg 内默认):faststart 收尾一遍不写 stdout/stderr,
+  // 看门狗用「进程 CPU 时间」判活(runFfmpegAtomic 内默认):faststart 收尾一遍不写 stdout/stderr,
   // 但一直在烧 CPU → 不会被误判卡死(线上实测整场转人工的根因)。
-  await runFfmpeg(buildRemuxArgs(input, outMp4, fmt));
+  // 落盘走原子收尾(`.part` → rename):被强杀时不留下「最终名存在但 moov 没写完」的半成品,
+  // 否则下游的续跑判定(existsSync)会把它当成品复用并静默投稿(见 artifact.ts 注释)。
+  // `fmt` 原样透传(节点侧原地替换会传非容器扩展名的临时名,必须显式 `-f` 指定封装器)。
+  await runFfmpegAtomic(buildRemuxArgs(input, outMp4, fmt), outMp4);
 }
 
 /** 分段烧录样式:danmu(飞屏滚动)| livechat(聊天框)。 */

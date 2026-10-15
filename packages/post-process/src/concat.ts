@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
 import { isOutputFormat, isVideoFileName, segmentIndexOf, sessionBaseOf, stageContainerOfPath, stampedSessionBaseOf, STAGE_CONTAINERS, type StageFormat } from "@drec/core";
 import { runFfmpeg } from "./ffmpeg.js";
+import { runFfmpegAtomic } from "./artifact.js";
 
 /**
  * 从视频分段文件名取会话基名(剥分段后缀 + 容器后缀);规则见 core `sessionBaseOf`。
@@ -159,7 +160,9 @@ export async function mergeSession(
       normalized.map((p) => `file '${p}'`).join("\n") + "\n",
       "utf-8",
     );
-    await runFfmpeg([
+    // 拼好的成品走原子收尾(`.part` → rename):被强杀时不会留下「最终名存在但没写完」的成品,
+    // 否则下游会把它当已完成产物复用/上传(见 artifact.ts 注释)。
+    await runFfmpegAtomic([
       "-y",
       "-f", "concat",
       "-safe", "0",
@@ -167,7 +170,7 @@ export async function mergeSession(
       "-c", "copy",
       ...stageContainerOfPath(outMp4).finalizeArgs,
       outMp4,
-    ]);   // faststart 收尾静默由 runFfmpeg 的 CPU 探针兜住
+    ], outMp4);   // faststart 收尾静默由 runFfmpeg 的 CPU 探针兜住
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
