@@ -54,6 +54,8 @@ export default defineConfig({
       "@drec/record-engine": fileURLToPath(new URL("./packages/record-engine/src/index.ts", import.meta.url)),
       "@drec/ffmpeg-recorder-extra": fileURLToPath(new URL("./packages/ffmpeg-recorder-extra/src/index.ts", import.meta.url)),
       "@drec/orchestrator": fileURLToPath(new URL("./packages/orchestrator/src/index.ts", import.meta.url)),
+      // web 表单规则经此 alias 复用 core 纯判定(与 packages/web/vite.config.ts 同名同目标)。
+      "@drec/rolling-policy": fileURLToPath(new URL("./packages/core/src/rolling-policy.ts", import.meta.url)),
     },
   },
 });
