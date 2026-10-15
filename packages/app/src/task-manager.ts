@@ -10,7 +10,8 @@
  * controllable fake process. The injectable timer (`schedule`) lets restart
  * tests run synchronously.
  */
-import { type TaskStore } from "./store.js";
+import { type Task, type TaskStore } from "./store.js";
+import type { OutputFormat } from "@drec/core";
 import { resolveTaskStreamCookies } from "./stream-cookies.js";
 import type { Spawner } from "./process/spawner.js";
 import type { RecorderProcess, ExitInfo } from "./process/recorder-process.js";
@@ -33,6 +34,12 @@ export interface TaskManagerOpts {
    * 生效值,即便同步 tick 还没跑到(规则刚删/刚停用)也不会按陈旧的 true 起 `--rolling-upload 1`。
    */
   beforeSpawn?: (taskId: number) => void;
+  /**
+   * 节点侧原地替换(issue #137)的**唯一判定点**:spawn 前按任务现状算出生效的输出格式(见
+   * `resolveNodeOutputFormat`)。不注入 = 恒 `original`(不替换,行为不变)。
+   * 规则之后才绑定的任务:已在跑的进程不受影响,下一次 spawn 起才按新判定。
+   */
+  nodeOutputFormat?: (task: Task) => OutputFormat;
   /** Respawn a process that exits UNEXPECTEDLY (crash). Default false. */
   autoRestart?: boolean;
   /** Delay before a restart respawn, ms. Default 5000. */
@@ -81,6 +88,7 @@ export class TaskManager {
   private readonly onRecordingStateChanged?: (taskId: number) => void;
   private readonly onAlert?: (taskId: number, stage: string, message: string) => void;
   private readonly beforeSpawn?: (taskId: number) => void;
+  private readonly nodeOutputFormat?: (task: Task) => OutputFormat;
   private readonly log: (m: string) => void;
   private readonly schedule: (cb: () => void, ms: number) => void;
   private readonly logStore: TaskLogStore;
@@ -109,6 +117,7 @@ export class TaskManager {
     this.store = store;
     this.spawner = spawner;
     this.beforeSpawn = opts.beforeSpawn;
+    this.nodeOutputFormat = opts.nodeOutputFormat;
     this.autoRestart = opts.autoRestart ?? false;
     this.restartDelayMs = opts.restartDelayMs ?? 5_000;
     this.maxRestarts = opts.maxRestarts ?? 5;
@@ -339,6 +348,8 @@ export class TaskManager {
     const effective = {
       ...task,
       cookies: resolveTaskStreamCookies(task, this.store),
+      // 交给 buildRecordArgs 的是判定后的生效值,不是库里所选值(有规则 / 受管 / rolling 时被压回 original)。
+      outputFormat: this.nodeOutputFormat?.(task) ?? "original",
     };
     const proc = this.spawner.spawn(effective);
     this.procs.set(taskId, proc);

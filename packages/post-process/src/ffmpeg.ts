@@ -263,7 +263,7 @@ export function ffprobeDuration(path: string): Promise<number> {
  */
 export function ffprobeVideo(
   path: string,
-): Promise<{ fps: number; kbps: number; durationMs: number; width: number; height: number }> {
+): Promise<{ fps: number; kbps: number; durationMs: number; width: number; height: number; hasVideo: boolean }> {
   return new Promise((resolve, reject) => {
     const proc = spawn("ffprobe", [
       "-v",
@@ -299,6 +299,8 @@ export function ffprobeVideo(
           Number(d.format?.duration ?? 0) * 1000,
         );
         const base = {
+          // 有无视频流(节点侧原地替换的校验用):没有 video 流的「成功 remux」不算数。
+          hasVideo: (d.streams ?? []).some((s: { codec_type?: string }) => s.codec_type === "video"),
           fps: Number.isFinite(fps) ? fps : 0,
           kbps,
           width: Number(v.width) || 0,

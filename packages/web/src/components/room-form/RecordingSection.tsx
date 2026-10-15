@@ -16,7 +16,7 @@ export interface RecordingValue {
   useCookie: boolean;
 }
 
-/** 「输出格式」下拉(选项来自 core 注册表)。不传 = 不显示(任务弹窗本期不显示)。 */
+/** 「输出格式」下拉(选项来自 core 注册表),房间面板 / 规则弹窗 / 任务弹窗共用。不传 = 不显示。 */
 export interface OutputFormatField {
   /** 所选值(存储口径)。 */
   value: OutputFormat;
@@ -24,6 +24,8 @@ export interface OutputFormatField {
   shown: OutputFormat;
   lock: Lock;
   onChange: (v: OutputFormat) => void;
+  /** 未锁定时的说明文案 key;缺省 = 存档形态说明(房间 / 规则表单);任务弹窗传节点侧原地替换的说明。 */
+  hintKey?: string;
 }
 
 interface Props {
@@ -102,7 +104,7 @@ export function RecordingSection(p: Props): ReactNode {
               ))}
             </select>
             <span className="block mt-1 text-xs text-muted">
-              {p.outputFormat.lock.locked && p.outputFormat.lock.reasonKey ? t(p.outputFormat.lock.reasonKey) : t("rooms.outputFormatHint")}
+              {p.outputFormat.lock.locked && p.outputFormat.lock.reasonKey ? t(p.outputFormat.lock.reasonKey) : t(p.outputFormat.hintKey ?? "rooms.outputFormatHint")}
             </span>
           </label>
         )}

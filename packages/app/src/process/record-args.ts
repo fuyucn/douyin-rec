@@ -51,5 +51,10 @@ export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
   if (task.rollingEffective) {
     args.push("--rolling-upload", "1");
   }
+  // 节点侧原地替换(issue #137):`task.outputFormat` 在这里已是**判定后的生效值**(TaskManager.spawnFor 经
+  // resolveNodeOutputFormat 算定:hub 受管 / 有规则绑定 / 边录边传 → original)。original = 不带 flag,行为不变。
+  if (task.outputFormat && task.outputFormat !== "original") {
+    args.push("--output-format", task.outputFormat);
+  }
   return args;
 }

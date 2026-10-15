@@ -16,6 +16,7 @@ import { EventCenter } from "@drec/observability";
 import { drecRoot, ensureHubConfigExample, ensureNodeIdentity, rootConfigDir, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
 import { refreshLocalRollingEffective } from "./rolling-effective.js";
+import { resolveNodeOutputFormat } from "./node-remux.js";
 import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
 import { makeNotifier, resolveWebhookToggles } from "@drec/observability";
@@ -110,6 +111,9 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       beforeSpawn: (taskId) => {
         if (rollingGuardOn) refreshLocalRollingEffective(store, rootHubDir(), [taskId], (m) => console.log(m));
       },
+      // 节点侧原地替换容器(issue #137)的唯一判定点:每次 spawn 现读规则文件,
+      // 无后处理的任务才把所选格式交给子进程;受管 / 有规则 / 边录边传一律 original。
+      nodeOutputFormat: (task) => resolveNodeOutputFormat(task, rootHubDir()),
       log: (m) => console.log(m),
       logStore,
       // 录制状态(起停/开播/收播/崩溃)→ 立刻推一次 changed。

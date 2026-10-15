@@ -1,7 +1,7 @@
 /** issue #137:规则模块的 outputFormat 联动(投稿锁定为 mp4 / 存储写回 / 往返 / 流程摘要)。 */
 import { describe, it, expect } from "vitest";
 import {
-  deriveConstraints, flowSummary, outputFormatFromStored, shownOutputFormat, storedFromForm, type FormFacts,
+  deriveConstraints, flowSummary, outputFormatFromStored, shownOutputFormat, storedFromForm, taskOutputFormatLock, type FormFacts,
 } from "../../packages/web/src/lib/room-form-rules";
 
 const facts = (over: Partial<FormFacts> = {}): FormFacts => ({
@@ -62,5 +62,20 @@ describe("流程摘要", () => {
   });
   it("投稿形态不带格式(即使存的是 mkv)", () => {
     expect(keys(facts({ uploadOn: true, outputFormat: "mkv" }))).not.toContain("roomForm.flow.format");
+  });
+});
+
+describe("任务弹窗「输出格式」锁(节点侧原地替换只对无后处理任务)", () => {
+  it("手动任务、无规则 → 可选", () => {
+    expect(taskOutputFormatLock({ managedBy: null, hasHubRule: false })).toEqual({ locked: false });
+  });
+  it("被 hub 管理(worker 上的受管任务)→ 锁定,原因指向 Hub 规则的存档/投稿形态", () => {
+    expect(taskOutputFormatLock({ managedBy: "hub", hasHubRule: false })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatHub" });
+  });
+  it("有 hub 规则绑定 → 锁定", () => {
+    expect(taskOutputFormatLock({ managedBy: null, hasHubRule: true })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatHub" });
+  });
+  it("读入缺省 = original(老任务无字段)", () => {
+    expect(outputFormatFromStored(undefined)).toBe("original");
   });
 });

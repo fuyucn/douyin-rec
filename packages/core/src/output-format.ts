@@ -20,6 +20,11 @@ export interface StageContainer {
   /** 含点的扩展名。 */
   ext: string;
   /**
+   * ffmpeg `-f` 封装器名。输出路径带非常规扩展名(节点侧原地替换的临时文件 `*.drec-remux`)时
+   * 不能靠扩展名推断容器,必须显式指定。
+   */
+  muxer: string;
+  /**
    * 单段 `-c copy` remux 的**输出侧**专属参数。mp4:FLV(1000Hz)直拷会得到非标准 time_base,
    * 钉成 90000(B 站转码器拒收非标时基);另加 faststart。这两个是 mp4 专属参数,
    * mkv 不需要也不带它们 → mkv 为空。
@@ -32,10 +37,11 @@ export interface StageContainer {
 export const STAGE_CONTAINERS: Record<StageFormat, StageContainer> = {
   mp4: {
     ext: ".mp4",
+    muxer: "mp4",
     remuxArgs: ["-video_track_timescale", "90000", "-movflags", "+faststart"],
     finalizeArgs: ["-movflags", "+faststart"],
   },
-  mkv: { ext: ".mkv", remuxArgs: [], finalizeArgs: [] },
+  mkv: { ext: ".mkv", muxer: "matroska", remuxArgs: [], finalizeArgs: [] },
 };
 
 export function isOutputFormat(v: unknown): v is OutputFormat {

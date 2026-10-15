@@ -60,9 +60,13 @@ describe("groupSessions 识别 mkv/mp4 分段,且不吃自己的产物", () => {
     expect(g[B].ts).toEqual([`${B}_000.ts`, `${B}_001.ts`]);
     expect(groupSessions([`${B}_000.flv`])[B].ts).toEqual([`${B}_000.flv`]);
   });
-  it("带段号的 mkv/mp4 分段被识别并按段号排序", () => {
-    const g = groupSessions([`${B}_002.mkv`, `${B}_000.mkv`, `${B}_001.mp4`]);
-    expect(g[B].ts).toEqual([`${B}_000.mkv`, `${B}_001.mp4`, `${B}_002.mkv`]);
+  it("带段号的 mkv 分段:会话声明了 nodeFormat=mkv 才识别并按段号排序;扩展名与声明不符的不收", () => {
+    const nodeFormats = new Map([[B, "mkv" as const]]);
+    const g = groupSessions([`${B}_002.mkv`, `${B}_000.mkv`, `${B}_001.mp4`], { nodeFormats });
+    expect(g[B].ts).toEqual([`${B}_000.mkv`, `${B}_002.mkv`]);
+  });
+  it("无声明(默认 / stage 目录 / 合并模式)一个 mp4/mkv 都不收,即使带段号", () => {
+    expect(groupSessions([`${B}_000.mkv`, `${B}_001.mp4`])).toEqual({});
   });
   it("合并/烧录产物不当分段:_danmu/_livechat、无时间戳的 {主播}_{日期}.mkv、同会话已有 ts 的 {base}.mkv", () => {
     const g = groupSessions([
@@ -74,7 +78,7 @@ describe("groupSessions 识别 mkv/mp4 分段,且不吃自己的产物", () => {
     expect(Object.keys(g)).toEqual([B]);
     expect(g[B].ts).toEqual([`${B}_000.ts`]);
   });
-  it("录制目录只有 {base}.mp4/.mkv(无段号单文件)→ 分组为空(与 base 一致)", () => {
+  it("录制目录只有 {base}.mp4/.mkv(无段号单文件)且无声明 → 分组为空(与 base 一致)", () => {
     expect(groupSessions([`${B}.mp4`])).toEqual({});
     expect(groupSessions([`${B}.mkv`])).toEqual({});
   });
@@ -82,6 +86,14 @@ describe("groupSessions 识别 mkv/mp4 分段,且不吃自己的产物", () => {
     const withNative = groupSessions([`${B}_000.ts`, `${B}_part0.mp4`, `${B}_part1.mp4`, `${B}_part0.mkv`]);
     expect(withNative[B].ts).toEqual([`${B}_000.ts`]);
     expect(groupSessions([`${B}_part0.mp4`, `${B}_part1.mp4`])).toEqual({});
+  });
+  it("buildRemuxArgs 带 fmt(节点侧写临时文件):mkv 显式 -f matroska 且无 mp4 专属参数;mp4 保留时基/faststart + -f mp4", () => {
+    const mkv = buildRemuxArgs("/in/a.ts", "/out/a.mkv.drec-remux", "mkv");
+    expect(mkv.slice(-3)).toEqual(["-f", "matroska", "/out/a.mkv.drec-remux"]);
+    expect(mkv).not.toContain("+faststart");
+    const mp4 = buildRemuxArgs("/in/a.ts", "/out/a.mp4.drec-remux", "mp4");
+    expect(mp4.slice(-3)).toEqual(["-f", "mp4", "/out/a.mp4.drec-remux"]);
+    expect(mp4).toContain("+faststart");
   });
   it("默认 original 对照:仅原生分段 + 合并产物时结果与 base 逐字一致", () => {
     const g = groupSessions([`${B}_000.ts`, `${B}_001.ts`, `${B}.mp4`, `${B}.xml`]);

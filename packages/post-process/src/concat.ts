@@ -1,8 +1,8 @@
 // ts/src/core/post/concat.ts
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
-import { isVideoFileName, segmentIndexOf, sessionBaseOf, stageContainerOfPath, stampedSessionBaseOf } from "@drec/core";
+import { isOutputFormat, isVideoFileName, segmentIndexOf, sessionBaseOf, stageContainerOfPath, stampedSessionBaseOf, STAGE_CONTAINERS, type StageFormat } from "@drec/core";
 import { runFfmpeg } from "./ffmpeg.js";
 
 /**
@@ -32,6 +32,34 @@ export interface SessionGroup {
   segmentXmls: string[];
 }
 
+export interface GroupSessionsOpts {
+  /**
+   * 会话基名 → 节点侧原地替换后的容器(读自该会话的 `{base}.session.json`,见 {@link readNodeFormats})。
+   * 只有**录制目录**的调用方才传;不传 = 一个 mp4/mkv 都不收(stage / 合并模式 / 默认 original 与 base 一致)。
+   */
+  nodeFormats?: ReadonlyMap<string, StageFormat>;
+}
+
+/**
+ * 读目录里各会话 `{base}.session.json` 的 `nodeFormat`(节点侧原地替换留的标记)。
+ * 老文件缺字段 = 未转换(不入表);损坏/非白名单值同样忽略,绝不抛。
+ * `files` = 该目录的文件名列表(只挑 `.session.json`)。
+ */
+export function readNodeFormats(dir: string, files: string[]): Map<string, StageFormat> {
+  const out = new Map<string, StageFormat>();
+  for (const f of files) {
+    if (!f.endsWith(".session.json")) continue;
+    try {
+      const d = JSON.parse(readFileSync(join(dir, basename(f)), "utf-8")) as { nodeFormat?: unknown };
+      const nf = d.nodeFormat;
+      if (typeof nf === "string" && isOutputFormat(nf) && nf !== "original") {
+        out.set(basename(f).slice(0, -".session.json".length), nf);
+      }
+    } catch { /* 缺失/损坏 → 视为未转换 */ }
+  }
+  return out;
+}
+
 /**
  * 文件名列表 → { base: SessionGroup }，ts/segmentXmls 已按段号排序。
  *
@@ -40,15 +68,17 @@ export interface SessionGroup {
  *   - `segmentXmls`: DLR/VPS per-segment {base}_NNN.xml，与 ts[i] 一一对齐
  * 两者按各自规律就地填充；调用方按需选用（多段烧录优先 segmentXmls）。
  */
-export function groupSessions(files: string[]): Record<string, SessionGroup> {
+export function groupSessions(files: string[], opts: GroupSessionsOpts = {}): Record<string, SessionGroup> {
   const out: Record<string, SessionGroup> = {};
   const ensure = (b: string): SessionGroup => (out[b] ??= { ts: [], xml: null, segmentXmls: [] });
 
   // First pass: collect video segments。录制原生容器 .ts(ffmpeg/DLR/biliLive)/.flv(mesio)恒认(与 base 一致);
-  // .mp4/.mkv(节点侧原地替换后的分段,issue #137)只认**带段号**的分段:
-  //   - 无段号单文件 `{base}.mp4/.mkv` 是合并产物(或待 PR2 处理的单段),不收,否则收口会把产物当源删掉;
-  //   - 带 part 序号的切分产物 `{stem}_part{N}.mp4`(split.ts 小写命名)不是分段,即使同目录有原生分段也不收;
-  //   - `_danmu`/`_livechat` 烧录产物、无时间戳基名的产物天然无段号/不带时间戳,同样被挡在外面。
+  // .mp4/.mkv 只有一种来源是源录像 —— 节点侧原地替换(issue #137):该会话的 session.json 声明了
+  // `nodeFormat`(`opts.nodeFormats`)且扩展名与之相符,带段号与无段号单文件都收。其余一律不收:
+  //   - 无声明(默认 original / stage 目录 / 合并模式):`{base}.mp4` 是合并产物、`{dateName}_{NNN}.mp4` 是
+  //     分段模式产出的分 P(标题模板含时间时形如分段),收了会在收口/重跑时被当源删掉或重复合并;
+  //   - 带 part 序号的切分产物 `{stem}_part{N}.mp4`(split.ts 小写命名)不是分段,声明了也不收;
+  //   - `_danmu`/`_livechat` 烧录产物、无时间戳基名的产物天然不带时间戳,同样被挡在外面。
   const NATIVE = /\.(ts|flv)$/i;
   // 切分产物判定不用正则(session-name-guard 禁止在 core 之外写分段序号正则):stem 末尾 `_part` + 纯数字。
   const isSplitPart = (f: string): boolean => {
@@ -61,8 +91,9 @@ export function groupSessions(files: string[]): Record<string, SessionGroup> {
     if (NATIVE.test(f)) {
       ensure(sessionBase(f)).ts.push(f);
     } else if (isVideoFileName(f)) {
-      if (isSplitPart(f)) continue;
-      if (!stampedSessionBaseOf(f) || segmentIndexOf(f) < 0) continue;
+      if (isSplitPart(f) || !stampedSessionBaseOf(basename(f))) continue;
+      const declared = opts.nodeFormats?.get(sessionBase(f));
+      if (!declared || !f.toLowerCase().endsWith(STAGE_CONTAINERS[declared].ext)) continue;
       ensure(sessionBase(f)).ts.push(f);
     }
   }
