@@ -53,7 +53,10 @@ export interface Constraints {
 
 const OPEN: Lock = { locked: false };
 
-/** 实际会烧录的版本:不录弹幕(或平台无弹幕)时无从烧录,按关处理(仅用于锁判定/摘要;存储见 storedFromForm,不改写原值)。 */
+/**
+ * 实际会烧录的版本:不录弹幕(或平台无弹幕)时没有弹幕文件、无从烧录,按关处理。
+ * 锁判定、流程摘要与存储(storedFromForm)统一用它,三方一致。
+ */
 function effectiveBurn(f: FormFacts): { burnDanmu: boolean; burnLivechat: boolean } {
   const canBurn = f.danmu && f.danmuAvailable;
   return { burnDanmu: canBurn && f.burnDanmu, burnLivechat: canBurn && f.burnLivechat };
@@ -130,16 +133,15 @@ export interface StoredFields {
 }
 
 /**
- * 表单 → 存储。被锁的方式按「收播后上传」写回;烧录开关保留用户原值(不录弹幕只是当前无从烧录,
- * 不是用户改了意图,静默改写会丢原值)。**仅最终方式为 rolling / nodeSide 时**写回实际值:这两种方式
- * 都与烧录互斥,后端按存储的烧录开关判定是否生效(shouldUseNodeSideUpload / resolveRollingPolicy),
- * 残留的烧录开关会让它们「需烧录」而静默回落。
+ * 表单 → 存储。被锁的方式按「收播后上传」写回;烧录开关**一律写回实际值**(effectiveBurn):不录弹幕就
+ * 没有弹幕文件,存原值会让后端照常执行烧录并失败,表单、流程摘要、后端三方必须一致。
+ * 代价:之后重新打开录弹幕时,烧录需手动重开(原值不保留)。
  * tsDirect 原值由调用方提交。
  */
 export function storedFromForm(f: FormFacts): StoredFields {
-  if (!f.uploadOn) return { mode: "stage", nodeSideUpload: false, burnDanmu: f.burnDanmu, burnLivechat: f.burnLivechat };
+  const burn = effectiveBurn(f);
+  if (!f.uploadOn) return { mode: "stage", nodeSideUpload: false, ...burn };
   const method = effectiveMethod(f, deriveConstraints(f));
-  const burn = method === "rolling" || method === "nodeSide" ? effectiveBurn(f) : { burnDanmu: f.burnDanmu, burnLivechat: f.burnLivechat };
   return { mode: method === "rolling" ? "rolling" : "upload", nodeSideUpload: method === "nodeSide", ...burn };
 }
 

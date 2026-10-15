@@ -126,11 +126,21 @@ describe("methodFromStored / storedFromForm 往返", () => {
   });
 });
 
-describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定同口径;存储仅 rolling / nodeSide 写回实际值)", () => {
+describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定同口径;存储一律写回实际值)", () => {
   const off = facts({ danmu: false, burnDanmu: true, burnLivechat: true });
   const burnOn = { burnDanmu: true, burnLivechat: true };
-  it("方式 after:存储保留烧录原值(不静默改写)", () => {
-    expect(storedFromForm({ ...off, method: "after" })).toMatchObject(burnOn);
+  const burnOff = { burnDanmu: false, burnLivechat: false };
+  it("方式 after:存储写回实际值 false(无弹幕文件,存原值后端会烧录失败)", () => {
+    expect(storedFromForm({ ...off, method: "after" })).toMatchObject(burnOff);
+  });
+  it("不录弹幕 + 原值开 + after:存储烧录 false,且流程摘要不含烧录步骤(二者一致)", () => {
+    const f = { ...off, method: "after" as const };
+    const s = storedFromForm(f);
+    expect(s).toMatchObject(burnOff);
+    const keys = flowSummary(f, true).map((x) => x.key);
+    expect(keys).not.toContain("roomForm.flow.burnDanmu");
+    expect(keys).not.toContain("roomForm.flow.burnLivechat");
+    expect(flowSummary({ ...f, ...s }, true)).toEqual(flowSummary(f, true));
   });
   it("方式 nodeSide + 不录弹幕 + 原值开:存储烧录 = false,nodeSideUpload = true", () => {
     expect(storedFromForm({ ...off, method: "nodeSide" }))
@@ -143,8 +153,8 @@ describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定同口径;存�
       { burnDanmu: s.burnDanmu, burnLivechat: s.burnLivechat },
     )).toEqual({ ok: true });
   });
-  it("只合成:存储保留烧录原值", () => {
-    expect(storedFromForm({ ...off, uploadOn: false })).toEqual({ mode: "stage", nodeSideUpload: false, ...burnOn });
+  it("只合成:存储写回实际值 false", () => {
+    expect(storedFromForm({ ...off, uploadOn: false })).toEqual({ mode: "stage", nodeSideUpload: false, ...burnOff });
   });
   it("方式 rolling:存储写回关,避免后端据残留烧录开关判定边录边传「需烧录」", () => {
     expect(storedFromForm({ ...off, method: "rolling" })).toEqual({ mode: "rolling", nodeSideUpload: false, burnDanmu: false, burnLivechat: false });
@@ -163,7 +173,7 @@ describe("实际烧录:不录弹幕 = 不烧(锁定显示、判定同口径;存�
     expect(flowSummary(off, true).map((x) => x.key)).toEqual(["roomForm.flow.record", "roomForm.flow.merge", "roomForm.flow.upload"]);
   });
   it("平台无弹幕同理", () => {
-    expect(storedFromForm(facts({ danmuAvailable: false, burnDanmu: true }))).toMatchObject({ burnDanmu: true });
+    expect(storedFromForm(facts({ danmuAvailable: false, burnDanmu: true }))).toMatchObject(burnOff);
   });
 });
 
