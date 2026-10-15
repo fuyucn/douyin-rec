@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { checkNewBroadcastAdmission, effectiveHubConfigPath, makeManualStartAdmit, makeNewBroadcastGate, volumeFreeBytes } from "../../packages/app/src/disk-gate.js";
+import { checkNewBroadcastAdmission, effectiveHubConfig, effectiveHubConfigPath, makeManualStartAdmit, makeNewBroadcastGate, volumeFreeBytes } from "../../packages/app/src/disk-gate.js";
 import { rootHubConfig } from "../../packages/app/src/paths.js";
 
 const GB = 1e9;
@@ -134,5 +134,58 @@ describe("hub 配置路径口径(子进程 / 手动启动 / daemon 同源)", () 
       { dir: "/mnt/task-disk", cfgPath: "/custom/hub.json" },
       { dir: "/default/out", cfgPath: "/custom/hub.json" },
     ]);
+  });
+});
+
+/**
+ * 审查打回项(issue #96 finding):水位来源必须与 daemon 同口径。
+ *
+ * 此前只处理「文件来源」(`--hub-config <file>`),inline/settings 两种来源下子进程会回落去读
+ * **根文件** —— 用户把 diskMinGB 设成 0(关闸门)却存在 settings 表里时,子进程仍按根文件/默认 10GB 拦录。
+ */
+describe("水位来源:inline/settings 也必须生效(与 daemon 同口径)", () => {
+  const OLD = { ...process.env };
+  afterEach(() => {
+    process.env.DOUYIN_REC_HUB_CONFIG = OLD.DOUYIN_REC_HUB_CONFIG;
+    process.env.DOUYIN_REC_HUB_CONFIG_JSON = OLD.DOUYIN_REC_HUB_CONFIG_JSON;
+    if (OLD.DOUYIN_REC_HUB_CONFIG === undefined) delete process.env.DOUYIN_REC_HUB_CONFIG;
+    if (OLD.DOUYIN_REC_HUB_CONFIG_JSON === undefined) delete process.env.DOUYIN_REC_HUB_CONFIG_JSON;
+  });
+
+  it("env 给了配置 JSON(inline/settings 来源)→ 直接用它,不看文件", () => {
+    process.env.DOUYIN_REC_HUB_CONFIG_JSON = cfg(0);      // 关闭闸门
+    delete process.env.DOUYIN_REC_HUB_CONFIG;
+    const eff = effectiveHubConfig();
+    expect(eff.json).toBe(cfg(0));
+    // 用该来源判定:diskMinGB=0 → 无论剩余多低都放行(证明读的是 JSON 而非根文件)
+    expect(checkNewBroadcastAdmission({ outDir: "/t", hubConfigPath: eff.path, hubConfigJson: eff.json, freeBytes: () => 0.1 * GB }))
+      .toEqual({ ok: true });
+  });
+
+  it("env 给了文件路径 → 仍按文件现读(可热改),优先于 JSON", () => {
+    process.env.DOUYIN_REC_HUB_CONFIG = "/cfg/hot.json";
+    process.env.DOUYIN_REC_HUB_CONFIG_JSON = cfg(0);
+    const eff = effectiveHubConfig();
+    expect(eff.path).toBe("/cfg/hot.json");
+    expect(eff.json).toBeUndefined();                       // 文件来源不带 JSON
+    // 文件里是 15GB → 剩 9GB 应拒绝(证明读的是文件内容)
+    const d = checkNewBroadcastAdmission({ outDir: "/t", hubConfigPath: eff.path, hubConfigJson: eff.json,
+                                           readConfig: () => cfg(15), freeBytes: () => 9 * GB });
+    expect(d.ok).toBe(false);
+  });
+
+  it("两个 env 都没有 → 回落数据根默认文件路径(与旧行为一致)", () => {
+    delete process.env.DOUYIN_REC_HUB_CONFIG;
+    delete process.env.DOUYIN_REC_HUB_CONFIG_JSON;
+    expect(effectiveHubConfigPath()).toBe(rootHubConfig());
+  });
+
+  it("hubConfigJson 优先于 hubConfigPath(判定层)", () => {
+    const d = checkNewBroadcastAdmission({
+      outDir: "/t", hubConfigPath: "/cfg/never.json", hubConfigJson: cfg(15),
+      readConfig: () => cfg(0),                              // 文件说关闭;JSON 说 15GB
+      freeBytes: () => 9 * GB,
+    });
+    expect(d.ok).toBe(false);                                // 采用 JSON → 拦
   });
 });

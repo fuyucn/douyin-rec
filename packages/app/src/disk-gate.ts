@@ -16,19 +16,36 @@ import { resolveDiskWatermark } from "./daemon.js";
 import { rootHubConfig } from "./paths.js";
 
 /**
- * 录制子进程 / 手动启动共用的 hub 配置路径:serve 用 `--hub-config <文件>` 时会把该文件路径写进
- * 环境变量(子进程继承),这样子进程与 serve 读同一份水位配置;否则读数据根下的默认文件。
- * 已知限制:hub 配置存在 settings 表里时,子进程读不到(daemon 读得到)→ 子进程按默认 10GB。
+ * 录制子进程 / 手动启动共用的 hub 配置**内容**:与 daemon 走同一口径。
+ *
+ * serve 在启动时把「当前生效的那份」配置交给子进程(见 serve.ts 的环境变量注入):
+ *   - 来源是文件(arg-file / root-file)→ 传路径,子进程每次现读(可热改);
+ *   - 来源是 inline / settings → 传 JSON 内容(无法传路径)。
+ * 两者都没有 → undefined → 与 daemon 一样回落默认水位。
+ *
+ * 返回值 = 配置 JSON 串(或 undefined);`path` 仅文件来源才有。
  */
+export function effectiveHubConfig(): { json: string | undefined; path: string } {
+  const envPath = process.env.DOUYIN_REC_HUB_CONFIG?.trim();
+  const envJson = process.env.DOUYIN_REC_HUB_CONFIG_JSON;
+  if (envPath) return { json: undefined, path: envPath };
+  if (envJson !== undefined && envJson.trim() !== "") return { json: envJson, path: "" };
+  return { json: undefined, path: rootHubConfig() };
+}
+
+/** 兼容旧调用点:只要「路径」(文件来源);非文件来源返回数据根下的默认文件路径。 */
 export function effectiveHubConfigPath(): string {
-  return process.env.DOUYIN_REC_HUB_CONFIG?.trim() || rootHubConfig();
+  const { path, json } = effectiveHubConfig();
+  return path || (json === undefined ? rootHubConfig() : "");
 }
 
 export interface NewBroadcastGateOpts {
   /** 任务自己的输出目录(录像最终落在其下的子目录);测它所在的卷,而不是默认输出目录所在卷。 */
   outDir: string;
-  /** hub 配置文件路径(现读;读不到 → 回落默认水位)。 */
+  /** hub 配置文件路径(现读;读不到 → 回落默认水位)。非文件来源(inline/settings)时可为空串。 */
   hubConfigPath: string;
+  /** 直接给出的配置 JSON(inline/settings 来源);优先于 hubConfigPath。 */
+  hubConfigJson?: string;
   /** 注入:读配置文本(测试用)。缺省读 hubConfigPath。 */
   readConfig?: (path: string) => string | undefined;
   /** 注入:取目录所在卷的剩余字节(测试用)。返回 null = 查不到 → 放行。 */
@@ -74,9 +91,11 @@ export function makeManualStartAdmit(
   resolveOut: (taskOutDir?: string | null) => string,
   over: Partial<NewBroadcastGateOpts> = {},
 ): (taskOutDir?: string | null) => AdmitDecision {
+  const eff = effectiveHubConfig();
   return (taskOutDir) => checkNewBroadcastAdmission({
     outDir: resolveOut(taskOutDir),
-    hubConfigPath: effectiveHubConfigPath(),
+    hubConfigPath: eff.path,
+    hubConfigJson: eff.json,
     ...over,
   });
 }
@@ -84,7 +103,9 @@ export function makeManualStartAdmit(
 /** 判定:剩余低于水位 → `{ok:false, reason}`;其余(含查不到、阈值关闭)→ `{ok:true}`。 */
 export function checkNewBroadcastAdmission(o: NewBroadcastGateOpts): AdmitDecision {
   const read = o.readConfig ?? defaultReadConfig;
-  const { bytes: watermark } = resolveDiskWatermark(read(o.hubConfigPath), o.warn);
+  // 来源优先:直接给的 JSON(inline/settings)> 文件路径。二者口径与 daemon 的 resolveDiskWatermark 一致。
+  const raw = o.hubConfigJson !== undefined ? o.hubConfigJson : read(o.hubConfigPath);
+  const { bytes: watermark } = resolveDiskWatermark(raw, o.warn);
   if (!(watermark > 0)) return { ok: true };
   const free = (o.freeBytes ?? volumeFreeBytes)(o.outDir);
   if (free == null) return { ok: true };
