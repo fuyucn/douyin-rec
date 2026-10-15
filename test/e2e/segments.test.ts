@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { FULL_CLEANUP, ROOM, Scenario } from "./harness/scenario.js";
 import { pastStartMs } from "./harness/fake-recordings.js";
@@ -240,4 +240,46 @@ describe("e2e: 半成品产物(issue #140)", () => {
     expect(s.jobState(KEY)).toBe("done");
   });
 
+});
+
+/**
+ * issue #142:分段续跑必须补齐烧录轨。
+ *
+ * 旧缺陷:续跑分叉在烧录循环之前 → 续跑拿到的烧录字段恒为空 → `appendSegmentGroup(files=[])`
+ * 把 append_danmu 标 skipped → markDone ⇒ 台账 done、稿件缺 `_danmu` 分 P,全程无告警。
+ */
+describe("e2e: 分段续跑补齐烧录轨(issue #142)", () => {
+  const KEY = `douyin:${ROOM}:2026-06-27`;
+  const onlyDanmu = (files: string[]): boolean => files.some((f) => f.includes("_danmu"));
+
+  /** 首轮:P1 建稿成功,append danmu 被「进程被杀」打断(未提交)→ job failed、稿件号已落库。 */
+  async function interruptedBeforeDanmu(): Promise<string> {
+    s = await Scenario.create({
+      cfg: { steps: { mergeSegments: false, burnDanmu: true, burnLivechat: false }, cleanup: FULL_CLEANUP },
+    });
+    s.record({ sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 1, segSec: 600 }] });
+    s.fake.inject({ op: "append", mode: "killed", applied: false, times: 100, match: onlyDanmu });
+    await s.reconcile();
+    expect(s.jobState(KEY)).toBe("failed");
+    expect(s.ledger.get(KEY)?.bv).toBeTruthy();
+    s.fake.clearFaults();
+    return KEY;
+  }
+
+  it("烧录产物还在盘上 → 续跑追加 danmu 分 P,稿件分 P 齐全", async () => {
+    const key = await interruptedBeforeDanmu();
+    await s.reconcile(); // 续跑(resumeSegmentAppends)
+    expect(s.jobState(key)).toBe("done");
+    expectHealthyDone(s, key, { parts: [...names(1), ...names(1, "_danmu")] });
+  });
+
+  it("烧录产物已丢 → 续跑先补烧再追加(不得静默标 done)", async () => {
+    const key = await interruptedBeforeDanmu();
+    const danmu = join(s.stageSubOf(key), "主播甲_2026-06-27_000_danmu.mp4");
+    expect(existsSync(danmu)).toBe(true);
+    rmSync(danmu);
+    await s.reconcile();
+    expect(s.jobState(key)).toBe("done");
+    expectHealthyDone(s, key, { parts: [...names(1), ...names(1, "_danmu")] });
+  });
 });

@@ -42,6 +42,12 @@ function linkOrCopySync(src: string, dst: string): void {
   linkOrCopy(src, dst);
 }
 
+/** 烧录产物规范名:`{plain 去扩展名}_{style}{同扩展名}`(主流程与续跑共用,保证两边认的是同一个文件)。 */
+function burnOutOf(plain: string, style: "danmu" | "livechat"): string {
+  const ext = path.extname(plain);
+  return `${plain.slice(0, plain.length - ext.length)}_${style}${ext}`;
+}
+
 /** 默认单段时长探测(ffprobe)。 */
 const defaultSegmentDuration = (src: string): Promise<number> =>
   import("@drec/post-process").then((m) => m.ffprobeDuration(src));
@@ -450,7 +456,7 @@ export async function runSegmentPipeline(o: {
     let burned = 0;
     for (const p of uploadParts) {
       throwIfAborted();
-      const out = p.plain.slice(0, -ext.length) + `_${style}${ext}`;
+      const out = burnOutOf(p.plain, style);
       // 无弹幕窗口 → 该组无弹幕可烧,回落 plain(不产出 *_danmu.mp4)。
       if (!p.window) { jlog(`${node} 组 ${p.index}: 无弹幕,跳过`); continue; }
       // 已存在 → 先自检是不是半成品(烧录被强杀会留下读不出时长的同名文件),读不出就重烧。
@@ -699,6 +705,41 @@ async function appendSegmentGroup(
   jlog(`append ${step} 完成(${finalFiles.length} 文件,${batches} 批)`);
 }
 
+/**
+ * 续跑回填烧录产物(#142):对「开启且尚未完成 append」的烧录轨,按规范名找盘上产物;
+ * 缺失或读不出时长 → 补烧(本地产物,重烧不会重复投稿)。已完成的轨不碰(收尾补跑不重烧)。
+ * 窗口内无弹幕的组默认实现不产出文件 → 不回填,与主流程同口径。
+ */
+async function recoverBurnProducts(
+  streamKey: string,
+  uploadParts: SegmentUploadPart[],
+  deps: PipelineDeps,
+  jlog: (msg: string) => void,
+  burnDanmu: boolean,
+  burnLivechat: boolean,
+): Promise<void> {
+  const probe = deps.segmentDuration ?? defaultSegmentDuration;
+  const burnOne = deps.burnSegment ?? defaultBurnSegment;
+  const tracks = [
+    { style: "danmu", on: burnDanmu, step: "append_danmu" },
+    { style: "livechat", on: burnLivechat, step: "append_livechat" },
+  ] as const;
+  for (const t of tracks) {
+    if (!t.on || deps.ledger.isStepDone(streamKey, t.step)) continue;
+    for (const p of uploadParts) {
+      if (!p.window) continue;
+      const out = burnOutOf(p.plain, t.style);
+      if (!(await isCompleteMedia(out, probe))) {
+        jlog(`续跑:${t.style} 组 ${p.index} 产物${existsSync(out) ? "读不出时长" : "缺失"} → 补烧 ${path.basename(out)}`);
+        await burnOne({ plain: p.plain, xmlPath: p.window.xmlPath, window: p.window, style: t.style, out });
+      }
+      if (existsSync(out)) {
+        if (t.style === "danmu") p.danmu = out; else p.livechat = out;
+      }
+    }
+  }
+}
+
 /** 分段模式续跑:已建稿 → 只补没做完的 append(plain 剩余分 P / danmu / livechat)。 */
 async function resumeSegmentAppends(
   streamKey: string,
@@ -728,15 +769,21 @@ async function resumeSegmentAppends(
     notify({ kind: "error", stage: "上传", message: `分段续跑失败:${bv} 产物缺失,请人工核对分 P` });
     return { state: "needs_manual", bv };
   }
+  // 烧录轨:主流程的烧录循环在续跑分叉**之后**,本函数拿到的 `uploadParts[].danmu/livechat` 恒为空。
+  // 不回填的话 `appendSegmentGroup(files=[])` 会把该步骤标 skipped 并随后 markDone ——
+  // 台账 done、稿件却缺烧录轨分 P,全程无告警(#142)。故按规范名重新发现,缺失/读不出则补烧。
+  await recoverBurnProducts(streamKey, uploadParts, deps, jlog, burnDanmu, burnLivechat);
   // 先补 plain:已建稿但其余分 P 可能还没传完(上次在 append plain 中途失败)。
   const plainFiles = uploadParts.map((p) => p.plain).filter((f) => f && existsSync(f));
   // 提交前自检:补 append 的产物同样不能是坏容器(稿件已建,绝不能追加坏分 P)→ 检出转人工。
-  // 只检 plain:本函数拿到的 `uploadParts[].danmu/livechat` 恒为空 —— 烧录循环在主流程里、
-  // **在续跑分叉之后**(见主流程注释),续跑路径不重烧也不追加烧录轨(该缺口另开 issue #142 跟踪)。
-  const brokenResume = await unreadableParts(plainFiles, deps.segmentDuration ?? defaultSegmentDuration);
+  const resumeFiles = [
+    ...plainFiles,
+    ...uploadParts.flatMap((p) => [p.danmu, p.livechat]).filter((f): f is string => !!f && existsSync(f)),
+  ];
+  const brokenResume = await unreadableParts(resumeFiles, deps.segmentDuration ?? defaultSegmentDuration);
   if (brokenResume.length > 0) {
     const names = brokenResume.slice(0, 3).map((f) => path.basename(f)).join(",");
-    jlog(`⚠️ 续跑产物自检失败:${brokenResume.length}/${plainFiles.length} 个分 P 读不出时长 → 拒绝 append:${names}`);
+    jlog(`⚠️ 续跑产物自检失败:${brokenResume.length}/${resumeFiles.length} 个分 P 读不出时长 → 拒绝 append:${names}`);
     ledger.setState(streamKey, "needs_manual", { error: `续跑产物自检失败:${brokenResume.length} 个分 P 读不出时长` });
     notify({ kind: "error", stage: "上传", message: `${streamKey} 续跑产物自检失败:${brokenResume.length} 个分 P 读不出时长,请人工核对` });
     return { state: "needs_manual", bv };
