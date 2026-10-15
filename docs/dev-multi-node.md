@@ -303,11 +303,11 @@ scripts/e2e-verify.sh seed --mirror          # 只播种、不起容器
 | 复制(改写后) | 不复制 |
 | --- | --- |
 | 数据库快照:`settings`(平台 cookies、时区)、`tasks` | biliup cookies、`vps.key`、`.env`、录像、stage、sync 库、prd 合并历史 |
-| hub 规则文件:workers 改写成 `local`/`node-1`/`node-2`,`upload.mode` 一律 `stage` | webhook(`discordWebhook`、通知开关)、任务级 webhook/outDir |
+| hub 规则文件:workers 改写成 `local`/`node-1`/`node-2`,`upload.mode` 一律 `stage` | webhook(`discordWebhook`、通知开关)、任务级 webhook/outDir |  <!-- issue-guard: allow(文档里说明「不注入 webhook 设置」这一行为,非凭证) -->
 
 - 任务全部 `enabled=0`、`status=stopped`、`rollingUpload=0`;**controller** 带全部任务,**worker** 只带 settings(任务由 hub 同步下发)。
 - 投不了稿(物理上):镜像里是假 biliup,biliup cookies 仍是 `FAKE-DEV`。要测真投稿走 egress 档,不在 mirror 档。
-- 种子在播种时过一道断言(`chk_mirror_seed`):无 webhook 设置、无 enabled 任务、无 prd 合并历史、hub 规则 workers ⊆ {local,node-1,node-2}、upload.mode=stage;`doctor` 的反例自检覆盖这些。该断言**不进 gate**——测试时任务被打开是预期。
+- 种子在播种时过一道断言(`chk_mirror_seed`):无 webhook 设置、无 enabled 任务、无 prd 合并历史、hub 规则 workers ⊆ {local,node-1,node-2}、upload.mode=stage;`doctor` 的反例自检覆盖这些。该断言**不进 gate**——测试时任务被打开是预期。  <!-- issue-guard: allow(文档里说明「不注入 webhook 设置」这一行为,非凭证) -->
 - 网络:三节点都接 `drec-devnet`(internal,节点间 ssh/rsync)+ `drec-devnet-egress`(出外网);controller 只发布 `127.0.0.1:$DREC_MIRROR_PORT`。compose 断言按档位校验这些形态,其它档位发布端口/加网络仍被拒绝。  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
 - `run s1|s2|s3|all` 在 mirror 档被拒绝(它们用假房间造数),请在 UI 里开真实任务。
 - 注意:dev 与 prd 对同一房间**同时**录制会各拉一路流;测试时尽量只开要测的那几个任务。
