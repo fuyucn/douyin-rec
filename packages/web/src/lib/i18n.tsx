@@ -191,11 +191,14 @@ const DICT = {
       runsEmptyHint: "录完一场并收播后,这里会显示该房间的处理流程(合并 → 烧录 → 上传)与结果。",
     },
     roomForm: {
-      useCookieStream: "带 Cookie 取流", notifySection: "通知",
+      useCookieStream: "带 Cookie 取流", notifySection: "通知", cleanupSection: "清理", output: "产出形态",
+      mergeOne: "合并为一个视频", mergeSplit: "按录制分段", moreUpload: "更多:稿件名 / 分P名 / 简介", flowLabel: "处理流程",
+      stageAfterDoneWarn: "当前只合成不上传:stage 里就是成品,完成后清空会把成品删掉",
+      method: { label: "上传方式", after: "收播后上传", afterHint: "收播后由 master 合并 / 烧录再投稿(默认)" },
       lock: { needDanmu: "需先开启「录弹幕」", needNodeSide: "仅在「节点侧上传」时生效", needMerge: "按分段产出时没有合并步骤" },
       flow: {
         record: "录制", noProcess: "不处理", rolling: "边录边传", merge: "合并", split: "按分段",
-        burnDanmu: "烧弹幕版", burnLivechat: "烧互动版", upload: "投稿 B站", nodeSide: "节点侧投稿", stageOnly: "只合成",
+        burnDanmu: "烧飞屏弹幕", burnLivechat: "烧聊天框", upload: "投稿 B站", nodeSide: "节点侧投稿", stageOnly: "只合成",
       },
     },
     settings: {
@@ -612,7 +615,10 @@ const DICT = {
       runsEmptyHint: "After a stream ends, this room's pipeline (merge → burn → upload) and results show up here.",
     },
     roomForm: {
-      useCookieStream: "Use cookie for streams", notifySection: "Notifications",
+      useCookieStream: "Use cookie for streams", notifySection: "Notifications", cleanupSection: "Cleanup", output: "Output",
+      mergeOne: "Merge into one video", mergeSplit: "Per recorded segment", moreUpload: "More: submission / part titles, description", flowLabel: "Processing flow",
+      stageAfterDoneWarn: "Compose-only mode: stage holds the final files; clearing it after completion deletes them",
+      method: { label: "Upload method", after: "Upload after broadcast", afterHint: "After the broadcast, master merges / burns, then uploads (default)" },
       lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment" },
       flow: {
         record: "Record", noProcess: "No processing", rolling: "Rolling upload", merge: "Merge", split: "Per segment",
