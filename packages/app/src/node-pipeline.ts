@@ -14,7 +14,7 @@
  *   - @drec/app 的 uploadPlain / appendGroup(biliup)
  *   - core 的 title-template(与 master 同源的产物命名/稿件标题)
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync } from "node:fs";
 import path from "node:path";
 import {
   linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, isAppendAmbiguous,
@@ -349,7 +349,7 @@ async function withRetry<T>(
 
 /** 节点侧上传的一个「分 P」产物(与 master 分段模式同义:单段 remux 或若干段合并)。 */
 interface NodePart {
-  /** 待上传 plain mp4(stage 内规范名 `{stem}_{NNN}.mp4`)。 */
+  /** 待上传 plain(stage 内规范名 `{stem}_{NNN}.mp4`;`.ts` 直传时为 `.ts` 硬链接)。 */
   plain: string;
   /** 构成该分 P 的源文件(清理/诊断用)。 */
   sources: string[];
@@ -427,6 +427,21 @@ function linkOrCopySync(src: string, dst: string): void {
 }
 
 /**
+ * `.ts` 直传:单段独占分 P 的 `.ts`,把源**硬链接**成规范上传名(`{stem}_{NNN}.ts`),不 remux。
+ * 只硬链接、**绝不复制**(复制就又是两份);跨设备/不支持 → 返回 false,调用方回落 remux。
+ * 条件对齐 rolling 路径(它本来就直传分段源文件,B站已稳定转码)。
+ */
+export function tryDirectTsLink(src: string, dst: string): boolean {
+  try {
+    if (existsSync(dst)) return true; // 续跑:已有则复用(与 remux 的 existsSync 跳过同义)
+    linkSync(src, dst);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 逐段 remux / 组内合并 → 每个分 P 的 plain mp4(落在 stageSub)。
  *
  * 命名与 master 分段模式**逐字一致**:`{stem}_{NNN}.mp4` —— 这个名字会直接变成 B 站分 P 的
@@ -473,6 +488,16 @@ async function produceParts(
     const out = path.join(stageSub, `${dateName}_${String(parts.length).padStart(3, "0")}.mp4`);
     const work = path.join(workDir, `${String(parts.length).padStart(3, "0")}.mp4`);
     const files = group.map((idx) => spec.tsFiles[idx]!);
+    // `.ts` 直传:单段独占分 P 的 .ts 不 remux,硬链接成规范名直接上传(同一内容只占一份)。
+    if (spec.tsDirect === true && group.length === 1 && /\.ts$/i.test(files[0]!)) {
+      const outTs = out.replace(/\.mp4$/i, ".ts");
+      if (tryDirectTsLink(files[0]!, outTs)) {
+        parts.push({ plain: outTs, sources: files, durSec: groupDur });
+        log(`分 P ${parts.length}: 1 段(${Math.round(groupDur)}s)→ ${path.basename(outTs)}(.ts 直传,免 remux)`);
+        continue;
+      }
+      log(`硬链接 ${path.basename(files[0]!)} 失败(跨设备?)→ 回落 remux(不复制,避免双份)`);
+    }
     if (group.length === 1) {
       if (!existsSync(work)) await remuxSegment(files[0]!, work);
     } else {
@@ -788,7 +813,7 @@ export async function probeNodeCapabilities(dataRoot: string): Promise<{
 
 /** 列出 stage 目录下的产物(stage 模式调试/展示用)。 */
 export function listNodeProducts(stageSub: string): string[] {
-  try { return readdirSync(stageSub).filter((f) => f.endsWith(".mp4")).map((f) => path.join(stageSub, f)); } catch { return []; }
+  try { return readdirSync(stageSub).filter((f) => f.endsWith(".mp4") || f.endsWith(".ts")).map((f) => path.join(stageSub, f)); } catch { return []; }
 }
 
 /**
@@ -813,7 +838,7 @@ export function nodeStageCleanupTargets(
     const p = path.join(stageSub, n);
     // 中间产物/别名目录:无论 stage 是否保留都不该留(它们不是交付物,且与成品同量级)。
     if (n === UPLOAD_ALIAS_DIR || n === ".work") out.push(p);
-    else if (opts.deleteProducts !== false && /\.mp4$/i.test(n)) out.push(p);
+    else if (opts.deleteProducts !== false && /\.(mp4|ts)$/i.test(n)) out.push(p);
     else if (opts.deleteXml && /\.(xml|ass)$/i.test(n)) out.push(p);
   }
   return out;

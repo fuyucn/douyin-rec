@@ -29,6 +29,8 @@ interface FormState {
   mergeSegments: boolean;
   /** (实验)节点侧上传:不烧录时 winner 节点本地 remux + 上传,省掉录像回传。默认 false。 */
   nodeSideUpload: boolean;
+  /** 节点侧上传时 ffmpeg 的 .ts 单段分 P 不 remux 直传(同一内容只占一份)。默认 false。 */
+  tsDirect: boolean;
   clStageSourceAfterMerge: boolean;
   clSourceAfterDone: boolean;
   clStageAfterDone: boolean;
@@ -68,6 +70,7 @@ const BLANK: FormState = {
   burnLivechat: true,
   mergeSegments: true,
   nodeSideUpload: false,
+  tsDirect: false,
   clStageSourceAfterMerge: false,
   clSourceAfterDone: false,
   clStageAfterDone: false,
@@ -118,6 +121,7 @@ function fromRule(r: HubRuleDTO): FormState {
     burnLivechat: c.steps?.burnLivechat !== false,
     mergeSegments: c.steps?.mergeSegments !== false,
     nodeSideUpload: c.steps?.nodeSideUpload === true,
+    tsDirect: c.steps?.tsDirect === true,
     clStageSourceAfterMerge: c.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: c.cleanup?.sourceAfterDone === true,
     clStageAfterDone: c.cleanup?.stageAfterDone === true,
@@ -324,7 +328,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
       requires: form.requires,
       recording: { sourceTaskId: form.sourceTaskId },
       pipeline: {
-        steps: { mergeSegments: form.mergeSegments, burnDanmu: form.burnDanmu, burnLivechat: form.burnLivechat, nodeSideUpload: form.nodeSideUpload },
+        steps: { mergeSegments: form.mergeSegments, burnDanmu: form.burnDanmu, burnLivechat: form.burnLivechat, nodeSideUpload: form.nodeSideUpload, tsDirect: form.tsDirect },
         cleanup: {
           stageSourceAfterMerge: form.clStageSourceAfterMerge,
           sourceAfterDone: form.clSourceAfterDone,
@@ -608,6 +612,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
             {([
               ["mergeSegments", t("hub.ruleDialog.toggleMergeSegmentsLabel"), t("hub.ruleDialog.toggleMergeSegmentsSub")],
               ["nodeSideUpload", t("hub.ruleDialog.toggleNodeSideUploadLabel"), t("hub.ruleDialog.toggleNodeSideUploadSub")],
+              ["tsDirect", t("hub.ruleDialog.toggleTsDirectLabel"), t("hub.ruleDialog.toggleTsDirectSub")],
               ["burnDanmu", t("hub.ruleDialog.toggleBurnDanmuLabel"), t("hub.ruleDialog.toggleBurnDanmuSub")],
               ["burnLivechat", t("hub.ruleDialog.toggleBurnLivechatLabel"), t("hub.ruleDialog.toggleBurnLivechatSub")],
               ["clStageSourceAfterMerge", t("hub.ruleDialog.toggleClStageSourceAfterMergeLabel"), t("hub.ruleDialog.toggleClStageSourceAfterMergeSub")],

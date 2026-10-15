@@ -6,11 +6,12 @@
  *      ④ master 与节点共享同一限流状态文件时,总提交数不超 rateLimit(并发场景)。
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import * as nodeFs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson } from "@drec/core";
-import { nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, runNodeSidePipeline, splitGroupsBySession, writeNodeResult, abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath } from "../../packages/app/src/node-pipeline.js";
+import { tryDirectTsLink, nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, runNodeSidePipeline, splitGroupsBySession, writeNodeResult, abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath } from "../../packages/app/src/node-pipeline.js";
 import { remuxSegment } from "@drec/post-process";
 import { uploadPlain, appendGroup, countVideoParts } from "../../packages/app/src/upload/biliup.js";
 
@@ -787,5 +788,118 @@ describe("issue #2 A2:abortNodeExecutor(经注入 deps 安全终止,绝不误杀
     expect(isExecutorCmdline(["node", "x", "_node-pipeline", "/d", enc({ streamKey: "a:1:2" })], "z:9:9")).toBe(false);
     expect(isExecutorCmdline(["node", "x", "other"], "a:1:2")).toBe(false); // 无 _node-pipeline
     expect(isExecutorCmdline(null, "a:1:2")).toBe(false);
+  });
+});
+
+/**
+ * `.ts` 直传(steps.tsDirect):ffmpeg 的 .ts 单段分 P 不 remux,源硬链接成规范名直接上传 ——
+ * 同一内容在节点上只占一份(源 inode == 上传物 inode,没有 .work、没有 mp4)。
+ */
+describe("节点侧:.ts 直传(tsDirect)", () => {
+  function scene(over: { files?: string[]; tsDirect?: boolean; mergeSegments?: boolean } = {}): { sub: string; spec: Parameters<typeof runNodeSidePipeline>[0] } {
+    const root = mkdtempSync(join(tmpdir(), "node-tsd-"));
+    const recDir = join(root, "recordings");
+    mkdirSync(recDir, { recursive: true });
+    const names = over.files ?? [0, 1, 2].map((i) => `Lilt_2026-10-12_05-18-36_${String(i).padStart(3, "0")}.ts`);
+    const tsFiles = names.map((n) => { const p = join(recDir, n); writeFileSync(p, "SRCTS"); return p; });
+    const stageDir = join(root, "stage");
+    mkdirSync(stageDir, { recursive: true });
+    return {
+      sub: join(stageDir, "douyin_123_2026-10-12"),
+      spec: {
+        streamKey: "douyin:123:2026-10-12",
+        tsFiles,
+        sessionBase: "Lilt_2026-10-12_05-18-36",
+        startMs: 1_750_000_000_000,
+        liveTitle: "开播啦",
+        mergeSegments: over.mergeSegments ?? false,
+        tsDirect: over.tsDirect,
+        uploadMode: "stage",
+        stageDir,
+        uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像", titleTemplate: "{name}_{date}" },
+        uploadPrivate: true,
+      },
+    };
+  }
+
+  it("开启 + 单段分 P + .ts → 上传物是源的硬链接(同 inode),没有 mp4 / .work", async () => {
+    vi.mocked(remuxSegment).mockClear();
+    const { sub, spec } = scene({ tsDirect: true });
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(remuxSegment).not.toHaveBeenCalled();
+    expect(r.products).toHaveLength(3);
+    for (let i = 0; i < 3; i++) {
+      const out = join(sub, `Lilt_2026-10-12_${String(i).padStart(3, "0")}.ts`);
+      expect(r.products![i]).toBe(out);
+      expect(statSync(out).ino).toBe(statSync(spec.tsFiles[i]!).ino); // 同一份数据
+      expect(readFileSync(out, "utf-8")).toBe("SRCTS");
+      expect(existsSync(join(sub, `Lilt_2026-10-12_${String(i).padStart(3, "0")}.mp4`))).toBe(false);
+    }
+    expect(existsSync(join(sub, ".work", "000.mp4"))).toBe(false);
+  });
+
+  it("默认(未开)→ 行为不变:照常 remux 成 mp4", async () => {
+    vi.mocked(remuxSegment).mockClear();
+    const { sub, spec } = scene();
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(remuxSegment).toHaveBeenCalledTimes(3);
+    expect(r.products![0]).toBe(join(sub, "Lilt_2026-10-12_000.mp4"));
+  });
+
+  it("开启但源是 .flv(mesio)→ 仍 remux(时基必须钉 90000)", async () => {
+    vi.mocked(remuxSegment).mockClear();
+    const { spec } = scene({ tsDirect: true, files: ["Lilt_2026-10-12_05-18-36_000.flv"] });
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(remuxSegment).toHaveBeenCalledTimes(1);
+    expect(r.products![0]).toMatch(/\.mp4$/);
+  });
+
+  it("开启但组内多段需要合并 → 仍走合并(直传只管单段独占的分 P)", async () => {
+    vi.mocked(remuxSegment).mockClear();
+    const { spec } = scene({ tsDirect: true, mergeSegments: true });
+    spec.segmentGroupSec = 100000; // 60s×3 全进一组
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(r.products).toHaveLength(1);
+    expect(r.products![0]).toMatch(/\.mp4$/);
+    expect(readFileSync(r.products![0]!, "utf-8")).toBe("MERGED");
+  });
+
+  it("硬链接失败(跨设备)→ 回落 remux,**不复制**出第二份 .ts", async () => {
+    vi.mocked(remuxSegment).mockClear();
+    const { sub, spec } = scene({ tsDirect: true });
+    const linkSpy = vi.mocked(nodeFs.linkSync);
+    for (let i = 0; i < 3; i++) linkSpy.mockImplementationOnce(() => { throw Object.assign(new Error("EXDEV"), { code: "EXDEV" }); });
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(remuxSegment).toHaveBeenCalledTimes(3);
+    for (let i = 0; i < 3; i++) {
+      expect(existsSync(join(sub, `Lilt_2026-10-12_${String(i).padStart(3, "0")}.ts`))).toBe(false);
+    }
+  });
+
+  it("续跑:规范 .ts 已存在 → 复用,inode 不变", async () => {
+    const { sub, spec } = scene({ tsDirect: true });
+    await runNodeSidePipeline(spec, silence);
+    const out = join(sub, "Lilt_2026-10-12_000.ts");
+    const ino = statSync(out).ino;
+    const r2 = await runNodeSidePipeline(spec, silence);
+    expect(r2.ok).toBe(true);
+    expect(statSync(out).ino).toBe(ino);
+  });
+
+  it("tryDirectTsLink:源不存在 → false(调用方回落 remux)", () => {
+    expect(tryDirectTsLink(join(tmpdir(), "nope-xyz.ts"), join(tmpdir(), "nope-dst-xyz.ts"))).toBe(false);
+  });
+
+  it("nodeStageCleanupTargets:stage 里的 .ts 直传链接也属于可清理的成品(只删链接,不碰源)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nodestage-ts-"));
+    writeFileSync(join(dir, "Lilt_2026-10-12_000.ts"), "v");
+    writeFileSync(join(dir, "Lilt_2026-10-12.xml"), "x");
+    const targets = nodeStageCleanupTargets(dir).map((p) => p.replace(dir + "/", ""));
+    expect(targets).toEqual(["Lilt_2026-10-12_000.ts"]);
   });
 });

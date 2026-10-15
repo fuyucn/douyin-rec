@@ -56,6 +56,13 @@ export interface HubPipelineConfig {
      * 节点缺 biliup / B站 cookie / 磁盘时也回落现状,并在 job.log 记明原因(不静默失败)。
      */
     nodeSideUpload?: boolean;
+    /**
+     * **(缺省 false)** `.ts` 直传:节点侧上传时,ffmpeg 引擎产出的 `.ts` 若**单段独占一个分 P**
+     * (无需拼接/烧录),不再 remux 成 mp4,直接把源 `.ts`(硬链接)作为上传物。
+     * 省掉一份 mp4 与一遍写盘,同一内容在节点上只占一份。mesio 的 `.flv`(时基须钉 90000)与
+     * 需要拼接的组仍走 remux。硬链接失败(跨设备)时回落 remux,绝不复制出第二份。
+     */
+    tsDirect?: boolean;
   };
   /**
    * 分段上传(mergeSegments=false)调优:
@@ -637,6 +644,8 @@ export interface NodePipelineSpec {
   segmentGroupSec?: number;
   /** 分段模式(不合并,逐段产出):与 master 侧 steps.mergeSegments=false 同义。 */
   mergeSegments: boolean;
+  /** `.ts` 直传:见 HubPipelineConfig.steps.tsDirect。缺省 false。 */
+  tsDirect?: boolean;
   /** 上传模式:upload = 建稿上传;stage = 只合成不上传(留节点)。 */
   uploadMode: "stage" | "upload";
   /** 节点上产物落地目录(节点本地,通常 = 该节点 dataRoot/stage)。 */
