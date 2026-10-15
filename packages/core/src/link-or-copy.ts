@@ -88,6 +88,9 @@ export function linkOrCopy(src: string, dst: string, opts?: LinkOrCopyOptions): 
   // 而第二次 link 会 EEXIST 误报「硬链接失败,回落复制」。
   // 触发场景很常见:上传 601 重试 / master 重启续跑都会重走这一段。
   if (sameInode(src, dst)) return "link";
+  // 临时名与 post-process 的 `atomicPartPath` 同形(`.{basename}.part{ext}`)—— 两者**互斥**:
+  // 同一最终名要么由 ffmpeg 原子写(`.part` 由 ffmpeg 持有),要么由本函数链/拷(此时没有 ffmpeg 在写)。
+  // 若将来新增调用方破坏这个不变量,这里的 `rmSync` 会删掉别人正在写的临时文件。
   const tmp = scratchPath(dst);
   // 上次进程死在 link 与 rename 之间(或复制中途)会留下同名临时名 → 不先清掉的话 `linkSync` 报 EEXIST,
   // 我们会误报「硬链接失败,回落复制」并整文件多复制一遍。临时名是我们自己的产物,直接清。

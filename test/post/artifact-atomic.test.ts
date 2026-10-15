@@ -26,6 +26,7 @@ describe("产物原子落盘(issue #140)", () => {
       "#!/bin/sh",
       "out=\"\"",
       "for a in \"$@\"; do out=\"$a\"; done",
+      "if [ -n \"${FAKE_FFMPEG_ARGV:-}\" ]; then for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$FAKE_FFMPEG_ARGV\"; done; fi",
       "fail=${FAKE_FFMPEG_FAIL:-0}",
       "if [ -n \"${FAKE_FFMPEG_FAIL_ON:-}\" ]; then case \"$out\" in *\"$FAKE_FFMPEG_FAIL_ON\"*) fail=1 ;; esac; fi",
       "printf 'OK' > \"$out\"",
@@ -39,7 +40,11 @@ describe("产物原子落盘(issue #140)", () => {
   });
 
   afterAll(() => { process.env.PATH = oldPath; });
-  afterEach(() => { delete process.env.FAKE_FFMPEG_FAIL; delete process.env.FAKE_FFMPEG_FAIL_ON; });
+  afterEach(() => {
+    delete process.env.FAKE_FFMPEG_FAIL;
+    delete process.env.FAKE_FFMPEG_FAIL_ON;
+    delete process.env.FAKE_FFMPEG_ARGV;
+  });
 
   it("临时名:同目录、保留扩展名、`.` 前缀", () => {
     expect(atomicPartPath("/s/主播_000.mp4")).toBe("/s/.主播_000.part.mp4");
@@ -88,10 +93,27 @@ describe("产物原子落盘(issue #140)", () => {
     writeFileSync(src, "SRC");
     // 调用方给的 out 就是它自己的临时名(`{最终名}.{owner}-{pid}.drec-remux`),必须原样写、原样保留。
     const tmpName = join(dir, "final.mkv.t1-4242.drec-remux");
+    // 假 ffmpeg 记录 argv:只有断言它收到的输出路径**就是这个临时名**,才能抓住「偷偷套了一层 .part」
+    // (两者最终都会 rename 到同一目标名,只断言最终状态区分不出来)。
+    const argvFile = join(dir, "argv.txt");
+    process.env.FAKE_FFMPEG_ARGV = argvFile;
     await remuxSegment(src, tmpName, "mkv", { atomic: false });
     expect(readFileSync(tmpName, "utf-8")).toBe("OK");
-    expect(existsSync(atomicPartPath(tmpName))).toBe(false); // 没有嵌套 .part
+    expect(readFileSync(argvFile, "utf-8").trim().split("\n").pop()).toBe(tmpName); // ffmpeg 直接写调用方给的临时名
+    expect(existsSync(atomicPartPath(tmpName))).toBe(false);                       // 没有嵌套 .part
     expect(existsSync(join(dir, ".final.mkv.t1-4242.drec-remux.part.mkv"))).toBe(false);
+  });
+
+  it("remuxSegment 默认(atomic 未指定)仍然原子:ffmpeg 写的是 `.part`,不是最终名", async () => {
+    const dir = newDir();
+    const src = join(dir, "src3.ts");
+    writeFileSync(src, "SRC");
+    const out = join(dir, "final3.mp4");
+    const argvFile = join(dir, "argv3.txt");
+    process.env.FAKE_FFMPEG_ARGV = argvFile;
+    await remuxSegment(src, out);
+    expect(readFileSync(argvFile, "utf-8").trim().split("\n").pop()).toBe(atomicPartPath(out));
+    expect(readFileSync(out, "utf-8")).toBe("OK");
   });
 
   it("mergeSession 也走原子收尾:规范化成功但 concat 失败 → 最终名不出现", async () => {
