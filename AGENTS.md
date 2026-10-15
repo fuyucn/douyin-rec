@@ -215,6 +215,20 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
   （daemon 下一次 tick 就用新时区，不用重启）。踩过的坑：host 层 `TZ` 难从进程外内省
   （`ssh vps date` 是 ssh 会话自己的环境，不是服务进程的，得挖 `/proc/<pid>/environ`）—— 这条彻底绕开。
 - 状态恢复、崩溃自动重启、每任务日志环形缓冲（web 实时 tail）。
+- **输出格式·节点侧原地替换**（issue #137，`app/node-remux.ts`）：任务字段 `outputFormat`（original/mp4/mkv）。仅**无后处理**
+  的任务生效 —— `TaskManager.spawnFor` 经唯一判定点 `resolveNodeOutputFormat` 决定是否给子进程传 `--output-format`
+  （hub 受管 / 有规则绑定 / 边录边传 → original 不传；规则之后才绑定则下一次 spawn 起生效）。子进程经 manager 的
+  封口钩子（与边录边传同一接缝、互斥）在每个分段**封口后**串行 `-c copy` 到 `*.drec-remux` 临时文件 → 校验
+  → fsync + 原子 rename → **最后**才删原文件；任一步失败保留原文件并走告警通道。校验是**唯一函数**
+  `verifyRemuxed`（正常路径与崩溃接管共用）：ffprobe 可读 / 有视频流与视频包 / 头部时长在容差内 / **扫全部视频包 pts 的
+  跨度（post-process `ffprobeVideoSpan`）与原文件在容差内** / 新文件体积 ≥ 原文件 × `MIN_SIZE_RATIO`。扫包是关键：
+  mkv 与 faststart mp4 的时长写在文件头，截断后头部时长仍完整，只看头部会放过坏文件。同一函数还比**视频包数**（新 ≥ 原 − min(一个 GOP, 0.5%)）、**音频**（原有音频则新文件必须有音轨且音频包数在容差内）、**全包扫描的 ffprobe 告警行数**（新不得多于原，挡索引完好但数据被补零的 mp4）。所有 ffprobe 探测走统一运行器（post-process `runFfprobe`）：消费 stderr 只留尾部、有超时并杀进程，超时/异常一律「无法判定」→ 两份都留。会话收尾转换有总时限（超时放弃并告警）；崩溃接管**后台执行、不挡开录**并有总时限。临时文件名带任务标识 + pid：接管时本任务残留且进程已死 → 立即清并告警，别的任务的新鲜残留不碰；校验失败而原文件已不存在（对方任务刚转完）→ 跳过、不隔离新文件。任何「无法判定」一律按失败处理。
+  会话 sidecar 记 `nodeFormat`（老文件缺字段=未转换），录制目录扫描据此识别无段号单文件；`groupSessions` 不传
+  `nodeFormats` 时一个 mp4/mkv 都不收（stage / 合并模式不会把分 P 产物当源）。`record` 启动时 `recoverNodeRemux`
+  接管崩溃遗留：孤儿临时文件只删 mtime 早于 `STALE_TMP_MIN_AGE_MS` 的（扫的是共享输出根，新鲜的可能是别的任务在写）；
+  配对新文件通过同一校验才删原文件，**存疑（不通过 / 无法判定）→ 两份都留**（新文件改名加 `.drec-suspect` 隔离，避免重复计入），
+  永不删到最后一份；接管的每个动作都发告警（「上次中断、该段保持原容器」）。任务视图（TaskDTO）下发 `outputFormatLock`
+  （`nodeOutputFormatLock`，与 `resolveNodeOutputFormat` 同源），前端据此锁定下拉，不自判 hub 状态；旧后端缺字段按不锁降级。
 
 ### hub 多节点编排（orchestrator + app 的 hub-store/task-sync）
 - **角色与节点分配**：Docker `task serve --hub` 同时是控制台/master 和一个可选的 `local` 录制 worker；

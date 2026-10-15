@@ -90,6 +90,19 @@ export function cookieLock(f: Pick<FormFacts, "danmu" | "danmuAvailable" | "cook
   return noDanmu && !f.cookieForStream ? lock("roomForm.lock.needDanmu") : OPEN;
 }
 
+/**
+ * 任务对话框的输出格式锁:**完全由后端下发的 `outputFormatLock` 决定**(= 后端 `nodeOutputFormatLock`,
+ * 与「是否真的替换」同源),前端不再自己判 hub 状态。字段缺失(旧后端)→ 不锁,降级但不崩。
+ */
+export function taskOutputFormatLock(f: { outputFormatLock?: string | null }): Lock {
+  switch (f.outputFormatLock) {
+    case "hub-managed":
+    case "hub-rule": return lock("roomForm.lock.outputFormatHub");
+    case "rolling": return lock("roomForm.lock.outputFormatRolling");
+    default: return OPEN;
+  }
+}
+
 export function deriveConstraints(f: FormFacts): Constraints {
   const noDanmu = !f.danmu || !f.danmuAvailable;
   const burn = effectiveBurn(f);

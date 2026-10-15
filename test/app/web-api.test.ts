@@ -1060,6 +1060,33 @@ describe("通知类型 webhook 开关端点", () => {
   });
 });
 
+describe("任务视图 outputFormatLock(后端判定下发,前端据此锁定;issue #137 返工)", () => {
+  const lockOf = (a: ReturnType<typeof makeApi>, id: number): string | undefined =>
+    (a.listTasks().body as Array<{ id: number; outputFormatLock?: string }>).find((t) => t.id === id)?.outputFormatLock;
+
+  it("无规则、非受管、无边录边传 → 省略(不锁)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("lock-none-") });
+    const t = a.createTask({ room: "111" }).body as { id: number };
+    expect(lockOf(a, t.id)).toBeUndefined();
+  });
+  it("非 hub 模式但残留规则绑定 → hub-rule(后端不会替换,下拉必须锁;此前前端按 hubRule 判会漏)", () => {
+    const deps = hubDeps("lock-stale-");
+    const a = makeApi({ store, manager, ...deps }); // hubEnabled 未开
+    const t = a.createTask({ room: "111" }).body as { id: number };
+    upsertHubRule(deps.hubDir as string, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: t.id } });
+    expect(lockOf(a, t.id)).toBe("hub-rule");
+  });
+  it("受管任务 → hub-managed;边录边传生效 → rolling", () => {
+    const a = makeApi({ store, manager, ...hubDeps("lock-managed-") });
+    const m = store.addTask({ room: "222", managedBy: "hub" });
+    expect(lockOf(a, m.id)).toBe("hub-managed");
+    const r = store.addTask({ room: "333" });
+    const real = store.listTasks.bind(store);
+    vi.spyOn(store, "listTasks").mockImplementation(() => real().map((t) => (t.id === r.id ? { ...t, rollingEffective: true } : t)));
+    expect(lockOf(a, r.id)).toBe("rolling");
+  });
+});
+
 describe("hub workers 端点(CRUD + hubEnabled 门)", () => {
   function apiWith(hubEnabled: boolean): { api: ReturnType<typeof makeApi>; cfg: string } {
     const cfg = join(mkdtempSync(join(tmpdir(), "wapi-")), "hub.config.json");

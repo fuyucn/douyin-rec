@@ -10,7 +10,8 @@ import { Tooltip } from "../components/Tooltip";
 import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, scheduleInput } from "../lib/labels";
-import { cookieLock } from "../lib/room-form-rules";
+import { cookieLock, outputFormatFromStored, taskOutputFormatLock } from "../lib/room-form-rules";
+import type { OutputFormat } from "@drec/output-format";
 import { fmtTimeInTz, localTimeTooltip } from "../lib/tz";
 
 interface Props {
@@ -31,6 +32,7 @@ interface FormState {
   schedule: string;
   danmu: boolean;
   useCookie: boolean;
+  outputFormat: OutputFormat;
   webhook: string;
 }
 
@@ -43,6 +45,7 @@ const BLANK: FormState = {
   schedule: "",
   danmu: true,
   useCookie: true,
+  outputFormat: "original",
   webhook: "",
 };
 
@@ -56,6 +59,7 @@ function fromTask(t: Task): FormState {
     schedule: scheduleInput(t),
     danmu: !!t.danmu,
     useCookie: !!t.useCookie,
+    outputFormat: outputFormatFromStored(t.outputFormat),
     webhook: t.webhook ?? "",
   };
 }
@@ -114,6 +118,8 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
     setForm((f) => ({ ...f, [key]: value }));
   }
 
+  // 输出格式只对无后处理的任务生效(节点侧原地替换);后端判定不适用(受管 / 有规则 / 边录边传)→ 锁定,不随保存提交(避免改掉规则侧的存档格式)。
+  const formatLock = taskOutputFormatLock({ outputFormatLock: task?.outputFormatLock });
   const danmuAvailable = plat ? plat.hasDanmu : true;
   // 抖音取流恒匿名,Cookie 只服务弹幕;B站/快手用它取流(锁定口径见 room-form-rules)。
   const cookieForStream = plat ? plat.id !== "douyin" : false;
@@ -131,6 +137,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
       useCookie: form.useCookie,
       schedule: form.schedule.trim() || null,
       webhook: form.webhook.trim() || null,
+      ...(formatLock.locked ? {} : { outputFormat: form.outputFormat }),
     };
     setBusy(true);
     try {
@@ -165,6 +172,13 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
           value={{ ...form, recEnabled: true }}
           onChange={(patch) => setForm((f) => ({ ...f, ...patch }))}
           showName
+          outputFormat={{
+            value: form.outputFormat,
+            shown: form.outputFormat,
+            lock: formatLock,
+            hintKey: "dialog.outputFormatHint",
+            onChange: (outputFormat) => set("outputFormat", outputFormat),
+          }}
           qualities={plat?.qualities ?? []}
           engines={plat?.engines ?? []}
           danmuAvailable={danmuAvailable}

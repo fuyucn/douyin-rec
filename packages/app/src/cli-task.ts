@@ -13,7 +13,7 @@ import { Command } from "commander";
 import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { TaskStore, resolveTaskWebhook, type Task, type EngineKind } from "./store.js";
 import { resolveTaskStreamCookies } from "./stream-cookies.js";
-import { rootHubConfig, resolveOutputDir } from "./paths.js";
+import { rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
 import { resolveDbPath } from "./db.js";
 import { parseSchedule, toDanmuFlag, parseBoolFlag } from "./task-input.js";
 
@@ -62,11 +62,12 @@ import {
   webhookTogglesFromEnv,
   type NotifWebhookToggles,
 } from "@drec/observability";
-import type { Recorder, RecordOpts, NotifyEvent, Notifier } from "@drec/core";
+import type { Recorder, RecordOpts, NotifyEvent, Notifier, StageFormat } from "@drec/core";
 import { TaskDaemon } from "./daemon.js";
 import { TaskManager } from "./task-manager.js";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { makeRollingUploadHookFactory } from "./rolling-upload.js";
+import { makeNodeRemuxHookFactory, resolveNodeOutputFormat } from "./node-remux.js";
 import { effectiveHubConfig, makeNewBroadcastGate } from "./disk-gate.js";
 
 // 本文件含多个命令组,日志按命令归属 scope:task→task_manager、daemon→scheduler、serve→web_server。
@@ -120,11 +121,22 @@ export function buildSessionForTask(
   };
 
   // 边录边传(T-33,默认关):开启时注入「每会话一个」上传钩子工厂(metadata 读 hub 规则/hub.config)。
-  const makeRolling = makeRollingUploadHookFactory({
+  let makeRolling = makeRollingUploadHookFactory({
     enabled: task.rollingEffective, // 只读 master 派生的生效值(issue #40)
     platform: task.platform,
     roomSlug: platformForRoom(task.room).extractRoomSlug(task.room),
   });
+  // 节点侧原地替换容器(issue #137):与 spawn 路径共用同一个判定点;rolling 生效时恒 original(互斥)。
+  // 前台 `task run` 不做崩溃接管(接管在每次 `record` 子进程启动时做,会扫同一目录)。
+  const nodeFormat = resolveNodeOutputFormat(task, rootHubDir());
+  if (!makeRolling && nodeFormat !== "original") {
+    makeRolling = makeNodeRemuxHookFactory({
+      format: nodeFormat as StageFormat,
+      owner: platformForRoom(task.room).extractRoomSlug(task.room),
+      log: (m) => console.log(m),
+      alert: (message) => { void notifier.notify({ kind: "error", stage: "转封装", message }).catch(() => {}); },
+    });
+  }
   // 新一场开播的磁盘水位闸门(issue #96):`task run` 前台录制同样受约束,与 cli record / 手动启动同口径。
   // 水位来源用 effectiveHubConfig()(含 inline/settings 来源的 JSON),与 daemon 同口径。
   const effHub = effectiveHubConfig();

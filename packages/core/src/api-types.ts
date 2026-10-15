@@ -913,6 +913,11 @@ export interface TaskDTO {
   rollingEffective: boolean;
   /** 输出格式(issue #137,缺省 original)。 */
   outputFormat: OutputFormat;
+  /**
+   * 输出格式被锁的原因(后端 `nodeOutputFormatLock` 判定,与实际是否替换同源);省略 = 不锁。
+   * 前端只据此锁定下拉并显示原因,不再自己判 hub 状态;旧后端无此字段 → 按「不锁」降级。
+   */
+  outputFormatLock?: "hub-managed" | "hub-rule" | "rolling";
   /** 在跑录制进程 spawn 时实际带的边录边传值(issue #89);进程没在跑则省略。 */
   rollingApplied?: boolean;
   /** 在跑进程的启动参数与 `rollingEffective` 不一致 → 待(空闲后)重启生效(issue #89);无漂移/没在跑则省略。 */

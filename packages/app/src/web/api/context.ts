@@ -15,6 +15,7 @@ import { rootHubDir, rootHubConfig, resolveOutputDir } from "../../paths.js";
 import { resolveTaskCookies, type Task } from "../../store.js";
 import { readBiliupCookieHeader } from "../../upload/biliup.js";
 import { listHubJobs } from "../../hub-jobs.js";
+import { nodeOutputFormatLock } from "../../node-remux.js";
 import { readManagedState } from "../../managed-state.js";
 import { hasSessionCookie, parseCookieExpiry } from "../../cookie-utils.js";
 import type { ApiDeps, ApiResult, CookieStatus, TaskView, TaskDetailView } from "./types.js";
@@ -147,6 +148,8 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
         })()
       : undefined;
     const rollingStatus = manager.rollingStatus?.(t.id) ?? null;
+    // 与 spawn 前的唯一判定点同源(不看 deps.hubEnabled:后端实际是否替换就是这个口径)。
+    const outputFormatLock = nodeOutputFormatLock(t, hubDir);
     return {
       ...t,
       ...(assigned !== undefined ? { assigned } : {}),
@@ -158,6 +161,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
       // 空数组不下发:前端 recordingWorkers?.length 判定依赖它。
       ...(workers && workers.length > 0 ? { recordingWorkers: workers } : {}),
       ...(hubRule ? { hubRule } : {}),
+      ...(outputFormatLock ? { outputFormatLock } : {}),
     };
   };
   const detailView = (t: Task): TaskDetailView => ({ ...view(t), runtime: manager.getRuntime(t.id) });

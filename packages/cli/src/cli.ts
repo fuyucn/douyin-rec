@@ -18,7 +18,7 @@ import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { biliAccountKey, burnFlags, effectiveStageFormat, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
-import type { HubResources } from "@drec/core";
+import type { HubResources, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { getEngine, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
@@ -84,6 +84,7 @@ interface RecordCliOpts {
   danmuXmlMode?: string;
   reconnect?: string;
   rollingUpload?: string;
+  outputFormat?: string;
   config?: string;
 }
 
@@ -173,6 +174,7 @@ program
   .option("--danmu-xml-mode <mode>", "弹幕 xml 粒度: session(整场一个,默认) | segment(逐段一个)")
   .option("--reconnect <sec>", "断流快速重连等待(秒) (默认 5)")
   .option("--rolling-upload <0|1>", "边录边传: 1=录制中每封口一段就上传并删该段源 0=整场录完再处理 (默认 0)")
+  .option("--output-format <fmt>", "节点侧输出格式 original|mp4|mkv: 分段封口后原地 remux 成所选容器、校验通过后删原文件 (默认 original=不转)")
   .option("--config <path>", "YAML 配置文件 (命令行选项优先覆盖)")
   .action(async (o: RecordCliOpts) => {
     const cfg = loadConfig(o.config);
@@ -241,6 +243,29 @@ program
         log: (m: string) => console.log(m),
       });
       console.log(`[rec] 边录边传已开启:每封口一段上传后删该段源(room=${slug})`);
+    }
+    // 节点侧原地替换容器(issue #137):子进程只**信** `--output-format`(是否适用已由 spawn 前的唯一判定点
+    // resolveNodeOutputFormat 算定,受管 / 有规则 / 边录边传都不会带该参数)。与边录边传互斥,rolling 优先(它上传后删源)。
+    // 非法值直接报错退出,不静默回落 —— 静默回落会让用户以为在转、实际没转。
+    let nodeFormat: OutputFormat = "original";
+    try { nodeFormat = parseOutputFormat(o.outputFormat); }
+    catch (e) { console.error(`[rec] ${(e as Error).message}`); process.exit(2); }
+    if (nodeFormat !== "original" && makeRolling) {
+      console.log(`[rec] 已开启边录边传,忽略 --output-format ${nodeFormat}(上传后删源,与原地替换互斥)`);
+    } else if (nodeFormat !== "original") {
+      const fmt = nodeFormat as StageFormat;
+      const { makeNodeRemuxHookFactory, recoverNodeRemuxInBackground } = await import("@drec/app");
+      const remuxDeps = {
+        log: (m: string) => console.log(m),
+        // 失败走现有告警通道(error 事件 → webhook + @@DREC_ALERT@@ → 站内 toast),不静默。
+        alert: (message: string) => { void notifier.notify({ kind: "error", stage: "转封装", message }).catch(() => {}); },
+        // 任务归属标识(临时文件名 = 归属 + pid):接管据此区分「本任务已死进程的残留」与「别的任务的新鲜残留」。
+        owner: platform.extractRoomSlug(o.room),
+      };
+      // 会话开始前接管上次崩溃留下的中间态:**后台执行、不挡开录**(探测挂死/慢盘不得拖住录制),整体有总时限。
+      void recoverNodeRemuxInBackground(opts.outDir, fmt, remuxDeps);
+      makeRolling = makeNodeRemuxHookFactory({ format: fmt, ...remuxDeps });
+      console.log(`[rec] 节点侧输出格式 ${fmt}:每封口一段原地 remux,校验通过后删原文件`);
     }
     // 新一场开播的磁盘水位闸门(issue #96):常驻任务的下一场开播此前不过闸门,低水位后仍会开新一场直至写满盘。
     // 每次判定现读 hub 配置(水位热改生效)并测**任务自己的输出目录**所在卷;只拦新一场,同场重连放行。

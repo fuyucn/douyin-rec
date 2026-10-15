@@ -2,7 +2,7 @@
 // 共享录像扫描函数：被 LocalTransport 和 _inventory CLI 子命令复用。
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { groupSessions } from "@drec/post-process";
+import { groupSessions, readNodeFormats } from "@drec/post-process";
 import type { ActiveRecordingRoom, NodeRecording, NodeRollingProgress, NodeRollingSession } from "./transport.js";
 import { readGaps, totalGapSecOf } from "./gaps.js";
 
@@ -184,7 +184,9 @@ export async function scanRecordings(
   for (const anchor of anchors) {
     const dir = join(recordingsDir, anchor);
     const files = readdirSync(dir);
-    const groups = groupSessions(files);
+    // 节点侧原地替换(issue #137)后的 mp4/mkv 分段(含无段号单文件)靠 session.json 的 nodeFormat 识别;
+    // 只在**录制目录**这里传 —— stage / 合并模式不传,分 P 产物与合并产物不会被当成源。
+    const groups = groupSessions(files, { nodeFormats: readNodeFormats(dir, files) });
     // 边录边传(T-33):已确认段被节点删空后,该会话在 groupSessions 里**没有条目**
     // (只有 .xml + .rolling.json 存活)。补出来,否则 master 看不到「已建稿」事实 → 漏收口。
     for (const f of files) {

@@ -122,6 +122,7 @@ const DICT = {
       room: "直播间（房间号或 URL）", roomPlaceholder: "36464127515 或 https://live.douyin.com/...",
       name: "主播名称", namePlaceholder: "可选，自动获取", quality: "画质",
       segment: "分段时长（秒，0 = 不分段）", scheduleWindow: "定时窗口（服务端时区）",
+      outputFormatHint: "只换容器、不并存两份。每个分段封口后在节点上原地 remux,校验通过才删原文件(失败保留原文件并告警);原始 = 不转换。仅无后处理的任务生效,下次启动录制时起作用。若该房间已有 Hub 规则(新建时同名房间也算),输出格式由规则决定、此处的选择不生效,保存后会显示为锁定。",
       schedulePlaceholder: "可选，如 22:30-01:00（支持跨夜）", schedHint: "按服务端配置的时区判断（现在 {now}{tz}），支持跨夜窗口如 22:30-01:00。",
       webhook: "通知 Webhook（Discord）", webhookPlaceholder: "可选，留空回落全局 webhook",
       webhookHint: "本任务专属：开播 / 录制完成 / 合并完成 / 出错时推送到此 Discord webhook。留空则用全局设置。",
@@ -198,7 +199,7 @@ const DICT = {
       mergeOne: "合并为一个视频", mergeSplit: "按录制分段",
       outputHint: "合并为一个视频 = 整场各分段合成一片再上传(默认);按录制分段 = 每段一个分 P,开烧录则逐段烧", moreUpload: "更多:稿件名 / 分P名 / 简介", flowLabel: "处理流程",
       method: { label: "上传方式", after: "收播后上传", afterHint: "收播后由 master 合并 / 烧录再投稿(默认)" },
-      lock: { needDanmu: "需先开启「录弹幕」", needNodeSide: "仅在「节点侧上传」时生效", needMerge: "按分段产出时没有合并步骤", needUploadForCleanArchive: "不投稿时存档就是成品,不会被清理;开关已锁定为保留", outputFormatUpload: "投稿固定使用 mp4(B 站要求),此项已锁定" },
+      lock: { needDanmu: "需先开启「录弹幕」", needNodeSide: "仅在「节点侧上传」时生效", needMerge: "按分段产出时没有合并步骤", needUploadForCleanArchive: "不投稿时存档就是成品,不会被清理;开关已锁定为保留", outputFormatUpload: "投稿固定使用 mp4(B 站要求),此项已锁定", outputFormatHub: "该任务由 Hub 规则的存档/投稿形态决定输出格式,此处不可选", outputFormatRolling: "该任务开启了边录边传(上传后删源),与原地替换容器互斥,此处不可选" },
       flow: {
         record: "录制", noProcess: "已暂停", rolling: "边录边传", merge: "合并", split: "按分段",
         burnDanmu: "烧飞屏弹幕", burnLivechat: "烧聊天框", upload: "投稿 B站", nodeSide: "节点侧投稿", stageOnly: "只存档", format: "格式 {fmt}",
@@ -549,6 +550,7 @@ const DICT = {
       room: "Room (id or URL)", roomPlaceholder: "36464127515 or https://live.douyin.com/...",
       name: "Streamer name", namePlaceholder: "optional, auto-detected", quality: "Quality",
       segment: "Segment seconds (0 = no split)", scheduleWindow: "Schedule window (server timezone)",
+      outputFormatHint: "Swaps the container only — never keeps two copies. Each segment is remuxed in place on the node once sealed, and the original is deleted only after verification (on failure it is kept and an alert is raised); Original = no conversion. Only for tasks without post-processing; takes effect the next time the recorder starts. If a Hub rule already exists for this room (a same-name room counts when creating), the rule decides the output format and this choice has no effect; it shows as locked after saving.",
       schedulePlaceholder: "optional, e.g. 22:30-01:00 (overnight ok)", schedHint: "Judged by the server's configured timezone (now {now}{tz}); overnight windows like 22:30-01:00 supported.",
       webhook: "Notify Webhook (Discord)", webhookPlaceholder: "optional, empty = fall back to global",
       webhookHint: "Per-task: live start / recording done / merge done / errors are pushed to this Discord webhook. Empty uses the global setting.",
@@ -625,7 +627,7 @@ const DICT = {
       mergeOne: "Merge into one video", mergeSplit: "Per recorded segment",
       outputHint: "Merge = all segments become one video before upload (default); per segment = each recorded segment is its own part, burned per segment when burning is on", moreUpload: "More: submission / part titles, description", flowLabel: "Processing flow",
       method: { label: "Upload method", after: "Upload after broadcast", afterHint: "After the broadcast, master merges / burns, then uploads (default)" },
-      lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment", needUploadForCleanArchive: "Without upload the archive is the final output and is never cleaned; locked to keep", outputFormatUpload: "Uploads always use mp4 (Bilibili requirement); locked" },
+      lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment", needUploadForCleanArchive: "Without upload the archive is the final output and is never cleaned; locked to keep", outputFormatUpload: "Uploads always use mp4 (Bilibili requirement); locked", outputFormatHub: "The output format of this task is decided by the Hub rule's archive / upload form, so it can't be set here", outputFormatRolling: "Rolling upload is on (source deleted after upload), which excludes in-place container replacement, so it can't be set here" },
       flow: {
         record: "Record", noProcess: "Paused", rolling: "Rolling upload", merge: "Merge", split: "Per segment",
         burnDanmu: "Burn danmu", burnLivechat: "Burn livechat", upload: "Upload to Bilibili", nodeSide: "Node-side upload", stageOnly: "Archive only", format: "Format {fmt}",
