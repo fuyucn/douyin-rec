@@ -1,5 +1,6 @@
 // ts/src/core/post/ffmpeg.ts
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 export interface Progress {
   pct: number;
@@ -36,6 +37,42 @@ export function parseProgressBlock(
 }
 
 /**
+ * 进程 CPU 时间探针(纯函数工厂,便于单测)。
+ *
+ * 返回的函数每次读一次 `/proc/<pid>/stat` 的 `utime+stime`(时钟 tick);与上次**不同** → true(= 在烧 CPU,视为存活)。
+ * 读不到(pid 已退、非 Linux、权限)→ false(绝不把「读不到」当存活,免得掩盖真卡死)。
+ * **平台边界**:依赖 `/proc`,仅 Linux 有效(三个节点与 master 容器都是 Linux)。非 Linux 上退化为
+ * 原来的「只看 stdout/stderr」语义 —— 不引入新风险,只是那里享受不到这条修复。
+ *
+ * 为什么用 CPU 时间而不是「输出文件在长」:实测 `-movflags +faststart` 的收尾一遍**会长时间不写输出**,
+ * 且静默随体积增长(88MB→2s、887MB→35s、3.1GB→117s),拿它当存活信号会在最大场次上照样误杀;
+ * 而同一窗口内 **CPU 时间从不静默**(实测最大静默 0s)—— 挪 moov 一直在烧 CPU,是可靠判活依据。
+ */
+export function makeCpuProbe(pid: number, readProc: (p: number) => string | null = defaultReadProcStat): () => boolean {
+  let last = -1;
+  return () => {
+    const raw = readProc(pid);
+    if (raw == null) return false;
+    // /proc/<pid>/stat: comm 可能含空格/括号 → 取最后一个 ')' 之后再切字段。
+    const tail = raw.slice(raw.lastIndexOf(")") + 2).trim().split(/\s+/);
+    // 字段 14/15(1-based)在 tail 里是 11/12(comm+state 之后)。
+    const ticks = Number(tail[11]) + Number(tail[12]);
+    if (!Number.isFinite(ticks)) return false;
+    if (ticks === last) return false;
+    last = ticks;
+    return true;
+  };
+}
+
+function defaultReadProcStat(pid: number): string | null {
+  try {
+    return readFileSync(`/proc/${pid}/stat`, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * spawn ffmpeg；解析 -progress pipe:1 stdout；
  * rc≠0 时 reject，带 stderr 尾部（最后 ~600 字符）。
  */
@@ -45,8 +82,25 @@ export function runFfmpeg(
     cwd?: string;
     totalMs?: number;
     onProgress?: (p: Progress) => void;
-    /** 卡死阈值:stdout/stderr 静默(无进度/无输出)超此毫秒数 → 杀 ffmpeg + reject。默认 120s,0=禁用。 */
+    /**
+     * 卡死阈值:**既无 stdout/stderr 输出、又无 CPU 时间前进**持续超过此毫秒数 → 杀 ffmpeg + reject。
+     * 默认 120s,0=禁用。(2026-10-15 起语义含 CPU 存活信号,见 {@link makeCpuProbe};
+     * 此前只看 stdout/stderr,会把 `+faststart` 收尾的长时间静默误判成卡死。)
+     */
     stallMs?: number;
+    /** 看门狗检查间隔(默认 15s)。仅供测试注入更小值,生产不要改。 */
+    watchIntervalMs?: number;
+    /**
+     * **只靠 CPU 信号续命**的硬上限(默认 30 分钟,0=禁用)。
+     *
+     * 为什么需要:若卡死表现为 CPU 空转(解复用器死循环),CPU 时间一直在涨 → 光看 CPU 就永远不会被杀。
+     * 这里规定:连续这么久**只有 CPU 前进、没有任何 stdout/stderr 输出** → 仍判定卡死并杀。
+     * 真进度不会踩到它:`+faststart` 收尾虽静默,但只持续几十秒~几分钟,远小于 30 分钟。
+     *
+     * ⚠️ 依赖调用方**不传** `-v quiet`/`-nostats`:本计时只被 stdout/stderr 输出清零,若调用方把
+     * ffmpeg 的 stats 也静音了,长任务会在该上限处被误杀。新增调用方时请留意。
+     */
+    cpuOnlyStallMs?: number;
   } = {},
 ): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -57,18 +111,34 @@ export function runFfmpeg(
     let buf = "";
 
     // 卡死看门狗:ffmpeg 输入损坏可能挂起(不退出、不写进度)→ Promise 永不 settle、整个
-    // merge/burn job 卡死无自愈。任何 stdout/stderr 活动刷新计时;静默超阈值 → SIGKILL + reject。
+    // merge/burn job 卡死无自愈。存活信号 = stdout/stderr 活动 **或** 进程 CPU 时间前进(见 makeCpuProbe);
+    // 两者都没有超过 stallMs → SIGKILL + reject。
     let settled = false;
     let lastActivity = Date.now();
     const stallMs = opts.stallMs ?? 120_000;
+    const cpuProbe = makeCpuProbe(proc.pid ?? -1);
+    const cpuOnlyStallMs = opts.cpuOnlyStallMs ?? 30 * 60_000;
+    // 最近一次**真实输出**(stdout/stderr)的时刻:与 lastActivity 不同,它不被 CPU 信号刷新。
+    let lastRealOutput = Date.now();
     const watch = stallMs > 0
       ? setInterval(() => {
-          if (Date.now() - lastActivity <= stallMs) return;
+          // 存活信号:stdout/stderr 活动(下面两个 data 监听) **或** 进程 CPU 时间前进。
+          // CPU 是主信号 —— faststart 收尾一遍不写任何输出,但一直在烧 CPU。
+          if (cpuProbe()) lastActivity = Date.now();
+          const idleMs = Date.now() - lastActivity;
+          const cpuOnlyMs = Date.now() - lastRealOutput;
+          // ① 完全没动静(既无输出也无 CPU)→ 卡死;
+          // ② 只有 CPU 在转、长时间没有任何输出 → 视为 CPU 空转型卡死(防止忙等永远杀不掉)。
+          const cpuOnlyStuck = cpuOnlyStallMs > 0 && cpuOnlyMs > cpuOnlyStallMs;
+          if (idleMs <= stallMs && !cpuOnlyStuck) return;
           try { proc.kill("SIGKILL"); } catch { /* gone */ }
+          const why = cpuOnlyStuck
+            ? `${(cpuOnlyMs / 1000).toFixed(1)}s 只有 CPU 前进、无任何输出(疑忙等)`
+            : `${(idleMs / 1000).toFixed(1)}s 无进度/输出`;
           done(() => reject(new Error(
-            `ffmpeg 卡死:${Math.round(stallMs / 1000)}s 无进度/输出,已杀。stderr 尾: ${stderrTail.trim().slice(-300) || "(无)"}`,
+            `ffmpeg 卡死:${why},已杀。stderr 尾: ${stderrTail.trim().slice(-300) || "(无)"}`,
           )));
-        }, 15_000)
+        }, opts.watchIntervalMs ?? 15_000)
       : null;
     watch?.unref?.();
     const done = (fn: () => void): void => {
@@ -80,7 +150,7 @@ export function runFfmpeg(
 
     proc.stdout.setEncoding("utf-8");
     proc.stdout.on("data", (chunk: string) => {
-      lastActivity = Date.now();
+      lastActivity = lastRealOutput = Date.now();
       buf += chunk;
       const lines = buf.split(/\r?\n/);
       buf = lines.pop() ?? "";
@@ -101,7 +171,7 @@ export function runFfmpeg(
 
     proc.stderr.setEncoding("utf-8");
     proc.stderr.on("data", (c: string) => {
-      lastActivity = Date.now();
+      lastActivity = lastRealOutput = Date.now();
       stderrTail = (stderrTail + c).slice(-600);
     });
 

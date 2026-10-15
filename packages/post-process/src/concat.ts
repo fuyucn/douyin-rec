@@ -119,7 +119,7 @@ export async function mergeSession(
       "-c", "copy",
       "-movflags", "+faststart",
       outMp4,
-    ]);
+    ]);   // faststart 收尾静默由 runFfmpeg 的 CPU 探针兜住
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
