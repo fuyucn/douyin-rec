@@ -1,0 +1,14 @@
+# egress 验收档覆盖(issue #88)。只由 scripts/e2e-verify.sh 在 DREC_EGRESS=1 / `up --egress` 时叠加到 compose.yml。
+# 与 internal 档的差别只有两处,且都只作用于 controller:
+#   1) 额外接入一个非 internal 的出口网络(worker 仍只在 internal 的 drec-devnet,保持断网只录制);
+#   2) 只读挂载真 biliup cookies(源路径由 e2e-verify 断言:文件存在、不在 dev 数据根/线上数据根/docker-data、非 vps.key)。
+# 其余隔离栏(容器名前缀/无 ports/无 privileged/数据根不重叠/worker host 为 dev 名)一律照常断言。
+services:
+  controller:
+    networks: [drec-devnet, drec-devnet-egress]
+    volumes:
+      - ${EGRESS_COOKIES:?由 scripts/e2e-verify.sh 注入}:/output-data/config/biliup/cookies.json:ro
+
+networks:
+  drec-devnet-egress:
+    name: drec-devnet-egress${DREC_DEV_SUFFIX:-}

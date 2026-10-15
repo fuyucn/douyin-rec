@@ -12,7 +12,7 @@ describe("buildRemuxArgs", () => {
       "-video_track_timescale", "90000", "-movflags", "+faststart", "/out/a.mp4",
     ]);
   });
-  it("mkv:无 -video_track_timescale / -movflags(matroska muxer 不认,会 Unrecognized option)", () => {
+  it("mkv:无 -video_track_timescale / -movflags(mp4 专属参数,mkv 不带)", () => {
     const a = buildRemuxArgs("/in/a.flv", "/out/a.mkv");
     expect(a).not.toContain("-video_track_timescale");
     expect(a).not.toContain("-movflags");
@@ -74,7 +74,18 @@ describe("groupSessions 识别 mkv/mp4 分段,且不吃自己的产物", () => {
     expect(Object.keys(g)).toEqual([B]);
     expect(g[B].ts).toEqual([`${B}_000.ts`]);
   });
-  it("仅有无段号的单文件 mkv(节点原地替换后的单段会话)可被识别", () => {
-    expect(groupSessions([`${B}.mkv`])[B].ts).toEqual([`${B}.mkv`]);
+  it("录制目录只有 {base}.mp4/.mkv(无段号单文件)→ 分组为空(与 base 一致)", () => {
+    expect(groupSessions([`${B}.mp4`])).toEqual({});
+    expect(groupSessions([`${B}.mkv`])).toEqual({});
+  });
+  it("切分产物 {base}_part0.mp4 不当分段:同目录有原生分段 / 单独存在均不收", () => {
+    const withNative = groupSessions([`${B}_000.ts`, `${B}_part0.mp4`, `${B}_part1.mp4`, `${B}_part0.mkv`]);
+    expect(withNative[B].ts).toEqual([`${B}_000.ts`]);
+    expect(groupSessions([`${B}_part0.mp4`, `${B}_part1.mp4`])).toEqual({});
+  });
+  it("默认 original 对照:仅原生分段 + 合并产物时结果与 base 逐字一致", () => {
+    const g = groupSessions([`${B}_000.ts`, `${B}_001.ts`, `${B}.mp4`, `${B}.xml`]);
+    expect(g[B].ts).toEqual([`${B}_000.ts`, `${B}_001.ts`]);
+    expect(g[B].xml).toBe(`${B}.xml`);
   });
 });

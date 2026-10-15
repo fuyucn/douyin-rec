@@ -242,7 +242,17 @@ program
       });
       console.log(`[rec] 边录边传已开启:每封口一段上传后删该段源(room=${slug})`);
     }
-    const session = new RecordingSession(recorder, { reconnectDelaySec, notifier, danmuEnabled, makeRolling });
+    // 新一场开播的磁盘水位闸门(issue #96):常驻任务的下一场开播此前不过闸门,低水位后仍会开新一场直至写满盘。
+    // 每次判定现读 hub 配置(水位热改生效)并测**任务自己的输出目录**所在卷;只拦新一场,同场重连放行。
+    const { makeNewBroadcastGate, effectiveHubConfig } = await import("@drec/app");
+    const effHub = effectiveHubConfig();
+    const admitNewBroadcast = makeNewBroadcastGate({
+      outDir: opts.outDir,
+      hubConfigPath: effHub.path,
+      hubConfigJson: effHub.json,
+      warn: (m: string) => console.warn(m),
+    });
+    const session = new RecordingSession(recorder, { reconnectDelaySec, notifier, danmuEnabled, makeRolling, admitNewBroadcast });
 
     // 优雅停止 — 同时处理 SIGINT (Ctrl-C) 和 SIGTERM (kill / 进程管理器)。
     // 缺 SIGTERM handler 会导致 kill 时 node 直接退、不跑 stop()，孤儿 ffmpeg 继续录。

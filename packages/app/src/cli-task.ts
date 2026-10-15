@@ -67,6 +67,7 @@ import { TaskDaemon } from "./daemon.js";
 import { TaskManager } from "./task-manager.js";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { makeRollingUploadHookFactory } from "./rolling-upload.js";
+import { effectiveHubConfig, makeNewBroadcastGate } from "./disk-gate.js";
 
 // 本文件含多个命令组,日志按命令归属 scope:task→task_manager、daemon→scheduler、serve→web_server。
 const log = createLogger("task_manager");
@@ -124,7 +125,13 @@ export function buildSessionForTask(
     platform: task.platform,
     roomSlug: platformForRoom(task.room).extractRoomSlug(task.room),
   });
-  const session = new RecordingSession(recorder, { notifier, danmuEnabled, makeRolling });
+  // 新一场开播的磁盘水位闸门(issue #96):`task run` 前台录制同样受约束,与 cli record / 手动启动同口径。
+  // 水位来源用 effectiveHubConfig()(含 inline/settings 来源的 JSON),与 daemon 同口径。
+  const effHub = effectiveHubConfig();
+  const admitNewBroadcast = makeNewBroadcastGate({
+    outDir: opts.outDir, hubConfigPath: effHub.path, hubConfigJson: effHub.json,
+  });
+  const session = new RecordingSession(recorder, { notifier, danmuEnabled, makeRolling, admitNewBroadcast });
   return { session, opts, url: roomToUrl(task.room) };
 }
 

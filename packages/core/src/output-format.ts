@@ -21,8 +21,8 @@ export interface StageContainer {
   ext: string;
   /**
    * 单段 `-c copy` remux 的**输出侧**专属参数。mp4:FLV(1000Hz)直拷会得到非标准 time_base,
-   * 钉成 90000(B 站转码器拒收非标时基);另加 faststart。这两个都是 mov/mp4 muxer 私有选项,
-   * 喂给 matroska muxer 会 `Unrecognized option` 直接失败 → mkv 必须为空。
+   * 钉成 90000(B 站转码器拒收非标时基);另加 faststart。这两个是 mp4 专属参数,
+   * mkv 不需要也不带它们 → mkv 为空。
    */
   remuxArgs: string[];
   /** concat / 烧录(重编码)产物的输出侧专属参数。mp4:faststart;mkv:无。 */

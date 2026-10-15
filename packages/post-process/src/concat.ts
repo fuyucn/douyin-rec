@@ -44,23 +44,26 @@ export function groupSessions(files: string[]): Record<string, SessionGroup> {
   const out: Record<string, SessionGroup> = {};
   const ensure = (b: string): SessionGroup => (out[b] ??= { ts: [], xml: null, segmentXmls: [] });
 
-  // First pass: collect video segments。录制原生容器 .ts(ffmpeg/DLR/biliLive)/.flv(mesio)恒认;
-  // .mp4/.mkv(节点侧原地替换后的分段,issue #137)也认,但**排除合并/烧录产物**以免合并自己吃自己:
-  //   - `_danmu`/`_livechat` 结尾的烧录产物;
-  //   - 无时间戳基名的合并产物 `{主播}_{日期}.mp4`;
-  //   - 同会话已有 .ts/.flv 分段时,无段号后缀的 `{base}.mp4/.mkv`(= 该会话的合并产物,keepTime/撞名时带时间戳)。
+  // First pass: collect video segments。录制原生容器 .ts(ffmpeg/DLR/biliLive)/.flv(mesio)恒认(与 base 一致);
+  // .mp4/.mkv(节点侧原地替换后的分段,issue #137)只认**带段号**的分段:
+  //   - 无段号单文件 `{base}.mp4/.mkv` 是合并产物(或待 PR2 处理的单段),不收,否则收口会把产物当源删掉;
+  //   - 带 part 序号的切分产物 `{stem}_part{N}.mp4`(split.ts 小写命名)不是分段,即使同目录有原生分段也不收;
+  //   - `_danmu`/`_livechat` 烧录产物、无时间戳基名的产物天然无段号/不带时间戳,同样被挡在外面。
   const NATIVE = /\.(ts|flv)$/i;
-  const nativeBases = new Set(files.filter((f) => NATIVE.test(f)).map(sessionBase));
+  // 切分产物判定不用正则(session-name-guard 禁止在 core 之外写分段序号正则):stem 末尾 `_part` + 纯数字。
+  const isSplitPart = (f: string): boolean => {
+    const stem = f.slice(0, f.lastIndexOf("."));
+    const i = stem.lastIndexOf("_part");
+    const tail = stem.slice(i + 5);
+    return i >= 0 && tail.length > 0 && [...tail].every((c) => c >= "0" && c <= "9");
+  };
   for (const f of files) {
     if (NATIVE.test(f)) {
       ensure(sessionBase(f)).ts.push(f);
     } else if (isVideoFileName(f)) {
-      const stem = f.replace(/\.[^.]+$/, "");
-      if (/_(danmu|livechat)$/i.test(stem)) continue;
-      if (!stampedSessionBaseOf(f)) continue;
-      const b = sessionBase(f);
-      if (segmentIndexOf(f) < 0 && nativeBases.has(b)) continue;
-      ensure(b).ts.push(f);
+      if (isSplitPart(f)) continue;
+      if (!stampedSessionBaseOf(f) || segmentIndexOf(f) < 0) continue;
+      ensure(sessionBase(f)).ts.push(f);
     }
   }
 

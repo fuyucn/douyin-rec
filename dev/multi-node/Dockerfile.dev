@@ -5,6 +5,8 @@
 # 假 biliup 顶替真路径,绝不让真 biliup 进 dev 镜像(误投稿不可逆)。
 ARG BASE=drec-dev-base:local
 FROM ${BASE}
+# REAL_BILIUP=1(egress 档,BASE 为 master 档,自带真 biliup):不装假 biliup。默认 0 = internal 档,假 biliup。
+ARG REAL_BILIUP=0
 
 # openssh-server:worker 的 sshd(真 SSH 通道,SshTransport 零改动)
 # openssh-client + rsync:controller 侧 ssh/rsync(master 档才有,worker 档没有);worker 侧 rsync 供 pull
@@ -16,10 +18,11 @@ RUN apt-get update \
  && mkdir -p /run/sshd
 
 # 假 biliup:模仿真实 BV 输出;只认 FAKE-DEV 假 cookies,绝不联网。
-COPY fake-biliup.js /usr/local/bin/biliup
+COPY fake-biliup.js /opt/drec-dev/fake-biliup.js
 COPY dev-worker-entrypoint.sh dev-controller-entrypoint.sh /usr/local/bin/
 COPY ssh_config.dev /etc/drec-dev/ssh_config.dev
-RUN chmod 0755 /usr/local/bin/biliup /usr/local/bin/dev-worker-entrypoint.sh /usr/local/bin/dev-controller-entrypoint.sh
+RUN chmod 0755 /opt/drec-dev/fake-biliup.js /usr/local/bin/dev-worker-entrypoint.sh /usr/local/bin/dev-controller-entrypoint.sh \
+ && if [ "$REAL_BILIUP" != "1" ]; then cp /opt/drec-dev/fake-biliup.js /usr/local/bin/biliup; fi
 
 ENV DREC_DEV=1
 # 默认入口留给 compose 按角色覆盖(controller / worker)。

@@ -12,7 +12,7 @@ import { extractItems, itemsToLivechatAss, itemsToRollingAss, type RenderOpts } 
  */
 export function buildRemuxArgs(input: string, outMp4: string): string[] {
   // 容器专属输出参数(mp4:时基 90000 + faststart;mkv:无)按**输出路径扩展名**取自 core 注册表。
-  // 这两个都是 mov/mp4 muxer 私有选项,喂给 matroska 会 `Unrecognized option` 失败,故不能写死。
+  // 这些参数是 mp4 专属,mkv 不带,故不能写死。
   return [
     "-y",
     "-i", resolve(input),
