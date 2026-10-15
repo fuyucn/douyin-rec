@@ -8,7 +8,7 @@
  * 读者(下游靠 `existsSync` 做续跑判定、以及上传)永远看不到「写了一半的最终名」。
  * 旧口径「调用方负责目标已存在先删」已作废;复制失败照常抛出。
  */
-import { copyFileSync, linkSync, renameSync, statSync } from "node:fs";
+import { copyFileSync, linkSync, renameSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import { createLogger } from "./log.js";
 
@@ -89,6 +89,9 @@ export function linkOrCopy(src: string, dst: string, opts?: LinkOrCopyOptions): 
   // 触发场景很常见:上传 601 重试 / master 重启续跑都会重走这一段。
   if (sameInode(src, dst)) return "link";
   const tmp = scratchPath(dst);
+  // 上次进程死在 link 与 rename 之间(或复制中途)会留下同名临时名 → 不先清掉的话 `linkSync` 报 EEXIST,
+  // 我们会误报「硬链接失败,回落复制」并整文件多复制一遍。临时名是我们自己的产物,直接清。
+  try { rmSync(tmp, { force: true }); } catch { /* 清不掉 → 按原行为继续(link 抛 → 走复制分支) */ }
   const rename = fs.renameSync ?? renameSync;
   try {
     fs.linkSync(src, tmp);

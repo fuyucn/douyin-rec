@@ -731,15 +731,12 @@ async function resumeSegmentAppends(
   // 先补 plain:已建稿但其余分 P 可能还没传完(上次在 append plain 中途失败)。
   const plainFiles = uploadParts.map((p) => p.plain).filter((f) => f && existsSync(f));
   // 提交前自检:补 append 的产物同样不能是坏容器(稿件已建,绝不能追加坏分 P)→ 检出转人工。
-  // 三类都要检:续跑不重烧,所以**旧版本**留下的 plain / _danmu / _livechat 半成品都可能在这条路上被追加。
-  const resumeFiles = [
-    ...plainFiles,
-    ...uploadParts.flatMap((p) => [p.danmu, p.livechat]).filter((f): f is string => !!f && existsSync(f)),
-  ];
-  const brokenResume = await unreadableParts(resumeFiles, deps.segmentDuration ?? defaultSegmentDuration);
+  // 只检 plain:本函数拿到的 `uploadParts[].danmu/livechat` 恒为空 —— 烧录循环在主流程里、
+  // **在续跑分叉之后**(见主流程注释),续跑路径不重烧也不追加烧录轨(该缺口另开 issue #142 跟踪)。
+  const brokenResume = await unreadableParts(plainFiles, deps.segmentDuration ?? defaultSegmentDuration);
   if (brokenResume.length > 0) {
     const names = brokenResume.slice(0, 3).map((f) => path.basename(f)).join(",");
-    jlog(`⚠️ 续跑产物自检失败:${brokenResume.length}/${resumeFiles.length} 个分 P 读不出时长 → 拒绝 append:${names}`);
+    jlog(`⚠️ 续跑产物自检失败:${brokenResume.length}/${plainFiles.length} 个分 P 读不出时长 → 拒绝 append:${names}`);
     ledger.setState(streamKey, "needs_manual", { error: `续跑产物自检失败:${brokenResume.length} 个分 P 读不出时长` });
     notify({ kind: "error", stage: "上传", message: `${streamKey} 续跑产物自检失败:${brokenResume.length} 个分 P 读不出时长,请人工核对` });
     return { state: "needs_manual", bv };

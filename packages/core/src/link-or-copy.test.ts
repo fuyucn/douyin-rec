@@ -77,6 +77,19 @@ describe("linkOrCopy", () => {
     expect(getLinkFallbackCount("r1")).toBe(0);
   });
 
+  it("陈旧临时名(上次死在 link/rename 之间)→ 先清掉再硬链接,不误报回落、不整文件复制", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loc-"));
+    writeFileSync(join(dir, "a"), "A");
+    writeFileSync(join(dir, ".b.part"), "STALE"); // 上次进程留下的临时名
+    const warn = vi.fn();
+    expect(linkOrCopy(join(dir, "a"), join(dir, "b"), { root: "r1", warn })).toBe("link");
+    expect(readFileSync(join(dir, "b"), "utf-8")).toBe("A");
+    expect(existsSync(join(dir, ".b.part"))).toBe(false);
+    expect(statSync(join(dir, "b")).ino).toBe(statSync(join(dir, "a")).ino);
+    expect(warn).not.toHaveBeenCalled();
+    expect(getLinkFallbackCount("r1")).toBe(0);
+  });
+
   it("替换中途失败:目标保持原样,不留半写状态", () => {
     const dir = mkdtempSync(join(tmpdir(), "loc-"));
     writeFileSync(join(dir, "a"), "new");

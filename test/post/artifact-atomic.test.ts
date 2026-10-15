@@ -6,7 +6,7 @@
  *  · 失败/被杀 → **最终名绝不出现**(这是 incident 的根:半成品以最终名存在就会被当成品复用/投稿)。
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -111,14 +111,24 @@ describe("产物原子落盘(issue #140)", () => {
     expect(existsSync(bad)).toBe(false);
   });
 
-  it("相对输出路径也走同一套临时名/rename(burn 以输出目录为 cwd)", async () => {
+  it("相对输出路径也走同一套临时名/rename(burn 以输出目录为 cwd,进程 cwd 是另一处)", async () => {
     const dir = newDir();
     const video = join(dir, "v3.mp4");
     writeFileSync(video, "V");
-    const rel = join(dir, "rel_danmu.mp4");
-    await burn({ inputMp4: video, assText: "[Script Info]\n", outMp4: rel, fontsDir: dir });
-    expect(readFileSync(rel, "utf-8")).toBe("OK");
-    expect(existsSync(atomicPartPath(rel))).toBe(false);
+    mkdirSync(join(dir, "sub"));
+    const cwd0 = process.cwd();
+    process.chdir(dir); // 真·相对路径:进程 cwd = dir,burn 的 cwd = dir/sub
+    try {
+      await burn({ inputMp4: video, assText: "[Script Info]\n", outMp4: join("sub", "rel_danmu.mp4"), fontsDir: dir });
+      const abs = join(dir, "sub", "rel_danmu.mp4");
+      expect(readFileSync(abs, "utf-8")).toBe("OK");
+      expect(existsSync(atomicPartPath(abs))).toBe(false);
+      // 不 resolve 的话 ffmpeg 会写到 dir/sub/sub/... 或把临时名留在 dir 下 —— 两者都算错位。
+      expect(existsSync(join(dir, "sub", "sub"))).toBe(false);
+      expect(existsSync(join(dir, ".rel_danmu.part.mp4"))).toBe(false);
+    } finally {
+      process.chdir(cwd0);
+    }
   });
 });
 

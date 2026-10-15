@@ -471,7 +471,8 @@ async function produceParts(
    *
    * 被强杀留下的半成品大小正常却读不出时长;当成品复用它会静默投稿坏分 P(B站建稿仍返回 `code: 0`,
    * 只在转码阶段报 `state=-16`,几十分钟后才发现 —— 2026-10-15 incident)。
-   * 故:读不出 → 判定「不可复用」,调用方原地重做(ffmpeg `-y` 覆盖同一 inode,旁边的硬链接名自动跟上)。
+   * 故:读不出 → 判定「不可复用」,调用方原地重做(重做走原子落盘,会生成**新 inode**;
+   * 规范名随后由 `linkOrCopySync` 无条件重新链到新 inode,所以旧名字不会停留在旧数据上)。
    */
   const reusableArtifact = async (p: string): Promise<boolean> => {
     if (!existsSync(p)) return false;

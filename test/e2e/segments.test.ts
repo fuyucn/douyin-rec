@@ -127,4 +127,49 @@ describe("e2e: 半成品产物(issue #140)", () => {
     expect(s.fake.calls, "坏产物不得再追加分 P").toHaveLength(calls);
     expect(s.jobState(key)).toBe("needs_manual");
   });
+
+  it("烧录产物读不出时长 → 首跑也拒投(烧录轨同样不许静默投稿)", async () => {
+    s = await Scenario.create({
+      cfg: { steps: { mergeSegments: false, burnDanmu: true, burnLivechat: false }, cleanup: FULL_CLEANUP },
+      deps: {
+        // 只有烧录产物坏:plain 正常 —— 证明自检覆盖了烧录轨(不是只盯 plain)。
+        segmentDuration: async (f) => (/_danmu\.mp4$/.test(f) ? 0 : probeJson(f)),
+      },
+    });
+    s.record({ sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 1, segSec: 600 }] });
+
+    await s.reconcile();
+
+    expect(s.fake.calls.filter((c) => c.op === "upload")).toHaveLength(0);
+    expect(s.jobState(KEY)).toBe("failed");
+  });
+
+  it("残留 _danmu 读不出时长 → 重烧而不是复用", async () => {
+    const residue = new Set<string>();
+    // 在「决定要不要烧」的那一刻取证:后续 stageAfterDone 会把产物清掉。
+    const burnAttempts: Array<{ out: string; before: string }> = [];
+    s = await Scenario.create({
+      cfg: { steps: { mergeSegments: false, burnDanmu: true, burnLivechat: false }, cleanup: FULL_CLEANUP },
+      deps: {
+        burnSegment: async (o) => {
+          burnAttempts.push({ out: o.out, before: existsSync(o.out) ? readFileSync(o.out, "utf-8") : "(missing)" });
+          writeFileSync(o.out, readFileSync(o.plain, "utf-8"));
+        },
+        segmentDuration: async (f) => (residue.delete(f) ? 0 : probeJson(f)),
+      },
+    });
+    s.record({ sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 1, segSec: 600 }] });
+    const half = join(s.stageSubOf(KEY), "主播甲_2026-06-27_000_danmu.mp4");
+    mkdirSync(dirname(half), { recursive: true });
+    writeFileSync(half, "HALF-BURNED");
+    residue.add(half);
+
+    await s.reconcile();
+
+    // 重烧了(复用判定若还是 existsSync,这里会是空数组)。
+    expect(burnAttempts.map((b) => b.out)).toEqual([half]);
+    expect(burnAttempts[0]?.before).toBe("HALF-BURNED"); // 烧之前看到的就是那个半成品
+    expect(s.jobState(KEY)).toBe("done");
+  });
+
 });
