@@ -26,9 +26,9 @@ export function ProcessingSection({ value: v, onChange, burn }: Props): ReactNod
       <p className="text-xs text-muted -mt-1">{t("rooms.procEnabledHint")}</p>
       <fieldset disabled={!v.procEnabled} className="space-y-3 disabled:opacity-50">
         <div>
-          <span className="field-label inline-flex items-center gap-1.5">
-            {t("roomForm.output")}<ExperimentalBadge id="segment-part-xml" />
-          </span>
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <span className="field-label !mb-0">{t("roomForm.output")}</span><ExperimentalBadge id="segment-part-xml" />
+          </div>
           <div className="seg-group" role="radiogroup">
             {([true, false] as const).map((merge) => (
               <button key={String(merge)} type="button" role="radio" aria-checked={v.mergeSegments === merge}
@@ -38,7 +38,7 @@ export function ProcessingSection({ value: v, onChange, burn }: Props): ReactNod
               </button>
             ))}
           </div>
-          <p className="text-xs text-muted mt-1">{t("hub.ruleDialog.toggleMergeSegmentsSub")}</p>
+          <p className="text-xs text-muted mt-1">{t("roomForm.outputHint")}</p>
         </div>
         <ToggleRow label={t("rooms.burnDanmu")} hint={t("hub.ruleDialog.toggleBurnDanmuSub")}
                    checked={v.burnDanmu} onChange={(x) => onChange({ burnDanmu: x })} lock={burn} />

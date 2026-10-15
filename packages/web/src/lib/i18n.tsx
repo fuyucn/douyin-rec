@@ -192,7 +192,8 @@ const DICT = {
     },
     roomForm: {
       useCookieStream: "带 Cookie 取流", notifySection: "通知", cleanupSection: "清理", output: "产出形态",
-      mergeOne: "合并为一个视频", mergeSplit: "按录制分段", moreUpload: "更多:稿件名 / 分P名 / 简介", flowLabel: "处理流程",
+      mergeOne: "合并为一个视频", mergeSplit: "按录制分段",
+      outputHint: "合并为一个视频 = 整场各分段合成一片再上传(默认);按录制分段 = 每段一个分 P,开烧录则逐段烧", moreUpload: "更多:稿件名 / 分P名 / 简介", flowLabel: "处理流程",
       stageAfterDoneWarn: "当前只合成不上传:stage 里就是成品,完成后清空会把成品删掉",
       method: { label: "上传方式", after: "收播后上传", afterHint: "收播后由 master 合并 / 烧录再投稿(默认)" },
       lock: { needDanmu: "需先开启「录弹幕」", needNodeSide: "仅在「节点侧上传」时生效", needMerge: "按分段产出时没有合并步骤" },
@@ -616,7 +617,8 @@ const DICT = {
     },
     roomForm: {
       useCookieStream: "Use cookie for streams", notifySection: "Notifications", cleanupSection: "Cleanup", output: "Output",
-      mergeOne: "Merge into one video", mergeSplit: "Per recorded segment", moreUpload: "More: submission / part titles, description", flowLabel: "Processing flow",
+      mergeOne: "Merge into one video", mergeSplit: "Per recorded segment",
+      outputHint: "Merge = all segments become one video before upload (default); per segment = each recorded segment is its own part, burned per segment when burning is on", moreUpload: "More: submission / part titles, description", flowLabel: "Processing flow",
       stageAfterDoneWarn: "Compose-only mode: stage holds the final files; clearing it after completion deletes them",
       method: { label: "Upload method", after: "Upload after broadcast", afterHint: "After the broadcast, master merges / burns, then uploads (default)" },
       lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment" },

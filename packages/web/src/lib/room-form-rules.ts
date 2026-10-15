@@ -92,10 +92,15 @@ function effectiveMethod(f: FormFacts, c: Pick<Constraints, "rolling" | "nodeSid
   return f.method;
 }
 
+/** 按当前依赖结算出的上传方式(已失效的方式回落「收播后上传」)。 */
+export function settledMethod(f: FormFacts): UploadMethod {
+  return effectiveMethod(f, deriveConstraints(f));
+}
+
 /** 写入一个字段后重算方式:开烧录 / 改节点数让当前方式失效时自动回落,不留「看着开着其实没生效」。 */
 export function applyChange<T extends FormFacts, K extends keyof T>(f: T, key: K, value: T[K]): T {
   const next = { ...f, [key]: value };
-  return { ...next, method: effectiveMethod(next, deriveConstraints(next)) };
+  return { ...next, method: settledMethod(next) };
 }
 
 /** 存储(upload.mode + steps.nodeSideUpload)→ 表单。 */
