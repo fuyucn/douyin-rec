@@ -108,7 +108,7 @@
 
 ## 待办（Next）
 
-- [ ] **T-47 审计整改（A 失败证据剩余缺口 / B1 人工已处理入口 / C 线路按吞吐排序 / D 进度判死 / E master pull 副本）** — 2026-10-15 审计 + 独立审计后的收敛计划，见 [`plans/035_audit_followups.md`](plans/035_audit_followups.md)。**为什么**：33/107 个 job 卡 `needs_manual` 无出口；上传线路首选最慢线路；超时按固定 1MB/s 估算。**验收**：计划 §2 各项验收；先做 F（部署后线上验证 27 个待验证票）。各项开 issue 后在此补链接；B2、C 为 needs-decision。
+- [ ] **T-47 审计整改（F 验证欠账 / A 失败证据剩余缺口 / K known_hosts 策略 / B1 人工已处理（扩展 recheck-verify）/ B2 / C 线路按吞吐排序 / D 超时判死标准 / E master pull 副本）** — 2026-10-15 审计 + 三轮独立审计后的收敛计划，见 [`plans/035_audit_followups.md`](plans/035_audit_followups.md)。**为什么**：33/107 个 job 卡 `needs_manual` 无出口；上传线路首选最慢线路；超时按固定 1MB/s 估算。**验收**：计划 §2 各项验收；先做 F。各项开 issue 并 accept 后在此补链接；B2、C、D、K 为 needs-decision，子项未 accept 前不改代码。
 
 - [ ] **T-38 CI 架构文档漂移守护恒红（issue [#11](https://github.com/fuyucn/douyin-rec/issues/11)）**
   — 2026-10-12 开票（incident）。**做什么**：让 CI 的架构文档守护能变绿。**根因**：CI 工作流用
