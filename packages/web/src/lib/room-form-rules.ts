@@ -15,8 +15,10 @@ export interface FormFacts {
   danmu: boolean;
   /** 平台是否支持弹幕(快手无)。 */
   danmuAvailable: boolean;
-  /** 是否已登录平台账号(含礼物需要)。 */
+  /** 是否已登录平台账号(带 Cookie 需要)。 */
   cookieReady: boolean;
+  /** Cookie 是否用于取流(B站/快手 true;抖音取流恒匿名,Cookie 只影响弹幕礼物/入场 → false)。 */
+  cookieForStream: boolean;
   procEnabled: boolean;
   /** 是否上传到 B 站(false = 只合成)。 */
   uploadOn: boolean;
@@ -38,7 +40,8 @@ export interface Lock {
 }
 
 export interface Constraints {
-  gift: Lock;
+  /** 「带 Cookie」开关;抖音上它只服务弹幕,所以依赖录弹幕。 */
+  cookie: Lock;
   burn: Lock;
   rolling: Lock;
   nodeSide: Lock;
@@ -72,7 +75,7 @@ export function deriveConstraints(f: FormFacts): Constraints {
   const rolling = rollingLock(f);
   const nodeSide = burning ? lock("rooms.nodeSideUploadDisabled") : OPEN;
   return {
-    gift: noDanmu ? lock("roomForm.lock.needDanmu") : f.cookieReady ? OPEN : lock("dialog.giftNeedCookie"),
+    cookie: !f.cookieReady ? lock("dialog.giftNeedCookie") : noDanmu && !f.cookieForStream ? lock("roomForm.lock.needDanmu") : OPEN,
     burn: noDanmu ? lock("roomForm.lock.needDanmu") : OPEN,
     rolling,
     nodeSide,

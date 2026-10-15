@@ -12,6 +12,7 @@ const facts = (over: Partial<FormFacts> = {}): FormFacts => ({
   danmu: true,
   danmuAvailable: true,
   cookieReady: true,
+  cookieForStream: false,
   procEnabled: true,
   uploadOn: true,
   method: "after",
@@ -45,17 +46,22 @@ describe("deriveConstraints — 边录边传(复用 core resolveRollingPolicy)",
 });
 
 describe("deriveConstraints — 其余依赖", () => {
-  it("关录弹幕 → 含礼物与烧录都锁", () => {
+  it("抖音(Cookie 只服务弹幕):关录弹幕 → Cookie 与烧录都锁", () => {
     const c = deriveConstraints(facts({ danmu: false }));
-    expect(c.gift).toEqual({ locked: true, reasonKey: "roomForm.lock.needDanmu" });
+    expect(c.cookie).toEqual({ locked: true, reasonKey: "roomForm.lock.needDanmu" });
     expect(c.burn).toEqual({ locked: true, reasonKey: "roomForm.lock.needDanmu" });
+  });
+  it("B站/快手(Cookie 用于取流):关录弹幕或平台无弹幕时 Cookie 仍可开", () => {
+    expect(deriveConstraints(facts({ cookieForStream: true, danmu: false })).cookie.locked).toBe(false);
+    expect(deriveConstraints(facts({ cookieForStream: true, danmuAvailable: false })).cookie.locked).toBe(false);
   });
   it("平台无弹幕 → 烧录锁", () => {
     expect(deriveConstraints(facts({ danmuAvailable: false })).burn.locked).toBe(true);
   });
-  it("未登录 → 含礼物锁(原因 = 需登录),烧录不锁", () => {
+  it("未登录 → Cookie 锁(原因 = 需登录,任何平台),烧录不锁", () => {
     const c = deriveConstraints(facts({ cookieReady: false }));
-    expect(c.gift).toEqual({ locked: true, reasonKey: "dialog.giftNeedCookie" });
+    expect(c.cookie).toEqual({ locked: true, reasonKey: "dialog.giftNeedCookie" });
+    expect(deriveConstraints(facts({ cookieReady: false, cookieForStream: true })).cookie.locked).toBe(true);
     expect(c.burn.locked).toBe(false);
   });
   it("开烧录 → 节点侧上传锁", () => {
