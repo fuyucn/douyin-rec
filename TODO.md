@@ -15,6 +15,12 @@
 
 ## 进行中
 
+- [~] **T-47 房间 / Hub 规则 / 任务三处表单按依赖重排（issue [#126](https://github.com/fuyucn/douyin-rec/issues/126)）**
+  — 2026-10-15 认领，swe-loop 执行，stacked PR [#127](https://github.com/fuyucn/douyin-rec/pull/127)→[#128](https://github.com/fuyucn/douyin-rec/pull/128)→[#129](https://github.com/fuyucn/douyin-rec/pull/129)→[#130](https://github.com/fuyucn/douyin-rec/pull/130)→[#131](https://github.com/fuyucn/douyin-rec/pull/131)→[#132](https://github.com/fuyucn/douyin-rec/pull/132)，最底层 base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：前端字段依赖收口到一个纯模块（边录边传可用性直接复用 core `resolveRollingPolicy`）；三处表单共用「录制→节点→处理→上传→清理→通知」分区，上传区「上传方式」三选一（收播后 / 节点侧 / 边录边传），不可用项给原因、失效自动回落；顶部流程摘要。
+  **顺带修**（均浏览器实测复现）：Hub 规则弹窗定时窗口静默丢失；新建规则把表单默认值写到源任务；规则开关文案称「录制不受影响」实为全房间暂停；任务弹窗未登录保存会改写登录态开关。
+  **验收**：依赖矩阵 vitest 覆盖；三处表单保存往返不丢字段；`pnpm test`/`typecheck`/web build 绿。**待决**：「只关处理、录制照常」现有规则模型无法表达，是否拆独立处理开关另议。
+
 - [~] **T-46 dev 多节点 e2e 环境（issue [#82](https://github.com/fuyucn/douyin-rec/issues/82)，P0+P1+P4）**
   — 2026-10-14 认领，分支 `codex/issue-82-dev-multinode`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：容器内 sshd 的 dev worker 镜像层 + compose 覆盖（`drec-devnet` internal）+ `scripts/e2e-verify.sh`
