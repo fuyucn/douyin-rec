@@ -4,11 +4,13 @@ import { api, type Task, type TaskPayload, type PlatformDTO } from "../api/clien
 import { cookieStatusAtom, serverTimezoneAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
-import { Switch } from "../components/Switch";
+import { NotifySection } from "../components/room-form/NotifySection";
+import { RecordingSection } from "../components/room-form/RecordingSection";
 import { Tooltip } from "../components/Tooltip";
 import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { pickPlatform, qualityLabel, scheduleInput } from "../lib/labels";
+import { pickPlatform, scheduleInput } from "../lib/labels";
+import { cookieLock } from "../lib/room-form-rules";
 import { fmtTimeInTz, localTimeTooltip } from "../lib/tz";
 
 interface Props {
@@ -112,10 +114,9 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
     setForm((f) => ({ ...f, [key]: value }));
   }
 
-  // 选项列表:平台清单 + 当前值(确保当前值始终可见,即便平台未加载完)。
-  const opts = (list: readonly string[] | undefined, current: string): string[] =>
-    [...new Set([...(list ?? []), current].filter(Boolean))];
   const danmuAvailable = plat ? plat.hasDanmu : true;
+  // 抖音取流恒匿名,Cookie 只服务弹幕;B站/快手用它取流(锁定口径见 room-form-rules)。
+  const cookieForStream = plat ? plat.id !== "douyin" : false;
 
   async function submit(ev: FormEvent): Promise<void> {
     ev.preventDefault();
@@ -126,8 +127,8 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
       engine: form.engine || undefined,
       segmentSec: Number(form.segmentSec) || 0,
       danmu: form.danmu ? 1 : 0,
-      // 顶部统一管理全局 cookie；此开关决定本任务是否带 cookie 抓弹幕。
-      useCookie: cookieReady && form.useCookie,
+      // 原值提交:未登录时开关只是锁定显示,不能借保存把任务的 Cookie 设置改掉(与房间面板 / 规则弹窗同口径)。
+      useCookie: form.useCookie,
       schedule: form.schedule.trim() || null,
       webhook: form.webhook.trim() || null,
     };
@@ -159,73 +160,17 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
         </p>
       )}
 
-      <form className="grid grid-cols-1 sm:grid-cols-2 gap-4" onSubmit={submit}>
-        <div className="sm:col-span-2">
-          <label className="field-label">
-            {t("dialog.room")}<span className="text-error-fg">*</span>
-          </label>
-          <input
-            required
-            className="input"
-            placeholder={t("dialog.roomPlaceholder")}
-            value={form.room}
-            onChange={(e) => set("room", e.target.value)}
-          />
-          {plat && <p className="mt-1 text-xs text-muted-soft">{t("dialog.platform", { id: plat.id })}</p>}
-        </div>
-
-        <div>
-          <label className="field-label">{t("dialog.name")}</label>
-          <input
-            className="input"
-            placeholder={t("dialog.namePlaceholder")}
-            value={form.name}
-            onChange={(e) => set("name", e.target.value)}
-          />
-        </div>
-
-        <div>
-          <label className="field-label">{t("dialog.quality")}</label>
-          <select className="select" value={form.quality} onChange={(e) => set("quality", e.target.value)}>
-            {opts(plat?.qualities, form.quality).map((q) => (
-              <option key={q} value={q}>
-                {qualityLabel(q)}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label className="field-label">{t("dialog.recorder")}</label>
-          <select className="select" value={form.engine} onChange={(e) => set("engine", e.target.value)}>
-            {opts(plat?.engines, form.engine).map((e) => (
-              <option key={e} value={e}>
-                {e}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label className="field-label">{t("dialog.segment")}</label>
-          <input
-            type="number"
-            min={0}
-            className="input"
-            value={form.segmentSec}
-            onChange={(e) => set("segmentSec", e.target.value)}
-          />
-        </div>
-
-        <div>
-          <label className="field-label">{t("dialog.scheduleWindow")}</label>
-          <input
-            className="input"
-            placeholder={t("dialog.schedulePlaceholder")}
-            value={form.schedule}
-            onChange={(e) => set("schedule", e.target.value)}
-          />
-          <p className="mt-1 text-xs text-muted-soft">
+      <form className="space-y-7" onSubmit={submit}>
+        <RecordingSection
+          value={{ ...form, recEnabled: true }}
+          onChange={(patch) => setForm((f) => ({ ...f, ...patch }))}
+          showName
+          qualities={plat?.qualities ?? []}
+          engines={plat?.engines ?? []}
+          danmuAvailable={danmuAvailable}
+          cookie={cookieLock({ danmu: form.danmu, danmuAvailable, cookieReady, cookieForStream })}
+          cookieForStream={cookieForStream}
+          scheduleHint={
             <Tooltip
               content={localTimeTooltip(new Date(), serverTz, (tz, local) =>
                 t("common.localTimeTooltip", { serverTz: tz, local }),
@@ -233,58 +178,28 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
             >
               <span>{t("dialog.schedHint", { now: fmtTimeInTz(new Date(), serverTz), tz: schedTzLabel(serverTz) })}</span>
             </Tooltip>
-          </p>
-        </div>
-
-        <div className="sm:col-span-2">
-          <label className="field-label">{t("dialog.webhook")}</label>
-          <input
-            className="input"
-            placeholder={t("dialog.webhookPlaceholder")}
-            value={form.webhook}
-            onChange={(e) => set("webhook", e.target.value)}
-          />
-          <p className="mt-1 text-xs text-muted-soft">{t("dialog.webhookHint")}</p>
-        </div>
-
-        <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3 mt-1">
-          <label
-            className="switch-row"
-            data-disabled={!danmuAvailable}
-          >
-            <span className="flex flex-col">
-              <span className="text-sm font-medium text-ink">{t("dialog.recDanmu")}</span>
-              <span className="text-xs text-muted mt-0.5">
-                {danmuAvailable ? (form.danmu ? t("common.on") : t("common.off")) : t("dialog.danmuNone")}
-              </span>
-            </span>
-            <Switch checked={danmuAvailable && form.danmu} onCheckedChange={(v) => set("danmu", v)} name="danmu" disabled={!danmuAvailable} />
-          </label>
-          <label
-            className="switch-row"
-            data-disabled={!cookieReady || !danmuAvailable}
-          >
-            <span className="flex flex-col">
-              <span className="text-sm font-medium text-ink">{t("dialog.danmuGift")}</span>
-              <span className="text-xs text-muted mt-0.5">
-                {!cookieReady ? t("dialog.giftNeedCookie") : form.useCookie ? t("dialog.giftOn") : t("dialog.giftOff")}
-              </span>
-            </span>
-            <Switch
-              checked={cookieReady && danmuAvailable && form.useCookie}
-              onCheckedChange={(v) => set("useCookie", v)}
-              name="useCookie"
-              disabled={!cookieReady || !danmuAvailable}
+          }
+        >
+          <div>
+            <label className="field-label">
+              {t("dialog.room")}<span className="text-error-fg">*</span>
+            </label>
+            <input
+              required
+              className="input"
+              placeholder={t("dialog.roomPlaceholder")}
+              value={form.room}
+              onChange={(e) => set("room", e.target.value)}
             />
-          </label>
-          {/* 边录边传已迁到 hub 规则(上传模式 = 边录边传,issue #40);task 只保留录制参数。
-              旧开关为 true 的任务只读提示一下,不可在此修改(下次保存规则时随规则收口)。 */}
-          {isEdit && task?.rollingUpload === true && (
-            <p className="text-xs text-muted sm:col-span-2">{t("rooms.rollingLegacyNote")}</p>
-          )}
-        </div>
+            {plat && <p className="mt-1 text-xs text-muted-soft">{t("dialog.platform", { id: plat.id })}</p>}
+          </div>
+        </RecordingSection>
+        <NotifySection webhook={form.webhook} onChange={(v) => set("webhook", v)} />
+        {/* 边录边传已迁到 hub 规则(上传方式 = 边录边传,issue #40);task 只保留录制参数。
+            旧开关为 true 的任务只读提示一下,不可在此修改。 */}
+        {isEdit && task?.rollingUpload === true && <p className="text-xs text-muted">{t("rooms.rollingLegacyNote")}</p>}
 
-        <div className="sm:col-span-2 flex justify-end gap-3 mt-3">
+        <div className="flex justify-end gap-3">
           <Button type="button" variant="secondary" onClick={onClose}>
             {t("common.cancel")}
           </Button>
