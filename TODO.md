@@ -25,6 +25,15 @@
   **验收**：三条路径（remux / merge / burn）原子落盘有回归用例；半成品必重做；坏产物拒投；全量测试 / typecheck / bundle 通过；
   dev 三节点 e2e（S1/S2/S3 + 真 ffmpeg 端到端）留证；独立审查 PASS。
 
+- [~] **T-52 收口混合容器目录缺段修复（issue [#143](https://github.com/fuyucn/douyin-rec/issues/143)，最小修复）**
+  — 2026-10-15 认领，分支 `codex/issue-143-merge-keep-converted`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：①pull 带会话边车 `{base}.session.json`（`NodeRecording.sessionJsonPath`，缺失则不带，旧 bundle 兼容）；
+  ②CLI `merge`/`burn` 与 scan/web 合并共用 `groupSessionsInDir`，读边车认节点侧已转换的 mkv/mp4 分段；
+  ③合并前兜底：拉进 stage 的视频分段有未被会话认领的 → 本场 `needs_manual` + 告警，不合并、不上传、不删源。
+  **为什么**：节点侧原地替换（T-51）后混合容器目录收口会静默丢整场会话，成品缺段且 job 照常往下走。
+  **验收**：混合容器全部会话进合并；边车缺失转人工且不删源；旧 bundle 无 sessionJsonPath 行为不变；CLI merge 认 mkv；
+  全量 vitest + typecheck + bundle 通过。不改输出格式作用位置/终态转换/锁定口径（属 `plans/036`）。
+
 - [!] **T-51 输出格式选项:按产出形态原地替换容器（issue [#137](https://github.com/fuyucn/douyin-rec/issues/137)）**
   — 2026-10-15 认领，swe-loop 执行，两个 stacked PR（存档侧 #138 → 节点侧原地替换 #139）均已合并并部署（`0.0.136`），
   base `feat/hub-optimization`（**已验证部分通过 / 未 close**）。
