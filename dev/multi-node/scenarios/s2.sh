@@ -44,10 +44,12 @@ s2_phase() {
   sc_info "[$label] 恢复 node-2(docker $up),等下一轮对账"
   fault "$up" 2
   fin() { [[ $(job_state "$room") == done ]]; }
+  _n2_up() { [[ $(node2_status) == true ]]; }
   wait_for 240 fin && sc_pass "$label/台账: 恢复后该场补收口 → done" || sc_fail "$label/台账: 恢复后未收口(state='$(job_state "$room")')"
   expect_eq "$label/台账" "候选含 node-1,node-2" "$(ledger "SELECT workerId FROM sync_candidates WHERE streamKey LIKE 'douyin:$room:%' ORDER BY workerId" | jq -r 'map(.workerId)|join(",")')" node-1,node-2
   expect_eq "$label/文件" "node-2 源录像清单与失联前一致(sourceAfterDone=false)" "$(manifest 2 "$anchor")" "$m2"
-  expect_eq "$label/API" "workers/status 里 node-2 恢复 ok=true" "$(node2_status)" true
+  # workers/status 是周期探测(缓存),恢复后需要再等一个探测周期才会翻回 true,不能立刻断言。
+  wait_for 120 _n2_up && sc_pass "$label/API: workers/status 里 node-2 恢复 ok=true" || sc_fail "$label/API: workers/status 里 node-2 恢复 ok=true(120s 内未翻回,实际 '$(node2_status)')"
   expect_eq "$label/文件" "假 biliup 档案本阶段恰新增 1 次 upload(无重复建稿)" "$(( $(arch_count "$anchor") - arch0 ))" 1
   ledger "SELECT streamKey,state,winnerWorker,bv FROM sync_jobs WHERE streamKey LIKE 'douyin:$room:%'" | jq -c '.[]' | sed 's/^/       » 台账 /'
 }

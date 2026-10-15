@@ -1,7 +1,6 @@
 # S3 收口清理(#60/#61)。真 ffmpeg 分段 + session.json + xml,走收播对账 → 烧录 → 假 biliup 上传 → 清理。
-# 重要:收口清理(删 stage 视频 / 删节点源)以「上传后回读 B站分P数核验通过」为前提(pipeline.ts cleanupAfterVerify)。
-# internal 档无外网 → 回读取数失败 = unknown(软状态 clean_verify=pending)→ 一律不删。本档断言这一「保守不删」;
-# 清零类断言只在能回读的 egress 档成立(SC_VERIFIED=1)。
+# 重要(#92):收口清理以「上传确认(biliup rc=0)」为前提;回读 B站分P数只是旁路校验,不拦清理。
+# 因此 internal 档(断外网、假 biliup)也能断言清零类结果。
 # 口径(xmlKeepRule,orchestrator/src/pipeline.ts):stageAfterDone=true → stage 视频类清零、stage 的 .xml/.ass 可删、
 # 节点源 .xml 必须保留;sourceAfterDone=true 时节点源视频(.ts)删。.xml 永不两处同时删光。
 
@@ -10,6 +9,10 @@ s3_case() {
   local label=$1 room=$2 anchor=$3 srcdone=$4
   local END; END=$(( $(date +%s) - 3600 ))
   sc_info "[$label] cleanup: sourceAfterDone=$srcdone stageAfterDone=true;burnDanmu=true(产出真 .ass)"
+  # 档案在 dev 数据根里累积(重跑同一 anchor 不清),以本次开始前的行数为基线只数增量。
+  local arch="/output-data/config/biliup/fake-archive.jsonl"
+  local base_up base_ap
+  base_up=$(cx sh -c "grep '$anchor' $arch 2>/dev/null | grep -c '\"op\":\"upload\"'" | tr -d ' '); base_ap=$(cx sh -c "grep '$anchor' $arch 2>/dev/null | grep -c '\"op\":\"append\"'" | tr -d ' ')
   seed 1 "$anchor" "$room" "$END" 2 10; seed 2 "$anchor" "$room" "$END" 2 10
   local t; t=$(mk_task "$room" "$anchor")
   mk_rule "$t" '["node-1","node-2"]' \
@@ -26,12 +29,9 @@ s3_case() {
   expect_eq "$label/台账" "再过 2 轮对账仍仅 1 个 job" "$(job_count "$room")" 1
   # 文件路
   local sd="/output-data/stage/douyin_${room}_*"
-  if [[ ${SC_VERIFIED:-0} == 1 ]]; then
-    expect_eq "$label/文件" "stage 视频类(.ts/.mp4/.flv)清零" "$(cx sh -c "ls $sd/*.ts $sd/*.mp4 $sd/*.flv 2>/dev/null | wc -l" | tr -d ' ')" 0
-  else
-    expect_eq "$label/台账" "clean_verify=pending(回读取数失败,软状态可重试)" "$(ledger "SELECT state FROM sync_node_states WHERE streamKey LIKE 'douyin:$room:%' AND node='clean_verify'" | jq -r '.[0].state // empty')" pending
-    expect_true "$label/文件" "核验未通过 → stage 视频类保守保留(>0)" sh -c "[ $(cx sh -c "ls $sd/*.ts $sd/*.mp4 $sd/*.flv 2>/dev/null | wc -l" | tr -d ' ') -gt 0 ]"
-  fi
+  # #92:清理只看上传确认(biliup rc=0),不再被「回读分P数」拦住;回读降为旁路校验(clean_verify)。
+  expect_eq "$label/文件" "stage 视频类(.ts/.mp4/.flv)清零(上传已确认即清理)" "$(cx sh -c "ls $sd/*.ts $sd/*.mp4 $sd/*.flv 2>/dev/null | wc -l" | tr -d ' ')" 0
+  expect_eq "$label/台账" "旁路校验 clean_verify 未失败(不阻塞清理)" "$(ledger "SELECT COUNT(*) n FROM sync_node_states WHERE streamKey LIKE 'douyin:$room:%' AND node='clean_verify' AND state='failed'" | jq -r '.[0].n')" 0
   expect_eq "$label/文件" "stage 的 .xml/.ass 已删(stageAfterDone=true,节点源保留 xml)" "$(cx sh -c "ls $sd/*.xml $sd/*.ass 2>/dev/null | wc -l" | tr -d ' ')" 0
   expect_true "$label/文件" "stage 仍有 job.log" cx sh -c "ls $sd/job.log"
   local n
@@ -39,15 +39,14 @@ s3_case() {
     expect_eq "$label/文件" "node-$n 源 .xml 保留(不得删最后一份)" "$(nx $n sh -c "ls /output-data/recordings/$anchor/*.xml | wc -l" | tr -d ' ')" 1
     expect_eq "$label/文件" "node-$n 会话 session.json 保留" "$(nx $n sh -c "ls /output-data/recordings/$anchor/*.session.json | wc -l" | tr -d ' ')" 1
   done
-  if [[ $srcdone == true && ${SC_VERIFIED:-0} == 1 ]]; then
-    expect_eq "$label/文件" "node-1 源视频 .ts 已按 sourceAfterDone 清理" "$(nx 1 sh -c "ls /output-data/recordings/$anchor/*.ts 2>/dev/null | wc -l" | tr -d ' ')" 0
+  if [[ $srcdone == true ]]; then
+    expect_eq "$label/文件" "node-1 源视频 .ts 已按 sourceAfterDone 清理(上传已确认)" "$(nx 1 sh -c "ls /output-data/recordings/$anchor/*.ts 2>/dev/null | wc -l" | tr -d ' ')" 0
   else
-    expect_eq "$label/文件" "node-1 源视频 .ts 保留(sourceAfterDone=$srcdone;未核验不删)" "$(nx 1 sh -c "ls /output-data/recordings/$anchor/*.ts | wc -l" | tr -d ' ')" 2
+    expect_eq "$label/文件" "node-1 源视频 .ts 保留(sourceAfterDone=false)" "$(nx 1 sh -c "ls /output-data/recordings/$anchor/*.ts | wc -l" | tr -d ' ')" 2
   fi
   # 假 biliup 档案:1 次 upload(P1=plain)+ 1 次 append(P2=danmu),全部关水印 + 仅自己可见
-  local arch="/output-data/config/biliup/fake-archive.jsonl"
-  expect_eq "$label/文件" "档案 upload 次数(无重复建稿)" "$(cx sh -c "grep '$anchor' $arch | grep -c '\"op\":\"upload\"'" | tr -d ' ')" 1
-  expect_eq "$label/文件" "档案 append 次数(danmu 分P)" "$(cx sh -c "grep '$anchor' $arch | grep -c '\"op\":\"append\"'" | tr -d ' ')" 1
+  expect_eq "$label/文件" "档案 upload 次数(无重复建稿)" "$(( $(cx sh -c "grep '$anchor' $arch | grep -c '\"op\":\"upload\"'" | tr -d ' ') - ${base_up:-0} ))" 1
+  expect_eq "$label/文件" "档案 append 次数(danmu 分P)" "$(( $(cx sh -c "grep '$anchor' $arch | grep -c '\"op\":\"append\"'" | tr -d ' ') - ${base_ap:-0} ))" 1
   expect_eq "$label/文件" "档案每行 watermarkOff 且 onlySelf" "$(cx sh -c "grep '$anchor' $arch | grep -vc '\"watermarkOff\":true,\"onlySelf\":true'" | tr -d ' ')" 0
   # API 路
   api GET "/api/hub/jobs?room=douyin.$room"
