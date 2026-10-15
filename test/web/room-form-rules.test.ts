@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { shouldUseNodeSideUpload } from "../../packages/orchestrator/src/node-side-upload";
 import {
   applyChange,
+  cookieLock,
   deriveConstraints,
   flowSummary,
   methodFromStored,
@@ -200,5 +201,24 @@ describe("flowSummary", () => {
   });
   it("无规则(单机任务)处理关闭时录制照常", () => {
     expect(flowSummary(facts({ procEnabled: false, hasRule: false }), true)[0]).toEqual({ key: "roomForm.flow.record", on: true });
+  });
+});
+
+describe("cookieLock — 任务弹窗单独使用,与 deriveConstraints 同口径", () => {
+  const base = { danmu: true, danmuAvailable: true, cookieReady: true, cookieForStream: false };
+  it("已登录 + 录弹幕 → 可开", () => {
+    expect(cookieLock(base)).toEqual({ locked: false });
+  });
+  it("未登录 → 锁(任何平台)", () => {
+    expect(cookieLock({ ...base, cookieReady: false })).toEqual({ locked: true, reasonKey: "dialog.giftNeedCookie" });
+    expect(cookieLock({ ...base, cookieReady: false, cookieForStream: true }).locked).toBe(true);
+  });
+  it("抖音不录弹幕 → 锁;取流平台不录弹幕 → 可开", () => {
+    expect(cookieLock({ ...base, danmu: false })).toEqual({ locked: true, reasonKey: "roomForm.lock.needDanmu" });
+    expect(cookieLock({ ...base, danmu: false, cookieForStream: true }).locked).toBe(false);
+  });
+  it("与 deriveConstraints().cookie 一致", () => {
+    const f = facts({ danmu: false });
+    expect(cookieLock(f)).toEqual(deriveConstraints(f).cookie);
   });
 });

@@ -76,6 +76,13 @@ function rollingLock(f: FormFacts): Lock {
   return lock(ROLLING_REASON_KEY[policy.reason] ?? "rooms.rollingReasonMultiNode");
 }
 
+/** 「带 Cookie」开关:未登录一律锁;抖音上它只服务弹幕,不录弹幕时也锁。任务弹窗单独用它。 */
+export function cookieLock(f: Pick<FormFacts, "danmu" | "danmuAvailable" | "cookieReady" | "cookieForStream">): Lock {
+  if (!f.cookieReady) return lock("dialog.giftNeedCookie");
+  const noDanmu = !f.danmu || !f.danmuAvailable;
+  return noDanmu && !f.cookieForStream ? lock("roomForm.lock.needDanmu") : OPEN;
+}
+
 export function deriveConstraints(f: FormFacts): Constraints {
   const noDanmu = !f.danmu || !f.danmuAvailable;
   const burn = effectiveBurn(f);
@@ -83,7 +90,7 @@ export function deriveConstraints(f: FormFacts): Constraints {
   const rolling = rollingLock(f);
   const nodeSide = burning ? lock("rooms.nodeSideUploadDisabled") : OPEN;
   return {
-    cookie: !f.cookieReady ? lock("dialog.giftNeedCookie") : noDanmu && !f.cookieForStream ? lock("roomForm.lock.needDanmu") : OPEN,
+    cookie: cookieLock(f),
     burn: noDanmu ? lock("roomForm.lock.needDanmu") : OPEN,
     rolling,
     nodeSide,
