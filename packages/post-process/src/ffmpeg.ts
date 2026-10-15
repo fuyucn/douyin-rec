@@ -1,5 +1,6 @@
 // ts/src/core/post/ffmpeg.ts
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 export interface Progress {
   pct: number;
@@ -36,6 +37,42 @@ export function parseProgressBlock(
 }
 
 /**
+ * 进程 CPU 时间探针(纯函数工厂,便于单测)。
+ *
+ * 返回的函数每次读一次 `/proc/<pid>/stat` 的 `utime+stime`(时钟 tick);与上次**不同** → true(= 在烧 CPU,视为存活)。
+ * 读不到(pid 已退、非 Linux、权限)→ false(绝不把「读不到」当存活,免得掩盖真卡死)。
+ * **平台边界**:依赖 `/proc`,仅 Linux 有效(三个节点与 master 容器都是 Linux)。非 Linux 上退化为
+ * 原来的「只看 stdout/stderr」语义 —— 不引入新风险,只是那里享受不到这条修复。
+ *
+ * 为什么用 CPU 时间而不是「输出文件在长」:实测 `-movflags +faststart` 的收尾一遍**会长时间不写输出**,
+ * 且静默随体积增长(88MB→2s、887MB→35s、3.1GB→117s),拿它当存活信号会在最大场次上照样误杀;
+ * 而同一窗口内 **CPU 时间从不静默**(实测最大静默 0s)—— 挪 moov 一直在烧 CPU,是可靠判活依据。
+ */
+export function makeCpuProbe(pid: number, readProc: (p: number) => string | null = defaultReadProcStat): () => boolean {
+  let last = -1;
+  return () => {
+    const raw = readProc(pid);
+    if (raw == null) return false;
+    // /proc/<pid>/stat: comm 可能含空格/括号 → 取最后一个 ')' 之后再切字段。
+    const tail = raw.slice(raw.lastIndexOf(")") + 2).trim().split(/\s+/);
+    // 字段 14/15(1-based)在 tail 里是 11/12(comm+state 之后)。
+    const ticks = Number(tail[11]) + Number(tail[12]);
+    if (!Number.isFinite(ticks)) return false;
+    if (ticks === last) return false;
+    last = ticks;
+    return true;
+  };
+}
+
+function defaultReadProcStat(pid: number): string | null {
+  try {
+    return readFileSync(`/proc/${pid}/stat`, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * spawn ffmpeg；解析 -progress pipe:1 stdout；
  * rc≠0 时 reject，带 stderr 尾部（最后 ~600 字符）。
  */
@@ -61,8 +98,12 @@ export function runFfmpeg(
     let settled = false;
     let lastActivity = Date.now();
     const stallMs = opts.stallMs ?? 120_000;
+    const cpuProbe = makeCpuProbe(proc.pid ?? -1);
     const watch = stallMs > 0
       ? setInterval(() => {
+          // 存活信号:stdout/stderr 活动(上面两个 data 监听) **或** 进程 CPU 时间前进。
+          // CPU 是主信号 —— faststart 收尾一遍不写任何输出,但一直在烧 CPU。
+          if (cpuProbe()) lastActivity = Date.now();
           if (Date.now() - lastActivity <= stallMs) return;
           try { proc.kill("SIGKILL"); } catch { /* gone */ }
           done(() => reject(new Error(

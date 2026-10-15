@@ -26,6 +26,8 @@ export function buildRemuxArgs(input: string, outMp4: string): string[] {
 
 /** 单段 remux(ts/flv → mp4,无损)。调用方负责目标目录存在。 */
 export async function remuxSegment(input: string, outMp4: string): Promise<void> {
+  // 看门狗用「进程 CPU 时间」判活(runFfmpeg 内默认):faststart 收尾一遍不写 stdout/stderr,
+  // 但一直在烧 CPU → 不会被误判卡死(线上实测整场转人工的根因)。
   await runFfmpeg(buildRemuxArgs(input, outMp4));
 }
 
