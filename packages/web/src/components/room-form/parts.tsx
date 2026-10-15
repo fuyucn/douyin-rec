@@ -19,13 +19,15 @@ export function SectionHeader({ title, toggle }: {
   );
 }
 
-export function ToggleRow({ label, hint, checked, onChange, lock, nested, badge }: {
+export function ToggleRow({ label, hint, checked, onChange, lock, lockedChecked, nested, badge }: {
   label: string;
   hint?: ReactNode;
   checked: boolean;
   onChange: (v: boolean) => void;
   /** 锁定时开关禁用、显示为关,说明换成锁定原因。 */
   lock?: Lock;
+  /** 锁定时开关显示的值(默认关);锁定值本身为开时用。 */
+  lockedChecked?: boolean;
   /** 缩进,表示依附于上一行。 */
   nested?: boolean;
   badge?: ReactNode;
@@ -40,7 +42,7 @@ export function ToggleRow({ label, hint, checked, onChange, lock, nested, badge 
           <span className="text-xs text-muted mt-0.5">{locked && lock?.reasonKey ? t(lock.reasonKey) : hint}</span>
         )}
       </span>
-      <Switch checked={checked && !locked} onCheckedChange={onChange} disabled={locked} />
+      <Switch checked={locked ? lockedChecked === true : checked} onCheckedChange={onChange} disabled={locked} />
     </label>
   );
 }
