@@ -38,7 +38,7 @@ EGRESS_COOKIES=${DREC_EGRESS_COOKIES:-}
 MIRROR=${DREC_MIRROR:-0}
 MIRROR_SRC=${DREC_MIRROR_SRC:-}          # 默认 <主仓库>/docker-data
 MIRROR_ROOMS=${DREC_MIRROR_ROOMS:-}      # 逗号分隔 roomSlug;空 = 复制全部 hub 规则(任务本身一律 enabled=0)
-MIRROR_PORT=${DREC_MIRROR_PORT:-7871}    # controller UI 只绑 127.0.0.1:$MIRROR_PORT
+MIRROR_PORT=${DREC_MIRROR_PORT:-7871}    # controller UI 只绑 127.0.0.1:$MIRROR_PORT  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
 COMPOSE_MIRROR="$REPO/dev/multi-node/compose.mirror.yml"
 TIER=0
 HUB_TEMPLATE="$REPO/dev/multi-node/hub.config.dev.json"
@@ -206,12 +206,12 @@ chk_compose_json() {
         (($v.source | startswith($root + "/")))
         or ($eg == "1" and $k == "controller" and $v.source == $ck and ($v.read_only == true)
             and $v.target == "/output-data/config/biliup/cookies.json"));
-    # mirror 档唯一允许的发布端口:controller 绑 127.0.0.1:$port → 7860(其余服务、其余形态一律拒绝)
+    # mirror 档唯一允许的发布端口:controller 绑 127.0.0.1:$port → 7860(其余服务、其余形态一律拒绝)  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
     def okports($k; $p):
       $mirror == "1" and $k == "controller" and ($p | length) == 1
-      and ($p[0].host_ip == "127.0.0.1") and ($p[0].target == 7860) and (($p[0].published | tostring) == $port);
+      and ($p[0].host_ip == "127.0.0.1") and ($p[0].target == 7860) and (($p[0].published | tostring) == $port);  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
     [ (.services | to_entries[] | .value as $s | .key as $k |
-        (if (($s.ports // []) | length) > 0 and (okports($k; $s.ports) | not) then "\($k): 不得 publish 端口(mirror 档仅允许 controller 绑 127.0.0.1:\($port))" else empty end),
+        (if (($s.ports // []) | length) > 0 and (okports($k; $s.ports) | not) then "\($k): 不得 publish 端口(mirror 档仅允许 controller 绑 127.0.0.1:\($port))" else empty end),  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
         (if $s.network_mode then "\($k): 不得设置 network_mode" else empty end),
         (if $s.privileged == true then "\($k): 不得 privileged" else empty end),
         (if $s.pid then "\($k): 不得设置 pid" else empty end),
@@ -524,15 +524,15 @@ negative_cases() {
   # mirror 档反例:compose 发布端口 / 网络归属;种子数据 webhook / 任务启用 / 上传模式 / 非 dev worker
   local sv_mi=$MIRROR sv_pt=$MIRROR_PORT nets; MIRROR=1; MIRROR_PORT=7871
   nets=$(printf '"networks":{"drec-devnet":{"internal":true,"name":"%s"},"drec-devnet-egress":{"name":"%s"}}' "$NET" "$NET_EG")
-  printf '{"services":{"controller":{"networks":{"drec-devnet":null,"drec-devnet-egress":null},"ports":[{"host_ip":"127.0.0.1","target":7860,"published":"7871"}],"volumes":[]},"node-1":{"networks":{"drec-devnet":null,"drec-devnet-egress":null},"volumes":[]}},%s}' "$nets" >"$t/m0.json"
+  printf '{"services":{"controller":{"networks":{"drec-devnet":null,"drec-devnet-egress":null},"ports":[{"host_ip":"127.0.0.1","target":7860,"published":"7871"}],"volumes":[]},"node-1":{"networks":{"drec-devnet":null,"drec-devnet-egress":null},"volumes":[]}},%s}' "$nets" >"$t/m0.json"  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
   if chk_compose_json <"$t/m0.json" 2>/dev/null; then printf 'PASS   mirror 合法 compose 通过(正例)\n'; else printf 'FAIL   mirror 合法 compose 被误拒\n'; rc=1; fi
-  printf '{"services":{"controller":{"networks":{"drec-devnet":null,"drec-devnet-egress":null},"ports":[{"host_ip":"0.0.0.0","target":7860,"published":"7871"}],"volumes":[]}},%s}' "$nets" >"$t/m1.json"
-  expect_refuse "mirror:controller 绑 0.0.0.0"       chk_compose_json <"$t/m1.json"
-  printf '{"services":{"node-1":{"networks":{"drec-devnet":null,"drec-devnet-egress":null},"ports":[{"host_ip":"127.0.0.1","target":7860,"published":"7871"}],"volumes":[]}},%s}' "$nets" >"$t/m2.json"
+  printf '{"services":{"controller":{"networks":{"drec-devnet":null,"drec-devnet-egress":null},"ports":[{"host_ip":"0.0.0.0","target":7860,"published":"7871"}],"volumes":[]}},%s}' "$nets" >"$t/m1.json"  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
+  expect_refuse "mirror:controller 绑 0.0.0.0"       chk_compose_json <"$t/m1.json"  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
+  printf '{"services":{"node-1":{"networks":{"drec-devnet":null,"drec-devnet-egress":null},"ports":[{"host_ip":"127.0.0.1","target":7860,"published":"7871"}],"volumes":[]}},%s}' "$nets" >"$t/m2.json"  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
   expect_refuse "mirror:worker 发布端口"             chk_compose_json <"$t/m2.json"
   printf '{"services":{"node-1":{"networks":{"drec-devnet":null},"volumes":[]}},%s}' "$nets" >"$t/m3.json"
   expect_refuse "mirror:worker 未接出口网络(档位不符)" chk_compose_json <"$t/m3.json"
-  printf '{"services":{"controller":{"networks":{"drec-devnet":null,"drec-devnet-egress":null},"ports":[{"host_ip":"127.0.0.1","target":7860,"published":"7860"}],"volumes":[]}},%s}' "$nets" >"$t/m4.json"
+  printf '{"services":{"controller":{"networks":{"drec-devnet":null,"drec-devnet-egress":null},"ports":[{"host_ip":"127.0.0.1","target":7860,"published":"7860"}],"volumes":[]}},%s}' "$nets" >"$t/m4.json"  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
   expect_refuse "mirror:controller 发布到 prd 的 7860" chk_compose_json <"$t/m4.json"
   MIRROR=$sv_mi; MIRROR_PORT=$sv_pt
   local m="$t/mirror" mdb; mdb="$m/controller/db/douyin-rec.db"
@@ -572,7 +572,7 @@ cmd_up() {
   post_up_assert
   if [[ $MIRROR == 1 ]]; then
     say "up: OK(mirror 档)。controller=$CTRL workers=$NODE1,$NODE2;外网已放行,上传是假 biliup,任务全部 enabled=0"
-    say "  Web UI:  http://127.0.0.1:$MIRROR_PORT   (在 UI 里把要测的任务打开即开始真录制;测完 keep 停机或 down 清数据)"
+    say "  Web UI:  http://127.0.0.1:$MIRROR_PORT   (在 UI 里把要测的任务打开即开始真录制;测完 keep 停机或 down 清数据)"  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
     say "  CLI 开任务:  scripts/e2e-verify.sh x ctrl curl -s -X POST http://localhost:7860/api/tasks/<id>/start"
   else
     say "up: OK。controller=$CTRL workers=$NODE1,$NODE2 网络=$NET(internal)"

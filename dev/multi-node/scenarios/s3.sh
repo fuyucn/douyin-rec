@@ -58,7 +58,7 @@ s3_case() {
 scenario_s3() {
   sc_begin S3 "收口清理:stageAfterDone=true;sourceAfterDone=false / true 两种"
   sc_require_fast_reconcile
-  local R1=900010021 A1=sc-s3-keep R2=900010022 A2=sc-s3-del
+  local R1=900010021 A1=sc-s3-keep R2=900010022 A2=sc-s3-del  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
   sc_cleanup_room $R1 $A1; sc_cleanup_room $R2 $A2
   s3_case keep $R1 $A1 false
   s3_case del  $R2 $A2 true

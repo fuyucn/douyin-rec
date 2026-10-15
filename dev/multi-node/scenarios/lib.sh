@@ -103,7 +103,7 @@ seed() {
       i=$((i+1))
     done
     printf "{\"roomSlug\":\"%s\",\"platform\":\"douyin\",\"gaps\":[],\"totalGapSec\":%s,\"title\":\"dev-title\"}\n" "$ROOM" "$GAP" > "$D/$B.session.json"
-    printf "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<i>\n<d p=\"1,1,25,16777215,1700000000,0,1,0\" user=\"u1\">dev</d>\n</i>\n" > "$D/$B.xml"
+    printf "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<i>\n<d p=\"1,1,25,16777215,1700000000,0,1,0\" user=\"u1\">dev</d>\n</i>\n" > "$D/$B.xml"  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
   ' _ "$anchor" "$room" "$end" "$segs" "$seg" "$gap"
 }
 

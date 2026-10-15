@@ -2,7 +2,7 @@
 scenario_s1() {
   sc_begin S1 "归属隐藏:规则 A 先勾 node-1+2 再撤掉 node-2,规则 B 始终勾 node-1+2"
   sc_require_fast_reconcile
-  local RA=900010001 RB=900010002 AA=sc-s1-a AB=sc-s1-b
+  local RA=900010001 RB=900010002 AA=sc-s1-a AB=sc-s1-b  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
   sc_cleanup_room $RA $AA; sc_cleanup_room $RB $AB
   local END; END=$(( $(date +%s) - 3600 ))
   local ta tb

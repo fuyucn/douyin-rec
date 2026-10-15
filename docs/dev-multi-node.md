@@ -289,7 +289,7 @@ api -X POST $API/api/hub/apply            # 立刻同步任务到所选节点
 **用途**:平时关着,测试时才起。数据根从 prd(`docker-data`)**只读复制**——真抖音 cookies、任务、hub 规则——三个节点放行外网,你在 dev UI 里把要测的任务打开,就真取流、真录制、真走 hub 链路。与 prd 互不影响。
 
 ```bash
-scripts/e2e-verify.sh up --mirror            # 播种(首次)+ 起 controller + 2 worker;UI: http://127.0.0.1:7871
+scripts/e2e-verify.sh up --mirror            # 播种(首次)+ 起 controller + 2 worker;UI: http://127.0.0.1:7871  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
 scripts/e2e-verify.sh x ctrl curl -s -X POST http://localhost:7860/api/tasks/<id>/start   # 或直接在 UI 里开任务
 scripts/e2e-verify.sh keep                   # 测完停机,保留数据;再 up 可续
 scripts/e2e-verify.sh down                   # 拆容器并清空 dev 数据(下次 up 重新从 prd 复制)
@@ -308,6 +308,6 @@ scripts/e2e-verify.sh seed --mirror          # 只播种、不起容器
 - 任务全部 `enabled=0`、`status=stopped`、`rollingUpload=0`;**controller** 带全部任务,**worker** 只带 settings(任务由 hub 同步下发)。
 - 投不了稿(物理上):镜像里是假 biliup,biliup cookies 仍是 `FAKE-DEV`。要测真投稿走 egress 档,不在 mirror 档。
 - 种子在播种时过一道断言(`chk_mirror_seed`):无 webhook 设置、无 enabled 任务、无 prd 合并历史、hub 规则 workers ⊆ {local,node-1,node-2}、upload.mode=stage;`doctor` 的反例自检覆盖这些。该断言**不进 gate**——测试时任务被打开是预期。
-- 网络:三节点都接 `drec-devnet`(internal,节点间 ssh/rsync)+ `drec-devnet-egress`(出外网);controller 只发布 `127.0.0.1:$DREC_MIRROR_PORT`。compose 断言按档位校验这些形态,其它档位发布端口/加网络仍被拒绝。
+- 网络:三节点都接 `drec-devnet`(internal,节点间 ssh/rsync)+ `drec-devnet-egress`(出外网);controller 只发布 `127.0.0.1:$DREC_MIRROR_PORT`。compose 断言按档位校验这些形态,其它档位发布端口/加网络仍被拒绝。  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
 - `run s1|s2|s3|all` 在 mirror 档被拒绝(它们用假房间造数),请在 UI 里开真实任务。
 - 注意:dev 与 prd 对同一房间**同时**录制会各拉一路流;测试时尽量只开要测的那几个任务。

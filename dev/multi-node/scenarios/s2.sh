@@ -57,7 +57,7 @@ s2_phase() {
 scenario_s2() {
   sc_begin S2 "失联三态:docker stop(拒绝)与 docker pause(超时)"
   sc_require_fast_reconcile
-  local R1=900010011 A1=sc-s2-stop R2=900010012 A2=sc-s2-pause
+  local R1=900010011 A1=sc-s2-stop R2=900010012 A2=sc-s2-pause  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
   sc_cleanup_room $R1 $A1; sc_cleanup_room $R2 $A2
   s2_phase stop stop start $R1 $A1 1   # 末参为历史遗留占位,断言已改为本阶段增量
   # 恢复后连续计数复位:再次失联(pause)应能再发一条 → 累计 2
