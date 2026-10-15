@@ -656,6 +656,61 @@ table.tasks tbody tr:last-child td {
   border-color: var(--muted-soft);
   background: var(--surface);
 }
+/* 房间表单:二选一分段按钮(产出形态)与上传方式单选卡(issue #126) */
+.seg-group {
+  display: inline-flex;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.seg-btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--body);
+  background: var(--raised);
+  cursor: pointer;
+}
+.seg-btn + .seg-btn {
+  border-left: 1px solid var(--hairline);
+}
+.seg-btn.is-active {
+  background: var(--primary);
+  color: var(--primary-fg);
+}
+.method-option {
+  display: flex;
+  width: 100%;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--raised);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+.method-option:hover {
+  border-color: var(--muted-soft);
+}
+.method-option.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.method-option[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.method-dot {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border-radius: 999px;
+  border: 1.5px solid var(--muted);
+}
+.method-option.is-active .method-dot {
+  border: 4px solid var(--accent);
+}
 .switch-row-sm {
   padding: 10px 14px;
 }
