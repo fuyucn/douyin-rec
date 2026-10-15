@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-12
+> 最后更新：2026-10-15
 
 ## 状态约定
 
@@ -15,23 +15,17 @@
 
 ## 进行中
 
-- [~] **T-51 输出格式选项:按产出形态原地替换容器（issue [#137](https://github.com/fuyucn/douyin-rec/issues/137)）**
-  — 2026-10-15 认领，swe-loop 执行，两个 stacked PR（存档侧 → 节点侧原地替换），base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+- [!] **T-51 输出格式选项:按产出形态原地替换容器（issue [#137](https://github.com/fuyucn/douyin-rec/issues/137)）**
+  — 2026-10-15 认领，swe-loop 执行，两个 stacked PR（存档侧 #138 → 节点侧原地替换 #139）均已合并并部署（`0.0.136`），
+  base `feat/hub-optimization`（**已验证部分通过 / 未 close**）。
   **做什么**：任务级字段 outputFormat（默认 original 不变，白名单 mp4 / mkv）；只换容器、原地替换、不并存两份；无后处理任务在节点封口后原地 remux，存档形态改后处理产物容器，投稿形态固定 mp4 并锁定。
   **验收**：默认行为不变有回归用例；校验失败不删原文件；下游认多扩展名；保存往返不丢；全量测试 / typecheck / web build / i18n 检查通过，每个 PR 有变异验证。
-  **进度**：第 1/2（存档侧）已合并（#138）；第 2/2（节点侧原地替换：封口后 remux + 校验 + 删原文件 + 崩溃接管，识别靠会话 sidecar 的 `nodeFormat`，仅无后处理任务）分支 `codex/issue-137-output-format-b`，PR 待审（**未合并 / 未部署 / 未 close**）。
-  返工第 2 轮（2026-10-15）：探测统一运行器（消费 stderr / 超时杀进程）、校验补视频包数 + 音频 + 解析告警、接管后台执行并修临时文件归属与竞态、收尾总时限（未合并 / 未部署）。
-
-- [~] **T-48 界面把 stage 统一称「存档」,不投稿时锁定清理存档开关（issue [#135](https://github.com/fuyucn/douyin-rec/issues/135)）**
-  — 2026-10-15 认领，swe-loop 执行，分支 `codex/issue-135-archive-wording`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
-  **做什么**：用户可见的 stage / 只合成 文案统一改为「存档」；不投稿时锁定「清理存档」并写回关（后端只合成路径本就不执行该清理）；清理开关改正向「投稿后保留存档」。存储与配置字段名不动。
-  **验收**：锁定与取反往返有 vitest + 变异；中英文案无用户可见 stage 残留；全量测试 / typecheck / web build / i18n 检查通过。
-
-- [~] **T-47 房间 / Hub 规则 / 任务三处表单按依赖重排（issue [#126](https://github.com/fuyucn/douyin-rec/issues/126)）**
-  — 2026-10-15 认领，swe-loop 执行，stacked PR [#127](https://github.com/fuyucn/douyin-rec/pull/127)→[#128](https://github.com/fuyucn/douyin-rec/pull/128)→[#129](https://github.com/fuyucn/douyin-rec/pull/129)→[#130](https://github.com/fuyucn/douyin-rec/pull/130)→[#131](https://github.com/fuyucn/douyin-rec/pull/131)→[#132](https://github.com/fuyucn/douyin-rec/pull/132)，最底层 base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
-  **做什么**：前端字段依赖收口到一个纯模块（边录边传可用性直接复用 core `resolveRollingPolicy`）；三处表单共用「录制→节点→处理→上传→清理→通知」分区，上传区「上传方式」三选一（收播后 / 节点侧 / 边录边传），不可用项给原因、失效自动回落；顶部流程摘要。
-  **顺带修**（均浏览器实测复现）：Hub 规则弹窗定时窗口静默丢失；新建规则把表单默认值写到源任务；规则开关文案称「录制不受影响」实为全房间暂停；任务弹窗未登录保存会改写登录态开关。
-  **验收**：依赖矩阵 vitest 覆盖；三处表单保存往返不丢字段；`pnpm test`/`typecheck`/web build 绿。**待决**：「只关处理、录制照常」现有规则模型无法表达，是否拆独立处理开关另议。
+  **验证（2026-10-15，dev 多节点镜像档实跑真实直播间）**：节点侧替换按设计生效（封口后换成所选容器、原文件删除、目录只剩一份、无残留临时文件、探测轨齐全、
+  会话 sidecar 写入格式标记、弹幕文件未动）；控制组符合预期（新建 hub 规则后重启即不再替换，界面下拉锁定并给原因）；存档侧容器实测产出所选容器。
+  **未通过**：hub 收口合并静默丢掉已转换的会话 —— 拉取清单不含会话标识边车，合并入口没有格式声明就不认转换后的分段，
+  成品只含原生容器会话（实测时长约为各段合计六成），流程不报错也不转人工。已单开 [#143](https://github.com/fuyucn/douyin-rec/issues/143)。
+  **阻塞原因 + 解除条件**：缺口属同一交付内的实现遗漏（格式声明只在两个调用点接上，收口路径漏了），而本交付两轮返工已用完，
+  不能再开第三轮 → 已转 `needs-decision`。**解除条件**：用户拍板「新开一条修复」或「并入别的交付」；拍板后按 #143 验收标准返工。
 
 - [~] **T-46 dev 多节点 e2e 环境（issue [#82](https://github.com/fuyucn/douyin-rec/issues/82)，P0+P1+P4）**
   — 2026-10-14 认领，分支 `codex/issue-82-dev-multinode`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
@@ -424,6 +418,26 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-48 界面把 stage 统一称「存档」,不投稿时锁定清理存档开关（issue [#135](https://github.com/fuyucn/douyin-rec/issues/135)，2026-10-15）**
+  — 2026-10-15 认领，swe-loop 执行，分支 `codex/issue-135-archive-wording`（PR #136），base `feat/hub-optimization`，已合并并部署（`0.0.136`）。
+  **做什么**：用户可见的 stage / 只合成 文案统一改为「存档」；不投稿时锁定「清理存档」并写回关（后端只合成路径本就不执行该清理）；清理开关改正向「投稿后保留存档」。存储与配置字段名不动。
+  **验收**：锁定与取反往返有 vitest + 变异；中英文案无用户可见 stage 残留；全量测试 / typecheck / web build / i18n 检查通过。
+  **验证（2026-10-15，dev 多节点镜像档实跑）**：界面切简体中文核对 —— 流程摘要显示 `plain → 存档`、上传区显示「只存档,不投稿(留存档待人工)」、
+  产出形态徽标显示「存档」，无 stage 残留；「投稿后保留存档」开关为禁用态（可访问性属性 aria-disabled 为真、底层输入 disabled），
+  强制点击不翻转（回读仍为开），提示「不投稿时存档就是成品,不会被清理;开关已锁定为保留」。
+  **收口**：已 close（2026-10-15），依据写在该票评论。
+
+- [x] **T-47 房间 / Hub 规则 / 任务三处表单按依赖重排（issue [#126](https://github.com/fuyucn/douyin-rec/issues/126)，2026-10-15）**
+  — 2026-10-15 认领，swe-loop 执行，stacked PR [#127](https://github.com/fuyucn/douyin-rec/pull/127)→[#128](https://github.com/fuyucn/douyin-rec/pull/128)→[#129](https://github.com/fuyucn/douyin-rec/pull/129)→[#130](https://github.com/fuyucn/douyin-rec/pull/130)→[#131](https://github.com/fuyucn/douyin-rec/pull/131)→[#132](https://github.com/fuyucn/douyin-rec/pull/132)，最底层 base `feat/hub-optimization`，已合并并部署（`0.0.136`）。
+  **做什么**：前端字段依赖收口到一个纯模块（边录边传可用性直接复用 core `resolveRollingPolicy`）；三处表单共用「录制→节点→处理→上传→清理→通知」分区，上传区「上传方式」三选一（收播后 / 节点侧 / 边录边传），不可用项给原因、失效自动回落；顶部流程摘要。
+  **顺带修**（均浏览器实测复现）：Hub 规则弹窗定时窗口静默丢失；新建规则把表单默认值写到源任务；规则开关文案称「录制不受影响」实为全房间暂停；任务弹窗未登录保存会改写登录态开关。
+  **验收**：依赖矩阵 vitest 覆盖；三处表单保存往返不丢字段；`pnpm test`/`typecheck`/web build 绿。
+  **验证（2026-10-15，dev 多节点镜像档实跑）**：三条表单逐条保存并回读 —— 任务弹窗（分段 1800→300、窗口 10:00-12:00、输出格式 原始→MKV）、
+  Hub 规则弹窗（分段 120、窗口 00:00-00:01，写入源任务并回读一致，确认定时窗口不再静默丢失）、统一房间面板（分段 240、窗口 08:00-09:00）
+  均与后端存储一致；三处均为分区布局 + 顶部流程摘要，输出格式锁与原因按后端下发的锁定原因显示。
+  **收口**：已 close（2026-10-15），依据写在该票评论。
+  **待决（另议）**：「只关处理、录制照常」现有规则模型无法表达，是否拆独立处理开关。
 
 - [x] **T-36 节点侧上传补磁盘水位闸门（issue [#8](https://github.com/fuyucn/douyin-rec/issues/8)，已 close 2026-10-13）**
   — 2026-10-12 认领，PR [#10](https://github.com/fuyucn/douyin-rec/pull/10)（分支
