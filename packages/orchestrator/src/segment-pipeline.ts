@@ -609,7 +609,7 @@ export async function runSegmentPipeline(o: {
   await appendSegmentGroup(streamKey, bv, "append_livechat", livechatPaths, burnLivechat, deps, jlog, isPublic, splitForUpload);
 
   ledger.markDone(streamKey, bv);
-  notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+  notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
 
   // 收口(与合并路径同一实现):上传确认后按配置清理(issue #92);清理失败只标 clean_*(T12),终态恒为 done。
   await finalizeAfterUpload({
@@ -817,7 +817,7 @@ async function resumeSegmentAppends(
   await appendSegmentGroup(streamKey, bv, "append_danmu", danmuFiles, burnDanmu, deps, jlog, isPublic, splitForUpload);
   await appendSegmentGroup(streamKey, bv, "append_livechat", livechatFiles, burnLivechat, deps, jlog, isPublic, splitForUpload);
   ledger.markDone(streamKey, bv);
-  notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+  notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
   // 上传成功 → 同一收口闸门(补做「删源」:续跑此前漏了 sourceAfterDone)。分P模式不碰 stage 交付物。
   const rmStage = deps.rmStage ?? defaultRmStage;
   await finalizeAfterUpload({

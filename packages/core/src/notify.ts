@@ -8,11 +8,14 @@ export type NotifyEvent =
   | { kind: "recordReconnect"; anchor: string; room: string; downSec: number }
   | { kind: "mergeDone"; file: string }
   | { kind: "burnDone"; style: string; file: string }
-  | { kind: "uploadDone"; bv: string; url: string }
+  // streamKey(hub 场次)可选:上传完成通知据此在发送前补上主播名/日期(见 observability enrichHubEvent)。
+  | { kind: "uploadDone"; bv: string; url: string; streamKey?: string; anchor?: string; date?: string }
   // hub 编排开始处理一场直播(新建 job、pipeline 启动)。同一场只发一次。
-  | { kind: "hubTaskStart"; streamKey: string; room: string; workers: string[]; mode: "stage" | "upload" }
+  // anchor/date/workerNames 由发送前的 enrichHubEvent 补齐(room 只是房间号,人读不出是谁);缺省时退回旧文案。
+  | { kind: "hubTaskStart"; streamKey: string; room: string; workers: string[]; mode: "stage" | "upload";
+      anchor?: string; date?: string; workerNames?: string[] }
   // stage 模式:合成完毕、等人工上传(正常终点,不是错误)。同一场只发一次。
-  | { kind: "stageReady"; streamKey: string }
+  | { kind: "stageReady"; streamKey: string; anchor?: string; date?: string }
   | { kind: "error"; stage: string; message: string };
 
 export interface Notifier { notify(e: NotifyEvent): Promise<void>; }
