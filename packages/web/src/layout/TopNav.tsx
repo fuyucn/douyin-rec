@@ -14,7 +14,9 @@ import { useT } from "../lib/i18n";
 function PageLinks({ className }: { className: string }): ReactNode {
   const t = useT();
   const hubEnabled = useAtomValue(hubEnabledAtom);
+  // Rooms first: it is the one-stop entry (list → detail → edit); tasks/hub remain for deep config.
   const items: { to: string; label: string; end?: boolean }[] = [
+    { to: "/rooms", label: t("nav.rooms") },
     { to: "/", label: t("nav.tasksList"), end: true },
   ];
   // Hub 与处理队列都仅 master(启用 hub)显示;slave/未开不显示。
