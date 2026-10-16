@@ -43,6 +43,12 @@ export interface ProcessContext {
   /** 上报进度(喂租约心跳 / 卡死看门狗)。 */
   markProgress(): void;
   log(msg: string): void;
+  /**
+   * 告警回调(recover 判 uncertain、磁盘不足、校验失败等须让人看见的事件;不等同于 `log`)。
+   * proc-queue 不依赖 observability(0.5),故告警经此回调注入;**按 `job.owner.taskId` 路由到该任务的
+   * 通知/事件中心由 runner 负责**(plans/036 §2.2 / §2.3),处理器只管调用。
+   */
+  alert(msg: string): void;
 }
 
 export interface ProcessResult {
@@ -125,7 +131,10 @@ export function parseJobId(jobId: string): { kind: string; logicalKey: string; g
 
 // ───────────────────────── 契约不变量 ─────────────────────────
 
-/** p 是否严格位于 root 之下(纯字符串口径,先 resolve 消掉 `..`;不跟符号链接)。 */
+/**
+ * p 是否严格位于 root 之下(纯字符串口径,先 resolve 消掉 `..`;**不跟符号链接**——
+ * `<root>/link -> /etc` 下的路径会被放行,节点侧(plans/036 T9a)须另做 realpath 校验)。
+ */
 function isUnderRoot(p: string, root: string): boolean {
   const rel = relative(resolve(root), resolve(p));
   return rel !== "" && rel !== ".." && !rel.startsWith("../") && !isAbsolute(rel);
@@ -136,7 +145,11 @@ function isUnderRoot(p: string, root: string): boolean {
  * - jobId 须可 parse 且与 kind/logicalKey/generation 一致;
  * - inputs 非空,inputs/outputs 全部是绝对路径(无 NUL);
  * - `replaceInputs` 时 inputs 必须全是视频扩展名(拒 xml/ass/会话边车 —— 不可再生);
+ * - `replaceInputs` 时 outputs 与 inputs 不得重叠(否则「删原文件」会删掉产物);
  * - 任一路径不在 `allowedRoots` 之下(空 allowedRoots = 全拒,fail-closed)。
+ *
+ * `allowedRoots` 必须是绝对路径:空串与相对路径一律忽略(不按 cwd 解析,同一配置判定不随 cwd 变),
+ * 全被忽略即全拒。`"/"` 会放行全盘,由构造方(T9a)保证不传。
  */
 export function assertJobInvariants(job: ProcessJob, opts: { allowedRoots: readonly string[] }): void {
   const bad = (why: string): never => {
@@ -158,7 +171,13 @@ export function assertJobInvariants(job: ProcessJob, opts: { allowedRoots: reado
       if (!isVideoFileName(p)) bad(`replaceInputs 只允许视频扩展名(拒 xml/ass/边车): ${p}`);
     }
   }
-  const roots = opts.allowedRoots.filter((r) => r !== "");
+  if (job.replaceInputs && job.outputs) {
+    const ins = new Set(job.inputs.map((p) => resolve(p)));
+    for (const o of job.outputs) {
+      if (ins.has(resolve(o))) bad(`replaceInputs 时 outputs 不得与 inputs 重叠: ${o}`);
+    }
+  }
+  const roots = opts.allowedRoots.filter((r) => isAbsolute(r));
   for (const p of paths) {
     if (!roots.some((r) => isUnderRoot(p, r))) bad(`路径不在 allowedRoots 内: ${p}`);
   }
@@ -176,14 +195,14 @@ export type JobState = "pending" | "running" | "done" | "failed" | "uncertain" |
  * - uncertain → failed:人工 ackUncertain(uncertain 不可直接回 pending/done);
  * - done / cancelled 终态。
  */
-export const PROC_TRANSITIONS: Readonly<Record<JobState, readonly JobState[]>> = {
-  pending: ["running", "cancelled"],
-  running: ["done", "failed", "uncertain", "cancelled", "pending"],
-  failed: ["pending"],
-  uncertain: ["failed"],
-  done: [],
-  cancelled: [],
-};
+export const PROC_TRANSITIONS: Readonly<Record<JobState, readonly JobState[]>> = Object.freeze({
+  pending: Object.freeze(["running", "cancelled"] as const),
+  running: Object.freeze(["done", "failed", "uncertain", "cancelled", "pending"] as const),
+  failed: Object.freeze(["pending"] as const),
+  uncertain: Object.freeze(["failed"] as const),
+  done: Object.freeze([] as const),
+  cancelled: Object.freeze([] as const),
+});
 
 export type TransitionReason =
   | "lease-expired-rerun" // 租约过期 + recover()=rerun
@@ -199,7 +218,13 @@ export interface TransitionContext {
   interruptible?: boolean;
 }
 
-/** 迁移是否合法(边在表内 + 条件满足);缺条件一律 false(fail-closed)。 */
+/**
+ * 迁移是否合法(边在表内 + 条件满足);缺条件一律 false(fail-closed)。
+ *
+ * ⚠️ 本函数**不**执行「biliup 已写 intent → uncertain」:`running → cancelled` 无条件放行。
+ * store 的 `finish(cancelled)` 必须先经 `cancelOutcome(kind, hasIntent)` 判定落点,
+ * 结果为 `uncertain` 时走 running → uncertain(第二期 T15 落地 biliup 时在 store 里强制,plans/036)。
+ */
 export function canTransition(from: JobState, to: JobState, ctx: TransitionContext = {}): boolean {
   if (!PROC_TRANSITIONS[from].includes(to)) return false;
   if (from === "pending" && to === "cancelled") return ctx.neverClaimed === true;
@@ -270,8 +295,27 @@ function decodeJob(raw: unknown, i: number): ProcessJob {
   if (!isRecord(raw.params)) return bad("params 须为对象");
   if (typeof raw.replaceInputs !== "boolean") return bad("replaceInputs 须为布尔");
   if (!isRecord(raw.owner)) return bad("owner 须为对象");
+  const { taskId, streamKey } = raw.owner;
+  if (taskId !== undefined && !Number.isSafeInteger(taskId)) return bad("owner.taskId 须为整数");
+  if (streamKey !== undefined && typeof streamKey !== "string") return bad("owner.streamKey 须为字符串");
   if (typeof raw.createdAt !== "number" || !Number.isFinite(raw.createdAt)) return bad("createdAt 非法");
-  return raw as unknown as ProcessJob;
+  // 白名单重建:未知字段不透传(防被原样序列化进 params/行 JSON)。
+  const job: ProcessJob = {
+    jobId: raw.jobId,
+    kind: raw.kind,
+    logicalKey: raw.logicalKey,
+    generation: raw.generation as number,
+    inputs: raw.inputs,
+    params: raw.params,
+    replaceInputs: raw.replaceInputs,
+    owner: {
+      ...(taskId !== undefined ? { taskId: taskId as number } : {}),
+      ...(streamKey !== undefined ? { streamKey: streamKey as string } : {}),
+    },
+    createdAt: raw.createdAt,
+  };
+  if (raw.outputs !== undefined) job.outputs = raw.outputs;
+  return job;
 }
 
 /** 编码 `EnqueueRequest` 为 base64(`_enqueue` 命令行参数)。 */
@@ -283,12 +327,21 @@ export function encodeEnqueue(req: EnqueueRequest): string {
 export function decodeEnqueue(b64: string): EnqueueRequest {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+    const buf = Buffer.from(b64, "base64");
+    // 往返校验:Buffer 对非法字符/尾部垃圾静默容错,此处拒绝(忽略填充差异)。
+    if (buf.toString("base64").replace(/=+$/, "") !== b64.replace(/=+$/, "")) throw new Error("非法 base64");
+    parsed = JSON.parse(buf.toString("utf8"));
   } catch (e) {
     throw new Error(`[processor] EnqueueRequest 无法解码: ${(e as Error).message}`);
   }
   if (!isRecord(parsed)) throw new Error("[processor] EnqueueRequest 不是对象");
   if (parsed.v !== 1) throw new Error(`[processor] 不支持的 EnqueueRequest 版本: ${String(parsed.v)}`);
   if (!Array.isArray(parsed.jobs)) throw new Error("[processor] EnqueueRequest.jobs 须为数组");
-  return { v: 1, jobs: parsed.jobs.map(decodeJob) };
+  const jobs = parsed.jobs.map(decodeJob);
+  const seen = new Set<string>();
+  for (const j of jobs) {
+    if (seen.has(j.jobId)) throw new Error(`[processor] EnqueueRequest 含重复 jobId: ${j.jobId}`);
+    seen.add(j.jobId);
+  }
+  return { v: 1, jobs };
 }

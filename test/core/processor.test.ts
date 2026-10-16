@@ -74,6 +74,12 @@ describe("jobIdOf / parseJobId", () => {
       expect(parseJobId(bad), bad).toBeNull();
     }
   });
+
+  it("parseJobId 对 generation 超 2^53 返回 null(不丢精度)", () => {
+    expect(parseJobId("remux:k#g9007199254740992")).toBeNull();
+    expect(parseJobId("remux:k#g9007199254740993")).toBeNull();
+    expect(parseJobId(`remux:k#g${Number.MAX_SAFE_INTEGER}`)?.generation).toBe(Number.MAX_SAFE_INTEGER);
+  });
 });
 
 describe("assertJobInvariants", () => {
@@ -103,12 +109,48 @@ describe("assertJobInvariants", () => {
     expect(() => assertJobInvariants(mkJob(), { allowedRoots: [] })).toThrow(/allowedRoots/);
   });
 
+  it("根的父目录 `<root>/..` 被拒(rel === \"..\" 分支)", () => {
+    expect(() => assertJobInvariants(mkJob({ inputs: [`${ROOT}/..`], replaceInputs: false }), allowed)).toThrow(/allowedRoots/);
+  });
+
+  it("空串 / 相对 allowedRoots 被忽略(fail-closed,不按 cwd 解析)", () => {
+    const inCwd = `${process.cwd()}/a_000.ts`;
+    expect(() => assertJobInvariants(mkJob({ inputs: [inCwd] }), { allowedRoots: [""] })).toThrow(/allowedRoots/);
+    expect(() => assertJobInvariants(mkJob({ inputs: [inCwd] }), { allowedRoots: ["."] })).toThrow(/allowedRoots/);
+    expect(() => assertJobInvariants(mkJob({ inputs: [inCwd] }), { allowedRoots: ["test"] })).toThrow(/allowedRoots/);
+    // 空串/相对根混入合法根:合法根照常放行
+    expect(() => assertJobInvariants(mkJob(), { allowedRoots: ["", "rel", ROOT] })).not.toThrow();
+  });
+
+  it("含 NUL 的路径被拒", () => {
+    expect(() => assertJobInvariants(mkJob({ inputs: [`${ROOT}/a\0.ts`] }), allowed)).toThrow(/路径非法/);
+    expect(() => assertJobInvariants(mkJob({ outputs: [`${ROOT}/o\0.mkv`] }), allowed)).toThrow(/路径非法/);
+  });
+
+  it("replaceInputs 时 outputs 与 inputs 重叠被拒;replaceInputs=false 不查", () => {
+    const same = `${ROOT}/x/a_000.ts`;
+    expect(() => assertJobInvariants(mkJob({ outputs: [same] }), allowed)).toThrow(/重叠/);
+    expect(() => assertJobInvariants(mkJob({ outputs: [`${ROOT}/x/../x/a_000.ts`] }), allowed)).toThrow(/重叠/);
+    expect(() => assertJobInvariants(mkJob({ outputs: [same], replaceInputs: false }), allowed)).not.toThrow();
+  });
+
+  // 口径钉死:isUnderRoot 是纯字符串判定、不跟符号链接。真实 realpath 校验属 plans/036 T9a(节点侧),
+  // 落地时把本条改成真用例(<root>/link -> 根外目录,link 下路径必须被拒)。
+  it.todo("符号链接逃逸:<root>/link -> 根外 的路径当前被放行,T9a 节点侧须 realpath 后拒绝");
+
   it("任一路径越界即拒:inputs 合法但 outputs 越界", () => {
     expect(() => assertJobInvariants(mkJob({ outputs: ["/tmp/out.mkv"] }), allowed)).toThrow(/allowedRoots/);
   });
 
   it("多个 allowedRoots:命中任一即可", () => {
     expect(() => assertJobInvariants(mkJob({ inputs: ["/stage/z/a_000.ts"] }), { allowedRoots: [ROOT, "/stage"] })).not.toThrow();
+  });
+
+  it("jobId 的 kind / logicalKey 单独不一致也被拒", () => {
+    const other = jobIdOf("merge", "task1:a_000.ts@1-2", 1);
+    expect(() => assertJobInvariants(mkJob({ jobId: other }), allowed)).toThrow(/不一致/);
+    const otherKey = jobIdOf("remux", "other-key", 1);
+    expect(() => assertJobInvariants(mkJob({ jobId: otherKey }), allowed)).toThrow(/不一致/);
   });
 
   it("jobId 与字段不一致 / 格式非法被拒", () => {
@@ -125,6 +167,13 @@ describe("状态机", () => {
     expect(canTransition("uncertain", "pending", { reason: "requeue" })).toBe(false);
     expect(canTransition("uncertain", "failed")).toBe(false);
     expect(canTransition("uncertain", "failed", { reason: "ack-uncertain" })).toBe(true);
+  });
+
+  it("PROC_TRANSITIONS 运行时冻结(含各行数组),无法被篡改", () => {
+    expect(Object.isFrozen(PROC_TRANSITIONS)).toBe(true);
+    for (const s of ALL) expect(Object.isFrozen(PROC_TRANSITIONS[s]), s).toBe(true);
+    expect(() => (PROC_TRANSITIONS.uncertain as unknown as string[]).push("pending")).toThrow();
+    expect(canTransition("uncertain", "pending", { reason: "requeue" })).toBe(false);
   });
 
   it("done / cancelled 终态:任何迁移都不允许", () => {
@@ -185,6 +234,38 @@ describe("EnqueueRequest 编解码", () => {
     expect(() => decodeEnqueue(enc({ v: 1, jobs: [{ ...mkJob(), generation: 0 }] }))).toThrow(/generation/);
     expect(() => decodeEnqueue(enc({ v: 1, jobs: [{ ...mkJob(), inputs: [1] }] }))).toThrow(/inputs/);
     expect(() => decodeEnqueue(enc({ v: 1, jobs: [{ ...mkJob(), replaceInputs: "yes" }] }))).toThrow(/replaceInputs/);
+  });
+
+  it("拒 owner 非对象 / owner 字段类型非法 / outputs 非字符串数组", () => {
+    const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64");
+    const withJob = (over: object) => enc({ v: 1, jobs: [{ ...mkJob(), ...over }] });
+    expect(() => decodeEnqueue(withJob({ owner: "x" }))).toThrow(/owner/);
+    expect(() => decodeEnqueue(withJob({ owner: null }))).toThrow(/owner/);
+    expect(() => decodeEnqueue(withJob({ owner: { taskId: "1" } }))).toThrow(/owner\.taskId/);
+    expect(() => decodeEnqueue(withJob({ owner: { streamKey: 1 } }))).toThrow(/owner\.streamKey/);
+    expect(() => decodeEnqueue(withJob({ outputs: [1] }))).toThrow(/outputs/);
+    expect(() => decodeEnqueue(withJob({ outputs: "a.mkv" }))).toThrow(/outputs/);
+  });
+
+  it("拒重复 jobId", () => {
+    const j = mkJob();
+    expect(() => decodeEnqueue(encodeEnqueue({ v: 1, jobs: [j, j] }))).toThrow(/重复 jobId/);
+    expect(decodeEnqueue(encodeEnqueue({ v: 1, jobs: [j, mkJob({ generation: 2 })] })).jobs).toHaveLength(2);
+  });
+
+  it("未知字段不透传(白名单重建),owner 只留 taskId/streamKey", () => {
+    const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64");
+    const out = decodeEnqueue(enc({ v: 1, jobs: [{ ...mkJob(), evil: 1, owner: { taskId: 2, streamKey: "k", x: 1 } }] }));
+    expect(out.jobs[0]).not.toHaveProperty("evil");
+    expect(out.jobs[0]!.owner).toEqual({ taskId: 2, streamKey: "k" });
+    expect(out.jobs[0]).not.toHaveProperty("outputs");
+  });
+
+  it("拒非法 base64(尾部垃圾 / 非法字符);合法 base64 去填充仍可解", () => {
+    const good = encodeEnqueue({ v: 1, jobs: [] });
+    expect(() => decodeEnqueue(good + "@@@")).toThrow(/无法解码/);
+    expect(() => decodeEnqueue(good.slice(0, 4) + "!" + good.slice(4))).toThrow(/无法解码/);
+    expect(decodeEnqueue(good.replace(/=+$/, ""))).toEqual({ v: 1, jobs: [] });
   });
 
   it("空 jobs 合法", () => {
