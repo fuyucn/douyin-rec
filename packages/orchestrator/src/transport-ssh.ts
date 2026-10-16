@@ -418,16 +418,26 @@ export class SshTransport implements Transport {
     if (trimmed !== "true" && trimmed !== "false") return false;
     return trimmed === "true";
   }
-  /** 远端:逐个 `test -e`,全在则 echo OK(命令单字符串传,同 listInventory 规避 ssh 打散)。 */
+  /**
+   * Remote `test -e` for every path; `OK` only when all are present (single command string, like
+   * listInventory, to avoid ssh word-splitting).
+   *
+   * Contract: `false` means the node answered `MISSING` — a real verdict. ssh failure / timeout /
+   * unparsable output **throws** rather than returning false, because callers treat false as "the
+   * file is gone" (issue #146: misreading a dropped link as a deletion escalates healthy sessions).
+   * Callers that are safe to fail closed keep their own `.catch(() => false)`.
+   */
   async exists(paths: string[]): Promise<boolean> {
     if (paths.length === 0) return true;
     const test = paths.map((p) => `test -e '${p.replace(/'/g, "'\\''")}'`).join(" && ");
-    try {
-      const out = await this.run([`${test} && echo OK || echo MISSING`]);
-      return out.trim().endsWith("OK");
-    } catch {
-      return false; // ssh 失败 → 当作不可用(选优会剔除;另有 reconciler failed 兜底)
-    }
+    // `this.run` rejects on ssh failure/timeout → propagate. Only the command's own OK/MISSING is a verdict.
+    const out = await this.run([`${test} && echo OK || echo MISSING`]);
+    const trimmed = out.trim();
+    // MISSING wins when both appear (fail closed); a lone `OK` is the only "all present" verdict.
+    if (/\bMISSING\b/.test(trimmed)) return false;
+    if (/\bOK\b/.test(trimmed)) return true;
+    // Unparsable (empty stdout, banner noise, truncated output) → not a verdict.
+    throw new Error(`exists 探测输出无法解析: ${trimmed.slice(-200) || "<空>"}`);
   }
 
   /** 轻量探针:远端 `test -d <dataRoot>`(不扫 recordings),硬超时默认 6s。退出非零/超时 → throw。 */

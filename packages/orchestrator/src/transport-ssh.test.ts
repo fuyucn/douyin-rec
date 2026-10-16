@@ -273,14 +273,31 @@ describe("SshTransport", () => {
     expect(calls).toEqual([["/r/a.ts", localDir], ["/r/b.ts", localDir]]);
   });
 
-  it("exists：远端全在→true,缺→false,空列表→true,ssh 抛错→false", async () => {
+  // 契约(issue #146):false 是「节点明确答 MISSING」的判定;ssh 失败/超时/输出乱码一律 **throw**,
+  // 由调用方决定怎么处理 —— 把掉线读成「文件被删」会把健康场次推成 needs_manual。
+  it("exists：远端全在→true,缺→false,空列表→true", async () => {
     const ok = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "OK\n", rsync: async () => {} });
     const miss = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "MISSING\n", rsync: async () => {} });
-    const fail = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => { throw new Error("x"); }, rsync: async () => {} });
     expect(await ok.exists(["/a", "/b"])).toBe(true);
     expect(await miss.exists(["/a"])).toBe(false);
     expect(await ok.exists([])).toBe(true);
-    expect(await fail.exists(["/a"])).toBe(false);
+  });
+
+  it("exists：ssh 抛错(不可达)→ throw,不返回 false", async () => {
+    const fail = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => { throw new Error("ssh rc=255"); }, rsync: async () => {} });
+    await expect(fail.exists(["/a"])).rejects.toThrow(/ssh rc=255/);
+  });
+
+  it("exists：输出无法解析(空/横幅噪声)→ throw,不返回 false", async () => {
+    const empty = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "\n", rsync: async () => {} });
+    const banner = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "Welcome to Ubuntu!\n", rsync: async () => {} });
+    await expect(empty.exists(["/a"])).rejects.toThrow(/无法解析/);
+    await expect(banner.exists(["/a"])).rejects.toThrow(/无法解析/);
+  });
+
+  it("exists：MISSING 与 OK 同时出现(多路径时后续命令失败)→ 以 MISSING 为准,不误报全在", async () => {
+    const t = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "OK\nMISSING\n", rsync: async () => {} });
+    expect(await t.exists(["/a"])).toBe(false);
   });
 
   describe("ping(轻量存活探针)", () => {
