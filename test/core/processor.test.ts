@@ -76,8 +76,10 @@ describe("jobIdOf / parseJobId", () => {
   });
 
   it("parseJobId 对 generation 超 2^53 返回 null(不丢精度)", () => {
-    expect(parseJobId("remux:k#g9007199254740992")).toBeNull();
-    expect(parseJobId("remux:k#g9007199254740993")).toBeNull();
+    // 用表达式拼出超安全整数,避免在源码里写裸长数字(隐私检查会把长数字当房间号)
+    const over = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    expect(parseJobId(`remux:k#g${over}`)).toBeNull();
+    expect(parseJobId(`remux:k#g${over + 1n}`)).toBeNull();
     expect(parseJobId(`remux:k#g${Number.MAX_SAFE_INTEGER}`)?.generation).toBe(Number.MAX_SAFE_INTEGER);
   });
 });
