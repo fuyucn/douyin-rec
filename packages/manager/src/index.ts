@@ -53,10 +53,9 @@ export interface SessionOpts {
   admitNewBroadcast?: () => AdmitDecision;
 
   /**
-   * Effective timezone recorded into the session sidecar (issue #87). Downstream
-   * (inventory scan / clustering / title derivation) formats the absolute
-   * start/end timestamps with it instead of reverse-parsing the filename with
-   * each process's local timezone. Default: process effective timezone.
+   * Effective timezone recorded into the session sidecar (issue #87), next to the
+   * absolute startMs. Self-describing metadata only: nothing reads it yet (scan uses
+   * startMs directly). Default: process effective timezone.
    */
   timeZone?: string;
 }

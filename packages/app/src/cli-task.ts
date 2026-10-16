@@ -146,8 +146,8 @@ export function buildSessionForTask(
   });
   const session = new RecordingSession(recorder, {
     notifier, danmuEnabled, makeRolling, admitNewBroadcast,
-    // Record the effective timezone into the session sidecar so downstream reads the
-    // absolute start/end instead of reverse-parsing the filename (issue #87).
+    // Record the effective timezone into the session sidecar next to the absolute startMs
+    // (issue #87); self-describing metadata, no reader yet.
     timeZone: effectiveTimezone(store),
   });
   return { session, opts, url: roomToUrl(task.room) };
