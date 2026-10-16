@@ -19,7 +19,8 @@ import { refreshLocalRollingEffective } from "./rolling-effective.js";
 import { resolveNodeOutputFormat } from "./node-remux.js";
 import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
-import { makeNotifier, resolveWebhookToggles } from "@drec/observability";
+import { makeNotifier, resolveWebhookToggles, type HubLabelLookup } from "@drec/observability";
+import { enrichHubEventSafely, makeHubLabelLookup } from "./hub-label-lookup.js";
 import { TaskDaemon, resolveDiskWatermark } from "./daemon.js";
 import { makeManualStartAdmit, currentDiskMinGB } from "./disk-gate.js";
 import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue";
@@ -404,6 +405,12 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // Hub 逻辑由 cli (L5) 通过 hubStarter 回调注入，app (L4) 不直接依赖 @drec/orchestrator，
     // 避免 app→orchestrator→app 的循环依赖（orchestrator 依赖 app 的 UploadOpts 等类型）。
     let stopHub: (() => void) | undefined;
+    // 每次发事件现取(任务/节点可在运行中增删);补全失败退回原事件,不影响 hub 流程。
+    const hubLabelLookup = (): HubLabelLookup => makeHubLabelLookup({
+      tasks: () => store.listTasks(),
+      workers: () => workerStore.listWorkers(rootHubConfig()),
+      liveAnchor: (id) => manager.getAnchorName(id),
+    });
     if (o.hub && hubStarter) {
       void hubStarter.start({
         hubConfigJson: resolveHubConfigJson(o.hubConfig, store),
@@ -414,7 +421,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         dbPath: resolveDbPath(o.db),
         store,
         manager,
-        onEvent: (e) => { events.emit(null, e); },
+        // 发送前补主播名/日期/节点名:hub 事件原本只带房间号与 streamKey,webhook 里看不出是哪个直播间。
+        onEvent: (e) => { events.emit(null, enrichHubEventSafely(e, hubLabelLookup, (m) => serveLog.warn(m))); },
         log: (m) => serveLog.info(m),
         warn: (m) => serveLog.warn(m),
       }).then((stop) => { stopHub = stop; }).catch((err) => {
