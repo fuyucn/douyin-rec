@@ -15,6 +15,12 @@
 
 ## 进行中
 
+- [~] **T-57 时区口径遗留三处（issue [#158](https://github.com/fuyucn/douyin-rec/issues/158)，#155 审查遗留）**
+  — 2026-10-15 认领，分支 `codex/issue-158-tz-followups`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：① 带 `<dataRoot>` 的隐藏命令按该数据根的库读时区；② 库不存在时保留继承的有效 TZ；③ 节点侧管线 spec 缺 `timeZone` 回落进程生效时区。
+  **为什么**：非默认时区节点上「段被删空」兜底日期与文件名对不上；自定义库路径下子进程被覆盖成默认时区；节点侧与边录边传口径不一致。
+  **验收**：三处各有回归用例；全量 test / typecheck / arch:check 通过。
+
 - [~] **T-56 标题/产物名/场次键/默认日期统一按设置时区（issue [#155](https://github.com/fuyucn/douyin-rec/issues/155)）**
   — 2026-10-15 认领，分支 `codex/issue-155-title-tz`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：审计全部生成日期的入口并统一为 `settings.timezone`（缺省北京）：分段文件名、streamKey、会话名还原、

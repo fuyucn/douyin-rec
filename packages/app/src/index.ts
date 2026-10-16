@@ -26,7 +26,7 @@ export { rootConfigDir } from "./paths.js";
 export { resolveDbPath } from "./db.js";
 export { readManagedState, writeManagedState, clearManagedState, MANAGED_STATE_FILE } from "./managed-state.js";
 export type { ManagedState } from "./managed-state.js";
-export { applyTimezone, applyTimezoneFromDb, effectiveTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
+export { applyTimezone, applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
 /** 应用版本号({root package.json version}-{commit6},由 pnpm bundle 注入;非打包环境回落 dev)。 */
 export { APP_VERSION } from "./version.js";
 export { makeNewBroadcastGate, checkNewBroadcastAdmission, volumeFreeBytes, effectiveHubConfig, effectiveHubConfigPath, makeManualStartAdmit } from "./disk-gate.js";

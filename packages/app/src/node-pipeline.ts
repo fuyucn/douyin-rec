@@ -19,7 +19,7 @@ import path from "node:path";
 import {
   linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, isAppendAmbiguous,
   isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, partTitleToFilename, resolveOutputStem, sanitizeStreamKey,
-  stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
+  processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
 } from "@drec/core";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment, unreadableParts } from "@drec/post-process";
 import { appendGroup, countVideoParts, uploadPlain } from "./upload/biliup.js";
@@ -548,7 +548,7 @@ async function produceParts(
  *     (否则 `{HH}-{mm}-{ss}` 会渲染成上传时刻);
  *   - `sessionBase`;缺 → 退回从文件名推。
  */
-function deriveTitles(spec: NodePipelineSpec, log: (m: string) => void): { stem: string; title: string; partTitle?: (i: number, n: number) => string | null } {
+export function deriveTitles(spec: NodePipelineSpec, log: (m: string) => void): { stem: string; title: string; partTitle?: (i: number, n: number) => string | null } {
   const base = spec.sessionBase
     || sessionBaseOfFile(path.basename(spec.tsFiles[0] ?? ""))
     || sanitizeStreamKey(spec.streamKey);
@@ -562,15 +562,17 @@ function deriveTitles(spec: NodePipelineSpec, log: (m: string) => void): { stem:
     log(`⚠️ 无 startMs(master 未下发且文件 mtime 不可用)→ 回落当前时刻;含 {HH}-{mm}-{ss} 的模板会不准`);
   }
   const liveTitle = spec.liveTitle;
+  // 老 master 不下发 timeZone → 取进程生效时区(与边录边传同口径,issue #158);不回落宿主机本地。
+  const timeZone = spec.timeZone ?? processTimeZone();
   const stem = resolveOutputStem({
     template: spec.uploadMeta.titleTemplate,
     sessionBase: base,
     startMs,
-    timeZone: spec.timeZone,
+    timeZone,
     liveTitle,
   });
   const subTpl = (spec.uploadMeta.submissionTitleTemplate ?? "").trim();
-  const ctx = { sessionBase: base, startMs, timeZone: spec.timeZone, liveTitle };
+  const ctx = { sessionBase: base, startMs, timeZone, liveTitle };
   // 稿件标题解析顺序与 master 一致:submissionTitleTemplate → 含 {title} 的 titleTemplate → stem。
   const title = subTpl
     ? formatBiliTitle(subTpl, ctx)

@@ -12,6 +12,7 @@
  * 进程启动时锁定一次——运行期改它,下一次 `new Date().getHours()` 立刻反映新值。
  */
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_TITLE_TIMEZONE, isValidTimeZone, resolveTimeZone } from "@drec/core";
 import { resolveDbPath } from "./db.js";
@@ -53,14 +54,16 @@ export function applyTimezone(store: TaskStore): string {
 /**
  * 独立 CLI 入口(record / merge / burn / upload 等不经 `task serve` 的命令)用:
  * 只读打开数据库取 `settings.timezone`,写进 `process.env.TZ`(与 {@link applyTimezone} 同一口径)。
- * 不走 `TaskStore`(会跑迁移、写库);库不存在 / 没有该设置 → 缺省北京时间;读库失败 → 保留继承的有效 TZ,否则北京;不抛错。
+ * 不走 `TaskStore`(会跑迁移、写库);库存在但没有该设置 → 缺省北京时间;库不存在 / 读库失败 → 保留继承的有效 TZ,否则北京;不抛错(issue #158)。
  * 子进程由 `serve` 拉起时库里的值与继承的 env 一致,这里只是幂等地再设一遍。
  */
 export function applyTimezoneFromDb(dbPath: string = resolveDbPath()): string {
   let configured: string | null = null;
   let readFailed = false;
   try {
-    if (existsSync(dbPath)) {
+    if (!existsSync(dbPath)) {
+      readFailed = true; // 库不存在(如 serve 以自定义 --db 起、子进程找不到库;或 ssh 会话无 env)→ 同样保留继承的有效 TZ
+    } else {
       const db = new DatabaseSync(dbPath, { readOnly: true });
       try {
         const row = db.prepare("SELECT value FROM settings WHERE key = 'timezone'").get() as { value?: string } | undefined;
@@ -72,8 +75,13 @@ export function applyTimezoneFromDb(dbPath: string = resolveDbPath()): string {
   } catch {
     readFailed = true; // 无 settings 表 / 被锁 / 损坏
   }
-  // 读失败时保留已继承的有效 TZ(serve 拉起子进程时 env 已是设置值);库不存在或没设该项 → 缺省北京。
+  // 无库 / 读失败时保留已继承的有效 TZ(serve 拉起子进程时 env 已是设置值);库在但没设该项 → 缺省北京。
   const tz = readFailed && isValidTimeZone(process.env.TZ ?? "") ? process.env.TZ! : resolveTimeZone(configured);
   process.env.TZ = tz;
   return tz;
+}
+
+/** 带 `<dataRoot>` 参数的隐藏命令(`_inventory` 等)读的库:`<dataRoot>/db/douyin-rec.db`(与命令本体同一路径,不看 cwd/env 默认根)。 */
+export function dbPathForDataRoot(dataRoot: string): string {
+  return join(dataRoot, "db", "douyin-rec.db");
 }
