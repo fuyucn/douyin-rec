@@ -2040,6 +2040,76 @@ describe("runPipeline — 边录边传识别短路", () => {
       deps.ledger.close();
     });
 
+    // issue #146:扫描之后、拉取之前边车被清理 → 跳过本轮(不 failed),下一轮重扫再收口。
+    const sidecarGone = (deps: TestDeps) => {
+      (deps.transports.get("node-1")!.exists as Mock).mockImplementation(async (paths: string[]) => !paths.some((p) => p.endsWith(".session.json")));
+    };
+
+    it("issue #146:扫描后边车消失 → 本轮跳过:不 pull、不 failed、不告警;下一轮重扫(边车不再声明)正常收口", async () => {
+      const deps = makeDeps();
+      sidecarGone(deps);
+      pullWrites(deps);
+      const first = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(first.streamKey);
+      const r1 = await runPipeline(first, deps);
+      expect(r1.state).toBe("pending");
+      expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      expect(deps.ledger.get(first.streamKey)?.state).toBe("pending"); // 仍在 RETRYABLE,不卡在 syncing
+      expect(deps.ledger.get(first.streamKey)?.state).not.toBe("failed");
+      expect(deps.notify.mock.calls.some((c) => (c[0] as { kind: string }).kind === "error")).toBe(false);
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      // 下一轮:重扫后本场不再声明边车,分段是原生 .ts → 照常合并上传收口。
+      const second = makeBroadcast([{ workerId: "node-1", rec: makeRec({ sessionBase: B, tsFiles: [`/remote/${B}.ts`], xmlPath: undefined }) }]);
+      const r2 = await runPipeline(second, deps);
+      expect(r2.state).toBe("done");
+      expect(deps.ledger.get(first.streamKey)?.state).toBe("done");
+      deps.ledger.close();
+    });
+
+    it("issue #146:边车消失且分段已是 mkv → 跳过一轮后重扫仍无人认领 → 转人工,不丢段、不删源", async () => {
+      const deps = makeDeps({ cfg: { ...makeDeps().cfg, cleanup: { sourceAfterDone: true, stageSourceAfterMerge: true } } });
+      sidecarGone(deps);
+      pullWrites(deps);
+      const first = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(first.streamKey);
+      expect((await runPipeline(first, deps)).state).toBe("pending");
+      // 重扫:边车已没、mkv 还在 → 沿用 #143 未认领门禁。
+      const second = makeBroadcast([{ workerId: "node-1", rec: recs(false) }]);
+      const r2 = await runPipeline(second, deps);
+      expect(r2.state).toBe("needs_manual");
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      const err = deps.notify.mock.calls.map((c) => c[0] as { kind: string; message?: string }).find((e) => e.kind === "error");
+      expect(err?.message).toContain("未被任何会话认领");
+      deps.ledger.close();
+    });
+
+    it("issue #146:exists 抛错(节点不可达)→ 同样跳过本轮,不 pull、不 failed", async () => {
+      const deps = makeDeps();
+      (deps.transports.get("node-1")!.exists as Mock).mockImplementation(async (paths: string[]) => {
+        if (paths.some((p) => p.endsWith(".session.json"))) throw new Error("ssh down");
+        return true;
+      });
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("issue #146:边车仍在 → 不影响原路径(pull 含边车、正常完成)", async () => {
+      const deps = makeDeps();
+      const seen: { v?: string[] } = {};
+      pullWrites(deps, seen);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("done");
+      expect(seen.v).toContain(`/remote/${A}.session.json`);
+      deps.ledger.close();
+    });
+
     it("旧 bundle 全原生 .ts(无 sessionJsonPath)→ 行为不变,照常完成", async () => {
       const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ sessionBase: B, tsFiles: [`/remote/${B}.ts`], xmlPath: undefined }) }]);
       const deps = makeDeps();

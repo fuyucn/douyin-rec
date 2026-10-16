@@ -61,6 +61,26 @@ export function unclaimedStageSegments(stageSub: string, pulled: readonly string
   return videoOnly([...pulled]).map((f) => path.basename(f)).filter((f) => present.includes(f) && !claimed.has(f));
 }
 
+/**
+ * 拉取前复核(issue #146):成员清单里声明了会话边车、但节点上已不存在的那些路径。
+ * 无 `exists` 能力的 transport 视为信任存在(与成员剔除同口径);`exists` 抛错/不可达 → 同样按缺失处理,
+ * 本轮跳过即可(跳过无代价,比硬拉后记 failed 安全)。
+ */
+export async function lostSidecars(
+  members: readonly { workerId: string; rec: { sessionJsonPath?: string } }[],
+  transports: ReadonlyMap<string, { exists?: (paths: string[]) => Promise<boolean> }>,
+): Promise<string[]> {
+  const lost: string[] = [];
+  for (const m of members) {
+    const sidecar = m.rec.sessionJsonPath;
+    const tp = transports.get(m.workerId);
+    if (!sidecar || !tp?.exists) continue;
+    const ok = await tp.exists([sidecar]).catch(() => false);
+    if (!ok) lost.push(sidecar);
+  }
+  return lost;
+}
+
 const STAGE_VIDEO_RE = new RegExp(`\\.(${VIDEO_EXT_ALT})$`, "i");
 
 /**
@@ -778,6 +798,18 @@ async function runPipelineInner(
       message: `所有节点均断流未录全,最完整=${winner.workerId}(${Math.round(winner.rec.durationSec)}s),已保留全部源,请人工对齐拼接。覆盖度:${JSON.stringify(selection.perNode)}`,
     });
     return { state: "needs_manual" };
+  }
+
+  // 扫描与拉取之间会话边车可能消失(节点侧格式转换 / 清理恰好完成,issue #146)。拉取前复核存在性:
+  // 缺失 → 本轮跳过该场(等下一轮重扫:边车没了就不再声明,按扫描结果分组,不能认领的分段仍由下面的
+  // 「未认领」门禁转人工 → 不丢段、不静默)。必须在转 syncing **之前**返回:syncing 不在 reconciler 的
+  // RETRYABLE 里,转了就卡死;也不记 failed(failed 会计重试次数 + 告警噪音)。
+  const missingSidecars = await lostSidecars(winnerMembers, transports);
+  if (missingSidecars.length > 0) {
+    const names = missingSidecars.map((f) => path.basename(f)).join(", ");
+    console.warn(`[pipeline] ${streamKey} 会话边车扫描后已消失(${names}),本轮跳过,下一轮重扫`);
+    jlog(`会话边车扫描后已消失(${names}) → 本轮跳过该场(不记 failed),下一轮重扫后收口`);
+    return { state: ledger.get(streamKey)?.state ?? "pending" };
   }
 
   // Mark syncing and pull files from winner node into a per-broadcast sub-directory
