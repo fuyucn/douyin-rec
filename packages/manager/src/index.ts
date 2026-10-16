@@ -152,11 +152,12 @@ export class RecordingSession {
   private onLiveAt: number | null = null;
 
   /**
-   * Absolute start of this recording session (epoch ms, issue #87). Frozen on the
-   * first sidecar write and reused on the final overwrite; lets downstream read a
-   * host-timezone-independent timestamp instead of reverse-parsing the filename.
+   * Authoritative session start (epoch ms), keyed by sidecar base (issue #87). One
+   * recording process spans several broadcasts (reconnect / stream-down then up); each
+   * opens a new base and must freeze its OWN start, so a stale value never leaks into
+   * the next broadcast's sidecar. Re-frozen whenever the base changes.
    */
-  private sessionStartMs: number | null = null;
+  private sessionStart: { base: string; ms: number } | null = null;
   /**
    * T14:连续「短命录制」次数(起播确认后 < STABLE_RECORD_MS 就断流)。
    * 达 SHORT_LIVED_ALARM 发一次 error 告警(继续按封顶退避,不放弃重连)。
@@ -234,7 +235,7 @@ export class RecordingSession {
     this.shortLivedCount = 0;
     this.shortLivedAlarmAt = 0;
     this.onLiveAt = null;
-    this.sessionStartMs = null;
+    this.sessionStart = null;
 
     mkdirSync(opts.outDir, { recursive: true });
     await this._startInner();
@@ -535,10 +536,12 @@ export class RecordingSession {
    */
   private _writeSession(base: string, withGaps = false): void {
     const plat = platformForRoom(this.roomUrl);
-    // Freeze the authoritative session start on the first write (issue #87): covers
-    // both the open (withGaps=false) and the final overwrite (withGaps=true) so the
-    // value never drifts to the stop time when a later call re-runs this method.
-    if (this.sessionStartMs === null) this.sessionStartMs = this.onLiveAt ?? Date.now();
+    // Freeze the authoritative session start the first time we write THIS base (issue #87).
+    // Keyed by base: one process covers several broadcasts, each opening a new base, so the
+    // value must never drift to a later broadcast's stop time.
+    if (this.sessionStart === null || this.sessionStart.base !== base) {
+      this.sessionStart = { base, ms: this.onLiveAt ?? Date.now() };
+    }
     const data: Record<string, unknown> = {
       sessionBase: basename(base),
       roomSlug: plat.extractRoomSlug(this.roomUrl),
@@ -546,7 +549,7 @@ export class RecordingSession {
       // Absolute start + effective timezone: consume as truth instead of deriving
       // from file mtime or filename parsing (which reverse-parses in the reader's
       // local timezone and can land on the wrong day across a UTC/Asia boundary).
-      startMs: this.sessionStartMs,
+      startMs: this.sessionStart.ms,
       timeZone: this.timeZone ?? processTimeZone(),
     };
     if (this.liveTitle) data.title = this.liveTitle;
@@ -559,7 +562,6 @@ export class RecordingSession {
     if (withGaps) {
       data.gaps = this.gaps;
       data.totalGapSec = Math.round(this.gaps.reduce((s, g) => s + (g.endMs - g.startMs), 0) / 1000);
-      data.endMs = Date.now();
     }
     writeFileSync(`${base}.session.json`, JSON.stringify(data), "utf-8");
   }

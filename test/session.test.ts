@@ -144,21 +144,55 @@ describe("RecordingSession", () => {
     expect(sj?.title).toBe("开播前已知标题");
   });
 
-  // issue #87:把绝对起止时刻 + 生效时区写进 sidecar,供下游格式化,不再靠文件名/进程时区反解。
-  it("issue #87:会话 sidecar 记录权威 startMs/endMs + 生效时区", async () => {
+  // issue #87:把绝对起录时刻 + 生效时区写进 sidecar,供下游格式化,不再靠文件名/进程时区反解。
+  it("issue #87:会话 sidecar 记录权威 startMs(起录绝对时刻)+ 生效时区", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sess-tz-"));
     const rec = new MockDlrRecorder();
     const sess = new RecordingSession(rec, { timeZone: "Asia/Shanghai" });
     await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "主播X" });
     await sess.stop();
-    const sj = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
-      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")))
-      .find((d) => d.startMs);
-    expect(sj?.timeZone).toBe("Asia/Shanghai");
-    expect(typeof sj?.startMs).toBe("number");
-    expect(sj!.startMs).toBeGreaterThan(0);
-    expect(typeof sj?.endMs).toBe("number");
-    expect(sj!.endMs).toBeGreaterThanOrEqual(sj!.startMs);
+    const files = readdirSync(dir).filter((f) => f.endsWith(".session.json"));
+    expect(files.length).toBeGreaterThanOrEqual(1);
+    // 断言**每一份** sidecar 都带 startMs(不止 `.find` 命中一份)。
+    for (const f of files) {
+      const d = JSON.parse(readFileSync(join(dir, f), "utf-8")) as { startMs?: number; timeZone?: string };
+      expect(typeof d.startMs).toBe("number");
+      expect(d.startMs!).toBeGreaterThan(0);
+      expect(d.timeZone).toBe("Asia/Shanghai");
+    }
+  });
+
+  // issue #87:同一进程跨场时,本场 startMs 必须取**本场** onLive 时刻,不能复用首场(否则无分段场次归错日)。
+  it("issue #87:同进程两场各自 startMs(不复用首场)", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-start-2b-"));
+    let stampSeq = 0;
+    const stamps = ["00-00-01", "01-00-00"];
+    class ReBroadcastRecorder implements Recorder {
+      name = "mock-rebroadcast"; providesDanmu = false;
+      ev!: RecorderEvents;
+      isLive = async () => false;                  // 每次 onOffline 都判「已下播」→ 第二场
+      async start(_u: string, o: RecordOpts, ev: RecorderEvents) {
+        this.ev = ev;
+        ev.onLive({ anchorName: "主播T" });
+        ev.onSegment(join(o.outDir, `主播T_2026-10-09_${stamps[stampSeq++]}_000.ts`));
+      }
+      async stop() {}
+    }
+    const sess = new RecordingSession(new ReBroadcastRecorder(), { reconnectDelaySec: 0.01, timeZone: "Asia/Shanghai" });
+    vi.setSystemTime(1_700_000_000_000);
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "" });
+    await vi.advanceTimersByTimeAsync(1);          // 第一场:onLive @ t0
+    vi.setSystemTime(1_700_003_600_000);            // +1h
+    (sess as unknown as { recorder: ReBroadcastRecorder }).recorder.ev.onOffline();
+    await vi.advanceTimersByTimeAsync(200);         // 下播 → 重连 → 第二场:onLive @ t0+1h 起
+    await sess.stop();
+    const rows = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")) as { sessionBase: string; startMs: number })
+      .sort((a, b) => a.sessionBase.localeCompare(b.sessionBase));
+    expect(rows.length).toBe(2);
+    expect(rows[0]!.startMs).toBe(1_700_000_000_000);
+    expect(rows[1]!.startMs).toBeGreaterThanOrEqual(1_700_003_600_000);  // 修复前会等于首场时刻
   });
 
   // 缺陷:同一录制进程跨场(下播 → 主播重新开播)时,第二场沿用第一场的标题 → 稿件 {title} 张冠李戴。

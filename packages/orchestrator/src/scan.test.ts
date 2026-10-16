@@ -89,6 +89,32 @@ describe("scanRecordings", () => {
     expect(rec.endMs).toBe(probeStart + 10_000);
   });
 
+  it("issue #87:sidecar startMs 非法(0/秒级)→ 回退文件名解析", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播F"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播F_2026-06-27_12-00-00.rolling.json"), JSON.stringify({ bv: FAKE_BV, parts: [] }));
+    writeFileSync(join(dir, "主播F_2026-06-27_12-00-00.session.json"),
+      JSON.stringify({ roomSlug: "555", platform: "douyin", startMs: 0 }));   // 0 → 非法,回落文件名
+
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    const rec = rs.find((r) => r.roomSlug === "555")!;
+    expect(rec.startMs).toBeGreaterThan(1e12);   // 文件名解析(本地时区)而非 0/1970
+  });
+
+  it("issue #87:endMs < startMs → 退回 endMs=startMs(不产生负跨度)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播G"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播G_2026-06-27_12-00.rolling.json"), JSON.stringify({ bv: FAKE_BV, parts: [] }));
+    const start = 1_700_050_000_000;
+    writeFileSync(join(dir, "主播G_2026-06-27_12-00.session.json"),
+      JSON.stringify({ roomSlug: "444", platform: "douyin", startMs: start, endMs: start - 10_000 }));
+
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    const rec = rs.find((r) => r.roomSlug === "444")!;
+    expect(rec.startMs).toBe(start);
+    expect(rec.endMs).toBe(start);
+  });
+
   it("未命中 taskRooms 时 fallback 使用目录名作 roomSlug", async () => {
     const root = mkdtempSync(join(tmpdir(), "scan-"));
     const dir = join(root, "主播A"); mkdirSync(dir);

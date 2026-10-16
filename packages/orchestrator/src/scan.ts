@@ -34,22 +34,22 @@ function countDanmuEntries(xmlPath: string): number {
  */
 function readSession(dir: string, base: string): {
   roomSlug?: string; platform?: string; totalGapSec: number; title?: string;
-  startMs?: number; endMs?: number; timeZone?: string;
+  startMs?: number; endMs?: number;
 } {
   try {
     const d = JSON.parse(readFileSync(join(dir, `${base}.session.json`), "utf-8")) as
       { roomSlug?: string; platform?: string; totalGapSec?: number; gaps?: GapInterval[]; title?: string;
-        startMs?: number; endMs?: number; timeZone?: string };
+        startMs?: number; endMs?: number };
     return {
       roomSlug: d.roomSlug || undefined,
       platform: d.platform || undefined,
       totalGapSec: d.totalGapSec ?? (d.gaps ? totalGapSecOf(d.gaps) : 0),
       title: d.title || undefined,
-      // Authoritative absolute timestamps (issue #87): only accept plausible epochs
-      // so a malformed/zero value falls back to the legacy filename parsing below.
-      startMs: typeof d.startMs === "number" && d.startMs > 0 ? d.startMs : undefined,
+      // Authoritative absolute start (issue #87). Require a millisecond-scale epoch so a
+      // zero / seconds-scale / string / malformed value falls back to the legacy filename
+      // parse below instead of producing a 1970 streamKey.
+      startMs: typeof d.startMs === "number" && d.startMs >= 1e12 ? d.startMs : undefined,
       endMs: typeof d.endMs === "number" && d.endMs > 0 ? d.endMs : undefined,
-      timeZone: typeof d.timeZone === "string" && d.timeZone.trim() ? d.timeZone.trim() : undefined,
     };
   } catch { /* 无 session.json → 回落旧 meta+gaps */ }
   let roomSlug: string | undefined, platform: string | undefined;
@@ -227,7 +227,8 @@ export async function scanRecordings(
       // that still have ts keep the ffprobe result; only this fallback changes.
       if (startMs === Infinity) {
         startMs = sess.startMs ?? startMsFromSessionBase(base);
-        endMs = sess.endMs ?? startMs;
+        // endMs only when it forms a valid span (a stale/negative value would inflate coverage).
+        endMs = sess.endMs !== undefined && sess.endMs >= startMs ? sess.endMs : startMs;
       }
       // 弹幕源 .xml 是**可选**产物:缺失(异常中断/历史录像)时不能把不存在的路径交给 pull
       // (本地 copyFileSync 会 ENOENT、rsync 会 rc≠0,整场后处理直接失败)。
