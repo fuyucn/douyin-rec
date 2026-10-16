@@ -87,6 +87,54 @@
 
 每步独立 issue → 分支 `codex/issue-<N>-<slug>` → PR → review 会话 → `needs-decision` 判定后合。
 
+## 4. UI/UX 审计结论（2026-10-16，opus-5-5 审计 packages/web）
+
+29 条 findings，按优先级归档到本计划的步骤里（审计未改任何代码）：
+
+### 落到 step 2（去噪与状态语义）
+
+- `lib/room-status.ts:57`：`latest-runs` 不返回 error，前端分不出 stage 正常收口与真故障，**所有** `needs_manual` 都算「需处理」。→ 后端补 `phase` 字段，复用队列同一套推导，不在前端另写。
+- `pages/HubPage.tsx:242`：同样的问题，`LatestRunBadge` 把正常收口显示成琥珀色。
+- `pages/QueuePage.tsx:640` 与 `components/HubJobs.tsx:64`：同一状态的严重度颜色不一致（红 vs 琥珀）。→ 抽共享映射：红只给 `failed`，真正待人工用琥珀。
+- `lib/task-status.ts:71`：`waiting`（等开播）设了 `pulse`，空闲房间也在闪。→ 只有 `recording` 闪。
+- `lib/room-status.ts:13`：attention 实际排在第三位，与注释「最需要看的排前面」矛盾。→ 排第一。
+- `pages/RoomsPage.tsx:74`：告警条只显示第一条。→ 显示「N 个房间需要处理」。
+- `pages/TaskList.tsx:166`：「错误」计数把节点不可达也算进去。→ 拆成「错误」与「状态未知」。
+
+### 落到 step 3（/rooms 首页化）
+
+- `App.tsx:38/46` + `layout/TopNav.tsx:17`：`/` 与兜底路由指向 TaskList，最接近「健康总览」的 `/rooms` 反而不在导航里；`/hub/:key` 是同一批房间的另一份列表。→ `/` 改指 RoomsPage，导航只留「房间 / 处理队列 / 设置」，`/hub/:key` 重定向到 `/rooms/:key`。
+- `pages/RoomsPage.tsx` 列定义 + `pages/rooms/shared.tsx:126`：只有裸 `lastBv`，没有时间没有链接，答不了「上次成没成」。→ 新增「上次交付」列（状态 + 相对时间 + 稿件链接），deliver/nodes/schedule 收进展开。
+- 看日志要跨页（`RoomsPage.tsx:213`、`RoomPage.tsx:80` 跳 `/task/:id`；`TaskDetail.tsx:112` 返回固定回 `/`）。→ 日志做成房间页内的 tab/抽屉，返回改 `navigate(-1)`。
+- `modals/AddRoomDialog.tsx:101`：规则写失败后仍弹「已添加」，两条 toast 互相矛盾。→ 规则失败就 return，或合成一条警告。
+- `pages/TaskDetail.tsx:227`：手机上日志在 20 行信息卡下面。→ 窄屏信息卡默认折叠，日志前置。
+
+### 视觉（用户明确反馈过「AI slop 感」「蓝色 border」）
+
+- `index.css:696` `.method-option.is-active`：accent 蓝边 + accent-soft 底，用在 `room-form/UploadSection.tsx:48`。→ 与 `.rm-pick.is-on`（ink 色边、无底色）统一，全应用只留一种选中样式。
+- `.chip-accent`（`index.css:916`）用在 `RoomDetail.tsx:343`、`room-form/FlowSummary.tsx:13`，`QueuePage.tsx:166` 还有内联 accent-soft。→ 普通 chip 改中性色，蓝只留主按钮与品牌标。
+- 图标混用 emoji：`QueuePage.tsx:309` ⏳、`TaskDetail.tsx:213/344` ⚠。→ 换 lucide `Hourglass` / `AlertTriangle`。
+- 装饰性元素：`layout/Footer.tsx:20` 标语带「/ 2026」；`HubPage.tsx:162` 只显示数量的指标卡。→ 删标语；指标卡改成健康指标（失败数、待处理数、节点离线数）或删除。
+
+### 移动端
+
+- 触控目标过小：`QueuePage.tsx:254` 搜索框 h-7、`:370/:509` 图标按钮 28px、`.rm-pick` 30px。→ `@media (pointer: coarse)` 提到 40px。
+- `TopNav.tsx:120`：手机导航单独占第二行。→ 导航缩到三项后同行，或改底部 tab。
+
+### 文案与 i18n
+
+- 硬编码英文：`TopNav.tsx` 的 "Hub"、`TaskList.tsx:266` 的 "ID"。
+- 术语混用：master/worker/Hub/remux 中英混用。→ 定术语表（主控 / 节点 / 编排 / 转封装）后一次性替换。
+- `i18n.tsx:143`「统一房间（实验页，旧页仍可用）」与 `:209`「房间」并存；`:99` 副标题外露「每 2 秒自动刷新」。→ 删实验页那套与刷新说明。
+- `QueuePage.tsx:280` 直接显示 `douyin`/`bilibili` 原始 id。→ 走平台名映射。
+- `RoomPage` 遥测卡仅远端录制时「已录」显示「—」。→ 显示「节点录制中」+ 节点数量。
+
+### 审计未覆盖
+
+`SettingsDialog`、`HubRuleDialog`、`CreateEditTaskDialog`，以及 `room-form/*` 大部分子组件。
+已知结构性风险：同一份房间配置有 RoomEditor / HubRuleDialog / CreateEditTaskDialog 三个入口，布局各不相同。
+→ 首页切换完成后只保留 `RoomEditor`，另两个只读或删除（并入 step 3 一起决策）。
+
 ## Global Constraints
 
 - 配置文件仍是唯一真理源，UI 不缓存规则（沿用现状）。
