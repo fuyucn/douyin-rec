@@ -16,6 +16,8 @@ export default defineConfig({
       "@drec/rolling-policy": fileURLToPath(new URL("../core/src/rolling-policy.ts", import.meta.url)),
       // 输出格式注册表(纯数据/纯函数):下拉选项、投稿锁定、缺省都与后端同源(issue #137)
       "@drec/output-format": fileURLToPath(new URL("../core/src/output-format.ts", import.meta.url)),
+      // Hub job state names (pure constants): room status uses the same terminal set as the ledger
+      "@drec/hub-ledger-contract": fileURLToPath(new URL("../core/src/hub-ledger-contract.ts", import.meta.url)),
     },
   },
   build: {

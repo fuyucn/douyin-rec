@@ -1,0 +1,73 @@
+import { describe, it, expect } from "vitest";
+import { latestRunKey, roomStatus, sortByStatus, type LatestRun } from "../../packages/web/src/lib/room-status.js";
+import type { RoomDTO, Task } from "../../packages/web/src/api/client.js";
+
+type Room = Pick<RoomDTO, "processing" | "recording">;
+const room = (procEnabled: boolean | null = true): Room =>
+  ({ recording: null, processing: procEnabled === null ? null : ({ enabled: procEnabled } as RoomDTO["processing"]) });
+const task = (p: Partial<Task> = {}): Task =>
+  ({ id: 1, enabled: true, status: "stopped", running: false, recording: false, recordingWorkers: [], ...p }) as Task;
+const run = (state: string): LatestRun => ({ state, bv: null, updatedAt: 1 });
+const w = (state: "recording" | "not_recording" | "unavailable") => ({ workerId: "n1", workerName: "n1", state, checkedAt: 1 });
+
+describe("latestRunKey", () => {
+  it("uses the colon form latest-runs groups by (not the dot room key)", () => {
+    expect(latestRunKey({ platform: "douyin", roomSlug: "123" })).toBe("douyin:123");
+  });
+});
+
+describe("roomStatus", () => {
+  it("live recording wins over an in-flight run of the previous session", () => {
+    expect(roomStatus(room(), task({ running: true, recording: true }), run("merging")).kind).toBe("recording");
+    expect(roomStatus(room(), task({ recordingWorkers: [w("recording")] }), run("uploading")).kind).toBe("recording");
+  });
+
+  it("draining / stopping still count as recording (stream still being written)", () => {
+    expect(roomStatus(room(), task({ status: "draining", running: true, recording: true }), null).kind).toBe("recording");
+    expect(roomStatus(room(), task({ stopping: true, running: true }), null).kind).toBe("recording");
+  });
+
+  it("recording faults surface as attention even while a run is processing", () => {
+    expect(roomStatus(room(), task({ recordingWorkers: [w("unavailable")] }), run("merging")).kind).toBe("attention");
+    expect(roomStatus(room(), task({ status: "error" }), null).kind).toBe("attention");
+  });
+
+  it("every non-terminal run state is processing (incl. retrying)", () => {
+    for (const s of ["pending", "settling", "syncing", "merging", "uploading", "retrying"]) {
+      expect(roomStatus(room(), task(), run(s)).kind).toBe("processing");
+    }
+  });
+
+  it("failed / needs_manual latest run → attention; done → waiting", () => {
+    expect(roomStatus(room(), task(), run("failed")).kind).toBe("attention");
+    expect(roomStatus(room(), task(), run("needs_manual")).kind).toBe("attention");
+    expect(roomStatus(room(), task(), run("done")).kind).toBe("waiting");
+  });
+
+  it("a disabled task keeps showing its in-flight run (processing is independent of the switch)", () => {
+    expect(roomStatus(room(), task({ enabled: false }), run("merging")).kind).toBe("processing");
+  });
+
+  it("a switched-off room with a stale failed run is paused, not attention", () => {
+    expect(roomStatus(room(), task({ enabled: false }), run("needs_manual")).kind).toBe("paused");
+    expect(roomStatus(room(false), task(), run("failed")).kind).toBe("paused");
+  });
+
+  it("paused: rule disabled, task disabled, or no task at all", () => {
+    expect(roomStatus(room(false), task(), run("done")).kind).toBe("paused");
+    expect(roomStatus(room(), task({ enabled: false }), null).kind).toBe("paused");
+    expect(roomStatus(room(null), undefined, null).kind).toBe("paused");
+  });
+
+  it("enabled and idle (no rule yet) → waiting", () => {
+    expect(roomStatus(room(null), task({ running: true, recording: false }), null).kind).toBe("waiting");
+  });
+});
+
+describe("sortByStatus", () => {
+  it("orders recording > processing > attention > waiting > paused, stable within a kind", () => {
+    const kinds = ["paused", "waiting", "recording", "attention", "waiting2", "processing"];
+    const statusOf = (k: string) => ({ kind: k.replace(/\d$/, "") as never, phase: null, run: null });
+    expect(sortByStatus(kinds, statusOf)).toEqual(["recording", "processing", "attention", "waiting", "waiting2", "paused"]);
+  });
+});

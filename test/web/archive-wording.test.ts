@@ -46,8 +46,8 @@ describe("界面用词:stage → 存档", () => {
   });
 });
 
-describe("房间面板与 Hub 规则弹窗共用同一份清理映射", () => {
-  for (const file of ["modals/RoomEditPanel.tsx", "modals/HubRuleDialog.tsx"]) {
+describe("房间编辑表单与 Hub 规则弹窗共用同一份清理映射", () => {
+  for (const file of ["lib/room-editor-form.ts", "modals/HubRuleDialog.tsx"]) {
     it(`${file}:读入走 keepArchiveFromStored,写回走 storedFromForm,无第二套`, () => {
       const src = read(file);
       expect(src).toContain("keepArchiveFromStored(");

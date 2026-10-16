@@ -9,7 +9,7 @@
 
     "moduleResolution": "bundler",
     "baseUrl": ".",
-    "paths": { "@drec/contracts": ["../core/src/api-types.ts"], "@drec/experimental": ["../core/src/experimental.ts"], "@drec/rolling-policy": ["../core/src/rolling-policy.ts"], "@drec/output-format": ["../core/src/output-format.ts"] },
+    "paths": { "@drec/contracts": ["../core/src/api-types.ts"], "@drec/experimental": ["../core/src/experimental.ts"], "@drec/rolling-policy": ["../core/src/rolling-policy.ts"], "@drec/output-format": ["../core/src/output-format.ts"], "@drec/hub-ledger-contract": ["../core/src/hub-ledger-contract.ts"] },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",

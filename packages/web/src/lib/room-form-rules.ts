@@ -2,7 +2,7 @@
  * room-form-rules.ts — 房间 / Hub 规则 / 任务表单的**字段依赖唯一推导**(Pure,可直测)。
  *
  * 为什么单独抽:「边录边传和烧录互斥」「节点侧上传只在上传时有效」这类依赖原本在
- * RoomEditPanel 与 HubRuleDialog 里各写一份,改一处漏一处。表单只渲染这里的结果。
+ * 房间编辑弹窗(RoomEditor)与 HubRuleDialog 里各写一份,改一处漏一处。表单只渲染这里的结果。
  * 边录边传是否可用直接调 core 的 `resolveRollingPolicy`,与 master 下发同一判定。
  */
 import { resolveRollingPolicy, type RollingReason } from "@drec/rolling-policy";
