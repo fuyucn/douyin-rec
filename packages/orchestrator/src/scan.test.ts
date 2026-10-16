@@ -44,6 +44,66 @@ describe("scanRecordings", () => {
     if (noTs) expect(noTs.totalBytes).toBeUndefined();
   });
 
+  it("issue #87:无 ts 的会话优先用 sidecar 的绝对起止时间戳(不靠文件名反解)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播C"); mkdirSync(dir);
+    // 段已被边录边传删空 → 只剩 rolling(bv) + session 边车。
+    writeFileSync(join(dir, "主播C_2026-06-27_12-00.rolling.json"), JSON.stringify({ bv: FAKE_BV, parts: [] }));
+    const sidecarStart = 1_700_050_000_000;
+    // 文件名墙钟(12:00)故意与 sidecar 的绝对 epoch 不一致,断言取的是 sidecar 值。
+    writeFileSync(join(dir, "主播C_2026-06-27_12-00.session.json"),
+      JSON.stringify({ roomSlug: "888", platform: "douyin", startMs: sidecarStart, timeZone: "Asia/Shanghai" }));
+
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    const rec = rs.find((r) => r.tsFiles.length === 0 && r.roomSlug === "888")!;
+    expect(rec.startMs).toBe(sidecarStart);
+    expect(rec.endMs).toBe(sidecarStart);   // 无分段 → 零跨度(不读 sidecar endMs)
+  });
+
+  it("issue #87:老 sidecar 无时间戳字段 → 回退文件名解析(向后兼容)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播D"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播D_2026-06-27_12-00-00.rolling.json"), JSON.stringify({ bv: FAKE_BV, parts: [] }));
+    // 老格式:只有身份,无 startMs/endMs/timeZone。
+    writeFileSync(join(dir, "主播D_2026-06-27_12-00-00.session.json"),
+      JSON.stringify({ roomSlug: "777", platform: "douyin" }));
+
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    const rec = rs.find((r) => r.roomSlug === "777")!;
+    expect(rec.startMs).toBeGreaterThan(0);
+    expect(rec.endMs).toBe(rec.startMs);
+  });
+
+  it("issue #87:有 ts 的会话仍用 ffprobe 的起止时间(sidecar 不覆盖,零回归)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播E"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播E_2026-06-27_12-00-00_000.ts"), "x");
+    writeFileSync(join(dir, "主播E_2026-06-27_12-00-00.session.json"),
+      JSON.stringify({ roomSlug: "666", platform: "douyin", startMs: 1_600_000_000_000, endMs: 1_600_000_600_000, timeZone: "Asia/Shanghai" }));
+
+    const probeStart = 1_700_000_000_000;
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 10, startMs: probeStart, endMs: probeStart + 10_000 }));
+    const rec = rs.find((r) => r.roomSlug === "666")!;
+    expect(rec.startMs).toBe(probeStart);
+    expect(rec.endMs).toBe(probeStart + 10_000);
+  });
+
+  it("issue #87:sidecar startMs 非法(0/秒级/字符串)→ 回退文件名解析", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const bad: Array<[string, unknown]> = [["555", 0], ["556", 1_700_000_000], ["557", "x"]];
+    for (const [slug, v] of bad) {
+      const dir = join(root, slug); mkdirSync(dir);
+      writeFileSync(join(dir, `${slug}_2026-06-27_12-00-00.rolling.json`), JSON.stringify({ bv: FAKE_BV, parts: [] }));
+      writeFileSync(join(dir, `${slug}_2026-06-27_12-00-00.session.json`),
+        JSON.stringify({ roomSlug: slug, platform: "douyin", startMs: v }));
+    }
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    for (const [slug] of bad) {
+      const rec = rs.find((r) => r.roomSlug === slug)!;
+      expect(rec.startMs).toBeGreaterThan(1e12);   // 文件名解析(本地时区)而非坏值
+    }
+  });
+
   it("未命中 taskRooms 时 fallback 使用目录名作 roomSlug", async () => {
     const root = mkdtempSync(join(tmpdir(), "scan-"));
     const dir = join(root, "主播A"); mkdirSync(dir);
