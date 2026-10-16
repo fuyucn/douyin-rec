@@ -13,7 +13,7 @@ import { createLogger, freeBytesOf, freeGBOf } from "@drec/core";
 import { TaskStore, resolveTaskWebhook } from "./store.js";
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
-import { drecRoot, ensureHubConfigExample, ensureNodeIdentity, rootConfigDir, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
+import { drecRoot, procQueueDbPath, ensureHubConfigExample, ensureNodeIdentity, rootConfigDir, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
 import { refreshLocalRollingEffective } from "./rolling-effective.js";
 import { resolveNodeOutputFormat } from "./node-remux.js";
@@ -21,7 +21,8 @@ import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
 import { makeNotifier, resolveWebhookToggles } from "@drec/observability";
 import { TaskDaemon, resolveDiskWatermark } from "./daemon.js";
-import { makeManualStartAdmit } from "./disk-gate.js";
+import { makeManualStartAdmit, currentDiskMinGB } from "./disk-gate.js";
+import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue";
 import { TaskManager } from "./task-manager.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
@@ -202,7 +203,39 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         delete process.env.DOUYIN_REC_HUB_CONFIG_JSON;
       }
     }
+    // 处理任务表 + 租约执行循环(plans/036 T3)。无注册处理器时空转;库打不开只告警、不拖垮 serve
+    // (`/api/proc/*` 回 503)。serve 遇他人(record 子进程)持有租约 → 置 handover 请求,不抢正在跑的 job。
+    let procStore: ProcQueueStore | null = null;
+    let procRunner: ProcRunner | null = null;
+    try {
+      procStore = new ProcQueueStore(procQueueDbPath(), { log: (m) => serveLog.warn(m) });
+      const numSetting = (key: string): number | undefined => {
+        const n = Number(store.getSetting(key));
+        return Number.isFinite(n) && n > 0 ? n : undefined;
+      };
+      procRunner = new ProcRunner({
+        store: procStore,
+        owner: `serve:${process.pid}:${Date.now()}`,
+        requestHandover: true,
+        diskMinGB: () => currentDiskMinGB((m) => serveLog.warn(m)),
+        alert: (taskId, message) => events.emit(taskId ?? null, { kind: "error", stage: "后处理", message }),
+        log: (m) => serveLog.info(m),
+        // 节点 settings `procLimits.<lane>`(默认 1,如 remux 的 copy 通道)与 `procShutdownWaitMs`(默认 15min)。
+        limiter: new SimpleSlotLimiter((_resource, lane) => numSetting(`procLimits.${lane}`) ?? 1),
+        shutdownWaitMs: numSetting("procShutdownWaitMs"),
+      });
+      procRunner.start();
+    } catch (e) {
+      serveLog.error("[proc] 处理任务表启动失败(后处理任务不可用,录制不受影响):", e);
+      procStore?.close();
+      procStore = null;
+      procRunner = null;
+    }
+    const procRunnerRef = procRunner;
+    const procStoreRef = procStore;
     const server = createWebServer({
+      procActive: procRunnerRef ? () => procRunnerRef.active() : undefined,
+      procPurge: procStoreRef ? (o) => ({ deleted: procStoreRef.gc({ purgeFailed: o.purgeFailed }) }) : undefined,
       store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(),
       // T15:告诉 API「master 实际在用哪份 hub 配置」—— UI 改 resources 必须写回那一份,
       // 而不是盲目写 rootHubConfig()(用户用 --hub-config / settings 时那是另一份文件)。
@@ -395,6 +428,10 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     const shutdown = (sig: string): void => {
       if (stopping) return;
       stopping = true;
+      // 首步:停 runner(停认领 → 可中断 job 回 pending → 删租约),与 daemon 停止并行、都等完再关 http。
+      const stopRunner = (procRunnerRef ? procRunnerRef.stop() : Promise.resolve()).catch((err: unknown) => {
+        serveLog.error("[proc] runner 停止出错:", err);
+      });
       clearInterval(recWatch);
       clearInterval(diskWatch);
       clearInterval(cookieWatch);
@@ -405,14 +442,16 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       // Stop scheduler ticks first (so it won't re-start a task), then stop
       // every running recorder, then close the http server.
       const stopDaemon = daemon ? daemon.stop() : manager.stopAll();
-      void Promise.resolve(stopDaemon)
+      void Promise.all([Promise.resolve(stopDaemon), stopRunner])
         .then(() => new Promise<void>((r) => server.close(() => r())))
         .then(() => {
+          procStoreRef?.close();
           store.close();
           serveLog.info("已关闭");
           process.exit(0);
         })
         .catch((err: unknown) => {
+          procStoreRef?.close();
           store.close();
           serveLog.error("关闭时出错:", err);
           process.exit(1);

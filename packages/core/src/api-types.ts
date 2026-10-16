@@ -326,6 +326,8 @@ export interface NodeStatus {
   /** 节点任务总数 / 其中 hub 受管数。 */
   taskCount: number;
   managedCount: number;
+  /** 处理任务表活动快照(plans/036 T3;旧 bundle 无此字段 → 旧 master 忽略 / 新 master 视为未知)。 */
+  procActive?: ProcActiveDTO;
 }
 
 export interface WorkerStatus {
@@ -1021,3 +1023,16 @@ export interface EventsDTO {
 
 // hub 台账契约的状态/步骤名(web 端只通过 @drec/contracts 拿类型;运行时常量在 hub-ledger-contract)
 export type { HubJobState, HubStepName } from "./hub-ledger-contract.js";
+
+/**
+ * 节点处理任务表活动快照(plans/036 §2.3):`GET /api/proc/active` 与 `_node-status.procActive` 同结构。
+ * 键 = processor kind。部署 guard 第二期据 `running.biliup > 0` 判断(T15)。
+ */
+export interface ProcActiveDTO {
+  /** 本进程的 ProcRunner 是否在运行(`_node-status` 由独立 CLI 进程读表,恒为 false)。 */
+  host: boolean;
+  running: Record<string, number>;
+  pending: Record<string, number>;
+  /** 该 kind 是否有存活的租约持有者。 */
+  leaseAlive: Record<string, boolean>;
+}

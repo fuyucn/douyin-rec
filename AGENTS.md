@@ -186,6 +186,16 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
 - 弹幕（独立 provider）：`connectDanmu` 在平台 core 内实现，经 `resolveLiveId`→`resolveDouyinLiveId`
   拿本场 liveId 连 WS，`XmlDanmuWriter` 写 biliLive 格式 `.xml`。
 
+### 处理任务表（@drec/proc-queue，plans/036 T3）
+- 每节点持久任务表 `<root>/db/proc-queue.db`（`node:sqlite` WAL）：`ProcQueueStore`（幂等迁移 / enqueue / `BEGIN IMMEDIATE` claim /
+  租约 / finish）+ `ProcRunner`（租约心跳 / fencing / 限额 / 磁盘准入 / 接管 recover / `stop()`）。首次切 WAL 带退避重试，
+  多进程并发首开安全（真多进程测试 `test/proc-queue/store-multiproc.test.ts`）。`tick()` 永不抛；fence 后同一持有者重获租约时，
+  被 abort 的行按孤儿经 `recover()` 处理，不停在 running。已认领过的 pending 行被取消 → 下次 claim 直接落 `cancelled`。
+- 接口：`GET /api/proc/active`（`ProcActiveDTO`：`host` / `running` / `pending` / `leaseAlive` 按 kind；runner 未起 → 503）；
+  `POST /api/proc/purge {purgeFailed:true}` 人工清 failed；隐藏命令 `_proc-gc <dataRoot> [--purge-failed]`；
+  `_node-status` 附 `procActive`。**部署 guard 补充**：`running.biliup > 0` 同样视为在忙（第二期上传落地后生效，见 plans/036 §2.3）。
+- 保留：done/cancelled 7 天 GC（runner 每小时）；failed/uncertain 不自动删，uncertain 须先 `ackUncertain` 再 purge。
+
 ### 录制会话（RecordingSession，@drec/manager）
 - 弹幕归属：录制器 video-only → 总是用独立 DanmuSource + XmlDanmuWriter 落盘。
 - **弹幕在 `onLive` 才启动**（不是会话开始）：`danmuStarted` 守卫每个 `_startInner` 只连一次。**根因**：

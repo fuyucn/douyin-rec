@@ -118,6 +118,13 @@ export function checkNewBroadcastAdmission(o: NewBroadcastGateOpts): AdmitDecisi
   };
 }
 
+/** 现读当前生效 hub 配置的磁盘水位(GB;0 = 关闭)。与 daemon / 录制子进程同源;供处理任务表准入。 */
+export function currentDiskMinGB(warn?: (msg: string) => void): number {
+  const eff = effectiveHubConfig();
+  const raw = eff.json !== undefined ? eff.json : defaultReadConfig(eff.path);
+  return resolveDiskWatermark(raw, warn).bytes / 1e9;
+}
+
 /** 构造闸门函数(每次调用现读配置与剩余空间)。 */
 export function makeNewBroadcastGate(o: NewBroadcastGateOpts): () => AdmitDecision {
   return () => checkNewBroadcastAdmission(o);

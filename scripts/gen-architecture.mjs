@@ -126,7 +126,7 @@ function textOn(rgb) {
 }
 
 const RANK_LABEL = {
-  0: "L0 · 基础叶子", 0.5: "L0.5 · 可观测性", 1: "L1 · 引擎轴(共享)",
+  0: "L0 · 基础叶子", 0.3: "L0.3 · 处理任务队列", 0.5: "L0.5 · 可观测性", 1: "L1 · 引擎轴(共享)",
   1.5: "L1.5 · 平台轴(可插拔)", 3: "L3 · 会话编排", 4: "L4 · 有状态应用",
   4.5: "L4.5 · 多节点 hub", 5: "L5 · 入口",
 };
@@ -136,7 +136,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 
 // ── 语义角色 → 颜色(Archify 风格:深色底 + 语义色) ──────────────────────────────
 const SEMANTIC = {
-  "@drec/core": "core", "@drec/observability": "core", "@drec/post-process": "core",
+  "@drec/core": "core", "@drec/observability": "core", "@drec/post-process": "core", "@drec/proc-queue": "core",
   "@drec/tui": "core", "@drec/ffmpeg-recorder-extra": "core",
   "@drec/record-engine": "engine",
   "@drec/douyin-live": "platform", "@drec/bilibili-live": "platform", "@drec/kuaishou-live": "platform",
@@ -307,6 +307,7 @@ const PKG_BLURB = {
   "@drec/core": "Platform / DownloadEngine 契约<br/>+ 注册表 + types/config/notify/api-types",
   "@drec/observability": "Notifier / EventCenter / 日志",
   "@drec/post-process": "concat / burn / ass / merge / ffmpeg / fonts",
+  "@drec/proc-queue": "ProcQueueStore 持久任务表(sqlite)<br/>ProcRunner 租约 / 心跳 / fencing / 关停",
   "@drec/tui": "Ink 终端控制台 (独立 bundle)",
   "@drec/ffmpeg-recorder-extra": "logStreamMeta + detectDevice",
   "@drec/record-engine": "通用 PollingRecorder<br/>下载引擎: ffmpeg(.ts) / mesio(.flv)",
@@ -319,7 +320,7 @@ const PKG_BLURB = {
   "@drec/cli": "record / merge / burn / probe + task 命令组<br/>providers-register: 注册平台 + 引擎",
 };
 const NODE_ID = {
-  "@drec/core": "core", "@drec/observability": "observ", "@drec/post-process": "post",
+  "@drec/core": "core", "@drec/observability": "observ", "@drec/post-process": "post", "@drec/proc-queue": "procq",
   "@drec/tui": "tui", "@drec/ffmpeg-recorder-extra": "extra", "@drec/record-engine": "engine",
   "@drec/douyin-live": "douyin", "@drec/bilibili-live": "bilibili", "@drec/kuaishou-live": "kuaishou",
   "@drec/manager": "manager", "@drec/app": "app", "@drec/orchestrator": "orch", "@drec/cli": "cli",

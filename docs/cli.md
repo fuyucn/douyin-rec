@@ -320,6 +320,9 @@ node dist/douyin-rec.mjs task serve --port 7860 --hub           # master：Web +
 | `_is-done <dataRoot> <roomSlug>` | 判断该房间是否仍在录（有媒体下载子进程 = 未收播） |
 | `_disk <dataRoot>` | 输出数据根剩余空间 GB（master 磁盘看门狗） |
 | `_recording-status <dataRoot>` | 输出当前正在录制的房间 `[{ platform, roomSlug }]`，供主控控制台显示远端录制状态 |
+| `_proc-gc <dataRoot> [--purge-failed]` | 清理处理任务表（`db/proc-queue.db`）：done/cancelled 超 7 天删；加 `--purge-failed` 额外删 failed；**uncertain 永不删**（须先人工确认转 failed）。库不存在 → `{"deleted":0}` 且不建文件 |
+
+`_node-status` 附可选字段 `procActive`（处理任务表快照，旧 master 忽略；只读连接，不跑迁移）。
 
 `_recording-status` 需要较新的 worker bundle；旧 bundle 会自动回退到 `_tasks` + `_is-done` 查询（结果一致，多几次 SSH）。
 
