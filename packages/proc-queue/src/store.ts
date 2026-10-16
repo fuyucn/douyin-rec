@@ -506,14 +506,17 @@ export class ProcQueueStore {
   /**
    * 接管后处置前任遗留的 running 行(`recover()` 的结果落库)。调用方须已持有该 kind 的有效租约。
    * rerun → pending(`attempts` 保持:那次尝试已发生);done → done;uncertain → uncertain(不自动重跑)。
+   * `info.attempts` 给出时为代际 CAS:与当前行不一致则不写、返回 false。
    */
   settleOrphan(
     jobId: string, newOwner: string, outcome: "rerun" | "done" | "uncertain",
-    info: { error?: string; allowSelf?: boolean } = {},
+    info: { error?: string; allowSelf?: boolean; attempts?: number } = {},
   ): boolean {
     return this.tx(() => {
       const row = this.get(jobId);
       if (!row || row.state !== "running") return false;
+      // 代际 CAS(D1):传入快照行的 attempts,已被重新认领(attempts 变了)的新一轮不得被旧快照的处置打回/收尾。
+      if (info.attempts !== undefined && row.attempts !== info.attempts) return false;
       // 本持有者名下的行默认拒绝(可能正在跑);仅 runner 确认「已被 fence、不在执行」时 allowSelf(F2)。
       if (row.claimedBy === newOwner && !info.allowSelf) return false;
       if (!this.leaseValid(row.kind, newOwner)) return false;

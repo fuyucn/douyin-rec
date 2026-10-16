@@ -444,6 +444,23 @@ describe("取消", () => {
   });
 });
 
+describe("settleOrphan 代际 CAS(D1)", () => {
+  it("attempts 与快照不一致(已被重新认领)→ 拒写;一致 → 写", () => {
+    const s = env.open();
+    const id = s.enqueue(env.job("a.ts"), roots()).jobId;
+    s.acquireLease("fake", "A");
+    s.claim({ kinds: ["fake"], owner: "A" });
+    const snap = s.get(id)!;
+    expect(snap.attempts).toBe(1);
+    expect(s.settleOrphan(id, "A", "rerun", { allowSelf: true, attempts: snap.attempts })).toBe(true);
+    s.claim({ kinds: ["fake"], owner: "A" }); // 第 2 轮已被重新认领
+    expect(s.get(id)?.attempts).toBe(2);
+    expect(s.settleOrphan(id, "A", "rerun", { allowSelf: true, attempts: snap.attempts })).toBe(false);
+    expect(s.get(id)?.state).toBe("running");
+    expect(s.settleOrphan(id, "A", "rerun", { allowSelf: true, attempts: 2 })).toBe(true);
+  });
+});
+
 describe("settleOrphan(接管后处置)", () => {
   it("rerun → pending(attempts 保持);done;uncertain;未持租约 / 自己的行拒绝", () => {
     const s = env.open();

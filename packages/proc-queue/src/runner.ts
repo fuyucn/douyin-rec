@@ -103,6 +103,8 @@ export class ProcRunner {
   private readonly yielding = new Set<string>();
   private readonly inflight = new Map<string, Inflight>();
   private readonly diskAlerted = new Set<string>();
+  /** 正在做孤儿处置(recover + settleOrphan)的 jobId:同一行同一时刻只允许一份处置(D1)。 */
+  private readonly settling = new Set<string>();
   private readonly hbFails = new Map<string, number>();
   private timers: NodeJS.Timeout[] = [];
   private started = false;
@@ -384,6 +386,17 @@ export class ProcRunner {
 
   /** 对一行孤儿:`recover()` 判定 → settleOrphan 落点 + 告警。返回 false = recover 期间失租(调用方应停止)。 */
   private async settleOrphanRow(p: Processor, row: ProcJobRecord, allowSelf: boolean): Promise<boolean> {
+    // D1:按行占位,settleFenced 与 recoverKind 不得并发处置同一行(recover 只调一次)。已占 → 跳过并继续后续行。
+    if (this.settling.has(row.jobId)) return true;
+    this.settling.add(row.jobId);
+    try {
+      return await this.settleOrphanRowInner(p, row, allowSelf);
+    } finally {
+      this.settling.delete(row.jobId);
+    }
+  }
+
+  private async settleOrphanRowInner(p: Processor, row: ProcJobRecord, allowSelf: boolean): Promise<boolean> {
     const { store, owner } = this.o;
     let outcome: "rerun" | "done" | "uncertain" = "uncertain";
     let why = "该处理器未实现 recover";
@@ -396,7 +409,11 @@ export class ProcRunner {
       }
     }
     if (!this.leaseOk(p.kind)) return false; // recover 期间失租,不再写
-    store.settleOrphan(row.jobId, owner, outcome, { error: why, allowSelf });
+    // 以快照行 attempts 做代际 CAS:行已被重新认领(新一轮在跑)则拒写,不打回、不告警、不记 recover 落点。
+    if (!store.settleOrphan(row.jobId, owner, outcome, { error: why, allowSelf, attempts: row.attempts })) {
+      this.log(`${row.jobId}: 孤儿处置被拒(行已变更/已被重新认领),跳过`);
+      return true;
+    }
     if (outcome === "uncertain") {
       this.o.alert(row.owner.taskId, `${row.kind} 任务上次执行被中断且无法判定结果(${why}),需人工确认: ${row.jobId}`);
     }
