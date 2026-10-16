@@ -139,6 +139,16 @@
 
 ## 待办（Next）
 
+- [ ] **T-55 后处理插件化第一期:Processor 契约 + 每节点持久任务表 + 留存文件转所选输出格式（计划 [plans/036_processor-plugins.md](plans/036_processor-plugins.md)，PR [#147](https://github.com/fuyucn/douyin-rec/pull/147)）**
+  — 2026-10-15。**做什么**:按计划第一期 T1 → T3 → T6 → T8 → T9a → T9b → T11 交付 —— core `Processor` 契约与注册表、
+  新包 `@drec/proc-queue`（每节点持久任务表 + 租约执行循环）、新包 `@drec/processors` 的 remux 处理器、录制封口转换迁入任务表
+  （store 打不开回落旧串行链）、hub 收尾后对留存源分段转所选输出格式（含仅 remux 的远端入队）、网页「合成所选」跟随输出格式。
+  **为什么**:转封装现有三份实现（封口转换 / 节点侧管线 / master 管线），只有一份带完整校验，并发与磁盘口径各不相同；
+  绑定 hub 规则的任务至今无法选输出格式。第二期（merge/burn/上传迁表）待第一期稳定 ≥ 2 周再细化。
+  **验收**:计划第一期各任务测试与验收条全部通过；`pnpm test` / `pnpm typecheck` / `pnpm arch:check` 通过；处理器与任务表包内无目录推导
+  （grep 验收）；规则任务处理中途从不转换、上传仍用 mp4；VPS 真实录制一场（用户安排）验证封口转换走任务表。
+  **前置**:计划 PR 合入 + 决策点 D2/D4/D6/D7/D8 拍板；实现须另开 `accept` 的 issue。
+
 - [ ] **T-54 分段续跑补齐烧录轨:续跑不重烧也不补烧录轨分 P（issue [#142](https://github.com/fuyucn/douyin-rec/issues/142)）**
   — 2026-10-15。#140 复审期间发现（不在 #140 范围，单独开票）：续跑路径拿到的烧录产物字段恒为空
   （赋值在主流程烧录循环里，而该循环在续跑分叉之后）→ `appendSegmentGroup(files=[])` 直接把该步骤标
