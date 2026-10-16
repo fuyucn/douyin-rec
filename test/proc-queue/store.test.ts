@@ -89,7 +89,7 @@ describe("enqueue", () => {
     const big = 2n ** 60n + 1n;
     const fake = ((_p: string, o?: { bigint?: boolean }) =>
       o?.bigint ? { ino: big, size: 5n } : { ino: Number(big), size: 5 }) as unknown as typeof statSync;
-    expect(fileTagOf("/whatever", fake)).toBe("1152921504606846977-5");
+    expect(fileTagOf("/whatever", fake)).toBe(`${String(big)}-5`); // 表达式拼装,不写长数字字面量
   });
 
   it("已带 fileTag 的 logicalKey 原样使用(不重复回填)", () => {
