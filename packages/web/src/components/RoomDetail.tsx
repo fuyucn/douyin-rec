@@ -1,4 +1,5 @@
 import { Pencil, Play, Square, Timer, Trash2 } from "lucide-react";
+import { useAtomValue } from "jotai";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type HubJobDTO, type HubRuleDTO, type Task, type WorkerDTO } from "../api/client";
 import { RunCard, JobLogDialog, runDate } from "./HubJobs";
@@ -10,17 +11,14 @@ import { ExperimentalBadge } from "./ExperimentalBadge";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
 import { errMessage, useToast, useHubStream, usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
+import { todayYmdInTz } from "../lib/tz";
+import { serverTimezoneAtom } from "../atoms";
 import { useT } from "../lib/i18n";
 import type { FlowCfg } from "./flow-build";
 
 const PAGE = 20;
 const CUSTOM_DATE = "__custom__";
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
-
-function todayYmd(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 
 /** 新建投稿序号:同 base key 已有 -N 则取最大 +1,否则从 -1 开始。 */
 function nextSubmissionNo(baseKey: string, runs: HubJobDTO[]): number {
@@ -85,7 +83,9 @@ export function RoomDetail({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
   const [runKey, setRunKey] = useState(CUSTOM_DATE);
-  const [runCustom, setRunCustom] = useState(todayYmd());
+  // 默认日期 = 后端设置时区的今天(不是浏览器本地日期,issue #155)。
+  const serverTz = useAtomValue(serverTimezoneAtom);
+  const [runCustom, setRunCustom] = useState(todayYmdInTz(serverTz));
   const [runWorker, setRunWorker] = useState("");
   const [runBusy, setRunBusy] = useState(false);
   // 立即执行默认新建任务(id 自动 -1/-2),避免复用同一天旧任务导致“重试不像重试”。
@@ -230,7 +230,7 @@ export function RoomDetail({
   };
   const openRun = (): void => {
     setRunKey(runs[0]?.streamKey ?? CUSTOM_DATE);
-    setRunCustom(runs[0] ? runDate(runs[0].streamKey).slice(0, 10) : todayYmd());
+    setRunCustom(runs[0] ? runDate(runs[0].streamKey).slice(0, 10) : todayYmdInTz(serverTz));
     setRunWorker("");
     setRunNew(true);
     setRunOpen(true);
@@ -426,7 +426,7 @@ export function RoomDetail({
           {runKey === CUSTOM_DATE && (
             <div>
               <label className="field-label">{t("hub.jobs.runNowDateHint")}</label>
-              <input className="input" value={runCustom} onChange={(e) => setRunCustom(e.target.value)} placeholder={todayYmd()} />
+              <input className="input" value={runCustom} onChange={(e) => setRunCustom(e.target.value)} placeholder={todayYmdInTz(serverTz)} />
             </div>
           )}
           <div>

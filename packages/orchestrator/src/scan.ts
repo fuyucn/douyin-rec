@@ -2,6 +2,7 @@
 // 共享录像扫描函数：被 LocalTransport 和 _inventory CLI 子命令复用。
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { epochFromZonedParts, processTimeZone } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import type { ActiveRecordingRoom, NodeRecording, NodeRollingProgress, NodeRollingSession } from "./transport.js";
 import { readGaps, totalGapSecOf } from "./gaps.js";
@@ -151,14 +152,15 @@ export type FfprobeAdapter = (file: string) => Promise<{ durationSec: number; st
  *
  * 为什么需要:边录边传(T-33)的会话可能**一个 .ts 都不剩**(确认后全删),此时没有任何
  * ffprobe 结果可推 startMs —— 若留 0,聚类会算出 `1970-01-01` 的 streamKey,收口写错场。
- * 会话 base 尾部的 `YYYY-MM-DD_HH-mm-ss` 就是录制起点(本地时区),用它兜底。
+ * 会话 base 尾部的 `YYYY-MM-DD_HH-mm-ss` 就是录制起点(设置时区墙钟),用它兜底。
  * 解析不出 → 0(调用方按旧行为处理)。
  */
 function startMsFromSessionBase(base: string): number {
   const m = /_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/.exec(base);
   if (!m) return 0;
   const [, y, mo, d, h, mi, s] = m;
-  return new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)).getTime();
+  // 墙钟按设置时区还原(与 record-engine `stamp` 同口径),不看宿主机本地时区(issue #155)。
+  return epochFromZonedParts(Number(y), Number(mo), Number(d), Number(h), Number(mi), Number(s), processTimeZone());
 }
 
 /**

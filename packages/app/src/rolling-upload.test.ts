@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -392,5 +392,41 @@ describe("rollingUploadSingleNode — 跨节点重复投稿闸门(纯函数)", (
   });
   it("规则勾选 ≥2 个节点 → 拒绝", () => {
     expect(rollingUploadSingleNode(true, ["vps1", "vps2"])).toBe(false);
+  });
+});
+
+describe("RollingUploader 标题日期按设置时区(issue #155)", () => {
+  const prevTZ = process.env.TZ;
+  afterEach(() => {
+    if (prevTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTZ;
+  });
+
+  // 会话名不带时间戳 → 标题日期取「首段写入时刻」按时区渲染。
+  // 该时刻 = 北京 2026-09-13 01:30 = 洛杉矶 2026-09-12 10:30。
+  const instant = new Date("2026-09-12T17:30:00Z");
+  async function firstTitle(timeZone?: string): Promise<string> {
+    const { paths } = mkSession(["主播_000.ts", "主播_001.ts"]);
+    utimesSync(paths[0], instant, instant);
+    const titles: string[] = [];
+    const up = vi.fn(async (a: { plain: { title: string } }) => { titles.push(a.plain.title); return "BV1tzzzzzzzz"; });
+    const u = new RollingUploader({
+      room, uploadMeta, timeZone, gate: new FakeGate(), uploadPlainRaw: up as never,
+      appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+    });
+    for (const p of paths) u.noteSegment(p);
+    await u.flush({ recordingActive: true });
+    return titles[0]!;
+  }
+
+  it("显式设置时区 = 北京 → 北京日期(宿主机本地为美西)", async () => {
+    process.env.TZ = "America/Los_Angeles";
+    expect(await firstTitle("Asia/Shanghai")).toContain("2026-09-13");
+  });
+  it("未传 timeZone → 取进程生效时区:未设 TZ → 北京;env=美西 → 美西(设置写入 env 的口径)", async () => {
+    delete process.env.TZ;
+    expect(await firstTitle(undefined)).toContain("2026-09-13");
+    process.env.TZ = "America/Los_Angeles";
+    expect(await firstTitle(undefined)).toContain("2026-09-12");
   });
 });

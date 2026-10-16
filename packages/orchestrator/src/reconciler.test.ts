@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, onTestFinished } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import type { Transport, NodeRecording, NodeInventory } from "./transport.js";
 import type { PipelineDeps } from "./pipeline.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
-import { JobAbortedError, USER_STOP, _resetJobAbort, beginJob, endJob, isJobLive } from "@drec/core";
+import { processTimeZone, zonedStamp, JobAbortedError, USER_STOP, _resetJobAbort, beginJob, endJob, isJobLive } from "@drec/core";
 import type { NotifyEvent } from "@drec/core";
 
 function freshLedger(): SyncLedger {
@@ -178,6 +178,30 @@ describe("Reconciler", () => {
     await reconciler.reconcileAll();
     expect(notify.mock.calls.filter(([e]) => e.kind === "hubTaskStart")).toHaveLength(1);
     ledger.close();
+  });
+
+  it("streamKey 日期按注入的设置时区(issue #155):宿主机为美西、北京次日凌晨开播 → 北京日期", async () => {
+    const prevTZ = process.env.TZ;
+    process.env.TZ = "America/Los_Angeles";
+    try {
+      const ledger = freshLedger();
+      // 北京 2026-09-13 01:30 = 洛杉矶 09-12 10:30
+      const startMs = new Date("2026-09-12T17:30:00Z").getTime();
+      const rec = makeRec({ startMs, endMs: startMs + 3_600_000, sessionBase: "主播名_2026-09-13_01-30-00" });
+      const transports = new Map([["node-1", makeTransport("node-1", [rec])]]);
+      const seen: string[] = [];
+      const reconciler = new Reconciler({
+        platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+        runPipeline: (async (b: Broadcast) => { seen.push(b.streamKey); return { state: "done" as const, bv: "BV" }; }) as never,
+        settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0,
+        timeZone: () => "Asia/Shanghai",
+      });
+      await reconciler.reconcileAll();
+      expect(seen).toEqual(["douyin:test-room:2026-09-13"]);
+      ledger.close();
+    } finally {
+      if (prevTZ === undefined) delete process.env.TZ; else process.env.TZ = prevTZ;
+    }
   });
 
   it("场景N(重连窗): 广播结束仍在 reconnectWindowMs 内 → 先不建 job/不跑 pipeline", async () => {
@@ -999,21 +1023,25 @@ describe("Reconciler.stopJob / runNow", () => {
   });
 
   it("runNow: 前缀 _HHMM 多场取 startMs 最新", async () => {
+    // 钉死进程时区 = 北京(env 未设),不随跑测机器 TZ 漂(streamKey 日期按设置时区算,issue #155)。
+    const prevTZ = process.env.TZ;
+    delete process.env.TZ;
+    onTestFinished(() => { if (prevTZ === undefined) delete process.env.TZ; else process.env.TZ = prevTZ; });
     const early = makeRec({
-      startMs: new Date("2026-06-22T08:00:00Z").getTime(),
-      endMs: new Date("2026-06-22T09:00:00Z").getTime(),
-      sessionBase: "主播名_2026-06-22_08-00-00",
+      startMs: new Date("2026-06-22T02:00:00Z").getTime(),
+      endMs: new Date("2026-06-22T03:00:00Z").getTime(),
+      sessionBase: "主播名_2026-06-22_10-00-00",
     });
     const late = makeRec({
-      startMs: new Date("2026-06-22T20:00:00Z").getTime(),
-      endMs: new Date("2026-06-22T21:00:00Z").getTime(),
-      sessionBase: "主播名_2026-06-22_20-00-00",
+      startMs: new Date("2026-06-22T10:00:00Z").getTime(),
+      endMs: new Date("2026-06-22T11:00:00Z").getTime(),
+      sessionBase: "主播名_2026-06-22_18-00-00",
     });
     // 同日两簇且 base 无 job → 两场都带 _HHMM;runNow(base) 走前缀,取 startMs 最新。
     const { ledger, reconciler, spyRunPipeline } = setup([early, late]);
     const r = await reconciler.runNow({ streamKey: key, wait: true });
-    const d = new Date(late.startMs);
-    const hhmm = `${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}`;
+    const z = zonedStamp(late.startMs, processTimeZone()); // streamKey 的 _HHMM 按设置时区,不看宿主机本地(issue #155)
+    const hhmm = `${z.hh}${z.mm}`;
     expect(r.ok).toBe(true);
     expect(r.streamKey).toBe(`${key}_${hhmm}`);
     expect(spyRunPipeline.mock.calls[0][0].startMs).toBe(late.startMs);

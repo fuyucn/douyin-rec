@@ -32,6 +32,7 @@ import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
+import { applyTimezoneFromDb, effectiveTimezone } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
 
@@ -109,6 +110,12 @@ program
   .name("douyin-rec")
   .description("抖音直播录制 + 弹幕捕获 (TS, 单文件 CLI)")
   .version(APP_VERSION, "-v, --version", "显示版本号")
+  // 时区唯一真理源 = settings.timezone。`task serve` 启动时自己应用(runServe);其余入口
+  // (独立 record / merge / burn / upload / 隐藏命令)不经 serve,这里统一从库里读同一设置,
+  // 否则会落回宿主机本地时区、算出错一天的文件名/标题(issue #155)。
+  .hook("preAction", (_cmd, action) => {
+    if (action.name() !== "serve") applyTimezoneFromDb();
+  })
   .option("--discord-webhook <url>", "Discord incoming webhook（也读 config / env DISCORD_WEBHOOK）")
   // 参数错误后顺带提示 --help，省得用户再敲一次。
   .showHelpAfterError("(用 --help 查看用法)")
@@ -1035,7 +1042,7 @@ const hubStarter: HubStarter = {
           submissionTitleTemplate: uploadDefaults.submissionTitleTemplate,
           partTitleTemplate: uploadDefaults.partTitleTemplate,
         },
-        timeZone: (opts.store.getSetting("timezone") ?? "").trim() || process.env.TZ || "Asia/Shanghai",
+        timeZone: effectiveTimezone(opts.store),
       },
     };
 
@@ -1064,7 +1071,7 @@ const hubStarter: HubStarter = {
           submissionTitleTemplate: (p.upload?.submissionTitleTemplate ?? "").trim() || uploadDefaults.submissionTitleTemplate,
           partTitleTemplate: (p.upload?.partTitleTemplate ?? "").trim() || uploadDefaults.partTitleTemplate,
         },
-        timeZone: (opts.store.getSetting("timezone") ?? "").trim() || process.env.TZ || "Asia/Shanghai",
+        timeZone: effectiveTimezone(opts.store),
         steps: p.steps,
         cleanup: p.cleanup,
         uploadBatchSize: p.uploadBatchSize,
@@ -1095,6 +1102,7 @@ const hubStarter: HubStarter = {
       ledger,
       pipelineDeps,
       resolveCfg,
+      timeZone: () => effectiveTimezone(opts.store),
       // 能力门控:按 worker id 取能力标签(hub.config.json 的 workers[].capabilities)。
       workerCapabilities: (id) => loadWorkers().find((w) => w.id === id)?.capabilities,
       reconnectWindowMs: hubCfg.reconnectWindowMs,

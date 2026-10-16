@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import {
   applyTitleTemplate,
   DEFAULT_TITLE_TEMPLATE,
@@ -12,6 +12,9 @@ import {
   validateLooseTitleTemplate,
   validateTitleTemplate,
   zonedStamp,
+  resolveTimeZone,
+  processTimeZone,
+  epochFromZonedParts,
 } from "./title-template.js";
 
 describe("parseSessionStamp", () => {
@@ -250,5 +253,63 @@ describe("分 P 标题(与稿件名分开)", () => {
     // 分P名:可含空格,渲染成宽松标题;类型后缀自动加
     expect(formatPartTitle("P{part} 弹幕版", { ...ctx, partIndex: 2, partTotal: 3 }, "danmu"))
       .toBe("P2 弹幕版_danmu");
+  });
+});
+
+describe("设置时区口径(issue #155)", () => {
+  const prevTZ = process.env.TZ;
+  afterEach(() => {
+    if (prevTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTZ;
+  });
+  // 北京 2026-09-13 01:30:05 = UTC 09-12 17:30:05 = 洛杉矶 09-12 10:30:05
+  const ms = Date.parse("2026-09-12T17:30:05Z");
+
+  it("resolveTimeZone: 空/非法 → 北京时间;合法原样", () => {
+    expect(resolveTimeZone(undefined)).toBe("Asia/Shanghai");
+    expect(resolveTimeZone("  ")).toBe("Asia/Shanghai");
+    expect(resolveTimeZone("Not/AZone")).toBe("Asia/Shanghai");
+    expect(resolveTimeZone(" America/Los_Angeles ")).toBe("America/Los_Angeles");
+  });
+
+  it("processTimeZone: 只看 process.env.TZ,未设 → 北京(不回落宿主机本地时区)", () => {
+    delete process.env.TZ;
+    expect(processTimeZone()).toBe("Asia/Shanghai");
+    process.env.TZ = "America/Los_Angeles";
+    expect(processTimeZone()).toBe("America/Los_Angeles");
+  });
+
+  it("进程时区为美西、未显式传 timeZone:标题日期仍是北京日期(次日凌晨场次)", () => {
+    process.env.TZ = "America/Los_Angeles";
+    expect(formatUploadTitle("{name}_{date}", { sessionBase: "某某", startMs: ms })).toBe("某某_2026-09-13");
+    expect(formatBiliTitle("{name}_{date}_{HHmm}", { sessionBase: "某某", startMs: ms })).toBe("某某_2026-09-13_0130");
+  });
+
+  it("北京晚间场次(美西同日白天):北京日期", () => {
+    process.env.TZ = "America/Los_Angeles";
+    const evening = Date.parse("2026-09-12T14:00:00Z"); // 北京 22:00 / 洛杉矶 07:00
+    expect(formatUploadTitle("{name}_{date}", { sessionBase: "某某", startMs: evening })).toBe("某某_2026-09-12");
+  });
+
+  it("已锁定 outputStem 不受时区影响(向后兼容)", () => {
+    process.env.TZ = "America/Los_Angeles";
+    expect(resolveOutputStem({ sessionBase: "某某", startMs: ms, existingStem: "某某_2026-09-12" })).toBe("某某_2026-09-12");
+  });
+});
+
+describe("epochFromZonedParts(zonedStamp 的逆)", () => {
+  it("北京墙钟 → epoch;与宿主机本地时区无关", () => {
+    expect(epochFromZonedParts(2026, 9, 13, 1, 30, 5, "Asia/Shanghai")).toBe(Date.parse("2026-09-12T17:30:05Z"));
+    expect(epochFromZonedParts(2026, 9, 12, 10, 30, 5, "America/Los_Angeles")).toBe(Date.parse("2026-09-12T17:30:05Z"));
+  });
+  it("与 zonedStamp 互逆(含跨日 / 夏令时一侧)", () => {
+    for (const tz of ["Asia/Shanghai", "America/Los_Angeles", "Europe/London"]) {
+      for (const iso of ["2026-01-15T03:04:05Z", "2026-07-01T23:59:59Z", "2026-03-08T10:00:00Z"]) {
+        const ms = Date.parse(iso);
+        const z = zonedStamp(ms, tz);
+        const [y, mo, d] = z.date.split("-").map(Number);
+        expect(epochFromZonedParts(y!, mo!, d!, Number(z.hh), Number(z.mm), Number(z.ss), tz)).toBe(ms);
+      }
+    }
   });
 });

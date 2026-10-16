@@ -5,9 +5,10 @@
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { epochFromZonedParts, processTimeZone, zonedStamp } from "@drec/core";
 
 export interface SessionSpec {
-  /** 会话首段开录时刻(epoch ms)。会话 base 由它按**本地时区**渲染,与 scan 的 startMsFromSessionBase 同口径。 */
+  /** 会话首段开录时刻(epoch ms)。会话 base 由它按**设置时区**渲染,与 scan 的 startMsFromSessionBase 同口径。 */
   startMs: number;
   segments: number;
   segSec: number;
@@ -34,15 +35,15 @@ export interface WrittenSession {
 
 const pad = (n: number, w = 2): string => String(n).padStart(w, "0");
 
-/** 与 identity/scan 同口径(本地时区)渲染 `{anchor}_{YYYY-MM-DD}_{HH-mm-ss}`。 */
+/** 与 identity/scan 同口径(设置时区,issue #155)渲染 `{anchor}_{YYYY-MM-DD}_{HH-mm-ss}`。 */
 export function sessionBaseOf(anchor: string, startMs: number): string {
-  const d = new Date(startMs);
-  return `${anchor}_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+  const z = zonedStamp(startMs, processTimeZone());
+  return `${anchor}_${z.date}_${z.hh}-${z.mm}-${z.ss}`;
 }
 
-/** 固定的过去时刻(本地时区 10:00)——远早于重连窗,且避开跨日。 */
+/** 固定的过去时刻(设置时区 10:00)——远早于重连窗,且避开跨日。 */
 export function pastStartMs(dayOffset = 0, hour = 10, minute = 0): number {
-  return new Date(2026, 5, 27 + dayOffset, hour, minute, 0).getTime();
+  return epochFromZonedParts(2026, 6, 27 + dayOffset, hour, minute, 0, processTimeZone());
 }
 
 function xmlBody(n: number): string {

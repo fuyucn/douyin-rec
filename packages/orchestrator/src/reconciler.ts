@@ -34,6 +34,8 @@ export interface ReconcilerDeps {
    * 带 platform 入参 → 多平台天然就绪(douyin/bilibili 同房间号不撞)。
    */
   resolveCfg?: (platform: string, roomSlug: string) => PipelineCfg | null;
+  /** streamKey 日期所用时区(设置时区,每轮现读);省略 → 进程生效时区。 */
+  timeZone?: () => string;
   /** pipeline 失败的最大自动重试次数;达到后升级 needs_manual 不再重入。默认 3。 */
   maxRetries?: number;
   /** retrying job / running 节点超过该时长视为进程重启中断,标 failed 后可重入。默认 600s。 */
@@ -122,6 +124,7 @@ export class Reconciler {
   private maxRetries: number;
   private staleMs: number;
   private reconnectWindowMs: number;
+  private timeZone?: () => string;
   /** 磁盘看门狗:节点数据根剩余 < 阈值(GB) → 告警。0/负 = 关闭。缺省 10。 */
   private diskMinGB: number;
   private notify?: (e: import("@drec/core").NotifyEvent) => void;
@@ -160,6 +163,7 @@ export class Reconciler {
     this.diskMinGB = resolveDiskMinGB(deps.diskMinGB, (m) => console.warn(m)).gb;
     this.notify = deps.notify;
     this.resolveCfg = deps.resolveCfg;
+    this.timeZone = deps.timeZone;
     this.workerCapabilities = deps.workerCapabilities;
     this.loadTransports = deps.loadTransports;
     this.cleanupBackfillThrottleMs = deps.cleanupBackfillThrottleMs ?? DEFAULT_CLEANUP_BACKFILL_THROTTLE_MS;
@@ -402,6 +406,7 @@ export class Reconciler {
       this.reconnectWindowMs,
       this.platform,
       knownKeys,
+      this.timeZone?.(),
     );
 
     const cfgByKey = new Map<string, PipelineCfg>();
