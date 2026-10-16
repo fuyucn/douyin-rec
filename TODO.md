@@ -137,6 +137,11 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
+- [~] **T-61 全自动流水线 + fleet 式房间管理（计划 [plans/037_autopilot_fleet.md](plans/037_autopilot_fleet.md)）**
+  — 2026-10-16 认领。主流程收敛为「监听 → 录制 → 投稿」，存档/烧录/多格式为默认关的增强开关。
+  **拆分**：①人工收件箱去噪（issue [#188](https://github.com/fuyucn/douyin-rec/issues/188)，进行中）②通知带该场直链 + 收件箱按「真事故/增强」分组 ③`/rooms` 首页化 + 内联日志 + 任务/Hub/队列收进「高级」④配置模板（改一次应用到多房间）⑤新增房间自动选节点（已在录房间绝不自动迁移）。
+  **验收**：默认口径为「录完就投、投完就删」；`needs_manual` 只剩真事故且必带原因；模板批量写回逐房间可见；全量 vitest / typecheck / web build 绿。
+
 - [ ] **T-58 后处理插件化第一期复审遗留（PR #152/#154/#159/#169 的非阻塞项，2026-10-16 从 T-55 抽出）**
   — 第二期开工前须处理;逐条落点如下。
   - T1 复审遗留（PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）:符号链接逃逸 → 已在 plan T9a 落地（节点侧 realpath,已合并);`finish(cancelled)` 先经 `cancelOutcome` → 落点 plan 第二期 T15。
