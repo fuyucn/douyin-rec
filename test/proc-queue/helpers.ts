@@ -11,7 +11,7 @@ export interface Env {
   rec: string;
   clock: { t: number };
   now: () => number;
-  open: (o?: { isPidAlive?: (pid: number) => boolean }) => ProcQueueStore;
+  open: (o?: { isPidAlive?: (pid: number) => boolean; busyTimeoutMs?: number; readOnly?: boolean }) => ProcQueueStore;
   file: (name: string, content?: string) => string;
   job: (name: string, over?: Partial<ProcessJob>) => ProcessJob;
   cleanup: () => void;

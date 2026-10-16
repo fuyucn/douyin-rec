@@ -23,7 +23,7 @@ describe("procQueueDbPath", () => {
 });
 
 describe("迁移", () => {
-  it("重复/并发首开幂等:user_version=1、数据不丢、表齐全", () => {
+  it("重复首开幂等(同进程多连接;真多进程见 store-multiproc.test.ts):user_version=1、数据不丢、表齐全", () => {
     const s1 = env.open();
     const r = s1.enqueue(env.job("a.ts"), roots());
     expect(r.state).toBe("pending");
@@ -127,6 +127,21 @@ describe("enqueue", () => {
     expect(r2.state).toBe("pending");
     expect(parseJobId(r2.jobId)?.generation).toBe(2);
     expect(s.nextGeneration("fake", parseJobId(r2.jobId)!.logicalKey)).toBe(3);
+  });
+
+  it("F4/V6:过期回执的下一代在已有更高 generation(g5)时不得撞号 → 6", () => {
+    const s = env.open();
+    lease(s);
+    const job = env.job("a.ts");
+    const r1 = s.enqueue(job, roots());
+    const out = env.file("a.mp4");
+    s.claim({ kinds: ["fake"], owner: "A" });
+    s.finish(r1.jobId, "A", { state: "done", outputs: [out] });
+    const r5 = s.enqueue(env.job("a.ts", { generation: 5 }), roots()); // 已存在更高代
+    expect(r5.state).toBe("pending");
+    rmSync(out);
+    const stale = s.enqueue(job, roots()); // g1 产物缺失 → stale
+    expect(stale).toMatchObject({ jobId: r1.jobId, state: "stale", nextGeneration: 6 });
   });
 
   it("nextGeneration:无行 = 1", () => {
@@ -243,7 +258,72 @@ describe("claim", () => {
     expect(a.list({ state: "running" })[0].attempts).toBe(1);
   });
 
-  it("没有该 kind 的有效租约 → 不认领(DB 级 fencing)", () => {
+  it("F4/V1:认领事务必须是 IMMEDIATE —— 事务内(accept 回调里)另一连接的写事务被挡在外面", () => {
+    const a = env.open();
+    const b = env.open({ busyTimeoutMs: 30 });
+    lease(a, "A");
+    a.enqueue(env.job("a.ts"), roots());
+    let bResult: unknown = "未调用";
+    a.claim({
+      kinds: ["fake"], owner: "A",
+      accept: () => {
+        // A 的认领事务正持写锁:IMMEDIATE → B 的 BEGIN IMMEDIATE 等不到锁而抛 locked;
+        // 若退化成 DEFERRED,A 此刻只持读锁,B 会成功抢走同一行(双认领)。
+        try { bResult = b.claim({ kinds: ["fake"], owner: "A" }); } catch (e) { bResult = (e as Error).message; }
+        return true;
+      },
+    });
+    expect(String(bResult)).toMatch(/locked|busy/i);
+    expect(a.list({ state: "running" })).toHaveLength(1);
+    expect(a.list({ state: "running" })[0].attempts).toBe(1);
+  });
+
+  it("F5:曾认领过的 pending 行被取消 → 下次 claim 直接落 cancelled(不执行、attempts 不增、不再多算 pending)", () => {
+    const s = env.open();
+    lease(s, "A");
+    const id = s.enqueue(env.job("a.ts"), roots()).jobId;
+    s.claim({ kinds: ["fake"], owner: "A" });
+    s.releaseForShutdown(id, "A", true); // 关停回退 → pending(everClaimed)
+    expect(s.requestCancel(id)).toBe("requested");
+    expect(s.active().pending.fake).toBe(1);
+    let accepted = 0;
+    expect(s.claim({ kinds: ["fake"], owner: "A", accept: () => { accepted++; return true; } })).toBeNull();
+    expect(accepted).toBe(0); // 取消行不走准入、不执行
+    expect(s.get(id)).toMatchObject({ state: "cancelled", attempts: 0 });
+    expect(s.get(id)?.finishedAt).not.toBeNull();
+    expect(s.active().pending.fake).toBeUndefined();
+  });
+
+  it("F5:被取消的行不挡后面的候选(同次 claim 继续认领下一条)", () => {
+    const s = env.open();
+    lease(s, "A");
+    const r1 = s.enqueue(env.job("a.ts"), roots());
+    const r2 = s.enqueue(env.job("b.ts"), roots());
+    s.claim({ kinds: ["fake"], owner: "A" });
+    s.releaseForShutdown(r1.jobId, "A", true);
+    s.requestCancel(r1.jobId);
+    expect(s.claim({ kinds: ["fake"], owner: "A" })?.jobId).toBe(r2.jobId);
+    expect(s.get(r1.jobId)?.state).toBe("cancelled");
+  });
+
+  it("F2:settleOrphan 默认拒绝本持有者名下的行;allowSelf(runner 确认已 fence)才处理", () => {
+    const s = env.open();
+    lease(s, "A");
+    const id = s.enqueue(env.job("a.ts"), roots()).jobId;
+    s.claim({ kinds: ["fake"], owner: "A" });
+    expect(s.settleOrphan(id, "A", "rerun")).toBe(false);
+    expect(s.settleOrphan(id, "A", "rerun", { allowSelf: true })).toBe(true);
+    expect(s.get(id)).toMatchObject({ state: "pending", claimedBy: null });
+  });
+
+  it("readOnly:只读连接可查、不建库不迁移;写入被拒", () => {
+    env.open().acquireLease("fake", "A", { pid: process.pid });
+    const ro = env.open({ readOnly: true });
+    expect(ro.getLease("fake")?.owner).toBe("A");
+    expect(() => ro.releaseLease("fake", "A")).toThrow();
+  });
+
+  it("nextGeneration:无行 = 1", () => {
     const s = env.open();
     s.enqueue(env.job("a.ts"), roots());
     expect(s.claim({ kinds: ["fake"], owner: "A" })).toBeNull(); // 无租约

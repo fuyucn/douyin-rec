@@ -1,6 +1,7 @@
 // plans/036 T3:ProcRunner —— 租约 / 心跳 / fencing / 限额 / 磁盘准入 / 接管 recover / 关停 / 快照(假处理器)。
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { registerProcessor, _resetProcessors, type ProcessContext, type ProcessJob } from "@drec/core";
 import { ProcRunner, SimpleSlotLimiter, readProcActive, LEASE_MS, type ProcRunnerOpts } from "@drec/proc-queue";
 import { makeEnv, fakeProcessor, gate, type Env } from "./helpers.js";
@@ -308,7 +309,8 @@ describe("故障处理(不静默、不崩)", () => {
     const id = store.enqueue(env.job("a.ts"), allowed()).jobId;
     const real = store.claim.bind(store);
     store.claim = () => { throw new Error("busy"); };
-    expect(() => r.tick()).toThrow(/busy/);
+    expect(() => r.tick()).not.toThrow(); // tick 永不抛(兜住并留痕)
+    expect(store.get(id)?.state).toBe("pending");
     store.claim = real;
     r.tick();
     await vi.waitFor(() => expect(store.get(id)?.state).toBe("done"));
@@ -407,7 +409,7 @@ describe("stop() 关停语义", () => {
     expect(s.getLease("fake")).toBeNull();
   });
 
-  it("非 interruptible 超时:abort 并记 uncertain + 告警", async () => {
+  it("非 interruptible 超时:abort,落点走 cancelOutcome(非 biliup → cancelled)+ 告警", async () => {
     registerProcessor(fakeProcessor({
       interruptible: false,
       run: (_j: ProcessJob, ctx: ProcessContext) => new Promise((_, rej) => {
@@ -419,8 +421,23 @@ describe("stop() 关停语义", () => {
     const id = s.enqueue(env.job("a.ts"), allowed()).jobId;
     r.tick();
     await r.stop();
-    expect(s.get(id)).toMatchObject({ state: "uncertain" });
+    expect(s.get(id)).toMatchObject({ state: "cancelled" });
     expect(alerts.some(([, m]) => m.includes("关停超时"))).toBe(true);
+  });
+
+  it("非 interruptible 超时:biliup 类(cancelOutcome hasIntent → uncertain)落 uncertain", async () => {
+    registerProcessor(fakeProcessor({
+      kind: "biliup", interruptible: false,
+      run: (_j: ProcessJob, ctx: ProcessContext) => new Promise((_, rej) => {
+        ctx.signal.addEventListener("abort", () => rej(new Error("aborted")));
+      }),
+    }));
+    const r = mkRunner("A", { shutdownWaitMs: 30 });
+    const s = env.open();
+    const id = s.enqueue(env.job("a.ts", { kind: "biliup", logicalKey: "t:a@" }), allowed()).jobId;
+    r.tick();
+    await r.stop();
+    expect(s.get(id)).toMatchObject({ state: "uncertain" });
   });
 
   it("重复 stop 安全", async () => {
@@ -444,5 +461,143 @@ describe("readProcActive(_node-status 用,只读)", () => {
     expect(readProcActive(env.root)).toEqual({ host: false, running: { fake: 1 }, pending: { fake: 1 }, leaseAlive: { fake: true } });
     g.resolve();
     writeFileSync(env.rec + "/keep", "");
+  });
+});
+
+describe("返工(PR #154 审查 F1/F2/F4/F5/F6)", () => {
+  it("F1:接管后补跑的 tick 抛错不得逃逸成 unhandled rejection", async () => {
+    const seen: unknown[] = [];
+    const h = (e: unknown): void => { seen.push(e); };
+    process.on("unhandledRejection", h);
+    try {
+      registerProcessor(fakeProcessor());
+      const store = env.open();
+      const logs: string[] = [];
+      const r = mkRunner("A", { store, log: (m) => logs.push(m) });
+      store.claim = () => { throw new Error("database is locked"); };
+      expect(() => r.tick()).not.toThrow();
+      await new Promise((x) => setTimeout(x, 50)); // 让 recover 后的补跑 tick 跑完
+      expect(seen).toEqual([]);
+      expect(logs.some((m) => m.includes("认领失败") && m.includes("database is locked"))).toBe(true);
+    } finally {
+      process.off("unhandledRejection", h);
+    }
+  });
+
+  it("F1:acquireLease 抛错也不逃逸(tick 不抛、留痕、下一轮恢复)", async () => {
+    registerProcessor(fakeProcessor());
+    const store = env.open();
+    const logs: string[] = [];
+    const r = mkRunner("A", { store, log: (m) => logs.push(m) });
+    const real = store.acquireLease.bind(store);
+    store.acquireLease = () => { throw new Error("database is locked"); };
+    expect(() => r.tick()).not.toThrow();
+    expect(logs.some((m) => m.includes("抢租约失败"))).toBe(true);
+    store.acquireLease = real;
+    const id = store.enqueue(env.job("a.ts"), allowed()).jobId;
+    r.tick();
+    await vi.waitFor(() => expect(store.get(id)?.state).toBe("done"));
+  });
+
+  it("F2:心跳失败触发 fence → 同一持有者重新拿到租约 → 被 abort 的行必须被恢复处理,不得停在 running", async () => {
+    let runs = 0;
+    registerProcessor(fakeProcessor({
+      run: (_j: ProcessJob, ctx: ProcessContext) => new Promise((res, rej) => {
+        runs++;
+        if (runs > 1) return res({ outputs: [] });
+        ctx.signal.addEventListener("abort", () => rej(new Error("aborted")));
+      }),
+      recover: async () => "rerun" as const,
+    }));
+    const store = env.open();
+    const r = mkRunner("A", { store });
+    const id = store.enqueue(env.job("a.ts"), allowed()).jobId;
+    r.tick();
+    expect(store.get(id)?.state).toBe("running");
+    const real = store.heartbeat.bind(store);
+    store.heartbeat = () => { throw new Error("database is locked"); };
+    r.heartbeat(); r.heartbeat(); r.heartbeat(); // 3×10s ≥ 租约 → fence
+    store.heartbeat = real;
+    for (let i = 0; i < 10 && store.get(id)?.state !== "done"; i++) {
+      await new Promise((x) => setTimeout(x, 20));
+      r.tick(); r.heartbeat();
+    }
+    expect(store.get(id)?.state).toBe("done"); // rerun 后第二次执行完成
+    expect(runs).toBe(2);
+    expect(r.active().running.fake).toBe(0);
+  });
+
+  it("F2:fence 后重获租约、recover=uncertain → 行落 uncertain + 告警(不停 running)", async () => {
+    registerProcessor(fakeProcessor({
+      run: (_j: ProcessJob, ctx: ProcessContext) => new Promise((_, rej) => {
+        ctx.signal.addEventListener("abort", () => rej(new Error("aborted")));
+      }),
+    })); // 无 recover → uncertain
+    const store = env.open();
+    const r = mkRunner("A", { store });
+    const id = store.enqueue(env.job("a.ts"), allowed()).jobId;
+    r.tick();
+    const real = store.heartbeat.bind(store);
+    store.heartbeat = () => { throw new Error("database is locked"); };
+    r.heartbeat(); r.heartbeat(); r.heartbeat();
+    store.heartbeat = real;
+    await vi.waitFor(() => { r.tick(); expect(store.get(id)?.state).toBe("uncertain"); });
+    expect(alerts.some(([, m]) => m.includes("需人工确认"))).toBe(true);
+  });
+
+  it("F4/V8:A 停顿 → B 接管 → A 在下次心跳前醒来调 assertLease,必须抛(DB 侧 fencing)", async () => {
+    const stuck = gate();
+    let aCtx!: ProcessContext;
+    let runs = 0;
+    registerProcessor(fakeProcessor({
+      run: async (_j: ProcessJob, ctx: ProcessContext) => { runs++; if (runs === 1) { aCtx = ctx; await stuck.promise; } return { outputs: [] }; },
+      recover: async () => "rerun" as const,
+    }));
+    const a = mkRunner("A");
+    const s = env.open();
+    s.enqueue(env.job("a.ts"), allowed());
+    a.tick();
+    expect(() => aCtx.assertLease()).not.toThrow(); // 停顿前合法
+    env.clock.t += LEASE_MS + 1; // A 停顿,租约过期
+    mkRunner("B").tick();
+    await vi.waitFor(() => expect(s.getLease("fake")?.owner).toBe("B"));
+    expect(() => aCtx.assertLease()).toThrow(/租约已丢/); // 没有任何 heartbeat / fence 先行
+    stuck.resolve();
+  });
+
+  it("F6:磁盘告警在认领写事务之外发出(告警回调里另一连接可立刻写)", () => {
+    registerProcessor(fakeProcessor({ estimateDiskBytes: () => 10e9 }));
+    const other = env.open({ busyTimeoutMs: 50 });
+    const store = env.open();
+    let wrote: unknown = null;
+    const r = mkRunner("A", {
+      store, diskMinGB: () => 5, freeBytes: () => 1e9,
+      alert: () => { wrote = other.enqueue(env.job("b.ts", { logicalKey: "t:b@" }), allowed()); }, // 事务内会 locked 抛错
+    });
+    store.enqueue(env.job("a.ts"), allowed());
+    r.tick();
+    expect(wrote).toMatchObject({ state: "pending" });
+  });
+
+  it("F6:start() 带定时器时先同步跑首个 tick(再建定时器)", () => {
+    registerProcessor(fakeProcessor());
+    const store = env.open();
+    const r = new ProcRunner({
+      store, owner: "A", diskMinGB: () => 0, alert: () => {}, tickMs: 3_600_000, heartbeatMs: 3_600_000, gcIntervalMs: 3_600_000,
+    });
+    runners.push(r);
+    r.start();
+    expect(store.getLease("fake")?.owner).toBe("A"); // 未等任何定时器
+  });
+
+  it("F6:readProcActive 对已存在的库不写(只读连接),未迁移的空文件 → 全空", () => {
+    mkdirSync(dirname(env.dbPath), { recursive: true });
+    writeFileSync(env.dbPath, ""); // 0 字节(未迁移)
+    expect(readProcActive(env.root)).toEqual({ host: false, running: {}, pending: {}, leaseAlive: {} });
+    expect(statSync(env.dbPath).size).toBe(0); // 只读:没迁移、没写
+    const s = env.open();
+    s.acquireLease("fake", "A", { pid: process.pid });
+    const dto = readProcActive(env.root);
+    expect(dto.leaseAlive.fake).toBe(true);
   });
 });

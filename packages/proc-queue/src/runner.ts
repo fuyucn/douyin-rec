@@ -75,6 +75,13 @@ const defaultFreeBytes = (dir: string): number | null => {
   }
 };
 
+async function withTimeout(ps: Promise<void>[], ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<boolean>((r) => { timer = setTimeout(() => r(false), ms); timer.unref?.(); });
+  const done = Promise.all(ps).then(() => true);
+  try { return await Promise.race([done, timeout]); } finally { if (timer) clearTimeout(timer); }
+}
+
 interface Inflight {
   job: ProcJobRecord;
   proc: Processor;
@@ -117,6 +124,9 @@ export class ProcRunner {
     this.started = true;
     this.stopping = false;
     if (this.o.timers === false) return;
+    // 先跑首个 gc / tick 再建定时器:`tick()` 不抛(内部兜住),即便首轮失败也不会留下对已关闭 store 空转的定时器。
+    this.gc();
+    this.tick();
     // 定时回调里的同步 DB 异常(锁超时等)不得变成 uncaughtException 拖垮 serve:吞掉但必留痕。
     const t = (fn: () => void, ms: number): void => {
       const h = setInterval(() => {
@@ -128,8 +138,6 @@ export class ProcRunner {
     t(() => this.heartbeat(), this.o.heartbeatMs ?? 10_000);
     t(() => this.tick(), this.o.tickMs ?? 2_000);
     t(() => this.gc(), this.o.gcIntervalMs ?? 3600_000);
-    this.gc();
-    this.tick();
   }
 
   // ───────────────────────── 租约 / 心跳 / fencing ─────────────────────────
@@ -184,6 +192,7 @@ export class ProcRunner {
     this.log(`${kind}: ${why},abort 本进程该类全部 job`);
     this.held.delete(kind);
     this.yielding.delete(kind);
+    this.hbFails.delete(kind);
     for (const f of this.inflight.values()) {
       if (f.job.kind !== kind) continue;
       f.reason = "fenced";
@@ -198,26 +207,41 @@ export class ProcRunner {
 
   // ───────────────────────── 认领循环 ─────────────────────────
 
-  /** 一轮:抢租约(+ 接管 recover)→ 按限额 / 磁盘准入认领。 */
+  /**
+   * 一轮:抢租约(+ 接管 recover)→ 按限额 / 磁盘准入认领。
+   * **永不抛**:租约 / claim 的 DB 异常(锁超时等)按 kind 兜住并留痕,下一轮重试(F1:异步补跑的 tick
+   * 若抛错会成为 unhandled rejection,Node 24 下直接拖垮 serve)。
+   */
   tick(): void {
     if (!this.started || this.stopping) return;
     const procs = listProcessors();
     for (const p of procs) {
       if (this.held.has(p.kind) || this.yielding.has(p.kind)) continue;
-      const r = this.o.store.acquireLease(p.kind, this.o.owner, {
-        leaseMs: this.leaseMs, requestHandover: this.o.requestHandover ?? false,
-      });
+      let r: { acquired: boolean; takeover: boolean };
+      try {
+        r = this.o.store.acquireLease(p.kind, this.o.owner, {
+          leaseMs: this.leaseMs, requestHandover: this.o.requestHandover ?? false,
+        });
+      } catch (e) {
+        this.log(`${p.kind}: 抢租约失败: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
       if (!r.acquired) continue;
       this.held.add(p.kind);
       this.log(`${p.kind}: 取得租约${r.takeover ? "(接管)" : ""}`);
-      // recover 完成后立刻再跑一轮认领(rerun 的行才能马上被接走,不必等下一个 tickMs)。
+      // recover 完成后立刻再跑一轮认领(rerun 的行才能马上被接走,不必等下一个 tickMs)。catch 必须在链尾。
       void this.recoverKind(p)
         .catch((e: unknown) => this.log(`${p.kind}: recover 异常 ${String(e)}`))
-        .then(() => this.tick());
+        .then(() => this.tick())
+        .catch((e: unknown) => this.log(`${p.kind}: recover 后补跑 tick 异常 ${String(e)}`));
     }
     for (const p of procs) {
       if (!this.held.has(p.kind) || this.yielding.has(p.kind)) continue;
-      this.claimLoop(p);
+      try {
+        this.claimLoop(p);
+      } catch (e) {
+        this.log(`${p.kind}: 认领失败: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
   }
 
@@ -227,12 +251,22 @@ export class ProcRunner {
       const release = this.limiter.tryAcquire(p.resource, lane);
       if (!release) return;
       let job: ProcJobRecord | null;
+      let denied: { job: ProcJobRecord; msg: string } | null = null;
       try {
-        job = this.o.store.claim({ kinds: [p.kind], owner: this.o.owner, accept: (j) => this.diskAdmit(p, j) });
+        // accept 在认领写事务内执行:只做纯判定,告警等副作用移到事务之后(不把事件发送带进写锁区间)。
+        job = this.o.store.claim({
+          kinds: [p.kind], owner: this.o.owner,
+          accept: (j) => {
+            const msg = this.diskDenied(p, j);
+            if (msg !== null) denied ??= { job: j, msg };
+            return msg === null;
+          },
+        });
       } catch (e) {
         release(); // 不泄漏并发槽
         throw e;
       }
+      if (denied) this.alertDiskOnce(p, denied);
       if (!job) {
         release();
         return;
@@ -242,20 +276,23 @@ export class ProcRunner {
     }
   }
 
-  /** 磁盘准入:`free − estimate ≥ diskMinGB`;不足 → 保持 pending,按 kind 告警一次(恢复后清标记)。 */
-  private diskAdmit(p: Processor, job: ProcJobRecord): boolean {
+  /** 磁盘准入(纯判定):`free − estimate ≥ diskMinGB` → null;不足 → 返回告警文案(保持 pending)。 */
+  private diskDenied(p: Processor, job: ProcJobRecord): string | null {
     const minGB = this.o.diskMinGB();
-    if (!(minGB > 0)) return true;
+    if (!(minGB > 0)) return null;
     const dir = dirname(job.outputs?.[0] ?? job.inputs[0]);
     const free = this.freeBytes(dir);
-    if (free == null) return true;
+    if (free == null) return null;
     const need = p.estimateDiskBytes(job);
-    if (free - need >= minGB * 1e9) return true;
-    if (!this.diskAlerted.has(p.kind)) {
-      this.diskAlerted.add(p.kind);
-      this.o.alert(job.owner.taskId, `磁盘剩余 ${(free / 1e9).toFixed(1)}GB,预计需 ${(need / 1e9).toFixed(1)}GB,低于水位 ${minGB}GB —— ${p.kind} 任务保持排队`);
-    }
-    return false;
+    if (free - need >= minGB * 1e9) return null;
+    return `磁盘剩余 ${(free / 1e9).toFixed(1)}GB,预计需 ${(need / 1e9).toFixed(1)}GB,低于水位 ${minGB}GB —— ${p.kind} 任务保持排队`;
+  }
+
+  /** 按 kind 告警一次(认领成功后清标记 → 恢复后再不足可再告警)。 */
+  private alertDiskOnce(p: Processor, d: { job: ProcJobRecord; msg: string }): void {
+    if (this.diskAlerted.has(p.kind)) return;
+    this.diskAlerted.add(p.kind);
+    this.o.alert(d.job.owner.taskId, d.msg);
   }
 
   private ctxFor(job: ProcJobRecord, ac: AbortController): ProcessContext {
@@ -324,7 +361,17 @@ export class ProcRunner {
   private async recoverKind(p: Processor): Promise<void> {
     const { store, owner } = this.o;
     for (const row of store.runningOfKind(p.kind)) {
-      if (this.inflight.has(row.jobId)) continue;
+      // 本进程仍在跑的行不碰;但 **被 fence 的 in-flight**(F2:自己心跳失败 fence 后又重新拿到租约,行不会被任何人
+      // 接管)要等它真正收尾再当孤儿处理,否则永远停在 running。
+      const live = this.inflight.get(row.jobId);
+      if (live) {
+        if (live.reason !== "fenced") continue;
+        if (!(await withTimeout([live.settled], this.o.abortWaitMs ?? 5_000))) {
+          this.log(`${row.jobId}: fence 后处理器未在时限内退出,本次不接管该行`);
+          continue;
+        }
+      }
+      const allowSelf = row.claimedBy === owner;
       let outcome: "rerun" | "done" | "uncertain" = "uncertain";
       let why = "该处理器未实现 recover";
       if (p.recover) {
@@ -336,7 +383,7 @@ export class ProcRunner {
         }
       }
       if (!this.leaseOk(p.kind)) return; // recover 期间失租,不再写
-      store.settleOrphan(row.jobId, owner, outcome, { error: why });
+      store.settleOrphan(row.jobId, owner, outcome, { error: why, allowSelf });
       if (outcome === "uncertain") {
         this.o.alert(row.owner.taskId, `${row.kind} 任务上次执行被中断且无法判定结果(${why}),需人工确认: ${row.jobId}`);
       }
@@ -377,12 +424,6 @@ export class ProcRunner {
     }
     const abortWait = this.o.abortWaitMs ?? 5_000;
     const waitMs = this.o.shutdownWaitMs ?? 15 * 60_000;
-    const withTimeout = async (ps: Promise<void>[], ms: number): Promise<boolean> => {
-      let timer: NodeJS.Timeout | undefined;
-      const timeout = new Promise<boolean>((r) => { timer = setTimeout(() => r(false), ms); timer.unref?.(); });
-      const done = Promise.all(ps).then(() => true);
-      try { return await Promise.race([done, timeout]); } finally { if (timer) clearTimeout(timer); }
-    };
     const interruptible = all.filter((f) => f.proc.interruptible);
     if (!(await withTimeout(interruptible.map((f) => f.settled), abortWait))) {
       // 处理器无视 abort:强制回 pending(租约随后删除,其后续 assertLease 必失败)。
@@ -396,7 +437,8 @@ export class ProcRunner {
         if (!this.inflight.has(f.job.jobId)) continue;
         f.reason = "shutdown";
         f.ac.abort();
-        store.finish(f.job.jobId, owner, { state: "uncertain", error: "关停等待超时,执行结果无法确定" });
+        // 取消落点走契约 `cancelOutcome`(不自造):已进入不可打断动作 → hasIntent=true(biliup → uncertain,其余 → cancelled)。
+        store.finish(f.job.jobId, owner, { state: "cancelled", hasIntent: true, error: "关停等待超时,执行被中止,结果无法确定" });
         this.o.alert(f.job.owner.taskId, `${f.job.kind} 任务关停超时,结果无法确定,需人工确认: ${f.job.jobId}`);
       }
     }
@@ -422,14 +464,19 @@ export class ProcRunner {
 }
 
 /**
- * 只读快照(`_node-status` 用):库不存在 → 全空(不创建文件、不跑迁移);存在则开只读语义的 store 查询。
+ * 只读快照(`_node-status` 用):库不存在 / 未迁移 → 全空(不创建文件、不跑迁移);存在则只读连接查询。
  * `host` 恒 false(调用方是独立 CLI 进程,不是 runner 宿主)。
  */
 export function readProcActive(dataRoot: string): ProcActiveDTO {
   const path = procQueueDbPath(dataRoot);
   const empty: ProcActiveDTO = { host: false, running: {}, pending: {}, leaseAlive: {} };
   if (!existsSync(path)) return empty;
-  const store = new ProcQueueStore(path);
+  let store: ProcQueueStore;
+  try {
+    store = new ProcQueueStore(path, { readOnly: true }); // 只读连接:不切 WAL、不迁移、不跑写事务
+  } catch {
+    return empty;
+  }
   try {
     const { running, pending } = store.active();
     const kinds = new Set([...Object.keys(running), ...Object.keys(pending), ...store.leaseKinds()]);
@@ -440,6 +487,8 @@ export function readProcActive(dataRoot: string): ProcActiveDTO {
       dto.leaseAlive[k] = store.leaseAlive(k);
     }
     return dto;
+  } catch {
+    return empty; // 库存在但尚未迁移(表缺失)等:视为空快照
   } finally {
     store.close();
   }

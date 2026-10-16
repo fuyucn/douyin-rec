@@ -2,7 +2,9 @@
  * proc-queue/store.ts — 每节点持久任务表 `ProcQueueStore`(plans/036 §2.3)。
  *
  * `<root>/db/proc-queue.db`(`node:sqlite`,WAL + busy_timeout)。**任何进程首开都执行幂等迁移**
- * (`PRAGMA user_version` + `CREATE TABLE IF NOT EXISTS`,包在 `BEGIN IMMEDIATE` 内,两进程同时首开安全)。
+ * (`PRAGMA user_version` + `CREATE TABLE IF NOT EXISTS`,包在 `BEGIN IMMEDIATE` 内)。
+ * 多进程同时首开:首次切 WAL 需排他锁,busy_timeout 对它不生效(直接报 `database is locked`),
+ * 故 `PRAGMA journal_mode=WAL` 单独带退避重试(`initWal`);test/proc-queue/store-multiproc.test.ts 用真进程钉住。
  * 全部写操作是同步的、单条 `BEGIN IMMEDIATE` 事务 → 跨进程(serve / record)互斥靠 sqlite 文件锁。
  *
  * 只经 core 的状态机(`canTransition` / `cancelOutcome`)判迁移合法性,不自造第二套;不 import 任何处理器、
@@ -74,9 +76,18 @@ export interface ProcQueueStoreOpts {
   /** pid 是否存活(测试可注入);默认 `process.kill(pid, 0)`。仅用于提前接管,过期才是权威。 */
   isPidAlive?: (pid: number) => boolean;
   log?: (m: string) => void;
+  /** sqlite busy_timeout(默认 5000ms;测试可调小以快速观察锁冲突)。 */
+  busyTimeoutMs?: number;
+  /** 只读打开:不建目录、不切 WAL、不迁移、只读连接;库/表缺失时查询抛错由调用方兜。 */
+  readOnly?: boolean;
 }
 
 const SCHEMA_VERSION = 1;
+const WAL_RETRIES = 200;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS proc_jobs(
@@ -178,11 +189,34 @@ export class ProcQueueStore {
   constructor(readonly dbPath: string, opts: ProcQueueStoreOpts = {}) {
     this.now = opts.now ?? Date.now;
     this.isPidAlive = opts.isPidAlive ?? defaultPidAlive;
+    if (opts.readOnly) {
+      this.db = new DatabaseSync(dbPath, { readOnly: true });
+      this.db.exec(`PRAGMA busy_timeout=${opts.busyTimeoutMs ?? 5000}`);
+      return;
+    }
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
-    this.db.exec("PRAGMA busy_timeout=5000");
-    this.db.exec("PRAGMA journal_mode=WAL");
+    this.db.exec(`PRAGMA busy_timeout=${opts.busyTimeoutMs ?? 5000}`);
+    this.initWal();
     this.migrate();
+  }
+
+  /**
+   * 切 WAL(幂等)。已是 WAL 直接返回;否则退避重试 `locked/busy`:并发首开时 busy_timeout 对
+   * journal_mode 切换不生效,不重试会让后到的进程直接抛 `database is locked`(F3 实测 2 进程 43% 失败)。
+   */
+  private initWal(): void {
+    for (let i = 0; ; i++) {
+      try {
+        const cur = (this.db.prepare("PRAGMA journal_mode").get() as Row).journal_mode;
+        if (String(cur).toLowerCase() === "wal") return;
+        this.db.exec("PRAGMA journal_mode=WAL");
+        return;
+      } catch (e) {
+        if (i >= WAL_RETRIES || !/locked|busy/i.test((e as Error).message)) throw e;
+        sleepSync(5 + Math.random() * 25);
+      }
+    }
   }
 
   /** 幂等迁移:`BEGIN IMMEDIATE` 内重读 user_version(两进程同时首开,后到者见已迁移即跳过)。 */
@@ -380,8 +414,10 @@ export class ProcQueueStore {
 
   /**
    * 认领最老的 pending 行(`BEGIN IMMEDIATE`,两连接并发只一个成功)。
-   * 只认领 `kinds` 内、且 `owner` 持有**有效租约**的 kind(DB 级 fencing);`cancelRequested` 的行跳过。
-   * `accept` 在事务内逐候选同步判定(磁盘准入等):返回 false 则跳过该候选,不改行。
+   * 只认领 `kinds` 内、且 `owner` 持有**有效租约**的 kind(DB 级 fencing)。
+   * `cancelRequested` 的待执行行(曾认领、关停回退后才被取消)**不执行**,认领时直接落终态(经
+   * `cancelOutcome`,等价 pending→running→cancelled 一步完成,`attempts` 不增),避免永远停在 pending。
+   * `accept` 在事务内逐候选同步判定(须纯判定,不得做告警等副作用):返回 false 则跳过该候选,不改行。
    */
   claim(o: { kinds: readonly string[]; owner: string; accept?: (job: ProcJobRecord) => boolean }): ProcJobRecord | null {
     if (o.kinds.length === 0) return null;
@@ -390,11 +426,19 @@ export class ProcQueueStore {
       const marks = o.kinds.map(() => "?").join(",");
       const cands = this.db.prepare(
         `SELECT j.* FROM proc_jobs j JOIN proc_runner_lease l ON l.kind=j.kind AND l.owner=? AND l.expiresAt>?
-         WHERE j.state='pending' AND j.cancelRequested=0 AND j.kind IN (${marks})
+         WHERE j.state='pending' AND j.kind IN (${marks})
          ORDER BY j.createdAt, j.rowid`,
       ).all(o.owner, t, ...o.kinds) as Row[];
       for (const c of cands) {
         const rec = toRecord(c);
+        if (rec.cancelRequested) {
+          const to = cancelOutcome(rec.kind, false);
+          this.db.prepare(
+            `UPDATE proc_jobs SET state=?, error='已取消(认领前已请求取消)', finishedAt=?, updatedAt=?
+             WHERE jobId=? AND state='pending'`,
+          ).run(to, t, t, rec.jobId);
+          continue;
+        }
         if (o.accept && !o.accept(rec)) continue;
         this.db.prepare(
           `UPDATE proc_jobs SET state='running', claimedBy=?, attempts=attempts+1, everClaimed=1,
@@ -465,11 +509,13 @@ export class ProcQueueStore {
    */
   settleOrphan(
     jobId: string, newOwner: string, outcome: "rerun" | "done" | "uncertain",
-    info: { error?: string } = {},
+    info: { error?: string; allowSelf?: boolean } = {},
   ): boolean {
     return this.tx(() => {
       const row = this.get(jobId);
-      if (!row || row.state !== "running" || row.claimedBy === newOwner) return false;
+      if (!row || row.state !== "running") return false;
+      // 本持有者名下的行默认拒绝(可能正在跑);仅 runner 确认「已被 fence、不在执行」时 allowSelf(F2)。
+      if (row.claimedBy === newOwner && !info.allowSelf) return false;
       if (!this.leaseValid(row.kind, newOwner)) return false;
       if (outcome === "rerun") {
         if (!canTransition("running", "pending", { reason: "lease-expired-rerun" })) return false;
@@ -522,7 +568,7 @@ export class ProcQueueStore {
 
   /**
    * 取消:从未认领的 pending 直接 cancelled;running 置 `cancelRequested`(执行者心跳时发现并 abort);
-   * pending 但已认领过(关停回退)也置标记,claim 会跳过它。其余状态 noop。
+   * pending 但已认领过(关停回退)也置标记,下次 `claim` 扫到时直接落终态(不执行)。其余状态 noop。
    */
   requestCancel(jobId: string): "cancelled" | "requested" | "noop" {
     return this.tx(() => {
