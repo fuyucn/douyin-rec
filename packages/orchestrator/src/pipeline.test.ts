@@ -2,7 +2,7 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupSourcesShared, xmlKeepRule, runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, consecutiveSidecarSkips, xmlKeepRule, runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
 import type { Broadcast } from "./identity.js";
@@ -2067,21 +2067,88 @@ describe("runPipeline — 边录边传识别短路", () => {
       deps.ledger.close();
     });
 
-    it("issue #146:边车消失且分段已是 mkv → 跳过一轮后重扫仍无人认领 → 转人工,不丢段、不删源", async () => {
-      const deps = makeDeps({ cfg: { ...makeDeps().cfg, cleanup: { sourceAfterDone: true, stageSourceAfterMerge: true } } });
+    it("issue #146:边车消失 → 跳过时必须留痕:job 日志含「会话边车扫描后已消失 … 本轮跳过」,台账 pull 步骤记明原因", async () => {
+      const lines: string[] = [];
+      const deps = makeDeps({ makeRunLogger: () => ({ info: (...a: unknown[]) => lines.push(a.join(" ")), warn: (...a: unknown[]) => lines.push(a.join(" ")), error: () => {} }) });
+      sidecarGone(deps);
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      await runPipeline(b, deps);
+      expect(lines.some((l) => l.includes("会话边车扫描后已消失") && l.includes(`${A}.session.json`) && l.includes("本轮跳过"))).toBe(true);
+      const skip = deps.ledger.getSteps(b.streamKey).filter((s) => s.step === "pull");
+      expect(skip).toHaveLength(1);
+      expect(skip[0].detail).toContain("会话边车扫描后消失");
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("pending"); // 标注不改 state
+      deps.ledger.close();
+    });
+
+    it("issue #146:持续缺失 → 连续跳过 3 轮后第 4 轮转 needs_manual + 告警恰一次(不无限 pending、不删源)", async () => {
+      const deps = makeDeps();
+      sidecarGone(deps);
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      for (let i = 0; i < 3; i++) {
+        expect((await runPipeline(b, deps)).state).toBe("pending");
+        expect(deps.notify.mock.calls.some((c) => (c[0] as { kind: string }).kind === "error")).toBe(false);
+      }
+      expect((await runPipeline(b, deps)).state).toBe("needs_manual");
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
+      const errs = deps.notify.mock.calls.map((c) => c[0] as { kind: string; message?: string }).filter((e) => e.kind === "error");
+      expect(errs).toHaveLength(1);
+      expect(errs[0].message).toContain("连续 3 轮");
+      expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("issue #146:跳过后边车恢复并真正 pull → 连续计数清零(之后再跳过从第 1 次起算)", async () => {
+      const deps = makeDeps();
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      const exists = deps.transports.get("node-1")!.exists as Mock;
+      exists.mockImplementation(async (paths: string[]) => !paths.some((p) => p.endsWith(".session.json")));
+      await runPipeline(b, deps);
+      await runPipeline(b, deps);
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(2);
+      deps.ledger.logStep(b.streamKey, "pull", "start"); // 一次真实的 pull 开始
+      deps.ledger.logStep(b.streamKey, "pull", "done");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(0);
+      deps.ledger.close();
+    });
+
+    it("issue #146:winner 有 2 个会话、仅第 2 个会话的边车消失 → 本轮跳过(逐会话复核)", async () => {
+      const t0 = Date.now() - 3_600_000;
+      const mk = (base: string, start: number, ts: string) => makeRec({
+        sessionBase: base, tsFiles: [ts], xmlPath: undefined, startMs: start, endMs: start + 1_800_000,
+        durationSec: 1800, sessionJsonPath: `/remote/${base}.session.json`,
+      });
+      const b = makeBroadcast([
+        { workerId: "node-1", rec: mk(A, t0, `/remote/${A}.ts`) },
+        { workerId: "node-1", rec: mk(B, t0 + 1_800_000, `/remote/${B}.ts`) },
+      ]);
+      const deps = makeDeps();
+      (deps.transports.get("node-1")!.exists as Mock).mockImplementation(async (paths: string[]) => !paths.some((p) => p.endsWith(`${B}.session.json`)));
+      pullWrites(deps);
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("issue #146(已知残余):重扫后无边车的 mkv 对 hub 不可见(groupSessions 不收)→ 只按可见分段收口,不是被未认领门禁拦下", async () => {
+      const deps = makeDeps();
       sidecarGone(deps);
       pullWrites(deps);
       const first = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
       deps.ledger.upsertPending(first.streamKey);
       expect((await runPipeline(first, deps)).state).toBe("pending");
-      // 重扫:边车已没、mkv 还在 → 沿用 #143 未认领门禁。
-      const second = makeBroadcast([{ workerId: "node-1", rec: recs(false) }]);
-      const r2 = await runPipeline(second, deps);
-      expect(r2.state).toBe("needs_manual");
-      expect(deps.uploadPlain).not.toHaveBeenCalled();
-      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
-      const err = deps.notify.mock.calls.map((c) => c[0] as { kind: string; message?: string }).find((e) => e.kind === "error");
-      expect(err?.message).toContain("未被任何会话认领");
+      // 真实重扫:无边车 → mkv 不进清单,只剩原生 .ts。
+      const second = makeBroadcast([{ workerId: "node-1", rec: makeRec({ sessionBase: B, tsFiles: [`/remote/${B}.ts`], xmlPath: undefined }) }]);
+      expect((await runPipeline(second, deps)).state).toBe("done");
       deps.ledger.close();
     });
 

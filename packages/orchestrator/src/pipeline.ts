@@ -81,7 +81,24 @@ export async function lostSidecars(
   return lost;
 }
 
-const STAGE_VIDEO_RE = new RegExp(`\\.(${VIDEO_EXT_ALT})$`, "i");
+/** 台账 pull 步骤 detail 前缀:标记「本轮因边车消失而跳过」(无 schema 变更,计数即从步骤流推导)。 */
+export const SIDECAR_SKIP_PREFIX = "跳过·";
+/** 连续跳过上限:默认对账 30 分钟一轮 → 约 1.5 小时仍缺失就不再等,转人工 + 告警。 */
+export const MAX_SIDECAR_SKIPS = 3;
+
+/** 自最近一次真正的 pull(start 事件)以来连续的跳过次数。 */
+export function consecutiveSidecarSkips(steps: readonly { step: string; phase: string; detail?: string | null }[]): number {
+  let n = 0;
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const s = steps[i];
+    if (s.step !== "pull") continue;
+    if (s.phase === "done" && s.detail?.startsWith(SIDECAR_SKIP_PREFIX)) n++;
+    else break;
+  }
+  return n;
+}
+
+const STAGE_VIDEO_RE =new RegExp(`\\.(${VIDEO_EXT_ALT})$`, "i");
 
 /**
  * stage 目录顶层的「视频类内容」(视频容器全集 ts/flv/mp4/mkv,来自 core 注册表 + `.work/` `.upload/` 中间产物目录)。
@@ -801,14 +818,27 @@ async function runPipelineInner(
   }
 
   // 扫描与拉取之间会话边车可能消失(节点侧格式转换 / 清理恰好完成,issue #146)。拉取前复核存在性:
-  // 缺失 → 本轮跳过该场(等下一轮重扫:边车没了就不再声明,按扫描结果分组,不能认领的分段仍由下面的
-  // 「未认领」门禁转人工 → 不丢段、不静默)。必须在转 syncing **之前**返回:syncing 不在 reconciler 的
+  // 缺失 → 本轮跳过该场(等下一轮重扫:边车没了就不再声明,按扫描结果分组;无边车的 mkv/mp4 不进清单、对 hub 不可见,
+  // 并非由「未认领」门禁兜底,已知残余见 PR #174)。持续缺失由连续跳过上限转人工。必须在转 syncing **之前**返回:syncing 不在 reconciler 的
   // RETRYABLE 里,转了就卡死;也不记 failed(failed 会计重试次数 + 告警噪音)。
   const missingSidecars = await lostSidecars(winnerMembers, transports);
   if (missingSidecars.length > 0) {
     const names = missingSidecars.map((f) => path.basename(f)).join(", ");
+    const prior = consecutiveSidecarSkips(ledger.getSteps(streamKey));
+    if (prior >= MAX_SIDECAR_SKIPS) {
+      // 持续缺失不能无限 pending(否则「可见的失败」变成只有 job.log 能看到的静默等待):转人工 + 告警一次
+      // (needs_manual 不在 RETRYABLE,不会每轮重复告警)。
+      const msg = `会话边车连续 ${prior} 轮扫描后仍消失(${names}),已转人工`;
+      console.warn(`[pipeline] ${streamKey} ${msg}`);
+      jlog(`${msg}(源文件未动)`);
+      ledger.setState(streamKey, "needs_manual", { winnerWorker: winner.workerId, error: msg });
+      notify({ kind: "error", stage: "同步", message: `${streamKey} ${msg},请检查节点上的会话边车与分段` });
+      return { state: "needs_manual" };
+    }
     console.warn(`[pipeline] ${streamKey} 会话边车扫描后已消失(${names}),本轮跳过,下一轮重扫`);
-    jlog(`会话边车扫描后已消失(${names}) → 本轮跳过该场(不记 failed),下一轮重扫后收口`);
+    jlog(`会话边车扫描后已消失(${names}) → 本轮跳过该场(不记 failed),下一轮重扫后收口(第 ${prior + 1}/${MAX_SIDECAR_SKIPS} 次)`);
+    // 台账标注(不改 state):hub 任务页据此看到「为什么没往下走」;同时是连续跳过的计数来源。
+    ledger.logStep(streamKey, "pull", "done", `${SIDECAR_SKIP_PREFIX}会话边车扫描后消失(${names}),第 ${prior + 1}/${MAX_SIDECAR_SKIPS} 次`);
     return { state: ledger.get(streamKey)?.state ?? "pending" };
   }
 
