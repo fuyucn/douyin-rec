@@ -938,6 +938,31 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
+  it("场景4b(issue #146): 成员剔除时 exists 抛错 → 仍按缺失剔除,不把整场炸掉", async () => {
+    // Transport.exists now throws when it cannot tell (issue #146). Member pruning must keep its own
+    // fail-closed `.catch(() => false)`; without it an ssh blip would throw out of runPipeline
+    // instead of just dropping that member.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const broadcast = makeBroadcast([
+      { workerId: "node-1", rec: makeRec({ durationSec: 9999, totalGapSec: 0 }) },
+      { workerId: "node-2", rec: makeRec({ durationSec: 3600, totalGapSec: 0 }) },
+    ]);
+    const deps = makeDeps();
+    const t1 = makeTransport("node-1", true);
+    (t1.exists as Mock).mockRejectedValue(new Error("ssh rc=255"));
+    deps.transports.set("node-1", t1);
+    deps.transports.set("node-2", makeTransport("node-2", true));
+    deps.ledger.upsertPending(broadcast.streamKey);
+
+    const result = await runPipeline(broadcast, deps);   // 不抛错
+    expect(result.state).toBe("done");
+    expect(deps.ledger.get(broadcast.streamKey)?.winnerWorker).toBe("node-2");
+    expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+    deps.ledger.close();
+  });
+
   it("场景5(#1 全缺失): 所有成员文件都没了 → failed", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);

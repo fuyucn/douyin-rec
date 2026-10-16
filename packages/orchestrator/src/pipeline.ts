@@ -64,10 +64,11 @@ export function unclaimedStageSegments(stageSub: string, pulled: readonly string
 /**
  * Pre-pull sidecar recheck (issue #146).
  *
- * `missing` and `unknown` must stay separate. `exists() === false` is NOT proof that a sidecar was
- * deleted: `SshTransport.exists` swallows ssh failures and reports false, so a dropped link is
- * indistinguishable from a removed file. Only `missing` may count toward {@link MAX_SIDECAR_SKIPS} —
- * otherwise a flaky network would escalate a perfectly healthy session to `needs_manual`.
+ * `missing` and `unknown` must stay separate. `exists()` reports false only when the node answered
+ * "gone" and throws when it could not tell; a thrown probe lands in `unknown`. Because a transport
+ * could still report false for its own reasons, a false answer is additionally confirmed with
+ * `ping()` before it is called a deletion. Only `missing` may count toward
+ * {@link MAX_SIDECAR_SKIPS} — otherwise a flaky network would escalate a healthy session.
  */
 export interface SidecarProbe {
   /** Node answered and the sidecar is gone → counts toward the consecutive-skip limit. */

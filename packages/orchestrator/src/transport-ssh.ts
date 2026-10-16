@@ -432,12 +432,13 @@ export class SshTransport implements Transport {
     const test = paths.map((p) => `test -e '${p.replace(/'/g, "'\\''")}'`).join(" && ");
     // `this.run` rejects on ssh failure/timeout → propagate. Only the command's own OK/MISSING is a verdict.
     const out = await this.run([`${test} && echo OK || echo MISSING`]);
-    const trimmed = out.trim();
-    // MISSING wins when both appear (fail closed); a lone `OK` is the only "all present" verdict.
-    if (/\bMISSING\b/.test(trimmed)) return false;
-    if (/\bOK\b/.test(trimmed)) return true;
+    // Parse only the last non-empty line: a login banner (`.bashrc` etc.) may print anything to
+    // stdout, and a stray "MISSING" word elsewhere must not be read as "the file is gone".
+    const last = out.split("\n").map((l) => l.trim()).filter(Boolean).pop();
+    if (last === "MISSING") return false;
+    if (last === "OK") return true;
     // Unparsable (empty stdout, banner noise, truncated output) → not a verdict.
-    throw new Error(`exists 探测输出无法解析: ${trimmed.slice(-200) || "<空>"}`);
+    throw new Error(`exists 探测输出无法解析: ${(last ?? "<空>").slice(-200)}`);
   }
 
   /** 轻量探针:远端 `test -d <dataRoot>`(不扫 recordings),硬超时默认 6s。退出非零/超时 → throw。 */
