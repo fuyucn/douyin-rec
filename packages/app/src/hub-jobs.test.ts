@@ -438,6 +438,8 @@ describe("buildQueueView", () => {
     expect(by("douyin:STOPPED:2026-10-06")).toBe("stopped");
     expect(by("douyin:BROKEN:2026-10-06")).toBe("waiting_manual");
     expect(by("douyin:NOERR:2026-10-06")).toBe("waiting_manual");
+    // 空 error 的行必须带一句可读的兜底原因(红色「待人工」旁不能是空白)。
+    expect(rows.find((r) => r.streamKey === "douyin:NOERR:2026-10-06")!.error).toContain("缺少失败原因");
     // error 透出到行
     expect(rows.find((r) => r.streamKey === "douyin:BROKEN:2026-10-06")!.error).toBe("进程重启中断");
     expect(rows.find((r) => r.streamKey === "douyin:UPLOAD:2026-10-06")!.error).toBe(STAGE_READY);
@@ -482,6 +484,38 @@ describe("buildQueueView", () => {
     const { active, rows } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY, manualLimit: 20 });
     expect(active.map((a) => a.streamKey)).toContain("douyin:FIRE:2026-10-01");
     expect(rows.find((r) => r.streamKey === "douyin:FIRE:2026-10-01")?.phase).toBe("waiting_manual");
+  });
+
+  it("error 被换行/制表符包住时仍算 stage 标记(SQL 判定与 JS trim 一致)", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage10-"));
+    const now = T0 + 10_000_000;
+    seedJob(db, "douyin:WRAP:2026-10-01", [["needs_manual", now]], 100, { error: `\n\t${STAGE_READY} \r\n` });
+    seedJob(db, "douyin:FIRE:2026-10-01", [["needs_manual", now - 1000]], 100, { error: "上传失败" });
+    db.close();
+    const { active, rows } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
+    // 包住空白的 stage 标记不应进人工收件箱。
+    expect(active.map((a) => a.streamKey)).not.toContain("douyin:WRAP:2026-10-01");
+    expect(active.map((a) => a.streamKey)).toContain("douyin:FIRE:2026-10-01");
+    const wrap = rows.find((r) => r.streamKey === "douyin:WRAP:2026-10-01");
+    expect(wrap?.phase).toBe("waiting_upload");
+    expect(rows.filter((r) => r.streamKey === "douyin:WRAP:2026-10-01")).toHaveLength(1);
+  });
+
+  it("rows 里同一场不重复出现(onlyError / excludeError 过滤不能交叠)", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage9-"));
+    const now = T0 + 10_000_000;
+    seedJob(db, "douyin:MIX:2026-10-01", [["needs_manual", now]], 100, { error: STAGE_READY });
+    seedJob(db, "douyin:FIRE:2026-10-01", [["needs_manual", now - 1000]], 100, { error: "上传失败" });
+    seedJob(db, "douyin:DONE:2026-10-01", [["done", now - 2000]], 100, { bv: "BV1" });
+    db.close();
+    const { rows } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
+    const keys = rows.map((r) => r.streamKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toContain("douyin:MIX:2026-10-01");
+    expect(keys).toContain("douyin:FIRE:2026-10-01");
+    expect(keys).toContain("douyin:DONE:2026-10-01");
   });
 
   it("waiting 多条登记取最早一条(最急)作代表", () => {

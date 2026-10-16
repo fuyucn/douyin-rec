@@ -363,12 +363,15 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         params.push(...opts.excludeStates);
       }
       // error 过滤与 states/excludeStates 正交,可叠加。COALESCE 让 NULL / 空串都算「无标记」。
+      // 判定口径必须和 toRow 里的 JS trim() 一致:SQLite 的 TRIM(默认) 只去空格,而 JS 会去制表符/
+      // 换行/回车,两者不同会把「被换行包住的 STAGE_READY」分进真事故堆、前端又渲染成 waiting_upload。
+      // 显式去掉这四种空白字符后与 JS trim() 对齐(不能用 char(9,10,13,32):char() 只取字符串首字符)。
       if (opts.excludeError !== undefined) {
-        where.push("COALESCE(TRIM(error), '') <> ?");
+        where.push(`COALESCE(${stripWsSql("error")}, '') <> ?`);
         params.push(opts.excludeError);
       }
       if (opts.onlyError !== undefined) {
-        where.push("TRIM(error) = ?");
+        where.push(`${stripWsSql("error")} = ?`);
         params.push(opts.onlyError);
       }
       const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
@@ -541,6 +544,22 @@ export interface BuildQueueOpts {
   stageDir?: string;
 }
 
+/**
+ * `needs_manual` 却没有 error 的行的兜底文案(issue #188 验收 2)。
+ *
+ * 这类行 = 数据异常(某条路径漏写了原因),或是**修复部署前**遗留的旧行(2026-10 前 stage 正常
+ * 收口不写 error)。红色「待人工」旁边必须有一句可读的原因,不能只留一个空红的标签。
+ */
+const UNKNOWN_MANUAL_REASON = "缺少失败原因(数据异常,建议清历史或重跑该场)";
+
+/**
+ * 去掉 error 列首尾所有空白字符的 SQL 表达式(与 JS trim() 对齐;NULL → 空串)。
+ * 先 REPLACE 掉制表符/换行/回车,再 TRIM 去空格(TRIM 默认只去空格,不要手工 replace 空格 ——
+ * 那会把「stage 模式正常收口」里的空格也删掉,导致与常量比不上)。
+ */
+const stripWsSql = (col: string): string =>
+  `TRIM(REPLACE(REPLACE(REPLACE(${col}, char(9), ''), char(10), ''), char(13), ''))`;
+
 const EMPTY_POOL: HubPoolSnapshotDTO = {
   cpu: { active: 0, queued: 0, max: 0 },
   net: { active: 0, queued: 0, max: 0 },
@@ -657,7 +676,11 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
       winnerWorker: job.winnerWorker,
       fails: job.fails,
       updatedAt: job.updatedAt,
-      error: job.error ?? null,
+      // 空 error 的 needs_manual 行补一句兜底说明(见 UNKNOWN_MANUAL_REASON);
+      // 其余行原样透出。
+      error: (job.state === "needs_manual" && !(job.error ?? "").trim())
+        ? UNKNOWN_MANUAL_REASON
+        : job.error ?? null,
       bv: job.bv ?? null,
       videoDurationSec: job.videoDurationSec,
       // 收尾时刻 = 末个事件(终态那次的时刻);非终态 null。

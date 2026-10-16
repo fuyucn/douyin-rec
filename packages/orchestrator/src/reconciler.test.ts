@@ -1409,6 +1409,35 @@ describe("磁盘看门狗(节点剩余空间告警)", () => {
       ledger.close();
     });
 
+    it("上传类节点失败(不可自动重试)→ 转人工时 error 必须非空(issue #188)", async () => {
+      const ledger = freshLedger();
+      const rec = makeRec();
+      const transports = new Map([["node-1", makeTransport("node-1", [rec])]]);
+      const key = clusterBroadcasts([{ workerId: "node-1", recordings: [rec] }], 0, "douyin")[0].streamKey;
+      let n = 0;
+      const runPipeline = vi.fn(async (b: Broadcast) => {
+        n++;
+        if (n === 1) {
+          ledger.markFailed(b.streamKey, "");
+          ledger.syncNodeState(b.streamKey, "upload_plain", "failed", { error: "" });
+          return { state: "failed" as const };
+        }
+        ledger.markDone(b.streamKey, "BV");
+        return { state: "done" as const, bv: "BV" };
+      });
+      const r = new Reconciler({
+        platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+        runPipeline: runPipeline as never,
+        settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0,
+      });
+      await r.reconcileAll();
+      await r.reconcileAll();
+      const job = ledger.get(key);
+      expect(job?.state).toBe("needs_manual");
+      expect((job?.error ?? "").trim()).not.toBe("");
+      ledger.close();
+    });
+
     it("failed 且达重试上限 → 转人工时 error 必须非空(issue #188:空串不得落库)", async () => {
       const ledger = freshLedger();
       const rec = makeRec();

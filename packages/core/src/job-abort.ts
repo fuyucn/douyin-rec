@@ -15,6 +15,22 @@ export { STAGE_READY };
  * 收口到 `needs_manual` 的路径散落在 orchestrator 管线与 CLI 节点重跑,曾经其中一条漏写 error,
  * 于是正常收口被队列判成红灯事故(issue #188)。统一从这里取值,漏写的面就只剩「忘记调用」。
  */
+/** 只需 `setState(streamKey, state, patch)` 这一面账的台账(真实 SyncLedger / 测试假账都满足)。 */
+export interface StageCompletionLedger {
+  setState(streamKey: string, state: "needs_manual", patch: { error: string }): unknown;
+}
+
+/**
+ * stage 交付模式的收口落账:写 `needs_manual` **并带上显式原因**(issue #188)。
+ *
+ * 为什么是函数而不是让调用点各写 `setState(..., { error: STAGE_READY })`:
+ * 这条收口分散在 orchestrator 的两条管线与 CLI 的单节点重跑三处,历史上其中一处漏写 error,
+ * 结果正常收口被队列判成红灯事故。收口只经过这一个入口,漏写的面就只剩「忘记调用」。
+ */
+export function closeStageReady(ledger: StageCompletionLedger, streamKey: string, uploadMode: string | undefined): void {
+  ledger.setState(streamKey, "needs_manual", { error: stageCompletionError(uploadMode) });
+}
+
 export function stageCompletionError(uploadMode: string | undefined): string {
   if (uploadMode === "upload") {
     // upload 模式不该走「收口到 needs_manual」这条路径;真走到这里说明上游判断漏了,

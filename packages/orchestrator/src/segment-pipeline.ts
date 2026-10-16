@@ -9,7 +9,7 @@
  */
 import path from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted, stageCompletionError } from "@drec/core";
+import { effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
 import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadableParts } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
@@ -506,7 +506,7 @@ export async function runSegmentPipeline(o: {
       notify({ kind: "error", stage: "同步", message: `${streamKey} 分段 stage 模式无任何分 P 产物,已保留全部源,请人工检查` });
       return { state: "needs_manual" };
     }
-    ledger.setState(streamKey, "needs_manual", { error: stageCompletionError(cfg.uploadMode) });
+    closeStageReady(ledger, streamKey, cfg.uploadMode);
     // 产物已落盘待人工上传 → 删各节点源(stage 里的分P交付物保留,不能删)。
     await cleanupNodeSources();
     notify({ kind: "stageReady", streamKey });

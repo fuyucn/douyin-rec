@@ -17,7 +17,7 @@ import { Command } from "commander";
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, burnFlags, effectiveStageFormat, stageCompletionError, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
+import { biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -1365,7 +1365,7 @@ const hubStarter: HubStarter = {
                 if (bv) opts.onEvent({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
               } else {
                 // stage 模式正常收口必须带显式标记(issue #188):空 error 会被队列判成红灯事故。
-                ledger.setState(streamKey, "needs_manual", { error: stageCompletionError(cfg.uploadMode) });
+                closeStageReady(ledger, streamKey, cfg.uploadMode);
               }
               return { ok: true };
             }

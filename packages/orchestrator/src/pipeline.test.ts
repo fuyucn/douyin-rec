@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { cleanupSourcesShared, consecutiveSidecarSkips, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
-import { STAGE_READY } from "@drec/core";
+import { closeStageReady, STAGE_READY } from "@drec/core";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
@@ -1083,6 +1083,18 @@ describe("runPipeline", () => {
       expect(deps.ledger.get(broadcast.streamKey)?.fails).toBe(1);
       deps.ledger.close();
     });
+  });
+
+  it("CLI 单节点重跑的 stage 收口同样必须带 STAGE_READY(issue #188 一轮 High 的回归测试)", () => {
+    // 该调用点在 cli.ts 内不可直接 import,断言它委托的唯一收口入口会写 error。
+    const writes: Array<{ streamKey: string; state: string; error: string }> = [];
+    closeStageReady(
+      { setState: (k, st, patch) => { writes.push({ streamKey: k, state: st, error: patch.error }); } },
+      "douyin:R:2026-10-01", "stage",
+    );
+    expect(writes).toEqual([{ streamKey: "douyin:R:2026-10-01", state: "needs_manual", error: STAGE_READY }]);
+    // upload 模式没有这条收口路径 → 明确抛错,不静默写空 error。
+    expect(() => closeStageReady({ setState: () => {} }, "douyin:R:2026-10-01", "upload")).toThrow();
   });
 
   it("合并模式 stage 收口必须写 STAGE_READY(线上噪音主来源,空 error 会被判红灯)", async () => {
