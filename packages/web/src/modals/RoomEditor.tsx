@@ -110,6 +110,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
 
   async function submit(ev: FormEvent): Promise<void> {
     ev.preventDefault();
+    if (managed) return;
     const r = payloadFromForm(form, ctx);
     if (!r.ok) { toast(t("rooms.scheduleInvalid"), "error"); return; }
     setBusy(true);
@@ -152,6 +153,9 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
               <div className="rm-editor-body">
                 {!room.recording && <p className="status-strip">{t("room.editor.noTask")}</p>}
                 {managed && <p className="status-strip">{t("room.editor.managed")}</p>}
+                {/* Managed rooms are owned by the master: every control is read-only here and Save is off,
+                    otherwise the processing half would still be written to this node's rule file. */}
+                <fieldset disabled={managed} className="contents">
 
                 <div>
                   <span className="field-label">{t("room.editor.after")}</span>
@@ -344,6 +348,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                     )}
                   </div>
                 </details>
+                </fieldset>
               </div>
 
               <div className="rm-editor-foot">
@@ -352,7 +357,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                 )}
                 <span className="flex-1 rm-foot-gap" />
                 <Button type="button" variant="secondary" onClick={onClose}>{t("hub.common.cancel")}</Button>
-                <Button type="submit" disabled={busy}>{busy ? t("rooms.saving") : t("rooms.save")}</Button>
+                <Button type="submit" disabled={busy || managed}>{busy ? t("rooms.saving") : t("rooms.save")}</Button>
               </div>
             </form>
           </BaseDialog.Popup>
