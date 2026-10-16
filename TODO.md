@@ -15,6 +15,12 @@
 
 ## 进行中
 
+- [~] **T-56 标题/产物名/场次键/默认日期统一按设置时区（issue [#155](https://github.com/fuyucn/douyin-rec/issues/155)）**
+  — 2026-10-15 认领，分支 `codex/issue-155-title-tz`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：审计全部生成日期的入口并统一为 `settings.timezone`（缺省北京）：分段文件名、streamKey、会话名还原、
+  独立 CLI 入口、前端默认日期。**为什么**：宿主机/浏览器为美西时晚间（北京次日）场次日期错一天。
+  **验收**：美西宿主机/浏览器下日期均为北京日期；每个入口有回归用例；全量 test / typecheck / web build 通过。
+
 - [~] **T-54 分段续跑补齐烧录轨:续跑不重烧也不补烧录轨分 P（issue [#142](https://github.com/fuyucn/douyin-rec/issues/142)）**
   — 2026-10-15 认领,分支 `codex/issue-142-resume-burn`(**未合并 / 未部署 / 未 close**)。#140 复审期间发现（不在 #140 范围，单独开票）：续跑路径拿到的烧录产物字段恒为空
   （赋值在主流程烧录循环里，而该循环在续跑分叉之后）→ `appendSegmentGroup(files=[])` 直接把该步骤标
