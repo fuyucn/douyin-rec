@@ -1,91 +1,87 @@
 # 036 后处理插件化：Processor 契约 + 每节点持久任务表
 
-状态：设计稿（未实施）。依据：2026-10-15 对代码的实测盘点（下文行号均为当日 `feat/hub-optimization` 基线，含 #141 原子写分P产物）。
-与 plan 033（不变量 I1–I12）、plan 034（交付模型）兼容；本文只管「转封装 / 合并 / 烧录 / 上传」这四类
-**文件处理**怎么执行，不改选优、聚类、对账语义。台账：本计划被 accept 后由记账会话在 `TODO.md` 记 `T-N`，
-本文不改 `TODO.md`。
+> **TODO：T-N 待分配（合入时补）。** 本计划合入的同一 PR 内在 `TODO.md` 补 `T-N` 行并回填此处，满足
+> AGENTS.md「plan 与 TODO 双向引用」；`TODO.md` 的 T-52 已单向指向本文。
+
+状态：设计稿（未实施），**返工 R1**。基线 `feat/hub-optimization` = `a208cc5`（含 #141 原子写分P产物、#144 合并收口
+`groupSessionsInDir` + stage 带边车 + 未认领分段守卫）。下文行号均在该基线实测。
+与 plan 033（不变量 I1–I12）、plan 034（交付模型）兼容；本文只管「转封装 / 合并 / 烧录 / 上传」四类**文件处理**
+怎么执行，不改选优、聚类、对账语义。
 
 ## Goal
 
-把后处理做成和平台、录制引擎一样的插件：
+把后处理做成和平台、录制引擎一样的插件，**分两期交付**：
 
-1. core 定义 `Processor` 契约 + 注册表（与 `Platform`、`registerEngine` 同级）。
-2. 一个处理器一个包：`@drec/proc-remux`、`@drec/proc-merge`、`@drec/proc-burn`、`@drec/proc-biliup`。
-3. 执行底座 = **每节点一张持久任务表**：文件在哪个节点，任务就在哪个节点执行；按资源类（cpu / net / upload）
-   限并发；崩溃后按表续跑，不再扫目录猜。
-4. 派发：本机直接写表；master → 远端用新隐藏命令 `_enqueue <dataRoot> <base64>`（与 `_apply-tasks` 同构），不用 webhook。
-5. orchestrator 的 pipeline 退化为「派发 + 等回执」。
-6. **核心原则：输入文件由派发方显式列出，处理器从不扫目录。** issue #143 的根因就是「哪些文件属于这一场」
-   在 5 处各自从目录推导（见 §1.3）。
+- **第一期（最小可交付，满足用户意图 1 + 意图 2 的「侧进程 / 队列」）**：
+  core `Processor` 契约 + 注册表 → 每节点持久任务表包 → remux 处理器 + 录制封口转换迁到任务表 →
+  收尾后对「留存文件」转所选输出格式（解锁规则任务）→ 任务页「合成所选」跟随输出格式。
+  第一期**只有 remux 一个处理器**进任务表；合并 / 烧录 / 上传路径一行不动，稳定版行为除「规则任务可选输出格式」外不变。
+- **第二期（可评审粒度，开工前再细化）**：merge / burn / 上传迁到任务表、master 管线退化为「派发 + 等回执」、
+  节点作业链、队列页。
 
-## 1. 现状
+不变的核心原则：**输入文件由派发方显式列出，处理器从不扫目录。**
+
+「加一个处理器 = 一个文件 + 注册一行」：处理器实现放 `@drec/processors/src/<kind>.ts`，在
+`packages/cli/src/providers-register.ts` 加一行 `registerProcessor(xxxProcessor)` —— 与该文件现有
+`registerPlatform`（22-24）/ `registerEngine`（28-29）并列，风格一致。
+
+## 1. 现状（a208cc5 实测）
 
 ### 1.1 三份转封装实现
 
-| 维度 | 录制封口转换 `app/src/node-remux.ts`（566 行） | 节点侧管线 `app/src/node-pipeline.ts`（890 行） | master 管线 `orchestrator/src/pipeline.ts`（1134 行）+ `segment-pipeline.ts`（803 行） |
+| 维度 | 录制封口转换 `app/src/node-remux.ts`（566 行） | 节点侧管线 `app/src/node-pipeline.ts`（890 行） | master 管线 `orchestrator/src/pipeline.ts`（1173 行）+ `segment-pipeline.ts`（803 行） |
 |---|---|---|---|
-| 入口 | manager 封口钩子 `makeNodeRemuxHookFactory` 357-412 | `_node-pipeline` 隐藏命令 → `runNodeSidePipeline` 594-830 | `runPipeline` 605-635；分段模式 `runSegmentPipeline` |
-| 转换调用 | `convertSegmentInPlace` 300-351 | `produceParts` 459-540：`remuxSegment`/`mergeSession` 写 `.work/NNN.mp4` 525-529 | 整场：merge 节点起子进程 `douyin-rec merge --format`（`workflow.ts` 154-157）；分段：逐段 `remuxSegment` 348-390，组合并 `mergeSession` 404-422 |
-| 输入从哪来 | 封口事件给的单个分段（显式） | spec 里的 `tsFiles[]`（显式），但会话 xml 靠同目录同名查找 484-491 | 对账聚类得到的 `Broadcast.members`；stage 内产物由 `stageProductPaths` / `deriveSegmentPlan` 从目录推导 |
-| 并发 | 每任务一条 promise 串行链 | 每场一个 pid 文件 135-154，**节点无全局上限** | `ResourcePool`（`workflow.ts` 459+）cpu/net/upload + `JobDispatcher` 跨房间上限；**分段模式的 remux/merge/burn 不进 `withCpu`**（只有上传走 `withUpload`），**pull 不进 `withNet`** |
-| 校验 | 完整：`verifyRemuxed` 254-295（头部时长、全包 PTS 跨度、包数、音频、ffprobe 告警行数、体积 ≥ 0.5×） | **无**（ffmpeg 退出码即认） | **无**（退出码即认） |
-| 磁盘闸 | 有：源大小 + 1 GiB 324-327（`disk-gate.ts` 69-76 用 `bavail*bsize`） | 节点上无；master 派发前 `diskWatermarkGate`（`node-side-upload.ts` 69-85, 348-352） | pull 前**无**；`diskMinGB` 只在对账里告警（`reconciler.ts` 186-210） |
-| 崩溃恢复 | 扫目录：`recoverNodeRemux` 436-503（孤儿 tmp 按 pid/2h mtime 判，配对靠 sidecar `nodeFormat`，存疑改名 `.drec-suspect`） | 结果文件 `.drec-node-result.json` 84-108 + pid；已 done 短路 620-625，不确定拒绝重入 642-649 | 台账 `sync_jobs` 状态机 + `sync_node_states` + `sync_parts`；`.work/` 输出已存在即跳过 |
-| 删原文件 | 校验通过后 `rmSync` 347 | 收尾自删源 803-807（xml 保留） | `cleanupSourcesShared` 244-317（远端经 ssh `rm -f`） |
+| 入口 | 封口钩子 `makeNodeRemuxHookFactory` 357；挂载点 `cli.ts` 255-268（record 命令）、`app/src/cli-task.ts` 131-139（`task run`） | `_node-pipeline` 隐藏命令 → `runNodeSidePipeline` 594 | `runPipeline` 620；分段模式 `runSegmentPipeline` |
+| 转换调用 | `convertSegmentInPlace` 300 | `produceParts` 459：`remuxSegment` / `mergeSession` 写 `.work/` | 整场：merge 节点起子进程 `douyin-rec merge --format`（`workflow.ts` 154-157）；分段：`remux` 342/374、组合并 `mergeGroup` 402/417、烧录 `burnOne` 444 |
+| 输入从哪来 | 封口事件给的单个分段（显式） | spec 里的 `tsFiles[]`（显式）；stage 产物 `readdirSync` 856/875 | pull 清单显式（含 `sessionJsonPath`，`pipeline.ts` 793-799）；**合并输入仍由 merge 子进程对 stage 目录 `groupSessionsInDir` 推导**（`cli.ts` 424），stage 产物由 `deriveStageProducts`（`session-plan.ts` 67，`pipeline.ts` 834/1035）/ `deriveSegmentPlan`（243）推导 |
+| 并发 | 每进程一条 promise 串行链（跨任务并行，各 record 进程各一条） | 每场一个 pid 文件 135，**节点无全局上限** | `ResourcePool`（`workflow.ts` 459）cpu/upload；workflow 节点只用 cpu/upload 两类（147/198/214/227/259/277），**`withNet`（668）无任何调用方**；分段模式 remux/merge/burn 不进 `withCpu`；pull 不限 |
+| 校验 | 完整：`verifyRemuxed` 254 | **无** | **无**（#141 后有 `isCompleteMedia`「存在 ≠ 完整」判定，但无 remux 等价校验） |
+| 磁盘闸 | 源大小 + 1 GiB（307/324，经 `disk-gate.ts` 69-73 `volumeFreeBytes` = `bavail*bsize`） | 节点无；master 派发前 `diskWatermarkGate`（`orchestrator/src/node-side-upload.ts` 69, 348） | pull 前无；`diskMinGB` 只在对账告警（`reconciler.ts` 160/187） |
+| 崩溃恢复 | 扫目录 `recoverNodeRemux` 436（孤儿 tmp 按 owner+pid / `STALE_TMP_MIN_AGE_MS` 77 判） | 结果文件 `NODE_RESULT_FILE` 84 + pid | `sync_jobs` 状态机 + `.work/` 续跑 |
+| 收尾等待 | `SESSION_END_BUDGET_MS = 3min`（91），超时放弃并告警（392-405） | — | — |
 
-**重复**：同一件事（`-c copy` 换容器）有 3 套调用、只有 1 套带校验；上传速率闸有 2 份（core `UploadGate`
-被节点与边录边传使用；master 的 `ResourcePool._awaitUploadSlot`（`workflow.ts` 733-767）是同语义的另一份实现，
-共用同一个 store 与 key）；并发限额有 3 种口径；崩溃恢复有 3 种风格；删视频源有 4 个入口
-（node-remux、节点执行体、master 共享清理、边录边传闸）。
+**分歧（会出事故的）**：节点侧与 master 的转换产物不经 `verifyRemuxed`；分段模式 CPU 不受 `maxCpuParallel` 约束；
+空闲空间两种算法（`disk-gate.ts` 72 `bavail*bsize` vs core `freeBytesOf` 20 优先 `frsize`）；网页「合成所选」
+固定产出 mp4（`app/src/web/api/merge.ts` 52-54，注释自认遗留）。
 
-**分歧（会出事故的）**：
-- 节点侧与 master 的转换产物不经校验就上传；只有录制封口转换会校验。
-- 分段模式 CPU 不受 `maxCpuParallel` 约束；pull 无网络限额、无磁盘闸。
-- 空闲空间两种算法：`disk-gate.ts` 69-76（`bavail*bsize`）与 core `freeBytesOf`（`disk-watermark.ts` 20-23，优先 `frsize`）。
-- 网页「合成所选」固定产出 mp4（`web/api/merge.ts` 52-54），不跟任务输出格式。
+### 1.2 可复用构件
 
-### 1.2 现有持久化/派发构件（可复用）
+- 能力协商 `NodeCapabilities`（`core/api-types.ts` 777）；旧 bundle 未知命令 `isUnknownCommandError`（`transport-ssh.ts` 95）→ 回落（`node-side-upload.ts` 325-335）。
+- 远端写入范式 `_apply-tasks <dataRoot> <base64>`（`cli.ts` 1740 起）；节点回执 `_node-status`（1842）。
+- 多进程安全认领：`openUploadLimitStore` 的 `busy_timeout`（`core/upload-gate.ts` 183）+ `BEGIN IMMEDIATE`（204）—— **core 已直接用 `node:sqlite`**。
+- 原子写（#141）：`post-process/src/artifact.ts` 的 `atomicPartPath` 18 / `withAtomicOutput` 27 / `runFfmpegAtomic` 36 / `unreadableParts` 55 / `isCompleteMedia` 77。
+- 会话分组唯一入口（#144）：`groupSessionsInDir`（`post-process/src/concat.ts` 70）。
+- 磁盘水位统一解析：core `resolveDiskMinGB`（`disk-watermark.ts` 32），daemon（`daemon.ts` 94）/ reconciler（160）/ cli（928、1497）共用。
+- 队列视图 `buildQueueView`（`app/src/hub-jobs.ts` 542）+ `ResourcePool.snapshot()`（`workflow.ts` 607）。
+- 注册表先例：`registerPlatform` / `registerEngine`（`cli/src/providers-register.ts` 22-29）。
 
-- 节点能力协商：`_node-capabilities` → `NodeCapabilities`（`core/api-types.ts` 777-786）；旧 bundle 报未知命令时
-  `isUnknownCommandError`（`transport-ssh.ts` 95-98）→ 调用方回落（`node-side-upload.ts` 330-335）。
-- 远端写入范式：`_apply-tasks <dataRoot> <base64>`（`cli.ts` 1743-1804）解码 JSON → 写本机库 → 打印单行 JSON。
-- 持久后台 job：`merge_jobs` 表（`app/src/merge-jobs.ts`，网页合成用）。
-- 多进程安全认领：`openUploadLimitStore` 的 `BEGIN IMMEDIATE`（`core/upload-gate.ts` 202-225）。
-- 原子写产物（#141）：post-process `artifact.ts` 的 `runFfmpegAtomic` / `withAtomicOutput`（写 `atomicPartPath` 再 rename）、
-  `isCompleteMedia` / `unreadableParts`（续跑判定「存在 ≠ 完整」）—— merge/burn/remux 处理器的写出与 recover 直接复用。
-- 队列视图：`buildQueueView`（`app/src/hub-jobs.ts` 542-696）+ `ResourcePool.snapshot()`（`workflow.ts` 607-642）；
-  节点状态已有 5s 轮询（`cli.ts` 904 汇总 F1 数据）。
+### 1.3 #144 之后的「这一场有哪些文件」推导
 
-### 1.3 #143 的结构根因：5 处从目录推导「这一场有哪些文件」
+#144 已把**目录上的会话分组**收口到 `groupSessionsInDir` 一处，5 个调用点统一：`scan.ts` 189、`web/api/merge.ts` 24/46、
+`cli.ts` 424（merge）/ 539（burn），外加 `pipeline.ts` 58 的 `unclaimedStageSegments`（55-62）守卫；pull 把
+`sessionJsonPath`（`transport.ts` 18，`scan.ts` 232 填）带进 stage（`pipeline.ts` 797）；`stageVideoLeftovers`（73-84）
+清空 stage 时连会话边车副本（`.session` JSON）一起删。**原 §1.3「cli 424/539 不认节点侧 mp4/mkv」已不成立。**
 
-| 调用点 | 是否认节点侧 mp4/mkv |
-|---|---|
-| `orchestrator/scan.ts` 189 `groupSessions(…, {nodeFormats})` | 是 |
-| `app/web/api/merge.ts` 24、46 | 是 |
-| `cli.ts` 424（merge 命令） | **否** |
-| `cli.ts` 539（burn 命令） | **否** |
-| `session-plan.ts` 67 / 243（`deriveStageProducts` / `deriveSegmentPlan`，pipeline 795/798/996 调用） | stage 内另一套推导 |
-
-另有 `scanRollingSessions`（`scan.ts` 84-110）、`orphan-cleanup.ts` 166-170、`recoverNodeRemux` 445-499、
-`node-pipeline.ts` 856/875、`pipeline.ts` 60 `stageVideoLeftovers` 也各自扫目录。#143 的最小修复（stage 拉 sidecar +
-合并前未认领分段守卫）**独立先行**，本计划不重复它；本计划让「推导」只发生在派发方一处（对账/选优），处理器只认 job 行里的路径。
+剩余结构问题：推导仍发生在**执行方**（merge 子进程对 stage 目录分组、`deriveStageProducts` / `deriveSegmentPlan`
+对 stage 目录推导、`node-pipeline.ts` 856/875 扫 stage），派发方手里明明有确切的 pull 清单。本计划第二期（T12a）
+把推导移到派发方一处，处理器只认 job 行里的路径；第一期不碰合并路径。
 
 ## 2. Architecture
 
-### 2.1 契约（core，`core/src/processor.ts`）
+### 2.1 契约 + 注册表（core 新模块 `processor`）
 
 ```ts
 export type ResourceClass = "cpu" | "net" | "upload";
 
 export interface ProcessJob {
-  jobId: string;                 // 派发方给定、确定性 → 幂等（重复派发返回现状，不重跑）
-  kind: string;                  // "remux" | "merge" | "burn" | "biliup"
+  jobId: string;                 // = jobIdOf(kind, logicalKey, generation)，派发方给定、确定性 → 幂等
+  kind: string;                  // 第一期只有 "remux"；第二期 "merge" | "burn" | "biliup"
+  logicalKey: string;            // 见下「jobId 约定」
+  generation: number;            // 从 1 起；只由「stale 重派」或人工重试递增
   inputs: string[];              // 绝对路径，显式列出；处理器不得扫目录
-  outputs?: string[];            // 期望产物（merge/burn 必填）
+  outputs?: string[];            // 期望产物（merge/burn 必填；remux 由 params.format 推出）
   params: Record<string, unknown>;
-  replaceInputs: boolean;        // true = 校验通过后删除 inputs（只允许视频扩展名，拒 .xml/.ass）
-  after?: string[];              // 前驱 jobId（T16 引入）
-  // jobId 约定：`${logicalKey}#g${generation}`；generation 只由人工重试递增
+  replaceInputs: boolean;        // true = 校验通过后删除 inputs（只允许视频扩展名，拒 xml/ass/会话边车）
   owner: { taskId?: number; streamKey?: string };
   createdAt: number;
 }
@@ -94,287 +90,319 @@ export interface Processor {
   kind: string;
   resource: ResourceClass;
   lane?: string;                 // 同资源类内的独立通道：remux = "copy"，不与烧录抢 cpu 槽
-  retryable: boolean;            // biliup = false：失败不自动重跑
+  retryable: boolean;            // biliup = false
+  interruptible: boolean;        // 关停时可直接 abort 回 pending（remux/merge/burn = true；biliup = false）
   validate(job: ProcessJob): string | null;
-  estimateDiskBytes(job: ProcessJob): number;   // runner 的磁盘准入用
+  estimateDiskBytes(job: ProcessJob): number;
   run(job: ProcessJob, ctx: ProcessContext): Promise<ProcessResult>;
   recover?(job: ProcessJob, ctx: ProcessContext): Promise<"rerun" | "done" | "uncertain">;
 }
-// registerProcessor / getProcessor / listProcessors / processorKinds / _resetProcessors（同 engine.ts）
+
+export function registerProcessor(p: Processor): void;   // 重复 kind 抛错
+export function getProcessor(kind: string): Processor | undefined;
+export function listProcessors(): Processor[];
+export function _resetProcessors(): void;                 // 仅测试
 ```
 
-`ProcessContext` 带 `signal: AbortSignal`（取消）、`log`、`alert`、`progress`、`tmpPathFor`、`freeBytes`。
+形态逐项对齐 `core/src/platform.ts` / engine 注册表（模块级 `Map`、重复注册抛错、`_reset*` 仅测试用）。
 
-任务状态：`pending → running → done | failed | uncertain | cancelled`；`running → pending` 仅当租约过期且 `recover()=rerun`；
-`failed → pending` 只经 `requeue`（人工重试，换新 generation）；`uncertain` 须先人工 `ackUncertain`；`done`/`cancelled` 是终态
-（`PROC_TRANSITIONS`，纯函数，放 core）。**biliup 在写 intent 之后被取消 → `uncertain`，不得记成 cancelled/failed。**
-入队命中已 done 的行但 `outputs` 有文件已不存在 → 返回 `stale`，由派发方换新 generation，绝不当 done。
+- **`jobIdOf(kind, logicalKey, generation) = \`${kind}:${logicalKey}#g${generation}\``**，`parseJobId` 为逆；全仓**只此一处**拼 jobId（F8）。
+- **logicalKey 约定**：封口转换 `task${taskId}:${basename}@${fileTag}`；留存转格式 `final:${streamKey}:${side}:${basename}@${fileTag}`；
+  `fileTag = ${ino}-${size}`（由**执行节点**的 `enqueue` 对 `inputs[0]` `stat` 得出并回填 —— 派发方不必知道远端 inode）。
+  同名文件被替换 / 不同天同名 → fileTag 不同 → 新行，不会命中旧 done。
+- **stale**：入队命中 done 行但 `outputs`（或 remux 的目标文件）已不存在 → 回执 `stale`，派发方以 `generation+1` 重派；
+  派发方用 `store.nextGeneration(kind, logicalKey)` 取下一代，不自己记计数。
+- `assertJobInvariants(job, { allowedRoots })`：空 inputs / 相对路径 / `replaceInputs` 含非视频 / **任一路径不在 `allowedRoots` 下**
+  → 拒（F11）。`allowedRoots` 由执行节点给出 = `drecRoot()` 下的 `recordings/`、`stage/` + 本节点各任务 `resolveOutputDir(task.outDir)`
+  （任务可配目录在数据根外，不能只认数据根）。
+- 状态机 `PROC_TRANSITIONS`（纯函数）：`pending → running → done | failed | uncertain | cancelled`；`pending → cancelled`
+  （**仅当从未被认领**，原子条件更新，第二期回落旧路径的前提）；`running → pending` 仅当租约过期且 `recover()=rerun`，或关停时
+  `interruptible` 的 job 被 abort；`failed → pending` 只经 `requeue`；`uncertain` 须先人工 `ackUncertain`；`done`/`cancelled` 终态。
+  `cancelOutcome(kind, hasIntent)`：biliup 写 intent 之后被取消 → `uncertain`。
 
-### 2.2 包与分层
+### 2.2 包与分层（D7、D8）
 
-| 包 | rank | 依赖 | 被谁依赖 |
-|---|---|---|---|
-| `@drec/proc-remux` | 2 | core、post-process | app、cli |
-| `@drec/proc-merge` | 2 | core、post-process | app、cli |
-| `@drec/proc-burn` | 2 | core、post-process | app、cli |
-| `@drec/proc-biliup` | 2 | core | app、cli |
+| 包 | rank | 依赖 | 被谁依赖 | 内容 |
+|---|---|---|---|---|
+| `@drec/core`（已有，0） | 0 | — | 全部 | 新模块 `processor`：契约 + 注册表 + 状态机 + `jobIdOf`（第二期 T2 加 `ResourceLimiter`） |
+| **`@drec/proc-queue`（新）** | **0.3** | core（+ 内置 `node:sqlite`） | app、orchestrator、cli | `ProcQueueStore`（表 + 租约）+ `ProcRunner`（执行循环）；只经 core 注册表找处理器，**不 import 任何处理器** |
+| **`@drec/processors`（新）** | **0.4** | core、post-process（0.2） | app、cli | `src/remux` 模块（第一期）；第二期加 merge / burn / biliup 三个模块；入口只做导出 |
 
-orchestrator（4.5）**不依赖**任何处理器包：它只构造 `ProcessJob`（core 类型）并经 `Transport` 派发。
-`test/arch/layering.test.ts` 的 `RANKS` 加 `proc-*: 2`，随后 `pnpm arch:gen`。
+依赖方向核对（`test/arch/layering.test.ts` 要求 rank 严格大于所依赖者）：proc-queue 0.3 > core 0；processors 0.4 > post-process 0.2 > core 0；
+app 4 / orchestrator 4.5 / cli 5 均 > 0.4。**orchestrator 只依赖 proc-queue（`LocalTransport.enqueue` 写本机表），不依赖 processors**
+（它只构造 `ProcessJob`），守住「编排层不执行处理器」。proc-queue 不依赖 observability（0.5）：告警经 `ProcessContext.alert` 回调注入。
+`RANKS` 加两行并更新 post-process 那行注释（被依赖方新增 processors）；`pnpm arch:gen` 提交生成物。
 
-### 2.3 执行底座：每节点持久任务表（app 层）
+为什么不放 app（审查 F2 选项②）：orchestrator（4.5）要写本机表（第一期 T9 的 master 本机留存转格式、第二期 T12a），放 app 就得让
+orchestrator 首次依赖 app 或由 cli 注入 store —— 后者要求 `startHub` 新增注入口、web merge 与 `node-pipeline` 也各自注入，三处接线。
+为什么不直接放 core：core 虽已用 `node:sqlite`（`upload-gate.ts`），但 runner 是常驻循环 + 子进程管理，core 是契约层且被 web 端经
+alias 引用子文件（`vitest.config.ts` 58-59、`packages/web/vite.config.ts` 16-18），不宜再塞执行体。
 
-- 存储：`<dataRoot>/db/proc-queue.db`（**D1**），WAL + `busy_timeout`；表 `proc_jobs`（jobId 主键、状态、输入输出、
-  租约、尝试次数、结果/错误）+ `proc_runner_lease`（每 kind 一行，每类本机至多一个存活持有者）。路径只由 `app/src/paths.ts` 的 `procQueueDbPath()`
-  （由 `drecRoot()` 推出）给出，serve / record / `_enqueue` / `_node-pipeline` 共用，不受 `--db` 覆盖影响。
-- 执行者 `ProcRunner`，**租约按 kind 分行**（`proc_runner_lease(kind PK, owner, pid, heartbeatAt, expiresAt)`，
-  leaseMs = 30s、心跳 10s；过期为权威，pid 已死只用于提前接管）。`claim` 只认领本进程已注册且持有租约的 kind。
-  `task serve` 为全部已注册 kind 抢租约；独立 `record` 进程只为 remux 抢、且仅当无存活持有者（**D2**）；serve 启动时
-  遇 record 持有 remux 租约 → 等其过期再接管，不抢正在跑的 job。这样录制子进程持有 remux 租约不会饿死 merge/burn/biliup。
-- 并发：cpu / net 走 core `ResourceLimiter`（从 `ResourcePool` 抽出，同一套语义：热读上限、cpu 带空闲内存闸）；
-  upload 由 `proc-biliup` 内部走 core `UploadGate`（同一 store、同一账号 key，跨进程共享冷却）。
-  cpu/net 槽按 `(resource, lane)` 分开计数：remux（`lane="copy"`，`-c copy` 只吃 IO）默认独立上限 1，不排在数小时的烧录后面。
-  上限来源（**D3**）：节点本地 settings，默认值 = 现行 `ResourcePool` 默认（cpu 1 / net 1）；master 本机沿用 hub `resources`。
-- 磁盘准入：认领前要求 `freeBytesOf(输出目录) ≥ estimateDiskBytes + 1 GiB`，不足则保持 pending 并告警一次；
-  统一用 core `freeBytesOf`，消除两种算法。
-- 租约防护（fencing）：心跳写失败或发现持有者已换人 → runner 立即 abort 本进程全部 job；处理器在不可逆动作前
-  （rename + 删 inputs、写 biliup intent、调用 biliup）调用 `ctx.assertLease()`，失租即抛错不执行。`record` 退出时
-  结束或中止当前 job 并**显式删除自己的租约行**，告警剩余 pending 数，serve 下一轮即可接管。
-- 崩溃续跑：**每次接管租约**（不仅启动时）对该 kind 的 `running` 行调用 `processor.recover(job)`；租约过期但原 pid 仍活
-  （卡住）时，retryable 的 kind 先杀该 pid 再 recover，biliup 直接记 uncertain；remux recover 只删嵌入 pid 已死的 tmp。**只碰该行列出的
-  inputs / outputs / tmp 路径**，不扫目录。`uncertain` 告警、不自动重跑。
-- 告警：serve 内执行时 `ctx.alert` 按 `owner.taskId` 投递到该任务的通知/事件中心（与 `@@DREC_ALERT@@` 同等可见）；
-  record 子进程内执行时仍走 `@@DREC_ALERT@@`。
-- 取消：store 置 `cancelRequested` → runner abort 该 job → 处理器清 tmp，按 `cancelOutcome(kind, hasIntent)` 落状态。
-- 保留：done/cancelled 行 30 天后 GC；failed/uncertain 不自动删。
+### 2.3 执行底座：每节点持久任务表
+
+**存储**：`<root>/db/proc-queue.db`（与 `rootDbPath()` 同目录，`app/src/paths.ts` 87-89；新增 `procQueueDbPath()` 单点，
+不受 `--db` 覆盖）；proc-queue 包本身只接收路径参数。WAL + `busy_timeout=5000`；**任何进程首开都执行幂等迁移**
+（`CREATE TABLE IF NOT EXISTS` + `PRAGMA user_version` 判版本，迁移包在 `BEGIN IMMEDIATE` 内）——写法抄 `openUploadLimitStore`。
+表：`proc_jobs`（jobId PK、kind、logicalKey、generation、state、inputs/outputs/params JSON、attempts、claimedBy、
+cancelRequested、result/error、时间戳）+ `proc_runner_lease(kind PK, owner, pid, heartbeatAt, expiresAt, handoverRequested)`。
+
+**租约与宿主**（每 kind 本机至多一个存活持有者；leaseMs 30s、心跳 10s；过期为权威，pid 已死只用于提前接管）：
+
+- `task serve`：为全部已注册 kind 抢租约。遇他人持有且未过期 → 置 `handoverRequested=1`，**不抢正在跑的 job**（F5）。
+- `record` 进程（serve 拉起的子进程与独立 record 同一规则）：**只在无存活持有者时**持有 remux；serve 拉起的子进程因 serve
+  先持有而只入队。持有期间每次心跳读 `handoverRequested`，置位 → 停止认领、当前 job 跑完、删自己的租约行。
+- 入队时若该 kind 无存活持有者，record 立即尝试接管（多个独立 record 时，持有者退出后其余 record 在下一次封口自然接手）。
+- **record 收尾**（`onSessionEnd`）**保留现有语义**：若本进程持有 remux 租约 → 等待「owner.taskId = 本任务」的 pending/running 行，
+  总时限仍为 `SESSION_END_BUDGET_MS`（3min），超时告警（文案同现在）、未完成行留在表中；若本进程不持有且无存活持有者 →
+  先接管再同样等待；若有他人（serve）持有 → 不等待（serve 常驻会做完）。退出时显式删除自己的租约行。
+
+**并发**：按 `(resource, lane)` 计数。第一期只有 `cpu/copy`，上限来自节点本地 settings `procLimits.copy`（默认 1，**D3**）。
+注意行为变化：现在每个 record 进程各自串行、跨任务并行；新模型下本节点所有任务的封口转换共用 copy 通道（默认 1 并发）——
+`-c copy` 主要吃 IO，多段并发反而互抢磁盘，默认 1 与现「单进程并发 1」口径一致；多任务同时收播时积压由表承接，不丢。
+第二期 T2 把 `ResourcePool` 的 `Semaphore`（`workflow.ts` 411）与 cpu 内存闸抽成 core `ResourceLimiter`，runner 改用它。
+
+**磁盘准入**（F15）：认领前要求 `freeBytesOf(statfs(输出目录)) − estimateDiskBytes(job) ≥ diskMinGB`，`diskMinGB` 由 core
+`resolveDiskMinGB` 读与 daemon 同一来源（`effectiveHubConfig().resources?.diskMinGB`），不新造常量；不足 → 保持 pending、按 kind
+告警一次（恢复后清告警标记）。
+
+**租约防护（fencing）**：心跳写失败或发现持有者已换人 → runner 立即 abort 本进程全部 job；处理器在不可逆动作前（rename + 删
+inputs；第二期：写 biliup intent、调用 biliup）调用 `ctx.assertLease()`，失租即抛错不执行。
+
+**崩溃续跑**：每次**接管**租约（不仅启动）对该 kind 的 `running` 行调用 `processor.recover(job)`；只碰该行列出的 inputs / outputs /
+tmp 路径，不扫目录。`uncertain` 告警、不自动重跑。
+
+**关停**（F6；`app/src/serve.ts` 395-422 现有 shutdown 只停 daemon/recorder 与 http）：shutdown 首步 `runner.stop()`：
+停止认领 → `interruptible` 的 running job 立即 abort（处理器删 tmp、inputs 不动、行回 `pending` 且 `attempts` 不加）→
+非 interruptible（第二期 biliup）等待至完成，上限 `procShutdownWaitMs`（默认 15min，节点 settings），到点 abort 并按
+`cancelOutcome` 记 `uncertain` → 删自己的租约行。第一期只有 remux（interruptible），关停延迟 ≤ 5s。
+
+**可观测**：新增 `GET /api/proc/active` → `{ host: boolean, running: Record<kind, number>, pending: Record<kind, number>, leaseAlive: Record<kind, boolean> }`；
+`_node-status` 附同结构可选字段 `procActive`（旧 master 忽略）。**不往 `GET /api/tasks` 塞**（它是 TaskDTO 列表，部署 guard 以
+`recording===true` 判定，保持不变）。部署 guard 的 AGENTS.md 文字改动只在第二期 biliup 迁移（T15）同 PR 做，第一期无需改
+（remux 可安全打断，见 §3）：
+> 拟改 AGENTS.md「硬性约束 → 部署安全 guard → 判定依据」一句为：「`GET /api/tasks` 里 `recording === true`(真正在录)，
+> **或** `GET /api/proc/active` 的 `running.biliup > 0`(任务表里有上传在跑) —— 任一成立就等。」
+
+**告警**：serve 内执行时 `ctx.alert` 按 `owner.taskId` 投递到该任务的通知/事件中心（与 `@@DREC_ALERT@@` 同等可见）；
+record 进程内执行时走 `@@DREC_ALERT@@`（与现 `node-remux` 告警同通道）。
+
+**保留**（F13）：done/cancelled 行 7 天后 GC（runner 每小时一次）；failed/uncertain 不自动删，经 `_proc-gc <dataRoot> [--purge-failed]`
+与 `POST /api/proc/purge`（uncertain 需先 ack）人工清。
 
 ### 2.4 派发与回执
 
-- 本机：`LocalTransport.enqueue` 直接写本机表。
-- 远端：`_enqueue <dataRoot> <base64>`（`EnqueueRequest{v:1,jobs}` → 打印单行 `EnqueueResponse`），
-  `_proc-status <dataRoot> <base64-jobIds>` 返回 `ProcessReceipt[]`，`_proc-cancel <dataRoot> <base64-jobIds>` 请求取消。
-  master 端 `dispatchAndAwait()` 轮询回执。
-- 协商：`NodeCapabilities.processors?: string[]`。缺字段 / 未知命令 → `ProcUnsupported` → 调用方走旧路径。
-- **降级只在确定未受理时**：master **发送 `_enqueue` 之前**先在 `sync_jobs.dispatchedVia` 写 `proc`（意图）。只有确定性的
-  「未知命令」错误才回落旧路径并清掉该标记；超时 / 断连等其他错误视为「可能已受理」，用 `_proc-status` 查清，查不清 →
-  needs_manual。标记为 `proc` 之后任何 `_proc-status` 错误（未知命令 / 不可达 / 行缺失）一律 `ProcLost` → needs_manual，
-  **绝不回落 `_node-pipeline`**（否则 worker 回滚后会二次建稿，违反 #25）。
-- 反向钉死：已有任何 `_node-pipeline` 状态（节点结果文件 / node state）的 streamKey 固定走旧路径，不再 `_enqueue`；worker 侧
-  `_node-pipeline` 发现 proc-queue 已有同 streamKey 的 job 时拒绝执行（双保险）。
-- 输入推导点唯一：master 侧 `planStageJobs(broadcast, pulledPaths, cfg)`，输入 = 传给 `Transport.pull` 的确切路径 + 同名 xml；
-  不再让 merge 子进程对 stage 目录 `groupSessions(readdirSync)`（现 `cli.ts` 424 被 `workflow.ts` 154-157 调用）。
+**第一期（只为留存转格式，kind=remux）**：
+
+- 本机：`LocalTransport.enqueue / procStatus` 直接读写本机表。
+- 远端：`_enqueue <dataRoot> <base64>`（`EnqueueRequest{v:1,jobs}` → 单行 `EnqueueResponse{v:1,results:[{jobId,state}]}`，
+  jobId 含节点回填的 fileTag）；`_proc-status <dataRoot> <base64-jobIds>` → `ProcessReceipt[]{jobId,state,error?,leaseAlive}`。
+- 协商：`NodeCapabilities.processors?: string[]`；缺字段 / 未知命令 → `ProcUnsupported` → 留存转格式跳过 + 标注（D5）。
+- **无存活执行者**（F4）：留存转格式是跟随任务、不阻塞 done，master **不等待**；只在随后的对账轮询 `_proc-status`，
+  `pending` 且 `leaseAlive=false` 持续 ≥ 60s → 告警一次「节点无执行者，留存转格式待节点 serve 恢复后自动执行」，不回落、不重派。
+  remux 不涉及不可逆外部动作，等节点 serve 起来自然续跑即可。
+
+**第二期（merge/burn/biliup，粒度到可评审）**：`dispatchAndAwait()` + `sync_jobs.dispatchedVia` 意图标记 + `_proc-cancel`；
+回落规则（F4）：`pending` 且无存活租约 ≥ 60s →
+master 发 `_proc-cancel`，**仅当节点原子地把从未认领的行置为 `cancelled`**（§2.1 `pending → cancelled` 条件）才回落旧路径；
+biliup 另加「intent 为空」条件；其余（已认领、状态未知、命令失败）一律 needs_manual，绝不回落（防二次建稿，#25）。
+已受理后 `_proc-status` 报未知命令 → `ProcLost` → needs_manual；已走 `_node-pipeline` 的 streamKey 钉死旧路径。
 
 ### 2.5 输出格式新模型（用户已确认）
 
 - 格式只作用于**收尾后留存**的文件；中间产物保持原生容器（录像）或 stage 格式（上传固定 mp4，`effectiveStageFormat`）。
-- 拆成两个概念：`shouldConvertAtSeal(task)`（录制封口是否原地转换；hub-rule / hub-managed / rolling 一律 false，是
-  `resolveNodeOutputFormat`（`node-remux.ts` 514-520）的唯一输入）与 `nodeOutputFormatLock`（只管 UI 锁定与原因）。
-  解锁规则任务的输出格式**只改后者**，因此规则任务录制中仍绝不转换。
-- 有规则的任务**处理中途绝不转换**；交付 done 且清理完成后，按 `survivingArtifacts(rule)` 计算留存清单，
-  对容器 ≠ 任务输出格式的文件派发 remux（节点源派到该节点，stage 产物派到本机）；替换前由 proc-remux 的
-  `markSessionNodeFormat` 写会话 sidecar 的 `nodeFormat`，保证扫描与「合成所选」仍认得转换后的文件。作为跟随任务，不阻塞 done（**D5**）。
-- 规则使收尾后本机不留任何视频 → 输出格式锁定，原因 `no-survivors`（UI 显示文案）。`hub-managed` / `rolling` 仍锁。
+- 拆两个概念：
+  - `shouldConvertAtSeal(task, hubDir)`：录制封口是否原地转换；是 `resolveNodeOutputFormat`（`node-remux.ts` 514-520）的唯一输入。
+    hub-managed / rolling / **有 enabled 规则绑定** → false。**规则存在但 `enabled=false` → 视同未绑定，回落封口转换**（F3）：
+    禁用规则时 hub 不处理该房间（`cli.ts` 1048 `if (!rule || !rule.enabled) return null`），无人收尾，只能在封口时转。
+  - `nodeOutputFormatLock`（只管 UI 锁与原因；现 529-539 遍历 `listHubRules` 不看 `enabled`）：第一期 T9 起去掉 `hub-rule`
+    （enabled 规则的任务改由收尾后转换），新增 `no-survivors`；规则禁用的任务不锁（走封口转换）。
+- 有 enabled 规则的任务**处理中途绝不转换**；交付 done **且清理完成后**，按 `survivingArtifacts(rule, { stageHasXmlCopy })`
+  算留存清单，对容器 ≠ 任务输出格式的**源录像分段**派发 remux（节点源派到该节点，stage 源副本派到本机）。
+- **stage 三分 P 成品（plain/danmu/livechat）默认不转**（**D6**）：它们是已上传稿件的同一份文件，保持 mp4 便于对照与重传；
+  只转源录像分段。
+- **边车**：留存的源分段被转换前，由 remux 处理器在同目录会话边车（`{base}` + `.session` JSON）写 `nodeFormat`（`markSessionNodeFormat`，
+  `node-remux.ts` 200）——节点源写节点那份，stage 源副本写 stage 里随 pull 带来的那份副本（#144 起 stage 内有）；
+  边车**只作为 `params.sidecar` 传入，绝不进 `inputs` / `replaceInputs`**。stage 副本缺边车（旧 bundle 节点）→ 不派该会话，
+  标注「缺会话边车，跳过转格式」（否则转后的 mkv 在 stage 里不被 `groupSessionsInDir` 认领，#143 同类）。
+- `stageAfterDone=true` 时 stage 内边车副本已随 `stageVideoLeftovers` 删除，`survivingArtifacts` 不把它们列为留存。
+- 规则使收尾后本机不留任何源视频 → 输出格式锁定，原因 `no-survivors`。`hub-managed` / `rolling` 仍锁。
 - 网页「合成所选」产物扩展名跟随任务输出格式（`original` → mp4）。
 
-### 2.6 队列页
+## 3. 不变量映射
 
-`_node-status` 附可选 `procQueue`（active + recent，各上限 50，路径只给文件名）；master 现有 5s 轮询汇总，本机直读表；
-`HubQueueDTO.nodeJobs` 按节点分组；QueuePage 新增「节点任务」分区；旧节点缺字段显示「节点版本不支持」。
-
-## 3. 不变量映射（迁移前 → 迁移后由谁保证）
-
-| 不变量 | 现在 | 迁移后 |
-|---|---|---|
-| 一场一个 BV（I1/I3/I8，#25） | P1 后立即 `ledger.setBv`（`workflow.ts` 241）；续跑分支 `resumeAppends`（`pipeline.ts` 676, 979-1134）；节点结果文件带 bv | biliup job 在 P1 返回 0 后 `ctx.progress({bv})` 写回行；master 见回执 bv 即 `setBv`；create 的 jobId 由 streamKey + generation 确定，重复派发不重跑；**换 generation 前**先查该 logicalKey 全部旧代行：有 bv → setBv 只补 append，有未 ack 的 uncertain → 拒绝重试 |
-| 只认 biliup 返回码（#92） | `pipeline.ts` 325-330, 387-416 | 原样搬入 `proc-biliup`：调用前写 intent，返回 0 写 confirm |
-| 结果未知不重传 | `UNSAFE_RETRY_NODES`（`reconciler.ts` 100）；节点拒绝不确定重入 619-626 | `proc-biliup.retryable=false`；intent 有、confirm 无 → `uncertain` → master 映射 needs_manual |
-| 重试上限 3 → needs_manual | `reconciler.ts` 92, 586-604 | 不变（仍在 reconciler，按回执 failed 计数） |
-| 上传速率 / 601 冷却跨进程共享 | `UploadGate` 与 `_awaitUploadSlot` 两份，同 store | 只剩 `UploadGate` |
-| 关水印 / copyright / 仅自己可见 | `app/upload/biliup.ts` 常量 | 常量原样搬入 `proc-biliup`，diff 为零，测试快照 argv |
-| xml/ass 不删最后一份 | `xmlKeepRule`（`pipeline.ts` 82-84）；各删除点都跳过 xml | 契约层拒绝：`replaceInputs` 的 inputs 只许视频扩展名；`survivingArtifacts` 从 `xmlKeepRule` 抽出成唯一判定 |
-| 校验通过才删原文件 | 仅 node-remux | 所有 remux（含节点侧、master 分段）都经 `verifyRemuxed` |
-| 磁盘准入（I12） | 分散 / 缺失 | runner 统一准入 |
-| 用户中止 | `job-abort.ts` + `_node-abort` | `_proc-cancel` + `signal`；biliup intent 后中止 → uncertain |
-| 版本回滚不二次建稿 | `_node-pipeline` 结果文件 | 受理后 `dispatchedVia=proc`，状态错误只进 needs_manual |
-| 同场不并发 | `withStreamLock` + `JobDispatcher` 活动去重 | 不变（流级锁仍在 master）；节点表靠 jobId 幂等 |
-| 部署由人 | — | 不变；本计划所有 PR 都不部署 |
-
-## 4. 迁移对照与新旧 bundle 混跑
-
-| 能力 | 旧路径（保留到 T18） | 新路径 | 切换开关 |
+| 不变量 | 现在 | 第一期后 | 第二期后 |
 |---|---|---|---|
-| 录制封口转换 | 进程内串行链 + 扫目录接管 | 入队 remux job | T7 合入即切（单节点内部行为） |
-| master 合并/烧录 | 本进程 ffmpeg | 本机表 merge/burn job | T12a（整场）/ T12b（分段）合入即切 |
-| 节点侧分 P 产出 | `produceParts` 直接 ffmpeg | 节点本机表 job | T13 合入即切（节点内部） |
-| master 上传 | 本进程 biliup | 本机表 biliup job | T15 |
-| 节点侧上传 | `_node-pipeline` | `_enqueue` 作业链 | T16：按节点 `processors` 能力逐节点切 |
-| 留存转格式 | 无（规则任务锁定） | done 后跟随 remux | T9：节点不支持则跳过 + 标注 |
+| 校验通过才删原文件 | 仅 node-remux（`verifyRemuxed` 254） | remux 处理器唯一实现（搬移，`function verifyRemuxed` 全仓一处） | 所有 remux（节点侧、master 分段）都经它 |
+| xml/ass 不删最后一份 | `xmlKeepRule`（`pipeline.ts` 97-99）+ `keepNodeXml`（276/291/371/687） | 契约层拒 xml/ass/边车进 `replaceInputs`；`survivingArtifacts` 从 `xmlKeepRule` 抽出（同一判定） | 同左；节点侧链以 `stageHasXmlCopy:false` 调用 |
+| 录制中绝不转换（规则任务） | `hub-rule` 锁 → `original` | `shouldConvertAtSeal` 只对 enabled 规则返回 false；T9 前后回归测试 | 不变 |
+| 收尾等待有总时限 | `SESSION_END_BUDGET_MS` 3min | 持有租约的 record 进程保留 3min 等待 + 同文案告警 | 不变 |
+| 部署可打断性 | 重启杀 record → 封口转换中断，下次启动扫目录接管 | 重启 → remux 行 abort 回 pending，下次接管续跑（不扫目录）；guard 不变 | biliup 非 interruptible：关停等待 + guard 加 `running.biliup` |
+| 一场一个 BV（#25）/ 只认返回码（#92）/ 结果未知不重传 | `workflow.ts` 241 `setBv`、`resumeAppends`（`pipeline.ts` 1018）、`UNSAFE_RETRY_NODES`（`reconciler.ts` 100） | **不动** | biliup job intent/confirm；回执 bv 即 setBv；换代前查旧代行；回落仅限「从未认领 + intent 空」 |
+| 关水印 / copyright / 仅自己可见 | `app/upload/biliup.ts` 常量 | 不动 | 常量逐字搬入 `processors/src/biliup.ts`，argv 快照测试 |
+| 重试上限 3 → needs_manual | `reconciler.ts` 92/596 | 不动 | 不变（按回执 failed 计数） |
+| 磁盘准入（I12） | 分散 | remux 用 `freeBytesOf` + `resolveDiskMinGB` | runner 统一 |
+| 同场不并发 | `withStreamLock` + `JobDispatcher` | 不动 | 不变；节点表靠 jobId 幂等 |
 
-混跑矩阵：
+## 4. 混跑与回滚
+
+第一期矩阵：
 
 | master | worker | 行为 |
 |---|---|---|
-| 新→回滚旧 | 新 | 旧 master 不认 `dispatchedVia`，可能对 `uploading` 场重发 `_node-pipeline`；新 worker 的 `_node-pipeline` 见同 streamKey 已有 proc job 即拒绝 → 旧 master 记失败，人工处理 |
-| 新 | 新→回滚旧 | 已受理的链 → `ProcLost` → needs_manual（不回落旧路径）；未受理的场 → 旧路径 |
-| 新 | 旧 | `processors` 缺失 → 节点侧上传走 `_node-pipeline`、留存转格式跳过并标注、队列页该节点「不支持」 |
-| 旧 | 新 | 新 worker 继续提供全部旧隐藏命令（T18 之前不删）；worker 自身封口转换走本机表，对 master 透明 |
 | 新 | 新 | 全走新路径 |
+| 新 | 旧 | `processors` 缺失 → 该节点留存转格式跳过 + 标注；worker 封口转换仍是旧链（对 master 透明） |
+| 旧 | 新 | 新 worker 封口转换走本机表，对 master 透明；旧 master 扫描期间节点上可能同时有 `*.drec-remux` tmp 与新文件 —— `groupSessions` 不认未知扩展名、tmp 不被聚类（T6 用例钉住，F14） |
+| 新→回滚旧 | 任意 | 旧 master 不派留存转格式；已入队的节点 remux 行照常被节点执行（无害） |
+| 任意 | 新→回滚旧 | `proc-queue.db` 被忽略；未完成 remux 的 tmp 保持旧命名 `{final}.{owner}-{pid}.drec-remux`，旧 `recoverNodeRemux` 照常清理；原文件在校验通过前从不删除，**不丢数据**，只是留存文件停在原容器 |
 
-回滚到旧 bundle：`proc-queue.db` 被忽略；未完成的 remux job 留下的 tmp 保持旧命名 `{final}.{owner}-{pid}.drec-remux`，
-旧版 `recoverNodeRemux` 能照常清理；原文件在新文件校验通过前从不删除，回滚不丢数据。未完成的 biliup job 回滚后不会被旧代码
-看到 —— 因此 T15/T16 回滚前提：master 账本与**每个** worker 的 proc-queue 均无 pending/running 的 biliup job，且每个 done 的 biliup 行的 bv
-都已在 master 账本（`_proc-status` 实测输出贴 PR）。
+第二期的混跑（`dispatchedVia` 钉死、`ProcLost`、回滚前提「各节点无 pending/running biliup 且 done 行 bv 已入账」）沿用原设计，开工前细化。
 
 ## Global Constraints
 
 - 只有 `accept` 的 issue 才实施；一 issue 一分支；PR base `feat/hub-optimization`；不部署。
-- 每个 `feat`/`fix` PR bump 根 `package.json` version 并 `pnpm bundle`。
+- 每个 `feat`/`fix` PR bump 根 `package.json` version 并 `pnpm bundle`（确认 `dist/douyin-rec.mjs` 已更新）。
 - 验证门：`pnpm test`、`pnpm typecheck`、`pnpm arch:check`；动前端加 `cd packages/web && pnpm build` + tsc。
-- 处理器内**禁止** `readdirSync` / `groupSessions` / 任何目录推导（T10、T18 用 grep 验收）。
-- 涉及上传 / 删源 / 台账的 PR（T14、T15、T16、T18）`pr-risk-scan` 必命中 → 走 `needs-decision`，不自行合并。
-- 不得删除 `recordings/` 下最后一份 `.xml` / `.ass`；契约层拒绝把 xml/ass 放进 `replaceInputs`。
+- 处理器与 proc-queue 内**禁止** `readdirSync` / `groupSessions*` / 任何目录推导（grep 验收）。
+- 不得删除 `recordings/` 下最后一份 `.xml` / `.ass`；契约层拒绝 xml/ass/边车进 `replaceInputs`。
 - 每步可独立合并、可独立回滚；旧路径保留到 T18。
-- 新包接线清单（T6/T10/T14 都要做）：`packages/proc-X/package.json`（仿 post-process）；app 与 cli 的 package.json 加
-  `workspace:*` 依赖；`pnpm install` 并提交 `pnpm-lock.yaml`；`vitest.config.ts` alias 与 `tsconfig.json` paths 各加一行；
-  RANKS 登记 2；`pnpm arch:gen` 提交生成物；`pnpm bundle` 后 grep `dist/douyin-rec.mjs` 含该包符号。
-- 行为变化的任务同 PR 更新 `AGENTS.md` 对应段落（T7、T9、T15、T16）与 `docs/multi-node-sync.md`（T5、T16）。
+- **新包接线清单（只做两次：T3 的 proc-queue、T6 的 processors）**：`packages/<pkg>/package.json`（仿 post-process）；
+  依赖方 package.json 加 `workspace:*`；`pnpm install` 提交 `pnpm-lock.yaml`；`vitest.config.ts` alias + `tsconfig.json` paths；
+  `RANKS` 登记；`pnpm arch:gen` 提交生成物；`pnpm bundle` 后 grep `dist/douyin-rec.mjs` 含该包符号。第二期加处理器**不再新增包**。
+- 行为变化的任务同 PR 更新 `AGENTS.md` 对应段落（T6：输出格式段的封口转换/接管描述；T9：输出格式段的锁定与收尾后转换；
+  第二期 T15：部署 guard 判定依据，见 §2.3 拟改文本）。
 
-## Tasks
+## 第一期 Tasks
 
-依赖顺序：T1 → T2 → T3 → T4 → T5 → T6 → T7 → T8 → T9 → T10 → T11 → T12a → T12b → T13 → T14 → T15 → T16 → T17 → T18。
-可并行：T1/T2；T6/T8/T10（依赖 T1 或 T1+T2）；T14 依赖 T1+T2（改 `ResourcePool.withUpload`）；T17 在 T5 后任意时刻。
+依赖：T1 → T3 → T6 → T8 → T9 → T11（T8 可与 T3/T6 并行；T11 只依赖 T8 的锁原因类型，可与 T9 并行）。
 
-### P0 地基（无行为变化）
+- [ ] **T1 core Processor 契约 + 注册表 + 状态机**（~260 行，无行为变化）
+  - 做什么：§2.1 全部类型；`registerProcessor/getProcessor/listProcessors/_resetProcessors`（对齐 `platform.ts`）；
+    `jobIdOf/parseJobId`；`assertJobInvariants(job,{allowedRoots})`；`PROC_TRANSITIONS`（含「未认领 pending → cancelled」）；
+    `cancelOutcome`；`EnqueueRequest/Response`、`ProcessReceipt`、`decodeEnqueue`；`NodeCapabilities.processors?`。
+  - 文件：core 新模块 `processor` + 同名测试（`test/core/`）；`core/src/index.ts`、`core/src/api-types.ts`。
+  - 测试：重复注册抛错；xml / 会话边车进 `replaceInputs` 被拒；路径不在 allowedRoots 被拒；`jobIdOf`↔`parseJobId` 往返；
+    `uncertain→pending` 不允许；`cancelOutcome('biliup',true)==='uncertain'`；`decodeEnqueue` 拒 v≠1。
 
-- [ ] **T1 core Processor 契约 + 注册表 + 状态机**（~260 行）
-  - 做什么：§2.1 的类型（含 `signal`、`lane`、`cancelled`）、`registerProcessor` 系列、`assertJobInvariants`（空 inputs / 相对路径 / `replaceInputs` 含非视频 → 拒）、`PROC_TRANSITIONS`、`cancelOutcome`、`jobIdOf/parseJobId`、`EnqueueRequest/Response` 与 `decodeEnqueue`。
-  - 为什么：所有后续包与派发只依赖 core 类型；xml 保护从契约层兜底。
-  - 文件：`packages/core/src/processor.ts`（新）、`packages/core/src/index.ts`、`test/core/processor.test.ts`。
-  - 验收/测试：重复注册抛错；xml 进 `replaceInputs` 被拒；`uncertain→pending` 不允许；`cancelOutcome('biliup', true)==='uncertain'`；`decodeEnqueue` 拒 v≠1。
-  - 风险：低。回滚：删文件。
+- [ ] **T3 `@drec/proc-queue`：`ProcQueueStore` + `ProcRunner`**（~600 行，含原 T3+T4；无线上调用方 → 无行为变化）
+  - 做什么：新包（接线清单）；store：幂等迁移、`enqueue`（jobId 幂等、回填 fileTag、done 但目标缺失 → `stale`）、`nextGeneration`、
+    按 kind 租约（含 `handoverRequested`）、`claim(kinds, resource, lane, owner)`（`BEGIN IMMEDIATE`）、`heartbeat`、`finish`（校验持有者 +
+    合法迁移）、`requeue`、`ackUncertain`、`requestCancel`、`cancelIfUnclaimed`、`list/get/active`、`gc`。
+    runner：租约/心跳/fencing、`(resource,lane)` 限额（第一期内置简单计数器，接口留给 T2 的 `ResourceLimiter`）、磁盘准入
+    （`freeBytesOf` + 注入的 `diskMinGB`）、接管时 recover、`stop()` 关停语义（§2.3）、`active()` 快照。
+    app：`procQueueDbPath()`；serve 启动 runner（无注册处理器时空转）+ shutdown 首步 `runner.stop()`；`GET /api/proc/active`；
+    `_node-status` 附 `procActive`；`_proc-gc` + `POST /api/proc/purge`；GC 7 天。
+  - 测试（假处理器）：同 jobId 二次入队不改 done 行；目标缺失 → stale 且 `nextGeneration` 递增；两连接并发 claim 只一个成功；
+    `cancelIfUnclaimed` 对已认领行返回 false；持有者心跳停 → 30s 内被接管；`handoverRequested` → 持有者跑完当前 job 后让出；
+    关停时 interruptible job 回 pending 且 attempts 不变、tmp 删、inputs 不变；被接管的卡住持有者 `assertLease` 失败 → 不删 inputs；
+    磁盘不足保持 pending 只告警一次；gc 不删 failed/uncertain；迁移在两进程同时首开时幂等。
+  - 风险：中（新常驻循环）。缓解：本任务无处理器注册、无调用方。
 
-- [ ] **T2 core 资源限额器**（~220 行）
-  - 做什么：把 `Semaphore`（`workflow.ts` 411-442）、cpu 内存闸（645-666）、`withNet`（668-675）抽到 `core/src/resource-limits.ts` 的 `ResourceLimiter`；`ResourcePool` 委托它，对外 API 与 `PoolSnapshot` 不变。
-  - 为什么：节点 runner（app）不能依赖 orchestrator；限额语义必须只有一份。
-  - 测试：既有 ResourcePool 测试不改即过；热读上限 1→2 时等待者立即放行。
-  - 风险：低（纯重构）。
+- [ ] **T6 `@drec/processors` remux 处理器 + 录制封口转换迁到任务表**（~550 行，含原 T6+T7；feat，bump）
+  - 做什么：新包（接线清单）；`src/remux` 模块逐字搬入 `verifyRemuxed`（254）、`convertSegmentInPlace`（300）、tmp 命名
+    `remuxTmpPath/parseRemuxTmpName`（170-178，**命名不变**，保证回滚兼容）、阈值常量、`markSessionNodeFormat/readNodeFormat`；
+    导出 `remuxProcessor`（cpu，lane=copy，retryable，interruptible）；`recover`：只有 tmp → 删 tmp → rerun；目标存在且校验通过 →
+    done 并删原文件；存疑 → uncertain + `.drec-suspect`，绝不删最后一份。磁盘取值改 `freeBytesOf`。
+    `providers-register.ts` 加 `registerProcessor(remuxProcessor)`。`node-remux.ts` 改薄封装：封口钩子 → 入队
+    `jobIdOf("remux", task…@fileTag, g)`（入队前写边车 `nodeFormat`，同现在）；record 进程按 §2.3 租约规则宿主 runner，
+    收尾保留 3min 总时限等待；store 打开失败 → **回落现有进程内串行链 + 告警**（稳定版兜底）。
+    `recoverNodeRemux` 保留，只兜底「不在表里」的旧 tmp（一个版本）。同 PR 改 AGENTS.md 输出格式段。
+  - 测试：既有 node-remux 测试全过；仓内 `function verifyRemuxed` 只一处；封口 3 段 → 3 行 pending 且边车已写；
+    serve 持有时 record 子进程只入队、收尾不等待；独立 record 持有时收尾等本任务行、3min 超时告警文案不变；
+    serve 启动遇 record 持有 → handover 后接管；runner 中途被杀 → 重启续跑，原文件只在校验通过后删；
+    store 打不开 → 走旧链；旧 master `_inventory` 期间 tmp 与新文件并存 → 聚类不收 tmp（F14）；
+    VPS 真实录制一场（人工、用户安排的场次）。
+  - 回滚：旧 bundle 按旧 tmp 命名照常接管。
 
-- [ ] **T3 节点持久任务表 `ProcQueueStore`**（~340 行）
-  - 做什么：`app/src/proc-queue.ts`，库文件 `<dataRoot>/db/proc-queue.db`；`enqueue`（jobId 幂等；命中 done 但输出缺失 → `stale`）、按 kind 分行的租约、`claim(kinds, resource, lane, owner)`（`BEGIN IMMEDIATE`）、`heartbeat`、`finish`（校验租约持有者 + 合法迁移）、`markUncertain`、`requeue`（仅 failed）、`ackUncertain`（人工）、`requestCancel`、`list`、`get`、`gc`；库路径走 `procQueueDbPath()`。
-  - 测试：同 jobId 二次入队不改 done 行；输出缺失 → stale；两个连接并发 claim 同一行只有一个成功；`requeue(uncertain)` 抛错；gc 不删 failed/uncertain。
-  - 风险：sqlite 多进程锁 —— 复用 `UploadGate` store 已验证的写法。
+- [ ] **T8 留存判定 + 锁定原因（纯逻辑，锁定结果不变）**（~200 行）
+  - 做什么：core `survivingArtifacts(rule, { stageHasXmlCopy })` 从 `xmlKeepRule`（`pipeline.ts` 97-99）与 `cleanupSourcesShared`
+    （259-332）抽出，pipeline 改用它（`keepNodeXml` 即 `stageHasXmlCopy:false`）；清单区分「源分段 / 三分 P 成品 / xml / 边车副本」，
+    `stageAfterDone=true` 时 stage 边车副本归入「随 stage 删除」（与 `stageVideoLeftovers` 73-84 一致）。
+    拆出 `shouldConvertAtSeal`（enabled 规则才算绑定）作 `resolveNodeOutputFormat` 唯一输入。锁原因联合类型收到 `core/api-types.ts`
+    一处（现 920、`app/web/api/types.ts` 152、`node-remux.ts` 528 三处重复），增 `no-survivors`；`room-form-rules.ts`（100）加文案。
+    **本步锁定结果与现在相同**（`hub-rule` 仍在）。
+  - 测试：cleanSource × stageAfterDone 四组合 × 两种交付模式；stage 边车副本归属；节点侧 × stageAfterDone=false → 节点 xml 留存；
+    绑定 enabled 规则且选 mkv → `resolveNodeOutputFormat()==='original'`；**规则 disabled + 选 mkv → 返回 mkv（封口转换）**（F3）；
+    既有清理测试不变；web build。
 
-- [ ] **T4 `ProcRunner` 执行底座**（~380 行）
-  - 做什么：按 kind 租约 + 心跳；按 `(resource, lane)` 在限额内认领；磁盘准入；启动续跑三分支（rerun / done / uncertain）；告警按 `owner.taskId` 路由；取消；serve 启动 runner（无处理器注册时空转）。
-  - 测试（假处理器）：cpu 上限 1 时两个 cpu job 串行而 net 并行；长时 burn 占槽时 remux（copy 通道）照常执行；record 持有 remux 租约时 serve 仍执行 merge；持有者心跳停止 → 30s 内被接管；进程已死 + recover=uncertain → 不调用 run；磁盘不足保持 pending；取消运行中 job → 子进程被杀、tmp 删、inputs 不变；被接管后恢复的卡住持有者 `assertLease` 失败 → 不删 inputs、不调用 biliup；运行期接管也触发 recover。
-  - 风险：中（新常驻循环）。缓解：无注册处理器时行为与现状一致；本任务无线上调用方。
-
-- [ ] **T5 派发通道**（~360 行）
-  - 做什么：`_enqueue` / `_proc-status` / `_proc-cancel` 隐藏命令；`sync_jobs.dispatchedVia`（受理后不回落）；`NodeCapabilities.processors?`；`Transport.enqueue?/procStatus?`（ssh 实现 + 未知命令降级为 `ProcUnsupported`）；`orchestrator/src/proc-dispatch.ts` 的 `dispatchAndAwait`；发送前写意图、歧义错误经 `_proc-status` 消解；旧路径 streamKey 钉死与 `_node-pipeline` 拒绝检查。
-  - 测试：旧节点未知命令 → `ProcUnsupported`；**已受理后**状态命令报未知 → `ProcLost` 且零次 `_node-pipeline`；`_enqueue` 超时但 worker 已受理 → 零次 `_node-pipeline`；已走旧路径的 streamKey 不发 `_enqueue`；同请求入队两次第二次返回原状态；能力缺字段按不支持。
-  - 混跑：本任务只铺通道，无调用方。
-
-### R 转封装先行
-
-- [ ] **T6 `@drec/proc-remux`**（~320 行，多为搬移）
-  - 做什么：把 `verifyRemuxed`（251-292）、`convertSegmentInPlace`（297-348）、tmp 命名（167-175）、全部阈值常量与 `markSessionNodeFormat/readNodeFormat` **逐字**搬入新包；导出 `remuxProcessor`（cpu，lane=copy，retryable）。`recover`：只有 tmp → 删 tmp 返回 rerun；final 存在且校验通过 → done 并删原文件；存疑 → uncertain，新文件加 `.drec-suspect`，绝不删最后一份。`node-remux.ts` 改为薄封装。
-  - 验收：仓内 `function verifyRemuxed` 只有一处；完成新包接线清单（见 Global Constraints）+ `arch:check`。
-  - 测试：既有 node-remux 测试全过；recover 三分支；`replaceInputs=false` 不删原文件。
-
-- [ ] **T7 录制封口转换改走任务表**（~300 行，feat，bump）
-  - 做什么：封口钩子改为入队 `remux:${taskId}:${段文件名}`；`markSessionNodeFormat` 仍在入队前写；`record` 注册 `remuxProcessor`，抢到租约则就地运行 runner；`recoverNodeRemux` 只兜底「不在表里」的老 tmp（一个版本）；`record` 退出释放租约；同 PR 更新 AGENTS.md 输出格式段。
-  - 为什么：用表续跑取代扫目录接管与会话收尾等待。
-  - 测试：封口 3 段 → 表中 3 行 pending 且 sidecar 已写；持有者退出 → serve 一个轮询周期内认领；runner 中途崩溃 → 重启续跑完成，原文件只在校验通过后删；VPS 真实录制一场（人工）。
-  - 回滚：旧 bundle 按 tmp 旧命名照常接管。
-
-- [ ] **T8 输出格式：留存判定 + 锁定原因（纯逻辑）**（~180 行）
-  - 做什么：core `survivingArtifacts(rule, { stageHasXmlCopy })`（节点侧交付时 stage 无 xml 副本，等价现 `keepNodeXml`，`pipeline.ts` 261/276/346/672）从 `xmlKeepRule`（`pipeline.ts` 82-84）与 `cleanupSourcesShared`（244-317）抽出，pipeline 改用它；**拆出 `shouldConvertAtSeal`** 作为 `resolveNodeOutputFormat` 唯一输入；锁定原因联合类型收到 `core/api-types.ts` 一处（现 `api-types.ts` 917、`app/web/api/types.ts` 152、`node-remux.ts` 526 三处重复），增 `no-survivors`；`packages/web/src/lib/room-form-rules.ts` 显示原因文案。**锁定结果本步不变**。
-  - 测试：cleanSource × stageAfterDone 四组合 × 两种交付模式（stage 有 / 无 xml 副本）；节点侧 × stageAfterDone=false → 节点 xml 留存；绑定规则且选 mkv 的任务 `resolveNodeOutputFormat()==='original'`；既有清理测试不变；web build。
-
-- [ ] **T9 收尾后对留存文件派发 remux，解锁规则任务**（~300 行，feat，bump）
-  - 做什么：`orchestrator/src/finalize-format.ts` 的 `planSurvivorRemux()`；pipeline / segment-pipeline 在 done + 清理之后调用；jobId `final-remux:${streamKey}:${文件名}`；节点不支持 → 跳过并标注；**只从 UI 锁** `nodeOutputFormatLock` 去掉 `hub-rule`，`shouldConvertAtSeal` 不动；job 带 `markSidecar`，替换前写 sidecar `nodeFormat`；同 PR 更新 AGENTS.md。依赖 T5/T6/T8。
-  - 测试：全清理 → 不派发；只转容器不一致的文件；节点不支持 → done 不变、告警一次；T9 前后绑定规则任务 `resolveNodeOutputFormat` 均为 `original`；转换后 `groupSessions(…, {nodeFormats})` 仍得到该会话。
+- [ ] **T9 收尾后对留存源分段派发 remux + 第一期远端通道，解锁规则任务**（~450 行，feat，bump）
+  - 做什么：`_enqueue` / `_proc-status` 隐藏命令（第一期只受理 kind=remux；节点侧 `assertJobInvariants` 用本节点 allowedRoots）；
+    `_node-capabilities` 报 `processors`；`Transport.enqueue?/procStatus?`（ssh + local；未知命令 → `ProcUnsupported`）；
+    orchestrator 新模块 `finalize-format` 的 `planSurvivorRemux()`，pipeline / segment-pipeline 在 done + 清理之后调用（fire-and-forget，
+    jobId 记入 `sync_jobs` 新列 `followups` JSON，供对账轮询与展示）；对账轮询回执，`pending && !leaseAlive ≥ 60s` 告警一次（F4）；
+    stale → `nextGeneration` 重派一次；stage 副本缺边车 → 跳过并标注；`nodeOutputFormatLock` 去掉 `hub-rule`，`no-survivors` 生效；
+    同 PR 改 AGENTS.md 输出格式段。依赖 T3/T6/T8。
+  - 测试：全清理 → 不派发；只转容器不一致的**源分段**、不转三分 P（D6）；边车只在 params、不在 inputs；节点不支持 → done 不变、标注一次；
+    节点无 runner → 60s 后告警一次、不重派；T9 前后绑定 enabled 规则任务 `resolveNodeOutputFormat` 均为 `original`；
+    转换后 `groupSessionsInDir` 仍认得该会话（节点目录与 stage 目录各一例）；`_enqueue` 拒数据根外路径。
   - 验收：处理中途从不转换；上传仍用 mp4。
 
-### M 合并 / 烧录
+- [ ] **T11 任务页「合成所选」跟随输出格式**（~120 行，fix，bump）
+  - 做什么：`app/src/web/api/merge.ts` 52-54 产物扩展名改由任务 `outputFormat` 决定（`original` → mp4），`merge_jobs` 记录实际路径；
+    前端零改动（`MergeJobView` 已显示路径）。原 T11 第一项（cli 424/539 补 `nodeFormats`）**已由 #144 完成，删除**；
+    「CLI merge/burn 直接调处理器」移入第二期 T12a。
+  - 测试：outputFormat=mkv → 产物 `.mkv` 可被 ffprobe 读、弹幕 xml 同名；`original` → mp4；老 merge job 可查。
 
-- [ ] **T10 `@drec/proc-merge`、`@drec/proc-burn`**（~300 行）
-  - 做什么：包装 post-process `mergeSessions/mergeSession/remuxSegment`、`renderXmlToAss/burn`；产物写出复用 `runFfmpegAtomic`（tmp 再 rename）；recover：`isCompleteMedia(final)` → done，否则删 tmp → rerun。
-  - 验收：两包内 grep 无 `readdirSync` / `groupSessions`；完成新包接线清单。
+第一期结束：用户意图 1 全部落地；意图 2 的「侧进程 / 按序接取」在 remux 上成立；merge/burn/上传路径零改动。
 
-- [ ] **T11 CLI merge/burn 与「合成所选」**（~260 行，fix，bump）
-  - 做什么：`cli.ts` 424/539 补 `nodeFormats`（#143 同类漏点）并改为组装显式 job 后直接调用 `getProcessor(kind).run(job, localCtx)`（不经任务表，无 serve 也能用；参数与产物逐字节兼容，因为 T12a 前 master 仍调用此 CLI）；网页 `startMerge` 改为入队 merge job，产物扩展名跟随任务输出格式；`MergeJobView` 由回执映射，前端零改动；`merge_jobs` 只读兼容老行。
-  - 测试：outputFormat=mkv → 产物 .mkv；老 merge job 可查；含节点侧 mp4 的目录能识别分段；workflow 拼出的 merge 命令前后产物一致（golden）。
+## 第二期（粒度到可评审，开工前再细化为子任务）
 
-- [ ] **T12a master 整场管线 merge/burn 改派发 + 唯一输入推导点**（~360 行，feat，bump）
-  - 做什么：`orchestrator/src/stage-jobs.ts` 的 `planStageJobs(b, pulledPaths, cfg): ProcessJob[]`（输入 = pull 清单 + 同名 xml，golden fixture 与现 `deriveStageProducts` 对拍）；workflow 的 merge / burn 节点（`workflow.ts` 154-157 起子进程）改为 `dispatchAndAwait(localTransport, job)`；`sync_node_states.generation`（幂等 ALTER），`retryHubNode`（`app/web/api/hub-jobs.ts` 112）人工重试时递增；中止按钮（core `abortJob`）联动 `procCancel`；`transport-local.ts` 实现 enqueue / procStatus / procCancel。
-  - 测试：对拍一致；master 重启 done 的 job 不重跑、人工重试换 generation 后重跑；中止 → job cancelled、sync_job needs_manual。
+- **T2 core `ResourceLimiter`**：从 `workflow.ts` 抽 `Semaphore`（411）+ cpu 内存闸（645-666）；`ResourcePool` 委托，API 与 `PoolSnapshot`
+  不变；runner 改用它。`withNet`（668）现无调用方：T2 验收 grep 确认其唯一调用方将是 T12b 的 pull（否则删除）（F12）。
+- **T5 完整派发通道**：`_proc-cancel`、`dispatchAndAwait`、`sync_jobs.dispatchedVia`、§2.4 第二期回落规则、旧路径钉死。
+- **T12a master 整场 merge/burn 改派发 + 唯一输入推导点（并入原 T10）**：在 `processors` 包加 `merge.ts` / `burn.ts`（包装
+  `mergeSessions` / `renderXmlToAss` / `burn`，写出走 `runFfmpegAtomic`，recover 用 `isCompleteMedia`）+ 注册两行；
+  `planStageJobs(b, pulledPaths, cfg)`：输入 = pull 清单中的视频 + xml，**`sessionJsonPath` 副本不作输入**，仅用于在派发方按
+  `readNodeFormats` 解析该会话的容器以组装显式分段序列；处理器吃显式路径、不再分组 → `unclaimedStageSegments`（`pipeline.ts` 55-62、
+  812-829）的目的（防 merge 静默漏段）由「`planStageJobs` 断言 pull 清单中每个视频分段都落入某个 job 的 inputs，否则 needs_manual」
+  在派发方取代，同 PR 删除该守卫并迁移其测试（`orchestrator/src/pipeline.test.ts` 1990 起「issue #143」describe 的 2011/2027 两例改钉新断言）。CLI merge/burn 改为组装显式 job 后
+  直接 `getProcessor(kind).run`（golden 对拍）；网页「合成所选」入队 merge job；`sync_node_states.generation` + `retryHubNode` 递增。
+- **T12b 分段管线改派发 + pull 进 net 限额**。
+- **T13 节点侧 `produceParts` 改用本机表**（`_node-pipeline` 协议不变；`awaitLocalJobs` 无租约 60s → failed）。
+- **T14 biliup 处理器 + 上传闸统一**（`processors` 的 biliup 模块；上传凭据路径参数化牵动 `node-pipeline`、`pipeline.ts`、web 调用方，估算按 ~500 行）。
+- **T15 master 上传改派发**（needs-decision；同 PR 改 AGENTS.md 部署 guard，§2.3 拟改文本）。
+- **T16 节点侧作业链 `_enqueue` + `after`** —— **推迟**：`_node-pipeline` 走 ssh 长命令（`transport-ssh.ts` 315-317，30 分钟硬超时）、
+  不依赖 worker serve，现状稳定；先让 T13 在 worker 内部用表、协议不变，观察一个月再定。
+- **T17 队列页** —— **推迟**：先只在 `/api/hub/queue` 露出本机 runner 的 active 行；节点分组等 T16 定了再做。
+- **T18 删除旧路径**（D4 门槛通过后）。
 
-- [ ] **T12b 分段管线改派发 + pull 进 net 限额**（~260 行，fix，bump）
-  - 做什么：segment-pipeline 逐段 remux（348-390）/ 组合并（404-422）/ 烧录（444-476）经 `planStageJobs` 派发；`pipeline.ts` 785 pull 前取 net 槽；`ResourcePool.snapshot` 的 cpu 计数改读 runner。
-  - 为什么：修分段模式绕过 CPU 闸、pull 不受限。
-  - 测试：两场分段并行时 cpu job 串行；既有 segment-pipeline 测试（假回执）全过。
+## 决策点
 
-- [ ] **T13 节点侧 `produceParts` 改用 job**（~220 行，fix，bump）
-  - 做什么：`node-pipeline.ts` 459-540 的 remux/merge 改为本机表 job，获得校验与磁盘准入；`.ts` 直传硬链接分支保持；`_node-pipeline` 协议不变。新增 `awaitLocalJobs(store, ids, {timeoutMs, noLeaseMs: 60s})`：无存活租约持有该 kind → 结果 failed（未上传，非 uncertain）。依赖 T4/T6/T10。
-  - 测试：worker 无 runner → 60s 后 failed、未调用 biliup；校验失败 → 结果 failed 且未调用 biliup；磁盘不足 → 等待告警不产出半截分 P；分 P 命名逐字不变。
+需要拍板的是 D2、D4、D6、D7、D8；D1、D3、D5 审查已同意，按推荐执行，仅备案。
 
-### U 上传（最后，needs-decision）
-
-- [ ] **T14 `@drec/proc-biliup` + 上传闸统一**（~380 行）
-  - 做什么：搬 `app/upload/biliup.ts`（cookie 路径参数化）；`uploadProcessor`（upload，retryable=false）：intent → `UploadGate.run(biliup)` → confirm / `progress({bv})`；recover：intent 有 confirm 无 → uncertain。`ResourcePool.withUpload` 委托 `UploadGate`，删 `_awaitUploadSlot`。
-  - 测试：硬常量 argv 快照；601 后冷却期内被挡；intent 后崩溃 → uncertain 且不调 biliup。
-  - 验收：grep `_awaitUploadSlot` 无结果；硬常量 diff 为零；完成新包接线清单。
-
-- [ ] **T15 master 上传节点改派发**（~380 行，feat，bump，needs-decision）
-  - 做什么：upload_plain / append、`resumeAppends`、分段上传改派发到本机表；回执见 bv 立即 `setBv`；uncertain → needs_manual；中止联动 `procCancel`（intent 后 → uncertain）；create 换 generation 前查旧代行（见 §3）；同 PR 更新 AGENTS.md。依赖 T12a/T14。
-  - 测试：P1 done 后 master 崩溃重启 → 只补 append；同 streamKey 重复派发 create 不重跑；g1 done 有 bv 而账本无 bv → 人工重试零次 create；g1 uncertain 未 ack → 重试被拒；append uncertain → needs_manual 不重试；#25/#92 回归全绿。
-  - 回滚前提：master 账本与本机 proc-queue 无 pending/running 的 biliup job。
-
-- [ ] **T16 节点侧上传改 `_enqueue` 作业链**（~400 行，feat，bump，needs-decision）
-  - 做什么：`ProcessJob.after` + runner「前驱 done 才认领、前驱失败 → blocked」；节点具备全部 kind 时 master 一次 `_enqueue` 整条链（分 P 产出 → create → append），轮询 `_proc-status` 代替 `_node-result`；节点源删除只由 master `cleanupSourcesShared` 做（消除双删），节点侧链以 `stageHasXmlCopy:false` 调用，保住最后一份 xml。不支持（受理前）→ 原 `_node-pipeline`；受理后任何状态错误 → needs_manual；中止经 `_proc-cancel`；同 PR 更新 AGENTS.md 与 `docs/multi-node-sync.md`。
-  - 回滚前提：master 账本与每个 worker 的 proc-queue 均无 pending/running biliup job（`_proc-status` 实测贴 PR）。
-  - 测试：老节点走原测试全过；链已受理后 worker 回滚（状态命令未知）→ needs_manual 且零次 `_node-pipeline`；create 回执带 bv → master 先 setBv；VPS 真实一场（人工，仅自己可见）。
-
-### Q 队列页
-
-- [ ] **T17 队列页统一展示所有节点任务**（~340 行，feat，bump）
-  - 做什么：§2.6；`_node-status` 附 `procQueue`；`HubQueueDTO.nodeJobs`；QueuePage「节点任务」分区。
-  - 测试：节点缺字段 → 标 unsupported；web build + tsc；`serve:local` 手动核对。
-
-### X 收尾
-
-- [ ] **T18 删除旧路径（D4 通过后）**（~300 行，chore/refactor）
-  - 条件：两节点 `_node-capabilities` 实测 `processors` 含全部 kind，且新路径稳定运行满 D4 约定期限（命令输出贴 PR）。
-  - 删除：`recoverNodeRemux` 扫目录兜底、节点执行体 `node-pipeline.ts` 与 `_node-pipeline/_node-result`（命令名保留一个版本返回明确错误；`_node-abort` 仅在 `_proc-cancel` 覆盖全部中止场景后删）、`merge_jobs` 兼容、无调用的 `ResourcePool.withCpu`、被表取代的孤儿清理分支；同步 `AGENTS.md`、`docs/multi-node-sync.md`。
-  - 验收：转封装仅 `proc-remux` 一份；上传闸仅 `UploadGate` 一份。
-
-## 决策点（需用户拍板，均附推荐）
-
-1. **D1 任务表位置** —— 要决定：独立库文件 `db/proc-queue.db` 还是任务库新表。不决定：T3 无法开工。
-   **推荐独立文件**：迁移失败不波及任务库；录制子进程高频写不和 serve 抢任务库锁；回滚时旧 bundle 完全无感。
-2. **D2 runner 宿主** —— 要决定：只在 `task serve` 里跑，还是无 serve 时独立 `record` 也可抢租约就地跑。不决定：独立录制时转换无人执行。
-   **推荐两者都可，靠按 kind 分行的租约保证每类本机唯一**：serve 持有全部 kind；独立 `record` 只在无存活持有者时持有 remux（保持现在独立 `record` 也能转换的行为）。
-3. **D3 节点并发上限来源** —— 要决定：节点本地 settings，还是 master 每次派发下发。不决定：VPS 上限只能用默认值。
-   **推荐节点本地 settings**（默认 = 现行 cpu 1 / net 1），master 本机沿用 hub `resources`；节点资源由节点自己说了算。
-4. **D4 上传迁移与旧路径删除** —— 要决定：T15/T16 是否实施（上传、删源属 needs-decision），以及 T18 删旧路径的门槛。不决定：上传仍是两套代码，重复与分歧继续存在。
-   **推荐实施，且 T18 门槛 = 两节点均报告全部 processors 且新路径连续 14 天无 uncertain/needs_manual 新增**。
-5. **D5 留存文件转格式的时机** —— 要决定：交付 done 后作为跟随任务（不阻塞 done），还是纳入 done 前的必经步骤。不决定：T9 无法开工。
-   **推荐跟随任务**：转格式失败只影响本地归档容器，不应把已送达的稿件标为未完成；失败告警、原文件保留。
+1. **D1 任务表位置（已定）** —— 独立 `<root>/db/proc-queue.db`；任何进程首开都跑幂等迁移（`IF NOT EXISTS` + `user_version`，`BEGIN IMMEDIATE`）。
+2. **D2 runner 宿主** —— 要决定：record 进程是否也可宿主 remux。不决定：独立 record 时转换无人执行。
+   **推荐**：serve 持有全部 kind；record（含 serve 子进程）只在无存活持有者时持有 remux；serve 用 `handoverRequested` 主动接管；
+   持有租约的 record 收尾保留 3min 总时限等待。理由：保持独立 record 现有行为，又不让长时录制霸占租约。
+3. **D3 节点并发上限来源（已定）** —— 节点本地 settings；默认复用现行口径（copy 1、cpu 1、net 1），磁盘水位复用 `resolveDiskMinGB`。
+4. **D4 第二期上传迁移与旧路径删除门槛** —— 要决定：T14/T15 是否实施、T18 门槛。不决定：上传仍两套代码。
+   **推荐**：第一期稳定 ≥ 2 周后再开 T14/T15；T18 门槛 = 两节点均报告全部 processors，且新路径 14 天内**每条** uncertain/needs_manual
+   都可归因于人工操作（有 issue 链接）—— 不用「零新增」，因为上传中部署本身就会产生 uncertain（F6）。
+5. **D5 留存转格式时机（已定）** —— 跟随任务，不阻塞 done；失败告警、原文件保留。
+6. **D6 stage 三分 P 成品是否也转容器** —— 要决定：`stageAfterDone=false` 时 plain/danmu/livechat 是否随任务格式转换。不决定：T9 范围不清。
+   **推荐不转**：它们就是已上传的稿件文件，保持 mp4 便于核对与重传；用户诉求针对的是源录像归档。真有需要再加规则级开关。
+7. **D7 队列包归属** —— 要决定：`ProcQueueStore`/`ProcRunner` 放哪。不决定：T3 开工即撞分层。
+   **推荐新包 `@drec/proc-queue`（rank 0.3，只依赖 core + `node:sqlite`）**：app、orchestrator、cli 都能直接用，orchestrator 不必依赖 app、
+   也不必新增注入口；core 保持纯契约（理由见 §2.2）。
+8. **D8 处理器一包还是多包** —— 要决定：一个 `@drec/processors` 还是每处理器一包。不决定：接线成本与 RANKS 形态不定。
+   **推荐一个包 `@drec/processors`（rank 0.4，依赖 core + post-process）**：插件性来自 core 契约 + 注册表，不来自包数；
+   加处理器 = 一个文件 + `providers-register.ts` 一行；接线清单只做一次。不放进 post-process，是为保持 post-process 为无状态纯函数库
+   （处理器带 tmp 命名、recover、租约断言等作业语义）。
 
 ## AGENTS.md 硬约束在新模型里如何成立
 
-- **recordings/ 下 xml/ass 不删最后一份**：契约层拒绝 xml/ass 进入 `replaceInputs`；处理器只删 `replaceInputs` 列出的视频；
-  清理仍只由 master `cleanupSourcesShared` 按 `survivingArtifacts`（即原 `xmlKeepRule`）执行。
-- **部署由人**：所有任务 PR 只合并不部署；混跑矩阵保证任意顺序部署 master / worker 都安全；部署前仍按 `recording===true` 守卫。
-- **上传规则**：关水印、copyright、仅自己可见常量原样搬入 `proc-biliup` 并有 argv 快照测试；一稿一 BV 由 jobId 幂等 + 回执即 setBv 保证；
-  人工投稿仍用 `upload-recording-today` skill，与本计划无关。
-- **不破坏 VPS 生产录制**：T7/T13/T16 的真实验证只在用户安排的场次做，不重启、不删文件。
+- **recordings/ 下 xml/ass 不删最后一份**：契约层拒 xml/ass/边车进 `replaceInputs`；处理器只删 `replaceInputs` 列出的视频；
+  清理仍只由 master `cleanupSourcesShared` 按 `survivingArtifacts`（即原 `xmlKeepRule` + `keepNodeXml`）执行；第一期 remux 只替换视频分段。
+- **部署安全 guard**：第一期 remux 可安全打断（abort 回 pending、原文件不动），`recording===true` 判定不变；第二期 biliup 进表时
+  同 PR 把 guard 扩到 `running.biliup>0`（拟改文本见 §2.3），并有关停等待兜底。
+- **部署由人**：所有任务 PR 只合并不部署；混跑矩阵保证任意顺序部署安全。
+- **上传规则**：第一期不碰上传。第二期硬常量逐字搬入 `processors/src/biliup.ts` 并有 argv 快照测试；人工投稿仍用 `upload-recording-today` skill。
+- **不破坏 VPS 生产录制**：T6 的真实验证只在用户安排的场次做，不重启、不删文件。
+- **版本规则 / 提交规范**：每个 feat/fix bump + bundle；plan 与代码分开 commit；无 AI trailer。
 
 ## 回滚
 
-每个任务单独可回滚（`git revert` 对应 PR）。数据侧：`proc-queue.db` 对旧 bundle 不可见；remux tmp 保持旧命名；
-原文件在校验通过前从不删除。唯一需要前置条件的是 T15/T16：回滚前确认队列无 running 的 biliup job，否则先等它结束或人工处理。
+每个任务单独 `git revert`。数据侧：`proc-queue.db` 对旧 bundle 不可见；remux tmp 保持旧命名；原文件在校验通过前从不删除。
+第一期回滚无前置条件。第二期 T15 回滚前提：各节点 proc-queue 无 pending/running biliup 且 done 行 bv 已入账（`_proc-status` 实测贴 PR）。
 
 ## 审计记录
 
@@ -393,17 +421,47 @@ orchestrator（4.5）**不依赖**任何处理器包：它只构造 `ProcessJob`
 | serve 内 `ctx.alert` 无投递对象 | 主要 | 按 `owner.taskId` 路由 |
 | T12 过大且 stage 输入仍扫目录 | 主要 | 拆 T12a/T12b；`planStageJobs` 唯一推导点 + golden 对拍 |
 | 转换后 sidecar 未写 `nodeFormat`，扫描漏认 | 主要 | proc-remux 承接 `markSessionNodeFormat`，替换前写 |
-| 新包接线、AGENTS.md / 文档同步未列入任务 | 主要 | Global Constraints 新增接线清单与文档同步要求，T6/T7/T9/T10/T14/T15/T16 引用 |
+| 新包接线、AGENTS.md / 文档同步未列入任务 | 主要 | Global Constraints 新增接线清单与文档同步要求 |
 
-另：`room-form-rules.ts` 路径更正为 `packages/web/src/lib/`；锁原因联合类型收到 core 一处；T11 CLI 直接调用处理器并加 golden；T13 `awaitLocalJobs` 无租约 60s → failed；T18 `_node-abort` 删除以 `_proc-cancel` 覆盖为前提。
+**第 2 轮**：verdict = revise，分 72；阻断 1、主要 4、次要 3。已全部修订（`dispatchedVia` 意图先写、generation 换代查旧代行、
+`stageHasXmlCopy`、fencing `assertLease`、租约按 kind 分行、退出删租约行 / `procQueueDbPath()` 单点等）。
 
-**第 2 轮**：verdict = revise，分 72；阻断 1、主要 4、次要 3。已全部修订：
+### 返工 R1（PR #147 独立审查，结论 REWORK；用户同意按报告返工，含 §3 砍/推迟）
 
-| 问题 | 级别 | 修订 |
+基线 rebase 到 `a208cc5`（含 #144），§1 全部行号重新实测。F1–F15 处置：
+
+| # | 级别 | 处置 |
 |---|---|---|
-| `_enqueue` 已被受理但回复丢失 → master 误判未受理回落旧路径，双链双 BV；旧路径中途的场被改投新路径；缺 master 回滚行 | 阻断 | 发送前写 `dispatchedVia` 意图；只有确定性未知命令才回落；旧路径 streamKey 钉死 + worker `_node-pipeline` 拒绝；混跑矩阵补 master 回滚行；回滚前提加「done 行 bv 已入账」 |
-| generation 递增让 biliup create jobId 变化，旧代行有 bv 未入账时二次建稿 | 主要 | 换代前查旧代行：有 bv 只补 append，未 ack 的 uncertain 拒绝 |
-| `survivingArtifacts(rule)` 漏 `keepNodeXml`，节点侧交付会删最后一份 xml | 主要 | 增 `stageHasXmlCopy` 入参；T16 节点侧链以 false 调用；测试覆盖两种交付模式 |
-| 租约无 fencing，卡住的持有者恢复后仍执行删源 / 上传 | 主要 | `ctx.assertLease()` 置于不可逆动作前；心跳失败自停；每次接管都 recover；卡住 pid 先杀再 recover，biliup 记 uncertain |
-| §2.3 仍写「单行租约」与按 kind 分行矛盾 | 主要 | 改为每 kind 一行 |
-| record 退出不释放租约；库路径受 `--db` 影响；T14 依赖 T2；两处行号偏移 | 次要 | 退出显式删租约行；`procQueueDbPath()` 单点；并行说明修正；行号改为 917 / 526 |
+| F1 #144 推翻 §1.3、T11/T12a 未吸收 | blocking | 采纳。§1.1/§1.3 按 a208cc5 重写（`groupSessionsInDir` 收口、`sessionJsonPath`、`unclaimedStageSegments`、边车随 stage 清空）；T11 删已完成项；T12a 写明 `sessionJsonPath` 只用于派发方解析容器、不作输入，`unclaimedStageSegments` 由派发方断言取代并同 PR 删除、迁测试；T8 把 stage 边车副本纳入留存/删除分类；T9 边车只经 `params.sidecar`、缺边车跳过 |
+| F2 队列归属违反分层 | blocking | 采纳选项①：新包 `@drec/proc-queue` rank 0.3（core + node:sqlite）；依赖方向逐包核对见 §2.2；列为 D7 |
+| F3 规则 disabled 静默不转 | major | 采纳。`shouldConvertAtSeal` 只认 enabled 规则，disabled 回落封口转换（证据 `cli.ts` 1048 禁用规则 hub 不处理）；T8 加用例 |
+| F4 无存活执行者判定 | major | 采纳。回执带 `leaseAlive`；第一期 remux：不等待、60s 告警一次、不回落；第二期：先 `cancelIfUnclaimed` 原子取消成功才回落，biliup 另需 intent 空 |
+| F5 record 霸占 remux 租约 / 收尾倒退 | major | 采纳。`handoverRequested`；持有租约的 record 收尾保留 `SESSION_END_BUDGET_MS` 等待与告警文案；D2 更新 |
+| F6 关停语义 / 部署 guard | major | 采纳。`Processor.interruptible`；`runner.stop()` 接入 `serve.ts` 395-422 的 shutdown；`GET /api/proc/active` + `_node-status.procActive`；AGENTS.md guard 拟改文本写入 §2.3，随第二期 T15 落地（第一期 remux 可安全打断，不需改）。注：报告引的 `cli.ts` 285-298 是 record 命令的 shutdown，serve 的在 `app/src/serve.ts` 395-422 |
+| F7 四个薄包过度设计 | major | 采纳。处理器合一包 `@drec/processors`；契约+注册表在 core；`providers-register.ts` 注册一行；列为 D8 |
+| F8 jobId 不一致 | major | 采纳。唯一 `jobIdOf(kind, logicalKey, generation)`；logicalKey 含节点回填的 `fileTag=${ino}-${size}`；stale → `nextGeneration` 重派，写入 T6/T9 验收 |
+| F9 plan↔TODO 双向引用 | major | 采纳。文首「TODO：T-N 待分配（合入时补）」；本轮不改 `TODO.md` |
+| F10 stage 三分 P 是否转 | minor | 采纳，列为 D6（推荐不转） |
+| F11 inputs 路径前缀 | minor | 采纳。`assertJobInvariants` 加 `allowedRoots`（数据根 recordings/stage + 本节点任务 outDir —— 任务目录可在数据根外，故不只认数据根） |
+| F12 `withNet` 无调用方 | minor | 实测确认（workflow 节点只用 cpu/upload，`withNet` 仅 `workflow.ts` 903 分派分支可达）；T2 验收：唯一调用方为 T12b pull，否则删 |
+| F13 GC 30 天偏长、缺 purge | minor | 采纳。done/cancelled 7 天；`_proc-gc` + `POST /api/proc/purge` |
+| F14 旧 master 看到 tmp 与新文件并存 | minor | 采纳。写入 T6 测试与 §4 混跑矩阵 |
+| F15 两套磁盘阈值 | minor | 采纳。runner 用 `freeBytesOf` + `resolveDiskMinGB`（与 daemon 同源），删除自造的 1 GiB 常量 |
+
+审查 §3 砍/推迟：四包 → 一包（采纳）；T16、T17 推迟（采纳）；T6+T7 合并、T10 并入 T12a（采纳）；最小可交付序列采纳，
+**唯一偏离**：第一期纳入「仅 remux 的 `_enqueue` / `_proc-status`」（并入 T9），因为留存源分段大多在远端节点上，没有远端入队
+T9 无法覆盖节点源；remux 无不可逆外部动作，不需要第二期的 `dispatchedVia` / 取消回落机制。
+
+**R1 自批**（以独立审查者视角重读后发现并已修）：
+
+1. 初稿把 `ProcRunner` 的并发直接依赖 T2 `ResourceLimiter`，而 T2 已推到第二期 → 第一期不可独立交付。改为 runner 内置简单计数器、接口留给 T2。
+2. 初稿 T11 仍写「CLI 直接调处理器」，但 merge 处理器在第二期 → 第一期 T11 只做网页产物扩展名，CLI 部分移到 T12a。
+3. fileTag 初稿用 mtime：remux 写边车会不改视频 mtime，但 `ino-size` 更稳且跨进程一致，改用 `ino-size`；并明确由执行节点回填（master 拿不到远端 inode）。
+4. 初稿 `allowedRoots` 只认数据根，会误拒配置了自定义 `outDir` 的任务录像 → 加本节点任务 `resolveOutputDir`。
+5. 初稿 F3 处置是「加 `rule-disabled` 锁原因」：会让禁用规则的任务既锁又无人收尾。改为禁用规则回落封口转换（hub 确不处理该房间）。
+6. 初稿打算把 `procActive` 塞进 `GET /api/tasks`：它返回 TaskDTO 列表，加顶层字段会破坏形状且与 guard 判定混淆 → 独立端点。
+7. 初稿第一期 T6 若 store 打不开则 remux 全停 → 加「回落现有进程内串行链 + 告警」兜底，保证不破坏稳定版。
+8. 注意到行为变化：封口转换从「每 record 进程各自串行」变成「节点 copy 通道共享」，已在 §2.3 写明并给出默认值理由。
+
+残余风险：T6 的租约在 serve 与多个 record 进程间的交接只能靠单测 + VPS 一场人工验证覆盖；`volumeFreeBytes`（`disk-gate.ts` 69-73，
+`bavail*bsize`）仍被新一场准入闸（110）使用，本计划只让 remux 改用 `freeBytesOf`，准入闸的口径统一应另开 fix issue（行为变化不宜夹带）。
