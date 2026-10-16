@@ -62,37 +62,76 @@ export function unclaimedStageSegments(stageSub: string, pulled: readonly string
 }
 
 /**
- * 拉取前复核(issue #146):成员清单里声明了会话边车、但节点上已不存在的那些路径。
- * 无 `exists` 能力的 transport 视为信任存在(与成员剔除同口径);`exists` 抛错/不可达 → 同样按缺失处理,
- * 本轮跳过即可(跳过无代价,比硬拉后记 failed 安全)。
+ * Pre-pull sidecar recheck (issue #146).
+ *
+ * `missing` and `unknown` must stay separate. `exists() === false` is NOT proof that a sidecar was
+ * deleted: `SshTransport.exists` swallows ssh failures and reports false, so a dropped link is
+ * indistinguishable from a removed file. Only `missing` may count toward {@link MAX_SIDECAR_SKIPS} —
+ * otherwise a flaky network would escalate a perfectly healthy session to `needs_manual`.
  */
-export async function lostSidecars(
+export interface SidecarProbe {
+  /** Node answered and the sidecar is gone → counts toward the consecutive-skip limit. */
+  missing: string[];
+  /** Could not be confirmed (unreachable node / probe threw) → skip the round, never count. */
+  unknown: string[];
+}
+
+/**
+ * Ask each winner member's node whether the sidecar the scan declared is still there.
+ *
+ * Transports without `exists` are trusted (same rule as member pruning). A `false` answer is only
+ * treated as a deletion once `ping()` confirms the node is actually reachable; transports without
+ * `ping` keep the previous behaviour (count it) — both real transports implement it.
+ */
+export async function probeSidecars(
   members: readonly { workerId: string; rec: { sessionJsonPath?: string } }[],
-  transports: ReadonlyMap<string, { exists?: (paths: string[]) => Promise<boolean> }>,
-): Promise<string[]> {
-  const lost: string[] = [];
+  transports: ReadonlyMap<string, { exists?: (paths: string[]) => Promise<boolean>; ping?: () => Promise<void> }>,
+): Promise<SidecarProbe> {
+  const missing: string[] = [];
+  const unknown: string[] = [];
   for (const m of members) {
     const sidecar = m.rec.sessionJsonPath;
     const tp = transports.get(m.workerId);
     if (!sidecar || !tp?.exists) continue;
-    const ok = await tp.exists([sidecar]).catch(() => false);
-    if (!ok) lost.push(sidecar);
+    let present: boolean;
+    try { present = await tp.exists([sidecar]); }
+    catch { unknown.push(sidecar); continue; }   // the probe itself failed → unknown, not "gone"
+    if (present) continue;
+    if (tp.ping) {
+      try { await tp.ping(); }
+      catch { unknown.push(sidecar); continue; }
+    }
+    missing.push(sidecar);
   }
-  return lost;
+  return { missing, unknown };
 }
 
-/** 台账 pull 步骤 detail 前缀:标记「本轮因边车消失而跳过」(无 schema 变更,计数即从步骤流推导)。 */
+/** Ledger `pull` detail prefix for "skipped this round because the sidecar is confirmed gone". */
 export const SIDECAR_SKIP_PREFIX = "跳过·";
+/**
+ * Ledger `pull` detail prefix for "skipped this round, could not confirm". Never counts toward the
+ * limit: an unreachable node is a connectivity problem, and the reconciler already alerts on nodes
+ * that fail inventory for several rounds.
+ */
+export const SIDECAR_UNKNOWN_PREFIX = "未确认·";
 /** 连续跳过上限:默认对账 30 分钟一轮 → 约 1.5 小时仍缺失就不再等,转人工 + 告警。 */
 export const MAX_SIDECAR_SKIPS = 3;
 
-/** 自最近一次真正的 pull(start 事件)以来连续的跳过次数。 */
+/**
+ * Consecutive *confirmed-missing* skips since the last real `pull` start.
+ *
+ * An {@link SIDECAR_UNKNOWN_PREFIX} round neither counts nor resets: it carries no evidence either
+ * way, so the confirmed-missing evidence on both sides of it still stands. Any other `pull` entry
+ * (a real pull start/done) ends the streak.
+ */
 export function consecutiveSidecarSkips(steps: readonly { step: string; phase: string; detail?: string | null }[]): number {
   let n = 0;
   for (let i = steps.length - 1; i >= 0; i--) {
     const s = steps[i];
     if (s.step !== "pull") continue;
-    if (s.phase === "done" && s.detail?.startsWith(SIDECAR_SKIP_PREFIX)) n++;
+    if (s.phase !== "done") break;
+    if (s.detail?.startsWith(SIDECAR_SKIP_PREFIX)) n++;
+    else if (s.detail?.startsWith(SIDECAR_UNKNOWN_PREFIX)) continue;
     else break;
   }
   return n;
@@ -817,17 +856,19 @@ async function runPipelineInner(
     return { state: "needs_manual" };
   }
 
-  // 扫描与拉取之间会话边车可能消失(节点侧格式转换 / 清理恰好完成,issue #146)。拉取前复核存在性:
-  // 缺失 → 本轮跳过该场(等下一轮重扫:边车没了就不再声明,按扫描结果分组;无边车的 mkv/mp4 不进清单、对 hub 不可见,
-  // 并非由「未认领」门禁兜底,已知残余见 PR #174)。持续缺失由连续跳过上限转人工。必须在转 syncing **之前**返回:syncing 不在 reconciler 的
-  // RETRYABLE 里,转了就卡死;也不记 failed(failed 会计重试次数 + 告警噪音)。
-  const missingSidecars = await lostSidecars(winnerMembers, transports);
-  if (missingSidecars.length > 0) {
-    const names = missingSidecars.map((f) => path.basename(f)).join(", ");
+  // The scan declares the sidecars; between the scan and the pull they can disappear (issue #146).
+  // Recheck before pulling: gone → skip this round and wait for the next scan (a sidecar that is
+  // really gone stops being declared, and the session is regrouped from the remaining segments).
+  // Must return **before** advancing to `syncing` — that state is not in the reconciler's RETRYABLE
+  // set, so advancing would wedge the job. Not recorded as `failed` either: that would burn a retry
+  // and add alert noise for something a rescan resolves.
+  const probe = await probeSidecars(winnerMembers, transports);
+  if (probe.missing.length > 0 || probe.unknown.length > 0) {
     const prior = consecutiveSidecarSkips(ledger.getSteps(streamKey));
-    if (prior >= MAX_SIDECAR_SKIPS) {
-      // 持续缺失不能无限 pending(否则「可见的失败」变成只有 job.log 能看到的静默等待):转人工 + 告警一次
-      // (needs_manual 不在 RETRYABLE,不会每轮重复告警)。
+    if (probe.missing.length > 0 && prior >= MAX_SIDECAR_SKIPS) {
+      // Confirmed gone for several rounds: stop waiting silently. `needs_manual` is not RETRYABLE,
+      // so the alert fires once and no source file is touched.
+      const names = probe.missing.map((f) => path.basename(f)).join(", ");
       const msg = `会话边车连续 ${prior} 轮扫描后仍消失(${names}),已转人工`;
       console.warn(`[pipeline] ${streamKey} ${msg}`);
       jlog(`${msg}(源文件未动)`);
@@ -835,10 +876,27 @@ async function runPipelineInner(
       notify({ kind: "error", stage: "同步", message: `${streamKey} ${msg},请检查节点上的会话边车与分段` });
       return { state: "needs_manual" };
     }
-    console.warn(`[pipeline] ${streamKey} 会话边车扫描后已消失(${names}),本轮跳过,下一轮重扫`);
-    jlog(`会话边车扫描后已消失(${names}) → 本轮跳过该场(不记 failed),下一轮重扫后收口(第 ${prior + 1}/${MAX_SIDECAR_SKIPS} 次)`);
-    // 台账标注(不改 state):hub 任务页据此看到「为什么没往下走」;同时是连续跳过的计数来源。
-    ledger.logStep(streamKey, "pull", "done", `${SIDECAR_SKIP_PREFIX}会话边车扫描后消失(${names}),第 ${prior + 1}/${MAX_SIDECAR_SKIPS} 次`);
+    const missingNames = probe.missing.map((f) => path.basename(f)).join(", ");
+    const unknownNames = probe.unknown.map((f) => path.basename(f)).join(", ");
+    const parts = [
+      probe.missing.length > 0 ? `已消失(${missingNames})` : "",
+      probe.unknown.length > 0 ? `无法确认(${unknownNames})` : "",
+    ].filter(Boolean).join(" · ");
+    console.warn(`[pipeline] ${streamKey} 会话边车 ${parts},本轮跳过,下一轮重扫`);
+    if (probe.missing.length > 0) {
+      jlog(`会话边车扫描后已消失(${missingNames}) → 本轮跳过该场(不记 failed),下一轮重扫后收口(第 ${prior + 1}/${MAX_SIDECAR_SKIPS} 次)`);
+      // Ledger annotation (state untouched): the hub jobs page shows why this round did nothing, and
+      // it is the counting source for the limit. Unconfirmed rounds are annotated separately and do
+      // not count — a dropped ssh link must never escalate a healthy session to needs_manual.
+      ledger.logStep(streamKey, "pull", "done",
+        `${SIDECAR_SKIP_PREFIX}会话边车扫描后消失(${missingNames}),第 ${prior + 1}/${MAX_SIDECAR_SKIPS} 次`);
+      if (probe.unknown.length > 0) {
+        ledger.logStep(streamKey, "pull", "done", `${SIDECAR_UNKNOWN_PREFIX}会话边车无法确认(${unknownNames}),不计入上限`);
+      }
+    } else {
+      jlog(`会话边车无法确认存在(${unknownNames}) → 本轮跳过该场(不记 failed、不计上限),下一轮重扫`);
+      ledger.logStep(streamKey, "pull", "done", `${SIDECAR_UNKNOWN_PREFIX}会话边车无法确认(${unknownNames}),不计入上限`);
+    }
     return { state: ledger.get(streamKey)?.state ?? "pending" };
   }
 

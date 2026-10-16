@@ -2,7 +2,7 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupSourcesShared, consecutiveSidecarSkips, xmlKeepRule, runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, consecutiveSidecarSkips, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
 import type { Broadcast } from "./identity.js";
@@ -69,6 +69,8 @@ function makeTransport(workerId: string, exists = true): Transport {
     isDone: vi.fn().mockResolvedValue(true),
     pull: vi.fn().mockResolvedValue(undefined),
     exists: vi.fn().mockResolvedValue(exists),
+    // 真实两个 transport 都有 ping;带上它,边车复核才走「可达 + 文件不在 = 真丢」的判定。
+    ping: vi.fn().mockResolvedValue(undefined),
     cleanup: vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -2152,7 +2154,7 @@ describe("runPipeline — 边录边传识别短路", () => {
       deps.ledger.close();
     });
 
-    it("issue #146:exists 抛错(节点不可达)→ 同样跳过本轮,不 pull、不 failed", async () => {
+    it("issue #146:exists 抛错(探测本身失败)→ 本轮跳过,不 pull、不 failed、不计入上限", async () => {
       const deps = makeDeps();
       (deps.transports.get("node-1")!.exists as Mock).mockImplementation(async (paths: string[]) => {
         if (paths.some((p) => p.endsWith(".session.json"))) throw new Error("ssh down");
@@ -2163,6 +2165,85 @@ describe("runPipeline — 边录边传识别短路", () => {
       deps.ledger.upsertPending(b.streamKey);
       expect((await runPipeline(b, deps)).state).toBe("pending");
       expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      // 探测失败 = 无证据,不得累积到上限(否则网络抖动会把健康场次转人工)。
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(0);
+      expect(deps.ledger.getSteps(b.streamKey).some((s) => s.detail?.startsWith(SIDECAR_UNKNOWN_PREFIX))).toBe(true);
+      deps.ledger.close();
+    });
+
+    it("issue #146:exists=false 但 ping 失败(节点不可达)→ 跳过且不计入上限,反复抖动也永不转人工", async () => {
+      const deps = makeDeps();
+      sidecarGone(deps);
+      (deps.transports.get("node-1")!.ping as Mock).mockRejectedValue(new Error("ssh 超时"));
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      // 远超上限的轮数:一次都不能转人工(健康场次不该被网络问题升级)。
+      for (let i = 0; i < 6; i++) expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(0);
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("pending");
+      expect(deps.notify.mock.calls.some((c) => (c[0] as { kind: string }).kind === "error")).toBe(false);
+      expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("issue #146:确认缺失与不可达交替 → 不可达轮既不计数也不清零(已确认的证据仍然成立)", async () => {
+      const deps = makeDeps();
+      const ping = deps.transports.get("node-1")!.ping as Mock;
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      // 第 1 轮:确认缺失(可达 + 文件不在)。
+      sidecarGone(deps);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(1);
+      // 第 2 轮:节点不可达 —— 既不 +1 也不清零。
+      ping.mockRejectedValue(new Error("ssh 超时"));
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(1);
+      // 第 3 轮:恢复可达且仍缺失 → 证据续上,计到 2。
+      ping.mockResolvedValue(undefined);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(2);
+      deps.ledger.close();
+    });
+
+    it("issue #146:连续确认缺失满上限后转人工;若中途只有不可达轮,则永不到上限", async () => {
+      const deps = makeDeps();
+      const ping = deps.transports.get("node-1")!.ping as Mock;
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      // 确认缺失 2 轮 + 不可达 2 轮:不可达轮不推进计数,故仍未到上限。
+      sidecarGone(deps);
+      await runPipeline(b, deps);
+      await runPipeline(b, deps);
+      ping.mockRejectedValue(new Error("ssh 超时"));
+      await runPipeline(b, deps);
+      await runPipeline(b, deps);
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(2);
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("pending");
+      // 恢复可达 → 第 3 次确认缺失即到上限,下一轮转人工并告警恰一次。
+      ping.mockResolvedValue(undefined);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(3);
+      expect((await runPipeline(b, deps)).state).toBe("needs_manual");
+      const errs = deps.notify.mock.calls.map((c) => c[0] as { kind: string }).filter((e) => e.kind === "error");
+      expect(errs).toHaveLength(1);
+      deps.ledger.close();
+    });
+
+    it("issue #146:无 ping 能力的 transport 保留旧口径(exists=false 即计入上限)", async () => {
+      const deps = makeDeps();
+      const tp = deps.transports.get("node-1")!;
+      delete (tp as { ping?: unknown }).ping;   // 旧/第三方 transport
+      sidecarGone(deps);
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(1);
       deps.ledger.close();
     });
 
