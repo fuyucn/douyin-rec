@@ -3,6 +3,7 @@ import type { Transport, NodeInventory } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
+import { pollFollowups } from "./finalize-format.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
 import { gateWorkers, explainRejections, isWorkerAssigned, isWorkerTargeted } from "@drec/core";
 import { JobDispatcher } from "./job-dispatcher.js";
@@ -505,6 +506,11 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     // 不依赖 worker 侧 DISCORD_WEBHOOK(worker 常不配,告警发不出去 → 爆盘无人知)。
     // 与主流程并行、不阻塞:查不到(transport 不支持/ssh 失败)就跳过该节点。
     void this.checkDiskSpace(transports);
+    // 收尾后留存转格式的回执轮询(T9b):与主流程并行,本方法返回前 await(永不抛;不可达的节点只跳过本轮)。
+    const followupPoll = pollFollowups({
+      ledger: this.ledger, transports, stageProc: this.pipelineDeps.finalizeFormat?.stageProc,
+      notify: this.notify, log: (m) => console.info(m),
+    }).catch(() => undefined);
     // 崩溃恢复:retrying job / running 节点超过 staleMs → 标 failed(「进程重启中断」),下一段逻辑决定重跑/人工。
     // 本进程正在跑的场(长 merge/burn/上传超过 staleMs 属正常)不误杀;重启后无活动才清理。
     this.ledger.sweepStale(this.staleMs, (streamKey) => this.pipelineDeps.pool?.hasStreamLock(streamKey) ?? false);
@@ -670,7 +676,7 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     }
     // 等**本轮派发出去**的场全部跑完(保留 running 守卫语义,见上方说明)。
     // 只等自己派发的那些:并发进来的另一轮所派的活跟本轮无关,不该把本轮卡住。
-    await Promise.all(dispatched);
+    await Promise.all([...dispatched, followupPoll]);
   }
 
   /**

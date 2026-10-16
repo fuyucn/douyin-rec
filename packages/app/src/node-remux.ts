@@ -35,13 +35,14 @@ import {
   sealedSegmentIndices,
   sessionBaseOf,
   STAGE_CONTAINERS,
+  survivingArtifacts,
   type OutputFormat,
   type OutputFormatLock,
   type RollingSegment,
   type StageFormat,
 } from "@drec/core";
 import type { RollingUploadHook } from "@drec/manager";
-import { listHubRules, hubKey } from "./hub-store.js";
+import { listHubRules, hubKey, type HubRule } from "./hub-store.js";
 import type { RemuxQueueLike } from "./remux-queue.js";
 import type { Task } from "./store.js";
 
@@ -293,31 +294,42 @@ export function shouldConvertAtSeal(
 }
 
 /**
- * 「不适用」原因(= 该任务的输出格式被锁、后端不会替换);适用则 undefined。{@link shouldConvertAtSeal} ≡ 此处 `undefined`
- * (「锁 ⇔ 封口不转」),任务视图把它原样下发,前端据此锁定下拉并显示原因。类型见 core `OutputFormatLock`。
- *   hub-managed = worker 上的受管任务;hub-rule = 有 enabled 规则绑定(源任务 id 或房间键同名,不论是否 hub 模式);
- *   rolling = 开了边录边传(上传后删源,互斥)。
+ * 输出格式「锁定」原因(后端不会按所选格式处理 / 所选格式无意义);未锁 → undefined。类型见 core `OutputFormatLock`。
+ *   hub-managed = worker 上的受管任务;rolling = 开了边录边传(上传后删源,互斥);
+ *   no-survivors = 有 enabled 规则绑定,且规则的清理开关使收尾后节点与 stage 都不留任何源视频(格式无处可用)。
+ *
+ * **与「封口是否转换」的关系(plans/036 T9b 起)**:有 enabled 规则绑定的任务**封口时仍不转换**(处理中途从不转),
+ * 但**不再锁**:规则任务改由收尾后转换(done + 清理之后对留存源分段派发 remux,见 orchestrator finalize-format)。
+ * 故不变量是「锁 ⇒ 封口不转」(单向),不再是 T8 的「锁 ⇔ 封口不转」。
  */
 export type NodeOutputFormatLock = OutputFormatLock;
 export function nodeOutputFormatLock(
   task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective">,
   hubDir: string,
 ): NodeOutputFormatLock | undefined {
-  return sealConversionBlocker(task, hubDir);
+  const b = sealConversionBlocker(task, hubDir);
+  if (b === undefined) return undefined;
+  if (b === "hub-managed" || b === "rolling") return b;
+  // 绑定了 enabled 规则:留存清单(与 orchestrator 清理 / 收尾转格式派发同一判定 core survivingArtifacts)里无源视频 → no-survivors。
+  const s = survivingArtifacts({ pipeline: { cleanup: b.rule.pipeline?.cleanup } }, { stageHasXmlCopy: true });
+  return s.nodeSourceSegments || s.stageSourceSegments ? undefined : "no-survivors";
 }
 
-/** 封口不转换的原因(无 = 转)。`shouldConvertAtSeal` 与 `nodeOutputFormatLock` 的共同底层,判定只此一份。 */
+/**
+ * 封口不转换的原因(无 = 转)。`shouldConvertAtSeal` 的底层,判定只此一份;`bound-rule` 携带绑定的 enabled 规则
+ * (供 {@link nodeOutputFormatLock} 算 no-survivors;它**不**构成锁)。
+ */
 function sealConversionBlocker(
   task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective">,
   hubDir: string,
-): NodeOutputFormatLock | undefined {
+): "hub-managed" | "rolling" | { rule: HubRule } | undefined {
   if (task.managedBy === "hub") return "hub-managed";
   if (task.rollingEffective) return "rolling";
   const platform = platformForRoom(task.room);
   const key = hubKey(platform.id, platform.extractRoomSlug(task.room));
   for (const r of listHubRules(hubDir)) {
     if (!r.enabled) continue;
-    if (r.recording?.sourceTaskId === task.id || r.key === key) return "hub-rule";
+    if (r.recording?.sourceTaskId === task.id || r.key === key) return { rule: r };
   }
   return undefined;
 }

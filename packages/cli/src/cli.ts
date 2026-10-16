@@ -18,7 +18,7 @@ import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { biliAccountKey, burnFlags, effectiveStageFormat, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
-import type { HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
+import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { getEngine, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
@@ -749,7 +749,7 @@ const hubStarter: HubStarter = {
     const { ffprobeVideo } = await import("@drec/post-process");
     const { handleEnqueue, handleProcStatus } = await import("@drec/app");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
+    const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
@@ -1043,6 +1043,13 @@ const hubStarter: HubStarter = {
       // 旁路校验延迟(issue #92):上传确认后多久回读分 P 数;只记录/告警,不影响清理。缺省 10 分钟。
       sideCheckDelayMs: hubCfg.sideCheckDelayMs,
       notify: opts.onEvent,
+      // 收尾后留存转格式(plans/036 T9b):stage 源段副本派到本机处理任务表(master 数据根,与 `_enqueue` 同一执行体)。
+      finalizeFormat: {
+        stageProc: {
+          enqueue: (req: EnqueueRequest) => handleEnqueue(drecRoot(), req),
+          procStatus: (ids: string[]) => handleProcStatus(drecRoot(), ids),
+        },
+      },
       // job.log 的落盘实现由组合根装配:observability 的 FileLogger,路径 = <stage>/<sanitized streamKey>/job.log
       //(目录名 = core 的 sanitizeStreamKey,与 pipeline/hub-jobs 同一真理源)。orchestrator 只调 ScopedLogger 接口。
       makeRunLogger: (streamKey: string) =>

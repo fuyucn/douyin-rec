@@ -70,12 +70,10 @@ describe("任务弹窗「输出格式」锁(完全由后端下发的 outputForma
     expect(taskOutputFormatLock({})).toEqual({ locked: false });
     expect(taskOutputFormatLock({ outputFormatLock: undefined })).toEqual({ locked: false });
     expect(taskOutputFormatLock({ outputFormatLock: null })).toEqual({ locked: false });
-    expect(taskOutputFormatLock({ outputFormatLock: "something-new" })).toEqual({ locked: false });
+    expect(taskOutputFormatLock({ outputFormatLock: "something-new" as never })).toEqual({ locked: false });
   });
-  it("hub-managed / hub-rule → 锁定,原因指向 Hub 规则", () => {
-    for (const v of ["hub-managed", "hub-rule"]) {
-      expect(taskOutputFormatLock({ outputFormatLock: v })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatHub" });
-    }
+  it("hub-managed → 锁定,原因指向 Hub 托管", () => {
+    expect(taskOutputFormatLock({ outputFormatLock: "hub-managed" })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatHub" });
   });
   it("rolling → 锁定,原因指向边录边传互斥", () => {
     expect(taskOutputFormatLock({ outputFormatLock: "rolling" })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatRolling" });

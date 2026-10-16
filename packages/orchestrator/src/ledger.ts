@@ -47,6 +47,8 @@ export interface JobRow {
   startMs?: number | null;
   /** 本场 stage stem / B 站标题(首次 merge 锁定,改模板不影响重跑)。旧库为 null。 */
   outputStem?: string | null;
+  /** 收尾后留存转格式的跟随状态(JSON,见 finalize-format `Followups`;plans/036 T9b)。旧库 / 未派发为 null。 */
+  followups?: string | null;
   updatedAt: number;
 }
 
@@ -96,6 +98,8 @@ export class SyncLedger {
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN fails INTEGER NOT NULL DEFAULT 0"); } catch { /* 列已存在 */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN startMs INTEGER"); } catch { /* 列已存在 */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN outputStem TEXT"); } catch { /* 列已存在 */ }
+    // 收尾后留存转格式的跟随状态(T9b;JSON)。旧库补列,老行为 NULL = 从未派发。
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN followups TEXT"); } catch { /* 列已存在 */ }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -243,6 +247,31 @@ export class SyncLedger {
     if (existing) return;
     const at = this.now();
     this.db.prepare("UPDATE sync_jobs SET outputStem=?, updatedAt=? WHERE streamKey=?").run(stem, at, streamKey);
+  }
+  /**
+   * 认领「收尾后留存转格式」的派发权(T9b):仅当 `followups` 仍为 NULL 时写入初值并返回 true;
+   * 已被认领(含历史派发过的场)→ false。这是「每场只派发一次」的唯一闸门(done 场收尾补跑会重入 runPipeline)。
+   * 不改 state、不写事件、**不碰 updatedAt**(跟随状态不该扰动 listRecent 排序与 sweepStale 判定)。
+   */
+  claimFollowups(streamKey: string, initial: string): boolean {
+    const r = this.db.prepare("UPDATE sync_jobs SET followups=? WHERE streamKey=? AND followups IS NULL").run(initial, streamKey);
+    return Number(r.changes) > 0;
+  }
+  /** 覆盖写跟随状态(不碰 updatedAt)。无此 job → 无操作。 */
+  setFollowups(streamKey: string, json: string): void {
+    this.db.prepare("UPDATE sync_jobs SET followups=? WHERE streamKey=?").run(json, streamKey);
+  }
+  getFollowups(streamKey: string): string | null {
+    const r = this.db.prepare("SELECT followups FROM sync_jobs WHERE streamKey=?").get(streamKey) as { followups?: string | null } | undefined;
+    return r?.followups ?? null;
+  }
+  /**
+   * 仍有未终结项的场(对账轮询用)。判据 = JSON 里的 `"open":true`(finalize-format 写入,`JSON.stringify` 无空格);
+   * 全部终结后写回 `open:false`,于是历史 done 场不会每轮被扫描解析。
+   */
+  listOpenFollowups(): Array<{ streamKey: string; followups: string }> {
+    return this.db.prepare("SELECT streamKey, followups FROM sync_jobs WHERE followups LIKE '%\"open\":true%'")
+      .all() as unknown as Array<{ streamKey: string; followups: string }>;
   }
   /** 某 step 的最新事件是否为 done(续跑用:跳过已完成的 append 组)。无该 step 事件 → false。 */
   isStepDone(streamKey: string, step: StepName): boolean {

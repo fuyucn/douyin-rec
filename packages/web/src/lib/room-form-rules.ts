@@ -6,6 +6,7 @@
  * 边录边传是否可用直接调 core 的 `resolveRollingPolicy`,与 master 下发同一判定。
  */
 import { resolveRollingPolicy, type RollingReason } from "@drec/rolling-policy";
+import type { OutputFormatLock } from "@drec/contracts";
 import { DEFAULT_OUTPUT_FORMAT, effectiveStageFormat, isOutputFormat, outputFormatLocked, type OutputFormat } from "@drec/output-format";
 
 /** 上传方式(UI 三选一);存储映射见 {@link methodFromStored} / {@link storedFromForm}。 */
@@ -94,13 +95,20 @@ export function cookieLock(f: Pick<FormFacts, "danmu" | "danmuAvailable" | "cook
  * 任务对话框的输出格式锁:**完全由后端下发的 `outputFormatLock` 决定**(= 后端 `nodeOutputFormatLock`,
  * 与「是否真的替换」同源),前端不再自己判 hub 状态。字段缺失(旧后端)→ 不锁,降级但不崩。
  */
-export function taskOutputFormatLock(f: { outputFormatLock?: string | null }): Lock {
-  switch (f.outputFormatLock) {
-    case "hub-managed":
-    case "hub-rule": return lock("roomForm.lock.outputFormatHub");
+export function taskOutputFormatLock(f: { outputFormatLock?: OutputFormatLock | null }): Lock {
+  const reason = f.outputFormatLock;
+  switch (reason) {
+    case "hub-managed": return lock("roomForm.lock.outputFormatHub");
     case "rolling": return lock("roomForm.lock.outputFormatRolling");
     case "no-survivors": return lock("roomForm.lock.outputFormatNoSurvivors");
-    default: return OPEN;
+    case null:
+    case undefined: return OPEN;
+    default: {
+      // 后端新增锁原因而这里漏分支 → 此处编译报错(reason 不再是 never);运行期遇到未知值按不锁降级。
+      const unhandled: never = reason;
+      void unhandled;
+      return OPEN;
+    }
   }
 }
 

@@ -38,16 +38,23 @@ export interface SurvivingArtifacts {
   stageSidecarCopies: boolean;
 }
 
+/**
+ * @param opts.stageHasXmlCopy 见文件头(pull 路径 true;节点侧上传 false)。
+ * @param opts.stagePulled     本场是否把源段拉进了 stage(缺省 true)。节点侧上传从不往 stage 放源段副本 →
+ *   传 false 时 `stageSourceSegments` 恒 false。**交付模式约束(T8 遗留)**:合并路径与分 P 路径在 done 后都按
+ *   `stageSourceAfterMerge` / `stageAfterDone` 清 stage 源段副本(分 P 路径在上传成功后另行清 scratch),所以两者共用本口径;
+ *   派发方另须以磁盘上实际存在为准(本清单只回答「清理开关会不会删」,不回答「文件是否存在」)。
+ */
 export function survivingArtifacts(
   rule: SurvivorRule,
-  opts: { stageHasXmlCopy: boolean },
+  opts: { stageHasXmlCopy: boolean; stagePulled?: boolean },
 ): SurvivingArtifacts {
   const c = rule.pipeline?.cleanup ?? {};
   const stageCleared = c.stageAfterDone === true;
   const nodeXmlDeletable = opts.stageHasXmlCopy && !stageCleared;
   return {
     nodeSourceSegments: !c.sourceAfterDone,
-    stageSourceSegments: !stageCleared && !c.stageSourceAfterMerge,
+    stageSourceSegments: opts.stagePulled !== false && !stageCleared && !c.stageSourceAfterMerge,
     stageProducts: !stageCleared,
     nodeXml: !(c.sourceAfterDone && nodeXmlDeletable),
     stageXml: !stageCleared,

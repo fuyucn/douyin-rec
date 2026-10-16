@@ -856,13 +856,14 @@ export function normalizeDouyinApiMode(v: unknown): DouyinApiMode {
   return (DOUYIN_API_MODES as readonly string[]).includes(s) ? (s as DouyinApiMode) : DEFAULT_DOUYIN_API_MODE;
 }
 
-/** GET /api/tasks[] 的任务响应(含 live 运行态;不含敏感 cookies)。 */
 /**
  * 任务「输出格式」被锁的原因(唯一定义;后端 `nodeOutputFormatLock` 产出,TaskDTO / app web DTO / 前端共用)。
- * `no-survivors` = 规则使收尾后本机不留任何源视频(plans/036 T9b 起由后端产出;T8 先收口类型与文案)。
+ * `no-survivors` = 规则使收尾后节点与 stage 都不留任何源视频(格式无处可用;plans/036 T9b 起由后端产出)。
+ * T9b 起不再有 `hub-rule`:有 enabled 规则绑定的任务封口时仍不转换,但改由收尾后转换,不再锁。
  */
-export type OutputFormatLock = "hub-managed" | "hub-rule" | "rolling" | "no-survivors";
+export type OutputFormatLock = "hub-managed" | "rolling" | "no-survivors";
 
+/** GET /api/tasks[] 的任务响应(含 live 运行态;不含敏感 cookies)。 */
 export interface TaskDTO {
   id: number;
   /** 平台 id(douyin / bilibili / kuaishou / ...)。由创建/改 room 时按 urlPattern 重判。 */

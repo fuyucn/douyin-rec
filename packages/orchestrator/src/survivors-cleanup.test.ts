@@ -107,6 +107,15 @@ describe("survivingArtifacts 清单", () => {
     }
   });
 
+  it("T8 遗留:stagePulled=false(节点侧上传,从不往 stage 拉源段)→ stage 源段副本恒不留存;缺省 = 拉了", () => {
+    for (const cleanup of [{}, { stageSourceAfterMerge: true }, { stageAfterDone: true }]) {
+      expect(survivingArtifacts({ pipeline: { cleanup } }, { stageHasXmlCopy: false, stagePulled: false }).stageSourceSegments).toBe(false);
+    }
+    expect(survivingArtifacts({}, { stageHasXmlCopy: true }).stageSourceSegments).toBe(true);
+    expect(survivingArtifacts({}, { stageHasXmlCopy: true, stagePulled: true }).stageSourceSegments).toBe(true);
+    // 节点侧其余字段不受 stagePulled 影响
+    expect(survivingArtifacts({}, { stageHasXmlCopy: false, stagePulled: false }).nodeSourceSegments).toBe(true);
+  });
   it("stageSourceAfterMerge 只摘 stage 源段副本,成品 / 边车副本不动", () => {
     const s = survivingArtifacts(rule({ stageSourceAfterMerge: true }), { stageHasXmlCopy: true });
     expect(s.stageSourceSegments).toBe(false);
