@@ -9,6 +9,7 @@ import type { ApiResult } from "./types.js";
 import { readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { groupSessionsInDir, mergeSessions } from "@drec/post-process";
+import { effectiveStageFormat, stageExt } from "@drec/core";
 import type { RecordingSessionDTO } from "@drec/core";
 
 export function buildMerge(ctx: ApiCtx) {
@@ -51,8 +52,9 @@ export function buildMerge(ctx: ApiCtx) {
         xmlPath: groups[b].xml ?? undefined,
       }));
       const outBase = `${bases[0]}_merged`;
-      // 网页手动合并本期不经过输出格式选项,仍固定产出 mp4(已知遗留,见 issue #137 PR 评论)。
-      const outMp4 = join(dir, `${outBase}.mp4`);
+      // 产物容器跟随任务 outputFormat(original → mp4;唯一判定 core effectiveStageFormat,issue #165)。
+      // 手动合成不是投稿,故不传 uploadMode。job 字段名仍叫 mp4(API/前端不变),内容是实际产物路径。
+      const outMp4 = join(dir, `${outBase}${stageExt(effectiveStageFormat(t.outputFormat, undefined))}`);
       const outXml = join(dir, `${outBase}.xml`);
       const allXml = bases.every((b) => groups[b].xml);
 
