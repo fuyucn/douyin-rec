@@ -158,31 +158,6 @@
 
 ## 待办（Next）
 
-- [~] **T-55 后处理插件化第一期:Processor 契约 + 每节点持久任务表 + 留存文件转所选输出格式（计划 [plans/036_processor-plugins.md](plans/036_processor-plugins.md)，PR [#147](https://github.com/fuyucn/douyin-rec/pull/147)）**
-  — 2026-10-15。**做什么**:按计划第一期 T1 → T3 → T6 → T8 → T9a → T9b → T11 交付 —— core `Processor` 契约与注册表、
-  新包 `@drec/proc-queue`（每节点持久任务表 + 租约执行循环）、新包 `@drec/processors` 的 remux 处理器、录制封口转换迁入任务表
-  （store 打不开回落旧串行链）、hub 收尾后对留存源分段转所选输出格式（含仅 remux 的远端入队）、网页「合成所选」跟随输出格式。
-  **为什么**:转封装现有三份实现（封口转换 / 节点侧管线 / master 管线），只有一份带完整校验，并发与磁盘口径各不相同；
-  绑定 hub 规则的任务至今无法选输出格式。第二期（merge/burn/上传迁表）待第一期稳定 ≥ 2 周再细化。
-  **验收**:计划第一期各任务测试与验收条全部通过；`pnpm test` / `pnpm typecheck` / `pnpm arch:check` 通过；处理器与任务表包内无目录推导
-  （grep 验收）；规则任务处理中途从不转换、上传仍用 mp4；VPS 真实录制一场（用户安排）验证封口转换走任务表。
-  **进度**:计划已合入、D1–D8 已按推荐确认（2026-10-15）；按切片各开一票。T1 = [#151](https://github.com/fuyucn/douyin-rec/issues/151)（已完成,PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）；T3 = [#153](https://github.com/fuyucn/douyin-rec/issues/153)（已合并 PR [#154](https://github.com/fuyucn/douyin-rec/pull/154),待部署观察）；T6 = [#156](https://github.com/fuyucn/douyin-rec/issues/156)（已合并 PR [#159](https://github.com/fuyucn/douyin-rec/pull/159),待 VPS 真实录制验证;遗留 [#160](https://github.com/fuyucn/douyin-rec/issues/160)）；T8 = [#161](https://github.com/fuyucn/douyin-rec/issues/161)（已合并 PR [#163](https://github.com/fuyucn/douyin-rec/pull/163)）；T9a = [#164](https://github.com/fuyucn/douyin-rec/issues/164)（已合并 PR [#167](https://github.com/fuyucn/douyin-rec/pull/167)）、T11 = [#165](https://github.com/fuyucn/douyin-rec/issues/165)（已合并 PR [#166](https://github.com/fuyucn/douyin-rec/pull/166)）；T9b = [#168](https://github.com/fuyucn/douyin-rec/issues/168)（已合并 PR [#169](https://github.com/fuyucn/douyin-rec/pull/169)）。**第一期代码全部合并（2026-10-16）**,待部署后真实场次观察;封口队列遗留 [#160](https://github.com/fuyucn/douyin-rec/issues/160) 进行中(部署 0.0.143+ 前修)。
-  T1 复审遗留（PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）：符号链接逃逸 → plan T9a（节点侧 realpath）；`finish(cancelled)` 先经 `cancelOutcome` → plan T15；
-  `recover()` 返回 `"done"` 时不带 outputs、store 无法据此判 stale → **T3 评估是否把返回值扩成 `{state:"done", outputs}`**（契约缺口，非 T1 范围）。
-  **T3 评估结论**：未改契约（T1 已合并，T3 只做 proc-queue）；接管 `recover()=done` 时 store 以行上声明的 `outputs`（无则空）落 done，
-  remux 无 `outputs` → 事后无法判 stale。**须在 T6 随 remux `recover` 一并决定**：把返回值扩成 `{state:"done", outputs}`（改 core + `settleOrphan` 落 `resultOutputs`）。
-  **T6 决定**：不改契约 —— 入队时 remux 行显式带 `outputs=[目标路径]`（`RemuxQueue.enqueue`），`recover()=done` 时 store 以行上 `outputs` 落 `resultOutputs`，stale 判定口径随之成立。
-  T3 复审遗留（PR #154 第二轮,不阻塞）：**N3** `readProcActive`（`packages/proc-queue/src/runner.ts`）把所有异常吞成空快照,权限/只读异常时 running 静默归零
-  → **第二期把 `running.biliup > 0` 接入部署 guard 前**须改为只把「库不存在 / 表不存在」当空,其余错误带 `error` 字段返回或抛给 `_node-status`；
-  **N4** `store.ts` claim 里对已认领过的 pending 取消行直接 `UPDATE state=cancelOutcome(...)`,未经 `canTransition`（绕开状态机唯一真理源）
-  → 在 `core` 状态机补显式 reason（如 `cancel-before-rerun`）并让 claim 路径断言之,随 T6 前的下一次 proc-queue 改动一并做。
-  T3 遗留落点：`ackUncertain`/`requeue` 目前只有 store 方法，**尚无 HTTP/CLI 入口**（plan 只要求 purge）→ T9a 的 `_proc-*` 命令或 T6 UI 前补。
-  T9b 复审遗留（PR [#169](https://github.com/fuyucn/douyin-rec/pull/169) 第 1 轮,不阻塞）：
-  ① **低码率体积比误判**：remux 校验的 `MIN_SIZE_RATIO`（0.5）对低码率流（纯音频 / 静态画面）可能把正常转换判失败（原文件保留、有告警，行为安全但会误报）→ 落点 `packages/processors` 的 `verifyRemuxed`，评估按容器开销改用绝对差或放宽比例；
-  ② **hub 任务页不展示留存转格式标注**：followups 的 notes（跳过 / 拒绝 / 回滚 / 缺边车 / 入队耗尽）只在台账与 job.log → 落点 `packages/web` 的 hub 任务页 + `GET /api/hub/queue` 的 DTO 带出 followups 摘要；
-  ③ **转换失败后会话边车仍写着已转换的 `nodeFormat`**（处理器在转换前就写）：目前无害（`groupSessions` 对原生录制容器无条件收录），但语义不精确 → 落点 `packages/processors` remux：失败路径回写边车或改为转换成功后才写（须保持崩溃接管可判定）。
-  T9b 复审遗留（PR [#169](https://github.com/fuyucn/douyin-rec/pull/169) 第 2 轮,不阻塞）：④ **stage 交付模式 + `stageAfterDone=true` 留存判定与实际不符**：stage 模式的清理从不执行 `stageAfterDone`（只有上传路径才清 stage），但 `survivingArtifacts` 按它认定 stage 副本已不在 → 副本仍在却不被转换，`no-survivors` 锁原因也可能不准；自相矛盾配置、影响小 → 落点 `packages/core` 的 `survivingArtifacts` 按交付模式取口径（stage 模式忽略 `stageAfterDone`），并与清理共用同一判定。
-
 - [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
   — 2026-10-15。**做什么**:录制引擎在 spawn 前判定水位(拒绝则不起录、下轮再判),手动启动接口过同一闸门(拒绝返回 409 且不改 enabled)。**为什么**:此前只有 daemon 在窗口启停时查水位,常驻任务的下一场开播与手动启动会绕过 → 盘满导致录制损坏。**验收**:两条路径均有测试覆盖 + dev 实跑;`pnpm test`/`typecheck` 通过。分支 `codex/issue-96-new-broadcast-gate`,PR [#97](https://github.com/fuyucn/douyin-rec/pull/97)。
 
@@ -481,6 +456,8 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+- [x] **T-55 后处理插件化第一期:Processor 契约 + 每节点持久任务表 + 留存文件转所选输出格式（计划 [plans/036_processor-plugins.md](plans/036_processor-plugins.md)）**
+  — 2026-10-16。切片:T1 [#151] → T3 [#153] → T6 [#156] → T8 [#161] → T9a [#164] → T9b [#168] → T11 [#165],全部经独立审查合并;另含 #143 收口丢段最小修复、#155/#158 时区口径、#160 封口队列遗留。部署 0.0.149 后于隔离 dev 镜像集群用真实直播间录像逐项验收(混合容器合并时长=各段合计、封口转换走任务表、收尾转格式且修改时间不变/无重复上传、远端入队越权全拒、合成所选跟随输出格式、标题按北京时间),8 张票已 close。第二期(merge/burn/上传迁表 + 队列页)待第一期稳定 ≥2 周后细化。
 
 - [x] **T-48 界面把 stage 统一称「存档」,不投稿时锁定清理存档开关（issue [#135](https://github.com/fuyucn/douyin-rec/issues/135)，2026-10-15）**
   — 2026-10-15 认领，swe-loop 执行，分支 `codex/issue-135-archive-wording`（PR #136），base `feat/hub-optimization`，已合并并部署（`0.0.136`）。
