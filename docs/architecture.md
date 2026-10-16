@@ -49,6 +49,9 @@ flowchart TB
   subgraph L05["L0.5 · 可观测性"]
     observ["<b>observability</b><br/>Notifier / EventCenter / 日志"]
   end
+  subgraph L03["L0.3 · 处理任务队列"]
+    procq["<b>proc-queue</b><br/>ProcQueueStore 持久任务表(sqlite)<br/>ProcRunner 租约 / 心跳 / fencing / 关停"]
+  end
   subgraph L02["rank 0.2"]
     post["<b>post-process</b><br/>concat / burn / ass / merge / ffmpeg / fonts"]
   end
@@ -67,6 +70,7 @@ flowchart TB
   cli --> observ
   cli --> orch
   cli --> post
+  cli --> procq
   cli --> engine
   orch --> core
   orch --> post
@@ -75,6 +79,7 @@ flowchart TB
   app --> manager
   app --> observ
   app --> post
+  app --> procq
   app --> engine
   manager --> core
   bilibili --> core
@@ -84,6 +89,7 @@ flowchart TB
   engine --> core
   engine --> extra
   observ --> core
+  procq --> core
   post --> core
 
   classDef axisPlat fill:#dcfce7,stroke:#16a34a,color:#14532d;

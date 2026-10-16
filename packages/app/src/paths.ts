@@ -17,6 +17,7 @@
 import { join } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { procQueueDbPath as procQueueDbPathOf } from "@drec/proc-queue";
 import { hostname as osHostname } from "node:os";
 
 /** 未设 DOUYIN_REC_ROOT 时的默认数据根(相对启动 cwd)。db/recordings/stage/config 都收在这一个目录下。 */
@@ -86,6 +87,11 @@ export function ensureHubConfigExample(): string | undefined {
 /** <root>/db/douyin-rec.db。 */
 export function rootDbPath(): string {
   return join(drecRoot(), "db", "douyin-rec.db");
+}
+
+/** <root>/db/proc-queue.db —— 处理任务表;路径单点在 `@drec/proc-queue`,此处只转发(不受 `--db` 覆盖)。 */
+export function procQueueDbPath(): string {
+  return procQueueDbPathOf(drecRoot());
 }
 
 /** <root>/recordings。 */

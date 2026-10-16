@@ -27,6 +27,8 @@ const RANKS: Record<string, number> = {
   "@drec/observability": 0.5,
   // 0.2:依赖 core 的会话基名(issue #50);只被 app/orchestrator/cli 依赖
   "@drec/post-process": 0.2,
+  // 0.3:每节点持久任务表 + 租约执行循环(依赖 core + node:sqlite;被 app/cli 依赖,不依赖 observability)
+  "@drec/proc-queue": 0.3,
   "@drec/tui": 0,
   "@drec/ffmpeg-recorder-extra": 0,
   // 1 共享层:通用录制器 + ffmpeg/mesio 引擎策略(record-engine)

@@ -75,6 +75,9 @@ importers:
       '@drec/post-process':
         specifier: workspace:*
         version: link:../post-process
+      '@drec/proc-queue':
+        specifier: workspace:*
+        version: link:../proc-queue
       '@drec/record-engine':
         specifier: workspace:*
         version: link:../record-engine
@@ -127,6 +130,9 @@ importers:
       '@drec/post-process':
         specifier: workspace:*
         version: link:../post-process
+      '@drec/proc-queue':
+        specifier: workspace:*
+        version: link:../proc-queue
       '@drec/record-engine':
         specifier: workspace:*
         version: link:../record-engine
@@ -211,6 +217,12 @@ importers:
       fast-xml-parser:
         specifier: ^5.8.0
         version: 5.8.0
+
+  packages/proc-queue:
+    dependencies:
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/record-engine:
     dependencies:

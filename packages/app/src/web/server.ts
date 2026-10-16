@@ -29,9 +29,11 @@ import type { RoomPayload } from "@drec/core";
 import { sseComment, sseFrame, type HubWatch } from "../hub-watch.js";
 import { buildMaintenance } from "./api/maintenance.js";
 import type { MaintenanceDeps } from "./api/maintenance.js";
+import { buildProc, type ProcApiDeps } from "./api/proc.js";
 
 /** T13 维护端点 handler(`buildMaintenance` 返回的两方法)。 */
 type MaintenanceApi = ReturnType<typeof buildMaintenance>;
+type ProcApi = ReturnType<typeof buildProc>;
 
 /** A matched route: the api method to call + extracted :id (if any). */
 export interface RouteMatch {
@@ -102,6 +104,8 @@ export interface RouteMatch {
     | "workersStatus"
     | "nodeTasks"
     | "nodeTaskLogs"
+    | "procActive"
+    | "procPurge"
     | "previewOrphans"
     | "cleanupOrphans"
     | "hubStream"
@@ -160,6 +164,8 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "getTimezone", methods: ["GET"], pattern: /^\/api\/timezone$/ },
   { name: "setTimezone", methods: ["POST"], pattern: /^\/api\/timezone$/, needsBody: true },
   { name: "getEvents", methods: ["GET"], pattern: /^\/api\/events$/ },
+  { name: "procActive", methods: ["GET"], pattern: /^\/api\/proc\/active$/ },
+  { name: "procPurge", methods: ["POST"], pattern: /^\/api\/proc\/purge$/, needsBody: true },
   { name: "previewOrphans", methods: ["GET"], pattern: /^\/api\/maintenance\/orphans$/ },
   { name: "cleanupOrphans", methods: ["POST"], pattern: /^\/api\/maintenance\/orphans$/, needsBody: true },
   { name: "hubStatus", methods: ["GET"], pattern: /^\/api\/hub\/status$/ },
@@ -244,6 +250,9 @@ export interface WebServerDeps {
   resolveAnchor?: (room: string, cookies: string | null) => Promise<string | null>;
   /** 短链→web_rid 解析器（默认 core/anchor.resolveShortUrl）。测试可注入 no-op。 */
   resolveShortUrl?: (url: string) => Promise<string | null>;
+  /** 处理任务表快照 / 人工清理(serve 注入 runner + store);省略 → `/api/proc/*` 回 503。 */
+  procActive?: ProcApiDeps["active"];
+  procPurge?: ProcApiDeps["purge"];
   /** 站内事件中枢（合成完成/错误 + 开播/录完观察器 emit 到此 → 本地流 + webhook）。 */
   events?: EventCenter;
   /** hub 任务配置目录(<root>/config/hub);省略=回落 rootHubDir()。测试注入 temp 目录。 */
@@ -346,8 +355,15 @@ async function dispatch(
   match: RouteMatch,
   req: IncomingMessage,
   maintenance: MaintenanceApi,
+  proc: ProcApi,
 ): Promise<ApiResult> {
   switch (match.name) {
+    case "procActive":
+      return proc.procActive();
+    case "procPurge": {
+      const body = (await readJson(req)) as { purgeFailed?: boolean };
+      return proc.procPurge(body ?? {});
+    }
     case "previewOrphans":
       return maintenance.previewOrphans();
     case "cleanupOrphans": {
@@ -656,6 +672,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     syncDbPath: deps.syncDbPath,
   };
   const maintenance = buildMaintenance(maintenanceDeps);
+  const proc = buildProc({ active: deps.procActive, purge: deps.procPurge });
 
   return createServer((req, res) => {
     void (async (): Promise<void> => {
@@ -705,7 +722,7 @@ export function createWebServer(deps: WebServerDeps): Server {
         return;
       }
       try {
-        const result = await dispatch(api, match, req, maintenance);
+        const result = await dispatch(api, match, req, maintenance, proc);
         sendJson(res, result.status, result.body);
       } catch (e) {
         if (e instanceof SyntaxError) {

@@ -18,7 +18,7 @@ import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { biliAccountKey, burnFlags, effectiveStageFormat, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
-import type { HubResources, OutputFormat, StageFormat } from "@drec/core";
+import type { HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { getEngine, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
@@ -1869,6 +1869,14 @@ program
     } catch {
       /* db 打不开 → 计数保持 0;不因此让整条命令失败(版本信息仍然有用) */
     }
+    // 处理任务表活动快照(plans/036 T3):库不存在 → 全空;读失败 → 省略字段(旧 master 本就忽略)。
+    let procActive: ProcActiveDTO | undefined;
+    try {
+      const { readProcActive } = await import("@drec/proc-queue");
+      procActive = readProcActive(dataRoot);
+    } catch {
+      /* 任务表读不到不拖垮整条命令(版本信息仍有用) */
+    }
     process.stdout.write(JSON.stringify({
       appVersion: APP_VERSION,
       appliedVersion,
@@ -1876,7 +1884,30 @@ program
       appVersionAtApply,
       taskCount,
       managedCount,
+      ...(procActive ? { procActive } : {}),
     }) + "\n");
+  });
+
+// (内部) 处理任务表人工清理(plans/036 §2.3):done/cancelled 超 7 天删;`--purge-failed` 额外删 failed。
+// uncertain 永不在此删(须先在任务表里 ack);库不存在 → 0,不创建文件。输出 {deleted}。
+program
+  .command("_proc-gc <dataRoot>", { hidden: true })
+  .option("--purge-failed", "额外清理 failed 行")
+  .description("(内部) 清理节点处理任务表(done/cancelled > 7 天;可选 failed)")
+  .action(async (dataRoot: string, opts: { purgeFailed?: boolean }) => {
+    const { existsSync } = await import("node:fs");
+    const { ProcQueueStore, procQueueDbPath } = await import("@drec/proc-queue");
+    const dbPath = procQueueDbPath(dataRoot);
+    let deleted = 0;
+    if (existsSync(dbPath)) {
+      const store = new ProcQueueStore(dbPath);
+      try {
+        deleted = store.gc({ purgeFailed: opts.purgeFailed === true });
+      } finally {
+        store.close();
+      }
+    }
+    process.stdout.write(JSON.stringify({ deleted }) + "\n");
   });
 
 // 节点侧上传(experimental,plans/027)的隐藏子命令隔离在独立文件,便于快速开关/回退。
