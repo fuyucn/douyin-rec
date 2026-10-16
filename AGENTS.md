@@ -233,7 +233,7 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
 - 状态恢复、崩溃自动重启、每任务日志环形缓冲（web 实时 tail）。
 - **输出格式·节点侧原地替换**（issue #137，`app/node-remux.ts` 薄封装 + `@drec/processors` 的 remux 模块，plans/036 T6）：任务字段 `outputFormat`（original/mp4/mkv）。仅**无后处理**
   的任务生效 —— `TaskManager.spawnFor` 经唯一判定点 `resolveNodeOutputFormat` 决定是否给子进程传 `--output-format`
-  （hub 受管 / 有规则绑定 / 边录边传 → original 不传；规则之后才绑定则下一次 spawn 起生效）。子进程经 manager 的
+  （hub 受管 / 有 **enabled** 规则绑定 / 边录边传 → original 不传；`enabled=false` 的规则视同未绑定、走封口转换；规则之后才绑定则下一次 spawn 起生效；判定唯一输入 `shouldConvertAtSeal`，锁 ⇔ 封口不转）。子进程经 manager 的
   封口钩子（与边录边传同一接缝、互斥）在每个分段**封口后**先写会话边车 `nodeFormat`、再**入队为 `remux` 处理任务**（每节点任务表 `<root>/db/proc-queue.db`，
   jobId=`jobIdOf("remux", task…@fileTag, g)`）；执行体 `remuxProcessor`（cpu / lane=copy / retryable / interruptible）串行 `-c copy` 到 `*.drec-remux` 临时文件 → 校验
   → fsync + 原子 rename → **最后**才删原文件；任一步失败保留原文件并走告警通道。校验是**唯一函数**

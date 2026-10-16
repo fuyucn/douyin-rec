@@ -10,7 +10,7 @@ import type { MergeJobStore } from "../../merge-jobs.js";
 import type { Task, TaskStore } from "../../store.js";
 import type { EventCenter, NotifWebhookToggles } from "@drec/observability";
 import type {
-  RecordingWorkerStatusDTO, HubRulePayload, HubPoolSnapshotDTO, WorkerTestResult, RoomPayload,
+  RecordingWorkerStatusDTO, HubRulePayload, HubPoolSnapshotDTO, WorkerTestResult, RoomPayload, OutputFormatLock,
 } from "@drec/core";
 
 export interface ApiResult {
@@ -149,7 +149,7 @@ export interface TaskView extends Task {
   /** 硬停收尾中(rolling 任务在传末段,最长约 10 分钟)。UI 用它显示「停止中」并禁用按钮。 */
   stopping?: boolean;
   /** 输出格式被锁的原因(与 core TaskDTO.outputFormatLock 同义;省略 = 不锁)。 */
-  outputFormatLock?: "hub-managed" | "hub-rule" | "rolling";
+  outputFormatLock?: OutputFormatLock;
   recordingWorkers?: RecordingWorkerStatusDTO[];
   /**
    * issue #73:master 判定「本节点是否被派发这个受管任务」。false=停用保留的未分配残留。

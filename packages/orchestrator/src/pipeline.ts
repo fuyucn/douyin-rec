@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "n
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, throwIfAborted, USER_STOP, VIDEO_EXT_ALT, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, USER_STOP, VIDEO_EXT_ALT, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
@@ -67,6 +67,7 @@ const STAGE_VIDEO_RE = new RegExp(`\\.(${VIDEO_EXT_ALT})$`, "i");
  * 用于 `stageAfterDone` 的整场清空:拉回的源段副本(本机胜出时是硬链接)、续跑残留、中间产物都在其中。
  * 另含随 pull 拉进 stage 的会话边车副本 `*.session.json`(issue #143;stage 里只有 pull 会产生它,
  * 删的只是 stage 的名字,节点源 / 本机硬链接源不受影响)—— 否则 `stageAfterDone` 清空后会残留。
+ * 归属 = core `survivingArtifacts().stageSidecarCopies`(随 stage 清空而删;`stageAfterDone` 关时本函数不会被调用)。
  * **绝不包含** `.xml/.ass/job.log`;只看顶层、不递归未知目录;不返回 stageSub 本身。
  * 调用方必须自己保证「上传已确认 + 有稿件号」(见 finalizeAfterUpload)。
  */
@@ -95,7 +96,9 @@ export function stageVideoLeftovers(stageSub: string): string[] {
  * @returns 该侧的 .xml/.ass 是否允许删除
  */
 export function xmlKeepRule(side: "node" | "stage", stageAfterDone: boolean): boolean {
-  return side === "node" ? !stageAfterDone : stageAfterDone;
+  // 判定唯一实现在 core `survivingArtifacts`;「该侧可删」= 该侧 xml 不在留存清单里。
+  const s = survivingArtifacts({ pipeline: { cleanup: { sourceAfterDone: true, stageAfterDone } } }, { stageHasXmlCopy: true });
+  return side === "node" ? !s.nodeXml : !s.stageXml;
 }
 
 export interface PipelineCfg {
@@ -276,6 +279,7 @@ export async function cleanupSourcesShared(o: {
   keepNodeXml?: boolean;
 }): Promise<CleanupOutcome> {
   const clean = o.cleanup ?? {};
+  const survivors = survivingArtifacts({ pipeline: { cleanup: clean } }, { stageHasXmlCopy: !o.keepNodeXml });
   const failed: CleanupFailure[] = [];
   /** 把一个清理步骤的失败目标落成一条 failed 步骤(UI/重试都靠它),并写 job.log。 */
   const markStep = (step: "clean_source" | "clean_stage_src", failures: CleanupFailure[], detail: string): void => {
@@ -288,7 +292,8 @@ export async function cleanupSourcesShared(o: {
 
   // ① 各节点 recordings 源(与 stage 侧独立;两开关可单独开)。
   if (clean.sourceAfterDone) {
-    const delNodeXml = o.keepNodeXml ? false : xmlKeepRule("node", clean.stageAfterDone === true);
+    // 节点源 xml 去留 = 留存清单(keepNodeXml 即 stageHasXmlCopy:false:节点侧上传无 stage xml 副本,节点 xml 恒为最后一份)。
+    const delNodeXml = !survivors.nodeXml;
     o.ledger.logStep(o.streamKey, "clean_source", "start");
     let fileCount = 0;
     const srcFailed: CleanupFailure[] = [];
@@ -311,7 +316,7 @@ export async function cleanupSourcesShared(o: {
   if (o.stagePulledSources && o.stagePulledSources.length > 0 && clean.stageSourceAfterMerge) {
     const paths = [...o.stagePulledSources];
     // .xml/.ass 副本:不保留 stage(节点源会保留)时才删 —— 与 xmlKeepRule 一致,永不两处删光。
-    if (xmlKeepRule("stage", clean.stageAfterDone === true)) {
+    if (!survivors.stageXml) {
       const dir = path.dirname(paths[0]);
       paths.push(...readdirSyncSafe(dir).filter((f) => /\.(xml|ass)$/i.test(f)).map((f) => path.join(dir, f)));
     }

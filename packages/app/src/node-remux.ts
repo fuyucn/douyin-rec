@@ -36,6 +36,7 @@ import {
   sessionBaseOf,
   STAGE_CONTAINERS,
   type OutputFormat,
+  type OutputFormatLock,
   type RollingSegment,
   type StageFormat,
 } from "@drec/core";
@@ -264,11 +265,8 @@ export async function recoverNodeRemux(dir: string, fmt: StageFormat, deps: Node
 
 /**
  * **唯一判定点**(spawn 录制子进程之前调用):该任务是否做节点侧原地替换,以及替换成什么。
- *   - 不被 hub 管理(`managedBy !== "hub"`:worker 上的受管任务一律不适用),
- *   - 且没有任何 hub 规则绑定它(规则 `recording.sourceTaskId === 任务 id`,或房间键 `{platform}.{roomSlug}` 同名)
- *     —— 有规则的存档侧形态由后处理容器负责(PR 1);
- *   - 且没开边录边传(`rollingEffective`:rolling 上传后删源,与原地替换互斥)
- *   才返回任务所选格式;否则一律 `original`(= 子进程不带该参数,行为与改动前一致)。
+ * 转不转只看 {@link shouldConvertAtSeal};用户选 original 则恒不替换。
+ * 不转 → 一律 `original`(= 子进程不带该参数,行为与改动前一致)。
  * 规则**之后才绑定**的任务:已在跑的进程不受影响,下一次 spawn 起按新判定(不再替换)。
  */
 export function resolveNodeOutputFormat(
@@ -276,17 +274,40 @@ export function resolveNodeOutputFormat(
   hubDir: string,
 ): OutputFormat {
   if (task.outputFormat === "original") return "original";
-  return nodeOutputFormatLock(task, hubDir) ? "original" : task.outputFormat;
+  return shouldConvertAtSeal(task, hubDir) ? task.outputFormat : "original";
 }
 
 /**
- * 「不适用」原因(= 该任务的输出格式被锁、后端不会替换);适用则 undefined。**与 {@link resolveNodeOutputFormat}
- * 同源**(后者只是在它之上叠加用户所选格式),任务视图把它原样下发,前端据此锁定下拉并显示原因。
- *   hub-managed = worker 上的受管任务;hub-rule = 有规则绑定(源任务 id 或房间键同名,不论是否 hub 模式);
+ * 录制封口时是否做节点侧原地转换(`resolveNodeOutputFormat` 的**唯一输入**,与所选格式无关):
+ *   - 不被 hub 管理(`managedBy !== "hub"`:worker 上的受管任务一律不适用),
+ *   - 没开边录边传(`rollingEffective`:rolling 上传后删源,与原地替换互斥),
+ *   - 没有 **enabled** 的 hub 规则绑定它(规则 `recording.sourceTaskId === 任务 id`,或房间键 `{platform}.{roomSlug}` 同名)
+ *     —— 有规则的存档侧形态由后处理容器负责。**规则存在但 `enabled=false` 视同未绑定**:禁用规则时 hub 不处理该房间,
+ *     无人收尾,只能在封口时转(与 `cli.ts` 的 `!rule.enabled → 不处理` 同口径)。
+ */
+export function shouldConvertAtSeal(
+  task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective">,
+  hubDir: string,
+): boolean {
+  return sealConversionBlocker(task, hubDir) === undefined;
+}
+
+/**
+ * 「不适用」原因(= 该任务的输出格式被锁、后端不会替换);适用则 undefined。{@link shouldConvertAtSeal} ≡ 此处 `undefined`
+ * (「锁 ⇔ 封口不转」),任务视图把它原样下发,前端据此锁定下拉并显示原因。类型见 core `OutputFormatLock`。
+ *   hub-managed = worker 上的受管任务;hub-rule = 有 enabled 规则绑定(源任务 id 或房间键同名,不论是否 hub 模式);
  *   rolling = 开了边录边传(上传后删源,互斥)。
  */
-export type NodeOutputFormatLock = "hub-managed" | "hub-rule" | "rolling";
+export type NodeOutputFormatLock = OutputFormatLock;
 export function nodeOutputFormatLock(
+  task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective">,
+  hubDir: string,
+): NodeOutputFormatLock | undefined {
+  return sealConversionBlocker(task, hubDir);
+}
+
+/** 封口不转换的原因(无 = 转)。`shouldConvertAtSeal` 与 `nodeOutputFormatLock` 的共同底层,判定只此一份。 */
+function sealConversionBlocker(
   task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective">,
   hubDir: string,
 ): NodeOutputFormatLock | undefined {
@@ -295,6 +316,7 @@ export function nodeOutputFormatLock(
   const platform = platformForRoom(task.room);
   const key = hubKey(platform.id, platform.extractRoomSlug(task.room));
   for (const r of listHubRules(hubDir)) {
+    if (!r.enabled) continue;
     if (r.recording?.sourceTaskId === task.id || r.key === key) return "hub-rule";
   }
   return undefined;

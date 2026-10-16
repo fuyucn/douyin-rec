@@ -857,6 +857,12 @@ export function normalizeDouyinApiMode(v: unknown): DouyinApiMode {
 }
 
 /** GET /api/tasks[] 的任务响应(含 live 运行态;不含敏感 cookies)。 */
+/**
+ * 任务「输出格式」被锁的原因(唯一定义;后端 `nodeOutputFormatLock` 产出,TaskDTO / app web DTO / 前端共用)。
+ * `no-survivors` = 规则使收尾后本机不留任何源视频(plans/036 T9b 起由后端产出;T8 先收口类型与文案)。
+ */
+export type OutputFormatLock = "hub-managed" | "hub-rule" | "rolling" | "no-survivors";
+
 export interface TaskDTO {
   id: number;
   /** 平台 id(douyin / bilibili / kuaishou / ...)。由创建/改 room 时按 urlPattern 重判。 */
@@ -921,7 +927,7 @@ export interface TaskDTO {
    * 输出格式被锁的原因(后端 `nodeOutputFormatLock` 判定,与实际是否替换同源);省略 = 不锁。
    * 前端只据此锁定下拉并显示原因,不再自己判 hub 状态;旧后端无此字段 → 按「不锁」降级。
    */
-  outputFormatLock?: "hub-managed" | "hub-rule" | "rolling";
+  outputFormatLock?: OutputFormatLock;
   /** 在跑录制进程 spawn 时实际带的边录边传值(issue #89);进程没在跑则省略。 */
   rollingApplied?: boolean;
   /** 在跑进程的启动参数与 `rollingEffective` 不一致 → 待(空闲后)重启生效(issue #89);无漂移/没在跑则省略。 */
