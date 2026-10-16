@@ -177,6 +177,10 @@
   **N4** `store.ts` claim 里对已认领过的 pending 取消行直接 `UPDATE state=cancelOutcome(...)`,未经 `canTransition`（绕开状态机唯一真理源）
   → 在 `core` 状态机补显式 reason（如 `cancel-before-rerun`）并让 claim 路径断言之,随 T6 前的下一次 proc-queue 改动一并做。
   T3 遗留落点：`ackUncertain`/`requeue` 目前只有 store 方法，**尚无 HTTP/CLI 入口**（plan 只要求 purge）→ T9a 的 `_proc-*` 命令或 T6 UI 前补。
+  T9b 复审遗留（PR [#169](https://github.com/fuyucn/douyin-rec/pull/169) 第 1 轮,不阻塞）：
+  ① **低码率体积比误判**：remux 校验的 `MIN_SIZE_RATIO`（0.5）对低码率流（纯音频 / 静态画面）可能把正常转换判失败（原文件保留、有告警，行为安全但会误报）→ 落点 `packages/processors` 的 `verifyRemuxed`，评估按容器开销改用绝对差或放宽比例；
+  ② **hub 任务页不展示留存转格式标注**：followups 的 notes（跳过 / 拒绝 / 回滚 / 缺边车 / 入队耗尽）只在台账与 job.log → 落点 `packages/web` 的 hub 任务页 + `GET /api/hub/queue` 的 DTO 带出 followups 摘要；
+  ③ **转换失败后会话边车仍写着已转换的 `nodeFormat`**（处理器在转换前就写）：目前无害（`groupSessions` 对原生录制容器无条件收录），但语义不精确 → 落点 `packages/processors` remux：失败路径回写边车或改为转换成功后才写（须保持崩溃接管可判定）。
 
 - [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
   — 2026-10-15。**做什么**:录制引擎在 spawn 前判定水位(拒绝则不起录、下轮再判),手动启动接口过同一闸门(拒绝返回 409 且不改 enabled)。**为什么**:此前只有 daemon 在窗口启停时查水位,常驻任务的下一场开播与手动启动会绕过 → 盘满导致录制损坏。**验收**:两条路径均有测试覆盖 + dev 实跑;`pnpm test`/`typecheck` 通过。分支 `codex/issue-96-new-broadcast-gate`,PR [#97](https://github.com/fuyucn/douyin-rec/pull/97)。
