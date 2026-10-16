@@ -10,6 +10,7 @@
     "@drec/manager": "workspace:*",
     "@drec/post-process": "workspace:*",
     "@drec/proc-queue": "workspace:*",
+    "@drec/processors": "workspace:*",
     "@drec/app": "workspace:*",
     "@drec/record-engine": "workspace:*",
     "commander": "^12.0.0",

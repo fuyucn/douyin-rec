@@ -254,6 +254,7 @@ program
     // 节点侧原地替换容器(issue #137):子进程只**信** `--output-format`(是否适用已由 spawn 前的唯一判定点
     // resolveNodeOutputFormat 算定,受管 / 有规则 / 边录边传都不会带该参数)。与边录边传互斥,rolling 优先(它上传后删源)。
     // 非法值直接报错退出,不静默回落 —— 静默回落会让用户以为在转、实际没转。
+    let closeRemuxQueue: () => Promise<void> = async () => {};
     let nodeFormat: OutputFormat = "original";
     try { nodeFormat = parseOutputFormat(o.outputFormat); }
     catch (e) { console.error(`[rec] ${(e as Error).message}`); process.exit(2); }
@@ -261,7 +262,7 @@ program
       console.log(`[rec] 已开启边录边传,忽略 --output-format ${nodeFormat}(上传后删源,与原地替换互斥)`);
     } else if (nodeFormat !== "original") {
       const fmt = nodeFormat as StageFormat;
-      const { makeNodeRemuxHookFactory, recoverNodeRemuxInBackground } = await import("@drec/app");
+      const { makeNodeRemuxHookFactory, recoverNodeRemuxInBackground, RemuxQueue } = await import("@drec/app");
       const remuxDeps = {
         log: (m: string) => console.log(m),
         // 失败走现有告警通道(error 事件 → webhook + @@DREC_ALERT@@ → 站内 toast),不静默。
@@ -270,9 +271,17 @@ program
         owner: platform.extractRoomSlug(o.room),
       };
       // 会话开始前接管上次崩溃留下的中间态:**后台执行、不挡开录**(探测挂死/慢盘不得拖住录制),整体有总时限。
+      // 目录级接管只兜底「不在任务表里」的旧 tmp / 配对;表内 job 由 runner 的租约接管 + recover 续跑。
       void recoverNodeRemuxInBackground(opts.outDir, fmt, remuxDeps);
-      makeRolling = makeNodeRemuxHookFactory({ format: fmt, ...remuxDeps });
-      console.log(`[rec] 节点侧输出格式 ${fmt}:每封口一段原地 remux,校验通过后删原文件`);
+      // 封口转换走每节点任务表(plans/036 T6):本进程按租约规则宿主 runner(serve 先持有则只入队)。
+      // 打不开 → null(已告警),钩子回落进程内串行转换。
+      const queue = RemuxQueue.open({ owner: remuxDeps.owner, outDir: opts.outDir, alert: remuxDeps.alert, log: remuxDeps.log });
+      if (queue) {
+        closeRemuxQueue = () => queue.close();
+        process.on("exit", () => queue.releaseLeaseSync());
+      }
+      makeRolling = makeNodeRemuxHookFactory({ format: fmt, ...remuxDeps, queue });
+      console.log(`[rec] 节点侧输出格式 ${fmt}:每封口一段入队原地 remux(${queue ? "任务表" : "进程内串行(任务表不可用)"}),校验通过后删原文件`);
     }
     // 新一场开播的磁盘水位闸门(issue #96):常驻任务的下一场开播此前不过闸门,低水位后仍会开新一场直至写满盘。
     // 每次判定现读 hub 配置(水位热改生效)并测**任务自己的输出目录**所在卷;只拦新一场,同场重连放行。
@@ -293,7 +302,7 @@ program
       if (stopping) return;
       stopping = true;
       console.log(`\n[rec] 收到 ${sig}，正在停止…`);
-      void session.stop().then(() => {
+      void session.stop().then(() => closeRemuxQueue()).then(() => {
         console.log("[rec] 已停止");
         process.exit(0);
       }).catch((err: unknown) => {
@@ -311,7 +320,7 @@ program
       if (stopping || draining) return;
       draining = true;
       console.log("[rec] 收到 SIGUSR2，窗口结束排空：等待当前直播自然收播…");
-      void session.drain().then(() => {
+      void session.drain().then(() => closeRemuxQueue()).then(() => {
         console.log("[rec] 排空完成，已停止");
         process.exit(0);
       }).catch((err: unknown) => {

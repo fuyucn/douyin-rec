@@ -675,6 +675,149 @@ describe("返工(PR #154 审查 F1/F2/F4/F5/F6)", () => {
     slow2.resolve();
   });
 
+  it("R4-1/D1b:快照过期(z 已被别路径处置回 pending、补跑 tick 未认领)→ recoverKind 不对 z 再调 recover,新一轮 tmp 不受影响", async () => {
+    const zSlow = gate(); const aRecover = gate(); const zRun2 = gate();
+    const recovers: string[] = [];
+    let zRuns = 0, zRecoverWhileRunning = 0;
+    registerProcessor(fakeProcessor({
+      run: async (j: ProcessJob, ctx: ProcessContext) => {
+        if (j.inputs[0].endsWith("a.ts")) {
+          await new Promise<void>((res) => ctx.signal.addEventListener("abort", () => res()));
+          return { outputs: [] };
+        }
+        await (++zRuns === 1 ? zSlow.promise : zRun2.promise);
+        return { outputs: [] };
+      },
+      recover: async (row) => {
+        recovers.push(row.inputs[0]);
+        if (row.inputs[0].endsWith("z.ts") && zRuns === 2) zRecoverWhileRunning++;
+        if (row.inputs[0].endsWith("a.ts")) await aRecover.promise;
+        return "rerun" as const;
+      },
+    }));
+    const store = env.open();
+    const r = mkRunner("A", { store, abortWaitMs: 30, limiter: new SimpleSlotLimiter(() => 9) });
+    const a = store.enqueue(env.job("a.ts"), allowed()).jobId;
+    const z = store.enqueue(env.job("z.ts"), allowed()).jobId;
+    r.tick();
+    await new Promise((x) => setTimeout(x, 10));
+    const real = store.heartbeat.bind(store);
+    store.heartbeat = () => { throw new Error("database is locked"); };
+    r.heartbeat(); r.heartbeat(); r.heartbeat(); // fence a、z
+    store.heartbeat = real;
+    await new Promise((x) => setTimeout(x, 20)); // a 收尾(行留 running)
+    r.tick(); // 重获租约 → recoverKind 快照 [a, z],卡在 a 的 recover
+    await vi.waitFor(() => expect(recovers).toContain(store.get(a)!.inputs[0]));
+    const realClaim = store.claim.bind(store);
+    store.claim = () => null; // 补跑 tick 暂时认领不到(资源 / 磁盘门禁、被更早的 pending 占槽)
+    zSlow.resolve(); // z 收尾 → settleFenced(z):recover#1 → pending
+    await vi.waitFor(() => expect(store.get(z)?.state).toBe("pending"));
+    expect(recovers.filter((p) => p.endsWith("z.ts")).length).toBe(1);
+    aRecover.resolve(); // recoverKind 轮到 z:快照 running,实际已 pending
+    await new Promise((x) => setTimeout(x, 60));
+    expect(recovers.filter((p) => p.endsWith("z.ts")).length).toBe(1); // 不得第 2 次 recover
+    store.claim = realClaim;
+    r.tick();
+    await vi.waitFor(() => expect(zRuns).toBe(2));
+    await new Promise((x) => setTimeout(x, 40));
+    expect(zRecoverWhileRunning).toBe(0);
+    expect(store.get(z)?.state).toBe("running");
+    zRun2.resolve();
+  });
+
+  it("R4-2/LEAK:settleOrphan 抛错后占位必须释放,重获租约后可再次处置", async () => {
+    let runs = 0;
+    registerProcessor(fakeProcessor({
+      run: async (_j: ProcessJob, ctx: ProcessContext) => {
+        if (++runs <= 1) await new Promise<void>((res) => ctx.signal.addEventListener("abort", () => res()));
+        return { outputs: [] };
+      },
+      recover: async () => "rerun" as const,
+    }));
+    const logs: string[] = [];
+    const store = env.open();
+    const r = mkRunner("A", { store, log: (m) => logs.push(m) });
+    const id = store.enqueue(env.job("a.ts"), allowed()).jobId;
+    r.tick();
+    await new Promise((x) => setTimeout(x, 10));
+    const real = store.heartbeat.bind(store);
+    const fence = (): void => {
+      store.heartbeat = () => { throw new Error("database is locked"); };
+      r.heartbeat(); r.heartbeat(); r.heartbeat();
+      store.heartbeat = real;
+    };
+    fence();
+    await new Promise((x) => setTimeout(x, 20)); // 第 1 轮收尾,行留 running
+    const realSettle = store.settleOrphan.bind(store);
+    store.settleOrphan = () => { throw new Error("database is locked"); };
+    r.tick(); // 重获租约 → recoverKind → settleOrphan 抛错
+    await vi.waitFor(() => expect(logs.some((m) => m.includes("recover 异常"))).toBe(true));
+    expect((r as unknown as { settling: Set<string> }).settling.size).toBe(0);
+    store.settleOrphan = realSettle;
+    fence(); // 再失租 → 再重获:行仍 running,必须能被处置
+    r.tick();
+    await vi.waitFor(() => { r.tick(); expect(store.get(id)?.state).toBe("done"); });
+  });
+
+  it("R4-2/S7:僵尸在重获租约前收尾,行留 running 且属本持有者 → recoverKind 以 allowSelf 处置,不得永久卡 running", async () => {
+    let runs = 0;
+    registerProcessor(fakeProcessor({
+      run: async (_j: ProcessJob, ctx: ProcessContext) => {
+        if (++runs === 1) await new Promise<void>((res) => ctx.signal.addEventListener("abort", () => res()));
+        return { outputs: [] };
+      },
+      recover: async () => "rerun" as const,
+    }));
+    const store = env.open();
+    const r = mkRunner("A", { store });
+    const id = store.enqueue(env.job("a.ts"), allowed()).jobId;
+    r.tick();
+    await new Promise((x) => setTimeout(x, 10));
+    const real = store.heartbeat.bind(store);
+    store.heartbeat = () => { throw new Error("database is locked"); };
+    r.heartbeat(); r.heartbeat(); r.heartbeat();
+    store.heartbeat = real;
+    await new Promise((x) => setTimeout(x, 20)); // 僵尸先收尾(此时未持租约 → 不写表)
+    expect(store.get(id)?.state).toBe("running");
+    expect(store.get(id)?.claimedBy).toBe("A");
+    r.tick(); // 重获租约 → recoverKind(allowSelf)
+    await vi.waitFor(() => { r.tick(); expect(store.get(id)?.state).toBe("done"); });
+    expect(runs).toBe(2);
+  });
+
+  it("R4-3:孤儿处置被拒的日志写明具体原因(行已被重新认领 attempts a→b)", async () => {
+    const hang = gate(); const slow2 = gate();
+    let runs = 0;
+    registerProcessor(fakeProcessor({
+      run: async (_j: ProcessJob, ctx: ProcessContext) => {
+        if (++runs === 1) await new Promise<void>((res) => ctx.signal.addEventListener("abort", () => res()));
+        else await slow2.promise;
+        return { outputs: [] };
+      },
+      recover: async () => { await hang.promise; return "rerun" as const; },
+    }));
+    const logs: string[] = [];
+    const store = env.open();
+    const r = mkRunner("A", { store, log: (m) => logs.push(m) });
+    const id = store.enqueue(env.job("a.ts"), allowed()).jobId;
+    r.tick();
+    await new Promise((x) => setTimeout(x, 10));
+    const real = store.heartbeat.bind(store);
+    store.heartbeat = () => { throw new Error("database is locked"); };
+    r.heartbeat(); r.heartbeat(); r.heartbeat();
+    store.heartbeat = real;
+    await new Promise((x) => setTimeout(x, 20));
+    r.tick();
+    await vi.waitFor(() => expect(store.get(id)?.attempts).toBe(1));
+    await new Promise((x) => setTimeout(x, 10));
+    expect(store.settleOrphan(id, "A", "rerun", { allowSelf: true })).toBe(true);
+    r.tick();
+    await vi.waitFor(() => expect(runs).toBe(2));
+    hang.resolve();
+    await vi.waitFor(() => expect(logs.some((m) => m.includes("孤儿处置被拒") && m.includes("重新认领 attempts 1→2"))).toBe(true));
+    slow2.resolve();
+  });
+
   it("M6:recover 挂起期间触发 fence → 复检租约失败,行不被 settle", async () => {
     const hang = gate();
     let recovering = 0;
