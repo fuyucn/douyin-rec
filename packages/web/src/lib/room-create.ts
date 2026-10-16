@@ -60,12 +60,13 @@ export function planNewRoomRule(o: {
 /**
  * Hub rule for a new room. `sourceTaskId` is what ties the rule to the recording task, so it is
  * required; a rule without it would never be driven by this task's recordings.
- * `workers: []` means "all nodes" (dynamic) — never expand it to today's node list.
+ * An empty selection OMITS `workers` (= all nodes, dynamic): the backend rejects `workers: []`,
+ * and expanding it would freeze today's node list.
  */
 export function newRoomRulePayload(o: { taskId: number; mode: NewRoomMode; danmu: boolean; uploadPrivate: boolean; workers: string[] }): HubRulePayload {
   return {
     enabled: true,
-    workers: o.workers,
+    ...(o.workers.length ? { workers: o.workers } : {}),
     recording: { sourceTaskId: o.taskId },
     pipeline: {
       steps: { mergeSegments: true, burnDanmu: o.mode === "upload" && o.danmu, burnLivechat: false },

@@ -44,11 +44,14 @@ describe("newRoomRulePayload", () => {
 describe("planNewRoomRule", () => {
   const base = { taskId: 7, mode: "archive" as const, danmu: false, uploadPrivate: true, workers: [] };
 
-  it("no existing rule → create, and an empty node selection stays empty (= all nodes, dynamic)", () => {
+  it("no existing rule → create, and an empty node selection omits workers (= all nodes; backend rejects [])", () => {
     const plan = planNewRoomRule({ ...base, hasExistingRule: false });
     expect(plan.kind).toBe("create");
     if (plan.kind !== "create") throw new Error("unreachable");
-    expect(plan.payload.workers).toEqual([]);
+    expect("workers" in plan.payload).toBe(false);
+    const picked = planNewRoomRule({ ...base, workers: ["w-test-1"], hasExistingRule: false });
+    if (picked.kind !== "create") throw new Error("unreachable");
+    expect(picked.payload.workers).toEqual(["w-test-1"]);
   });
 
   it("existing rule → bind only, never rewrite upload mode / enabled / nodes", () => {
