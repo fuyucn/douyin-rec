@@ -14,6 +14,14 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-59 收口:扫描与拉取之间会话边车消失导致 job 失败（issue [#146](https://github.com/fuyucn/douyin-rec/issues/146)）**
+  — 2026-10-16 认领并完成返工,PR [#174](https://github.com/fuyucn/douyin-rec/pull/174) 已合并进 `feat/hub-optimization`（**未部署 / 未 close**,票现为 `待验证`）。
+  **做什么**：拉取前复核清单声明的会话边车是否还在。判成两类——**确认缺失**（节点可达且文件确实不在）本轮跳过并计入连续上限,满 3 轮转 `needs_manual` + 告警一次;**无法确认**（节点不可达 / 探测失败 / 输出乱码）本轮跳过但**不计数也不清零**,永不因此转人工。台账两种前缀分开标注,真实 pull 仍清零。
+  **为什么**：原实现把 `exists() === false` 一律当「边车已消失」,而 `SshTransport.exists` 在 ssh 失败时 `catch → false` —— 一次掉线会被读成「文件被删」,3 轮网络抖动就能把健康场次推成 `needs_manual`。
+  **验收**：`exists` 探测失败必须抛错（不再被读成删除）;`exists` 只认最后一个非空行判定（登录横幅含 `MISSING` 不翻转结论）;13 处变异全部被测试杀死;全量门禁连续 5 次全绿（2613 passed）+ typecheck / arch:check / bundle。
+  **回写**：回归用例在 orchestrator 包 pipeline 与 transport-ssh 两个测试文件;残余（`exists` 纯字符串边界未单测、成员剔除处同样把「探测失败」当「文件不在」）已记入 issue [#176](https://github.com/fuyucn/douyin-rec/issues/176)。
+  **部署**：仅 master 侧收口逻辑,单测覆盖,**无需单独部署**,随下次部署带上。
+
 - [~] **T-54 分段续跑补齐烧录轨:续跑不重烧也不补烧录轨分 P（issue [#142](https://github.com/fuyucn/douyin-rec/issues/142)）**
   — 2026-10-15 认领,分支 `codex/issue-142-resume-burn`(**未合并 / 未部署 / 未 close**)。#140 复审期间发现（不在 #140 范围，单独开票）：续跑路径拿到的烧录产物字段恒为空
   （赋值在主流程烧录循环里，而该循环在续跑分叉之后）→ `appendSegmentGroup(files=[])` 直接把该步骤标
