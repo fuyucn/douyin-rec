@@ -4,7 +4,7 @@ import type {
   Recorder, DanmuSource, RecorderEvents, RecordOpts, DanmuMessage, StreamInfo,
 } from "@drec/core";
 import { XmlDanmuWriter } from "./danmu-xml/index.js";
-import { createLogger, platformForRoom, sessionBaseOf, stripVideoExt } from "@drec/core";
+import { createLogger, platformForRoom, processTimeZone, sessionBaseOf, stripVideoExt } from "@drec/core";
 import type { AdmitDecision, Notifier, NotifyEvent } from "@drec/core";
 
 const log = createLogger("session");
@@ -51,6 +51,13 @@ export interface SessionOpts {
    * (同一原因回升前只发一次),录制器保持等待开播并自动重试。不注入 = 不启用(行为不变)。
    */
   admitNewBroadcast?: () => AdmitDecision;
+
+  /**
+   * Effective timezone recorded into the session sidecar (issue #87), next to the
+   * absolute startMs. Self-describing metadata only: nothing reads it yet (scan uses
+   * startMs directly). Default: process effective timezone.
+   */
+  timeZone?: string;
 }
 
 /**
@@ -110,6 +117,8 @@ export class RecordingSession {
   private readonly drainPollSec: number;
   private readonly notifier: Notifier | undefined;
   private readonly danmuEnabled: boolean;
+  /** Effective timezone recorded into the session sidecar (issue #87). */
+  private readonly timeZone: string | undefined;
   /** 边录边传钩子工厂(T-33);undefined = 未启用(默认,行为不变)。 */
   private readonly makeRolling?: () => RollingUploadHook;
   /** 新一场开播准入闸门(issue #96);undefined = 不启用。 */
@@ -140,6 +149,14 @@ export class RecordingSession {
    * 否则「起得来但几秒退出」会以固定 5s 无限重连(实测上千次)。
    */
   private onLiveAt: number | null = null;
+
+  /**
+   * Authoritative session start (epoch ms), keyed by sidecar base (issue #87). One
+   * recording process spans several broadcasts (reconnect / stream-down then up); each
+   * opens a new base and must freeze its OWN start, so a stale value never leaks into
+   * the next broadcast's sidecar. Re-frozen whenever the base changes.
+   */
+  private sessionStart: { base: string; ms: number } | null = null;
   /**
    * T14:连续「短命录制」次数(起播确认后 < STABLE_RECORD_MS 就断流)。
    * 达 SHORT_LIVED_ALARM 发一次 error 告警(继续按封顶退避,不放弃重连)。
@@ -163,6 +180,7 @@ export class RecordingSession {
     this.danmuEnabled = sessionOpts?.danmuEnabled ?? true;
     this.makeRolling = sessionOpts?.makeRolling;
     this.admitNewBroadcast = sessionOpts?.admitNewBroadcast;
+    this.timeZone = sessionOpts?.timeZone;
   }
 
   /**
@@ -216,6 +234,7 @@ export class RecordingSession {
     this.shortLivedCount = 0;
     this.shortLivedAlarmAt = 0;
     this.onLiveAt = null;
+    this.sessionStart = null;
 
     mkdirSync(opts.outDir, { recursive: true });
     await this._startInner();
@@ -516,10 +535,21 @@ export class RecordingSession {
    */
   private _writeSession(base: string, withGaps = false): void {
     const plat = platformForRoom(this.roomUrl);
+    // Freeze the authoritative session start the first time we write THIS base (issue #87).
+    // Keyed by base: one process covers several broadcasts, each opening a new base, so the
+    // value must never drift to a later broadcast's stop time.
+    if (this.sessionStart === null || this.sessionStart.base !== base) {
+      this.sessionStart = { base, ms: this.onLiveAt ?? Date.now() };
+    }
     const data: Record<string, unknown> = {
       sessionBase: basename(base),
       roomSlug: plat.extractRoomSlug(this.roomUrl),
       platform: plat.id,
+      // Absolute start + effective timezone: consume as truth instead of deriving
+      // from file mtime or filename parsing (which reverse-parses in the reader's
+      // local timezone and can land on the wrong day across a UTC/Asia boundary).
+      startMs: this.sessionStart.ms,
+      timeZone: this.timeZone ?? processTimeZone(),
     };
     if (this.liveTitle) data.title = this.liveTitle;
     // 节点侧原地替换(issue #137)的转换标记由 app 层写进同一个文件;本方法是**整文件覆盖**,
