@@ -32,3 +32,5 @@ export * from "./rolling-policy.js";
 export * from "./experimental.js";
 // 输出格式(issue #137):白名单 + 容器注册表 + effectiveStageFormat(唯一真理源)。
 export * from "./output-format.js";
+// 后处理处理器契约 + 注册表 + jobId + 任务状态机(plans/036 T1;纯新增、无调用方)。
+export * from "./processor.js";
