@@ -390,6 +390,13 @@ export class ProcRunner {
     if (this.settling.has(row.jobId)) return true;
     this.settling.add(row.jobId);
     try {
+      // R4-1:快照可能已过期(循环开头取的行,期间别的路径已处置并回 pending / 重新认领)。占位后同步重读:
+      // 不再是「同一轮的 running」就不调 recover(recover 可能删新一轮的 tmp)。占位 + 同步重读之间无其他路径可改该行。
+      const cur = this.o.store.get(row.jobId);
+      if (!cur || cur.state !== "running" || cur.attempts !== row.attempts) {
+        this.log(`${row.jobId}: 孤儿处置跳过(行已不在原 running 轮次:state=${cur?.state ?? "缺失"} attempts=${cur?.attempts ?? "-"},快照 attempts=${row.attempts})`);
+        return true;
+      }
       return await this.settleOrphanRowInner(p, row, allowSelf);
     } finally {
       this.settling.delete(row.jobId);
@@ -411,7 +418,7 @@ export class ProcRunner {
     if (!this.leaseOk(p.kind)) return false; // recover 期间失租,不再写
     // 以快照行 attempts 做代际 CAS:行已被重新认领(新一轮在跑)则拒写,不打回、不告警、不记 recover 落点。
     if (!store.settleOrphan(row.jobId, owner, outcome, { error: why, allowSelf, attempts: row.attempts })) {
-      this.log(`${row.jobId}: 孤儿处置被拒(行已变更/已被重新认领),跳过`);
+      this.log(`${row.jobId}: 孤儿处置被拒(${this.rejectReason(row, allowSelf, p.kind)}),跳过`);
       return true;
     }
     if (outcome === "uncertain") {
@@ -419,6 +426,16 @@ export class ProcRunner {
     }
     this.log(`${row.jobId}: 接管 recover → ${outcome}`);
     return true;
+  }
+
+  /** settleOrphan 拒写后的具体原因(排障用;只读 store,与 settleOrphan 内的判定顺序一致)。 */
+  private rejectReason(row: ProcJobRecord, allowSelf: boolean, kind: string): string {
+    const cur = this.o.store.get(row.jobId);
+    if (!cur || cur.state !== "running") return `行状态已变为 ${cur?.state ?? "缺失"}`;
+    if (cur.attempts !== row.attempts) return `行已被重新认领 attempts ${row.attempts}→${cur.attempts}`;
+    if (cur.claimedBy === this.o.owner && !allowSelf) return "行属本持有者且未确认已被 fence";
+    if (!this.o.store.leaseValid(kind, this.o.owner)) return "租约已失效";
+    return "原因未知";
   }
 
   // ───────────────────────── 保留 ─────────────────────────
