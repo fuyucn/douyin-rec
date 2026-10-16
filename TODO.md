@@ -155,6 +155,8 @@
   **验收**:计划第一期各任务测试与验收条全部通过；`pnpm test` / `pnpm typecheck` / `pnpm arch:check` 通过；处理器与任务表包内无目录推导
   （grep 验收）；规则任务处理中途从不转换、上传仍用 mp4；VPS 真实录制一场（用户安排）验证封口转换走任务表。
   **进度**:计划已合入、D1–D8 已按推荐确认（2026-10-15）；按切片各开一票，T1 = issue [#151](https://github.com/fuyucn/douyin-rec/issues/151)（进行中）。
+  T1 复审遗留（PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）：符号链接逃逸 → plan T9a（节点侧 realpath）；`finish(cancelled)` 先经 `cancelOutcome` → plan T15；
+  `recover()` 返回 `"done"` 时不带 outputs、store 无法据此判 stale → **T3 评估是否把返回值扩成 `{state:"done", outputs}`**（契约缺口，非 T1 范围）。
 
 - [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
   — 2026-10-15。**做什么**:录制引擎在 spawn 前判定水位(拒绝则不起录、下轮再判),手动启动接口过同一闸门(拒绝返回 409 且不改 enabled)。**为什么**:此前只有 daemon 在窗口启停时查水位,常驻任务的下一场开播与手动启动会绕过 → 盘满导致录制损坏。**验收**:两条路径均有测试覆盖 + dev 实跑;`pnpm test`/`typecheck` 通过。分支 `codex/issue-96-new-broadcast-gate`,PR [#97](https://github.com/fuyucn/douyin-rec/pull/97)。
