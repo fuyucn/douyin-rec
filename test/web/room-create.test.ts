@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { newRoomRulePayload, newRoomTaskPayload, type NewRoomForm } from "../../packages/web/src/lib/room-create.js";
+import { newRoomRulePayload, newRoomTaskPayload, planNewRoomRule, type NewRoomForm } from "../../packages/web/src/lib/room-create.js";
 
 const form: NewRoomForm = {
   room: " https://live.example.com/100001 ", name: " 主播A ", schedule: "20:00-02:00", quality: "origin",
@@ -38,5 +38,21 @@ describe("newRoomRulePayload", () => {
   it("never enables cleanup that deletes the source or the stage copy", () => {
     const c = newRoomRulePayload({ ...base, mode: "upload" }).pipeline?.cleanup;
     expect(c).toEqual({ stageSourceAfterMerge: false, sourceAfterDone: false, stageAfterDone: false });
+  });
+});
+
+describe("planNewRoomRule", () => {
+  const base = { taskId: 7, mode: "archive" as const, danmu: false, uploadPrivate: true, workers: [] };
+
+  it("no existing rule → create, and an empty node selection stays empty (= all nodes, dynamic)", () => {
+    const plan = planNewRoomRule({ ...base, hasExistingRule: false });
+    expect(plan.kind).toBe("create");
+    if (plan.kind !== "create") throw new Error("unreachable");
+    expect(plan.payload.workers).toEqual([]);
+  });
+
+  it("existing rule → bind only, never rewrite upload mode / enabled / nodes", () => {
+    const plan = planNewRoomRule({ ...base, mode: "upload", workers: ["w-test-1"], hasExistingRule: true });
+    expect(plan).toEqual({ kind: "bindOnly", taskId: 7 });
   });
 });

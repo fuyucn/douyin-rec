@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { api, type PlatformDTO, type WorkerDTO } from "../api/client";
 import { Button } from "../components/Button";
 import { Switch } from "../components/Switch";
@@ -6,7 +6,7 @@ import { Dialog } from "../components/Dialog";
 import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform } from "../lib/labels";
-import { newRoomRulePayload, newRoomTaskPayload } from "../lib/room-create";
+import { newRoomTaskPayload, planNewRoomRule } from "../lib/room-create";
 import { OUTPUT_FORMATS, stageExt, type OutputFormat } from "@drec/output-format";
 import { Seg } from "./RoomEditor";
 
@@ -60,7 +60,6 @@ export function AddRoomDialog({ open, onClose, onSaved, hubEnabled, workers }: P
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plat?.id, platforms.length]);
 
-  const picked = useMemo(() => (form.workers.length ? form.workers : workers.map((w) => w.id)), [form.workers, workers]);
   const roomOk = form.room.trim().length > 0;
 
   function toggleWorker(id: string): void {
@@ -84,11 +83,17 @@ export function AddRoomDialog({ open, onClose, onSaved, hubEnabled, workers }: P
         const rooms = await api.listRooms().catch(() => []);
         const created = rooms.find((r) => r.key.startsWith(`${plat.id}.`) && (r.roomSlug === task.room || r.room === task.room));
         if (created) {
-          const rule = newRoomRulePayload({
-            taskId: task.id, mode, danmu: form.danmu, uploadPrivate: form.uploadPrivate, workers: picked,
+          const plan = planNewRoomRule({
+            taskId: task.id, mode, danmu: form.danmu, uploadPrivate: form.uploadPrivate,
+            workers: form.workers, hasExistingRule: created.processing !== null && created.processing !== undefined,
           });
           try {
-            await api.createHubRule(rule);
+            if (plan.kind === "create") await api.createHubRule(plan.payload);
+            else {
+              // Never rewrite an existing rule: only point it at the task we just created.
+              await api.updateHubRule(created.key, { recording: { sourceTaskId: plan.taskId } });
+              toast(t("room.addBoundExisting"), "success");
+            }
           } catch (err) {
             toast(t("room.addRuleFailed", { msg: errMessage(err) }), "error");
           }

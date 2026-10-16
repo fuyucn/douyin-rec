@@ -33,8 +33,34 @@ export function newRoomTaskPayload(f: NewRoomForm, mode: NewRoomMode): TaskPaylo
 }
 
 /**
+ * What to do about the processing half when adding a room.
+ *
+ * - `create`   — no rule for this room yet → write a fresh one with the chosen shape.
+ * - `bindOnly` — the room already has a rule (possibly hand-tuned, maybe paused) → only point its
+ *   `sourceTaskId` at the new task. Writing a full rule here would silently re-enable the room and
+ *   rewrite its upload mode / burn flags / nodes, which the user never asked for.
+ */
+export type NewRoomRulePlan =
+  | { kind: "create"; payload: HubRulePayload }
+  | { kind: "bindOnly"; taskId: number };
+
+export function planNewRoomRule(o: {
+  taskId: number;
+  mode: NewRoomMode;
+  danmu: boolean;
+  uploadPrivate: boolean;
+  /** 空 = 全部节点(与 isWorkerTargeted 同义,不固化成当前节点快照)。 */
+  workers: string[];
+  hasExistingRule: boolean;
+}): NewRoomRulePlan {
+  if (o.hasExistingRule) return { kind: "bindOnly", taskId: o.taskId };
+  return { kind: "create", payload: newRoomRulePayload(o) };
+}
+
+/**
  * Hub rule for a new room. `sourceTaskId` is what ties the rule to the recording task, so it is
  * required; a rule without it would never be driven by this task's recordings.
+ * `workers: []` means "all nodes" (dynamic) — never expand it to today's node list.
  */
 export function newRoomRulePayload(o: { taskId: number; mode: NewRoomMode; danmu: boolean; uploadPrivate: boolean; workers: string[] }): HubRulePayload {
   return {
