@@ -6,9 +6,9 @@ import { groupSessions } from "../../packages/post-process/src/concat.js";
 import { buildSplitArgs, splitToSizeLimit } from "../../packages/post-process/src/split.js";
 
 describe("buildRemuxArgs", () => {
-  it("mp4:与改动前逐字一致(时基 90000 + faststart)", () => {
+  it("mp4:除开头 -hide_banner 外与改动前逐字一致(时基 90000 + faststart)", () => {
     expect(buildRemuxArgs("/in/a.ts", "/out/a.mp4")).toEqual([
-      "-y", "-i", "/in/a.ts", "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+      "-hide_banner", "-y", "-i", "/in/a.ts", "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
       "-video_track_timescale", "90000", "-movflags", "+faststart", "/out/a.mp4",
     ]);
   });

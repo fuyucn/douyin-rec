@@ -2,6 +2,7 @@
 // 假 remux / 假 ffprobe 注入(不依赖本机 ffmpeg);任务表是真 sqlite(临时目录)。
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _resetProcessors, jobIdOf, registerProcessor, type EnqueueResult, type StageFormat } from "@drec/core";
@@ -279,6 +280,85 @@ describe("store 打不开 / 入队失败 → 回落进程内串行链(稳定版�
     expect(calls).toEqual([]);
     expect(alerts.some((m) => m.includes("mark-failed"))).toBe(true);
     expect(videoFiles().filter((n) => n.endsWith(".ts"))).toHaveLength(2);
+  });
+});
+
+describe("入队被拒于已有终态行 → 不回落,只告警(#160 第 4 项)", () => {
+  const forceState = (state: string): void => {
+    const db = new DatabaseSync(dbPath);
+    try { db.prepare("UPDATE proc_jobs SET state=?").run(state); } finally { db.close(); }
+  };
+
+  it.each(["uncertain", "failed", "cancelled"])("同段已有 %s 行,再次封口 → 不转换、只告警一次、原文件不动、行不变", async (state) => {
+    const q = openQueue(); // 无处理器注册:首次入队后行停在 pending
+    const a = seg(0), b = seg(1);
+    const h1 = hookOf(q, { budget: 30 });
+    h1.onSegment(a); h1.onSegment(b);
+    await h1.onSessionEnd();
+    expect(store().list({ kind: "remux" })).toHaveLength(2);
+    forceState(state);
+    alerts.length = 0;
+    const remux = vi.fn(copyRemux);
+    const h2 = hookOf(q, { budget: 2000, remux });
+    h2.onSegment(a); h2.onSegment(a); h2.onSegment(b); // 重复上报同一段不重复告警
+    await h2.onSessionEnd();
+    expect(remux).not.toHaveBeenCalled();
+    expect(videoFiles()).toEqual([`${B}_000.ts`, `${B}_001.ts`]);
+    const rows = store().list({ kind: "remux" });
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.state === state)).toBe(true);
+    const mine = alerts.filter((m) => m.includes("需人工处理"));
+    expect(mine).toHaveLength(2); // 每段一条(同一段只一次)
+    expect(mine[0]).toContain(`state=${state}`);
+    expect(mine[0]).toContain(`${B}_000.ts`);
+  });
+
+  it("正常首次入队不受影响:无告警、行 pending", async () => {
+    const q = openQueue();
+    const h = hookOf(q, { budget: 30 });
+    h.onSegment(seg(0)); h.onSegment(seg(1));
+    await h.onSessionEnd();
+    expect(alerts.filter((m) => m.includes("需人工处理"))).toEqual([]); // 预算 30ms 的超时告警与本断言无关
+    expect(store().list({ kind: "remux" }).map((r) => r.state)).toEqual(["pending", "pending"]);
+  });
+
+  it("其余拒绝原因(无 existingState,如契约/stat 失败)仍回落进程内转换", async () => {
+    const fake: RemuxQueueLike = {
+      enqueue: (): EnqueueResult => ({ jobId: "x", state: "rejected", error: "inputs[0] 无法 stat: ENOENT" }),
+      waitSettled: async () => "settled",
+    };
+    const h = hookOf(fake, { budget: 5000 });
+    h.onSegment(seg(0)); h.onSegment(seg(1));
+    await h.onSessionEnd();
+    expect(videoFiles()).toEqual([`${B}_000.mkv`, `${B}_001.mkv`]);
+    expect(alerts.filter((m) => m.includes("需人工处理"))).toEqual([]);
+  });
+
+  it("store.enqueue 对终态行回 existingState,对契约违规不带", () => {
+    const q = openQueue();
+    const p = seg(0);
+    expect(q.enqueue(p, "mkv").existingState).toBeUndefined();
+    forceState("uncertain");
+    const r = q.enqueue(p, "mkv");
+    expect(r).toMatchObject({ state: "rejected", existingState: "uncertain" });
+  });
+});
+
+describe("任务标识归属(#160 第 1 项)", () => {
+  it("带 taskId:行 owner.taskId 落库、logicalKey 前缀 task<id>", () => {
+    const q = openQueue({ taskId: 7 });
+    const r = q.enqueue(seg(0), "mkv");
+    expect(r.jobId).toMatch(/^remux:task7:.+_000\.ts@\d+-\d+#g1$/);
+    const row = store().list({ kind: "remux" })[0];
+    expect(row.owner).toMatchObject({ taskId: 7 });
+  });
+
+  it("无 taskId:行为不变(room<owner> 前缀、无 owner.taskId)", () => {
+    const q = openQueue();
+    q.enqueue(seg(0), "mkv");
+    const row = store().list({ kind: "remux" })[0];
+    expect(row.logicalKey).toMatch(/^roomroom1:/);
+    expect(row.owner.taskId).toBeUndefined();
   });
 });
 

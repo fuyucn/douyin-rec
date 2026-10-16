@@ -319,7 +319,10 @@ export class ProcQueueStore {
           }
           default:
             // failed / uncertain / cancelled:不隐式复活(须经 requeue / ackUncertain),入队方不重试。
-            return { jobId, state: "rejected", error: `已存在且 state=${existing.state}(需人工处理)` };
+            return {
+              jobId, state: "rejected", error: `已存在且 state=${existing.state}(需人工处理)`,
+              existingState: existing.state as "failed" | "uncertain" | "cancelled",
+            };
         }
       }
       const t = this.now();
