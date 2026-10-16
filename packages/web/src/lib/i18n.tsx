@@ -234,6 +234,8 @@ const DICT = {
         back: "房间", edit: "编辑", drain: "录完这场再停", recorded: "已录", nodes: "节点", lastRun: "最近一场", deliver: "交付",
         logs: "录制日志", runs: "场次", notFound: "找不到这个房间", nodeRecording: "在录", nodeIdle: "未在录", nodeDown: "离线",
         local: "本机",
+        backToList: "房间列表", info: "房间信息", process: "处理", procOn: "已启用", noRule: "未配置处理",
+        merge: "合成方式", mergeOne: "合并成一个", mergeSplit: "按分段",
       },
     },
     settings: {
@@ -693,6 +695,8 @@ const DICT = {
         back: "Rooms", edit: "Edit", drain: "Stop after this stream", recorded: "Recorded", nodes: "Nodes", lastRun: "Last run", deliver: "Delivery",
         logs: "Recording log", runs: "Runs", notFound: "Room not found", nodeRecording: "recording", nodeIdle: "idle", nodeDown: "offline",
         local: "local",
+        backToList: "Room list", info: "Room info", process: "Processing", procOn: "On", noRule: "No processing rule",
+        merge: "Output", mergeOne: "Merged into one", mergeSplit: "Per segment",
       },
     },
     settings: {
