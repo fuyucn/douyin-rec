@@ -783,6 +783,8 @@ export interface NodeCapabilities {
   diskFreeGB: number;
   /** 节点上是否有中文字体(烧录用;节点侧分支不烧,仅诊断展示)。 */
   cjkFonts?: boolean;
+  /** 节点已注册的处理器 kind 列表(plans/036);缺字段 = 旧节点,派发方按「不支持」处理。 */
+  processors?: string[];
 }
 
 /** POST /api/tasks + PATCH /api/tasks/:id 的请求体(部分字段;录制专属,hub 配置见 HubRule)。 */

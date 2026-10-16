@@ -146,7 +146,7 @@
 
 ## 待办（Next）
 
-- [ ] **T-55 后处理插件化第一期:Processor 契约 + 每节点持久任务表 + 留存文件转所选输出格式（计划 [plans/036_processor-plugins.md](plans/036_processor-plugins.md)，PR [#147](https://github.com/fuyucn/douyin-rec/pull/147)）**
+- [~] **T-55 后处理插件化第一期:Processor 契约 + 每节点持久任务表 + 留存文件转所选输出格式（计划 [plans/036_processor-plugins.md](plans/036_processor-plugins.md)，PR [#147](https://github.com/fuyucn/douyin-rec/pull/147)）**
   — 2026-10-15。**做什么**:按计划第一期 T1 → T3 → T6 → T8 → T9a → T9b → T11 交付 —— core `Processor` 契约与注册表、
   新包 `@drec/proc-queue`（每节点持久任务表 + 租约执行循环）、新包 `@drec/processors` 的 remux 处理器、录制封口转换迁入任务表
   （store 打不开回落旧串行链）、hub 收尾后对留存源分段转所选输出格式（含仅 remux 的远端入队）、网页「合成所选」跟随输出格式。
@@ -154,7 +154,9 @@
   绑定 hub 规则的任务至今无法选输出格式。第二期（merge/burn/上传迁表）待第一期稳定 ≥ 2 周再细化。
   **验收**:计划第一期各任务测试与验收条全部通过；`pnpm test` / `pnpm typecheck` / `pnpm arch:check` 通过；处理器与任务表包内无目录推导
   （grep 验收）；规则任务处理中途从不转换、上传仍用 mp4；VPS 真实录制一场（用户安排）验证封口转换走任务表。
-  **前置**:计划 PR 合入 + 决策点 D2/D4/D6/D7/D8 拍板；实现须另开 `accept` 的 issue。
+  **进度**:计划已合入、D1–D8 已按推荐确认（2026-10-15）；按切片各开一票，T1 = issue [#151](https://github.com/fuyucn/douyin-rec/issues/151)（进行中）。
+  T1 复审遗留（PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）：符号链接逃逸 → plan T9a（节点侧 realpath）；`finish(cancelled)` 先经 `cancelOutcome` → plan T15；
+  `recover()` 返回 `"done"` 时不带 outputs、store 无法据此判 stale → **T3 评估是否把返回值扩成 `{state:"done", outputs}`**（契约缺口，非 T1 范围）。
 
 - [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
   — 2026-10-15。**做什么**:录制引擎在 spawn 前判定水位(拒绝则不起录、下轮再判),手动启动接口过同一闸门(拒绝返回 409 且不改 enabled)。**为什么**:此前只有 daemon 在窗口启停时查水位,常驻任务的下一场开播与手动启动会绕过 → 盘满导致录制损坏。**验收**:两条路径均有测试覆盖 + dev 实跑;`pnpm test`/`typecheck` 通过。分支 `codex/issue-96-new-broadcast-gate`,PR [#97](https://github.com/fuyucn/douyin-rec/pull/97)。
