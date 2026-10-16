@@ -62,7 +62,7 @@ export function RoomPage(): ReactNode {
   // Only a local recorder process reports elapsed time; a remote recording has none to show.
   const elapsed = live ? detail?.runtime?.elapsedMs ?? null : null;
   const steps = proc?.pipeline?.steps;
-  const versions = versionKeys(proc).map((k) => t(k)).join(" + ");
+  const versions = versionKeys(room).map((k) => t(k)).join(" + ");
 
   return (
     <>
@@ -84,8 +84,8 @@ export function RoomPage(): ReactNode {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {rec && !enabled && (
-            <Button small onClick={() => actions.setEnabled(room, true)} disabled={managed}
-                    title={managed ? t("tasks.managedHint") : undefined}>
+            <Button small onClick={() => actions.setEnabled(room, true)} disabled={managed || !!task?.stopping}
+                    title={task?.stopping ? t("tasks.stoppingHint") : managed ? t("tasks.managedHint") : undefined}>
               {t("tasks.start")}
             </Button>
           )}
