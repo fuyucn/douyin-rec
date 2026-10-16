@@ -63,10 +63,12 @@ function describe(e: AppEventDTO, t: T): { key: NotifKey; message: string; type:
     case "burnDone":
       return { key: "merge", message: t("notif.evBurn", { file: baseName(s("file")) }), type: "success" };
     case "uploadDone":
-      return { key: "merge", message: t("notif.evUpload", { bv: s("bv") }), type: "success" };
+      return { key: "merge", message: t("notif.evUpload", { bv: s("anchor") ? `${s("anchor")} · ${s("bv")}` : s("bv") }), type: "success" };
     case "hubTaskStart": {
       const workers = Array.isArray(ev.workers) ? (ev.workers as unknown[]).length : 0;
-      return { key: "hub", message: t("notif.evHubStart", { room: s("room"), count: workers }), type: "info" };
+      const anchor = s("anchor");
+      const room = anchor ? `${anchor}${s("date") ? ` · ${s("date")}` : ""}` : s("room");
+      return { key: "hub", message: t("notif.evHubStart", { room, count: workers }), type: "info" };
     }
     case "error":
       return { key: "error", message: t("notif.evError", { stage: s("stage"), message: s("message") }), type: "error" };

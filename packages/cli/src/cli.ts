@@ -1362,7 +1362,7 @@ const hubStarter: HubStarter = {
               if (cfg.uploadMode === "upload") {
                 const bv = ledger.get(streamKey)?.bv ?? "";
                 ledger.markDone(streamKey, bv);
-                if (bv) opts.onEvent({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+                if (bv) opts.onEvent({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
               } else {
                 ledger.setState(streamKey, "needs_manual");
               }

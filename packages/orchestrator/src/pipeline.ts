@@ -648,7 +648,7 @@ export function tryRollingShortCircuit(o: {
   }
   ledger.setBv(streamKey, bv);
   ledger.markDone(streamKey, bv);
-  o.notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+  o.notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
   // 回读核验(#57 R1 观察期):只记日志,不阻塞、不转人工、不影响 done。fire-and-forget,任何异常吞掉。
   const confirmed = new Set(rolled.flatMap((m) => m.rec.rolling?.confirmed ?? []));
   if (o.countParts && confirmed.size > 0) {
@@ -1106,7 +1106,7 @@ async function runPipelineInner(
 
   jlog(`P1 上传完成: ${bv}`);
   ledger.markDone(streamKey, bv!);
-  notify({ kind: "uploadDone", bv: bv!, url: `https://www.bilibili.com/video/${bv!}` });
+  notify({ kind: "uploadDone", bv: bv!, url: `https://www.bilibili.com/video/${bv!}`, streamKey });
   // 收口:上传确认(biliup 返回 0)后按配置清理(issue #92),回读分 P 数只做延迟旁路校验;
   // 清理失败只标 clean_*(T12),终态恒为 done。
   await finalizeAfterUpload({
@@ -1275,7 +1275,7 @@ async function resumeAppends(
   }
 
   ledger.markDone(streamKey, bv);
-  notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}` });
+  notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
 
   // 上传成功 → 与主路径同一收口(issue #92:按配置清理 + 延迟旁路校验)。
   // 续跑此前漏了 sourceAfterDone,是节点源残留的来源之一,这里一并补上。

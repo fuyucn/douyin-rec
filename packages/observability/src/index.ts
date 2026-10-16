@@ -7,6 +7,7 @@ export {
   webhookTogglesFromEnv,
   WEBHOOK_TOGGLES_ENV,
 } from "./notifier/index.js";
+export { enrichHubEvent, humanizeStreamKeys, parseStreamKey, describeStream, type HubLabelLookup } from "./notifier/hub-label.js";
 export { DiscordNotifier } from "./notifier/discord.js";
 export type { Notifier, NotifyEvent, NotifKey, NotifWebhookToggles } from "@drec/core";
 export { EventCenter } from "./bus.js";

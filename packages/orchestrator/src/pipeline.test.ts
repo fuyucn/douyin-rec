@@ -759,7 +759,7 @@ describe("runPipeline", () => {
     const uploadDone = (deps.notify.mock.calls as Array<[NotifyEvent]>)
       .map(([e]) => e)
       .find((e) => e.kind === "uploadDone");
-    expect(uploadDone).toEqual({ kind: "uploadDone", bv: "BV123", url: "https://www.bilibili.com/video/BV123" });
+    expect(uploadDone).toMatchObject({ kind: "uploadDone", bv: "BV123", url: "https://www.bilibili.com/video/BV123" });
 
     // ledger should end at "done"
     const job = deps.ledger.get(broadcast.streamKey);
