@@ -181,6 +181,7 @@
   ① **低码率体积比误判**：remux 校验的 `MIN_SIZE_RATIO`（0.5）对低码率流（纯音频 / 静态画面）可能把正常转换判失败（原文件保留、有告警，行为安全但会误报）→ 落点 `packages/processors` 的 `verifyRemuxed`，评估按容器开销改用绝对差或放宽比例；
   ② **hub 任务页不展示留存转格式标注**：followups 的 notes（跳过 / 拒绝 / 回滚 / 缺边车 / 入队耗尽）只在台账与 job.log → 落点 `packages/web` 的 hub 任务页 + `GET /api/hub/queue` 的 DTO 带出 followups 摘要；
   ③ **转换失败后会话边车仍写着已转换的 `nodeFormat`**（处理器在转换前就写）：目前无害（`groupSessions` 对原生录制容器无条件收录），但语义不精确 → 落点 `packages/processors` remux：失败路径回写边车或改为转换成功后才写（须保持崩溃接管可判定）。
+  T9b 复审遗留（PR [#169](https://github.com/fuyucn/douyin-rec/pull/169) 第 2 轮,不阻塞）：④ **stage 交付模式 + `stageAfterDone=true` 留存判定与实际不符**：stage 模式的清理从不执行 `stageAfterDone`（只有上传路径才清 stage），但 `survivingArtifacts` 按它认定 stage 副本已不在 → 副本仍在却不被转换，`no-survivors` 锁原因也可能不准；自相矛盾配置、影响小 → 落点 `packages/core` 的 `survivingArtifacts` 按交付模式取口径（stage 模式忽略 `stageAfterDone`），并与清理共用同一判定。
 
 - [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
   — 2026-10-15。**做什么**:录制引擎在 spawn 前判定水位(拒绝则不起录、下轮再判),手动启动接口过同一闸门(拒绝返回 409 且不改 enabled)。**为什么**:此前只有 daemon 在窗口启停时查水位,常驻任务的下一场开播与手动启动会绕过 → 盘满导致录制损坏。**验收**:两条路径均有测试覆盖 + dev 实跑;`pnpm test`/`typecheck` 通过。分支 `codex/issue-96-new-broadcast-gate`,PR [#97](https://github.com/fuyucn/douyin-rec/pull/97)。
