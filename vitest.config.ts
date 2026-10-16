@@ -58,6 +58,7 @@ export default defineConfig({
       "@drec/orchestrator": fileURLToPath(new URL("./packages/orchestrator/src/index.ts", import.meta.url)),
       // web 表单规则经此 alias 复用 core 纯判定(与 packages/web/vite.config.ts 同名同目标)。
       "@drec/rolling-policy": fileURLToPath(new URL("./packages/core/src/rolling-policy.ts", import.meta.url)),
+      "@drec/hub-ledger-contract": fileURLToPath(new URL("./packages/core/src/hub-ledger-contract.ts", import.meta.url)),
       "@drec/output-format": fileURLToPath(new URL("./packages/core/src/output-format.ts", import.meta.url)),
     },
   },

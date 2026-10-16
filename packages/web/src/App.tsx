@@ -9,6 +9,7 @@ import { TopNav } from "./layout/TopNav";
 import { useRefreshCookie } from "./lib/hooks";
 import { useEventNotifications } from "./lib/notifications";
 import { HubPage } from "./pages/HubPage";
+import { RoomPage } from "./pages/RoomPage";
 import { RoomsPage } from "./pages/RoomsPage";
 import { QueuePage } from "./pages/QueuePage";
 import { TaskDetail } from "./pages/TaskDetail";
@@ -40,6 +41,7 @@ export function App(): ReactNode {
           <Route path="/hub" element={<HubPage />} />
           {/* T20 第1步:统一房间页(并存版)。**刻意不进主导航** —— 先用起来,确认好用再谈退役旧页。 */}
           <Route path="/rooms" element={<RoomsPage />} />
+          <Route path="/rooms/:key" element={<RoomPage />} />
           <Route path="/hub/:key" element={<HubPage />} />
           <Route path="*" element={<TaskList />} />
         </Routes>
