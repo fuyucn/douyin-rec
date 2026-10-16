@@ -219,6 +219,36 @@ describe("T9b 接线:done + 清理之后才派发", () => {
     h.deps.ledger.close();
   });
 
+  it("分段管线 stage 交付终点(stageReady)同样派发(M2b 守护:撤 segment-pipeline 的 stageReady 返回即红)", async () => {
+    const h = makeHarness({ outputFormat: "mkv", uploadMode: "stage", steps: { mergeSegments: false } });
+    Object.assign(h.deps, {
+      remuxSegment: async (_s: string, out: string) => { mkdirSync(join(out, ".."), { recursive: true }); writeFileSync(out, "x"); },
+      segmentDuration: async () => 60,
+      burnSegment: async ({ out }: { out: string }) => { writeFileSync(out, "x"); },
+    });
+    h.deps.ledger.upsertPending(STREAM_KEY);
+    const r = await runPipeline(broadcast(tsFiles), h.deps);
+    expect(r.state).toBe("needs_manual");
+    expect((r as { stageReady?: boolean }).stageReady).toBe(true);
+    await flush();
+    expect(h.nodeEnqueue).toHaveBeenCalledTimes(1);
+    h.deps.ledger.close();
+  });
+
+  it("真正失败的 needs_manual(所有节点断流未录全,留人工)→ 不派发(M6 守护:派发条件放宽成任何 needs_manual 即红)", async () => {
+    const h = makeHarness({ outputFormat: "mkv" });
+    h.deps.ledger.upsertPending(STREAM_KEY);
+    const r = await runPipeline(broadcast(tsFiles, { totalGapSec: 600 }), h.deps);
+    expect(r.state).toBe("needs_manual");
+    expect(h.deps.ledger.get(STREAM_KEY)!.error ?? "").not.toMatch(/stage/);
+    expect((r as { stageReady?: boolean }).stageReady).toBeUndefined();
+    await flush();
+    expect(h.nodeEnqueue).not.toHaveBeenCalled();
+    expect(h.stageEnqueue).not.toHaveBeenCalled();
+    expect(h.deps.ledger.getFollowups(STREAM_KEY)).toBeNull();
+    h.deps.ledger.close();
+  });
+
   it("original / 未设格式 / 未注入 finalizeFormat → 完全不派发(行为同旧)", async () => {
     for (const [fmt, fin] of [["original", true], [undefined, true], ["mkv", false]] as const) {
       const h = makeHarness({ outputFormat: fmt }, { finalize: fin });
