@@ -72,11 +72,11 @@ describe("effectiveTimezone / applyTimezoneFromDb(独立 CLI 入口,issue #155)"
     expect(effectiveTimezone(fakeStore("America/Chicago"))).toBe("America/Chicago");
   });
 
-  it("库不存在 → 覆盖宿主机 TZ 为北京(不抛错、不建库)", () => {
+  it("库不存在 → 保留继承的有效 TZ(不抛错、不建库;issue #158 取代 #155 的「覆盖为北京」)", () => {
     process.env.TZ = "America/Los_Angeles";
     const dir = mkdtempSync(join(tmpdir(), "tz-nodb-"));
-    expect(applyTimezoneFromDb(join(dir, "none.db"))).toBe("Asia/Shanghai");
-    expect(process.env.TZ).toBe("Asia/Shanghai");
+    expect(applyTimezoneFromDb(join(dir, "none.db"))).toBe("America/Los_Angeles");
+    expect(process.env.TZ).toBe("America/Los_Angeles");
   });
 
   it("库里有 settings.timezone → 写进 process.env.TZ,覆盖宿主机值", () => {

@@ -32,7 +32,7 @@ import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, APP_VERSION } from "@drec/app";
 import type { HubStarter } from "@drec/app";
-import { applyTimezoneFromDb, effectiveTimezone } from "@drec/app";
+import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
 
@@ -114,7 +114,11 @@ program
   // (独立 record / merge / burn / upload / 隐藏命令)不经 serve,这里统一从库里读同一设置,
   // 否则会落回宿主机本地时区、算出错一天的文件名/标题(issue #155)。
   .hook("preAction", (_cmd, action) => {
-    if (action.name() !== "serve") applyTimezoneFromDb();
+    if (action.name() === "serve") return;
+    // 带 <dataRoot> 的隐藏命令(_inventory 等)按传入数据根读库:ssh 会话无 DOUYIN_REC_*,默认路径通常无库(issue #158)。
+    const dataRoot = action.name().startsWith("_") ? action.args[0] : undefined;
+    if (dataRoot) applyTimezoneFromDb(dbPathForDataRoot(dataRoot));
+    else applyTimezoneFromDb();
   })
   .option("--discord-webhook <url>", "Discord incoming webhook（也读 config / env DISCORD_WEBHOOK）")
   // 参数错误后顺带提示 --help，省得用户再敲一次。

@@ -10,6 +10,7 @@ import * as nodeFs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deriveTitles } from "../../packages/app/src/node-pipeline.js";
 import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson } from "@drec/core";
 import { tryDirectTsLink, nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, runNodeSidePipeline, splitGroupsBySession, writeNodeResult, abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath } from "../../packages/app/src/node-pipeline.js";
 import { remuxSegment, ffprobeDuration } from "@drec/post-process";
@@ -1087,5 +1088,26 @@ describe("issue #140:半成品不复用 + 提交前自检", () => {
     expect(readFileSync(canonical, "utf-8")).toBe("REMUXED");       // 已被换成中间产物
     expect(statSync(canonical).ino).toBe(statSync(work).ino);       // 同一 inode(零拷贝)
     expect(vi.mocked(remuxSegment)).not.toHaveBeenCalled();         // 中间产物可读 → 不重做
+  });
+});
+
+describe("节点侧标题时区(issue #158)", () => {
+  const spec = (timeZone?: string) => ({
+    streamKey: "douyin:r:2026-10-15", tsFiles: ["/nonexistent/x_2026-10-15_13-00-00.ts"], mergeSegments: true,
+    startMs: Date.UTC(2026, 9, 15, 20, 0, 0), // 北京 10-16 04:00 / 美西 10-15 13:00
+    sessionBase: "x_2026-10-15", timeZone, // 仅日期会话名 → 时刻取 startMs 按时区渲染
+    uploadMeta: { titleTemplate: "{date}_{HH}" },
+  }) as never;
+  const withTz = <T,>(tz: string, f: () => T): T => {
+    const o = process.env.TZ; process.env.TZ = tz;
+    try { return f(); } finally { if (o === undefined) delete process.env.TZ; else process.env.TZ = o; }
+  };
+  it("spec 缺 timeZone → 取进程生效时区(与边录边传同口径),不回落北京", () => {
+    const r = withTz("America/Los_Angeles", () => deriveTitles(spec(), () => {}));
+    expect(r.stem).toBe("2026-10-15_13");
+  });
+  it("spec 带 timeZone → 以 spec 为准(不受进程 TZ 影响)", () => {
+    const r = withTz("America/Los_Angeles", () => deriveTitles(spec("Asia/Shanghai"), () => {}));
+    expect(r.stem).toBe("2026-10-16_04");
   });
 });
