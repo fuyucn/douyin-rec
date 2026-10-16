@@ -16,6 +16,8 @@ export interface RoomsData {
   rooms: RoomDTO[];
   loaded: boolean;
   workers: WorkerDTO[];
+  /** hub master 才发规则(worker 上只建录制任务)。 */
+  hubEnabled: boolean;
   taskOf: (r: RoomDTO) => Task | undefined;
   statusOf: (r: RoomDTO) => RoomStatus;
   refresh: () => Promise<void>;
@@ -27,6 +29,7 @@ export function useRoomsData(): RoomsData {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [runs, setRuns] = useState<Map<string, LatestRun>>(new Map());
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
+  const [hubEnabled, setHubEnabled] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   const refreshRuns = useCallback(async (): Promise<void> => {
@@ -47,11 +50,12 @@ export function useRoomsData(): RoomsData {
   usePolling(() => void refresh().catch(() => {}), 30_000);
   usePolling(() => void api.listTasks().then(setTasks).catch(() => {}), 5_000);
   usePolling(() => void api.listWorkers().then(setWorkers).catch(() => {}), 300_000);
+  usePolling(() => void api.getHubStatus().then((s) => setHubEnabled(s.enabled)).catch(() => {}), 300_000);
 
   const taskById = useMemo(() => new Map(tasks.map((x) => [x.id, x])), [tasks]);
   const taskOf = useCallback((r: RoomDTO) => (r.recording?.taskId != null ? taskById.get(r.recording.taskId) : undefined), [taskById]);
   const statusOf = useCallback((r: RoomDTO) => roomStatus(r, taskOf(r), runs.get(latestRunKey(r)) ?? null), [taskOf, runs]);
-  return { rooms, loaded, workers, taskOf, statusOf, refresh, stream };
+  return { rooms, loaded, workers, hubEnabled, taskOf, statusOf, refresh, stream };
 }
 
 /** Display name: task name > anchor name > room id. */
