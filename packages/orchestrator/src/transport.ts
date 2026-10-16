@@ -121,8 +121,15 @@ export interface Transport {
   isDone(roomSlug: string): Promise<boolean>;
   pull(remotePaths: string[], localDir: string): Promise<void>;
   /**
-   * 该节点上这些路径是否都还存在(选优前剔除「文件已被清理/归档」的候选,防选中后 pull 失败卡住)。
-   * 可选:无此能力的 transport 视为「信任存在」(pull 失败仍由 reconciler 标 failed 兜底)。
+   * Whether every one of these paths still exists on that node.
+   *
+   * `false` is a **verdict**: the node answered and the paths are gone. An unconfirmed probe (ssh
+   * failure / timeout / unparsable output) must **throw** instead — callers distinguish the two
+   * (issue #146: a dropped link must never be read as "the file was deleted", which would escalate a
+   * healthy session). Callers that only need a boolean and are safe to fail closed may `.catch(false)`.
+   *
+   * Optional: a transport without it is treated as "trust it exists" (a bad pull is still caught by
+   * the reconciler's `failed` path).
    */
   exists?(paths: string[]): Promise<boolean>;
   /** 删除该节点上的这些文件(cleanup 配置用;删失败应吞掉不抛)。无此能力则跳过清理。 */

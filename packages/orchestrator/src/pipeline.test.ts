@@ -2,7 +2,7 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupSourcesShared, xmlKeepRule, runPipeline, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, consecutiveSidecarSkips, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
 import type { Broadcast } from "./identity.js";
@@ -69,6 +69,9 @@ function makeTransport(workerId: string, exists = true): Transport {
     isDone: vi.fn().mockResolvedValue(true),
     pull: vi.fn().mockResolvedValue(undefined),
     exists: vi.fn().mockResolvedValue(exists),
+    // Both real transports implement ping; include it so the sidecar recheck can distinguish
+    // "reachable + file gone" (a real deletion) from "unreachable".
+    ping: vi.fn().mockResolvedValue(undefined),
     cleanup: vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -929,6 +932,31 @@ describe("runPipeline", () => {
     // winner 应是 node-2(node-1 被剔除),pull 在 node-2 上调用
     expect(deps.ledger.get(broadcast.streamKey)?.winnerWorker).toBe("node-2");
     expect(deps.transports.get("node-2")!.pull).toHaveBeenCalledTimes(1);
+    expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+    deps.ledger.close();
+  });
+
+  it("场景4b(issue #146): 成员剔除时 exists 抛错 → 仍按缺失剔除,不把整场炸掉", async () => {
+    // Transport.exists now throws when it cannot tell (issue #146). Member pruning must keep its own
+    // fail-closed `.catch(() => false)`; without it an ssh blip would throw out of runPipeline
+    // instead of just dropping that member.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const broadcast = makeBroadcast([
+      { workerId: "node-1", rec: makeRec({ durationSec: 9999, totalGapSec: 0 }) },
+      { workerId: "node-2", rec: makeRec({ durationSec: 3600, totalGapSec: 0 }) },
+    ]);
+    const deps = makeDeps();
+    const t1 = makeTransport("node-1", true);
+    (t1.exists as Mock).mockRejectedValue(new Error("ssh rc=255"));
+    deps.transports.set("node-1", t1);
+    deps.transports.set("node-2", makeTransport("node-2", true));
+    deps.ledger.upsertPending(broadcast.streamKey);
+
+    const result = await runPipeline(broadcast, deps);   // 不抛错
+    expect(result.state).toBe("done");
+    expect(deps.ledger.get(broadcast.streamKey)?.winnerWorker).toBe("node-2");
     expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
@@ -2037,6 +2065,272 @@ describe("runPipeline — 边录边传识别短路", () => {
       const err = deps.notify.mock.calls.map((c) => c[0] as { kind: string; message?: string }).find((e) => e.kind === "error");
       expect(err?.message).toContain("1 个");
       expect(deps.ledger.get(broadcast.streamKey)?.state).toBe("needs_manual");
+      deps.ledger.close();
+    });
+
+    // issue #146: sidecar removed between scan and pull -> skip the round, then regroup on rescan.
+    const sidecarGone = (deps: TestDeps) => {
+      (deps.transports.get("node-1")!.exists as Mock).mockImplementation(async (paths: string[]) => !paths.some((p) => p.endsWith(".session.json")));
+    };
+
+    it("issue #146:扫描后边车消失 → 本轮跳过:不 pull、不 failed、不告警;下一轮重扫(边车不再声明)正常收口", async () => {
+      const deps = makeDeps();
+      sidecarGone(deps);
+      pullWrites(deps);
+      const first = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(first.streamKey);
+      const r1 = await runPipeline(first, deps);
+      expect(r1.state).toBe("pending");
+      expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      expect(deps.ledger.get(first.streamKey)?.state).toBe("pending"); // 仍在 RETRYABLE,不卡在 syncing
+      expect(deps.ledger.get(first.streamKey)?.state).not.toBe("failed");
+      expect(deps.notify.mock.calls.some((c) => (c[0] as { kind: string }).kind === "error")).toBe(false);
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      // 下一轮:重扫后本场不再声明边车,分段是原生 .ts → 照常合并上传收口。
+      const second = makeBroadcast([{ workerId: "node-1", rec: makeRec({ sessionBase: B, tsFiles: [`/remote/${B}.ts`], xmlPath: undefined }) }]);
+      const r2 = await runPipeline(second, deps);
+      expect(r2.state).toBe("done");
+      expect(deps.ledger.get(first.streamKey)?.state).toBe("done");
+      deps.ledger.close();
+    });
+
+    it("issue #146:边车消失 → 跳过时必须留痕:job 日志含「会话边车扫描后已消失 … 本轮跳过」,台账 pull 步骤记明原因", async () => {
+      const lines: string[] = [];
+      const deps = makeDeps({ makeRunLogger: () => ({ info: (...a: unknown[]) => lines.push(a.join(" ")), warn: (...a: unknown[]) => lines.push(a.join(" ")), error: () => {} }) });
+      sidecarGone(deps);
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      await runPipeline(b, deps);
+      expect(lines.some((l) => l.includes("会话边车扫描后已消失") && l.includes(`${A}.session.json`) && l.includes("本轮跳过"))).toBe(true);
+      const skip = deps.ledger.getSteps(b.streamKey).filter((s) => s.step === "pull");
+      expect(skip).toHaveLength(1);
+      expect(skip[0].detail).toContain("会话边车扫描后消失");
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("pending"); // 标注不改 state
+      deps.ledger.close();
+    });
+
+    it("issue #146:持续缺失 → 连续跳过 3 轮后第 4 轮转 needs_manual + 告警恰一次(不无限 pending、不删源)", async () => {
+      const deps = makeDeps();
+      sidecarGone(deps);
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      for (let i = 0; i < 3; i++) {
+        expect((await runPipeline(b, deps)).state).toBe("pending");
+        expect(deps.notify.mock.calls.some((c) => (c[0] as { kind: string }).kind === "error")).toBe(false);
+      }
+      expect((await runPipeline(b, deps)).state).toBe("needs_manual");
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
+      const errs = deps.notify.mock.calls.map((c) => c[0] as { kind: string; message?: string }).filter((e) => e.kind === "error");
+      expect(errs).toHaveLength(1);
+      expect(errs[0].message).toContain("连续 3 轮");
+      expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("issue #146:跳过后边车恢复并真正 pull → 连续计数清零(之后再跳过从第 1 次起算)", async () => {
+      const deps = makeDeps();
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      const exists = deps.transports.get("node-1")!.exists as Mock;
+      exists.mockImplementation(async (paths: string[]) => !paths.some((p) => p.endsWith(".session.json")));
+      await runPipeline(b, deps);
+      await runPipeline(b, deps);
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(2);
+      deps.ledger.logStep(b.streamKey, "pull", "start"); // 一次真实的 pull 开始
+      deps.ledger.logStep(b.streamKey, "pull", "done");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(0);
+      deps.ledger.close();
+    });
+
+    it("issue #146:winner 有 2 个会话、仅第 2 个会话的边车消失 → 本轮跳过(逐会话复核)", async () => {
+      const t0 = Date.now() - 3_600_000;
+      const mk = (base: string, start: number, ts: string) => makeRec({
+        sessionBase: base, tsFiles: [ts], xmlPath: undefined, startMs: start, endMs: start + 1_800_000,
+        durationSec: 1800, sessionJsonPath: `/remote/${base}.session.json`,
+      });
+      const b = makeBroadcast([
+        { workerId: "node-1", rec: mk(A, t0, `/remote/${A}.ts`) },
+        { workerId: "node-1", rec: mk(B, t0 + 1_800_000, `/remote/${B}.ts`) },
+      ]);
+      const deps = makeDeps();
+      (deps.transports.get("node-1")!.exists as Mock).mockImplementation(async (paths: string[]) => !paths.some((p) => p.endsWith(`${B}.session.json`)));
+      pullWrites(deps);
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("issue #146(已知残余):重扫后无边车的 mkv 对 hub 不可见(groupSessions 不收)→ 只按可见分段收口,不是被未认领门禁拦下", async () => {
+      const deps = makeDeps();
+      sidecarGone(deps);
+      pullWrites(deps);
+      const first = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(first.streamKey);
+      expect((await runPipeline(first, deps)).state).toBe("pending");
+      // 真实重扫:无边车 → mkv 不进清单,只剩原生 .ts。
+      const second = makeBroadcast([{ workerId: "node-1", rec: makeRec({ sessionBase: B, tsFiles: [`/remote/${B}.ts`], xmlPath: undefined }) }]);
+      expect((await runPipeline(second, deps)).state).toBe("done");
+      deps.ledger.close();
+    });
+
+    it("issue #146:exists 抛错(探测本身失败)→ 本轮跳过,不 pull、不 failed、不计入上限", async () => {
+      const deps = makeDeps();
+      (deps.transports.get("node-1")!.exists as Mock).mockImplementation(async (paths: string[]) => {
+        if (paths.some((p) => p.endsWith(".session.json"))) throw new Error("ssh down");
+        return true;
+      });
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      // A failed probe carries no evidence and must not accumulate toward the limit.
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(0);
+      expect(deps.ledger.getSteps(b.streamKey).some((s) => s.detail?.startsWith(SIDECAR_UNKNOWN_PREFIX))).toBe(true);
+      deps.ledger.close();
+    });
+
+    it("issue #146:exists=false 但 ping 失败(节点不可达)→ 跳过且不计入上限,反复抖动也永不转人工", async () => {
+      const deps = makeDeps();
+      sidecarGone(deps);
+      (deps.transports.get("node-1")!.ping as Mock).mockRejectedValue(new Error("ssh 超时"));
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      // Far more rounds than the limit: a healthy session must never be escalated by a flaky link.
+      for (let i = 0; i < 6; i++) expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(0);
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("pending");
+      expect(deps.notify.mock.calls.some((c) => (c[0] as { kind: string }).kind === "error")).toBe(false);
+      expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("issue #146:确认缺失与不可达交替 → 不可达轮既不计数也不清零(已确认的证据仍然成立)", async () => {
+      const deps = makeDeps();
+      const ping = deps.transports.get("node-1")!.ping as Mock;
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      // Round 1: confirmed missing (reachable + file absent).
+      sidecarGone(deps);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(1);
+      // Round 2: node unreachable - neither counts nor resets.
+      ping.mockRejectedValue(new Error("ssh 超时"));
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(1);
+      // Round 3: reachable again and still missing -> evidence continues, count reaches 2.
+      ping.mockResolvedValue(undefined);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(2);
+      deps.ledger.close();
+    });
+
+    it("issue #146:连续确认缺失满上限后转人工;若中途只有不可达轮,则永不到上限", async () => {
+      const deps = makeDeps();
+      const ping = deps.transports.get("node-1")!.ping as Mock;
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      // 2 confirmed + 2 unreachable rounds: unreachable rounds do not advance the count.
+      sidecarGone(deps);
+      await runPipeline(b, deps);
+      await runPipeline(b, deps);
+      ping.mockRejectedValue(new Error("ssh 超时"));
+      await runPipeline(b, deps);
+      await runPipeline(b, deps);
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(2);
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("pending");
+      // Reachable again -> the 3rd confirmed round hits the limit, the next one escalates.
+      ping.mockResolvedValue(undefined);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(3);
+      expect((await runPipeline(b, deps)).state).toBe("needs_manual");
+      const errs = deps.notify.mock.calls.map((c) => c[0] as { kind: string }).filter((e) => e.kind === "error");
+      expect(errs).toHaveLength(1);
+      deps.ledger.close();
+    });
+
+    it("issue #146:无 ping 能力的 transport 保留旧口径(exists=false 即计入上限)", async () => {
+      const deps = makeDeps();
+      const tp = deps.transports.get("node-1")!;
+      delete (tp as { ping?: unknown }).ping;   // legacy / third-party transport
+      sidecarGone(deps);
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(1);
+      deps.ledger.close();
+    });
+
+    it("issue #146:已到上限时,一个「无法确认」的轮次不得转人工(只有确认缺失才触发)", async () => {
+      const deps = makeDeps();
+      const ping = deps.transports.get("node-1")!.ping as Mock;
+      sidecarGone(deps);
+      pullWrites(deps);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      // Accumulate 3 confirmed-missing rounds (at the limit).
+      for (let i = 0; i < 3; i++) expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(3);
+      // An unreachable round must not escalate even when the prior count is already at the limit.
+      ping.mockRejectedValue(new Error("ssh 超时"));
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("pending");
+      expect(deps.notify.mock.calls.some((c) => (c[0] as { kind: string }).kind === "error")).toBe(false);
+      // Reachable again and still missing -> only now escalate, with exactly one alert.
+      ping.mockResolvedValue(undefined);
+      expect((await runPipeline(b, deps)).state).toBe("needs_manual");
+      const errs = deps.notify.mock.calls.map((c) => c[0] as { kind: string }).filter((e) => e.kind === "error");
+      expect(errs).toHaveLength(1);
+      deps.ledger.close();
+    });
+
+    it("issue #146:混合轮(同节点两会话:一个确认缺失 + 一个探测失败)→ 两种台账标注都写,计数只 +1", async () => {
+      const t0 = Date.now() - 3_600_000;
+      const mk = (base: string, start: number) => makeRec({
+        sessionBase: base, tsFiles: [`/remote/${base}.ts`], xmlPath: undefined, startMs: start, endMs: start + 1_800_000,
+        durationSec: 1800, sessionJsonPath: `/remote/${base}.session.json`,
+      });
+      // winnerMembers = the winner node's own sessions, so both must belong to node-1.
+      const b = makeBroadcast([
+        { workerId: "node-1", rec: mk(A, t0) },
+        { workerId: "node-1", rec: mk(B, t0 + 1_800_000) },
+      ]);
+      const deps = makeDeps();
+      // Session A: reachable, sidecar gone. Session B: the probe itself fails.
+      (deps.transports.get("node-1")!.exists as Mock).mockImplementation(async (paths: string[]) => {
+        if (paths.some((p) => p.endsWith(`${B}.session.json`))) throw new Error("ssh down");
+        return !paths.some((p) => p.endsWith(".session.json"));
+      });
+      pullWrites(deps);
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      const steps = deps.ledger.getSteps(b.streamKey).filter((s) => s.step === "pull");
+      expect(steps.some((s) => s.detail?.startsWith(SIDECAR_SKIP_PREFIX))).toBe(true);
+      expect(steps.some((s) => s.detail?.startsWith(SIDECAR_UNKNOWN_PREFIX))).toBe(true);
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(1); // only the confirmed session counts
+      deps.ledger.close();
+    });
+
+    it("issue #146:边车仍在 → 不影响原路径(pull 含边车、正常完成)", async () => {
+      const deps = makeDeps();
+      const seen: { v?: string[] } = {};
+      pullWrites(deps, seen);
+      const b = makeBroadcast([{ workerId: "node-1", rec: recs(true) }]);
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("done");
+      expect(seen.v).toContain(`/remote/${A}.session.json`);
       deps.ledger.close();
     });
 

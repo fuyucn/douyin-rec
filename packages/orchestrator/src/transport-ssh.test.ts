@@ -273,14 +273,33 @@ describe("SshTransport", () => {
     expect(calls).toEqual([["/r/a.ts", localDir], ["/r/b.ts", localDir]]);
   });
 
-  it("exists：远端全在→true,缺→false,空列表→true,ssh 抛错→false", async () => {
+  // Contract (issue #146): false means the node answered MISSING; ssh failure / timeout / unparsable
+  // output must THROW. Reading a dropped link as "the file was deleted" escalates healthy sessions.
+  it("exists：远端全在→true,缺→false,空列表→true", async () => {
     const ok = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "OK\n", rsync: async () => {} });
     const miss = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "MISSING\n", rsync: async () => {} });
-    const fail = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => { throw new Error("x"); }, rsync: async () => {} });
     expect(await ok.exists(["/a", "/b"])).toBe(true);
     expect(await miss.exists(["/a"])).toBe(false);
     expect(await ok.exists([])).toBe(true);
-    expect(await fail.exists(["/a"])).toBe(false);
+  });
+
+  it("exists: ssh error (unreachable) throws instead of returning false", async () => {
+    const fail = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => { throw new Error("ssh rc=255"); }, rsync: async () => {} });
+    await expect(fail.exists(["/a"])).rejects.toThrow(/ssh rc=255/);
+  });
+
+  it("exists: unparsable output (empty / banner noise) throws instead of returning false", async () => {
+    const empty = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "\n", rsync: async () => {} });
+    const banner = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "Welcome to Ubuntu!\n", rsync: async () => {} });
+    await expect(empty.exists(["/a"])).rejects.toThrow(/无法解析/);
+    await expect(banner.exists(["/a"])).rejects.toThrow(/无法解析/);
+  });
+
+  it("exists: parses only the last non-empty line, so a banner containing MISSING/OK cannot flip the verdict", async () => {
+    const bannerMissing = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "MISSING\nOK\n", rsync: async () => {} });
+    const bannerOk = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "OK\nMISSING\n", rsync: async () => {} });
+    expect(await bannerMissing.exists(["/a"])).toBe(true);   // last line wins: OK
+    expect(await bannerOk.exists(["/a"])).toBe(false);       // last line wins: MISSING
   });
 
   describe("ping(轻量存活探针)", () => {
