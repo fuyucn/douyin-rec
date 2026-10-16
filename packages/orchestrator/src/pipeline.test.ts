@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { cleanupSourcesShared, consecutiveSidecarSkips, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
+import { STAGE_READY } from "@drec/core";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
@@ -477,7 +478,17 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
 
-    it("stage 模式 + 全碎片:无任何分P产物 → 绝不删源(完整性优先)", async () => {
+    it("stage 模式落盘必须写 STAGE_READY 作显式标记(空 error 会被队列当异常)", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts"] }) }]);
+      const deps = segmentDeps();
+      (deps as { cfg: PipelineCfg }).cfg = { ...deps.cfg, uploadMode: "stage" };
+      deps.ledger.upsertPending(broadcast.streamKey);
+      await runPipeline(broadcast, deps);
+      expect(deps.ledger.get(broadcast.streamKey)?.error).toBe(STAGE_READY);
+      deps.ledger.close();
+    });
+
+    it("stage 模式 + 全碎片:无任何分P产物 → 绝不删源,且 error 不是 STAGE_READY(真事故)", async () => {
       const tsFiles = ["/remote/s_000.ts", "/remote/s_001.ts"];
       const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles }) }]);
       const deps = segmentDeps();
@@ -495,6 +506,8 @@ describe("runPipeline", () => {
       // 零产物 → 源和 stage 都不许删(否则「源和副本全删、零成品」)。
       expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
       expect(deps.rmStage).not.toHaveBeenCalled();
+      // 零成品是事故,不能被标成「stage 正常收口」而混进中性色收件箱。
+      expect(deps.ledger.get(broadcast.streamKey)?.error).not.toBe(STAGE_READY);
       deps.ledger.close();
     });
 

@@ -396,7 +396,7 @@ export type QueuePhase =
   | "queued" | "running" | "waiting_settle" | "waiting_manual" | "done" | "failed"
   /**
    * `needs_manual` 细分三态(避免「正常收口」和「真故障」同色 → 告警疲劳):
-   * - `waiting_upload`:stage 模式正常收口(合成完待人工上传),**非故障**,中性色;
+   * - `waiting_upload`:stage 模式正常收口(`error === STAGE_READY`),**非故障**,中性色;
    * - `stopped`:用户主动停止,灰;
    * - `waiting_manual`:其他 needs_manual(重试耗尽 / 进程重启中断 / 上传失败…),红。
    */
@@ -441,7 +441,7 @@ export interface QueueItemDTO {
   /**
    * 失败/待人工的原因(台账 `sync_jobs.error`)。null/空 = 无错误。
    * **语义区分靠它**:
-   *  - `error` 空 + `state=needs_manual` → **stage 模式正常收口**(合成完待人工上传,非故障);
+   *  - `error === STAGE_READY` + `state=needs_manual` → **stage 模式正常收口**(存档待人工上传,非故障);
    *  - `error === "用户停止"` → 用户主动停止;
    *  - 其他非空 → 真故障(重试耗尽 / 进程重启中断 / 上传失败…)。
    */

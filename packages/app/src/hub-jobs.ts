@@ -12,7 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
-  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, readyNodes, USER_STOP,
+  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, readyNodes, STAGE_READY, USER_STOP,
   sanitizeStreamKey,
   type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO, type QueuePhase,
 } from "@drec/core";
@@ -576,7 +576,10 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     // 否则 8 条正常态和 2 条故障同色,告警疲劳(实测踩过)。
     const needsManualPhase = (): QueuePhase => {
       const err = (job.error ?? "").trim();
-      if (!err) return "waiting_upload"; // 无错误 = stage 模式正常收口(pipeline.ts 只 setState 不置 error)
+      // stage 模式正常收口由**显式常量**标记(不再靠「空 error」反推):空 error 一旦出现,
+      // 说明某条故障路径漏写了原因(实测「所有节点断流」就曾如此)→ 按真故障显示,绝不伪装成正常项。
+      if (err === STAGE_READY) return "waiting_upload";
+      if (!err) return "waiting_manual";
       if (err === USER_STOP) return "stopped";
       return "waiting_manual"; // 真故障
     };
@@ -641,7 +644,15 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     };
   };
 
-  for (const job of [...activeRows.jobs, ...manualRows.jobs]) active.push(toRow(job));
+  // needs_manual 要一分为二:**stage 模式正常收口**(error=STAGE_READY)不是要人救的火,
+  // 混进 active 会淹没真事故(实测 20 条里 2 条是这种噪音)→ 只留在 rows 时间轴里。
+  // 真事故(用户停止 / 各类失败)照旧进 active,人工收件箱只装真事故。
+  const stageReadyJobs: HubJobView[] = [];
+  const manualJobs: HubJobView[] = [];
+  for (const job of manualRows.jobs) {
+    ((job.error ?? "").trim() === STAGE_READY ? stageReadyJobs : manualJobs).push(job);
+  }
+  for (const job of [...activeRows.jobs, ...manualJobs]) active.push(toRow(job));
   // 已完成/失败的场也进 rows —— 前端渲染**一张表**(像日志),完成的行 phase=done/failed。
   // 独立拉一批终态(数量 = recentLimit),与 active 合并成单一时间轴。
   const finishedRows = recentRows.jobs.map(toRow);
@@ -662,7 +673,7 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   // rows:进行中 + 已完成,**同一时间轴、同一张表**(像日志)。finished 段的排序键用
   // finishedAt(收尾时刻)而非 enqueuedAt —— 否则「今天早上录、刚上传完」的稿会因入队早
   // 沉到列表底部,而用户关心的是「刚刚发生了什么」。进行中段仍用 enqueuedAt(队列语义)。
-  const rows: QueueItemDTO[] = [...active, ...finishedRows];
+  const rows: QueueItemDTO[] = [...active, ...stageReadyJobs.map(toRow), ...finishedRows];
   rows.sort((a, b) => {
     const key = (r: QueueItemDTO): number =>
       r.phase === "done" || r.phase === "failed" ? (r.finishedAt ?? r.updatedAt) : (r.enqueuedAt ?? r.updatedAt);
