@@ -468,6 +468,22 @@ describe("buildQueueView", () => {
     expect(manual.map((a) => a.streamKey)).toContain("douyin:x2:2026-10-01");
   });
 
+  it("stage 正常收口无限堆积也不会挤掉真事故(只增不减的终态,窗口不能被它占满)", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage8-"));
+    const now = T0 + 10_000_000;
+    // 120 条 stage 正常收口,updatedAt 全部比真事故新(它只增不减,几天就会到这个量级)
+    for (let i = 0; i < 120; i++) {
+      seedJob(db, `douyin:s${i}:2026-10-01`, [["needs_manual", now - 10_000 + i]], 100, { error: STAGE_READY });
+    }
+    // 唯一一条真事故,updatedAt 最旧
+    seedJob(db, "douyin:FIRE:2026-10-01", [["needs_manual", now - 900_000]], 100, { error: "节点侧上传 SSH 失败" });
+    db.close();
+    const { active, rows } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY, manualLimit: 20 });
+    expect(active.map((a) => a.streamKey)).toContain("douyin:FIRE:2026-10-01");
+    expect(rows.find((r) => r.streamKey === "douyin:FIRE:2026-10-01")?.phase).toBe("waiting_manual");
+  });
+
   it("waiting 多条登记取最早一条(最急)作代表", () => {
     const { dbPath, db } = makeSyncDb();
     const stage = mkdtempSync(join(tmpdir(), "queue-stage6-"));

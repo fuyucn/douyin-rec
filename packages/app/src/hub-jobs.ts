@@ -192,6 +192,13 @@ function historicalRates(db: DatabaseSync): Map<string, number> {
 }
 
 export interface ListHubJobsOpts {
+  /**
+   * 只取 `sync_jobs.error` **不等于**该值的行(NULL / 空串算「不等于」)——
+   * issue #188:把 stage 正常收口(STAGE_READY)从 needs_manual 里摘出去,让真事故不被它挤出窗口。
+   */
+  excludeError?: string;
+  /** 与 excludeError 互斥的取反:只取 error 等于该值的行。 */
+  onlyError?: string;
   /** 只列某房间的 run(key=`{platform}.{roomSlug}`;streamKey 前缀 `{platform}:{roomSlug}:` 过滤)。省略=全部房间。 */
   room?: string;
   /**
@@ -355,6 +362,15 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         where.push(`state NOT IN (${opts.excludeStates.map(() => "?").join(",")})`);
         params.push(...opts.excludeStates);
       }
+      // error 过滤与 states/excludeStates 正交,可叠加。COALESCE 让 NULL / 空串都算「无标记」。
+      if (opts.excludeError !== undefined) {
+        where.push("COALESCE(TRIM(error), '') <> ?");
+        params.push(opts.excludeError);
+      }
+      if (opts.onlyError !== undefined) {
+        where.push("TRIM(error) = ?");
+        params.push(opts.onlyError);
+      }
       const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
       total = Number((db.prepare(`SELECT COUNT(*) AS n FROM sync_jobs${whereSql}`)
         .get(...params) as unknown as { n: number }).n);
@@ -517,7 +533,8 @@ export interface BuildQueueOpts {
   sort?: "newest" | "oldest";
   /**
    * 「待人工」最多列几条(默认 20)。needs_manual 是终态、却要留在进行中列表;
-   * stage 模式的正常收口也是它(pipeline.ts:480)→ 长期 master 会堆积,必须 cap 否则淹没进行中区。
+   * stage 模式的正常收口也是它 → 长期 master 会堆积,必须 cap 否则淹没进行中区。
+   * 该上限**只约束真事故**;stage 正常收口另走一个同上限的查询(见 buildQueueView)。
    */
   manualLimit?: number;
   now?: number;
@@ -547,11 +564,16 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   const activeRows = listHubJobs(syncDbPath, {
     excludeStates: [...TERMINAL], limit: 200, offset: 0, now: opts.now, stageDir,
   });
-  // 取 needs_manual 时**放宽上限**再在内存里分两堆(stage 正常收口 / 真事故):若先按 manualLimit
-  // 取再分,一堆 stage 收口就能把 20 个名额占满,真事故反而不显示(issue #188 审查发现)。
-  // 多取 manualLimit 条只是多读一点 rows,分堆后真事故仍按 manualLimit 截断。
+  // needs_manual 一分为二,**在 SQL 层分**:真事故(error 非 STAGE_READY)单独查并按 manualLimit 截断;
+  // stage 正常收口另查一个有限额。放在内存里分堆是错的 —— stage 收口是终态、只增不减,
+  // 任何固定窗口最终都会被它占满,真事故从 active 和 rows 里一起消失(issue #188 审查发现)。
   const manualRows = listHubJobs(syncDbPath, {
-    states: ["needs_manual"], limit: manualLimit * 2 + 20, offset: 0, now: opts.now, stageDir,
+    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir,
+    excludeError: STAGE_READY,
+  });
+  const stageReadyRows = listHubJobs(syncDbPath, {
+    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir,
+    onlyError: STAGE_READY,
   });
   const recentRows = listHubJobs(syncDbPath, {
     states: ["done", "failed"], limit: recentLimit, offset: 0, now: opts.now, stageDir,
@@ -650,14 +672,7 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   // needs_manual 要一分为二:**stage 模式正常收口**(error=STAGE_READY)不是要人救的火,
   // 混进 active 会淹没真事故(实测 20 条里 2 条是这种噪音)→ 只留在 rows 时间轴里。
   // 真事故(用户停止 / 各类失败)照旧进 active,人工收件箱只装真事故。
-  const stageReadyJobs: HubJobView[] = [];
-  const manualJobs: HubJobView[] = [];
-  for (const job of manualRows.jobs) {
-    ((job.error ?? "").trim() === STAGE_READY ? stageReadyJobs : manualJobs).push(job);
-  }
-  // 真事故按 updatedAt 新→旧截到 manualLimit(activeRows 已是 updatedAt 倒序,手动截即可)。
-  manualJobs.length = Math.min(manualJobs.length, manualLimit);
-  for (const job of [...activeRows.jobs, ...manualJobs]) active.push(toRow(job));
+  for (const job of [...activeRows.jobs, ...manualRows.jobs]) active.push(toRow(job));
   // 已完成/失败的场也进 rows —— 前端渲染**一张表**(像日志),完成的行 phase=done/failed。
   // 独立拉一批终态(数量 = recentLimit),与 active 合并成单一时间轴。
   const finishedRows = recentRows.jobs.map(toRow);
@@ -678,7 +693,7 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   // rows:进行中 + 已完成,**同一时间轴、同一张表**(像日志)。finished 段的排序键用
   // finishedAt(收尾时刻)而非 enqueuedAt —— 否则「今天早上录、刚上传完」的稿会因入队早
   // 沉到列表底部,而用户关心的是「刚刚发生了什么」。进行中段仍用 enqueuedAt(队列语义)。
-  const rows: QueueItemDTO[] = [...active, ...stageReadyJobs.map(toRow), ...finishedRows];
+  const rows: QueueItemDTO[] = [...active, ...stageReadyRows.jobs.map(toRow), ...finishedRows];
   rows.sort((a, b) => {
     const key = (r: QueueItemDTO): number =>
       r.phase === "done" || r.phase === "failed" ? (r.finishedAt ?? r.updatedAt) : (r.enqueuedAt ?? r.updatedAt);

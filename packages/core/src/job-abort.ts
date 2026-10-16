@@ -16,7 +16,12 @@ export { STAGE_READY };
  * 于是正常收口被队列判成红灯事故(issue #188)。统一从这里取值,漏写的面就只剩「忘记调用」。
  */
 export function stageCompletionError(uploadMode: string | undefined): string {
-  return uploadMode === "upload" ? "" : STAGE_READY;
+  if (uploadMode === "upload") {
+    // upload 模式不该走「收口到 needs_manual」这条路径;真走到这里说明上游判断漏了,
+    // 不能静默写空 error(会被队列判成数据异常),所以明确抛出来而不是返回 ""。
+    throw new Error("stageCompletionError: upload 模式没有 needs_manual 收口路径");
+  }
+  return STAGE_READY;
 }
 
 const KILL_ESCALATE_MS = 2_000;
