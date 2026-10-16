@@ -350,6 +350,9 @@ biliup 另加「intent 为空」条件；其余（已认领、状态未知、命
     含本机 `effectiveHubConfig().stageDir`，N3）；`EnqueueResponse.results[]` 对 `stale` 附 `nextGeneration`、remux done 后原输入
     `stat` 失败 → `rejected`（N1）；`_node-capabilities` 报 `processors`；`Transport.enqueue?/procStatus?`（ssh + local，local 用
     `procQueueDbPath(cfg.dataRoot)`；未知命令 → `ProcUnsupported`）。本步无派发方，线上行为不变（仅新命令可被调用）。依赖 T3。
+    **符号链接逃逸（#152 复审 F3）**：core `assertJobInvariants` 的路径口径是纯字符串、**不跟符号链接**（`<root>/link -> /etc` 下的路径会放行）；
+    节点侧校验必须在其之上对 inputs/outputs 做 realpath（存在的最深祖先 realpath 后再判 allowedRoots），拒绝链接逃逸；
+    core 的 `it.todo`（符号链接逃逸）在本任务落地时改成真用例。
   - 测试：`_enqueue` 拒数据根外且不在 allowedRoots 的路径；**stageDir 在数据根外仍可入队**（N3）；stale 回执带 `nextGeneration`
     且等于节点 store 的下一代；remux done 后同 logicalKey 再入队 → `rejected`；fileTag 用 bigint `ino`（N8，构造 > 2^53 的 ino 断言
     字符串精确）；旧 bundle 节点（未知命令）→ `ProcUnsupported`；local / ssh Transport 往返一致。
@@ -390,6 +393,8 @@ biliup 另加「intent 为空」条件；其余（已认领、状态未知、命
 - **T13 节点侧 `produceParts` 改用本机表**（`_node-pipeline` 协议不变；`awaitLocalJobs` 无租约 60s → failed）。
 - **T14 biliup 处理器 + 上传闸统一**（`processors` 的 biliup 模块；上传凭据路径参数化牵动 `node-pipeline`、`pipeline.ts`、web 调用方，估算按 ~500 行）。
 - **T15 master 上传改派发**（needs-decision；同 PR 改 AGENTS.md 部署 guard，§2.3 拟改文本）。
+  store 的 `finish(cancelled)` 必须先经 core `cancelOutcome(kind, hasIntent)` 判定落点（`canTransition(running→cancelled)` 无条件放行，
+  不含「biliup 已写 intent → uncertain」；#152 复审 F5），并加用例：有 intent 的 biliup 取消落 `uncertain`。
 - **T16 节点侧作业链 `_enqueue` + `after`** —— **推迟**：`_node-pipeline` 走 ssh 长命令（`transport-ssh.ts` 315-317，30 分钟硬超时）、
   不依赖 worker serve，现状稳定；先让 T13 在 worker 内部用表、协议不变，观察一个月再定。
 - **T17 队列页** —— **推迟**：先只在 `/api/hub/queue` 露出本机 runner 的 active 行；节点分组等 T16 定了再做。
