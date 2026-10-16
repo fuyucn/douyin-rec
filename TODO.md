@@ -154,9 +154,12 @@
   绑定 hub 规则的任务至今无法选输出格式。第二期（merge/burn/上传迁表）待第一期稳定 ≥ 2 周再细化。
   **验收**:计划第一期各任务测试与验收条全部通过；`pnpm test` / `pnpm typecheck` / `pnpm arch:check` 通过；处理器与任务表包内无目录推导
   （grep 验收）；规则任务处理中途从不转换、上传仍用 mp4；VPS 真实录制一场（用户安排）验证封口转换走任务表。
-  **进度**:计划已合入、D1–D8 已按推荐确认（2026-10-15）；按切片各开一票。T1 = [#151](https://github.com/fuyucn/douyin-rec/issues/151)（已完成,PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）；T3 = [#153](https://github.com/fuyucn/douyin-rec/issues/153)（进行中）。
+  **进度**:计划已合入、D1–D8 已按推荐确认（2026-10-15）；按切片各开一票。T1 = [#151](https://github.com/fuyucn/douyin-rec/issues/151)（已完成,PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）；T3 = [#153](https://github.com/fuyucn/douyin-rec/issues/153)（实现完成，PR 待审；v0.0.141）。
   T1 复审遗留（PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）：符号链接逃逸 → plan T9a（节点侧 realpath）；`finish(cancelled)` 先经 `cancelOutcome` → plan T15；
   `recover()` 返回 `"done"` 时不带 outputs、store 无法据此判 stale → **T3 评估是否把返回值扩成 `{state:"done", outputs}`**（契约缺口，非 T1 范围）。
+  **T3 评估结论**：未改契约（T1 已合并，T3 只做 proc-queue）；接管 `recover()=done` 时 store 以行上声明的 `outputs`（无则空）落 done，
+  remux 无 `outputs` → 事后无法判 stale。**须在 T6 随 remux `recover` 一并决定**：把返回值扩成 `{state:"done", outputs}`（改 core + `settleOrphan` 落 `resultOutputs`）。
+  T3 遗留落点：`ackUncertain`/`requeue` 目前只有 store 方法，**尚无 HTTP/CLI 入口**（plan 只要求 purge）→ T9a 的 `_proc-*` 命令或 T6 UI 前补。
 
 - [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
   — 2026-10-15。**做什么**:录制引擎在 spawn 前判定水位(拒绝则不起录、下轮再判),手动启动接口过同一闸门(拒绝返回 409 且不改 enabled)。**为什么**:此前只有 daemon 在窗口启停时查水位,常驻任务的下一场开播与手动启动会绕过 → 盘满导致录制损坏。**验收**:两条路径均有测试覆盖 + dev 实跑;`pnpm test`/`typecheck` 通过。分支 `codex/issue-96-new-broadcast-gate`,PR [#97](https://github.com/fuyucn/douyin-rec/pull/97)。
