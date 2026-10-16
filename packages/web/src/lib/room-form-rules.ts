@@ -99,6 +99,7 @@ export function taskOutputFormatLock(f: { outputFormatLock?: OutputFormatLock | 
   const reason = f.outputFormatLock;
   switch (reason) {
     case "hub-managed": return lock("roomForm.lock.outputFormatHub");
+    case "hub-rule": return lock("roomForm.lock.outputFormatHubRule");
     case "rolling": return lock("roomForm.lock.outputFormatRolling");
     case "no-survivors": return lock("roomForm.lock.outputFormatNoSurvivors");
     case null:

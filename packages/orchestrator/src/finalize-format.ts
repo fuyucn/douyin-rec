@@ -12,7 +12,9 @@
  *   - `pending` 且无存活执行者持续 ≥ 60s → 告警一次,不回落、不重派(remux 不涉及不可逆外部动作,等节点 serve 起来自然续跑);
  *   - 入队回执 `stale` → 以回执 `nextGeneration` 重发**恰一次**;`rejected` 只标注不重试;
  *   - `_proc-status` 未知命令(节点已回滚旧 bundle)→ 标注「节点已回滚,留存转格式未执行」、停止轮询,**不进 needs_manual**(跟随任务,原文件未动);
- *   - 回执缺席(节点任务表无该 job)→ 终结并标注。
+ *   - 回执缺席(节点任务表无该 job)→ 终结并标注;
+ *   - 入队本身失败(非「不支持」,如 ssh 抖动 / 超时)→ 该批 job 留在 open 集合(state=`enqueue-failed`,带 job / attempts / nextAt),
+ *     **每节点告警一次**,由对账轮询按指数退避重入队至多 {@link MAX_ENQUEUE_RETRIES} 次;耗尽 → 终结(`failed`)并再告警一次。
  * 任何失败路径都只标注 / 告警,**绝不改 job 终态、绝不删任何文件**。
  */
 import path from "node:path";
@@ -31,6 +33,10 @@ import { ProcUnsupported, type Transport } from "./transport.js";
 export const STAGE_TARGET = "@stage";
 /** 「节点无执行者」告警的持续时长门槛(F4)。 */
 export const NO_EXECUTOR_WARN_MS = 60_000;
+/** 入队失败(瞬时)后由对账轮询重入队的次数上限;耗尽即放弃并告警(原文件未动)。 */
+export const MAX_ENQUEUE_RETRIES = 3;
+/** 重入队退避基数(ms):第 n 次重试前等 `BASE * 2^(n-1)`。 */
+export const ENQUEUE_RETRY_BASE_MS = 30_000;
 /** 单次 `_enqueue` 的 job 数上限(base64 走 argv,避免撞 Linux 单参数 128KiB 上限)。 */
 export const ENQUEUE_CHUNK = 40;
 /** remux 只受理录制原生容器。 */
@@ -47,7 +53,7 @@ export interface FinalizeFormatDeps {
   stageProc?: StageProcChannel;
 }
 
-export type FollowupState = "pending" | "running" | "done" | "failed" | "rejected" | "missing" | "rolled-back";
+export type FollowupState = "pending" | "running" | "done" | "failed" | "rejected" | "missing" | "rolled-back" | "enqueue-failed";
 const TERMINAL_STATES: ReadonlySet<FollowupState> = new Set(["done", "failed", "rejected", "missing", "rolled-back"]);
 
 export interface FollowupItem {
@@ -64,6 +70,12 @@ export interface FollowupItem {
   /** 「无执行者」告警已发(只发一次)。 */
   warned?: boolean;
   error?: string;
+  /** 仅 `enqueue-failed`:待重入队的请求 job(成功入队后删除)。 */
+  job?: ProcessJob;
+  /** 仅 `enqueue-failed`:已失败次数(首次入队失败 = 1)。 */
+  attempts?: number;
+  /** 仅 `enqueue-failed`:下次可重入队的时刻(ms)。 */
+  nextAt?: number;
 }
 
 /** `sync_jobs.followups` 的 JSON 形状。`open` = 仍有未终结项(对账轮询据此筛,见 `SyncLedger.listOpenFollowups`)。 */
@@ -73,6 +85,8 @@ export interface Followups {
   items: FollowupItem[];
   /** 人类可读标注(去重;跳过原因 / 回滚 / 拒绝等)。 */
   notes: string[];
+  /** 已就「入队失败」告警过的目标(每节点一次,首次失败时发;耗尽另发一条不受此限)。 */
+  enqueueAlerted?: string[];
 }
 
 export function parseFollowups(json: string | null | undefined): Followups | null {
@@ -196,6 +210,45 @@ function itemOf(target: string, job: ProcessJob, r: EnqueueResult, generation: n
   return base;
 }
 
+const labelOf = (target: string): string => (target === STAGE_TARGET ? "本机 stage" : `节点 ${target}`);
+
+/** 入队一批(≤ {@link ENQUEUE_CHUNK})并处理 stale 重发恰一次;传输 / 回执异常原样抛出(由调用方分类)。 */
+async function enqueueChunk(
+  target: string, chunk: ProcessJob[], transports: Map<string, Transport>, stageProc: StageProcChannel | undefined,
+  noteOnce: (s: string) => void,
+): Promise<FollowupItem[]> {
+  const items: FollowupItem[] = [];
+  const res = await enqueueVia(target, transports, stageProc, { v: 1, jobs: chunk });
+  if (!Array.isArray(res?.results) || res.results.length !== chunk.length) throw new Error("入队回执条数与请求不符");
+  const resend: ProcessJob[] = [];
+  res.results.forEach((r, idx) => {
+    if (r.state === "stale" && r.nextGeneration) {
+      // 同 jobId 已 done 但产物已不在:以节点算出的下一代**重发一次**(N1)。
+      const prev = chunk[idx];
+      resend.push({ ...prev, generation: r.nextGeneration, jobId: jobIdOf("remux", prev.logicalKey, r.nextGeneration) });
+    } else items.push(itemOf(target, chunk[idx], r, chunk[idx].generation));
+  });
+  if (resend.length > 0) {
+    const again = await enqueueVia(target, transports, stageProc, { v: 1, jobs: resend });
+    resend.forEach((job, k) => {
+      const r = again.results?.[k];
+      if (!r) { noteOnce(`${labelOf(target)} 重发回执缺失: ${path.basename(job.inputs[0])}`); return; }
+      const item = itemOf(target, job, r, job.generation);
+      if (r.state === "stale") { item.state = "rejected"; item.error = "重发一次后仍 stale,不再重试"; }
+      items.push(item);
+    });
+  }
+  return items;
+}
+
+/** 入队失败项:留在 open 集合,等对账轮询退避重入队。 */
+function failedItem(target: string, job: ProcessJob, e: unknown, now: number): FollowupItem {
+  return {
+    target, file: path.basename(job.inputs[0]), jobId: job.jobId, generation: job.generation, state: "enqueue-failed",
+    job, attempts: 1, nextAt: now + ENQUEUE_RETRY_BASE_MS, error: msgOf(e),
+  };
+}
+
 /** 本进程正在派发的场(done 场收尾补跑重入 runPipeline 时,避免与上一次尚未写完 followups 的派发重叠)。 */
 const dispatching = new Set<string>();
 /** 仅测试:清空进程内在途集合(入队永不返回的用例会让该 key 一直占位)。 */
@@ -211,6 +264,8 @@ export async function dispatchSurvivorRemux(o: {
   stageProc?: StageProcChannel;
   ledger: SyncLedger;
   log: (msg: string) => void;
+  notify?: (e: NotifyEvent) => void;
+  now?: () => number;
 }): Promise<Followups | null> {
   const { streamKey, plan, ledger, log } = o;
   if (dispatching.has(streamKey)) return null;
@@ -224,42 +279,28 @@ export async function dispatchSurvivorRemux(o: {
     for (const { target, job } of plan.jobs) byTarget.set(target, [...(byTarget.get(target) ?? []), job]);
 
     for (const [target, jobs] of byTarget) {
-      const label = target === STAGE_TARGET ? "本机 stage" : `节点 ${target}`;
+      const label = labelOf(target);
       for (let i = 0; i < jobs.length; i += ENQUEUE_CHUNK) {
         const chunk = jobs.slice(i, i + ENQUEUE_CHUNK);
         try {
-          const res = await enqueueVia(target, o.transports, o.stageProc, { v: 1, jobs: chunk });
-          if (!Array.isArray(res?.results) || res.results.length !== chunk.length) throw new Error("入队回执条数与请求不符");
-          const resend: Array<{ idx: number; job: ProcessJob }> = [];
-          res.results.forEach((r, idx) => {
-            if (r.state === "stale" && r.nextGeneration) {
-              // 同 jobId 已 done 但产物已不在:以节点算出的下一代**重发一次**(N1)。
-              const prev = chunk[idx];
-              resend.push({ idx, job: { ...prev, generation: r.nextGeneration, jobId: jobIdOf("remux", prev.logicalKey, r.nextGeneration) } });
-            } else fu.items.push(itemOf(target, chunk[idx], r, chunk[idx].generation));
-          });
-          if (resend.length > 0) {
-            const again = await enqueueVia(target, o.transports, o.stageProc, { v: 1, jobs: resend.map((x) => x.job) });
-            resend.forEach((x, k) => {
-              const r = again.results?.[k];
-              if (!r) { noteOnce(`${label} 重发回执缺失: ${path.basename(x.job.inputs[0])}`); return; }
-              const item = itemOf(target, x.job, r, x.job.generation);
-              if (r.state === "stale") { item.state = "rejected"; item.error = "重发一次后仍 stale,不再重试"; }
-              fu.items.push(item);
-            });
-          }
+          fu.items.push(...await enqueueChunk(target, chunk, o.transports, o.stageProc, noteOnce));
         } catch (e) {
           if (e instanceof ProcUnsupported) {
             noteOnce(`${label} 不支持处理任务表(旧版本),留存转格式跳过`);
             break; // 该目标其余批次同样不支持
           }
-          noteOnce(`${label} 留存转格式入队失败(不重试): ${msgOf(e)}`);
+          // 瞬时失败(ssh 抖动 / 超时等):本批及该目标其余批次留在 open 集合,由对账轮询退避重入队;每节点告警一次。
+          const at = (o.now ?? Date.now)();
+          for (const j of jobs.slice(i)) fu.items.push(failedItem(target, j, e, at));
+          noteOnce(`${label} 留存转格式入队失败,稍后重试(最多 ${MAX_ENQUEUE_RETRIES} 次): ${msgOf(e)}`);
+          fu.enqueueAlerted = [...(fu.enqueueAlerted ?? []), target];
+          o.notify?.({ kind: "error", stage: "同步", message: `${streamKey} ${label} 留存转格式入队失败(${jobs.length - i} 段),将自动重试: ${msgOf(e)}` });
           break;
         }
       }
     }
     for (const it of fu.items) {
-      if (it.state === "rejected") noteOnce(`${it.target === STAGE_TARGET ? "本机 stage" : `节点 ${it.target}`} 拒绝转格式 ${it.file}: ${it.error ?? "未知"}`);
+      if (it.state === "rejected") noteOnce(`${labelOf(it.target)} 拒绝转格式 ${it.file}: ${it.error ?? "未知"}`);
     }
     ledger.setFollowups(streamKey, serialize(fu));
     for (const n of fu.notes) log(`留存转格式: ${n}`);
@@ -296,7 +337,7 @@ export function launchFinalizeFormat(o: {
         stageSub: o.stageSub, stagePulled, hasStageProc: !!ff.stageProc,
       });
       await dispatchSurvivorRemux({
-        streamKey: b.streamKey, plan, transports: deps.transports, stageProc: ff.stageProc, ledger: deps.ledger, log,
+        streamKey: b.streamKey, plan, transports: deps.transports, stageProc: ff.stageProc, ledger: deps.ledger, log, notify: deps.notify,
       });
     } catch (e) {
       log(`留存转格式异常(忽略,不影响 done): ${msgOf(e)}`);
@@ -324,11 +365,13 @@ export async function pollFollowups(o: {
       const fu = parseFollowups(row.followups);
       if (!fu) continue;
       let changed = false;
-      const open = fu.items.filter((i) => !TERMINAL_STATES.has(i.state));
+      // 入队失败项:到期则退避重入队(成功 → 转为 pending 项并随后与其它项一起查回执;耗尽 → 终结 + 告警)。
+      if (await retryEnqueueFailed(fu, o, now())) changed = true;
+      const open = fu.items.filter((i) => !TERMINAL_STATES.has(i.state) && i.state !== "enqueue-failed");
       const targets = [...new Set(open.map((i) => i.target))];
       for (const target of targets) {
         const items = open.filter((i) => i.target === target);
-        const label = target === STAGE_TARGET ? "本机 stage" : `节点 ${target}`;
+        const label = labelOf(target);
         let receipts: ProcessReceipt[];
         try {
           if (target === STAGE_TARGET) {
@@ -397,4 +440,55 @@ export async function pollFollowups(o: {
       o.log?.(`[finalize-format] 轮询 ${row.streamKey} 异常(忽略): ${msgOf(e)}`);
     }
   }
+}
+
+/**
+ * 对「入队失败」项到期重入队(同目标的到期项合成批)。返回是否改动了 `fu`。永不抛。
+ * 失败 → attempts+1、指数退避;attempts 达 {@link MAX_ENQUEUE_RETRIES}+1(= 首次 + 3 次重试均失败)→ 终结为 `failed` 并按节点告警一次。
+ */
+async function retryEnqueueFailed(
+  fu: Followups,
+  o: { transports: Map<string, Transport>; stageProc?: StageProcChannel; notify?: (e: NotifyEvent) => void; log?: (msg: string) => void },
+  at: number,
+): Promise<boolean> {
+  const pending = fu.items.filter((i) => i.state === "enqueue-failed" && i.job && (i.nextAt ?? 0) <= at);
+  if (pending.length === 0) return false;
+  const noteOnce = (n: string): void => { if (!fu.notes.includes(n)) fu.notes.push(n); };
+  const exhausted = new Map<string, FollowupItem[]>();
+  for (const target of [...new Set(pending.map((i) => i.target))]) {
+    const label = labelOf(target);
+    const mine = pending.filter((i) => i.target === target);
+    for (let k = 0; k < mine.length; k += ENQUEUE_CHUNK) {
+      const batch = mine.slice(k, k + ENQUEUE_CHUNK);
+      try {
+        const got = await enqueueChunk(target, batch.map((i) => i.job as ProcessJob), o.transports, o.stageProc, noteOnce);
+        // 成功:以回执项替换失败项(stale 重发可能改 jobId / generation,回执项已带最终值)。
+        fu.items = fu.items.filter((i) => !batch.includes(i));
+        fu.items.push(...got);
+      } catch (e) {
+        if (e instanceof ProcUnsupported) {
+          for (const it of batch) { it.state = "rolled-back"; delete it.job; }
+          noteOnce(`${label} 不支持处理任务表(旧版本),留存转格式跳过`);
+          continue;
+        }
+        for (const it of batch) {
+          it.attempts = (it.attempts ?? 1) + 1;
+          it.error = msgOf(e);
+          if (it.attempts >= MAX_ENQUEUE_RETRIES + 1) {
+            it.state = "failed";
+            delete it.job;
+            exhausted.set(target, [...(exhausted.get(target) ?? []), it]);
+          } else it.nextAt = at + ENQUEUE_RETRY_BASE_MS * 2 ** ((it.attempts ?? 2) - 1);
+        }
+      }
+    }
+  }
+  for (const [target, its] of exhausted) {
+    const label = labelOf(target);
+    const msg = `${label} 留存转格式入队重试 ${MAX_ENQUEUE_RETRIES} 次仍失败,已放弃(${its.length} 段,原文件已保留): ${its[0].error ?? ""}`;
+    noteOnce(msg);
+    o.log?.(`[finalize-format] ${msg}`);
+    o.notify?.({ kind: "error", stage: "同步", message: msg });
+  }
+  return true;
 }

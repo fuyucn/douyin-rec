@@ -176,11 +176,42 @@ describe("T9b 接线:done + 清理之后才派发", () => {
     h.deps.ledger.close();
   });
 
-  it("stage 模式(未 done,needs_manual)→ 不派发:处理中途从不转换", async () => {
+  it("stage 交付模式正常终点(stageReady,清理之后)→ 派发:全留存时节点源与 stage 副本都转(MAJOR-2)", async () => {
     const h = makeHarness({ outputFormat: "mkv", uploadMode: "stage" });
+    (h.deps.transports.get("node-1")!.pull as Mock).mockImplementation(async (paths: string[], localDir: string) => {
+      mkdirSync(localDir, { recursive: true });
+      for (const p of paths) writeFileSync(join(localDir, p.split("/").pop()!), "x");
+      writeFileSync(join(localDir, `${BASE}.session.json`), "{}");
+    });
     h.deps.ledger.upsertPending(STREAM_KEY);
     const r = await runPipeline(broadcast(tsFiles), h.deps);
     expect(r.state).toBe("needs_manual");
+    await flush();
+    expect(h.nodeEnqueue).toHaveBeenCalledTimes(1);
+    expect(h.nodeEnqueue.mock.calls[0][0].jobs.map((j) => j.inputs[0]).sort()).toEqual(tsFiles);
+    expect(h.stageEnqueue).toHaveBeenCalledTimes(1);
+    expect(h.stageEnqueue.mock.calls[0][0].jobs).toHaveLength(2);
+    const fu = parseFollowups(h.deps.ledger.getFollowups(STREAM_KEY))!;
+    expect(fu.items).toHaveLength(4);
+    h.deps.ledger.close();
+  });
+
+  it("stage 交付模式 + 清理:派发发生在清理之后;节点源已删则不派节点", async () => {
+    const h = makeHarness({ outputFormat: "mkv", uploadMode: "stage", cleanup: { sourceAfterDone: true } });
+    h.deps.ledger.upsertPending(STREAM_KEY);
+    await runPipeline(broadcast(tsFiles), h.deps);
+    await flush();
+    expect(h.nodeEnqueue).not.toHaveBeenCalled();
+    h.deps.ledger.close();
+  });
+
+  it("stage 交付模式失败(节点失败 → failed,非 stageReady)→ 不派发", async () => {
+    const h = makeHarness({ outputFormat: "mkv", uploadMode: "stage" });
+    (h.deps.sh as Mock).mockRejectedValue(new Error("merge boom"));
+    h.deps.ledger.upsertPending(STREAM_KEY);
+    const r = await runPipeline(broadcast(tsFiles), h.deps);
+    expect(r.state).not.toBe("done");
+    expect((r as { stageReady?: boolean }).stageReady).toBeUndefined();
     await flush();
     expect(h.nodeEnqueue).not.toHaveBeenCalled();
     expect(h.stageEnqueue).not.toHaveBeenCalled();

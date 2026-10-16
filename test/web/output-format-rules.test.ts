@@ -75,6 +75,9 @@ describe("任务弹窗「输出格式」锁(完全由后端下发的 outputForma
   it("hub-managed → 锁定,原因指向 Hub 托管", () => {
     expect(taskOutputFormatLock({ outputFormatLock: "hub-managed" })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatHub" });
   });
+  it("hub-rule → 锁定,原因指向「规则仅按房间号命中、本任务非源任务」", () => {
+    expect(taskOutputFormatLock({ outputFormatLock: "hub-rule" })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatHubRule" });
+  });
   it("rolling → 锁定,原因指向边录边传互斥", () => {
     expect(taskOutputFormatLock({ outputFormatLock: "rolling" })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatRolling" });
   });

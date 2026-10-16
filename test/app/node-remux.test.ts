@@ -389,7 +389,12 @@ describe("判定矩阵 resolveNodeOutputFormat(spawn 前唯一判定点)", () =>
     expect(nodeOutputFormatLock(mk({ rollingEffective: true }), hubDir)).toBe("rolling");
     expect(nodeOutputFormatLock(mk({ outputFormat: "original", rollingEffective: true }), hubDir)).toBe("rolling");
     upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111" });
-    // T9b:有 enabled 规则(默认清理开关 = 全留存)→ 不锁;但封口仍不转(resolve 仍 original)
+    // 仅按房间键命中、无 sourceTaskId:收尾派发取不到本任务格式 → 锁 hub-rule(MAJOR-1)
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule");
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 8 } });
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule"); // 指向别的任务,同样锁
+    // T9b:本任务就是规则源任务(默认清理开关 = 全留存)→ 不锁;但封口仍不转(resolve 仍 original)
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 7 } });
     expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
     // 锁 ⇒ resolve 必为 original(单向)
     for (const over of [{ managedBy: "hub" }, { rollingEffective: true }, {}]) {
@@ -432,6 +437,11 @@ describe("T8:shouldConvertAtSeal / 锁同源 + 禁用规则不算绑定(plans/03
     expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("mkv");
     upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true });
     expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("original");
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule"); // 仅房间键命中 → 锁(收尾不会按本任务格式转)
+  });
+  it("hub-rule:源任务规则优先于仅房间键命中的规则(两条同时存在 → 不锁)", () => {
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true }); // 房间键命中、无源
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: true });
     expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
   });
   it("disabled 规则不盖过 enabled 规则:同时存在时封口仍不转", () => {
@@ -458,16 +468,33 @@ describe("T8:shouldConvertAtSeal / 锁同源 + 禁用规则不算绑定(plans/03
       [{ stageSourceAfterMerge: true }, undefined],
     ];
     for (const [cleanup, want] of cases) {
-      upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true, pipeline: { cleanup } });
+      upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true, recording: { sourceTaskId: 7 }, pipeline: { cleanup } });
       expect(nodeOutputFormatLock(mk(), hubDir), JSON.stringify(cleanup)).toBe(want);
       expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("original");
     }
+  });
+  it("no-survivors 与派发同口径:节点侧上传(不往 stage 放副本)+ sourceAfterDone → 锁;烧录 / stage 模式 / 未开节点侧则不按节点侧算", () => {
+    let n = 0; // upsert 深合并 steps:每次用干净的 hubDir
+    const rule = (steps: Record<string, boolean>, mode: string) => {
+      hubDir = join(dir, `hub-ns-${n++}`); mkdirSync(hubDir, { recursive: true });
+      upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true, recording: { sourceTaskId: 7 },
+        pipeline: { cleanup: { sourceAfterDone: true }, steps, upload: { mode } } as never });
+    };
+    rule({ nodeSideUpload: true, burnDanmu: false, burnLivechat: false }, "upload");
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("no-survivors");
+    rule({ nodeSideUpload: true }, "upload"); // 默认烧录开 → 不走节点侧,stage 仍有副本
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
+    rule({ nodeSideUpload: true, burnDanmu: false, burnLivechat: false }, "stage"); // stage 模式不走节点侧
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
+    rule({ burnDanmu: false, burnLivechat: false }, "upload"); // 未开节点侧
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
   });
   it("每种规则状态 × 受管 / rolling:锁 ⇒ resolveNodeOutputFormat()==='original'(选 mkv);shouldConvertAtSeal ⇔ resolve 不是 original;受管 / rolling 必锁", () => {
     const ruleStates: Array<[string, () => void]> = [
       ["无规则", () => {}],
       ["enabled · sourceTaskId", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: true }); }],
       ["enabled · 房间键", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true }); }],
+      ["enabled · 房间键 + 指向别的任务", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 8 }, enabled: true }); }],
       ["disabled · sourceTaskId", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: false }); }],
       ["disabled · 房间键", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: false }); }],
       ["别的任务的 enabled 规则", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "222", recording: { sourceTaskId: 8 }, enabled: true }); }],

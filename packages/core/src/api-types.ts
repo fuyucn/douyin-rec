@@ -859,9 +859,10 @@ export function normalizeDouyinApiMode(v: unknown): DouyinApiMode {
 /**
  * 任务「输出格式」被锁的原因(唯一定义;后端 `nodeOutputFormatLock` 产出,TaskDTO / app web DTO / 前端共用)。
  * `no-survivors` = 规则使收尾后节点与 stage 都不留任何源视频(格式无处可用;plans/036 T9b 起由后端产出)。
- * T9b 起不再有 `hub-rule`:有 enabled 规则绑定的任务封口时仍不转换,但改由收尾后转换,不再锁。
+ * `hub-rule` = enabled 规则仅按房间键命中、但本任务不是规则的源任务(收尾转格式只认源任务的格式,本任务所选格式不生效)。
+ * T9b 起:本任务就是规则源任务时封口仍不转换、但改由收尾后转换,不再锁。
  */
-export type OutputFormatLock = "hub-managed" | "rolling" | "no-survivors";
+export type OutputFormatLock = "hub-managed" | "hub-rule" | "rolling" | "no-survivors";
 
 /** GET /api/tasks[] 的任务响应(含 live 运行态;不含敏感 cookies)。 */
 export interface TaskDTO {

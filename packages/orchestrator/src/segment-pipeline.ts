@@ -274,7 +274,7 @@ export async function runSegmentPipeline(o: {
    * 分段模式下每类分P有 N 个,所以用回调而非固定字符串。
    */
   renderPartTitle?: (kind: "plain" | "danmu" | "livechat", partIndex: number, partTotal: number) => string | null;
-}): Promise<{ state: JobState; bv?: string }> {
+}): Promise<{ state: JobState; bv?: string; stageReady?: true }> {
   const { streamKey, deps, jlog, stageSub, winnerMembers, allMembers, dateName } = o;
   const uploadTitle = o.uploadTitle ?? dateName;
   const renderPartTitle = o.renderPartTitle;
@@ -508,7 +508,7 @@ export async function runSegmentPipeline(o: {
     // 产物已落盘待人工上传 → 删各节点源(stage 里的分P交付物保留,不能删)。
     await cleanupNodeSources();
     notify({ kind: "stageReady", streamKey });
-    return { state: "needs_manual" };
+    return { state: "needs_manual", stageReady: true };
   }
 
   // ── 上传:全部 plain 段一次多文件 upload 建稿(P1..Pn 顺序 = 段序)──
@@ -755,7 +755,7 @@ async function resumeSegmentAppends(
   splitForUpload: (mp4: string) => Promise<string[]>,
   allMembers: Broadcast["members"],
   srcSegments: string[],
-): Promise<{ state: JobState; bv?: string }> {
+): Promise<{ state: JobState; bv?: string; stageReady?: true }> {
   const { ledger, notify, cfg } = deps;
   jlog(`分段续跑:已建稿 bv=${bv},只补 append`);
   if (uploadParts.length === 0) {

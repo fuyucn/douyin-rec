@@ -210,11 +210,21 @@ describe("dispatchSurvivorRemux:派发与记账", () => {
     expect(ledger.get(KEY)!.state).toBe("done");
   });
 
-  it("其它入队失败(不可达等)→ 标注、不抛、不重试", async () => {
+  it("其它入队失败(不可达等)→ 标注、不抛、不改 job 终态;留在 open 集合并告警一次(MAJOR-3)", async () => {
     const enq = vi.fn(async () => { throw new Error("ssh rc=255"); });
-    const { ledger } = await run({ plan: plan(), transports: new Map([["node-1", node("node-1", enq as never)]]) });
+    const events: NotifyEvent[] = [];
+    const ledger = freshLedger();
+    await dispatchSurvivorRemux({
+      streamKey: KEY, plan: plan(), transports: new Map([["node-1", node("node-1", enq as never)]]), ledger, log: noop,
+      notify: (e) => events.push(e),
+    });
     const fu = parseFollowups(ledger.getFollowups(KEY))!;
     expect(fu.notes.some((n) => n.includes("入队失败") && n.includes("ssh rc=255"))).toBe(true);
+    expect(fu.open).toBe(true);
+    expect(fu.items).toHaveLength(2);
+    expect(fu.items.every((i) => i.state === "enqueue-failed" && i.attempts === 1 && i.job)).toBe(true);
+    expect(events).toHaveLength(1); // 每节点一次,不按段刷屏
+    expect(events[0]).toMatchObject({ kind: "error", stage: "同步" });
     expect(ledger.get(KEY)!.state).toBe("done");
   });
 
@@ -264,6 +274,74 @@ describe("dispatchSurvivorRemux:派发与记账", () => {
   });
 });
 
+describe("入队瞬时失败的退避重入队(MAJOR-3)", () => {
+  const T0 = 5_000_000;
+  async function seedFailed(enq: ReturnType<typeof vi.fn>, events: NotifyEvent[]) {
+    const ledger = freshLedger();
+    const ps = vi.fn(async (ids: string[]) => ids.map((jobId) => ({ jobId, state: "pending" as const, leaseAlive: true })));
+    const t = node("node-1", enq as never, ps as never);
+    const transports = new Map([["node-1", t]]);
+    await dispatchSurvivorRemux({ streamKey: KEY, plan: plan(), transports, ledger, log: noop, notify: (e) => events.push(e), now: () => T0 });
+    return { ledger, transports };
+  }
+
+  it("瞬时失败 → 到期重入队成功:转为 pending 项、不再告警;未到期不重试", async () => {
+    let fail = true;
+    const enq = vi.fn(async (req: EnqueueRequest): Promise<EnqueueResponse> => {
+      if (fail) throw new Error("ssh timeout");
+      return { v: 1, results: req.jobs.map((j) => ({ jobId: j.jobId.replace(/@#g/, "@7-1#g"), state: "pending" as const })) };
+    });
+    const events: NotifyEvent[] = [];
+    const { ledger, transports } = await seedFailed(enq, events);
+    expect(events).toHaveLength(1);
+    await pollFollowups({ ledger, transports, notify: (e) => events.push(e), now: () => T0 + 1_000 }); // 未到 nextAt
+    expect(enq).toHaveBeenCalledTimes(1);
+    fail = false;
+    await pollFollowups({ ledger, transports, notify: (e) => events.push(e), now: () => T0 + 30_000 });
+    expect(enq).toHaveBeenCalledTimes(2);
+    const fu = parseFollowups(ledger.getFollowups(KEY))!;
+    expect(fu.items).toHaveLength(2);
+    expect(fu.items.every((i) => i.state === "pending" && !i.job && i.jobId.includes("@7-1#g"))).toBe(true);
+    expect(fu.open).toBe(true); // 等回执
+    expect(events).toHaveLength(1); // 没有额外告警
+    expect(ledger.get(KEY)!.state).toBe("done");
+  });
+
+  it("持续失败 → 首次告警一次,重试 3 次(指数退避)后再告警并关闭;不再重试", async () => {
+    const enq = vi.fn(async () => { throw new Error("ssh timeout"); });
+    const events: NotifyEvent[] = [];
+    const { ledger, transports } = await seedFailed(enq, events);
+    const poll = (now: number) => pollFollowups({ ledger, transports, notify: (e) => events.push(e), now: () => now });
+    await poll(T0 + 30_000);            // 重试 1(退避 30s)→ 失败,下次 +60s
+    await poll(T0 + 30_000 + 59_999);   // 未到期
+    expect(enq).toHaveBeenCalledTimes(2);
+    await poll(T0 + 30_000 + 60_000);   // 重试 2 → 下次 +120s
+    await poll(T0 + 90_000 + 120_000);  // 重试 3 → 耗尽
+    expect(enq).toHaveBeenCalledTimes(4);
+    const fu = parseFollowups(ledger.getFollowups(KEY))!;
+    expect(fu.open).toBe(false);
+    expect(fu.items.every((i) => i.state === "failed" && !i.job)).toBe(true);
+    expect(events).toHaveLength(2); // 首次失败 + 耗尽,各一条(每节点)
+    expect(events[1].kind === "error" && events[1].message).toContain("已放弃");
+    await poll(T0 + 10_000_000);
+    expect(enq).toHaveBeenCalledTimes(4);
+    expect(events).toHaveLength(2);
+    expect(ledger.get(KEY)!.state).toBe("done");
+  });
+
+  it("重试时节点变成不支持(回滚)→ 终结为 rolled-back,不再重试、不告警", async () => {
+    let n = 0;
+    const enq = vi.fn(async () => { throw n++ === 0 ? new Error("ssh timeout") : new ProcUnsupported(); });
+    const events: NotifyEvent[] = [];
+    const { ledger, transports } = await seedFailed(enq, events);
+    await pollFollowups({ ledger, transports, notify: (e) => events.push(e), now: () => T0 + 30_000 });
+    const fu = parseFollowups(ledger.getFollowups(KEY))!;
+    expect(fu.open).toBe(false);
+    expect(fu.items.every((i) => i.state === "rolled-back")).toBe(true);
+    expect(events).toHaveLength(1);
+  });
+});
+
 describe("pollFollowups:对账轮询回执", () => {
   const T0 = 1_000_000;
   async function seed(procStatus: Transport["procStatus"]) {
@@ -300,6 +378,21 @@ describe("pollFollowups:对账轮询回执", () => {
     st = "done"; // 执行者恢复后自然完成
     await poll(T0 + 11 * NO_EXECUTOR_WARN_MS);
     expect(parseFollowups(s.ledger.getFollowups(KEY))!.open).toBe(false);
+  });
+
+  it("60s 阈值钉死字面量(不随常量变):59.999s 不告警、60s 告警(R14)", async () => {
+    expect(NO_EXECUTOR_WARN_MS).toBe(60_000);
+    let ledgerRef!: SyncLedger;
+    const ps = vi.fn(async () => receipts(ledgerRef, "pending", false));
+    const s = await seed(ps as never);
+    ledgerRef = s.ledger;
+    const events: NotifyEvent[] = [];
+    const poll = (now: number) => pollFollowups({ ledger: s.ledger, transports: s.transports, notify: (e) => events.push(e), now: () => now });
+    await poll(T0);
+    await poll(T0 + 59_999);
+    expect(events).toHaveLength(0);
+    await poll(T0 + 60_000);
+    expect(events).toHaveLength(1);
   });
 
   it("执行者存活(leaseAlive)→ 清掉「无执行者」起点,之后再断也从头计时", async () => {
