@@ -32,15 +32,24 @@ function countDanmuEntries(xmlPath: string): number {
  * 旧格式回落:`{base}.meta.json`(身份)+ `{base}.gaps.json`(缺口)—— 兼容历史录像。
  * 全缺失/损坏 → totalGapSec=0、roomSlug/platform=undefined。
  */
-function readSession(dir: string, base: string): { roomSlug?: string; platform?: string; totalGapSec: number; title?: string } {
+function readSession(dir: string, base: string): {
+  roomSlug?: string; platform?: string; totalGapSec: number; title?: string;
+  startMs?: number; endMs?: number; timeZone?: string;
+} {
   try {
     const d = JSON.parse(readFileSync(join(dir, `${base}.session.json`), "utf-8")) as
-      { roomSlug?: string; platform?: string; totalGapSec?: number; gaps?: GapInterval[]; title?: string };
+      { roomSlug?: string; platform?: string; totalGapSec?: number; gaps?: GapInterval[]; title?: string;
+        startMs?: number; endMs?: number; timeZone?: string };
     return {
       roomSlug: d.roomSlug || undefined,
       platform: d.platform || undefined,
       totalGapSec: d.totalGapSec ?? (d.gaps ? totalGapSecOf(d.gaps) : 0),
       title: d.title || undefined,
+      // Authoritative absolute timestamps (issue #87): only accept plausible epochs
+      // so a malformed/zero value falls back to the legacy filename parsing below.
+      startMs: typeof d.startMs === "number" && d.startMs > 0 ? d.startMs : undefined,
+      endMs: typeof d.endMs === "number" && d.endMs > 0 ? d.endMs : undefined,
+      timeZone: typeof d.timeZone === "string" && d.timeZone.trim() ? d.timeZone.trim() : undefined,
     };
   } catch { /* 无 session.json → 回落旧 meta+gaps */ }
   let roomSlug: string | undefined, platform: string | undefined;
@@ -212,9 +221,14 @@ export async function scanRecordings(
         endMs = Math.max(endMs, p.endMs);
       }
       const sess = readSession(dir, base);
-      // 无 ts 的会话(边录边传全删)→ startMs 用会话 base 时间戳兜底;endMs 未知取 = startMs。
-      const baseMs = startMsFromSessionBase(base);
-      if (startMs === Infinity) { startMs = baseMs; endMs = baseMs; }
+      // No-ts session (rolling upload deleted every segment): prefer the absolute start
+      // recorded in the sidecar (issue #87) over reverse-parsing the filename in this
+      // process's local timezone (a UTC reader would land on the wrong day). Sessions
+      // that still have ts keep the ffprobe result; only this fallback changes.
+      if (startMs === Infinity) {
+        startMs = sess.startMs ?? startMsFromSessionBase(base);
+        endMs = sess.endMs ?? startMs;
+      }
       // 弹幕源 .xml 是**可选**产物:缺失(异常中断/历史录像)时不能把不存在的路径交给 pull
       // (本地 copyFileSync 会 ENOENT、rsync 会 rc≠0,整场后处理直接失败)。
       const xmlAbs = join(dir, `${base}.xml`);

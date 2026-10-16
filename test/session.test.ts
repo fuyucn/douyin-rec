@@ -144,6 +144,23 @@ describe("RecordingSession", () => {
     expect(sj?.title).toBe("开播前已知标题");
   });
 
+  // issue #87:把绝对起止时刻 + 生效时区写进 sidecar,供下游格式化,不再靠文件名/进程时区反解。
+  it("issue #87:会话 sidecar 记录权威 startMs/endMs + 生效时区", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-tz-"));
+    const rec = new MockDlrRecorder();
+    const sess = new RecordingSession(rec, { timeZone: "Asia/Shanghai" });
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "主播X" });
+    await sess.stop();
+    const sj = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")))
+      .find((d) => d.startMs);
+    expect(sj?.timeZone).toBe("Asia/Shanghai");
+    expect(typeof sj?.startMs).toBe("number");
+    expect(sj!.startMs).toBeGreaterThan(0);
+    expect(typeof sj?.endMs).toBe("number");
+    expect(sj!.endMs).toBeGreaterThanOrEqual(sj!.startMs);
+  });
+
   // 缺陷:同一录制进程跨场(下播 → 主播重新开播)时,第二场沿用第一场的标题 → 稿件 {title} 张冠李戴。
   // 复现于 2026-10-09(video-rec-2 task 11:20:36 那场收播后进程继续轮询等下一场)。
   it("T-20b:下播后第二场 → sidecar 用**第二场**的标题(不沿用第一场)", async () => {

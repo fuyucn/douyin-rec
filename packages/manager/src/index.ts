@@ -4,7 +4,7 @@ import type {
   Recorder, DanmuSource, RecorderEvents, RecordOpts, DanmuMessage, StreamInfo,
 } from "@drec/core";
 import { XmlDanmuWriter } from "./danmu-xml/index.js";
-import { createLogger, platformForRoom, sessionBaseOf, stripVideoExt } from "@drec/core";
+import { createLogger, platformForRoom, processTimeZone, sessionBaseOf, stripVideoExt } from "@drec/core";
 import type { AdmitDecision, Notifier, NotifyEvent } from "@drec/core";
 
 const log = createLogger("session");
@@ -51,6 +51,14 @@ export interface SessionOpts {
    * (同一原因回升前只发一次),录制器保持等待开播并自动重试。不注入 = 不启用(行为不变)。
    */
   admitNewBroadcast?: () => AdmitDecision;
+
+  /**
+   * Effective timezone recorded into the session sidecar (issue #87). Downstream
+   * (inventory scan / clustering / title derivation) formats the absolute
+   * start/end timestamps with it instead of reverse-parsing the filename with
+   * each process's local timezone. Default: process effective timezone.
+   */
+  timeZone?: string;
 }
 
 /**
@@ -110,6 +118,8 @@ export class RecordingSession {
   private readonly drainPollSec: number;
   private readonly notifier: Notifier | undefined;
   private readonly danmuEnabled: boolean;
+  /** Effective timezone recorded into the session sidecar (issue #87). */
+  private readonly timeZone: string | undefined;
   /** 边录边传钩子工厂(T-33);undefined = 未启用(默认,行为不变)。 */
   private readonly makeRolling?: () => RollingUploadHook;
   /** 新一场开播准入闸门(issue #96);undefined = 不启用。 */
@@ -140,6 +150,13 @@ export class RecordingSession {
    * 否则「起得来但几秒退出」会以固定 5s 无限重连(实测上千次)。
    */
   private onLiveAt: number | null = null;
+
+  /**
+   * Absolute start of this recording session (epoch ms, issue #87). Frozen on the
+   * first sidecar write and reused on the final overwrite; lets downstream read a
+   * host-timezone-independent timestamp instead of reverse-parsing the filename.
+   */
+  private sessionStartMs: number | null = null;
   /**
    * T14:连续「短命录制」次数(起播确认后 < STABLE_RECORD_MS 就断流)。
    * 达 SHORT_LIVED_ALARM 发一次 error 告警(继续按封顶退避,不放弃重连)。
@@ -163,6 +180,7 @@ export class RecordingSession {
     this.danmuEnabled = sessionOpts?.danmuEnabled ?? true;
     this.makeRolling = sessionOpts?.makeRolling;
     this.admitNewBroadcast = sessionOpts?.admitNewBroadcast;
+    this.timeZone = sessionOpts?.timeZone;
   }
 
   /**
@@ -216,6 +234,7 @@ export class RecordingSession {
     this.shortLivedCount = 0;
     this.shortLivedAlarmAt = 0;
     this.onLiveAt = null;
+    this.sessionStartMs = null;
 
     mkdirSync(opts.outDir, { recursive: true });
     await this._startInner();
@@ -516,10 +535,19 @@ export class RecordingSession {
    */
   private _writeSession(base: string, withGaps = false): void {
     const plat = platformForRoom(this.roomUrl);
+    // Freeze the authoritative session start on the first write (issue #87): covers
+    // both the open (withGaps=false) and the final overwrite (withGaps=true) so the
+    // value never drifts to the stop time when a later call re-runs this method.
+    if (this.sessionStartMs === null) this.sessionStartMs = this.onLiveAt ?? Date.now();
     const data: Record<string, unknown> = {
       sessionBase: basename(base),
       roomSlug: plat.extractRoomSlug(this.roomUrl),
       platform: plat.id,
+      // Absolute start + effective timezone: consume as truth instead of deriving
+      // from file mtime or filename parsing (which reverse-parses in the reader's
+      // local timezone and can land on the wrong day across a UTC/Asia boundary).
+      startMs: this.sessionStartMs,
+      timeZone: this.timeZone ?? processTimeZone(),
     };
     if (this.liveTitle) data.title = this.liveTitle;
     // 节点侧原地替换(issue #137)的转换标记由 app 层写进同一个文件;本方法是**整文件覆盖**,
@@ -531,6 +559,7 @@ export class RecordingSession {
     if (withGaps) {
       data.gaps = this.gaps;
       data.totalGapSec = Math.round(this.gaps.reduce((s, g) => s + (g.endMs - g.startMs), 0) / 1000);
+      data.endMs = Date.now();
     }
     writeFileSync(`${base}.session.json`, JSON.stringify(data), "utf-8");
   }

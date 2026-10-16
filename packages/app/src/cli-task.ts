@@ -69,6 +69,7 @@ import { NodeRecordSpawner } from "./process/spawner.js";
 import { makeRollingUploadHookFactory } from "./rolling-upload.js";
 import { makeNodeRemuxHookFactory, resolveNodeOutputFormat } from "./node-remux.js";
 import { effectiveHubConfig, makeNewBroadcastGate } from "./disk-gate.js";
+import { effectiveTimezone } from "./timezone.js";
 
 // 本文件含多个命令组,日志按命令归属 scope:task→task_manager、daemon→scheduler、serve→web_server。
 const log = createLogger("task_manager");
@@ -143,7 +144,12 @@ export function buildSessionForTask(
   const admitNewBroadcast = makeNewBroadcastGate({
     outDir: opts.outDir, hubConfigPath: effHub.path, hubConfigJson: effHub.json,
   });
-  const session = new RecordingSession(recorder, { notifier, danmuEnabled, makeRolling, admitNewBroadcast });
+  const session = new RecordingSession(recorder, {
+    notifier, danmuEnabled, makeRolling, admitNewBroadcast,
+    // Record the effective timezone into the session sidecar so downstream reads the
+    // absolute start/end instead of reverse-parsing the filename (issue #87).
+    timeZone: effectiveTimezone(store),
+  });
   return { session, opts, url: roomToUrl(task.room) };
 }
 
