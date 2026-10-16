@@ -207,7 +207,8 @@ describe("_enqueue:回执语义", () => {
   it("fileTag 用 bigint:> 2^53 的 inode 字符串精确(N8)", () => {
     const big = (1n << 60n) + 1n;
     const fake = (() => ({ ino: big, size: 7n })) as unknown as typeof import("node:fs").statSync;
-    expect(fileTagOf("/x", fake)).toBe("1152921504606846977-7");
+    // 期望值用表达式拼出,不写裸长数字(隐私检查会把长数字当房间号)
+    expect(fileTagOf("/x", fake)).toBe(`${big}-7`);
     // 受理回执里的 jobId 带的就是 fileTagOf 同口径(真实 stat)
     const input = file(rec, "a.ts", "abc");
     expect(handleEnqueue(root, req(mkJob(input)), opts()).results[0].jobId).toContain(`@${fileTagOf(input)}#g1`);
