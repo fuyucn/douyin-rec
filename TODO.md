@@ -159,6 +159,10 @@
   `recover()` 返回 `"done"` 时不带 outputs、store 无法据此判 stale → **T3 评估是否把返回值扩成 `{state:"done", outputs}`**（契约缺口，非 T1 范围）。
   **T3 评估结论**：未改契约（T1 已合并，T3 只做 proc-queue）；接管 `recover()=done` 时 store 以行上声明的 `outputs`（无则空）落 done，
   remux 无 `outputs` → 事后无法判 stale。**须在 T6 随 remux `recover` 一并决定**：把返回值扩成 `{state:"done", outputs}`（改 core + `settleOrphan` 落 `resultOutputs`）。
+  T3 复审遗留（PR #154 第二轮,不阻塞）：**N3** `readProcActive`（`packages/proc-queue/src/runner.ts`）把所有异常吞成空快照,权限/只读异常时 running 静默归零
+  → **第二期把 `running.biliup > 0` 接入部署 guard 前**须改为只把「库不存在 / 表不存在」当空,其余错误带 `error` 字段返回或抛给 `_node-status`；
+  **N4** `store.ts` claim 里对已认领过的 pending 取消行直接 `UPDATE state=cancelOutcome(...)`,未经 `canTransition`（绕开状态机唯一真理源）
+  → 在 `core` 状态机补显式 reason（如 `cancel-before-rerun`）并让 claim 路径断言之,随 T6 前的下一次 proc-queue 改动一并做。
   T3 遗留落点：`ackUncertain`/`requeue` 目前只有 store 方法，**尚无 HTTP/CLI 入口**（plan 只要求 purge）→ T9a 的 `_proc-*` 命令或 T6 UI 前补。
 
 - [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
