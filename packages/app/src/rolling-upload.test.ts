@@ -12,6 +12,10 @@ class FakeGate extends UploadGate {
   async run<T>(_key: string, fn: () => Promise<T>): Promise<T> { return fn(); }
 }
 
+// 全部时间依赖固定在此:mtime 与注入的 now 都是常量,与真实系统时钟无关。
+const BASE_MS = Date.UTC(2026, 5, 27, 0, 0, 0);
+const NOW_MS = BASE_MS + 3_600_000;
+
 function mkSession(names: string[]): { dir: string; paths: string[] } {
   const dir = mkdtempSync(path.join(tmpdir(), "rolling-test-"));
   mkdirSync(path.join(dir, "rec"), { recursive: true });
@@ -20,6 +24,8 @@ function mkSession(names: string[]): { dir: string; paths: string[] } {
     writeFileSync(p, "x");
     return p;
   });
+  // mtime 钉死在固定时刻(相邻段间隔 60s,不触发碎片判定),不读真实时钟。
+  paths.forEach((p, i) => utimesSync(p, new Date(BASE_MS + i * 60_000), new Date(BASE_MS + i * 60_000)));
   return { dir, paths };
 }
 
@@ -32,8 +38,8 @@ const uploadMeta = { tag: "直播", tid: 21 };
 const noopAppend = async (): Promise<void> => {};
 // 测试里用 removeFile 接缝阻止真实删盘(只断言调用),避免污染 tmp。
 const noRemove = (): boolean => false;
-// mtime 与 now 可能差 1~2ms(文件系统时钟),让「录制已收尾」的封口判定稳定成立。
-const futureNow = (): number => Date.now() + 60_000;
+// 注入固定 now(晚于所有段 mtime),「录制已收尾」的封口判定与真实时钟无关。
+const futureNow = (): number => NOW_MS;
 // 与 segNames 同构的会话 base(读 sidecar / 崩溃恢复测试用)。
 const SESSION_BASE = "主播_2026-06-27_08-00-00";
 const sidecarPath = (dir: string): string => path.join(dir, "rec", `${SESSION_BASE}.rolling.json`);
@@ -45,13 +51,15 @@ function writeSidecar(dir: string, overrides: Record<string, unknown>): void {
       sessionBase: SESSION_BASE,
       segments: [],
       confirmed: [],
-      updatedAt: Date.now(),
+      updatedAt: BASE_MS,
       ...overrides,
     }),
   );
 }
 
 describe("RollingUploader — 边录边传录制端执行", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
   it("只处理封口段:有后继段的旧段上传+删,正在写的最近段不动", async () => {
     const { paths } = mkSession(segNames(3));
     const up = vi.fn(async () => "BV1aaaaaaaaa");
@@ -75,7 +83,10 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     const { paths } = mkSession(segNames(1));
     const up = vi.fn(async () => "BV1greaceregr");
     const remove = vi.fn(() => true);
-    // 不传 now(真 Date.now → 末段 mtime 距今约 0ms)/ 不传任何宽限。
+    // 不传 now(走默认 Date.now,由假时钟钉死;末段 mtime = 当前时刻,即「刚写完」)/ 不传任何宽限。
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(BASE_MS + 120_000));
+    utimesSync(paths[0], new Date(BASE_MS + 120_000), new Date(BASE_MS + 120_000)); // 与「当前」同刻:刚写完
     const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: remove, minSegmentSec: 0 });
     u.noteSegment(paths[0]);
     const r = await u.flush({ recordingActive: false });
@@ -165,7 +176,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
 
   it("碎片段:封口段时长不足 → 不上传、保留源、不阻塞后续段", async () => {
     const { paths } = mkSession(segNames(3));
-    const t0 = Date.now() - 60_000;
+    const t0 = BASE_MS;
     utimesSync(paths[0], new Date(t0), new Date(t0));
     utimesSync(paths[1], new Date(t0 + 1_000), new Date(t0 + 1_000)); // 距上段 1s < 5s → 碎片
     utimesSync(paths[2], new Date(t0 + 21_000), new Date(t0 + 21_000)); // 距上段 20s → 正常
@@ -249,7 +260,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
   // 这一条证据 —— 若额外要求段号连续,会把这种正常情况误判成人工干预 → 无谓转人工。
   it("崩溃恢复:碎片段导致 confirmed 非连续,仍按分P数补确认(不误转人工)", async () => {
     const { dir, paths } = mkSession(segNames(4));
-    const t0 = Date.now() - 600_000;
+    const t0 = BASE_MS;
     utimesSync(paths[0], new Date(t0), new Date(t0));
     utimesSync(paths[1], new Date(t0 + 1_000), new Date(t0 + 1_000));       // 距上段 1s < 5s → 碎片段
     utimesSync(paths[2], new Date(t0 + 301_000), new Date(t0 + 301_000));
@@ -333,7 +344,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
   // 现算 mtime,崩溃恢复时进程往往只剩尾段 → 时刻漂到收尾时间,与实际开播时间不符。
   it("建稿时刻锚定会话首段并持久化(重启后不漂到尾段时间)", async () => {
     const { dir, paths } = mkSession(segNames(2));
-    const t0 = Date.now() - 120_000;
+    const t0 = BASE_MS;
     utimesSync(paths[0], new Date(t0), new Date(t0));
     utimesSync(paths[1], new Date(t0 + 60_000), new Date(t0 + 60_000));
     const up = vi.fn(async () => "BV1aaaaaaaaaa");
@@ -348,7 +359,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     await u2.flush({ recordingActive: false });
     expect(up).toHaveBeenCalledTimes(1); // 建稿发生在段 0 上,时刻 = 会话首段
     const saved = JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { startMs?: number };
-    expect(Math.abs((saved.startMs ?? 0) - t0)).toBeLessThanOrEqual(1_000);
+    expect(saved.startMs).toBe(t0);
   });
 
   // sidecar 是「已传/已确认」的唯一持久化证据。原子写失败 → 幂等状态不可信:此后**绝不**外发
