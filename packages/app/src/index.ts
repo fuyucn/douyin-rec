@@ -20,6 +20,7 @@ export type { WorkerConfig } from "./worker-store.js";
 export { listHubJobs, readHubJobLog, jobLogPath, hubStageDir, buildQueueView, latestRunPerRoom } from "./hub-jobs.js";
 export type { HubJobView, HubJobEvent, BuildQueueOpts, LatestRunPerRoom } from "./hub-jobs.js";
 export { procQueueDbPath } from "./paths.js";
+export { handleEnqueue, handleProcStatus, nodeAllowedRoots, assertJobInvariantsReal, realpathDeep, decodeJobIds, encodeJobIds, REMOTE_ENQUEUE_KINDS } from "./node-enqueue.js";
 export { drecRoot, rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, rootBiliupCookies, DEFAULT_ROOT, ensureNodeIdentity, rootNodeIdentityPath } from "./paths.js";
 export type { NodeIdentity } from "./paths.js";
 export { rootConfigDir } from "./paths.js";

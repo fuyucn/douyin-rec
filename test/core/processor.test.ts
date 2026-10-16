@@ -1,5 +1,8 @@
 // plans/036 T1:处理器契约 / 注册表 / jobId / 不变量 / 状态机 / 派发编解码。
 import { describe, it, expect, beforeEach } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   registerProcessor, getProcessor, listProcessors, _resetProcessors,
   jobIdOf, parseJobId, assertJobInvariants,
@@ -136,9 +139,18 @@ describe("assertJobInvariants", () => {
     expect(() => assertJobInvariants(mkJob({ outputs: [same], replaceInputs: false }), allowed)).not.toThrow();
   });
 
-  // 口径钉死:isUnderRoot 是纯字符串判定、不跟符号链接。真实 realpath 校验属 plans/036 T9a(节点侧),
-  // 落地时把本条改成真用例(<root>/link -> 根外目录,link 下路径必须被拒)。
-  it.todo("符号链接逃逸:<root>/link -> 根外 的路径当前被放行,T9a 节点侧须 realpath 后拒绝");
+  // 口径钉死:isUnderRoot 是纯字符串判定、不跟符号链接 —— `<root>/link -> 根外` 下的路径在 core 层放行,
+  // 由节点侧 realpath 校验兜底(plans/036 T9a,真用例见 test/app/node-enqueue.test.ts「符号链接逃逸」)。
+  it("符号链接逃逸:core 纯字符串口径放行 <root>/link -> 根外 下的路径(realpath 校验在节点侧,T9a)", () => {
+    const base = mkdtempSync(join(tmpdir(), "core-symlink-"));
+    try {
+      const inRoot = join(base, "root"); const out = join(base, "out");
+      mkdirSync(inRoot); mkdirSync(out);
+      symlinkSync(out, join(inRoot, "link"));
+      const p = join(inRoot, "link", "a_000.ts");
+      expect(() => assertJobInvariants(mkJob({ inputs: [p] }), { allowedRoots: [inRoot] })).not.toThrow();
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
 
   it("任一路径越界即拒:inputs 合法但 outputs 越界", () => {
     expect(() => assertJobInvariants(mkJob({ outputs: ["/tmp/out.mkv"] }), allowed)).toThrow(/allowedRoots/);

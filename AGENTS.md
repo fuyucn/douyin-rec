@@ -195,7 +195,10 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
   被 abort 的行按孤儿经 `recover()` 处理，不停在 running。已认领过的 pending 行被取消 → 下次 claim 直接落 `cancelled`。
 - 接口：`GET /api/proc/active`（`ProcActiveDTO`：`host` / `running` / `pending` / `leaseAlive` 按 kind；runner 未起 → 503）；
   `POST /api/proc/purge {purgeFailed:true}` 人工清 failed；隐藏命令 `_proc-gc <dataRoot> [--purge-failed]`；
-  `_node-status` 附 `procActive`。**部署 guard 补充**：`running.biliup > 0` 同样视为在忙（第二期上传落地后生效，见 plans/036 §2.3）。
+  `_node-status` 附 `procActive`。**远端入队通道（T9a，无派发方）**：隐藏命令 `_enqueue <dataRoot> <base64>`（只受理 remux；
+  路径经 `allowedRoots`（数据根 `recordings/`+`stage/`、各任务输出目录、本机 hub `stageDir`）+ **realpath 校验**拒符号链接逃逸；回执 `stale` 附
+  节点 store 的 `nextGeneration`，remux done 后原输入 stat 失败 → `rejected`）、`_proc-status <dataRoot> <base64-jobIds>`（`{receipts}`，未知 jobId 缺席）；
+  `_node-capabilities` 附 `processors`；Transport `enqueue?/procStatus?`（ssh + local），旧节点未知命令 → `ProcUnsupported`。**部署 guard 补充**：`running.biliup > 0` 同样视为在忙（第二期上传落地后生效，见 plans/036 §2.3）。
 - 保留：done/cancelled 7 天 GC（runner 每小时）；failed/uncertain 不自动删，uncertain 须先 `ackUncertain` 再 purge。
 
 ### 录制会话（RecordingSession，@drec/manager）

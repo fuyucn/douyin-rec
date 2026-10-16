@@ -2,8 +2,9 @@
 import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { join, basename } from "node:path";
 import { linkOrCopy } from "@drec/core";
-import { freeGBOf, type NodeTaskDTO, type RemoteTaskSpec, type NodeStatus } from "@drec/core";
+import { freeGBOf, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type NodeTaskDTO, type RemoteTaskSpec, type NodeStatus } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecordingStatus, NodeTasks, Transport } from "./transport.js";
+import { ProcUnsupported } from "./transport.js";
 import { scanRecordings, scanRollingSessions } from "./scan.js";
 
 export interface LocalOpts {
@@ -35,6 +36,10 @@ export interface LocalOpts {
   nodeStatus?: () => NodeStatus | null;
   /** 本机任务日志尾巴(F3);缺省 → taskLogs() 返回不支持。 */
   taskLogs?: (taskId: number, lines: number) => { lines: string[]; error?: string };
+  /** 本机处理任务表入队(与 `_enqueue` 同一执行体,库路径 = procQueueDbPath(cfg.dataRoot));缺省 = 不支持。 */
+  enqueue?: (req: EnqueueRequest) => EnqueueResponse;
+  /** 本机回执查询(与 `_proc-status` 同一执行体);缺省 = 不支持。 */
+  procStatus?: (jobIds: string[]) => ProcessReceipt[];
 }
 
 export class LocalTransport implements Transport {
@@ -89,6 +94,16 @@ export class LocalTransport implements Transport {
   async taskLogs(taskId: number, lines: number): Promise<{ lines: string[]; error?: string }> {
     if (!this.o.taskLogs) return { lines: [], error: "本机未注入日志读取(单机模式)" };
     return this.o.taskLogs(taskId, lines);
+  }
+
+  async enqueue(req: EnqueueRequest): Promise<EnqueueResponse> {
+    if (!this.o.enqueue) throw new ProcUnsupported("本机未注入处理任务表入队");
+    return this.o.enqueue(req);
+  }
+
+  async procStatus(jobIds: string[]): Promise<ProcessReceipt[]> {
+    if (!this.o.procStatus) throw new ProcUnsupported("本机未注入处理任务表回执查询");
+    return this.o.procStatus(jobIds);
   }
 
   /** 轻量探针:recordings 目录存在即视为就绪(不扫内容)。 */
