@@ -9,21 +9,13 @@ import { CookieDialog } from "../modals/CookieDialog";
 import { QrLoginDialog } from "../modals/QrLoginDialog";
 import { SettingsDialog } from "../modals/SettingsDialog";
 import { useT } from "../lib/i18n";
+import { navItems } from "../lib/nav";
 
 /** 页面入口。桌面放进顶栏;手机一行放不下中文标签,改到第二行,避免被 hidden 掉。 */
 function PageLinks({ className }: { className: string }): ReactNode {
   const t = useT();
   const hubEnabled = useAtomValue(hubEnabledAtom);
-  // Rooms first: it is the one-stop entry (list → detail → edit); tasks/hub remain for deep config.
-  const items: { to: string; label: string; end?: boolean }[] = [
-    { to: "/rooms", label: t("nav.rooms") },
-    { to: "/", label: t("nav.tasksList"), end: true },
-  ];
-  // Hub 与处理队列都仅 master(启用 hub)显示;slave/未开不显示。
-  // 顺序:录制任务 → Hub(配置编排)→ 处理队列(运行观测),从「配」到「看」。
-  if (hubEnabled) {
-    items.push({ to: "/hub", label: "Hub" }, { to: "/queue", label: t("nav.queue") });
-  }
+  const items = navItems(hubEnabled === true).map((i) => ({ ...i, label: i.labelKey === "Hub" ? "Hub" : t(i.labelKey) }));
   return (
     <nav className={className} aria-label={t("nav.title")}>
       {items.map((item) => (
