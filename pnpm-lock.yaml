@@ -78,6 +78,9 @@ importers:
       '@drec/proc-queue':
         specifier: workspace:*
         version: link:../proc-queue
+      '@drec/processors':
+        specifier: workspace:*
+        version: link:../processors
       '@drec/record-engine':
         specifier: workspace:*
         version: link:../record-engine
@@ -133,6 +136,9 @@ importers:
       '@drec/proc-queue':
         specifier: workspace:*
         version: link:../proc-queue
+      '@drec/processors':
+        specifier: workspace:*
+        version: link:../processors
       '@drec/record-engine':
         specifier: workspace:*
         version: link:../record-engine
@@ -223,6 +229,15 @@ importers:
       '@drec/core':
         specifier: workspace:*
         version: link:../core
+
+  packages/processors:
+    dependencies:
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
+      '@drec/post-process':
+        specifier: workspace:*
+        version: link:../post-process
 
   packages/record-engine:
     dependencies:

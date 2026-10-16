@@ -50,6 +50,7 @@ export default defineConfig({
       "@drec/core": fileURLToPath(new URL("./packages/core/src/index.ts", import.meta.url)),
       "@drec/manager": fileURLToPath(new URL("./packages/manager/src/index.ts", import.meta.url)),
       "@drec/proc-queue": fileURLToPath(new URL("./packages/proc-queue/src/index.ts", import.meta.url)),
+      "@drec/processors": fileURLToPath(new URL("./packages/processors/src/index.ts", import.meta.url)),
       "@drec/post-process": fileURLToPath(new URL("./packages/post-process/src/index.ts", import.meta.url)),
       "@drec/douyin-live": fileURLToPath(new URL("./packages/douyin-live/src/index.ts", import.meta.url)),
       "@drec/record-engine": fileURLToPath(new URL("./packages/record-engine/src/index.ts", import.meta.url)),

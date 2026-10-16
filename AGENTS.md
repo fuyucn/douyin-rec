@@ -6,7 +6,7 @@
 提供 CLI 子命令与 Web UI（React）。支持 **master + worker 多节点架构**：master 通过 hub 编排把录制任务
 同步下发到选定节点，收播后在 master 侧做合并/烧录/上传。
 
-**技术栈**：Node 24（ESM，`.js` import 后缀）、pnpm workspace（13 个包）、TypeScript、vitest、
+**技术栈**：Node 24（ESM，`.js` import 后缀）、pnpm workspace（16 个包）、TypeScript、vitest、
 commander、esbuild 双产物打包（`dist/douyin-rec.mjs` + `dist/tui.mjs`）、`node:sqlite`（内置）。
 录制自研：`record-engine` 提供通用轮询基类 + 可插拔 ffmpeg/mesio 引擎；取流靠 vendored a_bogus 签名
 （`packages/douyin-live/src/vendor`）；弹幕 WS 客户端自研（参考 `douyin-danma-listener` 重写，
@@ -126,7 +126,7 @@ pnpm serve:local                                           # 本地开发（port
 
 分层由 `test/arch/layering.test.ts` 守护：依赖只能向下，**新增包必须在该测试 `RANKS` 登记**。
 当前 rank：core=0、observability=0.5、post-process=0.2、tui/ffmpeg-recorder-extra=0、
-record-engine=1、douyin-live/bilibili-live/kuaishou-live=1.5、manager=3、app=4、orchestrator=4.5、cli=5。
+proc-queue=0.3、processors=0.4、record-engine=1、douyin-live/bilibili-live/kuaishou-live=1.5、manager=3、app=4、orchestrator=4.5、cli=5。
 
 ```
 packages/
@@ -135,6 +135,8 @@ packages/
 │                             #   + platform(Platform 接口 + 注册表) + notify + api-types
 ├── observability/            # L0.5 logs + notification 实现(端口在 core;app/cli 依赖,manager/orchestrator 不依赖)
 ├── post-process/             # L0 后处理(纯函数):concat 多会话拼接 / burn 烧字幕 / ass / merge / ffmpeg spawn / fonts
+├── proc-queue/               # L0.3 每节点持久任务表(node:sqlite)+ ProcRunner 租约/心跳/fencing/关停;只经 core 注册表找处理器
+├── processors/               # L0.4 后处理处理器实现:remux(校验/原地转换/recover);加处理器 = 一个模块 + providers-register 一行
 ├── ffmpeg-recorder-extra/    # L0 附加插件:logStreamMeta(流信息) + detectDevice(ffprobe encoder)
 ├── tui/                      # L0 Ink TUI(独立打包 dist/tui.mjs)
 ├── record-engine/            # L1 通用 PollingRecorder(平台无关 + 引擎无关)+ 引擎策略 DownloadEngine:
@@ -229,17 +231,25 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
   前端默认日期（`todayYmdInTz(serverTz)`）都走 core 的 `resolveTimeZone`/`processTimeZone`（env 未设 → 北京，**不回落宿主机
   本地时区**）。不经 `serve` 的独立 CLI 命令由 cli `preAction` 钩子调 `applyTimezoneFromDb()` 读同一设置。
 - 状态恢复、崩溃自动重启、每任务日志环形缓冲（web 实时 tail）。
-- **输出格式·节点侧原地替换**（issue #137，`app/node-remux.ts`）：任务字段 `outputFormat`（original/mp4/mkv）。仅**无后处理**
+- **输出格式·节点侧原地替换**（issue #137，`app/node-remux.ts` 薄封装 + `@drec/processors` 的 remux 模块，plans/036 T6）：任务字段 `outputFormat`（original/mp4/mkv）。仅**无后处理**
   的任务生效 —— `TaskManager.spawnFor` 经唯一判定点 `resolveNodeOutputFormat` 决定是否给子进程传 `--output-format`
   （hub 受管 / 有规则绑定 / 边录边传 → original 不传；规则之后才绑定则下一次 spawn 起生效）。子进程经 manager 的
-  封口钩子（与边录边传同一接缝、互斥）在每个分段**封口后**串行 `-c copy` 到 `*.drec-remux` 临时文件 → 校验
+  封口钩子（与边录边传同一接缝、互斥）在每个分段**封口后**先写会话边车 `nodeFormat`、再**入队为 `remux` 处理任务**（每节点任务表 `<root>/db/proc-queue.db`，
+  jobId=`jobIdOf("remux", task…@fileTag, g)`）；执行体 `remuxProcessor`（cpu / lane=copy / retryable / interruptible）串行 `-c copy` 到 `*.drec-remux` 临时文件 → 校验
   → fsync + 原子 rename → **最后**才删原文件；任一步失败保留原文件并走告警通道。校验是**唯一函数**
   `verifyRemuxed`（正常路径与崩溃接管共用）：ffprobe 可读 / 有视频流与视频包 / 头部时长在容差内 / **扫全部视频包 pts 的
   跨度（post-process `ffprobeVideoSpan`）与原文件在容差内** / 新文件体积 ≥ 原文件 × `MIN_SIZE_RATIO`。扫包是关键：
-  mkv 与 faststart mp4 的时长写在文件头，截断后头部时长仍完整，只看头部会放过坏文件。同一函数还比**视频包数**（新 ≥ 原 − min(一个 GOP, 0.5%)）、**音频**（原有音频则新文件必须有音轨且音频包数在容差内）、**全包扫描的 ffprobe 告警行数**（新不得多于原，挡索引完好但数据被补零的 mp4）。所有 ffprobe 探测走统一运行器（post-process `runFfprobe`）：消费 stderr 只留尾部、有超时并杀进程，超时/异常一律「无法判定」→ 两份都留。会话收尾转换有总时限（超时放弃并告警）；崩溃接管**后台执行、不挡开录**并有总时限。临时文件名带任务标识 + pid：接管时本任务残留且进程已死 → 立即清并告警，别的任务的新鲜残留不碰；校验失败而原文件已不存在（对方任务刚转完）→ 跳过、不隔离新文件。任何「无法判定」一律按失败处理。
+  mkv 与 faststart mp4 的时长写在文件头，截断后头部时长仍完整，只看头部会放过坏文件。同一函数还比**视频包数**（新 ≥ 原 − min(一个 GOP, 0.5%)）、**音频**（原有音频则新文件必须有音轨且音频包数在容差内）、**全包扫描的 ffprobe 告警行数**（新不得多于原，挡索引完好但数据被补零的 mp4）。所有 ffprobe 探测走统一运行器（post-process `runFfprobe`）：消费 stderr 只留尾部、有超时并杀进程，超时/异常一律「无法判定」→ 两份都留。**执行宿主按租约规则（plans/036 §2.3）**：每 kind 本机至多一个存活持有者；`task serve` 先持有，`record` 子进程只入队；独立 `record`
+  仅在无存活持有者时持有（serve 起来后置 `handoverRequested`，持有者跑完当前 job 让出）。会话收尾（`onSessionEnd`）**保留 3 分钟总时限**等待本进程
+  入队的行：本进程持有则等、他人（serve）持有或等待中被接管则立即结束且不告警；超时告警文案不变，未完成行留在表中由持有者续跑。
+  **任务表打不开 → 回落进程内串行链 + 告警**（稳定版兜底；入队失败 / 被拒的单段同样回落）。表内 job 的崩溃续跑走 `recover`
+  （只碰该 job 的 src / 目标 / tmp，不扫目录：只有 tmp → 删 tmp → 重跑；目标在且校验通过 → done 并删原文件；存疑 → `uncertain` + 新文件 `.drec-suspect`
+  隔离、两份都留）；关停回 `pending`（attempts 不加、tmp 清、原文件不动）。不可逆动作（rename / 删原文件）前 `assertLease`。
+  契约层（`assertJobInvariants`）拒绝 xml / ass / 会话边车进 `replaceInputs`；处理器与 proc-queue 包内禁止 `readdirSync` / `groupSessions` / 目录推导（grep 守护）。
+  崩溃接管**后台执行、不挡开录**并有总时限。临时文件名带任务标识 + pid：接管时本任务残留且进程已死 → 立即清并告警，别的任务的新鲜残留不碰；校验失败而原文件已不存在（对方任务刚转完）→ 跳过、不隔离新文件。任何「无法判定」一律按失败处理。
   会话 sidecar 记 `nodeFormat`（老文件缺字段=未转换），录制目录扫描据此识别无段号单文件；`groupSessions` 不传
   `nodeFormats` 时一个 mp4/mkv 都不收（stage / 合并模式不会把分 P 产物当源）。`record` 启动时 `recoverNodeRemux`
-  接管崩溃遗留：孤儿临时文件只删 mtime 早于 `STALE_TMP_MIN_AGE_MS` 的（扫的是共享输出根，新鲜的可能是别的任务在写）；
+  （目录级，保留一个版本只兜底「不在任务表里」的旧 tmp / 配对）接管崩溃遗留：孤儿临时文件只删 mtime 早于 `STALE_TMP_MIN_AGE_MS` 的（扫的是共享输出根，新鲜的可能是别的任务在写）；
   配对新文件通过同一校验才删原文件，**存疑（不通过 / 无法判定）→ 两份都留**（新文件改名加 `.drec-suspect` 隔离，避免重复计入），
   永不删到最后一份；接管的每个动作都发告警（「上次中断、该段保持原容器」）。任务视图（TaskDTO）下发 `outputFormatLock`
   （`nodeOutputFormatLock`，与 `resolveNodeOutputFormat` 同源），前端据此锁定下拉，不自判 hub 状态；旧后端缺字段按不锁降级。

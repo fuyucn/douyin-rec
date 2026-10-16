@@ -49,6 +49,9 @@ flowchart TB
   subgraph L05["L0.5 · 可观测性"]
     observ["<b>observability</b><br/>Notifier / EventCenter / 日志"]
   end
+  subgraph L04["L0.4 · 处理器实现"]
+    procs["<b>processors</b><br/>remux 处理器(校验 / 原地转换 / recover);加处理器 = 一个模块 + 注册一行"]
+  end
   subgraph L03["L0.3 · 处理任务队列"]
     procq["<b>proc-queue</b><br/>ProcQueueStore 持久任务表(sqlite)<br/>ProcRunner 租约 / 心跳 / fencing / 关停"]
   end
@@ -71,6 +74,7 @@ flowchart TB
   cli --> orch
   cli --> post
   cli --> procq
+  cli --> procs
   cli --> engine
   orch --> core
   orch --> post
@@ -80,6 +84,7 @@ flowchart TB
   app --> observ
   app --> post
   app --> procq
+  app --> procs
   app --> engine
   manager --> core
   bilibili --> core
@@ -89,6 +94,8 @@ flowchart TB
   engine --> core
   engine --> extra
   observ --> core
+  procs --> core
+  procs --> post
   procq --> core
   post --> core
 

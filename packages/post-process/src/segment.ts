@@ -40,6 +40,8 @@ export interface RemuxSegmentOpts {
    * 本身就是崩溃接管扫描(`recoverNodeRemux`)的识别依据,套一层 `.part` 会让那个解析认不出来。
    */
   atomic?: boolean;
+  /** 取消信号(透传 runFfmpeg:abort 即杀 ffmpeg)。 */
+  signal?: AbortSignal;
 }
 
 export async function remuxSegment(input: string, outMp4: string, fmt?: StageFormat, opts: RemuxSegmentOpts = {}): Promise<void> {
@@ -49,7 +51,7 @@ export async function remuxSegment(input: string, outMp4: string, fmt?: StageFor
   // 否则下游的续跑判定(existsSync)会把它当成品复用并静默投稿(见 artifact.ts 注释)。
   // `fmt` 原样透传(节点侧原地替换会传非容器扩展名的临时名,必须显式 `-f` 指定封装器)。
   const args = buildRemuxArgs(input, outMp4, fmt);
-  if (opts.atomic === false) { await runFfmpeg(args); return; }
+  if (opts.atomic === false) { await runFfmpeg(args, { signal: opts.signal }); return; }
   await runFfmpegAtomic(args, outMp4);
 }
 

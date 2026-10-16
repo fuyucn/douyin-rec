@@ -25,10 +25,12 @@ const RANKS: Record<string, number> = {
   "@drec/core": 0,
   // 0.5 可观测性:logs + notification 实现(端口在 core;被 app/cli 依赖,manager/orchestrator 不依赖)
   "@drec/observability": 0.5,
-  // 0.2:依赖 core 的会话基名(issue #50);只被 app/orchestrator/cli 依赖
+  // 0.2:依赖 core 的会话基名(issue #50);被 processors/app/orchestrator/cli 依赖
   "@drec/post-process": 0.2,
   // 0.3:每节点持久任务表 + 租约执行循环(依赖 core + node:sqlite;被 app/cli 依赖,不依赖 observability)
   "@drec/proc-queue": 0.3,
+  // 0.4:后处理处理器实现(依赖 core + post-process;被 app/cli 依赖;proc-queue 不依赖它,只经 core 注册表找处理器)
+  "@drec/processors": 0.4,
   "@drec/tui": 0,
   "@drec/ffmpeg-recorder-extra": 0,
   // 1 共享层:通用录制器 + ffmpeg/mesio 引擎策略(record-engine)

@@ -101,6 +101,8 @@ export function runFfmpeg(
      * ffmpeg 的 stats 也静音了,长任务会在该上限处被误杀。新增调用方时请留意。
      */
     cpuOnlyStallMs?: number;
+    /** 取消信号:abort → SIGKILL ffmpeg + reject(处理器关停 / 取消时不留孤儿进程)。 */
+    signal?: AbortSignal;
   } = {},
 ): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -175,8 +177,17 @@ export function runFfmpeg(
       stderrTail = (stderrTail + c).slice(-600);
     });
 
+    const onAbort = (): void => {
+      try { proc.kill("SIGKILL"); } catch { /* gone */ }
+      done(() => reject(new Error("ffmpeg 已取消(abort)")));
+    };
+    if (opts.signal) {
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
     proc.on("error", (e) => done(() => reject(e)));
     proc.on("close", (code) => done(() => {
+      opts.signal?.removeEventListener("abort", onAbort);
       if (code === 0) resolve();
       else
         reject(
