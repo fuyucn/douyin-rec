@@ -299,7 +299,8 @@ export class ProcRunner {
     return {
       signal: ac.signal,
       assertLease: () => {
-        if (!this.leaseOk(job.kind)) throw new Error(`[proc] 租约已丢,拒绝执行不可逆动作 (${job.jobId})`);
+        // 被 fence 的 job 即便同一持有者之后重获租约也不得再做不可逆动作(N2:行已按孤儿处置)。
+        if (this.inflight.get(job.jobId)?.reason === "fenced" || !this.leaseOk(job.kind)) throw new Error(`[proc] 租约已丢,拒绝执行不可逆动作 (${job.jobId})`);
       },
       markProgress: () => {},
       log: (m) => this.log(`${job.jobId}: ${m}`),
@@ -319,7 +320,20 @@ export class ProcRunner {
       release();
       this.inflight.delete(job.jobId);
       this.finishYields();
+      // N1:被 fence 的 job 收尾时不写表;若本进程此后已重新持有该类型租约(recoverKind 不会再跑),自行按孤儿处置。
+      // 尚未重获租约则留给之后取得租约时的 recoverKind(此时已不在 inflight)。
+      if (f.reason === "fenced" && !this.stopping && this.held.has(job.kind)) {
+        void this.settleFenced(proc, job.jobId)
+          .catch((e: unknown) => this.log(`${job.jobId}: fence 后孤儿处置异常 ${String(e)}`))
+          .then(() => this.tick())
+          .catch((e: unknown) => this.log(`${job.jobId}: fence 后补跑 tick 异常 ${String(e)}`));
+      }
     });
+  }
+
+  private async settleFenced(p: Processor, jobId: string): Promise<void> {
+    const row = this.o.store.runningOfKind(p.kind).find((r) => r.jobId === jobId);
+    if (row) await this.settleOrphanRow(p, row, true);
   }
 
   private async execute(f: Inflight): Promise<void> {
@@ -361,34 +375,33 @@ export class ProcRunner {
   private async recoverKind(p: Processor): Promise<void> {
     const { store, owner } = this.o;
     for (const row of store.runningOfKind(p.kind)) {
-      // 本进程仍在跑的行不碰;但 **被 fence 的 in-flight**(F2:自己心跳失败 fence 后又重新拿到租约,行不会被任何人
-      // 接管)要等它真正收尾再当孤儿处理,否则永远停在 running。
-      const live = this.inflight.get(row.jobId);
-      if (live) {
-        if (live.reason !== "fenced") continue;
-        if (!(await withTimeout([live.settled], this.o.abortWaitMs ?? 5_000))) {
-          this.log(`${row.jobId}: fence 后处理器未在时限内退出,本次不接管该行`);
-          continue;
-        }
-      }
-      const allowSelf = row.claimedBy === owner;
-      let outcome: "rerun" | "done" | "uncertain" = "uncertain";
-      let why = "该处理器未实现 recover";
-      if (p.recover) {
-        try {
-          outcome = await p.recover(row, this.ctxFor(row, new AbortController()));
-          why = "recover() 判定无法确定";
-        } catch (e) {
-          why = `recover 异常: ${e instanceof Error ? e.message : String(e)}`;
-        }
-      }
-      if (!this.leaseOk(p.kind)) return; // recover 期间失租,不再写
-      store.settleOrphan(row.jobId, owner, outcome, { error: why, allowSelf });
-      if (outcome === "uncertain") {
-        this.o.alert(row.owner.taskId, `${row.kind} 任务上次执行被中断且无法判定结果(${why}),需人工确认: ${row.jobId}`);
-      }
-      this.log(`${row.jobId}: 接管 recover → ${outcome}`);
+      // 本进程仍在跑的行不碰(含被 fence 但尚未退出的:N1 —— 它收尾时由 launch 的 finally 自行按孤儿处置,
+      // 不在此等待,否则无视 abort 的处理器会让该行永远停在 running)。
+      if (this.inflight.has(row.jobId)) continue;
+      if (!(await this.settleOrphanRow(p, row, row.claimedBy === owner))) return;
     }
+  }
+
+  /** 对一行孤儿:`recover()` 判定 → settleOrphan 落点 + 告警。返回 false = recover 期间失租(调用方应停止)。 */
+  private async settleOrphanRow(p: Processor, row: ProcJobRecord, allowSelf: boolean): Promise<boolean> {
+    const { store, owner } = this.o;
+    let outcome: "rerun" | "done" | "uncertain" = "uncertain";
+    let why = "该处理器未实现 recover";
+    if (p.recover) {
+      try {
+        outcome = await p.recover(row, this.ctxFor(row, new AbortController()));
+        why = "recover() 判定无法确定";
+      } catch (e) {
+        why = `recover 异常: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+    if (!this.leaseOk(p.kind)) return false; // recover 期间失租,不再写
+    store.settleOrphan(row.jobId, owner, outcome, { error: why, allowSelf });
+    if (outcome === "uncertain") {
+      this.o.alert(row.owner.taskId, `${row.kind} 任务上次执行被中断且无法判定结果(${why}),需人工确认: ${row.jobId}`);
+    }
+    this.log(`${row.jobId}: 接管 recover → ${outcome}`);
+    return true;
   }
 
   // ───────────────────────── 保留 ─────────────────────────

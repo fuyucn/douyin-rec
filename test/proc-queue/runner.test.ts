@@ -545,6 +545,51 @@ describe("返工(PR #154 审查 F1/F2/F4/F5/F6)", () => {
     expect(alerts.some(([, m]) => m.includes("需人工确认"))).toBe(true);
   });
 
+  it("N1:fence 后处理器无视 abort、超过 abortWaitMs 才返回 → 行最终不得停在 running", async () => {
+    const slow = gate();
+    let runs = 0;
+    registerProcessor(fakeProcessor({
+      run: async () => { runs++; if (runs === 1) await slow.promise; return { outputs: [] }; },
+      recover: async () => "rerun" as const,
+    }));
+    const store = env.open();
+    const r = mkRunner("A", { store, abortWaitMs: 30 });
+    const id = store.enqueue(env.job("a.ts"), allowed()).jobId;
+    r.tick();
+    const real = store.heartbeat.bind(store);
+    store.heartbeat = () => { throw new Error("database is locked"); };
+    r.heartbeat(); r.heartbeat(); r.heartbeat(); // fence
+    store.heartbeat = real;
+    r.tick(); // 同一持有者重获租约;僵尸仍在跑
+    await new Promise((x) => setTimeout(x, 80)); // 超过 abortWaitMs
+    expect(store.get(id)?.state).toBe("running");
+    slow.resolve();
+    await vi.waitFor(() => { r.tick(); r.heartbeat(); expect(store.get(id)?.state).toBe("done"); });
+    expect(runs).toBe(2);
+    expect(r.active().running.fake).toBe(0);
+  });
+
+  it("N2:被 fence 的 job 在同一持有者重获租约后 assertLease 仍必须抛", async () => {
+    const slow = gate();
+    let zctx!: ProcessContext;
+    let runs = 0;
+    registerProcessor(fakeProcessor({
+      run: async (_j: ProcessJob, ctx: ProcessContext) => { runs++; if (runs === 1) { zctx = ctx; await slow.promise; } return { outputs: [] }; },
+      recover: async () => "rerun" as const,
+    }));
+    const store = env.open();
+    const r = mkRunner("A", { store });
+    store.enqueue(env.job("a.ts"), allowed());
+    r.tick();
+    const real = store.heartbeat.bind(store);
+    store.heartbeat = () => { throw new Error("database is locked"); };
+    r.heartbeat(); r.heartbeat(); r.heartbeat();
+    store.heartbeat = real;
+    r.tick(); // 重获租约
+    expect(() => zctx.assertLease()).toThrow(/租约已丢/);
+    slow.resolve();
+  });
+
   it("F4/V8:A 停顿 → B 接管 → A 在下次心跳前醒来调 assertLease,必须抛(DB 侧 fencing)", async () => {
     const stuck = gate();
     let aCtx!: ProcessContext;
