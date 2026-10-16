@@ -21,7 +21,7 @@
   - T3 N3（PR [#154](https://github.com/fuyucn/douyin-rec/pull/154) 第二轮）:活动快照读取把所有异常吞成空快照,权限/只读异常时运行计数静默归零 → **第二期把 `running.biliup > 0` 接入部署 guard 前**必须改为只把「库/表不存在」当空,其余带 `error` 返回或抛给 `_node-status`;落点 `packages/proc-queue` 的 runner。
   - T3 N4（同上）:认领路径对已认领过的待执行取消行直接落终态,未经状态机 `canTransition` → 在 core 状态机补显式 reason(`cancel-before-rerun`)并让该路径断言;落点 `packages/core` 状态机 + `packages/proc-queue` store。
   - T3 遗留:存疑确认 / 重排目前只有 store 方法,**尚无 HTTP/CLI 入口** → 落点 `_proc-*` 隐藏命令或队列页;第二期补。
-  - T6 审查遗留（PR [#159](https://github.com/fuyucn/douyin-rec/pull/159)）:`#160` 已修第 1/2/4 项;第 3 项（回落进程内串行链不受通道限额约束,节点转封装并发可到 2）与第 5 项（前台运行仍走旧进程内链、无接管）**明确推迟到第二期**（PR #170 正文已写明）。
+  - T6 审查遗留（PR [#159](https://github.com/fuyucn/douyin-rec/pull/159)）:第 1/2/4 项已由 issue [#160](https://github.com/fuyucn/douyin-rec/issues/160) 的 PR [#170](https://github.com/fuyucn/douyin-rec/pull/170) 修复并随 0.0.149 部署验收（**#160 本身仍 open,待其独立复核后再 close**）;第 3 项（回落进程内串行链不受通道限额约束,节点转封装并发可到 2）与第 5 项（前台运行仍走旧进程内链、无接管）**明确推迟到第二期**（PR #170 正文已写明）。
   - T9b ①（PR [#169](https://github.com/fuyucn/douyin-rec/pull/169) 第一轮）:低码率体积比误判（`MIN_SIZE_RATIO` 0.5 对纯音频/静态画面可能误报;原文件保留、有告警,行为安全）→ 落点 `packages/processors` 的校验函数,评估改绝对差或放宽比例。
   - T9b ②:hub 任务页不展示留存转格式标注（跳过/拒绝/回滚/缺边车/入队耗尽只在台账与 job 日志）→ 落点 `packages/web` 的 hub 任务页 + `GET /api/hub/queue` DTO 带出摘要。
   - T9b ③:转换失败后会话边车仍写着已转换容器标记（转换前就写;当前无害）→ 落点 `packages/processors` remux 失败路径回写,或改为转换成功后才写(须保持崩溃接管可判定)。
