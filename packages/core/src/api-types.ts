@@ -809,6 +809,8 @@ export interface TaskPayload {
    * 仍接受旧客户端写入(迁移来源:旧开关 true 且规则未配置 ≡ rolling),Web 表单不再提交。
    */
   rollingUpload?: boolean;
+  /** 输出格式(issue #137);服务端本就接受该字段,此前只是没写进 DTO 类型。 */
+  outputFormat?: OutputFormat;
 }
 
 /** GET /api/platforms 的单个平台配置投影(前端按 urlPattern 判平台 + 动态填表单选项)。 */

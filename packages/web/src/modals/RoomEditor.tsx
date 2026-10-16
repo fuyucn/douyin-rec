@@ -46,7 +46,7 @@ const METHODS: { id: UploadMethod; key: string; hint: string }[] = [
 const withCurrent = (list: readonly string[], cur: string): string[] => [...new Set([...list, cur].filter(Boolean))];
 const toggleIn = (list: string[], x: string): string[] => (list.includes(x) ? list.filter((y) => y !== x) : [...list, x]);
 
-function Seg<T extends string>({ items, value, onChange, small }: {
+export function Seg<T extends string>({ items, value, onChange, small }: {
   items: { id: T; label: string; lock?: Lock }[];
   value: T;
   onChange: (v: T) => void;
