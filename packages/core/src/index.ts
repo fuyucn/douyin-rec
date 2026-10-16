@@ -6,6 +6,7 @@ export * from "./platform.js";
 export * from "./notify.js";
 export * from "./api-types.js";
 export * from "./log.js";
+export * from "./atomic-name.js";
 export * from "./link-or-copy.js";
 export * from "./job-abort.js";
 export * from "./title-template.js";

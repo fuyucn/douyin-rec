@@ -2,7 +2,7 @@
 import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
-import { isOutputFormat, isVideoFileName, segmentIndexOf, sessionBaseOf, stageContainerOfPath, stampedSessionBaseOf, STAGE_CONTAINERS, type StageFormat } from "@drec/core";
+import { isAtomicTempName, isOutputFormat, isVideoFileName, segmentIndexOf, sessionBaseOf, stageContainerOfPath, stampedSessionBaseOf, STAGE_CONTAINERS, type StageFormat } from "@drec/core";
 import { runFfmpeg } from "./ffmpeg.js";
 import { runFfmpegAtomic } from "./artifact.js";
 
@@ -99,6 +99,8 @@ export function groupSessions(files: string[], opts: GroupSessionsOpts = {}): Re
     return i >= 0 && tail.length > 0 && [...tail].every((c) => c >= "0" && c <= "9");
   };
   for (const f of files) {
+    // 原子落盘临时名(`.x.part.ts` 等,崩溃残留)不是分段:原生容器也不例外。
+    if (isAtomicTempName(f)) continue;
     if (NATIVE.test(f)) {
       ensure(sessionBase(f)).ts.push(f);
     } else if (isVideoFileName(f)) {

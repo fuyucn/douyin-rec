@@ -8,7 +8,8 @@
 //   (实测残留文件 636,622,270B vs 源 636,643,728B,差 0.003%,`ffprobe` 报 moov 缺失)。
 //   改成「先写 `.part` 再 rename」后:**存在 ⟹ 完整**,中途被杀只留临时文件。
 import { existsSync, renameSync } from "node:fs";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { resolve } from "node:path";
+import { atomicTempName } from "@drec/core";
 import { runFfmpeg } from "./ffmpeg.js";
 
 /**
@@ -16,8 +17,7 @@ import { runFfmpeg } from "./ffmpeg.js";
  * 例:`/x/凌晴_000.mp4` → `/x/.凌晴_000.part.mp4`。
  */
 export function atomicPartPath(out: string): string {
-  const ext = extname(out);
-  return join(dirname(out), `.${basename(out, ext)}.part${ext}`);
+  return atomicTempName(out);
 }
 
 /**

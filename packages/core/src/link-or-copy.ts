@@ -9,7 +9,7 @@
  * 旧口径「调用方负责目标已存在先删」已作废;复制失败照常抛出。
  */
 import { copyFileSync, linkSync, renameSync, rmSync, statSync } from "node:fs";
-import { basename, dirname, extname, join } from "node:path";
+import { atomicTempName } from "./atomic-name.js";
 import { createLogger } from "./log.js";
 
 export interface LinkFs {
@@ -48,10 +48,7 @@ const rootKey = (o?: LinkOrCopyOptions): string => o?.root ?? process.env.DOUYIN
  * 同目录临时名(rename 不跨设备;`.` 前缀隐藏)。**保留原扩展名** —— 各 stage 清理按扩展名
  * 识别视频类残留(`stageVideoLeftovers` 等),不保留扩展名的临时名会成为清理不到的磁盘泄漏。
  */
-const scratchPath = (dst: string): string => {
-  const ext = extname(dst);
-  return join(dirname(dst), `.${basename(dst, ext)}.part${ext}`);
-};
+const scratchPath = atomicTempName;
 
 /** 两个名字是否指向同一 inode(取不到/不存在 → false;只用于幂等跳过,判不出不影响正确性)。 */
 function sameInode(a: string, b: string): boolean {
