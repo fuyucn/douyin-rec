@@ -1,6 +1,7 @@
 // lib/room-create.ts — payload shapes for the `/rooms` add dialog. Pure, so the create path
 // (which writes a hub rule as a side effect) can be tested without a DOM.
-import type { HubRulePayload, TaskPayload } from "../api/client";
+import type { HubRulePayload, RoomDTO, TaskPayload } from "../api/client";
+import { roomId } from "./labels";
 import type { OutputFormat } from "@drec/output-format";
 
 export interface NewRoomForm {
@@ -77,4 +78,22 @@ export function newRoomRulePayload(o: { taskId: number; mode: NewRoomMode; danmu
       cleanup: { stageSourceAfterMerge: false, sourceAfterDone: false, stageAfterDone: false },
     },
   };
+}
+
+/**
+ * Best-effort duplicate check before creating anything: the room is already listed with a
+ * recording task on the same platform. Adding it again would create a second task and record twice.
+ */
+export function findExistingRoom(rooms: readonly RoomDTO[], platformId: string, input: string): RoomDTO | undefined {
+  const id = roomId(input);
+  return rooms.find((r) => r.recording !== null && r.platform === platformId && (r.roomSlug === id || roomId(r.room) === id));
+}
+
+/**
+ * The room the new task landed in, matched by task id (not by URL text, which may be normalized).
+ * If another task already owns that room view, this returns undefined and the caller must not touch
+ * the rule — rebinding it would steal the processing half from the existing task.
+ */
+export function findCreatedRoom(rooms: readonly RoomDTO[], taskId: number): RoomDTO | undefined {
+  return rooms.find((r) => r.recording?.taskId === taskId);
 }

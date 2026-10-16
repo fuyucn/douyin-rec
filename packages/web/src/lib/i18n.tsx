@@ -218,6 +218,7 @@ const DICT = {
       addSchedule: "什么时候录", addUpload: "上传方式", addUploadHint: "新房间先按「收播后上传」建;要边录边传或节点直传,建好后再改。",
       addSubmit: "添加", added: "房间已添加", addNoRule: "任务已建,但没找到房间标识,处理规则请到房间里补",
       addRuleFailed: "任务已建,处理规则写入失败:{msg}",
+      addExists: "该房间已存在,请在房间页编辑",
       addBoundExisting: "任务已建:该房间已有处理规则,只做了绑定,未改动原有设置",
       editor: {
         title: "编辑房间", after: "录完之后", when: "什么时候录", whenPlaceholder: "留空 = 全天,如 20:00-02:00",
@@ -676,6 +677,7 @@ const DICT = {
       addSchedule: "When to record", addUpload: "Upload style", addUploadHint: "New rooms start with upload-after-broadcast; switch to rolling or node-side later.",
       addSubmit: "Add", added: "Room added", addNoRule: "Task created, but the room id was not found; set up processing from the room page",
       addRuleFailed: "Task created, but the processing rule failed: {msg}",
+      addExists: "This room already exists; edit it from the room page",
       addBoundExisting: "Task created: this room already had a processing rule, so only the binding was updated",
       editor: {
         title: "Edit room", after: "After recording", when: "When", whenPlaceholder: "Empty = all day, e.g. 20:00-02:00",

@@ -6,7 +6,7 @@ import { Dialog } from "../components/Dialog";
 import { errMessage, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform } from "../lib/labels";
-import { newRoomTaskPayload, planNewRoomRule } from "../lib/room-create";
+import { findCreatedRoom, findExistingRoom, newRoomTaskPayload, planNewRoomRule } from "../lib/room-create";
 import { OUTPUT_FORMATS, stageExt, type OutputFormat } from "@drec/output-format";
 import { Seg } from "./RoomEditor";
 
@@ -54,8 +54,8 @@ export function AddRoomDialog({ open, onClose, onSaved, hubEnabled, workers }: P
     if (!plat) return;
     setForm((f) => ({
       ...f,
-      quality: form.quality && plat.qualities.includes(f.quality) ? f.quality : form.quality || plat.defaultQuality,
-      engine: form.engine && plat.engines.includes(f.engine) ? f.engine : form.engine || plat.defaultEngine,
+      quality: plat.qualities.includes(f.quality) ? f.quality : plat.defaultQuality,
+      engine: plat.engines.includes(f.engine) ? f.engine : plat.defaultEngine,
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plat?.id, platforms.length]);
@@ -71,6 +71,10 @@ export function AddRoomDialog({ open, onClose, onSaved, hubEnabled, workers }: P
     if (!roomOk) return;
     setBusy(true);
     try {
+      if (plat) {
+        const dup = findExistingRoom(await api.listRooms().catch(() => []), plat.id, form.room.trim());
+        if (dup) { toast(t("room.addExists"), "error"); return; }
+      }
       const payload = newRoomTaskPayload(
         { ...form, quality: form.quality || plat?.defaultQuality || "origin" },
         mode,
@@ -78,10 +82,10 @@ export function AddRoomDialog({ open, onClose, onSaved, hubEnabled, workers }: P
       const task = await api.createTask(payload);
       if (hubEnabled && plat) {
         // The task API returns no slug, so resolve it from the room list (one extra read, only on create).
-        // Match on the room the task resolved to; if it isn't listed yet, tell the user instead of
-        // writing a rule under a guessed slug (a wrong key would silently never match the recording).
+        // Match by task id; if it isn't found, tell the user instead of writing a rule under a guessed
+        // key (a wrong key would silently never match the recording).
         const rooms = await api.listRooms().catch(() => []);
-        const created = rooms.find((r) => r.key.startsWith(`${plat.id}.`) && (r.roomSlug === task.room || r.room === task.room));
+        const created = findCreatedRoom(rooms, task.id);
         if (created) {
           const plan = planNewRoomRule({
             taskId: task.id, mode, danmu: form.danmu, uploadPrivate: form.uploadPrivate,
