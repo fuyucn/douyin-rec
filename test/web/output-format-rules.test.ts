@@ -84,3 +84,9 @@ describe("任务弹窗「输出格式」锁(完全由后端下发的 outputForma
     expect(outputFormatFromStored(undefined)).toBe("original");
   });
 });
+
+describe("任务弹窗「输出格式」锁:no-survivors(plans/036 T8,锁原因类型收口到 core 一处)", () => {
+  it("no-survivors → 锁定,文案指向「无留存源录像」", () => {
+    expect(taskOutputFormatLock({ outputFormatLock: "no-survivors" })).toEqual({ locked: true, reasonKey: "roomForm.lock.outputFormatNoSurvivors" });
+  });
+});

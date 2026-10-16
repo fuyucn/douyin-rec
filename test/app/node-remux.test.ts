@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   convertSegmentInPlace, DURATION_TOLERANCE_SEC, makeNodeRemuxHookFactory, markSessionNodeFormat,
-  NODE_REMUX_SUSPECT_SUFFIX, STALE_TMP_MIN_AGE_MS, NODE_REMUX_TMP_SUFFIX, recoverNodeRemux, REMUX_DISK_HEADROOM_BYTES, remuxTargetPath, resolveNodeOutputFormat, nodeOutputFormatLock,
+  NODE_REMUX_SUSPECT_SUFFIX, STALE_TMP_MIN_AGE_MS, NODE_REMUX_TMP_SUFFIX, recoverNodeRemux, REMUX_DISK_HEADROOM_BYTES, remuxTargetPath, resolveNodeOutputFormat, shouldConvertAtSeal, nodeOutputFormatLock,
   parseRemuxTmpName, remuxTmpPath, verifyRemuxed, packetAllowance, recoverNodeRemuxInBackground,
   type MediaProbe, type NodeRemuxDeps,
 } from "../../packages/app/src/node-remux.js";
@@ -399,6 +399,72 @@ describe("判定矩阵 resolveNodeOutputFormat(spawn 前唯一判定点)", () =>
     expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("mkv");
     upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 7 } });
     expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("original");
+  });
+});
+
+describe("T8:shouldConvertAtSeal / 锁同源 + 禁用规则不算绑定(plans/036 F3 / N2)", () => {
+  let hubDir: string;
+  beforeEach(() => { hubDir = join(dir, "hub"); mkdirSync(hubDir, { recursive: true }); });
+  const mk = (over: Record<string, unknown> = {}) => ({
+    id: 7, room: "https://live.douyin.com/111", managedBy: null as string | null,
+    outputFormat: "mkv" as const, rollingEffective: false, ...over,
+  });
+
+  it("绑定 enabled 规则(sourceTaskId / 房间键两种绑法)+ 选 mkv → original(录制中绝不转换)", () => {
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: true });
+    expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("original");
+    expect(shouldConvertAtSeal(mk(), hubDir)).toBe(false);
+  });
+  it("规则 disabled(sourceTaskId 绑定)+ 选 mkv → mkv(封口转换);不锁", () => {
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: false });
+    expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("mkv");
+    expect(shouldConvertAtSeal(mk(), hubDir)).toBe(true);
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
+  });
+  it("规则 disabled(房间键同名)+ 选 mkv → mkv;不锁", () => {
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: false });
+    expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("mkv");
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
+  });
+  it("规则 disabled 之后又被启用 → 立即回到锁住 / original(现读不缓存)", () => {
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: false });
+    expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("mkv");
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true });
+    expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("original");
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule");
+  });
+  it("disabled 规则不盖过 enabled 规则:同时存在时仍锁", () => {
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: false });
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: true });
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule");
+    expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("original");
+  });
+  it("每种规则状态 × 受管 / rolling:锁 ⇔ resolveNodeOutputFormat()==='original'(选 mkv),且 shouldConvertAtSeal ⇔ 不锁", () => {
+    const ruleStates: Array<[string, () => void]> = [
+      ["无规则", () => {}],
+      ["enabled · sourceTaskId", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: true }); }],
+      ["enabled · 房间键", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true }); }],
+      ["disabled · sourceTaskId", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: false }); }],
+      ["disabled · 房间键", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: false }); }],
+      ["别的任务的 enabled 规则", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "222", recording: { sourceTaskId: 8 }, enabled: true }); }],
+    ];
+    for (const [name, setup] of ruleStates) {
+      for (const hubDirN of [name]) { // 每个状态一个干净 hubDir
+        const d = join(dir, `hub-${hubDirN}`); mkdirSync(d, { recursive: true });
+        hubDir = d; setup();
+        for (const over of [{}, { managedBy: "hub" }, { rollingEffective: true }]) {
+          const t = mk(over);
+          const locked = nodeOutputFormatLock(t, hubDir) !== undefined;
+          expect(locked, `${name} ${JSON.stringify(over)}`).toBe(resolveNodeOutputFormat(t, hubDir) === "original");
+          expect(shouldConvertAtSeal(t, hubDir), `${name} ${JSON.stringify(over)}`).toBe(!locked);
+        }
+      }
+    }
+  });
+  it("选 original 时恒 original,与规则状态无关(但 disabled 规则下不报锁)", () => {
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: false });
+    expect(resolveNodeOutputFormat(mk({ outputFormat: "original" }), hubDir)).toBe("original");
+    expect(nodeOutputFormatLock(mk({ outputFormat: "original" }), hubDir)).toBeUndefined();
   });
 });
 

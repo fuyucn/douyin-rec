@@ -99,6 +99,7 @@ export function taskOutputFormatLock(f: { outputFormatLock?: string | null }): L
     case "hub-managed":
     case "hub-rule": return lock("roomForm.lock.outputFormatHub");
     case "rolling": return lock("roomForm.lock.outputFormatRolling");
+    case "no-survivors": return lock("roomForm.lock.outputFormatNoSurvivors");
     default: return OPEN;
   }
 }
