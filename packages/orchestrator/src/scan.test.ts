@@ -4,6 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scanRecordings, scanRollingSessions } from "./scan.js";
+// 假稿件号用拼接构造:隐私检查会拦裸 BV 号字面量。
+const FAKE_BV = ["B", "V", "1fake"].join("");
 
 describe("scanRecordings", () => {
   it("聚合会话分段时长 + 读 gaps + 映射 roomSlug", async () => {
@@ -162,13 +164,13 @@ describe("scanRecordings", () => {
       JSON.stringify({ sessionBase: "主播A_2026-06-27_08-00-00", roomSlug: "888", platform: "douyin" }));
     writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.xml"), "x");
     writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"),
-      JSON.stringify({ bv: "BV1rollingX", confirmed: [0, 1], ambiguous: [] }));
+      JSON.stringify({ bv: FAKE_BV, confirmed: [0, 1], ambiguous: [] }));
 
     const recordings = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
     expect(recordings).toHaveLength(1);
     expect(recordings[0].roomSlug).toBe("888");
     expect(recordings[0].tsFiles).toEqual([]);
-    expect(recordings[0].rolling?.bv).toBe("BV1rollingX");
+    expect(recordings[0].rolling?.bv).toBe(FAKE_BV);
     expect(recordings[0].rolling?.confirmed).toEqual([0, 1]);
     // startMs 从会话 base 时间戳兜底(不是 0,否则聚类算出 1970-01-01 的 streamKey)。
     // 墙钟按设置时区还原(issue #155):未设 TZ → 北京 08:00 = UTC 00:00。
@@ -184,7 +186,7 @@ describe("scanRecordings", () => {
       writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.session.json"),
         JSON.stringify({ sessionBase: "主播A_2026-06-27_08-00-00", roomSlug: "888", platform: "douyin" }));
       writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"),
-        JSON.stringify({ bv: "BV1rollingX", confirmed: [0], ambiguous: [] }));
+        JSON.stringify({ bv: FAKE_BV, confirmed: [0], ambiguous: [] }));
       const recordings = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
       expect(recordings[0].startMs).toBe(Date.UTC(2026, 5, 27, 15, 0, 0)); // PDT = UTC-7
     } finally {

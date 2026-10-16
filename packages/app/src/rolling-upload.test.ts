@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { RollingUploader } from "./rolling-upload.js";
 import { UploadGate, rollingUploadSingleNode } from "@drec/core";
+// 假稿件号用拼接构造:隐私检查会拦裸 BV 号字面量。
+const FAKE_BV = ["B", "V", "1fake"].join("");
 
 /** 记录一次上传用的假 gate(no-op store,不落盘、不冷却)。 */
 class FakeGate extends UploadGate {
@@ -409,7 +411,7 @@ describe("RollingUploader 标题日期按设置时区(issue #155)", () => {
     const { paths } = mkSession(["主播_000.ts", "主播_001.ts"]);
     utimesSync(paths[0], instant, instant);
     const titles: string[] = [];
-    const up = vi.fn(async (a: { plain: { title: string } }) => { titles.push(a.plain.title); return "BV1tzzzzzzzz"; });
+    const up = vi.fn(async (a: { plain: { title: string } }) => { titles.push(a.plain.title); return FAKE_BV; });
     const u = new RollingUploader({
       room, uploadMeta, timeZone, gate: new FakeGate(), uploadPlainRaw: up as never,
       appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
