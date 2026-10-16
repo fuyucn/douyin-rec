@@ -596,7 +596,7 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
         // 上传类节点失败不可自动重试(可能已建稿/已 append 部分分 P)→ 直接转人工,避免重复稿。
         const unsafeRetry = failedNodes.some((n) => UNSAFE_RETRY_NODES.has(n.node));
         if (unsafeRetry) {
-          this.ledger.setState(b.streamKey, "needs_manual", { error: job?.error ?? "上传类节点失败,禁止自动重试" });
+          this.ledger.setState(b.streamKey, "needs_manual", { error: job?.error || "上传类节点失败,禁止自动重试" });
           this.notify?.({
             kind: "error",
             stage: "同步",
@@ -605,7 +605,7 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
           continue;
         }
         if (job?.state === "failed" && (job.fails ?? 0) >= this.maxRetries) {
-          this.ledger.setState(b.streamKey, "needs_manual", { error: job.error ?? "达重试上限" });
+          this.ledger.setState(b.streamKey, "needs_manual", { error: job.error || "达重试上限" });
           this.notify?.({
             kind: "error",
             stage: "同步",

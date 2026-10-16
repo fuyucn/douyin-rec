@@ -4,15 +4,20 @@ import type { ChildProcess } from "node:child_process";
 /** 用户点停止:ledger / UI 固定文案。不可改,reconciler 靠它区分 failed 自动重试。 */
 export const USER_STOP = "用户停止";
 
+// STAGE_READY 定义在 hub-ledger-contract(纯模块,前端可引),此处再导出保持既有 import 路径可用。
+import { STAGE_READY } from "./hub-ledger-contract.js";
+export { STAGE_READY };
+
+
 /**
- * stage 交付模式正常收口(合成完待人工上传)的固定 `sync_jobs.error` 文案。
+ * stage 交付模式正常收口时该写的 `sync_jobs.error`;upload 模式返回空串(该模式不该走这条路径)。
  *
- * 为什么不再用「空 error」表达:空 error 曾被队列视图拿来反推「这是 stage 模式正常收口」,
- * 于是**任何漏写 error 的故障路径**(例如全部节点断流)也会被渲染成「待上传」而非红灯 ——
- * 真正的火被当成正常项。改为**显式常量**,`needs_manual` 一律必须带原因(AGENTS.md「不静默」)。
- * 不可改文案:队列视图按它判 phase,reconciler 的分诊也靠它区分「正常收口」与「要人救」。
+ * 收口到 `needs_manual` 的路径散落在 orchestrator 管线与 CLI 节点重跑,曾经其中一条漏写 error,
+ * 于是正常收口被队列判成红灯事故(issue #188)。统一从这里取值,漏写的面就只剩「忘记调用」。
  */
-export const STAGE_READY = "已存档待人工上传(stage 模式正常收口)";
+export function stageCompletionError(uploadMode: string | undefined): string {
+  return uploadMode === "upload" ? "" : STAGE_READY;
+}
 
 const KILL_ESCALATE_MS = 2_000;
 

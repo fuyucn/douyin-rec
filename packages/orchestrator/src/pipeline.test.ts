@@ -1085,6 +1085,29 @@ describe("runPipeline", () => {
     });
   });
 
+  it("合并模式 stage 收口必须写 STAGE_READY(线上噪音主来源,空 error 会被判红灯)", async () => {
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const deps = makeDeps({ cfg: { ...makeDeps().cfg, uploadMode: "stage" } });
+    deps.ledger.upsertPending(broadcast.streamKey);
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("needs_manual");
+    expect(deps.ledger.get(broadcast.streamKey)?.error).toBe(STAGE_READY);
+    deps.ledger.close();
+  });
+
+  it("所有节点断流未录全 → 转人工且必须带 error(否则会被渲染成「待上传」而非红灯)", async () => {
+    // 单节点但缺口超过阈值 → clean=false → 走「全部断流」中断支。
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 4000 }) }]);
+    const deps = makeDeps();
+    deps.ledger.upsertPending(broadcast.streamKey);
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("needs_manual");
+    const err = deps.ledger.get(broadcast.streamKey)?.error ?? "";
+    expect(err).not.toBe("");
+    expect(err).not.toBe(STAGE_READY);
+    deps.ledger.close();
+  });
+
   it("场景8(硬约束): 旧规则带 includeXmlAss 也绝不删 .xml(源 xml 与 plain xml 都保留)", async () => {
     const rmStage = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
     const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);

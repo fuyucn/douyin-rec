@@ -547,8 +547,11 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   const activeRows = listHubJobs(syncDbPath, {
     excludeStates: [...TERMINAL], limit: 200, offset: 0, now: opts.now, stageDir,
   });
+  // 取 needs_manual 时**放宽上限**再在内存里分两堆(stage 正常收口 / 真事故):若先按 manualLimit
+  // 取再分,一堆 stage 收口就能把 20 个名额占满,真事故反而不显示(issue #188 审查发现)。
+  // 多取 manualLimit 条只是多读一点 rows,分堆后真事故仍按 manualLimit 截断。
   const manualRows = listHubJobs(syncDbPath, {
-    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir,
+    states: ["needs_manual"], limit: manualLimit * 2 + 20, offset: 0, now: opts.now, stageDir,
   });
   const recentRows = listHubJobs(syncDbPath, {
     states: ["done", "failed"], limit: recentLimit, offset: 0, now: opts.now, stageDir,
@@ -652,6 +655,8 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   for (const job of manualRows.jobs) {
     ((job.error ?? "").trim() === STAGE_READY ? stageReadyJobs : manualJobs).push(job);
   }
+  // 真事故按 updatedAt 新→旧截到 manualLimit(activeRows 已是 updatedAt 倒序,手动截即可)。
+  manualJobs.length = Math.min(manualJobs.length, manualLimit);
   for (const job of [...activeRows.jobs, ...manualJobs]) active.push(toRow(job));
   // 已完成/失败的场也进 rows —— 前端渲染**一张表**(像日志),完成的行 phase=done/failed。
   // 独立拉一批终态(数量 = recentLimit),与 active 合并成单一时间轴。

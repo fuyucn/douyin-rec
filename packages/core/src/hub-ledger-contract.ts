@@ -14,6 +14,20 @@ export const HUB_JOB_STATES = [
 ] as const;
 export type HubJobState = (typeof HUB_JOB_STATES)[number];
 
+/**
+ * stage 交付模式正常收口(合成/分段产物落盘待人工上传)的固定 `sync_jobs.error` 文案。
+ *
+ * 为什么放在这个纯契约模块(而不是 job-abort):前端 `@drec/hub-ledger-contract` 直接映射到这里,
+ * run 卡片要用同一口径判断「这条 error 不是事故」(中性色而非红字)。job-abort 侧边 import
+ * node:child_process / node:async_hooks,浏览器端不能引。
+ *
+ * 为什么不再用「空 error」表达:空 error 曾被队列视图拿来反推「这是 stage 模式正常收口」,
+ * 于是**任何漏写 error 的故障路径**也会被渲染成「待上传」而非红灯 —— 真正的火被当成正常项。
+ * 改为显式常量后,`needs_manual` 一律必须带原因(AGENTS.md「不静默」)。
+ * 不可改文案:队列视图按它判 phase。
+ */
+export const STAGE_READY = "已存档待人工上传(stage 模式正常收口)";
+
 /** 终态集合(reconciler 不再推进;UI 也不再显示「进行中」)。 */
 export const HUB_TERMINAL_STATES = ["done", "failed", "needs_manual"] as const satisfies readonly HubJobState[];
 export type HubTerminalState = (typeof HUB_TERMINAL_STATES)[number];

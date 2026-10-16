@@ -502,7 +502,10 @@ export interface RollingDeliveryDTO {
 export interface HubQueueDTO {
   /** 边录边传的实时进度(F1;旧 master / 无节点上报时缺省)。 */
   delivering?: RollingDeliveryDTO[];
-  /** 进行中(非终态 ∪ needs_manual)—— 与 `rows` 中 phase 非 done/failed 的部分一致。 */
+  /**
+   * 进行中(非终态 ∪ **真事故的** needs_manual)。
+   * 与 `rows` 的差别:`rows` 还含 stage 模式正常收口(`phase=waiting_upload`,非故障)与终态行。
+   */
   active: QueueItemDTO[];
   /** 统一列表:进行中 + 已完成,按 sort(newest 缺省=最新在前)排好,前端渲染一张表。 */
   rows: QueueItemDTO[];

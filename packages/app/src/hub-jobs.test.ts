@@ -448,6 +448,26 @@ describe("buildQueueView", () => {
     expect(active.map((a) => a.streamKey)).not.toContain("douyin:UPLOAD:2026-10-06");
   });
 
+  it("manualLimit 只约束真事故:一堆 stage 正常收口不占人工收件箱名额", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage7-"));
+    const now = T0 + 10_000_000;
+    // 30 条 stage 正常收口(updatedAt 更新,会占满任何先取后分的窗口)
+    for (let i = 0; i < 30; i++) {
+      seedJob(db, `douyin:s${i}:2026-10-01`, [["needs_manual", now - 40_000 + i]], 100, { error: STAGE_READY });
+    }
+    // 3 条真事故,updatedAt 更旧
+    for (let i = 0; i < 3; i++) {
+      seedJob(db, `douyin:x${i}:2026-10-01`, [["needs_manual", now - 100_000 + i]], 100, { error: `上传失败 ${i}` });
+    }
+    db.close();
+    const { active } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY, manualLimit: 20 });
+    const manual = active.filter((a) => a.phase === "waiting_manual");
+    expect(manual).toHaveLength(3);
+    expect(manual.map((a) => a.streamKey)).toContain("douyin:x0:2026-10-01");
+    expect(manual.map((a) => a.streamKey)).toContain("douyin:x2:2026-10-01");
+  });
+
   it("waiting 多条登记取最早一条(最急)作代表", () => {
     const { dbPath, db } = makeSyncDb();
     const stage = mkdtempSync(join(tmpdir(), "queue-stage6-"));

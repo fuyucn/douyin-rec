@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "n
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { formatBiliTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, STAGE_READY, USER_STOP, VIDEO_EXT_ALT, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { formatBiliTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, stageCompletionError, USER_STOP, VIDEO_EXT_ALT, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
@@ -1090,7 +1090,7 @@ async function runPipelineInner(
   const bv = ledger.get(streamKey)?.bv;
   if (cfg.uploadMode !== "upload") {
     jlog(`stage 模式:合成完毕待人工上传`);
-    ledger.setState(streamKey, "needs_manual", { error: STAGE_READY });
+    ledger.setState(streamKey, "needs_manual", { error: stageCompletionError(cfg.uploadMode) });
     // stage 模式**不做分P核验**(没有稿件/bv);清理失败只记 clean_* failed,不影响终态。
     await cleanupSources();
     // 正常终点(不是错误):走 stageReady,别再以「出错（同步）」打扰用户。
