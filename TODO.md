@@ -16,7 +16,7 @@
 ## 进行中
 - [~] **T-60 会话 sidecar 写权威起止时间戳:远端隐藏命令按 UTC 运行导致跨天错日（issue [#87](https://github.com/fuyucn/douyin-rec/issues/87)）**
   — 2026-10-16 认领,分支 `codex/issue-session-tz-sidecar`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
-  **做什么**：录制端（manager）在 `{base}.session.json` 写入权威 `startMs`（本场起录绝对 epoch,按 base 固话,跨场不串）+ `timeZone`（生效时区）；清单扫描（scan）在会话**无分段文件**（边录边传全删）时优先用 sidecar 的绝对起录,而非按文件名 + 进程本地时区反解（UTC 会话会错日）。有分段的会话保持 ffprobe 结果（零回归），老录像（sidecar 无该字段）回退文件名解析。
+  **做什么**：录制端（manager）在会话边车写入权威 `startMs`（本场起录绝对 epoch,按 base 固话,跨场不串）+ `timeZone`（生效时区）；清单扫描（scan）在会话**无分段文件**（边录边传全删）时优先用 sidecar 的绝对起录,而非按文件名 + 进程本地时区反解（UTC 会话会错日）。有分段的会话保持 ffprobe 结果（零回归），老录像（sidecar 无该字段）回退文件名解析。
   **为什么**：远端隐藏命令默认按 UTC 运行,`startMsFromSessionBase` 用进程时区反解文件名 → 跨天场次归错日期、影响聚类与「当天第几场」序号（#87「决定三行」选「从数据消除依赖」）。
   **验收**：sidecar 写入 startMs/timeZone,且同进程两场各取本场起录（session 用例）；scan 无 ts 优先 sidecar / 老数据回退文件名 / 有 ts 仍用 ffprobe / 非法值回退（用例钉住）；全量测试 / typecheck / arch:check / bundle 通过。
 
