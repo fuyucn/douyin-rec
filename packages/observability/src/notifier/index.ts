@@ -57,9 +57,15 @@ export function formatMessage(e: NotifyEvent): string {
     case "recordReconnect": return `⚠️ 直播中断 ${e.downSec}s 后已重连，恢复录制：${e.anchor || e.room}（房间 ${e.room}）`;
     case "mergeDone":   return `🎬 合并完成：${e.file}`;
     case "burnDone":    return `🔥 烧录完成（${e.style}）：${e.file}`;
-    case "uploadDone":  return `⬆️ 上传完成：${e.bv} ${e.url}`;
-    case "hubTaskStart": return `📋 Hub 任务开始：${e.room}（${e.workers.length} 个节点：${e.workers.join(", ")}）· ${e.mode === "upload" ? "上传" : "仅合成"}`;
-    case "stageReady":   return `📦 合成完成待人工上传：${e.streamKey}`;
+    case "uploadDone":  return `⬆️ 上传完成：${e.anchor ? `${e.anchor} · ${e.date ?? ""} ` : ""}${e.bv} ${e.url}`;
+    case "hubTaskStart": {
+      // 有主播名 → 「主播名 · 日期（房间号,N 个节点：节点名）」;老事件(无补全字段)退回只有房间号的旧文案。
+      const nodes = `${e.workers.length} 个节点：${(e.workerNames ?? e.workers).join(", ")}`;
+      const mode = e.mode === "upload" ? "上传" : "仅合成";
+      const roomInfo = e.anchor ? `房间 ${e.room}，` : "";
+      return `📋 Hub 任务开始：${e.anchor || e.room}${e.date ? ` · ${e.date}` : ""}（${roomInfo}${nodes}）· ${mode}`;
+    }
+    case "stageReady":   return `📦 合成完成待人工上传：${e.anchor ? `${e.anchor} · ${e.date ?? ""}` : e.streamKey}`;
     case "error":       return `⚠️ 出错（${e.stage}）：${e.message}`;
   }
 }
