@@ -14,15 +14,28 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-58 后处理插件化第一期复审遗留（PR #152/#154/#159/#169 的非阻塞项，2026-10-16 从 T-55 抽出）**
+  — 第二期开工前须处理;逐条落点如下。
+  T1 复审遗留（PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）：符号链接逃逸 → plan T9a（节点侧 realpath）；`finish(cancelled)` 先经 `cancelOutcome` → plan T15；
+  **T3 评估结论**：未改契约（T1 已合并，T3 只做 proc-queue）；接管 `recover()=done` 时 store 以行上声明的 `outputs`（无则空）落 done，
+  **T6 决定**：不改契约 —— 入队时 remux 行显式带 `outputs=[目标路径]`（`RemuxQueue.enqueue`），`recover()=done` 时 store 以行上 `outputs` 落 `resultOutputs`，stale 判定口径随之成立。
+  T3 复审遗留（PR #154 第二轮,不阻塞）：**N3** `readProcActive`（`packages/proc-queue/src/runner.ts`）把所有异常吞成空快照,权限/只读异常时 running 静默归零
+  T3 遗留落点：`ackUncertain`/`requeue` 目前只有 store 方法，**尚无 HTTP/CLI 入口**（plan 只要求 purge）→ T9a 的 `_proc-*` 命令或 T6 UI 前补。
+  T9b 复审遗留（PR [#169](https://github.com/fuyucn/douyin-rec/pull/169) 第 1 轮,不阻塞）：
+  ① **低码率体积比误判**：remux 校验的 `MIN_SIZE_RATIO`（0.5）对低码率流（纯音频 / 静态画面）可能把正常转换判失败（原文件保留、有告警，行为安全但会误报）→ 落点 `packages/processors` 的 `verifyRemuxed`，评估按容器开销改用绝对差或放宽比例；
+  ② **hub 任务页不展示留存转格式标注**：followups 的 notes（跳过 / 拒绝 / 回滚 / 缺边车 / 入队耗尽）只在台账与 job.log → 落点 `packages/web` 的 hub 任务页 + `GET /api/hub/queue` 的 DTO 带出 followups 摘要；
+  ③ **转换失败后会话边车仍写着已转换的 `nodeFormat`**（处理器在转换前就写）：目前无害（`groupSessions` 对原生录制容器无条件收录），但语义不精确 → 落点 `packages/processors` remux：失败路径回写边车或改为转换成功后才写（须保持崩溃接管可判定）。
+  T9b 复审遗留（PR [#169](https://github.com/fuyucn/douyin-rec/pull/169) 第 2 轮,不阻塞）：④ **stage 交付模式 + `stageAfterDone=true` 留存判定与实际不符**：stage 模式的清理从不执行 `stageAfterDone`（只有上传路径才清 stage），但 `survivingArtifacts` 按它认定 stage 副本已不在 → 副本仍在却不被转换，`no-survivors` 锁原因也可能不准；自相矛盾配置、影响小 → 落点 `packages/core` 的 `survivingArtifacts` 按交付模式取口径（stage 模式忽略 `stageAfterDone`），并与清理共用同一判定。
 
-- [~] **T-57 时区口径遗留三处（issue [#158](https://github.com/fuyucn/douyin-rec/issues/158)，#155 审查遗留）**
-  — 2026-10-15 认领，分支 `codex/issue-158-tz-followups`（**未合并 / 未部署 / 未 close**）。
+
+- [x] **T-57 时区口径遗留三处（issue [#158](https://github.com/fuyucn/douyin-rec/issues/158)，#155 审查遗留）**
+  — 2026-10-16 完成。PR [#162](https://github.com/fuyucn/douyin-rec/pull/162) 已合并并随 0.0.149 部署；三种宿主时区全量结果一致。issue #158 已 close。
   **做什么**：① 带 `<dataRoot>` 的隐藏命令按该数据根的库读时区；② 库不存在时保留继承的有效 TZ；③ 节点侧管线 spec 缺 `timeZone` 回落进程生效时区。
   **为什么**：非默认时区节点上「段被删空」兜底日期与文件名对不上；自定义库路径下子进程被覆盖成默认时区；节点侧与边录边传口径不一致。
   **验收**：三处各有回归用例；全量 test / typecheck / arch:check 通过。
 
-- [~] **T-56 标题/产物名/场次键/默认日期统一按设置时区（issue [#155](https://github.com/fuyucn/douyin-rec/issues/155)）**
-  — 2026-10-15 认领，分支 `codex/issue-155-title-tz`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+- [x] **T-56 标题/产物名/场次键/默认日期统一按设置时区（issue [#155](https://github.com/fuyucn/douyin-rec/issues/155)）**
+  — 2026-10-16 完成。PR [#157](https://github.com/fuyucn/douyin-rec/pull/157) 已合并并随 0.0.149 部署；实测录制节点系统时区为 UTC、分段文件名与场次键均为北京时间。issue #155 已 close。
   **做什么**：审计全部生成日期的入口并统一为 `settings.timezone`（缺省北京）：分段文件名、streamKey、会话名还原、
   独立 CLI 入口、前端默认日期。**为什么**：宿主机/浏览器为美西时晚间（北京次日）场次日期错一天。
   **验收**：美西宿主机/浏览器下日期均为北京日期；每个入口有回归用例；全量 test / typecheck / web build 通过。
@@ -44,8 +57,8 @@
   **验收**：三条路径（remux / merge / burn）原子落盘有回归用例；半成品必重做；坏产物拒投；全量测试 / typecheck / bundle 通过；
   dev 三节点 e2e（S1/S2/S3 + 真 ffmpeg 端到端）留证；独立审查 PASS。
 
-- [~] **T-52 收口混合容器目录缺段修复（issue [#143](https://github.com/fuyucn/douyin-rec/issues/143)，最小修复）**
-  — 2026-10-15 认领，分支 `codex/issue-143-merge-keep-converted`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+- [x] **T-52 收口混合容器目录缺段修复（issue [#143](https://github.com/fuyucn/douyin-rec/issues/143)，最小修复）**
+  — 2026-10-16 完成。PR [#144](https://github.com/fuyucn/douyin-rec/pull/144) 已合并进开发分支并随 0.0.149 部署；隔离 dev 集群用真实直播间录像复现混合容器目录：拉取 4 个文件、两段都进合并、成品时长 189.865s = 177.832 + 12.023（修复前成品约为各段合计六成）。issue #143 已 close。
   **做什么**：①pull 带会话边车（`NodeRecording.sessionJsonPath`，缺失则不带，旧 bundle 兼容）；
   ②CLI `merge`/`burn` 与 scan/web 合并共用 `groupSessionsInDir`，读边车认节点侧已转换的 mkv/mp4 分段；
   ③合并前兜底：拉进 stage 的视频分段有未被会话认领的 → 本场 `needs_manual` + 告警，不合并、不上传、不删源。
@@ -53,18 +66,10 @@
   **验收**：混合容器全部会话进合并；边车缺失转人工且不删源；旧 bundle 无 sessionJsonPath 行为不变；CLI merge 认 mkv；
   全量 vitest + typecheck + bundle 通过。不改输出格式作用位置/终态转换/锁定口径（属 `plans/036`）。
 
-- [!] **T-51 输出格式选项:按产出形态原地替换容器（issue [#137](https://github.com/fuyucn/douyin-rec/issues/137)）**
-  — 2026-10-15 认领，swe-loop 执行，两个 stacked PR（存档侧 #138 → 节点侧原地替换 #139）均已合并并部署（`0.0.136`），
-  base `feat/hub-optimization`（**已验证部分通过 / 未 close**）。
-  **做什么**：任务级字段 outputFormat（默认 original 不变，白名单 mp4 / mkv）；只换容器、原地替换、不并存两份；无后处理任务在节点封口后原地 remux，存档形态改后处理产物容器，投稿形态固定 mp4 并锁定。
-  **验收**：默认行为不变有回归用例；校验失败不删原文件；下游认多扩展名；保存往返不丢；全量测试 / typecheck / web build / i18n 检查通过，每个 PR 有变异验证。
-  **验证（2026-10-15，dev 多节点镜像档实跑真实直播间）**：节点侧替换按设计生效（封口后换成所选容器、原文件删除、目录只剩一份、无残留临时文件、探测轨齐全、
-  会话 sidecar 写入格式标记、弹幕文件未动）；控制组符合预期（新建 hub 规则后重启即不再替换，界面下拉锁定并给原因）；存档侧容器实测产出所选容器。
-  **未通过**：hub 收口合并静默丢掉已转换的会话 —— 拉取清单不含会话标识边车，合并入口没有格式声明就不认转换后的分段，
-  成品只含原生容器会话（实测时长约为各段合计六成），流程不报错也不转人工。已单开 [#143](https://github.com/fuyucn/douyin-rec/issues/143)。
-  **阻塞原因 + 解除条件**：缺口属同一交付内的实现遗漏（格式声明只在两个调用点接上，收口路径漏了），而本交付两轮返工已用完，
-  不能再开第三轮 → 已转 `needs-decision`。**解除条件**：用户拍板「新开一条修复」或「并入别的交付」；拍板后按 #143 验收标准返工。
-
+- [x] **T-51 输出格式选项:按产出形态原地替换容器（issue [#137](https://github.com/fuyucn/douyin-rec/issues/137)）**
+  — 2026-10-16 完成。两个 stacked PR（存档侧 [#138] → 节点侧原地替换 [#139]）已合并;后续 [#143] 修复了收口丢失已转换会话的缺口(混合容器成品时长 = 各段合计)。
+  输出格式语义在第一期收敛为「只作用于清理后存活、用户最终拿到的文件」:无后处理任务封口转换走每节点任务表;有规则任务处理中途不转、收尾后转存活源分段;上传固定 mp4;本地无留存时锁定格式选项;合成所选跟随输出格式。
+  **验收(部署 0.0.149 后 dev 集群真实场次)**:节点侧替换生效、控制组锁定符合预期、存档侧容器正确、混合容器合并无丢段、收尾转格式后修改时间不变且无重复上传。issue #137 已 close。
 - [~] **T-46 dev 多节点 e2e 环境（issue [#82](https://github.com/fuyucn/douyin-rec/issues/82)，P0+P1+P4）**
   — 2026-10-14 认领，分支 `codex/issue-82-dev-multinode`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：容器内 sshd 的 dev worker 镜像层 + compose 覆盖（`drec-devnet` internal）+ `scripts/e2e-verify.sh`
@@ -457,7 +462,7 @@
 
 ## 已完成
 - [x] **T-55 后处理插件化第一期:Processor 契约 + 每节点持久任务表 + 留存文件转所选输出格式（计划 [plans/036_processor-plugins.md](plans/036_processor-plugins.md)）**
-  — 2026-10-16。切片:T1 [#151] → T3 [#153] → T6 [#156] → T8 [#161] → T9a [#164] → T9b [#168] → T11 [#165],全部经独立审查合并;另含 #143 收口丢段最小修复、#155/#158 时区口径、#160 封口队列遗留。部署 0.0.149 后于隔离 dev 镜像集群用真实直播间录像逐项验收(混合容器合并时长=各段合计、封口转换走任务表、收尾转格式且修改时间不变/无重复上传、远端入队越权全拒、合成所选跟随输出格式、标题按北京时间),8 张票已 close。第二期(merge/burn/上传迁表 + 队列页)待第一期稳定 ≥2 周后细化。
+  — 2026-10-16。切片 T1 [#151] → T3 [#153] → T6 [#156] → T8 [#161] → T9a [#164] → T9b [#168] → T11 [#165] 全部经独立审查合并;另含 #143 收口丢段最小修复、#155/#158 时区口径、#160 封口队列遗留、#137 输出格式交付。部署 0.0.149 后在隔离 dev 镜像集群用真实直播间录像逐项验收(混合容器合并时长=各段合计、封口转换走任务表、收尾转格式且修改时间不变/无重复上传、远端入队越权全拒、合成所选跟随输出格式、标题按北京时间),上述票已 close。第二期(merge/burn/上传迁表 + 队列页)待第一期稳定 ≥2 周后细化。
 
 - [x] **T-48 界面把 stage 统一称「存档」,不投稿时锁定清理存档开关（issue [#135](https://github.com/fuyucn/douyin-rec/issues/135)，2026-10-15）**
   — 2026-10-15 认领，swe-loop 执行，分支 `codex/issue-135-archive-wording`（PR #136），base `feat/hub-optimization`，已合并并部署（`0.0.136`）。
