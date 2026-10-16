@@ -1069,12 +1069,25 @@ describe("任务视图 outputFormatLock(后端判定下发,前端据此锁定;is
     const t = a.createTask({ room: "111" }).body as { id: number };
     expect(lockOf(a, t.id)).toBeUndefined();
   });
-  it("非 hub 模式但残留规则绑定 → hub-rule(后端不会替换,下拉必须锁;此前前端按 hubRule 判会漏)", () => {
+  it("非 hub 模式但残留规则绑定 → 不锁(T9b:规则任务改由收尾后转换);规则清掉所有源 → no-survivors", () => {
     const deps = hubDeps("lock-stale-");
     const a = makeApi({ store, manager, ...deps }); // hubEnabled 未开
     const t = a.createTask({ room: "111" }).body as { id: number };
     upsertHubRule(deps.hubDir as string, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: t.id } });
+    expect(lockOf(a, t.id)).toBeUndefined();
+    upsertHubRule(deps.hubDir as string, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: t.id }, pipeline: { cleanup: { sourceAfterDone: true, stageAfterDone: true } } });
+    expect(lockOf(a, t.id)).toBe("no-survivors");
+  });
+  it("规则仅按房间键命中(无 sourceTaskId / 指向别的任务)→ hub-rule;规则源任务就是它 → 不锁", () => {
+    const deps = hubDeps("lock-roomkey-");
+    const a = makeApi({ store, manager, ...deps });
+    const t = a.createTask({ room: "111" }).body as { id: number };
+    upsertHubRule(deps.hubDir as string, { platform: "douyin", roomSlug: "111" });
     expect(lockOf(a, t.id)).toBe("hub-rule");
+    upsertHubRule(deps.hubDir as string, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: t.id + 100 } });
+    expect(lockOf(a, t.id)).toBe("hub-rule");
+    upsertHubRule(deps.hubDir as string, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: t.id } });
+    expect(lockOf(a, t.id)).toBeUndefined();
   });
   it("受管任务 → hub-managed;边录边传生效 → rolling", () => {
     const a = makeApi({ store, manager, ...hubDeps("lock-managed-") });

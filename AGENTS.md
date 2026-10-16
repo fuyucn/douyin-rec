@@ -236,7 +236,7 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
 - 状态恢复、崩溃自动重启、每任务日志环形缓冲（web 实时 tail）。
 - **输出格式·节点侧原地替换**（issue #137，`app/node-remux.ts` 薄封装 + `@drec/processors` 的 remux 模块，plans/036 T6）：任务字段 `outputFormat`（original/mp4/mkv）。仅**无后处理**
   的任务生效 —— `TaskManager.spawnFor` 经唯一判定点 `resolveNodeOutputFormat` 决定是否给子进程传 `--output-format`
-  （hub 受管 / 有 **enabled** 规则绑定 / 边录边传 → original 不传；`enabled=false` 的规则视同未绑定、走封口转换；规则之后才绑定则下一次 spawn 起生效；判定唯一输入 `shouldConvertAtSeal`，锁 ⇔ 封口不转）。子进程经 manager 的
+  （hub 受管 / 有 **enabled** 规则绑定 / 边录边传 → original 不传；`enabled=false` 的规则视同未绑定、走封口转换；规则之后才绑定则下一次 spawn 起生效；判定唯一输入 `shouldConvertAtSeal`；**有 enabled 规则绑定的任务封口时仍不转（处理中途从不转换），但自 T9b 起改由收尾后转换，不再锁**，见下）。子进程经 manager 的
   封口钩子（与边录边传同一接缝、互斥）在每个分段**封口后**先写会话边车 `nodeFormat`、再**入队为 `remux` 处理任务**（每节点任务表 `<root>/db/proc-queue.db`，
   jobId=`jobIdOf("remux", task…@fileTag, g)`）；执行体 `remuxProcessor`（cpu / lane=copy / retryable / interruptible）串行 `-c copy` 到 `*.drec-remux` 临时文件 → 校验
   → fsync + 原子 rename → **最后**才删原文件；任一步失败保留原文件并走告警通道。校验是**唯一函数**
@@ -255,7 +255,19 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
   （目录级，保留一个版本只兜底「不在任务表里」的旧 tmp / 配对）接管崩溃遗留：孤儿临时文件只删 mtime 早于 `STALE_TMP_MIN_AGE_MS` 的（扫的是共享输出根，新鲜的可能是别的任务在写）；
   配对新文件通过同一校验才删原文件，**存疑（不通过 / 无法判定）→ 两份都留**（新文件改名加 `.drec-suspect` 隔离，避免重复计入），
   永不删到最后一份；接管的每个动作都发告警（「上次中断、该段保持原容器」）。任务视图（TaskDTO）下发 `outputFormatLock`
-  （`nodeOutputFormatLock`，与 `resolveNodeOutputFormat` 同源），前端据此锁定下拉，不自判 hub 状态；旧后端缺字段按不锁降级。
+  （`nodeOutputFormatLock`，原因 `hub-managed` / `hub-rule` / `rolling` / `no-survivors`：`hub-rule` = enabled 规则仅按房间键命中、本任务不是规则源任务（`sourceTaskId` 缺省或指向别的任务，收尾只认源任务的格式 → 所选格式永不生效）；`no-survivors` 只对规则源任务算，且节点侧上传时按「stage 不留副本」口径（与派发同判定）。不变量是单向的「锁 ⇒ 封口不转」，**不再是**「锁 ⇔ 封口不转」），
+  前端据此锁定下拉，不自判 hub 状态（参数类型 = core `OutputFormatLock`，switch 带 `never` 穷举，后端加原因漏分支会编译报错）；旧后端缺字段按不锁降级。
+- **输出格式·收尾后留存转格式**（issue #168，plans/036 T9b，orchestrator `finalize-format`）：有 enabled 规则绑定的任务，**job `done` 且清理完成之后**
+  （`runPipeline` 唯一出口，合并 / 分段 / 各续跑共用；fire-and-forget，**不阻塞 done、不碰上传路径**，上传仍固定 mp4），`planSurvivorRemux()` 按 core `survivingArtifacts`
+  （与清理同一判定）+ 磁盘实际存在算留存清单，对**容器 ≠ 所选格式的源录像分段**（节点 `recordings` 里的派到该节点；stage 拉回的源段副本派到本机，
+  `stageDir` 可在数据根外）经 `_enqueue` / 本机通道入队 `remux`。**不转三分 P 成品（D6）、xml/ass、边车**；会话边车只作 `params.sidecar`、
+  **绝不进 `inputs`**（remux 处理器转换前写 `nodeFormat`）。缺会话边车（stage 副本 / 旧节点）→ 跳过并标注；**stage 交付模式**的正常终点（stage 就绪、清理之后；管线返回 `stageReady` 标记）同样派发，失败 / 不确定 / 用户停止的 `needs_manual` 不派发。
+  每场只派发一次（`sync_jobs.followups` JSON 列，`claimFollowups` 为唯一闸门；旧库迁移补列，老行 NULL = 未派发）。对账每轮轮询 `_proc-status`：
+  `pending` 且无存活执行者持续 ≥ 60s → 告警一次（每节点一条，不回落、不重派）；入队回执 `stale` → 以 `nextGeneration` 重发**恰一次**；`rejected` 只标注；**入队本身失败**（非「不支持」，如 ssh 抖动）→ 每节点告警一次，条目留在 open 集合（`enqueue-failed`），对账轮询指数退避重入队至多 3 次，耗尽 → 终结并再告警一次；
+  `_proc-status` 未知命令（节点已回滚）→ 标注「节点已回滚，留存转格式未执行」、停止轮询、**不进 needs_manual**；回执缺席 → 终结并标注。
+  所有失败路径只标注 / 告警，**绝不改 job 终态、绝不删文件**。`no-survivors`：规则使节点与 stage 都不留源视频时才锁格式下拉。
+  **残余说明**：禁用规则期间（`enabled=false`）封口转换成 mp4/mkv 的录像，规则重新启用后 `groupSessions` 不收未声明容器的会话 → 对 hub 不可见（也不会被删）；
+  这是 plans/036 F3 的明确决定（与「规则之后才绑定」同口径）。
 
 ### hub 多节点编排（orchestrator + app 的 hub-store/task-sync）
 - **角色与节点分配**：Docker `task serve --hub` 同时是控制台/master 和一个可选的 `local` 录制 worker；

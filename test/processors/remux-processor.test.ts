@@ -1,7 +1,7 @@
 // plans/036 T6:remuxProcessor(契约实现)——run / recover / validate / 契约边界 / 静态守护。
 // 全部用临时目录 + 假 remux / 假 ffprobe 注入(不依赖本机 ffmpeg)。
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -82,6 +82,30 @@ describe("run — 校验通过才删原文件", () => {
     const r = await makeRemuxProcessor(baseDeps()).run(job(src), ctx());
     expect(r.outputs).toEqual([remuxTargetPath(src, "mkv")]);
     expect(ls().filter((n) => /\.(ts|mkv|drec-remux)$/.test(n))).toEqual([`${B}_000.mkv`]);
+  });
+
+  it("转换后最终文件继承原文件 atime/mtime(清单用 mtime 当分段结束时间,不继承会让对账把已完成的同一场聚成新簇)", async () => {
+    const src = put(`${B}_000.ts`);
+    const past = new Date(Date.now() - 3 * 3600_000);
+    utimesSync(src, past, past);
+    const before = statSync(src);
+    const r = await makeRemuxProcessor(baseDeps()).run(job(src), ctx());
+    const after = statSync(r.outputs![0]);
+    expect(Math.abs(after.mtimeMs - before.mtimeMs)).toBeLessThanOrEqual(1);
+    expect(Math.abs(after.atimeMs - before.atimeMs)).toBeLessThanOrEqual(1);
+  });
+
+  it("recover 重跑路径(只有 tmp → rerun → run)同样继承原 mtime", async () => {
+    const src = put(`${B}_000.ts`);
+    const past = new Date(Date.now() - 2 * 3600_000);
+    utimesSync(src, past, past);
+    const final = remuxTargetPath(src, "mkv");
+    writeFileSync(remuxTmpPath(final, "room1", 4242), "dur=1"); // 上一持有者(已死)留下的 tmp
+    const p = makeRemuxProcessor(baseDeps());
+    const j = { ...job(src), claimedBy: "serve:4242:1" } as ProcessJob;
+    expect(await p.recover!(j, ctx())).toBe("rerun");
+    await p.run(j, ctx());
+    expect(Math.abs(statSync(final).mtimeMs - past.getTime())).toBeLessThanOrEqual(1);
   });
 
   it("校验未通过(时长不符)→ 抛错、原文件保留、无 tmp、新文件不落最终名;失败文案只经抛错出口(不在 ctx.alert 里双发)", async () => {

@@ -43,6 +43,8 @@ export {
   PART_GROUP_CANONICAL,
 } from "./verify.js";
 export type { VerifyGroup, VerifyResult, VerifyOpts, PartsReader, SubmittedPlan } from "./verify.js";
+export { planSurvivorRemux, dispatchSurvivorRemux, pollFollowups, parseFollowups, STAGE_TARGET } from "./finalize-format.js";
+export type { FinalizeFormatDeps, StageProcChannel, Followups, FollowupItem } from "./finalize-format.js";
 export { LocalTransport } from "./transport-local.js";
 export { SshTransport } from "./transport-ssh.js";
 export { startHub } from "./hub.js";

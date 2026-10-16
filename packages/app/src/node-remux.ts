@@ -35,13 +35,16 @@ import {
   sealedSegmentIndices,
   sessionBaseOf,
   STAGE_CONTAINERS,
+  survivingArtifacts,
+  isUploadingMode,
+  pipelineBurns,
   type OutputFormat,
   type OutputFormatLock,
   type RollingSegment,
   type StageFormat,
 } from "@drec/core";
 import type { RollingUploadHook } from "@drec/manager";
-import { listHubRules, hubKey } from "./hub-store.js";
+import { listHubRules, hubKey, type HubRule } from "./hub-store.js";
 import type { RemuxQueueLike } from "./remux-queue.js";
 import type { Task } from "./store.js";
 
@@ -293,33 +296,50 @@ export function shouldConvertAtSeal(
 }
 
 /**
- * 「不适用」原因(= 该任务的输出格式被锁、后端不会替换);适用则 undefined。{@link shouldConvertAtSeal} ≡ 此处 `undefined`
- * (「锁 ⇔ 封口不转」),任务视图把它原样下发,前端据此锁定下拉并显示原因。类型见 core `OutputFormatLock`。
- *   hub-managed = worker 上的受管任务;hub-rule = 有 enabled 规则绑定(源任务 id 或房间键同名,不论是否 hub 模式);
- *   rolling = 开了边录边传(上传后删源,互斥)。
+ * 输出格式「锁定」原因(后端不会按所选格式处理 / 所选格式无意义);未锁 → undefined。类型见 core `OutputFormatLock`。
+ *   hub-managed = worker 上的受管任务;rolling = 开了边录边传(上传后删源,互斥);
+ *   hub-rule = 有 enabled 规则按房间键命中、但**不是**以本任务为源(`sourceTaskId` 缺省或指向别的任务):收尾转格式的格式
+ *     只取自规则的源任务,本任务的所选格式永不生效 → 锁(T9b 回归修复);
+ *   no-survivors = 本任务就是规则的源任务,且规则的清理开关使收尾后节点与 stage 都不留任何源视频(格式无处可用)。
+ *
+ * **与「封口是否转换」的关系(plans/036 T9b 起)**:`sourceTaskId === 本任务` 的 enabled 规则任务**封口时仍不转换**
+ * (处理中途从不转),但**不锁**:改由收尾后转换(done + 清理之后对留存源分段派发 remux,见 orchestrator finalize-format)。
+ * 故不变量是「锁 ⇒ 封口不转」(单向);「锁」同时覆盖「收尾也不会按本任务格式转」的全部情形。
  */
 export type NodeOutputFormatLock = OutputFormatLock;
 export function nodeOutputFormatLock(
   task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective">,
   hubDir: string,
 ): NodeOutputFormatLock | undefined {
-  return sealConversionBlocker(task, hubDir);
+  const b = sealConversionBlocker(task, hubDir);
+  if (b === undefined) return undefined;
+  if (b === "hub-managed" || b === "rolling") return b;
+  // 仅按房间键命中(非源任务):收尾派发取不到本任务的格式 → 锁(与派发侧 cli 只认 sourceTaskId 同口径)。
+  if (b.rule.recording?.sourceTaskId !== task.id) return "hub-rule";
+  // 本任务是源任务:留存清单(与 orchestrator 清理 / 收尾转格式派发同一判定 core survivingArtifacts)里无源视频 → no-survivors。
+  // 节点侧上传(与 pipeline `shouldUseNodeSideUpload` 同条件)不往 stage 放源段副本 → stagePulled=false / stageHasXmlCopy=false。
+  const p = b.rule.pipeline;
+  const nodeSide = !!p?.steps?.nodeSideUpload && isUploadingMode(p?.upload?.mode) && !pipelineBurns(p?.steps);
+  const s = survivingArtifacts({ pipeline: { cleanup: p?.cleanup } }, { stageHasXmlCopy: !nodeSide, stagePulled: !nodeSide });
+  return s.nodeSourceSegments || s.stageSourceSegments ? undefined : "no-survivors";
 }
 
-/** 封口不转换的原因(无 = 转)。`shouldConvertAtSeal` 与 `nodeOutputFormatLock` 的共同底层,判定只此一份。 */
+/**
+ * 封口不转换的原因(无 = 转)。`shouldConvertAtSeal` 的底层,判定只此一份;`bound-rule` 携带绑定的 enabled 规则
+ * (供 {@link nodeOutputFormatLock} 算 hub-rule / no-survivors)。
+ */
 function sealConversionBlocker(
   task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective">,
   hubDir: string,
-): NodeOutputFormatLock | undefined {
+): "hub-managed" | "rolling" | { rule: HubRule } | undefined {
   if (task.managedBy === "hub") return "hub-managed";
   if (task.rollingEffective) return "rolling";
   const platform = platformForRoom(task.room);
   const key = hubKey(platform.id, platform.extractRoomSlug(task.room));
-  for (const r of listHubRules(hubDir)) {
-    if (!r.enabled) continue;
-    if (r.recording?.sourceTaskId === task.id || r.key === key) return "hub-rule";
-  }
-  return undefined;
+  // 源任务规则优先于仅房间键命中的规则:任务既是某规则的源、又与另一规则同房间键时,收尾只认前者的格式。
+  const enabled = listHubRules(hubDir).filter((r) => r.enabled);
+  const rule = enabled.find((r) => r.recording?.sourceTaskId === task.id) ?? enabled.find((r) => r.key === key);
+  return rule ? { rule } : undefined;
 }
 
 /**

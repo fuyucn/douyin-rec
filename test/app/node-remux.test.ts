@@ -383,14 +383,20 @@ describe("判定矩阵 resolveNodeOutputFormat(spawn 前唯一判定点)", () =>
   it("边录边传生效(rolling 上传后删源)→ original,二者互斥", () => {
     expect(resolveNodeOutputFormat(mk({ rollingEffective: true }), hubDir)).toBe("original");
   });
-  it("nodeOutputFormatLock 与 resolve 同源:原因 = hub-managed / hub-rule / rolling / 无;与所选格式无关(选 original 也报锁)", () => {
+  it("nodeOutputFormatLock:原因 = hub-managed / rolling / no-survivors / 无;与所选格式无关(选 original 也报锁);enabled 规则任务不再锁(T9b)", () => {
     expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
     expect(nodeOutputFormatLock(mk({ managedBy: "hub" }), hubDir)).toBe("hub-managed");
     expect(nodeOutputFormatLock(mk({ rollingEffective: true }), hubDir)).toBe("rolling");
     expect(nodeOutputFormatLock(mk({ outputFormat: "original", rollingEffective: true }), hubDir)).toBe("rolling");
     upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111" });
+    // 仅按房间键命中、无 sourceTaskId:收尾派发取不到本任务格式 → 锁 hub-rule(MAJOR-1)
     expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule");
-    // 同源:凡有锁,resolve 必为 original
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 8 } });
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule"); // 指向别的任务,同样锁
+    // T9b:本任务就是规则源任务(默认清理开关 = 全留存)→ 不锁;但封口仍不转(resolve 仍 original)
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 7 } });
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
+    // 锁 ⇒ resolve 必为 original(单向)
     for (const over of [{ managedBy: "hub" }, { rollingEffective: true }, {}]) {
       expect(resolveNodeOutputFormat(mk(over), hubDir)).toBe("original");
     }
@@ -426,24 +432,69 @@ describe("T8:shouldConvertAtSeal / 锁同源 + 禁用规则不算绑定(plans/03
     expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("mkv");
     expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
   });
-  it("规则 disabled 之后又被启用 → 立即回到锁住 / original(现读不缓存)", () => {
+  it("规则 disabled 之后又被启用 → 立即回到 original(现读不缓存);不锁", () => {
     upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: false });
     expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("mkv");
     upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true });
     expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("original");
-    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule");
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule"); // 仅房间键命中 → 锁(收尾不会按本任务格式转)
   });
-  it("disabled 规则不盖过 enabled 规则:同时存在时仍锁", () => {
+  it("hub-rule:源任务规则优先于仅房间键命中的规则(两条同时存在 → 不锁)", () => {
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true }); // 房间键命中、无源
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: true });
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
+  });
+  it("disabled 规则不盖过 enabled 规则:同时存在时封口仍不转", () => {
     upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: false });
     upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: true });
-    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("hub-rule");
     expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("original");
+    expect(shouldConvertAtSeal(mk(), hubDir)).toBe(false);
   });
-  it("每种规则状态 × 受管 / rolling:锁 ⇔ resolveNodeOutputFormat()==='original'(选 mkv),且 shouldConvertAtSeal ⇔ 不锁", () => {
+  it("T9b 前后:绑定 enabled 规则的任务 resolveNodeOutputFormat 均为 original(处理中途从不转换),选 mkv / mp4 皆然", () => {
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: true });
+    for (const fmt of ["mkv", "mp4", "original"] as const) {
+      expect(resolveNodeOutputFormat(mk({ outputFormat: fmt }), hubDir), fmt).toBe("original");
+    }
+    upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: true, pipeline: { cleanup: { sourceAfterDone: true, stageAfterDone: true } } });
+    expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("original"); // no-survivors 锁住时同样
+  });
+  it("no-survivors:规则使节点与 stage 都不留源视频才锁;任一侧留存则不锁", () => {
+    const cases: Array<[Record<string, boolean>, string | undefined]> = [
+      [{}, undefined],
+      [{ sourceAfterDone: true }, undefined],                                   // stage 仍留
+      [{ stageAfterDone: true }, undefined],                                    // 节点仍留
+      [{ sourceAfterDone: true, stageAfterDone: true }, "no-survivors"],
+      [{ sourceAfterDone: true, stageSourceAfterMerge: true }, "no-survivors"],
+      [{ stageSourceAfterMerge: true }, undefined],
+    ];
+    for (const [cleanup, want] of cases) {
+      upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true, recording: { sourceTaskId: 7 }, pipeline: { cleanup } });
+      expect(nodeOutputFormatLock(mk(), hubDir), JSON.stringify(cleanup)).toBe(want);
+      expect(resolveNodeOutputFormat(mk(), hubDir)).toBe("original");
+    }
+  });
+  it("no-survivors 与派发同口径:节点侧上传(不往 stage 放副本)+ sourceAfterDone → 锁;烧录 / stage 模式 / 未开节点侧则不按节点侧算", () => {
+    let n = 0; // upsert 深合并 steps:每次用干净的 hubDir
+    const rule = (steps: Record<string, boolean>, mode: string) => {
+      hubDir = join(dir, `hub-ns-${n++}`); mkdirSync(hubDir, { recursive: true });
+      upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true, recording: { sourceTaskId: 7 },
+        pipeline: { cleanup: { sourceAfterDone: true }, steps, upload: { mode } } as never });
+    };
+    rule({ nodeSideUpload: true, burnDanmu: false, burnLivechat: false }, "upload");
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBe("no-survivors");
+    rule({ nodeSideUpload: true }, "upload"); // 默认烧录开 → 不走节点侧,stage 仍有副本
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
+    rule({ nodeSideUpload: true, burnDanmu: false, burnLivechat: false }, "stage"); // stage 模式不走节点侧
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
+    rule({ burnDanmu: false, burnLivechat: false }, "upload"); // 未开节点侧
+    expect(nodeOutputFormatLock(mk(), hubDir)).toBeUndefined();
+  });
+  it("每种规则状态 × 受管 / rolling:锁 ⇒ resolveNodeOutputFormat()==='original'(选 mkv);shouldConvertAtSeal ⇔ resolve 不是 original;受管 / rolling 必锁", () => {
     const ruleStates: Array<[string, () => void]> = [
       ["无规则", () => {}],
       ["enabled · sourceTaskId", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: true }); }],
       ["enabled · 房间键", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: true }); }],
+      ["enabled · 房间键 + 指向别的任务", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 8 }, enabled: true }); }],
       ["disabled · sourceTaskId", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "999", recording: { sourceTaskId: 7 }, enabled: false }); }],
       ["disabled · 房间键", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "111", enabled: false }); }],
       ["别的任务的 enabled 规则", () => { upsertHubRule(hubDir, { platform: "douyin", roomSlug: "222", recording: { sourceTaskId: 8 }, enabled: true }); }],
@@ -455,8 +506,10 @@ describe("T8:shouldConvertAtSeal / 锁同源 + 禁用规则不算绑定(plans/03
         for (const over of [{}, { managedBy: "hub" }, { rollingEffective: true }]) {
           const t = mk(over);
           const locked = nodeOutputFormatLock(t, hubDir) !== undefined;
-          expect(locked, `${name} ${JSON.stringify(over)}`).toBe(resolveNodeOutputFormat(t, hubDir) === "original");
-          expect(shouldConvertAtSeal(t, hubDir), `${name} ${JSON.stringify(over)}`).toBe(!locked);
+          const resolved = resolveNodeOutputFormat(t, hubDir);
+          if (locked) expect(resolved, `${name} ${JSON.stringify(over)}`).toBe("original"); // 锁 ⇒ 不转(单向)
+          expect(shouldConvertAtSeal(t, hubDir), `${name} ${JSON.stringify(over)}`).toBe(resolved !== "original");
+          if (over.managedBy || over.rollingEffective) expect(locked, `${name} ${JSON.stringify(over)}`).toBe(true);
         }
       }
     }

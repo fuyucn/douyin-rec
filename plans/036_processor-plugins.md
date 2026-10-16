@@ -229,7 +229,7 @@ biliup 另加「intent 为空」条件；其余（已认领、状态未知、命
     hub-managed / rolling / **有 enabled 规则绑定** → false。**规则存在但 `enabled=false` → 视同未绑定，回落封口转换**（F3）：
     禁用规则时 hub 不处理该房间（`cli.ts` 1048 `if (!rule || !rule.enabled) return null`），无人收尾，只能在封口时转。
   - `nodeOutputFormatLock`（只管 UI 锁与原因；现 529-539 遍历 `listHubRules` 不看 `enabled`）：**T8 起跳过 `enabled=false` 的规则**
-    （与 `shouldConvertAtSeal` 同源，保持「锁 ⇔ 封口不转」不变量，N2；规则禁用的任务不锁、走封口转换）；第一期 T9b 起去掉
+    （与 `shouldConvertAtSeal` 同源，保持「锁 ⇒ 封口不转」不变量（T9b 起为单向：规则任务不锁但封口仍不转），N2；规则禁用的任务不锁、走封口转换）；第一期 T9b 起去掉
     `hub-rule`（enabled 规则的任务改由收尾后转换），新增 `no-survivors`。
 - 有 enabled 规则的任务**处理中途绝不转换**；交付 done **且清理完成后**，按 `survivingArtifacts(rule, { stageHasXmlCopy })`
   算留存清单，对容器 ≠ 任务输出格式的**源录像分段**派发 remux（节点源派到该节点，stage 源副本派到本机）。
@@ -357,7 +357,7 @@ biliup 另加「intent 为空」条件；其余（已认领、状态未知、命
     且等于节点 store 的下一代；remux done 后同 logicalKey 再入队 → `rejected`；fileTag 用 bigint `ino`（N8，构造 > 2^53 的 ino 断言
     字符串精确）；旧 bundle 节点（未知命令）→ `ProcUnsupported`；local / ssh Transport 往返一致。
 
-- [ ] **T9b 收尾后对留存源分段派发 remux，解锁规则任务**（~250 行，feat，bump）
+- [x] **T9b 收尾后对留存源分段派发 remux，解锁规则任务**（实现 issue #168，2026-10-15）（~250 行，feat，bump）
   - 做什么：orchestrator 新模块 `finalize-format` 的 `planSurvivorRemux()`，pipeline / segment-pipeline 在 done + 清理之后调用
     （fire-and-forget，jobId 记入 `sync_jobs` 新列 `followups` JSON，供对账轮询与展示）；对账轮询回执，`pending && !leaseAlive ≥ 60s`
     告警一次（F4）；stale → 以回执 `nextGeneration` 重发一次（N1）；`rejected` 只标注不重试；`_proc-status` 未知命令（节点已回滚）→

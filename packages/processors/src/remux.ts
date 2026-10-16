@@ -12,7 +12,7 @@
  *     任一步失败:删临时文件、保留原文件。永不删到最后一份。
  *   - 不可逆动作(rename / 删原文件)前调 `assertLease`(失租即放弃,原文件不动)。
  */
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, statSync, statfsSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import { FFPROBE_HEADER_TIMEOUT_MS, FFPROBE_SCAN_TIMEOUT_MS } from "@drec/post-process";
 import {
@@ -312,7 +312,8 @@ export async function convertSegmentInPlace(src: string, fmt: StageFormat, deps:
   };
 
   let size: number;
-  try { size = statSync(src).size; } catch { return { ok: false, reason: "missing" }; } // 已被别处处理/删除:无事可做
+  let srcTimes: { atime: Date; mtime: Date };
+  try { const st = statSync(src); size = st.size; srcTimes = { atime: st.atime, mtime: st.mtime }; } catch { return { ok: false, reason: "missing" }; } // 已被别处处理/删除:无事可做
   const final = remuxTargetPath(src, fmt);
   const tmp = remuxTmpPath(final, deps.owner, deps.pid ?? process.pid);
   // 目标已存在 = 上次崩溃留下的配对(交给启动接管)或外部同名文件;**绝不覆盖**。
@@ -337,6 +338,9 @@ export async function convertSegmentInPlace(src: string, fmt: StageFormat, deps:
 
   try {
     deps.assertLease?.(); // 不可逆动作前:失租即放弃(tmp 清理、原文件不动)
+    // 继承原文件 atime/mtime:清单适配器用 mtime 当分段结束时间,转换时刻会让对账把已完成的同一场聚成新簇(重复管线 + 重复上传)。
+    // 封口转换 / 收尾转换 / 回落链 / recover 重跑都经本函数,故这是唯一一处。写失败按失败处理(保留原文件),不留「mtime 错位」的静默状态。
+    utimesSync(tmp, srcTimes.atime, srcTimes.mtime);
     fsync(tmp); // 先落盘再 rename:否则断电后新文件可能是空洞、而原文件已删 → 丢数据
     rename(tmp, final);
   } catch (e) { return fail("remux-failed", `落盘/改名失败: ${(e as Error).message}`, tmp); }

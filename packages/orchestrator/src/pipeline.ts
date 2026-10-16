@@ -15,6 +15,7 @@ import { runSegmentPipeline } from "./segment-pipeline.js";
 // 节点侧上传(experimental,plans/027):全部逻辑隔离在 node-side-upload.ts,便于快速开关/回退。
 import { shouldUseNodeSideUpload, tryNodeSideUpload } from "./node-side-upload.js";
 import { PART_GROUP_CANONICAL, verifyMessage, verifyParts, verifyUploaded } from "./verify.js";
+import { launchFinalizeFormat, type FinalizeFormatDeps } from "./finalize-format.js";
 
 /** 每任务可配的流水线步骤(默认全开;false 则跳过该产出)。 */
 export interface PipelineSteps {
@@ -201,6 +202,11 @@ export interface PipelineDeps {
   makeRunLogger?: (streamKey: string) => ScopedLogger;
   /** append 就地重试的退避 sleep(可注入测试,免真等 5s)。省略 → retry 内置 setTimeout。 */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * 收尾后留存源分段转输出格式(plans/036 T9b)。**存在 = 启用**(缺省不注入 = 行为与此前一致,测试/兼容);
+   * done + 清理完成后 fire-and-forget 派发,绝不阻塞 done、不碰上传路径。
+   */
+  finalizeFormat?: FinalizeFormatDeps;
   /** 旁路校验(issue #92)延迟多久再回读分 P 数(ms)。缺省 10 分钟;**只记录/告警,绝不影响清理**。 */
   sideCheckDelayMs?: number;
   /** 旁路校验的定时器注入(测试用:捕获/立即执行)。缺省 setTimeout(unref,不阻止进程退出)。 */
@@ -625,7 +631,7 @@ function makeJobLog(stageSub: string): (msg: string) => void {
 export async function runPipeline(
   b: Broadcast,
   deps: PipelineDeps,
-): Promise<{ state: JobState; bv?: string }> {
+): Promise<{ state: JobState; bv?: string; stageReady?: true }> {
   // 优先用注入的 run Logger(实现由 CLI 装配:observability 的 FileLogger);无则回退内置文件直写(兼容测试)。
   const injected = deps.makeRunLogger?.(b.streamKey);
   const jlog = injected
@@ -641,6 +647,12 @@ export async function runPipeline(
         return runPipelineInner(b, deps, jlog);
       });
       jlog(`=== pipeline end: ${r.state}${r.bv ? ` bv=${r.bv}` : ""} ===`);
+      // 收尾后留存转格式(T9b):单一插入点 —— 所有 done 出口(合并 / 分段 / 各续跑 / 节点侧上传)都经此,且已在清理之后。
+      // fire-and-forget:不 await(launch 永不 reject),done 判定与上传路径不受影响。
+      // stage 交付模式的正常终点(stageReady,清理之后)同样派发;其余 needs_manual(失败 / 不确定 / 用户停止)一律不派发。
+      if (r.state === "done" || r.stageReady === true) {
+        void launchFinalizeFormat({ b, deps, stageSub: path.join(deps.cfg.stageDir, sanitizeStreamKey(b.streamKey)), log: jlog });
+      }
       return r;
     } catch (e) {
       if (isJobAbort(e)) {
@@ -658,7 +670,7 @@ async function runPipelineInner(
   b: Broadcast,
   deps: PipelineDeps,
   jlog: (msg: string) => void,
-): Promise<{ state: JobState; bv?: string }> {
+): Promise<{ state: JobState; bv?: string; stageReady?: true }> {
   const { transports, ledger, uploadPlain, appendGroup, notify, cfg } = deps;
   // 子命令统一经此执行:命令行 + 耗时 + 输出摘尾(最后 2KB,biliup 输出可能很长)都进 job.log。
   const sh = async (cmd: string): Promise<void> => {
@@ -959,7 +971,7 @@ async function runPipelineInner(
     await cleanupSources();
     // 正常终点(不是错误):走 stageReady,别再以「出错（同步）」打扰用户。
     notify({ kind: "stageReady", streamKey });
-    return { state: "needs_manual" };
+    return { state: "needs_manual", stageReady: true };
   }
 
   // upload 模式但 bv 为空 = P1 没真正传上去(例如 upload_plain 被旧 skipped 状态卡住)。

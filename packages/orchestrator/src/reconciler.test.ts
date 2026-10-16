@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Reconciler, type ReconcilerDeps } from "./reconciler.js";
 import { SyncLedger } from "./ledger.js";
-import type { Transport, NodeRecording, NodeInventory } from "./transport.js";
+import { ProcUnsupported, type Transport, type NodeRecording, type NodeInventory } from "./transport.js";
 import type { PipelineDeps } from "./pipeline.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
@@ -106,6 +106,31 @@ describe("Reconciler", () => {
     expect(job?.state).toBe("done");
     expect(job?.bv).toBe("BV_TEST");
 
+    ledger.close();
+  });
+
+  it("T9b:每轮 reconcileAll 轮询收尾后转格式的回执;节点回滚 → 标注并停止轮询,job 终态不变", async () => {
+    const ledger = freshLedger();
+    ledger.upsertPending("douyin:test-room:2026-06-22");
+    ledger.markDone("douyin:test-room:2026-06-22", "BV1");
+    const procStatus = vi.fn(async () => { throw new ProcUnsupported(); });
+    const t1 = { ...makeTransport("node-1", []), procStatus } as Transport;
+    const transports = new Map([["node-1", t1]]);
+    ledger.setFollowups("douyin:test-room:2026-06-22", JSON.stringify({
+      v: 1, open: true, notes: [],
+      items: [{ target: "node-1", file: "a.ts", jobId: "remux:k@1-1#g1", generation: 1, state: "pending" }],
+    }));
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      settle: fastSettle, sleep: fastSleep,
+    });
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    expect(procStatus).toHaveBeenCalledTimes(1);
+    expect(ledger.get("douyin:test-room:2026-06-22")!.state).toBe("done");
+    const fu = JSON.parse(ledger.getFollowups("douyin:test-room:2026-06-22")!) as { open: boolean; notes: string[] };
+    expect(fu.open).toBe(false);
+    expect(fu.notes.some((n) => n.includes("已回滚,留存转格式未执行"))).toBe(true);
     ledger.close();
   });
 
