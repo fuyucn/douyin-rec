@@ -160,7 +160,7 @@
   绑定 hub 规则的任务至今无法选输出格式。第二期（merge/burn/上传迁表）待第一期稳定 ≥ 2 周再细化。
   **验收**:计划第一期各任务测试与验收条全部通过；`pnpm test` / `pnpm typecheck` / `pnpm arch:check` 通过；处理器与任务表包内无目录推导
   （grep 验收）；规则任务处理中途从不转换、上传仍用 mp4；VPS 真实录制一场（用户安排）验证封口转换走任务表。
-  **进度**:计划已合入、D1–D8 已按推荐确认（2026-10-15）；按切片各开一票。T1 = [#151](https://github.com/fuyucn/douyin-rec/issues/151)（已完成,PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）；T3 = [#153](https://github.com/fuyucn/douyin-rec/issues/153)（实现完成，PR 待审；v0.0.141）。
+  **进度**:计划已合入、D1–D8 已按推荐确认（2026-10-15）；按切片各开一票。T1 = [#151](https://github.com/fuyucn/douyin-rec/issues/151)（已完成,PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）；T3 = [#153](https://github.com/fuyucn/douyin-rec/issues/153)（已合并 PR [#154](https://github.com/fuyucn/douyin-rec/pull/154),待部署观察）；T6 = [#156](https://github.com/fuyucn/douyin-rec/issues/156)（进行中,含 T3 复审遗留:恢复回调快照过期重复调用 + 两处守护用例）。
   T1 复审遗留（PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）：符号链接逃逸 → plan T9a（节点侧 realpath）；`finish(cancelled)` 先经 `cancelOutcome` → plan T15；
   `recover()` 返回 `"done"` 时不带 outputs、store 无法据此判 stale → **T3 评估是否把返回值扩成 `{state:"done", outputs}`**（契约缺口，非 T1 范围）。
   **T3 评估结论**：未改契约（T1 已合并，T3 只做 proc-queue）；接管 `recover()=done` 时 store 以行上声明的 `outputs`（无则空）落 done，
