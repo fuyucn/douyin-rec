@@ -112,6 +112,13 @@ export function makeNodeRemuxHookFactory(
       try {
         const r = o.queue.enqueue(path, o.format);
         if (r.state !== "rejected") return true;
+        if (r.existingState) {
+          // 同一段已有终态行(failed/uncertain/cancelled):须人工处理,不隐式复活 → 绝不回落进程内重转(会绕过「存疑须人工 ack」),只告警。
+          const msg = `分段转 ${o.format} 已有处理记录(state=${r.existingState}),需人工处理,本段不再自动转换,已保留原文件 ${basename(path)}`;
+          o.log?.(`[remux] ${msg}`);
+          o.alert?.(msg);
+          return true;
+        }
         o.log?.(`[remux] 入队被拒(${r.error ?? "未知"}),本段回落进程内转换: ${basename(path)}`);
         return false;
       } catch (e) {

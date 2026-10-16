@@ -245,7 +245,7 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
   mkv 与 faststart mp4 的时长写在文件头，截断后头部时长仍完整，只看头部会放过坏文件。同一函数还比**视频包数**（新 ≥ 原 − min(一个 GOP, 0.5%)）、**音频**（原有音频则新文件必须有音轨且音频包数在容差内）、**全包扫描的 ffprobe 告警行数**（新不得多于原，挡索引完好但数据被补零的 mp4）。所有 ffprobe 探测走统一运行器（post-process `runFfprobe`）：消费 stderr 只留尾部、有超时并杀进程，超时/异常一律「无法判定」→ 两份都留。**执行宿主按租约规则（plans/036 §2.3）**：每 kind 本机至多一个存活持有者；`task serve` 先持有，`record` 子进程只入队；独立 `record`
   仅在无存活持有者时持有（serve 起来后置 `handoverRequested`，持有者跑完当前 job 让出）。会话收尾（`onSessionEnd`）**保留 3 分钟总时限**等待本进程
   入队的行：本进程持有则等、他人（serve）持有或等待中被接管则立即结束且不告警；超时告警文案不变，未完成行留在表中由持有者续跑。
-  **任务表打不开 → 回落进程内串行链 + 告警**（稳定版兜底；入队失败 / 被拒的单段同样回落）。表内 job 的崩溃续跑走 `recover`
+  **任务表打不开 → 回落进程内串行链 + 告警**（稳定版兜底；入队失败 / 因契约·stat 失败被拒的单段同样回落）。**同段已有终态行（failed/uncertain/cancelled）被拒 → 不回落、只告警一次**（`EnqueueResult.existingState`；须人工 ack/requeue，不得被进程内重转绕过，#160）。`record` 带 `--task-id`（仅 outputFormat 生效时）→ 入队行归属任务、serve 侧失败告警按任务显示；remux 的 ffmpeg 带 `-hide_banner`，失败文案里是真因而非版本横幅。表内 job 的崩溃续跑走 `recover`
   （只碰该 job 的 src / 目标 / tmp，不扫目录：只有 tmp → 删 tmp → 重跑；目标在且校验通过 → done 并删原文件；存疑 → `uncertain` + 新文件 `.drec-suspect`
   隔离、两份都留）；关停回 `pending`（attempts 不加、tmp 清、原文件不动）。不可逆动作（rename / 删原文件）前 `assertLease`。
   契约层（`assertJobInvariants`）拒绝 xml / ass / 会话边车进 `replaceInputs`；处理器与 proc-queue 包内禁止 `readdirSync` / `groupSessions` / 目录推导（grep 守护）。

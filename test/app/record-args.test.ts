@@ -114,4 +114,13 @@ describe("buildRecordArgs", () => {
     const args = buildRecordArgs(mkTask({ room: "https://live.douyin.com/999" }));
     expect(args[args.indexOf("--room") + 1]).toBe("https://live.douyin.com/999");
   });
+
+  it("outputFormat 生效时带 --task-id(封口转换行归属任务);original 不带", () => {
+    const withFmt = buildRecordArgs(mkTask({ id: 42, outputFormat: "mkv" }));
+    const i = withFmt.indexOf("--task-id");
+    expect(i).toBeGreaterThan(-1);
+    expect(withFmt[i + 1]).toBe("42");
+    expect(buildRecordArgs(mkTask({ id: 42 }))).not.toContain("--task-id");
+    expect(buildRecordArgs(mkTask({ id: 42, outputFormat: "original" }))).not.toContain("--task-id");
+  });
 });

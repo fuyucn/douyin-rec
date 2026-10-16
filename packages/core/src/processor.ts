@@ -261,6 +261,8 @@ export interface EnqueueResult {
   nextGeneration?: number;
   /** state=rejected 时的原因(可选,供标注)。 */
   error?: string;
+  /** 仅 state=rejected 且因「同 jobId 已有终态行」被拒:该行现态。入队方据此区分「须人工处理」与契约/stat 失败(后者可回落)。 */
+  existingState?: "failed" | "uncertain" | "cancelled";
 }
 
 /** `_enqueue` 的单行 JSON 响应。 */

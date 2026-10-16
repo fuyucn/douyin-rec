@@ -17,6 +17,7 @@ export function buildRemuxArgs(input: string, outMp4: string, fmt?: StageFormat)
   // 显式传 `fmt`(节点侧原地替换写临时文件,扩展名不是容器扩展名)→ 按 fmt 取参数并显式 `-f` 指定封装器。
   const container = fmt ? STAGE_CONTAINERS[fmt] : stageContainerOfPath(outMp4);
   return [
+    "-hide_banner", // 去掉版本/编译配置横幅:失败时 stderr 尾部只剩真因,告警文案才可读
     "-y",
     "-i", resolve(input),
     "-map", "0:v:0",

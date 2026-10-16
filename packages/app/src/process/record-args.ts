@@ -54,7 +54,9 @@ export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
   // 节点侧原地替换(issue #137):`task.outputFormat` 在这里已是**判定后的生效值**(TaskManager.spawnFor 经
   // resolveNodeOutputFormat 算定:hub 受管 / 有规则绑定 / 边录边传 → original)。original = 不带 flag,行为不变。
   if (task.outputFormat && task.outputFormat !== "original") {
-    args.push("--output-format", task.outputFormat);
+    // 任务标识只给封口转换队列用(入队行归属任务 → serve 侧失败告警按任务归属);无 outputFormat 时无人消费,不带。
+    if (typeof task.id === "number") args.push("--task-id", String(task.id));
+    args.push("--output-format", task.outputFormat); // 保持末尾(既有用例/约定)
   }
   return args;
 }

@@ -86,6 +86,7 @@ interface RecordCliOpts {
   reconnect?: string;
   rollingUpload?: string;
   outputFormat?: string;
+  taskId?: string;
   config?: string;
 }
 
@@ -186,6 +187,7 @@ program
   .option("--reconnect <sec>", "断流快速重连等待(秒) (默认 5)")
   .option("--rolling-upload <0|1>", "边录边传: 1=录制中每封口一段就上传并删该段源 0=整场录完再处理 (默认 0)")
   .option("--output-format <fmt>", "节点侧输出格式 original|mp4|mkv: 分段封口后原地 remux 成所选容器、校验通过后删原文件 (默认 original=不转)")
+  .option("--task-id <n>", "所属任务 id(serve 拉起时传入;封口转换入队行据此归属任务,失败告警按任务显示)")
   .option("--config <path>", "YAML 配置文件 (命令行选项优先覆盖)")
   .action(async (o: RecordCliOpts) => {
     const cfg = loadConfig(o.config);
@@ -279,7 +281,8 @@ program
       void recoverNodeRemuxInBackground(opts.outDir, fmt, remuxDeps);
       // 封口转换走每节点任务表(plans/036 T6):本进程按租约规则宿主 runner(serve 先持有则只入队)。
       // 打不开 → null(已告警),钩子回落进程内串行转换。
-      const queue = RemuxQueue.open({ owner: remuxDeps.owner, outDir: opts.outDir, alert: remuxDeps.alert, log: remuxDeps.log });
+      const taskIdNum = o.taskId !== undefined && /^\d+$/.test(o.taskId) ? Number(o.taskId) : undefined;
+      const queue = RemuxQueue.open({ owner: remuxDeps.owner, taskId: taskIdNum, outDir: opts.outDir, alert: remuxDeps.alert, log: remuxDeps.log });
       if (queue) {
         closeRemuxQueue = () => queue.close();
         process.on("exit", () => queue.releaseLeaseSync());
