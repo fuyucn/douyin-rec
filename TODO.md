@@ -160,11 +160,12 @@
   绑定 hub 规则的任务至今无法选输出格式。第二期（merge/burn/上传迁表）待第一期稳定 ≥ 2 周再细化。
   **验收**:计划第一期各任务测试与验收条全部通过；`pnpm test` / `pnpm typecheck` / `pnpm arch:check` 通过；处理器与任务表包内无目录推导
   （grep 验收）；规则任务处理中途从不转换、上传仍用 mp4；VPS 真实录制一场（用户安排）验证封口转换走任务表。
-  **进度**:计划已合入、D1–D8 已按推荐确认（2026-10-15）；按切片各开一票。T1 = [#151](https://github.com/fuyucn/douyin-rec/issues/151)（已完成,PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）；T3 = [#153](https://github.com/fuyucn/douyin-rec/issues/153)（已合并 PR [#154](https://github.com/fuyucn/douyin-rec/pull/154),待部署观察）；T6 = [#156](https://github.com/fuyucn/douyin-rec/issues/156)（进行中,含 T3 复审遗留:恢复回调快照过期重复调用 + 两处守护用例）。
+  **进度**:计划已合入、D1–D8 已按推荐确认（2026-10-15）；按切片各开一票。T1 = [#151](https://github.com/fuyucn/douyin-rec/issues/151)（已完成,PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）；T3 = [#153](https://github.com/fuyucn/douyin-rec/issues/153)（已合并 PR [#154](https://github.com/fuyucn/douyin-rec/pull/154),待部署观察）；T6 = [#156](https://github.com/fuyucn/douyin-rec/issues/156)（进行中;已完成 T3 复审遗留 R4-1/R4-2/R4-3:孤儿处置占位后重读行 + LEAK/S7 守护用例 + 拒写日志写明原因;T6 本体见 PR）。
   T1 复审遗留（PR [#152](https://github.com/fuyucn/douyin-rec/pull/152)）：符号链接逃逸 → plan T9a（节点侧 realpath）；`finish(cancelled)` 先经 `cancelOutcome` → plan T15；
   `recover()` 返回 `"done"` 时不带 outputs、store 无法据此判 stale → **T3 评估是否把返回值扩成 `{state:"done", outputs}`**（契约缺口，非 T1 范围）。
   **T3 评估结论**：未改契约（T1 已合并，T3 只做 proc-queue）；接管 `recover()=done` 时 store 以行上声明的 `outputs`（无则空）落 done，
   remux 无 `outputs` → 事后无法判 stale。**须在 T6 随 remux `recover` 一并决定**：把返回值扩成 `{state:"done", outputs}`（改 core + `settleOrphan` 落 `resultOutputs`）。
+  **T6 决定**：不改契约 —— 入队时 remux 行显式带 `outputs=[目标路径]`（`RemuxQueue.enqueue`），`recover()=done` 时 store 以行上 `outputs` 落 `resultOutputs`，stale 判定口径随之成立。
   T3 复审遗留（PR #154 第二轮,不阻塞）：**N3** `readProcActive`（`packages/proc-queue/src/runner.ts`）把所有异常吞成空快照,权限/只读异常时 running 静默归零
   → **第二期把 `running.biliup > 0` 接入部署 guard 前**须改为只把「库不存在 / 表不存在」当空,其余错误带 `error` 字段返回或抛给 `_node-status`；
   **N4** `store.ts` claim 里对已认领过的 pending 取消行直接 `UPDATE state=cancelOutcome(...)`,未经 `canTransition`（绕开状态机唯一真理源）
