@@ -18,6 +18,31 @@ export const TITLE_TOKENS = [
 ] as const;
 export const DEFAULT_TITLE_TIMEZONE = "Asia/Shanghai";
 
+/** 校验是不是 Intl 认得的 IANA 时区名。 */
+export function isValidTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 设置值 → 生效时区:空 / 非法 → 缺省北京时间。所有「按设置时区算日期」的入口共用,别各写一份。 */
+export function resolveTimeZone(raw?: string | null): string {
+  const tz = (raw ?? "").trim();
+  return tz && isValidTimeZone(tz) ? tz : DEFAULT_TITLE_TIMEZONE;
+}
+
+/**
+ * 当前进程生效的时区:`serve` 与独立 CLI 入口启动时都会把 `settings.timezone` 写进 `process.env.TZ`
+ * (见 app `applyTimezone` / `applyTimezoneFromDb`)。env 未设或非法 → 缺省北京时间,
+ * **不**回落宿主机本地时区(那正是 #155 的根因)。
+ */
+export function processTimeZone(): string {
+  return resolveTimeZone(process.env.TZ);
+}
+
 const TOKEN_RE = /\{([A-Za-z]+)\}/g;
 const STAMP_FULL = /^(.+)_(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})$/;
 const STAMP_NO_SEC = /^(.+)_(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})$/;
@@ -65,12 +90,7 @@ export function parseSessionStamp(sessionBase: string): (TitleParts & { hasTime:
 }
 
 export function zonedStamp(ms: number, timeZone?: string): Omit<TitleParts, "name"> {
-  let tz = (timeZone ?? "").trim() || DEFAULT_TITLE_TIMEZONE;
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: tz });
-  } catch {
-    tz = DEFAULT_TITLE_TIMEZONE;
-  }
+  const tz = resolveTimeZone(timeZone);
   const bag: Record<string, string> = {};
   for (const part of new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
@@ -90,6 +110,27 @@ export function zonedStamp(ms: number, timeZone?: string): Omit<TitleParts, "nam
     mm: bag.minute ?? "00",
     ss: bag.second ?? "00",
   };
+}
+
+/**
+ * `zonedStamp` 的逆运算:把 tz 下的墙钟时间(月 1-12)换成 epoch ms。
+ * 用于把会话名里的 `YYYY-MM-DD_HH-mm-ss`(设置时区墙钟)还原成时刻,不看宿主机本地时区。
+ * 夏令时空洞/重叠的墙钟取靠后的合法解(与 `Date` 本地构造的常见行为同向,足够兜底用)。
+ */
+export function epochFromZonedParts(
+  y: number, mo: number, d: number, h: number, mi: number, s: number, timeZone?: string,
+): number {
+  const asUtc = Date.UTC(y, mo - 1, d, h, mi, s);
+  let guess = asUtc;
+  for (let i = 0; i < 3; i++) {
+    const z = zonedStamp(guess, timeZone);
+    const [zy, zmo, zd] = z.date.split("-").map(Number) as [number, number, number];
+    const shown = Date.UTC(zy, zmo - 1, zd, Number(z.hh), Number(z.mm), Number(z.ss));
+    const delta = asUtc - shown;
+    if (delta === 0) break;
+    guess += delta;
+  }
+  return guess;
 }
 
 export function resolveTitleParts(ctx: TitleContext): TitleParts {

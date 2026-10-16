@@ -224,6 +224,10 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
   `process.env.TZ`，启动日志打一行 `[tz] 时区 = ...` 可查；`GET/POST /api/timezone` 可查/改，改了立即生效
   （daemon 下一次 tick 就用新时区，不用重启）。踩过的坑：host 层 `TZ` 难从进程外内省
   （`ssh vps date` 是 ssh 会话自己的环境，不是服务进程的，得挖 `/proc/<pid>/environ`）—— 这条彻底绕开。
+  **所有「日期」入口共用这一口径**（issue #155）：分段文件名 `stamp`（record-engine）、streamKey 日期（orchestrator
+  `identity`，Reconciler 注入 `timeZone` getter）、会话名还原 startMs（`scan`）、标题 / 产物名（core `zonedStamp`）、
+  前端默认日期（`todayYmdInTz(serverTz)`）都走 core 的 `resolveTimeZone`/`processTimeZone`（env 未设 → 北京，**不回落宿主机
+  本地时区**）。不经 `serve` 的独立 CLI 命令由 cli `preAction` 钩子调 `applyTimezoneFromDb()` 读同一设置。
 - 状态恢复、崩溃自动重启、每任务日志环形缓冲（web 实时 tail）。
 - **输出格式·节点侧原地替换**（issue #137，`app/node-remux.ts`）：任务字段 `outputFormat`（original/mp4/mkv）。仅**无后处理**
   的任务生效 —— `TaskManager.spawnFor` 经唯一判定点 `resolveNodeOutputFormat` 决定是否给子进程传 `--output-format`

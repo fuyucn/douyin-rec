@@ -16,7 +16,7 @@
 import { resolve, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { createLogger, platformForRoom, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
+import { createLogger, platformForRoom, processTimeZone, zonedStamp, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
 import { logStreamMeta, type StreamMetaSource } from "@drec/ffmpeg-recorder-extra";
 
 const log = createLogger("stream_recorder");
@@ -45,10 +45,13 @@ export type { PlatformStream };
 export { ffmpegEngine, buildFfmpegArgs } from "./engines/ffmpeg.js";
 export { mesioEngine, buildMesioArgs, resolveMesioBin } from "./engines/mesio.js";
 
-/** {name}_{YYYY-MM-DD_HH-MM-SS} 会话起始时间戳(分段文件名用)。 */
-export function stamp(d: Date): string {
-  const p = (n: number): string => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+/**
+ * {name}_{YYYY-MM-DD_HH-MM-SS} 会话起始时间戳(分段文件名用)。
+ * 按**设置时区**(缺省 = 进程生效时区 → 北京时间)算,不看宿主机本地时区(issue #155)。
+ */
+export function stamp(d: Date, timeZone: string = processTimeZone()): string {
+  const z = zonedStamp(d.getTime(), timeZone);
+  return `${z.date}_${z.hh}-${z.mm}-${z.ss}`;
 }
 
 /**

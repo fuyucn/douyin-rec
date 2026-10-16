@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { clusterBroadcasts } from "./identity.js";
 import type { NodeRecording } from "./transport.js";
 
@@ -118,5 +118,40 @@ describe("clusterBroadcasts", () => {
     );
     expect(out).toHaveLength(1);
     expect(out[0].streamKey).toBe("douyin:411:2026-08-14");
+  });
+});
+
+describe("clusterBroadcasts streamKey 日期按设置时区(issue #155)", () => {
+  const prevTZ = process.env.TZ;
+  afterEach(() => {
+    if (prevTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTZ;
+  });
+  // 北京 2026-09-13 01:30 开播 = 洛杉矶 09-12 10:30
+  const startMs = Date.parse("2026-09-12T17:30:00Z");
+  const run = (tz?: string) =>
+    clusterBroadcasts(
+      [{ workerId: "w", recordings: [rec({ startMs, endMs: startMs + 3_600_000 })] }],
+      undefined, "douyin", [], tz,
+    )[0]!.streamKey;
+
+  it("显式 timeZone 优先于进程本地时区;缺省取进程生效时区(env TZ = 设置)", () => {
+    process.env.TZ = "America/Los_Angeles";
+    // 缺省 = 进程生效时区(serve/独立 CLI 启动时已把设置写进 env);显式传设置时区 → 北京日期。
+    expect(run()).toBe("douyin:411:2026-09-12");
+    expect(run("Asia/Shanghai")).toBe("douyin:411:2026-09-13");
+  });
+  it("未设 TZ 且宿主机本地为美西:默认北京日期", () => {
+    delete process.env.TZ;
+    expect(run()).toBe("douyin:411:2026-09-13");
+  });
+  it("同日第二场 _HHMM 后缀也按设置时区", () => {
+    const a = Date.parse("2026-09-12T17:30:00Z"); // 北京 09-13 01:30
+    const b = Date.parse("2026-09-12T20:00:00Z"); // 北京 09-13 04:00(相隔 > 容差 → 两簇)
+    const out = clusterBroadcasts(
+      [{ workerId: "w", recordings: [rec({ startMs: a, endMs: a + 1_000_000 }), rec({ startMs: b, endMs: b + 1_000_000 })] }],
+      undefined, "douyin", [], "Asia/Shanghai",
+    );
+    expect(out.map((x) => x.streamKey).sort()).toEqual(["douyin:411:2026-09-13_0130", "douyin:411:2026-09-13_0400"]);
   });
 });

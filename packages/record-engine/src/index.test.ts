@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
 import { registerPlatform, type DownloadEngine, type Platform, type RecorderEvents } from "@drec/core";
 import {
-  PollingRecorder, POLL_MS, STALL_CHECK_MS, STALL_GRACEFUL_EXIT_MS, STALL_TIMEOUT_MS, THROTTLE_POLL_MS,
+  PollingRecorder, stamp, POLL_MS, STALL_CHECK_MS, STALL_GRACEFUL_EXIT_MS, STALL_TIMEOUT_MS, THROTTLE_POLL_MS,
   THROTTLE_MAX_POLL_MS,
 } from "./index.js";
 
@@ -467,5 +467,30 @@ describe("新一场开播准入闸门(issue #96)", () => {
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(ev.onLive).toHaveBeenCalledTimes(1);
     rmSync(outDir, { recursive: true, force: true });
+  });
+});
+
+describe("stamp 分段文件名时间戳按设置时区(issue #155)", () => {
+  const prevTZ = process.env.TZ;
+  afterEach(() => {
+    if (prevTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTZ;
+  });
+  // 北京 2026-09-13 01:30:05 = 洛杉矶 09-12 10:30:05
+  const d = new Date("2026-09-12T17:30:05Z");
+
+  it("未设 TZ(宿主机本地为美西也一样):缺省北京时间", () => {
+    delete process.env.TZ;
+    expect(stamp(d)).toBe("2026-09-13_01-30-05");
+  });
+  it("进程生效时区(设置写入 env)优先", () => {
+    process.env.TZ = "America/Los_Angeles";
+    expect(stamp(d)).toBe("2026-09-12_10-30-05");
+    process.env.TZ = "Asia/Shanghai";
+    expect(stamp(d)).toBe("2026-09-13_01-30-05");
+  });
+  it("显式 timeZone 覆盖进程时区;格式仍是 {date}_{HH-MM-SS}(与 parseSessionStamp 互逆)", () => {
+    process.env.TZ = "America/Los_Angeles";
+    expect(stamp(d, "Asia/Shanghai")).toBe("2026-09-13_01-30-05");
   });
 });
