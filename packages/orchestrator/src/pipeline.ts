@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "n
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { formatBiliTitle, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, USER_STOP, VIDEO_EXT_ALT, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { formatBiliTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, USER_STOP, VIDEO_EXT_ALT, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
@@ -58,7 +58,7 @@ export function unclaimedStageSegments(stageSub: string, pulled: readonly string
   const claimed = new Set<string>();
   for (const g of Object.values(groupSessionsInDir(stageSub, present))) for (const f of g.ts) claimed.add(path.basename(f));
   // 只核 stage 里确实在的文件:没拉到是 pull 自己的失败(由 pull/merge 的产物检查报),不是「未认领」。
-  return videoOnly([...pulled]).map((f) => path.basename(f)).filter((f) => present.includes(f) && !claimed.has(f));
+  return videoOnly([...pulled]).map((f) => path.basename(f)).filter((f) => !isAtomicTempName(f) && present.includes(f) && !claimed.has(f));
 }
 
 /**
