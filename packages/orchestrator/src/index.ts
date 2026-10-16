@@ -51,7 +51,7 @@ import { registerTransport } from "./transport.js";
 import type { ActiveRecordingRoom, ApplyTasksResult } from "./transport.js";
 import { LocalTransport } from "./transport-local.js";
 import { SshTransport } from "./transport-ssh.js";
-import type { NodeTaskDTO, RemoteTaskSpec } from "@drec/core";
+import type { EnqueueRequest, EnqueueResponse, NodeTaskDTO, ProcessReceipt, RemoteTaskSpec } from "@drec/core";
 
 export function registerBuiltinTransports(deps: {
   ffprobe: (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;
@@ -65,6 +65,11 @@ export function registerBuiltinTransports(deps: {
   listTasks?: () => NodeTaskDTO[];
   /** hub 任务同步:把期望任务应用到本机 store。 */
   applyTasks?: (input: { desired: RemoteTaskSpec[]; force?: boolean }) => ApplyTasksResult;
+  /** 处理任务表通道(plans/036 T9a):按 worker 的数据根执行入队 / 回执;不传 = local worker 不支持。 */
+  procChannel?: {
+    enqueue(dataRoot: string, req: EnqueueRequest): EnqueueResponse;
+    procStatus(dataRoot: string, jobIds: string[]): ProcessReceipt[];
+  };
 }): void {
   const taskRooms = deps.taskRooms ?? {};
   registerTransport("local", (cfg) =>
@@ -77,6 +82,12 @@ export function registerBuiltinTransports(deps: {
       activeRecordingRooms: deps.activeRecordingRooms,
       listTasks: deps.listTasks,
       applyTasks: deps.applyTasks,
+      ...(deps.procChannel
+        ? {
+            enqueue: (req: EnqueueRequest) => deps.procChannel!.enqueue(cfg.dataRoot!, req),
+            procStatus: (ids: string[]) => deps.procChannel!.procStatus(cfg.dataRoot!, ids),
+          }
+        : {}),
     }),
   );
   registerTransport("ssh", (cfg) =>

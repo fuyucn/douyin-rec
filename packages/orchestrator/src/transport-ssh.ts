@@ -1,8 +1,9 @@
 // packages/orchestrator/src/transport-ssh.ts
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { normalizeNodeResultFile, registerChild, throwIfAborted, type RemoteTaskSpec } from "@drec/core";
+import { encodeEnqueue, normalizeNodeResultFile, registerChild, throwIfAborted, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type RemoteTaskSpec } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeRecordingStatus, NodeRollingSession, NodeTasks, Transport } from "./transport.js";
+import { ProcUnsupported } from "./transport.js";
 import type { NodeCapabilities, NodeStatus, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec } from "@drec/core";
 
 export interface SshOpts {
@@ -301,7 +302,45 @@ export class SshTransport implements Transport {
       cookies: parsed.cookies === true,
       diskFreeGB: typeof parsed.diskFreeGB === "number" ? parsed.diskFreeGB : 0,
       cjkFonts: parsed.cjkFonts === true,
+      // 缺字段 = 旧节点(plans/036 D5):保持 undefined,派发方据此判「不支持」。
+      ...(Array.isArray(parsed.processors) ? { processors: parsed.processors.filter((x): x is string => typeof x === "string") } : {}),
     };
+  }
+
+  /**
+   * 远端入队(`_enqueue`,plans/036 §2.4)。**只**把明确的 unknown command 映射成 {@link ProcUnsupported};
+   * 可达性 / 超时等其余错误原样抛(不能把网络故障误报成「节点不支持」)。
+   */
+  async enqueue(req: EnqueueRequest): Promise<EnqueueResponse> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    let out: string;
+    try {
+      out = await this.run([`${nodePrefix} _enqueue ${this.o.dataRoot} ${encodeEnqueue(req)}`]);
+    } catch (e) {
+      if (isUnknownCommandError(e)) throw new ProcUnsupported("节点 bundle 不支持 _enqueue(旧版本)");
+      throw e;
+    }
+    const parsed = JSON.parse(out) as Partial<EnqueueResponse> & { error?: string };
+    if (parsed.error) throw new Error(`_enqueue 失败: ${parsed.error}`);
+    if (parsed.v !== 1 || !Array.isArray(parsed.results)) throw new Error("_enqueue 返回格式非法");
+    return { v: 1, results: parsed.results };
+  }
+
+  /** 回执查询(`_proc-status`)。unknown command → {@link ProcUnsupported}(节点回滚旧 bundle 的信号,N7)。 */
+  async procStatus(jobIds: string[]): Promise<ProcessReceipt[]> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const b64 = Buffer.from(JSON.stringify(jobIds), "utf8").toString("base64");
+    let out: string;
+    try {
+      out = await this.runStatus([`${nodePrefix} _proc-status ${this.o.dataRoot} ${b64}`]);
+    } catch (e) {
+      if (isUnknownCommandError(e)) throw new ProcUnsupported("节点 bundle 不支持 _proc-status(旧版本)");
+      throw e;
+    }
+    const parsed = JSON.parse(out) as { receipts?: ProcessReceipt[]; error?: string };
+    if (parsed.error) throw new Error(`_proc-status 失败: ${parsed.error}`);
+    if (!Array.isArray(parsed.receipts)) throw new Error("_proc-status 返回格式非法");
+    return parsed.receipts;
   }
 
   /**

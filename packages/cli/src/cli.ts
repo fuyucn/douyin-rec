@@ -14,7 +14,7 @@ import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌
 import { SyncGate } from "./sync-gate.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
-import { registerNodePipelineCommands } from "./node-pipeline-commands.js";
+import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { biliAccountKey, burnFlags, effectiveStageFormat, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
@@ -747,6 +747,7 @@ const hubStarter: HubStarter = {
       buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool, openUploadLimitStore,
     } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
+    const { handleEnqueue, handleProcStatus } = await import("@drec/app");
     const { statSync } = await import("node:fs");
     const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
@@ -831,6 +832,11 @@ const hubStarter: HubStarter = {
       }),
       // local worker = master 自身:hub 任务同步直接落在本机 store(与远端 `_tasks` / `_apply-tasks` 同路径)。
       listTasks: () => listNodeTasks(opts.store),
+      // 处理任务表通道(T9a):local worker 与远端 `_enqueue` / `_proc-status` 同一执行体(无派发方,仅可被调用)。
+      procChannel: {
+        enqueue: (dataRoot, req) => handleEnqueue(dataRoot, req),
+        procStatus: (dataRoot, ids) => handleProcStatus(dataRoot, ids),
+      },
       // adopt=false:本机源任务保持用户可编辑(managedBy 不置 hub),只有远端节点的同步任务才锁编辑。
       applyTasks: (input) => applyRemoteTasks(opts.store, input.desired, opts.log, {
         adopt: false,
@@ -1929,6 +1935,38 @@ program
       }
     }
     process.stdout.write(JSON.stringify({ deleted }) + "\n");
+  });
+
+// (内部) 远端入队(plans/036 §2.4 / T9a):master 经 ssh 把 remux 任务送进本节点的处理任务表。
+// 请求 = base64(EnqueueRequest);输出单行 EnqueueResponse。第一期只受理 remux,路径校验用本节点 allowedRoots + realpath。
+program
+  .command("_enqueue <dataRoot> <base64>", { hidden: true })
+  .description("(内部) 入队处理任务(仅 remux;供 master ssh 调用)")
+  .action(async (dataRoot: string, b64: string) => {
+    try {
+      await applyNodeDataRoot(dataRoot);
+      const { decodeEnqueue } = await import("@drec/core");
+      const { handleEnqueue } = await import("@drec/app");
+      process.stdout.write(JSON.stringify(handleEnqueue(dataRoot, decodeEnqueue(b64))) + "\n");
+    } catch (e) {
+      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
+      process.exitCode = 1;
+    }
+  });
+
+// (内部) 处理任务回执(plans/036 §2.4 / T9a):请求 = base64(jobId 字符串数组);输出 {receipts: ProcessReceipt[]}。
+// 库不存在 / 未知 jobId → 不出现在 receipts 里。
+program
+  .command("_proc-status <dataRoot> <base64>", { hidden: true })
+  .description("(内部) 查询处理任务回执(供 master ssh 调用)")
+  .action(async (dataRoot: string, b64: string) => {
+    try {
+      const { decodeJobIds, handleProcStatus } = await import("@drec/app");
+      process.stdout.write(JSON.stringify({ receipts: handleProcStatus(dataRoot, decodeJobIds(b64)) }) + "\n");
+    } catch (e) {
+      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
+      process.exitCode = 1;
+    }
   });
 
 // 节点侧上传(experimental,plans/027)的隐藏子命令隔离在独立文件,便于快速开关/回退。

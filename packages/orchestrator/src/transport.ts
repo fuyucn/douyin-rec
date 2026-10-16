@@ -1,5 +1,5 @@
 import { isWorkerTargeted } from "@drec/core";
-import type { ApplyTasksResult, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, RemoteTaskSpec, WorkerConfig } from "@drec/core";
+import type { ApplyTasksResult, EnqueueRequest, EnqueueResponse, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, ProcessReceipt, RemoteTaskSpec, WorkerConfig } from "@drec/core";
 
 // 契约在 core(app 的 worker-store 用同一形状);这里 re-export 保持既有调用点不变。
 export type { ApplyTasksResult, WorkerConfig } from "@drec/core";
@@ -104,6 +104,17 @@ export function recordingStatusWorkerIds(
   return out;
 }
 
+/**
+ * 节点不支持处理任务表通道(旧 bundle 无 `_enqueue` / `_proc-status`,或本机未注入)。
+ * 派发方据此「跳过 + 标注」,不当作可达性故障(plans/036 §2.4 / D5)。
+ */
+export class ProcUnsupported extends Error {
+  constructor(message = "节点不支持处理任务表通道") {
+    super(message);
+    this.name = "ProcUnsupported";
+  }
+}
+
 export interface Transport {
   readonly id: string;
   listInventory(): Promise<NodeInventory>;
@@ -194,6 +205,16 @@ export interface Transport {
    * 「确认已终止(可读 started → failed)」与「无法确认(保守 → needs_manual)」。
    */
   abortNodePipeline?(streamKey: string): Promise<{ aborted: boolean; detail?: string }>;
+  /**
+   * 向该节点的处理任务表入队(隐藏 `_enqueue`,plans/036 §2.4;第一期只受理 remux)。
+   * 节点不支持(旧 bundle 未知命令 / 本机未注入)→ 抛 {@link ProcUnsupported};其余失败原样抛。
+   */
+  enqueue?(req: EnqueueRequest): Promise<EnqueueResponse>;
+  /**
+   * 查询已入队 job 的回执(隐藏 `_proc-status`)。未知 jobId 不在结果里。
+   * 不支持 → 抛 {@link ProcUnsupported}(节点入队后又回滚旧 bundle 的信号,N7)。
+   */
+  procStatus?(jobIds: string[]): Promise<ProcessReceipt[]>;
 }
 
 type Factory = (cfg: WorkerConfig) => Transport;
