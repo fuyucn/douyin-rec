@@ -301,6 +301,10 @@ export interface ProcessReceipt {
   jobId: string;
   state: JobState;
   error?: string;
+  /** Persisted BV once known (biliup create/append). */
+  bv?: string;
+  /** Observable upload step (gate_wait/transfer/submit). */
+  step?: string;
   /** 持有租约的执行者是否存活(master 据此判「节点无执行者」)。 */
   leaseAlive: boolean;
 }

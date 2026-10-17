@@ -20,7 +20,14 @@ import { effectiveHubConfig } from "./disk-gate.js";
 import { TaskStore } from "./store.js";
 
 /** 第一期远端只受理的处理器 kind。 */
-export const REMOTE_ENQUEUE_KINDS: readonly string[] = ["remux"];
+/** Kinds accepted over the remote channel. upload-prep/biliup join once the node advertises them. */
+export function remoteEnqueueKinds(capabilities: readonly string[] = []): readonly string[] {
+  return [
+    "remux",
+    ...(capabilities.includes("upload-prep") ? ["upload-prep"] : []),
+    ...(capabilities.includes("biliup") ? ["biliup"] : []),
+  ];
+}
 
 /** 解析路径到真实路径:存在 → realpath;不存在 → 最深的存在祖先 realpath + 余下段(产物路径可能尚未创建)。 */
 export function realpathDeep(p: string): string {
@@ -110,6 +117,12 @@ export interface HandleEnqueueOpts extends NodeRootsOpts {
   /** 测试注入:处理器查找(缺省走 core 注册表)。 */
   getProcessor?: (kind: string) => Processor | undefined;
   log?: (msg: string) => void;
+  /** Explicit allow-list (tests); otherwise derived from capabilities. */
+  remoteKinds?: readonly string[];
+  /** Node capabilities from `_node-capabilities` (processors list). */
+  capabilities?: readonly string[];
+  /** Force batch semantics: all-or-nothing for biliup groups. */
+  batch?: boolean;
 }
 
 /** `_enqueue` 执行体:逐 job 受理,单个 job 的拒绝不影响其余。库打不开 → 抛错(命令非零退出,派发方当失败)。 */
@@ -118,9 +131,20 @@ export function handleEnqueue(dataRoot: string, req: EnqueueRequest, opts: Handl
   const lookup = opts.getProcessor ?? getProcessor;
   const store = new ProcQueueStore(procQueueDbPath(dataRoot), { log: opts.log });
   try {
+    if (opts.batch) {
+      const kinds = opts.remoteKinds ?? remoteEnqueueKinds(opts.capabilities);
+      const jobs: ProcessJob[] = [];
+      for (const job of req.jobs) {
+        if (!kinds.includes(job.kind)) return { v: 1, results: [{ jobId: job.jobId, state: "rejected", error: `远端不受理 kind=${job.kind}` }] };
+        jobs.push(assertJobInvariantsReal(job, roots));
+      }
+      const results = store.enqueueBatch(jobs, { allowedRoots: roots.map(realpathDeep) });
+      return { v: 1, results };
+    }
     const results: EnqueueResult[] = req.jobs.map((job) => {
       const reject = (error: string): EnqueueResult => ({ jobId: job.jobId, state: "rejected", error });
-      if (!REMOTE_ENQUEUE_KINDS.includes(job.kind)) return reject(`远端不受理 kind=${job.kind}`);
+      const kinds = opts.remoteKinds ?? remoteEnqueueKinds(opts.capabilities);
+      if (!kinds.includes(job.kind)) return reject(`远端不受理 kind=${job.kind}`);
       let real: ProcessJob;
       try {
         real = assertJobInvariantsReal(job, roots);
@@ -155,7 +179,7 @@ export function handleProcStatus(dataRoot: string, jobIds: string[]): ProcessRec
     for (const id of jobIds) {
       const row = store.get(id);
       if (!row) continue;
-      out.push({ jobId: id, state: row.state, ...(row.error ? { error: row.error } : {}), leaseAlive: store.leaseAlive(row.kind) });
+      out.push({ jobId: id, state: row.state, ...(row.error ? { error: row.error } : {}), ...(row.bv ? { bv: row.bv } : {}), ...(row.step ? { step: row.step } : {}), leaseAlive: store.leaseAlive(row.kind) });
     }
     return out;
   } catch {
@@ -176,4 +200,28 @@ export function decodeJobIds(b64: string): string[] {
 
 export function encodeJobIds(ids: string[]): string {
   return Buffer.from(JSON.stringify(ids), "utf8").toString("base64");
+}
+
+/** `_proc-cancel`: request cancel; pending rows are cancelled, running rows are left to the runner. */
+export function handleProcCancel(dataRoot: string, jobIds: string[]): ProcessReceipt[] {
+  const path = procQueueDbPath(dataRoot);
+  if (!existsSync(path)) return [];
+  const store = new ProcQueueStore(path);
+  try {
+    const out: ProcessReceipt[] = [];
+    for (const id of jobIds) {
+      const row = store.get(id);
+      if (!row) continue;
+      if (row.state === "pending") {
+        store.requestCancel(id);
+        out.push({ jobId: id, state: store.get(id)?.state ?? "pending", leaseAlive: store.leaseAlive(row.kind) });
+      } else {
+        store.requestCancel(id);
+        out.push({ jobId: id, state: row.state, leaseAlive: store.leaseAlive(row.kind) });
+      }
+    }
+    return out;
+  } finally {
+    store.close();
+  }
 }
