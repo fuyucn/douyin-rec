@@ -21,8 +21,8 @@
 
 | 事实 | 位置 |
 |---|---|
-| 预算只取 `winner.rec.totalBytes`（胜出方第一会话）；其它会话字节未求和。**已修（#203）**：`sumUploadBytes(winnerMembers)` | `orchestrator/src/node-side-upload.ts:384`、`:95`；`select.ts:129-130` |
-| 保守带宽 1MB/s。**已修（#203）**：0.1MB/s；下限 30 分钟、上限 6 小时不变 | `node-side-upload.ts:278-296` |
+| 预算只取 `winner.rec.totalBytes`（胜出方第一会话）；其它会话字节未求和。**已修（#203）**：`sumUploadBytes(winnerMembers)` | `orchestrator/src/node-side-upload.ts:404`、`:297`；`select.ts:129-130`（c2c48ff） |
+| 保守带宽 1MB/s。**已修（#203）**：0.1MB/s；下限 30 分钟、上限 6 小时不变 | `node-side-upload.ts:284-315`（c2c48ff） |
 | 总时长到点 ssh SIGKILL | `orchestrator/src/transport-ssh.ts:72-81` |
 | 超时后先 `_node-abort` 再回读结果 | `node-side-upload.ts:183-261`（abort `:197-205`） |
 | 节点侧 `uploading` 在上传闸之前就写，语义过宽 | `app/src/node-pipeline.ts:692`（`:766` 才带 `intentPart`） |
@@ -31,7 +31,7 @@
 | master 重启 → `sweepStale` 标 failed → 重入 → abort | `orchestrator/src/ledger.ts:357`、`reconciler.ts:516` |
 | `-N` 后缀 runNow 新建 key，只拦 `done+bv` | `reconciler.ts` runNow 段（实现时重新定位行号） |
 | 慢不换线：`--line` 只在开传前指定 | `app/src/upload/biliup.ts:113,179` |
-| 失败原因被「不确定」覆盖。**已修（#203）**：note 保留原始失败，error 上限 400 | `node-side-upload.ts:187` vs `:242` |
+| 失败原因被「不确定」覆盖。**已修（#203）**：note 保留原始失败，error 上限 400 | `node-side-upload.ts:239` 起（c2c48ff） |
 
 **已有、可直接复用**（plan 036 第一期已合并）：`packages/proc-queue`（每节点 `proc-queue.db`、租约、fencing、`uncertain`、
 `cancelOutcome`）、`@drec/processors`（目前只有 remux）、`_enqueue` / `_proc-status`、`/api/proc/active`、`(resource, lane)` 限额。
@@ -83,13 +83,14 @@
 - `transfer` 失败或停滞、且**确认进程已停** → **先旁证无稿**（与重启恢复同一规则：`seq=1` 查 `biliup list --is-pubing` + 时长/分 P 复核；append 查 `countVideoParts`）；确认无稿才回 `pending` 并带 `notBefore`（5 分钟起指数退避，封顶 1 小时，最多 3 次）；查不到/无法确认 → `uncertain`，不重试。重试重传该 job 的文件（biliup checkpoint 只在单次调用内有效，跨调用不保证续传，ETA 按整段算）。退避期间让出轮转给其它场。
   - **状态机迁移（PR2 必须一起改）**：core `TransitionReason` 新增 `transfer-retry`；`canTransition(running→pending)` 放行 `reason="transfer-retry"`（仅 biliup、仅 `step∈{gate_wait,transfer}` 且进程已确认停止时由 store 使用）。`ProcQueueStore` 新增 `retryTransfer(jobId)`，原子写 `state=pending, notBefore`；**不再加 `attempts`**（claim 时已 `attempts+1`，`store.ts:447`）。「最多 3 次」按 claim 次数计：第 3 次仍失败即不再 `retryTransfer`，转 `failed`。`retryable=false` 继续拦住 `failed→pending` 的通用人工重试。
 - `submit` 失败或结果不确定 → 先自动核对（append 用 `countVideoParts`，建稿用 `biliup list --is-pubing` 作旁证）；核对不出 → `uncertain`，人工处理。
-- 保序：job 带 `orderKey=streamKey`、`seq`、`generation`；**保序只在同一代内成立**（`orderKey + generation`）。换 generation 重入队后，旧代的 failed/cancelled 行不参与新代的 claim 判定，也不会被新代的级联取消波及。
+- 保序：job 带 `orderKey=streamKey`、`seq`、`generation`；**保序只在同一代内成立**（`orderKey + generation`）。
+- **generation 按 orderKey 统一分配**：现有 `nextGeneration(kind, logicalKey)` 是按单个 logicalKey 取 MAX+1（`store.ts:277-282`），seq=1..N 会各算各的。PR2 新增 `nextOrderGeneration(orderKey)`：`MAX(generation) WHERE orderKey=?` +1（无则 1），整场共用；`hub-recover-order` 的 `--bv`/`--restart` 也用它，**不按单行算**。换 generation 重入队后，旧代的 failed/cancelled 行不参与新代的 claim 判定，也不会被新代的级联取消波及。
 - **claim 改法（PR2 必须一起改）**：现有 `claim` 只按 `createdAt` FIFO（`store.ts:430-433`），也没有 `notBefore` 过滤。改为在同一事务内：
   1. `WHERE state='pending' AND (notBefore IS NULL OR notBefore<=now)`；
   2. 用 `NOT EXISTS` 排除**同 `orderKey` 且同 `generation`** 中更小 `seq` 且 `state != 'done'` 的行；
   2b. 要求 `prepJobId` 指向的 `upload-prep` 行 `state='done'`（`NOT EXISTS` 查 `proc_jobs` 同表）；prep 未 done → 保持 pending；
   3. 场间轮转用**显式游标**，不靠 `updatedAt`（claim 只刷新被认领那一行，同场后续行仍是入队时间，按时间排序会饿死新场）：新增表 `proc_order_cursor(orderKey PK, generation, lastClaimedAt)`；claim 时对候选按 `(cursor.lastClaimedAt ?? 0) ASC, seq ASC` 排序，成功后更新该 orderKey 的游标。退避中的场因 `notBefore` 被过滤，不占位。
-- **store 迁移（`user_version` +1）**：`proc_jobs` 新增 **7 列**：`notBefore`、`orderKey`、`seq`、`step`、`bv`、`childPid`、`childPidStartedAt`、`prepJobId`（`generation` 已在表内，不新增）。另建一张表 `proc_order_cursor(orderKey TEXT, generation INTEGER, lastClaimedAt INTEGER, PRIMARY KEY(orderKey, generation))`。现有 `proc_jobs` 只有 `note/error/resultOutputs`，没有进度、BV 与子进程身份的落点：
+- **store 迁移（`user_version` +1）**：`proc_jobs` 新增 **8 列**：`notBefore`、`orderKey`、`seq`、`step`、`bv`、`childPid`、`childPidStartedAt`、`prepJobId`（`generation` 已在表内，不新增）。另建一张表 `proc_order_cursor(orderKey TEXT, generation INTEGER, lastClaimedAt INTEGER, PRIMARY KEY(orderKey, generation))`。现有 `proc_jobs` 只有 `note/error/resultOutputs`，没有进度、BV 与子进程身份的落点：
   - `step`：runner 在阶段切换时原子更新（与节点结果文件同源，单一写入口）。
   - `bv`：`seq=1` 建稿成功后写入；append 行执行前读同 `orderKey` 的 `seq=1` 行。
   - `hasIntent` 映射：`step="submit"` 即 `hasIntent=true`；`gate_wait/transfer` 为 false。`cancelOutcome` 据此决定取消落 `cancelled` 还是 `uncertain`。
@@ -104,6 +105,7 @@
 
 ### 4.4 master 侧（对应 036 T5 + T15，`needs-decision`）
 
+- **入队幂等**：首次入队前把 `(orderKey, generation, seq→jobId)` 写进 `sync_jobs`（新列 `uploadPlan` JSON），重入**原样复用**、绝不重新算 generation。SSH 超时（受理结果未知）→ 下轮用同一批 jobId 重发 `_enqueue`；节点的 jobId 幂等回执会把它识别为 `pending/running/done`，不会产生第二份。
 - 入队**钉住执行节点**（winner 每轮可能不同，重入不得换节点）；`mode: queue`，回退 `blocking`；回退前要求节点队列无 pending/running biliup（或先取消）。blocking 遇到 `pending/running/uncertain` 队列项返回 409（`uncertain` 在 proc-queue 是终态、但结果未知，必须人工先处理）；`done(无 BV)`/`failed`/`cancelled` 不拦。已认领且 `interruptible=false` 的行最多等 `procShutdownWaitMs`（默认 15 分钟），到点 abort 并按 `cancelOutcome` 落 `uncertain`，然后才允许回退。
 - 队列模式下 master **不调 `_node-abort`**；轮询 `_proc-status`（每节点 60s）；SSH 失败 = 未知。
 - **SSH 失败时一律拒绝放行**：`-N`/`runNow` 若无法确认节点队列状态 → 返回 409（`force` 才放行，且日志写明「状态未知」）。
@@ -155,8 +157,7 @@
 
 ## 7. 测试清单
 
-- 预算只对 `winnerMembers` 求和（落败节点字节不计）；单会话 undefined 混入回落下限。
-- 队列模式下 `handleNodeFailure` **不调** `abortNodePipeline`；原始错误不被「不确定」覆盖。
+- 队列模式下 `handleNodeFailure` **不调** `abortNodePipeline`（原始错误保留已由 #203 覆盖）。
 - `sweepStale` 对远端在途 job 不标 failed（含 master 重启）。
 - 排队等配额超过 `heartbeatStaleMs` 不会被回队；字节停滞才判死；字节在涨 / 进程刚消失不判死；`submit` 无字节增长不杀。
 - 出现 `All files uploaded` 之后失败 → 不会第二次 upload；该行缺失 → 按 submit 不确定。
@@ -172,6 +173,8 @@
 - 关停超时：`step=transfer` → `hasIntent=false` → 回 pending；`step=submit` → `uncertain`。
 - `hub-recover-order --bv` 与 `--restart` 各自只跑一次；`--restart` 在 `biliup list` 无法确认时拒绝执行。
 - 两进程同时入队只产生一条；CAS 认领；`orderKey` 保序（seq 小的未 done 不放行大的）。
+- generation：整场 seq=1..N 共用 `nextOrderGeneration` 的值；master 重入不重算（`uploadPlan` 原样复用）；SSH 超时后用同一 jobId 重发只得到一条 job。
+- `hub-recover-order --bv/--restart` 的新 generation = 同 orderKey MAX+1，且新代可被 claim（旧代终态不挡）。
 - `transfer-retry`：只有 `step∈{gate_wait,transfer}` 且进程已停才允许 running→pending；`submit` 不允许；`failed→pending` 仍被 `retryable=false` 拒绝。
 - append 时 `seq=1` 未 done → 保持 pending（claim 门控）；`seq=1` 已 failed/uncertain → 后续 pending 全部 `cancelled(order-blocked)` 且只告警一次（**不**转 `uncertain`）。
 - 崩溃在「打印 All files uploaded」与「落 submit」之间 → 恢复先旁证：查到稿件 → done；查不到/无法确认 → `uncertain`，不再发起 upload。
