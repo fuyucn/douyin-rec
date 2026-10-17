@@ -363,15 +363,15 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         params.push(...opts.excludeStates);
       }
       // error 过滤与 states/excludeStates 正交,可叠加。COALESCE 让 NULL / 空串都算「无标记」。
-      // 判定口径必须和 toRow 里的 JS trim() 一致:SQLite 的 TRIM(默认) 只去空格,而 JS 会去制表符/
-      // 换行/回车,两者不同会把「被换行包住的 STAGE_READY」分进真事故堆、前端又渲染成 waiting_upload。
-      // 显式去掉这四种空白字符后与 JS trim() 对齐(不能用 char(9,10,13,32):char() 只取字符串首字符)。
+      // **精确相等**,不做任何 trim:STAGE_READY 由 closeStageReady 原样写入(值固定),
+      // trim 只会造出「SQL 判一种、JS 判另一种」的第二套口径(实测 NBSP/换行两边结论相反)。
+      // 相等判定在 SQL 与 toRow 里必须字面相同,改一处就要改另一处。
       if (opts.excludeError !== undefined) {
-        where.push(`COALESCE(${stripWsSql("error")}, '') <> ?`);
+        where.push("COALESCE(error, '') <> ?");
         params.push(opts.excludeError);
       }
       if (opts.onlyError !== undefined) {
-        where.push(`${stripWsSql("error")} = ?`);
+        where.push("error = ?");
         params.push(opts.onlyError);
       }
       const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
@@ -552,14 +552,6 @@ export interface BuildQueueOpts {
  */
 const UNKNOWN_MANUAL_REASON = "缺少失败原因(数据异常,建议清历史或重跑该场)";
 
-/**
- * 去掉 error 列首尾所有空白字符的 SQL 表达式(与 JS trim() 对齐;NULL → 空串)。
- * 先 REPLACE 掉制表符/换行/回车,再 TRIM 去空格(TRIM 默认只去空格,不要手工 replace 空格 ——
- * 那会把「stage 模式正常收口」里的空格也删掉,导致与常量比不上)。
- */
-const stripWsSql = (col: string): string =>
-  `TRIM(REPLACE(REPLACE(REPLACE(${col}, char(9), ''), char(10), ''), char(13), ''))`;
-
 const EMPTY_POOL: HubPoolSnapshotDTO = {
   cpu: { active: 0, queued: 0, max: 0 },
   net: { active: 0, queued: 0, max: 0 },
@@ -622,9 +614,9 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
       const err = (job.error ?? "").trim();
       // stage 模式正常收口由**显式常量**标记(不再靠「空 error」反推):空 error 一旦出现,
       // 说明某条故障路径漏写了原因(实测「所有节点断流」就曾如此)→ 按真故障显示,绝不伪装成正常项。
-      if (err === STAGE_READY) return "waiting_upload";
-      if (!err) return "waiting_manual";
+      if (job.error === STAGE_READY) return "waiting_upload"; // 精确相等,不做 trim(见 excludeError 的注释)
       if (err === USER_STOP) return "stopped";
+      if (!err) return "waiting_manual"; // 空 = 数据异常,按真事故渲染(另在 DTO 层补兜底文案)
       return "waiting_manual"; // 真故障
     };
     const phase: QueuePhase = job.state === "done"

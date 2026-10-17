@@ -506,8 +506,11 @@ describe("runPipeline", () => {
       // 零产物 → 源和 stage 都不许删(否则「源和副本全删、零成品」)。
       expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
       expect(deps.rmStage).not.toHaveBeenCalled();
-      // 零成品是事故,不能被标成「stage 正常收口」而混进中性色收件箱。
-      expect(deps.ledger.get(broadcast.streamKey)?.error).not.toBe(STAGE_READY);
+      // 零成品是事故,不能被标成「stage 正常收口」而混进中性色收件箱;
+      // 更不能退化成空 error(会被判成数据异常且没有原因可显示)。
+      const err = deps.ledger.get(broadcast.streamKey)?.error ?? "";
+      expect(err).not.toBe(STAGE_READY);
+      expect(err.trim()).not.toBe("");
       deps.ledger.close();
     });
 

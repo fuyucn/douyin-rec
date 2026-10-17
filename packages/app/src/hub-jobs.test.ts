@@ -486,20 +486,18 @@ describe("buildQueueView", () => {
     expect(rows.find((r) => r.streamKey === "douyin:FIRE:2026-10-01")?.phase).toBe("waiting_manual");
   });
 
-  it("error 被换行/制表符包住时仍算 stage 标记(SQL 判定与 JS trim 一致)", () => {
+  it("stage 标记按精确相等判定:两侧都不得 trim(否则同一行两边结论相反)", () => {
     const { dbPath, db } = makeSyncDb();
     const stage = mkdtempSync(join(tmpdir(), "queue-stage10-"));
     const now = T0 + 10_000_000;
-    seedJob(db, "douyin:WRAP:2026-10-01", [["needs_manual", now]], 100, { error: `\n\t${STAGE_READY} \r\n` });
+    seedJob(db, "douyin:WRAP:2026-10-01", [["needs_manual", now]], 100, { error: ` ${STAGE_READY} ` });
     seedJob(db, "douyin:FIRE:2026-10-01", [["needs_manual", now - 1000]], 100, { error: "上传失败" });
     db.close();
     const { active, rows } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
-    // 包住空白的 stage 标记不应进人工收件箱。
-    expect(active.map((a) => a.streamKey)).not.toContain("douyin:WRAP:2026-10-01");
-    expect(active.map((a) => a.streamKey)).toContain("douyin:FIRE:2026-10-01");
-    const wrap = rows.find((r) => r.streamKey === "douyin:WRAP:2026-10-01");
-    expect(wrap?.phase).toBe("waiting_upload");
-    expect(rows.filter((r) => r.streamKey === "douyin:WRAP:2026-10-01")).toHaveLength(1);
+    // 带空白的不是标记值(closeStageReady 原样写入,不会产生这种行)→ 当真事故处理。
+    expect(active.map((a) => a.streamKey)).toContain("douyin:WRAP:2026-10-01");
+    expect(rows.find((r) => r.streamKey === "douyin:WRAP:2026-10-01")?.phase).toBe("waiting_manual");
+    expect(rows.find((r) => r.streamKey === "douyin:FIRE:2026-10-01")?.phase).toBe("waiting_manual");
   });
 
   it("rows 里同一场不重复出现(onlyError / excludeError 过滤不能交叠)", () => {
