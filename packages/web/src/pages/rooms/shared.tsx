@@ -8,6 +8,7 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useHubStream, usePolling, errMessage, useToast, type HubStreamHandle } from "../../lib/hooks";
 import { useT } from "../../lib/i18n";
 import { roomId, scheduleText } from "../../lib/labels";
+import { ageOf, lastDelivery, type Delivery } from "../../lib/last-delivery";
 import { latestRunKey, roomStatus, type LatestRun, type RoomStatus } from "../../lib/room-status";
 import { PHASE_STYLE } from "../../lib/task-status";
 import { RoomEditor } from "../../modals/RoomEditor";
@@ -92,6 +93,37 @@ export function RoomBadge({ s }: { s: RoomStatus }): ReactNode {
     <span className={`badge ${st.tone} shrink-0`}>
       {s.kind !== "paused" && <span className={`dot${st.pulse ? " dot-running" : ""}`} style={{ background: dot }} />}
       {s.kind === "processing" && s.run ? runLabel(t, s.run.state) : t(`room.status.${s.kind}`)}
+    </span>
+  );
+}
+
+/** "Last delivery" cell: outcome icon-dot + relative time + submission link. Same verdict as the status column. */
+export function DeliveryCell({ s, now }: { s: RoomStatus; now: number }): ReactNode {
+  const t = useT();
+  const d: Delivery = lastDelivery(s.run);
+  const tone: Record<Delivery["kind"], string> = {
+    none: "var(--muted-soft)", running: "var(--status-fg)", uploaded: "var(--success-fg)",
+    archived: "var(--muted)", stopped: "var(--muted)", fault: "var(--warning-fg)",
+  };
+  const age = d.at != null ? ageOf(now, d.at) : null;
+  return (
+    <span className="inline-flex flex-col min-w-0">
+      <span className="inline-flex items-center gap-1.5 text-[13px] font-medium" style={{ color: tone[d.kind] }}>
+        <span className="dot" style={{ background: tone[d.kind] }} />
+        {t(`room.lastDeliver.${d.kind}`)}
+      </span>
+      {(age || d.bv) && (
+        <span className="text-[11px] text-muted-soft mt-0.5 truncate">
+          {age && t(`room.ago.${age.unit}`, { n: String(age.n) })}
+          {d.bv && (
+            <>
+              {age && " · "}
+              <a href={`https://www.bilibili.com/video/${d.bv}`} target="_blank" rel="noreferrer"
+                 className="hover:text-ink hover:underline" title={t("room.lastDeliver.openBv")}>{d.bv}</a>
+            </>
+          )}
+        </span>
+      )}
     </span>
   );
 }

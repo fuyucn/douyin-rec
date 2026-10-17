@@ -1,7 +1,7 @@
-import { CalendarRange, ChevronLeft, Clock3, ExternalLink, MonitorPlay, Terminal, UploadCloud } from "lucide-react";
+import { CalendarRange, ChevronLeft, Clock3, ExternalLink, MonitorPlay, UploadCloud } from "lucide-react";
 import { useAtomValue } from "jotai";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useCallback, useState, type ReactNode } from "react";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, type RollingDeliveryDTO, type Task, type TaskDetail as TaskDetailModel } from "../api/client";
 import { serverTimezoneAtom } from "../atoms";
 import { DanmuBadge, StatusBadge } from "../components/Badge";
@@ -9,7 +9,7 @@ import { Button } from "../components/Button";
 import { Tooltip } from "../components/Tooltip";
 import { errMessage, usePolling, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { classifyLogLine, LOG_LINE_STYLE } from "../lib/logLevel";
+import { LogTerminal } from "../components/LogTerminal";
 import { QUALITY_FULL, fmtClock, fmtStartedAt, platformLabel, roomHref, roomId, scheduleText } from "../lib/labels";
 import { localScheduleTooltip, localTimeTooltip } from "../lib/tz";
 import { fmtBytes, roomSlugOf } from "../lib/nodes-summary";
@@ -25,6 +25,8 @@ export function TaskDetail(): ReactNode {
   const { id } = useParams();
   const taskId = Number(id);
   const navigate = useNavigate();
+  // Opened from another in-app page (e.g. a room) → Back returns there instead of the task list.
+  const cameFromApp = useLocation().key !== "default";
   const toast = useToast();
   const [task, setTask] = useState<TaskDetailModel | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
@@ -33,9 +35,6 @@ export function TaskDetail(): ReactNode {
   /** 该房间的边录边传实时进度(master 队列快照里按房间筛;非 master / 无会话 → 空)。 */
   const [rolling, setRolling] = useState<RollingDeliveryDTO[]>([]);
 
-  const preRef = useRef<HTMLPreElement>(null);
-  const autoScrollRef = useRef(true);
-
   const poll = useCallback(async (): Promise<void> => {
     try {
       const [tk, l] = await Promise.all([api.getTask(taskId), api.getTaskLogs(taskId)]);
@@ -43,7 +42,7 @@ export function TaskDetail(): ReactNode {
       setLogs(l.lines ?? []);
     } catch {
       toast(t("tasks.unavailable"), "warning");
-      navigate("/");
+      navigate("/", { replace: true });
     }
   }, [taskId, navigate, toast, t]);
 
@@ -64,16 +63,6 @@ export function TaskDetail(): ReactNode {
   }, [taskId]);
   usePolling(() => void pollRolling(), 10_000, Number.isFinite(taskId));
 
-  // Stick to the bottom unless the user scrolled away.
-  useEffect(() => {
-    const pre = preRef.current;
-    if (pre && autoScrollRef.current) pre.scrollTop = pre.scrollHeight;
-  }, [logs]);
-
-  const onScroll = (): void => {
-    const el = preRef.current;
-    if (el) autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  };
 
   const action = async (kind: "start" | "stop"): Promise<void> => {
     try {
@@ -111,10 +100,11 @@ export function TaskDetail(): ReactNode {
     <>
       <Link
         to="/"
+        onClick={(e) => { if (cameFromApp) { e.preventDefault(); navigate(-1); } }}
         className="inline-flex items-center gap-1.5 text-sm text-muted hover:text-ink transition-colors mb-5"
       >
         <ChevronLeft className="w-4 h-4" />
-        {t("tasks.backToList")}
+        {t(cameFromApp ? "common.back" : "tasks.backToList")}
       </Link>
 
       <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
@@ -371,40 +361,7 @@ export function TaskDetail(): ReactNode {
         </section>
 
         <section className="lg:col-span-2 flex flex-col">
-          <div className="terminal">
-            <div className="terminal-head">
-              <span className="terminal-title">
-                <span
-                  className={`dot${task?.running ? " dot-running" : ""}`}
-                  style={{ background: task?.running ? "var(--success)" : "var(--muted-soft)" }}
-                />
-                <Terminal className="w-3.5 h-3.5" />
-                {t("tasks.logs")}
-              </span>
-              <span className="terminal-count">{logs.length ? t("tasks.lines", { count: logs.length }) : ""}</span>
-            </div>
-            <pre
-              ref={preRef}
-              onScroll={onScroll}
-              className="terminal-body"
-            >
-              {logs.length
-                ? logs.map((line, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        ...LOG_LINE_STYLE[classifyLogLine(line)],
-                        // 让整行(含背景)铺满,error 浅红底覆盖整行。
-                        margin: "0 -14px",
-                        padding: "0 14px",
-                      }}
-                    >
-                      {line || " "}
-                    </div>
-                  ))
-                : t("tasks.noLogs")}
-            </pre>
-          </div>
+          <LogTerminal lines={logs} running={!!task?.running} />
         </section>
 
         {Number.isFinite(taskId) && <MergePanel taskId={taskId} />}
