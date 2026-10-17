@@ -44,6 +44,16 @@ describe("roomStatus", () => {
     expect(roomStatus(room(), task(), run("done")).kind).toBe("waiting");
   });
 
+  it("needs_manual that is benign (stage close-out / user stop) is NOT attention", () => {
+    const m = (manualPhase: string | null): LatestRun => ({ state: "needs_manual", bv: null, updatedAt: 1, manualPhase });
+    expect(roomStatus(room(), task(), m("waiting_upload")).kind).toBe("waiting");
+    expect(roomStatus(room(), task(), m("stopped")).kind).toBe("waiting");
+    expect(roomStatus(room(), task(), m("waiting_manual")).kind).toBe("attention");
+    // old master (no manualPhase) keeps the previous behaviour
+    expect(roomStatus(room(), task(), m(null)).kind).toBe("attention");
+    expect(roomStatus(room(), task(), run("needs_manual")).kind).toBe("attention");
+  });
+
   it("a disabled task keeps showing its in-flight run (processing is independent of the switch)", () => {
     expect(roomStatus(room(), task({ enabled: false }), run("merging")).kind).toBe("processing");
   });
@@ -65,9 +75,9 @@ describe("roomStatus", () => {
 });
 
 describe("sortByStatus", () => {
-  it("orders recording > processing > attention > waiting > paused, stable within a kind", () => {
+  it("orders attention > recording > processing > waiting > paused, stable within a kind", () => {
     const kinds = ["paused", "waiting", "recording", "attention", "waiting2", "processing"];
     const statusOf = (k: string) => ({ kind: k.replace(/\d$/, "") as never, phase: null, run: null });
-    expect(sortByStatus(kinds, statusOf)).toEqual(["recording", "processing", "attention", "waiting", "waiting2", "paused"]);
+    expect(sortByStatus(kinds, statusOf)).toEqual(["attention", "recording", "processing", "waiting", "waiting2", "paused"]);
   });
 });

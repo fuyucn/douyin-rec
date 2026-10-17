@@ -5,6 +5,7 @@ import "@xyflow/react/dist/style.css";
 import { api, type HubJobDTO } from "../api/client";
 import type { HubStepName } from "@drec/contracts";
 import { STAGE_READY } from "@drec/hub-ledger-contract";
+import { runNeedsAttention } from "../lib/room-status";
 import { IconButton } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Dialog } from "./Dialog";
@@ -586,14 +587,18 @@ export function JobLogDialog({ logKey, onClose }: { logKey: string | null; onClo
 }
 
 /** 规则行内的「最近一次运行」紧凑徽标(在跑=当前步 spinner;终态=状态)。无 run → 提示。 */
-export function LatestRunBadge({ run }: { run: { state: string; currentStepSec?: number | null } | undefined }): ReactNode {
+export function LatestRunBadge({ run }: { run: { state: string; manualPhase?: string | null; currentStepSec?: number | null } | undefined }): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
   if (!run) return <span className="text-muted-soft text-xs">{t("hub.jobs.noRunYet")}</span>;
+  // Same verdict as the room list (runNeedsAttention): a benign needs_manual (stage close-out /
+  // user stop) is neutral and uses the queue page's wording, not the amber "needs action" colour.
+  const benign = run.state === "needs_manual" && !runNeedsAttention(run);
+  const benignKey = run.manualPhase === "stopped" ? "queue.phase.stopped" : "queue.phase.uploadWait";
   return (
-    <span className="inline-flex items-center gap-1 text-[12px] font-medium" style={{ color: stateColor(run.state) }}>
+    <span className="inline-flex items-center gap-1 text-[12px] font-medium" style={{ color: benign ? "var(--muted)" : stateColor(run.state) }}>
       {!TERMINAL.has(run.state) && <Loader2 className="w-3 h-3 animate-spin" />}
-      {labels[run.state] ?? run.state}
+      {benign ? t(benignKey) : (labels[run.state] ?? run.state)}
       {run.currentStepSec != null && <span className="text-muted-soft font-normal">· {humanSec(run.currentStepSec)}</span>}
     </span>
   );

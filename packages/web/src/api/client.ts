@@ -155,7 +155,7 @@ export const api = {
    * 排序:sort=newest(缺省,入队时间倒序=最新在前)| oldest(升序=FIFO 谁等最久谁在前)。
    */
   /** 每个房间最新一条 run(房间列表徽标用;不受分页影响)。 */
-  getLatestRuns: (): Promise<{ rooms: Array<{ roomKey: string; streamKey: string; state: string; bv: string | null; updatedAt: number }> }> =>
+  getLatestRuns: (): Promise<{ rooms: Array<{ roomKey: string; streamKey: string; state: string; bv: string | null; updatedAt: number; manualPhase?: string | null }> }> =>
     request("GET", "/api/hub/latest-runs"),
   getHubQueue: (
     opts: { phase?: string[]; states?: string[]; platform?: string[]; q?: string; sort?: "newest" | "oldest" } = {},
