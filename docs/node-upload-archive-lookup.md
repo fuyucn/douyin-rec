@@ -34,7 +34,7 @@ indicates they are separate server-side filters rather than one unfiltered listi
   pagination) and union the results.
 - There is no single "everything" flag observed; the finder must issue three queries.
 - This was verified at the CLI/extension level only. A real logged-in listing was **not** run
-  in this survey because no cookie file is present on this machine.
+  in this survey because no login file is present on this machine.
 - Consequence for the plan: `findRecentArchive` must query all three filters and treat any
   failed query as "unknown" (never as "no draft"). The real-response fixture is deferred to
   T14, where a human-authorized upload provides a logged-in session.
