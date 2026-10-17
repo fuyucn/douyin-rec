@@ -57,13 +57,16 @@
   节点结果文件 `phase` 取值**保持** `started|uploading|done|failed`（白名单 `NODE_RESULT_PHASES` 在 `core/src/api-types.ts:771`，旧 master 不认新值会归 null → 当成「确认没成」→ 重投），新信息只加可选 `step` 字段。
 - `runBiliup` 增加 `onSpawn(pid)` / `onLine(line)`（**已合并 #205**）；看到 `All files uploaded successfully` 即切到 `submit`。该行缺失或文案变化 → 一律按「submit 不确定」处理（宁可转人工，不重传）。
 - **顺序不变量**：`step=submit` 必须在「可能已发生提交」之前落盘；落盘失败 → 不继续提交，按 `uncertain` 处理（宁可转人工）。恢复时若看到 `submit` 而没有 BV → `uncertain`，绝不当 transfer 重跑。
-- **关停超时的 `hasIntent` 按 step 推导**：`runner.ts` 目前写死 `hasIntent:true`；PR2 改为 `hasIntent = step === "submit"`。`transfer` 阶段被关停/强制部署 → 回 `pending` 而非 `uncertain`，避免制造人工单。
+- **关停超时的 `hasIntent` 按 step 推导**：`runner.ts:488` 目前写死 `hasIntent:true`；PR2 改为 `hasIntent = step === "submit"`。
+  - **关停路径不能再走 `finish(cancelled)`**：新增 `store.abortForShutdown(jobId)`，对 `step∈{gate_wait,transfer}` 的 biliup job 直接 `running→pending`（`reason="shutdown-abort"`，但**绕过 `interruptible` 检查**，因为这里已确认进程被 SIGKILL 且没有提交）；`step=submit` 仍落 `uncertain`。
+  - 该回退**不触发** order-blocked 级联（它只对 failed/uncertain/cancelled 生效）；重启后同 `orderKey` 从该 seq 继续。
+  - `canTransition` 的 `shutdown-abort` 分支放宽为：`interruptible===true` **或** `kind=biliup && step∈{gate_wait,transfer}`（由 store 传入，缺省仍 fail-closed）。
 
 ### 4.2 停滞判定（只按字节进度）
 
 - biliup 在非 TTY 下进度条被隐藏，日志在 `pre_upload` 后静默，**不能把输出当心跳**。
 - 候选信号（**PR2 的硬前置：先在 VPS 实测选定一条，把命令与输出贴回 #202**）：① biliup 进程树 `/proc/<pid>/io` 的 `wchar` 增量；② checkpoint 文件 mtime/size；③ 套伪终端让进度条输出。
-- 判死条件：`transfer` 步内字节增量为 0 持续 `stallMs`（默认 15 分钟）。`remux` / `gate_wait` **不参与**；`submit` **永不 kill**；进程消失给宽限。
+- 判死条件：`transfer` 步内字节增量为 0 持续 `stallMs`（默认 15 分钟）。`gate_wait` **不参与**（无传输）；`submit` **永不 kill**；进程消失给宽限。remux 由独立的 `kind=remux` job 承担，不在本判死逻辑内。
 - 租约心跳（`heartbeatStaleMs`，按时间）与传输进度（按字节）是**两个信号**，只有后者能判死。
 - `gate_wait` 期间不参与字节停滞判定（没有传输），但仍占 `lane=biliup` 槽（串行化提交；见 §4.1 的取舍）。
 - 慢（< `slowAlertBps` 持续 `slowAlertWindowMs`）只告警，不 kill。`maxWallMs` 只用于告警 + 停止重试，不 kill。
@@ -71,19 +74,20 @@
 ### 4.3 重试与保序
 
 - `transfer` 失败或停滞、且**确认进程已停** → job 回 `pending` 并带 `notBefore`（5 分钟起指数退避，封顶 1 小时，最多 3 次）。重试重传该 job 的文件（biliup checkpoint 只在单次调用内有效，跨调用不保证续传，ETA 按整段算）。退避期间让出轮转给其它场。
-  - **状态机迁移（PR2 必须一起改）**：core `TransitionReason` 新增 `transfer-retry`；`canTransition(running→pending)` 放行 `reason="transfer-retry"`（仅 biliup、仅 `step∈{gate_wait,transfer}` 且进程已确认停止时由 store 使用）。`ProcQueueStore` 新增 `retryTransfer(jobId)`，原子写 `state=pending, notBefore, attempts+1`；`retryable=false` 继续拦住 `failed→pending` 的通用人工重试。
+  - **状态机迁移（PR2 必须一起改）**：core `TransitionReason` 新增 `transfer-retry`；`canTransition(running→pending)` 放行 `reason="transfer-retry"`（仅 biliup、仅 `step∈{gate_wait,transfer}` 且进程已确认停止时由 store 使用）。`ProcQueueStore` 新增 `retryTransfer(jobId)`，原子写 `state=pending, notBefore`；**不再加 `attempts`**（claim 时已 `attempts+1`，`store.ts:447`）。「最多 3 次」按 claim 次数计：第 3 次仍失败即不再 `retryTransfer`，转 `failed`。`retryable=false` 继续拦住 `failed→pending` 的通用人工重试。
 - `submit` 失败或结果不确定 → 先自动核对（append 用 `countVideoParts`，建稿用 `biliup list --is-pubing` 作旁证）；核对不出 → `uncertain`，人工处理。
 - 保序：job 带 `orderKey=streamKey`、`seq`；claim 时排除「同 orderKey 下有更小 seq 未 done」的 job。
-- **store 迁移（`user_version` +1）**：`notBefore`、`orderKey`、`seq`、`step`、`bv` 五列。现有 `proc_jobs` 只有 `note/error/resultOutputs`，没有进度与 BV 的落点：
+- **store 迁移（`user_version` +1）**：`notBefore`、`orderKey`、`seq`、`step`、`bv`、`childPid`、`childPidStartedAt` 七列。现有 `proc_jobs` 只有 `note/error/resultOutputs`，没有进度、BV 与子进程身份的落点：
   - `step`：runner 在阶段切换时原子更新（与节点结果文件同源，单一写入口）。
   - `bv`：`seq=1` 建稿成功后写入；append 行执行前读同 `orderKey` 的 `seq=1` 行。
-  - `hasIntent` 映射：`step="submit"` 即 `hasIntent=true`；`remux/gate_wait/transfer` 为 false。`cancelOutcome` 据此决定取消落 `cancelled` 还是 `uncertain`。
+  - `hasIntent` 映射：`step="submit"` 即 `hasIntent=true`；`gate_wait/transfer` 为 false。`cancelOutcome` 据此决定取消落 `cancelled` 还是 `uncertain`。
+  - `childPid` / `childPidStartedAt`：`onSpawn(pid)` 落盘。重启恢复时「进程已停」= pid 不存在，或 pid 存在但 cmdline 不匹配，**或** `startedAt` 不匹配（pid 复用）。只有确认已停才清理孤儿（SIGTERM→宽限→SIGKILL）并回 pending；无法确认 → `uncertain`，不起第二个进程。
   - **append 的 BV 来源**：append job 入队时 `bv` 可为空；runner 执行前从 store 读同 `orderKey` 下 `seq=1` 的 done 行取 BV，缺失则**不执行**、置 `uncertain` 并告警（绝不在无 BV 时新建稿）。
   - **前序不可完成的处置**：`seq` 更小的行进入 `failed`/`uncertain`/`cancelled` 时，同 `orderKey` 下所有更大 `seq` 的 pending 行原子转 `cancelled`（reason=`order-blocked`）并告警一次；既不静默卡住，也不越过前序乱序上传。
   - **order-blocked 的恢复路径**（两种，均走 PR6 的 dry-run→`--apply`，默认不改库）：
     - **已建稿**：人工用 `biliup list` / 台账补齐 BV → `hub-recover-order <streamKey> --bv <BV>`：给后续项**换 generation**（`nextGeneration`）重新入队，并把 `seq=1` 行绑定该 BV；新 jobId 不撞 `cancelled` 终态。
     - **确认未建稿**（`seq=1` transfer 重试耗尽且无 BV）：`hub-recover-order <streamKey> --restart`：从 `seq=1` 起整体换 generation 重新入队。执行前必须用 `biliup list --is-pubing` 旁证无稿；查不到就不允许 `--restart`。
-- 重启恢复：`pending` 原样保留；`running` 且在 `remux/gate_wait/transfer` → 清孤儿 biliup 后回 `pending`；在 `submit` → `uncertain`；已有 BV → 记 done，继续 append。
+- 重启恢复：`pending` 原样保留；`running` 且在 `gate_wait/transfer` → 确认子进程已停后回 `pending`；在 `submit` → `uncertain`；已有 BV → 记 done，继续 append。
 
 ### 4.4 master 侧（对应 036 T5 + T15，`needs-decision`）
 
@@ -121,7 +125,7 @@
 |---|---|---|---|
 | PR0 | ✅ 已合并（#203）：止血（现有 blocking 路径）：预算对 **winnerMembers** 全部会话求和、保守带宽下调到 0.1MB/s（上限仍 6h）、超时报错带 stderr、不覆盖原始错误、修测试 | 无 | 上传类，`needs-decision`（本次由用户确认开工） |
 | PR1 | ✅ 代码已合并（#205）：`runBiliup` 的 `onSpawn/onLine` + 结果文件加可选 `step`；**停滞信号 VPS 实测仍未做** | PR0 | 同上 |
-| PR2 | biliup 处理器 + 阶段/停滞/退避/保序 + store 迁移 + 重启恢复 + `_proc-cancel` + core 迁移 reason | PR1、036 T2、**VPS 停滞信号实测** | 同上 |
+| PR2 | biliup 处理器（remux 前置为独立 job）+ 阶段/停滞/退避/保序 + store 迁移（含 pid）+ 重启恢复 + `_proc-cancel` + core 迁移 reason + 关停回 pending | PR1、036 T2、**VPS 停滞信号实测** | 同上 |
 | PR3 | master 入队/轮询/不 abort/sweep 豁免/原 key 409（含 SSH 失败）/部署 guard（fail-closed）/回退保护 | PR2 | 同上（改部署 guard） |
 | PR4 | 边录边传接入共享并发槽 | PR2 | 同上 |
 | PR5 | 队列页（`/api/hub/queue` 露出节点 biliup 行、最后心跳、ETA） | PR3 | `enhancement` |
@@ -142,6 +146,9 @@
 - 排队等配额超过 `heartbeatStaleMs` 不会被回队；字节停滞才判死；字节在涨 / 进程刚消失不判死；`submit` 无字节增长不杀。
 - 出现 `All files uploaded` 之后失败 → 不会第二次 upload；该行缺失 → 按 submit 不确定。
 - 重启恢复矩阵：`running` × {gate_wait, transfer, submit} × {有 BV, 无 BV}（remux 不在 biliup job 内）；崩在「写 intent」与「spawn」之间 → 回 pending，不 append。
+- 子进程身份：pid 存活但 cmdline/startedAt 不匹配 → 不当作自己的孤儿；无法确认 → `uncertain`，绝不并列起第二个 biliup。
+- 关停：`transfer` 落回 pending 且**不**级联 order-blocked；同 orderKey 的后续项保持 pending。
+- 重试计数：claim 1 次 + retry 2 次 = 最多 3 次；第 3 次失败后不再 retryTransfer。
 - 关停超时：`step=transfer` → `hasIntent=false` → 回 pending；`step=submit` → `uncertain`。
 - `hub-recover-order --bv` 与 `--restart` 各自只跑一次；`--restart` 在 `biliup list` 无法确认时拒绝执行。
 - 两进程同时入队只产生一条；CAS 认领；`orderKey` 保序（seq 小的未 done 不放行大的）。
