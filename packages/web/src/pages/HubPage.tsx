@@ -85,7 +85,7 @@ export function HubPage(): ReactNode {
 
   /** 某规则(房间)的历次 run,新→旧:streamKey 前缀 `{platform}:{roomSlug}:` 匹配。 */
   /** 房间徽标用的「最新一条 run」:走 latestByRoom(权威端点),而不是 jobs(受最近 N 条分页限制)。 */
-  const latestRunOf = (r: HubRuleDTO): { state: string; currentStepSec?: number | null } | undefined =>
+  const latestRunOf = (r: HubRuleDTO): { state: string; manualPhase?: string | null; currentStepSec?: number | null } | undefined =>
     latestByRoom[`${r.platform}:${r.roomSlug}`];
 
   const toast = useToast();

@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { STAGE_READY } from "@drec/core";
+import { needsManualPhaseOf } from "./hub-jobs.js";
 import { activeHubJobKeys, buildQueueView, deleteHubJobHistory, latestRunPerRoom, listHubJobs, readHubJobLog, jobLogPath } from "./hub-jobs.js";
 
 /** 手工建台账 fixture(表结构与 orchestrator SyncLedger 对齐——结构即契约,不 import 它保分层)。 */
@@ -932,5 +933,32 @@ describe("T5 批量读取", () => {
       try { db.exec("ROLLBACK"); } catch { /* 已回滚 */ }
       db.close();
     }
+  });
+});
+
+describe("latestRunPerRoom.manualPhase (issue #190)", () => {
+  it("needs_manual 的最新一场带与队列同源的细分;其他状态为 null;不外泄 error", () => {
+    const { dbPath, db } = makeSyncDb();
+    const now = T0 + 1_000;
+    seedJob(db, "douyin:A:2026-10-01", [["needs_manual", now]], 100, { error: STAGE_READY });
+    seedJob(db, "douyin:B:2026-10-01", [["needs_manual", now]], 100, { error: "用户停止" });
+    seedJob(db, "douyin:C:2026-10-01", [["needs_manual", now]], 100, { error: "上传失败" });
+    seedJob(db, "douyin:D:2026-10-01", [["needs_manual", now]], 100);
+    seedJob(db, "douyin:E:2026-10-01", [["done", now]], 100, { bv: "BV1" });
+    db.close();
+    const by = Object.fromEntries(latestRunPerRoom(dbPath).map((r) => [r.roomKey, r]));
+    expect(by["douyin:A"].manualPhase).toBe("waiting_upload");
+    expect(by["douyin:B"].manualPhase).toBe("stopped");
+    expect(by["douyin:C"].manualPhase).toBe("waiting_manual");
+    expect(by["douyin:D"].manualPhase).toBe("waiting_manual"); // 空 error = 异常
+    expect(by["douyin:E"].manualPhase).toBeNull();
+    expect(JSON.stringify(by["douyin:C"])).not.toContain("上传失败");
+  });
+
+  it("needsManualPhaseOf 精确相等:带空白的 STAGE_READY 不算正常收口", () => {
+    expect(needsManualPhaseOf(STAGE_READY)).toBe("waiting_upload");
+    expect(needsManualPhaseOf(` ${STAGE_READY} `)).toBe("waiting_manual");
+    expect(needsManualPhaseOf(" 用户停止 ")).toBe("stopped");
+    expect(needsManualPhaseOf(null)).toBe("waiting_manual");
   });
 });

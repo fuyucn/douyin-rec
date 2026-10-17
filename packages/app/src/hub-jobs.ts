@@ -422,6 +422,18 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
 }
 
 /**
+ * `needs_manual` 细分:stage 正常收口 / 用户停止 / 真故障。队列视图与 latest-runs 共用这一处,
+ * 房间列表才不会和队列页对同一场给出相反结论(issue #190)。
+ *
+ * stage 正常收口由**显式常量**标记(精确相等,不 trim);空 error = 数据异常,按真故障渲染。
+ */
+export function needsManualPhaseOf(error: string | null | undefined): QueuePhase {
+  if (error === STAGE_READY) return "waiting_upload";
+  if ((error ?? "").trim() === USER_STOP) return "stopped";
+  return "waiting_manual";
+}
+
+/**
  * 每个房间的最新一条 run 摘要(按 streamKey 前缀 `{platform}:{roomSlug}:` 分组)。
  *
  * **为什么单独做**:Hub 房间列表原用「最近 N 条 run 再按房间过滤」→ 一个房间若最近 N 条里
@@ -438,6 +450,8 @@ export interface LatestRunPerRoom {
   state: string;
   bv: string | null;
   updatedAt: number;
+  /** 仅 `state=needs_manual` 才有(与队列同源的细分);其余状态为 null。旧 master 无此字段。 */
+  manualPhase: QueuePhase | null;
 }
 
 export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
@@ -451,9 +465,9 @@ export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
         substr(streamKey, 1,
           instr(substr(streamKey, instr(streamKey, ':') + 1), ':') + instr(streamKey, ':')
         ) AS roomKey,
-        streamKey, state, bv, updatedAt
+        streamKey, state, bv, updatedAt, error
       FROM (
-        SELECT streamKey, state, bv, updatedAt,
+        SELECT streamKey, state, bv, updatedAt, error,
                ROW_NUMBER() OVER (
                  PARTITION BY substr(streamKey, 1,
                    instr(substr(streamKey, instr(streamKey, ':') + 1), ':') + instr(streamKey, ':')
@@ -463,9 +477,15 @@ export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
         FROM sync_jobs
       )
       WHERE rn = 1
-    `).all() as unknown as LatestRunPerRoom[];
+    `).all() as unknown as Array<Omit<LatestRunPerRoom, "manualPhase"> & { error: string | null }>;
     // SQL 切出的 roomKey 带尾冒号(`douyin:123:`);统一去掉,与前端 `${platform}:${roomSlug}` 对齐。
-    return rows.map((r) => ({ ...r, roomKey: r.roomKey.replace(/:$/, ""), updatedAt: Number(r.updatedAt) }));
+    // error 只用来推导 manualPhase,不外泄(原始文案可能含路径/主机信息)。
+    return rows.map(({ error, ...r }) => ({
+      ...r,
+      roomKey: r.roomKey.replace(/:$/, ""),
+      updatedAt: Number(r.updatedAt),
+      manualPhase: r.state === "needs_manual" ? needsManualPhaseOf(error) : null,
+    }));
   } catch {
     return []; // 旧库无表
   } finally {
@@ -610,21 +630,12 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     // 终态(done/failed)也成行(同表渲染):phase 直接取终态名,无「正在做/下面做」概念。
     // needs_manual 细分三态 —— 用 error 区分「正常收口(stage 待上传)/ 用户停止 / 真故障」,
     // 否则 8 条正常态和 2 条故障同色,告警疲劳(实测踩过)。
-    const needsManualPhase = (): QueuePhase => {
-      const err = (job.error ?? "").trim();
-      // stage 模式正常收口由**显式常量**标记(不再靠「空 error」反推):空 error 一旦出现,
-      // 说明某条故障路径漏写了原因(实测「所有节点断流」就曾如此)→ 按真故障显示,绝不伪装成正常项。
-      if (job.error === STAGE_READY) return "waiting_upload"; // 精确相等,不做 trim(见 excludeError 的注释)
-      if (err === USER_STOP) return "stopped";
-      if (!err) return "waiting_manual"; // 空 = 数据异常,按真事故渲染(另在 DTO 层补兜底文案)
-      return "waiting_manual"; // 真故障
-    };
     const phase: QueuePhase = job.state === "done"
       ? "done"
       : job.state === "failed"
         ? "failed"
         : job.state === "needs_manual"
-          ? needsManualPhase()
+          ? needsManualPhaseOf(job.error)
           : waiting
             ? "queued"
             : job.state === "pending" || job.state === "settling"
