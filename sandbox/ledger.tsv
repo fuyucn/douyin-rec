@@ -3,3 +3,4 @@ iter	task	phase	tests	quality	pass	note
 1	T01	engineer	-	-	-	implement v2 migration, batch enqueue, cursor, setters
 1	T01	qa	2718/2766	ok	yes	full suite + typecheck + arch; quality_check ok
 1	T01	keep	2723/2771	ok	yes	committed
+2	T02	keep	2733/2775	ok	yes	committed
