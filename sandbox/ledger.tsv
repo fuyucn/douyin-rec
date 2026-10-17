@@ -11,3 +11,4 @@ iter	task	phase	tests	quality	pass	note
 8	T08	keep	2753/2795	ok	yes	committed
 9	T09	keep	2757/2799	ok	yes	committed
 10	T10a/b	keep	2761/2803	ok	yes	committed
+11	T11	keep	2790/2832	ok	yes	committed (version bump deferred to final PR step)
