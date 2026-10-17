@@ -32,13 +32,13 @@ export interface ProcessJob {
   replaceInputs: boolean;
   owner: { taskId?: number; streamKey?: string };
   createdAt: number;
-  /** plan 038: 同一场共享的保序键(remux 等无保序需求时为 null/缺省)。 */
+  /** plan 038: ordering key shared by one session (null/absent when no ordering is needed, e.g. remux). */
   orderKey?: string | null;
-  /** plan 038: 场内序号(1 起);orderKey 为空时无意义。 */
+  /** plan 038: 1-based position within the session; meaningless without orderKey. */
   seq?: number | null;
-  /** plan 038: 不早于该 epoch ms 才可认领。 */
+  /** plan 038: not claimable before this epoch ms. */
   notBefore?: number | null;
-  /** plan 038: biliup 行依赖的 upload-prep jobId。 */
+  /** plan 038: upload-prep jobId a biliup row waits on. */
   prepJobId?: string | null;
 }
 
@@ -234,7 +234,7 @@ export interface TransitionContext {
   reason?: TransitionReason;
   /** reason=shutdown-abort 时,job 的处理器是否 interruptible。 */
   interruptible?: boolean;
-  /** plan 038: transfer-retry 只允许 biliup 在 gate_wait/transfer 阶段、且子进程已确认停止。 */
+  /** plan 038: transfer-retry is only allowed for biliup at gate_wait/transfer, with the child confirmed stopped. */
   kind?: string;
   step?: string | null;
   childConfirmedStopped?: boolean;
@@ -356,22 +356,22 @@ function decodeJob(raw: unknown, i: number): ProcessJob {
 function decodeOrdering(raw: Record<string, unknown>, job: ProcessJob, bad: (why: string) => never): void {
   const { orderKey, seq, notBefore, prepJobId } = raw;
   if (orderKey != null) {
-    if (typeof orderKey !== "string" || orderKey === "") bad("orderKey 须为非空字符串");
+    if (typeof orderKey !== "string" || orderKey === "") bad("orderKey must be a non-empty string");
     job.orderKey = orderKey as string;
   }
   if (seq != null) {
-    if (!Number.isSafeInteger(seq) || (seq as number) < 1) bad("seq 须为 >=1 的整数");
+    if (!Number.isSafeInteger(seq) || (seq as number) < 1) bad("seq must be an integer >= 1");
     job.seq = seq as number;
   }
   if (notBefore != null) {
-    if (typeof notBefore !== "number" || !Number.isFinite(notBefore)) bad("notBefore 非法");
+    if (typeof notBefore !== "number" || !Number.isFinite(notBefore)) bad("notBefore is invalid");
     job.notBefore = notBefore as number;
   }
   if (prepJobId != null) {
-    if (typeof prepJobId !== "string" || prepJobId === "") bad("prepJobId 须为非空字符串");
+    if (typeof prepJobId !== "string" || prepJobId === "") bad("prepJobId must be a non-empty string");
     job.prepJobId = prepJobId as string;
   }
-  if (job.orderKey && job.seq == null) bad("orderKey 需要 seq");
+  if (job.orderKey && job.seq == null) bad("orderKey requires seq");
 }
 
 /** 编码 `EnqueueRequest` 为 base64(`_enqueue` 命令行参数)。 */

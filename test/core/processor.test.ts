@@ -276,7 +276,7 @@ describe("EnqueueRequest 编解码", () => {
     expect(() => decodeEnqueue(withJob({ orderKey: "", seq: 1 }))).toThrow(/orderKey/);
     expect(() => decodeEnqueue(withJob({ orderKey: 5, seq: 1 }))).toThrow(/orderKey/);
     expect(() => decodeEnqueue(withJob({ orderKey: "k", seq: 0 }))).toThrow(/seq/);
-    expect(() => decodeEnqueue(withJob({ orderKey: "k" }))).toThrow(/需要 seq/);
+    expect(() => decodeEnqueue(withJob({ orderKey: "k" }))).toThrow(/requires seq/);
     expect(() => decodeEnqueue(withJob({ notBefore: "soon" }))).toThrow(/notBefore/);
     expect(() => decodeEnqueue(withJob({ prepJobId: 3 }))).toThrow(/prepJobId/);
   });

@@ -89,7 +89,7 @@ export async function produceStageParts(spec: PrepSpec, log: (m: string) => void
     linkOrCopy(work, out);
     parts.push({ plain: out, sources: files, durSec: groupDur });
   }
-  log(`prep 产出 ${parts.length} 个分 P → ${spec.stageDir}`);
+  log(`prep produced ${parts.length} part(s) -> ${spec.stageDir}`);
   return parts;
 }
 
@@ -101,8 +101,8 @@ export const uploadPrepProcessor: Processor = {
   retryable: true,
   interruptible: true,
   validate(job: ProcessJob): string | null {
-    if (job.inputs.length === 0) return "inputs 不能为空";
-    if (job.replaceInputs) return "upload-prep 不得替换/删除源文件";
+    if (job.inputs.length === 0) return "inputs must not be empty";
+    if (job.replaceInputs) return "upload-prep must not replace or delete source files";
     return null;
   },
   estimateDiskBytes(job: ProcessJob): number {
@@ -123,10 +123,10 @@ export const uploadPrepProcessor: Processor = {
       minSegmentSec: Number(specs.minSegmentSec ?? 2),
       tsDirect: specs.tsDirect === true,
     };
-    if (!spec.stageDir) throw new Error("upload-prep 缺少 stageDir");
+    if (!spec.stageDir) throw new Error("upload-prep is missing stageDir");
     ctx.setState?.({ step: "remux" });
     const parts = await produceStageParts(spec, (m) => ctx.log(m), ctx);
-    if (parts.length === 0) throw new Error("upload-prep 没有产出任何分 P");
+    if (parts.length === 0) throw new Error("upload-prep produced no parts");
     return { outputs: parts.map((p) => p.plain), note: `${parts.length} parts` };
   },
   async recover(): Promise<"rerun"> { return "rerun"; },

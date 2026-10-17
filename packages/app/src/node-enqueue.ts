@@ -135,7 +135,7 @@ export function handleEnqueue(dataRoot: string, req: EnqueueRequest, opts: Handl
       const kinds = opts.remoteKinds ?? remoteEnqueueKinds(opts.capabilities);
       const jobs: ProcessJob[] = [];
       for (const job of req.jobs) {
-        if (!kinds.includes(job.kind)) return { v: 1, results: [{ jobId: job.jobId, state: "rejected", error: `远端不受理 kind=${job.kind}` }] };
+        if (!kinds.includes(job.kind)) return { v: 1, results: [{ jobId: job.jobId, state: "rejected", error: `remote enqueue does not accept kind=${job.kind}` }] };
         jobs.push(assertJobInvariantsReal(job, roots));
       }
       const results = store.enqueueBatch(jobs, { allowedRoots: roots.map(realpathDeep) });
@@ -144,7 +144,7 @@ export function handleEnqueue(dataRoot: string, req: EnqueueRequest, opts: Handl
     const results: EnqueueResult[] = req.jobs.map((job) => {
       const reject = (error: string): EnqueueResult => ({ jobId: job.jobId, state: "rejected", error });
       const kinds = opts.remoteKinds ?? remoteEnqueueKinds(opts.capabilities);
-      if (!kinds.includes(job.kind)) return reject(`远端不受理 kind=${job.kind}`);
+      if (!kinds.includes(job.kind)) return reject(`remote enqueue does not accept kind=${job.kind}`);
       let real: ProcessJob;
       try {
         real = assertJobInvariantsReal(job, roots);

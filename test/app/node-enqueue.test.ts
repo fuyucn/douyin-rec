@@ -136,7 +136,7 @@ describe("_enqueue:受理范围", () => {
     const p = file(rec, "a.mp4");
     const key = "final:s:plain:a.mp4@";
     const j: ProcessJob = { ...mkJob(p), kind: "merge", logicalKey: key, jobId: jobIdOf("merge", key, 1), params: {} };
-    expect(handleEnqueue(root, req(j), opts()).results[0]).toMatchObject({ state: "rejected", error: expect.stringContaining("远端不受理") });
+    expect(handleEnqueue(root, req(j), opts()).results[0]).toMatchObject({ state: "rejected", error: expect.stringContaining("remote enqueue does not accept") });
   });
 
   it("处理器 validate 不过(params.format 非法)被拒", () => {

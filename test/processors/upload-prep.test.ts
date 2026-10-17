@@ -18,7 +18,7 @@ function scene(): { root: string; segs: string[]; stage: string } {
 }
 
 describe("upload-prep (plan 038 T04)", () => {
-  it("产出 stage 分 P,源文件 inode/内容不变", async () => {
+  it("produces stage parts and leaves source inode/content unchanged", async () => {
     const { segs, stage } = scene();
     const before = segs.map((f) => [statSync(f).ino, statSync(f).size]);
     const parts = await produceStageParts({ segments: segs, stageDir: stage, stem: "x", mergeSegments: false, segmentGroupSec: 0, minSegmentSec: 2, tsDirect: false }, () => {});
@@ -27,9 +27,9 @@ describe("upload-prep (plan 038 T04)", () => {
     expect(segs.map((f) => [statSync(f).ino, statSync(f).size])).toEqual(before);
   });
 
-  it("processor:replaceInputs=true 被拒;缺少 stageDir 报错;run 返回输出", async () => {
+  it("processor: replaceInputs=true is refused; missing stageDir errors; run returns outputs", async () => {
     const { segs, stage } = scene();
-    expect(uploadPrepProcessor.validate({ inputs: segs, replaceInputs: true } as never)).toMatch(/不得替换/);
+    expect(uploadPrepProcessor.validate({ inputs: segs, replaceInputs: true } as never)).toMatch(/must not replace/);
     await expect(uploadPrepProcessor.run({ inputs: segs, params: {}, replaceInputs: false, owner: {}, kind: "upload-prep", logicalKey: "k", generation: 1, jobId: "upload-prep:k#g1" } as never, { log() {}, alert() {}, markProgress() {}, assertLease() {}, signal: new AbortController().signal } as never)).rejects.toThrow(/stageDir/);
     const res = await uploadPrepProcessor.run({ inputs: segs, params: { stageDir: stage, stem: "x", mergeSegments: false }, replaceInputs: false, owner: {}, kind: "upload-prep", logicalKey: "k", generation: 1, jobId: "upload-prep:k#g1" } as never, { log() {}, alert() {}, markProgress() {}, assertLease() {}, signal: new AbortController().signal } as never);
     expect(res.outputs).toHaveLength(2);

@@ -38,7 +38,7 @@ export interface LocalOpts {
   taskLogs?: (taskId: number, lines: number) => { lines: string[]; error?: string };
   /** 本机处理任务表入队(与 `_enqueue` 同一执行体,库路径 = procQueueDbPath(cfg.dataRoot));缺省 = 不支持。 */
   enqueue?: (req: EnqueueRequest) => EnqueueResponse;
-  /** 本机处理任务表取消;缺省 = 不支持。 */
+  /** Cancel jobs in the local proc queue; absent = unsupported. */
   procCancel?: (jobIds: string[]) => ProcessReceipt[];
   /** 本机回执查询(与 `_proc-status` 同一执行体);缺省 = 不支持。 */
   procStatus?: (jobIds: string[]) => ProcessReceipt[];
@@ -109,7 +109,7 @@ export class LocalTransport implements Transport {
   }
 
   async procCancel(jobIds: string[]): Promise<ProcessReceipt[]> {
-    if (!this.o.procCancel) throw new ProcUnsupported("本机未注入处理任务表取消");
+    if (!this.o.procCancel) throw new ProcUnsupported("local proc-queue cancel is not injected");
     return this.o.procCancel(jobIds);
   }
 

@@ -23,7 +23,7 @@ describe("procQueueDbPath", () => {
 });
 
 describe("迁移", () => {
-  it("重复首开幂等(同进程多连接;真多进程见 store-multiproc.test.ts):user_version=2、数据不丢、表齐全", () => {
+  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): user_version=2, data kept, tables present", () => {
     const s1 = env.open();
     const r = s1.enqueue(env.job("a.ts"), roots());
     expect(r.state).toBe("pending");
@@ -540,7 +540,7 @@ describe("list / active / gc", () => {
 });
 
 describe("v1 -> v2 migration (plan 038 T01)", () => {
-  it("已有 v1 库补 8 列与 cursor 表;旧行新列读为 null", () => {
+  it("an existing v1 db gains 8 columns and the cursor table; old rows read the new columns as null", () => {
     const path = join(env.root, "db", "old.db");
     mkdirSync(dirname(path), { recursive: true });
     const raw = new DatabaseSync(path);
@@ -567,16 +567,16 @@ describe("v1 -> v2 migration (plan 038 T01)", () => {
 });
 
 describe("enqueueBatch and order generation (plan 038 T01)", () => {
-  it("任一 rejected → 整批回滚,一条都不落", () => {
+  it("any rejected job rolls the whole batch back", () => {
     const s = env.open();
     const good = env.job("a.ts");
     const bad = { ...env.job("b.ts"), kind: "biliup", inputs: ["/outside/x.mp4"] } as never;
-    expect(() => s.enqueueBatch([good, bad], roots())).toThrow(/违反契约|批量入队被拒/);
+    expect(() => s.enqueueBatch([good, bad], roots())).toThrow(/违反契约|batch enqueue rejected/);
     expect(s.list()).toHaveLength(0);
     s.close();
   });
 
-  it("全部合法 → 同事务落库", () => {
+  it("all valid jobs land in one transaction", () => {
     const s = env.open();
     const out = s.enqueueBatch([env.job("a.ts"), env.job("b.ts")], roots());
     expect(out.map((r) => r.state)).toEqual(["pending", "pending"]);
@@ -584,7 +584,7 @@ describe("enqueueBatch and order generation (plan 038 T01)", () => {
     s.close();
   });
 
-  it("nextOrderGeneration 按 orderKey 取 MAX+1,不按单行 logicalKey", () => {
+  it("nextOrderGeneration is MAX+1 per orderKey, not per logicalKey", () => {
     const s = env.open();
     expect(s.nextOrderGeneration("k")).toBe(1);
     const mk = (name: string, order: string, gen: number) =>
@@ -597,7 +597,7 @@ describe("enqueueBatch and order generation (plan 038 T01)", () => {
     s.close();
   });
 
-  it("batch 写入 orderKey/seq/notBefore/prepJobId;fileTag 回填生效", () => {
+  it("batch writes orderKey/seq/notBefore/prepJobId and backfills the fileTag", () => {
     const s = env.open();
     const base = env.job("a.ts");
     const out = s.enqueueBatch([{ ...base, orderKey: "k", seq: 1, notBefore: 123, prepJobId: "p1" }], roots());
@@ -607,7 +607,7 @@ describe("enqueueBatch and order generation (plan 038 T01)", () => {
     s.close();
   });
 
-  it("setters:updateStep 只对 running 行;setBv/setChildPid/clearChildPid", () => {
+  it("setters: updateStep only touches running rows; setBv/setChildPid/clearChildPid", () => {
     const s = env.open();
     lease(s, "A", "fake");
     const id = s.enqueue(env.job("a.ts"), roots()).jobId;
@@ -625,7 +625,7 @@ describe("enqueueBatch and order generation (plan 038 T01)", () => {
 });
 
 describe("batch rollback on a rejected existing row (plan 038 T01)", () => {
-  it("同批出现 failed 行 → 抛 BatchRejected,前面已插入的行一并回滚", () => {
+  it("a failed row in the batch throws BatchRejected and rolls back earlier inserts", () => {
     const s = env.open();
     lease(s, "A", "fake");
     const old = env.job("old.ts");
@@ -639,7 +639,7 @@ describe("batch rollback on a rejected existing row (plan 038 T01)", () => {
 });
 
 describe("batch stale and fileTag failure (plan 038 T01)", () => {
-  it("batch 命中 stale → BatchRejected 且整批回滚", () => {
+  it("a stale hit in a batch throws BatchRejected and rolls the batch back", () => {
     const s = env.open();
     lease(s, "A", "fake");
     const job = env.job("a.ts");
@@ -653,10 +653,10 @@ describe("batch stale and fileTag failure (plan 038 T01)", () => {
     s.close();
   });
 
-  it("batch 中 fileTag stat 失败 → 整批回滚", () => {
+  it("a fileTag stat failure in a batch rolls the batch back", () => {
     const s = env.open();
     const bad = { ...env.job("x.ts"), inputs: [join(env.rec, "gone.ts")] };
-    expect(() => s.enqueueBatch([env.job("ok.ts"), bad], roots())).toThrow(/无法 stat/);
+    expect(() => s.enqueueBatch([env.job("ok.ts"), bad], roots())).toThrow(/cannot be stat-ed/);
     expect(s.list()).toHaveLength(0);
     s.close();
   });
@@ -665,7 +665,7 @@ describe("batch stale and fileTag failure (plan 038 T01)", () => {
 describe("claim ordering and transfer retry (plan 038 T02)", () => {
   const mk = (e: Env, name: string, order: string, gen: number, seq: number, extra: Record<string, unknown> = {}) =>
     e.job(name, { logicalKey: `${order}:${name}@`, generation: gen, orderKey: order, seq, ...extra });
-  it("seq 2 在 seq 1 done 前保持 pending;游标在场间轮转", () => {
+  it("seq 2 stays pending until seq 1 is done; the cursor rotates between orders", () => {
     const s = env.open();
     lease(s, "A", "fake");
     s.enqueueBatch([mk(env, "a.ts", "k", 1, 1), mk(env, "b.ts", "k", 1, 2), mk(env, "c.ts", "other", 1, 1)], roots());
@@ -675,7 +675,7 @@ describe("claim ordering and transfer retry (plan 038 T02)", () => {
     s.close();
   });
 
-  it("旧代终态行不挡新代", () => {
+  it("terminal rows of an old generation do not block the new one", () => {
     const s = env.open();
     lease(s, "A", "fake");
     const old = s.enqueue(mk(env, "a.ts", "k", 1, 1), roots());
@@ -686,7 +686,7 @@ describe("claim ordering and transfer retry (plan 038 T02)", () => {
     s.close();
   });
 
-  it("transfer-retry 只允许 biliup gate_wait/transfer,不消耗 attempts;submit 拒绝", () => {
+  it("transfer-retry is only allowed for biliup at gate_wait/transfer, does not consume attempts, and is refused at submit", () => {
     const s = env.open();
     lease(s, "A", "biliup");
     const j = s.enqueue(mk(env, "a.ts", "k", 1, 1, { kind: "biliup" }), roots());
@@ -700,7 +700,7 @@ describe("claim ordering and transfer retry (plan 038 T02)", () => {
     s.close();
   });
 
-  it("cascade 只取消同代更大 seq 的 pending", () => {
+  it("cascade only cancels pending rows with a larger seq in the same generation", () => {
     const s = env.open();
     const rows = s.enqueueBatch([mk(env, "a.ts", "k", 1, 1), mk(env, "b.ts", "k", 1, 2), mk(env, "c.ts", "k", 2, 2)], roots());
     expect(s.cascadeOrderBlocked("k", 1, 1)).toBe(1);
@@ -711,7 +711,7 @@ describe("claim ordering and transfer retry (plan 038 T02)", () => {
 });
 
 describe("prep-failed cascade (plan 038 T03b)", () => {
-  it("只取消同 orderKey+generation 的 pending biliup 行;其它代与 kind 不动", () => {
+  it("only cancels pending biliup rows of the same orderKey+generation; other generations and kinds are untouched", () => {
     const s = env.open();
     const mk = (name: string, gen: number, kind = "biliup") =>
       env.job(name, { kind, logicalKey: `k:${name}@`, generation: gen, orderKey: "k", seq: 1 });

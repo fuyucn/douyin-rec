@@ -56,12 +56,12 @@ export function makeBiliupProcessor(deps: BiliupDeps = {}): Processor {
     interruptible: false,
     validate(job: ProcessJob): string | null {
       const p = params(job);
-      if (!p.cookies) return "缺少 cookies 路径";
-      if (!p.title) return "缺少稿件标题";
-      if (!Number.isInteger(p.tid) || p.tid <= 0) return "tid 非法";
-      if (!p.tag) return "缺少 tag";
-      if (job.inputs.length === 0) return "inputs 不能为空";
-      if (job.inputs.some((f) => !existsSync(f))) return "分 P 文件不存在";
+      if (!p.cookies) return "missing cookies path";
+      if (!p.title) return "missing archive title";
+      if (!Number.isInteger(p.tid) || p.tid <= 0) return "invalid tid";
+      if (!p.tag) return "missing tag";
+      if (job.inputs.length === 0) return "inputs must not be empty";
+      if (job.inputs.some((f) => !existsSync(f))) return "a part file does not exist";
       return null;
     },
     estimateDiskBytes(): number { return 0; },
@@ -86,10 +86,10 @@ export function makeBiliupProcessor(deps: BiliupDeps = {}): Processor {
         ctx.setState?.({ step: "gate_wait" });
         // Fail-closed before creating anything: without duration we cannot prove "no draft".
         const expected = expectedDuration(job, deps);
-        if (expected <= 0) throw new Error("缺少本次产物的预期时长,无法确认是否已建稿,拒绝建稿");
+        if (expected <= 0) throw new Error("missing expected duration for this output; cannot prove no draft exists, refusing to create one");
         const proof = await findRecentArchive(p.cookies, p.title, expected, deps.lookup);
-        if (proof === "yes") throw new Error("已存在同标题同时长稿件,拒绝重复建稿");
-        if (proof === "unknown") throw new Error("无法确认是否已建稿,转人工核对");
+        if (proof === "yes") throw new Error("an archive with the same title and duration already exists; refusing to create a duplicate");
+        if (proof === "unknown") throw new Error("cannot confirm whether a draft exists; needs manual verification");
         bv = await uploadPlain({ plain: meta, run: runObserved });
         ctx.setState?.({ bv });
       }

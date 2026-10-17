@@ -353,12 +353,12 @@ export class SshTransport implements Transport {
     try {
       out = await this.runStatus([`${nodePrefix} _proc-cancel ${this.o.dataRoot} ${b64}`]);
     } catch (e) {
-      if (isUnknownCommandError(e)) throw new ProcUnsupported("节点 bundle 不支持 _proc-cancel(旧版本)");
+      if (isUnknownCommandError(e)) throw new ProcUnsupported("node bundle does not support _proc-cancel (old version)");
       throw e;
     }
     const parsed = JSON.parse(out) as { receipts?: ProcessReceipt[]; error?: string };
-    if (parsed.error) throw new Error(`_proc-cancel 失败: ${parsed.error}`);
-    if (!Array.isArray(parsed.receipts)) throw new Error("_proc-cancel 返回格式非法");
+    if (parsed.error) throw new Error(`_proc-cancel failed: ${parsed.error}`);
+    if (!Array.isArray(parsed.receipts)) throw new Error("_proc-cancel returned an invalid payload");
     return parsed.receipts;
   }
 

@@ -204,7 +204,7 @@ export class ProcQueueStore {
     }
   }
 
-  /** 幂等迁移(实现见 schema.ts;每次首开都跑,旧库按版本逐步升级)。 */
+  /** Idempotent migration (see schema.ts); runs on every open and upgrades old databases step by step. */
   private migrate(): void {
     migrateSchema(this.db);
   }
@@ -280,7 +280,7 @@ export class ProcQueueStore {
     try {
       tag = fileTagOf(job.inputs[0]);
     } catch (e) {
-      return { jobId: job.jobId, state: "rejected", error: `inputs[0] 无法 stat: ${(e as Error).message}` };
+      return { jobId: job.jobId, state: "rejected", error: `inputs[0] cannot be stat-ed: ${(e as Error).message}` };
     }
     const logicalKey = job.logicalKey.endsWith(FILE_TAG_PLACEHOLDER) ? `${job.logicalKey}${tag}` : job.logicalKey;
     return this.tx(() => this.enqueueTx(job, logicalKey));
@@ -344,20 +344,20 @@ export class ProcQueueStore {
           assertJobInvariants(job, { allowedRoots: opts.allowedRoots });
           let tag: string;
           try { tag = fileTagOf(job.inputs[0]); }
-          catch (e) { throw new Error(`inputs[0] 无法 stat: ${(e as Error).message}`); }
+          catch (e) { throw new Error(`inputs[0] cannot be stat-ed: ${(e as Error).message}`); }
           logicalKey = job.logicalKey.endsWith(FILE_TAG_PLACEHOLDER) ? `${job.logicalKey}${tag}` : job.logicalKey;
         } catch (e) {
           const error = (e as Error).message;
           const failed = { jobId: job.jobId, state: "rejected" as const, error };
-          const err = new BatchRejected(`批量入队被拒(${job.jobId}): ${error}`, [...out, failed]);
+          const err = new BatchRejected(`batch enqueue rejected (${job.jobId}): ${error}`, [...out, failed]);
           throw err;
         }
         const r = this.enqueueTx(job, logicalKey);
         if (r.state === "stale") {
-          throw new BatchRejected(`批量入队命中 stale(${r.jobId}): 需以新一代重派`, [...out, r]);
+          throw new BatchRejected(`batch enqueue hit stale (${r.jobId}): re-dispatch with a new generation`, [...out, r]);
         }
         if (r.state === "rejected") {
-          throw new BatchRejected(`批量入队被拒(${job.jobId}): ${r.error ?? "unknown"}`, [...out, r]);
+          throw new BatchRejected(`batch enqueue rejected (${job.jobId}): ${r.error ?? "unknown"}`, [...out, r]);
         }
         out.push(r);
       }
@@ -404,7 +404,7 @@ export class ProcQueueStore {
     return this.tx(() => this.db.prepare(
       `UPDATE proc_jobs SET state='cancelled', error=?, finishedAt=?, updatedAt=?
        WHERE orderKey=? AND generation=? AND seq>? AND state='pending'`,
-    ).run(`已取消(${reason})`, this.now(), this.now(), orderKey, generation, afterSeq).changes as number);
+    ).run(`cancelled (${reason})`, this.now(), this.now(), orderKey, generation, afterSeq).changes as number);
   }
 
   /** Cancel every pending biliup row of one order/generation after its prep failed. */
@@ -412,7 +412,7 @@ export class ProcQueueStore {
     return this.tx(() => this.db.prepare(
       `UPDATE proc_jobs SET state='cancelled', error=?, finishedAt=?, updatedAt=?
        WHERE orderKey=? AND generation=? AND state='pending' AND kind='biliup'`,
-    ).run("已取消(order-prep-failed)", this.now(), this.now(), orderKey, generation).changes as number);
+    ).run("cancelled (order-prep-failed)", this.now(), this.now(), orderKey, generation).changes as number);
   }
 
   clearChildPid(jobId: string): boolean {
@@ -420,7 +420,7 @@ export class ProcQueueStore {
       .run(this.now(), jobId).changes > 0);
   }
 
-  // ───────────────────────── 租约(实现在 lease.ts) ─────────────────────────
+  // ───────────────────────── Lease (implemented in lease.ts) ─────────────────────────
 
   getLease(kind: string): LeaseRow | null { return this.leases.getLease(kind); }
   leaseKinds(): string[] { return this.leases.leaseKinds(); }

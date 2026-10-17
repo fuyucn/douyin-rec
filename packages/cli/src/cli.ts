@@ -1988,10 +1988,10 @@ program
     }
   });
 
-// (内部) 取消处理任务(plans/038):pending 直接取消,running 由 runner 核验后收口。
+// (internal) Cancel processing jobs (plans/038): pending rows are cancelled directly; running rows are closed out by the runner after verification.
 program
   .command("_proc-cancel <dataRoot> <base64>", { hidden: true })
-  .description("(内部) 取消处理任务(供 master ssh 调用)")
+  .description("(internal) cancel processing jobs (called by the master over ssh)")
   .action(async (dataRoot: string, b64: string) => {
     try {
       const { decodeJobIds, handleProcCancel } = await import("@drec/app");

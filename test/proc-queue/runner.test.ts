@@ -932,7 +932,7 @@ describe("processor contract wiring (plan 038 T02)", () => {
 });
 
 describe("shutdown verification (plan 038 T09)", () => {
-  it("子进程仍存活 → 不判 safe,落 uncertain", async () => {
+  it("a child that is still alive is not judged safe and ends uncertain", async () => {
     let release!: () => void;
     const run = async () => new Promise<never>(() => { release = () => {}; });
     registerProcessor(fakeProcessor({
@@ -951,7 +951,7 @@ describe("shutdown verification (plan 038 T09)", () => {
     void release;
   });
 
-  it("子进程已停且无稿 → 回 pending(不消耗 attempts)", async () => {
+  it("a stopped child with no draft goes back to pending without consuming attempts", async () => {
     registerProcessor(fakeProcessor({ kind: "biliup", interruptible: false, retryable: false,
       run: async () => new Promise<never>(() => {}), verifyStopped: async () => "safe" }));
     const r = mkRunner("A", { shutdownWaitMs: 20, abortWaitMs: 20, probeChild: () => null });
