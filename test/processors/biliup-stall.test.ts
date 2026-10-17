@@ -197,6 +197,22 @@ describe("biliup processor stall handling", () => {
     expect(kill).not.toHaveBeenCalled();
   });
 
+  it("wall first crossed during transfer still turns a later submit uncertain", async () => {
+    let enterSubmit: () => void = () => {};
+    const kill = vi.fn();
+    const run = vi.fn((_a: string[], hooks?: BiliupHooks) => new Promise<string>(() => {
+      hooks?.onSpawn?.(13);
+      enterSubmit = () => hooks?.onLine?.("All files uploaded successfully");
+    }));
+    let n = 0;
+    const p = makeBiliupProcessor(base({ run, kill, readAcked: () => new Map([["s", ++n]]), lookup: { run: async () => "[]" } }));
+    const pending = p.run(job(files(1), {}, { maxWallMs: 20 }), ctx().c).catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 60));
+    enterSubmit();
+    expect(isUncertainOutcome(await pending)).toBe(true);
+    expect(kill).not.toHaveBeenCalled();
+  });
+
   it("after an uncertain submit the abandoned run never starts the next append", async () => {
     let finishSubmit: () => void = () => {};
     const run = vi.fn((argv: string[], hooks?: BiliupHooks) => new Promise<string>((res) => {

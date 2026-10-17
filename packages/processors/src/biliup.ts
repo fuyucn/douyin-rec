@@ -98,12 +98,11 @@ function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supe
     const c = child;
     if (!c || c.exited) return;
     const v = watch.observe((deps.readAcked ?? readTcpAcked)(c.pid));
-    if (v.kind === "wall") {
-      wall = true;
-      if (v.step === "submit") {
-        gaveUp = true;
-        giveUp(new UncertainOutcome(`biliup submit still running past maxWallMs (pid ${c.pid}); outcome unknown, slot held until it exits`));
-      }
+    if (v.kind === "wall") wall = true;
+    // Past the wall, a submit (now or later in this job) makes the outcome unknown; it is never killed.
+    if (wall && watch.currentStep === "submit" && !gaveUp) {
+      gaveUp = true;
+      giveUp(new UncertainOutcome(`biliup submit still running past maxWallMs (pid ${c.pid}); outcome unknown, slot held until it exits`));
     } else if (v.kind === "stall" && !c.stalled) {
       c.stalled = true;
       ctx.alert(`biliup transfer stalled: no tcp progress for ${Math.round(v.idleMs / 1000)}s; stopping pid ${c.pid}`);

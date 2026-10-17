@@ -87,6 +87,10 @@ export class TransferWatch {
     this.stepSince = this.lastProgress = this.windowStart = startedAt;
   }
 
+  get currentStep(): string {
+    return this.step;
+  }
+
   setStep(step: string): void {
     if (step === this.step) return;
     this.step = step;
