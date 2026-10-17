@@ -14,7 +14,7 @@ import { deriveTitles } from "../../packages/app/src/node-pipeline.js";
 import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson } from "@drec/core";
 import { tryDirectTsLink, nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, runNodeSidePipeline, splitGroupsBySession, writeNodeResult, abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath } from "../../packages/app/src/node-pipeline.js";
 import { remuxSegment, ffprobeDuration } from "@drec/post-process";
-import { uploadPlain, appendGroup, countVideoParts } from "../../packages/app/src/upload/biliup.js";
+import { uploadPlain, appendGroup, countVideoParts, runBiliup } from "../../packages/app/src/upload/biliup.js";
 
 // node:fs 走 spy(默认透传真实实现)—— 只有「硬链接不可用」用例才临时打桩 linkSync 抛错。
 vi.mock("node:fs", { spy: true });
@@ -54,6 +54,8 @@ vi.mock("../../packages/app/src/upload/biliup.js", () => ({
   uploadPlain: vi.fn(async () => "BV1NEW"),
   appendGroup: vi.fn(async () => {}),
   countVideoParts: vi.fn(async () => null),
+  runBiliup: vi.fn(async () => ""),
+  isAllFilesUploadedLine: (line: string) => /All files uploaded successfully/.test(line),
 }));
 
 const silence = (): void => {};
@@ -689,6 +691,72 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
     expect(seen).toEqual([[1, 2], [2, 3]]); // 第 2 次 append 时:已确认 2、意图 3
     expect(readNodeResult(sub)?.phase).toBe("done");
     vi.mocked(appendGroup).mockImplementation(async () => {});
+  });
+
+  // issue #204:结果文件的 step 仅是可观测信息(phase 不变),随 biliup 起进程 / 打印 `All files uploaded` 推进。
+  it("#204:step 依次 gate_wait → transfer → submit(建稿与每次 append 各走一遍),整场完成 phase=done 且不带 step", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockReset();
+    const seen: string[] = [];
+    const step = (): string => { const r = readNodeResult(sub); return `${r?.phase}/${r?.step}`; };
+    vi.mocked(runBiliup).mockImplementation((async (_argv: string[], hooks?: { onSpawn?: (p?: number) => void; onLine?: (l: string) => void }) => {
+      seen.push(`before:${step()}`);
+      hooks?.onSpawn?.(4242);
+      seen.push(`spawned:${step()}`);
+      hooks?.onLine?.("uploading part 1/1");
+      seen.push(`midway:${step()}`);
+      hooks?.onLine?.("All files uploaded successfully, checkpoint removed");
+      seen.push(`all-uploaded:${step()}`);
+      return "ok";
+    }) as never);
+    vi.mocked(uploadPlain).mockImplementation(async (o) => { await o.run!(["upload"]); return "BV1STEP"; });
+    vi.mocked(appendGroup).mockImplementation(async (o) => { await o.run!(["append"]); });
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    expect(seen.slice(0, 4)).toEqual([
+      "before:uploading/gate_wait", "spawned:uploading/transfer", "midway:uploading/transfer", "all-uploaded:uploading/submit",
+    ]);
+    // 每次 append 前都先回到 gate_wait(等配额),再 transfer → submit
+    expect(seen.slice(4, 8)).toEqual([
+      "before:uploading/gate_wait", "spawned:uploading/transfer", "midway:uploading/transfer", "all-uploaded:uploading/submit",
+    ]);
+    const done = readNodeResult(sub);
+    expect(done?.phase).toBe("done");
+    expect(done?.step).toBeUndefined();
+    vi.mocked(uploadPlain).mockImplementation(async () => "BV1NEW");
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+  });
+
+  it("#204:step 落盘失败不中断上传(只是可观测信息)", async () => {
+    const { spec, gate } = scene();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockReset();
+    vi.mocked(runBiliup).mockImplementation((async (_argv: string[], hooks?: { onSpawn?: (p?: number) => void }) => {
+      hooks?.onSpawn?.(1);
+      return "ok";
+    }) as never);
+    vi.mocked(uploadPlain).mockImplementation(async (o) => { await o.run!(["upload"]); return "BV1SOFT"; });
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+    // 只让「step=transfer」的那次落盘(rename)失败,其余照常 → 上传仍应成功
+    const fsMod = await import("node:fs");
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    let failed = 0;
+    vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => {
+      if (String(from).endsWith(".tmp") && actual.readFileSync(from, "utf-8").includes('"step":"transfer"')) {
+        failed += 1;
+        throw new Error("EIO step write");
+      }
+      return actual.renameSync(from, to);
+    }) as never);
+    try {
+      const r = await runNodeSidePipeline(spec, silence, gate);
+      expect(failed).toBeGreaterThan(0); // 确实触发过 step 落盘失败
+      expect(r.ok).toBe(true);
+    } finally {
+      vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => actual.renameSync(from, to)) as never);
+      vi.mocked(uploadPlain).mockImplementation(async () => "BV1NEW");
+    }
   });
 
   it("#25②:append 抛错 → failed 结果里带 bv 与已确认进度", async () => {

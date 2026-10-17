@@ -6,7 +6,7 @@
  * 「合法 phase / 非法 phase / 向后兼容 / 字段裁剪」一次性钉死,杜绝将来再次漂移。
  */
 import { describe, it, expect } from "vitest";
-import { NODE_RESULT_PHASES, normalizeNodeResultFile } from "./api-types.js";
+import { NODE_RESULT_PHASES, NODE_UPLOAD_STEPS, normalizeNodeResultFile } from "./api-types.js";
 
 describe("normalizeNodeResultFile(issue #2 phase 白名单唯一真理)", () => {
   it("NODE_RESULT_PHASES 含 started/uploading/done/failed(issue #2 新增 started)", () => {
@@ -39,5 +39,27 @@ describe("normalizeNodeResultFile(issue #2 phase 白名单唯一真理)", () => 
     expect(normalizeNodeResultFile(42)).toBeNull();
     const r = normalizeNodeResultFile({ phase: "failed", ok: false, bv: 123, products: "x", error: null });
     expect(r).toEqual({ phase: "failed", ok: false, bv: undefined, products: undefined, error: undefined, atMs: 0 });
+  });
+});
+
+describe("normalizeNodeResultFile 的可选 step(plan 038,issue #204)", () => {
+  it("phase 词表不变(新增 phase 会被旧 master 归一成 null → 误判确认没成),step 只是附加字段", () => {
+    expect([...NODE_RESULT_PHASES].sort()).toEqual(["done", "failed", "started", "uploading"]);
+    expect([...NODE_UPLOAD_STEPS]).toEqual(["remux", "gate_wait", "transfer", "submit"]);
+  });
+  it("四个合法 step 都能往返", () => {
+    for (const step of NODE_UPLOAD_STEPS) {
+      expect(normalizeNodeResultFile({ phase: "uploading", ok: false, step, atMs: 1 })?.step).toBe(step);
+    }
+  });
+  it("旧 bundle 的结果文件(无 step)照常解析,step 缺省为 undefined", () => {
+    const r = normalizeNodeResultFile({ phase: "uploading", ok: false, bv: "BV1x", atMs: 5 });
+    expect(r?.phase).toBe("uploading");
+    expect(r?.step).toBeUndefined();
+  });
+  it("非法 step 被丢弃,但不影响 phase 的判定(不会让整份结果变 null)", () => {
+    const r = normalizeNodeResultFile({ phase: "uploading", ok: false, step: "weird", atMs: 1 });
+    expect(r?.phase).toBe("uploading");
+    expect(r?.step).toBeUndefined();
   });
 });
