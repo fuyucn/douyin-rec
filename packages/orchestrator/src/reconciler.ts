@@ -4,6 +4,8 @@ import type { JobState, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
 import { pollFollowups } from "./finalize-format.js";
+import { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
+import { DEFAULT_NODE_UPLOAD, type NodeUploadConfig } from "./node-upload-config.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
 import { gateWorkers, explainRejections, isWorkerAssigned, isWorkerTargeted } from "@drec/core";
 import { JobDispatcher } from "./job-dispatcher.js";
@@ -58,6 +60,10 @@ export interface ReconcilerDeps {
    * → 该 worker 不参与本场。省略 → 视为所有 worker 无能力(只对写了 requires 的规则有影响)。
    */
   workerCapabilities?: (workerId: string) => string[] | undefined;
+  /** nodeUpload config (plan 038); omitted = defaults (blocking mode, nothing to poll). */
+  nodeUpload?: NodeUploadConfig;
+  /** Receives each queue-poll observation (maps terminal queue states onto the ledger). */
+  onUploadDispatch?: UploadPollerOpts["onDispatch"];
   /**
    * 实时重载(Approach A):每轮 reconcileAll 开头调用重建 transports Map。
    * 无状态 transport 重建极廉价。省略 → 用构造时的 transports(旧行为/测试)。
@@ -146,6 +152,7 @@ export class Reconciler {
    * 同一场会被派发两次(withStreamLock 只串行不 dedup → 重复投稿 P1)。
    */
   private readonly dispatcher: JobDispatcher;
+  private readonly uploadPoller: ReturnType<typeof createUploadQueuePoller>;
 
   constructor(deps: ReconcilerDeps) {
     this.platform = deps.platform;
@@ -168,6 +175,10 @@ export class Reconciler {
     this.workerCapabilities = deps.workerCapabilities;
     this.loadTransports = deps.loadTransports;
     this.cleanupBackfillThrottleMs = deps.cleanupBackfillThrottleMs ?? DEFAULT_CLEANUP_BACKFILL_THROTTLE_MS;
+    this.uploadPoller = createUploadQueuePoller({
+      ledger: this.ledger, transports: () => this.transports, notify: this.notify, log: (m) => console.info(m),
+      unreachableAlertMs: (deps.nodeUpload ?? DEFAULT_NODE_UPLOAD).unreachableAlertMs, onDispatch: deps.onUploadDispatch,
+    });
     this.dispatcher = new JobDispatcher({
       maxConcurrent: deps.maxConcurrentPipelines ?? DEFAULT_MAX_CONCURRENT_PIPELINES,
       // 热读优先:没传 getter 才用上面的静态值(T7 行为不变)。
@@ -498,6 +509,11 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
   return due.length > 0 ? due.join(",") : null;
 }
 
+  /** One queue-poll tick (driven by its own timer in startHub); never throws. */
+  pollUploadQueue(): Promise<void> {
+    return this.uploadPoller.poll();
+  }
+
   async reconcileAll(): Promise<void> {
     // 实时重载:重建 transports(反映 hub.config.json 最新 workers);同步给 pipeline 用的那份。
     if (this.loadTransports) this.transports = this.loadTransports();
@@ -513,7 +529,10 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     }).catch(() => undefined);
     // 崩溃恢复:retrying job / running 节点超过 staleMs → 标 failed(「进程重启中断」),下一段逻辑决定重跑/人工。
     // 本进程正在跑的场(长 merge/burn/上传超过 staleMs 属正常)不误杀;重启后无活动才清理。
-    this.ledger.sweepStale(this.staleMs, (streamKey) => this.pipelineDeps.pool?.hasStreamLock(streamKey) ?? false);
+    // A persisted uploadPlan means the node queue owns the upload; a restarted master has no stream lock,
+    // so the plan is the only proof that the order is still in flight.
+    this.ledger.sweepStale(this.staleMs, (streamKey) =>
+      (this.pipelineDeps.pool?.hasStreamLock(streamKey) ?? false) || this.ledger.getUploadPlan(streamKey) != null);
 
     // 第一份清单只用来确定「要等哪些场收播」;settle 期间节点可能还在写新分段,
     // 旧快照会漏尾巴 → settle 后必须再收一份权威清单,选优/合并只用新快照。
@@ -590,6 +609,10 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
 
         // Skip terminal states(needs_manual 属人工决策,reconciler 不自动推进)。
         if (job?.state === "needs_manual") continue;
+
+        // Queue-managed orders are advanced by the upload poller only. Re-entering the pipeline here could
+        // start a second (blocking) upload next to a queued or half-finished one.
+        if (job && this.ledger.getUploadPlan(b.streamKey) != null) continue;
 
         // failed 且已达重试上限 → 升级 needs_manual(终态)+ 通知一次人工,不再重入。
         const failedNodes = job?.state === "failed" ? this.ledger.getFailedNodes(b.streamKey) : [];

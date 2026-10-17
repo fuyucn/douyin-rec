@@ -10,8 +10,13 @@ export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";
 export {
   advanceUpload, ensureUploadPlan, planJobIds,
-  type UploadPlan, type UploadDispatch, type DispatchInput, type BiliupMeta, type PrepSpec as UploadPrepSpec,
+  type UploadPlan, type UploadDispatch, type UploadInput, type BiliupMeta, type PrepSpec as UploadPrepSpec,
 } from "./node-upload-queue.js";
+export { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
+export {
+  QUEUE_CAPABILITY, DEFAULT_NODE_UPLOAD, parseNodeUploadConfig, decideUploadMode, canFallbackToBlocking,
+  type NodeUploadConfig, type QueueGateInput, type UploadModeDecision,
+} from "./node-upload-config.js";
 export type { PipelineDeps, PipelineCfg, PipelineSteps, PipelineCleanup } from "./pipeline.js";
 export {
   buildWorkflow,

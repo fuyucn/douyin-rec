@@ -286,6 +286,15 @@ export class SyncLedger {
     const r = this.db.prepare("SELECT uploadPlan FROM sync_jobs WHERE streamKey=?").get(streamKey) as { uploadPlan?: string | null } | undefined;
     return r?.uploadPlan ?? null;
   }
+  /** Orders that have a queue plan and are not yet terminal in the ledger (the queue poller's work list). */
+  listUploadPlans(): Array<{ streamKey: string; state: JobState; uploadPlan: string }> {
+    return this.db.prepare("SELECT streamKey, state, uploadPlan FROM sync_jobs WHERE uploadPlan IS NOT NULL AND state NOT IN('done','needs_manual')")
+      .all() as unknown as Array<{ streamKey: string; state: JobState; uploadPlan: string }>;
+  }
+  /** Refresh `updatedAt` without changing state: proof of life for a queue-managed order (keeps sweepStale off it). */
+  touch(streamKey: string): void {
+    this.db.prepare("UPDATE sync_jobs SET updatedAt=? WHERE streamKey=?").run(this.now(), streamKey);
+  }
   /**
    * 仍有未终结项的场(对账轮询用)。判据 = JSON 里的 `"open":true`(finalize-format 写入,`JSON.stringify` 无空格);
    * 全部终结后写回 `open:false`,于是历史 done 场不会每轮被扫描解析。

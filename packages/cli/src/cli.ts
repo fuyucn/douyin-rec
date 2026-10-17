@@ -749,7 +749,7 @@ const hubStarter: HubStarter = {
       registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport, recordingStatusWorkerIds,
       satisfiesCapabilities,
       buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool, openUploadLimitStore,
-    } = await import("@drec/orchestrator");
+      parseNodeUploadConfig } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
     const { statSync } = await import("node:fs");
@@ -1127,6 +1127,8 @@ const hubStarter: HubStarter = {
       };
     };
 
+    // plan 038: queue-managed upload settings; absent/invalid = safe defaults (blocking, nothing polled).
+    const nodeUploadCfg = parseNodeUploadConfig((hubCfg as { nodeUpload?: unknown }).nodeUpload);
     const reconciler = new Reconciler({
       platform: hubCfg.platform ?? "douyin",
       transports,
@@ -1136,6 +1138,7 @@ const hubStarter: HubStarter = {
       timeZone: () => effectiveTimezone(opts.store),
       // 能力门控:按 worker id 取能力标签(hub.config.json 的 workers[].capabilities)。
       workerCapabilities: (id) => loadWorkers().find((w) => w.id === id)?.capabilities,
+      nodeUpload: nodeUploadCfg,
       reconnectWindowMs: hubCfg.reconnectWindowMs,
       loadTransports: buildTransports,
       notify: pipelineDeps.notify, // 达重试上限升级 needs_manual 时,复用 pipeline 同源 EventCenter 通知(站内+webhook)
@@ -1401,6 +1404,8 @@ const hubStarter: HubStarter = {
       tasks: () => opts.store.listTasks(),
       isRecording: (id: number) => opts.manager.isRecording(id),
       reconcileAll: () => reconciler.reconcileAll(),
+      pollUploadQueue: () => reconciler.pollUploadQueue(),
+      uploadQueuePollMs: nodeUploadCfg.pollMs,
       settleMs: hubCfg.settleMs ?? 90_000,
       pollMs: hubCfg.pollMs ?? 3_000,
       reconcileIntervalMs: hubCfg.reconcileIntervalMs ?? 30 * 60_000,
