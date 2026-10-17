@@ -395,6 +395,11 @@ docker 固定 `/output-data`（映射宿主机 `docker-data/`）。专用 env（
   - 部署前查**两个节点**(任一在录就等):
     - 本地:`curl -s http://127.0.0.1:7860/api/tasks`
     - VPS:`ssh ubuntu@100.97.21.80 'curl -s http://127.0.0.1:7860/api/tasks'`
+  - **上传也算在途（`scripts/deploy-precheck.sh` 为唯一实现，三态口径）**：`GET /api/proc/active` 的
+    `running.biliup>0` → 等待；端点 404（旧 bundle，无 proc-queue）→ blocking 路径的上传不在队列里，
+    改查节点 `<dataRoot>/stage/*/.drec-node-result.json` 有无**未陈旧**（默认 6h 内）的 `phase=uploading`：有 → 等待，
+    无 → 记录「该节点无法确认」后放行，读不到 stage 目录 → 当未知；不可达 / 超时 / 503 / 响应看不懂 → fail-closed 等待。
+    检查范围 = master + VPS1 + VPS2，部署前直接跑该脚本（退出码 0 放行 / 1 在录或在传 / 2 状态未知）。
   - 有录制 → **不要重启**;等录制结束(可周期性轮询)或先告诉用户什么时候可以部署。
   - 只有用户**明确要求**(如"强制部署""现在就部署""override")才可无视此 guard。
   - 原因:重启会杀掉录制子进程 → 当前分段被截断,可能丢流且 hub 侧留下不完整产物。
