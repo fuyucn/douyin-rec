@@ -13,3 +13,4 @@ iter	task	phase	tests	quality	pass	note
 10	T10a/b	keep	2761/2803	ok	yes	committed
 11	T11	keep	2790/2832	ok	yes	committed (version bump deferred to final PR step)
 12	T12	keep	2803/2845	ok	yes	committed; two-phase dispatch (biliup enqueued after prep done) + wire fix 0d2aac4
+13	T13	keep	2829/2871	ok*	yes	committed; *reconciler.ts was already over file_loc (734) before this task, +21 LOC; remux-queue flaky known
