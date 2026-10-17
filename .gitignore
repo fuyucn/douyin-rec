@@ -57,3 +57,7 @@ __pycache__/
 
 # dev 多节点 e2e 数据根(issue #82)
 data-dev/
+
+# swe-loop artifacts
+sandbox/
+loop.run.yaml

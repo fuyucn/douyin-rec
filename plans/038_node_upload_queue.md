@@ -98,7 +98,7 @@
   - **append 的 BV 来源**：append job 入队时 `bv` 可为空；runner 执行前从 store 读同 `orderKey` **且同 generation** 的 `seq=1` done 行取 BV。`seq=1` 尚未 done → 保持 pending（由 claim 门控，不算失败）；`seq=1` 已 failed/uncertain 而走到这里 → `cancelled(order-blocked)`，不转 `uncertain`。
   - **前序不可完成的处置**：`seq` 更小的行进入 `failed`/`uncertain`/`cancelled` 时，同 `orderKey` **且同 generation** 下所有更大 `seq` 的 pending 行原子转 `cancelled`（reason=`order-blocked`）并告警一次；跨代不级联。既不静默卡住，也不越过前序乱序上传。
   - **`upload-prep` 的重试**：`retryable=true`（纯本地文件操作），失败按 `notBefore` 退避重试，最多 3 次；耗尽后转 `failed`，同 `orderKey` 的 biliup 行落 `cancelled(order-prep-failed)`。
-  - **order-blocked / order-prep-failed 的恢复路径**（均走 PR6 的 dry-run→`--apply`，默认不改库）：
+  - **order-blocked / order-prep-failed 的恢复路径**（均走 PR6 工具（`hub-recover-order`，本计划 T7）的 dry-run→`--apply`，默认不改库）：
     - **已建稿**：人工用 `biliup list` / 台账补齐 BV → `hub-recover-order <streamKey> --bv <BV>`：给后续项**换 generation**（`nextOrderGeneration`）重新入队，并把 `seq=1` 行绑定该 BV；新 jobId 不撞 `cancelled` 终态。
     - **prep 失败**：先人工确认 prep 可重跑，`hub-recover-order <streamKey> --prep` 把 `order-prep-failed` 的 biliup 行与对应 prep 一起换 generation 重新入队。
     - **确认未建稿**（`seq=1` transfer 重试耗尽且无 BV）：`hub-recover-order <streamKey> --restart`：从 `seq=1` 起整体换 generation 重新入队。执行前必须按时间窗查**全部状态**的稿件旁证无稿；查不到就不允许 `--restart`。
@@ -127,7 +127,7 @@
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `mode` | `queue` | 回退 `blocking` |
+| `mode` | `blocking` | T10 之前保持 blocking；节点上报 `biliup-queue` 且显式配置后才启用 queue |
 | `concurrency` | 1 | 每节点 biliup 并发 |
 | `stallMs` | 900000 | transfer 字节停滞判死 |
 | `heartbeatStaleMs` | 180000 | 租约心跳过期 |
@@ -145,11 +145,12 @@
 |---|---|---|---|
 | PR0 | ✅ 已合并（#203）：止血（现有 blocking 路径）：预算对 **winnerMembers** 全部会话求和、保守带宽下调到 0.1MB/s（上限仍 6h）、超时报错带 stderr、不覆盖原始错误、修测试 | 无 | 上传类，`needs-decision`（本次由用户确认开工） |
 | PR1 | ✅ 代码已合并（#205）：`runBiliup` 的 `onSpawn/onLine` + 结果文件加可选 `step`；**停滞信号 VPS 实测仍未做** | PR0 | 同上 |
-| PR2 | `upload-prep` 处理器 + biliup 处理器 + 阶段/停滞/退避/保序 + claim 改造（notBefore/orderKey/轮转）+ store 迁移（含 pid/step/bv）+ 重启恢复 + `_proc-cancel` + core 迁移 reason + 关停回 pending | PR1、036 T2、**VPS 停滞信号实测** | 同上 |
+| PR2 | `upload-prep` 处理器 + biliup 处理器 + 阶段/退避/保序 + claim 改造 + store 迁移 + 重启恢复 + `_proc-cancel` + core 迁移 reason + 关停回 pending。**不含停滞判死** | PR1、036 T2 | 同上 |
+| PR2b | 停滞信号实测（人工授权一次真实上传）+ 停滞判死 / submit 告警 / `biliup-queue` 能力 | PR2 | 同上 |
 | PR3 | master 入队/轮询/不 abort/sweep 豁免/原 key 409（含 SSH 失败）/部署 guard（fail-closed）/回退保护 | PR2，**且 `hub-recover-order` 已合并在内** | 同上（改部署 guard） |
 | PR4 | 边录边传接入共享并发槽 | PR2 | 同上 |
 | PR5 | 队列页（`/api/hub/queue` 露出节点 biliup 行、最后心跳、ETA） | PR3 | `enhancement` |
-| PR6 | 归并工具 `hub-triage-node-uploads` / `hub-attach-bv` / `hub-clean-sources` / `hub-recover-order`（dry-run 默认，`--apply` 才写，参照 `hub-recheck-verify`） | **PR2**（recover-order 依赖 orderKey/seq/bv 列与 order-blocked）。**PR3 启用 `mode: queue` 前，`hub-recover-order` 必须先合入**（可随 PR3 交付，或提前从 PR6 拆出） | 删源类，`needs-decision` |
+| PR6 | 归并工具（本计划只交付 `hub-recover-order`；`hub-attach-bv` / `hub-clean-sources` 不在本计划） `hub-triage-node-uploads` / `hub-attach-bv` / `hub-clean-sources` / `hub-recover-order`（dry-run 默认，`--apply` 才写，参照 `hub-recheck-verify`） | **PR2**（recover-order 依赖 orderKey/seq/bv 列与 order-blocked）。**PR3 启用 `mode: queue` 前，`hub-recover-order` 必须先合入**（可随 PR3 交付，或提前从 PR6 拆出） | 删源类，`needs-decision` |
 | PR7 / PR8 | Phase 2：传输/提交拆分 + 已传分 P 复用（含许可证决策）；审核通过后才删源（默认关） | PR3 | `needs-decision` |
 
 回滚：每个 PR 单独 revert；PR3 之后切回 `blocking` 的前提是节点队列已空（`_proc-status` 实测贴 PR）。
