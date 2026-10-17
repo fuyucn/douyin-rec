@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-62 节点侧上传队列:biliup 作为 proc-queue 处理器,按进度停滞判死（计划 [plans/038_node_upload_queue.md](plans/038_node_upload_queue.md)）**
+  — 2026-10-16 立项,承接 plan 036 第二期 T14/T15,取代 plan 033 W1-2 与 issue #25 ①。issue [#202](https://github.com/fuyucn/douyin-rec/issues/202)（PR0 #203 已合并、PR1 #205 已合并,**均待部署实跑**;`待验证`）。
+  **做什么**：①止血：节点侧上传预算按胜出方全部会话字节求和并下调保守带宽,超时报错带 stderr、不覆盖原始错误；②biliup 处理器进每节点 proc-queue（阶段 gate_wait/transfer/submit;remux 先由独立 kind=remux job 完成,默认并发 1,字节停滞才判死,transfer 失败按退避重试、submit 不确定转 `uncertain`）；③master 改入队 + 轮询（钉住节点、不 abort、sweep 豁免、原 key 409、部署 guard 加 `running.biliup`）；④边录边传共用并发槽；⑤队列页与归并工具。
+  **为什么**：一次 743MB 的节点侧上传因预算只算第一会话 + 同节点并发抢带宽被总时长误杀（事后人工 5MB/s 约 2.5 分钟传完）；总时长判死与重启误 abort 都会把「没建稿」变成人工事故。
+  **验收**：PR0 回归用例钉住多会话求和与错误不覆盖；队列模式下重启 / SSH 断开不产生第二次 upload；停滞判死只看字节、submit 永不 kill；全量 vitest / typecheck / arch:check / bundle 绿。
+
 - [~] **T-60 会话 sidecar 写权威起止时间戳:远端隐藏命令按 UTC 运行导致跨天错日（issue [#87](https://github.com/fuyucn/douyin-rec/issues/87)）**
   — 2026-10-16 认领,分支 `codex/issue-session-tz-sidecar`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：录制端（manager）在会话边车写入权威 `startMs`（本场起录绝对 epoch,按 base 固话,跨场不串）+ `timeZone`（生效时区）；清单扫描（scan）在会话**无分段文件**（边录边传全删）时优先用 sidecar 的绝对起录,而非按文件名 + 进程本地时区反解（UTC 会话会错日）。有分段的会话保持 ffprobe 结果（零回归），老录像（sidecar 无该字段）回退文件名解析。
@@ -137,11 +143,7 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
-- [~] **T-62 节点侧上传队列:biliup 作为 proc-queue 处理器,按进度停滞判死（计划 [plans/038_node_upload_queue.md](plans/038_node_upload_queue.md)）**
-  — 2026-10-16 立项,承接 plan 036 第二期 T14/T15,取代 plan 033 W1-2 与 issue #25 ①。issue [#202](https://github.com/fuyucn/douyin-rec/issues/202)（PR0 #203 已合并、PR1 #205 已合并,**均待部署实跑**;`待验证`）。
-  **做什么**：①止血：节点侧上传预算按胜出方全部会话字节求和并下调保守带宽,超时报错带 stderr、不覆盖原始错误；②biliup 处理器进每节点 proc-queue（阶段 gate_wait/transfer/submit;remux 先由独立 kind=remux job 完成,默认并发 1,字节停滞才判死,transfer 失败按退避重试、submit 不确定转 `uncertain`）；③master 改入队 + 轮询（钉住节点、不 abort、sweep 豁免、原 key 409、部署 guard 加 `running.biliup`）；④边录边传共用并发槽；⑤队列页与归并工具。
-  **为什么**：一次 743MB 的节点侧上传因预算只算第一会话 + 同节点并发抢带宽被总时长误杀（事后人工 5MB/s 约 2.5 分钟传完）；总时长判死与重启误 abort 都会把「没建稿」变成人工事故。
-  **验收**：PR0 回归用例钉住多会话求和与错误不覆盖；队列模式下重启 / SSH 断开不产生第二次 upload；停滞判死只看字节、submit 永不 kill；全量 vitest / typecheck / arch:check / bundle 绿。
+
 
 - [~] **T-61 全自动流水线 + fleet 式房间管理（计划 [plans/037_autopilot_fleet.md](plans/037_autopilot_fleet.md)）**
   — 2026-10-16 认领，2026-10-16 落 plan + 开工 step 1。主流程收敛为「监听 → 录制 → 投稿」，存档/烧录/多格式为默认关的增强开关。

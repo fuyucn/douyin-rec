@@ -1,6 +1,6 @@
 # 038 节点侧上传队列：biliup 作为 proc-queue 处理器，按「进度停滞」判死、不按总时长
 
-> **TODO：T-62**（`TODO.md`「待办（Next）」）。承接 plan 036 第二期 T14 / T15（biliup 处理器 + master 上传改派发），
+> **TODO：T-62**（`TODO.md`「进行中」）。承接 plan 036 第二期 T14 / T15（biliup 处理器 + master 上传改派发），
 > 并取代 plan 033 的 W1-2 与 issue #25 ①（节点侧上传超时预算）。
 
 状态：PR0/PR1 已合并，PR2 起未实施。基线 `feat/hub-optimization` = `c2c48ff`；PR0/PR1 之前的行号在 `bb353c0` 实测。
@@ -60,6 +60,7 @@
 - **关停超时的 `hasIntent` 按 step 推导**：`runner.ts:488` 目前写死 `hasIntent:true`；PR2 改为 `hasIntent = step === "submit"`。
   - **扩展已有的 `releaseForShutdown(jobId, owner, interruptible)`**（`store.ts:497`），不新增第二个入口：新增可选 `step` 参数。对 `step∈{gate_wait,transfer}` 的 biliup job 放行 `running→pending`（`reason="shutdown-abort"`），因为此时已确认子进程被 SIGKILL、尚未提交；`step=submit` 不走这里，仍落 `uncertain`。
   - 只在 `runner.ts:481-488` 的**关停等待超时**后触发；正常关停仍先等最多 `procShutdownWaitMs`（默认 15 分钟）。
+  - **回 pending 前必须确认子进程真的死了**：现有 runner 超时后只 `abort()` 就 `finish`，没等退出也没核对 pid。PR2 先等子进程退出（宽限后 SIGKILL），再用 `childPid + childPidStartedAt` 核验；**确认不了就落 `uncertain`，绝不回 pending**（否则重启后可能并列起第二个 biliup → 重复稿）。
   - 该回退回退 `attempts`（关停不算一次尝试，沿用现有实现），且**不触发** order-blocked 级联；重启后同 `orderKey` 从该 seq 继续。
   - `canTransition` 的 `shutdown-abort` 分支放宽为：`interruptible===true` **或** `kind=biliup && step∈{gate_wait,transfer}`（由 store 传入；缺省仍 fail-closed）。
 
@@ -95,7 +96,7 @@
 - 入队**钉住执行节点**（winner 每轮可能不同，重入不得换节点）；`mode: queue`，回退 `blocking`；回退前要求节点队列无 pending/running biliup（或先取消）。blocking 遇到 `pending/running/uncertain` 队列项返回 409（`uncertain` 在 proc-queue 是终态、但结果未知，必须人工先处理）；`done(无 BV)`/`failed`/`cancelled` 不拦。已认领且 `interruptible=false` 的行最多等 `procShutdownWaitMs`（默认 15 分钟），到点 abort 并按 `cancelOutcome` 落 `uncertain`，然后才允许回退。
 - 队列模式下 master **不调 `_node-abort`**；轮询 `_proc-status`（每节点 60s）；SSH 失败 = 未知。
 - **SSH 失败时一律拒绝放行**：`-N`/`runNow` 若无法确认节点队列状态 → 返回 409（`force` 才放行，且日志写明「状态未知」）。
-- 部署 guard 分三态：`running.biliup>0` → 等待；端点明确不支持（旧 bundle / 404 / 未知命令）→ 记录「该节点无法确认」后放行（否则旧节点永远拦着升级）；不可达 / 超时 / 503 → fail-closed 等待。
+- 部署 guard 分三态：`running.biliup>0` → 等待；端点明确不支持（旧 bundle / 404 / 未知命令）→ 再查节点结果文件有无 `phase=uploading`（blocking 路径的上传不在 proc-queue 里），有则等待、无则记录「该节点无法确认」后放行；不可达 / 超时 / 503 → fail-closed 等待。
 - `sweepStale` 对「远端队列中」的 job 豁免（轮询时 touch `updatedAt`，或 `isStreamActive` 认远端在途）。
 - `-N` / `runNow`：按**去掉后缀的原 key** 查台账，任一 job 有 BV，或存在 `pending/running/uncertain` 队列项 → 409（`force` 才放行）。`biliup list` 只作旁证，不做自动判定。
 - `_proc-cancel`（036 T5 的一部分）**必须随 PR2 一起交付**：回退 blocking 前先取消该节点所有 pending 行；已认领的行只能等其收口或转 `uncertain`，不能回落旧路径。
@@ -127,10 +128,10 @@
 | PR0 | ✅ 已合并（#203）：止血（现有 blocking 路径）：预算对 **winnerMembers** 全部会话求和、保守带宽下调到 0.1MB/s（上限仍 6h）、超时报错带 stderr、不覆盖原始错误、修测试 | 无 | 上传类，`needs-decision`（本次由用户确认开工） |
 | PR1 | ✅ 代码已合并（#205）：`runBiliup` 的 `onSpawn/onLine` + 结果文件加可选 `step`；**停滞信号 VPS 实测仍未做** | PR0 | 同上 |
 | PR2 | biliup 处理器（remux 前置为独立 job）+ 阶段/停滞/退避/保序 + store 迁移（含 pid）+ 重启恢复 + `_proc-cancel` + core 迁移 reason + 关停回 pending | PR1、036 T2、**VPS 停滞信号实测** | 同上 |
-| PR3 | master 入队/轮询/不 abort/sweep 豁免/原 key 409（含 SSH 失败）/部署 guard（fail-closed）/回退保护 | PR2 | 同上（改部署 guard） |
+| PR3 | master 入队/轮询/不 abort/sweep 豁免/原 key 409（含 SSH 失败）/部署 guard（fail-closed）/回退保护 | PR2，**且 `hub-recover-order` 已合并在内** | 同上（改部署 guard） |
 | PR4 | 边录边传接入共享并发槽 | PR2 | 同上 |
 | PR5 | 队列页（`/api/hub/queue` 露出节点 biliup 行、最后心跳、ETA） | PR3 | `enhancement` |
-| PR6 | 归并工具 `hub-triage-node-uploads` / `hub-attach-bv` / `hub-clean-sources` / `hub-recover-order`（dry-run 默认，`--apply` 才写，参照 `hub-recheck-verify`） | **PR2**（recover-order 依赖 orderKey/seq/bv 列与 order-blocked） | 删源类，`needs-decision` |
+| PR6 | 归并工具 `hub-triage-node-uploads` / `hub-attach-bv` / `hub-clean-sources` / `hub-recover-order`（dry-run 默认，`--apply` 才写，参照 `hub-recheck-verify`） | **PR2**（recover-order 依赖 orderKey/seq/bv 列与 order-blocked）。**PR3 启用 `mode: queue` 前，`hub-recover-order` 必须先合入**（可随 PR3 交付，或提前从 PR6 拆出） | 删源类，`needs-decision` |
 | PR7 / PR8 | Phase 2：传输/提交拆分 + 已传分 P 复用（含许可证决策）；审核通过后才删源（默认关） | PR3 | `needs-decision` |
 
 回滚：每个 PR 单独 revert；PR3 之后切回 `blocking` 的前提是节点队列已空（`_proc-status` 实测贴 PR）。
@@ -146,10 +147,12 @@
 - `sweepStale` 对远端在途 job 不标 failed（含 master 重启）。
 - 排队等配额超过 `heartbeatStaleMs` 不会被回队；字节停滞才判死；字节在涨 / 进程刚消失不判死；`submit` 无字节增长不杀。
 - 出现 `All files uploaded` 之后失败 → 不会第二次 upload；该行缺失 → 按 submit 不确定。
+- **PR0 已完成**（#203）：预算对 `winnerMembers` 求和、原始错误不被覆盖，保留既有用例即可，本 PR 不重复实现。
 - 重启恢复矩阵：`running` × {gate_wait, transfer, submit} × {有 BV, 无 BV}（remux 不在 biliup job 内）；崩在「写 intent」与「spawn」之间 → 回 pending，不 append。
 - 崩溃恢复经 `settleOrphan(rerun)` 回 pending 时 `attempts` 保持（那次尝试已发生），与关停回退不同；连续重启不得额外消耗「最多 3 次」的额度以外的次数（以 claim 次数为唯一口径）。
 - 子进程身份：pid 存活但 cmdline/startedAt 不匹配 → 不当作自己的孤儿；无法确认 → `uncertain`，绝不并列起第二个 biliup。
 - 关停：`transfer` 落回 pending 且**不**级联 order-blocked；同 orderKey 的后续项保持 pending。
+- 关停时子进程仍未退出（孤儿 biliup 存活）→ 核验失败 → `uncertain`，重启后不得重新 claim 该 job。
 - 重试计数：claim 1 次 + retry 2 次 = 最多 3 次；第 3 次失败后不再 retryTransfer。
 - 关停超时：`step=transfer` → `hasIntent=false` → 回 pending；`step=submit` → `uncertain`。
 - `hub-recover-order --bv` 与 `--restart` 各自只跑一次；`--restart` 在 `biliup list` 无法确认时拒绝执行。
