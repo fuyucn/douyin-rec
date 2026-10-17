@@ -511,7 +511,7 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog }: { item: QueueItem
             <FileText className="w-3.5 h-3.5" />
           </button>
           <Link
-            to="/hub"
+            to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`}
             title={t("queue.openRoom")}
             className="icon-btn !w-7 !h-7"
           >

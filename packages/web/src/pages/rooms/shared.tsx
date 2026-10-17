@@ -9,7 +9,7 @@ import { useHubStream, usePolling, errMessage, useToast, type HubStreamHandle } 
 import { useT } from "../../lib/i18n";
 import { roomId, scheduleText } from "../../lib/labels";
 import { ageOf, lastDelivery, type Delivery } from "../../lib/last-delivery";
-import { latestRunKey, roomStatus, type LatestRun, type RoomStatus } from "../../lib/room-status";
+import { lastRunHint, latestRunKey, roomStatus, type LatestRun, type RoomStatus } from "../../lib/room-status";
 import { PHASE_STYLE } from "../../lib/task-status";
 import { RoomEditor } from "../../modals/RoomEditor";
 
@@ -39,6 +39,9 @@ export function useRoomsData(): RoomsData {
   }, []);
   const refresh = useCallback(async (): Promise<void> => {
     try {
+      // Tasks drive the start/stop icons and the status badge: refresh them with the rooms so an add / start /
+      // stop shows at once instead of waiting for the 5 s poll. A failure keeps the previous list.
+      void api.listTasks().then(setTasks).catch(() => {});
       setRooms(await api.listRooms());
       // Runs are secondary: a failure must not hide the room list, but still marks the stream stale.
       await refreshRuns();
@@ -155,7 +158,8 @@ export function statusDetail(t: ReturnType<typeof useT>, r: RoomDTO, s: RoomStat
       if (s.kind === "waiting") parts.push((r.recording && scheduleText(r.recording)) || t("room.allDay"));
       else if (r.processing?.enabled === false) parts.push(t("room.pausedRule"));
       else if (!r.recording) parts.push(t("room.noTask"));
-      if (s.run) parts.push(s.run.bv ? t("room.lastBv") : t("room.lastRun", { state: runLabel(t, s.run.state) }));
+      const hint = lastRunHint(s.run);
+      if (hint) parts.push(hint.kind === "bv" ? t("room.lastBv") : t("room.lastRun", { state: runLabel(t, hint.state) }));
       return parts.join(" · ");
     }
   }

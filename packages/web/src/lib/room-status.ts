@@ -35,6 +35,20 @@ export function runNeedsAttention(run: Pick<LatestRun, "state" | "manualPhase">)
   return !(run.manualPhase != null && BENIGN_MANUAL_PHASES.includes(run.manualPhase));
 }
 
+/**
+ * What the status line says about the last run, if anything. The delivery column already shows the
+ * outcome, so the line only adds what the badge cannot: a published BV, or a run that needs the user.
+ * Benign endings (stage close-out, user stop, plain done) say nothing — "Last run Needs manual" next to
+ * "Archived" contradicts itself.
+ */
+export type LastRunHint = { kind: "bv" } | { kind: "state"; state: string } | null;
+
+export function lastRunHint(run: LatestRun | null): LastRunHint {
+  if (!run) return null;
+  if (run.bv) return { kind: "bv" };
+  return runNeedsAttention(run) ? { kind: "state", state: run.state } : null;
+}
+
 export interface RoomStatus {
   kind: RoomStatusKind;
   /** Why this kind: the task phase (when it decided) or the run state. */

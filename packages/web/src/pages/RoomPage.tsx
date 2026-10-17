@@ -40,6 +40,14 @@ export function RoomPage(): ReactNode {
     setParams(next ? { logs: "1" } : {}, { replace: true });
   };
 
+  // Below the `lg` breakpoint the page is one column and the log panel sits under the info column, i.e. off
+  // screen. Bring it into view when it opens (also for the list's ?logs=1 arrival, once the room has loaded).
+  const logsMounted = logsOpen && !!room && taskId !== null;
+  useEffect(() => {
+    if (!logsMounted || !window.matchMedia("(max-width: 1023px)").matches) return;
+    document.getElementById("logs")?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [logsMounted]);
+
   // Elapsed time only exists for a local recorder process (runtime); remote-only → "—".
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const live = s?.kind === "recording";

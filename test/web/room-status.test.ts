@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { latestRunKey, roomStatus, sortByStatus, type LatestRun } from "../../packages/web/src/lib/room-status.js";
+import { lastRunHint, latestRunKey, roomStatus, sortByStatus, type LatestRun } from "../../packages/web/src/lib/room-status.js";
 import type { RoomDTO, Task } from "../../packages/web/src/api/client.js";
 
 type Room = Pick<RoomDTO, "processing" | "recording">;
@@ -79,5 +79,24 @@ describe("sortByStatus", () => {
     const kinds = ["paused", "waiting", "recording", "attention", "waiting2", "processing"];
     const statusOf = (k: string) => ({ kind: k.replace(/\d$/, "") as never, phase: null, run: null });
     expect(sortByStatus(kinds, statusOf)).toEqual(["attention", "recording", "processing", "waiting", "waiting2", "paused"]);
+  });
+});
+
+describe("lastRunHint (status-line suffix)", () => {
+  it("says nothing without a run", () => {
+    expect(lastRunHint(null)).toBeNull();
+  });
+  it("a published BV wins", () => {
+    expect(lastRunHint({ state: "done", bv: "BV1x", updatedAt: 1 })).toEqual({ kind: "bv" });
+  });
+  it("faults are named: failed, or needs_manual without a benign phase (legacy rows included)", () => {
+    expect(lastRunHint(run("failed"))).toEqual({ kind: "state", state: "failed" });
+    expect(lastRunHint(run("needs_manual"))).toEqual({ kind: "state", state: "needs_manual" });
+    expect(lastRunHint({ ...run("needs_manual"), manualPhase: "other" })).toEqual({ kind: "state", state: "needs_manual" });
+  });
+  it("benign endings stay silent: stage close-out, user stop, plain done", () => {
+    expect(lastRunHint({ ...run("needs_manual"), manualPhase: "waiting_upload" })).toBeNull();
+    expect(lastRunHint({ ...run("needs_manual"), manualPhase: "stopped" })).toBeNull();
+    expect(lastRunHint(run("done"))).toBeNull();
   });
 });

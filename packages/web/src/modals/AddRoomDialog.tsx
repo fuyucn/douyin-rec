@@ -109,7 +109,16 @@ export function AddRoomDialog({ open, onClose, onSaved, hubEnabled, workers }: P
           partial = true;
         }
       }
-      if (!partial) toast(t("room.added"), "success");
+      // A new room should just run (listen → record → deliver). The task API creates it stopped, so start it
+      // here, but only when the rule half is in place: a half-configured room stays paused for the user to fix.
+      if (!partial) {
+        try {
+          await api.startTask(task.id);
+          toast(t("room.added"), "success");
+        } catch (err) {
+          toast(t("room.addStartFailed", { msg: errMessage(err) }), "error");
+        }
+      }
       onSaved();
     } catch (e) {
       toast(errMessage(e), "error");
