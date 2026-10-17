@@ -22,6 +22,7 @@ const cfg = {
 function fakeLedger() {
   return {
     get: () => ({ bv: "" }),
+    getUploadPlan: () => null,
     logStep: vi.fn(),
     setState: vi.fn(),
     syncNodeState: vi.fn(),
@@ -193,6 +194,7 @@ describe("tryNodeSideUpload 失败收口(回读节点落盘结果,区分假失�
   function fakeLedgerSpy() {
     return {
       get: () => ({ bv: "" }),
+      getUploadPlan: () => null,
       logStep: vi.fn(),
       setState: vi.fn(),
       syncNodeState: vi.fn(),
@@ -404,6 +406,7 @@ describe("节点侧上传台账步骤名 = node_upload(非 pull)", () => {
   function spyLedger() {
     return {
       get: () => ({ bv: "" }),
+      getUploadPlan: () => null,
       logStep: vi.fn(),
       setState: vi.fn(),
       syncNodeState: vi.fn(),
@@ -499,6 +502,7 @@ describe("issue #2:started + 主动终止节点执行体(A1 尽早落盘 + A2 �
   function ledgerSpy() {
     return {
       get: () => ({ bv: "" }),
+      getUploadPlan: () => null,
       logStep: vi.fn(),
       setState: vi.fn(),
       syncNodeState: vi.fn(),
@@ -621,7 +625,7 @@ describe("tryNodeSideUpload 已建稿护栏(issue #91)", () => {
 
 describe("tryNodeSideUpload 成功收尾(issue #92)", () => {
   it("节点侧上传成功(返回 ok)→ 立刻按配置删节点源;节点侧无 sync_parts 基线,不排旁路校验", async () => {
-    const ledger = { get: () => ({ bv: "" }), logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), doneParts: () => new Set<number>() };
+    const ledger = { get: () => ({ bv: "" }), getUploadPlan: () => null, logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), doneParts: () => new Set<number>() };
     const t = fakeTransport();
     const scheduled: number[] = [];
     const deps = {
@@ -714,7 +718,7 @@ describe("节点侧失败原因写进台账时保留末尾", () => {
       readNodeResult: vi.fn(async () => null),
       cleanup: vi.fn(async () => {}),
     };
-    const ledger = { get: () => ({ bv: "" }), logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), setBv: vi.fn() };
+    const ledger = { get: () => ({ bv: "" }), getUploadPlan: () => null, logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), setBv: vi.fn() };
     const rec = { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" };
     await tryNodeSideUpload({
       streamKey: "douyin:123:2026-10-12", cfg, winner: { workerId: "w1", rec }, winnerMembers: [{ workerId: "w1", rec }],
@@ -777,7 +781,7 @@ describe("issue #202:needs_manual 保留原始失败原因", () => {
       nodeResult: vi.fn(async () => ({ phase: "uploading", ok: false, atMs: 1 })),
       cleanup: vi.fn(async () => {}),
     };
-    const ledger = { get: () => ({ bv: "" }), logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), setBv: vi.fn() };
+    const ledger = { get: () => ({ bv: "" }), getUploadPlan: () => null, logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), setBv: vi.fn() };
     const rec = { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" };
     await tryNodeSideUpload({
       streamKey: "douyin:123:2026-10-12", cfg, winner: { workerId: "w1", rec }, winnerMembers: [{ workerId: "w1", rec }],

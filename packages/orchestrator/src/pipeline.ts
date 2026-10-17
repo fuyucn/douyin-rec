@@ -2,6 +2,7 @@ import path from "node:path";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
+import type { NodeUploadConfig } from "./node-upload-config.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { formatBiliTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
@@ -241,6 +242,8 @@ export interface PipelineCfg {
 
 export interface PipelineDeps {
   transports: Map<string, Transport>;
+  /** nodeUpload config (plan 038); omitted = blocking, the queue path is never taken. */
+  nodeUpload?: NodeUploadConfig;
   ledger: SyncLedger;
   /** 共享资源池(cpu/net 各 max=1 + 内存闸门)。缺省 → runPipeline 内部新建(测试/兼容)。 */
   pool?: ResourcePool;

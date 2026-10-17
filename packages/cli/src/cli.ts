@@ -1009,10 +1009,13 @@ const hubStarter: HubStarter = {
       limitKey: masterUploadAccountKey(opts.warn),
       warn: opts.warn,
     });
+    // plan 038: queue-managed upload settings; absent/invalid = safe defaults (blocking, nothing polled).
+    const nodeUploadCfg = parseNodeUploadConfig((hubCfg as { nodeUpload?: unknown }).nodeUpload);
     const pipelineDeps = {
       transports,
       ledger,
       pool,
+      nodeUpload: nodeUploadCfg,
       // 返回 stdout+stderr(各截尾 64KB,biliup 输出可达 MB 级)→ pipeline 摘尾写进该场 job.log。
       sh: (cmd: string) => new Promise<string>((res, rej) => {
         // detached 进程组:停任务时 kill(-pid) 能带走 ffmpeg 孙进程;其它 spawn 不建组。
@@ -1127,8 +1130,6 @@ const hubStarter: HubStarter = {
       };
     };
 
-    // plan 038: queue-managed upload settings; absent/invalid = safe defaults (blocking, nothing polled).
-    const nodeUploadCfg = parseNodeUploadConfig((hubCfg as { nodeUpload?: unknown }).nodeUpload);
     const reconciler = new Reconciler({
       platform: hubCfg.platform ?? "douyin",
       transports,

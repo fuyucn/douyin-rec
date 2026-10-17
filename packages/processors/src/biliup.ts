@@ -2,9 +2,12 @@
  * biliup processor (plan 038 T08/T15): create the first part, then append each later part.
  * A transfer with no tcp progress for stallMs is stopped and retried with proof; submit is never killed.
  */
-import { existsSync } from "node:fs";
-import { basename } from "node:path";
-import { APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, UncertainOutcome, probeChild, type ProcessContext, type ProcessJob, type ProcessResult, type Processor } from "@drec/core";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { basename, dirname, extname, join } from "node:path";
+import {
+  APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
+  type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext,
+} from "@drec/core";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
 import { TransferWatch, readTcpAcked, watchConfigOf, type AckSample } from "./biliup-progress.js";
 import { findRecentArchive, type ArchiveQuery } from "./archive-lookup.js";
@@ -17,6 +20,9 @@ export interface BiliupParams {
   desc?: string;
   public?: boolean;
   bv?: string;
+  /** Part title template + render context (same as the blocking path); parts are uploaded under that name. */
+  partTitleTemplate?: string;
+  titleCtx?: TitleContext;
 }
 
 /** BV persisted on the queue row by an earlier attempt of this same job (P1 created by us, inputs[0] is P1). */
@@ -36,6 +42,8 @@ function params(job: ProcessJob): BiliupParams {
     desc: typeof p.desc === "string" ? p.desc : undefined,
     public: p.public === true,
     bv: typeof persisted === "string" && persisted ? persisted : (typeof p.bv === "string" && p.bv ? p.bv : undefined),
+    partTitleTemplate: typeof p.partTitleTemplate === "string" && p.partTitleTemplate.trim() ? p.partTitleTemplate : undefined,
+    titleCtx: typeof p.titleCtx === "object" && p.titleCtx !== null ? p.titleCtx : undefined,
   };
 }
 
@@ -59,6 +67,44 @@ export interface BiliupDeps {
   probe?: typeof probeChild;
   tickMs?: number;
   killGraceMs?: number;
+  /** Account rate-limit gate (601/21566 cooldown + window), opened per run; injected by the CLI. */
+  gate?: () => { run<T>(key: string, fn: () => Promise<T>): Promise<T> };
+  accountKey?: (cookiesPath: string) => string;
+  /** The node's own biliup cookies path when present; the master-sent path is only a fallback. */
+  localCookies?: () => string | null;
+}
+
+const ALIAS_DIR = ".upload";
+
+/** biliup is always run with the node's own cookies when it has them (the master path rarely exists here). */
+const cookiesOf = (p: BiliupParams, deps: BiliupDeps): string => deps.localCookies?.() ?? p.cookies;
+
+/**
+ * biliup names a part after its file stem, so each part is hard-linked under its rendered part title
+ * (same rule as the blocking node pipeline: 1-based index, `-P{idx}` on collisions, original name on failure).
+ */
+export function aliasPartFiles(files: readonly string[], template?: string, ctx?: TitleContext): string[] {
+  if (!template || !ctx) return [...files];
+  const used = new Set<string>();
+  return files.map((f, i) => {
+    let base: string | null = null;
+    try {
+      base = partTitleToFilename(formatPartTitle(template, { ...ctx, partIndex: i + 1, partTotal: files.length }, "plain"));
+    } catch { /* unrenderable title: keep the original name rather than fail the upload */ }
+    if (!base) return f;
+    let stem = base;
+    for (let n = 0; used.has(stem); n++) stem = `${base}-P${i + 1}${n > 0 ? `-${n}` : ""}`;
+    used.add(stem);
+    const dst = join(dirname(f), ALIAS_DIR, `${stem}${extname(f)}`);
+    try {
+      mkdirSync(dirname(dst), { recursive: true });
+      rmSync(dst, { force: true });
+      linkOrCopy(f, dst);
+      return dst;
+    } catch {
+      return f;
+    }
+  });
 }
 
 /** Transfer retries are counted by claims (plan 038 §4.3): 1 claim + 2 retries. */
@@ -144,18 +190,23 @@ interface RunState { bv?: string }
 
 async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps, sup: Supervisor, st: RunState): Promise<ProcessResult> {
   const p = params(job);
-  const files = job.inputs;
-  const meta = { cookies: p.cookies, title: p.title, tid: p.tid, tag: p.tag, ...(p.desc ? { desc: p.desc } : {}), public: p.public === true };
+  const files = aliasPartFiles(job.inputs, p.partTitleTemplate, p.titleCtx);
+  const cookies = cookiesOf(p, deps);
+  const meta = { cookies, title: p.title, tid: p.tid, tag: p.tag, ...(p.desc ? { desc: p.desc } : {}), public: p.public === true };
+  const gate = deps.gate?.();
+  const key = deps.accountKey?.(cookies) ?? "";
+  // Every create/append takes a fresh quota slot, like the blocking path; gate_wait is never a stall.
+  const gated = <T>(fn: () => Promise<T>): Promise<T> => (gate ? gate.run(key, fn) : fn());
   st.bv = p.bv;
   if (!st.bv) {
     sup.setStep("gate_wait");
     // Fail-closed before creating anything: without duration we cannot prove "no draft".
     const expected = expectedDuration(job, deps);
     if (expected <= 0) throw new Error("missing expected duration for this output; cannot prove no draft exists, refusing to create one");
-    const proof = await findRecentArchive(p.cookies, p.title, expected, deps.lookup);
+    const proof = await findRecentArchive(cookies, p.title, expected, deps.lookup);
     if (proof === "yes") throw new Error("an archive with the same title and duration already exists; refusing to create a duplicate");
     if (proof === "unknown") throw new Error("cannot confirm whether a draft exists; needs manual verification");
-    st.bv = await uploadPlain({ plain: meta, run: sup.run });
+    st.bv = await gated(() => uploadPlain({ plain: { ...meta, video: files[0]! }, run: sup.run }));
     ctx.setState?.({ bv: st.bv });
   }
   const bv = st.bv;
@@ -165,7 +216,7 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   // the archive, so appending from index 0 or 1 could duplicate a part. Resume only from a confirmed count.
   let appendFrom = p.bv ? 0 : 1;
   if (persistedBv(job) && !(job.params as { bv?: unknown }).bv) {
-    const onServer = countParts ? await countParts(bv, p.cookies).catch(() => null) : null;
+    const onServer = countParts ? await countParts(bv, cookies).catch(() => null) : null;
     if (onServer == null || onServer < 1 || onServer > files.length) {
       throw new Error(`${APPEND_AMBIGUOUS_MARKER} resumed upload of ${bv} cannot confirm how many parts are already on the archive (count=${onServer ?? "unknown"}); needs manual verification`);
     }
@@ -174,14 +225,14 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   for (let i = appendFrom; i < files.length; i++) {
     sup.setStep("gate_wait");
     try {
-      await appendGroup({ ...meta, bv, files: [files[i]!], run: sup.run, ...(countParts ? { countParts: () => countParts(bv, p.cookies) } : {}) });
+      await gated(() => appendGroup({ ...meta, bv, files: [files[i]!], run: sup.run, ...(countParts ? { countParts: () => countParts(bv, cookies) } : {}) }));
     } catch (e) {
       const msg = String((e as Error)?.message ?? e);
       if (msg.includes(APPEND_AMBIGUOUS_MARKER)) throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${msg}`);
       throw e;
     }
   }
-  return { outputs: [], bv, note: `${basename(files[0] ?? "")} +${Math.max(0, files.length - 1)} parts` };
+  return { outputs: [], bv, note: `${basename(job.inputs[0] ?? "")} +${Math.max(0, files.length - 1)} parts` };
 }
 
 const countPartsOf = (deps: BiliupDeps) => deps.countParts ?? (deps.run ? undefined : countVideoParts);
@@ -197,12 +248,12 @@ async function afterStall(job: ProcessJob, deps: BiliupDeps, sup: Supervisor, st
   if (sup.wallHit()) throw new Error(`${e.message}; past maxWallMs, not retrying`);
   if (attempts >= MAX_ATTEMPTS) throw new Error(`${e.message}; ${attempts} attempts used, not retrying`);
   if (!st.bv) {
-    const proof = await findRecentArchive(p.cookies, p.title, expectedDuration(job, deps), deps.lookup);
+    const proof = await findRecentArchive(cookiesOf(p, deps), p.title, expectedDuration(job, deps), deps.lookup);
     if (proof !== "no") throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${e.message}; cannot prove no draft was created (${proof})`);
   } else {
     if (p.bv) throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${e.message}; appends onto a pre-existing draft cannot be resumed safely`);
     const countParts = countPartsOf(deps);
-    const n = countParts ? await countParts(st.bv, p.cookies).catch(() => null) : null;
+    const n = countParts ? await countParts(st.bv, cookiesOf(p, deps)).catch(() => null) : null;
     if (n == null || n < 1 || n > job.inputs.length) throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${e.message}; part count unknown (${n ?? "unknown"})`);
   }
   const backoff = Math.min(MAX_BACKOFF_MS, RETRY_BACKOFF_MS * 2 ** (attempts - 1));
@@ -220,7 +271,7 @@ export function makeBiliupProcessor(deps: BiliupDeps = {}): Processor {
     capabilities: [BILIUP_QUEUE_CAPABILITY],
     validate(job: ProcessJob): string | null {
       const p = params(job);
-      if (!p.cookies) return "missing cookies path";
+      if (!cookiesOf(p, deps)) return "missing cookies path";
       if (!p.title) return "missing archive title";
       if (!Number.isInteger(p.tid) || p.tid <= 0) return "invalid tid";
       if (!p.tag) return "missing tag";
@@ -248,7 +299,7 @@ export function makeBiliupProcessor(deps: BiliupDeps = {}): Processor {
       const expected = expectedDuration(job, deps);
       // Child liveness is checked by the runner (pid + startedAt); this hook only proves no draft.
       if (!p.title || expected <= 0) return "uncertain";
-      const proof = await findRecentArchive(p.cookies, p.title, expected, deps.lookup);
+      const proof = await findRecentArchive(cookiesOf(p, deps), p.title, expected, deps.lookup);
       return proof === "no" ? "safe" : "uncertain";
     },
     async recover(): Promise<"uncertain"> { return "uncertain"; },

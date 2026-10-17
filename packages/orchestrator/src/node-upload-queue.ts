@@ -9,7 +9,7 @@
  * master restart) reuses them and the node's idempotent enqueue answers instead of creating a second job.
  * This module never uploads directly, never deletes anything and never calls `_node-abort`.
  */
-import { jobIdOf, type EnqueueResult, type ProcessJob, type ProcessReceipt } from "@drec/core";
+import { jobIdOf, type EnqueueResult, type ProcessJob, type ProcessReceipt, type TitleContext } from "@drec/core";
 import type { SyncLedger } from "./ledger.js";
 import { ProcUnsupported, type Transport } from "./transport.js";
 
@@ -50,6 +50,9 @@ export interface BiliupMeta {
   public?: boolean;
   /** Total expected duration of the parts; required for the node's no-draft proof. */
   expectedDurationSec: number;
+  /** Part title template + render context; the node uploads each part under its rendered title. */
+  partTitleTemplate?: string;
+  titleCtx?: TitleContext;
 }
 
 export type UploadDispatch =

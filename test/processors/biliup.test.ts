@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { makeBiliupProcessor } from "../../packages/processors/src/biliup.js";
+import { existsSync, statSync } from "node:fs";
+import { basename, dirname } from "node:path";
+import { aliasPartFiles, makeBiliupProcessor } from "../../packages/processors/src/biliup.js";
 
 function job(files: string[], params: Record<string, unknown> = {}) {
   return {
@@ -122,3 +124,45 @@ describe("biliup processor (plan 038 T08)", () => {
     expect(makeBiliupProcessor().validate(job(["/nope.mp4"]))).toMatch(/does not exist/);
   });
 });
+
+describe("biliup processor node wiring (plan 038 T15b)", () => {
+  it("creating P1 uploads the first part file (regression: the create command had no file)", async () => {
+    const run = vi.fn(async (argv: string[]) => argv[2] === "upload" ? "BV1iiiiiiiii" : "ok"); // issue-guard: allow (fake BV fixture)
+    const fs = files(2);
+    await makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]" } }).run(job(fs), ctx());
+    expect(run.mock.calls[0]![0]).toContain(fs[0]);
+    expect(run.mock.calls[1]![0]).toContain(fs[1]);
+  });
+
+  it("every create/append goes through the account gate with the local cookies' key", async () => {
+    const run = vi.fn(async (argv: string[]) => argv[2] === "upload" ? "BV1jjjjjjjjj" : "ok"); // issue-guard: allow (fake BV fixture)
+    const keys: string[] = [];
+    const gate = { run: async <T>(k: string, fn: () => Promise<T>) => { keys.push(k); return fn(); } };
+    const p = makeBiliupProcessor({
+      run, expectedDurationSec: 60, lookup: { run: async () => "[]" },
+      gate: () => gate, accountKey: (c) => `acct:${c}`, localCookies: () => "/node/cookies.json",
+    });
+    await p.run(job(files(3), { cookies: "/master/cookies.json" }), ctx());
+    expect(keys).toEqual(["acct:/node/cookies.json", "acct:/node/cookies.json", "acct:/node/cookies.json"]);
+    expect(run.mock.calls.every((c) => (c[0] as string[]).includes("/node/cookies.json"))).toBe(true);
+  });
+
+  it("validate accepts a job whose master cookies path is empty when the node has its own", () => {
+    const p = makeBiliupProcessor({ localCookies: () => "/node/cookies.json" });
+    expect(p.validate(job(files(1), { cookies: "" }))).toBeNull();
+  });
+
+  it("parts are hard-linked under their rendered titles, de-duplicated, originals kept", () => {
+    const fs = files(2);
+    const tc = { sessionBase: "a_2026-10-17_20-00-00", startMs: Date.UTC(2026, 9, 17, 12), timeZone: "UTC" };
+    const out = aliasPartFiles(fs, "{part}-{parts}", tc);
+    expect(out.map((f) => basename(f))).toEqual(["1-2.mp4", "2-2.mp4"]);
+    expect(out.every((f) => basename(dirname(f)) === ".upload" && statSync(f).nlink >= 1)).toBe(true);
+    expect(fs.every((f) => existsSync(f))).toBe(true);
+    const same = aliasPartFiles(fs, "same", tc);
+    expect(same.map((f) => basename(f))).toEqual(["same.mp4", "same-P2.mp4"]);
+    expect(aliasPartFiles(fs, undefined, undefined)).toEqual(fs);
+    expect(aliasPartFiles(fs, "{part}", { startMs: 0 })).toEqual(fs); // unrenderable → original names
+  });
+});
+
