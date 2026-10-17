@@ -709,3 +709,17 @@ describe("claim ordering and transfer retry (plan 038 T02)", () => {
     s.close();
   });
 });
+
+describe("prep-failed cascade (plan 038 T03b)", () => {
+  it("只取消同 orderKey+generation 的 pending biliup 行;其它代与 kind 不动", () => {
+    const s = env.open();
+    const mk = (name: string, gen: number, kind = "biliup") =>
+      env.job(name, { kind, logicalKey: `k:${name}@`, generation: gen, orderKey: "k", seq: 1 });
+    const rows = s.enqueueBatch([mk("a.ts", 1), mk("b.ts", 2), mk("c.ts", 1, "fake")], roots());
+    expect(s.cascadePrepFailed("k", 1)).toBe(1);
+    expect(s.get(rows[0]!.jobId)?.state).toBe("cancelled");
+    expect(s.get(rows[1]!.jobId)?.state).toBe("pending");
+    expect(s.get(rows[2]!.jobId)?.state).toBe("pending");
+    s.close();
+  });
+});

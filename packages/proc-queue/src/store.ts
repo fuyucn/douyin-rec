@@ -407,6 +407,14 @@ export class ProcQueueStore {
     ).run(`已取消(${reason})`, this.now(), this.now(), orderKey, generation, afterSeq).changes as number);
   }
 
+  /** Cancel every pending biliup row of one order/generation after its prep failed. */
+  cascadePrepFailed(orderKey: string, generation: number): number {
+    return this.tx(() => this.db.prepare(
+      `UPDATE proc_jobs SET state='cancelled', error=?, finishedAt=?, updatedAt=?
+       WHERE orderKey=? AND generation=? AND state='pending' AND kind='biliup'`,
+    ).run("已取消(order-prep-failed)", this.now(), this.now(), orderKey, generation).changes as number);
+  }
+
   clearChildPid(jobId: string): boolean {
     return this.tx(() => this.db.prepare("UPDATE proc_jobs SET childPid=NULL, childPidStartedAt=NULL, updatedAt=? WHERE jobId=?")
       .run(this.now(), jobId).changes > 0);
