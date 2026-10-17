@@ -62,6 +62,7 @@
 - 候选信号（**PR2 的硬前置：先在 VPS 实测选定一条，把命令与输出贴回 #202**）：① biliup 进程树 `/proc/<pid>/io` 的 `wchar` 增量；② checkpoint 文件 mtime/size；③ 套伪终端让进度条输出。
 - 判死条件：`transfer` 步内字节增量为 0 持续 `stallMs`（默认 15 分钟）。`remux` / `gate_wait` **不参与**；`submit` **永不 kill**；进程消失给宽限。
 - 租约心跳（`heartbeatStaleMs`，按时间）与传输进度（按字节）是**两个信号**，只有后者能判死。
+- `gate_wait` **不占** `lane=biliup` 槽：配额拿到后才置 `running`；等待期间 `state=pending, step=gate_wait`，其它场可轮转。
 - 慢（< `slowAlertBps` 持续 `slowAlertWindowMs`）只告警，不 kill。`maxWallMs` 只用于告警 + 停止重试，不 kill。
 
 ### 4.3 重试与保序
@@ -69,18 +70,24 @@
 - `transfer` 失败或停滞、且**确认进程已停** → job 回 `pending` 并带 `notBefore`（5 分钟起指数退避，封顶 1 小时，最多 3 次）。重试重传该 job 的文件（biliup checkpoint 只在单次调用内有效，跨调用不保证续传，ETA 按整段算）。退避期间让出轮转给其它场。
   - **状态机迁移（PR2 必须一起改）**：core `TransitionReason` 新增 `transfer-retry`；`canTransition(running→pending)` 放行 `reason="transfer-retry"`（仅 biliup、仅 `step∈{gate_wait,transfer}` 且进程已确认停止时由 store 使用）。`ProcQueueStore` 新增 `retryTransfer(jobId)`，原子写 `state=pending, notBefore, attempts+1`；`retryable=false` 继续拦住 `failed→pending` 的通用人工重试。
 - `submit` 失败或结果不确定 → 先自动核对（append 用 `countVideoParts`，建稿用 `biliup list --is-pubing` 作旁证）；核对不出 → `uncertain`，人工处理。
-- 保序：job 带 `orderKey=streamKey`、`seq`；claim 时排除「同 orderKey 下有更小 seq 未 done」的 job。需要 store 迁移（`user_version` +1：`notBefore`、`orderKey`、`seq` 列）。
+- 保序：job 带 `orderKey=streamKey`、`seq`；claim 时排除「同 orderKey 下有更小 seq 未 done」的 job。
+- **store 迁移（`user_version` +1）**：`notBefore`、`orderKey`、`seq`、`step`、`bv` 五列。现有 `proc_jobs` 只有 `note/error/resultOutputs`，没有进度与 BV 的落点：
+  - `step`：runner 在阶段切换时原子更新（与节点结果文件同源，单一写入口）。
+  - `bv`：`seq=1` 建稿成功后写入；append 行执行前读同 `orderKey` 的 `seq=1` 行。
+  - `hasIntent` 映射：`step="submit"` 即 `hasIntent=true`；`remux/gate_wait/transfer` 为 false。`cancelOutcome` 据此决定取消落 `cancelled` 还是 `uncertain`。
   - **append 的 BV 来源**：append job 入队时 `bv` 可为空；runner 执行前从 store 读同 `orderKey` 下 `seq=1` 的 done 行取 BV，缺失则**不执行**、置 `uncertain` 并告警（绝不在无 BV 时新建稿）。
   - **前序不可完成的处置**：`seq` 更小的行进入 `failed`/`uncertain`/`cancelled` 时，同 `orderKey` 下所有更大 `seq` 的 pending 行原子转 `cancelled`（reason=`order-blocked`）并告警一次；既不静默卡住，也不越过前序乱序上传。
+  - **order-blocked 的恢复路径**：人工用 `biliup list` / 台账补齐 BV 后，执行 `hub-recover-order <streamKey>`：给同 `orderKey` 的后续项**换 generation**（`nextGeneration`）重新入队，并把 `seq=1` 行绑定该 BV；新 generation 的 jobId 不同，不撞 `cancelled` 终态。该命令走 PR6 的 dry-run→`--apply`，默认不改库。
 - 重启恢复：`pending` 原样保留；`running` 且在 `remux/gate_wait/transfer` → 清孤儿 biliup 后回 `pending`；在 `submit` → `uncertain`；已有 BV → 记 done，继续 append。
 
 ### 4.4 master 侧（对应 036 T5 + T15，`needs-decision`）
 
-- 入队**钉住执行节点**（winner 每轮可能不同，重入不得换节点）；`mode: queue`，回退 `blocking`；回退前要求节点队列无 pending/running biliup（或先取消），blocking 遇到队列里已有的项返回 409。
+- 入队**钉住执行节点**（winner 每轮可能不同，重入不得换节点）；`mode: queue`，回退 `blocking`；回退前要求节点队列无 pending/running biliup（或先取消），blocking 遇到**非终态**队列项（pending/running/uncertain）返回 409；`done/failed/cancelled` 不拦。已认领且 `interruptible=false` 的行最多等 `procShutdownWaitMs`（默认 15 分钟），到点 abort 并按 `cancelOutcome` 落 `uncertain`，然后才允许回退。
 - 队列模式下 master **不调 `_node-abort`**；轮询 `_proc-status`（每节点 60s）；SSH 失败 = 未知。
-- **SSH 失败时一律拒绝放行**：`-N`/`runNow` 若无法确认节点队列状态 → 返回 409（`force` 才放行，且日志写明「状态未知」）；部署 guard 若 `/api/proc/active` 不可达或返回 503 → 视为「可能在上传」，等待（fail-closed）。
+- **SSH 失败时一律拒绝放行**：`-N`/`runNow` 若无法确认节点队列状态 → 返回 409（`force` 才放行，且日志写明「状态未知」）。
+- 部署 guard 分三态：`running.biliup>0` → 等待；端点明确不支持（旧 bundle / 404 / 未知命令）→ 记录「该节点无法确认」后放行（否则旧节点永远拦着升级）；不可达 / 超时 / 503 → fail-closed 等待。
 - `sweepStale` 对「远端队列中」的 job 豁免（轮询时 touch `updatedAt`，或 `isStreamActive` 认远端在途）。
-- `-N` / `runNow`：按**去掉后缀的原 key** 查台账，任一 job 有 BV 或已有队列项 → 409（`force` 才放行）。`biliup list` 只作旁证，不做自动判定。
+- `-N` / `runNow`：按**去掉后缀的原 key** 查台账，任一 job 有 BV 或存在**非终态**队列项 → 409（`force` 才放行）。`biliup list` 只作旁证，不做自动判定。
 - `_proc-cancel`（036 T5 的一部分）**必须随 PR2 一起交付**：回退 blocking 前先取消该节点所有 pending 行；已认领的行只能等其收口或转 `uncertain`，不能回落旧路径。
 - 部署 guard：`deploy-precheck` 同时读 `/api/proc/active` 的 `running.biliup`，>0 就等（AGENTS.md 同 PR 改，见 036 §2.3 拟改文本）。
 
@@ -107,7 +114,7 @@
 
 | PR | 内容 | 依赖 | 标签 |
 |---|---|---|---|
-| PR0 | ✅ 已合并（#203）：止血（现有 blocking 路径）：预算对 **winnerMembers** 全部会话求和、保守带宽下调（约 0.1–0.2MB/s 口径，上限仍 6h）、超时报错带 stderr、不覆盖原始错误、修测试 | 无 | 上传类，`needs-decision`（本次由用户确认开工） |
+| PR0 | ✅ 已合并（#203）：止血（现有 blocking 路径）：预算对 **winnerMembers** 全部会话求和、保守带宽下调到 0.1MB/s（上限仍 6h）、超时报错带 stderr、不覆盖原始错误、修测试 | 无 | 上传类，`needs-decision`（本次由用户确认开工） |
 | PR1 | ✅ 代码已合并（#205）：`runBiliup` 的 `onSpawn/onLine` + 结果文件加可选 `step`；**停滞信号 VPS 实测仍未做** | PR0 | 同上 |
 | PR2 | biliup 处理器 + 阶段/停滞/退避/保序 + store 迁移 + 重启恢复 + `_proc-cancel` + core 迁移 reason | PR1、036 T2、**VPS 停滞信号实测** | 同上 |
 | PR3 | master 入队/轮询/不 abort/sweep 豁免/原 key 409（含 SSH 失败）/部署 guard（fail-closed）/回退保护 | PR2 | 同上（改部署 guard） |
