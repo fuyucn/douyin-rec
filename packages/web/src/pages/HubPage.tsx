@@ -30,7 +30,8 @@ export function HubPage(): ReactNode {
   const [activeRuns, setActiveRuns] = useState(0);
   /** 每个房间最新一条 run(徽标用;权威来源,不受「最近 N 条」分页影响)。 */
   const [latestByRoom, setLatestByRoom] = useState<Record<string, { streamKey: string; state: string; bv: string | null; updatedAt: number; manualPhase?: string | null }>>({});
-  // Rooms whose latest run needs a person (same verdict as the room list).
+  // Rooms whose LATEST RUN needs a person. Not the room-list status: that one also folds in live
+  // recording and paused/disabled state, so the two numbers can legitimately differ.
   const attentionRooms = Object.values(latestByRoom).filter((r) => runNeedsAttention(r)).length;
   const [loaded, setLoaded] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
