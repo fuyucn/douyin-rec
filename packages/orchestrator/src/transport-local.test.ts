@@ -1,9 +1,10 @@
 // packages/orchestrator/src/transport-local.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalTransport } from "./transport-local.js";
+import { ProcUnsupported } from "./transport.js";
 
 describe("LocalTransport.ping(轻量存活探针)", () => {
   it("dataRoot 存在 → resolve", async () => {
@@ -190,5 +191,22 @@ describe("LocalTransport.recordingStatus(F1)", () => {
   it("未注入在录房间 / 目录不存在 → 空,不抛", async () => {
     const t = new LocalTransport({ id: "l", recordingsDir: "/nonexistent-dir-x", taskRooms: {}, ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }) });
     expect(await t.recordingStatus()).toEqual({ rooms: [], rolling: [] });
+  });
+});
+
+describe("LocalTransport.procCancel", () => {
+  const base = { id: "local", recordingsDir: "/tmp", taskRooms: {}, ffprobe: async () => ({ durationSec: 0, startMs: 0, endMs: 0 }) };
+
+  it("delegates to the injected handler and returns its receipts", async () => {
+    const receipts = [{ jobId: "j1", state: "cancelled" }];
+    const procCancel = vi.fn(() => receipts as never);
+    const t = new LocalTransport({ ...base, procCancel });
+    await expect(t.procCancel(["j1"])).resolves.toBe(receipts);
+    expect(procCancel).toHaveBeenCalledWith(["j1"]);
+  });
+
+  it("throws ProcUnsupported when no handler is injected", async () => {
+    const t = new LocalTransport(base);
+    await expect(t.procCancel(["j1"])).rejects.toBeInstanceOf(ProcUnsupported);
   });
 });

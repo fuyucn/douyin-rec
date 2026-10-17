@@ -750,7 +750,7 @@ const hubStarter: HubStarter = {
       buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool, openUploadLimitStore,
     } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
-    const { handleEnqueue, handleProcStatus } = await import("@drec/app");
+    const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
     const { statSync } = await import("node:fs");
     const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
@@ -839,6 +839,7 @@ const hubStarter: HubStarter = {
       procChannel: {
         enqueue: (dataRoot, req) => handleEnqueue(dataRoot, req),
         procStatus: (dataRoot, ids) => handleProcStatus(dataRoot, ids),
+        procCancel: (dataRoot, ids) => handleProcCancel(dataRoot, ids),
       },
       // adopt=false:本机源任务保持用户可编辑(managedBy 不置 hub),只有远端节点的同步任务才锁编辑。
       applyTasks: (input) => applyRemoteTasks(opts.store, input.desired, opts.log, {

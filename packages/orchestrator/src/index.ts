@@ -71,6 +71,7 @@ export function registerBuiltinTransports(deps: {
   procChannel?: {
     enqueue(dataRoot: string, req: EnqueueRequest): EnqueueResponse;
     procStatus(dataRoot: string, jobIds: string[]): ProcessReceipt[];
+    procCancel?(dataRoot: string, jobIds: string[]): ProcessReceipt[];
   };
 }): void {
   const taskRooms = deps.taskRooms ?? {};
@@ -88,6 +89,7 @@ export function registerBuiltinTransports(deps: {
         ? {
             enqueue: (req: EnqueueRequest) => deps.procChannel!.enqueue(cfg.dataRoot!, req),
             procStatus: (ids: string[]) => deps.procChannel!.procStatus(cfg.dataRoot!, ids),
+            ...(deps.procChannel!.procCancel ? { procCancel: (ids: string[]) => deps.procChannel!.procCancel!(cfg.dataRoot!, ids) } : {}),
           }
         : {}),
     }),
