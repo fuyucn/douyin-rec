@@ -197,7 +197,7 @@ describe("createUploadQueuePoller", () => {
 
   it("terminal ledger states are not polled", async () => {
     const s = setup(async () => []);
-    s.ledger.markDone(KEY, "BV1abcdefghi");
+    s.ledger.markDone(KEY, "BV1abcdefghi"); // issue-guard: allow (fake BV fixture)
     await s.poller.poll();
     expect(s.seen).toEqual([]);
   });

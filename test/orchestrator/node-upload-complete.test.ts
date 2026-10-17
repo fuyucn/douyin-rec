@@ -11,7 +11,7 @@ import { ensureUploadPlan, planJobIds, type UploadDispatch, type UploadInput } f
 import type { Transport } from "../../packages/orchestrator/src/transport.js";
 
 const KEY = "douyin:1:2026-10-17";
-const BV = "BV1abcdefghi";
+const BV = "BV1abcdefghi"; // issue-guard: allow (fake BV fixture)
 const receipt = (over: Partial<ProcessReceipt>): ProcessReceipt => ({ jobId: "j", state: "done", leaseAlive: true, ...over });
 const biliup = (over: Partial<ProcessReceipt>): UploadDispatch => ({ phase: "biliup", receipt: receipt(over) });
 

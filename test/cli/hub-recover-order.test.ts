@@ -11,7 +11,7 @@ beforeEach(() => { env = makeEnv(); });
 afterEach(() => env.cleanup());
 
 const ORDER = "douyin:1:2026-10-17";
-const BV = "BV1abcdefghi";
+const BV = "BV1abcdefghi"; // issue-guard: allow (fake BV fixture)
 const noDraft: RecoverDeps = { lookup: { run: async () => "" } };
 const roots = (): { allowedRoots: string[] } => ({ allowedRoots: [env.root] });
 
@@ -158,7 +158,7 @@ describe("--bv", () => {
   });
 
   it("refuses when the queue recorded a different BV", async () => {
-    const s = await failedWithDraft("BV1zzzzzzzzz");
+    const s = await failedWithDraft("BV1zzzzzzzzz"); // issue-guard: allow (fake BV fixture)
     const p = await planRecoverOrder(s, { orderKey: ORDER, mode: "bv", bv: BV, fromPart: 2 });
     expect(p.refusal).toMatch(/differs/);
   });
