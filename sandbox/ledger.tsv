@@ -17,3 +17,5 @@ iter	task	phase	tests	quality	pass	note
 13b	T13b	keep	-	ok	yes	committed; reuses listTasks (no new RPC)
 13c	T13c	keep	2843/2885	ok	yes	committed; found ledger accepts same-state writes -> guard in apply
 final	prep	keep	2843/2885	ok	yes	version 0.0.165, English comments, bundle ok; PR not opened (awaiting user)
+T16	keep	2860/2902	ok	yes	PR #210 merged; guard three-state in deploy-precheck, checks master+2 workers
+T17	keep	2871/2913	ok	yes	PR #211 merged; runNow 409 by base key + force, web confirm dialog
