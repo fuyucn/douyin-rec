@@ -528,11 +528,13 @@ export class ProcQueueStore {
    * running → pending(关停 abort):只允许 `interruptible` 的 job;`attempts` 回退(关停不算一次尝试)。
    * 校验持有者。返回是否成功。
    */
-  releaseForShutdown(jobId: string, owner: string, interruptible: boolean): boolean {
+  releaseForShutdown(jobId: string, owner: string, interruptible: boolean, ctx: { kind?: string; step?: string | null } = {}): boolean {
     return this.tx(() => {
       const row = this.get(jobId);
       if (!row || row.state !== "running" || row.claimedBy !== owner) return false;
-      if (!canTransition("running", "pending", { reason: "shutdown-abort", interruptible })) return false;
+      const shutdownAllowed = interruptible
+        || (ctx.kind === "biliup" && (ctx.step === "gate_wait" || ctx.step === "transfer"));
+      if (!canTransition("running", "pending", { reason: "shutdown-abort", interruptible: shutdownAllowed })) return false;
       this.db.prepare(
         `UPDATE proc_jobs SET state='pending', claimedBy=NULL, attempts=MAX(attempts-1,0), updatedAt=? WHERE jobId=?`,
       ).run(this.now(), jobId);

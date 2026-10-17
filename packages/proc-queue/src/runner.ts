@@ -305,6 +305,11 @@ export class ProcRunner {
         if (this.inflight.get(job.jobId)?.reason === "fenced" || !this.leaseOk(job.kind)) throw new Error(`[proc] 租约已丢,拒绝执行不可逆动作 (${job.jobId})`);
       },
       markProgress: () => {},
+      setState: (patch) => {
+        if (patch.step !== undefined) this.o.store.updateStep(job.jobId, patch.step);
+        if (patch.bv !== undefined) this.o.store.setBv(job.jobId, patch.bv ?? "");
+        if (patch.childPid !== undefined) this.o.store.setChildPid(job.jobId, patch.childPid, patch.childPidStartedAt ?? null);
+      },
       log: (m) => this.log(`${job.jobId}: ${m}`),
       alert: (m) => this.o.alert(job.owner.taskId, m),
     };
@@ -351,6 +356,12 @@ export class ProcRunner {
       }
       const res = await proc.run(job, ctx);
       if (f.reason === "fenced") return; // 已失租:行不归我们,不写表
+      if (res.bv) store.setBv(job.jobId, res.bv);
+      if (res.retry) {
+        if (proc.interruptible) store.updateStep(job.jobId, "transfer");
+        if (!store.retryTransfer(job.jobId, owner, res.retry.notBefore)) store.finish(job.jobId, owner, { state: "failed", error: "retry requested but not allowed" });
+        return;
+      }
       if (!store.finish(job.jobId, owner, { state: "done", outputs: res.outputs, note: res.note })) {
         this.log(`${job.jobId}: 完成但收尾失败(持有者已换人),忽略`);
       }
@@ -475,7 +486,7 @@ export class ProcRunner {
     if (!(await withTimeout(interruptible.map((f) => f.settled), abortWait))) {
       // 处理器无视 abort:强制回 pending(租约随后删除,其后续 assertLease 必失败)。
       for (const f of interruptible) {
-        if (this.inflight.has(f.job.jobId)) store.releaseForShutdown(f.job.jobId, owner, true);
+        if (this.inflight.has(f.job.jobId)) store.releaseForShutdown(f.job.jobId, owner, true, { kind: f.job.kind, step: f.job.step });
       }
     }
     const rest = all.filter((f) => !f.proc.interruptible);
@@ -484,8 +495,13 @@ export class ProcRunner {
         if (!this.inflight.has(f.job.jobId)) continue;
         f.reason = "shutdown";
         f.ac.abort();
-        // 取消落点走契约 `cancelOutcome`(不自造):已进入不可打断动作 → hasIntent=true(biliup → uncertain,其余 → cancelled)。
-        store.finish(f.job.jobId, owner, { state: "cancelled", hasIntent: true, error: "关停等待超时,执行被中止,结果无法确定" });
+        const verified = f.proc.verifyStopped ? await f.proc.verifyStopped(f.job, this.ctxFor(f.job, f.ac)).catch(() => "uncertain") : "uncertain";
+        if (verified === "safe") {
+          store.releaseForShutdown(f.job.jobId, owner, false, { kind: f.job.kind, step: f.job.step });
+        } else {
+          // 取消落点走契约 `cancelOutcome`(不自造):已进入不可打断动作 → hasIntent=true(biliup → uncertain,其余 → cancelled)。
+          store.finish(f.job.jobId, owner, { state: "cancelled", hasIntent: true, error: "关停等待超时,执行被中止,结果无法确定" });
+        }
         this.o.alert(f.job.owner.taskId, `${f.job.kind} 任务关停超时,结果无法确定,需人工确认: ${f.job.jobId}`);
       }
     }

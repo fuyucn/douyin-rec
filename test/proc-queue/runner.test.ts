@@ -904,3 +904,29 @@ describe("返工(PR #154 审查 F1/F2/F4/F5/F6)", () => {
     expect(dto.leaseAlive.fake).toBe(true);
   });
 });
+
+describe("processor contract wiring (plan 038 T02)", () => {
+  it("ctx.setState persists step/bv/childPid; ProcessResult.bv is stored", async () => {
+    registerProcessor(fakeProcessor({ run: async (_j, ctx) => {
+      ctx.setState?.({ step: "transfer", childPid: 42, childPidStartedAt: "t0" });
+      return { outputs: [], bv: "BV1WIRE" };
+    } }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("done"));
+    const row = s.get(jobId)!;
+    expect([row.step, row.bv, row.childPid]).toEqual(["transfer", "BV1WIRE", 42]);
+  });
+
+  it("ProcessResult.retry → pending with notBefore, attempts unchanged", async () => {
+    registerProcessor(fakeProcessor({ kind: "biliup", run: async () => ({ outputs: [], retry: { notBefore: 5, reason: "transfer-retry" } }) }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts", { kind: "biliup", orderKey: "k", seq: 1 }), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+    expect([s.get(jobId)?.attempts, s.get(jobId)?.notBefore, s.get(jobId)?.step]).toEqual([1, 5, "transfer"]);
+  });
+});

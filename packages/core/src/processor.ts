@@ -57,6 +57,8 @@ export interface ProcessContext {
    * 通知/事件中心由 runner 负责**(plans/036 §2.2 / §2.3),处理器只管调用。
    */
   alert(msg: string): void;
+  /** Persist observable progress fields (step / bv / child pid). Processor never touches the store. */
+  setState?(patch: { step?: string | null; bv?: string | null; childPid?: number | null; childPidStartedAt?: string | null }): void;
 }
 
 export interface ProcessResult {
@@ -64,6 +66,10 @@ export interface ProcessResult {
   outputs: string[];
   /** 人类可读备注(入表 / 展示)。 */
   note?: string;
+  /** BV created by this run (biliup). */
+  bv?: string;
+  /** Ask the runner to retry later (transfer failure with a confirmed stopped child). */
+  retry?: { notBefore: number; reason: "transfer-retry" };
 }
 
 export interface Processor {
@@ -81,6 +87,8 @@ export interface Processor {
   run(job: ProcessJob, ctx: ProcessContext): Promise<ProcessResult>;
   /** 接管中断的 running job 时判定:重跑 / 已完成 / 无法判定(→ uncertain)。 */
   recover?(job: ProcessJob, ctx: ProcessContext): Promise<"rerun" | "done" | "uncertain">;
+  /** Shutdown verification: may this running row safely return to pending? */
+  verifyStopped?(job: ProcessJob, ctx: ProcessContext): Promise<"safe" | "uncertain">;
 }
 
 // ───────────────────────── 注册表 ─────────────────────────
