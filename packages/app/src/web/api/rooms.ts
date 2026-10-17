@@ -163,6 +163,23 @@ export function buildRooms(ctx: ApiCtx) {
       const before = view(key);
       if (!before) return err(404, `未找到房间 ${key}`);
 
+      // Validate the processing half BEFORE touching the task: a rejection after the recording write
+      // would leave a half-applied save behind an error toast (the rollback below only covers a failed
+      // rule write). `workers: null` = explicit "all nodes" (clears the restriction); `[]` stays invalid.
+      const proc = input.processing;
+      if (proc) {
+        const checkInput: HubRulePayload = {
+          enabled: proc.enabled,
+          pipeline: proc.pipeline,
+          workers: proc.workers === null ? undefined : proc.workers,
+          requires: proc.requires,
+        };
+        const werr = ctx.validateWorkers(checkInput);
+        if (werr) return err(400, werr);
+        const perr = ctx.validatePipeline(checkInput, hubStore.getHubRule(hubDir, key)?.pipeline);
+        if (perr) return err(400, perr);
+      }
+
       // ── 录制半边 ──────────────────────────────────────────────────────────────
       const rec = input.recording;
       let taskId = before.recording?.taskId ?? null;
@@ -233,19 +250,7 @@ export function buildRooms(ctx: ApiCtx) {
       }
 
       // ── 处理半边 ──────────────────────────────────────────────────────────────
-      const proc = input.processing;
       if (proc) {
-        const ruleInput: HubRulePayload = {
-          enabled: proc.enabled,
-          pipeline: proc.pipeline,
-          workers: proc.workers,
-          requires: proc.requires,
-        };
-        // 复用 hub-rules 的同一套校验(判定逻辑只写一份):worker 必须已配置、标题模板合法。
-        const werr = ctx.validateWorkers(ruleInput);
-        if (werr) return err(400, werr);
-        const perr = ctx.validatePipeline(ruleInput, hubStore.getHubRule(hubDir, key)?.pipeline);
-        if (perr) return err(400, perr);
         // 「要改 processing 但没有 sourceTaskId」→ 规则建了也没法下发,必须让用户补。
         const sourceTaskId = before.processing
           ? ((before.processing as { recording?: { sourceTaskId?: number | null } }).recording?.sourceTaskId ?? taskId)

@@ -212,7 +212,8 @@ export function upsertHubRule(
     enabled?: boolean;
     pipeline?: HubPipelineConfig;
     recording?: HubRecordingConfig;
-    workers?: string[];
+    /** undefined = keep existing; null = clear (all nodes); a list overrides. */
+    workers?: string[] | null;
     requires?: string[];
   },
 ): HubRule {
@@ -225,8 +226,8 @@ export function upsertHubRule(
     // 整体替换会静默抹掉 cleanup / 标题模板等它没提交的字段。见 mergePipeline 注释。
     pipeline: mergePipeline(existing?.pipeline, input.pipeline),
     recording: input.recording ?? existing?.recording,
-    // workers 缺省沿用已有(undefined = 全部);显式传才覆盖。
-    workers: input.workers ?? existing?.workers,
+    // workers 缺省沿用已有(undefined = 全部);显式传才覆盖;null = 显式清空回「全部节点」。
+    workers: input.workers === null ? undefined : input.workers ?? existing?.workers,
     // requires 缺省沿用已有(undefined = 无能力要求);显式传才覆盖(空数组 = 清空要求)。
     requires: input.requires ?? existing?.requires,
     // order 同理:只在 reorderHubRules 显式写入;upsert/update 均沿用。

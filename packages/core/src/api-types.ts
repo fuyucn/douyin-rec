@@ -167,7 +167,8 @@ export interface RoomDTO {
  */
 export interface RoomPayload {
   recording?: Partial<Omit<RoomRecordingDTO, "taskId" | "cookies">> & { cookies?: string | null };
-  processing?: Partial<Pick<HubRuleDTO, "enabled" | "pipeline" | "workers" | "requires">>;
+  /** `workers: null` = all nodes (clears a previous restriction); an empty array is rejected. */
+  processing?: Partial<Pick<HubRuleDTO, "enabled" | "pipeline" | "requires">> & { workers?: string[] | null };
 }
 
 /** 一条 hub 规则(GET /api/hub/rules)。按平台限定,持久化为 <root>/config/hub/{platform}.{roomSlug}.json。 */

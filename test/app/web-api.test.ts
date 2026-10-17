@@ -1600,6 +1600,58 @@ describe("rooms 域(T9 统一房间视图)", () => {
     expect(a.updateRoom("douyin.123456", {}).status).toBe(400);
   });
 
+  // Regression (#196): the editor sends `workers: []` for "all nodes"; the API rejected it AFTER the
+  // recording half was already written, so a failed save still changed the schedule.
+  describe("workers 口径与保存原子性(#196)", () => {
+    const rule = (a: ReturnType<typeof makeApi>) =>
+      (a.listHubRules().body as Array<{ key: string; workers?: string[] }>).find((r) => r.key === "douyin.123456")!;
+
+    it("workers: null = 全部节点:无限制的房间可正常保存(两半都落盘)", () => {
+      const { s, a } = setup();
+      const t = a.createTask({ room: "123456" }).body as { id: number };
+      expect(a.createHubRule({ recording: { sourceTaskId: t.id } }).status).toBe(201); // no workers = all nodes
+      const res = a.updateRoom("douyin.123456", {
+        recording: { scheduleStart: "20:00", scheduleEnd: "02:00" },
+        processing: { workers: null, pipeline: { upload: { mode: "stage" } } },
+      });
+      expect(res.status).toBe(200);
+      expect(s.getTask(t.id)!.scheduleStart).toBe("20:00");
+      expect(rule(a).workers).toBeUndefined();
+    });
+
+    it("workers: null 清除已有的节点限制;缺省则沿用", () => {
+      const { a } = setup();
+      bindRoom(a, "123456", ["local"]);
+      expect(a.updateRoom("douyin.123456", { processing: { enabled: true } }).status).toBe(200);
+      expect(rule(a).workers).toEqual(["local"]);
+      expect(a.updateRoom("douyin.123456", { processing: { workers: null } }).status).toBe(200);
+      expect(rule(a).workers).toBeUndefined();
+    });
+
+    it("workers: [] 仍被拒,且被拒时录制半边不落盘", () => {
+      const { s, a } = setup();
+      const id = bindRoom(a, "123456", ["local"]);
+      const res = a.updateRoom("douyin.123456", {
+        recording: { scheduleStart: "20:00", scheduleEnd: "02:00" },
+        processing: { workers: [] },
+      });
+      expect(res.status).toBe(400);
+      expect(s.getTask(id)!.scheduleStart).toBeNull();
+      expect(rule(a).workers).toEqual(["local"]);
+    });
+
+    it("处理半边的流水线校验失败(rolling + 烧录)时,录制半边同样不落盘", () => {
+      const { s, a } = setup();
+      const id = bindRoom(a, "123456", ["local"]);
+      const res = a.updateRoom("douyin.123456", {
+        recording: { quality: "uhd" },
+        processing: { pipeline: { steps: { burnDanmu: true }, upload: { mode: "rolling" } } },
+      });
+      expect(res.status).toBe(400);
+      expect(s.getTask(id)!.quality).not.toBe("uhd");
+    });
+  });
+
   // 回归:此前 PUT 的 recording 分支**没有 schedule 处理** —— 前端表单改定时窗口提交后
   // 静默丢失(字段在 RoomRecordingDTO 里,但写入路径没读)。这里锁死成对写入 + 校验。
   it("PUT 定时窗口:成对写入 + 成对清空 + 半个窗口/坏格式 → 400", () => {
