@@ -25,7 +25,7 @@ function node(caps: string[] = ["upload-prep", "biliup", "biliup-queue"], rollin
     t: {
       id: "n1",
       nodeCapabilities: async () => ({ biliup: true, cookies: true, diskFreeGB: 100, processors: caps }),
-      nodePipeline: vi.fn(async () => ({ ok: true, bv: "BV1BLOCKING" })),
+      nodePipeline: vi.fn(async () => ({ ok: true, bv: "BV1TEST" })),
       listTasks: async () => ({ workerId: "n1", tasks: Array.from({ length: rolling }, () => ({ rollingEffective: true, rollingUpload: true })).concat([{ rollingEffective: false, rollingUpload: false }]) }),
       enqueue: vi.fn(async (req: EnqueueRequest): Promise<EnqueueResponse> => {
         jobs.push(...req.jobs);
