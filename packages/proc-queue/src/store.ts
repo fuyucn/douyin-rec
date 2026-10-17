@@ -17,6 +17,13 @@ import {
   assertJobInvariants, canTransition, cancelOutcome, jobIdOf,
   type EnqueueResult, type JobState, type ProcessJob,
 } from "@drec/core";
+import { migrateSchema } from "./schema.js";
+
+const WAL_RETRIES = 200;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 /** `<dataRoot>/db/proc-queue.db`。路径单点(app/orchestrator/cli 都经它,不各拼一份)。 */
 export function procQueueDbPath(dataRoot: string): string {
@@ -53,6 +60,14 @@ export interface ProcJobRecord extends ProcessJob {
   updatedAt: number;
   startedAt: number | null;
   finishedAt: number | null;
+  notBefore: number | null;
+  orderKey: string | null;
+  seq: number | null;
+  step: string | null;
+  bv: string | null;
+  childPid: number | null;
+  childPidStartedAt: string | null;
+  prepJobId: string | null;
 }
 
 export interface LeaseRow {
@@ -62,6 +77,11 @@ export interface LeaseRow {
   heartbeatAt: number;
   expiresAt: number;
   handoverRequested: boolean;
+}
+
+/** A batch was rejected and rolled back; `results` lists earlier entries plus the failure. */
+export class BatchRejected extends Error {
+  constructor(message: string, readonly results: EnqueueResult[]) { super(message); this.name = "BatchRejected"; }
 }
 
 export type FinishOutcome =
@@ -81,48 +101,6 @@ export interface ProcQueueStoreOpts {
   /** 只读打开:不建目录、不切 WAL、不迁移、只读连接;库/表缺失时查询抛错由调用方兜。 */
   readOnly?: boolean;
 }
-
-const SCHEMA_VERSION = 1;
-const WAL_RETRIES = 200;
-
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-const DDL = `
-CREATE TABLE IF NOT EXISTS proc_jobs(
-  jobId TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  logicalKey TEXT NOT NULL,
-  generation INTEGER NOT NULL,
-  state TEXT NOT NULL,
-  inputs TEXT NOT NULL,
-  outputs TEXT,
-  params TEXT NOT NULL,
-  replaceInputs INTEGER NOT NULL,
-  ownerTaskId INTEGER,
-  ownerStreamKey TEXT,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  claimedBy TEXT,
-  everClaimed INTEGER NOT NULL DEFAULT 0,
-  cancelRequested INTEGER NOT NULL DEFAULT 0,
-  resultOutputs TEXT,
-  note TEXT,
-  error TEXT,
-  createdAt INTEGER NOT NULL,
-  updatedAt INTEGER NOT NULL,
-  startedAt INTEGER,
-  finishedAt INTEGER);
-CREATE INDEX IF NOT EXISTS idx_proc_jobs_kind_state ON proc_jobs(kind, state, createdAt);
-CREATE INDEX IF NOT EXISTS idx_proc_jobs_logical ON proc_jobs(kind, logicalKey);
-CREATE TABLE IF NOT EXISTS proc_runner_lease(
-  kind TEXT PRIMARY KEY,
-  owner TEXT NOT NULL,
-  pid INTEGER NOT NULL,
-  heartbeatAt INTEGER NOT NULL,
-  expiresAt INTEGER NOT NULL,
-  handoverRequested INTEGER NOT NULL DEFAULT 0);
-`;
 
 const defaultPidAlive = (pid: number): boolean => {
   try {
@@ -161,6 +139,14 @@ function toRecord(r: Row): ProcJobRecord {
     updatedAt: Number(r.updatedAt),
     startedAt: r.startedAt == null ? null : Number(r.startedAt),
     finishedAt: r.finishedAt == null ? null : Number(r.finishedAt),
+    notBefore: r.notBefore == null ? null : Number(r.notBefore),
+    orderKey: r.orderKey == null ? null : String(r.orderKey),
+    seq: r.seq == null ? null : Number(r.seq),
+    step: r.step == null ? null : String(r.step),
+    bv: r.bv == null ? null : String(r.bv),
+    childPid: r.childPid == null ? null : Number(r.childPid),
+    childPidStartedAt: r.childPidStartedAt == null ? null : String(r.childPidStartedAt),
+    prepJobId: r.prepJobId == null ? null : String(r.prepJobId),
   };
   if (outputs) rec.outputs = outputs;
   return rec;
@@ -219,14 +205,9 @@ export class ProcQueueStore {
     }
   }
 
-  /** 幂等迁移:`BEGIN IMMEDIATE` 内重读 user_version(两进程同时首开,后到者见已迁移即跳过)。 */
+  /** 幂等迁移(实现见 schema.ts;每次首开都跑,旧库按版本逐步升级)。 */
   private migrate(): void {
-    this.tx(() => {
-      const v = Number((this.db.prepare("PRAGMA user_version").get() as Row).user_version ?? 0);
-      if (v >= SCHEMA_VERSION) return;
-      this.db.exec(DDL);
-      this.db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
-    });
+    migrateSchema(this.db);
   }
 
   /** `BEGIN IMMEDIATE` 事务;抛错回滚并重抛。 */
@@ -303,40 +284,107 @@ export class ProcQueueStore {
       return { jobId: job.jobId, state: "rejected", error: `inputs[0] 无法 stat: ${(e as Error).message}` };
     }
     const logicalKey = job.logicalKey.endsWith(FILE_TAG_PLACEHOLDER) ? `${job.logicalKey}${tag}` : job.logicalKey;
+    return this.tx(() => this.enqueueTx(job, logicalKey));
+  }
+
+  private enqueueTx(job: ProcessJob, logicalKey: string): EnqueueResult {
     const jobId = jobIdOf(job.kind, logicalKey, job.generation);
-    return this.tx((): EnqueueResult => {
-      const existing = this.get(jobId);
-      if (existing) {
-        switch (existing.state) {
-          case "pending": return { jobId, state: "pending" };
-          case "running": return { jobId, state: "running" };
-          case "done": {
-            const targets = existing.resultOutputs ?? existing.outputs ?? [];
-            if (targets.some((p) => !existsSync(p))) {
-              return { jobId, state: "stale", nextGeneration: this.nextGeneration(job.kind, logicalKey) };
-            }
-            return { jobId, state: "done" };
+    const existing = this.get(jobId);
+    if (existing) {
+      switch (existing.state) {
+        case "pending": return { jobId, state: "pending" };
+        case "running": return { jobId, state: "running" };
+        case "done": {
+          const targets = existing.resultOutputs ?? existing.outputs ?? [];
+          if (targets.some((p) => !existsSync(p))) {
+            return { jobId, state: "stale", nextGeneration: this.nextGeneration(job.kind, logicalKey) };
           }
-          default:
-            // failed / uncertain / cancelled:不隐式复活(须经 requeue / ackUncertain),入队方不重试。
-            return {
-              jobId, state: "rejected", error: `已存在且 state=${existing.state}(需人工处理)`,
-              existingState: existing.state as "failed" | "uncertain" | "cancelled",
-            };
+          return { jobId, state: "done" };
         }
+        default:
+          // failed / uncertain / cancelled: never revive implicitly (requeue / ackUncertain only).
+          return {
+            jobId, state: "rejected", error: `已存在且 state=${existing.state}(需人工处理)`,
+            existingState: existing.state as "failed" | "uncertain" | "cancelled",
+          };
       }
-      const t = this.now();
-      this.db.prepare(
-        `INSERT INTO proc_jobs(jobId, kind, logicalKey, generation, state, inputs, outputs, params, replaceInputs,
-           ownerTaskId, ownerStreamKey, createdAt, updatedAt)
-         VALUES(?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        jobId, job.kind, logicalKey, job.generation, JSON.stringify(job.inputs),
-        job.outputs ? JSON.stringify(job.outputs) : null, JSON.stringify(job.params), job.replaceInputs ? 1 : 0,
-        job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t,
-      );
-      return { jobId, state: "pending" };
+    }
+    const t = this.now();
+    this.db.prepare(
+      `INSERT INTO proc_jobs(jobId, kind, logicalKey, generation, state, inputs, outputs, params, replaceInputs,
+         ownerTaskId, ownerStreamKey, createdAt, updatedAt, orderKey, seq, notBefore, prepJobId)
+       VALUES(?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      jobId, job.kind, logicalKey, job.generation, JSON.stringify(job.inputs),
+      job.outputs ? JSON.stringify(job.outputs) : null, JSON.stringify(job.params), job.replaceInputs ? 1 : 0,
+      job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t,
+      job.orderKey ?? null, job.seq ?? null, job.notBefore ?? null, job.prepJobId ?? null,
+    );
+    return { jobId, state: "pending" };
+  }
+
+  /** Next generation for one orderKey (shared by the whole session, not per logicalKey). */
+  nextOrderGeneration(orderKey: string): number {
+    const r = this.db
+      .prepare("SELECT MAX(generation) AS g FROM proc_jobs WHERE orderKey=?")
+      .get(orderKey) as Row;
+    return (r.g == null ? 0 : Number(r.g)) + 1;
+  }
+
+  /**
+   * Atomic batch enqueue: either every job lands as pending, or none does.
+   * Any `rejected` or `stale` throws `BatchRejected` and rolls back the whole transaction,
+   * so an ordered session never gets a gap in its seq sequence.
+   */
+  enqueueBatch(jobs: readonly ProcessJob[], opts: { allowedRoots: readonly string[] }): EnqueueResult[] {
+    return this.tx(() => {
+      const out: EnqueueResult[] = [];
+      for (const job of jobs) {
+        let logicalKey: string;
+        try {
+          assertJobInvariants(job, { allowedRoots: opts.allowedRoots });
+          let tag: string;
+          try { tag = fileTagOf(job.inputs[0]); }
+          catch (e) { throw new Error(`inputs[0] 无法 stat: ${(e as Error).message}`); }
+          logicalKey = job.logicalKey.endsWith(FILE_TAG_PLACEHOLDER) ? `${job.logicalKey}${tag}` : job.logicalKey;
+        } catch (e) {
+          const error = (e as Error).message;
+          const failed = { jobId: job.jobId, state: "rejected" as const, error };
+          const err = new BatchRejected(`批量入队被拒(${job.jobId}): ${error}`, [...out, failed]);
+          throw err;
+        }
+        const r = this.enqueueTx(job, logicalKey);
+        if (r.state === "stale") {
+          throw new BatchRejected(`批量入队命中 stale(${r.jobId}): 需以新一代重派`, [...out, r]);
+        }
+        if (r.state === "rejected") {
+          throw new BatchRejected(`批量入队被拒(${job.jobId}): ${r.error ?? "unknown"}`, [...out, r]);
+        }
+        out.push(r);
+      }
+      return out;
     });
+  }
+
+  /** Advance the observable step; does not change the state machine. */
+  updateStep(jobId: string, step: string | null): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET step=?, updatedAt=? WHERE jobId=? AND state='running'")
+      .run(step, this.now(), jobId).changes > 0);
+  }
+
+  setBv(jobId: string, bv: string): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET bv=?, updatedAt=? WHERE jobId=?")
+      .run(bv, this.now(), jobId).changes > 0);
+  }
+
+  setChildPid(jobId: string, pid: number | null, startedAt: string | null = null): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET childPid=?, childPidStartedAt=?, updatedAt=? WHERE jobId=?")
+      .run(pid, startedAt, this.now(), jobId).changes > 0);
+  }
+
+  clearChildPid(jobId: string): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET childPid=NULL, childPidStartedAt=NULL, updatedAt=? WHERE jobId=?")
+      .run(this.now(), jobId).changes > 0);
   }
 
   // ───────────────────────── 租约 ─────────────────────────

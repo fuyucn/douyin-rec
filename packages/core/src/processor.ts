@@ -32,6 +32,14 @@ export interface ProcessJob {
   replaceInputs: boolean;
   owner: { taskId?: number; streamKey?: string };
   createdAt: number;
+  /** plan 038: 同一场共享的保序键(remux 等无保序需求时为 null/缺省)。 */
+  orderKey?: string | null;
+  /** plan 038: 场内序号(1 起);orderKey 为空时无意义。 */
+  seq?: number | null;
+  /** plan 038: 不早于该 epoch ms 才可认领。 */
+  notBefore?: number | null;
+  /** plan 038: biliup 行依赖的 upload-prep jobId。 */
+  prepJobId?: string | null;
 }
 
 /** 处理器运行期上下文(由 runner 注入;处理器只经它感知租约/取消,不直接碰任务表)。 */
