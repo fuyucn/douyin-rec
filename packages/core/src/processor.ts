@@ -216,7 +216,9 @@ export type TransitionReason =
   | "lease-expired-rerun" // 租约过期 + recover()=rerun
   | "shutdown-abort" // 关停时 interruptible job 被 abort
   | "requeue" // failed → pending
-  | "ack-uncertain"; // uncertain → failed
+  | "ack-uncertain" // uncertain → failed
+  | "transfer-retry" // running → pending after a failed/stalled transfer (child confirmed stopped)
+  | "order-blocked"; // cascade cancel of later seq rows in the same generation
 
 export interface TransitionContext {
   /** pending → cancelled 的前提:该行从未被认领(原子条件更新由 store 保证)。 */
@@ -224,6 +226,10 @@ export interface TransitionContext {
   reason?: TransitionReason;
   /** reason=shutdown-abort 时,job 的处理器是否 interruptible。 */
   interruptible?: boolean;
+  /** plan 038: transfer-retry 只允许 biliup 在 gate_wait/transfer 阶段、且子进程已确认停止。 */
+  kind?: string;
+  step?: string | null;
+  childConfirmedStopped?: boolean;
 }
 
 /**
@@ -237,6 +243,9 @@ export function canTransition(from: JobState, to: JobState, ctx: TransitionConte
   if (!PROC_TRANSITIONS[from].includes(to)) return false;
   if (from === "pending" && to === "cancelled") return ctx.neverClaimed === true;
   if (from === "running" && to === "pending") {
+    if (ctx.reason === "transfer-retry") {
+      return ctx.kind === "biliup" && (ctx.step === "gate_wait" || ctx.step === "transfer") && ctx.childConfirmedStopped === true;
+    }
     return ctx.reason === "lease-expired-rerun" || (ctx.reason === "shutdown-abort" && ctx.interruptible === true);
   }
   if (from === "failed" && to === "pending") return ctx.reason === "requeue";

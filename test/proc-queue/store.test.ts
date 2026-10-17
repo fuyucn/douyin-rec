@@ -661,3 +661,51 @@ describe("batch stale and fileTag failure (plan 038 T01)", () => {
     s.close();
   });
 });
+
+describe("claim ordering and transfer retry (plan 038 T02)", () => {
+  const mk = (e: Env, name: string, order: string, gen: number, seq: number, extra: Record<string, unknown> = {}) =>
+    e.job(name, { logicalKey: `${order}:${name}@`, generation: gen, orderKey: order, seq, ...extra });
+  it("seq 2 在 seq 1 done 前保持 pending;游标在场间轮转", () => {
+    const s = env.open();
+    lease(s, "A", "fake");
+    s.enqueueBatch([mk(env, "a.ts", "k", 1, 1), mk(env, "b.ts", "k", 1, 2), mk(env, "c.ts", "other", 1, 1)], roots());
+    expect(s.claim({ kinds: ["fake"], owner: "A" })?.orderKey).toBe("k");
+    expect(s.claim({ kinds: ["fake"], owner: "A" })?.orderKey).toBe("other"); // k seq2 blocked -> rotate
+    expect(s.claim({ kinds: ["fake"], owner: "A" })).toBeNull();
+    s.close();
+  });
+
+  it("旧代终态行不挡新代", () => {
+    const s = env.open();
+    lease(s, "A", "fake");
+    const old = s.enqueue(mk(env, "a.ts", "k", 1, 1), roots());
+    s.claim({ kinds: ["fake"], owner: "A" });
+    s.finish(old.jobId, "A", { state: "failed", error: "x" });
+    s.enqueue(mk(env, "b.ts", "k", 2, 1), roots());
+    expect(s.claim({ kinds: ["fake"], owner: "A" })?.generation).toBe(2);
+    s.close();
+  });
+
+  it("transfer-retry 只允许 biliup gate_wait/transfer,不消耗 attempts;submit 拒绝", () => {
+    const s = env.open();
+    lease(s, "A", "biliup");
+    const j = s.enqueue(mk(env, "a.ts", "k", 1, 1, { kind: "biliup" }), roots());
+    expect(s.claim({ kinds: ["biliup"], owner: "A" })?.jobId).toBe(j.jobId);
+    s.updateStep(j.jobId, "submit");
+    expect(s.retryTransfer(j.jobId, "A", 1)).toBe(false);
+    s.updateStep(j.jobId, "transfer");
+    expect(s.retryTransfer(j.jobId, "A", 1)).toBe(true);
+    const row = s.get(j.jobId)!;
+    expect([row.state, row.attempts, row.notBefore]).toEqual(["pending", 1, 1]);
+    s.close();
+  });
+
+  it("cascade 只取消同代更大 seq 的 pending", () => {
+    const s = env.open();
+    const rows = s.enqueueBatch([mk(env, "a.ts", "k", 1, 1), mk(env, "b.ts", "k", 1, 2), mk(env, "c.ts", "k", 2, 2)], roots());
+    expect(s.cascadeOrderBlocked("k", 1, 1)).toBe(1);
+    expect(s.get(rows[1]!.jobId)?.state).toBe("cancelled");
+    expect(s.get(rows[2]!.jobId)?.state).toBe("pending");
+    s.close();
+  });
+});

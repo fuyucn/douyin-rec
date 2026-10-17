@@ -18,6 +18,7 @@ import {
   type EnqueueResult, type JobState, type ProcessJob,
 } from "@drec/core";
 import { migrateSchema } from "./schema.js";
+import { ProcLeaseStore } from "./lease.js";
 
 const WAL_RETRIES = 200;
 
@@ -42,7 +43,9 @@ export function fileTagOf(path: string, stat: typeof statSync = statSync): strin
   return `${String(st.ino)}-${String(st.size)}`;
 }
 
-export const LEASE_MS = 30_000;
+export { LEASE_MS } from "./lease-types.js";
+import { LEASE_MS } from "./lease-types.js";
+import type { LeaseRow } from "./lease-types.js";
 export const GC_RETAIN_MS = 7 * 24 * 3600_000;
 
 /** 任务行(契约字段 + 执行态)。 */
@@ -70,14 +73,7 @@ export interface ProcJobRecord extends ProcessJob {
   prepJobId: string | null;
 }
 
-export interface LeaseRow {
-  kind: string;
-  owner: string;
-  pid: number;
-  heartbeatAt: number;
-  expiresAt: number;
-  handoverRequested: boolean;
-}
+export type { LeaseRow } from "./lease-types.js";
 
 /** A batch was rejected and rolled back; `results` lists earlier entries plus the failure. */
 export class BatchRejected extends Error {
@@ -169,6 +165,7 @@ export interface ListFilter {
 
 export class ProcQueueStore {
   private readonly db: DatabaseSync;
+  private readonly leases!: ProcLeaseStore;
   private readonly now: () => number;
   private readonly isPidAlive: (pid: number) => boolean;
 
@@ -178,6 +175,7 @@ export class ProcQueueStore {
     if (opts.readOnly) {
       this.db = new DatabaseSync(dbPath, { readOnly: true });
       this.db.exec(`PRAGMA busy_timeout=${opts.busyTimeoutMs ?? 5000}`);
+      this.leases = new ProcLeaseStore(this.db, { now: this.now, isPidAlive: this.isPidAlive });
       return;
     }
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -185,6 +183,7 @@ export class ProcQueueStore {
     this.db.exec(`PRAGMA busy_timeout=${opts.busyTimeoutMs ?? 5000}`);
     this.initWal();
     this.migrate();
+    this.leases = new ProcLeaseStore(this.db, { now: this.now, isPidAlive: this.isPidAlive });
   }
 
   /**
@@ -382,84 +381,48 @@ export class ProcQueueStore {
       .run(pid, startedAt, this.now(), jobId).changes > 0);
   }
 
+  /**
+   * Transfer retry: running -> pending with a backoff, without consuming an extra attempt
+   * (claim already incremented it). Only for biliup in gate_wait/transfer with a stopped child.
+   */
+  retryTransfer(jobId: string, owner: string, notBefore: number): boolean {
+    return this.tx(() => {
+      const row = this.get(jobId);
+      if (!row || row.state !== "running" || row.claimedBy !== owner) return false;
+      if (!canTransition("running", "pending", {
+        reason: "transfer-retry", kind: row.kind, step: row.step, childConfirmedStopped: true,
+      })) return false;
+      this.db.prepare(
+        "UPDATE proc_jobs SET state='pending', claimedBy=NULL, notBefore=?, updatedAt=? WHERE jobId=? AND state='running'",
+      ).run(notBefore, this.now(), jobId);
+      return true;
+    });
+  }
+
+  /** Cancel later pending rows of one order/generation; returns how many rows changed. */
+  cascadeOrderBlocked(orderKey: string, generation: number, afterSeq: number, reason = "order-blocked"): number {
+    return this.tx(() => this.db.prepare(
+      `UPDATE proc_jobs SET state='cancelled', error=?, finishedAt=?, updatedAt=?
+       WHERE orderKey=? AND generation=? AND seq>? AND state='pending'`,
+    ).run(`已取消(${reason})`, this.now(), this.now(), orderKey, generation, afterSeq).changes as number);
+  }
+
   clearChildPid(jobId: string): boolean {
     return this.tx(() => this.db.prepare("UPDATE proc_jobs SET childPid=NULL, childPidStartedAt=NULL, updatedAt=? WHERE jobId=?")
       .run(this.now(), jobId).changes > 0);
   }
 
-  // ───────────────────────── 租约 ─────────────────────────
+  // ───────────────────────── 租约(实现在 lease.ts) ─────────────────────────
 
-  getLease(kind: string): LeaseRow | null {
-    const r = this.db.prepare("SELECT * FROM proc_runner_lease WHERE kind=?").get(kind) as Row | undefined;
-    return r ? toLease(r) : null;
+  getLease(kind: string): LeaseRow | null { return this.leases.getLease(kind); }
+  leaseKinds(): string[] { return this.leases.leaseKinds(); }
+  leaseAlive(kind: string): boolean { return this.leases.leaseAlive(kind); }
+  leaseValid(kind: string, owner: string): boolean { return this.leases.leaseValid(kind, owner); }
+  acquireLease(kind: string, owner: string, o: Parameters<ProcLeaseStore["acquireLease"]>[2] = {}) {
+    return this.leases.acquireLease(kind, owner, o);
   }
-
-  /** 有租约行的 kind(含已过期;`leaseAlive` 再判存活)。 */
-  leaseKinds(): string[] {
-    return (this.db.prepare("SELECT kind FROM proc_runner_lease").all() as Row[]).map((r) => String(r.kind));
-  }
-
-  /** 租约行存活:未过期。pid 已死只用于「提前接管」,不影响此判定(过期为权威)。 */
-  leaseAlive(kind: string): boolean {
-    const l = this.getLease(kind);
-    return !!l && l.expiresAt > this.now();
-  }
-
-  /** 该 owner 当前是否仍持有有效(未过期)租约 —— `assertLease` / claim 的权威判据。 */
-  leaseValid(kind: string, owner: string): boolean {
-    const l = this.getLease(kind);
-    return !!l && l.owner === owner && l.expiresAt > this.now();
-  }
-
-  /**
-   * 抢租约。无行 / 已过期 / 自己持有 / 持有者 pid 已死 → 接管;
-   * 否则(他人存活持有)→ `acquired=false`,且 `requestHandover` 时置 `handoverRequested=1`
-   * (**不抢正在跑的 job**)。`takeover=true` = 此前存在他人的行(调用方须对其 running 行跑 recover)。
-   */
-  acquireLease(
-    kind: string, owner: string,
-    o: { pid?: number; leaseMs?: number; requestHandover?: boolean } = {},
-  ): { acquired: boolean; takeover: boolean; holder?: LeaseRow } {
-    const pid = o.pid ?? process.pid;
-    const leaseMs = o.leaseMs ?? LEASE_MS;
-    return this.tx(() => {
-      const t = this.now();
-      const cur = this.getLease(kind);
-      const mine = cur?.owner === owner;
-      const stale = !cur || cur.expiresAt <= t || (cur.pid !== pid && !this.isPidAlive(cur.pid));
-      if (cur && !mine && !stale) {
-        if (o.requestHandover) {
-          this.db.prepare("UPDATE proc_runner_lease SET handoverRequested=1 WHERE kind=?").run(kind);
-        }
-        return { acquired: false, takeover: false, holder: cur };
-      }
-      this.db.prepare(
-        `INSERT INTO proc_runner_lease(kind, owner, pid, heartbeatAt, expiresAt, handoverRequested)
-         VALUES(?, ?, ?, ?, ?, 0)
-         ON CONFLICT(kind) DO UPDATE SET owner=excluded.owner, pid=excluded.pid, heartbeatAt=excluded.heartbeatAt,
-           expiresAt=excluded.expiresAt, handoverRequested=0`,
-      ).run(kind, owner, pid, t, t + leaseMs);
-      return { acquired: true, takeover: !!cur && !mine };
-    });
-  }
-
-  /**
-   * 心跳续约。行不在 / 持有者已换人 → `ok=false`(调用方须立即 fencing)。
-   * 自己的行即使已过期、尚未被人接管,续约仍成立(接管会换 owner)。
-   */
-  heartbeat(kind: string, owner: string, leaseMs = LEASE_MS): { ok: boolean; handoverRequested: boolean } {
-    const t = this.now();
-    const res = this.db
-      .prepare("UPDATE proc_runner_lease SET heartbeatAt=?, expiresAt=? WHERE kind=? AND owner=?")
-      .run(t, t + leaseMs, kind, owner);
-    if (Number(res.changes) === 0) return { ok: false, handoverRequested: false };
-    return { ok: true, handoverRequested: !!this.getLease(kind)?.handoverRequested };
-  }
-
-  /** 删自己的租约行(优雅退出 / 交接完成)。返回是否删到。 */
-  releaseLease(kind: string, owner: string): boolean {
-    return Number(this.db.prepare("DELETE FROM proc_runner_lease WHERE kind=? AND owner=?").run(kind, owner).changes) > 0;
-  }
+  heartbeat(kind: string, owner: string, leaseMs?: number) { return this.leases.heartbeat(kind, owner, leaseMs); }
+  releaseLease(kind: string, owner: string): boolean { return this.leases.releaseLease(kind, owner); }
 
   // ───────────────────────── 认领 / 执行态 ─────────────────────────
 
@@ -478,8 +441,17 @@ export class ProcQueueStore {
       const cands = this.db.prepare(
         `SELECT j.* FROM proc_jobs j JOIN proc_runner_lease l ON l.kind=j.kind AND l.owner=? AND l.expiresAt>?
          WHERE j.state='pending' AND j.kind IN (${marks})
-         ORDER BY j.createdAt, j.rowid`,
-      ).all(o.owner, t, ...o.kinds) as Row[];
+           AND (j.notBefore IS NULL OR j.notBefore<=?)
+           AND (j.orderKey IS NULL OR NOT EXISTS (
+             SELECT 1 FROM proc_jobs p
+             WHERE p.orderKey=j.orderKey AND p.generation=j.generation
+               AND p.seq<j.seq AND p.state<>'done'))
+           AND (j.prepJobId IS NULL OR EXISTS (
+             SELECT 1 FROM proc_jobs q WHERE q.jobId=j.prepJobId AND q.state='done'))
+         ORDER BY COALESCE((SELECT c.lastClaimedAt FROM proc_order_cursor c
+                            WHERE c.orderKey=j.orderKey AND c.generation=j.generation), 0),
+                  j.createdAt, j.rowid`,
+      ).all(o.owner, t, ...o.kinds, t) as Row[];
       for (const c of cands) {
         const rec = toRecord(c);
         if (rec.cancelRequested) {
@@ -495,6 +467,12 @@ export class ProcQueueStore {
           `UPDATE proc_jobs SET state='running', claimedBy=?, attempts=attempts+1, everClaimed=1,
              startedAt=?, updatedAt=?, error=NULL WHERE jobId=? AND state='pending'`,
         ).run(o.owner, t, t, rec.jobId);
+        if (rec.orderKey) {
+          this.db.prepare(
+            `INSERT INTO proc_order_cursor(orderKey, generation, lastClaimedAt) VALUES(?,?,?)
+             ON CONFLICT(orderKey, generation) DO UPDATE SET lastClaimedAt=excluded.lastClaimedAt`,
+          ).run(rec.orderKey, rec.generation, t);
+        }
         return this.get(rec.jobId);
       }
       return null;
