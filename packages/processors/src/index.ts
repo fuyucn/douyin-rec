@@ -2,3 +2,5 @@
 export * from "./remux.js";
 export { uploadPrepProcessor, produceStageParts, splitGroupsBySession, tryDirectTsLink, type PrepPart, type PrepSpec } from "./upload-prep.js";
 export * from "./run-biliup.js";
+export * from "./archive-lookup.js";
+export * from "./child-identity.js";
