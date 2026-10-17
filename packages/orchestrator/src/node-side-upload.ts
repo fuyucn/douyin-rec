@@ -93,7 +93,7 @@ export interface NodeSideUploadArgs {
   streamKey: string;
   cfg: PipelineCfg;
   winner: { workerId: string; rec: { tsFiles: string[]; xmlPath?: string; totalBytes?: number } };
-  winnerMembers: readonly { workerId: string; rec: { tsFiles: string[]; xmlPath?: string } }[];
+  winnerMembers: readonly { workerId: string; rec: { tsFiles: string[]; xmlPath?: string; totalBytes?: number } }[];
   /**
    * 本场**全部**在场成员(含落败节点)。收尾删源要按它来 —— 与 master 常规路径的
    * `candidates.members` 同口径:落败节点的源同样是冗余副本,不删就永远占着磁盘。
@@ -184,7 +184,7 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
   const { streamKey, transport, ledger, jlog, notify } = o;
   const suffix = elapsedSec === undefined ? "" : `(${elapsedSec}s)`;
   jlog(`节点侧执行失败: ${errMsg}${suffix} → 回读节点落盘结果判定是否其实已成功`);
-  ledger.logStep(streamKey, "node_upload", "done", `节点侧失败: ${errMsg.slice(0, 120)}`);
+  ledger.logStep(streamKey, "node_upload", "done", `节点侧失败: ${errBrief(errMsg, 120)}`);
   // 注意:此处**不**立刻把节点表标 failed —— node_upload 的 running 标记留着,直到下面某条
   // 终态分支(回读成功→done / 不确定→failed / 确认没成→failed)。否则回读这段窗口内
   // nodeStates 无 running 节点,队列页会回落到 stateToNode("syncing")="pull"(又误报)。
@@ -235,15 +235,16 @@ async function handleNodeFailure(o: NodeSideUploadArgs, errMsg: string, elapsedS
     const progress = node?.confirmedParts != null
       ? `(已确认 ${node.confirmedParts} 个分 P${node.intentPart ? `,第 ${node.intentPart} 个追加结果未知` : ""})`
       : "";
-    const note = `${why}${progress};已禁止自动重试,请人工核对 B站稿件后处理`;
+    // 原始失败原因(如 ssh 超时 + 节点 stderr 末尾)必须随台账一起留下,不能只剩「结果不确定」。
+    const note = `${why}${progress};原始失败: ${errBrief(errMsg, 120)};已禁止自动重试,请人工核对 B站稿件后处理`;
     jlog(`节点侧结果不确定: ${note}`);
     // issue #25 ②:回读到 BV 就记进台账(此前超时被杀后台账无任何 BV,人工只能去 B站翻稿件)。
     if (node?.bv) ledger.setBv(streamKey, node.bv);
     ledger.logStep(streamKey, "node_upload", "done", `节点侧结果不确定: ${why.slice(0, 120)}`);
-    ledger.syncNodeState(streamKey, "node_upload", "failed", { error: note.slice(0, 200) });
+    ledger.syncNodeState(streamKey, "node_upload", "failed", { error: note.slice(0, 400) });
     // sync_node_states 行必须写:reconciler 的自动重试闸门看的是它(= 不安全重试标记)。
-    ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: note.slice(0, 200) });
-    ledger.setState(streamKey, "needs_manual", { error: note.slice(0, 200) });
+    ledger.syncNodeState(streamKey, "upload_plain", "failed", { error: note.slice(0, 400) });
+    ledger.setState(streamKey, "needs_manual", { error: note.slice(0, 400) });
     notify({ kind: "error", stage: "上传", message: `节点侧上传结果不确定 ${streamKey}: ${note}` });
     return { state: "needs_manual", bv: node?.bv };
   }
@@ -279,10 +280,29 @@ export function errBrief(msg: string, max = 240): string {
 export const NODE_UPLOAD_MIN_TIMEOUT_MS = 30 * 60_000;
 /** 上限:再大的场次也不无限等(6 小时),防执行体挂死占住对账轮。 */
 export const NODE_UPLOAD_MAX_TIMEOUT_MS = 6 * 3_600_000;
-/** 保守上传吞吐(字节/秒):线上实测约 1.7MB/s,取 1MB/s 留余量(弱上行节点)。 */
-const NODE_UPLOAD_CONSERVATIVE_BPS = 1_000_000;
+/**
+ * 保守上传吞吐(字节/秒)。线上空闲时约 1.7–5MB/s,但同节点并发上传时实测只有 0.1–0.2MB/s
+ * (issue #202),按 1MB/s 估会把这类场次误杀。取实测下界 0.1MB/s:预算偏长只是让一个兜底上限更宽,
+ * 不影响正常场次的实际耗时;真正按「字节进度停滞」判死留给 plan 038 的队列路径。
+ */
+const NODE_UPLOAD_CONSERVATIVE_BPS = 100_000;
 /** remux + 逐个建稿 / 追加接口耗时的固定余量。 */
 const NODE_UPLOAD_OVERHEAD_MS = 20 * 60_000;
+
+/**
+ * 本场实际上传的总字节数 = 胜出方**全部会话**的字节之和(上传文件取自 `winnerMembers`)。
+ * 落败节点的字节不计(它们不上传)。个别会话字节未知时只累加已知部分(下界,仍优于只看第一会话);
+ * 全部未知 → undefined(调用方回落下限)。
+ */
+export function sumUploadBytes(members: readonly { rec: { totalBytes?: number } }[]): number | undefined {
+  let sum = 0;
+  let known = false;
+  for (const m of members) {
+    const b = m.rec.totalBytes;
+    if (typeof b === "number" && Number.isFinite(b) && b > 0) { sum += b; known = true; }
+  }
+  return known ? sum : undefined;
+}
 
 /**
  * 节点侧上传的 ssh 超时(issue #25 ①):按场次字节数估算,而不是固定 30 分钟。
@@ -381,8 +401,9 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
   const t0 = Date.now();
   let result;
   try {
-    const timeoutMs = estimateNodeUploadTimeoutMs(winner.rec.totalBytes);
-    jlog(`节点侧超时预算 ${Math.round(timeoutMs / 60_000)} 分钟(场次 ${winner.rec.totalBytes != null ? (winner.rec.totalBytes / 1e9).toFixed(2) + "GB" : "大小未知"})`);
+    const uploadBytes = sumUploadBytes(winnerMembers) ?? winner.rec.totalBytes;
+    const timeoutMs = estimateNodeUploadTimeoutMs(uploadBytes);
+    jlog(`节点侧超时预算 ${Math.round(timeoutMs / 60_000)} 分钟(场次 ${uploadBytes != null ? (uploadBytes / 1e9).toFixed(2) + "GB" : "大小未知"})`);
     result = await transport.nodePipeline(spec, { timeoutMs });
   } catch (e) {
     const msg = String((e as Error)?.message ?? e);

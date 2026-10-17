@@ -77,7 +77,9 @@ function defaultRun(host: string, timeoutMs = 45_000) {
     const finish = (fn: () => void): void => { if (settled) return; settled = true; clearTimeout(timer); fn(); };
     const timer = setTimeout(() => {
       try { p.kill("SIGKILL"); } catch { /* already gone */ }
-      finish(() => reject(new Error(`ssh 超时 ${timeoutMs}ms 被杀: ${host} -- ${argv.join(" ").slice(0, 60)}`)));
+      // 带上被杀时已收到的 stderr 末尾:超时本身不说明节点在做什么,日志是唯一线索(issue #202)。
+      const tail = err.replace(/Warning: Permanently added[^\n]*(\n|$)/g, "").replace(/\s*\n\s*/g, " | ").trim().slice(-400);
+      finish(() => reject(new Error(`ssh 超时 ${timeoutMs}ms 被杀: ${host} -- ${argv.join(" ").slice(0, 60)}${tail ? ` | 节点 stderr 末尾: ${tail}` : ""}`)));
     }, timeoutMs);
     p.stdout.on("data", (b) => (out += b)); p.stderr.on("data", (b) => (err += b));
     p.on("close", (c) => finish(() => {

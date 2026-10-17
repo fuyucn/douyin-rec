@@ -8,7 +8,7 @@
  * 与 master 常规路径的稿件标题产生漂移。故这里把三个渲染字段钉死。
  */
 import { describe, it, expect, vi } from "vitest";
-import { tryNodeSideUpload, errBrief, estimateNodeUploadTimeoutMs, NODE_UPLOAD_MIN_TIMEOUT_MS, NODE_UPLOAD_MAX_TIMEOUT_MS } from "../../packages/orchestrator/src/node-side-upload.js";
+import { tryNodeSideUpload, errBrief, estimateNodeUploadTimeoutMs, sumUploadBytes, NODE_UPLOAD_MIN_TIMEOUT_MS, NODE_UPLOAD_MAX_TIMEOUT_MS } from "../../packages/orchestrator/src/node-side-upload.js";
 import type { PipelineCfg } from "../../packages/orchestrator/src/pipeline.js";
 
 const cfg = {
@@ -653,13 +653,14 @@ describe("estimateNodeUploadTimeoutMs(issue #25 ①:超时按字节估算)", () 
     expect(NODE_UPLOAD_MIN_TIMEOUT_MS).toBe(MIN);
   });
   it("小场次不低于下限", () => {
-    expect(estimateNodeUploadTimeoutMs(100e6)).toBe(MIN);
+    expect(estimateNodeUploadTimeoutMs(10e6)).toBe(MIN);
   });
   it("线上出事的 2.4GB 多分 P 场次:预算 ≥ 60 分钟(固定 30 分钟必被杀)", () => {
     expect(estimateNodeUploadTimeoutMs(2.4e9)).toBeGreaterThanOrEqual(60 * 60_000);
   });
   it("预算随字节单调增长,并封顶 6 小时", () => {
-    expect(estimateNodeUploadTimeoutMs(5e9)).toBeGreaterThan(estimateNodeUploadTimeoutMs(2.4e9));
+    expect(estimateNodeUploadTimeoutMs(1.5e9)).toBeGreaterThan(estimateNodeUploadTimeoutMs(1e9));
+    expect(estimateNodeUploadTimeoutMs(2.4e9)).toBe(NODE_UPLOAD_MAX_TIMEOUT_MS); // 0.1MB/s 口径下 2.4GB 已触顶
     expect(estimateNodeUploadTimeoutMs(1e12)).toBe(NODE_UPLOAD_MAX_TIMEOUT_MS);
     expect(NODE_UPLOAD_MAX_TIMEOUT_MS).toBe(6 * 3_600_000);
   });
@@ -722,5 +723,72 @@ describe("节点侧失败原因写进台账时保留末尾", () => {
     const msg = String(ledger.markFailed.mock.calls[0]?.[1] ?? "");
     expect(msg).toContain("ffmpeg 失败: Invalid data found");
     expect(msg).not.toContain("Permanently added");
+  });
+});
+
+describe("issue #202:预算按胜出方全部会话字节求和", () => {
+  it("sumUploadBytes:累加已知会话;非法/缺失忽略;全部未知 → undefined", () => {
+    expect(sumUploadBytes([{ rec: { totalBytes: 443e6 } }, { rec: { totalBytes: 300e6 } }])).toBe(743e6);
+    expect(sumUploadBytes([{ rec: { totalBytes: 443e6 } }, { rec: {} }, { rec: { totalBytes: NaN } }, { rec: { totalBytes: -1 } }])).toBe(443e6);
+    expect(sumUploadBytes([{ rec: {} }])).toBeUndefined();
+    expect(sumUploadBytes([])).toBeUndefined();
+  });
+
+  it("同节点并发抢带宽到实测下界 0.1MB/s 时,743MB 的预算仍够传完", () => {
+    expect(estimateNodeUploadTimeoutMs(743e6)).toBeGreaterThan(743e6 / 100_000 * 1000);
+  });
+
+  async function runWith(winnerMembers: { workerId: string; rec: Record<string, unknown> }[], members?: typeof winnerMembers) {
+    const t = {
+      nodeCapabilities: async () => ({ biliup: "/b", cookies: true, diskFreeGB: 100 }),
+      nodePipeline: vi.fn(async () => ({ ok: true, bv: "BV1T" })),
+      cleanup: vi.fn(async () => {}),
+    };
+    await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12", cfg, winner: winnerMembers[0] as never, winnerMembers: winnerMembers as never, members: members as never,
+      transport: t as never, ledger: fakeLedger(), jlog: () => {}, notify: () => {}, deps: fakeDeps(t),
+    });
+    return t.nodePipeline;
+  }
+
+  it("两个会话 P1+P2 → timeoutMs 按两者之和(而不是只看第一会话)", async () => {
+    const m = [
+      { workerId: "w1", rec: { tsFiles: ["/r/a.ts"], totalBytes: 443e6 } },
+      { workerId: "w1", rec: { tsFiles: ["/r/b.ts"], totalBytes: 300e6 } },
+    ];
+    const call = await runWith(m);
+    expect(call).toHaveBeenCalledWith(expect.anything(), { timeoutMs: estimateNodeUploadTimeoutMs(743e6) });
+    expect(estimateNodeUploadTimeoutMs(743e6)).toBeGreaterThan(estimateNodeUploadTimeoutMs(443e6));
+  });
+
+  it("落败节点的字节不计入预算(它们不上传)", async () => {
+    const win = [{ workerId: "w1", rec: { tsFiles: ["/r/a.ts"], totalBytes: 443e6 } }];
+    const loser = { workerId: "w2", rec: { tsFiles: ["/q/a.ts"], totalBytes: 9e9 } };
+    const call = await runWith(win, [...win, loser]);
+    expect(call).toHaveBeenCalledWith(expect.anything(), { timeoutMs: estimateNodeUploadTimeoutMs(443e6) });
+  });
+});
+
+describe("issue #202:needs_manual 保留原始失败原因", () => {
+  it("ssh 超时(带节点 stderr 末尾)+ 回读 uploading → error 同时含原始失败与「结果不确定」", async () => {
+    const t = {
+      nodeCapabilities: async () => ({ biliup: "/b", cookies: true, diskFreeGB: 100 }),
+      nodePipeline: vi.fn(async () => { throw new Error("ssh 超时 1800000ms 被杀: h -- node | 节点 stderr 末尾: biliup 上传分块停滞"); }),
+      nodeResult: vi.fn(async () => ({ phase: "uploading", ok: false, atMs: 1 })),
+      cleanup: vi.fn(async () => {}),
+    };
+    const ledger = { get: () => ({ bv: "" }), logStep: vi.fn(), setState: vi.fn(), syncNodeState: vi.fn(), markFailed: vi.fn(), markDone: vi.fn(), setBv: vi.fn() };
+    const rec = { tsFiles: ["/r/a.ts"], xmlPath: "/r/a.xml" };
+    await tryNodeSideUpload({
+      streamKey: "douyin:123:2026-10-12", cfg, winner: { workerId: "w1", rec }, winnerMembers: [{ workerId: "w1", rec }],
+      transport: t as never, ledger: ledger as never, jlog: () => {}, notify: () => {}, deps: fakeDeps(t),
+    });
+    const err = (ledger.setState.mock.calls.at(-1) as unknown[])[2] as { error: string };
+    expect(err.error).toContain("结果未知");
+    expect(err.error).toContain("biliup 上传分块停滞");
+    expect(err.error).toContain("已禁止自动重试");
+    // 首条台账步骤也不再取开头噪声
+    const steps = ledger.logStep.mock.calls.map((c) => String(c[3] ?? ""));
+    expect(steps.some((d) => d.includes("biliup 上传分块停滞"))).toBe(true);
   });
 });
