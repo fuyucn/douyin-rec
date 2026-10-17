@@ -9,17 +9,17 @@ import { DEFAULT_WATCH, TransferWatch, parseSsAcked, watchConfigOf } from "../..
 import type { BiliupHooks } from "../../packages/processors/src/run-biliup.js";
 
 const SS = [
-  "ESTAB 0      0         10.0.0.1:53844 10.0.0.2:443   users:((\"biliup\",pid=4242,fd=9))",
+  "ESTAB 0      0         local:53844 peer-a:443   users:((\"biliup\",pid=4242,fd=9))",
   "\t cubic wscale:9,7 rto:217 bytes_sent:904 bytes_acked:900 segs_out:3",
-  "ESTAB 0      0         10.0.0.1:53845 10.0.0.2:443   users:((\"node\",pid=7,fd=3))",
+  "ESTAB 0      0         local:53845 peer-a:443   users:((\"node\",pid=7,fd=3))",
   "\t cubic bytes_acked:55",
-  "ESTAB 0      0         10.0.0.1:53846 10.0.0.3:443   users:((\"biliup\",pid=4242,fd=10))",
+  "ESTAB 0      0         local:53846 peer-b:443   users:((\"biliup\",pid=4242,fd=10))",
   "\t cubic bytes_sent:1",
 ].join("\n");
 
 describe("parseSsAcked", () => {
   it("keeps only the pid's sockets; a socket without bytes_acked counts as 0", () => {
-    expect([...parseSsAcked(SS, 4242)]).toEqual([["10.0.0.1:53844>10.0.0.2:443", 900], ["10.0.0.1:53846>10.0.0.3:443", 0]]);
+    expect([...parseSsAcked(SS, 4242)]).toEqual([["local:53844>peer-a:443", 900], ["local:53846>peer-b:443", 0]]);
     expect(parseSsAcked(SS, 1).size).toBe(0);
   });
 });
