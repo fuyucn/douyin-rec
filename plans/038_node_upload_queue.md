@@ -98,7 +98,7 @@
   - **append 的 BV 来源**：append job 入队时 `bv` 可为空；runner 执行前从 store 读同 `orderKey` **且同 generation** 的 `seq=1` done 行取 BV。`seq=1` 尚未 done → 保持 pending（由 claim 门控，不算失败）；`seq=1` 已 failed/uncertain 而走到这里 → `cancelled(order-blocked)`，不转 `uncertain`。
   - **前序不可完成的处置**：`seq` 更小的行进入 `failed`/`uncertain`/`cancelled` 时，同 `orderKey` **且同 generation** 下所有更大 `seq` 的 pending 行原子转 `cancelled`（reason=`order-blocked`）并告警一次；跨代不级联。既不静默卡住，也不越过前序乱序上传。
   - **`upload-prep` 的重试**：`retryable=true`（纯本地文件操作），失败按 `notBefore` 退避重试，最多 3 次；耗尽后转 `failed`，同 `orderKey` 的 biliup 行落 `cancelled(order-prep-failed)`。
-  - **order-blocked / order-prep-failed 的恢复路径**（均走 PR6 工具（`hub-recover-order`，本计划 T7）的 dry-run→`--apply`，默认不改库）：
+  - **order-blocked / order-prep-failed 的恢复路径**（均走 PR6 工具（`hub-recover-order`，本计划 T11）的 dry-run→`--apply`，默认不改库）：
     - **已建稿**：人工用 `biliup list` / 台账补齐 BV → `hub-recover-order <streamKey> --bv <BV>`：给后续项**换 generation**（`nextOrderGeneration`）重新入队，并把 `seq=1` 行绑定该 BV；新 jobId 不撞 `cancelled` 终态。
     - **prep 失败**：先人工确认 prep 可重跑，`hub-recover-order <streamKey> --prep` 把 `order-prep-failed` 的 biliup 行与对应 prep 一起换 generation 重新入队。
     - **确认未建稿**（`seq=1` transfer 重试耗尽且无 BV）：`hub-recover-order <streamKey> --restart`：从 `seq=1` 起整体换 generation 重新入队。执行前必须按时间窗查**全部状态**的稿件旁证无稿；查不到就不允许 `--restart`。
@@ -127,7 +127,7 @@
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `mode` | `blocking` | T10 之前保持 blocking；节点上报 `biliup-queue` 且显式配置后才启用 queue |
+| `mode` | `blocking` | T15 之前保持 blocking；节点上报 `biliup-queue`（由 T15 发出）且显式配置后才启用 queue |
 | `concurrency` | 1 | 每节点 biliup 并发 |
 | `stallMs` | 900000 | transfer 字节停滞判死 |
 | `heartbeatStaleMs` | 180000 | 租约心跳过期 |
@@ -150,14 +150,14 @@
 | PR3 | master 入队/轮询/不 abort/sweep 豁免/原 key 409（含 SSH 失败）/部署 guard（fail-closed）/回退保护 | PR2，**且 `hub-recover-order` 已合并在内** | 同上（改部署 guard） |
 | PR4 | 边录边传接入共享并发槽 | PR2 | 同上 |
 | PR5 | 队列页（`/api/hub/queue` 露出节点 biliup 行、最后心跳、ETA） | PR3 | `enhancement` |
-| PR6 | 归并工具（本计划只交付 `hub-recover-order`；`hub-attach-bv` / `hub-clean-sources` 不在本计划） `hub-triage-node-uploads` / `hub-attach-bv` / `hub-clean-sources` / `hub-recover-order`（dry-run 默认，`--apply` 才写，参照 `hub-recheck-verify`） | **PR2**（recover-order 依赖 orderKey/seq/bv 列与 order-blocked）。**PR3 启用 `mode: queue` 前，`hub-recover-order` 必须先合入**（可随 PR3 交付，或提前从 PR6 拆出） | 删源类，`needs-decision` |
+| PR6 | 只交付 `hub-recover-order`（T11）：只写队列行，不删源、不上传。`hub-attach-bv` / `hub-clean-sources` 不在本计划。 | PR2 | `needs-decision`（写队列） |
 | PR7 / PR8 | Phase 2：传输/提交拆分 + 已传分 P 复用（含许可证决策）；审核通过后才删源（默认关） | PR3 | `needs-decision` |
 
 回滚：每个 PR 单独 revert；PR3 之后切回 `blocking` 的前提是节点队列已空（`_proc-status` 实测贴 PR）。
 
 ## 6. 本场处置（不写代码）
 
-冻结 `run`、带 `-N` 的新建任务与 `retry-node`；之后用 PR6 的 `hub-attach-bv` 先 dry-run 再 `--apply` 绑定 BV 并标 done；源文件由 `hub-clean-sources` 单独确认后删除，保留 xml。
+冻结 `run`、带 `-N` 的新建任务与 `retry-node`；之后用不在本计划的 `hub-attach-bv`（需另开票）先 dry-run 再 `--apply` 绑定 BV 并标 done；源文件由不在本计划的 `hub-clean-sources`（需另开票）单独确认后删除，保留 xml。
 
 ## 7. 测试清单
 
