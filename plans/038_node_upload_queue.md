@@ -3,7 +3,7 @@
 > **TODO：T-62**（`TODO.md`「待办（Next）」）。承接 plan 036 第二期 T14 / T15（biliup 处理器 + master 上传改派发），
 > 并取代 plan 033 的 W1-2 与 issue #25 ①（节点侧上传超时预算）。
 
-状态：设计稿（未实施）。基线 `feat/hub-optimization` = `bb353c0`；文中行号均在该基线实测。
+状态：PR0/PR1 已合并，PR2 起未实施。基线 `feat/hub-optimization` = `c2c48ff`；PR0/PR1 之前的行号在 `bb353c0` 实测。
 隐私：本文与关联 issue 一律不写 streamKey、房间号、BV、主播名、主机名；事故细节只留本地台账。
 
 ## 1. 起因（脱敏）
@@ -101,8 +101,8 @@
 
 | PR | 内容 | 依赖 | 标签 |
 |---|---|---|---|
-| PR0 | 止血（现有 blocking 路径）：预算对 **winnerMembers** 全部会话求和、保守带宽下调（约 0.1–0.2MB/s 口径，上限仍 6h）、超时报错带 stderr、不覆盖原始错误、修测试 | 无 | 上传类，`needs-decision`（本次由用户确认开工） |
-| PR1 | 停滞信号实测（VPS，只读）+ `runBiliup` 的 `onSpawn/onLine` + 结果文件加可选 `step` | PR0 | 同上 |
+| PR0 | ✅ 已合并（#203）：止血（现有 blocking 路径）：预算对 **winnerMembers** 全部会话求和、保守带宽下调（约 0.1–0.2MB/s 口径，上限仍 6h）、超时报错带 stderr、不覆盖原始错误、修测试 | 无 | 上传类，`needs-decision`（本次由用户确认开工） |
+| PR1 | ✅ 代码已合并（#205）：`runBiliup` 的 `onSpawn/onLine` + 结果文件加可选 `step`；**停滞信号 VPS 实测仍未做** | PR0 | 同上 |
 | PR2 | biliup 处理器 + 阶段/停滞/退避/保序 + store 迁移 + 重启恢复 | PR1、036 T2 | 同上 |
 | PR3 | master 入队/轮询/不 abort/sweep 豁免/原 key 409/部署 guard/回退保护 | PR2、036 T5 | 同上（改部署 guard） |
 | PR4 | 边录边传接入共享并发槽 | PR2 | 同上 |
