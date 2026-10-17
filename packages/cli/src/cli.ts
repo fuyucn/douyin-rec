@@ -22,7 +22,7 @@ import { biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUpl
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
-import { getEngine, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
+import { getEngine, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
 import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
@@ -838,7 +838,7 @@ const hubStarter: HubStarter = {
       listTasks: () => listNodeTasks(opts.store),
       // 处理任务表通道(T9a):local worker 与远端 `_enqueue` / `_proc-status` 同一执行体(无派发方,仅可被调用)。
       procChannel: {
-        enqueue: (dataRoot, req) => handleEnqueue(dataRoot, req),
+        enqueue: (dataRoot, req) => handleEnqueue(dataRoot, req, { capabilities: listProcessors().map((p) => p.kind) }),
         procStatus: (dataRoot, ids) => handleProcStatus(dataRoot, ids),
         procCancel: (dataRoot, ids) => handleProcCancel(dataRoot, ids),
       },
@@ -1960,7 +1960,8 @@ program
       await applyNodeDataRoot(dataRoot);
       const { decodeEnqueue } = await import("@drec/core");
       const { handleEnqueue } = await import("@drec/app");
-      process.stdout.write(JSON.stringify(handleEnqueue(dataRoot, decodeEnqueue(b64))) + "\n");
+      const capabilities = listProcessors().map((p) => p.kind);
+      process.stdout.write(JSON.stringify(handleEnqueue(dataRoot, decodeEnqueue(b64), { capabilities })) + "\n");
     } catch (e) {
       process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
       process.exitCode = 1;

@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleEnqueue, handleProcCancel, handleProcStatus, remoteEnqueueKinds } from "../../packages/app/src/node-enqueue.js";
+import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
 import { jobIdOf, registerProcessor, _resetProcessors, type Processor } from "@drec/core";
 
 function env() {
@@ -57,5 +58,19 @@ describe("remote enqueue capabilities and batch (plan 038 T10a)", () => {
     handleProcCancel(root, [a.jobId]);
     const st = handleProcStatus(root, [a.jobId]);
     expect(st[0]?.state).toBe("cancelled");
+  });
+
+  it("status exposes outputs only for done rows", () => {
+    const root = env();
+    const a = job(root, "upload-prep", "seg.ts");
+    handleEnqueue(root, { v: 1, jobs: [a] }, { capabilities: ["upload-prep"], getProcessor: () => proc("upload-prep") });
+    expect(handleProcStatus(root, [a.jobId])[0]).not.toHaveProperty("outputs");
+    const store = new ProcQueueStore(procQueueDbPath(root));
+    try {
+      store.acquireLease("upload-prep", "A", { pid: process.pid });
+      const c = store.claim({ kinds: ["upload-prep"], owner: "A" })!;
+      store.finish(c.jobId, "A", { state: "done", outputs: [join(root, "stage", "p0.mp4")] });
+    } finally { store.close(); }
+    expect(handleProcStatus(root, [a.jobId])[0]?.outputs).toEqual([join(root, "stage", "p0.mp4")]);
   });
 });

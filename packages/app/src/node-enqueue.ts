@@ -179,7 +179,7 @@ export function handleProcStatus(dataRoot: string, jobIds: string[]): ProcessRec
     for (const id of jobIds) {
       const row = store.get(id);
       if (!row) continue;
-      out.push({ jobId: id, state: row.state, ...(row.error ? { error: row.error } : {}), ...(row.bv ? { bv: row.bv } : {}), ...(row.step ? { step: row.step } : {}), leaseAlive: store.leaseAlive(row.kind) });
+      out.push({ jobId: id, state: row.state, ...(row.error ? { error: row.error } : {}), ...(row.bv ? { bv: row.bv } : {}), ...(row.step ? { step: row.step } : {}), ...(row.state === "done" && row.resultOutputs ? { outputs: row.resultOutputs } : {}), leaseAlive: store.leaseAlive(row.kind) });
     }
     return out;
   } catch {

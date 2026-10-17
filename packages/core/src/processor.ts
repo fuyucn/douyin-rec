@@ -305,6 +305,8 @@ export interface ProcessReceipt {
   bv?: string;
   /** Observable upload step (gate_wait/transfer/submit). */
   step?: string;
+  /** Result outputs once `state=done` (e.g. the stage parts an upload-prep job produced). */
+  outputs?: string[];
   /** 持有租约的执行者是否存活(master 据此判「节点无执行者」)。 */
   leaseAlive: boolean;
 }
@@ -346,7 +348,30 @@ function decodeJob(raw: unknown, i: number): ProcessJob {
     createdAt: raw.createdAt,
   };
   if (raw.outputs !== undefined) job.outputs = raw.outputs;
+  decodeOrdering(raw, job, bad);
   return job;
+}
+
+/** Ordering fields survive the wire (they were silently dropped before, which disabled remote ordering/prep gating). */
+function decodeOrdering(raw: Record<string, unknown>, job: ProcessJob, bad: (why: string) => never): void {
+  const { orderKey, seq, notBefore, prepJobId } = raw;
+  if (orderKey != null) {
+    if (typeof orderKey !== "string" || orderKey === "") bad("orderKey 须为非空字符串");
+    job.orderKey = orderKey as string;
+  }
+  if (seq != null) {
+    if (!Number.isSafeInteger(seq) || (seq as number) < 1) bad("seq 须为 >=1 的整数");
+    job.seq = seq as number;
+  }
+  if (notBefore != null) {
+    if (typeof notBefore !== "number" || !Number.isFinite(notBefore)) bad("notBefore 非法");
+    job.notBefore = notBefore as number;
+  }
+  if (prepJobId != null) {
+    if (typeof prepJobId !== "string" || prepJobId === "") bad("prepJobId 须为非空字符串");
+    job.prepJobId = prepJobId as string;
+  }
+  if (job.orderKey && job.seq == null) bad("orderKey 需要 seq");
 }
 
 /** 编码 `EnqueueRequest` 为 base64(`_enqueue` 命令行参数)。 */
