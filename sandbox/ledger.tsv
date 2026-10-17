@@ -4,3 +4,4 @@ iter	task	phase	tests	quality	pass	note
 1	T01	qa	2718/2766	ok	yes	full suite + typecheck + arch; quality_check ok
 1	T01	keep	2723/2771	ok	yes	committed
 2	T03	keep	2733/2775	ok	yes	committed
+4	T02(contract)	keep	2736/2778	ok	yes	committed
