@@ -6,6 +6,7 @@ import { runPipeline } from "./pipeline.js";
 import { pollFollowups } from "./finalize-format.js";
 import { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
 import { DEFAULT_NODE_UPLOAD, type NodeUploadConfig } from "./node-upload-config.js";
+import { completeFromDispatch } from "./node-upload-complete.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
 import { gateWorkers, explainRejections, isWorkerAssigned, isWorkerTargeted } from "@drec/core";
 import { JobDispatcher } from "./job-dispatcher.js";
@@ -62,7 +63,7 @@ export interface ReconcilerDeps {
   workerCapabilities?: (workerId: string) => string[] | undefined;
   /** nodeUpload config (plan 038); omitted = defaults (blocking mode, nothing to poll). */
   nodeUpload?: NodeUploadConfig;
-  /** Receives each queue-poll observation (maps terminal queue states onto the ledger). */
+  /** Receives each queue-poll observation; default maps terminal queue states onto the ledger (never deletes sources). */
   onUploadDispatch?: UploadPollerOpts["onDispatch"];
   /**
    * 实时重载(Approach A):每轮 reconcileAll 开头调用重建 transports Map。
@@ -177,7 +178,7 @@ export class Reconciler {
     this.cleanupBackfillThrottleMs = deps.cleanupBackfillThrottleMs ?? DEFAULT_CLEANUP_BACKFILL_THROTTLE_MS;
     this.uploadPoller = createUploadQueuePoller({
       ledger: this.ledger, transports: () => this.transports, notify: this.notify, log: (m) => console.info(m),
-      unreachableAlertMs: (deps.nodeUpload ?? DEFAULT_NODE_UPLOAD).unreachableAlertMs, onDispatch: deps.onUploadDispatch,
+      unreachableAlertMs: (deps.nodeUpload ?? DEFAULT_NODE_UPLOAD).unreachableAlertMs, onDispatch: deps.onUploadDispatch ?? ((k, _p, d) => completeFromDispatch(this.ledger, k, d, this.notify)),
     });
     this.dispatcher = new JobDispatcher({
       maxConcurrent: deps.maxConcurrentPipelines ?? DEFAULT_MAX_CONCURRENT_PIPELINES,
