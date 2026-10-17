@@ -930,3 +930,37 @@ describe("processor contract wiring (plan 038 T02)", () => {
     expect([s.get(jobId)?.attempts, s.get(jobId)?.notBefore, s.get(jobId)?.step]).toEqual([1, 5, "transfer"]);
   });
 });
+
+describe("shutdown verification (plan 038 T09)", () => {
+  it("子进程仍存活 → 不判 safe,落 uncertain", async () => {
+    let release!: () => void;
+    const run = async () => new Promise<never>(() => { release = () => {}; });
+    registerProcessor(fakeProcessor({
+      kind: "biliup", interruptible: false, retryable: false,
+      run,
+      verifyStopped: async () => "safe",
+    }));
+    const r = mkRunner("A", { shutdownWaitMs: 20, abortWaitMs: 20, probeChild: () => ({ pid: 7, startedAt: "t1", cmdline: "biliup" }) });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts", { kind: "biliup" }), allowed());
+    s.setChildPid(jobId, 7, "t1");
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("running"));
+    await r.stop();
+    expect(s.get(jobId)?.state).toBe("uncertain");
+    void release;
+  });
+
+  it("子进程已停且无稿 → 回 pending(不消耗 attempts)", async () => {
+    registerProcessor(fakeProcessor({ kind: "biliup", interruptible: false, retryable: false,
+      run: async () => new Promise<never>(() => {}), verifyStopped: async () => "safe" }));
+    const r = mkRunner("A", { shutdownWaitMs: 20, abortWaitMs: 20, probeChild: () => null });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts", { kind: "biliup" }), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("running"));
+    await r.stop();
+    expect(s.get(jobId)?.state).toBe("pending");
+    expect(s.get(jobId)?.attempts).toBe(0);
+  });
+});

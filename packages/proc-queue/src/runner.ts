@@ -6,7 +6,8 @@
  */
 import { existsSync, statfsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { freeBytesOf, listProcessors, type ProcActiveDTO, type ProcessContext, type Processor } from "@drec/core";
+import { freeBytesOf, isSameChild, listProcessors, probeChild, type ChildFingerprint, type ProcActiveDTO, type ProcessContext, type Processor } from "@drec/core";
+
 import { GC_RETAIN_MS, LEASE_MS, ProcQueueStore, procQueueDbPath, type ProcJobRecord } from "./store.js";
 
 /**
@@ -59,6 +60,8 @@ export interface ProcRunnerOpts {
   abortWaitMs?: number;
   /** false = 不起定时器(测试手动驱动 `tick()` / `heartbeat()`)。 */
   timers?: boolean;
+  /** Injectable child fingerprint probe (tests). */
+  probeChild?: (pid: number) => ChildFingerprint | null;
 }
 
 const defaultFreeBytes = (dir: string): number | null => {
@@ -343,6 +346,14 @@ export class ProcRunner {
     if (row) await this.settleOrphanRow(p, row, true);
   }
 
+  /** True only when the recorded child is gone or its pid/start fingerprint no longer matches. */
+  private async childStopped(job: ProcJobRecord | null): Promise<boolean> {
+    if (!job || job.childPid == null) return true; // nothing spawned
+    const probe = this.o.probeChild ?? probeChild;
+    const current = probe(job.childPid);
+    return !isSameChild({ pid: job.childPid, startedAt: job.childPidStartedAt }, current);
+  }
+
   private async execute(f: Inflight): Promise<void> {
     const { job, proc, ac } = f;
     const { store, owner } = this.o;
@@ -359,7 +370,9 @@ export class ProcRunner {
       if (res.bv) store.setBv(job.jobId, res.bv);
       if (res.retry) {
         if (proc.interruptible) store.updateStep(job.jobId, "transfer");
-        if (!store.retryTransfer(job.jobId, owner, res.retry.notBefore)) store.finish(job.jobId, owner, { state: "failed", error: "retry requested but not allowed" });
+        const fresh = store.get(job.jobId);
+        const stopped = await this.childStopped(fresh);
+        if (!store.retryTransfer(job.jobId, owner, res.retry.notBefore, stopped)) store.finish(job.jobId, owner, { state: "failed", error: "retry requested but not allowed" });
         return;
       }
       if (!store.finish(job.jobId, owner, { state: "done", outputs: res.outputs, note: res.note })) {
@@ -495,9 +508,18 @@ export class ProcRunner {
         if (!this.inflight.has(f.job.jobId)) continue;
         f.reason = "shutdown";
         f.ac.abort();
-        const verified = f.proc.verifyStopped ? await f.proc.verifyStopped(f.job, this.ctxFor(f.job, f.ac)).catch(() => "uncertain") : "uncertain";
+        const current = store.get(f.job.jobId);
+        const stopped = await this.childStopped(current);
+        const verified = stopped && f.proc.verifyStopped
+          ? await f.proc.verifyStopped(current ?? f.job, this.ctxFor(f.job, f.ac)).catch(() => "uncertain")
+          : "uncertain";
         if (verified === "safe") {
-          store.releaseForShutdown(f.job.jobId, owner, false, { kind: f.job.kind, step: f.job.step });
+          // biliup has no intent before submit; a verified stop may safely return to pending.
+          if (f.proc.interruptible || (f.job.kind === "biliup" && (current?.step === "gate_wait" || current?.step === "transfer" || current?.step == null))) {
+            store.releaseForShutdown(f.job.jobId, owner, true, { kind: f.job.kind, step: current?.step ?? f.job.step });
+          } else {
+            store.finish(f.job.jobId, owner, { state: "cancelled", hasIntent: true, error: "关停等待超时,执行被中止,结果无法确定" });
+          }
         } else {
           // 取消落点走契约 `cancelOutcome`(不自造):已进入不可打断动作 → hasIntent=true(biliup → uncertain,其余 → cancelled)。
           store.finish(f.job.jobId, owner, { state: "cancelled", hasIntent: true, error: "关停等待超时,执行被中止,结果无法确定" });

@@ -385,12 +385,12 @@ export class ProcQueueStore {
    * Transfer retry: running -> pending with a backoff, without consuming an extra attempt
    * (claim already incremented it). Only for biliup in gate_wait/transfer with a stopped child.
    */
-  retryTransfer(jobId: string, owner: string, notBefore: number): boolean {
+  retryTransfer(jobId: string, owner: string, notBefore: number, childConfirmedStopped: boolean): boolean {
     return this.tx(() => {
       const row = this.get(jobId);
       if (!row || row.state !== "running" || row.claimedBy !== owner) return false;
       if (!canTransition("running", "pending", {
-        reason: "transfer-retry", kind: row.kind, step: row.step, childConfirmedStopped: true,
+        reason: "transfer-retry", kind: row.kind, step: row.step, childConfirmedStopped,
       })) return false;
       this.db.prepare(
         "UPDATE proc_jobs SET state='pending', claimedBy=NULL, notBefore=?, updatedAt=? WHERE jobId=? AND state='running'",

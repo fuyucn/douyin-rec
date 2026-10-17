@@ -20,6 +20,7 @@ export interface BiliupParams {
 
 function params(job: ProcessJob): BiliupParams {
   const p = job.params as Partial<BiliupParams>;
+  const persisted = (job as { bv?: string | null }).bv;
   return {
     cookies: String(p.cookies ?? ""),
     title: String(p.title ?? ""),
@@ -27,7 +28,7 @@ function params(job: ProcessJob): BiliupParams {
     tag: String(p.tag ?? ""),
     desc: typeof p.desc === "string" ? p.desc : undefined,
     public: p.public === true,
-    bv: typeof p.bv === "string" && p.bv ? p.bv : undefined,
+    bv: typeof persisted === "string" && persisted ? persisted : (typeof p.bv === "string" && p.bv ? p.bv : undefined),
   };
 }
 
@@ -38,6 +39,12 @@ export interface BiliupDeps {
   /** Expected total duration of the parts, used for the no-draft proof. */
   expectedDurationSec?: number;
   probeDuration?: (file: string) => Promise<number>;
+}
+
+/** Expected duration comes from the job (master/prep), never silently defaulted to "safe". */
+function expectedDuration(job: ProcessJob, deps: BiliupDeps): number {
+  const fromJob = Number((job.params as { expectedDurationSec?: unknown }).expectedDurationSec ?? 0);
+  return Number.isFinite(fromJob) && fromJob > 0 ? fromJob : (deps.expectedDurationSec ?? 0);
 }
 
 export function makeBiliupProcessor(deps: BiliupDeps = {}): Processor {
@@ -77,17 +84,16 @@ export function makeBiliupProcessor(deps: BiliupDeps = {}): Processor {
       let bv = p.bv;
       if (!bv) {
         ctx.setState?.({ step: "gate_wait" });
-        // Fail-closed before creating anything: an archive in the same window means stop.
-        const expected = deps.expectedDurationSec ?? 0;
-        if (expected > 0) {
-          const proof = await findRecentArchive(p.cookies, p.title, expected, deps.lookup);
-          if (proof === "yes") throw new Error("已存在同标题同时长稿件,拒绝重复建稿");
-          if (proof === "unknown") throw new Error("无法确认是否已建稿,转人工核对");
-        }
+        // Fail-closed before creating anything: without duration we cannot prove "no draft".
+        const expected = expectedDuration(job, deps);
+        if (expected <= 0) throw new Error("缺少本次产物的预期时长,无法确认是否已建稿,拒绝建稿");
+        const proof = await findRecentArchive(p.cookies, p.title, expected, deps.lookup);
+        if (proof === "yes") throw new Error("已存在同标题同时长稿件,拒绝重复建稿");
+        if (proof === "unknown") throw new Error("无法确认是否已建稿,转人工核对");
         bv = await uploadPlain({ plain: meta, run: runObserved });
         ctx.setState?.({ bv });
       }
-      const appendFrom = p.bv ? 0 : 1;
+      const appendFrom = p.bv ? 0 : 1; // params.bv means inputs already contain P1
       for (let i = appendFrom; i < files.length; i++) {
         ctx.setState?.({ step: "gate_wait" });
         try {
@@ -102,7 +108,8 @@ export function makeBiliupProcessor(deps: BiliupDeps = {}): Processor {
     },
     async verifyStopped(job: ProcessJob): Promise<"safe" | "uncertain"> {
       const p = params(job);
-      const expected = deps.expectedDurationSec ?? 0;
+      const expected = expectedDuration(job, deps);
+      // Child liveness is checked by the runner (pid + startedAt); this hook only proves no draft.
       if (!p.title || expected <= 0) return "uncertain";
       const proof = await findRecentArchive(p.cookies, p.title, expected, deps.lookup);
       return proof === "no" ? "safe" : "uncertain";

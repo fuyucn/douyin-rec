@@ -692,9 +692,9 @@ describe("claim ordering and transfer retry (plan 038 T02)", () => {
     const j = s.enqueue(mk(env, "a.ts", "k", 1, 1, { kind: "biliup" }), roots());
     expect(s.claim({ kinds: ["biliup"], owner: "A" })?.jobId).toBe(j.jobId);
     s.updateStep(j.jobId, "submit");
-    expect(s.retryTransfer(j.jobId, "A", 1)).toBe(false);
+    expect(s.retryTransfer(j.jobId, "A", 1, true)).toBe(false);
     s.updateStep(j.jobId, "transfer");
-    expect(s.retryTransfer(j.jobId, "A", 1)).toBe(true);
+    expect(s.retryTransfer(j.jobId, "A", 1, true)).toBe(true);
     const row = s.get(j.jobId)!;
     expect([row.state, row.attempts, row.notBefore]).toEqual(["pending", 1, 1]);
     s.close();

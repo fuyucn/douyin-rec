@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isSameChild } from "../../packages/processors/src/child-identity.js";
+import { isSameChild } from "@drec/core";
 
 describe("child identity (plan 038 T07)", () => {
   it("pid 相同但 startedAt 不同 → 不是同一个子进程(pid 复用)", () => {
