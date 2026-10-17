@@ -8,3 +8,4 @@ iter	task	phase	tests	quality	pass	note
 5	T05	keep	2740/2782	ok	yes	committed
 6	T06	keep	-	-	-	read-only survey: three filters exist; real logged-in listing deferred to T14
 7	T07	keep	2748/2790	ok	yes	committed
+8	T08	keep	2753/2795	ok	yes	committed
