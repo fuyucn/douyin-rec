@@ -1,4 +1,4 @@
-import { Activity, ChevronLeft, GripVertical, Network, Plus, Radio, Server } from "lucide-react";
+import { Activity, ChevronLeft, GripVertical, Network, Plus, Radio, Server, TriangleAlert } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAtomValue } from "jotai";
@@ -6,6 +6,7 @@ import { api, type HubRuleDTO, type WorkerDTO, type WorkerStatus } from "../api/
 import { hubEnabledAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { LatestRunBadge } from "../components/HubJobs";
+import { runNeedsAttention } from "../lib/room-status";
 import { RoomDetail } from "../components/RoomDetail";
 import { WorkersPanel } from "../components/WorkersPanel";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
@@ -28,7 +29,10 @@ export function HubPage(): ReactNode {
   /** 全部非终态 run 的**数量**(Active 指标;用后端 total 权威计数,不受分页 limit 截断)。 */
   const [activeRuns, setActiveRuns] = useState(0);
   /** 每个房间最新一条 run(徽标用;权威来源,不受「最近 N 条」分页影响)。 */
-  const [latestByRoom, setLatestByRoom] = useState<Record<string, { streamKey: string; state: string; bv: string | null; updatedAt: number }>>({});
+  const [latestByRoom, setLatestByRoom] = useState<Record<string, { streamKey: string; state: string; bv: string | null; updatedAt: number; manualPhase?: string | null }>>({});
+  // Rooms whose LATEST RUN needs a person. Not the room-list status: that one also folds in live
+  // recording and paused/disabled state, so the two numbers can legitimately differ.
+  const attentionRooms = Object.values(latestByRoom).filter((r) => runNeedsAttention(r)).length;
   const [loaded, setLoaded] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
@@ -162,10 +166,10 @@ export function HubPage(): ReactNode {
       <div className="telemetry-bar telemetry-bar-cols-3 mb-5">
         <div className="telemetry-cell">
           <div className="flex flex-col gap-1.5 min-w-0">
-            <span className="telemetry-label">{t("hub.page.metricRules")}</span>
-            <span className="telemetry-value tabular-nums">{rules.length}</span>
+            <span className="telemetry-label">{t("hub.page.metricAttention")}</span>
+            <span className="telemetry-value tabular-nums" style={{ color: attentionRooms ? "var(--warning-fg)" : "var(--muted-soft)" }}>{attentionRooms}</span>
           </div>
-          <span className="telemetry-icon"><Radio className="w-4 h-4" /></span>
+          <span className="telemetry-icon" style={attentionRooms ? { color: "var(--warning-fg)" } : undefined}><TriangleAlert className="w-4 h-4" /></span>
         </div>
         <div className="telemetry-cell">
           <div className="flex flex-col gap-1.5 min-w-0">
@@ -238,7 +242,8 @@ export function HubPage(): ReactNode {
                         )}
                       </div>
                       <div className="flex items-center gap-1.5">
-                        <span className="dot" style={{ background: r.enabled ? "var(--success)" : "var(--muted-soft)" }} />
+                        {/* Neutral, not green: green means "recording" everywhere else; this only says the rule is on. */}
+                        <span className="dot" style={{ background: r.enabled ? "var(--ink)" : "var(--muted-soft)" }} />
                         <LatestRunBadge run={latestRunOf(r)} />
                       </div>
                     </button>

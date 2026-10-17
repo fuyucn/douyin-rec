@@ -693,8 +693,8 @@ table.tasks tbody tr:last-child td {
   border-color: var(--muted-soft);
 }
 .method-option.is-active {
-  border-color: var(--accent);
-  background: var(--accent-soft);
+  /* One selected style app-wide (same as .rm-pick.is-on): ink border, no tinted fill. */
+  border-color: var(--ink);
 }
 .method-option[aria-disabled="true"] {
   opacity: 0.55;
@@ -914,9 +914,11 @@ table.tasks tbody tr:last-child td {
   white-space: nowrap;
 }
 .chip-accent {
+  /* "On" chip: neutral, distinguished from the dimmed "off" ones by ink text — blue is for primary actions. */
   border-color: var(--hairline);
-  background: var(--accent-soft);
+  background: transparent;
   color: var(--ink);
+  font-weight: 500;
 }
 /* 「实验性」徽标:比普通 chip 更小,用 warning 色边框,一眼可辨但不抢控件标题 */
 .chip-experimental {
@@ -1592,5 +1594,22 @@ table.tasks tbody tr:last-child td {
   }
   .rm-more-sum {
     display: none;
+  }
+}
+
+/* Touch devices: 28-32px controls are too small to hit reliably. */
+@media (pointer: coarse) {
+  .btn-icon,
+  .icon-btn,
+  .rm-pick,
+  .btn-sm {
+    min-width: 40px;
+    min-height: 40px;
+  }
+  .rm-pick {
+    height: 40px;
+  }
+  .input {
+    min-height: 40px;
   }
 }

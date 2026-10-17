@@ -6,7 +6,7 @@
  * (来自 master ResourcePool 的 waiting 快照)—— 两者是两个维度:行序=整体先后,位次=某池内先后。
  */
 import {
-  Activity, AlertTriangle, Check, ChevronDown, ChevronRight, Cpu, ExternalLink, FileText, Loader2, Search, Square, UploadCloud, X,
+  Activity, AlertTriangle, Check, ChevronDown, ChevronRight, Cpu, ExternalLink, FileText, Hourglass, Loader2, Search, Square, UploadCloud, X,
 } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
@@ -14,7 +14,7 @@ import { Link } from "react-router-dom";
 import { api, type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO, type RollingDeliveryDTO } from "../api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/HubJobs";
-import { roomId } from "../lib/labels";
+import { platformLabel, roomId } from "../lib/labels";
 import { useHubStream, useTicker } from "../lib/hooks";
 import { NodesStrip } from "../components/NodesStrip";
 import { fmtBytes } from "../lib/nodes-summary";
@@ -163,7 +163,7 @@ function rowTiming(
 /** 筛选 chip 样式:选中态用 accent-soft + ink 边(与 telemetry-bar 的克制风格一致)。 */
 function chipStyle(on: boolean): CSSProperties {
   return on
-    ? { background: "var(--accent-soft)", borderColor: "var(--ink)", color: "var(--ink)", cursor: "pointer" }
+    ? { background: "var(--surface)", borderColor: "var(--ink)", color: "var(--ink)", cursor: "pointer" }
     : { cursor: "pointer" };
 }
 
@@ -277,7 +277,7 @@ function FilterBar({
               style={chipStyle(platform.includes(p))}
             >
               {platform.includes(p) && <Check className="w-3 h-3" />}
-              {p}
+              {platformLabel(p)}
             </button>
           ))}
         </div>
@@ -306,7 +306,7 @@ function phaseInfo(item: QueueItemDTO): {
 /** 相位图标 + 颜色(行与卡片共用)。 */
 function PhaseGlyph({ kind }: { kind: ReturnType<typeof phaseInfo>["kind"] }): ReactNode {
   if (kind === "busy") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
-  if (kind === "queued") return <span>⏳</span>;
+  if (kind === "queued") return <Hourglass className="w-3.5 h-3.5" aria-hidden="true" />;
   if (kind === "manual") return <AlertTriangle className="w-3.5 h-3.5" />;
   if (kind === "upload") return <UploadCloud className="w-3.5 h-3.5" />;
   if (kind === "stopped") return <Square className="w-3 h-3" />;
@@ -335,7 +335,7 @@ function QueueCard({ item, index, tz, onOpenLog }: { item: QueueItemDTO; index: 
             <span className="font-medium text-ink truncate">{item.anchorName ?? roomId(item.roomSlug)}</span>
             <span className="font-mono text-[11px] text-muted tabular-nums shrink-0">{sessionTime(item.streamKey)}</span>
           </div>
-          <div className="font-mono text-[11px] text-muted-soft mt-0.5">#{index} · {item.platform} · {roomId(item.roomSlug)}</div>
+          <div className="font-mono text-[11px] text-muted-soft mt-0.5">#{index} · {platformLabel(item.platform)} · {roomId(item.roomSlug)}</div>
         </div>
         <span className="inline-flex items-center gap-1.5 text-[13px] font-medium shrink-0" style={{ color: phaseColor(info.kind, item.state) }}>
           <PhaseGlyph kind={info.kind} />
@@ -370,7 +370,7 @@ function QueueCard({ item, index, tz, onOpenLog }: { item: QueueItemDTO; index: 
           <button type="button" title={t("hub.jobs.viewLog")} onClick={() => onOpenLog(item.streamKey)} className="icon-btn !w-7 !h-7">
             <FileText className="w-3.5 h-3.5" />
           </button>
-          <Link to="/hub" title={t("queue.openRoom")} className="icon-btn !w-7 !h-7">
+          <Link to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`} title={t("queue.openRoom")} className="icon-btn !w-7 !h-7">
             <ExternalLink className="w-3.5 h-3.5" />
           </Link>
         </span>
@@ -413,7 +413,7 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog }: { item: QueueItem
           <span className="font-mono text-[11px] text-muted tabular-nums shrink-0">{sessionTime(item.streamKey)}</span>
         </div>
         <div className="font-mono text-[11px] text-muted-soft mt-0.5 truncate">
-          {item.platform} · <span className="whitespace-nowrap">{roomId(item.roomSlug)}</span>
+          {platformLabel(item.platform)} · <span className="whitespace-nowrap">{roomId(item.roomSlug)}</span>
         </div>
       </td>
       <td style={{ width: 168 }}>
@@ -586,6 +586,8 @@ export function QueuePage(): ReactNode {
   // 旧文案「进行中 N」把待人工也算进去 → 显示「进行中 10」但其实 0 条在跑,误导。
   const runningCount = rows.filter((r) => r.phase === "running" || r.phase === "queued" || r.phase === "waiting_settle").length;
   const uploadCount = rows.filter((r) => r.phase === "waiting_upload").length;
+  // Same colour rule as HubJobs.stateColor: red only for a failed run, amber for "needs a person".
+  const failedCount = rows.filter((r) => r.phase === "failed").length;
   const attentionCount = rows.filter((r) => r.phase === "waiting_manual" || r.phase === "failed").length;
   const stoppedCount = rows.filter((r) => r.phase === "stopped").length;
   const doneCount = rows.filter((r) => r.phase === "done").length;
@@ -637,7 +639,7 @@ export function QueuePage(): ReactNode {
                 <span>{t("queue.summary.running", { n: runningCount })}</span>
                 {uploadCount > 0 && <span>{t("queue.summary.upload", { n: uploadCount })}</span>}
                 {attentionCount > 0 && (
-                  <span style={{ color: "var(--error-fg)" }}>{t("queue.summary.attention", { n: attentionCount })}</span>
+                  <span style={{ color: failedCount > 0 ? "var(--error-fg)" : "var(--warning-fg)" }}>{t("queue.summary.attention", { n: attentionCount })}</span>
                 )}
                 {stoppedCount > 0 && <span>{t("queue.summary.stopped", { n: stoppedCount })}</span>}
                 <span>{t("queue.summary.done", { n: doneCount })}</span>

@@ -6,6 +6,7 @@
  * 只读;数据全来自既有接口(任务的 recordingWorkers / workers status / 队列 delivering)。
  * 只显示「被某个房间选中」的节点 —— 没分配任务的节点不占版面。
  */
+import { WarnGlyph } from "./WarnGlyph";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useAtomValue } from "jotai";
 import { hubEnabledAtom } from "../atoms";
@@ -68,7 +69,7 @@ export function NodesStrip({ delivering }: { delivering: readonly RollingDeliver
                 {n.version && (
                   <span className="ml-auto font-mono text-[11px]" style={{ color: n.drift ? "var(--warning)" : "var(--muted-soft)" }}
                     title={n.drift ? t("queue.nodes.drift", { v: baseVersion(n.version), m: masterVersion }) : undefined}>
-                    {n.drift ? "⚠ " : ""}v{baseVersion(n.version)}
+                    {n.drift && <WarnGlyph />}v{baseVersion(n.version)}
                   </span>
                 )}
               </div>
@@ -80,7 +81,7 @@ export function NodesStrip({ delivering }: { delivering: readonly RollingDeliver
                 {n.unavailable > 0 && <span style={{ color: "var(--warning)" }}>{t("queue.nodes.unavailable", { n: n.unavailable })}</span>}
                 {n.diskFreeGB !== undefined && (
                   <span style={{ color: n.diskLow ? "var(--error-fg)" : undefined }}>
-                    {n.diskLow ? "⚠ " : ""}{t("queue.nodes.disk", { gb: n.diskFreeGB.toFixed(1) })}
+                    {n.diskLow && <WarnGlyph />}{t("queue.nodes.disk", { gb: n.diskFreeGB.toFixed(1) })}
                   </span>
                 )}
                 {/* 会话级进度已在下面的房间行里逐条给出,这里不重复「N 场 / 多少 MB」。 */}

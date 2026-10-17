@@ -17,7 +17,7 @@ export function Footer(): ReactNode {
           </span>
         </div>
         <p className="font-mono text-[11px] uppercase tracking-normal text-muted-soft">
-          {t("footer.tagline")} / 2026
+          {t("footer.tagline")}
         </p>
       </div>
     </footer>

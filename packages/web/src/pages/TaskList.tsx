@@ -163,9 +163,9 @@ export function TaskList(): ReactNode {
     !t.running &&
     t.status !== "error",
   ).length;
-  const errors = tasks.filter((t) =>
-    t.status === "error" || t.recordingWorkers?.some((worker) => worker.state === "unavailable"),
-  ).length;
+  // A task's own error is not the same as "we can't tell" (node unreachable): count them apart.
+  const errors = tasks.filter((t) => t.status === "error").length;
+  const unknown = tasks.filter((t) => t.status !== "error" && t.recordingWorkers?.some((worker) => worker.state === "unavailable")).length;
 
   return (
     <>
@@ -234,6 +234,7 @@ export function TaskList(): ReactNode {
           <div className="flex flex-col gap-1.5 min-w-0">
             <span className="telemetry-label">{t("tasks.metricError")}</span>
             <span className="telemetry-value tabular-nums" style={{ color: errors ? "var(--error-fg)" : "var(--muted-soft)" }}>{errors}</span>
+            {unknown > 0 && <span className="text-[11px] text-muted-soft">{t("tasks.unknownCount", { n: unknown })}</span>}
           </div>
           <span className="telemetry-icon" style={errors ? { color: "var(--error-fg)" } : undefined}><TriangleAlert className="w-4 h-4" /></span>
         </div>
@@ -263,7 +264,7 @@ export function TaskList(): ReactNode {
           <table className="tasks">
             <thead>
               <tr>
-                <th className="w-12">ID</th>
+                <th className="w-12">{t("tasks.colId")}</th>
                 <th>{t("tasks.colName")}</th>
                 <th className="w-[90px]">{t("tasks.colQuality")}</th>
                 <th className="w-[90px]">{t("tasks.colDanmu")}</th>
