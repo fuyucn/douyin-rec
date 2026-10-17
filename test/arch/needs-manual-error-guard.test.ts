@@ -76,9 +76,10 @@ describe("needs_manual 必须带 error(issue #188 源码守护)", () => {
   }
 
   it("守护本身不是空转:确实扫到了所有 needs_manual 写入点", () => {
-    // 明显偏少说明匹配逻辑坏了(历史上就坏过一次:正则要求紧跟 setState( 导致一条都扫不到)。
-    // 实测 46 处。给足余量,又不会因新增调用点而误报。
-    expect(matched).toBeGreaterThanOrEqual(30);
+    // 下限只用来抓「匹配逻辑坏了」(历史上坏过一次:正则要求状态紧跟 setState(,一条都扫不到)。
+    // 真实写入点约 29 处(另有 1 处是接口类型声明被一并匹配到)。门槛留足余量,
+    // **不要贴着实测值设** —— 正常合并/删除写入点时不该误报「守护空转」。
+    expect(matched).toBeGreaterThanOrEqual(20);
   });
 
   it("没有裸调用(改用 closeStageReady 或带非空 error)", () => {
