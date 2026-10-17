@@ -47,7 +47,38 @@ const TOKEN_RE = /\{([A-Za-z]+)\}/g;
 const STAMP_FULL = /^(.+)_(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})$/;
 const STAMP_NO_SEC = /^(.+)_(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})$/;
 const STAMP_DATE = /^(.+)_(\d{4}-\d{2}-\d{2})$/;
-const SAFE_STEM = /^[\p{L}\p{N}_\-【】（）()]+$/u;
+/**
+ * Characters a filename stem may keep. `.` is deliberately included: it is legal on every target
+ * filesystem (only `/`, NUL and the reserved `.`/`..` names are not). Platform names routinely carry
+ * it, and rejecting the whole upload for one dot stranded an entire recording in rolling mode.
+ * Anything outside this set is replaced with `-` by {@link sanitizeFileStem}.
+ */
+const SAFE_STEM = /^[\p{L}\p{N}_\-.【】（）()]+$/u;
+/** Characters replaced when a rendered stem is not safe. */
+const UNSAFE_STEM_CHAR = /[^\p{L}\p{N}_\-.【】（）()]+/gu;
+
+/**
+ * Make an arbitrary rendered title usable as a **file stem** (stage products / download names).
+ *
+ * - unsupported characters -> `-`, collapsed and trimmed;
+ * - `.`/`..`/empty are rejected (path traversal / no name at all) instead of silently becoming ``;
+ * - length is capped so the extension and `_danmu`/`_livechat` suffixes still fit.
+ *
+ * Returns null when nothing usable remains, so callers can fall back to the default naming rather
+ * than writing a file called `-`.
+ */
+export function sanitizeFileStem(s: string, maxLen = MAX_TITLE_LEN): string | null {
+  const collapsed = s
+    .normalize("NFC")
+    .replace(UNSAFE_STEM_CHAR, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "")
+    .trim();
+  if (!collapsed || collapsed === "." || collapsed === "..") return null;
+  const kept = collapsed.length > maxLen ? collapsed.slice(0, maxLen).replace(/[.-]+$/, "") : collapsed;
+  if (!kept || kept === "." || kept === "..") return null;
+  return isSafeStem(kept) ? kept : null;
+}
 
 export interface TitleParts {
   name: string;
@@ -228,7 +259,7 @@ export function validateTitleTemplate(template: string): string | null {
   }
   if (/[{}]/.test(stripped)) return "标题模板含未闭合的大括号";
   if (!SAFE_STEM.test(stripped)) {
-    return "标题模板含非法字符(仅允许字、数字、_-【】（）())";
+    return "标题模板含非法字符(仅允许字、数字、句点、_-【】（）())";
   }
   return null;
 }
@@ -259,8 +290,12 @@ export function formatUploadTitle(template: string | null | undefined, ctx: Titl
   if (rendered.length > MAX_TITLE_LEN) {
     throw new Error(`标题超过 ${MAX_TITLE_LEN} 字: ${rendered} (${rendered.length})`);
   }
-  if (!isSafeStem(rendered)) throw new Error(`标题含非法文件名字符: ${rendered}`);
-  return rendered;
+  if (isSafeStem(rendered)) return rendered;
+  // Clean instead of failing: a platform-supplied name with a stray space/punctuation must not stall
+  // the whole recording. A stem that cannot be cleaned at all is still an error (never write `-`).
+  const cleaned = sanitizeFileStem(rendered);
+  if (!cleaned) throw new Error(`标题无法清洗成合法文件名: ${rendered}`);
+  return cleaned;
 }
 
 /**

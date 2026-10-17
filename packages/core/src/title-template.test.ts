@@ -8,6 +8,7 @@ import {
   partTitleToFilename,
   parseSessionStamp,
   resolveOutputStem,
+  sanitizeFileStem,
   sanitizeLiveTitle,
   validateLooseTitleTemplate,
   validateTitleTemplate,
@@ -247,9 +248,9 @@ describe("分 P 标题(与稿件名分开)", () => {
     const ctx = { sessionBase: "某某_2026-09-12_14-30-05" };
     // 文件名规则(stage stem 侧):严格字符集
     expect(formatUploadTitle("{name}_{date}_{HH}-{mm}-{ss}", ctx)).toBe("某某_2026-09-12_14-30-05");
-    // 稿件名:可含空格(文件名侧会拒绝,这里必须允许)
+    // 稿件名:可含空格(文件名侧会清洗,这里必须保留)
     expect(formatBiliTitle("{name}_{date} 直播回放", ctx)).toBe("某某_2026-09-12 直播回放");
-    expect(() => formatUploadTitle("{name}_{date} 直播回放", ctx)).toThrow();
+    expect(formatUploadTitle("{name}_{date} 直播回放", ctx)).toBe("某某_2026-09-12-直播回放");
     // 分P名:可含空格,渲染成宽松标题;类型后缀自动加
     expect(formatPartTitle("P{part} 弹幕版", { ...ctx, partIndex: 2, partTotal: 3 }, "danmu"))
       .toBe("P2 弹幕版_danmu");
@@ -311,5 +312,36 @@ describe("epochFromZonedParts(zonedStamp 的逆)", () => {
         expect(epochFromZonedParts(y!, mo!, d!, Number(z.hh), Number(z.mm), Number(z.ss), tz)).toBe(ms);
       }
     }
+  });
+});
+
+describe("file stems from platform names (#207)", () => {
+  const ctx = { sessionBase: "某某_2026-09-12_14-30-05" };
+
+  it("a dot in the name is legal and preserved", () => {
+    expect(formatUploadTitle("{name}_{date}", { sessionBase: "一个.名字_2026-09-12_14-30-05" }))
+      .toBe("一个.名字_2026-09-12");
+  });
+
+  it("other punctuation is cleaned, not turned into a permanent rolling failure", () => {
+    expect(formatUploadTitle("{name}_{date}", { ...ctx, liveTitle: "" }))
+      .toBe("某某_2026-09-12");
+    expect(sanitizeFileStem("a b&c+d")).toBe("a-b-c-d");
+    expect(sanitizeFileStem("名字·今天")).toBe("名字-今天");
+  });
+
+  it("path separators cannot escape the output directory", () => {
+    expect(sanitizeFileStem("a/b")).toBe("a-b");
+    expect(sanitizeFileStem("a\\b")).toBe("a-b");
+    expect(sanitizeFileStem("../etc/passwd")).toBe("etc-passwd");
+    expect(sanitizeFileStem("..")).toBeNull();
+    expect(sanitizeFileStem(".")).toBeNull();
+    expect(sanitizeFileStem("")).toBeNull();
+  });
+
+  it("caps the length and never ends on a separator", () => {
+    const s = sanitizeFileStem("x".repeat(100))!;
+    expect(s.length).toBe(80);
+    expect(sanitizeFileStem(`${"y".repeat(79)}.`)).toMatch(/y$/);
   });
 });
