@@ -1,0 +1,149 @@
+# 038 节点侧上传队列：biliup 作为 proc-queue 处理器，按「进度停滞」判死、不按总时长
+
+> **TODO：T-62**（`TODO.md`「待办（Next）」）。承接 plan 036 第二期 T14 / T15（biliup 处理器 + master 上传改派发），
+> 并取代 plan 033 的 W1-2 与 issue #25 ①（节点侧上传超时预算）。
+
+状态：设计稿（未实施）。基线 `feat/hub-optimization` = `bb353c0`；文中行号均在该基线实测。
+隐私：本文与关联 issue 一律不写 streamKey、房间号、BV、主播名、主机名；事故细节只留本地台账。
+
+## 1. 起因（脱敏）
+
+某场节点侧上传（P1 约 443MB + P2 约 300MB）：
+
+- master 按**胜出方第一会话**的字节数（约 0.47GB）估预算 → 30 分钟（下限）。
+- 同一节点当时还有另一路 append 在并发上传，biliup 实测仅 0.1–0.2MB/s。
+- ssh 到点 SIGKILL，master 随即 `_node-abort`；节点结果文件停在 `phase=uploading`、无 BV；B 站「投稿中」为空 → 确认**未建稿**。
+- 事后人工补投：443MB 用 87.8s、300MB 用 60.4s（约 5MB/s），一次多文件 upload 建稿成功。
+
+结论：不是网络坏，是**预算算错 + 同节点并发抢带宽 + 用总时长判死**。
+
+## 2. 现状（bb353c0 实测）
+
+| 事实 | 位置 |
+|---|---|
+| 预算只取 `winner.rec.totalBytes`（胜出方第一会话）；`members` 里其它会话的字节运行时存在但从未求和 | `orchestrator/src/node-side-upload.ts:384`、`:95`；`select.ts:129-130` |
+| 保守带宽 1MB/s，下限 30 分钟，上限 6 小时 | `node-side-upload.ts:278-296` |
+| 总时长到点 ssh SIGKILL | `orchestrator/src/transport-ssh.ts:72-81` |
+| 超时后先 `_node-abort` 再回读结果 | `node-side-upload.ts:183-261`（abort `:197-205`） |
+| 节点侧 `uploading` 在上传闸之前就写，语义过宽 | `app/src/node-pipeline.ts:692`（`:766` 才带 `intentPart`） |
+| `UploadGate.run` 只串行「等配额」，`fn` 本身并发执行；串行链只在进程内 | `core/src/upload-gate.ts:320-328,412-420` |
+| 部署 guard 只看 `recording===true` | `scripts/deploy-precheck.sh:7-8` |
+| master 重启 → `sweepStale` 标 failed → 重入 → abort | `orchestrator/src/ledger.ts:357`、`reconciler.ts:516` |
+| `-N` 后缀 runNow 新建 key，只拦 `done+bv` | `reconciler.ts` runNow 段（实现时重新定位行号） |
+| 慢不换线：`--line` 只在开传前指定 | `app/src/upload/biliup.ts:113,179` |
+| 失败原因被「不确定」覆盖 | `node-side-upload.ts:187` vs `:242` |
+
+**已有、可直接复用**（plan 036 第一期已合并）：`packages/proc-queue`（每节点 `proc-queue.db`、租约、fencing、`uncertain`、
+`cancelOutcome`）、`@drec/processors`（目前只有 remux）、`_enqueue` / `_proc-status`、`/api/proc/active`、`(resource, lane)` 限额。
+**还没有**：biliup 处理器、`_proc-cancel` / `dispatchAndAwait`、`running.biliup` 进部署 guard（均在 036 第二期）。
+
+## 3. 决定（用户已确认）
+
+1. **选项 1**：一直传到成功或失败；**只按进度停滞判死**；速度只用于 ETA 与告警。不中途换节点（日后可用速度数据在**开传前**选节点，仅双录房间）。
+2. **队列放节点，不放 master**：上传数据在节点，master 只下发意图、轮询结果。
+3. **不新建 `upload_items` 表**：队列项 = proc-queue 的 `kind=biliup` job，复用其租约 / fencing / `uncertain`。
+4. 同一场严格保序（P1 建稿 → append 按 seq），场与场之间轮转；节点并发默认 1。
+5. SSH 只做短 RPC；SSH 失败 = 状态未知，**不改状态、不 abort**。
+
+## 4. 设计（相对 plan 036 第二期的增量）
+
+### 4.1 biliup 处理器（对应 036 T14）
+
+- `processors/src/biliup.ts`：硬常量（关水印、copyright、仅自己可见）从 `app/src/upload/biliup.ts` 逐字搬入，argv 快照测试。
+- `resource="upload"`、`lane="biliup"`，**默认并发 1**（节点 settings，可调）。`retryable=false`（重试由下面的阶段规则决定，不走通用重试）、`interruptible=false`。
+- 阶段 `step`：`remux → gate_wait → transfer → submit`，写进 job 的进度字段（不新增 phase 词表）。
+  节点结果文件 `phase` 取值**保持** `started|uploading|done|failed`（`core/src/api-types.ts:751` 白名单，旧 master 不认新值会归 null → 当成「确认没成」→ 重投），新信息只加可选 `step` 字段。
+- `runBiliup` 增加 `onSpawn(pid)` / `onLine(line)`；看到 `All files uploaded successfully` 即切到 `submit`。该行缺失或文案变化 → 一律按「submit 不确定」处理（宁可转人工，不重传）。
+
+### 4.2 停滞判定（只按字节进度）
+
+- biliup 在非 TTY 下进度条被隐藏，日志在 `pre_upload` 后静默，**不能把输出当心跳**。
+- 候选信号（**PR1 先在 VPS 实测再定**）：① biliup 进程树 `/proc/<pid>/io` 的 `wchar` 增量；② checkpoint 文件 mtime/size；③ 套伪终端让进度条输出。
+- 判死条件：`transfer` 步内字节增量为 0 持续 `stallMs`（默认 15 分钟）。`remux` / `gate_wait` **不参与**；`submit` **永不 kill**；进程消失给宽限。
+- 租约心跳（`heartbeatStaleMs`，按时间）与传输进度（按字节）是**两个信号**，只有后者能判死。
+- 慢（< `slowAlertBps` 持续 `slowAlertWindowMs`）只告警，不 kill。`maxWallMs` 只用于告警 + 停止重试，不 kill。
+
+### 4.3 重试与保序
+
+- `transfer` 失败或停滞、且**确认进程已停** → job 回 `pending` 并带 `notBefore`（5 分钟起指数退避，封顶 1 小时，最多 3 次）。**只重试失败的那一项**（checkpoint 本就按文件），退避期间让出轮转给其它场。
+- `submit` 失败或结果不确定 → 先自动核对（append 用 `countVideoParts`，建稿用 `biliup list --is-pubing` 作旁证）；核对不出 → `uncertain`，人工处理。
+- 保序：job 带 `orderKey=streamKey`、`seq`；claim 时排除「同 orderKey 下有更小 seq 未 done」的 job。需要 store 迁移（`user_version` +1：`notBefore`、`orderKey`、`seq` 列）。
+- 重启恢复：`pending` 原样保留；`running` 且在 `remux/gate_wait/transfer` → 清孤儿 biliup 后回 `pending`；在 `submit` → `uncertain`；已有 BV → 记 done，继续 append。
+
+### 4.4 master 侧（对应 036 T5 + T15，`needs-decision`）
+
+- 入队**钉住执行节点**（winner 每轮可能不同，重入不得换节点）；`mode: queue`，回退 `blocking`；回退前要求节点队列无 pending/running biliup（或先取消），blocking 遇到队列里已有的项返回 409。
+- 队列模式下 master **不调 `_node-abort`**；轮询 `_proc-status`（每节点 60s）；SSH 失败 = 未知。
+- `sweepStale` 对「远端队列中」的 job 豁免（轮询时 touch `updatedAt`，或 `isStreamActive` 认远端在途）。
+- `-N` / `runNow`：按**去掉后缀的原 key** 查台账，任一 job 有 BV 或已有队列项 → 409（`force` 才放行）。`biliup list` 只作旁证，不做自动判定。
+- 部署 guard：`deploy-precheck` 同时读 `/api/proc/active` 的 `running.biliup`，>0 就等（AGENTS.md 同 PR 改，见 036 §2.3 拟改文本）。
+
+### 4.5 边录边传共用并发槽
+
+边录边传现在在录制子进程里自己跑 biliup（`manager/record-args` + `rolling-upload`），不经队列。目标：入队 `kind=biliup`、与整场上传共用 `lane=biliup` 并发 1。
+在落地前不得宣称「节点并发为 1」。**实现方式需单独定**（子进程只入队 vs 带 pid 心跳的跨进程槽），PR4 开工前补设计。
+
+### 4.6 参数（`hub.config` 的 `nodeUpload.*`）
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `mode` | `queue` | 回退 `blocking` |
+| `concurrency` | 1 | 每节点 biliup 并发 |
+| `stallMs` | 900000 | transfer 字节停滞判死 |
+| `heartbeatStaleMs` | 180000 | 租约心跳过期 |
+| `maxWallMs` | 86400000 | 仅告警 + 停止重试 |
+| `maxAttempts` / `retryBackoffMs` | 3 / 300000 | transfer 重试 |
+| `pollIntervalMs` | 60000 | master 轮询 |
+| `slowAlertBps` / `slowAlertWindowMs` | 262144 / 1800000 | 慢速告警 |
+| `unreachableAlertMs` | 1800000 | 节点不可达告警 |
+
+## 5. PR 拆分
+
+| PR | 内容 | 依赖 | 标签 |
+|---|---|---|---|
+| PR0 | 止血（现有 blocking 路径）：预算对 **winnerMembers** 全部会话求和、保守带宽下调（约 0.1–0.2MB/s 口径，上限仍 6h）、超时报错带 stderr、不覆盖原始错误、修测试 | 无 | 上传类，`needs-decision`（本次由用户确认开工） |
+| PR1 | 停滞信号实测（VPS，只读）+ `runBiliup` 的 `onSpawn/onLine` + 结果文件加可选 `step` | PR0 | 同上 |
+| PR2 | biliup 处理器 + 阶段/停滞/退避/保序 + store 迁移 + 重启恢复 | PR1、036 T2 | 同上 |
+| PR3 | master 入队/轮询/不 abort/sweep 豁免/原 key 409/部署 guard/回退保护 | PR2、036 T5 | 同上（改部署 guard） |
+| PR4 | 边录边传接入共享并发槽 | PR2 | 同上 |
+| PR5 | 队列页（`/api/hub/queue` 露出节点 biliup 行、最后心跳、ETA） | PR3 | `enhancement` |
+| PR6 | 归并工具 `hub-triage-node-uploads` / `hub-attach-bv` / `hub-clean-sources`（dry-run 默认，`--apply` 才写，参照 `hub-recheck-verify`） | 无 | 删源类，`needs-decision` |
+| PR7 / PR8 | Phase 2：传输/提交拆分 + 已传分 P 复用（含许可证决策）；审核通过后才删源（默认关） | PR3 | `needs-decision` |
+
+回滚：每个 PR 单独 revert；PR3 之后切回 `blocking` 的前提是节点队列已空（`_proc-status` 实测贴 PR）。
+
+## 6. 本场处置（不写代码）
+
+冻结 `run`、带 `-N` 的新建任务与 `retry-node`；之后用 PR6 的 `hub-attach-bv` 先 dry-run 再 `--apply` 绑定 BV 并标 done；源文件由 `hub-clean-sources` 单独确认后删除，保留 xml。
+
+## 7. 测试清单
+
+- 预算只对 `winnerMembers` 求和（落败节点字节不计）；单会话 undefined 混入回落下限。
+- 队列模式下 `handleNodeFailure` **不调** `abortNodePipeline`；原始错误不被「不确定」覆盖。
+- `sweepStale` 对远端在途 job 不标 failed（含 master 重启）。
+- 排队等配额超过 `heartbeatStaleMs` 不会被回队；字节停滞才判死；字节在涨 / 进程刚消失不判死；`submit` 无字节增长不杀。
+- 出现 `All files uploaded` 之后失败 → 不会第二次 upload；该行缺失 → 按 submit 不确定。
+- 重启恢复矩阵：`running` × {remux, gate_wait, transfer, submit} × {有 BV, 无 BV}；崩在「写 intent」与「spawn」之间 → 回 pending，不 append。
+- 两进程同时入队只产生一条；CAS 认领；`orderKey` 保序（seq 小的未 done 不放行大的）。
+- `-N` 兄弟 job / 原 key 已有 BV → 409。
+- 旧节点无 `_enqueue` kind=biliup → 回落 blocking 且只上传一次；回滚演练：队列清空 → blocking，只产生一个稿件。
+- `transport-ssh.ts` 注入 `run` 时 `timeoutMs` 被忽略的现有缺口补断言；`node-side-upload.test.ts` 的 fake 方法名写错一并修。
+- 部署 guard：`running.biliup>0` 时 precheck 返回等待。
+
+## 8. 审核记录
+
+本方案在落笔前经两路独立审核（Fable 5.1；DeepSeek 用的是 V4.1 Flash，因 V4 Pro 额度用尽、可用列表无 4.1 Pro）。已采纳项落在上文，不采纳项：
+
+- 「租约按账号而非节点」：账号级限制主要卡提交频率而非传输并发，跨节点互斥需节点反连 master，现架构不支持 → 记为已知风险，用告警观察。
+- 「节点主动推心跳」：节点通常无 webhook、ssh 只能 master → 节点，保留轮询。
+- 「把 PR7 提前」：`All files uploaded` 已能分出边界；PR7 牵涉 GPL 许可证决策，留 Phase 2。
+
+已知风险：审核后发现 `origin/feat/hub-optimization` 已有 `proc-queue`，原方案的 `upload_items` 表与 `_upq-*` 命令与之重复，故改为本稿的「biliup = proc-queue 处理器」。
+
+## Global Constraints
+
+- 只有 `accept` 的 issue 才实施；一 issue 一分支；PR base `feat/hub-optimization`；不部署，部署仍由人做。
+- 每个 `feat`/`fix` PR bump 根 `package.json` version 并 `pnpm bundle`。
+- 验证门：`pnpm test`、`pnpm typecheck`、`pnpm arch:check`；动前端加 `cd packages/web && pnpm build`。
+- 不得删除 `recordings/` 下最后一份 `.xml` / `.ass`；上传、删源、删稿、部署、改 hub 规则一律 `needs-decision`。
+- 人工投稿仍用 `upload-recording-today` skill；本计划不直接上传任何文件。
