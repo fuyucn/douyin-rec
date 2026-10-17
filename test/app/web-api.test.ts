@@ -1282,7 +1282,21 @@ describe("hub 停止 / 立即执行端点", () => {
     const r = await a.runHubJob({ streamKey: "douyin:123:2026-08-10", winnerWorker: "vps", wait: false });
     expect(r.status).toBe(202);
     expect(r.body).toEqual({ ok: true, code: 202, streamKey: "douyin:123:2026-08-10" });
-    expect(fake).toHaveBeenCalledWith({ streamKey: "douyin:123:2026-08-10", winnerWorker: "vps", wait: false });
+    expect(fake).toHaveBeenCalledWith({ streamKey: "douyin:123:2026-08-10", winnerWorker: "vps", wait: false, force: false });
+  });
+  it("runNow: force is passed only when exactly true; a forceable 409 keeps its flag", async () => {
+    const fake = vi.fn(async (_o: { streamKey: string; force?: boolean }) =>
+      ({ ok: false, code: 409, error: "has BV", forceable: true }));
+    const a = makeApi({
+      store, manager, syncDbPath: join(mkdtempSync(join(tmpdir(), "run-")), "x-sync.db"), runNow: fake,
+    });
+    const r = await a.runHubJob({ streamKey: "douyin:123:2026-08-10" });
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ forceable: true });
+    await a.runHubJob({ streamKey: "douyin:123:2026-08-10", force: "yes" as unknown as boolean });
+    expect(fake.mock.calls[1]![0].force).toBe(false);
+    await a.runHubJob({ streamKey: "douyin:123:2026-08-10", force: true });
+    expect(fake.mock.calls[2]![0].force).toBe(true);
   });
   it("runNow wait=true → 200", async () => {
     const a = makeApi({

@@ -1,7 +1,7 @@
 import { Pencil, Play, Square, Timer, Trash2 } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, type HubJobDTO, type HubRuleDTO, type Task, type WorkerDTO } from "../api/client";
+import { api, ApiError, type HubJobDTO, type HubRuleDTO, type Task, type WorkerDTO } from "../api/client";
 import { RunCard, JobLogDialog, runDate } from "./HubJobs";
 import { Dialog } from "./Dialog";
 import { Button, IconButton } from "./Button";
@@ -93,6 +93,7 @@ export function RoomDetail({
   // T18 房间级**动作**。与配置(编辑弹窗)分离:动作会改运行时状态,危险的要二次确认。
   const [drainBusy, setDrainBusy] = useState(false);
   const [stopOpen, setStopOpen] = useState(false);
+  const [forceRun, setForceRun] = useState<{ streamKey: string; winnerWorker?: string; message: string } | null>(null);
 
   const refresh = async (): Promise<void> => {
     // worker 列表与 run 列表**解耦**:run 刷新是推送驱动的热路径(每次 changed 都跑),
@@ -219,12 +220,17 @@ export function RoomDetail({
       toast(errMessage(e), "error");
     }
   };
-  const runNow = async (streamKey: string, winnerWorker?: string): Promise<void> => {
+  const runNow = async (streamKey: string, winnerWorker?: string, force = false): Promise<void> => {
     try {
-      await api.runHubJob({ streamKey, winnerWorker });
+      await api.runHubJob({ streamKey, winnerWorker, force });
       toast(t("hub.jobs.started"), "info");
       void refresh().catch(() => {}); // 交互后主动刷新;失败由 stale 提示呈现
     } catch (e) {
+      // 409 that `force` can override (old BV / unfinished queue row): ask once instead of failing.
+      if (e instanceof ApiError && e.forceable && !force) {
+        setForceRun({ streamKey, winnerWorker, message: e.message });
+        return;
+      }
       toast(errMessage(e), "error");
     }
   };
@@ -456,6 +462,19 @@ export function RoomDetail({
           </div>
         </div>
       </Dialog>
+      <ConfirmDialog
+        open={forceRun !== null}
+        title={t("hub.jobs.runForceTitle")}
+        message={<><span className="block">{forceRun?.message}</span><span className="block mt-2">{t("hub.jobs.runForceHint")}</span></>}
+        confirmLabel={t("hub.jobs.runForceConfirm")}
+        destructive
+        onConfirm={() => {
+          const r = forceRun;
+          setForceRun(null);
+          if (r) void runNow(r.streamKey, r.winnerWorker, true);
+        }}
+        onCancel={() => setForceRun(null)}
+      />
       <ConfirmDialog
         open={confirmDelete}
         title={t("hub.common.deleteRuleConfirmTitle")}

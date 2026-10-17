@@ -62,10 +62,13 @@ export interface QrPoll {
 /** Thrown on non-2xx responses; carries the server's error message + status. */
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  /** True when the server says the refusal can be overridden with `force` (hub rerun 409). */
+  forceable: boolean;
+  constructor(message: string, status: number, forceable = false) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.forceable = forceable;
   }
 }
 
@@ -86,7 +89,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     if (data && typeof data === "object" && "error" in data) {
       msg = String((data as { error: unknown }).error);
     }
-    throw new ApiError(msg, res.status);
+    throw new ApiError(msg, res.status, (data as { forceable?: unknown } | null)?.forceable === true);
   }
   return data as T;
 }
@@ -178,7 +181,7 @@ export const api = {
   stopHubJob: (streamKey: string): Promise<{ ok: boolean; error?: string }> =>
     request("POST", `/api/hub/jobs/${encodeURIComponent(streamKey)}/stop`),
   /** 立刻跑一场已有录像的后处理。默认异步 202。 */
-  runHubJob: (input: { streamKey: string; winnerWorker?: string; wait?: boolean }): Promise<{ ok: boolean; error?: string; streamKey?: string }> =>
+  runHubJob: (input: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }): Promise<{ ok: boolean; error?: string; streamKey?: string }> =>
     request("POST", "/api/hub/jobs/run", input),
 
   // ── 多节点 worker(录制节点)管理 ─────────────────────────────────────────────

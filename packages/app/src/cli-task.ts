@@ -310,7 +310,7 @@ export interface HubStarter {
   /** 停一场后处理(rsync/ffmpeg/biliup),不动录制。hub 未启用 → web API 返回 400。 */
   stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 立刻跑一场已有录像的后处理(跳过 settle / 断流窗)。hub 未启用 → web API 返回 400。 */
-  runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
+  runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>;
 }
 
 /** Build the `task` command group. Pass a getWebhook() that reads program-level opts/env. */
