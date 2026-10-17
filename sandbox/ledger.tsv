@@ -15,3 +15,4 @@ iter	task	phase	tests	quality	pass	note
 12	T12	keep	2803/2845	ok	yes	committed; two-phase dispatch (biliup enqueued after prep done) + wire fix 0d2aac4
 13	T13	keep	2829/2871	ok*	yes	committed; *reconciler.ts was already over file_loc (734) before this task, +21 LOC; remux-queue flaky known
 13b	T13b	keep	-	ok	yes	committed; reuses listTasks (no new RPC)
+13c	T13c	keep	2843/2885	ok	yes	committed; found ledger accepts same-state writes -> guard in apply
