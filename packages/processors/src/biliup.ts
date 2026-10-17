@@ -158,7 +158,8 @@ function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supe
     const dt = lastWrite ? t - lastWrite.at : 0;
     const bps = lastWrite && dt > 0 && doneBytes >= lastWrite.doneBytes ? Math.round(((doneBytes - lastWrite.doneBytes) * 1000) / dt) : null;
     lastWrite = { doneBytes, totalBytes: part.total, bps, at: t };
-    ctx.setState?.({ progress: lastWrite });
+    // Runs inside a timer / child output handler: a throw here would be uncaught, and progress is display-only.
+    try { ctx.setState?.({ progress: lastWrite }); } catch (e) { ctx.log(`progress not saved: ${(e as Error)?.message ?? e}`); }
   };
   const timer = setInterval(() => {
     const c = child;

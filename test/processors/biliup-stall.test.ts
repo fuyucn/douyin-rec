@@ -295,3 +295,23 @@ describe("biliup processor progress", () => {
     expect(seq).toEqual([...seq].sort((a, b) => a - b)); // never goes backwards
   });
 });
+
+describe("biliup processor progress write failures", () => {
+  it("a throwing progress write is logged and the upload still finishes", async () => {
+    let finish: () => void = () => {};
+    const run = vi.fn((_a: string[], hooks?: BiliupHooks) => new Promise<string>((res) => {
+      hooks?.onSpawn?.(30);
+      finish = () => { hooks?.onLine?.("All files uploaded successfully"); res("BV1aaaaaaaaa"); }; // issue-guard: allow (fake BV fixture)
+    }));
+    const logs: string[] = [];
+    const setState = vi.fn((patch: { progress?: unknown }) => { if (patch.progress) throw new Error("database is locked"); });
+    const c = { log: (m: string) => logs.push(m), alert() {}, markProgress() {}, assertLease() {}, signal: new AbortController().signal, setState } as never;
+    let n = 0;
+    const p = makeBiliupProcessor(base({ run, progressEveryMs: 0, sizeOf: () => 10, readAcked: () => new Map([["s", ++n]]), lookup: { run: async () => "[]" } }));
+    const pending = p.run(job(files(1), {}, { stallMs: 60_000 }), c);
+    await new Promise((r) => setTimeout(r, 30));
+    finish();
+    expect((await pending).bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
+    expect(logs.some((m) => /progress not saved/.test(m))).toBe(true);
+  });
+});
