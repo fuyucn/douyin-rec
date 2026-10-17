@@ -130,15 +130,43 @@ export function checkBiliup(cookies: string): Promise<string | null> {
   });
 }
 
+/** biliup 在全部文件传完、提交稿件之前打印的行(传输 → 提交的唯一文本边界)。 */
+export function isAllFilesUploadedLine(line: string): boolean {
+  return /All files uploaded successfully/.test(line);
+}
+
+/** runBiliup 的可选观测回调(plan 038):只读观测,回调抛错不影响上传。 */
+export interface BiliupHooks {
+  /** 子进程启动后调用(pid 可能为 undefined:spawn 失败时)。 */
+  onSpawn?: (pid: number | undefined) => void;
+  /** stdout / stderr 每出现一整行调用一次(`\r` 与 `\n` 都算行尾;进度条用 `\r` 刷新)。 */
+  onLine?: (line: string) => void;
+}
+
 /** 底层：spawn biliup argv，收集 stdout+stderr，非零退出抛错，返回合并输出。 */
-export function runBiliup(argv: string[]): Promise<string> {
+export function runBiliup(argv: string[], hooks: BiliupHooks = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const p = spawn("biliup", argv);
     registerChild(p); // 不建进程组:biliup 自己管分块;checkBiliup(-V)不走这里
     let out = "", err = "";
     const appendTail = (current: string, c: Buffer): string => (current + String(c)).slice(-65536);
-    p.stdout.on("data", (c: Buffer) => (out = appendTail(out, c)));
-    p.stderr.on("data", (c: Buffer) => (err = appendTail(err, c)));
+    // 观测回调的异常一律吞掉:观测不能把一次正常上传变成失败。
+    const safe = (fn: () => void): void => { try { fn(); } catch { /* 观测回调不得影响上传 */ } };
+    // stdout 与 stderr 各自缓冲半行,凑够整行才回调(chunk 边界不保证按行切)。
+    const makeLiner = (): ((c: Buffer) => void) => {
+      let buf = "";
+      return (c: Buffer): void => {
+        if (!hooks.onLine) return;
+        buf += String(c);
+        const parts = buf.split(/[\r\n]+/);
+        buf = parts.pop() ?? "";
+        for (const line of parts) if (line) safe(() => hooks.onLine!(line));
+      };
+    };
+    const lineOut = makeLiner(), lineErr = makeLiner();
+    if (hooks.onSpawn) safe(() => hooks.onSpawn!(p.pid));
+    p.stdout.on("data", (c: Buffer) => { out = appendTail(out, c); lineOut(c); });
+    p.stderr.on("data", (c: Buffer) => { err = appendTail(err, c); lineErr(c); });
     p.on("error", reject);
     p.on("close", (code) => {
       try { throwIfAborted(); } catch (e) { reject(e); return; }

@@ -19,10 +19,10 @@ import path from "node:path";
 import {
   linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, isAppendAmbiguous,
   isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, partTitleToFilename, resolveOutputStem, sanitizeStreamKey,
-  processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type UploadGateStore,
+  processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type NodeUploadStep, type UploadGateStore,
 } from "@drec/core";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment, unreadableParts } from "@drec/post-process";
-import { appendGroup, countVideoParts, uploadPlain } from "./upload/biliup.js";
+import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain } from "./upload/biliup.js";
 import { rootBiliupCookies, rootDbPath, rootStageDir } from "./paths.js";
 
 /**
@@ -649,7 +649,7 @@ export async function runNodeSidePipeline(
     removeNodeExecutorPid(stageSub);
     throw new Error("节点结果文件损坏,禁止重建稿,转人工核对");
   }
-  if (!prior?.bv) writeNodeResult(stageSub, { phase: "started", ok: false }, log);
+  if (!prior?.bv) writeNodeResult(stageSub, { phase: "started", ok: false, step: "remux" }, log);
 
   // 0 字节分段(写满盘 / 开播即断的残留)不含任何内容,却会让 ffmpeg 失败、整场转人工且源永不删,
   // 磁盘越堆越满。跳过并记录;清理阶段仍按原始清单删掉它们。全是空段 → 明确报错(没有可传内容)。
@@ -689,7 +689,7 @@ export async function runNodeSidePipeline(
 
   // ⚠️ 上传前先落 `uploading` 标记:此后一旦 ssh 回传断开,master 回读会看到它 →
   // 明确「结果不确定」→ 转人工,**绝不自动重传**(重复投稿不可逆)。这是「假失败」修复的另一半。
-  writeNodeResult(stageSub, { phase: "uploading", ok: false }, log);
+  writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "gate_wait" }, log);
 
   // 上传:节点本地 cookies.json 优先,master 下发的兜底。
   //
@@ -737,6 +737,22 @@ export async function runNodeSidePipeline(
   //   既不能盲目 append(可能重复)也不能重建稿 → 抛错,master 据此转人工核对分 P。
   let bv = (prior?.bv ?? "").trim();
   let confirmedParts = 0;
+  let intentPart: number | undefined;
+  // 上传子步骤(plan 038):仅可观测信息,master 的成败判定只看 phase。落盘失败只记日志、不中断上传
+  // (落 uploading 本身已在上方强制成功;这里是增量信息,丢一次不影响「结果不确定」的保守口径)。
+  const markStep = (step: NodeUploadStep): void => {
+    try {
+      writeNodeResult(stageSub, { phase: "uploading", ok: false, step, bv: bv || undefined, products,
+        confirmedParts: confirmedParts || undefined, intentPart }, log);
+    } catch (e) {
+      log(`上传子步骤落盘失败(忽略,仅可观测信息): ${String((e as Error)?.message ?? e)}`);
+    }
+  };
+  // biliup 起进程 = 配额已拿到、开始传输;打印 `All files uploaded` = 传完、进入提交。
+  const observedRun = (argv: string[]): Promise<string> => runBiliup(argv, {
+    onSpawn: () => markStep("transfer"),
+    onLine: (line) => { if (isAllFilesUploadedLine(line)) markStep("submit"); },
+  });
   try {
     let nextIdx = 1; // 下一个待 append 的 parts 下标(parts[0]=P1,由建稿或已确认覆盖)
     if (bv) {
@@ -750,7 +766,7 @@ export async function runNodeSidePipeline(
     } else {
       bv = await withGate(uploadGate, accountKey, () =>
         withRetry(
-          () => uploadPlain({ plain: { ...meta, video: aliasFor(parts[0]!.plain, 1, totalParts), title } }),
+          () => uploadPlain({ plain: { ...meta, video: aliasFor(parts[0]!.plain, 1, totalParts), title }, run: observedRun }),
           { tries: 3, backoffMs: 60_000, shouldRetry: isUploadRateLimited },
         ),
       );
@@ -763,14 +779,15 @@ export async function runNodeSidePipeline(
       // issue #25 ②:追加**前**先把 BV + 已确认进度 + 本次意图落盘(建稿后到此刻只隔一行代码)。此前 BV 只在整场
       // 收尾 / 抛错时才写,执行体被 ssh 超时 / SIGKILL 杀掉就丢 BV → 「B站已有稿件、台账无任何 BV」;
       // 此后被杀,回读 `intentPart > confirmedParts` = 这次追加结果未知,其余已确认。
-      writeNodeResult(stageSub, { phase: "uploading", ok: false, bv, products, confirmedParts, intentPart: i + 1 }, log);
+      intentPart = i + 1;
+      writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "gate_wait", bv, products, confirmedParts, intentPart }, log);
       // 单文件 append → 安全重试(601 冷却后重试;其余错误只要「结果不确定」就不重试)。
       await withGate(uploadGate, accountKey, () =>
         withRetry(
           // countParts 与 master 路径同一装配:失败后回读分 P 数 → 变多=已提交(跳过)、没变=安全重试、
           // 查不到=抛 ambiguous 转人工;缺它则「已提交但响应丢失」会换线重复追加分 P(#59)。
           () => appendGroup({
-            ...meta, bv, files: [aliasFor(p.plain, i + 1, totalParts)],
+            ...meta, bv, files: [aliasFor(p.plain, i + 1, totalParts)], run: observedRun,
             countParts: () => countVideoParts(bv, cookies),
           }),
           { tries: 5, backoffMs: 60_000, shouldRetry: (e) => isUploadRateLimited(e) || !isAppendAmbiguous(e) },

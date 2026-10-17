@@ -747,9 +747,19 @@ export interface NodePipelineResultFile {
   intentPart?: number;
   /** 失败原因(ok=false)。 */
   error?: string;
+  /**
+   * 上传子步骤(plan 038,issue #204)。**只是可观测信息**:master 的成败 / 重试判定一律只看 `phase`,
+   * 旧 master 不认识该字段也无影响;`phase` 词表不变(新增 phase 会被旧 master 归一成 null → 误判「确认没成」)。
+   * 旧 bundle 不写 → 缺省 = 未知。
+   */
+  step?: NodeUploadStep;
   /** 结果写入时刻(epoch ms;master 用它判断结果是否属于本次执行)。 */
   atMs: number;
 }
+
+/** 节点侧上传子步骤:remux → 等上传配额 → 传输 → 提交(biliup 打印 `All files uploaded` 后进入 submit)。 */
+export const NODE_UPLOAD_STEPS = ["remux", "gate_wait", "transfer", "submit"] as const;
+export type NodeUploadStep = (typeof NODE_UPLOAD_STEPS)[number];
 
 /**
  * 节点侧落盘结果文件**合法的 phase 白名单**(唯一真理)。
@@ -779,6 +789,7 @@ export function normalizeNodeResultFile(parsed: unknown): NodePipelineResultFile
     confirmedParts: Number.isInteger(p.confirmedParts) && (p.confirmedParts as number) >= 0 ? p.confirmedParts : undefined,
     intentPart: Number.isInteger(p.intentPart) && (p.intentPart as number) >= 1 ? p.intentPart : undefined,
     error: typeof p.error === "string" ? p.error : undefined,
+    step: NODE_UPLOAD_STEPS.includes(p.step as NodeUploadStep) ? p.step : undefined,
     atMs: typeof p.atMs === "number" ? p.atMs : 0,
   };
 }
