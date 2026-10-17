@@ -161,7 +161,7 @@
 | PR3 | master 入队/轮询/不 abort/sweep 豁免/原 key 409（含 SSH 失败）/部署 guard（fail-closed）/回退保护 | PR2，**且 `hub-recover-order` 已合并在内** | 同上（改部署 guard） |
 | PR4 | 边录边传接入共享并发槽 | PR2 | 同上 |
 | PR5 | ✅ 已合并（#217，0.0.170）：队列页（`/api/hub/queue` 露出节点 biliup 行、最后心跳、ETA） | PR3 | `enhancement` |
-| PR6 | 只交付 `hub-recover-order`（T11）：只写队列行，不删源、不上传。`hub-attach-bv` / `hub-clean-sources` 不在本计划。 | PR2 | `needs-decision`（写队列） |
+| PR6 | ✅ 代码随 #209 合并（此前台账误记为待交付）：`recover-order` / `_recover-order`（T11），只写队列行，不删源、不上传；默认 dry-run，仅 `--apply` 写行。`hub-attach-bv` / `hub-clean-sources` 不在本计划。 | PR2 | `needs-decision`（写队列） |
 | PR7 / PR8 | Phase 2：传输/提交拆分 + 已传分 P 复用（含许可证决策）；审核通过后才删源（默认关） | PR3 | `needs-decision` |
 
 回滚：每个 PR 单独 revert；PR3 之后切回 `blocking` 的前提是节点队列已空（`_proc-status` 实测贴 PR）。
