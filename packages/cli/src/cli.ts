@@ -15,6 +15,7 @@ import { SyncGate } from "./sync-gate.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
+import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
@@ -1997,6 +1998,8 @@ program
 
 // 节点侧上传(experimental,plans/027)的隐藏子命令隔离在独立文件,便于快速开关/回退。
 registerNodePipelineCommands(program);
+// Order recovery (plan 038 T11): dry-run by default.
+registerRecoverOrderCommands(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   // 运行期错误统一走这里：干净的一行写 stderr + 退出码 1（参数/校验错由各命令 exit 2）。

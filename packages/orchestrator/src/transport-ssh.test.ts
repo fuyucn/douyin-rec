@@ -4,7 +4,7 @@ import { chmodSync, existsSync, rmSync, mkdtempSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SshTransport, buildRsyncArgs } from "./transport-ssh.js";
-import { recordingStatusWorkerIds } from "./transport.js";
+import { ProcUnsupported, recordingStatusWorkerIds } from "./transport.js";
 import { summarizeRsyncStderr } from "./transport-ssh.js";
 
 describe("recordingStatusWorkerIds", () => {
@@ -416,5 +416,38 @@ describe("SshTransport.taskLogs(F3:master 代查节点日志)", () => {
     await expect(t.taskLogs(1, 10)).resolves.toEqual({ lines: ["ok", "ok2"] });
     const t2 = mkT(async () => JSON.stringify({ lines: "not-an-array" }));
     await expect(t2.taskLogs(1, 10)).resolves.toEqual({ lines: [] });
+  });
+});
+
+describe("SshTransport.recoverOrder / procCancel", () => {
+  const mkT = (run: (argv: string[]) => Promise<string>) =>
+    new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+  const plan = { ok: true, orderKey: "o1", fromGeneration: 1, newGeneration: 2, jobs: [], notes: [] };
+
+  it("sends a base64 request to _recover-order and returns the parsed result", async () => {
+    const calls: string[] = [];
+    const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ plan, applied: false }); });
+    const req = { orderKey: "o1", mode: "prep" as const };
+    await expect(t.recoverOrder(req)).resolves.toEqual({ plan, applied: false });
+    const b64 = calls[0]!.split(" ").pop()!;
+    expect(calls[0]).toContain("_recover-order /data/drec");
+    expect(JSON.parse(Buffer.from(b64, "base64").toString("utf8"))).toEqual(req);
+  });
+
+  it("maps an unknown-command failure to ProcUnsupported", async () => {
+    const t = mkT(async () => { throw new Error("error: unknown command '_recover-order'"); });
+    await expect(t.recoverOrder({ orderKey: "o1", mode: "prep" })).rejects.toBeInstanceOf(ProcUnsupported);
+  });
+
+  it("surfaces node-reported errors and rejects malformed payloads", async () => {
+    await expect(mkT(async () => JSON.stringify({ error: "boom" })).recoverOrder({ orderKey: "o1", mode: "prep" })).rejects.toThrow(/boom/);
+    await expect(mkT(async () => JSON.stringify({ nope: 1 })).recoverOrder({ orderKey: "o1", mode: "prep" })).rejects.toThrow(/invalid/);
+  });
+
+  it("procCancel maps unknown command to ProcUnsupported and returns receipts otherwise", async () => {
+    const receipts = [{ jobId: "j1", state: "cancelled" }];
+    await expect(mkT(async () => JSON.stringify({ receipts })).procCancel(["j1"])).resolves.toEqual(receipts);
+    const old = mkT(async () => { throw new Error("error: unknown command '_proc-cancel'"); });
+    await expect(old.procCancel(["j1"])).rejects.toBeInstanceOf(ProcUnsupported);
   });
 });
