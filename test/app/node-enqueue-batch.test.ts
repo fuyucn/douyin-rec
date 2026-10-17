@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleEnqueue, handleProcCancel, handleProcStatus, remoteEnqueueKinds } from "../../packages/app/src/node-enqueue.js";
+import { handleEnqueue, handleProcCancel, handleProcStatus, localizePrepStage, remoteEnqueueKinds } from "../../packages/app/src/node-enqueue.js";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
 import { jobIdOf, registerProcessor, _resetProcessors, type Processor } from "@drec/core";
 
@@ -74,3 +74,23 @@ describe("remote enqueue capabilities and batch (plan 038 T10a)", () => {
     expect(handleProcStatus(root, [a.jobId])[0]?.outputs).toEqual([join(root, "stage", "p0.mp4")]);
   });
 });
+
+describe("localizePrepStage (plan 038 T15b)", () => {
+  it("upload-prep writes under this node's stage; other kinds are untouched", () => {
+    const prev = process.env.DOUYIN_REC_ROOT;
+    process.env.DOUYIN_REC_ROOT = "/node-root";
+    try {
+      const prep = { kind: "upload-prep", orderKey: "douyin:1:2026-10-17", logicalKey: "x", params: { stageDir: "/master/stage", stem: "s" } } as never;
+      const out = localizePrepStage(prep) as { params: { stageDir: string; stem: string } };
+      expect(out.params.stageDir.startsWith("/node-root/")).toBe(true);
+      expect(out.params.stageDir).not.toContain("/master/");
+      expect(out.params.stem).toBe("s");
+      expect(localizePrepStage(prep)).toEqual(out); // deterministic: a re-sent job stays identical
+      const other = { kind: "biliup", params: { stageDir: "/m" } } as never;
+      expect(localizePrepStage(other)).toBe(other);
+    } finally {
+      if (prev === undefined) delete process.env.DOUYIN_REC_ROOT; else process.env.DOUYIN_REC_ROOT = prev;
+    }
+  });
+});
+

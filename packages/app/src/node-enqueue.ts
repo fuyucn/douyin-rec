@@ -12,11 +12,12 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import {
-  assertJobInvariants, getProcessor, type EnqueueRequest, type EnqueueResponse, type EnqueueResult, type ProcessJob,
+  assertJobInvariants, getProcessor, sanitizeStreamKey, type EnqueueRequest, type EnqueueResponse, type EnqueueResult, type ProcessJob,
   type ProcessReceipt, type Processor,
 } from "@drec/core";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
 import { effectiveHubConfig } from "./disk-gate.js";
+import { rootStageDir } from "./paths.js";
 import { TaskStore } from "./store.js";
 
 /** 第一期远端只受理的处理器 kind。 */
@@ -125,6 +126,16 @@ export interface HandleEnqueueOpts extends NodeRootsOpts {
   batch?: boolean;
 }
 
+/**
+ * upload-prep writes its parts to this node's stage, never to whatever path the master sent (that is the
+ * master's stage; same rule as the blocking node pipeline). Deterministic, so a re-sent job stays identical.
+ */
+export function localizePrepStage(job: ProcessJob): ProcessJob {
+  if (job.kind !== "upload-prep") return job;
+  const key = job.orderKey ?? job.logicalKey;
+  return { ...job, params: { ...job.params, stageDir: join(rootStageDir(), sanitizeStreamKey(key)) } };
+}
+
 /** `_enqueue` 执行体:逐 job 受理,单个 job 的拒绝不影响其余。库打不开 → 抛错(命令非零退出,派发方当失败)。 */
 export function handleEnqueue(dataRoot: string, req: EnqueueRequest, opts: HandleEnqueueOpts = {}): EnqueueResponse {
   const roots = nodeAllowedRoots(dataRoot, opts);
@@ -136,7 +147,7 @@ export function handleEnqueue(dataRoot: string, req: EnqueueRequest, opts: Handl
       const jobs: ProcessJob[] = [];
       for (const job of req.jobs) {
         if (!kinds.includes(job.kind)) return { v: 1, results: [{ jobId: job.jobId, state: "rejected", error: `remote enqueue does not accept kind=${job.kind}` }] };
-        jobs.push(assertJobInvariantsReal(job, roots));
+        jobs.push(assertJobInvariantsReal(localizePrepStage(job), roots));
       }
       const results = store.enqueueBatch(jobs, { allowedRoots: roots.map(realpathDeep) });
       return { v: 1, results };
@@ -147,7 +158,7 @@ export function handleEnqueue(dataRoot: string, req: EnqueueRequest, opts: Handl
       if (!kinds.includes(job.kind)) return reject(`remote enqueue does not accept kind=${job.kind}`);
       let real: ProcessJob;
       try {
-        real = assertJobInvariantsReal(job, roots);
+        real = assertJobInvariantsReal(localizePrepStage(job), roots);
       } catch (e) {
         return reject((e as Error).message);
       }

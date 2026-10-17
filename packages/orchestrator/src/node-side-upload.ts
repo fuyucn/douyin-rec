@@ -23,6 +23,7 @@ import type { JobState, SyncLedger } from "./ledger.js";
 import { cleanupSourcesShared, defaultRmStage, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import type { Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
+import { tryQueueUpload } from "./node-upload-dispatch.js";
 
 /**
  * **实验功能总开关(kill switch)**。`false` = 全局停用节点侧上传,任何规则设置都不生效。
@@ -93,7 +94,7 @@ export interface NodeSideUploadArgs {
   streamKey: string;
   cfg: PipelineCfg;
   winner: { workerId: string; rec: { tsFiles: string[]; xmlPath?: string; totalBytes?: number } };
-  winnerMembers: readonly { workerId: string; rec: { tsFiles: string[]; xmlPath?: string; totalBytes?: number } }[];
+  winnerMembers: readonly { workerId: string; rec: { tsFiles: string[]; xmlPath?: string; totalBytes?: number; durationSec?: number } }[];
   /**
    * 本场**全部**在场成员(含落败节点)。收尾删源要按它来 —— 与 master 常规路径的
    * `candidates.members` 同口径:落败节点的源同样是冗余副本,不删就永远占着磁盘。
@@ -341,6 +342,12 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
     return { state: "needs_manual", bv: existingBv };
   }
 
+  // A persisted queue plan owns this upload (plan 038 T15b): never start a blocking upload beside it.
+  if (ledger.getUploadPlan(streamKey) != null) {
+    jlog(`节点侧上传由队列负责(已有 uploadPlan),本轮不再派发`);
+    return { state: ledger.get(streamKey)?.state ?? "syncing" };
+  }
+
   // 能力探测:旧 bundle 无 _node-capabilities / 节点缺 biliup / 无 cookie → 回落现状。
   if (!transport.nodeCapabilities || !transport.nodePipeline) {
     jlog(`节点侧上传不可用:节点 ${winner.workerId} 的 bundle 不支持(_node-pipeline 缺失) → 回落 pull 回 master`);
@@ -371,6 +378,9 @@ export async function tryNodeSideUpload(o: NodeSideUploadArgs): Promise<{ state:
     return null;
   }
   jlog(`节点侧上传可用(biliup=${caps.biliup} cookies=${caps.cookies} 磁盘=${fmtFreeGB(caps.diskFreeGB)})→ 节点本地处理,省掉回传`);
+
+  const queued = await tryQueueUpload(o, caps.processors);
+  if (queued) return queued;
 
   const spec: NodePipelineSpec = {
     streamKey,
