@@ -143,8 +143,6 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
-
-
 - [~] **T-61 全自动流水线 + fleet 式房间管理（计划 [plans/037_autopilot_fleet.md](plans/037_autopilot_fleet.md)）**
   — 2026-10-16 认领，2026-10-16 落 plan + 开工 step 1。主流程收敛为「监听 → 录制 → 投稿」，存档/烧录/多格式为默认关的增强开关。
   **拆分**：①人工收件箱去噪（issue [#188](https://github.com/fuyucn/douyin-rec/issues/188) → PR [#189](https://github.com/fuyucn/douyin-rec/pull/189)，已实现待审；顺带修了「所有节点断流」漏写 error 曾被显示成「待上传」）②通知带该场直链 + 收件箱按「真事故/增强」分组 ③`/rooms` 首页化 + 内联日志 + 任务/Hub/队列收进「高级」④配置模板（改一次应用到多房间）⑤新增房间自动选节点（已在录房间绝不自动迁移）。
