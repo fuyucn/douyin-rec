@@ -30,8 +30,15 @@ export function RoomPage(): ReactNode {
   const taskId = room?.recording?.taskId ?? null;
 
   // Logs live on this page (no hop to the task page). The list's log icon arrives with ?logs=1.
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const [logsOpen, setLogsOpen] = useState(params.get("logs") === "1");
+  // Switching rooms must not carry the open/closed state over; closing drops ?logs=1 so a refresh stays closed.
+  useEffect(() => { setLogsOpen(params.get("logs") === "1"); }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  const toggleLogs = (): void => {
+    const next = !logsOpen;
+    setLogsOpen(next);
+    setParams(next ? { logs: "1" } : {}, { replace: true });
+  };
 
   // Elapsed time only exists for a local recorder process (runtime); remote-only → "—".
   const [detail, setDetail] = useState<TaskDetail | null>(null);
@@ -104,7 +111,7 @@ export function RoomPage(): ReactNode {
             </Button>
           )}
           {taskId !== null && (
-            <Button small variant="secondary" onClick={() => setLogsOpen((v) => !v)} aria-expanded={logsOpen}>
+            <Button small variant="secondary" onClick={toggleLogs} aria-expanded={logsOpen}>
               <FileText className="w-4 h-4" />{t(logsOpen ? "room.detail.hideLogs" : "room.detail.showLogs")}
             </Button>
           )}

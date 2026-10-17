@@ -78,7 +78,7 @@ export function RoomsPage(): ReactNode {
         <div className="status-strip rm-alert mb-3 sm:mb-4">
           <span className="dot" style={{ background: "var(--warning)" }} />
           <span className="flex-1 min-w-0 truncate">
-            <b className="text-ink font-medium">{t("room.alertCount", { n: attention.length })}</b>
+            <b className="text-ink font-medium">{t("room.alertCount", { count: attention.length })}</b>
             <span className="text-muted-soft">
               {" · "}{roomName(attention[0])}{" · "}{statusDetail(t, attention[0], statusOf(attention[0]))}
             </span>
