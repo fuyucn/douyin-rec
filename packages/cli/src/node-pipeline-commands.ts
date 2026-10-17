@@ -50,10 +50,10 @@ export function registerNodePipelineCommands(program: Command): void {
       await applyNodeDataRoot(dataRoot);
       const { probeNodeCapabilities } = await import("@drec/app");
       try {
-        // processors = 本节点已注册的处理器 kind(plans/036 §2.4 协商;旧 bundle 无此字段 → 派发方按不支持)。
-        const { listProcessors } = await import("@drec/core");
+        // processors = registered kinds plus declared capabilities (plans/036 §2.4; old bundles omit it = unsupported).
+        const { advertisedCapabilities } = await import("@drec/core");
         const caps = await probeNodeCapabilities(dataRoot);
-        process.stdout.write(JSON.stringify({ ...caps, processors: listProcessors().map((p) => p.kind) }) + "\n");
+        process.stdout.write(JSON.stringify({ ...caps, processors: advertisedCapabilities() }) + "\n");
       } catch (e) {
         process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
         process.exitCode = 1;

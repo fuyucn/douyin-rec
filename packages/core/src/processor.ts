@@ -89,6 +89,24 @@ export interface Processor {
   recover?(job: ProcessJob, ctx: ProcessContext): Promise<"rerun" | "done" | "uncertain">;
   /** Shutdown verification: may this running row safely return to pending? */
   verifyStopped?(job: ProcessJob, ctx: ProcessContext): Promise<"safe" | "uncertain">;
+  /** Extra capability strings this processor advertises beyond its kind (e.g. "biliup-queue"). */
+  capabilities?: readonly string[];
+}
+
+/** Capability a node advertises once biliup stall death and submit alerts exist (plan 038 T15). */
+export const BILIUP_QUEUE_CAPABILITY = "biliup-queue";
+
+/**
+ * Thrown by a processor when the outcome cannot be known and its child may still be running
+ * (plan 038 T15: submit past maxWallMs). The runner records it as cancelled-with-intent.
+ * Duck-typed so a copy bundled twice still matches.
+ */
+export class UncertainOutcome extends Error {
+  readonly uncertain = true;
+}
+
+export function isUncertainOutcome(e: unknown): boolean {
+  return (e as { uncertain?: unknown } | null)?.uncertain === true;
 }
 
 // ───────────────────────── 注册表 ─────────────────────────
@@ -107,6 +125,11 @@ export function getProcessor(kind: string): Processor | undefined {
 
 export function listProcessors(): Processor[] {
   return [...processors.values()];
+}
+
+/** What a node reports in `_node-capabilities.processors`: registered kinds plus declared capabilities. */
+export function advertisedCapabilities(): string[] {
+  return [...new Set(listProcessors().flatMap((p) => [p.kind, ...(p.capabilities ?? [])]))];
 }
 
 /** 仅供测试:清空注册表。 */

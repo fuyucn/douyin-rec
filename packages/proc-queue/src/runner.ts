@@ -6,7 +6,7 @@
  */
 import { existsSync, statfsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { freeBytesOf, isSameChild, listProcessors, probeChild, type ChildFingerprint, type ProcActiveDTO, type ProcessContext, type Processor } from "@drec/core";
+import { freeBytesOf, isSameChild, isUncertainOutcome, listProcessors, probeChild, type ChildFingerprint, type ProcActiveDTO, type ProcessContext, type Processor } from "@drec/core";
 
 import { GC_RETAIN_MS, LEASE_MS, ProcQueueStore, procQueueDbPath, type ProcJobRecord } from "./store.js";
 
@@ -62,6 +62,8 @@ export interface ProcRunnerOpts {
   timers?: boolean;
   /** Injectable child fingerprint probe (tests). */
   probeChild?: (pid: number) => ChildFingerprint | null;
+  /** How often a finished job's still-alive child is re-checked before its slot is released (default 5s). */
+  childPollMs?: number;
 }
 
 const defaultFreeBytes = (dir: string): number | null => {
@@ -326,7 +328,7 @@ export class ProcRunner {
       // 收尾写表失败等:行留在 running,由租约过期后的接管 recover 处置;这里必须留痕并告警。
       this.log(`${job.jobId}: 执行收尾异常: ${e instanceof Error ? e.message : String(e)}`);
       this.o.alert(job.owner.taskId, `${job.kind} 任务收尾异常,待接管处置: ${job.jobId}`);
-    }).finally(() => {
+    }).then(() => this.holdWhileChildAlive(job.jobId)).finally(() => {
       release();
       this.inflight.delete(job.jobId);
       this.finishYields();
@@ -352,6 +354,22 @@ export class ProcRunner {
     const probe = this.o.probeChild ?? probeChild;
     const current = probe(job.childPid);
     return !isSameChild({ pid: job.childPid, startedAt: job.childPidStartedAt }, current);
+  }
+
+  /**
+   * The slot is bound to the child, not the row (plan 038 §4.2): a row may end uncertain while its biliup
+   * child still runs, and releasing then would let a second upload start beside it. Poll until it exits.
+   */
+  private async holdWhileChildAlive(jobId: string): Promise<void> {
+    let logged = false;
+    while (!this.stopping) {
+      const row = this.o.store.get(jobId);
+      if (row?.childPid == null) return;
+      if (!isSameChild({ pid: row.childPid, startedAt: row.childPidStartedAt }, (this.o.probeChild ?? probeChild)(row.childPid))) return;
+      if (!logged) this.log(`${jobId}: child pid ${row.childPid} still running; slot held until it exits`);
+      logged = true;
+      await new Promise((r) => setTimeout(r, this.o.childPollMs ?? 5_000));
+    }
   }
 
   private async execute(f: Inflight): Promise<void> {
@@ -388,6 +406,12 @@ export class ProcRunner {
       }
       if (f.reason === "cancel") {
         store.finish(job.jobId, owner, { state: "cancelled", error: "已取消" });
+        return;
+      }
+      if (isUncertainOutcome(e)) {
+        // Outcome unknown (e.g. submit past maxWallMs): cancelled-with-intent → uncertain for biliup, never retried.
+        store.finish(job.jobId, owner, { state: "cancelled", hasIntent: true, error: msg });
+        this.o.alert(job.owner.taskId, `${job.kind} 任务结果无法确定,需人工确认: ${msg}`);
         return;
       }
       store.finish(job.jobId, owner, { state: "failed", error: msg });
