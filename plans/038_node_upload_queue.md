@@ -64,7 +64,7 @@
 - **关停超时的 `hasIntent` 按 step 推导**：`runner.ts:488` 目前写死 `hasIntent:true`；PR2 改为 `hasIntent = step === "submit"`。
   - **扩展已有的 `releaseForShutdown(jobId, owner, interruptible)`**（`store.ts:497`），不新增第二个入口：新增可选 `step` 参数。对 `step∈{gate_wait,transfer}` 的 biliup job 放行 `running→pending`（`reason="shutdown-abort"`），因为此时已确认子进程被 SIGKILL、尚未提交；`step=submit` 不走这里，仍落 `uncertain`。
   - 只在 `runner.ts:481-488` 的**关停等待超时**后触发；正常关停仍先等最多 `procShutdownWaitMs`（默认 15 分钟）。
-  - **回 pending 前必须过两道闸**：①确认子进程真的死了（现有 runner 超时后只 `abort()` 就 `finish`；PR2 先等退出，宽限后 SIGKILL，再用 `childPid + childPidStartedAt` 核验）；②**旁证无稿**（与 §4.3 同一规则：`seq=1` 查 按时间窗查**全部状态**的稿件 + 时长复核，append 查 `countVideoParts`）。任一无法确认 → `uncertain`，绝不回 pending。
+  - **回 pending 前必须过两道闸**：①确认子进程真的死了（现有 runner 超时后只 `abort()` 就 `finish`；PR2 先等退出，宽限后 SIGKILL，再用 `childPid + childPidStartedAt` 核验）；②**旁证无稿**（与 §4.3 同一规则：`seq=1` 按时间窗查**全部状态**的稿件 + 时长复核，append 查 `countVideoParts`）。任一无法确认 → `uncertain`，绝不回 pending。
   - 该回退回退 `attempts`（关停不算一次尝试，沿用现有实现），且**不触发** order-blocked 级联；重启后同 `orderKey` 从该 seq 继续。
   - `canTransition` 的 `shutdown-abort` 分支放宽为：`interruptible===true` **或** `kind=biliup && step∈{gate_wait,transfer}`（由 store 传入；缺省仍 fail-closed）。
 
@@ -80,9 +80,9 @@
 
 ### 4.3 重试与保序
 
-- `transfer` 失败或停滞、且**确认进程已停** → **先旁证无稿**（与重启恢复同一规则：`seq=1` 查 按时间窗查**全部状态**的稿件 + 时长/分 P 复核；append 查 `countVideoParts`）；确认无稿才回 `pending` 并带 `notBefore`（5 分钟起指数退避，封顶 1 小时，最多 3 次）；查不到/无法确认 → `uncertain`，不重试。重试重传该 job 的文件（biliup checkpoint 只在单次调用内有效，跨调用不保证续传，ETA 按整段算）。退避期间让出轮转给其它场。
+- `transfer` 失败或停滞、且**确认进程已停** → **先旁证无稿**（与重启恢复同一规则：`seq=1` 按时间窗查**全部状态**的稿件 + 时长/分 P 复核；append 查 `countVideoParts`）；确认无稿才回 `pending` 并带 `notBefore`（5 分钟起指数退避，封顶 1 小时，最多 3 次）；查不到/无法确认 → `uncertain`，不重试。重试重传该 job 的文件（biliup checkpoint 只在单次调用内有效，跨调用不保证续传，ETA 按整段算）。退避期间让出轮转给其它场。
   - **状态机迁移（PR2 必须一起改）**：core `TransitionReason` 新增 `transfer-retry`；`canTransition(running→pending)` 放行 `reason="transfer-retry"`（仅 biliup、仅 `step∈{gate_wait,transfer}` 且进程已确认停止时由 store 使用）。`ProcQueueStore` 新增 `retryTransfer(jobId)`，原子写 `state=pending, notBefore`；**不再加 `attempts`**（claim 时已 `attempts+1`，`store.ts:447`）。「最多 3 次」按 claim 次数计：第 3 次仍失败即不再 `retryTransfer`，转 `failed`。`retryable=false` 继续拦住 `failed→pending` 的通用人工重试。
-- `submit` 失败或结果不确定 → 先自动核对（append 用 `countVideoParts`，建稿用 按时间窗查**全部状态**的稿件 作旁证）；核对不出 → `uncertain`，人工处理。
+- `submit` 失败或结果不确定 → 先自动核对（append 用 `countVideoParts`，建稿用按时间窗查**全部状态**的稿件作旁证）；核对不出 → `uncertain`，人工处理。
 - 保序：job 带 `orderKey=streamKey`、`seq`、`generation`；**保序只在同一代内成立**（`orderKey + generation`）。
 - **generation 按 orderKey 统一分配**：现有 `nextGeneration(kind, logicalKey)` 是按单个 logicalKey 取 MAX+1（`store.ts:277-282`），seq=1..N 会各算各的。PR2 新增 `nextOrderGeneration(orderKey)`：`MAX(generation) WHERE orderKey=?` +1（无则 1），整场共用；`hub-recover-order` 的 `--bv`/`--restart` 也用它，**不按单行算**。换 generation 重入队后，旧代的 failed/cancelled 行不参与新代的 claim 判定，也不会被新代的级联取消波及。
 - **claim 改法（PR2 必须一起改）**：现有 `claim` 只按 `createdAt` FIFO（`store.ts:430-433`），也没有 `notBefore` 过滤。改为在同一事务内：
@@ -101,9 +101,9 @@
   - **order-blocked / order-prep-failed 的恢复路径**（均走 PR6 的 dry-run→`--apply`，默认不改库）：
     - **已建稿**：人工用 `biliup list` / 台账补齐 BV → `hub-recover-order <streamKey> --bv <BV>`：给后续项**换 generation**（`nextOrderGeneration`）重新入队，并把 `seq=1` 行绑定该 BV；新 jobId 不撞 `cancelled` 终态。
     - **prep 失败**：先人工确认 prep 可重跑，`hub-recover-order <streamKey> --prep` 把 `order-prep-failed` 的 biliup 行与对应 prep 一起换 generation 重新入队。
-    - **确认未建稿**（`seq=1` transfer 重试耗尽且无 BV）：`hub-recover-order <streamKey> --restart`：从 `seq=1` 起整体换 generation 重新入队。执行前必须用 按时间窗查**全部状态**的稿件 旁证无稿；查不到就不允许 `--restart`。
+    - **确认未建稿**（`seq=1` transfer 重试耗尽且无 BV）：`hub-recover-order <streamKey> --restart`：从 `seq=1` 起整体换 generation 重新入队。执行前必须按时间窗查**全部状态**的稿件旁证无稿；查不到就不允许 `--restart`。
 - 重启恢复：`pending` 原样保留；`running` 且在 `gate_wait/transfer` → 确认子进程已停后回 `pending`；在 `submit` → `uncertain`；已有 BV → 记 done，继续 append。
-  - **`transfer` 回 pending 之前必须先旁证无稿**：biliup 打印 `All files uploaded` 后会在同一进程直接提交，落 `step=submit` 挡不住这个窗口。恢复时：`seq=1` 先 按时间窗查**全部状态**的稿件 查标题，再核对稿件时长与本次产物一致（`{name}_{date}` 同日可能撞标题，单靠标题会误判）；append 先 `countVideoParts`。已存在且时长/分 P 对得上 → 记 done/续传；任何「查不到 / 无法确认」→ `uncertain`，**不回 pending**。
+  - **`transfer` 回 pending 之前必须先旁证无稿**：biliup 打印 `All files uploaded` 后会在同一进程直接提交，落 `step=submit` 挡不住这个窗口。恢复时：`seq=1` 先按时间窗查**全部状态**的稿件并核对标题，再核对稿件时长与本次产物一致（`{name}_{date}` 同日可能撞标题，单靠标题会误判）；append 先 `countVideoParts`。已存在且时长/分 P 对得上 → 记 done/续传；任何「查不到 / 无法确认」→ `uncertain`，**不回 pending**。
 
 ### 4.4 master 侧（对应 036 T5 + T15，`needs-decision`）
 
