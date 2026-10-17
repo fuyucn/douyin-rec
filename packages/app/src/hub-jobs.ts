@@ -12,7 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
-  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, readyNodes, USER_STOP,
+  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, readyNodes, STAGE_READY, USER_STOP,
   sanitizeStreamKey,
   type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO, type QueuePhase,
 } from "@drec/core";
@@ -192,6 +192,13 @@ function historicalRates(db: DatabaseSync): Map<string, number> {
 }
 
 export interface ListHubJobsOpts {
+  /**
+   * 只取 `sync_jobs.error` **不等于**该值的行(NULL / 空串算「不等于」)——
+   * issue #188:把 stage 正常收口(STAGE_READY)从 needs_manual 里摘出去,让真事故不被它挤出窗口。
+   */
+  excludeError?: string;
+  /** 与 excludeError 互斥的取反:只取 error 等于该值的行。 */
+  onlyError?: string;
   /** 只列某房间的 run(key=`{platform}.{roomSlug}`;streamKey 前缀 `{platform}:{roomSlug}:` 过滤)。省略=全部房间。 */
   room?: string;
   /**
@@ -355,6 +362,18 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         where.push(`state NOT IN (${opts.excludeStates.map(() => "?").join(",")})`);
         params.push(...opts.excludeStates);
       }
+      // error 过滤与 states/excludeStates 正交,可叠加。COALESCE 让 NULL / 空串都算「无标记」。
+      // **精确相等**,不做任何 trim:STAGE_READY 由 closeStageReady 原样写入(值固定),
+      // trim 只会造出「SQL 判一种、JS 判另一种」的第二套口径(实测 NBSP/换行两边结论相反)。
+      // 相等判定在 SQL 与 toRow 里必须字面相同,改一处就要改另一处。
+      if (opts.excludeError !== undefined) {
+        where.push("COALESCE(error, '') <> ?");
+        params.push(opts.excludeError);
+      }
+      if (opts.onlyError !== undefined) {
+        where.push("error = ?");
+        params.push(opts.onlyError);
+      }
       const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
       total = Number((db.prepare(`SELECT COUNT(*) AS n FROM sync_jobs${whereSql}`)
         .get(...params) as unknown as { n: number }).n);
@@ -517,12 +536,21 @@ export interface BuildQueueOpts {
   sort?: "newest" | "oldest";
   /**
    * 「待人工」最多列几条(默认 20)。needs_manual 是终态、却要留在进行中列表;
-   * stage 模式的正常收口也是它(pipeline.ts:480)→ 长期 master 会堆积,必须 cap 否则淹没进行中区。
+   * stage 模式的正常收口也是它 → 长期 master 会堆积,必须 cap 否则淹没进行中区。
+   * 该上限**只约束真事故**;stage 正常收口另走一个同上限的查询(见 buildQueueView)。
    */
   manualLimit?: number;
   now?: number;
   stageDir?: string;
 }
+
+/**
+ * `needs_manual` 却没有 error 的行的兜底文案(issue #188 验收 2)。
+ *
+ * 这类行 = 数据异常(某条路径漏写了原因),或是**修复部署前**遗留的旧行(2026-10 前 stage 正常
+ * 收口不写 error)。红色「待人工」旁边必须有一句可读的原因,不能只留一个空红的标签。
+ */
+const UNKNOWN_MANUAL_REASON = "缺少失败原因(数据异常或修复前遗留的旧记录,请核对后清历史)";
 
 const EMPTY_POOL: HubPoolSnapshotDTO = {
   cpu: { active: 0, queued: 0, max: 0 },
@@ -547,8 +575,16 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   const activeRows = listHubJobs(syncDbPath, {
     excludeStates: [...TERMINAL], limit: 200, offset: 0, now: opts.now, stageDir,
   });
+  // needs_manual 一分为二,**在 SQL 层分**:真事故(error 非 STAGE_READY)单独查并按 manualLimit 截断;
+  // stage 正常收口另查一个有限额。放在内存里分堆是错的 —— stage 收口是终态、只增不减,
+  // 任何固定窗口最终都会被它占满,真事故从 active 和 rows 里一起消失(issue #188 审查发现)。
   const manualRows = listHubJobs(syncDbPath, {
     states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir,
+    excludeError: STAGE_READY,
+  });
+  const stageReadyRows = listHubJobs(syncDbPath, {
+    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir,
+    onlyError: STAGE_READY,
   });
   const recentRows = listHubJobs(syncDbPath, {
     states: ["done", "failed"], limit: recentLimit, offset: 0, now: opts.now, stageDir,
@@ -576,8 +612,11 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     // 否则 8 条正常态和 2 条故障同色,告警疲劳(实测踩过)。
     const needsManualPhase = (): QueuePhase => {
       const err = (job.error ?? "").trim();
-      if (!err) return "waiting_upload"; // 无错误 = stage 模式正常收口(pipeline.ts 只 setState 不置 error)
+      // stage 模式正常收口由**显式常量**标记(不再靠「空 error」反推):空 error 一旦出现,
+      // 说明某条故障路径漏写了原因(实测「所有节点断流」就曾如此)→ 按真故障显示,绝不伪装成正常项。
+      if (job.error === STAGE_READY) return "waiting_upload"; // 精确相等,不做 trim(见 excludeError 的注释)
       if (err === USER_STOP) return "stopped";
+      if (!err) return "waiting_manual"; // 空 = 数据异常,按真事故渲染(另在 DTO 层补兜底文案)
       return "waiting_manual"; // 真故障
     };
     const phase: QueuePhase = job.state === "done"
@@ -629,7 +668,11 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
       winnerWorker: job.winnerWorker,
       fails: job.fails,
       updatedAt: job.updatedAt,
-      error: job.error ?? null,
+      // 空 error 的 needs_manual 行补一句兜底说明(见 UNKNOWN_MANUAL_REASON);
+      // 其余行原样透出。
+      error: (job.state === "needs_manual" && !(job.error ?? "").trim())
+        ? UNKNOWN_MANUAL_REASON
+        : job.error ?? null,
       bv: job.bv ?? null,
       videoDurationSec: job.videoDurationSec,
       // 收尾时刻 = 末个事件(终态那次的时刻);非终态 null。
@@ -641,6 +684,9 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     };
   };
 
+  // needs_manual 要一分为二:**stage 模式正常收口**(error=STAGE_READY)不是要人救的火,
+  // 混进 active 会淹没真事故(实测 20 条里 2 条是这种噪音)→ 只留在 rows 时间轴里。
+  // 真事故(用户停止 / 各类失败)照旧进 active,人工收件箱只装真事故。
   for (const job of [...activeRows.jobs, ...manualRows.jobs]) active.push(toRow(job));
   // 已完成/失败的场也进 rows —— 前端渲染**一张表**(像日志),完成的行 phase=done/failed。
   // 独立拉一批终态(数量 = recentLimit),与 active 合并成单一时间轴。
@@ -662,7 +708,7 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   // rows:进行中 + 已完成,**同一时间轴、同一张表**(像日志)。finished 段的排序键用
   // finishedAt(收尾时刻)而非 enqueuedAt —— 否则「今天早上录、刚上传完」的稿会因入队早
   // 沉到列表底部,而用户关心的是「刚刚发生了什么」。进行中段仍用 enqueuedAt(队列语义)。
-  const rows: QueueItemDTO[] = [...active, ...finishedRows];
+  const rows: QueueItemDTO[] = [...active, ...stageReadyRows.jobs.map(toRow), ...finishedRows];
   rows.sort((a, b) => {
     const key = (r: QueueItemDTO): number =>
       r.phase === "done" || r.phase === "failed" ? (r.finishedAt ?? r.updatedAt) : (r.enqueuedAt ?? r.updatedAt);

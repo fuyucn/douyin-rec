@@ -9,7 +9,7 @@
  */
 import path from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted } from "@drec/core";
+import { effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
 import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadableParts } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
@@ -498,13 +498,15 @@ export async function runSegmentPipeline(o: {
   // ── stage 模式:逐段产物落盘待人工,不建稿 ──
   if (cfg.uploadMode !== "upload") {
     jlog(`分段 stage 模式:${uploadParts.length} 个分 P 已合成待人工上传`);
-    ledger.setState(streamKey, "needs_manual");
     // 完整性优先:没有任何分P产物(整场被判碎片)→ 绝不删源,否则「源和副本全删、零成品」。
+    // 这一支是**真事故**(零成品),必须带自己的原因,不能继承下面的 STAGE_READY。
     if (uploadParts.length === 0) {
       jlog(`分段 stage 模式:无任何分 P 产物,保留全部源与 stage(转人工)`);
+      ledger.setState(streamKey, "needs_manual", { error: "分段 stage 模式无任何分 P 产物,已保留全部源,请人工检查" });
       notify({ kind: "error", stage: "同步", message: `${streamKey} 分段 stage 模式无任何分 P 产物,已保留全部源,请人工检查` });
       return { state: "needs_manual" };
     }
+    closeStageReady(ledger, streamKey, cfg.uploadMode);
     // 产物已落盘待人工上传 → 删各节点源(stage 里的分P交付物保留,不能删)。
     await cleanupNodeSources();
     notify({ kind: "stageReady", streamKey });

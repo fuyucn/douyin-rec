@@ -396,7 +396,7 @@ export type QueuePhase =
   | "queued" | "running" | "waiting_settle" | "waiting_manual" | "done" | "failed"
   /**
    * `needs_manual` 细分三态(避免「正常收口」和「真故障」同色 → 告警疲劳):
-   * - `waiting_upload`:stage 模式正常收口(合成完待人工上传),**非故障**,中性色;
+   * - `waiting_upload`:stage 模式正常收口(`error === STAGE_READY`),**非故障**,中性色;
    * - `stopped`:用户主动停止,灰;
    * - `waiting_manual`:其他 needs_manual(重试耗尽 / 进程重启中断 / 上传失败…),红。
    */
@@ -441,9 +441,13 @@ export interface QueueItemDTO {
   /**
    * 失败/待人工的原因(台账 `sync_jobs.error`)。null/空 = 无错误。
    * **语义区分靠它**:
-   *  - `error` 空 + `state=needs_manual` → **stage 模式正常收口**(合成完待人工上传,非故障);
+   *  - `error === STAGE_READY` + `state=needs_manual` → **stage 模式正常收口**(存档待人工上传,非故障);
    *  - `error === "用户停止"` → 用户主动停止;
    *  - 其他非空 → 真故障(重试耗尽 / 进程重启中断 / 上传失败…)。
+   *  - **空 = 数据异常**(某条 needs_manual 路径漏写原因,或本修复部署前的遗留行):队列按真故障渲染,
+   *    并在 DTO 里替换成一句兜底文案(`缺少失败原因…`),不让红色标签旁边空白无解释。
+   *
+   * 两个标记都按**精确相等**判定(不 trim):写入方原样落库,trim 只会造出 SQL 与 JS 两套口径。
    */
   error: string | null;
   /** 完成态(`phase=done`)才有:B 站 BV 号 —— 已上传的稿可直接点开。 */
@@ -502,7 +506,10 @@ export interface RollingDeliveryDTO {
 export interface HubQueueDTO {
   /** 边录边传的实时进度(F1;旧 master / 无节点上报时缺省)。 */
   delivering?: RollingDeliveryDTO[];
-  /** 进行中(非终态 ∪ needs_manual)—— 与 `rows` 中 phase 非 done/failed 的部分一致。 */
+  /**
+   * 进行中(非终态 ∪ **真事故的** needs_manual)。
+   * 与 `rows` 的差别:`rows` 还含 stage 模式正常收口(`phase=waiting_upload`,非故障)与终态行。
+   */
   active: QueueItemDTO[];
   /** 统一列表:进行中 + 已完成,按 sort(newest 缺省=最新在前)排好,前端渲染一张表。 */
   rows: QueueItemDTO[];

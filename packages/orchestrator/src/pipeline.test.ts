@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { cleanupSourcesShared, consecutiveSidecarSkips, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
+import { closeStageReady, STAGE_READY } from "@drec/core";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
@@ -477,7 +478,17 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
 
-    it("stage 模式 + 全碎片:无任何分P产物 → 绝不删源(完整性优先)", async () => {
+    it("stage 模式落盘必须写 STAGE_READY 作显式标记(空 error 会被队列当异常)", async () => {
+      const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles: ["/remote/s_000.ts", "/remote/s_001.ts"] }) }]);
+      const deps = segmentDeps();
+      (deps as { cfg: PipelineCfg }).cfg = { ...deps.cfg, uploadMode: "stage" };
+      deps.ledger.upsertPending(broadcast.streamKey);
+      await runPipeline(broadcast, deps);
+      expect(deps.ledger.get(broadcast.streamKey)?.error).toBe(STAGE_READY);
+      deps.ledger.close();
+    });
+
+    it("stage 模式 + 全碎片:无任何分P产物 → 绝不删源,且 error 不是 STAGE_READY(真事故)", async () => {
       const tsFiles = ["/remote/s_000.ts", "/remote/s_001.ts"];
       const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0, tsFiles }) }]);
       const deps = segmentDeps();
@@ -495,6 +506,11 @@ describe("runPipeline", () => {
       // 零产物 → 源和 stage 都不许删(否则「源和副本全删、零成品」)。
       expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
       expect(deps.rmStage).not.toHaveBeenCalled();
+      // 零成品是事故,不能被标成「stage 正常收口」而混进中性色收件箱;
+      // 更不能退化成空 error(会被判成数据异常且没有原因可显示)。
+      const err = deps.ledger.get(broadcast.streamKey)?.error ?? "";
+      expect(err).not.toBe(STAGE_READY);
+      expect(err.trim()).not.toBe("");
       deps.ledger.close();
     });
 
@@ -1070,6 +1086,64 @@ describe("runPipeline", () => {
       expect(deps.ledger.get(broadcast.streamKey)?.fails).toBe(1);
       deps.ledger.close();
     });
+  });
+
+  it("CLI 单节点重跑的 stage 收口同样必须带 STAGE_READY(issue #188 一轮 High 的回归测试)", () => {
+    // 该调用点在 cli.ts 内不可直接 import,断言它委托的唯一收口入口会写 error。
+    const writes: Array<{ streamKey: string; state: string; error: string }> = [];
+    closeStageReady(
+      { setState: (k, st, patch) => { writes.push({ streamKey: k, state: st, error: patch.error }); } },
+      "douyin:R:2026-10-01", "stage",
+    );
+    expect(writes).toEqual([{ streamKey: "douyin:R:2026-10-01", state: "needs_manual", error: STAGE_READY }]);
+    // upload 模式没有这条收口路径 → 明确抛错,不静默写空 error。
+    expect(() => closeStageReady({ setState: () => {} }, "douyin:R:2026-10-01", "upload")).toThrow();
+  });
+
+  it("done 场补跑重烧失败 → needs_manual 的 error 必须非空(空串不得落库,issue #188)", async () => {
+    // 重烧失败的节点 error 若是空串,`?? ` 不会回落到默认文案 → 台账里会是一条「没有原因」的待人工。
+    const stageDir = mkdtempSync(join(tmpdir(), "reburn-"));
+    const deps = makeDeps({ cfg: { ...makeDeps().cfg, stageDir } });
+    const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+    deps.ledger.upsertPending(b.streamKey);
+    for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
+    deps.ledger.markDone(b.streamKey, "BVdone");
+    const sub = join(stageDir, "douyin_test-room_2026-06-27");
+    mkdirSync(sub, { recursive: true });
+    for (const f of [".mp4", "_danmu.mp4", "_livechat.mp4"]) writeFileSync(join(sub, "主播名_2026-06-27" + f), "x");
+    // 预置一个「failed 的烧录节点」,续跑会先重烧;重烧抛空 message 的错误 → 节点 error 仍是空串。
+    deps.ledger.syncNodeState(b.streamKey, "burn_danmu", "failed", { error: "" });
+    (deps.sh as Mock).mockImplementation(async () => { throw new Error(""); });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const r = await runPipeline(b, deps);
+    warn.mockRestore();
+    expect(r.state).toBe("needs_manual");
+    expect((deps.ledger.get(b.streamKey)?.error ?? "").trim()).not.toBe("");
+    deps.ledger.close();
+  });
+
+
+  it("合并模式 stage 收口必须写 STAGE_READY(线上噪音主来源,空 error 会被判红灯)", async () => {
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    const deps = makeDeps({ cfg: { ...makeDeps().cfg, uploadMode: "stage" } });
+    deps.ledger.upsertPending(broadcast.streamKey);
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("needs_manual");
+    expect(deps.ledger.get(broadcast.streamKey)?.error).toBe(STAGE_READY);
+    deps.ledger.close();
+  });
+
+  it("所有节点断流未录全 → 转人工且必须带 error(否则会被渲染成「待上传」而非红灯)", async () => {
+    // 单节点但缺口超过阈值 → clean=false → 走「全部断流」中断支。
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 4000 }) }]);
+    const deps = makeDeps();
+    deps.ledger.upsertPending(broadcast.streamKey);
+    const result = await runPipeline(broadcast, deps);
+    expect(result.state).toBe("needs_manual");
+    const err = deps.ledger.get(broadcast.streamKey)?.error ?? "";
+    expect(err).not.toBe("");
+    expect(err).not.toBe(STAGE_READY);
+    deps.ledger.close();
   });
 
   it("场景8(硬约束): 旧规则带 includeXmlAss 也绝不删 .xml(源 xml 与 plain xml 都保留)", async () => {

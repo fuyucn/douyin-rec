@@ -4,6 +4,7 @@ import { ReactFlow, Background, Controls, Handle, Position, type Node, type Edge
 import "@xyflow/react/dist/style.css";
 import { api, type HubJobDTO } from "../api/client";
 import type { HubStepName } from "@drec/contracts";
+import { STAGE_READY } from "@drec/hub-ledger-contract";
 import { IconButton } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Dialog } from "./Dialog";
@@ -530,7 +531,16 @@ export function RunCard({
           </a>
         )}
       </div>
-      {job.error && <div className="text-[12px] mt-1" style={{ color: "var(--error-fg)" }}>{job.error}</div>}
+      {/* stage 模式正常收口(issue #188):error 只是「已存档待人工上传」的说明,不是事故 —— 用中性色,
+          否则房间 run 卡片上会出现红字,和本仓「降低告警疲劳」的目标相反。 */}
+      {job.error && (
+        <div
+          className="text-[12px] mt-1"
+          style={{ color: job.error === STAGE_READY ? "var(--muted-soft)" : "var(--error-fg)" }}
+        >
+          {job.error}
+        </div>
+      )}
       {expanded && (
         <div className="mt-3 pt-3 border-t border-hairline overflow-x-auto" onClick={(e) => e.stopPropagation()}>
           <PipelineFlow job={job} workerName={workerName} cfg={cfg} onRetry={onRetry ? requestRetry : undefined} />
