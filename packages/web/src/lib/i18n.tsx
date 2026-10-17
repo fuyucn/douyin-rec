@@ -53,7 +53,7 @@ export function useT(): (key: string, vars?: Record<string, string | number>) =>
 const DICT = {
   zh: {
     common: { cancel: "取消", confirm: "确定", save: "保存", delete: "删除", refresh: "刷新", close: "关闭", optional: "可选", on: "开", off: "关", yes: "是", no: "否", localTimeTooltip: "当前时区：{serverTz}\n你的本地时间：{local}" },
-    nav: { title: "抖音录制控制台", tasksList: "录制任务", queue: "处理队列", login: "扫码登录", paste: "手动粘贴", clear: "清除", notif: "站内提醒设置" },
+    nav: { title: "抖音录制控制台", rooms: "房间", tasksList: "录制任务", queue: "处理队列", login: "扫码登录", paste: "手动粘贴", clear: "清除", notif: "站内提醒设置" },
     experimental: {
       badge: "实验性", riskPrefix: "风险:", defaultPrefix: "默认:", defaultOff: "关闭,需显式开启", defaultOn: "开启",
       truthNote: "是否开启以 hub 规则配置为准;直接改规则文件开启的,界面照常按规则显示。",
@@ -234,6 +234,8 @@ const DICT = {
         back: "房间", edit: "编辑", drain: "录完这场再停", recorded: "已录", nodes: "节点", lastRun: "最近一场", deliver: "交付",
         logs: "录制日志", runs: "场次", notFound: "找不到这个房间", nodeRecording: "在录", nodeIdle: "未在录", nodeDown: "离线",
         local: "本机",
+        backToList: "房间列表", info: "房间信息", process: "处理", procOn: "已启用", noRule: "未配置处理",
+        merge: "合成方式", mergeOne: "合并成一个", mergeSplit: "按分段",
       },
     },
     settings: {
@@ -512,7 +514,7 @@ const DICT = {
   },
   en: {
     common: { cancel: "Cancel", confirm: "Confirm", save: "Save", delete: "Delete", refresh: "Refresh", close: "Close", optional: "optional", on: "On", off: "Off", yes: "Yes", no: "No", localTimeTooltip: "Current timezone: {serverTz}\nYour local time: {local}" },
-    nav: { title: "Douyin Recorder", tasksList: "Tasks", queue: "Queue", login: "QR Login", paste: "Paste Cookie", clear: "Clear", notif: "Notification settings" },
+    nav: { title: "Douyin Recorder", rooms: "Rooms", tasksList: "Tasks", queue: "Queue", login: "QR Login", paste: "Paste Cookie", clear: "Clear", notif: "Notification settings" },
     experimental: {
       badge: "Experimental", riskPrefix: "Risk: ", defaultPrefix: "Default: ", defaultOff: "off, enable explicitly", defaultOn: "on",
       truthNote: "Whether it is on is decided by the hub rule config; if the rule file was edited directly, the UI shows the rule as-is.",
@@ -693,6 +695,8 @@ const DICT = {
         back: "Rooms", edit: "Edit", drain: "Stop after this stream", recorded: "Recorded", nodes: "Nodes", lastRun: "Last run", deliver: "Delivery",
         logs: "Recording log", runs: "Runs", notFound: "Room not found", nodeRecording: "recording", nodeIdle: "idle", nodeDown: "offline",
         local: "local",
+        backToList: "Room list", info: "Room info", process: "Processing", procOn: "On", noRule: "No processing rule",
+        merge: "Output", mergeOne: "Merged into one", mergeSplit: "Per segment",
       },
     },
     settings: {
