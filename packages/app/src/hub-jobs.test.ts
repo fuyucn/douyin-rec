@@ -500,6 +500,22 @@ describe("buildQueueView", () => {
     expect(rows.find((r) => r.streamKey === "douyin:FIRE:2026-10-01")?.phase).toBe("waiting_manual");
   });
 
+  it("兜底文案只作用于 needs_manual 行(failed / done 的空 error 必须原样为 null)", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-stage11-"));
+    const now = T0 + 10_000_000;
+    // failed / done 的 error 为空是合法的(例如从未失败过),不能被塞进兜底文案。
+    seedJob(db, "douyin:FAILED:2026-10-01", [["failed", now]], 100);
+    seedJob(db, "douyin:DONE:2026-10-01", [["done", now - 1000]], 100, { bv: "BV1" });
+    seedJob(db, "douyin:MANUAL:2026-10-01", [["needs_manual", now - 2000]], 100);
+    db.close();
+    const { rows } = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY });
+    const err = (k: string): string | null => rows.find((r) => r.streamKey === k)?.error ?? null;
+    expect(err("douyin:FAILED:2026-10-01")).toBeNull();
+    expect(err("douyin:DONE:2026-10-01")).toBeNull();
+    expect(err("douyin:MANUAL:2026-10-01")).toContain("缺少失败原因");
+  });
+
   it("rows 里同一场不重复出现(onlyError / excludeError 过滤不能交叠)", () => {
     const { dbPath, db } = makeSyncDb();
     const stage = mkdtempSync(join(tmpdir(), "queue-stage9-"));

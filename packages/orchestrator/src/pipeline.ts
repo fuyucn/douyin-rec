@@ -1079,7 +1079,7 @@ async function runPipelineInner(
   });
   if (!result.ok) {
     const errText = result.failed.length
-      ? ledger.getNodeState(streamKey, result.failed[0])?.error || `节点失败: ${result.failed.join(",")}`
+      ? ledger.getNodeState(streamKey, result.failed[0])?.error ?? `节点失败: ${result.failed.join(",")}`
       : `节点被阻断: ${result.blocked.join(",")}`;
     jlog(`pipeline 节点失败: failed=${result.failed.join(",")} blocked=${result.blocked.join(",")}`);
     ledger.markFailed(streamKey, `${errText} [${[...result.failed, ...result.blocked].join(",")}]`);
