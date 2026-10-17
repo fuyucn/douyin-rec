@@ -18,7 +18,7 @@ import { kuaishouPlatform } from "@drec/kuaishou-live";
 import { ffmpegEngine, mesioEngine } from "@drec/record-engine";
 import { existsSync } from "node:fs";
 import { makeBiliupProcessor, remuxProcessor, uploadPrepProcessor } from "@drec/processors";
-import { openNodeUploadGate, resolveUploadAccountKey, rootBiliupCookies } from "@drec/app";
+import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey, rootBiliupCookies } from "@drec/app";
 
 // ── 平台 ────────────────────────────────────────────────────────────────────
 // 接第二平台:写 <平台>-core 实现 Platform + 在此 registerPlatform 一行。
@@ -39,8 +39,11 @@ registerProcessor(uploadPrepProcessor);
 // One gate per process: the runner lives in the long-running serve process, so a gate per job would leak a
 // sqlite handle per upload (the gate exposes no close); the store itself serialises across processes.
 let nodeUploadGate: ReturnType<typeof openNodeUploadGate> | undefined;
+// One node-wide upload slot, shared with rolling upload (plan 038 PR4); null = unusable store, never blocks.
+const nodeUploadSlot = openNodeUploadSlot();
 registerProcessor(makeBiliupProcessor({
   gate: () => (nodeUploadGate ??= openNodeUploadGate()),
+  ...(nodeUploadSlot ? { slot: nodeUploadSlot } : {}),
   accountKey: resolveUploadAccountKey,
   localCookies: () => {
     const local = process.env.BILIUP_COOKIE ?? rootBiliupCookies();

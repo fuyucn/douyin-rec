@@ -5,8 +5,8 @@
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import {
-  APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
-  type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress,
+  APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
+  type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress, type UploadSlot,
 } from "@drec/core";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
 import { TransferWatch, readTcpAcked, watchConfigOf, type AckSample } from "./biliup-progress.js";
@@ -71,6 +71,10 @@ export interface BiliupDeps {
   progressEveryMs?: number;
   /** File size lookup for progress totals (tests inject). */
   sizeOf?: (path: string) => number;
+  /** Node-wide upload slot (plan 038 PR4): one biliup per node, shared with rolling upload. */
+  slot?: UploadSlot;
+  /** How long to wait for a free slot before failing the job (default 6h). */
+  slotWaitMs?: number;
   /** Account rate-limit gate (601/21566 cooldown + window), opened per run; injected by the CLI. */
   gate?: () => { run<T>(key: string, fn: () => Promise<T>): Promise<T> };
   accountKey?: (cookiesPath: string) => string;
@@ -149,6 +153,7 @@ function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supe
   const now = deps.now ?? Date.now;
   const part = { base: 0, size: 0, total: 0 };
   let lastWrite: UploadProgress | null = null;
+  const slot = deps.slot;
   // Progress = finished parts + this child's acked bytes, capped at the part size (acked includes HTTP overhead).
   const report = (force: boolean): void => {
     if (part.total <= 0) return;
@@ -160,6 +165,7 @@ function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supe
     lastWrite = { doneBytes, totalBytes: part.total, bps, at: t };
     // Runs inside a timer / child output handler: a throw here would be uncaught, and progress is display-only.
     try { ctx.setState?.({ progress: lastWrite }); } catch (e) { ctx.log(`progress not saved: ${(e as Error)?.message ?? e}`); }
+    slot?.touch();
   };
   const timer = setInterval(() => {
     const c = child;
@@ -225,6 +231,14 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   const key = deps.accountKey?.(cookies) ?? "";
   // Every create/append takes a fresh quota slot, like the blocking path; gate_wait is never a stall.
   const gated = <T>(fn: () => Promise<T>): Promise<T> => (gate ? gate.run(key, fn) : fn());
+  // One biliup per node: the slot is taken per part (create or one append) and released right after it.
+  const slotted = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const slot = deps.slot;
+    if (!slot) return gated(fn);
+    sup.setStep("gate_wait");
+    if (!(await slot.acquire("queue", deps.slotWaitMs ?? 6 * 3600_000))) throw new Error(`${SLOT_BUSY_MARKER} within the wait limit; nothing was uploaded`);
+    try { return await gated(fn); } finally { slot.release(); }
+  };
   const sizes = files.map((f) => { try { return (deps.sizeOf ?? ((x: string) => statSync(x).size))(f); } catch { return 0; } });
   const total = sizes.reduce((a, b) => a + b, 0);
   const partAt = (i: number): void => sup.setPart(sizes.slice(0, i).reduce((a, b) => a + b, 0), sizes[i] ?? 0, total);
@@ -238,7 +252,7 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
     if (proof === "yes") throw new Error("an archive with the same title and duration already exists; refusing to create a duplicate");
     if (proof === "unknown") throw new Error("cannot confirm whether a draft exists; needs manual verification");
     partAt(0);
-    st.bv = await gated(() => uploadPlain({ plain: { ...meta, video: files[0]! }, run: sup.run }));
+    st.bv = await slotted(() => uploadPlain({ plain: { ...meta, video: files[0]! }, run: sup.run }));
     ctx.setState?.({ bv: st.bv });
   }
   const bv = st.bv;
@@ -258,7 +272,7 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
     sup.setStep("gate_wait");
     partAt(i);
     try {
-      await gated(() => appendGroup({ ...meta, bv, files: [files[i]!], run: sup.run, ...(countParts ? { countParts: () => countParts(bv, cookies) } : {}) }));
+      await slotted(() => appendGroup({ ...meta, bv, files: [files[i]!], run: sup.run, ...(countParts ? { countParts: () => countParts(bv, cookies) } : {}) }));
     } catch (e) {
       const msg = String((e as Error)?.message ?? e);
       if (msg.includes(APPEND_AMBIGUOUS_MARKER)) throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${msg}`);
@@ -301,7 +315,7 @@ export function makeBiliupProcessor(deps: BiliupDeps = {}): Processor {
     retryable: false,
     interruptible: false,
     // Advertised only now that stall death and submit alerts exist (plan 038 T15).
-    capabilities: [BILIUP_QUEUE_CAPABILITY],
+    capabilities: [BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY],
     validate(job: ProcessJob): string | null {
       const p = params(job);
       if (!cookiesOf(p, deps)) return "missing cookies path";
@@ -321,6 +335,8 @@ export function makeBiliupProcessor(deps: BiliupDeps = {}): Processor {
       try {
         return await Promise.race([work, sup.abandoned]);
       } catch (e) {
+        // A busy slot is not an outcome: nothing was created. Wait, then let the runner try again.
+        if (isSlotBusy(e)) return { outputs: [], retry: { reason: "slot-busy", notBefore: Date.now() + RETRY_BACKOFF_MS } };
         if (e instanceof StallError) return afterStall(job, deps, sup, st, e);
         throw e;
       } finally {

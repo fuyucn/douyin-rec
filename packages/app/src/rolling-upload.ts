@@ -41,11 +41,21 @@ import {
   segmentSessionBase,
   stripVideoExt,
   UploadGate,
+  isSlotBusy,
+  SLOT_BUSY_MARKER,
+  type UploadSlot,
   type RollingSegment,
 } from "@drec/core";
 import { appendGroup, countVideoParts, uploadPlain } from "./upload/biliup.js";
 import { rootBiliupCookies } from "./paths.js";
-import { openNodeUploadGate, resolveUploadAccountKey } from "./node-pipeline.js";
+import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey } from "./node-pipeline.js";
+
+/** One node-wide upload slot per process; null when the node store cannot be opened (no coordination). */
+let sharedSlot: UploadSlot | null | undefined;
+export function sharedNodeUploadSlot(log?: (m: string) => void): UploadSlot | null {
+  if (sharedSlot === undefined) sharedSlot = openNodeUploadSlot(log ? { log } : {});
+  return sharedSlot;
+}
 import { getHubRule, hubKey } from "./hub-store.js";
 import { rootHubConfig, rootHubDir } from "./paths.js";
 import type { RollingUploadHook } from "@drec/manager";
@@ -126,6 +136,14 @@ export interface RollingUploaderOpts {
   countPartsRaw?: (bv: string, cookies: string) => Promise<number | null>;
   /** 限流闸门;缺省按节点本地库装配(与节点侧上传同一账号键)。 */
   gate?: UploadGate;
+  /**
+   * Node-wide upload slot (plan 038 PR4). **Default = no slot**: the slot is opened by the CLI wiring
+   * (one per node, shared with the queue path), because a caller that does not know the node's data root
+   * must not silently lock against a real on-disk slot.
+   */
+  slot?: UploadSlot | null;
+  /** 槽等待上限;超过则本段本轮放弃(保留源,下轮重试)。默认 30 分钟。 */
+  slotWaitMs?: number;
   log?: (msg: string) => void;
   /** 上传接缝(测试注入)。 */
   uploadPlainRaw?: typeof uploadPlain;
@@ -146,6 +164,7 @@ export class RollingUploader {
   private readonly o: RollingUploaderOpts;
   private readonly log: (m: string) => void;
   private readonly gate: UploadGate;
+  private readonly slot: UploadSlot | null;
   private readonly accountKey: string;
   private readonly now: () => number;
   private readonly minSegmentSec: number;
@@ -174,6 +193,7 @@ export class RollingUploader {
     this.minSegmentSec = Math.max(0, o.minSegmentSec ?? DEFAULT_MIN_SEGMENT_SEC);
     const cookiesPath = o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
     this.gate = o.gate ?? openNodeUploadGate({ warn: this.log });
+    this.slot = o.slot ?? null;
     this.accountKey = resolveUploadAccountKey(cookiesPath);
     this.segDir = "";
     // 初始 state 占位;真正的 sessionBase 由首个段确定(见 noteSegment)。
@@ -443,6 +463,12 @@ export class RollingUploader {
         if (this.deleteConfirmedSource(seg, confirmed, sealed.has(seg.index))) deleted.push(seg.path);
       } catch (e) {
         const msg = String((e as Error)?.message ?? e);
+        // 槽被别的上传占着(队列上传/另一会话)→ **暂时**状态:什么都没上传,保留源,下一轮再试。
+        // 绝不能记 ambiguous:那会让后续段永久被头阻塞挡回,线上的队列上传一旦跑起来就必然撞上。
+        if (isSlotBusy(e)) {
+          this.log(`[rolling] 段 ${seg.index} 等不到上传槽,保留源,下轮重试: ${msg.slice(0, 200)}`);
+          break;
+        }
         // 结果不确定(限流重试耗尽 / 网络) → 转人工:保留源,记 ambiguous,不自动重传。
         ambiguous.add(seg.index);
         this.state = { ...this.state, uploading: undefined, ambiguous: [...ambiguous], updatedAt: this.now() };
@@ -484,7 +510,7 @@ export class RollingUploader {
       this.state = { ...this.state, uploading: { index: seg.index, kind: "create" }, updatedAt: this.now() };
       if (!this.persist()) throw new Error("sidecar 写失败(建稿意图),中止上传并保留源");
       const up = this.o.uploadPlainRaw ?? uploadPlain;
-      const bv = await this.gate.run(this.accountKey, () => up({ plain: { ...meta, video: seg.path, title } }));
+      const bv = await this.withSlot(() => this.gate.run(this.accountKey, () => up({ plain: { ...meta, video: seg.path, title } })));
       // 把「当段已确认」并入同一次写:建稿成功即确认段 0,防止 bv 与 confirmed 分两次写之间崩溃。
       confirmed.add(seg.index);
       this.state = { ...this.state, bv, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
@@ -497,7 +523,7 @@ export class RollingUploader {
     this.state = { ...this.state, uploading: { index: seg.index, kind: "append" }, updatedAt: this.now() };
     if (!this.persist()) throw new Error("sidecar 写失败(append 意图),中止上传并保留源");
     const ap = this.o.appendGroupRaw ?? appendGroup;
-    await this.gate.run(this.accountKey, () =>
+    await this.withSlot(() => this.gate.run(this.accountKey, () =>
       ap({
         ...meta,
         bv,
@@ -505,12 +531,23 @@ export class RollingUploader {
         // 幂等核对:失败后重查分 P 数,变多 = 其实已成功;查不到 → 抛 ambiguous 标记转人工。
         countParts: () => this.countPartsInner(bv, cookies),
       }),
-    );
+    ));
     // 与建稿同口径:确认并入同一次写,防止 append 成功后、补 confirmed 前崩溃导致重复 append。
     confirmed.add(seg.index);
     this.state = { ...this.state, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
     if (!this.persist()) throw new Error(`sidecar 写失败(append 结果段 ${seg.index}),状态不可信,保留源`);
     this.log(`[rolling] 段 ${seg.index} append 到 ${bv}`);
+  }
+
+  /**
+   * One biliup per node (plan 038 PR4): take the node-wide slot around a single part upload and always give
+   * it back. Waiting is not an error — the segment stays on disk and the next flush retries.
+   */
+  private async withSlot<T>(fn: () => Promise<T>): Promise<T> {
+    if (!this.slot) return fn();
+    const ok = await this.slot.acquire("rolling", this.o.slotWaitMs ?? 30 * 60_000);
+    if (!ok) throw new Error(`${SLOT_BUSY_MARKER} within the wait limit; keeping the segment for the next try`);
+    try { return await fn(); } finally { this.slot.release(); }
   }
 
   /**
@@ -606,6 +643,8 @@ export function makeRollingUploadHookFactory(o: {
   removeFile?: (p: string) => boolean;
   now?: () => number;
   gate?: UploadGate;
+  /** Node-wide upload slot (plan 038 PR4); undefined = open the node's own slot, null = do not use one. */
+  slot?: UploadSlot | null;
 }): (() => RollingUploadHook) | undefined {
   if (!o.enabled) return undefined;
   return () => {
@@ -624,6 +663,8 @@ export function makeRollingUploadHookFactory(o: {
       removeFile: o.removeFile,
       now: o.now,
       gate: o.gate,
+      // One slot per node process, shared with the queue's biliup processor (plan 038 PR4).
+      slot: o.slot ?? sharedNodeUploadSlot(o.log),
     });
     return {
       onSegment: (p: string): void => {

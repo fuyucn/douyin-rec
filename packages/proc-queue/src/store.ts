@@ -422,6 +422,22 @@ export class ProcQueueStore {
     });
   }
 
+  /**
+   * Busy node-wide upload slot: running -> pending with backoff, no child-stopped proof needed because no
+   * upload was started (plan 038 PR4).
+   */
+  requeueSlotBusy(jobId: string, owner: string, notBefore: number): boolean {
+    return this.tx(() => {
+      const row = this.get(jobId);
+      if (!row || row.state !== "running" || row.claimedBy !== owner) return false;
+      if (!canTransition("running", "pending", { reason: "slot-busy", kind: row.kind })) return false;
+      this.db.prepare(
+        "UPDATE proc_jobs SET state='pending', claimedBy=NULL, notBefore=?, updatedAt=?, progress=NULL WHERE jobId=? AND state='running'",
+      ).run(notBefore, this.now(), jobId);
+      return true;
+    });
+  }
+
   /** Cancel later pending rows of one order/generation; returns how many rows changed. */
   cascadeOrderBlocked(orderKey: string, generation: number, afterSeq: number, reason = "order-blocked"): number {
     return this.tx(() => this.db.prepare(

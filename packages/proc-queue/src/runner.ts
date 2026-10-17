@@ -388,10 +388,15 @@ export class ProcRunner {
       if (f.reason === "fenced") return; // 已失租:行不归我们,不写表
       if (res.bv) store.setBv(job.jobId, res.bv);
       if (res.retry) {
-        if (proc.interruptible) store.updateStep(job.jobId, "transfer");
-        const fresh = store.get(job.jobId);
-        const stopped = await this.childStopped(fresh);
-        if (!store.retryTransfer(job.jobId, owner, res.retry.notBefore, stopped)) store.finish(job.jobId, owner, { state: "failed", error: "retry requested but not allowed" });
+        let ok: boolean;
+        if (res.retry.reason === "slot-busy") {
+          // No child was ever spawned, so there is nothing to stop and nothing to prove.
+          ok = store.requeueSlotBusy(job.jobId, owner, res.retry.notBefore);
+        } else {
+          if (proc.interruptible) store.updateStep(job.jobId, "transfer");
+          ok = store.retryTransfer(job.jobId, owner, res.retry.notBefore, await this.childStopped(store.get(job.jobId)));
+        }
+        if (!ok) store.finish(job.jobId, owner, { state: "failed", error: "retry requested but not allowed" });
         return;
       }
       if (!store.finish(job.jobId, owner, { state: "done", outputs: res.outputs, note: res.note })) {

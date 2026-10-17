@@ -4,11 +4,13 @@
  * Everything here fails closed toward the existing blocking path: queue mode needs an explicit opt-in AND
  * every safety condition below, and any value we cannot confirm counts as "not safe".
  */
-import { BILIUP_QUEUE_CAPABILITY, type ProcessReceipt } from "@drec/core";
+import { BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, type ProcessReceipt } from "@drec/core";
 import { ProcUnsupported, type Transport } from "./transport.js";
 
 /** Capability a node advertises once stall death, deploy guard and the -N gate are all in place (T15). */
 export const QUEUE_CAPABILITY = BILIUP_QUEUE_CAPABILITY;
+/** Advertised once the node serialises queue and rolling uploads on one node-wide slot (plan 038 PR4). */
+export const SLOT_CAPABILITY = BILIUP_SLOT_CAPABILITY;
 
 export interface NodeUploadConfig {
   mode: "blocking" | "queue";
@@ -54,13 +56,26 @@ export interface QueueGateInput {
 
 export type UploadModeDecision = { mode: "queue" } | { mode: "blocking"; reason: string };
 
+/**
+ * Rolling upload blocks queue mode until the node can serialise the two on one slot: before that, both would
+ * run biliup side by side on the same uplink and account (120s vs 30min budget mismatch). A node advertising
+ * `biliup-slot` has the shared slot, so rolling no longer rules queue mode out.
+ */
+export function rollingBlocksQueue(i: Pick<QueueGateInput, "capabilities" | "rollingEnabledCount">): string | null {
+  const slot = i.capabilities?.includes(SLOT_CAPABILITY) === true;
+  if (i.rollingEnabledCount == null) return "could not confirm whether rolling upload is enabled on the node";
+  if (i.rollingEnabledCount === 0) return null;
+  if (slot) return null;
+  return `${i.rollingEnabledCount} task(s) on the node use rolling upload`;
+}
+
 /** Pure decision: queue only when explicitly configured and every precondition is confirmed. */
 export function decideUploadMode(i: QueueGateInput): UploadModeDecision {
   const no = (reason: string): UploadModeDecision => ({ mode: "blocking", reason });
   if (i.cfg.mode !== "queue") return no("nodeUpload.mode is blocking (default)");
   if (!i.capabilities?.includes(QUEUE_CAPABILITY)) return no(`node does not advertise ${QUEUE_CAPABILITY}`);
-  if (i.rollingEnabledCount == null) return no("could not confirm whether rolling upload is enabled on the node");
-  if (i.rollingEnabledCount > 0) return no(`${i.rollingEnabledCount} task(s) on the node use rolling upload`);
+  const rolling = rollingBlocksQueue(i);
+  if (rolling) return no(rolling);
   if (!i.runNowGuard) return no("the -N/runNow 409 gate is not in place");
   return { mode: "queue" };
 }

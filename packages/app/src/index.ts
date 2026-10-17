@@ -46,7 +46,7 @@ export type { UploadOpts } from "./upload/biliup.js";
 export { fetchAnchorName, resolveShortUrl } from "./anchor.js";
 // 节点侧上传(experimental,见 plans/027):_node-pipeline / _node-capabilities 的节点侧执行体。
 export {
-  runNodeSidePipeline, probeNodeCapabilities, listNodeProducts, openNodeUploadGate, resolveUploadAccountKey,
+  runNodeSidePipeline, probeNodeCapabilities, listNodeProducts, openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey,
   planGroups, splitGroupsBySession, prepareNodeUploadAlias, nodeStageCleanupTargets,
   readNodeResult, nodeResultPath,
   abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath, readNodeExecutorPid,
