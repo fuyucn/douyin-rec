@@ -1,5 +1,5 @@
 import { isWorkerTargeted } from "@drec/core";
-import type { ApplyTasksResult, EnqueueRequest, EnqueueResponse, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, ProcessReceipt, RemoteTaskSpec, WorkerConfig } from "@drec/core";
+import type { ApplyTasksResult, EnqueueRequest, EnqueueResponse, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, ProcessReceipt, ProcessJob, RemoteTaskSpec, WorkerConfig } from "@drec/core";
 
 // 契约在 core(app 的 worker-store 用同一形状);这里 re-export 保持既有调用点不变。
 export type { ApplyTasksResult, WorkerConfig } from "@drec/core";
@@ -222,6 +222,33 @@ export interface Transport {
    * 不支持 → 抛 {@link ProcUnsupported}(节点入队后又回滚旧 bundle 的信号,N7)。
    */
   procStatus?(jobIds: string[]): Promise<ProcessReceipt[]>;
+  /** Request cancellation of queued jobs (`_proc-cancel`). Unsupported → ProcUnsupported. */
+  procCancel?(jobIds: string[]): Promise<ProcessReceipt[]>;
+  /** Plan (or apply) recovery of an upload order on the node (`_recover-order`). Unsupported -> ProcUnsupported. */
+  recoverOrder?(req: RecoverOrderRequest): Promise<RecoverOrderResult>;
+}
+
+/** Operator recovery request for one upload order (`_recover-order`, plan 038 T11). */
+export interface RecoverOrderRequest {
+  orderKey: string;
+  mode: "prep" | "bv" | "restart";
+  bv?: string;
+  fromPart?: number;
+  /** Default false: the node only reports the plan. */
+  apply?: boolean;
+}
+
+export interface RecoverOrderResult {
+  plan: {
+    ok: boolean;
+    orderKey: string;
+    fromGeneration: number;
+    newGeneration: number;
+    jobs: ProcessJob[];
+    refusal?: string;
+    notes: string[];
+  };
+  applied: boolean;
 }
 
 type Factory = (cfg: WorkerConfig) => Transport;

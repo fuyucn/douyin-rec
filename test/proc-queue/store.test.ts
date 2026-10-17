@@ -1,10 +1,10 @@
 // plans/036 T3:ProcQueueStore —— 迁移 / 幂等入队 / 租约 / 认领 / 迁移合法性 / gc。
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { parseJobId } from "@drec/core";
-import { ProcQueueStore, procQueueDbPath, fileTagOf, GC_RETAIN_MS, LEASE_MS } from "@drec/proc-queue";
+import { ProcQueueStore, BatchRejected, procQueueDbPath, fileTagOf, GC_RETAIN_MS, LEASE_MS } from "@drec/proc-queue";
 import { makeEnv, type Env } from "./helpers.js";
 
 let env: Env;
@@ -23,7 +23,7 @@ describe("procQueueDbPath", () => {
 });
 
 describe("迁移", () => {
-  it("重复首开幂等(同进程多连接;真多进程见 store-multiproc.test.ts):user_version=1、数据不丢、表齐全", () => {
+  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): user_version=2, data kept, tables present", () => {
     const s1 = env.open();
     const r = s1.enqueue(env.job("a.ts"), roots());
     expect(r.state).toBe("pending");
@@ -31,9 +31,9 @@ describe("迁移", () => {
     const s3 = env.open();
     expect(s3.get(r.jobId)?.state).toBe("pending");
     const raw = new DatabaseSync(env.dbPath);
-    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(1);
+    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
     const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((t) => t.name);
-    expect(tables).toEqual(expect.arrayContaining(["proc_jobs", "proc_runner_lease"]));
+    expect(tables).toEqual(expect.arrayContaining(["proc_jobs", "proc_runner_lease", "proc_order_cursor"]));
     raw.close();
     expect(s2.list()).toHaveLength(1);
   });
@@ -536,5 +536,190 @@ describe("list / active / gc", () => {
     s.ackUncertain(u);
     expect(s.gc({ purgeFailed: true })).toBe(1);
     expect(s.get(u)).toBeNull();
+  });
+});
+
+describe("v1 -> v2 migration (plan 038 T01)", () => {
+  it("an existing v1 db gains 8 columns and the cursor table; old rows read the new columns as null", () => {
+    const path = join(env.root, "db", "old.db");
+    mkdirSync(dirname(path), { recursive: true });
+    const raw = new DatabaseSync(path);
+    raw.exec(`CREATE TABLE proc_jobs(
+      jobId TEXT PRIMARY KEY, kind TEXT NOT NULL, logicalKey TEXT NOT NULL, generation INTEGER NOT NULL,
+      state TEXT NOT NULL, inputs TEXT NOT NULL, outputs TEXT, params TEXT NOT NULL, replaceInputs INTEGER NOT NULL,
+      ownerTaskId INTEGER, ownerStreamKey TEXT, attempts INTEGER NOT NULL DEFAULT 0, claimedBy TEXT,
+      everClaimed INTEGER NOT NULL DEFAULT 0, cancelRequested INTEGER NOT NULL DEFAULT 0, resultOutputs TEXT,
+      note TEXT, error TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, startedAt INTEGER, finishedAt INTEGER);
+      CREATE TABLE proc_runner_lease(kind TEXT PRIMARY KEY, owner TEXT NOT NULL, pid INTEGER NOT NULL,
+        heartbeatAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, handoverRequested INTEGER NOT NULL DEFAULT 0);
+      INSERT INTO proc_jobs(jobId,kind,logicalKey,generation,state,inputs,params,replaceInputs,createdAt,updatedAt)
+        VALUES('old','remux','k',1,'pending','[]','{}',0,1,1);
+      PRAGMA user_version=1;`);
+    raw.close();
+    const s = new ProcQueueStore(path);
+    const cols = new Set((new DatabaseSync(path).prepare("PRAGMA table_info(proc_jobs)").all() as Array<{ name: string }>).map((r) => r.name));
+    for (const c of ["notBefore","orderKey","seq","step","bv","childPid","childPidStartedAt","prepJobId"]) expect(cols.has(c)).toBe(true);
+    expect(s.get("old")?.orderKey).toBeNull();
+    const tables = (new DatabaseSync(path).prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((r) => r.name);
+    expect(tables).toContain("proc_order_cursor");
+    s.close();
+  });
+});
+
+describe("enqueueBatch and order generation (plan 038 T01)", () => {
+  it("any rejected job rolls the whole batch back", () => {
+    const s = env.open();
+    const good = env.job("a.ts");
+    const bad = { ...env.job("b.ts"), kind: "biliup", inputs: ["/outside/x.mp4"] } as never;
+    expect(() => s.enqueueBatch([good, bad], roots())).toThrow(/违反契约|batch enqueue rejected/);
+    expect(s.list()).toHaveLength(0);
+    s.close();
+  });
+
+  it("all valid jobs land in one transaction", () => {
+    const s = env.open();
+    const out = s.enqueueBatch([env.job("a.ts"), env.job("b.ts")], roots());
+    expect(out.map((r) => r.state)).toEqual(["pending", "pending"]);
+    expect(s.list()).toHaveLength(2);
+    s.close();
+  });
+
+  it("nextOrderGeneration is MAX+1 per orderKey, not per logicalKey", () => {
+    const s = env.open();
+    expect(s.nextOrderGeneration("k")).toBe(1);
+    const mk = (name: string, order: string, gen: number) =>
+      env.job(name, { logicalKey: `${order}:${name}@`, generation: gen, orderKey: order, seq: 1 });
+    s.enqueue(mk("a.ts", "k", 1), roots());
+    s.enqueue(mk("b.ts", "k", 2), roots());
+    s.enqueue(mk("d.ts", "other", 9), roots());
+    expect(s.nextOrderGeneration("k")).toBe(3);
+    expect(s.nextOrderGeneration("other")).toBe(10);
+    s.close();
+  });
+
+  it("batch writes orderKey/seq/notBefore/prepJobId and backfills the fileTag", () => {
+    const s = env.open();
+    const base = env.job("a.ts");
+    const out = s.enqueueBatch([{ ...base, orderKey: "k", seq: 1, notBefore: 123, prepJobId: "p1" }], roots());
+    const row = s.get(out[0]!.jobId)!;
+    expect([row.orderKey, row.seq, row.notBefore, row.prepJobId]).toEqual(["k", 1, 123, "p1"]);
+    expect(row.logicalKey).toMatch(/@\d+-\d+$/);
+    s.close();
+  });
+
+  it("setters: updateStep only touches running rows; setBv/setChildPid/clearChildPid", () => {
+    const s = env.open();
+    lease(s, "A", "fake");
+    const id = s.enqueue(env.job("a.ts"), roots()).jobId;
+    expect(s.updateStep(id, "gate_wait")).toBe(false); // pending
+    s.claim({ kinds: ["fake"], owner: "A" });
+    expect(s.updateStep(id, "gate_wait")).toBe(true);
+    expect(s.get(id)?.step).toBe("gate_wait");
+    expect(s.setBv(id, "BV1x")).toBe(true);
+    expect(s.setChildPid(id, 123, "start")).toBe(true);
+    expect(s.get(id)?.childPid).toBe(123);
+    expect(s.clearChildPid(id)).toBe(true);
+    expect(s.get(id)?.childPid).toBeNull();
+    s.close();
+  });
+});
+
+describe("batch rollback on a rejected existing row (plan 038 T01)", () => {
+  it("a failed row in the batch throws BatchRejected and rolls back earlier inserts", () => {
+    const s = env.open();
+    lease(s, "A", "fake");
+    const old = env.job("old.ts");
+    const first = s.enqueue(old, roots()).jobId;
+    s.claim({ kinds: ["fake"], owner: "A" });
+    s.finish(first, "A", { state: "failed", error: "boom" });
+    expect(() => s.enqueueBatch([env.job("new.ts"), old], roots())).toThrow(BatchRejected);
+    expect(s.list()).toHaveLength(1); // only the old failed row
+    s.close();
+  });
+});
+
+describe("batch stale and fileTag failure (plan 038 T01)", () => {
+  it("a stale hit in a batch throws BatchRejected and rolls the batch back", () => {
+    const s = env.open();
+    lease(s, "A", "fake");
+    const job = env.job("a.ts");
+    const first = s.enqueue(job, roots());
+    const doneRow = s.get(first.jobId)!;
+    expect(s.claim({ kinds: ["fake"], owner: "A" })?.jobId).toBe(first.jobId);
+    s.finish(first.jobId, "A", { state: "done", outputs: [join(env.rec, "missing.mp4")] });
+    const sameJob = { ...doneRow, jobId: first.jobId, kind: "fake", inputs: [join(env.rec, "a.ts")] };
+    expect(() => s.enqueueBatch([env.job("new.ts"), sameJob as never], roots())).toThrow(BatchRejected);
+    expect(s.list()).toHaveLength(1);
+    s.close();
+  });
+
+  it("a fileTag stat failure in a batch rolls the batch back", () => {
+    const s = env.open();
+    const bad = { ...env.job("x.ts"), inputs: [join(env.rec, "gone.ts")] };
+    expect(() => s.enqueueBatch([env.job("ok.ts"), bad], roots())).toThrow(/cannot be stat-ed/);
+    expect(s.list()).toHaveLength(0);
+    s.close();
+  });
+});
+
+describe("claim ordering and transfer retry (plan 038 T02)", () => {
+  const mk = (e: Env, name: string, order: string, gen: number, seq: number, extra: Record<string, unknown> = {}) =>
+    e.job(name, { logicalKey: `${order}:${name}@`, generation: gen, orderKey: order, seq, ...extra });
+  it("seq 2 stays pending until seq 1 is done; the cursor rotates between orders", () => {
+    const s = env.open();
+    lease(s, "A", "fake");
+    s.enqueueBatch([mk(env, "a.ts", "k", 1, 1), mk(env, "b.ts", "k", 1, 2), mk(env, "c.ts", "other", 1, 1)], roots());
+    expect(s.claim({ kinds: ["fake"], owner: "A" })?.orderKey).toBe("k");
+    expect(s.claim({ kinds: ["fake"], owner: "A" })?.orderKey).toBe("other"); // k seq2 blocked -> rotate
+    expect(s.claim({ kinds: ["fake"], owner: "A" })).toBeNull();
+    s.close();
+  });
+
+  it("terminal rows of an old generation do not block the new one", () => {
+    const s = env.open();
+    lease(s, "A", "fake");
+    const old = s.enqueue(mk(env, "a.ts", "k", 1, 1), roots());
+    s.claim({ kinds: ["fake"], owner: "A" });
+    s.finish(old.jobId, "A", { state: "failed", error: "x" });
+    s.enqueue(mk(env, "b.ts", "k", 2, 1), roots());
+    expect(s.claim({ kinds: ["fake"], owner: "A" })?.generation).toBe(2);
+    s.close();
+  });
+
+  it("transfer-retry is only allowed for biliup at gate_wait/transfer, does not consume attempts, and is refused at submit", () => {
+    const s = env.open();
+    lease(s, "A", "biliup");
+    const j = s.enqueue(mk(env, "a.ts", "k", 1, 1, { kind: "biliup" }), roots());
+    expect(s.claim({ kinds: ["biliup"], owner: "A" })?.jobId).toBe(j.jobId);
+    s.updateStep(j.jobId, "submit");
+    expect(s.retryTransfer(j.jobId, "A", 1, true)).toBe(false);
+    s.updateStep(j.jobId, "transfer");
+    expect(s.retryTransfer(j.jobId, "A", 1, true)).toBe(true);
+    const row = s.get(j.jobId)!;
+    expect([row.state, row.attempts, row.notBefore]).toEqual(["pending", 1, 1]);
+    s.close();
+  });
+
+  it("cascade only cancels pending rows with a larger seq in the same generation", () => {
+    const s = env.open();
+    const rows = s.enqueueBatch([mk(env, "a.ts", "k", 1, 1), mk(env, "b.ts", "k", 1, 2), mk(env, "c.ts", "k", 2, 2)], roots());
+    expect(s.cascadeOrderBlocked("k", 1, 1)).toBe(1);
+    expect(s.get(rows[1]!.jobId)?.state).toBe("cancelled");
+    expect(s.get(rows[2]!.jobId)?.state).toBe("pending");
+    s.close();
+  });
+});
+
+describe("prep-failed cascade (plan 038 T03b)", () => {
+  it("only cancels pending biliup rows of the same orderKey+generation; other generations and kinds are untouched", () => {
+    const s = env.open();
+    const mk = (name: string, gen: number, kind = "biliup") =>
+      env.job(name, { kind, logicalKey: `k:${name}@`, generation: gen, orderKey: "k", seq: 1 });
+    const rows = s.enqueueBatch([mk("a.ts", 1), mk("b.ts", 2), mk("c.ts", 1, "fake")], roots());
+    expect(s.cascadePrepFailed("k", 1)).toBe(1);
+    expect(s.get(rows[0]!.jobId)?.state).toBe("cancelled");
+    expect(s.get(rows[1]!.jobId)?.state).toBe("pending");
+    expect(s.get(rows[2]!.jobId)?.state).toBe("pending");
+    s.close();
   });
 });

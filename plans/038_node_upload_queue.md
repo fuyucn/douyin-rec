@@ -3,7 +3,7 @@
 > **TODO：T-62**（`TODO.md`「进行中」）。承接 plan 036 第二期 T14 / T15（biliup 处理器 + master 上传改派发），
 > 并取代 plan 033 的 W1-2 与 issue #25 ①（节点侧上传超时预算）。
 
-状态：PR0/PR1 已合并，PR2 起未实施。基线 `feat/hub-optimization` = `c2c48ff`；PR0/PR1 之前的行号在 `bb353c0` 实测。
+状态：PR0/PR1 已合并，PR2 起未实施。执行顺序以 swe-loop swe-loop 任务表（sandbox 下） 为准：先合 PR2（不含停滞判死，`mode=blocking`），停滞实测后才由 `biliup-queue` 能力打开 queue；每个任务一个子 issue 链 #207，PR base 保持 `feat/hub-optimization`。基线 `feat/hub-optimization` = `c2c48ff`；PR0/PR1 之前的行号在 `bb353c0` 实测。
 隐私：本文与关联 issue 一律不写 streamKey、房间号、BV、主播名、主机名；事故细节只留本地台账。
 
 ## 1. 起因（脱敏）
@@ -52,10 +52,10 @@
 - `processors/src/biliup.ts`：硬常量（关水印、copyright、仅自己可见）从 `app/src/upload/biliup.ts` 逐字搬入，argv 快照测试。
 - `resource="upload"`、`lane="biliup"`，**默认并发 1**（节点 settings，可调）。`retryable=false`（重试由下面的阶段规则决定，不走通用重试）、`interruptible=false`。
 - 阶段 `step`：`gate_wait → transfer → submit`，写进 job 的进度字段（不新增 phase 词表）。
-- **预处理用新的 `kind=upload-prep`，不复用现有 `kind=remux`**：现有 remux 处理器只接受单个原生分段、`replaceInputs=true`，转完会删源（`processors/src/remux.ts:354,380-397`），用它会把 `recordings/` 的源录像删掉，也无法做组内合并。
+- **预处理用新的 `kind=upload-prep`（共享 helper 从 node-pipeline 行为保持不变地抽出），不复用现有 `kind=remux`**：现有 remux 处理器只接受单个原生分段、`replaceInputs=true`，转完会删源（`processors/src/remux.ts:354,380-397`），用它会把 `recordings/` 的源录像删掉，也无法做组内合并。
   - `upload-prep`：`resource="cpu"`、`lane="copy"`、`replaceInputs=false`；输入是显式分段清单，输出到 stage 的 `.work/`，支持组内 `mergeSession` 与 `.ts` 直传硬链接（复用 `node-pipeline.ts:453-520` 的现有实现并搬入处理器）。
   - **整场的 biliup 行一次性原子入队**（同 `orderKey`、`generation`、`seq=1..N`），不按 prep 完成顺序逐条入队——否则 seq=2 可能在 seq=1 之前被 claim，读不到 BV 而误转 `uncertain`。
-  - `upload-prep` 仍可由 master 逐条/批量入队；biliup 行入队后，claim 的门控同时要求「同序号的 prep 已 done」。prep 失败 → 该序号及之后的 biliup 行转 `cancelled(order-prep-failed)`，源文件不动。
+  - `upload-prep` 仍可由 master 逐条/批量入队；biliup 行入队后，claim 的门控同时要求「同序号的 prep 已 done」。prep 失败 → 同 `orderKey`、同 generation 的**全部** biliup 行转 `cancelled(order-prep-failed)`（prep 不按 seq 编号），源文件不动。
   - 这样转码不占 `lane=biliup`，也不会删源。
 - **`gate_wait` 期间保持 `running` 并持有 `lane=biliup` 槽**（不再写「拿到配额才置 running」）：`step=gate_wait` 不传数据，但串行化提交本身正是账号级限流想要的；代价是冷却期（最长 30 分钟）其它场要等，这与「同账号并发 1」一致。等配额期间不参与停滞判定。
   节点结果文件 `phase` 取值**保持** `started|uploading|done|failed`（白名单 `NODE_RESULT_PHASES` 在 `core/src/api-types.ts:771`，旧 master 不认新值会归 null → 当成「确认没成」→ 重投），新信息只加可选 `step` 字段。
@@ -71,7 +71,7 @@
 ### 4.2 停滞判定（只按字节进度）
 
 - biliup 在非 TTY 下进度条被隐藏，日志在 `pre_upload` 后静默，**不能把输出当心跳**。
-- 候选信号（**PR2 的硬前置：先在 VPS 实测选定一条，把命令与输出贴回 #202**）：① biliup 进程树 `/proc/<pid>/io` 的 `wchar` 增量；② checkpoint 文件 mtime/size；③ 套伪终端让进度条输出。
+- 候选信号（**先在 VPS 实测选定一条，把命令与输出贴回 #202**）：① biliup 进程树 `/proc/<pid>/io` 的 `wchar` 增量；② checkpoint 文件 mtime/size；③ 套伪终端让进度条输出。
 - 判死条件：`transfer` 步内字节增量为 0 持续 `stallMs`（默认 15 分钟）。`gate_wait` **不参与**（无传输）；`submit` **永不 kill**；进程消失给宽限。预处理由 `upload-prep` 承担，不在本判死逻辑内。
 - **`submit` 卡住**：`step=submit` 超过 `submitAlertMs`（默认 30 分钟）只告警一次，不 kill；超过 `maxWallMs`（24 小时）转 `uncertain` 并告警，绝不自动重传。**transfer 核验失败时 `hasIntent` 视为 true → `uncertain`**（不能因为 step 不是 submit 就当没传）。**转 `uncertain` 时若子进程仍活着，必须保持 `lane=biliup` 占用直到进程退出**（slot 绑定 pid，不随 job 终态释放），否则会与下一场并列上传，破坏并发 1。告警里给出 pid 与 `_proc-cancel --kill` 操作；人工确认后可强制释放 slot。
 - 租约心跳（`heartbeatStaleMs`，按时间）与传输进度（按字节）是**两个信号**，只有后者能判死。
@@ -98,7 +98,7 @@
   - **append 的 BV 来源**：append job 入队时 `bv` 可为空；runner 执行前从 store 读同 `orderKey` **且同 generation** 的 `seq=1` done 行取 BV。`seq=1` 尚未 done → 保持 pending（由 claim 门控，不算失败）；`seq=1` 已 failed/uncertain 而走到这里 → `cancelled(order-blocked)`，不转 `uncertain`。
   - **前序不可完成的处置**：`seq` 更小的行进入 `failed`/`uncertain`/`cancelled` 时，同 `orderKey` **且同 generation** 下所有更大 `seq` 的 pending 行原子转 `cancelled`（reason=`order-blocked`）并告警一次；跨代不级联。既不静默卡住，也不越过前序乱序上传。
   - **`upload-prep` 的重试**：`retryable=true`（纯本地文件操作），失败按 `notBefore` 退避重试，最多 3 次；耗尽后转 `failed`，同 `orderKey` 的 biliup 行落 `cancelled(order-prep-failed)`。
-  - **order-blocked / order-prep-failed 的恢复路径**（均走 PR6 的 dry-run→`--apply`，默认不改库）：
+  - **order-blocked / order-prep-failed 的恢复路径**（均走 PR6 工具（`hub-recover-order`，本计划 T11）的 dry-run→`--apply`，默认不改库）：
     - **已建稿**：人工用 `biliup list` / 台账补齐 BV → `hub-recover-order <streamKey> --bv <BV>`：给后续项**换 generation**（`nextOrderGeneration`）重新入队，并把 `seq=1` 行绑定该 BV；新 jobId 不撞 `cancelled` 终态。
     - **prep 失败**：先人工确认 prep 可重跑，`hub-recover-order <streamKey> --prep` 把 `order-prep-failed` 的 biliup 行与对应 prep 一起换 generation 重新入队。
     - **确认未建稿**（`seq=1` transfer 重试耗尽且无 BV）：`hub-recover-order <streamKey> --restart`：从 `seq=1` 起整体换 generation 重新入队。执行前必须按时间窗查**全部状态**的稿件旁证无稿；查不到就不允许 `--restart`。
@@ -127,7 +127,7 @@
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `mode` | `queue` | 回退 `blocking` |
+| `mode` | `blocking` | T15 之前保持 blocking；节点上报 `biliup-queue`（由 T15 发出）且显式配置后才启用 queue |
 | `concurrency` | 1 | 每节点 biliup 并发 |
 | `stallMs` | 900000 | transfer 字节停滞判死 |
 | `heartbeatStaleMs` | 180000 | 租约心跳过期 |
@@ -145,18 +145,19 @@
 |---|---|---|---|
 | PR0 | ✅ 已合并（#203）：止血（现有 blocking 路径）：预算对 **winnerMembers** 全部会话求和、保守带宽下调到 0.1MB/s（上限仍 6h）、超时报错带 stderr、不覆盖原始错误、修测试 | 无 | 上传类，`needs-decision`（本次由用户确认开工） |
 | PR1 | ✅ 代码已合并（#205）：`runBiliup` 的 `onSpawn/onLine` + 结果文件加可选 `step`；**停滞信号 VPS 实测仍未做** | PR0 | 同上 |
-| PR2 | `upload-prep` 处理器 + biliup 处理器 + 阶段/停滞/退避/保序 + claim 改造（notBefore/orderKey/轮转）+ store 迁移（含 pid/step/bv）+ 重启恢复 + `_proc-cancel` + core 迁移 reason + 关停回 pending | PR1、036 T2、**VPS 停滞信号实测** | 同上 |
+| PR2 | `upload-prep` 处理器 + biliup 处理器 + 阶段/退避/保序 + claim 改造 + store 迁移 + 重启恢复 + `_proc-cancel` + core 迁移 reason + 关停回 pending。**不含停滞判死** | PR1、036 T2 | 同上 |
+| PR2b | 停滞信号实测（人工授权一次真实上传）+ 停滞判死 / submit 告警 / `biliup-queue` 能力 | PR2 | 同上 |
 | PR3 | master 入队/轮询/不 abort/sweep 豁免/原 key 409（含 SSH 失败）/部署 guard（fail-closed）/回退保护 | PR2，**且 `hub-recover-order` 已合并在内** | 同上（改部署 guard） |
 | PR4 | 边录边传接入共享并发槽 | PR2 | 同上 |
 | PR5 | 队列页（`/api/hub/queue` 露出节点 biliup 行、最后心跳、ETA） | PR3 | `enhancement` |
-| PR6 | 归并工具 `hub-triage-node-uploads` / `hub-attach-bv` / `hub-clean-sources` / `hub-recover-order`（dry-run 默认，`--apply` 才写，参照 `hub-recheck-verify`） | **PR2**（recover-order 依赖 orderKey/seq/bv 列与 order-blocked）。**PR3 启用 `mode: queue` 前，`hub-recover-order` 必须先合入**（可随 PR3 交付，或提前从 PR6 拆出） | 删源类，`needs-decision` |
+| PR6 | 只交付 `hub-recover-order`（T11）：只写队列行，不删源、不上传。`hub-attach-bv` / `hub-clean-sources` 不在本计划。 | PR2 | `needs-decision`（写队列） |
 | PR7 / PR8 | Phase 2：传输/提交拆分 + 已传分 P 复用（含许可证决策）；审核通过后才删源（默认关） | PR3 | `needs-decision` |
 
 回滚：每个 PR 单独 revert；PR3 之后切回 `blocking` 的前提是节点队列已空（`_proc-status` 实测贴 PR）。
 
 ## 6. 本场处置（不写代码）
 
-冻结 `run`、带 `-N` 的新建任务与 `retry-node`；之后用 PR6 的 `hub-attach-bv` 先 dry-run 再 `--apply` 绑定 BV 并标 done；源文件由 `hub-clean-sources` 单独确认后删除，保留 xml。
+冻结 `run`、带 `-N` 的新建任务与 `retry-node`；之后用不在本计划的 `hub-attach-bv`（需另开票）先 dry-run 再 `--apply` 绑定 BV 并标 done；源文件由不在本计划的 `hub-clean-sources`（需另开票）单独确认后删除，保留 xml。
 
 ## 7. 测试清单
 

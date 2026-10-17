@@ -904,3 +904,63 @@ describe("返工(PR #154 审查 F1/F2/F4/F5/F6)", () => {
     expect(dto.leaseAlive.fake).toBe(true);
   });
 });
+
+describe("processor contract wiring (plan 038 T02)", () => {
+  it("ctx.setState persists step/bv/childPid; ProcessResult.bv is stored", async () => {
+    registerProcessor(fakeProcessor({ run: async (_j, ctx) => {
+      ctx.setState?.({ step: "transfer", childPid: 42, childPidStartedAt: "t0" });
+      return { outputs: [], bv: "BV1WIRE" };
+    } }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts"), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("done"));
+    const row = s.get(jobId)!;
+    expect([row.step, row.bv, row.childPid]).toEqual(["transfer", "BV1WIRE", 42]);
+  });
+
+  it("ProcessResult.retry → pending with notBefore, attempts unchanged", async () => {
+    registerProcessor(fakeProcessor({ kind: "biliup", run: async () => ({ outputs: [], retry: { notBefore: 5, reason: "transfer-retry" } }) }));
+    const r = mkRunner("A");
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts", { kind: "biliup", orderKey: "k", seq: 1 }), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("pending"));
+    expect([s.get(jobId)?.attempts, s.get(jobId)?.notBefore, s.get(jobId)?.step]).toEqual([1, 5, "transfer"]);
+  });
+});
+
+describe("shutdown verification (plan 038 T09)", () => {
+  it("a child that is still alive is not judged safe and ends uncertain", async () => {
+    let release!: () => void;
+    const run = async () => new Promise<never>(() => { release = () => {}; });
+    registerProcessor(fakeProcessor({
+      kind: "biliup", interruptible: false, retryable: false,
+      run,
+      verifyStopped: async () => "safe",
+    }));
+    const r = mkRunner("A", { shutdownWaitMs: 20, abortWaitMs: 20, probeChild: () => ({ pid: 7, startedAt: "t1", cmdline: "biliup" }) });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts", { kind: "biliup" }), allowed());
+    s.setChildPid(jobId, 7, "t1");
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("running"));
+    await r.stop();
+    expect(s.get(jobId)?.state).toBe("uncertain");
+    void release;
+  });
+
+  it("a stopped child with no draft goes back to pending without consuming attempts", async () => {
+    registerProcessor(fakeProcessor({ kind: "biliup", interruptible: false, retryable: false,
+      run: async () => new Promise<never>(() => {}), verifyStopped: async () => "safe" }));
+    const r = mkRunner("A", { shutdownWaitMs: 20, abortWaitMs: 20, probeChild: () => null });
+    const s = env.open();
+    const { jobId } = s.enqueue(env.job("a.ts", { kind: "biliup" }), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(jobId)?.state).toBe("running"));
+    await r.stop();
+    expect(s.get(jobId)?.state).toBe("pending");
+    expect(s.get(jobId)?.attempts).toBe(0);
+  });
+});

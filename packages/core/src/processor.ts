@@ -32,6 +32,14 @@ export interface ProcessJob {
   replaceInputs: boolean;
   owner: { taskId?: number; streamKey?: string };
   createdAt: number;
+  /** plan 038: ordering key shared by one session (null/absent when no ordering is needed, e.g. remux). */
+  orderKey?: string | null;
+  /** plan 038: 1-based position within the session; meaningless without orderKey. */
+  seq?: number | null;
+  /** plan 038: not claimable before this epoch ms. */
+  notBefore?: number | null;
+  /** plan 038: upload-prep jobId a biliup row waits on. */
+  prepJobId?: string | null;
 }
 
 /** 处理器运行期上下文(由 runner 注入;处理器只经它感知租约/取消,不直接碰任务表)。 */
@@ -49,6 +57,8 @@ export interface ProcessContext {
    * 通知/事件中心由 runner 负责**(plans/036 §2.2 / §2.3),处理器只管调用。
    */
   alert(msg: string): void;
+  /** Persist observable progress fields (step / bv / child pid). Processor never touches the store. */
+  setState?(patch: { step?: string | null; bv?: string | null; childPid?: number | null; childPidStartedAt?: string | null }): void;
 }
 
 export interface ProcessResult {
@@ -56,6 +66,10 @@ export interface ProcessResult {
   outputs: string[];
   /** 人类可读备注(入表 / 展示)。 */
   note?: string;
+  /** BV created by this run (biliup). */
+  bv?: string;
+  /** Ask the runner to retry later (transfer failure with a confirmed stopped child). */
+  retry?: { notBefore: number; reason: "transfer-retry" };
 }
 
 export interface Processor {
@@ -73,6 +87,8 @@ export interface Processor {
   run(job: ProcessJob, ctx: ProcessContext): Promise<ProcessResult>;
   /** 接管中断的 running job 时判定:重跑 / 已完成 / 无法判定(→ uncertain)。 */
   recover?(job: ProcessJob, ctx: ProcessContext): Promise<"rerun" | "done" | "uncertain">;
+  /** Shutdown verification: may this running row safely return to pending? */
+  verifyStopped?(job: ProcessJob, ctx: ProcessContext): Promise<"safe" | "uncertain">;
 }
 
 // ───────────────────────── 注册表 ─────────────────────────
@@ -208,7 +224,9 @@ export type TransitionReason =
   | "lease-expired-rerun" // 租约过期 + recover()=rerun
   | "shutdown-abort" // 关停时 interruptible job 被 abort
   | "requeue" // failed → pending
-  | "ack-uncertain"; // uncertain → failed
+  | "ack-uncertain" // uncertain → failed
+  | "transfer-retry" // running → pending after a failed/stalled transfer (child confirmed stopped)
+  | "order-blocked"; // cascade cancel of later seq rows in the same generation
 
 export interface TransitionContext {
   /** pending → cancelled 的前提:该行从未被认领(原子条件更新由 store 保证)。 */
@@ -216,6 +234,10 @@ export interface TransitionContext {
   reason?: TransitionReason;
   /** reason=shutdown-abort 时,job 的处理器是否 interruptible。 */
   interruptible?: boolean;
+  /** plan 038: transfer-retry is only allowed for biliup at gate_wait/transfer, with the child confirmed stopped. */
+  kind?: string;
+  step?: string | null;
+  childConfirmedStopped?: boolean;
 }
 
 /**
@@ -229,6 +251,9 @@ export function canTransition(from: JobState, to: JobState, ctx: TransitionConte
   if (!PROC_TRANSITIONS[from].includes(to)) return false;
   if (from === "pending" && to === "cancelled") return ctx.neverClaimed === true;
   if (from === "running" && to === "pending") {
+    if (ctx.reason === "transfer-retry") {
+      return ctx.kind === "biliup" && (ctx.step === "gate_wait" || ctx.step === "transfer") && ctx.childConfirmedStopped === true;
+    }
     return ctx.reason === "lease-expired-rerun" || (ctx.reason === "shutdown-abort" && ctx.interruptible === true);
   }
   if (from === "failed" && to === "pending") return ctx.reason === "requeue";
@@ -276,6 +301,12 @@ export interface ProcessReceipt {
   jobId: string;
   state: JobState;
   error?: string;
+  /** Persisted BV once known (biliup create/append). */
+  bv?: string;
+  /** Observable upload step (gate_wait/transfer/submit). */
+  step?: string;
+  /** Result outputs once `state=done` (e.g. the stage parts an upload-prep job produced). */
+  outputs?: string[];
   /** 持有租约的执行者是否存活(master 据此判「节点无执行者」)。 */
   leaseAlive: boolean;
 }
@@ -317,7 +348,30 @@ function decodeJob(raw: unknown, i: number): ProcessJob {
     createdAt: raw.createdAt,
   };
   if (raw.outputs !== undefined) job.outputs = raw.outputs;
+  decodeOrdering(raw, job, bad);
   return job;
+}
+
+/** Ordering fields survive the wire (they were silently dropped before, which disabled remote ordering/prep gating). */
+function decodeOrdering(raw: Record<string, unknown>, job: ProcessJob, bad: (why: string) => never): void {
+  const { orderKey, seq, notBefore, prepJobId } = raw;
+  if (orderKey != null) {
+    if (typeof orderKey !== "string" || orderKey === "") bad("orderKey must be a non-empty string");
+    job.orderKey = orderKey as string;
+  }
+  if (seq != null) {
+    if (!Number.isSafeInteger(seq) || (seq as number) < 1) bad("seq must be an integer >= 1");
+    job.seq = seq as number;
+  }
+  if (notBefore != null) {
+    if (typeof notBefore !== "number" || !Number.isFinite(notBefore)) bad("notBefore is invalid");
+    job.notBefore = notBefore as number;
+  }
+  if (prepJobId != null) {
+    if (typeof prepJobId !== "string" || prepJobId === "") bad("prepJobId must be a non-empty string");
+    job.prepJobId = prepJobId as string;
+  }
+  if (job.orderKey && job.seq == null) bad("orderKey requires seq");
 }
 
 /** 编码 `EnqueueRequest` 为 base64(`_enqueue` 命令行参数)。 */

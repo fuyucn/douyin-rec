@@ -11,6 +11,10 @@ export interface HubDeps {
   syncTasks?: () => Promise<void>;
   /** 任务同步周期(ms),默认 60_000。 */
   syncIntervalMs?: number;
+  /** Queue-managed upload poll (plan 038); its own timer, independent of the reconcile lock. */
+  pollUploadQueue?: () => Promise<void>;
+  /** Poll period (ms), default 60_000. */
+  uploadQueuePollMs?: number;
 }
 
 /**
@@ -75,6 +79,16 @@ export function startHub(deps: HubDeps): () => void {
         void runSync();
       }, deps.syncIntervalMs ?? 60_000)
     : null;
+  let uploadPollRunning = false;
+  const uploadPollInterval = deps.pollUploadQueue
+    ? setInterval(() => {
+        if (uploadPollRunning) return;
+        uploadPollRunning = true;
+        void deps.pollUploadQueue!()
+          .catch((e) => console.error("[hub] upload queue poll failed:", e))
+          .finally(() => { uploadPollRunning = false; });
+      }, deps.uploadQueuePollMs ?? 60_000)
+    : null;
   // 启动即对账一次(不等第一个 tick):新增/改动的绑定任务尽快下发。
   if (deps.syncTasks) void runSync();
 
@@ -82,5 +96,6 @@ export function startHub(deps: HubDeps): () => void {
     clearInterval(pollInterval);
     clearInterval(reconcileInterval);
     if (syncInterval) clearInterval(syncInterval);
+    if (uploadPollInterval) clearInterval(uploadPollInterval);
   };
 }

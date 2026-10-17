@@ -16,7 +16,7 @@ import { douyinPlatform } from "@drec/douyin-live";
 import { bilibiliPlatform } from "@drec/bilibili-live";
 import { kuaishouPlatform } from "@drec/kuaishou-live";
 import { ffmpegEngine, mesioEngine } from "@drec/record-engine";
-import { remuxProcessor } from "@drec/processors";
+import { biliupProcessor, remuxProcessor, uploadPrepProcessor } from "@drec/processors";
 
 // ── 平台 ────────────────────────────────────────────────────────────────────
 // 接第二平台:写 <平台>-core 实现 Platform + 在此 registerPlatform 一行。
@@ -32,6 +32,8 @@ registerEngine(mesioEngine);
 // ── 后处理处理器 ──────────────────────────────────────────────────────────────
 // 加处理器 = `@drec/processors` 里一个模块 + 此处一行(与上面 registerPlatform / registerEngine 并列)。
 registerProcessor(remuxProcessor);
+registerProcessor(uploadPrepProcessor);
+registerProcessor(biliupProcessor);
 
 // ── 弹幕 ──────────────────────────────────────────────────────────────────────
 // 弹幕不再走「按名查 provider」注册表 —— 已收进 Platform.connectDanmu()(抖音见 @drec/douyin-live

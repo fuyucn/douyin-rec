@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { encodeEnqueue, normalizeNodeResultFile, registerChild, throwIfAborted, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type RemoteTaskSpec } from "@drec/core";
-import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeRecordingStatus, NodeRollingSession, NodeTasks, Transport } from "./transport.js";
+import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeRecordingStatus, NodeRollingSession, NodeTasks, RecoverOrderRequest, RecoverOrderResult, Transport } from "./transport.js";
 import { ProcUnsupported } from "./transport.js";
 import type { NodeCapabilities, NodeStatus, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec } from "@drec/core";
 
@@ -343,6 +343,40 @@ export class SshTransport implements Transport {
     if (parsed.error) throw new Error(`_proc-status 失败: ${parsed.error}`);
     if (!Array.isArray(parsed.receipts)) throw new Error("_proc-status 返回格式非法");
     return parsed.receipts;
+  }
+
+  /** Cancel queued jobs (`_proc-cancel`). Unknown command → ProcUnsupported. */
+  async procCancel(jobIds: string[]): Promise<ProcessReceipt[]> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const b64 = Buffer.from(JSON.stringify(jobIds), "utf8").toString("base64");
+    let out: string;
+    try {
+      out = await this.runStatus([`${nodePrefix} _proc-cancel ${this.o.dataRoot} ${b64}`]);
+    } catch (e) {
+      if (isUnknownCommandError(e)) throw new ProcUnsupported("node bundle does not support _proc-cancel (old version)");
+      throw e;
+    }
+    const parsed = JSON.parse(out) as { receipts?: ProcessReceipt[]; error?: string };
+    if (parsed.error) throw new Error(`_proc-cancel failed: ${parsed.error}`);
+    if (!Array.isArray(parsed.receipts)) throw new Error("_proc-cancel returned an invalid payload");
+    return parsed.receipts;
+  }
+
+  /** Plan or apply order recovery on the node (`_recover-order`); unknown command -> ProcUnsupported. */
+  async recoverOrder(req: RecoverOrderRequest): Promise<RecoverOrderResult> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const b64 = Buffer.from(JSON.stringify(req), "utf8").toString("base64");
+    let out: string;
+    try {
+      out = await this.runStatus([`${nodePrefix} _recover-order ${this.o.dataRoot} ${b64}`]);
+    } catch (e) {
+      if (isUnknownCommandError(e)) throw new ProcUnsupported("node bundle does not support _recover-order (old version)");
+      throw e;
+    }
+    const parsed = JSON.parse(out) as Partial<RecoverOrderResult> & { error?: string };
+    if (parsed.error) throw new Error(`_recover-order failed: ${parsed.error}`);
+    if (!parsed.plan || typeof parsed.applied !== "boolean") throw new Error("_recover-order returned an invalid payload");
+    return { plan: parsed.plan, applied: parsed.applied };
   }
 
   /**

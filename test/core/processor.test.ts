@@ -261,6 +261,26 @@ describe("EnqueueRequest 编解码", () => {
     expect(() => decodeEnqueue(withJob({ outputs: "a.mkv" }))).toThrow(/outputs/);
   });
 
+  it("ordering fields (orderKey/seq/notBefore/prepJobId) survive the wire", () => {
+    const j = mkJob({ orderKey: "k", seq: 2, notBefore: 1234, prepJobId: "upload-prep:x#g1" });
+    expect(decodeEnqueue(encodeEnqueue({ v: 1, jobs: [j] })).jobs[0]).toEqual(j);
+    // null / absent stay absent (old masters never send them)
+    const plain = decodeEnqueue(encodeEnqueue({ v: 1, jobs: [mkJob()] })).jobs[0]!;
+    expect(plain).not.toHaveProperty("orderKey");
+    expect(plain).not.toHaveProperty("seq");
+  });
+
+  it("rejects malformed ordering fields", () => {
+    const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64");
+    const withJob = (over: object) => enc({ v: 1, jobs: [{ ...mkJob(), ...over }] });
+    expect(() => decodeEnqueue(withJob({ orderKey: "", seq: 1 }))).toThrow(/orderKey/);
+    expect(() => decodeEnqueue(withJob({ orderKey: 5, seq: 1 }))).toThrow(/orderKey/);
+    expect(() => decodeEnqueue(withJob({ orderKey: "k", seq: 0 }))).toThrow(/seq/);
+    expect(() => decodeEnqueue(withJob({ orderKey: "k" }))).toThrow(/requires seq/);
+    expect(() => decodeEnqueue(withJob({ notBefore: "soon" }))).toThrow(/notBefore/);
+    expect(() => decodeEnqueue(withJob({ prepJobId: 3 }))).toThrow(/prepJobId/);
+  });
+
   it("拒重复 jobId", () => {
     const j = mkJob();
     expect(() => decodeEnqueue(encodeEnqueue({ v: 1, jobs: [j, j] }))).toThrow(/重复 jobId/);

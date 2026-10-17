@@ -8,6 +8,16 @@ export { satisfiesCapabilities, gateWorkers, explainRejections } from "@drec/cor
 export type { CapabilityRejection } from "@drec/core";
 export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";
+export {
+  advanceUpload, ensureUploadPlan, planJobIds,
+  type UploadPlan, type UploadDispatch, type UploadInput, type BiliupMeta, type PrepSpec as UploadPrepSpec,
+} from "./node-upload-queue.js";
+export { applyUploadOutcome, completeFromDispatch, mapUploadOutcome, type UploadOutcome } from "./node-upload-complete.js";
+export { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
+export {
+  QUEUE_CAPABILITY, DEFAULT_NODE_UPLOAD, parseNodeUploadConfig, decideUploadMode, canFallbackToBlocking, rollingEnabledCount,
+  type NodeUploadConfig, type QueueGateInput, type UploadModeDecision,
+} from "./node-upload-config.js";
 export type { PipelineDeps, PipelineCfg, PipelineSteps, PipelineCleanup } from "./pipeline.js";
 export {
   buildWorkflow,
@@ -71,6 +81,7 @@ export function registerBuiltinTransports(deps: {
   procChannel?: {
     enqueue(dataRoot: string, req: EnqueueRequest): EnqueueResponse;
     procStatus(dataRoot: string, jobIds: string[]): ProcessReceipt[];
+    procCancel?(dataRoot: string, jobIds: string[]): ProcessReceipt[];
   };
 }): void {
   const taskRooms = deps.taskRooms ?? {};
@@ -88,6 +99,7 @@ export function registerBuiltinTransports(deps: {
         ? {
             enqueue: (req: EnqueueRequest) => deps.procChannel!.enqueue(cfg.dataRoot!, req),
             procStatus: (ids: string[]) => deps.procChannel!.procStatus(cfg.dataRoot!, ids),
+            ...(deps.procChannel!.procCancel ? { procCancel: (ids: string[]) => deps.procChannel!.procCancel!(cfg.dataRoot!, ids) } : {}),
           }
         : {}),
     }),

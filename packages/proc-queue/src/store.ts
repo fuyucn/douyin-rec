@@ -17,6 +17,14 @@ import {
   assertJobInvariants, canTransition, cancelOutcome, jobIdOf,
   type EnqueueResult, type JobState, type ProcessJob,
 } from "@drec/core";
+import { migrateSchema } from "./schema.js";
+import { ProcLeaseStore } from "./lease.js";
+
+const WAL_RETRIES = 200;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 /** `<dataRoot>/db/proc-queue.db`。路径单点(app/orchestrator/cli 都经它,不各拼一份)。 */
 export function procQueueDbPath(dataRoot: string): string {
@@ -35,7 +43,9 @@ export function fileTagOf(path: string, stat: typeof statSync = statSync): strin
   return `${String(st.ino)}-${String(st.size)}`;
 }
 
-export const LEASE_MS = 30_000;
+export { LEASE_MS } from "./lease-types.js";
+import { LEASE_MS } from "./lease-types.js";
+import type { LeaseRow } from "./lease-types.js";
 export const GC_RETAIN_MS = 7 * 24 * 3600_000;
 
 /** 任务行(契约字段 + 执行态)。 */
@@ -53,15 +63,21 @@ export interface ProcJobRecord extends ProcessJob {
   updatedAt: number;
   startedAt: number | null;
   finishedAt: number | null;
+  notBefore: number | null;
+  orderKey: string | null;
+  seq: number | null;
+  step: string | null;
+  bv: string | null;
+  childPid: number | null;
+  childPidStartedAt: string | null;
+  prepJobId: string | null;
 }
 
-export interface LeaseRow {
-  kind: string;
-  owner: string;
-  pid: number;
-  heartbeatAt: number;
-  expiresAt: number;
-  handoverRequested: boolean;
+export type { LeaseRow } from "./lease-types.js";
+
+/** A batch was rejected and rolled back; `results` lists earlier entries plus the failure. */
+export class BatchRejected extends Error {
+  constructor(message: string, readonly results: EnqueueResult[]) { super(message); this.name = "BatchRejected"; }
 }
 
 export type FinishOutcome =
@@ -81,48 +97,6 @@ export interface ProcQueueStoreOpts {
   /** 只读打开:不建目录、不切 WAL、不迁移、只读连接;库/表缺失时查询抛错由调用方兜。 */
   readOnly?: boolean;
 }
-
-const SCHEMA_VERSION = 1;
-const WAL_RETRIES = 200;
-
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-const DDL = `
-CREATE TABLE IF NOT EXISTS proc_jobs(
-  jobId TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  logicalKey TEXT NOT NULL,
-  generation INTEGER NOT NULL,
-  state TEXT NOT NULL,
-  inputs TEXT NOT NULL,
-  outputs TEXT,
-  params TEXT NOT NULL,
-  replaceInputs INTEGER NOT NULL,
-  ownerTaskId INTEGER,
-  ownerStreamKey TEXT,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  claimedBy TEXT,
-  everClaimed INTEGER NOT NULL DEFAULT 0,
-  cancelRequested INTEGER NOT NULL DEFAULT 0,
-  resultOutputs TEXT,
-  note TEXT,
-  error TEXT,
-  createdAt INTEGER NOT NULL,
-  updatedAt INTEGER NOT NULL,
-  startedAt INTEGER,
-  finishedAt INTEGER);
-CREATE INDEX IF NOT EXISTS idx_proc_jobs_kind_state ON proc_jobs(kind, state, createdAt);
-CREATE INDEX IF NOT EXISTS idx_proc_jobs_logical ON proc_jobs(kind, logicalKey);
-CREATE TABLE IF NOT EXISTS proc_runner_lease(
-  kind TEXT PRIMARY KEY,
-  owner TEXT NOT NULL,
-  pid INTEGER NOT NULL,
-  heartbeatAt INTEGER NOT NULL,
-  expiresAt INTEGER NOT NULL,
-  handoverRequested INTEGER NOT NULL DEFAULT 0);
-`;
 
 const defaultPidAlive = (pid: number): boolean => {
   try {
@@ -161,6 +135,14 @@ function toRecord(r: Row): ProcJobRecord {
     updatedAt: Number(r.updatedAt),
     startedAt: r.startedAt == null ? null : Number(r.startedAt),
     finishedAt: r.finishedAt == null ? null : Number(r.finishedAt),
+    notBefore: r.notBefore == null ? null : Number(r.notBefore),
+    orderKey: r.orderKey == null ? null : String(r.orderKey),
+    seq: r.seq == null ? null : Number(r.seq),
+    step: r.step == null ? null : String(r.step),
+    bv: r.bv == null ? null : String(r.bv),
+    childPid: r.childPid == null ? null : Number(r.childPid),
+    childPidStartedAt: r.childPidStartedAt == null ? null : String(r.childPidStartedAt),
+    prepJobId: r.prepJobId == null ? null : String(r.prepJobId),
   };
   if (outputs) rec.outputs = outputs;
   return rec;
@@ -183,6 +165,7 @@ export interface ListFilter {
 
 export class ProcQueueStore {
   private readonly db: DatabaseSync;
+  private readonly leases!: ProcLeaseStore;
   private readonly now: () => number;
   private readonly isPidAlive: (pid: number) => boolean;
 
@@ -192,6 +175,7 @@ export class ProcQueueStore {
     if (opts.readOnly) {
       this.db = new DatabaseSync(dbPath, { readOnly: true });
       this.db.exec(`PRAGMA busy_timeout=${opts.busyTimeoutMs ?? 5000}`);
+      this.leases = new ProcLeaseStore(this.db, { now: this.now, isPidAlive: this.isPidAlive });
       return;
     }
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -199,6 +183,7 @@ export class ProcQueueStore {
     this.db.exec(`PRAGMA busy_timeout=${opts.busyTimeoutMs ?? 5000}`);
     this.initWal();
     this.migrate();
+    this.leases = new ProcLeaseStore(this.db, { now: this.now, isPidAlive: this.isPidAlive });
   }
 
   /**
@@ -219,14 +204,9 @@ export class ProcQueueStore {
     }
   }
 
-  /** 幂等迁移:`BEGIN IMMEDIATE` 内重读 user_version(两进程同时首开,后到者见已迁移即跳过)。 */
+  /** Idempotent migration (see schema.ts); runs on every open and upgrades old databases step by step. */
   private migrate(): void {
-    this.tx(() => {
-      const v = Number((this.db.prepare("PRAGMA user_version").get() as Row).user_version ?? 0);
-      if (v >= SCHEMA_VERSION) return;
-      this.db.exec(DDL);
-      this.db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
-    });
+    migrateSchema(this.db);
   }
 
   /** `BEGIN IMMEDIATE` 事务;抛错回滚并重抛。 */
@@ -300,118 +280,157 @@ export class ProcQueueStore {
     try {
       tag = fileTagOf(job.inputs[0]);
     } catch (e) {
-      return { jobId: job.jobId, state: "rejected", error: `inputs[0] 无法 stat: ${(e as Error).message}` };
+      return { jobId: job.jobId, state: "rejected", error: `inputs[0] cannot be stat-ed: ${(e as Error).message}` };
     }
     const logicalKey = job.logicalKey.endsWith(FILE_TAG_PLACEHOLDER) ? `${job.logicalKey}${tag}` : job.logicalKey;
+    return this.tx(() => this.enqueueTx(job, logicalKey));
+  }
+
+  private enqueueTx(job: ProcessJob, logicalKey: string): EnqueueResult {
     const jobId = jobIdOf(job.kind, logicalKey, job.generation);
-    return this.tx((): EnqueueResult => {
-      const existing = this.get(jobId);
-      if (existing) {
-        switch (existing.state) {
-          case "pending": return { jobId, state: "pending" };
-          case "running": return { jobId, state: "running" };
-          case "done": {
-            const targets = existing.resultOutputs ?? existing.outputs ?? [];
-            if (targets.some((p) => !existsSync(p))) {
-              return { jobId, state: "stale", nextGeneration: this.nextGeneration(job.kind, logicalKey) };
-            }
-            return { jobId, state: "done" };
+    const existing = this.get(jobId);
+    if (existing) {
+      switch (existing.state) {
+        case "pending": return { jobId, state: "pending" };
+        case "running": return { jobId, state: "running" };
+        case "done": {
+          const targets = existing.resultOutputs ?? existing.outputs ?? [];
+          if (targets.some((p) => !existsSync(p))) {
+            return { jobId, state: "stale", nextGeneration: this.nextGeneration(job.kind, logicalKey) };
           }
-          default:
-            // failed / uncertain / cancelled:不隐式复活(须经 requeue / ackUncertain),入队方不重试。
-            return {
-              jobId, state: "rejected", error: `已存在且 state=${existing.state}(需人工处理)`,
-              existingState: existing.state as "failed" | "uncertain" | "cancelled",
-            };
+          return { jobId, state: "done" };
         }
+        default:
+          // failed / uncertain / cancelled: never revive implicitly (requeue / ackUncertain only).
+          return {
+            jobId, state: "rejected", error: `已存在且 state=${existing.state}(需人工处理)`,
+            existingState: existing.state as "failed" | "uncertain" | "cancelled",
+          };
       }
-      const t = this.now();
-      this.db.prepare(
-        `INSERT INTO proc_jobs(jobId, kind, logicalKey, generation, state, inputs, outputs, params, replaceInputs,
-           ownerTaskId, ownerStreamKey, createdAt, updatedAt)
-         VALUES(?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        jobId, job.kind, logicalKey, job.generation, JSON.stringify(job.inputs),
-        job.outputs ? JSON.stringify(job.outputs) : null, JSON.stringify(job.params), job.replaceInputs ? 1 : 0,
-        job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t,
-      );
-      return { jobId, state: "pending" };
-    });
-  }
-
-  // ───────────────────────── 租约 ─────────────────────────
-
-  getLease(kind: string): LeaseRow | null {
-    const r = this.db.prepare("SELECT * FROM proc_runner_lease WHERE kind=?").get(kind) as Row | undefined;
-    return r ? toLease(r) : null;
-  }
-
-  /** 有租约行的 kind(含已过期;`leaseAlive` 再判存活)。 */
-  leaseKinds(): string[] {
-    return (this.db.prepare("SELECT kind FROM proc_runner_lease").all() as Row[]).map((r) => String(r.kind));
-  }
-
-  /** 租约行存活:未过期。pid 已死只用于「提前接管」,不影响此判定(过期为权威)。 */
-  leaseAlive(kind: string): boolean {
-    const l = this.getLease(kind);
-    return !!l && l.expiresAt > this.now();
-  }
-
-  /** 该 owner 当前是否仍持有有效(未过期)租约 —— `assertLease` / claim 的权威判据。 */
-  leaseValid(kind: string, owner: string): boolean {
-    const l = this.getLease(kind);
-    return !!l && l.owner === owner && l.expiresAt > this.now();
-  }
-
-  /**
-   * 抢租约。无行 / 已过期 / 自己持有 / 持有者 pid 已死 → 接管;
-   * 否则(他人存活持有)→ `acquired=false`,且 `requestHandover` 时置 `handoverRequested=1`
-   * (**不抢正在跑的 job**)。`takeover=true` = 此前存在他人的行(调用方须对其 running 行跑 recover)。
-   */
-  acquireLease(
-    kind: string, owner: string,
-    o: { pid?: number; leaseMs?: number; requestHandover?: boolean } = {},
-  ): { acquired: boolean; takeover: boolean; holder?: LeaseRow } {
-    const pid = o.pid ?? process.pid;
-    const leaseMs = o.leaseMs ?? LEASE_MS;
-    return this.tx(() => {
-      const t = this.now();
-      const cur = this.getLease(kind);
-      const mine = cur?.owner === owner;
-      const stale = !cur || cur.expiresAt <= t || (cur.pid !== pid && !this.isPidAlive(cur.pid));
-      if (cur && !mine && !stale) {
-        if (o.requestHandover) {
-          this.db.prepare("UPDATE proc_runner_lease SET handoverRequested=1 WHERE kind=?").run(kind);
-        }
-        return { acquired: false, takeover: false, holder: cur };
-      }
-      this.db.prepare(
-        `INSERT INTO proc_runner_lease(kind, owner, pid, heartbeatAt, expiresAt, handoverRequested)
-         VALUES(?, ?, ?, ?, ?, 0)
-         ON CONFLICT(kind) DO UPDATE SET owner=excluded.owner, pid=excluded.pid, heartbeatAt=excluded.heartbeatAt,
-           expiresAt=excluded.expiresAt, handoverRequested=0`,
-      ).run(kind, owner, pid, t, t + leaseMs);
-      return { acquired: true, takeover: !!cur && !mine };
-    });
-  }
-
-  /**
-   * 心跳续约。行不在 / 持有者已换人 → `ok=false`(调用方须立即 fencing)。
-   * 自己的行即使已过期、尚未被人接管,续约仍成立(接管会换 owner)。
-   */
-  heartbeat(kind: string, owner: string, leaseMs = LEASE_MS): { ok: boolean; handoverRequested: boolean } {
+    }
     const t = this.now();
-    const res = this.db
-      .prepare("UPDATE proc_runner_lease SET heartbeatAt=?, expiresAt=? WHERE kind=? AND owner=?")
-      .run(t, t + leaseMs, kind, owner);
-    if (Number(res.changes) === 0) return { ok: false, handoverRequested: false };
-    return { ok: true, handoverRequested: !!this.getLease(kind)?.handoverRequested };
+    this.db.prepare(
+      `INSERT INTO proc_jobs(jobId, kind, logicalKey, generation, state, inputs, outputs, params, replaceInputs,
+         ownerTaskId, ownerStreamKey, createdAt, updatedAt, orderKey, seq, notBefore, prepJobId)
+       VALUES(?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      jobId, job.kind, logicalKey, job.generation, JSON.stringify(job.inputs),
+      job.outputs ? JSON.stringify(job.outputs) : null, JSON.stringify(job.params), job.replaceInputs ? 1 : 0,
+      job.owner.taskId ?? null, job.owner.streamKey ?? null, t, t,
+      job.orderKey ?? null, job.seq ?? null, job.notBefore ?? null, job.prepJobId ?? null,
+    );
+    return { jobId, state: "pending" };
   }
 
-  /** 删自己的租约行(优雅退出 / 交接完成)。返回是否删到。 */
-  releaseLease(kind: string, owner: string): boolean {
-    return Number(this.db.prepare("DELETE FROM proc_runner_lease WHERE kind=? AND owner=?").run(kind, owner).changes) > 0;
+  /** Next generation for one orderKey (shared by the whole session, not per logicalKey). */
+  nextOrderGeneration(orderKey: string): number {
+    const r = this.db
+      .prepare("SELECT MAX(generation) AS g FROM proc_jobs WHERE orderKey=?")
+      .get(orderKey) as Row;
+    return (r.g == null ? 0 : Number(r.g)) + 1;
   }
+
+  /**
+   * Atomic batch enqueue: either every job lands as pending, or none does.
+   * Any `rejected` or `stale` throws `BatchRejected` and rolls back the whole transaction,
+   * so an ordered session never gets a gap in its seq sequence.
+   */
+  enqueueBatch(jobs: readonly ProcessJob[], opts: { allowedRoots: readonly string[] }): EnqueueResult[] {
+    return this.tx(() => {
+      const out: EnqueueResult[] = [];
+      for (const job of jobs) {
+        let logicalKey: string;
+        try {
+          assertJobInvariants(job, { allowedRoots: opts.allowedRoots });
+          let tag: string;
+          try { tag = fileTagOf(job.inputs[0]); }
+          catch (e) { throw new Error(`inputs[0] cannot be stat-ed: ${(e as Error).message}`); }
+          logicalKey = job.logicalKey.endsWith(FILE_TAG_PLACEHOLDER) ? `${job.logicalKey}${tag}` : job.logicalKey;
+        } catch (e) {
+          const error = (e as Error).message;
+          const failed = { jobId: job.jobId, state: "rejected" as const, error };
+          const err = new BatchRejected(`batch enqueue rejected (${job.jobId}): ${error}`, [...out, failed]);
+          throw err;
+        }
+        const r = this.enqueueTx(job, logicalKey);
+        if (r.state === "stale") {
+          throw new BatchRejected(`batch enqueue hit stale (${r.jobId}): re-dispatch with a new generation`, [...out, r]);
+        }
+        if (r.state === "rejected") {
+          throw new BatchRejected(`batch enqueue rejected (${job.jobId}): ${r.error ?? "unknown"}`, [...out, r]);
+        }
+        out.push(r);
+      }
+      return out;
+    });
+  }
+
+  /** Advance the observable step; does not change the state machine. */
+  updateStep(jobId: string, step: string | null): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET step=?, updatedAt=? WHERE jobId=? AND state='running'")
+      .run(step, this.now(), jobId).changes > 0);
+  }
+
+  setBv(jobId: string, bv: string): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET bv=?, updatedAt=? WHERE jobId=?")
+      .run(bv, this.now(), jobId).changes > 0);
+  }
+
+  setChildPid(jobId: string, pid: number | null, startedAt: string | null = null): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET childPid=?, childPidStartedAt=?, updatedAt=? WHERE jobId=?")
+      .run(pid, startedAt, this.now(), jobId).changes > 0);
+  }
+
+  /**
+   * Transfer retry: running -> pending with a backoff, without consuming an extra attempt
+   * (claim already incremented it). Only for biliup in gate_wait/transfer with a stopped child.
+   */
+  retryTransfer(jobId: string, owner: string, notBefore: number, childConfirmedStopped: boolean): boolean {
+    return this.tx(() => {
+      const row = this.get(jobId);
+      if (!row || row.state !== "running" || row.claimedBy !== owner) return false;
+      if (!canTransition("running", "pending", {
+        reason: "transfer-retry", kind: row.kind, step: row.step, childConfirmedStopped,
+      })) return false;
+      this.db.prepare(
+        "UPDATE proc_jobs SET state='pending', claimedBy=NULL, notBefore=?, updatedAt=? WHERE jobId=? AND state='running'",
+      ).run(notBefore, this.now(), jobId);
+      return true;
+    });
+  }
+
+  /** Cancel later pending rows of one order/generation; returns how many rows changed. */
+  cascadeOrderBlocked(orderKey: string, generation: number, afterSeq: number, reason = "order-blocked"): number {
+    return this.tx(() => this.db.prepare(
+      `UPDATE proc_jobs SET state='cancelled', error=?, finishedAt=?, updatedAt=?
+       WHERE orderKey=? AND generation=? AND seq>? AND state='pending'`,
+    ).run(`cancelled (${reason})`, this.now(), this.now(), orderKey, generation, afterSeq).changes as number);
+  }
+
+  /** Cancel every pending biliup row of one order/generation after its prep failed. */
+  cascadePrepFailed(orderKey: string, generation: number): number {
+    return this.tx(() => this.db.prepare(
+      `UPDATE proc_jobs SET state='cancelled', error=?, finishedAt=?, updatedAt=?
+       WHERE orderKey=? AND generation=? AND state='pending' AND kind='biliup'`,
+    ).run("cancelled (order-prep-failed)", this.now(), this.now(), orderKey, generation).changes as number);
+  }
+
+  clearChildPid(jobId: string): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET childPid=NULL, childPidStartedAt=NULL, updatedAt=? WHERE jobId=?")
+      .run(this.now(), jobId).changes > 0);
+  }
+
+  // ───────────────────────── Lease (implemented in lease.ts) ─────────────────────────
+
+  getLease(kind: string): LeaseRow | null { return this.leases.getLease(kind); }
+  leaseKinds(): string[] { return this.leases.leaseKinds(); }
+  leaseAlive(kind: string): boolean { return this.leases.leaseAlive(kind); }
+  leaseValid(kind: string, owner: string): boolean { return this.leases.leaseValid(kind, owner); }
+  acquireLease(kind: string, owner: string, o: Parameters<ProcLeaseStore["acquireLease"]>[2] = {}) {
+    return this.leases.acquireLease(kind, owner, o);
+  }
+  heartbeat(kind: string, owner: string, leaseMs?: number) { return this.leases.heartbeat(kind, owner, leaseMs); }
+  releaseLease(kind: string, owner: string): boolean { return this.leases.releaseLease(kind, owner); }
 
   // ───────────────────────── 认领 / 执行态 ─────────────────────────
 
@@ -430,8 +449,17 @@ export class ProcQueueStore {
       const cands = this.db.prepare(
         `SELECT j.* FROM proc_jobs j JOIN proc_runner_lease l ON l.kind=j.kind AND l.owner=? AND l.expiresAt>?
          WHERE j.state='pending' AND j.kind IN (${marks})
-         ORDER BY j.createdAt, j.rowid`,
-      ).all(o.owner, t, ...o.kinds) as Row[];
+           AND (j.notBefore IS NULL OR j.notBefore<=?)
+           AND (j.orderKey IS NULL OR NOT EXISTS (
+             SELECT 1 FROM proc_jobs p
+             WHERE p.orderKey=j.orderKey AND p.generation=j.generation
+               AND p.seq<j.seq AND p.state<>'done'))
+           AND (j.prepJobId IS NULL OR EXISTS (
+             SELECT 1 FROM proc_jobs q WHERE q.jobId=j.prepJobId AND q.state='done'))
+         ORDER BY COALESCE((SELECT c.lastClaimedAt FROM proc_order_cursor c
+                            WHERE c.orderKey=j.orderKey AND c.generation=j.generation), 0),
+                  j.createdAt, j.rowid`,
+      ).all(o.owner, t, ...o.kinds, t) as Row[];
       for (const c of cands) {
         const rec = toRecord(c);
         if (rec.cancelRequested) {
@@ -447,6 +475,12 @@ export class ProcQueueStore {
           `UPDATE proc_jobs SET state='running', claimedBy=?, attempts=attempts+1, everClaimed=1,
              startedAt=?, updatedAt=?, error=NULL WHERE jobId=? AND state='pending'`,
         ).run(o.owner, t, t, rec.jobId);
+        if (rec.orderKey) {
+          this.db.prepare(
+            `INSERT INTO proc_order_cursor(orderKey, generation, lastClaimedAt) VALUES(?,?,?)
+             ON CONFLICT(orderKey, generation) DO UPDATE SET lastClaimedAt=excluded.lastClaimedAt`,
+          ).run(rec.orderKey, rec.generation, t);
+        }
         return this.get(rec.jobId);
       }
       return null;
@@ -494,11 +528,13 @@ export class ProcQueueStore {
    * running → pending(关停 abort):只允许 `interruptible` 的 job;`attempts` 回退(关停不算一次尝试)。
    * 校验持有者。返回是否成功。
    */
-  releaseForShutdown(jobId: string, owner: string, interruptible: boolean): boolean {
+  releaseForShutdown(jobId: string, owner: string, interruptible: boolean, ctx: { kind?: string; step?: string | null } = {}): boolean {
     return this.tx(() => {
       const row = this.get(jobId);
       if (!row || row.state !== "running" || row.claimedBy !== owner) return false;
-      if (!canTransition("running", "pending", { reason: "shutdown-abort", interruptible })) return false;
+      const shutdownAllowed = interruptible
+        || (ctx.kind === "biliup" && (ctx.step === "gate_wait" || ctx.step === "transfer"));
+      if (!canTransition("running", "pending", { reason: "shutdown-abort", interruptible: shutdownAllowed })) return false;
       this.db.prepare(
         `UPDATE proc_jobs SET state='pending', claimedBy=NULL, attempts=MAX(attempts-1,0), updatedAt=? WHERE jobId=?`,
       ).run(this.now(), jobId);

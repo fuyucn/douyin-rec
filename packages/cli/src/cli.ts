@@ -15,13 +15,14 @@ import { SyncGate } from "./sync-gate.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
+import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
-import { getEngine, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
+import { getEngine, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
 import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
@@ -748,9 +749,9 @@ const hubStarter: HubStarter = {
       registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport, recordingStatusWorkerIds,
       satisfiesCapabilities,
       buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool, openUploadLimitStore,
-    } = await import("@drec/orchestrator");
+      parseNodeUploadConfig } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
-    const { handleEnqueue, handleProcStatus } = await import("@drec/app");
+    const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
     const { statSync } = await import("node:fs");
     const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
@@ -837,8 +838,9 @@ const hubStarter: HubStarter = {
       listTasks: () => listNodeTasks(opts.store),
       // 处理任务表通道(T9a):local worker 与远端 `_enqueue` / `_proc-status` 同一执行体(无派发方,仅可被调用)。
       procChannel: {
-        enqueue: (dataRoot, req) => handleEnqueue(dataRoot, req),
+        enqueue: (dataRoot, req) => handleEnqueue(dataRoot, req, { capabilities: listProcessors().map((p) => p.kind) }),
         procStatus: (dataRoot, ids) => handleProcStatus(dataRoot, ids),
+        procCancel: (dataRoot, ids) => handleProcCancel(dataRoot, ids),
       },
       // adopt=false:本机源任务保持用户可编辑(managedBy 不置 hub),只有远端节点的同步任务才锁编辑。
       applyTasks: (input) => applyRemoteTasks(opts.store, input.desired, opts.log, {
@@ -1125,6 +1127,8 @@ const hubStarter: HubStarter = {
       };
     };
 
+    // plan 038: queue-managed upload settings; absent/invalid = safe defaults (blocking, nothing polled).
+    const nodeUploadCfg = parseNodeUploadConfig((hubCfg as { nodeUpload?: unknown }).nodeUpload);
     const reconciler = new Reconciler({
       platform: hubCfg.platform ?? "douyin",
       transports,
@@ -1134,6 +1138,7 @@ const hubStarter: HubStarter = {
       timeZone: () => effectiveTimezone(opts.store),
       // 能力门控:按 worker id 取能力标签(hub.config.json 的 workers[].capabilities)。
       workerCapabilities: (id) => loadWorkers().find((w) => w.id === id)?.capabilities,
+      nodeUpload: nodeUploadCfg,
       reconnectWindowMs: hubCfg.reconnectWindowMs,
       loadTransports: buildTransports,
       notify: pipelineDeps.notify, // 达重试上限升级 needs_manual 时,复用 pipeline 同源 EventCenter 通知(站内+webhook)
@@ -1399,6 +1404,8 @@ const hubStarter: HubStarter = {
       tasks: () => opts.store.listTasks(),
       isRecording: (id: number) => opts.manager.isRecording(id),
       reconcileAll: () => reconciler.reconcileAll(),
+      pollUploadQueue: () => reconciler.pollUploadQueue(),
+      uploadQueuePollMs: nodeUploadCfg.pollMs,
       settleMs: hubCfg.settleMs ?? 90_000,
       pollMs: hubCfg.pollMs ?? 3_000,
       reconcileIntervalMs: hubCfg.reconcileIntervalMs ?? 30 * 60_000,
@@ -1958,7 +1965,8 @@ program
       await applyNodeDataRoot(dataRoot);
       const { decodeEnqueue } = await import("@drec/core");
       const { handleEnqueue } = await import("@drec/app");
-      process.stdout.write(JSON.stringify(handleEnqueue(dataRoot, decodeEnqueue(b64))) + "\n");
+      const capabilities = listProcessors().map((p) => p.kind);
+      process.stdout.write(JSON.stringify(handleEnqueue(dataRoot, decodeEnqueue(b64), { capabilities })) + "\n");
     } catch (e) {
       process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
       process.exitCode = 1;
@@ -1980,8 +1988,24 @@ program
     }
   });
 
+// (internal) Cancel processing jobs (plans/038): pending rows are cancelled directly; running rows are closed out by the runner after verification.
+program
+  .command("_proc-cancel <dataRoot> <base64>", { hidden: true })
+  .description("(internal) cancel processing jobs (called by the master over ssh)")
+  .action(async (dataRoot: string, b64: string) => {
+    try {
+      const { decodeJobIds, handleProcCancel } = await import("@drec/app");
+      process.stdout.write(JSON.stringify({ receipts: handleProcCancel(dataRoot, decodeJobIds(b64)) }) + "\n");
+    } catch (e) {
+      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
+      process.exitCode = 1;
+    }
+  });
+
 // 节点侧上传(experimental,plans/027)的隐藏子命令隔离在独立文件,便于快速开关/回退。
 registerNodePipelineCommands(program);
+// Order recovery (plan 038 T11): dry-run by default.
+registerRecoverOrderCommands(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   // 运行期错误统一走这里：干净的一行写 stderr + 退出码 1（参数/校验错由各命令 exit 2）。
