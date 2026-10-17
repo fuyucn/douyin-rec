@@ -27,7 +27,7 @@ describe("runBiliup 观测回调(issue #204)", () => {
     const lines: string[] = [];
     let pid: number | undefined;
     const out = await withFakeBiliup(
-      "printf 'part 1\\rpart 2\\nAll files uploaded succ'; sleep 0.2; printf 'essfully\\nBV1abcdefghi\\n'; echo 'warn on stderr' >&2",
+      "printf 'part 1\\rpart 2\\nAll files uploaded succ'; sleep 0.2; printf 'essfully\\narchive-ok-token\\n'; echo 'warn on stderr' >&2",
       () => runBiliup(["upload"], { onSpawn: (p) => { pid = p; }, onLine: (l) => lines.push(l) }),
     );
     expect(typeof pid).toBe("number");
@@ -35,15 +35,15 @@ describe("runBiliup 观测回调(issue #204)", () => {
     expect(lines).toContain("part 2");
     expect(lines).toContain("All files uploaded successfully"); // 跨 chunk 的半行被拼回整行
     expect(lines).toContain("warn on stderr");
-    expect(out).toContain("BV1abcdefghi"); // 合并输出不受回调影响
+    expect(out).toContain("archive-ok-token"); // 合并输出不受回调影响
   });
 
   it("回调抛错不影响上传结果", async () => {
-    const out = await withFakeBiliup("echo BV1zzzzzzzzz", () => runBiliup(["upload"], {
+    const out = await withFakeBiliup("echo upload-ok-token", () => runBiliup(["upload"], {
       onSpawn: () => { throw new Error("boom spawn"); },
       onLine: () => { throw new Error("boom line"); },
     }));
-    expect(out).toContain("BV1zzzzzzzzz");
+    expect(out).toContain("upload-ok-token");
   });
 
   it("非零退出仍然 reject,错误带输出末尾", async () => {
@@ -52,7 +52,7 @@ describe("runBiliup 观测回调(issue #204)", () => {
   });
 
   it("不传回调时行为与旧签名一致", async () => {
-    const out = await withFakeBiliup("echo BV1plainplain", () => runBiliup(["upload"]));
-    expect(out).toContain("BV1plainplain");
+    const out = await withFakeBiliup("echo plain-ok-token", () => runBiliup(["upload"]));
+    expect(out).toContain("plain-ok-token");
   });
 });
