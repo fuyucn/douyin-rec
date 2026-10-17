@@ -1,4 +1,5 @@
 import { CalendarRange, ChevronLeft, Clock3, ExternalLink, MonitorPlay, UploadCloud } from "lucide-react";
+import { WarnGlyph } from "../components/WarnGlyph";
 import { useAtomValue } from "jotai";
 import { useCallback, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
@@ -200,7 +201,7 @@ export function TaskDetail(): ReactNode {
             <span className="telemetry-label">{t("tasks.rollingUpload")}</span>
             <span className="telemetry-value-sm truncate" style={{ color: task?.rollingPending ? "var(--warning-fg)" : undefined }}
               title={task?.rollingPending ? t("tasks.rollingPendingHint") : undefined}>
-              {task?.rollingPending ? `⚠ ${t("tasks.rollingPending")}` : task?.rollingEffective ? t("tasks.rollingOn") : t("tasks.rollingOff")}
+              {task?.rollingPending ? <><WarnGlyph />{t("tasks.rollingPending")}</> : task?.rollingEffective ? t("tasks.rollingOn") : t("tasks.rollingOff")}
             </span>
           </div>
           <span className="telemetry-icon"><UploadCloud className="w-4 h-4" /></span>
@@ -331,7 +332,7 @@ export function TaskDetail(): ReactNode {
                 />
                 {task.rollingPending && (
                   <div className="pt-2.5 text-[11px]" style={{ color: "var(--warning-fg)" }}>
-                    ⚠ {t("tasks.rollingPendingHint")}
+                    <WarnGlyph />{t("tasks.rollingPendingHint")}
                   </div>
                 )}
               </InfoGroup>
@@ -360,7 +361,8 @@ export function TaskDetail(): ReactNode {
           </div>
         </section>
 
-        <section className="lg:col-span-2 flex flex-col">
+        {/* Phones: the live log first, the long info card after it. */}
+        <section className="lg:col-span-2 flex flex-col order-first lg:order-none">
           <LogTerminal lines={logs} running={!!task?.running} />
         </section>
 

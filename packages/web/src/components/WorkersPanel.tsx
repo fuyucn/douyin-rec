@@ -1,4 +1,5 @@
 import { GripVertical, Pencil, Plus, Trash2, X } from "lucide-react";
+import { WarnGlyph } from "./WarnGlyph";
 import { useEffect, useState, type ReactNode } from "react";
 import { api, type WorkerDTO, type WorkerStatus } from "../api/client";
 import { Button, IconButton } from "./Button";
@@ -185,7 +186,7 @@ export function WorkersPanel({
                   if (!d) return null;
                   return (
                     <div className="text-[11px] mt-1" style={{ color: "var(--warning)" }} title={d.text}>
-                      ⚠ {d.text}
+                      <WarnGlyph />{d.text}
                     </div>
                   );
                 })()}
@@ -196,7 +197,7 @@ export function WorkersPanel({
                   const low = typeof s.diskMinGB === "number" && s.diskMinGB > 0 && s.diskFreeGB < s.diskMinGB;
                   return (
                     <div className="text-[11px] mt-1" style={{ color: low ? "var(--error-fg)" : "var(--muted-soft)" }}>
-                      {low ? "⚠ " : ""}{t("hub.workers.diskFree", { gb: s.diskFreeGB.toFixed(1) })}
+                      {low && <WarnGlyph />}{t("hub.workers.diskFree", { gb: s.diskFreeGB.toFixed(1) })}
                       {low ? ` · ${t("hub.workers.diskLow", { min: String(s.diskMinGB) })}` : ""}
                     </div>
                   );
