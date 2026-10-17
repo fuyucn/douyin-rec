@@ -3,7 +3,7 @@
 > **TODO：T-62**（`TODO.md`「进行中」）。承接 plan 036 第二期 T14 / T15（biliup 处理器 + master 上传改派发），
 > 并取代 plan 033 的 W1-2 与 issue #25 ①（节点侧上传超时预算）。
 
-状态：PR0/PR1 已合并，PR2 起未实施。执行顺序以 swe-loop `sandbox/tasks.json` 为准：先合 PR2（不含停滞判死，`mode=blocking`），停滞实测后才由 `biliup-queue` 能力打开 queue；每个任务一个子 issue 链 #207，PR base 保持 `feat/hub-optimization`。基线 `feat/hub-optimization` = `c2c48ff`；PR0/PR1 之前的行号在 `bb353c0` 实测。
+状态：PR0/PR1 已合并，PR2 起未实施。执行顺序以 swe-loop swe-loop 任务表（sandbox 下） 为准：先合 PR2（不含停滞判死，`mode=blocking`），停滞实测后才由 `biliup-queue` 能力打开 queue；每个任务一个子 issue 链 #207，PR base 保持 `feat/hub-optimization`。基线 `feat/hub-optimization` = `c2c48ff`；PR0/PR1 之前的行号在 `bb353c0` 实测。
 隐私：本文与关联 issue 一律不写 streamKey、房间号、BV、主播名、主机名；事故细节只留本地台账。
 
 ## 1. 起因（脱敏）
