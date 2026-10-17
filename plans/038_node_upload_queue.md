@@ -54,11 +54,12 @@
 - 阶段 `step`：`gate_wait → transfer → submit`，写进 job 的进度字段（不新增 phase 词表）。
 - **预处理用新的 `kind=upload-prep`，不复用现有 `kind=remux`**：现有 remux 处理器只接受单个原生分段、`replaceInputs=true`，转完会删源（`processors/src/remux.ts:354,380-397`），用它会把 `recordings/` 的源录像删掉，也无法做组内合并。
   - `upload-prep`：`resource="cpu"`、`lane="copy"`、`replaceInputs=false`；输入是显式分段清单，输出到 stage 的 `.work/`，支持组内 `mergeSession` 与 `.ts` 直传硬链接（复用 `node-pipeline.ts:453-520` 的现有实现并搬入处理器）。
-  - 由 master 先入队 `upload-prep`；收到 `done` 后才入队对应的 biliup job（`orderKey/seq` 相同）。prep 失败 → biliup job 不入队，源文件不动。
+  - **整场的 biliup 行一次性原子入队**（同 `orderKey`、`generation`、`seq=1..N`），不按 prep 完成顺序逐条入队——否则 seq=2 可能在 seq=1 之前被 claim，读不到 BV 而误转 `uncertain`。
+  - `upload-prep` 仍可由 master 逐条/批量入队；biliup 行入队后，claim 的门控同时要求「同序号的 prep 已 done」。prep 失败 → 该序号及之后的 biliup 行转 `cancelled(order-prep-failed)`，源文件不动。
   - 这样转码不占 `lane=biliup`，也不会删源。
 - **`gate_wait` 期间保持 `running` 并持有 `lane=biliup` 槽**（不再写「拿到配额才置 running」）：`step=gate_wait` 不传数据，但串行化提交本身正是账号级限流想要的；代价是冷却期（最长 30 分钟）其它场要等，这与「同账号并发 1」一致。等配额期间不参与停滞判定。
   节点结果文件 `phase` 取值**保持** `started|uploading|done|failed`（白名单 `NODE_RESULT_PHASES` 在 `core/src/api-types.ts:771`，旧 master 不认新值会归 null → 当成「确认没成」→ 重投），新信息只加可选 `step` 字段。
-- `runBiliup` 增加 `onSpawn(pid)` / `onLine(line)`（**已合并 #205**）。`step="remux"` 只出现在现有 blocking 路径；biliup job 只会出现 `gate_wait/transfer/submit`。；看到 `All files uploaded successfully` 即切到 `submit`。该行缺失或文案变化 → 一律按「submit 不确定」处理（宁可转人工，不重传）。
+- `runBiliup` 增加 `onSpawn(pid)` / `onLine(line)`（**已合并 #205**）。`step="remux"` 只出现在现有 blocking 路径，biliup job 只会出现 `gate_wait/transfer/submit`；看到 `All files uploaded successfully` 即切到 `submit`。该行缺失或文案变化 → 一律按「submit 不确定」处理（宁可转人工，不重传）。
 - **顺序不变量**：`step=submit` 必须在「可能已发生提交」之前落盘；落盘失败 → 不继续提交，按 `uncertain` 处理（宁可转人工）。恢复时若看到 `submit` 而没有 BV → `uncertain`，绝不当 transfer 重跑。
 - **关停超时的 `hasIntent` 按 step 推导**：`runner.ts:488` 目前写死 `hasIntent:true`；PR2 改为 `hasIntent = step === "submit"`。
   - **扩展已有的 `releaseForShutdown(jobId, owner, interruptible)`**（`store.ts:497`），不新增第二个入口：新增可选 `step` 参数。对 `step∈{gate_wait,transfer}` 的 biliup job 放行 `running→pending`（`reason="shutdown-abort"`），因为此时已确认子进程被 SIGKILL、尚未提交；`step=submit` 不走这里，仍落 `uncertain`。
@@ -82,18 +83,18 @@
 - `transfer` 失败或停滞、且**确认进程已停** → job 回 `pending` 并带 `notBefore`（5 分钟起指数退避，封顶 1 小时，最多 3 次）。重试重传该 job 的文件（biliup checkpoint 只在单次调用内有效，跨调用不保证续传，ETA 按整段算）。退避期间让出轮转给其它场。
   - **状态机迁移（PR2 必须一起改）**：core `TransitionReason` 新增 `transfer-retry`；`canTransition(running→pending)` 放行 `reason="transfer-retry"`（仅 biliup、仅 `step∈{gate_wait,transfer}` 且进程已确认停止时由 store 使用）。`ProcQueueStore` 新增 `retryTransfer(jobId)`，原子写 `state=pending, notBefore`；**不再加 `attempts`**（claim 时已 `attempts+1`，`store.ts:447`）。「最多 3 次」按 claim 次数计：第 3 次仍失败即不再 `retryTransfer`，转 `failed`。`retryable=false` 继续拦住 `failed→pending` 的通用人工重试。
 - `submit` 失败或结果不确定 → 先自动核对（append 用 `countVideoParts`，建稿用 `biliup list --is-pubing` 作旁证）；核对不出 → `uncertain`，人工处理。
-- 保序：job 带 `orderKey=streamKey`、`seq`；claim 时排除「同 orderKey 下有更小 seq 未 done」的 job。
+- 保序：job 带 `orderKey=streamKey`、`seq`、`generation`；**保序只在同一代内成立**（`orderKey + generation`）。换 generation 重入队后，旧代的 failed/cancelled 行不参与新代的 claim 判定，也不会被新代的级联取消波及。
 - **claim 改法（PR2 必须一起改）**：现有 `claim` 只按 `createdAt` FIFO（`store.ts:430-433`），也没有 `notBefore` 过滤。改为在同一事务内：
   1. `WHERE state='pending' AND (notBefore IS NULL OR notBefore<=now)`；
-  2. 用 `NOT EXISTS` 排除同 `orderKey` 中更小 `seq` 且 `state != 'done'` 的行；
+  2. 用 `NOT EXISTS` 排除**同 `orderKey` 且同 `generation`** 中更小 `seq` 且 `state != 'done'` 的行；
   3. 排序 `ORDER BY updatedAt ASC, seq ASC` —— claim 会刷新 `updatedAt`，自然形成场间轮转；退避中的场因 `notBefore` 被过滤，不占位。
 - **store 迁移（`user_version` +1）**：`notBefore`、`orderKey`、`seq`、`step`、`bv`、`childPid`、`childPidStartedAt` 七列。现有 `proc_jobs` 只有 `note/error/resultOutputs`，没有进度、BV 与子进程身份的落点：
   - `step`：runner 在阶段切换时原子更新（与节点结果文件同源，单一写入口）。
   - `bv`：`seq=1` 建稿成功后写入；append 行执行前读同 `orderKey` 的 `seq=1` 行。
   - `hasIntent` 映射：`step="submit"` 即 `hasIntent=true`；`gate_wait/transfer` 为 false。`cancelOutcome` 据此决定取消落 `cancelled` 还是 `uncertain`。
   - `childPid` / `childPidStartedAt`：`onSpawn(pid)` 落盘。重启恢复时「进程已停」= pid 不存在，或 pid 存在但 cmdline 不匹配，**或** `startedAt` 不匹配（pid 复用）。只有确认已停才清理孤儿（SIGTERM→宽限→SIGKILL）并回 pending；无法确认 → `uncertain`，不起第二个进程。
-  - **append 的 BV 来源**：append job 入队时 `bv` 可为空；runner 执行前从 store 读同 `orderKey` 下 `seq=1` 的 done 行取 BV，缺失则**不执行**、置 `uncertain` 并告警（绝不在无 BV 时新建稿）。
-  - **前序不可完成的处置**：`seq` 更小的行进入 `failed`/`uncertain`/`cancelled` 时，同 `orderKey` 下所有更大 `seq` 的 pending 行原子转 `cancelled`（reason=`order-blocked`）并告警一次；既不静默卡住，也不越过前序乱序上传。
+  - **append 的 BV 来源**：append job 入队时 `bv` 可为空；runner 执行前从 store 读同 `orderKey` **且同 generation** 的 `seq=1` done 行取 BV。`seq=1` 尚未 done → 保持 pending（由 claim 门控，不算失败）；`seq=1` 已 failed/uncertain 而走到这里 → `cancelled(order-blocked)`，不转 `uncertain`。
+  - **前序不可完成的处置**：`seq` 更小的行进入 `failed`/`uncertain`/`cancelled` 时，同 `orderKey` **且同 generation** 下所有更大 `seq` 的 pending 行原子转 `cancelled`（reason=`order-blocked`）并告警一次；跨代不级联。既不静默卡住，也不越过前序乱序上传。
   - **order-blocked 的恢复路径**（两种，均走 PR6 的 dry-run→`--apply`，默认不改库）：
     - **已建稿**：人工用 `biliup list` / 台账补齐 BV → `hub-recover-order <streamKey> --bv <BV>`：给后续项**换 generation**（`nextGeneration`）重新入队，并把 `seq=1` 行绑定该 BV；新 jobId 不撞 `cancelled` 终态。
     - **确认未建稿**（`seq=1` transfer 重试耗尽且无 BV）：`hub-recover-order <streamKey> --restart`：从 `seq=1` 起整体换 generation 重新入队。执行前必须用 `biliup list --is-pubing` 旁证无稿；查不到就不允许 `--restart`。
