@@ -51,10 +51,13 @@
 
 - `processors/src/biliup.ts`：硬常量（关水印、copyright、仅自己可见）从 `app/src/upload/biliup.ts` 逐字搬入，argv 快照测试。
 - `resource="upload"`、`lane="biliup"`，**默认并发 1**（节点 settings，可调）。`retryable=false`（重试由下面的阶段规则决定，不走通用重试）、`interruptible=false`。
-- 阶段 `step`：`remux → gate_wait → transfer → submit`，写进 job 的进度字段（不新增 phase 词表）。
+- 阶段 `step`：`gate_wait → transfer → submit`，写进 job 的进度字段（不新增 phase 词表）。
+  - **remux 不进 biliup job**：remux 用已有的 `kind=remux` 处理器先跑完（独立 CPU/copy 通道，不占 `lane=biliup`），biliup job 的 `inputs` 是 remux 产物。这样转码不会挡住其它场的上传；失败 → biliup job 不入队。
+- **`gate_wait` 期间保持 `running` 并持有 `lane=biliup` 槽**（不再写「拿到配额才置 running」）：`step=gate_wait` 不传数据，但串行化提交本身正是账号级限流想要的；代价是冷却期（最长 30 分钟）其它场要等，这与「同账号并发 1」一致。等配额期间不参与停滞判定。
   节点结果文件 `phase` 取值**保持** `started|uploading|done|failed`（白名单 `NODE_RESULT_PHASES` 在 `core/src/api-types.ts:771`，旧 master 不认新值会归 null → 当成「确认没成」→ 重投），新信息只加可选 `step` 字段。
 - `runBiliup` 增加 `onSpawn(pid)` / `onLine(line)`（**已合并 #205**）；看到 `All files uploaded successfully` 即切到 `submit`。该行缺失或文案变化 → 一律按「submit 不确定」处理（宁可转人工，不重传）。
 - **顺序不变量**：`step=submit` 必须在「可能已发生提交」之前落盘；落盘失败 → 不继续提交，按 `uncertain` 处理（宁可转人工）。恢复时若看到 `submit` 而没有 BV → `uncertain`，绝不当 transfer 重跑。
+- **关停超时的 `hasIntent` 按 step 推导**：`runner.ts` 目前写死 `hasIntent:true`；PR2 改为 `hasIntent = step === "submit"`。`transfer` 阶段被关停/强制部署 → 回 `pending` 而非 `uncertain`，避免制造人工单。
 
 ### 4.2 停滞判定（只按字节进度）
 
@@ -62,7 +65,7 @@
 - 候选信号（**PR2 的硬前置：先在 VPS 实测选定一条，把命令与输出贴回 #202**）：① biliup 进程树 `/proc/<pid>/io` 的 `wchar` 增量；② checkpoint 文件 mtime/size；③ 套伪终端让进度条输出。
 - 判死条件：`transfer` 步内字节增量为 0 持续 `stallMs`（默认 15 分钟）。`remux` / `gate_wait` **不参与**；`submit` **永不 kill**；进程消失给宽限。
 - 租约心跳（`heartbeatStaleMs`，按时间）与传输进度（按字节）是**两个信号**，只有后者能判死。
-- `gate_wait` **不占** `lane=biliup` 槽：配额拿到后才置 `running`；等待期间 `state=pending, step=gate_wait`，其它场可轮转。
+- `gate_wait` 期间不参与字节停滞判定（没有传输），但仍占 `lane=biliup` 槽（串行化提交；见 §4.1 的取舍）。
 - 慢（< `slowAlertBps` 持续 `slowAlertWindowMs`）只告警，不 kill。`maxWallMs` 只用于告警 + 停止重试，不 kill。
 
 ### 4.3 重试与保序
@@ -77,7 +80,9 @@
   - `hasIntent` 映射：`step="submit"` 即 `hasIntent=true`；`remux/gate_wait/transfer` 为 false。`cancelOutcome` 据此决定取消落 `cancelled` 还是 `uncertain`。
   - **append 的 BV 来源**：append job 入队时 `bv` 可为空；runner 执行前从 store 读同 `orderKey` 下 `seq=1` 的 done 行取 BV，缺失则**不执行**、置 `uncertain` 并告警（绝不在无 BV 时新建稿）。
   - **前序不可完成的处置**：`seq` 更小的行进入 `failed`/`uncertain`/`cancelled` 时，同 `orderKey` 下所有更大 `seq` 的 pending 行原子转 `cancelled`（reason=`order-blocked`）并告警一次；既不静默卡住，也不越过前序乱序上传。
-  - **order-blocked 的恢复路径**：人工用 `biliup list` / 台账补齐 BV 后，执行 `hub-recover-order <streamKey>`：给同 `orderKey` 的后续项**换 generation**（`nextGeneration`）重新入队，并把 `seq=1` 行绑定该 BV；新 generation 的 jobId 不同，不撞 `cancelled` 终态。该命令走 PR6 的 dry-run→`--apply`，默认不改库。
+  - **order-blocked 的恢复路径**（两种，均走 PR6 的 dry-run→`--apply`，默认不改库）：
+    - **已建稿**：人工用 `biliup list` / 台账补齐 BV → `hub-recover-order <streamKey> --bv <BV>`：给后续项**换 generation**（`nextGeneration`）重新入队，并把 `seq=1` 行绑定该 BV；新 jobId 不撞 `cancelled` 终态。
+    - **确认未建稿**（`seq=1` transfer 重试耗尽且无 BV）：`hub-recover-order <streamKey> --restart`：从 `seq=1` 起整体换 generation 重新入队。执行前必须用 `biliup list --is-pubing` 旁证无稿；查不到就不允许 `--restart`。
 - 重启恢复：`pending` 原样保留；`running` 且在 `remux/gate_wait/transfer` → 清孤儿 biliup 后回 `pending`；在 `submit` → `uncertain`；已有 BV → 记 done，继续 append。
 
 ### 4.4 master 侧（对应 036 T5 + T15，`needs-decision`）
@@ -136,7 +141,9 @@
 - `sweepStale` 对远端在途 job 不标 failed（含 master 重启）。
 - 排队等配额超过 `heartbeatStaleMs` 不会被回队；字节停滞才判死；字节在涨 / 进程刚消失不判死；`submit` 无字节增长不杀。
 - 出现 `All files uploaded` 之后失败 → 不会第二次 upload；该行缺失 → 按 submit 不确定。
-- 重启恢复矩阵：`running` × {remux, gate_wait, transfer, submit} × {有 BV, 无 BV}；崩在「写 intent」与「spawn」之间 → 回 pending，不 append。
+- 重启恢复矩阵：`running` × {gate_wait, transfer, submit} × {有 BV, 无 BV}（remux 不在 biliup job 内）；崩在「写 intent」与「spawn」之间 → 回 pending，不 append。
+- 关停超时：`step=transfer` → `hasIntent=false` → 回 pending；`step=submit` → `uncertain`。
+- `hub-recover-order --bv` 与 `--restart` 各自只跑一次；`--restart` 在 `biliup list` 无法确认时拒绝执行。
 - 两进程同时入队只产生一条；CAS 认领；`orderKey` 保序（seq 小的未 done 不放行大的）。
 - `transfer-retry`：只有 `step∈{gate_wait,transfer}` 且进程已停才允许 running→pending；`submit` 不允许；`failed→pending` 仍被 `retryable=false` 拒绝。
 - append 无 BV → 不执行、转 `uncertain`；前序 failed/uncertain/cancelled → 后续 pending 全部 `cancelled(order-blocked)` 且只告警一次。
