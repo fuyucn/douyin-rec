@@ -5,6 +5,7 @@ import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
 import { pollFollowups } from "./finalize-format.js";
 import { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
+import { runNowConflict } from "./run-now-guard.js";
 import { DEFAULT_NODE_UPLOAD, type NodeUploadConfig } from "./node-upload-config.js";
 import { completeFromDispatch } from "./node-upload-complete.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
@@ -726,7 +727,9 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     streamKey: string;
     winnerWorker?: string;
     wait?: boolean;
-  }): Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }> {
+    /** Override the BV / queue 409 (plan 038 T17). Never overrides "already running". */
+    force?: boolean;
+  }): Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }> {
     const streamKey = opts.streamKey?.trim() ?? "";
     if (!streamKey) return { ok: false, error: "streamKey 必填", code: 400 };
     const wait = opts.wait === true;
@@ -757,10 +760,12 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     if (isJobLive(key) || (this.pipelineDeps.pool?.hasStreamLock(key) ?? false)) {
       return { ok: false, error: "任务正在执行", code: 409 };
     }
-    const job = this.ledger.get(key);
-    if (job?.state === "done" && job.bv) {
-      return { ok: false, error: `已完成(${job.bv}),不能重跑`, code: 409 };
-    }
+    // 409 by the original (suffix-free) key: any earlier BV or an unfinished queue row for this broadcast means a
+    // rerun could post a second draft. Only an explicit `force` (after the old draft was deleted) passes.
+    const conflict = await runNowConflict(
+      { ledger: this.ledger, transports, log: (m) => console.info(m) }, baseKey, { force: opts.force === true },
+    );
+    if (conflict) return { ok: false, error: conflict, code: 409, forceable: true };
 
     this.ledger.upsertPending(key, b.startMs);
     this.ledger.resetActiveNodes(key);

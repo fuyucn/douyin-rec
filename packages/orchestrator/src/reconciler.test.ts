@@ -986,6 +986,30 @@ describe("Reconciler.stopJob / runNow", () => {
     ledger.close();
   });
 
+  it("runNow: a BV on the base key also blocks the -N submission, and force lets it through (plan 038 T17)", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup();
+    ledger.upsertPending(key);
+    ledger.markDone(key, "BV_EXIST");
+    const blocked = await reconciler.runNow({ streamKey: `${key}-1`, wait: true });
+    expect(blocked).toMatchObject({ ok: false, code: 409, forceable: true });
+    expect(spyRunPipeline).not.toHaveBeenCalled();
+    const forced = await reconciler.runNow({ streamKey: `${key}-1`, wait: true, force: true });
+    expect(forced).toMatchObject({ ok: true, code: 200, streamKey: `${key}-1` });
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    ledger.close();
+  });
+
+  it("runNow: force does not override an already-running job", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup();
+    beginJob(key);
+    const r = await reconciler.runNow({ streamKey: key, wait: true, force: true });
+    endJob(key);
+    expect(r).toMatchObject({ ok: false, code: 409 });
+    expect(r.forceable).toBeUndefined();
+    expect(spyRunPipeline).not.toHaveBeenCalled();
+    ledger.close();
+  });
+
   it("runNow: 无行则 upsertPending,跳过 settle/重连窗,wait 则 200", async () => {
     const rec = makeRec({
       endMs: Date.now(), // 仍在重连窗内,reconcileAll 会跳过

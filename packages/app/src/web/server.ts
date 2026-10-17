@@ -296,7 +296,7 @@ export interface WebServerDeps {
   /** 停一场后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 立刻跑一场已有录像的后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
-  runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
+  runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>;
   /** master 资源池快照(CLI 注入)。省略/hub 未就绪 → 队列页无排队位次/占用(全 0)。 */
   rollingDelivery?: () => import("@drec/core").RollingDeliveryDTO[];
   poolSnapshot?: () => import("@drec/core").HubPoolSnapshotDTO | undefined;

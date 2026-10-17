@@ -122,13 +122,14 @@ export function buildHubJobs(ctx: ApiCtx) {
       return r.ok ? { status: 200, body: r } : { status: r.code ?? 400, body: r };
     },
 
-    async runHubJob(input: { streamKey?: string; winnerWorker?: string; wait?: boolean }): Promise<ApiResult> {
+    async runHubJob(input: { streamKey?: string; winnerWorker?: string; wait?: boolean; force?: boolean }): Promise<ApiResult> {
       if (!deps.syncDbPath || !deps.runNow) return err(400, "hub 未启用(立即执行未注入)");
       if (!input.streamKey) return err(400, "streamKey 必填");
       const r = await deps.runNow({
         streamKey: input.streamKey,
         winnerWorker: input.winnerWorker,
         wait: input.wait === true,
+        force: input.force === true,
       });
       return r.ok ? { status: r.code ?? 202, body: r } : { status: r.code ?? 400, body: r };
     },

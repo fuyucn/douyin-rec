@@ -655,7 +655,7 @@ let hubStopJob:
   | ((streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>)
   | undefined;
 let hubRunNow:
-  | ((opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>)
+  | ((opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>)
   | undefined;
 let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
 /** 各节点边录边传的实时进度(F1;随 5 秒状态轮询整体替换,只读展示)。 */
@@ -728,8 +728,8 @@ const requestNodeTasks = async (workerId: string): Promise<NodeTasksDTO> => {
 };
 
 const requestHubRunNow = async (
-  opts: { streamKey: string; winnerWorker?: string; wait?: boolean },
-): Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }> => {
+  opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean },
+): Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }> => {
   if (!hubRunNow) return { ok: false, error: "hub 未启动", code: 400 };
   return hubRunNow(opts);
 };
