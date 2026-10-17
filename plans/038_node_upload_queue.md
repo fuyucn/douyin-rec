@@ -91,7 +91,7 @@
 | `concurrency` | 1 | 每节点 biliup 并发 |
 | `stallMs` | 900000 | transfer 字节停滞判死 |
 | `heartbeatStaleMs` | 180000 | 租约心跳过期 |
-| `maxWallMs` | 86400000 | 仅告警 + 停止重试 |
+| `maxWallMs` | 24 小时 | 仅告警 + 停止重试 |
 | `maxAttempts` / `retryBackoffMs` | 3 / 300000 | transfer 重试 |
 | `pollIntervalMs` | 60000 | master 轮询 |
 | `slowAlertBps` / `slowAlertWindowMs` | 262144 / 1800000 | 慢速告警 |
@@ -135,7 +135,7 @@
 本方案在落笔前经两路独立审核（Fable 5.1；DeepSeek 用的是 V4.1 Flash，因 V4 Pro 额度用尽、可用列表无 4.1 Pro）。已采纳项落在上文，不采纳项：
 
 - 「租约按账号而非节点」：账号级限制主要卡提交频率而非传输并发，跨节点互斥需节点反连 master，现架构不支持 → 记为已知风险，用告警观察。
-- 「节点主动推心跳」：节点通常无 webhook、ssh 只能 master → 节点，保留轮询。
+- 「节点主动推心跳」：节点通常无外部通知通道、ssh 只能 master → 节点，保留轮询。
 - 「把 PR7 提前」：`All files uploaded` 已能分出边界；PR7 牵涉 GPL 许可证决策，留 Phase 2。
 
 已知风险：审核后发现 `origin/feat/hub-optimization` 已有 `proc-queue`，原方案的 `upload_items` 表与 `_upq-*` 命令与之重复，故改为本稿的「biliup = proc-queue 处理器」。
