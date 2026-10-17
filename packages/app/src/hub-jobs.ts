@@ -550,7 +550,7 @@ export interface BuildQueueOpts {
  * 这类行 = 数据异常(某条路径漏写了原因),或是**修复部署前**遗留的旧行(2026-10 前 stage 正常
  * 收口不写 error)。红色「待人工」旁边必须有一句可读的原因,不能只留一个空红的标签。
  */
-const UNKNOWN_MANUAL_REASON = "缺少失败原因(数据异常,建议清历史或重跑该场)";
+const UNKNOWN_MANUAL_REASON = "缺少失败原因(数据异常或修复前遗留的旧记录,请核对后清历史)";
 
 const EMPTY_POOL: HubPoolSnapshotDTO = {
   cpu: { active: 0, queued: 0, max: 0 },
