@@ -4,3 +4,4 @@ export { uploadPrepProcessor, produceStageParts, splitGroupsBySession, tryDirect
 export * from "./run-biliup.js";
 export * from "./archive-lookup.js";
 export * from "./child-identity.js";
+export * from "./biliup.js";
