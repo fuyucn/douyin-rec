@@ -7,12 +7,12 @@ import type { NotifyEvent, ProcessReceipt } from "@drec/core";
 import { SyncLedger } from "../../packages/orchestrator/src/ledger.js";
 import { Reconciler } from "../../packages/orchestrator/src/reconciler.js";
 import {
-  DEFAULT_NODE_UPLOAD, QUEUE_CAPABILITY, canFallbackToBlocking, decideUploadMode, parseNodeUploadConfig,
+  DEFAULT_NODE_UPLOAD, QUEUE_CAPABILITY, canFallbackToBlocking, decideUploadMode, parseNodeUploadConfig, rollingEnabledCount,
   type NodeUploadConfig,
 } from "../../packages/orchestrator/src/node-upload-config.js";
 import { createUploadQueuePoller } from "../../packages/orchestrator/src/node-upload-poll.js";
 import { ensureUploadPlan, type UploadInput } from "../../packages/orchestrator/src/node-upload-queue.js";
-import { ProcUnsupported, type Transport } from "../../packages/orchestrator/src/transport.js";
+import { ProcUnsupported, type NodeTasks, type Transport } from "../../packages/orchestrator/src/transport.js";
 
 const KEY = "douyin:1:2026-10-17";
 const fresh = (): SyncLedger => new SyncLedger(join(mkdtempSync(join(tmpdir(), "nup-")), "j.db"));
@@ -61,6 +61,40 @@ describe("decideUploadMode", () => {
     const d = decideUploadMode(i);
     expect(d.mode).toBe("blocking");
     expect((d as { reason: string }).reason).toMatch(re);
+  });
+});
+
+describe("rollingEnabledCount (T13b)", () => {
+  const withTasks = (tasks: Array<Record<string, unknown>>): Transport =>
+    ({ id: "n1", listTasks: async () => ({ workerId: "n1", tasks } as unknown as NodeTasks) } as Transport);
+
+  it("counts tasks with rolling enabled by config, including disabled ones", async () => {
+    const t = withTasks([
+      { rollingEffective: true, rollingUpload: true, enabled: true },
+      { rollingEffective: true, rollingUpload: true, enabled: false },
+      { rollingEffective: false, rollingUpload: false, enabled: true },
+    ]);
+    expect(await rollingEnabledCount(t)).toBe(2);
+  });
+
+  it("zero when no task uses rolling; legacy flag alone still counts", async () => {
+    expect(await rollingEnabledCount(withTasks([{ rollingEffective: false, rollingUpload: false }]))).toBe(0);
+    expect(await rollingEnabledCount(withTasks([{ rollingUpload: true }]))).toBe(1);
+    expect(await rollingEnabledCount(withTasks([]))).toBe(0);
+  });
+
+  it("unknown (null) without a channel, on failure, or when the DTO has no rolling fields", async () => {
+    expect(await rollingEnabledCount({ id: "n1" } as Transport)).toBeNull();
+    expect(await rollingEnabledCount({ id: "n1", listTasks: async () => { throw new Error("ssh"); } } as Transport)).toBeNull();
+    expect(await rollingEnabledCount(withTasks([{ enabled: true }]))).toBeNull();
+  });
+
+  it("feeds the gate: rolling present -> blocking, absent -> queue allowed", async () => {
+    const gate = async (tasks: Array<Record<string, unknown>>) => decideUploadMode({
+      cfg: queueCfg, capabilities: [QUEUE_CAPABILITY], runNowGuard: true, rollingEnabledCount: await rollingEnabledCount(withTasks(tasks)),
+    });
+    expect((await gate([{ rollingEffective: true, rollingUpload: true }])).mode).toBe("blocking");
+    expect((await gate([{ rollingEffective: false, rollingUpload: false }])).mode).toBe("queue");
   });
 });
 

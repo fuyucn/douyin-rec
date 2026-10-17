@@ -65,6 +65,22 @@ export function decideUploadMode(i: QueueGateInput): UploadModeDecision {
   return { mode: "queue" };
 }
 
+/**
+ * How many tasks on the node have rolling upload enabled, read from the node's task list (config, not a
+ * snapshot of what is recording right now: a disabled task can be started by the schedule at any minute).
+ * null = unknown (no channel, node unreachable, or an old bundle whose DTO has no rolling fields).
+ */
+export async function rollingEnabledCount(t: Transport): Promise<number | null> {
+  if (!t.listTasks) return null;
+  try {
+    const { tasks } = await t.listTasks();
+    if (tasks.some((x) => typeof x.rollingEffective !== "boolean" && typeof x.rollingUpload !== "boolean")) return null;
+    return tasks.filter((x) => x.rollingEffective === true || x.rollingUpload === true).length;
+  } catch {
+    return null;
+  }
+}
+
 const BLOCKING_STATES: ReadonlySet<ProcessReceipt["state"]> = new Set(["pending", "running", "uncertain"]);
 
 /**

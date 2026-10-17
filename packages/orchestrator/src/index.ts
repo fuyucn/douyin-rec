@@ -14,7 +14,7 @@ export {
 } from "./node-upload-queue.js";
 export { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
 export {
-  QUEUE_CAPABILITY, DEFAULT_NODE_UPLOAD, parseNodeUploadConfig, decideUploadMode, canFallbackToBlocking,
+  QUEUE_CAPABILITY, DEFAULT_NODE_UPLOAD, parseNodeUploadConfig, decideUploadMode, canFallbackToBlocking, rollingEnabledCount,
   type NodeUploadConfig, type QueueGateInput, type UploadModeDecision,
 } from "./node-upload-config.js";
 export type { PipelineDeps, PipelineCfg, PipelineSteps, PipelineCleanup } from "./pipeline.js";
