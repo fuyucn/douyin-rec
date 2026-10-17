@@ -68,7 +68,7 @@ export const PHASE_STYLE: Record<TaskPhaseKind, PhaseStyle> = {
   stopping: { tone: "badge-orange", dot: "var(--warning)", pulse: true, color: "var(--warning-fg)" },
   draining: { tone: "badge-orange", dot: "var(--warning)", pulse: true, color: "var(--warning-fg)" },
   recording: { tone: "badge-success", dot: "var(--success)", pulse: true, color: "var(--success-fg)" },
-  waiting: { tone: "badge-neutral", dot: "var(--muted-soft)", pulse: true, color: "var(--muted)" },
+  waiting: { tone: "badge-neutral", dot: "var(--muted-soft)", pulse: false, color: "var(--muted)" },
   offline: { tone: "badge-error", dot: "var(--error)", pulse: false, color: "var(--error-fg)" },
   error: { tone: "badge-error", dot: "var(--error)", pulse: false, color: "var(--error-fg)" },
   idle: { tone: "badge-neutral", dot: "var(--muted-soft)", pulse: false, color: "var(--muted-soft)" },

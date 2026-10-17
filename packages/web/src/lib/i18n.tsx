@@ -52,7 +52,7 @@ export function useT(): (key: string, vars?: Record<string, string | number>) =>
 // zh / en 同构。新增文案两边都加。值里用单花括号 {var} 占位;计数键用 _one/_other + {count}。
 const DICT = {
   zh: {
-    common: { cancel: "取消", confirm: "确定", save: "保存", delete: "删除", refresh: "刷新", close: "关闭", optional: "可选", on: "开", off: "关", yes: "是", no: "否", localTimeTooltip: "当前时区：{serverTz}\n你的本地时间：{local}" },
+    common: { back: "返回", cancel: "取消", confirm: "确定", save: "保存", delete: "删除", refresh: "刷新", close: "关闭", optional: "可选", on: "开", off: "关", yes: "是", no: "否", localTimeTooltip: "当前时区：{serverTz}\n你的本地时间：{local}" },
     nav: { title: "抖音录制控制台", rooms: "房间", tasksList: "录制任务", queue: "处理队列", login: "扫码登录", paste: "手动粘贴", clear: "清除", notif: "站内提醒设置" },
     experimental: {
       badge: "实验性", riskPrefix: "风险:", defaultPrefix: "默认:", defaultOff: "关闭,需显式开启", defaultOn: "开启",
@@ -211,13 +211,16 @@ const DICT = {
       run: { pending: "排队中", settling: "等收播", syncing: "拉取录像", merging: "合并 / 烧录", uploading: "上传中", retrying: "重跑中", done: "已完成", failed: "失败", needs_manual: "需人工处理" },
       allDay: "全天", allNodes: "全部节点", noTask: "未绑定录制任务", lastRun: "上一场 {state}", lastBv: "上一场已投稿",
       archiveMode: "存档", uploadMode: "投稿 B站", privateShort: "仅自己可见", publicShort: "公开", pausedRule: "房间已暂停",
-      alertMore: "另有 {n} 个房间需处理", view: "查看",
+      alertCount_one: "{count} 个房间需要处理", alertCount_other: "{count} 个房间需要处理", view: "查看",
+      colLastDeliver: "上次交付",
+      lastDeliver: { none: "尚无交付", running: "处理中", uploaded: "已投稿", archived: "已存档", stopped: "已停止", fault: "交付失败", openBv: "打开稿件" },
+      ago: { now: "刚刚", m: "{n} 分钟前", h: "{n} 小时前", d: "{n} 天前" },
       colRoom: "名称 / 房间", colDeliver: "交付", colNodes: "节点", colSchedule: "定时", colStatus: "状态", colAction: "操作",
       addTitle: "添加房间", addSubtitle: "填直播间地址即可,录完怎么处理随你再改",
       addAfter: "录完之后", addRoom: "直播间地址", addName: "显示名(可选)", addNamePlaceholder: "留空 = 自动抓主播名",
       addSchedule: "什么时候录", addUpload: "上传方式", addUploadHint: "新房间先按「收播后上传」建;要边录边传或节点直传,建好后再改。",
       addSubmit: "添加", added: "房间已添加", addNoRule: "任务已建,但没找到房间标识,处理规则请到房间里补",
-      addRuleFailed: "任务已建,处理规则写入失败:{msg}",
+      addRuleFailed: "录制任务已建,处理规则未建:{msg}",
       addExists: "该房间已存在,请在房间页编辑",
       addBoundExisting: "任务已建:该房间已有处理规则,只做了绑定,未改动原有设置",
       editor: {
@@ -232,7 +235,7 @@ const DICT = {
       },
       detail: {
         back: "房间", edit: "编辑", drain: "录完这场再停", recorded: "已录", nodes: "节点", lastRun: "最近一场", deliver: "交付",
-        logs: "录制日志", runs: "场次", notFound: "找不到这个房间", nodeRecording: "在录", nodeIdle: "未在录", nodeDown: "离线",
+        logs: "录制日志", showLogs: "查看日志", hideLogs: "收起日志", remoteRecording: "节点录制中", runs: "场次", notFound: "找不到这个房间", nodeRecording: "在录", nodeIdle: "未在录", nodeDown: "离线",
         local: "本机",
         backToList: "房间列表", info: "房间信息", process: "处理", procOn: "已启用", noRule: "未配置处理",
         merge: "合成方式", mergeOne: "合并成一个", mergeSplit: "按分段",
@@ -513,7 +516,7 @@ const DICT = {
     },
   },
   en: {
-    common: { cancel: "Cancel", confirm: "Confirm", save: "Save", delete: "Delete", refresh: "Refresh", close: "Close", optional: "optional", on: "On", off: "Off", yes: "Yes", no: "No", localTimeTooltip: "Current timezone: {serverTz}\nYour local time: {local}" },
+    common: { back: "Back", cancel: "Cancel", confirm: "Confirm", save: "Save", delete: "Delete", refresh: "Refresh", close: "Close", optional: "optional", on: "On", off: "Off", yes: "Yes", no: "No", localTimeTooltip: "Current timezone: {serverTz}\nYour local time: {local}" },
     nav: { title: "Douyin Recorder", rooms: "Rooms", tasksList: "Tasks", queue: "Queue", login: "QR Login", paste: "Paste Cookie", clear: "Clear", notif: "Notification settings" },
     experimental: {
       badge: "Experimental", riskPrefix: "Risk: ", defaultPrefix: "Default: ", defaultOff: "off, enable explicitly", defaultOn: "on",
@@ -672,13 +675,16 @@ const DICT = {
       run: { pending: "Queued", settling: "Settling", syncing: "Pulling", merging: "Merge / burn", uploading: "Uploading", retrying: "Retrying", done: "Done", failed: "Failed", needs_manual: "Needs manual" },
       allDay: "All day", allNodes: "All nodes", noTask: "No recording task", lastRun: "Last run {state}", lastBv: "Last run uploaded",
       archiveMode: "Archive", uploadMode: "Upload to Bilibili", privateShort: "Private", publicShort: "Public", pausedRule: "Room paused",
-      alertMore: "{n} more rooms need action", view: "View",
+      alertCount_one: "{count} room needs action", alertCount_other: "{count} rooms need action", view: "View",
+      colLastDeliver: "Last delivery",
+      lastDeliver: { none: "None yet", running: "Processing", uploaded: "Uploaded", archived: "Archived", stopped: "Stopped", fault: "Failed", openBv: "Open submission" },
+      ago: { now: "just now", m: "{n} min ago", h: "{n} h ago", d: "{n} d ago" },
       colRoom: "Name / room", colDeliver: "Deliver", colNodes: "Nodes", colSchedule: "Schedule", colStatus: "Status", colAction: "Actions",
       addTitle: "Add room", addSubtitle: "Enter the live URL; you can change the delivery later",
       addAfter: "After recording", addRoom: "Live room URL", addName: "Display name (optional)", addNamePlaceholder: "Empty = resolve the streamer name",
       addSchedule: "When to record", addUpload: "Upload style", addUploadHint: "New rooms start with upload-after-broadcast; switch to rolling or node-side later.",
       addSubmit: "Add", added: "Room added", addNoRule: "Task created, but the room id was not found; set up processing from the room page",
-      addRuleFailed: "Task created, but the processing rule failed: {msg}",
+      addRuleFailed: "Recording task created; processing rule not created: {msg}",
       addExists: "This room already exists; edit it from the room page",
       addBoundExisting: "Task created: this room already had a processing rule, so only the binding was updated",
       editor: {
@@ -693,7 +699,7 @@ const DICT = {
       },
       detail: {
         back: "Rooms", edit: "Edit", drain: "Stop after this stream", recorded: "Recorded", nodes: "Nodes", lastRun: "Last run", deliver: "Delivery",
-        logs: "Recording log", runs: "Runs", notFound: "Room not found", nodeRecording: "recording", nodeIdle: "idle", nodeDown: "offline",
+        logs: "Recording log", showLogs: "Show logs", hideLogs: "Hide logs", remoteRecording: "Recording on node", runs: "Runs", notFound: "Room not found", nodeRecording: "recording", nodeIdle: "idle", nodeDown: "offline",
         local: "local",
         backToList: "Room list", info: "Room info", process: "Processing", procOn: "On", noRule: "No processing rule",
         merge: "Output", mergeOne: "Merged into one", mergeSplit: "Per segment",

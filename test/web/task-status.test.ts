@@ -49,7 +49,8 @@ describe("taskPhase(运行态派生唯一口径)", () => {
 
   it("配色/脉冲:录制中绿脉冲、等待灰脉冲、离线红静止(离线不能被显示成等待)", () => {
     expect(PHASE_STYLE.recording).toMatchObject({ tone: "badge-success", pulse: true });
-    expect(PHASE_STYLE.waiting).toMatchObject({ tone: "badge-neutral", pulse: true });
+    // Only a live recording pulses: an idle, waiting room must not look busy.
+    expect(PHASE_STYLE.waiting).toMatchObject({ tone: "badge-neutral", pulse: false });
     expect(PHASE_STYLE.offline).toMatchObject({ tone: "badge-error", pulse: false });
     expect(PHASE_STYLE.idle.pulse).toBe(false);
   });

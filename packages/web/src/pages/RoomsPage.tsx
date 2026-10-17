@@ -12,10 +12,11 @@ import type { RoomDTO } from "../api/client";
 import { Button, IconButton } from "../components/Button";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { AddRoomDialog } from "../modals/AddRoomDialog";
+import { useTicker } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { roomId, scheduleText } from "../lib/labels";
 import { sortByStatus, type RoomStatusKind } from "../lib/room-status";
-import { deliverText, nodesText, roomName, RoomBadge, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
+import { DeliveryCell, deliverText, nodesText, roomName, RoomBadge, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
 
 type Filter = "all" | Extract<RoomStatusKind, "recording" | "processing" | "attention">;
 const FILTER_TONE: Record<Filter, string | undefined> = {
@@ -28,6 +29,8 @@ export function RoomsPage(): ReactNode {
   const actions = useRoomActions(data);
   const [filter, setFilter] = useState<Filter>("all");
   const [createOpen, setCreateOpen] = useState(false);
+  // Relative times ("5 min ago") must keep moving even though the page is push-driven.
+  const now = useTicker(30_000);
   const { rooms, loaded, statusOf } = data;
 
   const sorted = useMemo(() => sortByStatus(rooms, statusOf), [rooms, statusOf]);
@@ -75,9 +78,10 @@ export function RoomsPage(): ReactNode {
         <div className="status-strip rm-alert mb-3 sm:mb-4">
           <span className="dot" style={{ background: "var(--warning)" }} />
           <span className="flex-1 min-w-0 truncate">
-            <b className="text-ink font-medium">{roomName(attention[0])}</b>
-            {" · "}{statusDetail(t, attention[0], statusOf(attention[0]))}
-            {attention.length > 1 && <span className="text-muted-soft"> · {t("room.alertMore", { n: attention.length - 1 })}</span>}
+            <b className="text-ink font-medium">{t("room.alertCount", { count: attention.length })}</b>
+            <span className="text-muted-soft">
+              {" · "}{roomName(attention[0])}{" · "}{statusDetail(t, attention[0], statusOf(attention[0]))}
+            </span>
           </span>
           <Button small variant="secondary" onClick={() => setFilter("attention")}>{t("room.view")}</Button>
         </div>
@@ -92,7 +96,7 @@ export function RoomsPage(): ReactNode {
             </div>
           ))}
           {loaded && shown.length === 0 && <Empty t={t} empty={rooms.length === 0} />}
-          {loaded && shown.map((r) => <RoomCompactRow key={r.key} room={r} data={data} actions={actions} />)}
+          {loaded && shown.map((r) => <RoomCompactRow key={r.key} room={r} data={data} actions={actions} now={now} />)}
         </div>
 
         <div className="hidden lg:block min-w-0 overflow-x-auto">
@@ -100,7 +104,7 @@ export function RoomsPage(): ReactNode {
             <thead>
               <tr>
                 <th>{t("room.colRoom")}</th>
-                <th className="w-[110px]">{t("room.colDeliver")}</th>
+                <th className="w-[150px]">{t("room.colLastDeliver")}</th>
                 <th className="w-[180px]">{t("room.colNodes")}</th>
                 <th className="w-[130px]">{t("room.colSchedule")}</th>
                 <th className="w-[260px]">{t("room.colStatus")}</th>
@@ -130,14 +134,12 @@ export function RoomsPage(): ReactNode {
                         {actions.managedOf(r) && <span className="badge badge-muted shrink-0">{t("tasks.managed")}</span>}
                       </div>
                       <div className="font-mono text-xs text-muted mt-0.5 truncate" title={r.room}>
-                        {roomId(r.room)} · {r.platform}
+                        {roomId(r.room)} · {r.platform} · {deliverText(t, r)}
+                        {r.processing?.pipeline?.upload?.private === false && ` · ${t("room.publicShort")}`}
                       </div>
                     </Link>
                   </td>
-                  <td>
-                    <span className="chip">{deliverText(t, r)}</span>
-                    {r.processing?.pipeline?.upload?.private === false && <div className="text-[11px] text-muted-soft mt-1">{t("room.publicShort")}</div>}
-                  </td>
+                  <td><DeliveryCell s={statusOf(r)} now={now} /></td>
                   <td className="font-mono text-[11px] text-muted">{nodesText(r, data.workers, t("room.allNodes"))}</td>
                   <td>
                     {scheduleText(scheduleOf(r)) ? (
@@ -211,14 +213,15 @@ function RoomActions({ room, data, actions }: {
         )
       ) : null}
       {taskId !== null && (
-        <Link className="btn-icon" to={`/task/${taskId}`} title={t("room.detail.logs")}><FileText className="w-4 h-4" /></Link>
+        <Link className="btn-icon" to={`/rooms/${encodeURIComponent(room.key)}?logs=1`} title={t("room.detail.logs")}><FileText className="w-4 h-4" /></Link>
       )}
       <IconButton title={t("room.detail.edit")} onClick={() => actions.edit(room)}><Pencil className="w-4 h-4" /></IconButton>
     </div>
   );
 }
 
-function RoomCompactRow({ room, data, actions }: {
+function RoomCompactRow({ room, data, actions, now }: {
+  now: number;
   room: RoomDTO;
   data: ReturnType<typeof useRoomsData>;
   actions: ReturnType<typeof useRoomActions>;
@@ -238,6 +241,7 @@ function RoomCompactRow({ room, data, actions }: {
         <RoomBadge s={s} />
         <span className="text-[12px] text-muted truncate">{statusDetail(t, room, s)}</span>
       </div>
+      <div className="mt-2"><DeliveryCell s={s} now={now} /></div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <span className="chip">{deliverText(t, room)}</span>
         {scheduleText(scheduleOf(room)) && <span className="font-mono text-[11px] text-muted-soft tabular-nums">{scheduleText(scheduleOf(room))}</span>}

@@ -70,6 +70,7 @@ export function AddRoomDialog({ open, onClose, onSaved, hubEnabled, workers }: P
     ev.preventDefault();
     if (!roomOk) return;
     setBusy(true);
+    let partial = false;
     try {
       if (plat) {
         const dup = findExistingRoom(await api.listRooms().catch(() => []), plat.id, form.room.trim());
@@ -99,13 +100,16 @@ export function AddRoomDialog({ open, onClose, onSaved, hubEnabled, workers }: P
               toast(t("room.addBoundExisting"), "success");
             }
           } catch (err) {
+            // Half-done: say so once. A following "added" toast would contradict the error.
             toast(t("room.addRuleFailed", { msg: errMessage(err) }), "error");
+            partial = true;
           }
         } else {
           toast(t("room.addNoRule"), "error");
+          partial = true;
         }
       }
-      toast(t("room.added"), "success");
+      if (!partial) toast(t("room.added"), "success");
       onSaved();
     } catch (e) {
       toast(errMessage(e), "error");

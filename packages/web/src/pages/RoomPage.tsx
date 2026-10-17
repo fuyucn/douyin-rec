@@ -5,11 +5,12 @@
  * Only real data is shown — no synthesized progress or ETA beyond what the runs panel already has.
  */
 import { useEffect, useState, type ReactNode } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { CalendarRange, ChevronLeft, Clock3, ExternalLink, FileText, MonitorPlay, UploadCloud } from "lucide-react";
 import { api, type TaskDetail } from "../api/client";
 import { Button } from "../components/Button";
 import { HubStreamBanner } from "../components/HubStreamBanner";
+import { TaskLogPanel } from "../components/LogTerminal";
 import { RoomRunsPanel } from "../components/RoomRunsPanel";
 import { usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -27,6 +28,17 @@ export function RoomPage(): ReactNode {
   const task = room ? data.taskOf(room) : undefined;
   const s = room ? data.statusOf(room) : null;
   const taskId = room?.recording?.taskId ?? null;
+
+  // Logs live on this page (no hop to the task page). The list's log icon arrives with ?logs=1.
+  const [params, setParams] = useSearchParams();
+  const [logsOpen, setLogsOpen] = useState(params.get("logs") === "1");
+  // Switching rooms must not carry the open/closed state over; closing drops ?logs=1 so a refresh stays closed.
+  useEffect(() => { setLogsOpen(params.get("logs") === "1"); }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  const toggleLogs = (): void => {
+    const next = !logsOpen;
+    setLogsOpen(next);
+    setParams(next ? { logs: "1" } : {}, { replace: true });
+  };
 
   // Elapsed time only exists for a local recorder process (runtime); remote-only → "—".
   const [detail, setDetail] = useState<TaskDetail | null>(null);
@@ -99,9 +111,9 @@ export function RoomPage(): ReactNode {
             </Button>
           )}
           {taskId !== null && (
-            <Link to={`/task/${taskId}`} className="btn-secondary btn-sm">
-              <FileText className="w-4 h-4" />{t("room.detail.logs")}
-            </Link>
+            <Button small variant="secondary" onClick={toggleLogs} aria-expanded={logsOpen}>
+              <FileText className="w-4 h-4" />{t(logsOpen ? "room.detail.hideLogs" : "room.detail.showLogs")}
+            </Button>
           )}
           <Button small variant="secondary" onClick={() => actions.edit(room)}>{t("room.detail.edit")}</Button>
         </div>
@@ -111,7 +123,8 @@ export function RoomPage(): ReactNode {
 
       <div className="telemetry-bar mb-6">
         <Cell label={t("room.detail.recorded")} icon={<Clock3 className="w-4 h-4" />} tone={elapsed != null ? "var(--success-fg)" : undefined}
-              value={elapsed != null ? fmtClock(elapsed) : "-"} valueClass="telemetry-value tabular-nums" />
+              value={elapsed != null ? fmtClock(elapsed) : live && recNodes > 0 ? t("room.detail.remoteRecording") : "-"}
+              valueClass={elapsed != null ? "telemetry-value tabular-nums" : "telemetry-value-sm truncate"} />
         <Cell label={t("tasks.nodesBound")} icon={<MonitorPlay className="w-4 h-4" />}
               value={workers.length ? `${recNodes}/${workers.length}` : nodesText(room, data.workers, t("room.allNodes"))} />
         <Cell label={t("room.detail.deliver")} icon={<UploadCloud className="w-4 h-4" />} value={delivery} />
@@ -181,6 +194,12 @@ export function RoomPage(): ReactNode {
         </section>
 
         <section className="lg:col-span-2 min-w-0">
+          {/* Opened logs go ABOVE the runs: the runs list is long and the panel would land below the fold. */}
+          {logsOpen && taskId !== null && (
+            <div className="mb-5" id="logs">
+              <TaskLogPanel taskId={taskId} running={!!task?.running} />
+            </div>
+          )}
           <RoomRunsPanel room={room} workers={data.workers} collapsed />
         </section>
       </div>
