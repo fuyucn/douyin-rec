@@ -25,7 +25,7 @@
 | 保守带宽 1MB/s。**已修（#203）**：0.1MB/s；下限 30 分钟、上限 6 小时不变 | `node-side-upload.ts:284-315`（c2c48ff） |
 | 总时长到点 ssh SIGKILL | `orchestrator/src/transport-ssh.ts:72-81` |
 | 超时后先 `_node-abort` 再回读结果 | `node-side-upload.ts:183-261`（abort `:197-205`） |
-| 节点侧 `uploading` 在上传闸之前就写，语义过宽 | `app/src/node-pipeline.ts:692`（`:766` 才带 `intentPart`） |
+| 节点侧 `uploading` 在上传闸之前就写，语义过宽 | `app/src/node-pipeline.ts`（PR1 已加 `step=gate_wait`；`:783` 才带 `intentPart`），**已由 #205 缓解** |
 | `UploadGate.run` 只串行「等配额」，`fn` 本身并发执行；串行链只在进程内 | `core/src/upload-gate.ts:320-328,412-420` |
 | 部署 guard 只看 `recording===true` | `scripts/deploy-precheck.sh:7-8` |
 | master 重启 → `sweepStale` 标 failed → 重入 → abort | `orchestrator/src/ledger.ts:357`、`reconciler.ts:516` |
@@ -64,7 +64,7 @@
 - **关停超时的 `hasIntent` 按 step 推导**：`runner.ts:488` 目前写死 `hasIntent:true`；PR2 改为 `hasIntent = step === "submit"`。
   - **扩展已有的 `releaseForShutdown(jobId, owner, interruptible)`**（`store.ts:497`），不新增第二个入口：新增可选 `step` 参数。对 `step∈{gate_wait,transfer}` 的 biliup job 放行 `running→pending`（`reason="shutdown-abort"`），因为此时已确认子进程被 SIGKILL、尚未提交；`step=submit` 不走这里，仍落 `uncertain`。
   - 只在 `runner.ts:481-488` 的**关停等待超时**后触发；正常关停仍先等最多 `procShutdownWaitMs`（默认 15 分钟）。
-  - **回 pending 前必须确认子进程真的死了**：现有 runner 超时后只 `abort()` 就 `finish`，没等退出也没核对 pid。PR2 先等子进程退出（宽限后 SIGKILL），再用 `childPid + childPidStartedAt` 核验；**确认不了就落 `uncertain`，绝不回 pending**（否则重启后可能并列起第二个 biliup → 重复稿）。
+  - **回 pending 前必须过两道闸**：①确认子进程真的死了（现有 runner 超时后只 `abort()` 就 `finish`；PR2 先等退出，宽限后 SIGKILL，再用 `childPid + childPidStartedAt` 核验）；②**旁证无稿**（与 §4.3 同一规则：`seq=1` 查 `biliup list --is-pubing` + 时长复核，append 查 `countVideoParts`）。任一无法确认 → `uncertain`，绝不回 pending。
   - 该回退回退 `attempts`（关停不算一次尝试，沿用现有实现），且**不触发** order-blocked 级联；重启后同 `orderKey` 从该 seq 继续。
   - `canTransition` 的 `shutdown-abort` 分支放宽为：`interruptible===true` **或** `kind=biliup && step∈{gate_wait,transfer}`（由 store 传入；缺省仍 fail-closed）。
 
@@ -73,7 +73,7 @@
 - biliup 在非 TTY 下进度条被隐藏，日志在 `pre_upload` 后静默，**不能把输出当心跳**。
 - 候选信号（**PR2 的硬前置：先在 VPS 实测选定一条，把命令与输出贴回 #202**）：① biliup 进程树 `/proc/<pid>/io` 的 `wchar` 增量；② checkpoint 文件 mtime/size；③ 套伪终端让进度条输出。
 - 判死条件：`transfer` 步内字节增量为 0 持续 `stallMs`（默认 15 分钟）。`gate_wait` **不参与**（无传输）；`submit` **永不 kill**；进程消失给宽限。预处理由 `upload-prep` 承担，不在本判死逻辑内。
-- **`submit` 卡住**：`step=submit` 超过 `submitAlertMs`（默认 30 分钟）只告警一次，不 kill；超过 `maxWallMs`（24 小时）转 `uncertain` 并告警，绝不自动重传。**转 `uncertain` 时若子进程仍活着，必须保持 `lane=biliup` 占用直到进程退出**（slot 绑定 pid，不随 job 终态释放），否则会与下一场并列上传，破坏并发 1。
+- **`submit` 卡住**：`step=submit` 超过 `submitAlertMs`（默认 30 分钟）只告警一次，不 kill；超过 `maxWallMs`（24 小时）转 `uncertain` 并告警，绝不自动重传。**转 `uncertain` 时若子进程仍活着，必须保持 `lane=biliup` 占用直到进程退出**（slot 绑定 pid，不随 job 终态释放），否则会与下一场并列上传，破坏并发 1。告警里给出 pid 与 `_proc-cancel --kill` 操作；人工确认后可强制释放 slot。
 - 租约心跳（`heartbeatStaleMs`，按时间）与传输进度（按字节）是**两个信号**，只有后者能判死。
 - `gate_wait` 期间不参与字节停滞判定（没有传输），但仍占 `lane=biliup` 槽（串行化提交；见 §4.1 的取舍）。
 - 慢（< `slowAlertBps` 持续 `slowAlertWindowMs`）只告警，不 kill。`maxWallMs` 只用于告警 + 停止重试，不 kill。
@@ -89,7 +89,7 @@
   1. `WHERE state='pending' AND (notBefore IS NULL OR notBefore<=now)`；
   2. 用 `NOT EXISTS` 排除**同 `orderKey` 且同 `generation`** 中更小 `seq` 且 `state != 'done'` 的行；
   2b. 要求 `prepJobId` 指向的 `upload-prep` 行 `state='done'`（`NOT EXISTS` 查 `proc_jobs` 同表）；prep 未 done → 保持 pending；
-  3. 场间轮转用**显式游标**，不靠 `updatedAt`（claim 只刷新被认领那一行，同场后续行仍是入队时间，按时间排序会饿死新场）：新增表 `proc_order_cursor(orderKey PK, generation, lastClaimedAt)`；claim 时对候选按 `(cursor.lastClaimedAt ?? 0) ASC, seq ASC` 排序，成功后更新该 orderKey 的游标。退避中的场因 `notBefore` 被过滤，不占位。
+  3. 场间轮转用**显式游标**，不靠 `updatedAt`（claim 只刷新被认领那一行，同场后续行仍是入队时间，按时间排序会饿死新场）：新增表 `proc_order_cursor(orderKey, generation, lastClaimedAt, PRIMARY KEY(orderKey, generation))`；claim 时对候选按 `(cursor.lastClaimedAt ?? 0) ASC, seq ASC` 排序，成功后更新该 orderKey 的游标。退避中的场因 `notBefore` 被过滤，不占位。
 - **store 迁移（`user_version` +1）**：`proc_jobs` 新增 **8 列**：`notBefore`、`orderKey`、`seq`、`step`、`bv`、`childPid`、`childPidStartedAt`、`prepJobId`（`generation` 已在表内，不新增）。另建一张表 `proc_order_cursor(orderKey TEXT, generation INTEGER, lastClaimedAt INTEGER, PRIMARY KEY(orderKey, generation))`。现有 `proc_jobs` 只有 `note/error/resultOutputs`，没有进度、BV 与子进程身份的落点：
   - `step`：runner 在阶段切换时原子更新（与节点结果文件同源，单一写入口）。
   - `bv`：`seq=1` 建稿成功后写入；append 行执行前读同 `orderKey` 的 `seq=1` 行。
@@ -98,19 +98,20 @@
   - **append 的 BV 来源**：append job 入队时 `bv` 可为空；runner 执行前从 store 读同 `orderKey` **且同 generation** 的 `seq=1` done 行取 BV。`seq=1` 尚未 done → 保持 pending（由 claim 门控，不算失败）；`seq=1` 已 failed/uncertain 而走到这里 → `cancelled(order-blocked)`，不转 `uncertain`。
   - **前序不可完成的处置**：`seq` 更小的行进入 `failed`/`uncertain`/`cancelled` 时，同 `orderKey` **且同 generation** 下所有更大 `seq` 的 pending 行原子转 `cancelled`（reason=`order-blocked`）并告警一次；跨代不级联。既不静默卡住，也不越过前序乱序上传。
   - **order-blocked 的恢复路径**（两种，均走 PR6 的 dry-run→`--apply`，默认不改库）：
-    - **已建稿**：人工用 `biliup list` / 台账补齐 BV → `hub-recover-order <streamKey> --bv <BV>`：给后续项**换 generation**（`nextGeneration`）重新入队，并把 `seq=1` 行绑定该 BV；新 jobId 不撞 `cancelled` 终态。
+    - **已建稿**：人工用 `biliup list` / 台账补齐 BV → `hub-recover-order <streamKey> --bv <BV>`：给后续项**换 generation**（`nextOrderGeneration`）重新入队，并把 `seq=1` 行绑定该 BV；新 jobId 不撞 `cancelled` 终态。
     - **确认未建稿**（`seq=1` transfer 重试耗尽且无 BV）：`hub-recover-order <streamKey> --restart`：从 `seq=1` 起整体换 generation 重新入队。执行前必须用 `biliup list --is-pubing` 旁证无稿；查不到就不允许 `--restart`。
 - 重启恢复：`pending` 原样保留；`running` 且在 `gate_wait/transfer` → 确认子进程已停后回 `pending`；在 `submit` → `uncertain`；已有 BV → 记 done，继续 append。
   - **`transfer` 回 pending 之前必须先旁证无稿**：biliup 打印 `All files uploaded` 后会在同一进程直接提交，落 `step=submit` 挡不住这个窗口。恢复时：`seq=1` 先 `biliup list --is-pubing` 查标题，再核对稿件时长与本次产物一致（`{name}_{date}` 同日可能撞标题，单靠标题会误判）；append 先 `countVideoParts`。已存在且时长/分 P 对得上 → 记 done/续传；任何「查不到 / 无法确认」→ `uncertain`，**不回 pending**。
 
 ### 4.4 master 侧（对应 036 T5 + T15，`needs-decision`）
 
+- **批量原子入队（PR2/PR3 必须一起改）**：现有 `handleEnqueue`（`app/src/node-enqueue.ts:115-135`）逐个 `store.enqueue`，单个被拒不回滚。新增 `store.enqueueBatch(jobs)`，单事务「要么全进、要么全不进」；远端 `_enqueue` 对 biliup 批次返回每条结果，任一条 `rejected` → 整批不落库并回报原因。
 - **入队幂等**：首次入队前把 `(orderKey, generation, seq→jobId)` 写进 `sync_jobs`（新列 `uploadPlan` JSON），重入**原样复用**、绝不重新算 generation。SSH 超时（受理结果未知）→ 下轮用同一批 jobId 重发 `_enqueue`；节点的 jobId 幂等回执会把它识别为 `pending/running/done`，不会产生第二份。
-- 入队**钉住执行节点**（winner 每轮可能不同，重入不得换节点）；`mode: queue`，回退 `blocking`；回退前要求节点队列无 pending/running biliup（或先取消）。blocking 遇到 `pending/running/uncertain` 队列项返回 409（`uncertain` 在 proc-queue 是终态、但结果未知，必须人工先处理）；`done(无 BV)`/`failed`/`cancelled` 不拦。已认领且 `interruptible=false` 的行最多等 `procShutdownWaitMs`（默认 15 分钟），到点 abort 并按 `cancelOutcome` 落 `uncertain`，然后才允许回退。
+- 入队**钉住执行节点**（winner 每轮可能不同，重入不得换节点）；`mode: queue`，回退 `blocking`；回退前要求节点队列无 pending/running biliup（或先取消）。blocking 遇到 `pending/running/uncertain` 队列项返回 409（`uncertain` 在 proc-queue 是终态、但结果未知，必须人工先处理）；`done(无 BV)`/`failed`/`cancelled` 不拦。已认领且 `interruptible=false` 的行最多等 `procShutdownWaitMs`（默认 15 分钟），到点 abort；落点统一走「先核验子进程已死 + 旁证无稿」：确认无稿 → `cancelled`（允许回退），否则 → `uncertain`，**不得按 `hasIntent=false` 直接当没传**。
 - 队列模式下 master **不调 `_node-abort`**；轮询 `_proc-status`（每节点 60s）；SSH 失败 = 未知。
 - **SSH 失败时一律拒绝放行**：`-N`/`runNow` 若无法确认节点队列状态 → 返回 409（`force` 才放行，且日志写明「状态未知」）。
 - 部署 guard 分三态（**唯一口径**，`deploy-precheck` 与 AGENTS.md 同文）：`running.biliup>0` → 等待；端点明确不支持（旧 bundle / 404 / 未知命令）→ 再查节点结果文件有无**未陈旧**的 `phase=uploading`（`atMs` 在 `uploadingStaleMs` 内，或对应 pid 仍存活）——blocking 路径的上传不在 proc-queue 里；有则等待，陈旧/无 → 记录「该节点无法确认」后放行；不可达 / 超时 / 503 → fail-closed 等待。
-- `sweepStale` 对「远端队列中」的 job 豁免（轮询时 touch `updatedAt`，或 `isStreamActive` 认远端在途）。
+- `sweepStale` 对「远端队列中」的 job 豁免：以**持久化的 `sync_jobs.uploadPlan`** 为准（master 重启后内存里的 `pool.hasStreamLock` 是空的）。轮询 `_proc-status` 有在途行 → touch `updatedAt`；`uploadPlan` 存在且有非终态 jobId → 即使重启后首次 sweep 也不标 failed。
 - `-N` / `runNow`：按**去掉后缀的原 key** 查台账，任一 job 有 BV，或存在 `pending/running/uncertain` 队列项 → 409（`force` 才放行）。
   - **语义变更（needs-decision）**：现有语义是「每次立即执行都是独立任务」，只拦本 key 的 `done+bv`；改成按原 key 拦会挡住「删稿后重传」。删稿后重传必须显式 `force`，并在日志写明旧 BV。该条需在 PR3 开工前由人确认。`biliup list` 只作旁证，不做自动判定。
 - `_proc-cancel`（036 T5 的一部分）**必须随 PR2 一起交付**：回退 blocking 前先取消该节点所有 pending 行；已认领的行只能等其收口或转 `uncertain`，不能回落旧路径。
