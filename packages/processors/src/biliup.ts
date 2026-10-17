@@ -5,7 +5,7 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { APPEND_AMBIGUOUS_MARKER, type ProcessContext, type ProcessJob, type ProcessResult, type Processor } from "@drec/core";
-import { appendGroup, buildUploadArgs, parseBV, runBiliup, uploadPlain } from "./run-biliup.js";
+import { appendGroup, buildUploadArgs, countVideoParts, parseBV, runBiliup, uploadPlain } from "./run-biliup.js";
 import { findRecentArchive, type ArchiveQuery } from "./archive-lookup.js";
 
 export interface BiliupParams {
@@ -18,9 +18,15 @@ export interface BiliupParams {
   bv?: string;
 }
 
+/** BV persisted on the queue row by an earlier attempt of this same job (P1 created by us, inputs[0] is P1). */
+function persistedBv(job: ProcessJob): string | undefined {
+  const v = (job as { bv?: string | null }).bv;
+  return typeof v === "string" && v ? v : undefined;
+}
+
 function params(job: ProcessJob): BiliupParams {
   const p = job.params as Partial<BiliupParams>;
-  const persisted = (job as { bv?: string | null }).bv;
+  const persisted = persistedBv(job);
   return {
     cookies: String(p.cookies ?? ""),
     title: String(p.title ?? ""),
@@ -39,6 +45,11 @@ export interface BiliupDeps {
   /** Expected total duration of the parts, used for the no-draft proof. */
   expectedDurationSec?: number;
   probeDuration?: (file: string) => Promise<number>;
+  /**
+   * Parts currently on the archive (null = unknown). Defaults to the real lookup, except when `run` is
+   * injected (tests), where it stays unset so nothing touches the network.
+   */
+  countParts?: (bv: string, cookies: string) => Promise<number | null>;
 }
 
 /** Expected duration comes from the job (master/prep), never silently defaulted to "safe". */
@@ -93,11 +104,22 @@ export function makeBiliupProcessor(deps: BiliupDeps = {}): Processor {
         bv = await uploadPlain({ plain: meta, run: runObserved });
         ctx.setState?.({ bv });
       }
-      const appendFrom = p.bv ? 0 : 1; // params.bv means inputs already contain P1
+      const countParts = deps.countParts ?? (deps.run ? undefined : countVideoParts);
+      // params.bv: the draft exists and every input is a part still to append.
+      // Row bv only (a resumed attempt of this job): inputs[0] is P1 and some later parts may already be on
+      // the archive, so appending from index 0 or 1 could duplicate a part. Resume only from a confirmed count.
+      let appendFrom = p.bv ? 0 : 1;
+      if (persistedBv(job) && !(job.params as { bv?: unknown }).bv) {
+        const onServer = countParts ? await countParts(bv, p.cookies).catch(() => null) : null;
+        if (onServer == null || onServer < 1 || onServer > files.length) {
+          throw new Error(`${APPEND_AMBIGUOUS_MARKER} resumed upload of ${bv} cannot confirm how many parts are already on the archive (count=${onServer ?? "unknown"}); needs manual verification`);
+        }
+        appendFrom = onServer;
+      }
       for (let i = appendFrom; i < files.length; i++) {
         ctx.setState?.({ step: "gate_wait" });
         try {
-          await appendGroup({ ...meta, bv, files: [files[i]!], run: runObserved });
+          await appendGroup({ ...meta, bv, files: [files[i]!], run: runObserved, ...(countParts ? { countParts: () => countParts(bv!, p.cookies) } : {}) });
         } catch (e) {
           const msg = String((e as Error)?.message ?? e);
           if (msg.includes(APPEND_AMBIGUOUS_MARKER)) throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${msg}`);

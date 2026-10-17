@@ -57,14 +57,62 @@ describe("biliup processor (plan 038 T08)", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("a bv already in the table does not recreate P1 (resume)", async () => {
-    const run = vi.fn(async () => "ok");
-    const j = job(files(2)) as Record<string, unknown>;
+  const withRowBv = (n: number) => {
+    const j = job(files(n)) as Record<string, unknown>;
     (j as { bv?: string }).bv = "BV1fffffffff"; // issue-guard: allow (fake BV fixture)
-    const p = makeBiliupProcessor({ run });
+    return j;
+  };
+
+  it("a bv already in the table resumes appending from the confirmed part count", async () => {
+    const run = vi.fn(async () => "ok");
+    const j = withRowBv(4);
+    const p = makeBiliupProcessor({ run, countParts: async () => 2 });
     const r = await p.run(j as never, ctx());
     expect(r.bv).toBe("BV1fffffffff"); // issue-guard: allow (fake BV fixture)
-    expect(run.mock.calls.every((c) => c[0].includes("append"))).toBe(true);
+    // P1 and P2 are already on the archive: only the files at index 2 and 3 are appended, never P1 again.
+    const appended = run.mock.calls.map((c) => c[0] as string[]);
+    expect(appended.every((a) => a.includes("append"))).toBe(true);
+    expect(appended).toHaveLength(2);
+    expect(appended[0]!.join(" ")).toContain((j as { inputs: string[] }).inputs[2]);
+    expect(appended[1]!.join(" ")).toContain((j as { inputs: string[] }).inputs[3]);
+  });
+
+  it("a resumed job with an unknown part count fails closed and appends nothing", async () => {
+    const run = vi.fn(async () => "ok");
+    for (const count of [null, 0, 99]) {
+      await expect(makeBiliupProcessor({ run, countParts: async () => count }).run(withRowBv(3) as never, ctx()))
+        .rejects.toThrow(/cannot confirm how many parts/);
+    }
+    // No counter available at all (injected run, no countParts) is also unknown.
+    await expect(makeBiliupProcessor({ run }).run(withRowBv(3) as never, ctx())).rejects.toThrow(/cannot confirm how many parts/);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("a resumed job whose parts are all on the archive appends nothing", async () => {
+    const run = vi.fn(async () => "ok");
+    const r = await makeBiliupProcessor({ run, countParts: async () => 3 }).run(withRowBv(3) as never, ctx());
+    expect(r.bv).toBe("BV1fffffffff"); // issue-guard: allow (fake BV fixture)
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("params.bv still appends every input (all inputs are parts to append)", async () => {
+    const run = vi.fn(async () => "ok");
+    await makeBiliupProcessor({ run }).run(job(files(2), { bv: "BV1ggggggggg" }) as never, ctx()); // issue-guard: allow (fake BV fixture)
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it("a failed append is checked against the part count: grown count means it was accepted", async () => {
+    let n = 1;
+    const run = vi.fn(async (argv: string[]) => {
+      if (argv.includes("append")) { n = 2; throw new Error("error sending request start=0 end=1 uploader.rs:1"); }
+      return "BV1hhhhhhhhh"; // issue-guard: allow (fake BV fixture)
+    });
+    const countParts = vi.fn(async () => n);
+    const lookup = { run: async () => "[]" };
+    const r = await makeBiliupProcessor({ run, countParts, lookup, expectedDurationSec: 60 }).run(job(files(2)), ctx());
+    expect(r.bv).toBe("BV1hhhhhhhhh"); // issue-guard: allow (fake BV fixture)
+    // The append reached the server although the client saw an error: it must not be retried on another line.
+    expect(run.mock.calls.filter((c) => (c[0] as string[]).includes("append"))).toHaveLength(1);
   });
 
   it("validate rejects missing cookies/title/tid/file", () => {
