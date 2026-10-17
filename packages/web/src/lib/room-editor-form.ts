@@ -129,7 +129,9 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
       ...(recording ? { recording } : {}),
       processing: {
         enabled: f.procEnabled,
-        workers: f.workers,
+        // Empty selection = all nodes. The API rejects `[]`, so say it explicitly with null (which also
+        // clears an earlier restriction; omitting the field would silently keep it).
+        workers: f.workers.length ? f.workers : null,
         requires: f.requires,
         pipeline: {
           steps: {

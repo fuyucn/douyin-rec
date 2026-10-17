@@ -29,6 +29,12 @@ const ok = (r: ReturnType<typeof payloadFromForm>) => {
 };
 
 describe("room editor form ↔ payload", () => {
+  it("sends workers: null (explicit all nodes) for an empty selection, never []", () => {
+    const f = { ...formFromRoom(mkRoom()), workers: [] as string[] };
+    expect(ok(payloadFromForm(f, ctx)).processing?.workers).toBeNull();
+    const g = { ...formFromRoom(mkRoom()), workers: ["vps1", "local"] };
+    expect(ok(payloadFromForm(g, ctx)).processing?.workers).toEqual(["vps1", "local"]);
+  });
   it("round-trips stored fields without silently changing them", () => {
     const p = ok(payloadFromForm(formFromRoom(mkRoom()), ctx));
     expect(p.recording).toMatchObject({ name: "n", quality: "origin", engine: "ffmpeg", segmentSec: 1800, danmu: 1, useCookie: true, scheduleStart: "20:00", scheduleEnd: "02:00", outputFormat: "original", webhook: null });
