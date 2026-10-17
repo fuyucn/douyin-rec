@@ -49,6 +49,8 @@ export interface JobRow {
   outputStem?: string | null;
   /** 收尾后留存转格式的跟随状态(JSON,见 finalize-format `Followups`;plans/036 T9b)。旧库 / 未派发为 null。 */
   followups?: string | null;
+  /** Node upload queue plan (JSON, see node-upload-queue `UploadPlan`; plan 038 T12). Old rows / never queued: null. */
+  uploadPlan?: string | null;
   updatedAt: number;
 }
 
@@ -100,6 +102,8 @@ export class SyncLedger {
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN outputStem TEXT"); } catch { /* 列已存在 */ }
     // 收尾后留存转格式的跟随状态(T9b;JSON)。旧库补列,老行为 NULL = 从未派发。
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN followups TEXT"); } catch { /* 列已存在 */ }
+    // Node upload queue plan (plan 038 T12): persisted job ids per order. Old rows stay NULL = never queued.
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN uploadPlan TEXT"); } catch { /* column exists */ }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -264,6 +268,23 @@ export class SyncLedger {
   getFollowups(streamKey: string): string | null {
     const r = this.db.prepare("SELECT followups FROM sync_jobs WHERE streamKey=?").get(streamKey) as { followups?: string | null } | undefined;
     return r?.followups ?? null;
+  }
+  /**
+   * Claim the right to persist the upload plan: writes only while `uploadPlan` is NULL (first writer wins).
+   * Must happen before any enqueue so a re-entry reuses the same job ids and generation.
+   * Does not touch state, events or `updatedAt`.
+   */
+  claimUploadPlan(streamKey: string, json: string): boolean {
+    const r = this.db.prepare("UPDATE sync_jobs SET uploadPlan=? WHERE streamKey=? AND uploadPlan IS NULL").run(json, streamKey);
+    return Number(r.changes) > 0;
+  }
+  /** Overwrite the plan (recovery moves an order to a new generation). No such job: no-op. */
+  setUploadPlan(streamKey: string, json: string): void {
+    this.db.prepare("UPDATE sync_jobs SET uploadPlan=? WHERE streamKey=?").run(json, streamKey);
+  }
+  getUploadPlan(streamKey: string): string | null {
+    const r = this.db.prepare("SELECT uploadPlan FROM sync_jobs WHERE streamKey=?").get(streamKey) as { uploadPlan?: string | null } | undefined;
+    return r?.uploadPlan ?? null;
   }
   /**
    * 仍有未终结项的场(对账轮询用)。判据 = JSON 里的 `"open":true`(finalize-format 写入,`JSON.stringify` 无空格);

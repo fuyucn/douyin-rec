@@ -8,6 +8,10 @@ export { satisfiesCapabilities, gateWorkers, explainRejections } from "@drec/cor
 export type { CapabilityRejection } from "@drec/core";
 export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";
+export {
+  advanceUpload, ensureUploadPlan, planJobIds,
+  type UploadPlan, type UploadDispatch, type DispatchInput, type BiliupMeta, type PrepSpec as UploadPrepSpec,
+} from "./node-upload-queue.js";
 export type { PipelineDeps, PipelineCfg, PipelineSteps, PipelineCleanup } from "./pipeline.js";
 export {
   buildWorkflow,
