@@ -51,6 +51,8 @@ export interface JobRow {
   followups?: string | null;
   /** Node upload queue plan (JSON, see node-upload-queue `UploadPlan`; plan 038 T12). Old rows / never queued: null. */
   uploadPlan?: string | null;
+  /** Last queue poll snapshot (JSON `NodeUploadStatusDTO`; plan 038 PR5, display only). */
+  uploadStatus?: string | null;
   updatedAt: number;
 }
 
@@ -104,6 +106,8 @@ export class SyncLedger {
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN followups TEXT"); } catch { /* 列已存在 */ }
     // Node upload queue plan (plan 038 T12): persisted job ids per order. Old rows stay NULL = never queued.
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN uploadPlan TEXT"); } catch { /* column exists */ }
+    // Last queue poll snapshot for the queue page (plan 038 PR5). Display only; NULL = never polled.
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN uploadStatus TEXT"); } catch { /* column exists */ }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -281,6 +285,10 @@ export class SyncLedger {
   /** Overwrite the plan (recovery moves an order to a new generation). No such job: no-op. */
   setUploadPlan(streamKey: string, json: string): void {
     this.db.prepare("UPDATE sync_jobs SET uploadPlan=? WHERE streamKey=?").run(json, streamKey);
+  }
+  /** Store the latest queue observation; does not bump updatedAt (the poller's touch owns liveness). */
+  setUploadStatus(streamKey: string, json: string): void {
+    this.db.prepare("UPDATE sync_jobs SET uploadStatus=? WHERE streamKey=?").run(json, streamKey);
   }
   getUploadPlan(streamKey: string): string | null {
     const r = this.db.prepare("SELECT uploadPlan FROM sync_jobs WHERE streamKey=?").get(streamKey) as { uploadPlan?: string | null } | undefined;

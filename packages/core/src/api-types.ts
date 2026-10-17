@@ -289,6 +289,8 @@ export interface HubJobDTO {
   videoDurationSec: number | null;
   /** 该场是否有 job.log(有才给「查看日志」入口)。 */
   hasLog: boolean;
+  /** Queue-managed node upload status (plan 038 PR5); null/absent = not a queued node upload. */
+  nodeUpload?: NodeUploadStatusDTO | null;
 }
 
 /** 一个录制 worker(节点)的展示投影。id 内部稳定主键(UI 不展示);name 友好名。 */
@@ -463,6 +465,43 @@ export interface QueueItemDTO {
    * null = 旧库缺事件表(极老 run),此时回落 updatedAt。
    */
   enqueuedAt: number | null;
+  /** Queue-managed node upload status (plan 038 PR5); null = not a queued node upload. */
+  nodeUpload: NodeUploadStatusDTO | null;
+}
+
+/** Byte progress of a running node upload (biliup: tcp bytes acked across all parts of the job). */
+export interface UploadProgressDTO {
+  doneBytes: number;
+  totalBytes: number;
+  /** Recent transfer rate; null until two samples exist. */
+  bps: number | null;
+  /** Sample time (epoch ms, node clock). */
+  at: number;
+}
+
+/**
+ * Last observation of a queue-managed node upload (plan 038 PR5), stored by the master poller.
+ * Display only: nothing decides on it. `polledAt` tells how fresh it is (a down node stops updating it).
+ */
+export interface NodeUploadStatusDTO {
+  nodeId: string;
+  /** prep = the upload-prep job; biliup = the upload job; blocked = the order cannot advance. */
+  phase: "prep" | "biliup" | "blocked";
+  /** proc-queue job state (pending/running/done/failed/uncertain/cancelled) or enqueue result. */
+  state: string | null;
+  /** biliup step: gate_wait / transfer / submit. */
+  step: string | null;
+  attempts: number | null;
+  /** Backoff: earliest retry time (epoch ms). */
+  notBefore: number | null;
+  /** Runner lease heartbeat on the node (epoch ms). */
+  heartbeatAt: number | null;
+  leaseAlive: boolean | null;
+  progress: UploadProgressDTO | null;
+  bv: string | null;
+  error: string | null;
+  /** Master time of this observation (epoch ms). */
+  polledAt: number;
 }
 
 /**

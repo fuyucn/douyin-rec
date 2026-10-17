@@ -962,3 +962,51 @@ describe("latestRunPerRoom.manualPhase (issue #190)", () => {
     expect(needsManualPhaseOf(null)).toBe("waiting_manual");
   });
 });
+
+describe("queued node upload status (plan 038 PR5)", () => {
+  const KEY = "douyin:7:2026-10-17";
+  const status = (over: Record<string, unknown> = {}) => ({
+    nodeId: "n1", phase: "biliup", state: "running", step: "transfer", attempts: 1, notBefore: null,
+    heartbeatAt: T0, leaseAlive: true, bv: null, error: null, polledAt: T0 + 9_000,
+    progress: { doneBytes: 400, totalBytes: 1_000, bps: 100, at: T0 }, ...over,
+  });
+  function seed(raw: string | null, state = "syncing") {
+    const { dbPath, db } = makeSyncDb();
+    db.exec("ALTER TABLE sync_jobs ADD COLUMN uploadStatus TEXT");
+    seedJob(db, KEY, [["pending", T0], [state, T0 + 1_000]], 3_600);
+    db.prepare("UPDATE sync_jobs SET uploadStatus=? WHERE streamKey=?").run(raw, KEY);
+    db.close();
+    return dbPath;
+  }
+
+  it("exposes the snapshot and replaces the ETA with the measured rate", () => {
+    const dbPath = seed(JSON.stringify(status()));
+    const job = listHubJobs(dbPath, { now: T0 + 10_000 }).jobs[0]!;
+    expect(job.nodeUpload).toMatchObject({ nodeId: "n1", step: "transfer", progress: { doneBytes: 400 } });
+    expect(job.etaSec).toBe(6); // (1000 - 400) / 100
+    const row = buildQueueView(dbPath, { now: T0 + 10_000 }).active.find((r) => r.streamKey === KEY)!;
+    expect(row.nodeUpload?.nodeId).toBe("n1");
+    expect(row.etaSec).toBe(6);
+  });
+
+  it("a stale snapshot, no rate or a non-running job keeps the historical ETA", () => {
+    const cases = [
+      status({ polledAt: T0 - 10 * 60_000 }),
+      status({ progress: { doneBytes: 400, totalBytes: 1_000, bps: null, at: T0 } }),
+      status({ state: "pending" }),
+    ];
+    for (const s of cases) {
+      const eta = listHubJobs(seed(JSON.stringify(s)), { now: T0 + 10_000 }).jobs[0]!.etaSec;
+      expect(eta).not.toBe(6);
+    }
+  });
+
+  it("missing column, malformed JSON and terminal jobs read as null", () => {
+    const { dbPath, db } = makeSyncDb();
+    seedJob(db, KEY, [["syncing", T0]], 100);
+    db.close();
+    expect(listHubJobs(dbPath).jobs[0]!.nodeUpload).toBeNull();
+    expect(listHubJobs(seed("{bad")).jobs[0]!.nodeUpload).toBeNull();
+    expect(listHubJobs(seed(JSON.stringify(status()), "done")).jobs[0]!.nodeUpload).toBeNull();
+  });
+});

@@ -76,6 +76,7 @@ export class TransferWatch {
   private prev: AckSample = null;
   private windowStart: number;
   private windowBytes = 0;
+  private childBytes = 0;
   private readonly alerted = new Set<string>();
 
   constructor(
@@ -91,6 +92,11 @@ export class TransferWatch {
     return this.step;
   }
 
+  /** Bytes acked by the current child so far (sum of per-socket gains; closed sockets keep their share). */
+  get ackedSinceChild(): number {
+    return this.childBytes;
+  }
+
   setStep(step: string): void {
     if (step === this.step) return;
     this.step = step;
@@ -104,6 +110,7 @@ export class TransferWatch {
     this.prev = null;
     this.lastProgress = this.windowStart = t;
     this.windowBytes = 0;
+    this.childBytes = 0;
   }
 
   observe(sample: AckSample): WatchVerdict {
@@ -133,6 +140,7 @@ export class TransferWatch {
     if (gained > 0) {
       this.lastProgress = t;
       this.windowBytes += gained;
+      this.childBytes += gained;
     }
     if (t - this.windowStart >= this.cfg.slowAlertWindowMs) {
       const bps = (this.windowBytes * 1000) / (t - this.windowStart);

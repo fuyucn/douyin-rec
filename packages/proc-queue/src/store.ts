@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   assertJobInvariants, canTransition, cancelOutcome, jobIdOf,
-  type EnqueueResult, type JobState, type ProcessJob,
+  type EnqueueResult, type JobState, type ProcessJob, type UploadProgress,
 } from "@drec/core";
 import { migrateSchema } from "./schema.js";
 import { ProcLeaseStore } from "./lease.js";
@@ -71,6 +71,8 @@ export interface ProcJobRecord extends ProcessJob {
   childPid: number | null;
   childPidStartedAt: string | null;
   prepJobId: string | null;
+  /** Latest byte progress reported by the processor (display only). */
+  progress: UploadProgress | null;
 }
 
 export type { LeaseRow } from "./lease-types.js";
@@ -143,9 +145,21 @@ function toRecord(r: Row): ProcJobRecord {
     childPid: r.childPid == null ? null : Number(r.childPid),
     childPidStartedAt: r.childPidStartedAt == null ? null : String(r.childPidStartedAt),
     prepJobId: r.prepJobId == null ? null : String(r.prepJobId),
+    progress: parseProgress(r.progress),
   };
   if (outputs) rec.outputs = outputs;
   return rec;
+}
+
+/** Display-only JSON: anything malformed reads as "no progress", never as an error. */
+function parseProgress(raw: unknown): UploadProgress | null {
+  if (raw == null) return null;
+  try {
+    const p = JSON.parse(String(raw)) as Partial<UploadProgress>;
+    const num = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x) && x >= 0;
+    if (!num(p.doneBytes) || !num(p.totalBytes) || !num(p.at)) return null;
+    return { doneBytes: p.doneBytes, totalBytes: p.totalBytes, bps: num(p.bps) ? p.bps : null, at: p.at };
+  } catch { return null; }
 }
 
 function toLease(r: Row): LeaseRow {
@@ -365,6 +379,15 @@ export class ProcQueueStore {
     });
   }
 
+  /**
+   * Persist byte progress of a running job (display only). Does not bump updatedAt: progress is
+   * written every few seconds and must not look like a state change to anything sorting by it.
+   */
+  setProgress(jobId: string, progress: UploadProgress | null): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET progress=? WHERE jobId=? AND state='running'")
+      .run(progress ? JSON.stringify(progress) : null, jobId).changes > 0);
+  }
+
   /** Advance the observable step; does not change the state machine. */
   updateStep(jobId: string, step: string | null): boolean {
     return this.tx(() => this.db.prepare("UPDATE proc_jobs SET step=?, updatedAt=? WHERE jobId=? AND state='running'")
@@ -473,7 +496,7 @@ export class ProcQueueStore {
         if (o.accept && !o.accept(rec)) continue;
         this.db.prepare(
           `UPDATE proc_jobs SET state='running', claimedBy=?, attempts=attempts+1, everClaimed=1,
-             startedAt=?, updatedAt=?, error=NULL WHERE jobId=? AND state='pending'`,
+             startedAt=?, updatedAt=?, error=NULL, progress=NULL WHERE jobId=? AND state='pending'`,
         ).run(o.owner, t, t, rec.jobId);
         if (rec.orderKey) {
           this.db.prepare(

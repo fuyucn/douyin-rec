@@ -11,7 +11,7 @@ import {
 import { useAtomValue } from "jotai";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO, type RollingDeliveryDTO } from "../api/client";
+import { api, type HubPoolSnapshotDTO, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type RollingDeliveryDTO } from "../api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/HubJobs";
 import { platformLabel, roomId } from "../lib/labels";
@@ -127,6 +127,35 @@ function PoolBar({ pool }: { pool: HubPoolSnapshotDTO }): ReactNode {
           <AlertTriangle className="w-4 h-4" />
         </span>
       </div>
+    </div>
+  );
+}
+
+/** A poll snapshot older than this is shown as stale (the master polls every minute). */
+const NODE_UPLOAD_STALE_MS = 3 * 60_000;
+
+/**
+ * Queued node upload line (plan 038 PR5): node · phase/step · bytes · rate · heartbeat · attempt.
+ * Times come from the node and the master; small clock skew only shifts the "ago" texts.
+ */
+function nodeUploadLine(s: NodeUploadStatusDTO, now: number, t: TFunc): ReactNode {
+  const ago = (at: number): string => humanSec(Math.max(0, Math.round((now - at) / 1000)));
+  const stepKey = s.step === "gate_wait" || s.step === "transfer" || s.step === "submit" ? s.step : null;
+  const parts: string[] = [t("queue.nodeUpload.node", { node: s.nodeId }), t(`queue.nodeUpload.${s.phase}`)];
+  if (s.phase === "biliup" && s.state === "running" && stepKey) parts.push(t(`queue.nodeUpload.step.${stepKey}`));
+  else if (s.state) parts.push(s.state);
+  if (s.progress && s.progress.totalBytes > 0) {
+    parts.push(`${fmtBytes(s.progress.doneBytes)} / ${fmtBytes(s.progress.totalBytes)}`);
+    if (s.progress.bps) parts.push(t("queue.nodeUpload.rate", { rate: fmtBytes(s.progress.bps) }));
+  }
+  if (s.heartbeatAt) parts.push(t("queue.nodeUpload.heartbeat", { time: ago(s.heartbeatAt) }));
+  if (s.attempts && s.attempts > 1) parts.push(t("queue.nodeUpload.attempt", { n: s.attempts }));
+  if (s.notBefore && s.notBefore > now) parts.push(t("queue.nodeUpload.retryIn", { time: humanSec(Math.round((s.notBefore - now) / 1000)) }));
+  const stale = now - s.polledAt > NODE_UPLOAD_STALE_MS;
+  return (
+    <div className="text-[11px] mt-0.5 font-mono" style={{ color: stale ? "var(--warning-fg)" : "var(--muted-soft)" }} title={s.error ?? undefined}>
+      {parts.join(" · ")}
+      {stale && <span> · {t("queue.nodeUpload.stale", { time: ago(s.polledAt) })}</span>}
     </div>
   );
 }
@@ -425,6 +454,7 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog }: { item: QueueItem
           {rowTiming(item, now, dataAt, t)}
           {finished && item.winnerWorker && <span> · {t("hub.jobs.selected", { worker: item.winnerWorker })}</span>}
         </div>
+        {!finished && item.nodeUpload && nodeUploadLine(item.nodeUpload, now, t)}
         {/* 真故障/已停止:把台账里的 error 亮出来(否则只看到「待人工」不知为何)。
             两行截断 + 完整内容进 title:错误文本可能很长,不截断会把整行撑成小作文、挤掉同屏其它场次。 */}
         {((manual || stopped) && item.error) && (

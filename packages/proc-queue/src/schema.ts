@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 const DDL = `
 CREATE TABLE IF NOT EXISTS proc_jobs(
   jobId TEXT PRIMARY KEY,
@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS proc_jobs(
   bv TEXT,
   childPid INTEGER,
   childPidStartedAt TEXT,
-  prepJobId TEXT);
+  prepJobId TEXT,
+  progress TEXT);
 CREATE INDEX IF NOT EXISTS idx_proc_jobs_kind_state ON proc_jobs(kind, state, createdAt);
 CREATE INDEX IF NOT EXISTS idx_proc_jobs_logical ON proc_jobs(kind, logicalKey);
 CREATE TABLE IF NOT EXISTS proc_runner_lease(
@@ -60,6 +61,9 @@ export const V2_COLUMNS: readonly [string, string][] = [
   ["bv", "TEXT"], ["childPid", "INTEGER"], ["childPidStartedAt", "TEXT"], ["prepJobId", "TEXT"],
 ];
 
+/** Columns added in v2 -> v3 (plan 038 PR5: byte progress JSON for the queue page). */
+export const V3_COLUMNS: readonly [string, string][] = [["progress", "TEXT"]];
+
 type Row = Record<string, unknown>;
 
 /**
@@ -74,7 +78,7 @@ export function migrateSchema(db: DatabaseSync): void {
       if (v < 1) db.exec(DDL);
       if (v >= 1) {
         const cols = new Set((db.prepare("PRAGMA table_info(proc_jobs)").all() as Row[]).map((r) => String(r.name)));
-        for (const [name, type] of V2_COLUMNS) {
+        for (const [name, type] of [...V2_COLUMNS, ...V3_COLUMNS]) {
           if (!cols.has(name)) db.exec(`ALTER TABLE proc_jobs ADD COLUMN ${name} ${type}`);
         }
       }

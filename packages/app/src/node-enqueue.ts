@@ -190,7 +190,13 @@ export function handleProcStatus(dataRoot: string, jobIds: string[]): ProcessRec
     for (const id of jobIds) {
       const row = store.get(id);
       if (!row) continue;
-      out.push({ jobId: id, state: row.state, ...(row.error ? { error: row.error } : {}), ...(row.bv ? { bv: row.bv } : {}), ...(row.step ? { step: row.step } : {}), ...(row.state === "done" && row.resultOutputs ? { outputs: row.resultOutputs } : {}), leaseAlive: store.leaseAlive(row.kind) });
+      out.push({
+        jobId: id, state: row.state, ...(row.error ? { error: row.error } : {}), ...(row.bv ? { bv: row.bv } : {}), ...(row.step ? { step: row.step } : {}),
+        ...(row.state === "done" && row.resultOutputs ? { outputs: row.resultOutputs } : {}), leaseAlive: store.leaseAlive(row.kind),
+        // Display-only fields for the master queue page (plan 038 PR5).
+        attempts: row.attempts, notBefore: row.notBefore, heartbeatAt: store.getLease(row.kind)?.heartbeatAt ?? null,
+        ...(row.state === "running" && row.progress ? { progress: row.progress } : {}),
+      });
     }
     return out;
   } catch {

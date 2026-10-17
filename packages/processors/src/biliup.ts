@@ -2,11 +2,11 @@
  * biliup processor (plan 038 T08/T15): create the first part, then append each later part.
  * A transfer with no tcp progress for stallMs is stopped and retried with proof; submit is never killed.
  */
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import {
   APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
-  type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext,
+  type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress,
 } from "@drec/core";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
 import { TransferWatch, readTcpAcked, watchConfigOf, type AckSample } from "./biliup-progress.js";
@@ -67,6 +67,10 @@ export interface BiliupDeps {
   probe?: typeof probeChild;
   tickMs?: number;
   killGraceMs?: number;
+  /** Minimum gap between progress writes (default 30s); progress is display-only. */
+  progressEveryMs?: number;
+  /** File size lookup for progress totals (tests inject). */
+  sizeOf?: (path: string) => number;
   /** Account rate-limit gate (601/21566 cooldown + window), opened per run; injected by the CLI. */
   gate?: () => { run<T>(key: string, fn: () => Promise<T>): Promise<T> };
   accountKey?: (cookiesPath: string) => string;
@@ -124,6 +128,8 @@ function expectedDuration(job: ProcessJob, deps: BiliupDeps): number {
 interface Supervisor {
   run: (argv: string[]) => Promise<string>;
   setStep: (step: string) => void;
+  /** The next run uploads one part: bytes already uploaded by earlier parts, this part's size, job total. */
+  setPart: (baseBytes: number, partBytes: number, totalBytes: number) => void;
   /** Rejects with UncertainOutcome once submit passes maxWallMs; never resolves. */
   abandoned: Promise<never>;
   wallHit: () => boolean;
@@ -140,10 +146,25 @@ function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supe
   let giveUp: (e: Error) => void = () => {};
   const abandoned = new Promise<never>((_, reject) => { giveUp = reject; });
   abandoned.catch(() => {});
+  const now = deps.now ?? Date.now;
+  const part = { base: 0, size: 0, total: 0 };
+  let lastWrite: UploadProgress | null = null;
+  // Progress = finished parts + this child's acked bytes, capped at the part size (acked includes HTTP overhead).
+  const report = (force: boolean): void => {
+    if (part.total <= 0) return;
+    const t = now();
+    if (!force && lastWrite && t - lastWrite.at < (deps.progressEveryMs ?? 30_000)) return;
+    const doneBytes = Math.min(part.total, part.base + Math.min(part.size, watch.ackedSinceChild));
+    const dt = lastWrite ? t - lastWrite.at : 0;
+    const bps = lastWrite && dt > 0 && doneBytes >= lastWrite.doneBytes ? Math.round(((doneBytes - lastWrite.doneBytes) * 1000) / dt) : null;
+    lastWrite = { doneBytes, totalBytes: part.total, bps, at: t };
+    ctx.setState?.({ progress: lastWrite });
+  };
   const timer = setInterval(() => {
     const c = child;
     if (!c || c.exited) return;
     const v = watch.observe((deps.readAcked ?? readTcpAcked)(c.pid));
+    if (watch.currentStep === "transfer") report(false);
     if (v.kind === "wall") wall = true;
     // Past the wall, a submit (now or later in this job) makes the outcome unknown; it is never killed.
     if (wall && watch.currentStep === "submit" && !gaveUp) {
@@ -157,7 +178,13 @@ function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supe
     }
   }, deps.tickMs ?? 5_000);
   timer.unref?.();
-  const setStep = (step: string): void => { watch.setStep(step); ctx.setState?.({ step }); };
+  const setStep = (step: string): void => {
+    watch.setStep(step);
+    ctx.setState?.({ step });
+    // Every byte of this part is acked once biliup reports all files uploaded.
+    if (step === "submit") { part.base += part.size; part.size = 0; report(true); }
+  };
+  const setPart = (base: number, size: number, total: number): void => { part.base = base; part.size = size; part.total = total; };
   const exec = deps.run ?? runBiliup;
   const run = async (argv: string[]): Promise<string> => {
     // An abandoned run (job already uncertain) must never start another biliup child.
@@ -182,7 +209,7 @@ function supervise(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps): Supe
       me.exited = true;
     }
   };
-  return { run, setStep, abandoned, wallHit: () => wall, stop: () => clearInterval(timer) };
+  return { run, setStep, setPart, abandoned, wallHit: () => wall, stop: () => clearInterval(timer) };
 }
 
 /** Mutable progress of one run, read by the stall handler. */
@@ -197,6 +224,9 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   const key = deps.accountKey?.(cookies) ?? "";
   // Every create/append takes a fresh quota slot, like the blocking path; gate_wait is never a stall.
   const gated = <T>(fn: () => Promise<T>): Promise<T> => (gate ? gate.run(key, fn) : fn());
+  const sizes = files.map((f) => { try { return (deps.sizeOf ?? ((x: string) => statSync(x).size))(f); } catch { return 0; } });
+  const total = sizes.reduce((a, b) => a + b, 0);
+  const partAt = (i: number): void => sup.setPart(sizes.slice(0, i).reduce((a, b) => a + b, 0), sizes[i] ?? 0, total);
   st.bv = p.bv;
   if (!st.bv) {
     sup.setStep("gate_wait");
@@ -206,6 +236,7 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
     const proof = await findRecentArchive(cookies, p.title, expected, deps.lookup);
     if (proof === "yes") throw new Error("an archive with the same title and duration already exists; refusing to create a duplicate");
     if (proof === "unknown") throw new Error("cannot confirm whether a draft exists; needs manual verification");
+    partAt(0);
     st.bv = await gated(() => uploadPlain({ plain: { ...meta, video: files[0]! }, run: sup.run }));
     ctx.setState?.({ bv: st.bv });
   }
@@ -224,6 +255,7 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   }
   for (let i = appendFrom; i < files.length; i++) {
     sup.setStep("gate_wait");
+    partAt(i);
     try {
       await gated(() => appendGroup({ ...meta, bv, files: [files[i]!], run: sup.run, ...(countParts ? { countParts: () => countParts(bv, cookies) } : {}) }));
     } catch (e) {

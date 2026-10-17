@@ -11,6 +11,7 @@ import type { NodeSideUploadArgs } from "./node-side-upload.js";
 import { completeFromDispatch } from "./node-upload-complete.js";
 import { DEFAULT_NODE_UPLOAD, decideUploadMode, rollingEnabledCount } from "./node-upload-config.js";
 import { advanceUpload, ensureUploadPlan, type UploadInput } from "./node-upload-queue.js";
+import { uploadStatusOf } from "./node-upload-status.js";
 
 /** Titles rendered exactly like the blocking node pipeline (submission → `{title}` titleTemplate → stem). */
 export function queueUploadInput(o: NodeSideUploadArgs): UploadInput {
@@ -78,7 +79,9 @@ export async function tryQueueUpload(o: NodeSideUploadArgs, capabilities?: reado
   ledger.syncNodeState(streamKey, "node_upload", "running");
   jlog(`节点侧上传进入队列: node=${plan.nodeId} prep=${plan.prepJobId} biliup=${plan.biliupJobId}`);
   try {
-    completeFromDispatch(ledger, streamKey, await advanceUpload(transport, plan), o.notify);
+    const d = await advanceUpload(transport, plan);
+    try { ledger.setUploadStatus(streamKey, JSON.stringify(uploadStatusOf(plan, d, Date.now()))); } catch { /* display only */ }
+    completeFromDispatch(ledger, streamKey, d, o.notify);
   } catch (e) {
     // The plan is persisted: the poller retries with the same job ids, so a failed first step is harmless.
     jlog(`队列首次推进失败(${(e as Error)?.message ?? e}),由轮询重试`);

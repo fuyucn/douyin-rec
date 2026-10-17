@@ -223,12 +223,12 @@ describe("_proc-status", () => {
   it("回执含 state / leaseAlive / error;未知 jobId 不出现", () => {
     const input = file(rec, "a.ts");
     const id = handleEnqueue(root, req(mkJob(input)), opts()).results[0].jobId;
-    expect(handleProcStatus(root, [id, "remux:nope@1-1#g1"])).toEqual([{ jobId: id, state: "pending", leaseAlive: false }]);
+    expect(handleProcStatus(root, [id, "remux:nope@1-1#g1"])).toEqual([{ jobId: id, state: "pending", leaseAlive: false, attempts: 0, notBefore: null, heartbeatAt: null }]);
     const s = store();
     s.acquireLease("remux", "A", { pid: process.pid });
     const c = s.claim({ kinds: ["remux"], owner: "A" })!;
     s.finish(c.jobId, "A", { state: "failed", error: "boom" });
-    expect(handleProcStatus(root, [id])).toEqual([{ jobId: id, state: "failed", error: "boom", leaseAlive: true }]);
+    expect(handleProcStatus(root, [id])).toEqual([{ jobId: id, state: "failed", error: "boom", leaseAlive: true, attempts: 1, notBefore: null, heartbeatAt: expect.any(Number) }]);
   });
 
   it("jobIds 编解码往返;非法 base64 / 非数组抛错", () => {
@@ -266,7 +266,7 @@ describe("Transport:ssh / local 往返一致", () => {
     expect(viaSsh.results.map((r) => r.state)).toEqual(["pending", "rejected"]);
     const ids = viaSsh.results.map((r) => r.jobId);
     expect(await ssh(fakeNodeRun(root)).procStatus!(ids)).toEqual(await local().procStatus!(ids));
-    expect(await local().procStatus!(ids)).toEqual([{ jobId: ids[0], state: "pending", leaseAlive: false }]);
+    expect(await local().procStatus!(ids)).toEqual([{ jobId: ids[0], state: "pending", leaseAlive: false, attempts: 0, notBefore: null, heartbeatAt: null }]);
   });
 
   it("旧 bundle(未知命令)→ ProcUnsupported;可达性错误不被误映射", async () => {
