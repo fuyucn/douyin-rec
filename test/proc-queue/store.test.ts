@@ -23,7 +23,7 @@ describe("procQueueDbPath", () => {
 });
 
 describe("迁移", () => {
-  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): user_version=2, data kept, tables present", () => {
+  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): user_version=3, data kept, tables present", () => {
     const s1 = env.open();
     const r = s1.enqueue(env.job("a.ts"), roots());
     expect(r.state).toBe("pending");
@@ -31,7 +31,7 @@ describe("迁移", () => {
     const s3 = env.open();
     expect(s3.get(r.jobId)?.state).toBe("pending");
     const raw = new DatabaseSync(env.dbPath);
-    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
+    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3);
     const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((t) => t.name);
     expect(tables).toEqual(expect.arrayContaining(["proc_jobs", "proc_runner_lease", "proc_order_cursor"]));
     raw.close();
@@ -562,6 +562,42 @@ describe("v1 -> v2 migration (plan 038 T01)", () => {
     expect(s.get("old")?.orderKey).toBeNull();
     const tables = (new DatabaseSync(path).prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((r) => r.name);
     expect(tables).toContain("proc_order_cursor");
+    s.close();
+  });
+});
+
+describe("v2 -> v3 migration + progress (plan 038 PR5)", () => {
+  it("an existing v2 db gains the progress column; old rows read it as null", () => {
+    const s0 = env.open();
+    const r = s0.enqueue(env.job("a.ts"), roots());
+    s0.close();
+    const raw = new DatabaseSync(env.dbPath);
+    raw.exec("ALTER TABLE proc_jobs DROP COLUMN progress; PRAGMA user_version=2;");
+    raw.close();
+    const s = env.open();
+    const cols = new Set((new DatabaseSync(env.dbPath).prepare("PRAGMA table_info(proc_jobs)").all() as Array<{ name: string }>).map((c) => c.name));
+    expect(cols.has("progress")).toBe(true);
+    expect(s.get(r.jobId)?.progress).toBeNull();
+    s.close();
+  });
+
+  it("progress is written only while running, cleared on the next claim, and malformed JSON reads as null", () => {
+    const s = env.open();
+    const id = s.enqueue(env.job("a.ts"), roots()).jobId;
+    const p = { doneBytes: 10, totalBytes: 100, bps: 5, at: 1 };
+    expect(s.setProgress(id, p)).toBe(false); // pending: not written
+    s.acquireLease("fake", "A", { pid: process.pid });
+    expect(s.claim({ kinds: ["fake"], owner: "A" })?.jobId).toBe(id);
+    expect(s.setProgress(id, p)).toBe(true);
+    expect(s.get(id)?.progress).toEqual(p);
+    const raw = new DatabaseSync(env.dbPath);
+    raw.prepare("UPDATE proc_jobs SET progress='{bad' WHERE jobId=?").run(id);
+    expect(s.get(id)?.progress).toBeNull();
+    // A row back in pending with stale progress: the next claim starts from a clean slate.
+    raw.prepare("UPDATE proc_jobs SET state='pending', claimedBy=NULL, progress=? WHERE jobId=?").run(JSON.stringify(p), id);
+    raw.close();
+    expect(s.claim({ kinds: ["fake"], owner: "A" })?.jobId).toBe(id);
+    expect(s.get(id)?.progress).toBeNull();
     s.close();
   });
 });

@@ -9,9 +9,10 @@ import type { NotifyEvent } from "@drec/core";
 import type { SyncLedger } from "./ledger.js";
 import { advanceUpload, type UploadDispatch, type UploadPlan } from "./node-upload-queue.js";
 import { ProcUnsupported, type Transport } from "./transport.js";
+import { uploadStatusOf } from "./node-upload-status.js";
 
 export interface UploadPollerOpts {
-  ledger: Pick<SyncLedger, "listUploadPlans" | "touch">;
+  ledger: Pick<SyncLedger, "listUploadPlans" | "touch" | "setUploadStatus">;
   /** Getter, not a map: the hub reloads transports from config between ticks. */
   transports: () => Map<string, Transport>;
   unreachableAlertMs: number;
@@ -55,6 +56,9 @@ export function createUploadQueuePoller(o: UploadPollerOpts): { poll(): Promise<
       return fail(plan.nodeId, streamKey, (e as Error).message, e instanceof ProcUnsupported);
     }
     down.delete(plan.nodeId);
+    // Display only: a failed snapshot write must never stop the outcome mapping below.
+    try { o.ledger.setUploadStatus(streamKey, JSON.stringify(uploadStatusOf(plan, d, now()))); }
+    catch (e) { o.log?.(`[upload-queue] ${streamKey}: status snapshot not saved: ${(e as Error).message}`); }
     // Any observation of a live order is proof of life; terminal outcomes are the callback's business.
     if (d.phase !== "prep-failed" && d.phase !== "blocked") o.ledger.touch(streamKey);
     await o.onDispatch?.(streamKey, plan, d);

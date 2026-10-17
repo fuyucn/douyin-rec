@@ -14,7 +14,7 @@ import { join } from "node:path";
 import {
   HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, readyNodes, STAGE_READY, USER_STOP,
   sanitizeStreamKey,
-  type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO, type QueuePhase,
+  type HubPoolSnapshotDTO, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type QueuePhase,
 } from "@drec/core";
 import { rootHubConfig, rootStageDir } from "./paths.js";
 
@@ -51,6 +51,8 @@ export interface HubJobView {
   videoDurationSec: number | null;
   /** 该场 job.log 是否存在(存在才给「查看日志」入口)。 */
   hasLog: boolean;
+  /** Queue-managed node upload status (plan 038 PR5); null = not a queued node upload. */
+  nodeUpload: NodeUploadStatusDTO | null;
 }
 
 /** 终态集合(唯一真理 = core 的 hub 台账契约,与 orchestrator SyncLedger 对齐)。 */
@@ -161,7 +163,27 @@ export function jobLogPath(streamKey: string, stageDir = hubStageDir()): string 
   return join(stageDir, sanitizeStreamKey(streamKey), "job.log");
 }
 
-interface RawJob { streamKey: string; state: string; winnerWorker: string | null; bv: string | null; error: string | null; fails: number; updatedAt: number; }
+interface RawJob { streamKey: string; state: string; winnerWorker: string | null; bv: string | null; error: string | null; fails: number; updatedAt: number; uploadStatus?: string | null }
+
+/** Older snapshots than this no longer drive the ETA (the node stopped answering). */
+const NODE_UPLOAD_ETA_FRESH_MS = 5 * 60_000;
+
+/** Display-only JSON written by the master poller; malformed / old rows read as null. */
+export function parseNodeUploadStatus(raw: string | null | undefined): NodeUploadStatusDTO | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as NodeUploadStatusDTO;
+    return v && typeof v.nodeId === "string" && typeof v.phase === "string" && typeof v.polledAt === "number" ? v : null;
+  } catch { return null; }
+}
+
+/** ETA from measured bytes/s of a running transfer; null when there is nothing fresh to measure. */
+export function nodeUploadEtaSec(s: NodeUploadStatusDTO | null, now: number): number | null {
+  const p = s?.progress;
+  if (!s || !p || s.phase !== "biliup" || s.state !== "running" || now - s.polledAt > NODE_UPLOAD_ETA_FRESH_MS) return null;
+  if (!p.bps || p.bps <= 0 || p.totalBytes <= p.doneBytes) return null;
+  return Math.ceil((p.totalBytes - p.doneBytes) / p.bps);
+}
 
 /**
  * 历史步骤速率:最近 done 的 job 里,step 耗时 / winner 视频时长 的中位数。
@@ -402,6 +424,9 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
           etaSec = remain > 0 ? remain : null;
         }
       }
+      // A queued node upload measures its own rate; that beats the historical step-rate guess.
+      const nodeUpload = terminal ? null : parseNodeUploadStatus(j.uploadStatus);
+      etaSec = nodeUploadEtaSec(nodeUpload, now) ?? etaSec;
       return {
         streamKey: j.streamKey, state: j.state,
         winnerWorker: j.winnerWorker ?? null, candidates, bv: j.bv ?? null, error: j.error ?? null,
@@ -413,6 +438,7 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         nodeStates,
         currentStepSec, etaSec, videoDurationSec,
         hasLog: existsSync(jobLogPath(j.streamKey, stageDir)),
+        nodeUpload,
       };
     });
     return { jobs: views, total };
@@ -692,6 +718,7 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
         : null,
       // 入队时刻 = 首个事件(pending);startedAt 即 events[0].at,台账有事件就必有。
       enqueuedAt: job.startedAt,
+      nodeUpload: job.nodeUpload,
     };
   };
 

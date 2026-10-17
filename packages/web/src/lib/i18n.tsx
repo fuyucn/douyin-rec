@@ -499,6 +499,11 @@ const DICT = {
       nothingDone: "尚未开始",
       doneNoStepRecord: "（无步骤记录）",
       queuedAt: "等锁 · 第 {n} 位",
+      nodeUpload: {
+        node: "节点 {node}", prep: "预处理", biliup: "上传", blocked: "无法推进",
+        step: { gate_wait: "等配额", transfer: "传输中", submit: "提交中" },
+        rate: "{rate}/s", heartbeat: "心跳 {time}前", attempt: "第 {n} 次", retryIn: "{time}后重试", stale: "状态停在 {time}前",
+      },
       doing: { preparing: "准备中" },
       phase: { running: "执行中", queued: "排队中", pulling: "拉取中", settle: "等待收播", manual: "失败·待处理", uploadWait: "待上传", stopped: "已停止", done: "已完成", failed: "失败" },
       section: { all: "全部记录", delivering: "边录边传中" },
@@ -963,6 +968,11 @@ const DICT = {
       nothingDone: "Not started",
       doneNoStepRecord: "(no step record)",
       queuedAt: "waiting · #{n}",
+      nodeUpload: {
+        node: "node {node}", prep: "prep", biliup: "upload", blocked: "cannot advance",
+        step: { gate_wait: "waiting for quota", transfer: "transferring", submit: "submitting" },
+        rate: "{rate}/s", heartbeat: "heartbeat {time} ago", attempt: "attempt {n}", retryIn: "retry in {time}", stale: "status from {time} ago",
+      },
       doing: { preparing: "Preparing" },
       phase: { running: "Running", queued: "Queued", pulling: "Pulling", settle: "Waiting to end", manual: "Failed · needs action", uploadWait: "Ready to upload", stopped: "Stopped", done: "Done", failed: "Failed" },
       section: { all: "All records", delivering: "Uploading while recording" },

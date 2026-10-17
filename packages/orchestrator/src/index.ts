@@ -13,6 +13,7 @@ export {
   type UploadPlan, type UploadDispatch, type UploadInput, type BiliupMeta, type PrepSpec as UploadPrepSpec,
 } from "./node-upload-queue.js";
 export { applyUploadOutcome, completeFromDispatch, mapUploadOutcome, type UploadOutcome } from "./node-upload-complete.js";
+export { uploadStatusOf } from "./node-upload-status.js";
 export { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
 export {
   QUEUE_CAPABILITY, DEFAULT_NODE_UPLOAD, parseNodeUploadConfig, decideUploadMode, canFallbackToBlocking, rollingEnabledCount,

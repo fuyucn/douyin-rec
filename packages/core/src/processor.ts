@@ -10,6 +10,7 @@
  */
 
 import { isAbsolute, relative, resolve } from "node:path";
+import type { UploadProgressDTO } from "./api-types.js";
 import { isVideoFileName } from "./output-format.js";
 
 export type ResourceClass = "cpu" | "net" | "upload";
@@ -58,8 +59,11 @@ export interface ProcessContext {
    */
   alert(msg: string): void;
   /** Persist observable progress fields (step / bv / child pid). Processor never touches the store. */
-  setState?(patch: { step?: string | null; bv?: string | null; childPid?: number | null; childPidStartedAt?: string | null }): void;
+  setState?(patch: { step?: string | null; bv?: string | null; childPid?: number | null; childPidStartedAt?: string | null; progress?: UploadProgress | null }): void;
 }
+
+/** Byte progress of a running transfer; the shape lives in api-types so the web build can share it. */
+export type UploadProgress = UploadProgressDTO;
 
 export interface ProcessResult {
   /** 实际产物绝对路径。 */
@@ -332,6 +336,14 @@ export interface ProcessReceipt {
   outputs?: string[];
   /** 持有租约的执行者是否存活(master 据此判「节点无执行者」)。 */
   leaseAlive: boolean;
+  /** Claims so far (plan 038 PR5, display only; old nodes omit these). */
+  attempts?: number;
+  /** Earliest time a retry may be claimed (backoff); null/absent = none. */
+  notBefore?: number | null;
+  /** Last runner lease heartbeat for this kind (epoch ms). */
+  heartbeatAt?: number | null;
+  /** Latest byte progress reported by the processor. */
+  progress?: UploadProgress | null;
 }
 
 const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);

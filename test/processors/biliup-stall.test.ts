@@ -245,3 +245,73 @@ describe("biliup-queue capability", () => {
     expect(advertisedCapabilities()).toEqual(["biliup", "biliup-queue"]);
   });
 });
+
+// ── progress (plan 038 PR5) ──────────────────────────────────────────────────
+
+describe("TransferWatch.ackedSinceChild", () => {
+  it("sums per-socket gains, keeps a closed socket's share and restarts per child", () => {
+    const { w, clock } = mkWatch();
+    w.setStep("transfer");
+    clock.t = 1; w.observe(new Map([["a", 500]]));
+    clock.t = 2; w.observe(new Map([["b", 200]])); // a closed, b new
+    expect(w.ackedSinceChild).toBe(700);
+    w.childStarted();
+    expect(w.ackedSinceChild).toBe(0);
+  });
+});
+
+describe("biliup processor progress", () => {
+  it("reports cumulative bytes across parts, capped per part, with a rate once two samples exist", async () => {
+    const releases: Array<() => void> = [];
+    const lines: Array<(l: string) => void> = [];
+    let acked = 0;
+    const run = vi.fn((argv: string[], hooks?: BiliupHooks) => new Promise<string>((res) => {
+      hooks?.onSpawn?.(20 + releases.length);
+      acked = 0;
+      lines.push((l) => hooks?.onLine?.(l));
+      releases.push(() => res(argv.includes("upload") ? "BV1aaaaaaaaa" : "ok")); // issue-guard: allow (fake BV fixture)
+    }));
+    const p = makeBiliupProcessor(base({
+      run, progressEveryMs: 0, sizeOf: () => 1000, readAcked: () => new Map([["s", (acked += 400)]]),
+      lookup: { run: async () => "[]" }, countParts: async () => 1,
+    }));
+    const { c, setState } = ctx();
+    const done = p.run(job(files(2), {}, { stallMs: 60_000 }), c);
+    const progress = () => setState.mock.calls.map((x) => (x[0] as { progress?: { doneBytes: number; totalBytes: number; bps: number | null } }).progress).filter(Boolean);
+    const settle = () => new Promise((r) => setTimeout(r, 40));
+    await settle();
+    expect(progress().every((x) => x!.totalBytes === 2000 && x!.doneBytes <= 1000)).toBe(true);
+    expect(progress().some((x) => x!.doneBytes === 1000)).toBe(true); // 400+400+... capped at the part size
+    lines[0]!("All files uploaded successfully");
+    releases[0]!();
+    await settle();
+    expect(progress().at(-1)!.doneBytes).toBeGreaterThan(1000);
+    expect(progress().some((x) => x!.bps !== null)).toBe(true);
+    lines[1]!("All files uploaded successfully");
+    expect(progress().at(-1)!.doneBytes).toBe(2000);
+    releases[1]!();
+    await done;
+    const seq = progress().map((x) => x!.doneBytes);
+    expect(seq).toEqual([...seq].sort((a, b) => a - b)); // never goes backwards
+  });
+});
+
+describe("biliup processor progress write failures", () => {
+  it("a throwing progress write is logged and the upload still finishes", async () => {
+    let finish: () => void = () => {};
+    const run = vi.fn((_a: string[], hooks?: BiliupHooks) => new Promise<string>((res) => {
+      hooks?.onSpawn?.(30);
+      finish = () => { hooks?.onLine?.("All files uploaded successfully"); res("BV1aaaaaaaaa"); }; // issue-guard: allow (fake BV fixture)
+    }));
+    const logs: string[] = [];
+    const setState = vi.fn((patch: { progress?: unknown }) => { if (patch.progress) throw new Error("database is locked"); });
+    const c = { log: (m: string) => logs.push(m), alert() {}, markProgress() {}, assertLease() {}, signal: new AbortController().signal, setState } as never;
+    let n = 0;
+    const p = makeBiliupProcessor(base({ run, progressEveryMs: 0, sizeOf: () => 10, readAcked: () => new Map([["s", ++n]]), lookup: { run: async () => "[]" } }));
+    const pending = p.run(job(files(1), {}, { stallMs: 60_000 }), c);
+    await new Promise((r) => setTimeout(r, 30));
+    finish();
+    expect((await pending).bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
+    expect(logs.some((m) => /progress not saved/.test(m))).toBe(true);
+  });
+});

@@ -314,6 +314,7 @@ export class ProcRunner {
         if (patch.step !== undefined) this.o.store.updateStep(job.jobId, patch.step);
         if (patch.bv !== undefined) this.o.store.setBv(job.jobId, patch.bv ?? "");
         if (patch.childPid !== undefined) this.o.store.setChildPid(job.jobId, patch.childPid, patch.childPidStartedAt ?? null);
+        if (patch.progress !== undefined) this.o.store.setProgress(job.jobId, patch.progress);
       },
       log: (m) => this.log(`${job.jobId}: ${m}`),
       alert: (m) => this.o.alert(job.owner.taskId, m),
