@@ -4,11 +4,11 @@
  * Everything here fails closed toward the existing blocking path: queue mode needs an explicit opt-in AND
  * every safety condition below, and any value we cannot confirm counts as "not safe".
  */
-import type { ProcessReceipt } from "@drec/core";
+import { BILIUP_QUEUE_CAPABILITY, type ProcessReceipt } from "@drec/core";
 import { ProcUnsupported, type Transport } from "./transport.js";
 
 /** Capability a node advertises once stall death, deploy guard and the -N gate are all in place (T15). */
-export const QUEUE_CAPABILITY = "biliup-queue";
+export const QUEUE_CAPABILITY = BILIUP_QUEUE_CAPABILITY;
 
 export interface NodeUploadConfig {
   mode: "blocking" | "queue";

@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { registerProcessor, _resetProcessors, type ProcessContext, type ProcessJob } from "@drec/core";
+import { registerProcessor, _resetProcessors, UncertainOutcome, type ProcessContext, type ProcessJob } from "@drec/core";
 import { ProcRunner, SimpleSlotLimiter, readProcActive, LEASE_MS, type ProcRunnerOpts } from "@drec/proc-queue";
 import { makeEnv, fakeProcessor, gate, type Env } from "./helpers.js";
 
@@ -962,5 +962,52 @@ describe("shutdown verification (plan 038 T09)", () => {
     await r.stop();
     expect(s.get(jobId)?.state).toBe("pending");
     expect(s.get(jobId)?.attempts).toBe(0);
+  });
+});
+
+describe("uncertain outcome and pid-bound slot (plan 038 T15)", () => {
+  it("UncertainOutcome → uncertain + alert; the lane stays held until the recorded child exits", async () => {
+    let alive = true;
+    const second = vi.fn(async () => ({ outputs: [] }));
+    registerProcessor(fakeProcessor({
+      kind: "biliup", resource: "upload", lane: "biliup", interruptible: false, retryable: false,
+      run: async (j, ctx) => {
+        if (j.inputs[0]!.endsWith("b.ts")) return second();
+        ctx.setState?.({ step: "submit", childPid: 77, childPidStartedAt: "st" });
+        throw new UncertainOutcome("submit past maxWallMs");
+      },
+    }));
+    const r = mkRunner("A", { childPollMs: 10, probeChild: (pid) => (alive ? { pid, startedAt: "st", cmdline: "biliup" } : null) });
+    const s = env.open();
+    const a = s.enqueue(env.job("a.ts", { kind: "biliup" }), allowed()).jobId;
+    s.enqueue(env.job("b.ts", { kind: "biliup" }), allowed());
+    r.tick();
+    await vi.waitFor(() => expect(s.get(a)?.state).toBe("uncertain"));
+    expect(alerts.some(([, m]) => /无法确定/.test(m))).toBe(true);
+    await new Promise((res) => setTimeout(res, 60));
+    r.tick();
+    expect(second).not.toHaveBeenCalled();
+    alive = false;
+    await new Promise((res) => setTimeout(res, 40));
+    r.tick();
+    await vi.waitFor(() => expect(second).toHaveBeenCalledTimes(1));
+  });
+
+  it("a different process reusing the pid does not hold the slot", async () => {
+    const second = vi.fn(async () => ({ outputs: [] }));
+    registerProcessor(fakeProcessor({
+      kind: "biliup", resource: "upload", lane: "biliup", interruptible: false, retryable: false,
+      run: async (j, ctx) => {
+        if (j.inputs[0]!.endsWith("b.ts")) return second();
+        ctx.setState?.({ step: "submit", childPid: 77, childPidStartedAt: "st" });
+        throw new UncertainOutcome("x");
+      },
+    }));
+    const r = mkRunner("A", { childPollMs: 10, probeChild: (pid) => ({ pid, startedAt: "other", cmdline: "bash" }) });
+    const s = env.open();
+    s.enqueue(env.job("a.ts", { kind: "biliup" }), allowed());
+    s.enqueue(env.job("b.ts", { kind: "biliup" }), allowed());
+    r.tick();
+    await vi.waitFor(() => { r.tick(); expect(second).toHaveBeenCalledTimes(1); });
   });
 });
