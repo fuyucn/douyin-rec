@@ -1980,6 +1980,20 @@ program
     }
   });
 
+// (内部) 取消处理任务(plans/038):pending 直接取消,running 由 runner 核验后收口。
+program
+  .command("_proc-cancel <dataRoot> <base64>", { hidden: true })
+  .description("(内部) 取消处理任务(供 master ssh 调用)")
+  .action(async (dataRoot: string, b64: string) => {
+    try {
+      const { decodeJobIds, handleProcCancel } = await import("@drec/app");
+      process.stdout.write(JSON.stringify({ receipts: handleProcCancel(dataRoot, decodeJobIds(b64)) }) + "\n");
+    } catch (e) {
+      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
+      process.exitCode = 1;
+    }
+  });
+
 // 节点侧上传(experimental,plans/027)的隐藏子命令隔离在独立文件,便于快速开关/回退。
 registerNodePipelineCommands(program);
 

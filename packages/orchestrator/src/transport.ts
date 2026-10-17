@@ -222,6 +222,8 @@ export interface Transport {
    * 不支持 → 抛 {@link ProcUnsupported}(节点入队后又回滚旧 bundle 的信号,N7)。
    */
   procStatus?(jobIds: string[]): Promise<ProcessReceipt[]>;
+  /** Request cancellation of queued jobs (`_proc-cancel`). Unsupported → ProcUnsupported. */
+  procCancel?(jobIds: string[]): Promise<ProcessReceipt[]>;
 }
 
 type Factory = (cfg: WorkerConfig) => Transport;

@@ -345,6 +345,23 @@ export class SshTransport implements Transport {
     return parsed.receipts;
   }
 
+  /** Cancel queued jobs (`_proc-cancel`). Unknown command → ProcUnsupported. */
+  async procCancel(jobIds: string[]): Promise<ProcessReceipt[]> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const b64 = Buffer.from(JSON.stringify(jobIds), "utf8").toString("base64");
+    let out: string;
+    try {
+      out = await this.runStatus([`${nodePrefix} _proc-cancel ${this.o.dataRoot} ${b64}`]);
+    } catch (e) {
+      if (isUnknownCommandError(e)) throw new ProcUnsupported("节点 bundle 不支持 _proc-cancel(旧版本)");
+      throw e;
+    }
+    const parsed = JSON.parse(out) as { receipts?: ProcessReceipt[]; error?: string };
+    if (parsed.error) throw new Error(`_proc-cancel 失败: ${parsed.error}`);
+    if (!Array.isArray(parsed.receipts)) throw new Error("_proc-cancel 返回格式非法");
+    return parsed.receipts;
+  }
+
   /**
    * 在节点本地执行「remux → biliup 上传」并把 BV 回传(experimental,见 plans/027)。
    * spec 经 base64 传递(含 cookie,只走可信 ssh 通道,与 `_apply-tasks` 同一路径)。
