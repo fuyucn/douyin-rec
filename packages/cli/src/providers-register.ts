@@ -36,8 +36,11 @@ registerEngine(mesioEngine);
 registerProcessor(remuxProcessor);
 registerProcessor(uploadPrepProcessor);
 // biliup on a node: same account rate-limit gate and local cookies as the blocking node pipeline (plan 038 T15b).
+// One gate per process: the runner lives in the long-running serve process, so a gate per job would leak a
+// sqlite handle per upload (the gate exposes no close); the store itself serialises across processes.
+let nodeUploadGate: ReturnType<typeof openNodeUploadGate> | undefined;
 registerProcessor(makeBiliupProcessor({
-  gate: () => openNodeUploadGate(),
+  gate: () => (nodeUploadGate ??= openNodeUploadGate()),
   accountKey: resolveUploadAccountKey,
   localCookies: () => {
     const local = process.env.BILIUP_COOKIE ?? rootBiliupCookies();
