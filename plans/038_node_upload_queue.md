@@ -123,6 +123,17 @@
 边录边传现在在录制子进程里自己跑 biliup（`manager/record-args` + `rolling-upload`），不经队列。目标：入队 `kind=biliup`、与整场上传共用 `lane=biliup` 并发 1。
 在落地前不得宣称「节点并发为 1」。**实现方式需单独定**（子进程只入队 vs 带 pid 心跳的跨进程槽），PR4 开工前补设计。
 
+**PR4 设计（2026-10-17 补，待人选定）**
+
+现状实测：两台 worker 都有启用边录边传的任务（一台 6 个、一台 8 个）。`decideUploadMode` 在节点上有边录边传时一律回落 blocking，所以**不做 PR4，`nodeUpload.mode=queue` 在这两台上不会生效**。
+
+- **方案 A：录制子进程只入队。** 每个封口分段变成一条 `biliup` 队列行，由 serve 进程的 runner 统一执行。
+  好处：一套执行器，停滞判死/重试/进度全部复用。代价：要把边录边传的 sidecar 状态（已确认段、WAL 意图、BV）和「确认后删该段源」搬进队列；队列目前按设计不删源（T13c），需要新增删源语义。改动面大，回归风险高。
+- **方案 B（建议）：节点级跨进程上传槽。** 节点库里一张槽表（持有者 pid + 进程启动时间 + 类型 + 心跳），`BEGIN IMMEDIATE` 内抢占；持有者进程已死（pid+启动时间核对）或心跳过期即视为空闲。边录边传在现有 `gate.run` 处、队列 biliup 处理器在 `gated()` 处各自按**单个分 P**抢槽，传完即放。
+  好处：边录边传逻辑与 sidecar 一行不动；槽数取 `nodeUpload.concurrency`（默认 1）。节点广播新能力 `biliup-slot` 后，`decideUploadMode` 不再因边录边传回落。
+  注意：槽按分 P 抢，整场上传最多占一个分 P 的时长，边录边传的分段可以插在两个分 P 之间，不会被一整场上传饿住；空出槽时边录边传优先，避免录制盘堆积。停滞判死只覆盖队列上传，边录边传仍走现有路径。
+- 两个方案都不改删源口径，都属上传类 `needs-decision`。
+
 ### 4.6 参数（`hub.config` 的 `nodeUpload.*`）
 
 | 键 | 默认 | 说明 |
@@ -149,7 +160,7 @@
 | PR2b | 停滞信号实测（人工授权一次真实上传）+ 停滞判死 / submit 告警 / `biliup-queue` 能力 | PR2 | 同上 |
 | PR3 | master 入队/轮询/不 abort/sweep 豁免/原 key 409（含 SSH 失败）/部署 guard（fail-closed）/回退保护 | PR2，**且 `hub-recover-order` 已合并在内** | 同上（改部署 guard） |
 | PR4 | 边录边传接入共享并发槽 | PR2 | 同上 |
-| PR5 | 队列页（`/api/hub/queue` 露出节点 biliup 行、最后心跳、ETA） | PR3 | `enhancement` |
+| PR5 | ✅ 已合并（#217，0.0.170）：队列页（`/api/hub/queue` 露出节点 biliup 行、最后心跳、ETA） | PR3 | `enhancement` |
 | PR6 | 只交付 `hub-recover-order`（T11）：只写队列行，不删源、不上传。`hub-attach-bv` / `hub-clean-sources` 不在本计划。 | PR2 | `needs-decision`（写队列） |
 | PR7 / PR8 | Phase 2：传输/提交拆分 + 已传分 P 复用（含许可证决策）；审核通过后才删源（默认关） | PR3 | `needs-decision` |
 
