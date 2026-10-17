@@ -306,7 +306,7 @@ export function TaskDetail(): ReactNode {
                 <Row
                   label={t("tasks.rollingUpload")}
                   value={
-                    <Link to={`/hub/${encodeURIComponent(task.hubRule.key)}`} className="text-ink hover:underline">
+                    <Link to={`/rooms/${encodeURIComponent(task.hubRule.key)}`} className="text-ink hover:underline">
                       {task.hubRule.uploadMode === "upload"
                         ? (task.rollingEffective ? t("tasks.rollingOn") : t("tasks.rollingOff"))
                         : t("tasks.stageOnly")}
@@ -323,7 +323,7 @@ export function TaskDetail(): ReactNode {
                   label={t("tasks.lastRun")}
                   value={
                     task.hubRule.lastRun ? (
-                      <Link to={`/hub/${encodeURIComponent(task.hubRule.key)}`} className="text-ink hover:underline">
+                      <Link to={`/rooms/${encodeURIComponent(task.hubRule.key)}`} className="text-ink hover:underline">
                         {jobStateLabel(t, task.hubRule.lastRun.state)}
                         {task.hubRule.lastRun.bv ? ` · ${task.hubRule.lastRun.bv}` : ""}
                       </Link>

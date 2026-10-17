@@ -50,3 +50,14 @@ describe("no emoji glyphs in UI code", () => {
     expect(hits).toEqual([]);
   });
 });
+
+describe("room links (issue #197)", () => {
+  const read = (...p: string[]) => readFileSync(join(SRC, ...p), "utf-8");
+  it("queue rows and the task detail point at /rooms/:key, not the Hub overview / old Hub page", () => {
+    // Every "open this room" link in the queue (card + table row) must be room-specific.
+    const queue = read("pages", "QueuePage.tsx");
+    expect(queue.match(/title=\{t\("queue\.openRoom"\)\}/g)?.length).toBe(2);
+    expect(queue).not.toMatch(/to="\/hub"/);
+    expect(read("pages", "TaskDetail.tsx")).not.toMatch(/`\/hub\//);
+  });
+});
