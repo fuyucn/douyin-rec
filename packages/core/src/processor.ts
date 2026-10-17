@@ -72,8 +72,11 @@ export interface ProcessResult {
   note?: string;
   /** BV created by this run (biliup). */
   bv?: string;
-  /** Ask the runner to retry later (transfer failure with a confirmed stopped child). */
-  retry?: { notBefore: number; reason: "transfer-retry" };
+  /**
+   * Ask the runner to retry later. Omitted reason = `transfer-retry` (failed/stalled transfer, child
+   * confirmed stopped); `slot-busy` = the node-wide upload slot was taken, nothing was uploaded (PR4).
+   */
+  retry?: { notBefore: number; reason?: "transfer-retry" | "slot-busy" };
 }
 
 export interface Processor {
@@ -99,6 +102,9 @@ export interface Processor {
 
 /** Capability a node advertises once biliup stall death and submit alerts exist (plan 038 T15). */
 export const BILIUP_QUEUE_CAPABILITY = "biliup-queue";
+
+/** Capability a node advertises once rolling upload and queue upload share one node-wide slot (plan 038 PR4). */
+export const BILIUP_SLOT_CAPABILITY = "biliup-slot";
 
 /**
  * Thrown by a processor when the outcome cannot be known and its child may still be running
@@ -253,6 +259,7 @@ export type TransitionReason =
   | "requeue" // failed → pending
   | "ack-uncertain" // uncertain → failed
   | "transfer-retry" // running → pending after a failed/stalled transfer (child confirmed stopped)
+  | "slot-busy" // running → pending after waiting in vain for the node-wide upload slot (nothing done)
   | "order-blocked"; // cascade cancel of later seq rows in the same generation
 
 export interface TransitionContext {
@@ -278,6 +285,8 @@ export function canTransition(from: JobState, to: JobState, ctx: TransitionConte
   if (!PROC_TRANSITIONS[from].includes(to)) return false;
   if (from === "pending" && to === "cancelled") return ctx.neverClaimed === true;
   if (from === "running" && to === "pending") {
+    // A busy slot means no upload was attempted, so no child-stopped proof is needed.
+    if (ctx.reason === "slot-busy") return ctx.kind === "biliup";
     if (ctx.reason === "transfer-retry") {
       return ctx.kind === "biliup" && (ctx.step === "gate_wait" || ctx.step === "transfer") && ctx.childConfirmedStopped === true;
     }

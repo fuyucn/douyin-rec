@@ -18,12 +18,12 @@ import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, sta
 import path from "node:path";
 import {
   linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, isAppendAmbiguous,
-  isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, partTitleToFilename, resolveOutputStem, sanitizeStreamKey,
-  processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type NodeUploadStep, type UploadGateStore,
+  isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, openUploadSlot, partTitleToFilename, resolveOutputStem, sanitizeStreamKey,
+  processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type UploadSlot, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type NodeUploadStep, type UploadGateStore,
 } from "@drec/core";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment, unreadableParts } from "@drec/post-process";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain } from "./upload/biliup.js";
-import { rootBiliupCookies, rootDbPath, rootStageDir } from "./paths.js";
+import { procQueueDbPath, rootBiliupCookies, rootDbPath, rootStageDir } from "./paths.js";
 
 /**
  * 节点侧上传的**限流闸门**(030 T19,T-18 房间不上传风暴)。
@@ -56,6 +56,14 @@ export function resolveUploadAccountKey(cookiesPath?: string): string {
   } catch {
     return biliAccountKey(null);
   }
+}
+
+/**
+ * 节点级上传槽(plan 038 PR4):落在节点的处理任务库里,边录边传与队列整场上传共用。
+ * 库打不开时返回 null → 调用方不加锁(与旧行为一致),绝不因为槽的问题挡住上传。
+ */
+export function openNodeUploadSlot(opts: { log?: (m: string) => void } = {}): UploadSlot | null {
+  return openUploadSlot(procQueueDbPath(), { concurrency: 1, ...(opts.log ? { log: opts.log } : {}) });
 }
 
 /** 装配节点侧 UploadGate;store 缺省打开 `<dataRoot>/db/douyin-rec.db`。 */

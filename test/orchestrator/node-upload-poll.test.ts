@@ -7,7 +7,7 @@ import type { NotifyEvent, ProcessReceipt } from "@drec/core";
 import { SyncLedger } from "../../packages/orchestrator/src/ledger.js";
 import { Reconciler } from "../../packages/orchestrator/src/reconciler.js";
 import {
-  DEFAULT_NODE_UPLOAD, QUEUE_CAPABILITY, canFallbackToBlocking, decideUploadMode, parseNodeUploadConfig, rollingEnabledCount,
+  DEFAULT_NODE_UPLOAD, QUEUE_CAPABILITY, SLOT_CAPABILITY, canFallbackToBlocking, decideUploadMode, parseNodeUploadConfig, rollingBlocksQueue, rollingEnabledCount,
   type NodeUploadConfig,
 } from "../../packages/orchestrator/src/node-upload-config.js";
 import { createUploadQueuePoller } from "../../packages/orchestrator/src/node-upload-poll.js";
@@ -48,6 +48,14 @@ describe("decideUploadMode", () => {
 
   it("queues only when configured and every precondition is confirmed", () => {
     expect(decideUploadMode(ok)).toEqual({ mode: "queue" });
+  });
+
+  it("rolling upload no longer rules out queue mode once the node has the shared slot (PR4)", () => {
+    expect(decideUploadMode({ ...ok, capabilities: [QUEUE_CAPABILITY, SLOT_CAPABILITY], rollingEnabledCount: 3 })).toEqual({ mode: "queue" });
+    // Without the slot capability the old refusal stands, and it names why.
+    expect(decideUploadMode({ ...ok, rollingEnabledCount: 3 })).toMatchObject({ mode: "blocking", reason: expect.stringMatching(/rolling upload/) });
+    // An unconfirmed rolling count still blocks, slot or not: an unknown must never be treated as none.
+    expect(decideUploadMode({ ...ok, capabilities: [QUEUE_CAPABILITY, SLOT_CAPABILITY], rollingEnabledCount: null })).toMatchObject({ mode: "blocking", reason: expect.stringMatching(/could not confirm/) });
   });
 
   it.each([

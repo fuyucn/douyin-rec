@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerProcessor, _resetProcessors, advertisedCapabilities, isUncertainOutcome } from "@drec/core";
+import { openUploadSlot } from "@drec/core";
 import { makeBiliupProcessor, type BiliupDeps } from "../../packages/processors/src/biliup.js";
 import { DEFAULT_WATCH, TransferWatch, parseSsAcked, watchConfigOf } from "../../packages/processors/src/biliup-progress.js";
 import type { BiliupHooks } from "../../packages/processors/src/run-biliup.js";
@@ -242,7 +243,7 @@ describe("biliup-queue capability", () => {
     _resetProcessors();
     expect(advertisedCapabilities()).not.toContain("biliup-queue");
     registerProcessor(makeBiliupProcessor());
-    expect(advertisedCapabilities()).toEqual(["biliup", "biliup-queue"]);
+    expect(advertisedCapabilities()).toEqual(["biliup", "biliup-queue", "biliup-slot"]);
   });
 });
 
@@ -313,5 +314,70 @@ describe("biliup processor progress write failures", () => {
     finish();
     expect((await pending).bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
     expect(logs.some((m) => /progress not saved/.test(m))).toBe(true);
+  });
+});
+
+// ── node-wide upload slot (plan 038 PR4) ─────────────────────────────────────
+
+describe("biliup processor upload slot", () => {
+  function fakeSlot(held: { v: boolean }) {
+    return {
+      index: null,
+      acquire: async () => { if (held.v) return false; held.v = true; return true; },
+      release: () => { held.v = false; },
+      touch: () => {},
+      close: () => {},
+    };
+  }
+
+  it("takes the slot around every part and gives it back (one biliup at a time)", async () => {
+    const held = { v: false };
+    const overlap: boolean[] = [];
+    const bvSeen: string[] = [];
+    const run = vi.fn(async (argv: string[]) => {
+      overlap.push(held.v);
+      bvSeen.push(argv.includes("upload") ? "create" : "append");
+      return argv.includes("upload") ? "BV1aaaaaaaaa" : "ok"; // issue-guard: allow (fake BV fixture)
+    });
+    const p = makeBiliupProcessor(base({ run, slot: fakeSlot(held) as never, lookup: { run: async () => "[]" }, countParts: async () => 1 }));
+    const r = await p.run(job(files(3), {}, { stallMs: 60_000 }), ctx().c);
+    expect(r.bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
+    expect(overlap).toEqual([true, true, true]);
+    expect(bvSeen).toEqual(["create", "append", "append"]);
+    expect(held.v).toBe(false); // released after the last part
+  });
+
+  it("waits for a busy slot instead of failing, and never spawns a second biliup", { timeout: 15_000 }, async () => {
+    // A real slot: another holder owns it, we poll until it lets go.
+    const dir = mkdtempSync(join(tmpdir(), "slot-"));
+    const other = openUploadSlot(join(dir, "proc-queue.db"), { concurrency: 1, probe: () => null });
+    expect(await other.acquire("rolling", 10)).toBe(true);
+    let created = 0;
+    const run = vi.fn(async (argv: string[]) => { created++; return argv.includes("upload") ? "BV1aaaaaaaaa" : "ok"; }); // issue-guard: allow (fake BV fixture)
+    // Real time (1s poll): the other holder lets go shortly after we start waiting.
+    const ours = openUploadSlot(join(dir, "proc-queue.db"), { concurrency: 1, probe: () => null });
+    const release = setTimeout(() => other.release(), 20);
+    try {
+        const p = makeBiliupProcessor(base({ run, slot: ours, lookup: { run: async () => "[]" } }));
+      const r = await p.run(job(files(1), {}, { stallMs: 60_000 }), ctx().c);
+      expect(r.bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
+      expect(created).toBe(1);
+      expect(ours.index).toBeNull(); // released after the part
+    } finally { clearTimeout(release); other.close(); ours.close(); }
+  });
+
+  it("asks for a retry (not a failure) when no slot frees up within the wait limit", async () => {
+    const run = vi.fn(async () => "BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
+    const p = makeBiliupProcessor(base({ run, slotWaitMs: 1, slot: fakeSlot({ v: true }) as never, lookup: { run: async () => "[]" } }));
+    // Nothing was uploaded, so this must stay retryable: treating it as uncertain would need manual review.
+    expect(await p.run(job(files(1)), ctx().c)).toMatchObject({ outputs: [], retry: { reason: "slot-busy" } });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("without a slot nothing changes (old behaviour)", async () => {
+    const run = vi.fn(async () => "BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
+    const p = makeBiliupProcessor(base({ run, lookup: { run: async () => "[]" } }));
+    expect((await p.run(job(files(1)), ctx().c)).bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });

@@ -443,3 +443,58 @@ describe("RollingUploader 标题日期按设置时区(issue #155)", () => {
     expect(await firstTitle(undefined)).toContain("2026-09-12");
   });
 });
+
+describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
+  /** 一个手动控制的槽:记录 acquire/release,可由测试决定「忙/闲」与是否超时。 */
+  function fakeSlot(busy: { v: boolean }, opts: { failAcquire?: boolean } = {}) {
+    const calls: string[] = [];
+    return {
+      calls,
+      slot: {
+        index: null as number | null,
+        acquire: async (): Promise<boolean> => { calls.push("acquire"); if (opts.failAcquire) return false; if (busy.v) return false; busy.v = true; return true; },
+        release: () => { calls.push("release"); busy.v = false; },
+        touch: () => {},
+        close: () => {},
+      },
+    };
+  }
+
+  it("每传一个分 P 抢一次槽、传完立刻放(不与队列上传重叠)", async () => {
+    const { paths } = mkSession(segNames(3));
+    const busy = { v: false };
+    const { slot, calls } = fakeSlot(busy);
+    const held: boolean[] = [];
+    const up = vi.fn(async () => { held.push(busy.v); return FAKE_BV; });
+    const ap = vi.fn(async () => { held.push(busy.v); });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: slot as never });
+    for (const p of paths) u.noteSegment(p);
+    const r = await u.flush({ recordingActive: true });
+    expect(r.uploaded.sort()).toEqual([0, 1]); // 段 0 建稿、段 1 append;段 2 正在写
+    expect(held).toEqual([true, true]);        // 两次上传都持有槽
+    expect(busy.v).toBe(false);                // 每次都放开了
+    expect(calls).toEqual(["acquire", "release", "acquire", "release"]);
+  });
+
+  it("槽一直忙(等待超时)→ 段不上传、保留源、**不记待人工**,下一轮重试", async () => {
+    const { paths } = mkSession(segNames(2));
+    const up = vi.fn(async () => FAKE_BV);
+    const { slot } = fakeSlot({ v: true }, { failAcquire: true });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: slot as never });
+    for (const p of paths) u.noteSegment(p);
+    const r = await u.flush({ recordingActive: true });
+    expect(r.uploaded).toEqual([]);
+    expect(up).not.toHaveBeenCalled(); // 没抢到槽绝不 spawn biliup
+    expect(r.ambiguous).toEqual([]);   // 槽忙是暂时状态,不是「结果不确定」—— 记了会让后续段永久被头阻塞挡回
+  });
+
+  it("不注入槽时不加锁(旧行为不变)", async () => {
+    const { paths } = mkSession(segNames(1));
+    const up = vi.fn(async () => FAKE_BV);
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: null });
+    u.noteSegment(paths[0]!);
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([0]);
+    expect(up).toHaveBeenCalledTimes(1);
+  });
+});

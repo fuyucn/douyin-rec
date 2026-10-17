@@ -19,6 +19,7 @@ export * from "./hub-ledger-contract.js";
 export * from "./hub-flow.js";
 // 上传配额闸门(冷却 + 滑动窗口)唯一判定实现:master ResourcePool(L4.5)与节点侧上传(L4)共用。
 export * from "./upload-gate.js";
+export * from "./upload-slot.js";
 // 边录边传(T-33):封口判定 / 水位闸门 / 删源证据(唯一真理源,app L4 与 orchestrator L4.5 共用)。
 export * from "./rolling.js";
 // 会话基名 / 段号(issue #50):全仓唯一实现,守护测试禁止第二份同类正则。

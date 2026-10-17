@@ -602,6 +602,34 @@ describe("v2 -> v3 migration + progress (plan 038 PR5)", () => {
   });
 });
 
+describe("slot-busy requeue (plan 038 PR4)", () => {
+  it("biliup running -> pending with backoff, no child-stopped proof; other kinds are refused", () => {
+    const s = env.open();
+    lease(s, "A", "biliup");
+    const id = s.enqueue(env.job("a.ts", { kind: "biliup", logicalKey: "k:a.ts@", orderKey: "k", seq: 1 }), roots()).jobId;
+    const c = s.claim({ kinds: ["biliup"], owner: "A" })!;
+    s.updateStep(c.jobId, "gate_wait");
+    expect(s.requeueSlotBusy(c.jobId, "A", 4242)).toBe(true);
+    const row = s.get(id)!;
+    expect([row.state, row.notBefore, row.claimedBy]).toEqual(["pending", 4242, null]);
+    // Wrong owner / not running: refused (fail closed, never silently requeue someone else's row).
+    const b = s.claim({ kinds: ["biliup"], owner: "A" })!;
+    expect(s.requeueSlotBusy(b.jobId, "B", 1)).toBe(false);
+    expect(s.get(b.jobId)?.state).toBe("running");
+    s.close();
+  });
+
+  it("a non-biliup kind is refused", () => {
+    const s = env.open();
+    lease(s, "A", "fake");
+    s.enqueue(env.job("b.ts"), roots());
+    const c = s.claim({ kinds: ["fake"], owner: "A" })!;
+    expect(s.requeueSlotBusy(c.jobId, "A", 1)).toBe(false);
+    expect(s.get(c.jobId)?.state).toBe("running");
+    s.close();
+  });
+});
+
 describe("enqueueBatch and order generation (plan 038 T01)", () => {
   it("any rejected job rolls the whole batch back", () => {
     const s = env.open();
