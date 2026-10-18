@@ -34,7 +34,7 @@
   **为什么**：原实现把 `exists() === false` 一律当「边车已消失」,而 `SshTransport.exists` 在 ssh 失败时 `catch → false` —— 一次掉线会被读成「文件被删」,3 轮网络抖动就能把健康场次推成 `needs_manual`。
   **验收**：`exists` 探测失败必须抛错（不再被读成删除）;`exists` 只认最后一个非空行判定（登录横幅含 `MISSING` 不翻转结论）;13 处变异全部被测试杀死;全量门禁连续 5 次全绿（2613 passed）+ typecheck / arch:check / bundle。
   **回写**：回归用例在 orchestrator 包 pipeline 与 transport-ssh 两个测试文件;残余（`exists` 纯字符串边界未单测、成员剔除处同样把「探测失败」当「文件不在」）已记入 issue [#176](https://github.com/fuyucn/douyin-rec/issues/176)。
-  **T-59 残余收口（2026-10-17）**：PR [#222](https://github.com/fuyucn/douyin-rec/pull/222) 处理 #176：成员剔除只在确认 `exists=false` 时删除,探测失败保留成员（避免误换 winner）;跳过写独立 `skipped` phase,前端不再显示为 `pull/done`;无边车但带时间戳+段号的已转换分段进清单,由未认领门禁转人工。全量 2939 passed。**仍未部署**,T-59 保持 `待验证`。
+  **T-59 残余收口（2026-10-17）**：PR [#222](https://github.com/fuyucn/douyin-rec/pull/222) 处理 #176：成员剔除只在确认 `exists=false` 时删除,探测失败保留成员（避免误换 winner）;跳过写独立 `skipped` phase(兼容旧 `pull/done` 跳过行),前端不再显示为 `pull/done`。孤儿已转换分段可见化经独立 review 发现部署顺序回归,已拆到 [#223](https://github.com/fuyucn/douyin-rec/issues/223)(needs-decision)。全量 2943 passed。**仍未部署**,T-59 保持 `待验证`。
   **部署**：仅 master 侧收口逻辑,单测覆盖,**无需单独部署**,随下次部署带上。
 
 - [~] **T-54 分段续跑补齐烧录轨:续跑不重烧也不补烧录轨分 P（issue [#142](https://github.com/fuyucn/douyin-rec/issues/142)）**
