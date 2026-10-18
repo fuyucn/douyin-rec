@@ -137,3 +137,31 @@ describe("survivingArtifacts 清单", () => {
     expect(survivingArtifacts(rule({ stageAfterDone: false }), { stageHasXmlCopy: true }).stageSidecarCopies).toBe(true);
   });
 });
+
+describe("cleanupSourcesShared honours keepSession (issue #223)", () => {
+  it("'all' → member skipped entirely; 'xml' → videos only; unmarked → videos + xml", async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "survivors-keep-"));
+    const ledger = new SyncLedger(path.join(dir, "t.db"));
+    const calls = new Map<string, string[][]>();
+    const transport = (id: string) => ({
+      id, cleanup: async (ps: string[]) => { calls.set(id, [...(calls.get(id) ?? []), ps]); },
+    }) as unknown as Transport;
+    const out = await cleanupSourcesShared({
+      streamKey: "douyin:1:2026-01-01", ledger,
+      transports: new Map([["all", transport("all")], ["xml", transport("xml")], ["plain", transport("plain")]]),
+      members: [
+        { workerId: "all", rec: { tsFiles: ["/a/s.ts"], xmlPath: "/a/s.xml", keepSession: "all" } },
+        { workerId: "xml", rec: { tsFiles: ["/x/s.ts"], xmlPath: "/x/s.xml", keepSession: "xml" } },
+        { workerId: "plain", rec: { tsFiles: ["/p/s.ts"], xmlPath: "/p/s.xml" } },
+      ],
+      cleanup: { sourceAfterDone: true, stageAfterDone: false, stageSourceAfterMerge: false },
+      keepNodeXml: false, rmStage: async () => {}, log: () => {},
+    });
+    expect(out.ok).toBe(true);
+    expect(calls.has("all")).toBe(false);
+    expect(calls.get("xml")).toEqual([["/x/s.ts"]]);
+    expect(calls.get("plain")).toEqual([["/p/s.ts", "/p/s.xml"]]);
+    expect(JSON.stringify(ledger.getSteps("douyin:1:2026-01-01"))).toContain("kept 1 (orphans)");
+    ledger.close();
+  });
+});

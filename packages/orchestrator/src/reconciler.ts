@@ -1,7 +1,7 @@
 import { abortJob, isJobAbort, isJobLive, resolveDiskMinGB, USER_STOP } from "@drec/core";
 import type { Transport, NodeInventory } from "./transport.js";
 import type { UnclaimedSegment } from "./unclaimed.js";
-import type { JobState, SyncLedger } from "./ledger.js";
+import type { JobState, OrphanAlertKey, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
 import { pollFollowups } from "./finalize-format.js";
@@ -12,6 +12,7 @@ import { completeFromDispatch } from "./node-upload-complete.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
 import { gateWorkers, explainRejections, isWorkerAssigned, isWorkerTargeted } from "@drec/core";
 import { JobDispatcher } from "./job-dispatcher.js";
+import { findDoneOverlap, matchOrphans, orphanWindows, spanOf, toDoneWindow, type DoneWindow, type OrphanWindow } from "./orphan-rule.js";
 
 export interface SettleConfig {
   maxWaitMs: number;
@@ -101,6 +102,22 @@ const DEFAULT_UNREACHABLE_ALERT_ROUNDS = 6;
 export type InventoryResult =
   | { status: "ok" | "empty"; workerId: string; recordings: NodeInventory["recordings"]; unclaimedSegments?: UnclaimedSegment[]; unclaimedTruncated?: number }
   | { status: "unreachable"; workerId: string; recordings: []; reason: string };
+
+/** Identity of one session on one worker (orphan windows and broadcast members share it). */
+const orphanIdOf = (w: { workerId: string; sessionBase: string }): string => `${w.workerId}|${w.sessionBase}`;
+
+/** Per-round orphan (unclaimed converted segment) assessment, see Reconciler.assessOrphans (issue #223). */
+interface OrphanState {
+  overlapByKey: Map<string, OrphanWindow[]>;
+  unmatched: OrphanWindow[];
+  doneOverlap: Map<string, DoneWindow>;
+  /** Workers whose orphan state is unknown: old bundle (field absent) or truncated scan. */
+  unknownWorkers: Set<string>;
+  truncatedWorkers: Set<string>;
+  /** Reachable workers that reported the unclaimed fields (their alert rows may be pruned). */
+  knownWorkers: Set<string>;
+}
+
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_STALE_MS = 600_000;
 const DEFAULT_RECONNECT_WINDOW_MS = 10 * 60_000;
@@ -430,6 +447,7 @@ export class Reconciler {
     cfgByKey: Map<string, PipelineCfg>;
     /** 本轮清单失联的节点 id → 原因(超时/报错)。 */
     unreachable: Map<string, string>;
+    orphans: OrphanState;
   }> {
     const invs = await Promise.all(
       [...transports.values()].map((t) => this.inventoryWithTimeout(t)),
@@ -493,7 +511,102 @@ export class Reconciler {
       }
       cfgByKey.set(b.streamKey, cfg);   // 过滤后仍有/无成员都缓存;空成员在循环里跳过
     }
-    return { broadcasts, cfgByKey, unreachable };
+    const orphans = this.assessOrphans(invs, broadcasts);
+    return { broadcasts, cfgByKey, unreachable, orphans };
+  }
+
+  /**
+   * Match unclaimed converted segments (orphans) against broadcasts and done jobs, and mark member recs so
+   * cleanup never deletes an orphan session's node files (keepSession 'all'); unknown orphan state keeps node xml.
+   */
+  private assessOrphans(invs: InventoryResult[], broadcasts: ReturnType<typeof clusterBroadcasts>): OrphanState {
+    const unknownWorkers = new Set<string>();
+    const truncatedWorkers = new Set<string>();
+    const knownWorkers = new Set<string>();
+    const windows: OrphanWindow[] = [];
+    for (const i of invs) {
+      if (i.status === "unreachable") continue;
+      if (i.unclaimedSegments === undefined) { unknownWorkers.add(i.workerId); continue; }
+      knownWorkers.add(i.workerId);
+      windows.push(...orphanWindows(i.workerId, i.unclaimedSegments));
+      if ((i.unclaimedTruncated ?? 0) > 0) { truncatedWorkers.add(i.workerId); unknownWorkers.add(i.workerId); }
+    }
+    const withMembers = broadcasts.filter((b) => b.members.length > 0);
+    const { overlapByKey, unmatched } = matchOrphans(windows, withMembers.map(spanOf));
+
+    const doneWindows = this.ledger.listDoneWindows().map(toDoneWindow).filter((d): d is DoneWindow => d !== null);
+    const doneOverlap = new Map<string, DoneWindow>();
+    for (const b of withMembers) {
+      if (this.ledger.get(b.streamKey) != null) continue;
+      const d = findDoneOverlap(spanOf(b), doneWindows);
+      if (d) doneOverlap.set(b.streamKey, d);
+    }
+
+    const orphanBases = new Set(windows.map(orphanIdOf));
+    for (const b of withMembers) {
+      for (const m of b.members) {
+        if (orphanBases.has(orphanIdOf({ workerId: m.workerId, sessionBase: m.rec.sessionBase }))) m.rec.keepSession = "all";
+        else if (unknownWorkers.has(m.workerId)) m.rec.keepSession = "xml";
+      }
+    }
+    return { overlapByKey, unmatched, doneOverlap, unknownWorkers, truncatedWorkers, knownWorkers };
+  }
+
+  /**
+   * One deduped summary notification per round for orphans / done-overlaps / truncated scans.
+   * Windows overlapping a broadcast that still has a recording member are deferred (the live session's own
+   * segments may be about to be claimed); orphans of an earlier finished session in the same live room alert now.
+   * Known limitation: a live room is only visible through a broadcast with a recording member, so a node holding
+   * only orphans for a live room is deferred only if another member makes that broadcast visible (in practice a
+   * live session always has claimed native segments, so this needs a node with no live segments at all).
+   */
+  private alertOrphans(o: OrphanState, broadcasts: ReturnType<typeof clusterBroadcasts>, stillRecording: Set<string>): void {
+    const overlapBases = new Set<string>();
+    const byId = new Map<string, OrphanWindow>();
+    for (const list of o.overlapByKey.values()) {
+      for (const w of list) {
+        byId.set(orphanIdOf(w), w);
+        overlapBases.add(orphanIdOf(w));
+      }
+    }
+    for (const w of o.unmatched) byId.set(orphanIdOf(w), w);
+    const windows = [...byId.values()];
+
+    const liveSpans = broadcasts
+      .filter((b) => b.members.some((m) => stillRecording.has(`${m.workerId}:${m.rec.roomSlug}`)))
+      .map(spanOf);
+    const deferred = new Set<string>();
+    for (const list of matchOrphans(windows, liveSpans).overlapByKey.values()) {
+      for (const w of list) deferred.add(orphanIdOf(w));
+    }
+
+    const kindOf = (w: OrphanWindow): "overlap" | "unmatched" => (overlapBases.has(orphanIdOf(w)) ? "overlap" : "unmatched");
+    const keyOf = (w: OrphanWindow): OrphanAlertKey => ({ kind: kindOf(w), workerId: w.workerId, subject: w.sessionBase });
+    // currentKeys = every window this round (deferred included, used for prune); entries = what may alert now.
+    const currentKeys = windows.map(keyOf);
+    const entries = windows.filter((w) => !deferred.has(orphanIdOf(w))).map(keyOf);
+    for (const streamKey of o.doneOverlap.keys()) entries.push({ kind: "done-overlap", workerId: "*", subject: streamKey });
+    for (const workerId of o.truncatedWorkers) entries.push({ kind: "truncated", workerId, subject: "" });
+
+    const fresh = this.ledger.claimOrphanAlerts(entries);
+    if (fresh.length > 0) {
+      const count = (kind: string): number => fresh.filter((e) => e.kind === kind).length;
+      const first = fresh.slice(0, 10).map((e) => `${e.kind}/${e.workerId}/${e.subject}`).join(", ");
+      this.notify?.({
+        kind: "error",
+        stage: "同步",
+        message:
+          `Unclaimed node segments: ${fresh.length} new (${count("overlap")} overlap broadcasts and were skipped, ` +
+          `${count("unmatched")} without matching broadcast, ${count("done-overlap")} overlap done jobs, ` +
+          `${count("truncated")} nodes truncated). First: ${first}. ` +
+          `Release: fix {base}.session.json nodeFormat or move the files.`,
+      });
+    }
+    // Prune includes deferred windows so a deferred key is not dropped and re-alerted later.
+    for (const workerId of o.knownWorkers) {
+      if (o.truncatedWorkers.has(workerId)) continue;
+      this.ledger.pruneOrphanAlerts(workerId, currentKeys);
+    }
   }
 
 
@@ -572,12 +685,13 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
 
     // 已知 job key 传给聚类:同一天已有 base key 的 job(哪怕已 done)→ 本簇强制 _HHMM,
     // 否则第二场直播会复用 base key 被幂等跳过。
-    const { broadcasts, cfgByKey, unreachable } = await this.collect(transports, this.ledger.listKeys());
+    const { broadcasts, cfgByKey, unreachable, orphans } = await this.collect(transports, this.ledger.listKeys());
     this.trackUnreachable(transports, unreachable);
 
     // 3.5 第一份快照之后才出现的成员没经过 settle 等待(典型:首快照为空 → settle 秒回 →
     // 第二份快照才发现刚开播的分段)。现查 isDone,未收播则本轮跳过,防边录边合并残片。
     await this.settleLateMembers(first.broadcasts, broadcasts, stillRecording);
+    this.alertOrphans(orphans, broadcasts, stillRecording);
 
     // 4. For each broadcast: 建 job 行(快)→ 派发给有界并发调度器(慢 IO 在那边)。
     //
@@ -608,6 +722,18 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
         const windowMs = cfg.reconnectWindowMs ?? this.reconnectWindowMs;
         if (windowMs > 0 && Date.now() - latestEndMs < windowMs) {
           console.info(`[reconciler] ${b.streamKey} 结束 ${Math.round((Date.now() - latestEndMs) / 1000)}s 前,重连窗内等待(防第二场撞 key/防拆场)`);
+          continue;
+        }
+
+        // Orphan gate (issue #223): before the done branch on purpose — a done job keeps its sources (no backfill),
+        // existing jobs are neither retried nor escalated while orphans overlap.
+        const orphanHit = orphans.overlapByKey.get(b.streamKey);
+        const doneHit = orphans.doneOverlap.get(b.streamKey);
+        if (orphanHit || doneHit) {
+          const reason = orphanHit
+            ? `${orphanHit.length} unclaimed segment session(s) overlap this broadcast`
+            : `overlaps done job ${doneHit!.streamKey}`;
+          console.warn(`[reconciler] ${b.streamKey} skipped: ${reason}; fix the session sidecar or move the files to release`);
           continue;
         }
 

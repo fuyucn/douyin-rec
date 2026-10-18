@@ -6,6 +6,8 @@ import type { UnclaimedSegment } from "./unclaimed.js";
 // 契约在 core(app 的 worker-store 用同一形状);这里 re-export 保持既有调用点不变。
 export type { ApplyTasksResult, WorkerConfig } from "@drec/core";
 
+export type KeepSession = "all" | "xml";
+
 export interface NodeRecording {
   roomSlug: string;
   platform: string;          // douyin / bilibili(来自 meta.json;缺省 fallback douyin)。按 (platform,roomSlug) 聚类。
@@ -41,6 +43,11 @@ export interface NodeRecording {
    * 缺省 undefined = 未启用边录边传 / 老录像。
    */
   rolling?: NodeRollingProgress;
+  /**
+   * Master-only in-memory mark set by Reconciler.collect (issue #223); workers never emit it.
+   * 'all' = never delete this session's node files; 'xml' = keep node xml.
+   */
+  keepSession?: KeepSession;
 }
 
 /**

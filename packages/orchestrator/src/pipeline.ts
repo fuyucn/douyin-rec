@@ -1,7 +1,7 @@
 import path from "node:path";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
-import type { NodeRecording, Transport } from "./transport.js";
+import type { KeepSession, NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import { formatBiliTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
@@ -349,7 +349,7 @@ export async function cleanupSourcesShared(o: {
   streamKey: string;
   ledger: SyncLedger;
   transports: Map<string, Transport>;
-  members: readonly { workerId: string; rec: { tsFiles: string[]; xmlPath?: string } }[];
+  members: readonly { workerId: string; rec: { tsFiles: string[]; xmlPath?: string; keepSession?: KeepSession } }[];
   cleanup?: PipelineCleanup;
   /** stage 里拉来的源段副本(绝对路径);**仅合并路径传**。分P模式不传。 */
   stagePulledSources?: string[];
@@ -382,10 +382,13 @@ export async function cleanupSourcesShared(o: {
     const delNodeXml = !survivors.nodeXml;
     o.ledger.logStep(o.streamKey, "clean_source", "start");
     let fileCount = 0;
+    let kept = 0;
     const srcFailed: CleanupFailure[] = [];
     for (const m of o.members) {
+      // Sessions with unclaimed (orphan) segments keep everything on the node (issue #223).
+      if (m.rec.keepSession === "all") { kept++; continue; }
       const paths = videoOnly(m.rec.tsFiles);
-      if (delNodeXml && m.rec.xmlPath) paths.push(m.rec.xmlPath);
+      if (delNodeXml && m.rec.xmlPath && m.rec.keepSession !== "xml") paths.push(m.rec.xmlPath);
       if (paths.length === 0) continue;
       fileCount += paths.length;
       const t = o.transports.get(m.workerId);
@@ -395,7 +398,7 @@ export async function cleanupSourcesShared(o: {
       catch (e) { srcFailed.push({ target: m.workerId, error: String((e as Error)?.message ?? e).slice(0, 200) }); }
     }
     failed.push(...srcFailed);
-    markStep("clean_source", srcFailed, `删 ${o.members.length} 节点 · ${fileCount} 文件`);
+    markStep("clean_source", srcFailed, `删 ${o.members.length} 节点 · ${fileCount} 文件${kept > 0 ? ` · kept ${kept} (orphans)` : ""}`);
   }
 
   // ② 有合并处理 → stage 里拉来的源段副本已成冗余(成品是合并 mp4),可删。

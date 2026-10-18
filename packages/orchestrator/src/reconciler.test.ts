@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Reconciler, type ReconcilerDeps } from "./reconciler.js";
 import { SyncLedger } from "./ledger.js";
 import { ProcUnsupported, type Transport, type NodeRecording, type NodeInventory } from "./transport.js";
-import type { PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, type PipelineDeps } from "./pipeline.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
 import { processTimeZone, zonedStamp, JobAbortedError, USER_STOP, _resetJobAbort, beginJob, endJob, isJobLive } from "@drec/core";
@@ -1784,6 +1784,295 @@ describe("unclaimed-segment pass-through + deduped summary log (#225)", () => {
     expect(summaryLines(warn)).toEqual([
       "[reconciler] worker old orphan state unknown (worker does not report unclaimed segments)",
     ]);
+    ledger.close();
+  });
+});
+
+describe("orphan gate + alerts (#223)", () => {
+  const T0 = new Date("2026-06-22T08:00:00Z").getTime();
+  const MIN = 60_000;
+  const BASE = "主播名_2026-06-22_08-00-00";
+
+  function orphan(o: { sessionBase?: string; roomSlug?: string; startMs?: number; worker?: string } = {}) {
+    const startMs = o.startMs ?? T0;
+    const sessionBase = o.sessionBase ?? "orphan_2026-06-22_08-00-00";
+    return {
+      path: `/r/${o.worker ?? "w"}/${sessionBase}_000.mp4`, sizeBytes: 1, mtimeMs: startMs + 30 * MIN, sessionBase, segmentIndex: 0,
+      stampMs: startMs, stampSource: "sidecar" as const, sidecar: "minimal" as const,
+      platform: "douyin", roomSlug: o.roomSlug ?? "test-room", segmentSec: 1800,
+    };
+  }
+
+  type Inv = Omit<NodeInventory, "workerId">;
+  function setup(invs: Record<string, () => Inv>, o: { dbPath?: string; ledger?: SyncLedger; isDone?: () => boolean } = {}) {
+    const ledger = o.ledger ?? (o.dbPath ? new SyncLedger(o.dbPath) : freshLedger());
+    const transports = new Map<string, Transport>(Object.entries(invs).map(([id, inv]) => [id, {
+      ...makeTransport(id, []),
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockImplementation(async () => ({ workerId: id, ...inv() })),
+      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockImplementation(async () => o.isDone?.() ?? true),
+    }]));
+    const notify = vi.fn<(e: NotifyEvent) => void>();
+    const runPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV1"); return { state: "done", bv: "BV1" }; },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      runPipeline, settle: fastSettle, sleep: fastSleep, notify, maxRetries: 2,
+      reconnectWindowMs: 0, cleanupBackfillThrottleMs: 0,
+    });
+    return { ledger, reconciler, notify, runPipeline, transports };
+  }
+  const errors = (notify: ReturnType<typeof vi.fn>) =>
+    notify.mock.calls.map((c) => c[0] as NotifyEvent).filter((e) => e.kind === "error") as Array<{ message: string }>;
+  const keyOf = (recs: NodeRecording[], known: { streamKey: string; startMs?: number | null }[] = []) =>
+    clusterBroadcasts([{ workerId: "w1", recordings: recs }], undefined, "douyin", known)[0].streamKey;
+
+  let warn: ReturnType<typeof vi.spyOn>;
+  afterEach(() => { vi.restoreAllMocks(); });
+  const quiet = () => { warn = vi.spyOn(console, "warn").mockImplementation(() => {}); vi.spyOn(console, "info").mockImplementation(() => {}); };
+
+  it("overlapping orphan → no job row, no hubTaskStart, no pipeline, one error summary, warning names the reason", async () => {
+    quiet();
+    const { ledger, reconciler, notify, runPipeline } = setup({
+      w1: () => ({ recordings: [makeRec()], unclaimedSegments: [orphan()], unclaimedTruncated: 0 }),
+    });
+    await reconciler.reconcileAll();
+    expect(ledger.listKeys()).toEqual([]);
+    expect(runPipeline).not.toHaveBeenCalled();
+    expect(notify.mock.calls.some((c) => c[0].kind === "hubTaskStart")).toBe(false);
+    expect(errors(notify)).toHaveLength(1);
+    expect(errors(notify)[0].message).toContain("1 overlap broadcasts and were skipped");
+    expect(warn.mock.calls.map((c) => String(c[0])).some((m) => m.includes("skipped: 1 unclaimed segment session(s) overlap"))).toBe(true);
+    ledger.close();
+  });
+
+  it("dedupe: identical rounds and a master restart do not re-alert; disappear → reappear alerts once more", async () => {
+    quiet();
+    const dbPath = join(mkdtempSync(join(tmpdir(), "rec-orph-")), "j.db");
+    let segs = [orphan()];
+    const inv = { w1: () => ({ recordings: [makeRec()], unclaimedSegments: segs, unclaimedTruncated: 0 }) };
+    const a = setup(inv, { dbPath });
+    await a.reconciler.reconcileAll();
+    await a.reconciler.reconcileAll();
+    expect(errors(a.notify)).toHaveLength(1);
+    a.ledger.close();
+
+    const b = setup(inv, { dbPath });
+    await b.reconciler.reconcileAll();
+    expect(errors(b.notify)).toHaveLength(0);
+    segs = [];
+    await b.reconciler.reconcileAll();
+    segs = [orphan()];
+    await b.reconciler.reconcileAll();
+    expect(errors(b.notify)).toHaveLength(1);
+    b.ledger.close();
+  });
+
+  it("orphan of another room → broadcast processed normally, one 'unmatched' summary", async () => {
+    quiet();
+    const { ledger, reconciler, notify, runPipeline } = setup({
+      w1: () => ({ recordings: [makeRec()], unclaimedSegments: [orphan({ roomSlug: "other-room" })], unclaimedTruncated: 0 }),
+    });
+    await reconciler.reconcileAll();
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    expect(ledger.listKeys()).toHaveLength(1);
+    expect(errors(notify)).toHaveLength(1);
+    expect(errors(notify)[0].message).toContain("1 without matching broadcast");
+    ledger.close();
+  });
+
+  it("orphan of the same room but a non-overlapping time → processed, alerted as unmatched", async () => {
+    quiet();
+    const { ledger, reconciler, notify, runPipeline } = setup({
+      w1: () => ({ recordings: [makeRec()], unclaimedSegments: [orphan({ startMs: T0 + 5 * 60 * MIN })], unclaimedTruncated: 0 }),
+    });
+    await reconciler.reconcileAll();
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    expect(errors(notify)[0].message).toContain("1 without matching broadcast");
+    ledger.close();
+  });
+
+  it("new cluster overlapping a DONE job of the same room → skipped + done-overlap alert; a later cluster runs", async () => {
+    quiet();
+    const done = makeRec();
+    const ledger = freshLedger();
+    const doneKey = keyOf([done]);
+    ledger.upsertPending(doneKey, done.startMs);
+    ledger.recordCandidates(doneKey, [{ workerId: "w1", coverage: 1, durationSec: 3600, startMs: done.startMs, endMs: done.endMs, totalGapSec: 0 }]);
+    ledger.markDone(doneKey, "BV0");
+    const overlapping = makeRec({ sessionBase: "主播名_2026-06-22_08-30-00", startMs: T0 + 30 * MIN, endMs: T0 + 90 * MIN });
+    const later = makeRec({ sessionBase: "主播名_2026-06-22_11-00-00", startMs: T0 + 180 * MIN, endMs: T0 + 240 * MIN });
+    let recs = [overlapping];
+    const { reconciler, notify, runPipeline } = setup(
+      { w1: () => ({ recordings: recs, unclaimedSegments: [], unclaimedTruncated: 0 }) }, { ledger },
+    );
+    await reconciler.reconcileAll();
+    expect(runPipeline).not.toHaveBeenCalled();
+    expect(ledger.listKeys().map((k) => k.streamKey)).toEqual([doneKey]);
+    expect(errors(notify)).toHaveLength(1);
+    expect(errors(notify)[0].message).toContain("1 overlap done jobs");
+    recs = [later];
+    await reconciler.reconcileAll();
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    expect(errors(notify)).toHaveLength(1);
+    ledger.close();
+  });
+
+  it("existing pending job overlapping a DONE job of the same room → still runs, no done-overlap alert", async () => {
+    quiet();
+    const done = makeRec();
+    const ledger = freshLedger();
+    const doneKey = keyOf([done]);
+    ledger.upsertPending(doneKey, done.startMs);
+    ledger.recordCandidates(doneKey, [{ workerId: "w1", coverage: 1, durationSec: 3600, startMs: done.startMs, endMs: done.endMs, totalGapSec: 0 }]);
+    ledger.markDone(doneKey, "BV0");
+    const overlapping = makeRec({ sessionBase: "主播名_2026-06-22_08-30-00", startMs: T0 + 30 * MIN, endMs: T0 + 90 * MIN });
+    const pendingKey = keyOf([overlapping], ledger.listKeys());
+    expect(pendingKey).not.toBe(doneKey);
+    ledger.upsertPending(pendingKey, overlapping.startMs);
+    const { reconciler, notify, runPipeline } = setup(
+      { w1: () => ({ recordings: [overlapping], unclaimedSegments: [], unclaimedTruncated: 0 }) }, { ledger },
+    );
+    await reconciler.reconcileAll();
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    expect(runPipeline.mock.calls[0][0].streamKey).toBe(pendingKey);
+    expect(errors(notify)).toHaveLength(0);
+    ledger.close();
+  });
+
+  it("room still recording → no alert this round; once done → alert", async () => {
+    quiet();
+    let live = true;
+    const { ledger, reconciler, notify } = setup(
+      { w1: () => ({ recordings: [makeRec()], unclaimedSegments: [orphan()], unclaimedTruncated: 0 }) },
+      { isDone: () => !live },
+    );
+    await reconciler.reconcileAll();
+    expect(errors(notify)).toHaveLength(0);
+    live = false;
+    await reconciler.reconcileAll();
+    expect(errors(notify)).toHaveLength(1);
+    ledger.close();
+  });
+
+  it("deferral is overlap-based: finished-session orphan in a live room alerts now; overlapping one is deferred and not pruned", async () => {
+    quiet();
+    let live = true;
+    const liveRec = makeRec({ sessionBase: "主播名_2026-06-22_12-00-00", startMs: T0 + 240 * MIN, endMs: T0 + 300 * MIN });
+    const early = orphan({ sessionBase: "early_2026-06-22_08-00-00" });
+    const near = orphan({ sessionBase: "near_2026-06-22_12-00-00", startMs: T0 + 240 * MIN });
+    const { ledger, reconciler, notify } = setup(
+      { w1: () => ({ recordings: [liveRec], unclaimedSegments: [early, near], unclaimedTruncated: 0 }) },
+      { isDone: () => !live },
+    );
+    await reconciler.reconcileAll();
+    expect(errors(notify)).toHaveLength(1);
+    expect(errors(notify)[0].message).toContain(`unmatched/w1/${early.sessionBase}`);
+    expect(errors(notify)[0].message).not.toContain(near.sessionBase);
+    live = false;
+    await reconciler.reconcileAll();
+    expect(errors(notify)).toHaveLength(2);
+    expect(errors(notify)[1].message).toContain(`overlap/w1/${near.sessionBase}`);
+    // Live again: the claimed overlap key is deferred but kept, so the next finished round does not re-alert it.
+    live = true;
+    await reconciler.reconcileAll();
+    live = false;
+    await reconciler.reconcileAll();
+    expect(errors(notify)).toHaveLength(2);
+    ledger.close();
+  });
+
+  it("first deploy with orphans on two workers → exactly one notify listing both", async () => {
+    quiet();
+    const { ledger, reconciler, notify } = setup({
+      w1: () => ({ recordings: [], unclaimedSegments: [orphan({ worker: "w1", roomSlug: "r1" })], unclaimedTruncated: 0 }),
+      w2: () => ({ recordings: [], unclaimedSegments: [orphan({ worker: "w2", roomSlug: "r2" })], unclaimedTruncated: 3 }),
+    });
+    await reconciler.reconcileAll();
+    expect(errors(notify)).toHaveLength(1);
+    const msg = errors(notify)[0].message;
+    expect(msg).toContain("3 new");
+    expect(msg).toContain("unmatched/w1/");
+    expect(msg).toContain("unmatched/w2/");
+    expect(msg).toContain("1 nodes truncated");
+    ledger.close();
+  });
+
+  it("old worker (no unclaimed fields) → members keep node xml and the broadcast still runs; known clean worker unmarked", async () => {
+    quiet();
+    const { ledger, reconciler, runPipeline } = setup({
+      old: () => ({ recordings: [makeRec()] }),
+      clean: () => ({ recordings: [makeRec()], unclaimedSegments: [], unclaimedTruncated: 0 }),
+    });
+    await reconciler.reconcileAll();
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    const members = runPipeline.mock.calls[0][0].members;
+    expect(members.find((m) => m.workerId === "old")!.rec.keepSession).toBe("xml");
+    expect(members.find((m) => m.workerId === "clean")!.rec.keepSession).toBeUndefined();
+    ledger.close();
+  });
+
+  it("DONE job with cleanup backfill due + overlapping orphan → no backfill, state untouched; control without orphan backfills", async () => {
+    quiet();
+    for (const withOrphan of [true, false]) {
+      const rec = makeRec();
+      const ledger = freshLedger();
+      const key = keyOf([rec]);
+      ledger.upsertPending(key, rec.startMs);
+      ledger.setBv(key, "BV1");
+      ledger.markDone(key, "BV1");
+      ledger.syncNodeState(key, "clean_source", "failed", { error: "x" });
+      const { reconciler, runPipeline } = setup(
+        { w1: () => ({ recordings: [rec], unclaimedSegments: withOrphan ? [orphan()] : [], unclaimedTruncated: 0 }) }, { ledger },
+      );
+      await reconciler.reconcileAll();
+      expect(runPipeline).toHaveBeenCalledTimes(withOrphan ? 0 : 1);
+      expect(ledger.get(key)?.state).toBe("done");
+      ledger.close();
+    }
+  });
+
+  it("existing failed job + overlapping orphan → neither escalated (fails >= max) nor retried (fails < max)", async () => {
+    quiet();
+    for (const fails of [2, 1]) {
+      const rec = makeRec();
+      const ledger = freshLedger();
+      const key = keyOf([rec]);
+      ledger.upsertPending(key, rec.startMs);
+      for (let i = 0; i < fails; i++) ledger.markFailed(key, "boom");
+      const { reconciler, runPipeline, notify } = setup(
+        { w1: () => ({ recordings: [rec], unclaimedSegments: [orphan()], unclaimedTruncated: 0 }) }, { ledger },
+      );
+      await reconciler.reconcileAll();
+      expect(ledger.get(key)?.state).toBe("failed");
+      expect(ledger.get(key)?.fails).toBe(fails);
+      expect(runPipeline).not.toHaveBeenCalled();
+      expect(errors(notify).every((e) => !e.message.includes("needs_manual"))).toBe(true);
+      ledger.close();
+    }
+  });
+
+  it("runNow is not gated; the orphan session's member carries keepSession 'all' and cleanup keeps its files", async () => {
+    quiet();
+    const { ledger, reconciler, runPipeline } = setup({
+      w1: () => ({ recordings: [makeRec()], unclaimedSegments: [orphan({ sessionBase: BASE })], unclaimedTruncated: 0 }),
+      w2: () => ({ recordings: [makeRec({ tsFiles: ["/w2/a.ts"], xmlPath: "/w2/a.xml" })], unclaimedSegments: [], unclaimedTruncated: 0 }),
+    });
+    const key = keyOf([makeRec()]);
+    const r = await reconciler.runNow({ streamKey: key, wait: true });
+    expect(r).toMatchObject({ ok: true });
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    const members = runPipeline.mock.calls[0][0].members;
+    expect(members.find((m) => m.workerId === "w1")!.rec.keepSession).toBe("all");
+
+    const cleaned = new Map<string, string[]>();
+    const tr = (id: string) => ({ id, cleanup: async (ps: string[]) => { cleaned.set(id, ps); } }) as unknown as Transport;
+    await cleanupSourcesShared({
+      streamKey: key, ledger, transports: new Map([["w1", tr("w1")], ["w2", tr("w2")]]), members,
+      cleanup: { sourceAfterDone: true }, rmStage: async () => {}, log: () => {},
+    });
+    expect(cleaned.has("w1")).toBe(false);
+    expect(cleaned.get("w2")).toEqual(["/w2/a.ts", "/w2/a.xml"]);
     ledger.close();
   });
 });
