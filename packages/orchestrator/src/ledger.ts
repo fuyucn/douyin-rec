@@ -90,6 +90,8 @@ export interface NodeStateRow {
   updatedAt: number;
 }
 
+export interface OrphanAlertKey { kind: string; workerId: string; subject: string }
+
 export class SyncLedger {
   private db: DatabaseSync;
   constructor(dbPath: string) {
@@ -143,6 +145,12 @@ export class SyncLedger {
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_parts(
       streamKey TEXT NOT NULL, groupName TEXT NOT NULL, partIndex INTEGER NOT NULL,
       updatedAt INTEGER NOT NULL, PRIMARY KEY(streamKey, groupName, partIndex))`);
+    // Persistent orphan-alert dedupe (survives master restarts, so a deploy does not re-alert).
+    // kind: overlap | unmatched | done-overlap | truncated; subject: sessionBase, streamKey or ''.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS sync_orphan_alerts(
+      kind TEXT NOT NULL, workerId TEXT NOT NULL, subject TEXT NOT NULL,
+      firstAt INTEGER NOT NULL, lastSeenAt INTEGER NOT NULL,
+      PRIMARY KEY(kind, workerId, subject))`);
   }
   private logEvent(streamKey: string, state: JobState, at: number): void {
     this.db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(streamKey, state, at);
@@ -483,6 +491,43 @@ export class SyncLedger {
   getCandidates(streamKey: string): CandidateRow[] {
     return this.db.prepare("SELECT * FROM sync_candidates WHERE streamKey=? ORDER BY isWinner DESC, coverage DESC")
       .all(streamKey) as unknown as CandidateRow[];
+  }
+  /** Done jobs with start and the latest candidate end (null when no candidate rows). */
+  listDoneWindows(): Array<{ streamKey: string; startMs: number | null; endMs: number | null }> {
+    const rows = this.db.prepare(
+      `SELECT j.streamKey AS streamKey, j.startMs AS startMs, MAX(c.endMs) AS endMs
+       FROM sync_jobs j LEFT JOIN sync_candidates c ON c.streamKey = j.streamKey
+       WHERE j.state = 'done' GROUP BY j.streamKey`).all() as Array<{ streamKey: string; startMs: number | bigint | null; endMs: number | bigint | null }>;
+    return rows.map((r) => ({
+      streamKey: r.streamKey,
+      startMs: r.startMs === null ? null : Number(r.startMs),
+      endMs: r.endMs === null ? null : Number(r.endMs),
+    }));
+  }
+  /** Record alert keys; returns only the ones never seen before. Seen keys get lastSeenAt refreshed. */
+  claimOrphanAlerts(entries: readonly OrphanAlertKey[]): OrphanAlertKey[] {
+    const at = this.now();
+    const insert = this.db.prepare("INSERT OR IGNORE INTO sync_orphan_alerts(kind,workerId,subject,firstAt,lastSeenAt) VALUES(?,?,?,?,?)");
+    const touch = this.db.prepare("UPDATE sync_orphan_alerts SET lastSeenAt=? WHERE kind=? AND workerId=? AND subject=?");
+    const fresh: OrphanAlertKey[] = [];
+    for (const e of entries) {
+      if (Number(insert.run(e.kind, e.workerId, e.subject, at, at).changes) === 1) fresh.push(e);
+      else touch.run(at, e.kind, e.workerId, e.subject);
+    }
+    return fresh;
+  }
+  /** Drop a worker's alert rows whose (kind, subject) is no longer live, so a recurrence alerts again. */
+  pruneOrphanAlerts(workerId: string, live: readonly OrphanAlertKey[]): number {
+    const liveSet = new Set(live.filter((l) => l.workerId === workerId).map((l) => JSON.stringify([l.kind, l.subject])));
+    const rows = this.db.prepare("SELECT kind, subject FROM sync_orphan_alerts WHERE workerId=?")
+      .all(workerId) as Array<{ kind: string; subject: string }>;
+    const del = this.db.prepare("DELETE FROM sync_orphan_alerts WHERE kind=? AND workerId=? AND subject=?");
+    let n = 0;
+    for (const r of rows) {
+      if (liveSet.has(JSON.stringify([r.kind, r.subject]))) continue;
+      n += Number(del.run(r.kind, workerId, r.subject).changes);
+    }
+    return n;
   }
   close(): void { this.db.close(); }
 }

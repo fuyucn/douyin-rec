@@ -320,3 +320,93 @@ describe("sweepStale 崩溃恢复", () => {
     l.close();
   });
 });
+
+describe("orphan guard storage (#226)", () => {
+  it("listDoneWindows joins MAX(candidate endMs), null endMs without candidates, ignores non-done jobs", () => {
+    const l = fresh();
+    l.upsertPending("douyin:1:2026-06-20", 100);
+    l.recordCandidates("douyin:1:2026-06-20", [
+      { workerId: "a", coverage: 1, durationSec: 1, startMs: 100, endMs: 500, totalGapSec: 0 },
+      { workerId: "b", coverage: 1, durationSec: 1, startMs: 100, endMs: 900, totalGapSec: 0 },
+    ]);
+    l.setState("douyin:1:2026-06-20", "done");
+    l.upsertPending("douyin:2:2026-06-20", 200);
+    l.setState("douyin:2:2026-06-20", "done");
+    l.upsertPending("douyin:3:2026-06-20", 300);
+    l.recordCandidates("douyin:3:2026-06-20", [{ workerId: "a", coverage: 1, durationSec: 1, startMs: 300, endMs: 999, totalGapSec: 0 }]);
+    l.setState("douyin:3:2026-06-20", "syncing");
+    const rows = l.listDoneWindows().sort((x, y) => (x.streamKey < y.streamKey ? -1 : 1));
+    expect(rows).toEqual([
+      { streamKey: "douyin:1:2026-06-20", startMs: 100, endMs: 900 },
+      { streamKey: "douyin:2:2026-06-20", startMs: 200, endMs: null },
+    ]);
+    l.close();
+  });
+
+  it("claimOrphanAlerts returns a key only the first time, also after re-opening the db file", () => {
+    const p = join(mkdtempSync(join(tmpdir(), "led-orph-")), "j.db");
+    const k = { kind: "overlap", workerId: "w1", subject: "a_2026-06-20_01-00-00" };
+    const l = new SyncLedger(p);
+    expect(l.claimOrphanAlerts([k])).toEqual([k]);
+    expect(l.claimOrphanAlerts([k])).toEqual([]);
+    l.close();
+    const again = new SyncLedger(p);
+    expect(again.claimOrphanAlerts([k, { ...k, workerId: "w2" }])).toEqual([{ ...k, workerId: "w2" }]);
+    again.close();
+  });
+
+  it("refreshes lastSeenAt on a repeat claim; firstAt stays", () => {
+    const p = join(mkdtempSync(join(tmpdir(), "led-orph-")), "j.db");
+    const l = new SyncLedger(p);
+    const k = { kind: "unmatched", workerId: "w1", subject: "s" };
+    l.claimOrphanAlerts([k]);
+    l.claimOrphanAlerts([k]);
+    l.close();
+    const raw = new DatabaseSync(p);
+    const row = raw.prepare("SELECT firstAt, lastSeenAt FROM sync_orphan_alerts").get() as { firstAt: number; lastSeenAt: number };
+    raw.close();
+    expect(row.lastSeenAt).toBeGreaterThan(row.firstAt);
+  });
+
+  it("subjects containing ':' or '|' round-trip unchanged and stay distinct per column", () => {
+    const l = fresh();
+    const keys = [
+      { kind: "done-overlap", workerId: "*", subject: "x:a:b:2026-06-20" },
+      { kind: "overlap", workerId: "w|1", subject: "a|b" },
+      { kind: "overlap", workerId: "w", subject: "1|a|b" },
+      { kind: "truncated", workerId: "w1", subject: "" },
+    ];
+    expect(l.claimOrphanAlerts(keys)).toEqual(keys);
+    expect(l.claimOrphanAlerts(keys)).toEqual([]);
+    l.close();
+  });
+
+  it("pruneOrphanAlerts removes absent keys only for that worker, so a recurrence alerts again", () => {
+    const l = fresh();
+    const keep = { kind: "overlap", workerId: "w1", subject: "a" };
+    const gone = { kind: "unmatched", workerId: "w1", subject: "a" };
+    const other = { kind: "unmatched", workerId: "w2", subject: "b" };
+    l.claimOrphanAlerts([keep, gone, other]);
+    expect(l.pruneOrphanAlerts("w1", [keep])).toBe(1);
+    expect(l.claimOrphanAlerts([keep, gone, other])).toEqual([gone]);
+    expect(l.pruneOrphanAlerts("w1", [keep, gone])).toBe(0);
+    l.close();
+  });
+
+  it("table has separate columns + composite PRIMARY KEY on fresh and pre-existing dbs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "led-orph-"));
+    const p = join(dir, "old.db");
+    const raw = new DatabaseSync(p);
+    raw.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL, updatedAt INTEGER NOT NULL)`);
+    raw.close();
+    for (const path of [p, join(dir, "new.db")]) {
+      new SyncLedger(path).close();
+      new SyncLedger(path).close(); // idempotent re-open
+      const db = new DatabaseSync(path);
+      const cols = db.prepare("PRAGMA table_info(sync_orphan_alerts)").all() as Array<{ name: string; pk: number }>;
+      db.close();
+      expect(cols.map((c) => c.name)).toEqual(["kind", "workerId", "subject", "firstAt", "lastSeenAt"]);
+      expect(cols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(["kind", "workerId", "subject"]);
+    }
+  });
+});
