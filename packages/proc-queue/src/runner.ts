@@ -60,6 +60,8 @@ export interface ProcRunnerOpts {
   abortWaitMs?: number;
   /** false = 不起定时器(测试手动驱动 `tick()` / `heartbeat()`)。 */
   timers?: boolean;
+  /** Clock for the post-yield cooldown (tests). Default monotonic `performance.now` (immune to wall-clock jumps). */
+  now?: () => number;
   /** Injectable child fingerprint probe (tests). */
   probeChild?: (pid: number) => ChildFingerprint | null;
   /** How often a finished job's still-alive child is re-checked before its slot is released (default 5s). */
@@ -106,6 +108,13 @@ export class ProcRunner {
   private readonly held = new Set<string>();
   /** 收到 handover 请求、正在让出的 kind(不再认领,跑完当前 job 就删租约)。 */
   private readonly yielding = new Set<string>();
+  /**
+   * kind → when we yielded it on a handover request. For one lease period we do not take it back:
+   * the lease row is gone at that moment, and without this our own next tick usually beats the
+   * requester (serve) to it, resetting `handoverRequested` and turning the handover into ping-pong
+   * (#238). If the requester never shows up, we resume holding after the cooldown.
+   */
+  private readonly yieldedAt = new Map<string, number>();
   private readonly inflight = new Map<string, Inflight>();
   private readonly diskAlerted = new Set<string>();
   /** 正在做孤儿处置(recover + settleOrphan)的 jobId:同一行同一时刻只允许一份处置(D1)。 */
@@ -120,6 +129,10 @@ export class ProcRunner {
     this.limiter = opts.limiter ?? new SimpleSlotLimiter();
     this.freeBytes = opts.freeBytes ?? defaultFreeBytes;
     this.leaseMs = opts.leaseMs ?? LEASE_MS;
+  }
+
+  private clock(): number {
+    return this.o.now ? this.o.now() : performance.now();
   }
 
   private log(m: string): void {
@@ -190,6 +203,7 @@ export class ProcRunner {
       this.o.store.releaseLease(kind, this.o.owner);
       this.held.delete(kind);
       this.yielding.delete(kind);
+      this.yieldedAt.set(kind, this.clock());
       this.log(`${kind}: 已让出租约`);
     }
   }
@@ -224,6 +238,11 @@ export class ProcRunner {
     const procs = listProcessors();
     for (const p of procs) {
       if (this.held.has(p.kind) || this.yielding.has(p.kind)) continue;
+      const yielded = this.yieldedAt.get(p.kind);
+      if (yielded !== undefined) {
+        if (this.clock() - yielded < this.leaseMs) continue;
+        this.yieldedAt.delete(p.kind);
+      }
       let r: { acquired: boolean; takeover: boolean };
       try {
         r = this.o.store.acquireLease(p.kind, this.o.owner, {
@@ -560,6 +579,7 @@ export class ProcRunner {
     for (const kind of [...this.held]) store.releaseLease(kind, owner);
     this.held.clear();
     this.yielding.clear();
+    this.yieldedAt.clear();
   }
 
   // ───────────────────────── 快照 ─────────────────────────
