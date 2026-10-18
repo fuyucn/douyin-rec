@@ -20,11 +20,12 @@ import { Button, IconButton } from "../components/Button";
 import { Switch } from "../components/Switch";
 import { CleanupSection } from "../components/room-form/CleanupSection";
 import { RuleSwitch, ToggleRow } from "../components/room-form/parts";
-import { errMessage, useToast } from "../lib/hooks";
+import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
 import { factsOf, formFromRoom, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
 import { deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
+import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
 interface Props {
   room: RoomDTO;
@@ -69,7 +70,8 @@ export function Seg<T extends string>({ items, value, onChange, small }: {
 export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props): ReactNode {
   const t = useT();
   const toast = useToast();
-  const cookieReady = !!useAtomValue(cookieStatusAtom)?.hasSession;
+  const douyinReady = !!useAtomValue(cookieStatusAtom)?.hasSession;
+  const cookieStatuses = usePlatformCookieStatuses(true);
   const [form, setForm] = useState<RoomForm>(() => formFromRoom(room));
   const [busy, setBusy] = useState(false);
   const [platforms, setPlatforms] = useState<PlatformDTO[]>([]);
@@ -88,7 +90,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   const ctx: RoomContext = {
     hasRecording,
     danmuAvailable: plat ? plat.hasDanmu : true,
-    cookieReady,
+    cookieReady: cookieReadyFor(room.platform, cookieStatuses, douyinReady),
     // Douyin streams anonymously; its cookie only serves danmu. Other platforms stream with it.
     cookieForStream: room.platform !== "douyin",
   };
@@ -268,8 +270,8 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                         <ToggleRow label={t("rooms.danmu")} hint={ctx.danmuAvailable ? t("rooms.danmuHint") : t("dialog.danmuNone")}
                                    checked={form.danmu} onChange={(danmu) => update({ danmu })}
                                    lock={ctx.danmuAvailable ? undefined : { locked: true, reasonKey: "dialog.danmuNone" }} />
-                        <ToggleRow label={t(ctx.cookieForStream ? "roomForm.useCookieStream" : "rooms.useCookie")}
-                                   hint={t(ctx.cookieForStream ? "rooms.useCookieHintOther" : "rooms.useCookieHintDouyin")}
+                        <ToggleRow label={t(accountToggleCopy(ctx).labelKey)}
+                                   hint={t(accountToggleCopy(ctx).hintKey)}
                                    checked={form.useCookie} onChange={(useCookie) => update({ useCookie })} lock={c.cookie} />
                       </section>
                     )}

@@ -84,6 +84,32 @@ function rollingLock(f: FormFacts): Lock {
   return lock(ROLLING_REASON_KEY[policy.reason] ?? "rooms.rollingReasonMultiNode");
 }
 
+/**
+ * Whether the room's own platform has a logged-in account (the backend resolves the account per
+ * platform, so the douyin login says nothing about bilibili / kuaishou). `statuses` = GET /api/cookies;
+ * while it is not loaded (or failed) douyin falls back to the global douyin status and other platforms
+ * are treated as ready: the toggle is a hint, and the backend simply goes anonymous without an account.
+ */
+export function cookieReadyFor(
+  platformId: string | undefined,
+  statuses: readonly { platform: string; hasSession: boolean }[] | null,
+  douyinReady: boolean,
+): boolean {
+  const own = statuses?.find((s) => s.platform === (platformId ?? "douyin"));
+  if (own) return own.hasSession;
+  return platformId === undefined || platformId === "douyin" ? douyinReady : true;
+}
+
+/**
+ * Label / hint keys of the account toggle by what the account does on this platform:
+ * douyin = gifts/entries only; with danmu + stream (bilibili) = both; stream only (kuaishou, no danmu).
+ */
+export function accountToggleCopy(f: Pick<FormFacts, "cookieForStream" | "danmuAvailable">): { labelKey: string; hintKey: string } {
+  if (!f.cookieForStream) return { labelKey: "rooms.useCookie", hintKey: "rooms.useCookieHintDouyin" };
+  if (!f.danmuAvailable) return { labelKey: "roomForm.useCookieStreamOnly", hintKey: "rooms.useCookieHintStreamOnly" };
+  return { labelKey: "roomForm.useCookieStream", hintKey: "rooms.useCookieHintOther" };
+}
+
 /** 「带 Cookie」开关:未登录一律锁;抖音上它只服务弹幕,不录弹幕时也锁。任务弹窗单独用它。 */
 export function cookieLock(f: Pick<FormFacts, "danmu" | "danmuAvailable" | "cookieReady" | "cookieForStream">): Lock {
   if (!f.cookieReady) return lock("dialog.giftNeedCookie");

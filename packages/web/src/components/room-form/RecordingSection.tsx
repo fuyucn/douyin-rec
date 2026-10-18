@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { OUTPUT_FORMATS, stageExt, type OutputFormat } from "@drec/output-format";
 import { useT } from "../../lib/i18n";
 import { qualityLabel } from "../../lib/labels";
-import type { Lock } from "../../lib/room-form-rules";
+import { accountToggleCopy, type Lock } from "../../lib/room-form-rules";
 import { SectionHeader, ToggleRow } from "./parts";
 
 export interface RecordingValue {
@@ -55,8 +55,8 @@ function withCurrent(list: readonly string[], current: string): string[] {
 export function RecordingSection(p: Props): ReactNode {
   const t = useT();
   const v = p.value;
-  // 文案按平台:抖音取流恒匿名、Cookie 只影响弹幕;B站/快手关掉会掉到匿名基础画质。
-  const cookieHint = t(p.cookieForStream ? "rooms.useCookieHintOther" : "rooms.useCookieHintDouyin");
+  // Copy by what the account does on this platform (douyin: gifts/entries; bilibili: stream + gifts; kuaishou: stream).
+  const accountCopy = accountToggleCopy({ cookieForStream: p.cookieForStream, danmuAvailable: p.danmuAvailable });
   return (
     <section className="space-y-3">
       <SectionHeader
@@ -117,8 +117,8 @@ export function RecordingSection(p: Props): ReactNode {
         lock={p.danmuAvailable ? undefined : { locked: true, reasonKey: "dialog.danmuNone" }}
       />
       <ToggleRow
-        label={t(p.cookieForStream ? "roomForm.useCookieStream" : "rooms.useCookie")}
-        hint={cookieHint}
+        label={t(accountCopy.labelKey)}
+        hint={t(accountCopy.hintKey)}
         checked={v.useCookie}
         onChange={(x) => p.onChange({ useCookie: x })}
         lock={p.cookie}
