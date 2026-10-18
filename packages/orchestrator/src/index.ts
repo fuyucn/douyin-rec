@@ -79,7 +79,7 @@ export function registerBuiltinTransports(deps: {
   /** hub 任务同步:读本机任务清单(local worker = master 自身)。 */
   listTasks?: () => NodeTaskDTO[];
   /** hub 任务同步:把期望任务应用到本机 store。 */
-  applyTasks?: (input: { desired: RemoteTaskSpec[]; force?: boolean }) => ApplyTasksResult;
+  applyTasks?: (input: { desired: RemoteTaskSpec[]; force?: boolean; expectedVersion?: number }) => ApplyTasksResult;
   /** 处理任务表通道(plans/036 T9a):按 worker 的数据根执行入队 / 回执;不传 = local worker 不支持。 */
   procChannel?: {
     enqueue(dataRoot: string, req: EnqueueRequest): EnqueueResponse;

@@ -21,9 +21,12 @@ describe("managed-state 审计快照", () => {
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
   it("write → read 得到相同 desired", () => {
-    writeManagedState(dir, { version: 7, desired: [spec()] });
+    writeManagedState(dir, { version: 7, appVersion: "0.0.173-abc123", desired: [spec()] });
     const st = readManagedState(dir);
     expect(st?.version).toBe(7);
+    // T16: the applying bundle version must survive the round-trip; otherwise
+    // `_node-status` can never report whether a node runs old code.
+    expect(st?.appVersion).toBe("0.0.173-abc123");
     expect(st?.desired).toHaveLength(1);
     expect(st?.desired[0]?.roomSlug).toBe("123456");
   });
@@ -127,6 +130,13 @@ describe("managed-state 审计快照", () => {
     writeManagedState(dir, { version: 1, desired: [spec({ assigned: false }), spec({ roomSlug: "2", assigned: true }), spec({ roomSlug: "3" })] });
     const d = readManagedState(dir)!.desired;
     expect(d.map((x) => x.assigned)).toEqual([false, true, undefined]);
+  });
+
+  it("老快照没有 appVersion → 读回 undefined(不伪造版本)", () => {
+    writeFileSync(join(dir, MANAGED_STATE_FILE), JSON.stringify({ version: 3, savedAt: 1, desired: [] }));
+    const st = readManagedState(dir);
+    expect(st?.version).toBe(3);
+    expect(st?.appVersion).toBeUndefined();
   });
 
   it("issue #73:applyRemoteTasks 带 assigned:false → 任务只停用保留(不删),快照记录 assigned", () => {
