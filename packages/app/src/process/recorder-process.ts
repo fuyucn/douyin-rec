@@ -119,12 +119,20 @@ export class ChildRecorderProcess implements RecorderProcess {
     });
     // detached:true → 子进程成进程组 leader,硬停时用 process.kill(-pid) 一并收割它 spawn 的
     // ffmpeg 孙进程(否则 node 被 SIGKILL 后 ffmpeg 成孤儿继续写盘/占流)。
-    this.child = spawn(this.command, this.args, {
-      cwd: this.cwd,
-      env: this.env, // undefined → 继承 process.env;有值时已是 {...process.env, MESIO_PATH} 合并结果
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
-    });
+    try {
+      this.child = spawn(this.command, this.args, {
+        cwd: this.cwd,
+        env: this.env, // undefined → 继承 process.env;有值时已是 {...process.env, MESIO_PATH} 合并结果
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      });
+    } catch (e) {
+      // A synchronous spawn throw never emits exit/error, so clean up here or the credential file leaks.
+      this.exited = true;
+      this.cleanup();
+      this.resolveExit?.();
+      throw e;
+    }
 
     this.child.stdout?.on("data", (b: Buffer) => this.pipe(b));
     this.child.stderr?.on("data", (b: Buffer) => this.pipe(b));
