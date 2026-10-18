@@ -138,9 +138,15 @@ describe("pr-gate.py", () => {
     expect(r.lines.join("\n")).toContain("触及运行时路径");
   });
   it("工具类白名单：docs/scripts/test/.github 等不 bump 放行；任一运行时路径命中即 FAIL", () => {
-    const tool = ["docs/a.md", "scripts/a.py", "test/a.test.ts", ".github/pull_request_template.md", "plans/a.md", "configs/a.json", "dev/a.sh", "remote/a.sh"];
+    const tool = ["docs/a.md", "scripts/a.py", "test/a.test.ts", ".github/pull_request_template.md", "plans/a.md", "dev/a.sh", "remote/a.sh"];
     expect(gate(GOOD, ["--title", "fix(scripts): y", "--files", tool.join(",")]).status).toBe(0);
-    for (const runtime of ["packages/x.ts", "package.json", "Dockerfile", "docker-compose.yml", "dist/douyin-rec.mjs"]) {
+    // A declared bump must actually bump the manifest; otherwise "无需 bump" and a
+    // fake "0.0.1 → 0.0.2" would both pass for a change that alters the artifact.
+    const declared = GOOD.replace(/无需 bump:.*/, "0.0.1 → 0.0.2");
+    expect(gate(declared, ["--title", "fix(app): y", "--files", "packages/app/src/a.ts"]).lines.join("\n")).toContain("声明 bump 版本,但改动文件里没有根 package.json");
+    for (const runtime of ["packages/x.ts", "package.json", "Dockerfile", "docker-compose.yml", "dist/douyin-rec.mjs",
+                           "configs/hub.config.example.json", "assets/fonts/a.woff2", "esbuild.config.mjs",
+                           "tsconfig.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]) {
       const r = gate(GOOD, ["--title", "fix(scripts): y", "--files", [...tool, runtime].join(",")]);
       expect(r.lines.join("\n"), runtime).toContain("触及运行时路径");
     }

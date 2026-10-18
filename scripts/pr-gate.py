@@ -28,7 +28,23 @@ GUARD = HERE / "issue-guard.py"
 
 REQUIRED_SECTIONS = ["改动范围", "验证方式", "自审五项", "变异验证", "验证命令与输出", "评论采纳情况", "回写位置", "残余风险", "版本"]
 SELF_REVIEW_ITEMS = ["边界", "并发", "静默失败", "一致性", "分层"]
-RUNTIME_PATHS = ("packages/", "package.json", "Dockerfile", "docker-compose", "dist/")
+# Runtime surface = anything that can change the shipped artifact or the container.
+# Anything not listed here is treated as tool-only (scripts/docs/tests/CI/dev fixtures).
+# AGENTS.md and docs/agent-workflow.md quote this list verbatim; a guard test fails
+# if the three ever drift apart.
+RUNTIME_PATHS = (
+    "packages/",
+    "package.json",
+    "Dockerfile",
+    "docker-compose",
+    "dist/",
+    "configs/",          # hub.config.example.json is inlined into the bundle at build time
+    "assets/",           # fonts are copied into the runtime image
+    "esbuild.config.mjs",
+    "tsconfig.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+)
 # 独立占位词才算:TODO/TBD 前后不是路径/单词字符(放行 TODO.md、T-90 之类),
 # 三个以上句点两侧都是 ASCII 路径字符时是 git 范围(origin/x...HEAD),不算省略号。
 PLACEHOLDER = re.compile(
@@ -114,6 +130,11 @@ def check_version(sec: str, title: str, files: list[str] | None) -> list[str]:
         b = tuple(int(x) for x in bump.groups()[3:])
         if not (b[:2] == a[:2] and b[2] == a[2] + 1):
             return [f"版本声明应为 patch +1,实际 {a} → {b}"]
+        # A declared bump must touch the root manifest, otherwise a fake
+        # "0.0.1 → 0.0.2" line would pass for a change that alters the artifact.
+        touched = list(files or [])
+        if touched and "package.json" not in touched:
+            return ["声明 bump 版本,但改动文件里没有根 package.json(版本号与产物不同步)"]
         return []
     if skip:
         touched = [f for f in (files or []) if f.startswith(RUNTIME_PATHS)]
