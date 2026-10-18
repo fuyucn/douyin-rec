@@ -145,14 +145,18 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
    `scripts/pr-gate.py` 的 `RUNTIME_PATHS`,本段与 AGENTS.md 的清单必须逐字同步(有回归测试钉住)。
 7. **隐私闸门**:PR 正文与评论都过 `python3 scripts/issue-guard.py`;diff 本身由 CI 跑
    `issue-guard.py --diff origin/feat/hub-optimization`(只扫新增行,历史内容不计)。
-   源码文件名误报口径见该脚本头部说明:源码类文件不套「文件名 / 凭证类 / 主机名 / streamKey」语义词规则,
-   文档里的文件名若是仓库已跟踪文件则放行;确属夹具的行加 `issue-guard: allow` 并在评审中说明。
+   源码文件名误报口径见该脚本头部说明:源码类文件不套「文件名 / 凭证类 / 主机名 / streamKey」语义词规则;
+   `.json` 与生成物只豁免「文件名 / 主机名」,IP、稿件号、长数字、本机路径、登录凭证键值照扫;
+   文档里的文件名若是仓库已跟踪文件则放行。`issue-guard: allow` 只在测试夹具(`test/` 或 `*.test.*`)
+   生效,脚本会打印跳过的行数与位置,评审须逐条核对;其它位置的标记无效。
 8. **关联 issue 必须已进入开发状态**:合并前 `gh issue view N --json labels` 核对 PR 的 `Fixes #N` 对应
    issue 带 `in-review`(旧口径票为 `accept` + `in-progress`/`待验证`),且无 `needs-decision` / `decline`。
    没有 `Fixes #N`、issue 仍停在 `accept`/无状态、或被人改回 `needs-decision` → 不合并,打回并在 PR 里写明。
 9. **diff 触及危险类 → 强制 `needs-decision`,不自动合并**:合并前跑
    `scripts/pr-risk-scan.sh`(默认对 `origin/feat/hub-optimization...HEAD`),输出 `RISK`(退出码 1)
-   即命中上传 / biliup / 清理 / 删除(rm、unlink)/ ledger 状态转换。命中后 review agent
+   即命中上传 / biliup / 清理 / 删除(rm、unlink)/ 保留规则字段 / ledger 状态转换或 ledger 方法调用,
+   或改动了敏感文件清单(收口 / 台账 / 清理 / 保留规则相关,见脚本 `SENSITIVE_FILES`),纯改名按新旧路径判。
+   内容按 hunk 判定,带所在函数上下文(单行翻转保留规则也能命中)。命中后 review agent
    **不得自动合并**:给 PR 打 `needs-decision`,评论按「决定三行」写清(要决定什么 / 不做会怎样 /
    建议选项),等人拍板。issue 即使是 `accept`,diff 命中 RISK 也一样拦。`PASS` 只表示没命中这些
    规则,不代替第 1–8 条。

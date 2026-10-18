@@ -7,16 +7,18 @@
     python3 scripts/issue-guard.py --diff origin/feat/hub-optimization   # 只扫 PR 新增行(CI 用)
 
 --diff <base> 模式:对 `git diff -U0 <base>...HEAD` 只扫**新增行**(历史内容不会把 CI 卡红)。
-规则与上面一致,额外三条约定(只为让源码里的正常引用不误报,隐私向的规则不放松):
-  - 源码类文件(.ts/.tsx/.mjs/.js/.py/.sh/.yml/.yaml/.json)的新增行不套「文件名」「凭证类」
+规则与上面一致,额外四条约定(只为让源码里的正常引用不误报,隐私向的规则不放松):
+  - 源码类文件(.ts/.tsx/.mjs/.js/.py/.sh/.yml/.yaml)的新增行不套「文件名」「凭证类」
     「主机名」「streamKey」四条语义词规则(代码和测试夹具里写 foo.ts / cookie / vps2 /
     douyin:xxx 是这个仓库的日常);房间号长数字 / BV / IP / 本机路径仍然拦。
   - 文档等非源码文件全规则生效,但「文件名」命中的名字若是仓库已跟踪文件的 basename
     (`git ls-files`,即源码/文档文件名)视为源码文件名放行;录像/字幕/产物类文件名
     (仓库里不存在的)仍然拦。
-  - 生成物 docs/architecture.html 整个跳过(由 scripts/gen-architecture.mjs 从包清单、plans/ 现算,
-    内容含 vps1 / rooms.json 这类角色名与文件名;隐私应在生成源头把关,不在产物上重复扫)。
-  - 行内含 `issue-guard: allow` 标记的新增行整行跳过(确属测试夹具/假数据时用,须在评审中说明)。
+  - 生成物 docs/architecture.html 与 .json 文件只豁免「文件名」「主机名」两条(生成物由
+    scripts/gen-architecture.mjs 现算,含角色名与文件名;json 夹具/配置里写文件名、节点角色名是常态);
+    IP、稿件号、长数字、本机路径、登录凭证键值对照常扫(真实数据写进生成物/json 也能拦住)。
+  - 行内含 `issue-guard: allow` 标记的新增行只在测试夹具里跳过(test/ 目录或 *.test.* 文件);
+    其它位置的标记无效、照常扫描。跳过的行数与位置会打印出来,供评审核对。
 
 命中任何规则就打印行号和命中的片段，并以非 0 退出 —— 不要带着这些内容
 `gh issue create`。issue 正文和评论都要过一遍，评论是事后补的，最容易漏。
@@ -29,10 +31,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-CODE_SUFFIXES = (".ts", ".tsx", ".mjs", ".js", ".py", ".sh", ".yml", ".yaml", ".json")
+CODE_SUFFIXES = (".ts", ".tsx", ".mjs", ".js", ".py", ".sh", ".yml", ".yaml")
 ALLOW_MARK = "issue-guard: allow"
-GENERATED_SKIP = {"docs/architecture.html"}
+GENERATED = {"docs/architecture.html"}
 FILENAME_RULE = "文件名"
+# Generated output and .json: only the role-name / filename rules are waived.
+NARROW_SKIP_RULES = {FILENAME_RULE, "主机名"}
 # 源码里是语义词/夹具、不是泄露的规则:--diff 模式下对源码类文件不生效。
 CODE_SKIP_RULES = {FILENAME_RULE, "主机名", "streamKey", "cookie/webhook"}
 
@@ -50,6 +54,10 @@ RULES: list[tuple[str, str, str]] = [
     ("streamKey", r"\b(?:douyin|bilibili|kuaishou):[\w:.\-]+", "内部场次键"),
     ("文件名", r"\b\w[\w.\-]*\.(?:ts|mp4|flv|xml|ass|json)\b", "录像/字幕文件名"),
     ("cookie/webhook", r"(?i)\b(?:cookie|webhook|token|secret|authkey)\b", "凭证类"),
+    # Login-cookie key/value pairs (douyin / bilibili / kuaishou session keys) with a real-looking value.
+    ("登录凭证键值", r"(?i)\b(?:sessionid(?:_ss)?|sid_guard|sid_tt|uid_tt|odin_tt|ttwid|passport_csrf_token|"
+     r"sessdata|bili_jct|dedeuserid(?:__ckmd5)?|buvid3|kuaishou\.server\.web_(?:st|ph))"
+     r"\s*[=:]\s*[\"']?[A-Za-z0-9%_\-|]{16,}", "登录 cookie 键值对"),
     # 「master / worker」是允许的角色说法，只拦真实主机名样式（vps1、node-a、*.local 等）。
     ("主机名", r"(?i)\bvps\s*\d+\b|\b[\w\-]+\.(?:local|internal|lan)\b", "真实节点主机名（用「master / 某个 worker」指代）"),
 ]
@@ -89,21 +97,37 @@ def added_lines(base: str) -> list[tuple[str, int, str]]:
     return out
 
 
-def scan_diff(base: str) -> list[str]:
+def is_fixture(path: str) -> bool:
+    """Only test fixtures may use the allow mark: files under test/ or named *.test.*."""
+    return path.startswith("test/") or "/test/" in path or ".test." in Path(path).name
+
+
+def skipped_rules(path: str) -> set[str]:
+    if path in GENERATED or path.endswith(".json"):
+        return NARROW_SKIP_RULES
+    if path.endswith(CODE_SUFFIXES):
+        return CODE_SKIP_RULES
+    return set()
+
+
+def scan_diff(base: str) -> tuple[list[str], list[str]]:
+    """Return (hits, allowed) where allowed lists fixture lines skipped via the allow mark."""
     hits: list[str] = []
+    allowed: list[str] = []
     known = tracked_basenames()
     for path, lineno, line in added_lines(base):
-        if ALLOW_MARK in line or path in GENERATED_SKIP:
+        if ALLOW_MARK in line and is_fixture(path):
+            allowed.append(f"{path}:{lineno}")
             continue
-        is_code = path.endswith(CODE_SUFFIXES)
+        skip = skipped_rules(path)
         for name, pattern, why in RULES:
-            if is_code and name in CODE_SKIP_RULES:
+            if name in skip:
                 continue
             for match in re.finditer(pattern, line):
                 if name == FILENAME_RULE and Path(match.group(0)).name in known:
                     continue
                 hits.append(f"{path}:{lineno}: [{name}] {why} -> {match.group(0)!r}")
-    return hits
+    return hits, allowed
 
 
 def main(argv: list[str]) -> int:
@@ -115,7 +139,9 @@ def main(argv: list[str]) -> int:
         if len(argv) != 2:
             print("用法: issue-guard.py --diff <base>", file=sys.stderr)
             return 2
-        diff_hits = scan_diff(argv[1])
+        diff_hits, allowed = scan_diff(argv[1])
+        if allowed:
+            print(f"allow 标记跳过 {len(allowed)} 行(仅测试夹具): " + ", ".join(allowed), file=sys.stderr)
         if diff_hits:
             print("diff 新增行发现疑似隐私，先脱敏再提交：", file=sys.stderr)
             for hit in diff_hits:
