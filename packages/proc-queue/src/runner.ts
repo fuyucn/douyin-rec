@@ -60,7 +60,7 @@ export interface ProcRunnerOpts {
   abortWaitMs?: number;
   /** false = 不起定时器(测试手动驱动 `tick()` / `heartbeat()`)。 */
   timers?: boolean;
-  /** Clock for the post-yield cooldown (tests). Default `Date.now`. */
+  /** Clock for the post-yield cooldown (tests). Default monotonic `performance.now` (immune to wall-clock jumps). */
   now?: () => number;
   /** Injectable child fingerprint probe (tests). */
   probeChild?: (pid: number) => ChildFingerprint | null;
@@ -132,7 +132,7 @@ export class ProcRunner {
   }
 
   private clock(): number {
-    return (this.o.now ?? Date.now)();
+    return this.o.now ? this.o.now() : performance.now();
   }
 
   private log(m: string): void {
@@ -579,6 +579,7 @@ export class ProcRunner {
     for (const kind of [...this.held]) store.releaseLease(kind, owner);
     this.held.clear();
     this.yielding.clear();
+    this.yieldedAt.clear();
   }
 
   // ───────────────────────── 快照 ─────────────────────────
