@@ -1771,6 +1771,24 @@ describe("rooms 域(T9 统一房间视图)", () => {
     expect(s.getTask(id)!.name).toBe("主播");
   });
 
+  it.each([
+    ["throws", () => { throw new Error("disk I/O error"); }],
+    ["returns null", () => null],
+  ])("回滚本身失败(%s)→ 500 且明说录制半边可能已改动", (_label, undo) => {
+    const { s, a } = setup("rooms-rb-undo-fail-");
+    bindRoom(a, "123456");
+    const real = s.updateTask.bind(s);
+    let calls = 0;
+    vi.spyOn(s, "updateTask").mockImplementation(((id: number, patch: Parameters<typeof real>[1]) =>
+      ++calls === 1 ? real(id, patch) : undo()) as typeof real);
+    const res = a.updateRoom("douyin.123456", {
+      recording: { room: "654321", name: "改名" },
+      processing: { enabled: false },
+    });
+    expect(res.status).toBe(500);
+    expect(String((res.body as { error: string }).error)).toContain("回滚也失败");
+  });
+
   it("跨平台改房间号被拒 → 平台、画质、引擎都回到原值", () => {
     const { s, a } = setup("rooms-rb-xplat-");
     const id = bindRoom(a, "123456");

@@ -209,6 +209,8 @@ export function buildRooms(ctx: ApiCtx) {
       const rollbackRecording = (): boolean => {
         if (!snapshot || taskId === null) return true;
         const prev: Record<string, unknown> = {};
+        // A NULL rollingEffective reads as its derived value, so it comes back as an explicit 0/1 that
+        // reads the same; the next refreshLocalRollingEffective pass restores NULL where applicable.
         for (const f of undoKeys) prev[f] = snapshot[f];
         try {
           return store.updateTask(taskId, prev as RecordingPatch) !== null;
