@@ -16,11 +16,11 @@ import { ProcessingSection, type ProcessingValue } from "../components/room-form
 import { RecordingSection, type RecordingValue } from "../components/room-form/RecordingSection";
 import { RuleSwitch } from "../components/room-form/parts";
 import { UploadSection, type UploadValue } from "../components/room-form/UploadSection";
-import { errMessage, useToast } from "../lib/hooks";
+import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, scheduleInput, splitSchedule } from "../lib/labels";
 import {
-  deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, outputFormatFromStored, settledMethod, shownOutputFormat, storedFromForm, type FormFacts,
+  cookieReadyFor, deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, outputFormatFromStored, settledMethod, shownOutputFormat, storedFromForm, type FormFacts,
 } from "../lib/room-form-rules";
 
 interface Props {
@@ -134,7 +134,8 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
   const isEdit = rule !== null;
   const t = useT();
   const toast = useToast();
-  const cookieReady = !!useAtomValue(cookieStatusAtom)?.hasSession;
+  const douyinReady = !!useAtomValue(cookieStatusAtom)?.hasSession;
+  const cookieStatuses = usePlatformCookieStatuses(open);
   const [form, setForm] = useState<FormState>(BLANK);
   const [busy, setBusy] = useState(false);
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
@@ -212,7 +213,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
   const factsOf = (f: FormState): FormFacts => ({
     ...f,
     danmuAvailable: plat ? plat.hasDanmu : true,
-    cookieReady,
+    cookieReady: cookieReadyFor(platformId, cookieStatuses, douyinReady),
     cookieForStream: platformId !== "douyin",
     hasRule: true,
   });
