@@ -23,17 +23,23 @@ import type { Task, TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
 
 type RecordingPatch = Parameters<TaskStore["updateTask"]>[1];
+// Every writable key is a Task column, so a rollback can always read it from the snapshot.
+type RecordingKey = keyof RecordingPatch & keyof Task;
+const _patchKeysAreTaskFields: [Exclude<keyof RecordingPatch, keyof Task>] extends [never] ? true : never = true;
+void _patchKeysAreTaskFields;
 
 /**
- * Every task field the recording half of PUT can write. Rollback restores all of them from the
- * pre-write snapshot (restoring an unchanged field is a no-op), so a field added to the writer
- * cannot silently escape rollback. Includes quality/engine because a room change re-derives them.
- * Guarded by the "rollback restores every writable field" test.
+ * Keys to restore after a forward `patch`: exactly the keys written, plus the columns `updateTask`
+ * derives from them (a room change re-validates quality/engine; writing rollingUpload clears
+ * rollingEffective). Derived from the patch itself, so a newly written field cannot escape rollback,
+ * and fields this PUT never touched are never rewritten.
  */
-export const RECORDING_ROLLBACK_FIELDS = [
-  "room", "name", "quality", "engine", "danmu", "segmentSec", "scheduleStart", "scheduleEnd",
-  "useCookie", "cookies", "outDir", "webhook", "rollingUpload", "outputFormat",
-] as const satisfies readonly (keyof RecordingPatch & keyof Task)[];
+export function rollbackKeys(patch: RecordingPatch): RecordingKey[] {
+  const keys = new Set(Object.keys(patch) as RecordingKey[]);
+  if (keys.has("room")) { keys.add("quality"); keys.add("engine"); }
+  if (keys.has("rollingUpload")) keys.add("rollingEffective");
+  return [...keys];
+}
 
 /** 从 HubRuleDTO 里剥掉身份四元组(key/platform/roomSlug/room)——RoomDTO 顶层已有。 */
 function stripIdentity(dto: RoomDTO["processing"] & { key?: string }): NonNullable<RoomDTO["processing"]> {
@@ -196,14 +202,19 @@ export function buildRooms(ctx: ApiCtx) {
       // ── 录制半边 ──────────────────────────────────────────────────────────────
       const rec = input.recording;
       let taskId = before.recording?.taskId ?? null;
-      // Raw pre-write snapshot (the DTO hides cookies), set only once the recording half is written.
+      // Raw pre-write snapshot (the DTO hides cookies) + the keys to undo; set once the recording half is written.
       let snapshot: Task | null = null;
+      let undoKeys: RecordingKey[] = [];
       /** Undo the recording write; returns false when the undo itself failed. */
       const rollbackRecording = (): boolean => {
         if (!snapshot || taskId === null) return true;
-        const prev: RecordingPatch = {};
-        for (const f of RECORDING_ROLLBACK_FIELDS) (prev as Record<string, unknown>)[f] = snapshot[f];
-        return store.updateTask(taskId, prev) !== null;
+        const prev: Record<string, unknown> = {};
+        for (const f of undoKeys) prev[f] = snapshot[f];
+        try {
+          return store.updateTask(taskId, prev as RecordingPatch) !== null;
+        } catch {
+          return false;
+        }
       };
       const failAfterRecording = (status: number, reason: string): ApiResult => {
         if (!snapshot) return err(status, reason);
@@ -276,6 +287,7 @@ export function buildRooms(ctx: ApiCtx) {
           const updated = store.updateTask(taskId, patch);
           if (!updated) return err(500, `写入录制配置失败(id=${taskId})`);
           snapshot = t;
+          undoKeys = rollbackKeys(patch);
         }
       }
 

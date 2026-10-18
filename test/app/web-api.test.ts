@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore, type Task } from "../../packages/app/src/store.js";
-import { RECORDING_ROLLBACK_FIELDS } from "../../packages/app/src/web/api/rooms.js";
+import { rollbackKeys } from "../../packages/app/src/web/api/rooms.js";
 import { MergeJobStore } from "../../packages/app/src/merge-jobs.js";
 import { EventCenter } from "../../packages/observability/src/bus.js";
 import { listHubJobs } from "../../packages/app/src/hub-jobs.js";
@@ -1725,7 +1725,7 @@ describe("rooms 域(T9 统一房间视图)", () => {
     scheduleStart: "10:00", scheduleEnd: "12:00", useCookie: false, cookies: "new-cookie",
     outDir: "/tmp/elsewhere", webhook: "https://discord.com/api/webhooks/1/x", rollingUpload: true, outputFormat: "mp4",
   };
-  // Independent of RECORDING_ROLLBACK_FIELDS on purpose, so a shrunken rollback list is caught.
+  // Explicit list, independent of the implementation, so a rollback that misses a field is caught.
   const roomSnapshot = (t: Task) =>
     Object.fromEntries(Object.keys(ALL_RECORDING_FIELDS).map((f) => [f, t[f as keyof Task]]));
 
@@ -1748,14 +1748,44 @@ describe("rooms 域(T9 统一房间视图)", () => {
     expect(roomSnapshot(s.getTask(id)!)).toEqual(before);
   });
 
-  it("守卫:录制半边写入的每个字段都在回滚清单里(防新增字段漏回滚)", () => {
-    const { s, a } = setup("rooms-rb-guard-");
-    bindRoom(a, "123456");
+  it("回滚键 = 正向写入的键 + updateTask 派生列(改房间 → 画质/引擎;改旧开关 → 派生值)", () => {
+    expect(rollbackKeys({ name: "x" })).toEqual(["name"]);
+    expect(new Set(rollbackKeys({ room: "r" }))).toEqual(new Set(["room", "quality", "engine"]));
+    expect(new Set(rollbackKeys({ rollingUpload: true }))).toEqual(new Set(["rollingUpload", "rollingEffective"]));
+  });
+
+  it("只改 name 时规则写失败:未触碰的字段(含 rollingEffective 派生值)不被回滚改写", () => {
+    const s = new TaskStore(":memory:");
+    const api = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-rb-untouched-") });
+    const id = bindRoom(api, "123456");
+    // Legacy switch on but derived value explicitly off (rule mode=upload): rewriting rollingUpload would null it.
+    s.updateTask(id, { rollingUpload: true, rollingEffective: false });
+    const base = mkdtempSync(join(tmpdir(), "rooms-rb-untouched-ro-"));
+    const blocked = join(base, "hub-is-a-file");
+    writeFileSync(blocked, "not a dir");
+    const roApi = makeApi({ store: s, manager: new MockManager(), hubDir: blocked, hubConfigPath: join(base, "hub.config.json") });
     const spy = vi.spyOn(s, "updateTask");
-    expect(a.updateRoom("douyin.123456", { recording: { ...ALL_RECORDING_FIELDS, room: "123456" } as never }).status).toBe(200);
-    const written = Object.keys(spy.mock.calls[0]![1]);
-    expect(written.length).toBeGreaterThanOrEqual(Object.keys(ALL_RECORDING_FIELDS).length);
-    expect(written.filter((f) => !(RECORDING_ROLLBACK_FIELDS as readonly string[]).includes(f))).toEqual([]);
+    expect(roApi.updateRoom("douyin.123456", { recording: { name: "改名" }, processing: { enabled: false } }).status).toBe(500);
+    expect(Object.keys(spy.mock.calls.at(-1)![1])).toEqual(["name"]);
+    expect(s.getTask(id)!.rollingEffective).toBe(false);
+    expect(s.getTask(id)!.name).toBe("主播");
+  });
+
+  it("跨平台改房间号被拒 → 平台、画质、引擎都回到原值", () => {
+    const { s, a } = setup("rooms-rb-xplat-");
+    const id = bindRoom(a, "123456");
+    // Non-default quality: the platform switch re-derives it, so only an explicit restore brings it back.
+    s.updateTask(id, { quality: "hd" });
+    const before = { ...roomSnapshot(s.getTask(id)!), platform: s.getTask(id)!.platform };
+    const res = a.updateRoom("douyin.123456", {
+      recording: { room: "https://live.bilibili.com/777" },
+      processing: { enabled: false },
+    });
+    expect(res.status).toBe(400);
+    const after = s.getTask(id)!;
+    expect({ ...roomSnapshot(after), platform: after.platform }).toEqual(before);
+    expect(after.platform).toBe("douyin");
+    expect(after.quality).toBe("hd");
   });
 
   it("改房间号导致源任务与规则不一致 → 400 且录制半边回滚", () => {
