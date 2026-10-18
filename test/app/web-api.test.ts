@@ -12,7 +12,8 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TaskStore } from "../../packages/app/src/store.js";
+import { TaskStore, type Task } from "../../packages/app/src/store.js";
+import { RECORDING_ROLLBACK_FIELDS } from "../../packages/app/src/web/api/rooms.js";
 import { MergeJobStore } from "../../packages/app/src/merge-jobs.js";
 import { EventCenter } from "../../packages/observability/src/bus.js";
 import { listHubJobs } from "../../packages/app/src/hub-jobs.js";
@@ -1697,7 +1698,8 @@ describe("rooms 域(T9 统一房间视图)", () => {
     // 先在正常 hubDir 下建好房间(task + 规则),再把另一个 api 指向不可写目录。
     const api = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-ro-bind-") });
     const id = bindRoom(api, "123456");
-    const before = s.getTask(id)!.quality;
+    // name, not quality: an invalid quality is normalized back to the default, which would hide a missing rollback.
+    const before = s.getTask(id)!.name;
 
     // hubDir 指向一个**普通文件** → upsertHubRule 的 mkdir/rename 必然失败
     // (磁盘满 / 权限 / 目录被文件占位是同一类故障)。
@@ -1709,12 +1711,80 @@ describe("rooms 域(T9 统一房间视图)", () => {
     // 前提:房间在**不可写目录**下仍读得到(task 在 store 里,与 hubDir 无关)→ 不是 404 路径
     expect(roApi.getRoom("douyin.123456").status).toBe(200);
     const res = roApi.updateRoom("douyin.123456", {
-      recording: { quality: "low" },
+      recording: { name: "改名" },
       processing: { enabled: false },
     });
     expect(res.status).toBe(500);
     expect(String((res.body as { error: string }).error)).toContain("回滚");
-    expect(s.getTask(id)!.quality).toBe(before);   // 关键:录制半边没留下半成功
+    expect(s.getTask(id)!.name).toBe(before);   // 关键:录制半边没留下半成功
+  });
+
+  // #200: rollback must cover every field the recording half can write (schedule + cookies were missing).
+  const ALL_RECORDING_FIELDS = {
+    room: "654321", name: "改名", quality: "low", engine: "mesio", danmu: 0, segmentSec: 600,
+    scheduleStart: "10:00", scheduleEnd: "12:00", useCookie: false, cookies: "new-cookie",
+    outDir: "/tmp/elsewhere", webhook: "https://discord.com/api/webhooks/1/x", rollingUpload: true, outputFormat: "mp4",
+  };
+  // Independent of RECORDING_ROLLBACK_FIELDS on purpose, so a shrunken rollback list is caught.
+  const roomSnapshot = (t: Task) =>
+    Object.fromEntries(Object.keys(ALL_RECORDING_FIELDS).map((f) => [f, t[f as keyof Task]]));
+
+  it("hub 写失败 → 回滚覆盖录制半边所有可写字段(含定时窗口与 cookies)", () => {
+    const s = new TaskStore(":memory:");
+    const api = makeApi({ store: s, manager: new MockManager(), ...hubDeps("rooms-rb-all-") });
+    const id = bindRoom(api, "123456");
+    s.updateTask(id, { scheduleStart: "01:00", scheduleEnd: "02:00", cookies: "old-cookie", outDir: "/tmp/orig" });
+    const before = roomSnapshot(s.getTask(id)!);
+
+    const base = mkdtempSync(join(tmpdir(), "rooms-rb-all-ro-"));
+    const blocked = join(base, "hub-is-a-file");
+    writeFileSync(blocked, "not a dir");
+    const roApi = makeApi({ store: s, manager: new MockManager(), hubDir: blocked, hubConfigPath: join(base, "hub.config.json") });
+    const res = roApi.updateRoom("douyin.123456", {
+      recording: { ...ALL_RECORDING_FIELDS, room: "123456" } as never,
+      processing: { enabled: false },
+    });
+    expect(res.status).toBe(500);
+    expect(roomSnapshot(s.getTask(id)!)).toEqual(before);
+  });
+
+  it("守卫:录制半边写入的每个字段都在回滚清单里(防新增字段漏回滚)", () => {
+    const { s, a } = setup("rooms-rb-guard-");
+    bindRoom(a, "123456");
+    const spy = vi.spyOn(s, "updateTask");
+    expect(a.updateRoom("douyin.123456", { recording: { ...ALL_RECORDING_FIELDS, room: "123456" } as never }).status).toBe(200);
+    const written = Object.keys(spy.mock.calls[0]![1]);
+    expect(written.length).toBeGreaterThanOrEqual(Object.keys(ALL_RECORDING_FIELDS).length);
+    expect(written.filter((f) => !(RECORDING_ROLLBACK_FIELDS as readonly string[]).includes(f))).toEqual([]);
+  });
+
+  it("改房间号导致源任务与规则不一致 → 400 且录制半边回滚", () => {
+    const { s, a } = setup("rooms-rb-room-");
+    const id = bindRoom(a, "123456");
+    const before = roomSnapshot(s.getTask(id)!);
+    const res = a.updateRoom("douyin.123456", {
+      recording: { room: "654321", name: "改名" },
+      processing: { enabled: false },
+    });
+    expect(res.status).toBe(400);
+    expect(String((res.body as { error: string }).error)).toContain("已回滚录制配置");
+    expect(roomSnapshot(s.getTask(id)!)).toEqual(before);
+  });
+
+  it("规则绑定的源任务已删 → 400 且不留下录制半边", () => {
+    const { s, a } = setup("rooms-rb-gone-");
+    const gone = bindRoom(a, "123456");
+    const other = (a.createTask({ room: "123456", name: "另一个" }).body as { id: number }).id;
+    expect(s.removeTask(gone)).toBe(true);
+    const before = roomSnapshot(s.getTask(other)!);
+    const res = a.updateRoom("douyin.123456", {
+      recording: { name: "改名" },
+      processing: { enabled: false },
+    });
+    expect(res.status).toBe(400);
+    expect(String((res.body as { error: string }).error)).toContain("不存在");
+    expect(String((res.body as { error: string }).error)).toContain("已回滚录制配置");
+    expect(roomSnapshot(s.getTask(other)!)).toEqual(before);
   });
 
   it("GET 不存在的房间 → 404;key 格式非法 → 400", () => {
