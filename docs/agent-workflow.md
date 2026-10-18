@@ -139,9 +139,9 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
    `issue-guard.py --diff origin/feat/hub-optimization`(只扫新增行,历史内容不计)。
    源码文件名误报口径见该脚本头部说明:源码类文件不套「文件名 / 凭证类 / 主机名 / streamKey」语义词规则,
    文档里的文件名若是仓库已跟踪文件则放行;确属夹具的行加 `issue-guard: allow` 并在评审中说明。
-8. **关联 issue 必须是 `accept`**:合并前 `gh issue view N --json labels` 核对 PR 的 `Fixes #N` 对应
-   issue 带 `accept` 标签(且无 `needs-decision` / `decline`)。没有 `Fixes #N`、issue 不是
-   `accept`(含被人改回 `needs-decision`)→ 不合并,打回并在 PR 里写明。
+8. **关联 issue 必须已进入开发状态**:合并前 `gh issue view N --json labels` 核对 PR 的 `Fixes #N` 对应
+   issue 带 `in-review`(旧口径票为 `accept` + `in-progress`/`待验证`),且无 `needs-decision` / `decline`。
+   没有 `Fixes #N`、issue 仍停在 `accept`/无状态、或被人改回 `needs-decision` → 不合并,打回并在 PR 里写明。
 9. **diff 触及危险类 → 强制 `needs-decision`,不自动合并**:合并前跑
    `scripts/pr-risk-scan.sh`(默认对 `origin/feat/hub-optimization...HEAD`),输出 `RISK`(退出码 1)
    即命中上传 / biliup / 清理 / 删除(rm、unlink)/ ledger 状态转换。命中后 review agent
