@@ -15,9 +15,17 @@
 
 ## 进行中
 - [~] **T-67 主播名含 emoji/全角符号/点号时收口失败:stem 清洗、稿件标题保留原始字符（issue [#171](https://github.com/fuyucn/douyin-rec/issues/171)）**
-  — 2026-10-18 认领。PR [#236](https://github.com/fuyucn/douyin-rec/pull/236)(0.0.176,gate PASS,独立审查 APPROVE)。**风险扫描判上传类 → `needs-decision`,等人拍板合并**。
+  — 2026-10-18 认领。PR [#236](https://github.com/fuyucn/douyin-rec/pull/236)(0.0.178,gate PASS,独立审查 APPROVE)。**风险扫描判上传类 → `needs-decision`,等人拍板合并**。
   **做什么**：stem 渲染遇非法文件名字符改为清洗(已合法名原样不变);稿件标题四处(master / 节点 / 队列 / 边录边传)收口为 core 单一函数,未配稿件模板时保留原始字符。
   **验收**：三种以上非法字符形态回归用例;已合法名 stem 与标题不变;部署后此类房间收口不再需要人工改名。
+
+- [~] **T-69 remux 租约交接竞态:让出者自己抢回租约,用例间歇失败（issue [#238](https://github.com/fuyucn/douyin-rec/issues/238)）**
+  — 2026-10-18 PR [#240](https://github.com/fuyucn/douyin-rec/pull/240) 已合并(0.0.176,独立审查 APPROVE,CI 绿),issue `待验证`。
+  **做什么**：让出后不立即抢回;修用例里永不求值的等待条件。**验收**：全量负载下租约用例不再间歇失败;部署后 serve 接管不乒乓。
+
+- [~] **T-70 租约交接预留落库:兄弟 record 进程不再在让出瞬间抢走租约（issue [#241](https://github.com/fuyucn/douyin-rec/issues/241)）**
+  — 2026-10-18 PR [#242](https://github.com/fuyucn/douyin-rec/pull/242) 已合并(0.0.177,schema v4 单向迁移,独立审查 APPROVE),issue `待验证`。取代 T-69 的进程内冷却。
+  **做什么**：让出与预留同事务;预留期内只有请求方可取得租约;墙钟回拨与让出写库失败均有兜底。**验收**：多 runner 用例 + 迁移用例;部署后多房间同录时 serve 接管一次完成。
 
 - [~] **T-68 房间 PUT 回滚字段不全 / 源任务校验晚于录制写入（issue [#200](https://github.com/fuyucn/douyin-rec/issues/200)）**
   — 2026-10-18 PR [#237](https://github.com/fuyucn/douyin-rec/pull/237) 已合并(0.0.175,三轮独立审查,CI 绿),issue `待验证`,随下次部署收口。
