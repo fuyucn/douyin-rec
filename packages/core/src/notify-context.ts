@@ -127,19 +127,30 @@ export function decorateRecordEvent<E extends { kind: string; ctx?: NotifyContex
   return { ...e, ...anchor, ctx };
 }
 
-const CTX_KEYS = ["name", "nameSource", "platform", "roomSlug", "date", "time", "streamKey", "node", "step", "result", "next"] as const;
+/** Every NotifyContext field, checked both ways by the compiler (missing or extra keys fail to build). */
+const CTX_FIELDS = {
+  name: true, nameSource: true, platform: true, roomSlug: true, date: true, time: true,
+  streamKey: true, node: true, step: true, result: true, next: true,
+} as const satisfies Record<keyof NotifyContext, true>;
+
+const NAME_SOURCES: readonly DisplayNameSource[] = ["task", "live", "cached", "ledger", "session", "fallback"];
+const RESULTS: readonly NotifyResult[] = ["ok", "warn", "error"];
 
 /**
  * Validate a context received over a process boundary (the recorder alert line): keep only known keys
- * with non-empty string values. Anything else (a newer or broken child) is dropped, never trusted.
+ * with non-empty string values; the two enum fields must hold an allowed value. Anything else (a newer
+ * or broken child) is dropped, never trusted.
  */
 export function sanitizeNotifyContext(raw: unknown): NotifyContext | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const src = raw as Record<string, unknown>;
   const out: Record<string, string> = {};
-  for (const k of CTX_KEYS) {
+  for (const k of Object.keys(CTX_FIELDS) as (keyof NotifyContext)[]) {
     const v = src[k];
-    if (typeof v === "string" && v.length > 0) out[k] = v;
+    if (typeof v !== "string" || v.length === 0) continue;
+    if (k === "nameSource" && !(NAME_SOURCES as readonly string[]).includes(v)) continue;
+    if (k === "result" && !(RESULTS as readonly string[]).includes(v)) continue;
+    out[k] = v;
   }
   return Object.keys(out).length ? (out as NotifyContext) : undefined;
 }

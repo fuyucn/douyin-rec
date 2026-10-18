@@ -108,7 +108,8 @@ export function summarizeNodes(
         : t.enabled === false ? "disabled" : "waiting";
       const row: NodeRoom = {
         key: `${w.workerId}:${slug || t.room || n.rooms.length}`,
-        label: t.anchorName || t.name || slug || "?",
+        // Same priority as notifications and the queue page (issue #53): task name first.
+        label: t.name || t.anchorName || slug || "?",
         state, checkedAt: typeof w.checkedAt === "number" ? w.checkedAt : undefined, sessions: [],
       };
       n.rooms.push(row);

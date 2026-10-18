@@ -129,3 +129,10 @@ describe("#53 N4 review fixes", () => {
     expect(sanitizeNotifyContext(null)).toBeUndefined();
   });
 });
+
+describe("sanitizeNotifyContext enum fields (#53 N6 prerequisite)", () => {
+  it("nameSource and result must hold an allowed value", () => {
+    expect(sanitizeNotifyContext({ name: "T", nameSource: "task", result: "warn" })).toEqual({ name: "T", nameSource: "task", result: "warn" });
+    expect(sanitizeNotifyContext({ name: "T", nameSource: "bogus", result: "maybe" })).toEqual({ name: "T" });
+  });
+});
