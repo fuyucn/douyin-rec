@@ -75,7 +75,7 @@ export interface NotifyContext {
   streamKey?: string;
   /** Node display name or role (master / worker). */
   node?: string;
-  /** Pipeline step (e.g. merge, upload). */
+  /** Pipeline step (e.g. merge, burn). */
   step?: string;
   result?: NotifyResult;
   /** Short actionable next step for the reader. */
