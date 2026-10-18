@@ -7,10 +7,10 @@ import { Dialog } from "../components/Dialog";
 import { NotifySection } from "../components/room-form/NotifySection";
 import { RecordingSection } from "../components/room-form/RecordingSection";
 import { Tooltip } from "../components/Tooltip";
-import { errMessage, useToast } from "../lib/hooks";
+import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, scheduleInput } from "../lib/labels";
-import { cookieLock, outputFormatFromStored, taskOutputFormatLock } from "../lib/room-form-rules";
+import { cookieLock, cookieReadyFor, outputFormatFromStored, taskOutputFormatLock } from "../lib/room-form-rules";
 import type { OutputFormat } from "@drec/output-format";
 import { fmtTimeInTz, localTimeTooltip } from "../lib/tz";
 
@@ -80,7 +80,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
   const serverTz = useAtomValue(serverTimezoneAtom);
   // 含礼物需要已登录的全局 cookie；没有则禁用「弹幕含礼物」开关（拿不到礼物）。
   const cookieStatus = useAtomValue(cookieStatusAtom);
-  const cookieReady = !!cookieStatus?.hasSession;
+  const cookieStatuses = usePlatformCookieStatuses(open);
 
   // 平台清单(画质/录制器/弹幕选项的来源)。打开时拉一次,失败静默(选项退化为当前值)。
   useEffect(() => {
@@ -123,6 +123,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
   const danmuAvailable = plat ? plat.hasDanmu : true;
   // 抖音取流恒匿名,Cookie 只服务弹幕;B站/快手用它取流(锁定口径见 room-form-rules)。
   const cookieForStream = plat ? plat.id !== "douyin" : false;
+  const cookieReady = cookieReadyFor(plat?.id, cookieStatuses, !!cookieStatus?.hasSession);
 
   async function submit(ev: FormEvent): Promise<void> {
     ev.preventDefault();

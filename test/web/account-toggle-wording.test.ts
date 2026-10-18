@@ -34,11 +34,10 @@ const TOGGLE_KEYS = [
   "rooms.useCookie",
   "rooms.useCookieHintDouyin",
   "rooms.useCookieHintOther",
-  "rooms.useCookieNeedCookie",
+  "rooms.useCookieHintStreamOnly",
   "roomForm.useCookieStream",
-  "dialog.danmuGift",
+  "roomForm.useCookieStreamOnly",
   "dialog.giftNeedCookie",
-  "dialog.giftOn",
   "tasks.giftCookie",
 ];
 
@@ -51,9 +50,20 @@ describe("account toggle wording (#85)", () => {
     });
   }
   it("zh: labels name the function (gifts / entries) and the account", () => {
-    for (const k of ["rooms.useCookie", "dialog.danmuGift", "roomForm.useCookieStream"]) {
+    for (const k of ["rooms.useCookie", "roomForm.useCookieStream"]) {
       expect(get(dict.zh, k)).toMatch(/账号信息/);
       expect(get(dict.zh, k)).toMatch(/礼物/);
+    }
+  });
+  it("stream-only platform copy does not promise gifts / entries", () => {
+    for (const lang of ["zh", "en"] as const) {
+      expect(get(dict[lang], "roomForm.useCookieStreamOnly")).not.toMatch(/礼物|入场|gift|entr/i);
+      expect(get(dict[lang], "rooms.useCookieHintStreamOnly")).not.toMatch(/礼物|入场|gift|entr/i);
+    }
+  });
+  it("the not-logged-in lock reason is platform neutral (no gifts / entries claim)", () => {
+    for (const lang of ["zh", "en"] as const) {
+      expect(get(dict[lang], "dialog.giftNeedCookie")).not.toMatch(/礼物|入场|gift|entr/i);
     }
   });
   it("zh: the needs-danmu lock quotes the danmu toggle label verbatim", () => {
