@@ -93,3 +93,34 @@ export function contextForStream(streamKey: string, names: Omit<DisplayNameSourc
     ...(k ? { platform: k.platform, roomSlug: k.roomSlug, date: k.date, ...(k.time ? { time: k.time } : {}) } : {}),
   };
 }
+
+/** What a recording session knows about its room when it notifies. */
+export interface RecordNameFacts {
+  /** Task name passed to the recorder (`--name`). */
+  taskName?: string | null;
+  /** Anchor name the recorder resolved from the platform. */
+  liveAnchor?: string | null;
+  platform?: string | null;
+  roomSlug?: string | null;
+}
+
+/**
+ * Decorate an event from a recording session (issue #53 N4): attach `ctx` built by the shared name
+ * chain and, for the record start / reconnect / end events, show that resolved name instead of the
+ * raw platform anchor so the recorder's own notifications match the master's. Fields already on the
+ * event's `ctx` win. The `room` field and everything else stay as they were.
+ */
+export function decorateRecordEvent<E extends { kind: string; ctx?: NotifyContext; anchor?: string }>(e: E, f: RecordNameFacts): E {
+  const resolved = resolveDisplayName({ taskName: f.taskName, liveAnchor: f.liveAnchor, platform: f.platform, roomSlug: f.roomSlug });
+  const derived: NotifyContext = {
+    name: resolved.name,
+    nameSource: resolved.source,
+    ...(f.platform ? { platform: f.platform } : {}),
+    ...(f.roomSlug ? { roomSlug: f.roomSlug } : {}),
+  };
+  const ctx = { ...derived, ...e.ctx };
+  const isRecord = e.kind === "recordStart" || e.kind === "recordReconnect" || e.kind === "recordEnd";
+  // Without any real name keep the event's own anchor text (the message already falls back to the room).
+  const anchor = isRecord && resolved.source !== "fallback" ? { anchor: resolved.name } : {};
+  return { ...e, ...anchor, ctx };
+}

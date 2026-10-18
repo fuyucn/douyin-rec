@@ -129,8 +129,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         events.emit(taskId, { kind: "error", stage: "录制中断", message: `任务「${name}」${reason}` });
       },
       // 子进程结构化告警(取流失败/卡死/录制错误)→ 站内 toast(webhook 子进程已发,故 webhook:false 不重发)。
-      onAlert: (taskId, stage, message) => {
-        events.emit(taskId, { kind: "error", stage, message }, { webhook: false });
+      onAlert: (taskId, stage, message, ctx) => {
+        events.emit(taskId, { kind: "error", stage, message, ...(ctx ? { ctx } : {}) }, { webhook: false });
       },
     });
 

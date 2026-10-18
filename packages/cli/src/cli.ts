@@ -235,7 +235,8 @@ program
         await baseNotifier.notify(e);
         if (e.kind === "error") {
           try {
-            process.stdout.write(`@@DREC_ALERT@@${JSON.stringify({ stage: e.stage, message: e.message })}\n`);
+            // ctx (issue #53 N4) is an extra field: an older parent ignores it, a newer parent forwards it.
+            process.stdout.write(`@@DREC_ALERT@@${JSON.stringify({ stage: e.stage, message: e.message, ...(e.ctx ? { ctx: e.ctx } : {}) })}\n`);
           } catch {
             /* ignore */
           }

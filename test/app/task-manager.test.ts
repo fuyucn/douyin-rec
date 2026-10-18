@@ -280,6 +280,20 @@ describe("TaskManager", () => {
     expect(down[0].reason).toContain("放弃");
   });
 
+  it("告警带 ctx(#53 N4):对象转发;非对象丢弃;旧子进程无 ctx → undefined", () => {
+    const id = addTask();
+    const spawner = new MockSpawner();
+    const got: unknown[] = [];
+    const mgr = new TaskManager(store, spawner, { log: () => {}, onAlert: (_t, _s, _m, ctx) => got.push(ctx) });
+    mgr.start(id);
+    const p = spawner.last(id);
+    p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: { name: "T", platform: "douyin" } })}`);
+    p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: "bogus" })}`);
+    p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: ["x"] })}`);
+    p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m" })}`);
+    expect(got).toEqual([{ name: "T", platform: "douyin" }, undefined, undefined, undefined]);
+  });
+
   it("解析子进程 @@DREC_ALERT@@ 结构化告警 → onAlert,且不进日志", () => {
     const id = addTask();
     const spawner = new MockSpawner();

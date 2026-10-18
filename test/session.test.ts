@@ -463,6 +463,25 @@ describe("RecordingSession", () => {
     expect(events.some((e) => e.kind === "recordEnd")).toBe(true);
   });
 
+  it("通知带上下文(#53 N4):任务名优先于平台主播名,附平台与房间号;无任务名用主播名", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-notify-ctx-"));
+    const events: NotifyEvent[] = [];
+    const notifier: Notifier = { async notify(e) { events.push(e); } };
+    const sess = new RecordingSession(new MockDlrRecorder(), { notifier });
+    await sess.start("https://live.douyin.com/123", { ...makeOpts(dir), name: "任务名" }, { anchorName: "主播X" });
+    await sess.stop();
+    const start = events.find((e) => e.kind === "recordStart");
+    expect(start).toMatchObject({ anchor: "任务名", ctx: { name: "任务名", nameSource: "task", platform: "douyin", roomSlug: "123" } });
+    expect(events.find((e) => e.kind === "recordEnd")).toMatchObject({ anchor: "任务名", ctx: { nameSource: "task" } });
+
+    const dir2 = mkdtempSync(join(tmpdir(), "sess-notify-ctx2-"));
+    const events2: NotifyEvent[] = [];
+    const sess2 = new RecordingSession(new MockDlrRecorder(), { notifier: { async notify(e) { events2.push(e); } } });
+    await sess2.start("https://live.douyin.com/123", makeOpts(dir2), { anchorName: "主播X" });
+    await sess2.stop();
+    expect(events2.find((e) => e.kind === "recordStart")).toMatchObject({ anchor: "主播X", ctx: { name: "主播X", nameSource: "live" } });
+  });
+
   it("stop() 默认 → recordEnd reason=手动停止", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sess-stop-reason-"));
     const events: NotifyEvent[] = [];

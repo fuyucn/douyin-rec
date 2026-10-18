@@ -2,6 +2,7 @@
 import { describe, it, expect } from "vitest";
 import {
   contextForStream,
+  decorateRecordEvent,
   parseStreamKey,
   resolveDisplayName,
   type NotifyContext,
@@ -90,5 +91,25 @@ describe("old events render exactly as before (ctx is ignored until renderers op
       lookup,
     );
     expect(out.ctx).toMatchObject({ name: "A", nameSource: "cached", date: "2026-10-16", step: "merge" });
+  });
+});
+
+describe("decorateRecordEvent (#53 N4)", () => {
+  const facts = { taskName: "T", liveAnchor: "L", platform: "douyin", roomSlug: "abc" };
+  it("record events show the resolved name and carry ctx", () => {
+    const e = decorateRecordEvent({ kind: "recordStart", anchor: "L", room: "u", quality: "origin" } as NotifyEvent, facts);
+    expect(e).toMatchObject({ anchor: "T", ctx: { name: "T", nameSource: "task", platform: "douyin", roomSlug: "abc" } });
+  });
+  it("other events get ctx but no anchor field", () => {
+    const e = decorateRecordEvent({ kind: "error", stage: "弹幕", message: "m" } as NotifyEvent, facts);
+    expect(e).not.toHaveProperty("anchor");
+    expect(e.ctx).toMatchObject({ name: "T" });
+  });
+  it("no real name: keep the event's own anchor text; explicit ctx fields win", () => {
+    const e = decorateRecordEvent(
+      { kind: "recordEnd", anchor: "", room: "u", outDir: "/o", ctx: { step: "record" } } as NotifyEvent,
+      { platform: "douyin", roomSlug: "abc" },
+    );
+    expect(e).toMatchObject({ anchor: "", ctx: { name: "douyin abc", nameSource: "fallback", step: "record" } });
   });
 });
