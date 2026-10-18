@@ -1,5 +1,6 @@
 import { abortJob, isJobAbort, isJobLive, resolveDiskMinGB, USER_STOP } from "@drec/core";
 import type { Transport, NodeInventory } from "./transport.js";
+import type { UnclaimedSegment } from "./unclaimed.js";
 import type { JobState, SyncLedger } from "./ledger.js";
 import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
@@ -98,7 +99,7 @@ const DEFAULT_UNREACHABLE_ALERT_ROUNDS = 6;
  * unreachable 绝不能当 empty —— 否则会拿剩余节点错误选优、推进、删源。
  */
 export type InventoryResult =
-  | { status: "ok" | "empty"; workerId: string; recordings: NodeInventory["recordings"] }
+  | { status: "ok" | "empty"; workerId: string; recordings: NodeInventory["recordings"]; unclaimedSegments?: UnclaimedSegment[]; unclaimedTruncated?: number }
   | { status: "unreachable"; workerId: string; recordings: []; reason: string };
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_STALE_MS = 600_000;
@@ -130,6 +131,8 @@ export class Reconciler {
   private readonly unreachableStreak = new Map<string, number>();
   /** 已发过「失联」通知的节点(恢复后复位 → 再次失联可再报),保证一次失联期只发一条。 */
   private readonly unreachableAlerted = new Set<string>();
+  /** Last logged orphan-segment signature per worker, so an unchanged state is logged once. */
+  private readonly unclaimedLogSig = new Map<string, string>();
   private maxRetries: number;
   private staleMs: number;
   private reconnectWindowMs: number;
@@ -227,6 +230,24 @@ export class Reconciler {
     }));
   }
 
+  /** Log one line per worker when its orphan-segment summary changes (log-only; no behavior change). */
+  private logUnclaimedSummary(invs: InventoryResult[]): void {
+    for (const inv of invs) {
+      if (inv.status === "unreachable") continue;
+      const segs = inv.unclaimedSegments;
+      const sessions = segs ? [...new Set(segs.map((s) => s.sessionBase))].sort() : [];
+      const truncated = inv.unclaimedTruncated ?? 0;
+      const sig = segs === undefined ? "unknown" : `${segs.length}|${truncated}|${sessions.join(",")}`;
+      const prev = this.unclaimedLogSig.get(inv.workerId);
+      if (sig === prev) continue;
+      this.unclaimedLogSig.set(inv.workerId, sig);
+      if (prev === undefined && segs?.length === 0 && truncated === 0) continue;
+      console.warn(segs === undefined
+        ? `[reconciler] worker ${inv.workerId} orphan state unknown (worker does not report unclaimed segments)`
+        : `[reconciler] worker ${inv.workerId} unclaimed segments: ${segs.length} in ${sessions.length} sessions (truncated ${truncated})`);
+    }
+  }
+
   /**
    * listInventory 包超时,返回三态:挂起超过 inventoryTimeoutMs 或 reject → unreachable
    * (该节点本轮「不知道有没有录像」,不是「没录像」);正常返回按有无录像分 ok / empty。
@@ -243,7 +264,12 @@ export class Reconciler {
         (async (): Promise<InventoryResult> => {
           try {
             const inv = await t.listInventory();
-            return { status: inv.recordings.length > 0 ? "ok" : "empty", workerId: t.id, recordings: inv.recordings };
+            return {
+              status: inv.recordings.length > 0 ? "ok" : "empty",
+              workerId: t.id,
+              recordings: inv.recordings,
+              ...(inv.unclaimedSegments ? { unclaimedSegments: inv.unclaimedSegments, unclaimedTruncated: inv.unclaimedTruncated ?? 0 } : {}),
+            };
           } catch (err) {
             return { status: "unreachable", workerId: t.id, recordings: [], reason: String((err as Error)?.message ?? err).slice(0, 200) };
           }
@@ -414,6 +440,7 @@ export class Reconciler {
       unreachable.set(i.workerId, i.reason);
       console.warn(`[reconciler] worker ${i.workerId} 清单失联(${i.reason}),不当作「无录像」;涉及它的场本轮不选优`);
     }
+    this.logUnclaimedSummary(invs);
 
     const broadcasts = clusterBroadcasts(
       invs.map((i) => ({ workerId: i.workerId, recordings: i.recordings })),

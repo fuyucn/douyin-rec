@@ -4,7 +4,9 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalTransport } from "./transport-local.js";
-import { ProcUnsupported } from "./transport.js";
+import { ProcUnsupported, type NodeInventory } from "./transport.js";
+import { scanRecordings } from "./scan.js";
+import type { NodeTaskDTO } from "@drec/core";
 
 describe("LocalTransport.ping(轻量存活探针)", () => {
   it("dataRoot 存在 → resolve", async () => {
@@ -57,6 +59,60 @@ describe("LocalTransport.listInventory", () => {
     const inv = await t.listInventory();
     expect(inv.recordings).toHaveLength(1);
     expect(inv.recordings[0].roomSlug).toBe("12345");
+  });
+});
+
+describe("LocalTransport.listInventory unclaimed segments (#225)", () => {
+  const ffprobe = async () => ({ durationSec: 600, startMs: 1_700_000_000_000, endMs: 1_700_000_600_000 });
+  const task = (over: Partial<NodeTaskDTO>): NodeTaskDTO => ({
+    id: 1, platform: "douyin", roomSlug: "1", room: "https://live.douyin.com/1", name: null, quality: "origin",
+    engine: "ffmpeg", danmu: 0, segmentSec: 1800, scheduleStart: null, scheduleEnd: null, status: "idle",
+    useCookie: false, enabled: true, outDir: null, webhook: null, managedBy: null, anchorName: null,
+    rollingUpload: false, rollingEffective: false, ...over,
+  });
+  function fixture(): string {
+    const root = mkdtempSync(join(tmpdir(), "loc-unclaimed-"));
+    const a = join(root, "A"); mkdirSync(a);
+    writeFileSync(join(a, "A_2026-06-27_08-00-00_000.ts"), "x");
+    writeFileSync(join(a, "A_2026-06-27_10-00-00_000.mp4"), "xx"); // orphan: converted, no sidecar
+    const b = join(root, "B"); mkdirSync(b);
+    writeFileSync(join(b, "B_2026-06-27_12-00-00_000.mp4"), "x"); // orphan under anchorName-mapped dir
+    return root;
+  }
+  const segSecOf = (inv: NodeInventory, anchor: string) =>
+    inv.unclaimedSegments!.find((u) => u.path.includes(`${anchor}_2026`))!.segmentSec;
+
+  it("segmentSec comes from listTasks (name and anchorName); recordings equal scanRecordings", async () => {
+    const root = fixture();
+    const t = new LocalTransport({
+      id: "local", recordingsDir: root, taskRooms: { A: "888" }, ffprobe,
+      listTasks: () => [task({ name: "A", segmentSec: 600 }), task({ id: 2, name: "x", anchorName: "B", segmentSec: 900 })],
+    });
+    const inv = await t.listInventory();
+    expect(inv.workerId).toBe("local");
+    expect(inv.unclaimedTruncated).toBe(0);
+    expect(segSecOf(inv, "A")).toBe(600);
+    expect(segSecOf(inv, "B")).toBe(900);
+    expect(inv.recordings).toEqual(await scanRecordings(root, { A: "888" }, ffprobe));
+  });
+
+  it("without listTasks → segmentSec null (master falls back to its default)", async () => {
+    const root = fixture();
+    const inv = await new LocalTransport({ id: "local", recordingsDir: root, taskRooms: { A: "888" }, ffprobe }).listInventory();
+    expect(inv.unclaimedSegments).toHaveLength(2);
+    expect(inv.unclaimedSegments!.every((u) => u.segmentSec === null)).toBe(true);
+    expect(inv.recordings).toEqual(await scanRecordings(root, { A: "888" }, ffprobe));
+  });
+
+  it("non-positive / non-finite segmentSec in listTasks is ignored (null)", async () => {
+    const root = fixture();
+    const t = new LocalTransport({
+      id: "local", recordingsDir: root, taskRooms: {}, ffprobe,
+      listTasks: () => [task({ name: "A", segmentSec: 0 }), task({ id: 2, name: "B", segmentSec: Number.NaN })],
+    });
+    const inv = await t.listInventory();
+    expect(segSecOf(inv, "A")).toBeNull();
+    expect(segSecOf(inv, "B")).toBeNull();
   });
 });
 

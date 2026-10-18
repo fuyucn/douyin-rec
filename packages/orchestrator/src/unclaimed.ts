@@ -55,3 +55,50 @@ export function inferRoomFromSiblings(
   const { platform, roomSlug } = first;
   return siblings.every((s) => s.platform === platform && s.roomSlug === roomSlug) ? { platform, roomSlug } : null;
 }
+
+const SIDECAR_SHAPES: ReadonlySet<unknown> = new Set<SidecarShape>(["missing", "unparsable", "minimal", "full"]);
+const isStr = (v: unknown): v is string => typeof v === "string";
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const isStrOrNull = (v: unknown): boolean => v === null || isStr(v);
+const isNumOrNull = (v: unknown): boolean => v === null || isNum(v);
+
+function isUnclaimedSegment(v: unknown): v is UnclaimedSegment {
+  if (typeof v !== "object" || v === null) return false;
+  const s = v as Record<string, unknown>;
+  return (
+    isStr(s.path) && isStr(s.sessionBase) &&
+    isNum(s.sizeBytes) && isNum(s.mtimeMs) && isNum(s.segmentIndex) &&
+    isNumOrNull(s.stampMs) &&
+    (s.stampSource === null || s.stampSource === "sidecar" || s.stampSource === "filename") &&
+    SIDECAR_SHAPES.has(s.sidecar) &&
+    isStrOrNull(s.platform) && isStrOrNull(s.roomSlug) &&
+    isNumOrNull(s.segmentSec)
+  );
+}
+
+/**
+ * Validate the orphan fields of a worker's `_inventory` payload. Any malformed part yields
+ * undefined (= unknown), the same as an old worker that does not report them.
+ */
+export function parseUnclaimedPayload(raw: { unclaimedSegments?: unknown; unclaimedTruncated?: unknown }):
+  { unclaimedSegments: UnclaimedSegment[]; unclaimedTruncated: number } | undefined {
+  const { unclaimedSegments, unclaimedTruncated } = raw;
+  if (!Array.isArray(unclaimedSegments)) return undefined;
+  if (!Number.isInteger(unclaimedTruncated) || (unclaimedTruncated as number) < 0) return undefined;
+  if (!unclaimedSegments.every(isUnclaimedSegment)) return undefined;
+  return { unclaimedSegments, unclaimedTruncated: unclaimedTruncated as number };
+}
+
+/** Map task name / anchorName -> segmentSec for tasks with a usable (finite, > 0) segment length. */
+export function segmentSecByAnchorOf(
+  tasks: Iterable<{ name?: string | null; anchorName?: string | null; segmentSec?: number | null }>,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const task of tasks) {
+    const sec = task.segmentSec;
+    if (typeof sec !== "number" || !Number.isFinite(sec) || sec <= 0) continue;
+    if (task.name) out[task.name] = sec;
+    if (task.anchorName) out[task.anchorName] = sec;
+  }
+  return out;
+}

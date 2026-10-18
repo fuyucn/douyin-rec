@@ -1715,19 +1715,21 @@ program
     const { statSync } = await import("node:fs");
     const { TaskStore } = await import("@drec/app");
     const { ffprobeVideo } = await import("@drec/post-process");
-    const { scanRecordings } = await import("@drec/orchestrator");
+    const { scanInventory, segmentSecByAnchorOf } = await import("@drec/orchestrator");
 
     // 打开 slave 自身的 db，构建 taskRooms（anchorName/name → roomSlug）
     const dbPath = pathJoin(dataRoot, "db", "douyin-rec.db");
     const store = new TaskStore(dbPath);
     const taskRooms: Record<string, string> = {};
-    for (const task of store.listTasks()) {
+    const tasks = store.listTasks();
+    for (const task of tasks) {
       try {
         const slug = platformForRoom(task.room).extractRoomSlug(task.room);
         if (task.name) taskRooms[task.name] = slug;
         if (task.anchorName) taskRooms[task.anchorName] = slug;
       } catch { /* skip tasks whose platform can't be resolved */ }
     }
+    const segmentSecByAnchor = segmentSecByAnchorOf(tasks);
 
     // ffprobe 适配器：durationMs via ffprobeVideo + mtime → startMs/endMs
     const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
@@ -1737,8 +1739,8 @@ program
     };
 
     const recordingsDir = pathJoin(dataRoot, "recordings");
-    const recordings = await scanRecordings(recordingsDir, taskRooms, ffprobe);
-    process.stdout.write(JSON.stringify({ recordings }) + "\n");
+    const inventory = await scanInventory(recordingsDir, taskRooms, ffprobe, { segmentSecByAnchor });
+    process.stdout.write(JSON.stringify(inventory) + "\n");
   });
 
 // ─── _disk <dataRoot>（隐藏子命令，供 master 通过 SSH 调用）──────────────────────

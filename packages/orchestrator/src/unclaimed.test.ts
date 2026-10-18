@@ -1,6 +1,6 @@
 // packages/orchestrator/src/unclaimed.test.ts
 import { describe, it, expect } from "vitest";
-import { classifyUnclaimedFiles, inferRoomFromSiblings } from "./unclaimed.js";
+import { classifyUnclaimedFiles, inferRoomFromSiblings, segmentSecByAnchorOf } from "./unclaimed.js";
 
 const BASE = "a_2026-06-20_01-02-03";
 
@@ -31,7 +31,7 @@ describe("classifyUnclaimedFiles", () => {
 
   it("ignores runner/suspect intermediates, sidecar temps and atomic temps", () => {
     const files = [
-      `${BASE}_000.mp4.serve:12:1700000000-123.drec-remux`,
+      `${BASE}_000.mp4.serve:12:42-123.drec-remux`,
       `${BASE}_000.mp4.drec-suspect`,
       `${BASE}.session.json.123.ab12cd34.tmp`,
       `${BASE}.session.json.tmp`,
@@ -51,5 +51,28 @@ describe("inferRoomFromSiblings", () => {
     expect(inferRoomFromSiblings([{ platform: "douyin", roomSlug: "1" }, { platform: "douyin", roomSlug: "2" }])).toBeNull();
     expect(inferRoomFromSiblings([])).toBeNull();
     expect(inferRoomFromSiblings([{ platform: "douyin", roomSlug: "1" }, { platform: "douyin" }])).toBeNull();
+  });
+});
+
+describe("segmentSecByAnchorOf", () => {
+  it("maps both name and anchorName to segmentSec", () => {
+    expect(segmentSecByAnchorOf([{ name: "n", anchorName: "a", segmentSec: 600 }])).toEqual({ n: 600, a: 600 });
+  });
+
+  it("skips null/empty names and unusable segmentSec (missing, null, 0, negative, NaN, Infinity)", () => {
+    const tasks = [
+      { name: null, anchorName: "", segmentSec: 900 },
+      { name: "missing", anchorName: null },
+      { name: "null", anchorName: null, segmentSec: null },
+      { name: "zero", anchorName: null, segmentSec: 0 },
+      { name: "neg", anchorName: null, segmentSec: -1 },
+      { name: "nan", anchorName: null, segmentSec: Number.NaN },
+      { name: "inf", anchorName: null, segmentSec: Number.POSITIVE_INFINITY },
+    ];
+    expect(segmentSecByAnchorOf(tasks)).toEqual({});
+  });
+
+  it("returns an empty map for no tasks", () => {
+    expect(segmentSecByAnchorOf([])).toEqual({});
   });
 });

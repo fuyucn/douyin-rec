@@ -2,7 +2,7 @@ export * from "./transport.js";
 export { scanInventory, scanRecordings, scanRollingSessions } from "./scan.js";
 export type { FfprobeAdapter } from "./scan.js";
 export type { UnclaimedSegment, SidecarShape } from "./unclaimed.js";
-export { classifyUnclaimedFiles, UNCLAIMED_CAP } from "./unclaimed.js";
+export { classifyUnclaimedFiles, segmentSecByAnchorOf, UNCLAIMED_CAP } from "./unclaimed.js";
 export { Reconciler } from "./reconciler.js";
 // 能力门控纯函数已下沉 @drec/core(app L4 的「本机抑制」也要用;见 core/src/capabilities.ts)。
 // 这里 re-export 保持 orchestrator 现有消费方(cli/reconciler)导入路径不变。
