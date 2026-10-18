@@ -131,10 +131,9 @@ export function consecutiveSidecarSkips(steps: readonly { step: string; phase: s
   for (let i = steps.length - 1; i >= 0; i--) {
     const s = steps[i];
     if (s.step !== "pull") continue;
-    if (s.phase !== "done") break;
-    if (s.detail?.startsWith(SIDECAR_SKIP_PREFIX)) n++;
-    else if (s.detail?.startsWith(SIDECAR_UNKNOWN_PREFIX)) continue;
-    else break;
+    if (s.phase === "skipped" && s.detail?.startsWith(SIDECAR_SKIP_PREFIX)) { n++; continue; }
+    if (s.phase === "skipped" && s.detail?.startsWith(SIDECAR_UNKNOWN_PREFIX)) continue;
+    break;
   }
   return n;
 }
@@ -799,8 +798,10 @@ async function runPipelineInner(
     return { state: "done", bv };
   }
 
-  // #1 防护:剔除「文件已不在该节点」的成员(已归档/清理)——否则可能选中其为 winner、pull 失败卡住。
-  // 无 exists 能力的 transport 视为信任存在;exists 抛错按缺失剔除。
+  // #1 防护:剔除「文件已确认不在该节点」的成员(已归档/清理)——否则可能选中其为 winner、pull 失败卡住。
+  // An unconfirmed probe is NOT a deletion (issue #176): keep the member and let this round proceed.
+  // A genuinely removed member will be confirmed again on the next scan; a false eviction here could
+  // silently select a worse winner. Transports without `exists` are trusted.
   const presentMembers = [];
   for (const m of b.members) {
     const tp = transports.get(m.workerId);
@@ -811,11 +812,20 @@ async function runPipelineInner(
       presentMembers.push(m);
       continue;
     }
-    const ok = tp?.exists ? await tp.exists(m.rec.tsFiles).catch(() => false) : true;
-    if (ok) presentMembers.push(m);
-    else {
-      console.warn(`[pipeline] ${streamKey} 剔除成员 ${m.workerId}:文件已不存在`);
-      jlog(`剔除成员 ${m.workerId}:文件已不存在`);
+    if (!tp?.exists) { presentMembers.push(m); continue; }
+    try {
+      if (await tp.exists(m.rec.tsFiles)) presentMembers.push(m);
+      else {
+        console.warn(`[pipeline] ${streamKey} 剔除成员 ${m.workerId}:文件已不存在`);
+        jlog(`剔除成员 ${m.workerId}:文件已不存在`);
+      }
+    } catch (e) {
+      // Unknown is not gone. Keeping the member is the safe side: a later pull failure still goes
+      // through the normal `failed` path, whereas dropping it could change the winner silently.
+      const reason = String((e as Error)?.message ?? e).slice(0, 200);
+      console.warn(`[pipeline] ${streamKey} 成员 ${m.workerId} 文件存在性无法确认(${reason}) → 本轮保留该成员`);
+      jlog(`成员 ${m.workerId} 文件存在性无法确认(${reason}) → 本轮保留该成员`);
+      presentMembers.push(m);
     }
   }
   const candidates = { ...b, members: presentMembers };
@@ -895,14 +905,14 @@ async function runPipelineInner(
       // Ledger annotation (state untouched): the hub jobs page shows why this round did nothing, and
       // it is the counting source for the limit. Unconfirmed rounds are annotated separately and do
       // not count — a dropped ssh link must never escalate a healthy session to needs_manual.
-      ledger.logStep(streamKey, "pull", "done",
+      ledger.logStep(streamKey, "pull", "skipped",
         `${SIDECAR_SKIP_PREFIX}会话边车扫描后消失(${missingNames}),第 ${prior + 1}/${MAX_SIDECAR_SKIPS} 次`);
       if (probe.unknown.length > 0) {
-        ledger.logStep(streamKey, "pull", "done", `${SIDECAR_UNKNOWN_PREFIX}会话边车无法确认(${unknownNames}),不计入上限`);
+        ledger.logStep(streamKey, "pull", "skipped", `${SIDECAR_UNKNOWN_PREFIX}会话边车无法确认(${unknownNames}),不计入上限`);
       }
     } else {
       jlog(`会话边车无法确认存在(${unknownNames}) → 本轮跳过该场(不记 failed、不计上限),下一轮重扫`);
-      ledger.logStep(streamKey, "pull", "done", `${SIDECAR_UNKNOWN_PREFIX}会话边车无法确认(${unknownNames}),不计入上限`);
+      ledger.logStep(streamKey, "pull", "skipped", `${SIDECAR_UNKNOWN_PREFIX}会话边车无法确认(${unknownNames}),不计入上限`);
     }
     return { state: ledger.get(streamKey)?.state ?? "pending" };
   }

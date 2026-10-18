@@ -12,6 +12,7 @@ import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
 import { useT } from "../lib/i18n";
 import { buildFlow, pickMetric, type FlowCfg } from "./flow-build";
+import { deriveStepStatuses, type NodeStatus } from "../lib/hub-job-steps";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -77,8 +78,6 @@ export function runDate(streamKey: string): string {
   return parts.slice(2).join(":") || streamKey;
 }
 
-type NodeStatus = "done" | "active" | "skipped" | "todo" | "failed" | "blocked";
-
 const NODE_COLOR: Record<NodeStatus, { bg: string; fg: string; ring: string }> = {
   done: { bg: "var(--success)", fg: "var(--qr-surface)", ring: "var(--success)" },
   active: { bg: "var(--ink)", fg: "var(--canvas)", ring: "var(--ink)" },
@@ -86,16 +85,6 @@ const NODE_COLOR: Record<NodeStatus, { bg: string; fg: string; ring: string }> =
   blocked: { bg: "var(--warning)", fg: "var(--qr-surface)", ring: "var(--warning)" },
   skipped: { bg: "transparent", fg: "var(--muted-soft)", ring: "var(--hairline)" },
   todo: { bg: "transparent", fg: "var(--muted-soft)", ring: "var(--hairline)" },
-};
-
-/** API nodeStates.state → UI 状态(未知值一律回落 todo)。 */
-const NODE_STATE_TO_UI: Record<string, NodeStatus> = {
-  running: "active",
-  pending: "todo",
-  done: "done",
-  failed: "failed",
-  blocked: "blocked",
-  skipped: "skipped",
 };
 
 /**
@@ -124,36 +113,9 @@ export function pendingFinalizeNodes(job: HubJobDTO): string[] {
   return out;
 }
 
-/** 从 job.steps(start/done 配对)推导每个子步骤的状态 + 耗时。 */
+/** Derive node states from ledger events. Exported via the pure helper for regression coverage. */
 function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec: number | null }> {
-  const pair = new Map<string, { start?: number; done?: number }>();
-  for (const s of job.steps) {
-    const e = pair.get(s.step) ?? {};
-    if (s.phase === "start") e.start = s.at;
-    else e.done = s.at;
-    pair.set(s.step, e);
-  }
-  const success = job.state === "done" || job.state === "needs_manual";
-  const now = Date.now();
-  const nodeStates = new Map(job.nodeStates.map((n) => [n.node, n]));
-  const out: Record<string, { status: NodeStatus; sec: number | null }> = {};
-  for (const key of ALL_STEP_KEYS_TYPED) {
-    const e = pair.get(key);
-    const n = nodeStates.get(key);
-    if (n) {
-      // workflow 安全阀状态优先(running→active、pending→todo);耗时仍由 steps 配对推导。
-      const status: NodeStatus = NODE_STATE_TO_UI[n.state] ?? "todo";
-      const sec = e?.done != null && e.start != null ? Math.round((e.done - e.start) / 1000)
-        : status === "active" && e?.start != null ? Math.round((now - e.start) / 1000)
-        : null;
-      out[key] = { status, sec };
-      continue;
-    }
-    if (e?.done != null) out[key] = { status: "done", sec: e.start != null ? Math.round((e.done - e.start) / 1000) : null };
-    else if (e?.start != null) out[key] = { status: "active", sec: Math.round((now - e.start) / 1000) };
-    else out[key] = { status: success ? "skipped" : "todo", sec: null };
-  }
-  return out;
+  return deriveStepStatuses(job, ALL_STEP_KEYS_TYPED);
 }
 
 /** 自定义节点:状态圆 + 标签 + 耗时。hover 出详情(状态 + 耗时)。 */
@@ -313,7 +275,7 @@ function PipelineFlowInner({
   }));
   const graph = buildFlow(job, TERMINAL.has(job.state) ? undefined : cfg);
   const detailOf = (key: string): string | undefined =>
-    job.steps.filter((s) => s.step === key && s.phase === "done").map((s) => s.detail).filter(Boolean).pop();
+    job.steps.filter((s) => s.step === key && (s.phase === "done" || s.phase === "skipped")).map((s) => s.detail).filter(Boolean).pop();
   const nodeErrorOf = (key: string): string | undefined =>
     job.nodeStates.find((n) => n.node === key && n.state !== "done")?.error ?? undefined;
   // clean_*/clean_verify 的重跑 = 「补跑收尾」(删源/核验,幂等,不会重传)→ 与核心节点同口径可重试。

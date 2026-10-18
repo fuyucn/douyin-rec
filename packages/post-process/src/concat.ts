@@ -42,6 +42,17 @@ export interface GroupSessionsOpts {
 }
 
 /**
+ * Split-to-upload products (`{stem}_part0.mp4`) are not recording segments. The rule is a name
+ * shape rather than a regex because session-name regexes are owned by `@drec/core`.
+ */
+export function isSplitPartName(fileName: string): boolean {
+  const stem = fileName.slice(0, fileName.lastIndexOf("."));
+  const at = stem.lastIndexOf("_part");
+  const tail = stem.slice(at + 5);
+  return at >= 0 && tail.length > 0 && [...tail].every((c) => c >= "0" && c <= "9");
+}
+
+/**
  * 读目录里各会话 `{base}.session.json` 的 `nodeFormat`(节点侧原地替换留的标记)。
  * 老文件缺字段 = 未转换(不入表);损坏/非白名单值同样忽略,绝不抛。
  * `files` = 该目录的文件名列表(只挑 `.session.json`)。
@@ -91,20 +102,13 @@ export function groupSessions(files: string[], opts: GroupSessionsOpts = {}): Re
   //   - 带 part 序号的切分产物 `{stem}_part{N}.mp4`(split.ts 小写命名)不是分段,声明了也不收;
   //   - `_danmu`/`_livechat` 烧录产物、无时间戳基名的产物天然不带时间戳,同样被挡在外面。
   const NATIVE = /\.(ts|flv)$/i;
-  // 切分产物判定不用正则(session-name-guard 禁止在 core 之外写分段序号正则):stem 末尾 `_part` + 纯数字。
-  const isSplitPart = (f: string): boolean => {
-    const stem = f.slice(0, f.lastIndexOf("."));
-    const i = stem.lastIndexOf("_part");
-    const tail = stem.slice(i + 5);
-    return i >= 0 && tail.length > 0 && [...tail].every((c) => c >= "0" && c <= "9");
-  };
   for (const f of files) {
     // 原子落盘临时名(`.x.part.ts` 等,崩溃残留)不是分段:原生容器也不例外。
     if (isAtomicTempName(f)) continue;
     if (NATIVE.test(f)) {
       ensure(sessionBase(f)).ts.push(f);
     } else if (isVideoFileName(f)) {
-      if (isSplitPart(f) || !stampedSessionBaseOf(basename(f))) continue;
+      if (isSplitPartName(f) || !stampedSessionBaseOf(basename(f))) continue;
       const declared = opts.nodeFormats?.get(sessionBase(f));
       if (!declared || !f.toLowerCase().endsWith(STAGE_CONTAINERS[declared].ext)) continue;
       ensure(sessionBase(f)).ts.push(f);

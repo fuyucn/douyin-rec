@@ -19,7 +19,7 @@ import {
 import { rootHubConfig, rootStageDir } from "./paths.js";
 
 export interface HubJobEvent { state: string; at: number; }
-/** 细粒度子步骤事件(start/done)—— 驱动前端 fork/join 流程图。 */
+/** 细粒度子步骤事件(start/done/skipped)—— 驱动前端 fork/join 流程图。 */
 export interface HubJobStep { step: string; phase: string; at: number; detail?: string }
 /** 选优候选(流程图 select 步 fan-in 节点)。 */
 export interface HubJobCandidate { worker: string; coverage: number; durationSec: number; complete: boolean; isWinner: boolean; danmuCount?: number | null; }

@@ -954,10 +954,9 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
-  it("场景4b(issue #146): 成员剔除时 exists 抛错 → 仍按缺失剔除,不把整场炸掉", async () => {
-    // Transport.exists now throws when it cannot tell (issue #146). Member pruning must keep its own
-    // fail-closed `.catch(() => false)`; without it an ssh blip would throw out of runPipeline
-    // instead of just dropping that member.
+  it("场景4b(issue #176): 成员剔除时 exists 抛错 → 本轮保留成员,不把「无法确认」当删除", async () => {
+    // An unconfirmed probe is not a deletion. Dropping node-1 here would silently hand the win to
+    // node-2 even though node-1 has the more complete recording.
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const broadcast = makeBroadcast([
       { workerId: "node-1", rec: makeRec({ durationSec: 9999, totalGapSec: 0 }) },
@@ -966,14 +965,19 @@ describe("runPipeline", () => {
     const deps = makeDeps();
     const t1 = makeTransport("node-1", true);
     (t1.exists as Mock).mockRejectedValue(new Error("ssh rc=255"));
+    (t1.pull as Mock).mockImplementation(async (paths: string[], dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      for (const p of paths) writeFileSync(join(dir, p.split("/").pop()!), "x");
+    });
     deps.transports.set("node-1", t1);
     deps.transports.set("node-2", makeTransport("node-2", true));
     deps.ledger.upsertPending(broadcast.streamKey);
 
     const result = await runPipeline(broadcast, deps);   // 不抛错
     expect(result.state).toBe("done");
-    expect(deps.ledger.get(broadcast.streamKey)?.winnerWorker).toBe("node-2");
-    expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+    expect(deps.ledger.get(broadcast.streamKey)?.winnerWorker).toBe("node-1");
+    expect(deps.transports.get("node-1")!.pull).toHaveBeenCalledTimes(1);
+    expect(deps.transports.get("node-2")!.pull).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
     deps.ledger.close();
@@ -2213,11 +2217,12 @@ describe("runPipeline — 边录边传识别短路", () => {
       deps.ledger.upsertPending(b.streamKey);
       const exists = deps.transports.get("node-1")!.exists as Mock;
       exists.mockImplementation(async (paths: string[]) => !paths.some((p) => p.endsWith(".session.json")));
-      await runPipeline(b, deps);
-      await runPipeline(b, deps);
-      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(2);
-      deps.ledger.logStep(b.streamKey, "pull", "start"); // 一次真实的 pull 开始
-      deps.ledger.logStep(b.streamKey, "pull", "done");
+      expect((await runPipeline(b, deps)).state).toBe("pending");
+      expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(1);
+      // The sidecar is back on the next scan: run the real pull and finish the whole pipeline.
+      exists.mockResolvedValue(true);
+      expect((await runPipeline(b, deps)).state).toBe("done");
+      expect(deps.ledger.getSteps(b.streamKey).some((s) => s.step === "pull" && s.phase === "done")).toBe(true);
       expect(consecutiveSidecarSkips(deps.ledger.getSteps(b.streamKey))).toBe(0);
       deps.ledger.close();
     });
