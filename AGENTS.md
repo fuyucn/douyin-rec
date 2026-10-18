@@ -415,22 +415,25 @@ docker 固定 `/output-data`（映射宿主机 `docker-data/`）。专用 env（
 
 ## 版本规则（package.json `version`）
 
-**每个 `feat` / `fix` 都必须 bump 一次 version，与是否部署无关。** 版本号是变更的标记，
-不是部署的标记——一个版本可以只 commit/push 而不部署；也可以攒几个版本后一起部署。
+**按路径判定，不按提交类型：任何改动触及运行时路径（清单见下）的 PR 都必须 bump 一次 version，
+与是否部署、与 type 是 feat/fix/refactor/chore 无关。** 版本号是产物变更的标记，不是部署的标记——
+一个版本可以只 commit/push 而不部署；也可以攒几个版本后一起部署。
 
-- 完成一个 `feat` 或 `fix`（不含纯 `docs`/`test`/`chore`）→ 在 commit **之前** 把根目录
+- 触及运行时路径（通常是 `feat` / `fix`，也包括改依赖锁文件的 `chore`、改源码的 `refactor`）→ 在 commit **之前** 把根目录
   `package.json` 的 `version` patch +1（`0.0.X` → `0.0.X+1`），并重新执行 `pnpm bundle`
   使 `dist/douyin-rec.mjs` 内嵌的 `APP_VERSION` 同步更新。
 - version bump 与代码变更合入**同一个 commit**（`chore: bump version` 写进该 commit 的正文，
   或作为紧随其后的独立 chore commit 均可）。
 - **部署不是强制的**：不需要每次 bump 都部署；部署时只需用 bundle 产物
   （`dist/douyin-rec.mjs`）的 `APP_VERSION` 确认节点上跑的是哪个版本。
-- **非运行时豁免（工具类 PR）**：改动只落在工具类目录（`scripts/`、`docs/`、`test/`、`.github/`、
-  `plans/`、`dev/`、`remote/` 等）时，**不 bump、不 bundle**；PR 的「版本」段写「无需 bump + 理由」。
+- **非运行时豁免（工具类 PR）**：改动只落在工具类目录（`docs/`、`test/`、`.github/`、`plans/`、`dev/`、
+  `remote/`、`scripts/` 里除两个 install 脚本外的文件 等）或 `*.test.ts` 测试文件时，**不 bump、不 bundle**；
+  PR 的「版本」段写「无需 bump + 理由」。
   判定是**黑名单**语义：只要改动触及下列运行时路径之一，就必须 bump 并重新 bundle——
   `packages/`、`package.json`、`Dockerfile`、`docker-compose`、`dist/`、`configs/`、`assets/`、
-  `esbuild.config.mjs`、`tsconfig.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`。
-  其中 `configs/` 会经 bundle 内联进产物、`assets/` 会进镜像，所以它们不是工具目录。
+  `esbuild.config.mjs`、`tsconfig.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`.dockerignore`、
+  `scripts/install-mesio.sh`、`scripts/install-biliup.sh`。
+  其中 `configs/` 会经 bundle 内联进产物；`assets/`、两个 install 脚本会进镜像；`.dockerignore` 决定镜像构建上下文。
   这份清单是 `scripts/pr-gate.py` 的 `RUNTIME_PATHS` 的逐字副本——两边任何一处改动都必须同步另一处
   （有回归测试钉住），否则「人写的规则」和「机器检查」会分头漂移（这正是本条要消灭的问题）。
 

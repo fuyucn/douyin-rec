@@ -3,47 +3,35 @@
  * workflow doc) plus one machine source of truth (pr-gate.py RUNTIME_PATHS).
  * Nothing else enforces that the three agree, which is exactly the drift this guards.
  *
- * Both lists are parsed from their own text — no hardcoded copy here — so adding,
- * removing or reordering an entry on any side fails.
- *
- * The only normalization applied is dropping a leading backticked command name
- * (`pnpm bundle`) that happens to sit inside the same sentence; nothing else.
+ * The gate list is read by importing the script (no source parsing); each doc list is
+ * every backticked item between a start marker and a terminator, compared as an exact set.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 const read = (p: string) => readFileSync(join(ROOT, p), "utf-8");
 
-/** Runtime paths exactly as pr-gate.py declares them. */
+/** Runtime paths exactly as pr-gate.py declares them, read from the live module. */
 function runtimePathsFromGate(): string[] {
-  const src = read("scripts/pr-gate.py");
-  const start = src.indexOf("RUNTIME_PATHS = (");
-  expect(start, "pr-gate.py must still define RUNTIME_PATHS").toBeGreaterThan(-1);
-  const open = src.indexOf("(", start);
-  const close = src.indexOf(")", open);
-  return [...src.slice(open, close).matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  const code = "import importlib.util,json,sys;"
+    + "s=importlib.util.spec_from_file_location('g',sys.argv[1]);m=importlib.util.module_from_spec(s);"
+    + "s.loader.exec_module(m);print(json.dumps(list(m.RUNTIME_PATHS)))";
+  return JSON.parse(execFileSync("python3", ["-c", code, join(ROOT, "scripts/pr-gate.py")], { encoding: "utf-8" }));
 }
 
-/**
- * Backticked items of the runtime list in one doc paragraph.
- * AGENTS.md: between 「必须 bump 并重新 bundle——」 and 「。其中」.
- * Workflow doc: between 「之一就必须 bump」 and 「(configs/」.
- */
+/** Backticked items between `marker` and the next `stop` in one doc. */
 function runtimePathsFromDoc(doc: string, marker: string, stop: string): string[] {
-  const start = doc.indexOf(marker) + marker.length;
-  expect(start, "exemption paragraph not found").toBeGreaterThan(-1);
+  const at = doc.indexOf(marker);
+  expect(at, `exemption paragraph marker not found: ${marker}`).toBeGreaterThan(-1);
+  const start = at + marker.length;
   const end = doc.indexOf(stop, start);
   expect(end, "runtime list terminator not found").toBeGreaterThan(start);
-  // The list itself may be preceded by a backticked command inside the same
-  // sentence ("必须 bump + `pnpm bundle`(`packages/`、…)"), so drop any leading
-  // backticked token that is not a path.
-  const items = [...doc.slice(start, end).matchAll(/`([^`]+)`/g)].map((m) => m[1]);
-  return items.filter((p) => p !== "pnpm bundle");
+  return [...doc.slice(start, end).matchAll(/`([^`]+)`/g)].map((m) => m[1]);
 }
 
-const FLOW_STOP = "(`configs/` 会内联进产物";
 const TOOL_DIRS = ["scripts/", "docs/", "test/", ".github/", "plans/", "dev/", "remote/"];
 
 describe("工具类免 bump 豁免:文档与机器口径一致", () => {
@@ -62,7 +50,7 @@ describe("工具类免 bump 豁免:文档与机器口径一致", () => {
   });
 
   it("流程文档的运行时清单与 pr-gate.py 逐项相同", () => {
-    const inDoc = runtimePathsFromDoc(read("docs/agent-workflow.md"), "路径之一就必须 bump", FLOW_STOP);
+    const inDoc = runtimePathsFromDoc(read("docs/agent-workflow.md"), "必须 bump 的运行时路径清单:", "\n   清单说明");
     expect(inDoc.sort()).toEqual([...gate].sort());
   });
 

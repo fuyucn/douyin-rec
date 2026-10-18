@@ -134,12 +134,14 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
 5. **CI 状态**:不得有红,没有豁免项。架构文档漂移守护(`gen-architecture.mjs --check`)只比结构
    (包清单 / 依赖边 / 层级 / 流程图 / mermaid),不比生成时间与热度统计,所以任何红都是真红,
    一律打回。结构漂移的修法:`node scripts/gen-architecture.mjs` 重新生成并提交产物。
-6. **版本号**:feat/fix 已 bump 根 `package.json` patch,且 `dist/douyin-rec.mjs` 的 `APP_VERSION` 同步。
-   **非运行时豁免**(黑名单语义):只改工具类目录(`scripts/`、`docs/`、`test/`、`.github/`、`plans/`、
-   `dev/`、`remote/` 等)的 PR 不 bump、不 bundle,PR 版本段写「无需 bump + 理由」;只要改动触及下列运行时
-   路径之一就必须 bump + `pnpm bundle`(`packages/`、`package.json`、`Dockerfile`、`docker-compose`、
-   `dist/`、`configs/`、`assets/`、`esbuild.config.mjs`、`tsconfig.json`、`pnpm-lock.yaml`、
-   `pnpm-workspace.yaml`(`configs/` 会内联进产物、`assets/` 会进镜像,不算工具目录)。单一真相 =
+6. **版本号**(按路径判定,不按提交类型):触及运行时路径的 PR 已 bump 根 `package.json` patch,
+   且 `dist/douyin-rec.mjs` 的 `APP_VERSION` 同步。**非运行时豁免**(黑名单语义):只改工具类目录
+   (`docs/`、`test/`、`.github/`、`plans/`、`dev/`、`remote/`、`scripts/` 里除两个 install 脚本外的文件 等)
+   或 `*.test.ts` 的 PR 不 bump、不 bundle,PR 版本段写「无需 bump + 理由」。必须 bump 的运行时路径清单:
+   `packages/`、`package.json`、`Dockerfile`、`docker-compose`、`dist/`、`configs/`、`assets/`、
+   `esbuild.config.mjs`、`tsconfig.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`.dockerignore`、
+   `scripts/install-mesio.sh`、`scripts/install-biliup.sh`。
+   清单说明:configs 目录会内联进产物;assets 目录与两个 install 脚本会进镜像;dockerignore 决定构建上下文。单一真相 =
    `scripts/pr-gate.py` 的 `RUNTIME_PATHS`,本段与 AGENTS.md 的清单必须逐字同步(有回归测试钉住)。
 7. **隐私闸门**:PR 正文与评论都过 `python3 scripts/issue-guard.py`;diff 本身由 CI 跑
    `issue-guard.py --diff origin/feat/hub-optimization`(只扫新增行,历史内容不计)。

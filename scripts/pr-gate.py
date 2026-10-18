@@ -44,7 +44,16 @@ RUNTIME_PATHS = (
     "tsconfig.json",
     "pnpm-lock.yaml",
     "pnpm-workspace.yaml",
+    ".dockerignore",     # decides what enters the image build context
+    "scripts/install-mesio.sh",   # copied into and executed in the image
+    "scripts/install-biliup.sh",  # copied into and executed in the image
 )
+# Test files never reach the artifact even when they live under packages/.
+TEST_FILE = re.compile(r"\.test\.tsx?$")
+
+
+def runtime_files(files: list[str]) -> list[str]:
+    return [f for f in files if f.startswith(RUNTIME_PATHS) and not TEST_FILE.search(f)]
 # 独立占位词才算:TODO/TBD 前后不是路径/单词字符(放行 TODO.md、T-90 之类),
 # 三个以上句点两侧都是 ASCII 路径字符时是 git 范围(origin/x...HEAD),不算省略号。
 PLACEHOLDER = re.compile(
@@ -136,10 +145,12 @@ def check_version(sec: str, title: str, files: list[str] | None) -> list[str]:
         if touched and "package.json" not in touched:
             return ["声明 bump 版本,但改动文件里没有根 package.json(版本号与产物不同步)"]
         return []
+    # Path-based rule (independent of commit type and of how the section is worded):
+    # touching the runtime surface always requires a declared bump.
+    touched = runtime_files(files or [])
+    if touched:
+        return [f"改动触及运行时路径,须声明 bump(`0.0.X → 0.0.Y`): {', '.join(touched[:3])}"]
     if skip:
-        touched = [f for f in (files or []) if f.startswith(RUNTIME_PATHS)]
-        if touched:
-            return [f"声明不 bump,但改动触及运行时路径: {', '.join(touched[:3])}"]
         if kind in ("feat", "fix") and files is None:
             return []  # 离线且没给文件清单:无法核对,放行(gh 模式一定有清单)
         return [] if len(sec.strip()) >= 8 else ["不 bump 需写明理由"]
