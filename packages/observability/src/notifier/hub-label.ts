@@ -1,7 +1,7 @@
 // observability/src/notifier/hub-label.ts
 // hub 通知的「人话化」:事件里只有 streamKey(`{platform}:{roomSlug}:{date}[_HHMM]`)/房间号,
 // 在发送前补上主播名、日期、节点名,webhook 与站内 toast 共用同一份结果。纯函数,查表由调用方注入。
-import type { NotifyEvent } from "@drec/core";
+import { parseStreamKey, STREAM_KEY_SOURCE, type NotifyEvent, type ParsedStreamKey } from "@drec/core";
 
 export interface HubLabelLookup {
   /** (platform, roomSlug) → 主播名;查不到返回 undefined。 */
@@ -10,18 +10,10 @@ export interface HubLabelLookup {
   workerName: (id: string) => string | undefined;
 }
 
-export interface ParsedStreamKey { platform: string; roomSlug: string; date: string; time?: string }
+export { parseStreamKey, type ParsedStreamKey } from "@drec/core";
 
-const KEY_SOURCE = "([a-z]+):([^\\s:]+):(\\d{4}-\\d{2}-\\d{2})(?:_(\\d{2})(\\d{2}))?(?!\\d)";
 // In free text a key must not be glued to a word/path/URL on the left (e.g. `http://host:8080/...`).
-const EMBEDDED_KEY = `(?<![\\w/.-])${KEY_SOURCE}`;
-
-/** 解析 streamKey;不是该格式返回 null。同日多场的 `_HHMM` 后缀折成 `HH:MM`。 */
-export function parseStreamKey(key: string): ParsedStreamKey | null {
-  const m = new RegExp(`^${KEY_SOURCE}$`).exec(key);
-  if (!m) return null;
-  return { platform: m[1]!, roomSlug: m[2]!, date: m[3]!, ...(m[4] ? { time: `${m[4]}:${m[5]}` } : {}) };
-}
+const EMBEDDED_KEY = `(?<![\\w/.-])${STREAM_KEY_SOURCE}`;
 
 const dateText = (k: ParsedStreamKey): string => (k.time ? `${k.date} ${k.time}` : k.date);
 
