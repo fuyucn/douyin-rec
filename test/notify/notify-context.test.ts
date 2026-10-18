@@ -77,9 +77,18 @@ describe("old events render exactly as before (ctx is ignored until renderers op
       expect(formatMessage({ ...e, ctx })).toBe(formatMessage(e));
     });
   }
-  it("hub enrichment keeps ctx on the event", () => {
+  it("hub enrichment keeps an explicit ctx on the event", () => {
     const lookup = { anchorOf: () => "A", workerName: () => undefined };
     const out = enrichHubEvent({ kind: "stageReady", streamKey: "douyin:abc:2026-10-16", ctx }, lookup);
-    expect(out.ctx).toEqual(ctx);
+    // Explicit fields win; enrichment only adds what was missing (the key), without a mismatched name source.
+    expect(out.ctx).toEqual({ ...ctx, streamKey: "douyin:abc:2026-10-16" });
+  });
+  it("ctx merge: a caller source without a name is dropped; an explicit undefined does not erase", () => {
+    const lookup = { anchorOf: () => "A", workerName: () => undefined };
+    const out = enrichHubEvent(
+      { kind: "stageReady", streamKey: "douyin:abc:2026-10-16", ctx: { nameSource: "task", date: undefined, step: "merge" } },
+      lookup,
+    );
+    expect(out.ctx).toMatchObject({ name: "A", nameSource: "cached", date: "2026-10-16", step: "merge" });
   });
 });
