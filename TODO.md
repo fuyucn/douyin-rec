@@ -22,12 +22,6 @@
   **进度（2026-10-17）**：T01–T13c 随 PR [#209](https://github.com/fuyucn/douyin-rec/pull/209) 合并（审查中修了 biliup 续传会重复追加 P1 的缺陷）;T16 部署 guard 三态随 PR [#210](https://github.com/fuyucn/douyin-rec/pull/210) 合并;T17 `-N`/runNow 409 + force 随 PR [#211](https://github.com/fuyucn/douyin-rec/pull/211) 合并（均为用户批准的计划默认口径,**均未部署**）。队列模式仍默认关闭,节点不广播 `biliup-queue` 前不会启用。T14 实测（`tcp.acked` 为进度信号,`stallMs` 默认 300 秒）+ T15 字节停滞判死随 PR [#214](https://github.com/fuyucn/douyin-rec/pull/214) 合并（0.0.168,节点开始广播 `biliup-queue`）;T15b master 入队入口 + biliup 处理器补限流闸门/节点本机凭证/分 P 标题随 PR [#215](https://github.com/fuyucn/douyin-rec/pull/215) 合并（0.0.169）;PR5 队列页节点上传状态/心跳/实测 ETA 随 PR [#217](https://github.com/fuyucn/douyin-rec/pull/217) 合并（0.0.170）;PR4 边录边传与队列上传共用节点上传槽（方案 B,用户选定）随 PR [#219](https://github.com/fuyucn/douyin-rec/pull/219) 合并（0.0.171）。**均未部署**。
   **剩余（2026-10-17）**：①启用队列模式 = 在 master hub 配置写 `nodeUpload.mode=queue`（`needs-decision`）,且需先部署 0.0.171 到 master + 两个 worker;队列完成不删源（T13c 设计）,启用前需决定磁盘回收口径。②PR7/PR8 Phase 2（`needs-decision`）。③部署后实跑验证 #202/#204/#207（目前 `待验证`）。PR6 恢复工具（`recover-order`）**代码已在 #209**,此前误记为待交付;2026-10-17 两台节点 dry-run 验证可跑通(队列为空,只验证到拒绝未知订单)。
 
-- [~] **T-60 会话 sidecar 写权威起止时间戳:远端隐藏命令按 UTC 运行导致跨天错日（issue [#87](https://github.com/fuyucn/douyin-rec/issues/87)）**
-  — 2026-10-16 认领,分支 `codex/issue-session-tz-sidecar`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
-  **做什么**：录制端（manager）在会话边车写入权威 `startMs`（本场起录绝对 epoch,按 base 固话,跨场不串）+ `timeZone`（生效时区）；清单扫描（scan）在会话**无分段文件**（边录边传全删）时优先用 sidecar 的绝对起录,而非按文件名 + 进程本地时区反解（UTC 会话会错日）。有分段的会话保持 ffprobe 结果（零回归），老录像（sidecar 无该字段）回退文件名解析。
-  **为什么**：远端隐藏命令默认按 UTC 运行,`startMsFromSessionBase` 用进程时区反解文件名 → 跨天场次归错日期、影响聚类与「当天第几场」序号（#87「决定三行」选「从数据消除依赖」）。
-  **验收**：sidecar 写入 startMs/timeZone,且同进程两场各取本场起录（session 用例）；scan 无 ts 优先 sidecar / 老数据回退文件名 / 有 ts 仍用 ffprobe / 非法值回退（用例钉住）；全量测试 / typecheck / arch:check / bundle 通过。
-
 - [~] **T-54 分段续跑补齐烧录轨:续跑不重烧也不补烧录轨分 P（issue [#142](https://github.com/fuyucn/douyin-rec/issues/142)）**
   — 2026-10-15 认领,分支 `codex/issue-142-resume-burn`(**未合并 / 未部署 / 未 close**)。#140 复审期间发现（不在 #140 范围，单独开票）：续跑路径拿到的烧录产物字段恒为空
   （赋值在主流程烧录循环里，而该循环在续跑分叉之后）→ `appendSegmentGroup(files=[])` 直接把该步骤标
@@ -44,19 +38,6 @@
   **为什么**：被强杀留下的半成品大小正常却读不出时长，旧逻辑当成品复用 → 静默投稿坏分 P（B站转码 `-16`）。
   **验收**：三条路径（remux / merge / burn）原子落盘有回归用例；半成品必重做；坏产物拒投；全量测试 / typecheck / bundle 通过；
   dev 三节点 e2e（S1/S2/S3 + 真 ffmpeg 端到端）留证；独立审查 PASS。
-
-- [~] **T-46 dev 多节点 e2e 环境（issue [#82](https://github.com/fuyucn/douyin-rec/issues/82)，P0+P1+P4）**
-  — 2026-10-14 认领，分支 `codex/issue-82-dev-multinode`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
-  **做什么**：容器内 sshd 的 dev worker 镜像层 + compose 覆盖（`drec-devnet` internal）+ `scripts/e2e-verify.sh`
-  （up/down/keep/doctor/smoke，内置隔离断言）+ `docs/dev-multi-node.md` 设计稿与场景手册骨架。
-  **验收**：`doctor` 正反例通过；`up` 后 controller 内 ssh 到 worker 只读命令通；外网不可达；全量 vitest + typecheck 通过。
-  P2（S1 归属隐藏 / S2 失联三态 / S3 收口清理自动化）随后单独 PR；S4 重启接管挂 #72 / #57。
-
-- [~] **T-45 节点只显示归属自己的任务（issue [#73](https://github.com/fuyucn/douyin-rec/issues/73)，低风险部分）**
-  — 2026-10-14 认领，分支 `codex/issue-73-assigned-filter`，base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
-  **做什么**：归属判定收口 core `isWorkerAssigned`；`RemoteTaskSpec.assigned` 下发并存入节点快照；节点 `/api/tasks` 带 assigned，
-  worker 模式 Web 默认隐藏「受管 ∧ 未分配 ∧ 未在录」。**验收**：全量 vitest + typecheck + bundle + web build 通过；新旧混跑兼容。
-  真删未分配残留（危险类）见 #75，不在本条。
 
 - [~] **T-41 边录边传硬化：崩溃恢复 + 头阻塞 + 原子写 + 末段封口（issue [#3](https://github.com/fuyucn/douyin-rec/issues/3)，T-33 后续）**
   — 2026-10-13 认领，PR [#18](https://github.com/fuyucn/douyin-rec/pull/18)（分支
@@ -150,9 +131,6 @@
   - T9b ④:stage 交付模式 + 清 stage 开关时留存判定与实际不符（该模式从不执行清 stage）→ 落点 `packages/core` 的留存判定按交付模式取口径,并与清理共用同一判定。
 
 
-
-- [ ] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
-  — 2026-10-15。**做什么**:录制引擎在 spawn 前判定水位(拒绝则不起录、下轮再判),手动启动接口过同一闸门(拒绝返回 409 且不改 enabled)。**为什么**:此前只有 daemon 在窗口启停时查水位,常驻任务的下一场开播与手动启动会绕过 → 盘满导致录制损坏。**验收**:两条路径均有测试覆盖 + dev 实跑;`pnpm test`/`typecheck` 通过。分支 `codex/issue-96-new-broadcast-gate`,PR [#97](https://github.com/fuyucn/douyin-rec/pull/97)。
 
 - [ ] **T-50 水位配置注入的跟进项(#97 审查 LOW,不阻塞)** — 2026-10-15。三项:
   ① `serve.ts` 注入环境变量的分支只有源码文本断言 → 抽 `hubConfigEnvFor(src)` 纯函数并补行为测试;
@@ -450,6 +428,16 @@
 
 ## 已完成
 
+- [x] **T-60 会话 sidecar 写权威起止时间戳:远端隐藏命令按 UTC 运行导致跨天错日（issue [#87](https://github.com/fuyucn/douyin-rec/issues/87)）**
+  — 2026-10-18 完成。PR [#179](https://github.com/fuyucn/douyin-rec/pull/179) 已合并并随 0.0.174 部署；worker 主机为 UTC,而无分段会话的 `startMs` 全部与文件名时间在 Asia/Shanghai 对齐(毫秒级),旧边车回退文件名有回归用例。issue #87 已 close。
+- [x] **T-46 dev 多节点 e2e 环境（issue [#82](https://github.com/fuyucn/douyin-rec/issues/82)，P0+P1+P4）**
+  — 2026-10-18 完成。PR [#86](https://github.com/fuyucn/douyin-rec/pull/86) 与场景 PR [#125](https://github.com/fuyucn/douyin-rec/pull/125) 已合并；用该环境在 0.0.174 上重跑 S1 19/19、S2 28/28、S3 40/40，隔离断言与反例自检全过。issue #82 已 close。
+- [x] **T-45 节点只显示归属自己的任务（issue [#73](https://github.com/fuyucn/douyin-rec/issues/73)，低风险部分）**
+  — 2026-10-18 完成。PR [#76](https://github.com/fuyucn/douyin-rec/pull/76) 已合并并随 0.0.174 部署；S1 覆盖 `assigned=false` 停用保留、worker 默认隐藏、受管任务只读 403。真删未分配残留仍另票（#75）。issue #73 已 close。
+- [x] **T-49 磁盘水位闸门补全:常驻任务「新一场开播」与「手动启动」也过闸门（issue [#96](https://github.com/fuyucn/douyin-rec/issues/96)）**
+  — 2026-10-18 完成。PR [#97](https://github.com/fuyucn/douyin-rec/pull/97) 已合并并随 0.0.174 部署；新一场拒绝/热改恢复/同场重连放行/手动启动 409 均由回归用例与 dev 实跑覆盖。issue #96 已 close。
+- [x] **T-52b 状态机脚本收尾（issue [#81](https://github.com/fuyucn/douyin-rec/issues/81)）**
+  — 2026-10-18 完成。PR [#233](https://github.com/fuyucn/douyin-rec/pull/233) 已合并（独立审查两轮，第二轮 MERGE）；`--from` 必须匹配当前标签、旧口径 closeout 文档化、PR 模板提示。issue #81 已 close。
 - [x] **T-59 收口:扫描与拉取之间会话边车消失导致 job 失败（issue [#146](https://github.com/fuyucn/douyin-rec/issues/146)）**
   — 2026-10-18 完成。PR [#174](https://github.com/fuyucn/douyin-rec/pull/174) 已合并并随 0.0.174 部署；边车消失的确认缺失 / 无法确认 / 混合轮由 orchestrator 回归套件覆盖，隔离多节点 e2e S1 19/19、S2 28/28、S3 40/40 全绿。issue #146 已 close。
 - [x] **T-42 节点清单三态：失联/超时不再当「无录像」（issue [#27](https://github.com/fuyucn/douyin-rec/issues/27)）**
@@ -460,7 +448,7 @@
   — 2026-10-18 完成。PR [#228](https://github.com/fuyucn/douyin-rec/pull/228) 已合并并随 0.0.174 部署；两个 worker 的 `_inventory` 均返回 `unclaimedSegments` / `unclaimedTruncated`，master 日志由「unknown」变为「0 in 0 sessions」。issue #225 已 close。
 - [x] **T-66 节点应用回执端到端接通期望版本与 bundle 版本（issue [#230](https://github.com/fuyucn/douyin-rec/issues/230)）**
   — 2026-10-18 完成。PR [#231](https://github.com/fuyucn/douyin-rec/pull/231) 已合并并随 0.0.174 部署；三节点 `expectedVersion=1`、`appliedVersion=1`、`appVersion` 一致，`_node-status` 回吐真实 `appVersionAtApply`。issue #230 已 close。
-- [ ] **T-65 孤儿分段重叠时对账跳过并禁止删源（issue [#226](https://github.com/fuyucn/douyin-rec/issues/226)，#223 v4 PR2）**
+- [x] **T-65 孤儿分段重叠时对账跳过并禁止删源（issue [#226](https://github.com/fuyucn/douyin-rec/issues/226)，#223 v4 PR2）**
   — 2026-10-18 主动放弃（not planned）：孤儿分段按丢失接受，不再加保护规则。依据是 audit agent 的口径——根因 #224 与观测 #225 上线后，两节点孤儿统计均为 0（`0 in 0 sessions`），保护规则对当前不发生的场景只会增加旧 worker 的磁盘占用。PR [#229](https://github.com/fuyucn/douyin-rec/pull/229) 未合并已关闭，分支 `codex/issue-226-orphan-guard` 保留；若将来重现孤儿，重开 #226 并以当时 base 重建。
 
 - [x] **T-57 时区口径遗留三处（issue [#158](https://github.com/fuyucn/douyin-rec/issues/158)，#155 审查遗留）**
