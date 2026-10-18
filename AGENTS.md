@@ -425,6 +425,13 @@ docker 固定 `/output-data`（映射宿主机 `docker-data/`）。专用 env（
   或作为紧随其后的独立 chore commit 均可）。
 - **部署不是强制的**：不需要每次 bump 都部署；部署时只需用 bundle 产物
   （`dist/douyin-rec.mjs`）的 `APP_VERSION` 确认节点上跑的是哪个版本。
+- **非运行时豁免（工具类 PR）**：改动只落在 `scripts/`、`docs/`、`test/`、`.github/`、`plans/`、
+  `configs/`、`dev/`、`remote/` 等非运行时目录，且**没有触及**下列运行时路径时，**不 bump、不 bundle**：
+  `packages/`、根 `package.json`、`Dockerfile`、`docker-compose*`、`dist/`。
+  这一清单是 `scripts/pr-gate.py` 的 `RUNTIME_PATHS` 的逐字副本——两边任何一处改动都必须同步另一处，
+  否则「人写的规则」和「机器检查」会分头漂移（这正是本条要消灭的问题）。
+  工具类提交建议用 `docs` / `test` / `chore` / `ci` 类型；PR 的「版本」段写「无需 bump + 理由」，
+  机器会按这份白名单核对实际改动文件，声明与实际不符会被打回。
 
 ## 提交规范（约定式提交 / Conventional Commits）
 

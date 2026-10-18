@@ -137,6 +137,14 @@ describe("pr-gate.py", () => {
     const r = gate(GOOD, ["--title", "fix(app): y", "--files", "packages/app/src/a.ts"]);
     expect(r.lines.join("\n")).toContain("触及运行时路径");
   });
+  it("工具类白名单：docs/scripts/test/.github 等不 bump 放行；任一运行时路径命中即 FAIL", () => {
+    const tool = ["docs/a.md", "scripts/a.py", "test/a.test.ts", ".github/pull_request_template.md", "plans/a.md", "configs/a.json", "dev/a.sh", "remote/a.sh"];
+    expect(gate(GOOD, ["--title", "fix(scripts): y", "--files", tool.join(",")]).status).toBe(0);
+    for (const runtime of ["packages/x.ts", "package.json", "Dockerfile", "docker-compose.yml", "dist/douyin-rec.mjs"]) {
+      const r = gate(GOOD, ["--title", "fix(scripts): y", "--files", [...tool, runtime].join(",")]);
+      expect(r.lines.join("\n"), runtime).toContain("触及运行时路径");
+    }
+  });
   it("模板里的 HTML 注释与占位不算内容;原样模板 → FAIL", () => {
     const tpl = join(import.meta.dirname, "..", "..", ".github", "pull_request_template.md");
     const r = spawnSync("python3", [GATE, "--body-file", tpl, "--title", "feat(x): y"], { encoding: "utf-8" });

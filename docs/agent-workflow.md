@@ -135,6 +135,10 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
    (包清单 / 依赖边 / 层级 / 流程图 / mermaid),不比生成时间与热度统计,所以任何红都是真红,
    一律打回。结构漂移的修法:`node scripts/gen-architecture.mjs` 重新生成并提交产物。
 6. **版本号**:feat/fix 已 bump 根 `package.json` patch,且 `dist/douyin-rec.mjs` 的 `APP_VERSION` 同步。
+   **非运行时豁免**:只改 `scripts/`、`docs/`、`test/`、`.github/`、`plans/`、`configs/`、`dev/`、`remote/`
+   且未触及 `packages/`、根 `package.json`、`Dockerfile`、`docker-compose*`、`dist/` 的 PR 不 bump、不 bundle,
+   PR 版本段写「无需 bump + 理由」。判定白名单的单一真相 = `scripts/pr-gate.py` 的 `RUNTIME_PATHS`;
+  本段与 AGENTS.md 的豁免清单必须逐字同步。
 7. **隐私闸门**:PR 正文与评论都过 `python3 scripts/issue-guard.py`;diff 本身由 CI 跑
    `issue-guard.py --diff origin/feat/hub-optimization`(只扫新增行,历史内容不计)。
    源码文件名误报口径见该脚本头部说明:源码类文件不套「文件名 / 凭证类 / 主机名 / streamKey」语义词规则,
