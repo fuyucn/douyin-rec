@@ -57,7 +57,10 @@ RULES: list[tuple[str, str, str]] = [
     # Login-cookie key/value pairs (douyin / bilibili / kuaishou session keys) with a real-looking value.
     ("登录凭证键值", r"(?i)\b(?:sessionid(?:_ss)?|sid_guard|sid_tt|uid_tt|odin_tt|ttwid|passport_csrf_token|"
      r"sessdata|bili_jct|dedeuserid(?:__ckmd5)?|buvid3|kuaishou\.server\.web_(?:st|ph))"
-     r"\s*[=:]\s*[\"']?[A-Za-z0-9%_\-|]{16,}", "登录 cookie 键值对"),
+     r"[\"']?\s*[=:]\s*[\"']?[A-Za-z0-9%_\-|]{16,}", "登录 cookie 键值对"),
+    # biliup cookies.json layout: {"name": "SESSDATA", "value": "..."}.
+    ("登录凭证键值", r"(?i)\"name\"\s*:\s*\"(?:sessdata|bili_jct|dedeuserid(?:__ckmd5)?|sid|buvid3|sessionid)\""
+     r"\s*,\s*\"value\"\s*:\s*\"[^\"]{16,}", "登录 cookie 键值对(name/value 形态)"),
     # 「master / worker」是允许的角色说法，只拦真实主机名样式（vps1、node-a、*.local 等）。
     ("主机名", r"(?i)\bvps\s*\d+\b|\b[\w\-]+\.(?:local|internal|lan)\b", "真实节点主机名（用「master / 某个 worker」指代）"),
 ]
@@ -84,16 +87,21 @@ def added_lines(base: str) -> list[tuple[str, int, str]]:
         print(f"git diff 失败(base={base!r}): {proc.stderr.strip()}", file=sys.stderr)
         raise SystemExit(2)
     out: list[tuple[str, int, str]] = []
-    path, lineno = "", 0
+    path, lineno, in_hunk = "", 0, False
     for raw in proc.stdout.splitlines():
-        if raw.startswith("+++ "):
-            path = raw[4:].removeprefix("b/") if raw != "+++ /dev/null" else ""
+        if raw.startswith("diff "):
+            in_hunk = False
         elif raw.startswith("@@"):
+            in_hunk = True
             m = re.search(r"\+(\d+)", raw)
             lineno = int(m.group(1)) if m else 0
-        elif raw.startswith("+") and not raw.startswith("+++") and path:
-            out.append((path, lineno, raw[1:]))
-            lineno += 1
+        elif in_hunk:
+            # Inside a hunk an added line may itself start with "++"; it is content, not a header.
+            if raw.startswith("+") and path:
+                out.append((path, lineno, raw[1:]))
+                lineno += 1
+        elif raw.startswith("+++ "):
+            path = raw[4:].removeprefix("b/") if raw != "+++ /dev/null" else ""
     return out
 
 
