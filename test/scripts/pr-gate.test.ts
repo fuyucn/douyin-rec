@@ -137,6 +137,42 @@ describe("pr-gate.py", () => {
     const r = gate(GOOD, ["--title", "fix(app): y", "--files", "packages/app/src/a.ts"]);
     expect(r.lines.join("\n")).toContain("触及运行时路径");
   });
+  it("工具类白名单：docs/scripts/test/.github 等不 bump 放行；任一运行时路径命中即 FAIL", () => {
+    const tool = ["docs/a.md", "scripts/a.py", "test/a.test.ts", ".github/pull_request_template.md", "plans/a.md", "dev/a.sh", "remote/a.sh"];
+    expect(gate(GOOD, ["--title", "fix(scripts): y", "--files", tool.join(",")]).status).toBe(0);
+    // A declared bump must actually bump the manifest; otherwise "无需 bump" and a
+    // fake "0.0.1 → 0.0.2" would both pass for a change that alters the artifact.
+    const declared = GOOD.replace(/无需 bump:.*/, "0.0.1 → 0.0.2");
+    expect(gate(declared, ["--title", "fix(app): y", "--files", "packages/app/src/a.ts"]).lines.join("\n")).toContain("声明 bump 版本,但改动文件里没有根 package.json");
+    for (const runtime of ["packages/x.ts", "package.json", "Dockerfile", "docker-compose.yml", "dist/douyin-rec.mjs",
+                           "configs/hub.config.example.json", "assets/fonts/a.woff2", "esbuild.config.mjs",
+                           "tsconfig.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".dockerignore",
+                           "scripts/install-mesio.sh", "scripts/install-biliup.sh"]) {
+      const r = gate(GOOD, ["--title", "fix(scripts): y", "--files", [...tool, runtime].join(",")]);
+      expect(r.lines.join("\n"), runtime).toContain("触及运行时路径");
+    }
+  });
+  it("按路径判定,不看 type 与措辞:chore/refactor 触及运行时路径也须 bump;packages 下测试文件豁免", () => {
+    for (const [title, wording, file] of [
+      ["chore(deps): y", "无需 bump:依赖升级", "pnpm-lock.yaml"],
+      ["chore(deps): y", "chore 不涉及版本号变化", "pnpm-lock.yaml"],
+      ["refactor(app): y", "重构无行为变化,版本不变", "packages/app/src/a.ts"],
+    ]) {
+      const body = GOOD.replace(/无需 bump:.*/, wording);
+      expect(gate(body, ["--title", title, "--files", file]).lines.join("\n"), `${title} ${wording}`).toContain("触及运行时路径");
+    }
+    expect(gate(GOOD, ["--title", "test(app): y", "--files", "packages/app/src/a.test.ts"]).status).toBe(0);
+    // Exemption matches what vitest collects; a .tsx "test" ships like any other source.
+    expect(gate(GOOD, ["--title", "test(web): y", "--files", "packages/web/src/a.test.tsx"]).lines.join("\n")).toContain("触及运行时路径");
+  });
+  it("未触及运行时路径时不看 type:feat 只改文档、理由不含固定措辞也放行;无需 bump 里引用旧版本号不误判", () => {
+    const docsOnly = ["--files", "docs/a.md"];
+    const plain = GOOD.replace(/无需 bump:.*/, "文档改动,版本不变");
+    expect(gate(plain, ["--title", "feat(docs): y", ...docsOnly]).status).toBe(0);
+    expect(gate(plain, ["--title", "docs: y", ...docsOnly]).status).toBe(0);
+    const quoted = GOOD.replace(/无需 bump:.*/, "无需 bump;上次 0.0.5 → 0.0.6 已部署");
+    expect(gate(quoted, ["--title", "docs: y", ...docsOnly]).status).toBe(0);
+  });
   it("模板里的 HTML 注释与占位不算内容;原样模板 → FAIL", () => {
     const tpl = join(import.meta.dirname, "..", "..", ".github", "pull_request_template.md");
     const r = spawnSync("python3", [GATE, "--body-file", tpl, "--title", "feat(x): y"], { encoding: "utf-8" });
