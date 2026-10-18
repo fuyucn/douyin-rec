@@ -14,6 +14,7 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-63 会话边车并发写入导致 nodeFormat 丢失（issue [#224](https://github.com/fuyucn/douyin-rec/issues/224)，#223 v4 PR0）** — 原子写 + 严格标记 + 转格式改名后复查;不新增删除。计划见 #223 v4（T0）。
 - [~] **T-65 孤儿分段重叠时对账跳过并禁止删源（issue [#226](https://github.com/fuyucn/douyin-rec/issues/226)，#223 v4 PR2，needs-decision）** — 依赖 #225;计划 T3+T4。
 - [~] **T-64 节点清单上报未认领的已转换分段（issue [#225](https://github.com/fuyucn/douyin-rec/issues/225)，#223 v4 PR1）** — 识别纯函数 + `_inventory` 新字段,`recordings` 逐字节不变,无行为变化。计划 T1+T2。
 - [~] **T-62 节点侧上传队列:biliup 作为 proc-queue 处理器,按进度停滞判死（计划 [plans/038_node_upload_queue.md](plans/038_node_upload_queue.md)）**

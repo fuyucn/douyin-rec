@@ -4,6 +4,8 @@ import type {
   Recorder, DanmuSource, RecorderEvents, RecordOpts, DanmuMessage, StreamInfo,
 } from "@drec/core";
 import { XmlDanmuWriter } from "./danmu-xml/index.js";
+import { writeSessionSidecar } from "./session-sidecar.js";
+export { writeSessionSidecar, type SidecarWriteHooks } from "./session-sidecar.js";
 import { createLogger, platformForRoom, processTimeZone, sessionBaseOf, stripVideoExt } from "@drec/core";
 import type { AdmitDecision, Notifier, NotifyEvent } from "@drec/core";
 
@@ -552,17 +554,12 @@ export class RecordingSession {
       timeZone: this.timeZone ?? processTimeZone(),
     };
     if (this.liveTitle) data.title = this.liveTitle;
-    // 节点侧原地替换(issue #137)的转换标记由 app 层写进同一个文件;本方法是**整文件覆盖**,
-    // 不保留的话收尾那次覆盖就把标记抹掉(无段号单文件 mp4/mkv 随即再也认不出)。只透传白名单字段。
-    try {
-      const prev = JSON.parse(readFileSync(`${base}.session.json`, "utf-8")) as { nodeFormat?: unknown };
-      if (typeof prev.nodeFormat === "string") data.nodeFormat = prev.nodeFormat;
-    } catch { /* 无旧文件 / 损坏 → 无标记 */ }
     if (withGaps) {
       data.gaps = this.gaps;
       data.totalGapSec = Math.round(this.gaps.reduce((s, g) => s + (g.endMs - g.startMs), 0) / 1000);
     }
-    writeFileSync(`${base}.session.json`, JSON.stringify(data), "utf-8");
+    // Atomic write; carries the node-side `nodeFormat` marker over from the existing file.
+    writeSessionSidecar(base, data);
   }
 
   private write(m: DanmuMessage): void {

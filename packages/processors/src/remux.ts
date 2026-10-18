@@ -18,6 +18,7 @@ import { FFPROBE_HEADER_TIMEOUT_MS, FFPROBE_SCAN_TIMEOUT_MS } from "@drec/post-p
 import {
   freeBytesOf,
   sessionBaseOf,
+  writeFileAtomicSync,
   STAGE_CONTAINERS,
   type ProcessContext,
   type ProcessJob,
@@ -196,13 +197,22 @@ function sessionJsonOf(dir: string, base: string): string {
  */
 export function markSessionNodeFormat(dir: string, base: string, fmt: StageFormat): void {
   const p = sessionJsonOf(dir, base);
+  let raw: string | null = null;
+  try { raw = readFileSync(p, "utf-8"); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
   let data: Record<string, unknown> = { sessionBase: base };
-  try { data = JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>; } catch { /* 新建 */ }
+  if (raw !== null) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); }
+    catch { throw new Error(`session sidecar unparsable, refusing to overwrite: ${p}`); }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`session sidecar is not an object, refusing to overwrite: ${p}`);
+    }
+    data = parsed as Record<string, unknown>;
+  }
   if (data.nodeFormat === fmt) return;
   data.nodeFormat = fmt;
-  const tmp = `${p}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data), "utf-8");
-  renameSync(tmp, p);
+  writeFileAtomicSync(p, JSON.stringify(data));
 }
 
 export function readNodeFormat(dir: string, base: string): string | undefined {
@@ -344,6 +354,17 @@ export async function convertSegmentInPlace(src: string, fmt: StageFormat, deps:
     fsync(tmp); // 先落盘再 rename:否则断电后新文件可能是空洞、而原文件已删 → 丢数据
     rename(tmp, final);
   } catch (e) { return fail("remux-failed", `落盘/改名失败: ${(e as Error).message}`, tmp); }
+
+  // Re-check the marker after the rename: a manager sidecar write that read the file before our first mark
+  // can drop nodeFormat (issue #223 scenario B). Never delete the source while the marker is missing.
+  if (readNodeFormat(dirname(src), sessionBaseOf(src)) !== fmt) {
+    try {
+      markSessionNodeFormat(dirname(src), sessionBaseOf(src), fmt);
+      log(`[remux] marker re-applied after rename: ${name}`);
+    } catch (e) {
+      return fail("mark-failed", `marker missing after rename and re-mark failed, original and converted file both kept: ${(e as Error).message}`);
+    }
+  }
 
   // 新文件已是最终名且校验过 → 才删原文件。删失败不算失败(配对留给启动接管),但要留痕。
   try { deps.assertLease?.(); }
