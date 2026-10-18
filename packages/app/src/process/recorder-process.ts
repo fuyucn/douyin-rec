@@ -113,7 +113,8 @@ export class ChildRecorderProcess implements RecorderProcess {
   }
 
   start(): void {
-    if (this.child) return;
+    // exited without a child = an earlier synchronous spawn throw; this object is spent.
+    if (this.child || this.exited) return;
     this.exitPromise = new Promise<void>((resolve) => {
       this.resolveExit = resolve;
     });

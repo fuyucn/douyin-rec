@@ -215,5 +215,7 @@ describe("NodeRecordSpawner failure after the credential file is written (issue 
     expect(readdirSync(credentialDir())).toEqual(["record-7.cred"]);
     expect(() => proc.start()).toThrow();
     expect(readdirSync(credentialDir())).toEqual([]);
+    expect(() => proc.start()).not.toThrow(); // spent object: re-entry is a no-op
+    expect(proc.pid).toBeUndefined();
   });
 });

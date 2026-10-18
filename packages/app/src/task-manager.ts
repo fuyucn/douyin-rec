@@ -115,7 +115,8 @@ export class TaskManager {
   /**
    * taskIds whose start-failure alert already fired. The daemon retries every tick, so without
    * this a persistent failure (e.g. credential file unwritable) alerts once a minute. Cleared on
-   * the next successful spawn so a later relapse alerts again.
+   * the next spawn that does not throw so a later relapse alerts again; async spawn errors
+   * (ENOENT/EACCES via 'error') are crashes and go through handleExit instead.
    */
   private readonly startFailAlerted = new Set<number>();
 
