@@ -15,6 +15,11 @@
 
 ## 进行中
 - [~] **T-63 会话边车并发写入导致 nodeFormat 丢失（issue [#224](https://github.com/fuyucn/douyin-rec/issues/224)，#223 v4 PR0）** — 原子写 + 严格标记 + 转格式改名后复查;不新增删除。计划见 #223 v4（T0）。
+- [~] **T-66 节点应用回执端到端接通期望版本与 bundle 版本（issue [#230](https://github.com/fuyucn/douyin-rec/issues/230)）**
+  — 2026-10-18 认领。此前 `expectedVersion` 从未传入、`appVersion` 读写丢失、`WorkerStatus` 不回传期望版本 → UI 的
+  syncLag 永远 false。现由 master 按期望内容派生单调版本（内容不变不涨），端到端下发并落快照；`_node-status`
+  回吐真实 `appVersionAtApply`；同步失败/安全阀拒绝写 `syncError`，成功清空。验收：指纹顺序无关、旧 payload/旧快照兼容、
+  `_apply-tasks` 实跑快照版本 42 且 `_node-status` 回读一致；全量测试 / typecheck / arch:check / bundle 绿。
 - [~] **T-65 孤儿分段重叠时对账跳过并禁止删源（issue [#226](https://github.com/fuyucn/douyin-rec/issues/226)，#223 v4 PR2，needs-decision）** — 依赖 #225;计划 T3+T4。
 - [~] **T-64 节点清单上报未认领的已转换分段（issue [#225](https://github.com/fuyucn/douyin-rec/issues/225)，#223 v4 PR1）** — 识别纯函数 + `_inventory` 新字段,`recordings` 逐字节不变,无行为变化。计划 T1+T2。
 - [~] **T-62 节点侧上传队列:biliup 作为 proc-queue 处理器,按进度停滞判死（计划 [plans/038_node_upload_queue.md](plans/038_node_upload_queue.md)）**

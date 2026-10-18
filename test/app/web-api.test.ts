@@ -1943,15 +1943,18 @@ describe("T16 workers/status 版本回执", () => {
       store: s, manager: new MockManager(),
       // 一个节点有回执,一个没有(模拟旧 bundle)
       probeAllWorkers: async () => [
-        { id: "vps1", ok: true, appVersion: "0.0.61", appliedVersion: 7, appliedAt: 123 },
+        { id: "vps1", ok: true, appVersion: "0.0.61", appliedVersion: 7, appliedAt: 123, expectedVersion: 8, syncError: "boom" },
         { id: "old", ok: true },
       ],
     });
     const r = await a.workersStatus();
     expect(r.status).toBe(200);
-    const list = r.body as Array<{ id: string; ok: boolean; appVersion?: string; appliedVersion?: number | null }>;
+    const list = r.body as Array<{ id: string; ok: boolean; appVersion?: string; appliedVersion?: number | null; expectedVersion?: number; syncError?: string }>;
     expect(list.find((x) => x.id === "vps1")?.appVersion).toBe("0.0.61");
     expect(list.find((x) => x.id === "vps1")?.appliedVersion).toBe(7);
+    // Master-side receipt fields must survive the API unchanged (the UI computes drift from them).
+    expect(list.find((x) => x.id === "vps1")?.expectedVersion).toBe(8);
+    expect(list.find((x) => x.id === "vps1")?.syncError).toBe("boom");
     // 旧 bundle:没有版本字段,但仍是 ok —— **不能因为拿不到版本就报错**
     expect(list.find((x) => x.id === "old")?.ok).toBe(true);
     expect(list.find((x) => x.id === "old")?.appVersion).toBeUndefined();

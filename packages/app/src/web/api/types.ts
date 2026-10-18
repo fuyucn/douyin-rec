@@ -101,7 +101,7 @@ export interface ApiDeps {
   /** 连接测试(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<WorkerTestResult>;
   /** 批量存活探针(CLI 注入)。省略(hub 未开)→ status 端点返回 []。 */
-  probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  probeAllWorkers?: () => Promise<import("@drec/core").WorkerStatus[]>;
   /**
    * master 代查某节点的任务日志尾巴(F3;CLI 注入,内部走 Transport)。
    * 省略 → 该端点返回 400(hub 未启用),不静默 404/空表。

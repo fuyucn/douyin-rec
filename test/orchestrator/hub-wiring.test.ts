@@ -109,4 +109,21 @@ describe("T-2 applyTasks force 透传", () => {
     await t.applyTasks({ desired: [spec as never], force: true });
     expect(applyTasks).toHaveBeenCalledWith({ desired: [spec], force: true });
   });
+
+  it("SshTransport: expectedVersion 编入 _apply-tasks 的 base64 payload", async () => {
+    const seen: string[] = [];
+    const t = new SshTransport({
+      id: "vps", host: "h", dataRoot: "/drec",
+      run: async (argv) => { seen.push(argv.join(" ")); return JSON.stringify({ applied: [], removed: [], pending: [] }); },
+    });
+    await t.applyTasks({ desired: [spec as never], expectedVersion: 12 });
+    expect(payloadOf(seen[0]!)).toEqual({ desired: [spec], expectedVersion: 12 });
+  });
+
+  it("LocalTransport: expectedVersion 原样传给注入的 applyTasks 回调", async () => {
+    const applyTasks = vi.fn().mockResolvedValue({ applied: [], removed: [], pending: [] });
+    const t = new LocalTransport({ id: "local", recordingsDir: "/rec", applyTasks });
+    await t.applyTasks({ desired: [spec as never], expectedVersion: 12 });
+    expect(applyTasks).toHaveBeenCalledWith({ desired: [spec], expectedVersion: 12 });
+  });
 });

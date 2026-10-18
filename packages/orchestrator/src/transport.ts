@@ -174,7 +174,7 @@ export interface Transport {
    * 守卫会把「master 读不到规则」(desired 突然为空)与「用户真的要把房间从 A 节点改派到 B 节点」
    * 两种情况看成同一件事;force 是后者的唯一合法出口。
    */
-  applyTasks?(input: { desired: RemoteTaskSpec[]; force?: boolean }): Promise<ApplyTasksResult>;
+  applyTasks?(input: { desired: RemoteTaskSpec[]; force?: boolean; expectedVersion?: number }): Promise<ApplyTasksResult>;
   /**
    * 节点应用回执(T16):这台节点应用了哪一版期望、跑的是哪个 bundle。
    * **可选**:旧 bundle 没有 `_node-status` → 返回 null(UI 显示 unknown,不报错)。

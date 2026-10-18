@@ -46,6 +46,9 @@ export function readManagedState(dir: string): ManagedState | null {
       version: typeof raw.version === "number" ? raw.version : 0,
       savedAt: typeof raw.savedAt === "number" ? raw.savedAt : 0,
       desired: raw.desired,
+      // Old snapshots have no appVersion: omit the field so readers see "unknown"
+      // instead of inventing a value for the bundle that applied them.
+      ...(typeof raw.appVersion === "string" ? { appVersion: raw.appVersion } : {}),
     };
   } catch {
     return null;
@@ -61,7 +64,12 @@ export function writeManagedState(dir: string, state: Omit<ManagedState, "savedA
   mkdirSync(dir, { recursive: true });
   const path = join(dir, MANAGED_STATE_FILE);
   const tmp = join(dir, `.${MANAGED_STATE_FILE}.tmp`);
-  const body: ManagedState = { version: state.version ?? 0, savedAt: state.savedAt ?? Date.now(), desired: state.desired };
+  const body: ManagedState = {
+    version: state.version ?? 0,
+    savedAt: state.savedAt ?? Date.now(),
+    desired: state.desired,
+    ...(state.appVersion ? { appVersion: state.appVersion } : {}),
+  };
   writeFileSync(tmp, JSON.stringify(body, null, 2) + "\n", "utf-8");
   renameSync(tmp, path);
 }

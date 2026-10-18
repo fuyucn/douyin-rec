@@ -249,7 +249,7 @@ export class SshTransport implements Transport {
    * `force` 编进 payload 交给远端 `applyRemoteTasks` 跳过 T-2 安全阀 —— 必须端到端送达:
    * 只在 master 侧生效等于没做(远端节点才是拒绝删除的那个)。
    */
-  async applyTasks(input: { desired: RemoteTaskSpec[]; force?: boolean }): Promise<ApplyTasksResult> {
+  async applyTasks(input: { desired: RemoteTaskSpec[]; force?: boolean; expectedVersion?: number }): Promise<ApplyTasksResult> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const b64 = Buffer.from(JSON.stringify(input), "utf-8").toString("base64");
     const out = await this.run([`${nodePrefix} _apply-tasks ${this.o.dataRoot} ${b64}`]);
