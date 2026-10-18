@@ -253,14 +253,38 @@ export function validateLooseTitleTemplate(template: string): string | null {
   return null;
 }
 
+/**
+ * Turn a rendered name into a legal file stem. Identity for names that already pass
+ * `isSafeStem`, so stems produced before this existed stay byte-identical (rerun-stable).
+ * Otherwise every disallowed char (emoji, dots, full-width punctuation, spaces) becomes `-`,
+ * runs collapse, and edge dashes are trimmed. Returns "" when nothing legal is left.
+ */
+export function sanitizeStem(rendered: string): string {
+  const s = rendered.normalize("NFC").trim();
+  if (isSafeStem(s)) return s;
+  return s
+    .replace(/[^\p{L}\p{N}_\-【】（）()]/gu, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/-+_|_-+/g, "_")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, MAX_TITLE_LEN)
+    .replace(/-+$/, "");
+}
+
+/**
+ * Render the stage file stem. Anchor names may contain chars that are illegal in a stem
+ * (emoji, `.`, full-width symbols); those are sanitized instead of failing the job (#171).
+ * The submission title keeps the original chars — see `resolveSubmissionTitle`.
+ */
 export function formatUploadTitle(template: string | null | undefined, ctx: TitleContext): string {
   const rendered = applyTitleTemplate(template, resolveTitlePartsWithLiveTitle(ctx));
   if (!rendered) throw new Error("标题渲染结果为空");
   if (rendered.length > MAX_TITLE_LEN) {
     throw new Error(`标题超过 ${MAX_TITLE_LEN} 字: ${rendered} (${rendered.length})`);
   }
-  if (!isSafeStem(rendered)) throw new Error(`标题含非法文件名字符: ${rendered}`);
-  return rendered;
+  const stem = sanitizeStem(rendered);
+  if (!stem) throw new Error(`标题清洗后为空: ${rendered}`);
+  return stem;
 }
 
 /**
@@ -347,4 +371,25 @@ export function resolveOutputStem(opts: TitleContext & {
   const existing = opts.existingStem?.trim();
   if (existing) return existing;
   return formatUploadTitle(opts.template, opts);
+}
+
+/**
+ * Submission (稿件) title — single source for master pipeline, node pipeline, node-upload
+ * dispatch and rolling upload.
+ *
+ * 1. `submissionTemplate` set → loose render (B 站 allows spaces/punctuation/emoji).
+ * 2. Otherwise fall back to the file-name template, rendered loosely so original chars
+ *    survive (#171), but only while it still maps to `stem`; if the template changed after
+ *    the stem was locked, keep the locked stem so reruns stay stable.
+ */
+export function resolveSubmissionTitle(opts: {
+  submissionTemplate?: string | null;
+  template?: string | null;
+  stem: string;
+  ctx: TitleContext;
+}): string {
+  const sub = (opts.submissionTemplate ?? "").trim();
+  if (sub) return formatBiliTitle(sub, opts.ctx);
+  const loose = applyTitleTemplate(opts.template, resolveTitlePartsWithLiveTitle(opts.ctx)).trim();
+  return loose && loose.length <= MAX_TITLE_LEN && sanitizeStem(loose) === opts.stem ? loose : opts.stem;
 }

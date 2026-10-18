@@ -97,4 +97,13 @@ describe("queueUploadInput", () => {
     expect(i.meta.titleCtx).toMatchObject({ liveTitle: "夜聊", timeZone: "Asia/Shanghai" });
     expect(i.prep).toMatchObject({ mergeSegments: false, minSegmentSec: 2, tsDirect: false });
   });
+
+  it("anchor name with emoji/dots: stem is sanitized, submission title keeps original chars (#171)", () => {
+    const a = args(node().t, QUEUE);
+    a.cfg = { ...cfg, uploadMeta: { ...cfg.uploadMeta, submissionTitleTemplate: undefined } } as PipelineCfg;
+    a.earliest = { rec: { sessionBase: "主播🌟.喵_2026-10-17_20-00-00", startMs: Date.UTC(2026, 9, 17, 12) } } as never;
+    const i = queueUploadInput(a);
+    expect(i.prep.stem).toBe("主播-喵_2026-10-17");
+    expect(i.meta.title).toBe("主播🌟.喵_2026-10-17");
+  });
 });

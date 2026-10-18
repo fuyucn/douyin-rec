@@ -17,7 +17,7 @@
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync } from "node:fs";
 import path from "node:path";
 import {
-  linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, formatBiliTitle, formatPartTitle, isAppendAmbiguous,
+  linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, resolveSubmissionTitle, formatPartTitle, isAppendAmbiguous,
   isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, openUploadSlot, partTitleToFilename, resolveOutputStem, sanitizeStreamKey,
   processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type UploadSlot, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type NodeUploadStep, type UploadGateStore,
 } from "@drec/core";
@@ -579,12 +579,14 @@ export function deriveTitles(spec: NodePipelineSpec, log: (m: string) => void): 
     timeZone,
     liveTitle,
   });
-  const subTpl = (spec.uploadMeta.submissionTitleTemplate ?? "").trim();
   const ctx = { sessionBase: base, startMs, timeZone, liveTitle };
-  // 稿件标题解析顺序与 master 一致:submissionTitleTemplate → 含 {title} 的 titleTemplate → stem。
-  const title = subTpl
-    ? formatBiliTitle(subTpl, ctx)
-    : (spec.uploadMeta.titleTemplate ?? "").includes("{title}") ? formatBiliTitle(spec.uploadMeta.titleTemplate, ctx) : stem;
+  // Same resolution as master (single source in core).
+  const title = resolveSubmissionTitle({
+    submissionTemplate: spec.uploadMeta.submissionTitleTemplate,
+    template: spec.uploadMeta.titleTemplate,
+    stem,
+    ctx,
+  });
   const pt = spec.uploadMeta.partTitleTemplate;
   const partTitle = pt
     ? (i: number, n: number): string | null => formatPartTitle(pt, { ...ctx, partIndex: i, partTotal: n }, "plain")
