@@ -184,9 +184,18 @@ issue #78 起，循环里的「状态变更」和「审查前检查」不再靠�
 - **close 只归实现侧**：`issue-state.py <N> closed --close --reason-file F`，默认 `--role impl`；`--role review` 调 close 会被拒。review 心跳永远不调 close。
 
 **存量票过渡**：已挂 `accept` + `in-progress`（旧口径、PR 已开或在做）的票会同时带两个状态标签，脚本按歧义退出码 3。
+用 `--from` 指定其中仍在进行的那一个即可修复（例如 `--from in-progress`），脚本会清掉全部旧状态标签再加新标签。
+
+**`--from` 的约束**：它只用来消除歧义，必须真的是该票当前挂着的状态标签；单标签票不带 `--from`，无标签票才用 `--from -`。
+传错会退出码 1 且不改任何标签——否则就能伪造起始状态、绕过迁移表。
+
 迁移方法：对 PR 已开的票 `python3 scripts/issue-state.py <N> in-review --from in-progress --reason-file F`
 （一次删光 `accept`、`in-progress` 等旧状态标签再加 `in-review`），此后走新流程；PR 未开的票在开 PR 时同样用
 `--from in-progress` 迁到 `in-review`。先 `--ensure-labels` 补建新标签，再用 `--dry-run` 预检。
+
+**`accept` + `待验证` 存量票收口**：早期 PR 合并后票上同时留下 `accept` 与 `待验证`。收口时用 `--from 待验证`
+明确真实现状：`python3 scripts/issue-state.py <N> closed --close --from 待验证 --reason-file F`；
+不要直接 `gh issue close`——那会留下状态标签与机器标记分叉，下一次心跳又会把它当歧义票卡住。
 
 **心跳将引用这些工具（本 PR 不改 automations 文件，由人在合并后改提示词）**：
 

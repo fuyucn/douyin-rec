@@ -105,6 +105,29 @@ describe("迁移执行", () => {
     expect(fix.status).toBe(0);
     expect(fix.calls[0]).toMatch(/--remove-label accept --remove-label in-progress --add-label in-review|--remove-label in-progress --remove-label accept --add-label in-review/);
   });
+  it("--from 不是该票当前标签 → 1,不绕迁移表、不发写调用", () => {
+    const r = run(["78", "待验证", "--from", "in-review"], ["accept"]);
+    expect(r.status).toBe(1);
+    expect(r.err).toContain("不是该 issue 当前挂的状态标签");
+    expect(r.calls).toEqual([]);
+  });
+  it("单标签票传 --from → 1(不需要也不允许,避免掩盖标签漂移)", () => {
+    const r = run(["78", "in-progress", "--from", "accept"], ["accept"]);
+    expect(r.status).toBe(1);
+    expect(r.err).toContain("不需要 --from");
+    expect(r.calls).toEqual([]);
+  });
+  it("--from - 只在无状态标签时成立", () => {
+    expect(run(["78", "accept", "--from", "-"], ["enhancement"]).status).toBe(0);
+    const bad = run(["78", "in-progress", "--from", "-"], ["accept"]);
+    expect(bad.status).toBe(1);
+    expect(bad.calls).toEqual([]);
+    // Without the guard, "-" would look like an empty state and `→ accept` is
+    // legal from it — silently overwriting an existing in-review label.
+    const bypass = run(["78", "accept", "--from", "-"], ["in-review"]);
+    expect(bypass.status).toBe(1);
+    expect(bypass.calls).toEqual([]);
+  });
   it("无状态标签起步:只加不删", () => {
     const r = run(["5", "accept"], ["enhancement"]);
     expect(r.status).toBe(0);
