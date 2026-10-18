@@ -45,7 +45,7 @@ const TOGGLE_KEYS = [
 describe("account toggle wording (#85)", () => {
   const dict = loadDict();
   for (const lang of ["zh", "en"] as const) {
-    it(`${lang}: toggle copy says account, not cookie`, () => {
+    it(`${lang}: toggle copy uses account wording only`, () => {
       const bad = TOGGLE_KEYS.map((k) => [k, get(dict[lang], k)]).filter(([, v]) => /cookie/i.test(v));
       expect(bad).toEqual([]);
     });
