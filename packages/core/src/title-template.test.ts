@@ -142,6 +142,17 @@ describe("sanitizeStem", () => {
   it("全是非法字符 → 空串", () => {
     expect(sanitizeStem("🌟🌟")).toBe("");
   });
+  it("名字全是非法字符:不留前导下划线", () => {
+    expect(resolveOutputStem({ sessionBase: "🌟🌟_2026-09-12_14-30-05", timeZone: "Asia/Shanghai" })).toBe("2026-09-12");
+  });
+  it("已合法的名字不做 NFC 改写", () => {
+    expect(sanitizeStem("\uF900_2026-09-12")).toBe("\uF900_2026-09-12");
+  });
+  it("长 emoji 名字:按清洗后长度判断,不误报超长", () => {
+    const name = "啊".repeat(30) + "🌟".repeat(20);
+    const stem = resolveOutputStem({ sessionBase: `${name}_2026-09-12_14-30-05`, timeZone: "Asia/Shanghai" });
+    expect(stem).toBe(`${"啊".repeat(30)}_2026-09-12`);
+  });
 });
 
 describe("resolveSubmissionTitle", () => {

@@ -260,15 +260,14 @@ export function validateLooseTitleTemplate(template: string): string | null {
  * runs collapse, and edge dashes are trimmed. Returns "" when nothing legal is left.
  */
 export function sanitizeStem(rendered: string): string {
-  const s = rendered.normalize("NFC").trim();
-  if (isSafeStem(s)) return s;
-  return s
+  // Checked before NFC so already-legal names are never rewritten (NFC can change some ideographs).
+  if (SAFE_STEM.test(rendered)) return rendered;
+  return rendered
+    .normalize("NFC")
     .replace(/[^\p{L}\p{N}_\-【】（）()]/gu, "-")
     .replace(/-{2,}/g, "-")
     .replace(/-+_|_-+/g, "_")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, MAX_TITLE_LEN)
-    .replace(/-+$/, "");
+    .replace(/^[-_]+|-+$/g, "");
 }
 
 /**
@@ -279,11 +278,12 @@ export function sanitizeStem(rendered: string): string {
 export function formatUploadTitle(template: string | null | undefined, ctx: TitleContext): string {
   const rendered = applyTitleTemplate(template, resolveTitlePartsWithLiveTitle(ctx));
   if (!rendered) throw new Error("标题渲染结果为空");
-  if (rendered.length > MAX_TITLE_LEN) {
-    throw new Error(`标题超过 ${MAX_TITLE_LEN} 字: ${rendered} (${rendered.length})`);
-  }
   const stem = sanitizeStem(rendered);
   if (!stem) throw new Error(`标题清洗后为空: ${rendered}`);
+  // Length is checked on the sanitized stem: emoji count as 2 UTF-16 units but become one `-`.
+  if (stem.length > MAX_TITLE_LEN) {
+    throw new Error(`标题超过 ${MAX_TITLE_LEN} 字: ${stem} (${stem.length})`);
+  }
   return stem;
 }
 
