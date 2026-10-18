@@ -11,7 +11,7 @@
  * tests run synchronously.
  */
 import { type Task, type TaskStore } from "./store.js";
-import type { NotifyContext, OutputFormat } from "@drec/core";
+import { sanitizeNotifyContext, type NotifyContext, type OutputFormat } from "@drec/core";
 import { resolveTaskStreamCookies } from "./stream-cookies.js";
 import type { Spawner } from "./process/spawner.js";
 import type { RecorderProcess, ExitInfo } from "./process/recorder-process.js";
@@ -368,8 +368,8 @@ export class TaskManager {
       if (alert) {
         try {
           const a = JSON.parse(alert[1]) as { stage?: string; message?: string; ctx?: unknown };
-          // ctx comes from a child that may be older or newer: only a plain object is forwarded.
-          const ctx = a.ctx && typeof a.ctx === "object" && !Array.isArray(a.ctx) ? (a.ctx as NotifyContext) : undefined;
+          // ctx comes from a child that may be older or newer: only known string fields are forwarded.
+          const ctx = sanitizeNotifyContext(a.ctx);
           this.onAlert?.(taskId, a.stage ?? "error", a.message ?? "", ctx);
         } catch { /* 解析失败忽略 */ }
         return;

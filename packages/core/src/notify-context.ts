@@ -118,9 +118,28 @@ export function decorateRecordEvent<E extends { kind: string; ctx?: NotifyContex
     ...(f.platform ? { platform: f.platform } : {}),
     ...(f.roomSlug ? { roomSlug: f.roomSlug } : {}),
   };
-  const ctx = { ...derived, ...e.ctx };
+  // Only defined event fields win (an explicit `undefined` must not erase a derived value).
+  const own = Object.fromEntries(Object.entries(e.ctx ?? {}).filter(([, v]) => v !== undefined)) as NotifyContext;
+  const ctx = { ...derived, ...own };
   const isRecord = e.kind === "recordStart" || e.kind === "recordReconnect" || e.kind === "recordEnd";
   // Without any real name keep the event's own anchor text (the message already falls back to the room).
   const anchor = isRecord && resolved.source !== "fallback" ? { anchor: resolved.name } : {};
   return { ...e, ...anchor, ctx };
+}
+
+const CTX_KEYS = ["name", "nameSource", "platform", "roomSlug", "date", "time", "streamKey", "node", "step", "result", "next"] as const;
+
+/**
+ * Validate a context received over a process boundary (the recorder alert line): keep only known keys
+ * with non-empty string values. Anything else (a newer or broken child) is dropped, never trusted.
+ */
+export function sanitizeNotifyContext(raw: unknown): NotifyContext | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const src = raw as Record<string, unknown>;
+  const out: Record<string, string> = {};
+  for (const k of CTX_KEYS) {
+    const v = src[k];
+    if (typeof v === "string" && v.length > 0) out[k] = v;
+  }
+  return Object.keys(out).length ? (out as NotifyContext) : undefined;
 }

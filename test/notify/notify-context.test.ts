@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   contextForStream,
   decorateRecordEvent,
+  sanitizeNotifyContext,
   parseStreamKey,
   resolveDisplayName,
   type NotifyContext,
@@ -111,5 +112,20 @@ describe("decorateRecordEvent (#53 N4)", () => {
       { platform: "douyin", roomSlug: "abc" },
     );
     expect(e).toMatchObject({ anchor: "", ctx: { name: "douyin abc", nameSource: "fallback", step: "record" } });
+  });
+});
+
+describe("#53 N4 review fixes", () => {
+  it("decorateRecordEvent: an explicit undefined on the event ctx does not erase the derived value", () => {
+    const e = decorateRecordEvent({ kind: "error", stage: "s", message: "m", ctx: { name: undefined, step: "x" } } as NotifyEvent,
+      { taskName: "T", platform: "douyin", roomSlug: "abc" });
+    expect(e.ctx).toMatchObject({ name: "T", nameSource: "task", step: "x" });
+  });
+  it("sanitizeNotifyContext keeps only known non-empty string fields", () => {
+    expect(sanitizeNotifyContext({ name: "T", platform: "douyin", extra: "x", roomSlug: 123, date: "" })).toEqual({ name: "T", platform: "douyin" });
+    expect(sanitizeNotifyContext({ name: 1 })).toBeUndefined();
+    expect(sanitizeNotifyContext("bogus")).toBeUndefined();
+    expect(sanitizeNotifyContext(["x"])).toBeUndefined();
+    expect(sanitizeNotifyContext(null)).toBeUndefined();
   });
 });

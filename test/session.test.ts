@@ -521,6 +521,8 @@ describe("RecordingSession", () => {
     rec.ev.onOffline();                     // 抖动断流
     await vi.runAllTimersAsync();           // 判别 true → 不发 recordEnd;重连 onLive → recordReconnect
     expect(events.some((e) => e.kind === "recordReconnect")).toBe(true);
+    // #53 N4: the reconnect warning carries the same context as start / end.
+    expect(events.find((e) => e.kind === "recordReconnect")?.ctx).toMatchObject({ platform: "douyin", roomSlug: "123" });
     expect(events.filter((e) => e.kind === "recordStart").length).toBe(1); // 重连不重复发开播
     expect(events.some((e) => e.kind === "recordEnd")).toBe(false);        // 抖动不是结束
     await sess.stop();
@@ -538,6 +540,8 @@ describe("RecordingSession", () => {
     dm.onAlert?.("连上但 3 分钟 0 条");
     await sess.stop();
     expect(events.some((e) => e.kind === "error" && e.stage === "弹幕")).toBe(true);
+    // #53 N4: session error alerts carry context too (name by the shared chain).
+    expect(events.find((e) => e.kind === "error" && e.stage === "弹幕")?.ctx).toMatchObject({ name: "主播X", roomSlug: "123" });
   });
 
   it("弹幕 start 抛错 → session catch 后 notify {kind:error,stage:弹幕}(不影响录制)", async () => {

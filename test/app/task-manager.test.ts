@@ -280,14 +280,14 @@ describe("TaskManager", () => {
     expect(down[0].reason).toContain("放弃");
   });
 
-  it("告警带 ctx(#53 N4):对象转发;非对象丢弃;旧子进程无 ctx → undefined", () => {
+  it("告警带 ctx(#53 N4):只转发已知字符串字段;非对象丢弃;旧子进程无 ctx → undefined", () => {
     const id = addTask();
     const spawner = new MockSpawner();
     const got: unknown[] = [];
     const mgr = new TaskManager(store, spawner, { log: () => {}, onAlert: (_t, _s, _m, ctx) => got.push(ctx) });
     mgr.start(id);
     const p = spawner.last(id);
-    p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: { name: "T", platform: "douyin" } })}`);
+    p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: { name: "T", platform: "douyin", bad: 1, roomSlug: 5 } })}`);
     p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: "bogus" })}`);
     p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m", ctx: ["x"] })}`);
     p.emitLog(`@@DREC_ALERT@@${JSON.stringify({ stage: "弹幕", message: "m" })}`);
