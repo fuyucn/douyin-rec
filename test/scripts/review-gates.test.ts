@@ -77,13 +77,51 @@ describe("pr-risk-scan.sh", () => {
     expect(d.length).toBeGreaterThan(64 * 1024);
     expect(risk(d).status).toBe(1);
   });
-  it("上下文只取改动前后 20 行;hunk 头函数名参与匹配", () => {
-    const ctx = (n: number) => Array.from({ length: n }, (_, i) => ` const c${i} = ${i};`).join("\n");
-    const mk = (gap: number, hdr = "") =>
-      `diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1,9 +1,9 @@${hdr}\n rmSync(p);\n${ctx(gap)}\n-const n = 1;\n+const n = 2;\n`;
+  it("上下文只取改动前后 20 行;hunk 开头(函数签名)与头部函数名参与匹配", () => {
+    const ctx = (n: number) => Array.from({ length: n }, (_, i) => ` const c${i} = ${i};`);
+    // A hunk with correct line counts: 3 neutral head lines, rmSync, `gap` context lines, then a change.
+    const mk = (gap: number, hdr = "", head = [" function f() {", " const a = 1;", " const b = 2;"]) => {
+      const body = [...head, " rmSync(p);", ...ctx(gap), "-const n = 1;", "+const n = 2;"];
+      const n = body.length - 1;
+      return `diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1,${n} +1,${n} @@${hdr}\n${body.join("\n")}\n`;
+    };
     expect(risk(mk(5)).status).toBe(1);   // within the window
     expect(risk(mk(30)).status).toBe(0);  // beyond the window
-    expect(risk(mk(30, " function cleanupStage() {")).status).toBe(1); // function header
+    expect(risk(mk(30, " function cleanupStage() {")).status).toBe(1); // header function name
+    expect(risk(mk(30, "", [" function cleanupStage() {", " const a = 1;", " const b = 2;"])).status).toBe(1); // signature
+  });
+  it("git 模式:改动远离签名时,所在函数签名仍参与匹配", () => {
+    const d = mkdtempSync(join(tmpdir(), "risk-"));
+    const g = (...a: string[]) => spawnSync("git", a, { cwd: d, encoding: "utf-8" });
+    g("init", "-q", "-b", "base");
+    g("config", "user.email", "t@t.t");
+    g("config", "user.name", "t");
+    mkdirSync(join(d, "packages", "app", "src"), { recursive: true });
+    const lines = (v: number) => [
+      "export function a() {", "  return 1;", "}", "",
+      "export function cleanupStage(p: string) {",
+      ...Array.from({ length: 48 }, (_, i) => `  const c${i} = ${i === 40 ? v : i};`),
+      "}", "",
+    ].join("\n");
+    const f = join(d, "packages", "app", "src", "x.ts");
+    writeFileSync(f, lines(40));
+    g("add", ".");
+    g("commit", "-qm", "base");
+    g("checkout", "-q", "-b", "feature");
+    writeFileSync(f, lines(99));
+    g("commit", "-qam", "c");
+    const r = spawnSync("bash", [RISK, "base"], { cwd: d, encoding: "utf-8" });
+    expect(r.stdout.split("\n")[0]).toBe("RISK");
+  });
+  it("无 diff --git 头的普通 diff -u:按 hunk 行数结束,下一个文件的路径照判", () => {
+    const d = "--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1 +1 @@\n-const n = 1;\n+const n = 2;\n--- a/scripts/cleanup.sh\n+++ b/scripts/cleanup.sh\n@@ -1 +1 @@\n-echo a\n+echo b\n";
+    const r = risk(d);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("路径: scripts/cleanup.sh");
+  });
+  it("路径里含 \" b/\" 时按中点切分", () => {
+    const r = risk("diff --git a/x b/upload.ts b/x b/upload.ts\nold mode 100644\nnew mode 100755\n");
+    expect(r.out).toContain("路径: x b/upload.ts\n");
   });
   it("只改权限 / 二进制 / 带引号路径:从 diff 头取路径", () => {
     expect(risk("diff --git a/scripts/cleanup.sh b/scripts/cleanup.sh\nold mode 100644\nnew mode 100755\n").status).toBe(1);
@@ -182,6 +220,15 @@ describe("issue-guard.py --diff", () => {
     r2.g("add", ".");
     r2.g("commit", "-qm", "c");
     expect(guard(r2.d).stderr).toContain("name/value");
+  });
+  it("多行(格式化后的) name/value 凭证也拦,行号指向 name 行", () => {
+    const { d, g } = repo();
+    writeFileSync(join(d, "k.json"), '[\n  {\n    "name": "SESSDATA",\n    "value": "a1b2c3d4%2C17900%2Cabcdef"\n  }\n]\n'); // issue-guard: allow
+    g("add", ".");
+    g("commit", "-qm", "c");
+    const r = guard(d);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("k.json:3: [登录凭证键值]");
   });
   it("hunk 内以 ++ 开头的新增行仍按内容扫,不改写文件路径", () => {
     const { d, g } = repo();

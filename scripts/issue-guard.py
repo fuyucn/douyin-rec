@@ -58,12 +58,26 @@ RULES: list[tuple[str, str, str]] = [
     ("登录凭证键值", r"(?i)\b(?:sessionid(?:_ss)?|sid_guard|sid_tt|uid_tt|odin_tt|ttwid|passport_csrf_token|"
      r"sessdata|bili_jct|dedeuserid(?:__ckmd5)?|buvid3|kuaishou\.server\.web_(?:st|ph))"
      r"[\"']?\s*[=:]\s*[\"']?[A-Za-z0-9%_\-|]{16,}", "登录 cookie 键值对"),
-    # biliup cookies.json layout: {"name": "SESSDATA", "value": "..."}.
-    ("登录凭证键值", r"(?i)\"name\"\s*:\s*\"(?:sessdata|bili_jct|dedeuserid(?:__ckmd5)?|sid|buvid3|sessionid)\""
-     r"\s*,\s*\"value\"\s*:\s*\"[^\"]{16,}", "登录 cookie 键值对(name/value 形态)"),
     # 「master / worker」是允许的角色说法，只拦真实主机名样式（vps1、node-a、*.local 等）。
     ("主机名", r"(?i)\bvps\s*\d+\b|\b[\w\-]+\.(?:local|internal|lan)\b", "真实节点主机名（用「master / 某个 worker」指代）"),
 ]
+
+# Rules matched across lines (the cookie file is usually pretty-printed, one field per line).
+MULTILINE_RULES: list[tuple[str, str, str]] = [
+    # biliup cookies.json layout: {"name": "SESSDATA", "value": "..."}.
+    ("登录凭证键值", r"(?i)\"name\"\s*:\s*\"(?:sessdata|bili_jct|dedeuserid(?:__ckmd5)?|sid|buvid3|sessionid)\""
+     r"\s*,\s*\"value\"\s*:\s*\"[^\"\n]{16,}", "登录 cookie 键值对(name/value 形态)"),
+]
+
+
+def scan_block(text: str, source: str, first_line: int) -> list[str]:
+    """Apply MULTILINE_RULES to a block of consecutive lines starting at first_line."""
+    hits: list[str] = []
+    for name, pattern, why in MULTILINE_RULES:
+        for match in re.finditer(pattern, text):
+            lineno = first_line + text.count("\n", 0, match.start())
+            hits.append(f"{source}:{lineno}: [{name}] {why} -> {' '.join(match.group(0).split())!r}")
+    return hits
 
 
 def scan(text: str, source: str) -> list[str]:
@@ -74,7 +88,7 @@ def scan(text: str, source: str) -> list[str]:
                 hits.append(
                     f"{source}:{lineno}: [{name}] {why} -> {match.group(0)!r}"
                 )
-    return hits
+    return hits + scan_block(text, source, 1)
 
 
 def added_lines(base: str) -> list[tuple[str, int, str]]:
@@ -101,7 +115,7 @@ def added_lines(base: str) -> list[tuple[str, int, str]]:
                 out.append((path, lineno, raw[1:]))
                 lineno += 1
         elif raw.startswith("+++ "):
-            path = raw[4:].removeprefix("b/") if raw != "+++ /dev/null" else ""
+            path = raw[4:].strip('"').removeprefix("b/") if raw != "+++ /dev/null" else ""
     return out
 
 
@@ -123,10 +137,25 @@ def scan_diff(base: str) -> tuple[list[str], list[str]]:
     hits: list[str] = []
     allowed: list[str] = []
     known = tracked_basenames()
+    block: list[str] = []
+    block_path, block_start, block_next = "", 0, 0
+
+    def flush_block() -> None:
+        if block:
+            hits.extend(scan_block("\n".join(block), block_path, block_start))
+            block.clear()
+
     for path, lineno, line in added_lines(base):
         if ALLOW_MARK in line and is_fixture(path):
             allowed.append(f"{path}:{lineno}")
+            flush_block()
             continue
+        # Consecutive added lines of one file form a block for the multi-line rules.
+        if path != block_path or lineno != block_next:
+            flush_block()
+            block_path, block_start = path, lineno
+        block.append(line)
+        block_next = lineno + 1
         skip = skipped_rules(path)
         for name, pattern, why in RULES:
             if name in skip:
@@ -135,6 +164,7 @@ def scan_diff(base: str) -> tuple[list[str], list[str]]:
                 if name == FILENAME_RULE and Path(match.group(0)).name in known:
                     continue
                 hits.append(f"{path}:{lineno}: [{name}] {why} -> {match.group(0)!r}")
+    flush_block()
     return hits, allowed
 
 
