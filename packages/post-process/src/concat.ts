@@ -71,6 +71,14 @@ export function groupSessionsInDir(dir: string, files: string[] = readdirSync(di
   return groupSessions(files, { nodeFormats: readNodeFormats(dir, files) });
 }
 
+/** 切分产物判定不用正则(session-name-guard 禁止在 core 之外写分段序号正则):stem 末尾 `_part` + 纯数字。 */
+export function isSplitPartName(f: string): boolean {
+  const stem = f.slice(0, f.lastIndexOf("."));
+  const i = stem.lastIndexOf("_part");
+  const tail = stem.slice(i + 5);
+  return i >= 0 && tail.length > 0 && [...tail].every((c) => c >= "0" && c <= "9");
+}
+
 /**
  * 文件名列表 → { base: SessionGroup }，ts/segmentXmls 已按段号排序。
  *
@@ -91,20 +99,13 @@ export function groupSessions(files: string[], opts: GroupSessionsOpts = {}): Re
   //   - 带 part 序号的切分产物 `{stem}_part{N}.mp4`(split.ts 小写命名)不是分段,声明了也不收;
   //   - `_danmu`/`_livechat` 烧录产物、无时间戳基名的产物天然不带时间戳,同样被挡在外面。
   const NATIVE = /\.(ts|flv)$/i;
-  // 切分产物判定不用正则(session-name-guard 禁止在 core 之外写分段序号正则):stem 末尾 `_part` + 纯数字。
-  const isSplitPart = (f: string): boolean => {
-    const stem = f.slice(0, f.lastIndexOf("."));
-    const i = stem.lastIndexOf("_part");
-    const tail = stem.slice(i + 5);
-    return i >= 0 && tail.length > 0 && [...tail].every((c) => c >= "0" && c <= "9");
-  };
   for (const f of files) {
     // 原子落盘临时名(`.x.part.ts` 等,崩溃残留)不是分段:原生容器也不例外。
     if (isAtomicTempName(f)) continue;
     if (NATIVE.test(f)) {
       ensure(sessionBase(f)).ts.push(f);
     } else if (isVideoFileName(f)) {
-      if (isSplitPart(f) || !stampedSessionBaseOf(basename(f))) continue;
+      if (isSplitPartName(f) || !stampedSessionBaseOf(basename(f))) continue;
       const declared = opts.nodeFormats?.get(sessionBase(f));
       if (!declared || !f.toLowerCase().endsWith(STAGE_CONTAINERS[declared].ext)) continue;
       ensure(sessionBase(f)).ts.push(f);

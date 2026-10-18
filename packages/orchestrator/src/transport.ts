@@ -1,6 +1,8 @@
 import { isWorkerTargeted } from "@drec/core";
 import type { ApplyTasksResult, EnqueueRequest, EnqueueResponse, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, ProcessReceipt, ProcessJob, RemoteTaskSpec, WorkerConfig } from "@drec/core";
 
+import type { UnclaimedSegment } from "./unclaimed.js";
+
 // 契约在 core(app 的 worker-store 用同一形状);这里 re-export 保持既有调用点不变。
 export type { ApplyTasksResult, WorkerConfig } from "@drec/core";
 
@@ -52,7 +54,14 @@ export interface NodeRollingProgress {
   ambiguous?: number[];
   uploading?: { index: number; kind: "create" | "append" };
 }
-export interface NodeInventory { workerId: string; recordings: NodeRecording[]; }
+export interface NodeInventory {
+  workerId: string;
+  recordings: NodeRecording[];
+  /** Absent = unknown (old worker). */
+  unclaimedSegments?: UnclaimedSegment[];
+  /** Entries dropped by the worker cap; > 0 means the list is incomplete. */
+  unclaimedTruncated?: number;
+}
 
 /** `_tasks` 远端输出:该节点全部任务的隐私安全投影(无 cookies)。 */
 export interface NodeTasks { workerId: string; tasks: NodeTaskDTO[]; }

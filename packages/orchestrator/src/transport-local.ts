@@ -5,7 +5,8 @@ import { linkOrCopy } from "@drec/core";
 import { freeGBOf, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type NodeTaskDTO, type RemoteTaskSpec, type NodeStatus } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecordingStatus, NodeTasks, Transport } from "./transport.js";
 import { ProcUnsupported } from "./transport.js";
-import { scanRecordings, scanRollingSessions } from "./scan.js";
+import { scanInventory, scanRollingSessions } from "./scan.js";
+import { segmentSecByAnchorOf } from "./unclaimed.js";
 
 export interface LocalOpts {
   id: string;
@@ -54,8 +55,10 @@ export class LocalTransport implements Transport {
 
   async listInventory(): Promise<NodeInventory> {
     const taskRooms = this.resolveTaskRooms();
-    const recordings = await scanRecordings(this.o.recordingsDir, taskRooms, this.o.ffprobe);
-    return { workerId: this.id, recordings };
+    // Without listTasks (standalone construction sites) segmentSec stays null and the master falls back to its default.
+    const segmentSecByAnchor = segmentSecByAnchorOf(this.o.listTasks?.() ?? []);
+    const inv = await scanInventory(this.o.recordingsDir, taskRooms, this.o.ffprobe, { segmentSecByAnchor });
+    return { workerId: this.id, ...inv };
   }
 
   async listTasks(): Promise<NodeTasks> {
