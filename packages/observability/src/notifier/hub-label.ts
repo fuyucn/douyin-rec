@@ -18,10 +18,14 @@ function streamCtx(streamKey: string, lookup: HubLabelLookup, own: NotifyContext
   const names = k
     ? lookup.nameSourcesOf?.(k.platform, k.roomSlug) ?? { cachedAnchor: lookup.anchorOf(k.platform, k.roomSlug) }
     : {};
-  const derived = contextForStream(streamKey, names);
-  // A caller-supplied name carries its own provenance; do not pair it with the derived source.
-  if (own?.name !== undefined) delete derived.nameSource;
-  return { ...derived, ...own };
+  const derived: NotifyContext = contextForStream(streamKey, names);
+  // Only defined caller fields win (an explicit `undefined` must not erase a derived value).
+  const explicit = Object.fromEntries(Object.entries(own ?? {}).filter(([, v]) => v !== undefined)) as NotifyContext;
+  // Name and its source travel together: a caller name drops the derived source, a caller source
+  // without a name is meaningless next to the derived name and is dropped.
+  if (explicit.name !== undefined) delete derived.nameSource;
+  else delete explicit.nameSource;
+  return { ...derived, ...explicit };
 }
 
 export { parseStreamKey, type ParsedStreamKey } from "@drec/core";

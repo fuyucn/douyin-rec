@@ -66,3 +66,22 @@ describe("taskDisplayName (#53 N2)", () => {
     expect(taskDisplayName({ room: "r1", platform: "douyin", name: null, anchorName: null })).toBe("douyin r1");
   });
 });
+
+describe("#53 N2 review gaps", () => {
+  const l = makeHubLabelLookup({ tasks: () => [{ id: 1, room: "100001", name: "任务名", anchorName: null }], workers: () => [], liveAnchor: () => null });
+  it("stageReady / uploadDone carry ctx through the lookup", () => {
+    const stage = enrichHubEventSafely({ kind: "stageReady", streamKey: "douyin:100001:2026-10-16_2130" }, () => l);
+    expect(stage.ctx).toMatchObject({ name: "任务名", nameSource: "task", date: "2026-10-16", time: "21:30" });
+    const up = enrichHubEventSafely({ kind: "uploadDone", bv: "BV1x", url: "u", streamKey: "douyin:100001:2026-10-16" }, () => l);
+    expect(up.ctx).toMatchObject({ name: "任务名", nameSource: "task", roomSlug: "100001" });
+  });
+  it("a lookup without nameSourcesOf falls back to anchorOf as a cached name", () => {
+    const old = { anchorOf: () => "旧查表名", workerName: () => undefined };
+    expect(enrichHubEventSafely({ kind: "stageReady", streamKey: "douyin:1:2026-10-16" }, () => old).ctx)
+      .toMatchObject({ name: "旧查表名", nameSource: "cached" });
+  });
+  it("taskDisplayName falls back to the room id, not the full stored URL", () => {
+    expect(taskDisplayName({ room: "https://live.douyin.com/100001", platform: "douyin", name: null, anchorName: null }))
+      .toBe("douyin 100001");
+  });
+});

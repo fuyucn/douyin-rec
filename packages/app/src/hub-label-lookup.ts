@@ -19,9 +19,24 @@ export function taskNameSources(t: NameTask, liveAnchor?: string | null): Omit<D
   return { taskName: t.name, liveAnchor, cachedAnchor: t.anchorName };
 }
 
-/** Display name of a task by the shared chain; falls back to `platform room`, never an internal id. */
+/** Room id of a task for display; the stored room may be a full URL. Unparseable → as stored. */
+function roomIdOf(room: string): string {
+  try {
+    return platformForRoom(room).extractRoomSlug(room) || room;
+  } catch {
+    return room;
+  }
+}
+
+/** Display name of a task by the shared chain; falls back to `platform room-id`, never an internal id. */
 export function taskDisplayName(t: NameTask, liveAnchor?: string | null): string {
-  return resolveDisplayName({ ...taskNameSources(t, liveAnchor), platform: t.platform, roomSlug: t.room }).name;
+  return resolveDisplayName({ ...taskNameSources(t, liveAnchor), platform: t.platform, roomSlug: roomIdOf(t.room) }).name;
+}
+
+/** A real name for the task by the shared chain, or null when none is known (callers keep their own fallback). */
+export function knownTaskName(t: NameTask, liveAnchor?: string | null): string | null {
+  const r = resolveDisplayName(taskNameSources(t, liveAnchor));
+  return r.source === "fallback" ? null : r.name;
 }
 
 /** Snapshot tasks/workers once per event; names follow the shared chain (task name first). */
@@ -39,9 +54,7 @@ export function makeHubLabelLookup(src: HubLabelSources): HubLabelLookup {
   return {
     anchorOf: (platform, roomSlug) => {
       const t = tasks.find((task) => matches(task.room, platform, roomSlug));
-      if (!t) return undefined;
-      const r = resolveDisplayName(taskNameSources(t, src.liveAnchor(t.id)));
-      return r.source === "fallback" ? undefined : r.name; // no known name: callers keep their own fallback
+      return t ? knownTaskName(t, src.liveAnchor(t.id)) ?? undefined : undefined;
     },
     nameSourcesOf: (platform, roomSlug) => {
       const t = tasks.find((task) => matches(task.room, platform, roomSlug));
