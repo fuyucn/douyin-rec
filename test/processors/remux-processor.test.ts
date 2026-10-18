@@ -1,7 +1,7 @@
 // plans/036 T6:remuxProcessor(契约实现)——run / recover / validate / 契约边界 / 静态守护。
 // 全部用临时目录 + 假 remux / 假 ffprobe 注入(不依赖本机 ffmpeg)。
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -9,7 +9,7 @@ import {
   assertJobInvariants, jobIdOf, type ProcessContext, type ProcessJob,
 } from "@drec/core";
 import {
-  makeRemuxProcessor, markSessionNodeFormat, NODE_REMUX_SUSPECT_SUFFIX, remuxTargetPath, remuxTmpPath, remuxProcessor,
+  convertSegmentInPlace, makeRemuxProcessor, markSessionNodeFormat, NODE_REMUX_SUSPECT_SUFFIX, remuxTargetPath, remuxTmpPath, remuxProcessor,
   type MediaProbe, type NodeRemuxDeps,
 } from "@drec/processors";
 
@@ -251,6 +251,84 @@ describe("recover — 只碰 job 列出的路径,绝不删最后一份", () => {
   });
 });
 
+describe("issue #223 — strict marker and post-rename re-check", () => {
+  const IDENTITY = { sessionBase: B, roomSlug: "room1", platform: "douyin", startMs: 1_000 };
+  const sc = (): string => join(dir, `${B}.session.json`);
+  const readSc = (): Record<string, unknown> => JSON.parse(readFileSync(sc(), "utf-8")) as Record<string, unknown>;
+  const alerts: string[] = [];
+  beforeEach(() => { alerts.length = 0; });
+  const deps = (over: Partial<NodeRemuxDeps> = {}): NodeRemuxDeps => baseDeps({ fsync: () => {}, alert: (m) => alerts.push(m), ...over });
+
+  it("markSessionNodeFormat: truncated JSON throws and leaves the bytes untouched", () => {
+    writeFileSync(sc(), "{\"sessionBase\":");
+    expect(() => markSessionNodeFormat(dir, B, "mp4")).toThrow(/unparsable/);
+    expect(readFileSync(sc(), "utf-8")).toBe("{\"sessionBase\":");
+  });
+  it("markSessionNodeFormat: array / null / scalar JSON throws and leaves the bytes untouched", () => {
+    for (const body of ["[]", "null", "42"]) {
+      writeFileSync(sc(), body);
+      expect(() => markSessionNodeFormat(dir, B, "mp4"), body).toThrow(/not an object/);
+      expect(readFileSync(sc(), "utf-8")).toBe(body);
+    }
+  });
+  it("markSessionNodeFormat: non-ENOENT read error is rethrown (sidecar path is a directory)", () => {
+    mkdirSync(sc());
+    expect(() => markSessionNodeFormat(dir, B, "mp4")).toThrow(/EISDIR/);
+  });
+  it("markSessionNodeFormat: missing file → minimal {sessionBase,nodeFormat}", () => {
+    markSessionNodeFormat(dir, B, "mkv");
+    expect(readSc()).toEqual({ sessionBase: B, nodeFormat: "mkv" });
+  });
+  it("markSessionNodeFormat: full file → nodeFormat added, identity preserved, written atomically", () => {
+    writeFileSync(sc(), JSON.stringify(IDENTITY));
+    linkSync(sc(), `${sc()}.lnk`);
+    markSessionNodeFormat(dir, B, "mp4");
+    expect(readSc()).toEqual({ ...IDENTITY, nodeFormat: "mp4" });
+    expect(readFileSync(`${sc()}.lnk`, "utf-8")).toBe(JSON.stringify(IDENTITY));
+    expect(ls().filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("unparsable sidecar up front → mark-failed, original kept, sidecar unchanged, remux never runs", async () => {
+    const src = put(`${B}_000.ts`);
+    writeFileSync(sc(), "{\"sessionBase\":");
+    let remuxed = false;
+    const out = await convertSegmentInPlace(src, "mp4", deps({ remux: async () => { remuxed = true; } }));
+    expect(out).toMatchObject({ ok: false, reason: "mark-failed" });
+    expect(remuxed).toBe(false);
+    expect(existsSync(src)).toBe(true);
+    expect(readFileSync(sc(), "utf-8")).toBe("{\"sessionBase\":");
+  });
+
+  it("scenario B effect: sidecar rewritten without nodeFormat during remux → re-marked before the source is deleted", async () => {
+    const src = put(`${B}_000.ts`);
+    writeFileSync(sc(), JSON.stringify(IDENTITY));
+    const staleManagerWrite: NonNullable<NodeRemuxDeps["remux"]> = async (s, t) => {
+      writeFileSync(sc(), JSON.stringify({ ...IDENTITY, title: "t" }));
+      await copyRemux(s, t);
+    };
+    const out = await convertSegmentInPlace(src, "mp4", deps({ remux: staleManagerWrite }));
+    expect(out.ok).toBe(true);
+    expect(readSc()).toEqual({ ...IDENTITY, title: "t", nodeFormat: "mp4" });
+    expect(ls()).toEqual([`${B}.session.json`, `${B}_000.mp4`]);
+    expect(alerts).toEqual([]);
+  });
+
+  it("re-mark failure: sidecar made unparsable during remux → mark-failed, both files kept, bytes unchanged, one alert", async () => {
+    const src = put(`${B}_000.ts`);
+    writeFileSync(sc(), JSON.stringify(IDENTITY));
+    const corrupt: NonNullable<NodeRemuxDeps["remux"]> = async (s, t) => {
+      writeFileSync(sc(), "{\"sessionBase\":");
+      await copyRemux(s, t);
+    };
+    const out = await convertSegmentInPlace(src, "mp4", deps({ remux: corrupt }));
+    expect(out).toMatchObject({ ok: false, reason: "mark-failed" });
+    expect(existsSync(src)).toBe(true);
+    expect(existsSync(join(dir, `${B}_000.mp4`))).toBe(true);
+    expect(readFileSync(sc(), "utf-8")).toBe("{\"sessionBase\":");
+    expect(alerts).toHaveLength(1);
+  });
+});
+
 describe("静态守护(plans/036 Global Constraints)", () => {
   const ROOT = join(import.meta.dirname, "..", "..");
   const grep = (pat: string, path: string): string => {
@@ -264,6 +342,11 @@ describe("静态守护(plans/036 Global Constraints)", () => {
   it("处理器与 proc-queue 内无 readdirSync / groupSessions / 目录推导", () => {
     for (const pkg of ["processors", "proc-queue"]) {
       expect(grep("readdirSync|readdir\\(|groupSessions|deriveStage|deriveSegment", join(ROOT, "packages", pkg, "src")), pkg).toBe("");
+    }
+  });
+  it("issue #223: no in-place writeFileSync of a session sidecar in manager / processors", () => {
+    for (const pkg of ["manager", "processors"]) {
+      expect(grep("writeFileSync\\([^)]*(session\\.json|sessionJsonOf)", join(ROOT, "packages", pkg, "src")), pkg).toBe("");
     }
   });
   it("临时名命名不变(回滚兼容):{final}.{owner}-{pid}.drec-remux", () => {
