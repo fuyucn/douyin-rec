@@ -12,7 +12,7 @@ import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
 import { useT } from "../lib/i18n";
 import { buildFlow, pickMetric, type FlowCfg } from "./flow-build";
-import { deriveStepStatuses, type NodeStatus } from "../lib/hub-job-steps";
+import { deriveStepStatuses, stepDetail, type NodeStatus } from "../lib/hub-job-steps";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -274,8 +274,7 @@ function PipelineFlowInner({
     },
   }));
   const graph = buildFlow(job, TERMINAL.has(job.state) ? undefined : cfg);
-  const detailOf = (key: string): string | undefined =>
-    job.steps.filter((s) => s.step === key && (s.phase === "done" || s.phase === "skipped")).map((s) => s.detail).filter(Boolean).pop();
+  const detailOf = (key: string): string | undefined => stepDetail(job.steps, key);
   const nodeErrorOf = (key: string): string | undefined =>
     job.nodeStates.find((n) => n.node === key && n.state !== "done")?.error ?? undefined;
   // clean_*/clean_verify 的重跑 = 「补跑收尾」(删源/核验,幂等,不会重传)→ 与核心节点同口径可重试。

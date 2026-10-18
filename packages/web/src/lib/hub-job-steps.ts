@@ -33,6 +33,29 @@ const NODE_STATE_TO_UI: Record<string, NodeStatus> = {
 // them apart.
 const LEGACY_SKIP_DETAIL = /^(跳过·|未确认·)/;
 
+function isSkipEvent(s: StepEventLike): boolean {
+  return s.phase === "skipped" || (s.phase === "done" && !!s.detail && LEGACY_SKIP_DETAIL.test(s.detail));
+}
+
+/**
+ * Latest detail of a step from its done/skipped events. A skip reason is dropped once a later real
+ * `start` exists: the step is running again and the old "skipped because ..." text would contradict it.
+ */
+export function stepDetail(steps: readonly StepEventLike[], key: string): string | undefined {
+  let detail: string | undefined;
+  let fromSkip = false;
+  for (const s of steps) {
+    if (s.step !== key) continue;
+    if (s.phase === "start") {
+      if (fromSkip) { detail = undefined; fromSkip = false; }
+    } else if ((s.phase === "done" || s.phase === "skipped") && s.detail) {
+      detail = s.detail;
+      fromSkip = isSkipEvent(s);
+    }
+  }
+  return detail;
+}
+
 export function deriveStepStatuses(
   job: {
     state: string;
@@ -45,7 +68,7 @@ export function deriveStepStatuses(
   const pair = new Map<string, { start?: number; done?: number; skipped?: number }>();
   for (const s of job.steps) {
     const e = pair.get(s.step) ?? {};
-    if (s.phase === "skipped" || (s.phase === "done" && s.detail && LEGACY_SKIP_DETAIL.test(s.detail))) e.skipped = s.at;
+    if (isSkipEvent(s)) e.skipped = s.at;
     else if (s.phase === "start") e.start = s.at;
     else if (s.phase === "done") e.done = s.at;
     pair.set(s.step, e);

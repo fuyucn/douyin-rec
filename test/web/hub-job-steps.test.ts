@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { deriveStepStatuses } from "../../packages/web/src/lib/hub-job-steps.js";
+import { SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX } from "@drec/core";
+import { deriveStepStatuses, stepDetail } from "../../packages/web/src/lib/hub-job-steps.js";
 
 const KEYS = ["select", "pull", "merge"] as const;
 
@@ -55,5 +56,29 @@ describe("deriveStepStatuses", () => {
   it("a pending step without any event stays todo while the job is active", () => {
     const st = deriveStepStatuses({ state: "pending", steps: [], nodeStates: [] }, KEYS, 20);
     expect(st.pull).toEqual({ status: "todo", sec: null });
+  });
+});
+
+describe("stepDetail", () => {
+  it("drops a skip reason once a later real start exists, keeps real details", () => {
+    const skip = { step: "pull", phase: "skipped", at: 1, detail: `${SIDECAR_SKIP_PREFIX}gone` };
+    expect(stepDetail([skip], "pull")).toBe(skip.detail);
+    expect(stepDetail([skip, { step: "pull", phase: "start", at: 2 }], "pull")).toBeUndefined();
+    expect(stepDetail([skip, { step: "pull", phase: "start", at: 2 }, { step: "pull", phase: "done", at: 3, detail: "2 files" }], "pull"))
+      .toBe("2 files");
+    // A plain rerun keeps the previous real detail (unchanged behaviour).
+    expect(stepDetail([{ step: "merge", phase: "done", at: 1, detail: "m1" }, { step: "merge", phase: "start", at: 2 }], "merge")).toBe("m1");
+  });
+
+  it("legacy done-skip details are treated as skips too", () => {
+    const legacy = { step: "pull", phase: "done", at: 1, detail: `${SIDECAR_UNKNOWN_PREFIX}unreachable` };
+    expect(stepDetail([legacy, { step: "pull", phase: "start", at: 2 }], "pull")).toBeUndefined();
+  });
+
+  it("web mirrors the core skip prefixes (a rename in core must fail here)", () => {
+    for (const prefix of [SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX]) {
+      const st = deriveStepStatuses({ state: "pending", steps: [{ step: "pull", phase: "done", at: 1, detail: `${prefix}x` }], nodeStates: [] }, ["pull"], 2);
+      expect(st.pull.status).toBe("skipped");
+    }
   });
 });
