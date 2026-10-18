@@ -15,7 +15,7 @@
 
 ## 进行中
 - [~] **T-67 主播名含 emoji/全角符号/点号时收口失败:stem 清洗、稿件标题保留原始字符（issue [#171](https://github.com/fuyucn/douyin-rec/issues/171)）**
-  — 2026-10-18 认领。PR [#236](https://github.com/fuyucn/douyin-rec/pull/236)(0.0.178,gate PASS,独立审查 APPROVE)。**风险扫描判上传类 → `needs-decision`,等人拍板合并**。
+  — 2026-10-18 认领。PR [#236](https://github.com/fuyucn/douyin-rec/pull/236)(0.0.179,gate PASS,独立审查 APPROVE)。**风险扫描判上传类 → `needs-decision`,等人拍板合并**。
   **做什么**：stem 渲染遇非法文件名字符改为清洗(已合法名原样不变);稿件标题四处(master / 节点 / 队列 / 边录边传)收口为 core 单一函数,未配稿件模板时保留原始字符。
   **验收**：三种以上非法字符形态回归用例;已合法名 stem 与标题不变;部署后此类房间收口不再需要人工改名。
 
@@ -31,6 +31,18 @@
   — 2026-10-18 PR [#237](https://github.com/fuyucn/douyin-rec/pull/237) 已合并(0.0.175,三轮独立审查,CI 绿),issue `待验证`,随下次部署收口。
   **做什么**：回滚从写入前原始任务快照恢复,回滚键由正向 patch 推导(含派生列);源任务校验失败同样回滚;回滚自身失败明确报出。
   **验收**：8 条房间用例 + 5 组变异均被抓到;部署后关闭。
+
+- [~] **T-71 录制凭证文件遗留项:启动清扫、同步抛错回滚、启动失败告警去重（issue [#41](https://github.com/fuyucn/douyin-rec/issues/41)）**
+  — 2026-10-18 PR [#244](https://github.com/fuyucn/douyin-rec/pull/244)(0.0.179,gate PASS,独立审查 APPROVE)。**风险扫描判删除类(只删 run 目录凭证临时文件)→ `needs-decision`,等人拍板合并**。
+  **做什么**：serve 启动清扫残留凭证文件;子进程同步抛错时清理进程表与凭证文件;启动失败告警按任务去重、成功后重置。**验收**：各分支 vitest + 变异验证;部署后 run 目录无残留。
+
+- [~] **T-72 隐私闸门与风险扫描加固（issue [#74](https://github.com/fuyucn/douyin-rec/issues/74)）**
+  — 2026-10-18 PR [#245](https://github.com/fuyucn/douyin-rec/pull/245)(仅脚本/测试/文档,不 bump)。三轮独立审查均打回且问题已修,返工轮次用完 → **`needs-decision`**:合并会让风险扫描明显变严(回放 40 个合并提交约 68% 判 RISK)。
+  **做什么**：json/生成物豁免收窄、登录凭证键值规则、allow 标记仅测试夹具;风险扫描敏感文件清单、改名/权限/二进制路径、按 hunk + 函数签名匹配、异常 diff fail closed;文档同步。**验收**：37 条正反用例 + 变异验证。
+
+- [~] **T-73 账号开关文案与按平台登录判定（issue [#85](https://github.com/fuyucn/douyin-rec/issues/85)）**
+  — 2026-10-18 PR [#246](https://github.com/fuyucn/douyin-rec/pull/246) 已合并(0.0.178,两轮独立审查,CI 绿),issue `待验证`,部署后浏览器核对收口。
+  **做什么**：开关文案改为功能语义(抖音抓礼物/入场、B站取流+礼物、快手取流);登录判定按房间所属平台;锁定原因与弹幕开关同名。**验收**：表单规则与文案用例;部署后三类表单逐项核对。
 
 - [~] **T-62 节点侧上传队列:biliup 作为 proc-queue 处理器,按进度停滞判死（计划 [plans/038_node_upload_queue.md](plans/038_node_upload_queue.md)）**
   — 2026-10-16 立项,承接 plan 036 第二期 T14/T15,取代 plan 033 W1-2 与 issue #25 ①。issue [#202](https://github.com/fuyucn/douyin-rec/issues/202)（PR0 #203 已合并、PR1 #205 已合并,**均待部署实跑**;`待验证`）。
