@@ -44,6 +44,11 @@
   — 2026-10-18 PR [#246](https://github.com/fuyucn/douyin-rec/pull/246) 已合并(0.0.178,两轮独立审查,CI 绿),issue `待验证`,部署后浏览器核对收口。
   **做什么**：开关文案改为功能语义(抖音抓礼物/入场、B站取流+礼物、快手取流);登录判定按房间所属平台;锁定原因与弹幕开关同名。**验收**：表单规则与文案用例;部署后三类表单逐项核对。
 
+- [~] **T-74 通知与日志统一带直播间名称等上下文（issue [#53](https://github.com/fuyucn/douyin-rec/issues/53)）**
+  — 2026-10-18 认领,按 issue 内调查方案 N1–N8 分步。N1 契约随 PR [#248](https://github.com/fuyucn/douyin-rec/pull/248) 合并(0.0.179);N2 名称链路收口 + hub 事件附上下文随 PR [#249](https://github.com/fuyucn/douyin-rec/pull/249) 合并(0.0.180,两轮独立审查)。均未部署。
+  **做什么**：唯一名称链路(任务名 → 运行时主播名 → 缓存名 → 台账快照 → 会话基名 → 平台+房间号)+ 事件结构化上下文;后续 N3 台账快照列与编排层发送点、N4 录制子进程通知、N5 级别/去重/下一步、N6 前端渲染(含节点页两处主播名优先)、N7 日志前缀、N8 仓库假名扫描。
+  **验收**：每步独立 PR + 用例;旧事件文案除名称优先级外不变;部署后通知能看出是哪个直播间。
+
 - [~] **T-62 节点侧上传队列:biliup 作为 proc-queue 处理器,按进度停滞判死（计划 [plans/038_node_upload_queue.md](plans/038_node_upload_queue.md)）**
   — 2026-10-16 立项,承接 plan 036 第二期 T14/T15,取代 plan 033 W1-2 与 issue #25 ①。issue [#202](https://github.com/fuyucn/douyin-rec/issues/202)（PR0 #203 已合并、PR1 #205 已合并,**均待部署实跑**;`待验证`）。
   **做什么**：①止血：节点侧上传预算按胜出方全部会话字节求和并下调保守带宽,超时报错带 stderr、不覆盖原始错误；②biliup 处理器进每节点 proc-queue（阶段 gate_wait/transfer/submit;预处理先由独立 kind=upload-prep job 完成（不删源）,默认并发 1,字节停滞才判死,transfer 失败按退避重试、submit 不确定转 `uncertain`）；③master 改入队 + 轮询（钉住节点、不 abort、sweep 豁免、原 key 409、部署 guard 加 `running.biliup`）；④边录边传共用并发槽；⑤队列页与归并工具。
