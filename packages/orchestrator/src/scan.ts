@@ -2,11 +2,8 @@
 // 共享录像扫描函数：被 LocalTransport 和 _inventory CLI 子命令复用。
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import {
-  epochFromZonedParts, isAtomicTempName, isVideoFileName, processTimeZone,
-  segmentIndexOf, sessionBaseOf, stampedSessionBaseOf,
-} from "@drec/core";
-import { groupSessionsInDir, isSplitPartName, sortSegments } from "@drec/post-process";
+import { epochFromZonedParts, processTimeZone } from "@drec/core";
+import { groupSessionsInDir } from "@drec/post-process";
 import type { ActiveRecordingRoom, NodeRecording, NodeRollingProgress, NodeRollingSession } from "./transport.js";
 import { readGaps, totalGapSecOf } from "./gaps.js";
 
@@ -200,27 +197,6 @@ export async function scanRecordings(
     // 节点侧原地替换(issue #137)后的 mp4/mkv 分段(含无段号单文件)靠 session.json 的 nodeFormat 识别;
     // 只在**录制目录**这里传 —— stage / 合并模式不传,分 P 产物与合并产物不会被当成源。
     const groups = groupSessionsInDir(dir, files);
-    // A converted segment whose session sidecar was lost is invisible to `groupSessionsInDir`
-    // (without `nodeFormat` it cannot tell a source segment from a merge artifact). Surface only
-    // unambiguously source-shaped files: timestamped base + numeric segment index, and mark them so
-    // the pipeline turns the broadcast manual on every path (merge, segment, node-side upload) instead
-    // of silently never seeing them (issue #176).
-    const claimed = new Set(Object.values(groups).flatMap((g) => g.ts));
-    const unclaimed = new Map<string, string[]>();
-    for (const f of files) {
-      if (claimed.has(f) || isAtomicTempName(f) || !isVideoFileName(f)) continue;
-      if (/\.(ts|flv)$/i.test(f)) continue;
-      if (segmentIndexOf(f) < 0 || !stampedSessionBaseOf(f)) continue;
-      // Split products (`{stem}_part0.mp4`) carry a stamped prefix but are upload parts, not source.
-      if (isSplitPartName(f)) continue;
-      const base = sessionBaseOf(f);
-      groups[base] ??= { ts: [], xml: null, segmentXmls: [] };
-      groups[base].ts.push(f);
-      claimed.add(f);
-      unclaimed.set(base, [...(unclaimed.get(base) ?? []), f]);
-    }
-    // `groupSessionsInDir` sorts by segment index; appended orphans (and raw readdir order) must too.
-    for (const base of unclaimed.keys()) groups[base].ts = sortSegments(groups[base].ts);
     // 边录边传(T-33):已确认段被节点删空后,该会话在 groupSessions 里**没有条目**
     // (只有 .xml + .rolling.json 存活)。补出来,否则 master 看不到「已建稿」事实 → 漏收口。
     for (const f of files) {
@@ -272,7 +248,6 @@ export async function scanRecordings(
         tsFiles: g.ts.map((f) => join(dir, f)),
         xmlPath: hasXml ? xmlAbs : undefined,
         ...(hasSessionJson ? { sessionJsonPath: sessionJsonAbs } : {}),
-        ...(unclaimed.has(base) ? { unclaimedSegments: unclaimed.get(base) } : {}),
         // 弹幕条目数(0 = 仅表头的空 xml,或文件缺失)。选优据此避免选中「视频全但弹幕空」的节点。
         danmuCount: hasXml ? countDanmuEntries(xmlAbs) : 0,
         durationSec,

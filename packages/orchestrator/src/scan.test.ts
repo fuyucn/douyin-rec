@@ -213,46 +213,6 @@ describe("scanRecordings", () => {
     expect("sessionJsonPath" in b).toBe(false);
   });
 
-  it("issue #176:边车丢失但带段号的已转换分段仍进清单,不含 sessionJsonPath", async () => {
-    const root = mkdtempSync(join(tmpdir(), "scan-orphan-"));
-    const dir = join(root, "主播A");
-    mkdirSync(dir);
-    const base = "anchor_2026-06-27_10-00-00";
-    writeFileSync(join(dir, `${base}_000.mkv`), "x");
-    writeFileSync(join(dir, `${base}_001.mp4`), "x");
-    // A split product and an extensionless merge artifact must not be mistaken for source segments.
-    writeFileSync(join(dir, `${base}_part0.mp4`), "x");
-    writeFileSync(join(dir, "anchor_2026-06-27.mp4"), "x");
-    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 1, startMs: 1, endMs: 2 }));
-    expect(recs).toHaveLength(1);
-    expect(recs[0]!.tsFiles.map((f) => f.split("/").pop())).toEqual([`${base}_000.mkv`, `${base}_001.mp4`]);
-    expect("sessionJsonPath" in recs[0]!).toBe(false);
-    expect(recs[0]!.unclaimedSegments).toEqual([`${base}_000.mkv`, `${base}_001.mp4`]);
-  });
-
-  it("issue #176:孤儿分段与未转换 .ts 同会话 → 按段号排序,只标注孤儿", async () => {
-    const root = mkdtempSync(join(tmpdir(), "scan-orphan-mixed-"));
-    const dir = join(root, "主播A");
-    mkdirSync(dir);
-    const base = "anchor_2026-06-27_10-00-00";
-    writeFileSync(join(dir, `${base}_000.mp4`), "x"); // converted, sidecar lost
-    writeFileSync(join(dir, `${base}_001.ts`), "x"); // still waiting for conversion
-    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 1, startMs: 1, endMs: 2 }));
-    expect(recs).toHaveLength(1);
-    expect(recs[0]!.tsFiles.map((f) => f.split("/").pop())).toEqual([`${base}_000.mp4`, `${base}_001.ts`]);
-    expect(recs[0]!.unclaimedSegments).toEqual([`${base}_000.mp4`]);
-  });
-
-  it("issue #176:无孤儿的会话不带 unclaimedSegments 字段", async () => {
-    const root = mkdtempSync(join(tmpdir(), "scan-orphan-none-"));
-    const dir = join(root, "主播A");
-    mkdirSync(dir);
-    writeFileSync(join(dir, "anchor_2026-06-27_10-00-00_000.ts"), "x");
-    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 1, startMs: 1, endMs: 2 }));
-    expect(recs).toHaveLength(1);
-    expect("unclaimedSegments" in recs[0]!).toBe(false);
-  });
-
   it("T-33:段被删空但留下 .rolling.json → 仍产出(带 rolling.bv),供 master 收口", async () => {
     const prevTZ0 = process.env.TZ;
     delete process.env.TZ;
