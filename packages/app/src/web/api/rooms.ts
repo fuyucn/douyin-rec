@@ -19,8 +19,27 @@ import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
 import * as hubStore from "../../hub-store.js";
-import type { Task } from "../../store.js";
+import type { Task, TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
+
+type RecordingPatch = Parameters<TaskStore["updateTask"]>[1];
+// Every writable key is a Task column, so a rollback can always read it from the snapshot.
+type RecordingKey = keyof RecordingPatch & keyof Task;
+const _patchKeysAreTaskFields: [Exclude<keyof RecordingPatch, keyof Task>] extends [never] ? true : never = true;
+void _patchKeysAreTaskFields;
+
+/**
+ * Keys to restore after a forward `patch`: exactly the keys written, plus the columns `updateTask`
+ * derives from them (a room change re-validates quality/engine; writing rollingUpload clears
+ * rollingEffective). Derived from the patch itself, so a newly written field cannot escape rollback,
+ * and fields this PUT never touched are never rewritten.
+ */
+export function rollbackKeys(patch: RecordingPatch): RecordingKey[] {
+  const keys = new Set(Object.keys(patch) as RecordingKey[]);
+  if (keys.has("room")) { keys.add("quality"); keys.add("engine"); }
+  if (keys.has("rollingUpload")) keys.add("rollingEffective");
+  return [...keys];
+}
 
 /** 从 HubRuleDTO 里剥掉身份四元组(key/platform/roomSlug/room)——RoomDTO 顶层已有。 */
 function stripIdentity(dto: RoomDTO["processing"] & { key?: string }): NonNullable<RoomDTO["processing"]> {
@@ -183,6 +202,29 @@ export function buildRooms(ctx: ApiCtx) {
       // ── 录制半边 ──────────────────────────────────────────────────────────────
       const rec = input.recording;
       let taskId = before.recording?.taskId ?? null;
+      // Raw pre-write snapshot (the DTO hides cookies) + the keys to undo; set once the recording half is written.
+      let snapshot: Task | null = null;
+      let undoKeys: RecordingKey[] = [];
+      /** Undo the recording write; returns false when the undo itself failed. */
+      const rollbackRecording = (): boolean => {
+        if (!snapshot || taskId === null) return true;
+        const prev: Record<string, unknown> = {};
+        // A NULL rollingEffective reads as its derived value, so it comes back as an explicit 0/1 that
+        // reads the same; the next refreshLocalRollingEffective pass restores NULL where applicable.
+        for (const f of undoKeys) prev[f] = snapshot[f];
+        try {
+          return store.updateTask(taskId, prev as RecordingPatch) !== null;
+        } catch {
+          return false;
+        }
+      };
+      const failAfterRecording = (status: number, reason: string): ApiResult => {
+        if (!snapshot) return err(status, reason);
+        if (!rollbackRecording()) {
+          return err(500, `${reason};**且录制配置的回滚也失败了** —— 该房间 ${key} 的录制半边可能已被改动,请手工核对`);
+        }
+        return err(status, `${reason},已回滚录制配置`);
+      };
       if (rec) {
         const patch: Parameters<typeof store.updateTask>[1] = {};
         if ("room" in rec) {
@@ -246,6 +288,8 @@ export function buildRooms(ctx: ApiCtx) {
           if (t.managedBy === "hub") return err(403, `任务 id=${taskId} 由 hub 管理,请在 master 上修改`);
           const updated = store.updateTask(taskId, patch);
           if (!updated) return err(500, `写入录制配置失败(id=${taskId})`);
+          snapshot = t;
+          undoKeys = rollbackKeys(patch);
         }
       }
 
@@ -255,8 +299,10 @@ export function buildRooms(ctx: ApiCtx) {
         const sourceTaskId = before.processing
           ? ((before.processing as { recording?: { sourceTaskId?: number | null } }).recording?.sourceTaskId ?? taskId)
           : taskId;
+        // Checked after the recording write on purpose: it must see a room change made by this PUT.
+        // A failure here rolls the recording half back like a failed rule write (#200).
         const rerr = ctx.recordingError(sourceTaskId, k.roomSlug);
-        if (rerr) return err(400, rerr);
+        if (rerr) return failAfterRecording(400, rerr);
 
         try {
           hubStore.upsertHubRule(hubDir, {
@@ -271,29 +317,7 @@ export function buildRooms(ctx: ApiCtx) {
           });
         } catch (e) {
           // 回滚第一步:不留半成功。这是本域存在的核心原因。
-          if (rec && taskId !== null) {
-            const prev = before.recording;
-            if (prev) {
-              const ok = store.updateTask(taskId, {
-                room: prev.room,
-                name: prev.name,
-                quality: prev.quality,
-                engine: prev.engine,
-                danmu: prev.danmu,
-                segmentSec: prev.segmentSec,
-                useCookie: prev.useCookie,
-                outDir: prev.outDir,
-                webhook: prev.webhook,
-                rollingUpload: prev.rollingUpload,
-                outputFormat: prev.outputFormat,
-              });
-              if (!ok) {
-                return err(500, `写入处理配置失败(${(e as Error).message});`
-                  + `**且录制配置的回滚也失败了** —— 该房间 ${key} 的录制半边可能已被改动,请手工核对`);
-              }
-            }
-          }
-          return err(500, `写入处理配置失败,已回滚录制配置: ${(e as Error).message}`);
+          return failAfterRecording(500, `写入处理配置失败(${(e as Error).message})`);
         }
         // 规则此前已存在(表单展示的是读取时迁移后的 mode)才收口旧开关;新建规则同 createHubRule 不收口。
         if (before.processing) ctx.settleLegacyRolling(sourceTaskId, proc.pipeline?.upload?.mode);
