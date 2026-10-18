@@ -182,7 +182,12 @@ describe("租约宿主规则(§2.3)", () => {
     expect(s.getLease("remux")?.handoverRequested).toBe(true);
     expect(s.getLease("remux")?.owner).toBe(rec); // 不抢正在跑的 job
     finish();
-    await vi.waitFor(() => expect(s.getLease("remux")).toBeNull() || expect(s.getLease("remux")?.owner).not.toBe(rec));
+    // "Released or handed to someone else" as one assertion (an `expect(a) || expect(b)` chain
+    // never evaluates its right side, so it silently waited for "released" only).
+    await vi.waitFor(() => {
+      const l = s.getLease("remux");
+      expect(l === null || l.owner !== rec, `lease still held by ${l?.owner}`).toBe(true);
+    });
     await vi.waitFor(() => expect(s.list({ kind: "remux" })[0]?.state).toBe("done"));
     expect(s.acquireLease("remux", "serve:9:9", { leaseMs: 60_000, requestHandover: true }).acquired).toBe(true);
   });

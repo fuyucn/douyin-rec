@@ -182,6 +182,32 @@ describe("handover(交接)", () => {
     serve.tick();
     expect(s.get(id2)).toMatchObject({ state: "running", claimedBy: "serve" });
   });
+
+  it("让出后一个租约期内不抢回(给请求方留窗口);请求方始终不来 → 冷却后恢复持有 (#238)", async () => {
+    let t = 1_000_000;
+    const g = gate();
+    registerProcessor(fakeProcessor({ run: async () => { await g.promise; return { outputs: [] }; } }));
+    const holder = mkRunner("rec", { requestHandover: false, now: () => t });
+    const serve = mkRunner("serve", { requestHandover: true, store: env.open() });
+    const s = env.open();
+    const id = s.enqueue(env.job("a.ts"), allowed()).jobId;
+    holder.tick();
+    serve.tick(); // handover requested
+    holder.heartbeat();
+    g.resolve();
+    await vi.waitFor(() => expect(s.get(id)?.state).toBe("done"));
+    await vi.waitFor(() => expect(s.getLease("fake")).toBeNull());
+    // Our own tick right after yielding must not race the requester for the free lease.
+    holder.tick();
+    expect(s.getLease("fake")).toBeNull();
+    t += LEASE_MS - 1;
+    holder.tick();
+    expect(s.getLease("fake")).toBeNull();
+    // Requester never came: after one lease period we host again (independent record keeps working).
+    t += 1;
+    holder.tick();
+    expect(s.getLease("fake")?.owner).toBe("rec");
+  });
 });
 
 describe("接管 / recover / fencing", () => {
