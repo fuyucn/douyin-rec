@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-15
+> 最后更新：2026-10-18
 
 ## 状态约定
 
@@ -14,6 +14,16 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-67 主播名含 emoji/全角符号/点号时收口失败:stem 清洗、稿件标题保留原始字符（issue [#171](https://github.com/fuyucn/douyin-rec/issues/171)）**
+  — 2026-10-18 认领。PR [#236](https://github.com/fuyucn/douyin-rec/pull/236)(0.0.176,gate PASS,独立审查 APPROVE)。**风险扫描判上传类 → `needs-decision`,等人拍板合并**。
+  **做什么**：stem 渲染遇非法文件名字符改为清洗(已合法名原样不变);稿件标题四处(master / 节点 / 队列 / 边录边传)收口为 core 单一函数,未配稿件模板时保留原始字符。
+  **验收**：三种以上非法字符形态回归用例;已合法名 stem 与标题不变;部署后此类房间收口不再需要人工改名。
+
+- [~] **T-68 房间 PUT 回滚字段不全 / 源任务校验晚于录制写入（issue [#200](https://github.com/fuyucn/douyin-rec/issues/200)）**
+  — 2026-10-18 PR [#237](https://github.com/fuyucn/douyin-rec/pull/237) 已合并(0.0.175,三轮独立审查,CI 绿),issue `待验证`,随下次部署收口。
+  **做什么**：回滚从写入前原始任务快照恢复,回滚键由正向 patch 推导(含派生列);源任务校验失败同样回滚;回滚自身失败明确报出。
+  **验收**：8 条房间用例 + 5 组变异均被抓到;部署后关闭。
+
 - [~] **T-62 节点侧上传队列:biliup 作为 proc-queue 处理器,按进度停滞判死（计划 [plans/038_node_upload_queue.md](plans/038_node_upload_queue.md)）**
   — 2026-10-16 立项,承接 plan 036 第二期 T14/T15,取代 plan 033 W1-2 与 issue #25 ①。issue [#202](https://github.com/fuyucn/douyin-rec/issues/202)（PR0 #203 已合并、PR1 #205 已合并,**均待部署实跑**;`待验证`）。
   **做什么**：①止血：节点侧上传预算按胜出方全部会话字节求和并下调保守带宽,超时报错带 stderr、不覆盖原始错误；②biliup 处理器进每节点 proc-queue（阶段 gate_wait/transfer/submit;预处理先由独立 kind=upload-prep job 完成（不删源）,默认并发 1,字节停滞才判死,transfer 失败按退避重试、submit 不确定转 `uncertain`）；③master 改入队 + 轮询（钉住节点、不 abort、sweep 豁免、原 key 409、部署 guard 加 `running.biliup`）；④边录边传共用并发槽；⑤队列页与归并工具。
