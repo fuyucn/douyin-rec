@@ -77,9 +77,10 @@ describe("old events render exactly as before (ctx is ignored until renderers op
       expect(formatMessage({ ...e, ctx })).toBe(formatMessage(e));
     });
   }
-  it("hub enrichment keeps ctx on the event", () => {
+  it("hub enrichment keeps an explicit ctx on the event", () => {
     const lookup = { anchorOf: () => "A", workerName: () => undefined };
     const out = enrichHubEvent({ kind: "stageReady", streamKey: "douyin:abc:2026-10-16", ctx }, lookup);
-    expect(out.ctx).toEqual(ctx);
+    // Explicit fields win; enrichment only adds what was missing (the key), without a mismatched name source.
+    expect(out.ctx).toEqual({ ...ctx, streamKey: "douyin:abc:2026-10-16" });
   });
 });
