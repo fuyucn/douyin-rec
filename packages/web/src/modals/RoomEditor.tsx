@@ -24,7 +24,8 @@ import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
 import { factsOf, formFromRoom, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
-import { accountToggleCopy, cookieReadyFor, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
+import { deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
+import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
 interface Props {
   room: RoomDTO;
