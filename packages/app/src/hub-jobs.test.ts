@@ -311,6 +311,22 @@ describe("buildQueueView", () => {
     expect(it0.nextSteps).toContain("burn_livechat");
   });
 
+  it("legacy sidecar skip row (pull done + skip prefix) is not reported as done (issue #176)", () => {
+    const { dbPath, db } = makeSyncDb();
+    const now = T0 + 100_000;
+    seedJob(db, "douyin:200:2026-07-10", [["pending", now - 10_000]], 1000);
+    for (const [step, phase, at, detail] of [
+      ["select", "done", now - 20_000, null],
+      ["pull", "done", now - 10_000, "跳过·会话边车扫描后消失"],
+    ] as const) {
+      db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at,detail) VALUES(?,?,?,?,?)").run("douyin:200:2026-07-10", step, phase, at, detail);
+    }
+    db.close();
+    const { active } = buildQueueView(dbPath, { now, pool: POOL_EMPTY });
+    expect(active).toHaveLength(1);
+    expect(active[0].doneSteps.map((s) => s.step)).toEqual(["select"]);
+  });
+
   /**
    * 回归(issue #12):节点侧上传(本地 remux + 上传,无回传)的**当前节点**必须显示 `node_upload`,
    * 不能回落到 stateToNode("syncing")="pull"(否则队列页误报「还在 rsync 回传」)。

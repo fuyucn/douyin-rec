@@ -17,6 +17,13 @@ export interface NodeRecording {
    */
   sessionJsonPath?: string;
   /**
+   * Basenames of converted segments (`.mp4`/`.mkv`) that are in `tsFiles` only because they look like
+   * source segments, while their session sidecar is gone (issue #176). Nothing can prove they belong
+   * to this session, so the pipeline must route the broadcast to manual before merging, uploading or
+   * deleting anything. Absent = none found (or an older bundle that never surfaced them).
+   */
+  unclaimedSegments?: string[];
+  /**
    * 该场弹幕 xml 里的条目数(弹幕+礼物+入场)。**仅表头的空 xml**(WS 被风控/未连上)记 0。
    * 选优用:烧录取 winner 自己的 xml,故「视频覆盖更高但没弹幕」的节点不该赢过有弹幕的
    * (否则上传弹幕为空,哪怕同组另一节点弹幕完好)。缺省(旧录像/未统计)= undefined,按 0 处理。

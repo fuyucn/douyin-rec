@@ -983,6 +983,66 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
+  describe("issue #176: converted segments without a session sidecar", () => {
+    const orphanRec = (): NodeRecording => makeRec({
+      tsFiles: ["/remote/s_000.mp4", "/remote/s_001.ts"],
+      unclaimedSegments: ["s_000.mp4"],
+    });
+
+    for (const [label, steps] of [
+      ["merge mode", {}],
+      ["segment mode", { mergeSegments: false }],
+      ["node-side upload", { nodeSideUpload: true, burnDanmu: false, burnLivechat: false }],
+    ] as const) {
+      it(`${label}: → needs_manual before pull/upload/cleanup, one alert`, async () => {
+        const deps = makeDeps({ cfg: { ...makeDeps().cfg, steps } });
+        const b = makeBroadcast([{ workerId: "node-1", rec: orphanRec() }]);
+        deps.ledger.upsertPending(b.streamKey);
+
+        const result = await runPipeline(b, deps);
+        expect(result.state).toBe("needs_manual");
+        expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
+        const t1 = deps.transports.get("node-1")!;
+        expect(t1.pull).not.toHaveBeenCalled();
+        expect(t1.cleanup).not.toHaveBeenCalled();
+        expect(deps.uploadPlain).not.toHaveBeenCalled();
+        expect(deps.sh).not.toHaveBeenCalled();
+        expect(deps.notify).toHaveBeenCalledTimes(1);
+        deps.ledger.close();
+      });
+    }
+
+    it("an orphan on a losing member also stops the broadcast (cleanup would delete it)", async () => {
+      const deps = makeDeps();
+      const b = makeBroadcast([
+        { workerId: "node-1", rec: makeRec({ durationSec: 9999 }) },
+        { workerId: "node-2", rec: orphanRec() },
+      ]);
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("needs_manual");
+      expect(deps.transports.get("node-1")!.pull).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
+    it("an already delivered broadcast stays done and skips the source cleanup", async () => {
+      // Node-side config routes a done job to finalizeOnly, which would otherwise delete node sources.
+      const deps = makeDeps({ cfg: {
+        ...makeDeps().cfg,
+        steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false },
+        cleanup: { sourceAfterDone: true },
+      } });
+      const b = makeBroadcast([{ workerId: "node-1", rec: orphanRec() }]);
+      deps.ledger.upsertPending(b.streamKey);
+      deps.ledger.markDone(b.streamKey, "BV1done");
+
+      const result = await runPipeline(b, deps);
+      expect(result).toEqual({ state: "done", bv: "BV1done" });
+      expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+  });
+
   it("场景5(#1 全缺失): 所有成员文件都没了 → failed", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
@@ -2435,5 +2495,14 @@ describe("runPipeline — 边录边传识别短路", () => {
       expect(deps.ledger.get(broadcast.streamKey)?.state).not.toBe("needs_manual");
       deps.ledger.close();
     });
+  });
+});
+
+describe("consecutiveSidecarSkips legacy rows (issue #176)", () => {
+  it("skips logged as `done` before the `skipped` phase existed still count; a real pull resets", () => {
+    const skip = (phase: string, n: number) => ({ step: "pull", phase, detail: `${SIDECAR_SKIP_PREFIX}gone ${n}` });
+    const unknown = (phase: string) => ({ step: "pull", phase, detail: `${SIDECAR_UNKNOWN_PREFIX}unreachable` });
+    expect(consecutiveSidecarSkips([skip("done", 1), unknown("done"), skip("skipped", 2)])).toBe(2);
+    expect(consecutiveSidecarSkips([skip("done", 1), { step: "pull", phase: "done", detail: "2 文件" }, skip("skipped", 2)])).toBe(1);
   });
 });

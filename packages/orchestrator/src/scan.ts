@@ -6,7 +6,7 @@ import {
   epochFromZonedParts, isAtomicTempName, isVideoFileName, processTimeZone,
   segmentIndexOf, sessionBaseOf, stampedSessionBaseOf,
 } from "@drec/core";
-import { groupSessionsInDir, isSplitPartName } from "@drec/post-process";
+import { groupSessionsInDir, isSplitPartName, sortSegments } from "@drec/post-process";
 import type { ActiveRecordingRoom, NodeRecording, NodeRollingProgress, NodeRollingSession } from "./transport.js";
 import { readGaps, totalGapSecOf } from "./gaps.js";
 
@@ -202,9 +202,11 @@ export async function scanRecordings(
     const groups = groupSessionsInDir(dir, files);
     // A converted segment whose session sidecar was lost is invisible to `groupSessionsInDir`
     // (without `nodeFormat` it cannot tell a source segment from a merge artifact). Surface only
-    // unambiguously source-shaped files: timestamped base + numeric segment index. The later
-    // stage re-grouping then reports them as unclaimed and turns the session manual (issue #176).
+    // unambiguously source-shaped files: timestamped base + numeric segment index, and mark them so
+    // the pipeline turns the broadcast manual on every path (merge, segment, node-side upload) instead
+    // of silently never seeing them (issue #176).
     const claimed = new Set(Object.values(groups).flatMap((g) => g.ts));
+    const unclaimed = new Map<string, string[]>();
     for (const f of files) {
       if (claimed.has(f) || isAtomicTempName(f) || !isVideoFileName(f)) continue;
       if (/\.(ts|flv)$/i.test(f)) continue;
@@ -215,7 +217,10 @@ export async function scanRecordings(
       groups[base] ??= { ts: [], xml: null, segmentXmls: [] };
       groups[base].ts.push(f);
       claimed.add(f);
+      unclaimed.set(base, [...(unclaimed.get(base) ?? []), f]);
     }
+    // `groupSessionsInDir` sorts by segment index; appended orphans (and raw readdir order) must too.
+    for (const base of unclaimed.keys()) groups[base].ts = sortSegments(groups[base].ts);
     // 边录边传(T-33):已确认段被节点删空后,该会话在 groupSessions 里**没有条目**
     // (只有 .xml + .rolling.json 存活)。补出来,否则 master 看不到「已建稿」事实 → 漏收口。
     for (const f of files) {
@@ -267,6 +272,7 @@ export async function scanRecordings(
         tsFiles: g.ts.map((f) => join(dir, f)),
         xmlPath: hasXml ? xmlAbs : undefined,
         ...(hasSessionJson ? { sessionJsonPath: sessionJsonAbs } : {}),
+        ...(unclaimed.has(base) ? { unclaimedSegments: unclaimed.get(base) } : {}),
         // 弹幕条目数(0 = 仅表头的空 xml,或文件缺失)。选优据此避免选中「视频全但弹幕空」的节点。
         danmuCount: hasXml ? countDanmuEntries(xmlAbs) : 0,
         durationSec,

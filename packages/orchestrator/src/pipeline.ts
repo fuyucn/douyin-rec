@@ -4,7 +4,7 @@ import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { formatBiliTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { formatBiliTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
@@ -108,14 +108,7 @@ export async function probeSidecars(
   return { missing, unknown };
 }
 
-/** Ledger `pull` detail prefix for "skipped this round because the sidecar is confirmed gone". */
-export const SIDECAR_SKIP_PREFIX = "跳过·";
-/**
- * Ledger `pull` detail prefix for "skipped this round, could not confirm". Never counts toward the
- * limit: an unreachable node is a connectivity problem, and the reconciler already alerts on nodes
- * that fail inventory for several rounds.
- */
-export const SIDECAR_UNKNOWN_PREFIX = "未确认·";
+export { SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX };
 /** 连续跳过上限:默认对账 30 分钟一轮 → 约 1.5 小时仍缺失就不再等,转人工 + 告警。 */
 export const MAX_SIDECAR_SKIPS = 3;
 
@@ -131,8 +124,10 @@ export function consecutiveSidecarSkips(steps: readonly { step: string; phase: s
   for (let i = steps.length - 1; i >= 0; i--) {
     const s = steps[i];
     if (s.step !== "pull") continue;
-    if (s.phase === "skipped" && s.detail?.startsWith(SIDECAR_SKIP_PREFIX)) { n++; continue; }
-    if (s.phase === "skipped" && s.detail?.startsWith(SIDECAR_UNKNOWN_PREFIX)) continue;
+    // Legacy `done` skip rows (before issue #176) still count, so an upgrade does not reset the limit.
+    const skipRow = isSidecarSkipEvent(s);
+    if (skipRow && s.detail?.startsWith(SIDECAR_SKIP_PREFIX)) { n++; continue; }
+    if (skipRow && s.detail?.startsWith(SIDECAR_UNKNOWN_PREFIX)) continue;
     break;
   }
   return n;
@@ -770,6 +765,32 @@ async function runPipelineInner(
 
   // 续跑:job 已有 bv ⇒ P1 已建稿(不可逆),绝不重传。跳过 select/pull/merge/burn/uploadPlain,只补 append。
   const existing = ledger.get(streamKey);
+
+  // Converted segments whose session sidecar is gone (issue #176): nothing proves they belong to this
+  // session or where they sit in it. Stop before any branch can merge, upload or delete them —
+  // node-side upload and segment mode consume `tsFiles` directly and never reach the stage
+  // "unclaimed" check further down. Never deletes a source.
+  const unclaimedSegs = b.members.flatMap((m) => (m.rec.unclaimedSegments ?? []).map((f) => `${m.workerId}:${f}`));
+  if (unclaimedSegs.length > 0) {
+    const names = unclaimedSegs.slice(0, 5).join(", ") + (unclaimedSegs.length > 5 ? " …" : "");
+    if (existing?.state === "done") {
+      // Already delivered: keep the terminal state, but do not run the source cleanup over files
+      // nobody can attribute.
+      jlog(`已完成的场出现 ${unclaimedSegs.length} 个无会话边车的已转换分段(${names}) → 跳过收尾删源,留人工处理`);
+      return { state: "done", bv: existing.bv ?? undefined };
+    }
+    jlog(`${unclaimedSegs.length} 个已转换分段缺少会话边车(${names}) → 转人工(未合并、未上传、未删源)`);
+    ledger.setState(streamKey, "needs_manual", {
+      error: `${unclaimedSegs.length} 个已转换分段缺少会话边车,无法确认归属与顺序,已停止处理`,
+    });
+    notify({
+      kind: "error",
+      stage: "同步",
+      message: `${streamKey} 有 ${unclaimedSegs.length} 个已转换分段缺少会话边车,已转人工,未合并、未上传、未删源`,
+    });
+    return { state: "needs_manual" };
+  }
+
   // issue #91:节点侧上传的 done 场收尾补跑 —— 只补核验 + 删源,**不重新选优/拉回/上传**。
   // 必须排在下面「合并模式续跑」之前:否则合并模式的 done 场走 resumeAppends → finalizeOnly(不带 keepNodeXml),
   // 会把节点上**最后一份** .xml 一并删掉。
