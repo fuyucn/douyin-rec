@@ -74,9 +74,9 @@ export class ProcLeaseStore {
   }
 
   /**
-   * Reservation deadline for `kind` (0 = none). A reservation that looks wrong against the current
-   * wall clock (written "in the future", or longer than one lease period from now) is treated as void,
-   * so a backward clock jump cannot block record processes for longer than a lease (no pid check here).
+   * Reservation deadline for `kind` (0 = none). A reservation written "in the future" (the wall clock
+   * jumped back since) is treated as void, so a backward jump cannot stretch it past its own period
+   * (there is no pid check here). With t >= reservedAt, until - t never exceeds the reserved period.
    */
   reservedUntil(kind: string): number {
     const r = this.db.prepare("SELECT reservedAt, until FROM proc_lease_reservation WHERE kind=?").get(kind) as Row | undefined;
@@ -84,7 +84,7 @@ export class ProcLeaseStore {
     const t = this.o.now();
     const at = Number(r.reservedAt);
     const until = Number(r.until);
-    if (t < at || until - t > LEASE_MS) return 0;
+    if (t < at) return 0;
     return until;
   }
 
