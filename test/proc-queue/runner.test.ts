@@ -211,6 +211,23 @@ describe("handover(交接)", () => {
     expect(s.reservedUntil("fake")).toBe(0); // acquiring clears the reservation
   });
 
+  it("让出写库失败不抛(不成为 unhandled rejection),保持让出中,下次心跳重试成功", async () => {
+    registerProcessor(fakeProcessor({ run: async () => ({ outputs: [] }) }));
+    const store = env.open();
+    const holder = mkRunner("rec", { requestHandover: false, store });
+    const s = env.open();
+    holder.tick();
+    expect(s.getLease("fake")?.owner).toBe("rec");
+    expect(s.acquireLease("fake", "serve", { requestHandover: true }).acquired).toBe(false);
+    const spy = vi.spyOn(store, "yieldLease").mockImplementationOnce(() => { throw new Error("database is locked"); });
+    expect(() => holder.heartbeat()).not.toThrow();
+    expect(s.getLease("fake")?.owner).toBe("rec"); // still ours, still yielding
+    holder.heartbeat();
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(s.getLease("fake")).toBeNull();
+    expect(s.reservedUntil("fake")).toBeGreaterThan(0);
+  });
+
   it("预留期内请求方(serve)可直接接手,并清掉预留", async () => {
     const g = gate();
     registerProcessor(fakeProcessor({ run: async () => { await g.promise; return { outputs: [] }; } }));

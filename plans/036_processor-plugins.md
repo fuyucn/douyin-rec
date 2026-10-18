@@ -153,13 +153,15 @@ alias 引用子文件（`vitest.config.ts` 58-59、`packages/web/vite.config.ts`
 `cli.ts` 1435/1465 用 `cfg.dataRoot` 构造，不能 import app）直接用 `procQueueDbPath(cfg.dataRoot)`（N4）。WAL + `busy_timeout=5000`；**任何进程首开都执行幂等迁移**
 （`CREATE TABLE IF NOT EXISTS` + `PRAGMA user_version` 判版本，迁移包在 `BEGIN IMMEDIATE` 内）——写法抄 `openUploadLimitStore`。
 表：`proc_jobs`（jobId PK、kind、logicalKey、generation、state、inputs/outputs/params JSON、attempts、claimedBy、
-cancelRequested、result/error、时间戳）+ `proc_runner_lease(kind PK, owner, pid, heartbeatAt, expiresAt, handoverRequested)`。
+cancelRequested、result/error、时间戳）+ `proc_runner_lease(kind PK, owner, pid, heartbeatAt, expiresAt, handoverRequested)`
++ `proc_lease_reservation(kind PK, reservedAt, until)`(schema v4,#241:让出后预留给请求方一个租约期)。
 
 **租约与宿主**（每 kind 本机至多一个存活持有者；leaseMs 30s、心跳 10s；过期为权威，pid 已死只用于提前接管）：
 
 - `task serve`：为全部已注册 kind 抢租约。遇他人持有且未过期 → 置 `handoverRequested=1`，**不抢正在跑的 job**（F5）。
 - `record` 进程（serve 拉起的子进程与独立 record 同一规则）：**只在无存活持有者时**持有 remux；serve 拉起的子进程因 serve
-  先持有而只入队。持有期间每次心跳读 `handoverRequested`，置位 → 停止认领、当前 job 跑完、删自己的租约行。
+  先持有而只入队。持有期间每次心跳读 `handoverRequested`，置位 → 停止认领、当前 job 跑完、删自己的租约行**并在同一事务内写预留**
+  (#238/#241:预留期 = 一个租约期,期内只有请求方能取得租约,兄弟 record 与让出者都不能;期满恢复正常竞争)。
 - 入队时若该 kind 无存活持有者，record 立即尝试接管（多个独立 record 时，持有者退出后其余 record 在下一次封口自然接手）。
 - **record 收尾**（`onSessionEnd`）**保留现有语义**：若本进程持有 remux 租约 → 等待「owner.taskId = 本任务」的 pending/running 行，
   总时限仍为 `SESSION_END_BUDGET_MS`（3min），超时告警（文案同现在）、未完成行留在表中；若本进程不持有且无存活持有者 →

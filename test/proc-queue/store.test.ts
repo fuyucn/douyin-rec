@@ -596,6 +596,16 @@ describe("v3 -> v4 migration + lease reservation (#241)", () => {
     expect(s.acquireLease("fake", "rec2", { pid: process.pid }).acquired).toBe(true); // reservation gone
     s.close();
   });
+
+  it("a reservation that looks wrong after a backward clock jump is void (cannot block record for more than a lease)", () => {
+    const s = env.open();
+    s.acquireLease("fake", "rec", { pid: process.pid });
+    expect(s.yieldLease("fake", "rec")).toBe(true);
+    env.clock.t -= 60_000; // wall clock jumped back a minute
+    expect(s.reservedUntil("fake")).toBe(0);
+    expect(s.acquireLease("fake", "rec2", { pid: process.pid }).acquired).toBe(true);
+    s.close();
+  });
 });
 
 describe("v2 -> v3 migration + progress (plan 038 PR5)", () => {
