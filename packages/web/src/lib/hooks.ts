@@ -1,8 +1,8 @@
 /** Shared hooks: toast helper (sonner), cookie-status loader, an interval poller, SSE 状态流。 */
-import { useSetAtom } from "jotai";
+import { useAtomValue, useSetAtom } from "jotai";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast as sonnerToast } from "sonner";
-import { api, ApiError } from "../api/client";
+import { api, ApiError, type CookieStatus } from "../api/client";
 import { cookieStatusAtom } from "../atoms";
 
 export type ToastType = "success" | "error" | "warning" | "info";
@@ -40,6 +40,25 @@ export function useRefreshCookie(): () => Promise<void> {
       setCookie(null);
     }
   }, [setCookie]);
+}
+
+/**
+ * Per-platform account status (GET /api/cookies), loaded while `enabled` (a form is open) and reloaded
+ * when the global douyin status changes (e.g. after QR login). `null` until loaded or when the request
+ * fails; callers fall back via `cookieReadyFor`.
+ */
+export function usePlatformCookieStatuses(enabled: boolean): CookieStatus[] | null {
+  const douyin = useAtomValue(cookieStatusAtom);
+  const [statuses, setStatuses] = useState<CookieStatus[] | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    void api.getCookies().then((r) => alive && setStatuses(r.platforms)).catch(() => alive && setStatuses(null));
+    return () => {
+      alive = false;
+    };
+  }, [enabled, douyin]);
+  return statuses;
 }
 
 /**
