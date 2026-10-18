@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 const DDL = `
 CREATE TABLE IF NOT EXISTS proc_jobs(
   jobId TEXT PRIMARY KEY,
@@ -55,6 +55,16 @@ export const CURSOR_DDL = `CREATE TABLE IF NOT EXISTS proc_order_cursor(
   lastClaimedAt INTEGER NOT NULL,
   PRIMARY KEY(orderKey, generation));`;
 
+/**
+ * v4 (#241): a kind just yielded on a handover request is reserved for the requester for one
+ * lease period; runners that do not request handover (record processes) may not take it meanwhile.
+ * Kept out of proc_runner_lease so "no lease row" still means "nobody holds it".
+ */
+export const RESERVATION_DDL = `CREATE TABLE IF NOT EXISTS proc_lease_reservation(
+  kind TEXT PRIMARY KEY,
+  reservedAt INTEGER NOT NULL,
+  until INTEGER NOT NULL);`;
+
 /** Columns added in v1 -> v2 (old DBs use ALTER TABLE; fresh DBs get them from DDL). */
 export const V2_COLUMNS: readonly [string, string][] = [
   ["notBefore", "INTEGER"], ["orderKey", "TEXT"], ["seq", "INTEGER"], ["step", "TEXT"],
@@ -84,6 +94,7 @@ export function migrateSchema(db: DatabaseSync): void {
       }
       db.exec(CURSOR_DDL);
       db.exec(ORDER_INDEX);
+      db.exec(RESERVATION_DDL);
       db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
     }
     db.exec("COMMIT");

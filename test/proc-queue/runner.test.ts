@@ -183,30 +183,50 @@ describe("handover(交接)", () => {
     expect(s.get(id2)).toMatchObject({ state: "running", claimedBy: "serve" });
   });
 
-  it("让出后一个租约期内不抢回(给请求方留窗口);请求方始终不来 → 冷却后恢复持有 (#238)", async () => {
-    let t = 1_000_000;
+  it("让出后租约在库里预留给请求方一个租约期:让出者与兄弟 record 都抢不到,serve 可接;无人来则期满任一 runner 接手 (#238/#241)", async () => {
     const g = gate();
     registerProcessor(fakeProcessor({ run: async () => { await g.promise; return { outputs: [] }; } }));
-    const holder = mkRunner("rec", { requestHandover: false, now: () => t });
-    const serve = mkRunner("serve", { requestHandover: true, store: env.open() });
+    const holder = mkRunner("rec", { requestHandover: false });
+    const sibling = mkRunner("rec2", { requestHandover: false, store: env.open() });
     const s = env.open();
     const id = s.enqueue(env.job("a.ts"), allowed()).jobId;
     holder.tick();
-    serve.tick(); // handover requested
+    expect(s.acquireLease("fake", "serve", { requestHandover: true }).acquired).toBe(false); // handover requested
     holder.heartbeat();
     g.resolve();
     await vi.waitFor(() => expect(s.get(id)?.state).toBe("done"));
     await vi.waitFor(() => expect(s.getLease("fake")).toBeNull());
-    // Our own tick right after yielding must not race the requester for the free lease.
+    expect(s.reservedUntil("fake")).toBe(env.clock.t + LEASE_MS);
+    // Neither the yielder nor a sibling record process may take it inside the window.
     holder.tick();
+    sibling.tick();
     expect(s.getLease("fake")).toBeNull();
-    t += LEASE_MS - 1;
-    holder.tick();
+    env.clock.t += LEASE_MS - 1;
+    sibling.tick();
     expect(s.getLease("fake")).toBeNull();
-    // Requester never came: after one lease period we host again (independent record keeps working).
-    t += 1;
+    // Requester never came: once the reservation lapses any runner takes over (independent record keeps working).
+    env.clock.t += 1;
+    sibling.tick();
+    expect(s.getLease("fake")?.owner).toBe("rec2");
+    expect(s.reservedUntil("fake")).toBe(0); // acquiring clears the reservation
+  });
+
+  it("预留期内请求方(serve)可直接接手,并清掉预留", async () => {
+    const g = gate();
+    registerProcessor(fakeProcessor({ run: async () => { await g.promise; return { outputs: [] }; } }));
+    const holder = mkRunner("rec", { requestHandover: false });
+    const serve = mkRunner("serve", { requestHandover: true, store: env.open() });
+    const s = env.open();
+    const id = s.enqueue(env.job("a.ts"), allowed()).jobId;
     holder.tick();
-    expect(s.getLease("fake")?.owner).toBe("rec");
+    serve.tick();
+    holder.heartbeat();
+    g.resolve();
+    await vi.waitFor(() => expect(s.get(id)?.state).toBe("done"));
+    await vi.waitFor(() => expect(s.getLease("fake")).toBeNull());
+    serve.tick();
+    expect(s.getLease("fake")?.owner).toBe("serve");
+    expect(s.reservedUntil("fake")).toBe(0);
   });
 });
 

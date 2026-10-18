@@ -470,6 +470,8 @@ export class ProcQueueStore {
   }
   heartbeat(kind: string, owner: string, leaseMs?: number) { return this.leases.heartbeat(kind, owner, leaseMs); }
   releaseLease(kind: string, owner: string): boolean { return this.leases.releaseLease(kind, owner); }
+  yieldLease(kind: string, owner: string, reserveMs?: number): boolean { return this.leases.yieldLease(kind, owner, reserveMs); }
+  reservedUntil(kind: string): number { return this.leases.reservedUntil(kind); }
 
   // ───────────────────────── 认领 / 执行态 ─────────────────────────
 
