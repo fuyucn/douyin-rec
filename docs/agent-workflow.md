@@ -137,7 +137,7 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
 6. **版本号**(按路径判定,不按提交类型):触及运行时路径的 PR 已 bump 根 `package.json` patch,
    且 `dist/douyin-rec.mjs` 的 `APP_VERSION` 同步。**非运行时豁免**(黑名单语义):只改工具类目录
    (`docs/`、`test/`、`.github/`、`plans/`、`dev/`、`remote/`、`scripts/` 里除两个 install 脚本外的文件 等)
-   或 `*.test.ts` 的 PR 不 bump、不 bundle,PR 版本段写「无需 bump + 理由」。必须 bump 的运行时路径清单:
+   或 vitest 测试文件(`.test` 后缀)的 PR 不 bump、不 bundle,PR 版本段写「无需 bump + 理由」。必须 bump 的运行时路径清单:
    `packages/`、`package.json`、`Dockerfile`、`docker-compose`、`dist/`、`configs/`、`assets/`、
    `esbuild.config.mjs`、`tsconfig.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`.dockerignore`、
    `scripts/install-mesio.sh`、`scripts/install-biliup.sh`。
