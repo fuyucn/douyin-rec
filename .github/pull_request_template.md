@@ -48,4 +48,6 @@ Fixes #<N>
 <!-- 没覆盖到的、需要人留意的;确无写「无」并说明依据 -->
 
 ## 版本
-<!-- feat/fix:`0.0.X → 0.0.Y`(patch +1,dist 已 bundle);非运行时(仅 scripts/docs/test/.github):`无需 bump:<理由>` -->
+<!-- 按路径判定(与提交类型无关,见 AGENTS.md「版本规则」):改动触及运行时路径(清单 = scripts/pr-gate.py 的 RUNTIME_PATHS,
+     含 packages/、根 manifest、锁文件、Dockerfile、configs/、assets/、两个 install 脚本等)→ `0.0.X → 0.0.Y`(patch +1,已 bundle);
+     只改工具类文件(docs/、test/、plans/、.github/、其余 scripts/ 等)→ `无需 bump:<理由>` -->

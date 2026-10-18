@@ -427,7 +427,7 @@ docker 固定 `/output-data`（映射宿主机 `docker-data/`）。专用 env（
 - **部署不是强制的**：不需要每次 bump 都部署；部署时只需用 bundle 产物
   （`dist/douyin-rec.mjs`）的 `APP_VERSION` 确认节点上跑的是哪个版本。
 - **非运行时豁免（工具类 PR）**：改动只落在工具类目录（`docs/`、`test/`、`.github/`、`plans/`、`dev/`、
-  `remote/`、`scripts/` 里除两个 install 脚本外的文件 等）或 vitest 测试文件(`.test` 后缀)时，**不 bump、不 bundle**；
+  `remote/`、`scripts/` 里除两个 install 脚本外的文件 等）或 vitest 收集的用例文件(以 vitest.config 的 include 为准)时，**不 bump、不 bundle**；
   PR 的「版本」段写「无需 bump + 理由」。
   判定是**黑名单**语义：只要改动触及下列运行时路径之一，就必须 bump 并重新 bundle——
   `packages/`、`package.json`、`Dockerfile`、`docker-compose`、`dist/`、`configs/`、`assets/`、

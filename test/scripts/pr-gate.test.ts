@@ -162,6 +162,16 @@ describe("pr-gate.py", () => {
       expect(gate(body, ["--title", title, "--files", file]).lines.join("\n"), `${title} ${wording}`).toContain("触及运行时路径");
     }
     expect(gate(GOOD, ["--title", "test(app): y", "--files", "packages/app/src/a.test.ts"]).status).toBe(0);
+    // Exemption matches what vitest collects; a .tsx "test" ships like any other source.
+    expect(gate(GOOD, ["--title", "test(web): y", "--files", "packages/web/src/a.test.tsx"]).lines.join("\n")).toContain("触及运行时路径");
+  });
+  it("未触及运行时路径时不看 type:feat 只改文档、理由不含固定措辞也放行;无需 bump 里引用旧版本号不误判", () => {
+    const docsOnly = ["--files", "docs/a.md"];
+    const plain = GOOD.replace(/无需 bump:.*/, "文档改动,版本不变");
+    expect(gate(plain, ["--title", "feat(docs): y", ...docsOnly]).status).toBe(0);
+    expect(gate(plain, ["--title", "docs: y", ...docsOnly]).status).toBe(0);
+    const quoted = GOOD.replace(/无需 bump:.*/, "无需 bump;上次 0.0.5 → 0.0.6 已部署");
+    expect(gate(quoted, ["--title", "docs: y", ...docsOnly]).status).toBe(0);
   });
   it("模板里的 HTML 注释与占位不算内容;原样模板 → FAIL", () => {
     const tpl = join(import.meta.dirname, "..", "..", ".github", "pull_request_template.md");
