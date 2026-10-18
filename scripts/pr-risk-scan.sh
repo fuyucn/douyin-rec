@@ -53,6 +53,12 @@ cur=""
 in_hunk=0
 CTX=20            # context lines kept on each side of a change
 HEAD_KEEP=3       # leading hunk lines always matched (the enclosing function signature)
+# Signature-like lines (function / method / class / arrow const / shell function). The latest one seen
+# in the hunk is matched with every change, so a doc comment above the function or a second function
+# merged into the same hunk cannot push the enclosing signature out of the window.
+SIG_RE='^[[:space:]]*((export|async|public|private|protected|static|readonly|default|override)[[:space:]]+)*(function[[:space:]*]|class[[:space:]]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*(<[^>]*>)?\(.*\)[^;]*\{[[:space:]]*$|(const|let)[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=.*=>)|^[A-Za-z_][A-Za-z0-9_-]*[[:space:]]*\(\)[[:space:]]*\{'
+NOT_SIG_RE='^[[:space:]]*(if|for|while|switch|catch|else|return|do|await|new)([[:space:]]|\(|$)'
+last_sig=""
 head_left=0
 old_left=0
 new_left=0
@@ -120,6 +126,7 @@ start_hunk() {
   in_hunk=1
   hunk="${1#@@*@@}"$'\n'
   head_left=$HEAD_KEEP
+  last_sig=""
   old_left=1; new_left=1
   if [[ "$1" =~ ^@@\ -[0-9]+(,([0-9]+))?\ \+[0-9]+(,([0-9]+))?\ @@ ]]; then
     old_left="${BASH_REMATCH[2]:-1}"; new_left="${BASH_REMATCH[4]:-1}"
@@ -145,6 +152,8 @@ while IFS= read -r line; do
       "\\"*) continue ;;  # "\ No newline at end of file"
     esac
     body="${line:1}"
+    [[ "$body" =~ $SIG_RE && ! "$body" =~ $NOT_SIG_RE ]] && last_sig="$body"
+    [[ "$line" == [+-]* && -n "$last_sig" ]] && hunk+="$last_sig"$'\n'
     if (( head_left > 0 )); then
       # With --function-context the hunk opens on the enclosing function's signature: always match it.
       hunk+="$body"$'\n'; head_left=$((head_left - 1))
@@ -165,11 +174,15 @@ while IFS= read -r line; do
   fi
   case "$line" in
     "diff "*) cur=""; header_paths "$line" ;;
-    "+++ b/"*) cur="${line#+++ b/}"; check_path "$cur" ;;
-    "--- a/"*) cur="${line#--- a/}"; check_path "$cur" ;;  # 删除文件时 +++ 是 /dev/null,靠这行拿路径
+    "+++ /dev/null"*|"--- /dev/null"*) ;;
+    # File headers: git (`b/x`), plain `diff -u` (`x<TAB>timestamp`, optional a/ b/ prefix).
+    "+++ "*) p="${line#+++ }"; p="${p%%$'\t'*}"; cur="${p#b/}"; check_path "$cur" ;;
+    "--- "*) p="${line#--- }"; p="${p%%$'\t'*}"; cur="${p#a/}"; check_path "$cur" ;;  # 删除文件时 +++ 是 /dev/null,靠这行拿路径
     "rename from "*) check_path "${line#rename from }" ;;
     "rename to "*) cur="${line#rename to }"; check_path "$cur" ;;
     "@@"*) start_hunk "$line" ;;
+    # A change line outside any hunk means the counts were wrong or the diff was cut: fail closed.
+    [+-]*) reasons+=("diff 格式异常(hunk 外的增删行): ${cur:-未知文件}") ;;
   esac
 done <<< "$DIFF"
 flush_hunk

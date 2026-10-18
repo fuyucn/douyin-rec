@@ -67,6 +67,8 @@ MULTILINE_RULES: list[tuple[str, str, str]] = [
     # biliup cookies.json layout: {"name": "SESSDATA", "value": "..."}.
     ("登录凭证键值", r"(?i)\"name\"\s*:\s*\"(?:sessdata|bili_jct|dedeuserid(?:__ckmd5)?|sid|buvid3|sessionid)\""
      r"\s*,\s*\"value\"\s*:\s*\"[^\"\n]{16,}", "登录 cookie 键值对(name/value 形态)"),
+    ("登录凭证键值", r"(?i)\"value\"\s*:\s*\"[^\"\n]{16,}\"\s*,\s*\"name\"\s*:\s*"
+     r"\"(?:sessdata|bili_jct|dedeuserid(?:__ckmd5)?|sid|buvid3|sessionid)\"", "登录 cookie 键值对(value/name 形态)"),
 ]
 
 
