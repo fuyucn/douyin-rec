@@ -15,10 +15,10 @@
 
 ## 进行中
 - [!] **T-79 队列页「上传」视图:每节点 biliup 实时进度(issue [#44](https://github.com/fuyucn/douyin-rec/issues/44))** — 计划 [`plans/039_upload_view.md`](plans/039_upload_view.md)
-  — 2026-10-18 计划经三轮独立设计审查(第三轮唯一 HIGH 已按建议修订),审查轮次用完 → **`needs-decision`**:确认计划 + T0(镜像补 `ss`)是否做。
+  — 2026-10-18 计划经三轮独立设计审查,PR [#263](https://github.com/fuyucn/douyin-rec/pull/263) 已合并(计划入库)。**仍 `[!]`**:确认计划 + T0(镜像补 `ss`)是否做。
   **做什么**：节点状态命令旁路扫描 biliup 进程(只读),master 算速率/剩余/卡住/重试换线/最近结果,队列页按节点展示。**验收**：见计划 T1a–T4。
 - [!] **T-80 派生分P弹幕 xml 回收与总 xml 区分(issue [#84](https://github.com/fuyucn/douyin-rec/issues/84))** — 计划 [`plans/040_derived_part_xml_recycle.md`](plans/040_derived_part_xml_recycle.md)
-  — 2026-10-18 计划经三轮独立设计审查;审查发现两处**既有**风险(维护清理可能删掉会话唯一的空 xml、单节点重跑可能用分P切片覆盖总 xml),列为 T0 先修。审查轮次用完 → **`needs-decision`**:改名(R)还是保持同名(M)、T0 是否先行。
+  — 2026-10-18 计划经三轮独立设计审查,PR [#264](https://github.com/fuyucn/douyin-rec/pull/264) 已合并(计划入库;T0 改为空 xml 永不凭副本证据删除,emptyXml 类别停止删除)。**仍 `[!]`**:改名(R)还是保持同名(M)、T0 是否先行。
   **做什么**：T0 修既有风险(不删文件)→ T1 清单 → T2 维护页回收(dryRun + 审计)。**验收**：见计划。
 
 - [~] **T-78 追加后回读分P数遇B站列表刷新延迟:先间隔重读再换线（issue [#66](https://github.com/fuyucn/douyin-rec/issues/66)）**
@@ -34,7 +34,7 @@
   **做什么**：①选中节点失联超阈值转待人工或界面提示 ②立即执行遇选中节点失联返回冲突 ③脚手架双节点(已完成)。**验收**：三项各有测试;变异「失联当成空」时第三项场景变红(已满足)。
 
 - [~] **T-67 主播名含 emoji/全角符号/点号时收口失败:stem 清洗、稿件标题保留原始字符（issue [#171](https://github.com/fuyucn/douyin-rec/issues/171)）**
-  — 2026-10-18 认领。PR [#236](https://github.com/fuyucn/douyin-rec/pull/236)(0.0.179,gate PASS,独立审查 APPROVE)。**风险扫描判上传类 → `needs-decision`,等人拍板合并**。
+  — 2026-10-18 认领。PR [#236](https://github.com/fuyucn/douyin-rec/pull/236) 已合并(0.0.186,独立审查两轮 APPROVE)。审查发现稿件查重按标题精确比较,emoji/全角标题若被B站改写会被判「无稿件」而重传 → 已改为宽松匹配命中时返回「无法确认」(各调用方转人工,不重传),回归用例撤修复即红。**待部署实跑**。
   **做什么**：stem 渲染遇非法文件名字符改为清洗(已合法名原样不变);稿件标题四处(master / 节点 / 队列 / 边录边传)收口为 core 单一函数,未配稿件模板时保留原始字符。
   **验收**：三种以上非法字符形态回归用例;已合法名 stem 与标题不变;部署后此类房间收口不再需要人工改名。
 
@@ -52,7 +52,7 @@
   **验收**：8 条房间用例 + 5 组变异均被抓到;部署后关闭。
 
 - [~] **T-71 录制凭证文件遗留项:启动清扫、同步抛错回滚、启动失败告警去重（issue [#41](https://github.com/fuyucn/douyin-rec/issues/41)）**
-  — 2026-10-18 PR [#244](https://github.com/fuyucn/douyin-rec/pull/244)(0.0.179,gate PASS,独立审查 APPROVE)。**风险扫描判删除类(只删 run 目录凭证临时文件)→ `needs-decision`,等人拍板合并**。
+  — 2026-10-18 PR [#244](https://github.com/fuyucn/douyin-rec/pull/244) 已合并(0.0.184,独立审查两轮 APPROVE;删除仅限 run 目录本模块凭证临时文件)。**待部署实跑**。
   **做什么**：serve 启动清扫残留凭证文件;子进程同步抛错时清理进程表与凭证文件;启动失败告警按任务去重、成功后重置。**验收**：各分支 vitest + 变异验证;部署后 run 目录无残留。
 
 - [~] **T-72 隐私闸门与风险扫描加固（issue [#74](https://github.com/fuyucn/douyin-rec/issues/74)）**
