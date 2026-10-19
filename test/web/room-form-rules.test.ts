@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { shouldUseNodeSideUpload } from "../../packages/orchestrator/src/node-side-upload";
 import {
   applyChange,
+  burnVersionsApply,
   keepArchiveFromStored,
   accountToggleCopy,
   cookieLock,
@@ -291,5 +292,24 @@ describe("accountToggleCopy — toggle copy by what the account does (#85)", () 
   it("stream only, no danmu (kuaishou)", () => {
     expect(accountToggleCopy({ cookieForStream: true, danmuAvailable: false }))
       .toEqual({ labelKey: "roomForm.useCookieStreamOnly", hintKey: "rooms.useCookieHintStreamOnly" });
+  });
+});
+
+describe("burnVersionsApply — VERSIONS chips only where they can take effect (#284)", () => {
+  it("no processing rule → hidden (rule is the only thing that can burn)", () => {
+    expect(burnVersionsApply(facts({ hasRule: false }))).toBe(false);
+  });
+  it("rule disabled → hidden (nothing runs while the rule is paused)", () => {
+    expect(burnVersionsApply(facts({ procEnabled: false }))).toBe(false);
+  });
+  it("enabled rule → shown, for archive and upload alike (stage burns too)", () => {
+    expect(burnVersionsApply(facts({ uploadOn: true }))).toBe(true);
+    expect(burnVersionsApply(facts({ uploadOn: false }))).toBe(true);
+  });
+  it("danmu off → hidden, matching the detail page (no file to burn from)", () => {
+    expect(burnVersionsApply(facts({ danmu: false }))).toBe(false);
+  });
+  it("platform without danmu → hidden", () => {
+    expect(burnVersionsApply(facts({ danmuAvailable: false }))).toBe(false);
   });
 });

@@ -23,8 +23,8 @@ import { RuleSwitch, ToggleRow } from "../components/room-form/parts";
 import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
-import { factsOf, formFromRoom, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
-import { deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
+import { factsOf, formFromRoom, ruleFactsOf, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
+import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
 import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
 interface Props {
@@ -89,18 +89,20 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   const hasRecording = !!room.recording && !managed;
   const ctx: RoomContext = {
     hasRecording,
+    // A rule exists only when the API returned a processing half; a task-only room has none.
+    hasRule: !!room.processing,
     danmuAvailable: plat ? plat.hasDanmu : true,
     cookieReady: cookieReadyFor(room.platform, cookieStatuses, douyinReady),
     // Douyin streams anonymously; its cookie only serves danmu. Other platforms stream with it.
     cookieForStream: room.platform !== "douyin",
   };
-  const facts = factsOf(form, ctx);
+  const facts = ruleFactsOf(form, ctx);
   const c = deriveConstraints(facts);
   // Re-settle the upload method after every change: turning burn on / adding nodes can invalidate it.
   const update = (patch: Partial<RoomForm>): void =>
     setForm((f) => {
       const next = { ...f, ...patch };
-      return { ...next, method: settledMethod(factsOf(next, ctx)) };
+      return { ...next, method: settledMethod(ruleFactsOf(next, ctx)) };
     });
 
   const flow = flowSummary(facts, !!room.recording && room.recording.enabled);
@@ -215,21 +217,23 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                   </label>
                 )}
 
-                <div>
-                  <span className="field-label">{t("room.editor.versions")}</span>
-                  <div className="flex flex-wrap gap-1.5">
-                    <span className="chip rm-pick is-on" aria-disabled="true">{t("room.editor.original")}</span>
-                    {(["burnDanmu", "burnLivechat"] as const).map((k) => (
-                      <button key={k} type="button" disabled={c.burn.locked} aria-pressed={!c.burn.locked && form[k]}
-                              title={c.burn.locked && c.burn.reasonKey ? t(c.burn.reasonKey) : undefined}
-                              className={`chip rm-pick${!c.burn.locked && form[k] ? " is-on" : ""}`}
-                              onClick={() => update({ [k]: !form[k] })}>
-                        {t(k === "burnDanmu" ? "room.editor.danmuVer" : "room.editor.livechatVer")}
-                      </button>
-                    ))}
+                {burnVersionsApply(factsOf(form, ctx)) && (
+                  <div>
+                    <span className="field-label">{t("room.editor.versions")}</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="chip rm-pick is-on" aria-disabled="true">{t("room.editor.original")}</span>
+                      {(["burnDanmu", "burnLivechat"] as const).map((k) => (
+                        <button key={k} type="button" disabled={c.burn.locked} aria-pressed={!c.burn.locked && form[k]}
+                                title={c.burn.locked && c.burn.reasonKey ? t(c.burn.reasonKey) : undefined}
+                                className={`chip rm-pick${!c.burn.locked && form[k] ? " is-on" : ""}`}
+                                onClick={() => update({ [k]: !form[k] })}>
+                          {t(k === "burnDanmu" ? "room.editor.danmuVer" : "room.editor.livechatVer")}
+                        </button>
+                      ))}
+                    </div>
+                    {c.burn.locked && c.burn.reasonKey && <p className="text-xs text-muted mt-1">{t(c.burn.reasonKey)}</p>}
                   </div>
-                  {c.burn.locked && c.burn.reasonKey && <p className="text-xs text-muted mt-1">{t(c.burn.reasonKey)}</p>}
-                </div>
+                )}
 
                 <p className="text-xs text-muted">
                   <span className="font-mono uppercase mr-2">{t("room.editor.flow")}</span>

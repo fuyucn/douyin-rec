@@ -1,8 +1,43 @@
 import { describe, it, expect } from "vitest";
-import { formFromRoom, payloadFromForm, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { factsOf, formFromRoom, payloadFromForm, ruleFactsOf, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { deriveConstraints, settledMethod } from "../../packages/web/src/lib/room-form-rules.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
-const ctx: RoomContext = { hasRecording: true, danmuAvailable: true, cookieReady: true, cookieForStream: false };
+const ctx: RoomContext = { hasRecording: true, hasRule: true, danmuAvailable: true, cookieReady: true, cookieForStream: false };
+
+describe("factsOf carries the room's rule presence (#284)", () => {
+  it("task-only room (no processing half) → hasRule false, so VERSIONS stays hidden", () => {
+    const f = formFromRoom({ room: "1", platform: "douyin", processing: null } as never);
+    expect(factsOf(f, { ...ctx, hasRule: false }).hasRule).toBe(false);
+  });
+  it("room with a rule → hasRule true", () => {
+    const f = formFromRoom({ room: "1", platform: "douyin", processing: { enabled: true, pipeline: {} } } as never);
+    expect(factsOf(f, ctx).hasRule).toBe(true);
+  });
+});
+
+describe("task-only room save judges rolling as if the rule exists (#284)", () => {
+  const taskOnly = () => formFromRoom({
+    room: "1", platform: "douyin", processing: null,
+    recording: { danmu: 1, quality: "origin", engine: "ffmpeg", segmentSec: 1800, useCookie: true },
+  } as never);
+  it("rolling + burn on falls back to upload even when ctx.hasRule is false", () => {
+    const f = { ...taskOnly(), uploadOn: true, method: "rolling" as const, burnDanmu: true, workers: ["local"] };
+    const r = payloadFromForm(f, { ...ctx, hasRule: false });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.payload.processing?.pipeline?.upload?.mode).toBe("upload");
+    expect(r.payload.processing?.pipeline?.steps?.burnDanmu).toBe(true);
+  });
+  it("the editor's settled method agrees with what save stores (no ROLLING offered then rewritten)", () => {
+    const f = { ...taskOnly(), uploadOn: true, method: "rolling" as const, burnDanmu: true, workers: ["local"] };
+    const noRule = { ...ctx, hasRule: false };
+    expect(settledMethod(ruleFactsOf(f, noRule))).toBe("after");
+    expect(deriveConstraints(ruleFactsOf(f, noRule)).rolling.locked).toBe(true);
+    // Only the VERSIONS visibility keeps the real (display) rule presence.
+    expect(factsOf(f, noRule).hasRule).toBe(false);
+  });
+});
 
 function mkRoom(over: { recording?: Partial<NonNullable<RoomDTO["recording"]>> | null; processing?: Partial<NonNullable<RoomDTO["processing"]>> | null } = {}): RoomDTO {
   const recording = over.recording === null ? null : {

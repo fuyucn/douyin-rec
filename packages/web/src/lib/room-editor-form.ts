@@ -80,6 +80,8 @@ export function formFromRoom(r: RoomDTO): RoomForm {
 /** Room facts the rules need beyond the form itself. */
 export interface RoomContext {
   hasRecording: boolean;
+  /** The room already has a hub rule. A task-only room has none, so nothing can burn there. */
+  hasRule: boolean;
   danmuAvailable: boolean;
   cookieReady: boolean;
   cookieForStream: boolean;
@@ -93,9 +95,18 @@ export function factsOf(f: RoomForm, ctx: RoomContext): FormFacts {
     danmuAvailable: ctx.danmuAvailable,
     cookieReady: ctx.cookieReady,
     cookieForStream: ctx.cookieForStream,
-    // Saving always upserts the hub rule through the rooms API (empty workers = all nodes).
-    hasRule: true,
+    hasRule: ctx.hasRule,
   };
+}
+
+/**
+ * Facts for every decision that save will also make (locks, settled method, flow, stored values).
+ * Saving always upserts the hub rule, so these assume the rule exists even for a task-only room;
+ * display and save must share this one view or the editor would offer choices save then rewrites.
+ * Only the VERSIONS visibility reads the real `ctx.hasRule` (via `factsOf`).
+ */
+export function ruleFactsOf(f: RoomForm, ctx: RoomContext): FormFacts {
+  return factsOf(f, { ...ctx, hasRule: true });
 }
 
 export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; error: "schedule" };
@@ -108,7 +119,7 @@ export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; er
 export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   const sched = splitSchedule(f.schedule);
   if (!sched) return { ok: false, error: "schedule" };
-  const stored = storedFromForm(factsOf(f, ctx));
+  const stored = storedFromForm(ruleFactsOf(f, ctx));
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
   const recording: RoomPayload["recording"] = ctx.hasRecording
     ? {
