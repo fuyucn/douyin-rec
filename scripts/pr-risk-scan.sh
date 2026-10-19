@@ -56,12 +56,8 @@ DISPLAY_ONLY=(
   packages/web/src/lib/notification-text.ts
   packages/web/src/lib/hub-job-steps.ts
 )
-# Even in a display-only file, a line that calls the network keeps the full rules.
+# A display-only hunk that calls the network (fetch( / api.x() falls back to the full rules.
 CALL_RE='fetch\(|(^|[^A-Za-z0-9_])api\.[A-Za-z]+\('
-# Single-line `import { a, b } from "m"` / `export { a } from "m"`: only the brace list of names is
-# blanked (names are labels). The module path, `as` aliases, default / namespace / side-effect imports
-# and `import x = require()` stay matched: swapping the module or alias can change what runs.
-IMPORT_NAMES_RE='^([[:space:]]*(import|export)([[:space:]]+type)?[[:space:]]*)\{[^}]*\}([[:space:]]*from[[:space:]]*["'"'"'][^"'"'"']*["'"'"'][[:space:]]*;?[[:space:]]*)$'
 
 reasons=()
 notes=()
@@ -122,19 +118,16 @@ flush_hunk() {
     # Every signature in the hunk participates: a change deep inside a second function (or inside a
     # callback that itself has a signature) must still see all enclosing names.
     if (( ${#hit_sigs[@]} )); then hunk="$(printf '%s\n' "${hit_sigs[@]}")"$'\n'"$hunk"; fi
-    local pair label re text display=0 f calls
+    local pair label re text display=0 f
     for f in "${DISPLAY_ONLY[@]}"; do [[ "$cur" == "$f" ]] && display=1; done
-    text=""
-    local ln
-    while IFS= read -r ln; do
-      [[ "$ln" =~ $IMPORT_NAMES_RE && "$ln" != *" as "* ]] && ln="${BASH_REMATCH[1]}{}${BASH_REMATCH[4]}"
-      text+="$ln"$'\n'
-    done <<< "$hunk"
+    text="$hunk"
+    # A display file whose hunk calls the network gets the full rules for the whole hunk: the keyword
+    # may sit on a wrapped argument line or in a URL variable, not on the call line itself.
+    (( display )) && grep -Eq "$CALL_RE" <<< "$text" && display=0
     for pair in "上传:$UPLOAD_RE" "清理/删除:$DELETE_RE" "ledger 状态转换:$LEDGER_RE"; do
       label="${pair%%:*}"; re="${pair#*:}"
       if grep -Eiq "$re" <<< "$text"; then
-        calls="$(grep -E "$CALL_RE" <<< "$text" || true)"   # no pipe: pipefail + grep -q SIGPIPE would fail open
-        if (( display )) && ! grep -Eiq "$re" <<< "$calls"; then notes+=("提示[$label](仅展示,不计 RISK): $cur")
+        if (( display )); then notes+=("提示[$label](仅展示,不计 RISK): $cur")
         else reasons+=("内容[$label]: $cur"); fi
       fi
     done

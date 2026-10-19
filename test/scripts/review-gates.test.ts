@@ -282,21 +282,21 @@ describe("pr-risk-scan.sh", () => {
   it("不在展示清单里的 web 文件照旧按内容判 RISK", () => {
     expect(risk(diffOf("packages/web/src/pages/HubRuleDialog.tsx", "const uploadMode = 'upload';")).status).toBe(1);
   });
-  it("只改导入行(导入名含上传/台账字样)不按内容判 RISK;真实调用照判", () => {
-    expect(risk(diffOf("packages/app/src/x.ts", 'import { uploadPlain, SyncLedger } from "./y.js";')).status).toBe(0);
-    expect(risk(diffOf("packages/app/src/x.ts", 'export { uploadPlain } from "./y.js";')).status).toBe(0);
-    expect(risk(diffOf("packages/app/src/x.ts", "await uploadPlain(job);")).status).toBe(1);
-  });
   it("导入行里换模块路径、换别名、副作用导入、require 仍判 RISK", () => {
     expect(risk(diffOf("packages/app/src/x.ts", 'import { run } from "./upload.js";')).status).toBe(1);
     expect(risk(diffOf("packages/app/src/x.ts", 'import { uploadAll as finalize } from "./stage.js";')).status).toBe(1);
     expect(risk(diffOf("packages/app/src/x.ts", 'import "./cleanup-scheduler.js";')).status).toBe(1);
     expect(risk(diffOf("packages/app/src/x.ts", 'import x = require("./upload.js");')).status).toBe(1);
     expect(risk(diffOf("packages/app/src/x.ts", 'import {x} from "./y.js"; await uploadPlain(job);')).status).toBe(1);
+    // Module swap where the keyword is only in the imported name: must stay RISK.
+    expect(risk(diffOf("packages/app/src/x.ts", 'import { cleanupAll } from "./b.js";')).status).toBe(1);
   });
   it("展示清单里的文件新增网络调用仍判 RISK", () => {
     expect(risk(diffOf("packages/web/src/lib/i18n.tsx", 'await fetch("/api/hub/upload", { method: "POST" });')).status).toBe(1);
     expect(risk(diffOf("packages/web/src/lib/notification-text.ts", "void api.uploadNow(k);")).status).toBe(1);
+    // Keyword on a wrapped argument line, not the call line.
+    const wrapped = "diff --git a/packages/web/src/lib/i18n.tsx b/packages/web/src/lib/i18n.tsx\n--- a/packages/web/src/lib/i18n.tsx\n+++ b/packages/web/src/lib/i18n.tsx\n@@ -1,0 +1,2 @@\n+await api.retryJob(\n+  id, \"upload\");\n";
+    expect(risk(wrapped).status).toBe(1);
   });
   it("签名启发式不把 if/for 当函数", () => {
     const filler = Array.from({ length: 30 }, (_, i) => ` const c${i} = ${i};`);
