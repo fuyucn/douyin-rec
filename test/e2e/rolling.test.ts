@@ -243,6 +243,7 @@ describe("e2e: rolling(边录边传)", () => {
       await s.reconcile();
       const key = s.onlyKey();
       expect(s.jobState(key)).toBe("needs_manual");
+      expect(s.ledger.get(key)?.error).toContain("无稿件号");
       expect(s.fake.draftCount).toBe(0);
       expect(s.warnings.some((w) => w.includes("剔除成员")), "member must not be pruned").toBe(false);
     });
