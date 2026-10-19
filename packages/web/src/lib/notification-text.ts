@@ -16,13 +16,19 @@ function baseName(p?: string): string {
   return parts[parts.length - 1] || p;
 }
 
-/** Only the string fields we render; anything else in `ctx` is ignored. */
-function ctxOf(ev: Record<string, unknown>): { name?: string; date?: string; time?: string; next?: string } {
+/**
+ * Only the string fields we render; anything else in `ctx` is ignored. `name` is the display name only
+ * when the shared chain resolved a real one; a fallback (unknown room / "platform room") lands in
+ * `fallbackName` so it never outranks the event's own anchor and never prefixes an error.
+ */
+function ctxOf(ev: Record<string, unknown>): { name?: string; fallbackName?: string; date?: string; time?: string; next?: string } {
   const c = ev.ctx;
   if (!c || typeof c !== "object" || Array.isArray(c)) return {};
   const o = c as Record<string, unknown>;
   const str = (k: string): string | undefined => (typeof o[k] === "string" && o[k] !== "" ? (o[k] as string) : undefined);
-  return { name: str("name"), date: str("date"), time: str("time"), next: str("next") };
+  const name = str("name");
+  const fallback = o.nameSource === "fallback";
+  return { name: fallback ? undefined : name, fallbackName: fallback ? name : undefined, date: str("date"), time: str("time"), next: str("next") };
 }
 
 /** Event → { toggle key, text, toast kind }; null = no toast for this kind. */
@@ -31,20 +37,22 @@ export function describeEvent(e: AppEventDTO, t: T): { key: NotifKey; message: s
   const s = (k: string): string => String(ev[k] ?? "");
   const ctx = ctxOf(ev);
   const when = ctx.date ? `${ctx.date}${ctx.time ? ` ${ctx.time}` : ""}` : s("date");
-  // Session label for hub events: `name · date` from ctx, else the enriched anchor/date, else the raw room.
+  // One name priority for every event: resolved ctx name > event anchor > ctx fallback name.
+  const nameOf = (): string => ctx.name || s("anchor") || ctx.fallbackName || "";
+  // Session label for hub events: `name · date`, else the raw room / key.
   const session = (fallback: string): string => {
-    const name = ctx.name || s("anchor");
+    const name = nameOf();
     return name ? `${name}${when ? ` · ${when}` : ""}` : fallback;
   };
   switch (ev.kind) {
     case "recordStart":
-      return { key: "live", message: t("notif.evLive", { anchor: s("anchor") || ctx.name || s("room") }), type: "info" };
+      return { key: "live", message: t("notif.evLive", { anchor: nameOf() || s("room") }), type: "info" };
     case "recordEnd": {
       const reason = s("reason");
-      return { key: "recordEnd", message: t("notif.evRecordEnd", { anchor: s("anchor") || ctx.name || s("room"), reason: reason ? `（${reason}）` : "" }), type: "success" };
+      return { key: "recordEnd", message: t("notif.evRecordEnd", { anchor: nameOf() || s("room"), reason: reason ? `（${reason}）` : "" }), type: "success" };
     }
     case "recordReconnect":
-      return { key: "live", message: t("notif.evReconnect", { anchor: s("anchor") || ctx.name || s("room"), sec: s("downSec") }), type: "warning" };
+      return { key: "live", message: t("notif.evReconnect", { anchor: nameOf() || s("room"), sec: s("downSec") }), type: "warning" };
     case "mergeDone":
       return { key: "merge", message: t("notif.evMerge", { file: baseName(s("file")) }), type: "success" };
     case "burnDone":
@@ -60,6 +68,7 @@ export function describeEvent(e: AppEventDTO, t: T): { key: NotifKey; message: s
       return { key: "hub", message: t("notif.evHubStart", { room: session(s("room")), count: workers }), type: "info" };
     }
     case "error": {
+      // Deliberately ctx.name only: error events carry no anchor, and a fallback name must not prefix.
       const base = ctx.name
         ? t("notif.evErrorNamed", { name: ctx.name, stage: s("stage"), message: s("message") })
         : t("notif.evError", { stage: s("stage"), message: s("message") });

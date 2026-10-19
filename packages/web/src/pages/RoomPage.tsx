@@ -4,7 +4,7 @@
  * room's runs on the right (reuses `RoomRunsPanel`: workflow DAG / logs / retry).
  * Only real data is shown — no synthesized progress or ETA beyond what the runs panel already has.
  */
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { CalendarRange, ChevronLeft, Clock3, ExternalLink, FileText, MonitorPlay, UploadCloud } from "lucide-react";
 import { api, type TaskDetail } from "../api/client";
@@ -55,12 +55,16 @@ export function RoomPage(): ReactNode {
 
   // Elapsed time only exists for a local recorder process (runtime); remote-only → "—".
   const [detail, setDetail] = useState<TaskDetail | null>(null);
+  const taskRef = useRef(taskId);
   const live = s?.kind === "recording";
   usePolling(() => {
     if (taskId === null || !live) return;
-    void api.getTask(taskId).then(setDetail).catch(() => {});
+    const id = taskId;
+    // Drop a reply for a room we already left (the page stays mounted across room navigation).
+    void api.getTask(id).then((d) => { if (taskRef.current === id) setDetail(d); }).catch(() => {});
   }, 5_000, live);
   useEffect(() => { if (!live) setDetail(null); }, [live]);
+  useEffect(() => { taskRef.current = taskId; setDetail(null); }, [taskId]);
   const rolling = useRoomRolling(room ? room.roomSlug : null);
   const serverTz = useAtomValue(serverTimezoneAtom);
 

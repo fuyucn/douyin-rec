@@ -54,4 +54,19 @@ describe("describeEvent: deliberate changes for events without ctx (#53 N6 revie
     expect(describeEvent(ev({ kind: "uploadDone", bv: "BV1x", url: "u", anchor: "A", date: "2026-10-16" }), t)!.message)
       .toBe('notif.evUpload{"bv":"A · 2026-10-16 · BV1x"}');
   });
+  it("one name priority: resolved ctx name wins over the anchor for record and hub events alike", () => {
+    const ctx = { name: "任务名", nameSource: "task" };
+    expect(describeEvent(ev({ kind: "recordStart", anchor: "主播", room: "r", quality: "q", ctx }), t)!.message).toBe('notif.evLive{"anchor":"任务名"}');
+    expect(describeEvent(ev({ kind: "hubTaskStart", room: "r", workers: [], anchor: "主播", ctx }), t)!.message).toContain("任务名");
+  });
+  it("a fallback ctx name never outranks the anchor and never prefixes an error", () => {
+    const ctx = { name: "未知直播间", nameSource: "fallback" };
+    expect(describeEvent(ev({ kind: "recordStart", anchor: "主播", room: "r", quality: "q", ctx }), t)!.message).toBe('notif.evLive{"anchor":"主播"}');
+    expect(describeEvent(ev({ kind: "recordStart", anchor: "", room: "r", quality: "q", ctx }), t)!.message).toBe('notif.evLive{"anchor":"未知直播间"}');
+    expect(describeEvent(ev({ kind: "error", stage: "s", message: "m", ctx }), t)!.message).toMatch(/^notif\.evError\{/);
+  });
+  it("hub session label prefers the anchor over a fallback ctx name", () => {
+    const ctx = { name: "未知直播间", nameSource: "fallback", date: "2026-10-18" };
+    expect(describeEvent(ev({ kind: "hubTaskStart", room: "r", workers: [], anchor: "主播", ctx }), t)!.message).toContain("主播 · 2026-10-18");
+  });
 });
