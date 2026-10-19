@@ -13,6 +13,7 @@ import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌
                          // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
 import { SyncGate } from "./sync-gate.js";
 import { streamPartMaxMs } from "./stream-part-duration.js";
+import { zeroDiskRoom } from "./zero-disk-room.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
@@ -297,6 +298,7 @@ program
       // hub.config uploadDefaults > built-in defaults). Explicit stream-upload flags still win
       // because they only serve manual debugging.
       const roomSlug = platform.extractRoomSlug(roomToUrl(o.room));
+      const pumpRoom = zeroDiskRoom(platform, o.room);
       const streamMeta = resolveStreamUploadMeta(platform.id, roomSlug);
       // The stored task name is only a fallback; the live stream usually exposes the real
       // anchor. Both the XML metadata and `{name}` should use the real anchor once known.
@@ -365,7 +367,7 @@ program
       // it covers `parts` *and* `pending`. `pending` is the WAL of an upload whose outcome was
       // never persisted, and recovery re-uploads that whole file — listing only `parts` would
       // delete the last copy of an interrupted part (real data loss, found by review #280).
-      const st = readLivePumpState(livePumpStatePath(opts.outDir, o.room));
+      const st = readLivePumpState(livePumpStatePath(opts.outDir, pumpRoom));
       sweepOrphanSpools({
         spoolDir: opts.outDir,
         knownSpoolPaths: spoolPathsToKeep(st),
@@ -392,7 +394,7 @@ program
       });
       const run = runLivePump({
         cookiesPath: cookies,
-        room: o.room,
+        room: pumpRoom,
         fetch: async (r, q) => {
           const s = await platform.getStream(r, q);
           if (s.owner?.trim()) anchorName = s.owner.trim();
