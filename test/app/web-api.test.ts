@@ -2357,6 +2357,16 @@ describe("hubQueue.delivering(F1:边录边传实时进度)", () => {
     expect(b.delivering![0]).toMatchObject({ roomSlug: "111", anchorName: "小苏", bv: "BV1X", confirmed: 2, total: 3 });
   });
 
+  it("名称与通知同一链路(#53):任务名优先于运行时主播名与缓存名;无任务名时用运行时名", () => {
+    const named = store.addTask({ room: "111", name: "小苏" });
+    store.setAnchorName(named.id, "存档名");
+    const live = Object.assign(new MockManager(), { getAnchorName: () => "实时名" });
+    expect(queue({ manager: live, rollingDelivery: () => [d() as never] }).delivering![0]!.anchorName).toBe("小苏");
+    store.addTask({ room: "222" });
+    const items = [d({ roomSlug: "222", sessionBase: "S2" })] as never[];
+    expect(queue({ manager: live, rollingDelivery: () => items }).delivering![0]!.anchorName).toBe("实时名");
+  });
+
   it("未注入 rollingDelivery(旧 master / 无节点)→ 空数组,队列其余字段不受影响", () => {
     const b = queue({});
     expect(b.delivering).toEqual([]);

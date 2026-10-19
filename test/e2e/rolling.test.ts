@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { UploadGate } from "@drec/core";
+import type { Transport } from "@drec/orchestrator";
 import { RollingUploader, type RollingUploaderOpts } from "../../packages/app/src/rolling-upload.js";
 import { ANCHOR, ROOM, Scenario } from "./harness/scenario.js";
 import { pastStartMs, sessionBaseOf, writeRecording } from "./harness/fake-recordings.js";
@@ -206,6 +207,45 @@ describe("e2e: rolling(边录边传)", () => {
       // 再对账:needs_manual 不被自动推进。
       await s.reconcile();
       expect(s.fake.draftCount).toBe(0);
+    });
+
+    // #70 item 1: the prune step must keep a member that has no BV but left an intent or an ambiguous
+    // segment, even when its listed videos are already gone. Pruning it hides the member from the rolling
+    // guard, so the broadcast falls through to the normal path instead of needs_manual.
+    const filesGone = (base: Transport): Transport => new Proxy(base, {
+      get(target, prop, recv) {
+        if (prop === "exists") return async () => false;
+        const v = Reflect.get(target, prop, recv);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+
+    it("listed videos missing + uploading=create, no BV → member kept, needs_manual (#70)", async () => {
+      s = await Scenario.create({ wrapTransport: (base) => filesGone(base) });
+      await crashMidCreate();
+      await s.restart();
+
+      await s.reconcile();
+      const key = s.onlyKey();
+      expect(s.jobState(key)).toBe("needs_manual");
+      expect(s.ledger.get(key)?.error).toContain("无稿件号");
+      expect(s.fake.draftCount).toBe(0);
+      expect(s.warnings.some((w) => w.includes("剔除成员")), "member must not be pruned").toBe(false);
+    });
+
+    it("listed videos missing + ambiguous segment, no BV → member kept, needs_manual (#70)", async () => {
+      s = await Scenario.create({ wrapTransport: (base) => filesGone(base) });
+      const start = pastStartMs(0, 10, 0);
+      const side = writeSidecars(start);
+      writeSegment(start, 0);
+      writeFileSync(join(dir(), `${side.base}.rolling.json`), JSON.stringify({ confirmed: [], ambiguous: [0] }));
+
+      await s.reconcile();
+      const key = s.onlyKey();
+      expect(s.jobState(key)).toBe("needs_manual");
+      expect(s.ledger.get(key)?.error).toContain("无稿件号");
+      expect(s.fake.draftCount).toBe(0);
+      expect(s.warnings.some((w) => w.includes("剔除成员")), "member must not be pruned").toBe(false);
     });
   });
 });

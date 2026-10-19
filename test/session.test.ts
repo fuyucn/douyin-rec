@@ -463,6 +463,25 @@ describe("RecordingSession", () => {
     expect(events.some((e) => e.kind === "recordEnd")).toBe(true);
   });
 
+  it("通知带上下文(#53 N4):任务名优先于平台主播名,附平台与房间号;无任务名用主播名", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-notify-ctx-"));
+    const events: NotifyEvent[] = [];
+    const notifier: Notifier = { async notify(e) { events.push(e); } };
+    const sess = new RecordingSession(new MockDlrRecorder(), { notifier });
+    await sess.start("https://live.douyin.com/123", { ...makeOpts(dir), name: "任务名" }, { anchorName: "主播X" });
+    await sess.stop();
+    const start = events.find((e) => e.kind === "recordStart");
+    expect(start).toMatchObject({ anchor: "任务名", ctx: { name: "任务名", nameSource: "task", platform: "douyin", roomSlug: "123" } });
+    expect(events.find((e) => e.kind === "recordEnd")).toMatchObject({ anchor: "任务名", ctx: { nameSource: "task" } });
+
+    const dir2 = mkdtempSync(join(tmpdir(), "sess-notify-ctx2-"));
+    const events2: NotifyEvent[] = [];
+    const sess2 = new RecordingSession(new MockDlrRecorder(), { notifier: { async notify(e) { events2.push(e); } } });
+    await sess2.start("https://live.douyin.com/123", makeOpts(dir2), { anchorName: "主播X" });
+    await sess2.stop();
+    expect(events2.find((e) => e.kind === "recordStart")).toMatchObject({ anchor: "主播X", ctx: { name: "主播X", nameSource: "live" } });
+  });
+
   it("stop() 默认 → recordEnd reason=手动停止", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sess-stop-reason-"));
     const events: NotifyEvent[] = [];
@@ -502,6 +521,8 @@ describe("RecordingSession", () => {
     rec.ev.onOffline();                     // 抖动断流
     await vi.runAllTimersAsync();           // 判别 true → 不发 recordEnd;重连 onLive → recordReconnect
     expect(events.some((e) => e.kind === "recordReconnect")).toBe(true);
+    // #53 N4: the reconnect warning carries the same context as start / end.
+    expect(events.find((e) => e.kind === "recordReconnect")?.ctx).toMatchObject({ platform: "douyin", roomSlug: "123" });
     expect(events.filter((e) => e.kind === "recordStart").length).toBe(1); // 重连不重复发开播
     expect(events.some((e) => e.kind === "recordEnd")).toBe(false);        // 抖动不是结束
     await sess.stop();
@@ -519,6 +540,8 @@ describe("RecordingSession", () => {
     dm.onAlert?.("连上但 3 分钟 0 条");
     await sess.stop();
     expect(events.some((e) => e.kind === "error" && e.stage === "弹幕")).toBe(true);
+    // #53 N4: session error alerts carry context too (name by the shared chain).
+    expect(events.find((e) => e.kind === "error" && e.stage === "弹幕")?.ctx).toMatchObject({ name: "主播X", roomSlug: "123" });
   });
 
   it("弹幕 start 抛错 → session catch 后 notify {kind:error,stage:弹幕}(不影响录制)", async () => {

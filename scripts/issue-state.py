@@ -129,7 +129,9 @@ def main(argv: list[str]) -> int:
         if err:
             print(err, file=sys.stderr)
             return 1
-        print("OK")
+        # Legal, but say so when executing it will also need a reason file.
+        needs = a.check[1] in table["reasonRequired"] or [frm, a.check[1]] in table.get("reasonRequiredTransitions", [])
+        print("OK(执行时须带 --reason-file)" if needs else "OK")
         return 0
 
     if a.ensure_labels:
@@ -203,6 +205,10 @@ def main(argv: list[str]) -> int:
         reason = rp.read_text(encoding="utf-8")
     if to in table["reasonRequired"] and not reason.strip():
         print(f"迁移到 {to} 必须带 --reason-file(写明原因)", file=sys.stderr)
+        return 1
+    # Per-transition requirement: a staged issue going back to in-progress must say which step merged.
+    if [cur, to] in table.get("reasonRequiredTransitions", []) and not reason.strip():
+        print(f"迁移 {cur or '(无)'} → {to} 必须带 --reason-file(写明哪一步已合并、下一步做什么)", file=sys.stderr)
         return 1
     if to == "needs-decision":
         missing = [m for m in table["needsDecisionMarkers"] if m not in reason]

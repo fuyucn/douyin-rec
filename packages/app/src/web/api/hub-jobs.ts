@@ -9,6 +9,7 @@ import type { ApiResult } from "./types.js";
 import { HUB_JOB_STATES, QUEUE_PHASES, isUploadingMode, platformForRoom, type QueuePhase } from "@drec/core";
 import { listHubJobs, readHubJobLog, latestRunPerRoom, buildQueueView } from "../../hub-jobs.js";
 import * as hubStore from "../../hub-store.js";
+import { knownTaskName } from "../../hub-label-lookup.js";
 
 export function buildHubJobs(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
@@ -61,14 +62,14 @@ export function buildHubJobs(ctx: ApiCtx) {
         };
       }
       try {
-        // 一次 listTasks 建 roomSlug+platform → 主播名映射(hubRuleView 也是这个优先级)。
+        // 一次 listTasks 建 roomSlug+platform → 显示名映射;名称走与通知相同的 core 链路(#53)。
         const tasks = store.listTasks();
         const anchorOf = (platform: string, roomSlug: string): string | null => {
           const t = tasks.find(
             (task) => platformForRoom(task.room).id === platform
               && platformForRoom(task.room).extractRoomSlug(task.room) === roomSlug,
           );
-          return t ? manager.getAnchorName(t.id) ?? t.anchorName ?? t.name ?? null : null;
+          return t ? knownTaskName(t, manager.getAnchorName(t.id)) : null;
         };
         // query 过滤白名单校验:只认契约里的常量(防任意串进 Set;也防前端拼错静默返回空)。
         const csv = (v?: string[]): string[] =>
