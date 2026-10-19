@@ -14,7 +14,7 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-- [~] **T-80 派生分P弹幕 xml 回收与总 xml 区分(issue [#84](https://github.com/fuyucn/douyin-rec/issues/84))** — 计划 [`plans/040_derived_part_xml_recycle.md`](plans/040_derived_part_xml_recycle.md)
+- [!] **T-80 派生分P弹幕 xml 回收与总 xml 区分(issue [#84](https://github.com/fuyucn/douyin-rec/issues/84))** — 计划 [`plans/040_derived_part_xml_recycle.md`](plans/040_derived_part_xml_recycle.md)
   — 2026-10-18 计划经三轮独立设计审查;审查发现两处**既有**风险(维护清理可能删掉会话唯一的空 xml、单节点重跑可能用分P切片覆盖总 xml),列为 T0 先修。审查轮次用完 → **`needs-decision`**:改名(R)还是保持同名(M)、T0 是否先行。
   **做什么**：T0 修既有风险(不删文件)→ T1 清单 → T2 维护页回收(dryRun + 审计)。**验收**：见计划。
 
