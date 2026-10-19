@@ -158,7 +158,9 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
    `scripts/pr-risk-scan.sh`(默认对 `origin/feat/hub-optimization...HEAD`),输出 `RISK`(退出码 1)
    即命中上传 / biliup / 清理 / 删除(rm、unlink)/ 保留规则字段 / ledger 状态转换或 ledger 方法调用,
    或改动了敏感文件清单(收口 / 台账 / 清理 / 保留规则相关,见脚本 `SENSITIVE_FILES`),纯改名按新旧路径判。
-   内容按 hunk 判定,hunk 内所有函数签名行(含多行参数签名、属性箭头函数)都参与匹配(单行翻转保留规则也能命中)。命中后 review agent
+   内容按 hunk 判定,hunk 内所有函数签名行(含多行参数签名、属性箭头函数)都参与匹配(单行翻转保留规则也能命中)。
+   脚本 `DISPLAY_ONLY` 清单里的纯展示模块(词典、提示文案、步骤标签)内容命中只列「提示」,不计 RISK;
+   该 hunk 里只要出现 `fetch(` / `api.x(` 调用就整段按完整规则判。清单外的文件(含导入行)照旧。命中后 review agent
    **不得自动合并**:给 PR 打 `needs-decision`,评论按「决定三行」写清(要决定什么 / 不做会怎样 /
    建议选项),等人拍板。issue 即使是 `accept`,diff 命中 RISK 也一样拦。`PASS` 只表示没命中这些
    规则,不代替第 1–8 条。

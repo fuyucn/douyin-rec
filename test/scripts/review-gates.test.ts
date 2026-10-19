@@ -273,6 +273,32 @@ describe("pr-risk-scan.sh", () => {
     ].join("\n");
     expect(risk(d).status).toBe(1);
   });
+  it("纯展示模块(i18n / 提示文案)里的 upload 字样只列为提示,不判 RISK", () => {
+    const r = risk(diffOf("packages/web/src/lib/i18n.tsx", '  "queue.uploading": "上传中",'));
+    expect(r.status).toBe(0);
+    expect(r.out.split("\n")[0]).toBe("PASS");
+    expect(r.out).toContain("提示[上传](仅展示,不计 RISK): packages/web/src/lib/i18n.tsx");
+  });
+  it("不在展示清单里的 web 文件照旧按内容判 RISK", () => {
+    expect(risk(diffOf("packages/web/src/pages/HubRuleDialog.tsx", "const uploadMode = 'upload';")).status).toBe(1);
+  });
+  it("导入行里换模块路径、换别名、副作用导入、require 仍判 RISK", () => {
+    expect(risk(diffOf("packages/app/src/x.ts", 'import { run } from "./upload.js";')).status).toBe(1);
+    expect(risk(diffOf("packages/app/src/x.ts", 'import { uploadAll as finalize } from "./stage.js";')).status).toBe(1);
+    expect(risk(diffOf("packages/app/src/x.ts", 'import "./cleanup-scheduler.js";')).status).toBe(1);
+    expect(risk(diffOf("packages/app/src/x.ts", 'import x = require("./upload.js");')).status).toBe(1);
+    expect(risk(diffOf("packages/app/src/x.ts", 'import {x} from "./y.js"; await uploadPlain(job);')).status).toBe(1);
+    // Module swap where the keyword is only in the imported name: must stay RISK.
+    expect(risk(diffOf("packages/app/src/x.ts", 'import { cleanupAll } from "./b.js";')).status).toBe(1);
+  });
+  it("展示清单里的文件新增网络调用仍判 RISK", () => {
+    expect(risk(diffOf("packages/web/src/lib/i18n.tsx", 'await fetch("/api/hub/upload", { method: "POST" });')).status).toBe(1);
+    expect(risk(diffOf("packages/web/src/lib/notification-text.ts", "void api.uploadNow(k);")).status).toBe(1);
+    // Keyword on a wrapped argument line, not the call line.
+    const wrapped = "diff --git a/packages/web/src/lib/i18n.tsx b/packages/web/src/lib/i18n.tsx\n--- a/packages/web/src/lib/i18n.tsx\n+++ b/packages/web/src/lib/i18n.tsx\n@@ -1,0 +1,2 @@\n+await api.retryJob(\n+  id, \"upload\");\n";
+    expect(risk(wrapped).status).toBe(1);
+    expect(risk(diffOf("packages/web/src/lib/i18n.tsx", 'import { uploadNow } from "../api/upload";')).status).toBe(1);
+  });
   it("签名启发式不把 if/for 当函数", () => {
     const filler = Array.from({ length: 30 }, (_, i) => ` const c${i} = ${i};`);
     const lines = [" function f() {", " const a = 1;", " const b = 2;", "   if (cleanupDone) {", ...filler, "-const n = 1;", "+const n = 2;"];
