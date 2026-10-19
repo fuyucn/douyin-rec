@@ -6,11 +6,18 @@ const room = (pipeline: object | null, danmu = 1): Pick<RoomDTO, "processing" | 
   processing: pipeline === null ? null : ({ enabled: true, pipeline } as RoomDTO["processing"]),
   recording: { danmu } as RoomDTO["recording"],
 });
+const paused = (pipeline: object): Pick<RoomDTO, "processing" | "recording"> => ({
+  processing: { enabled: false, pipeline } as RoomDTO["processing"],
+  recording: { danmu: 1 } as RoomDTO["recording"],
+});
 const ALL = ["room.editor.original", "room.editor.danmuVer", "room.editor.livechatVer"];
 
 describe("versionKeys", () => {
   it("no processing rule → original only", () => {
     expect(versionKeys(room(null))).toEqual(["room.editor.original"]);
+  });
+  it("paused rule → original only (same reading as the editor, #284)", () => {
+    expect(versionKeys(paused({ upload: { mode: "upload" } }))).toEqual(["room.editor.original"]);
   });
   it("burn flags default on in every delivery mode (stage burns too, same as the pipeline)", () => {
     expect(versionKeys(room({ upload: { mode: "stage" } }))).toEqual(ALL);

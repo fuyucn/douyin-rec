@@ -24,7 +24,7 @@ import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
 import { factsOf, formFromRoom, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
-import { deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
+import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
 import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
 interface Props {
@@ -215,21 +215,23 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                   </label>
                 )}
 
-                <div>
-                  <span className="field-label">{t("room.editor.versions")}</span>
-                  <div className="flex flex-wrap gap-1.5">
-                    <span className="chip rm-pick is-on" aria-disabled="true">{t("room.editor.original")}</span>
-                    {(["burnDanmu", "burnLivechat"] as const).map((k) => (
-                      <button key={k} type="button" disabled={c.burn.locked} aria-pressed={!c.burn.locked && form[k]}
-                              title={c.burn.locked && c.burn.reasonKey ? t(c.burn.reasonKey) : undefined}
-                              className={`chip rm-pick${!c.burn.locked && form[k] ? " is-on" : ""}`}
-                              onClick={() => update({ [k]: !form[k] })}>
-                        {t(k === "burnDanmu" ? "room.editor.danmuVer" : "room.editor.livechatVer")}
-                      </button>
-                    ))}
+                {burnVersionsApply(facts) && (
+                  <div>
+                    <span className="field-label">{t("room.editor.versions")}</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="chip rm-pick is-on" aria-disabled="true">{t("room.editor.original")}</span>
+                      {(["burnDanmu", "burnLivechat"] as const).map((k) => (
+                        <button key={k} type="button" disabled={c.burn.locked} aria-pressed={!c.burn.locked && form[k]}
+                                title={c.burn.locked && c.burn.reasonKey ? t(c.burn.reasonKey) : undefined}
+                                className={`chip rm-pick${!c.burn.locked && form[k] ? " is-on" : ""}`}
+                                onClick={() => update({ [k]: !form[k] })}>
+                          {t(k === "burnDanmu" ? "room.editor.danmuVer" : "room.editor.livechatVer")}
+                        </button>
+                      ))}
+                    </div>
+                    {c.burn.locked && c.burn.reasonKey && <p className="text-xs text-muted mt-1">{t(c.burn.reasonKey)}</p>}
                   </div>
-                  {c.burn.locked && c.burn.reasonKey && <p className="text-xs text-muted mt-1">{t(c.burn.reasonKey)}</p>}
-                </div>
+                )}
 
                 <p className="text-xs text-muted">
                   <span className="font-mono uppercase mr-2">{t("room.editor.flow")}</span>

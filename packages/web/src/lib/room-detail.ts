@@ -8,7 +8,8 @@ import type { RoomDTO } from "../api/client";
  * is nothing to burn, matching the editor's reading (`danmu` off → burn off).
  */
 export function versionKeys(room: Pick<RoomDTO, "processing" | "recording">): string[] {
-  if (!room.processing) return ["room.editor.original"];
+  // Same reading as the editor's `burnVersionsApply`: no rule, or a paused rule, runs no steps.
+  if (!room.processing || room.processing.enabled === false) return ["room.editor.original"];
   const f = burnFlags(room.processing.pipeline?.steps);
   const canBurn = room.recording ? !!room.recording.danmu : true;
   return [

@@ -69,6 +69,17 @@ function effectiveBurn(f: FormFacts): { burnDanmu: boolean; burnLivechat: boolea
   const canBurn = f.danmu && f.danmuAvailable;
   return { burnDanmu: canBurn && f.burnDanmu, burnLivechat: canBurn && f.burnLivechat };
 }
+
+/**
+ * Whether the room has any burn version to choose from at all.
+ *
+ * The editor used to render the VERSIONS chips unconditionally, so archive-only rooms and rooms
+ * whose processing rule is disabled showed "danmu / livechat" pickers that could never take effect.
+ * One predicate keeps the editor, the room detail page and the stored form on the same reading.
+ */
+export function burnVersionsApply(f: FormFacts): boolean {
+  return f.hasRule && f.procEnabled;
+}
 const lock = (reasonKey: string): Lock => ({ locked: true, reasonKey });
 
 /** resolveRollingPolicy 的拒绝原因 → 文案 key(以 mode=rolling、规则启用调用,只会命中这两种)。 */
