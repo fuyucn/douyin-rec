@@ -14,6 +14,10 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-76 节点失联三态的跟进:脚手架双节点、失联超阈值、立即执行拦截（issue [#69](https://github.com/fuyucn/douyin-rec/issues/69)）**
+  — 2026-10-18 第 3 项完成:PR [#257](https://github.com/fuyucn/douyin-rec/pull/257) 已合并(仅测试/文档,独立审查 APPROVE),e2e 脚手架支持多节点,双节点失联场景对「失联当成空」有区分力。**第 1、2 项改收口/上传触发条件 → `needs-decision`**,issue 已写决定三行。
+  **做什么**：①选中节点失联超阈值转待人工或界面提示 ②立即执行遇选中节点失联返回冲突 ③脚手架双节点(已完成)。**验收**：三项各有测试;变异「失联当成空」时第三项场景变红(已满足)。
+
 - [~] **T-67 主播名含 emoji/全角符号/点号时收口失败:stem 清洗、稿件标题保留原始字符（issue [#171](https://github.com/fuyucn/douyin-rec/issues/171)）**
   — 2026-10-18 认领。PR [#236](https://github.com/fuyucn/douyin-rec/pull/236)(0.0.179,gate PASS,独立审查 APPROVE)。**风险扫描判上传类 → `needs-decision`,等人拍板合并**。
   **做什么**：stem 渲染遇非法文件名字符改为清洗(已合法名原样不变);稿件标题四处(master / 节点 / 队列 / 边录边传)收口为 core 单一函数,未配稿件模板时保留原始字符。
