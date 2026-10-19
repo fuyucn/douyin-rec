@@ -97,6 +97,17 @@ describe("迁移执行", () => {
     expect(r.status).toBe(1);
     expect(r.calls).toEqual([]);
   });
+  it("分步票(#253):in-review → in-progress 合法但必须带原因;accept → in-progress 仍不需要", () => {
+    expect(check("in-review", "in-progress")).toBe(0);
+    const bare = run(["78", "in-progress"], ["in-review"]);
+    expect(bare.status).toBe(1);
+    expect(bare.err).toContain("哪一步已合并");
+    expect(bare.calls).toEqual([]);
+    const ok = run(["78", "in-progress"], ["in-review"], "N1 已合并,开始 N2");
+    expect(ok.status).toBe(0);
+    expect(ok.calls.join("\n")).toContain("--add-label in-progress");
+    expect(run(["78", "in-progress"], ["accept"]).status).toBe(0);
+  });
   it("多个状态标签:拒绝(3);--from 指明后清掉全部旧状态标签", () => {
     const amb = run(["78", "in-review"], ["accept", "in-progress"]);
     expect(amb.status).toBe(3);

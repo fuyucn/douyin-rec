@@ -69,6 +69,12 @@ describe("pr-gate.py", () => {
     expect(r.lines).toEqual(["PASS"]);
     expect(r.status).toBe(0);
   });
+  it("分步票(#253):Part of #N 代替 Fixes 通过;两者都缺仍 FAIL", () => {
+    expect(gate(GOOD.replace("Fixes #78\n", "Part of #78\n")).status).toBe(0);
+    const none = gate(GOOD.replace("Fixes #78\n", "参见 #78\n"));
+    expect(none.status).toBe(1);
+    expect(none.lines.join("\n")).toContain("Part of #N");
+  });
   it("缺 Fixes → FAIL", () => {
     const r = gate(GOOD.replace("Fixes #78\n", ""));
     expect(r.status).toBe(1);

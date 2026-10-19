@@ -63,7 +63,7 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 4. **自动实现认领**：实现 heartbeat 扫到 `accept` 且无 `in-progress` 的票即认领（并行 ≤2、范围不重叠），
    打 `in-progress` 并留言「哪个 agent、何时开始、范围、模型」。**人不需要点名派活**；
    只在想指定别的会话做时手动接管。
-5. **实现会话只做这一条**，开分支和 PR，PR 正文写 `Fixes #N`。不合并 PR（合并归 review 会话）、
+5. **实现会话只做这一条**，开分支和 PR，PR 正文写 `Fixes #N`（分步实现的票每步写 `Part of #N`，见下）。不合并 PR（合并归 review 会话）、
    不部署、不顺手做无关改动。
 6. **代码做完先在 issue 留言**：做了什么、评论里哪条没采纳、为什么，然后按「四不 close」自查。
 7. **自动 Review 派独立会话审查**（`fork_context: false` 的新会话，只读审查、不改实现），
@@ -122,7 +122,7 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等人操作**；缺任一条 → 打回，
 在 PR 里列出缺口，票转 `rework-N`，等实现会话补。review 结论一律回帖到 PR（评论也过隐私闸门）。
 
-1. **PR 形态**：base = `feat/hub-optimization`，分支名 `codex/issue-N-<slug>`，正文有 `Fixes #N`；
+1. **PR 形态**：base = `feat/hub-optimization`，分支名 `codex/issue-N-<slug>`，正文有 `Fixes #N`（分步票为 `Part of #N`）；
    diff 尽量小、单一插入点。用 `gh pr view` / `gh pr diff --name-only` /
    `git log --oneline origin/feat/hub-optimization..<branch>` 核对确实存在且对得上 issue。
 2. **验证有实际结果**：`pnpm test` 全量 + `pnpm typecheck`；动前端加 `cd packages/web && pnpm build`；
@@ -149,7 +149,7 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
    文档里的文件名若是仓库已跟踪文件则放行;确属夹具的行加 `issue-guard: allow` 并在评审中说明。
 8. **关联 issue 必须已进入开发状态**:合并前 `gh issue view N --json labels` 核对 PR 的 `Fixes #N` 对应
    issue 带 `in-review`(旧口径票为 `accept` + `in-progress`/`待验证`),且无 `needs-decision` / `decline`。
-   没有 `Fixes #N`、issue 仍停在 `accept`/无状态、或被人改回 `needs-decision` → 不合并,打回并在 PR 里写明。
+   没有 `Fixes #N` / `Part of #N`、issue 仍停在 `accept`/无状态、或被人改回 `needs-decision` → 不合并,打回并在 PR 里写明。
 9. **diff 触及危险类 → 强制 `needs-decision`,不自动合并**:合并前跑
    `scripts/pr-risk-scan.sh`(默认对 `origin/feat/hub-optimization...HEAD`),输出 `RISK`(退出码 1)
    即命中上传 / biliup / 清理 / 删除(rm、unlink)/ ledger 状态转换。命中后 review agent
@@ -176,7 +176,7 @@ issue #78 起，循环里的「状态变更」和「审查前检查」不再靠�
 | 工具 | 用途 | 谁调 |
 | --- | --- | --- |
 | `scripts/issue-state.py <issue> <to> [--reason-file F]` + `scripts/issue-state.json` | **状态标签迁移的唯一入口**：状态标签唯一化（一次删光旧状态标签再加新标签）、按迁移表校验合法性、评论先过 `issue-guard.py`、评论末行带机器可读标记 | 所有心跳；**禁止直接 `gh issue edit` 改状态标签** |
-| `.github/pull_request_template.md` | PR 硬字段：`Fixes #N`、改动范围、验证方式、自审五项、变异验证（撤修复 FAIL + 复原 PASS 两段输出）、验证命令与输出、评论采纳、回写位置、残余风险、版本 | 实现 agent 开 PR 时按模板填 |
+| `.github/pull_request_template.md` | PR 硬字段：`Fixes #N`（分步票 `Part of #N`）、改动范围、验证方式、自审五项、变异验证（撤修复 FAIL + 复原 PASS 两段输出）、验证命令与输出、评论采纳、回写位置、残余风险、版本 | 实现 agent 开 PR 时按模板填 |
 | `scripts/pr-gate.py <PR>` | **审查第 0 步**：机械检查模板字段齐全、变异两段、版本声明、正文过隐私闸门；缺项输出清单、退出码非 0 | review 心跳，派 Opus 之前 |
 | `scripts/reinforce-metrics.py --loop --days N` | 只读 PR 流程指标：返工率与打回轮数分布、逃逸率（合并 48h 内同根因新 incident，按标题关键词粗匹）、`待验证` 停留时长、台账 `[ledger] 拒绝` 计数（`--ledger-log` / `--ledger-container`，日志不可得则标注跳过）；无 gh / 无网络时降级 | 巡检与周报，纯文本表可直接贴 loop 通知 |
 
@@ -185,6 +185,7 @@ issue #78 起，循环里的「状态变更」和「审查前检查」不再靠�
 **合法迁移**（唯一真相 = `scripts/issue-state.json`，改表必须同步改本文）：
 
 - `accept → in-progress`（认领）→ `in-review`（PR 已开）→ PASS：`待验证` ｜ FAIL：`rework-1` → `in-review` → 再 FAIL：`rework-2` → `in-review` → 再 FAIL：`needs-decision`。
+- **分步票**（一张票按计划拆成多个 PR，例如 N1–N8）：每步 PR 正文写 `Part of #N`，不写关闭关键词——基线日后合进默认分支时 `Fixes` 会把还有后续步骤的票自动关掉。某一步合并后 `in-review → in-progress`（必须 `--reason-file` 写明哪步已合并、下一步做什么），下一步开 PR 再转 `in-review`；**最后一步**写 `Fixes #N`，合并后按常规转 `待验证`。
 - `待验证 → closed`（实现侧收口）；`decline → closed`（不做的票收口，需 `--reason-file`）。
 - 任意活跃状态 → `needs-decision` / `blocked`；`needs-decision` 由人改回 `accept` / `decline`。
 - 非法迁移（如 `accept → 待验证`、跳过 `in-review`）退出码 1，不发任何远端写调用；当前同时挂多个状态标签时退出码 3，须 `--from <真实状态>` 指明后才会清理。

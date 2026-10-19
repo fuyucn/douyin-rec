@@ -204,6 +204,10 @@ def main(argv: list[str]) -> int:
     if to in table["reasonRequired"] and not reason.strip():
         print(f"迁移到 {to} 必须带 --reason-file(写明原因)", file=sys.stderr)
         return 1
+    # Per-transition requirement: a staged issue going back to in-progress must say which step merged.
+    if [cur, to] in table.get("reasonRequiredTransitions", []) and not reason.strip():
+        print(f"迁移 {cur or '(无)'} → {to} 必须带 --reason-file(写明哪一步已合并、下一步做什么)", file=sys.stderr)
+        return 1
     if to == "needs-decision":
         missing = [m for m in table["needsDecisionMarkers"] if m not in reason]
         if missing:
