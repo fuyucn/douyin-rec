@@ -709,8 +709,8 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
     ...(o.drainSignal ? { drainSignal: o.drainSignal } : {}),
     ...(o.signal ? { signal: o.signal } : {}),
   });
-  const run = (o: { drainSignal?: AbortSignal; signal?: AbortSignal; maxSegments?: number } = {}): Promise<ReturnType<typeof runLivePump> extends Promise<infer R> ? R : never> =>
-    runLivePump({ ...base(o), cookiesPath: join(dir, "cookies.json"), fetchImpl: upos(64 * 1024) });
+  const run = (o: { drainSignal?: AbortSignal; signal?: AbortSignal; maxSegments?: number; log?: (m: string) => void } = {}): Promise<ReturnType<typeof runLivePump> extends Promise<infer R> ? R : never> =>
+    runLivePump({ ...base(o), cookiesPath: join(dir, "cookies.json"), fetchImpl: upos(64 * 1024), ...(o.log ? { log: o.log } : {}) });
 
   it("drainSignal 一直未置位 → 一路录到上限(对照组)", async () => {
     seg();
@@ -732,11 +732,15 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
 
   it("排空发生在首段之前 → 空手收尾(等价「整窗口没开播」)", async () => {
     seg();
+    const logs: string[] = [];
     const drain = new AbortController();
     drain.abort(); // 信号比 pump 起来更早
-    const r = await run({ drainSignal: drain.signal, maxSegments: 2 });
+    const r = await run({ drainSignal: drain.signal, maxSegments: 2, log: (m) => logs.push(m) });
     expect(r.segments).toHaveLength(0);
     expect(r.ok, r.error ?? "").toBe(true); // 收尾不是失败
+    // 排空必须留痕:排空后还要等当前分 P 传完(或 preupload 退避)可能几分钟,
+    // 「没有新分 P 出现」与「卡死」在日志之外完全无法区分。
+    expect(logs.some((m) => m.includes("已排空"))).toBe(true);
   });
 
   it("排空不是硬停:drainSignal 只停「开下一场」,signal 照旧腰斩在录段", async () => {

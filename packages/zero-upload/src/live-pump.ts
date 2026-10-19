@@ -1418,12 +1418,21 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   // (`[状态] 录制中` / `[状态] 等待开播`). Without them a zero-disk task shows as "running"
   // but never "recording", so the UI cannot tell waiting-for-stream from actually recording.
   log("[状态] 等待开播");
+  let drainLogged = false;
   for (let seg = 0; maxSegments === 0 || seg < maxSegments; seg++) {
     if (await o.shouldStop?.()) break;
     // Window-end drain. Checked between parts only: the broadcast is never cut here, so the
     // part in flight still completes and uploads in full. Note this is NOT `signal` — aborting
     // would kill the ffmpeg mid-part, which is the hard-stop semantics of SIGTERM.
-    if (o.drainSignal?.aborted) break;
+    if (o.drainSignal?.aborted) {
+      // Must be visible: a drained run can still take minutes (the part in flight, or a
+      // preupload backoff), and "no new parts appearing" looks identical to a hang.
+      if (!drainLogged) {
+        drainLogged = true;
+        log("[live-pump] 窗口结束已排空:不再开录下一场,当前分 P 传完后收尾");
+      }
+      break;
+    }
     const s = await acquireStreamWithBackoff({
       room: o.room,
       fetch: o.fetch,
