@@ -43,6 +43,16 @@ describe("0 落盘路径必须注册 SIGUSR2(P1 源码守护)", () => {
     expect(section).toContain("drainSignal:");
   });
 
+  it("退出码区分「无产出」与「全部分 P 进稿」(review #280 P1)", () => {
+    // `ok:true` covers both endings, so the exit code must consult `outcome`; a bare
+    // `res.ok ? 0 : 1` made a room that recorded nothing look like a clean stop.
+    expect(section).toContain('res.outcome !== "no-stream"');
+  });
+
+  it("排空/停止在日志里留痕(不留痕 = 与卡死无法区分)", () => {
+    expect(section).toMatch(/停止录制并中止当前分 P/);
+  });
+
   it("分支内 SIGUSR2 与其他信号用不同信号量(排空 ≠ 硬停)", () => {
     // SIGINT/SIGTERM → abort(腰斩在录段);SIGUSR2 → drain(传完当前段)。
     // 若三者共用一个 AbortController,排空就变成硬停。

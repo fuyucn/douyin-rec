@@ -288,7 +288,7 @@ program
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
-      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath } = await import("@drec/zero-upload");
+      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep } = await import("@drec/zero-upload");
       const { rootBiliupCookies, sweepOrphanSpools } = await import("@drec/app");
       const sizeCap = alignFileSize(Number(o.streamUploadSize ?? DEFAULT_SEGMENT_CAP));
       const streamTitle = o.name?.trim() || platform.extractRoomSlug(roomToUrl(o.room));
@@ -338,10 +338,14 @@ program
       if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${xmlPath}`);
       // Remove spools left by a pump killed mid-part. They never reached the state file, so
       // nothing else would ever delete them. Only old, unreferenced files are touched.
+      // The keep-set is `spoolPathsToKeep` (single source of truth next to the state shape):
+      // it covers `parts` *and* `pending`. `pending` is the WAL of an upload whose outcome was
+      // never persisted, and recovery re-uploads that whole file — listing only `parts` would
+      // delete the last copy of an interrupted part (real data loss, found by review #280).
       const st = readLivePumpState(livePumpStatePath(opts.outDir, o.room));
       sweepOrphanSpools({
         spoolDir: opts.outDir,
-        knownSpoolPaths: st?.parts.map((p) => p.spoolPath) ?? [],
+        knownSpoolPaths: spoolPathsToKeep(st),
         log: (m) => console.log(m),
       });
       const abort = new AbortController();
@@ -402,7 +406,17 @@ program
             ? `[stream-upload] 台账已记录: ${r.bvid}${r.alreadyTerminal ? "(已是终态,未覆盖)" : ""}`
             : `[stream-upload] ⚠️ 台账记录失败(不影响已上传稿件): ${r.error}`);
         }
-        process.exit(res.ok ? 0 : 1);
+        // "No stream" is a real outcome, not a clean finish: the room recorded nothing, so it
+        // must not look like a natural end to the caller. `ok:true` alone used to carry both
+        // "every part uploaded" and "nothing was ever recorded" (review #280 P1), which let a
+        // silently failing room keep a healthy status.
+        const clean = res.ok && res.outcome !== "no-stream";
+        if (!clean) {
+          console.error(
+            `[stream-upload] 本场没有上传任何分 P(${res.outcome ?? "unknown"}),按失败退出并交由调度重试`,
+          );
+        }
+        process.exit(clean ? 0 : 1);
       }).catch((e) => {
         console.error(`[stream-upload] 失败: ${(e as Error).message}`);
         process.exit(1);

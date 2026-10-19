@@ -9,6 +9,7 @@ import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sweepOrphanSpools, ORPHAN_SPOOL_GRACE_MS } from "../../packages/app/src/live-pump-spool.js";
+import { spoolPathsToKeep } from "../../packages/zero-upload/src/live-pump.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "spool-sweep-")); });
@@ -39,6 +40,33 @@ describe("sweepOrphanSpools", () => {
     expect(existsSync(join(dir, "live-pump-1000002-3.ts"))).toBe(true);
     expect(existsSync(join(dir, "someone-else.ts"))).toBe(true);
     expect(existsSync(knownPath)).toBe(true);
+  });
+
+  it("pending 引用的 spool 也要保留(它是「已发起上传、结果未确认」的唯一恢复副本)", () => {
+    // Review #280 P1: the keep-set used to list `parts` only, so the WAL for an in-flight
+    // submit was treated as an orphan. Recovery re-uploads that whole file, so deleting it
+    // turns a recoverable part into an unrecoverable one.
+    const part = join(dir, "live-pump-1000005-1.ts");
+    const pending = join(dir, "live-pump-1000005-2.ts");
+    writeFileSync(part, "confirmed part");
+    writeFileSync(pending, "in-flight submit");
+    age("live-pump-1000005-1.ts", ORPHAN_SPOOL_GRACE_MS + 60_000);
+    age("live-pump-1000005-2.ts", ORPHAN_SPOOL_GRACE_MS + 60_000); // 退避可比宽限期更久
+
+    const keep = spoolPathsToKeep({
+      schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      parts: [{ index: 0, spoolPath: part, filename: "a.ts", stem: "s", title: "P1", bytes: 1, durationSec: 1, confirmed: true }],
+      pending: { kind: "append", partIndex: 1, stem: "s2", title: "P2", bytes: 1, durationSec: 1, spoolPath: pending },
+      updatedAt: 1,
+    });
+
+    expect(sweepOrphanSpools({ spoolDir: dir, knownSpoolPaths: keep })).toEqual([]);
+    expect(existsSync(pending)).toBe(true);   // 恢复依据没被清扫
+    expect(existsSync(part)).toBe(true);
+  });
+
+  it("没有 state 时保留集为空(向后兼容:老 state 缺字段不炸)", () => {
+    expect(spoolPathsToKeep(null)).toEqual([]);
   });
 
   it("宽限期边界:恰好等于宽限期的文件保留(只用严格更旧才删)", () => {

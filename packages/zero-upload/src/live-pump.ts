@@ -242,6 +242,24 @@ export interface LivePumpState {
   updatedAt: number;
 }
 
+/**
+ * Every spool path this state still depends on — the single source of truth for "which spool
+ * files must survive a cleanup".
+ *
+ * Two owners, not one: `parts` holds a part's spool until that part is confirmed, and `pending`
+ * is the WAL for an irreversible upload whose outcome is not yet persisted — recovery
+ * (`resubmitUnconfirmedPart`) re-uploads that whole file. Listing only `parts` here looks right
+ * and silently deletes the sole recovery copy of an interrupted upload (found by review):
+ * the window is reachable because an upload-backoff round alone can run for minutes, which is
+ * longer than the orphan-sweep grace period.
+ */
+export function spoolPathsToKeep(state: LivePumpState | null): string[] {
+  if (!state) return [];
+  const out = state.parts.map((p) => p.spoolPath);
+  if (state.pending) out.push(state.pending.spoolPath);
+  return out;
+}
+
 export function livePumpStatePath(spoolDir: string, room: string): string {
   const safe = room.replace(/[^0-9A-Za-z_-]+/g, "_");
   return join(spoolDir, `live-pump-${safe}.state.json`);
@@ -1299,6 +1317,17 @@ export interface RunLivePumpOptions {
 export interface RunLivePumpResult {
   ok: boolean;
   error?: string;
+  /**
+   * Why the run ended. Distinguishes "the archive holds what was recorded" from "nothing was
+   * ever recorded", which `ok` alone cannot do: a pump that never acquires a stream also
+   * returns ok with zero segments (found by review #280 — the caller then exited 0, and
+   * TaskManager read that as a clean stop, so a room that recorded nothing looked finished).
+   *
+   * `uploaded` — at least one part reached the archive.
+   * `no-stream` — the stream could not be acquired (give-up path), so no part exists.
+   * `stopped` — a stop signal cut the run (already-delivered parts are unaffected).
+   */
+  outcome?: "uploaded" | "no-stream" | "stopped";
   /** The archive already exists, so creating a new one is forbidden. */
   archiveExists?: boolean;
   bvid?: string;
@@ -1567,6 +1596,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
 
   return {
     ok: true,
+    // No part in the archive and ok:true is only reachable through the "could not acquire the
+    // stream" break below, so it is unambiguous: an abort/signal cut returns ok:false instead.
+    ...(segments.some((x) => x.stem) ? { outcome: "uploaded" as const } : { outcome: "no-stream" as const }),
     bvid: session.bvid,
     aid: session.aid,
     title: session.archiveTitle,

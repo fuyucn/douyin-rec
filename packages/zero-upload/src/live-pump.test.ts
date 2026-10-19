@@ -759,6 +759,59 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
   }, 30_000);
 });
 
+describe("outcome:区分「一场都没录到」与「分 P 都已进稿」", () => {
+  /**
+   * Review #280 P1. `ok:true` used to cover two very different endings: every part uploaded,
+   * and nothing ever recorded (stream never acquired). The caller could not tell them apart
+   * and exited 0 for both, so TaskManager read a silent no-recording as a clean stop.
+   */
+  const base = () => ({
+    room: "oc", spoolDir: mkdtempSync(join(tmpdir(), "oc-")), cookiesPath: COOKIES,
+    title: "t", tid: 21, tag: "x", private: true,
+    sizeCap: 4096, maxMs: 0, maxSegments: 1, quality: "origin", submit: true, spoolMode: "none" as const,
+    sleep: async () => {},
+  });
+
+  it("取不到流 → ok:true 但 outcome=no-stream(调用方据此按失败退出)", async () => {
+    const r = await runLivePump({
+      ...base(),
+      fetch: async () => ({ living: false }),
+      log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    expect(r.ok).toBe(true);
+    expect(r.segments).toHaveLength(0);
+    // 这是唯一能被调用方用来区分「静默漏录」的信号。
+    expect(r.outcome).toBe("no-stream");
+  });
+
+  it("有分 P 进稿 → outcome=uploaded", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-up-"));
+    const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+    const fetchImpl = ((input: string | URL | Request) => {
+      const u = new URL(typeof input === "string" ? input : input.toString());
+      if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+      if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+      if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
+      if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
+      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: [] } }));
+      return Promise.resolve(json({ code: 0, data: {} }));
+    }) as unknown as typeof fetch;
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+    const r = await runLivePump({
+      room: "oc2", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      cookiesPath: COOKIES,
+      sizeCap: CHUNK * 2, maxMs: 300, maxSegments: 1, quality: "origin", submit: true, spoolMode: "none",
+      fetchImpl, sleep: async () => {},
+      fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+      log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    expect(r.outcome).toBe("uploaded");
+    expect(r.segments.some((x) => x.stem)).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  }, 20_000);
+});
+
 describe("真子进程:不注册 SIGUSR2 handler 会当场死亡(P1 回归)", () => {
   /**
    * P1 的事故形状:0 落盘路径只注册 SIGINT/SIGTERM。daemon 窗口结束发 SIGUSR2 →
