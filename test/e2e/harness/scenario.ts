@@ -36,8 +36,10 @@ export const ANCHOR = "主播甲";
 export interface ScenarioOpts {
   /** 覆盖 PipelineCfg 的一部分(steps/cleanup 做浅合并)。 */
   cfg?: Partial<Omit<PipelineCfg, "steps" | "cleanup">> & { steps?: PipelineCfg["steps"]; cleanup?: PipelineCfg["cleanup"] };
-  /** 自定义 transport(节点侧场景要加 nodePipeline 等能力)。缺省 = 纯 LocalTransport。 */
-  wrapTransport?: (base: LocalTransport, s: Scenario) => Transport;
+  /** 自定义 transport(节点侧场景要加 nodePipeline 等能力)。缺省 = 纯 LocalTransport。每个节点各调一次。 */
+  wrapTransport?: (base: LocalTransport, s: Scenario, nodeId: string) => Transport;
+  /** 额外节点 id(`local` 之外;各自独立录像目录)。多节点选优/失联场景用(#69)。 */
+  extraNodes?: string[];
   /** 崩溃恢复 sweep 的 stale 阈值(缺省沿用生产 600s)。「重启后续跑」场景传 0 = 视作重启已过去足够久。 */
   staleMs?: number;
   /** 收尾补跑节流(缺省沿用生产 15 分钟);补跑场景传 0 = 立即可补跑。 */
@@ -52,6 +54,7 @@ export interface ScenarioOpts {
 
 export class Scenario {
   readonly root = mkdtempSync(join(tmpdir(), "drec-e2e-"));
+  /** `local` 节点的录像目录(单节点场景沿用)。其余节点见 {@link recordingsDirOf}。 */
   readonly recordingsDir = join(this.root, "recordings");
   readonly stageDir = join(this.root, "stage");
   readonly dbPath = join(this.root, "sync.db");
@@ -61,14 +64,17 @@ export class Scenario {
   readonly fake: FakeBiliup;
   ledger!: SyncLedger;
   reconciler!: Reconciler;
+  /** `local` 节点的 transport。 */
   transport!: Transport;
+  /** 全部节点的 transport(含 `local`)。 */
+  transports!: Map<string, Transport>;
   sessions: WrittenSession[] = [];
   private spies: MockInstance[] = [];
   private cfg: PipelineCfg;
 
   private constructor(fake: FakeBiliup, private readonly opts: ScenarioOpts) {
     this.fake = fake;
-    mkdirSync(this.recordingsDir, { recursive: true });
+    for (const id of this.nodeIds) mkdirSync(this.recordingsDirOf(id), { recursive: true });
     mkdirSync(this.stageDir, { recursive: true });
     const base: PipelineCfg = {
       cleanMaxGapSec: 30,
@@ -95,9 +101,17 @@ export class Scenario {
     return s;
   }
 
-  /** 写一份假录像到本节点(可多次调用造多个房间/多天)。 */
-  record(spec: Omit<RecordingSpec, "recordingsDir" | "anchor" | "roomSlug"> & Partial<Pick<RecordingSpec, "anchor" | "roomSlug">>): WrittenSession[] {
-    const w = writeRecording({ anchor: ANCHOR, roomSlug: ROOM, ...spec, recordingsDir: this.recordingsDir });
+  /** 全部节点 id(`local` 在前)。 */
+  get nodeIds(): string[] { return ["local", ...(this.opts.extraNodes ?? [])]; }
+  recordingsDirOf(nodeId: string): string {
+    return nodeId === "local" ? this.recordingsDir : join(this.root, `recordings-${nodeId}`);
+  }
+
+  /** 写一份假录像到指定节点(缺省 `local`;可多次调用造多个房间/多天)。 */
+  record(spec: Omit<RecordingSpec, "recordingsDir" | "anchor" | "roomSlug"> & Partial<Pick<RecordingSpec, "anchor" | "roomSlug">> & { node?: string }): WrittenSession[] {
+    const { node = "local", ...rest } = spec;
+    if (!this.nodeIds.includes(node)) throw new Error(`未知节点 ${node}`);
+    const w = writeRecording({ anchor: ANCHOR, roomSlug: ROOM, ...rest, recordingsDir: this.recordingsDirOf(node) });
     this.sessions.push(...w);
     return w;
   }
@@ -131,11 +145,13 @@ export class Scenario {
   private openFresh(): void {
     try { this.ledger?.close(); } catch { /* 首次无 */ }
     this.ledger = new SyncLedger(this.dbPath);
-    const local = new LocalTransport({
-      id: "local", recordingsDir: this.recordingsDir, taskRooms: {}, ffprobe: fakeFfprobe,
-    });
-    this.transport = this.opts.wrapTransport ? this.opts.wrapTransport(local, this) : local;
-    const transports = new Map<string, Transport>([["local", this.transport]]);
+    const transports = new Map<string, Transport>();
+    for (const id of this.nodeIds) {
+      const base = new LocalTransport({ id, recordingsDir: this.recordingsDirOf(id), taskRooms: {}, ffprobe: fakeFfprobe });
+      transports.set(id, this.opts.wrapTransport ? this.opts.wrapTransport(base, this, id) : base);
+    }
+    this.transports = transports;
+    this.transport = transports.get("local")!;
     const pipelineDeps = this.buildDeps(transports);
     this.reconciler = new Reconciler({
       platform: "douyin",
@@ -233,9 +249,9 @@ export class Scenario {
     if (existsSync(this.stageDir)) walk(this.stageDir, "");
     return out.sort();
   }
-  /** 节点录像目录里仍在的文件名(相对 anchor 目录)。 */
-  recordingFiles(anchor = ANCHOR): string[] {
-    const d = join(this.recordingsDir, anchor);
+  /** 节点录像目录里仍在的文件名(相对 anchor 目录;缺省 `local` 节点)。 */
+  recordingFiles(anchor = ANCHOR, nodeId = "local"): string[] {
+    const d = join(this.recordingsDirOf(nodeId), anchor);
     return existsSync(d) ? readdirSync(d).sort() : [];
   }
   ledgerRejections(): string[] { return this.warnings.filter((w) => w.includes("[ledger] 拒绝")); }

@@ -46,3 +46,52 @@ describe("e2e: 节点清单失联(#27)", () => {
     });
   }
 });
+
+// #69 item 3: with a single node, "unreachable" and "empty" both yield no job, so the scenario above cannot
+// tell them apart. Two nodes record the same broadcast; only n2 flaps. Treating n2 as empty would let the
+// pipeline pick local's shorter copy, upload it and clean local's source.
+describe("e2e: two nodes, one unreachable (#69)", () => {
+  const twoNodes = async (): Promise<Scenario> => {
+    const sc = await Scenario.create({
+      extraNodes: ["n2"],
+      cfg: { cleanup: FULL_CLEANUP },
+      wrapTransport: (base, _s, id) => (id === "n2" ? flaky(base) : base),
+      reconcilerOpts: { inventoryTimeoutMs: 30 },
+    });
+    sc.record({ node: "local", sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 2, segSec: 600 }] });
+    sc.record({ node: "n2", sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 3, segSec: 600 }] });
+    return sc;
+  };
+
+  for (const m of ["reject", "hang"] as const) {
+    it(`${m}: the reachable node alone is not selected; after recovery the longer n2 copy wins`, async () => {
+      mode = m;
+      s = await twoNodes();
+      const localBefore = s.recordingFiles(undefined, "local");
+      const n2Before = s.recordingFiles(undefined, "n2");
+
+      await s.reconcile();
+      expect(s.ledger.listKeys(), "no job while a selected node is unreachable").toHaveLength(0);
+      expect(s.fake.calls, "no upload while a selected node is unreachable").toHaveLength(0);
+      expect(s.recordingFiles(undefined, "local"), "reachable node's source untouched").toEqual(localBefore);
+      expect(s.recordingFiles(undefined, "n2")).toEqual(n2Before);
+
+      mode = "ok";
+      await s.reconcile();
+      const key = s.onlyKey();
+      expectHealthyDone(s, key, { parts: 3 });
+      // n2 has the longer copy, so it wins once both inventories are in.
+      expect(s.ledger.get(key)?.winnerWorker).toBe("n2");
+      expect(s.ledger.getCandidates(key).map((c) => c.workerId).sort()).toEqual(["local", "n2"]);
+    });
+  }
+
+  it("control: a reachable but empty n2 does not block local", async () => {
+    mode = "ok";
+    s = await Scenario.create({ extraNodes: ["n2"], cfg: { cleanup: FULL_CLEANUP } });
+    s.record({ node: "local", sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 2, segSec: 600 }] });
+    await s.reconcile();
+    expectHealthyDone(s, s.onlyKey(), { parts: 3 });
+    expect(s.ledger.get(s.onlyKey())?.winnerWorker).toBe("local");
+  });
+});
