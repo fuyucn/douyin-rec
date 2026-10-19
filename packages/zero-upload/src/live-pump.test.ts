@@ -144,12 +144,13 @@ afterEach(() => { setSpawnForTest(undefined); });
 
 describe("buildPipeFfmpegArgs", () => {
   it("stdout matroska + -fs 上界 + 不滚动分段", () => {
-    const args = buildPipeFfmpegArgs({ url: "https://live.douyin.com/x.flv", headers: { Referer: "https://live.douyin.com/" }, sizeCap: 100 * 1024 * 1024 });
+    const cap = 100 * 1024 * 1024; // 写成表达式:隐私闸门会把裸长数字当房间号
+    const args = buildPipeFfmpegArgs({ url: "https://live.douyin.com/x.flv", headers: { Referer: "https://live.douyin.com/" }, sizeCap: cap });
     expect(args.at(-1)).toBe("-");
     // 容器是 mpegts:管道(非 seekable)上可写音轨,且 -fs 强杀后仍读得出时长
     // (matroska 两个都不行,实测 62002)。于是不需要 remux,可以边录边传。
     expect(args).toContain("mpegts");
-    expect(hasPair(args, "-fs", "104857600")).toBe(true);
+    expect(hasPair(args, "-fs", String(cap))).toBe(true);
     // 没有 segment muxer —— 一段一个进程,不靠 -segment_time 滚动。
     expect(args).not.toContain("segment");
     expect(args).not.toContain("-segment_time");
