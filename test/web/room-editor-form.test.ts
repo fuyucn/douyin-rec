@@ -15,6 +15,25 @@ describe("factsOf carries the room's rule presence (#284)", () => {
   });
 });
 
+describe("task-only save must not depend on the display-only hasRule (#284 re-review)", () => {
+  it("hasRule:false hides the chips, but the saved payload still uses the rule-aware path", () => {
+    const room = {
+      room: "1", platform: "douyin", processing: null,
+      recording: { danmu: 1, quality: "origin", engine: "ffmpeg", segmentSec: 1800, useCookie: true },
+    } as never;
+    const f = formFromRoom(room);
+    const r = payloadFromForm(f, { ...ctx, hasRule: false });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Saving always upserts a rule, so the burn values come from the rule-aware path. The key
+    // guarantee is that this does not depend on `hasRule` (display) being true.
+    const withRule = payloadFromForm(f, { ...ctx, hasRule: true });
+    expect(withRule.ok).toBe(true);
+    if (!withRule.ok) return;
+    expect(JSON.stringify(r.payload)).toBe(JSON.stringify(withRule.payload));
+  });
+});
+
 function mkRoom(over: { recording?: Partial<NonNullable<RoomDTO["recording"]>> | null; processing?: Partial<NonNullable<RoomDTO["processing"]>> | null } = {}): RoomDTO {
   const recording = over.recording === null ? null : {
     taskId: 7, room: "https://live.douyin.com/1", name: "n", anchorName: null, quality: "origin", engine: "ffmpeg",
