@@ -209,7 +209,7 @@
   **多房间在线并发 + 21186 限流（2026-10-18，`<sha>`）**：两个直播间同时在线各跑 `none` 模式 → 两个不同稿件（`BV1xx` 3P/119s、`BV1xx` 3P/100s），各 3 个不同 cid，盘上零视频文件。同场暴露两个真问题：①`21186 投稿的频率过快` 未被识别为限流 → 第二个房间建稿被拒、已上传 6.3MB 直接丢弃、整场零产出（已纳入 `isUploadRateLimited`）；②preupload 限流退避完全静默（可超 40 分钟），形态与卡死无异，现已每次退避打日志。
   **同房间双 0 落盘 guard（2026-10-18，`<sha>`）**：实测风险 —— 同一房间两个任务各录一次，state 按 outDir 隔离互不知情 → 产出两个重复稿件（`BV1xx`/`BV1xx`），B 站无删稿 API 撤不下来。已在 `TaskManager.start` 挡掉（按平台+房间判；普通录制不受影响）。变异验证过。
   **同房间 guard 真实 serve 验证（2026-10-18）**：真实 `task serve` 进程里两个同房间 0 落盘任务，任务 1 `running=true`、任务 2 被拒停在 `stopped`，serve 日志打出「拒绝启动 id=2:同一房间已有 0 落盘任务 id=1(g1)在录,同时录会产出两个重复稿件且无法删除」—— 原因对用户可见。
-  **下一步（接生产前必做）**：①`RollingUploader` 契约从 `path` 扩到 `bytes`（现 0 落盘完全绕过它）。②**接 hub 规则**需要先设计「上传结果如何回流 SyncLedger」（当前 streamUpload 只能当单机/手动任务，guard 已明确拒绝绑规则）。③`record --stream-upload` 目前不写 `session.json` 边车（hub 按它聚场/选优），接 hub 前必须补。
+  **下一步（接生产前必做）**：①`RollingUploader` 契约从 `path` 扩到 `bytes`（现 0 落盘完全绕过它）。②**接 hub 规则**需要先设计「上传结果如何回流 SyncLedger」（当前 streamUpload 只能当单机/手动任务，guard 已明确拒绝绑规则）。③`record --stream-upload` 目前不写 `会话状态边车` 边车（hub 按它聚场/选优），接 hub 前必须补。
   **纪律教训**：PoC 为二分调试新建 6 条测试稿件（本可全部 append 到一条），B站无删稿 API，清理代价由用户承担；并曾把「上传路径打通」误述为「链路打通」。
 
 - [~] **T-61 全自动流水线 + fleet 式房间管理（计划 [plans/037_autopilot_fleet.md](plans/037_autopilot_fleet.md)）**
@@ -395,7 +395,7 @@
   **VPS2 跑的是 pre-0.0.76 旧 bundle** → `applyNodeDataRoot` 错根 → 限流库 `output-data/db/…`
   打不开 → ssh rc=255；`douyin:347071634383:2026-10-12_0523` 那次 winner 是 **VPS1 0.0.75**
   （同样错根）→ 产物落 `~/output-data/stage/…`、`ssh rc=1`。**根因都是没部署到 0.0.76+**。
-  唯一成功的仍是**手动** `_node-pipeline`（VPS2，`BV1xx`，private 4 分 P）。
+  唯一成功的仍是**手动** `_node-pipeline`（某个 worker，`BV1xx`，private 4 分 P）。
   ② **删源漏网（本轮修复）**：节点侧路径**提前 return**，`runPipelineInner` 走不到常规
   `cleanupSources()` ⇒ `transport.cleanup` 永不调用 ⇒ 节点 `recordings/` 的 `.ts` 永远不删。
   实测残留：VPS1 `~/output-data/` 5.8G（错根 stage + db）、VPS1 `~/drec/stage/douyin_32353809778_2026-10-11/`
@@ -718,7 +718,7 @@
   **验收**:新增 `packages/orchestrator/src/segment-pipeline.test.ts`(7 用例;已验证「还原旧实现即 2 例失败」);
   `pnpm test` **902 全过**、`tsc --noEmit`、`pnpm bundle`(`0.0.47`,产物已无 `globalOffset`)。
   **部署**:`0.0.47` 已上线 master + VPS1 + VPS2(三节点 ok)。
-  **受影响的历史稿件**:`63171491268` 10-07 与 10-09 两场(10-07 稿件 `BV1xx` 3 个 livechat 全丢)。
+  **受影响的历史稿件**:`<房间>` 10-07 与 10-09 两场(10-07 稿件 `BV1xx` 3 个 livechat 全丢)。
   源 `.ts` 已被 cleanup 删除 → **无法补烧**,只能保留现状(弹幕 xml 仍在节点,但视频已删)。
   **另一类同症状但不同根因**:`68133201791`(凌晴)10-09 两场 `danmuCount:0`(xml 全空,取不到弹幕)
   → livechat 也无产物;那是弹幕采集问题(见 T-9),非本 bug。（2026-10-09）
