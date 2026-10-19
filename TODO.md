@@ -14,6 +14,10 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [!] **T-79 队列页「上传」视图:每节点 biliup 实时进度(issue [#44](https://github.com/fuyucn/douyin-rec/issues/44))** — 计划 [`plans/039_upload_view.md`](plans/039_upload_view.md)
+  — 2026-10-18 计划经三轮独立设计审查(第三轮唯一 HIGH 已按建议修订),审查轮次用完 → **`needs-decision`**:确认计划 + T0(镜像补 `ss`)是否做。
+  **做什么**：节点状态命令旁路扫描 biliup 进程(只读),master 算速率/剩余/卡住/重试换线/最近结果,队列页按节点展示。**验收**：见计划 T1a–T4。
+
 - [~] **T-78 追加后回读分P数遇B站列表刷新延迟:先间隔重读再换线（issue [#66](https://github.com/fuyucn/douyin-rec/issues/66)）**
   — 2026-10-18 PR [#261](https://github.com/fuyucn/douyin-rec/pull/261)(仅测试/文档,独立审查 APPROVE):假B站支持回读延迟,已知缺陷场景复现「重复追加一次」。**风险扫描按路径名判 RISK + 修复改追加成功判定 → `needs-decision`**,issue 已写决定三行。
   **做什么**：读到「没变」先退避重读(约 10 秒)再换线,主控/边录边传/节点侧共用。**验收**：#261 场景转真实用例;退避时长有单测;不改上传硬标准。
