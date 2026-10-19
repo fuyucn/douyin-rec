@@ -452,14 +452,26 @@ export class TaskManager {
     this.appliedRolling.delete(taskId);
     const wasDraining = this.draining.delete(taskId);
 
-    if (info.expected) {
+    // A zero-disk upload run replaces the file recorder and owns the whole process: when it ends
+    // (no stream after retries, or all parts delivered) it exits 0 on its own. Nothing marked the
+    // exit "expected", so treating code=0 as a crash respawns it in a tight loop — measured in a
+    // real container: six failed stream acquisitions, then "异常退出 (code=0)" and restart #1.
+    // Only claimed for stream-upload tasks: a plain recorder exits on a stop signal, and its
+    // exit code is not its own verdict on whether it did what it was started to do.
+    const zeroDiskFinalized = info.code === 0
+      && !info.expected
+      && this.store.getTask(taskId)?.streamUpload === true;
+
+    if (info.expected || zeroDiskFinalized) {
       this.store.setStatus(taskId, "stopped");
       this.notifyRecordingState(taskId);
       this.logTask(
         taskId,
         wasDraining
           ? `[task_manager] ✓ 任务 id=${taskId} 直播自然收播，排空完成，已停止`
-          : `[task_manager] ✓ 任务 id=${taskId} 已正常停止`,
+          : zeroDiskFinalized
+            ? `[task_manager] ✓ 任务 id=${taskId} 0 落盘直传已自行收尾(exit 0),已停止`
+            : `[task_manager] ✓ 任务 id=${taskId} 已正常停止`,
       );
       return;
     }

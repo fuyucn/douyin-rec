@@ -266,6 +266,45 @@ describe("TaskManager", () => {
     expect(store.getTask(id)!.status).toBe("running");
   });
 
+  it("0 落盘任务自行收尾(exit 0,预期外)→ 正常停止,不进崩溃重启循环", async () => {
+    // Real container 2026-10-19: the pump replaced the file recorder and owned the process, so
+    // when the stream could not be acquired after retries it exited 0 by itself. Nothing had
+    // marked that exit expected, so TaskManager called it a crash and respawned in a tight loop
+    // ("异常退出 (code=0)" → restart #1), each round costing another six acquisition attempts.
+    const id = addTask({ room: "https://live.douyin.com/51077534924", streamUpload: true });
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true,
+      restartDelayMs: 0,
+      schedule: (cb) => cb(),
+      log: () => {},
+    });
+    mgr.start(id);
+    spawner.last(id).emitExit({ code: 0, signal: null, expected: false });
+
+    expect(spawner.spawned).toHaveLength(1);        // no respawn
+    expect(mgr.isRunning(id)).toBe(false);
+    expect(store.getTask(id)!.status).toBe("stopped"); // not "error"
+  });
+
+  it("普通录制任务 exit 0 仍按崩溃处理(不放宽到全部任务)", () => {
+    // The relaxation is scoped to stream uploads: a plain recorder exits only on a stop signal,
+    // so its exit code is not its own verdict and must keep resuming a genuine crash.
+    const id = addTask(); // plain task
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true,
+      restartDelayMs: 0,
+      schedule: (cb) => cb(),
+      log: () => {},
+    });
+    mgr.start(id);
+    spawner.last(id).emitExit({ code: 0, signal: null, expected: false });
+
+    expect(spawner.spawned).toHaveLength(2); // still respawns
+    expect(store.getTask(id)!.status).toBe("running");
+  });
+
   it("unexpected exit WITHOUT autoRestart → status error, not running", () => {
     const id = addTask();
     const spawner = new MockSpawner();
