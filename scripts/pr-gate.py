@@ -7,7 +7,7 @@
 
 输出:第一行恒为 `PASS` 或 `FAIL`;FAIL 后每行一条缺项。退出码 PASS=0 / FAIL=1 / 取数失败=2。
 缺项 ⇒ 不派 Opus 审查,直接打回返工(缺项清单原样贴到 PR 评论)。
-检查项:Fixes #N、各必填段非空(模板里的 HTML 注释与「待填」不算内容)、自审五项各「发现→修复」或
+检查项:Fixes #N(分步票写 Part of #N)、各必填段非空(模板里的 HTML 注释与「待填」不算内容)、自审五项各「发现→修复」或
 「无+理由」、变异验证含 FAIL 与 PASS 两段输出、验证命令含 pnpm test / pnpm typecheck 与输出、
 版本声明合理(按路径判定:改动触及 RUNTIME_PATHS 必须声明 patch +1 bump,与提交类型无关;否则写「无需 bump + 理由」)、
 正文过 issue-guard.py。
@@ -177,8 +177,10 @@ def run_guard(body: str) -> list[str]:
 
 def gate(body: str, title: str = "", files: list[str] | None = None, guard: bool = True) -> list[str]:
     errs: list[str] = []
-    if not re.search(r"(?im)^\s*(?:Fixes|Closes|Resolves)\s+#\d+", strip_comments(body)):
-        errs.append("缺 `Fixes #N`(独占一行)")
+    # `Part of #N` = one step of a staged issue: links the issue without a closing keyword, so a later
+    # merge of the base into the default branch cannot close an issue whose other steps are still open.
+    if not re.search(r"(?im)^\s*(?:Fixes|Closes|Resolves|Part\s+of)\s+#\d+", strip_comments(body)):
+        errs.append("缺 `Fixes #N` 或分步票的 `Part of #N`(独占一行)")
     secs = split_sections(body)
     for name in REQUIRED_SECTIONS:
         if name not in secs:
