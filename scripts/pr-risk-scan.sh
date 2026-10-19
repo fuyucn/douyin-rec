@@ -56,9 +56,22 @@ HEAD_KEEP=3       # leading hunk lines always matched (the enclosing function si
 # Signature-like lines (function / method / class / arrow const / shell function). The latest one seen
 # in the hunk is matched with every change, so a doc comment above the function or a second function
 # merged into the same hunk cannot push the enclosing signature out of the window.
+# One-line forms: function / class / method / const arrow. Property arrows are SIG_PROP_RE below;
+# signatures whose parameters span several lines are SIG_HEAD_RE (head) + SIG_CLOSE (closing line).
 SIG_RE='^[[:space:]]*((export|async|public|private|protected|static|readonly|default|override)[[:space:]]+)*(function[[:space:]*]|class[[:space:]]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*(<[^>]*>)?\(.*\)[^;]*\{[[:space:]]*$|(const|let)[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=.*=>)|^[A-Za-z_][A-Za-z0-9_-]*[[:space:]]*\(\)[[:space:]]*\{'
+# Object / class property holding a function: `handler: async (req) => {`, `run = (x) => {`,
+# `onEnd: function () {`. The name is what the content rules look for, so the line must be kept.
+SIG_PROP_RE='^[[:space:]]*([A-Za-z_$][A-Za-z0-9_$]*|"[^"]+"|'"'"'[^'"'"']+'"'"'|\[[^]]+\])[[:space:]]*[:=][[:space:]]*(async[[:space:]]+)?(\([^)]*\)[[:space:]]*=>|function[[:space:]*]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=>)'
+# Head of a multi-line signature: a name followed by an unclosed `(`. A multi-line call looks the same,
+# so a head is only kept once a closing line `) {` / `): T {` / `) =>` shows up before any `;`.
+SIG_HEAD_RE='^[[:space:]]*((export|async|public|private|protected|static|readonly|default|override)[[:space:]]+)*(function[[:space:]*][A-Za-z_$]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*(<[^>]*>)?\([^)]*$|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*[:=][[:space:]]*(async[[:space:]]+)?\([^)]*$)'
+# A multi-line call ends on `;`. A semicolon inside the parameter list (`opts: { a: T; b: U }`) does not.
+SEMI_END_RE=';[[:space:]]*$'
+SIG_CLOSE_RE='^[[:space:]]*(\}[^)]*)?\)'
 NOT_SIG_RE='^[[:space:]]*(if|for|while|switch|catch|else|return|do|await|new)([[:space:]]|\(|$)'
-last_sig=""
+pending_head=""   # unclosed multi-line head awaiting its closing line
+delta=()          # signature-like lines seen since the last change in the current hunk
+hit_sigs=()       # signatures seen up to each change: all of them are matched when the hunk flushes
 head_left=0
 old_left=0
 new_left=0
@@ -90,6 +103,9 @@ content_scanned() {
 # under pipefail an early-exiting grep SIGPIPEs the writer on large hunks and the match is lost.
 flush_hunk() {
   if (( hunk_changed )) && [[ -n "$cur" && "$cur" != "$SELF" ]] && content_scanned "$cur"; then
+    # Every signature in the hunk participates: a change deep inside a second function (or inside a
+    # callback that itself has a signature) must still see all enclosing names.
+    if (( ${#hit_sigs[@]} )); then hunk="$(printf '%s\n' "${hit_sigs[@]}")"$'\n'"$hunk"; fi
     local pair label re
     for pair in "上传:$UPLOAD_RE" "清理/删除:$DELETE_RE" "ledger 状态转换:$LEDGER_RE"; do
       label="${pair%%:*}"; re="${pair#*:}"
@@ -102,6 +118,8 @@ flush_hunk() {
   hunk_changed=0
   pre=()
   after=0
+  delta=()
+  hit_sigs=()
 }
 
 # `diff --git a/X b/Y` (optionally quoted): the only header present for mode-only and binary changes.
@@ -126,7 +144,9 @@ start_hunk() {
   in_hunk=1
   hunk="${1#@@*@@}"$'\n'
   head_left=$HEAD_KEEP
-  last_sig=""
+  pending_head=""
+  delta=()
+  hit_sigs=()
   old_left=1; new_left=1
   if [[ "$1" =~ ^@@\ -[0-9]+(,([0-9]+))?\ \+[0-9]+(,([0-9]+))?\ @@ ]]; then
     old_left="${BASH_REMATCH[2]:-1}"; new_left="${BASH_REMATCH[4]:-1}"
@@ -152,8 +172,19 @@ while IFS= read -r line; do
       "\\"*) continue ;;  # "\ No newline at end of file"
     esac
     body="${line:1}"
-    [[ "$body" =~ $SIG_RE && ! "$body" =~ $NOT_SIG_RE ]] && last_sig="$body"
-    [[ "$line" == [+-]* && -n "$last_sig" ]] && hunk+="$last_sig"$'\n'
+    sig_new=""
+    if [[ ! "$body" =~ $NOT_SIG_RE ]]; then
+      if [[ "$body" =~ $SIG_RE || "$body" =~ $SIG_PROP_RE ]]; then sig_new="$body"; pending_head=""
+      elif [[ "$body" =~ $SIG_HEAD_RE ]]; then pending_head="$body"; fi
+    fi
+    # Closing line of a multi-line parameter list: commit the pending head as a signature.
+    if [[ -n "$pending_head" && -z "$sig_new" && "$body" =~ $SIG_CLOSE_RE && ! "$body" =~ $SEMI_END_RE && "$body" =~ (\{|=>)[[:space:]]*$ ]]; then
+      sig_new="$pending_head"; pending_head=""
+    elif [[ "$body" =~ $SEMI_END_RE ]]; then pending_head=""; fi
+    [[ -n "$sig_new" ]] && delta+=("$sig_new")
+    # A change commits the signatures seen so far; signatures after the last change never join, so a
+    # class-sized hunk cannot push the enclosing signature out (no cap needed for correctness).
+    if [[ "$line" == [+-]* && ${#delta[@]} -gt 0 ]]; then hit_sigs+=("${delta[@]}"); delta=(); fi
     if (( head_left > 0 )); then
       # With --function-context the hunk opens on the enclosing function's signature: always match it.
       hunk+="$body"$'\n'; head_left=$((head_left - 1))

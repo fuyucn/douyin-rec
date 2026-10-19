@@ -143,6 +143,136 @@ describe("pr-risk-scan.sh", () => {
       "function cleanupStage() {", ...body(60, 50, v2), "}", ""].join("\n");
     expect(gitScan(src(1, 50), src(7, 99)).split("\n")[0]).toBe("RISK");
   });
+  it("多行参数签名(行尾只有一个 `(`)也参与匹配,即使改动离签名很远", () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `  const c${i} = ${i};`);
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " import x from 'y';",
+      " const z = 1;",
+      " export const w = 2;",
+      "   cleanupStage(",
+      "     dir,",
+      "   ) {",
+      ...filler,
+      "-    const n = 1;",
+      "+    const n = 2;",
+      "",
+    ].join("\n");
+    const r = risk(d);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("内容[清理/删除]: packages/app/src/x.ts");
+  });
+  it("对象/类的属性箭头函数(改动离签名很远)也参与匹配", () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`);
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " import x from 'y';",
+      " const z = 1;",
+      " export const w = 2;",
+      "   cleanupStage: async (p) => {",
+      ...filler,
+      "-    const n = 1;",
+      "+    const n = 2;",
+      "",
+    ].join("\n");
+    const r = risk(d);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("内容[清理/删除]: packages/app/src/x.ts");
+  });
+  it("属性箭头函数里无关的改动不误判(没有清理语义)", () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`);
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " import x from 'y';",
+      " const z = 1;",
+      " export const w = 2;",
+      "   describe: async (p) => {",
+      ...filler,
+      "-    const n = 1;",
+      "+    const n = 2;",
+      "",
+    ].join("\n");
+    expect(risk(d).status).toBe(0);
+  });
+  it("多行调用(`rmSync(` ... `);`)不当作签名:改动在别的函数里 → PASS", () => {
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      "function a() {",
+      "  const n = 1;",
+      "-  const m = 1;",
+      "+  const m = 2;",
+      ...Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`),
+      "  rmSync(",
+      "    p,",
+      "  );",
+      "}",
+      "",
+    ].join("\n");
+    expect(risk(d).status).toBe(0);
+  });
+  it("改动前后各有几百个方法时,所在函数签名不被挤掉", () => {
+    const methods = Array.from({ length: 250 }, (_, i) => [`  m${i}() {`, "  }"]).flat();
+    const filler = Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`);
+    const after = Array.from({ length: 250 }, (_, i) => [`  z${i}() {`, "  }"]).flat();
+    // Signatures AFTER the change must not push the enclosing one out either.
+    const lines = [" export class Big {", " const a = 1;", " const b = 2;", ...methods, "  cleanupStage() {", ...filler, "-    const n = 1;", "+    const n = 2;", ...after];
+    const n = lines.length - 1;
+    const d = `diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1,${n} +1,${n} @@\n${lines.join("\n")}\n`;
+    expect(risk(d).status).toBe(1);
+  });
+  it("多行头遇到分号即作废:后面的 `) {` 不再把它提升为签名", () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`);
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " import x from 'y';",
+      " const z = 1;",
+      " export const w = 2;",
+      "   cleanupStage(",
+      "   done;",
+      "   ) {",
+      ...filler,
+      "-    const n = 1;",
+      "+    const n = 2;",
+      "",
+    ].join("\n");
+    expect(risk(d).status).toBe(0);
+  });
+  it("多行签名参数里有内联类型的分号(`opts: { a: T; b: U }`)仍识别为签名", () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`);
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " import x from 'y';",
+      " const z = 1;",
+      " export const w = 2;",
+      "   async cleanupStage(",
+      "     dir: string,",
+      "     opts: { keep: boolean; force: boolean },",
+      "   ): Promise<void> {",
+      ...filler,
+      "-    const n = 1;",
+      "+    const n = 2;",
+      "",
+    ].join("\n");
+    expect(risk(d).status).toBe(1);
+  });
   it("签名启发式不把 if/for 当函数", () => {
     const filler = Array.from({ length: 30 }, (_, i) => ` const c${i} = ${i};`);
     const lines = [" function f() {", " const a = 1;", " const b = 2;", "   if (cleanupDone) {", ...filler, "-const n = 1;", "+const n = 2;"];
@@ -192,7 +322,9 @@ describe("pr-risk-scan.sh", () => {
 });
 
 describe("issue-guard.py --diff", () => {
-  function repo() {
+  // `seed` writes files that must already exist on the base branch, so the feature diff shows them
+  // as context (a credential file whose only changed line is `"value"` is exactly that case).
+  function repo(seed?: (d: string) => void) {
     const d = mkdtempSync(join(tmpdir(), "guard-"));
     const g = (...a: string[]) => spawnSync("git", a, { cwd: d, encoding: "utf-8" });
     g("init", "-q", "-b", "base");
@@ -200,6 +332,7 @@ describe("issue-guard.py --diff", () => {
     g("config", "user.name", "t");
     mkdirSync(join(d, "docs"));
     writeFileSync(join(d, "docs", "a.md"), "历史里的 BV1Ab4y1C7xY 与 10.0.0.1\n"); // issue-guard: allow
+    seed?.(d);
     g("add", ".");
     g("commit", "-qm", "base");
     g("checkout", "-q", "-b", "feature");
@@ -278,6 +411,33 @@ describe("issue-guard.py --diff", () => {
     const r = guard(d);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("k.json:3: [登录凭证键值]");
+  });
+  it("只改 value 行(文件已在 base,name 是上下文行)也拦,并指向 name 行", () => {
+    // The whole file is created on base, so the diff carries only the changed `value` line. Without
+    // the neighbouring context lines the name/value rule would never see them together.
+    const pretty = (v: string) => `[\n  {\n    "name": "SESSDATA",\n    "value": "${v}",\n    "domain": ".bilibili.com"\n  }\n]\n`;
+    const { d, g } = repo((dir) => writeFileSync(join(dir, "k.json"), pretty("OLDVALUEa1b2c3d4%2C17900")));
+    writeFileSync(join(d, "k.json"), pretty("NEWVALUEa1b2c3d4%2C17900")); // issue-guard: allow
+    g("commit", "-qam", "c");
+    const r = guard(d);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("k.json:3: [登录凭证键值]");
+  });
+  it("name/value 都在上下文里、只在它们下面插入无关行 → 不拦(旧内容不卡红)", () => {
+    const body = (extra: string) => `[\n  {\n    "name": "SESSDATA",\n    "value": "OLDVALUEa1b2c3d4%2C17900",\n${extra}  }\n]\n`; // issue-guard: allow
+    const { d, g } = repo((dir) => writeFileSync(join(dir, "notes.md"), body(""))); // issue-guard: allow
+    writeFileSync(join(d, "notes.md"), body('    "note": "unrelated",\n'));
+    g("commit", "-qam", "c");
+    expect(guard(d).status).toBe(0);
+  });
+  it("夹具里带 allow 标记的旧 value 行不会作为上下文被重新扫描", () => {
+    // Old allow-marked value line sits above a newly added name line (value-then-name layout).
+    // The mark sits inside the value string so the line still matches the value-then-name rule.
+    const old = '  "value": "OLDVALUEa1b2c3d4%2C17900 issue-guard: allow",\n'; // issue-guard: allow
+    const { d, g } = repo((dir) => { mkdirSync(join(dir, "test")); writeFileSync(join(dir, "test", "f.test.ts"), old); }); // issue-guard: allow
+    appendFileSync(join(d, "test", "f.test.ts"), '  "name": "SESSDATA",\n'); // issue-guard: allow
+    g("commit", "-qam", "c");
+    expect(guard(d).status).toBe(0);
   });
   it("value 在 name 之前的形态也拦", () => {
     const { d, g } = repo();

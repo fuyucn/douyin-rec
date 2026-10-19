@@ -150,6 +150,7 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
    `.json` 与生成物只豁免「文件名 / 主机名」,IP、稿件号、长数字、本机路径、登录凭证键值照扫;
    文档里的文件名若是仓库已跟踪文件则放行。`issue-guard: allow` 只在测试夹具(`test/` 或 `*.test.*`)
    生效,脚本会打印跳过的行数与位置,评审须逐条核对;其它位置的标记无效。
+   凭证 name/value 跨行规则会带上新增块上方 3 行未改动的上下文,只改 value 行也能命中(命中行号可能指向 name 行)。
 8. **关联 issue 必须已进入开发状态**:合并前 `gh issue view N --json labels` 核对 PR 的 `Fixes #N` / `Part of #N` 对应
    issue 带 `in-review`(旧口径票为 `accept` + `in-progress`/`待验证`),且无 `needs-decision` / `decline`。
    没有 `Fixes #N` / `Part of #N`、issue 仍停在 `accept`/无状态、或被人改回 `needs-decision` → 不合并,打回并在 PR 里写明。
@@ -157,7 +158,7 @@ agent 直接 `gh pr merge <N> --merge` 合进 `feat/hub-optimization`，不等�
    `scripts/pr-risk-scan.sh`(默认对 `origin/feat/hub-optimization...HEAD`),输出 `RISK`(退出码 1)
    即命中上传 / biliup / 清理 / 删除(rm、unlink)/ 保留规则字段 / ledger 状态转换或 ledger 方法调用,
    或改动了敏感文件清单(收口 / 台账 / 清理 / 保留规则相关,见脚本 `SENSITIVE_FILES`),纯改名按新旧路径判。
-   内容按 hunk 判定,带所在函数上下文(单行翻转保留规则也能命中)。命中后 review agent
+   内容按 hunk 判定,hunk 内所有函数签名行(含多行参数签名、属性箭头函数)都参与匹配(单行翻转保留规则也能命中)。命中后 review agent
    **不得自动合并**:给 PR 打 `needs-decision`,评论按「决定三行」写清(要决定什么 / 不做会怎样 /
    建议选项),等人拍板。issue 即使是 `accept`,diff 命中 RISK 也一样拦。`PASS` 只表示没命中这些
    规则,不代替第 1–8 条。

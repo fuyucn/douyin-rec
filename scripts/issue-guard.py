@@ -6,7 +6,8 @@
     gh issue view 12 --json body -q .body | python3 scripts/issue-guard.py -
     python3 scripts/issue-guard.py --diff origin/feat/hub-optimization   # 只扫 PR 新增行(CI 用)
 
---diff <base> 模式:对 `git diff -U0 <base>...HEAD` 只扫**新增行**(历史内容不会把 CI 卡红)。
+--diff <base> 模式:对 `git diff -U3 <base>...HEAD` 只扫**新增行**(历史内容不会把 CI 卡红;新增块上方 3 行未改动
+上下文只用来拼接跨行凭证,命中必须落到新增行上)。
 规则与上面一致,额外四条约定(只为让源码里的正常引用不误报,隐私向的规则不放松):
   - 源码类文件(.ts/.tsx/.mjs/.js/.py/.sh/.yml/.yaml)的新增行不套「文件名」「凭证类」
     「主机名」「streamKey」四条语义词规则(代码和测试夹具里写 foo.ts / cookie / vps2 /
@@ -72,11 +73,17 @@ MULTILINE_RULES: list[tuple[str, str, str]] = [
 ]
 
 
-def scan_block(text: str, source: str, first_line: int) -> list[str]:
-    """Apply MULTILINE_RULES to a block of consecutive lines starting at first_line."""
+def scan_block(text: str, source: str, first_line: int, added_from: int = 0) -> list[str]:
+    """Apply MULTILINE_RULES to a block of consecutive lines starting at first_line.
+
+    `added_from` is the character offset where the added lines begin: leading context lines may help a
+    match, but a match that ends inside the context alone is old content and must not be reported.
+    """
     hits: list[str] = []
     for name, pattern, why in MULTILINE_RULES:
         for match in re.finditer(pattern, text):
+            if match.end() <= added_from:
+                continue
             lineno = first_line + text.count("\n", 0, match.start())
             hits.append(f"{source}:{lineno}: [{name}] {why} -> {' '.join(match.group(0).split())!r}")
     return hits
@@ -93,28 +100,50 @@ def scan(text: str, source: str) -> list[str]:
     return hits + scan_block(text, source, 1)
 
 
-def added_lines(base: str) -> list[tuple[str, int, str]]:
-    """解析 `git diff -U0 <base>...HEAD`,返回 (文件, 新文件行号, 行内容) 的新增行。"""
+# Context lines kept before an added block so a credential field split across lines still matches
+# (`"name": "SESSDATA"` on an unchanged line, only `"value"` added). Kept small: the multi-line rules
+# only need the neighbouring fields, and a bigger window would pull unrelated history into the match.
+CONTEXT_LINES = 3
+
+
+def added_lines(base: str) -> list[tuple[str, int, str, list[str]]]:
+    """解析 `git diff -U3 <base>...HEAD`,返回 (文件, 新文件行号, 行内容, 该行之前 3 行上下文)。"""
     proc = subprocess.run(
-        ["git", "diff", "-U0", "--no-color", "--no-ext-diff", f"{base}...HEAD"],
+        ["git", "diff", f"-U{CONTEXT_LINES}", "--no-color", "--no-ext-diff", f"{base}...HEAD"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         print(f"git diff 失败(base={base!r}): {proc.stderr.strip()}", file=sys.stderr)
         raise SystemExit(2)
-    out: list[tuple[str, int, str]] = []
+    out: list[tuple[str, int, str, list[str]]] = []
     path, lineno, in_hunk = "", 0, False
+    context: list[str] = []
     for raw in proc.stdout.splitlines():
         if raw.startswith("diff "):
             in_hunk = False
+            context = []
         elif raw.startswith("@@"):
             in_hunk = True
+            context = []
             m = re.search(r"\+(\d+)", raw)
             lineno = int(m.group(1)) if m else 0
         elif in_hunk:
             # Inside a hunk an added line may itself start with "++"; it is content, not a header.
             if raw.startswith("+") and path:
-                out.append((path, lineno, raw[1:]))
+                out.append((path, lineno, raw[1:], list(context)))
+                lineno += 1
+                context = []
+            elif raw.startswith("-"):
+                continue  # removed lines never exist in the new file
+            elif raw.startswith(" "):
+                # An allow-marked fixture line must not come back as context and be scanned again.
+                if ALLOW_MARK in raw and is_fixture(path):
+                    context = []
+                    lineno += 1
+                    continue
+                context.append(raw[1:])
+                if len(context) > CONTEXT_LINES:
+                    context.pop(0)
                 lineno += 1
         elif raw.startswith("+++ "):
             path = raw[4:].strip('"').removeprefix("b/") if raw != "+++ /dev/null" else ""
@@ -141,21 +170,28 @@ def scan_diff(base: str) -> tuple[list[str], list[str]]:
     known = tracked_basenames()
     block: list[str] = []
     block_path, block_start, block_next = "", 0, 0
+    block_ctx: list[str] = []
 
     def flush_block() -> None:
         if block:
-            hits.extend(scan_block("\n".join(block), block_path, block_start))
+            # The block's reported first line must line up with the context that precedes it, so a
+            # match landing on a context line still prints the right line number.
+            added_from = sum(len(c) + 1 for c in block_ctx)
+            hits.extend(scan_block("\n".join([*block_ctx, *block]), block_path, block_start - len(block_ctx), added_from))
             block.clear()
+            block_ctx.clear()
 
-    for path, lineno, line in added_lines(base):
+    for path, lineno, line, ctx in added_lines(base):
         if ALLOW_MARK in line and is_fixture(path):
             allowed.append(f"{path}:{lineno}")
             flush_block()
             continue
-        # Consecutive added lines of one file form a block for the multi-line rules.
+        # Consecutive added lines of one file form a block for the multi-line rules. The unchanged
+        # lines directly above it join the block: a credential can be split across them.
         if path != block_path or lineno != block_next:
             flush_block()
             block_path, block_start = path, lineno
+            block_ctx = list(ctx[-CONTEXT_LINES:])
         block.append(line)
         block_next = lineno + 1
         skip = skipped_rules(path)
