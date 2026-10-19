@@ -109,9 +109,9 @@ export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; er
 export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   const sched = splitSchedule(f.schedule);
   if (!sched) return { ok: false, error: "schedule" };
-  // Saving always upserts the hub rule through the rooms API, so the stored form must assume a
-  // rule exists even for a task-only room. `hasRule` is a *display* fact (nothing can burn yet);
-  // reusing it here would write burn defaults the user never saw (#284 re-review).
+  // Saving always upserts the hub rule through the rooms API, so legality (e.g. rolling vs burn)
+  // is judged as if the rule already exists, matching the backend. `ctx.hasRule` only drives display;
+  // using it here would let a task-only room save `rolling` together with burn on.
   const stored = storedFromForm(factsOf(f, { ...ctx, hasRule: true }));
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
   const recording: RoomPayload["recording"] = ctx.hasRecording
