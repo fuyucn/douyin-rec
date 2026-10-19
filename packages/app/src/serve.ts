@@ -20,13 +20,14 @@ import { resolveNodeOutputFormat } from "./node-remux.js";
 import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
 import { makeNotifier, resolveWebhookToggles, type HubLabelLookup } from "@drec/observability";
-import { enrichHubEventSafely, makeHubLabelLookup } from "./hub-label-lookup.js";
+import { enrichHubEventSafely, makeHubLabelLookup, taskDisplayName } from "./hub-label-lookup.js";
 import { TaskDaemon, resolveDiskWatermark } from "./daemon.js";
 import { makeManualStartAdmit, currentDiskMinGB } from "./disk-gate.js";
 import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue";
 import { TaskManager } from "./task-manager.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
+import { sweepCredentialFiles } from "./process/credential-file.js";
 import { createWebServer } from "./web/server.js";
 import { HubWatch } from "./hub-watch.js";
 import { QrLoginManager } from "./login/login-manager.js";
@@ -82,6 +83,12 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     const node = ensureNodeIdentity();
     console.log(`[node] 身份 = ${node.nodeId}${node.hostname ? ` (${node.hostname})` : ""}`);
 
+    // Credential files left by a force-killed previous serve: no live child needs them (each
+    // child reads its file once at startup), and nothing has been spawned yet in this process.
+    const swept = sweepCredentialFiles();
+    if (swept.removed > 0) console.log(`[cred] 启动清扫:删除残留录制凭证文件 ${swept.removed} 个`);
+    for (const f of swept.failed) console.error(`[cred] 启动清扫失败: ${f}`);
+
     // ONE manager drives both the web (manual start/stop) and, if requested,
     // the scheduler (automatic start/stop). They share the same subprocess
     // lifecycle + crash auto-restart.
@@ -125,11 +132,12 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       // 重启耗尽彻底停 → 告警(events 在下方初始化,回调在崩溃时才触发,届时已就绪)。
       onTaskDown: (taskId, reason) => {
         const t = store.getTask(taskId);
-        events.emit(taskId, { kind: "error", stage: "录制中断", message: `任务「${t?.name ?? t?.anchorName ?? taskId}」${reason}` });
+        const name = t ? taskDisplayName(t, manager.getAnchorName(taskId)) : String(taskId);
+        events.emit(taskId, { kind: "error", stage: "录制中断", message: `任务「${name}」${reason}` });
       },
       // 子进程结构化告警(取流失败/卡死/录制错误)→ 站内 toast(webhook 子进程已发,故 webhook:false 不重发)。
-      onAlert: (taskId, stage, message) => {
-        events.emit(taskId, { kind: "error", stage, message }, { webhook: false });
+      onAlert: (taskId, stage, message, ctx) => {
+        events.emit(taskId, { kind: "error", stage, message, ...(ctx ? { ctx } : {}) }, { webhook: false });
       },
     });
 
@@ -281,7 +289,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         const prev = lastRec.get(t.id);
         lastRec.set(t.id, rec);
         if (prev === undefined || rec === prev) continue;
-        const anchor = manager.getAnchorName(t.id) ?? t.anchorName ?? t.name ?? t.room;
+        const anchor = taskDisplayName(t, manager.getAnchorName(t.id));
         events.emit(
           t.id,
           rec

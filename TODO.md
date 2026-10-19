@@ -14,8 +14,27 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [!] **T-79 队列页「上传」视图:每节点 biliup 实时进度(issue [#44](https://github.com/fuyucn/douyin-rec/issues/44))** — 计划 [`plans/039_upload_view.md`](plans/039_upload_view.md)
+  — 2026-10-18 计划经三轮独立设计审查,PR [#263](https://github.com/fuyucn/douyin-rec/pull/263) 已合并(计划入库)。**仍 `[!]`**:确认计划 + T0(镜像补 `ss`)是否做。
+  **做什么**：节点状态命令旁路扫描 biliup 进程(只读),master 算速率/剩余/卡住/重试换线/最近结果,队列页按节点展示。**验收**：见计划 T1a–T4。
+- [!] **T-80 派生分P弹幕 xml 回收与总 xml 区分(issue [#84](https://github.com/fuyucn/douyin-rec/issues/84))** — 计划 [`plans/040_derived_part_xml_recycle.md`](plans/040_derived_part_xml_recycle.md)
+  — 2026-10-18 计划经三轮独立设计审查,PR [#264](https://github.com/fuyucn/douyin-rec/pull/264) 已合并(计划入库;T0 改为空 xml 永不凭副本证据删除,emptyXml 类别停止删除)。**仍 `[!]`**:改名(R)还是保持同名(M)、T0 是否先行。
+  **做什么**：T0 修既有风险(不删文件)→ T1 清单 → T2 维护页回收(dryRun + 审计)。**验收**：见计划。
+
+- [~] **T-78 追加后回读分P数遇B站列表刷新延迟:先间隔重读再换线（issue [#66](https://github.com/fuyucn/douyin-rec/issues/66)）**
+  — 2026-10-18 PR [#261](https://github.com/fuyucn/douyin-rec/pull/261)(仅测试/文档,独立审查 APPROVE):假B站支持回读延迟,已知缺陷场景复现「重复追加一次」。**风险扫描按路径名判 RISK + 修复改追加成功判定 → `needs-decision`**,issue 已写决定三行。
+  **做什么**：读到「没变」先退避重读(约 10 秒)再换线,主控/边录边传/节点侧共用。**验收**：#261 场景转真实用例;退避时长有单测;不改上传硬标准。
+
+- [~] **T-77 主控止血跟进:保留成员回归用例、混合稿件号情形、回读计数（issue [#70](https://github.com/fuyucn/douyin-rec/issues/70)）**
+  — 2026-10-18 第 1 项完成:PR [#259](https://github.com/fuyucn/douyin-rec/pull/259) 已合并(仅测试,独立审查 APPROVE),改回旧剔除逻辑两例变红。**第 2、3 项改上传完成/转人工判定 → `needs-decision`**,issue 已写决定三行。
+  **做什么**：①剔除阶段保留成员的回归用例(已完成) ②台账有稿件号 + 另一成员建稿中被杀的判定 ③回读计数口径。**验收**：各项有测试;不改上传硬标准。
+
+- [~] **T-76 节点失联三态的跟进:脚手架双节点、失联超阈值、立即执行拦截（issue [#69](https://github.com/fuyucn/douyin-rec/issues/69)）**
+  — 2026-10-18 第 3 项完成:PR [#257](https://github.com/fuyucn/douyin-rec/pull/257) 已合并(仅测试/文档,独立审查 APPROVE),e2e 脚手架支持多节点,双节点失联场景对「失联当成空」有区分力。**第 1、2 项改收口/上传触发条件 → `needs-decision`**,issue 已写决定三行。
+  **做什么**：①选中节点失联超阈值转待人工或界面提示 ②立即执行遇选中节点失联返回冲突 ③脚手架双节点(已完成)。**验收**：三项各有测试;变异「失联当成空」时第三项场景变红(已满足)。
+
 - [~] **T-67 主播名含 emoji/全角符号/点号时收口失败:stem 清洗、稿件标题保留原始字符（issue [#171](https://github.com/fuyucn/douyin-rec/issues/171)）**
-  — 2026-10-18 认领。PR [#236](https://github.com/fuyucn/douyin-rec/pull/236)(0.0.178,gate PASS,独立审查 APPROVE)。**风险扫描判上传类 → `needs-decision`,等人拍板合并**。
+  — 2026-10-18 认领。PR [#236](https://github.com/fuyucn/douyin-rec/pull/236) 已合并(0.0.186,独立审查两轮 APPROVE)。审查发现稿件查重按标题精确比较,emoji/全角标题若被B站改写会被判「无稿件」而重传 → 已改为宽松匹配命中时返回「无法确认」(各调用方转人工,不重传),回归用例撤修复即红。**待部署实跑**。
   **做什么**：stem 渲染遇非法文件名字符改为清洗(已合法名原样不变);稿件标题四处(master / 节点 / 队列 / 边录边传)收口为 core 单一函数,未配稿件模板时保留原始字符。
   **验收**：三种以上非法字符形态回归用例;已合法名 stem 与标题不变;部署后此类房间收口不再需要人工改名。
 
@@ -31,6 +50,23 @@
   — 2026-10-18 PR [#237](https://github.com/fuyucn/douyin-rec/pull/237) 已合并(0.0.175,三轮独立审查,CI 绿),issue `待验证`,随下次部署收口。
   **做什么**：回滚从写入前原始任务快照恢复,回滚键由正向 patch 推导(含派生列);源任务校验失败同样回滚;回滚自身失败明确报出。
   **验收**：8 条房间用例 + 5 组变异均被抓到;部署后关闭。
+
+- [~] **T-71 录制凭证文件遗留项:启动清扫、同步抛错回滚、启动失败告警去重（issue [#41](https://github.com/fuyucn/douyin-rec/issues/41)）**
+  — 2026-10-18 PR [#244](https://github.com/fuyucn/douyin-rec/pull/244) 已合并(0.0.184,独立审查两轮 APPROVE;删除仅限 run 目录本模块凭证临时文件)。**待部署实跑**。
+  **做什么**：serve 启动清扫残留凭证文件;子进程同步抛错时清理进程表与凭证文件;启动失败告警按任务去重、成功后重置。**验收**：各分支 vitest + 变异验证;部署后 run 目录无残留。
+
+- [~] **T-72 隐私闸门与风险扫描加固（issue [#74](https://github.com/fuyucn/douyin-rec/issues/74)）**
+  — 2026-10-18 PR [#245](https://github.com/fuyucn/douyin-rec/pull/245)(仅脚本/测试/文档,不 bump)。三轮独立审查均打回且问题已修,返工轮次用完 → **`needs-decision`**:合并会让风险扫描明显变严(回放 40 个合并提交约 68% 判 RISK)。
+  **做什么**：json/生成物豁免收窄、登录凭证键值规则、allow 标记仅测试夹具;风险扫描敏感文件清单、改名/权限/二进制路径、按 hunk + 函数签名匹配、异常 diff fail closed;文档同步。**验收**：37 条正反用例 + 变异验证。
+
+- [~] **T-73 账号开关文案与按平台登录判定（issue [#85](https://github.com/fuyucn/douyin-rec/issues/85)）**
+  — 2026-10-18 PR [#246](https://github.com/fuyucn/douyin-rec/pull/246) 已合并(0.0.178,两轮独立审查,CI 绿),issue `待验证`,部署后浏览器核对收口。
+  **做什么**：开关文案改为功能语义(抖音抓礼物/入场、B站取流+礼物、快手取流);登录判定按房间所属平台;锁定原因与弹幕开关同名。**验收**：表单规则与文案用例;部署后三类表单逐项核对。
+
+- [~] **T-74 通知与日志统一带直播间名称等上下文（issue [#53](https://github.com/fuyucn/douyin-rec/issues/53)）**
+  — 2026-10-18 认领,按 issue 内调查方案 N1–N8 分步。N1 契约随 PR [#248](https://github.com/fuyucn/douyin-rec/pull/248) 合并(0.0.179);N2 名称链路收口 + hub 事件附上下文随 PR [#249](https://github.com/fuyucn/douyin-rec/pull/249) 合并(0.0.180,两轮独立审查)。均未部署。
+  **做什么**：唯一名称链路(任务名 → 运行时主播名 → 缓存名 → 台账快照 → 会话基名 → 平台+房间号)+ 事件结构化上下文;后续 N3 台账快照列与编排层发送点、N4 录制子进程通知、N5 级别/去重/下一步、N6 前端渲染(含节点页两处主播名优先)、N7 日志前缀、N8 仓库假名扫描。
+  **验收**：每步独立 PR + 用例;旧事件文案除名称优先级外不变;部署后通知能看出是哪个直播间。
 
 - [~] **T-62 节点侧上传队列:biliup 作为 proc-queue 处理器,按进度停滞判死（计划 [plans/038_node_upload_queue.md](plans/038_node_upload_queue.md)）**
   — 2026-10-16 立项,承接 plan 036 第二期 T14/T15,取代 plan 033 W1-2 与 issue #25 ①。issue [#202](https://github.com/fuyucn/douyin-rec/issues/202)（PR0 #203 已合并、PR1 #205 已合并,**均待部署实跑**;`待验证`）。
@@ -216,6 +252,10 @@
   运行记录 + job 日志 + 单节点重试 + 失败重跑 + 停止,行内时钟图标入口,推送驱动刷新。
   至此 `/rooms` = Tasks(录)+ Hub(配)+ Hub(看)。**仍未做**:跨房间的处理队列视图
   (现 `/queue` 页独有,「队列的进程」要并进来需再评估是否同页共存或合并)。
+  **追加**(`0.0.182`,#265 / PR #266,2026-10-19):Rooms 补齐 Tasks 的只读展示项 —— 顶栏「已连接 · 时间」
+  (共享 `ConnStatus`,房间拉取与任务轮询分别记录,任一失败即显示连接失败)、房间详情的账号开关/输出目录/
+  开始与创建时间、边录边传会话进度(共享 `RollingProgress`)。**故意不做**:「显示未分配」仅 worker 节点有意义;
+  Rooms 状态栏是房间级模型。待部署后实跑验证。
 
 - [~] **T-30 hub/tasks 协作 + 编排/队列/多节点优化**(分支 `feat/hub-optimization`;M1 进行中) — 计划 `plans/030_hub_tasks_optimization.md`
   (结构化任务 `plans/030_tasks.json`,唯一执行源;20 任务 / 8 组件,plan-loop 校验 ok)。
@@ -446,6 +486,9 @@
 
 ## 已完成
 
+- [x] **T-75 PR 门禁与状态机支持分步实现的票(Part of #N)（issue [#253](https://github.com/fuyucn/douyin-rec/issues/253)）**
+  — 2026-10-18 完成。PR [#255](https://github.com/fuyucn/douyin-rec/pull/255) 已合并(仅脚本/文档/测试,两轮独立审查),issue 已 close。门禁接受 `Part of #N`;`in-review → in-progress` 须写原因;review 合并口径与指标脚本同步。T-74(#53)后续步骤改用此写法。
+
 - [x] **T-60 会话 sidecar 写权威起止时间戳:远端隐藏命令按 UTC 运行导致跨天错日（issue [#87](https://github.com/fuyucn/douyin-rec/issues/87)）**
   — 2026-10-18 完成。PR [#179](https://github.com/fuyucn/douyin-rec/pull/179) 已合并并随 0.0.174 部署；worker 主机为 UTC,而无分段会话的 `startMs` 全部与文件名时间在 Asia/Shanghai 对齐(毫秒级),旧边车回退文件名有回归用例。issue #87 已 close。
 - [x] **T-46 dev 多节点 e2e 环境（issue [#82](https://github.com/fuyucn/douyin-rec/issues/82)，P0+P1+P4）**
@@ -458,6 +501,7 @@
   — 2026-10-18 完成。PR [#233](https://github.com/fuyucn/douyin-rec/pull/233) 已合并（独立审查两轮，第二轮 MERGE）；`--from` 必须匹配当前标签、旧口径 closeout 文档化、PR 模板提示。issue #81 已 close。
 - [x] **T-59 收口:扫描与拉取之间会话边车消失导致 job 失败（issue [#146](https://github.com/fuyucn/douyin-rec/issues/146)）**
   — 2026-10-18 完成。PR [#174](https://github.com/fuyucn/douyin-rec/pull/174) 已合并并随 0.0.174 部署；边车消失的确认缺失 / 无法确认 / 混合轮由 orchestrator 回归套件覆盖，隔离多节点 e2e S1 19/19、S2 28/28、S3 40/40 全绿。issue #146 已 close。
+  残余(#176):PR [#222](https://github.com/fuyucn/douyin-rec/pull/222) 处理 —— 成员剔除只在确认缺失时删除,探测失败保留成员;跳过写独立 `skipped` phase,前端不再显示为 `pull/done`。
 - [x] **T-42 节点清单三态：失联/超时不再当「无录像」（issue [#27](https://github.com/fuyucn/douyin-rec/issues/27)）**
   — 2026-10-18 完成。PR [#67](https://github.com/fuyucn/douyin-rec/pull/67) 已合并并随 0.0.174 部署；在干净隔离多节点集群（真 sshd、internal 网络、假 biliup）跑 S2：`docker stop` 拒绝路径与 `docker pause` 超时路径均判定 unreachable，28/28 通过；失联期间不建 job/不选优/不删源，恢复后补收口且无重复上传。issue #27 已 close。
 - [x] **T-63 会话边车并发写入导致 nodeFormat 丢失（issue [#224](https://github.com/fuyucn/douyin-rec/issues/224)，#223 v4 PR0）**

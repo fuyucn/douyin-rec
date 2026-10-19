@@ -4,7 +4,7 @@
  * 凭证不能走 argv(同机 `ps` 可见、超时报错可能连参数写进日志),改写到数据根下
  * `<root>/run/` 的私有文件,再用 `--cookies-file` 传路径。写入失败直接抛错,**绝不回退 argv**。
  */
-import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { drecRoot } from "../paths.js";
 
@@ -42,4 +42,36 @@ export function writeCredentialFile(taskId: number, credential: string): string 
 /** 删除凭证文件;不存在视为已清理。 */
 export function removeCredentialFile(path: string): void {
   rmSync(path, { force: true });
+}
+
+/** Names written by writeCredentialFile: `record-<id>.cred` and its `.<pid>.tmp` staging file. */
+const CREDENTIAL_NAME = /^record-\d+\.cred(\.\d+\.tmp)?$/;
+
+/**
+ * Startup sweep: remove credential files left behind when a previous serve was killed before
+ * its children exited. Children read the file once at startup, so nothing alive still needs it.
+ * Only touches names this module writes; a missing dir is a no-op. Per-file failures are
+ * returned (not thrown) so one bad entry cannot block serve startup, but they are never silent.
+ */
+export function sweepCredentialFiles(): { removed: number; failed: string[] } {
+  const dir = credentialDir();
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { removed: 0, failed: [] };
+    return { removed: 0, failed: [`${dir}: ${(e as Error).message}`] };
+  }
+  let removed = 0;
+  const failed: string[] = [];
+  for (const name of names) {
+    if (!CREDENTIAL_NAME.test(name)) continue;
+    try {
+      rmSync(join(dir, name), { force: true });
+      removed++;
+    } catch (e) {
+      failed.push(`${name}: ${(e as Error).message}`);
+    }
+  }
+  return { removed, failed };
 }

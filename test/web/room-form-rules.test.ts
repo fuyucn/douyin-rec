@@ -3,7 +3,9 @@ import { shouldUseNodeSideUpload } from "../../packages/orchestrator/src/node-si
 import {
   applyChange,
   keepArchiveFromStored,
+  accountToggleCopy,
   cookieLock,
+  cookieReadyFor,
   deriveConstraints,
   flowSummary,
   methodFromStored,
@@ -253,5 +255,41 @@ describe("cookieLock — 任务弹窗单独使用,与 deriveConstraints 同口�
   it("与 deriveConstraints().cookie 一致", () => {
     const f = facts({ danmu: false });
     expect(cookieLock(f)).toEqual(deriveConstraints(f).cookie);
+  });
+});
+
+describe("cookieReadyFor — account readiness of the room's own platform (#85)", () => {
+  const st = [
+    { platform: "douyin", hasSession: false },
+    { platform: "bilibili", hasSession: true },
+    { platform: "kuaishou", hasSession: false },
+  ];
+  it("uses the room's platform, not the douyin login", () => {
+    expect(cookieReadyFor("bilibili", st, false)).toBe(true);
+    expect(cookieReadyFor("kuaishou", st, true)).toBe(false);
+    expect(cookieReadyFor("douyin", st, true)).toBe(false); // loaded status wins over the global atom
+  });
+  it("statuses not loaded: douyin / unknown room fall back to the global douyin status, others are not blocked", () => {
+    expect(cookieReadyFor("douyin", null, false)).toBe(false);
+    expect(cookieReadyFor(undefined, null, true)).toBe(true);
+    expect(cookieReadyFor("bilibili", null, false)).toBe(true);
+  });
+  it("platform missing from the list behaves like not loaded", () => {
+    expect(cookieReadyFor("bilibili", [{ platform: "douyin", hasSession: false }], false)).toBe(true);
+  });
+});
+
+describe("accountToggleCopy — toggle copy by what the account does (#85)", () => {
+  it("douyin: gifts / entries", () => {
+    expect(accountToggleCopy({ cookieForStream: false, danmuAvailable: true }))
+      .toEqual({ labelKey: "rooms.useCookie", hintKey: "rooms.useCookieHintDouyin" });
+  });
+  it("stream + danmu (bilibili)", () => {
+    expect(accountToggleCopy({ cookieForStream: true, danmuAvailable: true }))
+      .toEqual({ labelKey: "roomForm.useCookieStream", hintKey: "rooms.useCookieHintOther" });
+  });
+  it("stream only, no danmu (kuaishou)", () => {
+    expect(accountToggleCopy({ cookieForStream: true, danmuAvailable: false }))
+      .toEqual({ labelKey: "roomForm.useCookieStreamOnly", hintKey: "rooms.useCookieHintStreamOnly" });
   });
 });

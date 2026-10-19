@@ -11,7 +11,7 @@
  * tests run synchronously.
  */
 import { type Task, type TaskStore } from "./store.js";
-import type { OutputFormat } from "@drec/core";
+import { sanitizeNotifyContext, type NotifyContext, type OutputFormat } from "@drec/core";
 import { resolveTaskStreamCookies } from "./stream-cookies.js";
 import type { Spawner } from "./process/spawner.js";
 import type { RecorderProcess, ExitInfo } from "./process/recorder-process.js";
@@ -60,7 +60,7 @@ export interface TaskManagerOpts {
    */
   onRecordingStateChanged?: (taskId: number) => void;
   /** 子进程结构化告警(@@DREC_ALERT@@)回调(serve 接到 → EventCenter 站内 toast;webhook 子进程已发)。 */
-  onAlert?: (taskId: number, stage: string, message: string) => void;
+  onAlert?: (taskId: number, stage: string, message: string, ctx?: NotifyContext) => void;
   /** Logger. Default console.log. */
   log?: (m: string) => void;
   /**
@@ -86,7 +86,7 @@ export class TaskManager {
   private readonly maxRestarts: number;
   private readonly onTaskDown?: (taskId: number, reason: string) => void;
   private readonly onRecordingStateChanged?: (taskId: number) => void;
-  private readonly onAlert?: (taskId: number, stage: string, message: string) => void;
+  private readonly onAlert?: (taskId: number, stage: string, message: string, ctx?: NotifyContext) => void;
   private readonly beforeSpawn?: (taskId: number) => void;
   private readonly nodeOutputFormat?: (task: Task) => OutputFormat;
   private readonly log: (m: string) => void;
@@ -112,6 +112,13 @@ export class TaskManager {
    * 仅在跑时存在。
    */
   private readonly appliedRolling = new Map<number, boolean>();
+  /**
+   * taskIds whose start-failure alert already fired. The daemon retries every tick, so without
+   * this a persistent failure (e.g. credential file unwritable) alerts once a minute. Cleared on
+   * the next spawn that does not throw so a later relapse alerts again; async spawn errors
+   * (ENOENT/EACCES via 'error') are crashes and go through handleExit instead.
+   */
+  private readonly startFailAlerted = new Set<number>();
 
   constructor(store: TaskStore, spawner: Spawner, opts: TaskManagerOpts = {}) {
     this.store = store;
@@ -324,6 +331,7 @@ export class TaskManager {
   private trySpawn(taskId: number): boolean {
     try {
       this.spawnFor(taskId);
+      this.startFailAlerted.delete(taskId);
       return true;
     } catch (e) {
       const reason = `启动失败:${(e as Error)?.message ?? e}`;
@@ -331,7 +339,10 @@ export class TaskManager {
       this.store.setStatus(taskId, "error");
       this.notifyRecordingState(taskId);
       this.logTask(taskId, `[task_manager] ✗ 任务 id=${taskId} ${reason}`);
-      this.onTaskDown?.(taskId, reason);
+      if (!this.startFailAlerted.has(taskId)) {
+        this.startFailAlerted.add(taskId);
+        this.onTaskDown?.(taskId, reason);
+      }
       return false;
     }
   }
@@ -367,8 +378,10 @@ export class TaskManager {
       const alert = /@@DREC_ALERT@@(\{.*\})/.exec(msg);
       if (alert) {
         try {
-          const a = JSON.parse(alert[1]) as { stage?: string; message?: string };
-          this.onAlert?.(taskId, a.stage ?? "error", a.message ?? "");
+          const a = JSON.parse(alert[1]) as { stage?: string; message?: string; ctx?: unknown };
+          // ctx comes from a child that may be older or newer: only known string fields are forwarded.
+          const ctx = sanitizeNotifyContext(a.ctx);
+          this.onAlert?.(taskId, a.stage ?? "error", a.message ?? "", ctx);
         } catch { /* 解析失败忽略 */ }
         return;
       }
@@ -389,7 +402,19 @@ export class TaskManager {
       }
     });
     proc.onExit((info) => this.handleExit(taskId, info));
-    proc.start();
+    try {
+      proc.start();
+    } catch (e) {
+      // Synchronous start failure: drop the tracking entries, otherwise start() sees the task as
+      // running forever and refuses to retry until serve restarts.
+      if (this.procs.get(taskId) === proc) {
+        this.procs.delete(taskId);
+        this.startedAt.delete(taskId);
+        this.recordingPhase.delete(taskId);
+        this.appliedRolling.delete(taskId);
+      }
+      throw e;
+    }
   }
 
   private handleExit(taskId: number, info: ExitInfo): void {

@@ -41,7 +41,7 @@ commander、esbuild 双产物打包（`dist/douyin-rec.mjs` + `dist/tui.mjs`）�
 - **优化建议单独开 `enhancement`。** 不和故障混在一条 issue 里。
 - **Triage 只打标签：** `accept` / `decline` / `needs-decision`。上传、删源、部署、改 hub 规则一律 `needs-decision`，不能自行 accept。
   `needs-decision` 的评论必须写「决定三行」：要决定什么 / 不做会怎样 / 建议选项。
-- **只有 `accept` 的 issue 才能改代码。** 一个 issue 一个分支；完成开 PR，PR 链到 issue。**不合并 PR（合并归 review 会话）、不部署。** `accept` 之后再在 `TODO.md` 记一条 `T-N`，并写上 issue 链接。
+- **只有 `accept` 的 issue 才能改代码。** 一个 issue 一个分支；完成开 PR，PR 链到 issue（分步实现的票中间各步写 `Part of #N`、最后一步写 `Fixes #N`）。**不合并 PR（合并归 review 会话）、不部署。** `accept` 之后再在 `TODO.md` 记一条 `T-N`，并写上 issue 链接。
 - **issue 评论也算输入。** 实现前读完评论。可以不采纳，但 PR 里要写出理由。
 - **`accept` ≠ 有人在做。** 实现 heartbeat 自动认领：扫到 `accept` 且无 `in-progress` 的票即打 `in-progress` 并评论「哪个 agent、何时开始」；人只在想指定别的会话做时手动接管。
 - **做完要留言，然后可以 close。** 先总结结果和未采纳的理由，再按「四不 close」门禁自查（有证据 / 已验证 / 有回归测试 / 已回写经验）；**四条全过，agent 可直接 `gh issue close` 并写明关闭依据**，不必等人。缺任一条就不 close，改成在 issue 里写清缺口并保持 open。

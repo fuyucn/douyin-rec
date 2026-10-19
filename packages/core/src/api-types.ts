@@ -225,7 +225,7 @@ export interface HubJobStepDTO {
    * `node_upload` = 节点侧上传(节点本地 remux + 上传,无回传),与常规 pull 区分开。
    */
   step: string;
-  /** start | done。 */
+  /** start | done | skipped. `skipped` means the step deliberately did not run this round. */
   phase: string;
   at: number;
   /** 该步真实信息(done 事件才有;旧库无 → 缺省)。 */

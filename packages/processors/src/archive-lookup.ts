@@ -80,6 +80,11 @@ export async function listAllArchives(cookiesPath: string, q: ArchiveQuery = {})
   return all.filter((h) => (seen.has(h.bv) ? false : (seen.add(h.bv), true)));
 }
 
+/** Title key that survives server-side rewrites: NFKC, case-folded, letters and digits only. */
+export function looseTitleKey(title: string): string {
+  return title.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+}
+
 /** Compare a candidate against an expected duration; tolerance is max(60s, 2%). */
 export function durationMatches(hit: ArchiveHit, expectedSec: number): boolean {
   if (!hit.durationSec || !(expectedSec > 0)) return false;
@@ -103,7 +108,12 @@ export async function findRecentArchive(
   const windowMs = q.windowMs ?? 48 * 3600_000;
   const recent = hits.filter((h) => h.createdAt == null || now - h.createdAt <= windowMs);
   const sameTitle = recent.filter((h) => h.title.trim() === title.trim());
-  if (sameTitle.length === 0) return "no";
+  if (sameTitle.length === 0) {
+    // Bilibili may normalize emoji / full-width characters in stored titles. A loose-only match could be
+    // our own archive under a rewritten title, so never answer "no" for it (that would re-upload).
+    const key = looseTitleKey(title);
+    return recent.some((h) => looseTitleKey(h.title) === key) ? "unknown" : "no";
+  }
   if (sameTitle.some((h) => durationMatches(h, expectedDurationSec))) return "yes";
   // Title matches but duration does not: we cannot tell whether this is the same session.
   return "unknown";

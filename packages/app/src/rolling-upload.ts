@@ -32,7 +32,7 @@ import {
 import path, { join } from "node:path";
 import {
   canDeleteRollingSource,
-  formatBiliTitle,
+  resolveSubmissionTitle,
   processTimeZone,
   headOfLineFilter,
   planRollingUploads,
@@ -504,8 +504,12 @@ export class RollingUploader {
         startMs,
         timeZone: this.o.timeZone ?? processTimeZone(),
       });
-      const subTpl = (this.o.uploadMeta.submissionTitleTemplate ?? "").trim();
-      const title = subTpl ? formatBiliTitle(subTpl, { sessionBase: base, startMs, timeZone: this.o.timeZone ?? processTimeZone() }) : stem;
+      const title = resolveSubmissionTitle({
+        submissionTemplate: this.o.uploadMeta.submissionTitleTemplate,
+        template: this.o.uploadMeta.titleTemplate,
+        stem,
+        ctx: { sessionBase: base, startMs, timeZone: this.o.timeZone ?? processTimeZone() },
+      });
       // WAL:先落「建稿中」意图,再真正建稿。崩溃后据此转人工,绝不自动重建稿(重复投稿不可逆)。
       this.state = { ...this.state, uploading: { index: seg.index, kind: "create" }, updatedAt: this.now() };
       if (!this.persist()) throw new Error("sidecar 写失败(建稿意图),中止上传并保留源");

@@ -3,7 +3,7 @@ import { WarnGlyph } from "../components/WarnGlyph";
 import { useAtomValue } from "jotai";
 import { useCallback, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { api, type RollingDeliveryDTO, type Task, type TaskDetail as TaskDetailModel } from "../api/client";
+import { api, type Task, type TaskDetail as TaskDetailModel } from "../api/client";
 import { serverTimezoneAtom } from "../atoms";
 import { DanmuBadge, StatusBadge } from "../components/Badge";
 import { Button } from "../components/Button";
@@ -13,11 +13,12 @@ import { useT } from "../lib/i18n";
 import { LogTerminal } from "../components/LogTerminal";
 import { QUALITY_FULL, fmtClock, fmtStartedAt, platformLabel, roomHref, roomId, scheduleText } from "../lib/labels";
 import { localScheduleTooltip, localTimeTooltip } from "../lib/tz";
-import { fmtBytes, roomSlugOf } from "../lib/nodes-summary";
+import { roomSlugOf } from "../lib/nodes-summary";
 import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
 import { MergePanel } from "../components/MergePanel";
 import { jobStateLabel } from "../components/HubJobs";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { RollingProgressRows, useRoomRolling } from "../components/RollingProgress";
 
 /** Detail page (#/task/:id): info card + live logs console, 2s polling. */
 export function TaskDetail(): ReactNode {
@@ -33,8 +34,6 @@ export function TaskDetail(): ReactNode {
   const [logs, setLogs] = useState<string[]>([]);
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
-  /** 该房间的边录边传实时进度(master 队列快照里按房间筛;非 master / 无会话 → 空)。 */
-  const [rolling, setRolling] = useState<RollingDeliveryDTO[]>([]);
 
   const poll = useCallback(async (): Promise<void> => {
     try {
@@ -48,21 +47,8 @@ export function TaskDetail(): ReactNode {
   }, [taskId, navigate, toast, t]);
 
   usePolling(() => void poll(), 2000, Number.isFinite(taskId));
-  // 边录边传快照另走 10 秒一轮:它由 master 5 秒级状态轮询产生,2 秒重拉只是重复扫台账,
-  // 而节点模式下该端点固定 400 —— 没必要跟着任务详情的高频轮询。
-  // 房间匹配必须用与后端 extractRoomSlug 同口径的 roomSlugOf:roomId 只在抖音返回房间号,
-  // B站/快手会返回整段 URL → 与快照里的 roomSlug 永远不相等,进度区恒空。
-  const pollRolling = useCallback(async (): Promise<void> => {
-    try {
-      const tk = await api.getTask(taskId);
-      const slug = roomSlugOf(tk.room);
-      const q = await api.getHubQueue({ q: slug || undefined });
-      setRolling((q.delivering ?? []).filter((d) => !slug || d.roomSlug === slug));
-    } catch {
-      /* 非 master / 队列不可用 → 保持上次结果(不把已知进度清成空) */
-    }
-  }, [taskId]);
-  usePolling(() => void pollRolling(), 10_000, Number.isFinite(taskId));
+  /** 该房间的边录边传实时进度(master 队列快照里按房间筛;非 master / 无会话 → 空)。 */
+  const rolling = useRoomRolling(task ? roomSlugOf(task.room) : null);
 
 
   const action = async (kind: "start" | "stop"): Promise<void> => {
@@ -340,22 +326,7 @@ export function TaskDetail(): ReactNode {
 
             {rolling.length > 0 && (
               <InfoGroup title={t("tasks.progressTitle")}>
-                {rolling.map((d) => (
-                  <div key={d.sessionBase} className="py-2 border-b border-hairline last:border-0 last:pb-0">
-                    <div className="flex items-center gap-2 text-[12px]">
-                      <span className="font-mono text-muted-soft">{d.sessionBase}</span>
-                      <span className="ml-auto">{t("queue.delivering.progress", { c: d.confirmed, n: d.total })}</span>
-                    </div>
-                    <div className="flex flex-wrap gap-x-3 text-[11px] text-muted font-mono mt-0.5">
-                      {d.uploading && <span>{t("queue.delivering.pending")}</span>}
-                      {typeof d.lockedBytes === "number" && d.lockedBytes > 0 && <span>{fmtBytes(d.lockedBytes)}</span>}
-                      {d.ambiguous > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.delivering.unknown")} {d.ambiguous}</span>}
-                      {d.bv && (
-                        <a className="hover:text-ink" href={`https://www.bilibili.com/video/${d.bv}`} target="_blank" rel="noreferrer">{d.bv}</a>
-                      )}
-                    </div>
-                  </div>
-                ))}
+                <RollingProgressRows rolling={rolling} />
               </InfoGroup>
             )}
           </div>

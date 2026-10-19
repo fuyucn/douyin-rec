@@ -358,6 +358,20 @@ describe("SshTransport", () => {
     expect(await bannerOk.exists(["/a"])).toBe(false);       // last line wins: MISSING
   });
 
+  it("exists: trims CRLF and trailing spaces; ignores blank lines", async () => {
+    const crlf = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "banner\r\n\r\n OK \r\n", rsync: async () => {} });
+    const missing = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "\r\n MISSING \t\n\n", rsync: async () => {} });
+    expect(await crlf.exists(["/a"])).toBe(true);
+    expect(await missing.exists(["/a"])).toBe(false);
+  });
+
+  it("exists: all-whitespace or unknown trailing text is not a verdict", async () => {
+    const blank = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => " \r\n\t\n", rsync: async () => {} });
+    const unknown = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "OK\nplease retry\n", rsync: async () => {} });
+    await expect(blank.exists(["/a"])).rejects.toThrow(/无法解析/);
+    await expect(unknown.exists(["/a"])).rejects.toThrow(/无法解析/);
+  });
+
   describe("ping(轻量存活探针)", () => {
     it("远端 test -d 退出 0(run resolve)→ resolve;命令含 test -d + dataRoot", async () => {
       const captured: string[][] = [];

@@ -12,14 +12,14 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
-  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, readyNodes, STAGE_READY, USER_STOP,
+  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, isSidecarSkipEvent, readyNodes, STAGE_READY, USER_STOP,
   sanitizeStreamKey,
   type HubPoolSnapshotDTO, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type QueuePhase,
 } from "@drec/core";
 import { rootHubConfig, rootStageDir } from "./paths.js";
 
 export interface HubJobEvent { state: string; at: number; }
-/** 细粒度子步骤事件(start/done)—— 驱动前端 fork/join 流程图。 */
+/** 细粒度子步骤事件(start/done/skipped)—— 驱动前端 fork/join 流程图。 */
 export interface HubJobStep { step: string; phase: string; at: number; detail?: string }
 /** 选优候选(流程图 select 步 fan-in 节点)。 */
 export interface HubJobCandidate { worker: string; coverage: number; durationSec: number; complete: boolean; isWinner: boolean; danmuCount?: number | null; }
@@ -784,7 +784,8 @@ function doneStepsOf(job: HubJobView): HubJobStep[] {
   const seen = new Set<string>();
   const out: HubJobStep[] = [];
   for (const s of job.steps) {
-    if (s.phase !== "done" || seen.has(s.step)) continue;
+    // A legacy sidecar skip was logged as `done` but nothing ran (issue #176).
+    if (s.phase !== "done" || isSidecarSkipEvent(s) || seen.has(s.step)) continue;
     seen.add(s.step);
     out.push(s);
   }
