@@ -56,8 +56,11 @@
   **做什么**：serve 启动清扫残留凭证文件;子进程同步抛错时清理进程表与凭证文件;启动失败告警按任务去重、成功后重置。**验收**：各分支 vitest + 变异验证;部署后 run 目录无残留。
 
 - [~] **T-72 隐私闸门与风险扫描加固（issue [#74](https://github.com/fuyucn/douyin-rec/issues/74)）**
-  — 2026-10-18 PR [#245](https://github.com/fuyucn/douyin-rec/pull/245)(仅脚本/测试/文档,不 bump)。三轮独立审查均打回且问题已修,返工轮次用完 → **`needs-decision`**:合并会让风险扫描明显变严(回放 40 个合并提交约 68% 判 RISK)。
+  — 2026-10-18 PR [#245](https://github.com/fuyucn/douyin-rec/pull/245) 已合并(仅脚本/测试/文档,不 bump)。用户按建议选 A:接受更严的风险扫描,函数签名启发式与「仅改 value 行」的凭证漏检另开 [#269](https://github.com/fuyucn/douyin-rec/issues/269) 跟进。
   **做什么**：json/生成物豁免收窄、登录凭证键值规则、allow 标记仅测试夹具;风险扫描敏感文件清单、改名/权限/二进制路径、按 hunk + 函数签名匹配、异常 diff fail closed;文档同步。**验收**：37 条正反用例 + 变异验证。
+
+- [~] **T-81 风险扫描函数签名启发式补全 + 仅改 value 行的凭证漏检（issue [#269](https://github.com/fuyucn/douyin-rec/issues/269)）**
+  — 2026-10-18 立项(#74 选 A 的跟进),纯脚本与测试。**做什么**:收集 hunk 内全部签名行、补属性箭头与多行方法签名;`name` 在上下文、`value` 为新增行时命中凭证规则。**验收**:每类正反样例 + 现有 review-gates 套件不回退。
 
 - [~] **T-73 账号开关文案与按平台登录判定（issue [#85](https://github.com/fuyucn/douyin-rec/issues/85)）**
   — 2026-10-18 PR [#246](https://github.com/fuyucn/douyin-rec/pull/246) 已合并(0.0.178,两轮独立审查,CI 绿),issue `待验证`,部署后浏览器核对收口。
