@@ -34,6 +34,9 @@ import {
   canDeleteRollingSource,
   resolveSubmissionTitle,
   processTimeZone,
+  zonedStamp,
+  formatPartTitle,
+  sanitizeStem,
   headOfLineFilter,
   planRollingUploads,
   resolveOutputStem,
@@ -58,6 +61,7 @@ export function sharedNodeUploadSlot(log?: (m: string) => void): UploadSlot | nu
 }
 import { getHubRule, hubKey } from "./hub-store.js";
 import { rootHubConfig, rootHubDir } from "./paths.js";
+import { effectiveHubConfig } from "./disk-gate.js";
 import type { RollingUploadHook } from "@drec/manager";
 
 /** 一个会话的持久化确认状态(防重启后重复投稿)。 */
@@ -124,6 +128,7 @@ export interface RollingUploaderOpts {
     desc?: string;
     titleTemplate?: string;
     submissionTitleTemplate?: string;
+    partTitleTemplate?: string;
   };
   timeZone?: string;
   /** 缺省 true(仅自己可见);false = 公开。 */
@@ -585,25 +590,39 @@ export class RollingUploader {
   }
 }
 
-/** 从 hub 全局配置解析上传 metadata(与 cli 的 resolveCfg 同口径:规则 upload > hub.config uploadDefaults)。 */
-function resolveRollingUploadMeta(
+/** 规则/hub.config 上传 metadata 的读取(两个公开解析器的共同实现)。 */
+function resolveRollingUploadMetaInner(
   platform: string,
   roomSlug: string,
 ): { meta: RollingUploaderOpts["uploadMeta"]; private: boolean } {
-  // hub 规则(现读不缓存;无规则/坏 JSON → null):只有规则**显式** upload 时才走边录边传的 metadata。
+  // hub 规则(现读不缓存;无规则/坏 JSON → null)。A disabled rule or a stage-only rule
+  // must not leak upload metadata: a manually started stream-upload task could otherwise
+  // inherit a stale `private:false` and publish irreversibly.
   const rule = getHubRule(rootHubDir(), hubKey(platform, roomSlug));
+  const mode = rule?.pipeline?.upload?.mode;
+  const ruleActive = rule?.enabled !== false && (mode === "upload" || mode === "rolling");
   let uploadDefaults: {
-    tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string;
+    tag?: string; tid?: number; desc?: string; titleTemplate?: string;
+    submissionTitleTemplate?: string; partTitleTemplate?: string;
   } = {};
   try {
-    const raw = JSON.parse(readFileSync(rootHubConfig(), "utf-8")) as {
+    // `serve` may be running with --hub-config, settings, or inline JSON. The child record
+    // process receives the effective source through DOUYIN_REC_HUB_CONFIG(_JSON); reading
+    // only rootHubConfig() would silently ignore the configuration the user is running.
+    const eff = effectiveHubConfig();
+    const text = eff.json !== undefined
+      ? eff.json
+      : readFileSync(eff.path || rootHubConfig(), "utf-8");
+    const raw = JSON.parse(text) as {
       uploadDefaults?: typeof uploadDefaults;
+      uploadMeta?: typeof uploadDefaults;
     };
-    uploadDefaults = raw.uploadDefaults ?? {};
+    // `uploadMeta` is the documented legacy alias; keep both paths on one resolver.
+    uploadDefaults = raw.uploadDefaults ?? raw.uploadMeta ?? {};
   } catch {
     /* 无 hub.config → 用规则/内置默认 */
   }
-  const up = rule?.pipeline?.upload;
+  const up = ruleActive ? rule?.pipeline?.upload : undefined;
   return {
     meta: {
       tag: up?.tag || uploadDefaults.tag || "直播,录像",
@@ -611,10 +630,118 @@ function resolveRollingUploadMeta(
       desc: up?.desc ?? uploadDefaults.desc,
       titleTemplate: (up?.titleTemplate ?? "").trim() || uploadDefaults.titleTemplate,
       submissionTitleTemplate: (up?.submissionTitleTemplate ?? "").trim() || uploadDefaults.submissionTitleTemplate,
+      partTitleTemplate: (up?.partTitleTemplate ?? "").trim() || uploadDefaults.partTitleTemplate,
     },
     // 可见性:规则 upload.private 缺省 true(= 仅自己可见)。**保守默认 true**(公开是不可逆的曝光)。
     private: up?.private !== false,
   };
+}
+
+/**
+ * 上传 metadata 的**唯一解析处**(规则 upload > hub.config uploadDefaults > 内置默认)。
+ *
+ * 边录边传(rolling)与 0 落盘流式直传共用它:两条路都建稿,用户在 hub 规则里配的分区/标签/标题/
+ * 可见性必须同样生效。此前它是私有函数,0 落盘路径只能退回 CLI 默认值 —— 规则里配的标题模板会
+ * 静默失效,这种「看起来配了其实没生效」正是要避免的。
+ */
+export function resolveRollingUploadMeta(
+  platform: string,
+  roomSlug: string,
+): { meta: RollingUploaderOpts["uploadMeta"]; private: boolean } {
+  return resolveRollingUploadMetaInner(platform, roomSlug);
+}
+
+/**
+ * 0 落盘流式直传(plans/039)建稿用的 metadata。
+ *
+ * `tid` / `tag` / `private` 与边录边传**同一处解析**(规则 upload > hub.config uploadDefaults >
+ * 内置默认)。为什么这三项必须接进来:它们在 hub 规则里配了却对 0 落盘路径静默失效,会导致
+ * 稿件投到错误分区/标签,或该房间要求公开时变成私稿 —— 都是不可逆的投稿事故。
+ * 标题见 {@link resolveStreamUploadTitle};显式 `--stream-upload-*` 参数继续优先。
+ */
+export function resolveStreamUploadMeta(
+  platform: string,
+  roomSlug: string,
+): { tid: number; tag: string; desc?: string; partTitleTemplate?: string; private: boolean } {
+  const { meta, private: isPrivate } = resolveRollingUploadMetaInner(platform, roomSlug);
+  return {
+    tid: meta.tid,
+    tag: meta.tag,
+    ...(meta.desc ? { desc: meta.desc } : {}),
+    ...(meta.partTitleTemplate ? { partTitleTemplate: meta.partTitleTemplate } : {}),
+    private: isPrivate,
+  };
+}
+
+/**
+ * 0 落盘的稿件标题:显式参数优先,否则按 hub 规则/submission 模板渲染,回落 `{name}_{date}`。
+ *
+ * 0 落盘没有录像文件名可继承(标题此前只能来自 CLI `--name`,规则里配的模板对它无效),
+ * 所以渲染口径与边录边传的建稿渲染保持同一套(core 的 `resolveSubmissionTitle`)。
+ */
+export function resolveStreamUploadTitle(o: {
+  platform: string;
+  roomSlug: string;
+  /** Explicit CLI title override (manual debug runs); wins over hub templates. */
+  explicit?: string;
+  /** Anchor name for `{name}`; falls back to the room slug. */
+  anchorName: string;
+  /** Session start time (epoch ms) for `{date}`/`{HH}-{mm}-{ss}`; reuse it across restarts. */
+  startMs: number;
+  timeZone?: string;
+  /** Live stream title for `{title}`; absent until the first stream acquisition. */
+  liveTitle?: string;
+}): string {
+  const explicit = (o.explicit ?? "").trim();
+  if (explicit) return explicit.slice(0, 80);
+  const { meta } = resolveRollingUploadMetaInner(o.platform, o.roomSlug);
+  const timeZone = o.timeZone ?? processTimeZone();
+  // A bare anchor name has no `YYYY-MM-DD_HH-mm-ss` suffix, so `{name}` is not derivable from
+  // `sessionBase` alone. Prefix the start stamp, then the shared renderer sees the same shape
+  // rolling upload gets from a recorded segment's filename.
+  const z = zonedStamp(o.startMs, timeZone);
+  const sessionBase = `${o.anchorName.trim() || o.roomSlug}_${z.date}_${z.hh}-${z.mm}-${z.ss}`;
+  const ctx = { sessionBase, startMs: o.startMs, timeZone, ...(o.liveTitle ? { liveTitle: o.liveTitle } : {}) };
+  let stem: string;
+  try {
+    stem = resolveOutputStem({ template: meta.titleTemplate, sessionBase, startMs: o.startMs, timeZone, ...(o.liveTitle ? { liveTitle: o.liveTitle } : {}) });
+  } catch {
+    // Zero-disk has no filename, so a strict stem failure must not abort recording. Keep a
+    // safe, truncated fallback for `resolveSubmissionTitle`; the submission title itself is
+    // rendered loosely and capped at 80 chars.
+    stem = (sanitizeStem(`${o.anchorName.trim() || o.roomSlug}_${z.date}`) || o.roomSlug).slice(0, 80);
+  }
+  return resolveSubmissionTitle({
+    submissionTemplate: meta.submissionTitleTemplate,
+    template: meta.titleTemplate,
+    stem,
+    ctx,
+  });
+}
+
+/** Render a zero-disk part title from the hub `partTitleTemplate` (null = keep the stem). */
+export function resolveStreamPartTitle(o: {
+  platform: string;
+  roomSlug: string;
+  anchorName: string;
+  startMs: number;
+  timeZone?: string;
+  liveTitle?: string;
+  partIndex: number;
+  partTotal?: number;
+}): string | null {
+  const { meta } = resolveRollingUploadMetaInner(o.platform, o.roomSlug);
+  const timeZone = o.timeZone ?? processTimeZone();
+  const z = zonedStamp(o.startMs, timeZone);
+  const sessionBase = `${o.anchorName.trim() || o.roomSlug}_${z.date}_${z.hh}-${z.mm}-${z.ss}`;
+  return formatPartTitle(meta.partTitleTemplate, {
+    sessionBase,
+    startMs: o.startMs,
+    timeZone,
+    ...(o.liveTitle ? { liveTitle: o.liveTitle } : {}),
+    partIndex: o.partIndex,
+    partTotal: o.partTotal,
+  }, "plain");
 }
 
 /**

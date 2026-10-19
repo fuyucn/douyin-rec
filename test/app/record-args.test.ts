@@ -32,6 +32,19 @@ describe("buildRecordArgs", () => {
     expect(buildRecordArgs(mkTask({ streamUpload: true }))).toContain("--stream-upload");
   });
 
+  it("zero-disk tasks fall back to the resolved anchor when no name is set (no room-number titles)", () => {
+    const args = buildRecordArgs(mkTask({ streamUpload: true, name: null, anchorName: "主播" }));
+    const i = args.indexOf("--name");
+    expect(i).toBeGreaterThan(0);
+    expect(args[i + 1]).toBe("主播");
+    // No name and no anchor → no flag at all (the CLI keeps its room-slug fallback).
+    expect(buildRecordArgs(mkTask({ streamUpload: true, name: null, anchorName: null }))).not.toContain("--name");
+  });
+
+  it("普通录制不吃 anchorName 回退(它自己从每场流解析 owner)", () => {
+    expect(buildRecordArgs(mkTask({ streamUpload: false, name: null, anchorName: "缓存名字" }))).not.toContain("--name");
+  });
+
   it("passes --stream-upload-spool none only when the spool is explicitly disabled", () => {
     expect(buildRecordArgs(mkTask({ streamUpload: true, streamUploadSpool: true }))).not.toContain("--stream-upload-spool");
     expect(buildRecordArgs(mkTask({ streamUpload: true, streamUploadSpool: false }))).toContain("--stream-upload-spool");

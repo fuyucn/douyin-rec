@@ -828,3 +828,22 @@ Node 对无人处理的 SIGUSR2 的默认动作是**立即终止进程**（实�
 - 真实 B 站 `preupload` 命中 601 限流（30/60/120/240s 退避），符合既有设计（B23）。
 
 **仍未覆盖**：daemon → serve → 子进程链路上的 SIGUSR2 端到端（daemon 窗口结束真实触发一次）。
+
+## B28. 0 落盘上传 metadata 与边录边传统一（2026-10-19）
+
+**问题**：0 落盘路径建稿时把 `tid=21`、`tag=直播,录像`、`private=true` 写死在 CLI，标题也只取
+`--name` 或房间号。hub 规则里配的分区/标签/可见性/标题模板因此对这条路**静默失效**，会把稿件
+投到错误分区，或把用户要求公开的房间投成私稿。
+
+**修复**：把 `resolveRollingUploadMeta` 作为唯一读取处公开，新增两个薄投影：
+`resolveStreamUploadMeta`（tid/tag/desc/private）与 `resolveStreamUploadTitle`（同一套
+`resolveOutputStem` + `resolveSubmissionTitle` 渲染，含设置时区）。CLI 仅在显式
+`--stream-upload-tid/tag/private` 时覆盖；标题由 `--name` 提供 `{name}` 锚点，不再当标题字面值。
+`desc` 随 `LivePumpSession` 持久化，重启续录仍用同一份稿件简介。
+
+**兼容**：老 state 文件没有 `desc` 字段 → 视为空；`--stream-upload-tag/private` 的 CLI 默认值移除，
+未显式给时才读规则，避免 commander 默认值把规则永久压住。
+
+**验证**：`rolling-upload.test.ts` 覆盖规则 > hub.config > 内置默认、标题模板与显式覆盖；
+`live-pump.test.ts` 覆盖 `desc` 真正进入建稿请求。`pnpm test` 3325 passed / 42 skipped，
+typecheck / arch:check / bundle / issue-guard 全绿。

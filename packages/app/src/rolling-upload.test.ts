@@ -1,8 +1,11 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RollingUploader } from "./rolling-upload.js";
+import {
+  RollingUploader, resolveRollingUploadMeta, resolveStreamUploadMeta,
+  resolveStreamUploadTitle, resolveStreamPartTitle,
+} from "./rolling-upload.js";
 import { UploadGate, rollingUploadSingleNode } from "@drec/core";
 // 假稿件号用拼接构造:隐私检查会拦裸 BV 号字面量。
 const FAKE_BV = ["B", "V", "1fake"].join("");
@@ -496,5 +499,129 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
     const r = await u.flush({ recordingActive: false });
     expect(r.uploaded).toEqual([0]);
     expect(up).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config > 内置默认)", () => {
+  const prevRoot = process.env.DOUYIN_REC_ROOT;
+  let root: string;
+
+  function writeConfig(): void {
+    mkdirSync(path.join(root, "config", "hub"), { recursive: true });
+    writeFileSync(path.join(root, "config", "hub.config.json"), JSON.stringify({
+      uploadDefaults: { tag: "默认标签", tid: 17, submissionTitleTemplate: "{name} 的默认回放" },
+    }), "utf-8");
+    writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      pipeline: { upload: { mode: "rolling", tag: "规则标签", tid: 21, desc: "规则简介", private: false } },
+    }), "utf-8");
+  }
+
+  beforeEach(() => {
+    root = mkdtempSync(path.join(tmpdir(), "stream-meta-"));
+    process.env.DOUYIN_REC_ROOT = root;
+    writeConfig();
+  });
+
+  afterEach(() => {
+    delete process.env.DOUYIN_REC_HUB_CONFIG;
+    delete process.env.DOUYIN_REC_HUB_CONFIG_JSON;
+    if (prevRoot === undefined) delete process.env.DOUYIN_REC_ROOT;
+    else process.env.DOUYIN_REC_ROOT = prevRoot;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("规则 upload 的 tid/tag/private 对 0 落盘生效", () => {
+    expect(resolveStreamUploadMeta("douyin", "123")).toEqual({
+      tid: 21, tag: "规则标签", desc: "规则简介", partTitleTemplate: undefined, private: false,
+    });
+    expect(resolveStreamUploadMeta("douyin", "123")).toEqual({
+      tid: resolveRollingUploadMeta("douyin", "123").meta.tid,
+      tag: resolveRollingUploadMeta("douyin", "123").meta.tag,
+      desc: resolveRollingUploadMeta("douyin", "123").meta.desc,
+      partTitleTemplate: resolveRollingUploadMeta("douyin", "123").meta.partTitleTemplate,
+      private: resolveRollingUploadMeta("douyin", "123").private,
+    });
+  });
+
+  it("无房间规则时回落 hub.config uploadDefaults", () => {
+    expect(resolveStreamUploadMeta("douyin", "999")).toEqual({ tid: 17, tag: "默认标签", partTitleTemplate: undefined, private: true });
+  });
+
+  it("禁用规则 / 仅 stage 规则不提供上传 metadata(防止私稿被旧规则改成公开)", () => {
+    writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      enabled: false,
+      pipeline: { upload: { mode: "rolling", tag: "禁用标签", tid: 22, private: false } },
+    }), "utf-8");
+    expect(resolveStreamUploadMeta("douyin", "123")).toEqual({
+      tid: 17, tag: "默认标签", partTitleTemplate: undefined, private: true,
+    });
+    writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      pipeline: { upload: { mode: "stage", tag: "stage标签", tid: 23, private: false } },
+    }), "utf-8");
+    expect(resolveStreamUploadMeta("douyin", "123")).toEqual({
+      tid: 17, tag: "默认标签", partTitleTemplate: undefined, private: true,
+    });
+  });
+
+  it("读取 serve 注入的实际生效配置(路径与内联 JSON),并兼容旧 uploadMeta 别名", () => {
+    const alt = path.join(root, "alt-hub.config.json");
+    writeFileSync(alt, JSON.stringify({
+      uploadDefaults: { tag: "路径配置标签", tid: 31, submissionTitleTemplate: "{name} 路径配置" },
+    }), "utf-8");
+    process.env.DOUYIN_REC_HUB_CONFIG = alt;
+    expect(resolveStreamUploadMeta("douyin", "999")).toEqual({ tid: 31, tag: "路径配置标签", partTitleTemplate: undefined, private: true });
+
+    delete process.env.DOUYIN_REC_HUB_CONFIG;
+    process.env.DOUYIN_REC_HUB_CONFIG_JSON = JSON.stringify({
+      uploadMeta: { tag: "旧别名标签", tid: 18, submissionTitleTemplate: "{name} 旧别名" },
+    });
+    expect(resolveStreamUploadMeta("douyin", "999")).toEqual({ tid: 18, tag: "旧别名标签", partTitleTemplate: undefined, private: true });
+    expect(resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "999", anchorName: "主播",
+      startMs: Date.UTC(2026, 8, 12, 17, 30, 0), timeZone: "Asia/Shanghai",
+    })).toBe("主播 旧别名");
+  });
+
+  it("标题模板对 0 落盘生效;显式 CLI 标题优先", () => {
+    const startMs = Date.UTC(2026, 8, 12, 17, 30, 0);
+    expect(resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "123", anchorName: "主播", startMs,
+    })).toBe("主播 的默认回放");
+    expect(resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "123", explicit: "手动标题", anchorName: "主播", startMs,
+    })).toBe("手动标题");
+  });
+
+  it("未配标题模板时仍能渲染默认 {name}_{date}(不是把房间号当主播名)", () => {
+    rmSync(path.join(root, "config", "hub", "douyin.123.json"));
+    writeFileSync(path.join(root, "config", "hub.config.json"), "{}", "utf-8");
+    const startMs = Date.UTC(2026, 8, 12, 17, 30, 0);
+    expect(resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "123", anchorName: "主播", startMs, timeZone: "Asia/Shanghai",
+    })).toBe("主播_2026-09-13");
+  });
+
+  it("直播标题与分 P 模板生效;长名称不再阻止录制", () => {
+    writeFileSync(path.join(root, "config", "hub.config.json"), JSON.stringify({
+      uploadDefaults: {
+        submissionTitleTemplate: "[{name}]{title}_P{part}of{parts}",
+        partTitleTemplate: "{name}-P{part}",
+      },
+    }), "utf-8");
+    const startMs = Date.UTC(2026, 8, 12, 17, 30, 0);
+    expect(resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "999", anchorName: "主播", startMs, timeZone: "Asia/Shanghai",
+      liveTitle: "今晚直播",
+    })).toBe("[主播]今晚直播_Pof");
+    expect(resolveStreamPartTitle({
+      platform: "douyin", roomSlug: "999", anchorName: "主播", startMs, timeZone: "Asia/Shanghai",
+      partIndex: 2, partTotal: 5,
+    })).toBe("主播-P2");
+
+    const longName = "超".repeat(70);
+    const title = resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "999", anchorName: longName, startMs, timeZone: "Asia/Shanghai",
+    });
+    expect(title.length).toBeLessThanOrEqual(80);
   });
 });

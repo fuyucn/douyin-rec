@@ -42,6 +42,12 @@ export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
   if (task.name) {
     // per-streamer output subfolder + filename prefix
     args.push("--name", task.name);
+  } else if (task.streamUpload && task.anchorName) {
+    // Zero-disk only: it has no recording filename to inherit the anchor from, so a cached
+    // anchor keeps title templates and danmu metadata from falling back to the room slug.
+    // Deliberately scoped to streamUpload: the normal recorder resolves the owner itself from
+    // each stream, and a stale cached name would rename its output subfolder.
+    args.push("--name", task.anchorName);
   }
   if (cookiesFile) {
     args.push("--cookies-file", cookiesFile);

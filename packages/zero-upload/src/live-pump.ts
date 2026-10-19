@@ -214,6 +214,8 @@ export interface LivePumpState {
   title: string;
   tid: number;
   tag: string;
+  /** Archive description; absent in older state files (treated as empty). */
+  desc?: string;
   private: boolean;
   /** Archive identity; absent until the first part is submitted. */
   bvid?: string;
@@ -300,6 +302,8 @@ export interface LivePumpSessionOpts {
   title: string;
   tid: number;
   tag: string;
+  /** Archive description from hub rules (optional; empty when not configured). */
+  desc?: string;
   private?: boolean;
   fetchImpl?: typeof fetch;
   log?: (msg: string) => void;
@@ -345,6 +349,7 @@ export class LivePumpSession {
       title: o.title,
       tid: o.tid,
       tag: o.tag,
+      ...(o.desc ? { desc: o.desc } : {}),
       private: o.private !== false,
       parts: [],
       updatedAt: Date.now(),
@@ -367,6 +372,17 @@ export class LivePumpSession {
   get roomKey(): string { return this.state.room; }
   /** Archive title persisted with this session (not the current CLI argument). */
   get archiveTitle(): string { return this.state.title; }
+  /** True once the archive exists or a part/pending upload has been recorded. */
+  get hasArchiveIdentity(): boolean {
+    return !!this.state.bvid || !!this.state.aid || this.state.parts.length > 0 || !!this.state.pending;
+  }
+
+  /** Update the title only while the archive is still fresh; resumed identities stay stable. */
+  setTitleIfFresh(title: string): boolean {
+    if (this.hasArchiveIdentity || !title.trim()) return false;
+    this.state = { ...this.state, title };
+    return true;
+  }
 
   /** Persisted state snapshot (diagnostics and tests). */
   snapshot(): LivePumpState { return JSON.parse(JSON.stringify(this.state)) as LivePumpState; }
@@ -632,6 +648,7 @@ export class LivePumpSession {
             title: this.state.title,
             tid: this.state.tid,
             tag: this.state.tag,
+            ...(this.state.desc ? { desc: this.state.desc } : {}),
             private: this.state.private,
             videos: [{ filename: video.filename, ...(video.title ? { title: video.title } : {}), ...(video.desc ? { desc: video.desc } : {}) }],
             fetchImpl: doFetch,
@@ -1164,6 +1181,10 @@ export interface StreamAcquirer {
   url?: string;
   /** HTTP headers required by the platform; passed through to ffmpeg. */
   headers?: Record<string, string>;
+  /** Live stream title when the platform exposes it (used for title templates). */
+  title?: string;
+  /** Anchor name when the platform exposes it (used for XML metadata). */
+  owner?: string;
 }
 
 export interface AcquireStreamOpts {
@@ -1256,8 +1277,12 @@ export interface RunLivePumpOptions {
   quality: string;
   spoolDir: string;
   title: string;
+  /** Render the archive title after the first stream acquisition (for `{title}` templates). */
+  titleForLive?: (liveTitle: string) => string;
   tid: number;
   tag: string;
+  /** Archive description; omitted/empty = no description. */
+  desc?: string;
   private?: boolean;
   /** Byte cap per part (also the UPOS preupload declaration). */
   sizeCap: number;
@@ -1268,6 +1293,8 @@ export interface RunLivePumpOptions {
   line?: string;
   /** Submit every completed part to the archive. Default true. */
   submit?: boolean;
+  /** Render a part title from its 1-based index; null = keep the generated stem. */
+  partTitle?: (partIndex: number, liveTitle?: string) => string | null;
   log?: (msg: string) => void;
   /** Stop the loop after this many parts (tests / manual runs). */
   shouldStop?: () => boolean | Promise<boolean>;
@@ -1371,6 +1398,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   const log = o.log ?? ((m: string) => process.stderr.write(`${m}\n`));
   const sleep = o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const maxSegments = Math.max(0, o.maxSegments ?? 0);
+  /** Live title seen on the first acquisition (platforms may not expose one). */
+  let liveTitle: string | undefined;
   const session = new LivePumpSession({
     cookiesPath: o.cookiesPath,
     room: o.room,
@@ -1378,6 +1407,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     title: o.title,
     tid: o.tid,
     tag: o.tag,
+    ...(o.desc ? { desc: o.desc } : {}),
     private: o.private !== false,
     log,
     // The session performs the archive create/append requests; it must use the same fetch
@@ -1475,6 +1505,15 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       sleep,
     });
     if (!s.living || !s.url) break;
+    if (s.title?.trim()) liveTitle = s.title.trim();
+    if (o.titleForLive && s.title) {
+      const nextTitle = o.titleForLive(s.title);
+      if (session.setTitleIfFresh(nextTitle)) log(`[live-pump] 稿件标题已按直播标题渲染: ${nextTitle}`);
+    } else if (o.titleForLive) {
+      // No live title from this platform, but the anchor/start time may still have changed.
+      const nextTitle = o.titleForLive("");
+      if (session.setTitleIfFresh(nextTitle)) log(`[live-pump] 稿件标题已按取流信息重渲染: ${nextTitle}`);
+    }
     if (seg === 0) log("[状态] 录制中");
 
     const fileName = `live-pump-${Date.now()}-${seg}.ts`;
@@ -1561,7 +1600,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         index: nextIndex,
         spoolPath: `${o.spoolDir.replace(/\/$/, "")}/${fileName}`,
         stem,
-        title: fileName.replace(/\.[^.]+$/, ""),
+        title: o.partTitle?.(nextIndex + 1, liveTitle) ?? fileName.replace(/\.[^.]+$/, ""),
         bytes: r.spooledBytes,
         durationSec: r.spoolDurationSec,
       });
