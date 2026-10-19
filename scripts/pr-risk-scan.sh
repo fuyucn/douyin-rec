@@ -56,8 +56,9 @@ DISPLAY_ONLY=(
   packages/web/src/lib/notification-text.ts
   packages/web/src/lib/hub-job-steps.ts
 )
-# A display-only hunk that calls the network (fetch( / api.x() falls back to the full rules.
-CALL_RE='fetch\(|(^|[^A-Za-z0-9_])api\.[A-Za-z]+\('
+# A display-only hunk that calls the network or adds an import falls back to the full rules (an import
+# could bring in a helper that uploads, or register one as a side effect).
+CALL_RE='fetch\(|(^|[^A-Za-z0-9_])api[[:space:]]*(\.|\[)|sendBeacon|XMLHttpRequest|EventSource|^[[:space:]]*import[[:space:]]|require\('
 
 reasons=()
 notes=()

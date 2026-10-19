@@ -297,6 +297,7 @@ describe("pr-risk-scan.sh", () => {
     // Keyword on a wrapped argument line, not the call line.
     const wrapped = "diff --git a/packages/web/src/lib/i18n.tsx b/packages/web/src/lib/i18n.tsx\n--- a/packages/web/src/lib/i18n.tsx\n+++ b/packages/web/src/lib/i18n.tsx\n@@ -1,0 +1,2 @@\n+await api.retryJob(\n+  id, \"upload\");\n";
     expect(risk(wrapped).status).toBe(1);
+    expect(risk(diffOf("packages/web/src/lib/i18n.tsx", 'import { uploadNow } from "../api/upload";')).status).toBe(1);
   });
   it("签名启发式不把 if/for 当函数", () => {
     const filler = Array.from({ length: 30 }, (_, i) => ` const c${i} = ${i};`);
