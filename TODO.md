@@ -65,13 +65,6 @@
 - [~] **T-83 Rooms 切换房间残留旧进度/旧时间 + 提示名称优先级统一（issue [#275](https://github.com/fuyucn/douyin-rec/issues/275)）**
   — 2026-10-18 PR [#276](https://github.com/fuyucn/douyin-rec/pull/276) 已合并(0.0.188,审查 APPROVE)。过期响应按当前房间作废、taskId 变化清空详情;提示统一「解析名 > 主播名 > 兜底名」,兜底名不加错误前缀。**部署后**在两个在录房间间切换核对。
 
-- [~] **T-82 node-upload-poll 用例 CI 偶发失败:派发等待不确定（issue [#271](https://github.com/fuyucn/douyin-rec/issues/271)）**
-  — 2026-10-18 PR [#272](https://github.com/fuyucn/douyin-rec/pull/272):假录像终点在 2026-06,默认 10 分钟重连窗会按宿主时钟跳过该场 → 显式关闭重连窗、等待放宽到 5 秒,断言消息带派发次数与台账状态。已合并(0.0.187),issue `待验证`:后续 CI 轮次不再复现即收口。
-
-- [~] **T-81 风险扫描函数签名启发式补全 + 仅改 value 行的凭证漏检（issue [#269](https://github.com/fuyucn/douyin-rec/issues/269)）**
-  — 2026-10-18 认领并实现(#74 选 A 的跟进),纯脚本与测试。**做什么**:收集 hunk 内全部签名行、补属性箭头与多行方法签名;`name` 在上下文、`value` 为新增行时命中凭证规则。**验收**:每类正反样例 + 现有 review-gates 套件不回退。
-  PR [#273](https://github.com/fuyucn/douyin-rec/pull/273) 已合并(五轮审查,末轮 APPROVE;回放 40 提交 RISK 7→7),issue `待验证`。
-
 - [~] **T-73 账号开关文案与按平台登录判定（issue [#85](https://github.com/fuyucn/douyin-rec/issues/85)）**
   — 2026-10-18 PR [#246](https://github.com/fuyucn/douyin-rec/pull/246) 已合并(0.0.178,两轮独立审查,CI 绿),issue `待验证`,部署后浏览器核对收口。
   **做什么**：开关文案改为功能语义(抖音抓礼物/入场、B站取流+礼物、快手取流);登录判定按房间所属平台;锁定原因与弹幕开关同名。**验收**：表单规则与文案用例;部署后三类表单逐项核对。
@@ -499,6 +492,13 @@
 
 ## 已完成
 
+- [x] **T-82 node-upload-poll 用例 CI 偶发失败:派发等待不确定（issue [#271](https://github.com/fuyucn/douyin-rec/issues/271)）**
+  — 2026-10-18 PR [#272](https://github.com/fuyucn/douyin-rec/pull/272):假录像终点在 2026-06,默认 10 分钟重连窗会按宿主时钟跳过该场 → 显式关闭重连窗、等待放宽到 5 秒,断言消息带派发次数与台账状态。已合并(0.0.187),issue `待验证`:后续 CI 轮次不再复现即收口。
+  — 2026-10-19 完成:#271 关闭,#272 合并后 CI 连续 29 次通过、0 失败。
+- [x] **T-81 风险扫描函数签名启发式补全 + 仅改 value 行的凭证漏检（issue [#269](https://github.com/fuyucn/douyin-rec/issues/269)）**
+  — 2026-10-18 认领并实现(#74 选 A 的跟进),纯脚本与测试。**做什么**:收集 hunk 内全部签名行、补属性箭头与多行方法签名;`name` 在上下文、`value` 为新增行时命中凭证规则。**验收**:每类正反样例 + 现有 review-gates 套件不回退。
+  PR [#273](https://github.com/fuyucn/douyin-rec/pull/273) 已合并(五轮审查,末轮 APPROVE;回放 40 提交 RISK 7→7)。
+  — 2026-10-19 完成:#269 关闭,新扫描已在 #274/#276/#277/#278 实际运行。
 - [x] **T-75 PR 门禁与状态机支持分步实现的票(Part of #N)（issue [#253](https://github.com/fuyucn/douyin-rec/issues/253)）**
   — 2026-10-18 完成。PR [#255](https://github.com/fuyucn/douyin-rec/pull/255) 已合并(仅脚本/文档/测试,两轮独立审查),issue 已 close。门禁接受 `Part of #N`;`in-review → in-progress` 须写原因;review 合并口径与指标脚本同步。T-74(#53)后续步骤改用此写法。
 
