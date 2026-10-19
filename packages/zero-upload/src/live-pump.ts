@@ -214,6 +214,8 @@ export interface LivePumpState {
   title: string;
   tid: number;
   tag: string;
+  /** Archive description; absent in older state files (treated as empty). */
+  desc?: string;
   private: boolean;
   /** Archive identity; absent until the first part is submitted. */
   bvid?: string;
@@ -300,6 +302,8 @@ export interface LivePumpSessionOpts {
   title: string;
   tid: number;
   tag: string;
+  /** Archive description from hub rules (optional; empty when not configured). */
+  desc?: string;
   private?: boolean;
   fetchImpl?: typeof fetch;
   log?: (msg: string) => void;
@@ -345,6 +349,7 @@ export class LivePumpSession {
       title: o.title,
       tid: o.tid,
       tag: o.tag,
+      ...(o.desc ? { desc: o.desc } : {}),
       private: o.private !== false,
       parts: [],
       updatedAt: Date.now(),
@@ -632,6 +637,7 @@ export class LivePumpSession {
             title: this.state.title,
             tid: this.state.tid,
             tag: this.state.tag,
+            ...(this.state.desc ? { desc: this.state.desc } : {}),
             private: this.state.private,
             videos: [{ filename: video.filename, ...(video.title ? { title: video.title } : {}), ...(video.desc ? { desc: video.desc } : {}) }],
             fetchImpl: doFetch,
@@ -1258,6 +1264,8 @@ export interface RunLivePumpOptions {
   title: string;
   tid: number;
   tag: string;
+  /** Archive description; omitted/empty = no description. */
+  desc?: string;
   private?: boolean;
   /** Byte cap per part (also the UPOS preupload declaration). */
   sizeCap: number;
@@ -1378,6 +1386,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     title: o.title,
     tid: o.tid,
     tag: o.tag,
+    ...(o.desc ? { desc: o.desc } : {}),
     private: o.private !== false,
     log,
     // The session performs the archive create/append requests; it must use the same fetch

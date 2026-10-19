@@ -461,6 +461,45 @@ describe("runLivePump 的 fetchImpl 必须贯通到稿件提交", () => {
   }, 20_000);
 });
 
+describe("archive description survives state and reaches the create request", () => {
+  it("passes desc from runLivePump options to the first studio create", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-desc-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      let createBody: Record<string, unknown> | undefined;
+      const fake = ((input: string | URL | Request, init?: RequestInit) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") {
+          createBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
+        }
+        return Promise.resolve(json({ code: 0, data: {} }));
+      }) as unknown as typeof fetch;
+
+      installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+      const r = await runLivePump({
+        cookiesPath: join(dir, "cookies.json"), room: "fi", spoolDir: dir, title: "fi",
+        tid: 21, tag: "x", desc: "hub rule description", private: true,
+        sizeCap: CHUNK, maxMs: 300, maxSegments: 1, quality: "origin", submit: true,
+        spoolMode: "none", fetchImpl: fake,
+        fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+        sleep: async () => {},
+      });
+      expect(r.ok, r.error ?? "").toBe(true);
+      expect(createBody?.desc).toBe("hub rule description");
+    } finally {
+      setSpawnForTest(undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
 describe("已入稿的分 P 不因末段被取消而作废", () => {
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-cancel-ok-")); });

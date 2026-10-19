@@ -202,9 +202,9 @@ program
   .option("--stream-upload-size <bytes>", "流式直传每 P 字节上界(默认对齐后的 1GiB)")
   .option("--stream-upload-sec <sec>", "流式直传每 P 时长阈值(秒),与 --stream-upload-size 谁先到算一 P")
   .option("--stream-upload-tid <tid>", "流式直传投稿分区(默认 21)")
-  .option("--stream-upload-tag <tag>", "流式直传标签(逗号分隔)", "直播,录像")
+  .option("--stream-upload-tag <tag>", "流式直传标签(逗号分隔;省略=hub 规则/hub.config 默认)")
   .option("--stream-upload-spool <full|none>", "流式直传是否保留本地 spool: full=可整文件回退(默认), none=真 0 落盘", "full")
-  .option("--stream-upload-private <0|1>", "流式直传仅自己可见(默认 1)", "1")
+  .option("--stream-upload-private <0|1>", "流式直传仅自己可见(省略=hub 规则/hub.config 默认,保守为 1)")
   .option("--output-format <fmt>", "节点侧输出格式 original|mp4|mkv: 分段封口后原地 remux 成所选容器、校验通过后删原文件 (默认 original=不转)")
   .option("--task-id <n>", "所属任务 id(serve 拉起时传入;封口转换入队行据此归属任务,失败告警按任务显示)")
   .option("--config <path>", "YAML 配置文件 (命令行选项优先覆盖)")
@@ -289,14 +289,27 @@ program
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
       const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep } = await import("@drec/zero-upload");
-      const { rootBiliupCookies, sweepOrphanSpools } = await import("@drec/app");
+      const { rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta, resolveStreamUploadTitle } = await import("@drec/app");
+      // Hub-rule metadata is the same single source as rolling upload (rule upload >
+      // hub.config uploadDefaults > built-in defaults). Explicit stream-upload flags still win
+      // because they only serve manual debugging.
+      const roomSlug = platform.extractRoomSlug(roomToUrl(o.room));
+      const streamMeta = resolveStreamUploadMeta(platform.id, roomSlug);
       const sizeCap = alignFileSize(Number(o.streamUploadSize ?? DEFAULT_SEGMENT_CAP));
-      const streamTitle = o.name?.trim() || platform.extractRoomSlug(roomToUrl(o.room));
       const cookies = o.cookiesFile ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+      // A resumed session keeps the archive identity from its state file; only a fresh session
+      // uses this title. `--name` is the anchor/output name, not a title override, so hub title
+      // templates remain effective for named tasks.
+      const streamTitle = resolveStreamUploadTitle({
+        platform: platform.id,
+        roomSlug,
+        anchorName: o.name?.trim() || roomSlug,
+        startMs: Date.now(),
+      });
       console.log(
         `[rec] 流式直传(0 落盘)已开启:room=${o.room} sizeCap=${sizeCap} ` +
         `sec=${o.streamUploadSec ?? (Number(o.segment ?? 0) > 0 ? `${o.segment}(--segment)` : "字节兜底")} ` +
-        `tid=${o.streamUploadTid ?? "21"}`,
+        `tid=${o.streamUploadTid ?? streamMeta.tid}`,
       );
       // Danmu still goes to disk on the zero-disk path (the only artifact that does).
       // The pump stays platform-agnostic; this layer owns the platform source + xml writer.
@@ -377,9 +390,10 @@ program
         quality: (o.quality ?? cfg.quality ?? platform.defaultQuality) as RecordOpts["quality"],
         spoolDir: opts.outDir,
         title: streamTitle,
-        tid: Number(o.streamUploadTid ?? "21"),
-        tag: o.streamUploadTag ?? "直播,录像",
-        private: o.streamUploadPrivate !== "0",
+        tid: Number(o.streamUploadTid ?? streamMeta.tid),
+        tag: o.streamUploadTag ?? streamMeta.tag,
+        ...(streamMeta.desc ? { desc: streamMeta.desc } : {}),
+        private: o.streamUploadPrivate === undefined ? streamMeta.private : o.streamUploadPrivate !== "0",
         sizeCap,
         maxMs: streamPartMaxMs(o.streamUploadSec, o.segment),
         maxSegments: 0,

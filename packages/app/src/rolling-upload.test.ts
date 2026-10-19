@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RollingUploader } from "./rolling-upload.js";
+import { RollingUploader, resolveRollingUploadMeta, resolveStreamUploadMeta, resolveStreamUploadTitle } from "./rolling-upload.js";
 import { UploadGate, rollingUploadSingleNode } from "@drec/core";
 // 假稿件号用拼接构造:隐私检查会拦裸 BV 号字面量。
 const FAKE_BV = ["B", "V", "1fake"].join("");
@@ -496,5 +496,65 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
     const r = await u.flush({ recordingActive: false });
     expect(r.uploaded).toEqual([0]);
     expect(up).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config > 内置默认)", () => {
+  const prevRoot = process.env.DOUYIN_REC_ROOT;
+  let root: string;
+
+  function writeConfig(): void {
+    mkdirSync(path.join(root, "config", "hub"), { recursive: true });
+    writeFileSync(path.join(root, "config", "hub.config.json"), JSON.stringify({
+      uploadDefaults: { tag: "默认标签", tid: 17, submissionTitleTemplate: "{name} 的默认回放" },
+    }), "utf-8");
+    writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      pipeline: { upload: { mode: "rolling", tag: "规则标签", tid: 21, desc: "规则简介", private: false } },
+    }), "utf-8");
+  }
+
+  beforeEach(() => {
+    root = mkdtempSync(path.join(tmpdir(), "stream-meta-"));
+    process.env.DOUYIN_REC_ROOT = root;
+    writeConfig();
+  });
+
+  afterEach(() => {
+    if (prevRoot === undefined) delete process.env.DOUYIN_REC_ROOT;
+    else process.env.DOUYIN_REC_ROOT = prevRoot;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("规则 upload 的 tid/tag/private 对 0 落盘生效", () => {
+    expect(resolveStreamUploadMeta("douyin", "123")).toEqual({ tid: 21, tag: "规则标签", desc: "规则简介", private: false });
+    expect(resolveStreamUploadMeta("douyin", "123")).toEqual({
+      tid: resolveRollingUploadMeta("douyin", "123").meta.tid,
+      tag: resolveRollingUploadMeta("douyin", "123").meta.tag,
+      desc: resolveRollingUploadMeta("douyin", "123").meta.desc,
+      private: resolveRollingUploadMeta("douyin", "123").private,
+    });
+  });
+
+  it("无房间规则时回落 hub.config uploadDefaults", () => {
+    expect(resolveStreamUploadMeta("douyin", "999")).toEqual({ tid: 17, tag: "默认标签", private: true });
+  });
+
+  it("标题模板对 0 落盘生效;显式 CLI 标题优先", () => {
+    const startMs = Date.UTC(2026, 8, 12, 17, 30, 0);
+    expect(resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "123", anchorName: "主播", startMs,
+    })).toBe("主播 的默认回放");
+    expect(resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "123", explicit: "手动标题", anchorName: "主播", startMs,
+    })).toBe("手动标题");
+  });
+
+  it("未配标题模板时仍能渲染默认 {name}_{date}(不是把房间号当主播名)", () => {
+    rmSync(path.join(root, "config", "hub", "douyin.123.json"));
+    writeFileSync(path.join(root, "config", "hub.config.json"), "{}", "utf-8");
+    const startMs = Date.UTC(2026, 8, 12, 17, 30, 0);
+    expect(resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "123", anchorName: "主播", startMs, timeZone: "Asia/Shanghai",
+    })).toBe("主播_2026-09-13");
   });
 });

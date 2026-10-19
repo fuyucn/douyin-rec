@@ -34,6 +34,7 @@ import {
   canDeleteRollingSource,
   resolveSubmissionTitle,
   processTimeZone,
+  zonedStamp,
   headOfLineFilter,
   planRollingUploads,
   resolveOutputStem,
@@ -585,8 +586,8 @@ export class RollingUploader {
   }
 }
 
-/** 从 hub 全局配置解析上传 metadata(与 cli 的 resolveCfg 同口径:规则 upload > hub.config uploadDefaults)。 */
-function resolveRollingUploadMeta(
+/** 规则/hub.config 上传 metadata 的读取(两个公开解析器的共同实现)。 */
+function resolveRollingUploadMetaInner(
   platform: string,
   roomSlug: string,
 ): { meta: RollingUploaderOpts["uploadMeta"]; private: boolean } {
@@ -615,6 +616,72 @@ function resolveRollingUploadMeta(
     // 可见性:规则 upload.private 缺省 true(= 仅自己可见)。**保守默认 true**(公开是不可逆的曝光)。
     private: up?.private !== false,
   };
+}
+
+/**
+ * 上传 metadata 的**唯一解析处**(规则 upload > hub.config uploadDefaults > 内置默认)。
+ *
+ * 边录边传(rolling)与 0 落盘流式直传共用它:两条路都建稿,用户在 hub 规则里配的分区/标签/标题/
+ * 可见性必须同样生效。此前它是私有函数,0 落盘路径只能退回 CLI 默认值 —— 规则里配的标题模板会
+ * 静默失效,这种「看起来配了其实没生效」正是要避免的。
+ */
+export function resolveRollingUploadMeta(
+  platform: string,
+  roomSlug: string,
+): { meta: RollingUploaderOpts["uploadMeta"]; private: boolean } {
+  return resolveRollingUploadMetaInner(platform, roomSlug);
+}
+
+/**
+ * 0 落盘流式直传(plans/039)建稿用的 metadata。
+ *
+ * `tid` / `tag` / `private` 与边录边传**同一处解析**(规则 upload > hub.config uploadDefaults >
+ * 内置默认)。为什么这三项必须接进来:它们在 hub 规则里配了却对 0 落盘路径静默失效,会导致
+ * 稿件投到错误分区/标签,或该房间要求公开时变成私稿 —— 都是不可逆的投稿事故。
+ * 标题见 {@link resolveStreamUploadTitle};显式 `--stream-upload-*` 参数继续优先。
+ */
+export function resolveStreamUploadMeta(
+  platform: string,
+  roomSlug: string,
+): { tid: number; tag: string; desc?: string; private: boolean } {
+  const { meta, private: isPrivate } = resolveRollingUploadMetaInner(platform, roomSlug);
+  return { tid: meta.tid, tag: meta.tag, ...(meta.desc ? { desc: meta.desc } : {}), private: isPrivate };
+}
+
+/**
+ * 0 落盘的稿件标题:显式参数优先,否则按 hub 规则/submission 模板渲染,回落 `{name}_{date}`。
+ *
+ * 0 落盘没有录像文件名可继承(标题此前只能来自 CLI `--name`,规则里配的模板对它无效),
+ * 所以渲染口径与边录边传的建稿渲染保持同一套(core 的 `resolveSubmissionTitle`)。
+ */
+export function resolveStreamUploadTitle(o: {
+  platform: string;
+  roomSlug: string;
+  /** Explicit CLI title override (manual debug runs); wins over hub templates. */
+  explicit?: string;
+  /** Anchor name for `{name}`; falls back to the room slug. */
+  anchorName: string;
+  /** Session start time (epoch ms) for `{date}`/`{HH}-{mm}-{ss}`; reuse it across restarts. */
+  startMs: number;
+  timeZone?: string;
+}): string {
+  const explicit = (o.explicit ?? "").trim();
+  if (explicit) return explicit;
+  const { meta } = resolveRollingUploadMetaInner(o.platform, o.roomSlug);
+  const timeZone = o.timeZone ?? processTimeZone();
+  // A bare anchor name has no `YYYY-MM-DD_HH-mm-ss` suffix, so `{name}` is not derivable from
+  // `sessionBase` alone. Prefix the start stamp, then the shared renderer sees the same shape
+  // rolling upload gets from a recorded segment's filename.
+  const z = zonedStamp(o.startMs, timeZone);
+  const sessionBase = `${o.anchorName.trim() || o.roomSlug}_${z.date}_${z.hh}-${z.mm}-${z.ss}`;
+  const ctx = { sessionBase, startMs: o.startMs, timeZone };
+  const stem = resolveOutputStem({ template: meta.titleTemplate, sessionBase, startMs: o.startMs, timeZone });
+  return resolveSubmissionTitle({
+    submissionTemplate: meta.submissionTitleTemplate,
+    template: meta.titleTemplate,
+    stem,
+    ctx,
+  });
 }
 
 /**
