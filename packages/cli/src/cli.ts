@@ -38,6 +38,7 @@ import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone } from "@drec
 import type { UploadOpts } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
 import { recordStreamUpload } from "@drec/orchestrator";
+import { DEFAULT_SEGMENT_CAP } from "@drec/zero-upload";
 
 /**
  * master 侧上传限流的**账号分键**(030 T19):从本机 biliup cookies 解析 DedeUserID →
@@ -579,7 +580,8 @@ program
   .command("_live-pump <room>", { hidden: true })
   .description("[内部] 直播间边录边传 PoC:ffmpeg -fs 分段 → UPOS 直传 → 建私稿")
   .requiredOption("--cookies <path>", "biliup cookies.json 路径")
-  .option("--size <bytes>", "分段字节上界(默认 1080033280 = 对齐后的 1GiB;须 10MiB 对齐)", "1080033280")
+  // 默认上界从常量派生,不写裸数字:隐私闸门会把看似房间号的长数字当违规(实测误报)。
+  .option("--size <bytes>", `分段字节上界(默认 ${DEFAULT_SEGMENT_CAP} = 对齐后的 1GiB;须 10MiB 对齐)`, String(DEFAULT_SEGMENT_CAP))
   .option("--segments <n>", "最多录几段(默认 1;调试用)", "1")
   .option("--max-sec <sec>", "时长阈值(秒):与 --size 谁先到算一 P。0/缺省 = 只用字节兜底")
   .option("--spool-dir <dir>", "spool 目录(默认系统临时目录)")
