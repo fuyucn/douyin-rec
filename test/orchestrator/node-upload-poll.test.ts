@@ -244,14 +244,23 @@ describe("Reconciler with queue-managed orders", () => {
     const mk = (): Reconciler => new Reconciler({
       platform: "douyin", transports: new Map([["n1", t]]), ledger, runPipeline: runPipeline as never,
       pipelineDeps: { transports: new Map([["n1", t]]), ledger, sh: async () => {}, uploadPlain: async () => "BV", appendGroup: async () => {}, notify: () => {}, cfg: { cleanMaxGapSec: 30, stageDir: "/tmp/s", cookies: "/c", uploadMode: "upload", uploadMeta: { tag: "x", tid: 21, desc: "" } } },
+      // Fake recording ends in 2026-06: without this the default 10-minute reconnect window
+      // skips the broadcast whenever the wall clock is close to the session end (CI skew / slow hosts),
+      // and the assertion below fails with 0 calls even though nothing is wrong.
+      reconnectWindowMs: 0,
       settle: { maxWaitMs: 1, pollMs: 1 }, sleep: async () => {},
     });
-    await mk().reconcileAll();
-    // Dispatch is non-blocking, so wait for the failure to land instead of assuming reconcileAll awaited it.
+    const r = mk();
+    await r.reconcileAll();
+    // reconcileAll awaits the jobs it dispatched; give the scheduled microtasks one turn, then assert
+    // with the actual state in the message so a real regression is not mistaken for timing.
+    // Capture the state before asserting: the assertion message must not throw when nothing was dispatched.
     await vi.waitFor(() => {
-      expect(runPipeline).toHaveBeenCalledTimes(1);
+      const dispatched = runPipeline.mock.calls.length;
+      const state = dispatched > 0 ? ledger.get(keys[0]!)?.state : "not dispatched";
+      expect(runPipeline, `dispatched=${dispatched} state=${state ?? "none"}`).toHaveBeenCalledTimes(1);
       expect(ledger.get(keys[0]!)?.state).toBe("failed");
-    });
+    }, { timeout: 5_000, interval: 10 });
 
     ensureUploadPlan(ledger, keys[0]!, "n1", { ...input, owner: { streamKey: keys[0]! } });
     await mk().reconcileAll();
