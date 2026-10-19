@@ -59,6 +59,12 @@
   — 2026-10-18 PR [#245](https://github.com/fuyucn/douyin-rec/pull/245) 已合并(仅脚本/测试/文档,不 bump)。用户按建议选 A:接受更严的风险扫描,函数签名启发式与「仅改 value 行」的凭证漏检另开 [#269](https://github.com/fuyucn/douyin-rec/issues/269) 跟进。
   **做什么**：json/生成物豁免收窄、登录凭证键值规则、allow 标记仅测试夹具;风险扫描敏感文件清单、改名/权限/二进制路径、按 hunk + 函数签名匹配、异常 diff fail closed;文档同步。**验收**：37 条正反用例 + 变异验证。
 
+- [~] **T-84 风险扫描对纯展示模块只列提示（issue [#254](https://github.com/fuyucn/douyin-rec/issues/254)）**
+  — 2026-10-18 PR [#277](https://github.com/fuyucn/douyin-rec/pull/277) 已合并(仅脚本/测试/文档,三轮审查末轮 APPROVE)。`DISPLAY_ONLY`(词典、提示文案、步骤标签)内容命中只列提示;hunk 含网络调用或导入即按完整规则。「导入行不匹配」会漏判换模块,未采纳。回放 40 提交 RISK 8→7。issue `待验证`。
+
+- [~] **T-83 Rooms 切换房间残留旧进度/旧时间 + 提示名称优先级统一（issue [#275](https://github.com/fuyucn/douyin-rec/issues/275)）**
+  — 2026-10-18 PR [#276](https://github.com/fuyucn/douyin-rec/pull/276) 已合并(0.0.188,审查 APPROVE)。过期响应按当前房间作废、taskId 变化清空详情;提示统一「解析名 > 主播名 > 兜底名」,兜底名不加错误前缀。**部署后**在两个在录房间间切换核对。
+
 - [~] **T-82 node-upload-poll 用例 CI 偶发失败:派发等待不确定（issue [#271](https://github.com/fuyucn/douyin-rec/issues/271)）**
   — 2026-10-18 PR [#272](https://github.com/fuyucn/douyin-rec/pull/272):假录像终点在 2026-06,默认 10 分钟重连窗会按宿主时钟跳过该场 → 显式关闭重连窗、等待放宽到 5 秒,断言消息带派发次数与台账状态。已合并(0.0.187),issue `待验证`:后续 CI 轮次不再复现即收口。
 
