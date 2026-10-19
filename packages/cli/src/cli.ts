@@ -14,6 +14,7 @@ import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌
 import { SyncGate } from "./sync-gate.js";
 import { streamPartMaxMs } from "./stream-part-duration.js";
 import { zeroDiskRoom } from "./zero-disk-room.js";
+import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
@@ -304,7 +305,7 @@ program
       // anchor. Both the XML metadata and `{name}` should use the real anchor once known.
       let anchorName = o.name?.trim() || roomSlug;
       const sizeCap = alignFileSize(Number(o.streamUploadSize ?? DEFAULT_SEGMENT_CAP));
-      const cookies = o.cookiesFile ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+      const uploadCookies = zeroDiskUploadCookie(process.env, rootBiliupCookies());
       // Latched on the first successful acquisition so templates use the real broadcast start,
       // not the process start (a task may sit in "waiting for stream" for hours).
       let streamStartMs = Date.now();
@@ -393,7 +394,7 @@ program
         drain.abort();
       });
       const run = runLivePump({
-        cookiesPath: cookies,
+        cookiesPath: uploadCookies,
         room: pumpRoom,
         fetch: async (r, q) => {
           const s = await platform.getStream(r, q);
