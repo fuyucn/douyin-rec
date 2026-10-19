@@ -84,7 +84,7 @@ function makeFetch(overrides: { failChunk?: number; failComplete?: boolean } = {
 }
 
 /** 记录 submitStudio 的请求体。 */
-function makeSubmitFetch(payload: { code?: number; data?: unknown } = { code: 0, data: { aid: 1, bvid: "BV1xx411c7mD" } }) {
+function makeSubmitFetch(payload: { code?: number; data?: unknown } = { code: 0, data: { aid: 1, bvid: "BVfakefixture1" } }) {
   let seen: Record<string, unknown> | undefined;
   const impl = (async (_input: string | URL | Request, init?: RequestInit) => {
     seen = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
@@ -345,7 +345,7 @@ describe("private archive lookup + append", () => {
         code: 0,
         data: {
           archive: {
-            aid: 7, bvid: "BV1xx411c7mD", title: "private", tid: 21, tag: "a,b",
+            aid: 7, bvid: "BVfakefixture1", title: "private", tid: 21, tag: "a,b",
             desc: "desc", is_only_self: 1,
           },
           videos: [
@@ -355,11 +355,11 @@ describe("private archive lookup + append", () => {
         },
       }), { status: 200 });
     }) as unknown as typeof fetch;
-    const r = await lookup({ cookiesPath: COOKIES, bvid: "BV1xx411c7mD", fetchImpl: impl });
+    const r = await lookup({ cookiesPath: COOKIES, bvid: "BVfakefixture1", fetchImpl: impl });
     expect(r.ok).toBe(true);
     expect(seenUrl).toContain("/x/vupre/web/archive/view?bvid=");
     expect(r.archive).toMatchObject({
-      aid: 7, bvid: "BV1xx411c7mD", title: "private", tid: 21, tag: "a,b",
+      aid: 7, bvid: "BVfakefixture1", title: "private", tid: 21, tag: "a,b",
       private: true, videos: [{ filename: "stem1" }, { filename: "stem2" }],
     });
   });
@@ -375,7 +375,7 @@ describe("private archive lookup + append", () => {
           code: 0,
           data: {
             archive: {
-              aid: 7, bvid: "BV1xx411c7mD", title: "private", tid: 21, tag: "a",
+              aid: 7, bvid: "BVfakefixture1", title: "private", tid: 21, tag: "a",
               desc: "", is_only_self: 1,
             },
             videos: [
@@ -387,11 +387,11 @@ describe("private archive lookup + append", () => {
       }
       postPath = url;
       body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
-      return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BV1xx411c7mD" } }), { status: 200 });
+      return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BVfakefixture1" } }), { status: 200 });
     }) as unknown as typeof fetch;
     const r = await appendStudioPart({
       cookiesPath: COOKIES,
-      bvid: "BV1xx411c7mD",
+      bvid: "BVfakefixture1",
       video: { filename: "stem3", title: "P3" },
       fetchImpl: impl,
     });
@@ -416,7 +416,7 @@ describe("private archive lookup + append", () => {
           code: 0,
           data: {
             archive: {
-              aid: 7, bvid: "BV1xx411c7mD", title: "private", tid: 21, tag: "a",
+              aid: 7, bvid: "BVfakefixture1", title: "private", tid: 21, tag: "a",
               is_only_self: 1,
             },
             videos: [{ cid: 13, filename: "stem3", title: "P3" }],
@@ -427,7 +427,7 @@ describe("private archive lookup + append", () => {
       return new Response(JSON.stringify({ code: 0, data: { aid: 7 } }), { status: 200 });
     }) as unknown as typeof fetch;
     const r = await appendStudioPart({
-      cookiesPath: COOKIES, bvid: "BV1xx411c7mD",
+      cookiesPath: COOKIES, bvid: "BVfakefixture1",
       video: { filename: "stem3", title: "P3" }, fetchImpl: impl,
     });
     expect(r.ok).toBe(true);
@@ -446,7 +446,7 @@ describe("private archive lookup + append", () => {
       return new Response(JSON.stringify({ code: 0 }), { status: 200 });
     }) as unknown as typeof fetch;
     const r = await appendStudioPart({
-      cookiesPath: COOKIES, bvid: "BV1xx411c7mD",
+      cookiesPath: COOKIES, bvid: "BVfakefixture1",
       video: { filename: "stem3" }, fetchImpl: impl,
     });
     expect(r.ok).toBe(false);
@@ -465,7 +465,7 @@ describe("private archive lookup + append", () => {
           code: 0,
           data: {
             archives: [],
-            arc_audits: [{ Archive: { aid: 7, bvid: "BV1xx411c7mD", title: "测试-1" } }],
+            arc_audits: [{ Archive: { aid: 7, bvid: "BVfakefixture1", title: "测试-1" } }],
           },
         }), { status: 200 });
       }
@@ -473,7 +473,7 @@ describe("private archive lookup + append", () => {
       return new Response(JSON.stringify({
         code: 0,
         data: {
-          archive: { aid: 7, bvid: "BV1xx411c7mD", title: "测试-1", tid: 21, tag: "", is_only_self: 1 },
+          archive: { aid: 7, bvid: "BVfakefixture1", title: "测试-1", tid: 21, tag: "", is_only_self: 1 },
           videos: [{ cid: 11, filename: "stem0" }],
         },
       }), { status: 200 });

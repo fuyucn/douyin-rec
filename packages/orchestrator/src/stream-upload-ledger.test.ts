@@ -19,31 +19,31 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe("recordStreamUpload", () => {
   it("新 job:建 pending 后直接落到 done 并带上 BV", () => {
-    const r = recordStreamUpload({ syncDbPath: db, streamKey: KEY, bvid: "BV1su0000001", parts: 3 });
+    const r = recordStreamUpload({ syncDbPath: db, streamKey: KEY, bvid: "BVfakefixture1", parts: 3 });
     expect(r.ok).toBe(true);
-    expect(r.bvid).toBe("BV1su0000001");
+    expect(r.bvid).toBe("BVfakefixture1");
     expect(r.alreadyTerminal).toBe(false);
     const l = new SyncLedger(db);
     const job = l.get(KEY);
     expect(job?.state).toBe("done");
-    expect(job?.bv).toBe("BV1su0000001");
+    expect(job?.bv).toBe("BVfakefixture1");
     l.close();
   });
 
   it("重复写入幂等:不重复建 job、不覆盖已有终态", () => {
-    recordStreamUpload({ syncDbPath: db, streamKey: KEY, bvid: "BV1su0000001", parts: 3 });
-    const r2 = recordStreamUpload({ syncDbPath: db, streamKey: KEY, bvid: "BV1su9999999", parts: 5 });
+    recordStreamUpload({ syncDbPath: db, streamKey: KEY, bvid: "BVfakefixture1", parts: 3 });
+    const r2 = recordStreamUpload({ syncDbPath: db, streamKey: KEY, bvid: "BVfakefixture1", parts: 5 });
     expect(r2.ok).toBe(true);
     expect(r2.alreadyTerminal).toBe(true);      // 已知是终态
     const l = new SyncLedger(db);
     // 第一个 BV 不被第二次写入覆盖(B 站无删稿,覆盖会指向一个不存在的稿件)。
-    expect(l.get(KEY)?.bv).toBe("BV1su0000001");
+    expect(l.get(KEY)?.bv).toBe("BVfakefixture1");
     expect(l.get(KEY)?.state).toBe("done");
     l.close();
   });
 
   it("库路径不存在/不可写 → 返回失败而不抛(上传已成功,不能因台账失败而失败)", () => {
-    const r = recordStreamUpload({ syncDbPath: join(dir, "nope", "x-sync.db"), streamKey: KEY, bvid: "BV1su0000002", parts: 1 });
+    const r = recordStreamUpload({ syncDbPath: join(dir, "nope", "x-sync.db"), streamKey: KEY, bvid: "BVfakefixture1", parts: 1 });
     expect(r.ok).toBe(false);
     expect(r.error).toBeTruthy();
   });

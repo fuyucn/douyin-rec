@@ -439,9 +439,9 @@ describe("runLivePump 的 fetchImpl 必须贯通到稿件提交", () => {
       if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
       if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
       if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
-      if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BV1fi0000001" } }));
-      if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BV1fi0000001" } }));
-      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BV1fi0000001", title: "t", tid: 21 }, videos: [] } }));
+      if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVfakefixture1" } }));
+      if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVfakefixture1" } }));
+      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVfakefixture1", title: "t", tid: 21 }, videos: [] } }));
       if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
       return Promise.resolve(json({ code: 0, data: {} }));
     }) as unknown as typeof fetch;
@@ -456,7 +456,7 @@ describe("runLivePump 的 fetchImpl 必须贯通到稿件提交", () => {
     });
     expect(r.ok, r.error ?? "").toBe(true);
     expect(seen).toContain("/x/vu/web/add/v3");
-    expect(r.bvid).toBe("BV1fi0000001");
+    expect(r.bvid).toBe("BVfakefixture1");
   }, 20_000);
 });
 
@@ -689,11 +689,11 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
       if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
       if (u.pathname === "/x/vu/web/add/v3") {
         created = true;
-        return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BV1dr0000001" } }));
+        return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVfakefixture1" } }));
       }
-      if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BV1dr0000001" } }));
+      if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BVfakefixture1" } }));
       // lookupArchive 读 `data.archive`(扁平形状会被当成空,append 因此失败)。
-      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BV1dr0000001", title: "t", tid: 21 }, videos: [] } }));
+      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BVfakefixture1", title: "t", tid: 21 }, videos: [] } }));
       return Promise.resolve(json({ code: 0, data: {} }));
     }) as unknown as typeof fetch;
   }
@@ -1228,7 +1228,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
   const makeSessionFetch = () => {
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     const archive = {
-      aid: 7, bvid: "BV1xx411c7mD", title: "测试-1", tid: 21, tag: "x",
+      aid: 7, bvid: "BVfakefixture1", title: "测试-1", tid: 21, tag: "x",
       desc: "", is_only_self: 1,
     };
     let videos: Array<{ cid: number; filename: string; title: string }> = [];
@@ -1248,7 +1248,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
       posts.push({ path: url, body });
       const sent = (body.videos ?? []) as Array<{ filename: string; title?: string }>;
       videos = sent.map((v, i) => ({ cid: 10 + i, filename: v.filename, title: v.title ?? "" }));
-      return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BV1xx411c7mD" } }), { status: 200 });
+      return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BVfakefixture1" } }), { status: 200 });
     }) as unknown as typeof fetch;
     return { impl, posts, videos: () => videos };
   };
@@ -1267,7 +1267,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
         bytes: 6, durationSec: 10,
       });
       expect(r.ok).toBe(true);
-      expect(session.bvid).toBe("BV1xx411c7mD");
+      expect(session.bvid).toBe("BVfakefixture1");
     }
     expect(posts.map((p) => p.path.includes("/add/v3") ? "create" : "edit")).toEqual(["create", "edit", "edit"]);
     expect((posts[1]!.body.videos as Array<{ filename: string }>).map((v) => v.filename)).toEqual(["stem0", "stem1"]);
@@ -1426,7 +1426,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
         return new Response(JSON.stringify({
           code: 0,
           data: {
-            archive: { aid: 7, bvid: "BV1xx411c7mD", title: "t", tid: 21, tag: "", is_only_self: 1 },
+            archive: { aid: 7, bvid: "BVfakefixture1", title: "t", tid: 21, tag: "", is_only_self: 1 },
             videos,
           },
         }), { status: 200 });
@@ -1438,7 +1438,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
       const body = JSON.parse(String(init?.body ?? "{}")) as { videos?: Array<{ filename: string; title?: string }> };
       videos.length = 0;
       for (const [i, v] of (body.videos ?? []).entries()) videos.push({ cid: 10 + i, filename: v.filename, title: v.title ?? "" });
-      return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BV1xx411c7mD" } }), { status: 200 });
+      return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BVfakefixture1" } }), { status: 200 });
     }) as unknown as typeof fetch;
     const session = new LivePumpSession({
       cookiesPath: COOKIES, room: "r", spoolDir: dir, title: "t",
@@ -1483,11 +1483,11 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
         completes++;
         return new Response(JSON.stringify({ OK: 1, key: `bucket/resub${completes}.ts` }), { status: 200 });
       }
-      if (method === "POST") return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BV1xx411c7mD" } }), { status: 200 });
+      if (method === "POST") return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BVfakefixture1" } }), { status: 200 });
       return new Response(JSON.stringify({
         code: 0,
         data: {
-          archive: { aid: 7, bvid: "BV1xx411c7mD", title: "t", tid: 21, tag: "", is_only_self: 1 },
+          archive: { aid: 7, bvid: "BVfakefixture1", title: "t", tid: 21, tag: "", is_only_self: 1 },
           videos: [{ cid: 10, filename: "stem0", title: "P1" }],
         },
       }), { status: 200 });
@@ -1497,7 +1497,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     writeFileSync(spool, "recovered-part-bytes");
     writeLivePumpState(statePath, {
       schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
-      bvid: "BV1xx411c7mD", aid: 7,
+      bvid: "BVfakefixture1", aid: 7,
       parts: [
         { index: 0, spoolPath: join(dir, "gone.ts"), filename: "gone.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: true },
         { index: 1, spoolPath: spool, filename: "p1.ts", stem: "stem1", title: "P2", bytes: 19, durationSec: 10, confirmed: false },
@@ -1532,7 +1532,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
       if ((init?.method ?? "GET") === "GET" && url.includes("/x/web/archives")) {
         return new Response(JSON.stringify({
           code: 0,
-          data: { archives: [], arc_audits: [{ Archive: { aid: 7, bvid: "BV1xx411c7mD", title: "测试-1" } }] },
+          data: { archives: [], arc_audits: [{ Archive: { aid: 7, bvid: "BVfakefixture1", title: "测试-1" } }] },
         }), { status: 200 });
       }
       return impl(input, init);
@@ -1543,7 +1543,7 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     });
     const r = await session.recover();
     expect(r.ok).toBe(true);
-    expect(session.bvid).toBe("BV1xx411c7mD");
+    expect(session.bvid).toBe("BVfakefixture1");
     expect(posts).toHaveLength(0);
     expect(readLivePumpState(statePath)?.pending).toBeUndefined();
   });
