@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { NodeRecordSpawner } from "../../packages/app/src/process/spawner.js";
 import {
   credentialDir,
+  sweepCredentialFiles,
   writeCredentialFile,
 } from "../../packages/app/src/process/credential-file.js";
 import type { Task } from "../../packages/app/src/store.js";
@@ -168,5 +169,53 @@ describe("NodeRecordSpawner 登录凭证走文件", () => {
     process.env.DOUYIN_REC_ROOT = bad;
     const { entry } = writeFakeCli("exit");
     expect(() => new NodeRecordSpawner({ cliEntry: entry }).spawn(mkTask())).toThrow(/凭证/);
+  });
+});
+
+describe("sweepCredentialFiles (issue #41 startup sweep)", () => {
+  it("removes leftover credential and staging files, keeps unrelated files", () => {
+    const dir = credentialDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "record-3.cred"), SECRET);
+    writeFileSync(join(dir, "record-12.cred.4242.tmp"), SECRET);
+    writeFileSync(join(dir, "other.lock"), "x");
+    writeFileSync(join(dir, "record-x.cred"), "x");
+    expect(sweepCredentialFiles()).toEqual({ removed: 2, failed: [] });
+    expect(readdirSync(dir).sort()).toEqual(["other.lock", "record-x.cred"]);
+  });
+
+  it("missing run dir is a no-op", () => {
+    expect(existsSync(credentialDir())).toBe(false);
+    expect(sweepCredentialFiles()).toEqual({ removed: 0, failed: [] });
+  });
+
+  it("unreadable run dir is reported, not thrown", () => {
+    mkdirSync(join(root, "r2"));
+    writeFileSync(join(root, "r2", "run"), "x"); // run is a file → readdir ENOTDIR
+    process.env.DOUYIN_REC_ROOT = join(root, "r2");
+    const r = sweepCredentialFiles();
+    expect(r.removed).toBe(0);
+    expect(r.failed).toHaveLength(1);
+  });
+});
+
+describe("NodeRecordSpawner failure after the credential file is written (issue #41)", () => {
+  it("removes the credential file when building the process throws", () => {
+    const { entry } = writeFakeCli("exit");
+    const spawner = new NodeRecordSpawner({
+      cliEntry: entry,
+      mesioPath: () => { throw new Error("settings read failed"); },
+    });
+    expect(() => spawner.spawn(mkTask())).toThrow(/settings read failed/);
+    expect(readdirSync(credentialDir())).toEqual([]);
+  });
+
+  it("removes the credential file when the child spawn throws synchronously", () => {
+    const proc = new NodeRecordSpawner({ command: "", cliEntry: "x" }).spawn(mkTask());
+    expect(readdirSync(credentialDir())).toEqual(["record-7.cred"]);
+    expect(() => proc.start()).toThrow();
+    expect(readdirSync(credentialDir())).toEqual([]);
+    expect(() => proc.start()).not.toThrow(); // spent object: re-entry is a no-op
+    expect(proc.pid).toBeUndefined();
   });
 });
