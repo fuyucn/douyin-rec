@@ -76,8 +76,12 @@ export interface JobEvent { streamKey: string; state: JobState; at: number; }
 
 /** pipeline 细粒度子步骤规范名(流程图节点)。upload/append 仅 upload 模式有。 */
 export type StepName = HubStepName;
-/** 子步骤事件:start/done 配对(能算每步耗时 + 判断当前在跑哪步;异步并行的两轨各有各的起止)。 */
-export interface StepEvent { streamKey: string; step: StepName; phase: "start" | "done"; at: number; detail?: string }
+/**
+ * Sub-step events: start/done pair for duration and the currently running step (parallel branches
+ * each have their own pair). `skipped` means the step was deliberately not run this round.
+ */
+export type StepPhase = "start" | "done" | "skipped";
+export interface StepEvent { streamKey: string; step: StepName; phase: StepPhase; at: number; detail?: string }
 
 /** 单节点状态(workflow 安全阀 + 单节点重跑)。与 StepName 同 key。 */
 export type NodeStateName = HubNodeStateName;
@@ -148,7 +152,7 @@ export class SyncLedger {
     this.db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(streamKey, state, at);
   }
   /** 记一个子步骤 start/done(pipeline 调用;流程图用)。 */
-  logStep(streamKey: string, step: StepName, phase: "start" | "done", detail?: string): void {
+  logStep(streamKey: string, step: StepName, phase: StepPhase, detail?: string): void {
     this.db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at,detail) VALUES(?,?,?,?,?)")
       .run(streamKey, step, phase, this.now(), detail ?? null);
   }
@@ -380,6 +384,8 @@ export class SyncLedger {
       // 故与 pull 同口径排除(真正的闸门仍是失败路径写的 upload_plain failed)。
       if (step === "select" || step === "pull" || step === "node_upload") continue;
       const name = step as StepName;
+      // A skip is not a failure and not a completion: it carries no node verdict at all.
+      if (e.phase === "skipped") continue;
       this.syncNodeState(streamKey, name, e.phase === "done" ? "done" : "failed", {
         error: e.phase === "done" ? undefined : "上次中断/失败",
       });

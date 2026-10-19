@@ -27,6 +27,7 @@ import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue"
 import { TaskManager } from "./task-manager.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
+import { sweepCredentialFiles } from "./process/credential-file.js";
 import { createWebServer } from "./web/server.js";
 import { HubWatch } from "./hub-watch.js";
 import { QrLoginManager } from "./login/login-manager.js";
@@ -81,6 +82,12 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // master 经 SSH `_node-id` 读到它作为 worker id(替代自分配 worker-N)—— 换 master/重启都不丢身份。
     const node = ensureNodeIdentity();
     console.log(`[node] 身份 = ${node.nodeId}${node.hostname ? ` (${node.hostname})` : ""}`);
+
+    // Credential files left by a force-killed previous serve: no live child needs them (each
+    // child reads its file once at startup), and nothing has been spawned yet in this process.
+    const swept = sweepCredentialFiles();
+    if (swept.removed > 0) console.log(`[cred] 启动清扫:删除残留录制凭证文件 ${swept.removed} 个`);
+    for (const f of swept.failed) console.error(`[cred] 启动清扫失败: ${f}`);
 
     // ONE manager drives both the web (manual start/stop) and, if requested,
     // the scheduler (automatic start/stop). They share the same subprocess
