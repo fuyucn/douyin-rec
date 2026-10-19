@@ -804,3 +804,27 @@ Node 对无人处理的 SIGUSR2 的默认动作是**立即终止进程**（实�
 
 **未覆盖**：排空落在取流退避的 sleep 里（最长约 155s）会多录一个分 P，与 `PollingRecorder`
 对「已在飞的 poll」同行为，未专门测试；未做 daemon → serve → 子进程的真实 SIGUSR2 端到端。
+
+## B26. 拆包后的真实环境验证（2026-10-19）
+
+在独立构建的验证容器（`--network host`，镜像含本分支代码）内跑真实路径，房间 51077534924（在播）。
+
+| 验证项 | 结果 |
+|---|---|
+| 真 0 落盘上传（`--stream-upload-spool none`） | 稿件 `BV1xAnn6WEZN`，9.9MiB / 1 块，`无本地 spool(真 0 落盘)`；盘上**只有 state.json + 弹幕 xml，零视频文件** |
+| 多分 P 续同一稿件 | 容器手工跑 `_live-pump` → `BV1xAnn6WE6S`，20.0MiB / 2 块 / 119s，`usedFileFallback=false` / `backpressured=false` / `sessionLeaked=false`，spool 已删 |
+| serve 真实 spawn 的参数 | `[rec] 流式直传(0 落盘)已开启:… sizeCap=… sec=90(--segment) tid=21`（证明任务开关 → argv 接线通） |
+| 同房间 guard（B24）在真实 serve 下 | `拒绝启动 id=5:同一房间已有 0 落盘任务 id=4(zdverify4)在录,同时录会产出两个重复稿件且无法删除` |
+| 停止（SIGTERM） | `收到 SIGTERM,停止录制并中止当前分 P` |
+| **窗口结束排空（SIGUSR2，B25 的 P1）** | 分 P 正在传时 `kill -USR2 <pid>` → 进程 **ALIVE**（未被杀），继续把当前段传完。**对照**：无 handler 时 Node 默认动作当场杀进程（实测 exit 159，见 B25 真子进程用例） |
+| 台账回流 | `[stream-upload] 台账已记录: BV1xAnn6WEZN` |
+
+**验证中发现并修掉的缺陷**：排空**不打日志**。方案 4 的实现里 SIGUSR2 只 abort 一个 controller，pump 在循环顶部读到就 break —— 排空后往往还要等当前分 P 传完或 preupload 退避（实测可达数分钟），而「没有新分 P 出现」与「卡死」在日志之外**完全无法区分**。
+已补 `[live-pump] 窗口结束已排空:不再开录下一场,当前分 P 传完后收尾`（只打一次），并加断言。
+
+**环境限制（非代码问题，记录以免重复排查）**：
+- 宿主机 ffmpeg 不可用（brew tap `homebrew-ffmpeg/ffmpeg` 未信任，`libx265.216` 与已装的 217 ABI 不兼容，软链会因缺 `_x265_api_get_216` 失败）→ 端到端验证改在容器内做。
+- 容器里 `task serve` 拉起的子进程取流持续 `10011 当前服务繁忙`，但同一容器手工跑 `record` / `probe` 取流正常 → 抖音对该出口/端点组合的风控，不是 0 落盘代码问题。排空验证因此用手工 `record` 进程做（一样是真实进程 + 真实信号）。
+- 真实 B 站 `preupload` 命中 601 限流（30/60/120/240s 退避），符合既有设计（B23）。
+
+**仍未覆盖**：daemon → serve → 子进程链路上的 SIGUSR2 端到端（daemon 窗口结束真实触发一次）。
