@@ -1,8 +1,19 @@
 import { describe, it, expect } from "vitest";
-import { formFromRoom, payloadFromForm, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { factsOf, formFromRoom, payloadFromForm, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
-const ctx: RoomContext = { hasRecording: true, danmuAvailable: true, cookieReady: true, cookieForStream: false };
+const ctx: RoomContext = { hasRecording: true, hasRule: true, danmuAvailable: true, cookieReady: true, cookieForStream: false };
+
+describe("factsOf carries the room's rule presence (#284)", () => {
+  it("task-only room (no processing half) → hasRule false, so VERSIONS stays hidden", () => {
+    const f = formFromRoom({ room: "1", platform: "douyin", processing: null } as never);
+    expect(factsOf(f, { ...ctx, hasRule: false }).hasRule).toBe(false);
+  });
+  it("room with a rule → hasRule true", () => {
+    const f = formFromRoom({ room: "1", platform: "douyin", processing: { enabled: true, pipeline: {} } } as never);
+    expect(factsOf(f, ctx).hasRule).toBe(true);
+  });
+});
 
 function mkRoom(over: { recording?: Partial<NonNullable<RoomDTO["recording"]>> | null; processing?: Partial<NonNullable<RoomDTO["processing"]>> | null } = {}): RoomDTO {
   const recording = over.recording === null ? null : {

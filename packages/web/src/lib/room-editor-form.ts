@@ -80,6 +80,8 @@ export function formFromRoom(r: RoomDTO): RoomForm {
 /** Room facts the rules need beyond the form itself. */
 export interface RoomContext {
   hasRecording: boolean;
+  /** The room already has a hub rule. A task-only room has none, so nothing can burn there. */
+  hasRule: boolean;
   danmuAvailable: boolean;
   cookieReady: boolean;
   cookieForStream: boolean;
@@ -93,8 +95,7 @@ export function factsOf(f: RoomForm, ctx: RoomContext): FormFacts {
     danmuAvailable: ctx.danmuAvailable,
     cookieReady: ctx.cookieReady,
     cookieForStream: ctx.cookieForStream,
-    // Saving always upserts the hub rule through the rooms API (empty workers = all nodes).
-    hasRule: true,
+    hasRule: ctx.hasRule,
   };
 }
 

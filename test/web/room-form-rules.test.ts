@@ -302,8 +302,14 @@ describe("burnVersionsApply — VERSIONS chips only where they can take effect (
   it("rule disabled → hidden (nothing runs while the rule is paused)", () => {
     expect(burnVersionsApply(facts({ procEnabled: false }))).toBe(false);
   });
-  it("enabled rule → shown, for archive and upload alike", () => {
+  it("enabled rule → shown, for archive and upload alike (stage burns too)", () => {
     expect(burnVersionsApply(facts({ uploadOn: true }))).toBe(true);
     expect(burnVersionsApply(facts({ uploadOn: false }))).toBe(true);
+  });
+  it("danmu off → hidden, matching the detail page (no file to burn from)", () => {
+    expect(burnVersionsApply(facts({ danmu: false }))).toBe(false);
+  });
+  it("platform without danmu → hidden", () => {
+    expect(burnVersionsApply(facts({ danmuAvailable: false }))).toBe(false);
   });
 });

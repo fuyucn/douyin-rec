@@ -78,7 +78,8 @@ function effectiveBurn(f: FormFacts): { burnDanmu: boolean; burnLivechat: boolea
  * One predicate keeps the editor, the room detail page and the stored form on the same reading.
  */
 export function burnVersionsApply(f: FormFacts): boolean {
-  return f.hasRule && f.procEnabled;
+  // With danmu off there is no file to burn from, so the chips would be dead controls.
+  return f.hasRule && f.procEnabled && f.danmu && f.danmuAvailable;
 }
 const lock = (reasonKey: string): Lock => ({ locked: true, reasonKey });
 

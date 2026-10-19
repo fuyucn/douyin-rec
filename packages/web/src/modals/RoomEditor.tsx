@@ -89,6 +89,8 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   const hasRecording = !!room.recording && !managed;
   const ctx: RoomContext = {
     hasRecording,
+    // A rule exists only when the API returned a processing half; a task-only room has none.
+    hasRule: !!room.processing,
     danmuAvailable: plat ? plat.hasDanmu : true,
     cookieReady: cookieReadyFor(room.platform, cookieStatuses, douyinReady),
     // Douyin streams anonymously; its cookie only serves danmu. Other platforms stream with it.
