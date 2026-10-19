@@ -176,6 +176,9 @@ describe("TaskStore", () => {
     expect(byRoom("on").rollingEffective).toBe(true); // NULL → 旧开关迁移
     expect(byRoom("off").rollingEffective).toBe(false);
     expect(byRoom("on").rollingUpload).toBe(true); // 旧列不动
+    // plans/039 两列:旧库补列,存量行按默认(关 0 落盘 / 保留 spool 1)。
+    expect(byRoom("on").streamUpload).toBe(false);
+    expect(byRoom("on").streamUploadSpool).toBe(true);
     store.close();
   });
 
@@ -362,6 +365,22 @@ describe("TaskStore", () => {
     const u = store.updateTask(t.id, { rollingUpload: true })!;
     expect(u.rollingUpload).toBe(true);
     expect(store.getTask(t.id)!.rollingUpload).toBe(true);
+    store.close();
+  });
+  it("plans/039:streamUpload 默认 false(旧库/新库一致),可加/可改/可关,持久化回读", () => {
+    const store = new TaskStore(dbPath);
+    const t = store.addTask({ room: "stream-1" });
+    expect(t.streamUpload).toBe(false); // 向后兼容:不写这个字段的老库读出来也是关
+    expect(store.updateTask(t.id, { streamUpload: true })!.streamUpload).toBe(true);
+    expect(store.getTask(t.id)!.streamUpload).toBe(true);
+    // 它不是派生字段:改它**不该**像 rollingUpload 那样清空 rollingEffective。
+    const withRolling = store.addTask({ room: "stream-2", rollingUpload: true });
+    expect(store.updateTask(withRolling.id, { streamUpload: true })!.rollingEffective).toBe(true);
+    expect(store.updateTask(t.id, { streamUpload: false })!.streamUpload).toBe(false);
+    // 真 0 落盘:默认保留 spool(向后兼容),显式关闭可持久化。
+    expect(t.streamUploadSpool).toBe(true);
+    expect(store.updateTask(t.id, { streamUploadSpool: false })!.streamUploadSpool).toBe(false);
+    expect(store.getTask(t.id)!.streamUploadSpool).toBe(false);
     store.close();
   });
   // hub 规则现为文件版 → 测试在 packages/app/src/hub-store.test.ts。

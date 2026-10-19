@@ -85,3 +85,11 @@ export function applyTimezoneFromDb(dbPath: string = resolveDbPath()): string {
 export function dbPathForDataRoot(dataRoot: string): string {
   return join(dataRoot, "db", "douyin-rec.db");
 }
+
+/**
+ * hub 台账库路径:`<db>` → `<db>-sync.db`。与 serve 侧同一推导(`resolveDbPath(...).replace`),
+ * 抽成函数免得两处漂移 —— 写错会让 0 落盘的上传结果记到另一个库、UI 永远看不到。
+ */
+export function syncDbPathFor(dbPath: string): string {
+  return dbPath.replace(/\.db$/, "-sync.db");
+}

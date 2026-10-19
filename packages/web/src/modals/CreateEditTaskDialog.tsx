@@ -6,6 +6,8 @@ import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { NotifySection } from "../components/room-form/NotifySection";
 import { RecordingSection } from "../components/room-form/RecordingSection";
+import { ToggleRow } from "../components/room-form/parts";
+import { ExperimentalBadge } from "../components/ExperimentalBadge";
 import { Tooltip } from "../components/Tooltip";
 import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -34,6 +36,10 @@ interface FormState {
   useCookie: boolean;
   outputFormat: OutputFormat;
   webhook: string;
+  /** 0 落盘流式直传(plans/039):源录像不落盘,边录边传 B 站。 */
+  streamUpload: boolean;
+  /** 真 0 落盘 = 连 spool 都不写;代价是分 P 上传失败时没有本地回退源。 */
+  streamUploadSpool: boolean;
 }
 
 const BLANK: FormState = {
@@ -47,6 +53,8 @@ const BLANK: FormState = {
   useCookie: true,
   outputFormat: "original",
   webhook: "",
+  streamUpload: false,
+  streamUploadSpool: true,
 };
 
 function fromTask(t: Task): FormState {
@@ -61,6 +69,9 @@ function fromTask(t: Task): FormState {
     useCookie: !!t.useCookie,
     outputFormat: outputFormatFromStored(t.outputFormat),
     webhook: t.webhook ?? "",
+    // 旧后端不下发该字段 → undefined → false(行为同改前)。
+    streamUpload: t.streamUpload === true,
+    streamUploadSpool: t.streamUploadSpool !== false,
   };
 }
 
@@ -138,6 +149,8 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
       useCookie: form.useCookie,
       schedule: form.schedule.trim() || null,
       webhook: form.webhook.trim() || null,
+      streamUpload: form.streamUpload,
+      streamUploadSpool: form.streamUploadSpool,
       ...(formatLock.locked ? {} : { outputFormat: form.outputFormat }),
     };
     setBusy(true);
@@ -213,6 +226,27 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
         {/* 边录边传已迁到 hub 规则(上传方式 = 边录边传,issue #40);task 只保留录制参数。
             旧开关为 true 的任务只读提示一下,不可在此修改。 */}
         {isEdit && task?.rollingUpload === true && <p className="text-xs text-muted">{t("rooms.rollingLegacyNote")}</p>}
+        {/* 0 落盘流式直传:与边录边传互斥 —— 两者都要写源文件,这里以前端提示 + 后端 400 双保险。 */}
+        <ToggleRow
+          label={t("dialog.streamUpload")}
+          hint={t("dialog.streamUploadHint")}
+          checked={form.streamUpload}
+          onChange={(x) => set("streamUpload", x)}
+          lock={task?.rollingEffective ? { locked: true, reasonKey: "dialog.streamUploadLockRolling" } : undefined}
+          lockedChecked={false}
+          badge={<ExperimentalBadge id="stream-upload" />}
+        />
+        {form.streamUpload && (
+          <ToggleRow
+            nested
+            label={t("dialog.streamUploadZeroDisk")}
+            hint={t("dialog.streamUploadZeroDiskHint")}
+            checked={!form.streamUploadSpool}
+            onChange={(x) => set("streamUploadSpool", !x)}
+            lock={task?.rollingEffective ? { locked: true, reasonKey: "dialog.streamUploadLockRolling" } : undefined}
+            lockedChecked={false}
+          />
+        )}
 
         <div className="flex justify-end gap-3">
           <Button type="button" variant="secondary" onClick={onClose}>

@@ -1,29 +1,22 @@
 // biliup process helpers shared by app and processors (plan 038 T05).
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { APPEND_AMBIGUOUS_MARKER, registerChild, throwIfAborted, type UploadLine, type UploadOpts } from "@drec/core";
+import { APPEND_AMBIGUOUS_MARKER, biliupCookieHeader, registerChild, throwIfAborted, type UploadLine, type UploadOpts } from "@drec/core";
 
 
 // 契约在 core(orchestrator 也要用,不能让 L4.5 反向依赖 L4);这里 re-export 保持既有调用点不变。
 export type { UploadLine, UploadOpts } from "@drec/core";
 
-/** Extract a Cookie header from biliup cookies.json without exposing values. */
-export function biliupCookieHeader(data: unknown): string | null {
-  const root = data as { cookie_info?: { cookies?: unknown }; cookies?: unknown } | null;
-  const raw = root?.cookie_info?.cookies ?? root?.cookies ?? data;
-  if (!Array.isArray(raw)) return null;
-  const pairs = raw
-    .map((item) => {
-      const c = item as { name?: unknown; value?: unknown };
-      const name = String(c?.name ?? "").trim();
-      const value = String(c?.value ?? "").trim();
-      return name && value ? `${name}=${value}` : "";
-    })
-    .filter(Boolean);
-  return pairs.length > 0 ? pairs.join("; ") : null;
-}
+/**
+ * Cookie 头提取已下沉 core(单一真理源,0 落盘直传包也要用,不能让 L4 反向依赖)。
+ * 这里 re-export 保持既有调用点(`@drec/processors` 的导入方)不变。
+ */
+export { biliupCookieHeader } from "@drec/core";
 
-/** Read biliup's Bilibili login cookies as a request Cookie header. */
+/**
+ * Read biliup's Bilibili login cookies as a request Cookie header (default path for callers).
+ * 解析在 core;这里只负责读盘并按需兜底 null。
+ */
 export function readBiliupCookieHeader(cookiesPath: string): string | null {
   try {
     return biliupCookieHeader(JSON.parse(readFileSync(cookiesPath, "utf-8")));

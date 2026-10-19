@@ -11,7 +11,7 @@
  * tests run synchronously.
  */
 import { type Task, type TaskStore } from "./store.js";
-import { sanitizeNotifyContext, type NotifyContext, type OutputFormat } from "@drec/core";
+import { platformForRoom, sanitizeNotifyContext, type NotifyContext, type OutputFormat } from "@drec/core";
 import { resolveTaskStreamCookies } from "./stream-cookies.js";
 import type { Spawner } from "./process/spawner.js";
 import type { RecorderProcess, ExitInfo } from "./process/recorder-process.js";
@@ -220,12 +220,38 @@ export class TaskManager {
       this.log(`[task_manager] start: 未找到任务 id=${taskId}`);
       return false;
     }
+    // 0 落盘直传会为**每个启动的进程**建一个稿件(状态文件按 outDir 隔离,彼此不知道对方存在)。
+    // 同一房间被两个任务同时录 → 两个内容重复的稿件,而 B 站没有删稿 API,代价不可逆。
+    // 这是配置错误,必须在启动前挡掉,而不是等用户看到两个稿件。
+    if (task.streamUpload) {
+      const clash = [...this.procs.keys()].find((id) => {
+        const other = this.store.getTask(id);
+        return other?.streamUpload === true && this.sameRoom(other, task);
+      });
+      if (clash !== undefined) {
+        const other = this.store.getTask(clash);
+        this.log(
+          `[task_manager] 拒绝启动 id=${taskId}:同一房间已有 0 落盘任务 id=${clash}` +
+          `(${other?.name ?? other?.room})在录,同时录会产出两个重复稿件且无法删除`,
+        );
+        return false;
+      }
+    }
     this.restarts.set(taskId, 0);
     if (!this.trySpawn(taskId)) return false;
     this.store.setStatus(taskId, "running");
     this.notifyRecordingState(taskId);
     this.logTask(taskId, `[task_manager] ▶ 启动任务 id=${taskId}（${task.name ?? task.room}）`);
     return true;
+  }
+
+  /** 两个任务是否录同一房间(按平台 + 房间 slug,不用原始 URL 字符串比较)。 */
+  private sameRoom(a: { room: string; platform?: string }, b: { room: string; platform?: string }): boolean {
+    const norm = (t: { room: string; platform?: string }): string => {
+      const p = platformForRoom(t.room);
+      return `${p.id}:${p.extractRoomSlug(t.room)}`;
+    };
+    return norm(a) === norm(b);
   }
 
   /** 正在硬停的任务 → 共用同一个 promise(重复调用不重复发信号)。 */

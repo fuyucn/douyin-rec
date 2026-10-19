@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-18
+> 最后更新：2026-10-19
 
 ## 状态约定
 
@@ -171,6 +171,44 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
+- [ ] **T-63 UPOS 直传 + 边录边传 PoC(T-63,计划 [plans/039_zero_disk_upload.md](plans/039_zero_disk_upload.md) 附录 A/B)**
+  — 2026-10-17 起，分支 `codex/research-zero-disk-upload`（**未合并 / 未部署 / 未开 PR**）。
+  **做了什么**：`packages/processors/src/upos-stream.ts`（自研 UPOS 直传：preupload/chunk/complete/submitStudio，不依赖 biliup CLI）+ `live-pump.ts`（每段一个 ffmpeg 管道，边录边传）+ 隐藏命令 `_live-pump <room>`。29 + 16 单测。
+  **为什么**：用户目标「直播间直接出稿件，减少仅上传不需备份的空间占用」。
+  **关键实测**：①容器必须用 **mpegts** —— matroska 写 stdout 带不了音轨、被 `-fs` 强杀不写 trailer → 缺 duration → B站拒（`62002`）；TS 每包自带 PTS，全过。②`complete` 接受**少传**（声明 N 块实传 M<N 个连续 part → `OK:1`），所以 `size` 是上界、分 P 大小=实际字节，「谁先到算一 P」（字节兜底 / 时长阈值）成立。③UPOS 单 P ≤ 2GiB，「一稿一 P」不可能。④preupload 有 **601「上传过快」限流**，是建会话频率问题：8×8MiB 触发 5 次退避、10 块连续 0 次。
+  **修掉的真 bug**（均实测，变异验证）：①时长结算尾块被静默丢弃（3 段各丢 ~3 秒视频，日志只看块数毫无异常）；②`maxMs` 从未从 `pumpSegment` 下发；③缺 ffprobe 自检导致 `62002`；④四处文档承诺「回退文件上传」而代码没有（已补 `reuploadSpoolFile`）。
+  **验收**：`pnpm test` **2935 passed / 42 skipped**、`typecheck`/`bundle`/`arch:check` 绿。真实直播间：单段 1P、多段 5P、断流 4P 均回读 `code=0`。
+  **直播复核（2026-10-18）**：真实直播间完成 1P 与 2P 两轮私稿。1P：`streamedBytes == spooledBytes == 8771328`，22.071s，`usedFileFallback=false`；2P：两段分别 5,603,340 / 4,883,300 字节，14.002s / 12.370s，均无回退，服务端回读 2 个 cid。取流失败后的指数退避已补（5s/10s/20s…，上限 5 次重试）。
+  **2026-10-18 单稿状态机**：新增 `LivePumpSession`：P1 完成即建稿、后续 P 完成即读取完整稿件后 `edit` 追加；每次不可逆请求前 fsync WAL，崩溃后按 `archive/view` 的 stem 核对，绝不再建第二稿；未确认 P 头阻塞；确认后才删 spool。单测覆盖建稿、连续追加、失败保留 spool、建稿/追加恢复、标题歧义、网络不可达与写盘失败。
+  **真实单稿多分 P（2026-10-18，房间 491554018246）**：一次在线跑通 **同一稿件 5 个分 P**（`BV1knnL6iEyT`，aid 117463530342138，私稿）：P1 建稿后每段确认即追加，服务端回读 `partCount=5` 且 cid 各不相同；每段 2 块、约 16MB、时长 41~47s，`usedFileFallback=false`、`sessionLeaked=false`、`backpressured=false`；确认过的 spool 全部已删。
+  **修掉的真 bug（真实跑出来的）**：续跑/恢复后 CLI 仍用本地段号 `index=seg` 提交 → 复用已确认索引、覆盖分 P 记录、新段 spool 泄漏（实测第 3 段未入稿且文件残留）。改为按会话已确认最大索引续号，并补回归用例。
+  **互斥修复**：`record --stream-upload` 原本与普通录制会话并行（同一流被拉两次 + 可能重复建稿）。改为**替换**落盘录制器，且与 `--rolling-upload` 同开时直接 exit 2 拒绝。
+  **断流验证（2026-10-18，房间 64442011833）**：强杀 ffmpeg 3 次，段1/段2 仍进**同一稿件** `BV1ckn56YEdS`（服务端回读 2 个 cid），证明断流后自动重取流并续同一稿件。
+  **修掉的真 bug（断流跑出来的）**：web `edit` 连续追 P 命中 `code:21540 请求过于频繁` → 之前按「永久失败」处理，整个分 P 判失败并头阻塞后续分 P。已把 `21540` 纳入 core `isUploadRateLimited`，并给 `submitPart` 加指数退避重试（默认 60s 起、5 次、封顶 300s）。
+  **断流 + 限流双重验证（同房间，修复后）**：强杀 ffmpeg 1 次，5 个分 P 全部进入同一稿件 `BV1F1n56hE7D`（`partCount=5`，5 个 cid），全部 `usedFileFallback=false` / `sessionLeaked=false` / `backpressured=false`，spool 全部清理。
+  **未确认分 P 的恢复**：单条未确认且 spool 仍在时，按整文件重传再追加（`resubmitUnconfirmedPart`）；多条未确认或 spool 已丢仍转人工。实测遇到 B 站 `10010 稿件已锁定`（审核锁定）时**正确停手不丢数据**，spool 保留待人工。
+  **接成任务开关（2026-10-18，`cc2c54f`）**：`streamUpload` 升为一等任务字段（DB/store/hub 同步/argv/Web 表单/API 门禁全链路打通），不再只能跑隐藏命令。互斥判定收敛到 core `streamUploadConflicts`（唯一一份，API + 表单 + argv 兜底共用）；`OutputFormatLock` 新增 `stream-upload`（0 落盘不产文件 → 格式无对象可作用）；登记实验性徽标（layer=task，观察 168h）。门禁：test **2944 passed / 42 skipped** + typecheck/arch:check/bundle/web build 全绿。
+  **接开关后的真实实跑**：①`_live-pump --size 25MiB --segments 8` → 同一稿件 `BV1QcnL6JE1h`，服务端回读 **8 个分 P**、cid 各不同，8/8 `usedFileFallback=false`/`sessionLeaked=false`/`backpressured=false`，spool 逐段删除。②走任务 argv 的 `record --stream-upload 1 --size 25MiB --sec 45` → 稿件 `BV1Rdn56XEKm`，每段 ~17MiB/45s 证明**时长上限先到即结算**（字节未到 cap），与设计一致。
+  **更正归因（2026-10-18，`221bfa4`）**：B11 把「第 1 段后静默停住」归因为「取流无超时」并不完整。真正根因是超时定时器 `unref()` —— fetch 永不返回时它是事件循环里唯一句柄，unref 后 Node 空转，`Promise.race` 永不 resolve，表现为进程存活/CPU 0/无 socket/无日志。已去掉 unref，并用**真子进程**回归（esbuild 打包后 spawn；vitest 自己持句柄测不出）+ 变异验证（加回 unref 即失败）。修后实测私稿 `BV1ABn56KEX4`（8.2MiB / 22.4s，无回退）。
+  **弹幕 + 取流超时（2026-10-18，`2c70271`）**：0 落盘路径现在自己连平台弹幕，用同一个 `XmlDanmuWriter` 写会话级 `.xml`（唯一落盘产物；连接失败不阻断视频，`finally` 保证停源）。同时修掉本轮跑出的**真事故**：`acquireStreamWithBackoff` 直接 await `platform.getStream`，该调用可永久挂起（无超时）→ 第 1 段确认后静默停录、无重试日志、弹幕还在涨；现每次取流 30s 上限，超时/抛错都按失败退避。实测房间 64442011833 私稿 `BV15Zn56pEVw`：**5 个分 P 同一稿件**（5 个不同 cid，duration 190s，每段 ~45s 时长先到），spool 逐段删除，xml 含锚点与 `<d>/<member>`；修前同场景第 1 段后卡死，修后连跑 5 段。`pnpm test` **2948 passed / 42 skipped** + typecheck/arch:check/bundle 全绿。
+  **生产路径验证（2026-10-18，`f532296`）**：隔离数据根起 `task serve`，走 API 建任务 + 启动，确认真实 spawn 的 argv 含 `--stream-upload 1`（非手工命令）；同次运行验证取流失败退避（抖音 `10011` → 5/10/20/40/80s，5 次后收尾）与弹幕 xml 落盘。另加 hub 边界 guard：0 落盘不产可扫描录像，绑成规则源会让 hub 永远选不到 winner → 房间编辑与任务改开关两个方向都回 400。
+  **重启续录 + 孤儿 spool（2026-10-18，`793e433`）**：真实私稿 `BV1wrn56PE8G` 三次启动同目录，part 0→3 连续进**同一稿件**；kill 在段中途会留下永不清扫的孤儿 spool（实测 1.07MB），已在 app 层加启动清扫（processors 禁止列目录），删除条件 = 本模块命名 + 不在 state + 超 10 分钟宽限 + unlink 成功，任何异常不阻断启动。真实 CLI 日志确认孤儿被删、state 引用的 spool 全保留。
+  **真 0 落盘（2026-10-18，`a71bff4`）**：审计发现此前「0 落盘」仍把每个字节 writeSync 到 spool（峰值占用=一个分 P），只是确认后删。现在 spool 可关：`full`（默认，可整文件回退 + 本地自检）/ `none`（真 0 落盘，失败无本地回退、必须显式报错）。接线到 core/DB/store/hub 同步/argv/API/任务弹窗；单测覆盖 none 模式不创建任何文件、字节仍全部上传、失败必须报错；真实 daemon spawn 已确认 argv 含 `--stream-upload-spool none`。另修：分 P 时长此前不读任务的 `segmentSec`，现在 `maxMs = --stream-upload-sec ?? --segment`（0/缺失 = 只用字节兜底）。
+  **窗口结束排空 P1 修复（2026-10-18，B25）**：0 落盘分支此前只注册 SIGINT/SIGTERM，daemon 窗口结束发 SIGUSR2 → Node 默认动作杀掉进程（实测 exit 159）→ 在录的那段被腰斩（`spool=none` 下无本地副本，视频永久丢失），且 `stopGraceful` 发信号前已置 `expected=true`，task 日志反而打印「直播自然收播，排空完成」—— 与事实相反。修：`RunLivePumpOptions.drainSignal`（与 `signal`(= 腰斩) 职责分开，语义同 `record-engine.drain()`）+ cli 在 `runLivePump()` 前注册 `process.on("SIGUSR2")`。回归 9 条（4 排空行为 + 2 真子进程 + 3 grep 守护），三条变异验证都真的跑失败过。门禁：test 2987/42 + typecheck/arch:check/bundle 绿。**未覆盖**：排空落在取流退避 sleep 里会多录一分 P；未做 daemon→serve→子进程真实端到端。
+  **审计收尾（2026-10-18）**：旧库迁移已补测试覆盖 `streamUpload`/`streamUploadSpool` 补列与默认值（旧库读出「关」+「保留 spool」，行为不变）。
+  **真 0 落盘端到端（2026-10-18，`83ac51d`）**：缺口 1 已补 —— 容器内真实 ffmpeg + 假 B 站跑 `runLivePump(spoolMode:"none")` 2 段：同一稿件 `BV1zd0000001`、`create`+`append` 各一次、**盘上视频文件 0 个**。顺带修两个真 bug：①`runLivePump` 没把 `fetchImpl` 传给 `LivePumpSession`，假传输在建稿处静默回落真实网络（拿到 -400），已贯通 + 回归用例 + 变异验证；②none 模式亚秒分 P 被 `Math.round` 舍成 0 → 判「缺 duration」判死，改为保留两位小数。
+  **多房间并发（2026-10-18，`7a28ebc`）**：两个房间并发跑 `spoolMode:"none"`，各自 2 个分 P 进**各自稿件**（`BV1conc0001`/`BV1conc0002`），state 按房间名分离，盘上零视频文件；回归用例做了变异验证（同 BV 即失败）。
+  **hub 守卫补洞（2026-10-18，`d07a97c`）**：真漏洞 —— `createHubRule` 自己内联查任务存在性、没调 `ctx.recordingError`，于是 `POST /api/hub/rules` 能把 streamUpload 任务绑成规则源，造出永远选不到 winner 且无报错的规则。已改为复用唯一判定；三条写入路径（房间编辑 / 规则 PATCH / 规则新建）现在全部拒绝，无绕过入口。
+  **录制相位标记（2026-10-18，`17435af8`）**：真缺口 —— 0 落盘路径不打 `[状态] 录制中/等待开播`，TaskManager 解析不到 → 任务永远显示「进程在跑但没在录」。已补标记（拿到流后打一次「录制中」）+ 回归 + 变异验证。另自查并否决一个疑似问题（`--output-format` 与 stream-upload 同给不会 exit 2，因流式路径先 return），改动已回退。
+  **停止不留孤儿 ffmpeg（2026-10-18，`725a506f`）**：真缺口 —— 0 落盘路径在共享 SIGINT/SIGTERM handler 安装前就 return，停止任务时正在录的 ffmpeg 没人杀。已让 CLI 自装 handler 并 abort、AbortSignal 贯通到 runSegment，另对**已** aborted 的信号补显式 kill（addEventListener 对已中止信号永不触发）。实测 abort 后 `ffmpeg_procs=0`。
+  **真 0 落盘在线验证（2026-10-18，房间 27471901912）**：缺口 1 已补。真实直播间 + 真实 B 站，`--stream-upload-spool none`：首次 10 个分 P → SIGKILL → 重启后续 6 个分 P，全部进**同一稿件** `BV1odnj6hEPk`；服务端回读 **16 个分 P**、16 个不同 cid、duration 356s、审核中；磁盘上只有 state + xml，**视频文件 0 个**。
+  **hub 台账回流 + 停止不作废（2026-10-18，`61d2d72e`/`2f79acfc`）**：①新增 `recordStreamUpload`，0 落盘上传结果直接写台账终态（pending→done+BV），房间不再永远空转；修掉 `markDone` 覆盖已有 BV 的问题（B 站无删稿，覆盖会让台账指向无法撤下的稿件）。②在线 SIGTERM 实测 bug：停止切断末段时整个 run 报 `ok:false`，即使此前 4 个分 P 已入稿 → 退出码非 0 + 台账不写。已修（abort 归类 + 已入稿即成功）。在线验证 `BV1Stnj6DE9r` 4 分 P/152s，`ok:true` + `台账已记录`。
+  **多房间在线并发 + 21186 限流（2026-10-18，`00935811`）**：两个直播间同时在线各跑 `none` 模式 → 两个不同稿件（`BV1tenj62Ec5` 3P/119s、`BV1Tenj62EaM` 3P/100s），各 3 个不同 cid，盘上零视频文件。同场暴露两个真问题：①`21186 投稿的频率过快` 未被识别为限流 → 第二个房间建稿被拒、已上传 6.3MB 直接丢弃、整场零产出（已纳入 `isUploadRateLimited`）；②preupload 限流退避完全静默（可超 40 分钟），形态与卡死无异，现已每次退避打日志。
+  **同房间双 0 落盘 guard（2026-10-18，`56461874`）**：实测风险 —— 同一房间两个任务各录一次，state 按 outDir 隔离互不知情 → 产出两个重复稿件（`BV1pwnj6BEFM`/`BV1Cwnj6BELW`），B 站无删稿 API 撤不下来。已在 `TaskManager.start` 挡掉（按平台+房间判；普通录制不受影响）。变异验证过。
+  **同房间 guard 真实 serve 验证（2026-10-18）**：真实 `task serve` 进程里两个同房间 0 落盘任务，任务 1 `running=true`、任务 2 被拒停在 `stopped`，serve 日志打出「拒绝启动 id=2:同一房间已有 0 落盘任务 id=1(g1)在录,同时录会产出两个重复稿件且无法删除」—— 原因对用户可见。
+  **下一步（接生产前必做）**：①`RollingUploader` 契约从 `path` 扩到 `bytes`（现 0 落盘完全绕过它）。②**接 hub 规则**需要先设计「上传结果如何回流 SyncLedger」（当前 streamUpload 只能当单机/手动任务，guard 已明确拒绝绑规则）。③`record --stream-upload` 目前不写 `session.json` 边车（hub 按它聚场/选优），接 hub 前必须补。
+  **纪律教训**：PoC 为二分调试新建 6 条测试稿件（本可全部 append 到一条），B站无删稿 API，清理代价由用户承担；并曾把「上传路径打通」误述为「链路打通」。
+
 - [~] **T-61 全自动流水线 + fleet 式房间管理（计划 [plans/037_autopilot_fleet.md](plans/037_autopilot_fleet.md)）**
   — 2026-10-16 认领，2026-10-16 落 plan + 开工 step 1。主流程收敛为「监听 → 录制 → 投稿」，存档/烧录/多格式为默认关的增强开关。
   **拆分**：①人工收件箱去噪（issue [#188](https://github.com/fuyucn/douyin-rec/issues/188) → PR [#189](https://github.com/fuyucn/douyin-rec/pull/189)，已实现待审；顺带修了「所有节点断流」漏写 error 曾被显示成「待上传」）②通知带该场直链 + 收件箱按「真事故/增强」分组 ③`/rooms` 首页化 + 内联日志 + 任务/Hub/队列收进「高级」④配置模板（改一次应用到多房间）⑤新增房间自动选节点（已在录房间绝不自动迁移）。

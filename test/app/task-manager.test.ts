@@ -83,8 +83,10 @@ beforeEach(() => {
   store = new TaskStore(":memory:");
 });
 
-function addTask(): number {
-  return store.addTask({ room: "12345" }).id;
+function addTask(
+  over: Partial<Parameters<TaskStore["addTask"]>[0]> = {},
+): number {
+  return store.addTask({ room: "12345", ...over }).id;
 }
 
 describe("TaskManager beforeSpawn(边录边传起录兜底)", () => {
@@ -126,6 +128,42 @@ describe("TaskManager", () => {
     expect(mgr.isRunning(id)).toBe(true);
     expect(mgr.runningIds()).toEqual([id]);
     expect(store.getTask(id)!.status).toBe("running");
+  });
+
+  it("同一房间已有 0 落盘任务在录 → 第二个拒绝启动(否则产出两个无法删除的重复稿件)", () => {
+    const a = addTask({ room: "https://live.douyin.com/27471901912", outDir: "/tmp/dupA", streamUpload: true });
+    const b = addTask({ room: "https://live.douyin.com/27471901912", outDir: "/tmp/dupB", streamUpload: true });
+    const spawner = new MockSpawner();
+    const logs: string[] = [];
+    const mgr = new TaskManager(store, spawner, { log: (m) => logs.push(m) });
+
+    expect(mgr.start(a)).toBe(true);
+    // 第二个同房间任务:不起进程、不报 running。
+    expect(mgr.start(b)).toBe(false);
+    expect(spawner.spawned).toHaveLength(1);
+    expect(mgr.isRunning(b)).toBe(false);
+    expect(logs.join("\n")).toContain("0 落盘");
+  });
+
+  it("不同房间的 0 落盘任务互不挡(多房间并发仍可同时录)", () => {
+    const a = addTask({ room: "https://live.douyin.com/27471901912", outDir: "/tmp/mA", streamUpload: true });
+    const b = addTask({ room: "https://live.douyin.com/63171491268", outDir: "/tmp/mB", streamUpload: true });
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {} });
+
+    expect(mgr.start(a)).toBe(true);
+    expect(mgr.start(b)).toBe(true);
+    expect(spawner.spawned).toHaveLength(2);
+  });
+
+  it("普通录制任务(非 0 落盘)不受该守卫影响", () => {
+    const a = addTask({ room: "https://live.douyin.com/27471901912", outDir: "/tmp/pA" });
+    const b = addTask({ room: "https://live.douyin.com/27471901912", outDir: "/tmp/pB" });
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {} });
+
+    expect(mgr.start(a)).toBe(true);
+    expect(mgr.start(b)).toBe(true);
   });
 
   it("spawn 前置步骤(写凭证文件)抛错 → start 返回 false、status=error、onTaskDown 告警,不抛出", () => {

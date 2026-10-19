@@ -260,6 +260,11 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     const t = store.getTask(Number(sourceTaskId));
     if (!t) return "recording.sourceTaskId 指向的任务不存在";
     if (platformForRoom(t.room).extractRoomSlug(t.room) !== roomSlug) return "recording.sourceTaskId 与规则房间不一致";
+    // 0 落盘流式直传(plans/039)不产生可被 hub 扫描的录像文件:规则会永远选不到 winner、卡在
+    // 选优/收尾。它的产物直接进 B 站稿件,不经过 merge/burn/upload 管线,所以不能当 hub 规则的源。
+    if (t.streamUpload) {
+      return "该任务开启了 0 落盘流式直传,不产生录像文件,不能绑定 hub 规则(请改用普通录制任务)";
+    }
     return null;
   };
 

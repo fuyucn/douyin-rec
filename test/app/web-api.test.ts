@@ -1090,6 +1090,12 @@ describe("任务视图 outputFormatLock(后端判定下发,前端据此锁定;is
     upsertHubRule(deps.hubDir as string, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: t.id } });
     expect(lockOf(a, t.id)).toBeUndefined();
   });
+  it("0 落盘流式直传 → stream-upload(不产生文件,格式无对象可作用)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("lock-stream-") });
+    const t = a.createTask({ room: "444", streamUpload: true }).body as { id: number };
+    expect(lockOf(a, t.id)).toBe("stream-upload");
+  });
+
   it("受管任务 → hub-managed;边录边传生效 → rolling", () => {
     const a = makeApi({ store, manager, ...hubDeps("lock-managed-") });
     const m = store.addTask({ room: "222", managedBy: "hub" });
@@ -1098,6 +1104,50 @@ describe("任务视图 outputFormatLock(后端判定下发,前端据此锁定;is
     const real = store.listTasks.bind(store);
     vi.spyOn(store, "listTasks").mockImplementation(() => real().map((t) => (t.id === r.id ? { ...t, rollingEffective: true } : t)));
     expect(lockOf(a, r.id)).toBe("rolling");
+  });
+});
+
+describe("streamUpload 不能作为 hub 规则源(不产生可扫描录像)", () => {
+  it("房间规则绑定 streamUpload 任务 → 400(否则 hub 永远选不到 winner)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-hub-") });
+    const t = a.createTask({ room: "99003", streamUpload: true }).body as { id: number };
+    const res = a.updateRoom("douyin.99003", { room: "99003", processing: { enabled: true, recording: { sourceTaskId: t.id } } } as never);
+    expect(res.status).toBe(400);
+    expect(String((res.body as { error: string }).error)).toContain("0 落盘");
+  });
+
+  it("直接 POST /api/hub/rules 绑 streamUpload 任务 → 400(createHubRule 不能绕过守卫)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-hub3-") });
+    const t = a.createTask({ room: "99005", streamUpload: true }).body as { id: number };
+    const res = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
+    expect(res.status).toBe(400);
+    expect(String((res.body as { error: string }).error)).toContain("0 落盘");
+  });
+
+  it("已绑定规则的源任务再改开 streamUpload → 400(反向顺序也要挡)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-hub2-") });
+    const t = a.createTask({ room: "99004" }).body as { id: number };
+    a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(400);
+    expect(store.getTask(t.id)!.streamUpload).toBe(false);
+  });
+});
+
+describe("streamUpload 与 rollingUpload 互斥(plans/039 写入侧门禁)", () => {
+  it("建任务同时给两个开关 → 400,不落库", () => {
+    const res = api.createTask({ room: "99001", streamUpload: true, rollingUpload: true });
+    expect(res.status).toBe(400);
+    expect(store.listTasks().some((t) => t.room === "99001")).toBe(false);
+  });
+
+  it("改任务时只打开一边(与存量冲突)→ 400,存量值不变;先关旧值再开新值 → 200", () => {
+    const t = api.createTask({ room: "99002", rollingUpload: true }).body as { id: number };
+    const bad = api.updateTask(t.id, { streamUpload: true });
+    expect(bad.status).toBe(400);
+    expect(store.getTask(t.id)!.streamUpload).toBe(false);
+    expect(store.getTask(t.id)!.rollingUpload).toBe(true);
+    expect(api.updateTask(t.id, { rollingUpload: false }).status).toBe(200);
+    expect(api.updateTask(t.id, { streamUpload: true }).status).toBe(200);
   });
 });
 

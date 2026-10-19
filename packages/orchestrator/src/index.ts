@@ -10,6 +10,8 @@ export { satisfiesCapabilities, gateWorkers, explainRejections } from "@drec/cor
 export type { CapabilityRejection } from "@drec/core";
 export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";
+export { recordStreamUpload } from "./stream-upload-ledger.js";
+export type { RecordStreamUploadOpts, RecordStreamUploadResult } from "./stream-upload-ledger.js";
 export {
   advanceUpload, ensureUploadPlan, planJobIds,
   type UploadPlan, type UploadDispatch, type UploadInput, type BiliupMeta, type PrepSpec as UploadPrepSpec,

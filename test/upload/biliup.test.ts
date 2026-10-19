@@ -177,6 +177,10 @@ describe("isUploadRateLimited：识别 601 与 21566", () => {
     const msg = 'biliup 失败 (rc=1): ResponseData { code: 21566, data: None, message: "投稿过于频繁，建议将APP升级至最新版本后再试", ttl: Some(1) }';
     expect(isUploadRateLimited(new Error(msg))).toBe(true);
   });
+  it("21186 投稿频率过快(并发建稿实测:两个房间同时开录时命中)", () => {
+    const msg = 'create failed: {"code":21186,"message":"您投稿的频率过快，请稍等2秒","ttl":1}';
+    expect(isUploadRateLimited(new Error(msg))).toBe(true);
+  });
   it("普通错误不误判", () => {
     expect(isUploadRateLimited(new Error("登录已失效"))).toBe(false);
     expect(isUploadRateLimited(new Error("biliup 失败 (rc=1): HTTP status server error (500)"))).toBe(false);

@@ -142,6 +142,9 @@ importers:
       '@drec/record-engine':
         specifier: workspace:*
         version: link:../record-engine
+      '@drec/zero-upload':
+        specifier: workspace:*
+        version: link:../zero-upload
       commander:
         specifier: ^12.0.0
         version: 12.1.0
@@ -238,6 +241,9 @@ importers:
       '@drec/post-process':
         specifier: workspace:*
         version: link:../post-process
+      '@drec/zero-upload':
+        specifier: workspace:*
+        version: link:../zero-upload
 
   packages/record-engine:
     dependencies:
@@ -256,6 +262,15 @@ importers:
       react:
         specifier: ^19.2.7
         version: 19.2.7
+
+  packages/zero-upload:
+    dependencies:
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
+      '@drec/post-process':
+        specifier: workspace:*
+        version: link:../post-process
 
 packages:
 

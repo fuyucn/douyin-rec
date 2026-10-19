@@ -53,6 +53,11 @@ export function buildHubRules(ctx: ApiCtx) {
       if (!task) return err(400, "recording.sourceTaskId 指向的任务不存在");
       const platform = platformForRoom(task.room);
       const roomSlug = platform.extractRoomSlug(task.room);
+      // 复用唯一判定(存在性 / 房间一致性 / 0 落盘不可绑规则),不要在这里另写一份 ——
+      // 此前 createHubRule 只内联查了存在性,漏掉 streamUpload 守卫,能绕过它建出
+      // 永远选不到 winner 的规则。
+      const rerr = recordingError(sourceTaskId, roomSlug);
+      if (rerr) return err(400, rerr);
       // 同房间规则已存在时 upsert 会深合并 pipeline → 按合并后校验。
       const perr = validatePipeline(input, hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug))?.pipeline);
       if (perr) return err(400, perr);

@@ -29,6 +29,9 @@ const RANKS: Record<string, number> = {
   "@drec/post-process": 0.2,
   // 0.3:每节点持久任务表 + 租约执行循环(依赖 core + node:sqlite;被 app/cli 依赖,不依赖 observability)
   "@drec/proc-queue": 0.3,
+  // 0.35:0 落盘流式直传(依赖 core + post-process 两个 L0 叶子;被 processors re-export、app/cli 直接依赖)。
+  //       **不能**依赖 processors(它 re-export 本包)—— 反向会让"动 0 落盘"能碰到录制主干。
+  "@drec/zero-upload": 0.35,
   // 0.4:后处理处理器实现(依赖 core + post-process;被 app/cli 依赖;proc-queue 不依赖它,只经 core 注册表找处理器)
   "@drec/processors": 0.4,
   "@drec/tui": 0,
