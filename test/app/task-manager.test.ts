@@ -449,3 +449,70 @@ describe("T17 录制状态变化通知", () => {
     expect(logs.some((l) => l.includes("notifyRecordingState"))).toBe(true);  // 但不静默
   });
 });
+
+describe("TaskManager spawn failures (issue #41)", () => {
+  /** Spawner whose process throws from start() while `failStart` is set. */
+  class ThrowingStartSpawner extends MockSpawner {
+    failStart = true;
+    override spawn(task: { id: number }): RecorderProcess {
+      const p = super.spawn(task) as FakeRecorderProcess;
+      if (this.failStart) p.start = (): void => { throw new Error("spawn EACCES"); };
+      return p;
+    }
+  }
+
+  it("synchronous start() throw clears the process entry so the task can start again", () => {
+    const id = addTask();
+    const spawner = new ThrowingStartSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {} });
+    expect(mgr.start(id)).toBe(false);
+    expect(mgr.isRunning(id)).toBe(false);
+    expect(mgr.runningIds()).toEqual([]);
+    expect(store.getTask(id)!.status).toBe("error");
+    spawner.failStart = false;
+    expect(mgr.start(id)).toBe(true);
+    expect(mgr.isRunning(id)).toBe(true);
+    expect(store.getTask(id)!.status).toBe("running");
+  });
+
+  it("start-failure alert fires once per task until a spawn succeeds", () => {
+    const a = addTask();
+    const b = addTask();
+    const spawner = new ThrowingStartSpawner();
+    const down: number[] = [];
+    const mgr = new TaskManager(store, spawner, { log: () => {}, onTaskDown: (tid) => down.push(tid) });
+    mgr.start(a);
+    mgr.start(a);
+    mgr.start(a);
+    mgr.start(b);
+    expect(down).toEqual([a, b]);
+    spawner.failStart = false;
+    mgr.start(a); // recovered → dedupe reset
+    void mgr.stop(a);
+    spawner.failStart = true;
+    mgr.start(a);
+    expect(down).toEqual([a, b, a]);
+  });
+
+  it("spawn failure inside the restart timer marks error, alerts, and stops retrying", () => {
+    const id = addTask();
+    const spawner = new ThrowingStartSpawner();
+    spawner.failStart = false;
+    const down: string[] = [];
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true,
+      restartDelayMs: 0,
+      schedule: (cb) => cb(),
+      log: () => {},
+      onTaskDown: (_tid, reason) => down.push(reason),
+    });
+    mgr.start(id);
+    spawner.failStart = true;
+    spawner.last(id).emitExit({ code: 1, signal: null, expected: false }); // crash → restart → start() throws
+    expect(spawner.spawned).toHaveLength(2);
+    expect(mgr.isRunning(id)).toBe(false);
+    expect(store.getTask(id)!.status).toBe("error");
+    expect(down).toHaveLength(1);
+    expect(down[0]).toContain("spawn EACCES");
+  });
+});
