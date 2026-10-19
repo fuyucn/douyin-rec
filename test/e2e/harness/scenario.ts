@@ -74,7 +74,9 @@ export class Scenario {
 
   private constructor(fake: FakeBiliup, private readonly opts: ScenarioOpts) {
     this.fake = fake;
-    for (const id of this.nodeIds) mkdirSync(this.recordingsDirOf(id), { recursive: true });
+    const ids = this.nodeIds;
+    if (new Set(ids).size !== ids.length) throw new Error(`节点 id 重复: ${ids.join(",")}`);
+    for (const id of ids) mkdirSync(this.recordingsDirOf(id), { recursive: true });
     mkdirSync(this.stageDir, { recursive: true });
     const base: PipelineCfg = {
       cleanMaxGapSec: 30,

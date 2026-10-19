@@ -5,7 +5,7 @@ import { pastStartMs } from "./harness/fake-recordings.js";
 import { expectHealthyDone } from "./harness/invariants.js";
 
 let s: Scenario;
-afterEach(() => s?.dispose());
+afterEach(() => { s?.dispose(); mode = "ok"; });
 
 /** 清单失联开关:reject / hang(超时)/ ok。其余能力原样透传给真 LocalTransport。 */
 let mode: "ok" | "reject" | "hang" = "ok";
