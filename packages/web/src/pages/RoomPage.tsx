@@ -8,13 +8,18 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { CalendarRange, ChevronLeft, Clock3, ExternalLink, FileText, MonitorPlay, UploadCloud } from "lucide-react";
 import { api, type TaskDetail } from "../api/client";
+import { useAtomValue } from "jotai";
+import { serverTimezoneAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { TaskLogPanel } from "../components/LogTerminal";
+import { RollingProgressRows, useRoomRolling } from "../components/RollingProgress";
 import { RoomRunsPanel } from "../components/RoomRunsPanel";
+import { Tooltip } from "../components/Tooltip";
 import { usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { QUALITY_FULL, fmtClock, platformLabel, roomHref, roomId, scheduleText } from "../lib/labels";
+import { QUALITY_FULL, fmtClock, fmtStartedAt, platformLabel, roomHref, roomId, scheduleText } from "../lib/labels";
+import { localTimeTooltip } from "../lib/tz";
 import { versionKeys } from "../lib/room-detail";
 import { deliverText, nodesText, roomName, RoomBadge, runLabel, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
 
@@ -56,6 +61,8 @@ export function RoomPage(): ReactNode {
     void api.getTask(taskId).then(setDetail).catch(() => {});
   }, 5_000, live);
   useEffect(() => { if (!live) setDetail(null); }, [live]);
+  const rolling = useRoomRolling(room ? room.roomSlug : null);
+  const serverTz = useAtomValue(serverTimezoneAtom);
 
   if (!data.loaded) return <div className="skeleton h-40 w-full" aria-hidden="true" />;
   if (!room || !s) {
@@ -81,6 +88,7 @@ export function RoomPage(): ReactNode {
   const sched = rec ? scheduleText(rec) : null;
   // Only a local recorder process reports elapsed time; a remote recording has none to show.
   const elapsed = live ? detail?.runtime?.elapsedMs ?? null : null;
+  const startedAt = live ? detail?.runtime?.startedAt ?? null : null;
   const steps = proc?.pipeline?.steps;
   const versions = versionKeys(room).map((k) => t(k)).join(" + ");
 
@@ -165,10 +173,12 @@ export function RoomPage(): ReactNode {
                   <Row label={t("tasks.quality")} value={QUALITY_FULL[rec.quality] ?? rec.quality} />
                   <Row label={t("tasks.recorder")} mono value={rec.engine} />
                   <Row label={t("tasks.danmu")} value={rec.danmu ? t("common.yes") : t("common.no")} />
+                  <Row label={t("tasks.giftCookie")} value={rec.useCookie ? t("common.yes") : t("common.no")} />
                   <Row label={t("tasks.segmentSec")} mono
                        value={rec.segmentSec > 0 ? t("tasks.segmentUnit", { s: String(rec.segmentSec) }) : t("tasks.noSegment")} />
                   <Row label={t("rooms.outputFormat")} mono
                        value={rec.outputFormat === "original" ? t("rooms.outputFormatOriginal") : rec.outputFormat.toUpperCase()} />
+                  <Row label={t("tasks.outDir")} mono value={rec.outDir ?? "-"} />
                 </>
               ) : <Row label={t("tasks.room")} value={t("room.noTask")} />}
             </InfoGroup>
@@ -188,6 +198,14 @@ export function RoomPage(): ReactNode {
 
             <InfoGroup title={t("tasks.groupRuntime")}>
               <Row label={t("room.detail.lastRun")} value={s.run ? runLabel(t, s.run.state) : "-"} />
+              <Row label={t("tasks.startedAt")} mono value={
+                startedAt != null ? (
+                  <Tooltip content={localTimeTooltip(new Date(startedAt), serverTz, (tz, local) => t("common.localTimeTooltip", { serverTz: tz, local }))}>
+                    <span>{fmtStartedAt(startedAt, serverTz)}</span>
+                  </Tooltip>
+                ) : "-"
+              } />
+              <Row label={t("tasks.createdAt")} mono value={task ? fmtStartedAt(Date.parse(task.createdAt) || null, serverTz) : "-"} />
               {workers.map((w) => (
                 <Row key={w.workerId} label={w.workerName} mono value={
                   <span className="inline-flex items-center gap-1.5">
@@ -198,6 +216,12 @@ export function RoomPage(): ReactNode {
                 } />
               ))}
             </InfoGroup>
+
+            {rolling.length > 0 && (
+              <InfoGroup title={t("tasks.progressTitle")}>
+                <RollingProgressRows rolling={rolling} />
+              </InfoGroup>
+            )}
           </div>
         </section>
 

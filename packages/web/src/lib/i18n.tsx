@@ -312,7 +312,7 @@ const DICT = {
       saved: "通知设置已保存", failed: "保存失败: {msg}",
       evLive: "开播 · 开始录制：{anchor}", evRecordEnd: "录制结束{reason}：{anchor}", evMerge: "合成完成：{file}",
       evReconnect: "直播中断 {sec}s 后已重连：{anchor}",
-      evBurn: "烧录完成：{file}", evUpload: "上传完成：{bv}", evHubStart: "Hub 任务开始：{room}（{count} 个节点）", evError: "出错[{stage}]：{message}",
+      evBurn: "烧录完成：{file}", evUpload: "上传完成：{bv}", evHubStart: "Hub 任务开始：{room}（{count} 个节点）", evError: "出错[{stage}]：{message}", evErrorNamed: "{name} · 出错[{stage}]：{message}", evStageReady: "合成完成待人工上传：{room}", next: "下一步：{next}",
     },
     qr: {
       title: "抖音扫码登录", desc: "用抖音 App 扫码，确认后自动获取登录 Cookie", alt: "二维码", close: "关闭",
@@ -782,7 +782,7 @@ const DICT = {
       saved: "Notification settings saved", failed: "Save failed: {msg}",
       evLive: "Live · recording started: {anchor}", evRecordEnd: "Recording ended{reason}: {anchor}", evMerge: "Merge done: {file}",
       evReconnect: "Reconnected after {sec}s interruption: {anchor}",
-      evBurn: "Burn done: {file}", evUpload: "Upload done: {bv}", evHubStart: "Hub task started: {room} ({count} nodes)", evError: "Error[{stage}]: {message}",
+      evBurn: "Burn done: {file}", evUpload: "Upload done: {bv}", evHubStart: "Hub task started: {room} ({count} nodes)", evError: "Error[{stage}]: {message}", evErrorNamed: "{name} · Error[{stage}]: {message}", evStageReady: "Composed, waiting for manual upload: {room}", next: "Next: {next}",
     },
     qr: {
       title: "Douyin QR Login", desc: "Scan with the Douyin app; the cookie is fetched after you confirm.", alt: "QR code", close: "Close",

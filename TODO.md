@@ -14,6 +14,9 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [!] **T-79 队列页「上传」视图:每节点 biliup 实时进度(issue [#44](https://github.com/fuyucn/douyin-rec/issues/44))** — 计划 [`plans/039_upload_view.md`](plans/039_upload_view.md)
+  — 2026-10-18 计划经三轮独立设计审查(第三轮唯一 HIGH 已按建议修订),审查轮次用完 → **`needs-decision`**:确认计划 + T0(镜像补 `ss`)是否做。
+  **做什么**：节点状态命令旁路扫描 biliup 进程(只读),master 算速率/剩余/卡住/重试换线/最近结果,队列页按节点展示。**验收**：见计划 T1a–T4。
 - [!] **T-80 派生分P弹幕 xml 回收与总 xml 区分(issue [#84](https://github.com/fuyucn/douyin-rec/issues/84))** — 计划 [`plans/040_derived_part_xml_recycle.md`](plans/040_derived_part_xml_recycle.md)
   — 2026-10-18 计划经三轮独立设计审查;审查发现两处**既有**风险(维护清理可能删掉会话唯一的空 xml、单节点重跑可能用分P切片覆盖总 xml),列为 T0 先修。审查轮次用完 → **`needs-decision`**:改名(R)还是保持同名(M)、T0 是否先行。
   **做什么**：T0 修既有风险(不删文件)→ T1 清单 → T2 维护页回收(dryRun + 审计)。**验收**：见计划。
@@ -249,6 +252,10 @@
   运行记录 + job 日志 + 单节点重试 + 失败重跑 + 停止,行内时钟图标入口,推送驱动刷新。
   至此 `/rooms` = Tasks(录)+ Hub(配)+ Hub(看)。**仍未做**:跨房间的处理队列视图
   (现 `/queue` 页独有,「队列的进程」要并进来需再评估是否同页共存或合并)。
+  **追加**(`0.0.182`,#265 / PR #266,2026-10-19):Rooms 补齐 Tasks 的只读展示项 —— 顶栏「已连接 · 时间」
+  (共享 `ConnStatus`,房间拉取与任务轮询分别记录,任一失败即显示连接失败)、房间详情的账号开关/输出目录/
+  开始与创建时间、边录边传会话进度(共享 `RollingProgress`)。**故意不做**:「显示未分配」仅 worker 节点有意义;
+  Rooms 状态栏是房间级模型。待部署后实跑验证。
 
 - [~] **T-30 hub/tasks 协作 + 编排/队列/多节点优化**(分支 `feat/hub-optimization`;M1 进行中) — 计划 `plans/030_hub_tasks_optimization.md`
   (结构化任务 `plans/030_tasks.json`,唯一执行源;20 任务 / 8 组件,plan-loop 校验 ok)。

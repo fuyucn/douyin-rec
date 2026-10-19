@@ -81,7 +81,7 @@ export function NodeLogsDialog({
                 onClick={() => loadLogs(task.id)}
                 title={`#${task.id} · ${task.platform}`}
               >
-                #{task.id} {task.anchorName ?? task.name ?? task.roomSlug}
+                #{task.id} {task.name || task.anchorName || task.roomSlug}
                 {task.enabled ? "" : ` · ${t("badge.disabled")}`}
               </Button>
             ))}

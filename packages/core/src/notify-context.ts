@@ -127,19 +127,31 @@ export function decorateRecordEvent<E extends { kind: string; ctx?: NotifyContex
   return { ...e, ...anchor, ctx };
 }
 
-const CTX_KEYS = ["name", "nameSource", "platform", "roomSlug", "date", "time", "streamKey", "node", "step", "result", "next"] as const;
+/** Every NotifyContext field, checked both ways by the compiler (missing or extra keys fail to build). */
+const CTX_FIELDS = {
+  name: true, nameSource: true, platform: true, roomSlug: true, date: true, time: true,
+  streamKey: true, node: true, step: true, result: true, next: true,
+} as const satisfies Record<keyof NotifyContext, true>;
+
+// Allowed enum values, exhaustive at compile time (a new member must be listed here to cross a process).
+const NAME_SOURCES = { task: true, live: true, cached: true, ledger: true, session: true, fallback: true } as const satisfies Record<DisplayNameSource, true>;
+const RESULTS = { ok: true, warn: true, error: true } as const satisfies Record<NotifyResult, true>;
 
 /**
  * Validate a context received over a process boundary (the recorder alert line): keep only known keys
- * with non-empty string values. Anything else (a newer or broken child) is dropped, never trusted.
+ * with non-empty string values; the two enum fields must hold an allowed value. Anything else (a newer
+ * or broken child) is dropped, never trusted.
  */
 export function sanitizeNotifyContext(raw: unknown): NotifyContext | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const src = raw as Record<string, unknown>;
   const out: Record<string, string> = {};
-  for (const k of CTX_KEYS) {
+  for (const k of Object.keys(CTX_FIELDS) as (keyof NotifyContext)[]) {
     const v = src[k];
-    if (typeof v === "string" && v.length > 0) out[k] = v;
+    if (typeof v !== "string" || v.length === 0) continue;
+    if (k === "nameSource" && !Object.hasOwn(NAME_SOURCES, v)) continue;
+    if (k === "result" && !Object.hasOwn(RESULTS, v)) continue;
+    out[k] = v;
   }
   return Object.keys(out).length ? (out as NotifyContext) : undefined;
 }
