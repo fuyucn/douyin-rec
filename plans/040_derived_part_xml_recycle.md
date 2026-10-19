@@ -18,23 +18,28 @@
   1. `app/orphan-cleanup.ts`:「别处有非空副本」索引按基名、跨 `recordings/` 与 `stage/` 全局。datetime 模板 + S1 弹幕为空 +
      S2 有弹幕 → 非空派生把 S1 记为「有非空副本」→ stage 与节点源的空 `S1.xml` 都被判可删(**最后一份**)。
      派生只在 `stageAfterDone` 关时留存,而此时 stage 副本也留存 —— 可达。
+     **损失是结构性的**:录制端只写 `<d>/<gift>/<member>`,「空」xml 确实无内容;但删掉后该会话没有 xml 文件,
+     违反「不得删掉最后一份」,并影响重跑时 `requireDanmu` 选优与烧录输入。
   2. `orchestrator/session-plan.ts` `deriveStageProducts` 取目录里第一个 `.xml` 作 `xmlArg`;单节点重跑(cli)经
      `workflow.ts` `copyFileSync(xmlArg, plainXml)` 可能把总 xml 覆盖成某一分P的切片,烧录随之错位。
      缺省模板下 `X_日期_000.xml` 排在 `X_日期_09-30-00.xml` 之前;ext4 readdir 顺序不定。
   3. `post-process/concat.ts` `groupSessions`:datetime 模板下派生被当作 S1 的逐段 xml(`merge --indir`、web merge 消费);
      只有人把 merge 指向 stage 目录才触发。
-- 回收:`stageAfterDone` 开时 `clean_stage` 通配删 stage 子目录全部 `.xml|.ass`(`segment-pipeline.ts` 两处、`pipeline.ts` 一处),
-  合法但不区分;关时派生永久留存。同一 stageSub 之后以合并模式 + `stageAfterDone` 重跑时会被通配删。
+- 回收:stage 内按 `.xml|.ass` 通配删除的点:`segment-pipeline.ts` 两处 `clean_stage`、`pipeline.ts` 的 `clean_stage`
+  与 `clean_stage_src`(`!survivors.stageXml` 时)、`app/node-pipeline.ts` 的 `deleteXml`(节点侧不派生,只需确认)。
+  合法但不区分;`stageAfterDone` 关时派生永久留存。同一 stageSub 之后以合并模式 + `stageAfterDone` 重跑时会被通配删。
 
 ## 设计
 
 ### 选项 R(建议):派生文件改名,结构上区分
 
 新派生写成 `{dateName}_{NNN}.derived.xml`:`sessionBaseOf` 得 `…_NNN.derived`(无分段后缀),`segmentIndexOf` = -1,
-`stampedSessionBaseOf` 不匹配 → 上面风险 1–3 对新文件**结构性消失**,无需逐个消费点打补丁。
+`stampedSessionBaseOf` 不匹配,`isAtomicTempName` 为否 → 风险 1、3 对新文件结构性消失;**风险 2 不消失**
+(`deriveStageProducts` 取任意 `.xml`,`X_日期_000.derived.xml` 仍可能排在前面),由 T0 的选取规则修。
 - 代价:派生 xml 不再与分P mp4 同 stem(按同名自动挂弹幕的播放器需手动选);功能说明与实验开关文案同步改。
 - 需核对新后缀不命中 `isAtomicTempName` / `.part` 等 scratch 规则(有用例)。
-- 旧名派生文件(改名前已产出):不改名、不自动删;风险 1–3 对它们按选项 M 的「消费点排除」补丁处理(只认清单或结构判定)。
+- 旧名派生文件(改名前已产出)与新名并存(跳过判定只看新名):不改名、不自动删;回收时列为「未登记,保留」。
+  对它们的风险由 T0 的**与命名无关**的修复覆盖。
 
 ### 选项 M:保持命名,靠清单 + 逐个消费点排除
 
@@ -45,9 +50,12 @@
 ### 共同部分(两选项都要)
 
 - 清单:每 stageSub **固定一个** `.derived-xml.json`(`{v:1, files:[{name, sourceXml, window, bytes, sha256}]}`,原子写);
-  条目对应文件已不在 → 容忍并清掉条目;`clean_stage` 删除时一并删清单。
+  条目对应文件已不在 → 容忍并清掉条目;上面列出的每个 stage 通配删除点都显式把清单一并删(它不匹配 `\.(xml|ass)$`)。
 - 判定函数放 **core**(纯 node:fs,无业务依赖),orphan-cleanup(app)与 orchestrator 共用,不破坏分层。
-- 回收 `recycleDerivedPartXml(stageSub)`:只删「清单内 + 哈希一致」的文件;拒删名单按**精确名**定义:
+- 回收 `recycleDerivedPartXml(stageSub)`:
+  - 选项 R 候选 = 名字以 `.derived.xml` 结尾 + 在清单内 + 哈希一致;
+  - 选项 M 候选 = 在清单内 + 哈希一致;
+  - 拒删名单按**精确名**定义(两选项都适用):
   `segmentIndexOf < 0` 的名字(选项 M 下)、`{dateName}.xml`、各会话 stamped xml 名;同名的旧逐段源 `{sessionBase}_NNN.xml`
   被重新拉取覆盖后哈希不符 → 保护(有用例)。
 - 触发点:先做维护页「清理」单列一类(默认 dryRun,确认后删,写审计日志);「收口时自动回收」暂不做。
@@ -60,9 +68,12 @@
 
 ## Tasks
 
-- [ ] T0 先修既有风险(不删任何文件):选项 R = 改名 + 旧名文件在 orphan-cleanup / deriveStageProducts / groupSessions 中排除;
-      选项 M = 清单写入顺序 + 三处排除。验收:datetime 模板 + 两会话 + S1 空弹幕 + S2 非空 → 两份空 `S1.xml` 都保留;
-      单节点重跑 `xmlArg` 永不选派生;`groupSessions` 不收派生。
+- [ ] T0 先修既有风险(不删任何文件,**与派生命名无关**,新旧文件一并覆盖):
+  - orphan-cleanup:空的会话级 xml(`segmentIndexOf < 0`)只认**同基名的非空会话级 xml**为副本;逐段 / 派生切片永不能替代整场 xml。
+  - `deriveStageProducts`:`xmlArg` 优先精确 `{dateName}.xml`;否则取 `segmentIndexOf < 0` 且不含 `.derived` 的 stamped xml;都没有 = 无 xml。
+  - `groupSessions`:旧名只在把 merge 指向 stage 目录时命中,写入文档,不打补丁。
+  - 验收:datetime 模板 + 两会话 + S1 空弹幕 + S2 非空 → 两份空 `S1.xml` 都保留;单节点重跑 `xmlArg` 永不选派生(新旧名、
+    任意 readdir 顺序);`.derived.xml` 的 `sessionBaseOf / segmentIndexOf / stampedSessionBaseOf / isAtomicTempName` 回归用例。
 - [ ] T1 清单 + core 判定函数。验收:幂等、哈希不符视为非派生、清单损坏不抛、条目文件缺失被容忍。
 - [ ] T2 回收(维护页一类,dryRun + 审计)。验收:派生开启 → 关闭 → 回收,总 xml 存在且字节不变;清单外 / 哈希不符 / 拒删名单不动。
 - T0、T2 涉及弹幕保护与删除:`needs-decision` + Opus 复审 + `pr-risk-scan`。
