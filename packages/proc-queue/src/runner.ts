@@ -187,7 +187,16 @@ export class ProcRunner {
   private finishYields(): void {
     for (const kind of [...this.yielding]) {
       if ([...this.inflight.values()].some((f) => f.job.kind === kind)) continue;
-      this.o.store.releaseLease(kind, this.o.owner);
+      // Reserved for the requester for one lease period (DB-wide, so sibling record processes
+      // cannot grab it either); if the requester never comes, any runner may take it afterwards.
+      try {
+        this.o.store.yieldLease(kind, this.o.owner, this.leaseMs);
+      } catch (e) {
+        // Also reached from launch().finally(): never throw (unhandled rejection kills the process on
+        // Node 24). Stay in `yielding`; the next heartbeat retries.
+        this.log(`${kind}: 让出租约写库失败,下次心跳重试: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
       this.held.delete(kind);
       this.yielding.delete(kind);
       this.log(`${kind}: 已让出租约`);

@@ -23,7 +23,7 @@ describe("procQueueDbPath", () => {
 });
 
 describe("迁移", () => {
-  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): user_version=3, data kept, tables present", () => {
+  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): user_version=4, data kept, tables present", () => {
     const s1 = env.open();
     const r = s1.enqueue(env.job("a.ts"), roots());
     expect(r.state).toBe("pending");
@@ -31,9 +31,9 @@ describe("迁移", () => {
     const s3 = env.open();
     expect(s3.get(r.jobId)?.state).toBe("pending");
     const raw = new DatabaseSync(env.dbPath);
-    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3);
+    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(4);
     const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((t) => t.name);
-    expect(tables).toEqual(expect.arrayContaining(["proc_jobs", "proc_runner_lease", "proc_order_cursor"]));
+    expect(tables).toEqual(expect.arrayContaining(["proc_jobs", "proc_runner_lease", "proc_order_cursor", "proc_lease_reservation"]));
     raw.close();
     expect(s2.list()).toHaveLength(1);
   });
@@ -562,6 +562,48 @@ describe("v1 -> v2 migration (plan 038 T01)", () => {
     expect(s.get("old")?.orderKey).toBeNull();
     const tables = (new DatabaseSync(path).prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((r) => r.name);
     expect(tables).toContain("proc_order_cursor");
+    s.close();
+  });
+});
+
+describe("v3 -> v4 migration + lease reservation (#241)", () => {
+  it("an existing v3 db gains the reservation table; data kept", () => {
+    const s0 = env.open();
+    const r = s0.enqueue(env.job("a.ts"), roots());
+    s0.close();
+    const raw = new DatabaseSync(env.dbPath);
+    raw.exec("DROP TABLE proc_lease_reservation; PRAGMA user_version=3;");
+    raw.close();
+    const s = env.open();
+    expect(s.get(r.jobId)?.state).toBe("pending");
+    expect(s.reservedUntil("fake")).toBe(0);
+    s.close();
+  });
+
+  it("yield reserves the kind: non-requesters refused until it lapses, requesters accepted; yielding a lease we no longer hold reserves nothing", () => {
+    const s = env.open();
+    expect(s.acquireLease("fake", "rec", { pid: process.pid }).acquired).toBe(true);
+    expect(s.yieldLease("fake", "someone-else")).toBe(false);
+    expect(s.reservedUntil("fake")).toBe(0);
+    expect(s.yieldLease("fake", "rec", 1000)).toBe(true);
+    expect(s.getLease("fake")).toBeNull();
+    expect(s.acquireLease("fake", "rec2", { pid: process.pid }).acquired).toBe(false);
+    env.clock.t += 999;
+    expect(s.acquireLease("fake", "rec", { pid: process.pid }).acquired).toBe(false);
+    expect(s.acquireLease("fake", "serve", { pid: process.pid, requestHandover: true }).acquired).toBe(true);
+    expect(s.reservedUntil("fake")).toBe(0);
+    s.releaseLease("fake", "serve");
+    expect(s.acquireLease("fake", "rec2", { pid: process.pid }).acquired).toBe(true); // reservation gone
+    s.close();
+  });
+
+  it("a reservation that looks wrong after a backward clock jump is void (cannot block record for more than a lease)", () => {
+    const s = env.open();
+    s.acquireLease("fake", "rec", { pid: process.pid });
+    expect(s.yieldLease("fake", "rec")).toBe(true);
+    env.clock.t -= 60_000; // wall clock jumped back a minute
+    expect(s.reservedUntil("fake")).toBe(0);
+    expect(s.acquireLease("fake", "rec2", { pid: process.pid }).acquired).toBe(true);
     s.close();
   });
 });

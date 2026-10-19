@@ -182,6 +182,69 @@ describe("handover(交接)", () => {
     serve.tick();
     expect(s.get(id2)).toMatchObject({ state: "running", claimedBy: "serve" });
   });
+
+  it("让出后租约在库里预留给请求方一个租约期:让出者与兄弟 record 都抢不到,serve 可接;无人来则期满任一 runner 接手 (#238/#241)", async () => {
+    const g = gate();
+    registerProcessor(fakeProcessor({ run: async () => { await g.promise; return { outputs: [] }; } }));
+    const holder = mkRunner("rec", { requestHandover: false });
+    const sibling = mkRunner("rec2", { requestHandover: false, store: env.open() });
+    const s = env.open();
+    const id = s.enqueue(env.job("a.ts"), allowed()).jobId;
+    holder.tick();
+    expect(s.acquireLease("fake", "serve", { requestHandover: true }).acquired).toBe(false); // handover requested
+    holder.heartbeat();
+    g.resolve();
+    await vi.waitFor(() => expect(s.get(id)?.state).toBe("done"));
+    await vi.waitFor(() => expect(s.getLease("fake")).toBeNull());
+    expect(s.reservedUntil("fake")).toBe(env.clock.t + LEASE_MS);
+    // Neither the yielder nor a sibling record process may take it inside the window.
+    holder.tick();
+    sibling.tick();
+    expect(s.getLease("fake")).toBeNull();
+    env.clock.t += LEASE_MS - 1;
+    sibling.tick();
+    expect(s.getLease("fake")).toBeNull();
+    // Requester never came: once the reservation lapses any runner takes over (independent record keeps working).
+    env.clock.t += 1;
+    sibling.tick();
+    expect(s.getLease("fake")?.owner).toBe("rec2");
+    expect(s.reservedUntil("fake")).toBe(0); // acquiring clears the reservation
+  });
+
+  it("让出写库失败不抛(不成为 unhandled rejection),保持让出中,下次心跳重试成功", async () => {
+    registerProcessor(fakeProcessor({ run: async () => ({ outputs: [] }) }));
+    const store = env.open();
+    const holder = mkRunner("rec", { requestHandover: false, store });
+    const s = env.open();
+    holder.tick();
+    expect(s.getLease("fake")?.owner).toBe("rec");
+    expect(s.acquireLease("fake", "serve", { requestHandover: true }).acquired).toBe(false);
+    const spy = vi.spyOn(store, "yieldLease").mockImplementationOnce(() => { throw new Error("database is locked"); });
+    expect(() => holder.heartbeat()).not.toThrow();
+    expect(s.getLease("fake")?.owner).toBe("rec"); // still ours, still yielding
+    holder.heartbeat();
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(s.getLease("fake")).toBeNull();
+    expect(s.reservedUntil("fake")).toBeGreaterThan(0);
+  });
+
+  it("预留期内请求方(serve)可直接接手,并清掉预留", async () => {
+    const g = gate();
+    registerProcessor(fakeProcessor({ run: async () => { await g.promise; return { outputs: [] }; } }));
+    const holder = mkRunner("rec", { requestHandover: false });
+    const serve = mkRunner("serve", { requestHandover: true, store: env.open() });
+    const s = env.open();
+    const id = s.enqueue(env.job("a.ts"), allowed()).jobId;
+    holder.tick();
+    serve.tick();
+    holder.heartbeat();
+    g.resolve();
+    await vi.waitFor(() => expect(s.get(id)?.state).toBe("done"));
+    await vi.waitFor(() => expect(s.getLease("fake")).toBeNull());
+    serve.tick();
+    expect(s.getLease("fake")?.owner).toBe("serve");
+    expect(s.reservedUntil("fake")).toBe(0);
+  });
 });
 
 describe("接管 / recover / fencing", () => {

@@ -1,27 +1,37 @@
 // observability/src/notifier/hub-label.ts
 // hub 通知的「人话化」:事件里只有 streamKey(`{platform}:{roomSlug}:{date}[_HHMM]`)/房间号,
 // 在发送前补上主播名、日期、节点名,webhook 与站内 toast 共用同一份结果。纯函数,查表由调用方注入。
-import type { NotifyEvent } from "@drec/core";
+import { contextForStream, parseStreamKey, STREAM_KEY_SOURCE, type DisplayNameSources, type NotifyContext, type NotifyEvent, type ParsedStreamKey } from "@drec/core";
 
 export interface HubLabelLookup {
   /** (platform, roomSlug) → 主播名;查不到返回 undefined。 */
   anchorOf: (platform: string, roomSlug: string) => string | undefined;
   /** workerId → 节点显示名;查不到返回 undefined(退回 id)。 */
   workerName: (id: string) => string | undefined;
+  /** (platform, roomSlug) → raw name sources for the shared priority chain; optional (older lookups). */
+  nameSourcesOf?: (platform: string, roomSlug: string) => Omit<DisplayNameSources, "platform" | "roomSlug"> | undefined;
 }
 
-export interface ParsedStreamKey { platform: string; roomSlug: string; date: string; time?: string }
+/** Structured context for a hub session; an explicit `ctx` already on the event wins field by field. */
+function streamCtx(streamKey: string, lookup: HubLabelLookup, own: NotifyContext | undefined): NotifyContext {
+  const k = parseStreamKey(streamKey);
+  const names = k
+    ? lookup.nameSourcesOf?.(k.platform, k.roomSlug) ?? { cachedAnchor: lookup.anchorOf(k.platform, k.roomSlug) }
+    : {};
+  const derived: NotifyContext = contextForStream(streamKey, names);
+  // Only defined caller fields win (an explicit `undefined` must not erase a derived value).
+  const explicit = Object.fromEntries(Object.entries(own ?? {}).filter(([, v]) => v !== undefined)) as NotifyContext;
+  // Name and its source travel together: a caller name drops the derived source, a caller source
+  // without a name is meaningless next to the derived name and is dropped.
+  if (explicit.name !== undefined) delete derived.nameSource;
+  else delete explicit.nameSource;
+  return { ...derived, ...explicit };
+}
 
-const KEY_SOURCE = "([a-z]+):([^\\s:]+):(\\d{4}-\\d{2}-\\d{2})(?:_(\\d{2})(\\d{2}))?(?!\\d)";
+export { parseStreamKey, type ParsedStreamKey } from "@drec/core";
+
 // In free text a key must not be glued to a word/path/URL on the left (e.g. `http://host:8080/...`).
-const EMBEDDED_KEY = `(?<![\\w/.-])${KEY_SOURCE}`;
-
-/** 解析 streamKey;不是该格式返回 null。同日多场的 `_HHMM` 后缀折成 `HH:MM`。 */
-export function parseStreamKey(key: string): ParsedStreamKey | null {
-  const m = new RegExp(`^${KEY_SOURCE}$`).exec(key);
-  if (!m) return null;
-  return { platform: m[1]!, roomSlug: m[2]!, date: m[3]!, ...(m[4] ? { time: `${m[4]}:${m[5]}` } : {}) };
-}
+const EMBEDDED_KEY = `(?<![\\w/.-])${STREAM_KEY_SOURCE}`;
 
 const dateText = (k: ParsedStreamKey): string => (k.time ? `${k.date} ${k.time}` : k.date);
 
@@ -48,13 +58,19 @@ export function enrichHubEvent(e: NotifyEvent, lookup: HubLabelLookup): NotifyEv
         anchor: lookup.anchorOf(k?.platform ?? "", e.room) || e.anchor,
         ...(k ? { date: dateText(k) } : {}),
         workerNames: e.workers.map((id) => lookup.workerName(id) || id),
+        ctx: streamCtx(e.streamKey, lookup, e.ctx),
       };
     }
     case "stageReady":
     case "uploadDone": {
       const k = e.streamKey ? parseStreamKey(e.streamKey) : null;
-      if (!k) return e;
-      return { ...e, anchor: lookup.anchorOf(k.platform, k.roomSlug) || e.anchor || k.roomSlug, date: dateText(k) };
+      if (!k || !e.streamKey) return e;
+      return {
+        ...e,
+        anchor: lookup.anchorOf(k.platform, k.roomSlug) || e.anchor || k.roomSlug,
+        date: dateText(k),
+        ctx: streamCtx(e.streamKey, lookup, e.ctx),
+      };
     }
     case "error":
       return { ...e, message: humanizeStreamKeys(e.message, lookup) };

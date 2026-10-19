@@ -4,7 +4,9 @@ import type {
   Recorder, DanmuSource, RecorderEvents, RecordOpts, DanmuMessage, StreamInfo,
 } from "@drec/core";
 import { XmlDanmuWriter } from "./danmu-xml/index.js";
-import { createLogger, platformForRoom, processTimeZone, sessionBaseOf, stripVideoExt } from "@drec/core";
+import { writeSessionSidecar } from "./session-sidecar.js";
+export { writeSessionSidecar, type SidecarWriteHooks } from "./session-sidecar.js";
+import { createLogger, decorateRecordEvent, platformForRoom, processTimeZone, sessionBaseOf, stripVideoExt } from "@drec/core";
 import type { AdmitDecision, Notifier, NotifyEvent } from "@drec/core";
 
 const log = createLogger("session");
@@ -203,7 +205,26 @@ export class RecordingSession {
 
   /** Fire-and-forget notifier call — swallows errors so notifications never affect recording. */
   private notify(e: NotifyEvent): void {
-    void this.notifier?.notify(e).catch(() => {});
+    void this.notifier?.notify(this.withContext(e)).catch(() => {});
+  }
+
+  /**
+   * Attach the notification context (issue #53 N4): display name by the shared chain (task name before
+   * the platform anchor), platform and room id. `this.anchor` itself is untouched (it also names the
+   * danmu file header). Never throws: a context failure must not cost the notification.
+   */
+  private withContext(e: NotifyEvent): NotifyEvent {
+    try {
+      const platform = this.roomUrl ? platformForRoom(this.roomUrl) : null;
+      return decorateRecordEvent(e, {
+        taskName: this.opts.name,
+        liveAnchor: this.anchor,
+        platform: platform?.id,
+        roomSlug: platform && this.roomUrl ? platform.extractRoomSlug(this.roomUrl) : undefined,
+      });
+    } catch {
+      return e;
+    }
   }
 
   /**
@@ -215,7 +236,7 @@ export class RecordingSession {
     if (!this.notifier) return;
     try {
       await Promise.race([
-        this.notifier.notify(e),
+        this.notifier.notify(this.withContext(e)),
         new Promise<void>((r) => setTimeout(r, timeoutMs)),
       ]);
     } catch { /* 通知失败绝不影响停止 */ }
@@ -552,17 +573,12 @@ export class RecordingSession {
       timeZone: this.timeZone ?? processTimeZone(),
     };
     if (this.liveTitle) data.title = this.liveTitle;
-    // 节点侧原地替换(issue #137)的转换标记由 app 层写进同一个文件;本方法是**整文件覆盖**,
-    // 不保留的话收尾那次覆盖就把标记抹掉(无段号单文件 mp4/mkv 随即再也认不出)。只透传白名单字段。
-    try {
-      const prev = JSON.parse(readFileSync(`${base}.session.json`, "utf-8")) as { nodeFormat?: unknown };
-      if (typeof prev.nodeFormat === "string") data.nodeFormat = prev.nodeFormat;
-    } catch { /* 无旧文件 / 损坏 → 无标记 */ }
     if (withGaps) {
       data.gaps = this.gaps;
       data.totalGapSec = Math.round(this.gaps.reduce((s, g) => s + (g.endMs - g.startMs), 0) / 1000);
     }
-    writeFileSync(`${base}.session.json`, JSON.stringify(data), "utf-8");
+    // Atomic write; carries the node-side `nodeFormat` marker over from the existing file.
+    writeSessionSidecar(base, data);
   }
 
   private write(m: DanmuMessage): void {

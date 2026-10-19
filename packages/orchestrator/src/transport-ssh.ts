@@ -4,6 +4,7 @@ import { mkdirSync } from "node:fs";
 import { encodeEnqueue, normalizeNodeResultFile, registerChild, throwIfAborted, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type RemoteTaskSpec } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeRecordingStatus, NodeRollingSession, NodeTasks, RecoverOrderRequest, RecoverOrderResult, Transport } from "./transport.js";
 import { ProcUnsupported } from "./transport.js";
+import { parseUnclaimedPayload } from "./unclaimed.js";
 import type { NodeCapabilities, NodeStatus, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec } from "@drec/core";
 
 export interface SshOpts {
@@ -162,8 +163,10 @@ export class SshTransport implements Transport {
     // 旧写法 ["bash","-lc",cmd] 经 ssh 空格 join 成 `bash -lc node /path …` → bash -c 只取 "node"
     // 当命令、其余成位置参数 → 实际只跑 `node`(无脚本)→ 空输出 → JSON.parse 抛错 → 该节点恒缺席。
     const out = await this.run([cmd]);
-    const parsed = JSON.parse(out) as { recordings: NodeRecording[] };
-    return { workerId: this.id, recordings: parsed.recordings };
+    const parsed = JSON.parse(out) as { recordings: NodeRecording[]; unclaimedSegments?: unknown; unclaimedTruncated?: unknown };
+    // Old workers omit the orphan fields and malformed ones are dropped: both mean "unknown".
+    const extra = parseUnclaimedPayload(parsed);
+    return { workerId: this.id, recordings: parsed.recordings, ...(extra ?? {}) };
   }
 
   /** 读远端任务清单(隐藏 `_tasks` 子命令;输出不含 cookies)。 */
@@ -246,7 +249,7 @@ export class SshTransport implements Transport {
    * `force` 编进 payload 交给远端 `applyRemoteTasks` 跳过 T-2 安全阀 —— 必须端到端送达:
    * 只在 master 侧生效等于没做(远端节点才是拒绝删除的那个)。
    */
-  async applyTasks(input: { desired: RemoteTaskSpec[]; force?: boolean }): Promise<ApplyTasksResult> {
+  async applyTasks(input: { desired: RemoteTaskSpec[]; force?: boolean; expectedVersion?: number }): Promise<ApplyTasksResult> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const b64 = Buffer.from(JSON.stringify(input), "utf-8").toString("base64");
     const out = await this.run([`${nodePrefix} _apply-tasks ${this.o.dataRoot} ${b64}`]);

@@ -1,6 +1,8 @@
 export * from "./transport.js";
-export { scanRecordings, scanRollingSessions } from "./scan.js";
+export { scanInventory, scanRecordings, scanRollingSessions } from "./scan.js";
 export type { FfprobeAdapter } from "./scan.js";
+export type { UnclaimedSegment, SidecarShape } from "./unclaimed.js";
+export { classifyUnclaimedFiles, segmentSecByAnchorOf, UNCLAIMED_CAP } from "./unclaimed.js";
 export { Reconciler } from "./reconciler.js";
 // 能力门控纯函数已下沉 @drec/core(app L4 的「本机抑制」也要用;见 core/src/capabilities.ts)。
 // 这里 re-export 保持 orchestrator 现有消费方(cli/reconciler)导入路径不变。
@@ -77,7 +79,7 @@ export function registerBuiltinTransports(deps: {
   /** hub 任务同步:读本机任务清单(local worker = master 自身)。 */
   listTasks?: () => NodeTaskDTO[];
   /** hub 任务同步:把期望任务应用到本机 store。 */
-  applyTasks?: (input: { desired: RemoteTaskSpec[]; force?: boolean }) => ApplyTasksResult;
+  applyTasks?: (input: { desired: RemoteTaskSpec[]; force?: boolean; expectedVersion?: number }) => ApplyTasksResult;
   /** 处理任务表通道(plans/036 T9a):按 worker 的数据根执行入队 / 回执;不传 = local worker 不支持。 */
   procChannel?: {
     enqueue(dataRoot: string, req: EnqueueRequest): EnqueueResponse;

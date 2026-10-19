@@ -120,4 +120,29 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
     expect(tsLeft(s)).toBe(3);
     expect(s.ledgerRejections()).toEqual([]);
   });
+
+  // #66: the part list refreshes about 0.5-1s after an append returns. If the append was applied but the
+  // response was lost, the single immediate readback still sees the old count, so the wrapper switches line
+  // and appends again (duplicate part). Known defect; flip to it() once readback retries with backoff.
+  // The fake lag is counted in reads, so the backoff timing itself needs a unit test next to appendGroup.
+  it("fake: countLagReads keeps the pre-append count for N reads", async () => {
+    s = await create(); rec(s);
+    s.fake.countLagReads = 2;
+    await s.reconcile();
+    const bv = s.fake.onlyArchive.bv;
+    expect(s.fake.onlyArchive.parts).toHaveLength(3);
+    // The last append (livechat) left a 2-read lag: the counts before it, then the real count.
+    expect(await s.fake.countVideoParts(bv)).toBe(2);
+    expect(await s.fake.countVideoParts(bv)).toBe(2);
+    expect(await s.fake.countVideoParts(bv)).toBe(3);
+  });
+
+  it.fails("append applied but response lost + delayed readback → must not append twice (#66)", async () => {
+    s = await create(); rec(s);
+    s.fake.countLagReads = 1;
+    s.fake.inject({ op: "append", mode: "ambiguous" });
+    await s.reconcile();
+    expect(s.fake.calls.filter((c) => c.files[0]?.endsWith("_danmu.mp4")), "danmu appended once").toHaveLength(1);
+    expectHealthyDone(s, s.onlyKey(), { parts: THREE });
+  });
 });

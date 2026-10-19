@@ -7,9 +7,10 @@
 
 输出:第一行恒为 `PASS` 或 `FAIL`;FAIL 后每行一条缺项。退出码 PASS=0 / FAIL=1 / 取数失败=2。
 缺项 ⇒ 不派 Opus 审查,直接打回返工(缺项清单原样贴到 PR 评论)。
-检查项:Fixes #N、各必填段非空(模板里的 HTML 注释与「待填」不算内容)、自审五项各「发现→修复」或
+检查项:Fixes #N(分步票写 Part of #N)、各必填段非空(模板里的 HTML 注释与「待填」不算内容)、自审五项各「发现→修复」或
 「无+理由」、变异验证含 FAIL 与 PASS 两段输出、验证命令含 pnpm test / pnpm typecheck 与输出、
-版本声明合理(feat/fix 须 bump patch,或声明不 bump 且改动不触运行时)、正文过 issue-guard.py。
+版本声明合理(按路径判定:改动触及 RUNTIME_PATHS 必须声明 patch +1 bump,与提交类型无关;否则写「无需 bump + 理由」)、
+正文过 issue-guard.py。
 """
 
 from __future__ import annotations
@@ -28,7 +29,33 @@ GUARD = HERE / "issue-guard.py"
 
 REQUIRED_SECTIONS = ["改动范围", "验证方式", "自审五项", "变异验证", "验证命令与输出", "评论采纳情况", "回写位置", "残余风险", "版本"]
 SELF_REVIEW_ITEMS = ["边界", "并发", "静默失败", "一致性", "分层"]
-RUNTIME_PATHS = ("packages/", "package.json", "Dockerfile", "docker-compose", "dist/")
+# Runtime surface = anything that can change the shipped artifact or the container.
+# Anything not listed here is treated as tool-only (scripts/docs/tests/CI/dev fixtures).
+# AGENTS.md and docs/agent-workflow.md quote this list verbatim; a guard test fails
+# if the three ever drift apart.
+RUNTIME_PATHS = (
+    "packages/",
+    "package.json",
+    "Dockerfile",
+    "docker-compose",
+    "dist/",
+    "configs/",          # hub.config.example.json is inlined into the bundle at build time
+    "assets/",           # fonts are copied into the runtime image
+    "esbuild.config.mjs",
+    "tsconfig.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    ".dockerignore",     # decides what enters the image build context
+    "scripts/install-mesio.sh",   # copied into and executed in the image
+    "scripts/install-biliup.sh",  # copied into and executed in the image
+)
+# Test files never reach the artifact even when they live under packages/.
+# Matches exactly what vitest collects (vitest.config.ts include: *.test.ts).
+TEST_FILE = re.compile(r"\.test\.ts$")
+
+
+def runtime_files(files: list[str]) -> list[str]:
+    return [f for f in files if f.startswith(RUNTIME_PATHS) and not TEST_FILE.search(f)]
 # 独立占位词才算:TODO/TBD 前后不是路径/单词字符(放行 TODO.md、T-90 之类),
 # 三个以上句点两侧都是 ASCII 路径字符时是 git 范围(origin/x...HEAD),不算省略号。
 PLACEHOLDER = re.compile(
@@ -109,22 +136,30 @@ def check_version(sec: str, title: str, files: list[str] | None) -> list[str]:
     kind = typ.group(1).lower() if typ else ""
     bump = re.search(r"(\d+)\.(\d+)\.(\d+)\s*(?:→|->|=>|到)\s*(\d+)\.(\d+)\.(\d+)", sec)
     skip = re.search(r"无需\s*bump|不\s*bump|不适用", sec)
-    if bump:
+    touched = runtime_files(files or [])
+    # An explicit "no bump" wins for a non-runtime change, so quoting an old version
+    # number in the reason ("上次 0.0.5 → 0.0.6 已部署") is not mistaken for a bump.
+    if bump and not (skip and files is not None and not touched):
         a = tuple(int(x) for x in bump.groups()[:3])
         b = tuple(int(x) for x in bump.groups()[3:])
         if not (b[:2] == a[:2] and b[2] == a[2] + 1):
             return [f"版本声明应为 patch +1,实际 {a} → {b}"]
+        # A declared bump must touch the root manifest, otherwise a fake
+        # "0.0.1 → 0.0.2" line would pass for a change that alters the artifact.
+        if files and "package.json" not in files:
+            return ["声明 bump 版本,但改动文件里没有根 package.json(版本号与产物不同步)"]
         return []
+    # Path-based rule (independent of commit type and of how the section is worded):
+    # touching the runtime surface always requires a declared bump.
+    if touched:
+        return [f"改动触及运行时路径,须声明 bump(`0.0.X → 0.0.Y`): {', '.join(touched[:3])}"]
+    if files is None and kind in ("feat", "fix") and not skip:
+        # Offline without a file list the paths cannot be checked; feat/fix almost always
+        # touch runtime, so demand an explicit statement either way (gh mode always has files).
+        return ["离线无文件清单:feat/fix 须声明版本(`0.0.X → 0.0.Y`)或写明「无需 bump + 理由」"]
     if skip:
-        touched = [f for f in (files or []) if f.startswith(RUNTIME_PATHS)]
-        if touched:
-            return [f"声明不 bump,但改动触及运行时路径: {', '.join(touched[:3])}"]
-        if kind in ("feat", "fix") and files is None:
-            return []  # 离线且没给文件清单:无法核对,放行(gh 模式一定有清单)
         return [] if len(sec.strip()) >= 8 else ["不 bump 需写明理由"]
-    if kind in ("feat", "fix"):
-        return ["feat/fix 须声明版本(`0.0.X → 0.0.Y`)或写明「无需 bump + 理由」(仅 scripts/docs/test/.github 改动)"]
-    return [] if has_content(sec) else ["版本段为空(非 feat/fix 也要写「无需 bump」)"]
+    return [] if has_content(sec) else ["版本段为空(未触及运行时路径也要写「无需 bump + 理由」)"]
 
 
 def run_guard(body: str) -> list[str]:
@@ -142,8 +177,10 @@ def run_guard(body: str) -> list[str]:
 
 def gate(body: str, title: str = "", files: list[str] | None = None, guard: bool = True) -> list[str]:
     errs: list[str] = []
-    if not re.search(r"(?im)^\s*(?:Fixes|Closes|Resolves)\s+#\d+", strip_comments(body)):
-        errs.append("缺 `Fixes #N`(独占一行)")
+    # `Part of #N` = one step of a staged issue: links the issue without a closing keyword, so a later
+    # merge of the base into the default branch cannot close an issue whose other steps are still open.
+    if not re.search(r"(?im)^\s*(?:Fixes|Closes|Resolves|Part\s+of)\s+#\d+", strip_comments(body)):
+        errs.append("缺 `Fixes #N` 或分步票的 `Part of #N`(独占一行)")
     secs = split_sections(body)
     for name in REQUIRED_SECTIONS:
         if name not in secs:

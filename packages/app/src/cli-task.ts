@@ -284,7 +284,7 @@ export interface HubStarter {
   /** 连接测试(cli L5 用 orchestrator getTransport + listInventory 实现)。 */
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
   /** 批量存活探针(cli L5 用 orchestrator scoped transport ping 实现)。省略 → status 端点返回 []。 */
-  probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  probeAllWorkers?: () => Promise<import("@drec/core").WorkerStatus[]>;
   /** master 读某节点的任务清单(F3,只读)。省略 → 端点返回 400。 */
   nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
   /** master 代查某节点的任务日志尾巴(F3)。省略 → 端点返回 400(hub 未启用)。 */

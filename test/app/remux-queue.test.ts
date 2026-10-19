@@ -182,7 +182,12 @@ describe("租约宿主规则(§2.3)", () => {
     expect(s.getLease("remux")?.handoverRequested).toBe(true);
     expect(s.getLease("remux")?.owner).toBe(rec); // 不抢正在跑的 job
     finish();
-    await vi.waitFor(() => expect(s.getLease("remux")).toBeNull() || expect(s.getLease("remux")?.owner).not.toBe(rec));
+    // "Released or handed to someone else" as one assertion (an `expect(a) || expect(b)` chain
+    // never evaluates its right side, so it silently waited for "released" only).
+    await vi.waitFor(() => {
+      const l = s.getLease("remux");
+      expect(l === null || l.owner !== rec, `lease still held by ${l?.owner}`).toBe(true);
+    });
     await vi.waitFor(() => expect(s.list({ kind: "remux" })[0]?.state).toBe("done"));
     expect(s.acquireLease("remux", "serve:9:9", { leaseMs: 60_000, requestHandover: true }).acquired).toBe(true);
   });
@@ -273,7 +278,7 @@ describe("store 打不开 / 入队失败 → 回落进程内串行链(稳定版�
   it("边车写失败 → 放弃本段(原文件保留 + 告警),不入队也不回落", async () => {
     const calls: string[] = [];
     const fake: RemuxQueueLike = { enqueue: (p): EnqueueResult => { calls.push(p); return { jobId: "x", state: "pending" }; }, waitSettled: async () => "settled" };
-    mkdirSync(join(dir, `${B}.session.json.tmp`)); // 让写 .tmp 失败(目标是目录)
+    writeFileSync(join(dir, `${B}.session.json`), "{\"sessionBase\":"); // Unparsable sidecar: the strict marker refuses to overwrite it (issue #223)
     const h = hookOf(fake, { budget: 2000 });
     h.onSegment(seg(0)); h.onSegment(seg(1));
     await h.onSessionEnd();

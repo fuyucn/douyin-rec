@@ -1,6 +1,8 @@
 import { isWorkerTargeted } from "@drec/core";
 import type { ApplyTasksResult, EnqueueRequest, EnqueueResponse, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, ProcessReceipt, ProcessJob, RemoteTaskSpec, WorkerConfig } from "@drec/core";
 
+import type { UnclaimedSegment } from "./unclaimed.js";
+
 // 契约在 core(app 的 worker-store 用同一形状);这里 re-export 保持既有调用点不变。
 export type { ApplyTasksResult, WorkerConfig } from "@drec/core";
 
@@ -52,7 +54,14 @@ export interface NodeRollingProgress {
   ambiguous?: number[];
   uploading?: { index: number; kind: "create" | "append" };
 }
-export interface NodeInventory { workerId: string; recordings: NodeRecording[]; }
+export interface NodeInventory {
+  workerId: string;
+  recordings: NodeRecording[];
+  /** Absent = unknown (old worker). */
+  unclaimedSegments?: UnclaimedSegment[];
+  /** Entries dropped by the worker cap; > 0 means the list is incomplete. */
+  unclaimedTruncated?: number;
+}
 
 /** `_tasks` 远端输出:该节点全部任务的隐私安全投影(无 cookies)。 */
 export interface NodeTasks { workerId: string; tasks: NodeTaskDTO[]; }
@@ -158,7 +167,7 @@ export interface Transport {
    * 守卫会把「master 读不到规则」(desired 突然为空)与「用户真的要把房间从 A 节点改派到 B 节点」
    * 两种情况看成同一件事;force 是后者的唯一合法出口。
    */
-  applyTasks?(input: { desired: RemoteTaskSpec[]; force?: boolean }): Promise<ApplyTasksResult>;
+  applyTasks?(input: { desired: RemoteTaskSpec[]; force?: boolean; expectedVersion?: number }): Promise<ApplyTasksResult>;
   /**
    * 节点应用回执(T16):这台节点应用了哪一版期望、跑的是哪个 bundle。
    * **可选**:旧 bundle 没有 `_node-status` → 返回 null(UI 显示 unknown,不报错)。

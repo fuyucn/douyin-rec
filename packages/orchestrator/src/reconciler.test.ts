@@ -1215,7 +1215,8 @@ describe("磁盘看门狗(节点剩余空间告警)", () => {
         expect(notify).toHaveBeenCalledTimes(1);
         expect((notify.mock.calls[0][0] as { message: string }).message).toContain("阈值 10GB");
       }
-      expect(warn).toHaveBeenCalledTimes(1); // 仅非数字那次告警,缺省不告警
+      // 仅非数字那次告警,缺省不告警(只数 [disk] 告警;节点孤儿摘要行不计)
+      expect(warn.mock.calls.filter((c) => String(c[0]).startsWith("[disk]"))).toHaveLength(1);
     } finally {
       warn.mockRestore();
     }
@@ -1709,6 +1710,80 @@ describe("清单三态:失联节点所在的场不选优不收口(#27)", () => {
       await reconciler.reconcileAll();
     }
     expect(notify.mock.calls.filter((c) => c[0].kind === "error")).toHaveLength(0);
+    ledger.close();
+  });
+});
+
+describe("unclaimed-segment pass-through + deduped summary log (#225)", () => {
+  const seg = (sessionBase: string, segmentIndex: number) => ({
+    path: `/r/A/${sessionBase}_00${segmentIndex}.mp4`, sizeBytes: 1, mtimeMs: 1, sessionBase, segmentIndex,
+    stampMs: null, stampSource: null, sidecar: "missing" as const, platform: null, roomSlug: null, segmentSec: null,
+  });
+
+  function setup(invs: Record<string, () => NodeInventory>) {
+    const ledger = freshLedger();
+    const transports = new Map<string, Transport>(Object.entries(invs).map(([id, inv]) => [id, {
+      ...makeTransport(id, []),
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockImplementation(async () => inv()),
+    }]));
+    const runPipeline = vi.fn();
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      runPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0,
+    });
+    return { ledger, reconciler, transports, runPipeline };
+  }
+  const summaryLines = (spy: ReturnType<typeof vi.spyOn>) =>
+    spy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("unclaimed segments") || m.includes("orphan state unknown"));
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("inventoryWithTimeout copies the unclaimed fields; status still derives from recordings", async () => {
+    const { ledger, reconciler, transports } = setup({
+      w1: () => ({ workerId: "w1", recordings: [], unclaimedSegments: [seg("A_1", 0)], unclaimedTruncated: 2 }),
+      w2: () => ({ workerId: "w2", recordings: [], unclaimedSegments: [seg("A_1", 0)] }),
+      old: () => ({ workerId: "old", recordings: [] }),
+    });
+    const withTimeout = (id: string) =>
+      (reconciler as unknown as { inventoryWithTimeout(t: Transport): Promise<unknown> }).inventoryWithTimeout(transports.get(id)!);
+    expect(await withTimeout("w1")).toEqual({
+      status: "empty", workerId: "w1", recordings: [], unclaimedSegments: [seg("A_1", 0)], unclaimedTruncated: 2,
+    });
+    expect(await withTimeout("w2")).toMatchObject({ status: "empty", unclaimedTruncated: 0 });
+    const old = await withTimeout("old");
+    expect(old).toEqual({ status: "empty", workerId: "old", recordings: [] });
+    ledger.close();
+  });
+
+  it("logs the summary once across identical rounds and again when the count changes", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let segs = [seg("A_1", 0), seg("A_1", 1), seg("A_2", 0)];
+    const { ledger, reconciler, runPipeline } = setup({
+      w1: () => ({ workerId: "w1", recordings: [], unclaimedSegments: segs, unclaimedTruncated: 0 }),
+    });
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    expect(summaryLines(warn)).toEqual(["[reconciler] worker w1 unclaimed segments: 3 in 2 sessions (truncated 0)"]);
+    segs = [seg("A_1", 0)];
+    await reconciler.reconcileAll();
+    expect(summaryLines(warn)).toHaveLength(2);
+    expect(summaryLines(warn)[1]).toBe("[reconciler] worker w1 unclaimed segments: 1 in 1 sessions (truncated 0)");
+    expect(runPipeline).not.toHaveBeenCalled();
+    expect(ledger.listKeys()).toEqual([]);
+    ledger.close();
+  });
+
+  it("old worker → exactly one 'unknown' line across rounds; empty first sighting logs nothing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { ledger, reconciler } = setup({
+      old: () => ({ workerId: "old", recordings: [] }),
+      clean: () => ({ workerId: "clean", recordings: [], unclaimedSegments: [], unclaimedTruncated: 0 }),
+    });
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    expect(summaryLines(warn)).toEqual([
+      "[reconciler] worker old orphan state unknown (worker does not report unclaimed segments)",
+    ]);
     ledger.close();
   });
 });

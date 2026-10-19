@@ -15,6 +15,7 @@ issue-guard.py → 一次 `gh issue edit` 删全部旧状态标签 + 加新标�
 
 退出码: 0 成功 | 1 非法迁移/参数 | 2 用法错误 | 3 当前状态歧义(多个状态标签,用 --from 指明)
         4 隐私闸门命中 | 5 gh 调用失败。
+--from 必须真是该票当前挂的状态标签(单标签票不需要它;无标签票用 "-"),否则退出码 1。
 环境变量 ISSUE_STATE_GH 可替换 gh 可执行文件(测试注入用)。
 """
 
@@ -128,7 +129,9 @@ def main(argv: list[str]) -> int:
         if err:
             print(err, file=sys.stderr)
             return 1
-        print("OK")
+        # Legal, but say so when executing it will also need a reason file.
+        needs = a.check[1] in table["reasonRequired"] or [frm, a.check[1]] in table.get("reasonRequiredTransitions", [])
+        print("OK(执行时须带 --reason-file)" if needs else "OK")
         return 0
 
     if a.ensure_labels:
@@ -158,6 +161,30 @@ def main(argv: list[str]) -> int:
         return 5
     if a.frm is not None:
         cur = "" if a.frm == "-" else a.frm
+        # `--from` exists to resolve an ambiguous label set, not to override it.
+        # Accepting an arbitrary value would let a caller bypass the transition
+        # table (e.g. claim "in-review" on an issue that only has `accept`) and
+        # leave the old label behind.
+        if cur == "" and present:
+            have = ", ".join(present) or "(none)"
+            print(
+                f"--from - 表示无状态标签,但该 issue 当前挂着: {have}",
+                file=sys.stderr,
+            )
+            return 1
+        if cur and cur not in present:
+            have = ", ".join(present) or "(none)"
+            print(
+                f"--from {cur or '-'} 不是该 issue 当前挂的状态标签(实际: {have})",
+                file=sys.stderr,
+            )
+            return 1
+        if len(present) == 1 and cur:
+            print(
+                f"只有单个状态标签 {present[0]},不需要 --from;确认无误后去掉该参数重试",
+                file=sys.stderr,
+            )
+            return 1
     elif len(present) > 1:
         print(f"当前有多个状态标签 {present},状态必须唯一;用 --from 指明真实当前状态以修复", file=sys.stderr)
         return 3
@@ -178,6 +205,10 @@ def main(argv: list[str]) -> int:
         reason = rp.read_text(encoding="utf-8")
     if to in table["reasonRequired"] and not reason.strip():
         print(f"迁移到 {to} 必须带 --reason-file(写明原因)", file=sys.stderr)
+        return 1
+    # Per-transition requirement: a staged issue going back to in-progress must say which step merged.
+    if [cur, to] in table.get("reasonRequiredTransitions", []) and not reason.strip():
+        print(f"迁移 {cur or '(无)'} → {to} 必须带 --reason-file(写明哪一步已合并、下一步做什么)", file=sys.stderr)
         return 1
     if to == "needs-decision":
         missing = [m for m in table["needsDecisionMarkers"] if m not in reason]

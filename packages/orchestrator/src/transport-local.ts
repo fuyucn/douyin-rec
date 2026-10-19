@@ -5,7 +5,8 @@ import { linkOrCopy } from "@drec/core";
 import { freeGBOf, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type NodeTaskDTO, type RemoteTaskSpec, type NodeStatus } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecordingStatus, NodeTasks, Transport } from "./transport.js";
 import { ProcUnsupported } from "./transport.js";
-import { scanRecordings, scanRollingSessions } from "./scan.js";
+import { scanInventory, scanRollingSessions } from "./scan.js";
+import { segmentSecByAnchorOf } from "./unclaimed.js";
 
 export interface LocalOpts {
   id: string;
@@ -24,7 +25,7 @@ export interface LocalOpts {
   /** hub 任务同步:读本机任务清单(local worker = master 自身)。缺省 = 不支持。 */
   listTasks?: () => NodeTaskDTO[];
   /** hub 任务同步:把期望任务应用到本机 store。缺省 = 不支持。 */
-  applyTasks?: (input: { desired: RemoteTaskSpec[]; force?: boolean }) => ApplyTasksResult;
+  applyTasks?: (input: { desired: RemoteTaskSpec[]; force?: boolean; expectedVersion?: number }) => ApplyTasksResult;
   /** 本节点稳定身份(<root>/config/node.json)。缺省 → nodeId() 返 null。 */
   nodeIdentity?: () => { nodeId: string; hostname?: string } | null;
   /**
@@ -54,8 +55,10 @@ export class LocalTransport implements Transport {
 
   async listInventory(): Promise<NodeInventory> {
     const taskRooms = this.resolveTaskRooms();
-    const recordings = await scanRecordings(this.o.recordingsDir, taskRooms, this.o.ffprobe);
-    return { workerId: this.id, recordings };
+    // Without listTasks (standalone construction sites) segmentSec stays null and the master falls back to its default.
+    const segmentSecByAnchor = segmentSecByAnchorOf(this.o.listTasks?.() ?? []);
+    const inv = await scanInventory(this.o.recordingsDir, taskRooms, this.o.ffprobe, { segmentSecByAnchor });
+    return { workerId: this.id, ...inv };
   }
 
   async listTasks(): Promise<NodeTasks> {
@@ -63,7 +66,7 @@ export class LocalTransport implements Transport {
     return { workerId: this.id, tasks: this.o.listTasks() };
   }
 
-  async applyTasks(input: { desired: RemoteTaskSpec[]; force?: boolean }): Promise<ApplyTasksResult> {
+  async applyTasks(input: { desired: RemoteTaskSpec[]; force?: boolean; expectedVersion?: number }): Promise<ApplyTasksResult> {
     if (!this.o.applyTasks) throw new Error("LocalTransport: 未注入 applyTasks 回调(hub 任务同步未启用)");
     return this.o.applyTasks(input);
   }

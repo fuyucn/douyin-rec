@@ -1,9 +1,9 @@
 // packages/orchestrator/src/scan.test.ts
-import { describe, it, expect, onTestFinished } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { describe, it, expect, onTestFinished, vi } from "vitest";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scanRecordings, scanRollingSessions } from "./scan.js";
+import { scanInventory, scanRecordings, scanRollingSessions, scanUnclaimedSegments } from "./scan.js";
 // 假稿件号用拼接构造:隐私检查会拦裸 BV 号字面量。
 const FAKE_BV = ["B", "V", "1fake"].join("");
 
@@ -352,5 +352,160 @@ describe("scanRollingSessions(F1:边录边传实时进度,只读 sidecar)", () =
     const root = mkdtempSync(join(tmpdir(), "rs-"));
     mk(root, "A", "A_bili", { segments: seg(1), confirmed: [0], startMs: 5 }, { roomSlug: "777", platform: "bilibili" });
     expect(scanRollingSessions(root, [{ platform: "douyin", roomSlug: "777" }])).toEqual([]);
+  });
+});
+
+describe("scanInventory (unclaimed converted segments, detection only)", () => {
+  const S = 1_700_123_456_000;
+  const probe = (calls: string[]) => async (f: string) => {
+    calls.push(f);
+    return { durationSec: 60, startMs: 1_700_000_000_000, endMs: 1_700_000_060_000 };
+  };
+  const sidecar = (dir: string, base: string, body: unknown) =>
+    writeFileSync(join(dir, `${base}.session.json`), typeof body === "string" ? body : JSON.stringify(body));
+  const withTz = async <T>(tz: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = process.env.TZ;
+    process.env.TZ = tz;
+    try { return await fn(); } finally { if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev; }
+  };
+
+  function fixture(): string {
+    const root = mkdtempSync(join(tmpdir(), "scan-inv-"));
+    const a = join(root, "A"); mkdirSync(a);
+    const room = { roomSlug: "888", platform: "douyin" };
+    writeFileSync(join(a, "A_2026-06-27_08-00-00_000.ts"), "x");
+    sidecar(a, "A_2026-06-27_08-00-00", room);
+    // Converted and declared: claimed by groupSessions, must not be reported.
+    writeFileSync(join(a, "A_2026-06-27_09-00-00_000.mp4"), "x");
+    sidecar(a, "A_2026-06-27_09-00-00", { ...room, nodeFormat: "mp4" });
+    // Orphan with a full sidecar lacking nodeFormat; its startMs (S) deliberately differs from the stamp.
+    writeFileSync(join(a, "A_2026-06-27_10-00-00_000.mp4"), "xx");
+    writeFileSync(join(a, "A_2026-06-27_10-00-00_001.mp4"), "xxx");
+    sidecar(a, "A_2026-06-27_10-00-00", { roomSlug: "777", platform: "bilibili", startMs: S });
+    // Orphan with an unparsable sidecar: room comes from the agreeing siblings (08 + 09).
+    writeFileSync(join(a, "A_2026-06-27_11-00-00_000.mkv"), "x");
+    sidecar(a, "A_2026-06-27_11-00-00", "{bad");
+    const b = join(root, "B"); mkdirSync(b);
+    writeFileSync(join(b, "B_2026-06-27_12-00-00_000.mp4"), "x");
+    const c = join(root, "C"); mkdirSync(c);
+    writeFileSync(join(c, "C_1960-01-01_00-00-00_000.mp4"), "x");
+    sidecar(c, "C_1960-01-01_00-00-00", { startMs: 0 });
+    return root;
+  }
+
+  it("recordings equal scanRecordings byte for byte", async () => {
+    const root = fixture();
+    const expected = await scanRecordings(root, { A: "888" }, probe([]));
+    const inv = await scanInventory(root, { A: "888" }, probe([]));
+    expect(inv.recordings).toEqual(expected);
+    expect(JSON.stringify(inv.recordings)).toBe(JSON.stringify(expected));
+  });
+
+  it("never ffprobes orphan files", async () => {
+    const root = fixture();
+    const calls: string[] = [];
+    const inv = await scanInventory(root, {}, probe(calls));
+    expect(inv.unclaimedSegments!.length).toBeGreaterThan(0);
+    for (const u of inv.unclaimedSegments!) expect(calls).not.toContain(u.path);
+    // The claimed mp4 is still probed by scanRecordings: the fake really records calls.
+    expect(calls.some((f) => f.endsWith("A_2026-06-27_09-00-00_000.mp4"))).toBe(true);
+  });
+
+  it("reports orphans with sidecar shape, stamp source, room and segmentSec; claimed mp4 is not reported", async () => {
+    const root = fixture();
+    const inv = await withTz("Asia/Shanghai", () =>
+      scanInventory(root, {}, probe([]), { segmentSecByAnchor: { B: 1800 } }));
+    const byName = new Map(inv.unclaimedSegments!.map((u) => [u.path.slice(root.length + 1), u]));
+    expect([...byName.keys()]).toEqual([
+      "A/A_2026-06-27_10-00-00_000.mp4",
+      "A/A_2026-06-27_10-00-00_001.mp4",
+      "A/A_2026-06-27_11-00-00_000.mkv",
+      "B/B_2026-06-27_12-00-00_000.mp4",
+      "C/C_1960-01-01_00-00-00_000.mp4",
+    ]);
+    expect(inv.unclaimedTruncated).toBe(0);
+
+    expect(byName.get("A/A_2026-06-27_10-00-00_001.mp4")).toMatchObject({
+      sizeBytes: 3, sessionBase: "A_2026-06-27_10-00-00", segmentIndex: 1,
+      stampMs: S, stampSource: "sidecar", sidecar: "full",
+      platform: "bilibili", roomSlug: "777", segmentSec: null,
+    });
+    expect(byName.get("A/A_2026-06-27_11-00-00_000.mkv")).toMatchObject({
+      sidecar: "unparsable", stampSource: "filename", stampMs: Date.UTC(2026, 5, 27, 3, 0, 0),
+      platform: "douyin", roomSlug: "888",
+    });
+    expect(byName.get("B/B_2026-06-27_12-00-00_000.mp4")).toMatchObject({
+      sidecar: "missing", stampSource: "filename", stampMs: Date.UTC(2026, 5, 27, 4, 0, 0),
+      platform: null, roomSlug: null, segmentSec: 1800,
+    });
+    // Pre-epoch stamp and a zero sidecar startMs: reported as unknown, never as epoch 0 or negative.
+    expect(byName.get("C/C_1960-01-01_00-00-00_000.mp4")).toMatchObject({
+      sidecar: "minimal", stampMs: null, stampSource: null,
+    });
+  });
+
+  it("sidecar startMs wins regardless of process time zone", async () => {
+    const root = fixture();
+    for (const tz of ["Asia/Shanghai", "America/Los_Angeles"]) {
+      const { unclaimedSegments } = await withTz(tz, async () => scanUnclaimedSegments(root));
+      const hit = unclaimedSegments.find((u) => u.path.endsWith("A_2026-06-27_10-00-00_000.mp4"))!;
+      expect(hit.stampMs).toBe(S);
+      expect(hit.stampSource).toBe("sidecar");
+    }
+  });
+
+  it("infers no room when siblings disagree", () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-inv-"));
+    const d = join(root, "D"); mkdirSync(d);
+    writeFileSync(join(d, "D_2026-06-27_08-00-00_000.ts"), "x");
+    sidecar(d, "D_2026-06-27_08-00-00", { roomSlug: "1", platform: "douyin" });
+    writeFileSync(join(d, "D_2026-06-27_09-00-00_000.ts"), "x");
+    sidecar(d, "D_2026-06-27_09-00-00", { roomSlug: "2", platform: "douyin" });
+    writeFileSync(join(d, "D_2026-06-27_10-00-00_000.mp4"), "x");
+    const [hit] = scanUnclaimedSegments(root).unclaimedSegments;
+    expect(hit).toMatchObject({ sidecar: "missing", platform: null, roomSlug: null });
+  });
+
+  it("caps the list by path and counts the rest; empty tree → [] and 0", () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-inv-"));
+    const d = join(root, "E"); mkdirSync(d);
+    for (const i of ["002", "000", "001"]) writeFileSync(join(d, `E_2026-06-27_08-00-00_${i}.mp4`), "x");
+    const capped = scanUnclaimedSegments(root, { cap: 2 });
+    expect(capped.unclaimedSegments.map((u) => u.segmentIndex)).toEqual([0, 1]);
+    expect(capped.unclaimedTruncated).toBe(1);
+
+    const empty = scanUnclaimedSegments(mkdtempSync(join(tmpdir(), "scan-inv-")));
+    expect(empty).toEqual({ unclaimedSegments: [], unclaimedTruncated: 0 });
+  });
+
+  it.skipIf(process.getuid?.() === 0)("skips an unreadable anchor dir without losing other anchors' orphans", () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-inv-"));
+    const ok = join(root, "F"); mkdirSync(ok);
+    writeFileSync(join(ok, "F_2026-06-27_08-00-00_000.mp4"), "x");
+    const locked = join(root, "G"); mkdirSync(locked);
+    writeFileSync(join(locked, "G_2026-06-27_08-00-00_000.mp4"), "x");
+    chmodSync(locked, 0o000);
+    onTestFinished(() => chmodSync(locked, 0o755));
+    const { unclaimedSegments } = scanUnclaimedSegments(root);
+    expect(unclaimedSegments.map((u) => u.path)).toEqual([join(ok, "F_2026-06-27_08-00-00_000.mp4")]);
+  });
+
+  it("orphan pass failure keeps recordings, omits orphan fields and warns once", async () => {
+    vi.resetModules();
+    vi.doMock("./unclaimed.js", async (orig) => ({
+      ...(await orig<typeof import("./unclaimed.js")>()),
+      classifyUnclaimedFiles: () => { throw new Error("boom"); },
+    }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    onTestFinished(() => { vi.doUnmock("./unclaimed.js"); vi.resetModules(); warn.mockRestore(); });
+    const scan = await import("./scan.js");
+    const root = fixture();
+    const expected = await scanRecordings(root, { A: "888" }, probe([]));
+    const inv = await scan.scanInventory(root, { A: "888" }, probe([]));
+    expect(JSON.stringify(inv.recordings)).toBe(JSON.stringify(expected));
+    expect(inv).not.toHaveProperty("unclaimedSegments");
+    expect(inv).not.toHaveProperty("unclaimedTruncated");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain("boom");
   });
 });

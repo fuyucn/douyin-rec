@@ -6,6 +6,8 @@ import { epochFromZonedParts, processTimeZone } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import type { ActiveRecordingRoom, NodeRecording, NodeRollingProgress, NodeRollingSession } from "./transport.js";
 import { readGaps, totalGapSecOf } from "./gaps.js";
+import { classifyUnclaimedFiles, inferRoomFromSiblings, UNCLAIMED_CAP } from "./unclaimed.js";
+import type { SidecarShape, UnclaimedSegment } from "./unclaimed.js";
 
 interface GapInterval { startMs: number; endMs: number }
 
@@ -163,7 +165,7 @@ export type FfprobeAdapter = (file: string) => Promise<{ durationSec: number; st
  * 会话 base 尾部的 `YYYY-MM-DD_HH-mm-ss` 就是录制起点(设置时区墙钟),用它兜底。
  * 解析不出 → 0(调用方按旧行为处理)。
  */
-function startMsFromSessionBase(base: string): number {
+export function startMsFromSessionBase(base: string): number {
   const m = /_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/.exec(base);
   if (!m) return 0;
   const [, y, mo, d, h, mi, s] = m;
@@ -262,4 +264,103 @@ export async function scanRecordings(
     }
   }
   return recordings;
+}
+
+/** Classify `{base}.session.json`; startMs is returned for any parsed object with a finite startMs > 0. */
+function readSidecarShape(dir: string, base: string): {
+  shape: SidecarShape; platform?: string; roomSlug?: string; startMs?: number;
+} {
+  let d: unknown;
+  try {
+    d = JSON.parse(readFileSync(join(dir, `${base}.session.json`), "utf-8"));
+  } catch (e) {
+    return { shape: (e as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unparsable" };
+  }
+  if (typeof d !== "object" || d === null || Array.isArray(d)) return { shape: "unparsable" };
+  const o = d as { platform?: unknown; roomSlug?: unknown; startMs?: unknown };
+  const startMs = typeof o.startMs === "number" && Number.isFinite(o.startMs) && o.startMs > 0 ? o.startMs : undefined;
+  if (typeof o.platform === "string" && typeof o.roomSlug === "string") {
+    return { shape: "full", platform: o.platform, roomSlug: o.roomSlug, startMs };
+  }
+  return { shape: "minimal", startMs };
+}
+
+/**
+ * Report stamped mp4/mkv segments that groupSessionsInDir does not claim (orphans). Read-only:
+ * statSync + sidecar reads only, never ffprobe.
+ */
+export function scanUnclaimedSegments(
+  recordingsDir: string,
+  opts: { segmentSecByAnchor?: Record<string, number>; cap?: number } = {},
+): { unclaimedSegments: UnclaimedSegment[]; unclaimedTruncated: number } {
+  const all: UnclaimedSegment[] = [];
+  let anchors: string[] = [];
+  try {
+    anchors = readdirSync(recordingsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch { anchors = []; }
+
+  for (const anchor of anchors) {
+    const dir = join(recordingsDir, anchor);
+    let files: string[];
+    let groups: ReturnType<typeof groupSessionsInDir>;
+    try {
+      files = readdirSync(dir);
+      groups = groupSessionsInDir(dir, files);
+    } catch { continue; }
+    const claimed = new Set(Object.values(groups).flatMap((g) => g.ts));
+    const hits = classifyUnclaimedFiles(files, claimed);
+    if (!hits.length) continue;
+    const fullSiblings = Object.keys(groups).flatMap((base) => {
+      const s = readSidecarShape(dir, base);
+      return s.shape === "full" ? [{ base, platform: s.platform, roomSlug: s.roomSlug }] : [];
+    });
+    for (const { file, sessionBase, segmentIndex } of hits) {
+      let st;
+      try { st = statSync(join(dir, file)); } catch { continue; }
+      const own = readSidecarShape(dir, sessionBase);
+      const room = own.platform && own.roomSlug
+        ? { platform: own.platform, roomSlug: own.roomSlug }
+        : inferRoomFromSiblings(fullSiblings.filter((s) => s.base !== sessionBase));
+      const stamp = own.startMs ?? startMsFromSessionBase(sessionBase);
+      const stampMs = stamp > 0 ? stamp : null;
+      all.push({
+        path: join(dir, file),
+        sizeBytes: st.size,
+        mtimeMs: st.mtimeMs,
+        sessionBase,
+        segmentIndex,
+        stampMs,
+        stampSource: own.startMs ? "sidecar" : stampMs !== null ? "filename" : null,
+        sidecar: own.shape,
+        platform: room?.platform ?? null,
+        roomSlug: room?.roomSlug ?? null,
+        segmentSec: opts.segmentSecByAnchor?.[anchor] ?? null,
+      });
+    }
+  }
+  all.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const cap = opts.cap ?? UNCLAIMED_CAP;
+  return { unclaimedSegments: all.slice(0, cap), unclaimedTruncated: Math.max(0, all.length - cap) };
+}
+
+/**
+ * `scanRecordings` plus the orphan pass; `recordings` is exactly what `scanRecordings` returns.
+ * The orphan pass is best-effort: if it throws, the orphan fields are omitted (unknown) and the
+ * recordings still come back.
+ */
+export async function scanInventory(
+  recordingsDir: string,
+  taskRooms: Record<string, string>,
+  ffprobe: FfprobeAdapter,
+  opts: { segmentSecByAnchor?: Record<string, number>; cap?: number } = {},
+): Promise<{ recordings: NodeRecording[]; unclaimedSegments?: UnclaimedSegment[]; unclaimedTruncated?: number }> {
+  const recordings = await scanRecordings(recordingsDir, taskRooms, ffprobe);
+  try {
+    return { recordings, ...scanUnclaimedSegments(recordingsDir, opts) };
+  } catch (e) {
+    console.warn(`[scan] unclaimed-segment pass failed, omitting orphan fields: ${(e as Error).message}`);
+    return { recordings };
+  }
 }

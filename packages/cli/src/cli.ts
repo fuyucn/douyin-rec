@@ -22,17 +22,17 @@ import { biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUpl
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
-import { getEngine, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
+import { decorateRecordEvent, getEngine, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
 import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
-import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type NodeTaskLogsDTO, type NodeTasksDTO } from "@drec/core";
+import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, APP_VERSION } from "@drec/app";
-import type { HubStarter } from "@drec/app";
+import type { HubStarter, TaskStore } from "@drec/app";
 import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
@@ -235,7 +235,8 @@ program
         await baseNotifier.notify(e);
         if (e.kind === "error") {
           try {
-            process.stdout.write(`@@DREC_ALERT@@${JSON.stringify({ stage: e.stage, message: e.message })}\n`);
+            // ctx (issue #53 N4) is an extra field: an older parent ignores it, a newer parent forwards it.
+            process.stdout.write(`@@DREC_ALERT@@${JSON.stringify({ stage: e.stage, message: e.message, ...(e.ctx ? { ctx: e.ctx } : {}) })}\n`);
           } catch {
             /* ignore */
           }
@@ -273,7 +274,12 @@ program
       const remuxDeps = {
         log: (m: string) => console.log(m),
         // 失败走现有告警通道(error 事件 → webhook + @@DREC_ALERT@@ → 站内 toast),不静默。
-        alert: (message: string) => { void notifier.notify({ kind: "error", stage: "转封装", message }).catch(() => {}); },
+        // Same context as the session's own notifications (issue #53 N4): task name, platform, room id.
+        alert: (message: string) => {
+          const e = decorateRecordEvent({ kind: "error", stage: "转封装", message } as NotifyEvent,
+            { taskName: opts.name, platform: platform.id, roomSlug: platform.extractRoomSlug(o.room) });
+          void notifier.notify(e).catch(() => {});
+        },
         // 任务归属标识(临时文件名 = 归属 + pid):接管据此区分「本任务已死进程的残留」与「别的任务的新鲜残留」。
         owner: platform.extractRoomSlug(o.room),
       };
@@ -669,6 +675,11 @@ const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWork
 /** master 资源池快照提供者(由 hubStarter.start 注入,读同一 ResourcePool 实例);未启动 → undefined。 */
 let hubPoolSnapshot: (() => HubPoolSnapshotDTO) | undefined;
 const readPoolSnapshot = (): HubPoolSnapshotDTO | undefined => hubPoolSnapshot?.();
+/**
+ * Master-side sync receipt settings (expected version / last sync error).
+ * Hub start injects the live TaskStore; undefined until hub starts.
+ */
+let hubReceiptSettings: Pick<TaskStore, "getSetting" | "setSetting"> | undefined;
 /** web API → hubStarter.retryNode 的统一入口(hub 未启动 → 400)。 */
 const requestHubRetryNode = async (
   streamKey: string,
@@ -745,6 +756,7 @@ const hubStarter: HubStarter = {
   stopJob: requestHubStopJob,
   runNow: requestHubRunNow,
   async start(opts) {
+    hubReceiptSettings = opts.store;
     const {
       registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport, recordingStatusWorkerIds,
       satisfiesCapabilities,
@@ -755,6 +767,7 @@ const hubStarter: HubStarter = {
     const { statSync } = await import("node:fs");
     const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
+    const { recordExpectedVersion, recordSyncError } = await import("@drec/app");
 
     const hubCfg = JSON.parse(opts.hubConfigJson ?? "null") as null | {
       platform?: string;
@@ -848,6 +861,8 @@ const hubStarter: HubStarter = {
         force: input.force === true,
         // 审计快照落 <数据根>/config/managed/(显式传目录,不从 DOUYIN_REC_ROOT 推导)。
         managedStateDir: join(rootConfigDir(), "managed"),
+        // T16:本机 worker 也必须记录期望版本,否则状态页只报 unknown。
+        ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
       }),
     });
 
@@ -1254,7 +1269,24 @@ const hubStarter: HubStarter = {
           if (!t?.applyTasks) continue; // 该 transport 不支持任务同步 → 跳过(下轮再试)
           try {
             const desired = desiredFor(w.id);
-            const r = await t.applyTasks({ desired, force });
+            // T16:版本由内容派生;周期 tick 内容不变时复用同一版,避免假的 syncLag。
+            // 回执只是观测:settings 写失败绝不能阻止本轮任务同步(否则一次磁盘/DB 故障会停录)。
+            let expectedVersion: number | undefined;
+            try {
+              expectedVersion = hubReceiptSettings
+                ? recordExpectedVersion(hubReceiptSettings, w.id, desired)
+                : undefined;
+            } catch (e) {
+              opts.warn(`[hub] 记录期望版本 ${w.id} 失败(忽略,继续同步): ${(e as Error).message}`);
+            }
+            const r = await t.applyTasks({ desired, force, ...(expectedVersion !== undefined ? { expectedVersion } : {}) });
+            // A safety-valve rejection means the expected set was NOT fully applied:
+            // keep it visible as syncError instead of clearing the receipt.
+            try {
+              if (hubReceiptSettings) recordSyncError(hubReceiptSettings, w.id, r.rejected ? `rejected: ${r.rejected}` : null);
+            } catch (e) {
+              opts.warn(`[hub] 记录同步结果 ${w.id} 失败(忽略): ${(e as Error).message}`);
+            }
             // 本机(local worker)的 pending 任务直接走同一进程里的 TaskManager 硬停,
             // 与远端 `_apply-tasks` 的 serve API 硬停语义一致:停源任务/删规则要立即停,
             // 不能等排空(否则 hub settle 会一直等这场直播自然收播,迟迟不建 job)。
@@ -1284,8 +1316,16 @@ const hubStarter: HubStarter = {
                 + `若 master 侧配置读取异常,先检查 config/hub/ 目录。`);
             }
           } catch (e) {
+            const msg = (e as Error).message;
+            // 失败原因必须留在 receipt 里:只有日志的话,重启后无从判断「期望没应用到」。
+            // 同样包住:回执失败不能再抛进外层 catch 形成二次异常。
+            try {
+              if (hubReceiptSettings) recordSyncError(hubReceiptSettings, w.id, msg);
+            } catch (recordErr) {
+              opts.warn(`[hub] 记录同步失败原因 ${w.id} 失败: ${(recordErr as Error).message}`);
+            }
             // 节点离线/命令失败 → 只 warn,下轮对账自愈,不打断 reconcile。
-            opts.warn(`[hub] 任务同步 ${w.id} 失败: ${(e as Error).message}`);
+            opts.warn(`[hub] 任务同步 ${w.id} 失败: ${msg}`);
           }
         }
       } finally {
@@ -1459,6 +1499,7 @@ const hubStarter: HubStarter = {
       hubStopJob = undefined;
       hubRunNow = undefined;
       hubPoolSnapshot = undefined;
+      hubReceiptSettings = undefined;
     };
   },
   async testWorker(cfg) {
@@ -1494,12 +1535,12 @@ const hubStarter: HubStarter = {
       return { ok: false, error: (e as Error).message };
     }
   },
-  async probeAllWorkers(): Promise<Array<{ id: string; ok: boolean; error?: string }>> {
+  async probeAllWorkers(): Promise<WorkerStatus[]> {
     // scoped 一次性 transport(不进全局 registry,不污染运行中的 hub);逐 worker ping,allSettled 汇总。
     const { LocalTransport, SshTransport } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
     const { statSync } = await import("node:fs");
-    const { workerStore, rootHubConfig } = await import("@drec/app");
+    const { workerStore, rootHubConfig, withMasterReceipt } = await import("@drec/app");
     const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
       const { durationMs } = await ffprobeVideo(file).catch(() => ({ durationMs: 0 }));
       const endMs = statSync(file).mtimeMs;
@@ -1514,12 +1555,14 @@ const hubStarter: HubStarter = {
             nodeStatus: () => {
               let appliedVersion: number | null = null;
               let appliedAt: number | null = null;
+              let appVersionAtApply: string | null = null;
               try {
                 const st = readManagedState(join(w.dataRoot ?? "", "config", "managed"));
                 appliedVersion = st?.version ?? null;
                 appliedAt = st?.savedAt ?? null;
+                appVersionAtApply = st?.appVersion ?? null;
               } catch { /* 未同步过 → null */ }
-              return { appVersion: APP_VERSION, appliedVersion, appliedAt, appVersionAtApply: null, taskCount: 0, managedCount: 0 };
+              return { appVersion: APP_VERSION, appliedVersion, appliedAt, appVersionAtApply, taskCount: 0, managedCount: 0 };
             },
           })
         : new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
@@ -1548,9 +1591,11 @@ const hubStarter: HubStarter = {
       }
       const { status: ns, diskFreeGB } = r.value;
       const disk = diskFreeGB !== undefined ? { diskFreeGB, diskMinGB } : {};
-      return ns
+      const base = ns
         ? { id: w.id, ok: true, appVersion: ns.appVersion, appliedVersion: ns.appliedVersion, appliedAt: ns.appliedAt, ...disk }
         : { id: w.id, ok: true, ...disk };
+      // T16:把 master 侧期望版本与最近同步失败附在节点回执上;旧节点/未注入 → 字段缺省。
+      return hubReceiptSettings ? withMasterReceipt(base, hubReceiptSettings) : base;
     });
   },
 };
@@ -1715,19 +1760,21 @@ program
     const { statSync } = await import("node:fs");
     const { TaskStore } = await import("@drec/app");
     const { ffprobeVideo } = await import("@drec/post-process");
-    const { scanRecordings } = await import("@drec/orchestrator");
+    const { scanInventory, segmentSecByAnchorOf } = await import("@drec/orchestrator");
 
     // 打开 slave 自身的 db，构建 taskRooms（anchorName/name → roomSlug）
     const dbPath = pathJoin(dataRoot, "db", "douyin-rec.db");
     const store = new TaskStore(dbPath);
     const taskRooms: Record<string, string> = {};
-    for (const task of store.listTasks()) {
+    const tasks = store.listTasks();
+    for (const task of tasks) {
       try {
         const slug = platformForRoom(task.room).extractRoomSlug(task.room);
         if (task.name) taskRooms[task.name] = slug;
         if (task.anchorName) taskRooms[task.anchorName] = slug;
       } catch { /* skip tasks whose platform can't be resolved */ }
     }
+    const segmentSecByAnchor = segmentSecByAnchorOf(tasks);
 
     // ffprobe 适配器：durationMs via ffprobeVideo + mtime → startMs/endMs
     const ffprobe = async (file: string): Promise<{ durationSec: number; startMs: number; endMs: number }> => {
@@ -1737,8 +1784,8 @@ program
     };
 
     const recordingsDir = pathJoin(dataRoot, "recordings");
-    const recordings = await scanRecordings(recordingsDir, taskRooms, ffprobe);
-    process.stdout.write(JSON.stringify({ recordings }) + "\n");
+    const inventory = await scanInventory(recordingsDir, taskRooms, ffprobe, { segmentSecByAnchor });
+    process.stdout.write(JSON.stringify(inventory) + "\n");
   });
 
 // ─── _disk <dataRoot>（隐藏子命令，供 master 通过 SSH 调用）──────────────────────
@@ -1791,14 +1838,12 @@ program
   .description("(内部) 应用 master 下发的期望任务(供 master ssh 调用)")
   .action(async (dataRoot: string, b64: string) => {
     const { join: pathJoin } = await import("node:path");
-    const { TaskStore, applyRemoteTasks } = await import("@drec/app");
-    const input = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as { desired: RemoteTaskSpec[]; force?: boolean };
+    const { TaskStore, applyTasksPayload } = await import("@drec/app");
     const store = new TaskStore(pathJoin(dataRoot, "db", "douyin-rec.db"));
-    const result = applyRemoteTasks(store, Array.isArray(input.desired) ? input.desired : [], undefined, {
+    // T16:payload 的 expectedVersion 由 applyTasksPayload 透传到快照;旧 master 缺字段 → 版本 0。
+    const result = applyTasksPayload(store, b64, undefined, {
       // 审计快照:目录由 dataRoot 显式派生(本命令只带 dataRoot,无 DOUYIN_REC_ROOT —— 见 managed-state.ts)。
       managedStateDir: pathJoin(dataRoot, "config", "managed"),
-      // force 来自 master payload(POST /api/hub/apply?force=1)或节点 env DREC_ALLOW_SHRINK=1。
-      force: input.force === true,
     });
     // 不再期望的受管任务必须**硬停**(而非排空):这是「用户停源任务/删规则」的明确意图,
     // 排空会等到直播自然收播,hub 的 settle 因而一直卡着不建 job。

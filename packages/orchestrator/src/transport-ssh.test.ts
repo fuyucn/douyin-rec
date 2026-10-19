@@ -4,7 +4,7 @@ import { chmodSync, existsSync, rmSync, mkdtempSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SshTransport, buildRsyncArgs } from "./transport-ssh.js";
-import { ProcUnsupported, recordingStatusWorkerIds } from "./transport.js";
+import { ProcUnsupported, recordingStatusWorkerIds, type NodeRecording } from "./transport.js";
 import { summarizeRsyncStderr } from "./transport-ssh.js";
 
 describe("recordingStatusWorkerIds", () => {
@@ -193,6 +193,62 @@ describe("SshTransport", () => {
     expect(inv.workerId).toBe("vps");
     expect(inv.recordings[0].roomSlug).toBe("411");
     expect(inv.recordings[0].durationSec).toBe(3600);
+  });
+
+  describe("listInventory unclaimed fields (#225)", () => {
+    const recordings = [
+      { roomSlug: "411", sessionBase: "z_2026-06-27_07-54", tsFiles: ["a_000.ts"], xmlPath: "z.xml",
+        durationSec: 3600, startMs: 1_700_000_000_000, endMs: 1_700_003_600_000, totalGapSec: 0 },
+    ];
+    const seg = {
+      path: "/d/recordings/A/A_2026-06-27_10-00-00_000.mp4", sizeBytes: 10, mtimeMs: 1_700_000_000_000,
+      sessionBase: "A_2026-06-27_10-00-00", segmentIndex: 0, stampMs: 1_700_000_000_000, stampSource: "filename",
+      sidecar: "missing", platform: null, roomSlug: null, segmentSec: 1800,
+    };
+    const mkInv = (payload: unknown) => new SshTransport({ id: "vps", host: "h", dataRoot: "/d",
+      run: async () => JSON.stringify(payload), rsync: async () => {} }).listInventory();
+
+    it("new worker output → recordings plus validated unclaimed fields", async () => {
+      const inv = await mkInv({ recordings, unclaimedSegments: [seg], unclaimedTruncated: 3 });
+      expect(inv).toEqual({ workerId: "vps", recordings, unclaimedSegments: [seg], unclaimedTruncated: 3 });
+    });
+
+    it("old master parse shape still yields identical recordings from new output", () => {
+      const out = JSON.stringify({ recordings, unclaimedSegments: [seg], unclaimedTruncated: 0 });
+      expect((JSON.parse(out) as { recordings: NodeRecording[] }).recordings).toEqual(recordings);
+    });
+
+    it("old worker output (recordings only) → no unclaimed keys (unknown)", async () => {
+      const inv = await mkInv({ recordings });
+      expect(inv).toEqual({ workerId: "vps", recordings });
+      expect(inv).not.toHaveProperty("unclaimedSegments");
+      expect(inv).not.toHaveProperty("unclaimedTruncated");
+    });
+
+    it("[] is reported as none, not unknown", async () => {
+      const inv = await mkInv({ recordings, unclaimedSegments: [], unclaimedTruncated: 0 });
+      expect(inv.unclaimedSegments).toEqual([]);
+      expect(inv.unclaimedTruncated).toBe(0);
+    });
+
+    const malformed: Array<[string, unknown]> = [
+      ["entry missing path", { recordings, unclaimedSegments: [{ ...seg, path: undefined }], unclaimedTruncated: 0 }],
+      ["entry with bad sidecar shape", { recordings, unclaimedSegments: [seg, { ...seg, sidecar: "weird" }], unclaimedTruncated: 0 }],
+      ["entry with string segmentSec", { recordings, unclaimedSegments: [{ ...seg, segmentSec: "1800" }], unclaimedTruncated: 0 }],
+      ["null entry", { recordings, unclaimedSegments: [null], unclaimedTruncated: 0 }],
+      ["missing truncated", { recordings, unclaimedSegments: [seg] }],
+      ["negative truncated", { recordings, unclaimedSegments: [seg], unclaimedTruncated: -1 }],
+      ["fractional truncated", { recordings, unclaimedSegments: [seg], unclaimedTruncated: 1.5 }],
+      ["non-array segments", { recordings, unclaimedSegments: { 0: seg }, unclaimedTruncated: 0 }],
+    ];
+    for (const [name, payload] of malformed) {
+      it(`malformed (${name}) → no unclaimed keys, recordings intact`, async () => {
+        const inv = await mkInv(payload);
+        expect(inv.recordings).toEqual(recordings);
+        expect(inv).not.toHaveProperty("unclaimedSegments");
+        expect(inv).not.toHaveProperty("unclaimedTruncated");
+      });
+    }
   });
 
   it("listInventory 发送包含 _inventory 和 dataRoot 的命令", async () => {
