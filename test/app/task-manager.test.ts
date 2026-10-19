@@ -131,8 +131,8 @@ describe("TaskManager", () => {
   });
 
   it("同一房间已有 0 落盘任务在录 → 第二个拒绝启动(否则产出两个无法删除的重复稿件)", () => {
-    const a = addTask({ room: "https://live.douyin.com/94198981234", outDir: "/tmp/dupA", streamUpload: true });
-    const b = addTask({ room: "https://live.douyin.com/94198981234", outDir: "/tmp/dupB", streamUpload: true });
+    const a = addTask({ room: "https://live.douyin.com/981234", outDir: "/tmp/dupA", streamUpload: true });
+    const b = addTask({ room: "https://live.douyin.com/981234", outDir: "/tmp/dupB", streamUpload: true });
     const spawner = new MockSpawner();
     const logs: string[] = [];
     const mgr = new TaskManager(store, spawner, { log: (m) => logs.push(m) });
@@ -146,8 +146,8 @@ describe("TaskManager", () => {
   });
 
   it("不同房间的 0 落盘任务互不挡(多房间并发仍可同时录)", () => {
-    const a = addTask({ room: "https://live.douyin.com/94198981234", outDir: "/tmp/mA", streamUpload: true });
-    const b = addTask({ room: "https://live.douyin.com/94198981235", outDir: "/tmp/mB", streamUpload: true });
+    const a = addTask({ room: "https://live.douyin.com/981234", outDir: "/tmp/mA", streamUpload: true });
+    const b = addTask({ room: "https://live.douyin.com/981235", outDir: "/tmp/mB", streamUpload: true });
     const spawner = new MockSpawner();
     const mgr = new TaskManager(store, spawner, { log: () => {} });
 
@@ -157,8 +157,8 @@ describe("TaskManager", () => {
   });
 
   it("普通录制任务(非 0 落盘)不受该守卫影响", () => {
-    const a = addTask({ room: "https://live.douyin.com/94198981234", outDir: "/tmp/pA" });
-    const b = addTask({ room: "https://live.douyin.com/94198981234", outDir: "/tmp/pB" });
+    const a = addTask({ room: "https://live.douyin.com/981234", outDir: "/tmp/pA" });
+    const b = addTask({ room: "https://live.douyin.com/981234", outDir: "/tmp/pB" });
     const spawner = new MockSpawner();
     const mgr = new TaskManager(store, spawner, { log: () => {} });
 
@@ -271,7 +271,7 @@ describe("TaskManager", () => {
     // when the stream could not be acquired after retries it exited 0 by itself. Nothing had
     // marked that exit expected, so TaskManager called it a crash and respawned in a tight loop
     // ("异常退出 (code=0)" → restart #1), each round costing another six acquisition attempts.
-    const id = addTask({ room: "https://live.douyin.com/94198981236", streamUpload: true });
+    const id = addTask({ room: "https://live.douyin.com/981236", streamUpload: true });
     const spawner = new MockSpawner();
     const mgr = new TaskManager(store, spawner, {
       autoRestart: true,
