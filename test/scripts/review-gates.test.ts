@@ -252,6 +252,27 @@ describe("pr-risk-scan.sh", () => {
     ].join("\n");
     expect(risk(d).status).toBe(0);
   });
+  it("多行签名参数里有内联类型的分号(`opts: { a: T; b: U }`)仍识别为签名", () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`);
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " import x from 'y';",
+      " const z = 1;",
+      " export const w = 2;",
+      "   async cleanupStage(",
+      "     dir: string,",
+      "     opts: { keep: boolean; force: boolean },",
+      "   ): Promise<void> {",
+      ...filler,
+      "-    const n = 1;",
+      "+    const n = 2;",
+      "",
+    ].join("\n");
+    expect(risk(d).status).toBe(1);
+  });
   it("签名启发式不把 if/for 当函数", () => {
     const filler = Array.from({ length: 30 }, (_, i) => ` const c${i} = ${i};`);
     const lines = [" function f() {", " const a = 1;", " const b = 2;", "   if (cleanupDone) {", ...filler, "-const n = 1;", "+const n = 2;"];

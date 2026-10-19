@@ -65,6 +65,8 @@ SIG_PROP_RE='^[[:space:]]*([A-Za-z_$][A-Za-z0-9_$]*|"[^"]+"|'"'"'[^'"'"']+'"'"'|
 # Head of a multi-line signature: a name followed by an unclosed `(`. A multi-line call looks the same,
 # so a head is only kept once a closing line `) {` / `): T {` / `) =>` shows up before any `;`.
 SIG_HEAD_RE='^[[:space:]]*((export|async|public|private|protected|static|readonly|default|override)[[:space:]]+)*(function[[:space:]*][A-Za-z_$]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*(<[^>]*>)?\([^)]*$|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*[:=][[:space:]]*(async[[:space:]]+)?\([^)]*$)'
+# A multi-line call ends on `;`. A semicolon inside the parameter list (`opts: { a: T; b: U }`) does not.
+SEMI_END_RE=';[[:space:]]*$'
 SIG_CLOSE_RE='^[[:space:]]*(\}[^)]*)?\)'
 NOT_SIG_RE='^[[:space:]]*(if|for|while|switch|catch|else|return|do|await|new)([[:space:]]|\(|$)'
 pending_head=""   # unclosed multi-line head awaiting its closing line
@@ -176,9 +178,9 @@ while IFS= read -r line; do
       elif [[ "$body" =~ $SIG_HEAD_RE ]]; then pending_head="$body"; fi
     fi
     # Closing line of a multi-line parameter list: commit the pending head as a signature.
-    if [[ -n "$pending_head" && -z "$sig_new" && "$body" =~ $SIG_CLOSE_RE && "$body" != *";"* && "$body" =~ (\{|=>)[[:space:]]*$ ]]; then
+    if [[ -n "$pending_head" && -z "$sig_new" && "$body" =~ $SIG_CLOSE_RE && ! "$body" =~ $SEMI_END_RE && "$body" =~ (\{|=>)[[:space:]]*$ ]]; then
       sig_new="$pending_head"; pending_head=""
-    elif [[ "$body" == *";"* ]]; then pending_head=""; fi
+    elif [[ "$body" =~ $SEMI_END_RE ]]; then pending_head=""; fi
     [[ -n "$sig_new" ]] && delta+=("$sig_new")
     # A change commits the signatures seen so far; signatures after the last change never join, so a
     # class-sized hunk cannot push the enclosing signature out (no cap needed for correctness).
