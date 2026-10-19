@@ -273,6 +273,20 @@ describe("pr-risk-scan.sh", () => {
     ].join("\n");
     expect(risk(d).status).toBe(1);
   });
+  it("纯展示模块(i18n / 提示文案)里的 upload 字样只列为提示,不判 RISK", () => {
+    const r = risk(diffOf("packages/web/src/lib/i18n.tsx", '  "queue.uploading": "上传中",'));
+    expect(r.status).toBe(0);
+    expect(r.out.split("\n")[0]).toBe("PASS");
+    expect(r.out).toContain("提示[上传](仅展示,不计 RISK): packages/web/src/lib/i18n.tsx");
+  });
+  it("不在展示清单里的 web 文件照旧按内容判 RISK", () => {
+    expect(risk(diffOf("packages/web/src/pages/HubRuleDialog.tsx", "const uploadMode = 'upload';")).status).toBe(1);
+  });
+  it("只改导入行(导入名含上传/台账字样)不按内容判 RISK;真实调用照判", () => {
+    expect(risk(diffOf("packages/app/src/x.ts", 'import { uploadPlain, SyncLedger } from "./y.js";')).status).toBe(0);
+    expect(risk(diffOf("packages/app/src/x.ts", 'export { uploadPlain } from "./y.js";')).status).toBe(0);
+    expect(risk(diffOf("packages/app/src/x.ts", "await uploadPlain(job);")).status).toBe(1);
+  });
   it("签名启发式不把 if/for 当函数", () => {
     const filler = Array.from({ length: 30 }, (_, i) => ` const c${i} = ${i};`);
     const lines = [" function f() {", " const a = 1;", " const b = 2;", "   if (cleanupDone) {", ...filler, "-const n = 1;", "+const n = 2;"];

@@ -48,7 +48,20 @@ SENSITIVE_FILES=(
   packages/cli/src/node-pipeline-commands.ts
 )
 
+# Display-only web modules (dictionary / toast text / progress rows): a content hit there is listed as a
+# note, not a RISK. Their words ("upload", "uploading") are labels, not upload behaviour. Path and
+# sensitive-file rules still apply, and any web file not listed here keeps the full content rules.
+DISPLAY_ONLY=(
+  packages/web/src/lib/i18n.tsx
+  packages/web/src/lib/notification-text.ts
+  packages/web/src/lib/hub-job-steps.ts
+  packages/web/src/components/RollingProgress.tsx
+)
+# Import / re-export lines name modules and types, they do not run anything: never matched.
+IMPORT_RE='^[[:space:]]*(import[[:space:]]|export[[:space:]]+(type[[:space:]]+)?(\*|\{[^}]*\})[[:space:]]+from[[:space:]]|\}[[:space:]]+from[[:space:]])'
+
 reasons=()
+notes=()
 cur=""
 in_hunk=0
 CTX=20            # context lines kept on each side of a change
@@ -106,11 +119,14 @@ flush_hunk() {
     # Every signature in the hunk participates: a change deep inside a second function (or inside a
     # callback that itself has a signature) must still see all enclosing names.
     if (( ${#hit_sigs[@]} )); then hunk="$(printf '%s\n' "${hit_sigs[@]}")"$'\n'"$hunk"; fi
-    local pair label re
+    local pair label re text display=0 f
+    for f in "${DISPLAY_ONLY[@]}"; do [[ "$cur" == "$f" ]] && display=1; done
+    text="$(grep -Ev "$IMPORT_RE" <<< "$hunk" || true)"
     for pair in "上传:$UPLOAD_RE" "清理/删除:$DELETE_RE" "ledger 状态转换:$LEDGER_RE"; do
       label="${pair%%:*}"; re="${pair#*:}"
-      if grep -Eiq "$re" <<< "$hunk"; then
-        reasons+=("内容[$label]: $cur")
+      if grep -Eiq "$re" <<< "$text"; then
+        if (( display )); then notes+=("提示[$label](仅展示,不计 RISK): $cur")
+        else reasons+=("内容[$label]: $cur"); fi
       fi
     done
   fi
@@ -221,6 +237,8 @@ flush_hunk
 if (( ${#reasons[@]} )); then
   echo "RISK"
   printf '%s\n' "${reasons[@]}" | sort -u
+  (( ${#notes[@]} )) && printf '%s\n' "${notes[@]}" | sort -u
   exit 1
 fi
 echo "PASS"
+if (( ${#notes[@]} )); then printf '%s\n' "${notes[@]}" | sort -u; fi
