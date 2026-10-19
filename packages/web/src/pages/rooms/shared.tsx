@@ -5,6 +5,7 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { api, type RoomDTO, type Task, type WorkerDTO } from "../../api/client";
 import type { ConnState } from "../../atoms";
+import { connOf } from "../../lib/conn";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useHubStream, usePolling, errMessage, useToast, type HubStreamHandle } from "../../lib/hooks";
 import { useT } from "../../lib/i18n";
@@ -35,8 +36,12 @@ export function useRoomsData(): RoomsData {
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
   const [hubEnabled, setHubEnabled] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  /** Shown in the list header like the Tasks page, so a failing fetch is not silent. */
-  const [conn, setConn] = useState<ConnState>(null);
+  /**
+   * Shown in the list header like the Tasks page, so a failing fetch is not silent. Rooms and tasks are tracked
+   * apart: the 5 s task poll keeps the time fresh, but must not hide a failing room fetch.
+   */
+  const [fetches, setFetches] = useState<{ rooms: ConnState; tasks: ConnState }>({ rooms: null, tasks: null });
+  const mark = useCallback((k: "rooms" | "tasks", ok: boolean) => setFetches((f) => ({ ...f, [k]: { ok, at: Date.now() } })), []);
 
   const refreshRuns = useCallback(async (): Promise<void> => {
     const { rooms: rs } = await api.getLatestRuns();
@@ -49,9 +54,9 @@ export function useRoomsData(): RoomsData {
       void api.listTasks().then(setTasks).catch(() => {});
       try {
         setRooms(await api.listRooms());
-        setConn({ ok: true, at: Date.now() });
+        mark("rooms", true);
       } catch (e) {
-        setConn({ ok: false, at: Date.now() });
+        mark("rooms", false);
         throw e;
       }
       // Runs are secondary: a failure must not hide the room list, but still marks the stream stale.
@@ -64,13 +69,14 @@ export function useRoomsData(): RoomsData {
   const stream = useHubStream(refresh);
   usePolling(() => void refresh().catch(() => {}), 30_000);
   // The 5 s task poll also refreshes the connection time: room fetches are push-driven and can be minutes apart.
-  usePolling(() => void api.listTasks().then((ts) => { setTasks(ts); setConn({ ok: true, at: Date.now() }); })
-    .catch(() => setConn({ ok: false, at: Date.now() })), 5_000);
+  usePolling(() => void api.listTasks().then((ts) => { setTasks(ts); mark("tasks", true); })
+    .catch(() => mark("tasks", false)), 5_000);
   usePolling(() => void api.listWorkers().then(setWorkers).catch(() => {}), 300_000);
   usePolling(() => void api.getHubStatus().then((s) => setHubEnabled(s.enabled)).catch(() => {}), 300_000);
 
   const taskById = useMemo(() => new Map(tasks.map((x) => [x.id, x])), [tasks]);
   const taskOf = useCallback((r: RoomDTO) => (r.recording?.taskId != null ? taskById.get(r.recording.taskId) : undefined), [taskById]);
+  const conn = useMemo((): ConnState => connOf(fetches.rooms, fetches.tasks), [fetches]);
   const statusOf = useCallback((r: RoomDTO) => roomStatus(r, taskOf(r), runs.get(latestRunKey(r)) ?? null), [taskOf, runs]);
   return { rooms, loaded, conn, workers, hubEnabled, taskOf, statusOf, refresh, stream };
 }
