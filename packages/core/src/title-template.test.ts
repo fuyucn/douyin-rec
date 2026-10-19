@@ -121,7 +121,9 @@ describe("resolveOutputStem", () => {
 
   // #171: anchor names with emoji / full-width symbols / dots must not fail the job.
   it.each([
-    ["emoji", "某某🌟喵_2026-09-12_14-30-05", "某某-喵_2026-09-12"],
+    ["emoji", "某某🌟喵_2026-09-12_14-30-05", "某某喵_2026-09-12"],
+    ["emoji with variation selector", "某某❤️喵_2026-09-12_14-30-05", "某某喵_2026-09-12"],
+    ["emoji with skin tone", "某某👍🏽喵_2026-09-12_14-30-05", "某某喵_2026-09-12"],
     ["full-width punctuation", "某某「小号」！_2026-09-12_14-30-05", "某某-小号_2026-09-12"],
     ["dots", "a.b.c_2026-09-12_14-30-05", "a-b-c_2026-09-12"],
     ["leading symbol", "🌟某某_2026-09-12_14-30-05", "某某_2026-09-12"],
@@ -141,6 +143,12 @@ describe("sanitizeStem", () => {
   });
   it("全是非法字符 → 空串", () => {
     expect(sanitizeStem("🌟🌟")).toBe("");
+  });
+  it("emoji 被忽略,不留下分隔符", () => {
+    expect(sanitizeStem("某某🌟喵")).toBe("某某喵");
+    expect(sanitizeStem("某某❤️喵")).toBe("某某喵");
+    expect(sanitizeStem("👨‍👩‍👧某某")).toBe("某某");
+    expect(sanitizeStem("🇨🇳某某")).toBe("某某");
   });
   it("名字全是非法字符:不留前导下划线", () => {
     expect(resolveOutputStem({ sessionBase: "🌟🌟_2026-09-12_14-30-05", timeZone: "Asia/Shanghai" })).toBe("2026-09-12");
