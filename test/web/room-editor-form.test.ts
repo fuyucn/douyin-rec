@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { factsOf, formFromRoom, payloadFromForm, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { factsOf, formFromRoom, payloadFromForm, ruleFactsOf, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { deriveConstraints, settledMethod } from "../../packages/web/src/lib/room-form-rules.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
 const ctx: RoomContext = { hasRecording: true, hasRule: true, danmuAvailable: true, cookieReady: true, cookieForStream: false };
@@ -27,6 +28,14 @@ describe("task-only room save judges rolling as if the rule exists (#284)", () =
     if (!r.ok) return;
     expect(r.payload.processing?.pipeline?.upload?.mode).toBe("upload");
     expect(r.payload.processing?.pipeline?.steps?.burnDanmu).toBe(true);
+  });
+  it("the editor's settled method agrees with what save stores (no ROLLING offered then rewritten)", () => {
+    const f = { ...taskOnly(), uploadOn: true, method: "rolling" as const, burnDanmu: true, workers: ["local"] };
+    const noRule = { ...ctx, hasRule: false };
+    expect(settledMethod(ruleFactsOf(f, noRule))).toBe("after");
+    expect(deriveConstraints(ruleFactsOf(f, noRule)).rolling.locked).toBe(true);
+    // Only the VERSIONS visibility keeps the real (display) rule presence.
+    expect(factsOf(f, noRule).hasRule).toBe(false);
   });
 });
 

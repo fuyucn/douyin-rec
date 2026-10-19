@@ -23,7 +23,7 @@ import { RuleSwitch, ToggleRow } from "../components/room-form/parts";
 import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
-import { factsOf, formFromRoom, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
+import { factsOf, formFromRoom, ruleFactsOf, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
 import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
 import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
@@ -96,13 +96,13 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
     // Douyin streams anonymously; its cookie only serves danmu. Other platforms stream with it.
     cookieForStream: room.platform !== "douyin",
   };
-  const facts = factsOf(form, ctx);
+  const facts = ruleFactsOf(form, ctx);
   const c = deriveConstraints(facts);
   // Re-settle the upload method after every change: turning burn on / adding nodes can invalidate it.
   const update = (patch: Partial<RoomForm>): void =>
     setForm((f) => {
       const next = { ...f, ...patch };
-      return { ...next, method: settledMethod(factsOf(next, ctx)) };
+      return { ...next, method: settledMethod(ruleFactsOf(next, ctx)) };
     });
 
   const flow = flowSummary(facts, !!room.recording && room.recording.enabled);
@@ -217,7 +217,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                   </label>
                 )}
 
-                {burnVersionsApply(facts) && (
+                {burnVersionsApply(factsOf(form, ctx)) && (
                   <div>
                     <span className="field-label">{t("room.editor.versions")}</span>
                     <div className="flex flex-wrap gap-1.5">

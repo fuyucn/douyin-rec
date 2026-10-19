@@ -51,4 +51,10 @@ describe("RoomEditor VERSIONS 渲染条件(#284 源码守护)", () => {
     const label = 't("room.editor.versions")';
     expect(src.split(label).length - 1).toBe(1);
   });
+
+  it("constraints / settled method / flow use ruleFactsOf, so display agrees with save", () => {
+    expect(src).toContain("settledMethod(ruleFactsOf(");
+    expect(src).toContain("const facts = ruleFactsOf(");
+    expect(src).not.toMatch(/(settledMethod|deriveConstraints|flowSummary)\(factsOf\(/);
+  });
 });

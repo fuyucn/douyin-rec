@@ -99,6 +99,16 @@ export function factsOf(f: RoomForm, ctx: RoomContext): FormFacts {
   };
 }
 
+/**
+ * Facts for every decision that save will also make (locks, settled method, flow, stored values).
+ * Saving always upserts the hub rule, so these assume the rule exists even for a task-only room;
+ * display and save must share this one view or the editor would offer choices save then rewrites.
+ * Only the VERSIONS visibility reads the real `ctx.hasRule` (via `factsOf`).
+ */
+export function ruleFactsOf(f: RoomForm, ctx: RoomContext): FormFacts {
+  return factsOf(f, { ...ctx, hasRule: true });
+}
+
 export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; error: "schedule" };
 
 /**
@@ -109,10 +119,7 @@ export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; er
 export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   const sched = splitSchedule(f.schedule);
   if (!sched) return { ok: false, error: "schedule" };
-  // Saving always upserts the hub rule through the rooms API, so legality (e.g. rolling vs burn)
-  // is judged as if the rule already exists, matching the backend. `ctx.hasRule` only drives display;
-  // using it here would let a task-only room save `rolling` together with burn on.
-  const stored = storedFromForm(factsOf(f, { ...ctx, hasRule: true }));
+  const stored = storedFromForm(ruleFactsOf(f, ctx));
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
   const recording: RoomPayload["recording"] = ctx.hasRecording
     ? {
