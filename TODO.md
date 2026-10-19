@@ -463,6 +463,9 @@
 
 ## 已完成
 
+- [x] **T-75 PR 门禁与状态机支持分步实现的票(Part of #N)（issue [#253](https://github.com/fuyucn/douyin-rec/issues/253)）**
+  — 2026-10-18 完成。PR [#255](https://github.com/fuyucn/douyin-rec/pull/255) 已合并(仅脚本/文档/测试,两轮独立审查),issue 已 close。门禁接受 `Part of #N`;`in-review → in-progress` 须写原因;review 合并口径与指标脚本同步。T-74(#53)后续步骤改用此写法。
+
 - [x] **T-60 会话 sidecar 写权威起止时间戳:远端隐藏命令按 UTC 运行导致跨天错日（issue [#87](https://github.com/fuyucn/douyin-rec/issues/87)）**
   — 2026-10-18 完成。PR [#179](https://github.com/fuyucn/douyin-rec/pull/179) 已合并并随 0.0.174 部署；worker 主机为 UTC,而无分段会话的 `startMs` 全部与文件名时间在 Asia/Shanghai 对齐(毫秒级),旧边车回退文件名有回归用例。issue #87 已 close。
 - [x] **T-46 dev 多节点 e2e 环境（issue [#82](https://github.com/fuyucn/douyin-rec/issues/82)，P0+P1+P4）**
