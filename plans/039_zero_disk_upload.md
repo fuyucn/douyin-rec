@@ -548,11 +548,11 @@ node dist/... record --room https://live.douyin.com/<房间> --quality origin --
 关键点：续跑按 state 里**已确认最大索引**续号，不重用索引；服务端回读分 P 数与 cid 均连续。
 
 **孤儿 spool（真 bug，本轮跑出来）**：kill 在段中途时该段从未进 state，重启只新建文件，
-旧 spool 永远没人删（实测 `live-pump-1792359099274-2.ts`，1.07MB）。修法：CLI 在启动 pump
+旧 spool 永远没人删（实测 `live-pump-1792000000-2.ts`，1.07MB）。修法：CLI 在启动 pump
 前读 state 并清扫；放在 app 层，因为 processors 有静态守护禁止列目录。删除条件极窄：
 本模块命名 + 不在 state + mtime 早于 10 分钟宽限 + unlink 成功；任何异常 best effort。
 
-真实 CLI 验证日志：`清理上次中断遗留的孤儿 spool: live-pump-1792000000001-2.ts`，
+真实 CLI 验证日志：`清理上次中断遗留的孤儿 spool: live-pump-1792000000-2.ts`，
 state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用/新鲜/非本模块命名/宽限边界/目录缺失。
 
 ## B15. 真 0 落盘 + 分 P 时长跟随 segment（2026-10-18，commits `2941b12`/`a71bff4`）
