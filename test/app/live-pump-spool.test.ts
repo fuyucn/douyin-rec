@@ -24,19 +24,19 @@ describe("sweepOrphanSpools", () => {
     writeFileSync(join(dir, "live-pump-1000001-2.ts"), "orphan");
     age("live-pump-1000001-2.ts", ORPHAN_SPOOL_GRACE_MS + 60_000);
 
-    writeFileSync(join(dir, "live-pump-1700000000001-3.ts"), "fresh"); // 另一进程可能正在写
+    writeFileSync(join(dir, "live-pump-1000002-3.ts"), "fresh"); // 另一进程可能正在写
     writeFileSync(join(dir, "someone-else.ts"), "x");
     age("someone-else.ts", ORPHAN_SPOOL_GRACE_MS + 60_000);
 
-    writeFileSync(join(dir, "live-pump-1700000000002-4.ts"), "known");
-    age("live-pump-1700000000002-4.ts", ORPHAN_SPOOL_GRACE_MS + 60_000);
-    const knownPath = join(dir, "live-pump-1700000000002-4.ts");
+    writeFileSync(join(dir, "live-pump-1000004-4.ts"), "known");
+    age("live-pump-1000004-4.ts", ORPHAN_SPOOL_GRACE_MS + 60_000);
+    const knownPath = join(dir, "live-pump-1000004-4.ts");
 
     const removed = sweepOrphanSpools({ spoolDir: dir, knownSpoolPaths: [knownPath] });
 
     expect(removed).toEqual(["live-pump-1000001-2.ts"]);
     expect(existsSync(join(dir, "live-pump-1000001-2.ts"))).toBe(false);
-    expect(existsSync(join(dir, "live-pump-1700000000001-3.ts"))).toBe(true);
+    expect(existsSync(join(dir, "live-pump-1000002-3.ts"))).toBe(true);
     expect(existsSync(join(dir, "someone-else.ts"))).toBe(true);
     expect(existsSync(knownPath)).toBe(true);
   });

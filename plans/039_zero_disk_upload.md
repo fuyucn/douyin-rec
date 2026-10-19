@@ -391,7 +391,7 @@ record_segments loop:
    **回归测试**：`上传总量 == spool 实际字节`（变异验证：把那行校验加回去，测试立刻复现 `3072 vs 3600`）。
 2. **`maxMs` 从未下发**：`pumpSegment` 收了 `maxMs` 却没传给 `runSegment`，
    「谁先到算一 P」退化成只有字节兜底。
-3. **ffprobe 自检**：`BV1JQnT6VEQP` 被 B站拒成 `62002`，根因是 matroska 缺 trailer
+3. **ffprobe 自检**：`BV1xx` 被 B站拒成 `62002`，根因是 matroska 缺 trailer
    读不出时长。T-53 早有「读不出即拒投」，当时漏了。
 4. **回退路径只写在注释里**：四处文档承诺「回退文件上传」，代码没有。失败段的字节
    白躺盘上。已实现 `reuploadSpoolFile`。
@@ -439,7 +439,7 @@ create/append 崩溃恢复、标题歧义、网络不可达、WAL 写失败。
 
 ## B9. 真实单稿多分 P 验证（2026-10-18，房间 491554018246）
 
-- 一次在线跑出**同一稿件 5 个分 P**：`BV1knnL6iEyT`（aid `117463530342138`，私稿）。
+- 一次在线跑出**同一稿件 5 个分 P**：`BV1xx`（aid `117463530342138`，私稿）。
 - 服务端 `x/vupre/web/archive/view` 回读 `partCount=5`，5 个 cid 各不相同；P1 建稿、后续逐个 `edit` 追加。
 - 每段 2 块、约 16MB、时长 41~47s；`usedFileFallback=false`、`sessionLeaked=false`、`backpressured=false`。
 - 确认过的 spool 全部删除；残余孤儿 spool 已人工清理。
@@ -464,8 +464,8 @@ create/append 崩溃恢复、标题歧义、网络不可达、WAL 写失败。
 
 | 场景 | 命令 | 结果 |
 |---|---|---|
-| 8 段字节结算 | `_live-pump --size 25MiB --segments 8` | 同一稿件 `BV1QcnL6JE1h`，服务端回读 **8 个分 P**（cid 各不同），8/8 无回退、无泄漏、无背压，spool 逐段删除 |
-| 任务链路 + 时长结算 | `record --stream-upload 1 --stream-upload-size 25MiB --stream-upload-sec 45` | 稿件 `BV1Rdn56XEKm`，每段 2 块 ~17MiB / 45s —— **时长上限先到**即结算（字节未到 cap），与设计一致 |
+| 8 段字节结算 | `_live-pump --size 25MiB --segments 8` | 同一稿件 `BV1xx`，服务端回读 **8 个分 P**（cid 各不同），8/8 无回退、无泄漏、无背压，spool 逐段删除 |
+| 任务链路 + 时长结算 | `record --stream-upload 1 --stream-upload-size 25MiB --stream-upload-sec 45` | 稿件 `BV1xx`，每段 2 块 ~17MiB / 45s —— **时长上限先到**即结算（字节未到 cap），与设计一致 |
 
 第二行是对 `buildRecordArgs` 实际下发 argv 的直接验证（同一参数集）。
 
@@ -481,7 +481,7 @@ create/append 崩溃恢复、标题歧义、网络不可达、WAL 写失败。
 弹幕 xml 还在增长，却再也不录下一段，也没有任何报错。现在每次取流有 30s 上限，超时与抛错都按
 一次失败进入退避（5s/10s/20s…），不再冻结整个 pump。
 
-**真实验证（房间 64442011833，私稿 `BV15Zn56pEVw`）**：
+**真实验证（房间 64442011833，私稿 `BV1xx`）**：
 
 | 项 | 结果 |
 |---|---|
@@ -530,14 +530,14 @@ node dist/... record --room https://live.douyin.com/64442011833 --quality origin
 **修法**：不 unref。并补一个**真子进程**回归（esbuild 打单文件后 spawn），因为 vitest
 自己持有句柄，测不出这个 bug。变异验证：临时加回 unref → 用例失败；移除 → 通过。
 
-**实测**：修后同房间跑通 1 段（私稿 `BV1ABn56KEX4`，8.2MiB / 22.4s，无回退，spool 已清）。
+**实测**：修后同房间跑通 1 段（私稿 `BV1xx`，8.2MiB / 22.4s，无回退，spool 已清）。
 
 **教训**：给「可能永不 settle 的 Promise」加超时兜底时，**兜底定时器本身必须 ref**；
 否则兜底机制会在最需要它的时候把事件循环放空。
 
 ## B14. 重启续录验证 + 孤儿 spool（2026-10-18，commit `793e433`）
 
-**重启续录（真实）**：私稿 `BV1wrn56PE8G`，同一 spool 目录连续三次启动：
+**重启续录（真实）**：私稿 `BV1xx`，同一 spool 目录连续三次启动：
 
 | 运行 | 结果 |
 |---|---|
@@ -603,9 +603,9 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 
 ```
 段1 第 1 块完成,累计 1.0MiB
-段2 已确认到稿件 BV1zd0000001
+段2 已确认到稿件 BV1xx
 段2 结束: 1 块 / 1.0MiB,无本地 spool(真 0 落盘),ffmpeg exit=0
-{ ok: true, bvid: "BV1zd0000001", segments: 2, calls: ["create","append"], videoFiles: [] }
+{ ok: true, bvid: "BV1xx", segments: 2, calls: ["create","append"], videoFiles: [] }
 ```
 
 即：2 个分 P 进**同一稿件**、`create` + `append` 各一次、**盘上视频文件 0 个**。
@@ -680,10 +680,10 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 
 | 阶段 | 结果 |
 |---|---|
-| 首次运行 | 10 个分 P 确认进稿件 `BV1odnj6hEPk`，日志每段写「无本地 spool(真 0 落盘)」 |
+| 首次运行 | 10 个分 P 确认进稿件 `BV1xx`，日志每段写「无本地 spool(真 0 落盘)」 |
 | SIGKILL 中断 | 段中途被杀 |
 | 重启续录 | `resumed state (10 parts)`，又 6 个分 P 追加到**同一稿件** |
-| 服务端回读 | `BV1odnj6hEPk`，**16 个分 P**、16 个不同 cid、duration 356s、state -6（审核中） |
+| 服务端回读 | `BV1xx`，**16 个分 P**、16 个不同 cid、duration 356s、state -6（审核中） |
 | 磁盘 | 目录里只有 `state.json` + `xml`，**视频文件 0 个** |
 
 即：真 0 落盘 + 中断续传 + 同一稿件，全部在真实链路上成立。
@@ -706,7 +706,7 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 收尾处补一次 `signal.aborted` 归类（否则 `sealedBy` 恒为 `eof`，守卫永不触发）；
 ② 末段 `sealedBy=abort` 且已有分 P 入稿 → 按成功收尾（该段仍带 `uploadError` 上报，不隐瞒）。
 
-在线验证（房间 27471901912，真 0 落盘）：SIGTERM 后 `ok:true` + `台账已记录: BV1Stnj6DE9r`，
+在线验证（房间 27471901912，真 0 落盘）：SIGTERM 后 `ok:true` + `台账已记录: BV1xx`，
 服务端回读 4 个分 P / 152s / 4 个不同 cid。修前同场景 `ok:false` 且台账不写。
 
 ## B23. 多房间在线并发 + 21186 限流 + 退避留痕（2026-10-18，commit `00935811`）
@@ -715,8 +715,8 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 
 | 房间 | 稿件 | 分 P | 时长 | cid | 盘上视频文件 |
 |---|---|---|---|---|---|
-| 27471901912 | `BV1tenj62Ec5` | 3 | 119s | 3 个不同 | 0 |
-| 63171491268 | `BV1Tenj62EaM` | 3 | 100s | 3 个不同 | 0 |
+| 27471901912 | `BV1xx` | 3 | 119s | 3 个不同 | 0 |
+| 63171491268 | `BV1xx` | 3 | 100s | 3 个不同 | 0 |
 
 两个不同稿件、互不串稿、并发下仍零落盘。
 
@@ -734,7 +734,7 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 ## B24. 同房间双 0 落盘任务 guard（2026-10-18，commit `56461874`）
 
 **实测确认的风险**：同一房间被两个任务各录一次（state 文件按 `outDir` 隔离、互不知情），
-产出**两个内容重复的稿件**（`BV1pwnj6BEFM` / `BV1Cwnj6BELW`）。B 站没有删稿 API，
+产出**两个内容重复的稿件**（`BV1xx` / `BV1xx`）。B 站没有删稿 API，
 这两个稿件用户永远撤不下来。
 
 0 落盘是「每个启动的进程各建一个稿件」的模型，所以这不是罕见竞态，而是**配置写错时必然发生**。
@@ -811,13 +811,13 @@ Node 对无人处理的 SIGUSR2 的默认动作是**立即终止进程**（实�
 
 | 验证项 | 结果 |
 |---|---|
-| 真 0 落盘上传（`--stream-upload-spool none`） | 稿件 `BV1xAnn6WEZN`，9.9MiB / 1 块，`无本地 spool(真 0 落盘)`；盘上**只有 state.json + 弹幕 xml，零视频文件** |
-| 多分 P 续同一稿件 | 容器手工跑 `_live-pump` → `BV1xAnn6WE6S`，20.0MiB / 2 块 / 119s，`usedFileFallback=false` / `backpressured=false` / `sessionLeaked=false`，spool 已删 |
+| 真 0 落盘上传（`--stream-upload-spool none`） | 稿件 `BV1xx`，9.9MiB / 1 块，`无本地 spool(真 0 落盘)`；盘上**只有 state.json + 弹幕 xml，零视频文件** |
+| 多分 P 续同一稿件 | 容器手工跑 `_live-pump` → `BV1xx`，20.0MiB / 2 块 / 119s，`usedFileFallback=false` / `backpressured=false` / `sessionLeaked=false`，spool 已删 |
 | serve 真实 spawn 的参数 | `[rec] 流式直传(0 落盘)已开启:… sizeCap=… sec=90(--segment) tid=21`（证明任务开关 → argv 接线通） |
 | 同房间 guard（B24）在真实 serve 下 | `拒绝启动 id=5:同一房间已有 0 落盘任务 id=4(zdverify4)在录,同时录会产出两个重复稿件且无法删除` |
 | 停止（SIGTERM） | `收到 SIGTERM,停止录制并中止当前分 P` |
 | **窗口结束排空（SIGUSR2，B25 的 P1）** | 分 P 正在传时 `kill -USR2 <pid>` → 进程 **ALIVE**（未被杀），继续把当前段传完。**对照**：无 handler 时 Node 默认动作当场杀进程（实测 exit 159，见 B25 真子进程用例） |
-| 台账回流 | `[stream-upload] 台账已记录: BV1xAnn6WEZN` |
+| 台账回流 | `[stream-upload] 台账已记录: BV1xx` |
 
 **验证中发现并修掉的缺陷**：排空**不打日志**。方案 4 的实现里 SIGUSR2 只 abort 一个 controller，pump 在循环顶部读到就 break —— 排空后往往还要等当前分 P 传完或 preupload 退避（实测可达数分钟），而「没有新分 P 出现」与「卡死」在日志之外**完全无法区分**。
 已补 `[live-pump] 窗口结束已排空:不再开录下一场,当前分 P 传完后收尾`（只打一次），并加断言。
