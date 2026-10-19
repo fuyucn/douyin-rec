@@ -45,3 +45,13 @@ describe("describeEvent (#53 N6)", () => {
       .toBe('notif.evError{"message":"m","stage":"s"}');
   });
 });
+
+describe("describeEvent: deliberate changes for events without ctx (#53 N6 review)", () => {
+  it("record events with an empty anchor fall back to the room instead of rendering blank", () => {
+    expect(describeEvent(ev({ kind: "recordStart", anchor: "", room: "r1", quality: "q" }), t)!.message).toBe('notif.evLive{"anchor":"r1"}');
+  });
+  it("upload done from an enriched event shows the date too (anchor · date · BV)", () => {
+    expect(describeEvent(ev({ kind: "uploadDone", bv: "BV1x", url: "u", anchor: "A", date: "2026-10-16" }), t)!.message)
+      .toBe('notif.evUpload{"bv":"A · 2026-10-16 · BV1x"}');
+  });
+});

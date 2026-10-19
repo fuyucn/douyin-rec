@@ -133,8 +133,9 @@ const CTX_FIELDS = {
   streamKey: true, node: true, step: true, result: true, next: true,
 } as const satisfies Record<keyof NotifyContext, true>;
 
-const NAME_SOURCES: readonly DisplayNameSource[] = ["task", "live", "cached", "ledger", "session", "fallback"];
-const RESULTS: readonly NotifyResult[] = ["ok", "warn", "error"];
+// Allowed enum values, exhaustive at compile time (a new member must be listed here to cross a process).
+const NAME_SOURCES = { task: true, live: true, cached: true, ledger: true, session: true, fallback: true } as const satisfies Record<DisplayNameSource, true>;
+const RESULTS = { ok: true, warn: true, error: true } as const satisfies Record<NotifyResult, true>;
 
 /**
  * Validate a context received over a process boundary (the recorder alert line): keep only known keys
@@ -148,8 +149,8 @@ export function sanitizeNotifyContext(raw: unknown): NotifyContext | undefined {
   for (const k of Object.keys(CTX_FIELDS) as (keyof NotifyContext)[]) {
     const v = src[k];
     if (typeof v !== "string" || v.length === 0) continue;
-    if (k === "nameSource" && !(NAME_SOURCES as readonly string[]).includes(v)) continue;
-    if (k === "result" && !(RESULTS as readonly string[]).includes(v)) continue;
+    if (k === "nameSource" && !Object.hasOwn(NAME_SOURCES, v)) continue;
+    if (k === "result" && !Object.hasOwn(RESULTS, v)) continue;
     out[k] = v;
   }
   return Object.keys(out).length ? (out as NotifyContext) : undefined;
