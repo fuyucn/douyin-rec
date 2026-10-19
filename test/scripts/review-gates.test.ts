@@ -203,6 +203,25 @@ describe("pr-risk-scan.sh", () => {
     ].join("\n");
     expect(risk(d).status).toBe(0);
   });
+  it("多行调用(`rmSync(` ... `);`)不当作签名:改动在别的函数里 → PASS", () => {
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      "function a() {",
+      "  const n = 1;",
+      "-  const m = 1;",
+      "+  const m = 2;",
+      ...Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`),
+      "  rmSync(",
+      "    p,",
+      "  );",
+      "}",
+      "",
+    ].join("\n");
+    expect(risk(d).status).toBe(0);
+  });
   it("签名启发式不把 if/for 当函数", () => {
     const filler = Array.from({ length: 30 }, (_, i) => ` const c${i} = ${i};`);
     const lines = [" function f() {", " const a = 1;", " const b = 2;", "   if (cleanupDone) {", ...filler, "-const n = 1;", "+const n = 2;"];
@@ -352,6 +371,22 @@ describe("issue-guard.py --diff", () => {
     const r = guard(d);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("k.json:3: [登录凭证键值]");
+  });
+  it("name/value 都在上下文里、只在它们下面插入无关行 → 不拦(旧内容不卡红)", () => {
+    const body = (extra: string) => `[\n  {\n    "name": "SESSDATA",\n    "value": "OLDVALUEa1b2c3d4%2C17900",\n${extra}  }\n]\n`; // issue-guard: allow
+    const { d, g } = repo((dir) => writeFileSync(join(dir, "notes.md"), body(""))); // issue-guard: allow
+    writeFileSync(join(d, "notes.md"), body('    "note": "unrelated",\n'));
+    g("commit", "-qam", "c");
+    expect(guard(d).status).toBe(0);
+  });
+  it("夹具里带 allow 标记的旧 value 行不会作为上下文被重新扫描", () => {
+    // Old allow-marked value line sits above a newly added name line (value-then-name layout).
+    // The mark sits inside the value string so the line still matches the value-then-name rule.
+    const old = '  "value": "OLDVALUEa1b2c3d4%2C17900 issue-guard: allow",\n'; // issue-guard: allow
+    const { d, g } = repo((dir) => { mkdirSync(join(dir, "test")); writeFileSync(join(dir, "test", "f.test.ts"), old); }); // issue-guard: allow
+    appendFileSync(join(d, "test", "f.test.ts"), '  "name": "SESSDATA",\n'); // issue-guard: allow
+    g("commit", "-qam", "c");
+    expect(guard(d).status).toBe(0);
   });
   it("value 在 name 之前的形态也拦", () => {
     const { d, g } = repo();

@@ -56,18 +56,18 @@ HEAD_KEEP=3       # leading hunk lines always matched (the enclosing function si
 # Signature-like lines (function / method / class / arrow const / shell function). The latest one seen
 # in the hunk is matched with every change, so a doc comment above the function or a second function
 # merged into the same hunk cannot push the enclosing signature out of the window.
-# One-line forms: function / class / method / const arrow. Property-arrow and multi-line forms are
-# handled by SIG_HEAD_RE below (an `name: async (x) => {` property, or a signature whose parameters
-# span several lines and which therefore ends on a bare `(`).
+# One-line forms: function / class / method / const arrow. Property arrows are SIG_PROP_RE below;
+# signatures whose parameters span several lines are SIG_HEAD_RE (head) + SIG_CLOSE (closing line).
 SIG_RE='^[[:space:]]*((export|async|public|private|protected|static|readonly|default|override)[[:space:]]+)*(function[[:space:]*]|class[[:space:]]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*(<[^>]*>)?\(.*\)[^;]*\{[[:space:]]*$|(const|let)[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=.*=>)|^[A-Za-z_][A-Za-z0-9_-]*[[:space:]]*\(\)[[:space:]]*\{'
 # Object / class property holding a function: `handler: async (req) => {`, `run = (x) => {`,
 # `onEnd: function () {`. The name is what the content rules look for, so the line must be kept.
 SIG_PROP_RE='^[[:space:]]*([A-Za-z_$][A-Za-z0-9_$]*|"[^"]+"|'"'"'[^'"'"']+'"'"'|\[[^]]+\])[[:space:]]*[:=][[:space:]]*(async[[:space:]]+)?(\([^)]*\)[[:space:]]*=>|function[[:space:]*]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=>)'
-# A signature whose parameters span lines ends on `(`. Calls end on `)` / `;` and are not matched, and
-# a line ending in `(` only joins the context when it also carries a name (bare `(` is not enough).
+# Head of a multi-line signature: a name followed by an unclosed `(`. A multi-line call looks the same,
+# so a head is only kept once a closing line `) {` / `): T {` / `) =>` shows up before any `;`.
 SIG_HEAD_RE='^[[:space:]]*((export|async|public|private|protected|static|readonly|default|override)[[:space:]]+)*(function[[:space:]*][A-Za-z_$]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*(<[^>]*>)?\([^)]*$|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*[:=][[:space:]]*(async[[:space:]]+)?\([^)]*$)'
+SIG_CLOSE_RE='^[[:space:]]*(\}[^)]*)?\)'
 NOT_SIG_RE='^[[:space:]]*(if|for|while|switch|catch|else|return|do|await|new)([[:space:]]|\(|$)'
-last_sig=""
+pending_head=""   # unclosed multi-line head awaiting its closing line
 sigs=()           # every signature-like line seen in the current hunk (deduped, capped)
 head_left=0
 old_left=0
@@ -140,7 +140,7 @@ start_hunk() {
   in_hunk=1
   hunk="${1#@@*@@}"$'\n'
   head_left=$HEAD_KEEP
-  last_sig=""
+  pending_head=""
   sigs=()
   old_left=1; new_left=1
   if [[ "$1" =~ ^@@\ -[0-9]+(,([0-9]+))?\ \+[0-9]+(,([0-9]+))?\ @@ ]]; then
@@ -167,11 +167,19 @@ while IFS= read -r line; do
       "\\"*) continue ;;  # "\ No newline at end of file"
     esac
     body="${line:1}"
-    if [[ ! "$body" =~ $NOT_SIG_RE ]] && { [[ "$body" =~ $SIG_RE ]] || [[ "$body" =~ $SIG_PROP_RE ]] || [[ "$body" =~ $SIG_HEAD_RE ]]; }; then
-      last_sig="$body"
+    sig_new=""
+    if [[ ! "$body" =~ $NOT_SIG_RE ]]; then
+      if [[ "$body" =~ $SIG_RE || "$body" =~ $SIG_PROP_RE ]]; then sig_new="$body"; pending_head=""
+      elif [[ "$body" =~ $SIG_HEAD_RE ]]; then pending_head="$body"; fi
+    fi
+    # Closing line of a multi-line parameter list: commit the pending head as a signature.
+    if [[ -n "$pending_head" && -z "$sig_new" && "$body" =~ $SIG_CLOSE_RE && "$body" != *";"* && "$body" =~ (\{|=>)[[:space:]]*$ ]]; then
+      sig_new="$pending_head"; pending_head=""
+    elif [[ "$body" == *";"* ]]; then pending_head=""; fi
+    if [[ -n "$sig_new" ]]; then
       sig_seen=0
-      for sig in ${sigs[@]+"${sigs[@]}"}; do [[ "$sig" == "$body" ]] && { sig_seen=1; break; }; done
-      (( ! sig_seen && ${#sigs[@]} < 20 )) && sigs+=("$body")
+      for sig in ${sigs[@]+"${sigs[@]}"}; do [[ "$sig" == "$sig_new" ]] && { sig_seen=1; break; }; done
+      (( ! sig_seen && ${#sigs[@]} < 20 )) && sigs+=("$sig_new")
     fi
     if (( head_left > 0 )); then
       # With --function-context the hunk opens on the enclosing function's signature: always match it.

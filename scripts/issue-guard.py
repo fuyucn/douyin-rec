@@ -6,7 +6,8 @@
     gh issue view 12 --json body -q .body | python3 scripts/issue-guard.py -
     python3 scripts/issue-guard.py --diff origin/feat/hub-optimization   # 只扫 PR 新增行(CI 用)
 
---diff <base> 模式:对 `git diff -U0 <base>...HEAD` 只扫**新增行**(历史内容不会把 CI 卡红)。
+--diff <base> 模式:对 `git diff -U3 <base>...HEAD` 只扫**新增行**(历史内容不会把 CI 卡红;新增块上方 3 行未改动
+上下文只用来拼接跨行凭证,命中必须落到新增行上)。
 规则与上面一致,额外四条约定(只为让源码里的正常引用不误报,隐私向的规则不放松):
   - 源码类文件(.ts/.tsx/.mjs/.js/.py/.sh/.yml/.yaml)的新增行不套「文件名」「凭证类」
     「主机名」「streamKey」四条语义词规则(代码和测试夹具里写 foo.ts / cookie / vps2 /
@@ -72,11 +73,17 @@ MULTILINE_RULES: list[tuple[str, str, str]] = [
 ]
 
 
-def scan_block(text: str, source: str, first_line: int) -> list[str]:
-    """Apply MULTILINE_RULES to a block of consecutive lines starting at first_line."""
+def scan_block(text: str, source: str, first_line: int, added_from: int = 0) -> list[str]:
+    """Apply MULTILINE_RULES to a block of consecutive lines starting at first_line.
+
+    `added_from` is the character offset where the added lines begin: leading context lines may help a
+    match, but a match that ends inside the context alone is old content and must not be reported.
+    """
     hits: list[str] = []
     for name, pattern, why in MULTILINE_RULES:
         for match in re.finditer(pattern, text):
+            if match.end() <= added_from:
+                continue
             lineno = first_line + text.count("\n", 0, match.start())
             hits.append(f"{source}:{lineno}: [{name}] {why} -> {' '.join(match.group(0).split())!r}")
     return hits
@@ -129,6 +136,11 @@ def added_lines(base: str) -> list[tuple[str, int, str, list[str]]]:
             elif raw.startswith("-"):
                 continue  # removed lines never exist in the new file
             elif raw.startswith(" "):
+                # An allow-marked fixture line must not come back as context and be scanned again.
+                if ALLOW_MARK in raw and is_fixture(path):
+                    context = []
+                    lineno += 1
+                    continue
                 context.append(raw[1:])
                 if len(context) > CONTEXT_LINES:
                     context.pop(0)
@@ -164,7 +176,8 @@ def scan_diff(base: str) -> tuple[list[str], list[str]]:
         if block:
             # The block's reported first line must line up with the context that precedes it, so a
             # match landing on a context line still prints the right line number.
-            hits.extend(scan_block("\n".join([*block_ctx, *block]), block_path, block_start - len(block_ctx)))
+            added_from = sum(len(c) + 1 for c in block_ctx)
+            hits.extend(scan_block("\n".join([*block_ctx, *block]), block_path, block_start - len(block_ctx), added_from))
             block.clear()
             block_ctx.clear()
 
