@@ -74,6 +74,13 @@ describe("reinforce-metrics.py --loop", () => {
     };
     expect(run(["--days", "7"], fx).out).toMatch(/0\/1\/0\/0/);
   });
+  it("分步 PR(Part of #N,#253)同样关联 issue:其 rework 标记计入打回轮数", () => {
+    const fx = {
+      prs: [{ number: 6, title: "x", body: "Part of #31", mergedAt: hoursAgo(5), reviews: [], comments: [] }],
+      issues: [{ number: 31, title: "t", state: "OPEN", createdAt: hoursAgo(9), labels: [], comments: [{ body: marker("rework-1", hoursAgo(6)) }] }],
+    };
+    expect(run(["--days", "7"], fx).out).toMatch(/0\/1\/0\/0/);
+  });
   it("台账拒绝:有日志则计数,无日志跳过并标注", () => {
     const dir = mkdtempSync(join(tmpdir(), "ledger-"));
     const log = join(dir, "l.log");

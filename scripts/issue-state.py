@@ -129,7 +129,9 @@ def main(argv: list[str]) -> int:
         if err:
             print(err, file=sys.stderr)
             return 1
-        print("OK")
+        # Legal, but say so when executing it will also need a reason file.
+        needs = a.check[1] in table["reasonRequired"] or [frm, a.check[1]] in table.get("reasonRequiredTransitions", [])
+        print("OK(执行时须带 --reason-file)" if needs else "OK")
         return 0
 
     if a.ensure_labels:

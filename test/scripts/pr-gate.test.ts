@@ -75,6 +75,11 @@ describe("pr-gate.py", () => {
     expect(none.status).toBe(1);
     expect(none.lines.join("\n")).toContain("Part of #N");
   });
+  it("Part of 只认行首、大小写不敏感;注释里的不算", () => {
+    expect(gate(GOOD.replace("Fixes #78\n", "part of #78\n")).status).toBe(0);
+    expect(gate(GOOD.replace("Fixes #78\n", "see Part of #78\n")).status).toBe(1);
+    expect(gate(GOOD.replace("Fixes #78\n", "<!-- Part of #78 -->\n")).status).toBe(1);
+  });
   it("缺 Fixes → FAIL", () => {
     const r = gate(GOOD.replace("Fixes #78\n", ""));
     expect(r.status).toBe(1);

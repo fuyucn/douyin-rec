@@ -99,6 +99,9 @@ describe("迁移执行", () => {
   });
   it("分步票(#253):in-review → in-progress 合法但必须带原因;accept → in-progress 仍不需要", () => {
     expect(check("in-review", "in-progress")).toBe(0);
+    const hint = spawnSync("python3", [SCRIPT, "--check", "in-review", "in-progress"], { encoding: "utf-8" }).stdout;
+    expect(hint).toContain("--reason-file");
+    expect(spawnSync("python3", [SCRIPT, "--check", "accept", "in-progress"], { encoding: "utf-8" }).stdout.trim()).toBe("OK");
     const bare = run(["78", "in-progress"], ["in-review"]);
     expect(bare.status).toBe(1);
     expect(bare.err).toContain("哪一步已合并");

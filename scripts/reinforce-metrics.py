@@ -159,7 +159,8 @@ def label_names(obj: dict) -> set[str]:
 
 
 def linked_issue(pr: dict) -> int | None:
-    m = re.search(r"(?im)^\s*(?:fixes|closes|resolves)\s+#(\d+)", pr.get("body") or "")
+    # `Part of #N` = one step of a staged issue (#253); it links the same issue for the metrics.
+    m = re.search(r"(?im)^\s*(?:fixes|closes|resolves|part\s+of)\s+#(\d+)", pr.get("body") or "")
     return int(m.group(1)) if m else None
 
 
