@@ -1318,16 +1318,20 @@ export interface RunLivePumpResult {
   ok: boolean;
   error?: string;
   /**
-   * Why the run ended. Distinguishes "the archive holds what was recorded" from "nothing was
-   * ever recorded", which `ok` alone cannot do: a pump that never acquires a stream also
-   * returns ok with zero segments (found by review #280 — the caller then exited 0, and
-   * TaskManager read that as a clean stop, so a room that recorded nothing looked finished).
+   * Why an `ok` run ended. Distinguishes "this run produced something" from "this run recorded
+   * nothing", which `ok` alone cannot do: a pump that never acquires a stream also returns ok
+   * with zero segments (found by review #280 — the caller then exited 0, and TaskManager read
+   * that as a clean stop, so a room that recorded nothing looked finished).
    *
-   * `uploaded` — at least one part reached the archive.
-   * `no-stream` — the stream could not be acquired (give-up path), so no part exists.
-   * `stopped` — a stop signal cut the run (already-delivered parts are unaffected).
+   * `uploaded` — at least one part completed. With `submit` enabled that means it reached the
+   *   archive; with `submit:false` it means it was fully recorded and only held back locally.
+   * `no-stream` — the stream could not be acquired, so no part exists.
+   *
+   * Absent when `ok:false` (an error or a stop cut the run); read `error` for the reason and
+   * `segments` for what was already delivered. Deliberately no `stopped` value: a cut run is
+   * reported through `ok:false`, so a third state would be unreachable.
    */
-  outcome?: "uploaded" | "no-stream" | "stopped";
+  outcome?: "uploaded" | "no-stream";
   /** The archive already exists, so creating a new one is forbidden. */
   archiveExists?: boolean;
   bvid?: string;

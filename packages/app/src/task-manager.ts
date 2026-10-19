@@ -452,10 +452,13 @@ export class TaskManager {
     this.appliedRolling.delete(taskId);
     const wasDraining = this.draining.delete(taskId);
 
-    // A zero-disk upload run replaces the file recorder and owns the whole process: when it ends
-    // (no stream after retries, or all parts delivered) it exits 0 on its own. Nothing marked the
-    // exit "expected", so treating code=0 as a crash respawns it in a tight loop — measured in a
-    // real container: six failed stream acquisitions, then "异常退出 (code=0)" and restart #1.
+    // A zero-disk upload run replaces the file recorder and owns the whole process, so it ends
+    // on its own once its parts are delivered and exits 0 without anyone marking the exit
+    // "expected"; treating that as a crash respawned it in a tight loop (measured in a real
+    // container: "异常退出 (code=0)" then restart #1).
+    // Exit 0 means "delivered what it recorded" only: a run that never acquired a stream exits
+    // non-zero on purpose (see the `outcome` handling in the streaming-upload CLI path), so a
+    // silently failing room is a crash here and gets retried/alerted instead of a clean stop.
     // Only claimed for stream-upload tasks: a plain recorder exits on a stop signal, and its
     // exit code is not its own verdict on whether it did what it was started to do.
     const zeroDiskFinalized = info.code === 0

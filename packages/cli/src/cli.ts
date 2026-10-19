@@ -410,11 +410,13 @@ program
         // must not look like a natural end to the caller. `ok:true` alone used to carry both
         // "every part uploaded" and "nothing was ever recorded" (review #280 P1), which let a
         // silently failing room keep a healthy status.
+        // Only the no-stream case gets this specific message: an `ok:false` run may already have
+        // delivered parts, and blaming "no parts uploaded" for it would be plainly wrong.
         const clean = res.ok && res.outcome !== "no-stream";
-        if (!clean) {
-          console.error(
-            `[stream-upload] 本场没有上传任何分 P(${res.outcome ?? "unknown"}),按失败退出并交由调度重试`,
-          );
+        if (res.ok && res.outcome === "no-stream") {
+          console.error("[stream-upload] 本场没有上传任何分 P(取不到流),按失败退出并交由调度重试");
+        } else if (!res.ok && res.error) {
+          console.error(`[stream-upload] 本场以失败收尾: ${res.error}`);
         }
         process.exit(clean ? 0 : 1);
       }).catch((e) => {

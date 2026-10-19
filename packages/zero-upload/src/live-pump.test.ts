@@ -784,6 +784,41 @@ describe("outcome:区分「一场都没录到」与「分 P 都已进稿」", ()
     expect(r.outcome).toBe("no-stream");
   });
 
+  it("ok:false 时 outcome 缺席(别让调用方把「传了几个才失败」当成「一个都没传」)", async () => {
+    // Review P3: the failure message used to read "no parts uploaded" for every non-clean run,
+    // including runs that had already delivered parts. `outcome` must therefore stay absent on
+    // the error path so the caller can tell the two apart.
+    const dir = mkdtempSync(join(tmpdir(), "oc-fail-"));
+    writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    // 让 complete 失败 → submitPart 失败 → ok:false
+    const fetchImpl = ((input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(typeof input === "string" ? input : input.toString());
+      const m = (init?.method ?? "GET").toUpperCase();
+      if (u.pathname === "/preupload") return Promise.resolve(new Response(JSON.stringify({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }), { status: 200 }));
+      if (m === "POST" && u.searchParams.has("uploads")) return Promise.resolve(new Response(JSON.stringify({ upload_id: "uid" }), { status: 200 }));
+      if (m === "PUT") return Promise.resolve(new Response("", { status: 200 }));
+      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(new Response(JSON.stringify({ OK: 1, key: "b/p.ts" }), { status: 200 }));
+      // 建稿被服务端拒绝 → submitPart 返回 ok:false(整场 ok:false,但字节已传完)
+      if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(new Response(JSON.stringify({ code: 21015, message: "stem rejected" }), { status: 200 }));
+      return Promise.resolve(new Response(JSON.stringify({ code: 0, data: {} }), { status: 200 }));
+    }) as unknown as typeof fetch;
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+    const r = await runLivePump({
+      room: "oc3", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      cookiesPath: join(dir, "cookies.json"),
+      sizeCap: CHUNK * 2, maxMs: 300, maxSegments: 1, quality: "origin", submit: true, spoolMode: "none",
+      fetchImpl, sleep: async () => {},
+      fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+      log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    expect(r.ok).toBe(false);
+    expect(r.outcome).toBeUndefined(); // 关键:失败路径不冒充「一个都没传」
+    expect(r.error).toBeTruthy();
+    rmSync(dir, { recursive: true, force: true });
+  }, 20_000);
+
   it("有分 P 进稿 → outcome=uploaded", async () => {
     const dir = mkdtempSync(join(tmpdir(), "oc-up-"));
     const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
