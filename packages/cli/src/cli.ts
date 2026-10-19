@@ -22,7 +22,7 @@ import { biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUpl
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
-import { getEngine, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
+import { decorateRecordEvent, getEngine, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
 import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
@@ -235,7 +235,8 @@ program
         await baseNotifier.notify(e);
         if (e.kind === "error") {
           try {
-            process.stdout.write(`@@DREC_ALERT@@${JSON.stringify({ stage: e.stage, message: e.message })}\n`);
+            // ctx (issue #53 N4) is an extra field: an older parent ignores it, a newer parent forwards it.
+            process.stdout.write(`@@DREC_ALERT@@${JSON.stringify({ stage: e.stage, message: e.message, ...(e.ctx ? { ctx: e.ctx } : {}) })}\n`);
           } catch {
             /* ignore */
           }
@@ -273,7 +274,12 @@ program
       const remuxDeps = {
         log: (m: string) => console.log(m),
         // 失败走现有告警通道(error 事件 → webhook + @@DREC_ALERT@@ → 站内 toast),不静默。
-        alert: (message: string) => { void notifier.notify({ kind: "error", stage: "转封装", message }).catch(() => {}); },
+        // Same context as the session's own notifications (issue #53 N4): task name, platform, room id.
+        alert: (message: string) => {
+          const e = decorateRecordEvent({ kind: "error", stage: "转封装", message } as NotifyEvent,
+            { taskName: opts.name, platform: platform.id, roomSlug: platform.extractRoomSlug(o.room) });
+          void notifier.notify(e).catch(() => {});
+        },
         // 任务归属标识(临时文件名 = 归属 + pid):接管据此区分「本任务已死进程的残留」与「别的任务的新鲜残留」。
         owner: platform.extractRoomSlug(o.room),
       };

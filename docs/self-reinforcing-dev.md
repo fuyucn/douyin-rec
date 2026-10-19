@@ -36,7 +36,7 @@
 
 - **自动实现（2026-10-12 起）**：实现 heartbeat 扫到 `accept` 且无 `in-progress` 的票即认领，
   打 `in-progress` 并评论「哪个 agent、何时开始、范围、模型」；并行最多 2 张且改动范围不重叠。不再需要人点名派活。
-- 一个 `accept` issue 一个分支，PR 写 `Fixes #N`；实现会话**只开 PR，不合并**（合并归 review 会话）、
+- 一个 `accept` issue 一个分支，PR 写 `Fixes #N`（分步实现的票中间各步写 `Part of #N`）；实现会话**只开 PR，不合并**（合并归 review 会话）、
   不部署、不顺手做无关改动。
 - 行为变更必须有回归测试钉住（无法自动化的，写明人工验证步骤）。
 - 自审循环照旧：实现 → 自审找缺陷 → 修复 → 复审；`pnpm test` / `typecheck` / `bundle` 全绿。
@@ -94,7 +94,7 @@
 - [ ] `accept` 才进 `TODO.md`（`T-N` + issue 链接）
 
 实现与 PR：
-- [ ] 一个 issue 一个分支，`Fixes #N`
+- [ ] 一个 issue 一个分支，`Fixes #N`（分步票中间各步 `Part of #N`）
 - [ ] 有回归测试（或写明人工验证步骤）
 - [ ] 自审发现 → 修复清单可查
 - [ ] PR 里说明评论哪些采纳 / 哪些不采纳及理由

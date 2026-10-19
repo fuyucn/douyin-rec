@@ -8,6 +8,7 @@
  * 可直接注入 `PipelineDeps`、`RollingUploader` 的 `*Raw` 接缝,或用 `vi.mock` 顶替 biliup 模块。
  *
  * 可注入的故障(见 {@link Fault}):超时 / 网关错误 / 结果不确定 / 进程被杀。
+ * 另可模拟分 P 列表刷新延迟(见 {@link FakeBiliup.countLagReads})。
  */
 import { basename } from "node:path";
 import type { UploadOpts } from "@drec/core";
@@ -89,6 +90,13 @@ export class FakeBiliup {
   private seq = 0;
   /** false → `countVideoParts` 返回 null(模拟接口风控/网络不可用)。 */
   countAvailable = true;
+  /**
+   * 分 P 列表刷新延迟(#66):每次 append 提交后,接下来这么多次 `countVideoParts` 仍返回提交前的分 P 数。
+   * 0 = 立即可见(缺省)。按读次数计、不按时间:能验证「多读几次」,不能验证退避时长。
+   * 下一次 append 前的基线读也会消耗残余延迟(读到偏小的基线),与真实站点的延迟刷新一致。
+   */
+  countLagReads = 0;
+  private stale = new Map<string, { count: number; left: number }>();
 
   constructor(private readonly real: RealBiliup) {}
 
@@ -128,6 +136,7 @@ export class FakeBiliup {
       const bv = flags.get("--vid") ?? "";
       const a = this.archives.get(bv);
       if (!a) throw new Error(`biliup 失败 (rc=1): 稿件不存在 ${bv}`);
+      if (this.countLagReads > 0) this.stale.set(bv, { count: a.parts.length, left: this.countLagReads });
       a.parts.push(...files);
       return a;
     };
@@ -161,6 +170,11 @@ export class FakeBiliup {
   /** 与真实 `countVideoParts` 同签名(第二参 cookies 忽略)。 */
   readonly countVideoParts = async (bv: string, _cookies?: string): Promise<number | null> => {
     if (!this.countAvailable) return null;
+    const lag = this.stale.get(bv);
+    if (lag && lag.left > 0) {
+      lag.left--;
+      return lag.count;
+    }
     const a = this.archives.get(bv);
     return a ? a.parts.length : null;
   };

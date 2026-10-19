@@ -4,6 +4,7 @@ export * from "./config.js";
 export * from "./engine.js";
 export * from "./platform.js";
 export * from "./notify.js";
+export * from "./notify-context.js";
 export * from "./api-types.js";
 export * from "./log.js";
 export * from "./atomic-name.js";
