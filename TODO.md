@@ -63,7 +63,7 @@
   — 2026-10-18 PR [#272](https://github.com/fuyucn/douyin-rec/pull/272):假录像终点在 2026-06,默认 10 分钟重连窗会按宿主时钟跳过该场 → 显式关闭重连窗、等待放宽到 5 秒,断言消息带派发次数与台账状态。
 
 - [~] **T-81 风险扫描函数签名启发式补全 + 仅改 value 行的凭证漏检（issue [#269](https://github.com/fuyucn/douyin-rec/issues/269)）**
-  — 2026-10-18 立项(#74 选 A 的跟进),纯脚本与测试。**做什么**:收集 hunk 内全部签名行、补属性箭头与多行方法签名;`name` 在上下文、`value` 为新增行时命中凭证规则。**验收**:每类正反样例 + 现有 review-gates 套件不回退。
+  — 2026-10-18 认领并实现(#74 选 A 的跟进),纯脚本与测试。**做什么**:收集 hunk 内全部签名行、补属性箭头与多行方法签名;`name` 在上下文、`value` 为新增行时命中凭证规则。**验收**:每类正反样例 + 现有 review-gates 套件不回退。
 
 - [~] **T-73 账号开关文案与按平台登录判定（issue [#85](https://github.com/fuyucn/douyin-rec/issues/85)）**
   — 2026-10-18 PR [#246](https://github.com/fuyucn/douyin-rec/pull/246) 已合并(0.0.178,两轮独立审查,CI 绿),issue `待验证`,部署后浏览器核对收口。

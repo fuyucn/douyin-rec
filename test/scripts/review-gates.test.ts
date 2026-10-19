@@ -143,6 +143,66 @@ describe("pr-risk-scan.sh", () => {
       "function cleanupStage() {", ...body(60, 50, v2), "}", ""].join("\n");
     expect(gitScan(src(1, 50), src(7, 99)).split("\n")[0]).toBe("RISK");
   });
+  it("多行参数签名(行尾只有一个 `(`)也参与匹配,即使改动离签名很远", () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `  const c${i} = ${i};`);
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " import x from 'y';",
+      " const z = 1;",
+      " export const w = 2;",
+      "   cleanupStage(",
+      "     dir,",
+      "   ) {",
+      ...filler,
+      "-    const n = 1;",
+      "+    const n = 2;",
+      "",
+    ].join("\n");
+    const r = risk(d);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("内容[清理/删除]: packages/app/src/x.ts");
+  });
+  it("对象/类的属性箭头函数(改动离签名很远)也参与匹配", () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`);
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " import x from 'y';",
+      " const z = 1;",
+      " export const w = 2;",
+      "   cleanupStage: async (p) => {",
+      ...filler,
+      "-    const n = 1;",
+      "+    const n = 2;",
+      "",
+    ].join("\n");
+    const r = risk(d);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("内容[清理/删除]: packages/app/src/x.ts");
+  });
+  it("属性箭头函数里无关的改动不误判(没有清理语义)", () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`);
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " import x from 'y';",
+      " const z = 1;",
+      " export const w = 2;",
+      "   describe: async (p) => {",
+      ...filler,
+      "-    const n = 1;",
+      "+    const n = 2;",
+      "",
+    ].join("\n");
+    expect(risk(d).status).toBe(0);
+  });
   it("签名启发式不把 if/for 当函数", () => {
     const filler = Array.from({ length: 30 }, (_, i) => ` const c${i} = ${i};`);
     const lines = [" function f() {", " const a = 1;", " const b = 2;", "   if (cleanupDone) {", ...filler, "-const n = 1;", "+const n = 2;"];
@@ -192,7 +252,9 @@ describe("pr-risk-scan.sh", () => {
 });
 
 describe("issue-guard.py --diff", () => {
-  function repo() {
+  // `seed` writes files that must already exist on the base branch, so the feature diff shows them
+  // as context (a credential file whose only changed line is `"value"` is exactly that case).
+  function repo(seed?: (d: string) => void) {
     const d = mkdtempSync(join(tmpdir(), "guard-"));
     const g = (...a: string[]) => spawnSync("git", a, { cwd: d, encoding: "utf-8" });
     g("init", "-q", "-b", "base");
@@ -200,6 +262,7 @@ describe("issue-guard.py --diff", () => {
     g("config", "user.name", "t");
     mkdirSync(join(d, "docs"));
     writeFileSync(join(d, "docs", "a.md"), "历史里的 BV1Ab4y1C7xY 与 10.0.0.1\n"); // issue-guard: allow
+    seed?.(d);
     g("add", ".");
     g("commit", "-qm", "base");
     g("checkout", "-q", "-b", "feature");
@@ -275,6 +338,17 @@ describe("issue-guard.py --diff", () => {
     writeFileSync(join(d, "k.json"), '[\n  {\n    "name": "SESSDATA",\n    "value": "a1b2c3d4%2C17900%2Cabcdef"\n  }\n]\n'); // issue-guard: allow
     g("add", ".");
     g("commit", "-qm", "c");
+    const r = guard(d);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("k.json:3: [登录凭证键值]");
+  });
+  it("只改 value 行(文件已在 base,name 是上下文行)也拦,并指向 name 行", () => {
+    // The whole file is created on base, so the diff carries only the changed `value` line. Without
+    // the neighbouring context lines the name/value rule would never see them together.
+    const pretty = (v: string) => `[\n  {\n    "name": "SESSDATA",\n    "value": "${v}",\n    "domain": ".bilibili.com"\n  }\n]\n`;
+    const { d, g } = repo((dir) => writeFileSync(join(dir, "k.json"), pretty("OLDVALUEa1b2c3d4%2C17900")));
+    writeFileSync(join(d, "k.json"), pretty("NEWVALUEa1b2c3d4%2C17900")); // issue-guard: allow
+    g("commit", "-qam", "c");
     const r = guard(d);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("k.json:3: [登录凭证键值]");

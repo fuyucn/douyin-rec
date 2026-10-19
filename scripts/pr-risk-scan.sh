@@ -56,9 +56,19 @@ HEAD_KEEP=3       # leading hunk lines always matched (the enclosing function si
 # Signature-like lines (function / method / class / arrow const / shell function). The latest one seen
 # in the hunk is matched with every change, so a doc comment above the function or a second function
 # merged into the same hunk cannot push the enclosing signature out of the window.
+# One-line forms: function / class / method / const arrow. Property-arrow and multi-line forms are
+# handled by SIG_HEAD_RE below (an `name: async (x) => {` property, or a signature whose parameters
+# span several lines and which therefore ends on a bare `(`).
 SIG_RE='^[[:space:]]*((export|async|public|private|protected|static|readonly|default|override)[[:space:]]+)*(function[[:space:]*]|class[[:space:]]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*(<[^>]*>)?\(.*\)[^;]*\{[[:space:]]*$|(const|let)[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=.*=>)|^[A-Za-z_][A-Za-z0-9_-]*[[:space:]]*\(\)[[:space:]]*\{'
+# Object / class property holding a function: `handler: async (req) => {`, `run = (x) => {`,
+# `onEnd: function () {`. The name is what the content rules look for, so the line must be kept.
+SIG_PROP_RE='^[[:space:]]*([A-Za-z_$][A-Za-z0-9_$]*|"[^"]+"|'"'"'[^'"'"']+'"'"'|\[[^]]+\])[[:space:]]*[:=][[:space:]]*(async[[:space:]]+)?(\([^)]*\)[[:space:]]*=>|function[[:space:]*]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=>)'
+# A signature whose parameters span lines ends on `(`. Calls end on `)` / `;` and are not matched, and
+# a line ending in `(` only joins the context when it also carries a name (bare `(` is not enough).
+SIG_HEAD_RE='^[[:space:]]*((export|async|public|private|protected|static|readonly|default|override)[[:space:]]+)*(function[[:space:]*][A-Za-z_$]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*(<[^>]*>)?\([^)]*$|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*[:=][[:space:]]*(async[[:space:]]+)?\([^)]*$)'
 NOT_SIG_RE='^[[:space:]]*(if|for|while|switch|catch|else|return|do|await|new)([[:space:]]|\(|$)'
 last_sig=""
+sigs=()           # every signature-like line seen in the current hunk (deduped, capped)
 head_left=0
 old_left=0
 new_left=0
@@ -90,6 +100,9 @@ content_scanned() {
 # under pipefail an early-exiting grep SIGPIPEs the writer on large hunks and the match is lost.
 flush_hunk() {
   if (( hunk_changed )) && [[ -n "$cur" && "$cur" != "$SELF" ]] && content_scanned "$cur"; then
+    # Every signature in the hunk participates: a change deep inside a second function (or inside a
+    # callback that itself has a signature) must still see all enclosing names.
+    if (( ${#sigs[@]} )); then hunk="$(printf '%s\n' "${sigs[@]}")"$'\n'"$hunk"; fi
     local pair label re
     for pair in "上传:$UPLOAD_RE" "清理/删除:$DELETE_RE" "ledger 状态转换:$LEDGER_RE"; do
       label="${pair%%:*}"; re="${pair#*:}"
@@ -102,6 +115,7 @@ flush_hunk() {
   hunk_changed=0
   pre=()
   after=0
+  sigs=()
 }
 
 # `diff --git a/X b/Y` (optionally quoted): the only header present for mode-only and binary changes.
@@ -127,6 +141,7 @@ start_hunk() {
   hunk="${1#@@*@@}"$'\n'
   head_left=$HEAD_KEEP
   last_sig=""
+  sigs=()
   old_left=1; new_left=1
   if [[ "$1" =~ ^@@\ -[0-9]+(,([0-9]+))?\ \+[0-9]+(,([0-9]+))?\ @@ ]]; then
     old_left="${BASH_REMATCH[2]:-1}"; new_left="${BASH_REMATCH[4]:-1}"
@@ -152,8 +167,12 @@ while IFS= read -r line; do
       "\\"*) continue ;;  # "\ No newline at end of file"
     esac
     body="${line:1}"
-    [[ "$body" =~ $SIG_RE && ! "$body" =~ $NOT_SIG_RE ]] && last_sig="$body"
-    [[ "$line" == [+-]* && -n "$last_sig" ]] && hunk+="$last_sig"$'\n'
+    if [[ ! "$body" =~ $NOT_SIG_RE ]] && { [[ "$body" =~ $SIG_RE ]] || [[ "$body" =~ $SIG_PROP_RE ]] || [[ "$body" =~ $SIG_HEAD_RE ]]; }; then
+      last_sig="$body"
+      sig_seen=0
+      for sig in ${sigs[@]+"${sigs[@]}"}; do [[ "$sig" == "$body" ]] && { sig_seen=1; break; }; done
+      (( ! sig_seen && ${#sigs[@]} < 20 )) && sigs+=("$body")
+    fi
     if (( head_left > 0 )); then
       # With --function-context the hunk opens on the enclosing function's signature: always match it.
       hunk+="$body"$'\n'; head_left=$((head_left - 1))
