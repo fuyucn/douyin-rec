@@ -531,6 +531,41 @@ describe("titleForLive / partTitle reach the archive identity and part submissio
     }
   });
 
+  it("platform without a live title still re-renders the title from the first acquisition", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-notitle-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      const fake = ((input: string | URL | Request) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
+        return Promise.resolve(json({ code: 0, data: {} }));
+      }) as unknown as typeof fetch;
+
+      installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+      const r = await runLivePump({
+        cookiesPath: join(dir, "cookies.json"), room: "fi", spoolDir: dir,
+        title: "initial", titleForLive: () => "re-rendered without live title",
+        tid: 21, tag: "x", private: true,
+        sizeCap: CHUNK, maxMs: 300, maxSegments: 1, quality: "origin", submit: true,
+        spoolMode: "none", fetchImpl: fake,
+        fetch: async () => ({ living: true, url: "http://x/y.ts" }), // no title/owner
+        sleep: async () => {},
+      });
+      expect(r.ok, r.error ?? "").toBe(true);
+      // Title was re-rendered even though the platform exposed no live title.
+      expect(r.title).toBe("re-rendered without live title");
+    } finally {
+      setSpawnForTest(undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("re-renders a fresh archive title with the live title and uses the part template", async () => {
     const dir = mkdtempSync(join(tmpdir(), "live-pump-title-"));
     try {

@@ -1294,7 +1294,7 @@ export interface RunLivePumpOptions {
   /** Submit every completed part to the archive. Default true. */
   submit?: boolean;
   /** Render a part title from its 1-based index; null = keep the generated stem. */
-  partTitle?: (partIndex: number) => string | null;
+  partTitle?: (partIndex: number, liveTitle?: string) => string | null;
   log?: (msg: string) => void;
   /** Stop the loop after this many parts (tests / manual runs). */
   shouldStop?: () => boolean | Promise<boolean>;
@@ -1398,6 +1398,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   const log = o.log ?? ((m: string) => process.stderr.write(`${m}\n`));
   const sleep = o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const maxSegments = Math.max(0, o.maxSegments ?? 0);
+  /** Live title seen on the first acquisition (platforms may not expose one). */
+  let liveTitle: string | undefined;
   const session = new LivePumpSession({
     cookiesPath: o.cookiesPath,
     room: o.room,
@@ -1503,9 +1505,14 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       sleep,
     });
     if (!s.living || !s.url) break;
+    if (s.title?.trim()) liveTitle = s.title.trim();
     if (o.titleForLive && s.title) {
       const nextTitle = o.titleForLive(s.title);
       if (session.setTitleIfFresh(nextTitle)) log(`[live-pump] 稿件标题已按直播标题渲染: ${nextTitle}`);
+    } else if (o.titleForLive) {
+      // No live title from this platform, but the anchor/start time may still have changed.
+      const nextTitle = o.titleForLive("");
+      if (session.setTitleIfFresh(nextTitle)) log(`[live-pump] 稿件标题已按取流信息重渲染: ${nextTitle}`);
     }
     if (seg === 0) log("[状态] 录制中");
 
@@ -1593,7 +1600,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         index: nextIndex,
         spoolPath: `${o.spoolDir.replace(/\/$/, "")}/${fileName}`,
         stem,
-        title: o.partTitle?.(nextIndex + 1) ?? fileName.replace(/\.[^.]+$/, ""),
+        title: o.partTitle?.(nextIndex + 1, liveTitle) ?? fileName.replace(/\.[^.]+$/, ""),
         bytes: r.spooledBytes,
         durationSec: r.spoolDurationSec,
       });

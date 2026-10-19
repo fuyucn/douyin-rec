@@ -303,6 +303,8 @@ program
       let anchorName = o.name?.trim() || roomSlug;
       const sizeCap = alignFileSize(Number(o.streamUploadSize ?? DEFAULT_SEGMENT_CAP));
       const cookies = o.cookiesFile ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+      // Latched on the first successful acquisition so templates use the real broadcast start,
+      // not the process start (a task may sit in "waiting for stream" for hours).
       let streamStartMs = Date.now();
       let streamStarted = false;
       // A resumed session keeps the archive identity from its state file; only a fresh session
@@ -416,12 +418,13 @@ program
           startMs: streamStartMs,
           liveTitle,
         }),
-        partTitle: (partIndex) => resolveStreamPartTitle({
+        partTitle: (partIndex, liveTitle) => resolveStreamPartTitle({
           platform: platform.id,
           roomSlug,
           anchorName,
           startMs: streamStartMs,
           partIndex,
+          ...(liveTitle ? { liveTitle } : {}),
         }),
         tid: Number(o.streamUploadTid ?? streamMeta.tid),
         tag: o.streamUploadTag ?? streamMeta.tag,

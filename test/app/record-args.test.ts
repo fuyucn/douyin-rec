@@ -41,6 +41,10 @@ describe("buildRecordArgs", () => {
     expect(buildRecordArgs(mkTask({ streamUpload: true, name: null, anchorName: null }))).not.toContain("--name");
   });
 
+  it("普通录制不吃 anchorName 回退(它自己从每场流解析 owner)", () => {
+    expect(buildRecordArgs(mkTask({ streamUpload: false, name: null, anchorName: "缓存名字" }))).not.toContain("--name");
+  });
+
   it("passes --stream-upload-spool none only when the spool is explicitly disabled", () => {
     expect(buildRecordArgs(mkTask({ streamUpload: true, streamUploadSpool: true }))).not.toContain("--stream-upload-spool");
     expect(buildRecordArgs(mkTask({ streamUpload: true, streamUploadSpool: false }))).toContain("--stream-upload-spool");
