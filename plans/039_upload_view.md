@@ -44,7 +44,7 @@ web: 队列页「上传」视图,按节点分行
 - **百分比 = 已读字节**:当前文件 fdinfo `pos` + 之前各文件大小,除以总字节;biliup 预读会让它略超前于实际发送,
   封顶 99%,进程结束后以结果为准。**前提待 T1a 实测**:biliup 是否顺序 `read()` 每个文件一次。若用 `pread` / mmap
   (`pos` 恒 0)、启动时一次性打开全部文件、或尾段已关 fd,则改用 `/proc/<pid>/io` 的 `rchar` 累计除以总字节,
-  并保留最后一次看到的文件序号;T1a 结论写回本节再进 T1。
+  并保留最后一次看到的文件序号(`rchar` 含 socket 与 cookies 读取,略偏高,T1a 记录偏差);T1a 结论写回本节再进 T1。
 - **速率 / 卡住 = acked 增量**:只对两次采样中都存在的 socket 求差(新开 / 已关的 socket 不计),所以外部采样丢失
   已关 socket 的累计值不影响速率;master 重启只丢一个采样间隔。无 acked 增长 ≥ `stallMs`(默认 300s,与 038 同口径)
   = 疑似卡住;**没有 `ss` 时退回已读字节增长判定,并在界面注明「按读盘进度判定」**(T14 实测读盘可能停顿数分钟而发送仍在进行,
@@ -74,8 +74,9 @@ web: 队列页「上传」视图,按节点分行
 - 只读:扫描与跟踪失败只影响展示,不得抛出到状态轮询主路径;本机路径必须 async,不得 `execFileSync`。
 - 不改上传硬标准、不改任何上传 / 删源 / 台账判定;跟踪器不写台账。
 - **节点输出与 DTO 都不含任何路径、cookie 路径、标题、简介、标签**:归属在节点上完成,只上报场次 key 或 stage 目录名、
-  分P 序号与字节数。argv 解析为正向白名单:文件 = op 词(`upload` / `append`)之后、第一个 `-` 旗标之前的位置参数
-  (与 `buildUploadArgs` 的顺序一致);旗标只取 `--line` 的值,其余旗标一律不读,将来新增带值旗标也不会被误当成文件。
+  分P 序号与字节数。argv 不按位置猜文件(`buildUploadArgs` 文件在旗标前,`buildAppendArgs` 文件在旗标后):
+  **候选 = 不以 `-` 开头的 argv 项,只保留在节点上解析为 `recordings/` 或 stage 根之下的普通文件者,保持 argv 顺序**;
+  不依赖各旗标的参数个数,cookies 路径与各旗标的值天然被滤掉,且路径只在节点上使用。旗标只额外读取 `--line` 的值。
   场次以 key(平台:房间:日期)+ 主播名展示,稿件号沿用现有队列页口径。
 - 节点能力状态:`reported:false`(旧 bundle 无字段)/ `supported:false`(无 `/proc`,如 macOS)/
   `permitted:false`(读 `/proc/<pid>/fd`、`fdinfo` 或 `ss -p` 遇 EACCES:状态命令的 ssh 用户与服务运行用户不同,
@@ -101,8 +102,10 @@ web: 队列页「上传」视图,按节点分行
       分P 归属按「口径」三类;依赖注入(`readdir/readFile/readlink/stat/ss/now`)。`ss` 解析复用 processors 的 `parseSsAcked`
       (orchestrator 声明对 processors 的依赖,rank 4.5 > 0.4,分层测试仍过)。
 - [ ] cli `_recording-status` 输出 `uploads`;transport 类型加可选 `uploads`;master 自身扫描由 cli 装配、每轮执行。
-- **验收**:fixture 覆盖 upload / append、无 `--line`、多文件、旗标值不被当成文件、敏感值不外泄、三类归属、无 `/proc`、
-  无 `ss`、EACCES、读失败。
+- [ ] `scanRecordingRooms` 改为同时返回遍历到的 pid 列表,传给扫描函数;master 自身按 `/proc/<pid>/task/<pid>/children`
+      递归取 serve 后代进程。
+- **验收**:fixture 覆盖 `buildUploadArgs` 与 `buildAppendArgs` 的真实输出(各含 / 不含 `--line`)、多文件、旗标值与 cookies 路径
+  不被当成文件、敏感值不外泄、三类归属、master 后代进程递归、无 `/proc`、无 `ss`、EACCES、读失败。
 
 ### T2 master 跟踪器(orchestrator,纯函数)
 - [ ] `UploadRunTracker.ingest(nodeId, snapshot | error, at)`:速率、剩余、卡住、重试 / 换线计数、结束归档、拉取失败保留旧值并标 stale。
