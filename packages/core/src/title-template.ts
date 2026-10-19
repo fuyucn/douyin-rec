@@ -253,17 +253,24 @@ export function validateLooseTitleTemplate(template: string): string | null {
   return null;
 }
 
+// Emoji are dropped instead of replaced: an anchor name like `小明🌟` should produce `小明`,
+// not a stray `-`. Variation selectors, ZWJ, keycap marks and skin tones are removed with them.
+const EMOJI_RE =
+  /[\p{Extended_Pictographic}\p{Regional_Indicator}\u200D\uFE0F\u20E3\u{1F3FB}-\u{1F3FF}]/gu;
+
 /**
  * Turn a rendered name into a legal file stem. Identity for names that already pass
  * `isSafeStem`, so stems produced before this existed stay byte-identical (rerun-stable).
- * Otherwise every disallowed char (emoji, dots, full-width punctuation, spaces) becomes `-`,
- * runs collapse, and edge dashes are trimmed. Returns "" when nothing legal is left.
+ * Otherwise emoji are ignored, every other disallowed char (dots, full-width punctuation,
+ * spaces) becomes `-`, runs collapse, and edge dashes are trimmed. Returns "" when nothing
+ * legal is left.
  */
 export function sanitizeStem(rendered: string): string {
   // Checked before NFC so already-legal names are never rewritten (NFC can change some ideographs).
   if (SAFE_STEM.test(rendered)) return rendered;
   return rendered
     .normalize("NFC")
+    .replace(EMOJI_RE, "")
     .replace(/[^\p{L}\p{N}_\-【】（）()]/gu, "-")
     .replace(/-{2,}/g, "-")
     .replace(/-+_|_-+/g, "_")
