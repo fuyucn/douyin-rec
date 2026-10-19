@@ -69,11 +69,16 @@
 ## Tasks
 
 - [ ] T0 先修既有风险(不删任何文件,**与派生命名无关**,新旧文件一并覆盖):
-  - orphan-cleanup:空的会话级 xml(`segmentIndexOf < 0`)只认**同基名的非空会话级 xml**为副本;逐段 / 派生切片永不能替代整场 xml。
-  - `deriveStageProducts`:`xmlArg` 优先精确 `{dateName}.xml`;否则取 `segmentIndexOf < 0` 且不含 `.derived` 的 stamped xml;都没有 = 无 xml。
+  - orphan-cleanup:空 xml 的「副本证据」只认**另一根目录(recordings ↔ stage)下同名且字节完全相同**的文件;
+    逐段 / 派生切片与 stage 合并产物(`{outputStem}.xml`,datetime 模板下会与 S1 同名且含 S2 弹幕)都不算。
+    空文件不可能有非空的真副本,同名不同内容 = 不同文件。
+  - `deriveStageProducts`:所有候选(含精确名)都必须 `segmentIndexOf < 0` 且不以 `.derived.xml` 结尾;
+    优先锁定的输出 stem / `sessionBases[0] + ".xml"`,其次精确 `{dateName}.xml`,再按 `sessionBases` 固定顺序取 stamped xml;
+    都没有 = 无 xml。不依赖 readdir 顺序;stage 只有分段 mp4(`dateName` 被猜成 `X_000`)时也不会选中切片。
   - `groupSessions`:旧名只在把 merge 指向 stage 目录时命中,写入文档,不打补丁。
-  - 验收:datetime 模板 + 两会话 + S1 空弹幕 + S2 非空 → 两份空 `S1.xml` 都保留;单节点重跑 `xmlArg` 永不选派生(新旧名、
-    任意 readdir 顺序);`.derived.xml` 的 `sessionBaseOf / segmentIndexOf / stampedSessionBaseOf / isAtomicTempName` 回归用例。
+  - 验收:datetime 模板 + 两会话 + S1 空弹幕 + S2 非空 → 两份空 `S1.xml` 都保留(分段模式与合并模式各一例,
+    合并模式下 stage 的 `S1.xml` 被合并产物覆盖);单节点重跑 `xmlArg` 永不选派生(新旧名、任意 readdir 顺序、
+    「分段模式 stage 后改合并重跑」一例);`.derived.xml` 的 `sessionBaseOf / segmentIndexOf / stampedSessionBaseOf / isAtomicTempName` 回归用例。
 - [ ] T1 清单 + core 判定函数。验收:幂等、哈希不符视为非派生、清单损坏不抛、条目文件缺失被容忍。
 - [ ] T2 回收(维护页一类,dryRun + 审计)。验收:派生开启 → 关闭 → 回收,总 xml 存在且字节不变;清单外 / 哈希不符 / 拒删名单不动。
 - T0、T2 涉及弹幕保护与删除:`needs-decision` + Opus 复审 + `pr-risk-scan`。
