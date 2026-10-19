@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { findRecentArchive, listAllArchives, parseArchiveList, durationMatches } from "../../packages/processors/src/archive-lookup.js";
+import { findRecentArchive, listAllArchives, parseArchiveList, durationMatches, looseTitleKey } from "../../packages/processors/src/archive-lookup.js";
 
 const page = (rows: unknown[]) => JSON.stringify({ code: 0, data: { list: rows } });
 const hit = (bv: string, title: string, duration: number, ctime = Math.floor(Date.now() / 1000)) => ({ bvid: bv, title, duration, ctime });
@@ -25,6 +25,19 @@ describe("archive lookup across all states (plan 038 T07)", () => {
     const run = vi.fn(async (argv: string[]) => argv.includes("--pubed") ? page([hit("BV" + "3".repeat(10), "t", 10)]) : page([]));
     expect(await findRecentArchive("c", "t", 3600, { run })).toBe("unknown");
     expect(await findRecentArchive("c", "other", 3600, { run })).toBe("no");
+  });
+
+  it("a title rewritten by the server (emoji / full-width dropped) is unknown, never no", async () => {
+    const stored = "主播A_2026-10-18";
+    const run = vi.fn(async (argv: string[]) => argv.includes("--pubed") ? page([hit("BV" + "5".repeat(10), stored, 3600)]) : page([]));
+    expect(await findRecentArchive("c", "主播\u{1F338}Ａ_2026-10-18", 3600, { run })).toBe("unknown");
+    expect(await findRecentArchive("c", "主播B_2026-10-18", 3600, { run })).toBe("no");
+    expect(await findRecentArchive("c", stored, 3600, { run })).toBe("yes");
+  });
+
+  it("looseTitleKey keeps letters and digits only, NFKC and case-folded", () => {
+    expect(looseTitleKey("Ａｂ\u{1F338} 1.2")).toBe("ab12");
+    expect(looseTitleKey("\u{1F338}\u{1F338}")).toBe("");
   });
 
   it("union de-duplicates; rows with an invalid BVID are dropped; bad JSON -> null", async () => {
