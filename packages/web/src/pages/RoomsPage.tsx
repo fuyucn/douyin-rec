@@ -10,6 +10,7 @@ import { Link } from "react-router-dom";
 import { Activity, FileText, FolderOpen, LayoutGrid, Loader, Pencil, Play, Plus, Square, TriangleAlert } from "lucide-react";
 import type { RoomDTO } from "../api/client";
 import { Button, IconButton } from "../components/Button";
+import { ConnStatus } from "../components/ConnStatus";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { AddRoomDialog } from "../modals/AddRoomDialog";
 import { useTicker } from "../lib/hooks";
@@ -59,10 +60,13 @@ export function RoomsPage(): ReactNode {
           <h1 className="headline text-[28px] sm:text-[32px] leading-tight">{t("room.title")}</h1>
           <p className="text-muted text-sm mt-1.5">{t("room.subtitle")}</p>
         </div>
-        <Button onClick={() => setCreateOpen(true)} aria-label={t("room.add")} className="rm-add">
-          <Plus className="w-4 h-4" />
-          <span className="rm-add-label">{t("room.add")}</span>
-        </Button>
+        <div className="flex items-center gap-3 shrink-0">
+          <ConnStatus conn={data.conn} />
+          <Button onClick={() => setCreateOpen(true)} aria-label={t("room.add")} className="rm-add">
+            <Plus className="w-4 h-4" />
+            <span className="rm-add-label">{t("room.add")}</span>
+          </Button>
+        </div>
       </div>
 
       <HubStreamBanner handle={data.stream} />

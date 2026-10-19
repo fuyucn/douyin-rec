@@ -16,7 +16,7 @@
     "": ["accept", "needs-decision", "decline", "blocked"],
     "accept": ["in-progress", "needs-decision", "decline", "blocked"],
     "in-progress": ["in-review", "needs-decision", "blocked"],
-    "in-review": ["待验证", "rework-1", "rework-2", "needs-decision", "blocked"],
+    "in-review": ["待验证", "in-progress", "rework-1", "rework-2", "needs-decision", "blocked"],
     "rework-1": ["in-review", "needs-decision", "blocked"],
     "rework-2": ["in-review", "needs-decision", "blocked"],
     "待验证": ["closed", "needs-decision", "blocked"],
@@ -25,6 +25,7 @@
     "blocked": ["accept", "in-progress", "in-review", "needs-decision", "decline"]
   },
   "reasonRequired": ["rework-1", "rework-2", "needs-decision", "decline", "blocked", "closed"],
+  "reasonRequiredTransitions": [["in-review", "in-progress"]],
   "needsDecisionMarkers": ["要决定什么", "不做会怎样", "建议选项"],
   "closeRoles": ["impl"]
 }

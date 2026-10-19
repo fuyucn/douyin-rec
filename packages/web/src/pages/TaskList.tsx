@@ -23,9 +23,10 @@ import { Tooltip } from "../components/Tooltip";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { QUALITY_SHORT, roomId, scheduleText } from "../lib/labels";
-import { fmtTimeInTz, localScheduleTooltip, localTimeTooltip } from "../lib/tz";
+import { localScheduleTooltip } from "../lib/tz";
 import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ConnStatus } from "../components/ConnStatus";
 
 /** 窄屏不用多列表格:状态徽章和房间 URL 会把列撑出屏幕。一行一块,信息仍在。 */
 function TaskCompactRow({ task }: { task: Task }): ReactNode {
@@ -175,27 +176,7 @@ export function TaskList(): ReactNode {
           <p className="text-muted text-sm mt-1.5">{t("tasks.pageSubtitle")}</p>
         </div>
         <div className="flex items-center gap-3 shrink-0">
-          {conn && (
-            <Tooltip
-              content={
-                conn.ok
-                  ? localTimeTooltip(new Date(conn.at), serverTz, (tz, local) =>
-                      t("common.localTimeTooltip", { serverTz: tz, local }),
-                    )
-                  : undefined
-              }
-            >
-              <span
-                className="hidden sm:inline-flex items-center gap-1.5 text-xs"
-                style={{ color: conn.ok ? "var(--success-fg)" : "var(--error-fg)" }}
-              >
-                <span className="dot" style={{ background: conn.ok ? "var(--success)" : "var(--error)" }} />
-                {conn.ok
-                  ? t("tasks.connected", { time: fmtTimeInTz(new Date(conn.at), serverTz) })
-                  : t("tasks.connFailed")}
-              </span>
-            </Tooltip>
-          )}
+          <ConnStatus conn={conn} />
           {hiddenCount > 0 || showUnassigned ? (
             <Button small variant="secondary" onClick={() => setShowUnassigned((v) => !v)}>
               {t(showUnassigned ? "tasks.hideUnassigned" : "tasks.showUnassigned", { n: allTasks.filter(isUnassignedHidden).length })}

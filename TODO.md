@@ -14,6 +14,18 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-78 追加后回读分P数遇B站列表刷新延迟:先间隔重读再换线（issue [#66](https://github.com/fuyucn/douyin-rec/issues/66)）**
+  — 2026-10-18 PR [#261](https://github.com/fuyucn/douyin-rec/pull/261)(仅测试/文档,独立审查 APPROVE):假B站支持回读延迟,已知缺陷场景复现「重复追加一次」。**风险扫描按路径名判 RISK + 修复改追加成功判定 → `needs-decision`**,issue 已写决定三行。
+  **做什么**：读到「没变」先退避重读(约 10 秒)再换线,主控/边录边传/节点侧共用。**验收**：#261 场景转真实用例;退避时长有单测;不改上传硬标准。
+
+- [~] **T-77 主控止血跟进:保留成员回归用例、混合稿件号情形、回读计数（issue [#70](https://github.com/fuyucn/douyin-rec/issues/70)）**
+  — 2026-10-18 第 1 项完成:PR [#259](https://github.com/fuyucn/douyin-rec/pull/259) 已合并(仅测试,独立审查 APPROVE),改回旧剔除逻辑两例变红。**第 2、3 项改上传完成/转人工判定 → `needs-decision`**,issue 已写决定三行。
+  **做什么**：①剔除阶段保留成员的回归用例(已完成) ②台账有稿件号 + 另一成员建稿中被杀的判定 ③回读计数口径。**验收**：各项有测试;不改上传硬标准。
+
+- [~] **T-76 节点失联三态的跟进:脚手架双节点、失联超阈值、立即执行拦截（issue [#69](https://github.com/fuyucn/douyin-rec/issues/69)）**
+  — 2026-10-18 第 3 项完成:PR [#257](https://github.com/fuyucn/douyin-rec/pull/257) 已合并(仅测试/文档,独立审查 APPROVE),e2e 脚手架支持多节点,双节点失联场景对「失联当成空」有区分力。**第 1、2 项改收口/上传触发条件 → `needs-decision`**,issue 已写决定三行。
+  **做什么**：①选中节点失联超阈值转待人工或界面提示 ②立即执行遇选中节点失联返回冲突 ③脚手架双节点(已完成)。**验收**：三项各有测试;变异「失联当成空」时第三项场景变红(已满足)。
+
 - [~] **T-67 主播名含 emoji/全角符号/点号时收口失败:stem 清洗、稿件标题保留原始字符（issue [#171](https://github.com/fuyucn/douyin-rec/issues/171)）**
   — 2026-10-18 认领。PR [#236](https://github.com/fuyucn/douyin-rec/pull/236)(0.0.179,gate PASS,独立审查 APPROVE)。**风险扫描判上传类 → `needs-decision`,等人拍板合并**。
   **做什么**：stem 渲染遇非法文件名字符改为清洗(已合法名原样不变);稿件标题四处(master / 节点 / 队列 / 边录边传)收口为 core 单一函数,未配稿件模板时保留原始字符。
@@ -233,6 +245,10 @@
   运行记录 + job 日志 + 单节点重试 + 失败重跑 + 停止,行内时钟图标入口,推送驱动刷新。
   至此 `/rooms` = Tasks(录)+ Hub(配)+ Hub(看)。**仍未做**:跨房间的处理队列视图
   (现 `/queue` 页独有,「队列的进程」要并进来需再评估是否同页共存或合并)。
+  **追加**(`0.0.182`,#265 / PR #266,2026-10-19):Rooms 补齐 Tasks 的只读展示项 —— 顶栏「已连接 · 时间」
+  (共享 `ConnStatus`,房间拉取与任务轮询分别记录,任一失败即显示连接失败)、房间详情的账号开关/输出目录/
+  开始与创建时间、边录边传会话进度(共享 `RollingProgress`)。**故意不做**:「显示未分配」仅 worker 节点有意义;
+  Rooms 状态栏是房间级模型。待部署后实跑验证。
 
 - [~] **T-30 hub/tasks 协作 + 编排/队列/多节点优化**(分支 `feat/hub-optimization`;M1 进行中) — 计划 `plans/030_hub_tasks_optimization.md`
   (结构化任务 `plans/030_tasks.json`,唯一执行源;20 任务 / 8 组件,plan-loop 校验 ok)。
@@ -462,6 +478,9 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+
+- [x] **T-75 PR 门禁与状态机支持分步实现的票(Part of #N)（issue [#253](https://github.com/fuyucn/douyin-rec/issues/253)）**
+  — 2026-10-18 完成。PR [#255](https://github.com/fuyucn/douyin-rec/pull/255) 已合并(仅脚本/文档/测试,两轮独立审查),issue 已 close。门禁接受 `Part of #N`;`in-review → in-progress` 须写原因;review 合并口径与指标脚本同步。T-74(#53)后续步骤改用此写法。
 
 - [x] **T-60 会话 sidecar 写权威起止时间戳:远端隐藏命令按 UTC 运行导致跨天错日（issue [#87](https://github.com/fuyucn/douyin-rec/issues/87)）**
   — 2026-10-18 完成。PR [#179](https://github.com/fuyucn/douyin-rec/pull/179) 已合并并随 0.0.174 部署；worker 主机为 UTC,而无分段会话的 `startMs` 全部与文件名时间在 Asia/Shanghai 对齐(毫秒级),旧边车回退文件名有回归用例。issue #87 已 close。

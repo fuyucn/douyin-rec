@@ -23,7 +23,7 @@ pnpm test:e2e        # 只跑本目录(~2s);同时也属于 pnpm test
 ## 场景
 
 `merge`(正常合并)、`segments`(分段)、`node-side`(节点侧,含 ssh 假失败回读)、`rolling`(边录边传,含 #57 R1「建稿中被杀、无稿件号 → 主控转人工」)、
-`upload-retry`(超时/网关/不确定/被杀后的重试与降级)。已知缺陷用 `it.fails` 标注并链接 issue
+`upload-retry`(超时/网关/不确定/被杀后的重试与降级)。`inventory-unreachable`(清单失联:单节点 + 双节点(#69),双节点下失联节点不能被当作空清单)。已知缺陷用 `it.fails` 标注并链接 issue
 (现有:#46 重启后孤立分段;#59 节点侧追加分P计数核对已修复并转为真实用例);缺陷修复后用例会开始「意外通过」→ 去掉 `.fails`。
 
 ## 加新场景
@@ -37,6 +37,9 @@ await s.restart();            // 模拟进程重启
 await s.reconcile();
 expectHealthyDone(s, s.onlyKey(), { parts: 3 });
 ```
+
+多节点:`Scenario.create({ extraNodes: ["n2"] })` 后 `s.record({ node: "n2", ... })`;每个节点独立录像目录、
+独立 `LocalTransport`,`wrapTransport(base, s, nodeId)` 按节点包装,`s.recordingFiles(anchor, nodeId)` 查各节点源。
 
 ## 口径说明
 
