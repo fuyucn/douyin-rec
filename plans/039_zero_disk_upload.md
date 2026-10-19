@@ -230,15 +230,15 @@
 ### 致命细节：`complete` 的 `key`
 
 ```json
-{"OK":1,"location":"ugcever/n261018ad32pig....ts","bucket":"ugcever","key":"n261018ad32pig....ts"}
+{"OK":1,"location":"ugcever/n261018ad…ts","bucket":"ugcever","key":"n261018ad…ts"}
 ```
 
 `key` 与 `location` 的区别：
 
 | 字段 | 形状 | 含 bucket 前缀 | 含扩展名 |
 |---|---|---|---|
-| `location` | `ugcever/n261018ad3xxx.ts` | 是 | 是 |
-| `key` | `n261018ad3xxx.ts` | **否** | 是 |
+| `location` | `ugcever/n261018ad…ts` | 是 | 是 |
+| `key` | `n261018ad…ts` | **否** | 是 |
 
 PoC v1 只做了「剥扩展名」没做「剥目录」，且按 `location` 的形状推断 `key` 也带目录，
 结果 stem 变成 `/n261018ad3xxx`（前导斜杠被当成目录）→ `21015`。
@@ -424,7 +424,7 @@ record_segments loop:
 ## B8. 单稿状态机（2026-10-18）
 
 PoC 原先“所有段完成后一次建稿”，不满足“P1 完成即上传、后续 P 继续追加同一稿件”。
-现由 `LivePumpSession` 持久化 `live-pump-<room>.`*.`*.session 状态文件```：
+现由 `LivePumpSession` 持久化 `live-pump-<room>.` + session 状态文件：
 
 - P1 `complete` 后立即建稿，拿到 `bvid/aid` 即落盘；
 - 后续 P `complete` 后先 `GET /x/vupre/web/archive/view` 读取完整 `archive + videos`，
@@ -548,11 +548,11 @@ node dist/... record --room https://live.douyin.com/<房间> --quality origin --
 关键点：续跑按 state 里**已确认最大索引**续号，不重用索引；服务端回读分 P 数与 cid 均连续。
 
 **孤儿 spool（真 bug，本轮跑出来）**：kill 在段中途时该段从未进 state，重启只新建文件，
-旧 spool 永远没人删（实测 `live-pump-1792000000-2.ts`，1.07MB）。修法：CLI 在启动 pump
+旧 spool 永远没人删（实测 `live-pump-<ts>-2.ts`，1.07MB）。修法：CLI 在启动 pump
 前读 state 并清扫；放在 app 层，因为 processors 有静态守护禁止列目录。删除条件极窄：
 本模块命名 + 不在 state + mtime 早于 10 分钟宽限 + unlink 成功；任何异常 best effort。
 
-真实 CLI 验证日志：`清理上次中断遗留的孤儿 spool: live-pump-1792000000-2.ts`，
+真实 CLI 验证日志：`清理上次中断遗留的孤儿 spool: live-pump-<ts>-2.ts`，
 state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用/新鲜/非本模块命名/宽限边界/目录缺失。
 
 ## B15. 真 0 落盘 + 分 P 时长跟随 segment（2026-10-18，commits `2941b12`/`a71bff4`）
