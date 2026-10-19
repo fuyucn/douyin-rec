@@ -372,6 +372,17 @@ export class LivePumpSession {
   get roomKey(): string { return this.state.room; }
   /** Archive title persisted with this session (not the current CLI argument). */
   get archiveTitle(): string { return this.state.title; }
+  /** True once the archive exists or a part/pending upload has been recorded. */
+  get hasArchiveIdentity(): boolean {
+    return !!this.state.bvid || !!this.state.aid || this.state.parts.length > 0 || !!this.state.pending;
+  }
+
+  /** Update the title only while the archive is still fresh; resumed identities stay stable. */
+  setTitleIfFresh(title: string): boolean {
+    if (this.hasArchiveIdentity || !title.trim()) return false;
+    this.state = { ...this.state, title };
+    return true;
+  }
 
   /** Persisted state snapshot (diagnostics and tests). */
   snapshot(): LivePumpState { return JSON.parse(JSON.stringify(this.state)) as LivePumpState; }
@@ -1170,6 +1181,10 @@ export interface StreamAcquirer {
   url?: string;
   /** HTTP headers required by the platform; passed through to ffmpeg. */
   headers?: Record<string, string>;
+  /** Live stream title when the platform exposes it (used for title templates). */
+  title?: string;
+  /** Anchor name when the platform exposes it (used for XML metadata). */
+  owner?: string;
 }
 
 export interface AcquireStreamOpts {
@@ -1262,6 +1277,8 @@ export interface RunLivePumpOptions {
   quality: string;
   spoolDir: string;
   title: string;
+  /** Render the archive title after the first stream acquisition (for `{title}` templates). */
+  titleForLive?: (liveTitle: string) => string;
   tid: number;
   tag: string;
   /** Archive description; omitted/empty = no description. */
@@ -1276,6 +1293,8 @@ export interface RunLivePumpOptions {
   line?: string;
   /** Submit every completed part to the archive. Default true. */
   submit?: boolean;
+  /** Render a part title from its 1-based index; null = keep the generated stem. */
+  partTitle?: (partIndex: number) => string | null;
   log?: (msg: string) => void;
   /** Stop the loop after this many parts (tests / manual runs). */
   shouldStop?: () => boolean | Promise<boolean>;
@@ -1484,6 +1503,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       sleep,
     });
     if (!s.living || !s.url) break;
+    if (o.titleForLive && s.title) {
+      const nextTitle = o.titleForLive(s.title);
+      if (session.setTitleIfFresh(nextTitle)) log(`[live-pump] 稿件标题已按直播标题渲染: ${nextTitle}`);
+    }
     if (seg === 0) log("[状态] 录制中");
 
     const fileName = `live-pump-${Date.now()}-${seg}.ts`;
@@ -1570,7 +1593,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         index: nextIndex,
         spoolPath: `${o.spoolDir.replace(/\/$/, "")}/${fileName}`,
         stem,
-        title: fileName.replace(/\.[^.]+$/, ""),
+        title: o.partTitle?.(nextIndex + 1) ?? fileName.replace(/\.[^.]+$/, ""),
         bytes: r.spooledBytes,
         durationSec: r.spoolDurationSec,
       });

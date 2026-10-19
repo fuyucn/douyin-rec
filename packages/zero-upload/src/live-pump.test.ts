@@ -23,6 +23,7 @@ import {
   LivePumpSession,
   readLivePumpState,
   writeLivePumpState,
+  livePumpStatePath,
   runSegment,
   runLivePump,
   setSpawnForTest,
@@ -493,6 +494,87 @@ describe("archive description survives state and reaches the create request", ()
       });
       expect(r.ok, r.error ?? "").toBe(true);
       expect(createBody?.desc).toBe("hub rule description");
+    } finally {
+      setSpawnForTest(undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
+describe("titleForLive / partTitle reach the archive identity and part submissions", () => {
+  it("setTitleIfFresh only changes a session before any archive identity exists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-fresh-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      const fresh = new LivePumpSession({
+        cookiesPath: join(dir, "cookies.json"), room: "fresh", spoolDir: dir,
+        title: "initial", tid: 21, tag: "x", private: true,
+      });
+      expect(fresh.hasArchiveIdentity).toBe(false);
+      expect(fresh.setTitleIfFresh("live title")).toBe(true);
+      expect(fresh.archiveTitle).toBe("live title");
+      writeLivePumpState(livePumpStatePath(dir, "fresh"), {
+        ...fresh.snapshot(),
+        bvid: "BILIfake1",
+      });
+      const resumed = new LivePumpSession({
+        cookiesPath: join(dir, "cookies.json"), room: "fresh", spoolDir: dir,
+        title: "new title", tid: 21, tag: "x", private: true,
+      });
+      expect(resumed.hasArchiveIdentity).toBe(true);
+      expect(resumed.setTitleIfFresh("another title")).toBe(false);
+      expect(resumed.archiveTitle).toBe("live title");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-renders a fresh archive title with the live title and uses the part template", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-title-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      let createBody: Record<string, unknown> | undefined;
+      const fake = ((input: string | URL | Request, init?: RequestInit) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") {
+          createBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
+        }
+        if (u.pathname === "/x/vupre/web/archive/view") {
+          return Promise.resolve(json({
+            code: 0,
+            data: {
+              archive: { aid: 7, bvid: "BILIfake1", title: String(createBody?.title ?? "t"), tid: 21, tag: "x" },
+              videos: [{ cid: 1, filename: "b/p.ts", title: "P1" }],
+            },
+          }));
+        }
+        return Promise.resolve(json({ code: 0, data: {} }));
+      }) as unknown as typeof fetch;
+
+      installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a), { chunkEvery: 1024, delayMs: 1 });
+      const r = await runLivePump({
+        cookiesPath: join(dir, "cookies.json"), room: "fi", spoolDir: dir,
+        title: "initial", titleForLive: (liveTitle) => `【${liveTitle}】`,
+        tid: 21, tag: "x", private: true,
+        sizeCap: CHUNK, maxMs: 300, maxSegments: 2, quality: "origin", submit: true,
+        spoolMode: "none", fetchImpl: fake,
+        partTitle: (part) => `part-${part}`,
+        fetch: async () => ({ living: true, url: "http://x/y.ts", title: "今晚直播" }),
+        sleep: async () => {},
+      });
+      expect(r.ok, r.error ?? "").toBe(true);
+      expect(createBody?.title).toBe("【今晚直播】");
+      const videos = createBody?.videos as Array<{ title?: string }> | undefined;
+      expect(videos?.[0]?.title).toBe("part-1");
     } finally {
       setSpawnForTest(undefined);
       rmSync(dir, { recursive: true, force: true });

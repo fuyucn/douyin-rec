@@ -289,22 +289,30 @@ program
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
       const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep } = await import("@drec/zero-upload");
-      const { rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta, resolveStreamUploadTitle } = await import("@drec/app");
+      const {
+        rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta,
+        resolveStreamUploadTitle, resolveStreamPartTitle,
+      } = await import("@drec/app");
       // Hub-rule metadata is the same single source as rolling upload (rule upload >
       // hub.config uploadDefaults > built-in defaults). Explicit stream-upload flags still win
       // because they only serve manual debugging.
       const roomSlug = platform.extractRoomSlug(roomToUrl(o.room));
       const streamMeta = resolveStreamUploadMeta(platform.id, roomSlug);
+      // The stored task name is only a fallback; the live stream usually exposes the real
+      // anchor. Both the XML metadata and `{name}` should use the real anchor once known.
+      let anchorName = o.name?.trim() || roomSlug;
       const sizeCap = alignFileSize(Number(o.streamUploadSize ?? DEFAULT_SEGMENT_CAP));
       const cookies = o.cookiesFile ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+      let streamStartMs = Date.now();
+      let streamStarted = false;
       // A resumed session keeps the archive identity from its state file; only a fresh session
       // uses this title. `--name` is the anchor/output name, not a title override, so hub title
       // templates remain effective for named tasks.
       const streamTitle = resolveStreamUploadTitle({
         platform: platform.id,
         roomSlug,
-        anchorName: o.name?.trim() || roomSlug,
-        startMs: Date.now(),
+        anchorName,
+        startMs: streamStartMs,
       });
       console.log(
         `[rec] 流式直传(0 落盘)已开启:room=${o.room} sizeCap=${sizeCap} ` +
@@ -334,7 +342,7 @@ program
           // Anchor to the wall clock at connect time: parts are sealed by byte/duration, so a
           // single session-level axis is the only stable reference for burn/part slicing.
           const startMs = Date.now();
-          writer.open(xmlPath, { anchorName: streamTitle, roomId: platform.extractRoomSlug(roomToUrl(o.room)), videoStartMs: startMs });
+          writer.open(xmlPath, { anchorName, roomId: platform.extractRoomSlug(roomToUrl(o.room)), videoStartMs: startMs });
           writerOpened = true;
           await danmuSource.start(roomToUrl(o.room), {
             quality: (o.quality ?? cfg.quality ?? platform.defaultQuality) as RecordOpts["quality"],
@@ -385,11 +393,36 @@ program
         room: o.room,
         fetch: async (r, q) => {
           const s = await platform.getStream(r, q);
-          return { living: s.living, ...(s.url ? { url: s.url } : {}), ...(s.headers ? { headers: s.headers } : {}) };
+          if (s.owner?.trim()) anchorName = s.owner.trim();
+          if (s.living && s.url && !streamStarted) {
+            streamStartMs = Date.now();
+            streamStarted = true;
+          }
+          return {
+            living: s.living,
+            ...(s.url ? { url: s.url } : {}),
+            ...(s.headers ? { headers: s.headers } : {}),
+            ...(s.title ? { title: s.title } : {}),
+            ...(s.owner ? { owner: s.owner } : {}),
+          };
         },
         quality: (o.quality ?? cfg.quality ?? platform.defaultQuality) as RecordOpts["quality"],
         spoolDir: opts.outDir,
         title: streamTitle,
+        titleForLive: (liveTitle) => resolveStreamUploadTitle({
+          platform: platform.id,
+          roomSlug,
+          anchorName,
+          startMs: streamStartMs,
+          liveTitle,
+        }),
+        partTitle: (partIndex) => resolveStreamPartTitle({
+          platform: platform.id,
+          roomSlug,
+          anchorName,
+          startMs: streamStartMs,
+          partIndex,
+        }),
         tid: Number(o.streamUploadTid ?? streamMeta.tid),
         tag: o.streamUploadTag ?? streamMeta.tag,
         ...(streamMeta.desc ? { desc: streamMeta.desc } : {}),
