@@ -179,7 +179,7 @@ def gate(body: str, title: str = "", files: list[str] | None = None, guard: bool
     errs: list[str] = []
     # `Part of #N` = one step of a staged issue: links the issue without a closing keyword, so a later
     # merge of the base into the default branch cannot close an issue whose other steps are still open.
-    if not re.search(r"(?im)^\s*(?:Fixes|Closes|Resolves|Part of)\s+#\d+", strip_comments(body)):
+    if not re.search(r"(?im)^\s*(?:Fixes|Closes|Resolves|Part\s+of)\s+#\d+", strip_comments(body)):
         errs.append("缺 `Fixes #N` 或分步票的 `Part of #N`(独占一行)")
     secs = split_sections(body)
     for name in REQUIRED_SECTIONS:

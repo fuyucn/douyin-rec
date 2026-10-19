@@ -9,7 +9,7 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 | 值班 Audit | 读 master 与各 worker 的录制状态、queue、`sync_jobs`、磁盘、日志；有证据才开 `incident` | 改代码、删文件、重启、重传、部署 |
 | 优化 Audit | 低频开 `enhancement`，写清代价和验收标准 | 把优化伪装成故障，或直接改代码 |
 | 自动 Triage（heartbeat） | 自动打 `accept` / `decline` / `needs-decision`，`decline` 写原因。**当前 PAUSED，由实现心跳或人代跑** | 对危险类自行 accept；替人拍板 |
-| 自动实现（heartbeat） | 领 `accept` issue（并行 ≤2，见下），开分支和 **开 PR**（`Fixes #N`）；打回后在原分支返工；`待验证` 票部署实跑后按「四不 close」**close issue**（close 的单一负责方） | 合并 PR、部署、顺手做无关改动 |
+| 自动实现（heartbeat） | 领 `accept` issue（并行 ≤2，见下），开分支和 **开 PR**（`Fixes #N`；分步票中间各步 `Part of #N`）；打回后在原分支返工；分步票某步合并后转回 `in-progress` 的票由原会话继续下一步，原会话已不在时实现 heartbeat 按进度评论接手；`待验证` 票部署实跑后按「四不 close」**close issue**（close 的单一负责方） | 合并 PR、部署、顺手做无关改动 |
 | 自动 Review（heartbeat） | 对每个 open PR 派**独立会话**审查（门禁见下）；**审查通过即合并 PR 并把票转 `待验证`**（PR 正文为 `Part of #N` 的分步 PR 例外：转回 `in-progress` 并 `--reason-file` 写明哪步已合并、下一步做什么，不转 `待验证`）；不通过打回并列出缺口 | 改实现代码（只打回，不代改）、部署、跳过门禁合并、close issue |
 | 人 | 部署、危险类拍板（`needs-decision`） | —— |
 
@@ -63,7 +63,7 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 4. **自动实现认领**：实现 heartbeat 扫到 `accept` 且无 `in-progress` 的票即认领（并行 ≤2、范围不重叠），
    打 `in-progress` 并留言「哪个 agent、何时开始、范围、模型」。**人不需要点名派活**；
    只在想指定别的会话做时手动接管。
-5. **实现会话只做这一条**，开分支和 PR，PR 正文写 `Fixes #N`（分步实现的票每步写 `Part of #N`，见下）。不合并 PR（合并归 review 会话）、
+5. **实现会话只做这一条**，开分支和 PR，PR 正文写 `Fixes #N`（分步实现的票中间各步写 `Part of #N`、最后一步写 `Fixes #N`，见下）。不合并 PR（合并归 review 会话）、
    不部署、不顺手做无关改动。
 6. **代码做完先在 issue 留言**：做了什么、评论里哪条没采纳、为什么，然后按「四不 close」自查。
 7. **自动 Review 派独立会话审查**（`fork_context: false` 的新会话，只读审查、不改实现），
@@ -83,7 +83,7 @@ GitHub issue 是队列和证据。`TODO.md` 只记录已经 `accept` 的实现�
 
 `accept` 只是「可以做」，不等于「有人在做」——看板上区分这两件事靠 `in-progress` 标签。
 自 2026-10-12 起，`accept` → `in-progress` 这一步由实现 heartbeat 自动完成，不再等人指定；
-`in-progress` → `in-review`（PR 已开，实现侧打）→ **合并 → `待验证`** 由 review heartbeat 自动完成，`待验证` → **close** 由实现 heartbeat
+`in-progress` → `in-review`（PR 已开，实现侧打）→ **合并 → `待验证`**（分步 PR 转回 `in-progress`）由 review heartbeat 自动完成，`待验证` → **close** 由实现 heartbeat
 在部署实跑后收口，人只在危险类拍板与部署时出场。
 **文档/测试类票**（无需部署实跑）合并后，由实现心跳当轮按「四不 close」收口，无需等部署。
 
