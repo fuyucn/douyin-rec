@@ -21,8 +21,8 @@ const age = (name: string, msAgo: number): void => {
 
 describe("sweepOrphanSpools", () => {
   it("删除孤儿,保留 state 引用的、新鲜的、非本模块命名的文件", () => {
-    writeFileSync(join(dir, "live-pump-17000000001-2.ts"), "orphan");
-    age("live-pump-17000000001-2.ts", ORPHAN_SPOOL_GRACE_MS + 60_000);
+    writeFileSync(join(dir, "live-pump-1000001-2.ts"), "orphan");
+    age("live-pump-1000001-2.ts", ORPHAN_SPOOL_GRACE_MS + 60_000);
 
     writeFileSync(join(dir, "live-pump-1700000000001-3.ts"), "fresh"); // 另一进程可能正在写
     writeFileSync(join(dir, "someone-else.ts"), "x");
@@ -34,18 +34,18 @@ describe("sweepOrphanSpools", () => {
 
     const removed = sweepOrphanSpools({ spoolDir: dir, knownSpoolPaths: [knownPath] });
 
-    expect(removed).toEqual(["live-pump-17000000001-2.ts"]);
-    expect(existsSync(join(dir, "live-pump-17000000001-2.ts"))).toBe(false);
+    expect(removed).toEqual(["live-pump-1000001-2.ts"]);
+    expect(existsSync(join(dir, "live-pump-1000001-2.ts"))).toBe(false);
     expect(existsSync(join(dir, "live-pump-1700000000001-3.ts"))).toBe(true);
     expect(existsSync(join(dir, "someone-else.ts"))).toBe(true);
     expect(existsSync(knownPath)).toBe(true);
   });
 
   it("宽限期边界:恰好等于宽限期的文件保留(只用严格更旧才删)", () => {
-    writeFileSync(join(dir, "live-pump-17000000003-5.ts"), "edge");
-    age("live-pump-17000000003-5.ts", ORPHAN_SPOOL_GRACE_MS - 5_000);
+    writeFileSync(join(dir, "live-pump-1000003-5.ts"), "edge");
+    age("live-pump-1000003-5.ts", ORPHAN_SPOOL_GRACE_MS - 5_000);
     expect(sweepOrphanSpools({ spoolDir: dir, knownSpoolPaths: [] })).toEqual([]);
-    expect(existsSync(join(dir, "live-pump-17000000003-5.ts"))).toBe(true);
+    expect(existsSync(join(dir, "live-pump-1000003-5.ts"))).toBe(true);
   });
 
   it("目录不存在 → 不抛、返回空(启动路径永不因清扫失败)", () => {
