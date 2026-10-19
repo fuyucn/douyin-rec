@@ -69,8 +69,8 @@
 ## Tasks
 
 - [ ] T0 先修既有风险(不删任何文件,**与派生命名无关**,新旧文件一并覆盖):
-  - orphan-cleanup:**空 xml 永不凭副本证据删除**;非空 xml 的「副本证据」只认**另一根目录(recordings ↔ stage)下同名且字节完全相同**的非空文件;
-    逐段 / 派生切片与 stage 合并产物(`{outputStem}.xml`,datetime 模板下会与 S1 同名且含 S2 弹幕)都不算。
+  - orphan-cleanup:**空 xml 永不凭副本证据删除** —— 即 `emptyXml` 类别从此不再删除任何文件(非空 xml 本来就不进删除候选),维护页把该类显示为「保留」;
+    逐段 / 派生切片与 stage 合并产物(`{outputStem}.xml`,datetime 模板下会与 S1 同名且含 S2 弹幕)原先被当作副本证据,正是误删的来源。
     两份空文件字节相同,若互认为副本会被同时判删(删光最后一份),故空文件一律保留;同名不同内容 = 不同文件。
   - `deriveStageProducts`:所有候选(含精确名)都必须 `segmentIndexOf < 0` 且不以 `.derived.xml` 结尾; <!-- issue-guard: allow -->
     优先锁定的输出 stem / `sessionBases[0] + ".xml"`,其次精确 `{dateName}.xml`,再按 `sessionBases` 固定顺序取 stamped xml;
@@ -86,7 +86,7 @@
 ## 另记(不在本计划)
 
 - orphan-cleanup 的基名索引不区分目录:会话基名含时分秒,只有按日命名的产物(派生 / 合并产物)可能跨场同名;
-  T0 改为「空 xml 永不凭副本证据删;非空副本只认另一根目录下同名且字节相同」后一并消除,不再另开票。
+  T0 改为「空 xml 永不凭副本证据删,`emptyXml` 类别停止删除」后一并消除,不再另开票。
 
 ## 待拍板
 
