@@ -92,7 +92,8 @@ export class FakeBiliup {
   countAvailable = true;
   /**
    * 分 P 列表刷新延迟(#66):每次 append 提交后,接下来这么多次 `countVideoParts` 仍返回提交前的分 P 数。
-   * 0 = 立即可见(缺省)。
+   * 0 = 立即可见(缺省)。按读次数计、不按时间:能验证「多读几次」,不能验证退避时长。
+   * 下一次 append 前的基线读也会消耗残余延迟(读到偏小的基线),与真实站点的延迟刷新一致。
    */
   countLagReads = 0;
   private stale = new Map<string, { count: number; left: number }>();
