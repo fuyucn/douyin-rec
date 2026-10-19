@@ -114,3 +114,16 @@ describe("节点卡片的房间行", () => {
     expect(r.map((n) => n.syncLag)).toEqual([true, false, false]);
   });
 });
+
+describe("room label priority (#53): task name before the cached anchor name", () => {
+  it("task name wins; no task name → anchor; neither → room id", () => {
+    const mk = (room: string, name: string | null, anchorName: string | null) =>
+      ({ room, name, anchorName, enabled: true, recordingWorkers: [{ workerId: "a", workerName: "A", state: "recording" }] }) as unknown as Task;
+    const r = summarizeNodes([
+      mk("https://live.douyin.com/1", "任务名", "主播名"),
+      mk("https://live.douyin.com/2", null, "主播名2"),
+      mk("https://live.douyin.com/3", null, null),
+    ], {}, [], "");
+    expect(r[0]!.rooms.map((x) => x.label).sort()).toEqual(["3", "主播名2", "任务名"].sort());
+  });
+});
