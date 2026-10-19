@@ -4,7 +4,7 @@ import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { formatBiliTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
@@ -994,23 +994,19 @@ async function runPipelineInner(
     existingStem,
   });
   // 投稿标题单独渲染:stage 文件名要严格字符集,B 站标题可含空格/标点/emoji。
-  // 稿件名解析顺序:
-  //   1. submissionTitleTemplate(独立配置)—— 用 sessionBase 重渲染,不受文件名快照影响;
-  //   2. 没配 → 回落文件名规则(历史行为):模板含 {title} 且无锁定 stem 时走宽松渲染,
-  //      否则直接用已锁定的文件名 stem(保证续跑稳定)。
-  const subTpl = (cfg.uploadMeta.submissionTitleTemplate ?? "").trim();
+  // Resolution order lives in core `resolveSubmissionTitle` (shared with node/rolling paths).
   const titleCtx = {
     sessionBase: earliest.rec.sessionBase,
     startMs: earliest.rec.startMs || b.startMs,
     timeZone: cfg.timeZone,
     liveTitle: earliest.rec.title,
   };
-  const usesLiveTitle = (cfg.uploadMeta.titleTemplate ?? "").includes("{title}");
-  const uploadTitle = subTpl
-    ? formatBiliTitle(subTpl, titleCtx)
-    : usesLiveTitle && !existingStem
-      ? formatBiliTitle(cfg.uploadMeta.titleTemplate, titleCtx)
-      : dateName;
+  const uploadTitle = resolveSubmissionTitle({
+    submissionTemplate: cfg.uploadMeta.submissionTitleTemplate,
+    template: cfg.uploadMeta.titleTemplate,
+    stem: dateName,
+    ctx: titleCtx,
+  });
   ledger.setOutputStem(streamKey, dateName);
   jlog(`产物 stem: ${dateName}`);
   if (uploadTitle !== dateName) jlog(`投稿标题: ${uploadTitle}`);

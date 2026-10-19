@@ -5,7 +5,7 @@
  * wins), take one advance step, and leave the rest to the upload poller. Anything not confirmed safe keeps
  * the existing blocking path. Never uploads directly, never deletes anything.
  */
-import { formatBiliTitle, processTimeZone, resolveOutputStem, sanitizeStreamKey, type TitleContext } from "@drec/core";
+import { processTimeZone, resolveOutputStem, resolveSubmissionTitle, sanitizeStreamKey, type TitleContext } from "@drec/core";
 import type { JobState } from "./ledger.js";
 import type { NodeSideUploadArgs } from "./node-side-upload.js";
 import { completeFromDispatch } from "./node-upload-complete.js";
@@ -24,8 +24,7 @@ export function queueUploadInput(o: NodeSideUploadArgs): UploadInput {
   };
   const tpl = cfg.uploadMeta.titleTemplate ?? "";
   const stem = resolveOutputStem({ template: tpl, ...ctx });
-  const sub = (cfg.uploadMeta.submissionTitleTemplate ?? "").trim();
-  const title = sub ? formatBiliTitle(sub, ctx) : tpl.includes("{title}") ? formatBiliTitle(tpl, ctx) : stem;
+  const title = resolveSubmissionTitle({ submissionTemplate: cfg.uploadMeta.submissionTitleTemplate, template: tpl, stem, ctx });
   const expectedDurationSec = winnerMembers.reduce((s, m) => s + (m.rec.durationSec ?? 0), 0);
   return {
     prep: {
