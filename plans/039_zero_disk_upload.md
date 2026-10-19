@@ -376,10 +376,10 @@ record_segments loop:
 
 | 轮次 | 房间 | 配置 | 结果 |
 |---|---|---|---|
-| 单段 | 63171491268 | 100MiB cap | 1 稿 1 P；0 次 601 |
-| 多段 | 51077534924 | 5 × 60s | 1 稿 **5 P**，durs=[62,62,62,63,62]；0 次 601 |
-| 断流 | 553144832992 | 4 × 60s，中途 kill ffmpeg | 1 稿 **4 P**，durs=[63,63,51,64]；自动重取流续录 |
-| TS 流式 | 553144832992 | 3 × 60s | 3 段成功（但每段丢尾，见 B4） |
+| 单段 | <房间> | 100MiB cap | 1 稿 1 P；0 次 601 |
+| 多段 | <房间> | 5 × 60s | 1 稿 **5 P**，durs=[62,62,62,63,62]；0 次 601 |
+| 断流 | <房间> | 4 × 60s，中途 kill ffmpeg | 1 稿 **4 P**，durs=[63,63,51,64]；自动重取流续录 |
+| TS 流式 | <房间> | 3 × 60s | 3 段成功（但每段丢尾，见 B4） |
 
 ## B4. 修掉的真 bug（都是实测打出来的，不是推想）
 
@@ -424,7 +424,7 @@ record_segments loop:
 ## B8. 单稿状态机（2026-10-18）
 
 PoC 原先“所有段完成后一次建稿”，不满足“P1 完成即上传、后续 P 继续追加同一稿件”。
-现由 `LivePumpSession` 持久化 `live-pump-<room>.state.json`：
+现由 `LivePumpSession` 持久化 `live-pump-<room>.`*.state.json``：
 
 - P1 `complete` 后立即建稿，拿到 `bvid/aid` 即落盘；
 - 后续 P `complete` 后先 `GET /x/vupre/web/archive/view` 读取完整 `archive + videos`，
@@ -437,7 +437,7 @@ PoC 原先“所有段完成后一次建稿”，不满足“P1 完成即上传�
 测试覆盖：P1→P2→P3 同一稿件、完整 `videos` 列表、确认后清理、失败保留、
 create/append 崩溃恢复、标题歧义、网络不可达、WAL 写失败。
 
-## B9. 真实单稿多分 P 验证（2026-10-18，房间 491554018246）
+## B9. 真实单稿多分 P 验证（2026-10-18，房间 <房间>）
 
 - 一次在线跑出**同一稿件 5 个分 P**：`BV1xx`（aid `117463530342138`，私稿）。
 - 服务端 `x/vupre/web/archive/view` 回读 `partCount=5`，5 个 cid 各不相同；P1 建稿、后续逐个 `edit` 追加。
@@ -446,7 +446,7 @@ create/append 崩溃恢复、标题歧义、网络不可达、WAL 写失败。
 - 真 bug（真实跑出来）：续跑/恢复后 CLI 用本地段号 `index=seg` 提交 → 复用已确认索引、
   覆盖分 P 记录、新段 spool 泄漏。改为按已确认最大索引续号 + 回归用例。
 
-## B10. 接成任务开关（2026-10-18，commit `cc2c54f`）
+## B10. 接成任务开关（2026-10-18，commit `<sha>`）
 
 此前 0 落盘只能靠隐藏命令 `_live-pump` 手动跑；现在 `streamUpload` 是**一等任务字段**，
 走完整任务链路：DB 列 → `TaskStore` → hub 同步 → 录制子进程 argv → Web 表单 → API 门禁。
@@ -460,7 +460,7 @@ create/append 崩溃恢复、标题歧义、网络不可达、WAL 写失败。
 - **实验性徽标**：登记 `stream-upload`（layer=`task`，观察期 168h——丢的是没传完的那一段，没有源文件可回退）。
 - 旧库/旧节点向后兼容：`ensureColumn` 默认 0；旧 master 不下发该字段 → 节点按 false（照旧落盘）。
 
-真实实跑（容器内，房间 64442011833，私稿）：
+真实实跑（容器内，房间 <房间>，私稿）：
 
 | 场景 | 命令 | 结果 |
 |---|---|---|
@@ -469,7 +469,7 @@ create/append 崩溃恢复、标题歧义、网络不可达、WAL 写失败。
 
 第二行是对 `buildRecordArgs` 实际下发 argv 的直接验证（同一参数集）。
 
-## B11. 弹幕落盘 + 取流超时（2026-10-18，commit `2c70271`）
+## B11. 弹幕落盘 + 取流超时（2026-10-18，commit `<sha>`）
 
 **弹幕**：0 落盘路径此前绕过 `RecordingSession`，`.xml` 完全不产出。现在 `record --stream-upload`
 自己连平台弹幕（`platform.connectDanmu`），用**同一个** `XmlDanmuWriter`（从 `@drec/manager` 公开导出）
@@ -481,7 +481,7 @@ create/append 崩溃恢复、标题歧义、网络不可达、WAL 写失败。
 弹幕 xml 还在增长，却再也不录下一段，也没有任何报错。现在每次取流有 30s 上限，超时与抛错都按
 一次失败进入退避（5s/10s/20s…），不再冻结整个 pump。
 
-**真实验证（房间 64442011833，私稿 `BV1xx`）**：
+**真实验证（房间 <房间>，私稿 `BV1xx`）**：
 
 | 项 | 结果 |
 |---|---|
@@ -501,7 +501,7 @@ typecheck / arch:check / bundle 全绿。
 `TaskManager` 真正 spawn 的子进程 argv 含 `--stream-upload 1`：
 
 ```
-node dist/... record --room https://live.douyin.com/64442011833 --quality origin --engine ffmpeg
+node dist/... record --room https://live.douyin.com/<房间> --quality origin --engine ffmpeg
   --danmu 1 --out .../recordings --segment 1800 --name su-e2e --stream-upload 1
 ```
 
@@ -517,7 +517,7 @@ node dist/... record --room https://live.douyin.com/64442011833 --quality origin
 **结论**：`streamUpload` 当前是**单机/手动任务**能力，接 hub 规则必须先补
 「上传结果如何回流 hub 台账」——已记入 TODO 下一步。
 
-## B13. 更正与根因（2026-10-18，commit `221bfa4`）
+## B13. 更正与根因（2026-10-18，commit `<sha>`）
 
 **更正 B11 的归因**：B11 把「第 1 段后静默停住」写成「取流无超时」。这个归因不完整 ——
 实测 `probe` 正常、进程也没有 socket 在等网络。真正根因是**超时定时器被 unref**：
@@ -535,7 +535,7 @@ node dist/... record --room https://live.douyin.com/64442011833 --quality origin
 **教训**：给「可能永不 settle 的 Promise」加超时兜底时，**兜底定时器本身必须 ref**；
 否则兜底机制会在最需要它的时候把事件循环放空。
 
-## B14. 重启续录验证 + 孤儿 spool（2026-10-18，commit `793e433`）
+## B14. 重启续录验证 + 孤儿 spool（2026-10-18，commit `<sha>`）
 
 **重启续录（真实）**：私稿 `BV1xx`，同一 spool 目录连续三次启动：
 
@@ -621,7 +621,7 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 
 门禁：`pnpm test` **2965 passed / 42 skipped**，typecheck / arch:check / bundle 绿。
 
-## B17. 多房间并发（2026-10-18，commit `7a28ebc`）
+## B17. 多房间并发（2026-10-18，commit `<sha>`）
 
 两个房间并发跑 `runLivePump(spoolMode:"none")`，各自独立 spool 目录、共享同一个假 B 站：
 
@@ -633,7 +633,7 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 即：**不串稿**（两个不同 BV）、状态互不污染、并发下仍是真 0 落盘。
 回归用例已做变异验证：让假服务对两个房间返回同一 BV → 用例失败。
 
-## B18. hub 守卫补洞（2026-10-18，commit `d07a97c`）
+## B18. hub 守卫补洞（2026-10-18，commit `<sha>`）
 
 **真漏洞**：`streamUpload` 不能当 hub 规则源的守卫写在 `ctx.recordingError` 里，
 房间编辑与规则 PATCH 都调它，但 **`createHubRule` 自己内联查了一遍任务存在性**，
@@ -660,7 +660,7 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 `parseOutputFormat` 之前就 `return`，所以非法值不会 `exit 2` —— 不是 bug，
 改动已回退，不留无谓 churn。
 
-## B20. 停止不留孤儿 ffmpeg（2026-10-18，commit `725a506f`）
+## B20. 停止不留孤儿 ffmpeg（2026-10-18，commit `<sha>`）
 
 **真缺口**：0 落盘路径在安装共享 SIGINT/SIGTERM handler **之前**就 `return`，
 所以停止一个 0 落盘任务时，正在录的 ffmpeg 没人杀 → 孤儿进程继续写盘。
@@ -674,7 +674,7 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 实测（容器内真实 ffmpeg）：abort 后分 P 干净失败、`ffmpeg_procs=0`（无孤儿）。
 回归用例 + 变异验证（去掉已中止兜底即超时失败）。
 
-## B21. 真 0 落盘在线验证（2026-10-18，房间 27471901912）
+## B21. 真 0 落盘在线验证（2026-10-18，房间 <房间>）
 
 **缺口 1 已补**：真实直播间 + 真实 B 站投稿，`--stream-upload-spool none`。
 
@@ -684,7 +684,7 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 | SIGKILL 中断 | 段中途被杀 |
 | 重启续录 | `resumed state (10 parts)`，又 6 个分 P 追加到**同一稿件** |
 | 服务端回读 | `BV1xx`，**16 个分 P**、16 个不同 cid、duration 356s、state -6（审核中） |
-| 磁盘 | 目录里只有 `state.json` + `xml`，**视频文件 0 个** |
+| 磁盘 | 目录里只有 ``*.state.json`` + `xml`，**视频文件 0 个** |
 
 即：真 0 落盘 + 中断续传 + 同一稿件，全部在真实链路上成立。
 
@@ -706,17 +706,17 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 收尾处补一次 `signal.aborted` 归类（否则 `sealedBy` 恒为 `eof`，守卫永不触发）；
 ② 末段 `sealedBy=abort` 且已有分 P 入稿 → 按成功收尾（该段仍带 `uploadError` 上报，不隐瞒）。
 
-在线验证（房间 27471901912，真 0 落盘）：SIGTERM 后 `ok:true` + `台账已记录: BV1xx`，
+在线验证（房间 <房间>，真 0 落盘）：SIGTERM 后 `ok:true` + `台账已记录: BV1xx`，
 服务端回读 4 个分 P / 152s / 4 个不同 cid。修前同场景 `ok:false` 且台账不写。
 
-## B23. 多房间在线并发 + 21186 限流 + 退避留痕（2026-10-18，commit `00935811`）
+## B23. 多房间在线并发 + 21186 限流 + 退避留痕（2026-10-18，commit `<sha>`）
 
 **在线多房间并发（缺口已补）**：两个直播间同时在线，各跑 `spoolMode:"none"`：
 
 | 房间 | 稿件 | 分 P | 时长 | cid | 盘上视频文件 |
 |---|---|---|---|---|---|
-| 27471901912 | `BV1xx` | 3 | 119s | 3 个不同 | 0 |
-| 63171491268 | `BV1xx` | 3 | 100s | 3 个不同 | 0 |
+| <房间> | `BV1xx` | 3 | 119s | 3 个不同 | 0 |
+| <房间> | `BV1xx` | 3 | 100s | 3 个不同 | 0 |
 
 两个不同稿件、互不串稿、并发下仍零落盘。
 
@@ -731,7 +731,7 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 
 回归：21186 识别用例，已做变异验证（同时去掉 code 与中文匹配即失败）。
 
-## B24. 同房间双 0 落盘任务 guard（2026-10-18，commit `56461874`）
+## B24. 同房间双 0 落盘任务 guard（2026-10-18，commit `<sha>`）
 
 **实测确认的风险**：同一房间被两个任务各录一次（state 文件按 `outDir` 隔离、互不知情），
 产出**两个内容重复的稿件**（`BV1xx` / `BV1xx`）。B 站没有删稿 API，
@@ -807,11 +807,11 @@ Node 对无人处理的 SIGUSR2 的默认动作是**立即终止进程**（实�
 
 ## B26. 拆包后的真实环境验证（2026-10-19）
 
-在独立构建的验证容器（`--network host`，镜像含本分支代码）内跑真实路径，房间 51077534924（在播）。
+在独立构建的验证容器（`--network host`，镜像含本分支代码）内跑真实路径，房间 <房间>（在播）。
 
 | 验证项 | 结果 |
 |---|---|
-| 真 0 落盘上传（`--stream-upload-spool none`） | 稿件 `BV1xx`，9.9MiB / 1 块，`无本地 spool(真 0 落盘)`；盘上**只有 state.json + 弹幕 xml，零视频文件** |
+| 真 0 落盘上传（`--stream-upload-spool none`） | 稿件 `BV1xx`，9.9MiB / 1 块，`无本地 spool(真 0 落盘)`；盘上**只有 `*.state.json` + 弹幕 xml，零视频文件** |
 | 多分 P 续同一稿件 | 容器手工跑 `_live-pump` → `BV1xx`，20.0MiB / 2 块 / 119s，`usedFileFallback=false` / `backpressured=false` / `sessionLeaked=false`，spool 已删 |
 | serve 真实 spawn 的参数 | `[rec] 流式直传(0 落盘)已开启:… sizeCap=… sec=90(--segment) tid=21`（证明任务开关 → argv 接线通） |
 | 同房间 guard（B24）在真实 serve 下 | `拒绝启动 id=5:同一房间已有 0 落盘任务 id=4(zdverify4)在录,同时录会产出两个重复稿件且无法删除` |
