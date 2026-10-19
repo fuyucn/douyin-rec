@@ -59,6 +59,9 @@
   — 2026-10-18 PR [#245](https://github.com/fuyucn/douyin-rec/pull/245) 已合并(仅脚本/测试/文档,不 bump)。用户按建议选 A:接受更严的风险扫描,函数签名启发式与「仅改 value 行」的凭证漏检另开 [#269](https://github.com/fuyucn/douyin-rec/issues/269) 跟进。
   **做什么**：json/生成物豁免收窄、登录凭证键值规则、allow 标记仅测试夹具;风险扫描敏感文件清单、改名/权限/二进制路径、按 hunk + 函数签名匹配、异常 diff fail closed;文档同步。**验收**：37 条正反用例 + 变异验证。
 
+- [~] **T-82 node-upload-poll 用例 CI 偶发失败:派发等待不确定（issue [#271](https://github.com/fuyucn/douyin-rec/issues/271)）**
+  — 2026-10-18 PR [#272](https://github.com/fuyucn/douyin-rec/pull/272):假录像终点在 2026-06,默认 10 分钟重连窗会按宿主时钟跳过该场 → 显式关闭重连窗、等待放宽到 5 秒,断言消息带派发次数与台账状态。
+
 - [~] **T-81 风险扫描函数签名启发式补全 + 仅改 value 行的凭证漏检（issue [#269](https://github.com/fuyucn/douyin-rec/issues/269)）**
   — 2026-10-18 立项(#74 选 A 的跟进),纯脚本与测试。**做什么**:收集 hunk 内全部签名行、补属性箭头与多行方法签名;`name` 在上下文、`value` 为新增行时命中凭证规则。**验收**:每类正反样例 + 现有 review-gates 套件不回退。
 
