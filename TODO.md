@@ -498,6 +498,7 @@
   — 2026-10-18 完成。PR [#233](https://github.com/fuyucn/douyin-rec/pull/233) 已合并（独立审查两轮，第二轮 MERGE）；`--from` 必须匹配当前标签、旧口径 closeout 文档化、PR 模板提示。issue #81 已 close。
 - [x] **T-59 收口:扫描与拉取之间会话边车消失导致 job 失败（issue [#146](https://github.com/fuyucn/douyin-rec/issues/146)）**
   — 2026-10-18 完成。PR [#174](https://github.com/fuyucn/douyin-rec/pull/174) 已合并并随 0.0.174 部署；边车消失的确认缺失 / 无法确认 / 混合轮由 orchestrator 回归套件覆盖，隔离多节点 e2e S1 19/19、S2 28/28、S3 40/40 全绿。issue #146 已 close。
+  残余(#176):PR [#222](https://github.com/fuyucn/douyin-rec/pull/222) 处理 —— 成员剔除只在确认缺失时删除,探测失败保留成员;跳过写独立 `skipped` phase,前端不再显示为 `pull/done`。
 - [x] **T-42 节点清单三态：失联/超时不再当「无录像」（issue [#27](https://github.com/fuyucn/douyin-rec/issues/27)）**
   — 2026-10-18 完成。PR [#67](https://github.com/fuyucn/douyin-rec/pull/67) 已合并并随 0.0.174 部署；在干净隔离多节点集群（真 sshd、internal 网络、假 biliup）跑 S2：`docker stop` 拒绝路径与 `docker pause` 超时路径均判定 unreachable，28/28 通过；失联期间不建 job/不选优/不删源，恢复后补收口且无重复上传。issue #27 已 close。
 - [x] **T-63 会话边车并发写入导致 nodeFormat 丢失（issue [#224](https://github.com/fuyucn/douyin-rec/issues/224)，#223 v4 PR0）**

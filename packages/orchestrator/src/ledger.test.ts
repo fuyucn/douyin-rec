@@ -320,3 +320,20 @@ describe("sweepStale 崩溃恢复", () => {
     l.close();
   });
 });
+
+describe("backfillNodeStates", () => {
+  it("a skipped step carries no node verdict; an unfinished start still backfills as failed (issue #176)", () => {
+    const l = fresh();
+    l.upsertPending("k1");
+    l.logStep("k1", "merge", "start");
+    l.logStep("k1", "merge", "done");
+    l.logStep("k1", "burn_danmu", "skipped");
+    l.logStep("k1", "burn_livechat", "start");
+    l.backfillNodeStates("k1");
+    const states = new Map(l.getNodeStates("k1").map((n) => [n.node, n.state]));
+    expect(states.get("merge")).toBe("done");
+    expect(states.has("burn_danmu")).toBe(false);
+    expect(states.get("burn_livechat")).toBe("failed");
+    l.close();
+  });
+});
