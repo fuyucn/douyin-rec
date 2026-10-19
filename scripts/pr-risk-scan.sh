@@ -68,7 +68,8 @@ SIG_HEAD_RE='^[[:space:]]*((export|async|public|private|protected|static|readonl
 SIG_CLOSE_RE='^[[:space:]]*(\}[^)]*)?\)'
 NOT_SIG_RE='^[[:space:]]*(if|for|while|switch|catch|else|return|do|await|new)([[:space:]]|\(|$)'
 pending_head=""   # unclosed multi-line head awaiting its closing line
-sigs=()           # every signature-like line seen in the current hunk (deduped, newest 200)
+delta=()          # signature-like lines seen since the last change in the current hunk
+hit_sigs=()       # signatures seen up to each change: all of them are matched when the hunk flushes
 head_left=0
 old_left=0
 new_left=0
@@ -102,7 +103,7 @@ flush_hunk() {
   if (( hunk_changed )) && [[ -n "$cur" && "$cur" != "$SELF" ]] && content_scanned "$cur"; then
     # Every signature in the hunk participates: a change deep inside a second function (or inside a
     # callback that itself has a signature) must still see all enclosing names.
-    if (( ${#sigs[@]} )); then hunk="$(printf '%s\n' "${sigs[@]}")"$'\n'"$hunk"; fi
+    if (( ${#hit_sigs[@]} )); then hunk="$(printf '%s\n' "${hit_sigs[@]}")"$'\n'"$hunk"; fi
     local pair label re
     for pair in "上传:$UPLOAD_RE" "清理/删除:$DELETE_RE" "ledger 状态转换:$LEDGER_RE"; do
       label="${pair%%:*}"; re="${pair#*:}"
@@ -115,7 +116,8 @@ flush_hunk() {
   hunk_changed=0
   pre=()
   after=0
-  sigs=()
+  delta=()
+  hit_sigs=()
 }
 
 # `diff --git a/X b/Y` (optionally quoted): the only header present for mode-only and binary changes.
@@ -141,7 +143,8 @@ start_hunk() {
   hunk="${1#@@*@@}"$'\n'
   head_left=$HEAD_KEEP
   pending_head=""
-  sigs=()
+  delta=()
+  hit_sigs=()
   old_left=1; new_left=1
   if [[ "$1" =~ ^@@\ -[0-9]+(,([0-9]+))?\ \+[0-9]+(,([0-9]+))?\ @@ ]]; then
     old_left="${BASH_REMATCH[2]:-1}"; new_left="${BASH_REMATCH[4]:-1}"
@@ -176,16 +179,10 @@ while IFS= read -r line; do
     if [[ -n "$pending_head" && -z "$sig_new" && "$body" =~ $SIG_CLOSE_RE && "$body" != *";"* && "$body" =~ (\{|=>)[[:space:]]*$ ]]; then
       sig_new="$pending_head"; pending_head=""
     elif [[ "$body" == *";"* ]]; then pending_head=""; fi
-    if [[ -n "$sig_new" ]]; then
-      sig_seen=0
-      for sig in ${sigs[@]+"${sigs[@]}"}; do [[ "$sig" == "$sig_new" ]] && { sig_seen=1; break; }; done
-      # Bounded, but drop the OLDEST: a class-sized hunk can hold hundreds of methods and the one that
-      # encloses the change is the most recent, so refusing new entries would lose exactly that one.
-      if (( ! sig_seen )); then
-        (( ${#sigs[@]} >= 200 )) && sigs=("${sigs[@]:1}")
-        sigs+=("$sig_new")
-      fi
-    fi
+    [[ -n "$sig_new" ]] && delta+=("$sig_new")
+    # A change commits the signatures seen so far; signatures after the last change never join, so a
+    # class-sized hunk cannot push the enclosing signature out (no cap needed for correctness).
+    if [[ "$line" == [+-]* && ${#delta[@]} -gt 0 ]]; then hit_sigs+=("${delta[@]}"); delta=(); fi
     if (( head_left > 0 )); then
       # With --function-context the hunk opens on the enclosing function's signature: always match it.
       hunk+="$body"$'\n'; head_left=$((head_left - 1))

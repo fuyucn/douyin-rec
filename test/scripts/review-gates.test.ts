@@ -222,10 +222,12 @@ describe("pr-risk-scan.sh", () => {
     ].join("\n");
     expect(risk(d).status).toBe(0);
   });
-  it("hunk 里有几百个方法时,最近的签名不被上限挤掉", () => {
+  it("改动前后各有几百个方法时,所在函数签名不被挤掉", () => {
     const methods = Array.from({ length: 250 }, (_, i) => [`  m${i}() {`, "  }"]).flat();
     const filler = Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`);
-    const lines = [" export class Big {", " const a = 1;", " const b = 2;", ...methods, "  cleanupStage() {", ...filler, "-    const n = 1;", "+    const n = 2;"];
+    const after = Array.from({ length: 250 }, (_, i) => [`  z${i}() {`, "  }"]).flat();
+    // Signatures AFTER the change must not push the enclosing one out either.
+    const lines = [" export class Big {", " const a = 1;", " const b = 2;", ...methods, "  cleanupStage() {", ...filler, "-    const n = 1;", "+    const n = 2;", ...after];
     const n = lines.length - 1;
     const d = `diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1,${n} +1,${n} @@\n${lines.join("\n")}\n`;
     expect(risk(d).status).toBe(1);
