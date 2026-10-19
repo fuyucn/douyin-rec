@@ -68,7 +68,7 @@ SIG_HEAD_RE='^[[:space:]]*((export|async|public|private|protected|static|readonl
 SIG_CLOSE_RE='^[[:space:]]*(\}[^)]*)?\)'
 NOT_SIG_RE='^[[:space:]]*(if|for|while|switch|catch|else|return|do|await|new)([[:space:]]|\(|$)'
 pending_head=""   # unclosed multi-line head awaiting its closing line
-sigs=()           # every signature-like line seen in the current hunk (deduped, capped)
+sigs=()           # every signature-like line seen in the current hunk (deduped, newest 200)
 head_left=0
 old_left=0
 new_left=0
@@ -179,7 +179,12 @@ while IFS= read -r line; do
     if [[ -n "$sig_new" ]]; then
       sig_seen=0
       for sig in ${sigs[@]+"${sigs[@]}"}; do [[ "$sig" == "$sig_new" ]] && { sig_seen=1; break; }; done
-      (( ! sig_seen && ${#sigs[@]} < 20 )) && sigs+=("$sig_new")
+      # Bounded, but drop the OLDEST: a class-sized hunk can hold hundreds of methods and the one that
+      # encloses the change is the most recent, so refusing new entries would lose exactly that one.
+      if (( ! sig_seen )); then
+        (( ${#sigs[@]} >= 200 )) && sigs=("${sigs[@]:1}")
+        sigs+=("$sig_new")
+      fi
     fi
     if (( head_left > 0 )); then
       # With --function-context the hunk opens on the enclosing function's signature: always match it.

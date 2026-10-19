@@ -222,6 +222,34 @@ describe("pr-risk-scan.sh", () => {
     ].join("\n");
     expect(risk(d).status).toBe(0);
   });
+  it("hunk 里有几百个方法时,最近的签名不被上限挤掉", () => {
+    const methods = Array.from({ length: 250 }, (_, i) => [`  m${i}() {`, "  }"]).flat();
+    const filler = Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`);
+    const lines = [" export class Big {", " const a = 1;", " const b = 2;", ...methods, "  cleanupStage() {", ...filler, "-    const n = 1;", "+    const n = 2;"];
+    const n = lines.length - 1;
+    const d = `diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1,${n} +1,${n} @@\n${lines.join("\n")}\n`;
+    expect(risk(d).status).toBe(1);
+  });
+  it("多行头遇到分号即作废:后面的 `) {` 不再把它提升为签名", () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `    const c${i} = ${i};`);
+    const d = [
+      "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts",
+      "--- a/packages/app/src/x.ts",
+      "+++ b/packages/app/src/x.ts",
+      "@@ -1,40 +1,40 @@",
+      " import x from 'y';",
+      " const z = 1;",
+      " export const w = 2;",
+      "   cleanupStage(",
+      "   done;",
+      "   ) {",
+      ...filler,
+      "-    const n = 1;",
+      "+    const n = 2;",
+      "",
+    ].join("\n");
+    expect(risk(d).status).toBe(0);
+  });
   it("签名启发式不把 if/for 当函数", () => {
     const filler = Array.from({ length: 30 }, (_, i) => ` const c${i} = ${i};`);
     const lines = [" function f() {", " const a = 1;", " const b = 2;", "   if (cleanupDone) {", ...filler, "-const n = 1;", "+const n = 2;"];
