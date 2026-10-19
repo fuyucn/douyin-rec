@@ -14,7 +14,7 @@
  * 然后返回 500 + 原因。代价是:若回滚本身也失败,仍可能留下半成功 —— 这种情况下
  * 错误信息必须**明说哪半边可能已改**,让用户能自己核对(静默留半成功是不可接受的)。
  */
-import { parseOutputFormat, platformForRoom, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
+import { parseOutputFormat, platformForRoom, streamUploadConflicts, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
@@ -90,6 +90,8 @@ export function buildRooms(ctx: ApiCtx) {
           webhook: t.webhook,
           rollingUpload: t.rollingUpload,
           rollingEffective: t.rollingEffective,
+          streamUpload: t.streamUpload,
+          streamUploadSpool: t.streamUploadSpool,
           outputFormat: t.outputFormat,
         }
       : null;
@@ -273,6 +275,15 @@ export function buildRooms(ctx: ApiCtx) {
         if ("outDir" in rec) patch.outDir = rec.outDir ?? null;
         if ("webhook" in rec) patch.webhook = normWebhook(rec.webhook);
         if ("rollingUpload" in rec) patch.rollingUpload = rec.rollingUpload === true;
+        if ("streamUpload" in rec) patch.streamUpload = rec.streamUpload === true;
+        if ("streamUploadSpool" in rec) patch.streamUploadSpool = rec.streamUploadSpool !== false;
+        // 互斥(单一判定 = core.streamUploadConflicts):用 patch 后生效值比,只改一边也挡另一边的存量。
+        if (streamUploadConflicts(
+          patch.streamUpload ?? before.recording?.streamUpload,
+          patch.rollingUpload ?? before.recording?.rollingUpload,
+        )) {
+          return err(400, "streamUpload 与 rollingUpload 互斥:0 落盘不写盘,滚动上传靠文件");
+        }
         if ("outputFormat" in rec) {
           try { patch.outputFormat = parseOutputFormat(rec.outputFormat); } catch (e) { return err(400, (e as Error).message); }
         }

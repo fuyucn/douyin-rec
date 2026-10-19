@@ -191,6 +191,13 @@ export interface CreateTaskInput {
   webhook?: string | null;
   /** 边录边传开关(T-33,默认 false)。 */
   rollingUpload?: boolean;
+  /**
+   * 0 落盘流式直传开关(plans/039,默认 false)。与 `rollingUpload` **互斥**:
+   * 前者不写盘、后者靠文件滚动上传,同时为真 API 回 400。
+   */
+  streamUpload?: boolean;
+  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  streamUploadSpool?: boolean;
   /** 输出格式(issue #137;白名单见 core `OUTPUT_FORMATS`,非法值(含空串)→ 400;缺省 = original / 不改)。 */
   outputFormat?: string;
 }
@@ -217,6 +224,13 @@ export interface UpdateTaskInput {
   webhook?: string | null;
   /** 边录边传开关(T-33,默认 false)。 */
   rollingUpload?: boolean;
+  /**
+   * 0 落盘流式直传开关(plans/039,默认 false)。与 `rollingUpload` **互斥**:
+   * 前者不写盘、后者靠文件滚动上传,同时为真 API 回 400。
+   */
+  streamUpload?: boolean;
+  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  streamUploadSpool?: boolean;
   /** 输出格式(issue #137;白名单见 core `OUTPUT_FORMATS`,非法值(含空串)→ 400;缺省 = original / 不改)。 */
   outputFormat?: string;
 }

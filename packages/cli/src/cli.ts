@@ -12,15 +12,16 @@
 import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌 env(如 DOUYIN_REC_ROOT),
                          // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
 import { SyncGate } from "./sync-gate.js";
+import { streamPartMaxMs } from "./stream-part-duration.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
-import { RecordingSession } from "@drec/manager";
+import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { decorateRecordEvent, getEngine, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
 import { PollingRecorder } from "@drec/record-engine";
@@ -31,11 +32,13 @@ import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
-import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, APP_VERSION } from "@drec/app";
+import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, APP_VERSION, syncDbPathFor } from "@drec/app";
 import type { HubStarter, TaskStore } from "@drec/app";
 import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
+import { recordStreamUpload } from "@drec/orchestrator";
+import { DEFAULT_SEGMENT_CAP } from "@drec/zero-upload";
 
 /**
  * master 侧上传限流的**账号分键**(030 T19):从本机 biliup cookies 解析 DedeUserID →
@@ -86,6 +89,14 @@ interface RecordCliOpts {
   danmuXmlMode?: string;
   reconnect?: string;
   rollingUpload?: string;
+  /** Streaming zero-disk upload: ffmpeg stdout → UPOS chunks → one archive (default off). */
+  streamUpload?: string;
+  streamUploadSize?: string;
+  streamUploadSec?: string;
+  streamUploadTid?: string;
+  streamUploadTag?: string;
+  streamUploadPrivate?: string;
+  streamUploadSpool?: string;
   outputFormat?: string;
   taskId?: string;
   config?: string;
@@ -187,6 +198,13 @@ program
   .option("--danmu-xml-mode <mode>", "弹幕 xml 粒度: session(整场一个,默认) | segment(逐段一个)")
   .option("--reconnect <sec>", "断流快速重连等待(秒) (默认 5)")
   .option("--rolling-upload <0|1>", "边录边传: 1=录制中每封口一段就上传并删该段源 0=整场录完再处理 (默认 0)")
+  .option("--stream-upload <0|1>", "流式直传(0 落盘): 1=ffmpeg stdout 直传 UPOS 并续同一稿件,上传确认后删 spool;0=关闭(默认)")
+  .option("--stream-upload-size <bytes>", "流式直传每 P 字节上界(默认对齐后的 1GiB)")
+  .option("--stream-upload-sec <sec>", "流式直传每 P 时长阈值(秒),与 --stream-upload-size 谁先到算一 P")
+  .option("--stream-upload-tid <tid>", "流式直传投稿分区(默认 21)")
+  .option("--stream-upload-tag <tag>", "流式直传标签(逗号分隔)", "直播,录像")
+  .option("--stream-upload-spool <full|none>", "流式直传是否保留本地 spool: full=可整文件回退(默认), none=真 0 落盘", "full")
+  .option("--stream-upload-private <0|1>", "流式直传仅自己可见(默认 1)", "1")
   .option("--output-format <fmt>", "节点侧输出格式 original|mp4|mkv: 分段封口后原地 remux 成所选容器、校验通过后删原文件 (默认 original=不转)")
   .option("--task-id <n>", "所属任务 id(serve 拉起时传入;封口转换入队行据此归属任务,失败告警按任务显示)")
   .option("--config <path>", "YAML 配置文件 (命令行选项优先覆盖)")
@@ -258,6 +276,158 @@ program
         log: (m: string) => console.log(m),
       });
       console.log(`[rec] 边录边传已开启:每封口一段上传后删该段源(room=${slug})`);
+    }
+    const streamUploadEnabled = o.streamUpload !== undefined
+      && !["0", "off", "false", "no", "none"].includes(o.streamUpload.trim().toLowerCase());
+    // streaming upload replaces the file-based recorder; running both would pull the same
+    // stream twice and upload a duplicate archive, so it must be mutually exclusive.
+    if (streamUploadEnabled && rollingEnabled) {
+      console.error("[rec] --stream-upload 与 --rolling-upload 互斥,请只开一个");
+      process.exit(2);
+    }
+    if (streamUploadEnabled) {
+      // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
+      // 看起来像改 processors,容易连带碰到后处理插件层。
+      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep } = await import("@drec/zero-upload");
+      const { rootBiliupCookies, sweepOrphanSpools } = await import("@drec/app");
+      const sizeCap = alignFileSize(Number(o.streamUploadSize ?? DEFAULT_SEGMENT_CAP));
+      const streamTitle = o.name?.trim() || platform.extractRoomSlug(roomToUrl(o.room));
+      const cookies = o.cookiesFile ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+      console.log(
+        `[rec] 流式直传(0 落盘)已开启:room=${o.room} sizeCap=${sizeCap} ` +
+        `sec=${o.streamUploadSec ?? (Number(o.segment ?? 0) > 0 ? `${o.segment}(--segment)` : "字节兜底")} ` +
+        `tid=${o.streamUploadTid ?? "21"}`,
+      );
+      // Danmu still goes to disk on the zero-disk path (the only artifact that does).
+      // The pump stays platform-agnostic; this layer owns the platform source + xml writer.
+      const danmuSource = o.danmu === "0"
+        ? null
+        : platform.connectDanmu?.({
+            roomUrl: roomToUrl(o.room),
+            channelId: platform.extractRoomSlug(roomToUrl(o.room)),
+            opts: {
+              quality: (o.quality ?? cfg.quality ?? platform.defaultQuality) as RecordOpts["quality"],
+              cookies: o.cookies,
+              outDir: opts.outDir,
+              segmentSec: 0,
+            },
+          }) ?? null;
+      const xmlPath = join(opts.outDir, `live-pump-${platform.extractRoomSlug(roomToUrl(o.room))}.xml`);
+      const writer = danmuSource ? new XmlDanmuWriter() : null;
+      let writerOpened = false;
+      const danmu = danmuSource && writer ? {
+        xmlPath,
+        start: async (): Promise<void> => {
+          // Anchor to the wall clock at connect time: parts are sealed by byte/duration, so a
+          // single session-level axis is the only stable reference for burn/part slicing.
+          const startMs = Date.now();
+          writer.open(xmlPath, { anchorName: streamTitle, roomId: platform.extractRoomSlug(roomToUrl(o.room)), videoStartMs: startMs });
+          writerOpened = true;
+          await danmuSource.start(roomToUrl(o.room), {
+            quality: (o.quality ?? cfg.quality ?? platform.defaultQuality) as RecordOpts["quality"],
+            cookies: o.cookies,
+            outDir: opts.outDir,
+            segmentSec: 0,
+          }, (m) => writer.add(m), (msg) => console.error(`[live-pump] ⚠️ 弹幕: ${msg}`));
+        },
+        stop: async (): Promise<void> => {
+          await danmuSource.stop().catch(() => {});
+          if (writerOpened) writer.close();
+        },
+      } : undefined;
+      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${xmlPath}`);
+      // Remove spools left by a pump killed mid-part. They never reached the state file, so
+      // nothing else would ever delete them. Only old, unreferenced files are touched.
+      // The keep-set is `spoolPathsToKeep` (single source of truth next to the state shape):
+      // it covers `parts` *and* `pending`. `pending` is the WAL of an upload whose outcome was
+      // never persisted, and recovery re-uploads that whole file — listing only `parts` would
+      // delete the last copy of an interrupted part (real data loss, found by review #280).
+      const st = readLivePumpState(livePumpStatePath(opts.outDir, o.room));
+      sweepOrphanSpools({
+        spoolDir: opts.outDir,
+        knownSpoolPaths: spoolPathsToKeep(st),
+        log: (m) => console.log(m),
+      });
+      const abort = new AbortController();
+      const onSig = (sig: string): void => {
+        console.log(`[stream-upload] 收到 ${sig},停止录制并中止当前分 P`);
+        abort.abort();
+      };
+      process.on("SIGINT", () => onSig("SIGINT"));
+      process.on("SIGTERM", () => onSig("SIGTERM"));
+      // Window-end drain (SIGUSR2). Registered *before* the pump starts so a window-end signal
+      // always finds a handler: Node's default for an unhandled SIGUSR2 is immediate process
+      // death (measured: exit 159), which cuts the in-flight part mid-upload. In
+      // `--stream-upload-spool none` there is no local copy of that part, so the video is lost
+      // for good. It would also be reported as a clean exit: `stopGraceful` marks the child
+      // `expected` *before* sending the signal, so the task log would claim
+      // "直播自然收播，排空完成" for a broadcast that was never drained.
+      const drain = new AbortController();
+      process.on("SIGUSR2", () => {
+        if (drain.signal.aborted) return; // the daemon re-sends every tick; idempotent
+        drain.abort();
+      });
+      const run = runLivePump({
+        cookiesPath: cookies,
+        room: o.room,
+        fetch: async (r, q) => {
+          const s = await platform.getStream(r, q);
+          return { living: s.living, ...(s.url ? { url: s.url } : {}), ...(s.headers ? { headers: s.headers } : {}) };
+        },
+        quality: (o.quality ?? cfg.quality ?? platform.defaultQuality) as RecordOpts["quality"],
+        spoolDir: opts.outDir,
+        title: streamTitle,
+        tid: Number(o.streamUploadTid ?? "21"),
+        tag: o.streamUploadTag ?? "直播,录像",
+        private: o.streamUploadPrivate !== "0",
+        sizeCap,
+        maxMs: streamPartMaxMs(o.streamUploadSec, o.segment),
+        maxSegments: 0,
+        submit: true,
+        spoolMode: o.streamUploadSpool === "none" ? "none" : "full",
+        signal: abort.signal,
+        drainSignal: drain.signal,
+        danmu,
+        log: (m) => console.log(m),
+      }).then((res) => {
+        console.log(`[stream-upload] ${JSON.stringify(res)}`);
+        // Record the upload outcome in the hub ledger. A zero-disk run leaves no recording
+        // files for the pipeline to scan, so without this the room would never show an outcome.
+        // Best effort: the archive already exists, so a ledger failure must not fail the run.
+        if (res.ok && res.bvid) {
+          const roomSlug = platform.extractRoomSlug(roomToUrl(o.room));
+          const r = recordStreamUpload({
+            syncDbPath: syncDbPathFor(dbPathForDataRoot(process.env.DOUYIN_REC_ROOT ?? process.cwd())),
+            streamKey: `${platform.id}:${roomSlug}:${new Date().toISOString().slice(0, 10)}`,
+            bvid: res.bvid,
+            parts: res.segments.length,
+          });
+          console.log(r.ok
+            ? `[stream-upload] 台账已记录: ${r.bvid}${r.alreadyTerminal ? "(已是终态,未覆盖)" : ""}`
+            : `[stream-upload] ⚠️ 台账记录失败(不影响已上传稿件): ${r.error}`);
+        }
+        // "No stream" is a real outcome, not a clean finish: the room recorded nothing, so it
+        // must not look like a natural end to the caller. `ok:true` alone used to carry both
+        // "every part uploaded" and "nothing was ever recorded" (review #280 P1), which let a
+        // silently failing room keep a healthy status.
+        // Only the no-stream case gets this specific message: an `ok:false` run may already have
+        // delivered parts, and blaming "no parts uploaded" for it would be plainly wrong.
+        const clean = res.ok && res.outcome !== "no-stream";
+        if (res.ok && res.outcome === "no-stream") {
+          console.error("[stream-upload] 本场没有上传任何分 P(取不到流),按失败退出并交由调度重试");
+        } else if (!res.ok && res.error) {
+          console.error(`[stream-upload] 本场以失败收尾: ${res.error}`);
+        }
+        process.exit(clean ? 0 : 1);
+      }).catch((e) => {
+        console.error(`[stream-upload] 失败: ${(e as Error).message}`);
+        process.exit(1);
+      });
+      // The pump owns the whole process, so it owns signal handling too (the shared handlers
+      // are installed further down and this path returns before them). Without the abort,
+      // stopping a zero-disk task leaves the current ffmpeg orphaned.
+      // The streaming pump owns the whole process: no file recorder, no second ffmpeg.
+      return;
     }
     // 节点侧原地替换容器(issue #137):子进程只**信** `--output-format`(是否适用已由 spawn 前的唯一判定点
     // resolveNodeOutputFormat 算定,受管 / 有规则 / 边录边传都不会带该参数)。与边录边传互斥,rolling 优先(它上传后删源)。
@@ -356,6 +526,144 @@ program
 // ─── danmu-only 子命令（隔离测试）────────────────────────────────────────────
 // 仅连弹幕 WS，不创建 recorder / 不录视频 / 不跑 RecordingSession（→ 无视频流、无 ffmpeg、
 // 无流断开重连）。用于隔离验证「弹幕 WS 连接本身是否触发异地踢」，与视频侧重连风暴解耦。
+// (internal) Direct UPOS streaming upload for a local file (PoC, no biliup CLI).
+// Input: base64(JSON {files: string[], title: string, tid: number, tag: string, private: boolean}).
+// Output: {ok, bvid?, aid?, parts: [{file, cid, bytes, ms}]}
+program
+  .command("_upos-upload <dataRoot> <base64>", { hidden: true })
+  .description("(internal) stream local files straight to UPOS and create a private archive")
+  .action(async (dataRoot: string, b64: string) => {
+    try {
+      await applyNodeDataRoot(dataRoot);
+      const { preupload, uploadChunks, complete, submitStudio, UposRateLimited } = await import("@drec/zero-upload");
+      const { readFileSync, statSync } = await import("node:fs");
+      const req = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as {
+        files: string[]; title: string; tid: number; tag: string; private?: boolean;
+      };
+      if (!req.files?.length) throw new Error("files must not be empty");
+      const cookies = process.env.BILIUP_COOKIE ?? join(dataRoot, "config", "biliup", "cookies.json");
+      if (!existsSync(cookies)) throw new Error(`cookies 不存在: ${cookies}`);
+      const parts: Array<{ file: string; stem: string; bytes: number; ms: number }> = [];
+      const videos: Array<{ filename: string; title: string }> = [];
+      for (const file of req.files) {
+        if (!existsSync(file)) throw new Error(`文件不存在: ${file}`);
+        const t0 = Date.now();
+        const buf = readFileSync(file);
+        const name = basename(file);
+        // B 站对「连续建新分 P」会 601 限流(实测:多 P 连传时第 7 个开始的 preupload 被拒)。
+        // 冷却是唯一解——重试本身没错,只是要退后。指数退避封顶 5 分钟,最多 8 次。
+        let session!: Awaited<ReturnType<typeof preupload>>;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            session = await preupload({ cookiesPath: cookies, fileName: name, totalSize: buf.length, line: "txa" });
+            break;
+          } catch (e) {
+            if (!(e instanceof UposRateLimited) || attempt >= 8) throw e;
+            const wait = Math.min(30_000 * 2 ** attempt, 300_000);
+            process.stderr.write(`[upos] 601 限流,${wait / 1000}s 后重试 preupload (第 ${attempt + 1} 次): ${name}\n`);
+            await new Promise((r) => setTimeout(r, wait));
+          }
+        }
+        const chunks = await uploadChunks({
+          session, totalSize: buf.length,
+          readChunk: async (i, size) => buf.subarray(i * session.bucket.chunkSize, i * session.bucket.chunkSize + size),
+        });
+        const done = await complete({ session, parts: chunks });
+        if (!done.ok) throw new Error(`complete 失败: ${JSON.stringify(done.raw).slice(0, 400)}`);
+        const stem = done.stem;
+        if (!stem) throw new Error(`complete 未返回可用 UPOS stem: ${JSON.stringify(done.raw).slice(0, 400)}`);
+        parts.push({ file: name, stem, bytes: buf.length, ms: Date.now() - t0 });
+        videos.push({ filename: stem, title: name.replace(/\.[^.]+$/, "") });
+      }
+      const r = await submitStudio({
+        cookiesPath: cookies, title: req.title, tid: req.tid, tag: req.tag,
+        private: req.private !== false, videos,
+      });
+      if (!r.ok) throw new Error(`submit 失败: ${JSON.stringify(r.raw).slice(0, 400)}`);
+      process.stdout.write(JSON.stringify({ ok: true, bvid: r.bvid, aid: r.aid, parts }) + "\n");
+    } catch (e) {
+      process.stdout.write(JSON.stringify({ error: String((e as Error)?.message ?? e) }) + "\n");
+      process.exitCode = 1;
+    }
+  });
+
+// ─── _live-pump:边录边传 PoC(T-63 阶段 2)─────────────────────────────────────
+// 一段直播 → ffmpeg(-fs 上界) → UPOS 分块 → 建私稿。与生产的区别:
+//  · 封口信号是 **ffmpeg 进程退出**,不是「出现后继段」→ P1 不必等 P2;
+//  · spool 文件始终写,失败/取消时按实际长度回退 biliup 文件上传。
+// ⚠️ 真实投稿:调用即建稿件(B 站无删稿 API)。不接生产路径,须显式确认。
+program
+  .command("_live-pump <room>", { hidden: true })
+  .description("[内部] 直播间边录边传 PoC:ffmpeg -fs 分段 → UPOS 直传 → 建私稿")
+  .requiredOption("--cookies <path>", "biliup cookies.json 路径")
+  // 默认上界从常量派生,不写裸数字:隐私闸门会把看似房间号的长数字当违规(实测误报)。
+  .option("--size <bytes>", `分段字节上界(默认 ${DEFAULT_SEGMENT_CAP} = 对齐后的 1GiB;须 10MiB 对齐)`, String(DEFAULT_SEGMENT_CAP))
+  .option("--segments <n>", "最多录几段(默认 1;调试用)", "1")
+  .option("--max-sec <sec>", "时长阈值(秒):与 --size 谁先到算一 P。0/缺省 = 只用字节兜底")
+  .option("--spool-dir <dir>", "spool 目录(默认系统临时目录)")
+  .option("--title <title>", "稿件标题(默认 测试-<timestamp>)")
+  .option("--tid <tid>", "投稿分区(默认 21 生活-日常)", "21")
+  .option("--tag <tag>", "标签(逗号分隔)", "测试")
+  .option("--line <line>", "上传线路(默认 txa)", "txa")
+  .option("--private", "仅自己可见(默认)", true)
+  .option("--submit", "真的建稿(缺省只跑一段到 complete,不建稿)")
+  .action(async (room: string, o: {
+    cookies: string; size: string; segments: string; maxSec?: string; spoolDir?: string;
+    title?: string; tid: string; tag: string; line: string; private: boolean; submit?: boolean;
+  }) => {
+    const { platformForRoom } = await import("@drec/core");
+    const { alignFileSize, DEFAULT_SEGMENT_CAP, runLivePump } = await import("@drec/zero-upload");
+    const { tmpdir } = await import("node:os");
+
+    const platform = platformForRoom(room);
+    const sizeCap = alignFileSize(Number(o.size));
+    if (sizeCap !== Number(o.size)) {
+      process.stderr.write(`[live-pump] size ${o.size} 未按 10MiB 对齐 → 用 ${sizeCap}\n`);
+    }
+    if (sizeCap !== DEFAULT_SEGMENT_CAP && o.size === String(DEFAULT_SEGMENT_CAP)) {
+      // 走到这里说明用户手改过 --size;提示真实生效值,避免「我设了 1GiB 怎么变成 1030MiB」。
+      process.stderr.write(`[live-pump] 默认上界已按 10MiB 对齐为 ${DEFAULT_SEGMENT_CAP}(1GiB=102.4×10MiB,不对齐)\n`);
+    }
+    const spoolDir = o.spoolDir ?? `${tmpdir()}/live-pump`;
+    const maxSegments = Math.max(1, Number(o.segments));
+    const title = o.title ?? `测试-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}`;
+    const res = await runLivePump({
+      cookiesPath: o.cookies,
+      room,
+      fetch: async (r, q) => {
+        const s = await platform.getStream(r, q);
+        return {
+          living: s.living,
+          ...(s.url ? { url: s.url } : {}),
+          ...(s.headers ? { headers: s.headers } : {}),
+        };
+      },
+      quality: platform.defaultQuality ?? "origin",
+      spoolDir,
+      title,
+      tid: Number(o.tid),
+      tag: o.tag,
+      private: o.private !== false,
+      sizeCap,
+      maxMs: o.maxSec && Number(o.maxSec) > 0 ? Number(o.maxSec) * 1000 : undefined,
+      maxSegments,
+      line: o.line,
+      submit: o.submit === true,
+      log: (m) => process.stderr.write(`${m}\n`),
+    });
+    const out: Record<string, unknown> = {
+      ok: res.ok, room, sizeCap,
+      segments: res.segments, spoolDir: res.spoolDir,
+      submitted: !!res.bvid, bvid: res.bvid, aid: res.aid,
+      title: res.title, parts: res.segments.length,
+      ...(res.error ? { error: res.error } : {}),
+      ...(res.archiveExists ? { archiveExists: true } : {}),
+    };
+    process.stderr.write(`[live-pump] 状态保留在 ${res.statePath}(确认过的 spool 已清理)\n`);
+    process.stdout.write(JSON.stringify(out) + "\n");
+    if (!res.ok) process.exitCode = 1;
+  });
+
 program
   .command("danmu-only", { hidden: true }) // 隐藏：不出现在 --help，仅供内部排查（隔离弹幕 WS 测异地踢）
   .description("[内部] 仅连弹幕 WS、不录视频（隔离测试异地踢）")

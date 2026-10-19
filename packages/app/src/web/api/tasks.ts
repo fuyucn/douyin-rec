@@ -6,7 +6,7 @@
  */
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
-import { parseOutputFormat, platformForRoom, listPlatforms, type OutputFormat } from "@drec/core";
+import { parseOutputFormat, platformForRoom, listPlatforms, streamUploadConflicts, type OutputFormat } from "@drec/core";
 import { inWindow, nowMinutesLocal } from "../../scheduler.js";
 import type { CreateTaskInput, UpdateTaskInput, TaskView } from "./types.js";
 import type { TaskStore } from "../../store.js";
@@ -40,6 +40,11 @@ export function buildTasks(ctx: ApiCtx) {
 
       let outputFormat: OutputFormat;
       try { outputFormat = parseOutputFormat(input.outputFormat); } catch (e) { return err(400, (e as Error).message); }
+      // 0 落盘边录边传与滚动边录边传互斥(单一判定 = core.streamUploadConflicts)。
+      // 手动建任务的 rollingEffective 由 store 从旧开关派生,故这里用同口径比较。
+      if (streamUploadConflicts(input.streamUpload, input.rollingUpload === true)) {
+        return err(400, "streamUpload 与 rollingUpload 互斥:0 落盘不写盘,滚动上传靠文件");
+      }
       const task = store.addTask({
         room,
         name: input.name ?? null,
@@ -54,6 +59,8 @@ export function buildTasks(ctx: ApiCtx) {
         scheduleEnd,
         webhook: normWebhook(input.webhook),
         rollingUpload: input.rollingUpload === true,
+        streamUpload: input.streamUpload === true,
+        streamUploadSpool: input.streamUploadSpool !== false,
         outputFormat,
       });
       // 创建即抓主播名（不等开始录制）；后台写回，UI 轮询即显示。
@@ -87,6 +94,17 @@ export function buildTasks(ctx: ApiCtx) {
       if ("outDir" in input) patch.outDir = input.outDir ?? null;
       if ("webhook" in input) patch.webhook = normWebhook(input.webhook);
       if ("rollingUpload" in input) patch.rollingUpload = input.rollingUpload === true;
+      if ("streamUpload" in input) patch.streamUpload = input.streamUpload === true;
+      if ("streamUploadSpool" in input) patch.streamUploadSpool = input.streamUploadSpool !== false;
+      // 互斥校验用**patch 后的生效值**(只改了其中一边时也要挡住另一边的存量值)。
+      if (streamUploadConflicts(patch.streamUpload ?? existing.streamUpload, patch.rollingUpload ?? existing.rollingUpload)) {
+        return err(400, "streamUpload 与 rollingUpload 互斥:0 落盘不写盘,滚动上传靠文件");
+      }
+      // 0 落盘不产生可扫描的录像文件 → hub 规则会永远选不到 winner。与房间编辑同一句判定
+      // (ctx.recordingError),这里挡「先建规则、再把源任务改成 streamUpload」的反向顺序。
+      if (patch.streamUpload === true && isHubSourceTask(id)) {
+        return err(400, "该任务已绑定 hub 规则;0 落盘流式直传不产生录像文件,不能作为规则源任务");
+      }
       if ("outputFormat" in input) {
         try { patch.outputFormat = parseOutputFormat(input.outputFormat); } catch (e) { return err(400, (e as Error).message); }
       }

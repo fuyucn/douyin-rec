@@ -280,10 +280,12 @@ export async function recoverNodeRemux(dir: string, fmt: StageFormat, deps: Node
  * 规则**之后才绑定**的任务:已在跑的进程不受影响,下一次 spawn 起按新判定(不再替换)。
  */
 export function resolveNodeOutputFormat(
-  task: Pick<Task, "id" | "room" | "managedBy" | "outputFormat" | "rollingEffective">,
+  task: Pick<Task, "id" | "room" | "managedBy" | "outputFormat" | "rollingEffective" | "streamUpload">,
   hubDir: string,
 ): OutputFormat {
   if (task.outputFormat === "original") return "original";
+  // 0 落盘流式直传:没有源文件 → 封口转换无对象(与 nodeOutputFormatLock 同口径,同一个理由字段)。
+  if (task.streamUpload) return "original";
   return shouldConvertAtSeal(task, hubDir) ? task.outputFormat : "original";
 }
 
@@ -296,9 +298,11 @@ export function resolveNodeOutputFormat(
  *     无人收尾,只能在封口时转(与 `cli.ts` 的 `!rule.enabled → 不处理` 同口径)。
  */
 export function shouldConvertAtSeal(
-  task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective">,
+  task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective" | "streamUpload">,
   hubDir: string,
 ): boolean {
+  // 0 落盘流式直传:不产出文件 → 无从转换(与 resolveNodeOutputFormat 的早退同理由)。
+  if (task.streamUpload) return false;
   return sealConversionBlocker(task, hubDir) === undefined;
 }
 
@@ -315,9 +319,12 @@ export function shouldConvertAtSeal(
  */
 export type NodeOutputFormatLock = OutputFormatLock;
 export function nodeOutputFormatLock(
-  task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective">,
+  task: Pick<Task, "id" | "room" | "managedBy" | "rollingEffective" | "streamUpload">,
   hubDir: string,
 ): NodeOutputFormatLock | undefined {
+  // 0 落盘流式直传(plans/039):源录像不落盘 → 没有文件可转换,所选格式无对象可作用。
+  // 先于其它原因判定:这一条与 hub/rolling 无关,纯粹是「本任务不会产出文件」。
+  if (task.streamUpload) return "stream-upload";
   const b = sealConversionBlocker(task, hubDir);
   if (b === undefined) return undefined;
   if (b === "hub-managed" || b === "rolling") return b;

@@ -52,6 +52,9 @@ flowchart TB
   subgraph L04["L0.4 · 处理器实现"]
     procs["<b>processors</b><br/>remux 处理器(校验 / 原地转换 / recover);加处理器 = 一个模块 + 注册一行"]
   end
+  subgraph L035["rank 0.35"]
+    zeroup["<b>zero-upload</b><br/>0 落盘流式直传(自研 UPOS)<br/>live-pump: 一段一 ffmpeg 边录边传"]
+  end
   subgraph L03["L0.3 · 处理任务队列"]
     procq["<b>proc-queue</b><br/>ProcQueueStore 持久任务表(sqlite)<br/>ProcRunner 租约 / 心跳 / fencing / 关停"]
   end
@@ -76,6 +79,7 @@ flowchart TB
   cli --> procq
   cli --> procs
   cli --> engine
+  cli --> zeroup
   orch --> core
   orch --> post
   app --> core
@@ -96,6 +100,9 @@ flowchart TB
   observ --> core
   procs --> core
   procs --> post
+  procs --> zeroup
+  zeroup --> core
+  zeroup --> post
   procq --> core
   post --> core
 

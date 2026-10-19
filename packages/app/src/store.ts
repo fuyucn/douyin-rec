@@ -74,6 +74,17 @@ export interface Task {
    */
   rollingEffective: boolean;
   /**
+   * 0 落盘边录边传(zero-disk streaming upload, plans/039):ffmpeg 管道 stdout → UPOS 直传,
+   * 源录像不落盘;以「字节上限 或 时长上限」先到者结算一个分 P,后续分 P append 到同一稿件。
+   * 与 `rollingEffective` **互斥**(两者都要写盘 vs 不写盘);不是派生字段,纯用户开关。
+   */
+  streamUpload: boolean;
+  /**
+   * 0 落盘是否保留本地 spool(默认 true)。false = 真 0 落盘:视频字节完全不写盘,
+   * 代价是该分 P 上传失败时没有本地回退源。仅 streamUpload=true 时有意义。
+   */
+  streamUploadSpool: boolean;
+  /**
    * 输出格式(issue #137,白名单见 core `OUTPUT_FORMATS`):`original`(缺省,现状)| `mp4` | `mkv`。
    * 本期只作用于**后处理产物容器**(存档形态);投稿形态恒 mp4(见 core `effectiveStageFormat`)。
    */
@@ -110,6 +121,10 @@ export interface TaskInput {
   anchorName?: string | null;
   /** **旧**边录边传开关(T-33,默认 false);见 Task.rollingUpload(新配置入口在 hub 规则)。 */
   rollingUpload?: boolean;
+  /** 0 落盘边录边传(默认 false);与 rollingUpload/rollingEffective 互斥。 */
+  streamUpload?: boolean;
+  /** 0 落盘是否保留 spool(默认 true);false = 真 0 落盘。 */
+  streamUploadSpool?: boolean;
   /** 输出格式(缺省 original);白名单外的值 → addTask 抛错(API 层先校验并回 400)。 */
   outputFormat?: OutputFormat;
 }
@@ -136,6 +151,8 @@ interface TaskRow {
   webhook: string | null;
   managedBy: string | null;
   rollingUpload: number;
+  streamUpload: number;
+  streamUploadSpool: number;
   rollingEffective: number | null;
   outputFormat: string | null;
 }
@@ -199,6 +216,8 @@ function rowToTask(r: TaskRow): Task {
     managedBy: r.managedBy ?? null,
     rollingUpload: Number(r.rollingUpload) !== 0,
     // 派生值缺失(NULL)→ 读取时迁移:无规则信息可用,等价「规则未配置」→ 旧开关 true ≡ rolling。
+    streamUpload: Number(r.streamUpload) !== 0,
+    streamUploadSpool: r.streamUploadSpool == null ? true : Number(r.streamUploadSpool) !== 0,
     rollingEffective: r.rollingEffective == null
       ? resolveRollingPolicy(null, Number(r.rollingUpload) !== 0).effective
       : Number(r.rollingEffective) !== 0,
@@ -252,8 +271,8 @@ export class TaskStore {
       `INSERT INTO tasks
          (room, platform, name, quality, engine, danmu, segmentSec, cookies, outDir,
           scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook, managedBy, anchorName,
-          rollingUpload, outputFormat)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          rollingUpload, streamUpload, streamUploadSpool, outputFormat)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       room,
@@ -275,6 +294,8 @@ export class TaskStore {
       input.managedBy ?? null,
       input.anchorName ?? null,
       (input.rollingUpload ?? false) ? 1 : 0,
+      (input.streamUpload ?? false) ? 1 : 0,
+      (input.streamUploadSpool ?? true) ? 1 : 0,
       parseOutputFormat(input.outputFormat),
     );
     const id = Number(info.lastInsertRowid);
@@ -311,6 +332,8 @@ export class TaskStore {
         | "enabled"
         | "webhook"
         | "rollingUpload"
+        | "streamUpload"
+        | "streamUploadSpool"
         | "outputFormat"
       > & {
         /** 派生生效值(仅 master 同步/启动刷新可写);null = 清空,回落旧开关迁移。 */
@@ -368,6 +391,8 @@ export class TaskStore {
     // undefined = 未给(沿用);非法值抛错(API 层先校验回 400)。
     if (patch.outputFormat !== undefined) set("outputFormat", parseOutputFormat(patch.outputFormat));
     if ("rollingUpload" in patch) set("rollingUpload", patch.rollingUpload ? 1 : 0);
+    if ("streamUpload" in patch) set("streamUpload", patch.streamUpload ? 1 : 0);
+    if ("streamUploadSpool" in patch) set("streamUploadSpool", patch.streamUploadSpool ? 1 : 0);
     if ("rollingEffective" in patch) {
       set("rollingEffective", patch.rollingEffective == null ? null : patch.rollingEffective ? 1 : 0);
     } else if ("rollingUpload" in patch) {

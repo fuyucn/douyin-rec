@@ -104,6 +104,29 @@ export function biliAccountKeyFromCookiesJson(text: string | null | undefined): 
 }
 
 /**
+ * 从 biliup `cookies.json` 的**已解析对象**提取 Cookie 请求头(纯函数,不读盘、不暴露来源)。
+ * 兼容 `{cookie_info:{cookies:[{name,value}]}}` 与 `{cookies:[...]}` 两种结构。
+ * 抽不出任何一对 name=value → null。
+ *
+ * 单一真理源:进程内上传(@drec/processors)与 0 落盘直传(@drec/zero-upload)共用同一份,
+ * 勿在任一侧复制第二份。
+ */
+export function biliupCookieHeader(data: unknown): string | null {
+  const root = data as { cookie_info?: { cookies?: unknown }; cookies?: unknown } | null;
+  const raw = root?.cookie_info?.cookies ?? root?.cookies ?? data;
+  if (!Array.isArray(raw)) return null;
+  const pairs = raw
+    .map((item) => {
+      const c = item as { name?: unknown; value?: unknown };
+      const name = String(c?.name ?? "").trim();
+      const value = String(c?.value ?? "").trim();
+      return name && value ? `${name}=${value}` : "";
+    })
+    .filter(Boolean);
+  return pairs.length > 0 ? pairs.join("; ") : null;
+}
+
+/**
  * 字段消毒:坏数据(非有限数/非数组/非升序/窗口外)在此收敛,不进内存态。
  * orchestrator/upload-limits.ts 直接 re-export 本函数(单一真理源,勿复制第二份)。
  */

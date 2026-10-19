@@ -57,6 +57,8 @@ export function migrate(db: DatabaseSync): void {
       useCookie    INTEGER NOT NULL DEFAULT 1,
       enabled      INTEGER NOT NULL DEFAULT 0,
       rollingUpload INTEGER NOT NULL DEFAULT 0,
+      streamUpload INTEGER NOT NULL DEFAULT 0,
+      streamUploadSpool INTEGER NOT NULL DEFAULT 1,
       createdAt    TEXT
     );
     CREATE TABLE IF NOT EXISTS settings (
@@ -115,6 +117,10 @@ export function migrate(db: DatabaseSync): void {
   // 边录边传**生效值**(issue #40,master 按 hub 规则 + 旧开关派生,录制端只读):
   // NULL = 尚未派生(旧库/无规则单机任务)→ 读取时按旧 rollingUpload 迁移;0/1 = master 已算定。
   ensureColumn(db, "tasks", "rollingEffective", "INTEGER");
+  // 流式直传(零落盘,plans/039):1=ffmpeg stdout 直传 UPOS、续同一稿件、确认后删 spool。
+  // 默认 0 → 老库/老配置行为完全不变。与 rollingUpload 互斥(应用层校验)。
+  ensureColumn(db, "tasks", "streamUpload", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "tasks", "streamUploadSpool", "INTEGER NOT NULL DEFAULT 1");
   // 输出格式(issue #137):original(缺省,现状不变)| mp4 | mkv。旧库补列即取 DEFAULT,行为不变。
   ensureColumn(db, "tasks", "outputFormat", "TEXT NOT NULL DEFAULT 'original'");
   // 注:多节点 hub 配置已独立成 hub_rules 表(按 roomSlug),不再放 tasks 上。

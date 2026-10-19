@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-18
+> 最后更新：2026-10-19
 
 ## 状态约定
 
@@ -171,6 +171,47 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
+- [ ] **T-63 UPOS 直传 + 边录边传 PoC(T-63,计划 [plans/039_zero_disk_upload.md](plans/039_zero_disk_upload.md) 附录 A/B)**
+  — 2026-10-17 起，分支 `codex/research-zero-disk-upload`（**未合并 / 未部署 / 未开 PR**）。
+  **做了什么**：`packages/processors/src/upos-stream.ts`（自研 UPOS 直传：preupload/chunk/complete/submitStudio，不依赖 biliup CLI）+ `live-pump.ts`（每段一个 ffmpeg 管道，边录边传）+ 隐藏命令 `_live-pump <room>`。29 + 16 单测。
+  **为什么**：用户目标「直播间直接出稿件，减少仅上传不需备份的空间占用」。
+  **关键实测**：①容器必须用 **mpegts** —— matroska 写 stdout 带不了音轨、被 `-fs` 强杀不写 trailer → 缺 duration → B站拒（`62002`）；TS 每包自带 PTS，全过。②`complete` 接受**少传**（声明 N 块实传 M<N 个连续 part → `OK:1`），所以 `size` 是上界、分 P 大小=实际字节，「谁先到算一 P」（字节兜底 / 时长阈值）成立。③UPOS 单 P ≤ 2GiB，「一稿一 P」不可能。④preupload 有 **601「上传过快」限流**，是建会话频率问题：8×8MiB 触发 5 次退避、10 块连续 0 次。
+  **修掉的真 bug**（均实测，变异验证）：①时长结算尾块被静默丢弃（3 段各丢 ~3 秒视频，日志只看块数毫无异常）；②`maxMs` 从未从 `pumpSegment` 下发；③缺 ffprobe 自检导致 `62002`；④四处文档承诺「回退文件上传」而代码没有（已补 `reuploadSpoolFile`）。
+  **验收**：`pnpm test` **2935 passed / 42 skipped**、`typecheck`/`bundle`/`arch:check` 绿。真实直播间：单段 1P、多段 5P、断流 4P 均回读 `code=0`。
+  **直播复核（2026-10-18）**：真实直播间完成 1P 与 2P 两轮私稿。1P：`streamedBytes == spooledBytes == 8771328`，22.071s，`usedFileFallback=false`；2P：两段分别 5,603,340 / 4,883,300 字节，14.002s / 12.370s，均无回退，服务端回读 2 个 cid。取流失败后的指数退避已补（5s/10s/20s…，上限 5 次重试）。
+  **2026-10-18 单稿状态机**：新增 `LivePumpSession`：P1 完成即建稿、后续 P 完成即读取完整稿件后 `edit` 追加；每次不可逆请求前 fsync WAL，崩溃后按 `archive/view` 的 stem 核对，绝不再建第二稿；未确认 P 头阻塞；确认后才删 spool。单测覆盖建稿、连续追加、失败保留 spool、建稿/追加恢复、标题歧义、网络不可达与写盘失败。
+  **真实单稿多分 P（2026-10-18，房间 <房间>）**：一次在线跑通 **同一稿件 5 个分 P**（`BV1xx`，aid `<aid>`，私稿）：P1 建稿后每段确认即追加，服务端回读 `partCount=5` 且 cid 各不相同；每段 2 块、约 16MB、时长 41~47s，`usedFileFallback=false`、`sessionLeaked=false`、`backpressured=false`；确认过的 spool 全部已删。
+  **修掉的真 bug（真实跑出来的）**：续跑/恢复后 CLI 仍用本地段号 `index=seg` 提交 → 复用已确认索引、覆盖分 P 记录、新段 spool 泄漏（实测第 3 段未入稿且文件残留）。改为按会话已确认最大索引续号，并补回归用例。
+  **互斥修复**：`record --stream-upload` 原本与普通录制会话并行（同一流被拉两次 + 可能重复建稿）。改为**替换**落盘录制器，且与 `--rolling-upload` 同开时直接 exit 2 拒绝。
+  **断流验证（2026-10-18，房间 <房间>）**：强杀 ffmpeg 3 次，段1/段2 仍进**同一稿件** `BV1xx`（服务端回读 2 个 cid），证明断流后自动重取流并续同一稿件。
+  **修掉的真 bug（断流跑出来的）**：web `edit` 连续追 P 命中 `code:21540 请求过于频繁` → 之前按「永久失败」处理，整个分 P 判失败并头阻塞后续分 P。已把 `21540` 纳入 core `isUploadRateLimited`，并给 `submitPart` 加指数退避重试（默认 60s 起、5 次、封顶 300s）。
+  **断流 + 限流双重验证（同房间，修复后）**：强杀 ffmpeg 1 次，5 个分 P 全部进入同一稿件 `BV1xx`（`partCount=5`，5 个 cid），全部 `usedFileFallback=false` / `sessionLeaked=false` / `backpressured=false`，spool 全部清理。
+  **未确认分 P 的恢复**：单条未确认且 spool 仍在时，按整文件重传再追加（`resubmitUnconfirmedPart`）；多条未确认或 spool 已丢仍转人工。实测遇到 B 站 `10010 稿件已锁定`（审核锁定）时**正确停手不丢数据**，spool 保留待人工。
+  **接成任务开关（2026-10-18，`cc2c54f`）**：`streamUpload` 升为一等任务字段（DB/store/hub 同步/argv/Web 表单/API 门禁全链路打通），不再只能跑隐藏命令。互斥判定收敛到 core `streamUploadConflicts`（唯一一份，API + 表单 + argv 兜底共用）；`OutputFormatLock` 新增 `stream-upload`（0 落盘不产文件 → 格式无对象可作用）；登记实验性徽标（layer=task，观察 168h）。门禁：test **2944 passed / 42 skipped** + typecheck/arch:check/bundle/web build 全绿。
+  **接开关后的真实实跑**：①`_live-pump --size 25MiB --segments 8` → 同一稿件 `BV1xx`，服务端回读 **8 个分 P**、cid 各不同，8/8 `usedFileFallback=false`/`sessionLeaked=false`/`backpressured=false`，spool 逐段删除。②走任务 argv 的 `record --stream-upload 1 --size 25MiB --sec 45` → 稿件 `BV1xx`，每段 ~17MiB/45s 证明**时长上限先到即结算**（字节未到 cap），与设计一致。
+  **更正归因（2026-10-18，`221bfa4`）**：B11 把「第 1 段后静默停住」归因为「取流无超时」并不完整。真正根因是超时定时器 `unref()` —— fetch 永不返回时它是事件循环里唯一句柄，unref 后 Node 空转，`Promise.race` 永不 resolve，表现为进程存活/CPU 0/无 socket/无日志。已去掉 unref，并用**真子进程**回归（esbuild 打包后 spawn；vitest 自己持句柄测不出）+ 变异验证（加回 unref 即失败）。修后实测私稿 `BV1xx`（8.2MiB / 22.4s，无回退）。
+  **弹幕 + 取流超时（2026-10-18，`2c70271`）**：0 落盘路径现在自己连平台弹幕，用同一个 `XmlDanmuWriter` 写会话级 `.xml`（唯一落盘产物；连接失败不阻断视频，`finally` 保证停源）。同时修掉本轮跑出的**真事故**：`acquireStreamWithBackoff` 直接 await `platform.getStream`，该调用可永久挂起（无超时）→ 第 1 段确认后静默停录、无重试日志、弹幕还在涨；现每次取流 30s 上限，超时/抛错都按失败退避。实测房间 <房间> 私稿 `BV1xx`：**5 个分 P 同一稿件**（5 个不同 cid，duration 190s，每段 ~45s 时长先到），spool 逐段删除，xml 含锚点与 `<d>/<member>`；修前同场景第 1 段后卡死，修后连跑 5 段。`pnpm test` **2948 passed / 42 skipped** + typecheck/arch:check/bundle 全绿。
+  **生产路径验证（2026-10-18，`f532296`）**：隔离数据根起 `task serve`，走 API 建任务 + 启动，确认真实 spawn 的 argv 含 `--stream-upload 1`（非手工命令）；同次运行验证取流失败退避（抖音 `10011` → 5/10/20/40/80s，5 次后收尾）与弹幕 xml 落盘。另加 hub 边界 guard：0 落盘不产可扫描录像，绑成规则源会让 hub 永远选不到 winner → 房间编辑与任务改开关两个方向都回 400。
+  **重启续录 + 孤儿 spool（2026-10-18，`793e433`）**：真实私稿 `BV1xx` 三次启动同目录，part 0→3 连续进**同一稿件**；kill 在段中途会留下永不清扫的孤儿 spool（实测 1.07MB），已在 app 层加启动清扫（processors 禁止列目录），删除条件 = 本模块命名 + 不在 state + 超 10 分钟宽限 + unlink 成功，任何异常不阻断启动。真实 CLI 日志确认孤儿被删、state 引用的 spool 全保留。
+  **真 0 落盘（2026-10-18，`a71bff4`）**：审计发现此前「0 落盘」仍把每个字节 writeSync 到 spool（峰值占用=一个分 P），只是确认后删。现在 spool 可关：`full`（默认，可整文件回退 + 本地自检）/ `none`（真 0 落盘，失败无本地回退、必须显式报错）。接线到 core/DB/store/hub 同步/argv/API/任务弹窗；单测覆盖 none 模式不创建任何文件、字节仍全部上传、失败必须报错；真实 daemon spawn 已确认 argv 含 `--stream-upload-spool none`。另修：分 P 时长此前不读任务的 `segmentSec`，现在 `maxMs = --stream-upload-sec ?? --segment`（0/缺失 = 只用字节兜底）。
+  **真实容器跑出的第二个 bug：0 落盘自行收尾被判崩溃（2026-10-19，B27，已修）**：容器实测 —— 6 次取不到流后 pump 正常收尾（`{"ok":true,"segments":[]}`，`exit 0`），但 TaskManager 判 `异常退出 (code=0 signal=null)` 并立即重启，每轮又烧 6 次取流尝试，形成 tight loop。根因：`expected` 只在 SIGTERM/SIGUSR2 时置位（`recorder-process.ts:199/208`），而 0 落盘**替换了落盘录制器、自己拥有进程**，自然退出时没有任何人置位。修：`code===0 && !expected && task.streamUpload` → 正常停止，日志 `0 落盘直传已自行收尾(exit 0)`。**刻意不放宽到全部任务**（普通录制进程只在停止信号时退出，其 exit code 不是它自己的结论；已加对照组用例）。门禁 test 3310/42 + typecheck 绿，变异验证过。
+  **daemon→SIGUSR2 链路证据闭合（2026-10-19，B27）**：三段各有证据 —— ① daemon 窗口结束 → `manager.stopGraceful` → `status=draining`（`test/app/daemon.test.ts` 的 graceful drain 用例）；② `ChildRecorderProcess.stopGraceful` → `child.kill("SIGUSR2")`（`test/app/recorder-process.test.ts`）；③ record 进程收 SIGUSR2 → 不被杀、当前段传完（B26 容器实测：分 P 在传时发信号，进程 ALIVE）。唯一缺「同一次运行三层串起来」的观测：容器出口 IP 被抖音限流（`10011`，同容器手工跑也一样，宿主机 probe 正常）→ 取不到流就没有在录段，环境限制，非代码问题。
+  **拆包 + 真实环境验证（2026-10-19，B26）**：0 落盘拆为独立叶子包 `@drec/zero-upload`（rank 0.35，只依赖 core + post-process），processors 仅 re-export；`biliupCookieHeader` 下沉 core 以免新包反向依赖 processors。容器内真实验证：真 0 落盘上传成功（`BV1xx`，盘上零视频文件）、多分 P 同稿（`BV1xx`）、serve 真实 spawn 参数正确、同房间 guard 生效、SIGTERM 正常。**SIGUSR2 排空**：分 P 在传时发信号 → 进程 ALIVE 未被杀（对照无 handler 时 exit 159）。验证中发现并修掉：排空不打日志（排空后可能等数分钟，与卡死无法区分）→ 补一次性留痕 + 断言。门禁 test 3308/42 + typecheck/arch:check/bundle 绿。**未覆盖**：daemon→serve→子进程链路的真实 SIGUSR2 端到端。
+  **窗口结束排空 P1 修复（2026-10-18，B25）**：0 落盘分支此前只注册 SIGINT/SIGTERM，daemon 窗口结束发 SIGUSR2 → Node 默认动作杀掉进程（实测 exit 159）→ 在录的那段被腰斩（`spool=none` 下无本地副本，视频永久丢失），且 `stopGraceful` 发信号前已置 `expected=true`，task 日志反而打印「直播自然收播，排空完成」—— 与事实相反。修：`RunLivePumpOptions.drainSignal`（与 `signal`(= 腰斩) 职责分开，语义同 `record-engine.drain()`）+ cli 在 `runLivePump()` 前注册 `process.on("SIGUSR2")`。回归 9 条（4 排空行为 + 2 真子进程 + 3 grep 守护），三条变异验证都真的跑失败过。门禁：test 2987/42 + typecheck/arch:check/bundle 绿。**未覆盖**：排空落在取流退避 sleep 里会多录一分 P；未做 daemon→serve→子进程真实端到端。
+  **审计收尾（2026-10-18）**：旧库迁移已补测试覆盖 `streamUpload`/`streamUploadSpool` 补列与默认值（旧库读出「关」+「保留 spool」，行为不变）。
+  **真 0 落盘端到端（2026-10-18，`83ac51d`）**：缺口 1 已补 —— 容器内真实 ffmpeg + 假 B 站跑 `runLivePump(spoolMode:"none")` 2 段：同一稿件 `BV1xx`、`create`+`append` 各一次、**盘上视频文件 0 个**。顺带修两个真 bug：①`runLivePump` 没把 `fetchImpl` 传给 `LivePumpSession`，假传输在建稿处静默回落真实网络（拿到 -400），已贯通 + 回归用例 + 变异验证；②none 模式亚秒分 P 被 `Math.round` 舍成 0 → 判「缺 duration」判死，改为保留两位小数。
+  **多房间并发（2026-10-18，`7a28ebc`）**：两个房间并发跑 `spoolMode:"none"`，各自 2 个分 P 进**各自稿件**（两个不同假 BV 号），state 按房间名分离，盘上零视频文件；回归用例做了变异验证（同 BV 即失败）。
+  **hub 守卫补洞（2026-10-18，`d07a97c`）**：真漏洞 —— `createHubRule` 自己内联查任务存在性、没调 `ctx.recordingError`，于是 `POST /api/hub/rules` 能把 streamUpload 任务绑成规则源，造出永远选不到 winner 且无报错的规则。已改为复用唯一判定；三条写入路径（房间编辑 / 规则 PATCH / 规则新建）现在全部拒绝，无绕过入口。
+  **录制相位标记（2026-10-18，`17435af8`）**：真缺口 —— 0 落盘路径不打 `[状态] 录制中/等待开播`，TaskManager 解析不到 → 任务永远显示「进程在跑但没在录」。已补标记（拿到流后打一次「录制中」）+ 回归 + 变异验证。另自查并否决一个疑似问题（`--output-format` 与 stream-upload 同给不会 exit 2，因流式路径先 return），改动已回退。
+  **停止不留孤儿 ffmpeg（2026-10-18，`725a506f`）**：真缺口 —— 0 落盘路径在共享 SIGINT/SIGTERM handler 安装前就 return，停止任务时正在录的 ffmpeg 没人杀。已让 CLI 自装 handler 并 abort、AbortSignal 贯通到 runSegment，另对**已** aborted 的信号补显式 kill（addEventListener 对已中止信号永不触发）。实测 abort 后 `ffmpeg_procs=0`。
+  **真 0 落盘在线验证（2026-10-18，房间 <房间>）**：缺口 1 已补。真实直播间 + 真实 B 站，`--stream-upload-spool none`：首次 10 个分 P → SIGKILL → 重启后续 6 个分 P，全部进**同一稿件** `BV1xx`；服务端回读 **16 个分 P**、16 个不同 cid、duration 356s、审核中；磁盘上只有 state + xml，**视频文件 0 个**。
+  **hub 台账回流 + 停止不作废（2026-10-18，`61d2d72e`/`2f79acfc`）**：①新增 `recordStreamUpload`，0 落盘上传结果直接写台账终态（pending→done+BV），房间不再永远空转；修掉 `markDone` 覆盖已有 BV 的问题（B 站无删稿，覆盖会让台账指向无法撤下的稿件）。②在线 SIGTERM 实测 bug：停止切断末段时整个 run 报 `ok:false`，即使此前 4 个分 P 已入稿 → 退出码非 0 + 台账不写。已修（abort 归类 + 已入稿即成功）。在线验证 `BV1xx` 4 分 P/152s，`ok:true` + `台账已记录`。
+  **多房间在线并发 + 21186 限流（2026-10-18，`<sha>`）**：两个直播间同时在线各跑 `none` 模式 → 两个不同稿件（`BV1xx` 3P/119s、`BV1xx` 3P/100s），各 3 个不同 cid，盘上零视频文件。同场暴露两个真问题：①`21186 投稿的频率过快` 未被识别为限流 → 第二个房间建稿被拒、已上传 6.3MB 直接丢弃、整场零产出（已纳入 `isUploadRateLimited`）；②preupload 限流退避完全静默（可超 40 分钟），形态与卡死无异，现已每次退避打日志。
+  **同房间双 0 落盘 guard（2026-10-18，`<sha>`）**：实测风险 —— 同一房间两个任务各录一次，state 按 outDir 隔离互不知情 → 产出两个重复稿件（`BV1xx`/`BV1xx`），B 站无删稿 API 撤不下来。已在 `TaskManager.start` 挡掉（按平台+房间判；普通录制不受影响）。变异验证过。
+  **同房间 guard 真实 serve 验证（2026-10-18）**：真实 `task serve` 进程里两个同房间 0 落盘任务，任务 1 `running=true`、任务 2 被拒停在 `stopped`，serve 日志打出「拒绝启动 id=2:同一房间已有 0 落盘任务 id=1(g1)在录,同时录会产出两个重复稿件且无法删除」—— 原因对用户可见。
+  **下一步（接生产前必做）**：①`RollingUploader` 契约从 `path` 扩到 `bytes`（现 0 落盘完全绕过它）。②**接 hub 规则**需要先设计「上传结果如何回流 SyncLedger」（当前 streamUpload 只能当单机/手动任务，guard 已明确拒绝绑规则）。③`record --stream-upload` 目前不写 `会话状态边车` 边车（hub 按它聚场/选优），接 hub 前必须补。
+  **纪律教训**：PoC 为二分调试新建 6 条测试稿件（本可全部 append 到一条），B站无删稿 API，清理代价由用户承担；并曾把「上传路径打通」误述为「链路打通」。
+
 - [~] **T-61 全自动流水线 + fleet 式房间管理（计划 [plans/037_autopilot_fleet.md](plans/037_autopilot_fleet.md)）**
   — 2026-10-16 认领，2026-10-16 落 plan + 开工 step 1。主流程收敛为「监听 → 录制 → 投稿」，存档/烧录/多格式为默认关的增强开关。
   **拆分**：①人工收件箱去噪（issue [#188](https://github.com/fuyucn/douyin-rec/issues/188) → PR [#189](https://github.com/fuyucn/douyin-rec/pull/189)，已实现待审；顺带修了「所有节点断流」漏写 error 曾被显示成「待上传」）②通知带该场直链 + 收件箱按「真事故/增强」分组 ③`/rooms` 首页化 + 内联日志 + 任务/Hub/队列收进「高级」④配置模板（改一次应用到多房间）⑤新增房间自动选节点（已在录房间绝不自动迁移）。
@@ -209,7 +250,7 @@
 - [~] **T-32 分P 核验假 mismatch → 13 个 job 卡 needs_manual + 源不删(磁盘持续涨)** — 2026-10-10 实测发现。
   **根因(台账时间戳 + B站实查双向取证)**:`finalizeAfterUpload` 在**最后一个 append 成功后 0.5~0.6 秒**
   就去查 `view?bvid=`,而 B站 `pages` 列表此刻**还没同步** → 只看到 P1 → 判「期望3/实际1」→
-  永久 `needs_manual` + 保留全部源。**上传其实全对**:实查 `BV1pqpL6kEeH`=3 分P、`BV1hWpL6HEWr`=2 分P。
+  永久 `needs_manual` + 保留全部源。**上传其实全对**:实查 `BV1xx`=3 分P、`BV1xx`=2 分P。
   **影响**:13/61 个 job(21%)卡人工待办;每场源几个 GB 不删 → 磁盘持续涨;reconciler **不重跑
   `needs_manual`**(设计如此,防重传重复稿)→ 不会自愈。
   **修**:①核验前等 B站数据可见并重查(`verify.ts` 加带重试的最终一致:mismatch 不立刻转人工,
@@ -347,14 +388,14 @@
   `rec.sessionBase`；`pipeline.ts` 两处重复的 `earliest` reduce 合并为一份口径；新增
   `test/orchestrator/node-side-upload.test.ts` 钉死三个渲染字段。
   **修复后复测（VPS2 节点本地实跑 `_node-pipeline`）**：产物落**正确根** → 建稿
-  `BV11fpD65EU7`（「Lilt_2026-10-12 直播回放」）→ 逐条 append P2/P3/P4 → 源 `.ts` 清理、
+  `BV1xx`（「Lilt_2026-10-12 直播回放」）→ 逐条 append P2/P3/P4 → 源 `.ts` 清理、
   **`.xml` 保留**（最后一份）、`.upload` 别名清理。**全链路通过**。
   **2026-10-12 复核（线上台账 + 两节点实测）—— 自动化路径仍全败 + 发现删源/清 stage 漏网**：
   ① **两次自动跑全失败**（`sync_node_states` 两条 `upload_plain=failed`）：test room/Lilt 那次是
   **VPS2 跑的是 pre-0.0.76 旧 bundle** → `applyNodeDataRoot` 错根 → 限流库 `output-data/db/…`
   打不开 → ssh rc=255；`douyin:347071634383:2026-10-12_0523` 那次 winner 是 **VPS1 0.0.75**
   （同样错根）→ 产物落 `~/output-data/stage/…`、`ssh rc=1`。**根因都是没部署到 0.0.76+**。
-  唯一成功的仍是**手动** `_node-pipeline`（VPS2，`BV11fpD65EU7`，private 4 分 P）。
+  唯一成功的仍是**手动** `_node-pipeline`（某个 worker，`BV1xx`，private 4 分 P）。
   ② **删源漏网（本轮修复）**：节点侧路径**提前 return**，`runPipelineInner` 走不到常规
   `cleanupSources()` ⇒ `transport.cleanup` 永不调用 ⇒ 节点 `recordings/` 的 `.ts` 永远不删。
   实测残留：VPS1 `~/output-data/` 5.8G（错根 stage + db）、VPS1 `~/drec/stage/douyin_32353809778_2026-10-11/`
@@ -392,7 +433,7 @@
   **2026-10-12 收尾复核（本机 master 0.0.76 + VPS1 0.0.75，均为 pre-0.0.79）——「播种假录像 + jobs/run」实测全链路**：
   用 `runNow` 跳过 settle/断连窗，对**已在盘录像**直接点火后处理，无需等真收播：
   `POST /api/hub/jobs/run {streamKey}`。本次对 test room 249293641318 的**真实残留**（VPS1 Lilt 1.8G
-  4×`.ts`，即缺陷 A 的现场）点火 → 节点侧 remux 4 分 P → 上传成功 → 台账 `done` + **`BV1ovpX6BEXM`**（private）。
+  4×`.ts`，即缺陷 A 的现场）点火 → 节点侧 remux 4 分 P → 上传成功 → 台账 `done` + **`BV1xx`**（private）。
   **证实「节点侧上传」功能本身 OK，但 pre-0.0.79 的 master 不跑收尾清理** ⇒
   ① VPS1 `recordings/Lilt/*.ts`（1.8G）**未删**、节点 stage mp4 4 个（1.8G）**未清**；
   ② `sync_node_states` 行**陈旧**（仍 `upload_plain=failed`，与新 `done` 不一致）；
@@ -577,7 +618,7 @@
 - [x] **T-36 节点侧上传补磁盘水位闸门（issue [#8](https://github.com/fuyucn/douyin-rec/issues/8)，已 close 2026-10-13）**
   — 2026-10-12 认领，PR [#10](https://github.com/fuyucn/douyin-rec/pull/10)（分支
   `codex/issue-8-node-upload-disk-gate`，base `feat/hub-optimization`，sub-agent 独立 worktree 实现，
-  **已由 review agent 合并（2026-10-13，merge commit `c7b34bc`），0.0.87 已部署，issue 已 close**）。
+  **已由 review agent 合并（2026-10-13，merge commit `<sha>`），0.0.87 已部署，issue 已 close**）。
   **做什么**：`shouldUseNodeSideUpload` 或其 executor 增加一道磁盘水位闸门 —— 节点剩余空间低于阈值时不选
   节点侧、回落 pull 回 master，并记明回落原因。**为什么**：节点盘满时仍走节点侧 → remux 写盘 ENOSPC →
   ssh rc≠0 → 保守转人工（2026-10-12 多场即该簇）。**验收**：阈值与 reconciler `diskMinGB` 同源；
@@ -604,7 +645,7 @@
 
 - [x] **T-35 中间产物→规范上传名改同盘硬链接（issue [#6](https://github.com/fuyucn/douyin-rec/issues/6)，已 close 2026-10-12）**
   — 2026-10-12 认领，PR [#9](https://github.com/fuyucn/douyin-rec/pull/9)（分支 `codex/issue-6-stage-hardlink`，
-  base `feat/hub-optimization`），**已由人合并**（merge commit `d21d408`，版本 `0.0.81`），issue 已按
+  base `feat/hub-optimization`），**已由人合并**（merge commit `<sha>`，版本 `0.0.81`），issue 已按
   「四不 close」门禁收口 close。
   **做什么**：节点侧分段管线 + master 分段管线的「中间产物 → 规范上传名」由真拷贝改同盘硬链接优先、
   失败回落复制（`linkOrCopySync`），降低上传期 stage 峰值占用。**为什么**：真拷贝使峰值翻倍，
@@ -653,7 +694,7 @@
   pipeline 分段核验观察期用例——均在基线 `4dbbaec` 上同样失败）；`pnpm typecheck` 通过；web `pnpm build` 通过；
   `pnpm bundle` 出 `0.0.75`。**版本**：本 worktree 基线 0.0.74 → bump 0.0.75；与主工作区未提交的 0.0.76–0.0.79
   合并后统一为 **0.0.80**（合并提交里改的，见 package.json）。
-  **合并完成（2026-10-12）**：合并进 `feat/hub-optimization`（merge commit `37cbade`，与主工作区 0.0.76–0.0.79 汇合，版本统一 **0.0.80**）；合并后整树 `pnpm test` **1270 passed**、`pnpm typecheck` 通过、`pnpm bundle` 出 0.0.80。**未部署、未 push**（远程无 `feat/hub-optimization`，是否 push 待用户决定）。
+  **合并完成（2026-10-12）**：合并进 `feat/hub-optimization`（merge commit `<sha>`，与主工作区 0.0.76–0.0.79 汇合，版本统一 **0.0.80**）；合并后整树 `pnpm test` **1270 passed**、`pnpm typecheck` 通过、`pnpm bundle` 出 0.0.80。**未部署、未 push**（远程无 `feat/hub-optimization`，是否 push 待用户决定）。
   **部署完成（2026-10-12）**：三节点均升到 **0.0.80**（local `0.0.80-66feff`、两台 VPS `0.0.80-88d10e`），
   经 `scripts/auto-deploy.sh`（stage first → vps1 → migrate）在部署 guard 全空闲时执行；worker id → nodeId 迁移完成（无改动，已备份）。
   **部署后无回归**：`/api/hub/workers/status` 三节点全 `ok`、`/api/tasks` 16 任务正常、`/api/hub/queue` 正常；
@@ -677,13 +718,13 @@
   **验收**:新增 `packages/orchestrator/src/segment-pipeline.test.ts`(7 用例;已验证「还原旧实现即 2 例失败」);
   `pnpm test` **902 全过**、`tsc --noEmit`、`pnpm bundle`(`0.0.47`,产物已无 `globalOffset`)。
   **部署**:`0.0.47` 已上线 master + VPS1 + VPS2(三节点 ok)。
-  **受影响的历史稿件**:`63171491268` 10-07 与 10-09 两场(10-07 稿件 `BV12ipK6HEBb` 3 个 livechat 全丢)。
+  **受影响的历史稿件**:`<房间>` 10-07 与 10-09 两场(10-07 稿件 `BV1xx` 3 个 livechat 全丢)。
   源 `.ts` 已被 cleanup 删除 → **无法补烧**,只能保留现状(弹幕 xml 仍在节点,但视频已删)。
   **另一类同症状但不同根因**:`68133201791`(凌晴)10-09 两场 `danmuCount:0`(xml 全空,取不到弹幕)
   → livechat 也无产物;那是弹幕采集问题(见 T-9),非本 bug。（2026-10-09）
 - [x] **T-27 hub 上传撞 `21566 投稿过于频繁` → 整场转人工（真缺陷）** — 2026-10-09 实况:
   `douyin.76601480575`（汪汪想不到）hub 建稿两次均报 `code: 21566`,重试 1 次后转 `needs_manual`,
-  白等一场;人工补传成功（`BV12Zp86sEN2`,3 分 P）。
+  白等一场;人工补传成功（`BV1xx`,3 分 P）。
   **根因(读源码 + 实测双向确认)**:`packages/app/src/upload/biliup.ts` 调 `biliup upload` **未指定
   `--submit`** → biliup CLI **默认走 app 提交接口**(`entry.rs`:`submit.unwrap_or(SubmitOption::App)`),
   而 app 接口(`member.bilibili.com/x/vu/app/add`)**更易触发 21566 风控**(biliup 自己的 server 端因此
@@ -695,10 +736,10 @@
   加 `BILIUP_SUBMIT` 透传;④`upload-recording-today` skill 同步加 `--submit web`(唯一权威)。
   **验收**:`pnpm test` 894 全过(+6 用例:submit 默认/覆盖/非法回落 + 21566/601/普通错误识别)、
   `tsc --noEmit` 通过、`pnpm bundle` 产物含 `BILIUP_SUBMIT` 与 21566;本机实测
-  `biliup ... --submit web upload P1 P2 P3` 建稿成功拿 `BV12Zp86sEN2`(水印 `state:0` 已确认)。（2026-10-09）
+  `biliup ... --submit web upload P1 P2 P3` 建稿成功拿 `BV1xx`(水印 `state:0` 已确认)。（2026-10-09）
 
 - [x] **T-28 `{title}` 渲染为空的真凶 = 录制节点跑的是**旧 bundle**(非代码缺陷)+ 跨场标题串台(真缺陷)**
-  — 2026-10-09 实况:`BV12Zp86sEN2` 稿件名 `汪汪想不到_2026-10-09_ 直播回放`(双下划线 = `{title}` 空),
+  — 2026-10-09 实况:`BV1xx` 稿件名 `汪汪想不到_2026-10-09_ 直播回放`(双下划线 = `{title}` 空),
   当天 12 场 hub 上传**全部**如此。
   **根因 ①(部署滞后,非代码 bug)**:T-20 的侧car `title` 修复(`f8e7543`,10-08 23:00 PDT)**只存在于
   master 容器 + VPS 源码**,而该场由 VPS2 录制;VPS2 当时跑的进程 `PID 465892` **启动于 10-08 20:09 UTC**
@@ -714,7 +755,7 @@
   的 sidecar —— 实测踩到)。
   **验收**:`pnpm test` **895 全过**(+1 用例 `T-20b`:下播→第二场用第二场标题;已验证「移除修复即失败」)、
   `tsc --noEmit` 通过、`pnpm bundle`(`0.0.46`,产物含 `offlineNotified&&(this.liveTitle="")`)。
-  **线上修复**:`BV12Zp86sEN2` 稿件名经 web edit 接口改为
+  **线上修复**:`BV1xx` 稿件名经 web edit 接口改为
   `汪汪想不到_2026-10-09_养着不烧心 直播回放`(`{title}=养着不烧心`,与抖音 API 一致;水印仍 `state:0`,
   仅自己可见未变)。
   **遗留**:其余 11 场当天上传(10-09)同样 `{title}` 空,均系旧 bundle 所致 → 待 `0.0.46` 部署后不再复现;

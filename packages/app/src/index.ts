@@ -7,6 +7,7 @@ export type { ServeOpts, ServeDeps } from "./serve.js";
 export type { HubStarter } from "./cli-task.js";
 export { TaskStore } from "./store.js";
 export { resolveTaskCookies } from "./store.js";
+export { sweepOrphanSpools, ORPHAN_SPOOL_GRACE_MS } from "./live-pump-spool.js";
 export { resolveTaskStreamCookies } from "./stream-cookies.js";
 export type { Task } from "./store.js";
 export { listNodeTasks, applyRemoteTasks } from "./task-sync.js";
@@ -34,7 +35,7 @@ export {
 export type { ExpectedVersionState, ReceiptSettings } from "./sync-receipt.js";
 export { parseApplyTasksPayload, applyTasksPayload } from "./apply-payload.js";
 export type { ApplyTasksPayload } from "./apply-payload.js";
-export { applyTimezone, applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
+export { applyTimezone, applyTimezoneFromDb, dbPathForDataRoot, syncDbPathFor, effectiveTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
 /** 应用版本号({root package.json version}-{commit6},由 pnpm bundle 注入;非打包环境回落 dev)。 */
 export { APP_VERSION } from "./version.js";
 export { makeNewBroadcastGate, checkNewBroadcastAdmission, volumeFreeBytes, effectiveHubConfig, effectiveHubConfigPath, makeManualStartAdmit } from "./disk-gate.js";

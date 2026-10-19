@@ -83,8 +83,10 @@ beforeEach(() => {
   store = new TaskStore(":memory:");
 });
 
-function addTask(): number {
-  return store.addTask({ room: "12345" }).id;
+function addTask(
+  over: Partial<Parameters<TaskStore["addTask"]>[0]> = {},
+): number {
+  return store.addTask({ room: "12345", ...over }).id;
 }
 
 describe("TaskManager beforeSpawn(边录边传起录兜底)", () => {
@@ -126,6 +128,42 @@ describe("TaskManager", () => {
     expect(mgr.isRunning(id)).toBe(true);
     expect(mgr.runningIds()).toEqual([id]);
     expect(store.getTask(id)!.status).toBe("running");
+  });
+
+  it("同一房间已有 0 落盘任务在录 → 第二个拒绝启动(否则产出两个无法删除的重复稿件)", () => {
+    const a = addTask({ room: "https://live.douyin.com/981234", outDir: "/tmp/dupA", streamUpload: true });
+    const b = addTask({ room: "https://live.douyin.com/981234", outDir: "/tmp/dupB", streamUpload: true });
+    const spawner = new MockSpawner();
+    const logs: string[] = [];
+    const mgr = new TaskManager(store, spawner, { log: (m) => logs.push(m) });
+
+    expect(mgr.start(a)).toBe(true);
+    // 第二个同房间任务:不起进程、不报 running。
+    expect(mgr.start(b)).toBe(false);
+    expect(spawner.spawned).toHaveLength(1);
+    expect(mgr.isRunning(b)).toBe(false);
+    expect(logs.join("\n")).toContain("0 落盘");
+  });
+
+  it("不同房间的 0 落盘任务互不挡(多房间并发仍可同时录)", () => {
+    const a = addTask({ room: "https://live.douyin.com/981234", outDir: "/tmp/mA", streamUpload: true });
+    const b = addTask({ room: "https://live.douyin.com/981235", outDir: "/tmp/mB", streamUpload: true });
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {} });
+
+    expect(mgr.start(a)).toBe(true);
+    expect(mgr.start(b)).toBe(true);
+    expect(spawner.spawned).toHaveLength(2);
+  });
+
+  it("普通录制任务(非 0 落盘)不受该守卫影响", () => {
+    const a = addTask({ room: "https://live.douyin.com/981234", outDir: "/tmp/pA" });
+    const b = addTask({ room: "https://live.douyin.com/981234", outDir: "/tmp/pB" });
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {} });
+
+    expect(mgr.start(a)).toBe(true);
+    expect(mgr.start(b)).toBe(true);
   });
 
   it("spawn 前置步骤(写凭证文件)抛错 → start 返回 false、status=error、onTaskDown 告警,不抛出", () => {
@@ -225,6 +263,45 @@ describe("TaskManager", () => {
 
     expect(spawner.spawned).toHaveLength(2); // respawned
     expect(mgr.isRunning(id)).toBe(true);
+    expect(store.getTask(id)!.status).toBe("running");
+  });
+
+  it("0 落盘任务自行收尾(exit 0,预期外)→ 正常停止,不进崩溃重启循环", async () => {
+    // Real container 2026-10-19: the pump replaced the file recorder and owned the process, so
+    // when the stream could not be acquired after retries it exited 0 by itself. Nothing had
+    // marked that exit expected, so TaskManager called it a crash and respawned in a tight loop
+    // ("异常退出 (code=0)" → restart #1), each round costing another six acquisition attempts.
+    const id = addTask({ room: "https://live.douyin.com/981236", streamUpload: true });
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true,
+      restartDelayMs: 0,
+      schedule: (cb) => cb(),
+      log: () => {},
+    });
+    mgr.start(id);
+    spawner.last(id).emitExit({ code: 0, signal: null, expected: false });
+
+    expect(spawner.spawned).toHaveLength(1);        // no respawn
+    expect(mgr.isRunning(id)).toBe(false);
+    expect(store.getTask(id)!.status).toBe("stopped"); // not "error"
+  });
+
+  it("普通录制任务 exit 0 仍按崩溃处理(不放宽到全部任务)", () => {
+    // The relaxation is scoped to stream uploads: a plain recorder exits only on a stop signal,
+    // so its exit code is not its own verdict and must keep resuming a genuine crash.
+    const id = addTask(); // plain task
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true,
+      restartDelayMs: 0,
+      schedule: (cb) => cb(),
+      log: () => {},
+    });
+    mgr.start(id);
+    spawner.last(id).emitExit({ code: 0, signal: null, expected: false });
+
+    expect(spawner.spawned).toHaveLength(2); // still respawns
     expect(store.getTask(id)!.status).toBe("running");
   });
 

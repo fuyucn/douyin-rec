@@ -41,6 +41,8 @@ export function listNodeTasks(store: TaskStore): NodeTaskDTO[] {
       anchorName: t.anchorName,
       rollingUpload: t.rollingUpload,
       rollingEffective: t.rollingEffective,
+      streamUpload: t.streamUpload,
+      streamUploadSpool: t.streamUploadSpool,
       outputFormat: t.outputFormat,
     };
   });
@@ -211,6 +213,9 @@ export function applyRemoteTasks(
         // 生效值由 master 算好下发(issue #40),节点只存不判;旧 master 不带该字段 → 回落旧开关(旧行为)。
         rollingUpload: spec.rollingUpload,
         rollingEffective: spec.rollingEffective ?? spec.rollingUpload,
+        // 0 落盘边录边传(plans/039):普通用户开关,旧 master 不带 → false(行为不变)。
+        streamUpload: spec.streamUpload ?? false,
+        streamUploadSpool: spec.streamUploadSpool ?? true,
         // 旧 master 不下发 / 非白名单值 → original(现状);不抛,免得一个坏值拒掉整批同步。
         outputFormat: readOutputFormat(spec.outputFormat),
       });
@@ -243,6 +248,8 @@ export function applyRemoteTasks(
         // 防止 master 的 null 覆盖 worker 已抓到的正确值。
         anchorName: spec.anchorName ?? null,
         rollingUpload: spec.rollingUpload,
+        streamUpload: spec.streamUpload ?? false,
+        streamUploadSpool: spec.streamUploadSpool ?? true,
         outputFormat: readOutputFormat(spec.outputFormat),
       });
       store.updateTask(created.id, { rollingEffective: spec.rollingEffective ?? spec.rollingUpload });

@@ -7,6 +7,10 @@ import { XmlDanmuWriter } from "./danmu-xml/index.js";
 import { writeSessionSidecar } from "./session-sidecar.js";
 export { writeSessionSidecar, type SidecarWriteHooks } from "./session-sidecar.js";
 import { createLogger, decorateRecordEvent, platformForRoom, processTimeZone, sessionBaseOf, stripVideoExt } from "@drec/core";
+
+// 0 落盘流式直传(plans/039)在 record 进程里自己连弹幕,不复用 RecordingSession;
+// 它需要同一个 writer 保证 xml 格式一致,所以从这里公开导出(格式的唯一实现仍在 danmu-xml)。
+export { XmlDanmuWriter } from "./danmu-xml/index.js";
 import type { AdmitDecision, Notifier, NotifyEvent } from "@drec/core";
 
 const log = createLogger("session");

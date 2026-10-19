@@ -65,6 +65,13 @@ const DICT = {
         where: "在 hub 规则的「上传模式」里开关。",
         graduation: "跟踪票关闭且线上观察满 48 小时无新增 incident 后摘除徽标。",
       },
+      streamUpload: {
+        name: "0 落盘流式直传",
+        desc: "录制数据边录边直传 B 站,源录像不落盘;按字节上限或时长上限先到者结算一个分 P,后续分 P 续到同一稿件。",
+        risk: "未上传完的那一段一旦断流即丢失(没有源文件可回退);上传结果不确定时会停下并保留临时文件转人工。与「边录边传」互斥。",
+        where: "在任务的「0 落盘流式直传」开关里切换。",
+        graduation: "跟踪票关闭且线上观察满 168 小时无新增 incident 后摘除徽标。",
+      },
       nodeSideUpload: {
         name: "节点侧上传",
         desc: "不烧录的房间由录制节点本地合成并上传,省掉录像回传主控。",
@@ -117,6 +124,11 @@ const DICT = {
     danmuKind: { off: "关闭", gift: "含礼物", anon: "匿名" },
     dialog: {
       createTitle: "新建录制任务", editTitle: "编辑任务", desc: "填写直播间与录制参数，全局 Cookie 在右上角统一管理。",
+      streamUpload: "0 落盘流式直传",
+      streamUploadHint: "开 = 录制数据边录边直传 B 站,源录像不落盘;按字节上限或时长上限先到者结算一个分 P,后续分 P 续到同一稿件。关 = 照旧落盘录制。",
+      streamUploadLockRolling: "该任务已启用「边录边传」,两者互斥(边录边传靠源文件上传);请先在 hub 规则里改上传模式。",
+      streamUploadZeroDisk: "真 0 落盘(不保留本地 spool)",
+      streamUploadZeroDiskHint: "开 = 视频字节完全不写盘,失败时该分 P 没有本地回退源;关 = 每个分 P 先写盘,确认后才删(可整文件重传)。",
       platform: "平台: {id}",
       runningWarn: "运行中任务：修改将保存到数据库，下次启动生效。",
       room: "直播间（房间号或 URL）", roomPlaceholder: "36464127515 或 https://live.douyin.com/...",
@@ -199,7 +211,7 @@ const DICT = {
       mergeOne: "合并为一个视频", mergeSplit: "按录制分段",
       outputHint: "合并为一个视频 = 整场各分段合成一片再上传(默认);按录制分段 = 每段一个分 P,开烧录则逐段烧", moreUpload: "更多:稿件名 / 分P名 / 简介", flowLabel: "处理流程",
       method: { label: "上传方式", after: "收播后上传", afterHint: "收播后由主控合并 / 烧录再投稿(默认)" },
-      lock: { needDanmu: "需先开启「录制弹幕」", needNodeSide: "仅在「节点侧上传」时生效", needMerge: "按分段产出时没有合并步骤", needUploadForCleanArchive: "不投稿时存档就是成品,不会被清理;开关已锁定为保留", outputFormatUpload: "投稿固定使用 mp4(B 站要求),此项已锁定", outputFormatHub: "该任务由主控的 Hub 托管(受管任务),输出格式在主控上设置,此处不可选", outputFormatHubRule: "该房间有 Hub 规则按房间号命中本任务、但本任务不是规则的源任务,输出格式只取自规则的源任务,此处不可选", outputFormatRolling: "该任务开启了边录边传(上传后删源),与原地替换容器互斥,此处不可选", outputFormatNoSurvivors: "该任务的 Hub 规则会在收尾后清掉本机所有源录像,没有可转换的文件,此处不可选" },
+      lock: { needDanmu: "需先开启「录制弹幕」", needNodeSide: "仅在「节点侧上传」时生效", needMerge: "按分段产出时没有合并步骤", needUploadForCleanArchive: "不投稿时存档就是成品,不会被清理;开关已锁定为保留", outputFormatUpload: "投稿固定使用 mp4(B 站要求),此项已锁定", outputFormatHub: "该任务由主控的 Hub 托管(受管任务),输出格式在主控上设置,此处不可选", outputFormatHubRule: "该房间有 Hub 规则按房间号命中本任务、但本任务不是规则的源任务,输出格式只取自规则的源任务,此处不可选", outputFormatRolling: "该任务开启了边录边传(上传后删源),与原地替换容器互斥,此处不可选", outputFormatStreamUpload: "该任务开启了 0 落盘流式直传,不产生源文件,此处不可选", outputFormatNoSurvivors: "该任务的 Hub 规则会在收尾后清掉本机所有源录像,没有可转换的文件,此处不可选" },
       flow: {
         record: "录制", noProcess: "已暂停", rolling: "边录边传", merge: "合并", split: "按分段",
         burnDanmu: "烧飞屏弹幕", burnLivechat: "烧聊天框", upload: "投稿 B站", nodeSide: "节点侧投稿", stageOnly: "只存档", format: "格式 {fmt}",
@@ -535,6 +547,13 @@ const DICT = {
         where: "Toggle it under \"Upload mode\" in the hub rule.",
         graduation: "The badge is removed once the tracking issue is closed and production has run 48 hours without a new incident.",
       },
+      streamUpload: {
+        name: "Zero-disk streaming upload",
+        desc: "Recording data is uploaded to Bilibili while it is still being recorded, so no source recording touches disk. A part is sealed when either the byte cap or the duration cap is reached first, and later parts append to the same archive.",
+        risk: "A part that has not finished uploading is lost if the stream drops (there is no source file to fall back to). When the upload outcome is uncertain the run stops and keeps the spool file for manual handling. Mutually exclusive with rolling upload.",
+        where: "Toggle it with the \"Zero-disk streaming upload\" switch on a task.",
+        graduation: "The badge is removed once the tracking issue is closed and production has run 168 hours without a new incident.",
+      },
       nodeSideUpload: {
         name: "Node-side upload",
         desc: "For rooms without burning, the recording node remuxes and uploads locally, skipping the transfer back to master.",
@@ -587,6 +606,11 @@ const DICT = {
     danmuKind: { off: "Off", gift: "Gifts", anon: "Anonymous" },
     dialog: {
       createTitle: "New recording task", editTitle: "Edit task", desc: "Set the room and recording options. The global cookie is managed at the top-right.",
+      streamUpload: "Zero-disk streaming upload",
+      streamUploadHint: "On = recording data is uploaded to Bilibili while recording, no source recording touches disk; a part is sealed when the byte cap or the duration cap is reached first, and later parts append to the same archive. Off = record to disk as before.",
+      streamUploadLockRolling: "This task has rolling upload enabled; the two are mutually exclusive (rolling upload needs the source file). Change the upload mode in the hub rule first.",
+      streamUploadZeroDisk: "True zero-disk (no local spool)",
+      streamUploadZeroDiskHint: "On = video bytes never touch disk; if a part fails to upload there is no local fallback. Off = each part is written to disk and deleted only after confirmation (whole-file re-upload possible).",
       platform: "Platform: {id}",
       runningWarn: "Running task: changes are saved to the DB and take effect on next start.",
       room: "Room (id or URL)", roomPlaceholder: "36464127515 or https://live.douyin.com/...",
@@ -669,7 +693,7 @@ const DICT = {
       mergeOne: "Merge into one video", mergeSplit: "Per recorded segment",
       outputHint: "Merge = all segments become one video before upload (default); per segment = each recorded segment is its own part, burned per segment when burning is on", moreUpload: "More: submission / part titles, description", flowLabel: "Processing flow",
       method: { label: "Upload method", after: "Upload after broadcast", afterHint: "After the broadcast, master merges / burns, then uploads (default)" },
-      lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment", needUploadForCleanArchive: "Without upload the archive is the final output and is never cleaned; locked to keep", outputFormatUpload: "Uploads always use mp4 (Bilibili requirement); locked", outputFormatHub: "This task is managed by the master Hub; its output format is set on the master, so it can't be set here", outputFormatHubRule: "A Hub rule matches this room but this task is not the rule's source task; the output format is taken from the source task only, so it can't be set here", outputFormatRolling: "Rolling upload is on (source deleted after upload), which excludes in-place container replacement, so it can't be set here", outputFormatNoSurvivors: "The task's Hub rule deletes every local source recording after it finishes, so there is nothing to convert; it can't be set here" },
+      lock: { needDanmu: "Turn on \"Record danmu\" first", needNodeSide: "Only applies to node-side upload", needMerge: "No merge step when output is per segment", needUploadForCleanArchive: "Without upload the archive is the final output and is never cleaned; locked to keep", outputFormatUpload: "Uploads always use mp4 (Bilibili requirement); locked", outputFormatHub: "This task is managed by the master Hub; its output format is set on the master, so it can't be set here", outputFormatHubRule: "A Hub rule matches this room but this task is not the rule's source task; the output format is taken from the source task only, so it can't be set here", outputFormatRolling: "Rolling upload is on (source deleted after upload), which excludes in-place container replacement, so it can't be set here", outputFormatStreamUpload: "Zero-disk streaming upload is on, so no source file is produced and there is nothing to convert; it can't be set here", outputFormatNoSurvivors: "The task's Hub rule deletes every local source recording after it finishes, so there is nothing to convert; it can't be set here" },
       flow: {
         record: "Record", noProcess: "Paused", rolling: "Rolling upload", merge: "Merge", split: "Per segment",
         burnDanmu: "Burn danmu", burnLivechat: "Burn livechat", upload: "Upload to Bilibili", nodeSide: "Node-side upload", stageOnly: "Archive only", format: "Format {fmt}",

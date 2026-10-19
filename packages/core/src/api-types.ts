@@ -142,6 +142,19 @@ export interface RoomRecordingDTO {
   rollingUpload: boolean;
   /** 边录边传**实际生效值**(master 按规则 + 旧开关算出的只读派生字段;见 core `resolveRollingPolicy`)。 */
   rollingEffective: boolean;
+  /**
+   * 流式直传(零落盘,plans/039):ffmpeg stdout 直传 UPOS,续同一稿件,分 P 确认后删 spool。
+   * 与 `rollingUpload`/边录边传**互斥**(后者按文件路径上传,需要落盘)。
+   * 默认 false = 行为与改动前完全一致。
+   */
+  streamUpload: boolean;
+  /**
+   * 0 落盘流式直传是否保留本地 spool(plans/039):
+   *   - true(默认)= 每个分 P 仍写盘,失败可整文件回退、可本地 ffprobe 自检;
+   *   - false = 真 0 落盘,视频字节完全不落盘;代价是该分 P 上传失败时没有本地回退源。
+   * 仅 `streamUpload=true` 时有意义。
+   */
+  streamUploadSpool: boolean;
   /** 输出格式(issue #137,缺省 original);投稿形态下后处理产物恒 mp4(见 core `effectiveStageFormat`)。 */
   outputFormat: OutputFormat;
 }
@@ -596,6 +609,11 @@ export interface NodeTaskDTO {
   rollingUpload: boolean;
   /** 边录边传实际生效值(派生,只读)。 */
   rollingEffective: boolean;
+  /**
+   * 流式直传(零落盘,plans/039)。**远端节点**:与 `rollingEffective` 同值下发;旧节点包不认识
+   * 该字段会忽略(继续原样录制,行为同改前)。本机(local):原样透传源任务的值。
+   */
+  streamUpload?: boolean;
   /** 输出格式(issue #137);旧节点包不返回 → 视为 original。 */
   outputFormat?: OutputFormat;
 }
@@ -657,6 +675,13 @@ export interface RemoteTaskSpec {
    * 可选:旧 master 不下发 → 节点回落 `rollingUpload`(旧行为)。
    */
   rollingEffective?: boolean;
+  /**
+   * 0 落盘流式直传开关(plans/039)。可选:旧 master 不下发 → 节点按 false(照旧落盘录制);
+   * 旧节点包不认识该字段会忽略。录制端把它翻译成 `record --stream-upload`。
+   */
+  streamUpload?: boolean;
+  /** 0 落盘是否保留 spool(可选;旧 master 不下发 → 默认保留,行为不变)。 */
+  streamUploadSpool?: boolean;
   /**
    * 输出格式(issue #137)。可选:旧 master 不下发 → 节点按 `original`;旧节点包不认识该字段则忽略
    * (继续原样输出)。非白名单值节点一律按 `original`(不抛、不拒绝整批)。
@@ -867,6 +892,13 @@ export interface TaskPayload {
    * 仍接受旧客户端写入(迁移来源:旧开关 true 且规则未配置 ≡ rolling),Web 表单不再提交。
    */
   rollingUpload?: boolean;
+  /**
+   * 流式直传(零落盘,plans/039)。与 `rollingUpload` 互斥,同时为真时保存即拒。
+   * 缺省 false = 走现有录制路径。
+   */
+  streamUpload?: boolean;
+  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  streamUploadSpool?: boolean;
   /** 输出格式(issue #137);服务端本就接受该字段,此前只是没写进 DTO 类型。 */
   outputFormat?: OutputFormat;
 }
@@ -921,8 +953,9 @@ export function normalizeDouyinApiMode(v: unknown): DouyinApiMode {
  * `no-survivors` = 规则使收尾后节点与 stage 都不留任何源视频(格式无处可用;plans/036 T9b 起由后端产出)。
  * `hub-rule` = enabled 规则仅按房间键命中、但本任务不是规则的源任务(收尾转格式只认源任务的格式,本任务所选格式不生效)。
  * T9b 起:本任务就是规则源任务时封口仍不转换、但改由收尾后转换,不再锁。
+ * `stream-upload` = 0 落盘流式直传(plans/039):**根本不产生文件**,输出格式无对象可作用。
  */
-export type OutputFormatLock = "hub-managed" | "hub-rule" | "rolling" | "no-survivors";
+export type OutputFormatLock = "hub-managed" | "hub-rule" | "rolling" | "no-survivors" | "stream-upload";
 
 /** GET /api/tasks[] 的任务响应(含 live 运行态;不含敏感 cookies)。 */
 export interface TaskDTO {
@@ -983,6 +1016,10 @@ export interface TaskDTO {
   rollingUpload: boolean;
   /** 边录边传实际生效值(派生,只读)。 */
   rollingEffective: boolean;
+  /** 流式直传(零落盘)开关;与边录边传互斥。 */
+  streamUpload: boolean;
+  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  streamUploadSpool: boolean;
   /** 输出格式(issue #137,缺省 original)。 */
   outputFormat: OutputFormat;
   /**

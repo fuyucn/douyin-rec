@@ -71,6 +71,21 @@ export const EXPERIMENTAL_FEATURES: readonly ExperimentalFeature[] = [
     defaultEnabled: false,
   },
   {
+    // 0 落盘流式直传(plans/039):ffmpeg stdout → UPOS 直传,源录像不落盘;以字节/时长上限
+    // 先到者结算一个分 P,续同一稿件。层 = task(任务录制配置开关,与 rolling 的 hub 规则入口不同)。
+    id: "stream-upload",
+    nameKey: "experimental.streamUpload.name",
+    descKey: "experimental.streamUpload.desc",
+    riskKey: "experimental.streamUpload.risk",
+    whereKey: "experimental.streamUpload.where",
+    graduationKey: "experimental.streamUpload.graduation",
+    // 0 落盘一旦断流丢的是**没上传完的那一段**(没有源文件可回退),观察期按最长口径留。
+    graduation: { observeHours: 168, closeTrackingIssue: true },
+    trackingIssue: null,
+    layer: "task",
+    defaultEnabled: false,
+  },
+  {
     id: "segment-part-xml",
     nameKey: "experimental.segmentPartXml.name",
     descKey: "experimental.segmentPartXml.desc",

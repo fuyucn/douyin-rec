@@ -48,8 +48,15 @@ export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
   }
   // 边录边传(T-33):录制端**只读 master 派生的 `rollingEffective`**(issue #40),不读旧开关/规则;
   // 仅生效时下发(默认关 = 不带该 flag,行为不变)。
-  if (task.rollingEffective) {
+  // 0 落盘(plans/039)优先:两者同时为真时不传 `--rolling-upload`,避免 `record` 互斥检查退出 2。
+  if (task.rollingEffective && !task.streamUpload) {
     args.push("--rolling-upload", "1");
+  }
+  // 0 落盘边录边传:ffmpeg 管道 stdout → UPOS 直传,源录像不落盘。与 rolling 互斥(见上)。
+  if (task.streamUpload) {
+    args.push("--stream-upload", "1");
+    // 默认保留 spool(可整文件回退);显式关掉 = 真 0 落盘,失败无本地回退。
+    if (task.streamUploadSpool === false) args.push("--stream-upload-spool", "none");
   }
   // 节点侧原地替换(issue #137):`task.outputFormat` 在这里已是**判定后的生效值**(TaskManager.spawnFor 经
   // resolveNodeOutputFormat 算定:hub 受管 / 有规则绑定 / 边录边传 → original)。original = 不带 flag,行为不变。

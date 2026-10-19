@@ -127,6 +127,7 @@ export function taskOutputFormatLock(f: { outputFormatLock?: OutputFormatLock | 
     case "hub-managed": return lock("roomForm.lock.outputFormatHub");
     case "hub-rule": return lock("roomForm.lock.outputFormatHubRule");
     case "rolling": return lock("roomForm.lock.outputFormatRolling");
+    case "stream-upload": return lock("roomForm.lock.outputFormatStreamUpload");
     case "no-survivors": return lock("roomForm.lock.outputFormatNoSurvivors");
     case null:
     case undefined: return OPEN;

@@ -20,12 +20,29 @@ function mkTask(over: Partial<Task> = {}): Task {
     useCookie: true,
     rollingUpload: false,
     rollingEffective: false,
+    streamUpload: false,
+    streamUploadSpool: true,
     createdAt: "2026-06-12T00:00:00.000Z",
     ...over,
   };
 }
 
 describe("buildRecordArgs", () => {
+  it("passes --stream-upload for zero-disk streaming (plans/039)", () => {
+    expect(buildRecordArgs(mkTask({ streamUpload: true }))).toContain("--stream-upload");
+  });
+
+  it("passes --stream-upload-spool none only when the spool is explicitly disabled", () => {
+    expect(buildRecordArgs(mkTask({ streamUpload: true, streamUploadSpool: true }))).not.toContain("--stream-upload-spool");
+    expect(buildRecordArgs(mkTask({ streamUpload: true, streamUploadSpool: false }))).toContain("--stream-upload-spool");
+  });
+
+  it("never passes both --rolling-upload and --stream-upload (mutually exclusive)", () => {
+    const args = buildRecordArgs(mkTask({ streamUpload: true, rollingEffective: true }));
+    expect(args).not.toContain("--rolling-upload");
+    expect(args).toContain("--stream-upload");
+  });
+
   it("maps all base fields with defaults (name present, no cookies, default outDir)", () => {
     expect(buildRecordArgs(mkTask())).toEqual([
       "record",

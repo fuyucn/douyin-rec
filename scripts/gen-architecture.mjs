@@ -308,6 +308,7 @@ const PKG_BLURB = {
   "@drec/observability": "Notifier / EventCenter / 日志",
   "@drec/post-process": "concat / burn / ass / merge / ffmpeg / fonts",
   "@drec/proc-queue": "ProcQueueStore 持久任务表(sqlite)<br/>ProcRunner 租约 / 心跳 / fencing / 关停",
+  "@drec/zero-upload": "0 落盘流式直传(自研 UPOS)<br/>live-pump: 一段一 ffmpeg 边录边传",
   "@drec/processors": "remux 处理器(校验 / 原地转换 / recover);加处理器 = 一个模块 + 注册一行",
   "@drec/tui": "Ink 终端控制台 (独立 bundle)",
   "@drec/ffmpeg-recorder-extra": "logStreamMeta + detectDevice",
@@ -321,7 +322,8 @@ const PKG_BLURB = {
   "@drec/cli": "record / merge / burn / probe + task 命令组<br/>providers-register: 注册平台 + 引擎",
 };
 const NODE_ID = {
-  "@drec/core": "core", "@drec/observability": "observ", "@drec/post-process": "post", "@drec/proc-queue": "procq", "@drec/processors": "procs",
+  "@drec/core": "core", "@drec/observability": "observ", "@drec/post-process": "post", "@drec/proc-queue": "procq", "@drec/zero-upload": "zeroup",
+  "@drec/processors": "procs",
   "@drec/tui": "tui", "@drec/ffmpeg-recorder-extra": "extra", "@drec/record-engine": "engine",
   "@drec/douyin-live": "douyin", "@drec/bilibili-live": "bilibili", "@drec/kuaishou-live": "kuaishou",
   "@drec/manager": "manager", "@drec/app": "app", "@drec/orchestrator": "orch", "@drec/cli": "cli",

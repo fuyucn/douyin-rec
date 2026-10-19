@@ -19,7 +19,9 @@ describe("experimental 注册表", () => {
       expect(["hub", "task", "global"]).toContain(f.layer);
     }
   });
-  it("首批登记 rolling-upload / node-side-upload / segment-part-xml", () => {
+  it("首批登记 rolling-upload / node-side-upload / segment-part-xml / stream-upload", () => {
+    // 0 落盘流式直传(plans/039):层 = task(任务录制配置开关,不是 hub 规则的「上传方式」)。
+    expect(getExperimentalFeature("stream-upload")?.layer).toBe("task");
     expect(isExperimental("rolling-upload")).toBe(true);
     expect(isExperimental("node-side-upload")).toBe(true);
     expect(isExperimental("segment-part-xml")).toBe(true);
@@ -28,7 +30,9 @@ describe("experimental 注册表", () => {
   it("未登记 id → undefined / false;按层过滤", () => {
     expect(getExperimentalFeature("nope")).toBeUndefined();
     expect(isExperimental("nope")).toBe(false);
-    expect(experimentalByLayer("hub").length).toBe(EXPERIMENTAL_FEATURES.length);
+    // 各层条数之和恒等于总数(分层只是筛选视图,不能漏项);global 目前无登记项。
+    const byLayer = (["hub", "task", "global"] as const).reduce((n, l) => n + experimentalByLayer(l).length, 0);
+    expect(byLayer).toBe(EXPERIMENTAL_FEATURES.length);
     expect(experimentalByLayer("global")).toEqual([]);
   });
   it("默认策略 key 随 defaultEnabled", () => {
