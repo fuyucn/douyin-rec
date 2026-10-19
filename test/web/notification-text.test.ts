@@ -65,4 +65,8 @@ describe("describeEvent: deliberate changes for events without ctx (#53 N6 revie
     expect(describeEvent(ev({ kind: "recordStart", anchor: "", room: "r", quality: "q", ctx }), t)!.message).toBe('notif.evLive{"anchor":"未知直播间"}');
     expect(describeEvent(ev({ kind: "error", stage: "s", message: "m", ctx }), t)!.message).toMatch(/^notif\.evError\{/);
   });
+  it("hub session label prefers the anchor over a fallback ctx name", () => {
+    const ctx = { name: "未知直播间", nameSource: "fallback", date: "2026-10-18" };
+    expect(describeEvent(ev({ kind: "hubTaskStart", room: "r", workers: [], anchor: "主播", ctx }), t)!.message).toContain("主播 · 2026-10-18");
+  });
 });

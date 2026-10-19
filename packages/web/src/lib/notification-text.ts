@@ -68,6 +68,7 @@ export function describeEvent(e: AppEventDTO, t: T): { key: NotifKey; message: s
       return { key: "hub", message: t("notif.evHubStart", { room: session(s("room")), count: workers }), type: "info" };
     }
     case "error": {
+      // Deliberately ctx.name only: error events carry no anchor, and a fallback name must not prefix.
       const base = ctx.name
         ? t("notif.evErrorNamed", { name: ctx.name, stage: s("stage"), message: s("message") })
         : t("notif.evError", { stage: s("stage"), message: s("message") });
