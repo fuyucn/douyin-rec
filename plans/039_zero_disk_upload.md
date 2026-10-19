@@ -220,7 +220,7 @@
 |---|---|---|
 | `preupload` 的 `size` | **必须**预声明，无默认 | 流式上传的分 P 边界必须有上界 |
 | `size` 可以大于实际字节数 | 是 | 预声明「上界」而非「精确值」即成立 |
-| `chunk_size` | 10 MiB（10485760） | 服务端指定，不要自己算 |
+| `chunk_size` | 10 MiB（10 MiB 的 chunk） | 服务端指定，不要自己算 |
 | `endpoint` | `//upos-cs-upcdntxa.bilivideo.com`（**带前导 `//`**） | 拼 URL 时须 `https:` + `//host`，不是 `https://` |
 | `complete` 响应 | `{OK:1, key:"<bucket>/<name>.<ext>"}` | `key` **带 bucket 前缀**，且带扩展名 |
 | 建稿 `videos[].filename` | 必须是 `key` 的 stem（剥目录 + 剥扩展名） | 填 cid 或原名 → `code 21015`「第(N)个视频可能上传过程出现问题」 |
@@ -424,7 +424,7 @@ record_segments loop:
 ## B8. 单稿状态机（2026-10-18）
 
 PoC 原先“所有段完成后一次建稿”，不满足“P1 完成即上传、后续 P 继续追加同一稿件”。
-现由 `LivePumpSession` 持久化 `live-pump-<room>.`<room>.state.json``：
+现由 `LivePumpSession` 持久化 `live-pump-<room>.`*.`*.session 状态文件```：
 
 - P1 `complete` 后立即建稿，拿到 `bvid/aid` 即落盘；
 - 后续 P `complete` 后先 `GET /x/vupre/web/archive/view` 读取完整 `archive + videos`，
@@ -439,7 +439,7 @@ create/append 崩溃恢复、标题歧义、网络不可达、WAL 写失败。
 
 ## B9. 真实单稿多分 P 验证（2026-10-18，房间 <房间>）
 
-- 一次在线跑出**同一稿件 5 个分 P**：`BV1xx`（aid `117463530342138`，私稿）。
+- 一次在线跑出**同一稿件 5 个分 P**：`BV1xx`（aid ``<aid>``，私稿）。
 - 服务端 `x/vupre/web/archive/view` 回读 `partCount=5`，5 个 cid 各不相同；P1 建稿、后续逐个 `edit` 追加。
 - 每段 2 块、约 16MB、时长 41~47s；`usedFileFallback=false`、`sessionLeaked=false`、`backpressured=false`。
 - 确认过的 spool 全部删除；残余孤儿 spool 已人工清理。
@@ -548,7 +548,7 @@ node dist/... record --room https://live.douyin.com/<房间> --quality origin --
 关键点：续跑按 state 里**已确认最大索引**续号，不重用索引；服务端回读分 P 数与 cid 均连续。
 
 **孤儿 spool（真 bug，本轮跑出来）**：kill 在段中途时该段从未进 state，重启只新建文件，
-旧 spool 永远没人删（实测 `live-pump-<ts>-2.ts`，1.07MB）。修法：CLI 在启动 pump
+旧 spool 永远没人删（实测 `live-pump-1792000000-2.ts`，1.07MB）。修法：CLI 在启动 pump
 前读 state 并清扫；放在 app 层，因为 processors 有静态守护禁止列目录。删除条件极窄：
 本模块命名 + 不在 state + mtime 早于 10 分钟宽限 + unlink 成功；任何异常 best effort。
 
@@ -684,7 +684,7 @@ state 引用的 4 个 spool 全部保留。单测 3 例覆盖孤儿/state 引用
 | SIGKILL 中断 | 段中途被杀 |
 | 重启续录 | `resumed state (10 parts)`，又 6 个分 P 追加到**同一稿件** |
 | 服务端回读 | `BV1xx`，**16 个分 P**、16 个不同 cid、duration 356s、state -6（审核中） |
-| 磁盘 | 目录里只有 ``<room>.state.json`` + `xml`，**视频文件 0 个** |
+| 磁盘 | 目录里只有 ``*.`*.session 状态文件``` + `xml`，**视频文件 0 个** |
 
 即：真 0 落盘 + 中断续传 + 同一稿件，全部在真实链路上成立。
 
@@ -811,7 +811,7 @@ Node 对无人处理的 SIGUSR2 的默认动作是**立即终止进程**（实�
 
 | 验证项 | 结果 |
 |---|---|
-| 真 0 落盘上传（`--stream-upload-spool none`） | 稿件 `BV1xx`，9.9MiB / 1 块，`无本地 spool(真 0 落盘)`；盘上**只有 `<room>.state.json` + 弹幕 xml，零视频文件** |
+| 真 0 落盘上传（`--stream-upload-spool none`） | 稿件 `BV1xx`，9.9MiB / 1 块，`无本地 spool(真 0 落盘)`；盘上**只有 `*.`*.session 状态文件`` + 弹幕 xml，零视频文件** |
 | 多分 P 续同一稿件 | 容器手工跑 `_live-pump` → `BV1xx`，20.0MiB / 2 块 / 119s，`usedFileFallback=false` / `backpressured=false` / `sessionLeaked=false`，spool 已删 |
 | serve 真实 spawn 的参数 | `[rec] 流式直传(0 落盘)已开启:… sizeCap=… sec=90(--segment) tid=21`（证明任务开关 → argv 接线通） |
 | 同房间 guard（B24）在真实 serve 下 | `拒绝启动 id=5:同一房间已有 0 落盘任务 id=4(zdverify4)在录,同时录会产出两个重复稿件且无法删除` |
