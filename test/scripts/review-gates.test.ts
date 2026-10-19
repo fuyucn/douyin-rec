@@ -41,6 +41,150 @@ describe("pr-risk-scan.sh", () => {
   it("测试文件内容提到 unlink 不按内容判 RISK", () => {
     expect(risk(diffOf("packages/app/src/x.test.ts", "expect(unlink).toBeCalled();")).status).toBe(0);
   });
+  it("敏感文件清单:收口/保留规则文件任何改动 → RISK", () => {
+    const r = risk(diffOf("packages/core/src/survivors.ts", "const a = 1;"));
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("敏感文件: packages/core/src/survivors.ts");
+  });
+  it("纯改名(只有 rename 头)按新旧路径判定", () => {
+    const d = "diff --git a/packages/app/src/a.ts b/packages/app/src/cleanup-x.ts\nsimilarity index 100%\nrename from packages/app/src/a.ts\nrename to packages/app/src/cleanup-x.ts\n";
+    const r = risk(d);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("路径: packages/app/src/cleanup-x.ts");
+    const clean = "diff --git a/packages/app/src/a.ts b/packages/app/src/b.ts\nsimilarity index 100%\nrename from packages/app/src/a.ts\nrename to packages/app/src/b.ts\n";
+    expect(risk(clean).status).toBe(0);
+  });
+  it("单行翻转:改动行无关键词,但所在函数上下文涉及清理 → RISK", () => {
+    const d = "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1,4 +1,4 @@\n function decide() {\n-  const keep = true;\n+  const keep = false;\n   if (!keep) rmSync(p);\n";
+    expect(risk(d).status).toBe(1);
+    const noCtx = "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1,3 +1,3 @@\n function f() {\n-  const n = 1;\n+  const n = 2;\n";
+    expect(risk(noCtx).status).toBe(0);
+  });
+  it("上下文行只在 hunk 有改动时才算(纯上下文 hunk 不触发)", () => {
+    const d = "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1,2 +1,3 @@\n rmSync(p);\n@@ -9,1 +10,2 @@\n+const z = 1;\n";
+    expect(risk(d).status).toBe(0);
+  });
+  it("在别处调用 ledger 方法 → RISK", () => {
+    expect(risk(diffOf("packages/app/src/x.ts", "await ledger.recordStep(k, s);")).status).toBe(1);
+    expect(risk(diffOf("packages/app/src/x.ts", "this.ledger?.finish(id);")).status).toBe(1);
+  });
+  it("翻转保留规则字段 → RISK", () => {
+    expect(risk(diffOf("packages/web/src/lib/x.ts", "stageAfterDone: false,")).status).toBe(1);
+  });
+  it("超大 hunk(>64KB)里靠前的命中不丢(管道提前关闭不能吞掉 RISK)", () => {
+    const filler = Array.from({ length: 5000 }, (_, i) => `+const v${i} = ${i}; // padding padding padding`).join("\n");
+    const d = `diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -0,0 +1,5001 @@\n+rmSync(p);\n${filler}\n`;
+    expect(d.length).toBeGreaterThan(64 * 1024);
+    expect(risk(d).status).toBe(1);
+  });
+  it("上下文只取改动前后 20 行;hunk 开头(函数签名)与头部函数名参与匹配", () => {
+    const ctx = (n: number) => Array.from({ length: n }, (_, i) => ` const c${i} = ${i};`);
+    // A hunk with correct line counts: 3 neutral head lines, rmSync, `gap` context lines, then a change.
+    const mk = (gap: number, hdr = "", head = [" function f() {", " const a = 1;", " const b = 2;"]) => {
+      const body = [...head, " rmSync(p);", ...ctx(gap), "-const n = 1;", "+const n = 2;"];
+      const n = body.length - 1;
+      return `diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1,${n} +1,${n} @@${hdr}\n${body.join("\n")}\n`;
+    };
+    expect(risk(mk(5)).status).toBe(1);   // within the window
+    expect(risk(mk(30)).status).toBe(0);  // beyond the window
+    expect(risk(mk(30, " function cleanupStage() {")).status).toBe(1); // header function name
+    expect(risk(mk(30, "", [" function cleanupStage() {", " const a = 1;", " const b = 2;"])).status).toBe(1); // signature
+  });
+  it("git 模式:改动远离签名时,所在函数签名仍参与匹配", () => {
+    const d = mkdtempSync(join(tmpdir(), "risk-"));
+    const g = (...a: string[]) => spawnSync("git", a, { cwd: d, encoding: "utf-8" });
+    g("init", "-q", "-b", "base");
+    g("config", "user.email", "t@t.t");
+    g("config", "user.name", "t");
+    mkdirSync(join(d, "packages", "app", "src"), { recursive: true });
+    const lines = (v: number) => [
+      "export function a() {", "  return 1;", "}", "",
+      "export function cleanupStage(p: string) {",
+      ...Array.from({ length: 48 }, (_, i) => `  const c${i} = ${i === 40 ? v : i};`),
+      "}", "",
+    ].join("\n");
+    const f = join(d, "packages", "app", "src", "x.ts");
+    writeFileSync(f, lines(40));
+    g("add", ".");
+    g("commit", "-qm", "base");
+    g("checkout", "-q", "-b", "feature");
+    writeFileSync(f, lines(99));
+    g("commit", "-qam", "c");
+    const r = spawnSync("bash", [RISK, "base"], { cwd: d, encoding: "utf-8" });
+    expect(r.stdout.split("\n")[0]).toBe("RISK");
+  });
+  /** Temp git repo with one file committed on `base`, then rewritten on `feature`; returns the scan stdout. */
+  function gitScan(before: string, after: string): string {
+    const d = mkdtempSync(join(tmpdir(), "risk-"));
+    const g = (...a: string[]) => spawnSync("git", a, { cwd: d, encoding: "utf-8" });
+    g("init", "-q", "-b", "base");
+    g("config", "user.email", "t@t.t");
+    g("config", "user.name", "t");
+    mkdirSync(join(d, "packages", "app", "src"), { recursive: true });
+    const f = join(d, "packages", "app", "src", "x.ts");
+    writeFileSync(f, before);
+    g("add", ".");
+    g("commit", "-qm", "base");
+    g("checkout", "-q", "-b", "feature");
+    writeFileSync(f, after);
+    g("commit", "-qam", "c");
+    return spawnSync("bash", [RISK, "base"], { cwd: d, encoding: "utf-8" }).stdout;
+  }
+  const body = (n: number, changeAt: number, v: number) =>
+    Array.from({ length: n }, (_, i) => `  const c${i} = ${i === changeAt ? v : i};`);
+  it("git 模式:函数上方多行文档注释不把签名挤出匹配范围", () => {
+    const src = (v: number) => ["export function a() {", "  return 1;", "}", "",
+      "/**", " * Doc line one.", " * Doc line two.", " * Doc line three.", " */",
+      "export function cleanupStage(dir: string) {", ...body(60, 45, v), "}", ""].join("\n");
+    expect(gitScan(src(45), src(99)).split("\n")[0]).toBe("RISK");
+  });
+  it("git 模式:两个函数合进一个 hunk 时,第二个函数签名也参与匹配", () => {
+    const src = (v1: number, v2: number) => ["function alpha() {", ...body(40, 1, v1), "}",
+      "function cleanupStage() {", ...body(60, 50, v2), "}", ""].join("\n");
+    expect(gitScan(src(1, 50), src(7, 99)).split("\n")[0]).toBe("RISK");
+  });
+  it("签名启发式不把 if/for 当函数", () => {
+    const filler = Array.from({ length: 30 }, (_, i) => ` const c${i} = ${i};`);
+    const lines = [" function f() {", " const a = 1;", " const b = 2;", "   if (cleanupDone) {", ...filler, "-const n = 1;", "+const n = 2;"];
+    const n = lines.length - 1;
+    const d = `diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1,${n} +1,${n} @@\n${lines.join("\n")}\n`;
+    expect(risk(d).status).toBe(0);
+  });
+  it("diff -ruN 风格(无 a/ b/ 前缀,带时间戳)也按内容与路径判", () => {
+    const d = "diff -ruN old/x.ts new/x.ts\n--- packages/app/src/x.ts\t2026-10-01 10:00:00\n+++ packages/app/src/x.ts\t2026-10-02 10:00:00\n@@ -1 +1 @@\n-const a = 1;\n+fs.rmSync(x);\n";
+    const r = risk(d);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("内容[清理/删除]: packages/app/src/x.ts");
+  });
+  it("hunk 行数偏小(被截断/手改)→ 多出来的增删行 fail closed", () => {
+    const d = "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1 +1 @@\n-const a = 1;\n+const a = 2;\n+const b = 3;\n";
+    const r = risk(d);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("diff 格式异常");
+  });
+  it("无 diff --git 头的普通 diff -u:按 hunk 行数结束,下一个文件的路径照判", () => {
+    const d = "--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1 +1 @@\n-const n = 1;\n+const n = 2;\n--- a/scripts/cleanup.sh\n+++ b/scripts/cleanup.sh\n@@ -1 +1 @@\n-echo a\n+echo b\n";
+    const r = risk(d);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("路径: scripts/cleanup.sh");
+  });
+  it("路径里含 \" b/\" 时按中点切分", () => {
+    const r = risk("diff --git a/x b/upload.ts b/x b/upload.ts\nold mode 100644\nnew mode 100755\n");
+    expect(r.out).toContain("路径: x b/upload.ts\n");
+  });
+  it("只改权限 / 二进制 / 带引号路径:从 diff 头取路径", () => {
+    expect(risk("diff --git a/scripts/cleanup.sh b/scripts/cleanup.sh\nold mode 100644\nnew mode 100755\n").status).toBe(1);
+    expect(risk("diff --git a/assets/upload.bin b/assets/upload.bin\nindex 1..2 100644\nBinary files a/assets/upload.bin and b/assets/upload.bin differ\n").status).toBe(1);
+    expect(risk('diff --git "a/packages/app/src/\\344cleanup.ts" "b/packages/app/src/\\344cleanup.ts"\nnew file mode 100644\n').status).toBe(1);
+    expect(risk("diff --git a/assets/logo.bin b/assets/logo.bin\nBinary files a/assets/logo.bin and b/assets/logo.bin differ\n").status).toBe(0);
+  });
+  it("hunk 内以 -- 开头的删除行是内容,不当文件头", () => {
+    const d = "diff --git a/packages/app/src/x.ts b/packages/app/src/x.ts\n--- a/packages/app/src/x.ts\n+++ b/packages/app/src/x.ts\n@@ -1,2 +1,1 @@\n--- a/packages/app/src/upload.ts\n-rmSync(p);\n";
+    const r = risk(d);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("内容[清理/删除]: packages/app/src/x.ts");
+    expect(r.out).not.toContain("upload.ts");
+  });
   it("删除文件也按路径判 RISK", () => {
     const d = "diff --git a/packages/app/src/cleanup.ts b/packages/app/src/cleanup.ts\ndeleted file mode 100644\n--- a/packages/app/src/cleanup.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
     expect(risk(d).status).toBe(1);
@@ -87,10 +231,97 @@ describe("issue-guard.py --diff", () => {
     g("commit", "-qam", "c2");
     expect(guard(d).status).toBe(1);
   });
-  it("issue-guard: allow 标记的新增行跳过", () => {
+  it("allow 标记在文档里无效,照常拦", () => {
     const { d, g } = repo();
     appendFileSync(join(d, "docs", "a.md"), "夹具 BV1Zz9y1C7xA issue-guard: allow\n"); // issue-guard: allow
     g("commit", "-qam", "c");
+    expect(guard(d).status).toBe(1);
+  });
+  it("allow 标记只在测试夹具生效,并打印跳过行数与位置", () => {
+    const { d, g } = repo();
+    mkdirSync(join(d, "test"));
+    writeFileSync(join(d, "test", "f.test.ts"), "const ip = '10.0.0.7'; // issue-guard: allow\n"); // issue-guard: allow
+    g("add", ".");
+    g("commit", "-qm", "c");
+    const r = guard(d);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("allow 标记跳过 1 行");
+    expect(r.stderr).toContain("test/f.test.ts:1");
+  });
+  it("json 只豁免文件名/主机名:IP 与长数字照拦,文件名放行", () => {
+    const { d, g } = repo();
+    writeFileSync(join(d, "c.json"), '{ "id": "vps2", "file": "rec.flv" }\n');
+    g("add", ".");
+    g("commit", "-qm", "c");
     expect(guard(d).status).toBe(0);
+    appendFileSync(join(d, "c.json"), '{ "host": "10.1.2.3" }\n'); // issue-guard: allow
+    g("commit", "-qam", "c2");
+    expect(guard(d).stderr).toContain("IP 地址");
+  });
+  it("json 形态的登录凭证(键值与 name/value)也拦", () => {
+    const { d, g } = repo();
+    writeFileSync(join(d, "c.json"), '{ "sessionid": "0123abcd4567ef89aabbccdd" }\n'); // issue-guard: allow
+    g("add", ".");
+    g("commit", "-qm", "c");
+    expect(guard(d).stderr).toContain("登录凭证键值");
+    const r2 = repo();
+    writeFileSync(join(r2.d, "k.json"), '[{"name":"SESSDATA","value":"a1b2c3d4%2C17900%2Cabcdef"}]\n'); // issue-guard: allow
+    r2.g("add", ".");
+    r2.g("commit", "-qm", "c");
+    expect(guard(r2.d).stderr).toContain("name/value");
+  });
+  it("多行(格式化后的) name/value 凭证也拦,行号指向 name 行", () => {
+    const { d, g } = repo();
+    writeFileSync(join(d, "k.json"), '[\n  {\n    "name": "SESSDATA",\n    "value": "a1b2c3d4%2C17900%2Cabcdef"\n  }\n]\n'); // issue-guard: allow
+    g("add", ".");
+    g("commit", "-qm", "c");
+    const r = guard(d);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("k.json:3: [登录凭证键值]");
+  });
+  it("value 在 name 之前的形态也拦", () => {
+    const { d, g } = repo();
+    writeFileSync(join(d, "k.json"), '[{"value": "a1b2c3d4%2C17900%2Cabcdef", "name": "SESSDATA"}]\n'); // issue-guard: allow
+    g("add", ".");
+    g("commit", "-qm", "c");
+    expect(guard(d).stderr).toContain("value/name");
+  });
+  it("hunk 内以 ++ 开头的新增行仍按内容扫,不改写文件路径", () => {
+    const { d, g } = repo();
+    writeFileSync(join(d, "docs", "b.md"), "++ 10.2.3.4\n"); // issue-guard: allow
+    g("add", ".");
+    g("commit", "-qm", "c");
+    const r = guard(d);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("docs/b.md:1");
+  });
+  it("json 不再豁免场次键与凭证类词", () => {
+    const { d, g } = repo();
+    writeFileSync(join(d, "c.json"), '{ "key": "douyin:abc:2026" }\n'); // issue-guard: allow
+    g("add", ".");
+    g("commit", "-qm", "c");
+    expect(guard(d).stderr).toContain("streamKey");
+  });
+  it("生成物不再整文件跳过:写进 IP 照拦,角色名放行", () => {
+    const { d, g } = repo();
+    writeFileSync(join(d, "docs", "architecture.html"), "<p>vps1 rooms.json</p>\n");
+    g("add", ".");
+    g("commit", "-qm", "c");
+    expect(guard(d).status).toBe(0);
+    appendFileSync(join(d, "docs", "architecture.html"), "<p>100.64.0.9</p>\n"); // issue-guard: allow
+    g("commit", "-qam", "c2");
+    expect(guard(d).status).toBe(1);
+  });
+  it("登录凭证键值对在源码里也拦;变量名/短值不误报", () => {
+    const { d, g } = repo();
+    writeFileSync(join(d, "x.ts"), "const sessdata: string = c; const k = `sessionid=${v}`;\n");
+    g("add", ".");
+    g("commit", "-qm", "c");
+    expect(guard(d).status).toBe(0);
+    appendFileSync(join(d, "x.ts"), "const c = 'sessionid=0123abcd4567ef89aabbccdd';\n"); // issue-guard: allow
+    g("commit", "-qam", "c2");
+    const r = guard(d);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("登录凭证键值");
   });
 });

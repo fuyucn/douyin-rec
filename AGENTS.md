@@ -47,6 +47,10 @@ commander、esbuild 双产物打包（`dist/douyin-rec.mjs` + `dist/tui.mjs`）�
 - **做完要留言，然后可以 close。** 先总结结果和未采纳的理由，再按「四不 close」门禁自查（有证据 / 已验证 / 有回归测试 / 已回写经验）；**四条全过，agent 可直接 `gh issue close` 并写明关闭依据**，不必等人。缺任一条就不 close，改成在 issue 里写清缺口并保持 open。
 - **PR 由自动 review 会话审查，门禁全过即由 agent 合并**（`gh pr merge --merge`，base 保持
   `feat/hub-optimization`）——不必等人手动合并；review 只打回、不代改代码。
+- **RISK 门禁：** 合并前跑 `scripts/pr-risk-scan.sh`；输出 `RISK`（上传 / 清理删除 / 保留规则 / ledger、
+  或改了敏感文件清单）→ 不自动合并，票转 `needs-decision` 并写「决定三行」，等人拍板。
+- **打回回路：** review 不过 → PR 保持 open、票转 `rework-1`（再不过 `rework-2`），实现会话在原分支返工后
+  转回 `in-review` 重审；第 3 次仍不过转 `needs-decision`。细则见 `docs/agent-workflow.md`「review 门禁」。
 - **部署仍由人做（部署不变）。** master 与 VPS1 任一 `recording===true` 就等；用户明确 override 除外。
 
 ## 自审循环（agent 必读：写完 ≠ 完成）

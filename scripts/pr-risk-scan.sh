@@ -10,8 +10,13 @@
 #
 # 口径(宁可误报 RISK 让人确认,不可漏):
 #   - 路径:非 .md 文件的路径含 upload / biliup / cleanup / ledger / unlink / rm-* 即 RISK。
-#   - 内容:只扫生产代码与运维脚本的增/删行(packages/ 下非测试 ts/tsx/mjs/js、scripts/*.sh、
-#     Dockerfile、remote/、.github/);文档、测试、本脚本自身不按内容扫(否则文档里提到词就误报)。
+#   - 路径:敏感文件清单(收口 / 台账 / 清理 / 保留规则相关,见 SENSITIVE_FILES)命中即 RISK;
+#     纯改名(diff 里只有 rename from/to 头、没有 +++/---)也按新旧两个路径判定。
+#   - 内容:只扫生产代码与运维脚本(packages/ 下非测试 ts/tsx/mjs/js、scripts/*.sh、Dockerfile、
+#     remote/、.github/);文档、测试、本脚本自身不按内容扫(否则文档里提到词就误报)。
+#     git 模式用 --function-context 取 diff,按 hunk 判定:hunk 里有增/删行时,连同 hunk 开头 3 行
+#     (所在函数签名)、hunk 头的函数名与改动前后各 20 行上下文一起匹配,单行翻转保留规则、在别处调用 ledger 方法也能命中。
+#   - 路径同时取自 `diff --git` 头(权限变更、二进制、带引号路径只有这一行)。
 set -euo pipefail
 
 DEFAULT_BASE="origin/feat/hub-optimization"
@@ -22,45 +27,165 @@ if [[ "${1:-}" == "--diff-file" ]]; then
   if [[ "$2" == "-" ]]; then DIFF="$(cat)"; else DIFF="$(cat "$2")"; fi
 else
   base="${1:-$DEFAULT_BASE}"
-  DIFF="$(git diff -U0 --no-color --no-ext-diff "$base...HEAD")" || { echo "git diff 失败(base=$base)" >&2; exit 2; }
+  DIFF="$(git diff --function-context --no-color --no-ext-diff "$base...HEAD")" || { echo "git diff 失败(base=$base)" >&2; exit 2; }
 fi
 
 PATH_RE='(upload|biliup|cleanup|clean-up|ledger|unlink|(^|/)rm[-_.])'
 UPLOAD_RE='biliup|\bupload|--is-only-self|watermark'
-DELETE_RE='cleanup|\bunlink(Sync)?\b|\brmSync\b|\brm\(|fs\.rm\b|rimraf|\brmdir|\brm +-[a-zA-Z]*[rf]|removeSource|deleteSource'
-LEDGER_RE='sync_jobs|SyncLedger|needs_manual|\b(setState|advanceState|markDone|markFailed|upsertPending|sweepStale)\b'
+DELETE_RE='cleanup|\bunlink(Sync)?\b|\brmSync\b|\brm\(|fs\.rm\b|rimraf|\brmdir|\brm +-[a-zA-Z]*[rf]|removeSource|deleteSource|xmlKeepRule|stageAfterDone|keepSource|survivor'
+LEDGER_RE='sync_jobs|SyncLedger|needs_manual|\b(setState|advanceState|markDone|markFailed|upsertPending|sweepStale)\b|\bledger\??\.[A-Za-z]+\('
+# Files whose behaviour decides closeout / ledger state / what gets kept or deleted: any change is RISK.
+SENSITIVE_FILES=(
+  packages/orchestrator/src/pipeline.ts
+  packages/orchestrator/src/segment-pipeline.ts
+  packages/orchestrator/src/reconciler.ts
+  packages/orchestrator/src/ledger.ts
+  packages/orchestrator/src/node-side-upload.ts
+  packages/core/src/survivors.ts
+  packages/core/src/hub-ledger-contract.ts
+  packages/app/src/node-pipeline.ts
+  packages/app/src/orphan-cleanup.ts
+  packages/cli/src/node-pipeline-commands.ts
+)
 
 reasons=()
 cur=""
+in_hunk=0
+CTX=20            # context lines kept on each side of a change
+HEAD_KEEP=3       # leading hunk lines always matched (the enclosing function signature)
+# Signature-like lines (function / method / class / arrow const / shell function). The latest one seen
+# in the hunk is matched with every change, so a doc comment above the function or a second function
+# merged into the same hunk cannot push the enclosing signature out of the window.
+SIG_RE='^[[:space:]]*((export|async|public|private|protected|static|readonly|default|override)[[:space:]]+)*(function[[:space:]*]|class[[:space:]]|[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*(<[^>]*>)?\(.*\)[^;]*\{[[:space:]]*$|(const|let)[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=.*=>)|^[A-Za-z_][A-Za-z0-9_-]*[[:space:]]*\(\)[[:space:]]*\{'
+NOT_SIG_RE='^[[:space:]]*(if|for|while|switch|catch|else|return|do|await|new)([[:space:]]|\(|$)'
+last_sig=""
+head_left=0
+old_left=0
+new_left=0
+hunk=""           # text matched for the current hunk: function header + changes + nearby context
+hunk_changed=0
+pre=()            # trailing context lines seen since the last change (at most CTX)
+after=0           # context lines still to keep after the last change
 
 check_path() {
-  [[ "$1" != *.md && "$1" != "$SELF" ]] && printf '%s' "$1" | grep -Eiq "$PATH_RE" && reasons+=("路径: $1")
+  [[ -n "$1" && "$1" != "$SELF" ]] || return 0
+  [[ "$1" != *.md ]] && grep -Eiq "$PATH_RE" <<< "$1" && reasons+=("路径: $1")
+  local f
+  for f in "${SENSITIVE_FILES[@]}"; do
+    [[ "$1" == "$f" ]] && reasons+=("敏感文件: $1")
+  done
+  return 0
+}
+
+content_scanned() {
+  case "$1" in
+    packages/*.test.*|*/test/*|test/*) return 1 ;;
+    packages/*.ts|packages/*.tsx|packages/*.mjs|packages/*.js) return 0 ;;
+    scripts/*.sh|Dockerfile*|docker-compose*|remote/*|.github/*) return 0 ;;
+  esac
+  return 1
+}
+
+# Match the finished hunk against the content rules. Here-strings, not `printf | grep -q`:
+# under pipefail an early-exiting grep SIGPIPEs the writer on large hunks and the match is lost.
+flush_hunk() {
+  if (( hunk_changed )) && [[ -n "$cur" && "$cur" != "$SELF" ]] && content_scanned "$cur"; then
+    local pair label re
+    for pair in "上传:$UPLOAD_RE" "清理/删除:$DELETE_RE" "ledger 状态转换:$LEDGER_RE"; do
+      label="${pair%%:*}"; re="${pair#*:}"
+      if grep -Eiq "$re" <<< "$hunk"; then
+        reasons+=("内容[$label]: $cur")
+      fi
+    done
+  fi
+  hunk=""
+  hunk_changed=0
+  pre=()
+  after=0
+}
+
+# `diff --git a/X b/Y` (optionally quoted): the only header present for mode-only and binary changes.
+header_paths() {
+  local h="${1#diff --git }"
+  h="${h//\"/}"
+  local n=$(( (${#h} - 5) / 2 ))
+  if (( n > 0 )) && [[ "${h:0:2}" == "a/" && "${h:2+n:3}" == " b/" && "${h:2:n}" == "${h:5+n}" ]]; then
+    check_path "${h:2:n}"   # same path on both sides: split at the midpoint (paths may contain " b/")
+    cur="${h:2:n}"
+  elif [[ "$h" =~ ^a/(.*)\ b/(.*)$ ]]; then
+    check_path "${BASH_REMATCH[1]}"
+    [[ "${BASH_REMATCH[2]}" != "${BASH_REMATCH[1]}" ]] && check_path "${BASH_REMATCH[2]}"
+    cur="${BASH_REMATCH[2]}"
+  fi
+  return 0
+}
+
+# Start a hunk: remember its line budget so plain `diff -u` input (no `diff --git` lines) still
+# leaves the hunk at the right place, and keep the header's function name.
+start_hunk() {
+  in_hunk=1
+  hunk="${1#@@*@@}"$'\n'
+  head_left=$HEAD_KEEP
+  last_sig=""
+  old_left=1; new_left=1
+  if [[ "$1" =~ ^@@\ -[0-9]+(,([0-9]+))?\ \+[0-9]+(,([0-9]+))?\ @@ ]]; then
+    old_left="${BASH_REMATCH[2]:-1}"; new_left="${BASH_REMATCH[4]:-1}"
+  fi
+}
+
+# Account one body line against the hunk budget; leave the hunk once both sides are consumed.
+consume() {
+  case "$1" in
+    -) old_left=$((old_left - 1)) ;;
+    +) new_left=$((new_left - 1)) ;;
+    *) old_left=$((old_left - 1)); new_left=$((new_left - 1)) ;;
+  esac
+  if (( old_left <= 0 && new_left <= 0 )); then flush_hunk; in_hunk=0; fi
   return 0
 }
 
 while IFS= read -r line; do
-  case "$line" in
-    "+++ b/"*) cur="${line#+++ b/}"; check_path "$cur" ;;
-    "--- a/"*) cur="${line#--- a/}"; check_path "$cur" ;;  # 删除文件时 +++ 是 /dev/null,靠这行拿路径
-    "+++ "*|"--- "*|"diff "*|"index "*|"@@"*) ;;
-    [+-]*)
-      [[ -n "$cur" && "$cur" != "$SELF" ]] || continue
-      scan=0
-      case "$cur" in
-        packages/*.test.*|*/test/*|test/*) ;;
-        packages/*.ts|packages/*.tsx|packages/*.mjs|packages/*.js) scan=1 ;;
-        scripts/*.sh|Dockerfile*|docker-compose*|remote/*|.github/*) scan=1 ;;
+  if (( in_hunk )); then
+    case "$line" in
+      "diff "*) flush_hunk; in_hunk=0; cur=""; header_paths "$line"; continue ;;
+      "@@"*) flush_hunk; start_hunk "$line"; continue ;;
+      "\\"*) continue ;;  # "\ No newline at end of file"
+    esac
+    body="${line:1}"
+    [[ "$body" =~ $SIG_RE && ! "$body" =~ $NOT_SIG_RE ]] && last_sig="$body"
+    [[ "$line" == [+-]* && -n "$last_sig" ]] && hunk+="$last_sig"$'\n'
+    if (( head_left > 0 )); then
+      # With --function-context the hunk opens on the enclosing function's signature: always match it.
+      hunk+="$body"$'\n'; head_left=$((head_left - 1))
+      [[ "$line" == [+-]* ]] && { hunk_changed=1; after=$CTX; }
+    else
+      case "$line" in
+        [+-]*)
+          (( ${#pre[@]} )) && hunk+="$(printf '%s\n' "${pre[@]}")"$'\n'
+          pre=(); hunk+="$body"$'\n'; hunk_changed=1; after=$CTX ;;
+        *)
+          if (( after > 0 )); then hunk+="$body"$'\n'; after=$((after - 1))
+          else pre+=("$body"); (( ${#pre[@]} > CTX )) && pre=("${pre[@]:1}")
+          fi ;;
       esac
-      (( scan )) || continue
-      body="${line:1}"
-      for pair in "上传:$UPLOAD_RE" "清理/删除:$DELETE_RE" "ledger 状态转换:$LEDGER_RE"; do
-        label="${pair%%:*}"; re="${pair#*:}"
-        if printf '%s' "$body" | grep -Eiq "$re"; then
-          reasons+=("内容[$label]: $cur")
-        fi
-      done ;;
+    fi
+    consume "${line:0:1}"
+    continue
+  fi
+  case "$line" in
+    "diff "*) cur=""; header_paths "$line" ;;
+    "+++ /dev/null"*|"--- /dev/null"*) ;;
+    # File headers: git (`b/x`), plain `diff -u` (`x<TAB>timestamp`, optional a/ b/ prefix).
+    "+++ "*) p="${line#+++ }"; p="${p%%$'\t'*}"; cur="${p#b/}"; check_path "$cur" ;;
+    "--- "*) p="${line#--- }"; p="${p%%$'\t'*}"; cur="${p#a/}"; check_path "$cur" ;;  # 删除文件时 +++ 是 /dev/null,靠这行拿路径
+    "rename from "*) check_path "${line#rename from }" ;;
+    "rename to "*) cur="${line#rename to }"; check_path "$cur" ;;
+    "@@"*) start_hunk "$line" ;;
+    # A change line outside any hunk means the counts were wrong or the diff was cut: fail closed.
+    [+-]*) reasons+=("diff 格式异常(hunk 外的增删行): ${cur:-未知文件}") ;;
   esac
 done <<< "$DIFF"
+flush_hunk
 
 if (( ${#reasons[@]} )); then
   echo "RISK"
