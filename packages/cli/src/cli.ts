@@ -1600,6 +1600,11 @@ const hubStarter: HubStarter = {
           //   - 本机(local):applyTasks 写的是**源任务本身**,其旧 `rollingUpload` 是用户旧值
           //     (迁移来源,不能被覆盖,同 enabled 的特例),故只更新派生字段 `rollingEffective`。
           ...rollingFields,
+          // Zero-disk lives on the task, but the desired spec is a full task projection:
+          // omitting it makes local applyTasks write `false` back to the source task on every
+          // sync tick, silently turning zero-disk off.
+          streamUpload: src.streamUpload,
+          streamUploadSpool: src.streamUploadSpool,
         });
       }
       return out;

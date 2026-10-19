@@ -23,6 +23,8 @@ export interface RoomForm {
   procEnabled: boolean;
   uploadOn: boolean;
   method: UploadMethod;
+  streamUpload: boolean;
+  streamUploadSpool: boolean;
   mergeSegments: boolean;
   burnDanmu: boolean;
   burnLivechat: boolean;
@@ -56,6 +58,8 @@ export function formFromRoom(r: RoomDTO): RoomForm {
     useCookie: rec?.useCookie ?? true,
     procEnabled: r.processing?.enabled ?? true,
     ...methodFromStored(p.upload?.mode, p.steps?.nodeSideUpload === true),
+    streamUpload: rec?.streamUpload === true,
+    streamUploadSpool: rec?.streamUploadSpool !== false,
     // Burn defaults to ON (backend burnFlags reads `!== false`); `=== true` would silently save it off.
     mergeSegments: p.steps?.mergeSegments !== false,
     burnDanmu: p.steps?.burnDanmu !== false,
@@ -96,6 +100,7 @@ export function factsOf(f: RoomForm, ctx: RoomContext): FormFacts {
     cookieReady: ctx.cookieReady,
     cookieForStream: ctx.cookieForStream,
     hasRule: ctx.hasRule,
+    streamUpload: f.streamUpload,
   };
 }
 
@@ -130,6 +135,10 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
         outputFormat: stored.outputFormat,
         danmu: f.danmu ? 1 : 0,
         useCookie: f.useCookie,
+        // Zero-disk is only meaningful under rolling; other modes clear it so a later save
+        // cannot resurrect a hidden switch.
+        streamUpload: stored.mode === "rolling" && f.streamUpload,
+        streamUploadSpool: f.streamUploadSpool,
         ...sched,
         webhook: f.webhook.trim() || null,
       }

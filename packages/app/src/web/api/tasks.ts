@@ -6,12 +6,13 @@
  */
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
-import { parseOutputFormat, platformForRoom, listPlatforms, streamUploadConflicts, type OutputFormat } from "@drec/core";
+import { parseOutputFormat, platformForRoom, listPlatforms, streamUploadConflicts, zeroDiskRuleError, type OutputFormat } from "@drec/core";
 import { inWindow, nowMinutesLocal } from "../../scheduler.js";
 import type { CreateTaskInput, UpdateTaskInput, TaskView } from "./types.js";
 import type { TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
 import { redactLogLines } from "@drec/core";
+import * as hubStore from "../../hub-store.js";
 
 /** Web 停止请求最多同步等待的时间(ms)。普通任务几秒内退出;rolling 任务可能在传末段,超时先返回。 */
 const STOP_WAIT_MS = 15_000;
@@ -45,6 +46,15 @@ export function buildTasks(ctx: ApiCtx) {
       if (streamUploadConflicts(input.streamUpload, input.rollingUpload === true)) {
         return err(400, "streamUpload 与 rollingUpload 互斥:0 落盘不写盘,滚动上传靠文件");
       }
+      // A zero-disk task must be a rolling sub-mode. Validate the room rule up front so a
+      // task created from the Tasks page cannot bypass the Rooms editor guard.
+      const roomPlatform = platformForRoom(room);
+      const roomSlug = roomPlatform.extractRoomSlug(room);
+      const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(roomPlatform.id, roomSlug));
+      const zerr = zeroDiskRuleError(input.streamUpload, rule
+        ? { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers, steps: rule.pipeline?.steps }
+        : null);
+      if (zerr) return err(400, zerr);
       const task = store.addTask({
         room,
         name: input.name ?? null,
@@ -100,11 +110,19 @@ export function buildTasks(ctx: ApiCtx) {
       if (streamUploadConflicts(patch.streamUpload ?? existing.streamUpload, patch.rollingUpload ?? existing.rollingUpload)) {
         return err(400, "streamUpload 与 rollingUpload 互斥:0 落盘不写盘,滚动上传靠文件");
       }
-      // 0 落盘不产生可扫描的录像文件 → hub 规则会永远选不到 winner。与房间编辑同一句判定
-      // (ctx.recordingError),这里挡「先建规则、再把源任务改成 streamUpload」的反向顺序。
-      if (patch.streamUpload === true && isHubSourceTask(id)) {
-        return err(400, "该任务已绑定 hub 规则;0 落盘流式直传不产生录像文件,不能作为规则源任务");
+      // Zero-disk may only be enabled under a rolling rule with no burn, pinned to local.
+      if (patch.streamUpload === true) {
+        const room = (patch.room ?? existing.room);
+        const p = platformForRoom(room);
+        const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(p.id, p.extractRoomSlug(room)));
+        const zerr = zeroDiskRuleError(true, rule
+          ? { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers, steps: rule.pipeline?.steps }
+          : null);
+        if (zerr) return err(400, zerr);
       }
+      // A task that is already the source of a rolling rule may switch to zero-disk:
+      // zero-disk is that rule's sub-mode and reports its own ledger result. The zero-disk
+      // rule check above rejects any non-rolling / burning / multi-node rule.
       if ("outputFormat" in input) {
         try { patch.outputFormat = parseOutputFormat(input.outputFormat); } catch (e) { return err(400, (e as Error).message); }
       }

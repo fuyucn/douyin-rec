@@ -598,6 +598,32 @@ describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config >
     const startMs = Date.UTC(2026, 8, 12, 17, 30, 0);
     expect(resolveStreamUploadTitle({
       platform: "douyin", roomSlug: "123", anchorName: "主播", startMs, timeZone: "Asia/Shanghai",
+    })).toBe("主播_2026-09-13_01-30-00");
+  });
+
+  it("zero-disk default title carries the start time (two streams on one day stay distinct)", () => {
+    rmSync(path.join(root, "config", "hub", "douyin.123.json"));
+    writeFileSync(path.join(root, "config", "hub.config.json"), "{}", "utf-8");
+    const a = resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "123", anchorName: "主播",
+      startMs: Date.UTC(2026, 8, 12, 17, 30, 0), timeZone: "Asia/Shanghai",
+    });
+    const b = resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "123", anchorName: "主播",
+      startMs: Date.UTC(2026, 8, 13, 17, 30, 0), timeZone: "Asia/Shanghai",
+    });
+    expect(a).toMatch(/^主播_2026-09-13_\d{2}-\d{2}-\d{2}$/);
+    expect(a).not.toBe(b);
+  });
+
+  it("an explicit date-only title template is honored verbatim", () => {
+    rmSync(path.join(root, "config", "hub", "douyin.123.json"));
+    writeFileSync(path.join(root, "config", "hub.config.json"), JSON.stringify({
+      uploadDefaults: { titleTemplate: "{name}_{date}" },
+    }), "utf-8");
+    expect(resolveStreamUploadTitle({
+      platform: "douyin", roomSlug: "123", anchorName: "主播",
+      startMs: Date.UTC(2026, 8, 12, 17, 30, 0), timeZone: "Asia/Shanghai",
     })).toBe("主播_2026-09-13");
   });
 

@@ -50,6 +50,12 @@ describe("applyRemoteTasks", () => {
     expect(t.name).toBe("新名");
   });
 
+  it("master 下发的 zero-disk 字段会被应用,不会被同步清掉", () => {
+    const t = store.addTask({ room: "123456" });
+    applyRemoteTasks(store, [spec({ streamUpload: true, streamUploadSpool: false })], undefined, { adopt: false });
+    expect(store.getTask(t.id)).toMatchObject({ streamUpload: true, streamUploadSpool: false });
+  });
+
   // T-4:worker 录制时会自抓主播名并持久化;master 侧该值常为 null(只在建/改房间时抓一次)。
   // 若下发时带 `anchorName: null`,会把 worker 抓到的正确值覆盖成空 → 界面主播名消失。
   it("T-4: 更新已有任务时不下发 anchorName(null 不覆盖 worker 自抓的值)", () => {

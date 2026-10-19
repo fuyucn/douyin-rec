@@ -22,6 +22,7 @@ const facts = (over: Partial<FormFacts> = {}): FormFacts => ({
   procEnabled: true,
   uploadOn: true,
   method: "after",
+  streamUpload: false,
   tsDirect: false,
   mergeSegments: true,
   burnDanmu: false,
@@ -50,6 +51,18 @@ describe("deriveConstraints — 边录边传(复用 core resolveRollingPolicy)",
   });
   it("无规则(单机任务)→ 不受节点数约束", () => {
     expect(deriveConstraints(facts({ hasRule: false, workers: [] })).rolling.locked).toBe(false);
+  });
+});
+
+describe("deriveConstraints — 0 落盘是 rolling 的子选项", () => {
+  it("rolling + 无烧录 + 单 local → 可用", () => {
+    const c = deriveConstraints(facts({ method: "rolling", streamUpload: true }));
+    expect(c.streamUpload).toEqual({ locked: false });
+  });
+  it("收播后上传 / 多节点 / 烧录 → 锁定", () => {
+    expect(deriveConstraints(facts({ method: "after", streamUpload: true })).streamUpload.locked).toBe(true);
+    expect(deriveConstraints(facts({ method: "rolling", streamUpload: true, workers: ["local", "vps1"] })).streamUpload.locked).toBe(true);
+    expect(deriveConstraints(facts({ method: "rolling", streamUpload: true, burnLivechat: true })).streamUpload.locked).toBe(true);
   });
 });
 

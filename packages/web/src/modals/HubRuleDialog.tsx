@@ -44,6 +44,8 @@ type FormState = RecordingValue & ProcessingValue & UploadValue & CleanupValue &
    * 用户是否改过录制字段:阻止「tasks 迟到 / 换源任务 → 回显覆盖正在填的值」。表单草稿态,不提交。
    */
   recordingTouched: boolean;
+  /** The source task's zero-disk sub-mode (stored on the task, not the rule). */
+  streamUpload: boolean;
 };
 
 type RecordingHalf = Omit<RecordingValue, "name"> & { outputFormat: OutputFormat };
@@ -89,6 +91,7 @@ const BLANK: FormState = {
   requires: [],
   sourceTaskId: null,
   recordingTouched: false,
+  streamUpload: false,
 };
 
 function fromRule(r: HubRuleDTO): FormState {
@@ -104,6 +107,7 @@ function fromRule(r: HubRuleDTO): FormState {
     mergeSegments: c.steps?.mergeSegments !== false,
     tsDirect: c.steps?.tsDirect === true,
     ...methodFromStored(c.upload?.mode, c.steps?.nodeSideUpload === true),
+    streamUpload: false,
     clStageSourceAfterMerge: c.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: c.cleanup?.sourceAfterDone === true,
     clKeepArchive: keepArchiveFromStored(c.cleanup?.stageAfterDone),
@@ -150,7 +154,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     if (!open) return;
     if (!rule) { setForm(BLANK); return; }
     const task = tasks.find((x) => x.id === rule.recording?.sourceTaskId) ?? null;
-    setForm({ ...fromRule(rule), ...recordingFromTask(task) });
+    setForm({ ...fromRule(rule), ...recordingFromTask(task), streamUpload: task?.streamUpload === true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, rule?.key]);
 
@@ -196,7 +200,11 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
         if (rule) {
           setForm((f) => (f.recordingTouched
             ? f
-            : { ...f, ...recordingFromTask(ts.find((x) => x.id === (rule.recording?.sourceTaskId ?? -1)) ?? null) }));
+            : {
+                ...f,
+                ...recordingFromTask(ts.find((x) => x.id === (rule.recording?.sourceTaskId ?? -1)) ?? null),
+                streamUpload: ts.find((x) => x.id === (rule.recording?.sourceTaskId ?? -1))?.streamUpload === true,
+              }));
         }
       })
       .catch(() => { if (alive) setTasksError(true); });
@@ -216,6 +224,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     cookieReady: cookieReadyFor(platformId, cookieStatuses, douyinReady),
     cookieForStream: platformId !== "douyin",
     hasRule: true,
+    streamUpload: f.streamUpload,
   });
   const facts = factsOf(form);
   const c = deriveConstraints(facts);
@@ -230,7 +239,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
   // 换源任务:录制半边改按新任务回显(否则保存会把表单默认值写到该任务上)。
   const pickSource = (id: number | null): void => {
     const task = tasks.find((x) => x.id === id) ?? null;
-    setForm((f) => ({ ...f, sourceTaskId: id, ...(f.recordingTouched ? {} : recordingFromTask(task)) }));
+    setForm((f) => ({ ...f, sourceTaskId: id, streamUpload: task?.streamUpload === true, ...(f.recordingTouched ? {} : recordingFromTask(task)) }));
   };
   const toggleIn = (list: string[], x: string): string[] => (list.includes(x) ? list.filter((y) => y !== x) : [...list, x]);
 
@@ -272,6 +281,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     const sched = splitSchedule(form.schedule);
     if (!sched) { toast(t("rooms.scheduleInvalid"), "error"); return; }
     const payload = buildPayload();
+    const stored = storedFromForm(facts);
     // 定时窗口必须成对发 scheduleStart/End:后端不认单个 schedule 字段(此前在这里静默丢失)。
     const recording = form.sourceTaskId === null
       ? undefined
@@ -282,7 +292,10 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           danmu: form.danmu ? 1 : 0,
           useCookie: form.useCookie,
           ...(Number(form.segmentSec) > 0 ? { segmentSec: Number(form.segmentSec) } : {}),
-          outputFormat: storedFromForm(facts).outputFormat,
+          outputFormat: stored.outputFormat,
+          // Leaving rolling clears zero-disk in the same write, so the rule can never be
+          // saved in a state the backend would reject on reopen.
+          streamUpload: stored.mode === "rolling" && facts.streamUpload,
           ...sched,
         };
     // 编辑时换了源任务 → 规则也要重新绑定(PUT rooms 的 processing 不含 sourceTaskId)。

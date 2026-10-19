@@ -14,6 +14,7 @@ export default defineConfig({
       "@drec/experimental": fileURLToPath(new URL("../core/src/experimental.ts", import.meta.url)),
       // 边录边传生效判定(纯函数):表单的禁用原因与后端下发同源,不在前端另写一份(房间表单重设计 T1)
       "@drec/rolling-policy": fileURLToPath(new URL("../core/src/rolling-policy.ts", import.meta.url)),
+      "@drec/zero-disk-policy": fileURLToPath(new URL("../core/src/zero-disk-policy.ts", import.meta.url)),
       // 输出格式注册表(纯数据/纯函数):下拉选项、投稿锁定、缺省都与后端同源(issue #137)
       "@drec/output-format": fileURLToPath(new URL("../core/src/output-format.ts", import.meta.url)),
       // Hub job state names (pure constants): room status uses the same terminal set as the ledger

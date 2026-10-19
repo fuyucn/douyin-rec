@@ -6,7 +6,7 @@ import {
 
 const facts = (over: Partial<FormFacts> = {}): FormFacts => ({
   danmu: true, danmuAvailable: true, cookieReady: true, cookieForStream: false,
-  procEnabled: true, uploadOn: false, method: "after", tsDirect: false, mergeSegments: true,
+  procEnabled: true, uploadOn: false, method: "after", streamUpload: false, tsDirect: false, mergeSegments: true,
   burnDanmu: false, burnLivechat: false, clKeepArchive: true, outputFormat: "original",
   workers: ["local"], hasRule: true,
   ...over,
