@@ -55,10 +55,13 @@ DISPLAY_ONLY=(
   packages/web/src/lib/i18n.tsx
   packages/web/src/lib/notification-text.ts
   packages/web/src/lib/hub-job-steps.ts
-  packages/web/src/components/RollingProgress.tsx
 )
-# Import / re-export lines name modules and types, they do not run anything: never matched.
-IMPORT_RE='^[[:space:]]*(import[[:space:]]|export[[:space:]]+(type[[:space:]]+)?(\*|\{[^}]*\})[[:space:]]+from[[:space:]]|\}[[:space:]]+from[[:space:]])'
+# Even in a display-only file, a line that calls the network keeps the full rules.
+CALL_RE='fetch\(|(^|[^A-Za-z0-9_])api\.[A-Za-z]+\('
+# Single-line `import { a, b } from "m"` / `export { a } from "m"`: only the brace list of names is
+# blanked (names are labels). The module path, `as` aliases, default / namespace / side-effect imports
+# and `import x = require()` stay matched: swapping the module or alias can change what runs.
+IMPORT_NAMES_RE='^([[:space:]]*(import|export)([[:space:]]+type)?[[:space:]]*)\{[^}]*\}([[:space:]]*from[[:space:]]*["'"'"'][^"'"'"']*["'"'"'][[:space:]]*;?[[:space:]]*)$'
 
 reasons=()
 notes=()
@@ -119,13 +122,19 @@ flush_hunk() {
     # Every signature in the hunk participates: a change deep inside a second function (or inside a
     # callback that itself has a signature) must still see all enclosing names.
     if (( ${#hit_sigs[@]} )); then hunk="$(printf '%s\n' "${hit_sigs[@]}")"$'\n'"$hunk"; fi
-    local pair label re text display=0 f
+    local pair label re text display=0 f calls
     for f in "${DISPLAY_ONLY[@]}"; do [[ "$cur" == "$f" ]] && display=1; done
-    text="$(grep -Ev "$IMPORT_RE" <<< "$hunk" || true)"
+    text=""
+    local ln
+    while IFS= read -r ln; do
+      [[ "$ln" =~ $IMPORT_NAMES_RE && "$ln" != *" as "* ]] && ln="${BASH_REMATCH[1]}{}${BASH_REMATCH[4]}"
+      text+="$ln"$'\n'
+    done <<< "$hunk"
     for pair in "上传:$UPLOAD_RE" "清理/删除:$DELETE_RE" "ledger 状态转换:$LEDGER_RE"; do
       label="${pair%%:*}"; re="${pair#*:}"
       if grep -Eiq "$re" <<< "$text"; then
-        if (( display )); then notes+=("提示[$label](仅展示,不计 RISK): $cur")
+        calls="$(grep -E "$CALL_RE" <<< "$text" || true)"   # no pipe: pipefail + grep -q SIGPIPE would fail open
+        if (( display )) && ! grep -Eiq "$re" <<< "$calls"; then notes+=("提示[$label](仅展示,不计 RISK): $cur")
         else reasons+=("内容[$label]: $cur"); fi
       fi
     done

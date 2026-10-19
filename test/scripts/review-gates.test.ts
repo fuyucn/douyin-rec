@@ -287,6 +287,17 @@ describe("pr-risk-scan.sh", () => {
     expect(risk(diffOf("packages/app/src/x.ts", 'export { uploadPlain } from "./y.js";')).status).toBe(0);
     expect(risk(diffOf("packages/app/src/x.ts", "await uploadPlain(job);")).status).toBe(1);
   });
+  it("导入行里换模块路径、换别名、副作用导入、require 仍判 RISK", () => {
+    expect(risk(diffOf("packages/app/src/x.ts", 'import { run } from "./upload.js";')).status).toBe(1);
+    expect(risk(diffOf("packages/app/src/x.ts", 'import { uploadAll as finalize } from "./stage.js";')).status).toBe(1);
+    expect(risk(diffOf("packages/app/src/x.ts", 'import "./cleanup-scheduler.js";')).status).toBe(1);
+    expect(risk(diffOf("packages/app/src/x.ts", 'import x = require("./upload.js");')).status).toBe(1);
+    expect(risk(diffOf("packages/app/src/x.ts", 'import {x} from "./y.js"; await uploadPlain(job);')).status).toBe(1);
+  });
+  it("展示清单里的文件新增网络调用仍判 RISK", () => {
+    expect(risk(diffOf("packages/web/src/lib/i18n.tsx", 'await fetch("/api/hub/upload", { method: "POST" });')).status).toBe(1);
+    expect(risk(diffOf("packages/web/src/lib/notification-text.ts", "void api.uploadNow(k);")).status).toBe(1);
+  });
   it("签名启发式不把 if/for 当函数", () => {
     const filler = Array.from({ length: 30 }, (_, i) => ` const c${i} = ${i};`);
     const lines = [" function f() {", " const a = 1;", " const b = 2;", "   if (cleanupDone) {", ...filler, "-const n = 1;", "+const n = 2;"];
