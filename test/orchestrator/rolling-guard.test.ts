@@ -28,8 +28,12 @@ const mem = (workerId: string, sessionBase: string, rolling: Rolling | undefined
 function run(members: never[], countParts?: (bv: string) => Promise<number | null>) {
   const notify = vi.fn();
   const jlog = vi.fn();
-  const r = tryRollingShortCircuit({ streamKey: KEY, cfg: { steps: { burnDanmu: false, burnLivechat: false } }, members, ledger, transports: new Map(), notify, jlog, countParts });
-  return { r, notify, jlog };
+  const waits: number[] = [];
+  const r = tryRollingShortCircuit({
+    streamKey: KEY, cfg: { steps: { burnDanmu: false, burnLivechat: false } }, members, ledger, transports: new Map(), notify, jlog, countParts,
+    readback: { sleep: async (ms) => { waits.push(ms); } },
+  });
+  return { r, notify, jlog, waits };
 }
 const flush = (): Promise<void> => new Promise((res) => setImmediate(res));
 
@@ -114,27 +118,32 @@ describe("#57 R1:多稿件文案", () => {
   });
 });
 
-describe("#57 R1:rolling 收口后的回读核验(观察期只记日志)", () => {
-  it("分 P 数一致 → 记日志,done 不变", async () => {
-    const countParts = vi.fn().mockResolvedValue(2);
-    const { r, jlog } = run([mem("n1", "s1", { bv: "BV1ok", confirmed: [0, 1] })], countParts);
+describe("#57 R1 / #327: rolling delayed multi-read read-back after done", () => {
+  it("first read short, later read matches -> no alert, done unchanged, delayed reads used", async () => {
+    const countParts = vi.fn().mockResolvedValueOnce(1).mockResolvedValue(2);
+    const { r, notify, jlog, waits } = run([mem("n1", "s1", { bv: "BV1ok", confirmed: [0, 1] })], countParts);
     expect(r).toEqual({ state: "done", bv: "BV1ok" });
     await flush();
-    expect(countParts).toHaveBeenCalledWith("BV1ok");
-    expect(jlog).toHaveBeenCalledWith(expect.stringContaining("回读核验"));
+    expect(countParts).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([120_000, 120_000]);
     expect(jlog).toHaveBeenCalledWith(expect.stringContaining("一致"));
+    expect(notify.mock.calls.map(([e]) => e.kind)).toEqual(["uploadDone"]);
+    expect(ledger.getNodeStates(KEY).find((n) => n.node === "clean_verify")).toBeUndefined();
   });
 
   it.each([
-    ["分 P 数不符", async () => 1],
-    ["读取失败", async () => null],
-    ["抛错", async () => { throw new Error("boom"); }],
-  ] as const)("%s → 只记日志,不转人工、不发 error 通知", async (_n, cp) => {
-    const { r, notify, jlog } = run([mem("n1", "s1", { bv: "BV1ok", confirmed: [0, 1] })], cp);
+    ["persistent short", async () => 1],
+    ["persistent higher", async () => 5],
+    ["unreadable (null)", async () => null],
+    ["throws", async () => { throw new Error("boom"); }],
+  ] as const)("%s -> one error notify + clean_verify flagged on the job; job stays done", async (_n, cp) => {
+    const { r, notify } = run([mem("n1", "s1", { bv: "BV1ok", confirmed: [0, 1] })], cp);
     expect(r).toEqual({ state: "done", bv: "BV1ok" });
     await flush();
     expect(ledger.get(KEY)?.state).toBe("done");
-    expect(jlog).toHaveBeenCalledWith(expect.stringContaining("回读核验"));
-    expect(notify.mock.calls.map(([e]) => e.kind)).toEqual(["uploadDone"]);
+    expect(notify.mock.calls.map(([e]) => e.kind)).toEqual(["uploadDone", "error"]);
+    const node = ledger.getNodeStates(KEY).find((n) => n.node === "clean_verify");
+    expect(node?.state).toBe("done");
+    expect(node?.error).toContain("边录边传回读核验");
   });
 });

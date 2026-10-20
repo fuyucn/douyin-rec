@@ -55,23 +55,35 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
     expect(stageVideos(s).some((f) => f.endsWith(".mp4"))).toBe(true);
   });
 
-  // ── issue #92:上传是否成功只看 biliup 返回码;回读分 P 数不再是清理的闸门(只做延迟的旁路校验)──
-  it("回读取不到分P数 → 照常清:stage 源段副本与节点源都删,弹幕/session 保留", async () => {
+  // ── issue #327:上传是否成功仍只看 biliup 返回码,但删最后一份源之前先延后回读分 P 数;
+  //    窗口耗尽仍少 / 读不到 → 保留全部源(stage 产物 + 节点源)并转人工 ──
+  it("回读取不到分P数 → 保留:stage 产物与节点源都不删,转 needs_manual", async () => {
     s = await Scenario.create({ cfg: { cleanup: { ...COMMON } } });
     s.fake.countAvailable = false;
     record(s);
     await s.reconcile();
-    expect(s.jobState(s.onlyKey())).toBe("done");
-    expect(stageVideos(s)).toEqual([]);
-    expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(0);
-    expect(s.recordingFiles().some((f) => /\.(xml|session\.json)$/.test(f))).toBe(true);
+    expect(s.jobState(s.onlyKey())).toBe("needs_manual");
+    expect(stageVideos(s).filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+    expect(stageVideos(s).some((f) => f.endsWith(".mp4"))).toBe(true);
+    expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
   });
 
-  it("B站回读分P数少于提交数 → 照常清:stage 源段副本与节点源都删(不再保源)", async () => {
+  it("B站回读分P数少于提交数(窗口耗尽仍少)→ 保留 stage 与节点源 + needs_manual(中文原因含期望/回读)", async () => {
     s = await Scenario.create({ cfg: { cleanup: { ...COMMON } }, deps: { countParts: async () => 1 } });
     record(s);
     await s.reconcile();
-    expect(s.jobState(s.onlyKey())).toBe("done");
+    expect(s.jobState(s.onlyKey())).toBe("needs_manual");
+    expect(s.ledger.get(s.onlyKey())?.error).toMatch(/期望 3.*回读 1/);
+    expect(stageVideos(s).some((f) => f.endsWith(".mp4"))).toBe(true);
+    expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+  });
+
+  it("回读首读偏少、稍后读到期望(列表延迟)→ 照常清并 done", async () => {
+    s = await Scenario.create({ cfg: { cleanup: { ...COMMON } } });
+    s.fake.countLagReads = 2;
+    record(s);
+    await s.reconcile();
+    expectHealthyDone(s, s.onlyKey(), { parts: 3 });
     expect(stageVideos(s)).toEqual([]);
     expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(0);
   });
@@ -87,7 +99,7 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
   // ── 收尾补跑 ──
   const keep = (sc: Scenario): string[] => sc.stageResidue().filter((f) => /\.(xml|ass)$|\.session\.json$/.test(f));
 
-  it("回读取不到分P数:首轮已清完,再对账一轮不产生变化、不再有 clean_verify=pending 让补跑反复重入", async () => {
+  it("回读取不到分P数:首轮转人工后再对账一轮不产生变化、不重复上传、不重复清理", async () => {
     s = await Scenario.create({ cfg: { cleanup: { ...COMMON } }, cleanupBackfillThrottleMs: 0 });
     s.fake.countAvailable = false;
     record(s);
@@ -97,8 +109,8 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
     await s.reconcile();
     expect(s.stageResidue()).toEqual(before);
     expect(s.fake.calls, "补跑不得重复上传").toHaveLength(calls);
-    expect(s.jobState(s.onlyKey())).toBe("done");
-    expect(s.ledger.getNodeState(s.onlyKey(), "clean_verify")?.state).toBe("done");
+    expect(s.jobState(s.onlyKey())).toBe("needs_manual");
+    expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
   });
 
   it("清理后 .xml/.session.json/job.log 保留(不删最后一份弹幕)", async () => {
@@ -112,12 +124,21 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
     expect(s.recordingFiles().some((f) => f.endsWith(".xml"))).toBe(true);
   });
 
-  // ── 续跑 / 分段主路径 / 分段续跑:回读无结论(取不到 / 未注入)也照常清 stage 源段 ──
+  // ── 续跑 / 分段主路径 / 分段续跑:未注入分 P 查询(核验关闭)照常清 stage 源段 ──
   const tsCount = (sc: Scenario): number => stageVideos(sc).filter((f) => f.endsWith(".ts")).length;
   const NO_READBACK = [
-    { name: "回读取不到", mk: (sc: Scenario): void => { sc.fake.countAvailable = false; }, deps: {} },
     { name: "未注入分P查询", mk: (): void => {}, deps: { countParts: undefined } },
   ] as const;
+
+  it("分段主路径 回读取不到 → 保留 stage 与节点源 + needs_manual(#327)", async () => {
+    s = await Scenario.create({ cfg: { steps: { mergeSegments: false }, cleanup: { ...COMMON } } });
+    s.fake.countAvailable = false;
+    record(s);
+    await s.reconcile();
+    expect(s.jobState(s.onlyKey())).toBe("needs_manual");
+    expect(tsCount(s)).toBe(6);
+    expect(s.recordingFiles().filter((f) => f.endsWith(".ts"))).toHaveLength(6);
+  });
 
   describe.each(NO_READBACK)("$name", ({ mk, deps }) => {
     it("合并续跑(烧录中断、稿件号已落库、成品仍在)→ 续跑完成后 stage 源段副本清空,节点源删除", async () => {
@@ -170,7 +191,7 @@ describe("e2e: 完成后清 stage 一并清视频类内容(#60)", () => {
   });
 });
 
-// ── 回读不再是闸门后,「biliup 返回非 0 → 不 markDone、不删源」是唯一护栏:续跑路径必须有测试钉住 ──
+// ── 「biliup 返回非 0 → 不 markDone、不删源」是唯一护栏:续跑路径必须有测试钉住 ──
 describe("e2e: 续跑里 append 返回非 0 → 不 markDone、不清 stage / 节点源(#92)", () => {
   const stageTs = (sc: Scenario): number => sc.stageResidue().filter((f) => f.endsWith(".ts")).length;
 

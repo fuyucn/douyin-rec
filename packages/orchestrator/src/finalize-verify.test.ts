@@ -1,205 +1,154 @@
 /**
- * finalizeAfterUpload 的收口口径(issue #92):**上传是否成功只看 biliup 返回码**。
- * 走到收口 = 上传已确认,清理无条件执行;回读 B站分 P 数降为**延迟的旁路校验**,
- * 只记录/告警,绝不影响清理、不转人工。
+ * finalizeAfterUpload gate (issue #327, supersedes the #92 "read-back never affects cleanup" rule).
+ * Upload success is still decided by the biliup exit code alone (no retry / re-append anywhere); but before the
+ * LAST copy of the video is deleted, the part count is re-read with delays. Match -> clean up; still short / higher /
+ * unreadable after the window -> keep all sources, needs_manual, one notify, cleanup never called.
  */
 import { describe, it, expect, vi } from "vitest";
 import { DEFAULT_SIDE_CHECK_DELAY_MS, finalizeAfterUpload } from "./pipeline.js";
 import type { SyncLedger } from "./ledger.js";
 
-/** 假台账:记录调用,便于断言「没有把 job 打成 needs_manual / 没有留 pending」。 */
 function fakeLedger(parts: Record<string, number[]>) {
   const calls = {
-    setState: [] as Array<{ state: string; error?: string }>,
+    setState: [] as Array<{ state: string; error?: string; force?: boolean }>,
     nodeState: [] as Array<{ node: string; state: string; error?: string | null }>,
     logStep: [] as Array<{ step: string; phase: string; detail?: string }>,
   };
   const ledger = {
     doneParts: (_k: string, g: string) => new Set(parts[g] ?? []),
-    setState: (k: string, state: string, patch?: { error?: string }) => { calls.setState.push({ state, error: patch?.error }); },
-    syncNodeState: (k: string, node: string, state: string, patch?: { error?: string | null }) => { calls.nodeState.push({ node, state, error: patch?.error }); },
-    logStep: (k: string, step: string, phase: string, detail?: string) => { calls.logStep.push({ step, phase, detail }); },
+    setState: (_k: string, state: string, patch?: { error?: string }, opts?: { force?: boolean }) => {
+      calls.setState.push({ state, error: patch?.error, force: opts?.force });
+    },
+    syncNodeState: (_k: string, node: string, state: string, patch?: { error?: string | null }) => { calls.nodeState.push({ node, state, error: patch?.error }); },
+    logStep: (_k: string, step: string, phase: string, detail?: string) => { calls.logStep.push({ step, phase, detail }); },
   } as unknown as SyncLedger;
   return { ledger, calls };
 }
 
 const ALL_ON = { plain: true, danmu: true, livechat: true };
 
-let seq = 0;
-interface Harness {
-  /** 每个 harness 独立的 streamKey(旁路校验按 streamKey 去重,不能跨用例串)。 */
-  key: string;
-  deps: Parameters<typeof finalizeAfterUpload>[0]["deps"];
-  countCalls: () => number;
-  scheduled: Array<{ fn: () => void; ms: number }>;
-}
-function harness(ledger: SyncLedger, actual: number | null | "throw" | "no-count", extra: Record<string, unknown> = {}): Harness {
+/** Scripted countParts + fake sleep (records requested waits, never really waits). */
+function harness(ledger: SyncLedger, reads: Array<number | null | "throw"> | "no-count", extra: Record<string, unknown> = {}) {
+  const waits: number[] = [];
   let n = 0;
-  const scheduled: Harness["scheduled"] = [];
-  const d: Record<string, unknown> = {
-    ledger,
-    // 核验重查默认 5 次 × 3s 退避;测试注入 no-op 免真等。
-    sleep: async () => {},
-    scheduleSideCheck: (fn: () => void, ms: number) => { scheduled.push({ fn, ms }); },
-    ...extra,
-  };
-  if (actual !== "no-count") {
+  const d: Record<string, unknown> = { ledger, sleep: async (ms: number) => { waits.push(ms); }, ...extra };
+  if (reads !== "no-count") {
     d.countParts = async () => {
+      const r = reads[Math.min(n, reads.length - 1)];
       n++;
-      if (actual === "throw") throw new Error("net down");
-      return actual;
+      if (r === "throw") throw new Error("net down");
+      return r;
     };
   }
-  return { key: `k${++seq}`, deps: d as unknown as Harness["deps"], countCalls: () => n, scheduled };
+  return { deps: d as unknown as Parameters<typeof finalizeAfterUpload>[0]["deps"], waits, reads: () => n };
 }
 
-async function run(h: Harness, notify: (e: unknown) => void = () => {}) {
-  let cleaned = 0;
+async function run(h: ReturnType<typeof harness>, notify: (e: unknown) => void = () => {}, commitDone?: () => void) {
+  const cleanup = vi.fn(async () => ({ ok: true as const, failed: [] as never[] }));
   const r = await finalizeAfterUpload({
-    streamKey: h.key, bv: "BV1", deps: h.deps, log: () => {},
-    cleanupSources: async () => { cleaned++; return { ok: true, failed: [] }; },
-    on: ALL_ON,
-    notify: notify as never,
+    streamKey: "k", bv: "BV1", deps: h.deps, log: () => {},
+    cleanupSources: cleanup, on: ALL_ON, notify: notify as never, commitDone,
   });
-  return { r, cleaned: () => cleaned };
+  return { r, cleanup };
 }
 
-describe("finalizeAfterUpload:上传确认后无条件清理,回读不是闸门(#92)", () => {
-  it.each([
-    ["回读少于期望(期望3/实际1)", 1],
-    ["回读取不到数据", null],
-    ["回读一致", 3],
-    ["回读多于期望", 5],
-    ["回读抛错", "throw"],
-    ["未注入分P查询", "no-count"],
-  ] as const)("%s → 照常清理源,无 needs_manual", async (_n, actual) => {
+describe("finalizeAfterUpload: delayed read-back gate before cleanup (#327)", () => {
+  it("first read short, later read correct -> cleanup proceeds, no alert, done committed after the gate", async () => {
     const { ledger, calls } = fakeLedger({ plain: [0, 1, 2] });
-    const h = harness(ledger, actual);
-    const { r, cleaned } = await run(h);
-    expect(cleaned()).toBe(1);
-    expect(r.ok).toBe(true);
-    expect(calls.setState).toHaveLength(0);
+    const h = harness(ledger, [2, 2, 3]);
+    const notify = vi.fn();
+    const commit = vi.fn();
+    const { r, cleanup } = await run(h, notify, commit);
+    expect(r.blocked).toBeUndefined();
+    expect(h.reads()).toBe(3);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(notify).not.toHaveBeenCalled();
+    expect(calls.setState).toEqual([]);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(commit.mock.invocationCallOrder[0]).toBeLessThan(cleanup.mock.invocationCallOrder[0]);
   });
 
-  it("收口时**不同步回读**(回读在延迟后旁路执行),且不留 clean_verify=pending(否则补跑会反复重入)", async () => {
-    const { ledger, calls } = fakeLedger({ plain: [0, 1, 2] });
-    const h = harness(ledger, null);
+  it("reads wait 2/2/2/4 minutes of the default 10-minute window", async () => {
+    const { ledger } = fakeLedger({ plain: [0, 1, 2] });
+    const h = harness(ledger, [1]);
     await run(h);
-    expect(h.countCalls()).toBe(0);
-    expect(calls.nodeState.some((n) => n.node === "clean_verify" && n.state === "done")).toBe(true);
-    expect(calls.nodeState.some((n) => n.state === "pending")).toBe(false);
+    expect(h.waits).toEqual([120_000, 120_000, 120_000, 240_000]);
+    expect(h.waits.reduce((a, b) => a + b, 0)).toBe(DEFAULT_SIDE_CHECK_DELAY_MS);
   });
 
-  it("清理失败不影响返回(照常返回 outcome,不抛)", async () => {
+  it("window is the existing sideCheckDelayMs knob", async () => {
+    const { ledger } = fakeLedger({ plain: [0, 1, 2] });
+    const h = harness(ledger, [3], { sideCheckDelayMs: 1000 });
+    await run(h);
+    expect(h.waits).toEqual([200]); // matched on the first read, only the first wait happened
+  });
+
+  it("persistent short -> sources kept, needs_manual (Chinese reason with expected/read-back), one notify, no commit", async () => {
+    const { ledger, calls } = fakeLedger({ plain: [0, 1, 2] });
+    const h = harness(ledger, [2]);
+    const notify = vi.fn();
+    const commit = vi.fn();
+    const { r, cleanup } = await run(h, notify, commit);
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(r.blocked).toContain("期望 3");
+    expect(r.blocked).toContain("回读 2");
+    expect(calls.setState).toHaveLength(1);
+    expect(calls.setState[0]).toMatchObject({ state: "needs_manual", force: false });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(h.reads()).toBe(4);
+  });
+
+  it.each([["null", null], ["throws", "throw"]] as const)("unreadable (%s) every time -> same as short", async (_n, v) => {
+    const { ledger, calls } = fakeLedger({ plain: [0, 1, 2] });
+    const h = harness(ledger, [v]);
+    const notify = vi.fn();
+    const { r, cleanup } = await run(h, notify, () => {});
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(r.blocked).toContain("无法回读");
+    expect(calls.setState[0]?.state).toBe("needs_manual");
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  it("read-back higher than expected -> kept + needs_manual (possible duplicate)", async () => {
+    const { ledger, calls } = fakeLedger({ plain: [0, 1, 2] });
+    const h = harness(ledger, [5]);
+    const notify = vi.fn();
+    const { r, cleanup } = await run(h, notify, () => {});
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(r.blocked).toContain("多于期望");
+    expect(calls.setState[0]?.state).toBe("needs_manual");
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  it("already-done job (no commitDone, cleanup backfill) -> needs_manual is forced", async () => {
+    const { ledger, calls } = fakeLedger({ plain: [0, 1, 2] });
+    const h = harness(ledger, [1]);
+    await run(h);
+    expect(calls.setState[0]).toMatchObject({ state: "needs_manual", force: true });
+  });
+
+  it("no countParts or no baseline -> no wait, cleanup as before (node-side path unchanged)", async () => {
+    const a = fakeLedger({ plain: [0, 1, 2] });
+    const h1 = harness(a.ledger, "no-count");
+    expect((await run(h1)).cleanup).toHaveBeenCalledTimes(1);
+    expect(h1.waits).toEqual([]);
+    const b = fakeLedger({});
+    const h2 = harness(b.ledger, [1]);
+    const r2 = await run(h2);
+    expect(r2.cleanup).toHaveBeenCalledTimes(1);
+    expect(h2.waits).toEqual([]);
+    expect(h2.reads()).toBe(0);
+  });
+
+  it("cleanup failure is returned, never thrown (unchanged)", async () => {
     const { ledger } = fakeLedger({ plain: [0] });
-    const h = harness(ledger, 1);
+    const h = harness(ledger, [1]);
     const r = await finalizeAfterUpload({
       streamKey: "k", bv: "BV1", deps: h.deps, log: () => {},
       cleanupSources: async () => ({ ok: false, failed: [{ target: "x", error: "e" }] } as never),
       on: ALL_ON, notify: () => {},
     });
     expect(r.ok).toBe(false);
-  });
-});
-
-describe("旁路校验:延迟回读,只记录/告警(#92)", () => {
-  it("默认延迟 10 分钟;可用 sideCheckDelayMs 配置", async () => {
-    const { ledger } = fakeLedger({ plain: [0, 1, 2] });
-    const h1 = harness(ledger, 3);
-    await run(h1);
-    expect(h1.scheduled).toHaveLength(1);
-    expect(h1.scheduled[0].ms).toBe(DEFAULT_SIDE_CHECK_DELAY_MS);
-    expect(DEFAULT_SIDE_CHECK_DELAY_MS).toBe(600_000);
-    const h2 = harness(ledger, 3, { sideCheckDelayMs: 42 });
-    await run(h2);
-    expect(h2.scheduled[0].ms).toBe(42);
-  });
-
-  it("同一场多次走到收口(收尾补跑)→ 只排一次旁路校验,不重复告警", async () => {
-    const { ledger } = fakeLedger({ plain: [0, 1, 2] });
-    const h = harness(ledger, 1);
-    await run(h);
-    await run(h);
-    await run(h);
-    expect(h.scheduled).toHaveLength(1);
-  });
-
-  it("未注入分 P 查询 → 不排旁路校验", async () => {
-    const { ledger } = fakeLedger({ plain: [0, 1, 2] });
-    const h = harness(ledger, "no-count");
-    await run(h);
-    expect(h.scheduled).toHaveLength(0);
-  });
-
-  it("到点回读不符 → 记台账备注 + 发一条告警,**不改任何状态**、不再清理", async () => {
-    const { ledger, calls } = fakeLedger({ plain: [0, 1, 2] });
-    const h = harness(ledger, 1);
-    const notify = vi.fn();
-    const { cleaned } = await run(h, notify);
-    expect(h.countCalls()).toBe(0);
-    h.scheduled[0].fn();
-    await vi.waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
-    const msg = String((notify.mock.calls[0][0] as { message: string }).message);
-    expect(msg).toContain("期望 3");
-    expect(msg).toContain("回读 1");
-    expect(msg).toContain("仅记录");
-    const step = calls.logStep.find((s) => s.step === "clean_verify" && /旁路校验/.test(s.detail ?? ""));
-    expect(step?.detail).toContain("仅记录");
-    expect(calls.setState).toHaveLength(0);
-    expect(cleaned()).toBe(1); // 旁路不触发第二次清理
-    // 旁路校验不得改节点表:不能把 clean_* 标 failed(会触发收尾补跑重入)、不能留 pending
-    const after = calls.nodeState.slice(1); // [0] 是收口时写的 clean_verify=done
-    expect(after.filter((n) => n.node !== "clean_verify")).toEqual([]);
-    expect(after.every((n) => n.state === "done")).toBe(true);
-  });
-
-  it("到点回读一致 → 只记日志,不告警", async () => {
-    const { ledger, calls } = fakeLedger({ plain: [0, 1, 2] });
-    const h = harness(ledger, 3);
-    const notify = vi.fn();
-    await run(h, notify);
-    h.scheduled[0].fn();
-    await vi.waitFor(() => expect(calls.logStep.some((s) => /旁路校验通过/.test(s.detail ?? ""))).toBe(true));
-    expect(notify).not.toHaveBeenCalled();
-  });
-
-  it.each([["取不到数据", null], ["抛错", "throw"]] as const)("到点回读%s → 不告警、不抛、不改状态", async (_n, actual) => {
-    const { ledger, calls } = fakeLedger({ plain: [0, 1, 2] });
-    const h = harness(ledger, actual);
-    const notify = vi.fn();
-    await run(h, notify);
-    h.scheduled[0].fn();
-    await vi.waitFor(() => expect(h.countCalls()).toBeGreaterThan(0));
-    await new Promise((r) => setTimeout(r, 5));
-    expect(notify).not.toHaveBeenCalled();
-    expect(calls.setState).toHaveLength(0);
-  });
-
-  it("旁路校验内部抛错(如台账写失败)→ 吞掉并只记日志,绝不产生未处理的 rejection(Node 24 下会让 master 进程崩)", async () => {
-    const { ledger } = fakeLedger({ plain: [0, 1, 2] });
-    const h = harness(ledger, 1); // 回读少 → 走「记台账备注」分支,下面让它抛
-    await run(h);
-    expect(h.scheduled).toHaveLength(1);
-    (ledger as unknown as { logStep: () => void }).logStep = () => { throw new Error("ledger down"); };
-    const unhandled: unknown[] = [];
-    const onUnhandled = (e: unknown): void => { unhandled.push(e); };
-    process.on("unhandledRejection", onUnhandled);
-    try {
-      h.scheduled[0].fn();
-      await new Promise((r) => setTimeout(r, 30));
-    } finally {
-      process.off("unhandledRejection", onUnhandled);
-    }
-    expect(unhandled).toEqual([]);
-  });
-
-  it("无基线(台账没有已传分 P)→ 回读也不告警", async () => {
-    const { ledger } = fakeLedger({});
-    const h = harness(ledger, 3);
-    const notify = vi.fn();
-    await run(h, notify);
-    h.scheduled[0].fn();
-    await new Promise((r) => setTimeout(r, 5));
-    expect(notify).not.toHaveBeenCalled();
   });
 });

@@ -610,14 +610,17 @@ export async function runSegmentPipeline(o: {
   await appendSegmentGroup(streamKey, bv, "append_danmu", danmuPaths, burnDanmu, deps, jlog, isPublic, splitForUpload);
   await appendSegmentGroup(streamKey, bv, "append_livechat", livechatPaths, burnLivechat, deps, jlog, isPublic, splitForUpload);
 
-  ledger.markDone(streamKey, bv);
-  notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
-
-  // 收口(与合并路径同一实现):上传确认后按配置清理(issue #92);清理失败只标 clean_*(T12),终态恒为 done。
-  await finalizeAfterUpload({
+  // 收口(与合并路径同一实现):上传确认后先延后回读分 P 数(#327),通过才标 done + 按配置清理;
+  // 不符 / 读不到 → 转人工并保留全部源(含 stage 产物)。清理失败只标 clean_*(T12),终态恒为 done。
+  const fin = await finalizeAfterUpload({
     streamKey, bv, deps, log: jlog, notify, cleanupSources: cleanupNodeSources,
     on: { plain: true, danmu: burnDanmu, livechat: burnLivechat },
+    commitDone: () => {
+      ledger.markDone(streamKey, bv);
+      notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
+    },
   });
+  if (fin.blocked) return { state: "needs_manual", bv };
   // 上传成功 → stage 里的「拉来源段副本 + .work 中间产物」已是冗余,可清。
   // 注意:这里只清**非交付物**;分P成品/烧录产物由下面的 stageAfterDone 决定是否清。
   if (clean.stageSourceAfterMerge) {
@@ -818,18 +821,21 @@ async function resumeSegmentAppends(
   const livechatFiles = uploadParts.map((p) => p.livechat).filter((f): f is string => !!f && existsSync(f));
   await appendSegmentGroup(streamKey, bv, "append_danmu", danmuFiles, burnDanmu, deps, jlog, isPublic, splitForUpload);
   await appendSegmentGroup(streamKey, bv, "append_livechat", livechatFiles, burnLivechat, deps, jlog, isPublic, splitForUpload);
-  ledger.markDone(streamKey, bv);
-  notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
   // 上传成功 → 同一收口闸门(补做「删源」:续跑此前漏了 sourceAfterDone)。分P模式不碰 stage 交付物。
   const rmStage = deps.rmStage ?? defaultRmStage;
-  await finalizeAfterUpload({
+  const fin = await finalizeAfterUpload({
     streamKey, bv, deps, log: jlog, notify,
     cleanupSources: () => cleanupSourcesShared({
       streamKey, ledger, transports: deps.transports, members: allMembers,
       cleanup: cfg.cleanup, rmStage, log: jlog,
     }),
     on: { plain: true, danmu: burnDanmu, livechat: burnLivechat },
+    commitDone: () => {
+      ledger.markDone(streamKey, bv);
+      notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
+    },
   });
+  if (fin.blocked) return { state: "needs_manual", bv };
   // 上传成功 → stage 里的「拉来源段副本 + .work 中间产物」已冗余,可清(非交付物)。
   if (cfg.cleanup?.stageSourceAfterMerge) {
     const scratch = [

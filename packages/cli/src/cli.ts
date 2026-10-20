@@ -1169,7 +1169,7 @@ const hubStarter: HubStarter = {
       reconnectWindowMs?: number;
       /** Consecutive unreachable rounds after which a blocked broadcast turns needs_manual; default 12, <=0 disables. */
       blockedManualRounds?: number;
-      /** 上传确认后旁路校验(回读分 P 数)的延迟(ms);缺省 10 分钟。只记录/告警,不影响清理(issue #92)。 */
+      /** 上传后延后回读分 P 数的总窗口(ms);缺省 10 分钟。主控路径删最后一份源之前必须回读一致,否则保留源并转人工(issues #92 / #327)。 */
       sideCheckDelayMs?: number;
       /** 投稿默认(per-task 文件留空时回退);旧字段 uploadMeta 也认(迁移兼容)。 */
       uploadDefaults?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string };
@@ -1445,10 +1445,10 @@ const hubStarter: HubStarter = {
         }),
       // T11 核验接缝:取该稿件在 B站的**实际分 P 数**。核验的期望值来自上传时写下的
       // sync_parts 检查点(实际提交了几段),不用「文件大小上界」—— 那是评审明确否决的做法。
-      // 缺省不注入 = 不做旁路校验;这里注入 = 上传确认后延迟回读分 P 数,**只记录/告警,不影响清理**(issue #92)。
+      // 缺省不注入 = 不做回读;这里注入 = 主控路径删最后一份源之前延后回读分 P 数,不一致则保留源并转人工(issue #327)。
       // cookies 用 hubCfg.cookies(与 appendGroup 同源;per-job override 已在 pipeline 内传下去)。
       countParts: (bv: string) => countVideoParts(bv, hubCfg.cookies ?? ""),
-      // 旁路校验延迟(issue #92):上传确认后多久回读分 P 数;只记录/告警,不影响清理。缺省 10 分钟。
+      // 延后回读总窗口(issues #92 / #327):首读约 2 分钟后,其后重读,至多 10 分钟;缺省 10 分钟。
       sideCheckDelayMs: hubCfg.sideCheckDelayMs,
       notify: opts.onEvent,
       // 收尾后留存转格式(plans/036 T9b):stage 源段副本派到本机处理任务表(master 数据根,与 `_enqueue` 同一执行体)。
