@@ -930,7 +930,7 @@ describe("outcome:区分「一场都没录到」与「分 P 都已进稿」", ()
     sleep: async () => {},
   });
 
-  it("取不到流 → ok:true 但 outcome=no-stream(调用方据此按失败退出)", async () => {
+  it("取不到流(未开 waitForBroadcast) → ok:true 但 outcome=no-stream", async () => {
     const r = await runLivePump({
       ...base(),
       fetch: async () => ({ living: false }),
@@ -938,8 +938,64 @@ describe("outcome:区分「一场都没录到」与「分 P 都已进稿」", ()
     } as Parameters<typeof runLivePump>[0]);
     expect(r.ok).toBe(true);
     expect(r.segments).toHaveLength(0);
-    // 这是唯一能被调用方用来区分「静默漏录」的信号。
     expect(r.outcome).toBe("no-stream");
+  });
+
+  it("取不到流 → 留在进程内按 30s 探测,绝不自行退出(issue #308 回归)", async () => {
+    // Before the fix the pump gave up after 6 failed attempts and the CLI exited 1, so the
+    // scheduler restarted the task every few minutes. It must keep polling until told to stop.
+    const drain = new AbortController();
+    const sleeps: number[] = [];
+    let calls = 0;
+    const r = await runLivePump({
+      ...base(),
+      waitForBroadcast: true,
+      drainSignal: drain.signal,
+      sleep: async (ms) => { sleeps.push(ms); },
+      fetch: async () => {
+        calls++;
+        if (calls === 12) drain.abort(); // well past the old 6-attempt give-up point
+        return { living: false };
+      },
+      log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    expect(calls).toBe(12);
+    expect(r.ok).toBe(true);
+    expect(r.segments).toHaveLength(0);
+    expect(r.outcome).toBe("idle");
+    // One probe per poll interval, never a faster backoff cadence: the pump must not raise
+    // risk-control pressure above the file recorder's 30s.
+    expect(sleeps.length).toBeGreaterThan(0);
+    expect(sleeps.every((ms) => ms >= 30_000)).toBe(true);
+  });
+
+  it("等待开播时收到停止信号 → 立即返回 idle(不等满轮询间隔)", async () => {
+    const abort = new AbortController();
+    const started = Date.now();
+    const p = runLivePump({
+      ...base(),
+      waitForBroadcast: true,
+      signal: abort.signal,
+      sleep: undefined, // real timers: only the abort can end the 30s wait
+      fetch: async () => ({ living: false }),
+      log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    setTimeout(() => abort.abort(), 50);
+    const r = await p;
+    expect(r.outcome).toBe("idle");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("shouldStop 在等待中生效 → idle", async () => {
+    let n = 0;
+    const r = await runLivePump({
+      ...base(),
+      waitForBroadcast: true,
+      shouldStop: () => ++n > 3,
+      fetch: async () => ({ living: false }),
+      log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    expect(r.outcome).toBe("idle");
   });
 
   it("ok:false 时 outcome 缺席(别让调用方把「传了几个才失败」当成「一个都没传」)", async () => {

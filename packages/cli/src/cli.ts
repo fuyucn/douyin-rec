@@ -452,6 +452,8 @@ program
         spoolMode: o.streamUploadSpool === "none" ? "none" : "full",
         signal: abort.signal,
         drainSignal: drain.signal,
+        // Wait in-process for the next broadcast instead of exiting (issue #308).
+        waitForBroadcast: true,
         danmu,
         log: (m) => console.log(m),
         onAlert: (message) => { void notifier.notify({ kind: "error", stage: "0落盘", message }).catch(() => {}); },
@@ -472,14 +474,17 @@ program
             ? `[stream-upload] 台账已记录: ${r.bvid}${r.alreadyTerminal ? "(已是终态,未覆盖)" : ""}`
             : `[stream-upload] ⚠️ 台账记录失败(不影响已上传稿件): ${r.error}`);
         }
-        // "No stream" is a real outcome, not a clean finish: the room recorded nothing, so it
-        // must not look like a natural end to the caller. `ok:true` alone used to carry both
-        // "every part uploaded" and "nothing was ever recorded" (review #280 P1), which let a
-        // silently failing room keep a healthy status.
-        // Only the no-stream case gets this specific message: an `ok:false` run may already have
-        // delivered parts, and blaming "no parts uploaded" for it would be plainly wrong.
+        // `ok:true` covers three endings: parts delivered, `idle` (a stop/drain arrived while the
+        // pump was still waiting for a broadcast) and `no-stream` (gave up). With
+        // `waitForBroadcast` the pump never gives up on its own (issue #308), so `idle` is a
+        // requested stop and exits 0; exiting non-zero for it made TaskManager treat an idle
+        // task as a crash and restart it in a loop. `no-stream` stays a failure as a backstop
+        // (review #280 P1): a room that recorded nothing must not look like a natural end.
+        // An `ok:false` run may already have delivered parts, so only its error text is logged.
         const clean = res.ok && res.outcome !== "no-stream";
-        if (res.ok && res.outcome === "no-stream") {
+        if (res.ok && res.outcome === "idle") {
+          console.log("[stream-upload] 收到停止/排空时仍未开播,本场无分 P,正常退出");
+        } else if (res.ok && res.outcome === "no-stream") {
           console.error("[stream-upload] 本场没有上传任何分 P(取不到流),按失败退出并交由调度重试");
         } else if (!res.ok && res.error) {
           console.error(`[stream-upload] 本场以失败收尾: ${res.error}`);

@@ -1394,8 +1394,17 @@ export interface RunLivePumpOptions {
    * losing that video for good, because there is no local copy to fall back to.
    */
   drainSignal?: AbortSignal;
-  /** Sleep seam for stream-acquisition backoff (tests). */
+  /** Sleep seam for stream-acquisition backoff and the idle poll (tests). */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Stay in-process until a broadcast starts instead of giving up after a few failed probes.
+   * Production zero-disk tasks set this: exiting made the scheduler restart the task every few
+   * minutes, and every restart re-hit the stream and danmu endpoints (issue #308). Only a
+   * stop/drain ends the wait. Default false keeps the one-shot behavior of manual runs.
+   */
+  waitForBroadcast?: boolean;
+  /** Poll interval while waiting for a broadcast (default 30s, same as the file recorder). */
+  idlePollMs?: number;
   /**
    * "full" (default) mirrors each part to a spool file (fallback + ffprobe self-check).
    * "none" = true zero-disk: nothing is written for video; a failed part cannot be retried
@@ -1434,13 +1443,14 @@ export interface RunLivePumpResult {
    *
    * `uploaded` — at least one part completed. With `submit` enabled that means it reached the
    *   archive; with `submit:false` it means it was fully recorded and only held back locally.
-   * `no-stream` — the stream could not be acquired, so no part exists.
+   * `idle` — the run was still waiting for a broadcast when a stop or window-end drain arrived,
+   *   so no part exists. The pump never gives up on its own while waiting (issue #308), so this
+   *   is only ever a requested stop, never a failure.
    *
-   * Absent when `ok:false` (an error or a stop cut the run); read `error` for the reason and
-   * `segments` for what was already delivered. Deliberately no `stopped` value: a cut run is
-   * reported through `ok:false`, so a third state would be unreachable.
+   * Absent when `ok:false` (an error cut the run); read `error` for the reason and
+   * `segments` for what was already delivered.
    */
-  outcome?: "uploaded" | "no-stream";
+  outcome?: "uploaded" | "no-stream" | "idle";
   /** The archive already exists, so creating a new one is forbidden. */
   archiveExists?: boolean;
   bvid?: string;
@@ -1468,6 +1478,37 @@ export function zeroDiskPartLost(
   backpressured: boolean | undefined,
 ): boolean {
   return (spoolMode ?? "full") === "none" && backpressured === true;
+}
+
+/** Default poll interval while no broadcast is live; keeps risk-control pressure at file-recorder level. */
+export const IDLE_POLL_MS = 30_000;
+
+/**
+ * Sleep that ends early when any signal aborts. `sleepImpl` is the test seam; it is still raced
+ * against the signals so a stop is never delayed by a long poll interval.
+ */
+async function sleepUnlessAborted(
+  ms: number,
+  signals: Array<AbortSignal | undefined>,
+  sleepImpl?: (ms: number) => Promise<void>,
+): Promise<void> {
+  const live = signals.filter((x): x is AbortSignal => !!x);
+  if (live.some((x) => x.aborted)) return;
+  let timer: NodeJS.Timeout | undefined;
+  let onAbort: () => void = () => {};
+  const aborted = new Promise<void>((resolve) => {
+    onAbort = resolve;
+    for (const sig of live) sig.addEventListener("abort", onAbort, { once: true });
+  });
+  const slept = sleepImpl
+    ? sleepImpl(ms)
+    : new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); });
+  try {
+    await Promise.race([slept, aborted]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    for (const sig of live) sig.removeEventListener("abort", onAbort);
+  }
 }
 
 /**
@@ -1539,11 +1580,17 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     }
   }
 
-  // Danmu is the one artifact that still hits disk on the zero-disk path. Start it only after
-  // recovery succeeded (an archive in an uncertain state must not collect more parts), and stop
-  // it on every exit path below. Failure is non-fatal: video upload must not be blocked by WS.
+  // Danmu is the one artifact that still hits disk on the zero-disk path. It starts only once a
+  // stream is actually live (never while waiting): connecting before the broadcast resolves a
+  // stale liveId, so the WS stays connected but receives nothing for the whole show. It also
+  // starts only after recovery succeeded (an archive in an uncertain state must not collect
+  // more parts), and is stopped on every exit path below. Failure is non-fatal: video upload
+  // must not be blocked by WS.
   let danmuStarted = false;
-  if (o.danmu) {
+  let danmuAttempted = false;
+  const startDanmuOnce = async (): Promise<void> => {
+    if (!o.danmu || danmuAttempted) return;
+    danmuAttempted = true;
     try {
       await o.danmu.start((m) => { /* writer is owned by the caller's start() */ });
       danmuStarted = true;
@@ -1551,7 +1598,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     } catch (e) {
       log(`[live-pump] ⚠️ 弹幕连接失败(不影响视频上传): ${(e as Error).message}`);
     }
-  }
+  };
   const stopDanmu = async (): Promise<void> => {
     if (!danmuStarted || !o.danmu) return;
     danmuStarted = false;
@@ -1559,6 +1606,26 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   };
 
   const segments: LivePumpSegmentReport[] = [];
+  const idlePollMs = o.idlePollMs ?? IDLE_POLL_MS;
+  const stopRequested = async (): Promise<boolean> =>
+    !!o.signal?.aborted || !!o.drainSignal?.aborted || !!(await o.shouldStop?.());
+  /** Probe until a stream is live. Resolves null once a stop or drain is requested. */
+  const waitForBroadcast = async (): Promise<StreamAcquirer | null> => {
+    for (let misses = 0; ; misses++) {
+      if (await stopRequested()) return null;
+      // One attempt per poll (no backoff retries): the interval itself is the retry cadence.
+      const s = await acquireStreamWithBackoff({
+        room: o.room, fetch: o.fetch, quality: o.quality, maxRetries: 0, sleep,
+      });
+      if (s.living && s.url) return s;
+      // Log the first miss and then roughly every 10 minutes, so a long wait is visible
+      // without flooding the task log.
+      if (misses % Math.max(1, Math.round(600_000 / idlePollMs)) === 0) {
+        log(`[live-pump] 未开播,每 ${idlePollMs / 1000}s 探测一次(留在进程内等待)`);
+      }
+      await sleepUnlessAborted(idlePollMs, [o.signal, o.drainSignal], o.sleep);
+    }
+  };
   try {
   // TaskManager derives the task's recording phase from these exact markers
   // (`[状态] 录制中` / `[状态] 等待开播`). Without them a zero-disk task shows as "running"
@@ -1579,15 +1646,29 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       }
       break;
     }
-    const s = await acquireStreamWithBackoff({
-      room: o.room,
-      fetch: o.fetch,
-      quality: o.quality,
-      onRetry: (waitMs, attempt, max) => log(`[live-pump] 段${seg + 1} 取流失败,${waitMs / 1000}s 后重试(${attempt}/${max})`),
-      onGiveUp: (attempts) => log(`[live-pump] 连续 ${attempts} 次取不到流,按收播收尾(已录分 P 不受影响)`),
-      sleep,
-    });
+    let s: StreamAcquirer;
+    if (o.waitForBroadcast && segments.length === 0) {
+      // Nothing recorded in this run yet: the broadcast has not started (or this is a restart
+      // after it ended). Wait in-process, one probe per interval, instead of exiting. Exiting
+      // used to hand the task back to the scheduler, which restarted it every few minutes and
+      // hammered the stream/danmu endpoints (issue #308). Only a stop or drain ends this wait.
+      const waited = await waitForBroadcast();
+      if (!waited) break;
+      s = waited;
+    } else {
+      // A broadcast is in progress: ride out short outages with backoff, then treat a stream
+      // that stays gone as the end of the show (parts already delivered are unaffected).
+      s = await acquireStreamWithBackoff({
+        room: o.room,
+        fetch: o.fetch,
+        quality: o.quality,
+        onRetry: (waitMs, attempt, max) => log(`[live-pump] 段${seg + 1} 取流失败,${waitMs / 1000}s 后重试(${attempt}/${max})`),
+        onGiveUp: (attempts) => log(`[live-pump] 连续 ${attempts} 次取不到流,按收播收尾(已录分 P 不受影响)`),
+        sleep,
+      });
+    }
     if (!s.living || !s.url) break;
+    await startDanmuOnce();
     if (s.title?.trim()) liveTitle = s.title.trim();
     if (o.titleForLive && s.title) {
       const nextTitle = o.titleForLive(s.title);
@@ -1722,9 +1803,12 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
 
   return {
     ok: true,
-    // No part in the archive and ok:true is only reachable through the "could not acquire the
-    // stream" break below, so it is unambiguous: an abort/signal cut returns ok:false instead.
-    ...(segments.some((x) => x.stem) ? { outcome: "uploaded" as const } : { outcome: "no-stream" as const }),
+    // No part from this run: with `waitForBroadcast` the only way here is a stop/drain arriving
+    // while still waiting (the wait never gives up by itself), so it is a requested stop. Without
+    // it, the stream could not be acquired and the run gave up.
+    ...(segments.some((x) => x.stem)
+      ? { outcome: "uploaded" as const }
+      : { outcome: o.waitForBroadcast ? "idle" as const : "no-stream" as const }),
     bvid: session.bvid,
     aid: session.aid,
     title: session.archiveTitle,
