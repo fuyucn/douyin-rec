@@ -16,7 +16,10 @@ function overlaps(a: NodeRecording, b: NodeRecording, tol: number): boolean {
  * the master then sees that later session as its own job carrying the inherited BV.
  */
 function liveIdsConflict(a: NodeRecording, b: NodeRecording): boolean {
-  return !!a.liveSessionId && !!b.liveSessionId && a.liveSessionId !== b.liveSessionId;
+  if (!a.liveSessionId || !b.liveSessionId || a.liveSessionId === b.liveSessionId) return false;
+  // One room cannot hold two broadcasts at the same time: recordings whose spans truly overlap are one broadcast
+  // whatever their ids say (a bad id must not split them into two jobs that could both upload).
+  return !(a.startMs < b.endMs && b.startMs < a.endMs);
 }
 
 function ymd(ms: number, tz: string): string { return zonedStamp(ms, tz).date; }
@@ -73,6 +76,16 @@ export function clusterBroadcasts(
   const dayCount = new Map<string, number>();
   for (const b of out) { const k = `${b.platform}:${b.roomSlug}:${ymd(b.startMs, timeZone)}`; dayCount.set(k, (dayCount.get(k) ?? 0) + 1); }
   const known = new Map(Array.from(knownKeys, (k) => [k.streamKey, k]));
+  // Live-id splits can leave two clusters of one day closer than the tolerance, so more than one could match a
+  // known base job. Only the cluster whose start is closest to that job keeps the base key (#321 review).
+  const baseOwner = new Map<string, Broadcast>();
+  for (const b of out) {
+    const base = `${b.platform}:${b.roomSlug}:${ymd(b.startMs, timeZone)}`;
+    const k = known.get(base);
+    if (k?.startMs == null) continue;
+    const cur = baseOwner.get(base);
+    if (!cur || Math.abs(b.startMs - k.startMs) < Math.abs(cur.startMs - k.startMs)) baseOwner.set(base, b);
+  }
   for (const b of out) {
     const day = ymd(b.startMs, timeZone); const base = `${b.platform}:${b.roomSlug}:${day}`;
     const knownJob = known.get(base);
@@ -80,7 +93,7 @@ export function clusterBroadcasts(
     // 旧库无 startMs 时,用「开录早于 job 最后更新」近似判断,避免把已 done 的第一场误判成第二场。
     const sameAsKnown = knownJob
       ? knownJob.startMs != null
-        ? Math.abs(knownJob.startMs - b.startMs) <= overlapToleranceMs
+        ? Math.abs(knownJob.startMs - b.startMs) <= overlapToleranceMs && baseOwner.get(base) === b
         : b.startMs <= (knownJob.updatedAt ?? 0) + overlapToleranceMs
       : false;
     // 同一天多簇 + 已存在的异场 job 都要 _HHMM,否则会复用 base key 被幂等跳过。

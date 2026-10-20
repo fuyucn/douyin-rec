@@ -154,7 +154,7 @@ describe("Reconciler", () => {
       const ledger = freshLedger();
       ledger.upsertPending(day, firstStart);
       ledger.markDone(day, "BV_FIRST");
-      // Second broadcast 26 min after the first ended: own cluster (different live id) → `_HHMM` key.
+      // A later broadcast with its own live id on the same day → `_HHMM` key (the base job is already done).
       const second = makeRec({
         sessionBase: "主播名_2026-06-22_09-26-00", startMs: new Date("2026-06-22T10:26:00Z").getTime(),
         endMs: new Date("2026-06-22T11:00:00Z").getTime(), liveSessionId: "live-2", rolling,

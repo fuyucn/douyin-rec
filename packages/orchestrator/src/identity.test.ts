@@ -187,6 +187,15 @@ describe("clusterBroadcasts × live id (issue #320)", () => {
   it("84 min apart with the same live id → still two jobs on the master (live id only splits; #321 review)", () => {
     expect(cluster([rec(0, 60, "a"), rec(144, 200, "a")])).toHaveLength(2);
   });
+  it("#321 review: two id-split clusters near a known base job → only the closest keeps the base key", () => {
+    const base = "douyin:r1:2026-10-20";
+    const out = clusterBroadcasts([{ workerId: "w1", recordings: [rec(0, 22, "a"), rec(48, 200, "b")] }], undefined, "douyin",
+      [{ streamKey: base, startMs: T0 }], "UTC");
+    expect(out.map((b) => b.streamKey)).toEqual([base, `${base}_0448`]);
+  });
+  it("#321 review: truly overlapping spans stay one broadcast even with different ids", () => {
+    expect(cluster([rec(0, 60, "a"), rec(30, 90, "b")])).toHaveLength(1);
+  });
   it("an id-less member does not bridge two broadcasts with different live ids", () => {
     const out = cluster([rec(0, 30, "a"), rec(10, 200), rec(50, 200, "b")]);
     expect(out.map((b) => b.members.map((m) => m.rec.liveSessionId ?? "-"))).toEqual([["a", "-"], ["b"]]);

@@ -1225,6 +1225,21 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect(readA(f).bv).toBeUndefined();
   });
 
+  it("issue #320: BV-less A is never taken over across the window (same id, 84 min) nor with a different id (10 min)", async () => {
+    for (const [gap, aId, bId] of [[84, "live-1", "live-1"], [10, "live-1", "live-2"]] as const) {
+      const f = setup({ confirmedA: [], bGapMin: gap, sidecar: { bv: undefined, closedAt: A_LAST_MS } });
+      for (const [b, id] of [[A_BASE, aId], [B_BASE, bId]] as const) {
+        writeFileSync(path.join(f.dir, `${b}.session.json`), JSON.stringify({ sessionBase: b, roomSlug: "123", platform: "douyin", liveSessionId: id }));
+      }
+      const plain = vi.fn(async () => ["B", "V", "1second"].join(""));
+      const u = uploaderB(f, { append: vi.fn(async () => {}), plain });
+      f.bPaths.forEach((p) => u.noteSegment(p));
+      await u.flush({ recordingActive: false });
+      expect((plain.mock.calls as unknown as Array<[{ plain: { video: string } }]>).map((c) => path.basename(c[0].plain.video)), `gap ${gap}`).toEqual([`${B_BASE}_000.ts`]);
+      expect(readA(f).bv).toBeUndefined();
+    }
+  });
+
   it("leftovers still pending after the takeover (upload slot busy): B keeps waiting instead of overtaking", async () => {
     const f = setup();
     const busy = new Error("busy");
