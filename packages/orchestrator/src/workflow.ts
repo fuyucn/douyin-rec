@@ -374,6 +374,12 @@ export interface ResourcePoolCfg {
   maxCpuParallel?: number;
   maxNetParallel?: number;
   minBurnFreeMemMB?: number;
+  /**
+   * Minimum free memory (MB) before a merge node (ffmpeg concat `-c copy`, no re-encode) may start.
+   * Default 512: measured peak RSS of a 1080p concat-copy is ~60 MB, so 512 is ~8x headroom.
+   */
+  minMergeFreeMemMB?: number;
+  /** How long a node waits for memory before ONE alert is raised; waiting continues afterwards. */
   memWaitTimeoutMs?: number;
   /**
    * **热读取值器**(T15):传函数则每次判定都用它取当前值,改配置**立即生效、无需重启**。
@@ -386,6 +392,7 @@ export interface ResourcePoolCfg {
   maxCpuParallelLive?: () => number;
   maxNetParallelLive?: () => number;
   minBurnFreeMemMBLive?: () => number;
+  minMergeFreeMemMBLive?: () => number;
   /**
    * **全局上传队列**:B 站按「提交次数」限流(`code 601 上传视频过快`),与并发数无关。
    * 故队列对「每一次提交」做限速:
@@ -490,6 +497,8 @@ export class ResourcePool {
   private minBurnFreeMemMB: number;
   /** 热读的内存下限(T15);无 getter 时是构造值的常量闭包。 */
   private minBurnFreeMemMBLive: () => number;
+  private minMergeFreeMemMBLive: () => number;
+  private onMemShortage: (msg: string) => void;
   private memWaitTimeoutMs: number;
   private now: () => number;
   private sleep: (ms: number) => Promise<void>;
@@ -524,6 +533,8 @@ export class ResourcePool {
       limitKey?: string;
       /** 持久化失败等诊断日志;缺省 console.error。**绝不静默**。 */
       warn?: (msg: string) => void;
+      /** Called once per wait when memory stays short past `memWaitTimeoutMs` (the wait itself continues). */
+      onMemShortage?: (msg: string) => void;
     } = {},
   ) {
     // 有 live getter 就热读它,否则用构造时的数字(后者保持向后兼容)。
@@ -532,6 +543,7 @@ export class ResourcePool {
     // 热读版:每次等内存门前取当前值(UI 改完立即生效);无 getter 时退回构造值。
     this.minBurnFreeMemMBLive = cfg.minBurnFreeMemMBLive ?? ((): number => cfg.minBurnFreeMemMB ?? 2048);
     this.minBurnFreeMemMB = cfg.minBurnFreeMemMB ?? 2048;
+    this.minMergeFreeMemMBLive = cfg.minMergeFreeMemMBLive ?? ((): number => cfg.minMergeFreeMemMB ?? 512);
     this.memWaitTimeoutMs = cfg.memWaitTimeoutMs ?? 600_000;
     this.uploadRateLimit = Math.max(0, cfg.uploadRateLimit ?? 5);
     this.uploadRateWindowMs = Math.max(0, cfg.uploadRateWindowMs ?? 600_000);
@@ -542,6 +554,7 @@ export class ResourcePool {
     this.limitStore = inject.limitStore;
     this.limitKey = (inject.limitKey ?? "").trim() || UPLOAD_GATE_DEFAULT_KEY;
     this.warn = inject.warn ?? ((m: string) => console.error(m));
+    this.onMemShortage = inject.onMemShortage ?? ((m: string) => this.warn(m));
     this.restoreUploadLimits();
   }
 
@@ -641,19 +654,30 @@ export class ResourcePool {
     };
   }
 
-  /** CPU 锁(merge/burn 共用,max=1)+ 内存闸门;内存长期不足 → 抛错由节点标 failed。 */
-  async withCpu<T>(fn: () => Promise<T>, streamKey?: string): Promise<T> {
+  /**
+   * CPU lock (merge/burn share it, max=1) + memory gate.
+   * Memory shortage only queues: the node keeps polling until memory recovers. After `memWaitTimeoutMs`
+   * one alert states need vs available, then waiting continues (a user stop still aborts the wait).
+   * `kind` picks the floor: merge (copy-only) vs burn (re-encode).
+   */
+  async withCpu<T>(fn: () => Promise<T>, streamKey?: string, kind: "merge" | "burn" = "burn"): Promise<T> {
     const clear = this.markWaiting(streamKey, "cpu");
     try {
       return await this.withSemaphore(this.cpu, async () => {
         clear(); // 已进闸门 → 不再算「排队」
-        const memFloor = this.minBurnFreeMemMBLive();
+        // Merge never gates stricter than burn: `minBurnFreeMemMB: 0` (gate off) keeps disabling both.
+        const burnFloor = this.minBurnFreeMemMBLive();
+        const memFloor = kind === "merge" ? Math.min(this.minMergeFreeMemMBLive(), burnFloor) : burnFloor;
         if (memFloor > 0) {
           const deadline = this.now() + this.memWaitTimeoutMs;
+          let alerted = false;
           while (this.freeMemMB() < memFloor) {
             throwIfAborted();
-            if (this.now() >= deadline) {
-              throw new Error(`内存不足(可用 ${Math.round(this.freeMemMB())}MB < ${memFloor}MB),等待超时`);
+            if (!alerted && this.now() >= deadline) {
+              alerted = true;
+              this.onMemShortage(
+                `Memory low for ${kind}${streamKey ? ` (${streamKey})` : ""}: need ${memFloor} MB, available ${Math.round(this.freeMemMB())} MB; still waiting`,
+              );
             }
             await this.sleep(2000);
           }
@@ -898,7 +922,7 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
         await node.run(ctx);
         validateArtifacts(node.outputs, "输出");
       };
-      if (node.resource === "cpu") await pool.withCpu(body, streamKey);
+      if (node.resource === "cpu") await pool.withCpu(body, streamKey, node.key === "merge" ? "merge" : "burn");
       else if (node.resource === "upload") await pool.withUpload(body, streamKey);
       else if (node.resource === "net") await pool.withNet(body, streamKey);
       else await body();

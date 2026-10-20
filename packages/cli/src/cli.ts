@@ -1183,6 +1183,7 @@ const hubStarter: HubStarter = {
         maxCpuParallel?: number;
         maxNetParallel?: number;
         minBurnFreeMemMB?: number;
+        minMergeFreeMemMB?: number;
         memWaitTimeoutMs?: number;
         staleMs?: number;
         /** T7:跨房间的调度并发上限(同时派发几场后处理流程)。缺省 2;与 maxCpuParallel 无关。 */
@@ -1377,6 +1378,7 @@ const hubStarter: HubStarter = {
           maxCpuParallel: r.maxCpuParallel ?? hubCfg.resources?.maxCpuParallel ?? 1,
           maxNetParallel: r.maxNetParallel ?? hubCfg.resources?.maxNetParallel ?? 1,
           minBurnFreeMemMB: r.minBurnFreeMemMB ?? hubCfg.resources?.minBurnFreeMemMB ?? 2048,
+          minMergeFreeMemMB: r.minMergeFreeMemMB ?? hubCfg.resources?.minMergeFreeMemMB ?? 512,
           maxConcurrentPipelines: r.maxConcurrentPipelines ?? hubCfg.resources?.maxConcurrentPipelines ?? 2,
         };
       } catch {
@@ -1385,6 +1387,7 @@ const hubStarter: HubStarter = {
           maxCpuParallel: hubCfg.resources?.maxCpuParallel ?? 1,
           maxNetParallel: hubCfg.resources?.maxNetParallel ?? 1,
           minBurnFreeMemMB: hubCfg.resources?.minBurnFreeMemMB ?? 2048,
+          minMergeFreeMemMB: hubCfg.resources?.minMergeFreeMemMB ?? 512,
           maxConcurrentPipelines: hubCfg.resources?.maxConcurrentPipelines ?? 2,
         };
       }
@@ -1396,6 +1399,8 @@ const hubStarter: HubStarter = {
       maxCpuParallelLive: () => liveResources().maxCpuParallel ?? 1,
       maxNetParallelLive: () => liveResources().maxNetParallel ?? 1,
       minBurnFreeMemMBLive: () => liveResources().minBurnFreeMemMB ?? 2048,
+      minMergeFreeMemMB: hubCfg.resources?.minMergeFreeMemMB ?? 512,
+      minMergeFreeMemMBLive: () => liveResources().minMergeFreeMemMB ?? 512,
       memWaitTimeoutMs: hubCfg.resources?.memWaitTimeoutMs ?? 600_000,
       uploadRateLimit: hubCfg.resources?.uploadRateLimit ?? 5,
       uploadRateWindowMs: hubCfg.resources?.uploadRateWindowMs ?? 600_000,
@@ -1408,6 +1413,7 @@ const hubStarter: HubStarter = {
       limitStore: openUploadLimitStore(dbPath, { log: opts.warn }),
       limitKey: masterUploadAccountKey(opts.warn),
       warn: opts.warn,
+      onMemShortage: (message) => { opts.warn(message); opts.onEvent({ kind: "error", stage: "memory", message }); },
     });
     // plan 038: queue-managed upload settings; absent/invalid = safe defaults (blocking, nothing polled).
     const nodeUploadCfg = parseNodeUploadConfig((hubCfg as { nodeUpload?: unknown }).nodeUpload);

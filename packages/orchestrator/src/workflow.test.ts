@@ -400,6 +400,43 @@ describe("ResourcePool — cpu/net 串行与内存闸门", () => {
     expect(active.max).toBe(1);
     t.ledger.close();
   });
+
+  it("memory shortage past the timeout alerts once (need vs available) and still runs after recovery", async () => {
+    let now = 0;
+    let mem = 1900; // steady ~1.9 GB, below the 2048 burn floor
+    const alerts: string[] = [];
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 2048, memWaitTimeoutMs: 10_000, uploadRateLimit: 0 },
+      {
+        now: () => now,
+        // virtual clock; memory recovers only well after the timeout has elapsed
+        sleep: async (ms) => { now += ms; if (now >= 60_000) mem = 4096; },
+        freeMemMB: () => mem,
+        onMemShortage: (m) => alerts.push(m),
+      },
+    );
+    let ran = false;
+    await pool.withCpu(async () => { ran = true; }, "douyin:1:d", "burn");
+    expect(ran).toBe(true);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toContain("need 2048 MB");
+    expect(alerts[0]).toContain("available 1900 MB");
+  });
+
+  it("merge uses its own (lower) floor: 1.9 GB available is enough for merge but not for burn", async () => {
+    let now = 0;
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 2048, minMergeFreeMemMB: 512, memWaitTimeoutMs: 10_000, uploadRateLimit: 0 },
+      { now: () => now, sleep: async (ms) => { now += ms; if (now >= 30_000) throw new Error("burn still gated"); }, freeMemMB: () => 1900 },
+    );
+    await pool.withCpu(async () => {}, "douyin:1:d", "merge"); // passes immediately
+    await expect(pool.withCpu(async () => {}, "douyin:1:d", "burn")).rejects.toThrow("burn still gated");
+  });
+
+  it("minBurnFreeMemMB=0 still switches the whole gate off, merge included (backward compat)", async () => {
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 }, { freeMemMB: () => 10 });
+    await pool.withCpu(async () => {}, "douyin:1:d", "merge");
+  });
 });
 
 describe("ResourcePool — 全局上传队列(withUpload)", () => {

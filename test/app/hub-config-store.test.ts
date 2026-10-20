@@ -62,6 +62,16 @@ describe("hub-config-store(T15 resources)", () => {
     expect(readResources(cfg).maxCpuParallel).toBe(2);
   });
 
+  it("minMergeFreeMemMB: default 512, overridable, validated, bad value falls back", () => {
+    expect(DEFAULT_HUB_RESOURCES.minMergeFreeMemMB).toBe(512);
+    writeFileSync(cfg, JSON.stringify({ resources: { minMergeFreeMemMB: 256 } }), "utf-8");
+    expect(readResources(cfg).minMergeFreeMemMB).toBe(256);
+    writeFileSync(cfg, JSON.stringify({ resources: { minMergeFreeMemMB: -5 } }), "utf-8");
+    expect(readResources(cfg).minMergeFreeMemMB).toBe(512);
+    expect(validateResources({ minMergeFreeMemMB: -1 })).toContain("minMergeFreeMemMB");
+    expect(validateResources({ minMergeFreeMemMB: 0 })).toBeNull();
+  });
+
   it("validateResources: 低于下限 / 非有限数 → 错误串;合法 → null", () => {
     expect(validateResources({ maxCpuParallel: 0 })).toContain("maxCpuParallel");
     expect(validateResources({ maxNetParallel: -1 })).toContain("maxNetParallel");

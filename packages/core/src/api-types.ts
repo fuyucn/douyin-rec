@@ -25,7 +25,9 @@ export interface HubResources {
   maxNetParallel?: number;
   /** 烧录前要求的最小可用内存 MB。≥0。默认 2048。 */
   minBurnFreeMemMB?: number;
-  /** 等内存门的时间上限 ms。≥0。默认 600_000。 */
+  /** 合并(-c copy,不重编码)前要求的最小可用内存 MB。≥0。默认 512(实测 1080p concat 峰值约 60 MB)。 */
+  minMergeFreeMemMB?: number;
+  /** 内存不足持续多久后告警一次 ms(告警后继续排队等待,不再失败)。≥0。默认 600_000。 */
   memWaitTimeoutMs?: number;
   /** 上传滑动窗口内允许次数。≥1。默认 5。 */
   uploadRateLimit?: number;
