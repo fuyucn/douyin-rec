@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clusterBroadcasts } from "./identity.js";
-import { scanInventory, scanRecordings, scanRollingSessions, scanUnclaimedSegments } from "./scan.js";
+import { ROLLING_ACTIVE_MAX_QUIET_MS, rollingOwnerActive, scanInventory, scanRecordings, scanRollingSessions, scanUnclaimedSegments } from "./scan.js";
 // 假稿件号用拼接构造:隐私检查会拦裸 BV 号字面量。
 const FAKE_BV = ["B", "V", "1fake"].join("");
 
@@ -567,5 +567,22 @@ describe("scanRecordings stable rolling session boundaries (issue #292)", () => 
     rmSync(join(dir, seg(0)));
     const recs = await scanRecordings(root, {}, async (f) => probeBySeg(f));
     expect(recs[0]!.startMs).toBe(T0 + 1_800_000);
+  });
+});
+
+describe("rollingOwnerActive (issue #309)", () => {
+  const now = 1_800_000_000_000;
+  const alive = (): boolean => true;
+  const dead = (): boolean => false;
+  it("legacy sidecar without an owner pid is unknown", () => {
+    expect(rollingOwnerActive({ updatedAt: now }, now, alive)).toBeUndefined();
+  });
+  it("live owner that has not closed the session is active", () => {
+    expect(rollingOwnerActive({ ownerPid: 42, updatedAt: now - 60_000 }, now, alive)).toBe(true);
+  });
+  it("closed session, dead owner, or a long-quiet sidecar is not active", () => {
+    expect(rollingOwnerActive({ ownerPid: 42, closedAt: now, updatedAt: now }, now, alive)).toBe(false);
+    expect(rollingOwnerActive({ ownerPid: 42, updatedAt: now }, now, dead)).toBe(false);
+    expect(rollingOwnerActive({ ownerPid: 42, heartbeatAt: now - ROLLING_ACTIVE_MAX_QUIET_MS - 1, updatedAt: 0 }, now, alive)).toBe(false);
   });
 });

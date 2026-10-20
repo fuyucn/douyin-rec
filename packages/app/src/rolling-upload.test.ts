@@ -719,6 +719,19 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
     expect(saved.ambiguous ?? []).toEqual([]);
   });
 
+  it("issue #309: markClosed stamps closedAt after the session-end flush; a busy slot keeps the session open until then", async () => {
+    const { dir, paths } = mkSession(segNames(1));
+    const busy = fakeSlot({ v: true }, { failAcquire: true });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: vi.fn(async () => FAKE_BV), appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: busy.slot as never });
+    u.noteSegment(paths[0]!);
+    await u.flush({ recordingActive: false });
+    expect(JSON.parse(readFileSync(sidecarPath(dir), "utf-8")).closedAt).toBeUndefined();
+    await u.markClosed();
+    const saved = JSON.parse(readFileSync(sidecarPath(dir), "utf-8"));
+    expect(saved.closedAt).toBe(NOW_MS);
+    expect(saved.ownerPid).toBe(process.pid);
+  });
+
   it("不注入槽时不加锁(旧行为不变)", async () => {
     const { paths } = mkSession(segNames(1));
     const up = vi.fn(async () => FAKE_BV);

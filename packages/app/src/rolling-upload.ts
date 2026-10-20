@@ -119,6 +119,12 @@ interface RollingState {
    */
   ownerPid?: number;
   heartbeatAt?: number;
+  /**
+   * Issue #309: set once the owner finished this session (session-end flush returned, or a successor finished
+   * taking it over). Absent while the owner may still upload it, so the master can tell "owner still working
+   * on it" (wait) from "owner gone mid-upload" (manual). Sidecars written before this field existed never have it.
+   */
+  closedAt?: number;
   updatedAt: number;
 }
 
@@ -833,6 +839,8 @@ export class RollingUploader {
     await peer.flush({ recordingActive: false });
     if (peer.stateUntrusted) return this.waitForPredecessor(`${prev.base} 的 sidecar 写失败`);
     if (peer.hasUploadablePending()) return this.waitForPredecessor(`${prev.base} 仍有分段待上传(槽忙/未完成)`);
+    // The claim above stamped this live pid as owner; close it so the master does not keep waiting on it.
+    await peer.markClosed();
     return "proceed";
   }
 
@@ -841,6 +849,22 @@ export class RollingUploader {
     const confirmed = new Set(this.state.confirmed);
     const ambiguous = new Set(this.state.ambiguous ?? []);
     return this.planPending(false, this.now(), confirmed, ambiguous).pending.length > 0;
+  }
+
+  /**
+   * Stamp the session as finished by its owner (issue #309). Queued on the serial chain so it lands after the
+   * session-end flush; an intent or leftover segment may remain (they are reported as-is, not resolved here).
+   */
+  markClosed(): Promise<void> {
+    const run = this.chain.then(() => this.stampClosed(), () => this.stampClosed());
+    this.chain = run.catch(() => undefined);
+    return run;
+  }
+
+  private stampClosed(): void {
+    if (!this.state.sessionBase || this.state.closedAt) return;
+    this.state = { ...this.state, closedAt: this.now(), updatedAt: this.now() };
+    this.persist();
   }
 
   /** Clear the write-ahead intent of an upload that never started. A failed sidecar write marks the state untrusted. */
@@ -1136,7 +1160,10 @@ export function makeRollingUploadHookFactory(o: {
         // 不阻塞录制;串行链保证同一会话不并发上传。失败/不确定在 uploader 内部转人工(保留源)。
         void uploader.flush({ recordingActive: true }).catch(() => undefined);
       },
-      onSessionEnd: (): Promise<void> => uploader.flush({ recordingActive: false }).then(() => undefined),
+      onSessionEnd: async (): Promise<void> => {
+        try { await uploader.flush({ recordingActive: false }); }
+        finally { await uploader.markClosed(); }
+      },
     };
   };
 }

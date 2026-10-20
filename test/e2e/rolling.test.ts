@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { UploadGate } from "@drec/core";
@@ -57,7 +58,15 @@ async function recordSession(u: RollingUploader, startMs: number, segments: numb
     if (i < segments - 1) await u.flush({ recordingActive: true });
   }
   await u.flush({ recordingActive: false });
+  await u.markClosed(); // what the session-end hook does after the final flush
   return files;
+}
+
+/** The test process stays alive, so a "killed" owner is simulated by pointing the sidecar at an exited pid. */
+function simulateOwnerExit(base: string): void {
+  const f = join(dir(), `${base}.rolling.json`);
+  const deadPid = spawnSync(process.execPath, ["-e", ""]).pid;
+  writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, "utf-8")), ownerPid: deadPid }));
 }
 
 describe("e2e: rolling(边录边传)", () => {
@@ -178,7 +187,7 @@ describe("e2e: rolling(边录边传)", () => {
   // ── #57 R1 主控止血:建稿中被杀、无稿件号 → 主控绝不走常规整场管线(否则重复建稿),转人工 ──────
   // 注:这是「主控判定」收紧;录制端重启后接管孤立分段见 #46(上面的用例)。
   describe("建稿中被杀(#57 R1)", () => {
-    async function crashMidCreate(): Promise<{ base: string; files: string[] }> {
+    async function crashMidCreate(opts: { ownerAlive?: boolean } = {}): Promise<{ base: string; files: string[] }> {
       const start = pastStartMs(0, 10, 0);
       writeSidecars(start);
       // 建稿(create)永不返回 = 进程在「建稿中」被杀:意图标记已落盘,稿件号没有。
@@ -187,8 +196,18 @@ describe("e2e: rolling(边录边传)", () => {
       for (let i = 0; i < 2; i++) { const p = writeSegment(start, i); files.push(p); u.noteSegment(p); }
       void u.flush({ recordingActive: false });
       await new Promise((r) => setTimeout(r, 50));
+      if (!opts.ownerAlive) simulateOwnerExit(sessionBaseOf(ANCHOR, start));
       return { base: sessionBaseOf(ANCHOR, start), files };
     }
+
+    it("issue #309: create still in flight (owner alive, session not closed) -> master waits, no job, no manual", async () => {
+      s = await Scenario.create();
+      const { files } = await crashMidCreate({ ownerAlive: true });
+      await s.reconcile();
+      expect(s.ledger.listKeys(), "must not judge a session its owner is still uploading").toHaveLength(0);
+      expect(s.fake.draftCount).toBe(0);
+      for (const f of files) expect(existsSync(f)).toBe(true);
+    });
 
     it("无稿件号 + uploading=create → 主控转人工,不建稿、不 pull、不删源、通知", async () => {
       s = await Scenario.create();

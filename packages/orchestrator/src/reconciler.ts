@@ -631,6 +631,14 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
         if (b.members.length === 0) continue;
         // 仍有成员在录制 → 本轮跳过(不建 job、不合并残片),待其录完的后续轮再处理。
         if (b.members.some((m) => stillRecording.has(`${m.workerId}:${m.rec.roomSlug}`))) continue;
+        // Issue #309: recording ended but the node's rolling uploader still owns a session of this broadcast
+        // (waiting for the upload slot or uploading the tail). Judging now would read its write-ahead intent or
+        // unsent tail as "interrupted" and park the broadcast in needs_manual; wait for the owner instead.
+        const ownerBusy = b.members.filter((m) => m.rec.rolling?.active === true);
+        if (ownerBusy.length > 0) {
+          console.info(`[reconciler] ${b.streamKey} 边录边传进程仍在处理会话(${ownerBusy.map((m) => m.workerId).join(",")}),本轮跳过`);
+          continue;
+        }
 
         const cfg = cfgByKey.get(b.streamKey) ?? this.pipelineDeps.cfg;
         // 断流重连窗口:最后一段结束还没超过 reconnectWindowMs,先不处理(可能马上重连并成同一场)。

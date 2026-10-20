@@ -53,6 +53,12 @@ export interface NodeRollingProgress {
   confirmed?: number[];
   ambiguous?: number[];
   uploading?: { index: number; kind: "create" | "append" };
+  /**
+   * Issue #309: the recorder process that owns this session is still alive and has not closed the session yet
+   * (it may be waiting for the upload slot or uploading the tail). Computed on the node at scan time. Absent on
+   * old bundles / legacy sidecars = unknown, handled exactly as before.
+   */
+  active?: boolean;
 }
 export interface NodeInventory {
   workerId: string;
