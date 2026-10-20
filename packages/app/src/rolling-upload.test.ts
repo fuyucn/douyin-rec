@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  RollingUploader, looksLikeRecordProcess, resolveRollingUploadMeta, resolveStreamUploadMeta,
+  RollingUploader, looksLikeRecordProcess, makeRollingUploadHookFactory, resolveRollingUploadMeta, resolveStreamUploadMeta,
   resolveStreamUploadTitle, resolveStreamPartTitle,
 } from "./rolling-upload.js";
 import { UploadGate, rollingUploadSingleNode } from "@drec/core";
@@ -677,6 +677,61 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
     expect(r.ambiguous).toEqual([]);   // 槽忙是暂时状态,不是「结果不确定」—— 记了会让后续段永久被头阻塞挡回
   });
 
+  it("issue #309: slot busy on create leaves no create intent; a restarted uploader then creates instead of going manual", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    const busy = fakeSlot({ v: true }, { failAcquire: true });
+    const up = vi.fn(async () => FAKE_BV);
+    const u1 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: busy.slot as never });
+    for (const p of paths) u1.noteSegment(p);
+    await u1.flush({ recordingActive: true });
+    expect(up).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(sidecarPath(dir), "utf-8")).uploading).toBeUndefined();
+
+    // Next process reads the sidecar: no dangling intent, so nothing is marked ambiguous and the create goes out.
+    const free = fakeSlot({ v: false });
+    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: free.slot as never });
+    for (const p of paths) u2.noteSegment(p);
+    const r = await u2.flush({ recordingActive: true });
+    expect(r.ambiguous).toEqual([]);
+    expect(r.uploaded).toEqual([0]);
+    expect(up).toHaveBeenCalledTimes(1);
+  });
+
+  it("issue #309: slot busy on append clears the append intent so recovery does not need a part-count read", async () => {
+    const { dir, paths } = mkSession(segNames(3));
+    let denyNext = false;
+    const slot = {
+      index: null as number | null,
+      acquire: async (): Promise<boolean> => !denyNext,
+      release: () => {},
+      touch: () => {},
+      close: () => {},
+    };
+    const up = vi.fn(async () => { denyNext = true; return FAKE_BV; }); // slot goes busy right after the create
+    const ap = vi.fn(async () => {});
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: slot as never });
+    for (const p of paths) u.noteSegment(p);
+    const r = await u.flush({ recordingActive: true });
+    expect(r.uploaded).toEqual([0]);
+    expect(ap).not.toHaveBeenCalled();
+    const saved = JSON.parse(readFileSync(sidecarPath(dir), "utf-8"));
+    expect(saved.uploading).toBeUndefined();
+    expect(saved.ambiguous ?? []).toEqual([]);
+  });
+
+  it("issue #309: markClosed stamps closedAt after the session-end flush; a busy slot keeps the session open until then", async () => {
+    const { dir, paths } = mkSession(segNames(1));
+    const busy = fakeSlot({ v: true }, { failAcquire: true });
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: vi.fn(async () => FAKE_BV), appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: busy.slot as never });
+    u.noteSegment(paths[0]!);
+    await u.flush({ recordingActive: false });
+    expect(JSON.parse(readFileSync(sidecarPath(dir), "utf-8")).closedAt).toBeUndefined();
+    await u.markClosed();
+    const saved = JSON.parse(readFileSync(sidecarPath(dir), "utf-8"));
+    expect(saved.closedAt).toBe(NOW_MS);
+    expect(saved.ownerPid).toBe(process.pid);
+  });
+
   it("不注入槽时不加锁(旧行为不变)", async () => {
     const { paths } = mkSession(segNames(1));
     const up = vi.fn(async () => FAKE_BV);
@@ -685,6 +740,22 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
     const r = await u.flush({ recordingActive: false });
     expect(r.uploaded).toEqual([0]);
     expect(up).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("session-end hook closes the session (issue #309)", () => {
+  it("onSessionEnd flushes, then stamps closedAt even when the slot stayed busy", async () => {
+    const { dir, paths } = mkSession(segNames(1));
+    const hook = makeRollingUploadHookFactory({
+      enabled: true, platform: "douyin", roomSlug: "123", gate: new FakeGate(), now: futureNow, minSegmentSec: 0,
+      removeFile: noRemove, uploadPlainRaw: vi.fn(async () => FAKE_BV) as never, appendGroupRaw: noopAppend as never,
+      slot: { index: null, acquire: async () => false, release: () => {}, touch: () => {}, close: () => {} } as never,
+    })!();
+    hook.onSegment(paths[0]!);
+    await hook.onSessionEnd();
+    const saved = JSON.parse(readFileSync(sidecarPath(dir), "utf-8"));
+    expect(saved.closedAt).toBe(NOW_MS);
+    expect(saved.uploading).toBeUndefined();
   });
 });
 
@@ -920,6 +991,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect(names(append)).toEqual([`${A_BASE}_001.ts`, `${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
     expect(readA(f)).toMatchObject({ confirmed: [0, 1, 2], ownerPid: B_PID });
     expect(readA(f).uploading).toBeUndefined();
+    expect(readA(f).closedAt, "a finished takeover closes A so the master stops waiting on B's live pid").toBe(f.bStartMs + 3_600_000);
     const b = JSON.parse(readFileSync(path.join(f.dir, `${B_BASE}.rolling.json`), "utf-8"));
     // Inherited after the takeover: A's 3 confirmed parts, and the owner/heartbeat are stamped on every persist.
     expect(b).toMatchObject({ bv: FAKE_BV, inheritedParts: 3, inheritedFrom: A_BASE, confirmed: [0], ownerPid: B_PID });
@@ -1002,6 +1074,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect(r1.uploaded).toEqual([]);
     expect(u.ambiguousIndices).toEqual([]); // waiting is not ambiguous
     expect(readA(f)).toMatchObject({ confirmed: [0], ownerPid: DEAD_PID }); // untouched
+    expect(readA(f).closedAt).toBeUndefined();
     expect(logs.filter((m) => m.includes("暂不接管"))).toHaveLength(1);
     alive = false;
     await u.flush({ recordingActive: false });
@@ -1084,6 +1157,34 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     await u.flush({ recordingActive: false });
     expect(names(append)).toEqual([`${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
     expect(readA(f)).toMatchObject({ confirmed: [0, 2] });
+  });
+
+  it("#317 review: slot-starved A never created (no BV, unsent segments): B fails closed, nobody creates from A", async () => {
+    const f = setup({ confirmedA: [], sidecar: { bv: undefined, closedAt: A_LAST_MS } });
+    const plain = vi.fn(async () => FAKE_BV);
+    const append = vi.fn(async () => {});
+    const u = uploaderB(f, { append, plain });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    const r = await u.flush({ recordingActive: false });
+    expect(plain).not.toHaveBeenCalled(); // neither a peer create from A0 nor a B-only submission that skips A
+    expect(append).not.toHaveBeenCalled();
+    expect(r.uploaded).toEqual([]);
+    expect(u.ambiguousIndices).toEqual([0]);
+    expect(readA(f).bv).toBeUndefined();
+  });
+
+  it("#317 review: BV-less A is judged from its video end, not from a late closedAt: 70 min after the video → B does not take it over", async () => {
+    // A's last segment mtime is BASE_MS + 120s; it was closed 30 min later (slot wait at session end).
+    const f = setup({ confirmedA: [], bGapMin: 70, sidecar: { bv: undefined, closedAt: A_LAST_MS + 30 * 60_000, updatedAt: A_LAST_MS + 30 * 60_000, heartbeatAt: A_LAST_MS + 30 * 60_000 } });
+    const plain = vi.fn(async () => ["B", "V", "1second"].join(""));
+    const append = vi.fn(async () => {});
+    const u = uploaderB(f, { append, plain, count: async () => 1 });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    // B creates only its own content; A's segments are left for the master's normal pipeline.
+    expect((plain.mock.calls as unknown as Array<[{ plain: { video: string } }]>).map((c) => path.basename(c[0].plain.video))).toEqual([`${B_BASE}_000.ts`]);
+    expect(append).not.toHaveBeenCalled();
+    expect(readA(f).bv).toBeUndefined();
   });
 
   it("leftovers still pending after the takeover (upload slot busy): B keeps waiting instead of overtaking", async () => {

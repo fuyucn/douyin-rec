@@ -109,6 +109,24 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
+  it("issue #309: a node whose rolling uploader still owns the session defers the broadcast instead of judging it", async () => {
+    const ledger = freshLedger();
+    const pending = makeRec({ tsFiles: ["/remote/a_000.ts"], rolling: { uploading: { index: 0, kind: "create" }, confirmed: [], active: true } });
+    const t1 = makeTransport("node-1", [pending]);
+    const transports = new Map([["node-1", t1]]);
+    const runPipeline = vi.fn(async () => ({ state: "done" as const, bv: "BV_TEST" }));
+    const base = { platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports), runPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0 };
+    await new Reconciler(base).reconcileAll();
+    expect(runPipeline).not.toHaveBeenCalled();
+    expect(ledger.listKeys()).toHaveLength(0); // no job row, so nothing lands in needs_manual
+
+    // Owner closed the session (or is gone): judged as before.
+    vi.mocked(t1.listInventory).mockResolvedValue({ workerId: "node-1", recordings: [{ ...pending, rolling: { ...pending.rolling, active: false } }] });
+    await new Reconciler(base).reconcileAll();
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    ledger.close();
+  });
+
   it("T9b:每轮 reconcileAll 轮询收尾后转格式的回执;节点回滚 → 标注并停止轮询,job 终态不变", async () => {
     const ledger = freshLedger();
     ledger.upsertPending("douyin:test-room:2026-06-22");
@@ -1050,6 +1068,14 @@ describe("Reconciler.stopJob / runNow", () => {
     expect(r).toMatchObject({ ok: false, code: 404 });
     expect(spyRunPipeline).not.toHaveBeenCalled();
     expect(ledger.get(key)).toBeNull();
+    ledger.close();
+  });
+
+  it("runNow: a node's rolling uploader still owns the session → forceable 409 (issue #309)", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup([makeRec({ rolling: { confirmed: [], active: true } })]);
+    const r = await reconciler.runNow({ streamKey: key, wait: true });
+    expect(r).toMatchObject({ ok: false, code: 409, forceable: true });
+    expect(spyRunPipeline).not.toHaveBeenCalled();
     ledger.close();
   });
 

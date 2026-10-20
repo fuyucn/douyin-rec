@@ -16,6 +16,10 @@
 ## 进行中
 - [~] **T-88 任务敏感字段接口脱敏 + 回调地址不进 argv(issue [#47](https://github.com/fuyucn/douyin-rec/issues/47))**
   **做什么**：任务/房间 DTO 的 登录态、回调地址经 core `redactTaskSecrets` 脱敏(只给 是否已设置标记);编辑表单留空=不改;子进程 回调地址走 0600 文件传入。**为什么**：接口明文返回敏感字段、`ps` 可见回调地址。**验收**：list/detail/create/update/room 响应无明文;PATCH 缺省保留;argv 不含回调地址;变异检查 FAIL→PASS。
+- [~] **T-90 边录边传:槽忙时不留建稿/追加意图,避免被误判为「建稿中断」转人工（issue [#309](https://github.com/fuyucn/douyin-rec/issues/309)）**
+  — 2026-10-20 认领(用户授权),分支 `codex/issue-309-rolling-slot-busy-intent`。**做什么**：上传槽等待超时(biliup 未启动)时清掉已落盘的 create/append 意图。**为什么**：意图先于抢槽落盘,槽忙只 break 不清,下一个进程读到 create 意图即转人工、无稿件号。**验收**：槽忙后 sidecar 无 `uploading`;重启后的 uploader 不记 ambiguous 并正常建稿;变异检查 FAIL→PASS。不改「绝不自动重建稿」规则。
+- [~] **T-91 边录边传:收尾槽忙有界重试 + 分P数读不到时延迟复核（issue [#310](https://github.com/fuyucn/douyin-rec/issues/310)）**
+  — 2026-10-20 认领(用户授权),分支 `codex/issue-310-rolling-confirm-retry`(叠在 T-90 之上)。**做什么**：会话收尾 flush 遇槽忙时有界等待重试;append 失败后分P数读不到(null)时延迟重读再判定,仍读不到才 ambiguous。**为什么**：收尾 flush 一次性,槽忙即留下已封口段 → master 判「未确认分段」转人工;单次读不到即 ambiguous。**验收**：收尾槽忙后段被上传;null 计数在复核窗内恢复则不转人工;从不在无分P数证明时重试 append;变异检查 FAIL→PASS。
 - [~] **T-89 边录边传:后继会话接管前序会话的未确认分段（issue [#46](https://github.com/fuyucn/douyin-rec/issues/46)，#57 R2 的接管部分）**
   — 2026-10-20 认领(用户授权),分支 `codex/issue-46-rolling-takeover`,PR 待开(base `feat/hub-optimization`)。
   **做什么**：重启/断流重连后,后继会话先结算前序会话悬空的 `uploading` 意图(分P数回读),再把前序剩余封口段按段号 append 并确认后删源,最后才传自己的段;sidecar 记 owner pid + 心跳,owner 存活则等待(规避 PR #72 的接管竞态)。

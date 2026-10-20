@@ -67,17 +67,47 @@ function readSession(dir: string, base: string): {
  * 存在且带 bv = 该会话已由录制节点自己建稿 → master **不得重复建稿**(否则重复投稿)。
  * 缺失/损坏 → undefined(老录像/未启用;不抛)。
  */
+/**
+ * Issue #309: an owner that is still alive and has not closed its session is still working on it (slot wait or
+ * tail upload). Bounded by the last sidecar write, so a stale pid (reused by another process) stops counting.
+ */
+export const ROLLING_ACTIVE_MAX_QUIET_MS = 3 * 3600_000;
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException)?.code === "EPERM"; }
+}
+
+export function rollingOwnerActive(
+  d: { ownerPid?: unknown; closedAt?: unknown; heartbeatAt?: unknown; updatedAt?: unknown },
+  nowMs: number,
+  isAlive: (pid: number) => boolean = pidAlive,
+): boolean | undefined {
+  const pid = d.ownerPid;
+  // Legacy sidecar without an owner pid: unknown, the caller keeps its old behaviour.
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return undefined;
+  if (typeof d.closedAt === "number") return false;
+  const last = Math.max(
+    typeof d.heartbeatAt === "number" ? d.heartbeatAt : 0,
+    typeof d.updatedAt === "number" ? d.updatedAt : 0,
+  );
+  if (nowMs - last > ROLLING_ACTIVE_MAX_QUIET_MS) return false;
+  return isAlive(pid);
+}
+
 function readRolling(dir: string, base: string): NodeRollingProgress | undefined {
   try {
     const d = JSON.parse(readFileSync(join(dir, `${base}.rolling.json`), "utf-8")) as
-      { bv?: string; confirmed?: unknown; ambiguous?: unknown; uploading?: { index?: unknown; kind?: unknown } | null };
+      { bv?: string; confirmed?: unknown; ambiguous?: unknown; uploading?: { index?: unknown; kind?: unknown } | null;
+        ownerPid?: unknown; closedAt?: unknown; heartbeatAt?: unknown; updatedAt?: unknown };
     const u = d.uploading;
     // 意图标记原样透传给主控(主控据此区分「建稿中被杀」);形状不合法 → 当作无(不抛)。
     const uploading: NodeRollingProgress["uploading"] = u && typeof u.index === "number" && (u.kind === "create" || u.kind === "append")
       ? { index: u.index, kind: u.kind as "create" | "append" }
       : undefined;
+    const active = rollingOwnerActive(d, Date.now());
     return {
       uploading,
+      ...(active !== undefined ? { active } : {}),
       bv: typeof d.bv === "string" && d.bv ? d.bv : undefined,
       confirmed: Array.isArray(d.confirmed) ? d.confirmed.filter((n): n is number => typeof n === "number") : undefined,
       ambiguous: Array.isArray(d.ambiguous) ? d.ambiguous.filter((n): n is number => typeof n === "number") : undefined,

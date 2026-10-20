@@ -119,6 +119,12 @@ interface RollingState {
    */
   ownerPid?: number;
   heartbeatAt?: number;
+  /**
+   * Issue #309: set once the owner finished this session (session-end flush returned, or a successor finished
+   * taking it over). Absent while the owner may still upload it, so the master can tell "owner still working
+   * on it" (wait) from "owner gone mid-upload" (manual). Sidecars written before this field existed never have it.
+   */
+  closedAt?: number;
   updatedAt: number;
 }
 
@@ -211,8 +217,17 @@ function writeStateFile(dir: string, state: RollingState, pid: number, nowMs: nu
   }
 }
 
+/** True when `s` still has an unconfirmed, non-empty segment file on disk. */
+function hasUnsentContent(s: RollingState): boolean {
+  const confirmed = new Set(s.confirmed);
+  return (s.segments ?? []).some((x) => {
+    if (confirmed.has(x.index)) return false;
+    try { return statSync(x.path).size > 0; } catch { return false; }
+  });
+}
+
 /** A same-room sidecar found next to this session that started earlier. */
-interface PredecessorCand { base: string; s: RollingState; start: number; last: number }
+interface PredecessorCand { base: string; s: RollingState; start: number; last: number; lastMedia: number }
 
 export interface RollingUploaderOpts {
   /** 房间身份(删源证据用)。 */
@@ -662,10 +677,12 @@ export class RollingUploader {
         ctx: { sessionBase: base, startMs, timeZone: this.o.timeZone ?? processTimeZone() },
       });
       // WAL:先落「建稿中」意图,再真正建稿。崩溃后据此转人工,绝不自动重建稿(重复投稿不可逆)。
-      this.state = { ...this.state, uploading: { index: seg.index, kind: "create" }, updatedAt: this.now() };
-      if (!this.persist()) throw new Error("sidecar 写失败(建稿意图),中止上传并保留源");
+      // Issue #309: written only once the slot and the gate let biliup start, so a wait never leaves an intent.
       const up = this.o.uploadPlainRaw ?? uploadPlain;
-      const bv = await this.withSlot(() => this.gate.run(this.accountKey, () => up({ plain: { ...meta, video: seg.path, title } })));
+      const bv = await this.withSlot(() => this.gate.run(this.accountKey, () => {
+        this.writeIntent(seg.index, "create");
+        return up({ plain: { ...meta, video: seg.path, title } });
+      }));
       // 把「当段已确认」并入同一次写:建稿成功即确认段 0,防止 bv 与 confirmed 分两次写之间崩溃。
       confirmed.add(seg.index);
       this.state = { ...this.state, bv, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
@@ -675,18 +692,18 @@ export class RollingUploader {
     }
     const bv = this.state.bv;
     // WAL:先落「追加第 index 段中」意图。崩溃后凭分 P 数核对是否已提交(见 recoverDanglingUpload)。
-    this.state = { ...this.state, uploading: { index: seg.index, kind: "append" }, updatedAt: this.now() };
-    if (!this.persist()) throw new Error("sidecar 写失败(append 意图),中止上传并保留源");
+    // Written right before biliup starts (issue #309), same as the create intent.
     const ap = this.o.appendGroupRaw ?? appendGroup;
-    await this.withSlot(() => this.gate.run(this.accountKey, () =>
-      ap({
+    await this.withSlot(() => this.gate.run(this.accountKey, () => {
+      this.writeIntent(seg.index, "append");
+      return ap({
         ...meta,
         bv,
         files: [seg.path],
         // 幂等核对:失败后重查分 P 数,变多 = 其实已成功;查不到 → 抛 ambiguous 标记转人工。
         countParts: () => this.countPartsInner(bv, cookies),
-      }),
-    ));
+      });
+    }));
     // 与建稿同口径:确认并入同一次写,防止 append 成功后、补 confirmed 前崩溃导致重复 append。
     confirmed.add(seg.index);
     this.state = { ...this.state, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
@@ -733,19 +750,26 @@ export class RollingUploader {
         : typeof s.streamKey === "string" && s.streamKey.startsWith(`${this.o.room.platform}:${this.o.room.roomSlug}:`);
       if (!sameRoom) continue;
       const num = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) ? n : 0);
-      let last = num(s.updatedAt);
+      let lastMedia = 0;
       for (const seg of s.segments ?? []) {
-        try { last = Math.max(last, statSync(seg.path).mtimeMs); } catch { /* segment already deleted */ }
+        try { lastMedia = Math.max(lastMedia, statSync(seg.path).mtimeMs); } catch { /* segment already deleted */ }
       }
+      const last = Math.max(num(s.updatedAt), lastMedia);
       const start = num(s.startMs) || num(s.updatedAt);
       if (start >= startMs) continue; // not a predecessor
-      cands.push({ base, s, start, last });
+      cands.push({ base, s, start, last, lastMedia });
     }
-    // Sessions that never created or intended a submission have nothing to continue.
-    const meaningful = cands.filter((c) => c.s.bv || c.s.uploading || (c.s.ambiguous?.length ?? 0) > 0);
+    // Sessions that never created or intended a submission have nothing to continue, unless they still hold
+    // non-empty unconfirmed segments: a slot-starved session that never got to create (issue #309 review). Its
+    // content would have to lead the submission; this session fails closed instead of creating one without it.
+    const meaningful = cands.filter((c) => c.s.bv || c.s.uploading || (c.s.ambiguous?.length ?? 0) > 0 || hasUnsentContent(c.s));
     if (meaningful.length === 0) return { kind: "none" };
     const prev = meaningful.reduce((a, b) => (b.start > a.start ? b : a));
-    if (!isSameBroadcastGap(startMs - prev.last)) return { kind: "none" };
+    // A BV-less predecessor is an ordinary upload candidate for the master, which measures its window from the
+    // video end. Measure from the same clock (segment mtimes), not from sidecar writes (`closedAt` can land up to
+    // the slot wait later); otherwise the master may upload it while this session also takes it over (#317 review).
+    const ref = !prev.s.bv && prev.lastMedia > 0 ? prev.lastMedia : prev.last;
+    if (!isSameBroadcastGap(startMs - ref)) return { kind: "none" };
     return { kind: "found", prev };
   }
 
@@ -794,7 +818,9 @@ export class RollingUploader {
     const found = this.locatePredecessor();
     if (found.kind !== "found") return "proceed";
     const { prev } = found;
-    // No BV / ambiguous segments: keep the existing fail-closed behaviour (findPredecessor reports uncertain).
+    // No BV / ambiguous segments: fail closed (findPredecessor reports uncertain). A BV-less predecessor is never
+    // taken over: it is an ordinary upload candidate for the master (run-now skips the reconnect window), so a
+    // node-side create from its segments could duplicate a manuscript the master uploads (#317 review rounds 2-3).
     if (!prev.s.bv || (prev.s.ambiguous?.length ?? 0) > 0) return "proceed";
     const confirmed = new Set(prev.s.confirmed);
     const exists = (f: string): boolean => { try { statSync(f); return true; } catch { return false; } };
@@ -833,6 +859,8 @@ export class RollingUploader {
     await peer.flush({ recordingActive: false });
     if (peer.stateUntrusted) return this.waitForPredecessor(`${prev.base} 的 sidecar 写失败`);
     if (peer.hasUploadablePending()) return this.waitForPredecessor(`${prev.base} 仍有分段待上传(槽忙/未完成)`);
+    // The claim above stamped this live pid as owner; close it so the master does not keep waiting on it.
+    await peer.markClosed();
     return "proceed";
   }
 
@@ -844,13 +872,38 @@ export class RollingUploader {
   }
 
   /**
+   * Stamp the session as finished by its owner (issue #309). Queued on the serial chain so it lands after the
+   * session-end flush; an intent or leftover segment may remain (they are reported as-is, not resolved here).
+   */
+  markClosed(): Promise<void> {
+    const run = this.chain.then(() => this.stampClosed(), () => this.stampClosed());
+    this.chain = run.catch(() => undefined);
+    return run;
+  }
+
+  private stampClosed(): void {
+    if (!this.state.sessionBase || this.state.closedAt) return;
+    this.state = { ...this.state, closedAt: this.now(), updatedAt: this.now() };
+    this.persist();
+  }
+
+  /** Persist the write-ahead intent immediately before biliup starts; throws (source kept) when it cannot be written. */
+  private writeIntent(index: number, kind: "create" | "append"): void {
+    this.state = { ...this.state, uploading: { index, kind }, updatedAt: this.now() };
+    if (!this.persist()) throw new Error(`sidecar 写失败(${kind === "create" ? "建稿" : "append"} 意图),中止上传并保留源`);
+  }
+
+  /**
    * One biliup per node (plan 038 PR4): take the node-wide slot around a single part upload and always give
    * it back. Waiting is not an error — the segment stays on disk and the next flush retries.
    */
   private async withSlot<T>(fn: () => Promise<T>): Promise<T> {
     if (!this.slot) return fn();
     const ok = await this.slot.acquire("rolling", this.o.slotWaitMs ?? 30 * 60_000);
-    if (!ok) throw new Error(`${SLOT_BUSY_MARKER} within the wait limit; keeping the segment for the next try`);
+    if (!ok) {
+      // Nothing was started and no intent was written (it is written inside `fn`, issue #309).
+      throw new Error(`${SLOT_BUSY_MARKER} within the wait limit; keeping the segment for the next try`);
+    }
     try { return await fn(); } finally { this.slot.release(); }
   }
 
@@ -1123,7 +1176,10 @@ export function makeRollingUploadHookFactory(o: {
         // 不阻塞录制;串行链保证同一会话不并发上传。失败/不确定在 uploader 内部转人工(保留源)。
         void uploader.flush({ recordingActive: true }).catch(() => undefined);
       },
-      onSessionEnd: (): Promise<void> => uploader.flush({ recordingActive: false }).then(() => undefined),
+      onSessionEnd: async (): Promise<void> => {
+        try { await uploader.flush({ recordingActive: false }); }
+        finally { await uploader.markClosed(); }
+      },
     };
   };
 }
