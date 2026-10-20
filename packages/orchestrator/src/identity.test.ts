@@ -121,6 +121,23 @@ describe("clusterBroadcasts", () => {
   });
 });
 
+describe("clusterBroadcasts same-broadcast gap boundary (issue #292, default tolerance = 60 min)", () => {
+  const t0 = new Date("2026-08-14T08:00:00Z").getTime();
+  const two = (gapMin: number) => clusterBroadcasts([{ workerId: "w", recordings: [
+    rec({ sessionBase: "a", startMs: t0, endMs: t0 + 30 * 60_000 }),
+    rec({ sessionBase: "b", startMs: t0 + (30 + gapMin) * 60_000, endMs: t0 + (60 + gapMin) * 60_000 }),
+  ] }]);
+  it("gap 59 min and exactly 60 min → one broadcast", () => {
+    expect(two(59)).toHaveLength(1);
+    expect(two(60)).toHaveLength(1);
+  });
+  it("gap 61 min → two broadcasts with distinct keys", () => {
+    const out = two(61);
+    expect(out).toHaveLength(2);
+    expect(out[1]!.streamKey).toMatch(/_\d{4}$/);
+  });
+});
+
 describe("clusterBroadcasts streamKey 日期按设置时区(issue #155)", () => {
   const prevTZ = process.env.TZ;
   afterEach(() => {

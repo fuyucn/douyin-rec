@@ -65,8 +65,12 @@ interface Transport {
 1. **本地即时触发**：如果 master 的 `local` worker 正在录该房间，本机 `recordEnd` 可在结束后即时启动对账；`recordReconnect` 不代表整场结束。
 2. **远端与恢复触发**：远端 worker 的 `recordEnd` 事件不会直接作为 master 本地事件转发。master 通过周期 `reconcileAll` 扫描已收播录像，并在 settle 确认成员已结束后处理。因此远端单节点录制的最终处理时机受 `reconcileIntervalMs` 影响；master 离线期间录制的内容也会在恢复后扫描。
 
-**收播后的重连窗**：一场结束后不足 `reconnectWindowMs`（默认 10 分钟）时，对账会跳过该场，
-避免同一房间短时间内的第二场撞上同一个 `streamKey`，也避免边录边合并残片。测试时可用
+**收播后的重连窗**：一场结束后不足 `reconnectWindowMs`（默认 60 分钟，即 core 的 `SAME_BROADCAST_GAP_MS`）时，对账会跳过该场，
+避免同一房间短时间内的第二场撞上同一个 `streamKey`，也避免边录边合并残片。聚类用同一个常量：
+同房间相邻会话间隔 **≤ 60 分钟 = 同一场**（断流重开），**> 60 分钟 = 新场次**（`_HHMM` key）；
+同日 `_HHMM` 派生 job 若与已有稿件的场次时间上无法证明相隔 > 60 分钟，自动路径转 `needs_manual`、
+重跑返回 409（不自动建第二稿）。边录边传会话删段后，扫描起点固定取会话边车 `startMs`（或会话名时间戳），
+不随剩余分段漂移；段全删时 end 取 `.rolling.json` 的 `updatedAt`，不再是零宽区间。测试时可用
 Hub 房间页的「立即执行」跳过等待。
 
 ## 控制台如何显示远端录制状态

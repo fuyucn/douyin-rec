@@ -1,4 +1,4 @@
-import { abortJob, isJobAbort, isJobLive, resolveDiskMinGB, USER_STOP } from "@drec/core";
+import { abortJob, isJobAbort, isJobLive, resolveDiskMinGB, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
 import type { Transport, NodeInventory } from "./transport.js";
 import type { UnclaimedSegment } from "./unclaimed.js";
 import type { JobState, SyncLedger } from "./ledger.js";
@@ -6,7 +6,7 @@ import type { PipelineDeps, PipelineCfg } from "./pipeline.js";
 import { runPipeline } from "./pipeline.js";
 import { pollFollowups } from "./finalize-format.js";
 import { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
-import { runNowConflict } from "./run-now-guard.js";
+import { isDerivedKey, runNowConflict } from "./run-now-guard.js";
 import { DEFAULT_NODE_UPLOAD, type NodeUploadConfig } from "./node-upload-config.js";
 import { completeFromDispatch } from "./node-upload-complete.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
@@ -103,7 +103,7 @@ export type InventoryResult =
   | { status: "unreachable"; workerId: string; recordings: []; reason: string };
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_STALE_MS = 600_000;
-const DEFAULT_RECONNECT_WINDOW_MS = 10 * 60_000;
+const DEFAULT_RECONNECT_WINDOW_MS = SAME_BROADCAST_GAP_MS;
 const DEFAULT_CLEANUP_BACKFILL_THROTTLE_MS = 15 * 60_000;
 const DEFAULT_MAX_CONCURRENT_PIPELINES = 2;
 const DEFAULT_SLEEP = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -677,6 +677,26 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
           continue;
         }
 
+        // A derived `_HHMM` key whose same-day family already has a submission (or a queued upload) may be the same
+        // broadcast under a drifted start (issue #292). Never auto-run it: park it for a human instead.
+        if (!job && isDerivedKey(b.streamKey)) {
+          const conflict = await runNowConflict(
+            { ledger: this.ledger, transports },
+            b.streamKey,
+            { force: false, self: { startMs: b.startMs, endMs: Math.max(...b.members.map((m) => m.rec.endMs)) } },
+          );
+          if (conflict) {
+            this.ledger.upsertPending(b.streamKey, b.startMs);
+            this.ledger.setState(b.streamKey, "needs_manual", { error: `same-broadcast guard: ${conflict}` });
+            this.notify?.({
+              kind: "error",
+              stage: "同步",
+              message: `${b.streamKey} may be the same broadcast as an existing submission; parked as needs_manual instead of creating a second draft. ${conflict.slice(0, 200)}`,
+            });
+            continue;
+          }
+        }
+
         const { isNew } = this.ledger.upsertPending(b.streamKey, b.startMs);
 
         // 新建 job(同一场只一次)→ 通知「hub 任务开始」(站内 toast + 全局 webhook)。
@@ -790,7 +810,8 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     // 409 by the original (suffix-free) key: any earlier BV or an unfinished queue row for this broadcast means a
     // rerun could post a second draft. Only an explicit `force` (after the old draft was deleted) passes.
     const conflict = await runNowConflict(
-      { ledger: this.ledger, transports, log: (m) => console.info(m) }, baseKey, { force: opts.force === true },
+      { ledger: this.ledger, transports, log: (m) => console.info(m) }, baseKey,
+      { force: opts.force === true, self: { startMs: b.startMs, endMs: Math.max(...members.map((m) => m.rec.endMs)) } },
     );
     if (conflict) return { ok: false, error: conflict, code: 409, forceable: true };
 

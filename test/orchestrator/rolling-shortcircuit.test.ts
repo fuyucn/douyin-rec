@@ -58,3 +58,15 @@ describe("tryRollingShortCircuit × 烧录配置与起录时不一致(issue #52)
     expect(r).toEqual({ state: "needs_manual", bv: "BV1" });
   });
 });
+
+describe("tryRollingShortCircuit records the broadcast span (issue #292)", () => {
+  it("done path persists the min start / max end so the same-broadcast guard can compare spans", () => {
+    const m = (startMs: number, endMs: number) =>
+      ({ workerId: "w1", rec: { tsFiles: [], startMs, endMs, durationSec: 10, rolling: { bv: "BV1", confirmed: [0], ambiguous: [] } } }) as never;
+    const { r } = run(undefined, [m(1000, 2000), m(500, 1500)]);
+    expect(r).toEqual({ state: "done", bv: "BV1" });
+    const c = ledger.getCandidates(KEY);
+    expect(c).toHaveLength(1);
+    expect([c[0]!.startMs, c[0]!.endMs, c[0]!.durationSec]).toEqual([500, 2000, 20]);
+  });
+});

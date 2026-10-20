@@ -176,7 +176,7 @@ export function xmlKeepRule(side: "node" | "stage", stageAfterDone: boolean): bo
 
 export interface PipelineCfg {
   cleanMaxGapSec: number;
-  /** 断流重连合并窗(ms):结束距现在不足该窗的场暂不处理;聚类容差同窗。缺省 reconciler 默认 10 分钟。 */
+  /** 断流重连合并窗(ms):结束距现在不足该窗的场暂不处理;聚类容差同窗。缺省 core `SAME_BROADCAST_GAP_MS`(60 分钟)。 */
   reconnectWindowMs?: number;
   /**
    * **磁盘水位闸门阈值(GB)** —— 与 reconciler 的磁盘看门狗**同一个配置键 / 同一个默认值**
@@ -642,6 +642,27 @@ export function tryRollingShortCircuit(o: {
     const msg = `${streamKey} 该场按起录时配置收口,新配置(烧录)下一场生效`;
     jlog(`边录边传识别:当前规则烧录已开启,与起录时配置不一致 → ${msg}(仍按 rolling 收口 done,BV=${bv})`);
     o.notify({ kind: "error", stage: "边录边传", message: `${msg}(BV=${bv})` });
+  }
+  // Persist the broadcast's time span so the same-broadcast guard can later tell a genuinely new broadcast
+  // (gap > 60 min) from a drifted duplicate (issue #292). Rolling jobs return before selectWinner records any.
+  // The span is bookkeeping: a failure to record it must not block closing the job, but it is never silent.
+  try {
+    const span = new Map<string, { startMs: number; endMs: number; durationSec: number }>();
+    for (const m of rolled) {
+      const cur = span.get(m.workerId);
+      span.set(m.workerId, {
+        startMs: Math.min(cur?.startMs ?? Infinity, m.rec.startMs ?? 0),
+        endMs: Math.max(cur?.endMs ?? 0, m.rec.endMs ?? 0),
+        durationSec: (cur?.durationSec ?? 0) + (m.rec.durationSec ?? 0),
+      });
+    }
+    ledger.recordCandidates(
+      streamKey,
+      [...span].map(([workerId, v]) => ({ workerId, coverage: 1, totalGapSec: 0, ...v })),
+      rolled[0]!.workerId,
+    );
+  } catch (e) {
+    jlog(`边录边传识别:记录本场时间跨度失败(${String((e as Error)?.message ?? e).slice(0, 120)}),同场判定将按未知处理`);
   }
   ledger.setBv(streamKey, bv);
   ledger.markDone(streamKey, bv);

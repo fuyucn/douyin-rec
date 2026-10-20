@@ -258,6 +258,39 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
+  it("issue #292: a drifted `_HHMM` job of a broadcast that already has a BV is parked as needs_manual, never run", async () => {
+    const ledger = freshLedger();
+    const baseKey = "douyin:drift-room:2026-08-14";
+    const start = new Date("2026-08-14T08:00:00Z").getTime();
+    ledger.upsertPending(baseKey, start);
+    ledger.markDone(baseKey, "BV_FIRST");
+    ledger.recordCandidates(baseKey,
+      [{ workerId: "node-1", coverage: 1, durationSec: 7200, startMs: start, endMs: start + 2 * 3_600_000, totalGapSec: 0 }], "node-1");
+    // Legacy drifted scan: same session, start moved 30 min forward, 30 min before the recorded end.
+    const rec = makeRec({
+      roomSlug: "drift-room", sessionBase: "主播名_2026-08-14_08-00-00",
+      startMs: start + 90 * 60_000, endMs: start + 2 * 3_600_000, durationSec: 1800,
+    });
+    const transports = new Map([["node-1", makeTransport("node-1", [rec])]]);
+    const runPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => ({ state: "done", bv: b.streamKey }),
+    );
+    const notify = vi.fn();
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      runPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0, notify,
+    });
+    await reconciler.reconcileAll();
+    expect(runPipeline).not.toHaveBeenCalled();
+    const derived = ledger.listKeys().map((k) => k.streamKey).filter((k) => k !== baseKey);
+    expect(derived).toHaveLength(1);
+    expect(derived[0]).toMatch(/^douyin:drift-room:2026-08-14_\d{4}$/);
+    expect(ledger.get(derived[0]!)?.state).toBe("needs_manual");
+    expect(ledger.get(derived[0]!)?.error).toMatch(/same-broadcast guard.*BV_FIRST/);
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
+    ledger.close();
+  });
+
   it("场景O(同日第二场): 已有 done 的 base job → 新场用 _HHMM 后缀,跑自己的 pipeline", async () => {
     const ledger = freshLedger();
     // 第一场已 done(记录 startMs,供聚类判断不是同一场)
@@ -266,6 +299,10 @@ describe("Reconciler", () => {
     const secondEnd = secondStart + 3_600_000;
     ledger.upsertPending("douyin:same-day-room:2026-08-14", firstStart);
     ledger.markDone("douyin:same-day-room:2026-08-14", "BV_FIRST");
+    // The first broadcast's real span is on record (every pipeline path writes it), so the same-broadcast guard
+    // can prove the 12:00 session is > 60 min later and therefore a genuinely new broadcast.
+    ledger.recordCandidates("douyin:same-day-room:2026-08-14",
+      [{ workerId: "node-1", coverage: 1, durationSec: 3600, startMs: firstStart, endMs: firstStart + 3_600_000, totalGapSec: 0 }], "node-1");
 
     const rec2 = makeRec({
       roomSlug: "same-day-room",

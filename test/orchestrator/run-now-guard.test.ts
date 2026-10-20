@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProcessReceipt } from "@drec/core";
 import { SyncLedger } from "../../packages/orchestrator/src/ledger.js";
-import { isSameBroadcast, runNowConflict } from "../../packages/orchestrator/src/run-now-guard.js";
+import { isDerivedKey, isSameBroadcast, runNowConflict } from "../../packages/orchestrator/src/run-now-guard.js";
 import { ProcUnsupported, type Transport } from "../../packages/orchestrator/src/transport.js";
 
 const BASE = "douyin:1:2026-10-17";
@@ -87,5 +87,66 @@ describe("runNowConflict", () => {
     const log = vi.fn();
     expect(await runNowConflict({ ledger: l, transports: node(async () => { throw new Error("x"); }), log }, BASE, { force: true })).toBeNull();
     expect(log).toHaveBeenCalledOnce();
+  });
+});
+
+describe("same-day derived `_HHMM` keys share the base key's guard (issue #292)", () => {
+  const HOUR = 3_600_000;
+  const t0 = Date.UTC(2026, 9, 17, 0, 0, 0);
+  const span = (l: SyncLedger, key: string, startMs: number, endMs: number): void =>
+    l.recordCandidates(key, [{ workerId: "n1", coverage: 1, durationSec: 1, startMs, endMs, totalGapSec: 0 }], "n1");
+  const withBv = (l: SyncLedger, key: string, bv: string): void => { order(l, key, false); l.setBv(key, bv); };
+
+  it("isDerivedKey only matches `_HHMM`", () => {
+    expect(isDerivedKey(`${BASE}_1325`)).toBe(true);
+    expect(isDerivedKey(`${BASE}_1325-2`)).toBe(true);
+    expect(isDerivedKey(BASE)).toBe(false);
+    expect(isDerivedKey(`${BASE}-2`)).toBe(false);
+  });
+
+  it("a derived job overlapping the base broadcast is blocked by the base BV (drifted start)", async () => {
+    const l = fresh();
+    withBv(l, BASE, "BV1ddddddddd"); // issue-guard: allow (fake BV fixture)
+    span(l, BASE, t0, t0 + 3 * HOUR);
+    const msg = await runNowConflict({ ledger: l, transports: new Map() }, `${BASE}_0130`,
+      { force: false, self: { startMs: t0 + 90 * 60_000, endMs: t0 + 3 * HOUR } });
+    expect(msg).toMatch(/already has BV/);
+    // force still passes (explicit human override).
+    expect(await runNowConflict({ ledger: l, transports: new Map() }, `${BASE}_0130`,
+      { force: true, self: { startMs: t0 + 90 * 60_000, endMs: t0 + 3 * HOUR } })).toBeNull();
+  });
+
+  it("the same applies to the rerun path (`_HHMM-N`'s base key) and in the other direction", async () => {
+    const l = fresh();
+    withBv(l, `${BASE}_0130`, "BV1eeeeeeeee"); // issue-guard: allow (fake BV fixture)
+    span(l, `${BASE}_0130`, t0 + 90 * 60_000, t0 + 3 * HOUR);
+    expect(await runNowConflict({ ledger: l, transports: new Map() }, BASE,
+      { force: false, self: { startMs: t0, endMs: t0 + 3 * HOUR } })).toMatch(/already has BV/);
+  });
+
+  it("boundary: gap 60 min is the same broadcast (blocked), 61 min is a new one (allowed)", async () => {
+    for (const [gapMin, blocked] of [[59, true], [60, true], [61, false]] as const) {
+      const l = fresh();
+      withBv(l, BASE, "BV1fffffffff"); // issue-guard: allow (fake BV fixture)
+      span(l, BASE, t0, t0 + 2 * HOUR);
+      const start = t0 + 2 * HOUR + gapMin * 60_000;
+      const msg = await runNowConflict({ ledger: l, transports: new Map() }, `${BASE}_1000`,
+        { force: false, self: { startMs: start, endMs: start + HOUR } });
+      expect(msg === null, `gap ${gapMin}`).toBe(!blocked);
+    }
+  });
+
+  it("unknown spans fail closed: a same-day sibling with a BV and no recorded span blocks", async () => {
+    const l = fresh();
+    withBv(l, BASE, "BV1ggggggggg"); // issue-guard: allow (fake BV fixture)
+    expect(await runNowConflict({ ledger: l, transports: new Map() }, `${BASE}_2200`,
+      { force: false, self: { startMs: t0 + 20 * HOUR, endMs: t0 + 21 * HOUR } })).toMatch(/already has BV/);
+  });
+
+  it("a different day is never a sibling", async () => {
+    const l = fresh();
+    withBv(l, "douyin:1:2026-10-16", "BV1hhhhhhhhh"); // issue-guard: allow (fake BV fixture)
+    expect(await runNowConflict({ ledger: l, transports: new Map() }, `${BASE}_0130`,
+      { force: false, self: { startMs: t0, endMs: t0 + HOUR } })).toBeNull();
   });
 });

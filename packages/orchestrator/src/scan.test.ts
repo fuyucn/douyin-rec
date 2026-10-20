@@ -1,8 +1,9 @@
 // packages/orchestrator/src/scan.test.ts
 import { describe, it, expect, onTestFinished, vi } from "vitest";
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { clusterBroadcasts } from "./identity.js";
 import { scanInventory, scanRecordings, scanRollingSessions, scanUnclaimedSegments } from "./scan.js";
 // 假稿件号用拼接构造:隐私检查会拦裸 BV 号字面量。
 const FAKE_BV = ["B", "V", "1fake"].join("");
@@ -507,5 +508,64 @@ describe("scanInventory (unclaimed converted segments, detection only)", () => {
     expect(inv).not.toHaveProperty("unclaimedTruncated");
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0][0])).toContain("boom");
+  });
+});
+
+describe("scanRecordings stable rolling session boundaries (issue #292)", () => {
+  const T0 = Date.UTC(2026, 5, 27, 0, 0, 0); // 08:00 in the default settings timezone
+  const seg = (i: number): string => `主播A_2026-06-27_08-00-00_00${i}.ts`;
+  const probeBySeg = (file: string): { durationSec: number; startMs: number; endMs: number } => {
+    const i = Number(/_00(\d)\.ts$/.exec(file)![1]);
+    return { durationSec: 1800, startMs: T0 + i * 1_800_000, endMs: T0 + (i + 1) * 1_800_000 };
+  };
+  const setup = (): { root: string; dir: string } => {
+    const prevTZ = process.env.TZ;
+    delete process.env.TZ;
+    onTestFinished(() => { if (prevTZ === undefined) delete process.env.TZ; else process.env.TZ = prevTZ; });
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.session.json"),
+      JSON.stringify({ roomSlug: "888", platform: "douyin", startMs: T0 }));
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"),
+      JSON.stringify({ bv: FAKE_BV, confirmed: [0, 1], segments: [], startMs: T0 + 1_800_000, updatedAt: T0 + 3 * 1_800_000 }));
+    for (const i of [0, 1, 2]) writeFileSync(join(dir, seg(i)), "x");
+    return { root, dir };
+  };
+  const keyOf = (recs: Awaited<ReturnType<typeof scanRecordings>>): string =>
+    clusterBroadcasts([{ workerId: "w", recordings: recs }])[0]!.streamKey;
+
+  it("deleting the earliest confirmed segments does not move startMs or the job key", async () => {
+    const { root, dir } = setup();
+    const before = await scanRecordings(root, {}, async (f) => probeBySeg(f));
+    expect(before[0]!.startMs).toBe(T0);
+    rmSync(join(dir, seg(0)));
+    const after = await scanRecordings(root, {}, async (f) => probeBySeg(f));
+    expect(after[0]!.tsFiles).toHaveLength(2);
+    expect(after[0]!.startMs).toBe(T0); // without the fix: T0 + 30 min (earliest surviving segment)
+    expect(keyOf(after)).toBe(keyOf(before));
+    rmSync(join(dir, seg(1)));
+    const later = await scanRecordings(root, {}, async (f) => probeBySeg(f));
+    expect(later[0]!.startMs).toBe(T0);
+    expect(keyOf(later)).toBe(keyOf(before));
+  });
+
+  it("a session whose segments were all deleted gets a non-zero-width span from the rolling sidecar", async () => {
+    const { root, dir } = setup();
+    for (const i of [0, 1, 2]) rmSync(join(dir, seg(i)));
+    const recs = await scanRecordings(root, {}, async (f) => probeBySeg(f));
+    expect(recs[0]!.tsFiles).toEqual([]);
+    expect(recs[0]!.startMs).toBe(T0);
+    expect(recs[0]!.endMs).toBe(T0 + 3 * 1_800_000);
+    // A next session 41 min after the real end still clusters with it (no fake gap from a zero-width span).
+    const next = { ...recs[0]!, sessionBase: "next", startMs: recs[0]!.endMs + 41 * 60_000, endMs: recs[0]!.endMs + 71 * 60_000 };
+    expect(clusterBroadcasts([{ workerId: "w", recordings: [recs[0]!, next] }])).toHaveLength(1);
+  });
+
+  it("non-rolling sessions keep the pure ffprobe start (no sidecar override)", async () => {
+    const { root, dir } = setup();
+    rmSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"));
+    rmSync(join(dir, seg(0)));
+    const recs = await scanRecordings(root, {}, async (f) => probeBySeg(f));
+    expect(recs[0]!.startMs).toBe(T0 + 1_800_000);
   });
 });
