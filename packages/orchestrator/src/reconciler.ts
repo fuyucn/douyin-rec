@@ -857,26 +857,33 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     if (isJobLive(key) || (this.pipelineDeps.pool?.hasStreamLock(key) ?? false)) {
       return { ok: false, error: "任务正在执行", code: 409 };
     }
-    // A selected worker of this room is unreachable: its recordings are unknown, so the winner could be the worse copy
-    // and a cleanup would drop the reachable sources. 409 unless forced; a forced run logs which node was missing.
+    // Both guards are evaluated before any force bypass so a single 409 lists every reason; one force cannot skip a
+    // reason the user never saw.
+    // 1) A selected worker of this room is unreachable: its recordings are unknown, so the winner could be the worse
+    //    copy and a cleanup would drop the reachable sources.
     const missing = this.blockingUnreachable(cfgByKey.get(found.streamKey) ?? this.pipelineDeps.cfg, transports, unreachable);
-    if (missing.length > 0) {
-      const detail = missing.map((id) => `${id}(${unreachable.get(id)})`).join(", ");
-      if (opts.force !== true) {
-        return {
-          ok: false, code: 409, forceable: true,
-          error: `选中节点 ${detail} 清单失联,可能漏掉其上的录像;确认后用 force 继续(将只用可达节点选优)`,
-        };
-      }
-      console.warn(`[runNow] force over unreachable node(s): ${detail}`);
-    }
-    // 409 by the original (suffix-free) key: any earlier BV or an unfinished queue row for this broadcast means a
-    // rerun could post a second draft. Only an explicit `force` (after the old draft was deleted) passes.
+    const missingDetail = missing.map((id) => `${id}(${unreachable.get(id)})`).join(", ");
+    // 2) By the original (suffix-free) key: any earlier BV or an unfinished queue row for this broadcast means a
+    //    rerun could post a second draft.
     const conflict = await runNowConflict(
       { ledger: this.ledger, transports, log: (m) => console.info(m) }, baseKey,
       { force: opts.force === true, self: { startMs: b.startMs, endMs: Math.max(...members.map((m) => m.rec.endMs)) } },
     );
-    if (conflict) return { ok: false, error: conflict, code: 409, forceable: true };
+    if (opts.force !== true) {
+      const reasons: string[] = [];
+      if (missing.length > 0) {
+        reasons.push(`选中节点 ${missingDetail} 清单失联,可能漏掉其上的录像(force 后将只用可达节点选优)`);
+      }
+      if (conflict) reasons.push(conflict);
+      if (reasons.length > 0) {
+        return {
+          ok: false, code: 409, forceable: true,
+          error: reasons.length === 1 && !missing.length ? reasons[0]! : `${reasons.join(";")};确认全部原因后用 force 继续`,
+        };
+      }
+    } else if (missing.length > 0) {
+      console.warn(`[runNow] force over unreachable node(s): ${missingDetail}`);
+    }
 
     this.ledger.upsertPending(key, b.startMs);
     this.ledger.resetActiveNodes(key);
