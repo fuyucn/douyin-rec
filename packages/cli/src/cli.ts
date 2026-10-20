@@ -32,7 +32,7 @@ import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
-import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
+import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, APP_VERSION, syncDbPathFor } from "@drec/app";
 import type { HubStarter, TaskStore } from "@drec/app";
@@ -1042,6 +1042,9 @@ const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWork
   hubRecordingSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
 /** master 资源池快照提供者(由 hubStarter.start 注入,读同一 ResourcePool 实例);未启动 → undefined。 */
 let hubPoolSnapshot: (() => HubPoolSnapshotDTO) | undefined;
+/** Blocked-broadcast provider (injected by hubStarter.start from the live Reconciler); hub not started → empty. */
+let hubBlockedBroadcasts: (() => HubBlockedBroadcastDTO[]) | undefined;
+const readBlockedBroadcasts = (): HubBlockedBroadcastDTO[] => hubBlockedBroadcasts?.() ?? [];
 const readPoolSnapshot = (): HubPoolSnapshotDTO | undefined => hubPoolSnapshot?.();
 /**
  * Master-side sync receipt settings (expected version / last sync error).
@@ -1119,6 +1122,7 @@ const hubStarter: HubStarter = {
   nodeTaskLogs: requestNodeTaskLogs,
   nodeTasks: requestNodeTasks,
   rollingDelivery: readRollingDelivery,
+  blockedBroadcasts: readBlockedBroadcasts,
   poolSnapshot: readPoolSnapshot,
   retryNode: requestHubRetryNode,
   stopJob: requestHubStopJob,
@@ -1152,6 +1156,8 @@ const hubStarter: HubStarter = {
       cleanMaxGapSec?: number;
       /** 断流重连合并窗(ms);缺省 10 分钟。 */
       reconnectWindowMs?: number;
+      /** Consecutive unreachable rounds after which a blocked broadcast turns needs_manual; default 12, <=0 disables. */
+      blockedManualRounds?: number;
       /** 上传确认后旁路校验(回读分 P 数)的延迟(ms);缺省 10 分钟。只记录/告警,不影响清理(issue #92)。 */
       sideCheckDelayMs?: number;
       /** 投稿默认(per-task 文件留空时回退);旧字段 uploadMeta 也认(迁移兼容)。 */
@@ -1524,6 +1530,7 @@ const hubStarter: HubStarter = {
       workerCapabilities: (id) => loadWorkers().find((w) => w.id === id)?.capabilities,
       nodeUpload: nodeUploadCfg,
       reconnectWindowMs: hubCfg.reconnectWindowMs,
+      blockedManualRounds: hubCfg.blockedManualRounds,
       loadTransports: buildTransports,
       notify: pipelineDeps.notify, // 达重试上限升级 needs_manual 时,复用 pipeline 同源 EventCenter 通知(站内+webhook)
       staleMs: hubCfg.resources?.staleMs ?? 600_000,
@@ -1813,6 +1820,7 @@ const hubStarter: HubStarter = {
     hubRunNow = (opts) => reconciler.runNow(opts);
     // 队列页的「排队位次 / 资源占用」来源:读同一 ResourcePool 实例(进程内共享)。
     hubPoolSnapshot = () => pool.snapshot();
+    hubBlockedBroadcasts = () => reconciler.blockedBroadcasts();
 
     const stop = startHub({
       tasks: () => opts.store.listTasks(),
@@ -1872,6 +1880,7 @@ const hubStarter: HubStarter = {
       hubStopJob = undefined;
       hubRunNow = undefined;
       hubPoolSnapshot = undefined;
+      hubBlockedBroadcasts = undefined;
       hubReceiptSettings = undefined;
     };
   },

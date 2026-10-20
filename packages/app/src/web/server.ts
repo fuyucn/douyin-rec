@@ -299,6 +299,7 @@ export interface WebServerDeps {
   runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>;
   /** master 资源池快照(CLI 注入)。省略/hub 未就绪 → 队列页无排队位次/占用(全 0)。 */
   rollingDelivery?: () => import("@drec/core").RollingDeliveryDTO[];
+  blockedBroadcasts?: () => import("@drec/core").HubBlockedBroadcastDTO[];
   poolSnapshot?: () => import("@drec/core").HubPoolSnapshotDTO | undefined;
   /**
    * hub 台账变更监视(T4):`GET /api/hub/stream` 的 SSE 通道。
@@ -656,6 +657,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     stopJob: deps.stopJob,
     runNow: deps.runNow,
     rollingDelivery: deps.rollingDelivery,
+    blockedBroadcasts: deps.blockedBroadcasts,
     poolSnapshot: deps.poolSnapshot,
     mergeJobs: (() => {
       const mj = new MergeJobStore(deps.store.db);

@@ -259,6 +259,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       // issue #73:与 `_apply-tasks` 同目录(<数据根>/config/managed),节点列表据快照里的 assigned 标记过滤。
       managedStateDir: join(rootConfigDir(), "managed"),
       rollingDelivery: hubEnabled ? hubStarter?.rollingDelivery : undefined,
+      blockedBroadcasts: hubEnabled ? hubStarter?.blockedBroadcasts : undefined,
       poolSnapshot: hubEnabled ? hubStarter?.poolSnapshot : undefined,
       requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
       // 手动启动的磁盘水位准入(issue #96):与 daemon 同源的水位配置,每次现读(热改生效);测默认输出目录所在卷。

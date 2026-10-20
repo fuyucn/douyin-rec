@@ -104,7 +104,11 @@ export function buildHubJobs(ctx: ApiCtx) {
           .map((d) => ({ ...d, anchorName: anchorOf(d.platform, d.roomSlug) }))
           .filter((d) => plats.length === 0 || plats.includes(d.platform))
           .filter((d) => !q || `${d.anchorName ?? ""} ${d.roomSlug} ${d.sessionBase} ${d.bv ?? ""}`.toLowerCase().includes(q));
-        return { status: 200, body: { ...view, delivering } };
+        const blocked = (deps.blockedBroadcasts?.() ?? [])
+          .map((b) => ({ ...b, anchorName: anchorOf(b.platform, b.roomSlug) }))
+          .filter((b) => plats.length === 0 || plats.includes(b.platform))
+          .filter((b) => !q || `${b.anchorName ?? ""} ${b.roomSlug} ${b.streamKey} ${b.workers.join(" ")}`.toLowerCase().includes(q));
+        return { status: 200, body: { ...view, delivering, blocked } };
       } catch (e) {
         return err(500, `读 hub 队列失败: ${String((e as Error)?.message ?? e)}`);
       }

@@ -137,6 +137,7 @@ export interface ApiDeps {
   /** master 资源池快照(CLI 注入,读同一 ResourcePool 实例)。省略/未就绪 → 队列页无排队位次(全 0)。 */
   /** 边录边传的实时进度(F1;省略 = 不展示)。 */
   rollingDelivery?: () => import("@drec/core").RollingDeliveryDTO[];
+  blockedBroadcasts?: () => import("@drec/core").HubBlockedBroadcastDTO[];
   poolSnapshot?: () => HubPoolSnapshotDTO | undefined;
 }
 
