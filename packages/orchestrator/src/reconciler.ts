@@ -10,6 +10,7 @@ import { isDerivedKey, runNowConflict } from "./run-now-guard.js";
 import { DEFAULT_NODE_UPLOAD, type NodeUploadConfig } from "./node-upload-config.js";
 import { completeFromDispatch } from "./node-upload-complete.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
+import type { HubBlockedBroadcastDTO } from "@drec/core";
 import { gateWorkers, explainRejections, isWorkerAssigned, isWorkerTargeted } from "@drec/core";
 import { JobDispatcher } from "./job-dispatcher.js";
 
@@ -33,6 +34,11 @@ export interface ReconcilerDeps {
   inventoryTimeoutMs?: number;
   /** 节点连续多少轮清单失联(超时/报错)后发一次「节点失联」通知。默认 6;<=0 关闭。 */
   unreachableAlertRounds?: number;
+  /**
+   * A broadcast blocked by an unreachable selected worker for this many consecutive rounds becomes `needs_manual`
+   * (never selects/uploads/deletes; a human decides). Default 12; <=0 disables (the broadcast stays blocked and visible).
+   */
+  blockedManualRounds?: number;
   /**
    * 按平台 + 房间解析该场的 pipeline 配置(来自 hub 任务文件 config/hub/{platform}.{roomSlug}.json)。
    * 返回 null → 该房间没开 hub(无配置文件 / 已禁用)→ **跳过不处理**。
@@ -93,6 +99,7 @@ export interface ReconcilerDeps {
 const DEFAULT_SETTLE: SettleConfig = { maxWaitMs: 600_000, pollMs: 15_000 };
 const DEFAULT_INVENTORY_TIMEOUT_MS = 60_000;
 const DEFAULT_UNREACHABLE_ALERT_ROUNDS = 6;
+const DEFAULT_BLOCKED_MANUAL_ROUNDS = 12;
 
 /**
  * 单节点清单结果三态:ok=有录像;empty=可达但确实没录像;unreachable=超时/报错(**不知道**有没有)。
@@ -126,6 +133,9 @@ export class Reconciler {
   private sleep: (ms: number) => Promise<void>;
   private inventoryTimeoutMs: number;
   private unreachableAlertRounds: number;
+  private blockedManualRounds: number;
+  /** Broadcasts currently blocked by an unreachable selected worker (rebuilt each reconcileAll round). */
+  private blocked = new Map<string, HubBlockedBroadcastDTO>();
   /** 节点 → 连续失联轮数(仅 reconcileAll 每轮更新一次;恢复即清零)。 */
   private readonly unreachableStreak = new Map<string, number>();
   /** 已发过「失联」通知的节点(恢复后复位 → 再次失联可再报),保证一次失联期只发一条。 */
@@ -169,6 +179,7 @@ export class Reconciler {
     this.sleep = deps.sleep ?? DEFAULT_SLEEP;
     this.inventoryTimeoutMs = deps.inventoryTimeoutMs ?? DEFAULT_INVENTORY_TIMEOUT_MS;
     this.unreachableAlertRounds = deps.unreachableAlertRounds ?? DEFAULT_UNREACHABLE_ALERT_ROUNDS;
+    this.blockedManualRounds = deps.blockedManualRounds ?? DEFAULT_BLOCKED_MANUAL_ROUNDS;
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.staleMs = deps.staleMs ?? DEFAULT_STALE_MS;
     this.reconnectWindowMs = this.resolveWindowMs(deps.reconnectWindowMs);
@@ -551,6 +562,11 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
   return due.length > 0 ? due.join(",") : null;
 }
 
+  /** Broadcasts currently waiting on an unreachable selected worker (read-only snapshot for the queue API). */
+  blockedBroadcasts(): HubBlockedBroadcastDTO[] {
+    return [...this.blocked.values()].map((b) => ({ ...b, workers: [...b.workers] }));
+  }
+
   /** One queue-poll tick (driven by its own timer in startHub); never throws. */
   pollUploadQueue(): Promise<void> {
     return this.uploadPoller.poll();
@@ -608,6 +624,7 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     // 上传链全局串行是设计如此(防 601)。T7 真正交付的是「后一场的 job 行立即可见」
     // + 后一场的 pull/net/upload 可与前一场的 CPU 工作重叠。
     const dispatched: Promise<void>[] = [];
+    const blockedNow = new Map<string, HubBlockedBroadcastDTO>();
     for (const b of broadcasts) {
       try {
         // 过滤后无成员 → 房间没开 hub / 选中 worker 没人录到 → 跳过(不建 job)。
@@ -687,6 +704,25 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
             `[reconciler] ${b.streamKey} 参与节点 ${lost.map((id) => `${id}(${unreachable.get(id)})`).join(", ")} 清单失联,` +
               `本轮跳过选优与收口,下轮重试`,
           );
+          // Only a not-yet-started broadcast (no job / pending / failed) is tracked and parked; a job already in
+          // flight is left untouched.
+          if (job && !RETRYABLE.has(job.state)) continue;
+          const prev = this.blocked.get(b.streamKey);
+          const rounds = (prev && prev.workers.join() === lost.join() ? prev.rounds : 0) + 1;
+          const entry: HubBlockedBroadcastDTO = {
+            streamKey: b.streamKey, platform: b.platform, roomSlug: b.roomSlug, workers: lost,
+            sinceMs: prev && prev.workers.join() === lost.join() ? prev.sinceMs : Date.now(),
+            rounds, threshold: this.blockedManualRounds,
+          };
+          if (this.blockedManualRounds > 0 && rounds >= this.blockedManualRounds) {
+            const why = `节点 ${lost.join("、")} 清单已连续 ${rounds} 轮失联(${lost.map((id) => unreachable.get(id)).join("; ")}),` +
+              `本场暂停选优/收口,已转人工(未选优、未上传、未删源);节点恢复后请手动「立即执行」`;
+            this.ledger.upsertPending(b.streamKey, b.startMs);
+            this.ledger.setState(b.streamKey, "needs_manual", { error: why });
+            this.notify?.({ kind: "error", stage: "同步", message: `${b.streamKey} ${why}`.slice(0, 400) });
+            continue;
+          }
+          blockedNow.set(b.streamKey, entry);
           continue;
         }
 
@@ -759,6 +795,7 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
         this.ledger.markFailed(b.streamKey, String((err as Error)?.message ?? err).slice(0, 300));
       }
     }
+    this.blocked = blockedNow;
     // 等**本轮派发出去**的场全部跑完(保留 running 守卫语义,见上方说明)。
     // 只等自己派发的那些:并发进来的另一轮所派的活跟本轮无关,不该把本轮卡住。
     await Promise.all([...dispatched, followupPoll]);
@@ -797,7 +834,7 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
 
     if (this.loadTransports) this.transports = this.loadTransports();
     const transports = this.transports;
-    const { broadcasts, cfgByKey } = await this.collect(transports, this.ledger.listKeys());
+    const { broadcasts, cfgByKey, unreachable } = await this.collect(transports, this.ledger.listKeys());
     // 新建任务(UI 用 -1/-2 后缀):录像身份仍是 base key,但 job/stage 用带后缀的新 key,
     // 这样每次「立即执行」都是独立 hub 任务,不会续跑旧任务。
     // 注意不能用裸 /-\d+$/ 判断:日期本身以 -DD 结尾(2026-08-27 会误判成 -27 后缀)。
@@ -819,6 +856,19 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     const key = b.streamKey;
     if (isJobLive(key) || (this.pipelineDeps.pool?.hasStreamLock(key) ?? false)) {
       return { ok: false, error: "任务正在执行", code: 409 };
+    }
+    // A selected worker of this room is unreachable: its recordings are unknown, so the winner could be the worse copy
+    // and a cleanup would drop the reachable sources. 409 unless forced; a forced run logs which node was missing.
+    const missing = this.blockingUnreachable(cfgByKey.get(found.streamKey) ?? this.pipelineDeps.cfg, transports, unreachable);
+    if (missing.length > 0) {
+      const detail = missing.map((id) => `${id}(${unreachable.get(id)})`).join(", ");
+      if (opts.force !== true) {
+        return {
+          ok: false, code: 409, forceable: true,
+          error: `选中节点 ${detail} 清单失联,可能漏掉其上的录像;确认后用 force 继续(将只用可达节点选优)`,
+        };
+      }
+      console.warn(`[runNow] force over unreachable node(s): ${detail}`);
     }
     // 409 by the original (suffix-free) key: any earlier BV or an unfinished queue row for this broadcast means a
     // rerun could post a second draft. Only an explicit `force` (after the old draft was deleted) passes.

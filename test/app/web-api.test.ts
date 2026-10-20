@@ -2581,6 +2581,20 @@ describe("hubQueue.delivering(F1:边录边传实时进度)", () => {
     expect(queue({ manager: live, rollingDelivery: () => items }).delivering![0]!.anchorName).toBe("实时名");
   });
 
+  it("blocked broadcasts (#69): carried with the anchor name; absent provider -> empty; filters apply", () => {
+    store.addTask({ room: "111", name: "小苏" });
+    const blocked = (over: Record<string, unknown> = {}) => ({
+      streamKey: "douyin:111:2026-01-01", platform: "douyin", roomSlug: "111", workers: ["n2"], sinceMs: 5, rounds: 3, threshold: 12, ...over,
+    });
+    const q = (deps: Partial<ApiDeps>, opts: Parameters<ReturnType<typeof makeApi>["hubQueue"]>[0] = {}) =>
+      (makeApi({ store, manager, syncDbPath: "/nonexistent/x-sync.db", ...deps }).hubQueue(opts).body as { blocked?: Array<Record<string, unknown>> });
+    expect(q({}).blocked).toEqual([]);
+    const items = [blocked(), blocked({ platform: "bilibili", roomSlug: "222", streamKey: "bilibili:222:2026-01-01" })] as never[];
+    expect(q({ blockedBroadcasts: () => items }).blocked![0]).toMatchObject({ anchorName: "小苏", workers: ["n2"], sinceMs: 5, rounds: 3, threshold: 12 });
+    expect(q({ blockedBroadcasts: () => items }, { platform: ["bilibili"] }).blocked).toHaveLength(1);
+    expect(q({ blockedBroadcasts: () => items }, { phase: ["done"] }).blocked).toHaveLength(2);
+  });
+
   it("未注入 rollingDelivery(旧 master / 无节点)→ 空数组,队列其余字段不受影响", () => {
     const b = queue({});
     expect(b.delivering).toEqual([]);
