@@ -14,6 +14,8 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-88 任务凭证接口脱敏 + webhook 不进 argv(issue [#47](https://github.com/fuyucn/douyin-rec/issues/47))**
+  **做什么**：任务/房间 DTO 的 cookies、webhook 经 core `redactTaskSecrets` 脱敏(只给 hasCookies/hasWebhook);编辑表单留空=不改;子进程 webhook 走 0600 凭证文件 + `--discord-webhook-file`。**为什么**：接口明文返回凭证、`ps` 可见 webhook。**验收**：list/detail/create/update/room 响应无明文;PATCH 缺省保留;argv 不含 webhook;变异检查 FAIL→PASS。
 - [~] **T-87 rolling 上传拦截 0 字节封口段(issue [#177](https://github.com/fuyucn/douyin-rec/issues/177))**
   **做什么**：rolling 上传读段真实大小,0 字节段不上传、保留源、记日志、不阻塞后续段(不依赖前段 mtime)。**为什么**：0 字节段致 B 站 duration=0 → 稿件 -16 不可逆。**验收**：前段源已删/仍在两种 0 字节用例不上传;既有碎片/崩溃恢复用例绿。
 - [~] **T-86 起录时记录平台本场 id 与拉流路径(诊断日志)(issue [#294](https://github.com/fuyucn/douyin-rec/issues/294))**
