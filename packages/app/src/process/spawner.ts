@@ -4,7 +4,7 @@
  * This is the ONLY file that knows how to turn a Task into a concrete OS
  * subprocess: it picks the executable (process.execPath = the running node),
  * the cli entry (process.argv[1] = the bundle path, e.g. dist/douyin-rec.mjs),
- * the `record` argv (buildRecordArgs), and any GLOBAL flags (--discord-webhook).
+ * the `record` argv (buildRecordArgs), and any GLOBAL flags (--discord-webhook-file).
  *
  * The TaskManager depends on the Spawner *interface* only, so tests inject a
  * MockSpawner and never spawn a real child.
@@ -26,7 +26,7 @@ export interface Spawner {
 /**
  * 解析子进程实际推送的 Discord webhook：**任务级优先，回落全局**。
  * `global` 可为定值或 getter（getter → 每次 spawn 求值，从而带上 settings 表的 `discordWebhook`）。
- * 子进程是独立 `record` 进程、无 DB 访问，只能靠 `--discord-webhook` 透传，故这里是 webhook 进子进程的唯一关口。
+ * 子进程是独立 `record` 进程、无 DB 访问，只能靠 `--discord-webhook-file` 透传文件路径，故这里是 webhook 进子进程的唯一关口。
  * 纯函数、导出供测试（曾因 spawner 只读 env/program、漏掉 UI 设的 settings webhook 而整场无 Discord）。
  */
 export function resolveSpawnWebhook(
@@ -51,7 +51,7 @@ export interface NodeRecordSpawnerOpts {
    * 全局 Discord webhook（任务未自带 webhook 时回落）→ GLOBAL flag before `record`。
    * 可传字符串（启动时定值）或 **getter**（每次 spawn 时读取，与 `mesioPath` 同模式）。用 getter
    * 才能把 **settings 表的 `discordWebhook`**（UI 设的全局 webhook）带进子进程——子进程是独立 `record`
-   * 进程、无 DB 访问，只能靠这里透传 `--discord-webhook`；定值会漏掉「serve 启动后才在 UI 设 webhook」。
+   * 进程、无 DB 访问，只能靠这里透传(0600 文件 + `--discord-webhook-file`)；定值会漏掉「serve 启动后才在 UI 设 webhook」。
    */
   webhook?: string | (() => string | undefined);
   /**
@@ -129,20 +129,24 @@ export class NodeRecordSpawner implements Spawner {
     // 登录凭证写 0600 文件、argv 只带路径;写失败直接抛(不回退 argv)。
     // task.cookies 为空(useCookie=false / 未配置)→ 不生成文件。
     const credFile = task.cookies ? writeCredentialFile(task.id, task.cookies) : undefined;
+    let hookFile: string | undefined;
     try {
-      return this.buildProcess(task, credFile);
+      // The Discord webhook is a credential too: same 0600 file mechanism, argv carries only the path.
+      const hook = resolveSpawnWebhook(task.webhook, this.webhook);
+      hookFile = hook ? writeCredentialFile(task.id, hook, "webhook") : undefined;
+      return this.buildProcess(task, credFile, hookFile);
     } catch (e) {
-      // Nothing owns the credential file yet; remove it before surfacing the error.
+      // Nothing owns the credential files yet; remove them before surfacing the error.
       if (credFile) removeCredentialFile(credFile);
+      if (hookFile) removeCredentialFile(hookFile);
       throw e;
     }
   }
 
-  private buildProcess(task: Task, credFile: string | undefined): ChildRecorderProcess {
+  private buildProcess(task: Task, credFile: string | undefined, hookFile: string | undefined): ChildRecorderProcess {
     // 每任务 webhook 优先,回落全局(getter 时每次 spawn 读取,带上 settings 表 webhook)→
-    // 子进程的开播/录完通知推到该 webhook。
-    const hook = resolveSpawnWebhook(task.webhook, this.webhook);
-    const globals = hook ? ["--discord-webhook", hook] : [];
+    // 子进程的开播/录完通知推到该 webhook;只传文件路径,绝不进 argv。
+    const globals = hookFile ? ["--discord-webhook-file", hookFile] : [];
     const args = [this.cliEntry, ...globals, ...buildRecordArgs(task, credFile)];
     // mesio 路径设置(若配置)→ 注入 MESIO_PATH;否则继承父 env(引擎自行兜底 bin/mesio)。
     const mesio = this.mesioPath?.()?.trim();
@@ -167,7 +171,7 @@ export class NodeRecordSpawner implements Spawner {
       onLog: this.onLog,
       killTimeoutMs: resolveKillTimeoutMs(task, this.killTimeoutMs, this.rollingKillTimeoutMs),
       termChildOnly: !!task.rollingEffective,
-      cleanupFiles: credFile ? [credFile] : undefined,
+      cleanupFiles: [credFile, hookFile].filter((f): f is string => !!f),
     });
   }
 }

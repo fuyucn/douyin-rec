@@ -950,18 +950,25 @@ describe("cookie handlers (global account cookie)", () => {
 
 describe("每任务 webhook 字段", () => {
   it("创建带 webhook → 持久化 + DTO 暴露;空串归一化为 null(回落全局)", () => {
-    const a = api.createTask({ room: "111", webhook: "https://discord.test/hook" }).body as { id: number; webhook: string | null };
-    expect(a.webhook).toBe("https://discord.test/hook");
-    const b = api.createTask({ room: "222", webhook: "   " }).body as { webhook: string | null };
-    expect(b.webhook).toBeNull();
-    const c = api.createTask({ room: "333" }).body as { webhook: string | null };
-    expect(c.webhook).toBeNull();
+    const a = api.createTask({ room: "111", webhook: "https://discord.test/hook" }).body as { id: number; webhook: null; hasWebhook: boolean };
+    // DTO never echoes the secret (issue #47); the store keeps it.
+    expect(a.webhook).toBeNull();
+    expect(a.hasWebhook).toBe(true);
+    expect(store.getTask(a.id)!.webhook).toBe("https://discord.test/hook");
+    const b = api.createTask({ room: "222", webhook: "   " }).body as { id: number; hasWebhook: boolean };
+    expect(b.hasWebhook).toBe(false);
+    expect(store.getTask(b.id)!.webhook).toBeNull();
+    const c = api.createTask({ room: "333" }).body as { id: number; hasWebhook: boolean };
+    expect(c.hasWebhook).toBe(false);
+    expect(store.getTask(c.id)!.webhook).toBeNull();
   });
 
   it("PATCH 更新 webhook;传空串清空回 null", () => {
     const t = api.createTask({ room: "111" }).body as { id: number };
-    expect((api.updateTask(t.id, { webhook: "https://x/y" }).body as { webhook: string | null }).webhook).toBe("https://x/y");
-    expect((api.updateTask(t.id, { webhook: "" }).body as { webhook: string | null }).webhook).toBeNull();
+    expect((api.updateTask(t.id, { webhook: "https://x/y" }).body as { hasWebhook: boolean }).hasWebhook).toBe(true);
+    expect(store.getTask(t.id)!.webhook).toBe("https://x/y");
+    expect((api.updateTask(t.id, { webhook: "" }).body as { hasWebhook: boolean }).hasWebhook).toBe(false);
+    expect(store.getTask(t.id)!.webhook).toBeNull();
   });
 });
 

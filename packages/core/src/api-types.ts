@@ -136,8 +136,11 @@ export interface RoomRecordingDTO {
   useCookie: boolean;
   /** cookies 是敏感值:**永远不外发**,仅 PUT 时可写。DTO 里恒为 null。 */
   cookies: null;
+  hasCookies: boolean;
   outDir: string | null;
-  webhook: string | null;
+  /** webhook 同为凭证:原文恒不外发(null),PUT 时缺省 = 保持原值,显式空串/null = 清除。 */
+  webhook: null;
+  hasWebhook: boolean;
   /** **旧**边录边传开关(T-33):已迁到 hub 规则 `pipeline.upload.mode="rolling"`(issue #40);仅作旧值只读/迁移来源。 */
   rollingUpload: boolean;
   /** 边录边传**实际生效值**(master 按规则 + 旧开关算出的只读派生字段;见 core `resolveRollingPolicy`)。 */
@@ -179,7 +182,9 @@ export interface RoomDTO {
  * 绝不留下半成功。
  */
 export interface RoomPayload {
-  recording?: Partial<Omit<RoomRecordingDTO, "taskId" | "cookies">> & { cookies?: string | null };
+  recording?: Partial<Omit<RoomRecordingDTO, "taskId" | "cookies" | "webhook" | "hasCookies" | "hasWebhook">>
+    // Secrets: absent = keep the stored value, "" / null = clear (the DTO never echoes them back).
+    & { cookies?: string | null; webhook?: string | null };
   /** `workers: null` = all nodes (clears a previous restriction); an empty array is rejected. */
   processing?: Partial<Pick<HubRuleDTO, "enabled" | "pipeline" | "requires">> & { workers?: string[] | null };
 }
@@ -1010,8 +1015,12 @@ export interface TaskDTO {
     /** 最近一次 run 的状态 + BV(无 run = null)。 */
     lastRun: { state: string; bv: string | null } | null;
   };
-  /** 任务专属 Discord webhook;null = 回落全局。 */
-  webhook: string | null;
+  /** 凭证恒不外发(见 core `redactTaskSecrets`):cookies / webhook 恒为 null,只给「是否已设置」。 */
+  cookies: null;
+  webhook: null;
+  hasCookies: boolean;
+  /** 任务专属 Discord webhook 是否已设置(原文不回显);false = 回落全局。 */
+  hasWebhook: boolean;
   /** **旧**边录边传开关(T-33):已迁到 hub 规则 `pipeline.upload.mode="rolling"`(issue #40),仅作旧值只读。 */
   rollingUpload: boolean;
   /** 边录边传实际生效值(派生,只读)。 */

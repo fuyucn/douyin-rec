@@ -7,7 +7,7 @@
 import { join } from "node:path";
 import {
   isUploadingMode, normalizeUploadMode, pipelineBurns, resolveRollingPolicy, rollingReasonText, listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
-  zeroDiskRuleError,
+  zeroDiskRuleError, redactTaskSecrets,
   type WorkerDTO, type HubPipelineConfig, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO,
 } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
@@ -170,7 +170,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     // 与 spawn 前的唯一判定点同源(不看 deps.hubEnabled:后端实际是否替换就是这个口径)。
     const outputFormatLock = nodeOutputFormatLock(t, hubDir);
     return {
-      ...t,
+      ...redactTaskSecrets(t),
       ...(assigned !== undefined ? { assigned } : {}),
       running: manager.isRunning(t.id),
       ...(stopping ? { stopping } : {}),
