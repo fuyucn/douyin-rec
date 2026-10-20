@@ -677,6 +677,48 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
     expect(r.ambiguous).toEqual([]);   // 槽忙是暂时状态,不是「结果不确定」—— 记了会让后续段永久被头阻塞挡回
   });
 
+  it("issue #309: slot busy on create leaves no create intent; a restarted uploader then creates instead of going manual", async () => {
+    const { dir, paths } = mkSession(segNames(2));
+    const busy = fakeSlot({ v: true }, { failAcquire: true });
+    const up = vi.fn(async () => FAKE_BV);
+    const u1 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: busy.slot as never });
+    for (const p of paths) u1.noteSegment(p);
+    await u1.flush({ recordingActive: true });
+    expect(up).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(sidecarPath(dir), "utf-8")).uploading).toBeUndefined();
+
+    // Next process reads the sidecar: no dangling intent, so nothing is marked ambiguous and the create goes out.
+    const free = fakeSlot({ v: false });
+    const u2 = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: free.slot as never });
+    for (const p of paths) u2.noteSegment(p);
+    const r = await u2.flush({ recordingActive: true });
+    expect(r.ambiguous).toEqual([]);
+    expect(r.uploaded).toEqual([0]);
+    expect(up).toHaveBeenCalledTimes(1);
+  });
+
+  it("issue #309: slot busy on append clears the append intent so recovery does not need a part-count read", async () => {
+    const { dir, paths } = mkSession(segNames(3));
+    let denyNext = false;
+    const slot = {
+      index: null as number | null,
+      acquire: async (): Promise<boolean> => !denyNext,
+      release: () => {},
+      touch: () => {},
+      close: () => {},
+    };
+    const up = vi.fn(async () => { denyNext = true; return FAKE_BV; }); // slot goes busy right after the create
+    const ap = vi.fn(async () => {});
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 0, slot: slot as never });
+    for (const p of paths) u.noteSegment(p);
+    const r = await u.flush({ recordingActive: true });
+    expect(r.uploaded).toEqual([0]);
+    expect(ap).not.toHaveBeenCalled();
+    const saved = JSON.parse(readFileSync(sidecarPath(dir), "utf-8"));
+    expect(saved.uploading).toBeUndefined();
+    expect(saved.ambiguous ?? []).toEqual([]);
+  });
+
   it("不注入槽时不加锁(旧行为不变)", async () => {
     const { paths } = mkSession(segNames(1));
     const up = vi.fn(async () => FAKE_BV);

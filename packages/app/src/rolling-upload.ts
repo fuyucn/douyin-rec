@@ -843,6 +843,13 @@ export class RollingUploader {
     return this.planPending(false, this.now(), confirmed, ambiguous).pending.length > 0;
   }
 
+  /** Clear the write-ahead intent of an upload that never started. A failed sidecar write marks the state untrusted. */
+  private dropUnstartedIntent(): void {
+    if (!this.state.uploading) return;
+    this.state = { ...this.state, uploading: undefined, updatedAt: this.now() };
+    this.persist();
+  }
+
   /**
    * One biliup per node (plan 038 PR4): take the node-wide slot around a single part upload and always give
    * it back. Waiting is not an error — the segment stays on disk and the next flush retries.
@@ -850,7 +857,13 @@ export class RollingUploader {
   private async withSlot<T>(fn: () => Promise<T>): Promise<T> {
     if (!this.slot) return fn();
     const ok = await this.slot.acquire("rolling", this.o.slotWaitMs ?? 30 * 60_000);
-    if (!ok) throw new Error(`${SLOT_BUSY_MARKER} within the wait limit; keeping the segment for the next try`);
+    if (!ok) {
+      // Issue #309: biliup was never spawned, so the write-ahead intent written before this call describes an
+      // upload that did not start. Left on disk, the next process would read it as a crashed create/append and
+      // send the segment (or, for create, the whole session) to manual review.
+      this.dropUnstartedIntent();
+      throw new Error(`${SLOT_BUSY_MARKER} within the wait limit; keeping the segment for the next try`);
+    }
     try { return await fn(); } finally { this.slot.release(); }
   }
 
