@@ -898,7 +898,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
   function uploaderB(f: Fixture, o: { append: unknown; plain?: unknown; count?: () => Promise<number | null>; alive?: (pid: number) => boolean; now?: () => number; logs?: string[] }): RollingUploader {
     return new RollingUploader({
       room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
-      uploadPlainRaw: (o.plain ?? vi.fn(async () => "BVunexpected")) as never,
+      uploadPlainRaw: (o.plain ?? vi.fn(async () => FAKE_BV + "unexpected")) as never,
       appendGroupRaw: o.append as never,
       countPartsRaw: o.count ?? (async () => 1),
       isPidAlive: o.alive ?? (() => false),
@@ -1157,7 +1157,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
   it("owner alive beyond the wait bound: fail closed (no create/append, sources kept) and notify exactly once", async () => {
     const f = setup();
     const append = vi.fn(async () => {});
-    const plain = vi.fn(async () => "BVunexpected");
+    const plain = vi.fn(async () => FAKE_BV + "unexpected");
     const alerts: string[] = [];
     let t = f.bStartMs + 3_600_000;
     const u = new RollingUploader({
