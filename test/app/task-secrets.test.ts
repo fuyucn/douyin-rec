@@ -16,7 +16,7 @@ import { credentialDir, sweepCredentialFiles, writeCredentialFile } from "../../
 import { upsertHubRule } from "../../packages/app/src/hub-store.js";
 import type { Task } from "../../packages/app/src/store.js";
 
-const COOKIE = "sessionid=TOP-SECRET-COOKIE";
+const COOKIE = "sessionid=TOP-SECRET-COOKIE"; // issue-guard: allow
 const HOOK = "https://discord.com/api/webhooks/123/TOP-SECRET-HOOK";
 
 const manager: ManagerLike = {
