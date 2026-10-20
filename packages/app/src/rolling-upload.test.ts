@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  RollingUploader, resolveRollingUploadMeta, resolveStreamUploadMeta,
+  RollingUploader, looksLikeRecordProcess, resolveRollingUploadMeta, resolveStreamUploadMeta,
   resolveStreamUploadTitle, resolveStreamPartTitle,
 } from "./rolling-upload.js";
 import { UploadGate, rollingUploadSingleNode } from "@drec/core";
@@ -855,5 +855,328 @@ describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config >
     });
     expect(t.length).toBeLessThanOrEqual(80);
     expect(t.endsWith("_2026-09-13_01-30-05_001")).toBe(true);
+  });
+});
+
+// Issue #46: a successor session takes over the predecessor's leftover segments before uploading its own.
+describe("RollingUploader — 接管前序会话残段(#46)", () => {
+  const A_BASE = "主播_2026-06-27_08-00-00";
+  const B_BASE = "主播_2026-06-27_09-30-00";
+  const A_LAST_MS = BASE_MS + 120_000;
+  const DEAD_PID = 999_001;
+  const B_PID = 999_002;
+
+  interface Fixture { dir: string; aPaths: string[]; bPaths: string[]; bStartMs: number }
+
+  /** Predecessor A: `n` segments, `confirmedA` already uploaded; sidecar says its owner is `ownerPid`. */
+  function setup(opts: { n?: number; confirmedA?: number[]; sidecar?: Record<string, unknown>; bGapMin?: number } = {}): Fixture {
+    const dir = mkdtempSync(path.join(tmpdir(), "rolling-takeover-"));
+    const n = opts.n ?? 3;
+    const aPaths = Array.from({ length: n }, (_, i) => {
+      const p = path.join(dir, `${A_BASE}_${String(i).padStart(3, "0")}.ts`);
+      writeFileSync(p, "x");
+      utimesSync(p, new Date(BASE_MS + i * 60_000), new Date(BASE_MS + i * 60_000));
+      return p;
+    });
+    writeFileSync(path.join(dir, `${A_BASE}.rolling.json`), JSON.stringify({
+      streamKey: `douyin:123:${A_BASE}`, sessionBase: A_BASE, room,
+      segments: aPaths.map((p, index) => ({ index, path: p })),
+      confirmed: opts.confirmedA ?? [0], bv: FAKE_BV,
+      startMs: BASE_MS, updatedAt: A_LAST_MS, ownerPid: DEAD_PID, heartbeatAt: A_LAST_MS,
+      ...opts.sidecar,
+    }));
+    const bStartMs = A_LAST_MS + (opts.bGapMin ?? 10) * 60_000;
+    const bPaths = [0].map((i) => {
+      const p = path.join(dir, `${B_BASE}_${String(i).padStart(3, "0")}.ts`);
+      writeFileSync(p, "x");
+      utimesSync(p, new Date(bStartMs), new Date(bStartMs));
+      return p;
+    });
+    return { dir, aPaths, bPaths, bStartMs };
+  }
+
+  function uploaderB(f: Fixture, o: { append: unknown; plain?: unknown; count?: () => Promise<number | null>; alive?: (pid: number) => boolean; now?: () => number; logs?: string[] }): RollingUploader {
+    return new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
+      uploadPlainRaw: (o.plain ?? vi.fn(async () => FAKE_BV + "unexpected")) as never,
+      appendGroupRaw: o.append as never,
+      countPartsRaw: o.count ?? (async () => 1),
+      isPidAlive: o.alive ?? (() => false),
+      now: o.now ?? (() => f.bStartMs + 3_600_000),
+      log: (m) => o.logs?.push(m),
+    });
+  }
+
+  const names = (ap: { mock: { calls: unknown[][] } }): string[] =>
+    (ap.mock.calls as unknown as Array<[{ files: string[] }]>).map((c) => path.basename(c[0].files[0]!));
+  const readA = (f: Fixture): Record<string, unknown> => JSON.parse(readFileSync(path.join(f.dir, `${A_BASE}.rolling.json`), "utf-8"));
+
+  it("restart with A's 2 sealed unconfirmed segments: B appends A1, A2 then B0 (A's parts before B's)", async () => {
+    const f = setup();
+    const append = vi.fn(async () => {});
+    const u = uploaderB(f, { append });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(names(append)).toEqual([`${A_BASE}_001.ts`, `${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
+    expect(readA(f)).toMatchObject({ confirmed: [0, 1, 2], ownerPid: B_PID });
+    expect(readA(f).uploading).toBeUndefined();
+    const b = JSON.parse(readFileSync(path.join(f.dir, `${B_BASE}.rolling.json`), "utf-8"));
+    // Inherited after the takeover: A's 3 confirmed parts, and the owner/heartbeat are stamped on every persist.
+    expect(b).toMatchObject({ bv: FAKE_BV, inheritedParts: 3, inheritedFrom: A_BASE, confirmed: [0], ownerPid: B_PID });
+    expect(typeof b.heartbeatAt).toBe("number");
+  });
+
+  it("takeover deletes each source only after its own confirmation", async () => {
+    const f = setup();
+    const events: string[] = [];
+    const append = vi.fn(async (o: { files: string[] }) => { events.push(`append ${path.basename(o.files[0]!)}`); });
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, isPidAlive: () => false,
+      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      removeFile: (p) => { events.push(`remove ${path.basename(p)}`); return true; }, now: () => f.bStartMs + 3_600_000,
+    });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    // A0 was confirmed before the crash (its source is cleaned up first); every other source goes only after its own append.
+    expect(events).toEqual([
+      `remove ${A_BASE}_000.ts`,
+      `append ${A_BASE}_001.ts`, `remove ${A_BASE}_001.ts`,
+      `append ${A_BASE}_002.ts`, `remove ${A_BASE}_002.ts`,
+      `append ${B_BASE}_000.ts`, `remove ${B_BASE}_000.ts`,
+    ]);
+  });
+
+  it("dangling append intent that landed: confirmed without re-append; the rest follows in order", async () => {
+    // A confirmed [0] with an append of segment 1 in flight; the submission already has 2 parts.
+    const f = setup({ sidecar: { uploading: { index: 1, kind: "append" } } });
+    const append = vi.fn(async () => {});
+    const u = uploaderB(f, { append, count: async () => 2 });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(names(append)).toEqual([`${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
+    expect(readA(f)).toMatchObject({ confirmed: [0, 1, 2] });
+  });
+
+  it("dangling append intent that did not land: retried normally", async () => {
+    const f = setup({ sidecar: { uploading: { index: 1, kind: "append" } } });
+    const append = vi.fn(async () => {});
+    const u = uploaderB(f, { append, count: async () => 1 });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(names(append)).toEqual([`${A_BASE}_001.ts`, `${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
+  });
+
+  it("dangling intent with unreadable part count: A goes uncertain, B uploads nothing and goes manual", async () => {
+    const f = setup({ sidecar: { uploading: { index: 1, kind: "append" } } });
+    const append = vi.fn(async () => {});
+    const u = uploaderB(f, { append, count: async () => null });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(append).not.toHaveBeenCalled();
+    expect(readA(f).ambiguous).toEqual([1]);
+    expect(u.ambiguousIndices).toEqual([0]);
+  });
+
+  it("part-count recovery accounts for A's own inherited parts", async () => {
+    // A continued an earlier session (2 inherited parts) and has 1 confirmed: 2 + 1 + 1 landed = 4.
+    const f = setup({ sidecar: { inheritedParts: 2, uploading: { index: 1, kind: "append" } } });
+    const append = vi.fn(async () => {});
+    const landed = uploaderB(f, { append, count: async () => 4 });
+    f.bPaths.forEach((p) => landed.noteSegment(p));
+    await landed.flush({ recordingActive: false });
+    expect(names(append)).toEqual([`${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
+    // B's inherited parts include A's inherited ones: 2 + 3 confirmed.
+    expect(JSON.parse(readFileSync(path.join(f.dir, `${B_BASE}.rolling.json`), "utf-8")).inheritedParts).toBe(5);
+  });
+
+  it("owner pid alive: B waits (no upload, logged once) and proceeds once the owner is gone", async () => {
+    const f = setup();
+    const append = vi.fn(async () => {});
+    let alive = true;
+    const logs: string[] = [];
+    const u = uploaderB(f, { append, alive: (pid) => alive && pid === DEAD_PID, logs });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    const r1 = await u.flush({ recordingActive: false });
+    await u.flush({ recordingActive: false });
+    expect(append).not.toHaveBeenCalled();
+    expect(r1.uploaded).toEqual([]);
+    expect(u.ambiguousIndices).toEqual([]); // waiting is not ambiguous
+    expect(readA(f)).toMatchObject({ confirmed: [0], ownerPid: DEAD_PID }); // untouched
+    expect(logs.filter((m) => m.includes("暂不接管"))).toHaveLength(1);
+    alive = false;
+    await u.flush({ recordingActive: false });
+    expect(names(append)).toEqual([`${A_BASE}_001.ts`, `${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
+  });
+
+  it("legacy sidecar without owner pid: waits while its files are recent, takes over once quiet", async () => {
+    const f = setup({ sidecar: { ownerPid: undefined, heartbeatAt: undefined } });
+    const append = vi.fn(async () => {});
+    const recent = uploaderB(f, { append, now: () => A_LAST_MS + 60_000 });
+    f.bPaths.forEach((p) => recent.noteSegment(p));
+    await recent.flush({ recordingActive: false });
+    expect(append).not.toHaveBeenCalled();
+    const quiet = uploaderB(f, { append, now: () => A_LAST_MS + 30 * 60_000 });
+    f.bPaths.forEach((p) => quiet.noteSegment(p));
+    await quiet.flush({ recordingActive: false });
+    expect(names(append)).toEqual([`${A_BASE}_001.ts`, `${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
+  });
+
+  it("A's last segment still growing: not sealed yet, B waits without uploading", async () => {
+    const f = setup();
+    const append = vi.fn(async () => {});
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 40, minSegmentSec: 0, removeFile: noRemove, isPidAlive: () => false,
+      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1, now: () => f.bStartMs + 3_600_000,
+    });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    const run = u.flush({ recordingActive: false });
+    setTimeout(() => {
+      appendFileSync(f.aPaths[2]!, "more");
+      utimesSync(f.aPaths[2]!, new Date(BASE_MS + 120_000), new Date(BASE_MS + 120_000)); // keep the injected clock ahead of it
+    }, 10);
+    await run;
+    expect(append).not.toHaveBeenCalled();
+    // Size now stable → the next flush takes over.
+    await u.flush({ recordingActive: false });
+    expect(names(append)).toEqual([`${A_BASE}_001.ts`, `${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
+  });
+
+  it("A without BV but with a create intent keeps failing closed", async () => {
+    const f = setup({ confirmedA: [], sidecar: { bv: undefined, uploading: { index: 0, kind: "create" } } });
+    const append = vi.fn(async () => {});
+    const plain = vi.fn(async () => FAKE_BV);
+    const u = uploaderB(f, { append, plain });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(append).not.toHaveBeenCalled();
+    expect(plain).not.toHaveBeenCalled();
+    expect(u.ambiguousIndices).toEqual([0]);
+  });
+
+  it("A with ambiguous segments: B goes uncertain, A's leftovers are not touched", async () => {
+    const f = setup({ sidecar: { ambiguous: [1] } });
+    const append = vi.fn(async () => {});
+    const u = uploaderB(f, { append });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(append).not.toHaveBeenCalled();
+    expect(u.ambiguousIndices).toEqual([0]);
+  });
+
+  it("gap > 60 min: predecessor is not touched, B creates its own submission", async () => {
+    const f = setup({ bGapMin: 61 });
+    const append = vi.fn(async () => {});
+    const plain = vi.fn(async () => "BVsecond");
+    const u = uploaderB(f, { append, plain });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(plain).toHaveBeenCalledTimes(1);
+    expect(append).not.toHaveBeenCalled();
+    expect(readA(f)).toMatchObject({ confirmed: [0], ownerPid: DEAD_PID });
+  });
+
+  it("0-byte leftover is skipped like in a normal flush; the rest is taken over and B proceeds", async () => {
+    const f = setup();
+    writeFileSync(f.aPaths[1]!, ""); // 0-byte
+    const append = vi.fn(async () => {});
+    const u = uploaderB(f, { append });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(names(append)).toEqual([`${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
+    expect(readA(f)).toMatchObject({ confirmed: [0, 2] });
+  });
+
+  it("leftovers still pending after the takeover (upload slot busy): B keeps waiting instead of overtaking", async () => {
+    const f = setup();
+    const busy = new Error("busy");
+    const append = vi.fn(async () => { throw busy; });
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove, isPidAlive: () => false,
+      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1, now: () => f.bStartMs + 3_600_000,
+      slot: { acquire: async () => false, release: () => {} } as never, slotWaitMs: 1,
+    });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    const r = await u.flush({ recordingActive: false });
+    expect(append).not.toHaveBeenCalled();
+    expect(r.uploaded).toEqual([]);
+    expect(u.ambiguousIndices).toEqual([]);
+  });
+
+  it("owner pid reused by an unrelated process: judged gone via /proc identity, takeover proceeds", async () => {
+    const f = setup();
+    const append = vi.fn(async () => {});
+    // Default liveness (kill(pid,0)) on our own pid succeeds; only the cmdline identity check says "not a recorder".
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
+      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      now: () => f.bStartMs + 3_600_000,
+      procCmdline: () => ["/usr/sbin/nginx", "-g", "daemon off;"],
+    });
+    // Point the sidecar owner at a pid that really exists (this test process) so only identity decides.
+    writeFileSync(path.join(f.dir, `${A_BASE}.rolling.json`), JSON.stringify({ ...readA(f), ownerPid: process.pid }));
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(names(append)).toEqual([`${A_BASE}_001.ts`, `${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
+  });
+
+  it("owner pid held by a real record process of this program still counts as alive (B waits)", async () => {
+    const f = setup();
+    const append = vi.fn(async () => {});
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
+      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      now: () => f.bStartMs + 3_600_000,
+      procCmdline: () => ["node", "/app/dist/douyin-rec.mjs", "record", "--room", "https://live.example/123"],
+    });
+    writeFileSync(path.join(f.dir, `${A_BASE}.rolling.json`), JSON.stringify({ ...readA(f), ownerPid: process.pid }));
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it("/proc unavailable: falls back to the bare kill(pid,0) probe (alive pid → waits)", async () => {
+    const f = setup();
+    const append = vi.fn(async () => {});
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
+      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      now: () => f.bStartMs + 3_600_000, procCmdline: () => undefined,
+    });
+    writeFileSync(path.join(f.dir, `${A_BASE}.rolling.json`), JSON.stringify({ ...readA(f), ownerPid: process.pid }));
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it("looksLikeRecordProcess: only this program's record subcommand", () => {
+    expect(looksLikeRecordProcess(["node", "dist/douyin-rec.mjs", "record", "--room", "x"])).toBe(true);
+    expect(looksLikeRecordProcess(["node", "dist/douyin-rec.mjs", "task", "serve"])).toBe(false);
+    expect(looksLikeRecordProcess(["ffmpeg", "-i", "record"])).toBe(false);
+  });
+
+  it("owner alive beyond the wait bound: fail closed (no create/append, sources kept) and notify exactly once", async () => {
+    const f = setup();
+    const append = vi.fn(async () => {});
+    const plain = vi.fn(async () => FAKE_BV + "unexpected");
+    const alerts: string[] = [];
+    let t = f.bStartMs + 3_600_000;
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
+      uploadPlainRaw: plain as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      isPidAlive: () => true, now: () => t, ownerWaitMs: 30 * 60_000, notify: (m) => alerts.push(m),
+    });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false }); // starts the wait clock
+    t += 29 * 60_000;
+    await u.flush({ recordingActive: false }); // still within the bound
+    expect(alerts).toEqual([]);
+    t += 2 * 60_000;
+    await u.flush({ recordingActive: false }); // bound exceeded → give up
+    await u.flush({ recordingActive: false }); // later flushes stay closed, no second alert
+    expect(alerts).toHaveLength(1);
+    expect(append).not.toHaveBeenCalled();
+    expect(plain).not.toHaveBeenCalled();
+    expect(u.ambiguousIndices).toEqual([0]);
+    expect(readA(f)).toMatchObject({ confirmed: [0], ownerPid: DEAD_PID }); // predecessor untouched
   });
 });

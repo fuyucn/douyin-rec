@@ -131,8 +131,8 @@ describe("e2e: rolling(边录边传)", () => {
   // ── 已知缺陷 #46:重启后旧会话未确认分段被孤立 ──────────────────────────────────
   // 现状:旧会话 append 进行中进程被杀,rolling.json 留着 `uploading` 标记;重启后只会为**新会话**
   // 创建上传器,旧会话的标记永远没人结算,其后分段既不续传也不转人工、无日志。
-  // 预期失败(it.fails):待 #46 修复(启动时扫描并接管/转人工)后,本用例会开始通过 → 去掉 `.fails`。
-  describe("重启后孤立分段(已知缺陷 https://github.com/fuyucn/douyin-rec/issues/46)", () => {
+  // #46 已修:后继会话在首次上传前先接管前序会话(owner 进程已退出)的残段,再传自己的段。
+  describe("重启后孤立分段(https://github.com/fuyucn/douyin-rec/issues/46)", () => {
     async function crashMidAppend(): Promise<{ oldStart: number; oldFiles: string[]; oldBase: string }> {
       const oldStart = pastStartMs(0, 10, 0);
       const oldBase = sessionBaseOf(ANCHOR, oldStart);
@@ -156,24 +156,27 @@ describe("e2e: rolling(边录边传)", () => {
       expect(existsSync(oldFiles[2]!)).toBe(true);
     });
 
-    it.fails("重启开新会话后,旧会话的未确认分段被接管:uploading 标记已结算、每段要么已确认要么转人工", async () => {
+    it("重启开新会话后,旧会话的未确认分段被接管:uploading 标记已结算、每段要么已确认要么转人工", async () => {
       s = await Scenario.create();
       const { oldBase } = await crashMidAppend();
       await s.restart();
       // 重启后:录制端只为「新会话」创建上传器并正常录完。
       const newStart = pastStartMs(0, 11, 0);
       writeSidecars(newStart);
-      await recordSession(uploader([]), newStart, 2);
+      await recordSession(uploader([], { stableCheckMs: 0 }), newStart, 2);
 
       const old = readRolling(oldBase);
       const settled = new Set([...(old.confirmed ?? []), ...(old.ambiguous ?? [])]);
       expect(old.uploading, "旧会话的 uploading 标记应被结算").toBeUndefined();
       for (const i of [0, 1, 2]) expect(settled.has(i), `旧会话段 ${i} 既未确认也未转人工(被孤立)`).toBe(true);
+      // 同一份稿件:旧会话 3 段在前、新会话 2 段在后,不重复建稿。
+      expect(s.fake.draftCount).toBe(1);
+      expect(s.fake.onlyArchive.parts).toHaveLength(5);
     });
   });
 
   // ── #57 R1 主控止血:建稿中被杀、无稿件号 → 主控绝不走常规整场管线(否则重复建稿),转人工 ──────
-  // 注:这是「主控判定」收紧;录制端重启后接管孤立分段(#46)属 R2,上面的 it.fails 仍保持预期失败。
+  // 注:这是「主控判定」收紧;录制端重启后接管孤立分段见 #46(上面的用例)。
   describe("建稿中被杀(#57 R1)", () => {
     async function crashMidCreate(): Promise<{ base: string; files: string[] }> {
       const start = pastStartMs(0, 10, 0);
