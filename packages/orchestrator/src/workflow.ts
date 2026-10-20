@@ -658,32 +658,42 @@ export class ResourcePool {
    * CPU lock (merge/burn share it, max=1) + memory gate.
    * Memory shortage only queues: the node keeps polling until memory recovers. After `memWaitTimeoutMs`
    * one alert states need vs available, then waiting continues (a user stop still aborts the wait).
-   * `kind` picks the floor: merge (copy-only) vs burn (re-encode).
+   * The memory wait happens OUTSIDE the CPU lock, so a node that cannot get memory never blocks other
+   * streams; memory is re-checked once the lock is held. `kind` picks the floor: merge (copy-only) vs burn.
    */
   async withCpu<T>(fn: () => Promise<T>, streamKey?: string, kind: "merge" | "burn" = "burn"): Promise<T> {
     const clear = this.markWaiting(streamKey, "cpu");
-    try {
-      return await this.withSemaphore(this.cpu, async () => {
-        clear(); // 已进闸门 → 不再算「排队」
-        // Merge never gates stricter than burn: `minBurnFreeMemMB: 0` (gate off) keeps disabling both.
-        const burnFloor = this.minBurnFreeMemMBLive();
-        const memFloor = kind === "merge" ? Math.min(this.minMergeFreeMemMBLive(), burnFloor) : burnFloor;
-        if (memFloor > 0) {
-          const deadline = this.now() + this.memWaitTimeoutMs;
-          let alerted = false;
-          while (this.freeMemMB() < memFloor) {
-            throwIfAborted();
-            if (!alerted && this.now() >= deadline) {
-              alerted = true;
-              this.onMemShortage(
-                `Memory low for ${kind}${streamKey ? ` (${streamKey})` : ""}: need ${memFloor} MB, available ${Math.round(this.freeMemMB())} MB; still waiting`,
-              );
-            }
-            await this.sleep(2000);
-          }
+    // Merge never gates stricter than burn: `minBurnFreeMemMB: 0` (gate off) keeps disabling both.
+    const floor = (): number => {
+      const burnFloor = this.minBurnFreeMemMBLive();
+      return kind === "merge" ? Math.min(this.minMergeFreeMemMBLive(), burnFloor) : burnFloor;
+    };
+    const memOk = (): boolean => { const f = floor(); return f <= 0 || this.freeMemMB() >= f; };
+    const deadline = this.now() + this.memWaitTimeoutMs;
+    let alerted = false;
+    const waitForMem = async (): Promise<void> => {
+      while (!memOk()) {
+        throwIfAborted();
+        if (!alerted && this.now() >= deadline) {
+          alerted = true;
+          this.onMemShortage(
+            `Memory low for ${kind}${streamKey ? ` (${streamKey})` : ""}: need ${floor()} MB, available ${Math.round(this.freeMemMB())} MB; still waiting`,
+          );
         }
-        return fn();
-      });
+        await this.sleep(2000);
+      }
+    };
+    try {
+      for (;;) {
+        await waitForMem();
+        await this.cpu.acquire();
+        if (memOk()) {
+          clear(); // 已进闸门 → 不再算「排队」
+          try { return await fn(); } finally { this.cpu.release(); }
+        }
+        // Memory dropped while queued for the lock: give the slot back and wait again.
+        this.cpu.release();
+      }
     } finally {
       clear();
     }

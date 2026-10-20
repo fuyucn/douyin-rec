@@ -433,6 +433,29 @@ describe("ResourcePool — cpu/net 串行与内存闸门", () => {
     await expect(pool.withCpu(async () => {}, "douyin:1:d", "burn")).rejects.toThrow("burn still gated");
   });
 
+  it("a burn waiting for memory does not hold the CPU slot: another stream's merge still runs", async () => {
+    let mem = 1900; // enough for merge (512), not for burn (2048)
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 2048, minMergeFreeMemMB: 512, maxCpuParallel: 1, memWaitTimeoutMs: 600_000, uploadRateLimit: 0 },
+      { sleep: () => new Promise((r) => setImmediate(r)), freeMemMB: () => mem },
+    );
+    let burnRan = false;
+    const burn = pool.withCpu(async () => { burnRan = true; }, "douyin:A:d", "burn");
+    await new Promise((r) => setImmediate(r));
+    let mergeRan = false;
+    const merge = pool.withCpu(async () => { mergeRan = true; }, "douyin:B:d", "merge");
+    const outcome = await Promise.race([merge.then(() => "merged"), new Promise((r) => setTimeout(() => r("blocked"), 200))]);
+    expect(outcome).toBe("merged");
+    expect(mergeRan).toBe(true);
+    expect(burnRan).toBe(false);
+    // The waiting burn is reported as queued, not as holding the slot.
+    expect(pool.snapshot().cpu.active).toBe(0);
+    expect(pool.snapshot().waiting.some((w) => w.streamKey === "douyin:A:d" && w.resource === "cpu")).toBe(true);
+    mem = 4096;
+    await burn;
+    expect(burnRan).toBe(true);
+  });
+
   it("minBurnFreeMemMB=0 still switches the whole gate off, merge included (backward compat)", async () => {
     const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 }, { freeMemMB: () => 10 });
     await pool.withCpu(async () => {}, "douyin:1:d", "merge");
