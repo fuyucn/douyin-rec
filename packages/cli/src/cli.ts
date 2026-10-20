@@ -13,7 +13,7 @@ import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌
                          // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
 import { SyncGate } from "./sync-gate.js";
 import { streamPartMaxMs } from "./stream-part-duration.js";
-import { zeroDiskRoom } from "./zero-disk-room.js";
+import { zeroDiskRoom, zeroDiskXmlPath } from "./zero-disk-room.js";
 import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
@@ -343,15 +343,17 @@ program
               segmentSec: 0,
             },
           }) ?? null;
-      const xmlPath = join(opts.outDir, `live-pump-${platform.extractRoomSlug(roomToUrl(o.room))}.xml`);
-      const writer = danmuSource ? new XmlDanmuWriter() : null;
+      // Per-run file name (issue #329): fixed only once the danmu actually starts.
+      let xmlPath = "";
+      const writer = danmuSource ? new XmlDanmuWriter({ log: (m) => console.warn(`[live-pump] ⚠️ ${m}`) }) : null;
       let writerOpened = false;
       const danmu = danmuSource && writer ? {
-        xmlPath,
+        get xmlPath(): string { return xmlPath; },
         start: async (): Promise<void> => {
           // Anchor to the wall clock at connect time: parts are sealed by byte/duration, so a
           // single session-level axis is the only stable reference for burn/part slicing.
           const startMs = Date.now();
+          xmlPath = zeroDiskXmlPath(opts.outDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs);
           writer.open(xmlPath, { anchorName, roomId: platform.extractRoomSlug(roomToUrl(o.room)), videoStartMs: startMs });
           writerOpened = true;
           await danmuSource.start(roomToUrl(o.room), {
@@ -366,7 +368,7 @@ program
           if (writerOpened) writer.close();
         },
       } : undefined;
-      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${xmlPath}`);
+      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${opts.outDir}/live-pump-<room>_<开播时间>.xml`);
       // Remove spools left by a pump killed mid-part. They never reached the state file, so
       // nothing else would ever delete them. Only old, unreferenced files are touched.
       // The keep-set is `spoolPathsToKeep` (single source of truth next to the state shape):
