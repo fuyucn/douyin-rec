@@ -7,6 +7,7 @@ import { SyncLedger } from "./ledger.js";
 import { ProcUnsupported, type Transport, type NodeRecording, type NodeInventory } from "./transport.js";
 import type { PipelineDeps } from "./pipeline.js";
 import { clusterBroadcasts, type Broadcast } from "./identity.js";
+import { zeroDiskStreamKey } from "@drec/core";
 import type { JobState } from "./ledger.js";
 import { processTimeZone, zonedStamp, JobAbortedError, USER_STOP, _resetJobAbort, beginJob, endJob, isJobLive } from "@drec/core";
 import type { NotifyEvent } from "@drec/core";
@@ -2203,6 +2204,85 @@ describe("unclaimed-segment pass-through + deduped summary log (#225)", () => {
     expect(summaryLines(warn)).toEqual([
       "[reconciler] worker old orphan state unknown (worker does not report unclaimed segments)",
     ]);
+    ledger.close();
+  });
+});
+
+describe("issue #324: zero-disk done keys must not swallow regular recordings", () => {
+  const msgOf = (e: NotifyEvent): string => ("message" in e ? String(e.message) : "");
+  const rec = makeRec({ rolling: { confirmed: [], ambiguous: [0] } as NodeRecording["rolling"] });
+  function make(ledger: SyncLedger, notify = vi.fn<(e: NotifyEvent) => void>()) {
+    const transports = new Map([["node-1", makeTransport("node-1", [rec])]]);
+    const runPipeline = vi.fn(async () => ({ state: "needs_manual" as JobState }));
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      runPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0, notify,
+    });
+    return { reconciler, runPipeline, notify };
+  }
+
+  it("a zero-disk job under its own key leaves the day's recording to the pipeline", async () => {
+    const ledger = freshLedger();
+    const zd = zeroDiskStreamKey("douyin", rec.roomSlug, rec.startMs + 60_000);
+    ledger.upsertPending(zd, rec.startMs + 60_000);
+    ledger.markDone(zd, "ZD_TEST");
+    const { reconciler, runPipeline, notify } = make(ledger);
+    await reconciler.reconcileAll();
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    expect((runPipeline.mock.calls[0] as unknown as [Broadcast])[0].streamKey).not.toBe(zd);
+    expect(notify).not.toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("不属于该稿件") }));
+    ledger.close();
+  });
+
+  it("an old-style done key (no candidates, other manuscript) is reported once instead of skipped silently", async () => {
+    const ledger = freshLedger();
+    const base = clusterBroadcasts([{ workerId: "node-1", recordings: [rec] }])[0].streamKey;
+    ledger.upsertPending(base); // the pre-fix zero-disk write: bare day key, no startMs
+    ledger.markDone(base, "ZD_TEST");
+    const { reconciler, runPipeline, notify } = make(ledger);
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    expect(runPipeline).not.toHaveBeenCalled();
+    const alerts = notify.mock.calls.filter(([e]) => msgOf(e).includes("不属于该稿件"));
+    expect(alerts).toHaveLength(1);
+    expect(ledger.get(base)?.state).toBe("done");
+    ledger.close();
+  });
+
+  it("no alert when the done job owns the recordings (same manuscript, or selection ran)", async () => {
+    const owned = freshLedger();
+    const rolled = makeRec({ rolling: { bv: "BV_OWN", confirmed: [0] } as NodeRecording["rolling"] });
+    const base = clusterBroadcasts([{ workerId: "node-1", recordings: [rolled] }])[0].streamKey;
+    owned.upsertPending(base); owned.markDone(base, "BV_OWN");
+    const transports = new Map([["node-1", makeTransport("node-1", [rolled])]]);
+    const notify = vi.fn<(e: NotifyEvent) => void>();
+    await new Reconciler({ platform: "douyin", transports, ledger: owned, pipelineDeps: makePipelineDeps(owned, transports),
+      runPipeline: vi.fn(), settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0, notify }).reconcileAll();
+    expect(notify.mock.calls.filter(([e]) => msgOf(e).includes("不属于该稿件"))).toHaveLength(0);
+    owned.close();
+
+    const selected = freshLedger();
+    selected.upsertPending(base); selected.markDone(base, "BV_PIPE");
+    selected.recordCandidates(base, [{ workerId: "node-1", coverage: 1, durationSec: 3600, startMs: rec.startMs, endMs: rec.endMs, totalGapSec: 0 }], "node-1");
+    const { reconciler, notify: n2 } = make(selected);
+    await reconciler.reconcileAll();
+    expect(n2.mock.calls.filter(([e]) => msgOf(e).includes("不属于该稿件"))).toHaveLength(0);
+    selected.close();
+  });
+});
+
+describe("issue #324: dual recording is not reported as unclaimed", () => {
+  it("a plain recording next to the rolling session that closed the broadcast stays quiet", async () => {
+    const ledger = freshLedger();
+    const rolled = makeRec({ rolling: { bv: "BV_ROLL", confirmed: [0] } as NodeRecording["rolling"] });
+    const plain = makeRec({ sessionBase: "主播名_2026-06-22_08-00-05" });
+    const transports = new Map([["node-1", makeTransport("node-1", [rolled])], ["node-2", makeTransport("node-2", [plain])]]);
+    const base = clusterBroadcasts([{ workerId: "node-1", recordings: [rolled] }, { workerId: "node-2", recordings: [plain] }])[0].streamKey;
+    ledger.upsertPending(base); ledger.markDone(base, "BV_ROLL");
+    const notify = vi.fn<(e: NotifyEvent) => void>();
+    await new Reconciler({ platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      runPipeline: vi.fn(), settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0, notify }).reconcileAll();
+    expect(notify.mock.calls.filter(([e]) => ("message" in e ? String(e.message) : "").includes("不属于该稿件"))).toHaveLength(0);
     ledger.close();
   });
 });

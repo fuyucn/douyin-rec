@@ -22,6 +22,7 @@ import {
   zeroDiskNodeDir,
   zeroDiskNodePreflight,
 } from "../../packages/app/src/zero-disk-node.js";
+import { zeroDiskStreamKey } from "@drec/core";
 import {
   resolveRollingUploadMeta,
   resolveStreamPartTitle,
@@ -410,7 +411,7 @@ describe("createZeroDiskReporter — one managed run: status trail + exactly one
   beforeEach(() => { useRoot("node"); });
   const mk = (now = T0) => createZeroDiskReporter({ platform: "douyin", roomSlug: "77", startMs: 1234, now: () => now });
 
-  it("tracks part progress, then writes one receipt keyed like the master-local path", () => {
+  it("tracks part progress, then writes one receipt keyed like the master-local path (-zd key + start time)", () => {
     const r = mk();
     r.running();
     expect(buildZeroDiskReport({ isAlive: () => true }).status[0]).toMatchObject({ state: "running", parts: 0 });
@@ -420,8 +421,10 @@ describe("createZeroDiskReporter — one managed run: status trail + exactly one
     expect(fin).toEqual({ receiptWritten: true });
     const rep = buildZeroDiskReport({ isAlive: () => false });
     expect(rep.receipts).toEqual([{
-      v: 1, id: "douyin:77:1234", platform: "douyin", roomSlug: "77", streamKey: "douyin:77:2026-10-20", bvid: "BVfake1", parts: 2, atMs: T0,
+      v: 1, id: "douyin:77:1234", platform: "douyin", roomSlug: "77", streamKey: zeroDiskStreamKey("douyin", "77", 1234), startMs: 1234, bvid: "BVfake1", parts: 2, atMs: T0,
     }]);
+    // Own `-zd` namespace: never the bare date key a regular recording of the same room and day uses (issue #324).
+    expect(rep.receipts[0]!.streamKey).toMatch(/-zd$/);
     expect(rep.status[0]).toMatchObject({ state: "finished", parts: 2, bvid: "BVfake1" });
   });
   it("parts = the larger of confirmed-so-far and this run's segments", () => {

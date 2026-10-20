@@ -8,6 +8,7 @@
  * master therefore ships the resolved metadata with the task spec and the node consumes ONLY that.
  * Parsing is strict on purpose: a missing field is a refusal to start, never a default.
  */
+import { processTimeZone, zonedStamp } from "./title-template.js";
 
 /** Env var carrying the delivered JSON from the node's task manager to its `record` child. */
 export const ZERO_DISK_DELIVERY_ENV = "DREC_ZERO_DISK_DELIVERY";
@@ -110,6 +111,19 @@ export function zeroDiskAccountVerdict(expectedKey: string, nodeKey: string): Ze
   return null;
 }
 
+/**
+ * Ledger key of a zero-disk run (issue #324): `{platform}:{roomSlug}:{date}_{HHMM}-zd`, date and time of the
+ * stream start in the configured time zone.
+ *
+ * It must never equal a key the broadcast clustering can produce (`{date}` / `{date}_{HHMM}` / `-N`). A zero-disk
+ * run used to take the bare `{UTC date}` key without a start time; clustering then treated a real recording of the
+ * same room and day as "the known job", reused the key, found it `done` and skipped the recording without a trace.
+ */
+export function zeroDiskStreamKey(platform: string, roomSlug: string, startMs: number, timeZone: string = processTimeZone()): string {
+  const z = zonedStamp(startMs, timeZone);
+  return `${platform}:${roomSlug}:${z.date}_${z.hh}${z.mm}-zd`;
+}
+
 /** One finished zero-disk run, written by the node and applied to the master ledger exactly once. */
 export interface ZeroDiskReceipt {
   v: 1;
@@ -117,11 +131,25 @@ export interface ZeroDiskReceipt {
   id: string;
   platform: string;
   roomSlug: string;
-  /** Ledger job key, built by the node with the same formula as the local path. */
+  /** Ledger job key, built by the node with {@link zeroDiskStreamKey} (same formula as the local path). */
   streamKey: string;
+  /** When the run started; stored as the ledger job's startMs. Absent on receipts from nodes older than issue #324. */
+  startMs?: number;
   bvid: string;
   parts: number;
   atMs: number;
+}
+
+/**
+ * Ledger entry the master records for a receipt. Receipts from nodes older than issue #324 carry no start time and
+ * the bare UTC-date key that swallows same-day real recordings; those are re-keyed into the `-zd` namespace using the
+ * completion time instead of trusting the node's formula.
+ */
+export function zeroDiskReceiptLedgerEntry(r: ZeroDiskReceipt, timeZone?: string): { streamKey: string; startMs: number } {
+  if (r.startMs === undefined) {
+    return { streamKey: zeroDiskStreamKey(r.platform, r.roomSlug, r.atMs, timeZone), startMs: r.atMs };
+  }
+  return { streamKey: r.streamKey, startMs: r.startMs };
 }
 
 /** Lifecycle of the zero-disk process on a node, as shown in the master console. */
@@ -157,7 +185,8 @@ export function normalizeZeroDiskReceipt(x: unknown): ZeroDiskReceipt | null {
   if (typeof id !== "string" || !id || typeof platform !== "string" || !platform || typeof roomSlug !== "string" || !roomSlug) return null;
   if (typeof streamKey !== "string" || !streamKey || typeof bvid !== "string" || !bvid) return null;
   if (!Number.isInteger(parts) || (parts as number) < 0 || typeof atMs !== "number" || !Number.isFinite(atMs)) return null;
-  return { v: 1, id, platform, roomSlug, streamKey, bvid, parts: parts as number, atMs };
+  const startMs = typeof x.startMs === "number" && Number.isFinite(x.startMs) ? x.startMs : undefined;
+  return { v: 1, id, platform, roomSlug, streamKey, bvid, parts: parts as number, atMs, ...(startMs !== undefined ? { startMs } : {}) };
 }
 
 export function normalizeZeroDiskStatus(x: unknown): ZeroDiskNodeStatus | null {

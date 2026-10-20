@@ -38,6 +38,7 @@ import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedStat
 import type { HubStarter, TaskStore } from "@drec/app";
 import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
+import { zeroDiskReceiptLedgerEntry, zeroDiskStreamKey } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
 import { recordStreamUpload } from "@drec/orchestrator";
 import { DEFAULT_SEGMENT_CAP } from "@drec/zero-upload";
@@ -520,9 +521,12 @@ program
         } else if (res.ok && res.bvid) {
           const r = recordStreamUpload({
             syncDbPath: syncDbPathFor(dbPathForDataRoot(process.env.DOUYIN_REC_ROOT ?? process.cwd())),
-            streamKey: `${platform.id}:${roomSlug}:${new Date().toISOString().slice(0, 10)}`,
+            // Own key namespace + real start time, so a regular recording of the same room and day is
+            // never mistaken for this job and skipped (issue #324).
+            streamKey: zeroDiskStreamKey(platform.id, roomSlug, streamStartMs),
             bvid: res.bvid,
             parts: res.segments.length,
+            startMs: streamStartMs,
           });
           console.log(r.ok
             ? `[stream-upload] 台账已记录: ${r.bvid}${r.alreadyTerminal ? "(已是终态,未覆盖)" : ""}`
@@ -1429,7 +1433,8 @@ const hubStarter: HubStarter = {
     // rows are never overwritten), so re-polling or a master restart cannot double-record.
     const zeroDiskFleet = new ZeroDiskFleet({
       applyReceipt: (r) => {
-        const res = recordStreamUpload({ syncDbPath: dbPath, streamKey: r.streamKey, bvid: r.bvid, parts: r.parts });
+        const { streamKey, startMs } = zeroDiskReceiptLedgerEntry(r);
+        const res = recordStreamUpload({ syncDbPath: dbPath, streamKey, bvid: r.bvid, parts: r.parts, startMs });
         if (res.ok && res.alreadyTerminal) opts.log(`[zero-disk] 台账已是终态,未覆盖: ${r.streamKey}`);
         return res;
       },

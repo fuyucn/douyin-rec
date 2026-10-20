@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { zeroDiskStreamKey } from "@drec/core";
 import { recordStreamUpload } from "./stream-upload-ledger.js";
 import { SyncLedger } from "./ledger.js";
 
@@ -46,5 +47,21 @@ describe("recordStreamUpload", () => {
     const r = recordStreamUpload({ syncDbPath: join(dir, "nope", "x-sync.db"), streamKey: KEY, bvid: "BILIfake1", parts: 1 });
     expect(r.ok).toBe(false);
     expect(r.error).toBeTruthy();
+  });
+});
+
+describe("zeroDiskStreamKey (issue #324)", () => {
+  it("uses the stream start in the given zone and a suffix clustering never produces", () => {
+    const start = Date.UTC(2026, 9, 18, 23, 47); // 07:47 next day in Shanghai
+    expect(zeroDiskStreamKey("douyin", "12345", start, "Asia/Shanghai")).toBe("douyin:12345:2026-10-19_0747-zd");
+    expect(zeroDiskStreamKey("douyin", "12345", start, "UTC")).toBe("douyin:12345:2026-10-18_2347-zd");
+  });
+
+  it("stores the start time on the job so later clustering compares real starts", () => {
+    const key = zeroDiskStreamKey("douyin", "12345", 1_000_000);
+    recordStreamUpload({ syncDbPath: db, streamKey: key, bvid: "BILIfake1", parts: 1, startMs: 1_000_000 });
+    const l = new SyncLedger(db);
+    expect(l.get(key)?.startMs).toBe(1_000_000);
+    l.close();
   });
 });

@@ -20,6 +20,8 @@ export interface RecordStreamUploadOpts {
   bvid: string;
   /** Parts that reached the archive, for the event detail line. */
   parts: number;
+  /** When the stream went live; stored as the job's startMs so later clustering compares real start times. */
+  startMs?: number;
   now?: number;
 }
 
@@ -41,7 +43,7 @@ export function recordStreamUpload(o: RecordStreamUploadOpts): RecordStreamUploa
     ledger = new SyncLedger(o.syncDbPath);
     const before = ledger.get(o.streamKey);
     // Idempotent: an existing job keeps its history, a new one starts pending.
-    ledger.upsertPending(o.streamKey);
+    ledger.upsertPending(o.streamKey, o.startMs);
     const beforeTerminal = before !== null && ["done", "failed", "needs_manual"].includes(before.state);
     if (beforeTerminal) {
       // Already terminal. Bilibili has no delete API, so overwriting the BV would point the

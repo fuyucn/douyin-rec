@@ -147,6 +147,8 @@ export class Reconciler {
   /** Last emitted signature per expected-skip log key; repeats are suppressed until the signature changes or the repeat window passes. */
   private readonly skipLogState = new Map<string, { sig: string; at: number }>();
   private static readonly SKIP_LOG_REPEAT_MS = 30 * 60_000;
+  /** done keys already alerted for recordings the job never claimed (issue #324), so each is reported once. */
+  private readonly doneUnclaimedAlerted = new Set<string>();
   private maxRetries: number;
   private staleMs: number;
   private reconnectWindowMs: number;
@@ -545,6 +547,26 @@ export class Reconciler {
 
 
 /**
+ * A `done` key that never went through selection (no candidate rows) but whose scanned members carry no manuscript
+ * of that job: something else marked the key done (e.g. a zero-disk run on the same room and day, issue #324), and
+ * these recordings would otherwise be skipped forever without a trace. Alert once per key; the state stays done
+ * (done has no exits) and nothing is uploaded automatically.
+ */
+private alertUnclaimedOnDone(b: Broadcast, job: { bv?: string | null }): void {
+  if (this.doneUnclaimedAlerted.has(b.streamKey)) return;
+  if (this.ledger.getCandidates(b.streamKey).length > 0) return;
+  // Only rolling sessions carry their own manuscript id, so only they can prove "not this job's". A plain
+  // recording next to a rolling one is normal dual recording (the rolling short-circuit closed the broadcast).
+  const unclaimed = b.members.filter((m) => m.rec.tsFiles.length > 0 && m.rec.rolling != null && (m.rec.rolling.bv ?? null) !== (job.bv ?? null));
+  if (unclaimed.length === 0) return;
+  this.doneUnclaimedAlerted.add(b.streamKey);
+  const sessions = unclaimed.map((m) => `${m.workerId}:${m.rec.sessionBase}`).join(", ");
+  const message = `${b.streamKey} 已是 done(稿件 ${job.bv ?? "无"}),但节点上还有不属于该稿件的录像 [${sessions}],不会被自动处理,请人工核对是否需要补传`;
+  console.warn(`[reconciler] ${message}`);
+  this.notify?.({ kind: "error", stage: "同步", message });
+}
+
+/**
  * T12:该 job 是否**到点该补跑收尾**(清理失败 / 核验软状态)。
  *
  * 节流:同一场两次补跑之间至少 `cleanupBackfillThrottleMs`(默认 15 分钟)——
@@ -706,6 +728,7 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
               }
             }));
           }
+          this.alertUnclaimedOnDone(b, job);
           continue;
         }
 
