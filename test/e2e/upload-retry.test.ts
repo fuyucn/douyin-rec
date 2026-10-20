@@ -122,9 +122,9 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
   });
 
   // #66: the part list refreshes about 0.5-1s after an append returns. If the append was applied but the
-  // response was lost, the single immediate readback still sees the old count, so the wrapper switches line
-  // and appends again (duplicate part). Known defect; flip to it() once readback retries with backoff.
-  // The fake lag is counted in reads, so the backoff timing itself needs a unit test next to appendGroup.
+  // response was lost, appendGroup re-reads at intervals before switching line (no duplicate part).
+  // The fake lag is counted in reads and the fake injects a no-op sleep; backoff timing is unit-tested
+  // next to appendGroup (test/upload/biliup-append.test.ts).
   it("fake: countLagReads keeps the pre-append count for N reads", async () => {
     s = await create(); rec(s);
     s.fake.countLagReads = 2;
@@ -137,7 +137,7 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
     expect(await s.fake.countVideoParts(bv)).toBe(3);
   });
 
-  it.fails("append applied but response lost + delayed readback → must not append twice (#66)", async () => {
+  it("append applied but response lost + delayed readback → must not append twice (#66)", async () => {
     s = await create(); rec(s);
     s.fake.countLagReads = 1;
     s.fake.inject({ op: "append", mode: "ambiguous" });
