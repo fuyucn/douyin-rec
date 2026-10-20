@@ -80,7 +80,7 @@ export interface RollingUploadHook {
 }
 
 export class RecordingSession {
-  private writer = new XmlDanmuWriter();
+  private writer = new XmlDanmuWriter({ log: (m) => log.warn(m) });
   private writerOpen = false;
   /** Session-level danmu xml path currently open (DLR mode). Null = none open. */
   private currentXmlPath: string | null = null;

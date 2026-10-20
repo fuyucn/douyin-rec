@@ -1,4 +1,4 @@
-import { writeFileSync, openSync, writeSync, closeSync, fstatSync, ftruncateSync } from "node:fs";
+import { writeFileSync, openSync, writeSync, closeSync, fstatSync, ftruncateSync, existsSync, renameSync, statSync } from "node:fs";
 import type { DanmuMessage, DanmuWriter } from "@drec/core";
 import { RECORDER_XML_STYLE } from "./recorder-xml-style.js";
 
@@ -47,6 +47,23 @@ const HEADER = (anchor: string, roomId: string, vst: string) =>
   `</metadata>\n` +
   `${RECORDER_XML_STYLE}\n`;
 
+/**
+ * Move a non-empty file that `open()` would otherwise truncate out of the way (issue #329).
+ * The xml is the only copy of the danmu, so it is renamed aside intact, never overwritten.
+ * Returns the new path, or null when there was nothing to preserve.
+ */
+export function preserveExistingXml(filePath: string, nowMs: number = Date.now()): string | null {
+  try {
+    if (!existsSync(filePath) || statSync(filePath).size === 0) return null;
+  } catch {
+    return null;
+  }
+  let target = `${filePath}.prev-${nowMs}`;
+  for (let n = 1; existsSync(target); n++) target = `${filePath}.prev-${nowMs}-${n}`; // rename would overwrite
+  renameSync(filePath, target);
+  return target;
+}
+
 export class XmlDanmuWriter implements DanmuWriter {
   private path = "";
   private baseSec: number | null = null;
@@ -55,7 +72,12 @@ export class XmlDanmuWriter implements DanmuWriter {
   /** 去重：抖音 WS 会重发最近消息，按消息键丢弃重复。每次 open() 重置。 */
   private seen = new Set<string>();
 
+  /** @param opts.log receives a line whenever an existing xml was renamed aside instead of truncated. */
+  constructor(private readonly opts: { log?: (msg: string) => void } = {}) {}
+
   open(filePath: string, meta: { anchorName: string; roomId?: string; videoStartMs?: number }): void {
+    const preserved = preserveExistingXml(filePath);
+    if (preserved) this.opts.log?.(`弹幕 xml 已存在且非空,已原样改名留存(不截断): ${preserved}`);
     this.path = filePath;
     this.videoStartMs = meta.videoStartMs ?? null;
     // 锚到视频起点时 baseSec 立即定;否则等首条消息(旧行为)。

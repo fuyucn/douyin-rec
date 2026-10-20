@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { XmlDanmuWriter } from "./xml-writer.js";
+import { XmlDanmuWriter, preserveExistingXml } from "./xml-writer.js";
 import type { DanmuMessage } from "@drec/core";
 
 let dir = "";
@@ -116,5 +116,43 @@ describe("XmlDanmuWriter — biliLive RecorderXmlStyle 格式", () => {
     const xml = readFileSync(path, "utf-8");
     expect(xml).toContain("<i>");
     expect(xml).toContain("</i>");
+  });
+});
+
+describe("XmlDanmuWriter.open never truncates an existing xml (issue #329)", () => {
+  it("reopening the same path keeps the earlier danmu in a .prev- file", () => {
+    const logs: string[] = [];
+    const w1 = new XmlDanmuWriter({ log: (m) => logs.push(m) });
+    w1.open(path, { anchorName: "a" });
+    w1.add(dm({ content: "first-run" }));
+    w1.close();
+    const w2 = new XmlDanmuWriter({ log: (m) => logs.push(m) });
+    w2.open(path, { anchorName: "a" });
+    w2.add(dm({ content: "second-run" }));
+    const prev = readdirSync(dir).filter((f) => f.startsWith("t.xml.prev-"));
+    expect(prev).toHaveLength(1);
+    expect(readFileSync(join(dir, prev[0]!), "utf-8")).toContain("first-run");
+    const cur = readFileSync(path, "utf-8");
+    expect(cur).toContain("second-run");
+    expect(cur).not.toContain("first-run");
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain(prev[0]!);
+  });
+
+  it("a missing or empty file is not preserved", () => {
+    expect(preserveExistingXml(path)).toBeNull();
+    writeFileSync(path, "");
+    expect(preserveExistingXml(path)).toBeNull();
+    expect(readdirSync(dir)).toEqual(["t.xml"]);
+  });
+
+  it("never overwrites an earlier preserved copy", () => {
+    writeFileSync(path, "one");
+    const a = preserveExistingXml(path, 1000);
+    writeFileSync(path, "two");
+    const b = preserveExistingXml(path, 1000);
+    expect(a).not.toBe(b);
+    expect(readFileSync(a!, "utf-8")).toBe("one");
+    expect(readFileSync(b!, "utf-8")).toBe("two");
   });
 });
