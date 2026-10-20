@@ -63,7 +63,7 @@ describe("cleanupBackfillDue:**不再**因「clean_source 缺失」补跑(2026-1
   });
 });
 
-describe("上传确认后回读数与期望不符也不保源(issue #92,取代 T33 ② 的保源口径)", () => {
+describe("删最后一份源之前的延后回读闸门(issue #327,取代 #92 的「不保源」口径)", () => {
   function deps(actual: number | null) {
     const dir = mkdtempSync(join(tmpdir(), "t33-"));
     mkdirSync(join(dir, "sub"), { recursive: true });
@@ -83,7 +83,6 @@ describe("上传确认后回读数与期望不符也不保源(issue #92,取代 T
       cfg,
       countParts: async () => actual,
       sleep: async () => {},
-      scheduleSideCheck: () => {}, // 旁路校验不在本组用例范围(见 finalize-verify.test.ts)
     } as unknown as PipelineDeps;
   }
 
@@ -101,18 +100,20 @@ describe("上传确认后回读数与期望不符也不保源(issue #92,取代 T
     return { cleaned, state: d.ledger.get("k")?.state };
   };
 
-  it("actual < expected(回读少,期望 3 实际 1)→ 照常清理一次,不转人工(返回码 0 即成功)", async () => {
+  it("actual < expected(回读少,期望 3 实际 1,窗口耗尽仍少)→ 不清理,转人工", async () => {
     const r = await finalizeWith(1, 3);
-    expect(r.cleaned).toBe(1);
-    expect(r.state).not.toBe("needs_manual");
+    expect(r.cleaned).toBe(0);
+    expect(r.state).toBe("needs_manual");
   });
 
   it("actual === expected → 正常清理", async () => {
     expect((await finalizeWith(3, 3)).cleaned).toBe(1);
   });
 
-  it("actual > expected(多出分 P)→ 正常清理", async () => {
-    expect((await finalizeWith(5, 1)).cleaned).toBe(1);
+  it("actual > expected(多出分 P,可能重复)→ 不清理,转人工", async () => {
+    const r = await finalizeWith(5, 1);
+    expect(r.cleaned).toBe(0);
+    expect(r.state).toBe("needs_manual");
   });
 });
 

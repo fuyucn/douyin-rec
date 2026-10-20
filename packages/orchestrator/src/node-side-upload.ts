@@ -153,7 +153,7 @@ async function finalizeNodeSuccess(
     jlog(`节点侧收尾清理部分失败(${cleanOutcome.failed.length}):`
       + `${cleanOutcome.failed.map((f) => f.target).join(",")}(已记 clean_source failed,待 reconciler 补跑)`);
   }
-  // 注意:节点侧路径从不写 sync_parts 基线,回读分 P 数无从比对,故这里**不排**旁路校验(issue #92)。
+  // 注意:节点侧路径从不写 sync_parts 基线,回读分 P 数无从比对,故这里**不做**删源前回读(issue #92 / #327:无基线 = 放行,行为不变)。
   return { state: "done", bv };
 }
 

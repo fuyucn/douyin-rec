@@ -162,6 +162,57 @@ export async function verifyUploaded(
 }
 
 /**
+ * 期望分 P 数(台账基线)。0 = 无基线(plain 组恒有 P1,plain=0 说明台账里没有本次上传的 checkpoint:
+ * 老 job / 续跑只补 append / 节点侧上传),调用方必须当「无法核验」放行,不能当「期望 0」。
+ */
+export function expectedPartsFromLedger(
+  ledger: PartsReader,
+  streamKey: string,
+  on: Record<VerifyGroup, boolean>,
+): number {
+  const plan = submittedPlanFromLedger(ledger, streamKey, on);
+  return plan.counts.plain === 0 ? 0 : expectedPartCount(plan);
+}
+
+/** 延后回读总窗口默认值(issue #327):即 `sideCheckDelayMs` 缺省,不另设旋钮。 */
+export const DEFAULT_READBACK_WINDOW_MS = 10 * 60_000;
+
+/** 各次回读占总窗口的比例(间隔,非累计):10 分钟窗口 = 首读 2 分钟后,再 2/2/4 分钟后重读(累计 2/4/6/10 分钟)。 */
+const READBACK_SPLIT = [0.2, 0.2, 0.2, 0.4] as const;
+
+/** 回读前的等待序列(ms)。 */
+export function readbackDelays(windowMs: number): number[] {
+  const w = Math.max(0, windowMs);
+  return READBACK_SPLIT.map((r) => Math.round(w * r));
+}
+
+/**
+ * 延后多次回读分 P 数(issue #327):每次先等 `readbackDelays` 的一段,再读一次;读到与期望一致立即返回 `ok`。
+ * 窗口耗尽仍不符 → 返回**最后一次**结果:`mismatch`(`actual < expected` = 少,`actual > expected` = 可能重复)/
+ * `unknown`(最后一次读不到或抛错)。B站列表最终一致:早期的「少」多半是读早了,所以不能只读一次。
+ * 不重传、不重试上传,只读。
+ */
+export async function readbackWithDelays(o: {
+  expected: number;
+  bv: string;
+  countParts: (bv: string) => Promise<number | null>;
+  windowMs: number;
+  sleep: (ms: number) => Promise<void>;
+}): Promise<VerifyResult> {
+  let last: VerifyResult = { kind: "unknown", reason: "未读取" };
+  for (const delay of readbackDelays(o.windowMs)) {
+    await o.sleep(delay);
+    try {
+      last = verifyParts(o.expected, await o.countParts(o.bv));
+    } catch (e) {
+      last = { kind: "unknown", reason: `取实际分 P 数异常: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
+    }
+    if (last.kind === "ok") return last;
+  }
+  return last;
+}
+
+/**
  * 取实际分 P 数,**并等它与期望一致**(B站 `pages` 列表是最终一致的)。
  *
  * ## 为什么必须重试(2026-10-10 实测取证,不是推测)
@@ -221,8 +272,8 @@ export interface VerifyOpts {
   sleep?: (ms: number) => Promise<void>;
   /**
    * mismatch 时是否**阻塞**(转 needs_manual + 保留源)。
-   * 缺省 = {@link DEFAULT_VERIFY_BLOCKING}(false)。注意:issue #92 起收口(finalizeAfterUpload)不再读取该策略,
-   * 回读只做延迟旁路校验;此开关仅保留给 verify 模块自身的纯函数与测试。
+   * 缺省 = {@link DEFAULT_VERIFY_BLOCKING}(false)。注意:收口(finalizeAfterUpload)不读取该策略:
+   * issue #327 起删源前的延后回读自成闸门({@link readbackWithDelays});此开关仅保留给 verify 模块自身的纯函数与测试。
    * 传 true 恢复旧行为。
    */
   blocking?: boolean;
@@ -248,7 +299,7 @@ export interface VerifyOpts {
  * 攒够样本后用**真实分布**回答「B站同步要等多久」,再决定要不要升回硬验收。
  *
  * ## 怎么翻回去
- * (issue #92 起收口不再据此阻塞:改 `DEFAULT_VERIFY_BLOCKING` 不会让清理重新被回读卡住。)
+ * (收口不据此阻塞:删源前的闸门是 issue #327 的延后多次回读,与本开关无关。)
  */
 const DEFAULT_VERIFY_BLOCKING = false;
 

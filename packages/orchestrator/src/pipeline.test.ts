@@ -277,13 +277,16 @@ describe("runPipeline", () => {
         expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
       });
 
-      it("期望 9 实际 8(回读少)→ 仍 done,**照常删节点源**(issue #92:上传是否成功只看 biliup 返回码)", async () => {
-        // 收口时不再同步回读;回读由延迟的旁路校验承担(只记录/告警,不影响清理),见 finalize-verify.test.ts。
-        const deps = segUploadDeps({ countParts: async () => 8 });
+      it("期望 9 实际 8(窗口耗尽仍少)→ needs_manual,**保留全部源**,不发 uploadDone(#327)", async () => {
+        const notify = vi.fn();
+        const deps = segUploadDeps({ countParts: async () => 8, notify });
         const r = await runSeg(deps);
-        expect(r.state).toBe("done");
-        expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
-        expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("done");
+        expect(r.state).toBe("needs_manual");
+        expect(r.bv).toBe("BV123"); // upload itself succeeded (biliup exit 0); only cleanup is withheld
+        expect(deps.ledger.get(STREAM_KEY)?.state).toBe("needs_manual");
+        expect(deps.ledger.get(STREAM_KEY)?.error).toMatch(/期望 9.*回读 8/);
+        expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+        expect(notify.mock.calls.map(([e]) => (e as { kind: string }).kind)).toEqual(["error"]);
       });
 
       it("未注入 countParts → 核验关闭,分段路径照常删源(与现状一致)", async () => {
@@ -293,12 +296,11 @@ describe("runPipeline", () => {
         expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
       });
 
-      it("countParts=null → 不影响清理:照常删源、clean_verify 记 done(不再留 pending)、job 仍 done", async () => {
+      it("countParts=null(一直读不到)→ 同样保留源并转人工(#327)", async () => {
         const deps = segUploadDeps({ countParts: async () => null });
         const r = await runSeg(deps);
-        expect(r.state).toBe("done");
-        expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("done");
-        expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+        expect(r.state).toBe("needs_manual");
+        expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
       });
 
       it("分段路径 rmStage 抛错 → job 仍 done(不因清理失败变 failed)", async () => {
@@ -1974,23 +1976,34 @@ describe("runPipeline", () => {
       expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
     });
 
-    it("合并路径 回读少于期望(期望 3 实际 2)→ 仍 done,**照常删节点源**(issue #92)", async () => {
-      // 收口不再同步回读;回读在延迟后旁路执行(只记录/告警)。
-      const deps = uploadDeps({ countParts: async () => 2 });
+    it("合并路径 回读少于期望(期望 3 实际 2,窗口耗尽仍少)→ needs_manual,保留全部源,不发 uploadDone(#327)", async () => {
+      const notify = vi.fn();
+      const deps = uploadDeps({ countParts: async () => 2, notify });
       const r = await run(deps);
-      expect(r.state).toBe("done");
-      expect(r.bv).toBe("BV123");                    // 上传确实成功了
-      expect(deps.ledger.get(STREAM_KEY)?.state).toBe("done");
-      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+      expect(r.state).toBe("needs_manual");
+      expect(r.bv).toBe("BV123");                    // 上传确实成功了(biliup 返回 0),只是不删源
+      expect(deps.ledger.get(STREAM_KEY)?.state).toBe("needs_manual");
+      expect(deps.ledger.get(STREAM_KEY)?.error).toMatch(/期望 3.*回读 2/);
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+      expect(notify.mock.calls.map(([e]) => (e as { kind: string }).kind)).not.toContain("uploadDone");
+      expect(notify.mock.calls.filter(([e]) => (e as { kind: string }).kind === "error")).toHaveLength(1);
     });
 
-    it("countParts 返回 null → 不影响清理:照常删源、clean_verify 记 done(不再留 pending)、不转人工", async () => {
+    it("合并路径 首读偏少、稍后读到期望 → 清理照常,job done,无告警(#327)", async () => {
+      let n = 0;
+      const notify = vi.fn();
+      const deps = uploadDeps({ countParts: async () => (++n < 3 ? 2 : 3), notify });
+      const r = await run(deps);
+      expect(r.state).toBe("done");
+      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
+      expect(notify.mock.calls.map(([e]) => (e as { kind: string }).kind)).not.toContain("error");
+    });
+
+    it("countParts 返回 null(一直读不到)→ 保留源并转人工(#327)", async () => {
       const deps = uploadDeps({ countParts: async () => null });
       const r = await run(deps);
-      expect(r.state).toBe("done");                   // 上传成功的事实不被回滚
-      expect(deps.ledger.getNodeState(STREAM_KEY, "clean_verify")?.state).toBe("done");
-      expect(deps.transports.get("node-1")!.cleanup).toHaveBeenCalled();
-      expect(deps.ledger.get(STREAM_KEY)?.state).not.toBe("needs_manual");
+      expect(r.state).toBe("needs_manual");
+      expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
     });
 
     it("未注入 countParts → 核验关闭,清理行为与现状一致(照常删源)", async () => {

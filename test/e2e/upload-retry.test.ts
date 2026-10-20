@@ -126,7 +126,8 @@ describe("e2e: 上传超时/故障后的重试与降级", () => {
   // The fake lag is counted in reads and the fake injects a no-op sleep; backoff timing is unit-tested
   // next to appendGroup (test/upload/biliup-append.test.ts).
   it("fake: countLagReads keeps the pre-append count for N reads", async () => {
-    s = await create(); rec(s);
+    // No countParts -> the master's delayed read-back gate (#327) is off and does not consume the fake's lag reads.
+    s = await Scenario.create({ cfg: { cleanup: FULL_CLEANUP }, deps: { countParts: undefined } }); rec(s);
     s.fake.countLagReads = 2;
     await s.reconcile();
     const bv = s.fake.onlyArchive.bv;
