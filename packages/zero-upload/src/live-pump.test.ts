@@ -7,7 +7,7 @@ import { build } from "esbuild";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, statSync, writeFileSync, existsSync, writeSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, statSync, writeFileSync, existsSync, writeSync, mkdirSync, readdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -21,6 +21,7 @@ import {
   buildPipeFfmpegArgs,
   DEFAULT_SEGMENT_CAP,
   LivePumpSession,
+  archivedSpoolPathsToKeep,
   readLivePumpState,
   writeLivePumpState,
   livePumpStatePath,
@@ -1821,5 +1822,95 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     expect(r.ok).toBe(true);
     expect(posts.length).toBe(before);
     expect(readLivePumpState(statePath)?.parts.find((p) => p.index === 1)?.confirmed).toBe(true);
+  });
+});
+
+describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
+  let dir: string;
+  const MIN = 60_000;
+  const FAKE_BV = "BV" + "1fakeSame293";
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-gap-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  const open = (log: (m: string) => void = () => {}) => new LivePumpSession({
+    cookiesPath: COOKIES, room: "gap", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true, log,
+  });
+  const statePath = () => livePumpStatePath(dir, "gap");
+  const part = (confirmed: boolean) => ({
+    index: 0, spoolPath: join(dir, "p0.ts"), filename: "f", stem: "s", title: "P1",
+    bytes: 1, durationSec: 1, confirmed,
+  });
+  /** Writes a state whose last activity was `agoMin` minutes ago (updatedAt is stamped by hand). */
+  function seed(agoMin: number, extra: Record<string, unknown> = {}): void {
+    const base = {
+      schemaVersion: 1, room: "gap", createdAt: 1, title: "old", tid: 21, tag: "x", private: true,
+      bvid: FAKE_BV, parts: [part(true)], updatedAt: Date.now() - agoMin * MIN, ...extra,
+    };
+    writeFileSync(statePath(), JSON.stringify(base));
+  }
+  const archives = () => readdirSync(dir).filter((f) => f.includes(".archived-"));
+
+  it("61 min gap: starts a new submission and archives the old state", () => {
+    seed(61);
+    const logs: string[] = [];
+    const s = open((m) => logs.push(m));
+    expect(s.hasArchiveIdentity).toBe(false);
+    expect(s.bvid).toBeUndefined();
+    const a = archives();
+    expect(a.length).toBe(1);
+    expect(readLivePumpState(join(dir, a[0]!))?.bvid).toBe(FAKE_BV);
+    expect(existsSync(statePath())).toBe(false);
+    expect(logs.join("\n")).toContain("archived old state");
+  });
+
+  it("59 and 60 min gaps continue the same submission", () => {
+    for (const ago of [59, 60]) {
+      seed(ago - 0.01);
+      const s = open();
+      expect(s.bvid).toBe(FAKE_BV);
+      expect(archives().length).toBe(0);
+    }
+  });
+
+  it("pending WAL at archive time: kept in the archive, error surfaced, next start is fresh", () => {
+    const pending = { kind: "append", partIndex: 1, stem: "s1", title: "P2", bytes: 1, durationSec: 1, spoolPath: join(dir, "p1.ts") };
+    seed(120, { pending });
+    expect(() => open()).toThrow(/pending\/unconfirmed/);
+    const a = archives();
+    expect(a.length).toBe(1);
+    expect(readLivePumpState(join(dir, a[0]!))?.pending?.stem).toBe("s1");
+    expect(archivedSpoolPathsToKeep(dir, "gap")).toContain(pending.spoolPath);
+    expect(open().hasArchiveIdentity).toBe(false);
+  });
+
+  it("corrupt state: refuses to start and leaves the file untouched", () => {
+    writeFileSync(statePath(), "{not json");
+    expect(() => open()).toThrow(/corrupt/);
+    expect(readFileSync(statePath(), "utf-8")).toBe("{not json");
+    expect(archives().length).toBe(0);
+  });
+
+  it("old state without a timestamp and with unconfirmed parts: cannot judge, refuses", () => {
+    seed(0, { updatedAt: undefined, parts: [part(false)] });
+    expect(() => open()).toThrow(/cannot judge/);
+    expect(archives().length).toBe(0);
+  });
+
+  it("old fully confirmed state without a timestamp falls back to file mtime", () => {
+    seed(0, { updatedAt: undefined });
+    const old = new Date(Date.now() - 90 * MIN);
+    utimesSync(statePath(), old, old);
+    expect(open().hasArchiveIdentity).toBe(false);
+    expect(archives().length).toBe(1);
+    seed(0, { updatedAt: undefined });
+    expect(open().bvid).toBe(FAKE_BV);
+  });
+
+  it("every state write refreshes last activity so the rule works after a restart", () => {
+    seed(500);
+    const st = readLivePumpState(statePath())!;
+    writeLivePumpState(statePath(), st);
+    expect(open().bvid).toBe(FAKE_BV);
+    expect(archives().length).toBe(0);
   });
 });

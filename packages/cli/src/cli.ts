@@ -294,7 +294,7 @@ program
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
-      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep } = await import("@drec/zero-upload");
+      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep } = await import("@drec/zero-upload");
       const {
         rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta,
         resolveStreamUploadTitle, resolveStreamPartTitle,
@@ -375,7 +375,7 @@ program
       const st = readLivePumpState(livePumpStatePath(opts.outDir, pumpRoom));
       sweepOrphanSpools({
         spoolDir: opts.outDir,
-        knownSpoolPaths: spoolPathsToKeep(st),
+        knownSpoolPaths: [...spoolPathsToKeep(st), ...archivedSpoolPathsToKeep(opts.outDir, pumpRoom)],
         log: (m) => console.log(m),
       });
       const abort = new AbortController();

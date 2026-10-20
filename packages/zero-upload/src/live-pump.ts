@@ -26,6 +26,7 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -48,7 +49,7 @@ import {
   type UposPart,
   type StudioVideo,
 } from "./upos-stream.js";
-import { isUploadRateLimited, type DanmuMessage } from "@drec/core";
+import { isSameBroadcastGap, isUploadRateLimited, type DanmuMessage } from "@drec/core";
 import { ffprobeDuration } from "@drec/post-process";
 
 export const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
@@ -295,6 +296,57 @@ export function writeLivePumpState(path: string, state: LivePumpState): void {
   }
 }
 
+/** Archived state files are `<state path>.archived-<epoch ms>`; they are kept for audit, never deleted. */
+const ARCHIVED_SUFFIX = ".archived-";
+
+/**
+ * Same-broadcast rule for the room-keyed state file (issue #293).
+ *
+ * The state is keyed by room only, so without this a later broadcast of the same room would append
+ * to the previous broadcast's archive. Last activity = `updatedAt`, which `writeLivePumpState`
+ * stamps on every write (so it survives restarts). A state older than `SAME_BROADCAST_GAP_MS`
+ * (core's single rule) is renamed aside and the caller starts a new submission.
+ *
+ * Fallback for old files without a usable `updatedAt`: if everything is confirmed, the file mtime
+ * stands in as last activity; if anything is pending/unconfirmed we cannot judge and refuse.
+ * Corrupt/unreadable state also refuses (a silent fresh start would overwrite it and duplicate the
+ * archive). An archived state that still holds pending/unconfirmed parts is kept intact and the
+ * call throws so the operator sees it; the next start then begins a new submission.
+ */
+function rolloverStaleState(path: string, room: string, nowMs: number, log: (msg: string) => void): void {
+  if (!existsSync(path)) return;
+  const state = readLivePumpState(path);
+  if (!state) throw new Error(`live-pump state ${path} is unreadable or corrupt; refusing to start (manual recovery required)`);
+  if (state.room !== room) return; // the constructor reports the mismatch
+  const unconfirmed = !!state.pending || state.parts.some((p) => !p.confirmed);
+  let lastActivity = state.updatedAt;
+  if (typeof lastActivity !== "number" || !Number.isFinite(lastActivity) || lastActivity <= 0) {
+    if (unconfirmed) {
+      throw new Error(`live-pump state ${path} has no last-activity timestamp and unconfirmed parts; cannot judge the broadcast, refusing to start (manual recovery required)`);
+    }
+    lastActivity = statSync(path).mtimeMs;
+  }
+  if (isSameBroadcastGap(nowMs - lastActivity)) return;
+  const archived = `${path}${ARCHIVED_SUFFIX}${nowMs}`;
+  renameSync(path, archived);
+  log(`[live-pump] last activity ${Math.round((nowMs - lastActivity) / 60_000)} min ago exceeds the same-broadcast gap; archived old state to ${archived}, starting a new submission`);
+  if (unconfirmed) {
+    throw new Error(`live-pump archived state ${archived} still has pending/unconfirmed parts; kept for manual recovery. Restart to begin a new submission`);
+  }
+}
+
+/** Spool paths still referenced by archived (rolled-over) states; the orphan sweep must keep them. */
+export function archivedSpoolPathsToKeep(spoolDir: string, room: string): string[] {
+  const base = basename(livePumpStatePath(spoolDir, room)) + ARCHIVED_SUFFIX;
+  const out: string[] = [];
+  try {
+    for (const f of readdirSync(spoolDir)) {
+      if (f.startsWith(base)) out.push(...spoolPathsToKeep(readLivePumpState(join(spoolDir, f))));
+    }
+  } catch { /* spool dir missing: nothing archived */ }
+  return out;
+}
+
 export interface LivePumpSessionOpts {
   cookiesPath: string;
   room: string;
@@ -338,6 +390,7 @@ export class LivePumpSession {
     mkdirSync(o.spoolDir, { recursive: true });
     this.log = o.log ?? ((m) => process.stderr.write(`${m}\n`));
     this.statePath = livePumpStatePath(o.spoolDir, o.room);
+    rolloverStaleState(this.statePath, o.room, Date.now(), this.log);
     const loaded = readLivePumpState(this.statePath);
     if (loaded && loaded.room !== o.room) {
       throw new Error(`live-pump state room mismatch: ${loaded.room} != ${o.room}`);
