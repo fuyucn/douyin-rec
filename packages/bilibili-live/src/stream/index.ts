@@ -40,6 +40,8 @@ export interface RoomInfo {
   living: boolean; // live_status === 1(2=轮播按未开播)
   uid: string;
   title: string;
+  /** Broadcast start time from get_info; "0000-00-00 00:00:00" (normalized to "") when offline. */
+  liveTime: string;
 }
 
 /** Room/get_info:解析短号→真实 room_id、开播状态、uid、标题。 */
@@ -50,6 +52,7 @@ export async function getRoomInfo(channelId: string): Promise<RoomInfo> {
     living: Number(d.live_status) === 1,
     uid: String(d.uid ?? ""),
     title: String(d.title ?? ""),
+    liveTime: /^0000-/.test(String(d.live_time ?? "")) ? "" : String(d.live_time ?? ""),
   };
 }
 
@@ -126,7 +129,10 @@ export async function getStream(channelId: string, quality: string, cookies?: st
   const owner = (await getUname(info.uid)) ?? "";
   // bilibili CDN(bilivideo.com)校验来路 → 录制器(ffmpeg/mesio)拉流必须带这些头,否则 403。
   const headers = { Referer: "https://live.bilibili.com/", "User-Agent": UA };
-  return { living: true, url, owner, title: info.title, headers, raw: play };
+  return {
+    living: true, url, owner, title: info.title, headers, raw: play,
+    ...(info.liveTime ? { liveSessionId: `live_time:${info.liveTime}` } : {}),
+  };
 }
 
 /** 判活:房间号 → 是否直播中(权威 live_status)。 */

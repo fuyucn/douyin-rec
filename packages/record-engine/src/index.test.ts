@@ -6,9 +6,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
 import { registerPlatform, type DownloadEngine, type Platform, type RecorderEvents } from "@drec/core";
 import {
-  PollingRecorder, stamp, POLL_MS, STALL_CHECK_MS, STALL_GRACEFUL_EXIT_MS, STALL_TIMEOUT_MS, THROTTLE_POLL_MS,
+  PollingRecorder, stamp, describeStreamIdentity, POLL_MS, STALL_CHECK_MS, STALL_GRACEFUL_EXIT_MS, STALL_TIMEOUT_MS, THROTTLE_POLL_MS,
   THROTTLE_MAX_POLL_MS,
 } from "./index.js";
+
+describe("describeStreamIdentity", () => {
+  it("keeps host+path and drops signed query params", () => {
+    const a = describeStreamIdentity({ url: "https://pull.example.com/stage/abc_or4.flv?expire=1&sign=x", liveSessionId: "42" });
+    const b = describeStreamIdentity({ url: "https://pull.example.com/stage/abc_or4.flv?expire=2&sign=y", liveSessionId: "42" });
+    expect(a).toBe("liveSessionId=42 streamPath=pull.example.com/stage/abc_or4.flv");
+    expect(a).toBe(b);
+  });
+
+  it("marks missing id and url explicitly", () => {
+    expect(describeStreamIdentity({})).toBe("liveSessionId=- streamPath=-");
+    expect(describeStreamIdentity({ url: "not a url" })).toBe("liveSessionId=- streamPath=unparsable");
+  });
+});
 
 /** 可控退出状态的假下载子进程(不真 spawn)。 */
 class FakeProc extends EventEmitter {

@@ -33,6 +33,12 @@ export interface PlatformStream {
   /** 平台专属原始结果(子类按需用,如 douyin 的 logStreamMeta);平台无关层不碰。 */
   raw?: unknown;
   /**
+   * Platform-issued id of the current broadcast (Douyin room id_str, Bilibili live_time).
+   * Diagnostic only for now: logged on every recorder spawn to verify whether a reconnect
+   * keeps the same broadcast identity. Absent when the platform does not expose one.
+   */
+  liveSessionId?: string;
+  /**
    * 风控/限流信号:平台取流页可达但被风控(如快手「请求过快,请稍后重试」)时给出可读原因。
    * 录制器据此进入降频轮询 + 显式日志(否则「等待开播」会把风控伪装成「主播没开播」,掩盖漏录)。
    */

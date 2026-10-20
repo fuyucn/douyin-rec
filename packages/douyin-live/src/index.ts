@@ -202,6 +202,7 @@ export const douyinPlatform: Platform = {
       url: res?.currentStream?.url,
       owner: res?.owner != null ? String(res.owner) : undefined,
       title: res?.title != null ? String(res.title) : undefined,
+      ...(res?.liveId ? { liveSessionId: String(res.liveId) } : {}),
       raw: res, // 完整结果留给录制器子类(logStreamMeta 等)
     };
   },

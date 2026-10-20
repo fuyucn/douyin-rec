@@ -26,7 +26,7 @@ import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFo
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
 import { decorateRecordEvent, getEngine, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
-import { PollingRecorder } from "@drec/record-engine";
+import { PollingRecorder, describeStreamIdentity } from "@drec/record-engine";
 import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
@@ -399,6 +399,8 @@ program
         fetch: async (r, q) => {
           const s = await platform.getStream(r, q);
           if (s.owner?.trim()) anchorName = s.owner.trim();
+          // Zero-disk path bypasses PollingRecorder; log identity here so both paths are comparable.
+          if (s.living && s.url) console.log(`[session-id] ${describeStreamIdentity(s)}`);
           if (s.living && s.url && !streamStarted) {
             streamStartMs = Date.now();
             streamStarted = true;

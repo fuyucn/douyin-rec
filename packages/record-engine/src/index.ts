@@ -55,6 +55,24 @@ export function stamp(d: Date, timeZone: string = processTimeZone()): string {
 }
 
 /**
+ * One-line broadcast identity for diagnostics: the platform's per-broadcast id plus the stream
+ * URL host+path. Query strings are dropped because they carry signatures and expiry, which
+ * change on every fetch and would make two fetches of the same broadcast look different.
+ */
+export function describeStreamIdentity(probe: Pick<PlatformStream, "url" | "liveSessionId">): string {
+  let streamPath = "-";
+  if (probe.url) {
+    try {
+      const u = new URL(probe.url);
+      streamPath = `${u.host}${u.pathname}`;
+    } catch {
+      streamPath = "unparsable";
+    }
+  }
+  return `liveSessionId=${probe.liveSessionId || "-"} streamPath=${streamPath}`;
+}
+
+/**
  * 子目录/文件名清洗:删非法字符(/ \ : * ? " < > |)+ 控制符,折叠空白,trim(不截断)。
  * **必须与合并 UI(api.ts recordingsDir → sanitizeSeg)一致**——否则落盘目录名与读取算出的对不上。
  */
@@ -235,6 +253,8 @@ export class PollingRecorder implements Recorder {
           return;
         }
         if (this.lastAdmitDenied) { log.info(`准入闸门放行,开始录制新一场`); this.lastAdmitDenied = null; }
+        // Logged on every spawn (first start and each reconnect) to verify broadcast identity.
+        log.info(`[session-id] ${describeStreamIdentity(probe)}`);
         this.spawnRecording(probe.url, probe, String(probe.owner ?? ""), String(probe.title ?? ""));
         return;
       }
