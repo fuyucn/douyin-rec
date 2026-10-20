@@ -1,13 +1,11 @@
-import { processTimeZone, zonedStamp } from "@drec/core";
+import { isSameBroadcastGap, processTimeZone, SAME_BROADCAST_GAP_MS, zonedStamp } from "@drec/core";
 import type { NodeRecording } from "./transport.js";
 
 export interface BroadcastMember { workerId: string; rec: NodeRecording; }
 export interface Broadcast { streamKey: string; platform: string; roomSlug: string; startMs: number; members: BroadcastMember[]; }
 
-const DEFAULT_TOLERANCE = 5 * 60_000;
-
 function overlaps(a: NodeRecording, b: NodeRecording, tol: number): boolean {
-  return a.startMs <= b.endMs + tol && b.startMs <= a.endMs + tol;
+  return isSameBroadcastGap(a.startMs - b.endMs, tol) && isSameBroadcastGap(b.startMs - a.endMs, tol);
 }
 
 function ymd(ms: number, tz: string): string { return zonedStamp(ms, tz).date; }
@@ -15,12 +13,12 @@ function hhmm(ms: number, tz: string): string { const z = zonedStamp(ms, tz); re
 
 /**
  * 跨节点把录像聚成「同一场直播」。**按 (platform, roomSlug) 分组**(douyin/bilibili 同房间号不撞),
- * 组内按时间窗(5min 容差)区间合并。streamKey = `{platform}:{roomSlug}:{date}`(同日多簇追加 _HHMM)。
+ * 组内按时间窗(间隔 <= 60min 为同一场,core `SAME_BROADCAST_GAP_MS`)区间合并。streamKey = `{platform}:{roomSlug}:{date}`(同日多簇追加 _HHMM)。
  * platform 取自每条 rec(scan 从 meta.json 读;旧录像 fallback douyin);defaultPlatform 仅作极端兜底。
  */
 export function clusterBroadcasts(
   byTenant: { workerId: string; recordings: NodeRecording[] }[],
-  overlapToleranceMs = DEFAULT_TOLERANCE,
+  overlapToleranceMs = SAME_BROADCAST_GAP_MS,
   defaultPlatform = "douyin",
   knownKeys: Iterable<{ streamKey: string; startMs?: number | null; updatedAt?: number }> = [],
   /** streamKey 日期所用时区(设置时区);缺省 = 进程生效时区,不看宿主机本地时区(issue #155)。 */

@@ -87,6 +87,16 @@ function readRolling(dir: string, base: string): NodeRollingProgress | undefined
   }
 }
 
+/** `updatedAt` (epoch ms) of `{base}.rolling.json`; 0 when missing, corrupt or not a millisecond-scale epoch. */
+function readRollingUpdatedAt(dir: string, base: string): number {
+  try {
+    const d = JSON.parse(readFileSync(join(dir, `${base}.rolling.json`), "utf-8")) as { updatedAt?: unknown };
+    return typeof d.updatedAt === "number" && d.updatedAt >= 1e12 ? d.updatedAt : 0;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * 扫边录边传会话的**实时进度**(F1,只读)。
  * 纳入:①该房间此刻在录,且是它最新的一个会话;②任何会话只要有「正在传 / 结果未知」的未决项(收播后仍需关注)。
@@ -222,16 +232,23 @@ export async function scanRecordings(
         endMs = Math.max(endMs, p.endMs);
       }
       const sess = readSession(dir, base);
-      // No-ts session (rolling upload deleted every segment): prefer the absolute start
-      // recorded in the sidecar (issue #87) over reverse-parsing the filename in this
-      // process's local timezone (a UTC reader would land on the wrong day). Sessions
-      // that still have ts keep the ffprobe result; only this fallback changes.
-      if (startMs === Infinity) {
+      // Rolling sessions delete confirmed segments, so the earliest surviving segment's ffprobe start drifts
+      // forward scan after scan, which re-keys the broadcast (`_HHMM`) and forks a duplicate job (issue #292).
+      // Pin the start to the stable session boundary: the sidecar's absolute start (issue #87) or the stamp in the
+      // session base (both are fixed at session start). `min` keeps a too-late sidecar from hiding an earlier
+      // segment. Non-rolling sessions keep the pure ffprobe result.
+      const stableStart = rolling ? (sess.startMs ?? startMsFromSessionBase(base)) : 0;
+      const noSegments = startMs === Infinity;
+      if (stableStart > 0) startMs = Math.min(startMs, stableStart);
+      // No-ts session (rolling upload deleted every segment): the start comes from the same stable boundary
+      // (sidecar, else the filename stamp in the settings timezone, issue #155; a UTC reader would otherwise land
+      // on the wrong day).
+      if (noSegments) {
         startMs = sess.startMs ?? startMsFromSessionBase(base);
-        // No segments left → the span is unknown; keep the pre-change zero span. We do NOT
-        // read a sidecar endMs (no recorder writes a trustworthy one; a stop-time value would
-        // inflate coverage and could merge adjacent broadcasts).
-        endMs = startMs;
+        // No segments left → there is no ffprobe end. Use the rolling sidecar's last write (the final segment
+        // confirmation, written once the session ended) so the interval is not zero-width; a zero-width span
+        // fakes a gap to the next session and splits one broadcast. Missing/invalid → keep the zero span.
+        endMs = Math.max(startMs, readRollingUpdatedAt(dir, base));
       }
       // 弹幕源 .xml 是**可选**产物:缺失(异常中断/历史录像)时不能把不存在的路径交给 pull
       // (本地 copyFileSync 会 ENOENT、rsync 会 rc≠0,整场后处理直接失败)。
