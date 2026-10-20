@@ -725,7 +725,11 @@ export function resolveStreamUploadTitle(o: {
   });
 }
 
-/** Render a zero-disk part title from the hub `partTitleTemplate` (null = keep the stem). */
+/**
+ * Render a zero-disk part title from the hub `partTitleTemplate`. Without a template, fall back to
+ * what rolling upload shows (the recorded segment stem `{name}_{date}_{HH-mm-ss}_{NNN}`), never the
+ * internal spool file name.
+ */
 export function resolveStreamPartTitle(o: {
   platform: string;
   roomSlug: string;
@@ -735,7 +739,7 @@ export function resolveStreamPartTitle(o: {
   liveTitle?: string;
   partIndex: number;
   partTotal?: number;
-}): string | null {
+}): string {
   const { meta } = resolveRollingUploadMetaInner(o.platform, o.roomSlug);
   const timeZone = o.timeZone ?? processTimeZone();
   const z = zonedStamp(o.startMs, timeZone);
@@ -747,7 +751,7 @@ export function resolveStreamPartTitle(o: {
     ...(o.liveTitle ? { liveTitle: o.liveTitle } : {}),
     partIndex: o.partIndex,
     partTotal: o.partTotal,
-  }, "plain");
+  }, "plain") ?? `${sessionBase}_${String(Math.max(o.partIndex - 1, 0)).padStart(3, "0")}`;
 }
 
 /**
