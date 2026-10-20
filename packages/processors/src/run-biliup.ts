@@ -252,6 +252,13 @@ export async function countVideoParts(bv: string, cookiesPath: string): Promise<
 export const APPEND_REREAD_DELAYS_MS: readonly number[] = [3000, 3000, 4000];
 
 /**
+ * Issue #310: extra re-read intervals when the count read fails (null) after an append failure, ~30s total.
+ * A null read is the view API throttling or erroring, not proof of anything; giving up on the first one turns a
+ * transient hiccup into a manual-review record. Only the count is re-read: the append itself is never retried here.
+ */
+export const APPEND_UNREADABLE_REREAD_DELAYS_MS: readonly number[] = [5000, 10000, 15000];
+
+/**
  * 追加一个逻辑组到已建稿件(空组跳过)。多组必须**串行**调用(同稿件并发 append 会撞)。
  * public 透传给 buildAppendArgs,保证追加分 P 时保留 P1 的可见性/水印设置。
  *
@@ -259,7 +266,8 @@ export const APPEND_REREAD_DELAYS_MS: readonly number[] = [3000, 3000, 4000];
  *   变多 → 服务端其实已追加成功(直接返回,不再重试);
  *   未变 → 分 P 列表刷新有延迟(约 0.5-1s+,#66),按 APPEND_REREAD_DELAYS_MS 间隔继续重读(合计约 10s);
  *     期间变多 → 已追加成功;整个窗口都没变 → 确认未提交,安全换线;
- *   查不到(任一次读到 null)→ 结果不确定,抛 APPEND_AMBIGUOUS_MARKER(调用方不得自动重试,转人工)。
+ *   读到 null(且有基线)→ 再按 APPEND_UNREADABLE_REREAD_DELAYS_MS 延迟重读(#310),仍读不到才算结果不确定,
+ *     抛 APPEND_AMBIGUOUS_MARKER(调用方不得自动重试,转人工);没有基线(before 为 null)直接不确定。
  * 不传 countParts → 保持旧行为(仅换线,不判定)。
  */
 export async function appendGroup(o: {
@@ -296,6 +304,14 @@ export async function appendGroup(o: {
           if (before == null || after == null || after > before) break;
           await sleep(delay);
           after = await o.countParts().catch(() => null);
+        }
+        // Baseline known but the re-read failed: wait and re-read before declaring the outcome unknown.
+        if (before != null && after == null) {
+          for (const delay of APPEND_UNREADABLE_REREAD_DELAYS_MS) {
+            await sleep(delay);
+            after = await o.countParts().catch(() => null);
+            if (after != null) break;
+          }
         }
         if (before != null && after != null) {
           if (after > before) return;              // 服务端已追加成功(客户端只是没拿到响应)
