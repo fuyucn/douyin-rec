@@ -165,6 +165,17 @@ describe("P1→append", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("appendGroup(#310)：恢复后分P数比基线少(列表残缺)→ ambiguous,不换线", async () => {
+    const calls: string[][] = [];
+    const counts: (number | null)[] = [2, null, 1, 1, 1, 1];
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls), lines: ["alia", "txa"],
+      countParts: async () => (counts.length > 0 ? counts.shift()! : 1),
+      sleep: async () => {},
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1);
+  });
+
   it("appendGroup(#310)：未变 → 读不到 → 未变(混合)→ ambiguous,不换线", async () => {
     const calls: string[][] = [];
     const counts: (number | null)[] = [1, 1, null, 1];

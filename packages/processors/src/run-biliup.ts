@@ -312,11 +312,12 @@ export async function appendGroup(o: {
         // Unchanged may just be a stale list (#66): it must stay unchanged through the whole re-read window,
         // counted from the first readable answer. Any null inside the window leaves the outcome unknown.
         for (const delay of APPEND_REREAD_DELAYS_MS) {
-          if (before == null || after == null || after > before) break;
+          if (before == null || after == null || after !== before) break;
           await sleep(delay);
           after = await o.countParts().catch(() => null);
         }
-        if (before != null && after != null) {
+        // A count below the baseline is a truncated/degraded list, not proof of anything: ambiguous (#318 review).
+        if (before != null && after != null && after >= before) {
           if (after > before) return;              // 服务端已追加成功(客户端只是没拿到响应)
         } else {
           throw new Error(
