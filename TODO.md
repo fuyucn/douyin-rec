@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-95 合并内存准入:内存不足改为排队等待,不再超时转人工（issue [#311](https://github.com/fuyucn/douyin-rec/issues/311)）**
+  — 2026-10-20 认领,分支 `codex/issue-311-merge-mem-wait`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：内存闸门超时不再抛错,只告警一次（含需求/可用量）并继续等;新增 `minMergeFreeMemMB`（默认 512,实测 concat-copy 峰值约 60 MB）,merge 取 `min(merge, burn)`;烧录阈值 2048 不变。
+  **为什么**：master 所在 VM 约 3.9 GB,`MemAvailable` 常态约 1.9 GB,永远达不到 2048,合并必超时转人工。
+  **验收**：先低后高 → 最终执行;超时只告警一次;`minBurnFreeMemMB=0` 仍整体关闭闸门;全量测试 / typecheck / bundle 通过。
+  **待拍板**：烧录阈值在该 VM 上仍永远等不到,是否下调或加内存由 owner 决定。
 - [~] **T-94 对账日志去重:「仍在录制 / 重连窗内等待」每轮刷屏（issue [#313](https://github.com/fuyucn/douyin-rec/issues/313)）**
   — 2026-10-20 认领,分支 `codex/issue-313-settle-log-dedupe`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：按 (场次, 节点集合) 去重,状态变化 / 条件清除后再现 / 30 分钟后才再打;文案去掉「超时」。**为什么**：生产 8 小时约 350 条,淹没真实错误。
