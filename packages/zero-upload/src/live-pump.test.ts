@@ -22,6 +22,7 @@ import {
   DEFAULT_SEGMENT_CAP,
   LivePumpSession,
   archivedSpoolPathsToKeep,
+  spoolSweepSafe,
   readLivePumpState,
   writeLivePumpState,
   livePumpStatePath,
@@ -1872,29 +1873,122 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     }
   });
 
-  it("pending WAL at archive time: kept in the archive, error surfaced, next start is fresh", () => {
+  const openWithAlerts = (alerts: string[]) => new LivePumpSession({
+    cookiesPath: COOKIES, room: "gap", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+    log: () => {}, onAlert: (m) => alerts.push(m),
+  });
+
+  it("stale state with pending WAL: archived intact, ONE alert, new submission starts (never throws)", () => {
     const pending = { kind: "append", partIndex: 1, stem: "s1", title: "P2", bytes: 1, durationSec: 1, spoolPath: join(dir, "p1.ts") };
     seed(120, { pending });
-    expect(() => open()).toThrow(/pending\/unconfirmed/);
+    const alerts: string[] = [];
+    const s = openWithAlerts(alerts);
+    expect(s.hasArchiveIdentity).toBe(false);
+    expect(alerts.length).toBe(1);
     const a = archives();
     expect(a.length).toBe(1);
     expect(readLivePumpState(join(dir, a[0]!))?.pending?.stem).toBe("s1");
     expect(archivedSpoolPathsToKeep(dir, "gap")).toContain(pending.spoolPath);
-    expect(open().hasArchiveIdentity).toBe(false);
   });
 
-  it("corrupt state: refuses to start and leaves the file untouched", () => {
+  it("stale state with an unconfirmed part: archived + one alert + fresh submission", () => {
+    seed(120, { parts: [part(false)] });
+    const alerts: string[] = [];
+    expect(openWithAlerts(alerts).hasArchiveIdentity).toBe(false);
+    expect(alerts.length).toBe(1);
+    expect(archives().length).toBe(1);
+  });
+
+  it("stale but fully confirmed state: archived without an alert", () => {
+    seed(120);
+    const alerts: string[] = [];
+    expect(openWithAlerts(alerts).hasArchiveIdentity).toBe(false);
+    expect(alerts.length).toBe(0);
+    expect(archives().length).toBe(1);
+  });
+
+  it("within the gap and readable: continued, no alert, no archive", () => {
+    seed(30, { parts: [part(false)] });
+    const alerts: string[] = [];
+    expect(openWithAlerts(alerts).bvid).toBe(FAKE_BV);
+    expect(alerts.length).toBe(0);
+    expect(archives().length).toBe(0);
+  });
+
+  it("corrupt state: archived byte-for-byte, one alert, new submission, never throws", () => {
     writeFileSync(statePath(), "{not json");
-    expect(() => open()).toThrow(/corrupt/);
-    expect(readFileSync(statePath(), "utf-8")).toBe("{not json");
-    expect(archives().length).toBe(0);
+    const alerts: string[] = [];
+    const s = openWithAlerts(alerts);
+    expect(s.hasArchiveIdentity).toBe(false);
+    expect(alerts.length).toBe(1);
+    const a = archives();
+    expect(a.length).toBe(1);
+    expect(readFileSync(join(dir, a[0]!), "utf-8")).toBe("{not json");
+    expect(existsSync(statePath())).toBe(false);
   });
 
-  it("old state without a timestamp and with unconfirmed parts: cannot judge, refuses", () => {
+  it("old state without a timestamp and with unconfirmed parts: archived + one alert, not appended to", () => {
     seed(0, { updatedAt: undefined, parts: [part(false)] });
-    expect(() => open()).toThrow(/cannot judge/);
-    expect(archives().length).toBe(0);
+    const alerts: string[] = [];
+    const s = openWithAlerts(alerts);
+    expect(s.bvid).toBeUndefined();
+    expect(alerts.length).toBe(1);
+    expect(archives().length).toBe(1);
   });
+
+  it("two archives in the same millisecond never overwrite each other", () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    try {
+      writeFileSync(statePath(), "{bad1");
+      open();
+      writeFileSync(statePath(), "{bad2");
+      open();
+    } finally { now.mockRestore(); }
+    expect(archives().length).toBe(2);
+  });
+
+  it("spoolSweepSafe is false while any live or archived state is unreadable", () => {
+    expect(spoolSweepSafe(dir, "gap")).toBe(true);
+    seed(1);
+    expect(spoolSweepSafe(dir, "gap")).toBe(true);
+    writeFileSync(`${statePath()}.archived-1`, "{bad");
+    expect(spoolSweepSafe(dir, "gap")).toBe(false);
+    rmSync(`${statePath()}.archived-1`);
+    writeFileSync(statePath(), "{bad");
+    expect(spoolSweepSafe(dir, "gap")).toBe(false);
+  });
+
+  it("runLivePump with a corrupt old state: alerts once, archives, and still records into a new submission", async () => {
+    writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    writeFileSync(statePath(), "{not json");
+    const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+    const fake = ((input: string | URL | Request) => {
+      const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+      if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+      if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+      if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILInew1" } }));
+      if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILInew1" } }));
+      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILInew1", title: "t", tid: 21 }, videos: [] } }));
+      if (u.pathname === "/x/web/archives") return Promise.resolve(json({ code: 0, data: { arc_audits: [] } }));
+      return Promise.resolve(json({ code: 0, data: {} }));
+    }) as unknown as typeof fetch;
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+    const alerts: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: join(dir, "cookies.json"), room: "gap", spoolDir: dir, title: "t",
+      tid: 21, tag: "x", private: true, sizeCap: CHUNK, maxMs: 300, maxSegments: 1,
+      quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
+      fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+      sleep: async () => {}, log: () => {}, onAlert: (m) => alerts.push(m),
+    });
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.bvid).toBe("BILInew1");
+    expect(alerts.length).toBe(1);
+    expect(archives().length).toBe(1);
+  }, 20_000);
 
   it("old fully confirmed state without a timestamp falls back to file mtime", () => {
     seed(0, { updatedAt: undefined });

@@ -304,35 +304,59 @@ const ARCHIVED_SUFFIX = ".archived-";
  *
  * The state is keyed by room only, so without this a later broadcast of the same room would append
  * to the previous broadcast's archive. Last activity = `updatedAt`, which `writeLivePumpState`
- * stamps on every write (so it survives restarts). A state older than `SAME_BROADCAST_GAP_MS`
- * (core's single rule) is renamed aside and the caller starts a new submission.
+ * stamps on every write (so it survives restarts). Within `SAME_BROADCAST_GAP_MS` (core's single
+ * rule) and readable, the old state is continued.
  *
- * Fallback for old files without a usable `updatedAt`: if everything is confirmed, the file mtime
- * stands in as last activity; if anything is pending/unconfirmed we cannot judge and refuse.
- * Corrupt/unreadable state also refuses (a silent fresh start would overwrite it and duplicate the
- * archive). An archived state that still holds pending/unconfirmed parts is kept intact and the
- * call throws so the operator sees it; the next start then begins a new submission.
+ * The zero-disk path has no local copy of the stream, so refusing to start loses the broadcast for
+ * good; a split submission is the lesser evil. Therefore this never throws. Whenever the old state
+ * cannot be trusted to belong to the current broadcast, it is renamed aside intact (the WAL and the
+ * spool files it references are kept) and a new submission starts:
+ *  - stale (older than the gap) - archived; an alert is raised only if it still holds
+ *    pending/unconfirmed parts, because then a human must reconcile them;
+ *  - unreadable/corrupt, or room mismatch, or no usable timestamp with unconfirmed parts - archived
+ *    with an alert, and never appended to.
+ * An old state without a timestamp whose parts are all confirmed falls back to the file mtime.
+ * Returns the alert message, if any.
  */
-function rolloverStaleState(path: string, room: string, nowMs: number, log: (msg: string) => void): void {
-  if (!existsSync(path)) return;
+function rolloverStaleState(path: string, room: string, nowMs: number, log: (msg: string) => void): string | undefined {
+  if (!existsSync(path)) return undefined;
+  const archive = (reason: string, alert: boolean): string => {
+    let archived = `${path}${ARCHIVED_SUFFIX}${nowMs}`;
+    for (let n = 1; existsSync(archived); n++) archived = `${path}${ARCHIVED_SUFFIX}${nowMs}-${n}`; // rename would overwrite
+    renameSync(path, archived);
+    const msg = `0 落盘旧状态${reason},已原样归档到 ${archived}(含未确认分 P 与暂存文件),本场开新稿件继续录制,需人工核对旧稿件`;
+    log(`[live-pump] ${reason}; archived old state to ${archived}, starting a new submission`);
+    return alert ? msg : "";
+  };
   const state = readLivePumpState(path);
-  if (!state) throw new Error(`live-pump state ${path} is unreadable or corrupt; refusing to start (manual recovery required)`);
-  if (state.room !== room) return; // the constructor reports the mismatch
+  if (!state) return archive("无法读取或已损坏", true) || undefined;
+  if (state.room !== room) return archive(`房间不匹配(${state.room})`, true) || undefined;
   const unconfirmed = !!state.pending || state.parts.some((p) => !p.confirmed);
   let lastActivity = state.updatedAt;
   if (typeof lastActivity !== "number" || !Number.isFinite(lastActivity) || lastActivity <= 0) {
-    if (unconfirmed) {
-      throw new Error(`live-pump state ${path} has no last-activity timestamp and unconfirmed parts; cannot judge the broadcast, refusing to start (manual recovery required)`);
+    if (unconfirmed) return archive("缺少最后活动时间且有未确认分 P,无法判断是否同一场", true) || undefined;
+    try { lastActivity = statSync(path).mtimeMs; } catch { return archive("无法读取文件时间", true) || undefined; }
+  }
+  if (isSameBroadcastGap(nowMs - lastActivity)) return undefined;
+  const reason = `距最后活动 ${Math.round((nowMs - lastActivity) / 60_000)} 分钟,超过同场间隔`;
+  return archive(reason, unconfirmed) || undefined;
+}
+
+/**
+ * False when the orphan-spool sweep must be skipped: the live state or an archived state exists
+ * but cannot be read, so the spool files it references are unknown and deleting "unreferenced"
+ * files could destroy the only copy of an unconfirmed part.
+ */
+export function spoolSweepSafe(spoolDir: string, room: string): boolean {
+  const live = livePumpStatePath(spoolDir, room);
+  if (existsSync(live) && !readLivePumpState(live)) return false;
+  const base = basename(live) + ARCHIVED_SUFFIX;
+  try {
+    for (const f of readdirSync(spoolDir)) {
+      if (f.startsWith(base) && !readLivePumpState(join(spoolDir, f))) return false;
     }
-    lastActivity = statSync(path).mtimeMs;
-  }
-  if (isSameBroadcastGap(nowMs - lastActivity)) return;
-  const archived = `${path}${ARCHIVED_SUFFIX}${nowMs}`;
-  renameSync(path, archived);
-  log(`[live-pump] last activity ${Math.round((nowMs - lastActivity) / 60_000)} min ago exceeds the same-broadcast gap; archived old state to ${archived}, starting a new submission`);
-  if (unconfirmed) {
-    throw new Error(`live-pump archived state ${archived} still has pending/unconfirmed parts; kept for manual recovery. Restart to begin a new submission`);
-  }
+  } catch { /* spool dir missing: nothing to protect */ }
+  return true;
 }
 
 /** Spool paths still referenced by archived (rolled-over) states; the orphan sweep must keep them. */
@@ -371,6 +395,8 @@ export interface LivePumpSessionOpts {
   line?: string;
   /** Chunk progress observer for resubmission. */
   onChunk?: (streamedBytes: number, chunksDone: number) => void;
+  /** Error-level alert channel (same notifier as the other zero-disk alerts). Fired at most once per start. */
+  onAlert?: (message: string) => void;
 }
 
 /**
@@ -390,7 +416,8 @@ export class LivePumpSession {
     mkdirSync(o.spoolDir, { recursive: true });
     this.log = o.log ?? ((m) => process.stderr.write(`${m}\n`));
     this.statePath = livePumpStatePath(o.spoolDir, o.room);
-    rolloverStaleState(this.statePath, o.room, Date.now(), this.log);
+    const rolloverAlert = rolloverStaleState(this.statePath, o.room, Date.now(), this.log);
+    if (rolloverAlert) o.onAlert?.(rolloverAlert);
     const loaded = readLivePumpState(this.statePath);
     if (loaded && loaded.room !== o.room) {
       throw new Error(`live-pump state room mismatch: ${loaded.room} != ${o.room}`);
@@ -1323,6 +1350,8 @@ export interface LivePumpSegmentReport {
 }
 
 export interface RunLivePumpOptions {
+  /** Error-level alert channel for conditions a human must act on (e.g. old state archived at start). */
+  onAlert?: (message: string) => void;
   cookiesPath: string;
   room: string;
   /** Stream fetcher (production passes `platform.getStream` through a projection). */
@@ -1463,6 +1492,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     ...(o.desc ? { desc: o.desc } : {}),
     private: o.private !== false,
     log,
+    ...(o.onAlert ? { onAlert: o.onAlert } : {}),
     // The session performs the archive create/append requests; it must use the same fetch
     // override as the segment uploader, or a fake transport would silently fall back to the
     // real network (real bug: a fake-UPOS run hit live Bilibili and got -400).
