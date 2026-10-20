@@ -200,7 +200,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
   it("0 字节段(前驱源仍在):不上传、保留源、不阻塞后续段,只记一次日志", async () => {
     const { paths } = mkSession(segNames(3));
     writeFileSync(paths[1], ""); // sealed segment opened but never written
-    const up = vi.fn(async () => "BV1zzzzzzzzzz");
+    const up = vi.fn(async () => FAKE_BV + "zzzz");
     const ap = vi.fn(async () => {});
     const remove = vi.fn(noRemove);
     const log = vi.fn();
@@ -218,7 +218,7 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     const { paths } = mkSession(segNames(3));
     rmSync(paths[0]); // previous source already uploaded and deleted
     writeFileSync(paths[1], "");
-    const up = vi.fn(async () => "BV1yyyyyyyyyy");
+    const up = vi.fn(async () => FAKE_BV + "yyyy");
     const ap = vi.fn(async () => {});
     const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 5 });
     for (const p of paths) u.noteSegment(p);
