@@ -184,8 +184,12 @@ describe("clusterBroadcasts × live id (issue #320)", () => {
   it("26 min apart with different live ids → two broadcasts", () => {
     expect(cluster([rec(0, 22, "a"), rec(48, 200, "b")])).toHaveLength(2);
   });
-  it("84 min apart with the same live id → one broadcast", () => {
-    expect(cluster([rec(0, 60, "a"), rec(144, 200, "a")])).toHaveLength(1);
+  it("84 min apart with the same live id → still two jobs on the master (live id only splits; #321 review)", () => {
+    expect(cluster([rec(0, 60, "a"), rec(144, 200, "a")])).toHaveLength(2);
+  });
+  it("an id-less member does not bridge two broadcasts with different live ids", () => {
+    const out = cluster([rec(0, 30, "a"), rec(10, 200), rec(50, 200, "b")]);
+    expect(out.map((b) => b.members.map((m) => m.rec.liveSessionId ?? "-"))).toEqual([["a", "-"], ["b"]]);
   });
   it("no live id → time window as before", () => {
     expect(cluster([rec(0, 22), rec(48, 200)])).toHaveLength(1);

@@ -1,4 +1,4 @@
-import { isSameBroadcast, isSameBroadcastGap, processTimeZone, SAME_BROADCAST_GAP_MS, zonedStamp } from "@drec/core";
+import { isSameBroadcastGap, processTimeZone, SAME_BROADCAST_GAP_MS, zonedStamp } from "@drec/core";
 import type { NodeRecording } from "./transport.js";
 
 export interface BroadcastMember { workerId: string; rec: NodeRecording; }
@@ -8,10 +8,15 @@ function overlaps(a: NodeRecording, b: NodeRecording, tol: number): boolean {
   return isSameBroadcastGap(a.startMs - b.endMs, tol) && isSameBroadcastGap(b.startMs - a.endMs, tol);
 }
 
-/** Issue #320: live ids decide when both are known; otherwise the time-window overlap as before. */
-function sameBroadcast(a: NodeRecording, b: NodeRecording, tol: number): boolean {
-  if (a.liveSessionId && b.liveSessionId) return isSameBroadcast({ aLiveId: a.liveSessionId, bLiveId: b.liveSessionId, gapMs: 0 });
-  return overlaps(a, b, tol);
+/**
+ * Issue #320: two recordings whose live ids are both known and differ are never the same broadcast, even inside the
+ * time window. On the master the live id only SPLITS: it never joins sessions beyond the window, because a job for
+ * the earlier part may already be done under the base key, and folding a later session into it would skip that
+ * session silently (#321 review). The node still continues the manuscript across the gap (core `isSameBroadcast`);
+ * the master then sees that later session as its own job carrying the inherited BV.
+ */
+function liveIdsConflict(a: NodeRecording, b: NodeRecording): boolean {
+  return !!a.liveSessionId && !!b.liveSessionId && a.liveSessionId !== b.liveSessionId;
 }
 
 function ymd(ms: number, tz: string): string { return zonedStamp(ms, tz).date; }
@@ -19,8 +24,8 @@ function hhmm(ms: number, tz: string): string { const z = zonedStamp(ms, tz); re
 
 /**
  * 跨节点把录像聚成「同一场直播」。**按 (platform, roomSlug) 分组**(douyin/bilibili 同房间号不撞),
- * 组内按时间窗(间隔 <= 60min 为同一场,core `SAME_BROADCAST_GAP_MS`)区间合并;两条录像都带平台 liveId 时
- * 只看 liveId 是否相同(issue #320,core `isSameBroadcast`)。streamKey = `{platform}:{roomSlug}:{date}`(同日多簇追加 _HHMM)。
+ * 组内按时间窗(间隔 <= 60min 为同一场,core `SAME_BROADCAST_GAP_MS`)区间合并;两条录像都带平台 liveId 且不同时
+ * 一定拆开(issue #320)。liveId 在 master 侧只拆不并,见 `liveIdsConflict`。streamKey = `{platform}:{roomSlug}:{date}`(同日多簇追加 _HHMM)。
  * platform 取自每条 rec(scan 从 meta.json 读;旧录像 fallback douyin);defaultPlatform 仅作极端兜底。
  */
 export function clusterBroadcasts(
@@ -54,7 +59,12 @@ export function clusterBroadcasts(
       cluster = [];
     };
     for (const m of members) {
-      if (cluster.length && cluster.some((c) => sameBroadcast(c.rec, m.rec, overlapToleranceMs))) cluster.push(m);
+      // Join on time overlap, but never next to a member whose live id differs (an id-less member from an old node
+      // must not bridge two broadcasts with different ids).
+      const joins = cluster.length > 0
+        && cluster.some((c) => overlaps(c.rec, m.rec, overlapToleranceMs))
+        && !cluster.some((c) => liveIdsConflict(c.rec, m.rec));
+      if (joins) cluster.push(m);
       else { flush(); cluster = [m]; }
     }
     flush();

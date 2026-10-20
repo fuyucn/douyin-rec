@@ -585,11 +585,9 @@ export class RecordingSession {
       timeZone: this.timeZone ?? processTimeZone(),
     };
     if (this.liveTitle) data.title = this.liveTitle;
-    // Issue #320: the platform live id decides "same broadcast" downstream. Frozen per base like startMs;
-    // only filled in later if the first write had none.
+    // Issue #320: the platform live id decides "same broadcast" downstream. Frozen at the first write of a base
+    // like startMs (no later fill-in: a later write may already belong to the next spawn).
     if (this.sessionLiveId === null || this.sessionLiveId.base !== base) {
-      this.sessionLiveId = { base, id: this.currentLiveSessionId };
-    } else if (!this.sessionLiveId.id && this.currentLiveSessionId) {
       this.sessionLiveId = { base, id: this.currentLiveSessionId };
     }
     if (this.sessionLiveId.id) data.liveSessionId = this.sessionLiveId.id;
