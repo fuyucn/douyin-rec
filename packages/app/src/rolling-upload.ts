@@ -385,10 +385,19 @@ export class RollingUploader {
     this.persist();
   }
 
+  private isEmptySegment(seg: RollingSegment): boolean {
+    // Read the real size: a 0-byte segment (ffmpeg reports `Opening` before any write) uploads as
+    // duration=0 and Bilibili rejects the whole submission (state -16, irreversible). Independent of
+    // the previous segment's mtime, which is gone once that source was uploaded and deleted.
+    // An unreadable file counts as empty: nothing safe to upload, source kept.
+    try { return statSync(seg.path).size <= 0; } catch { return true; }
+  }
+
   /**
    * 判断封口段是否为「碎片段」(时长小于 {@link minSegmentSec})。
    * 时长用「本段 mtime − 上一段 mtime」近似(上一段关闭 ≈ 本段开始)。段 0 无前驱 → 恒非碎片
    * (P1 必传)。碎片段不上传、不删、不阻塞后续段(内容缺口极小,交给人工)。
+   * 前驱 mtime 不可用(前驱源已上传并删除)时本判定放行,由 {@link isEmptySegment} 的真实大小检查兜底。
    */
   private isFragment(seg: RollingSegment, rolling: readonly RollingSegment[]): boolean {
     if (this.minSegmentSec <= 0 || seg.index === 0) return false;
@@ -441,6 +450,12 @@ export class RollingUploader {
     const headBlocked = headOfLineFilter(planned, ambiguous);
     const pending: RollingSegment[] = [];
     for (const s of headBlocked) {
+      if (this.isEmptySegment(s)) {
+        if (this.loggedSkipped.has(s.index)) continue;
+        this.loggedSkipped.add(s.index);
+        this.log(`[rolling] 段 ${s.index} 为 0 字节,不上传、保留源(转人工处理)`);
+        continue;
+      }
       if (this.isFragment(s, rolling)) {
         if (this.loggedSkipped.has(s.index)) continue;
         this.loggedSkipped.add(s.index);

@@ -197,6 +197,36 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     expect(r2.uploaded).toEqual([]);
   });
 
+  it("0 字节段(前驱源仍在):不上传、保留源、不阻塞后续段,只记一次日志", async () => {
+    const { paths } = mkSession(segNames(3));
+    writeFileSync(paths[1], ""); // sealed segment opened but never written
+    const up = vi.fn(async () => FAKE_BV + "zzzz");
+    const ap = vi.fn(async () => {});
+    const remove = vi.fn(noRemove);
+    const log = vi.fn();
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: remove, now: futureNow, minSegmentSec: 0, log });
+    for (const p of paths) u.noteSegment(p);
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([0, 2]);
+    expect(ap).toHaveBeenCalledTimes(1);
+    expect(remove).not.toHaveBeenCalledWith(paths[1]);
+    await u.flush({ recordingActive: false });
+    expect(log.mock.calls.filter((c) => String(c[0]).includes("0 字节"))).toHaveLength(1);
+  });
+
+  it("0 字节段(前驱源已删):碎片判定无 mtime 可用也不上传", async () => {
+    const { paths } = mkSession(segNames(3));
+    rmSync(paths[0]); // previous source already uploaded and deleted
+    writeFileSync(paths[1], "");
+    const up = vi.fn(async () => FAKE_BV + "yyyy");
+    const ap = vi.fn(async () => {});
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: ap, removeFile: noRemove, now: futureNow, minSegmentSec: 5 });
+    for (const p of paths) u.noteSegment(p);
+    const r = await u.flush({ recordingActive: false });
+    expect(r.uploaded).toEqual([2]); // only the non-empty segment; the 0-byte one is never sent
+    expect(up).toHaveBeenCalledTimes(1);
+  });
+
   it("可见性:默认「仅自己可见」,唯一 override = uploadPrivate:false", async () => {
     const { paths } = mkSession(segNames(1));
     const up = vi.fn(async (_o: { plain: { public?: boolean } }) => "BV1pppppppppp");
