@@ -1,4 +1,4 @@
-import { abortJob, isJobAbort, isJobLive, resolveDiskMinGB, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
+import { abortJob, effectiveReconnectWindowMs, isJobAbort, isJobLive, resolveDiskMinGB, SAME_BROADCAST_GAP_MS, USER_STOP } from "@drec/core";
 import type { Transport, NodeInventory } from "./transport.js";
 import type { UnclaimedSegment } from "./unclaimed.js";
 import type { JobState, SyncLedger } from "./ledger.js";
@@ -103,7 +103,6 @@ export type InventoryResult =
   | { status: "unreachable"; workerId: string; recordings: []; reason: string };
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_STALE_MS = 600_000;
-const DEFAULT_RECONNECT_WINDOW_MS = SAME_BROADCAST_GAP_MS;
 const DEFAULT_CLEANUP_BACKFILL_THROTTLE_MS = 15 * 60_000;
 const DEFAULT_MAX_CONCURRENT_PIPELINES = 2;
 const DEFAULT_SLEEP = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -136,6 +135,7 @@ export class Reconciler {
   private maxRetries: number;
   private staleMs: number;
   private reconnectWindowMs: number;
+  private warnedWindowValues = new Set<number>();
   private timeZone?: () => string;
   /** 磁盘看门狗:节点数据根剩余 < 阈值(GB) → 告警。0/负 = 关闭。缺省 10。 */
   private diskMinGB: number;
@@ -171,7 +171,7 @@ export class Reconciler {
     this.unreachableAlertRounds = deps.unreachableAlertRounds ?? DEFAULT_UNREACHABLE_ALERT_ROUNDS;
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.staleMs = deps.staleMs ?? DEFAULT_STALE_MS;
-    this.reconnectWindowMs = deps.reconnectWindowMs ?? DEFAULT_RECONNECT_WINDOW_MS;
+    this.reconnectWindowMs = this.resolveWindowMs(deps.reconnectWindowMs);
     // 与 daemon / 上传闸门同一解析(core):缺省 10、非数字回落 10 并告警、<=0 关闭。
     this.diskMinGB = resolveDiskMinGB(deps.diskMinGB, (m) => console.warn(m)).gb;
     this.notify = deps.notify;
@@ -422,6 +422,19 @@ export class Reconciler {
    *   - resolveCfg 返回 null(房间没开 hub)→ 清空 members → settle 不等它、循环跳过。
    *   - cfg.workers 显式非空 → 只留 workerId∈workers 的成员;缺省/空 = 全部(向后兼容)。
    */
+  /**
+   * Resolve a configured reconnect window to the effective one (never below SAME_BROADCAST_GAP_MS unless
+   * disabled with <= 0). A raised value is logged once per distinct configured value, never silently.
+   */
+  private resolveWindowMs(configured: number | undefined): number {
+    const { ms, clamped } = effectiveReconnectWindowMs(configured);
+    if (clamped && !this.warnedWindowValues.has(configured!)) {
+      this.warnedWindowValues.add(configured!);
+      console.warn(`[reconciler] reconnectWindowMs=${configured} 低于同场口径 ${SAME_BROADCAST_GAP_MS}ms,已按 ${ms}ms 生效(请把配置改为 >= 3600000)`);
+    }
+    return ms;
+  }
+
   private async collect(
     transports: Map<string, Transport>,
     knownKeys: Iterable<{ streamKey: string; startMs?: number | null; updatedAt?: number }> = [],
@@ -605,7 +618,7 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
         const cfg = cfgByKey.get(b.streamKey) ?? this.pipelineDeps.cfg;
         // 断流重连窗口:最后一段结束还没超过 reconnectWindowMs,先不处理(可能马上重连并成同一场)。
         const latestEndMs = Math.max(...b.members.map((m) => m.rec.endMs));
-        const windowMs = cfg.reconnectWindowMs ?? this.reconnectWindowMs;
+        const windowMs = cfg.reconnectWindowMs != null ? this.resolveWindowMs(cfg.reconnectWindowMs) : this.reconnectWindowMs;
         if (windowMs > 0 && Date.now() - latestEndMs < windowMs) {
           console.info(`[reconciler] ${b.streamKey} 结束 ${Math.round((Date.now() - latestEndMs) / 1000)}s 前,重连窗内等待(防第二场撞 key/防拆场)`);
           continue;
@@ -687,11 +700,11 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
           );
           if (conflict) {
             this.ledger.upsertPending(b.streamKey, b.startMs);
-            this.ledger.setState(b.streamKey, "needs_manual", { error: `same-broadcast guard: ${conflict}` });
+            this.ledger.setState(b.streamKey, "needs_manual", { error: `同场守卫:${conflict}` });
             this.notify?.({
               kind: "error",
               stage: "同步",
-              message: `${b.streamKey} may be the same broadcast as an existing submission; parked as needs_manual instead of creating a second draft. ${conflict.slice(0, 200)}`,
+              message: `${b.streamKey} 可能与已有稿件是同一场,已转人工、未新建第二稿。${conflict.slice(0, 200)}`,
             });
             continue;
           }
