@@ -22,12 +22,12 @@ export type { HubResources } from "@drec/core";
  * 默认值(唯一一份)。缺字段时回落这里 —— 与 cli/pipeline 现有默认值一致。
  *
  * 放在 store 而不是各消费点:三个(ResourcePool 构造、UI 默认值、回落读)各写一遍
- * `?? 1` / `?? 2048`,改一个默认值漏另一个是迟早的事(自审:这正是 T15 要消灭的模式)。
+ * `?? 1` / `?? 1024`,改一个默认值漏另一个是迟早的事(自审:这正是 T15 要消灭的模式)。
  */
 export const DEFAULT_HUB_RESOURCES: Required<HubResources> = {
   maxCpuParallel: 1,
   maxNetParallel: 1,
-  minBurnFreeMemMB: 2048,
+  minBurnFreeMemMB: 1024,
   minMergeFreeMemMB: 512,
   memWaitTimeoutMs: 600_000,
   uploadRateLimit: 5,

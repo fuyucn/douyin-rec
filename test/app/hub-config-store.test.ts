@@ -64,6 +64,7 @@ describe("hub-config-store(T15 resources)", () => {
 
   it("minMergeFreeMemMB: default 512, overridable, validated, bad value falls back", () => {
     expect(DEFAULT_HUB_RESOURCES.minMergeFreeMemMB).toBe(512);
+    expect(DEFAULT_HUB_RESOURCES.minBurnFreeMemMB).toBe(1024);
     writeFileSync(cfg, JSON.stringify({ resources: { minMergeFreeMemMB: 256 } }), "utf-8");
     expect(readResources(cfg).minMergeFreeMemMB).toBe(256);
     writeFileSync(cfg, JSON.stringify({ resources: { minMergeFreeMemMB: -5 } }), "utf-8");

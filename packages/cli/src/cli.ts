@@ -1178,7 +1178,7 @@ const hubStarter: HubStarter = {
       maxWaitSec?: number;
       /** Settle poll interval (seconds). */
       settleSec?: number;
-      /** 资源池 / 崩溃恢复安全阀。缺省:cpu/net 各 1、内存闸门 2048MB/600s、stale 600s。 */
+      /** 资源池 / 崩溃恢复安全阀。缺省:cpu/net 各 1、内存闸门 烧录 1024MB · 合并 512MB · 600s 后告警、stale 600s。 */
       resources?: {
         maxCpuParallel?: number;
         maxNetParallel?: number;
@@ -1377,7 +1377,7 @@ const hubStarter: HubStarter = {
         return {
           maxCpuParallel: r.maxCpuParallel ?? hubCfg.resources?.maxCpuParallel ?? 1,
           maxNetParallel: r.maxNetParallel ?? hubCfg.resources?.maxNetParallel ?? 1,
-          minBurnFreeMemMB: r.minBurnFreeMemMB ?? hubCfg.resources?.minBurnFreeMemMB ?? 2048,
+          minBurnFreeMemMB: r.minBurnFreeMemMB ?? hubCfg.resources?.minBurnFreeMemMB ?? 1024,
           minMergeFreeMemMB: r.minMergeFreeMemMB ?? hubCfg.resources?.minMergeFreeMemMB ?? 512,
           maxConcurrentPipelines: r.maxConcurrentPipelines ?? hubCfg.resources?.maxConcurrentPipelines ?? 2,
         };
@@ -1386,7 +1386,7 @@ const hubStarter: HubStarter = {
         return {
           maxCpuParallel: hubCfg.resources?.maxCpuParallel ?? 1,
           maxNetParallel: hubCfg.resources?.maxNetParallel ?? 1,
-          minBurnFreeMemMB: hubCfg.resources?.minBurnFreeMemMB ?? 2048,
+          minBurnFreeMemMB: hubCfg.resources?.minBurnFreeMemMB ?? 1024,
           minMergeFreeMemMB: hubCfg.resources?.minMergeFreeMemMB ?? 512,
           maxConcurrentPipelines: hubCfg.resources?.maxConcurrentPipelines ?? 2,
         };
@@ -1395,10 +1395,10 @@ const hubStarter: HubStarter = {
     const pool = new ResourcePool({
       maxCpuParallel: hubCfg.resources?.maxCpuParallel ?? 1,
       maxNetParallel: hubCfg.resources?.maxNetParallel ?? 1,
-      minBurnFreeMemMB: hubCfg.resources?.minBurnFreeMemMB ?? 2048,
+      minBurnFreeMemMB: hubCfg.resources?.minBurnFreeMemMB ?? 1024,
       maxCpuParallelLive: () => liveResources().maxCpuParallel ?? 1,
       maxNetParallelLive: () => liveResources().maxNetParallel ?? 1,
-      minBurnFreeMemMBLive: () => liveResources().minBurnFreeMemMB ?? 2048,
+      minBurnFreeMemMBLive: () => liveResources().minBurnFreeMemMB ?? 1024,
       minMergeFreeMemMB: hubCfg.resources?.minMergeFreeMemMB ?? 512,
       minMergeFreeMemMBLive: () => liveResources().minMergeFreeMemMB ?? 512,
       memWaitTimeoutMs: hubCfg.resources?.memWaitTimeoutMs ?? 600_000,

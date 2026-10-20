@@ -456,6 +456,13 @@ describe("ResourcePool — cpu/net 串行与内存闸门", () => {
     expect(burnRan).toBe(true);
   });
 
+  it("default burn floor is 1024 MB: ~1.9 GB available runs a burn without waiting", async () => {
+    let slept = 0;
+    const pool = new ResourcePool({ uploadRateLimit: 0 }, { sleep: async () => { slept++; throw new Error("burn gated"); }, freeMemMB: () => 1900 });
+    await pool.withCpu(async () => {}, "douyin:1:d", "burn");
+    expect(slept).toBe(0);
+  });
+
   it("minBurnFreeMemMB=0 still switches the whole gate off, merge included (backward compat)", async () => {
     const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 }, { freeMemMB: () => 10 });
     await pool.withCpu(async () => {}, "douyin:1:d", "merge");

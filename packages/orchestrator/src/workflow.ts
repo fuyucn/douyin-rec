@@ -541,8 +541,8 @@ export class ResourcePool {
     this.cpu = new Semaphore(cfg.maxCpuParallelLive ?? ((): number => Math.max(1, cfg.maxCpuParallel ?? 1)));
     this.net = new Semaphore(cfg.maxNetParallelLive ?? ((): number => Math.max(1, cfg.maxNetParallel ?? 1)));
     // 热读版:每次等内存门前取当前值(UI 改完立即生效);无 getter 时退回构造值。
-    this.minBurnFreeMemMBLive = cfg.minBurnFreeMemMBLive ?? ((): number => cfg.minBurnFreeMemMB ?? 2048);
-    this.minBurnFreeMemMB = cfg.minBurnFreeMemMB ?? 2048;
+    this.minBurnFreeMemMBLive = cfg.minBurnFreeMemMBLive ?? ((): number => cfg.minBurnFreeMemMB ?? 1024);
+    this.minBurnFreeMemMB = cfg.minBurnFreeMemMB ?? 1024;
     this.minMergeFreeMemMBLive = cfg.minMergeFreeMemMBLive ?? ((): number => cfg.minMergeFreeMemMB ?? 512);
     this.memWaitTimeoutMs = cfg.memWaitTimeoutMs ?? 600_000;
     this.uploadRateLimit = Math.max(0, cfg.uploadRateLimit ?? 5);
