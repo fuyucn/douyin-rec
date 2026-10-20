@@ -1,7 +1,7 @@
 // test/upload/biliup-append.test.ts
 import { describe, it, expect } from "vitest";
 import { appendGroup, buildAppendArgs, uploadThenAppend, uploadThenAppendGroups } from "../../packages/app/src/upload/biliup.js";
-import { APPEND_REREAD_DELAYS_MS } from "../../packages/processors/src/run-biliup.js";
+import { APPEND_REREAD_DELAYS_MS, APPEND_UNREADABLE_REREAD_DELAYS_MS } from "../../packages/processors/src/run-biliup.js";
 
 // 防御:append 也带关水印 + 仅自己可见(防 append 重置稿件设置,见 biliup.ts 注释)。
 const WM = '{"watermark":{"state":0}}';
@@ -126,6 +126,78 @@ describe("P1→append", () => {
       sleep: async () => {},
     })).rejects.toThrow(/append-ambiguous/);
     expect(calls).toHaveLength(1);
+  });
+
+  it("appendGroup(#310)：重读读不到、延迟后恢复且变多 → 视为已提交,不换线不转人工", async () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    const counts: (number | null)[] = [1, null, null, 2]; // before, then two unreadable reads, then committed
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls), lines: ["alia", "txa"],
+      countParts: async () => (counts.length > 0 ? counts.shift()! : 2),
+      sleep: async (ms) => { sleeps.push(ms); },
+    });
+    expect(calls).toHaveLength(1);
+    expect(sleeps).toEqual([5000, 10000]);
+  });
+
+  it("appendGroup(#310)：恢复后数量没变 → 仍要走完整的 #66 窗口才换线", async () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    const counts: (number | null)[] = [1, null, 1, 1, 1, 1];
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls, "txa"), lines: ["alia", "txa"],
+      countParts: async () => (counts.length > 0 ? counts.shift()! : 1),
+      sleep: async (ms) => { sleeps.push(ms); },
+    });
+    expect(calls).toHaveLength(2);
+    expect(sleeps).toEqual([5000, ...APPEND_REREAD_DELAYS_MS]);
+  });
+
+  it("appendGroup(#310)：恢复后数量没变、窗口内刷新变多 → 已提交,不重复追加", async () => {
+    const calls: string[][] = [];
+    const counts: (number | null)[] = [1, null, 1, 2];
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls), lines: ["alia", "txa"],
+      countParts: async () => (counts.length > 0 ? counts.shift()! : 2),
+      sleep: async () => {},
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("appendGroup(#310)：恢复后分P数比基线少(列表残缺)→ ambiguous,不换线", async () => {
+    const calls: string[][] = [];
+    const counts: (number | null)[] = [2, null, 1, 1, 1, 1];
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls), lines: ["alia", "txa"],
+      countParts: async () => (counts.length > 0 ? counts.shift()! : 1),
+      sleep: async () => {},
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("appendGroup(#310)：未变 → 读不到 → 未变(混合)→ ambiguous,不换线", async () => {
+    const calls: string[][] = [];
+    const counts: (number | null)[] = [1, 1, null, 1];
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls), lines: ["alia", "txa"],
+      countParts: async () => (counts.length > 0 ? counts.shift()! : 1),
+      sleep: async () => {},
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("appendGroup(#310)：延迟窗口内始终读不到 → 仍然 ambiguous,不换线,窗口约 30s", async () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    const counts: (number | null)[] = [1];
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls), lines: ["alia", "txa"],
+      countParts: async () => counts.shift() ?? null,
+      sleep: async (ms) => { sleeps.push(ms); },
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1);
+    expect(sleeps).toEqual([...APPEND_UNREADABLE_REREAD_DELAYS_MS]);
   });
 
   it("uploadThenAppend：先传 plain 拿 BV，再 append 两个分P", async () => {
