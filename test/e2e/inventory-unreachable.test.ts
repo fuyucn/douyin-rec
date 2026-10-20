@@ -86,6 +86,32 @@ describe("e2e: two nodes, one unreachable (#69)", () => {
     });
   }
 
+  it("runNow not forced: unreachable node and existing BV are listed in ONE 409; force bypasses both", async () => {
+    mode = "ok";
+    s = await Scenario.create({
+      extraNodes: ["n2"],
+      cfg: { cleanup: { sourceAfterDone: false, stageAfterDone: false, stageSourceAfterMerge: false } },
+      wrapTransport: (base, _s, id) => (id === "n2" ? flaky(base) : base),
+      reconcilerOpts: { inventoryTimeoutMs: 30 },
+    });
+    s.record({ node: "local", sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 2, segSec: 600 }] });
+    s.record({ node: "n2", sessions: [{ startMs: pastStartMs(0, 10, 0), segments: 3, segSec: 600 }] });
+    await s.reconcile();
+    const key = s.onlyKey();
+    const bv = s.ledger.get(key)?.bv;
+    expect(bv, "first run created a draft").toBeTruthy();
+
+    mode = "reject";
+    const r = await s.reconciler.runNow({ streamKey: key });
+    expect(r.code).toBe(409);
+    expect(r.forceable).toBe(true);
+    expect(r.error, "lists the unreachable node").toMatch(/n2.*清单失联/);
+    expect(r.error, "lists the existing BV in the same 409").toContain(bv!);
+
+    const forced = await s.reconciler.runNow({ streamKey: key, force: true, wait: true });
+    expect(forced.ok).toBe(true);
+  });
+
   it("control: a reachable but empty n2 does not block local", async () => {
     mode = "ok";
     s = await Scenario.create({ extraNodes: ["n2"], cfg: { cleanup: FULL_CLEANUP } });

@@ -561,7 +561,29 @@ export interface RollingDeliveryDTO {
   lockedBytes?: number;
 }
 
+/**
+ * A broadcast waiting on an unreachable selected worker (read-only; nothing is selected, uploaded or deleted meanwhile).
+ * After `threshold` consecutive rounds it becomes `needs_manual` and leaves this list.
+ */
+export interface HubBlockedBroadcastDTO {
+  streamKey: string;
+  platform: string;
+  roomSlug: string;
+  /** Anchor name (filled by the master per room; unknown = absent). */
+  anchorName?: string | null;
+  /** Unreachable selected worker ids blocking this broadcast. */
+  workers: string[];
+  /** First round (epoch ms) this broadcast was blocked by these workers. */
+  sinceMs: number;
+  /** Consecutive blocked rounds so far. */
+  rounds: number;
+  /** Rounds after which the broadcast turns `needs_manual` (<=0 = never). */
+  threshold: number;
+}
+
 export interface HubQueueDTO {
+  /** Broadcasts blocked by an unreachable selected worker (older master = absent). */
+  blocked?: HubBlockedBroadcastDTO[];
   /** 边录边传的实时进度(F1;旧 master / 无节点上报时缺省)。 */
   delivering?: RollingDeliveryDTO[];
   /**

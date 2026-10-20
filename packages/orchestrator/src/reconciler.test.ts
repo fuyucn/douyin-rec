@@ -1800,6 +1800,124 @@ describe("清单三态:失联节点所在的场不选优不收口(#27)", () => {
     expect(notify.mock.calls.filter((c) => c[0].kind === "error")).toHaveLength(0);
     ledger.close();
   });
+
+  describe("blocked broadcast: queue visibility, needs_manual threshold, run-now 409 (#69)", () => {
+    const errors = (n: ReturnType<typeof setup>["notify"]): NotifyEvent[] => n.mock.calls.map((c) => c[0]).filter((e) => e.kind === "error");
+
+    it("exposes the blocked broadcast (node, since, rounds) while a selected worker is unreachable; clears on recovery", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const live = flaky("live", [makeRec()], "ok");
+      const lost = flaky("lost", [makeRec()], "reject");
+      const { ledger, reconciler } = setup({ transports: [live.t, lost.t], extra: { blockedManualRounds: 5 } });
+
+      expect(reconciler.blockedBroadcasts()).toEqual([]);
+      await reconciler.reconcileAll();
+      await reconciler.reconcileAll();
+      const [b] = reconciler.blockedBroadcasts();
+      expect(b).toMatchObject({ workers: ["lost"], rounds: 2, threshold: 5, platform: "douyin" });
+      expect(b.sinceMs).toBeGreaterThan(0);
+      expect(reconciler.blockedBroadcasts()).toHaveLength(1);
+
+      lost.set("ok");
+      await reconciler.reconcileAll();
+      expect(reconciler.blockedBroadcasts()).toEqual([]);
+      ledger.close();
+    });
+
+    it("threshold reached -> needs_manual naming the node + one notify; no pipeline call; never auto-cleared", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const live = flaky("live", [makeRec()], "ok");
+      const lost = flaky("lost", [makeRec()], "reject");
+      const { ledger, runPipeline, reconciler, notify } = setup({
+        transports: [live.t, lost.t], extra: { blockedManualRounds: 3, unreachableAlertRounds: 0 },
+      });
+
+      await reconciler.reconcileAll();
+      await reconciler.reconcileAll();
+      expect(ledger.listKeys()).toHaveLength(0);
+      expect(errors(notify)).toHaveLength(0);
+      await reconciler.reconcileAll();                       // 3rd consecutive round
+      const [k] = ledger.listKeys();
+      expect(ledger.get(k.streamKey)?.state).toBe("needs_manual");
+      expect(ledger.get(k.streamKey)?.error).toContain("lost");
+      expect(errors(notify)).toHaveLength(1);
+      expect(JSON.stringify(errors(notify)[0])).toContain("lost");
+      expect(reconciler.blockedBroadcasts()).toEqual([]);   // parked rows show in jobs, not in the blocked list
+
+      lost.set("ok");                                        // recovery must NOT auto-clear: a human decides
+      await reconciler.reconcileAll();
+      await reconciler.reconcileAll();
+      expect(ledger.get(k.streamKey)?.state).toBe("needs_manual");
+      expect(errors(notify)).toHaveLength(1);
+      expect(runPipeline).not.toHaveBeenCalled();
+      ledger.close();
+    });
+
+    it("blockedManualRounds <= 0 disables the transition (stays blocked and visible)", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const live = flaky("live", [makeRec()], "ok");
+      const lost = flaky("lost", [makeRec()], "reject");
+      const { ledger, runPipeline, reconciler } = setup({ transports: [live.t, lost.t], extra: { blockedManualRounds: 0 } });
+      for (let i = 0; i < 15; i++) await reconciler.reconcileAll();
+      expect(ledger.listKeys()).toHaveLength(0);
+      expect(runPipeline).not.toHaveBeenCalled();
+      expect(reconciler.blockedBroadcasts()[0]).toMatchObject({ rounds: 15, threshold: 0 });
+      ledger.close();
+    });
+
+    it("recovery before the threshold resumes normally and restarts the count", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const live = flaky("live", [makeRec()], "ok");
+      const lost = flaky("lost", [makeRec()], "reject");
+      const { ledger, runPipeline, reconciler, notify } = setup({
+        transports: [live.t, lost.t], extra: { blockedManualRounds: 3, unreachableAlertRounds: 0 },
+      });
+      await reconciler.reconcileAll();
+      await reconciler.reconcileAll();
+      lost.set("ok");
+      await reconciler.reconcileAll();
+      expect(runPipeline).toHaveBeenCalledTimes(1);
+      const [k] = ledger.listKeys();
+      expect(ledger.get(k.streamKey)?.state).toBe("done");
+      expect(errors(notify)).toHaveLength(0);
+      ledger.close();
+    });
+
+    it("run-now with an unreachable selected node -> 409 forceable, no pipeline; force proceeds and logs the node", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const info = vi.spyOn(console, "info").mockImplementation(() => {});
+      const live = flaky("live", [makeRec()], "ok");
+      const lost = flaky("lost", [makeRec()], "reject");
+      const { ledger, runPipeline, reconciler } = setup({ transports: [live.t, lost.t] });
+      const key = clusterBroadcasts([{ workerId: "live", recordings: [makeRec()] }], 0, "douyin")[0].streamKey;
+
+      const r = await reconciler.runNow({ streamKey: key, wait: true });
+      expect(r).toMatchObject({ ok: false, code: 409, forceable: true });
+      expect(r.error).toContain("lost");
+      expect(runPipeline).not.toHaveBeenCalled();
+      expect(ledger.get(key)).toBeNull();
+
+      const warn = vi.mocked(console.warn);
+      const f = await reconciler.runNow({ streamKey: key, wait: true, force: true });
+      expect(f.ok).toBe(true);
+      expect(runPipeline).toHaveBeenCalledTimes(1);
+      expect(runPipeline.mock.calls[0][0].members.map((m) => m.workerId)).toEqual(["live"]);
+      expect([...warn.mock.calls, ...info.mock.calls].map((c) => String(c[0])).join("\n")).toMatch(/force over unreachable node\(s\): lost/);
+      ledger.close();
+    });
+
+    it("run-now is unaffected when the unreachable node is not selected by the rule", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const live = flaky("live", [makeRec()], "ok");
+      const lost = flaky("lost", [], "reject");
+      const { ledger, runPipeline, reconciler } = setup({ transports: [live.t, lost.t], cfgFor: () => ({ workers: ["live"] }) });
+      const key = clusterBroadcasts([{ workerId: "live", recordings: [makeRec()] }], 0, "douyin")[0].streamKey;
+      const r = await reconciler.runNow({ streamKey: key, wait: true });
+      expect(r.ok).toBe(true);
+      expect(runPipeline).toHaveBeenCalledTimes(1);
+      ledger.close();
+    });
+  });
 });
 
 describe("unclaimed-segment pass-through + deduped summary log (#225)", () => {

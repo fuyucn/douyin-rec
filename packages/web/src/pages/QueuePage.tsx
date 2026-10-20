@@ -11,7 +11,7 @@ import {
 import { useAtomValue } from "jotai";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type HubPoolSnapshotDTO, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type RollingDeliveryDTO } from "../api/client";
+import { api, type HubBlockedBroadcastDTO, type HubPoolSnapshotDTO, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type RollingDeliveryDTO } from "../api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/HubJobs";
 import { platformLabel, roomId } from "../lib/labels";
@@ -80,6 +80,33 @@ function DeliveringPanel({ items, now }: { items: RollingDeliveryDTO[]; now: num
                 <span className="text-muted-soft text-[12px]">{t("queue.delivering.noBv")}</span>
               )}
               <span className="ml-auto text-muted-soft font-mono text-[11px]">{t("queue.delivering.updated", { s: sec })}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Broadcasts waiting on an unreachable selected worker; read-only, nothing is uploaded or deleted meanwhile. */
+function BlockedPanel({ items, now }: { items: HubBlockedBroadcastDTO[]; now: number }): ReactNode {
+  const t = useT();
+  if (items.length === 0) return null;
+  return (
+    <div className="mb-5">
+      <div className="section-label mb-2.5">{t("queue.section.blocked")}</div>
+      <div className="space-y-2">
+        {items.map((b) => {
+          const min = Math.max(0, Math.round((now - b.sinceMs) / 60_000));
+          return (
+            <div key={b.streamKey} className="card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+              <span className="font-medium">{b.anchorName ?? b.roomSlug}</span>
+              <span className="text-muted-soft font-mono text-[11px]">{b.streamKey}</span>
+              <span style={{ color: "var(--error-fg)" }}>{t("queue.blocked.by", { nodes: b.workers.join(", ") })}</span>
+              <span className="text-muted font-mono text-[12px]">{t("queue.blocked.since", { min })}</span>
+              <span className="text-muted font-mono text-[12px]">
+                {b.threshold > 0 ? t("queue.blocked.rounds", { n: b.rounds, max: b.threshold }) : t("queue.blocked.roundsNoLimit", { n: b.rounds })}
+              </span>
             </div>
           );
         })}
@@ -659,6 +686,7 @@ export function QueuePage(): ReactNode {
           <div className="section-label mb-2.5">{t("queue.filter.groupRuntime")}</div>
           {pool && <PoolBar pool={pool} />}
           <DeliveringPanel items={data?.delivering ?? []} now={now} />
+          <BlockedPanel items={data?.blocked ?? []} now={now} />
           <FilterBar
             phase={phase} states={states} platform={platform} q={q}
             onPhase={setPhase} onStates={setStates} onPlatform={setPlatform}
