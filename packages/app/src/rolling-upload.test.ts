@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  RollingUploader, resolveRollingUploadMeta, resolveStreamUploadMeta,
+  RollingUploader, looksLikeRecordProcess, resolveRollingUploadMeta, resolveStreamUploadMeta,
   resolveStreamUploadTitle, resolveStreamPartTitle,
 } from "./rolling-upload.js";
 import { UploadGate, rollingUploadSingleNode } from "@drec/core";
@@ -1100,5 +1100,83 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect(append).not.toHaveBeenCalled();
     expect(r.uploaded).toEqual([]);
     expect(u.ambiguousIndices).toEqual([]);
+  });
+
+  it("owner pid reused by an unrelated process: judged gone via /proc identity, takeover proceeds", async () => {
+    const f = setup();
+    const append = vi.fn(async () => {});
+    // Default liveness (kill(pid,0)) on our own pid succeeds; only the cmdline identity check says "not a recorder".
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
+      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      now: () => f.bStartMs + 3_600_000,
+      procCmdline: () => ["/usr/sbin/nginx", "-g", "daemon off;"],
+    });
+    // Point the sidecar owner at a pid that really exists (this test process) so only identity decides.
+    writeFileSync(path.join(f.dir, `${A_BASE}.rolling.json`), JSON.stringify({ ...readA(f), ownerPid: process.pid }));
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(names(append)).toEqual([`${A_BASE}_001.ts`, `${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
+  });
+
+  it("owner pid held by a real record process of this program still counts as alive (B waits)", async () => {
+    const f = setup();
+    const append = vi.fn(async () => {});
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
+      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      now: () => f.bStartMs + 3_600_000,
+      procCmdline: () => ["node", "/app/dist/douyin-rec.mjs", "record", "--room", "https://live.example/123"],
+    });
+    writeFileSync(path.join(f.dir, `${A_BASE}.rolling.json`), JSON.stringify({ ...readA(f), ownerPid: process.pid }));
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it("/proc unavailable: falls back to the bare kill(pid,0) probe (alive pid → waits)", async () => {
+    const f = setup();
+    const append = vi.fn(async () => {});
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
+      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      now: () => f.bStartMs + 3_600_000, procCmdline: () => undefined,
+    });
+    writeFileSync(path.join(f.dir, `${A_BASE}.rolling.json`), JSON.stringify({ ...readA(f), ownerPid: process.pid }));
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it("looksLikeRecordProcess: only this program's record subcommand", () => {
+    expect(looksLikeRecordProcess(["node", "dist/douyin-rec.mjs", "record", "--room", "x"])).toBe(true);
+    expect(looksLikeRecordProcess(["node", "dist/douyin-rec.mjs", "task", "serve"])).toBe(false);
+    expect(looksLikeRecordProcess(["ffmpeg", "-i", "record"])).toBe(false);
+  });
+
+  it("owner alive beyond the wait bound: fail closed (no create/append, sources kept) and notify exactly once", async () => {
+    const f = setup();
+    const append = vi.fn(async () => {});
+    const plain = vi.fn(async () => "BVunexpected");
+    const alerts: string[] = [];
+    let t = f.bStartMs + 3_600_000;
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove,
+      uploadPlainRaw: plain as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      isPidAlive: () => true, now: () => t, ownerWaitMs: 30 * 60_000, notify: (m) => alerts.push(m),
+    });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false }); // starts the wait clock
+    t += 29 * 60_000;
+    await u.flush({ recordingActive: false }); // still within the bound
+    expect(alerts).toEqual([]);
+    t += 2 * 60_000;
+    await u.flush({ recordingActive: false }); // bound exceeded → give up
+    await u.flush({ recordingActive: false }); // later flushes stay closed, no second alert
+    expect(alerts).toHaveLength(1);
+    expect(append).not.toHaveBeenCalled();
+    expect(plain).not.toHaveBeenCalled();
+    expect(u.ambiguousIndices).toEqual([0]);
+    expect(readA(f)).toMatchObject({ confirmed: [0], ownerPid: DEAD_PID }); // predecessor untouched
   });
 });

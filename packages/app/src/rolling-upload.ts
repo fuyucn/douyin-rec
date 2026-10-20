@@ -34,6 +34,7 @@ import {
   statSync,
   unlinkSync,
   writeFileSync,
+  existsSync,
 } from "node:fs";
 import path, { join } from "node:path";
 import {
@@ -134,17 +135,47 @@ const DEFAULT_MIN_SEGMENT_SEC = 2;
 
 /** Legacy sidecars carry no owner pid: treat the owner as possibly alive while any of its files changed this recently. */
 const LEGACY_OWNER_QUIET_MS = 10 * 60_000;
+/** Longest a successor waits for a predecessor's (identity-checked) live owner before failing closed. */
+const DEFAULT_OWNER_WAIT_MS = 30 * 60_000;
 /** The predecessor's last segment must keep the same size across this pause before it counts as sealed. */
 const DEFAULT_STABLE_CHECK_MS = 2_000;
 
-function isPidAlive(pid: number): boolean {
+/** Does this argv look like this program's `record` subcommand (the process that owns rolling sidecars)? */
+export function looksLikeRecordProcess(args: readonly string[]): boolean {
+  const hasProgram = args.some((a) => /douyin-rec(\.mjs)?$/.test(a));
+  return hasProgram && args.includes("record");
+}
+
+/**
+ * Read `/proc/<pid>/cmdline` as argv. `null` = no such process; `undefined` = /proc unusable on this platform
+ * (caller falls back to a bare kill(pid, 0) probe).
+ */
+function readProcCmdline(pid: number): string[] | null | undefined {
+  if (!existsSync("/proc/self/cmdline")) return undefined;
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf-8").split("\0").filter((x) => x.length > 0);
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "ENOENT" ? null : undefined;
+  }
+}
+
+/**
+ * Is `pid` still the recorder that owned a sidecar? kill(pid, 0) alone is fooled by pid reuse (container restarts
+ * hand small pids to unrelated processes), so on Linux the command line must also look like our `record`
+ * subcommand. A reused pid held by another recorder of this program still counts as alive: the room is not
+ * checked (the `--room` argument may be a short link that does not carry the slug), the bounded wait covers it.
+ */
+function isPidAlive(pid: number, cmdlineOf: (pid: number) => string[] | null | undefined = readProcCmdline): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (e) {
     // EPERM = exists but not ours; anything but ESRCH is treated as alive (fail closed).
-    return (e as NodeJS.ErrnoException)?.code !== "ESRCH";
+    if ((e as NodeJS.ErrnoException)?.code === "ESRCH") return false;
   }
+  const args = cmdlineOf(pid);
+  if (args === undefined) return true; // /proc unavailable: the bare probe is all we have
+  if (args === null || args.length === 0) return false; // gone or zombie
+  return looksLikeRecordProcess(args);
 }
 
 function statePathFor(dir: string, sessionBase: string): string {
@@ -231,6 +262,12 @@ export interface RollingUploaderOpts {
   pid?: number;
   /** Liveness probe for a predecessor's owner pid (test seam; default `process.kill(pid, 0)`). */
   isPidAlive?: (pid: number) => boolean;
+  /** /proc/<pid>/cmdline reader for the default owner-identity check (test seam; null = no process, undefined = no /proc). */
+  procCmdline?: (pid: number) => string[] | null | undefined;
+  /** How long to keep waiting for a live predecessor owner before failing closed (default 30 min). */
+  ownerWaitMs?: number;
+  /** Alert channel for rolling cases that need a human (same sink as the recorder's error notifications). */
+  notify?: (message: string) => void;
   /** Pause between the two size checks of a predecessor's last segment (default 2s; tests pass 0). */
   stableCheckMs?: number;
 }
@@ -253,6 +290,10 @@ export class RollingUploader {
   private readonly pidAlive: (pid: number) => boolean;
   /** Takeover wait reason already logged (one line per distinct reason, not per flush). */
   private takeoverWaitLogged = "";
+  /** When this session first found the predecessor's owner alive (cleared once the owner is gone). */
+  private ownerWaitSince = 0;
+  /** Set once the owner wait exceeded its bound: findPredecessor then fails closed (no create, no append). */
+  private takeoverGaveUp = "";
   /** 段文件所在目录(首个段确定;sidecar 写在这里)。 */
   private segDir = "";
   private state: RollingState;
@@ -277,7 +318,7 @@ export class RollingUploader {
     this.now = o.now ?? Date.now;
     this.minSegmentSec = Math.max(0, o.minSegmentSec ?? DEFAULT_MIN_SEGMENT_SEC);
     this.pid = o.pid ?? process.pid;
-    this.pidAlive = o.isPidAlive ?? isPidAlive;
+    this.pidAlive = o.isPidAlive ?? ((pid: number): boolean => isPidAlive(pid, o.procCmdline));
     const cookiesPath = o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
     this.gate = o.gate ?? openNodeUploadGate({ warn: this.log });
     this.slot = o.slot ?? null;
@@ -709,6 +750,7 @@ export class RollingUploader {
   }
 
   private findPredecessor(): PredecessorLink {
+    if (this.takeoverGaveUp) return { kind: "uncertain", reason: this.takeoverGaveUp };
     const found = this.locatePredecessor();
     if (found.kind !== "found") return found;
     const { prev } = found;
@@ -759,8 +801,20 @@ export class RollingUploader {
     const leftovers = (prev.s.segments ?? []).filter((x) => !confirmed.has(x.index) && exists(x.path));
     if (!prev.s.uploading && leftovers.length === 0) return "proceed";
     if (this.ownerMayBeAlive(prev.s, prev.last)) {
+      const nowMs = this.now();
+      if (!this.ownerWaitSince) this.ownerWaitSince = nowMs;
+      const limit = this.o.ownerWaitMs ?? DEFAULT_OWNER_WAIT_MS;
+      if (nowMs - this.ownerWaitSince >= limit) {
+        // Fail closed like an uncertain predecessor: no create, no append, sources kept, one alert.
+        this.takeoverGaveUp = `${prev.base} 的录制进程持续存活超过 ${Math.round(limit / 60_000)} 分钟,放弃等待`;
+        const msg = `边录边传:${this.takeoverGaveUp},本会话不建稿不 append,保留源转人工`;
+        this.log(`[rolling] ⚠️ ${msg}`);
+        try { this.o.notify?.(msg); } catch { /* alert is best-effort */ }
+        return "proceed";
+      }
       return this.waitForPredecessor(`${prev.base} 的录制进程可能仍存活(pid=${String(prev.s.ownerPid ?? "未知")})`);
     }
+    this.ownerWaitSince = 0;
     // Owner is gone, but an orphaned recorder child could still be writing: the newest segment only counts as
     // sealed when its size is unchanged across two checks.
     const last = leftovers.reduce<{ index: number; path: string } | undefined>((m, x) => (!m || x.index > m.index ? x : m), undefined);
@@ -1030,6 +1084,8 @@ export function makeRollingUploadHookFactory(o: {
   cookies?: string;
   minSegmentSec?: number;
   log?: (msg: string) => void;
+  /** Alert sink for cases needing a human (wired to the recorder's notifier in the CLI). */
+  notify?: (message: string) => void;
   uploadPlainRaw?: typeof uploadPlain;
   appendGroupRaw?: typeof appendGroup;
   countPartsRaw?: (bv: string, cookies: string) => Promise<number | null>;
@@ -1050,6 +1106,7 @@ export function makeRollingUploadHookFactory(o: {
       cookies: o.cookies,
       minSegmentSec: o.minSegmentSec,
       log: o.log,
+      notify: o.notify,
       uploadPlainRaw: o.uploadPlainRaw,
       appendGroupRaw: o.appendGroupRaw,
       countPartsRaw: o.countPartsRaw,
