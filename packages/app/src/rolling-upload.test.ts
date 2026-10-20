@@ -1159,16 +1159,18 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect(readA(f)).toMatchObject({ confirmed: [0, 2] });
   });
 
-  it("issue #309 review: slot-starved A never created (no BV, no intent): the takeover creates from A0, B inherits", async () => {
+  it("#317 review: slot-starved A never created (no BV, unsent segments): B fails closed, nobody creates from A", async () => {
     const f = setup({ confirmedA: [], sidecar: { bv: undefined, closedAt: A_LAST_MS } });
     const plain = vi.fn(async () => FAKE_BV);
     const append = vi.fn(async () => {});
-    const u = uploaderB(f, { append, plain, count: async () => 1 });
+    const u = uploaderB(f, { append, plain });
     f.bPaths.forEach((p) => u.noteSegment(p));
-    await u.flush({ recordingActive: false });
-    expect((plain.mock.calls as unknown as Array<[{ plain: { video: string } }]>).map((c) => path.basename(c[0].plain.video))).toEqual([`${A_BASE}_000.ts`]);
-    expect(names(append)).toEqual([`${A_BASE}_001.ts`, `${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
-    expect(u.bv).toBe(FAKE_BV);
+    const r = await u.flush({ recordingActive: false });
+    expect(plain).not.toHaveBeenCalled(); // neither a peer create from A0 nor a B-only submission that skips A
+    expect(append).not.toHaveBeenCalled();
+    expect(r.uploaded).toEqual([]);
+    expect(u.ambiguousIndices).toEqual([0]);
+    expect(readA(f).bv).toBeUndefined();
   });
 
   it("#317 review: BV-less A is judged from its video end, not from a late closedAt: 70 min after the video → B does not take it over", async () => {
@@ -1183,22 +1185,6 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect((plain.mock.calls as unknown as Array<[{ plain: { video: string } }]>).map((c) => path.basename(c[0].plain.video))).toEqual([`${B_BASE}_000.ts`]);
     expect(append).not.toHaveBeenCalled();
     expect(readA(f).bv).toBeUndefined();
-  });
-
-  it("#317 review: BV-less A taken over but its create hits a busy slot → B waits, creates nothing", async () => {
-    const f = setup({ confirmedA: [], sidecar: { bv: undefined, closedAt: A_LAST_MS } });
-    const plain = vi.fn(async () => FAKE_BV);
-    const u = new RollingUploader({
-      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove, isPidAlive: () => false,
-      uploadPlainRaw: plain as never, appendGroupRaw: vi.fn() as never, countPartsRaw: async () => 1, now: () => f.bStartMs + 3_600_000,
-      slot: { acquire: async () => false, release: () => {} } as never, slotWaitMs: 1,
-    });
-    f.bPaths.forEach((p) => u.noteSegment(p));
-    const r = await u.flush({ recordingActive: false });
-    expect(plain).not.toHaveBeenCalled();
-    expect(r.uploaded).toEqual([]);
-    expect(u.ambiguousIndices).toEqual([]);
-    expect(readA(f).uploading).toBeUndefined();
   });
 
   it("leftovers still pending after the takeover (upload slot busy): B keeps waiting instead of overtaking", async () => {

@@ -761,7 +761,7 @@ export class RollingUploader {
     }
     // Sessions that never created or intended a submission have nothing to continue, unless they still hold
     // non-empty unconfirmed segments: a slot-starved session that never got to create (issue #309 review). Its
-    // content must lead the submission, so it is taken over (it creates) instead of being silently skipped.
+    // content would have to lead the submission; this session fails closed instead of creating one without it.
     const meaningful = cands.filter((c) => c.s.bv || c.s.uploading || (c.s.ambiguous?.length ?? 0) > 0 || hasUnsentContent(c.s));
     if (meaningful.length === 0) return { kind: "none" };
     const prev = meaningful.reduce((a, b) => (b.start > a.start ? b : a));
@@ -818,12 +818,10 @@ export class RollingUploader {
     const found = this.locatePredecessor();
     if (found.kind !== "found") return "proceed";
     const { prev } = found;
-    // Ambiguous segments: keep the existing fail-closed behaviour (findPredecessor reports uncertain).
-    // A predecessor without a BV is taken over too (issue #309 review): the peer creates the submission from the
-    // predecessor's first segment, then this session inherits it. Only the clean case (no intent at all): a
-    // BV-less predecessor with any intent keeps failing closed exactly as before.
-    if ((prev.s.ambiguous?.length ?? 0) > 0) return "proceed";
-    if (!prev.s.bv && prev.s.uploading) return "proceed";
+    // No BV / ambiguous segments: fail closed (findPredecessor reports uncertain). A BV-less predecessor is never
+    // taken over: it is an ordinary upload candidate for the master (run-now skips the reconnect window), so a
+    // node-side create from its segments could duplicate a manuscript the master uploads (#317 review rounds 2-3).
+    if (!prev.s.bv || (prev.s.ambiguous?.length ?? 0) > 0) return "proceed";
     const confirmed = new Set(prev.s.confirmed);
     const exists = (f: string): boolean => { try { statSync(f); return true; } catch { return false; } };
     const leftovers = (prev.s.segments ?? []).filter((x) => !confirmed.has(x.index) && exists(x.path));
