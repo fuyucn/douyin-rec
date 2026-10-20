@@ -63,6 +63,7 @@ export function sharedNodeUploadSlot(log?: (m: string) => void): UploadSlot | nu
 import { getHubRule, hubKey } from "./hub-store.js";
 import { rootHubConfig, rootHubDir } from "./paths.js";
 import { effectiveHubConfig } from "./disk-gate.js";
+import { sanitizePathSegment } from "@drec/record-engine";
 import type { RollingUploadHook } from "@drec/manager";
 
 /** 一个会话的持久化确认状态(防重启后重复投稿)。 */
@@ -725,6 +726,18 @@ export function resolveStreamUploadTitle(o: {
   });
 }
 
+/** Rolling's default part title: the recorded segment stem (`sanitizePathSegment(name)_stamp_NNN`), capped at 80. */
+function rollingStyleStem(
+  name: string,
+  z: { date: string; hh: string; mm: string; ss: string },
+  partIndex: number,
+): string {
+  const idx = String(Math.max(partIndex - 1, 0)).padStart(3, "0");
+  const tail = `_${z.date}_${z.hh}-${z.mm}-${z.ss}_${idx}`;
+  const head = (sanitizePathSegment(name) || "live").slice(0, 80 - tail.length);
+  return `${head}${tail}`;
+}
+
 /**
  * Render a zero-disk part title from the hub `partTitleTemplate`. Without a template, fall back to
  * what rolling upload shows (the recorded segment stem `{name}_{date}_{HH-mm-ss}_{NNN}`), never the
@@ -751,7 +764,7 @@ export function resolveStreamPartTitle(o: {
     ...(o.liveTitle ? { liveTitle: o.liveTitle } : {}),
     partIndex: o.partIndex,
     partTotal: o.partTotal,
-  }, "plain") ?? `${sessionBase}_${String(Math.max(o.partIndex - 1, 0)).padStart(3, "0")}`;
+  }, "plain") ?? rollingStyleStem(o.anchorName || o.roomSlug, z, o.partIndex);
 }
 
 /**
