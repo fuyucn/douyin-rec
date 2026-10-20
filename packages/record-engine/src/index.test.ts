@@ -46,7 +46,7 @@ function makePlatform(living: boolean | "error"): Platform {
     extractRoomSlug: (url) => url.replace(/^https?:\/\//, ""),
     resolveShortUrl: async () => null,
     fetchAnchorName: async () => null,
-    getStream: async () => ({ living: true, url: "http://test.local/live.flv", owner: "测试主播" }),
+    getStream: async () => ({ living: true, url: "http://test.local/live.flv", owner: "测试主播", liveSessionId: "live-9" }),
     getLiving: async () => {
       if (living === "error") throw new Error("network down");
       return living;
@@ -79,6 +79,20 @@ async function startRecorder(proc: FakeProc) {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("platform live id (issue #320)", () => {
+  it("onLive carries the live id the platform returned with the stream", async () => {
+    vi.useFakeTimers();
+    registerPlatform(makePlatform(true));
+    const proc = new FakeProc();
+    const { ev, outDir } = await startRecorder(proc);
+    expect(ev.onLive).toHaveBeenCalledWith(expect.objectContaining({ liveSessionId: "live-9" }));
+    proc.exitCode = 0;
+    proc.emit("close", 0, null);
+    await vi.advanceTimersByTimeAsync(1);
+    rmSync(outDir, { recursive: true, force: true });
+  });
 });
 
 describe("卡死看门狗(正常下播不误报)", () => {

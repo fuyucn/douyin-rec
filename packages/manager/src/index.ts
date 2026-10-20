@@ -163,6 +163,10 @@ export class RecordingSession {
    * the next broadcast's sidecar. Re-frozen whenever the base changes.
    */
   private sessionStart: { base: string; ms: number } | null = null;
+  /** Live id reported by the latest onLive (null = this spawn reported none). */
+  private currentLiveSessionId: string | null = null;
+  /** Live id frozen per sidecar base (issue #320), same keying as {@link sessionStart}. */
+  private sessionLiveId: { base: string; id: string | null } | null = null;
   /**
    * T14:连续「短命录制」次数(起播确认后 < STABLE_RECORD_MS 就断流)。
    * 达 SHORT_LIVED_ALARM 发一次 error 告警(继续按封顶退避,不放弃重连)。
@@ -260,6 +264,8 @@ export class RecordingSession {
     this.shortLivedAlarmAt = 0;
     this.onLiveAt = null;
     this.sessionStart = null;
+    this.currentLiveSessionId = null;
+    this.sessionLiveId = null;
 
     mkdirSync(opts.outDir, { recursive: true });
     await this._startInner();
@@ -289,6 +295,8 @@ export class RecordingSession {
         // 正是靠这里无条件清零导致固定 5s 无限重连(实测 1650 次)。真正的复位判据在
         // _handleOffline:本场「时长够 + 进度新鲜」才算录稳了(见 STABLE_RECORD_MS)。
         this.onLiveAt = Date.now();
+        // Reset on every spawn: a spawn without an id must not inherit the previous broadcast's id.
+        this.currentLiveSessionId = (i.liveSessionId ?? "").trim() || null;
         // 新一场开播(下播后重新开播):清掉上一场的标题,否则第二场会沿用第一场的 title。
         // 判据 = offlineNotified(offline 时查权威 getLiving=false → 已确认下播);
         // 抖动断流(仍在播)不清 —— 同一场重连保留首值,避免被后续空值清掉。
@@ -577,6 +585,12 @@ export class RecordingSession {
       timeZone: this.timeZone ?? processTimeZone(),
     };
     if (this.liveTitle) data.title = this.liveTitle;
+    // Issue #320: the platform live id decides "same broadcast" downstream. Frozen at the first write of a base
+    // like startMs (no later fill-in: a later write may already belong to the next spawn).
+    if (this.sessionLiveId === null || this.sessionLiveId.base !== base) {
+      this.sessionLiveId = { base, id: this.currentLiveSessionId };
+    }
+    if (this.sessionLiveId.id) data.liveSessionId = this.sessionLiveId.id;
     if (withGaps) {
       data.gaps = this.gaps;
       data.totalGapSec = Math.round(this.gaps.reduce((s, g) => s + (g.endMs - g.startMs), 0) / 1000);

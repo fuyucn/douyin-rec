@@ -736,7 +736,11 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
 
         // A derived `_HHMM` key whose same-day family already has a submission (or a queued upload) may be the same
         // broadcast under a drifted start (issue #292). Never auto-run it: park it for a human instead.
-        if (!job && isDerivedKey(b.streamKey)) {
+        // Every member already carries a node-created BV (rolling): the master closes it out without creating a
+        // manuscript, so there is no second draft to guard against (issue #320: a re-broadcast with a new live id
+        // gets its own `_HHMM` key and must not be parked).
+        const nodeOwned = b.members.length > 0 && b.members.every((m) => !!m.rec.rolling?.bv);
+        if (!job && isDerivedKey(b.streamKey) && !nodeOwned) {
           const conflict = await runNowConflict(
             { ledger: this.ledger, transports },
             b.streamKey,

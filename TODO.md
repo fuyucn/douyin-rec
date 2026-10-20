@@ -18,6 +18,8 @@
   **做什么**：任务/房间 DTO 的 登录态、回调地址经 core `redactTaskSecrets` 脱敏(只给 是否已设置标记);编辑表单留空=不改;子进程 回调地址走 0600 文件传入。**为什么**：接口明文返回敏感字段、`ps` 可见回调地址。**验收**：list/detail/create/update/room 响应无明文;PATCH 缺省保留;argv 不含回调地址;变异检查 FAIL→PASS。
 - [~] **T-90 边录边传:槽忙时不留建稿/追加意图,避免被误判为「建稿中断」转人工（issue [#309](https://github.com/fuyucn/douyin-rec/issues/309)）**
   — 2026-10-20 认领(用户授权),分支 `codex/issue-309-rolling-slot-busy-intent`。**做什么**：上传槽等待超时(biliup 未启动)时清掉已落盘的 create/append 意图。**为什么**：意图先于抢槽落盘,槽忙只 break 不清,下一个进程读到 create 意图即转人工、无稿件号。**验收**：槽忙后 sidecar 无 `uploading`;重启后的 uploader 不记 ambiguous 并正常建稿;变异检查 FAIL→PASS。不改「绝不自动重建稿」规则。
+- [~] **T-92 「同一场」判定改用平台 liveId,60 分钟间隔只作兜底（issue [#320](https://github.com/fuyucn/douyin-rec/issues/320)）**
+  — 2026-10-20 认领(用户授权),分支 `codex/issue-320-live-id-broadcast`(叠在 T-90 之上)。**做什么**：录制端把 `liveSessionId` 写进会话 sidecar;core `isSameBroadcast` 两边都有 id 时只比 id,否则按 60 分钟;节点续稿(#148)与 master 聚类共用。**为什么**：实测 26 分钟内两次开播 liveId 不同(按 #148 会被并进一个稿件,不可逆),而 84 分钟空窗可能仍是同一场。**验收**：不同 id 不续稿不聚类、相同 id 跨 60 分钟续稿聚类、缺 id 行为不变;变异检查 FAIL→PASS。
 - [~] **T-91 边录边传:append 失败后分P数读不到时延迟复核（issue [#310](https://github.com/fuyucn/douyin-rec/issues/310)）**
   — 2026-10-20 认领(用户授权),分支 `codex/issue-310-rolling-confirm-retry`(叠在 T-90 之上)。**做什么**：append 失败后分P数读不到(null)先延迟重读等接口恢复,恢复后仍须在 #66 的完整窗口内保持不变才算未提交;窗口内任一次 null 或读数低于基线都判 ambiguous。**为什么**：单次读不到即转人工;反过来,恢复后只读一次就换线会重复追加。**验收**：恢复且变多 → 已提交;恢复不变 → 走完整窗口才换线;混合/低于基线 → ambiguous;变异检查 FAIL→PASS。收尾槽忙的有界重试未做(证据不足,见 #310 评论)。
   **残余(未做)**：崩溃恢复路径的分P数读取仍是单次读;失败路径的延迟重读(最长约 40s)期间仍持有节点上传槽。

@@ -127,6 +127,55 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
+  it("issue #320 (#321 review HIGH): same live id 84 min after a done broadcast is processed as its own job, not folded and skipped", async () => {
+    const day = "douyin:test-room:2026-06-22";
+    const ledger = freshLedger();
+    ledger.upsertPending(day, new Date("2026-06-22T08:00:00Z").getTime());
+    ledger.markDone(day, "BV_FIRST");
+    const first = makeRec({ liveSessionId: "live-1", rolling: { bv: "BV_FIRST", confirmed: [0] } });
+    const later = makeRec({
+      sessionBase: "主播名_2026-06-22_10-24-00", startMs: new Date("2026-06-22T10:24:00Z").getTime(),
+      endMs: new Date("2026-06-22T11:00:00Z").getTime(), liveSessionId: "live-1", rolling: { bv: "BV_FIRST", confirmed: [0] },
+    });
+    const t1 = makeTransport("node-1", [first, later]);
+    const transports = new Map([["node-1", t1]]);
+    const seen: Broadcast[] = [];
+    const runPipeline = vi.fn(async (b: Broadcast) => { seen.push(b); return { state: "done" as const, bv: "BV_FIRST" }; });
+    await new Reconciler({ platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports), runPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0 }).reconcileAll();
+    expect(seen.map((b) => b.members.map((m) => m.rec.sessionBase))).toEqual([["主播名_2026-06-22_10-24-00"]]);
+    expect(seen[0]!.streamKey).not.toBe(day);
+    ledger.close();
+  });
+
+  it("issue #320: a derived _HHMM broadcast whose members all carry a node-created BV is closed out, not parked", async () => {
+    const day = "douyin:test-room:2026-06-22";
+    const firstStart = new Date("2026-06-22T08:00:00Z").getTime();
+    const run = async (rolling: NodeRecording["rolling"]) => {
+      const ledger = freshLedger();
+      ledger.upsertPending(day, firstStart);
+      ledger.markDone(day, "BV_FIRST");
+      // A later broadcast with its own live id on the same day → `_HHMM` key (the base job is already done).
+      const second = makeRec({
+        sessionBase: "主播名_2026-06-22_09-26-00", startMs: new Date("2026-06-22T10:26:00Z").getTime(),
+        endMs: new Date("2026-06-22T11:00:00Z").getTime(), liveSessionId: "live-2", rolling,
+      });
+      const t1 = makeTransport("node-1", [second]);
+      const transports = new Map([["node-1", t1]]);
+      const runPipeline = vi.fn(async () => ({ state: "done" as const, bv: "BV_SECOND" }));
+      await new Reconciler({ platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports), runPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0 }).reconcileAll();
+      const derived = ledger.listKeys().map((k) => k.streamKey).find((k) => k !== day)!;
+      return { state: ledger.get(derived)?.state, runs: runPipeline.mock.calls.length, ledger };
+    };
+    const owned = await run({ bv: "BV_SECOND", confirmed: [0] });
+    expect(owned).toMatchObject({ runs: 1 });
+    expect(owned.state).not.toBe("needs_manual");
+    owned.ledger.close();
+    // Without a node BV the master would upload: the guard still parks it.
+    const plain = await run(undefined);
+    expect(plain).toMatchObject({ runs: 0, state: "needs_manual" });
+    plain.ledger.close();
+  });
+
   it("T9b:每轮 reconcileAll 轮询收尾后转格式的回执;节点回滚 → 标注并停止轮询,job 终态不变", async () => {
     const ledger = freshLedger();
     ledger.upsertPending("douyin:test-room:2026-06-22");

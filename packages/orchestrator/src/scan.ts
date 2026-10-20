@@ -36,17 +36,18 @@ function countDanmuEntries(xmlPath: string): number {
  */
 function readSession(dir: string, base: string): {
   roomSlug?: string; platform?: string; totalGapSec: number; title?: string;
-  startMs?: number;
+  startMs?: number; liveSessionId?: string;
 } {
   try {
     const d = JSON.parse(readFileSync(join(dir, `${base}.session.json`), "utf-8")) as
       { roomSlug?: string; platform?: string; totalGapSec?: number; gaps?: GapInterval[]; title?: string;
-        startMs?: number };
+        startMs?: number; liveSessionId?: unknown };
     return {
       roomSlug: d.roomSlug || undefined,
       platform: d.platform || undefined,
       totalGapSec: d.totalGapSec ?? (d.gaps ? totalGapSecOf(d.gaps) : 0),
       title: d.title || undefined,
+      liveSessionId: typeof d.liveSessionId === "string" && d.liveSessionId ? d.liveSessionId : undefined,
       // Authoritative absolute start (issue #87). Require a millisecond-scale epoch so a
       // zero / seconds-scale / string / malformed value falls back to the legacy filename
       // parse below instead of producing a 1970 streamKey.
@@ -306,6 +307,7 @@ export async function scanRecordings(
         endMs,
         totalGapSec: sess.totalGapSec,
         title: sess.title,
+        ...(sess.liveSessionId ? { liveSessionId: sess.liveSessionId } : {}),
         rolling,
       });
     }

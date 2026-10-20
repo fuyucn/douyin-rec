@@ -180,7 +180,7 @@ export class PollingRecorder implements Recorder {
     });
     this.engineCleanup = cleanup ?? null;
     // 登记 proc + onLive + onSegment(会话首段)+ 卡死看门狗 + close/error 接线。
-    this.beginRecording(proc, owner, title, sessionFirstPath);
+    this.beginRecording(proc, owner, title, sessionFirstPath, probe.liveSessionId);
   }
 
   async start(roomUrl: string, opts: RecordOpts, ev: RecorderEvents): Promise<void> {
@@ -296,13 +296,13 @@ export class PollingRecorder implements Recorder {
    * 引擎 spawn 后调用:登记 proc + onLive + onSegment(首段)+ 起卡死看门狗 + wire close/error。
    * 进程退出后由 reportExitThenOffline 判别下播/断流 → onOffline(由 RecordingSession 决定重连)。
    */
-  protected beginRecording(proc: ChildProcess, owner: string, title: string, firstSegment?: string): void {
+  protected beginRecording(proc: ChildProcess, owner: string, title: string, firstSegment?: string, liveSessionId?: string): void {
     const ev = this.ev;
     if (!ev) return;
     this.proc = proc;
     this.lastAdvanceAt = Date.now(); // 起始宽限
     this.startStallWatch(proc);
-    ev.onLive({ anchorName: owner, title: title || undefined });
+    ev.onLive({ anchorName: owner, title: title || undefined, ...(liveSessionId ? { liveSessionId } : {}) });
     if (firstSegment) ev.onSegment(firstSegment);
     proc.on("close", (code) => {
       this.proc = null;

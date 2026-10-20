@@ -229,6 +229,38 @@ describe("RecordingSession", () => {
     expect(rows[1]!.title).toBe("第二场标题");   // 修复前这里会是「第一场标题」
   });
 
+  it("issue #320: each session sidecar records its own platform live id; a spawn without one writes none", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-liveid-"));
+    const ids: Array<string | undefined> = ["live-1", undefined];
+    let stampSeq = 0;
+    const stamps = ["00-00-01", "01-00-00"];
+    class LiveIdRecorder implements Recorder {
+      name = "mock-liveid"; providesDanmu = false;
+      ev!: RecorderEvents;
+      isLive = async () => false;
+      async start(_u: string, o: RecordOpts, ev: RecorderEvents) {
+        this.ev = ev;
+        const id = ids[stampSeq];
+        ev.onLive({ anchorName: "主播T", ...(id ? { liveSessionId: id } : {}) });
+        ev.onSegment(join(o.outDir, `主播T_2026-10-09_${stamps[stampSeq++]}_000.ts`));
+      }
+      async stop() {}
+    }
+    const sess = new RecordingSession(new LiveIdRecorder(), { reconnectDelaySec: 0.01 });
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "" });
+    await vi.advanceTimersByTimeAsync(1);
+    (sess as unknown as { recorder: LiveIdRecorder }).recorder.ev.onOffline();
+    await vi.advanceTimersByTimeAsync(200);
+    await sess.stop();
+    const rows = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")) as { sessionBase: string; liveSessionId?: string })
+      .sort((a, b) => a.sessionBase.localeCompare(b.sessionBase));
+    expect(rows.length).toBe(2);
+    expect(rows[0]!.liveSessionId).toBe("live-1");
+    expect(rows[1]!.liveSessionId).toBeUndefined(); // must not inherit the previous broadcast's id
+  });
+
   it("弹幕只在 onLive 后启动：recorder 未 fire onLive(等开播)→ 弹幕不连(防开播前陈旧 liveId)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sess-"));
     // 模拟 daemon 定时起、但房间还没开播:recorder 在轮询,不 fire onLive。

@@ -172,3 +172,36 @@ describe("clusterBroadcasts streamKey 日期按设置时区(issue #155)", () => 
     expect(out.map((x) => x.streamKey).sort()).toEqual(["douyin:411:2026-09-13_0130", "douyin:411:2026-09-13_0400"]);
   });
 });
+
+describe("clusterBroadcasts × live id (issue #320)", () => {
+  const T0 = Date.UTC(2026, 9, 20, 4, 0, 0);
+  const rec = (startMin: number, endMin: number, liveSessionId?: string) => ({
+    roomSlug: "r1", platform: "douyin", sessionBase: `s${startMin}`, tsFiles: [], durationSec: 0, totalGapSec: 0,
+    startMs: T0 + startMin * 60_000, endMs: T0 + endMin * 60_000, ...(liveSessionId ? { liveSessionId } : {}),
+  });
+  const cluster = (recs: ReturnType<typeof rec>[]) => clusterBroadcasts([{ workerId: "w1", recordings: recs }], undefined, "douyin", [], "UTC");
+
+  it("26 min apart with different live ids → two broadcasts", () => {
+    expect(cluster([rec(0, 22, "a"), rec(48, 200, "b")])).toHaveLength(2);
+  });
+  it("84 min apart with the same live id → still two jobs on the master (live id only splits; #321 review)", () => {
+    expect(cluster([rec(0, 60, "a"), rec(144, 200, "a")])).toHaveLength(2);
+  });
+  it("#321 review: two id-split clusters near a known base job → only the closest keeps the base key", () => {
+    const base = "douyin:r1:2026-10-20";
+    const out = clusterBroadcasts([{ workerId: "w1", recordings: [rec(0, 22, "a"), rec(48, 200, "b")] }], undefined, "douyin",
+      [{ streamKey: base, startMs: T0 }], "UTC");
+    expect(out.map((b) => b.streamKey)).toEqual([base, `${base}_0448`]);
+  });
+  it("#321 review: truly overlapping spans stay one broadcast even with different ids", () => {
+    expect(cluster([rec(0, 60, "a"), rec(30, 90, "b")])).toHaveLength(1);
+  });
+  it("an id-less member does not bridge two broadcasts with different live ids", () => {
+    const out = cluster([rec(0, 30, "a"), rec(10, 200), rec(50, 200, "b")]);
+    expect(out.map((b) => b.members.map((m) => m.rec.liveSessionId ?? "-"))).toEqual([["a", "-"], ["b"]]);
+  });
+  it("no live id → time window as before", () => {
+    expect(cluster([rec(0, 22), rec(48, 200)])).toHaveLength(1);
+    expect(cluster([rec(0, 60), rec(144, 200)])).toHaveLength(2);
+  });
+});

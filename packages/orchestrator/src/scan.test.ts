@@ -61,6 +61,18 @@ describe("scanRecordings", () => {
     expect(rec.endMs).toBe(sidecarStart);   // 无分段 → 零跨度(不读 sidecar endMs)
   });
 
+  it("issue #320: the session sidecar's live id reaches the recording; absent stays absent", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播L"); mkdirSync(dir);
+    for (const [b, extra] of [["主播L_2026-06-27_12-00-00", { liveSessionId: "live-1" }], ["主播L_2026-06-27_14-00-00", {}]] as const) {
+      writeFileSync(join(dir, `${b}.rolling.json`), JSON.stringify({ bv: FAKE_BV, confirmed: [] }));
+      writeFileSync(join(dir, `${b}.session.json`), JSON.stringify({ roomSlug: "555", platform: "douyin", ...extra }));
+    }
+    const rs = (await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 })))
+      .filter((r) => r.roomSlug === "555").sort((a, b) => a.sessionBase.localeCompare(b.sessionBase));
+    expect(rs.map((r) => r.liveSessionId)).toEqual(["live-1", undefined]);
+  });
+
   it("issue #87:老 sidecar 无时间戳字段 → 回退文件名解析(向后兼容)", async () => {
     const root = mkdtempSync(join(tmpdir(), "scan-"));
     const dir = join(root, "主播D"); mkdirSync(dir);

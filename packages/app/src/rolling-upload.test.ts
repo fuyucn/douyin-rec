@@ -492,6 +492,44 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
     expect(plain).toHaveBeenCalledTimes(1);
   });
 
+  const writeLiveId = (dir: string, base: string, id: string): void =>
+    writeFileSync(path.join(dir, `${base}.session.json`), JSON.stringify({ sessionBase: base, roomSlug: "123", platform: "douyin", liveSessionId: id }));
+
+  it("issue #320: gap <= 60 min but a different live id → new broadcast, B creates its own submission", async () => {
+    const { dir, plain, append } = await runSessionA();
+    const b = sessionB(dir, 26);
+    writeLiveId(dir, A_BASE, "live-1");
+    writeLiveId(dir, B_BASE, "live-2");
+    const plainB = vi.fn(async () => ["B", "V", "1second"].join(""));
+    const u = uploaderB(plainB, append, b.startMs);
+    b.paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(plainB).toHaveBeenCalledTimes(1);
+    expect(u.bv).not.toBe(FAKE_BV);
+  });
+
+  it("issue #320: gap 84 min but the same live id → same broadcast, B appends to A's submission", async () => {
+    const { dir, plain, append } = await runSessionA();
+    const b = sessionB(dir, 84);
+    writeLiveId(dir, A_BASE, "live-1");
+    writeLiveId(dir, B_BASE, "live-1");
+    const u = uploaderB(plain, append, b.startMs);
+    b.paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(plain).toHaveBeenCalledTimes(1);
+    expect(u.bv).toBe(FAKE_BV);
+  });
+
+  it("issue #320: live id known on one side only → falls back to the gap rule", async () => {
+    const { dir, plain, append } = await runSessionA();
+    const b = sessionB(dir, 30);
+    writeLiveId(dir, B_BASE, "live-2");
+    const u = uploaderB(plain, append, b.startMs);
+    b.paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(u.bv).toBe(FAKE_BV);
+  });
+
   it("predecessor uncertain (create intent without BV): B neither creates nor appends, segment goes manual", async () => {
     const { dir } = await runSessionA();
     // A crashed mid-create: intent persisted, no BV.
@@ -1185,6 +1223,21 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect((plain.mock.calls as unknown as Array<[{ plain: { video: string } }]>).map((c) => path.basename(c[0].plain.video))).toEqual([`${B_BASE}_000.ts`]);
     expect(append).not.toHaveBeenCalled();
     expect(readA(f).bv).toBeUndefined();
+  });
+
+  it("issue #320: BV-less A is never taken over across the window (same id, 84 min) nor with a different id (10 min)", async () => {
+    for (const [gap, aId, bId] of [[84, "live-1", "live-1"], [10, "live-1", "live-2"]] as const) {
+      const f = setup({ confirmedA: [], bGapMin: gap, sidecar: { bv: undefined, closedAt: A_LAST_MS } });
+      for (const [b, id] of [[A_BASE, aId], [B_BASE, bId]] as const) {
+        writeFileSync(path.join(f.dir, `${b}.session.json`), JSON.stringify({ sessionBase: b, roomSlug: "123", platform: "douyin", liveSessionId: id }));
+      }
+      const plain = vi.fn(async () => ["B", "V", "1second"].join(""));
+      const u = uploaderB(f, { append: vi.fn(async () => {}), plain });
+      f.bPaths.forEach((p) => u.noteSegment(p));
+      await u.flush({ recordingActive: false });
+      expect((plain.mock.calls as unknown as Array<[{ plain: { video: string } }]>).map((c) => path.basename(c[0].plain.video)), `gap ${gap}`).toEqual([`${B_BASE}_000.ts`]);
+      expect(readA(f).bv).toBeUndefined();
+    }
   });
 
   it("leftovers still pending after the takeover (upload slot busy): B keeps waiting instead of overtaking", async () => {
