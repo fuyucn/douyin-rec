@@ -228,12 +228,17 @@ export function buildRooms(ctx: ApiCtx) {
       if (proc && sameKey) {
         // The rule side must be valid for every zero-disk task in the room, not only the source
         // task that the rule happens to point at.
-        const roomErr = ctx.zeroDiskRoomError(k.platform, k.roomSlug, {
-          enabled: proc.enabled ?? before.processing?.enabled ?? true,
-          mode: mergedPipeline.upload?.mode,
-          workers: proc.workers === null ? [] : proc.workers ?? before.processing?.workers,
-          steps: mergedPipeline.steps,
-        });
+        const roomErr = ctx.zeroDiskRoomError(
+          k.platform,
+          k.roomSlug,
+          {
+            enabled: proc.enabled ?? before.processing?.enabled ?? true,
+            mode: mergedPipeline.upload?.mode,
+            workers: proc.workers === null ? [] : proc.workers ?? before.processing?.workers,
+            steps: mergedPipeline.steps,
+          },
+          { taskId: before.recording?.taskId ?? null, streamUpload: zeroDiskNext },
+        );
         if (roomErr) return err(400, roomErr);
       }
 

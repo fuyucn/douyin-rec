@@ -56,6 +56,8 @@ export interface ApiCtx {
     platform: string,
     roomSlug: string,
     rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+    /** The task this request is writing; its post-write flag overrides the persisted one. */
+    override?: { taskId: number | null; streamUpload: boolean },
   ) => string | null;
   settleLegacyRolling: (sourceTaskId: number | null | undefined, mode: unknown) => void;
   recordingsDir: (t: Task) => string | null;
@@ -311,9 +313,13 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     platform: string,
     roomSlug: string,
     rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+    override?: { taskId: number | null; streamUpload: boolean },
   ): string | null => {
     const affected = store.listTasks().filter((t) => {
-      if (!t.streamUpload) return false;
+      // Read the post-write value for the task being saved: turning zero-disk off in the
+      // same request that leaves rolling must not trip over its stale persisted `true`.
+      const streamUpload = override && t.id === override.taskId ? override.streamUpload : t.streamUpload;
+      if (!streamUpload) return false;
       try {
         const p = platformForRoom(t.room);
         return p.id === platform && p.extractRoomSlug(t.room) === roomSlug;

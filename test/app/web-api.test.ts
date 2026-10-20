@@ -1250,6 +1250,44 @@ describe("streamUpload 作为 rolling 子选项的规则门禁", () => {
     expect(res.status).toBe(400);
     expect(String((res.body as { error: string }).error)).toContain(`#${extra.id}`);
   });
+
+  it("同一次保存关掉零落盘并离开 rolling → 200(扫描被写任务取写入后的值)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-off-same-write-") });
+    const t = a.createTask({ room: "99601" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: t.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(200);
+    const res = a.updateRoom("douyin.99601", {
+      recording: { streamUpload: false },
+      processing: {
+        enabled: true, workers: ["local"],
+        pipeline: { upload: { mode: "upload" }, steps: { burnDanmu: false, burnLivechat: false } },
+      },
+    } as never);
+    expect(res.status).toBe(200);
+    expect(store.getTask(t.id)!.streamUpload).toBe(false);
+  });
+
+  it("同一次保存关掉零落盘但仍是 rolling → 200", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-off-stay-rolling-") });
+    const t = a.createTask({ room: "99602" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: t.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(200);
+    const res = a.updateRoom("douyin.99602", {
+      recording: { streamUpload: false },
+      processing: {
+        enabled: true, workers: ["local"],
+        pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+      },
+    } as never);
+    expect(res.status).toBe(200);
+    expect(store.getTask(t.id)!.streamUpload).toBe(false);
+  });
 });
 
 describe("streamUpload 与 rollingUpload 互斥(plans/039 写入侧门禁)", () => {
