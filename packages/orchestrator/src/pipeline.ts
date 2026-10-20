@@ -584,19 +584,8 @@ export function tryRollingShortCircuit(o: {
 }): { state: JobState; bv?: string } | null {
   const { streamKey, members, ledger, jlog, cfg } = o;
   if (ledger.get(streamKey)?.bv) return null; // 已有 BV(续跑) → 交给既有续跑路径
-  // #57 R1 止血:有边传进度、**无稿件号**,且留有建稿意图(uploading.kind=create)或结果不确定(ambiguous)
-  // = 建稿可能已提交、只是稿件号没落盘。此时走常规整场管线会**重复建稿**(B站不可逆)→ 转人工。
-  // 先于 rolled/bvs 判定:同场其它成员即使有 bv(或没有任何 bv)也一样。
-  const unsettled = members.filter((m) => rollingUnsettledWithoutBv(m.rec.rolling));
-  if (unsettled.length > 0) {
-    const detail = unsettled
-      .map((m) => `${m.workerId}:${m.rec.sessionBase}(${describeUnsettled(m.rec.rolling!)})`)
-      .join(";");
-    jlog(`边录边传识别:无稿件号但存在建稿意图/不确定结果 [${detail}] → 转人工(不走常规整场管线,防重复建稿)`);
-    ledger.setState(streamKey, "needs_manual", { error: `边录边传:建稿中断或结果不确定且无稿件号(${detail}),请人工核对稿件后处理` });
-    o.notify({ kind: "error", stage: "上传", message: `${streamKey} 边录边传:建稿中断/结果不确定且无稿件号,已转人工核对(未走常规管线)` });
-    return { state: "needs_manual" };
-  }
+  // #57 R1 止血(检查与动作见 blockUnsettledWithoutBv):先于 rolled/bvs 判定。
+  if (blockUnsettledWithoutBv({ streamKey, members, ledger, jlog, notify: o.notify })) return { state: "needs_manual" };
   const rolled = members.filter((m) => m.rec.rolling?.bv);
   if (rolled.length === 0) return null;
   const bvs = [...new Set(rolled.map((m) => m.rec.rolling!.bv!))];
@@ -675,6 +664,31 @@ export function tryRollingShortCircuit(o: {
     void readbackRollingParts(o.countParts, bv, confirmedTotal, streamKey, jlog);
   }
   return { state: "done", bv };
+}
+
+/**
+ * #57 R1 / #70:有边传进度、**无稿件号**,且留有建稿意图(uploading.kind=create)或结果不确定(ambiguous)
+ * = 建稿可能已提交、只是稿件号没落盘。此时走常规整场管线会**重复建稿**(B站不可逆),走续跑会漏掉该成员的分 P → 转人工。
+ * 同场其它成员即使有 bv(或没有任何 bv)也一样。命中 → 台账转 needs_manual + 通知并返回 true;只拦截,不做任何自动动作。
+ * 两处共用:tryRollingShortCircuit(常规路径)与 runPipeline 续跑入口(台账已有 bv)。
+ */
+function blockUnsettledWithoutBv(o: {
+  streamKey: string;
+  members: Broadcast["members"];
+  ledger: SyncLedger;
+  jlog: (m: string) => void;
+  notify: (e: NotifyEvent) => void;
+}): boolean {
+  const { streamKey, members, ledger, jlog } = o;
+  const unsettled = members.filter((m) => rollingUnsettledWithoutBv(m.rec.rolling));
+  if (unsettled.length === 0) return false;
+  const detail = unsettled
+    .map((m) => `${m.workerId}:${m.rec.sessionBase}(${describeUnsettled(m.rec.rolling!)})`)
+    .join(";");
+  jlog(`边录边传识别:无稿件号但存在建稿意图/不确定结果 [${detail}] → 转人工(不走常规整场管线,防重复建稿)`);
+  ledger.setState(streamKey, "needs_manual", { error: `边录边传:建稿中断或结果不确定且无稿件号(${detail}),请人工核对稿件后处理` });
+  o.notify({ kind: "error", stage: "上传", message: `${streamKey} 边录边传:建稿中断/结果不确定且无稿件号,已转人工核对(未走常规管线)` });
+  return true;
 }
 
 /** 无稿件号、但留有建稿意图(create)或不确定段 = 建稿可能已提交而稿件号丢失。 */
@@ -788,6 +802,11 @@ async function runPipelineInner(
 
   // 续跑:job 已有 bv ⇒ P1 已建稿(不可逆),绝不重传。跳过 select/pull/merge/burn/uploadPlain,只补 append。
   const existing = ledger.get(streamKey);
+  // #70:台账已有 bv 时,同场另一成员可能在建稿中被杀(有意图/不确定段、无稿件号)—— 续跑只认台账 bv,
+  // 会漏掉该成员的分 P 却收口 done。续跑任一分支(含节点侧 done 补跑)前先跑同一检查,命中转人工。
+  if (existing?.bv && blockUnsettledWithoutBv({ streamKey, members: b.members, ledger, jlog, notify })) {
+    return { state: "needs_manual", bv: existing.bv };
+  }
   // issue #91:节点侧上传的 done 场收尾补跑 —— 只补核验 + 删源,**不重新选优/拉回/上传**。
   // 必须排在下面「合并模式续跑」之前:否则合并模式的 done 场走 resumeAppends → finalizeOnly(不带 keepNodeXml),
   // 会把节点上**最后一份** .xml 一并删掉。

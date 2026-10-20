@@ -1300,6 +1300,53 @@ describe("runPipeline", () => {
       deps.ledger.close();
     });
 
+    describe("#70 resume × member killed mid-create (no BV of its own)", () => {
+      async function resumeWith(killed: Partial<NodeRecording> | null) {
+        const { mkdirSync, writeFileSync } = await import("node:fs");
+        const stageDir = mkdtempSync(join(tmpdir(), "resume-mixed-"));
+        const deps = makeDeps({
+          cfg: { ...makeDeps().cfg, stageDir, cleanup: { sourceAfterDone: true, stageSourceAfterMerge: true } },
+        });
+        const members = [{ workerId: "node-1", rec: makeRec({ rolling: { bv: "BVrolled", confirmed: [0] } }) }];
+        if (killed) members.push({ workerId: "node-2", rec: makeRec({ sessionBase: "killed_session", tsFiles: ["/remote/k.ts"], ...killed }) });
+        const b = makeBroadcast(members);
+        deps.ledger.upsertPending(b.streamKey);
+        for (const st of ["syncing", "merging", "uploading"] as const) deps.ledger.setState(b.streamKey, st);
+        deps.ledger.setBv(b.streamKey, "BVexisting");
+        const sub = join(stageDir, "douyin_test-room_2026-06-27");
+        mkdirSync(sub, { recursive: true });
+        for (const suf of [".mp4", "_danmu.mp4", "_livechat.mp4", ".xml"]) writeFileSync(join(sub, "主播名_2026-06-27" + suf), "x");
+        const r = await runPipeline(b, deps);
+        return { r, deps, b };
+      }
+
+      it.each([
+        ["create intent", { rolling: { uploading: { index: 0, kind: "create" as const } } }],
+        ["ambiguous segment", { rolling: { ambiguous: ["seg0"] } }],
+      ])("ledger has BV + member with %s and no BV → needs_manual, no append, no cleanup", async (_n, killed) => {
+        const { r, deps, b } = await resumeWith(killed as Partial<NodeRecording>);
+        expect(r).toEqual({ state: "needs_manual", bv: "BVexisting" });
+        expect(deps.ledger.get(b.streamKey)?.state).toBe("needs_manual");
+        expect(deps.ledger.get(b.streamKey)?.error).toContain("无稿件号");
+        expect(deps.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error", message: expect.stringContaining("无稿件号") }));
+        expect(deps.uploadPlain).not.toHaveBeenCalled();
+        expect(deps.appendGroup).not.toHaveBeenCalled();
+        expect(deps.sh).not.toHaveBeenCalled();
+        expect(deps.transports.get("node-1")!.cleanup).not.toHaveBeenCalled();
+        expect(deps.transports.get("node-2")!.cleanup).not.toHaveBeenCalled();
+        deps.ledger.close();
+      });
+
+      it("ledger has BV + all members clean → resumes as before (appends, done)", async () => {
+        const { r, deps, b } = await resumeWith({ rolling: { confirmed: [] } });
+        expect(r).toEqual({ state: "done", bv: "BVexisting" });
+        expect(deps.ledger.get(b.streamKey)?.state).toBe("done");
+        expect(deps.uploadPlain).not.toHaveBeenCalled();
+        expect(deps.appendGroup).toHaveBeenCalled();
+        deps.ledger.close();
+      });
+    });
+
     it("续跑:markDone 后补做删源(回归:续跑曾完全不删节点源 → 残留)", async () => {
       const { mkdirSync, writeFileSync } = await import("node:fs");
       const stageDir = mkdtempSync(join(tmpdir(), "resume-clean-"));
