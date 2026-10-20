@@ -238,6 +238,11 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
   前端默认日期（`todayYmdInTz(serverTz)`）都走 core 的 `resolveTimeZone`/`processTimeZone`（env 未设 → 北京，**不回落宿主机
   本地时区**）。不经 `serve` 的独立 CLI 命令由 cli `preAction` 钩子调 `applyTimezoneFromDb()` 读同一设置。
 - 状态恢复、崩溃自动重启、每任务日志环形缓冲（web 实时 tail）。
+- **未开播 ≠ 失败（issue #308）**：录制进程未开播时必须**留在进程内**按 ~30s 轮询（PollingRecorder 与 0 落盘
+  `waitForBroadcast` 同口径），绝不能以非 0 退出交给调度重试——每次重启都会重新请求取流与弹幕 liveId，放大风控。
+  0 落盘的「同一场」判定（打开稿件状态）放在**开播那一刻**，不在进程启动时；弹幕只在开播后连接（未开播时解析的
+  liveId 是上一场的）。TaskManager 重启耗尽后记放弃时间，daemon 冷却 10 分钟内不自动拉起（手动启停清除），
+  否则「放弃」约 20s 后就被 daemon 当作进入窗口重启，形成无限循环。
 - **输出格式·节点侧原地替换**（issue #137，`app/node-remux.ts` 薄封装 + `@drec/processors` 的 remux 模块，plans/036 T6）：任务字段 `outputFormat`（original/mp4/mkv）。仅**无后处理**
   的任务生效 —— `TaskManager.spawnFor` 经唯一判定点 `resolveNodeOutputFormat` 决定是否给子进程传 `--output-format`
   （hub 受管 / 有 **enabled** 规则绑定 / 边录边传 → original 不传；`enabled=false` 的规则视同未绑定、走封口转换；规则之后才绑定则下一次 spawn 起生效；判定唯一输入 `shouldConvertAtSeal`；**有 enabled 规则绑定的任务封口时仍不转（处理中途从不转换），但自 T9b 起改由收尾后转换，不再锁**，见下）。子进程经 manager 的
