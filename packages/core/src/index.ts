@@ -6,6 +6,7 @@ export * from "./platform.js";
 export * from "./notify.js";
 export * from "./notify-context.js";
 export * from "./api-types.js";
+export * from "./task-redact.js";
 export * from "./log.js";
 export * from "./atomic-name.js";
 export * from "./atomic-write.js";

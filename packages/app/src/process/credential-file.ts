@@ -13,14 +13,17 @@ export function credentialDir(): string {
   return resolve(drecRoot(), "run");
 }
 
+/** Which secret the file carries; cookies keep the original name so existing files/sweeps are unaffected. */
+export type CredentialKind = "cookies" | "webhook";
+
 /**
  * 原子写入凭证文件并返回其绝对路径:先写同目录 0600 临时文件再 rename,
  * 读者永远看不到半截内容,文件从创建起就是 0600(不存在先宽后紧的窗口)。
  * 任何 fs 错误原样抛出(不吞)。同一任务重复 spawn 会覆盖上一份。
  */
-export function writeCredentialFile(taskId: number, credential: string): string {
+export function writeCredentialFile(taskId: number, credential: string, kind: CredentialKind = "cookies"): string {
   const dir = credentialDir();
-  const path = join(dir, `record-${taskId}.cred`);
+  const path = join(dir, `record-${taskId}${kind === "webhook" ? ".webhook" : ""}.cred`);
   const tmp = `${path}.${process.pid}.tmp`;
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -44,8 +47,8 @@ export function removeCredentialFile(path: string): void {
   rmSync(path, { force: true });
 }
 
-/** Names written by writeCredentialFile: `record-<id>.cred` and its `.<pid>.tmp` staging file. */
-const CREDENTIAL_NAME = /^record-\d+\.cred(\.\d+\.tmp)?$/;
+/** Names written by writeCredentialFile: `record-<id>[.webhook].cred` and its `.<pid>.tmp` staging file. */
+const CREDENTIAL_NAME = /^record-\d+(\.webhook)?\.cred(\.\d+\.tmp)?$/;
 
 /**
  * Startup sweep: remove credential files left behind when a previous serve was killed before

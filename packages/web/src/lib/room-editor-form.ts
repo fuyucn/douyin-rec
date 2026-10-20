@@ -17,7 +17,12 @@ export interface RoomForm {
   engine: string;
   segmentSec: string;
   schedule: string;
+  /** New webhook typed by the user. The stored value is never echoed to the client, so this starts empty. */
   webhook: string;
+  /** A webhook is stored server-side (DTO `hasWebhook`). */
+  hasWebhook: boolean;
+  /** User asked to clear the stored webhook. */
+  webhookClear: boolean;
   danmu: boolean;
   useCookie: boolean;
   procEnabled: boolean;
@@ -44,6 +49,16 @@ export interface RoomForm {
   requires: string[];
 }
 
+/**
+ * PATCH semantics for the per-task webhook secret: the server never returns the stored value, so
+ * an untouched field must be OMITTED (= keep); typed text replaces; the explicit clear box sends null.
+ */
+export function webhookPatch(typed: string, clear: boolean): { webhook?: string | null } {
+  const v = typed.trim();
+  if (v) return { webhook: v };
+  return clear ? { webhook: null } : {};
+}
+
 export function formFromRoom(r: RoomDTO): RoomForm {
   const rec = r.recording;
   const p = r.processing?.pipeline ?? {};
@@ -53,7 +68,9 @@ export function formFromRoom(r: RoomDTO): RoomForm {
     engine: rec?.engine ?? "",
     segmentSec: String(rec?.segmentSec ?? 1800),
     schedule: rec?.scheduleStart && rec?.scheduleEnd ? `${rec.scheduleStart}-${rec.scheduleEnd}` : "",
-    webhook: rec?.webhook ?? "",
+    webhook: "",
+    hasWebhook: rec?.hasWebhook === true,
+    webhookClear: false,
     danmu: !!rec?.danmu,
     useCookie: rec?.useCookie ?? true,
     procEnabled: r.processing?.enabled ?? true,
@@ -140,7 +157,7 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
         streamUpload: stored.mode === "rolling" && f.streamUpload,
         streamUploadSpool: f.streamUploadSpool,
         ...sched,
-        webhook: f.webhook.trim() || null,
+        ...webhookPatch(f.webhook, f.webhookClear),
       }
     : undefined;
   return {

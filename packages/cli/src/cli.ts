@@ -136,6 +136,8 @@ program
     else applyTimezoneFromDb();
   })
   .option("--discord-webhook <url>", "Discord incoming webhook（也读 config / env DISCORD_WEBHOOK）")
+  // serve 拉起子进程时用文件传 webhook(凭证不进 argv / ps);手动 CLI 仍可直接用 --discord-webhook。
+  .option("--discord-webhook-file <path>", "从文件读取 Discord webhook (优先于 --discord-webhook)")
   // 参数错误后顺带提示 --help，省得用户再敲一次。
   .showHelpAfterError("(用 --help 查看用法)")
   .addHelpText(
@@ -245,7 +247,9 @@ program
     const engine = pickEngine(engineId, platform.defaultEngine);
     const recorder: Recorder = new PollingRecorder(engine);
 
-    const webhook = (program.opts() as { discordWebhook?: string }).discordWebhook ?? cfg.discordWebhook ?? process.env.DISCORD_WEBHOOK;
+    const gopts = program.opts() as { discordWebhook?: string; discordWebhookFile?: string };
+    const webhook = (gopts.discordWebhookFile ? readFileSync(gopts.discordWebhookFile, "utf-8").trim() || undefined : undefined)
+      ?? gopts.discordWebhook ?? cfg.discordWebhook ?? process.env.DISCORD_WEBHOOK;
     // 告警双通道:webhook(makeNotifier)+ error 事件额外打一行 @@DREC_ALERT@@{json} 到 stdout,
     // 供父进程(TaskManager)解析 → EventCenter → 站内 toast(webhook 已由 makeNotifier 发,父进程不再重发)。
     const toggles = webhookTogglesFromEnv();
