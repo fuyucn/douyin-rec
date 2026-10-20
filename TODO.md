@@ -193,6 +193,7 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
+- [~] **T-96 0 落盘弹幕 xml 每次启动覆盖上一份(issue [#329](https://github.com/fuyucn/douyin-rec/issues/329))** — 2026-10-20。**做什么**:xml 按每次运行独立命名,writer 打开时不截断已有非空文件(改名留存)。**为什么**:0 落盘 xml 是唯一落盘产物,覆盖不可恢复。**验收**:同房间连续两次运行两份弹幕都在;回归测试 + 变异验证;上线后实测两场两份 xml。
 - [~] **T-89 0 落盘稿件状态按同场口径切分(issue [#293](https://github.com/fuyucn/douyin-rec/issues/293))** — 2026-10-20。状态只按房间键,同房间下一场会追加到上一场稿件。**做什么**:启动时按最后活动距今与 `SAME_BROADCAST_GAP_MS` 比较,超过则归档旧状态并新建稿件,不确定则拒绝并报错。**验收**:同房间间隔 61 分钟起新稿件、59/60 分钟续用、归档含未确认分 P 时保留并报错、状态损坏拒绝启动;有变异验证。
 - [x] **T-85 0 落盘作为 rolling 子选项(issue [#285](https://github.com/fuyucn/douyin-rec/issues/285))**
   — 2026-10-19 完成。PR [#287](https://github.com/fuyucn/douyin-rec/pull/287)(三轮 review,末轮通过;`pr-risk-scan` = RISK,用户拍板合并)合并 `c888f334`;PR [#289](https://github.com/fuyucn/douyin-rec/pull/289) 恢复丢失的 CLI 接线合并 `d7c50582`,已部署 `0.0.192-7dc6a6`。
