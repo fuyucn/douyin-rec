@@ -653,6 +653,7 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
         // 仍有成员在录制 → 本轮跳过(不建 job、不合并残片),待其录完的后续轮再处理。
         if (b.members.some((m) => stillRecording.has(`${m.workerId}:${m.rec.roomSlug}`))) {
           this.clearSkipLog(`window:${b.streamKey}`);
+          this.clearSkipLog(`rolling:${b.streamKey}`);
           continue;
         }
         // Issue #309: recording ended but the node's rolling uploader still owns a session of this broadcast
