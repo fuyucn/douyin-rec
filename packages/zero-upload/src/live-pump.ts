@@ -1394,8 +1394,17 @@ export interface RunLivePumpOptions {
    * losing that video for good, because there is no local copy to fall back to.
    */
   drainSignal?: AbortSignal;
-  /** Sleep seam for stream-acquisition backoff (tests). */
+  /** Sleep seam for stream-acquisition backoff and the idle poll (tests). */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Stay in-process until a broadcast starts instead of giving up after a few failed probes.
+   * Production zero-disk tasks set this: exiting made the scheduler restart the task every few
+   * minutes, and every restart re-hit the stream and danmu endpoints (issue #308). Only a
+   * stop/drain ends the wait. Default false keeps the one-shot behavior of manual runs.
+   */
+  waitForBroadcast?: boolean;
+  /** Poll interval while waiting for a broadcast (default 30s, same as the file recorder). */
+  idlePollMs?: number;
   /**
    * "full" (default) mirrors each part to a spool file (fallback + ffprobe self-check).
    * "none" = true zero-disk: nothing is written for video; a failed part cannot be retried
@@ -1434,13 +1443,16 @@ export interface RunLivePumpResult {
    *
    * `uploaded` — at least one part completed. With `submit` enabled that means it reached the
    *   archive; with `submit:false` it means it was fully recorded and only held back locally.
-   * `no-stream` — the stream could not be acquired, so no part exists.
+   * `no-stream` — the stream could not be acquired and the run gave up (only without
+   *   `waitForBroadcast`), so no part exists. Callers treat it as a failure.
+   * `idle` — `waitForBroadcast` run that recorded no part: a stop/drain arrived while waiting, or
+   *   the room dropped right after it was seen live. Waiting never gives up on its own
+   *   (issue #308), so this is a normal ending, never a failure.
    *
-   * Absent when `ok:false` (an error or a stop cut the run); read `error` for the reason and
-   * `segments` for what was already delivered. Deliberately no `stopped` value: a cut run is
-   * reported through `ok:false`, so a third state would be unreachable.
+   * Absent when `ok:false` (an error cut the run); read `error` for the reason and
+   * `segments` for what was already delivered.
    */
-  outcome?: "uploaded" | "no-stream";
+  outcome?: "uploaded" | "no-stream" | "idle";
   /** The archive already exists, so creating a new one is forbidden. */
   archiveExists?: boolean;
   bvid?: string;
@@ -1470,6 +1482,37 @@ export function zeroDiskPartLost(
   return (spoolMode ?? "full") === "none" && backpressured === true;
 }
 
+/** Default poll interval while no broadcast is live; keeps risk-control pressure at file-recorder level. */
+export const IDLE_POLL_MS = 30_000;
+
+/**
+ * Sleep that ends early when any signal aborts. `sleepImpl` is the test seam; it is still raced
+ * against the signals so a stop is never delayed by a long poll interval.
+ */
+async function sleepUnlessAborted(
+  ms: number,
+  signals: Array<AbortSignal | undefined>,
+  sleepImpl?: (ms: number) => Promise<void>,
+): Promise<void> {
+  const live = signals.filter((x): x is AbortSignal => !!x);
+  if (live.some((x) => x.aborted)) return;
+  let timer: NodeJS.Timeout | undefined;
+  let onAbort: () => void = () => {};
+  const aborted = new Promise<void>((resolve) => {
+    onAbort = resolve;
+    for (const sig of live) sig.addEventListener("abort", onAbort, { once: true });
+  });
+  const slept = sleepImpl
+    ? sleepImpl(ms)
+    : new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); });
+  try {
+    await Promise.race([slept, aborted]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    for (const sig of live) sig.removeEventListener("abort", onAbort);
+  }
+}
+
 /**
  * Record a live room and upload every finished part into one archive.
  *
@@ -1482,68 +1525,135 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   const maxSegments = Math.max(0, o.maxSegments ?? 0);
   /** Live title seen on the first acquisition (platforms may not expose one). */
   let liveTitle: string | undefined;
-  const session = new LivePumpSession({
-    cookiesPath: o.cookiesPath,
-    room: o.room,
-    spoolDir: o.spoolDir,
-    title: o.title,
-    tid: o.tid,
-    tag: o.tag,
-    ...(o.desc ? { desc: o.desc } : {}),
-    private: o.private !== false,
-    log,
-    ...(o.onAlert ? { onAlert: o.onAlert } : {}),
-    // The session performs the archive create/append requests; it must use the same fetch
-    // override as the segment uploader, or a fake transport would silently fall back to the
-    // real network (real bug: a fake-UPOS run hit live Bilibili and got -400).
-    fetchImpl: o.fetchImpl,
-  });
+  // TaskManager derives the task's recording phase from these exact markers
+  // (`[状态] 录制中` / `[状态] 等待开播`). Without them a zero-disk task shows as "running"
+  // but never "recording", so the UI cannot tell waiting-for-stream from actually recording.
+  log("[状态] 等待开播");
+  const idlePollMs = o.idlePollMs ?? IDLE_POLL_MS;
+  const stopRequested = async (): Promise<boolean> =>
+    !!o.signal?.aborted || !!o.drainSignal?.aborted || !!(await o.shouldStop?.());
+  /** Probe until a stream is live. Resolves null once a stop or drain is requested. */
+  const waitForBroadcast = async (): Promise<StreamAcquirer | null> => {
+    for (let misses = 0; ; misses++) {
+      if (await stopRequested()) return null;
+      // One attempt per poll (no backoff retries): the interval itself is the retry cadence.
+      const s = await acquireStreamWithBackoff({
+        room: o.room, fetch: o.fetch, quality: o.quality, maxRetries: 0, sleep,
+      });
+      if (s.living && s.url) return s;
+      // Log the first miss and then roughly every 10 minutes, so a long wait is visible
+      // without flooding the task log.
+      if (misses % Math.max(1, Math.round(600_000 / idlePollMs)) === 0) {
+        log(`[live-pump] 未开播,每 ${idlePollMs / 1000}s 探测一次(留在进程内等待)`);
+      }
+      await sleepUnlessAborted(idlePollMs, [o.signal, o.drainSignal], o.sleep);
+    }
+  };
+  /**
+   * Open the room's session and settle what a previous run left behind (WAL recovery, one
+   * re-uploadable unconfirmed part). Constructing the session also applies the same-broadcast
+   * rule (#293) against the current time. Returns a failure result instead of a session when
+   * the archive is in a state that must not collect more parts.
+   */
+  const openSession = async (): Promise<{ session: LivePumpSession } | { fail: RunLivePumpResult }> => {
+    const session = new LivePumpSession({
+      cookiesPath: o.cookiesPath,
+      room: o.room,
+      spoolDir: o.spoolDir,
+      title: o.title,
+      tid: o.tid,
+      tag: o.tag,
+      ...(o.desc ? { desc: o.desc } : {}),
+      private: o.private !== false,
+      log,
+      ...(o.onAlert ? { onAlert: o.onAlert } : {}),
+      // The session performs the archive create/append requests; it must use the same fetch
+      // override as the segment uploader, or a fake transport would silently fall back to the
+      // real network (real bug: a fake-UPOS run hit live Bilibili and got -400).
+      fetchImpl: o.fetchImpl,
+    });
 
-  if (o.submit !== false) {
-    const recovered = await session.recover();
-    if (!recovered.ok) {
-      log(
-        recovered.archiveExists
-          ? `[live-pump] 稿件已存在但状态不确定,禁止新建稿件: ${recovered.reason}`
-          : `[live-pump] 恢复失败,停止以避免重复建稿: ${recovered.reason}`,
-      );
+    if (o.submit !== false) {
+      const recovered = await session.recover();
+      if (!recovered.ok) {
+        log(
+          recovered.archiveExists
+            ? `[live-pump] 稿件已存在但状态不确定,禁止新建稿件: ${recovered.reason}`
+            : `[live-pump] 恢复失败,停止以避免重复建稿: ${recovered.reason}`,
+        );
+        return { fail: {
+          ok: false, error: recovered.reason, archiveExists: !!recovered.archiveExists,
+          title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
+          statePath: livePumpStatePath(o.spoolDir, o.room),
+        } };
+      }
+      if (session.hasUnconfirmed) {
+        const pending = session.parts.filter((p) => !p.confirmed);
+        // One unconfirmed part whose spool survived is recoverable: re-upload the whole file and
+        // append it. More than one (or a missing spool) means a real gap, so stop for a human.
+        if (pending.length === 1 && existsSync(pending[0]!.spoolPath)) {
+          log(`[live-pump] 有 1 个未确认分 P(索引 ${pending[0]!.index}),按整文件重传补齐`);
+          const fixed = await session.resubmitUnconfirmedPart();
+          if (!fixed.ok) {
+            return { fail: {
+              ok: false, error: fixed.error, bvid: session.bvid, aid: session.aid,
+              title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
+              statePath: livePumpStatePath(o.spoolDir, o.room),
+            } };
+          }
+        } else {
+          const error = `unconfirmed parts: ${pending.map((p) => p.index).join(",")}`;
+          log(`[live-pump] 有 ${pending.length} 个未确认分 P;为避免重复/空洞,拒绝继续录制上传`);
+          return { fail: {
+            ok: false, error, bvid: session.bvid, aid: session.aid,
+            title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
+            statePath: livePumpStatePath(o.spoolDir, o.room),
+          } };
+        }
+      }
+    }
+    return { session };
+  };
+
+  if (o.waitForBroadcast) {
+    // A previous run may have left a pending/unconfirmed part (e.g. the last part's submit failed
+    // as the show ended). Settle it now, while its archive is still "this broadcast", instead of
+    // after a long wait when the gap rule would archive it for a human (review of #319).
+    const st = existsSync(livePumpStatePath(o.spoolDir, o.room))
+      ? readLivePumpState(livePumpStatePath(o.spoolDir, o.room))
+      : undefined;
+    if (o.submit !== false && st !== undefined && (!st || !!st.pending || st.parts.some((p) => !p.confirmed))) {
+      log("[live-pump] 上次运行留有未确认分 P,等待开播前先恢复");
+      const pre = await openSession();
+      if ("fail" in pre) return pre.fail;
+    }
+    // Wait BEFORE opening the session for recording. The session decides "same broadcast or a
+    // new one" from the state's last activity when it is constructed; deciding at process start
+    // and then waiting hours would append the next broadcast to the previous one's archive. The
+    // probe result is dropped on purpose: the loop below fetches a fresh URL.
+    const first = await waitForBroadcast();
+    if (!first) {
       return {
-        ok: false, error: recovered.reason, archiveExists: !!recovered.archiveExists,
-        title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
+        ok: true, outcome: "idle", title: o.title, segments: [], spoolDir: o.spoolDir,
         statePath: livePumpStatePath(o.spoolDir, o.room),
       };
     }
-    if (session.hasUnconfirmed) {
-      const pending = session.parts.filter((p) => !p.confirmed);
-      // One unconfirmed part whose spool survived is recoverable: re-upload the whole file and
-      // append it. More than one (or a missing spool) means a real gap, so stop for a human.
-      if (pending.length === 1 && existsSync(pending[0]!.spoolPath)) {
-        log(`[live-pump] 有 1 个未确认分 P(索引 ${pending[0]!.index}),按整文件重传补齐`);
-        const fixed = await session.resubmitUnconfirmedPart();
-        if (!fixed.ok) {
-          return {
-            ok: false, error: fixed.error, bvid: session.bvid, aid: session.aid,
-            title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
-            statePath: livePumpStatePath(o.spoolDir, o.room),
-          };
-        }
-      } else {
-        const error = `unconfirmed parts: ${pending.map((p) => p.index).join(",")}`;
-        log(`[live-pump] 有 ${pending.length} 个未确认分 P;为避免重复/空洞,拒绝继续录制上传`);
-        return {
-          ok: false, error, bvid: session.bvid, aid: session.aid,
-          title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
-          statePath: livePumpStatePath(o.spoolDir, o.room),
-        };
-      }
-    }
   }
+  const opened = await openSession();
+  if ("fail" in opened) return opened.fail;
+  const session = opened.session;
 
-  // Danmu is the one artifact that still hits disk on the zero-disk path. Start it only after
-  // recovery succeeded (an archive in an uncertain state must not collect more parts), and stop
-  // it on every exit path below. Failure is non-fatal: video upload must not be blocked by WS.
+  // Danmu is the one artifact that still hits disk on the zero-disk path. It starts only once a
+  // stream is actually live (never while waiting): connecting before the broadcast resolves a
+  // stale liveId, so the WS stays connected but receives nothing for the whole show. It also
+  // starts only after recovery succeeded (an archive in an uncertain state must not collect
+  // more parts), and is stopped on every exit path below. Failure is non-fatal: video upload
+  // must not be blocked by WS.
   let danmuStarted = false;
-  if (o.danmu) {
+  let danmuAttempted = false;
+  const startDanmuOnce = async (): Promise<void> => {
+    if (!o.danmu || danmuAttempted) return;
+    danmuAttempted = true;
     try {
       await o.danmu.start((m) => { /* writer is owned by the caller's start() */ });
       danmuStarted = true;
@@ -1551,7 +1661,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     } catch (e) {
       log(`[live-pump] ⚠️ 弹幕连接失败(不影响视频上传): ${(e as Error).message}`);
     }
-  }
+  };
   const stopDanmu = async (): Promise<void> => {
     if (!danmuStarted || !o.danmu) return;
     danmuStarted = false;
@@ -1560,10 +1670,6 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
 
   const segments: LivePumpSegmentReport[] = [];
   try {
-  // TaskManager derives the task's recording phase from these exact markers
-  // (`[状态] 录制中` / `[状态] 等待开播`). Without them a zero-disk task shows as "running"
-  // but never "recording", so the UI cannot tell waiting-for-stream from actually recording.
-  log("[状态] 等待开播");
   let drainLogged = false;
   for (let seg = 0; maxSegments === 0 || seg < maxSegments; seg++) {
     if (await o.shouldStop?.()) break;
@@ -1579,6 +1685,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       }
       break;
     }
+    // With `waitForBroadcast` the waiting already happened before the session was opened, so the
+    // room was just seen live: fetch a fresh URL with the normal backoff. If it is gone again,
+    // ending here (exit 0) is safe — the next run waits in-process and re-decides the session.
+    // Waiting again *here* would keep a session opened hours earlier for the next broadcast.
     const s = await acquireStreamWithBackoff({
       room: o.room,
       fetch: o.fetch,
@@ -1588,6 +1698,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       sleep,
     });
     if (!s.living || !s.url) break;
+    await startDanmuOnce();
     if (s.title?.trim()) liveTitle = s.title.trim();
     if (o.titleForLive && s.title) {
       const nextTitle = o.titleForLive(s.title);
@@ -1722,9 +1833,12 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
 
   return {
     ok: true,
-    // No part in the archive and ok:true is only reachable through the "could not acquire the
-    // stream" break below, so it is unambiguous: an abort/signal cut returns ok:false instead.
-    ...(segments.some((x) => x.stem) ? { outcome: "uploaded" as const } : { outcome: "no-stream" as const }),
+    // No part from this run. With `waitForBroadcast` that is a stop/drain while waiting, or a room
+    // that dropped right after it was seen live; both are normal endings (the next run waits
+    // in-process again). Without it, the stream could not be acquired and the run gave up.
+    ...(segments.some((x) => x.stem)
+      ? { outcome: "uploaded" as const }
+      : { outcome: o.waitForBroadcast ? "idle" as const : "no-stream" as const }),
     bvid: session.bvid,
     aid: session.aid,
     title: session.archiveTitle,

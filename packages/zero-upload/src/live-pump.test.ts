@@ -930,7 +930,7 @@ describe("outcome:区分「一场都没录到」与「分 P 都已进稿」", ()
     sleep: async () => {},
   });
 
-  it("取不到流 → ok:true 但 outcome=no-stream(调用方据此按失败退出)", async () => {
+  it("取不到流(未开 waitForBroadcast) → ok:true 但 outcome=no-stream", async () => {
     const r = await runLivePump({
       ...base(),
       fetch: async () => ({ living: false }),
@@ -938,8 +938,76 @@ describe("outcome:区分「一场都没录到」与「分 P 都已进稿」", ()
     } as Parameters<typeof runLivePump>[0]);
     expect(r.ok).toBe(true);
     expect(r.segments).toHaveLength(0);
-    // 这是唯一能被调用方用来区分「静默漏录」的信号。
     expect(r.outcome).toBe("no-stream");
+  });
+
+  it("取不到流 → 留在进程内按 30s 探测,绝不自行退出(issue #308 回归)", async () => {
+    // Before the fix the pump gave up after 6 failed attempts and the CLI exited 1, so the
+    // scheduler restarted the task every few minutes. It must keep polling until told to stop.
+    const drain = new AbortController();
+    const sleeps: number[] = [];
+    let calls = 0;
+    const r = await runLivePump({
+      ...base(),
+      waitForBroadcast: true,
+      drainSignal: drain.signal,
+      sleep: async (ms) => { sleeps.push(ms); },
+      fetch: async () => {
+        calls++;
+        if (calls === 12) drain.abort(); // well past the old 6-attempt give-up point
+        return { living: false };
+      },
+      log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    expect(calls).toBe(12);
+    expect(r.ok).toBe(true);
+    expect(r.segments).toHaveLength(0);
+    expect(r.outcome).toBe("idle");
+    // One probe per poll interval, never a faster backoff cadence: the pump must not raise
+    // risk-control pressure above the file recorder's 30s.
+    expect(sleeps.length).toBeGreaterThan(0);
+    expect(sleeps.every((ms) => ms >= 30_000)).toBe(true);
+  });
+
+  it("等待开播时收到停止信号 → 立即返回 idle(不等满轮询间隔)", async () => {
+    const abort = new AbortController();
+    const started = Date.now();
+    const p = runLivePump({
+      ...base(),
+      waitForBroadcast: true,
+      signal: abort.signal,
+      sleep: undefined, // real timers: only the abort can end the 30s wait
+      fetch: async () => ({ living: false }),
+      log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    setTimeout(() => abort.abort(), 50);
+    const r = await p;
+    expect(r.outcome).toBe("idle");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("刚探测到开播随即断流 → 走正常退避后以 idle 收尾,不再带着已打开的稿件会话继续等(#308)", async () => {
+    let calls = 0;
+    const r = await runLivePump({
+      ...base(),
+      waitForBroadcast: true,
+      fetch: async () => (++calls === 1 ? { living: true, url: "u" } : { living: false }),
+      log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    expect(r).toMatchObject({ ok: true, outcome: "idle" });
+    expect(calls).toBe(7); // 1 live probe + initial fetch + 5 backoff retries, then exit
+  });
+
+  it("shouldStop 在等待中生效 → idle", async () => {
+    let n = 0;
+    const r = await runLivePump({
+      ...base(),
+      waitForBroadcast: true,
+      shouldStop: () => ++n > 3,
+      fetch: async () => ({ living: false }),
+      log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    expect(r.outcome).toBe("idle");
   });
 
   it("ok:false 时 outcome 缺席(别让调用方把「传了几个才失败」当成「一个都没传」)", async () => {
@@ -1762,6 +1830,62 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     expect(existsSync(spool)).toBe(false);
   });
 
+  it("waitForBroadcast: a recoverable unconfirmed part is settled before waiting, not after (#308 review)", async () => {
+    // Last part's submit failed as the show ended; the restart finds the room offline. Recovery
+    // must not be deferred to the next broadcast, where the gap rule would archive it for a human.
+    let completes = 0;
+    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = new URL(url);
+      if (u.pathname.endsWith("/preupload")) {
+        return new Response(JSON.stringify({
+          chunk_size: CHUNK, auth: "a", endpoint: "//upos-cs.bilivideo.com",
+          biz_id: "1", upos_uri: `upos://bucket/re${completes}.ts`, OK: 1,
+        }), { status: 200 });
+      }
+      if (method === "POST" && u.searchParams.has("uploads")) {
+        return new Response(JSON.stringify({ upload_id: `uid-${completes}` }), { status: 200 });
+      }
+      if (method === "PUT") return new Response("", { status: 200 });
+      if (method === "POST" && u.hostname.includes("bilivideo")) {
+        completes++;
+        return new Response(JSON.stringify({ OK: 1, key: `bucket/resub${completes}.ts` }), { status: 200 });
+      }
+      if (method === "POST") return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }), { status: 200 });
+      return new Response(JSON.stringify({
+        code: 0,
+        data: {
+          archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21, tag: "", is_only_self: 1 },
+          videos: [{ cid: 10, filename: "stem0", title: "P1" }],
+        },
+      }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const statePath = join(dir, "live-pump-r.state.json");
+    const spool = join(dir, "p1.ts");
+    writeFileSync(spool, "recovered-part-bytes");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      bvid: "BILIfake1", aid: 7,
+      parts: [
+        { index: 0, spoolPath: join(dir, "gone.ts"), filename: "gone.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: true },
+        { index: 1, spoolPath: spool, filename: "p1.ts", stem: "stem1", title: "P2", bytes: 19, durationSec: 10, confirmed: false },
+      ],
+      updatedAt: Date.now(),
+    });
+    const drain = new AbortController();
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "r", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: 1024, quality: "origin", submit: true, spoolMode: "none", waitForBroadcast: true,
+      fetchImpl: impl, sleep: async () => {}, drainSignal: drain.signal, log: () => {},
+      fetch: async () => { drain.abort(); return { living: false }; },
+    });
+    expect(r).toMatchObject({ ok: true, outcome: "idle" });
+    expect(completes).toBeGreaterThan(0);
+    expect(readLivePumpState(statePath)?.parts.every((p) => p.confirmed)).toBe(true);
+    expect(existsSync(spool)).toBe(false);
+  });
+
   it("recovers create intent by exact title and does not create a second archive", async () => {
     const { impl, posts, videos } = makeSessionFetch();
     videos().push({ cid: 10, filename: "stem0", title: "P1" });
@@ -1998,6 +2122,47 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(archives().length).toBe(1);
     seed(0, { updatedAt: undefined });
     expect(open().bvid).toBe(FAKE_BV);
+  });
+
+  it("waitForBroadcast: same-broadcast is decided when the room goes live, not at process start (#308)", async () => {
+    seed(30); // fresh when the process starts
+    let calls = 0;
+    const logs: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "gap", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: 1024, quality: "origin", submit: false, spoolMode: "none", waitForBroadcast: true,
+      sleep: async () => {},
+      // Stop right after the session is opened; no part is recorded.
+      shouldStop: () => calls >= 3,
+      fetch: async () => {
+        calls++;
+        // Still waiting: the old state must not even be opened yet.
+        expect(logs.some((m) => m.includes("resumed state"))).toBe(false);
+        if (calls < 3) return { living: false };
+        seed(120); // hours passed while waiting in-process
+        return { living: true, url: "http://x/y.ts" };
+      },
+      log: (m) => logs.push(m),
+    });
+    expect(r.outcome).toBe("idle");
+    expect(archives().length).toBe(1); // the next broadcast must not append to the old archive
+    expect(logs.join("\n")).toContain("archived old state");
+  });
+
+  it("waitForBroadcast: stopped while still waiting -> old state untouched", async () => {
+    seed(120);
+    const drain = new AbortController();
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "gap", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: 1024, quality: "origin", submit: true, spoolMode: "none", waitForBroadcast: true,
+      sleep: async () => {}, drainSignal: drain.signal,
+      fetch: async () => { drain.abort(); return { living: false }; },
+      log: () => {},
+    });
+    expect(r).toMatchObject({ ok: true, outcome: "idle" });
+    expect(r.bvid).toBeUndefined(); // no ledger writeback for a run that never went live
+    expect(archives().length).toBe(0);
+    expect(existsSync(statePath())).toBe(true);
   });
 
   it("every state write refreshes last activity so the rule works after a restart", () => {

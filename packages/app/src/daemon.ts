@@ -141,6 +141,8 @@ export class TaskDaemon {
   /** Guards against overlapping ticks (a slow start/stop spanning intervals). */
   private ticking = false;
   private stopped = false;
+  /** taskIds already told they are in the give-up cooldown (dedupe the log). */
+  private readonly warnedCooldown = new Set<number>();
   /** taskIds already warned about overrunning into a fresh window (dedupe the log). */
   private readonly warnedReentry = new Set<number>();
   /** 边录边传漂移:任务 id → 已连续空闲的 tick 数(录制中/排空中/无漂移即清零)。 */
@@ -206,6 +208,21 @@ export class TaskDaemon {
       const refuseStart = free != null && shouldRefuseNewRecording(free, this.diskWatermarkBytes);
       for (const id of start) {
         const t = tasks.find((x) => x.id === id);
+        // TaskManager gave up on this task (restarts exhausted). Starting it again on the next tick
+        // turned "give up" into an endless restart loop that kept hitting the platform API
+        // (issue #308), so wait out the cooldown. A user start bypasses this.
+        const cooldownMs = this.manager.restartCooldownRemainingMs(id);
+        if (cooldownMs > 0) {
+          if (!this.warnedCooldown.has(id)) {
+            this.warnedCooldown.add(id);
+            this.log(
+              `[scheduler] ⏸ 任务 id=${id}${t ? `（${t.name ?? t.room}）` : ""}重启次数已耗尽,` +
+                `${Math.ceil(cooldownMs / 60_000)} 分钟内不自动拉起(手动启动不受限)`,
+            );
+          }
+          continue;
+        }
+        this.warnedCooldown.delete(id);
         if (refuseStart) {
           // 同一任务只在首次拒绝时告警(回升后复位),避免每 tick 刷屏。
           if (!this.diskRefused.has(id)) {

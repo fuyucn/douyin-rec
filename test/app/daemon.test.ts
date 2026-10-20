@@ -153,6 +153,35 @@ class MockSpawner implements Spawner {
 }
 
 describe("TaskDaemon — composition with TaskManager", () => {
+  it("does not restart a task the manager gave up on until the cooldown passes (#308)", async () => {
+    const store = new TaskStore(":memory:");
+    const id = store.addTask({ room: "r", enabled: true }).id;
+    const spawner = new MockSpawner();
+    let now = 5_000_000;
+    const logs: string[] = [];
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true, maxRestarts: 1, restartDelayMs: 0, giveUpCooldownMs: 600_000,
+      schedule: (cb) => cb(), log: () => {}, clock: () => now,
+    });
+    const daemon = new TaskDaemon(store, mgr, { now: () => localAt(7), log: (m) => logs.push(m) });
+    const crash = (): void => {
+      const p = spawner.spawned.at(-1)!;
+      (p as unknown as { cbs: ((i: ExitInfo) => void)[] }).cbs.forEach((cb) => cb({ code: 1, signal: null, expected: false }));
+    };
+
+    await daemon.tick(); // spawn #1
+    crash(); // restart #1 -> spawn #2
+    crash(); // gives up
+    expect(spawner.spawned).toHaveLength(2);
+    await daemon.tick();
+    await daemon.tick();
+    expect(spawner.spawned).toHaveLength(2); // the old loop restarted it here (~20s later)
+    expect(logs.filter((m) => m.includes("重启次数已耗尽"))).toHaveLength(1);
+    now += 600_000;
+    await daemon.tick();
+    expect(spawner.spawned).toHaveLength(3);
+  });
+
   it("starts an eligible task via the manager (spawns a subprocess) on tick", async () => {
     const store = new TaskStore(":memory:");
     const id = store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true }).id;

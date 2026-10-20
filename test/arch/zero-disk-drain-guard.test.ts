@@ -43,10 +43,12 @@ describe("0 落盘路径必须注册 SIGUSR2(P1 源码守护)", () => {
     expect(section).toContain("drainSignal:");
   });
 
-  it("退出码区分「无产出」与「全部分 P 进稿」(review #280 P1)", () => {
-    // `ok:true` covers both endings, so the exit code must consult `outcome`; a bare
-    // `res.ok ? 0 : 1` made a room that recorded nothing look like a clean stop.
-    expect(section).toContain('res.outcome !== "no-stream"');
+  it("0 落盘分支必须留在进程内等开播,且等待中被停止不算失败(issue #308)", () => {
+    // The pump waits in-process and only returns `idle` on a requested stop. Exiting non-zero for
+    // it made TaskManager restart the task in a loop; the only failures are `ok:false` runs.
+    expect(section).toContain("waitForBroadcast: true");
+    expect(section).toContain('res.outcome !== "no-stream"'); // backstop (review #280 P1)
+    expect(section).not.toMatch(/outcome === "idle"[^\n]*process\.exit\(1\)/);
   });
 
   it("排空/停止在日志里留痕(不留痕 = 与卡死无法区分)", () => {

@@ -337,6 +337,33 @@ describe("TaskManager", () => {
     expect(store.getTask(id)!.status).toBe("error");
   });
 
+  it("give-up cooldown (#308): set when restarts run out, expires, cleared by an explicit start/stop", async () => {
+    const id = addTask();
+    const spawner = new MockSpawner();
+    let now = 1_000_000;
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true, maxRestarts: 1, restartDelayMs: 0, giveUpCooldownMs: 600_000,
+      schedule: (cb) => cb(), log: () => {}, clock: () => now,
+    });
+    mgr.start(id);
+    expect(mgr.restartCooldownRemainingMs(id)).toBe(0);
+    spawner.last(id).emitExit({ code: 1, signal: null, expected: false }); // restart #1
+    spawner.last(id).emitExit({ code: 1, signal: null, expected: false }); // gives up
+    expect(mgr.restartCooldownRemainingMs(id)).toBe(600_000);
+    now += 599_999;
+    expect(mgr.restartCooldownRemainingMs(id)).toBe(1);
+    now += 1;
+    expect(mgr.restartCooldownRemainingMs(id)).toBe(0);
+
+    spawner.last(id).emitExit({ code: 1, signal: null, expected: false }); // no-op: not tracked
+    mgr.start(id);
+    spawner.last(id).emitExit({ code: 1, signal: null, expected: false });
+    spawner.last(id).emitExit({ code: 1, signal: null, expected: false }); // gives up again
+    expect(mgr.restartCooldownRemainingMs(id)).toBeGreaterThan(0);
+    await mgr.stop(id); // user action clears it
+    expect(mgr.restartCooldownRemainingMs(id)).toBe(0);
+  });
+
   it("fires onTaskDown once when restarts are exhausted (for alerting)", () => {
     const id = addTask();
     const spawner = new MockSpawner();

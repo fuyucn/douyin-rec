@@ -46,6 +46,12 @@ export interface TaskManagerOpts {
   restartDelayMs?: number;
   /** Max consecutive auto-restarts per task before giving up. Default 5. */
   maxRestarts?: number;
+  /**
+   * After restarts are exhausted, how long the daemon must leave the task alone before starting
+   * it again (default 10 min). Without it the daemon re-started a given-up task on its next tick
+   * (~20s later), so "give up" never happened and a crash loop ran forever (issue #308).
+   */
+  giveUpCooldownMs?: number;
   /** 任务崩溃重启耗尽、彻底放弃时回调(serve 接到 → 发告警 webhook)。 */
   onTaskDown?: (taskId: number, reason: string) => void;
   /**
@@ -84,6 +90,7 @@ export class TaskManager {
   private readonly autoRestart: boolean;
   private readonly restartDelayMs: number;
   private readonly maxRestarts: number;
+  private readonly giveUpCooldownMs: number;
   private readonly onTaskDown?: (taskId: number, reason: string) => void;
   private readonly onRecordingStateChanged?: (taskId: number) => void;
   private readonly onAlert?: (taskId: number, stage: string, message: string, ctx?: NotifyContext) => void;
@@ -98,6 +105,8 @@ export class TaskManager {
   private readonly procs = new Map<number, RecorderProcess>();
   /** taskId → consecutive auto-restart count (reset on explicit start/stop). */
   private readonly restarts = new Map<number, number>();
+  /** taskId → epoch ms the restart budget ran out (cleared by an explicit start or stop). */
+  private readonly gaveUpAt = new Map<number, number>();
   /** taskIds currently DRAINING (window ended, waiting for the broadcast to end). */
   private readonly draining = new Set<number>();
   /** taskId → epoch ms the current run started; present iff running. */
@@ -128,6 +137,7 @@ export class TaskManager {
     this.autoRestart = opts.autoRestart ?? false;
     this.restartDelayMs = opts.restartDelayMs ?? 5_000;
     this.maxRestarts = opts.maxRestarts ?? 5;
+    this.giveUpCooldownMs = Math.max(0, opts.giveUpCooldownMs ?? 10 * 60_000);
     this.onTaskDown = opts.onTaskDown;
     this.onRecordingStateChanged = opts.onRecordingStateChanged;
     this.onAlert = opts.onAlert;
@@ -212,9 +222,23 @@ export class TaskManager {
     return true;
   }
 
+  /**
+   * Remaining give-up cooldown in ms (0 = may start). The daemon checks this before its
+   * automatic start; an explicit `start()` (user action) ignores and clears it.
+   */
+  restartCooldownRemainingMs(taskId: number): number {
+    const at = this.gaveUpAt.get(taskId);
+    if (at === undefined) return 0;
+    const left = at + this.giveUpCooldownMs - this.clock();
+    if (left > 0) return left;
+    this.gaveUpAt.delete(taskId);
+    return 0;
+  }
+
   /** Spawn the task if not already running. Returns false if running/missing. */
   start(taskId: number): boolean {
     if (this.procs.has(taskId)) return false;
+    this.gaveUpAt.delete(taskId);
     const task = this.store.getTask(taskId);
     if (!task) {
       this.log(`[task_manager] start: 未找到任务 id=${taskId}`);
@@ -270,6 +294,7 @@ export class TaskManager {
     const proc = this.procs.get(taskId);
     // Reset restart budget so an in-flight restart timer becomes a no-op.
     this.restarts.delete(taskId);
+    this.gaveUpAt.delete(taskId);
     this.draining.delete(taskId);
     if (!proc) return;
     this.logTask(taskId, `[task_manager] ■ 停止任务 id=${taskId}`);
@@ -456,9 +481,10 @@ export class TaskManager {
     // on its own once its parts are delivered and exits 0 without anyone marking the exit
     // "expected"; treating that as a crash respawned it in a tight loop (measured in a real
     // container: "异常退出 (code=0)" then restart #1).
-    // Exit 0 means "delivered what it recorded" only: a run that never acquired a stream exits
-    // non-zero on purpose (see the `outcome` handling in the streaming-upload CLI path), so a
-    // silently failing room is a crash here and gets retried/alerted instead of a clean stop.
+    // Exit 0 means the run ended normally: parts delivered, or no part because it was stopped
+    // while waiting for a broadcast / the room dropped right after going live (`idle`, #308).
+    // The pump no longer gives up while offline, so a non-zero exit here is a real failure and
+    // gets retried/alerted (bounded by the restart budget and the daemon's give-up cooldown).
     // Only claimed for stream-upload tasks: a plain recorder exits on a stop signal, and its
     // exit code is not its own verdict on whether it did what it was started to do.
     const zeroDiskFinalized = info.code === 0
@@ -496,6 +522,7 @@ export class TaskManager {
       const reason = `已达最大重启次数 ${this.maxRestarts}，放弃（已停止录制）`;
       this.logTask(taskId, `[task_manager] 任务 id=${taskId} ${reason}`);
       this.restarts.delete(taskId);
+      this.gaveUpAt.set(taskId, this.clock());
       this.onTaskDown?.(taskId, reason);
       return;
     }
