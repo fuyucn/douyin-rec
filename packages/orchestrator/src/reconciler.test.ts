@@ -258,6 +258,90 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
+  it("issue #292: configured reconnectWindowMs=600000 still waits 60 min after the broadcast ends", async () => {
+    const ledger = freshLedger();
+    const endMs = Date.now() - 30 * 60_000; // ended 30 min ago: past the stale 10 min config, inside 60 min
+    const rec = makeRec({
+      roomSlug: "clamp-wait-room", sessionBase: "主播名_2026-08-14_08-00-00",
+      startMs: endMs - 3_600_000, endMs, durationSec: 3600,
+    });
+    const transports = new Map([["node-1", makeTransport("node-1", [rec])]]);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV"); return { state: "done", bv: "BV" }; },
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 600_000,
+    });
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).not.toHaveBeenCalled();
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes("reconnectWindowMs=600000"))).toHaveLength(1);
+    ledger.close();
+  });
+
+  it("issue #292: configured reconnectWindowMs=600000 still clusters a 30 min gap into one broadcast", async () => {
+    const ledger = freshLedger();
+    const t0 = Date.now() - 6 * 3_600_000;
+    const a = makeRec({
+      roomSlug: "clamp-cluster-room", sessionBase: "主播名_2026-08-14_08-00-00",
+      startMs: t0, endMs: t0 + 3_600_000, durationSec: 3600,
+    });
+    const b = makeRec({
+      roomSlug: "clamp-cluster-room", sessionBase: "主播名_2026-08-14_09-30-00",
+      startMs: t0 + 3_600_000 + 30 * 60_000, endMs: t0 + 2 * 3_600_000 + 30 * 60_000, durationSec: 3600,
+    });
+    const transports = new Map([["node-1", makeTransport("node-1", [a, b])]]);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (x) => { ledger.markDone(x.streamKey, "BV"); return { state: "done", bv: "BV" }; },
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 600_000,
+    });
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+    expect(spyRunPipeline.mock.calls[0]![0].members).toHaveLength(2);
+    ledger.close();
+  });
+
+  it("issue #292: a drifted `_HHMM` job of a broadcast that already has a BV is parked as needs_manual, never run", async () => {
+    const ledger = freshLedger();
+    const baseKey = "douyin:drift-room:2026-08-14";
+    const start = new Date("2026-08-14T08:00:00Z").getTime();
+    ledger.upsertPending(baseKey, start);
+    ledger.markDone(baseKey, "BV_FIRST");
+    ledger.recordCandidates(baseKey,
+      [{ workerId: "node-1", coverage: 1, durationSec: 7200, startMs: start, endMs: start + 2 * 3_600_000, totalGapSec: 0 }], "node-1");
+    // Legacy drifted scan: same session, start moved 30 min forward, 30 min before the recorded end.
+    const rec = makeRec({
+      roomSlug: "drift-room", sessionBase: "主播名_2026-08-14_08-00-00",
+      startMs: start + 90 * 60_000, endMs: start + 2 * 3_600_000, durationSec: 1800,
+    });
+    const transports = new Map([["node-1", makeTransport("node-1", [rec])]]);
+    const runPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => ({ state: "done", bv: b.streamKey }),
+    );
+    const notify = vi.fn();
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      runPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0, notify,
+    });
+    await reconciler.reconcileAll();
+    expect(runPipeline).not.toHaveBeenCalled();
+    const derived = ledger.listKeys().map((k) => k.streamKey).filter((k) => k !== baseKey);
+    expect(derived).toHaveLength(1);
+    expect(derived[0]).toMatch(/^douyin:drift-room:2026-08-14_\d{4}$/);
+    expect(ledger.get(derived[0]!)?.state).toBe("needs_manual");
+    expect(ledger.get(derived[0]!)?.error).toMatch(/同场守卫.*BV_FIRST/);
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: "error" }));
+    ledger.close();
+  });
+
   it("场景O(同日第二场): 已有 done 的 base job → 新场用 _HHMM 后缀,跑自己的 pipeline", async () => {
     const ledger = freshLedger();
     // 第一场已 done(记录 startMs,供聚类判断不是同一场)
@@ -266,6 +350,10 @@ describe("Reconciler", () => {
     const secondEnd = secondStart + 3_600_000;
     ledger.upsertPending("douyin:same-day-room:2026-08-14", firstStart);
     ledger.markDone("douyin:same-day-room:2026-08-14", "BV_FIRST");
+    // The first broadcast's real span is on record (every pipeline path writes it), so the same-broadcast guard
+    // can prove the 12:00 session is > 60 min later and therefore a genuinely new broadcast.
+    ledger.recordCandidates("douyin:same-day-room:2026-08-14",
+      [{ workerId: "node-1", coverage: 1, durationSec: 3600, startMs: firstStart, endMs: firstStart + 3_600_000, totalGapSec: 0 }], "node-1");
 
     const rec2 = makeRec({
       roomSlug: "same-day-room",
