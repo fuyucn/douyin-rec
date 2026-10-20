@@ -179,7 +179,7 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
-- [~] **T-92 0 落盘下播后进程不再 code=1 退出重启循环(issue [#308](https://github.com/fuyucn/douyin-rec/issues/308))** — 2026-10-20 认领(用户授权),分支 `codex/issue-308-zero-disk-no-restart-loop`,PR 待开(base `feat/hub-optimization`)。
+- [~] **T-93 0 落盘下播后进程不再 code=1 退出重启循环(issue [#308](https://github.com/fuyucn/douyin-rec/issues/308))** — 2026-10-20 认领(用户授权),分支 `codex/issue-308-zero-disk-no-restart-loop`,PR 待开(base `feat/hub-optimization`)。
   **做什么**:0 落盘 pump 未开播(本次尚无分 P)时留在进程内按 30s 探测,只有停止/排空才结束;弹幕改到真正开播后才连;等待中被停止退出码为 0。已有分 P 的会话沿用原退避收播逻辑。**为什么**:此前连续取流失败 6 次后 `code=1` 退出,TaskManager 重启 5 次放弃、daemon 再启动,生产 8 小时 169 次,放大取流与弹幕 liveId 请求。**验收**:取流连续失败 >6 次不退出且间隔 >=30s;停止/排空信号立即结束且 exit 0;未开播不连弹幕;已有分 P 会话不受影响;变异检查 FAIL→PASS;全量 test/typecheck/bundle。
 - [~] **T-89 0 落盘稿件状态按同场口径切分(issue [#293](https://github.com/fuyucn/douyin-rec/issues/293))** — 2026-10-20。状态只按房间键,同房间下一场会追加到上一场稿件。**做什么**:启动时按最后活动距今与 `SAME_BROADCAST_GAP_MS` 比较,超过则归档旧状态并新建稿件,不确定则拒绝并报错。**验收**:同房间间隔 61 分钟起新稿件、59/60 分钟续用、归档含未确认分 P 时保留并报错、状态损坏拒绝启动;有变异验证。
 - [x] **T-85 0 落盘作为 rolling 子选项(issue [#285](https://github.com/fuyucn/douyin-rec/issues/285))**
