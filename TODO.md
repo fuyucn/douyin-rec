@@ -14,7 +14,7 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-- [~] **T-91 对账日志去重:「仍在录制 / 重连窗内等待」每轮刷屏（issue [#313](https://github.com/fuyucn/douyin-rec/issues/313)）**
+- [~] **T-94 对账日志去重:「仍在录制 / 重连窗内等待」每轮刷屏（issue [#313](https://github.com/fuyucn/douyin-rec/issues/313)）**
   — 2026-10-20 认领,分支 `codex/issue-313-settle-log-dedupe`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：按 (场次, 节点集合) 去重,状态变化 / 条件清除后再现 / 30 分钟后才再打;文案去掉「超时」。**为什么**：生产 8 小时约 350 条,淹没真实错误。
   **验收**：重复轮次只出一条;状态变化再出;对账行为不变（pipeline 仍不跑）;全量测试 / typecheck / bundle 通过。
