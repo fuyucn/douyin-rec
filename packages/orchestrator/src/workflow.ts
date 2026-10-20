@@ -669,12 +669,15 @@ export class ResourcePool {
       return kind === "merge" ? Math.min(this.minMergeFreeMemMBLive(), burnFloor) : burnFloor;
     };
     const memOk = (): boolean => { const f = floor(); return f <= 0 || this.freeMemMB() >= f; };
-    const deadline = this.now() + this.memWaitTimeoutMs;
+    // The alert clock starts when memory is first seen short, not when the node starts queuing for
+    // the CPU lock: time spent behind another node's merge/burn is not a memory shortage.
+    let shortSince: number | undefined;
     let alerted = false;
     const waitForMem = async (): Promise<void> => {
       while (!memOk()) {
         throwIfAborted();
-        if (!alerted && this.now() >= deadline) {
+        shortSince ??= this.now();
+        if (!alerted && this.now() - shortSince >= this.memWaitTimeoutMs) {
           alerted = true;
           this.onMemShortage(
             `Memory low for ${kind}${streamKey ? ` (${streamKey})` : ""}: need ${floor()} MB, available ${Math.round(this.freeMemMB())} MB; still waiting`,
@@ -687,7 +690,9 @@ export class ResourcePool {
       for (;;) {
         await waitForMem();
         await this.cpu.acquire();
-        if (memOk()) {
+        let ok: boolean;
+        try { ok = memOk(); } catch (e) { this.cpu.release(); throw e; } // never leak the permit
+        if (ok) {
           clear(); // 已进闸门 → 不再算「排队」
           try { return await fn(); } finally { this.cpu.release(); }
         }
