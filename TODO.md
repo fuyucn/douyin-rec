@@ -50,10 +50,6 @@
   **做什么**：stem 渲染遇非法文件名字符改为清洗(已合法名原样不变);稿件标题四处(master / 节点 / 队列 / 边录边传)收口为 core 单一函数,未配稿件模板时保留原始字符。
   **验收**：三种以上非法字符形态回归用例;已合法名 stem 与标题不变;部署后此类房间收口不再需要人工改名。
 
-- [~] **T-69 remux 租约交接竞态:让出者自己抢回租约,用例间歇失败（issue [#238](https://github.com/fuyucn/douyin-rec/issues/238)）**
-  — 2026-10-18 PR [#240](https://github.com/fuyucn/douyin-rec/pull/240) 已合并(0.0.176,独立审查 APPROVE,CI 绿),issue `待验证`。
-  **做什么**：让出后不立即抢回;修用例里永不求值的等待条件。**验收**：全量负载下租约用例不再间歇失败;部署后 serve 接管不乒乓。
-
 - [~] **T-70 租约交接预留落库:兄弟 record 进程不再在让出瞬间抢走租约（issue [#241](https://github.com/fuyucn/douyin-rec/issues/241)）**
   — 2026-10-18 PR [#242](https://github.com/fuyucn/douyin-rec/pull/242) 已合并(0.0.177,schema v4 单向迁移,独立审查 APPROVE),issue `待验证`。取代 T-69 的进程内冷却。
   **做什么**：让出与预留同事务;预留期内只有请求方可取得租约;墙钟回拨与让出写库失败均有兜底。**验收**：多 runner 用例 + 迁移用例;部署后多房间同录时 serve 接管一次完成。
@@ -66,13 +62,6 @@
 - [~] **T-71 录制凭证文件遗留项:启动清扫、同步抛错回滚、启动失败告警去重（issue [#41](https://github.com/fuyucn/douyin-rec/issues/41)）**
   — 2026-10-18 PR [#244](https://github.com/fuyucn/douyin-rec/pull/244) 已合并(0.0.184,独立审查两轮 APPROVE;删除仅限 run 目录本模块凭证临时文件)。**待部署实跑**。
   **做什么**：serve 启动清扫残留凭证文件;子进程同步抛错时清理进程表与凭证文件;启动失败告警按任务去重、成功后重置。**验收**：各分支 vitest + 变异验证;部署后 run 目录无残留。
-
-- [~] **T-72 隐私闸门与风险扫描加固（issue [#74](https://github.com/fuyucn/douyin-rec/issues/74)）**
-  — 2026-10-18 PR [#245](https://github.com/fuyucn/douyin-rec/pull/245) 已合并(仅脚本/测试/文档,不 bump)。用户按建议选 A:接受更严的风险扫描,函数签名启发式与「仅改 value 行」的凭证漏检另开 [#269](https://github.com/fuyucn/douyin-rec/issues/269) 跟进。
-  **做什么**：json/生成物豁免收窄、登录凭证键值规则、allow 标记仅测试夹具;风险扫描敏感文件清单、改名/权限/二进制路径、按 hunk + 函数签名匹配、异常 diff fail closed;文档同步。**验收**：37 条正反用例 + 变异验证。
-
-- [~] **T-84 风险扫描对纯展示模块只列提示（issue [#254](https://github.com/fuyucn/douyin-rec/issues/254)）**
-  — 2026-10-18 PR [#277](https://github.com/fuyucn/douyin-rec/pull/277) 已合并(仅脚本/测试/文档,三轮审查末轮 APPROVE)。`DISPLAY_ONLY`(词典、提示文案、步骤标签)内容命中只列提示;hunk 含网络调用或导入即按完整规则。「导入行不匹配」会漏判换模块,未采纳。回放 40 提交 RISK 8→7。issue `待验证`。
 
 - [~] **T-83 Rooms 切换房间残留旧进度/旧时间 + 提示名称优先级统一（issue [#275](https://github.com/fuyucn/douyin-rec/issues/275)）**
   — 2026-10-18 PR [#276](https://github.com/fuyucn/douyin-rec/pull/276) 已合并(0.0.188,审查 APPROVE)。过期响应按当前房间作废、taskId 变化清空详情;提示统一「解析名 > 主播名 > 兜底名」,兜底名不加错误前缀。**部署后**在两个在录房间间切换核对。
@@ -550,6 +539,17 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+- [x] **T-69 remux 租约交接竞态:让出者自己抢回租约,用例间歇失败（issue [#238](https://github.com/fuyucn/douyin-rec/issues/238)）**（2026-10-20）
+  — 2026-10-18 PR [#240](https://github.com/fuyucn/douyin-rec/pull/240) 已合并(0.0.176,独立审查 APPROVE,CI 绿),issue `待验证`。
+  **做什么**：让出后不立即抢回;修用例里永不求值的等待条件。**验收**：全量负载下租约用例不再间歇失败;部署后 serve 接管不乒乓。
+  — 2026-10-20 四不 close 收口,issue #238 已关闭。
+- [x] **T-72 隐私闸门与风险扫描加固（issue [#74](https://github.com/fuyucn/douyin-rec/issues/74)）**（2026-10-20）
+  — 2026-10-18 PR [#245](https://github.com/fuyucn/douyin-rec/pull/245) 已合并(仅脚本/测试/文档,不 bump)。用户按建议选 A:接受更严的风险扫描,函数签名启发式与「仅改 value 行」的凭证漏检另开 [#269](https://github.com/fuyucn/douyin-rec/issues/269) 跟进。
+  **做什么**：json/生成物豁免收窄、登录凭证键值规则、allow 标记仅测试夹具;风险扫描敏感文件清单、改名/权限/二进制路径、按 hunk + 函数签名匹配、异常 diff fail closed;文档同步。**验收**：37 条正反用例 + 变异验证。
+  — 2026-10-20 四不 close 收口,issue #74 已关闭。
+- [x] **T-84 风险扫描对纯展示模块只列提示（issue [#254](https://github.com/fuyucn/douyin-rec/issues/254)）**（2026-10-20）
+  — 2026-10-18 PR [#277](https://github.com/fuyucn/douyin-rec/pull/277) 已合并(仅脚本/测试/文档,三轮审查末轮 APPROVE)。`DISPLAY_ONLY`(词典、提示文案、步骤标签)内容命中只列提示;hunk 含网络调用或导入即按完整规则。「导入行不匹配」会漏判换模块,未采纳。回放 40 提交 RISK 8→7。issue `待验证`。
+  — 2026-10-20 四不 close 收口,issue #254 已关闭。
 
 - [x] **T-82 node-upload-poll 用例 CI 偶发失败:派发等待不确定（issue [#271](https://github.com/fuyucn/douyin-rec/issues/271)）**
   — 2026-10-18 PR [#272](https://github.com/fuyucn/douyin-rec/pull/272):假录像终点在 2026-06,默认 10 分钟重连窗会按宿主时钟跳过该场 → 显式关闭重连窗、等待放宽到 5 秒,断言消息带派发次数与台账状态。已合并(0.0.187),issue `待验证`:后续 CI 轮次不再复现即收口。
