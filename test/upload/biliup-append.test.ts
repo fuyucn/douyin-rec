@@ -1,6 +1,7 @@
 // test/upload/biliup-append.test.ts
 import { describe, it, expect } from "vitest";
 import { appendGroup, buildAppendArgs, uploadThenAppend, uploadThenAppendGroups } from "../../packages/app/src/upload/biliup.js";
+import { APPEND_REREAD_DELAYS_MS } from "../../packages/processors/src/run-biliup.js";
 
 // 防御:append 也带关水印 + 仅自己可见(防 append 重置稿件设置,见 biliup.ts 注释)。
 const WM = '{"watermark":{"state":0}}';
@@ -75,9 +76,56 @@ describe("P1→append", () => {
     await appendGroup({
       cookies: "c.json", bv: "BV1", files: ["d.mp4"], run, lines: ["alia", "txa"],
       countParts: async () => 1, // before=after=1 → 未提交
+      sleep: async () => {},
     });
     expect(calls).toHaveLength(2);
     expect(calls[1]).toContain("txa");
+  });
+
+  const failRun = (calls: string[][], okOn?: string) => async (argv: string[]): Promise<string> => {
+    calls.push(argv);
+    if (okOn && argv.includes(okOn)) return "appended";
+    throw new Error("biliup 失败 (rc=1): connection error uploader.rs:557 start=0 end=1024");
+  };
+
+  it("appendGroup(#66)：回读延迟刷新 → 重读到变多,不换线、不重复追加", async () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    const counts = [1, 1, 1, 2]; // before, then two stale re-reads, then refreshed
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls), lines: ["alia", "txa"],
+      countParts: async () => counts.shift() ?? 2,
+      sleep: async (ms) => { sleeps.push(ms); },
+    });
+    expect(calls).toHaveLength(1);
+    expect(sleeps).toEqual([3000, 3000]);
+  });
+
+  it("appendGroup(#66)：整个重读窗口都没变 → 照旧换线,窗口约 10s", async () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    let reads = 0;
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls, "txa"), lines: ["alia", "txa"],
+      countParts: async () => { reads++; return 1; },
+      sleep: async (ms) => { sleeps.push(ms); },
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain("txa");
+    expect(sleeps).toEqual([...APPEND_REREAD_DELAYS_MS]);
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(10_000);
+    expect(reads).toBe(1 + 1 + APPEND_REREAD_DELAYS_MS.length);
+  });
+
+  it("appendGroup(#66)：重读中途读不到 → ambiguous,不换线", async () => {
+    const calls: string[][] = [];
+    const counts: (number | null)[] = [1, 1, null];
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls), lines: ["alia", "txa"],
+      countParts: async () => counts.shift() ?? null,
+      sleep: async () => {},
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1);
   });
 
   it("uploadThenAppend：先传 plain 拿 BV，再 append 两个分P", async () => {

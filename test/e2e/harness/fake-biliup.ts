@@ -190,7 +190,7 @@ export class FakeBiliup {
   readonly appendGroup = (o: {
     bv: string; files: string[]; cookies: string; public?: boolean;
     countParts?: () => Promise<number | null>;
-  }): Promise<void> => this.real.appendGroup({ ...o, run: this.run });
+  }): Promise<void> => this.real.appendGroup({ ...o, run: this.run, sleep: async () => {} });
 
   // ── 断言用视图 ──
   /** 建稿次数(= upload 且已提交的稿件数)。 */
