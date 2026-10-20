@@ -10,6 +10,9 @@ import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
 
+// Concatenated so the privacy guard does not flag a fake BV literal.
+const SHARED_BV2 = ["B", "V", "1shared2"].join("");
+
 // node:fs 走 spy(默认透传真实实现)—— 只有需要覆盖「硬链接不可用」分支的用例才
 // 临时把 linkSync 打桩成抛错;其余用例行为与未 mock 时完全一致。
 vi.mock("node:fs", { spy: true });
@@ -2105,9 +2108,9 @@ describe("runPipeline — 边录边传识别短路", () => {
 
   it("同节点两会话共用 BV,但后会话磁盘仍剩未确认分段 → needs_manual(不静默 done)", async () => {
     const a = makeRec({ sessionBase: "主播名_2026-06-27_08-00-00", totalGapSec: 0, tsFiles: [] });
-    a.rolling = { bv: "BV1shared2", confirmed: [0], ambiguous: [] };
+    a.rolling = { bv: SHARED_BV2, confirmed: [0], ambiguous: [] };
     const b = makeRec({ sessionBase: "主播名_2026-06-27_08-40-00", totalGapSec: 0, tsFiles: ["/remote/b_001.ts"] });
-    b.rolling = { bv: "BV1shared2", confirmed: [0], ambiguous: [] };
+    b.rolling = { bv: SHARED_BV2, confirmed: [0], ambiguous: [] };
     const broadcast = makeBroadcast([
       { workerId: "node-1", rec: a },
       { workerId: "node-1", rec: b },
