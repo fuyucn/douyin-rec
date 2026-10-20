@@ -883,6 +883,9 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
         reasons.push(`选中节点 ${missingDetail} 清单失联,可能漏掉其上的录像(force 后将只用可达节点选优)`);
       }
       if (conflict) reasons.push(conflict);
+      // Issue #309: a node's rolling uploader still owns a session of this broadcast (slot wait / tail upload).
+      const busy = members.filter((m) => m.rec.rolling?.active === true).map((m) => m.workerId);
+      if (busy.length > 0) reasons.push(`节点 ${busy.join(",")} 的边录边传仍在处理本场(等槽或上传末段),现在重跑可能重复建稿`);
       if (reasons.length > 0) {
         return {
           ok: false, code: 409, forceable: true,

@@ -1071,6 +1071,14 @@ describe("Reconciler.stopJob / runNow", () => {
     ledger.close();
   });
 
+  it("runNow: a node's rolling uploader still owns the session → forceable 409 (issue #309)", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup([makeRec({ rolling: { confirmed: [], active: true } })]);
+    const r = await reconciler.runNow({ streamKey: key, wait: true });
+    expect(r).toMatchObject({ ok: false, code: 409, forceable: true });
+    expect(spyRunPipeline).not.toHaveBeenCalled();
+    ledger.close();
+  });
+
   it("runNow: live / 持锁 → 409", async () => {
     const { ledger, reconciler, spyRunPipeline } = setup();
     beginJob(key);

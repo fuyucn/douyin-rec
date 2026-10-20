@@ -217,6 +217,15 @@ function writeStateFile(dir: string, state: RollingState, pid: number, nowMs: nu
   }
 }
 
+/** True when `s` still has an unconfirmed, non-empty segment file on disk. */
+function hasUnsentContent(s: RollingState): boolean {
+  const confirmed = new Set(s.confirmed);
+  return (s.segments ?? []).some((x) => {
+    if (confirmed.has(x.index)) return false;
+    try { return statSync(x.path).size > 0; } catch { return false; }
+  });
+}
+
 /** A same-room sidecar found next to this session that started earlier. */
 interface PredecessorCand { base: string; s: RollingState; start: number; last: number }
 
@@ -668,10 +677,12 @@ export class RollingUploader {
         ctx: { sessionBase: base, startMs, timeZone: this.o.timeZone ?? processTimeZone() },
       });
       // WAL:先落「建稿中」意图,再真正建稿。崩溃后据此转人工,绝不自动重建稿(重复投稿不可逆)。
-      this.state = { ...this.state, uploading: { index: seg.index, kind: "create" }, updatedAt: this.now() };
-      if (!this.persist()) throw new Error("sidecar 写失败(建稿意图),中止上传并保留源");
+      // Issue #309: written only once the slot and the gate let biliup start, so a wait never leaves an intent.
       const up = this.o.uploadPlainRaw ?? uploadPlain;
-      const bv = await this.withSlot(() => this.gate.run(this.accountKey, () => up({ plain: { ...meta, video: seg.path, title } })));
+      const bv = await this.withSlot(() => this.gate.run(this.accountKey, () => {
+        this.writeIntent(seg.index, "create");
+        return up({ plain: { ...meta, video: seg.path, title } });
+      }));
       // 把「当段已确认」并入同一次写:建稿成功即确认段 0,防止 bv 与 confirmed 分两次写之间崩溃。
       confirmed.add(seg.index);
       this.state = { ...this.state, bv, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
@@ -681,18 +692,18 @@ export class RollingUploader {
     }
     const bv = this.state.bv;
     // WAL:先落「追加第 index 段中」意图。崩溃后凭分 P 数核对是否已提交(见 recoverDanglingUpload)。
-    this.state = { ...this.state, uploading: { index: seg.index, kind: "append" }, updatedAt: this.now() };
-    if (!this.persist()) throw new Error("sidecar 写失败(append 意图),中止上传并保留源");
+    // Written right before biliup starts (issue #309), same as the create intent.
     const ap = this.o.appendGroupRaw ?? appendGroup;
-    await this.withSlot(() => this.gate.run(this.accountKey, () =>
-      ap({
+    await this.withSlot(() => this.gate.run(this.accountKey, () => {
+      this.writeIntent(seg.index, "append");
+      return ap({
         ...meta,
         bv,
         files: [seg.path],
         // 幂等核对:失败后重查分 P 数,变多 = 其实已成功;查不到 → 抛 ambiguous 标记转人工。
         countParts: () => this.countPartsInner(bv, cookies),
-      }),
-    ));
+      });
+    }));
     // 与建稿同口径:确认并入同一次写,防止 append 成功后、补 confirmed 前崩溃导致重复 append。
     confirmed.add(seg.index);
     this.state = { ...this.state, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
@@ -747,8 +758,10 @@ export class RollingUploader {
       if (start >= startMs) continue; // not a predecessor
       cands.push({ base, s, start, last });
     }
-    // Sessions that never created or intended a submission have nothing to continue.
-    const meaningful = cands.filter((c) => c.s.bv || c.s.uploading || (c.s.ambiguous?.length ?? 0) > 0);
+    // Sessions that never created or intended a submission have nothing to continue, unless they still hold
+    // non-empty unconfirmed segments: a slot-starved session that never got to create (issue #309 review). Its
+    // content must lead the submission, so it is taken over (it creates) instead of being silently skipped.
+    const meaningful = cands.filter((c) => c.s.bv || c.s.uploading || (c.s.ambiguous?.length ?? 0) > 0 || hasUnsentContent(c.s));
     if (meaningful.length === 0) return { kind: "none" };
     const prev = meaningful.reduce((a, b) => (b.start > a.start ? b : a));
     if (!isSameBroadcastGap(startMs - prev.last)) return { kind: "none" };
@@ -800,8 +813,12 @@ export class RollingUploader {
     const found = this.locatePredecessor();
     if (found.kind !== "found") return "proceed";
     const { prev } = found;
-    // No BV / ambiguous segments: keep the existing fail-closed behaviour (findPredecessor reports uncertain).
-    if (!prev.s.bv || (prev.s.ambiguous?.length ?? 0) > 0) return "proceed";
+    // Ambiguous segments: keep the existing fail-closed behaviour (findPredecessor reports uncertain).
+    // A predecessor without a BV is taken over too (issue #309 review): the peer creates the submission from the
+    // predecessor's first segment, then this session inherits it. Only the clean case (no intent at all): a
+    // BV-less predecessor with any intent keeps failing closed exactly as before.
+    if ((prev.s.ambiguous?.length ?? 0) > 0) return "proceed";
+    if (!prev.s.bv && prev.s.uploading) return "proceed";
     const confirmed = new Set(prev.s.confirmed);
     const exists = (f: string): boolean => { try { statSync(f); return true; } catch { return false; } };
     const leftovers = (prev.s.segments ?? []).filter((x) => !confirmed.has(x.index) && exists(x.path));
@@ -867,11 +884,10 @@ export class RollingUploader {
     this.persist();
   }
 
-  /** Clear the write-ahead intent of an upload that never started. A failed sidecar write marks the state untrusted. */
-  private dropUnstartedIntent(): void {
-    if (!this.state.uploading) return;
-    this.state = { ...this.state, uploading: undefined, updatedAt: this.now() };
-    this.persist();
+  /** Persist the write-ahead intent immediately before biliup starts; throws (source kept) when it cannot be written. */
+  private writeIntent(index: number, kind: "create" | "append"): void {
+    this.state = { ...this.state, uploading: { index, kind }, updatedAt: this.now() };
+    if (!this.persist()) throw new Error(`sidecar 写失败(${kind === "create" ? "建稿" : "append"} 意图),中止上传并保留源`);
   }
 
   /**
@@ -882,10 +898,7 @@ export class RollingUploader {
     if (!this.slot) return fn();
     const ok = await this.slot.acquire("rolling", this.o.slotWaitMs ?? 30 * 60_000);
     if (!ok) {
-      // Issue #309: biliup was never spawned, so the write-ahead intent written before this call describes an
-      // upload that did not start. Left on disk, the next process would read it as a crashed create/append and
-      // send the segment (or, for create, the whole session) to manual review.
-      this.dropUnstartedIntent();
+      // Nothing was started and no intent was written (it is written inside `fn`, issue #309).
       throw new Error(`${SLOT_BUSY_MARKER} within the wait limit; keeping the segment for the next try`);
     }
     try { return await fn(); } finally { this.slot.release(); }

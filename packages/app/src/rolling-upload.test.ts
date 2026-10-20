@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  RollingUploader, looksLikeRecordProcess, resolveRollingUploadMeta, resolveStreamUploadMeta,
+  RollingUploader, looksLikeRecordProcess, makeRollingUploadHookFactory, resolveRollingUploadMeta, resolveStreamUploadMeta,
   resolveStreamUploadTitle, resolveStreamPartTitle,
 } from "./rolling-upload.js";
 import { UploadGate, rollingUploadSingleNode } from "@drec/core";
@@ -743,6 +743,22 @@ describe("RollingUploader × 节点上传槽 (plan 038 PR4)", () => {
   });
 });
 
+describe("session-end hook closes the session (issue #309)", () => {
+  it("onSessionEnd flushes, then stamps closedAt even when the slot stayed busy", async () => {
+    const { dir, paths } = mkSession(segNames(1));
+    const hook = makeRollingUploadHookFactory({
+      enabled: true, platform: "douyin", roomSlug: "123", gate: new FakeGate(), now: futureNow, minSegmentSec: 0,
+      removeFile: noRemove, uploadPlainRaw: vi.fn(async () => FAKE_BV) as never, appendGroupRaw: noopAppend as never,
+      slot: { index: null, acquire: async () => false, release: () => {}, touch: () => {}, close: () => {} } as never,
+    })!();
+    hook.onSegment(paths[0]!);
+    await hook.onSessionEnd();
+    const saved = JSON.parse(readFileSync(sidecarPath(dir), "utf-8"));
+    expect(saved.closedAt).toBe(NOW_MS);
+    expect(saved.uploading).toBeUndefined();
+  });
+});
+
 describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config > 内置默认)", () => {
   const prevRoot = process.env.DOUYIN_REC_ROOT;
   let root: string;
@@ -975,6 +991,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect(names(append)).toEqual([`${A_BASE}_001.ts`, `${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
     expect(readA(f)).toMatchObject({ confirmed: [0, 1, 2], ownerPid: B_PID });
     expect(readA(f).uploading).toBeUndefined();
+    expect(readA(f).closedAt, "a finished takeover closes A so the master stops waiting on B's live pid").toBe(f.bStartMs + 3_600_000);
     const b = JSON.parse(readFileSync(path.join(f.dir, `${B_BASE}.rolling.json`), "utf-8"));
     // Inherited after the takeover: A's 3 confirmed parts, and the owner/heartbeat are stamped on every persist.
     expect(b).toMatchObject({ bv: FAKE_BV, inheritedParts: 3, inheritedFrom: A_BASE, confirmed: [0], ownerPid: B_PID });
@@ -1057,6 +1074,7 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect(r1.uploaded).toEqual([]);
     expect(u.ambiguousIndices).toEqual([]); // waiting is not ambiguous
     expect(readA(f)).toMatchObject({ confirmed: [0], ownerPid: DEAD_PID }); // untouched
+    expect(readA(f).closedAt).toBeUndefined();
     expect(logs.filter((m) => m.includes("暂不接管"))).toHaveLength(1);
     alive = false;
     await u.flush({ recordingActive: false });
@@ -1139,6 +1157,18 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     await u.flush({ recordingActive: false });
     expect(names(append)).toEqual([`${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
     expect(readA(f)).toMatchObject({ confirmed: [0, 2] });
+  });
+
+  it("issue #309 review: slot-starved A never created (no BV, no intent): the takeover creates from A0, B inherits", async () => {
+    const f = setup({ confirmedA: [], sidecar: { bv: undefined, closedAt: A_LAST_MS } });
+    const plain = vi.fn(async () => FAKE_BV);
+    const append = vi.fn(async () => {});
+    const u = uploaderB(f, { append, plain, count: async () => 1 });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect((plain.mock.calls as unknown as Array<[{ plain: { video: string } }]>).map((c) => path.basename(c[0].plain.video))).toEqual([`${A_BASE}_000.ts`]);
+    expect(names(append)).toEqual([`${A_BASE}_001.ts`, `${A_BASE}_002.ts`, `${B_BASE}_000.ts`]);
+    expect(u.bv).toBe(FAKE_BV);
   });
 
   it("leftovers still pending after the takeover (upload slot busy): B keeps waiting instead of overtaking", async () => {
