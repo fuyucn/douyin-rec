@@ -7,8 +7,8 @@ describe("zeroDiskRoom", () => {
       roomToUrl: (room: string) => (/^https?:\/\//.test(room) ? room : `https://live.douyin.com/${room}`),
       extractRoomSlug: (url: string) => url.match(/^https?:\/\/live\.douyin\.com\/([^/?#]+)/)?.[1] ?? url,
     };
-    expect(zeroDiskRoom(platform as never, "https://live.douyin.com/769269676376")).toBe("769269676376");
-    expect(zeroDiskRoom(platform as never, "769269676376")).toBe("769269676376");
+    expect(zeroDiskRoom(platform as never, "https://live.douyin.com/123456789012")).toBe("123456789012");
+    expect(zeroDiskRoom(platform as never, "123456789012")).toBe("123456789012");
   });
 
   it("keeps platform-specific URL formats intact after normalization", () => {
