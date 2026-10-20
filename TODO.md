@@ -14,6 +14,8 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-87 rolling 上传拦截 0 字节封口段(issue [#177](https://github.com/fuyucn/douyin-rec/issues/177))**
+  **做什么**：rolling 上传读段真实大小,0 字节段不上传、保留源、记日志、不阻塞后续段(不依赖前段 mtime)。**为什么**：0 字节段致 B 站 duration=0 → 稿件 -16 不可逆。**验收**：前段源已删/仍在两种 0 字节用例不上传;既有碎片/崩溃恢复用例绿。
 - [~] **T-86 起录时记录平台本场 id 与拉流路径(诊断日志)(issue [#294](https://github.com/fuyucn/douyin-rec/issues/294))**
   **做什么**：每次起录/重连打 `[session-id]` 日志(抖音 id_str / B站 live_time + 去签名的拉流 host+path)。**为什么**：#148/#292 要定「同一场」口径,先跑两天验证重连前后 id 是否一致。**验收**：单测 + 全量绿;部署后两天数据回填 #148。
 - [!] **T-79 队列页「上传」视图:每节点 biliup 实时进度(issue [#44](https://github.com/fuyucn/douyin-rec/issues/44))** — 计划 [`plans/039_upload_view.md`](plans/039_upload_view.md)
