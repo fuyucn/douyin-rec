@@ -18,6 +18,10 @@
  * ⚠️ 会话隔离 + 同场续稿(#148):每个会话各有 sidecar/段号;但相邻会话间隔 <= `SAME_BROADCAST_GAP_MS`
  * 视为同一场断流重连,后会话从磁盘上的前序 sidecar 继承 BV 并 append(见 findPredecessor),
  * 不再另起稿件;前序状态不确定 → 不建稿不 append,转人工。间隔更大 = 新场次,照常建稿。
+ *
+ * 接管残段(#46):后继会话在**首次上传前**先接管前序会话留下的未确认分段(结算悬空意图 → 按段号 append →
+ * 确认后删源),再传自己的段(分 P 顺序 = 前序在前)。前提 = 前序 owner 进程已退出(sidecar 记 ownerPid +
+ * heartbeatAt;pid 存活 → 等待,不上传);前序末段需两次探测大小不变才算封口。
  */
 import {
   closeSync,
@@ -30,6 +34,7 @@ import {
   statSync,
   unlinkSync,
   writeFileSync,
+  existsSync,
 } from "node:fs";
 import path, { join } from "node:path";
 import {
@@ -107,6 +112,13 @@ interface RollingState {
   inheritedParts?: number;
   /** Predecessor session base this session continued (diagnostics only). */
   inheritedFrom?: string;
+  /**
+   * Issue #46: pid of the process that last wrote this sidecar (the recorder, or a successor that took the session
+   * over) and when it did so. A successor only takes over leftover segments when this pid is gone; sidecars written
+   * before this field existed have neither (legacy → judged by file activity instead).
+   */
+  ownerPid?: number;
+  heartbeatAt?: number;
   updatedAt: number;
 }
 
@@ -121,6 +133,51 @@ const ROLLING_STATE_SCHEMA_VERSION = 2;
 /** 碎片段阈值:预计时长低于该秒数的封口段不上传(默认 2s,源保留)。 */
 const DEFAULT_MIN_SEGMENT_SEC = 2;
 
+/** Legacy sidecars carry no owner pid: treat the owner as possibly alive while any of its files changed this recently. */
+const LEGACY_OWNER_QUIET_MS = 10 * 60_000;
+/** Longest a successor waits for a predecessor's (identity-checked) live owner before failing closed. */
+const DEFAULT_OWNER_WAIT_MS = 30 * 60_000;
+/** The predecessor's last segment must keep the same size across this pause before it counts as sealed. */
+const DEFAULT_STABLE_CHECK_MS = 2_000;
+
+/** Does this argv look like this program's `record` subcommand (the process that owns rolling sidecars)? */
+export function looksLikeRecordProcess(args: readonly string[]): boolean {
+  const hasProgram = args.some((a) => /douyin-rec(\.mjs)?$/.test(a));
+  return hasProgram && args.includes("record");
+}
+
+/**
+ * Read `/proc/<pid>/cmdline` as argv. `null` = no such process; `undefined` = /proc unusable on this platform
+ * (caller falls back to a bare kill(pid, 0) probe).
+ */
+function readProcCmdline(pid: number): string[] | null | undefined {
+  if (!existsSync("/proc/self/cmdline")) return undefined;
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf-8").split("\0").filter((x) => x.length > 0);
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "ENOENT" ? null : undefined;
+  }
+}
+
+/**
+ * Is `pid` still the recorder that owned a sidecar? kill(pid, 0) alone is fooled by pid reuse (container restarts
+ * hand small pids to unrelated processes), so on Linux the command line must also look like our `record`
+ * subcommand. A reused pid held by another recorder of this program still counts as alive: the room is not
+ * checked (the `--room` argument may be a short link that does not carry the slug), the bounded wait covers it.
+ */
+function isPidAlive(pid: number, cmdlineOf: (pid: number) => string[] | null | undefined = readProcCmdline): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch (e) {
+    // EPERM = exists but not ours; anything but ESRCH is treated as alive (fail closed).
+    if ((e as NodeJS.ErrnoException)?.code === "ESRCH") return false;
+  }
+  const args = cmdlineOf(pid);
+  if (args === undefined) return true; // /proc unavailable: the bare probe is all we have
+  if (args === null || args.length === 0) return false; // gone or zombie
+  return looksLikeRecordProcess(args);
+}
+
 function statePathFor(dir: string, sessionBase: string): string {
   // sidecar 必须与分段文件同目录(下一个会话/重启能读到);base 不含目录,需拼上 dirname。
   return join(dir, `${sessionBase}.rolling.json`);
@@ -133,6 +190,29 @@ function readState(dir: string, sessionBase: string): RollingState | null {
     return null;
   }
 }
+
+/** Atomic sidecar write (tmp → fsync → rename), stamped with the writer's pid + heartbeat. Throws on failure. */
+function writeStateFile(dir: string, state: RollingState, pid: number, nowMs: number): void {
+  const target = statePathFor(dir, state.sessionBase);
+  const tmp = `${target}.tmp.${process.pid}.${Date.now().toString(36)}`;
+  try {
+    const fd = openSync(tmp, "w", 0o644);
+    try {
+      const body = { ...state, ownerPid: pid, heartbeatAt: nowMs, schemaVersion: ROLLING_STATE_SCHEMA_VERSION };
+      writeFileSync(fd, JSON.stringify(body), "utf-8");
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, target);
+  } catch (e) {
+    try { unlinkSync(tmp); } catch { /* best-effort 清理临时文件 */ }
+    throw e;
+  }
+}
+
+/** A same-room sidecar found next to this session that started earlier. */
+interface PredecessorCand { base: string; s: RollingState; start: number; last: number }
 
 export interface RollingUploaderOpts {
   /** 房间身份(删源证据用)。 */
@@ -178,6 +258,18 @@ export interface RollingUploaderOpts {
   removeFile?: (p: string) => boolean;
   /** 时间源(测试注入)。 */
   now?: () => number;
+  /** Pid stamped into sidecars as the owner (test seam; default `process.pid`). */
+  pid?: number;
+  /** Liveness probe for a predecessor's owner pid (test seam; default `process.kill(pid, 0)`). */
+  isPidAlive?: (pid: number) => boolean;
+  /** /proc/<pid>/cmdline reader for the default owner-identity check (test seam; null = no process, undefined = no /proc). */
+  procCmdline?: (pid: number) => string[] | null | undefined;
+  /** How long to keep waiting for a live predecessor owner before failing closed (default 30 min). */
+  ownerWaitMs?: number;
+  /** Alert channel for rolling cases that need a human (same sink as the recorder's error notifications). */
+  notify?: (message: string) => void;
+  /** Pause between the two size checks of a predecessor's last segment (default 2s; tests pass 0). */
+  stableCheckMs?: number;
 }
 
 /**
@@ -194,6 +286,14 @@ export class RollingUploader {
   private readonly accountKey: string;
   private readonly now: () => number;
   private readonly minSegmentSec: number;
+  private readonly pid: number;
+  private readonly pidAlive: (pid: number) => boolean;
+  /** Takeover wait reason already logged (one line per distinct reason, not per flush). */
+  private takeoverWaitLogged = "";
+  /** When this session first found the predecessor's owner alive (cleared once the owner is gone). */
+  private ownerWaitSince = 0;
+  /** Set once the owner wait exceeded its bound: findPredecessor then fails closed (no create, no append). */
+  private takeoverGaveUp = "";
   /** 段文件所在目录(首个段确定;sidecar 写在这里)。 */
   private segDir = "";
   private state: RollingState;
@@ -217,6 +317,8 @@ export class RollingUploader {
     this.log = o.log ?? ((m: string): void => console.error(m));
     this.now = o.now ?? Date.now;
     this.minSegmentSec = Math.max(0, o.minSegmentSec ?? DEFAULT_MIN_SEGMENT_SEC);
+    this.pid = o.pid ?? process.pid;
+    this.pidAlive = o.isPidAlive ?? ((pid: number): boolean => isPidAlive(pid, o.procCmdline));
     const cookiesPath = o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
     this.gate = o.gate ?? openNodeUploadGate({ warn: this.log });
     this.slot = o.slot ?? null;
@@ -235,27 +337,7 @@ export class RollingUploader {
     // 顺序颠倒会让重启后同一路径被当新段,分到已确认段号之外的号 → 重复上传该段(丢幂等)。
     if (!this.state.sessionBase) {
       const dir = path.dirname(filePath);
-      const base = segmentSessionBase(path.basename(filePath)) ?? stripVideoExt(path.basename(filePath));
-      const loaded = readState(dir, base);
-      this.state = loaded ?? {
-        streamKey: this.o.streamKeyOf?.(base) ?? `${this.o.room.platform}:${this.o.room.roomSlug}:${base}`,
-        sessionBase: base,
-        room: { platform: this.o.room.platform, roomSlug: this.o.room.roomSlug },
-        segments: [],
-        confirmed: [],
-        updatedAt: this.now(),
-      };
-      // 重启读回建稿时刻:标题时间锚定**会话首段**,不受「重启后先看到哪个段」影响。
-      if (Number.isFinite(this.state.startMs) && (this.state.startMs ?? 0) > 0) {
-        this.firstSegMtimeMs = this.state.startMs as number;
-      }
-      // 重启/换进程读到「已确认」段 → 需要补删「确认了但没删成」的源(崩溃窗口:确认后、删前被杀)。
-      if (this.state.confirmed.length > 0) this.needsConfirmCleanup = true;
-      // 从持久化状态重建「路径 → 段号」映射(重启后段号续号,不漏传、不重复建稿)。
-      for (const s of this.state.segments ?? []) {
-        if (s && typeof s.path === "string" && typeof s.index === "number") this.indexByPath.set(s.path, s.index);
-      }
-      this.segDir = dir;
+      this.loadSession(dir, segmentSessionBase(path.basename(filePath)) ?? stripVideoExt(path.basename(filePath)));
     }
     const existing = this.indexByPath.get(filePath);
     if (existing != null) return existing;
@@ -276,6 +358,30 @@ export class RollingUploader {
     return idx;
   }
 
+  /** Load (or initialise) the sidecar of session `base` in `dir`; rebuilds the path → index map. */
+  private loadSession(dir: string, base: string): void {
+    const loaded = readState(dir, base);
+    this.state = loaded ?? {
+      streamKey: this.o.streamKeyOf?.(base) ?? `${this.o.room.platform}:${this.o.room.roomSlug}:${base}`,
+      sessionBase: base,
+      room: { platform: this.o.room.platform, roomSlug: this.o.room.roomSlug },
+      segments: [],
+      confirmed: [],
+      updatedAt: this.now(),
+    };
+    // 重启读回建稿时刻:标题时间锚定**会话首段**,不受「重启后先看到哪个段」影响。
+    if (Number.isFinite(this.state.startMs) && (this.state.startMs ?? 0) > 0) {
+      this.firstSegMtimeMs = this.state.startMs as number;
+    }
+    // 重启/换进程读到「已确认」段 → 需要补删「确认了但没删成」的源(崩溃窗口:确认后、删前被杀)。
+    if (this.state.confirmed.length > 0) this.needsConfirmCleanup = true;
+    // 从持久化状态重建「路径 → 段号」映射(重启后段号续号,不漏传、不重复建稿)。
+    for (const s of this.state.segments ?? []) {
+      if (s && typeof s.path === "string" && typeof s.index === "number") this.indexByPath.set(s.path, s.index);
+    }
+    this.segDir = dir;
+  }
+
   /** 当前 BV(建稿后;诊断/回传用)。 */
   get bv(): string | undefined { return this.state.bv; }
   /** 已确认段号(诊断/测试)。 */
@@ -293,19 +399,10 @@ export class RollingUploader {
     // 的 `.rolling.json`)。此时无事可持久化,直接跳过,绝不写脏文件。
     if (!this.state.sessionBase || !this.segDir) return true;
     const target = statePathFor(this.segDir, this.state.sessionBase);
-    const tmp = `${target}.tmp.${process.pid}.${Date.now().toString(36)}`;
     try {
-      const fd = openSync(tmp, "w", 0o644);
-      try {
-        writeFileSync(fd, JSON.stringify({ ...this.state, schemaVersion: ROLLING_STATE_SCHEMA_VERSION }), "utf-8");
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
-      renameSync(tmp, target);
+      writeStateFile(this.segDir, this.state, this.pid, this.now());
       return true;
     } catch (e) {
-      try { unlinkSync(tmp); } catch { /* best-effort 清理临时文件 */ }
       this.stateUntrusted = true;
       this.log(
         `[rolling] ⚠️ sidecar 原子写失败(${target}),会话幂等状态不可信 → 停止自动上传并保留源(转人工): ` +
@@ -329,81 +426,64 @@ export class RollingUploader {
   private async recoverDanglingUpload(): Promise<void> {
     if (this.recoveryDone || !this.state.uploading) return;
     this.recoveryDone = true;
-    const { index, kind } = this.state.uploading;
-    const confirmed = new Set(this.state.confirmed);
+    this.state = await this.settleIntent(this.state);
+    this.persist();
+  }
+
+  /**
+   * Settle the dangling `uploading` intent of `s` and return the resulting state (the caller persists it).
+   * Works on any session's state, so a successor can settle its predecessor's intent with identical semantics.
+   */
+  private async settleIntent(s: RollingState): Promise<RollingState> {
+    if (!s.uploading) return s;
+    const { index, kind } = s.uploading;
+    const confirmed = new Set(s.confirmed);
+    const manual = (): RollingState => ({
+      ...s,
+      uploading: undefined,
+      ambiguous: [...(s.ambiguous ?? []), index],
+      updatedAt: this.now(),
+    });
     if (confirmed.has(index)) {
       // 已在确认后、销标记前被杀:仅清标记,源由 needsConfirmCleanup 补删。
-      this.state = { ...this.state, uploading: undefined, updatedAt: this.now() };
-      this.persist();
-      return;
+      return { ...s, uploading: undefined, updatedAt: this.now() };
     }
     if (kind === "create") {
       this.log(`[rolling] ⚠️ 上次会话在 P1 建稿过程中中断(BV 未知),段 ${index} 转人工核对,绝不自动重建稿`);
-      this.state = {
-        ...this.state,
-        uploading: undefined,
-        ambiguous: [...(this.state.ambiguous ?? []), index],
-        updatedAt: this.now(),
-      };
-      this.persist();
-      return;
+      return manual();
     }
-    if (kind === "append" && this.state.bv) {
+    if (kind === "append" && s.bv) {
       const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
       let parts: number | null = null;
       try {
-        parts = await this.gate.run(this.accountKey, () => this.countPartsInner(this.state.bv!, cookies));
+        parts = await this.gate.run(this.accountKey, () => this.countPartsInner(s.bv!, cookies));
       } catch { parts = null; }
       // Parts inherited from predecessor sessions of the same broadcast are already in the submission.
-      const expected = (this.state.inheritedParts ?? 0) + this.state.confirmed.length;
+      const expected = (s.inheritedParts ?? 0) + s.confirmed.length;
       // 用**分 P 数**做唯一证据(不额外要求段号连续):碎片段会被跳过(minSegmentSec),
       // 那时 confirmed 天然非连续(如 0,1,3)但分 P 数**仍然** = 已上传段数 = confirmed.length
       // —— 再要求连续会把这种正常情况误判成「历史/人工干预」→ 无谓转人工。
       if (parts == null) {
-        this.log(`[rolling] ⚠️ 上电恢复失败(parts=${String(parts)} confirmed=${this.state.confirmed.join(",")}),段 ${index} 转人工核对`);
-        this.state = {
-          ...this.state,
-          uploading: undefined,
-          ambiguous: [...(this.state.ambiguous ?? []), index],
-          updatedAt: this.now(),
-        };
-        this.persist();
-        return;
+        this.log(`[rolling] ⚠️ 上电恢复失败(parts=${String(parts)} confirmed=${s.confirmed.join(",")}),段 ${index} 转人工核对`);
+        return manual();
       }
       if (parts === expected + 1) {
         // 上次 append 其实已成功(客户端没拿到响应即被杀)→ 补确认,源交 needsConfirmCleanup 删除。
         confirmed.add(index);
-        this.state = { ...this.state, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
-        this.persist();
         this.log(`[rolling] 上电恢复:段 ${index} 上次 append 已提交(分P数=${parts}),补确认`);
-        return;
+        return { ...s, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
       }
       if (parts === expected) {
         // 未提交 → 安全,清意图标记;正常循环会重试该段。
-        this.state = { ...this.state, uploading: undefined, updatedAt: this.now() };
-        this.persist();
         this.log(`[rolling] 上电恢复:段 ${index} 上次 append 未提交(分P数=${parts}),安全重试`);
-        return;
+        return { ...s, uploading: undefined, updatedAt: this.now() };
       }
       this.log(`[rolling] ⚠️ 上电恢复:段 ${index} 分P数异常(${parts} != 期望 ${expected}/${expected + 1}),转人工核对`);
-      this.state = {
-        ...this.state,
-        uploading: undefined,
-        ambiguous: [...(this.state.ambiguous ?? []), index],
-        updatedAt: this.now(),
-      };
-      this.persist();
-      return;
+      return manual();
     }
     // append 意图但无 BV(状态不一致)→ 保守转人工。
     this.log(`[rolling] ⚠️ 上电恢复:append 意图但无 BV,段 ${index} 转人工核对`);
-    this.state = {
-      ...this.state,
-      uploading: undefined,
-      ambiguous: [...(this.state.ambiguous ?? []), index],
-      updatedAt: this.now(),
-    };
-    this.persist();
+    return manual();
   }
 
   private isEmptySegment(seg: RollingSegment): boolean {
@@ -446,44 +526,16 @@ export class RollingUploader {
       // 失败已在 persist() 日志明示;此后不做任何上传/删源(保留源,转人工)。
       return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
     }
-    const rolling: RollingSegment[] = [...this.indexByPath.entries()].map(([p, index]) => {
-      let mtimeMs = 0;
-      try { mtimeMs = statSync(p).mtimeMs; } catch { mtimeMs = 0; }
-      return { path: p, index, mtimeMs };
-    });
     // 崩溃恢复:结算上次进程留下的 uploading 意图(可能补确认 / 安全重试 / 转人工)。
     await this.recoverDanglingUpload();
     if (this.stateUntrusted) return { uploaded: [], deleted: [], ambiguous: this.ambiguousIndices };
     const confirmed = new Set(this.state.confirmed);
     const ambiguous = new Set(this.state.ambiguous ?? []);
-    // 封口判定(唯一真理 = core.sealedSegmentIndices),grace 恒为 0:
-    //   - 录制中:最新段**恒不封口**(只有「出现后继段」才封口),grace 根本不参与判定;
-    //   - 收尾(recordingActive=false):调用方契约是**录制进程已退出** —— manager 在
-    //     `await recorder.stop()`(SIGINT + 8s SIGKILL 兜底)之后才调 `onSessionEnd`,最后一段不会再增长。
-    //   ⚠️ 这里曾经沿用 `DEFAULT_SEAL_GRACE_MS`(3s):而「刚写完就收尾」的末段 mtime 距今 < 3s
-    //   → 判不出封口 → **末段永不上传、源永残留**(master 见「有 rolling.bv 但仍有 ts」→ 整场转人工)。
-    //   收尾是**一次性**调用(不重试),所以这个宽限没有任何补救机会,只有害处。见 rolling-upload.test.ts
-    //   「默认收尾 flush 上传末段」回归用例。
-    const sealOpts = { recordingActive, nowMs, sealGraceMs: 0 };
-    const sealed = sealedSegmentIndices(rolling, sealOpts);
-    const planned = planRollingUploads(rolling, sealOpts, confirmed);
-    // 头阻塞:ambiguous 段及其后的段一律不外发(B 站 append 只能追加末尾,缺口不可逆)。
-    const headBlocked = headOfLineFilter(planned, ambiguous);
-    const pending: RollingSegment[] = [];
-    for (const s of headBlocked) {
-      if (this.isEmptySegment(s)) {
-        if (this.loggedSkipped.has(s.index)) continue;
-        this.loggedSkipped.add(s.index);
-        this.log(`[rolling] 段 ${s.index} 为 0 字节,不上传、保留源(转人工处理)`);
-        continue;
-      }
-      if (this.isFragment(s, rolling)) {
-        if (this.loggedSkipped.has(s.index)) continue;
-        this.loggedSkipped.add(s.index);
-        this.log(`[rolling] 段 ${s.index} 时长过短(< ${this.minSegmentSec}s),不上传、保留源(转人工处理)`);
-        continue;
-      }
-      pending.push(s);
+    const { rolling, sealed, pending } = this.planPending(recordingActive, nowMs, confirmed, ambiguous);
+    // Issue #46: a successor must settle and upload its predecessor's leftover segments before its own first
+    // upload to the inherited submission (part order = A's parts, then B's).
+    if (pending.length > 0 && !this.state.bv && (await this.takeOverPredecessor()) === "wait") {
+      return { uploaded: [], deleted: [], ambiguous: [...ambiguous] };
     }
 
     const uploaded: number[] = [];
@@ -524,6 +576,50 @@ export class RollingUploader {
       }
     }
     return { uploaded, deleted, ambiguous: [...ambiguous] };
+  }
+
+  /** Seal + head-of-line + skip filters shared by the own flush and the successor's readiness check. */
+  private planPending(
+    recordingActive: boolean,
+    nowMs: number,
+    confirmed: ReadonlySet<number>,
+    ambiguous: ReadonlySet<number>,
+  ): { rolling: RollingSegment[]; sealed: Set<number>; pending: RollingSegment[] } {
+    const rolling: RollingSegment[] = [...this.indexByPath.entries()].map(([p, index]) => {
+      let mtimeMs = 0;
+      try { mtimeMs = statSync(p).mtimeMs; } catch { mtimeMs = 0; }
+      return { path: p, index, mtimeMs };
+    });
+    // 封口判定(唯一真理 = core.sealedSegmentIndices),grace 恒为 0:
+    //   - 录制中:最新段**恒不封口**(只有「出现后继段」才封口),grace 根本不参与判定;
+    //   - 收尾(recordingActive=false):调用方契约是**录制进程已退出** —— manager 在
+    //     `await recorder.stop()`(SIGINT + 8s SIGKILL 兜底)之后才调 `onSessionEnd`,最后一段不会再增长。
+    //   ⚠️ 这里曾经沿用 `DEFAULT_SEAL_GRACE_MS`(3s):而「刚写完就收尾」的末段 mtime 距今 < 3s
+    //   → 判不出封口 → **末段永不上传、源永残留**(master 见「有 rolling.bv 但仍有 ts」→ 整场转人工)。
+    //   收尾是**一次性**调用(不重试),所以这个宽限没有任何补救机会,只有害处。见 rolling-upload.test.ts
+    //   「默认收尾 flush 上传末段」回归用例。
+    const sealOpts = { recordingActive, nowMs, sealGraceMs: 0 };
+    const sealed = sealedSegmentIndices(rolling, sealOpts);
+    const planned = planRollingUploads(rolling, sealOpts, confirmed);
+    // 头阻塞:ambiguous 段及其后的段一律不外发(B 站 append 只能追加末尾,缺口不可逆)。
+    const headBlocked = headOfLineFilter(planned, ambiguous);
+    const pending: RollingSegment[] = [];
+    for (const s of headBlocked) {
+      if (this.isEmptySegment(s)) {
+        if (this.loggedSkipped.has(s.index)) continue;
+        this.loggedSkipped.add(s.index);
+        this.log(`[rolling] 段 ${s.index} 为 0 字节,不上传、保留源(转人工处理)`);
+        continue;
+      }
+      if (this.isFragment(s, rolling)) {
+        if (this.loggedSkipped.has(s.index)) continue;
+        this.loggedSkipped.add(s.index);
+        this.log(`[rolling] 段 ${s.index} 时长过短(< ${this.minSegmentSec}s),不上传、保留源(转人工处理)`);
+        continue;
+      }
+      pending.push(s);
+    }
+    return { rolling, sealed, pending };
   }
 
   /** 上传一个封口段:P1(无 bv)建稿 → 落 BV;其余 append。 */
@@ -605,7 +701,10 @@ export class RollingUploader {
    * ambiguous segments, a submission-less session with create intent) returns `uncertain` — the caller then neither
    * creates nor appends. A gap above SAME_BROADCAST_GAP_MS means a new broadcast → `none` (new submission).
    */
-  private findPredecessor(): PredecessorLink {
+  private locatePredecessor():
+    | { kind: "none" }
+    | { kind: "uncertain"; reason: string }
+    | { kind: "found"; prev: PredecessorCand } {
     const own = this.state.sessionBase;
     const startMs = this.state.startMs ?? (this.firstSegMtimeMs || this.now());
     let names: string[];
@@ -614,8 +713,7 @@ export class RollingUploader {
     } catch (e) {
       return { kind: "uncertain", reason: `读不到会话目录: ${String((e as Error)?.message ?? e).slice(0, 80)}` };
     }
-    interface Cand { base: string; s: RollingState; start: number; last: number }
-    const cands: Cand[] = [];
+    const cands: PredecessorCand[] = [];
     for (const f of names) {
       const base = f.slice(0, -".rolling.json".length);
       if (base === own) continue;
@@ -648,6 +746,14 @@ export class RollingUploader {
     if (meaningful.length === 0) return { kind: "none" };
     const prev = meaningful.reduce((a, b) => (b.start > a.start ? b : a));
     if (!isSameBroadcastGap(startMs - prev.last)) return { kind: "none" };
+    return { kind: "found", prev };
+  }
+
+  private findPredecessor(): PredecessorLink {
+    if (this.takeoverGaveUp) return { kind: "uncertain", reason: this.takeoverGaveUp };
+    const found = this.locatePredecessor();
+    if (found.kind !== "found") return found;
+    const { prev } = found;
     const { s } = prev;
     if (s.uploading) return { kind: "uncertain", reason: `${prev.base} 有未结算的上传意图(${s.uploading.kind})` };
     if ((s.ambiguous?.length ?? 0) > 0) return { kind: "uncertain", reason: `${prev.base} 有结果不确定的段` };
@@ -655,6 +761,86 @@ export class RollingUploader {
     const inherited = s.inheritedParts ?? 0;
     if (!Number.isInteger(inherited) || inherited < 0) return { kind: "uncertain", reason: `${prev.base} 继承分P数非法` };
     return { kind: "inherit", bv: s.bv, parts: inherited + s.confirmed.length, from: prev.base };
+  }
+
+  /** Is the process that owned predecessor sidecar `s` possibly still running? Unknown owner → judged by file activity. */
+  private ownerMayBeAlive(s: RollingState, lastActivityMs: number): boolean {
+    const pid = s.ownerPid;
+    if (typeof pid === "number" && Number.isInteger(pid) && pid > 0) {
+      // Same process: the earlier session ended (its onSessionEnd was awaited before this one started).
+      return pid === this.pid ? false : this.pidAlive(pid);
+    }
+    const hb = typeof s.heartbeatAt === "number" && Number.isFinite(s.heartbeatAt) ? s.heartbeatAt : 0;
+    return this.now() - Math.max(hb, lastActivityMs) < LEGACY_OWNER_QUIET_MS;
+  }
+
+  private waitForPredecessor(reason: string): "wait" {
+    if (this.takeoverWaitLogged !== reason) {
+      this.takeoverWaitLogged = reason;
+      this.log(`[rolling] 前序会话残段暂不接管,本会话先不上传: ${reason}`);
+    }
+    return "wait";
+  }
+
+  /**
+   * Issue #46: before this session's first upload to an inherited submission, finish the predecessor's leftovers:
+   * settle its dangling intent (part-count readback), then append its remaining sealed segments in index order,
+   * through a peer uploader on the predecessor's sidecar (same WAL, same delete-after-confirm rules).
+   * Returns `wait` when it is not safe/possible yet (owner may be alive, last segment still growing, leftovers
+   * still pending) — nothing of this session is uploaded then and the next flush re-checks. `proceed` means the
+   * predecessor is settled, absent, or fail-closed (the caller's findPredecessor then yields `uncertain`).
+   */
+  private async takeOverPredecessor(): Promise<"proceed" | "wait"> {
+    const found = this.locatePredecessor();
+    if (found.kind !== "found") return "proceed";
+    const { prev } = found;
+    // No BV / ambiguous segments: keep the existing fail-closed behaviour (findPredecessor reports uncertain).
+    if (!prev.s.bv || (prev.s.ambiguous?.length ?? 0) > 0) return "proceed";
+    const confirmed = new Set(prev.s.confirmed);
+    const exists = (f: string): boolean => { try { statSync(f); return true; } catch { return false; } };
+    const leftovers = (prev.s.segments ?? []).filter((x) => !confirmed.has(x.index) && exists(x.path));
+    if (!prev.s.uploading && leftovers.length === 0) return "proceed";
+    if (this.ownerMayBeAlive(prev.s, prev.last)) {
+      const nowMs = this.now();
+      if (!this.ownerWaitSince) this.ownerWaitSince = nowMs;
+      const limit = this.o.ownerWaitMs ?? DEFAULT_OWNER_WAIT_MS;
+      if (nowMs - this.ownerWaitSince >= limit) {
+        // Fail closed like an uncertain predecessor: no create, no append, sources kept, one alert.
+        this.takeoverGaveUp = `${prev.base} 的录制进程持续存活超过 ${Math.round(limit / 60_000)} 分钟,放弃等待`;
+        const msg = `边录边传:${this.takeoverGaveUp},本会话不建稿不 append,保留源转人工`;
+        this.log(`[rolling] ⚠️ ${msg}`);
+        try { this.o.notify?.(msg); } catch { /* alert is best-effort */ }
+        return "proceed";
+      }
+      return this.waitForPredecessor(`${prev.base} 的录制进程可能仍存活(pid=${String(prev.s.ownerPid ?? "未知")})`);
+    }
+    this.ownerWaitSince = 0;
+    // Owner is gone, but an orphaned recorder child could still be writing: the newest segment only counts as
+    // sealed when its size is unchanged across two checks.
+    const last = leftovers.reduce<{ index: number; path: string } | undefined>((m, x) => (!m || x.index > m.index ? x : m), undefined);
+    const lastIndex = Math.max(...(prev.s.segments ?? []).map((x) => x.index));
+    if (last && last.index === lastIndex) {
+      const size = (): number => { try { return statSync(last.path).size; } catch { return -1; } };
+      const before = size();
+      await new Promise((r) => setTimeout(r, this.o.stableCheckMs ?? DEFAULT_STABLE_CHECK_MS));
+      if (before < 0 || before !== size()) return this.waitForPredecessor(`${prev.base} 的末段仍在变化或已消失`);
+    }
+    const peer = new RollingUploader({ ...this.o, gate: this.gate, slot: this.slot });
+    peer.loadSession(this.segDir, prev.base);
+    // Claim: stamps this process as the sidecar owner so a racing successor sees a live owner and waits.
+    if (!peer.persist()) return this.waitForPredecessor(`${prev.base} 的 sidecar 无法写入`);
+    this.log(`[rolling] 接管前序会话 ${prev.base} 的 ${leftovers.length} 个未确认分段(owner 已退出)`);
+    await peer.flush({ recordingActive: false });
+    if (peer.stateUntrusted) return this.waitForPredecessor(`${prev.base} 的 sidecar 写失败`);
+    if (peer.hasUploadablePending()) return this.waitForPredecessor(`${prev.base} 仍有分段待上传(槽忙/未完成)`);
+    return "proceed";
+  }
+
+  /** True while sealed, unconfirmed, non-skipped segments remain (everything counts as sealed: owner is gone). */
+  private hasUploadablePending(): boolean {
+    const confirmed = new Set(this.state.confirmed);
+    const ambiguous = new Set(this.state.ambiguous ?? []);
+    return this.planPending(false, this.now(), confirmed, ambiguous).pending.length > 0;
   }
 
   /**
@@ -898,6 +1084,8 @@ export function makeRollingUploadHookFactory(o: {
   cookies?: string;
   minSegmentSec?: number;
   log?: (msg: string) => void;
+  /** Alert sink for cases needing a human (wired to the recorder's notifier in the CLI). */
+  notify?: (message: string) => void;
   uploadPlainRaw?: typeof uploadPlain;
   appendGroupRaw?: typeof appendGroup;
   countPartsRaw?: (bv: string, cookies: string) => Promise<number | null>;
@@ -918,6 +1106,7 @@ export function makeRollingUploadHookFactory(o: {
       cookies: o.cookies,
       minSegmentSec: o.minSegmentSec,
       log: o.log,
+      notify: o.notify,
       uploadPlainRaw: o.uploadPlainRaw,
       appendGroupRaw: o.appendGroupRaw,
       countPartsRaw: o.countPartsRaw,

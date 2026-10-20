@@ -280,6 +280,7 @@ program
         platform: platform.id,
         roomSlug: slug,
         log: (m: string) => console.log(m),
+        notify: (message: string) => { void notifier.notify({ kind: "error", stage: "边录边传", message }).catch(() => {}); },
       });
       console.log(`[rec] 边录边传已开启:每封口一段上传后删该段源(room=${slug})`);
     }

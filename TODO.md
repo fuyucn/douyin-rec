@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-19
+> 最后更新：2026-10-20
 
 ## 状态约定
 
@@ -16,6 +16,12 @@
 ## 进行中
 - [~] **T-88 任务敏感字段接口脱敏 + 回调地址不进 argv(issue [#47](https://github.com/fuyucn/douyin-rec/issues/47))**
   **做什么**：任务/房间 DTO 的 登录态、回调地址经 core `redactTaskSecrets` 脱敏(只给 是否已设置标记);编辑表单留空=不改;子进程 回调地址走 0600 文件传入。**为什么**：接口明文返回敏感字段、`ps` 可见回调地址。**验收**：list/detail/create/update/room 响应无明文;PATCH 缺省保留;argv 不含回调地址;变异检查 FAIL→PASS。
+- [~] **T-89 边录边传:后继会话接管前序会话的未确认分段（issue [#46](https://github.com/fuyucn/douyin-rec/issues/46)，#57 R2 的接管部分）**
+  — 2026-10-20 认领(用户授权),分支 `codex/issue-46-rolling-takeover`,PR 待开(base `feat/hub-optimization`)。
+  **做什么**：重启/断流重连后,后继会话先结算前序会话悬空的 `uploading` 意图(分P数回读),再把前序剩余封口段按段号 append 并确认后删源,最后才传自己的段;sidecar 记 owner pid + 心跳,owner 存活则等待(规避 PR #72 的接管竞态)。
+  **验收**：重启后 A 残段 → B 先传 A 残段再传 B;悬空意图落地/未落地/不可知三态;owner 存活等待;A 模糊 → B 转人工;e2e 的 `it.fails`(#46)转真实通过;变异验证。
+  **不做**：前序有稿件号残段但无后继会话 → 仍由主控 needs_manual 处理。
+
 - [~] **T-87 rolling 上传拦截 0 字节封口段(issue [#177](https://github.com/fuyucn/douyin-rec/issues/177))**
   **做什么**：rolling 上传读段真实大小,0 字节段不上传、保留源、记日志、不阻塞后续段(不依赖前段 mtime)。**为什么**：0 字节段致 B 站 duration=0 → 稿件 -16 不可逆。**验收**：前段源已删/仍在两种 0 字节用例不上传;既有碎片/崩溃恢复用例绿。
 - [~] **T-86 起录时记录平台本场 id 与拉流路径(诊断日志)(issue [#294](https://github.com/fuyucn/douyin-rec/issues/294))**
