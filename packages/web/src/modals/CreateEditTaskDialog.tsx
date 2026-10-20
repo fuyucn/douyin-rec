@@ -5,6 +5,7 @@ import { cookieStatusAtom, serverTimezoneAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { NotifySection } from "../components/room-form/NotifySection";
+import { webhookPatch } from "../lib/room-editor-form";
 import { RecordingSection } from "../components/room-form/RecordingSection";
 import { ToggleRow } from "../components/room-form/parts";
 import { ExperimentalBadge } from "../components/ExperimentalBadge";
@@ -35,7 +36,10 @@ interface FormState {
   danmu: boolean;
   useCookie: boolean;
   outputFormat: OutputFormat;
+  /** New webhook typed by the user; the stored one is never sent to the client (see webhookPatch). */
   webhook: string;
+  hasWebhook: boolean;
+  webhookClear: boolean;
   /** 0 落盘流式直传(plans/039):源录像不落盘,边录边传 B 站。 */
   streamUpload: boolean;
   /** 真 0 落盘 = 连 spool 都不写;代价是分 P 上传失败时没有本地回退源。 */
@@ -53,6 +57,8 @@ const BLANK: FormState = {
   useCookie: true,
   outputFormat: "original",
   webhook: "",
+  hasWebhook: false,
+  webhookClear: false,
   streamUpload: false,
   streamUploadSpool: true,
 };
@@ -68,7 +74,9 @@ function fromTask(t: Task): FormState {
     danmu: !!t.danmu,
     useCookie: !!t.useCookie,
     outputFormat: outputFormatFromStored(t.outputFormat),
-    webhook: t.webhook ?? "",
+    webhook: "",
+    hasWebhook: t.hasWebhook === true,
+    webhookClear: false,
     // 旧后端不下发该字段 → undefined → false(行为同改前)。
     streamUpload: t.streamUpload === true,
     streamUploadSpool: t.streamUploadSpool !== false,
@@ -152,7 +160,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
       // 原值提交:未登录时开关只是锁定显示,不能借保存把任务的 Cookie 设置改掉(与房间面板 / 规则弹窗同口径)。
       useCookie: form.useCookie,
       schedule: form.schedule.trim() || null,
-      webhook: form.webhook.trim() || null,
+      ...webhookPatch(form.webhook, form.webhookClear),
       // Preserve the stored zero-disk fields; the room editor is the only writer.
       ...(zeroDiskManaged ? { streamUpload: form.streamUpload, streamUploadSpool: form.streamUploadSpool } : {}),
       ...(formatLock.locked ? {} : { outputFormat: form.outputFormat }),
@@ -226,7 +234,8 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
             {plat && <p className="mt-1 text-xs text-muted-soft">{t("dialog.platform", { id: plat.id })}</p>}
           </div>
         </RecordingSection>
-        <NotifySection webhook={form.webhook} onChange={(v) => set("webhook", v)} />
+        <NotifySection webhook={form.webhook} onChange={(v) => set("webhook", v)}
+                       hasStored={form.hasWebhook} clear={form.webhookClear} onClearChange={(v) => set("webhookClear", v)} />
         {/* 边录边传已迁到 hub 规则(上传方式 = 边录边传,issue #40);task 只保留录制参数。
             旧开关为 true 的任务只读提示一下,不可在此修改。 */}
         {isEdit && task?.rollingUpload === true && <p className="text-xs text-muted">{t("rooms.rollingLegacyNote")}</p>}

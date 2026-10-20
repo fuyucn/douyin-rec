@@ -382,8 +382,15 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                     {hasRecording && (
                       <label className="block">
                         <span className="field-label">{t("room.editor.webhook")}</span>
-                        <input className="input font-mono text-sm" placeholder={t("dialog.webhookPlaceholder")} value={form.webhook}
+                        <input className="input font-mono text-sm" value={form.webhook} disabled={form.webhookClear}
+                               placeholder={form.hasWebhook && !form.webhookClear ? t("dialog.webhookPlaceholderSet") : t("dialog.webhookPlaceholder")}
                                onChange={(e) => update({ webhook: e.target.value })} />
+                        {form.hasWebhook && (
+                          <label className="flex items-center gap-2 text-xs mt-1">
+                            <input type="checkbox" checked={form.webhookClear} onChange={(e) => update({ webhookClear: e.target.checked })} />
+                            {t("dialog.webhookClear")}
+                          </label>
+                        )}
                       </label>
                     )}
                   </div>

@@ -11,6 +11,7 @@ import type { Task, TaskStore } from "../../store.js";
 import type { EventCenter, NotifWebhookToggles } from "@drec/observability";
 import type {
   RecordingWorkerStatusDTO, HubRulePayload, HubPoolSnapshotDTO, WorkerTestResult, RoomPayload, OutputFormatLock,
+  TaskSecrets, RedactedTaskSecrets,
 } from "@drec/core";
 
 export interface ApiResult {
@@ -140,7 +141,7 @@ export interface ApiDeps {
 }
 
 /** A task enriched with its live running state for client display. */
-export interface TaskView extends Task {
+export interface TaskView extends Omit<Task, keyof TaskSecrets>, RedactedTaskSecrets {
   running: boolean;
   /** 抓取到的主播名（运行时解析，未设 name 时 UI 用它显示），未知为 null。 */
   anchorName: string | null;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { factsOf, formFromRoom, payloadFromForm, ruleFactsOf, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { factsOf, formFromRoom, payloadFromForm, ruleFactsOf, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
 import { deriveConstraints, settledMethod } from "../../packages/web/src/lib/room-form-rules.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
@@ -43,7 +43,7 @@ function mkRoom(over: { recording?: Partial<NonNullable<RoomDTO["recording"]>> |
   const recording = over.recording === null ? null : {
     taskId: 7, room: "https://live.douyin.com/1", name: "n", anchorName: null, quality: "origin", engine: "ffmpeg",
     danmu: 1, segmentSec: 1800, scheduleStart: "20:00", scheduleEnd: "02:00", enabled: true, useCookie: true,
-    cookies: null, outDir: null, webhook: null, rollingUpload: false, rollingEffective: false, outputFormat: "original",
+    cookies: null, hasCookies: false, outDir: null, webhook: null, hasWebhook: false, rollingUpload: false, rollingEffective: false, outputFormat: "original",
     streamUpload: false, streamUploadSpool: true,
     ...over.recording,
   } as NonNullable<RoomDTO["recording"]>;
@@ -73,7 +73,9 @@ describe("room editor form ↔ payload", () => {
   });
   it("round-trips stored fields without silently changing them", () => {
     const p = ok(payloadFromForm(formFromRoom(mkRoom()), ctx));
-    expect(p.recording).toMatchObject({ name: "n", quality: "origin", engine: "ffmpeg", segmentSec: 1800, danmu: 1, useCookie: true, scheduleStart: "20:00", scheduleEnd: "02:00", outputFormat: "original", webhook: null });
+    expect(p.recording).toMatchObject({ name: "n", quality: "origin", engine: "ffmpeg", segmentSec: 1800, danmu: 1, useCookie: true, scheduleStart: "20:00", scheduleEnd: "02:00", outputFormat: "original" });
+    // Untouched webhook field is omitted (= keep stored secret), not sent as null.
+    expect(p.recording).not.toHaveProperty("webhook");
     expect(p.processing?.workers).toEqual(["vps1"]);
     expect(p.processing?.pipeline?.steps).toMatchObject({ mergeSegments: true, burnDanmu: true, burnLivechat: false, nodeSideUpload: false });
     expect(p.processing?.pipeline?.upload).toMatchObject({ mode: "upload", private: true, tid: 171, tag: "a,b", titleTemplate: "{name}_{date}" });
@@ -124,5 +126,16 @@ describe("room editor form ↔ payload", () => {
     const f = formFromRoom(mkRoom());
     expect(ok(payloadFromForm({ ...f, schedule: "" }, ctx)).recording).toMatchObject({ scheduleStart: null, scheduleEnd: null });
     expect(payloadFromForm({ ...f, schedule: "20:00" }, ctx)).toEqual({ ok: false, error: "schedule" });
+  });
+});
+
+describe("webhookPatch (secret PATCH semantics, issue #47)", () => {
+  it("untouched = omitted (keep), typed = replace, clear box = null", () => {
+    expect(webhookPatch("", false)).toEqual({});
+    expect(webhookPatch("   ", false)).toEqual({});
+    expect(webhookPatch(" https://x/y ", false)).toEqual({ webhook: "https://x/y" });
+    expect(webhookPatch("", true)).toEqual({ webhook: null });
+    // typing a new value wins over a stale clear flag
+    expect(webhookPatch("https://x/y", true)).toEqual({ webhook: "https://x/y" });
   });
 });

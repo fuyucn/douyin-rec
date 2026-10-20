@@ -14,7 +14,7 @@
  * 然后返回 500 + 原因。代价是:若回滚本身也失败,仍可能留下半成功 —— 这种情况下
  * 错误信息必须**明说哪半边可能已改**,让用户能自己核对(静默留半成功是不可接受的)。
  */
-import { parseOutputFormat, platformForRoom, streamUploadConflicts, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
+import { parseOutputFormat, platformForRoom, redactTaskSecrets, streamUploadConflicts, type RoomDTO, type RoomPayload, type RoomRecordingDTO, type HubRulePayload } from "@drec/core";
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
 import { refreshLocalRollingEffective } from "../../rolling-effective.js";
@@ -69,6 +69,11 @@ export function buildRooms(ctx: ApiCtx) {
     return { platform, roomSlug };
   };
 
+  const secretsOf = (t: Task): Pick<RoomRecordingDTO, "cookies" | "webhook" | "hasCookies" | "hasWebhook"> => {
+    const { cookies, webhook, hasCookies, hasWebhook } = redactTaskSecrets(t);
+    return { cookies, webhook, hasCookies, hasWebhook };
+  };
+
   const recordingOf = (t: Task | null): RoomRecordingDTO | null =>
     t
       ? {
@@ -84,10 +89,9 @@ export function buildRooms(ctx: ApiCtx) {
           scheduleEnd: t.scheduleEnd,
           enabled: t.enabled,
           useCookie: t.useCookie,
-          // cookies 是敏感值:DTO 恒不外发。要改用 PUT。
-          cookies: null,
+          // cookies / webhook 是凭证:DTO 恒不外发(redactTaskSecrets 单一出口),要改用 PUT。
+          ...secretsOf(t),
           outDir: t.outDir,
-          webhook: t.webhook,
           rollingUpload: t.rollingUpload,
           rollingEffective: t.rollingEffective,
           streamUpload: t.streamUpload,
