@@ -650,4 +650,24 @@ describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config >
     });
     expect(title.length).toBeLessThanOrEqual(80);
   });
+
+  it("without a partTitleTemplate the part title follows the rolling segment stem", () => {
+    const startMs = Date.UTC(2026, 8, 12, 17, 30, 5);
+    expect(resolveStreamPartTitle({
+      platform: "douyin", roomSlug: "998", anchorName: "主播", startMs, timeZone: "Asia/Shanghai",
+      partIndex: 3,
+    })).toBe("主播_2026-09-13_01-30-05_002");
+  });
+
+  it("default part title strips path-illegal characters and stays within 80 chars", () => {
+    const startMs = Date.UTC(2026, 8, 12, 17, 30, 5);
+    expect(resolveStreamPartTitle({
+      platform: "douyin", roomSlug: "997", anchorName: "主/播:A", startMs, timeZone: "Asia/Shanghai", partIndex: 1,
+    })).toBe("主播A_2026-09-13_01-30-05_000");
+    const t = resolveStreamPartTitle({
+      platform: "douyin", roomSlug: "997", anchorName: "超".repeat(90), startMs, timeZone: "Asia/Shanghai", partIndex: 2,
+    });
+    expect(t.length).toBeLessThanOrEqual(80);
+    expect(t.endsWith("_2026-09-13_01-30-05_001")).toBe(true);
+  });
 });
