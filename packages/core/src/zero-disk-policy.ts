@@ -25,9 +25,9 @@ export function zeroDiskRuleError(
   rule: ZeroDiskRule | null | undefined,
 ): string | null {
   if (streamUpload !== true || rule == null) return null;
-  if (rule.enabled === false) {
-    return "0 落盘是 rolling 的子选项,但该房间的 hub 规则已停用";
-  }
+  // A disabled rule records nothing, so zero-disk cannot run under it. Allow pausing a
+  // zero-disk room without forcing the user to turn the sub-option off first.
+  if (rule.enabled === false) return null;
   if (normalizeUploadMode(rule.mode) !== "rolling") {
     return "0 落盘只能在 rolling 上传方式下使用";
   }

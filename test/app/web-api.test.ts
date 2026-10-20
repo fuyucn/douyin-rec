@@ -1163,6 +1163,93 @@ describe("streamUpload 作为 rolling 子选项的规则门禁", () => {
     expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(400);
     expect(store.getTask(t.id)!.streamUpload).toBe(false);
   });
+
+  it("零落盘任务改到另一个不兼容房间 → 400(按生效房间校验)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-move-task-") });
+    const t = a.createTask({ room: "99101" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: t.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(200);
+    // Target room has an incompatible rule (upload + burn + two nodes).
+    const other = a.createTask({ room: "99102" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: other.id }, workers: ["local"],
+      pipeline: { upload: { mode: "upload" }, steps: { burnDanmu: true, burnLivechat: false } },
+    });
+    expect(a.updateTask(t.id, { room: "99102" }).status).toBe(400);
+    expect(store.getTask(t.id)).toMatchObject({ room: expect.stringContaining("99101"), streamUpload: true });
+  });
+
+  it("房间 PUT 同时改房间号 → 按新房间规则校验,400 且不落库", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-move-room-") });
+    const t = a.createTask({ room: "99201" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: t.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(200);
+    const other = a.createTask({ room: "99202" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: other.id }, workers: ["local", "vps2"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    const res = a.updateRoom("douyin.99201", { recording: { room: "99202" } });
+    expect(res.status).toBe(400);
+    expect(String((res.body as { error: string }).error)).toContain("local");
+    expect(store.getTask(t.id)!.room).toContain("99201");
+  });
+
+  it("同房间第二个零落盘任务在规则降级时也被拦住(按房间扫描,不只源任务)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-room-scan-") });
+    const src = a.createTask({ room: "99301" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: src.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    // The source task itself is NOT zero-disk; only a second task in the same room is.
+    const extra = a.createTask({ room: "99301", streamUpload: true }).body as { id: number };
+    // Rule is degraded to upload+multi-node: the second zero-disk task would still run.
+    const res = a.updateRoom("douyin.99301", { processing: {
+      enabled: true, workers: ["local", "vps2"], pipeline: { upload: { mode: "upload" } },
+    } as never });
+    expect(res.status).toBe(400);
+    expect(String((res.body as { error: string }).error)).toContain(`#${extra.id}`);
+  });
+
+  it("createHubRule 是 upsert:按合并后的规则校验", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-upsert-") });
+    const src = a.createTask({ room: "99401" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: src.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    expect(a.updateTask(src.id, { streamUpload: true }).status).toBe(200);
+    // Same room again: omitting steps inherits the stored (non-burning) steps, so this is legal.
+    expect(a.createHubRule({ recording: { sourceTaskId: src.id }, workers: ["local"] }).status).toBe(201);
+    // Turning burning on through the create/upsert path must be rejected.
+    expect(a.createHubRule({
+      recording: { sourceTaskId: src.id }, workers: ["local"],
+      pipeline: { steps: { burnDanmu: true, burnLivechat: false } },
+    }).status).toBe(400);
+  });
+
+  it("createHubRule 对非源任务的零落盘任务同样生效(按房间扫描)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-upsert-room-") });
+    const src = a.createTask({ room: "99501" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: src.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    const extra = a.createTask({ room: "99501", streamUpload: true }).body as { id: number };
+    const res = a.createHubRule({
+      recording: { sourceTaskId: src.id }, workers: ["local"],
+      pipeline: { upload: { mode: "upload" } },
+    });
+    expect(res.status).toBe(400);
+    expect(String((res.body as { error: string }).error)).toContain(`#${extra.id}`);
+  });
 });
 
 describe("streamUpload 与 rollingUpload 互斥(plans/039 写入侧门禁)", () => {

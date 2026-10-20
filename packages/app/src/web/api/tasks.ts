@@ -110,8 +110,10 @@ export function buildTasks(ctx: ApiCtx) {
       if (streamUploadConflicts(patch.streamUpload ?? existing.streamUpload, patch.rollingUpload ?? existing.rollingUpload)) {
         return err(400, "streamUpload 与 rollingUpload 互斥:0 落盘不写盘,滚动上传靠文件");
       }
-      // Zero-disk may only be enabled under a rolling rule with no burn, pinned to local.
-      if (patch.streamUpload === true) {
+      // Zero-disk must be valid for the room the task will actually live in after this patch,
+      // not just the room it had before. A plain room change can otherwise walk a live task
+      // into a non-rolling/burning/multi-node rule while `--stream-upload` stays on.
+      if ((patch.streamUpload ?? existing.streamUpload) === true) {
         const room = (patch.room ?? existing.room);
         const p = platformForRoom(room);
         const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(p.id, p.extractRoomSlug(room)));

@@ -51,6 +51,12 @@ export interface ApiCtx {
     streamUpload: boolean | null | undefined,
     rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
   ) => string | null;
+  /** Validate a rule against every zero-disk task already sitting in the same room. */
+  zeroDiskRoomError: (
+    platform: string,
+    roomSlug: string,
+    rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+  ) => string | null;
   settleLegacyRolling: (sourceTaskId: number | null | undefined, mode: unknown) => void;
   recordingsDir: (t: Task) => string | null;
   platformCookie: (platform: string) => { value: string | null; source: CookieStatus["source"] };
@@ -296,6 +302,32 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     return zeroDiskRuleError(true, rule);
   };
 
+  /**
+   * Rules are validated against the whole room, not just the bound source task. A second
+   * zero-disk task in the same room still runs with `--stream-upload` even if the rule's source
+   * task changed, so degrading the rule must be rejected while any such task exists.
+   */
+  const zeroDiskRoomError = (
+    platform: string,
+    roomSlug: string,
+    rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+  ): string | null => {
+    const affected = store.listTasks().filter((t) => {
+      if (!t.streamUpload) return false;
+      try {
+        const p = platformForRoom(t.room);
+        return p.id === platform && p.extractRoomSlug(t.room) === roomSlug;
+      } catch {
+        return false;
+      }
+    });
+    for (const t of affected) {
+      const err = zeroDiskRuleError(true, rule);
+      if (err) return `任务 #${t.id} ${err}`;
+    }
+    return null;
+  };
+
   // 名字净化成单个安全路径段(与 @drec/record-engine 的 sanitizePathSegment 同规则)。
   const sanitizeSeg = (name: string): string =>
     name.replace(/[/\\:*?"<>|]/g, "")
@@ -347,7 +379,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
   return {
     deps, store, manager, hubDir, hubConfigPath,
     err, isHubSourceTask, workerToDto, resolveAnchorBg, view, detailView,
-    validateWorkers, validatePipeline, hubRuleView, recordingError, zeroDiskErrorFor, settleLegacyRolling, recordingsDir,
+    validateWorkers, validatePipeline, hubRuleView, recordingError, zeroDiskErrorFor, zeroDiskRoomError, settleLegacyRolling, recordingsDir,
     platformCookie, biliupStatus, validCookiePlatform,
     normWebhook, toUseCookie, cookieStatus,
   };

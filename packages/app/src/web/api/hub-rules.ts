@@ -14,7 +14,7 @@ import { activeHubJobKeys, deleteHubJobHistory } from "../../hub-jobs.js";
 
 export function buildHubRules(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
-    err, validateWorkers, validatePipeline, hubRuleView, recordingError, zeroDiskErrorFor } = ctx;
+    err, validateWorkers, validatePipeline, hubRuleView, recordingError, zeroDiskErrorFor, zeroDiskRoomError } = ctx;
   return {
     hubStatus(): ApiResult {
       return { status: 200, body: { enabled: deps.hubEnabled ?? false } };
@@ -59,19 +59,25 @@ export function buildHubRules(ctx: ApiCtx) {
       const rerr = task.streamUpload ? null : recordingError(sourceTaskId, roomSlug);
       if (rerr) return err(400, rerr);
       // 同房间规则已存在时 upsert 会深合并 pipeline → 按合并后校验。
-      const perr = validatePipeline(input, hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug))?.pipeline);
+      const existingRule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug));
+      const perr = validatePipeline(input, existingRule?.pipeline);
       if (perr) return err(400, perr);
+      // create is an upsert: validate what will be stored (merged), not just the request body.
+      const merged = hubStore.mergePipeline(existingRule?.pipeline, input.pipeline);
+      const ruleView = {
+        enabled: input.enabled ?? existingRule?.enabled,
+        mode: merged.upload?.mode,
+        workers: input.workers ?? existingRule?.workers,
+        steps: merged.steps,
+      };
       const zerr = zeroDiskErrorFor(
         sourceTaskId,
         task.streamUpload,
-        {
-          enabled: input.enabled,
-          mode: input.pipeline?.upload?.mode,
-          workers: input.workers,
-          steps: input.pipeline?.steps,
-        },
+        ruleView,
       );
       if (zerr) return err(400, zerr);
+      const roomErr = zeroDiskRoomError(platform.id, roomSlug, ruleView);
+      if (roomErr) return err(400, roomErr);
       try {
         const rule = hubStore.upsertHubRule(hubDir, {
           platform: platform.id,
@@ -116,6 +122,17 @@ export function buildHubRules(ctx: ApiCtx) {
         },
       );
       if (zerr) return err(400, zerr);
+      const roomErr = zeroDiskRoomError(
+        key.slice(0, key.indexOf(".")),
+        ruleSlug,
+        {
+          enabled: input.enabled ?? existingRule?.enabled,
+          mode: merged.upload?.mode,
+          workers: input.workers ?? existingRule?.workers,
+          steps: merged.steps,
+        },
+      );
+      if (roomErr) return err(400, roomErr);
       const patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[]; requires?: string[] } = {};
       if ("enabled" in input) patch.enabled = input.enabled;
       if ("pipeline" in input) patch.pipeline = input.pipeline;

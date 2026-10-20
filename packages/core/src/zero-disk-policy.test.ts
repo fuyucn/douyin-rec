@@ -7,8 +7,10 @@ describe("zeroDiskRuleError — zero-disk is a rolling sub-mode", () => {
   it("allows rolling + no burn + local-only", () => {
     expect(zeroDiskRuleError(true, RULE)).toBeNull();
   });
-  it("disabled / non-rolling / burning / multi-node are rejected with a reason", () => {
-    expect(zeroDiskRuleError(true, { ...RULE, enabled: false })).toContain("停用");
+  it("a disabled rule is allowed (pausing a room must not force zero-disk off)", () => {
+    expect(zeroDiskRuleError(true, { ...RULE, enabled: false })).toBeNull();
+  });
+  it("non-rolling / burning / multi-node are rejected with a reason", () => {
     expect(zeroDiskRuleError(true, { ...RULE, mode: "upload" })).toContain("rolling");
     expect(zeroDiskRuleError(true, { ...RULE, mode: "stage" })).toContain("rolling");
     expect(zeroDiskRuleError(true, { ...RULE, steps: { burnDanmu: true, burnLivechat: false } })).toContain("烧录");
