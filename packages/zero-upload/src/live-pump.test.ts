@@ -986,6 +986,18 @@ describe("outcome:区分「一场都没录到」与「分 P 都已进稿」", ()
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
+  it("刚探测到开播随即断流 → 走正常退避后以 idle 收尾,不再带着已打开的稿件会话继续等(#308)", async () => {
+    let calls = 0;
+    const r = await runLivePump({
+      ...base(),
+      waitForBroadcast: true,
+      fetch: async () => (++calls === 1 ? { living: true, url: "u" } : { living: false }),
+      log: () => {},
+    } as Parameters<typeof runLivePump>[0]);
+    expect(r).toMatchObject({ ok: true, outcome: "idle" });
+    expect(calls).toBe(7); // 1 live probe + initial fetch + 5 backoff retries, then exit
+  });
+
   it("shouldStop 在等待中生效 → idle", async () => {
     let n = 0;
     const r = await runLivePump({
@@ -2054,6 +2066,47 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(archives().length).toBe(1);
     seed(0, { updatedAt: undefined });
     expect(open().bvid).toBe(FAKE_BV);
+  });
+
+  it("waitForBroadcast: same-broadcast is decided when the room goes live, not at process start (#308)", async () => {
+    seed(30); // fresh when the process starts
+    let calls = 0;
+    const logs: string[] = [];
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "gap", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: 1024, quality: "origin", submit: false, spoolMode: "none", waitForBroadcast: true,
+      sleep: async () => {},
+      // Stop right after the session is opened; no part is recorded.
+      shouldStop: () => calls >= 3,
+      fetch: async () => {
+        calls++;
+        // Still waiting: the old state must not even be opened yet.
+        expect(logs.some((m) => m.includes("resumed state"))).toBe(false);
+        if (calls < 3) return { living: false };
+        seed(120); // hours passed while waiting in-process
+        return { living: true, url: "http://x/y.ts" };
+      },
+      log: (m) => logs.push(m),
+    });
+    expect(r.outcome).toBe("idle");
+    expect(archives().length).toBe(1); // the next broadcast must not append to the old archive
+    expect(logs.join("\n")).toContain("archived old state");
+  });
+
+  it("waitForBroadcast: stopped while still waiting -> old state untouched", async () => {
+    seed(120);
+    const drain = new AbortController();
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "gap", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: 1024, quality: "origin", submit: true, spoolMode: "none", waitForBroadcast: true,
+      sleep: async () => {}, drainSignal: drain.signal,
+      fetch: async () => { drain.abort(); return { living: false }; },
+      log: () => {},
+    });
+    expect(r).toMatchObject({ ok: true, outcome: "idle" });
+    expect(r.bvid).toBeUndefined(); // no ledger writeback for a run that never went live
+    expect(archives().length).toBe(0);
+    expect(existsSync(statePath())).toBe(true);
   });
 
   it("every state write refreshes last activity so the rule works after a restart", () => {

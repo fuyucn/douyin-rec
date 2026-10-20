@@ -474,16 +474,16 @@ program
             ? `[stream-upload] 台账已记录: ${r.bvid}${r.alreadyTerminal ? "(已是终态,未覆盖)" : ""}`
             : `[stream-upload] ⚠️ 台账记录失败(不影响已上传稿件): ${r.error}`);
         }
-        // `ok:true` covers three endings: parts delivered, `idle` (a stop/drain arrived while the
-        // pump was still waiting for a broadcast) and `no-stream` (gave up). With
-        // `waitForBroadcast` the pump never gives up on its own (issue #308), so `idle` is a
-        // requested stop and exits 0; exiting non-zero for it made TaskManager treat an idle
-        // task as a crash and restart it in a loop. `no-stream` stays a failure as a backstop
-        // (review #280 P1): a room that recorded nothing must not look like a natural end.
+        // `ok:true` covers three endings: parts delivered, `idle` and `no-stream`. With
+        // `waitForBroadcast` the pump never gives up waiting on its own (issue #308); `idle` means
+        // no part this run (stopped while waiting, or the room dropped right after going live),
+        // which is a normal ending and exits 0. Exiting non-zero for it made TaskManager treat an
+        // idle task as a crash and restart it in a loop. `no-stream` (gave up, non-waiting
+        // callers only) stays a failure as a backstop (review #280 P1).
         // An `ok:false` run may already have delivered parts, so only its error text is logged.
         const clean = res.ok && res.outcome !== "no-stream";
         if (res.ok && res.outcome === "idle") {
-          console.log("[stream-upload] 收到停止/排空时仍未开播,本场无分 P,正常退出");
+          console.log("[stream-upload] 本次未录到分 P(等待中被停止,或开播后立即断流),正常退出");
         } else if (res.ok && res.outcome === "no-stream") {
           console.error("[stream-upload] 本场没有上传任何分 P(取不到流),按失败退出并交由调度重试");
         } else if (!res.ok && res.error) {

@@ -55,10 +55,11 @@ describe("runLivePump danmu seam", () => {
     await expect(runLivePump({
       ...base(dir),
       waitForBroadcast: true,
-      fetch: async () => (++calls < 3 ? { living: false } : { living: true, url: "http://127.0.0.1:1/none.flv" }),
+      fetch: async () => (++calls < 3 ? { living: false } : { living: true, url: "http://invalid.test/none.flv" }),
       danmu: { start, stop, xmlPath: join(dir, "a.xml") },
     })).rejects.toThrow();
-    expect(calls).toBe(3);
+    // 3 waiting probes, then one fresh fetch after the session is opened (the probe URL is dropped).
+    expect(calls).toBe(4);
     expect(start).toHaveBeenCalledTimes(1);
     expect(stop).toHaveBeenCalledTimes(1);
   });
@@ -70,7 +71,7 @@ describe("runLivePump danmu seam", () => {
     // stop it from being reached.
     await expect(runLivePump({
       ...base(dir),
-      fetch: async () => ({ living: true, url: "http://127.0.0.1:1/none.flv" }),
+      fetch: async () => ({ living: true, url: "http://invalid.test/none.flv" }),
       danmu: { start: async () => { throw new Error("ws down"); }, stop, xmlPath: join(dir, "a.xml") },
     })).rejects.toThrow(/cookies/);
     expect(stop).not.toHaveBeenCalled(); // start 失败 = 没连上,不应再 stop

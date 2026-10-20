@@ -1443,9 +1443,11 @@ export interface RunLivePumpResult {
    *
    * `uploaded` — at least one part completed. With `submit` enabled that means it reached the
    *   archive; with `submit:false` it means it was fully recorded and only held back locally.
-   * `idle` — the run was still waiting for a broadcast when a stop or window-end drain arrived,
-   *   so no part exists. The pump never gives up on its own while waiting (issue #308), so this
-   *   is only ever a requested stop, never a failure.
+   * `no-stream` — the stream could not be acquired and the run gave up (only without
+   *   `waitForBroadcast`), so no part exists. Callers treat it as a failure.
+   * `idle` — `waitForBroadcast` run that recorded no part: a stop/drain arrived while waiting, or
+   *   the room dropped right after it was seen live. Waiting never gives up on its own
+   *   (issue #308), so this is a normal ending, never a failure.
    *
    * Absent when `ok:false` (an error cut the run); read `error` for the reason and
    * `segments` for what was already delivered.
@@ -1523,6 +1525,43 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   const maxSegments = Math.max(0, o.maxSegments ?? 0);
   /** Live title seen on the first acquisition (platforms may not expose one). */
   let liveTitle: string | undefined;
+  // TaskManager derives the task's recording phase from these exact markers
+  // (`[状态] 录制中` / `[状态] 等待开播`). Without them a zero-disk task shows as "running"
+  // but never "recording", so the UI cannot tell waiting-for-stream from actually recording.
+  log("[状态] 等待开播");
+  const idlePollMs = o.idlePollMs ?? IDLE_POLL_MS;
+  const stopRequested = async (): Promise<boolean> =>
+    !!o.signal?.aborted || !!o.drainSignal?.aborted || !!(await o.shouldStop?.());
+  /** Probe until a stream is live. Resolves null once a stop or drain is requested. */
+  const waitForBroadcast = async (): Promise<StreamAcquirer | null> => {
+    for (let misses = 0; ; misses++) {
+      if (await stopRequested()) return null;
+      // One attempt per poll (no backoff retries): the interval itself is the retry cadence.
+      const s = await acquireStreamWithBackoff({
+        room: o.room, fetch: o.fetch, quality: o.quality, maxRetries: 0, sleep,
+      });
+      if (s.living && s.url) return s;
+      // Log the first miss and then roughly every 10 minutes, so a long wait is visible
+      // without flooding the task log.
+      if (misses % Math.max(1, Math.round(600_000 / idlePollMs)) === 0) {
+        log(`[live-pump] 未开播,每 ${idlePollMs / 1000}s 探测一次(留在进程内等待)`);
+      }
+      await sleepUnlessAborted(idlePollMs, [o.signal, o.drainSignal], o.sleep);
+    }
+  };
+  if (o.waitForBroadcast) {
+    // Wait BEFORE opening the session. The session decides "same broadcast or a new one" from the
+    // state's last activity when it is constructed; deciding at process start and then waiting
+    // hours would append the next broadcast to the previous one's archive. The probe result is
+    // dropped on purpose: recovery can take a while, and the loop below fetches a fresh URL.
+    const first = await waitForBroadcast();
+    if (!first) {
+      return {
+        ok: true, outcome: "idle", title: o.title, segments: [], spoolDir: o.spoolDir,
+        statePath: livePumpStatePath(o.spoolDir, o.room),
+      };
+    }
+  }
   const session = new LivePumpSession({
     cookiesPath: o.cookiesPath,
     room: o.room,
@@ -1606,31 +1645,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   };
 
   const segments: LivePumpSegmentReport[] = [];
-  const idlePollMs = o.idlePollMs ?? IDLE_POLL_MS;
-  const stopRequested = async (): Promise<boolean> =>
-    !!o.signal?.aborted || !!o.drainSignal?.aborted || !!(await o.shouldStop?.());
-  /** Probe until a stream is live. Resolves null once a stop or drain is requested. */
-  const waitForBroadcast = async (): Promise<StreamAcquirer | null> => {
-    for (let misses = 0; ; misses++) {
-      if (await stopRequested()) return null;
-      // One attempt per poll (no backoff retries): the interval itself is the retry cadence.
-      const s = await acquireStreamWithBackoff({
-        room: o.room, fetch: o.fetch, quality: o.quality, maxRetries: 0, sleep,
-      });
-      if (s.living && s.url) return s;
-      // Log the first miss and then roughly every 10 minutes, so a long wait is visible
-      // without flooding the task log.
-      if (misses % Math.max(1, Math.round(600_000 / idlePollMs)) === 0) {
-        log(`[live-pump] 未开播,每 ${idlePollMs / 1000}s 探测一次(留在进程内等待)`);
-      }
-      await sleepUnlessAborted(idlePollMs, [o.signal, o.drainSignal], o.sleep);
-    }
-  };
   try {
-  // TaskManager derives the task's recording phase from these exact markers
-  // (`[状态] 录制中` / `[状态] 等待开播`). Without them a zero-disk task shows as "running"
-  // but never "recording", so the UI cannot tell waiting-for-stream from actually recording.
-  log("[状态] 等待开播");
   let drainLogged = false;
   for (let seg = 0; maxSegments === 0 || seg < maxSegments; seg++) {
     if (await o.shouldStop?.()) break;
@@ -1646,27 +1661,18 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       }
       break;
     }
-    let s: StreamAcquirer;
-    if (o.waitForBroadcast && segments.length === 0) {
-      // Nothing recorded in this run yet: the broadcast has not started (or this is a restart
-      // after it ended). Wait in-process, one probe per interval, instead of exiting. Exiting
-      // used to hand the task back to the scheduler, which restarted it every few minutes and
-      // hammered the stream/danmu endpoints (issue #308). Only a stop or drain ends this wait.
-      const waited = await waitForBroadcast();
-      if (!waited) break;
-      s = waited;
-    } else {
-      // A broadcast is in progress: ride out short outages with backoff, then treat a stream
-      // that stays gone as the end of the show (parts already delivered are unaffected).
-      s = await acquireStreamWithBackoff({
-        room: o.room,
-        fetch: o.fetch,
-        quality: o.quality,
-        onRetry: (waitMs, attempt, max) => log(`[live-pump] 段${seg + 1} 取流失败,${waitMs / 1000}s 后重试(${attempt}/${max})`),
-        onGiveUp: (attempts) => log(`[live-pump] 连续 ${attempts} 次取不到流,按收播收尾(已录分 P 不受影响)`),
-        sleep,
-      });
-    }
+    // With `waitForBroadcast` the waiting already happened before the session was opened, so the
+    // room was just seen live: fetch a fresh URL with the normal backoff. If it is gone again,
+    // ending here (exit 0) is safe — the next run waits in-process and re-decides the session.
+    // Waiting again *here* would keep a session opened hours earlier for the next broadcast.
+    const s = await acquireStreamWithBackoff({
+      room: o.room,
+      fetch: o.fetch,
+      quality: o.quality,
+      onRetry: (waitMs, attempt, max) => log(`[live-pump] 段${seg + 1} 取流失败,${waitMs / 1000}s 后重试(${attempt}/${max})`),
+      onGiveUp: (attempts) => log(`[live-pump] 连续 ${attempts} 次取不到流,按收播收尾(已录分 P 不受影响)`),
+      sleep,
+    });
     if (!s.living || !s.url) break;
     await startDanmuOnce();
     if (s.title?.trim()) liveTitle = s.title.trim();
@@ -1803,9 +1809,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
 
   return {
     ok: true,
-    // No part from this run: with `waitForBroadcast` the only way here is a stop/drain arriving
-    // while still waiting (the wait never gives up by itself), so it is a requested stop. Without
-    // it, the stream could not be acquired and the run gave up.
+    // No part from this run. With `waitForBroadcast` that is a stop/drain while waiting, or a room
+    // that dropped right after it was seen live; both are normal endings (the next run waits
+    // in-process again). Without it, the stream could not be acquired and the run gave up.
     ...(segments.some((x) => x.stem)
       ? { outcome: "uploaded" as const }
       : { outcome: o.waitForBroadcast ? "idle" as const : "no-stream" as const }),
