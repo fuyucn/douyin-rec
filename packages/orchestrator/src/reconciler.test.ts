@@ -1204,6 +1204,41 @@ describe("Reconciler.stopJob / runNow", () => {
     ledger.close();
   });
 
+  it("ackJob: needs_manual + note → marked, state/error untouched, reconcile does not re-run", async () => {
+    const { ledger, reconciler, spyRunPipeline } = setup();
+    ledger.upsertPending(key, new Date("2026-06-22T08:00:00Z").getTime());
+    ledger.setState(key, "needs_manual", { error: "upload result unknown" });
+    const before = ledger.get(key)!;
+    expect(reconciler.ackJob(key, { note: "manuscript verified" })).toEqual({ ok: true });
+    const after = ledger.get(key)!;
+    expect(after.state).toBe("needs_manual");
+    expect(after.error).toBe("upload result unknown");
+    expect(after.updatedAt).toBe(before.updatedAt);
+    expect(after.ackNote).toBe("manuscript verified");
+    expect(after.ackedAt).toEqual(expect.any(Number));
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).not.toHaveBeenCalled();
+    ledger.close();
+  });
+
+  it("ackJob: rejects missing job / other states / blank or oversized note; undo clears", () => {
+    const { ledger, reconciler } = setup();
+    expect(reconciler.ackJob(key, { note: "x" })).toMatchObject({ ok: false, code: 404 });
+    ledger.upsertPending(key);
+    expect(reconciler.ackJob(key, { note: "x" })).toMatchObject({ ok: false, code: 409 });
+    ledger.setState(key, "needs_manual", { error: "e" });
+    expect(reconciler.ackJob(key, { note: "   " })).toMatchObject({ ok: false, code: 400 });
+    expect(reconciler.ackJob(key, {})).toMatchObject({ ok: false, code: 400 });
+    expect(reconciler.ackJob(key, { note: "x".repeat(501) })).toMatchObject({ ok: false, code: 400 });
+    expect(ledger.get(key)?.ackedAt ?? null).toBeNull();
+    expect(reconciler.ackJob(key, { note: "  ok  " })).toEqual({ ok: true });
+    expect(ledger.get(key)?.ackNote).toBe("ok");
+    expect(reconciler.ackJob(key, { undo: true })).toEqual({ ok: true });
+    expect(ledger.get(key)?.ackedAt ?? null).toBeNull();
+    expect(ledger.get(key)?.ackNote ?? null).toBeNull();
+    ledger.close();
+  });
+
   it("reconcile 收到 abort → needs_manual,不 markFailed", async () => {
     const { ledger, reconciler, spyRunPipeline } = setup();
     spyRunPipeline.mockImplementation(async () => { throw new JobAbortedError(); });

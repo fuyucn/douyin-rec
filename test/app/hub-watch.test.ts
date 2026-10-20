@@ -37,6 +37,25 @@ function makeDb(): { dbPath: string; db: DatabaseSync } {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 describe("computeVersionFingerprint", () => {
+  it("issue #312: review marks change the fingerprint; an old ledger without the columns still fingerprints", () => {
+    const { dbPath, db } = makeDb();
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,fails,updatedAt) VALUES(?,?,0,?)").run("douyin:1:2026-10-01", "needs_manual", 1000);
+    const old = computeVersionFingerprint(dbPath);
+    expect(old.jobsAckSig).toBeNull();
+    expect(old.jobsMaxUpdatedAt).toBe(1000);
+    db.exec("ALTER TABLE sync_jobs ADD COLUMN ackedAt INTEGER");
+    db.exec("ALTER TABLE sync_jobs ADD COLUMN ackNote TEXT");
+    const none = computeVersionFingerprint(dbPath).jobsAckSig;
+    db.prepare("UPDATE sync_jobs SET ackedAt=2000, ackNote='n'").run();
+    const marked = computeVersionFingerprint(dbPath);
+    // updatedAt is untouched by an ack, so the ack signature alone must carry the change.
+    expect(marked.jobsMaxUpdatedAt).toBe(1000);
+    expect(marked.jobsAckSig).not.toBe(none);
+    db.prepare("UPDATE sync_jobs SET ackedAt=NULL, ackNote=NULL").run();
+    expect(computeVersionFingerprint(dbPath).jobsAckSig).toBe(none);
+    db.close();
+  });
+
   it("db 文件不存在 → 纯 mtime 指纹且不抛", () => {
     const fp = computeVersionFingerprint("/nonexistent/nope-sync.db");
     expect(fp.mtimeMs).toBe(-1);

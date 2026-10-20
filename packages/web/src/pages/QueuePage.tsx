@@ -6,7 +6,7 @@
  * (来自 master ResourcePool 的 waiting 快照)—— 两者是两个维度:行序=整体先后,位次=某池内先后。
  */
 import {
-  Activity, AlertTriangle, Check, ChevronDown, ChevronRight, Cpu, ExternalLink, FileText, Hourglass, Loader2, Search, Square, UploadCloud, X,
+  Activity, AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardCheck, Cpu, ExternalLink, FileText, Hourglass, Loader2, Search, Square, UploadCloud, X,
 } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
@@ -15,7 +15,8 @@ import { api, type HubBlockedBroadcastDTO, type HubPoolSnapshotDTO, type HubQueu
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/HubJobs";
 import { platformLabel, roomId } from "../lib/labels";
-import { useHubStream, useTicker } from "../lib/hooks";
+import { errMessage, useHubStream, useTicker, useToast } from "../lib/hooks";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { NodesStrip } from "../components/NodesStrip";
 import { fmtBytes } from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
@@ -379,7 +380,7 @@ function phaseColor(kind: ReturnType<typeof phaseInfo>["kind"], state: string): 
 }
 
 /** 窄屏卡片(<sm):表格在手机上溢出,改竖排卡片,信息不丢。 */
-function QueueCard({ item, index, tz, onOpenLog }: { item: QueueItemDTO; index: number; tz: string; onOpenLog: (key: string) => void }): ReactNode {
+function QueueCard({ item, index, tz, onOpenLog, onAck }: { item: QueueItemDTO; index: number; tz: string; onOpenLog: (key: string) => void; onAck: (key: string) => void }): ReactNode {
   const t = useT();
   const info = phaseInfo(item);
   const finished = item.phase === "done" || item.phase === "failed";
@@ -423,6 +424,11 @@ function QueueCard({ item, index, tz, onOpenLog }: { item: QueueItemDTO; index: 
           {finished && item.bv && (
             <a className="font-mono text-[11px] text-muted hover:text-ink" href={`https://www.bilibili.com/video/${item.bv}`} target="_blank" rel="noreferrer">{item.bv}</a>
           )}
+          {item.state === "needs_manual" && (
+            <button type="button" title={t("queue.ack.action")} onClick={() => onAck(item.streamKey)} className="icon-btn !w-7 !h-7">
+              <ClipboardCheck className="w-3.5 h-3.5" />
+            </button>
+          )}
           <button type="button" title={t("hub.jobs.viewLog")} onClick={() => onOpenLog(item.streamKey)} className="icon-btn !w-7 !h-7">
             <FileText className="w-3.5 h-3.5" />
           </button>
@@ -436,7 +442,7 @@ function QueueCard({ item, index, tz, onOpenLog }: { item: QueueItemDTO; index: 
 }
 
 /** 一行队列项:位置/场次/状态/做了什么→正在做什么→下面做什么/入队时间。 */
-function QueueRow({ item, index, tz, now, dataAt, onOpenLog }: { item: QueueItemDTO; index: number; tz: string; now: number; dataAt: number; onOpenLog: (key: string) => void }): ReactNode {
+function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: QueueItemDTO; index: number; tz: string; now: number; dataAt: number; onOpenLog: (key: string) => void; onAck: (key: string) => void }): ReactNode {
   const t = useT();
   const info = phaseInfo(item);
   const queued = info.kind === "queued";
@@ -557,8 +563,18 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog }: { item: QueueItem
           : (item.enqueuedAt ? fmtTimeInTz(new Date(item.enqueuedAt), tz) : "-")}
       </td>
       {/* 操作:查看日志(队列页不再是无出口的死胡同)。 */}
-      <td style={{ width: 56 }}>
+      <td style={{ width: 84 }}>
         <div className="flex items-center justify-end gap-0.5">
+          {item.state === "needs_manual" && (
+            <button
+              type="button"
+              title={t("queue.ack.action")}
+              onClick={() => onAck(item.streamKey)}
+              className="icon-btn !w-7 !h-7"
+            >
+              <ClipboardCheck className="w-3.5 h-3.5" />
+            </button>
+          )}
           <button
             type="button"
             title={t("hub.jobs.viewLog")}
@@ -596,6 +612,11 @@ export function QueuePage(): ReactNode {
   // 排序方向:newest(默认,最新入队在前)| oldest(FIFO,等最久的在前)。点表头切换。
   const [sort, setSort] = useState<"newest" | "oldest">("newest");
   const [logKey, setLogKey] = useState<string | null>(null);
+  // Review mark for a needs_manual run (issue #312): the key being marked + the required note.
+  const [ackKey, setAckKey] = useState<string | null>(null);
+  const [ackNote, setAckNote] = useState("");
+  const toast = useToast();
+  const openAck = (key: string): void => { setAckKey(key); setAckNote(""); };
   // 输入框每键都触发 → 延迟 250ms 再请求,避免逐字打请求。
   const [debouncedQ, setDebouncedQ] = useState("");
   useEffect(() => {
@@ -648,6 +669,10 @@ export function QueuePage(): ReactNode {
   const attentionCount = rows.filter((r) => r.phase === "waiting_manual" || r.phase === "failed").length;
   const stoppedCount = rows.filter((r) => r.phase === "stopped").length;
   const doneCount = rows.filter((r) => r.phase === "done").length;
+  // The server caps the needs_manual inbox (manualLimit); say so instead of implying the list is complete.
+  // Only meaningful without filters: `active` is filtered server-side, so a filter would look like "more hidden".
+  const manualShown = (data?.active ?? []).filter((r) => r.state === "needs_manual").length;
+  const manualTotal = data?.manualTotal ?? 0;
   const pool = data?.pool;
   const filtered = phase.length + states.length + platform.length + (debouncedQ ? 1 : 0) > 0;
 
@@ -700,6 +725,10 @@ export function QueuePage(): ReactNode {
                   <span style={{ color: failedCount > 0 ? "var(--error-fg)" : "var(--warning-fg)" }}>{t("queue.summary.attention", { n: attentionCount })}</span>
                 )}
                 {stoppedCount > 0 && <span>{t("queue.summary.stopped", { n: stoppedCount })}</span>}
+                {!filtered && manualTotal > manualShown && (
+                  <span style={{ color: "var(--warning-fg)" }}>{t("queue.summary.manualMore", { total: manualTotal, shown: manualShown })}</span>
+                )}
+                {(data?.manualAcked ?? 0) > 0 && <span>{t("queue.summary.acked", { n: data?.manualAcked ?? 0 })}</span>}
                 <span>{t("queue.summary.done", { n: doneCount })}</span>
               </>
             }
@@ -713,7 +742,7 @@ export function QueuePage(): ReactNode {
             </div>
           ) : (
             rows.map((it, i) => (
-              <QueueCard key={it.streamKey} item={it} index={i + 1} tz={tz} onOpenLog={setLogKey} />
+              <QueueCard key={it.streamKey} item={it} index={i + 1} tz={tz} onOpenLog={setLogKey} onAck={openAck} />
             ))
           )}
           </div>
@@ -763,6 +792,7 @@ export function QueuePage(): ReactNode {
                         now={now}
                         dataAt={dataAt}
                         onOpenLog={setLogKey}
+                        onAck={openAck}
                       />
                     ))
                   )}
@@ -774,6 +804,32 @@ export function QueuePage(): ReactNode {
       )}
 
       <JobLogDialog logKey={logKey} onClose={() => setLogKey(null)} />
+      <ConfirmDialog
+        open={ackKey !== null}
+        title={t("queue.ack.title")}
+        message={t("queue.ack.message")}
+        confirmLabel={t("queue.ack.confirm")}
+        onCancel={() => setAckKey(null)}
+        onConfirm={() => {
+          const key = ackKey;
+          if (!key) return;
+          if (!ackNote.trim()) { toast(t("queue.ack.required"), "error"); return; }
+          api.ackHubJob(key, { note: ackNote.trim() })
+            .then(() => { toast(t("queue.ack.done"), "success"); setAckKey(null); void poll(); })
+            .catch((e: unknown) => toast(errMessage(e), "error"));
+        }}
+      >
+        <div className="space-y-2 mb-3">
+          <div className="font-mono text-[11px] text-muted break-all">{ackKey}</div>
+          <textarea
+            className="input w-full min-h-[72px]"
+            maxLength={500}
+            value={ackNote}
+            placeholder={t("queue.ack.placeholder")}
+            onChange={(e) => setAckNote(e.target.value)}
+          />
+        </div>
+      </ConfirmDialog>
     </>
   );
 }

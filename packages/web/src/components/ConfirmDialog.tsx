@@ -14,6 +14,8 @@ interface Props {
   cancelLabel?: string;
   /** Red confirm button for destructive actions (delete / clear). */
   destructive?: boolean;
+  /** Extra controls under the description (e.g. a required note); rendered outside the description paragraph. */
+  children?: ReactNode;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -29,6 +31,7 @@ export function ConfirmDialog({
   confirmLabel,
   cancelLabel,
   destructive,
+  children,
   onConfirm,
   onCancel,
 }: Props): ReactNode {
@@ -47,6 +50,7 @@ export function ConfirmDialog({
                 )}
               </div>
             </div>
+            {children}
             <div className="flex justify-end gap-2">
               <Button small variant="secondary" onClick={onCancel}>
                 {cancelLabel ?? t("common.cancel")}

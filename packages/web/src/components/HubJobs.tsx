@@ -503,6 +503,12 @@ export function RunCard({
           {job.error}
         </div>
       )}
+      {/* Reviewed needs_manual run (issue #312): the error stays as the record; the note says why it is closed. */}
+      {job.state === "needs_manual" && job.ackedAt != null && (
+        <div className="text-[12px] mt-1 text-muted">
+          {t("hub.jobs.acked", { note: job.ackNote ?? "" })}
+        </div>
+      )}
       {expanded && (
         <div className="mt-3 pt-3 border-t border-hairline overflow-x-auto" onClick={(e) => e.stopPropagation()}>
           <PipelineFlow job={job} workerName={workerName} cfg={cfg} onRetry={onRetry ? requestRetry : undefined} />

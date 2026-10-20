@@ -172,3 +172,69 @@ describe("SyncLedger 状态转换白名单(#26)", () => {
     });
   });
 });
+
+describe("needs_manual review mark (issue #312)", () => {
+  const acked = (k: string) => ledger.get(k)?.ackedAt ?? null;
+
+  it("ackManual only touches needs_manual rows and keeps state, events and updatedAt", () => {
+    ledger.upsertPending("k");
+    expect(ledger.ackManual("k", "n")).toBe(false);
+    expect(acked("k")).toBeNull();
+    ledger.setState("k", "needs_manual", { error: "e" });
+    const before = ledger.get("k")!;
+    const events = ledger.getEvents("k").length;
+    expect(ledger.ackManual("k", "n")).toBe(true);
+    expect(ledger.get("k")).toMatchObject({ state: "needs_manual", error: "e", ackNote: "n", updatedAt: before.updatedAt });
+    expect(acked("k")).not.toBeNull();
+    expect(ledger.getEvents("k")).toHaveLength(events);
+    expect(ledger.ackManual("missing", "n")).toBe(false);
+  });
+
+  it("re-asserting the same needs_manual reason keeps the mark", () => {
+    ledger.upsertPending("k");
+    ledger.setState("k", "needs_manual", { error: "e" });
+    ledger.ackManual("k", "n");
+    expect(ledger.setState("k", "needs_manual", { error: "e" })).toBe(true);
+    expect(acked("k")).not.toBeNull();
+  });
+
+  it("a new needs_manual reason reopens the case", () => {
+    ledger.upsertPending("k");
+    ledger.setState("k", "needs_manual", { error: "e" });
+    ledger.ackManual("k", "n");
+    ledger.setState("k", "needs_manual", { error: "other" });
+    expect(acked("k")).toBeNull();
+    expect(ledger.get("k")?.ackNote ?? null).toBeNull();
+  });
+
+  it("leaving needs_manual (manual retry) drops the mark, so a later needs_manual is a fresh case", () => {
+    ledger.upsertPending("k");
+    ledger.setState("k", "needs_manual", { error: "e" });
+    ledger.ackManual("k", "n");
+    ledger.setState("k", "retrying");
+    expect(acked("k")).toBeNull();
+    ledger.setState("k", "needs_manual", { error: "e" });
+    expect(acked("k")).toBeNull();
+  });
+
+  it("a rejected transition leaves the mark alone", () => {
+    ledger.upsertPending("k");
+    ledger.setState("k", "needs_manual", { error: "e" });
+    ledger.ackManual("k", "n");
+    expect(ledger.markFailed("k", "late")).toBe(false);
+    expect(acked("k")).not.toBeNull();
+  });
+
+  it("migrates an old ledger without the columns", () => {
+    ledger.close();
+    const old = join(dir, "old.db");
+    const db = new DatabaseSync(old);
+    db.exec("CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL, winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, startMs INTEGER, updatedAt INTEGER NOT NULL)");
+    db.prepare("INSERT INTO sync_jobs(streamKey,state,error,updatedAt) VALUES(?,?,?,1)").run("k", "needs_manual", "e");
+    db.close();
+    ledger = new SyncLedger(old);
+    expect(ledger.get("k")?.ackedAt ?? null).toBeNull();
+    expect(ledger.ackManual("k", "n")).toBe(true);
+    expect(ledger.get("k")?.ackNote).toBe("n");
+  });
+});

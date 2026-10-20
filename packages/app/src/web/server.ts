@@ -94,6 +94,7 @@ export interface RouteMatch {
     | "getHubJobLog"
     | "retryHubNode"
     | "stopHubJob"
+    | "ackHubJob"
     | "runHubJob"
     | "listWorkers"
     | "createWorker"
@@ -182,6 +183,7 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "getHubJobLog", methods: ["GET"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/log$/, param: "sid", decode: true },
   { name: "retryHubNode", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/retry-node$/, param: "sid", decode: true, needsBody: true },
   { name: "stopHubJob", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/stop$/, param: "sid", decode: true },
+  { name: "ackHubJob", methods: ["POST"], pattern: /^\/api\/hub\/jobs\/([^/]+)\/ack$/, param: "sid", decode: true, needsBody: true },
   { name: "testWorker", methods: ["POST"], pattern: /^\/api\/hub\/workers\/test$/, needsBody: true },
   { name: "nodeTasks", methods: ["GET"], pattern: /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)\/tasks$/, param: "slug" },
   { name: "nodeTaskLogs", methods: ["GET"], pattern: /^\/api\/hub\/workers\/([A-Za-z0-9_-]+)\/tasks\/(\d+)\/logs$/, param: "slug" },
@@ -297,6 +299,8 @@ export interface WebServerDeps {
   retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 停一场后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
+  /** Mark / unmark a needs_manual run as reviewed (issue #312). hub 未启用 → web API 返回 400。 */
+  ackJob?: (streamKey: string, opts: { note?: string; undo?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 立刻跑一场已有录像的后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>;
   /** master 资源池快照(CLI 注入)。省略/hub 未就绪 → 队列页无排队位次/占用(全 0)。 */
@@ -545,6 +549,10 @@ async function dispatch(
     }
     case "stopHubJob":
       return api.stopHubJob(match.sid!);
+    case "ackHubJob": {
+      const body = (await readJson(req)) as { note?: string; undo?: boolean };
+      return api.ackHubJob(match.sid!, body ?? {});
+    }
     case "runHubJob": {
       const body = (await readJson(req)) as Parameters<Api["runHubJob"]>[0];
       return api.runHubJob(body ?? {});
@@ -658,6 +666,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     localSuppressedIds: deps.localSuppressedIds,
     retryNode: deps.retryNode,
     stopJob: deps.stopJob,
+    ackJob: deps.ackJob,
     runNow: deps.runNow,
     rollingDelivery: deps.rollingDelivery,
     blockedBroadcasts: deps.blockedBroadcasts,

@@ -53,6 +53,13 @@ export interface JobRow {
   uploadPlan?: string | null;
   /** Last queue poll snapshot (JSON `NodeUploadStatusDTO`; plan 038 PR5, display only). */
   uploadStatus?: string | null;
+  /**
+   * Manual review mark on a `needs_manual` row (issue #312): when a person/agent confirmed the case needs no
+   * further action. The row keeps its state, history and log; the queue inbox just stops listing it.
+   * Cleared automatically when the job changes state or re-enters needs_manual for a different reason.
+   */
+  ackedAt?: number | null;
+  ackNote?: string | null;
   updatedAt: number;
 }
 
@@ -112,6 +119,12 @@ export class SyncLedger {
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN uploadPlan TEXT"); } catch { /* column exists */ }
     // Last queue poll snapshot for the queue page (plan 038 PR5). Display only; NULL = never polled.
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN uploadStatus TEXT"); } catch { /* column exists */ }
+    // Manual review mark for needs_manual rows (issue #312). NULL = not reviewed.
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackedAt INTEGER"); } catch { /* column exists */ }
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackNote TEXT"); } catch { /* column exists */ }
+    // transition() names these columns on every state change, so a failed ALTER must surface here, not later.
+    const cols = new Set((this.db.prepare("PRAGMA table_info(sync_jobs)").all() as Array<{ name: string }>).map((c) => c.name));
+    if (!cols.has("ackedAt") || !cols.has("ackNote")) throw new Error("sync_jobs migration failed: ackedAt/ackNote columns missing");
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -204,6 +217,7 @@ export class SyncLedger {
     set: string,
     args: Array<string | number | null>,
     force = false,
+    reopen: (cur: JobRow) => boolean = (cur) => cur.state !== to,
   ): boolean {
     const cur = this.get(streamKey);
     if (!cur) {
@@ -215,7 +229,9 @@ export class SyncLedger {
       return false;
     }
     const at = this.now();
-    const r = this.db.prepare(`UPDATE sync_jobs SET state=?, ${set}, updatedAt=? WHERE streamKey=? AND state=?`)
+    // A state change (or a new needs_manual reason) is a new case: drop any earlier review mark.
+    const clearAck = reopen(cur) ? "ackedAt=NULL, ackNote=NULL, " : "";
+    const r = this.db.prepare(`UPDATE sync_jobs SET state=?, ${set}, ${clearAck}updatedAt=? WHERE streamKey=? AND state=?`)
       .run(to, ...args, at, streamKey, cur.state);
     if (Number(r.changes) === 0) {
       console.warn(`[ledger] 拒绝状态转换 ${streamKey}: ${cur.state} → ${to}(状态已被并发改写)`);
@@ -231,7 +247,19 @@ export class SyncLedger {
     opts: TransitionOpts = {},
   ): boolean {
     return this.transition(streamKey, state, "winnerWorker=COALESCE(?,winnerWorker), error=?",
-      [patch.winnerWorker ?? null, patch.error ?? null], opts.force === true);
+      [patch.winnerWorker ?? null, patch.error ?? null], opts.force === true,
+      (cur) => cur.state !== state || (state === "needs_manual" && (patch.error ?? null) !== (cur.error ?? null)));
+  }
+  /**
+   * Set (note = text) or clear (note = null) the manual review mark of a `needs_manual` row (issue #312).
+   * Compare-and-set on the state: a row that moved on meanwhile is left alone and false is returned.
+   * Does not change state, events or `updatedAt` (the age of the case stays the age of the case).
+   */
+  ackManual(streamKey: string, note: string | null): boolean {
+    const at = note === null ? null : this.now();
+    const r = this.db.prepare("UPDATE sync_jobs SET ackedAt=?, ackNote=? WHERE streamKey=? AND state='needs_manual'")
+      .run(at, note, streamKey);
+    return Number(r.changes) > 0;
   }
   /**
    * 流程内推进(syncing/merging/uploading):done 场的收尾补跑会重入这些阶段,

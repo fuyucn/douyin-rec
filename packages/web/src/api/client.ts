@@ -182,6 +182,9 @@ export const api = {
   /** 停一场后处理(rsync/ffmpeg/biliup),不动录制。 */
   stopHubJob: (streamKey: string): Promise<{ ok: boolean; error?: string }> =>
     request("POST", `/api/hub/jobs/${encodeURIComponent(streamKey)}/stop`),
+  /** Mark a needs_manual run as reviewed (note required), or clear the mark with undo (issue #312). */
+  ackHubJob: (streamKey: string, input: { note?: string; undo?: boolean }): Promise<{ ok: boolean; error?: string }> =>
+    request("POST", `/api/hub/jobs/${encodeURIComponent(streamKey)}/ack`, input),
   /** 立刻跑一场已有录像的后处理。默认异步 202。 */
   runHubJob: (input: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }): Promise<{ ok: boolean; error?: string; streamKey?: string }> =>
     request("POST", "/api/hub/jobs/run", input),

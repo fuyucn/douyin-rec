@@ -277,7 +277,7 @@ describe("buildQueueView", () => {
 
   it("无 sync db → active/rows/recent 空,pool 原样透出", () => {
     const v = buildQueueView("/nonexistent/x-sync.db", { pool: POOL_EMPTY });
-    expect(v).toEqual({ active: [], rows: [], recent: [], pool: POOL_EMPTY });
+    expect(v).toEqual({ active: [], rows: [], recent: [], pool: POOL_EMPTY, manualTotal: 0, manualAcked: 0 });
   });
 
   it("进行中 job:doneSteps=已完成(做了什么),nextSteps=DAG 后继(下面做什么),phase=running", () => {
@@ -441,6 +441,49 @@ describe("buildQueueView", () => {
     expect(manual.map((a) => a.streamKey)).toContain("douyin:m39:2026-10-01");
     expect(manual.map((a) => a.streamKey)).not.toContain("douyin:m0:2026-10-01");
     expect(recent).toHaveLength(0);
+  });
+
+  it("issue #312: queue reports the full needs_manual total, not just the capped list (old ledger, no ack columns)", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "queue-ack-old-"));
+    const now = T0 + 10_000_000;
+    for (let i = 0; i < 40; i++) seedJob(db, `douyin:m${i}:2026-10-01`, [["needs_manual", now - 40_000 + i]], 100, { error: `e${i}` });
+    seedJob(db, "douyin:s:2026-10-01", [["needs_manual", now - 50_000]], 100, { error: STAGE_READY });
+    db.close();
+    const q = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY, manualLimit: 20 });
+    expect(q.active.filter((a) => a.phase === "waiting_manual")).toHaveLength(20);
+    expect(q.manualTotal).toBe(40);
+    expect(q.manualAcked).toBe(0);
+    // Old ledger must not lose rows because the ack filter cannot be applied.
+    expect(q.rows.map((r) => r.streamKey)).toContain("douyin:s:2026-10-01");
+    expect(listHubJobs(dbPath, { states: ["needs_manual"], acked: true, stageDir: stage }).total).toBe(0);
+    expect(listHubJobs(dbPath, { states: ["needs_manual"], acked: false, stageDir: stage }).total).toBe(41);
+  });
+
+  it("issue #312: reviewed needs_manual runs leave the inbox and the timeline but stay in the ledger", () => {
+    const { dbPath, db } = makeSyncDb();
+    db.exec("ALTER TABLE sync_jobs ADD COLUMN ackedAt INTEGER");
+    db.exec("ALTER TABLE sync_jobs ADD COLUMN ackNote TEXT");
+    const stage = mkdtempSync(join(tmpdir(), "queue-ack-"));
+    const now = T0 + 10_000_000;
+    for (let i = 0; i < 40; i++) seedJob(db, `douyin:m${i}:2026-10-01`, [["needs_manual", now - 40_000 + i]], 100, { error: `e${i}` });
+    seedJob(db, "douyin:s:2026-10-01", [["needs_manual", now - 50_000]], 100, { error: STAGE_READY });
+    // Review the 25 newest incidents plus the stage-ready row.
+    for (let i = 15; i < 40; i++) db.prepare("UPDATE sync_jobs SET ackedAt=?, ackNote=? WHERE streamKey=?").run(now, "checked", `douyin:m${i}:2026-10-01`);
+    db.prepare("UPDATE sync_jobs SET ackedAt=?, ackNote=? WHERE streamKey=?").run(now, "uploaded by hand", "douyin:s:2026-10-01");
+    db.close();
+    const q = buildQueueView(dbPath, { now, stageDir: stage, pool: POOL_EMPTY, manualLimit: 20 });
+    const manual = q.active.filter((a) => a.phase === "waiting_manual").map((a) => a.streamKey);
+    // Older unreviewed incidents now surface instead of being pushed out by reviewed ones.
+    expect(manual).toHaveLength(15);
+    expect(manual).toContain("douyin:m0:2026-10-01");
+    expect(manual).not.toContain("douyin:m39:2026-10-01");
+    expect(q.rows.map((r) => r.streamKey)).not.toContain("douyin:s:2026-10-01");
+    expect(q.manualTotal).toBe(15);
+    expect(q.manualAcked).toBe(25);
+    const job = listHubJobs(dbPath, { states: ["needs_manual"], acked: true, limit: 100, stageDir: stage }).jobs
+      .find((j) => j.streamKey === "douyin:m39:2026-10-01")!;
+    expect(job).toMatchObject({ state: "needs_manual", error: "e39", ackedAt: now, ackNote: "checked" });
   });
 
   it("needs_manual 细分:stage 正常收口(显式 STAGE_READY)/ 用户停止 / 真故障 / 空 error 视为异常", () => {

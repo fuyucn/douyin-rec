@@ -127,6 +127,13 @@ export function buildHubJobs(ctx: ApiCtx) {
       return r.ok ? { status: 200, body: r } : { status: r.code ?? 400, body: r };
     },
 
+    async ackHubJob(streamKey: string, input: { note?: string; undo?: boolean }): Promise<ApiResult> {
+      if (!deps.syncDbPath || !deps.ackJob) return err(400, "hub 未启用(核对标记未注入)");
+      const note = typeof input.note === "string" ? input.note : undefined;
+      const r = await deps.ackJob(streamKey, { note, undo: input.undo === true });
+      return r.ok ? { status: 200, body: r } : { status: r.code ?? 400, body: r };
+    },
+
     async runHubJob(input: { streamKey?: string; winnerWorker?: string; wait?: boolean; force?: boolean }): Promise<ApiResult> {
       if (!deps.syncDbPath || !deps.runNow) return err(400, "hub 未启用(立即执行未注入)");
       if (!input.streamKey) return err(400, "streamKey 必填");

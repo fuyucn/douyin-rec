@@ -134,6 +134,8 @@ export interface ApiDeps {
   retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 停一场后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
+  /** Mark / unmark a needs_manual run as reviewed (issue #312; CLI 注入)。省略 → 端点返回「hub 未启用」。 */
+  ackJob?: (streamKey: string, opts: { note?: string; undo?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 立刻跑一场已有录像的后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>;
   /** master 资源池快照(CLI 注入,读同一 ResourcePool 实例)。省略/未就绪 → 队列页无排队位次(全 0)。 */
@@ -356,6 +358,11 @@ export interface Api {
   retryHubNode(streamKey: string, input: { node?: string; force?: boolean }): Promise<ApiResult>;
   /** POST /api/hub/jobs/:key/stop — 停一场后处理,不动录制。 */
   stopHubJob(streamKey: string): Promise<ApiResult>;
+  /**
+   * POST /api/hub/jobs/:key/ack { note } | { undo: true } — 标记待人工任务「已核对」(或撤销)。
+   * 不改状态、不删记录;只让它离开队列的待人工列表(issue #312)。
+   */
+  ackHubJob(streamKey: string, input: { note?: string; undo?: boolean }): Promise<ApiResult>;
   /** POST /api/hub/jobs/run { streamKey, winnerWorker?, wait?, force? } — 立刻跑一场已有录像的后处理。 */
   runHubJob(input: { streamKey?: string; winnerWorker?: string; wait?: boolean; force?: boolean }): Promise<ApiResult>;
   /** GET /api/hub/workers — 列出录制 worker(hub 未启用 → 400)。 */

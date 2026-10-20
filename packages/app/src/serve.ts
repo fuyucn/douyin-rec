@@ -277,6 +277,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         : undefined,
       retryNode: hubEnabled ? hubStarter?.retryNode : undefined,
       stopJob: hubEnabled ? hubStarter?.stopJob : undefined,
+      ackJob: hubEnabled ? hubStarter?.ackJob : undefined,
       runNow: hubEnabled ? hubStarter?.runNow : undefined,
       hubWatch: hubWatch ?? undefined,
       log: (m) => console.log(m),
