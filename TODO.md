@@ -183,6 +183,7 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
+- [~] **T-89 0 落盘稿件状态按同场口径切分(issue [#293](https://github.com/fuyucn/douyin-rec/issues/293))** — 2026-10-20。状态只按房间键,同房间下一场会追加到上一场稿件。**做什么**:启动时按最后活动距今与 `SAME_BROADCAST_GAP_MS` 比较,超过则归档旧状态并新建稿件,不确定则拒绝并报错。**验收**:同房间间隔 61 分钟起新稿件、59/60 分钟续用、归档含未确认分 P 时保留并报错、状态损坏拒绝启动;有变异验证。
 - [x] **T-85 0 落盘作为 rolling 子选项(issue [#285](https://github.com/fuyucn/douyin-rec/issues/285))**
   — 2026-10-19 完成。PR [#287](https://github.com/fuyucn/douyin-rec/pull/287)(三轮 review,末轮通过;`pr-risk-scan` = RISK,用户拍板合并)合并 `c888f334`;PR [#289](https://github.com/fuyucn/douyin-rec/pull/289) 恢复丢失的 CLI 接线合并 `d7c50582`,已部署 `0.0.192-7dc6a6`。
   **做了什么**:0 落盘从任务页独立开关迁到房间编辑的 rolling 子选项;core 唯一判定 `zeroDiskRuleError`「rolling + 无烧录 + 仅 local」;房间 / 任务 / hub 规则三条写入口共用,按生效房间与房间内全部 0 落盘任务校验;hub 同步下带 `streamUpload`,不再每个 tick 清掉;默认稿件标题带开播时分秒;新增 `test/arch/zero-disk-wiring-guard.test.ts` 守住 CLI 接线。

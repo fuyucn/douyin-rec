@@ -295,7 +295,7 @@ program
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
-      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep } = await import("@drec/zero-upload");
+      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe } = await import("@drec/zero-upload");
       const {
         rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta,
         resolveStreamUploadTitle, resolveStreamPartTitle,
@@ -374,11 +374,16 @@ program
       // never persisted, and recovery re-uploads that whole file — listing only `parts` would
       // delete the last copy of an interrupted part (real data loss, found by review #280).
       const st = readLivePumpState(livePumpStatePath(opts.outDir, pumpRoom));
-      sweepOrphanSpools({
-        spoolDir: opts.outDir,
-        knownSpoolPaths: spoolPathsToKeep(st),
-        log: (m) => console.log(m),
-      });
+      // An unreadable live/archived state references unknown spool files: skip the sweep entirely.
+      if (spoolSweepSafe(opts.outDir, pumpRoom)) {
+        sweepOrphanSpools({
+          spoolDir: opts.outDir,
+          knownSpoolPaths: [...spoolPathsToKeep(st), ...archivedSpoolPathsToKeep(opts.outDir, pumpRoom)],
+          log: (m) => console.log(m),
+        });
+      } else {
+        console.log("[live-pump] 存在无法读取的旧状态,跳过孤儿 spool 清扫(避免误删其引用的暂存文件)");
+      }
       const abort = new AbortController();
       const onSig = (sig: string): void => {
         console.log(`[stream-upload] 收到 ${sig},停止录制并中止当前分 P`);
@@ -449,6 +454,7 @@ program
         drainSignal: drain.signal,
         danmu,
         log: (m) => console.log(m),
+        onAlert: (message) => { void notifier.notify({ kind: "error", stage: "0落盘", message }).catch(() => {}); },
       }).then((res) => {
         console.log(`[stream-upload] ${JSON.stringify(res)}`);
         // Record the upload outcome in the hub ledger. A zero-disk run leaves no recording
