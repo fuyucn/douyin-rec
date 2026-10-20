@@ -127,6 +127,22 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
+  it("issue #313: the rolling-owner skip log is printed once across rounds and the broadcast is still deferred", async () => {
+    const ledger = freshLedger();
+    const pending = makeRec({ tsFiles: ["/remote/a_000.ts"], rolling: { uploading: { index: 0, kind: "create" }, confirmed: [], active: true } });
+    const transports = new Map([["node-1", makeTransport("node-1", [pending])]]);
+    const runPipeline = vi.fn(async () => ({ state: "done" as const, bv: "BV_TEST" }));
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    const reconciler = new Reconciler({ platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports), runPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 0 });
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    expect(infoSpy.mock.calls.filter((c) => String(c[0]).includes("边录边传进程仍在处理会话"))).toHaveLength(1);
+    expect(runPipeline).not.toHaveBeenCalled();
+    infoSpy.mockRestore();
+    ledger.close();
+  });
+
   it("issue #320 (#321 review HIGH): same live id 84 min after a done broadcast is processed as its own job, not folded and skipped", async () => {
     const day = "douyin:test-room:2026-06-22";
     const ledger = freshLedger();
@@ -571,6 +587,93 @@ describe("Reconciler", () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("node-slow"));
 
     warnSpy.mockRestore();
+    ledger.close();
+  });
+
+  it("issue #313: repeated 'still recording' skip logs are deduped per (room-session, node set), reprinted on change, and never say 超时", async () => {
+    const ledger = freshLedger();
+    const rec = makeRec();
+    let recording = true;
+    const t1: Transport = {
+      id: "node-slow",
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ workerId: "node-slow", recordings: [rec] }),
+      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockImplementation(async () => !recording),
+      pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
+    };
+    const transports = new Map([["node-slow", t1]]);
+    const pipelineDeps = makePipelineDeps(ledger, transports);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (b) => { ledger.markDone(b.streamKey, "BV"); return { state: "done", bv: "BV" }; },
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps,
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep,
+    });
+    const skipLogs = (): string[] => warnSpy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("仍在录制"));
+
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    expect(skipLogs()).toHaveLength(1); // three rounds, one line
+    expect(skipLogs()[0]).not.toContain("超时");
+    expect(skipLogs()[0]).toContain("仍在录制");
+    expect(spyRunPipeline).not.toHaveBeenCalled(); // behavior unchanged: still skipped
+
+    recording = false; // recording ends → condition clears, pipeline runs
+    await reconciler.reconcileAll();
+    expect(spyRunPipeline).toHaveBeenCalledTimes(1);
+
+    warnSpy.mockRestore();
+    ledger.close();
+  });
+
+  it("issue #313: skip log reprints after the condition cleared and came back (state change)", async () => {
+    const ledger = freshLedger();
+    const rec = makeRec();
+    let recording = true;
+    const t1: Transport = {
+      id: "node-slow",
+      listInventory: vi.fn<() => Promise<NodeInventory>>().mockResolvedValue({ workerId: "node-slow", recordings: [rec] }),
+      isDone: vi.fn<(roomSlug: string) => Promise<boolean>>().mockImplementation(async () => !recording),
+      pull: vi.fn<(remotePaths: string[], localDir: string) => Promise<void>>().mockResolvedValue(undefined),
+    };
+    const transports = new Map([["node-slow", t1]]);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      // pipeline is irrelevant here; keep the job from completing so the cleared round stays cheap
+      runPipeline: vi.fn(async () => ({ state: "needs_manual" as JobState })), settle: fastSettle, sleep: fastSleep,
+    });
+    const count = (): number => warnSpy.mock.calls.filter((c) => String(c[0]).includes("仍在录制")).length;
+    await reconciler.reconcileAll();
+    expect(count()).toBe(1);
+    recording = false;
+    await reconciler.reconcileAll();
+    recording = true;
+    await reconciler.reconcileAll();
+    expect(count()).toBe(2);
+    warnSpy.mockRestore();
+    ledger.close();
+  });
+
+  it("issue #313: reconnect-window wait log is printed once across rounds", async () => {
+    const ledger = freshLedger();
+    const endMs = Date.now() - 60_000;
+    const rec = makeRec({ roomSlug: "window-dedupe-room", startMs: endMs - 3_600_000, endMs, durationSec: 3600 });
+    const transports = new Map([["node-1", makeTransport("node-1", [rec])]]);
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    const runPipeline = vi.fn(async () => ({ state: "done" as JobState }));
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      runPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 10 * 60_000,
+    });
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    await reconciler.reconcileAll();
+    expect(infoSpy.mock.calls.filter((c) => String(c[0]).includes("重连窗内等待"))).toHaveLength(1);
+    expect(runPipeline).not.toHaveBeenCalled();
+    infoSpy.mockRestore();
     ledger.close();
   });
 

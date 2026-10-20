@@ -142,6 +142,9 @@ export class Reconciler {
   private readonly unreachableAlerted = new Set<string>();
   /** Last logged orphan-segment signature per worker, so an unchanged state is logged once. */
   private readonly unclaimedLogSig = new Map<string, string>();
+  /** Last emitted signature per expected-skip log key; repeats are suppressed until the signature changes or the repeat window passes. */
+  private readonly skipLogState = new Map<string, { sig: string; at: number }>();
+  private static readonly SKIP_LOG_REPEAT_MS = 30 * 60_000;
   private maxRetries: number;
   private staleMs: number;
   private reconnectWindowMs: number;
@@ -331,6 +334,22 @@ export class Reconciler {
   }
 
   /**
+   * Emit an expected-skip log once per (key, signature). Re-emits when the signature changes, when the
+   * condition cleared in between (`clearSkipLog`), or after SKIP_LOG_REPEAT_MS. Logging only; never gates behavior.
+   */
+  private logSkipOnce(key: string, sig: string, emit: () => void): void {
+    const now = Date.now();
+    const prev = this.skipLogState.get(key);
+    if (prev && prev.sig === sig && now - prev.at < Reconciler.SKIP_LOG_REPEAT_MS) return;
+    this.skipLogState.set(key, { sig, at: now });
+    emit();
+  }
+
+  private clearSkipLog(key: string): void {
+    this.skipLogState.delete(key);
+  }
+
+  /**
    * 轮询各成员 isDone(roomSlug) 直到全部收播或 maxWaitMs 超时。无 isDone 的 transport 视为已收播。
    * isDone 抛错按"未收播"算(但不中止循环)。
    * **返回仍未收播的成员 key 集合(`workerId:roomSlug`)** —— 调用方据此跳过仍在录制的场,
@@ -375,15 +394,17 @@ export class Reconciler {
       if (Date.now() < deadline) await this.sleep(pollMs);
     }
 
-    // Log any members that timed out
-    if (pending.size > 0) {
-      const timedOut = [...pending].map((k) => {
-        const { workerId, roomSlug } = memberMap.get(k)!;
-        return `${workerId}/${roomSlug}`;
-      });
-      console.warn(
-        `[reconciler] settle 超时 — 以下节点仍在录制，本轮跳过其所在场，待录完后续轮再处理: ${timedOut.join(", ")}`,
-      );
+    // Expected state (still recording), not a fault: log once per (room-session, node set).
+    for (const b of broadcasts) {
+      const nodes = b.members
+        .filter((m) => pending.has(`${m.workerId}:${m.rec.roomSlug}`))
+        .map((m) => `${m.workerId}/${m.rec.roomSlug}`);
+      const key = `settle:${b.streamKey}`;
+      if (nodes.length === 0) { this.clearSkipLog(key); continue; }
+      const sorted = [...new Set(nodes)].sort();
+      this.logSkipOnce(key, sorted.join(","), () => console.warn(
+        `[reconciler] ${b.streamKey} 仍在录制，跳过本轮，待录完后续轮再处理: ${sorted.join(", ")}`,
+      ));
     }
     return pending;
   }
@@ -630,24 +651,35 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
         // 过滤后无成员 → 房间没开 hub / 选中 worker 没人录到 → 跳过(不建 job)。
         if (b.members.length === 0) continue;
         // 仍有成员在录制 → 本轮跳过(不建 job、不合并残片),待其录完的后续轮再处理。
-        if (b.members.some((m) => stillRecording.has(`${m.workerId}:${m.rec.roomSlug}`))) continue;
+        if (b.members.some((m) => stillRecording.has(`${m.workerId}:${m.rec.roomSlug}`))) {
+          this.clearSkipLog(`window:${b.streamKey}`);
+          continue;
+        }
         // Issue #309: recording ended but the node's rolling uploader still owns a session of this broadcast
         // (waiting for the upload slot or uploading the tail). Judging now would read its write-ahead intent or
         // unsent tail as "interrupted" and park the broadcast in needs_manual; wait for the owner instead.
         const ownerBusy = b.members.filter((m) => m.rec.rolling?.active === true);
         if (ownerBusy.length > 0) {
-          console.info(`[reconciler] ${b.streamKey} 边录边传进程仍在处理会话(${ownerBusy.map((m) => m.workerId).join(",")}),本轮跳过`);
+          const nodes = [...new Set(ownerBusy.map((m) => m.workerId))].sort().join(",");
+          this.logSkipOnce(`rolling:${b.streamKey}`, nodes, () => console.info(
+            `[reconciler] ${b.streamKey} 边录边传进程仍在处理会话(${nodes}),本轮跳过`,
+          ));
           continue;
         }
+        this.clearSkipLog(`rolling:${b.streamKey}`);
 
         const cfg = cfgByKey.get(b.streamKey) ?? this.pipelineDeps.cfg;
         // 断流重连窗口:最后一段结束还没超过 reconnectWindowMs,先不处理(可能马上重连并成同一场)。
         const latestEndMs = Math.max(...b.members.map((m) => m.rec.endMs));
         const windowMs = cfg.reconnectWindowMs != null ? this.resolveWindowMs(cfg.reconnectWindowMs) : this.reconnectWindowMs;
         if (windowMs > 0 && Date.now() - latestEndMs < windowMs) {
-          console.info(`[reconciler] ${b.streamKey} 结束 ${Math.round((Date.now() - latestEndMs) / 1000)}s 前,重连窗内等待(防第二场撞 key/防拆场)`);
+          const nodes = [...new Set(b.members.map((m) => m.workerId))].sort().join(",");
+          this.logSkipOnce(`window:${b.streamKey}`, nodes, () => console.info(
+            `[reconciler] ${b.streamKey} 结束 ${Math.round((Date.now() - latestEndMs) / 1000)}s 前,重连窗内等待(防第二场撞 key/防拆场)`,
+          ));
           continue;
         }
+        this.clearSkipLog(`window:${b.streamKey}`);
 
         const job = this.ledger.get(b.streamKey);
 
