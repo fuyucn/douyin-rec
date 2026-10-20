@@ -1171,6 +1171,36 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
     expect(u.bv).toBe(FAKE_BV);
   });
 
+  it("#317 review: BV-less A is judged from its video end, not from a late closedAt: 70 min after the video → B does not take it over", async () => {
+    // A's last segment mtime is BASE_MS + 120s; it was closed 30 min later (slot wait at session end).
+    const f = setup({ confirmedA: [], bGapMin: 70, sidecar: { bv: undefined, closedAt: A_LAST_MS + 30 * 60_000, updatedAt: A_LAST_MS + 30 * 60_000, heartbeatAt: A_LAST_MS + 30 * 60_000 } });
+    const plain = vi.fn(async () => ["B", "V", "1second"].join(""));
+    const append = vi.fn(async () => {});
+    const u = uploaderB(f, { append, plain, count: async () => 1 });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    // B creates only its own content; A's segments are left for the master's normal pipeline.
+    expect((plain.mock.calls as unknown as Array<[{ plain: { video: string } }]>).map((c) => path.basename(c[0].plain.video))).toEqual([`${B_BASE}_000.ts`]);
+    expect(append).not.toHaveBeenCalled();
+    expect(readA(f).bv).toBeUndefined();
+  });
+
+  it("#317 review: BV-less A taken over but its create hits a busy slot → B waits, creates nothing", async () => {
+    const f = setup({ confirmedA: [], sidecar: { bv: undefined, closedAt: A_LAST_MS } });
+    const plain = vi.fn(async () => FAKE_BV);
+    const u = new RollingUploader({
+      room, uploadMeta, gate: new FakeGate(), pid: B_PID, stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove, isPidAlive: () => false,
+      uploadPlainRaw: plain as never, appendGroupRaw: vi.fn() as never, countPartsRaw: async () => 1, now: () => f.bStartMs + 3_600_000,
+      slot: { acquire: async () => false, release: () => {} } as never, slotWaitMs: 1,
+    });
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    const r = await u.flush({ recordingActive: false });
+    expect(plain).not.toHaveBeenCalled();
+    expect(r.uploaded).toEqual([]);
+    expect(u.ambiguousIndices).toEqual([]);
+    expect(readA(f).uploading).toBeUndefined();
+  });
+
   it("leftovers still pending after the takeover (upload slot busy): B keeps waiting instead of overtaking", async () => {
     const f = setup();
     const busy = new Error("busy");

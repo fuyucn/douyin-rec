@@ -227,7 +227,7 @@ function hasUnsentContent(s: RollingState): boolean {
 }
 
 /** A same-room sidecar found next to this session that started earlier. */
-interface PredecessorCand { base: string; s: RollingState; start: number; last: number }
+interface PredecessorCand { base: string; s: RollingState; start: number; last: number; lastMedia: number }
 
 export interface RollingUploaderOpts {
   /** 房间身份(删源证据用)。 */
@@ -750,13 +750,14 @@ export class RollingUploader {
         : typeof s.streamKey === "string" && s.streamKey.startsWith(`${this.o.room.platform}:${this.o.room.roomSlug}:`);
       if (!sameRoom) continue;
       const num = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) ? n : 0);
-      let last = num(s.updatedAt);
+      let lastMedia = 0;
       for (const seg of s.segments ?? []) {
-        try { last = Math.max(last, statSync(seg.path).mtimeMs); } catch { /* segment already deleted */ }
+        try { lastMedia = Math.max(lastMedia, statSync(seg.path).mtimeMs); } catch { /* segment already deleted */ }
       }
+      const last = Math.max(num(s.updatedAt), lastMedia);
       const start = num(s.startMs) || num(s.updatedAt);
       if (start >= startMs) continue; // not a predecessor
-      cands.push({ base, s, start, last });
+      cands.push({ base, s, start, last, lastMedia });
     }
     // Sessions that never created or intended a submission have nothing to continue, unless they still hold
     // non-empty unconfirmed segments: a slot-starved session that never got to create (issue #309 review). Its
@@ -764,7 +765,11 @@ export class RollingUploader {
     const meaningful = cands.filter((c) => c.s.bv || c.s.uploading || (c.s.ambiguous?.length ?? 0) > 0 || hasUnsentContent(c.s));
     if (meaningful.length === 0) return { kind: "none" };
     const prev = meaningful.reduce((a, b) => (b.start > a.start ? b : a));
-    if (!isSameBroadcastGap(startMs - prev.last)) return { kind: "none" };
+    // A BV-less predecessor is an ordinary upload candidate for the master, which measures its window from the
+    // video end. Measure from the same clock (segment mtimes), not from sidecar writes (`closedAt` can land up to
+    // the slot wait later); otherwise the master may upload it while this session also takes it over (#317 review).
+    const ref = !prev.s.bv && prev.lastMedia > 0 ? prev.lastMedia : prev.last;
+    if (!isSameBroadcastGap(startMs - ref)) return { kind: "none" };
     return { kind: "found", prev };
   }
 
