@@ -14,6 +14,8 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-86 起录时记录平台本场 id 与拉流路径(诊断日志)(issue [#294](https://github.com/fuyucn/douyin-rec/issues/294))**
+  **做什么**：每次起录/重连打 `[session-id]` 日志(抖音 id_str / B站 live_time + 去签名的拉流 host+path)。**为什么**：#148/#292 要定「同一场」口径,先跑两天验证重连前后 id 是否一致。**验收**：单测 + 全量绿;部署后两天数据回填 #148。
 - [!] **T-79 队列页「上传」视图:每节点 biliup 实时进度(issue [#44](https://github.com/fuyucn/douyin-rec/issues/44))** — 计划 [`plans/039_upload_view.md`](plans/039_upload_view.md)
   — 2026-10-18 计划经三轮独立设计审查,PR [#263](https://github.com/fuyucn/douyin-rec/pull/263) 已合并(计划入库)。**仍 `[!]`**:确认计划 + T0(镜像补 `ss`)是否做。
   **做什么**：节点状态命令旁路扫描 biliup 进程(只读),master 算速率/剩余/卡住/重试换线/最近结果,队列页按节点展示。**验收**：见计划 T1a–T4。
