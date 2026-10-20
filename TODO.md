@@ -179,8 +179,6 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
-- [~] **T-93 0 落盘下播后进程不再 code=1 退出重启循环(issue [#308](https://github.com/fuyucn/douyin-rec/issues/308))** — 2026-10-20 认领(用户授权),分支 `codex/issue-308-zero-disk-no-restart-loop`,PR 待开(base `feat/hub-optimization`)。
-  **做什么**:0 落盘 pump 未开播(本次尚无分 P)时留在进程内按 30s 探测,只有停止/排空才结束;弹幕改到真正开播后才连;等待中被停止退出码为 0。已有分 P 的会话沿用原退避收播逻辑。**为什么**:此前连续取流失败 6 次后 `code=1` 退出,TaskManager 重启 5 次放弃、daemon 再启动,生产 8 小时 169 次,放大取流与弹幕 liveId 请求。**验收**:取流连续失败 >6 次不退出且间隔 >=30s;停止/排空信号立即结束且 exit 0;未开播不连弹幕;已有分 P 会话不受影响;变异检查 FAIL→PASS;全量 test/typecheck/bundle。
 - [~] **T-89 0 落盘稿件状态按同场口径切分(issue [#293](https://github.com/fuyucn/douyin-rec/issues/293))** — 2026-10-20。状态只按房间键,同房间下一场会追加到上一场稿件。**做什么**:启动时按最后活动距今与 `SAME_BROADCAST_GAP_MS` 比较,超过则归档旧状态并新建稿件,不确定则拒绝并报错。**验收**:同房间间隔 61 分钟起新稿件、59/60 分钟续用、归档含未确认分 P 时保留并报错、状态损坏拒绝启动;有变异验证。
 - [x] **T-85 0 落盘作为 rolling 子选项(issue [#285](https://github.com/fuyucn/douyin-rec/issues/285))**
   — 2026-10-19 完成。PR [#287](https://github.com/fuyucn/douyin-rec/pull/287)(三轮 review,末轮通过;`pr-risk-scan` = RISK,用户拍板合并)合并 `c888f334`;PR [#289](https://github.com/fuyucn/douyin-rec/pull/289) 恢复丢失的 CLI 接线合并 `d7c50582`,已部署 `0.0.192-7dc6a6`。
@@ -548,6 +546,10 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+- [x] **T-93 0 落盘下播后进程不再 code=1 退出重启循环(issue [#308](https://github.com/fuyucn/douyin-rec/issues/308))**（2026-10-20）
+  — PR [#319](https://github.com/fuyucn/douyin-rec/pull/319) 已合并(0.0.207,独立 Opus 审查 2 轮:第 1 轮 FAIL 已修,第 2 轮 PASS;CI 绿;`pr-risk-scan` = RISK,owner 预授权合并)。未部署,生产确认待下次部署。
+  **做了什么**:0 落盘 `waitForBroadcast` 在打开稿件会话前留在进程内每 30s 探测,停止/排空才结束(`idle` exit 0);同场判定移到开播时刻;有可补传的未确认分 P 时等待前先恢复;弹幕开播后才连;TaskManager 重启耗尽后 daemon 冷却 10 分钟不自动拉起(手动启停清除)。经验回写 AGENTS.md「任务系统」段。
+  **遗留**:冷却日志在「手动启动后再次放弃」时可能少打一条;开播后的退避睡眠不响应停止信号(既有);0 落盘同场判定未接入 #320 的平台 liveId。
 - [x] **T-69 remux 租约交接竞态:让出者自己抢回租约,用例间歇失败（issue [#238](https://github.com/fuyucn/douyin-rec/issues/238)）**（2026-10-20）
   — 2026-10-18 PR [#240](https://github.com/fuyucn/douyin-rec/pull/240) 已合并(0.0.176,独立审查 APPROVE,CI 绿),issue `待验证`。
   **做什么**：让出后不立即抢回;修用例里永不求值的等待条件。**验收**：全量负载下租约用例不再间歇失败;部署后 serve 接管不乒乓。
