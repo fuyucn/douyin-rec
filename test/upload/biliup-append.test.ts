@@ -141,15 +141,39 @@ describe("P1→append", () => {
     expect(sleeps).toEqual([5000, 10000]);
   });
 
-  it("appendGroup(#310)：重读读不到、延迟后恢复但数量没变 → 确认未提交,换线重试", async () => {
+  it("appendGroup(#310)：恢复后数量没变 → 仍要走完整的 #66 窗口才换线", async () => {
     const calls: string[][] = [];
-    const counts: (number | null)[] = [1, null, 1];
+    const sleeps: number[] = [];
+    const counts: (number | null)[] = [1, null, 1, 1, 1, 1];
     await appendGroup({
       cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls, "txa"), lines: ["alia", "txa"],
       countParts: async () => (counts.length > 0 ? counts.shift()! : 1),
-      sleep: async () => {},
+      sleep: async (ms) => { sleeps.push(ms); },
     });
     expect(calls).toHaveLength(2);
+    expect(sleeps).toEqual([5000, ...APPEND_REREAD_DELAYS_MS]);
+  });
+
+  it("appendGroup(#310)：恢复后数量没变、窗口内刷新变多 → 已提交,不重复追加", async () => {
+    const calls: string[][] = [];
+    const counts: (number | null)[] = [1, null, 1, 2];
+    await appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls), lines: ["alia", "txa"],
+      countParts: async () => (counts.length > 0 ? counts.shift()! : 2),
+      sleep: async () => {},
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("appendGroup(#310)：未变 → 读不到 → 未变(混合)→ ambiguous,不换线", async () => {
+    const calls: string[][] = [];
+    const counts: (number | null)[] = [1, 1, null, 1];
+    await expect(appendGroup({
+      cookies: "c.json", bv: "BV1", files: ["d.mp4"], run: failRun(calls), lines: ["alia", "txa"],
+      countParts: async () => (counts.length > 0 ? counts.shift()! : 1),
+      sleep: async () => {},
+    })).rejects.toThrow(/append-ambiguous/);
+    expect(calls).toHaveLength(1);
   });
 
   it("appendGroup(#310)：延迟窗口内始终读不到 → 仍然 ambiguous,不换线,窗口约 30s", async () => {
