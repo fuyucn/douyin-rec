@@ -425,6 +425,162 @@ describe("RollingUploader — 边录边传录制端执行", () => {
   });
 });
 
+// Issue #148: reconnect sessions of one broadcast continue the same submission.
+describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
+  const A_BASE = "主播_2026-06-27_08-00-00";
+  const B_BASE = "主播_2026-06-27_09-30-00";
+  const A_LAST_MS = BASE_MS + 120_000; // predecessor's last activity (injected `now` while it flushes)
+
+  /** Session A (2 segments) is fully uploaded by a first uploader instance; returns the shared dir. */
+  async function runSessionA(opts: { plain?: ReturnType<typeof vi.fn>; append?: ReturnType<typeof vi.fn> } = {}) {
+    const dir = mkdtempSync(path.join(tmpdir(), "rolling-reuse-"));
+    const a = [0, 1].map((i) => {
+      const p = path.join(dir, `${A_BASE}_${String(i).padStart(3, "0")}.ts`);
+      writeFileSync(p, "x");
+      utimesSync(p, new Date(BASE_MS + i * 60_000), new Date(BASE_MS + i * 60_000));
+      return p;
+    });
+    const plain = opts.plain ?? vi.fn(async () => FAKE_BV);
+    const append = opts.append ?? vi.fn(async () => {});
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: plain, appendGroupRaw: append, countPartsRaw: async () => 2, removeFile: noRemove, now: () => A_LAST_MS, minSegmentSec: 0 });
+    a.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    return { dir, plain, append };
+  }
+
+  /** Session B starts `gapMin` minutes after A's last activity; its segments are created fresh. */
+  function sessionB(dir: string, gapMin: number, n = 1): { paths: string[]; startMs: number } {
+    const startMs = A_LAST_MS + gapMin * 60_000;
+    const paths = Array.from({ length: n }, (_, i) => {
+      const p = path.join(dir, `${B_BASE}_${String(i).padStart(3, "0")}.ts`);
+      writeFileSync(p, "x");
+      utimesSync(p, new Date(startMs + i * 60_000), new Date(startMs + i * 60_000));
+      return p;
+    });
+    return { paths, startMs };
+  }
+
+  const uploaderB = (plain: unknown, append: unknown, startMs: number, count = async (): Promise<number | null> => 2): RollingUploader =>
+    new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: plain as never, appendGroupRaw: append as never, countPartsRaw: count, removeFile: noRemove, now: () => startMs + 3_600_000, minSegmentSec: 0 });
+
+  it("gap <= 60 min: B appends to A's BV (one submission, parts A then B); link is persisted", async () => {
+    const { dir, plain, append } = await runSessionA();
+    const b = sessionB(dir, 60);
+    const u = uploaderB(plain, append, b.startMs);
+    b.paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(plain).toHaveBeenCalledTimes(1); // only A created a submission
+    const calls = (append.mock.calls as unknown as Array<[{ bv: string; files: string[] }]>).map((c) => [c[0].bv, path.basename(c[0].files[0])]);
+    expect(calls).toEqual([
+      [FAKE_BV, `${A_BASE}_001.ts`],
+      [FAKE_BV, `${B_BASE}_000.ts`],
+    ]);
+    expect(u.bv).toBe(FAKE_BV);
+    const saved = JSON.parse(readFileSync(path.join(dir, `${B_BASE}.rolling.json`), "utf-8"));
+    expect(saved).toMatchObject({ bv: FAKE_BV, inheritedParts: 2, inheritedFrom: A_BASE, confirmed: [0] });
+  });
+
+  it("gap 61 min: new broadcast → B creates its own submission", async () => {
+    const { dir, plain, append } = await runSessionA();
+    const b = sessionB(dir, 61);
+    const plainB = vi.fn(async () => ["B", "V", "1second"].join(""));
+    const u = uploaderB(plainB, append, b.startMs);
+    b.paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(plainB).toHaveBeenCalledTimes(1);
+    expect(u.bv).not.toBe(FAKE_BV);
+    expect(plain).toHaveBeenCalledTimes(1);
+  });
+
+  it("predecessor uncertain (create intent without BV): B neither creates nor appends, segment goes manual", async () => {
+    const { dir } = await runSessionA();
+    // A crashed mid-create: intent persisted, no BV.
+    const aState = JSON.parse(readFileSync(path.join(dir, `${A_BASE}.rolling.json`), "utf-8"));
+    writeFileSync(path.join(dir, `${A_BASE}.rolling.json`), JSON.stringify({ ...aState, ambiguous: [], uploading: { index: 0, kind: "create" }, bv: undefined }));
+    const b = sessionB(dir, 10);
+    const plainB = vi.fn(async () => FAKE_BV);
+    const appendB = vi.fn(async () => {});
+    const logs: string[] = [];
+    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: plainB, appendGroupRaw: appendB, countPartsRaw: async () => 2, removeFile: noRemove, now: () => b.startMs + 3_600_000, minSegmentSec: 0, log: (m) => logs.push(m) });
+    b.paths.forEach((p) => u.noteSegment(p));
+    const r = await u.flush({ recordingActive: false });
+    expect(plainB).not.toHaveBeenCalled();
+    expect(appendB).not.toHaveBeenCalled();
+    expect(r.uploaded).toEqual([]);
+    expect(u.ambiguousIndices).toEqual([0]);
+    expect(logs.join("\n")).toContain("无法确认前序会话稿件状态");
+  });
+
+  it("predecessor with ambiguous segments or unreadable sidecar also fails closed", async () => {
+    for (const mode of ["ambiguous", "corrupt"] as const) {
+      const { dir } = await runSessionA();
+      const f = path.join(dir, `${A_BASE}.rolling.json`);
+      if (mode === "ambiguous") {
+        const st = JSON.parse(readFileSync(f, "utf-8"));
+        writeFileSync(f, JSON.stringify({ ...st, ambiguous: [1] }));
+      } else {
+        writeFileSync(f, "{not json");
+        utimesSync(f, new Date(A_LAST_MS), new Date(A_LAST_MS));
+      }
+      const b = sessionB(dir, 5);
+      const plainB = vi.fn(async () => FAKE_BV);
+      const appendB = vi.fn(async () => {});
+      const u = uploaderB(plainB, appendB, b.startMs);
+      b.paths.forEach((p) => u.noteSegment(p));
+      await u.flush({ recordingActive: false });
+      expect(plainB, mode).not.toHaveBeenCalled();
+      expect(appendB, mode).not.toHaveBeenCalled();
+      expect(u.ambiguousIndices, mode).toEqual([0]);
+    }
+  });
+
+  it("restart in the middle of B keeps the link: new instance appends the rest to the same BV", async () => {
+    const { dir, plain, append } = await runSessionA();
+    const b = sessionB(dir, 20, 2);
+    const u1 = uploaderB(plain, append, b.startMs);
+    u1.noteSegment(b.paths[0]!);
+    u1.noteSegment(b.paths[1]!);
+    // B's first segment is sealed by the second; only it uploads, then the process "dies".
+    await u1.flush({ recordingActive: true });
+    expect(u1.confirmedIndices).toEqual([0]);
+    const u2 = uploaderB(plain, append, b.startMs);
+    b.paths.forEach((p) => u2.noteSegment(p));
+    await u2.flush({ recordingActive: false });
+    expect(plain).toHaveBeenCalledTimes(1);
+    expect(u2.bv).toBe(FAKE_BV);
+    expect(u2.confirmedIndices).toEqual([0, 1]);
+    const saved = JSON.parse(readFileSync(path.join(dir, `${B_BASE}.rolling.json`), "utf-8"));
+    expect(saved.inheritedParts).toBe(2);
+  });
+
+  it("crash recovery counts inherited parts: parts = inherited + confirmed + 1 means the append landed", async () => {
+    const { dir } = await runSessionA();
+    const b = sessionB(dir, 5, 2);
+    const writeB = (): void => writeFileSync(path.join(dir, `${B_BASE}.rolling.json`), JSON.stringify({
+      streamKey: `douyin:123:${B_BASE}`, sessionBase: B_BASE, room,
+      segments: b.paths.map((p, index) => ({ index, path: p })),
+      confirmed: [0], bv: FAKE_BV, inheritedParts: 2, uploading: { index: 1, kind: "append" },
+      startMs: b.startMs, updatedAt: b.startMs,
+    }));
+    // 2 inherited + 1 confirmed + 1 landed = 4 → already committed, no re-append.
+    writeB();
+    const ap1 = vi.fn(async () => {});
+    const u1 = uploaderB(vi.fn(), ap1, b.startMs, async () => 4);
+    u1.noteSegment(b.paths[0]!);
+    await u1.flush({ recordingActive: false });
+    expect(u1.confirmedIndices).toEqual([0, 1]);
+    expect(ap1).not.toHaveBeenCalled();
+    // 3 = inherited + confirmed → not committed, safe retry (not treated as an anomaly).
+    writeB();
+    const ap2 = vi.fn(async () => {});
+    const u2 = uploaderB(vi.fn(), ap2, b.startMs, async () => 3);
+    u2.noteSegment(b.paths[0]!);
+    await u2.flush({ recordingActive: false });
+    expect(ap2).toHaveBeenCalledTimes(1);
+    expect(u2.ambiguousIndices).toEqual([]);
+  });
+});
+
 describe("rollingUploadSingleNode — 跨节点重复投稿闸门(纯函数)", () => {
   it("无规则(单机 / 未编排)→ 允许", () => {
     expect(rollingUploadSingleNode(false, undefined)).toBe(true);
