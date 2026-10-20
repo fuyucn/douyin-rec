@@ -14,6 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-91 对账日志去重:「仍在录制 / 重连窗内等待」每轮刷屏（issue [#313](https://github.com/fuyucn/douyin-rec/issues/313)）**
+  — 2026-10-20 认领,分支 `codex/issue-313-settle-log-dedupe`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：按 (场次, 节点集合) 去重,状态变化 / 条件清除后再现 / 30 分钟后才再打;文案去掉「超时」。**为什么**：生产 8 小时约 350 条,淹没真实错误。
+  **验收**：重复轮次只出一条;状态变化再出;对账行为不变（pipeline 仍不跑）;全量测试 / typecheck / bundle 通过。
+
 - [~] **T-88 任务敏感字段接口脱敏 + 回调地址不进 argv(issue [#47](https://github.com/fuyucn/douyin-rec/issues/47))**
   **做什么**：任务/房间 DTO 的 登录态、回调地址经 core `redactTaskSecrets` 脱敏(只给 是否已设置标记);编辑表单留空=不改;子进程 回调地址走 0600 文件传入。**为什么**：接口明文返回敏感字段、`ps` 可见回调地址。**验收**：list/detail/create/update/room 响应无明文;PATCH 缺省保留;argv 不含回调地址;变异检查 FAIL→PASS。
 - [~] **T-90 边录边传:槽忙时不留建稿/追加意图,避免被误判为「建稿中断」转人工（issue [#309](https://github.com/fuyucn/douyin-rec/issues/309)）**
