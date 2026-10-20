@@ -1549,11 +1549,88 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       await sleepUnlessAborted(idlePollMs, [o.signal, o.drainSignal], o.sleep);
     }
   };
+  /**
+   * Open the room's session and settle what a previous run left behind (WAL recovery, one
+   * re-uploadable unconfirmed part). Constructing the session also applies the same-broadcast
+   * rule (#293) against the current time. Returns a failure result instead of a session when
+   * the archive is in a state that must not collect more parts.
+   */
+  const openSession = async (): Promise<{ session: LivePumpSession } | { fail: RunLivePumpResult }> => {
+    const session = new LivePumpSession({
+      cookiesPath: o.cookiesPath,
+      room: o.room,
+      spoolDir: o.spoolDir,
+      title: o.title,
+      tid: o.tid,
+      tag: o.tag,
+      ...(o.desc ? { desc: o.desc } : {}),
+      private: o.private !== false,
+      log,
+      ...(o.onAlert ? { onAlert: o.onAlert } : {}),
+      // The session performs the archive create/append requests; it must use the same fetch
+      // override as the segment uploader, or a fake transport would silently fall back to the
+      // real network (real bug: a fake-UPOS run hit live Bilibili and got -400).
+      fetchImpl: o.fetchImpl,
+    });
+
+    if (o.submit !== false) {
+      const recovered = await session.recover();
+      if (!recovered.ok) {
+        log(
+          recovered.archiveExists
+            ? `[live-pump] 稿件已存在但状态不确定,禁止新建稿件: ${recovered.reason}`
+            : `[live-pump] 恢复失败,停止以避免重复建稿: ${recovered.reason}`,
+        );
+        return { fail: {
+          ok: false, error: recovered.reason, archiveExists: !!recovered.archiveExists,
+          title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
+          statePath: livePumpStatePath(o.spoolDir, o.room),
+        } };
+      }
+      if (session.hasUnconfirmed) {
+        const pending = session.parts.filter((p) => !p.confirmed);
+        // One unconfirmed part whose spool survived is recoverable: re-upload the whole file and
+        // append it. More than one (or a missing spool) means a real gap, so stop for a human.
+        if (pending.length === 1 && existsSync(pending[0]!.spoolPath)) {
+          log(`[live-pump] 有 1 个未确认分 P(索引 ${pending[0]!.index}),按整文件重传补齐`);
+          const fixed = await session.resubmitUnconfirmedPart();
+          if (!fixed.ok) {
+            return { fail: {
+              ok: false, error: fixed.error, bvid: session.bvid, aid: session.aid,
+              title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
+              statePath: livePumpStatePath(o.spoolDir, o.room),
+            } };
+          }
+        } else {
+          const error = `unconfirmed parts: ${pending.map((p) => p.index).join(",")}`;
+          log(`[live-pump] 有 ${pending.length} 个未确认分 P;为避免重复/空洞,拒绝继续录制上传`);
+          return { fail: {
+            ok: false, error, bvid: session.bvid, aid: session.aid,
+            title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
+            statePath: livePumpStatePath(o.spoolDir, o.room),
+          } };
+        }
+      }
+    }
+    return { session };
+  };
+
   if (o.waitForBroadcast) {
-    // Wait BEFORE opening the session. The session decides "same broadcast or a new one" from the
-    // state's last activity when it is constructed; deciding at process start and then waiting
-    // hours would append the next broadcast to the previous one's archive. The probe result is
-    // dropped on purpose: recovery can take a while, and the loop below fetches a fresh URL.
+    // A previous run may have left a pending/unconfirmed part (e.g. the last part's submit failed
+    // as the show ended). Settle it now, while its archive is still "this broadcast", instead of
+    // after a long wait when the gap rule would archive it for a human (review of #319).
+    const st = existsSync(livePumpStatePath(o.spoolDir, o.room))
+      ? readLivePumpState(livePumpStatePath(o.spoolDir, o.room))
+      : undefined;
+    if (o.submit !== false && st !== undefined && (!st || !!st.pending || st.parts.some((p) => !p.confirmed))) {
+      log("[live-pump] 上次运行留有未确认分 P,等待开播前先恢复");
+      const pre = await openSession();
+      if ("fail" in pre) return pre.fail;
+    }
+    // Wait BEFORE opening the session for recording. The session decides "same broadcast or a
+    // new one" from the state's last activity when it is constructed; deciding at process start
+    // and then waiting hours would append the next broadcast to the previous one's archive. The
+    // probe result is dropped on purpose: the loop below fetches a fresh URL.
     const first = await waitForBroadcast();
     if (!first) {
       return {
@@ -1562,62 +1639,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       };
     }
   }
-  const session = new LivePumpSession({
-    cookiesPath: o.cookiesPath,
-    room: o.room,
-    spoolDir: o.spoolDir,
-    title: o.title,
-    tid: o.tid,
-    tag: o.tag,
-    ...(o.desc ? { desc: o.desc } : {}),
-    private: o.private !== false,
-    log,
-    ...(o.onAlert ? { onAlert: o.onAlert } : {}),
-    // The session performs the archive create/append requests; it must use the same fetch
-    // override as the segment uploader, or a fake transport would silently fall back to the
-    // real network (real bug: a fake-UPOS run hit live Bilibili and got -400).
-    fetchImpl: o.fetchImpl,
-  });
-
-  if (o.submit !== false) {
-    const recovered = await session.recover();
-    if (!recovered.ok) {
-      log(
-        recovered.archiveExists
-          ? `[live-pump] 稿件已存在但状态不确定,禁止新建稿件: ${recovered.reason}`
-          : `[live-pump] 恢复失败,停止以避免重复建稿: ${recovered.reason}`,
-      );
-      return {
-        ok: false, error: recovered.reason, archiveExists: !!recovered.archiveExists,
-        title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
-        statePath: livePumpStatePath(o.spoolDir, o.room),
-      };
-    }
-    if (session.hasUnconfirmed) {
-      const pending = session.parts.filter((p) => !p.confirmed);
-      // One unconfirmed part whose spool survived is recoverable: re-upload the whole file and
-      // append it. More than one (or a missing spool) means a real gap, so stop for a human.
-      if (pending.length === 1 && existsSync(pending[0]!.spoolPath)) {
-        log(`[live-pump] 有 1 个未确认分 P(索引 ${pending[0]!.index}),按整文件重传补齐`);
-        const fixed = await session.resubmitUnconfirmedPart();
-        if (!fixed.ok) {
-          return {
-            ok: false, error: fixed.error, bvid: session.bvid, aid: session.aid,
-            title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
-            statePath: livePumpStatePath(o.spoolDir, o.room),
-          };
-        }
-      } else {
-        const error = `unconfirmed parts: ${pending.map((p) => p.index).join(",")}`;
-        log(`[live-pump] 有 ${pending.length} 个未确认分 P;为避免重复/空洞,拒绝继续录制上传`);
-        return {
-          ok: false, error, bvid: session.bvid, aid: session.aid,
-          title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
-          statePath: livePumpStatePath(o.spoolDir, o.room),
-        };
-      }
-    }
-  }
+  const opened = await openSession();
+  if ("fail" in opened) return opened.fail;
+  const session = opened.session;
 
   // Danmu is the one artifact that still hits disk on the zero-disk path. It starts only once a
   // stream is actually live (never while waiting): connecting before the broadcast resolves a

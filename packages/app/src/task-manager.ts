@@ -481,9 +481,10 @@ export class TaskManager {
     // on its own once its parts are delivered and exits 0 without anyone marking the exit
     // "expected"; treating that as a crash respawned it in a tight loop (measured in a real
     // container: "异常退出 (code=0)" then restart #1).
-    // Exit 0 means "delivered what it recorded" only: a run that never acquired a stream exits
-    // non-zero on purpose (see the `outcome` handling in the streaming-upload CLI path), so a
-    // silently failing room is a crash here and gets retried/alerted instead of a clean stop.
+    // Exit 0 means the run ended normally: parts delivered, or no part because it was stopped
+    // while waiting for a broadcast / the room dropped right after going live (`idle`, #308).
+    // The pump no longer gives up while offline, so a non-zero exit here is a real failure and
+    // gets retried/alerted (bounded by the restart budget and the daemon's give-up cooldown).
     // Only claimed for stream-upload tasks: a plain recorder exits on a stop signal, and its
     // exit code is not its own verdict on whether it did what it was started to do.
     const zeroDiskFinalized = info.code === 0

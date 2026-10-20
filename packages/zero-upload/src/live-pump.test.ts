@@ -1830,6 +1830,62 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     expect(existsSync(spool)).toBe(false);
   });
 
+  it("waitForBroadcast: a recoverable unconfirmed part is settled before waiting, not after (#308 review)", async () => {
+    // Last part's submit failed as the show ended; the restart finds the room offline. Recovery
+    // must not be deferred to the next broadcast, where the gap rule would archive it for a human.
+    let completes = 0;
+    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = new URL(url);
+      if (u.pathname.endsWith("/preupload")) {
+        return new Response(JSON.stringify({
+          chunk_size: CHUNK, auth: "a", endpoint: "//upos-cs.bilivideo.com",
+          biz_id: "1", upos_uri: `upos://bucket/re${completes}.ts`, OK: 1,
+        }), { status: 200 });
+      }
+      if (method === "POST" && u.searchParams.has("uploads")) {
+        return new Response(JSON.stringify({ upload_id: `uid-${completes}` }), { status: 200 });
+      }
+      if (method === "PUT") return new Response("", { status: 200 });
+      if (method === "POST" && u.hostname.includes("bilivideo")) {
+        completes++;
+        return new Response(JSON.stringify({ OK: 1, key: `bucket/resub${completes}.ts` }), { status: 200 });
+      }
+      if (method === "POST") return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }), { status: 200 });
+      return new Response(JSON.stringify({
+        code: 0,
+        data: {
+          archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21, tag: "", is_only_self: 1 },
+          videos: [{ cid: 10, filename: "stem0", title: "P1" }],
+        },
+      }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const statePath = join(dir, "live-pump-r.state.json");
+    const spool = join(dir, "p1.ts");
+    writeFileSync(spool, "recovered-part-bytes");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "r", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      bvid: "BILIfake1", aid: 7,
+      parts: [
+        { index: 0, spoolPath: join(dir, "gone.ts"), filename: "gone.ts", stem: "stem0", title: "P1", bytes: 1, durationSec: 1, confirmed: true },
+        { index: 1, spoolPath: spool, filename: "p1.ts", stem: "stem1", title: "P2", bytes: 19, durationSec: 10, confirmed: false },
+      ],
+      updatedAt: Date.now(),
+    });
+    const drain = new AbortController();
+    const r = await runLivePump({
+      cookiesPath: COOKIES, room: "r", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      sizeCap: 1024, quality: "origin", submit: true, spoolMode: "none", waitForBroadcast: true,
+      fetchImpl: impl, sleep: async () => {}, drainSignal: drain.signal, log: () => {},
+      fetch: async () => { drain.abort(); return { living: false }; },
+    });
+    expect(r).toMatchObject({ ok: true, outcome: "idle" });
+    expect(completes).toBeGreaterThan(0);
+    expect(readLivePumpState(statePath)?.parts.every((p) => p.confirmed)).toBe(true);
+    expect(existsSync(spool)).toBe(false);
+  });
+
   it("recovers create intent by exact title and does not create a second archive", async () => {
     const { impl, posts, videos } = makeSessionFetch();
     videos().push({ cid: 10, filename: "stem0", title: "P1" });
