@@ -15,13 +15,15 @@
  * 不会重复建稿/重复 append。首个封口段 = P1 建稿(拿 BV),后续段 = append(单文件一次提交,
  * 失败可安全重试;不确定失败 → 记 ambiguous、保留源、转人工)。
  *
- * ⚠️ 为什么按**会话**隔离:断流重连会产生新会话(新文件名 base)+ 新 xml;不同会话的段各自独立
- * 建稿/append,绝不跨会话混在一起(与 orchestrator 的「分 P 只能属于一个会话」同口径)。
+ * ⚠️ 会话隔离 + 同场续稿(#148):每个会话各有 sidecar/段号;但相邻会话间隔 <= `SAME_BROADCAST_GAP_MS`
+ * 视为同一场断流重连,后会话从磁盘上的前序 sidecar 继承 BV 并 append(见 findPredecessor),
+ * 不再另起稿件;前序状态不确定 → 不建稿不 append,转人工。间隔更大 = 新场次,照常建稿。
  */
 import {
   closeSync,
   fsyncSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -32,6 +34,7 @@ import {
 import path, { join } from "node:path";
 import {
   canDeleteRollingSource,
+  isSameBroadcastGap,
   resolveSubmissionTitle,
   processTimeZone,
   zonedStamp,
@@ -94,8 +97,24 @@ interface RollingState {
    * 与文件名/实际开播时间不一致。老文件无此字段 → 回落现算(行为不变)。
    */
   startMs?: number;
+  /** Room this session belongs to; lets a successor session recognise same-room sidecars in a shared directory. */
+  room?: { platform: string; roomSlug: string };
+  /**
+   * Issue #148: parts already in `bv` that were contributed by predecessor session(s) of the same broadcast
+   * (this session continued their submission instead of creating its own). Crash recovery compares the
+   * submission's part count against `inheritedParts + confirmed.length`, so it must be persisted.
+   */
+  inheritedParts?: number;
+  /** Predecessor session base this session continued (diagnostics only). */
+  inheritedFrom?: string;
   updatedAt: number;
 }
+
+/** Outcome of looking for a predecessor session whose submission this session should continue. */
+type PredecessorLink =
+  | { kind: "none" }
+  | { kind: "inherit"; bv: string; parts: number; from: string }
+  | { kind: "uncertain"; reason: string };
 
 /** sidecar schema 版本(WAL 字段演进;老文件无此字段 = v1,读时兼容)。 */
 const ROLLING_STATE_SCHEMA_VERSION = 2;
@@ -221,6 +240,7 @@ export class RollingUploader {
       this.state = loaded ?? {
         streamKey: this.o.streamKeyOf?.(base) ?? `${this.o.room.platform}:${this.o.room.roomSlug}:${base}`,
         sessionBase: base,
+        room: { platform: this.o.room.platform, roomSlug: this.o.room.roomSlug },
         segments: [],
         confirmed: [],
         updatedAt: this.now(),
@@ -334,7 +354,8 @@ export class RollingUploader {
       try {
         parts = await this.gate.run(this.accountKey, () => this.countPartsInner(this.state.bv!, cookies));
       } catch { parts = null; }
-      const expected = this.state.confirmed.length;
+      // Parts inherited from predecessor sessions of the same broadcast are already in the submission.
+      const expected = (this.state.inheritedParts ?? 0) + this.state.confirmed.length;
       // 用**分 P 数**做唯一证据(不额外要求段号连续):碎片段会被跳过(minSegmentSec),
       // 那时 confirmed 天然非连续(如 0,1,3)但分 P 数**仍然** = 已上传段数 = confirmed.length
       // —— 再要求连续会把这种正常情况误判成「历史/人工干预」→ 无谓转人工。
@@ -517,6 +538,18 @@ export class RollingUploader {
       public: this.o.uploadPrivate === false,
     };
     if (!this.state.bv) {
+      const link = this.findPredecessor();
+      if (link.kind === "uncertain") {
+        throw new Error(`边录边传:无法确认前序会话稿件状态(${link.reason}),不建稿、不 append,保留源转人工`);
+      }
+      if (link.kind === "inherit") {
+        // Same broadcast (gap <= SAME_BROADCAST_GAP_MS): continue the predecessor's submission.
+        this.state = { ...this.state, bv: link.bv, inheritedParts: link.parts, inheritedFrom: link.from, updatedAt: this.now() };
+        if (!this.persist()) throw new Error("sidecar 写失败(继承前序稿件),中止上传并保留源");
+        this.log(`[rolling] 同一场断流重连:续用前序会话 ${link.from} 的稿件(已有 ${link.parts} 个分P),本会话段改为 append`);
+      }
+    }
+    if (!this.state.bv) {
       const base = segmentSessionBase(path.basename(seg.path)) ?? this.state.sessionBase;
       // startMs 用**会话第一段写入时刻**(不是上传时刻):`{HH}-{mm}-{ss}` 渲染才与文件名一致。
       const startMs = this.firstSegMtimeMs || this.now();
@@ -563,6 +596,65 @@ export class RollingUploader {
     this.state = { ...this.state, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
     if (!this.persist()) throw new Error(`sidecar 写失败(append 结果段 ${seg.index}),状态不可信,保留源`);
     this.log(`[rolling] 段 ${seg.index} append 到 ${bv}`);
+  }
+
+  /**
+   * Issue #148: find the predecessor session (same room, sidecar in the same directory) whose submission this
+   * session must continue. Derived from on-disk state, never process memory, so a restart re-derives the same link.
+   * Fail closed: anything we cannot judge (unreadable sidecar near this session, pending create/append intent,
+   * ambiguous segments, a submission-less session with create intent) returns `uncertain` — the caller then neither
+   * creates nor appends. A gap above SAME_BROADCAST_GAP_MS means a new broadcast → `none` (new submission).
+   */
+  private findPredecessor(): PredecessorLink {
+    const own = this.state.sessionBase;
+    const startMs = this.state.startMs ?? (this.firstSegMtimeMs || this.now());
+    let names: string[];
+    try {
+      names = readdirSync(this.segDir).filter((f) => f.endsWith(".rolling.json"));
+    } catch (e) {
+      return { kind: "uncertain", reason: `读不到会话目录: ${String((e as Error)?.message ?? e).slice(0, 80)}` };
+    }
+    interface Cand { base: string; s: RollingState; start: number; last: number }
+    const cands: Cand[] = [];
+    for (const f of names) {
+      const base = f.slice(0, -".rolling.json".length);
+      if (base === own) continue;
+      let s: RollingState;
+      try {
+        s = JSON.parse(readFileSync(join(this.segDir, f), "utf-8")) as RollingState;
+        if (!s || typeof s !== "object" || !Array.isArray(s.confirmed)) throw new Error("bad shape");
+      } catch {
+        // Unreadable sidecar: its room/BV are unknown. Only matters when it was written near this session.
+        let m = 0;
+        try { m = statSync(join(this.segDir, f)).mtimeMs; } catch { /* treat as unknown time */ }
+        if (m === 0 || isSameBroadcastGap(startMs - m)) return { kind: "uncertain", reason: `前序 sidecar 不可读(${f})` };
+        continue;
+      }
+      const sameRoom = s.room
+        ? s.room.platform === this.o.room.platform && s.room.roomSlug === this.o.room.roomSlug
+        : typeof s.streamKey === "string" && s.streamKey.startsWith(`${this.o.room.platform}:${this.o.room.roomSlug}:`);
+      if (!sameRoom) continue;
+      const num = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) ? n : 0);
+      let last = num(s.updatedAt);
+      for (const seg of s.segments ?? []) {
+        try { last = Math.max(last, statSync(seg.path).mtimeMs); } catch { /* segment already deleted */ }
+      }
+      const start = num(s.startMs) || num(s.updatedAt);
+      if (start >= startMs) continue; // not a predecessor
+      cands.push({ base, s, start, last });
+    }
+    // Sessions that never created or intended a submission have nothing to continue.
+    const meaningful = cands.filter((c) => c.s.bv || c.s.uploading || (c.s.ambiguous?.length ?? 0) > 0);
+    if (meaningful.length === 0) return { kind: "none" };
+    const prev = meaningful.reduce((a, b) => (b.start > a.start ? b : a));
+    if (!isSameBroadcastGap(startMs - prev.last)) return { kind: "none" };
+    const { s } = prev;
+    if (s.uploading) return { kind: "uncertain", reason: `${prev.base} 有未结算的上传意图(${s.uploading.kind})` };
+    if ((s.ambiguous?.length ?? 0) > 0) return { kind: "uncertain", reason: `${prev.base} 有结果不确定的段` };
+    if (!s.bv) return { kind: "uncertain", reason: `${prev.base} 无稿件号` };
+    const inherited = s.inheritedParts ?? 0;
+    if (!Number.isInteger(inherited) || inherited < 0) return { kind: "uncertain", reason: `${prev.base} 继承分P数非法` };
+    return { kind: "inherit", bv: s.bv, parts: inherited + s.confirmed.length, from: prev.base };
   }
 
   /**

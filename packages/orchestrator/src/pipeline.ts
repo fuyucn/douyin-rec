@@ -668,9 +668,11 @@ export function tryRollingShortCircuit(o: {
   ledger.markDone(streamKey, bv);
   o.notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
   // 回读核验(#57 R1 观察期):只记日志,不阻塞、不转人工、不影响 done。fire-and-forget,任何异常吞掉。
-  const confirmed = new Set(rolled.flatMap((m) => m.rec.rolling?.confirmed ?? []));
-  if (o.countParts && confirmed.size > 0) {
-    void readbackRollingParts(o.countParts, bv, confirmed.size, streamKey, jlog);
+  // Sessions of one broadcast share this BV (issue #148) and each numbers its segments from 0, so the expected
+  // part count is the sum of every session's confirmed list, not the size of the merged index set.
+  const confirmedTotal = rolled.reduce((n, m) => n + new Set(m.rec.rolling?.confirmed ?? []).size, 0);
+  if (o.countParts && confirmedTotal > 0) {
+    void readbackRollingParts(o.countParts, bv, confirmedTotal, streamKey, jlog);
   }
   return { state: "done", bv };
 }
