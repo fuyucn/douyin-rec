@@ -29,6 +29,7 @@ const RESOURCE_FIELDS: Array<{
   { key: "maxNetParallel", min: 0, label: "settings.resNet", hint: "settings.resNetHint" },
   { key: "maxConcurrentPipelines", min: 1, label: "settings.resPipelines", hint: "settings.resPipelinesHint" },
   { key: "minBurnFreeMemMB", min: 0, label: "settings.resMem", hint: "settings.resMemHint" },
+  { key: "minMergeFreeMemMB", min: 0, label: "settings.resMergeMem", hint: "settings.resMergeMemHint" },
   { key: "memWaitTimeoutMs", min: 0, label: "settings.resMemWait", hint: "settings.resMemWaitHint" },
   { key: "uploadRateLimit", min: 1, label: "settings.resRateLimit", hint: "settings.resRateLimitHint" },
   { key: "uploadRateWindowMs", min: 1, label: "settings.resRateWindow", hint: "settings.resRateWindowHint" },

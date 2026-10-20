@@ -23,9 +23,11 @@ export interface HubResources {
   maxCpuParallel?: number;
   /** 拉取/上传等网络步骤并行度。≥0(0 = 禁网络并发)。默认 1。 */
   maxNetParallel?: number;
-  /** 烧录前要求的最小可用内存 MB。≥0。默认 2048。 */
+  /** 烧录前要求的最小可用内存 MB。≥0。默认 1024(实测 1080p libx264 烧录峰值约 600 MB,约 1.7 倍余量);0 = 关闭整个内存闸门。 */
   minBurnFreeMemMB?: number;
-  /** 等内存门的时间上限 ms。≥0。默认 600_000。 */
+  /** 合并(-c copy,不重编码)前要求的最小可用内存 MB。≥0。默认 512(实测 1080p concat 峰值约 60 MB)。 */
+  minMergeFreeMemMB?: number;
+  /** 内存不足持续多久后告警一次 ms(告警后继续排队等待,不再失败)。≥0。默认 600_000。 */
   memWaitTimeoutMs?: number;
   /** 上传滑动窗口内允许次数。≥1。默认 5。 */
   uploadRateLimit?: number;

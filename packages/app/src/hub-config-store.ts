@@ -22,12 +22,13 @@ export type { HubResources } from "@drec/core";
  * 默认值(唯一一份)。缺字段时回落这里 —— 与 cli/pipeline 现有默认值一致。
  *
  * 放在 store 而不是各消费点:三个(ResourcePool 构造、UI 默认值、回落读)各写一遍
- * `?? 1` / `?? 2048`,改一个默认值漏另一个是迟早的事(自审:这正是 T15 要消灭的模式)。
+ * `?? 1` / `?? 1024`,改一个默认值漏另一个是迟早的事(自审:这正是 T15 要消灭的模式)。
  */
 export const DEFAULT_HUB_RESOURCES: Required<HubResources> = {
   maxCpuParallel: 1,
   maxNetParallel: 1,
-  minBurnFreeMemMB: 2048,
+  minBurnFreeMemMB: 1024,
+  minMergeFreeMemMB: 512,
   memWaitTimeoutMs: 600_000,
   uploadRateLimit: 5,
   uploadRateWindowMs: 600_000,
@@ -54,6 +55,7 @@ export function readResources(configPath: string): HubResources {
     maxCpuParallel: num(raw.maxCpuParallel, DEFAULT_HUB_RESOURCES.maxCpuParallel, 1),
     maxNetParallel: num(raw.maxNetParallel, DEFAULT_HUB_RESOURCES.maxNetParallel, 0),
     minBurnFreeMemMB: num(raw.minBurnFreeMemMB, DEFAULT_HUB_RESOURCES.minBurnFreeMemMB, 0),
+    minMergeFreeMemMB: num(raw.minMergeFreeMemMB, DEFAULT_HUB_RESOURCES.minMergeFreeMemMB, 0),
     memWaitTimeoutMs: num(raw.memWaitTimeoutMs, DEFAULT_HUB_RESOURCES.memWaitTimeoutMs, 0),
     uploadRateLimit: num(raw.uploadRateLimit, DEFAULT_HUB_RESOURCES.uploadRateLimit, 1),
     uploadRateWindowMs: num(raw.uploadRateWindowMs, DEFAULT_HUB_RESOURCES.uploadRateWindowMs, 1),
@@ -76,7 +78,7 @@ function num(v: unknown, dflt: number, min: number): number {
  */
 export function validateResources(patch: Partial<HubResources>): string | null {
   const checks: Array<[keyof HubResources, number]> = [
-    ["maxCpuParallel", 1], ["maxNetParallel", 0], ["minBurnFreeMemMB", 0],
+    ["maxCpuParallel", 1], ["maxNetParallel", 0], ["minBurnFreeMemMB", 0], ["minMergeFreeMemMB", 0],
     ["memWaitTimeoutMs", 0], ["uploadRateLimit", 1], ["uploadRateWindowMs", 1],
     ["uploadCooldownMs", 0], ["maxConcurrentPipelines", 1],
   ];
