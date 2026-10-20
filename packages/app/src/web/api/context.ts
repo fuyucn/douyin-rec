@@ -7,6 +7,7 @@
 import { join } from "node:path";
 import {
   isUploadingMode, normalizeUploadMode, pipelineBurns, resolveRollingPolicy, rollingReasonText, listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
+  zeroDiskRuleError,
   type WorkerDTO, type HubPipelineConfig, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO,
 } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
@@ -39,7 +40,25 @@ export interface ApiCtx {
   validateWorkers: (input: HubRulePayload) => string | null;
   validatePipeline: (input: HubRulePayload, existing?: HubPipelineConfig) => string | null;
   hubRuleView: (r: hubStore.HubRule) => HubRuleDTO;
-  recordingError: (sourceTaskId: number | null | undefined, roomSlug: string) => string | null;
+  recordingError: (
+    sourceTaskId: number | null | undefined,
+    roomSlug: string,
+    /** An already-bound rule: a zero-disk task may keep its existing source binding. */
+    boundRule?: { recording?: { sourceTaskId?: number | null } | null } | null,
+  ) => string | null;
+  zeroDiskErrorFor: (
+    sourceTaskId: number | null | undefined,
+    streamUpload: boolean | null | undefined,
+    rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+  ) => string | null;
+  /** Validate a rule against every zero-disk task already sitting in the same room. */
+  zeroDiskRoomError: (
+    platform: string,
+    roomSlug: string,
+    rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+    /** The task this request is writing; its post-write flag overrides the persisted one. */
+    override?: { taskId: number | null; streamUpload: boolean },
+  ) => string | null;
   settleLegacyRolling: (sourceTaskId: number | null | undefined, mode: unknown) => void;
   recordingsDir: (t: Task) => string | null;
   platformCookie: (platform: string) => { value: string | null; source: CookieStatus["source"] };
@@ -255,15 +274,62 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     if (t?.rollingUpload) store.updateTask(t.id, { rollingUpload: false });
   };
 
-  const recordingError = (sourceTaskId: number | null | undefined, roomSlug: string): string | null => {
+  const recordingError = (
+    sourceTaskId: number | null | undefined,
+    roomSlug: string,
+    boundRule?: { recording?: { sourceTaskId?: number | null } | null } | null,
+  ): string | null => {
     if (!sourceTaskId) return null;
     const t = store.getTask(Number(sourceTaskId));
     if (!t) return "recording.sourceTaskId 指向的任务不存在";
     if (platformForRoom(t.room).extractRoomSlug(t.room) !== roomSlug) return "recording.sourceTaskId 与规则房间不一致";
-    // 0 落盘流式直传(plans/039)不产生可被 hub 扫描的录像文件:规则会永远选不到 winner、卡在
-    // 选优/收尾。它的产物直接进 B 站稿件,不经过 merge/burn/upload 管线,所以不能当 hub 规则的源。
-    if (t.streamUpload) {
+    // Zero-disk tasks have no files for the hub scanner. They may keep an existing rule
+    // binding (zero-disk is its rolling sub-mode and reports its own ledger result), but
+    // must never be newly bound as a rule source. `zeroDiskErrorFor` is authoritative for
+    // the rolling/no-burn/local checks.
+    if (t.streamUpload && boundRule?.recording?.sourceTaskId !== t.id && boundRule != null) {
       return "该任务开启了 0 落盘流式直传,不产生录像文件,不能绑定 hub 规则(请改用普通录制任务)";
+    }
+    return null;
+  };
+
+  /** Zero-disk is a rolling sub-mode: validate it against the rule being saved. */
+  const zeroDiskErrorFor = (
+    sourceTaskId: number | null | undefined,
+    streamUpload: boolean | null | undefined,
+    rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+  ): string | null => {
+    if (streamUpload !== true) return null;
+    if (!sourceTaskId) return "0 落盘必须绑定一个录制任务";
+    return zeroDiskRuleError(true, rule);
+  };
+
+  /**
+   * Rules are validated against the whole room, not just the bound source task. A second
+   * zero-disk task in the same room still runs with `--stream-upload` even if the rule's source
+   * task changed, so degrading the rule must be rejected while any such task exists.
+   */
+  const zeroDiskRoomError = (
+    platform: string,
+    roomSlug: string,
+    rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+    override?: { taskId: number | null; streamUpload: boolean },
+  ): string | null => {
+    const affected = store.listTasks().filter((t) => {
+      // Read the post-write value for the task being saved: turning zero-disk off in the
+      // same request that leaves rolling must not trip over its stale persisted `true`.
+      const streamUpload = override && t.id === override.taskId ? override.streamUpload : t.streamUpload;
+      if (!streamUpload) return false;
+      try {
+        const p = platformForRoom(t.room);
+        return p.id === platform && p.extractRoomSlug(t.room) === roomSlug;
+      } catch {
+        return false;
+      }
+    });
+    for (const t of affected) {
+      const err = zeroDiskRuleError(true, rule);
+      if (err) return `任务 #${t.id} ${err}`;
     }
     return null;
   };
@@ -319,7 +385,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
   return {
     deps, store, manager, hubDir, hubConfigPath,
     err, isHubSourceTask, workerToDto, resolveAnchorBg, view, detailView,
-    validateWorkers, validatePipeline, hubRuleView, recordingError, settleLegacyRolling, recordingsDir,
+    validateWorkers, validatePipeline, hubRuleView, recordingError, zeroDiskErrorFor, zeroDiskRoomError, settleLegacyRolling, recordingsDir,
     platformCookie, biliupStatus, validCookiePlatform,
     normWebhook, toUseCookie, cookieStatus,
   };

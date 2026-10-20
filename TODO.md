@@ -171,6 +171,10 @@
     是无效操作 —— 要改概率得调 weight。本轮未改 priority。
 
 ## 待办（Next）
+- [~] **T-85 0 落盘作为 rolling 子选项(issue [#285](https://github.com/fuyucn/douyin-rec/issues/285))**
+  — 2026-10-19 认领,分支 `codex/issue-285-zero-disk-rolling`,PR [#287](https://github.com/fuyucn/douyin-rec/pull/287)(review 通过;`pr-risk-scan` = RISK,待用户拍板合并/部署)。
+  **做什么**:0 落盘从任务页独立开关迁到房间编辑的 rolling 子选项;core 唯一判定「rolling + 无烧录 + 仅 local」;房间/任务/规则三条写入口共用;标题默认带开播时分秒。
+  **验收**:无后期处理时可开;非 rolling / 烧录 / 多节点拒绝且不落库;0 落盘字段不被 hub 同步清掉;全量 test/typecheck/bundle/web build 绿。
 - [ ] **T-63 UPOS 直传 + 边录边传 PoC(T-63,计划 [plans/039_zero_disk_upload.md](plans/039_zero_disk_upload.md) 附录 A/B)**
   — 2026-10-17 起，分支 `codex/research-zero-disk-upload`（**未合并 / 未部署 / 未开 PR**）。
   **做了什么**：`packages/processors/src/upos-stream.ts`（自研 UPOS 直传：preupload/chunk/complete/submitStudio，不依赖 biliup CLI）+ `live-pump.ts`（每段一个 ffmpeg 管道，边录边传）+ 隐藏命令 `_live-pump <room>`。29 + 16 单测。

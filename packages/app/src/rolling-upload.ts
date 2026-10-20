@@ -35,6 +35,7 @@ import {
   resolveSubmissionTitle,
   processTimeZone,
   zonedStamp,
+  DEFAULT_TITLE_TEMPLATE,
   formatPartTitle,
   sanitizeStem,
   headOfLineFilter,
@@ -702,9 +703,14 @@ export function resolveStreamUploadTitle(o: {
   const z = zonedStamp(o.startMs, timeZone);
   const sessionBase = `${o.anchorName.trim() || o.roomSlug}_${z.date}_${z.hh}-${z.mm}-${z.ss}`;
   const ctx = { sessionBase, startMs: o.startMs, timeZone, ...(o.liveTitle ? { liveTitle: o.liveTitle } : {}) };
+  // The built-in default is date-only, which cannot distinguish two broadcasts on the same
+  // day. Zero-disk has no filename to inherit the start time from, so only the *default*
+  // gains the start stamp; an explicit template is honored verbatim.
+  const explicitTemplate = (meta.titleTemplate ?? "").trim();
+  const timedTemplate = explicitTemplate || `${DEFAULT_TITLE_TEMPLATE}_{HH}-{mm}-{ss}`;
   let stem: string;
   try {
-    stem = resolveOutputStem({ template: meta.titleTemplate, sessionBase, startMs: o.startMs, timeZone, ...(o.liveTitle ? { liveTitle: o.liveTitle } : {}) });
+    stem = resolveOutputStem({ template: timedTemplate, sessionBase, startMs: o.startMs, timeZone, ...(o.liveTitle ? { liveTitle: o.liveTitle } : {}) });
   } catch {
     // Zero-disk has no filename, so a strict stem failure must not abort recording. Keep a
     // safe, truncated fallback for `resolveSubmissionTitle`; the submission title itself is
@@ -713,7 +719,7 @@ export function resolveStreamUploadTitle(o: {
   }
   return resolveSubmissionTitle({
     submissionTemplate: meta.submissionTitleTemplate,
-    template: meta.titleTemplate,
+    template: timedTemplate,
     stem,
     ctx,
   });

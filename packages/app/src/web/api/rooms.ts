@@ -183,11 +183,68 @@ export function buildRooms(ctx: ApiCtx) {
 
       const before = view(key);
       if (!before) return err(404, `未找到房间 ${key}`);
+      const proc = input.processing;
+
+      const recInput = input.recording;
+      const existingStreamUpload = before.recording?.streamUpload === true;
+      const streamUploadNext = recInput && "streamUpload" in recInput
+        ? recInput.streamUpload === true
+        : existingStreamUpload;
+      // The editor sends `streamUpload:false` when it leaves rolling. A partial API write that
+      // only changes the mode still has to be rejected, not silently reinterpreted.
+      const zeroDiskNext = streamUploadNext;
+      // A room change moves the task to a different rule key. Validate zero-disk against the
+      // rule the task will actually live under, not the old key this request was addressed to.
+      const nextRoom = (recInput?.room ?? before.room).trim() || before.room;
+      const nextP = platformForRoom(nextRoom);
+      const nextKey = hubStore.hubKey(nextP.id, nextP.extractRoomSlug(nextRoom));
+      const sameKey = nextKey === key;
+      // Saving a zero-disk room must also be a rolling rule with no burn, pinned to local.
+      // Check it before the recording write so a rejected rule leaves the task untouched.
+      const nextRule = hubStore.getHubRule(hubDir, nextKey);
+      const mergedPipeline = hubStore.mergePipeline(
+        nextRule?.pipeline,
+        sameKey ? input.processing?.pipeline : undefined,
+      );
+      // When the room changes, the incoming processing patch belongs to the old key and must
+      // not be used: validate against the rule that already exists at the destination.
+      const nextEnabled = (sameKey ? input.processing?.enabled : undefined) ?? nextRule?.enabled ?? before.processing?.enabled ?? true;
+      const nextWorkers = sameKey
+        ? input.processing?.workers === null ? [] : input.processing?.workers ?? nextRule?.workers
+        : nextRule?.workers;
+      const zeroErr = ctx.zeroDiskErrorFor(
+        before.recording?.taskId ?? null,
+        zeroDiskNext,
+        {
+          enabled: nextEnabled,
+          // A room with no existing rule and no upload mode in this write is still a rule
+          // being created with the upload-mode default; don't claim it is rolling.
+          mode: mergedPipeline.upload?.mode ?? (nextRule || before.processing ? "upload" : undefined),
+          workers: nextWorkers,
+          steps: mergedPipeline.steps,
+        },
+      );
+      if (zeroErr) return err(400, zeroErr);
+      if (proc && sameKey) {
+        // The rule side must be valid for every zero-disk task in the room, not only the source
+        // task that the rule happens to point at.
+        const roomErr = ctx.zeroDiskRoomError(
+          k.platform,
+          k.roomSlug,
+          {
+            enabled: proc.enabled ?? before.processing?.enabled ?? true,
+            mode: mergedPipeline.upload?.mode,
+            workers: proc.workers === null ? [] : proc.workers ?? before.processing?.workers,
+            steps: mergedPipeline.steps,
+          },
+          { taskId: before.recording?.taskId ?? null, streamUpload: zeroDiskNext },
+        );
+        if (roomErr) return err(400, roomErr);
+      }
 
       // Validate the processing half BEFORE touching the task: a rejection after the recording write
       // would leave a half-applied save behind an error toast (the rollback below only covers a failed
       // rule write). `workers: null` = explicit "all nodes" (clears the restriction); `[]` stays invalid.
-      const proc = input.processing;
       if (proc) {
         const checkInput: HubRulePayload = {
           enabled: proc.enabled,
@@ -312,7 +369,13 @@ export function buildRooms(ctx: ApiCtx) {
           : taskId;
         // Checked after the recording write on purpose: it must see a room change made by this PUT.
         // A failure here rolls the recording half back like a failed rule write (#200).
-        const rerr = ctx.recordingError(sourceTaskId, k.roomSlug);
+        // A zero-disk source may be bound when this same write creates its rolling rule;
+        // zeroDiskErrorFor above has already rejected non-rolling / burning / multi-node.
+        const rerr = ctx.recordingError(
+          sourceTaskId,
+          k.roomSlug,
+          zeroDiskNext && sourceTaskId ? { recording: { sourceTaskId } } : hubStore.getHubRule(hubDir, key),
+        );
         if (rerr) return failAfterRecording(400, rerr);
 
         try {

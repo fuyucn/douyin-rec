@@ -17,6 +17,7 @@ import { OUTPUT_FORMATS, stageExt } from "@drec/output-format";
 import { api, type PlatformDTO, type RoomDTO, type WorkerDTO } from "../api/client";
 import { cookieStatusAtom } from "../atoms";
 import { Button, IconButton } from "../components/Button";
+import { ExperimentalBadge } from "../components/ExperimentalBadge";
 import { Switch } from "../components/Switch";
 import { CleanupSection } from "../components/room-form/CleanupSection";
 import { RuleSwitch, ToggleRow } from "../components/room-form/parts";
@@ -204,6 +205,39 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                       <span className="text-sm text-ink">{t("room.editor.public")} <span className="text-xs text-muted">· {t("room.editor.publicHint")}</span></span>
                       <Switch checked={!form.uploadPrivate} onCheckedChange={(x) => update({ uploadPrivate: !x })} />
                     </label>
+                    {form.method === "rolling" && (
+                      <>
+                        <ToggleRow
+                          nested
+                          label={t("room.editor.zeroDisk")}
+                          hint={t("room.editor.zeroDiskHint")}
+                          checked={form.streamUpload}
+                          onChange={(streamUpload) => update({ streamUpload })}
+                          lock={c.streamUpload}
+                          lockedChecked={false}
+                          badge={<ExperimentalBadge id="stream-upload" />}
+                        />
+                        {form.streamUpload && c.streamUpload.locked && (
+                          <ToggleRow
+                            nested
+                            label={t("room.editor.zeroDiskSpool")}
+                            hint={t("room.editor.zeroDiskSpoolHint")}
+                            checked={form.streamUploadSpool}
+                            onChange={(streamUploadSpool) => update({ streamUploadSpool })}
+                            lock={c.streamUpload}
+                          />
+                        )}
+                        {form.streamUpload && !c.streamUpload.locked && (
+                          <ToggleRow
+                            nested
+                            label={t("room.editor.zeroDiskSpool")}
+                            hint={t("room.editor.zeroDiskSpoolHint")}
+                            checked={form.streamUploadSpool}
+                            onChange={(streamUploadSpool) => update({ streamUploadSpool })}
+                          />
+                        )}
+                      </>
+                    )}
                   </div>
                 ) : (
                   <label className="rm-ctx">

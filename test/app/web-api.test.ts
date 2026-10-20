@@ -1107,28 +1107,185 @@ describe("任务视图 outputFormatLock(后端判定下发,前端据此锁定;is
   });
 });
 
-describe("streamUpload 不能作为 hub 规则源(不产生可扫描录像)", () => {
-  it("房间规则绑定 streamUpload 任务 → 400(否则 hub 永远选不到 winner)", () => {
+describe("streamUpload 作为 rolling 子选项的规则门禁", () => {
+  it("房间规则绑定 streamUpload 任务,但规则不是 rolling → 400", () => {
     const a = makeApi({ store, manager, ...hubDeps("su-hub-") });
     const t = a.createTask({ room: "99003", streamUpload: true }).body as { id: number };
-    const res = a.updateRoom("douyin.99003", { room: "99003", processing: { enabled: true, recording: { sourceTaskId: t.id } } } as never);
+    const res = a.updateRoom("douyin.99003", {
+      room: "99003",
+      processing: {
+        enabled: true,
+        recording: { sourceTaskId: t.id },
+        pipeline: { upload: { mode: "upload" }, steps: { burnDanmu: false, burnLivechat: false } },
+        workers: ["local"],
+      },
+    } as never);
     expect(res.status).toBe(400);
-    expect(String((res.body as { error: string }).error)).toContain("0 落盘");
+    expect(String((res.body as { error: string }).error)).toContain("rolling");
   });
 
-  it("直接 POST /api/hub/rules 绑 streamUpload 任务 → 400(createHubRule 不能绕过守卫)", () => {
+  it("直接 POST /api/hub/rules 绑 streamUpload 任务,但规则不是 rolling → 400", () => {
     const a = makeApi({ store, manager, ...hubDeps("su-hub3-") });
     const t = a.createTask({ room: "99005", streamUpload: true }).body as { id: number };
-    const res = a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
+    const res = a.createHubRule({
+      recording: { sourceTaskId: t.id },
+      workers: ["local"],
+      pipeline: { upload: { mode: "upload" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
     expect(res.status).toBe(400);
-    expect(String((res.body as { error: string }).error)).toContain("0 落盘");
+    expect(String((res.body as { error: string }).error)).toContain("rolling");
   });
 
-  it("已绑定规则的源任务再改开 streamUpload → 400(反向顺序也要挡)", () => {
+  it("已绑定 rolling 规则的源任务再改开 streamUpload → 200(同一规则下的子选项)", () => {
     const a = makeApi({ store, manager, ...hubDeps("su-hub2-") });
     const t = a.createTask({ room: "99004" }).body as { id: number };
+    expect(a.createHubRule({
+      recording: { sourceTaskId: t.id },
+      workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    }).status).toBe(201);
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(200);
+    expect(store.getTask(t.id)!.streamUpload).toBe(true);
+  });
+
+  it("已绑定 rolling 规则但烧录开着 → 400", () => {
+    const deps = hubDeps("su-hub4-");
+    const a = makeApi({ store, manager, ...deps });
+    const t = a.createTask({ room: "99006" }).body as { id: number };
     a.createHubRule({ recording: { sourceTaskId: t.id }, workers: ["local"] });
+    // Turning burning on while the rule is rolling is itself rejected by the rolling/burn guard,
+    // so leave the rule valid and prove the task-side zero-disk check by pointing it at a
+    // burning rule written directly.
+    upsertHubRule(deps.hubDir as string, {
+      platform: "douyin", roomSlug: "99006", workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: true, burnLivechat: false } },
+    });
     expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(400);
+    expect(store.getTask(t.id)!.streamUpload).toBe(false);
+  });
+
+  it("零落盘任务改到另一个不兼容房间 → 400(按生效房间校验)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-move-task-") });
+    const t = a.createTask({ room: "99101" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: t.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(200);
+    // Target room has an incompatible rule (upload + burn + two nodes).
+    const other = a.createTask({ room: "99102" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: other.id }, workers: ["local"],
+      pipeline: { upload: { mode: "upload" }, steps: { burnDanmu: true, burnLivechat: false } },
+    });
+    expect(a.updateTask(t.id, { room: "99102" }).status).toBe(400);
+    expect(store.getTask(t.id)).toMatchObject({ room: expect.stringContaining("99101"), streamUpload: true });
+  });
+
+  it("房间 PUT 同时改房间号 → 按新房间规则校验,400 且不落库", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-move-room-") });
+    const t = a.createTask({ room: "99201" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: t.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(200);
+    const other = a.createTask({ room: "99202" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: other.id }, workers: ["local", "vps2"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    const res = a.updateRoom("douyin.99201", { recording: { room: "99202" } });
+    expect(res.status).toBe(400);
+    expect(String((res.body as { error: string }).error)).toContain("local");
+    expect(store.getTask(t.id)!.room).toContain("99201");
+  });
+
+  it("同房间第二个零落盘任务在规则降级时也被拦住(按房间扫描,不只源任务)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-room-scan-") });
+    const src = a.createTask({ room: "99301" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: src.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    // The source task itself is NOT zero-disk; only a second task in the same room is.
+    const extra = a.createTask({ room: "99301", streamUpload: true }).body as { id: number };
+    // Rule is degraded to upload+multi-node: the second zero-disk task would still run.
+    const res = a.updateRoom("douyin.99301", { processing: {
+      enabled: true, workers: ["local", "vps2"], pipeline: { upload: { mode: "upload" } },
+    } as never });
+    expect(res.status).toBe(400);
+    expect(String((res.body as { error: string }).error)).toContain(`#${extra.id}`);
+  });
+
+  it("createHubRule 是 upsert:按合并后的规则校验", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-upsert-") });
+    const src = a.createTask({ room: "99401" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: src.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    expect(a.updateTask(src.id, { streamUpload: true }).status).toBe(200);
+    // Same room again: omitting steps inherits the stored (non-burning) steps, so this is legal.
+    expect(a.createHubRule({ recording: { sourceTaskId: src.id }, workers: ["local"] }).status).toBe(201);
+    // Turning burning on through the create/upsert path must be rejected.
+    expect(a.createHubRule({
+      recording: { sourceTaskId: src.id }, workers: ["local"],
+      pipeline: { steps: { burnDanmu: true, burnLivechat: false } },
+    }).status).toBe(400);
+  });
+
+  it("createHubRule 对非源任务的零落盘任务同样生效(按房间扫描)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-upsert-room-") });
+    const src = a.createTask({ room: "99501" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: src.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    const extra = a.createTask({ room: "99501", streamUpload: true }).body as { id: number };
+    const res = a.createHubRule({
+      recording: { sourceTaskId: src.id }, workers: ["local"],
+      pipeline: { upload: { mode: "upload" } },
+    });
+    expect(res.status).toBe(400);
+    expect(String((res.body as { error: string }).error)).toContain(`#${extra.id}`);
+  });
+
+  it("同一次保存关掉零落盘并离开 rolling → 200(扫描被写任务取写入后的值)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-off-same-write-") });
+    const t = a.createTask({ room: "99601" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: t.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(200);
+    const res = a.updateRoom("douyin.99601", {
+      recording: { streamUpload: false },
+      processing: {
+        enabled: true, workers: ["local"],
+        pipeline: { upload: { mode: "upload" }, steps: { burnDanmu: false, burnLivechat: false } },
+      },
+    } as never);
+    expect(res.status).toBe(200);
+    expect(store.getTask(t.id)!.streamUpload).toBe(false);
+  });
+
+  it("同一次保存关掉零落盘但仍是 rolling → 200", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-off-stay-rolling-") });
+    const t = a.createTask({ room: "99602" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: t.id }, workers: ["local"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(200);
+    const res = a.updateRoom("douyin.99602", {
+      recording: { streamUpload: false },
+      processing: {
+        enabled: true, workers: ["local"],
+        pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+      },
+    } as never);
+    expect(res.status).toBe(200);
     expect(store.getTask(t.id)!.streamUpload).toBe(false);
   });
 });

@@ -44,6 +44,7 @@ function mkRoom(over: { recording?: Partial<NonNullable<RoomDTO["recording"]>> |
     taskId: 7, room: "https://live.douyin.com/1", name: "n", anchorName: null, quality: "origin", engine: "ffmpeg",
     danmu: 1, segmentSec: 1800, scheduleStart: "20:00", scheduleEnd: "02:00", enabled: true, useCookie: true,
     cookies: null, outDir: null, webhook: null, rollingUpload: false, rollingEffective: false, outputFormat: "original",
+    streamUpload: false, streamUploadSpool: true,
     ...over.recording,
   } as NonNullable<RoomDTO["recording"]>;
   const processing = over.processing === null ? null : ({
@@ -108,6 +109,15 @@ describe("room editor form ↔ payload", () => {
     expect(ok(payloadFromForm(f, ctx)).processing?.pipeline?.upload?.mode).toBe("upload");
     const noBurn = { ...f, burnDanmu: false, burnLivechat: false };
     expect(ok(payloadFromForm(noBurn, ctx)).processing?.pipeline?.upload?.mode).toBe("rolling");
+  });
+
+  it("zero-disk is saved only under rolling; leaving rolling clears it", () => {
+    const f = { ...formFromRoom(mkRoom({ recording: { streamUpload: true, streamUploadSpool: false } })), method: "rolling" as const, burnDanmu: false, burnLivechat: false };
+    const p = ok(payloadFromForm(f, ctx));
+    expect(p.processing?.pipeline?.upload?.mode).toBe("rolling");
+    expect(p.recording).toMatchObject({ streamUpload: true, streamUploadSpool: false });
+    const q = ok(payloadFromForm({ ...f, method: "after" }, ctx));
+    expect(q.recording).toMatchObject({ streamUpload: false });
   });
 
   it("empty schedule clears the window; malformed schedule is rejected", () => {

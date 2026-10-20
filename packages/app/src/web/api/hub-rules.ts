@@ -14,7 +14,7 @@ import { activeHubJobKeys, deleteHubJobHistory } from "../../hub-jobs.js";
 
 export function buildHubRules(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
-    err, validateWorkers, validatePipeline, hubRuleView, recordingError } = ctx;
+    err, validateWorkers, validatePipeline, hubRuleView, recordingError, zeroDiskErrorFor, zeroDiskRoomError } = ctx;
   return {
     hubStatus(): ApiResult {
       return { status: 200, body: { enabled: deps.hubEnabled ?? false } };
@@ -53,14 +53,31 @@ export function buildHubRules(ctx: ApiCtx) {
       if (!task) return err(400, "recording.sourceTaskId 指向的任务不存在");
       const platform = platformForRoom(task.room);
       const roomSlug = platform.extractRoomSlug(task.room);
-      // 复用唯一判定(存在性 / 房间一致性 / 0 落盘不可绑规则),不要在这里另写一份 ——
-      // 此前 createHubRule 只内联查了存在性,漏掉 streamUpload 守卫,能绕过它建出
-      // 永远选不到 winner 的规则。
-      const rerr = recordingError(sourceTaskId, roomSlug);
+      // Reuse the shared existence/room check. A zero-disk source is allowed only when this
+      // create call itself is the rolling rule that makes zero-disk legal; the check below
+      // rejects every other case.
+      const rerr = task.streamUpload ? null : recordingError(sourceTaskId, roomSlug);
       if (rerr) return err(400, rerr);
       // 同房间规则已存在时 upsert 会深合并 pipeline → 按合并后校验。
-      const perr = validatePipeline(input, hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug))?.pipeline);
+      const existingRule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug));
+      const perr = validatePipeline(input, existingRule?.pipeline);
       if (perr) return err(400, perr);
+      // create is an upsert: validate what will be stored (merged), not just the request body.
+      const merged = hubStore.mergePipeline(existingRule?.pipeline, input.pipeline);
+      const ruleView = {
+        enabled: input.enabled ?? existingRule?.enabled,
+        mode: merged.upload?.mode,
+        workers: input.workers ?? existingRule?.workers,
+        steps: merged.steps,
+      };
+      const zerr = zeroDiskErrorFor(
+        sourceTaskId,
+        task.streamUpload,
+        ruleView,
+      );
+      if (zerr) return err(400, zerr);
+      const roomErr = zeroDiskRoomError(platform.id, roomSlug, ruleView);
+      if (roomErr) return err(400, roomErr);
       try {
         const rule = hubStore.upsertHubRule(hubDir, {
           platform: platform.id,
@@ -88,8 +105,34 @@ export function buildHubRules(ctx: ApiCtx) {
       if (perr) return err(400, perr);
       const dot = key.indexOf(".");
       const ruleSlug = dot < 0 ? key : key.slice(dot + 1);
-      const rerr = recordingError(input.recording?.sourceTaskId, ruleSlug);
+      const existingRule = hubStore.getHubRule(hubDir, key);
+      const rerr = recordingError(input.recording?.sourceTaskId, ruleSlug, existingRule);
       if (rerr) return err(400, rerr);
+      const sourceTaskId = input.recording?.sourceTaskId ?? existingRule?.recording?.sourceTaskId ?? null;
+      const sourceTask = sourceTaskId ? store.getTask(Number(sourceTaskId)) : null;
+      const merged = hubStore.mergePipeline(existingRule?.pipeline, input.pipeline);
+      const zerr = zeroDiskErrorFor(
+        sourceTaskId,
+        sourceTask?.streamUpload,
+        {
+          enabled: input.enabled ?? existingRule?.enabled,
+          mode: merged.upload?.mode,
+          workers: input.workers ?? existingRule?.workers,
+          steps: merged.steps,
+        },
+      );
+      if (zerr) return err(400, zerr);
+      const roomErr = zeroDiskRoomError(
+        key.slice(0, key.indexOf(".")),
+        ruleSlug,
+        {
+          enabled: input.enabled ?? existingRule?.enabled,
+          mode: merged.upload?.mode,
+          workers: input.workers ?? existingRule?.workers,
+          steps: merged.steps,
+        },
+      );
+      if (roomErr) return err(400, roomErr);
       const patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[]; requires?: string[] } = {};
       if ("enabled" in input) patch.enabled = input.enabled;
       if ("pipeline" in input) patch.pipeline = input.pipeline;

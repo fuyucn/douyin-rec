@@ -7,6 +7,7 @@
  */
 import { resolveRollingPolicy, type RollingReason } from "@drec/rolling-policy";
 import type { OutputFormatLock } from "@drec/contracts";
+import { zeroDiskRuleError } from "@drec/zero-disk-policy";
 import { DEFAULT_OUTPUT_FORMAT, effectiveStageFormat, isOutputFormat, outputFormatLocked, type OutputFormat } from "@drec/output-format";
 
 /** 上传方式(UI 三选一);存储映射见 {@link methodFromStored} / {@link storedFromForm}。 */
@@ -37,6 +38,8 @@ export interface FormFacts {
   workers: readonly string[];
   /** 该房间是否有 hub 规则(无规则 = 单机任务,边录边传不受节点数约束)。 */
   hasRule: boolean;
+  /** 0 落盘子选项(只在 rolling 且无烧录、单 local 节点时可用)。 */
+  streamUpload: boolean;
 }
 
 export interface Lock {
@@ -57,6 +60,8 @@ export interface Constraints {
   clKeepArchive: Lock;
   /** 投稿(收播后 / 节点侧 / 边录边传)一律 mp4:平台要求,选项锁定。 */
   outputFormat: Lock;
+  /** 0 落盘是 rolling 的子选项:不满足 rolling 安全口径时锁死。 */
+  streamUpload: Lock;
 }
 
 const OPEN: Lock = { locked: false };
@@ -158,6 +163,14 @@ export function deriveConstraints(f: FormFacts): Constraints {
   const burning = burn.burnDanmu || burn.burnLivechat;
   const rolling = rollingLock(f);
   const nodeSide = burning ? lock("rooms.nodeSideUploadDisabled") : OPEN;
+  // Zero-disk is a rolling sub-mode and requires an actual rule pinned to local. A task-only
+  // room has no rule yet, so the switch stays locked until the room is saved as rolling/local.
+  const zeroDiskError = zeroDiskRuleError(f.streamUpload, {
+    enabled: true,
+    mode: f.method === "rolling" ? "rolling" : "upload",
+    workers: f.workers,
+    steps: { burnDanmu: burn.burnDanmu, burnLivechat: burn.burnLivechat },
+  });
   return {
     cookie: cookieLock(f),
     burn: noDanmu ? lock("roomForm.lock.needDanmu") : OPEN,
@@ -168,6 +181,7 @@ export function deriveConstraints(f: FormFacts): Constraints {
     clKeepArchive: f.uploadOn ? OPEN : lock("roomForm.lock.needUploadForCleanArchive"),
     // 是否锁、锁成什么,唯一判定 = core outputFormatLocked / effectiveStageFormat,与后端一致。
     outputFormat: outputFormatLocked(f.uploadOn ? "upload" : "stage") ? lock("roomForm.lock.outputFormatUpload") : OPEN,
+    streamUpload: zeroDiskError ? lock("roomForm.lock.zeroDiskNeedsRolling") : OPEN,
   };
 }
 

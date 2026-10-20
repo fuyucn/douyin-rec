@@ -135,6 +135,10 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
   // 抖音取流恒匿名,Cookie 只服务弹幕;B站/快手用它取流(锁定口径见 room-form-rules)。
   const cookieForStream = plat ? plat.id !== "douyin" : false;
   const cookieReady = cookieReadyFor(plat?.id, cookieStatuses, !!cookieStatus?.hasSession);
+  // Zero-disk is configured on the room editor (rolling sub-option); the task dialog only
+  // shows the legacy switch for tasks that already carry it. New/changed zero-disk settings
+  // must go through the room editor so the rule and task are written together.
+  const zeroDiskManaged = isEdit && task?.streamUpload === true;
 
   async function submit(ev: FormEvent): Promise<void> {
     ev.preventDefault();
@@ -149,8 +153,8 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
       useCookie: form.useCookie,
       schedule: form.schedule.trim() || null,
       webhook: form.webhook.trim() || null,
-      streamUpload: form.streamUpload,
-      streamUploadSpool: form.streamUploadSpool,
+      // Preserve the stored zero-disk fields; the room editor is the only writer.
+      ...(zeroDiskManaged ? { streamUpload: form.streamUpload, streamUploadSpool: form.streamUploadSpool } : {}),
       ...(formatLock.locked ? {} : { outputFormat: form.outputFormat }),
     };
     setBusy(true);
@@ -226,25 +230,17 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
         {/* 边录边传已迁到 hub 规则(上传方式 = 边录边传,issue #40);task 只保留录制参数。
             旧开关为 true 的任务只读提示一下,不可在此修改。 */}
         {isEdit && task?.rollingUpload === true && <p className="text-xs text-muted">{t("rooms.rollingLegacyNote")}</p>}
-        {/* 0 落盘流式直传:与边录边传互斥 —— 两者都要写源文件,这里以前端提示 + 后端 400 双保险。 */}
-        <ToggleRow
-          label={t("dialog.streamUpload")}
-          hint={t("dialog.streamUploadHint")}
-          checked={form.streamUpload}
-          onChange={(x) => set("streamUpload", x)}
-          lock={task?.rollingEffective ? { locked: true, reasonKey: "dialog.streamUploadLockRolling" } : undefined}
-          lockedChecked={false}
-          badge={<ExperimentalBadge id="stream-upload" />}
-        />
-        {form.streamUpload && (
+        {/* Zero-disk moved under the room editor's rolling sub-option. Keep the legacy
+            read-only switch visible so an existing task is not silently changed here. */}
+        {zeroDiskManaged && (
           <ToggleRow
-            nested
-            label={t("dialog.streamUploadZeroDisk")}
-            hint={t("dialog.streamUploadZeroDiskHint")}
-            checked={!form.streamUploadSpool}
-            onChange={(x) => set("streamUploadSpool", !x)}
-            lock={task?.rollingEffective ? { locked: true, reasonKey: "dialog.streamUploadLockRolling" } : undefined}
-            lockedChecked={false}
+            label={t("dialog.streamUpload")}
+            hint={t("dialog.streamUploadMoved")}
+            checked={form.streamUpload}
+            onChange={() => {}}
+            lock={{ locked: true }}
+            lockedChecked
+            badge={<ExperimentalBadge id="stream-upload" />}
           />
         )}
 
