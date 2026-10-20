@@ -174,7 +174,7 @@
 - [x] **T-85 0 落盘作为 rolling 子选项(issue [#285](https://github.com/fuyucn/douyin-rec/issues/285))**
   — 2026-10-19 完成。PR [#287](https://github.com/fuyucn/douyin-rec/pull/287)(三轮 review,末轮通过;`pr-risk-scan` = RISK,用户拍板合并)合并 `c888f334`;PR [#289](https://github.com/fuyucn/douyin-rec/pull/289) 恢复丢失的 CLI 接线合并 `d7c50582`,已部署 `0.0.192-7dc6a6`。
   **做了什么**:0 落盘从任务页独立开关迁到房间编辑的 rolling 子选项;core 唯一判定 `zeroDiskRuleError`「rolling + 无烧录 + 仅 local」;房间 / 任务 / hub 规则三条写入口共用,按生效房间与房间内全部 0 落盘任务校验;hub 同步下带 `streamUpload`,不再每个 tick 清掉;默认稿件标题带开播时分秒;新增 `test/arch/zero-disk-wiring-guard.test.ts` 守住 CLI 接线。
-  **实测**:生产任务 85(直播间 45649367368)rolling + local + 无烧录 + 真 0 落盘,`[状态] 录制中`,分块持续上传到 60MiB+;dispatch 前旧的 `10011` 消失。
+  **实测**:生产任务 85(测试直播间)rolling + local + 无烧录 + 真 0 落盘,`[状态] 录制中`,分块持续上传到 60MiB+;dispatch 前旧的 `10011` 消失。
   **遗留**:state 文件命名改为数字房间号,升级瞬间若有进行中的 0 落盘会话会起新稿件(本次部署时未开录,无影响);两个 worker 仍是 `0.0.189-dev`。
 - [ ] **T-63 UPOS 直传 + 边录边传 PoC(T-63,计划 [plans/039_zero_disk_upload.md](plans/039_zero_disk_upload.md) 附录 A/B)**
   — 2026-10-17 起，分支 `codex/research-zero-disk-upload`（**未合并 / 未部署 / 未开 PR**）。
