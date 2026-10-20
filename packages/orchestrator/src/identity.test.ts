@@ -172,3 +172,23 @@ describe("clusterBroadcasts streamKey 日期按设置时区(issue #155)", () => 
     expect(out.map((x) => x.streamKey).sort()).toEqual(["douyin:411:2026-09-13_0130", "douyin:411:2026-09-13_0400"]);
   });
 });
+
+describe("clusterBroadcasts × live id (issue #320)", () => {
+  const T0 = Date.UTC(2026, 9, 20, 4, 0, 0);
+  const rec = (startMin: number, endMin: number, liveSessionId?: string) => ({
+    roomSlug: "r1", platform: "douyin", sessionBase: `s${startMin}`, tsFiles: [], durationSec: 0, totalGapSec: 0,
+    startMs: T0 + startMin * 60_000, endMs: T0 + endMin * 60_000, ...(liveSessionId ? { liveSessionId } : {}),
+  });
+  const cluster = (recs: ReturnType<typeof rec>[]) => clusterBroadcasts([{ workerId: "w1", recordings: recs }], undefined, "douyin", [], "UTC");
+
+  it("26 min apart with different live ids → two broadcasts", () => {
+    expect(cluster([rec(0, 22, "a"), rec(48, 200, "b")])).toHaveLength(2);
+  });
+  it("84 min apart with the same live id → one broadcast", () => {
+    expect(cluster([rec(0, 60, "a"), rec(144, 200, "a")])).toHaveLength(1);
+  });
+  it("no live id → time window as before", () => {
+    expect(cluster([rec(0, 22), rec(48, 200)])).toHaveLength(1);
+    expect(cluster([rec(0, 60), rec(144, 200)])).toHaveLength(2);
+  });
+});

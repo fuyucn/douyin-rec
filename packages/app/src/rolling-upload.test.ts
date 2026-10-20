@@ -492,6 +492,44 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
     expect(plain).toHaveBeenCalledTimes(1);
   });
 
+  const writeLiveId = (dir: string, base: string, id: string): void =>
+    writeFileSync(path.join(dir, `${base}.session.json`), JSON.stringify({ sessionBase: base, roomSlug: "123", platform: "douyin", liveSessionId: id }));
+
+  it("issue #320: gap <= 60 min but a different live id → new broadcast, B creates its own submission", async () => {
+    const { dir, plain, append } = await runSessionA();
+    const b = sessionB(dir, 26);
+    writeLiveId(dir, A_BASE, "live-1");
+    writeLiveId(dir, B_BASE, "live-2");
+    const plainB = vi.fn(async () => ["B", "V", "1second"].join(""));
+    const u = uploaderB(plainB, append, b.startMs);
+    b.paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(plainB).toHaveBeenCalledTimes(1);
+    expect(u.bv).not.toBe(FAKE_BV);
+  });
+
+  it("issue #320: gap 84 min but the same live id → same broadcast, B appends to A's submission", async () => {
+    const { dir, plain, append } = await runSessionA();
+    const b = sessionB(dir, 84);
+    writeLiveId(dir, A_BASE, "live-1");
+    writeLiveId(dir, B_BASE, "live-1");
+    const u = uploaderB(plain, append, b.startMs);
+    b.paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(plain).toHaveBeenCalledTimes(1);
+    expect(u.bv).toBe(FAKE_BV);
+  });
+
+  it("issue #320: live id known on one side only → falls back to the gap rule", async () => {
+    const { dir, plain, append } = await runSessionA();
+    const b = sessionB(dir, 30);
+    writeLiveId(dir, B_BASE, "live-2");
+    const u = uploaderB(plain, append, b.startMs);
+    b.paths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    expect(u.bv).toBe(FAKE_BV);
+  });
+
   it("predecessor uncertain (create intent without BV): B neither creates nor appends, segment goes manual", async () => {
     const { dir } = await runSessionA();
     // A crashed mid-create: intent persisted, no BV.

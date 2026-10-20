@@ -35,6 +35,8 @@ export interface NodeRecording {
   totalGapSec: number;       // 断流缺口总秒数(来自 gaps sidecar)
   /** 本场直播标题(来自 `{base}.session.json`);无则 undefined。 */
   title?: string;
+  /** Platform live id of this session (from `{base}.session.json`, issue #320); undefined = unknown. */
+  liveSessionId?: string;
   /**
    * 边录边传(T-33)结果 sidecar(`{base}.rolling.json`,录制端写):该会话由录制节点**自己**
    * 建稿/append 的分 P 与 BV。存在 = master **不得重复建稿**(否则重复投稿)。

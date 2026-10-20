@@ -19,6 +19,8 @@ export interface StreamInfo {
   title?: string;
   /** 分辨率/编码，如 "1088x1920 | H264" */
   streamDesc?: string;
+  /** Platform id of the broadcast being recorded (`PlatformStream.liveSessionId`); absent when unknown. */
+  liveSessionId?: string;
 }
 
 export interface RecordOpts {

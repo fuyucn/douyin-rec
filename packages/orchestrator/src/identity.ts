@@ -1,4 +1,4 @@
-import { isSameBroadcastGap, processTimeZone, SAME_BROADCAST_GAP_MS, zonedStamp } from "@drec/core";
+import { isSameBroadcast, isSameBroadcastGap, processTimeZone, SAME_BROADCAST_GAP_MS, zonedStamp } from "@drec/core";
 import type { NodeRecording } from "./transport.js";
 
 export interface BroadcastMember { workerId: string; rec: NodeRecording; }
@@ -8,12 +8,19 @@ function overlaps(a: NodeRecording, b: NodeRecording, tol: number): boolean {
   return isSameBroadcastGap(a.startMs - b.endMs, tol) && isSameBroadcastGap(b.startMs - a.endMs, tol);
 }
 
+/** Issue #320: live ids decide when both are known; otherwise the time-window overlap as before. */
+function sameBroadcast(a: NodeRecording, b: NodeRecording, tol: number): boolean {
+  if (a.liveSessionId && b.liveSessionId) return isSameBroadcast({ aLiveId: a.liveSessionId, bLiveId: b.liveSessionId, gapMs: 0 });
+  return overlaps(a, b, tol);
+}
+
 function ymd(ms: number, tz: string): string { return zonedStamp(ms, tz).date; }
 function hhmm(ms: number, tz: string): string { const z = zonedStamp(ms, tz); return `${z.hh}${z.mm}`; }
 
 /**
  * 跨节点把录像聚成「同一场直播」。**按 (platform, roomSlug) 分组**(douyin/bilibili 同房间号不撞),
- * 组内按时间窗(间隔 <= 60min 为同一场,core `SAME_BROADCAST_GAP_MS`)区间合并。streamKey = `{platform}:{roomSlug}:{date}`(同日多簇追加 _HHMM)。
+ * 组内按时间窗(间隔 <= 60min 为同一场,core `SAME_BROADCAST_GAP_MS`)区间合并;两条录像都带平台 liveId 时
+ * 只看 liveId 是否相同(issue #320,core `isSameBroadcast`)。streamKey = `{platform}:{roomSlug}:{date}`(同日多簇追加 _HHMM)。
  * platform 取自每条 rec(scan 从 meta.json 读;旧录像 fallback douyin);defaultPlatform 仅作极端兜底。
  */
 export function clusterBroadcasts(
@@ -47,7 +54,7 @@ export function clusterBroadcasts(
       cluster = [];
     };
     for (const m of members) {
-      if (cluster.length && cluster.some((c) => overlaps(c.rec, m.rec, overlapToleranceMs))) cluster.push(m);
+      if (cluster.length && cluster.some((c) => sameBroadcast(c.rec, m.rec, overlapToleranceMs))) cluster.push(m);
       else { flush(); cluster = [m]; }
     }
     flush();

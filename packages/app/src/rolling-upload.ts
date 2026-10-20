@@ -39,6 +39,7 @@ import {
 import path, { join } from "node:path";
 import {
   canDeleteRollingSource,
+  isSameBroadcast,
   isSameBroadcastGap,
   resolveSubmissionTitle,
   processTimeZone,
@@ -224,6 +225,16 @@ function hasUnsentContent(s: RollingState): boolean {
     if (confirmed.has(x.index)) return false;
     try { return statSync(x.path).size > 0; } catch { return false; }
   });
+}
+
+/** Platform live id the recorder wrote into `{base}.session.json` (issue #320); null when missing or unreadable. */
+function readSessionLiveId(dir: string, base: string): string | null {
+  try {
+    const d = JSON.parse(readFileSync(join(dir, `${base}.session.json`), "utf-8")) as { liveSessionId?: unknown };
+    return typeof d.liveSessionId === "string" && d.liveSessionId ? d.liveSessionId : null;
+  } catch {
+    return null;
+  }
 }
 
 /** A same-room sidecar found next to this session that started earlier. */
@@ -765,11 +776,21 @@ export class RollingUploader {
     const meaningful = cands.filter((c) => c.s.bv || c.s.uploading || (c.s.ambiguous?.length ?? 0) > 0 || hasUnsentContent(c.s));
     if (meaningful.length === 0) return { kind: "none" };
     const prev = meaningful.reduce((a, b) => (b.start > a.start ? b : a));
-    // A BV-less predecessor is an ordinary upload candidate for the master, which measures its window from the
-    // video end. Measure from the same clock (segment mtimes), not from sidecar writes (`closedAt` can land up to
-    // the slot wait later); otherwise the master may upload it while this session also takes it over (#317 review).
-    const ref = !prev.s.bv && prev.lastMedia > 0 ? prev.lastMedia : prev.last;
-    if (!isSameBroadcastGap(startMs - ref)) return { kind: "none" };
+    const prevLiveId = readSessionLiveId(this.segDir, prev.base);
+    const ownLiveId = readSessionLiveId(this.segDir, own);
+    if (!prev.s.bv) {
+      // A BV-less predecessor is an ordinary upload candidate for the master, which joins only by its time window
+      // (measured from the video end) and lets the live id only split. Use the same rule here, from the same clock
+      // (segment mtimes, not sidecar writes: `closedAt` can land a slot wait later), so the master never uploads it
+      // while this session also takes it over (#317 / #321 review).
+      if (prevLiveId && ownLiveId && prevLiveId !== ownLiveId) return { kind: "none" };
+      const ref = prev.lastMedia > 0 ? prev.lastMedia : prev.last;
+      if (!isSameBroadcastGap(startMs - ref)) return { kind: "none" };
+      return { kind: "found", prev };
+    }
+    // Issue #320: with a BV the master closes the session out without uploading, so the live id decides (also
+    // across a long recorder gap); without ids on both sides the 60-minute gap rule applies.
+    if (!isSameBroadcast({ aLiveId: prevLiveId, bLiveId: ownLiveId, gapMs: startMs - prev.last })) return { kind: "none" };
     return { kind: "found", prev };
   }
 
