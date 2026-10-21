@@ -18,11 +18,11 @@ export type { HubRule } from "./hub-store.js";
 // 文件版 worker(录制节点)配置(hub.config.json 的 workers 数组):cli reconciler + api 用。
 export * as workerStore from "./worker-store.js";
 export type { WorkerConfig } from "./worker-store.js";
-export { listHubJobs, readHubJobLog, jobLogPath, hubStageDir, buildQueueView, latestRunPerRoom } from "./hub-jobs.js";
+export { listHubJobs, readHubJobLog, jobLogPath, jobLogPaths, hubStageDir, hubLogsDir, buildQueueView, latestRunPerRoom } from "./hub-jobs.js";
 export type { HubJobView, HubJobEvent, BuildQueueOpts, LatestRunPerRoom } from "./hub-jobs.js";
 export { procQueueDbPath } from "./paths.js";
 export { handleEnqueue, handleProcStatus, nodeAllowedRoots, assertJobInvariantsReal, realpathDeep, decodeJobIds, encodeJobIds, remoteEnqueueKinds, handleProcCancel } from "./node-enqueue.js";
-export { drecRoot, rootHubDir, rootHubConfig, rootStageDir, rootOutputDir, rootBiliupCookies, DEFAULT_ROOT, ensureNodeIdentity, rootNodeIdentityPath } from "./paths.js";
+export { drecRoot, rootHubDir, rootHubConfig, rootStageDir, rootLogsDir, rootOutputDir, rootBiliupCookies, DEFAULT_ROOT, ensureNodeIdentity, rootNodeIdentityPath } from "./paths.js";
 export type { NodeIdentity } from "./paths.js";
 export { rootConfigDir } from "./paths.js";
 export { resolveDbPath } from "./db.js";

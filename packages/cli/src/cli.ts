@@ -1206,7 +1206,7 @@ const hubStarter: HubStarter = {
     const { ffprobeVideo } = await import("@drec/post-process");
     const { handleEnqueue, handleProcStatus, handleProcCancel } = await import("@drec/app");
     const { statSync } = await import("node:fs");
-    const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
+    const { uploadPlain, appendGroup, countVideoParts, hubStore, workerStore, rootHubDir, rootHubConfig, rootConfigDir, rootStageDir, rootLogsDir, drecRoot, listNodeTasks, applyRemoteTasks, resolveTaskStreamCookies } = await import("@drec/app");
     const { FileLogger } = await import("@drec/observability");
     const { recordExpectedVersion, recordSyncError } = await import("@drec/app");
 
@@ -1556,10 +1556,12 @@ const hubStarter: HubStarter = {
           procStatus: (ids: string[]) => handleProcStatus(drecRoot(), ids),
         },
       },
-      // job.log 的落盘实现由组合根装配:observability 的 FileLogger,路径由 core 的 resolveJobLogPath 解析
-      //(与 pipeline/hub-jobs 同一真理源)。orchestrator 只调 ScopedLogger 接口。
+      // Run logs are written by the composition root: observability FileLogger, path from core resolveJobLogPath
+      // (same source of truth as hub-jobs). New sessions log under <root>/logs/hub, outside stage, so stage
+      // cleanup can never swallow later log lines; a session whose legacy stage log exists keeps it (sticky).
+      // The orchestrator only sees the ScopedLogger interface.
       makeRunLogger: (streamKey: string) =>
-        new FileLogger(resolveJobLogPath(hubCfg.stageDir ?? rootStageDir(), streamKey)),
+        new FileLogger(resolveJobLogPath(hubCfg.stageDir ?? rootStageDir(), streamKey, { layout: "room", logsRoot: rootLogsDir() })),
       cfg: {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         // 磁盘水位闸门(issue #8):与下面的 Reconciler 看门狗**同源同解析**(core resolveDiskMinGB)。

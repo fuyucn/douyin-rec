@@ -742,7 +742,9 @@ async function readbackRollingParts(o: {
 }
 
 /**
- * 每场专属日志(`<stageSub>/job.log`,append-only,随 stage 产物持久保留)。
+ * Fallback per-session log (`<stageSub>/job.log`), used only when no run logger is injected (tests).
+ * Production injects the logger from the CLI, which writes under the logs dir instead of stage (issue #334).
+ * 每场专属日志(append-only)。
  * 记录选优明细/每步起止耗时/子命令输出摘尾/致命错误——补上「容器日志混杂且重启即丢」的复盘缺口。
  * 写失败静默(日志绝不反噬 pipeline)。
  */

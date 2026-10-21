@@ -60,4 +60,12 @@ describe("output path resolver is the only path builder (issue #333)", () => {
     const bad = files.flatMap((f) => violations(relative(ROOT, f), readFileSync(f, "utf-8")));
     expect(bad).toEqual([]);
   });
+
+  it("the hub run logger is wired to the logs dir (issue #334), not into stage", () => {
+    const cli = readFileSync(join(ROOT, "packages/cli/src/cli.ts"), "utf-8");
+    const m = /makeRunLogger:[\s\S]{0,400}?resolveJobLogPath\(([^;]*)\)\),/.exec(cli);
+    expect(m, "makeRunLogger must build its path via resolveJobLogPath").not.toBeNull();
+    expect(m![1]).toMatch(/layout:\s*"room"/);
+    expect(m![1]).toMatch(/logsRoot:\s*rootLogsDir\(\)/);
+  });
 });
