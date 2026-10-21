@@ -1,5 +1,5 @@
 import path from "node:path";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, rmdirSync } from "node:fs";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
@@ -305,6 +305,53 @@ export async function defaultRmStage(paths: string[]): Promise<void> {
   }
 }
 
+export type StageDirOutcome = "removed" | "kept" | "missing" | "failed";
+
+/**
+ * Master-side only (issue #335): after a `stageAfterDone` cleanup has deleted the known files of a finished,
+ * uploaded session, drop the now-empty session directory so no shell is left behind.
+ *
+ * Safety rules, all enforced here so the five call sites cannot get them wrong:
+ * - non-recursive `rmdir`: a directory that still holds anything (unknown file, a failed delete) is kept and
+ *   reported through `log`, never emptied by force;
+ * - only a real directory strictly inside `stageRoot` is touched (never the stage root, never a symlink);
+ * - never throws: cleanup failures must not turn a done job into a failed one (re-run = duplicate upload).
+ * Callers invoke it only after a successful upload confirmation with a BV and a clean `clean_stage`; stage
+ * delivery mode, needs_manual and no-BV sessions never reach those branches. Node-side stage directories are
+ * never passed here (the node result file is the duplicate-upload guard).
+ */
+export function removeEmptyStageDir(stageRoot: string, stageSub: string, log: (msg: string) => void): StageDirOutcome {
+  const rel = path.relative(path.resolve(stageRoot), path.resolve(stageSub));
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) { log(`stage dir not removed: ${stageSub} is not inside the stage root`); return "failed"; }
+  try {
+    if (!lstatSync(stageSub).isDirectory()) return "missing";
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "ENOENT" ? "missing" : failedStageDir(log, stageSub, e);
+  }
+  let names: string[];
+  try { names = readdirSync(stageSub); } catch (e) { return failedStageDir(log, stageSub, e); }
+  if (names.length > 0) return keptStageDir(log, stageSub, names);
+  try {
+    rmdirSync(stageSub);
+    return "removed";
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") return "missing";
+    if (code === "ENOTEMPTY" || code === "EEXIST") return keptStageDir(log, stageSub, readdirSyncSafe(stageSub));
+    return failedStageDir(log, stageSub, e);
+  }
+}
+
+function keptStageDir(log: (msg: string) => void, stageSub: string, names: string[]): StageDirOutcome {
+  log(`stage dir kept: ${names.length} file(s) remain (${names.slice(0, 5).join(", ")}${names.length > 5 ? ", ..." : ""})`);
+  return "kept";
+}
+
+function failedStageDir(log: (msg: string) => void, stageSub: string, e: unknown): StageDirOutcome {
+  log(`stage dir not removed (${stageSub}): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+  return "failed";
+}
+
 /** 读目录文件名(失败 → 空数组;清理路径用,绝不反噬)。分段模块与合并路径共用。 */
 export function readdirSyncSafe(dir: string): string[] {
   try { return readdirSync(dir); } catch { return []; }
@@ -455,7 +502,7 @@ export async function finalizeOnly(
     const left = stageVideoLeftovers(stageSub);
     if (left.length > 0) {
       deps.ledger.logStep(streamKey, "clean_stage", "start");
-      try { await rmStageFn(left); deps.ledger.logStep(streamKey, "clean_stage", "done", `删 ${left.length} 文件(补清 stage 视频类)`); }
+      try { await rmStageFn(left); deps.ledger.logStep(streamKey, "clean_stage", "done", `删 ${left.length} 文件(补清 stage 视频类)`); removeEmptyStageDir(cfg.stageDir, stageSub, jlog); }
       catch (e) {
         const msg = String((e as Error)?.message ?? e).slice(0, 200);
         deps.ledger.logStep(streamKey, "clean_stage", "done", `删 ${left.length} 文件 · 失败`);
@@ -1211,6 +1258,7 @@ async function runPipelineInner(
     catch (e) { stageFailed.push({ target: stageSub, error: String((e as Error)?.message ?? e).slice(0, 200) }); }
     if (stageFailed.length === 0) {
       ledger.logStep(streamKey, "clean_stage", "done", `删 ${present.length} 文件`);
+      removeEmptyStageDir(cfg.stageDir, stageSub, jlog);
     } else {
       ledger.logStep(streamKey, "clean_stage", "done", `删 ${present.length} 文件 · 失败`);
       ledger.syncNodeState(streamKey, "clean_stage", "failed", {
@@ -1375,7 +1423,7 @@ async function resumeAppends(
       ...stageVideoLeftovers(stageSub),
     ])];
     ledger.logStep(streamKey, "clean_stage", "start");
-    try { await rmStageFn(products); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件(不含 .xml/.ass)`); }
+    try { await rmStageFn(products); ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件(不含 .xml/.ass)`); removeEmptyStageDir(cfg.stageDir, stageSub, jlog); }
     catch (e) {   // 同上:清理失败不外抛(否则整场被判 failed → 重跑 = 重复投稿)
       const msg = String((e as Error)?.message ?? e).slice(0, 200);
       ledger.logStep(streamKey, "clean_stage", "done", `删 ${products.length} 文件 · 失败`);
