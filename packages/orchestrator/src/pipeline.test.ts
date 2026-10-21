@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupSourcesShared, consecutiveSidecarSkips, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, consecutiveSidecarSkips, removeEmptyStageDir, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
 import { closeStageReady, STAGE_READY } from "@drec/core";
@@ -260,6 +260,21 @@ describe("runPipeline", () => {
         Object.assign(deps, o);
         return deps;
       }
+
+      it("issue #335: stageAfterDone also removes the emptied session dir on the segment path", async () => {
+        const deps = segUploadDeps();
+        (deps as { cfg: PipelineCfg }).cfg = { ...deps.cfg, cleanup: { stageAfterDone: true } };
+        // real deletion and a silent run logger (the fallback logger would put a log file into the dir)
+        Object.assign(deps, {
+          rmStage: async (paths: string[]) => { for (const p of paths) rmSync(p, { force: true, recursive: true }); },
+          makeRunLogger: () => ({ info: () => {}, warn: () => {}, error: () => {} }),
+        });
+        const b = SEG_BC();
+        deps.ledger.upsertPending(b.streamKey);
+        expect((await runPipeline(b, deps)).state).toBe("done");
+        expect(existsSync(stageSubOf(deps))).toBe(false);
+        deps.ledger.close();
+      });
       async function runSeg(deps: TestDeps) {
         const b = SEG_BC();
         deps.ledger.upsertPending(b.streamKey);
@@ -2069,6 +2084,21 @@ describe("runPipeline", () => {
       expect(deps.uploadPlain).not.toHaveBeenCalled();   // 绝不重复投稿
     });
 
+    it("issue #335: the cleanup-only re-run removes a stage dir once its leftovers are gone, and never uploads", async () => {
+      const deps = uploadDeps({ countParts: async () => 3 }, { cleanup: { sourceAfterDone: true, stageAfterDone: true } });
+      Object.assign(deps, { makeRunLogger: () => ({ info: () => {}, warn: () => {}, error: () => {} }) });
+      const b = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+      deps.ledger.upsertPending(b.streamKey, b.startMs);
+      deps.ledger.setBv(b.streamKey, "BV123");
+      deps.ledger.markDone(b.streamKey, "BV123");
+      mkdirSync(stageSubOf(deps), { recursive: true });
+      writeFileSync(join(stageSubOf(deps), "leftover.ts"), "x"); // a video leftover the first run missed
+      expect((await runPipeline(b, deps)).state).toBe("done");
+      expect(existsSync(stageSubOf(deps))).toBe(false);
+      expect(deps.uploadPlain).not.toHaveBeenCalled();
+      deps.ledger.close();
+    });
+
     it("stage 清理失败(rmStage 抛错)→ job 仍 done + clean_stage=failed", async () => {
       const deps = uploadDeps({
         countParts: async () => 3,
@@ -2558,5 +2588,161 @@ describe("consecutiveSidecarSkips legacy rows (issue #176)", () => {
     const unknown = (phase: string) => ({ step: "pull", phase, detail: `${SIDECAR_UNKNOWN_PREFIX}unreachable` });
     expect(consecutiveSidecarSkips([skip("done", 1), unknown("done"), skip("skipped", 2)])).toBe(2);
     expect(consecutiveSidecarSkips([skip("done", 1), { step: "pull", phase: "done", detail: "2 文件" }, skip("skipped", 2)])).toBe(1);
+  });
+});
+
+describe("empty stage dir removal after stageAfterDone (issue #335)", () => {
+  const cleanupCfg = (deps: TestDeps, over: Partial<PipelineCfg> = {}): PipelineCfg => ({ ...deps.cfg, cleanup: { stageAfterDone: true }, ...over });
+  /** The merge input safety check needs a non-empty stage dir; pull is mocked, so seed one source file. */
+  const seedStage = (deps: TestDeps): void => {
+    mkdirSync(stageSubOf(deps), { recursive: true });
+    writeFileSync(join(stageSubOf(deps), "src.ts"), "x");
+  };
+  const capture = (): { lines: string[]; logger: PipelineDeps["makeRunLogger"] } => {
+    const lines: string[] = [];
+    const push = (...a: unknown[]): void => { lines.push(a.join(" ")); };
+    return { lines, logger: () => ({ info: push, warn: push, error: () => {} }) };
+  };
+
+  it("done + upload + stageAfterDone: known files removed, then the session dir itself is gone", async () => {
+    const base = makeDeps();
+    const log = capture();
+    const deps = makeDeps({ cfg: cleanupCfg(base), makeRunLogger: log.logger });
+    seedStage(deps);
+    const b = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    deps.ledger.upsertPending(b.streamKey);
+    const r = await runPipeline(b, deps);
+    expect(r.state).toBe("done");
+    expect(existsSync(stageSubOf(deps))).toBe(false);
+    deps.ledger.close();
+  });
+
+  it("an unknown file keeps the directory (non-recursive rmdir) and the log says so", async () => {
+    const log = capture();
+    const base = makeDeps();
+    const stageSub = join(base.cfg.stageDir, "douyin_test-room_2026-06-27");
+    const deps = makeDeps({
+      cfg: cleanupCfg(base),
+      makeRunLogger: log.logger,
+      // real delete of the listed paths, then something nobody knows about shows up
+      rmStage: async (paths: string[]) => {
+        for (const p of paths) rmSync(p, { force: true, recursive: true });
+        writeFileSync(join(stageSub, "mystery.bin"), "x");
+      },
+    });
+    seedStage(deps);
+    const b = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    deps.ledger.upsertPending(b.streamKey);
+    const r = await runPipeline(b, deps);
+    expect(r.state).toBe("done");
+    expect(existsSync(join(stageSubOf(deps), "mystery.bin"))).toBe(true);
+    expect(log.lines.some((l) => l.includes("stage dir kept") && l.includes("mystery.bin"))).toBe(true);
+    deps.ledger.close();
+  });
+
+  it("a failed stage cleanup never removes the directory (even if it is empty by then)", async () => {
+    const base = makeDeps();
+    const deps = makeDeps({
+      cfg: cleanupCfg(base),
+      makeRunLogger: () => ({ info: () => {}, warn: () => {}, error: () => {} }),
+      // deletes everything, then reports failure: the dir is empty but the cleanup did not succeed
+      rmStage: async (paths: string[]) => {
+        for (const p of paths) rmSync(p, { force: true, recursive: true });
+        throw new Error("simulated cleanup failure");
+      },
+    });
+    seedStage(deps);
+    const b = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    deps.ledger.upsertPending(b.streamKey);
+    expect((await runPipeline(b, deps)).state).toBe("done");
+    expect(existsSync(stageSubOf(deps))).toBe(true);
+    expect(deps.ledger.getNodeStates(b.streamKey).find((n) => n.node === "clean_stage")?.state).toBe("failed");
+    deps.ledger.close();
+  });
+
+  it("stageAfterDone off: the directory and its files stay", async () => {
+    const base = makeDeps();
+    const deps = makeDeps({ cfg: { ...base.cfg, cleanup: { sourceAfterDone: true } } });
+    const b = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    deps.ledger.upsertPending(b.streamKey);
+    expect((await runPipeline(b, deps)).state).toBe("done");
+    expect(existsSync(stageSubOf(deps))).toBe(true);
+    deps.ledger.close();
+  });
+
+  it("stage delivery mode (nothing uploaded): never touched even with stageAfterDone", async () => {
+    const base = makeDeps();
+    const deps = makeDeps({ cfg: cleanupCfg(base, { uploadMode: "stage" }) });
+    const b = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    deps.ledger.upsertPending(b.streamKey);
+    await runPipeline(b, deps);
+    expect(existsSync(stageSubOf(deps))).toBe(true);
+    expect(readdirSync(stageSubOf(deps)).length).toBeGreaterThan(0);
+    deps.ledger.close();
+  });
+
+  it("no BV: the job never reaches done and the directory and its files are untouched", async () => {
+    const base = makeDeps();
+    const deps = makeDeps({ cfg: cleanupCfg(base) });
+    deps.uploadPlain.mockResolvedValue("");
+    seedStage(deps);
+    const b = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    deps.ledger.upsertPending(b.streamKey);
+    const r = await runPipeline(b, deps);
+    expect(r.state).not.toBe("done");
+    expect(readdirSync(stageSubOf(deps)).length).toBeGreaterThan(0);
+    deps.ledger.close();
+  });
+
+  describe("removeEmptyStageDir", () => {
+    const mkRoot = (): { root: string; sub: string; lines: string[]; log: (m: string) => void } => {
+      const root = mkdtempSync(join(tmpdir(), "stagedir-"));
+      const sub = join(root, "douyin_x_2026-01-01");
+      const lines: string[] = [];
+      return { root, sub, lines, log: (m) => lines.push(m) };
+    };
+
+    it("removes an empty dir; a rerun after a crash is a safe no-op", () => {
+      const t = mkRoot();
+      mkdirSync(t.sub);
+      expect(removeEmptyStageDir(t.root, t.sub, t.log)).toBe("removed");
+      expect(removeEmptyStageDir(t.root, t.sub, t.log)).toBe("missing");
+      expect(t.lines).toEqual([]);
+    });
+    it("keeps a non-empty dir untouched (never recursive) and reports the names", () => {
+      const t = mkRoot();
+      mkdirSync(join(t.sub, "nested"), { recursive: true });
+      writeFileSync(join(t.sub, "a.xml"), "x");
+      expect(removeEmptyStageDir(t.root, t.sub, t.log)).toBe("kept");
+      expect(existsSync(join(t.sub, "a.xml"))).toBe(true);
+      expect(t.lines[0]).toContain("stage dir kept");
+    });
+    it("a file that appears between the listing and the rmdir keeps the dir (ENOTEMPTY is not forced)", async () => {
+      const t = mkRoot();
+      mkdirSync(t.sub);
+      const fs = await import("node:fs");
+      vi.mocked(fs.rmdirSync).mockImplementationOnce(() => {
+        writeFileSync(join(t.sub, "late.bin"), "x");
+        throw Object.assign(new Error("ENOTEMPTY: directory not empty"), { code: "ENOTEMPTY" });
+      });
+      expect(removeEmptyStageDir(t.root, t.sub, t.log)).toBe("kept");
+      expect(existsSync(join(t.sub, "late.bin"))).toBe(true);
+      expect(t.lines[0]).toContain("late.bin");
+    });
+    it("never removes the stage root or anything outside it", () => {
+      const t = mkRoot();
+      expect(removeEmptyStageDir(t.root, t.root, t.log)).toBe("failed");
+      expect(existsSync(t.root)).toBe(true);
+      const outside = mkdtempSync(join(tmpdir(), "outside-"));
+      expect(removeEmptyStageDir(t.root, outside, t.log)).toBe("failed");
+      expect(existsSync(outside)).toBe(true);
+    });
+    it("does not follow or remove a symlink", () => {
+      const t = mkRoot();
+      const target = mkdtempSync(join(tmpdir(), "linktarget-"));
+      symlinkSync(target, t.sub);
+      expect(removeEmptyStageDir(t.root, t.sub, t.log)).toBe("missing");
+      expect(existsSync(target)).toBe(true);
+    });
   });
 });

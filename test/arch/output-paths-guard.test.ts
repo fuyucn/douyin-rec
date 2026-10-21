@@ -69,3 +69,12 @@ describe("output path resolver is the only path builder (issue #333)", () => {
     expect(m![1]).toMatch(/logsRoot:\s*rootLogsDir\(\)/);
   });
 });
+
+describe("node-side stage is never removed as a whole directory (issue #335)", () => {
+  it("app node pipeline and node commands do not use the empty-dir remover or rmdir", () => {
+    for (const f of ["packages/app/src/node-pipeline.ts", "packages/cli/src/node-pipeline-commands.ts", "packages/app/src/node-enqueue.ts"]) {
+      const src = readFileSync(join(ROOT, f), "utf-8");
+      expect(src, f).not.toMatch(/removeEmptyStageDir|rmdirSync/);
+    }
+  });
+});

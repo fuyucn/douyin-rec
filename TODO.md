@@ -14,6 +14,13 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-100 完成后清 stage:清理后删除空场次目录(master 侧)（issue [#335](https://github.com/fuyucn/douyin-rec/issues/335)）**
+  — 2026-10-21 认领,分支 `codex/issue-335-empty-stage-dir`,**叠在 T-99（#334,PR #339）之上**,base 为该分支（**未合并 / 未部署 / 未 close**;RISK,不自动合并）。
+  **做什么**：master 侧 `stageAfterDone` 清理成功后,对场次目录做**非递归** rmdir(只删已知文件,目录里还有东西就保留并写日志告警);只在「上传已确认 + 有稿件号 + 清理无失败」的分支里调用;只允许 stage 根目录内的真目录(不删根、不跟符号链接);从不外抛。
+  **为什么**：#5 空壳目录堆积;日志已由 T-99 移出 stage,这里删的只是空目录。
+  **验收**：done 且勾选清理 → 目录消失、日志仍在;目录不空 / 未上传(stage 交付)/ 无稿件号 / needs_manual → 不动;节点侧 stage 与节点结果文件不动(架构守护);变异验证(五处调用点逐个撤、非递归改强删均红);全量门禁通过。
+  **注意**：已堆积的旧空壳目录不在本条范围(旧目录里有旧日志,保留);仅对之后完成的场次生效。
+
 - [~] **T-99 场次日志移出 stage 到独立日志目录,永久保留（issue [#334](https://github.com/fuyucn/douyin-rec/issues/334)）**
   — 2026-10-21 认领,分支 `codex/issue-334-job-log-relocation`,**叠在 `codex/issue-333-path-resolver`（T-98,PR #338,RISK 待 owner 拍板）之上**,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：新场次日志写 `<root>/logs/hub/<平台>_<房间号>/<场次>.log`（经 T-98 解析函数,不做跨盘搬迁）;读日志 / hasLog / 删除场次历史三处同时兼容新旧路径;旧场次若 stage 内已有 job.log 则继续写旧路径（sticky）。
