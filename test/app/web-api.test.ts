@@ -8,6 +8,7 @@
  */
 import { buildRecordArgs } from "../../packages/app/src/process/record-args.js";
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { platformForRoom } from "@drec/core";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1002,6 +1003,35 @@ describe("GET /recordings + POST /merge 校验", () => {
     expect(body.sessions[0]).toMatchObject({ segments: 2, hasXml: true });
     expect(body.sessions[1]).toMatchObject({ segments: 1, hasXml: false });
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("issue #336: listRecordings shows sessions of the old name dir AND the room dir; the layout switch picks the primary", () => {
+    const root = mkdtempSync(join(tmpdir(), "rec_room_"));
+    const savedRoot = process.env.DOUYIN_REC_ROOT;
+    process.env.DOUYIN_REC_ROOT = root;
+    try {
+      const out = join(root, "recordings");
+      const p = platformForRoom("111");
+      const roomDir = join(out, `Renamed_${p.id}_${p.extractRoomSlug("111")}`);
+      mkdirSync(join(out, "主播A"), { recursive: true });
+      mkdirSync(roomDir, { recursive: true });
+      writeFileSync(join(out, "主播A", "主播A_2026-06-15_08-00-00.ts"), "");
+      writeFileSync(join(roomDir, "主播A_2026-06-16_08-00-00.ts"), "");
+      const t = api.createTask({ room: "111", name: "主播A" }).body as { id: number };
+      // switch off (default): legacy dir is primary, but the new session is still listed
+      const off = api.listRecordings(t.id).body as { dir: string; sessions: { base: string }[] };
+      expect(off.dir).toBe(join(out, "主播A"));
+      expect(off.sessions.map((x) => x.base)).toEqual(["主播A_2026-06-15_08-00-00", "主播A_2026-06-16_08-00-00"]);
+      // switch on: the room dir is primary, the old session is still listed
+      mkdirSync(join(root, "config"), { recursive: true });
+      writeFileSync(join(root, "config", "output-layout.json"), JSON.stringify({ layout: "room" }));
+      const on = api.listRecordings(t.id).body as { dir: string; sessions: { base: string }[] };
+      expect(on.dir).toBe(roomDir);
+      expect(on.sessions.map((x) => x.base)).toEqual(["主播A_2026-06-15_08-00-00", "主播A_2026-06-16_08-00-00"]);
+    } finally {
+      if (savedRoot === undefined) delete process.env.DOUYIN_REC_ROOT; else process.env.DOUYIN_REC_ROOT = savedRoot;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("startMerge 未启用 mergeJobs → 501", () => {

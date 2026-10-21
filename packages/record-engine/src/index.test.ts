@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -91,6 +91,61 @@ describe("platform live id (issue #320)", () => {
     proc.exitCode = 0;
     proc.emit("close", 0, null);
     await vi.advanceTimersByTimeAsync(1);
+    rmSync(outDir, { recursive: true, force: true });
+  });
+});
+
+describe("recording directory layout (issue #336)", () => {
+  const layoutPlatform = (owner: string): Platform => ({
+    ...makePlatform(true),
+    id: "test-layout",
+    matchUrl: (url) => /layout\.local/.test(url),
+    extractRoomSlug: (url) => /(\d+)$/.exec(url)?.[1] ?? url,
+    getStream: async () => ({ living: true, url: "http://layout.local/live.flv", owner, liveSessionId: "l-1" }),
+  });
+
+  async function dirFor(outputLayout: "legacy" | "room" | undefined, setup?: (outDir: string) => void, owner = "AnchorA"): Promise<{ dir: string; outDir: string }> {
+    vi.useFakeTimers();
+    registerPlatform(layoutPlatform(owner));
+    const proc = new FakeProc();
+    let dir = "";
+    const engine: DownloadEngine = {
+      id: "fake",
+      spawn: (o) => { dir = o.dir; return { proc: proc as unknown as ChildProcess, sessionFirstPath: join(o.dir, "a.ts") }; },
+    };
+    const rec = new PollingRecorder(engine);
+    const ev: RecorderEvents = { onLive: vi.fn(), onSegment: vi.fn(), onOffline: vi.fn(), onError: vi.fn(), onProbeError: vi.fn() };
+    const outDir = mkdtempSync(join(tmpdir(), "rec-layout-"));
+    setup?.(outDir);
+    await rec.start("https://layout.local/live/4242", { quality: "origin", outDir, segmentSec: 0, ...(outputLayout ? { outputLayout } : {}) }, ev);
+    await vi.advanceTimersByTimeAsync(1);
+    proc.exitCode = 0;
+    proc.emit("close", 0, null);
+    await vi.advanceTimersByTimeAsync(1);
+    return { dir, outDir };
+  }
+
+  it("default stays the old name directory (switch off = unchanged behaviour)", async () => {
+    const { dir, outDir } = await dirFor(undefined);
+    expect(dir).toBe(join(outDir, "AnchorA"));
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("room layout creates <name>_<platform>_<room>, even when an old name directory exists", async () => {
+    const { dir, outDir } = await dirFor("room", (o) => mkdirSync(join(o, "AnchorA")));
+    expect(dir).toBe(join(outDir, "AnchorA_test-layout_4242"));
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("an anchor rename does not move the room: the suffix-matched directory is reused", async () => {
+    const { dir, outDir } = await dirFor("room", (o) => mkdirSync(join(o, "OldNick_test-layout_4242")), "NewNick");
+    expect(dir).toBe(join(outDir, "OldNick_test-layout_4242"));
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  it("unknown anchor name falls back to the room number instead of failing", async () => {
+    const { dir, outDir } = await dirFor("room", undefined, "");
+    expect(dir).toBe(join(outDir, "4242_test-layout_4242"));
     rmSync(outDir, { recursive: true, force: true });
   });
 });

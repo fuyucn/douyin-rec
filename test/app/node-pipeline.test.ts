@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveTitles } from "../../packages/app/src/node-pipeline.js";
-import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson } from "@drec/core";
+import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson, stageSessionDir } from "@drec/core";
 import { tryDirectTsLink, nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, runNodeSidePipeline, splitGroupsBySession, writeNodeResult, abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath } from "../../packages/app/src/node-pipeline.js";
 import { remuxSegment, ffprobeDuration } from "@drec/post-process";
 import { uploadPlain, appendGroup, countVideoParts, runBiliup } from "../../packages/app/src/upload/biliup.js";
@@ -499,6 +499,54 @@ describe("issue #2 A1:started 在 remux 之前落盘(执行体中途死仍可见
     const r = readNodeResult(sub);
     expect(r?.phase).toBe("started"); // started 写在 produceParts 之前 → 中途死也留痕
     expect(r?.bv).toBeUndefined();    // started 不代表已建稿
+  });
+
+  describe("issue #336: node-local layout switch", () => {
+    const withSwitch = async (layout: "room" | undefined, body: () => Promise<void>): Promise<void> => {
+      const saved = process.env.DOUYIN_REC_ROOT;
+      const dataRoot = mkdtempSync(join(tmpdir(), "node-layout-"));
+      process.env.DOUYIN_REC_ROOT = dataRoot;
+      if (layout) {
+        mkdirSync(join(dataRoot, "config"), { recursive: true });
+        writeFileSync(join(dataRoot, "config", "output-layout.json"), JSON.stringify({ layout }));
+      }
+      try { await body(); } finally { if (saved === undefined) delete process.env.DOUYIN_REC_ROOT; else process.env.DOUYIN_REC_ROOT = saved; }
+    };
+
+    it("switch on: a new session dir is the room dir (room number stands in for the unknown anchor name); result readable after the switch is turned off", async () => {
+      const { stageDir, spec } = uploadScene();
+      await withSwitch("room", async () => {
+        vi.mocked(remuxSegment).mockImplementationOnce(() => { throw new Error("remux boom"); });
+        await expect(runNodeSidePipeline(spec, silence)).rejects.toThrow(/remux boom/);
+        const roomSub = join(stageDir, "123_douyin_123", "2026-10-12");
+        expect(readNodeResult(roomSub)?.phase).toBe("started");
+        expect(existsSync(join(stageDir, "douyin_123_2026-10-12"))).toBe(false);
+      });
+      // switch off again: the node-side lookup (what _node-result / _node-abort use) still finds the room-layout result
+      await withSwitch(undefined, async () => {
+        expect(readNodeResult(stageSessionDir(stageDir, "douyin:123:2026-10-12"))?.phase).toBe("started");
+      });
+    });
+
+    it("switch on but the session already runs in the old layout: it stays there (no re-upload from a fresh dir)", async () => {
+      const { stageDir, sub, spec } = uploadScene();
+      mkdirSync(sub, { recursive: true });
+      await withSwitch("room", async () => {
+        vi.mocked(remuxSegment).mockImplementationOnce(() => { throw new Error("remux boom"); });
+        await expect(runNodeSidePipeline(spec, silence)).rejects.toThrow(/remux boom/);
+        expect(readNodeResult(sub)?.phase).toBe("started");
+        expect(existsSync(join(stageDir, "123_douyin_123"))).toBe(false);
+      });
+    });
+
+    it("switch off (default): the old layout, exactly as before", async () => {
+      const { sub, spec } = uploadScene();
+      await withSwitch(undefined, async () => {
+        vi.mocked(remuxSegment).mockImplementationOnce(() => { throw new Error("remux boom"); });
+        await expect(runNodeSidePipeline(spec, silence)).rejects.toThrow(/remux boom/);
+        expect(readNodeResult(sub)?.phase).toBe("started");
+      });
+    });
   });
 
   it("执行体接管即写 pid 文件(.drec-node-executor.pid)供 _node-abort 定位", async () => {

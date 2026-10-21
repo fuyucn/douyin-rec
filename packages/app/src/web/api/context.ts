@@ -6,12 +6,12 @@
  */
 import {
   isUploadingMode, normalizeUploadMode, pipelineBurns, resolveRollingPolicy, rollingReasonText, listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
-  zeroDiskRuleError, redactTaskSecrets, recordingRoomDir,
+  zeroDiskRuleError, redactTaskSecrets, recordingRoomDir, recordingRoomDirCandidates,
   type WorkerDTO, type HubPipelineConfig, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO,
 } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
 import * as workerStore from "../../worker-store.js";
-import { rootHubDir, rootHubConfig, resolveOutputDir } from "../../paths.js";
+import { rootHubDir, rootHubConfig, resolveOutputDir, readOutputLayout } from "../../paths.js";
 import { resolveTaskCookies, type Task } from "../../store.js";
 import { readBiliupCookieHeader } from "../../upload/biliup.js";
 import { listHubJobs } from "../../hub-jobs.js";
@@ -59,6 +59,8 @@ export interface ApiCtx {
     override?: { taskId: number | null; streamUpload: boolean },
   ) => string | null;
   settleLegacyRolling: (sourceTaskId: number | null | undefined, mode: unknown) => void;
+  /** Every directory that may hold this task's recordings (current layout first, old layout after), existing or not. */
+  recordingsDirs: (t: Task) => string[];
   recordingsDir: (t: Task) => string | null;
   platformCookie: (platform: string) => { value: string | null; source: CookieStatus["source"] };
   biliupStatus: () => BiliupAuthStatus;
@@ -336,10 +338,26 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     return null;
   };
 
+  const roomOfTask = (t: Task): { platform: string; roomSlug: string } | undefined => {
+    try {
+      const p = platformForRoom(t.room);
+      return { platform: p.id, roomSlug: p.extractRoomSlug(t.room) };
+    } catch { return undefined; }
+  };
+  /** Recording dir where NEW sessions of this task go (the layout switch decides). */
   const recordingsDir = (t: Task): string | null => {
     const outDir = resolveOutputDir(t.outDir);
     const anchor = manager.getAnchorName(t.id) ?? t.anchorName ?? "";
-    return recordingRoomDir(outDir, [t.name, anchor]);
+    const room = roomOfTask(t);
+    return recordingRoomDir(outDir, [t.name, anchor], room ? { ...room, anchorName: t.name || anchor } : undefined, { layout: readOutputLayout() });
+  };
+  /** Both layouts' directories: old sessions stay visible after the switch (they are read-only history, not migrated). */
+  const recordingsDirs = (t: Task): string[] => {
+    const outDir = resolveOutputDir(t.outDir);
+    const anchor = manager.getAnchorName(t.id) ?? t.anchorName ?? "";
+    const all = recordingRoomDirCandidates(outDir, [t.name, anchor], roomOfTask(t));
+    const primary = recordingsDir(t);
+    return primary ? [primary, ...all.filter((d) => d !== primary)] : all;
   };
 
   const platformCookie = (platform: string): { value: string | null; source: CookieStatus["source"] } => {
@@ -379,7 +397,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
   return {
     deps, store, manager, hubDir, hubConfigPath,
     err, isHubSourceTask, workerToDto, resolveAnchorBg, view, detailView,
-    validateWorkers, validatePipeline, hubRuleView, recordingError, zeroDiskErrorFor, zeroDiskRoomError, settleLegacyRolling, recordingsDir,
+    validateWorkers, validatePipeline, hubRuleView, recordingError, zeroDiskErrorFor, zeroDiskRoomError, settleLegacyRolling, recordingsDir, recordingsDirs,
     platformCookie, biliupStatus, validCookiePlatform,
     normWebhook, toUseCookie, cookieStatus,
   };

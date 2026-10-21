@@ -31,6 +31,39 @@ describe("scanRecordings", () => {
     expect(recordings[0].endMs).toBe(1_700_001_800_000);
   });
 
+  it("issue #336: a room-layout dir names its room, so sidecar-less recordings cluster with the old-layout dir of the same room", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-room-"));
+    // old layout: anchor-name dir, room known from the session sidecar
+    const oldDir = join(root, "OldName"); mkdirSync(oldDir);
+    writeFileSync(join(oldDir, "OldName_2026-06-27_07-00-00_000.ts"), "x");
+    writeFileSync(join(oldDir, "OldName_2026-06-27_07-00-00.session.json"), JSON.stringify({ roomSlug: "555", platform: "douyin", gaps: [] }));
+    // new layout: no sidecar at all (old recording copied in / sidecar lost); the dir suffix is the only room evidence
+    const newDir = join(root, "NewName_douyin_555"); mkdirSync(newDir);
+    writeFileSync(join(newDir, "NewName_2026-06-27_09-30-00_000.ts"), "x");
+    const other = join(root, "Other_bilibili_777"); mkdirSync(other);
+    writeFileSync(join(other, "Other_2026-06-27_09-30-00_000.ts"), "x");
+
+    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1_700_000_000_000, endMs: 1_700_000_060_000 }));
+    const byBase = Object.fromEntries(recs.map((r) => [r.sessionBase, r]));
+    expect(byBase["NewName_2026-06-27_09-30-00"]).toMatchObject({ roomSlug: "555", platform: "douyin" });
+    expect(byBase["OldName_2026-06-27_07-00-00"]).toMatchObject({ roomSlug: "555", platform: "douyin" });
+    expect(byBase["Other_2026-06-27_09-30-00"]).toMatchObject({ roomSlug: "777", platform: "bilibili" });
+    // same (platform, room) => one broadcast across the two directories
+    const b = clusterBroadcasts([{ workerId: "n", recordings: recs.filter((r) => r.roomSlug === "555") }] as never, 60_000_000);
+    expect(b).toHaveLength(1);
+    expect(b[0].members[0].rec.roomSlug).toBe("555");
+  });
+
+  it("issue #336: an old anchor-name dir that merely looks like a room dir keeps its task mapping (mapping beats the suffix)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-look-"));
+    const dir = join(root, "Fan_douyin_club"); mkdirSync(dir);
+    writeFileSync(join(dir, "Fan_douyin_club_2026-06-27_07-00-00_000.ts"), "x");
+    const recs = await scanRecordings(root, { "Fan_douyin_club": "321" }, async () => ({ durationSec: 60, startMs: 1_700_000_000_000, endMs: 1_700_000_060_000 }));
+    expect(recs[0]).toMatchObject({ roomSlug: "321", platform: "douyin" });
+    const recs2 = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1_700_000_000_000, endMs: 1_700_000_060_000 }));
+    expect(recs2[0]).toMatchObject({ roomSlug: "club", platform: "douyin" }); // no mapping: the suffix is the only evidence
+  });
+
   it("totalBytes = 本场所有 .ts 的字节数之和(issue #25 ①);无 ts 的会话不上报", async () => {
     const root = mkdtempSync(join(tmpdir(), "scan-"));
     const dir = join(root, "主播B"); mkdirSync(dir);

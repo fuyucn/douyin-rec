@@ -4,7 +4,7 @@ import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
@@ -274,6 +274,12 @@ export interface PipelineDeps {
   /** 按 streamKey 造该场的 run 级 Logger(job.log)。缺省=内置文件直写(兼容旧行为/测试)。
    *  CLI 注入 @drec/observability 的 FileLogger,使「怎么落盘」由组合根装配、orchestrator 只调 ScopedLogger 接口。 */
   makeRunLogger?: (streamKey: string) => ScopedLogger;
+  /**
+   * Master-local stage layout switch (issue #336), read per run so flipping the node's switch file needs no
+   * restart. Only decides where a NEW session dir is created (`<name>_<platform>_<room>/<date>`); a session
+   * dir that already exists, in either layout, is always reused. Omitted = legacy.
+   */
+  stageLayout?: () => PathLayout;
   /** append 就地重试的退避 sleep(可注入测试,免真等 5s)。省略 → retry 内置 setTimeout。 */
   sleep?: (ms: number) => Promise<void>;
   /**
@@ -862,7 +868,13 @@ async function runPipelineInner(
   const { burnDanmu, burnLivechat } = burnFlags(cfg.steps); // 默认开
   const clean = cfg.cleanup ?? {};
   const { streamKey } = b;
-  const stageSub = stageSessionDir(cfg.stageDir, streamKey);
+  // The anchor name only names a NEW room directory; it is read off the stamped session base of the earliest member.
+  const earliestBase = [...b.members].sort((x, y) => x.rec.startMs - y.rec.startMs)[0]?.rec.sessionBase;
+  const stageSub = stageSessionDir(cfg.stageDir, streamKey, {
+    layout: deps.stageLayout?.(),
+    anchorName: earliestBase ? anchorNameOfSessionBase(earliestBase) : null,
+    warn: jlog,
+  });
   // 后处理产物容器:唯一出处 core effectiveStageFormat(original→mp4;投稿强制 mp4)。
   const stageFmt = effectiveStageFormat(cfg.outputFormat, cfg.uploadMode);
 

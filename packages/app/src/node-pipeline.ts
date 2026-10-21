@@ -23,7 +23,7 @@ import {
 } from "@drec/core";
 import { ffprobeDuration, mergeSession, planSegmentGroups, remuxSegment, unreadableParts } from "@drec/post-process";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain } from "./upload/biliup.js";
-import { procQueueDbPath, rootBiliupCookies, rootDbPath, rootStageDir } from "./paths.js";
+import { procQueueDbPath, rootBiliupCookies, rootDbPath, rootStageDir, readOutputLayout } from "./paths.js";
 
 /**
  * 节点侧上传的**限流闸门**(030 T19,T-18 房间不上传风暴)。
@@ -622,7 +622,8 @@ export async function runNodeSidePipeline(
   // (master 侧某些配置下 stageDir 为空),整条节点侧上传必然失败(线上实测 3 次全挂转人工)。
   // 现改为:优先 spec.stageDir(仅在它确实存在时,兼容手工/测试场景),否则落节点自己的 stage。
   const stageRoot = spec.stageDir && existsSync(spec.stageDir) ? spec.stageDir : rootStageDir();
-  const stageSub = stageSessionDir(stageRoot, spec.streamKey);
+  // Node-local layout switch decides only where a NEW session dir is created; an existing one (either layout) is reused.
+  const stageSub = stageSessionDir(stageRoot, spec.streamKey, { layout: readOutputLayout() });
   // 幂等重入的**已建稿证据**优先于源文件校验(源可能已被上次成功清理),故 done+bv 早返回放在此。
   log(`=== 节点侧管线 start ${spec.streamKey} 段数=${spec.tsFiles.length} mode=${spec.uploadMode} ===`);
 

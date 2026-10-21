@@ -16,7 +16,7 @@
 import { resolve, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { createLogger, platformForRoom, sanitizePathSegment, processTimeZone, zonedStamp, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
+import { createLogger, platformForRoom, recordingRoomDir, sanitizePathSegment, processTimeZone, zonedStamp, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
 import { logStreamMeta, type StreamMetaSource } from "@drec/ffmpeg-recorder-extra";
 
 const log = createLogger("stream_recorder");
@@ -87,6 +87,8 @@ export class PollingRecorder implements Recorder {
   protected quality: RecordOpts["quality"] = "origin";
   protected outDir = "";
   protected outName?: string;
+  /** New-session directory layout (issue #336); legacy unless the node switch is on. */
+  protected outputLayout: "legacy" | "room" = "legacy";
   /** 任务 cookie:原样透传给 platform.getStream,平台自决用不用(抖音忽略保持匿名,bilibili 可用)。 */
   protected cookies?: string;
   protected segSec = 0;
@@ -145,7 +147,15 @@ export class PollingRecorder implements Recorder {
     if (probe.raw) logStreamMeta(url, probe.raw as StreamMetaSource, this.quality);
 
     const safe = sanitizePathSegment(this.outName || owner) || this.channelId;
-    const dir = join(this.outDir, safe);
+    // Directory via the core resolver. Legacy: <out>/<name> (channel id when the name is empty), exactly as before.
+    // Room layout: the suffix-matched `<name>_<platform>_<room>` dir (the one this process created on its first
+    // spawn, or an earlier one; an anchor rename never moves it), else a new one. Old name dirs are history.
+    const dir = recordingRoomDir(
+      this.outDir,
+      this.outName || owner,
+      { platform: this.platform.id, roomSlug: this.channelId, anchorName: this.outName || owner },
+      { layout: this.outputLayout, warn: (m) => log.warn(m) },
+    ) ?? join(this.outDir, this.channelId);
     try {
       mkdirSync(dir, { recursive: true });
     } catch (e) {
@@ -185,6 +195,7 @@ export class PollingRecorder implements Recorder {
     this.cookies = opts.cookies;
     this.outDir = resolve(opts.outDir);
     this.outName = opts.name?.trim() || undefined;
+    this.outputLayout = opts.outputLayout === "room" ? "room" : "legacy";
     this.segSec = opts.segmentSec > 0 ? opts.segmentSec : 0;
     this.admit = opts.admit;
 

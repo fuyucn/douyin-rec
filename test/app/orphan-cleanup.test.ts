@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { platformForRoom } from "@drec/core";
+import { DatabaseSync } from "node:sqlite";
 import {
   isEmptyXml, scanOrphans, cleanupOrphans,
 } from "../../packages/app/src/orphan-cleanup.js";
@@ -290,6 +291,56 @@ describe("maintenance protects room-layout recording dirs (issue #333)", () => {
     const items = run(false);
     expect(items.length).toBeGreaterThan(0);
     expect(items.every((i) => i.keepReason !== null)).toBe(true);
+  });
+});
+
+describe("maintenance protects the stage dirs of active hub jobs in BOTH layouts (issue #336)", () => {
+  const run = (state: string): { legacy: (string | null)[]; room: (string | null)[] } => {
+    const root = mkdtempSync(join(tmpdir(), "orphan-stage-"));
+    const savedRoot = process.env.DOUYIN_REC_ROOT;
+    process.env.DOUYIN_REC_ROOT = root;
+    try {
+      const stage = join(root, "stage");
+      const KEY = "douyin:555:2026-10-10";
+      const legacyDir = join(stage, "douyin_555_2026-10-10");
+      const roomDir = join(stage, "Someone_douyin_555", "2026-10-10");
+      const old = new Date(Date.now() - 48 * 3600_000);
+      for (const d of [legacyDir, roomDir]) {
+        mkdirSync(d, { recursive: true });
+        const f = join(d, "s_2026-10-10_00-00-00.xml");
+        writeFileSync(f, EMPTY, "utf-8");
+        utimesSync(f, old, old); // stale: only the active-job protection can keep it
+      }
+      // a non-empty copy of the same session elsewhere makes the empty shells deletable
+      mkdirSync(join(root, "recordings", "x"), { recursive: true });
+      writeFileSync(join(root, "recordings", "x", "s_2026-10-10_00-00-00.xml"), NONEMPTY, "utf-8");
+      const syncDb = join(root, "x-sync.db");
+      const db = new DatabaseSync(syncDb);
+      db.exec(`CREATE TABLE sync_jobs(streamKey TEXT PRIMARY KEY, state TEXT NOT NULL,
+        winnerWorker TEXT, bv TEXT, error TEXT, fails INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL)`);
+      db.prepare("INSERT INTO sync_jobs(streamKey,state,updatedAt) VALUES(?,?,?)").run(KEY, state, Date.now());
+      db.close();
+      const api = buildMaintenance({ store: new TaskStore(":memory:"), manager: { isRecording: () => false, getAnchorName: () => null } as never, dataRoot: root, syncDbPath: syncDb, stageDir: stage });
+      const body = api.previewOrphans().body as { emptyXml: { path: string; keepReason: string | null }[] };
+      const pick = (dir: string): (string | null)[] => body.emptyXml.filter((i) => i.path.startsWith(dir)).map((i) => i.keepReason);
+      return { legacy: pick(legacyDir), room: pick(roomDir) };
+    } finally {
+      if (savedRoot === undefined) delete process.env.DOUYIN_REC_ROOT; else process.env.DOUYIN_REC_ROOT = savedRoot;
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it("active job (merging): the old-layout dir and the room-layout dir are both kept", () => {
+    const r = run("merging");
+    expect(r.legacy.length).toBeGreaterThan(0);
+    expect(r.room.length).toBeGreaterThan(0);
+    expect(r.legacy.every((k) => k !== null)).toBe(true);
+    expect(r.room.every((k) => k !== null)).toBe(true);
+  });
+  it("control: a finished job (done) protects neither, so the shells are deletable", () => {
+    const r = run("done");
+    expect(r.legacy.every((k) => k === null)).toBe(true);
+    expect(r.room.every((k) => k === null)).toBe(true);
   });
 });
 
