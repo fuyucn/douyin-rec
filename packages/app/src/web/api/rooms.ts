@@ -203,7 +203,7 @@ export function buildRooms(ctx: ApiCtx) {
       const nextP = platformForRoom(nextRoom);
       const nextKey = hubStore.hubKey(nextP.id, nextP.extractRoomSlug(nextRoom));
       const sameKey = nextKey === key;
-      // Saving a zero-disk room must also be a rolling rule with no burn, pinned to local.
+      // Saving a zero-disk room must also be a rolling rule with no burn, pinned to exactly one node.
       // Check it before the recording write so a rejected rule leaves the task untouched.
       const nextRule = hubStore.getHubRule(hubDir, nextKey);
       const mergedPipeline = hubStore.mergePipeline(

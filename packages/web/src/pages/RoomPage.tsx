@@ -21,6 +21,7 @@ import { useT } from "../lib/i18n";
 import { QUALITY_FULL, fmtClock, fmtStartedAt, platformLabel, roomHref, roomId, scheduleText } from "../lib/labels";
 import { localTimeTooltip } from "../lib/tz";
 import { versionKeys } from "../lib/room-detail";
+import { zeroDiskView } from "../lib/zero-disk-status";
 import { deliverText, nodesText, roomName, RoomBadge, runLabel, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
 
 export function RoomPage(): ReactNode {
@@ -210,6 +211,18 @@ export function RoomPage(): ReactNode {
                 ) : "-"
               } />
               <Row label={t("tasks.createdAt")} mono value={task ? fmtStartedAt(Date.parse(task.createdAt) || null, serverTz) : "-"} />
+              {(task?.zeroDisk ?? []).map((z) => {
+                const v = zeroDiskView(z);
+                const tone = v.tone === "ok" ? "var(--success)" : v.tone === "error" ? "var(--error)" : v.tone === "warn" ? "var(--warning-fg)" : "var(--muted-soft)";
+                return (
+                  <Row key={`zd-${z.workerId}`} label={`${t("room.zeroDisk.title")} · ${z.workerName}`} value={
+                    <span className="inline-flex items-center gap-1.5" title={v.detail}>
+                      <span className="dot" style={{ background: tone }} />
+                      {t(v.key, v.vars)}
+                    </span>
+                  } />
+                );
+              })}
               {workers.map((w) => (
                 <Row key={w.workerId} label={w.workerName} mono value={
                   <span className="inline-flex items-center gap-1.5">

@@ -179,6 +179,13 @@ describe("TaskStore", () => {
     // plans/039 两列:旧库补列,存量行按默认(关 0 落盘 / 保留 spool 1)。
     expect(byRoom("on").streamUpload).toBe(false);
     expect(byRoom("on").streamUploadSpool).toBe(true);
+    // issue #331: the delivered zero-disk metadata column is added; existing rows have none (local behavior unchanged).
+    expect(byRoom("on").zeroDiskDelivery).toBeNull();
+    const id = byRoom("on").id;
+    store.updateTask(id, { zeroDiskDelivery: "{\"v\":1}" });
+    expect(store.getTask(id)!.zeroDiskDelivery).toBe("{\"v\":1}");
+    store.updateTask(id, { zeroDiskDelivery: null });
+    expect(store.getTask(id)!.zeroDiskDelivery).toBeNull();
     store.close();
   });
 

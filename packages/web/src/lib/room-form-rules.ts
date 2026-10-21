@@ -38,7 +38,7 @@ export interface FormFacts {
   workers: readonly string[];
   /** 该房间是否有 hub 规则(无规则 = 单机任务,边录边传不受节点数约束)。 */
   hasRule: boolean;
-  /** 0 落盘子选项(只在 rolling 且无烧录、单 local 节点时可用)。 */
+  /** 0 落盘子选项(只在 rolling 且无烧录、恰好一个节点时可用)。 */
   streamUpload: boolean;
 }
 
@@ -163,8 +163,8 @@ export function deriveConstraints(f: FormFacts): Constraints {
   const burning = burn.burnDanmu || burn.burnLivechat;
   const rolling = rollingLock(f);
   const nodeSide = burning ? lock("rooms.nodeSideUploadDisabled") : OPEN;
-  // Zero-disk is a rolling sub-mode and requires an actual rule pinned to local. A task-only
-  // room has no rule yet, so the switch stays locked until the room is saved as rolling/local.
+  // Zero-disk is a rolling sub-mode and requires an actual rule pinned to exactly one node. A task-only
+  // room has no rule yet, so the switch stays locked until the room is saved as rolling on one node.
   const zeroDiskError = zeroDiskRuleError(f.streamUpload, {
     enabled: true,
     mode: f.method === "rolling" ? "rolling" : "upload",

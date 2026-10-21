@@ -8,7 +8,7 @@ import { join } from "node:path";
 import {
   isUploadingMode, normalizeUploadMode, pipelineBurns, resolveRollingPolicy, rollingReasonText, listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
   zeroDiskRuleError, redactTaskSecrets,
-  type WorkerDTO, type HubPipelineConfig, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO,
+  type WorkerDTO, type HubPipelineConfig, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO,
 } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
 import * as workerStore from "../../worker-store.js";
@@ -134,12 +134,14 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
   // 显示用主播名:运行时(录制中 [主播] 日志解析)优先,否则持久化的(创建时抓的)。
   const view = (t: Task): TaskView => {
     let workers: RecordingWorkerStatusDTO[] | undefined;
+    let zeroDisk: ZeroDiskNodeStatusDTO[] | undefined;
     const stopping = manager.isStopping(t.id) || undefined;
     let hubRule: TaskView["hubRule"];
     if (deps.recordingWorkers || deps.hubEnabled) {
       const platform = platformForRoom(t.room);
       const roomSlug = platform.extractRoomSlug(t.room);
       if (deps.recordingWorkers) workers = deps.recordingWorkers(platform.id, roomSlug);
+      if (deps.zeroDiskStatus && t.streamUpload) zeroDisk = deps.zeroDiskStatus(platform.id, roomSlug);
       if (deps.hubEnabled) {
         const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug));
         if (rule) {
@@ -179,6 +181,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
       ...(rollingStatus ? { rollingApplied: rollingStatus.applied, ...(rollingStatus.drift ? { rollingPending: true } : {}) } : {}),
       // 空数组不下发:前端 recordingWorkers?.length 判定依赖它。
       ...(workers && workers.length > 0 ? { recordingWorkers: workers } : {}),
+      ...(zeroDisk && zeroDisk.length > 0 ? { zeroDisk } : {}),
       ...(hubRule ? { hubRule } : {}),
       ...(outputFormatLock ? { outputFormatLock } : {}),
     };

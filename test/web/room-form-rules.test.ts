@@ -59,6 +59,12 @@ describe("deriveConstraints — 0 落盘是 rolling 的子选项", () => {
     const c = deriveConstraints(facts({ method: "rolling", streamUpload: true }));
     expect(c.streamUpload).toEqual({ locked: false });
   });
+  it("rolling + 无烧录 + 恰好一个远端节点 → 可用(issue #331)", () => {
+    expect(deriveConstraints(facts({ method: "rolling", streamUpload: true, workers: ["vps1"] })).streamUpload).toEqual({ locked: false });
+  });
+  it("未勾选任何节点(= 全部节点)→ 锁定:必须恰好一个节点", () => {
+    expect(deriveConstraints(facts({ method: "rolling", streamUpload: true, workers: [] })).streamUpload.locked).toBe(true);
+  });
   it("收播后上传 / 多节点 / 烧录 → 锁定", () => {
     expect(deriveConstraints(facts({ method: "after", streamUpload: true })).streamUpload.locked).toBe(true);
     expect(deriveConstraints(facts({ method: "rolling", streamUpload: true, workers: ["local", "vps1"] })).streamUpload.locked).toBe(true);

@@ -85,6 +85,12 @@ export interface Task {
    */
   streamUploadSpool: boolean;
   /**
+   * master 下发的 0 落盘上传元数据(issue #331),**原始 JSON 文本**:只在 hub 受管的侧节点任务上有值,
+   * 存储层不校验 —— 使用点(`zeroDiskNodePreflight`)用 core `parseZeroDiskDelivery` 严格解析,坏值 = 拒绝启动。
+   * null = 未下发(master 本机任务 / 旧行为不变)。
+   */
+  zeroDiskDelivery: string | null;
+  /**
    * 输出格式(issue #137,白名单见 core `OUTPUT_FORMATS`):`original`(缺省,现状)| `mp4` | `mkv`。
    * 本期只作用于**后处理产物容器**(存档形态);投稿形态恒 mp4(见 core `effectiveStageFormat`)。
    */
@@ -125,6 +131,8 @@ export interface TaskInput {
   streamUpload?: boolean;
   /** 0 落盘是否保留 spool(默认 true);false = 真 0 落盘。 */
   streamUploadSpool?: boolean;
+  /** master 下发的 0 落盘元数据原始 JSON(issue #331);仅内部同步路径可写。 */
+  zeroDiskDelivery?: string | null;
   /** 输出格式(缺省 original);白名单外的值 → addTask 抛错(API 层先校验并回 400)。 */
   outputFormat?: OutputFormat;
 }
@@ -153,6 +161,7 @@ interface TaskRow {
   rollingUpload: number;
   streamUpload: number;
   streamUploadSpool: number;
+  zeroDiskDelivery?: string | null;
   rollingEffective: number | null;
   outputFormat: string | null;
 }
@@ -218,6 +227,7 @@ function rowToTask(r: TaskRow): Task {
     // 派生值缺失(NULL)→ 读取时迁移:无规则信息可用,等价「规则未配置」→ 旧开关 true ≡ rolling。
     streamUpload: Number(r.streamUpload) !== 0,
     streamUploadSpool: r.streamUploadSpool == null ? true : Number(r.streamUploadSpool) !== 0,
+    zeroDiskDelivery: r.zeroDiskDelivery ?? null,
     rollingEffective: r.rollingEffective == null
       ? resolveRollingPolicy(null, Number(r.rollingUpload) !== 0).effective
       : Number(r.rollingEffective) !== 0,
@@ -271,8 +281,8 @@ export class TaskStore {
       `INSERT INTO tasks
          (room, platform, name, quality, engine, danmu, segmentSec, cookies, outDir,
           scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook, managedBy, anchorName,
-          rollingUpload, streamUpload, streamUploadSpool, outputFormat)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          rollingUpload, streamUpload, streamUploadSpool, outputFormat, zeroDiskDelivery)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       room,
@@ -297,6 +307,7 @@ export class TaskStore {
       (input.streamUpload ?? false) ? 1 : 0,
       (input.streamUploadSpool ?? true) ? 1 : 0,
       parseOutputFormat(input.outputFormat),
+      input.zeroDiskDelivery ?? null,
     );
     const id = Number(info.lastInsertRowid);
     const task = this.getTask(id);
@@ -335,6 +346,7 @@ export class TaskStore {
         | "streamUpload"
         | "streamUploadSpool"
         | "outputFormat"
+        | "zeroDiskDelivery"
       > & {
         /** 派生生效值(仅 master 同步/启动刷新可写);null = 清空,回落旧开关迁移。 */
         rollingEffective?: boolean | null;
@@ -393,6 +405,7 @@ export class TaskStore {
     if ("rollingUpload" in patch) set("rollingUpload", patch.rollingUpload ? 1 : 0);
     if ("streamUpload" in patch) set("streamUpload", patch.streamUpload ? 1 : 0);
     if ("streamUploadSpool" in patch) set("streamUploadSpool", patch.streamUploadSpool ? 1 : 0);
+    if ("zeroDiskDelivery" in patch) set("zeroDiskDelivery", patch.zeroDiskDelivery ?? null);
     if ("rollingEffective" in patch) {
       set("rollingEffective", patch.rollingEffective == null ? null : patch.rollingEffective ? 1 : 0);
     } else if ("rollingUpload" in patch) {

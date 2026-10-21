@@ -85,6 +85,18 @@ describe("_node-abort 命令注册(issue #2 A2)", () => {
     const program = new Command();
     registerNodePipelineCommands(program);
     const names = program.commands.map((c) => c.name());
-    expect(names).toEqual(expect.arrayContaining(["_node-capabilities", "_node-pipeline", "_node-result", "_node-abort"]));
+    expect(names).toEqual(expect.arrayContaining(["_node-capabilities", "_node-pipeline", "_node-result", "_node-abort", "_zero-disk-report"]));
+  });
+});
+
+describe("_zero-disk-report 命令注册(issue #331)", () => {
+  it("存在、隐藏、<dataRoot> 必填、带 action(master 的 ssh 轮询依赖它;缺失 = 旧节点语义)", () => {
+    const program = new Command();
+    registerNodePipelineCommands(program);
+    const cmd = program.commands.find((c) => c.name() === "_zero-disk-report");
+    expect(cmd, "`_zero-disk-report` 未注册").toBeDefined();
+    expect(cmd!.registeredArguments.map((a) => a.name())).toEqual(["dataRoot"]);
+    expect(cmd!._hidden).toBe(true);
+    expect((cmd as unknown as { _actionHandler?: unknown })._actionHandler).toBeTypeOf("function");
   });
 });

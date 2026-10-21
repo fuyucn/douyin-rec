@@ -20,10 +20,18 @@ export interface RedactedTaskSecrets {
   hasWebhook: boolean;
 }
 
+/**
+ * Internal-only task fields that never reach API output: the master-delivered zero-disk metadata
+ * (issue #331) carries node paths and the upload account key. Clients get the status DTO instead.
+ */
+type InternalTaskFields = "zeroDiskDelivery";
+
 /** Strip secret values from a task-shaped object, leaving presence flags. Pure; does not mutate. */
-export function redactTaskSecrets<T extends TaskSecrets>(t: T): Omit<T, keyof TaskSecrets> & RedactedTaskSecrets {
+export function redactTaskSecrets<T extends TaskSecrets>(t: T): Omit<T, keyof TaskSecrets | InternalTaskFields> & RedactedTaskSecrets {
+  const out = { ...t } as Record<string, unknown>;
+  delete out.zeroDiskDelivery;
   return {
-    ...t,
+    ...(out as Omit<T, keyof TaskSecrets | InternalTaskFields>),
     cookies: null,
     webhook: null,
     hasCookies: !!t.cookies?.trim(),

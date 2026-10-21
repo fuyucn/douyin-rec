@@ -3,8 +3,10 @@
  *
  * Zero-disk writes no source files, so it cannot participate in the file-based hub
  * pipeline (scan / select / merge / burn). It is only safe when the rule is rolling,
- * has no burn steps, and is pinned to the master's local worker: that worker writes
- * the upload result into the same ledger the master reads.
+ * has no burn steps, and is pinned to exactly ONE node (the master's local worker or a
+ * single side node): every node that records the room creates its own archive, and an
+ * archive cannot be deleted afterwards. A side node reports its result back and the
+ * master writes the ledger (issue #331).
  */
 import { normalizeUploadMode, pipelineBurns, type BurnSteps } from "./rolling-policy.js";
 
@@ -35,8 +37,11 @@ export function zeroDiskRuleError(
     return "0 落盘只能在关闭烧录后使用(rolling 只上传 plain,烧录分 P 会被丢掉)";
   }
   const workers = rule.workers ?? [];
-  if (workers.length !== 1 || workers[0] !== "local") {
-    return "0 落盘当前只支持勾选 local 一个节点(上传台账写在 master 本机)";
+  if (workers.length === 0) {
+    return "0 落盘必须恰好勾选一个节点(本机或某个远端节点)";
+  }
+  if (workers.length > 1) {
+    return "0 落盘只能勾选一个节点:多个节点同录会各自建稿,稿件无法删除";
   }
   return null;
 }

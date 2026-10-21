@@ -66,14 +66,19 @@ export function openNodeUploadSlot(opts: { log?: (m: string) => void } = {}): Up
   return openUploadSlot(procQueueDbPath(), { concurrency: 1, ...(opts.log ? { log: opts.log } : {}) });
 }
 
+/** Node-side submission quota defaults, shared by every upload path on the node (one number, one place). */
+export const NODE_UPLOAD_RATE_LIMIT = 5;
+export const NODE_UPLOAD_WINDOW_MS = 600_000;
+export const NODE_UPLOAD_COOLDOWN_MS = 1_800_000;
+
 /** 装配节点侧 UploadGate;store 缺省打开 `<dataRoot>/db/douyin-rec.db`。 */
 export function openNodeUploadGate(opts: NodeUploadGateOpts = {}): UploadGate {
   const warn = opts.warn ?? ((m: string) => console.error(m));
   return new UploadGate({
     store: opts.store ?? openUploadLimitStore(rootDbPath(), { log: warn }),
-    rateLimit: opts.rateLimit ?? 5,
-    windowMs: opts.windowMs ?? 600_000,
-    cooldownMs: opts.cooldownMs ?? 1_800_000,
+    rateLimit: opts.rateLimit ?? NODE_UPLOAD_RATE_LIMIT,
+    windowMs: opts.windowMs ?? NODE_UPLOAD_WINDOW_MS,
+    cooldownMs: opts.cooldownMs ?? NODE_UPLOAD_COOLDOWN_MS,
     warn,
   });
 }
@@ -860,7 +865,7 @@ export async function runNodeSidePipeline(
 
 /** 节点侧上传能力探测:节点上是否有 biliup + B站 cookie + 中文字体 + 磁盘剩余。 */
 export async function probeNodeCapabilities(dataRoot: string): Promise<{
-  biliup: boolean; cookies: boolean; diskFreeGB: number; cjkFonts: boolean;
+  biliup: boolean; cookies: boolean; diskFreeGB: number; cjkFonts: boolean; zeroDisk: boolean;
 }> {
   const { spawnSync } = await import("node:child_process");
   const hasBiliup = spawnSync("sh", ["-c", "command -v biliup"], { stdio: "ignore" }).status === 0;
@@ -874,7 +879,9 @@ export async function probeNodeCapabilities(dataRoot: string): Promise<{
   } catch { /* 目录不存在等 → 0 */ }
   // 中文字体(烧录用;节点侧分支不烧,仅诊断展示)。fc-list 缺失 = 无。
   const cjkFonts = spawnSync("sh", ["-c", "fc-list 2>/dev/null | grep -qi 'noto sans cjk'"], { stdio: "ignore" }).status === 0;
-  return { biliup: hasBiliup, cookies: hasCookies, diskFreeGB, cjkFonts };
+  // zeroDisk: this bundle understands master-delivered zero-disk metadata, verifies the node account
+  // before uploading and reports receipts (`_zero-disk-report`). An older bundle omits the field.
+  return { biliup: hasBiliup, cookies: hasCookies, diskFreeGB, cjkFonts, zeroDisk: true };
 }
 
 /** 节点 stage 里的视频类产物:后处理容器(注册表 mp4/mkv)+ `.ts` 直传。 */

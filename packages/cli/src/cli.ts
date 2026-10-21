@@ -21,20 +21,20 @@ import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
-import { decorateRecordEvent, getEngine, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
+import { decorateRecordEvent, getEngine, isWorkerAssigned, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
 import { PollingRecorder, describeStreamIdentity } from "@drec/record-engine";
 import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
-import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
+import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
-import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, APP_VERSION, syncDbPathFor } from "@drec/app";
+import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
 import type { HubStarter, TaskStore } from "@drec/app";
 import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
@@ -99,6 +99,8 @@ interface RecordCliOpts {
   streamUploadTag?: string;
   streamUploadPrivate?: string;
   streamUploadSpool?: string;
+  /** Internal: hub-managed side node (issue #331); metadata comes from the delivered env object only. */
+  zeroDiskManaged?: string;
   outputFormat?: string;
   taskId?: string;
   config?: string;
@@ -208,6 +210,7 @@ program
   .option("--stream-upload-tid <tid>", "流式直传投稿分区(默认 21)")
   .option("--stream-upload-tag <tag>", "流式直传标签(逗号分隔;省略=hub 规则/hub.config 默认)")
   .option("--stream-upload-spool <full|none>", "流式直传是否保留本地 spool: full=可整文件回退(默认), none=真 0 落盘", "full")
+  .option("--zero-disk-managed <0|1>", "(内部) hub 受管侧节点的 0 落盘:元数据/账号校验只取 master 下发对象,缺失即拒绝启动")
   .option("--stream-upload-private <0|1>", "流式直传仅自己可见(省略=hub 规则/hub.config 默认,保守为 1)")
   .option("--output-format <fmt>", "节点侧输出格式 original|mp4|mkv: 分段封口后原地 remux 成所选容器、校验通过后删原文件 (默认 original=不转)")
   .option("--task-id <n>", "所属任务 id(serve 拉起时传入;封口转换入队行据此归属任务,失败告警按任务显示)")
@@ -299,18 +302,46 @@ program
       const {
         rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta,
         resolveStreamUploadTitle, resolveStreamPartTitle,
+        zeroDiskNodePreflight, writeZeroDiskStatus, createZeroDiskReporter, makeNodeSubmitGate,
       } = await import("@drec/app");
       // Hub-rule metadata is the same single source as rolling upload (rule upload >
       // hub.config uploadDefaults > built-in defaults). Explicit stream-upload flags still win
       // because they only serve manual debugging.
       const roomSlug = platform.extractRoomSlug(roomToUrl(o.room));
       const pumpRoom = zeroDiskRoom(platform, o.room);
-      const streamMeta = resolveStreamUploadMeta(platform.id, roomSlug);
+      // Hub-managed side node (issue #331): the master-delivered object is the ONLY source of upload
+      // metadata and the account to verify. The node's rule directory is empty, so reading it would
+      // silently fall back to defaults (private visibility, default title). Refuse instead.
+      const managed = o.zeroDiskManaged === "1";
+      let delivery: import("@drec/core").ZeroDiskDelivery | undefined;
+      let managedCookies: string | undefined;
+      if (managed) {
+        const pre = zeroDiskNodePreflight(process.env[ZERO_DISK_DELIVERY_ENV]);
+        if (!pre.ok) {
+          writeZeroDiskStatus({ platform: platform.id, roomSlug, state: "refused", code: pre.refusal.code, message: pre.refusal.message, parts: 0 });
+          const msg = `0 落盘拒绝启动 [${pre.refusal.code}]: ${pre.refusal.message}`;
+          console.error(`[stream-upload] ${msg}`);
+          await notifier.notify({ kind: "error", stage: "0落盘", message: msg }).catch(() => {});
+          process.exit(2);
+        }
+        delivery = pre.delivery;
+        managedCookies = pre.cookiesPath;
+        console.log(`[stream-upload] 节点预检通过(上传登录来源=${pre.credentialSource},账号与 master 配置一致)`);
+      }
+      // Explicit stream-upload flags only serve manual debugging; a managed run ignores them.
+      const manual: Pick<RecordCliOpts, "streamUploadTid" | "streamUploadTag" | "streamUploadPrivate"> = delivery ? {} : o;
+      const streamMeta = delivery
+        ? { tid: delivery.meta.tid, tag: delivery.meta.tag, private: delivery.meta.private, ...(delivery.meta.desc ? { desc: delivery.meta.desc } : {}) }
+        : resolveStreamUploadMeta(platform.id, roomSlug);
+      const metaOverride = delivery ? { meta: delivery.meta } : {};
       // The stored task name is only a fallback; the live stream usually exposes the real
       // anchor. Both the XML metadata and `{name}` should use the real anchor once known.
       let anchorName = o.name?.trim() || roomSlug;
       const sizeCap = alignFileSize(Number(o.streamUploadSize ?? DEFAULT_SEGMENT_CAP));
-      const uploadCookies = zeroDiskUploadCookie(process.env, rootBiliupCookies());
+      const uploadCookies = managedCookies ?? zeroDiskUploadCookie(process.env, rootBiliupCookies());
+      // Status + receipt for the master (managed only); one receipt id per process run.
+      const reporter = delivery ? createZeroDiskReporter({ platform: platform.id, roomSlug }) : null;
+      reporter?.running();
       // Latched on the first successful acquisition so templates use the real broadcast start,
       // not the process start (a task may sit in "waiting for stream" for hours).
       let streamStartMs = Date.now();
@@ -323,11 +354,12 @@ program
         roomSlug,
         anchorName,
         startMs: streamStartMs,
+        ...metaOverride,
       });
       console.log(
         `[rec] 流式直传(0 落盘)已开启:room=${o.room} sizeCap=${sizeCap} ` +
         `sec=${o.streamUploadSec ?? (Number(o.segment ?? 0) > 0 ? `${o.segment}(--segment)` : "字节兜底")} ` +
-        `tid=${o.streamUploadTid ?? streamMeta.tid}`,
+        `tid=${manual.streamUploadTid ?? streamMeta.tid}${managed ? " (master 下发)" : ""}`,
       );
       // Danmu still goes to disk on the zero-disk path (the only artifact that does).
       // The pump stays platform-agnostic; this layer owns the platform source + xml writer.
@@ -434,6 +466,7 @@ program
           anchorName,
           startMs: streamStartMs,
           liveTitle,
+          ...metaOverride,
         }),
         partTitle: (partIndex, liveTitle) => resolveStreamPartTitle({
           platform: platform.id,
@@ -442,11 +475,12 @@ program
           startMs: streamStartMs,
           partIndex,
           ...(liveTitle ? { liveTitle } : {}),
+          ...metaOverride,
         }),
-        tid: Number(o.streamUploadTid ?? streamMeta.tid),
-        tag: o.streamUploadTag ?? streamMeta.tag,
+        tid: Number(manual.streamUploadTid ?? streamMeta.tid),
+        tag: manual.streamUploadTag ?? streamMeta.tag,
         ...(streamMeta.desc ? { desc: streamMeta.desc } : {}),
-        private: o.streamUploadPrivate === undefined ? streamMeta.private : o.streamUploadPrivate !== "0",
+        private: manual.streamUploadPrivate === undefined ? streamMeta.private : manual.streamUploadPrivate !== "0",
         sizeCap,
         maxMs: streamPartMaxMs(o.streamUploadSec, o.segment),
         maxSegments: 0,
@@ -459,13 +493,29 @@ program
         danmu,
         log: (m) => console.log(m),
         onAlert: (message) => { void notifier.notify({ kind: "error", stage: "0落盘", message }).catch(() => {}); },
-      }).then((res) => {
+        // Managed nodes share the account's submission window with the node's other uploads and
+        // report part progress to the master console (issue #331).
+        ...(delivery ? {
+          submitGate: makeNodeSubmitGate({ cookiesPath: uploadCookies, log: (m) => console.log(m) }),
+          onPartConfirmed: (info: { count: number; bvid?: string }) => reporter?.partConfirmed(info),
+        } : {}),
+      }).then(async (res) => {
         console.log(`[stream-upload] ${JSON.stringify(res)}`);
         // Record the upload outcome in the hub ledger. A zero-disk run leaves no recording
         // files for the pipeline to scan, so without this the room would never show an outcome.
         // Best effort: the archive already exists, so a ledger failure must not fail the run.
-        if (res.ok && res.bvid) {
-          const roomSlug = platform.extractRoomSlug(roomToUrl(o.room));
+        if (reporter) {
+          // Managed side node: the master owns the ledger. Persist an immutable receipt the master
+          // polls (`_zero-disk-report`); this node's own ledger is never written.
+          const fin = reporter.finish({ ok: res.ok, ...(res.bvid ? { bvid: res.bvid } : {}), ...(res.error ? { error: res.error } : {}), segments: res.segments.length });
+          if (fin.receiptError) {
+            // The archive exists but the master cannot learn about it: say so loudly.
+            console.error(`[stream-upload] ⚠️ ${fin.receiptError}`);
+            await notifier.notify({ kind: "error", stage: "0落盘", message: fin.receiptError }).catch(() => {});
+          } else if (fin.receiptWritten) {
+            console.log(`[stream-upload] 回执已写入,等待 master 拉取并记台账: ${res.bvid}`);
+          }
+        } else if (res.ok && res.bvid) {
           const r = recordStreamUpload({
             syncDbPath: syncDbPathFor(dbPathForDataRoot(process.env.DOUYIN_REC_ROOT ?? process.cwd())),
             streamKey: `${platform.id}:${roomSlug}:${new Date().toISOString().slice(0, 10)}`,
@@ -494,6 +544,7 @@ program
         process.exit(clean ? 0 : 1);
       }).catch((e) => {
         console.error(`[stream-upload] 失败: ${(e as Error).message}`);
+        reporter?.failed((e as Error).message);
         process.exit(1);
       });
       // The pump owns the whole process, so it owns signal handling too (the shared handlers
@@ -1045,6 +1096,8 @@ let hubRunNow:
   | ((opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>)
   | undefined;
 let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
+/** 0 落盘侧节点状态快照(issue #331;随 hub 同步 tick 整体替换,只读展示)。 */
+let hubZeroDiskSnapshot = new Map<string, ZeroDiskNodeStatusDTO[]>();
 /** 各节点边录边传的实时进度(F1;随 5 秒状态轮询整体替换,只读展示)。 */
 let hubDeliverySnapshot: RollingDeliveryDTO[] = [];
 /** probeAllWorkers 的结果缓存 TTL。 */
@@ -1053,6 +1106,8 @@ const readRollingDelivery = (): RollingDeliveryDTO[] => hubDeliverySnapshot;
 const recordingSnapshotKey = (platform: string, roomSlug: string): string => `${platform}:${roomSlug}`;
 const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWorkerStatusDTO[] =>
   hubRecordingSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
+const readZeroDiskStatus = (platform: string, roomSlug: string): ZeroDiskNodeStatusDTO[] =>
+  hubZeroDiskSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
 /** master 资源池快照提供者(由 hubStarter.start 注入,读同一 ResourcePool 实例);未启动 → undefined。 */
 let hubPoolSnapshot: (() => HubPoolSnapshotDTO) | undefined;
 /** Blocked-broadcast provider (injected by hubStarter.start from the live Reconciler); hub not started → empty. */
@@ -1132,6 +1187,7 @@ const requestHubRunNow = async (
 const hubStarter: HubStarter = {
   requestSyncTasks: requestHubSync,
   recordingWorkers: readRecordingWorkers,
+  zeroDiskStatus: readZeroDiskStatus,
   nodeTaskLogs: requestNodeTaskLogs,
   nodeTasks: requestNodeTasks,
   rollingDelivery: readRollingDelivery,
@@ -1144,7 +1200,7 @@ const hubStarter: HubStarter = {
     hubReceiptSettings = opts.store;
     const {
       registerBuiltinTransports, Reconciler, SyncLedger, startHub, getTransport, recordingStatusWorkerIds,
-      satisfiesCapabilities,
+      satisfiesCapabilities, ZeroDiskFleet, blockedKey,
       buildWorkflow, runWorkflowNodes, deriveStageProducts, withOutputStem, ResourcePool, openUploadLimitStore,
       parseNodeUploadConfig } = await import("@drec/orchestrator");
     const { ffprobeVideo } = await import("@drec/post-process");
@@ -1355,6 +1411,38 @@ const hubStarter: HubStarter = {
     const transports = buildTransports();     // 初始 Map(pipelineDeps 也用它)
     const dbPath = (opts.dbPath ?? "douyin-rec.db").replace(/\.db$/, "-sync.db");
     const ledger = new SyncLedger(dbPath);
+    // Zero-disk on side nodes (issue #331): capability gate + receipt polling + console status.
+    // The master owns the ledger; a node only reports. `recordStreamUpload` is idempotent (terminal
+    // rows are never overwritten), so re-polling or a master restart cannot double-record.
+    const zeroDiskFleet = new ZeroDiskFleet({
+      applyReceipt: (r) => {
+        const res = recordStreamUpload({ syncDbPath: dbPath, streamKey: r.streamKey, bvid: r.bvid, parts: r.parts });
+        if (res.ok && res.alreadyTerminal) opts.log(`[zero-disk] 台账已是终态,未覆盖: ${r.streamKey}`);
+        return res;
+      },
+      log: (m) => opts.log(m),
+      alert: (message) => opts.onEvent({ kind: "error", stage: "0落盘", message }),
+    });
+    /** Targets the master currently expects to run zero-disk: (room, non-local node) pairs. */
+    const zeroDiskTargetList = (): Array<{ workerId: string; platform: string; roomSlug: string }> => {
+      const out: Array<{ workerId: string; platform: string; roomSlug: string }> = [];
+      for (const rule of hubStore.listHubRules(hubDir)) {
+        const src = rule.recording?.sourceTaskId ? opts.store.getTask(rule.recording.sourceTaskId) : null;
+        if (!src?.streamUpload) continue;
+        const p = platformForRoom(src.room);
+        if (p.extractRoomSlug(src.room) !== rule.roomSlug) continue;
+        for (const w of loadWorkers()) {
+          if (w.kind === "local" || w.id === "local") continue;
+          if (!isWorkerAssigned(rule, w.id, w.capabilities)) continue;
+          out.push({ workerId: w.id, platform: p.id, roomSlug: rule.roomSlug });
+        }
+      }
+      return out;
+    };
+    /** Rooms the master refused to push this round (reason shown in the console). Rebuilt every sync. */
+    let zeroDiskBlocked = new Map<string, string>();
+    /** Last delivery built per (node, room): reused when a rebuild fails, so a transient read error cannot stop a live upload. */
+    const zeroDiskLastGood = new Map<string, import("@drec/core").ZeroDiskDelivery>();
 
     // 投稿默认:uploadDefaults(新)> uploadMeta(旧,迁移兼容)> 硬兜底。
     const uploadDefaults = hubCfg.uploadDefaults ?? hubCfg.uploadMeta ?? {};
@@ -1590,7 +1678,26 @@ const hubStarter: HubStarter = {
         // 该 worker 不再被派发这个房间(规则禁用 / 未勾选 / 能力不满足)→ 产 enabled:false,
         // 让节点**停用但保留**(T3)。字段与正常路径**同源构造**:早前写成两个 push 各抄一遍字段,
         // 抄漏一个字段就是「禁用路径丢配置」的静默 bug(自审发现,已合为一条)。
-        const { assigned, enabled: specEnabled } = resolveSpecAssignment(rule, workerId, capsOfThis, src.enabled);
+        const { assigned, enabled: specEnabledBase } = resolveSpecAssignment(rule, workerId, capsOfThis, src.enabled);
+        // Zero-disk on a side node (issue #331): the master ships the resolved upload metadata and the
+        // expected account; an old / unconfirmed node, or an unbuildable delivery, gets the task
+        // DISABLED with a visible reason, never defaults. One decision point: `planZeroDiskSpec`.
+        const workerDataRoot = loadWorkers().find((w) => w.id === workerId)?.dataRoot;
+        const zdKey = blockedKey(workerId, p.id, rule.roomSlug);
+        const zd = planZeroDiskSpec({
+          streamUpload: src.streamUpload,
+          workerId,
+          assigned,
+          enabled: specEnabledBase,
+          allowsPush: zeroDiskFleet.allowsPush(workerId),
+          build: () => buildZeroDiskDelivery({ platform: p.id, roomSlug: rule.roomSlug, ...(workerDataRoot ? { workerDataRoot } : {}) }),
+          ...(zeroDiskLastGood.get(zdKey) ? { lastGood: zeroDiskLastGood.get(zdKey)! } : {}),
+        });
+        if (zd.delivery && !zd.stale) zeroDiskLastGood.set(zdKey, zd.delivery);
+        if (zd.stale) opts.warn(`[zero-disk] 无法重建下发对象(${zd.stale});沿用上次的,避免停掉在传的稿件`);
+        if (zd.blocked) zeroDiskBlocked.set(zdKey, zd.blocked);
+        const specEnabled = zd.enabled;
+        const zeroDiskDelivery = zd.delivery;
         // ⚠️ **local(master 本机)是特例**:它的 applyTasks 写的是**源任务本身**,
         // 而源任务的 enabled 是「用户要不要录这个房间」的**全局意图**,不是「本节点是否被选中」。
         // 若这里也按 targeted 强制 false,那么「把 local 从某房间 workers 里移除」会被写成
@@ -1641,6 +1748,7 @@ const hubStarter: HubStarter = {
           // sync tick, silently turning zero-disk off.
           streamUpload: src.streamUpload,
           streamUploadSpool: src.streamUploadSpool,
+          ...(zeroDiskDelivery ? { zeroDiskDelivery } : {}),
         });
       }
       return out;
@@ -1662,6 +1770,24 @@ const hubStarter: HubStarter = {
           refreshLocalRollingEffective(opts.store, hubDir, undefined, opts.warn);
         } catch (e) {
           opts.warn(`[rolling] 同步 tick 重算边录边传生效值失败: ${(e as Error).message}`);
+        }
+        // Zero-disk capability gate (issue #331): refresh which nodes advertise support BEFORE building
+        // specs, and reset this round's "blocked" reasons. Failures here only mean "not confirmed",
+        // which the gate treats as not supported.
+        const zeroDiskTargets = zeroDiskTargetList();
+        zeroDiskBlocked = new Map();
+        // Forget deliveries of pairs that are no longer targeted: a later re-assignment must rebuild.
+        const liveKeys = new Set(zeroDiskTargets.map((x) => blockedKey(x.workerId, x.platform, x.roomSlug)));
+        for (const k of [...zeroDiskLastGood.keys()]) if (!liveKeys.has(k)) zeroDiskLastGood.delete(k);
+        const fleetWorkers = (): Array<{ id: string; name: string; kind: string; transport?: ReturnType<typeof getTransport> }> => {
+          const tmap = buildTransports();
+          return loadWorkers().map((w) => ({ id: w.id, name: w.name ?? w.id, kind: w.kind, transport: tmap.get(w.id) }));
+        };
+        try {
+          const wanted = new Set(zeroDiskTargets.map((x) => x.workerId));
+          await zeroDiskFleet.refreshSupport(fleetWorkers().filter((w) => wanted.has(w.id)));
+        } catch (e) {
+          opts.warn(`[zero-disk] 能力探测失败(按不支持处理): ${(e as Error).message}`);
         }
         for (const w of loadWorkers()) {
           const t = buildTransports().get(w.id);
@@ -1726,6 +1852,15 @@ const hubStarter: HubStarter = {
             // 节点离线/命令失败 → 只 warn,下轮对账自愈,不打断 reconcile。
             opts.warn(`[hub] 任务同步 ${w.id} 失败: ${msg}`);
           }
+        }
+        // Collect zero-disk receipts (-> master ledger) and refresh the console view. Never throws into
+        // the sync tick: a polling failure must not stop task sync.
+        try {
+          const fw = fleetWorkers();
+          await zeroDiskFleet.poll(fw, new Set(zeroDiskTargets.map((x) => x.workerId)));
+          hubZeroDiskSnapshot = zeroDiskFleet.snapshot(zeroDiskTargets, fw, zeroDiskBlocked);
+        } catch (e) {
+          opts.warn(`[zero-disk] 回执轮询失败(下轮重试): ${(e as Error).message}`);
         }
       } finally {
         if (hubSyncGate.endRun()) void syncTasks();
@@ -1893,6 +2028,7 @@ const hubStarter: HubStarter = {
       recordingProbeStopped = true;
       if (recordingStatusTimer) clearTimeout(recordingStatusTimer);
       hubRecordingSnapshot = new Map();
+      hubZeroDiskSnapshot = new Map();
       hubSyncTasks = undefined;
       hubSyncGate.unbind(); // 必须解绑:否则 stop 之后的同步请求会打到已停的旧 runner(自审发现)
       hubRetryNode = undefined;

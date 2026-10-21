@@ -1,7 +1,7 @@
 // packages/orchestrator/src/transport-ssh.ts
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { encodeEnqueue, normalizeNodeResultFile, registerChild, throwIfAborted, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type RemoteTaskSpec } from "@drec/core";
+import { encodeEnqueue, normalizeNodeResultFile, normalizeZeroDiskReport, type ZeroDiskReport, registerChild, throwIfAborted, type EnqueueRequest, type EnqueueResponse, type ProcessReceipt, type RemoteTaskSpec } from "@drec/core";
 import type { ActiveRecordingRoom, ApplyTasksResult, NodeInventory, NodeRecording, NodeRecordingStatus, NodeRollingSession, NodeTasks, RecoverOrderRequest, RecoverOrderResult, Transport } from "./transport.js";
 import { ProcUnsupported } from "./transport.js";
 import { parseUnclaimedPayload } from "./unclaimed.js";
@@ -297,6 +297,26 @@ export class SshTransport implements Transport {
     };
   }
 
+  /**
+   * 0 落盘回执 + 状态(`_zero-disk-report`,只读,issue #331)。旧 bundle 的 unknown command → `null`
+   * (= 不支持,不是故障);不可达 / 非法输出 → 抛错,调用方据此标「节点离线」,不当成「没有回执」。
+   */
+  async zeroDiskReport(): Promise<ZeroDiskReport | null> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    let out: string;
+    try {
+      out = await this.runStatus([`${nodePrefix} _zero-disk-report ${this.o.dataRoot}`]);
+    } catch (e) {
+      if (isUnknownCommandError(e)) return null;
+      throw e;
+    }
+    const parsed = JSON.parse(out) as { error?: unknown };
+    if (typeof parsed?.error === "string") throw new Error(`_zero-disk-report: ${parsed.error}`);
+    const report = normalizeZeroDiskReport(parsed);
+    if (!report) throw new Error("_zero-disk-report: unrecognized output");
+    return report;
+  }
+
   /** 节点侧上传能力探测(experimental,见 plans/027)。旧 bundle 无 `_node-capabilities` → 抛错,调用方按不支持处理。 */
   async nodeCapabilities(): Promise<NodeCapabilities> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
@@ -307,6 +327,8 @@ export class SshTransport implements Transport {
       cookies: parsed.cookies === true,
       diskFreeGB: typeof parsed.diskFreeGB === "number" ? parsed.diskFreeGB : 0,
       cjkFonts: parsed.cjkFonts === true,
+      // Absent on old bundles = not supported (issue #331): the master must not push zero-disk there.
+      zeroDisk: parsed.zeroDisk === true,
       // 缺字段 = 旧节点(plans/036 D5):保持 undefined,派发方据此判「不支持」。
       ...(Array.isArray(parsed.processors) ? { processors: parsed.processors.filter((x): x is string => typeof x === "string") } : {}),
     };

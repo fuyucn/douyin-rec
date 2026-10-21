@@ -1060,10 +1060,15 @@ export function resolveStreamUploadTitle(o: {
   timeZone?: string;
   /** Live stream title for `{title}`; absent until the first stream acquisition. */
   liveTitle?: string;
+  /**
+   * Master-delivered metadata (hub-managed side node, issue #331). When given it is the ONLY source:
+   * the node's own rule directory is empty and must not be consulted.
+   */
+  meta?: RollingUploaderOpts["uploadMeta"];
 }): string {
   const explicit = (o.explicit ?? "").trim();
   if (explicit) return explicit.slice(0, 80);
-  const { meta } = resolveRollingUploadMetaInner(o.platform, o.roomSlug);
+  const meta = o.meta ?? resolveRollingUploadMetaInner(o.platform, o.roomSlug).meta;
   const timeZone = o.timeZone ?? processTimeZone();
   // A bare anchor name has no `YYYY-MM-DD_HH-mm-ss` suffix, so `{name}` is not derivable from
   // `sessionBase` alone. Prefix the start stamp, then the shared renderer sees the same shape
@@ -1119,8 +1124,10 @@ export function resolveStreamPartTitle(o: {
   liveTitle?: string;
   partIndex: number;
   partTotal?: number;
+  /** Master-delivered metadata (issue #331); the only source when given. */
+  meta?: RollingUploaderOpts["uploadMeta"];
 }): string {
-  const { meta } = resolveRollingUploadMetaInner(o.platform, o.roomSlug);
+  const meta = o.meta ?? resolveRollingUploadMetaInner(o.platform, o.roomSlug).meta;
   const timeZone = o.timeZone ?? processTimeZone();
   const z = zonedStamp(o.startMs, timeZone);
   const sessionBase = `${o.anchorName.trim() || o.roomSlug}_${z.date}_${z.hh}-${z.mm}-${z.ss}`;

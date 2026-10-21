@@ -16,6 +16,7 @@ import { resolveTaskStreamCookies } from "./stream-cookies.js";
 import type { Spawner } from "./process/spawner.js";
 import type { RecorderProcess, ExitInfo } from "./process/recorder-process.js";
 import { TaskLogStore } from "@drec/observability";
+import { preflightManagedZeroDiskTask, type ZeroDiskPreflight } from "./zero-disk-node.js";
 
 /** Live runtime info for a task, surfaced to the web 详情 page. */
 export interface TaskRuntime {
@@ -40,6 +41,12 @@ export interface TaskManagerOpts {
    * 规则之后才绑定的任务:已在跑的进程不受影响,下一次 spawn 起才按新判定。
    */
   nodeOutputFormat?: (task: Task) => OutputFormat;
+  /**
+   * Pre-spawn verification for hub-managed zero-disk tasks (issue #331): delivered metadata present,
+   * node login found, node account equals the master-configured one. Defaults to the real check;
+   * tests inject a fake. A refusal never spawns (no silent fallback to defaults).
+   */
+  zeroDiskPreflight?: (task: Task) => ZeroDiskPreflight;
   /** Respawn a process that exits UNEXPECTEDLY (crash). Default false. */
   autoRestart?: boolean;
   /** Delay before a restart respawn, ms. Default 5000. */
@@ -96,6 +103,7 @@ export class TaskManager {
   private readonly onAlert?: (taskId: number, stage: string, message: string, ctx?: NotifyContext) => void;
   private readonly beforeSpawn?: (taskId: number) => void;
   private readonly nodeOutputFormat?: (task: Task) => OutputFormat;
+  private readonly zeroDiskPreflight: (task: Task) => ZeroDiskPreflight;
   private readonly log: (m: string) => void;
   private readonly schedule: (cb: () => void, ms: number) => void;
   private readonly logStore: TaskLogStore;
@@ -134,6 +142,7 @@ export class TaskManager {
     this.spawner = spawner;
     this.beforeSpawn = opts.beforeSpawn;
     this.nodeOutputFormat = opts.nodeOutputFormat;
+    this.zeroDiskPreflight = opts.zeroDiskPreflight ?? preflightManagedZeroDiskTask;
     this.autoRestart = opts.autoRestart ?? false;
     this.restartDelayMs = opts.restartDelayMs ?? 5_000;
     this.maxRestarts = opts.maxRestarts ?? 5;
@@ -406,6 +415,13 @@ export class TaskManager {
       this.logTask(taskId, `[task_manager] beforeSpawn 失败(忽略,按库内现值起录): ${(e as Error)?.message ?? e}`);
     }
     const task = this.store.getTask(taskId)!;
+    // A hub-managed node must never start a zero-disk upload from defaults: the master-delivered
+    // metadata and the account check are mandatory. Throwing routes through trySpawn, which marks the
+    // task `error`, logs the reason and alerts once (no restart loop, nothing is uploaded).
+    if (task.streamUpload && task.managedBy === "hub") {
+      const pre = this.zeroDiskPreflight(task);
+      if (!pre.ok) throw new Error(`0 落盘拒绝启动 [${pre.refusal.code}]: ${pre.refusal.message}`);
+    }
     // Platform-aware cookie resolution, shared with buildSessionForTask.
     const effective = {
       ...task,

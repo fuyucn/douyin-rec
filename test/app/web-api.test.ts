@@ -1155,6 +1155,46 @@ describe("streamUpload 作为 rolling 子选项的规则门禁", () => {
     expect(store.getTask(t.id)!.streamUpload).toBe(true);
   });
 
+  it("规则只勾选一个远端节点 → 零落盘可保存;两个节点 / 烧录被拒且文案准确(issue #331)", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-side-node-") });
+    const t = a.createTask({ room: "99021" }).body as { id: number };
+    expect(a.createHubRule({
+      recording: { sourceTaskId: t.id }, workers: ["vps2"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    }).status).toBe(201);
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(200);
+    expect(store.getTask(t.id)!.streamUpload).toBe(true);
+
+    // same room, now two nodes → rejected through the room API, task untouched
+    const two = a.updateRoom("douyin.99021", {
+      processing: { enabled: true, workers: ["local", "vps2"], pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } } },
+    } as never);
+    expect(two.status).toBe(400);
+    expect(String((two.body as { error: string }).error)).toContain("只能勾选一个节点");
+
+    // burning on a single side node is still rejected with the burn reason (not the node reason)
+    const burn = a.updateRoom("douyin.99021", {
+      processing: { enabled: true, workers: ["vps2"], pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: true, burnLivechat: false } } },
+    } as never);
+    expect(burn.status).toBe(400);
+    expect(String((burn.body as { error: string }).error)).toContain("烧录");
+  });
+
+  it("零落盘任务绑定到「全部节点」(未勾选)→ 400,文案要求恰好一个节点", () => {
+    const a = makeApi({ store, manager, ...hubDeps("su-all-nodes-") });
+    const t = a.createTask({ room: "99022" }).body as { id: number };
+    a.createHubRule({
+      recording: { sourceTaskId: t.id }, workers: ["vps2"],
+      pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } },
+    });
+    expect(a.updateTask(t.id, { streamUpload: true }).status).toBe(200);
+    const res = a.updateRoom("douyin.99022", {
+      processing: { enabled: true, workers: null, pipeline: { upload: { mode: "rolling" }, steps: { burnDanmu: false, burnLivechat: false } } },
+    } as never);
+    expect(res.status).toBe(400);
+    expect(String((res.body as { error: string }).error)).toContain("恰好勾选一个节点");
+  });
+
   it("已绑定 rolling 规则但烧录开着 → 400", () => {
     const deps = hubDeps("su-hub4-");
     const a = makeApi({ store, manager, ...deps });
@@ -1204,7 +1244,7 @@ describe("streamUpload 作为 rolling 子选项的规则门禁", () => {
     });
     const res = a.updateRoom("douyin.99201", { recording: { room: "99202" } });
     expect(res.status).toBe(400);
-    expect(String((res.body as { error: string }).error)).toContain("local");
+    expect(String((res.body as { error: string }).error)).toContain("只能勾选一个节点");
     expect(store.getTask(t.id)!.room).toContain("99201");
   });
 

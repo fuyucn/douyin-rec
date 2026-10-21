@@ -1,5 +1,5 @@
 import { isWorkerTargeted } from "@drec/core";
-import type { ApplyTasksResult, EnqueueRequest, EnqueueResponse, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, ProcessReceipt, ProcessJob, RemoteTaskSpec, WorkerConfig } from "@drec/core";
+import type { ZeroDiskReport, ApplyTasksResult, EnqueueRequest, EnqueueResponse, NodeCapabilities, NodePipelineResult, NodePipelineResultFile, NodePipelineSpec, NodeStatus, NodeTaskDTO, ProcessReceipt, ProcessJob, RemoteTaskSpec, WorkerConfig } from "@drec/core";
 
 import type { UnclaimedSegment } from "./unclaimed.js";
 
@@ -193,6 +193,12 @@ export interface Transport {
    * 不用给节点开公网入口。旧 bundle 无该命令 → 抛 unknown command,调用方按「不支持」处理。
    */
   taskLogs?(taskId: number, lines: number): Promise<{ lines: string[]; error?: string }>;
+  /**
+   * 0 落盘回执 + 各房间状态(隐藏 `_zero-disk-report`,只读;issue #331)。
+   * 返回 `null` = 节点是旧 bundle(unknown command)→ 不支持;网络/节点故障 → 抛错(= 离线,不当成「无回执」)。
+   * 本机 transport 不实现:master 本机的 0 落盘直接写自己的台账。
+   */
+  zeroDiskReport?(): Promise<ZeroDiskReport | null>;
   /**
    * 节点侧上传能力探测(experimental,见 plans/027)。无此能力(旧 bundle)= 不支持 → flag on 的房间回落现状。
    * 查:biliup 可用 + B站 cookie 存在 + 磁盘剩余。
