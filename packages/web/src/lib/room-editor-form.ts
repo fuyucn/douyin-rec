@@ -59,6 +59,13 @@ export function webhookPatch(typed: string, clear: boolean): { webhook?: string 
   return clear ? { webhook: null } : {};
 }
 
+/** Prefilled when a room has no template of its own, so the shared title scheme is visible and editable. */
+export const DEFAULT_TITLE_TEMPLATES = {
+  titleTemplate: "{name}_{date}_{HH}-{mm}-{ss}",
+  submissionTitleTemplate: "{name}_{date}_{title} 直播回放",
+  partTitleTemplate: "P{part}",
+} as const;
+
 export function formFromRoom(r: RoomDTO): RoomForm {
   const rec = r.recording;
   const p = r.processing?.pipeline ?? {};
@@ -87,9 +94,9 @@ export function formFromRoom(r: RoomDTO): RoomForm {
     tid: String(p.upload?.tid ?? 21),
     tag: p.upload?.tag ?? "",
     desc: p.upload?.desc ?? "",
-    titleTemplate: p.upload?.titleTemplate ?? "",
-    submissionTitleTemplate: p.upload?.submissionTitleTemplate ?? "",
-    partTitleTemplate: p.upload?.partTitleTemplate ?? "",
+    titleTemplate: p.upload?.titleTemplate || DEFAULT_TITLE_TEMPLATES.titleTemplate,
+    submissionTitleTemplate: p.upload?.submissionTitleTemplate || DEFAULT_TITLE_TEMPLATES.submissionTitleTemplate,
+    partTitleTemplate: p.upload?.partTitleTemplate || DEFAULT_TITLE_TEMPLATES.partTitleTemplate,
     clStageSourceAfterMerge: p.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: p.cleanup?.sourceAfterDone === true,
     clKeepArchive: keepArchiveFromStored(p.cleanup?.stageAfterDone),
