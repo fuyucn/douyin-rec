@@ -2,8 +2,8 @@
  * RoomEditor — `/rooms` create/edit sheet: four free-to-jump step tabs, no wizard.
  *
  * Four steps as tabs (free to jump, nothing is a wizard): 1 record (when / where / recorder options),
- * 2 process (archive vs upload, merge, versions, node capabilities), 3 upload (timing, metadata; only while
- * upload is on), 4 finish (cleanup, webhook). A flow summary sits below the tabs.
+ * 2 process (merge, versions, node capabilities), 3 upload (archive vs submit to Bilibili, then timing and
+ * metadata while submitting), 4 finish (cleanup, webhook). A flow summary sits below the tabs.
  * Desktop: centered card; phone: full-screen sheet with a pinned footer.
  *
  * Field dependencies come from room-form-rules (shared with the Hub dialog); mapping to the
@@ -110,19 +110,16 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
       return { ...next, method: settledMethod(ruleFactsOf(next, ctx)) };
     });
 
-  // The upload step only exists while upload is on; fall back to processing if it was open when that changed.
-  const curStep: StepId = step === "upload" && !form.uploadOn ? "process" : step;
-  // Arrow/Home/End move between enabled tabs (roving tabindex), skipping the disabled Upload step.
+  // Arrow/Home/End move between tabs (roving tabindex).
   const onStepKey = (e: KeyboardEvent) => {
     const keys = ["ArrowLeft", "ArrowRight", "Home", "End"];
     if (!keys.includes(e.key)) return;
-    const ids = STEPS.filter((sid) => !(sid === "upload" && !form.uploadOn));
-    const at = ids.indexOf(curStep);
-    const next = e.key === "Home" ? 0 : e.key === "End" ? ids.length - 1
-      : (at + (e.key === "ArrowRight" ? 1 : -1) + ids.length) % ids.length;
+    const at = STEPS.indexOf(step);
+    const next = e.key === "Home" ? 0 : e.key === "End" ? STEPS.length - 1
+      : (at + (e.key === "ArrowRight" ? 1 : -1) + STEPS.length) % STEPS.length;
     e.preventDefault();
-    setStep(ids[next]);
-    document.getElementById(`rm-step-${ids[next]}`)?.focus();
+    setStep(STEPS[next]);
+    document.getElementById(`rm-step-${STEPS[next]}`)?.focus();
   };
   const flow = flowSummary(facts, !!room.recording && room.recording.enabled);
   const caps = useMemo(() => [...new Set(workers.flatMap((w) => w.capabilities ?? []))], [workers]);
@@ -178,11 +175,10 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                 {/* Outside the fieldset: a managed room is read-only, but its steps must stay browsable. */}
                 <div role="tablist" className="rm-steps" aria-label={t("room.editor.steps")} onKeyDown={onStepKey}>
                   {STEPS.map((sid, i) => {
-                    const off = sid === "upload" && !form.uploadOn;
                     return (
-                      <button key={sid} type="button" role="tab" id={`rm-step-${sid}`} aria-selected={curStep === sid} aria-controls="rm-step-panel"
-                              tabIndex={curStep === sid ? 0 : -1} disabled={off} title={off ? t("room.editor.stepUploadOff") : undefined}
-                              className={`rm-step${curStep === sid ? " is-active" : ""}`} onClick={() => setStep(sid)}>
+                      <button key={sid} type="button" role="tab" id={`rm-step-${sid}`} aria-selected={step === sid} aria-controls="rm-step-panel"
+                              tabIndex={step === sid ? 0 : -1}
+                              className={`rm-step${step === sid ? " is-active" : ""}`} onClick={() => setStep(sid)}>
                         <span className="rm-step-n">{i + 1}</span>
                         <span className="rm-step-t">{t(`room.editor.step.${sid}`)}</span>
                       </button>
@@ -197,8 +193,8 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                   {flow.map((s) => t(s.key, s.vars)).join(" → ")}
                 </p>
 
-                <div role="tabpanel" id="rm-step-panel" aria-labelledby={`rm-step-${curStep}`} className="rm-panel">
-                  {curStep === "record" && (
+                <div role="tabpanel" id="rm-step-panel" aria-labelledby={`rm-step-${step}`} className="rm-panel">
+                  {step === "record" && (
                     <>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <label className="block min-w-0">
@@ -255,14 +251,8 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                     </>
                   )}
 
-                  {curStep === "process" && (
+                  {step === "process" && (
                     <>
-                      <div>
-                        <span className="field-label">{t("room.editor.after")}</span>
-                        <Seg value={form.uploadOn ? "upload" : "archive"} onChange={(v) => update({ uploadOn: v === "upload" })}
-                             items={[{ id: "archive", label: t("room.archiveMode") }, { id: "upload", label: t("room.uploadMode") }]} />
-                        {!form.uploadOn && <p className="text-xs text-muted mt-1">{t("room.editor.uploadOffHint")}</p>}
-                      </div>
                       <section className="space-y-3">
                         <RuleSwitch checked={form.procEnabled} onChange={(procEnabled) => update({ procEnabled })} />
                         <div>
@@ -324,7 +314,15 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                     </>
                   )}
 
-                  {curStep === "upload" && form.uploadOn && (
+                  {step === "upload" && (
+                    <>
+                      <div>
+                        <span className="field-label">{t("room.editor.after")}</span>
+                        <Seg value={form.uploadOn ? "upload" : "archive"} onChange={(v) => update({ uploadOn: v === "upload" })}
+                             items={[{ id: "archive", label: t("room.archiveMode") }, { id: "upload", label: t("room.uploadMode") }]} />
+                        {!form.uploadOn && <p className="text-xs text-muted mt-1">{t("room.editor.uploadOffHint")}</p>}
+                      </div>
+                    {form.uploadOn && (
                     <>
                   <div className="rm-ctx">
                     <span className="field-label !mb-0">{t("room.editor.timing")}</span>
@@ -403,9 +401,11 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                         </div>
                       </section>
                     </>
+                    )}
+                    </>
                   )}
 
-                  {curStep === "finish" && (
+                  {step === "finish" && (
                     <>
                     <CleanupSection value={form} onChange={update} constraints={c} procEnabled={form.procEnabled} />
 
