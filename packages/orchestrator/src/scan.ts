@@ -294,9 +294,12 @@ export async function scanRecordings(
         // > taskRooms[主播名] > 目录名(后两者不可靠回退)。
         // A room-layout directory (`<name>_<platform>_<room>`) names its room itself, so recordings without a
         // sidecar still cluster with the same room's sessions in an old-layout directory (issue #336).
-        roomSlug: sess.roomSlug ?? roomOfDir?.roomSlug ?? taskRooms[anchor] ?? anchor,
-        // platform 来自 sidecar(新录像必有);再看目录后缀;旧录像/缺省 → douyin(历史只有抖音)。
-        platform: sess.platform ?? roomOfDir?.platform ?? "douyin",
+        // Order: sidecar > task mapping > dir suffix > dir name. The task mapping goes first because it is keyed by the
+        // anchor name of an old-layout dir (so a legacy name that merely looks like a room dir cannot be misread),
+        // while room-layout dirs are never in it and fall through to the suffix.
+        roomSlug: sess.roomSlug ?? taskRooms[anchor] ?? roomOfDir?.roomSlug ?? anchor,
+        // platform 来自 sidecar(新录像必有);只有房间号取自目录后缀时才信目录里的平台;旧录像/缺省 → douyin(历史只有抖音)。
+        platform: sess.platform ?? (!sess.roomSlug && !taskRooms[anchor] ? roomOfDir?.platform : undefined) ?? "douyin",
         sessionBase: base,
         tsFiles: g.ts.map((f) => join(dir, f)),
         xmlPath: hasXml ? xmlAbs : undefined,

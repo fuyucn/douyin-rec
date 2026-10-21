@@ -53,7 +53,7 @@ export function buildMerge(ctx: ApiCtx) {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
       const { primary, groups } = collectGroups(t);
-      if (Object.keys(groups).length === 0) return err(404, "该任务暂无录制目录");
+      if (!recordingsDirs(t).some((d) => existsSync(d))) return err(404, "该任务暂无录制目录");
       const bases = input.sessions ?? [];
       if (bases.length === 0) return err(400, "请至少选择一个会话");
       for (const b of bases) if (!groups[b]) return err(400, `未知会话: ${b}`);
@@ -63,7 +63,9 @@ export function buildMerge(ctx: ApiCtx) {
         xmlPath: groups[b].xml ?? undefined,
       }));
       // Output next to the new-layout recordings when that directory exists, else beside the first selected session.
-      const dir = primary && existsSync(primary) ? primary : dirname(groups[bases[0]].ts[0] ?? join(primary ?? ".", "x"));
+      const firstTs = groups[bases[0]].ts[0];
+      if (!(primary && existsSync(primary)) && !firstTs) return err(400, `会话无视频: ${bases[0]}`);
+      const dir = primary && existsSync(primary) ? primary : dirname(firstTs);
       const outBase = `${bases[0]}_merged`;
       // 产物容器跟随任务 outputFormat(original → mp4;唯一判定 core effectiveStageFormat,issue #165)。
       // 手动合成不是投稿,故不传 uploadMode。job 字段名仍叫 mp4(API/前端不变),内容是实际产物路径。
