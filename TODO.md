@@ -15,7 +15,7 @@
 
 ## 进行中
 - [~] **T-102 房间编辑弹窗改为分步骤标签页（issue [#342](https://github.com/fuyucn/douyin-rec/issues/342)）**
-  — 2026-10-22 认领,分支 `codex/issue-room-editor-steps`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  — 2026-10-21 认领,分支 `codex/issue-room-editor-steps`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：房间编辑弹窗拆成 录制 / 处理 / 上传 / 清理与通知 四个可自由跳转的标签页;没选投稿时「上传」置灰;弹窗固定高度,切步骤不跳动;手机全屏可用。
   **为什么**：原来录制、处理、上传、清理全挤在一个滚动区与「更多设置」折叠区里,层级不清。
   **验收**：不改字段含义与保存逻辑;桌面与手机宽度实看通过;web build / 类型 / 文案检查 / 全量测试通过。新建房间、任务、hub 规则弹窗不在范围。
