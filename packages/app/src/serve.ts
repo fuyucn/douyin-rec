@@ -256,6 +256,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       nodeTaskLogs: hubEnabled ? hubStarter?.nodeTaskLogs : undefined,
       nodeTasks: hubEnabled ? hubStarter?.nodeTasks : undefined,
       recordingWorkers: hubEnabled ? hubStarter?.recordingWorkers : undefined,
+      zeroDiskStatus: hubEnabled ? hubStarter?.zeroDiskStatus : undefined,
       // issue #73:与 `_apply-tasks` 同目录(<数据根>/config/managed),节点列表据快照里的 assigned 标记过滤。
       managedStateDir: join(rootConfigDir(), "managed"),
       rollingDelivery: hubEnabled ? hubStarter?.rollingDelivery : undefined,

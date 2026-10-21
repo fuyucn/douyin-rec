@@ -291,6 +291,8 @@ export interface HubStarter {
   nodeTaskLogs?: (workerId: string, taskId: number, lines: number) => Promise<import("@drec/core").NodeTaskLogsDTO>;
   /** master 控制台读取 hub 源任务的 worker 录制状态快照。 */
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
+  /** The master console reads the zero-disk side-node status snapshot (issue #331). */
+  zeroDiskStatus?: (platform: string, roomSlug: string) => import("@drec/core").ZeroDiskNodeStatusDTO[];
   /** master 资源池快照(读同一 ResourcePool 实例);队列页显示 CPU/上传占用与排队位次。省略 → 全 0。 */
   /** 边录边传的实时进度(F1;controller 队列页展示)。 */
   rollingDelivery?: () => import("@drec/core").RollingDeliveryDTO[];

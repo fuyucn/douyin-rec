@@ -8,6 +8,7 @@
 import { HUB_TERMINAL_STATES } from "@drec/hub-ledger-contract";
 import type { RoomDTO, Task } from "../api/client";
 import { taskPhase, type TaskPhase } from "./task-status";
+import { zeroDiskNeedsAttention } from "./zero-disk-status";
 
 /** List order = this order (needs-you first, paused last). */
 export const ROOM_STATUS_ORDER = ["attention", "recording", "processing", "waiting", "paused"] as const;
@@ -83,6 +84,9 @@ export function roomStatus(room: Pick<RoomDTO, "processing" | "recording">, task
   const out = (kind: RoomStatusKind): RoomStatus => ({ kind, phase, run });
   if (phase && (phase.kind === "recording" || phase.kind === "draining" || phase.kind === "stopping")) return out("recording");
   if (phase && (phase.kind === "offline" || phase.kind === "error")) return out("attention");
+  // A zero-disk side node that refused / failed / is too old / unreachable needs the user, but only while the
+  // room is meant to run (a paused room stays paused).
+  if (task && task.enabled && room.processing?.enabled !== false && task.zeroDisk?.some(zeroDiskNeedsAttention)) return out("attention");
   if (run && !TERMINAL.includes(run.state)) return out("processing");
   if (room.processing?.enabled === false || !task || !task.enabled) return out("paused");
   if (run && runNeedsAttention(run)) return out("attention");

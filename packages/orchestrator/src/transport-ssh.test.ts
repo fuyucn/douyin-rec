@@ -521,3 +521,32 @@ describe("SshTransport.recoverOrder / procCancel", () => {
     await expect(old.procCancel(["j1"])).rejects.toBeInstanceOf(ProcUnsupported);
   });
 });
+
+describe("SshTransport.zeroDiskReport / nodeCapabilities.zeroDisk (issue #331)", () => {
+  const mkT = (run: (argv: string[]) => Promise<string>) =>
+    new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+  const receipt = { v: 1, id: "douyin:1:5", platform: "douyin", roomSlug: "1", streamKey: "douyin:1:2026-10-20", bvid: "BVfake1", parts: 2, atMs: 5 };
+
+  it("calls the hidden read-only command with the node data root and parses the report", async () => {
+    const calls: string[] = [];
+    const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ v: 1, receipts: [receipt, { junk: true }], status: [] }); });
+    const r = await t.zeroDiskReport();
+    expect(calls[0]).toContain("_zero-disk-report /data/drec");
+    expect(r?.receipts).toEqual([receipt]);
+  });
+  it("an old bundle (unknown command) means unsupported (null), not a failure", async () => {
+    const old = mkT(async () => { throw new Error("ssh rc=1: error: unknown command '_zero-disk-report'"); });
+    await expect(old.zeroDiskReport()).resolves.toBeNull();
+  });
+  it("an unreachable node / bad output throws, so the caller marks it offline instead of 'no receipts'", async () => {
+    await expect(mkT(async () => { throw new Error("ssh rc=255"); }).zeroDiskReport()).rejects.toThrow("255");
+    await expect(mkT(async () => JSON.stringify({ error: "disk" })).zeroDiskReport()).rejects.toThrow("disk");
+    await expect(mkT(async () => JSON.stringify({ nope: 1 })).zeroDiskReport()).rejects.toThrow("unrecognized");
+  });
+  it("_node-capabilities: zeroDisk is true only when the node says so (old bundles omit it)", async () => {
+    const caps = (extra: object) => mkT(async () => JSON.stringify({ biliup: true, cookies: true, diskFreeGB: 5, ...extra })).nodeCapabilities();
+    expect((await caps({ zeroDisk: true })).zeroDisk).toBe(true);
+    expect((await caps({})).zeroDisk).toBe(false);
+    expect((await caps({ zeroDisk: "yes" })).zeroDisk).toBe(false);
+  });
+});

@@ -11,6 +11,11 @@ import { writeManagedState } from "./managed-state.js";
 import { APP_VERSION } from "./version.js";
 import type { TaskStore } from "./store.js";
 
+/** Serialized master-delivered zero-disk metadata (issue #331); null when the master sent none. */
+function deliveryJson(spec: RemoteTaskSpec): string | null {
+  return spec.zeroDiskDelivery ? JSON.stringify(spec.zeroDiskDelivery) : null;
+}
+
 function slugOf(room: string): { platform: string; roomSlug: string } {
   const p = platformForRoom(room);
   return { platform: p.id, roomSlug: p.extractRoomSlug(room) };
@@ -216,6 +221,10 @@ export function applyRemoteTasks(
         // 0 落盘边录边传(plans/039):普通用户开关,旧 master 不带 → false(行为不变)。
         streamUpload: spec.streamUpload ?? false,
         streamUploadSpool: spec.streamUploadSpool ?? true,
+        // Zero-disk metadata (issue #331): store what the master ships as-is (raw JSON, parsed strictly at the use
+        // site); not shipped -> null. Overwritten every round, so a rule change (visibility / title template)
+        // reaches the node on the next sync.
+        zeroDiskDelivery: deliveryJson(spec),
         // 旧 master 不下发 / 非白名单值 → original(现状);不抛,免得一个坏值拒掉整批同步。
         outputFormat: readOutputFormat(spec.outputFormat),
       });
@@ -250,6 +259,7 @@ export function applyRemoteTasks(
         rollingUpload: spec.rollingUpload,
         streamUpload: spec.streamUpload ?? false,
         streamUploadSpool: spec.streamUploadSpool ?? true,
+        zeroDiskDelivery: deliveryJson(spec),
         outputFormat: readOutputFormat(spec.outputFormat),
       });
       store.updateTask(created.id, { rollingEffective: spec.rollingEffective ?? spec.rollingUpload });

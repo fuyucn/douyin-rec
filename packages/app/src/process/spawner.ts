@@ -17,6 +17,17 @@ import {
 } from "./recorder-process.js";
 import type { Task } from "../store.js";
 import { WEBHOOK_TOGGLES_ENV, type NotifWebhookToggles } from "@drec/observability";
+import { ZERO_DISK_DELIVERY_ENV } from "@drec/core";
+
+/**
+ * Master-delivered zero-disk metadata (issue #331) reaches the `record` child by env, not argv. It holds
+ * no login value (metadata, an account key and a path). Only a hub-managed zero-disk task gets it; a
+ * managed task without it makes the child refuse to start.
+ */
+export function zeroDiskDeliveryEnv(task: Pick<Task, "streamUpload" | "managedBy" | "zeroDiskDelivery">): Record<string, string> | null {
+  if (!task.streamUpload || task.managedBy !== "hub" || !task.zeroDiskDelivery) return null;
+  return { [ZERO_DISK_DELIVERY_ENV]: task.zeroDiskDelivery };
+}
 
 /** Factory seam: Task → RecorderProcess. Mockable in tests. */
 export interface Spawner {
@@ -153,13 +164,15 @@ export class NodeRecordSpawner implements Spawner {
     // 抖音 API 模式设置(若配置)→ 注入 DOUYIN_REC_API_MODE;否则继承父 env(douyin-live 用默认 balance)。
     const apiMode = this.douyinApiMode?.()?.trim();
     const toggles = this.webhookToggles?.();
+    const zeroDiskEnv = zeroDiskDeliveryEnv(task);
     const env =
-      mesio || apiMode || toggles
+      mesio || apiMode || toggles || zeroDiskEnv
         ? {
             ...process.env,
             ...(mesio ? { MESIO_PATH: mesio } : {}),
             ...(apiMode ? { DOUYIN_REC_API_MODE: apiMode } : {}),
             ...(toggles ? { [WEBHOOK_TOGGLES_ENV]: JSON.stringify(toggles) } : {}),
+            ...(zeroDiskEnv ?? {}),
           }
         : undefined;
     return new ChildRecorderProcess({

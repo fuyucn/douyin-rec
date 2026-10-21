@@ -847,3 +847,29 @@ Node 对无人处理的 SIGUSR2 的默认动作是**立即终止进程**（实�
 **验证**：`rolling-upload.test.ts` 覆盖规则 > hub.config > 内置默认、标题模板与显式覆盖；
 `live-pump.test.ts` 覆盖 `desc` 真正进入建稿请求。`pnpm test` 3325 passed / 42 skipped，
 typecheck / arch:check / bundle / issue-guard 全绿。
+
+## B29. 0 落盘支持单个侧节点,由 master 统一管理(issue #331,T-97,2026-10-20)
+
+**问题**:策略要求 workers 恰为 `["local"]`,理由是「台账写在 master 本机」。侧节点上还有三件事会静默出错:
+规则目录为空 → 标题/分区/标签/**可见性**退回内置默认(私稿、默认标题);节点自带的 B 站登录与 master 配置的
+账号是否同一个无人校验(投错账号不可逆);0 落盘进程写的是节点自己的台账,master 永远看不到结果。
+
+**设计(单一决策点 + 严格失败,不做静默降级)**:
+
+| 项 | 做法 |
+| --- | --- |
+| 策略 | core `zeroDiskRuleError`:rolling + 无烧录 + **恰好一个节点**(local 或任一 worker)。房间 API / 任务 API / hub 规则 API / Web 编辑器共用它 |
+| 元数据下发 | master 用与本机同一解析器(`resolveRollingUploadMeta`)算一次,随任务规格下发 `zeroDiskDelivery`(tid/tag/desc/**private 必须显式**/三个标题模板/账号键/凭证兜底路径)。节点存为 `tasks.zeroDiskDelivery`,每轮同步覆盖(规则改了下一轮生效) |
+| 节点侧消费 | 受管节点的 0 落盘**只**读下发对象(`resolveStream*Title` 新增 `meta` 参数);缺字段/类型错一律 `delivery_missing` 拒绝启动。master 本机路径不变(仍读规则目录) |
+| 凭证 | 节点本地登录优先(`BILIUP_COOKIE` → 数据根下默认的 biliup 登录文件),master 下发的节点内路径兜底;**只传路径,不传值**(因此该路径在常规部署下与节点默认登录文件相同,实际无额外兜底:不再单独下发登录文件值,节点没有登录就拒绝启动,这是对 issue「master 可下发兜底」的有意收窄)。master 侧账号键取 `hubCfg.cookies`(与 master 自己的上传管线同源),缺省才用数据根默认登录文件。上传前用 core `biliAccountKeyFromCookiesJson` 比对账号键,不一致/无法识别/无凭证 → 拒绝启动 + 告警 + 状态文件 |
+| 台账 | 节点不写自己的台账,每次运行写**一份不可变回执**(`config/zero-disk/receipts/<id>.json`,30 天后自清)。master 经隐藏只读命令 `_zero-disk-report`(ssh)轮询,用既有幂等 `recordStreamUpload` 记账(终态行不覆盖)。master 离线期间回执留在节点,回来后补记;重复拉取不重复记。旧节点 unknown command → 「不支持」(`null`),不是故障 |
+| 能力闸门 | `_node-capabilities` 新增 `zeroDisk:true`。master 的 `ZeroDiskFleet` 探测后才允许下发启用的任务;旧节点/未确认 → 下发 `enabled:false` + 控制台原因。**已知支持的节点探测瞬时失败不撤销**(撤销 = 停掉在传稿件) |
+| 可见性 | 同一次轮询带回每个房间的状态(running/finished/failed/refused/stopped + 已确认分 P 数 + 拒绝码)。`GET /api/tasks` 的 `zeroDisk[]`、房间页「运行」组、列表 attention 状态 |
+| 限流 | 0 落盘建稿/追加此前**不计入**节点上按账号分桶的提交窗口,也不把 601/21566/21540 冷却写进共享桶。现在:每次提交在同一桶里占额(`tryClaim`),命中限流写冷却(`recordRateLimit`)。**不阻塞**:直播不能等 30 分钟冷却,窗口满只记日志并照常提交;不占节点 biliup 槽(槽是整场上传的串行锁,0 落盘常驻数小时会饿死别人) |
+
+**不改**:local 0 落盘行为(含 #308 `waitForBroadcast`)、录制/stage 目录布局、rolling 与普通录制。
+
+**已知限制 / 后续**:
+- 同一 UTC 日同一房间的第二场回执,台账 job 键(`{platform}:{room}:{date}`)已是终态 → 不覆盖(与 local 既有语义一致)。
+- 节点被 SIGKILL 的运行没有回执,稿件 BV 需看节点状态文件/任务日志补记(master 侧状态会显示 stopped + 已确认分 P 数)。
+- 限流记账对 master 本机 0 落盘未启用(保持 local 行为不变);如需统一另开票。

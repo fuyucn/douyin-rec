@@ -397,6 +397,22 @@ export interface LivePumpSessionOpts {
   onChunk?: (streamedBytes: number, chunksDone: number) => void;
   /** Error-level alert channel (same notifier as the other zero-disk alerts). Fired at most once per start. */
   onAlert?: (message: string) => void;
+  /**
+   * Shared account accounting for archive submissions (issue #331). Zero-disk submits (create/append)
+   * count against the same per-account window as every other upload on the node, and a rate-limit hit
+   * cools that account for everyone. Both hooks are synchronous and non-blocking on purpose: the part
+   * is already uploaded and recording continues, so waiting out a 30-minute cooldown here would lose
+   * live video. Errors thrown by the hooks are swallowed.
+   */
+  submitGate?: SubmitGate;
+}
+
+/** See {@link LivePumpSessionOpts.submitGate}. */
+export interface SubmitGate {
+  /** Called before each submit attempt; record the submission in the shared window. */
+  noteSubmit(): void;
+  /** Called when Bilibili answered with a submission rate limit; cool the shared account. */
+  noteRateLimited(): void;
 }
 
 /**
@@ -717,6 +733,7 @@ export class LivePumpSession {
     const maxAttempts = this.o.rateLimitAttempts ?? 5;
     let lastError = "";
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try { this.o.submitGate?.noteSubmit(); } catch { /* accounting must never block a submit */ }
       let raw: Record<string, unknown>;
       let ok: boolean;
       let bvid: string | undefined;
@@ -756,6 +773,7 @@ export class LivePumpSession {
       const detail = `${pending.kind} failed: ${JSON.stringify(raw).slice(0, 300)}`;
       lastError = detail;
       if (!isUploadRateLimited(detail)) return { ok: false, error: detail };
+      try { this.o.submitGate?.noteRateLimited(); } catch { /* accounting must never block a submit */ }
       const waitMs = Math.min(baseMs * 2 ** attempt, 300_000);
       this.log(
         `[live-pump] ${pending.kind} 命中投稿限流(${JSON.stringify(raw).slice(0, 120)}),` +
@@ -1378,6 +1396,13 @@ export interface RunLivePumpOptions {
   /** Render a part title from its 1-based index; null = keep the generated stem. */
   partTitle?: (partIndex: number, liveTitle?: string) => string | null;
   log?: (msg: string) => void;
+  /** Shared account accounting for archive submissions (see {@link LivePumpSessionOpts.submitGate}). */
+  submitGate?: SubmitGate;
+  /**
+   * Called after each part is confirmed into the archive: `count` = parts confirmed so far (including
+   * earlier runs of the same archive). Progress for the master console; throwing is swallowed.
+   */
+  onPartConfirmed?: (info: { count: number; bvid?: string }) => void;
   /** Stop the loop after this many parts (tests / manual runs). */
   shouldStop?: () => boolean | Promise<boolean>;
   /**
@@ -1567,6 +1592,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       private: o.private !== false,
       log,
       ...(o.onAlert ? { onAlert: o.onAlert } : {}),
+      ...(o.submitGate ? { submitGate: o.submitGate } : {}),
       // The session performs the archive create/append requests; it must use the same fetch
       // override as the segment uploader, or a fake transport would silently fall back to the
       // real network (real bug: a fake-UPOS run hit live Bilibili and got -400).
@@ -1810,6 +1836,10 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         `[live-pump] 段${seg + 1} 已确认到稿件 ${submitted.bvid ?? submitted.aid}` +
         `${r.usedFileFallback ? " (整文件回退)" : ""}`,
       );
+      try {
+        const bv = submitted.bvid ?? session.bvid;
+        o.onPartConfirmed?.({ count: session.parts.filter((p) => p.confirmed).length, ...(bv ? { bvid: bv } : {}) });
+      } catch { /* progress reporting must never fail an upload */ }
     }
     segments.push(report);
     const disk = (o.spoolMode ?? "full") === "none"

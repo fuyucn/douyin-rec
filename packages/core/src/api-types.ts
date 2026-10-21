@@ -2,6 +2,8 @@
 // 后端 @drec/app 的 web/api 用它定请求/响应;前端 packages/web 经 alias import 同一份。
 import type { OutputFormat } from "./output-format.js";
 import type { NotifyEvent, NotifKey, NotifWebhookToggles } from "./notify.js";
+import type { ZeroDiskDelivery, ZeroDiskNodeStatusDTO } from "./zero-disk-delivery.js";
+export type { ZeroDiskNodeStatusDTO, ZeroDiskRunState, ZeroDiskRefusalCode } from "./zero-disk-delivery.js";
 export type { NotifyEvent, NotifKey, NotifWebhookToggles };
 
 /** hub 规则 `pipeline.upload.mode` 的取值。`rolling` = 合成并上传 + 录制端边录边传(issue #40)。 */
@@ -712,6 +714,14 @@ export interface RemoteTaskSpec {
   /** 0 落盘是否保留 spool(可选;旧 master 不下发 → 默认保留,行为不变)。 */
   streamUploadSpool?: boolean;
   /**
+   * Upload metadata + account key + fallback credential path a zero-disk run needs on a SIDE node (issue #331).
+   * Shipped by the master only when `streamUpload` is on and the target is a non-local node; when it is missing
+   * the node refuses to start zero-disk (never falls back to defaults).
+   * Old node bundles ignore the field, so the master gates on `NodeCapabilities.zeroDisk` and never ships an
+   * enabled zero-disk task to an old node.
+   */
+  zeroDiskDelivery?: ZeroDiskDelivery;
+  /**
    * 输出格式(issue #137)。可选:旧 master 不下发 → 节点按 `original`;旧节点包不认识该字段则忽略
    * (继续原样输出)。非白名单值节点一律按 `original`(不抛、不拒绝整批)。
    */
@@ -897,6 +907,11 @@ export interface NodeCapabilities {
   diskFreeGB: number;
   /** 节点上是否有中文字体(烧录用;节点侧分支不烧,仅诊断展示)。 */
   cjkFonts?: boolean;
+  /**
+   * Whether the node supports master-managed zero-disk (issue #331: metadata delivery + account check + receipts).
+   * Missing field = old node -> the master treats it as unsupported and ships no enabled zero-disk task.
+   */
+  zeroDisk?: boolean;
   /** 节点已注册的处理器 kind 列表(plans/036);缺字段 = 旧节点,派发方按「不支持」处理。 */
   processors?: string[];
 }
@@ -1020,6 +1035,8 @@ export interface TaskDTO {
   stopping?: boolean;
   /** Hub 源任务在被选中 worker 上的录制状态;普通任务为空数组。 */
   recordingWorkers?: RecordingWorkerStatusDTO[];
+  /** Zero-disk side-node state in the master console (issue #331): one per selected non-local node; omitted when none. */
+  zeroDisk?: ZeroDiskNodeStatusDTO[];
   /** issue #73:master 判定的归属标记。false=受管但未派给本节点(停用保留);省略=视为归属。 */
   assigned?: boolean;
   /**

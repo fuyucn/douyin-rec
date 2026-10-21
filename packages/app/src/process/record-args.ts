@@ -63,6 +63,9 @@ export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
     args.push("--stream-upload", "1");
     // 默认保留 spool(可整文件回退);显式关掉 = 真 0 落盘,失败无本地回退。
     if (task.streamUploadSpool === false) args.push("--stream-upload-spool", "none");
+    // Hub-managed side node (issue #331): the child must take its upload metadata and account check
+    // from the master-delivered object (env, see spawner) and never from local rule files.
+    if (task.managedBy === "hub") args.push("--zero-disk-managed", "1");
   }
   // 节点侧原地替换(issue #137):`task.outputFormat` 在这里已是**判定后的生效值**(TaskManager.spawnFor 经
   // resolveNodeOutputFormat 算定:hub 受管 / 有规则绑定 / 边录边传 → original)。original = 不带 flag,行为不变。

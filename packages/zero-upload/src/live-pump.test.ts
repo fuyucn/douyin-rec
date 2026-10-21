@@ -1776,6 +1776,41 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     expect(videos.map((v) => v.filename)).toEqual(["stem0", "stem1"]);
   });
 
+  it("reports each submit attempt and each rate-limit answer to the shared account gate; a throwing gate never blocks a submit (issue #331)", async () => {
+    let posts = 0;
+    let limited = 0;
+    const videos: Array<{ cid: number; filename: string; title: string }> = [];
+    const impl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "GET") {
+        return new Response(JSON.stringify({
+          code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21, tag: "", is_only_self: 1 }, videos },
+        }), { status: 200 });
+      }
+      posts++;
+      if (posts === 1) { limited++; return new Response(JSON.stringify({ code: 21540, message: "请求过于频繁，请稍后再试", ttl: 1 }), { status: 200 }); }
+      const body = JSON.parse(String(init?.body ?? "{}")) as { videos?: Array<{ filename: string; title?: string }> };
+      videos.length = 0;
+      for (const [i, v] of (body.videos ?? []).entries()) videos.push({ cid: 10 + i, filename: v.filename, title: v.title ?? "" });
+      return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const notes = { submit: 0, limited: 0 };
+    const session = new LivePumpSession({
+      cookiesPath: COOKIES, room: "r", spoolDir: dir, title: "t", tid: 21, tag: "x", private: true,
+      fetchImpl: impl, cleanupConfirmedSpool: false, rateLimitBaseMs: 1, sleep: async () => {},
+      submitGate: {
+        noteSubmit: () => { notes.submit++; throw new Error("gate db down"); },
+        noteRateLimited: () => { notes.limited++; },
+      },
+    });
+    const p0 = join(dir, "g0.ts");
+    writeFileSync(p0, "0");
+    const r = await session.submitPart({ index: 0, spoolPath: p0, stem: "stem0", title: "P1", bytes: 1, durationSec: 1 });
+    expect(r.ok).toBe(true);
+    expect(notes.submit).toBe(posts); // one note per attempt, including the retried one
+    expect(notes.limited).toBe(limited);
+    expect(notes.limited).toBe(1);
+  });
+
   it("resubmits a single unconfirmed part from its spool instead of stopping the run", async () => {
     // Real run 2026-10-18: a part hit 21540 after `complete()`, so the stem exists on the server
     // but not on the archive. Recovery stopped the whole broadcast; the spool can finish the job.
@@ -2172,4 +2207,38 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(open().bvid).toBe(FAKE_BV);
     expect(archives().length).toBe(0);
   });
+});
+
+describe("part progress hook (issue #331)", () => {
+  it("onPartConfirmed fires after each part is confirmed into the archive with the running count and BV", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-progress-"));
+    try {
+      writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+        cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+      }));
+      const fake = ((input: string | URL | Request) => {
+        const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+        if (u.pathname === "/preupload") return Promise.resolve(json({ OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1", endpoint: "//upos.test", upos_uri: "upos://b/p.ts" }));
+        if (u.searchParams.has("uploads")) return Promise.resolve(json({ upload_id: "uid" }));
+        if (u.searchParams.has("uploadId") && u.searchParams.has("profile")) return Promise.resolve(json({ OK: 1, key: "b/p.ts" }));
+        if (u.pathname === "/x/vu/web/add/v3") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
+        return Promise.resolve(json({ code: 0, data: {} }));
+      }) as unknown as typeof fetch;
+      installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a));
+      const seen: Array<{ count: number; bvid?: string }> = [];
+      const r = await runLivePump({
+        cookiesPath: join(dir, "cookies.json"), room: "fi", spoolDir: dir, title: "fi",
+        tid: 21, tag: "x", private: true, sizeCap: CHUNK, maxMs: 300, maxSegments: 1,
+        quality: "origin", submit: true, spoolMode: "none", fetchImpl: fake,
+        fetch: async () => ({ living: true, url: "http://x/y.ts" }),
+        sleep: async () => {},
+        onPartConfirmed: (info) => { seen.push(info); throw new Error("a throwing observer must not fail the upload"); },
+      });
+      expect(r.ok, r.error ?? "").toBe(true);
+      expect(seen).toEqual([{ count: 1, bvid: "BILIfake1" }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });

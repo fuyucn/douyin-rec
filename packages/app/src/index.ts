@@ -64,6 +64,12 @@ export type { NodeUploadGateOpts } from "./node-pipeline.js";
 export { RollingUploader, makeRollingUploadHookFactory, resolveRollingUploadMeta } from "./rolling-upload.js";
 export { resolveStreamUploadMeta, resolveStreamUploadTitle, resolveStreamPartTitle } from "./rolling-upload.js";
 export { refreshLocalRollingEffective, rollingSpecFields } from "./rolling-effective.js";
+// Zero-disk on a side node (issue #331): node preflight / status + receipt files / master-side delivery object builder.
+export {
+  zeroDiskNodePreflight, resolveNodeUploadCredential, writeZeroDiskStatus, writeZeroDiskReceipt, buildZeroDiskReport,
+  buildZeroDiskDelivery, planZeroDiskSpec, createZeroDiskReporter, zeroDiskNodeDir, ZERO_DISK_RECEIPT_TTL_MS, preflightManagedZeroDiskTask, makeNodeSubmitGate,
+} from "./zero-disk-node.js";
+export type { ZeroDiskPreflight, ZeroDiskDeliveryBuild, ZeroDiskCredentialSource } from "./zero-disk-node.js";
 export type { RollingUploaderOpts } from "./rolling-upload.js";
 // 节点侧原地替换容器(issue #137 第 2/2):封口后 remux + 校验 + 删原文件 + 崩溃接管 + 唯一判定点。
 export { RemuxQueue, type RemuxQueueLike, type RemuxWaitOutcome } from "./remux-queue.js";

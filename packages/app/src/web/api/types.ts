@@ -11,7 +11,7 @@ import type { Task, TaskStore } from "../../store.js";
 import type { EventCenter, NotifWebhookToggles } from "@drec/observability";
 import type {
   RecordingWorkerStatusDTO, HubRulePayload, HubPoolSnapshotDTO, WorkerTestResult, RoomPayload, OutputFormatLock,
-  TaskSecrets, RedactedTaskSecrets,
+  TaskSecrets, RedactedTaskSecrets, ZeroDiskNodeStatusDTO,
 } from "@drec/core";
 
 export interface ApiResult {
@@ -112,6 +112,8 @@ export interface ApiDeps {
   nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
   /** 录制节点状态缓存读取;避免每次列任务都同步 SSH。 */
   recordingWorkers?: (platform: string, roomSlug: string) => RecordingWorkerStatusDTO[];
+  /** Cached zero-disk side-node status reader (issue #331); only on a master hub. */
+  zeroDiskStatus?: (platform: string, roomSlug: string) => ZeroDiskNodeStatusDTO[];
   /**
    * 节点侧 master 下发快照目录(`<数据根>/config/managed`)。提供时,受管任务视图带 `assigned`
    * (取自快照里 master 算好的归属标记;缺失/旧 master 不带 → 省略 = 视为归属)。省略 = 不带(master/单机)。
@@ -142,7 +144,7 @@ export interface ApiDeps {
 }
 
 /** A task enriched with its live running state for client display. */
-export interface TaskView extends Omit<Task, keyof TaskSecrets>, RedactedTaskSecrets {
+export interface TaskView extends Omit<Task, keyof TaskSecrets | "zeroDiskDelivery">, RedactedTaskSecrets {
   running: boolean;
   /** 抓取到的主播名（运行时解析，未设 name 时 UI 用它显示），未知为 null。 */
   anchorName: string | null;
@@ -153,6 +155,8 @@ export interface TaskView extends Omit<Task, keyof TaskSecrets>, RedactedTaskSec
   /** 输出格式被锁的原因(与 core TaskDTO.outputFormatLock 同义;省略 = 不锁)。 */
   outputFormatLock?: OutputFormatLock;
   recordingWorkers?: RecordingWorkerStatusDTO[];
+  /** Zero-disk side-node state (issue #331): one per selected non-local node; omitted when none. */
+  zeroDisk?: ZeroDiskNodeStatusDTO[];
   /**
    * issue #73:master 判定「本节点是否被派发这个受管任务」。false=停用保留的未分配残留。
    * 仅受管任务且快照里有标记时才有;省略 = 视为归属(旧 master / 非受管 / 无快照)。
