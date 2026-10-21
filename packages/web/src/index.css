@@ -1421,7 +1421,8 @@ table.tasks tbody tr:last-child td {
 }
 .modal-card.rm-editor {
   width: min(560px, 100%);
-  max-height: calc(100dvh - 48px);
+  /* Fixed height so switching steps never makes the card jump. */
+  height: min(680px, calc(100dvh - 48px));
   display: flex;
   flex-direction: column;
   padding: 0;
@@ -1497,35 +1498,49 @@ table.tasks tbody tr:last-child td {
   opacity: 0.45;
   cursor: not-allowed;
 }
-.rm-more summary {
+.rm-steps {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--hairline);
+  margin: 0 -2px;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+.rm-step {
+  flex: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  list-style: none;
-}
-.rm-more summary::-webkit-details-marker {
-  display: none;
-}
-.rm-more summary::before {
-  content: "›";
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 8px;
+  font-size: 13px;
   color: var(--muted);
-  transition: transform 0.12s ease;
-}
-.rm-more[open] summary::before {
-  transform: rotate(90deg);
-}
-.rm-more-sum {
-  margin-left: auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
   white-space: nowrap;
+}
+.rm-step.is-active {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+.rm-step:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.rm-step-n {
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--muted);
+}
+.rm-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 @media (max-width: 639px) {
+  .rm-step-n {
+    display: none;
+  }
   .rm-tele {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
@@ -1591,9 +1606,6 @@ table.tasks tbody tr:last-child td {
   }
   .rm-editor-foot > button {
     flex: 1;
-  }
-  .rm-more-sum {
-    display: none;
   }
 }
 

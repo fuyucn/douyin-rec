@@ -1,10 +1,10 @@
 /**
- * RoomEditor — `/rooms` create/edit sheet: one screen, no wizard.
+ * RoomEditor — `/rooms` create/edit sheet: four free-to-jump step tabs, no wizard.
  *
- * Layout = the one decision that shapes everything else ("after recording": archive / upload),
- * then when + where, then only the options that decision makes meaningful (upload timing + public
- * for upload; output format for archive), then which versions. Everything else is folded into
- * "more settings". Desktop: centered card; phone: full-screen sheet with a pinned footer.
+ * Four steps as tabs (free to jump, nothing is a wizard): 1 record (when / where / recorder options),
+ * 2 process (archive vs upload, merge, versions, node capabilities), 3 upload (timing, metadata; only while
+ * upload is on), 4 finish (cleanup, webhook). A flow summary sits below the tabs.
+ * Desktop: centered card; phone: full-screen sheet with a pinned footer.
  *
  * Field dependencies come from room-form-rules (shared with the Hub dialog); mapping to the
  * payload from room-editor-form. Saving is one `PUT /api/rooms/:key` (backend rolls back halves).
@@ -12,7 +12,7 @@
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { useAtomValue } from "jotai";
 import { X } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { OUTPUT_FORMATS, stageExt } from "@drec/output-format";
 import { api, type PlatformDTO, type RoomDTO, type WorkerDTO } from "../api/client";
 import { cookieStatusAtom } from "../atoms";
@@ -37,6 +37,9 @@ interface Props {
   /** Omitted = no delete button (rule-only / managed rooms). */
   onDelete?: () => void;
 }
+
+type StepId = "record" | "process" | "upload" | "finish";
+const STEPS: readonly StepId[] = ["record", "process", "upload", "finish"];
 
 const METHODS: { id: UploadMethod; key: string; hint: string }[] = [
   { id: "after", key: "room.editor.timingAfter", hint: "roomForm.method.afterHint" },
@@ -75,6 +78,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   const cookieStatuses = usePlatformCookieStatuses(true);
   const [form, setForm] = useState<RoomForm>(() => formFromRoom(room));
   const [busy, setBusy] = useState(false);
+  const [step, setStep] = useState<StepId>("record");
   const [platforms, setPlatforms] = useState<PlatformDTO[]>([]);
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
 
@@ -106,6 +110,20 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
       return { ...next, method: settledMethod(ruleFactsOf(next, ctx)) };
     });
 
+  // The upload step only exists while upload is on; fall back to processing if it was open when that changed.
+  const curStep: StepId = step === "upload" && !form.uploadOn ? "process" : step;
+  // Arrow/Home/End move between enabled tabs (roving tabindex), skipping the disabled Upload step.
+  const onStepKey = (e: KeyboardEvent) => {
+    const keys = ["ArrowLeft", "ArrowRight", "Home", "End"];
+    if (!keys.includes(e.key)) return;
+    const ids = STEPS.filter((sid) => !(sid === "upload" && !form.uploadOn));
+    const at = ids.indexOf(curStep);
+    const next = e.key === "Home" ? 0 : e.key === "End" ? ids.length - 1
+      : (at + (e.key === "ArrowRight" ? 1 : -1) + ids.length) % ids.length;
+    e.preventDefault();
+    setStep(ids[next]);
+    document.getElementById(`rm-step-${ids[next]}`)?.focus();
+  };
   const flow = flowSummary(facts, !!room.recording && room.recording.enabled);
   const caps = useMemo(() => [...new Set(workers.flatMap((w) => w.capabilities ?? []))], [workers]);
   const workerName = (id: string): string => workers.find((w) => w.id === id)?.name ?? id;
@@ -116,6 +134,10 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   async function submit(ev: FormEvent): Promise<void> {
     ev.preventDefault();
     if (managed) return;
+    // Native min= validation only reaches inputs of the visible step, so re-check the numeric fields here.
+    const bad: StepId | null = form.segmentSec.trim() !== "" && Number(form.segmentSec) < 0 ? "record"
+      : form.uploadOn && form.tid.trim() !== "" && Number(form.tid) < 1 ? "upload" : null;
+    if (bad) { setStep(bad); toast(t("room.editor.fieldInvalid"), "error"); return; }
     const r = payloadFromForm(form, ctx);
     if (!r.ok) { toast(t("rooms.scheduleInvalid"), "error"); return; }
     setBusy(true);
@@ -132,13 +154,6 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   }
 
   const name = room.recording?.name || room.recording?.anchorName || room.roomSlug;
-  const moreSummary = [
-    hasRecording && qualityLabel(form.quality),
-    hasRecording && form.engine,
-    hasRecording && `${form.segmentSec}s`,
-    form.mergeSegments ? t("roomForm.flow.merge") : t("roomForm.flow.split"),
-    form.uploadOn && (form.titleTemplate || "{name}_{date}"),
-  ].filter(Boolean).join(" · ");
 
   return (
     <BaseDialog.Root open onOpenChange={(o) => !o && onClose()}>
@@ -160,36 +175,157 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                 {managed && <p className="status-strip">{t("room.editor.managed")}</p>}
                 {/* Managed rooms are owned by the master: every control is read-only here and Save is off,
                     otherwise the processing half would still be written to this node's rule file. */}
+                {/* Outside the fieldset: a managed room is read-only, but its steps must stay browsable. */}
+                <div role="tablist" className="rm-steps" aria-label={t("room.editor.steps")} onKeyDown={onStepKey}>
+                  {STEPS.map((sid, i) => {
+                    const off = sid === "upload" && !form.uploadOn;
+                    return (
+                      <button key={sid} type="button" role="tab" id={`rm-step-${sid}`} aria-selected={curStep === sid} aria-controls="rm-step-panel"
+                              tabIndex={curStep === sid ? 0 : -1} disabled={off} title={off ? t("room.editor.stepUploadOff") : undefined}
+                              className={`rm-step${curStep === sid ? " is-active" : ""}`} onClick={() => setStep(sid)}>
+                        <span className="rm-step-n">{i + 1}</span>
+                        <span className="rm-step-t">{t(`room.editor.step.${sid}`)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
                 <fieldset disabled={managed} className="contents">
 
-                <div>
-                  <span className="field-label">{t("room.editor.after")}</span>
-                  <Seg value={form.uploadOn ? "upload" : "archive"} onChange={(v) => update({ uploadOn: v === "upload" })}
-                       items={[{ id: "archive", label: t("room.archiveMode") }, { id: "upload", label: t("room.uploadMode") }]} />
-                </div>
+                <p className="text-xs text-muted">
+                  <span className="font-mono uppercase mr-2">{t("room.editor.flow")}</span>
+                  {flow.map((s) => t(s.key, s.vars)).join(" → ")}
+                </p>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <label className="block min-w-0">
-                    <span className="field-label">{t("room.editor.when")}</span>
-                    <input className="input font-mono" placeholder={t("room.editor.whenPlaceholder")} value={form.schedule}
-                           disabled={!hasRecording} onChange={(e) => update({ schedule: e.target.value })} />
+                <div role="tabpanel" id="rm-step-panel" aria-labelledby={`rm-step-${curStep}`} className="rm-panel">
+                  {curStep === "record" && (
+                    <>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label className="block min-w-0">
+                          <span className="field-label">{t("room.editor.when")}</span>
+                          <input className="input font-mono" placeholder={t("room.editor.whenPlaceholder")} value={form.schedule}
+                                 disabled={!hasRecording} onChange={(e) => update({ schedule: e.target.value })} />
+                        </label>
+                        <div className="min-w-0">
+                          <span className="field-label">{t("room.editor.where")}</span>
+                          <div className="flex flex-wrap gap-1.5 min-h-10 items-center">
+                            {workers.map((w) => (
+                              <button key={w.id} type="button" aria-pressed={form.workers.includes(w.id)}
+                                      className={`chip rm-pick${form.workers.includes(w.id) ? " is-on" : ""}`}
+                                      onClick={() => update({ workers: toggleIn(form.workers, w.id) })}>
+                                {w.name || w.id}
+                              </button>
+                            ))}
+                            {form.workers.length === 0 && <span className="text-xs text-muted">{t("room.editor.whereHint")}</span>}
+                          </div>
+                        </div>
+                      </div>
+                      {hasRecording ? (
+                        <section className="space-y-3">
+                          <div className="grid grid-cols-2 gap-3">
+                            <label className="block col-span-2">
+                              <span className="field-label">{t("rooms.name")}</span>
+                              <input className="input" value={form.name} onChange={(e) => update({ name: e.target.value })} />
+                            </label>
+                            <label className="block">
+                              <span className="field-label">{t("rooms.quality")}</span>
+                              <select className="select" value={form.quality} onChange={(e) => update({ quality: e.target.value })}>
+                                {withCurrent(plat?.qualities ?? [], form.quality).map((q) => <option key={q} value={q}>{qualityLabel(q)}</option>)}
+                              </select>
+                            </label>
+                            <label className="block">
+                              <span className="field-label">{t("rooms.engine")}</span>
+                              <select className="select" value={form.engine} onChange={(e) => update({ engine: e.target.value })}>
+                                {withCurrent(plat?.engines ?? [], form.engine).map((x) => <option key={x} value={x}>{x}</option>)}
+                              </select>
+                            </label>
+                            <label className="block col-span-2">
+                              <span className="field-label">{t("rooms.segmentSec")}</span>
+                              <input className="input" type="number" min={0} value={form.segmentSec} onChange={(e) => update({ segmentSec: e.target.value })} />
+                            </label>
+                          </div>
+                          <ToggleRow label={t("rooms.danmu")} hint={ctx.danmuAvailable ? t("rooms.danmuHint") : t("dialog.danmuNone")}
+                                     checked={form.danmu} onChange={(danmu) => update({ danmu })}
+                                     lock={ctx.danmuAvailable ? undefined : { locked: true, reasonKey: "dialog.danmuNone" }} />
+                          <ToggleRow label={t(accountToggleCopy(ctx).labelKey)}
+                                     hint={t(accountToggleCopy(ctx).hintKey)}
+                                     checked={form.useCookie} onChange={(useCookie) => update({ useCookie })} lock={c.cookie} />
+                        </section>
+                      ) : null}
+                    </>
+                  )}
+
+                  {curStep === "process" && (
+                    <>
+                      <div>
+                        <span className="field-label">{t("room.editor.after")}</span>
+                        <Seg value={form.uploadOn ? "upload" : "archive"} onChange={(v) => update({ uploadOn: v === "upload" })}
+                             items={[{ id: "archive", label: t("room.archiveMode") }, { id: "upload", label: t("room.uploadMode") }]} />
+                        {!form.uploadOn && <p className="text-xs text-muted mt-1">{t("room.editor.uploadOffHint")}</p>}
+                      </div>
+                      <section className="space-y-3">
+                        <RuleSwitch checked={form.procEnabled} onChange={(procEnabled) => update({ procEnabled })} />
+                        <div>
+                          <span className="field-label">{t("roomForm.output")}</span>
+                          <Seg value={form.mergeSegments ? "merge" : "split"} onChange={(v) => update({ mergeSegments: v === "merge" })}
+                               items={[{ id: "merge", label: t("roomForm.mergeOne") }, { id: "split", label: t("roomForm.mergeSplit") }]} />
+                          <p className="text-xs text-muted mt-1">{t("roomForm.outputHint")}</p>
+                        </div>
+                        {form.uploadOn && (
+                          <ToggleRow label={t("hub.ruleDialog.toggleTsDirectLabel")} hint={t("hub.ruleDialog.toggleTsDirectSub")}
+                                     checked={form.tsDirect} onChange={(tsDirect) => update({ tsDirect })} lock={c.tsDirect} />
+                        )}
+                        {caps.length > 0 && (
+                          <div>
+                            <span className="field-label">{t("room.editor.caps")}</span>
+                            <div className="flex flex-wrap gap-1.5">
+                              {caps.map((cap) => (
+                                <button key={cap} type="button" aria-pressed={form.requires.includes(cap)}
+                                        className={`chip rm-pick${form.requires.includes(cap) ? " is-on" : ""}`}
+                                        onClick={() => update({ requires: toggleIn(form.requires, cap) })}>{cap}</button>
+                              ))}
+                            </div>
+                            {form.workers.some((id) => form.requires.some((r) => !(workers.find((w) => w.id === id)?.capabilities ?? []).includes(r))) && (
+                              <p className="text-xs text-error-fg mt-1">
+                                {t("hub.ruleDialog.capsFiltered", { workers: form.workers.filter((id) => form.requires.some((r) => !(workers.find((w) => w.id === id)?.capabilities ?? []).includes(r))).map(workerName).join("、") })}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </section>
+                      {!form.uploadOn && (
+                  <label className="rm-ctx">
+                    <span className="field-label !mb-0">{t("rooms.outputFormat")}</span>
+                    <select className="select" value={shownOutputFormat(facts)} disabled={!hasRecording || c.outputFormat.locked}
+                            onChange={(e) => update({ outputFormat: e.target.value as RoomForm["outputFormat"] })}>
+                      {OUTPUT_FORMATS.map((f) => (
+                        <option key={f} value={f}>{f === "original" ? t("rooms.outputFormatOriginal") : stageExt(f).slice(1).toUpperCase()}</option>
+                      ))}
+                    </select>
                   </label>
-                  <div className="min-w-0">
-                    <span className="field-label">{t("room.editor.where")}</span>
-                    <div className="flex flex-wrap gap-1.5 min-h-10 items-center">
-                      {workers.map((w) => (
-                        <button key={w.id} type="button" aria-pressed={form.workers.includes(w.id)}
-                                className={`chip rm-pick${form.workers.includes(w.id) ? " is-on" : ""}`}
-                                onClick={() => update({ workers: toggleIn(form.workers, w.id) })}>
-                          {w.name || w.id}
+                      )}
+                {burnVersionsApply(factsOf(form, ctx)) && (
+                  <div>
+                    <span className="field-label">{t("room.editor.versions")}</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="chip rm-pick is-on" aria-disabled="true">{t("room.editor.original")}</span>
+                      {(["burnDanmu", "burnLivechat"] as const).map((k) => (
+                        <button key={k} type="button" disabled={c.burn.locked} aria-pressed={!c.burn.locked && form[k]}
+                                title={c.burn.locked && c.burn.reasonKey ? t(c.burn.reasonKey) : undefined}
+                                className={`chip rm-pick${!c.burn.locked && form[k] ? " is-on" : ""}`}
+                                onClick={() => update({ [k]: !form[k] })}>
+                          {t(k === "burnDanmu" ? "room.editor.danmuVer" : "room.editor.livechatVer")}
                         </button>
                       ))}
-                      {form.workers.length === 0 && <span className="text-xs text-muted">{t("room.editor.whereHint")}</span>}
                     </div>
+                    {c.burn.locked && c.burn.reasonKey && <p className="text-xs text-muted mt-1">{t(c.burn.reasonKey)}</p>}
                   </div>
-                </div>
+                )}
+                    </>
+                  )}
 
-                {form.uploadOn ? (
+                  {curStep === "upload" && form.uploadOn && (
+                    <>
                   <div className="rm-ctx">
                     <span className="field-label !mb-0">{t("room.editor.timing")}</span>
                     <Seg small value={form.method} onChange={(method) => update({ method })}
@@ -239,116 +375,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                       </>
                     )}
                   </div>
-                ) : (
-                  <label className="rm-ctx">
-                    <span className="field-label !mb-0">{t("rooms.outputFormat")}</span>
-                    <select className="select" value={shownOutputFormat(facts)} disabled={!hasRecording || c.outputFormat.locked}
-                            onChange={(e) => update({ outputFormat: e.target.value as RoomForm["outputFormat"] })}>
-                      {OUTPUT_FORMATS.map((f) => (
-                        <option key={f} value={f}>{f === "original" ? t("rooms.outputFormatOriginal") : stageExt(f).slice(1).toUpperCase()}</option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-
-                {burnVersionsApply(factsOf(form, ctx)) && (
-                  <div>
-                    <span className="field-label">{t("room.editor.versions")}</span>
-                    <div className="flex flex-wrap gap-1.5">
-                      <span className="chip rm-pick is-on" aria-disabled="true">{t("room.editor.original")}</span>
-                      {(["burnDanmu", "burnLivechat"] as const).map((k) => (
-                        <button key={k} type="button" disabled={c.burn.locked} aria-pressed={!c.burn.locked && form[k]}
-                                title={c.burn.locked && c.burn.reasonKey ? t(c.burn.reasonKey) : undefined}
-                                className={`chip rm-pick${!c.burn.locked && form[k] ? " is-on" : ""}`}
-                                onClick={() => update({ [k]: !form[k] })}>
-                          {t(k === "burnDanmu" ? "room.editor.danmuVer" : "room.editor.livechatVer")}
-                        </button>
-                      ))}
-                    </div>
-                    {c.burn.locked && c.burn.reasonKey && <p className="text-xs text-muted mt-1">{t(c.burn.reasonKey)}</p>}
-                  </div>
-                )}
-
-                <p className="text-xs text-muted">
-                  <span className="font-mono uppercase mr-2">{t("room.editor.flow")}</span>
-                  {flow.map((s) => t(s.key, s.vars)).join(" → ")}
-                </p>
-
-                <details className="rm-more">
-                  <summary>
-                    <span className="text-sm text-ink">{t("room.editor.more")}</span>
-                    <span className="rm-more-sum">{moreSummary}</span>
-                  </summary>
-                  <div className="space-y-6 pt-4">
-                    {hasRecording && (
                       <section className="space-y-3">
-                        <h3 className="form-section">{t("room.editor.recording")}</h3>
-                        <div className="grid grid-cols-2 gap-3">
-                          <label className="block col-span-2">
-                            <span className="field-label">{t("rooms.name")}</span>
-                            <input className="input" value={form.name} onChange={(e) => update({ name: e.target.value })} />
-                          </label>
-                          <label className="block">
-                            <span className="field-label">{t("rooms.quality")}</span>
-                            <select className="select" value={form.quality} onChange={(e) => update({ quality: e.target.value })}>
-                              {withCurrent(plat?.qualities ?? [], form.quality).map((q) => <option key={q} value={q}>{qualityLabel(q)}</option>)}
-                            </select>
-                          </label>
-                          <label className="block">
-                            <span className="field-label">{t("rooms.engine")}</span>
-                            <select className="select" value={form.engine} onChange={(e) => update({ engine: e.target.value })}>
-                              {withCurrent(plat?.engines ?? [], form.engine).map((x) => <option key={x} value={x}>{x}</option>)}
-                            </select>
-                          </label>
-                          <label className="block col-span-2">
-                            <span className="field-label">{t("rooms.segmentSec")}</span>
-                            <input className="input" type="number" min={0} value={form.segmentSec} onChange={(e) => update({ segmentSec: e.target.value })} />
-                          </label>
-                        </div>
-                        <ToggleRow label={t("rooms.danmu")} hint={ctx.danmuAvailable ? t("rooms.danmuHint") : t("dialog.danmuNone")}
-                                   checked={form.danmu} onChange={(danmu) => update({ danmu })}
-                                   lock={ctx.danmuAvailable ? undefined : { locked: true, reasonKey: "dialog.danmuNone" }} />
-                        <ToggleRow label={t(accountToggleCopy(ctx).labelKey)}
-                                   hint={t(accountToggleCopy(ctx).hintKey)}
-                                   checked={form.useCookie} onChange={(useCookie) => update({ useCookie })} lock={c.cookie} />
-                      </section>
-                    )}
-
-                    <section className="space-y-3">
-                      <h3 className="form-section">{t("room.editor.processing")}</h3>
-                      <RuleSwitch checked={form.procEnabled} onChange={(procEnabled) => update({ procEnabled })} />
-                      <div>
-                        <span className="field-label">{t("roomForm.output")}</span>
-                        <Seg value={form.mergeSegments ? "merge" : "split"} onChange={(v) => update({ mergeSegments: v === "merge" })}
-                             items={[{ id: "merge", label: t("roomForm.mergeOne") }, { id: "split", label: t("roomForm.mergeSplit") }]} />
-                        <p className="text-xs text-muted mt-1">{t("roomForm.outputHint")}</p>
-                      </div>
-                      {form.uploadOn && (
-                        <ToggleRow label={t("hub.ruleDialog.toggleTsDirectLabel")} hint={t("hub.ruleDialog.toggleTsDirectSub")}
-                                   checked={form.tsDirect} onChange={(tsDirect) => update({ tsDirect })} lock={c.tsDirect} />
-                      )}
-                      {caps.length > 0 && (
-                        <div>
-                          <span className="field-label">{t("room.editor.caps")}</span>
-                          <div className="flex flex-wrap gap-1.5">
-                            {caps.map((cap) => (
-                              <button key={cap} type="button" aria-pressed={form.requires.includes(cap)}
-                                      className={`chip rm-pick${form.requires.includes(cap) ? " is-on" : ""}`}
-                                      onClick={() => update({ requires: toggleIn(form.requires, cap) })}>{cap}</button>
-                            ))}
-                          </div>
-                          {form.workers.some((id) => form.requires.some((r) => !(workers.find((w) => w.id === id)?.capabilities ?? []).includes(r))) && (
-                            <p className="text-xs text-error-fg mt-1">
-                              {t("hub.ruleDialog.capsFiltered", { workers: form.workers.filter((id) => form.requires.some((r) => !(workers.find((w) => w.id === id)?.capabilities ?? []).includes(r))).map(workerName).join("、") })}
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </section>
-
-                    {form.uploadOn && (
-                      <section className="space-y-3">
-                        <h3 className="form-section">{t("room.editor.upload")}</h3>
                         <div className="grid grid-cols-2 gap-3">
                           <label className="block">
                             <span className="field-label">{t("room.editor.tid")}</span>
@@ -375,8 +402,11 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                           </label>
                         </div>
                       </section>
-                    )}
+                    </>
+                  )}
 
+                  {curStep === "finish" && (
+                    <>
                     <CleanupSection value={form} onChange={update} constraints={c} procEnabled={form.procEnabled} />
 
                     {hasRecording && (
@@ -393,8 +423,9 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                         )}
                       </label>
                     )}
-                  </div>
-                </details>
+                    </>
+                  )}
+                </div>
                 </fieldset>
               </div>
 
