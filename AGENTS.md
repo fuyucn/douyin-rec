@@ -370,6 +370,8 @@ node dist/douyin-rec.mjs _apply-tasks <dataRoot> <base64>   # 远端应用 maste
 靠 store/hub/orchestrator 测 + `test/setup.ts` 注册假平台 + 真实录制覆盖。
 
 📁 **数据目录**：db / recordings / stage / logs（hub 场次日志，永久保留，不在 stage 内）/ config（含 hub 规则、biliup cookies）全收在**一个数据根**
+
+📂 **房间目录布局**（`<名>_<平台>_<房间号>/`，节点本地开关，默认关）：规则、开关文件、回滚与上线顺序见 `docs/output-layout.md`；路径只经 core 的输出路径解析模块，不要手拼。
 `DOUYIN_REC_ROOT` 下（见 `packages/app/src/paths.ts`），不散落项目里。**未设时默认 `./output-data`**
 （裸跑不再把文件平铺进 cwd）。本仓库约定：`pnpm serve:local` 用 `DOUYIN_REC_ROOT=./data-local`；
 docker 固定 `/output-data`（映射宿主机 `docker-data/`）。专用 env（`DOUYIN_REC_DB`/`DOUYIN_REC_OUTPUT`/
