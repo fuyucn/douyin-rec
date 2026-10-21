@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-98 输出路径统一解析函数(stage / 录像 / 场次日志),行为不变（issue [#333](https://github.com/fuyucn/douyin-rec/issues/333)）**
+  — 2026-10-21 认领,分支 `codex/issue-333-path-resolver`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。目录布局改造 #333→#334→#335→#336 的第 1 步,#337 阻塞不做。
+  **做什么**：core 新增 `output-paths.ts`(stage 场次目录 / 录像房间目录 / 场次日志的唯一解析 + 目录名清洗唯一规则),替换 11 处手写拼接与三份清洗副本;默认仍输出旧路径,新布局只在显式 `layout: "room"` 时生效。
+  **为什么**：后续布局调整都依赖单一入口,否则写入方与读取方路径不一致、维护页活动保护静默失效。
+  **验收**：按 `_<平台>_<房间号>` 后缀查找、仅创建时用名字(无名字用房间号兜底);旧目录 sticky;同后缀多目录取最早并告警;core 外无手写拼接(架构守护 + 变异);全量测试 / typecheck / arch:check / bundle 通过,对外路径不变。
+
 - [~] **T-95 合并内存准入:内存不足改为排队等待,不再超时转人工（issue [#311](https://github.com/fuyucn/douyin-rec/issues/311)）**
   — 2026-10-20 认领,分支 `codex/issue-311-merge-mem-wait`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：内存闸门超时不再抛错,只告警一次（含需求/可用量）并继续等;新增 `minMergeFreeMemMB`（默认 512,实测 concat-copy 峰值约 60 MB）,merge 取 `min(merge, burn)`;烧录默认阈值 2048 → 1024。
