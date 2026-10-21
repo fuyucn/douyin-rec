@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   jobLogFileName, jobLogPathCandidates, legacyStageSessionDir, recordingRoomDir, recordingRoomDirCandidates, resolveJobLogPath, roomDirName,
-  sanitizePathSegment, sanitizeRoomName, stageSessionDir, stageSessionDirCandidates, findRoomDir, ROOM_NAME_MAX_BYTES,
+  sanitizePathSegment, sanitizeRoomName, stageSessionDir, parseOutputLayout, parseRoomDirName, anchorNameOfSessionBase, stageSessionDirCandidates, findRoomDir, ROOM_NAME_MAX_BYTES,
 } from "./output-paths.js";
 
 let root: string;
@@ -78,6 +78,14 @@ describe("stageSessionDir", () => {
     // never creates a third one
     expect(stageSessionDir(root, KEY, { layout: "room", anchorName: "C", warn: () => {} }).startsWith(got!)).toBe(true);
   });
+  it("an existing session dir is reused whatever the configured layout is (no orphaning on a switch)", () => {
+    // started under the room layout, switch turned back to legacy: still the room path
+    mkdirSync(join(root, "N_douyin_1234567", "2026-10-20"), { recursive: true });
+    expect(stageSessionDir(root, KEY)).toBe(join(root, "N_douyin_1234567", "2026-10-20"));
+    // a room dir without that session dir does not capture a legacy-layout session
+    expect(stageSessionDir(root, "douyin:1234567:2026-10-22")).toBe(join(root, "douyin_1234567_2026-10-22"));
+    expect(stageSessionDir(root, "douyin:1234567:2026-10-22", { layout: "room" })).toBe(join(root, "N_douyin_1234567", "2026-10-22"));
+  });
   it("malformed streamKey falls back to legacy, never throws", () => {
     expect(stageSessionDir(root, "weird", { layout: "room" })).toBe(join(root, "weird"));
   });
@@ -93,13 +101,15 @@ describe("recordingRoomDir", () => {
     expect(recordingRoomDir(root, ["///", " Bob "])).toBe(join(root, "Bob"));
     expect(recordingRoomDir(root, [null, ""])).toBeNull();
   });
-  it("room layout: sticky legacy, then suffix match, then new", () => {
+  it("room layout: suffix match first (rename-proof), else a new room dir; legacy dirs are history, not reused", () => {
     const room = { platform: "douyin", roomSlug: "77" };
     expect(recordingRoomDir(root, "Bob", room, { layout: "room" })).toBe(join(root, "Bob_douyin_77"));
-    mkdirSync(join(root, "Bob"));
-    expect(recordingRoomDir(root, "Bob", room, { layout: "room" })).toBe(join(root, "Bob"));
+    mkdirSync(join(root, "Bob")); // an old-layout dir for the same anchor exists: new sessions still go to the room dir
+    expect(recordingRoomDir(root, "Bob", room, { layout: "room" })).toBe(join(root, "Bob_douyin_77"));
     mkdirSync(join(root, "Old_douyin_77"));
     expect(recordingRoomDir(root, "Carol", room, { layout: "room" })).toBe(join(root, "Old_douyin_77"));
+    // legacy layout is untouched by any of this
+    expect(recordingRoomDir(root, "Carol", room)).toBe(join(root, "Carol"));
   });
   it("candidates list both old and new directories once", () => {
     mkdirSync(join(root, "Old_douyin_77"));
@@ -145,5 +155,26 @@ describe("jobLogPathCandidates", () => {
   });
   it("malformed key: legacy only", () => {
     expect(jobLogPathCandidates(stage(), "weird", logs())).toEqual([join(stage(), "weird", "job.log")]);
+  });
+});
+
+describe("layout switch and name helpers", () => {
+  it("parseOutputLayout: only the exact string room enables it", () => {
+    expect(parseOutputLayout("room")).toBe("room");
+    for (const v of ["legacy", "ROOM", "", undefined, null, 1, {}]) expect(parseOutputLayout(v)).toBe("legacy");
+  });
+  it("parseRoomDirName: rightmost known platform marker, anchor names containing it cannot hijack", () => {
+    const ids = ["douyin", "bilibili"];
+    expect(parseRoomDirName("Alice_douyin_1234", ids)).toEqual({ platform: "douyin", roomSlug: "1234" });
+    expect(parseRoomDirName("a_douyin_b_bilibili_99", ids)).toEqual({ platform: "bilibili", roomSlug: "99" });
+    expect(parseRoomDirName("a_douyin_b_douyin_7", ids)).toEqual({ platform: "douyin", roomSlug: "7" });
+    expect(parseRoomDirName("Alice", ids)).toBeNull();
+    expect(parseRoomDirName("_douyin_5", ids)).toBeNull();
+    expect(parseRoomDirName("x_douyin_", ids)).toBeNull();
+  });
+  it("anchorNameOfSessionBase: strips the stamp and segment suffix", () => {
+    expect(anchorNameOfSessionBase("Alice_2026-10-20_08-00-00")).toBe("Alice");
+    expect(anchorNameOfSessionBase("Al_ice_2026-10-20_08-00-00-PART01")).toBe("Al_ice");
+    expect(anchorNameOfSessionBase("no-stamp")).toBeNull();
   });
 });

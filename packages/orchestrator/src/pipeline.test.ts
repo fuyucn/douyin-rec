@@ -2617,6 +2617,81 @@ describe("empty stage dir removal after stageAfterDone (issue #335)", () => {
     deps.ledger.close();
   });
 
+  describe("stage layout switch (issue #336)", () => {
+    /**
+     * pull is where the stage session dir first gets used: the mock records the dir the pipeline chose (dest)
+     * and seeds it, and the merge/burn mock writes its products there, so the test sees the pipeline's own choice.
+     */
+    const layoutDeps = (layout: "room" | undefined, stageAfterDone: boolean): { deps: TestDeps; chosen: () => string; stageRoot: string } => {
+      const base = makeDeps();
+      let chosen = "";
+      const sh = vi.fn<(cmd: string) => Promise<void>>().mockImplementation(async (cmd: string) => {
+        if (cmd.includes(" merge ")) {
+          const stem = /--out-base\s+'([^']+)'/.exec(cmd)?.[1] ?? "主播名_2026-06-27";
+          for (const f of ["danmu.xml", `${stem}.mp4`, `${stem}.xml`]) writeFileSync(join(chosen, f), "x");
+        } else if (cmd.includes("--style danmu") || cmd.includes("--style livechat")) {
+          const video = /--video\s+(\S+)/.exec(cmd)?.[1] ?? "";
+          const stem = (video.split("/").pop() ?? "x").replace(/\.mp4$/i, "");
+          writeFileSync(join(chosen, stem + (cmd.includes("--style livechat") ? "_livechat.mp4" : "_danmu.mp4")), "x");
+        }
+      });
+      const deps = makeDeps({
+        cfg: { ...base.cfg, ...(stageAfterDone ? { cleanup: { stageAfterDone: true } } : {}) },
+        sh: sh as never,
+        ...(layout ? { stageLayout: () => layout } : {}),
+        makeRunLogger: () => ({ info: () => {}, warn: () => {}, error: () => {} }),
+      });
+      for (const t of deps.transports.values()) {
+        (t as { pull: unknown }).pull = vi.fn(async (_files: string[], dest: string) => {
+          chosen = dest;
+          mkdirSync(dest, { recursive: true });
+          writeFileSync(join(dest, "src.ts"), "x");
+        });
+      }
+      return { deps, chosen: () => chosen, stageRoot: base.cfg.stageDir };
+    };
+    const bc = (): Broadcast => makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+
+    it("switch on: a new session runs in <anchor>_<platform>_<room>/<date>, the anchor read off the session base", async () => {
+      const { deps, chosen, stageRoot } = layoutDeps("room", false);
+      const b = bc();
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("done");
+      expect(chosen()).toBe(join(stageRoot, "主播名_douyin_test-room", "2026-06-27"));
+      deps.ledger.close();
+    });
+
+    it("switch on + stageAfterDone: the session dir goes, the room dir stays for the next session", async () => {
+      const { deps, chosen, stageRoot } = layoutDeps("room", true);
+      const b = bc();
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("done");
+      expect(existsSync(chosen())).toBe(false);
+      expect(existsSync(join(stageRoot, "主播名_douyin_test-room"))).toBe(true);
+      deps.ledger.close();
+    });
+
+    it("switch off (default): the old layout, nothing created in the room layout", async () => {
+      const { deps, chosen, stageRoot } = layoutDeps(undefined, false);
+      const b = bc();
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("done");
+      expect(chosen()).toBe(join(stageRoot, "douyin_test-room_2026-06-27"));
+      expect(existsSync(join(stageRoot, "主播名_douyin_test-room"))).toBe(false);
+      deps.ledger.close();
+    });
+
+    it("switch on but the session dir already exists in the old layout: it keeps using it", async () => {
+      const { deps, chosen, stageRoot } = layoutDeps("room", false);
+      mkdirSync(join(stageRoot, "douyin_test-room_2026-06-27"), { recursive: true });
+      const b = bc();
+      deps.ledger.upsertPending(b.streamKey);
+      expect((await runPipeline(b, deps)).state).toBe("done");
+      expect(chosen()).toBe(join(stageRoot, "douyin_test-room_2026-06-27"));
+      deps.ledger.close();
+    });
+  });
+
   it("an unknown file keeps the directory (non-recursive rmdir) and the log says so", async () => {
     const log = capture();
     const base = makeDeps();

@@ -136,9 +136,11 @@ export function legacyStageSessionDir(stageRoot: string, streamKey: string): str
 }
 
 /**
- * Stage directory of one session. Legacy layout (default), a malformed streamKey, or an existing
- * legacy directory (sticky) give the legacy path; otherwise `<room dir>/<date[_HHMM]>`.
- * `anchorName` only matters when no room directory exists yet.
+ * Stage directory of one session. A session directory that already exists is reused whatever the
+ * configured layout is (legacy first, then the room layout): a running session never moves, and a layout
+ * switch cannot orphan node results or half-written output. Only when neither exists does the layout decide:
+ * legacy (default, and for a malformed streamKey) gives `<stage>/<sanitized key>`, "room" gives
+ * `<room dir>/<date[_HHMM]>`. `anchorName` only matters when no room directory exists yet.
  */
 export function stageSessionDir(
   stageRoot: string,
@@ -146,11 +148,16 @@ export function stageSessionDir(
   opts: ResolveOpts & { anchorName?: string | null } = {},
 ): string {
   const legacy = legacyStageSessionDir(stageRoot, streamKey);
-  if (opts.layout !== "room") return legacy;
   const parsed = parseStreamKey(streamKey);
-  if (!parsed || existsSync(legacy)) return legacy;
-  const roomDir = findRoomDir(stageRoot, parsed.platform, parsed.roomSlug, opts.warn)
-    ?? join(stageRoot, roomDirName(parsed.platform, parsed.roomSlug, opts.anchorName));
+  if (!parsed) return legacy;
+  if (existsSync(legacy)) return legacy;
+  const existingRoom = findRoomDir(stageRoot, parsed.platform, parsed.roomSlug, opts.warn);
+  if (existingRoom) {
+    const inRoom = join(existingRoom, sanitizeStreamKey(sessionPart(parsed)));
+    if (existsSync(inRoom) || opts.layout === "room") return inRoom;
+  }
+  if (opts.layout !== "room") return legacy;
+  const roomDir = join(stageRoot, roomDirName(parsed.platform, parsed.roomSlug, opts.anchorName));
   return join(roomDir, sanitizeStreamKey(sessionPart(parsed)));
 }
 
@@ -172,8 +179,11 @@ export function stageSessionDirCandidates(stageRoot: string, streamKey: string, 
 /**
  * Recording directory of a room under the output root.
  * Legacy: `<outRoot>/<sanitized name>`; null when the name is empty (not resolvable yet, callers must
- * then protect/scan nothing rather than guess). Room layout: an existing legacy directory is sticky,
- * else the suffix-matched room directory, else a new `<name>_<platform>_<room>` path.
+ * then protect/scan nothing rather than guess). Room layout (new sessions only): the suffix-matched room
+ * directory (an anchor rename never changes it), else a new `<name>_<platform>_<room>` path. An existing
+ * legacy directory is deliberately NOT reused here: legacy directories are read-only history, new
+ * sessions go to the room directory. A recorder that is already running keeps the directory it resolved
+ * at its first spawn, so a session never changes directory underneath itself.
  */
 export function recordingRoomDir(
   outRoot: string,
@@ -184,7 +194,6 @@ export function recordingRoomDir(
   const legacySub = firstSegment(legacyName);
   const legacy = legacySub ? join(outRoot, legacySub) : null;
   if (opts.layout !== "room" || !room) return legacy;
-  if (legacy && existsSync(legacy)) return legacy;
   return findRoomDir(outRoot, room.platform, room.roomSlug, opts.warn)
     ?? join(outRoot, roomDirName(room.platform, room.roomSlug, room.anchorName || legacySub));
 }
@@ -242,4 +251,37 @@ export function jobLogPathCandidates(stageRoot: string, streamKey: string, logsR
   const fresh = join(logsRoot, "hub", `${sanitizePathSegment(parsed.platform)}_${sanitizePathSegment(parsed.roomSlug)}`, jobLogFileName(streamKey));
   // Sticky legacy: an existing legacy log is also the write target, so it goes first.
   return existsSync(legacy) ? [legacy, fresh] : [fresh, legacy];
+}
+
+/** Layout switch value: anything but the exact string "room" is the legacy layout (never throws). */
+export function parseOutputLayout(raw: unknown): PathLayout {
+  return raw === "room" ? "room" : "legacy";
+}
+
+/**
+ * Room id parsed from a room directory name `<name>_<platform>_<room>` (the reverse of roomDirName),
+ * used for old recordings that have no session sidecar. Matches the known platform ids and takes the
+ * rightmost `_<platform>_` so an anchor name containing it cannot hijack the split. null when the name
+ * does not carry the suffix (a legacy anchor-name directory).
+ */
+export function parseRoomDirName(dirName: string, platformIds: readonly string[]): { platform: string; roomSlug: string } | null {
+  let best: { platform: string; roomSlug: string; at: number } | null = null;
+  for (const id of platformIds) {
+    const marker = `_${id}_`;
+    const at = dirName.lastIndexOf(marker);
+    if (at <= 0) continue;
+    const roomSlug = dirName.slice(at + marker.length);
+    if (!roomSlug) continue;
+    if (!best || at > best.at) best = { platform: id, roomSlug, at };
+  }
+  return best ? { platform: best.platform, roomSlug: best.roomSlug } : null;
+}
+
+/**
+ * Anchor name carried by a stamped session base (`<anchor>_<YYYY-MM-DD>_<HH-MM-SS>[segment suffix]`),
+ * or null. Lets the master name a NEW stage room directory without being told the anchor name.
+ */
+export function anchorNameOfSessionBase(sessionBase: string): string | null {
+  const m = /^(.+)_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(?:[-_].*)?$/.exec(sessionBase);
+  return m?.[1] ?? null;
 }

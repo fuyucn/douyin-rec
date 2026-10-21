@@ -78,3 +78,17 @@ describe("node-side stage is never removed as a whole directory (issue #335)", (
     }
   });
 });
+
+describe("the layout switch reaches every writer (issue #336)", () => {
+  it("cli passes the node-local switch to the recorder and to the hub pipeline", () => {
+    const cli = readFileSync(join(ROOT, "packages/cli/src/cli.ts"), "utf-8");
+    expect(cli).toMatch(/outputLayout:\s*readOutputLayout\(\)/);
+    expect(cli).toMatch(/stageLayout:\s*\(\)\s*=>\s*readOutputLayout\(\)/);
+  });
+  it("node pipeline and node enqueue resolve new stage dirs with the switch", () => {
+    for (const f of ["packages/app/src/node-pipeline.ts", "packages/app/src/node-enqueue.ts"]) {
+      expect(readFileSync(join(ROOT, f), "utf-8"), f).toMatch(/layout:\s*readOutputLayout\(\)/);
+    }
+  });
+});
+

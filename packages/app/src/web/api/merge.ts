@@ -7,22 +7,36 @@
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
 import { readdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { groupSessionsInDir, mergeSessions } from "@drec/post-process";
 import { effectiveStageFormat, stageExt } from "@drec/core";
 import type { RecordingSessionDTO } from "@drec/core";
 
 export function buildMerge(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
-    err, view, recordingsDir } = ctx;
+    err, view, recordingsDir, recordingsDirs } = ctx;
+
+  /**
+   * Sessions of every existing recording directory of a task (old and new layout), keyed by base name.
+   * Bases carry a timestamp, so they do not collide across directories; the first directory wins on a tie.
+   * The merged output goes to the primary directory (where new sessions are written).
+   */
+  const collectGroups = (t: Parameters<typeof recordingsDirs>[0]): { primary: string | null; groups: ReturnType<typeof groupSessionsInDir> } => {
+    const primary = recordingsDir(t);
+    const groups: ReturnType<typeof groupSessionsInDir> = {};
+    for (const dir of recordingsDirs(t)) {
+      if (!existsSync(dir)) continue;
+      const files = readdirSync(dir).map((f) => join(dir, f));
+      // 任务录制目录:认节点侧原地替换后的 mp4/mkv(issue #137)
+      for (const [base, g] of Object.entries(groupSessionsInDir(dir, files))) if (!groups[base]) groups[base] = g;
+    }
+    return { primary, groups };
+  };
   return {
     listRecordings(id: number): ApiResult {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
-      const dir = recordingsDir(t);
-      if (!dir || !existsSync(dir)) return { status: 200, body: { dir, sessions: [] } };
-      const files = readdirSync(dir).map((f) => join(dir, f));
-      const groups = groupSessionsInDir(dir, files); // 任务录制目录:认节点侧原地替换后的 mp4/mkv(issue #137)
+      const { primary: dir, groups } = collectGroups(t);
       const sessions: RecordingSessionDTO[] = Object.entries(groups)
         .filter(([, g]) => g.ts.length > 0) // 只列有视频的会话
         .map(([base, g]) => ({
@@ -38,19 +52,18 @@ export function buildMerge(ctx: ApiCtx) {
       if (!deps.mergeJobs) return err(501, "合成功能未启用");
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
-      const dir = recordingsDir(t);
-      if (!dir || !existsSync(dir)) return err(404, "该任务暂无录制目录");
+      const { primary, groups } = collectGroups(t);
+      if (Object.keys(groups).length === 0) return err(404, "该任务暂无录制目录");
       const bases = input.sessions ?? [];
       if (bases.length === 0) return err(400, "请至少选择一个会话");
-
-      const files = readdirSync(dir).map((f) => join(dir, f));
-      const groups = groupSessionsInDir(dir, files); // 任务录制目录:认节点侧原地替换后的 mp4/mkv(issue #137)
       for (const b of bases) if (!groups[b]) return err(400, `未知会话: ${b}`);
       // 入参顺序 = 时间序;每会话取分段 ts + 会话级 xml(无则不合并弹幕)。
       const inputs = bases.map((b) => ({
         tsFiles: groups[b].ts,
         xmlPath: groups[b].xml ?? undefined,
       }));
+      // Output next to the new-layout recordings when that directory exists, else beside the first selected session.
+      const dir = primary && existsSync(primary) ? primary : dirname(groups[bases[0]].ts[0] ?? join(primary ?? ".", "x"));
       const outBase = `${bases[0]}_merged`;
       // 产物容器跟随任务 outputFormat(original → mp4;唯一判定 core effectiveStageFormat,issue #165)。
       // 手动合成不是投稿,故不传 uploadMode。job 字段名仍叫 mp4(API/前端不变),内容是实际产物路径。

@@ -31,7 +31,7 @@ import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-proc
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
-import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir } from "@drec/app";
+import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
@@ -237,6 +237,8 @@ program
       outDir: o.out || cfg.outDir || rootOutputDir(),
       segmentSec: o.segment !== undefined ? Number(o.segment) : cfg.segmentSec,
       name: o.name?.trim() || undefined,
+      // Node-local layout switch (issue #336); read once at process start so a running session never changes dir.
+      outputLayout: readOutputLayout(),
       danmuXmlMode:
         (o.danmuXmlMode ?? cfg.danmuXmlMode) === "segment" ? "segment" : "session",
     };
@@ -1560,6 +1562,8 @@ const hubStarter: HubStarter = {
       // (same source of truth as hub-jobs). New sessions log under <root>/logs/hub, outside stage, so stage
       // cleanup can never swallow later log lines; a session whose legacy stage log exists keeps it (sticky).
       // The orchestrator only sees the ScopedLogger interface.
+      // Master-local layout switch for NEW stage session dirs (issue #336); read per run, existing dirs are reused.
+      stageLayout: () => readOutputLayout(),
       makeRunLogger: (streamKey: string) =>
         new FileLogger(resolveJobLogPath(hubCfg.stageDir ?? rootStageDir(), streamKey, { layout: "room", logsRoot: rootLogsDir() })),
       cfg: {

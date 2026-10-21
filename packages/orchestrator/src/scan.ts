@@ -2,7 +2,7 @@
 // 共享录像扫描函数：被 LocalTransport 和 _inventory CLI 子命令复用。
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { epochFromZonedParts, processTimeZone } from "@drec/core";
+import { epochFromZonedParts, listPlatforms, parseRoomDirName, processTimeZone } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import type { ActiveRecordingRoom, NodeRecording, NodeRollingProgress, NodeRollingSession } from "./transport.js";
 import { readGaps, totalGapSecOf } from "./gaps.js";
@@ -237,6 +237,7 @@ export async function scanRecordings(
   for (const anchor of anchors) {
     const dir = join(recordingsDir, anchor);
     const files = readdirSync(dir);
+    const roomOfDir = parseRoomDirName(anchor, listPlatforms().map((p) => p.id));
     // 节点侧原地替换(issue #137)后的 mp4/mkv 分段(含无段号单文件)靠 session.json 的 nodeFormat 识别;
     // 只在**录制目录**这里传 —— stage / 合并模式不传,分 P 产物与合并产物不会被当成源。
     const groups = groupSessionsInDir(dir, files);
@@ -291,9 +292,11 @@ export async function scanRecordings(
       recordings.push({
         // slug = 房间号(web_rid)唯一 ID。优先级:session.json/旧 sidecar(随录像走、跨节点一致)
         // > taskRooms[主播名] > 目录名(后两者不可靠回退)。
-        roomSlug: sess.roomSlug ?? taskRooms[anchor] ?? anchor,
-        // platform 来自 sidecar(新录像必有);旧录像/缺省 → douyin(历史只有抖音)。
-        platform: sess.platform ?? "douyin",
+        // A room-layout directory (`<name>_<platform>_<room>`) names its room itself, so recordings without a
+        // sidecar still cluster with the same room's sessions in an old-layout directory (issue #336).
+        roomSlug: sess.roomSlug ?? roomOfDir?.roomSlug ?? taskRooms[anchor] ?? anchor,
+        // platform 来自 sidecar(新录像必有);再看目录后缀;旧录像/缺省 → douyin(历史只有抖音)。
+        platform: sess.platform ?? roomOfDir?.platform ?? "douyin",
         sessionBase: base,
         tsFiles: g.ts.map((f) => join(dir, f)),
         xmlPath: hasXml ? xmlAbs : undefined,

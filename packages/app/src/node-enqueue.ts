@@ -17,7 +17,7 @@ import {
 } from "@drec/core";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
 import { effectiveHubConfig } from "./disk-gate.js";
-import { rootStageDir } from "./paths.js";
+import { readOutputLayout, rootStageDir } from "./paths.js";
 import { TaskStore } from "./store.js";
 
 /** 第一期远端只受理的处理器 kind。 */
@@ -133,7 +133,7 @@ export interface HandleEnqueueOpts extends NodeRootsOpts {
 export function localizePrepStage(job: ProcessJob): ProcessJob {
   if (job.kind !== "upload-prep") return job;
   const key = job.orderKey ?? job.logicalKey;
-  return { ...job, params: { ...job.params, stageDir: stageSessionDir(rootStageDir(), key) } };
+  return { ...job, params: { ...job.params, stageDir: stageSessionDir(rootStageDir(), key, { layout: readOutputLayout() }) } };
 }
 
 /** `_enqueue` 执行体:逐 job 受理,单个 job 的拒绝不影响其余。库打不开 → 抛错(命令非零退出,派发方当失败)。 */

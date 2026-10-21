@@ -1,3 +1,4 @@
+import type { PathLayout } from "./output-paths.js";
 /** 一条弹幕消息（统一模型，Recorder/DanmuSource 都用） */
 export type DanmuKind = "danmaku" | "gift" | "member";
 export interface DanmuMessage {
@@ -34,6 +35,11 @@ export interface RecordOpts {
    * 留空则按抓取到的主播名（getStream 返回的 owner）自动分目录。
    */
   name?: string;
+  /**
+   * Recording directory layout for NEW sessions (issue #336): "room" = `<name>_<platform>_<room>/`,
+   * anything else / omitted = the legacy `<name>/` directory. Node-local switch, read by the CLI at start.
+   */
+  outputLayout?: PathLayout;
   /**
    * 弹幕 xml 落盘粒度（仅当弹幕由 DanmuSource + 我们的 XmlDanmuWriter 写时生效）：
    *   "session"（默认）— 整场一个 xml，合并时按 ffprobe 时长切 ASS。最稳，避开断流位移。

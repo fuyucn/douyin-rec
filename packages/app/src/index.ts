@@ -22,7 +22,7 @@ export { listHubJobs, readHubJobLog, jobLogPath, jobLogPaths, hubStageDir, hubLo
 export type { HubJobView, HubJobEvent, BuildQueueOpts, LatestRunPerRoom } from "./hub-jobs.js";
 export { procQueueDbPath } from "./paths.js";
 export { handleEnqueue, handleProcStatus, nodeAllowedRoots, assertJobInvariantsReal, realpathDeep, decodeJobIds, encodeJobIds, remoteEnqueueKinds, handleProcCancel } from "./node-enqueue.js";
-export { drecRoot, rootHubDir, rootHubConfig, rootStageDir, rootLogsDir, rootOutputDir, rootBiliupCookies, DEFAULT_ROOT, ensureNodeIdentity, rootNodeIdentityPath } from "./paths.js";
+export { drecRoot, rootHubDir, rootHubConfig, rootStageDir, rootLogsDir, rootOutputLayoutPath, readOutputLayout, rootOutputDir, rootBiliupCookies, DEFAULT_ROOT, ensureNodeIdentity, rootNodeIdentityPath } from "./paths.js";
 export type { NodeIdentity } from "./paths.js";
 export { rootConfigDir } from "./paths.js";
 export { resolveDbPath } from "./db.js";

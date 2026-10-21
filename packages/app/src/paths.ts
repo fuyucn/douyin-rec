@@ -18,6 +18,7 @@
 import { join } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { parseOutputLayout, type PathLayout } from "@drec/core";
 import { procQueueDbPath as procQueueDbPathOf } from "@drec/proc-queue";
 import { hostname as osHostname } from "node:os";
 
@@ -108,6 +109,27 @@ export function rootStageDir(): string {
 /** <root>/logs —— hub 场次日志根(`logs/hub/<平台>_<房间号>/<场次>.log`,永久保留,不在 stage 内)。 */
 export function rootLogsDir(): string {
   return join(drecRoot(), "logs");
+}
+
+/**
+ * <root>/config/output-layout.json —— this node's LOCAL switch for the room-directory layout (issue #336):
+ * `{"layout":"room"}` makes NEW recording sessions and NEW stage session dirs use `<name>_<platform>_<room>/`.
+ * Absent / unreadable / anything else = legacy. It is a file in the data root (not an env var) so ssh-launched
+ * hidden commands, which do not inherit the service environment, see the same value. Each node flips its own
+ * switch, which keeps mixed-version fleets safe: a node that has not been switched keeps the old layout.
+ */
+export function rootOutputLayoutPath(root?: string): string {
+  return join(root ? join(root, "config") : rootConfigDir(), "output-layout.json");
+}
+
+/** Current layout switch of this node; read on every call (the file is the single source of truth). */
+export function readOutputLayout(root?: string): PathLayout {
+  try {
+    const raw = JSON.parse(readFileSync(rootOutputLayoutPath(root), "utf-8")) as { layout?: unknown } | null;
+    return parseOutputLayout(raw?.layout);
+  } catch {
+    return "legacy";
+  }
 }
 
 /** <root>/config/biliup/cookies.json。 */
