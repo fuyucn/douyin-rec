@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-99 场次日志移出 stage 到独立日志目录,永久保留（issue [#334](https://github.com/fuyucn/douyin-rec/issues/334)）**
+  — 2026-10-21 认领,分支 `codex/issue-334-job-log-relocation`,**叠在 `codex/issue-333-path-resolver`（T-98,PR #338,RISK 待 owner 拍板）之上**,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：新场次日志写 `<root>/logs/hub/<平台>_<房间号>/<场次>.log`（经 T-98 解析函数,不做跨盘搬迁）;读日志 / hasLog / 删除场次历史三处同时兼容新旧路径;旧场次若 stage 内已有 job.log 则继续写旧路径（sticky）。
+  **为什么**：stage 清理后只剩 job.log 导致空壳目录堆积（#5）;且清理之后管线仍会写日志,目录被删则写入被 FileLogger 静默吞掉。
+  **验收**：清理后写的日志仍完整可见;旧场次日志在 UI 仍可查;删除历史时新旧两处日志都处理;回归用例 + 变异验证;全量门禁通过。运维脚本按目录名统计残留的逻辑核对结论见 PR。
+
 - [~] **T-98 输出路径统一解析函数(stage / 录像 / 场次日志),行为不变（issue [#333](https://github.com/fuyucn/douyin-rec/issues/333)）**
   — 2026-10-21 认领,分支 `codex/issue-333-path-resolver`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。目录布局改造 #333→#334→#335→#336 的第 1 步,#337 阻塞不做。
   **做什么**：core 新增 `output-paths.ts`(stage 场次目录 / 录像房间目录 / 场次日志的唯一解析 + 目录名清洗唯一规则),替换 11 处手写拼接与三份清洗副本;默认仍输出旧路径,新布局只在显式 `layout: "room"` 时生效。
