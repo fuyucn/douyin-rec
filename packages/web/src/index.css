@@ -1524,10 +1524,6 @@ table.tasks tbody tr:last-child td {
   color: var(--ink);
   border-bottom-color: var(--ink);
 }
-.rm-step:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
 .rm-step-n {
   font-family: var(--font-mono);
   font-size: 11px;

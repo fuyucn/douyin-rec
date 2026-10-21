@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-104 房间编辑器投稿 B站开关移到第 3 步（issue [#346](https://github.com/fuyucn/douyin-rec/issues/346)）**
+  — 2026-10-21 认领,分支 `codex/issue-346-upload-toggle-step3`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：「归档 / 投稿 B站」开关从第 2 步挪到第 3 步顶部,第 3 步始终可点;选投稿才显示投稿字段。
+  **为什么**：原来要先回第 2 步选投稿才能解锁第 3 步,顺序绕。
+  **验收**：不改表单状态与保存内容;第 2 步依赖开关的项仍按值显示;全量测试 / 类型 / web 构建 / 文案检查通过。
+
 - [~] **T-103 房间编辑器标题模板预填统一默认值（issue [#344](https://github.com/fuyucn/douyin-rec/issues/344)）**
   — 2026-10-21 认领,分支 `codex/issue-344-title-defaults`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：房间没存标题模板时,编辑弹窗三个模板输入框预填统一默认值;清空保存仍走原回落。
