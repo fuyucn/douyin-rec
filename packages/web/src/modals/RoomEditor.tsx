@@ -1,9 +1,9 @@
 /**
- * RoomEditor — `/rooms` create/edit sheet: one screen, no wizard.
+ * RoomEditor — `/rooms` create/edit sheet: four free-to-jump step tabs, no wizard.
  *
  * Four steps as tabs (free to jump, nothing is a wizard): 1 record (when / where / recorder options),
  * 2 process (archive vs upload, merge, versions, node capabilities), 3 upload (timing, metadata; only while
- * upload is on), 4 finish (cleanup, webhook). A flow summary stays above the tabs.
+ * upload is on), 4 finish (cleanup, webhook). A flow summary sits below the tabs.
  * Desktop: centered card; phone: full-screen sheet with a pinned footer.
  *
  * Field dependencies come from room-form-rules (shared with the Hub dialog); mapping to the
@@ -134,6 +134,10 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
   async function submit(ev: FormEvent): Promise<void> {
     ev.preventDefault();
     if (managed) return;
+    // Native min= validation only reaches inputs of the visible step, so re-check the numeric fields here.
+    const bad: StepId | null = form.segmentSec.trim() !== "" && Number(form.segmentSec) < 0 ? "record"
+      : form.uploadOn && form.tid.trim() !== "" && Number(form.tid) < 1 ? "upload" : null;
+    if (bad) { setStep(bad); toast(t("room.editor.fieldInvalid"), "error"); return; }
     const r = payloadFromForm(form, ctx);
     if (!r.ok) { toast(t("rooms.scheduleInvalid"), "error"); return; }
     setBusy(true);
