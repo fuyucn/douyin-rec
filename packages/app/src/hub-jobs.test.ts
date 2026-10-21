@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { STAGE_READY } from "@drec/core";
 import { needsManualPhaseOf } from "./hub-jobs.js";
-import { activeHubJobKeys, buildQueueView, deleteHubJobHistory, latestRunPerRoom, listHubJobs, readHubJobLog, jobLogPath } from "./hub-jobs.js";
+import { activeHubJobKeys, buildQueueView, deleteHubJobHistory, latestRunPerRoom, listHubJobs, readHubJobLog, jobLogPath, jobLogPaths } from "./hub-jobs.js";
 
 /** 手工建台账 fixture(表结构与 orchestrator SyncLedger 对齐——结构即契约,不 import 它保分层)。 */
 function makeSyncDb(): { dbPath: string; db: DatabaseSync } {
@@ -154,17 +154,17 @@ describe("listHubJobs", () => {
     seedJob(db, "douyin:3:2026-07-03", [["pending", now - 60_000], ["merging", now - 50_000]], 1000);
     db.close();
     // 造一个 job.log
-    const logP = jobLogPath("douyin:3:2026-07-03", stage);
+    const logs = mkdtempSync(join(tmpdir(), "hublogs-"));
     mkdirSync(join(stage, "douyin_3_2026-07-03"), { recursive: true });
-    writeFileSync(logP, "[t] hello\n");
+    writeFileSync(join(stage, "douyin_3_2026-07-03", "job.log"), "[t] hello\n"); // legacy location
 
-    const { jobs } = listHubJobs(dbPath, { now, stageDir: stage });
+    const { jobs } = listHubJobs(dbPath, { now, stageDir: stage, logsDir: logs });
     expect(jobs[0].currentStepSec).toBe(50);
     // fallback merging rate 0.3 × 1000 − 50 = 250
     expect(jobs[0].etaSec).toBe(250);
     expect(jobs[0].hasLog).toBe(true);
-    expect(readHubJobLog("douyin:3:2026-07-03", 65536, stage)).toContain("hello");
-    expect(readHubJobLog("douyin:no-such", 65536, stage)).toBeNull();
+    expect(readHubJobLog("douyin:3:2026-07-03", 65536, stage, logs)).toContain("hello");
+    expect(readHubJobLog("douyin:no-such", 65536, stage, logs)).toBeNull();
   });
 
   it("includes step detail in the DTO", () => {
@@ -183,6 +183,7 @@ describe("deleteHubJobHistory / activeHubJobKeys", () => {
   it("删除该房间全部历史(五表 + job.log),不动其他房间", () => {
     const { dbPath, db } = makeSyncDb();
     const stage = mkdtempSync(join(tmpdir(), "hubdelete-"));
+    const logs = mkdtempSync(join(tmpdir(), "hubdelete-logs-"));
     seedJob(db, "douyin:100:2026-07-01", [["done", T0]], 100, { bv: "A1" });
     seedJob(db, "douyin:100:2026-07-02", [["done", T0 + 1000]], 100, { bv: "A2" });
     seedJob(db, "douyin:200:2026-07-01", [["done", T0 + 2000]], 100, { bv: "B1" });
@@ -191,20 +192,28 @@ describe("deleteHubJobHistory / activeHubJobKeys", () => {
         .run(key, "merge", "start", T0, "4 段");
       db.prepare("INSERT INTO sync_node_states(streamKey,node,state,error,attempts,updatedAt) VALUES(?,?,?,?,?,?)")
         .run(key, "merge", "done", null, 1, T0);
-      const logP = jobLogPath(key, stage);
-      mkdirSync(join(stage, key.replace(/[:/]/g, "_")), { recursive: true });
+      const logP = jobLogPath(key, stage, logs); // new location
+      mkdirSync(join(logP, ".."), { recursive: true });
       writeFileSync(logP, "log\n");
     }
+    // one old session still has its log in the legacy stage location
+    const oldKey = "douyin:100:2026-07-02";
+    const legacyLog = join(stage, "douyin_100_2026-07-02", "job.log");
+    mkdirSync(join(legacyLog, ".."), { recursive: true });
+    writeFileSync(legacyLog, "old\n");
     db.close();
 
-    const r = deleteHubJobHistory(dbPath, "douyin.100", stage);
+    const r = deleteHubJobHistory(dbPath, "douyin.100", stage, logs);
     expect(r.deleted).toBe(2);
     expect(new Set(r.streamKeys)).toEqual(new Set(["douyin:100:2026-07-01", "douyin:100:2026-07-02"]));
 
-    const { jobs } = listHubJobs(dbPath, { stageDir: stage });
+    const { jobs } = listHubJobs(dbPath, { stageDir: stage, logsDir: logs });
     expect(jobs.map((j) => j.streamKey)).toEqual(["douyin:200:2026-07-01"]);
-    expect(existsSync(jobLogPath("douyin:100:2026-07-01", stage))).toBe(false);
-    expect(existsSync(jobLogPath("douyin:200:2026-07-01", stage))).toBe(true);
+    expect(existsSync(jobLogPath("douyin:100:2026-07-01", stage, logs))).toBe(false);
+    expect(existsSync(jobLogPath("douyin:200:2026-07-01", stage, logs))).toBe(true);
+    // both locations of the deleted sessions are gone
+    expect(existsSync(legacyLog)).toBe(false);
+    for (const p of jobLogPaths(oldKey, stage, logs)) expect(existsSync(p)).toBe(false);
   });
 
   it("activeHubJobKeys 只报非终态 run;done/failed/needs_manual 不拦", () => {
@@ -1024,5 +1033,41 @@ describe("queued node upload status (plan 038 PR5)", () => {
     expect(listHubJobs(dbPath).jobs[0]!.nodeUpload).toBeNull();
     expect(listHubJobs(seed("{bad")).jobs[0]!.nodeUpload).toBeNull();
     expect(listHubJobs(seed(JSON.stringify(status()), "done")).jobs[0]!.nodeUpload).toBeNull();
+  });
+});
+
+describe("job logs live outside stage (issue #334)", () => {
+  const KEY = "douyin:7:2026-09-09";
+
+  it("new sessions resolve to logs/hub/<platform>_<room>, not into stage", () => {
+    const stage = mkdtempSync(join(tmpdir(), "hubstage-n-"));
+    const logs = mkdtempSync(join(tmpdir(), "hublogs-n-"));
+    const p = jobLogPath(KEY, stage, logs);
+    expect(p.startsWith(join(logs, "hub", "douyin_7"))).toBe(true);
+    expect(p.startsWith(stage)).toBe(false);
+  });
+
+  it("a log written after the stage dir is gone is still readable and flagged hasLog", () => {
+    const { dbPath, db } = makeSyncDb();
+    const stage = mkdtempSync(join(tmpdir(), "hubstage-c-"));
+    const logs = mkdtempSync(join(tmpdir(), "hublogs-c-"));
+    seedJob(db, KEY, [["done", T0]], 100);
+    db.close();
+    const p = jobLogPath(KEY, stage, logs);
+    mkdirSync(join(p, ".."), { recursive: true });
+    writeFileSync(p, "[t] cleanup finished\n"); // no stage dir exists at all
+    expect(existsSync(join(stage, "douyin_7_2026-09-09"))).toBe(false);
+    expect(readHubJobLog(KEY, 65536, stage, logs)).toContain("cleanup finished");
+    expect(listHubJobs(dbPath, { stageDir: stage, logsDir: logs }).jobs[0].hasLog).toBe(true);
+  });
+
+  it("sticky: a session whose legacy log exists keeps writing there; the legacy log stays readable", () => {
+    const stage = mkdtempSync(join(tmpdir(), "hubstage-s-"));
+    const logs = mkdtempSync(join(tmpdir(), "hublogs-s-"));
+    const legacy = join(stage, "douyin_7_2026-09-09", "job.log");
+    mkdirSync(join(legacy, ".."), { recursive: true });
+    writeFileSync(legacy, "[t] started before upgrade\n");
+    expect(jobLogPath(KEY, stage, logs)).toBe(legacy);
+    expect(readHubJobLog(KEY, 65536, stage, logs)).toContain("before upgrade");
   });
 });

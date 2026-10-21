@@ -12,10 +12,10 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import {
   HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, isSidecarSkipEvent, readyNodes, STAGE_READY, USER_STOP,
-  resolveJobLogPath,
+  jobLogPathCandidates,
   type HubPoolSnapshotDTO, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type QueuePhase,
 } from "@drec/core";
-import { rootHubConfig, rootStageDir } from "./paths.js";
+import { rootHubConfig, rootLogsDir, rootStageDir } from "./paths.js";
 
 export interface HubJobEvent { state: string; at: number; }
 /** 细粒度子步骤事件(start/done/skipped)—— 驱动前端 fork/join 流程图。 */
@@ -119,7 +119,7 @@ export interface DeleteHubHistoryResult {
  * 删除某房间的全部历史 run:五张台账表 + 各场 job.log。
  * 表结构即契约;旧库缺表按存在表删,不炸。无 sync db → 空结果。
  */
-export function deleteHubJobHistory(syncDbPath: string, roomKey: string, stageDir = hubStageDir()): DeleteHubHistoryResult {
+export function deleteHubJobHistory(syncDbPath: string, roomKey: string, stageDir = hubStageDir(), logsDir = hubLogsDir()): DeleteHubHistoryResult {
   const prefix = roomKeyToStreamPrefix(roomKey);
   if (!existsSync(syncDbPath)) return { deleted: 0, streamKeys: [] };
   const db = new DatabaseSync(syncDbPath);
@@ -140,7 +140,10 @@ export function deleteHubJobHistory(syncDbPath: string, roomKey: string, stageDi
   }
   const streamKeys = rows.map((r) => r.streamKey);
   for (const key of streamKeys) {
-    try { rmSync(jobLogPath(key, stageDir), { force: true }); } catch { /* 日志不存在/权限 → 不阻断 */ }
+    // Both locations: the log may be in the new logs dir or, for sessions older than the move, in stage.
+    for (const p of jobLogPaths(key, stageDir, logsDir)) {
+      try { rmSync(p, { force: true }); } catch { /* 日志不存在/权限 → 不阻断 */ }
+    }
   }
   return { deleted: streamKeys.length, streamKeys };
 }
@@ -157,9 +160,24 @@ export function hubStageDir(): string {
   return rootStageDir();
 }
 
-/** 该场 job.log 的绝对路径(不保证存在)。 */
-export function jobLogPath(streamKey: string, stageDir = hubStageDir()): string {
-  return resolveJobLogPath(stageDir, streamKey);
+/** Job log root (outside stage, kept forever). */
+export function hubLogsDir(): string {
+  return rootLogsDir();
+}
+
+/** Every path this session's job log may be at (new location first, legacy stage location second). */
+export function jobLogPaths(streamKey: string, stageDir = hubStageDir(), logsDir = hubLogsDir()): string[] {
+  return jobLogPathCandidates(stageDir, streamKey, logsDir);
+}
+
+/** Where this session's job log is written (not guaranteed to exist). */
+export function jobLogPath(streamKey: string, stageDir = hubStageDir(), logsDir = hubLogsDir()): string {
+  return jobLogPaths(streamKey, stageDir, logsDir)[0];
+}
+
+/** The job log that exists on disk (new or legacy location), or null. */
+function existingJobLog(streamKey: string, stageDir: string, logsDir: string): string | null {
+  return jobLogPaths(streamKey, stageDir, logsDir).find((p) => existsSync(p)) ?? null;
 }
 
 interface RawJob { streamKey: string; state: string; winnerWorker: string | null; bv: string | null; error: string | null; fails: number; updatedAt: number; uploadStatus?: string | null }
@@ -235,6 +253,8 @@ export interface ListHubJobsOpts {
   offset?: number;
   now?: number;
   stageDir?: string;
+  /** Job log root (default: data-root logs dir). */
+  logsDir?: string;
 }
 
 export interface HubJobsResult {
@@ -362,7 +382,7 @@ function batchAttached(db: DatabaseSync, keys: readonly string[]): AttachedTable
  * room 给定 → 只列该房间的历次 run(GitHub「某 workflow 的 run 列表」);省略 → 全房间最近 N。
  */
 export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): HubJobsResult {
-  const { room, limit = 10, offset = 0, now = Date.now(), stageDir = hubStageDir() } = opts;
+  const { room, limit = 10, offset = 0, now = Date.now(), stageDir = hubStageDir(), logsDir = hubLogsDir() } = opts;
   if (!existsSync(syncDbPath)) return { jobs: [], total: 0 };
   const db = openLedger(syncDbPath);
   // room key `{platform}.{roomSlug}` → streamKey 前缀 `{platform}:{roomSlug}:`(仅替换首个点)。
@@ -436,7 +456,7 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         steps: steps.map((s) => ({ step: s.step, phase: s.phase, at: Number(s.at), detail: s.detail ?? undefined })),
         nodeStates,
         currentStepSec, etaSec, videoDurationSec,
-        hasLog: existsSync(jobLogPath(j.streamKey, stageDir)),
+        hasLog: existingJobLog(j.streamKey, stageDir, logsDir) !== null,
         nodeUpload,
       };
     });
@@ -519,9 +539,9 @@ export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
 }
 
 /** 读该场 job.log 尾部(默认 64KB;不存在 → null)。 */
-export function readHubJobLog(streamKey: string, tailBytes = 65536, stageDir = hubStageDir()): string | null {
-  const p = jobLogPath(streamKey, stageDir);
-  if (!existsSync(p)) return null;
+export function readHubJobLog(streamKey: string, tailBytes = 65536, stageDir = hubStageDir(), logsDir = hubLogsDir()): string | null {
+  const p = existingJobLog(streamKey, stageDir, logsDir);
+  if (!p) return null;
   const size = statSync(p).size;
   const buf = readFileSync(p);
   return buf.subarray(Math.max(0, size - tailBytes)).toString("utf-8");
@@ -587,6 +607,8 @@ export interface BuildQueueOpts {
   manualLimit?: number;
   now?: number;
   stageDir?: string;
+  /** Job log root (default: data-root logs dir). */
+  logsDir?: string;
 }
 
 /**
@@ -613,26 +635,26 @@ const EMPTY_POOL: HubPoolSnapshotDTO = {
  * - doneSteps:该场已完成子步骤(做了什么);nextSteps:按 core DAG 推导(下面做什么)。
  */
 export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): HubQueueDTO {
-  const { pool = EMPTY_POOL, recentLimit = 8, manualLimit = 20, stageDir = hubStageDir() } = opts;
+  const { pool = EMPTY_POOL, recentLimit = 8, manualLimit = 20, stageDir = hubStageDir(), logsDir = hubLogsDir() } = opts;
   // **不要**用「取最近 N 条再客户端过滤」:台账超过 N 行后,updatedAt 较旧的**正在处理**场
   // 会被新完成的历史挤出结果 → 队列页整场消失(实测 1 active + 520 done → active=[])。
   // 故分两条精确查询:①非终态 ∪ needs_manual(=active) ②终态按 updatedAt 倒序取 recentLimit(=recent)。
   const activeRows = listHubJobs(syncDbPath, {
-    excludeStates: [...TERMINAL], limit: 200, offset: 0, now: opts.now, stageDir,
+    excludeStates: [...TERMINAL], limit: 200, offset: 0, now: opts.now, stageDir, logsDir,
   });
   // needs_manual 一分为二,**在 SQL 层分**:真事故(error 非 STAGE_READY)单独查并按 manualLimit 截断;
   // stage 正常收口另查一个有限额。放在内存里分堆是错的 —— stage 收口是终态、只增不减,
   // 任何固定窗口最终都会被它占满,真事故从 active 和 rows 里一起消失(issue #188 审查发现)。
   const manualRows = listHubJobs(syncDbPath, {
-    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir,
+    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir, logsDir,
     excludeError: STAGE_READY,
   });
   const stageReadyRows = listHubJobs(syncDbPath, {
-    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir,
+    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir, logsDir,
     onlyError: STAGE_READY,
   });
   const recentRows = listHubJobs(syncDbPath, {
-    states: ["done", "failed"], limit: recentLimit, offset: 0, now: opts.now, stageDir,
+    states: ["done", "failed"], limit: recentLimit, offset: 0, now: opts.now, stageDir, logsDir,
   });
   // 同一场可能登记多条 waiting(两个 burn 同抢 cpu + upload)→ 取**最早**那条(最急)作代表,
   // 其余忽略(位次取该资源队列内的真实序号)。

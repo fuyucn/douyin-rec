@@ -212,7 +212,8 @@ export function jobLogFileName(streamKey: string): string {
 }
 
 /**
- * Job log of one session. Legacy: `<stage session dir>/job.log`. Room layout: `<logsRoot>/hub/<platform>_<room>/<sanitized key>.log`,
+ * Job log of one session. `layout` here is the LOG layout only; it is independent of the stage layout
+ * (job logs move out of stage before stage directories are renamed). Legacy: `<stage session dir>/job.log`. Room layout: `<logsRoot>/hub/<platform>_<room>/<sanitized key>.log`,
  * kept outside stage so it survives stage cleanup. A session whose legacy log already exists keeps
  * writing there (sticky). `logsRoot` is required for the room layout; without it, or with a malformed key,
  * the legacy path is returned.
@@ -227,4 +228,18 @@ export function resolveJobLogPath(
   const parsed = parseStreamKey(streamKey);
   if (!parsed || existsSync(legacy)) return legacy;
   return join(opts.logsRoot, "hub", `${sanitizePathSegment(parsed.platform)}_${sanitizePathSegment(parsed.roomSlug)}`, jobLogFileName(streamKey));
+}
+
+/**
+ * Every place a session's job log may live, write target first: the sticky/new path from
+ * resolveJobLogPath, then the other layout's path. Readers take the first that exists, deletion
+ * removes all of them, so old sessions keep their logs after the move (issue #334).
+ */
+export function jobLogPathCandidates(stageRoot: string, streamKey: string, logsRoot: string): string[] {
+  const legacy = join(legacyStageSessionDir(stageRoot, streamKey), JOB_LOG_FILE);
+  const parsed = parseStreamKey(streamKey);
+  if (!parsed) return [legacy];
+  const fresh = join(logsRoot, "hub", `${sanitizePathSegment(parsed.platform)}_${sanitizePathSegment(parsed.roomSlug)}`, jobLogFileName(streamKey));
+  // Sticky legacy: an existing legacy log is also the write target, so it goes first.
+  return existsSync(legacy) ? [legacy, fresh] : [fresh, legacy];
 }

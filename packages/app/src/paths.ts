@@ -4,6 +4,7 @@
  *   <root>/db/douyin-rec.db          数据库(含抖音账号 cookie)
  *   <root>/recordings/               录像输出
  *   <root>/stage/                    hub 合成暂存(合并/烧录中间产物)
+ *   <root>/logs/hub/<平台>_<房间号>/  hub 场次日志(永久保留;不放 stage,清理 stage 不会带走日志)
  *   <root>/config/biliup/cookies.json  biliup B站上传 cookie
  *   <root>/config/hub.config.json    hub 全局配置;<root>/config/hub/       hub 每房间任务配置
  *
@@ -102,6 +103,11 @@ export function rootOutputDir(): string {
 /** <root>/stage —— hub 合成暂存(合并/烧录中间产物;上传后可按 cleanup 配置清理)。 */
 export function rootStageDir(): string {
   return join(drecRoot(), "stage");
+}
+
+/** <root>/logs —— hub 场次日志根(`logs/hub/<平台>_<房间号>/<场次>.log`,永久保留,不在 stage 内)。 */
+export function rootLogsDir(): string {
+  return join(drecRoot(), "logs");
 }
 
 /** <root>/config/biliup/cookies.json。 */

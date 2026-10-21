@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  jobLogFileName, legacyStageSessionDir, recordingRoomDir, recordingRoomDirCandidates, resolveJobLogPath, roomDirName,
+  jobLogFileName, jobLogPathCandidates, legacyStageSessionDir, recordingRoomDir, recordingRoomDirCandidates, resolveJobLogPath, roomDirName,
   sanitizePathSegment, sanitizeRoomName, stageSessionDir, stageSessionDirCandidates, findRoomDir, ROOM_NAME_MAX_BYTES,
 } from "./output-paths.js";
 
@@ -125,5 +125,25 @@ describe("resolveJobLogPath", () => {
     writeFileSync(join(stage, "douyin_1234567_2026-10-20", "job.log"), "x");
     expect(resolveJobLogPath(stage, KEY, { layout: "room", logsRoot: join(root, "logs") })).toBe(join(stage, "douyin_1234567_2026-10-20", "job.log"));
     expect(resolveJobLogPath(stage, "douyin:1:2026-10-21", { layout: "room" })).toBe(join(stage, "douyin_1_2026-10-21", "job.log"));
+  });
+});
+
+describe("jobLogPathCandidates", () => {
+  const stage = () => join(root, "stage");
+  const logs = () => join(root, "logs");
+  it("new location first, legacy second; both always listed", () => {
+    const c = jobLogPathCandidates(stage(), KEY, logs());
+    expect(c).toEqual([join(logs(), "hub", "douyin_1234567", jobLogFileName(KEY)), join(stage(), "douyin_1234567_2026-10-20", "job.log")]);
+  });
+  it("sticky legacy goes first but the new path is still a candidate (deletion must reach it)", () => {
+    mkdirSync(join(stage(), "douyin_1234567_2026-10-20"), { recursive: true });
+    writeFileSync(join(stage(), "douyin_1234567_2026-10-20", "job.log"), "x");
+    const c = jobLogPathCandidates(stage(), KEY, logs());
+    expect(c).toHaveLength(2);
+    expect(c[0]).toBe(join(stage(), "douyin_1234567_2026-10-20", "job.log"));
+    expect(c[1]).toBe(join(logs(), "hub", "douyin_1234567", jobLogFileName(KEY)));
+  });
+  it("malformed key: legacy only", () => {
+    expect(jobLogPathCandidates(stage(), "weird", logs())).toEqual([join(stage(), "weird", "job.log")]);
   });
 });
