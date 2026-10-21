@@ -2640,6 +2640,26 @@ describe("empty stage dir removal after stageAfterDone (issue #335)", () => {
     deps.ledger.close();
   });
 
+  it("a failed stage cleanup never removes the directory (even if it is empty by then)", async () => {
+    const base = makeDeps();
+    const deps = makeDeps({
+      cfg: cleanupCfg(base),
+      makeRunLogger: () => ({ info: () => {}, warn: () => {}, error: () => {} }),
+      // deletes everything, then reports failure: the dir is empty but the cleanup did not succeed
+      rmStage: async (paths: string[]) => {
+        for (const p of paths) rmSync(p, { force: true, recursive: true });
+        throw new Error("simulated cleanup failure");
+      },
+    });
+    seedStage(deps);
+    const b = makeBroadcast([{ workerId: "node-1", rec: makeRec({ totalGapSec: 0 }) }]);
+    deps.ledger.upsertPending(b.streamKey);
+    expect((await runPipeline(b, deps)).state).toBe("done");
+    expect(existsSync(stageSubOf(deps))).toBe(true);
+    expect(deps.ledger.getNodeStates(b.streamKey).find((n) => n.node === "clean_stage")?.state).toBe("failed");
+    deps.ledger.close();
+  });
+
   it("stageAfterDone off: the directory and its files stay", async () => {
     const base = makeDeps();
     const deps = makeDeps({ cfg: { ...base.cfg, cleanup: { sourceAfterDone: true } } });
