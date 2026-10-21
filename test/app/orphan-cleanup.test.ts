@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { platformForRoom } from "@drec/core";
 import {
   isEmptyXml, scanOrphans, cleanupOrphans,
 } from "../../packages/app/src/orphan-cleanup.js";
@@ -241,6 +242,54 @@ describe("maintenance 端点(T13 API 层)", () => {
     expect(body.emptyXml.length).toBeGreaterThan(0);
     expect(body.emptyXml.every((i) => i.keepReason !== null)).toBe(true);
     rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("maintenance protects room-layout recording dirs (issue #333)", () => {
+  const mk = (recordingIds: number[]) => ({
+    isRecording: (id: number) => recordingIds.includes(id),
+    getAnchorName: () => null,
+  });
+  const run = (withRoomDir: boolean): { keepReason: string | null }[] => {
+    const root = mkdtempSync(join(tmpdir(), "orphan-room-"));
+    const savedRoot = process.env.DOUYIN_REC_ROOT;
+    process.env.DOUYIN_REC_ROOT = root;
+    try {
+      const store = new TaskStore(":memory:");
+      const task = store.addTask({ room: "111", name: "NameA" });
+      const p = platformForRoom("111");
+      // The legacy directory exists too (name directory), the room directory only when asked.
+      const dirs = [join(root, "recordings", "NameA")];
+      if (withRoomDir) dirs.push(join(root, "recordings", `Renamed_${p.id}_${p.extractRoomSlug("111")}`));
+      const old = new Date(Date.now() - 48 * 3600_000);
+      for (const d of dirs) {
+        mkdirSync(d, { recursive: true });
+        const f = join(d, "s_2026-10-10_00-00-00.xml");
+        writeFileSync(f, EMPTY, "utf-8");
+        utimesSync(f, old, old); // stale: only the active-directory protection can keep it
+      }
+      // A non-empty copy of the same session elsewhere makes the empty shells deletable, so a keepReason
+      // can only come from the active-directory protection.
+      mkdirSync(join(root, "stage"), { recursive: true });
+      writeFileSync(join(root, "stage", "s_2026-10-10_00-00-00.xml"), NONEMPTY, "utf-8");
+      const api = buildMaintenance({ store, manager: mk([task.id]) as never, dataRoot: root });
+      const body = api.previewOrphans().body as { emptyXml: { path: string; keepReason: string | null }[] };
+      return body.emptyXml.filter((i) => i.path.includes(withRoomDir ? "Renamed_" : "NameA"));
+    } finally {
+      if (savedRoot === undefined) delete process.env.DOUYIN_REC_ROOT; else process.env.DOUYIN_REC_ROOT = savedRoot;
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it("recording task: the suffix-matched room directory is protected, not just the name directory", () => {
+    const items = run(true);
+    expect(items.length).toBeGreaterThan(0);
+    expect(items.every((i) => i.keepReason !== null)).toBe(true);
+  });
+  it("control: the legacy name directory of a recording task stays protected", () => {
+    const items = run(false);
+    expect(items.length).toBeGreaterThan(0);
+    expect(items.every((i) => i.keepReason !== null)).toBe(true);
   });
 });
 

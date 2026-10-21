@@ -47,3 +47,5 @@ export * from "./processor.js";
 // 收尾后留存清单(plans/036 T8):xml/ass「不删最后一份」+ 源分段/成品/边车副本归属的唯一判定。
 export * from "./survivors.js";
 export * from "./child-identity.js";
+// Output path resolver (issue #333): stage / recording / job-log paths and the one name-sanitize rule.
+export * from "./output-paths.js";

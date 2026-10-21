@@ -13,11 +13,10 @@
  * 直接构造所需 handler(**不进 `makeApi`**),故只依赖 store/manager/hub 台账路径 ——
  * 无需在 `Api`/`ApiDeps` 上加字段(`web/api/types.ts` 不在本次改动范围)。
  */
-import { join } from "node:path";
 import { listHubJobs, hubStageDir } from "../../hub-jobs.js";
 import { cleanupOrphans, scanOrphans, type ScanOptions, type ScanResult, type CleanupResult } from "../../orphan-cleanup.js";
 import { drecRoot, resolveOutputDir, rootStageDir } from "../../paths.js";
-import { HUB_TERMINAL_STATES, sanitizeStreamKey } from "@drec/core";
+import { HUB_TERMINAL_STATES, platformForRoom, recordingRoomDirCandidates, stageSessionDirCandidates } from "@drec/core";
 import type { ManagerLike, ApiResult } from "./types.js";
 import type { TaskStore } from "../../store.js";
 
@@ -33,28 +32,19 @@ export interface MaintenanceDeps {
 }
 
 /**
- * 名字净化成单个安全路径段 —— **必须与 `@drec/record-engine` 的 sanitizePathSegment 同规则**
- * (web/api/context.ts 的 recordingsDir 也是这套)。写错会让「正在录制」的保护落到错误的目录上,
- * 形同没有保护(静默失去安全阀)。
+ * Every recording directory a task may be writing to: the legacy anchor-name directory (same rule as
+ * web/api/context.ts recordingsDir, both go through core) plus any suffix-matched room directory.
+ * Empty when the name is not resolved yet -- protect nothing rather than guess a wrong directory
+ * (the scratch staleness threshold covers that case).
  */
-function sanitizeSeg(name: string): string {
-  return name
-    .replace(/[/\\:*?"<>|]/g, "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\x00-\x1f\x7f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
- * 任务的实际录像目录(与 web/api/context.ts 的 recordingsDir 同口径:`outDir` + 净化后的主播子目录)。
- * 无子目录时返回 `null` —— 与 recordingsDir 一致(命名尚未解析出来 → 无法定位,宁可少保护 +
- * 让 scratch 陈旧阈值兜底,也不猜一个错误的目录)。
- */
-function recordingDirOf(outDir: string | null, name: string | null, anchor: string | null): string | null {
-  const base = resolveOutputDir(outDir);
-  const sub = (name ? sanitizeSeg(name) : "") || (anchor ? sanitizeSeg(anchor) : "");
-  return sub ? join(base, sub) : null;
+function recordingDirsOf(task: { room: string; outDir: string | null; name: string | null }, anchor: string | null): string[] {
+  const base = resolveOutputDir(task.outDir);
+  let room: { platform: string; roomSlug: string } | undefined;
+  try {
+    const p = platformForRoom(task.room);
+    room = { platform: p.id, roomSlug: p.extractRoomSlug(task.room) };
+  } catch { /* unknown platform: legacy directory only */ }
+  return recordingRoomDirCandidates(base, [task.name, anchor], room);
 }
 
 export function buildMaintenance(deps: MaintenanceDeps): {
@@ -68,8 +58,7 @@ export function buildMaintenance(deps: MaintenanceDeps): {
     const recordingDirs: string[] = [];
     for (const t of deps.store.listTasks()) {
       if (!deps.manager.isRecording(t.id)) continue;
-      const dir = recordingDirOf(t.outDir, t.name, deps.manager.getAnchorName(t.id) ?? t.anchorName);
-      if (dir) recordingDirs.push(dir);
+      recordingDirs.push(...recordingDirsOf(t, deps.manager.getAnchorName(t.id) ?? t.anchorName));
     }
     const activePaths: string[] = [];
     if (deps.syncDbPath) {
@@ -77,10 +66,10 @@ export function buildMaintenance(deps: MaintenanceDeps): {
         const terminal = new Set<string>(HUB_TERMINAL_STATES);
         const { jobs } = listHubJobs(deps.syncDbPath, { limit: 200, excludeStates: [...terminal] });
         const stage = deps.stageDir ?? hubStageDir();
-        // 用权威 sanitizeStreamKey(hub-jobs 的 stage 子目录也按它建),不自己拼一个近似的:
-        // 两者一旦不一致,活动 job 的保护就会指向不存在的目录 —— 保护静默失效,比报错更糟。
+        // Paths come from the core resolver (the pipeline builds them there too) and cover both the
+        // legacy and the room layout: a mismatch would leave the active job unprotected, silently.
         for (const j of jobs) {
-          activePaths.push(join(stage, sanitizeStreamKey(j.streamKey)));
+          activePaths.push(...stageSessionDirCandidates(stage, j.streamKey));
         }
       } catch {
         // 台账读不到(首次运行/损坏)→ 只靠「正在录制」+ 陈旧阈值兜底(宁可少删)。

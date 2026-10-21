@@ -12,7 +12,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import {
-  assertJobInvariants, getProcessor, sanitizeStreamKey, type EnqueueRequest, type EnqueueResponse, type EnqueueResult, type ProcessJob,
+  assertJobInvariants, getProcessor, stageSessionDir, type EnqueueRequest, type EnqueueResponse, type EnqueueResult, type ProcessJob,
   type ProcessReceipt, type Processor,
 } from "@drec/core";
 import { ProcQueueStore, procQueueDbPath } from "@drec/proc-queue";
@@ -133,7 +133,7 @@ export interface HandleEnqueueOpts extends NodeRootsOpts {
 export function localizePrepStage(job: ProcessJob): ProcessJob {
   if (job.kind !== "upload-prep") return job;
   const key = job.orderKey ?? job.logicalKey;
-  return { ...job, params: { ...job.params, stageDir: join(rootStageDir(), sanitizeStreamKey(key)) } };
+  return { ...job, params: { ...job.params, stageDir: stageSessionDir(rootStageDir(), key) } };
 }
 
 /** `_enqueue` 执行体:逐 job 受理,单个 job 的拒绝不影响其余。库打不开 → 抛错(命令非零退出,派发方当失败)。 */

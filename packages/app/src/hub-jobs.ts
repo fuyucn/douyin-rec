@@ -10,10 +10,9 @@
  */
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
 import {
   HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, isSidecarSkipEvent, readyNodes, STAGE_READY, USER_STOP,
-  sanitizeStreamKey,
+  resolveJobLogPath,
   type HubPoolSnapshotDTO, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type QueuePhase,
 } from "@drec/core";
 import { rootHubConfig, rootStageDir } from "./paths.js";
@@ -160,7 +159,7 @@ export function hubStageDir(): string {
 
 /** 该场 job.log 的绝对路径(不保证存在)。 */
 export function jobLogPath(streamKey: string, stageDir = hubStageDir()): string {
-  return join(stageDir, sanitizeStreamKey(streamKey), "job.log");
+  return resolveJobLogPath(stageDir, streamKey);
 }
 
 interface RawJob { streamKey: string; state: string; winnerWorker: string | null; bv: string | null; error: string | null; fails: number; updatedAt: number; uploadStatus?: string | null }
