@@ -12,7 +12,7 @@
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { useAtomValue } from "jotai";
 import { X } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { OUTPUT_FORMATS, stageExt } from "@drec/output-format";
 import { api, type PlatformDTO, type RoomDTO, type WorkerDTO } from "../api/client";
 import { cookieStatusAtom } from "../atoms";
@@ -112,6 +112,18 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
 
   // The upload step only exists while upload is on; fall back to processing if it was open when that changed.
   const curStep: StepId = step === "upload" && !form.uploadOn ? "process" : step;
+  // Arrow/Home/End move between enabled tabs (roving tabindex), skipping the disabled Upload step.
+  const onStepKey = (e: KeyboardEvent) => {
+    const keys = ["ArrowLeft", "ArrowRight", "Home", "End"];
+    if (!keys.includes(e.key)) return;
+    const ids = STEPS.filter((sid) => !(sid === "upload" && !form.uploadOn));
+    const at = ids.indexOf(curStep);
+    const next = e.key === "Home" ? 0 : e.key === "End" ? ids.length - 1
+      : (at + (e.key === "ArrowRight" ? 1 : -1) + ids.length) % ids.length;
+    e.preventDefault();
+    setStep(ids[next]);
+    document.getElementById(`rm-step-${ids[next]}`)?.focus();
+  };
   const flow = flowSummary(facts, !!room.recording && room.recording.enabled);
   const caps = useMemo(() => [...new Set(workers.flatMap((w) => w.capabilities ?? []))], [workers]);
   const workerName = (id: string): string => workers.find((w) => w.id === id)?.name ?? id;
@@ -159,14 +171,13 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                 {managed && <p className="status-strip">{t("room.editor.managed")}</p>}
                 {/* Managed rooms are owned by the master: every control is read-only here and Save is off,
                     otherwise the processing half would still be written to this node's rule file. */}
-                <fieldset disabled={managed} className="contents">
-
-                <div role="tablist" className="rm-steps" aria-label={t("room.editor.steps")}>
+                {/* Outside the fieldset: a managed room is read-only, but its steps must stay browsable. */}
+                <div role="tablist" className="rm-steps" aria-label={t("room.editor.steps")} onKeyDown={onStepKey}>
                   {STEPS.map((sid, i) => {
                     const off = sid === "upload" && !form.uploadOn;
                     return (
                       <button key={sid} type="button" role="tab" id={`rm-step-${sid}`} aria-selected={curStep === sid} aria-controls="rm-step-panel"
-                              disabled={off} title={off ? t("room.editor.stepUploadOff") : undefined}
+                              tabIndex={curStep === sid ? 0 : -1} disabled={off} title={off ? t("room.editor.stepUploadOff") : undefined}
                               className={`rm-step${curStep === sid ? " is-active" : ""}`} onClick={() => setStep(sid)}>
                         <span className="rm-step-n">{i + 1}</span>
                         <span className="rm-step-t">{t(`room.editor.step.${sid}`)}</span>
@@ -174,6 +185,8 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                     );
                   })}
                 </div>
+
+                <fieldset disabled={managed} className="contents">
 
                 <p className="text-xs text-muted">
                   <span className="font-mono uppercase mr-2">{t("room.editor.flow")}</span>
@@ -244,6 +257,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                         <span className="field-label">{t("room.editor.after")}</span>
                         <Seg value={form.uploadOn ? "upload" : "archive"} onChange={(v) => update({ uploadOn: v === "upload" })}
                              items={[{ id: "archive", label: t("room.archiveMode") }, { id: "upload", label: t("room.uploadMode") }]} />
+                        {!form.uploadOn && <p className="text-xs text-muted mt-1">{t("room.editor.uploadOffHint")}</p>}
                       </div>
                       <section className="space-y-3">
                         <RuleSwitch checked={form.procEnabled} onChange={(procEnabled) => update({ procEnabled })} />

@@ -1537,34 +1537,6 @@ table.tasks tbody tr:last-child td {
   flex-direction: column;
   gap: 14px;
 }
-.rm-more summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  list-style: none;
-}
-.rm-more summary::-webkit-details-marker {
-  display: none;
-}
-.rm-more summary::before {
-  content: "›";
-  color: var(--muted);
-  transition: transform 0.12s ease;
-}
-.rm-more[open] summary::before {
-  transform: rotate(90deg);
-}
-.rm-more-sum {
-  margin-left: auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--muted);
-}
 @media (max-width: 639px) {
   .rm-step-n {
     display: none;
@@ -1634,9 +1606,6 @@ table.tasks tbody tr:last-child td {
   }
   .rm-editor-foot > button {
     flex: 1;
-  }
-  .rm-more-sum {
-    display: none;
   }
 }
 
