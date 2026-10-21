@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { factsOf, formFromRoom, payloadFromForm, ruleFactsOf, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { DEFAULT_TITLE_TEMPLATES, factsOf, formFromRoom, payloadFromForm, ruleFactsOf, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
 import { deriveConstraints, settledMethod } from "../../packages/web/src/lib/room-form-rules.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
@@ -137,5 +137,32 @@ describe("webhookPatch (secret PATCH semantics, issue #47)", () => {
     expect(webhookPatch("", true)).toEqual({ webhook: null });
     // typing a new value wins over a stale clear flag
     expect(webhookPatch("https://x/y", true)).toEqual({ webhook: "https://x/y" });
+  });
+});
+
+describe("title templates are prefilled but clearing them keeps the old fallback", () => {
+  const room = (upload: object) => ({
+    room: "1", platform: "douyin",
+    processing: { enabled: true, pipeline: { upload } },
+    recording: { danmu: 1, quality: "origin", engine: "ffmpeg", segmentSec: 1800, useCookie: true },
+  }) as never;
+  it("empty stored templates show the shared defaults", () => {
+    const f = formFromRoom(room({}));
+    expect(f.titleTemplate).toBe(DEFAULT_TITLE_TEMPLATES.titleTemplate);
+    expect(f.submissionTitleTemplate).toBe(DEFAULT_TITLE_TEMPLATES.submissionTitleTemplate);
+    expect(f.partTitleTemplate).toBe(DEFAULT_TITLE_TEMPLATES.partTitleTemplate);
+  });
+  it("a stored template wins over the default", () => {
+    expect(formFromRoom(room({ titleTemplate: "{name}_{date}" })).titleTemplate).toBe("{name}_{date}");
+  });
+  it("user-cleared fields are sent as unset so the backend fallback applies", () => {
+    const f = { ...formFromRoom(room({})), uploadOn: true, titleTemplate: "", submissionTitleTemplate: "", partTitleTemplate: "" };
+    const r = payloadFromForm(f, ctx);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const u = r.payload.processing?.pipeline?.upload;
+    expect(u?.titleTemplate).toBeUndefined();
+    expect(u?.submissionTitleTemplate).toBeUndefined();
+    expect(u?.partTitleTemplate).toBeUndefined();
   });
 });

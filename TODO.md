@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-103 房间编辑器标题模板预填统一默认值（issue [#344](https://github.com/fuyucn/douyin-rec/issues/344)）**
+  — 2026-10-21 认领,分支 `codex/issue-344-title-defaults`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：房间没存标题模板时,编辑弹窗三个模板输入框预填统一默认值;清空保存仍走原回落。
+  **为什么**：空输入框看不出当前生效的标题方案,各房间设置容易不一致。
+  **验收**：已存模板优先;清空后 payload 不下发;全量测试 / 类型 / web 构建通过。
+
 - [~] **T-102 房间编辑弹窗改为分步骤标签页（issue [#342](https://github.com/fuyucn/douyin-rec/issues/342)）**
   — 2026-10-21 认领,分支 `codex/issue-room-editor-steps`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：房间编辑弹窗拆成 录制 / 处理 / 上传 / 清理与通知 四个可自由跳转的标签页;没选投稿时「上传」置灰;弹窗固定高度,切步骤不跳动;手机全屏可用。
