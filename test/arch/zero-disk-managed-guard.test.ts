@@ -34,6 +34,8 @@ describe("record --stream-upload on a hub-managed node", () => {
   it("takes metadata only from the delivered object (manual flags are ignored when managed)", () => {
     expect(block).toContain("const manual");
     expect(block).toContain("delivery ? {} : o");
+    // the title/tag/tid/visibility come from the delivered meta, not the node's own defaults
+    expect(block).toMatch(/const streamMeta = delivery\s*\? \{ tid: delivery\.meta\.tid, tag: delivery\.meta\.tag, private: delivery\.meta\.private/);
     expect(block).not.toMatch(/o\.streamUpload(Tid|Tag|Private)/); // only through `manual`
     // all three title resolvers receive the delivered meta
     expect((block.match(/\.\.\.metaOverride/g) ?? []).length).toBe(3);
@@ -64,6 +66,8 @@ describe("master spec builder", () => {
     expect(cli).toContain("planZeroDiskSpec({");
     expect(cli).toContain("...(zeroDiskDelivery ? { zeroDiskDelivery } : {})");
     expect(cli).toContain("allowsPush: zeroDiskFleet.allowsPush(workerId)");
+    expect(cli).toContain("ruleError: zeroDiskRuleError(src.streamUpload");
+    expect(cli).toContain("masterCookiesPath: hubCfg.cookies");
   });
   it("probes capabilities before building specs and polls receipts after applying them", () => {
     const refresh = cli.indexOf("zeroDiskFleet.refreshSupport(");

@@ -194,9 +194,10 @@ export interface Transport {
    */
   taskLogs?(taskId: number, lines: number): Promise<{ lines: string[]; error?: string }>;
   /**
-   * 0 落盘回执 + 各房间状态(隐藏 `_zero-disk-report`,只读;issue #331)。
-   * 返回 `null` = 节点是旧 bundle(unknown command)→ 不支持;网络/节点故障 → 抛错(= 离线,不当成「无回执」)。
-   * 本机 transport 不实现:master 本机的 0 落盘直接写自己的台账。
+   * Zero-disk receipts + per-room status (hidden `_zero-disk-report`, read-only; issue #331).
+   * Returns `null` for an old bundle (unknown command) = unsupported; a network/node failure throws
+   * (= offline, never mistaken for "no receipts").
+   * The local transport does not implement it: the master's own zero-disk run writes its ledger directly.
    */
   zeroDiskReport?(): Promise<ZeroDiskReport | null>;
   /**

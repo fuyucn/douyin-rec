@@ -861,7 +861,7 @@ typecheck / arch:check / bundle / issue-guard 全绿。
 | 策略 | core `zeroDiskRuleError`:rolling + 无烧录 + **恰好一个节点**(local 或任一 worker)。房间 API / 任务 API / hub 规则 API / Web 编辑器共用它 |
 | 元数据下发 | master 用与本机同一解析器(`resolveRollingUploadMeta`)算一次,随任务规格下发 `zeroDiskDelivery`(tid/tag/desc/**private 必须显式**/三个标题模板/账号键/凭证兜底路径)。节点存为 `tasks.zeroDiskDelivery`,每轮同步覆盖(规则改了下一轮生效) |
 | 节点侧消费 | 受管节点的 0 落盘**只**读下发对象(`resolveStream*Title` 新增 `meta` 参数);缺字段/类型错一律 `delivery_missing` 拒绝启动。master 本机路径不变(仍读规则目录) |
-| 凭证 | 节点本地登录优先(`BILIUP_COOKIE` → 数据根下默认的 biliup 登录文件),master 下发的节点内路径兜底;**只传路径,不传值**。上传前用 core `biliAccountKeyFromCookiesJson` 比对账号键,不一致/无法识别/无凭证 → 拒绝启动 + 告警 + 状态文件 |
+| 凭证 | 节点本地登录优先(`BILIUP_COOKIE` → 数据根下默认的 biliup 登录文件),master 下发的节点内路径兜底;**只传路径,不传值**(因此该路径在常规部署下与节点默认登录文件相同,实际无额外兜底:不再单独下发登录文件值,节点没有登录就拒绝启动,这是对 issue「master 可下发兜底」的有意收窄)。master 侧账号键取 `hubCfg.cookies`(与 master 自己的上传管线同源),缺省才用数据根默认登录文件。上传前用 core `biliAccountKeyFromCookiesJson` 比对账号键,不一致/无法识别/无凭证 → 拒绝启动 + 告警 + 状态文件 |
 | 台账 | 节点不写自己的台账,每次运行写**一份不可变回执**(`config/zero-disk/receipts/<id>.json`,30 天后自清)。master 经隐藏只读命令 `_zero-disk-report`(ssh)轮询,用既有幂等 `recordStreamUpload` 记账(终态行不覆盖)。master 离线期间回执留在节点,回来后补记;重复拉取不重复记。旧节点 unknown command → 「不支持」(`null`),不是故障 |
 | 能力闸门 | `_node-capabilities` 新增 `zeroDisk:true`。master 的 `ZeroDiskFleet` 探测后才允许下发启用的任务;旧节点/未确认 → 下发 `enabled:false` + 控制台原因。**已知支持的节点探测瞬时失败不撤销**(撤销 = 停掉在传稿件) |
 | 可见性 | 同一次轮询带回每个房间的状态(running/finished/failed/refused/stopped + 已确认分 P 数 + 拒绝码)。`GET /api/tasks` 的 `zeroDisk[]`、房间页「运行」组、列表 attention 状态 |

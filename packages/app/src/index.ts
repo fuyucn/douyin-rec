@@ -64,7 +64,7 @@ export type { NodeUploadGateOpts } from "./node-pipeline.js";
 export { RollingUploader, makeRollingUploadHookFactory, resolveRollingUploadMeta } from "./rolling-upload.js";
 export { resolveStreamUploadMeta, resolveStreamUploadTitle, resolveStreamPartTitle } from "./rolling-upload.js";
 export { refreshLocalRollingEffective, rollingSpecFields } from "./rolling-effective.js";
-// 0 落盘在侧节点(issue #331):节点预检 / 状态与回执文件 / master 下发对象构造。
+// Zero-disk on a side node (issue #331): node preflight / status + receipt files / master-side delivery object builder.
 export {
   zeroDiskNodePreflight, resolveNodeUploadCredential, writeZeroDiskStatus, writeZeroDiskReceipt, buildZeroDiskReport,
   buildZeroDiskDelivery, planZeroDiskSpec, createZeroDiskReporter, zeroDiskNodeDir, ZERO_DISK_RECEIPT_TTL_MS, preflightManagedZeroDiskTask, makeNodeSubmitGate,

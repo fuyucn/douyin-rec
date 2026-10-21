@@ -283,7 +283,7 @@ export interface WebServerDeps {
   nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
   /** worker 录制状态快照(CLI 注入;不在请求路径上同步 SSH)。 */
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
-  /** 0 落盘侧节点状态快照(issue #331;CLI 注入,不在请求路径上同步 SSH)。 */
+  /** Zero-disk side-node status snapshot (issue #331); injected by the CLI so no SSH happens on the request path. */
   zeroDiskStatus?: (platform: string, roomSlug: string) => import("@drec/core").ZeroDiskNodeStatusDTO[];
   /** 节点侧 master 下发快照目录(见 ApiDeps.managedStateDir);serve 不论是否 hub 模式都注入。 */
   managedStateDir?: string;

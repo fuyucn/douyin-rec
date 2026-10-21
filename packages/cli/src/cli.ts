@@ -25,7 +25,7 @@ import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
-import { decorateRecordEvent, getEngine, isWorkerAssigned, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
+import { zeroDiskRuleError, decorateRecordEvent, getEngine, isWorkerAssigned, listProcessors, platformForRoom, resolveSpecAssignment, type DownloadEngine } from "@drec/core";
 import { PollingRecorder, describeStreamIdentity } from "@drec/record-engine";
 import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-process";
 import { renderXmlToAss } from "@drec/post-process";
@@ -1096,7 +1096,7 @@ let hubRunNow:
   | ((opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>)
   | undefined;
 let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
-/** 0 落盘侧节点状态快照(issue #331;随 hub 同步 tick 整体替换,只读展示)。 */
+/** Zero-disk side-node status snapshot (issue #331); replaced wholesale on each hub sync tick, display only. */
 let hubZeroDiskSnapshot = new Map<string, ZeroDiskNodeStatusDTO[]>();
 /** 各节点边录边传的实时进度(F1;随 5 秒状态轮询整体替换,只读展示)。 */
 let hubDeliverySnapshot: RollingDeliveryDTO[] = [];
@@ -1443,6 +1443,8 @@ const hubStarter: HubStarter = {
     let zeroDiskBlocked = new Map<string, string>();
     /** Last delivery built per (node, room): reused when a rebuild fails, so a transient read error cannot stop a live upload. */
     const zeroDiskLastGood = new Map<string, import("@drec/core").ZeroDiskDelivery>();
+    /** Last stale reason logged per (node, room), so the same warning is not repeated every sync tick. */
+    const zeroDiskStaleWarned = new Map<string, string>();
 
     // 投稿默认:uploadDefaults(新)> uploadMeta(旧,迁移兼容)> 硬兜底。
     const uploadDefaults = hubCfg.uploadDefaults ?? hubCfg.uploadMeta ?? {};
@@ -1690,11 +1692,22 @@ const hubStarter: HubStarter = {
           assigned,
           enabled: specEnabledBase,
           allowsPush: zeroDiskFleet.allowsPush(workerId),
-          build: () => buildZeroDiskDelivery({ platform: p.id, roomSlug: rule.roomSlug, ...(workerDataRoot ? { workerDataRoot } : {}) }),
+          ruleError: zeroDiskRuleError(src.streamUpload, { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers, steps: rule.pipeline?.steps }),
+          build: () => buildZeroDiskDelivery({
+            platform: p.id,
+            roomSlug: rule.roomSlug,
+            // The master's configured upload login (same file its own pipeline uploads with).
+            ...(hubCfg.cookies ? { masterCookiesPath: hubCfg.cookies } : {}),
+            ...(workerDataRoot ? { workerDataRoot } : {}),
+          }),
           ...(zeroDiskLastGood.get(zdKey) ? { lastGood: zeroDiskLastGood.get(zdKey)! } : {}),
         });
         if (zd.delivery && !zd.stale) zeroDiskLastGood.set(zdKey, zd.delivery);
-        if (zd.stale) opts.warn(`[zero-disk] 无法重建下发对象(${zd.stale});沿用上次的,避免停掉在传的稿件`);
+        if (zd.stale && zeroDiskStaleWarned.get(zdKey) !== zd.stale) {
+          zeroDiskStaleWarned.set(zdKey, zd.stale);
+          opts.warn(`[zero-disk] 无法重建下发对象(${zd.stale});沿用上次的,避免停掉在传的稿件`);
+        }
+        if (!zd.stale) zeroDiskStaleWarned.delete(zdKey);
         if (zd.blocked) zeroDiskBlocked.set(zdKey, zd.blocked);
         const specEnabled = zd.enabled;
         const zeroDiskDelivery = zd.delivery;

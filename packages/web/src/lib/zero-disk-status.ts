@@ -40,7 +40,7 @@ export function zeroDiskView(z: ZeroDiskNodeStatusDTO): ZeroDiskView {
   }
   switch (z.run) {
     case "refused":
-      return { key: (z.code && REFUSAL_KEYS[z.code]) || "room.zeroDisk.refused", tone: "error" };
+      return { key: (z.code && REFUSAL_KEYS[z.code]) || "room.zeroDisk.refused", tone: "error", ...(z.message ? { detail: z.message } : {}) };
     case "failed":
       return { key: "room.zeroDisk.failed", tone: "error", ...(z.message ? { detail: z.message } : {}) };
     case "running":

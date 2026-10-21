@@ -6,7 +6,7 @@
  *
  * 两个隐藏子命令(供 master 经 SSH 调用,不在 `--help` 显示):
  *   - `_node-capabilities <dataRoot>` → 探测 biliup/cookies/磁盘/字体(决定 master 是否走节点侧)。
- *   - `_zero-disk-report <dataRoot>` → 0 落盘回执 + 状态(只读,issue #331)。
+ *   - `_zero-disk-report <dataRoot>` → zero-disk receipts + status (read-only, issue #331).
  *   - `_node-pipeline <dataRoot> <base64>` → 节点本地 remux + biliup 上传,回传 BV(不含视频回传)。
  *   - `_node-result <dataRoot> <streamKey>` → 回读节点侧**落盘结果文件**(ssh 断线后的权威结果)。
  *   - `_node-abort <dataRoot> <streamKey>` → 终止该场的**节点执行体**(issue #2:master 判失败/收口后
@@ -61,8 +61,9 @@ export function registerNodePipelineCommands(program: Command): void {
       }
     });
 
-  // 0 落盘回执 + 状态(issue #331):master 轮询的**只读**输出。节点不删除回执(30 天后自行清理),
-  // 所以 master 离线多久都不丢;重复拉取由 master 台账的终态守卫保证不重复记。
+  // Zero-disk receipts + status (issue #331): read-only output the master polls. The node never deletes
+  // receipts itself (self-cleaned after 30 days), so none are lost however long the master is offline;
+  // repeated pulls are made harmless by the master ledger's terminal-state guard.
   program
     .command("_zero-disk-report <dataRoot>", { hidden: true })
     .description("(内部) 输出 0 落盘回执与各房间状态 JSON(只读;供 master ssh 调用)")

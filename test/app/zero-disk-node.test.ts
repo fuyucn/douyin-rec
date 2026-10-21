@@ -220,6 +220,18 @@ describe("planZeroDiskSpec — the single decision point for what a node is sent
     expect(planZeroDiskSpec({ ...base, assigned: false, enabled: false, build })).toEqual({ enabled: false });
     expect(built).toBe(0);
   });
+  it("a rule violating the one-node policy blocks every side node (hand-edited rule files)", () => {
+    let built = 0;
+    const build = () => { built++; return delivery; };
+    for (const workerId of ["vps1", "vps2"]) {
+      expect(planZeroDiskSpec({ ...base, workerId, ruleError: "one node only", build, lastGood: delivery.delivery }))
+        .toEqual({ enabled: false, blocked: "one node only" });
+    }
+    expect(built).toBe(0);
+    // a clean rule (null) and the local node are unaffected
+    expect(planZeroDiskSpec({ ...base, ruleError: null })).toMatchObject({ enabled: true });
+    expect(planZeroDiskSpec({ ...base, workerId: "local", ruleError: "x" })).toEqual({ enabled: true });
+  });
   it("an enabled=false source stays disabled even for a supported node", () => {
     expect(planZeroDiskSpec({ ...base, enabled: false })).toMatchObject({ enabled: false });
   });

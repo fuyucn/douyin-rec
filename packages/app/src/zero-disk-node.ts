@@ -292,6 +292,8 @@ export function makeNodeSubmitGate(o: {
  *
  * - local node (the master itself) and non-zero-disk rooms: untouched.
  * - not assigned to this node: nothing to deliver (the spec is disabled anyway).
+ * - the rule itself violates the one-node policy (hand-edited file: no node / several nodes / burn):
+ *   sent DISABLED with the reason on EVERY side node, so no node can create a second archive.
  * - node does not advertise support (old / unknown): sent DISABLED, so an old bundle never starts it
  *   with defaults; the console shows why (see ZeroDiskFleet.view).
  * - delivery cannot be built (master account unknown): sent DISABLED with a reason, never defaulted.
@@ -305,11 +307,14 @@ export function planZeroDiskSpec(o: {
   assigned: boolean;
   enabled: boolean;
   allowsPush: boolean;
+  /** `zeroDiskRuleError(true, rule)` of the room's hub rule; non-null blocks every side node. */
+  ruleError?: string | null;
   build: () => ZeroDiskDeliveryBuild;
   /** Last delivery successfully built for this (node, room); reused only when a rebuild fails. */
   lastGood?: ZeroDiskDelivery;
 }): { enabled: boolean; delivery?: ZeroDiskDelivery; blocked?: string; stale?: string } {
   if (!o.streamUpload || o.workerId === "local" || !o.assigned) return { enabled: o.enabled };
+  if (o.ruleError) return { enabled: false, blocked: o.ruleError };
   if (!o.allowsPush) return { enabled: false };
   const built = o.build();
   if (built.ok) return { enabled: o.enabled, delivery: built.delivery };

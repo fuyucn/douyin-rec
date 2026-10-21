@@ -121,7 +121,7 @@ export function migrate(db: DatabaseSync): void {
   // 默认 0 → 老库/老配置行为完全不变。与 rollingUpload 互斥(应用层校验)。
   ensureColumn(db, "tasks", "streamUpload", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "tasks", "streamUploadSpool", "INTEGER NOT NULL DEFAULT 1");
-  // 0 落盘在侧节点上的上传元数据/账号键(issue #331,master 下发的 JSON;NULL = 未下发,local/旧行为不变)。
+  // Zero-disk upload metadata / account key on a side node (issue #331; JSON shipped by the master; NULL = not shipped, local/legacy unchanged).
   ensureColumn(db, "tasks", "zeroDiskDelivery", "TEXT");
   // 输出格式(issue #137):original(缺省,现状不变)| mp4 | mkv。旧库补列即取 DEFAULT,行为不变。
   ensureColumn(db, "tasks", "outputFormat", "TEXT NOT NULL DEFAULT 'original'");

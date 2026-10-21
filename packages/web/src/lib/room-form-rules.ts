@@ -38,7 +38,7 @@ export interface FormFacts {
   workers: readonly string[];
   /** 该房间是否有 hub 规则(无规则 = 单机任务,边录边传不受节点数约束)。 */
   hasRule: boolean;
-  /** 0 落盘子选项(只在 rolling 且无烧录、恰好一个节点时可用)。 */
+  /** Zero-disk sub-option (only usable with rolling, no burn, exactly one node). */
   streamUpload: boolean;
 }
 

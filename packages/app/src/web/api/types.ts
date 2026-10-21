@@ -112,7 +112,7 @@ export interface ApiDeps {
   nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
   /** 录制节点状态缓存读取;避免每次列任务都同步 SSH。 */
   recordingWorkers?: (platform: string, roomSlug: string) => RecordingWorkerStatusDTO[];
-  /** 0 落盘侧节点状态缓存读取(issue #331);master hub 才有。 */
+  /** Cached zero-disk side-node status reader (issue #331); only on a master hub. */
   zeroDiskStatus?: (platform: string, roomSlug: string) => ZeroDiskNodeStatusDTO[];
   /**
    * 节点侧 master 下发快照目录(`<数据根>/config/managed`)。提供时,受管任务视图带 `assigned`
@@ -155,7 +155,7 @@ export interface TaskView extends Omit<Task, keyof TaskSecrets | "zeroDiskDelive
   /** 输出格式被锁的原因(与 core TaskDTO.outputFormatLock 同义;省略 = 不锁)。 */
   outputFormatLock?: OutputFormatLock;
   recordingWorkers?: RecordingWorkerStatusDTO[];
-  /** 0 落盘侧节点状态(issue #331):每个被选中的非 local 节点一条;无则省略。 */
+  /** Zero-disk side-node state (issue #331): one per selected non-local node; omitted when none. */
   zeroDisk?: ZeroDiskNodeStatusDTO[];
   /**
    * issue #73:master 判定「本节点是否被派发这个受管任务」。false=停用保留的未分配残留。

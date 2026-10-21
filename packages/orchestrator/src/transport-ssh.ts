@@ -298,8 +298,9 @@ export class SshTransport implements Transport {
   }
 
   /**
-   * 0 落盘回执 + 状态(`_zero-disk-report`,只读,issue #331)。旧 bundle 的 unknown command → `null`
-   * (= 不支持,不是故障);不可达 / 非法输出 → 抛错,调用方据此标「节点离线」,不当成「没有回执」。
+   * Zero-disk receipts + status (`_zero-disk-report`, read-only, issue #331). An old bundle's unknown command
+   * → `null` (= unsupported, not a fault); unreachable / invalid output → throws, so the caller marks the node
+   * offline instead of treating it as "no receipts".
    */
   async zeroDiskReport(): Promise<ZeroDiskReport | null> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;

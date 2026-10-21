@@ -85,9 +85,10 @@ export interface Task {
    */
   streamUploadSpool: boolean;
   /**
-   * master 下发的 0 落盘上传元数据(issue #331),**原始 JSON 文本**:只在 hub 受管的侧节点任务上有值,
-   * 存储层不校验 —— 使用点(`zeroDiskNodePreflight`)用 core `parseZeroDiskDelivery` 严格解析,坏值 = 拒绝启动。
-   * null = 未下发(master 本机任务 / 旧行为不变)。
+   * Zero-disk upload metadata shipped by the master (issue #331), as RAW JSON text: only set on hub-managed
+   * side-node tasks. The store does not validate; the use site (`zeroDiskNodePreflight`) parses it strictly
+   * with core `parseZeroDiskDelivery`, and a bad value refuses to start.
+   * null = not shipped (master-local task / legacy behavior unchanged).
    */
   zeroDiskDelivery: string | null;
   /**
@@ -131,7 +132,7 @@ export interface TaskInput {
   streamUpload?: boolean;
   /** 0 落盘是否保留 spool(默认 true);false = 真 0 落盘。 */
   streamUploadSpool?: boolean;
-  /** master 下发的 0 落盘元数据原始 JSON(issue #331);仅内部同步路径可写。 */
+  /** Raw zero-disk delivery JSON from the master (issue #331); written only by the internal sync path. */
   zeroDiskDelivery?: string | null;
   /** 输出格式(缺省 original);白名单外的值 → addTask 抛错(API 层先校验并回 400)。 */
   outputFormat?: OutputFormat;
