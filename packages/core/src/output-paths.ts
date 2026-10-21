@@ -108,7 +108,8 @@ export function findRoomDir(root: string, platform: string, roomSlug: string, wa
     try {
       const st = statSync(join(root, name));
       if (!st.isDirectory()) continue;
-      hits.push({ name, at: st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs });
+      // birthtime only: mtime moves with directory contents, so without a birth time fall back to name order.
+      hits.push({ name, at: st.birthtimeMs > 0 ? st.birthtimeMs : 0 });
     } catch { /* vanished between readdir and stat */ }
   }
   if (hits.length === 0) return null;

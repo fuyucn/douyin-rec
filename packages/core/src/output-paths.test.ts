@@ -62,9 +62,9 @@ describe("stageSessionDir", () => {
     expect(stageSessionDir(root, "douyin:1234567:2026-10-21", { layout: "room" })).toBe(join(root, "OldName_douyin_1234567", "2026-10-21"));
   });
   it("platform and room are part of the suffix: other rooms never match", () => {
-    mkdirSync(join(root, "X_douyin_91234567"));
-    mkdirSync(join(root, "X_bilibili_1234567"));
-    expect(findRoomDir(root, "douyin", "1234567")).toBeNull();
+    mkdirSync(join(root, "X_douyin_91234"));
+    mkdirSync(join(root, "X_bilibili_1234"));
+    expect(findRoomDir(root, "douyin", "1234")).toBeNull();
   });
   it("several dirs with the same suffix: oldest wins and warns", () => {
     mkdirSync(join(root, "B_douyin_1234567"));

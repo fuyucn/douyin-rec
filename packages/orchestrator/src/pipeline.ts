@@ -4,7 +4,7 @@ import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, legacyStageSessionDir, stageSessionDir, JOB_LOG_FILE, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
@@ -746,12 +746,12 @@ async function readbackRollingParts(o: {
  * 记录选优明细/每步起止耗时/子命令输出摘尾/致命错误——补上「容器日志混杂且重启即丢」的复盘缺口。
  * 写失败静默(日志绝不反噬 pipeline)。
  */
-function makeJobLog(stageSub: string): (msg: string) => void {
+function makeJobLog(logFile: string): (msg: string) => void {
   let dirReady = false;
   return (msg: string): void => {
     try {
-      if (!dirReady) { mkdirSync(stageSub, { recursive: true }); dirReady = true; }
-      appendFileSync(path.join(stageSub, JOB_LOG_FILE), `[${new Date().toISOString()}] ${msg}\n`, "utf-8");
+      if (!dirReady) { mkdirSync(path.dirname(logFile), { recursive: true }); dirReady = true; }
+      appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`, "utf-8");
     } catch { /* 日志失败不影响管线 */ }
   };
 }
@@ -764,7 +764,7 @@ export async function runPipeline(
   const injected = deps.makeRunLogger?.(b.streamKey);
   const jlog = injected
     ? (msg: string): void => injected.info(msg)
-    : makeJobLog(legacyStageSessionDir(deps.cfg.stageDir, b.streamKey));
+    : makeJobLog(resolveJobLogPath(deps.cfg.stageDir, b.streamKey));
   jlog(`=== pipeline start ${b.streamKey} 成员=[${b.members.map((m) => m.workerId).join(",")}] mode=${deps.cfg.uploadMode} ===`);
   return runWithJob(b.streamKey, async () => {
     try {
