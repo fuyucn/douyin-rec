@@ -21,7 +21,7 @@ import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, sanitizeStreamKey, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -1556,10 +1556,10 @@ const hubStarter: HubStarter = {
           procStatus: (ids: string[]) => handleProcStatus(drecRoot(), ids),
         },
       },
-      // job.log 的落盘实现由组合根装配:observability 的 FileLogger,路径 = <stage>/<sanitized streamKey>/job.log
-      //(目录名 = core 的 sanitizeStreamKey,与 pipeline/hub-jobs 同一真理源)。orchestrator 只调 ScopedLogger 接口。
+      // job.log 的落盘实现由组合根装配:observability 的 FileLogger,路径由 core 的 resolveJobLogPath 解析
+      //(与 pipeline/hub-jobs 同一真理源)。orchestrator 只调 ScopedLogger 接口。
       makeRunLogger: (streamKey: string) =>
-        new FileLogger(`${hubCfg.stageDir ?? rootStageDir()}/${sanitizeStreamKey(streamKey)}/job.log`),
+        new FileLogger(resolveJobLogPath(hubCfg.stageDir ?? rootStageDir(), streamKey)),
       cfg: {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         // 磁盘水位闸门(issue #8):与下面的 Reconciler 看门狗**同源同解析**(core resolveDiskMinGB)。
@@ -1901,7 +1901,7 @@ const hubStarter: HubStarter = {
       if (parts.length < 3) return { ok: false, error: `非法 streamKey: ${streamKey}`, code: 400 };
       const platform = parts[0];
       const roomSlug = parts[1];
-      const stageSub = join(hubCfg.stageDir ?? rootStageDir(), sanitizeStreamKey(streamKey));
+      const stageSub = stageSessionDir(hubCfg.stageDir ?? rootStageDir(), streamKey);
       const job = ledger.get(streamKey);
       // 同场 pipeline 正在跑(持流锁 / live job)→ 不排队,直接 409。
       // 否则会静默等在锁后,等当前上传完成又重跑一次,造成重复烧录/重复分 P。

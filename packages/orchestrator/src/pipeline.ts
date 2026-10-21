@@ -4,7 +4,7 @@ import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, sanitizeStreamKey, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, legacyStageSessionDir, stageSessionDir, JOB_LOG_FILE, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
@@ -751,7 +751,7 @@ function makeJobLog(stageSub: string): (msg: string) => void {
   return (msg: string): void => {
     try {
       if (!dirReady) { mkdirSync(stageSub, { recursive: true }); dirReady = true; }
-      appendFileSync(path.join(stageSub, "job.log"), `[${new Date().toISOString()}] ${msg}\n`, "utf-8");
+      appendFileSync(path.join(stageSub, JOB_LOG_FILE), `[${new Date().toISOString()}] ${msg}\n`, "utf-8");
     } catch { /* 日志失败不影响管线 */ }
   };
 }
@@ -764,7 +764,7 @@ export async function runPipeline(
   const injected = deps.makeRunLogger?.(b.streamKey);
   const jlog = injected
     ? (msg: string): void => injected.info(msg)
-    : makeJobLog(path.join(deps.cfg.stageDir, sanitizeStreamKey(b.streamKey)));
+    : makeJobLog(legacyStageSessionDir(deps.cfg.stageDir, b.streamKey));
   jlog(`=== pipeline start ${b.streamKey} 成员=[${b.members.map((m) => m.workerId).join(",")}] mode=${deps.cfg.uploadMode} ===`);
   return runWithJob(b.streamKey, async () => {
     try {
@@ -779,7 +779,7 @@ export async function runPipeline(
       // fire-and-forget:不 await(launch 永不 reject),done 判定与上传路径不受影响。
       // stage 交付模式的正常终点(stageReady,清理之后)同样派发;其余 needs_manual(失败 / 不确定 / 用户停止)一律不派发。
       if (r.state === "done" || r.stageReady === true) {
-        void launchFinalizeFormat({ b, deps, stageSub: path.join(deps.cfg.stageDir, sanitizeStreamKey(b.streamKey)), log: jlog });
+        void launchFinalizeFormat({ b, deps, stageSub: stageSessionDir(deps.cfg.stageDir, b.streamKey), log: jlog });
       }
       return r;
     } catch (e) {
@@ -813,7 +813,7 @@ async function runPipelineInner(
   const { burnDanmu, burnLivechat } = burnFlags(cfg.steps); // 默认开
   const clean = cfg.cleanup ?? {};
   const { streamKey } = b;
-  const stageSub = path.join(cfg.stageDir, sanitizeStreamKey(streamKey));
+  const stageSub = stageSessionDir(cfg.stageDir, streamKey);
   // 后处理产物容器:唯一出处 core effectiveStageFormat(original→mp4;投稿强制 mp4)。
   const stageFmt = effectiveStageFormat(cfg.outputFormat, cfg.uploadMode);
 

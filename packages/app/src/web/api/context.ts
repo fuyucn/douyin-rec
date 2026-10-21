@@ -4,10 +4,9 @@
  * 从原 web/api.ts 的 makeApi() 闭包里抽出:凡被 ≥2 个域用到的辅助都放这里,
  * 避免域文件之间互相 import(会造成循环)。各域统一签名 `buildXxx(ctx: ApiCtx)`。
  */
-import { join } from "node:path";
 import {
   isUploadingMode, normalizeUploadMode, pipelineBurns, resolveRollingPolicy, rollingReasonText, listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
-  zeroDiskRuleError, redactTaskSecrets,
+  zeroDiskRuleError, redactTaskSecrets, recordingRoomDir,
   type WorkerDTO, type HubPipelineConfig, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO,
 } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
@@ -337,18 +336,10 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     return null;
   };
 
-  // 名字净化成单个安全路径段(与 @drec/record-engine 的 sanitizePathSegment 同规则)。
-  const sanitizeSeg = (name: string): string =>
-    name.replace(/[/\\:*?"<>|]/g, "")
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x1f\x7f]/g, "")
-      .replace(/\s+/g, " ").trim();
-
   const recordingsDir = (t: Task): string | null => {
     const outDir = resolveOutputDir(t.outDir);
     const anchor = manager.getAnchorName(t.id) ?? t.anchorName ?? "";
-    const sub = (t.name ? sanitizeSeg(t.name) : "") || (anchor ? sanitizeSeg(anchor) : "");
-    return sub ? join(outDir, sub) : null;
+    return recordingRoomDir(outDir, [t.name, anchor]);
   };
 
   const platformCookie = (platform: string): { value: string | null; source: CookieStatus["source"] } => {

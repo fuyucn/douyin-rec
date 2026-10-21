@@ -16,7 +16,7 @@
 import { resolve, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { createLogger, platformForRoom, processTimeZone, zonedStamp, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
+import { createLogger, platformForRoom, sanitizePathSegment, processTimeZone, zonedStamp, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
 import { logStreamMeta, type StreamMetaSource } from "@drec/ffmpeg-recorder-extra";
 
 const log = createLogger("stream_recorder");
@@ -72,18 +72,8 @@ export function describeStreamIdentity(probe: Pick<PlatformStream, "url" | "live
   return `liveSessionId=${probe.liveSessionId || "-"} streamPath=${streamPath}`;
 }
 
-/**
- * 子目录/文件名清洗:删非法字符(/ \ : * ? " < > |)+ 控制符,折叠空白,trim(不截断)。
- * **必须与合并 UI(api.ts recordingsDir → sanitizeSeg)一致**——否则落盘目录名与读取算出的对不上。
- */
-export function sanitizePathSegment(name: string): string {
-  return name
-    .replace(/[/\\:*?"<>|]/g, "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\x00-\x1f\x7f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+/** Re-exported for existing importers; the rule itself lives in core output-paths (issue #333). */
+export { sanitizePathSegment };
 
 export class PollingRecorder implements Recorder {
   readonly name: string;

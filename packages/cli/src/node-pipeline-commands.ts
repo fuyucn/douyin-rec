@@ -113,8 +113,8 @@ export function registerNodePipelineCommands(program: Command): void {
     .action(async (dataRoot: string, streamKey: string) => {
       await applyNodeDataRoot(dataRoot);
       const { readNodeResult, rootStageDir } = await import("@drec/app");
-      const { sanitizeStreamKey } = await import("@drec/core");
-      const stageSub = path.join(rootStageDir(), sanitizeStreamKey(streamKey));
+      const { stageSessionDir } = await import("@drec/core");
+      const stageSub = stageSessionDir(rootStageDir(), streamKey);
       const r = readNodeResult(stageSub);
       process.stdout.write(JSON.stringify(r ?? null) + "\n");
     });
@@ -138,8 +138,8 @@ export function registerNodePipelineCommands(program: Command): void {
     .action(async (dataRoot: string, streamKey: string) => {
       await applyNodeDataRoot(dataRoot);
       const { abortNodeExecutor, rootStageDir } = await import("@drec/app");
-      const { sanitizeStreamKey } = await import("@drec/core");
-      const stageSub = path.join(rootStageDir(), sanitizeStreamKey(streamKey));
+      const { stageSessionDir } = await import("@drec/core");
+      const stageSub = stageSessionDir(rootStageDir(), streamKey);
       try {
         const res = await abortNodeExecutor(stageSub, streamKey);
         process.stdout.write(JSON.stringify(res) + "\n");
