@@ -6,7 +6,7 @@
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { CalendarRange, ChevronLeft, Clock3, ExternalLink, FileText, MonitorPlay, UploadCloud } from "lucide-react";
+import { CalendarRange, ChevronLeft, Clock3, ExternalLink, MonitorPlay, UploadCloud } from "lucide-react";
 import { api, type TaskDetail } from "../api/client";
 import { useAtomValue } from "jotai";
 import { serverTimezoneAtom } from "../atoms";
@@ -131,11 +131,6 @@ export function RoomPage(): ReactNode {
               {t("tasks.stop")}
             </Button>
           )}
-          {taskId !== null && (
-            <Button small variant="secondary" onClick={toggleLogs} aria-expanded={logsOpen}>
-              <FileText className="w-4 h-4" />{t(logsOpen ? "room.detail.hideLogs" : "room.detail.showLogs")}
-            </Button>
-          )}
           <Button small variant="secondary" onClick={() => actions.edit(room)}>{t("room.detail.edit")}</Button>
         </div>
       </div>
@@ -244,9 +239,9 @@ export function RoomPage(): ReactNode {
 
         <section className="lg:col-span-2 min-w-0">
           {/* Opened logs go ABOVE the runs: the runs list is long and the panel would land below the fold. */}
-          {logsOpen && taskId !== null && (
+          {taskId !== null && (
             <div className="mb-5" id="logs">
-              <TaskLogPanel taskId={taskId} running={!!task?.running} />
+              <TaskLogPanel taskId={taskId} running={!!task?.running} open={logsOpen} onToggle={toggleLogs} />
             </div>
           )}
           <RoomRunsPanel room={room} workers={data.workers} collapsed />
