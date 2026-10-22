@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-106 零落盘整文件重传改为分片读取（issue [#354](https://github.com/fuyucn/douyin-rec/issues/354)）**
+  — 2026-10-22 认领,分支 `codex/issue-354-reupload-slices`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**;上传路径,RISK,需人拍板;方案 A 已批准）。
+  **做什么**：`reuploadSpoolFile` 由一次性整文件读入改为按块用文件句柄定位读取。
+  **为什么**：分段最大约 1GiB,小节点上回退路径会内存不足。
+  **验收**：内存不随文件大小增长(实测 1GiB 文件约 +226MB,旧 +1064MB);结果与原文件逐字节一致;判定语义不变;句柄在 finally 关闭。
+
 - [~] **T-105 房间详情页日志块改为点标题栏展开收起（issue [#348](https://github.com/fuyucn/douyin-rec/issues/348)）**
   — 2026-10-21 认领,分支 `codex/issue-348-logs-title-toggle`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：去掉「查看 / 收起日志」按钮,日志块常驻,点标题栏展开收起。
