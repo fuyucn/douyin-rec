@@ -10,6 +10,7 @@
  * cleanup, or the reconciler. Zero-disk tasks are still rejected as hub rule sources (they cannot
  * be scanned); this is for bookkeeping of what a zero-disk run actually uploaded.
  */
+import { zeroDiskReceiptLedgerEntry, type ZeroDiskReceipt } from "@drec/core";
 import { SyncLedger } from "./ledger.js";
 
 export interface RecordStreamUploadOpts {
@@ -20,6 +21,8 @@ export interface RecordStreamUploadOpts {
   bvid: string;
   /** Parts that reached the archive, for the event detail line. */
   parts: number;
+  /** When the stream went live; stored as the job's startMs so later clustering compares real start times. */
+  startMs?: number;
   now?: number;
 }
 
@@ -41,7 +44,7 @@ export function recordStreamUpload(o: RecordStreamUploadOpts): RecordStreamUploa
     ledger = new SyncLedger(o.syncDbPath);
     const before = ledger.get(o.streamKey);
     // Idempotent: an existing job keeps its history, a new one starts pending.
-    ledger.upsertPending(o.streamKey);
+    ledger.upsertPending(o.streamKey, o.startMs);
     const beforeTerminal = before !== null && ["done", "failed", "needs_manual"].includes(before.state);
     if (beforeTerminal) {
       // Already terminal. Bilibili has no delete API, so overwriting the BV would point the
@@ -58,4 +61,25 @@ export function recordStreamUpload(o: RecordStreamUploadOpts): RecordStreamUploa
   } finally {
     try { ledger?.close(); } catch { /* close is best effort */ }
   }
+}
+
+/**
+ * Apply a side node's zero-disk receipt to the master ledger (issue #324). A receipt from a node older than the
+ * `-zd` keys is re-keyed (see {@link zeroDiskReceiptLedgerEntry}); if that same upload was already recorded under
+ * the node's bare key before the upgrade, nothing is written again, so the upgrade does not create a second
+ * `done` row for the same manuscript.
+ */
+export function recordZeroDiskReceipt(syncDbPath: string, r: ZeroDiskReceipt): RecordStreamUploadResult {
+  if (r.startMs === undefined) {
+    let ledger: SyncLedger | undefined;
+    try {
+      ledger = new SyncLedger(syncDbPath);
+      const old = ledger.get(r.streamKey);
+      if (old?.state === "done" && old.bv === r.bvid) return { ok: true, bvid: r.bvid, alreadyTerminal: true };
+    } catch { /* fall through: recording under the new key is still correct */ } finally {
+      try { ledger?.close(); } catch { /* best effort */ }
+    }
+  }
+  const { streamKey, startMs } = zeroDiskReceiptLedgerEntry(r);
+  return recordStreamUpload({ syncDbPath, streamKey, bvid: r.bvid, parts: r.parts, startMs });
 }

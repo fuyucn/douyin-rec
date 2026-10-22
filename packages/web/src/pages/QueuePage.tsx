@@ -26,16 +26,18 @@ import { fmtTimeInTz } from "../lib/tz";
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
 /**
- * streamKey `{platform}:{roomSlug}:{date}[_HHMM]` → 场次时间展示。
+ * streamKey `{platform}:{roomSlug}:{date}[_HHMM][-zd]` → 场次时间展示。
  * 同日多场时 `_HHMM` 是关键区分(如 2026-10-07_2101 = 21:01 开播),加 `·` 分隔更易读。
  */
 function sessionTime(streamKey: string): string {
   const suffix = streamKey.split(":").slice(2).join(":"); // "2026-10-07_2101"
-  const m = /^(\d{4}-\d{2}-\d{2})(?:_(\d{2})(\d{2}))?$/.exec(suffix);
+  const m = /^(\d{4}-\d{2}-\d{2})(?:_(\d{2})(\d{2}))?(-zd)?$/.exec(suffix);
   if (!m) return suffix;
-  const [, date, hh, mm] = m;
+  const [, date, hh, mm, zd] = m;
   const short = date.slice(5); // MM-DD
   if (!hh) return short;
+  // `-zd` = zero-disk run (issue #324): show it as a tag instead of the raw suffix.
+  if (zd) return `${short} ${hh}:${mm} · 0落盘`;
   // _HHMM 是录制端按**本地时区**写的,直接用字符串,不再转时区(避免二次偏移)。
   return `${short} ${hh}:${mm}`;
 }

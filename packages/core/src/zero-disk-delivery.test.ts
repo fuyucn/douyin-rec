@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   isKnownAccountKey,
   normalizeZeroDiskReceipt,
+  zeroDiskReceiptLedgerEntry,
+  zeroDiskStreamKey,
   normalizeZeroDiskReport,
   normalizeZeroDiskStatus,
   parseZeroDiskDelivery,
@@ -87,5 +89,23 @@ describe("receipt / status / report normalizers", () => {
     expect(r?.status).toHaveLength(0);
     expect(normalizeZeroDiskReport({ v: 2 })).toBeNull();
     expect(normalizeZeroDiskReport("x")).toBeNull();
+  });
+});
+
+describe("zero-disk receipt ledger key (issue #324)", () => {
+  const base = { v: 1 as const, id: "douyin:1:5", platform: "douyin", roomSlug: "1", bvid: "BV1x", parts: 2, atMs: Date.UTC(2026, 9, 19, 12, 0) };
+  it("keeps the node's -zd key and start time as sent", () => {
+    const key = zeroDiskStreamKey("douyin", "1", 1_000_000, "UTC");
+    expect(zeroDiskReceiptLedgerEntry({ ...base, streamKey: key, startMs: 1_000_000 })).toEqual({ streamKey: key, startMs: 1_000_000 });
+  });
+  it("re-keys a legacy receipt (no startMs, bare date key) into the -zd namespace", () => {
+    const e = zeroDiskReceiptLedgerEntry({ ...base, streamKey: "douyin:1:2026-10-19" }, "UTC");
+    expect(e.streamKey).toBe("douyin:1:2026-10-19_1200-zd");
+    expect(e.startMs).toBe(base.atMs);
+  });
+  it("startMs survives the receipt round trip and stays optional", () => {
+    const r = { ...base, streamKey: "k", startMs: 42 };
+    expect(normalizeZeroDiskReceipt(r)).toEqual({ ...r });
+    expect(normalizeZeroDiskReceipt({ ...base, streamKey: "k", startMs: "x" })).toEqual({ ...base, streamKey: "k" });
   });
 });

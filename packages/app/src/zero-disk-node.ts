@@ -14,6 +14,7 @@ import {
   biliAccountKeyFromCookiesJson,
   isKnownAccountKey,
   normalizeZeroDiskReceipt,
+  zeroDiskStreamKey,
   normalizeZeroDiskStatus,
   parseZeroDiskDelivery,
   zeroDiskAccountVerdict,
@@ -371,10 +372,10 @@ export function createZeroDiskReporter(o: {
         return { receiptWritten: false };
       }
       try {
-        // Same key formula as the master-local path (platform:room:UTC date of completion).
+        // Same key formula as the master-local path: own `-zd` namespace + run start (issue #324).
         const atMs = now();
-        const streamKey = `${o.platform}:${o.roomSlug}:${new Date(atMs).toISOString().slice(0, 10)}`;
-        const r = writeZeroDiskReceipt({ id: `${o.platform}:${o.roomSlug}:${startMs}`, platform: o.platform, roomSlug: o.roomSlug, streamKey, bvid: res.bvid, parts, atMs }, atMs);
+        const streamKey = zeroDiskStreamKey(o.platform, o.roomSlug, startMs);
+        const r = writeZeroDiskReceipt({ id: `${o.platform}:${o.roomSlug}:${startMs}`, platform: o.platform, roomSlug: o.roomSlug, streamKey, startMs, bvid: res.bvid, parts, atMs }, atMs);
         write("finished");
         return { receiptWritten: r.written };
       } catch (e) {
