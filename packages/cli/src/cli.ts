@@ -1094,6 +1094,9 @@ let hubRetryNode:
 let hubStopJob:
   | ((streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>)
   | undefined;
+let hubAckJob:
+  | ((streamKey: string, opts: { note?: string; undo?: boolean }) => { ok: boolean; error?: string; code?: number })
+  | undefined;
 let hubRunNow:
   | ((opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>)
   | undefined;
@@ -1135,6 +1138,13 @@ const requestHubStopJob = async (
 ): Promise<{ ok: boolean; error?: string; code?: number }> => {
   if (!hubStopJob) return { ok: false, error: "hub 未启动", code: 400 };
   return hubStopJob(streamKey);
+};
+const requestHubAckJob = async (
+  streamKey: string,
+  opts: { note?: string; undo?: boolean },
+): Promise<{ ok: boolean; error?: string; code?: number }> => {
+  if (!hubAckJob) return { ok: false, error: "hub 未启动", code: 400 };
+  return hubAckJob(streamKey, opts);
 };
 /**
  * web API → 节点日志代查的统一入口(F3)。
@@ -1197,6 +1207,7 @@ const hubStarter: HubStarter = {
   poolSnapshot: readPoolSnapshot,
   retryNode: requestHubRetryNode,
   stopJob: requestHubStopJob,
+  ackJob: requestHubAckJob,
   runNow: requestHubRunNow,
   async start(opts) {
     hubReceiptSettings = opts.store;
@@ -1990,6 +2001,7 @@ const hubStarter: HubStarter = {
     hubRetryNode = (streamKey: string, node: WorkflowNodeKey, o?: { force?: boolean }) =>
       retryNode(streamKey, node, o?.force === true);
     hubStopJob = (streamKey: string) => reconciler.stopJob(streamKey);
+    hubAckJob = (streamKey, o) => reconciler.ackJob(streamKey, o);
     hubRunNow = (opts) => reconciler.runNow(opts);
     // 队列页的「排队位次 / 资源占用」来源:读同一 ResourcePool 实例(进程内共享)。
     hubPoolSnapshot = () => pool.snapshot();
@@ -2052,6 +2064,7 @@ const hubStarter: HubStarter = {
       hubSyncGate.unbind(); // 必须解绑:否则 stop 之后的同步请求会打到已停的旧 runner(自审发现)
       hubRetryNode = undefined;
       hubStopJob = undefined;
+      hubAckJob = undefined;
       hubRunNow = undefined;
       hubPoolSnapshot = undefined;
       hubBlockedBroadcasts = undefined;

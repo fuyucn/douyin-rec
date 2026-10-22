@@ -125,6 +125,11 @@ describe("matchRoute", () => {
       name: "stopHubJob",
       sid: "douyin:123:2026-08-10",
     });
+    expect(matchRoute("POST", "/api/hub/jobs/douyin%3A123%3A2026-08-10/ack")).toMatchObject({
+      name: "ackHubJob",
+      sid: "douyin:123:2026-08-10",
+      needsBody: true,
+    });
     expect(matchRoute("GET", "/api/platforms")?.name).toBe("listPlatforms");
     expect(matchRoute("GET", "/api/webhook")?.name).toBe("getWebhook");
     expect(matchRoute("POST", "/api/webhook")).toMatchObject({ name: "setWebhook", needsBody: true });

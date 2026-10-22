@@ -1555,6 +1555,24 @@ describe("hub 停止 / 立即执行端点", () => {
     expect(r.status).toBe(400);
     expect((r.body as { error?: string }).error).toContain("hub 未启用");
   });
+  it("issue #312: ackHubJob passes note/undo through and keeps the error code", async () => {
+    const fake = vi.fn(async (_key: string, o: { note?: string; undo?: boolean }) =>
+      o.undo || o.note ? { ok: true } : { ok: false, error: "核对备注必填", code: 400 });
+    const a = makeApi({
+      store,
+      manager,
+      syncDbPath: join(mkdtempSync(join(tmpdir(), "ack-")), "x-sync.db"),
+      ackJob: fake,
+    });
+    expect((await a.ackHubJob("douyin:123:2026-08-10", { note: "checked" })).status).toBe(200);
+    expect(fake).toHaveBeenLastCalledWith("douyin:123:2026-08-10", { note: "checked", undo: false });
+    expect((await a.ackHubJob("douyin:123:2026-08-10", { undo: true })).status).toBe(200);
+    expect(fake).toHaveBeenLastCalledWith("douyin:123:2026-08-10", { note: undefined, undo: true });
+    // A non-string note is dropped rather than coerced.
+    const bad = await a.ackHubJob("douyin:123:2026-08-10", { note: 42 as unknown as string });
+    expect(bad.status).toBe(400);
+    expect((await makeApi({ store, manager }).ackHubJob("k", { note: "x" })).status).toBe(400);
+  });
   it("注入 runNow → 默认 202,wait/winnerWorker 透传", async () => {
     const fake = vi.fn(async (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) =>
       ({ ok: true, code: opts.wait ? 200 : 202, streamKey: opts.streamKey }));

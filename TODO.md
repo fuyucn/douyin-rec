@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-107 待人工记录可「标记已核对」+ 队列显示待人工总数（issue [#312](https://github.com/fuyucn/douyin-rec/issues/312)）**
+  — 2026-10-22 重新基于当前 base 提交(原 PR #323 过期),分支 `codex/issue-312-manual-verified`（**未合并 / 未部署 / 未 close**;动台账,RISK,需人拍板）。
+  **做什么**：台账 `sync_jobs` 加 `ackedAt/ackNote`,`POST /api/hub/jobs/:key/ack` 标记/撤销,状态不变;状态变化或换了转人工原因时自动作废;队列只列未核对的待人工并返回 `manualTotal/manualAcked`。
+  **为什么**：队列按 20 条截断且不报总数,也没有不删记录的「已处理」出口。
+  **验收**：已核对行离开待人工列表但台账/日志保留;迁移失败不静默;已核对的 stage 收口行也计入已核对总数;全量测试 / 类型 / web 构建通过。
+
 - [~] **T-106 零落盘整文件重传改为分片读取（issue [#354](https://github.com/fuyucn/douyin-rec/issues/354)）**
   — 2026-10-22 认领,分支 `codex/issue-354-reupload-slices`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**;上传路径,RISK,需人拍板;方案 A 已批准）。
   **做什么**：`reuploadSpoolFile` 由一次性整文件读入改为按块用文件句柄定位读取。

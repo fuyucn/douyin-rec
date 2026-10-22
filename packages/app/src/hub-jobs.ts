@@ -52,6 +52,9 @@ export interface HubJobView {
   hasLog: boolean;
   /** Queue-managed node upload status (plan 038 PR5); null = not a queued node upload. */
   nodeUpload: NodeUploadStatusDTO | null;
+  /** Review mark on a needs_manual run (issue #312); null = not reviewed / ledger predates the column. */
+  ackedAt: number | null;
+  ackNote: string | null;
 }
 
 /** 终态集合(唯一真理 = core 的 hub 台账契约,与 orchestrator SyncLedger 对齐)。 */
@@ -180,7 +183,24 @@ function existingJobLog(streamKey: string, stageDir: string, logsDir: string): s
   return jobLogPaths(streamKey, stageDir, logsDir).find((p) => existsSync(p)) ?? null;
 }
 
-interface RawJob { streamKey: string; state: string; winnerWorker: string | null; bv: string | null; error: string | null; fails: number; updatedAt: number; uploadStatus?: string | null }
+interface RawJob {
+  streamKey: string; state: string; winnerWorker: string | null; bv: string | null; error: string | null;
+  fails: number; updatedAt: number; uploadStatus?: string | null; ackedAt?: number | null; ackNote?: string | null;
+}
+
+/**
+ * Whether the ledger already has the review-mark columns (added by SyncLedger on start, issue #312).
+ * The app opens the ledger read-only and must not assume them: a query naming a missing column throws,
+ * and listHubJobs turns that into an empty result — the queue would silently go blank.
+ */
+function hasAckColumns(db: DatabaseSync): boolean {
+  try {
+    const cols = db.prepare("PRAGMA table_info(sync_jobs)").all() as unknown as { name: string }[];
+    return cols.some((c) => c.name === "ackedAt");
+  } catch {
+    return false;
+  }
+}
 
 /** Older snapshots than this no longer drive the ETA (the node stopped answering). */
 const NODE_UPLOAD_ETA_FRESH_MS = 5 * 60_000;
@@ -238,6 +258,11 @@ export interface ListHubJobsOpts {
   excludeError?: string;
   /** 与 excludeError 互斥的取反:只取 error 等于该值的行。 */
   onlyError?: string;
+  /**
+   * Review-mark filter (issue #312): false = only unreviewed rows, true = only reviewed rows, omitted = both.
+   * On a ledger without the columns every row counts as unreviewed.
+   */
+  acked?: boolean;
   /** 只列某房间的 run(key=`{platform}.{roomSlug}`;streamKey 前缀 `{platform}:{roomSlug}:` 过滤)。省略=全部房间。 */
   room?: string;
   /**
@@ -415,6 +440,10 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         where.push("error = ?");
         params.push(opts.onlyError);
       }
+      if (opts.acked !== undefined) {
+        if (hasAckColumns(db)) where.push(opts.acked ? "ackedAt IS NOT NULL" : "ackedAt IS NULL");
+        else if (opts.acked) return { jobs: [], total: 0 }; // old ledger: nothing can be reviewed yet
+      }
       const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
       total = Number((db.prepare(`SELECT COUNT(*) AS n FROM sync_jobs${whereSql}`)
         .get(...params) as unknown as { n: number }).n);
@@ -458,6 +487,8 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         currentStepSec, etaSec, videoDurationSec,
         hasLog: existingJobLog(j.streamKey, stageDir, logsDir) !== null,
         nodeUpload,
+        ackedAt: j.ackedAt == null ? null : Number(j.ackedAt),
+        ackNote: j.ackNote ?? null,
       };
     });
     return { jobs: views, total };
@@ -617,7 +648,7 @@ export interface BuildQueueOpts {
  * 这类行 = 数据异常(某条路径漏写了原因),或是**修复部署前**遗留的旧行(2026-10 前 stage 正常
  * 收口不写 error)。红色「待人工」旁边必须有一句可读的原因,不能只留一个空红的标签。
  */
-const UNKNOWN_MANUAL_REASON = "缺少失败原因(数据异常或修复前遗留的旧记录,请核对后清历史)";
+const UNKNOWN_MANUAL_REASON = "缺少失败原因(数据异常或修复前遗留的旧记录,请核对后标记已核对)";
 
 const EMPTY_POOL: HubPoolSnapshotDTO = {
   cpu: { active: 0, queued: 0, max: 0 },
@@ -647,11 +678,16 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   // 任何固定窗口最终都会被它占满,真事故从 active 和 rows 里一起消失(issue #188 审查发现)。
   const manualRows = listHubJobs(syncDbPath, {
     states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir, logsDir,
-    excludeError: STAGE_READY,
+    excludeError: STAGE_READY, acked: false,
   });
+  // Reviewed runs (issue #312) leave the inbox but stay in the ledger; only their count is reported.
+  const manualAcked = listHubJobs(syncDbPath, {
+    states: ["needs_manual"], limit: 0, offset: 0, now: opts.now, stageDir, logsDir,
+    acked: true,
+  }).total;
   const stageReadyRows = listHubJobs(syncDbPath, {
     states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir, logsDir,
-    onlyError: STAGE_READY,
+    onlyError: STAGE_READY, acked: false,
   });
   const recentRows = listHubJobs(syncDbPath, {
     states: ["done", "failed"], limit: recentLimit, offset: 0, now: opts.now, stageDir, logsDir,
@@ -797,6 +833,9 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     rows: rows.filter(keep),
     recent: recent.slice(0, recentLimit),
     pool,
+    // Totals ignore the filters on purpose: they size the whole inbox, not the current view.
+    manualTotal: manualRows.total,
+    manualAcked,
   };
 }
 

@@ -112,6 +112,8 @@ const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_STALE_MS = 600_000;
 const DEFAULT_CLEANUP_BACKFILL_THROTTLE_MS = 15 * 60_000;
 const DEFAULT_MAX_CONCURRENT_PIPELINES = 2;
+/** Upper bound for a needs_manual review note (issue #312). */
+const ACK_NOTE_MAX = 500;
 const DEFAULT_SLEEP = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const RETRYABLE = new Set<JobState>(["pending", "failed"]);
@@ -858,6 +860,29 @@ private cleanupBackfillDue(streamKey: string, sourceAfterDone?: boolean): string
     if (job.state === "needs_manual") return { ok: true };
     abortJob(streamKey); // 非 live → false,不留 aborted 痕迹
     this.ledger.setState(streamKey, "needs_manual", { error: USER_STOP });
+    return { ok: true };
+  }
+
+  /**
+   * Mark a needs_manual run as reviewed (issue #312), or clear the mark with `undo`.
+   * The run keeps its state, history and job.log; only the queue inbox stops listing it. A note is
+   * required so the ledger records why nothing more is needed. Never changes state, so nothing re-runs.
+   */
+  ackJob(streamKey: string, opts: { note?: string; undo?: boolean }): { ok: boolean; error?: string; code?: number } {
+    const job = this.ledger.get(streamKey);
+    if (!job) return { ok: false, error: `没有这个任务: ${streamKey}`, code: 404 };
+    if (job.state !== "needs_manual") {
+      return { ok: false, error: `只有待人工(needs_manual)的任务能标记核对,当前状态 ${job.state}`, code: 409 };
+    }
+    let note: string | null = null;
+    if (!opts.undo) {
+      note = (opts.note ?? "").trim();
+      if (!note) return { ok: false, error: "核对备注必填(写明为什么不再需要处理)", code: 400 };
+      if (note.length > ACK_NOTE_MAX) return { ok: false, error: `核对备注过长(上限 ${ACK_NOTE_MAX} 字)`, code: 400 };
+    }
+    if (!this.ledger.ackManual(streamKey, note)) {
+      return { ok: false, error: "任务状态已变化,请刷新后重试", code: 409 };
+    }
     return { ok: true };
   }
 

@@ -312,6 +312,8 @@ export interface HubStarter {
   retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 停一场后处理(rsync/ffmpeg/biliup),不动录制。hub 未启用 → web API 返回 400。 */
   stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
+  /** Mark / unmark a needs_manual run as reviewed (issue #312; CLI 注入)。省略 → 端点返回「hub 未启用」。 */
+  ackJob?: (streamKey: string, opts: { note?: string; undo?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 立刻跑一场已有录像的后处理(跳过 settle / 断流窗)。hub 未启用 → web API 返回 400。 */
   runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>;
 }

@@ -27,6 +27,11 @@ export interface HubFingerprint {
   jobsMaxRowid: number | null;
   stepsMaxRowid: number | null;
   nodeStatesMaxUpdatedAt: number | null;
+  /**
+   * Review marks on needs_manual rows (`COUNT(ackedAt):MAX(ackedAt)`, issue #312). An ack does not touch
+   * `updatedAt`, so without this the queue page would not refresh after a mark/unmark. null = old ledger.
+   */
+  jobsAckSig: string | null;
 }
 
 /** 只读连接打开 sqlite 时的等待预算(ms)。不设则并发写期间直接 SQLITE_BUSY。 */
@@ -43,6 +48,7 @@ export function computeVersionFingerprint(dbPath: string): HubFingerprint {
     jobsMaxRowid: null,
     stepsMaxRowid: null,
     nodeStatesMaxUpdatedAt: null,
+    jobsAckSig: null,
   };
   try {
     if (existsSync(dbPath)) fp.mtimeMs = statSync(dbPath).mtimeMs;
@@ -65,6 +71,11 @@ export function computeVersionFingerprint(dbPath: string): HubFingerprint {
     fp.jobsMaxRowid = one("SELECT MAX(rowid) AS n FROM sync_jobs");
     fp.stepsMaxRowid = one("SELECT MAX(rowid) AS n FROM sync_job_steps");
     fp.nodeStatesMaxUpdatedAt = one("SELECT MAX(updatedAt) AS n FROM sync_node_states");
+    try {
+      const row = db.prepare("SELECT COUNT(ackedAt) AS c, MAX(ackedAt) AS m FROM sync_jobs").get() as
+        unknown as { c: number; m: number | null } | undefined;
+      fp.jobsAckSig = row ? `${Number(row.c)}:${row.m ?? ""}` : null;
+    } catch { /* ledger without the ack columns yet: keep null, the other fields still count */ }
   } catch {
     // 表不存在(旧库)/被锁 → 保留 null 占位。下一次 tick 取到值时指纹会「从 null 变有值」
     // 而被判为变更 —— 这是正确的:从不可观测变为可观测,前端该刷一次。
@@ -80,7 +91,8 @@ export function fingerprintEquals(a: HubFingerprint, b: HubFingerprint): boolean
     && a.jobsMaxUpdatedAt === b.jobsMaxUpdatedAt
     && a.jobsMaxRowid === b.jobsMaxRowid
     && a.stepsMaxRowid === b.stepsMaxRowid
-    && a.nodeStatesMaxUpdatedAt === b.nodeStatesMaxUpdatedAt;
+    && a.nodeStatesMaxUpdatedAt === b.nodeStatesMaxUpdatedAt
+    && a.jobsAckSig === b.jobsAckSig;
 }
 
 export interface HubWatchOptions {

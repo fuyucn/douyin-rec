@@ -313,6 +313,9 @@ export interface HubJobDTO {
   hasLog: boolean;
   /** Queue-managed node upload status (plan 038 PR5); null/absent = not a queued node upload. */
   nodeUpload?: NodeUploadStatusDTO | null;
+  /** Review mark on a needs_manual run (issue #312); null/absent = not reviewed (or older master). */
+  ackedAt?: number | null;
+  ackNote?: string | null;
 }
 
 /** 一个录制 worker(节点)的展示投影。id 内部稳定主键(UI 不展示);name 友好名。 */
@@ -600,6 +603,14 @@ export interface HubQueueDTO {
   /** 最近完成的完整视图(兼容旧调用方;与 rows 里 phase=done/failed 的部分同源)。 */
   recent: HubJobDTO[];
   pool: HubPoolSnapshotDTO;
+  /**
+   * Unreviewed real-incident needs_manual runs in total (issue #312). `active` lists at most `manualLimit`
+   * of them, so the UI must show "N of manualTotal" instead of implying the list is complete.
+   * Older master: absent.
+   */
+  manualTotal?: number;
+  /** needs_manual runs already marked as reviewed (kept in history, left out of `active`). Older master: absent. */
+  manualAcked?: number;
 }
 
 /** POST /api/hub/rules + PATCH /api/hub/rules/:roomSlug 的请求体。 */
