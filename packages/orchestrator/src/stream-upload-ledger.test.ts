@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zeroDiskStreamKey } from "@drec/core";
-import { recordStreamUpload } from "./stream-upload-ledger.js";
+import { recordStreamUpload, recordZeroDiskReceipt } from "./stream-upload-ledger.js";
 import { SyncLedger } from "./ledger.js";
 
 const KEY = "douyin:12345:2026-10-18";
@@ -62,6 +62,33 @@ describe("zeroDiskStreamKey (issue #324)", () => {
     recordStreamUpload({ syncDbPath: db, streamKey: key, bvid: "BILIfake1", parts: 1, startMs: 1_000_000 });
     const l = new SyncLedger(db);
     expect(l.get(key)?.startMs).toBe(1_000_000);
+    l.close();
+  });
+});
+
+describe("recordZeroDiskReceipt (issue #324)", () => {
+  const legacy = { v: 1 as const, id: "douyin:12345:9", platform: "douyin", roomSlug: "12345", streamKey: KEY, bvid: "BILIfake1", parts: 2, atMs: Date.UTC(2026, 9, 18, 12, 0) };
+  it("legacy receipt already recorded under its bare key is not recorded a second time", () => {
+    recordStreamUpload({ syncDbPath: db, streamKey: KEY, bvid: "BILIfake1", parts: 2 });
+    const r = recordZeroDiskReceipt(db, legacy);
+    expect(r).toMatchObject({ ok: true, alreadyTerminal: true });
+    const l = new SyncLedger(db);
+    expect(l.get(zeroDiskStreamKey("douyin", "12345", legacy.atMs))).toBeNull();
+    l.close();
+  });
+  it("legacy receipt not yet recorded lands under the -zd key with the completion time as start", () => {
+    expect(recordZeroDiskReceipt(db, legacy).ok).toBe(true);
+    const l = new SyncLedger(db);
+    expect(l.get(KEY)).toBeNull();
+    const job = l.get(zeroDiskStreamKey("douyin", "12345", legacy.atMs));
+    expect(job).toMatchObject({ state: "done", bv: "BILIfake1" });
+    l.close();
+  });
+  it("a current receipt keeps its own key and start time", () => {
+    const key = zeroDiskStreamKey("douyin", "12345", 5_000_000);
+    expect(recordZeroDiskReceipt(db, { ...legacy, streamKey: key, startMs: 5_000_000 }).ok).toBe(true);
+    const l = new SyncLedger(db);
+    expect(l.get(key)).toMatchObject({ state: "done", bv: "BILIfake1" });
     l.close();
   });
 });

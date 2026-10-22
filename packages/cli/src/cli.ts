@@ -38,9 +38,9 @@ import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedStat
 import type { HubStarter, TaskStore } from "@drec/app";
 import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
-import { zeroDiskReceiptLedgerEntry, zeroDiskStreamKey } from "@drec/core";
+import { zeroDiskStreamKey } from "@drec/core";
 import type { PipelineCfg, SyncLedger, WorkflowNodeKey } from "@drec/orchestrator";
-import { recordStreamUpload } from "@drec/orchestrator";
+import { recordStreamUpload, recordZeroDiskReceipt } from "@drec/orchestrator";
 import { DEFAULT_SEGMENT_CAP } from "@drec/zero-upload";
 
 /**
@@ -1433,8 +1433,7 @@ const hubStarter: HubStarter = {
     // rows are never overwritten), so re-polling or a master restart cannot double-record.
     const zeroDiskFleet = new ZeroDiskFleet({
       applyReceipt: (r) => {
-        const { streamKey, startMs } = zeroDiskReceiptLedgerEntry(r);
-        const res = recordStreamUpload({ syncDbPath: dbPath, streamKey, bvid: r.bvid, parts: r.parts, startMs });
+        const res = recordZeroDiskReceipt(dbPath, r);
         if (res.ok && res.alreadyTerminal) opts.log(`[zero-disk] 台账已是终态,未覆盖: ${r.streamKey}`);
         return res;
       },
