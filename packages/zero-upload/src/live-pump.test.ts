@@ -7,7 +7,7 @@ import { build } from "esbuild";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, statSync, writeFileSync, existsSync, writeSync, mkdirSync, readdirSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, statSync, writeFileSync, existsSync, writeSync, mkdirSync, readdirSync, utimesSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -66,8 +66,8 @@ function session(): PreuploadResult {
  * 会回答 preupload 的假 fetch —— 整文件回退路径自己要先建会话。
  * `completeReject` = 让 complete 失败,验证失败不被静默。
  */
-function makeUploadFetch(opts: { completeReject?: boolean } = {}) {
-  const puts: Array<{ partNumber: string; bytes: number }> = [];
+function makeUploadFetch(opts: { completeReject?: boolean; onPut?: () => void } = {}) {
+  const puts: Array<{ partNumber: string; bytes: number; body?: Buffer }> = [];
   const fake = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
     const u = new URL(url);
@@ -82,7 +82,9 @@ function makeUploadFetch(opts: { completeReject?: boolean } = {}) {
       return new Response(JSON.stringify({ upload_id: "uid" }), { status: 200 });
     }
     if (method === "PUT") {
-      puts.push({ partNumber: u.searchParams.get("partNumber") ?? "0", bytes: (init?.body as ArrayBuffer | undefined)?.byteLength ?? 0 });
+      const ab = init?.body as ArrayBuffer | undefined;
+      puts.push({ partNumber: u.searchParams.get("partNumber") ?? "0", bytes: ab?.byteLength ?? 0, body: ab ? Buffer.from(ab) : undefined });
+      opts.onPut?.();
       return new Response("", { status: 200 });
     }
     if (opts.completeReject) return new Response(JSON.stringify({ OK: 0, message: "parts boom" }), { status: 200 });
@@ -1260,6 +1262,34 @@ describe("失败回退:已录字节必须被用上,不能白躺盘上", () => {
     expect(r.stem).toBe("fb123");           // complete 返回的 UPOS stem
     expect(r.bytes).toBe(total);
     expect(puts.map((p) => p.bytes)).toEqual([CHUNK, CHUNK, CHUNK]); // 无尾块协商问题
+  });
+
+  it("reuploadSpoolFile:分片读取与文件逐字节一致,含不足一块的尾块", async () => {
+    const spool = join(dir, "seg-tail.ts");
+    const total = CHUNK * 2 + 123;
+    const data = Buffer.alloc(total);
+    for (let i = 0; i < total; i++) data[i] = (i * 7 + 3) % 256;
+    writeFileSync(spool, data);
+    const { fake, puts } = makeUploadFetch();
+    const r = await reuploadSpoolFile({
+      cookiesPath: COOKIES, fileName: "seg-tail.ts", spoolPath: spool, line: "txa", fetchImpl: fake,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.bytes).toBe(total);
+    const sorted = [...puts].sort((a, b) => Number(a.partNumber) - Number(b.partNumber));
+    expect(sorted.map((p) => p.bytes)).toEqual([CHUNK, CHUNK, 123]);
+    expect(Buffer.concat(sorted.map((p) => p.body!)).equals(data)).toBe(true);
+  });
+
+  it("reuploadSpoolFile:spool 在上传中被截断 → ok=false 且带原因(不静默补零)", { timeout: 30000 }, async () => {
+    const spool = join(dir, "seg-trunc.ts");
+    writeFileSync(spool, Buffer.alloc(CHUNK * 4, 9));
+    const { fake } = makeUploadFetch({ onPut: () => truncateSync(spool, CHUNK) });
+    const r = await reuploadSpoolFile({
+      cookiesPath: COOKIES, fileName: "seg-trunc.ts", spoolPath: spool, line: "txa", fetchImpl: fake,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/spool/);
   });
 
   it("reuploadSpoolFile:complete 失败时 ok=false 且带原因(不静默)", async () => {

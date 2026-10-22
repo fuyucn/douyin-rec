@@ -1231,16 +1231,30 @@ export async function reuploadSpoolFile(o: {
   signal?: AbortSignal;
   onChunk?: (streamedBytes: number, chunksDone: number) => void;
 }): Promise<{ ok: boolean; stem?: string; chunks: number; bytes: number; error?: string }> {
-  const { readFileSync, statSync } = await import("node:fs");
+  const { openSync, closeSync, statSync } = await import("node:fs");
   let totalSize: number;
-  let body: Buffer;
+  let fd: number;
   try {
     totalSize = statSync(o.spoolPath).size;
     if (totalSize <= 0) return { ok: false, chunks: 0, bytes: 0, error: "spool 为空" };
-    body = readFileSync(o.spoolPath);
+    fd = openSync(o.spoolPath, "r");
   } catch (e) {
     return { ok: false, chunks: 0, bytes: 0, error: String((e as Error)?.message ?? e).slice(0, 200) };
   }
+  try {
+    return await reuploadOpenSpool(o, fd, totalSize);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Uploads an already-open spool in chunk-sized slices, so peak memory is about one chunk instead of the whole file. */
+async function reuploadOpenSpool(
+  o: Parameters<typeof reuploadSpoolFile>[0],
+  fd: number,
+  totalSize: number,
+): Promise<{ ok: boolean; stem?: string; chunks: number; bytes: number; error?: string }> {
+  const { readSync } = await import("node:fs");
 
   let session!: PreuploadResult;
   for (let attempt = 0; ; attempt++) {
@@ -1263,11 +1277,20 @@ export async function reuploadSpoolFile(o: {
       retries: 3,
       signal: o.signal,
       onProgress: (p) => o.onChunk?.(p.uploadedBytes, p.chunksDone),
-      readChunk: async (i, size) => body.subarray(i * session.bucket.chunkSize, i * session.bucket.chunkSize + size),
+      readChunk: async (i, size) => {
+        const buf = Buffer.allocUnsafe(size);
+        let off = 0;
+        while (off < size) {
+          const n = readSync(fd, buf, off, size - off, i * session.bucket.chunkSize + off);
+          if (n <= 0) throw new Error(`spool 读取提前结束(块 ${i}, ${off}/${size})`);
+          off += n;
+        }
+        return buf;
+      },
     });
     const done = await complete({ session, parts, fetchImpl: o.fetchImpl });
-    if (!done.ok) return { ok: false, chunks: parts.length, bytes: body.length, error: `complete: ${JSON.stringify(done.raw).slice(0, 200)}` };
-    return { ok: true, stem: done.stem, chunks: parts.length, bytes: body.length };
+    if (!done.ok) return { ok: false, chunks: parts.length, bytes: totalSize, error: `complete: ${JSON.stringify(done.raw).slice(0, 200)}` };
+    return { ok: true, stem: done.stem, chunks: parts.length, bytes: totalSize };
   } catch (e) {
     return { ok: false, chunks: 0, bytes: 0, error: String((e as Error)?.message ?? e).slice(0, 200) };
   }
