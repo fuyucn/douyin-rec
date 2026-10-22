@@ -480,7 +480,7 @@ describe("buildQueueView", () => {
     expect(manual).not.toContain("douyin:m39:2026-10-01");
     expect(q.rows.map((r) => r.streamKey)).not.toContain("douyin:s:2026-10-01");
     expect(q.manualTotal).toBe(15);
-    expect(q.manualAcked).toBe(25);
+    expect(q.manualAcked).toBe(26); // 25 incidents + the acked stage-ready row: every reviewed row stays counted
     const job = listHubJobs(dbPath, { states: ["needs_manual"], acked: true, limit: 100, stageDir: stage }).jobs
       .find((j) => j.streamKey === "douyin:m39:2026-10-01")!;
     expect(job).toMatchObject({ state: "needs_manual", error: "e39", ackedAt: now, ackNote: "checked" });
