@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-108 零落盘台账键不再吞同房同日的真实录像（issue [#324](https://github.com/fuyucn/douyin-rec/issues/324)）**
+  — 2026-10-22 基于当前 base 重做(原 PR #326 过期),分支 `codex/issue-324-zero-disk-ledger-key`（**未合并 / 未部署 / 未 close**;动台账键,RISK,需人拍板）。
+  **做什么**：零落盘台账键改为独立的 `-zd` 命名空间并带开播时间;master 本机路径与副节点回执路径都用同一个函数;旧节点的回执在 master 侧重新取键;对账器遇到 done 键上未被认领的边录边传会话时告警一次。
+  **为什么**：旧键是裸 UTC 日期,同房同日的真实录像被认作「已 done」而静默跳过,不上传也不报警。
+  **验收**：两条路径键一致且不与常规键相撞;旧回执不再用裸键;回归测试;全量测试 / 类型通过。
+
 - [~] **T-107 待人工记录可「标记已核对」+ 队列显示待人工总数（issue [#312](https://github.com/fuyucn/douyin-rec/issues/312)）**
   — 2026-10-22 重新基于当前 base 提交(原 PR #323 过期),分支 `codex/issue-312-manual-verified`（**未合并 / 未部署 / 未 close**;动台账,RISK,需人拍板）。
   **做什么**：台账 `sync_jobs` 加 `ackedAt/ackNote`,`POST /api/hub/jobs/:key/ack` 标记/撤销,状态不变;状态变化或换了转人工原因时自动作废;队列只列未核对的待人工并返回 `manualTotal/manualAcked`。
