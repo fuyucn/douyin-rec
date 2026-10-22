@@ -1248,7 +1248,7 @@ export async function reuploadSpoolFile(o: {
   }
 }
 
-/** Uploads an already-open spool in chunk-sized slices, so peak memory is about one chunk instead of the whole file. */
+/** Uploads an already-open spool in chunk-sized slices, so memory no longer scales with the file size (one chunk buffer at a time). */
 async function reuploadOpenSpool(
   o: Parameters<typeof reuploadSpoolFile>[0],
   fd: number,
