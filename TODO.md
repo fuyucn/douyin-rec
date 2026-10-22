@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-105 房间详情页日志块改为点标题栏展开收起（issue [#348](https://github.com/fuyucn/douyin-rec/issues/348)）**
+  — 2026-10-21 认领,分支 `codex/issue-348-logs-title-toggle`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
+  **做什么**：去掉「查看 / 收起日志」按钮,日志块常驻,点标题栏展开收起。
+  **为什么**：多一个按钮且与日志块分离,操作绕。
+  **验收**：收起不轮询;列表 ?logs=1 进入仍展开;全量测试 / 类型 / web 构建 / 文案检查通过。
+
 - [~] **T-104 房间编辑器投稿 B站开关移到第 3 步（issue [#346](https://github.com/fuyucn/douyin-rec/issues/346)）**
   — 2026-10-21 认领,分支 `codex/issue-346-upload-toggle-step3`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：「归档 / 投稿 B站」开关从第 2 步挪到第 3 步顶部,第 3 步始终可点;选投稿才显示投稿字段。
