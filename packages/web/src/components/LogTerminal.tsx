@@ -17,6 +17,9 @@ export function LogTerminal({ lines, running, className = "", open = true, onTog
   const preRef = useRef<HTMLPreElement>(null);
   const stickRef = useRef(true);
 
+  // A reopened console is a fresh <pre>: follow the newest lines again.
+  useEffect(() => { if (open) stickRef.current = true; }, [open]);
+
   useEffect(() => {
     const pre = preRef.current;
     if (pre && stickRef.current) pre.scrollTop = pre.scrollHeight;
@@ -56,10 +59,7 @@ export function LogTerminal({ lines, running, className = "", open = true, onTog
 /** Collapsible log console; polls the task's log tail only while open. */
 export function TaskLogPanel({ taskId, running, open, onToggle }: { taskId: number; running: boolean; open: boolean; onToggle: () => void }): ReactNode {
   const [lines, setLines] = useState<string[]>([]);
-  const poll = useCallback(
-    () => (open ? api.getTaskLogs(taskId).then((l) => setLines(l.lines ?? [])).catch(() => {}) : Promise.resolve()),
-    [taskId, open],
-  );
-  usePolling(poll, 2_000);
+  const poll = useCallback(() => api.getTaskLogs(taskId).then((l) => setLines(l.lines ?? [])).catch(() => {}), [taskId]);
+  usePolling(poll, 2_000, open);
   return <LogTerminal lines={lines} running={running} className="room-log" open={open} onToggle={onToggle} />;
 }

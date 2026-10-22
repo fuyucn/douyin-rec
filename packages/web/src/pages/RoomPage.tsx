@@ -238,7 +238,7 @@ export function RoomPage(): ReactNode {
         </section>
 
         <section className="lg:col-span-2 min-w-0">
-          {/* Opened logs go ABOVE the runs: the runs list is long and the panel would land below the fold. */}
+          {/* Logs sit ABOVE the runs: the runs list is long and the panel would land below the fold. */}
           {taskId !== null && (
             <div className="mb-5" id="logs">
               <TaskLogPanel taskId={taskId} running={!!task?.running} open={logsOpen} onToggle={toggleLogs} />
