@@ -174,8 +174,18 @@ export interface SegmentExit {
   stderrTail: string;
 }
 
+/**
+ * Forward dts step (seconds) above which a finished part is held. The ffmpeg live_flv demuxer
+ * already corrects steps above its own 10s threshold, so what is left is a rare uncorrected
+ * jump; 30s keeps ordinary uplink stalls and PK switches from blocking good parts (the
+ * reported failures were thousands of seconds).
+ */
+export const DTS_GAP_FORWARD_SEC = 30;
+const defaultScanDtsGap = (path: string): Promise<DtsGap | null | undefined> => ffprobeDtsGap(path, DTS_GAP_FORWARD_SEC);
+
 /** Matches the ffmpeg warnings emitted when input timestamps jump or go backwards. */
-const TS_DISCONTINUITY_RE = /timestamp discontinuity|non-monotonic dts|non monotonically increasing dts/i;
+// ffmpeg 5.x says "Non-monotonous DTS", newer builds say "Non-monotonic DTS"; accept both.
+const TS_DISCONTINUITY_RE = /timestamp discontinuity|non-monoton(?:ic|ous) dts|non monotonically increasing dts/i;
 
 /** Count timestamp-discontinuity warning lines in a block of ffmpeg stderr text. */
 export function countTsDiscontinuities(text: string): number {
@@ -1215,18 +1225,26 @@ export async function pumpSegment(o: {
   }
 
   if (rec.tsDiscontinuities) {
-    o.log?.(`[live-pump] ⚠️ ${o.fileName}: ffmpeg 报告 ${rec.tsDiscontinuities} 次时间戳不连续(已按单一偏移处理)`);
+    o.log?.(`[live-pump] ⚠️ ${o.fileName}: ffmpeg 报告 ${rec.tsDiscontinuities} 次时间戳不连续(流内跳变或被复用器钳平)`);
   }
 
   // Pre-complete gate: a part is only visible in the archive after `complete` + submit, so a
-  // scan here can still keep a broken part out. Held parts keep their spool and skip BOTH
-  // complete and the whole-file fallback (that fallback would upload the same bad bytes).
-  if (spoolMode === "full" && !rec.uploadError && rec.spooledBytes > 0) {
+  // scan here can still keep a broken part out. Held parts skip BOTH complete and the
+  // whole-file fallback (that fallback would upload the same bad bytes), and this runs even
+  // when the chunk upload already failed, for the same reason.
+  if (spoolMode === "full" && rec.spooledBytes > 0 && durationSec > 0) {
     let gap: DtsGap | null | undefined;
-    try { gap = await (o.scanDtsGap ?? ffprobeDtsGap)(spoolPath); } catch { gap = undefined; }
+    try { gap = await (o.scanDtsGap ?? defaultScanDtsGap)(spoolPath); } catch { gap = undefined; }
     if (gap) {
       rec.tsGap = gap;
-      rec.uploadError = `时间戳跳变(流${gap.streamIndex}: ${gap.fromSec.toFixed(1)}s → ${gap.toSec.toFixed(1)}s),已保留 spool 不投稿: ${spoolPath}`;
+      // Rename so the orphan sweep (which only matches the plain spool name) keeps the sample.
+      let kept = spoolPath;
+      const heldPath = spoolPath.replace(/(\.[^./]+)?$/, ".held-gap$1");
+      try { renameSync(spoolPath, heldPath); kept = heldPath; } catch { /* keep under the original name */ }
+      const why = `时间戳跳变(流${gap.streamIndex}: ${gap.fromSec.toFixed(1)}s → ${gap.toSec.toFixed(1)}s),不投稿,spool 保留为 ${kept}`;
+      rec.uploadError = rec.uploadError ? `${rec.uploadError};${why}` : why;
+      // Chunks may already be on UPOS but this part will never complete.
+      if (rec.chunksUploaded > 0) rec.sessionLeaked = true;
     } else if (gap === undefined) {
       o.log?.(`[live-pump] ⚠️ ${o.fileName}: 时间戳扫描无法判定,按原流程继续`);
     }

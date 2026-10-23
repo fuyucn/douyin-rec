@@ -357,6 +357,16 @@ export async function ffprobeDtsGap(
   backwardSec = 0.5,
   timeoutMs = FFPROBE_SCAN_TIMEOUT_MS,
 ): Promise<DtsGap | null | undefined> {
+  // Only audio and video count: sparse data / subtitle streams legitimately step by many seconds.
+  const st = await runFfprobe(["-v", "error", "-show_entries", "stream=index,codec_type", "-of", "csv=p=0", path], Math.min(timeoutMs, FFPROBE_HEADER_TIMEOUT_MS));
+  if (st.code !== 0) return undefined;
+  const media = new Set<number>();
+  for (const l of st.out.split("\n")) {
+    const f = l.trim().split(",");
+    const idx = f.map((x) => Number(x)).find((x) => x !== undefined && Number.isInteger(x) && x >= 0);
+    if (idx !== undefined && f.some((x) => x === "video" || x === "audio")) media.add(idx);
+  }
+  if (media.size === 0) return undefined;
   const r = await runFfprobe(["-v", "error", "-show_entries", "packet=stream_index,dts_time", "-of", "csv=p=0", path], timeoutMs);
   if (r.code !== 0) return undefined;
   const prev = new Map<number, number>();
@@ -366,7 +376,7 @@ export async function ffprobeDtsGap(
     if (f.length < 2) continue;
     const idx = Number(f[0]);
     const t = parseFloat(f[1] ?? "");
-    if (!Number.isInteger(idx) || !Number.isFinite(t)) continue;
+    if (!Number.isInteger(idx) || !media.has(idx) || !Number.isFinite(t)) continue;
     seen++;
     const p = prev.get(idx);
     if (p !== undefined && (t - p > forwardSec || p - t > backwardSec)) return { streamIndex: idx, fromSec: p, toSec: t };

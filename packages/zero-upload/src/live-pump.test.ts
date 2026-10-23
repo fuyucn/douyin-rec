@@ -1395,10 +1395,11 @@ describe("countTsDiscontinuities", () => {
     const text = [
       "[flv @ 0x1] Timestamp discontinuity detected on stream 0 (a=1 b=2)",
       "[mpegts @ 0x2] Non-monotonic DTS in output stream 0:1; previous: 5, current: 3; changing to 6.",
+      "[vost#0:0/copy @ 0x4] Non-monotonous DTS in output stream 0:0; previous: 9, current: 7; changing to 10.",
       "[http @ 0x3] Stream ends prematurely",
       "",
     ].join("\n");
-    expect(countTsDiscontinuities(text)).toBe(2);
+    expect(countTsDiscontinuities(text)).toBe(3);
     expect(countTsDiscontinuities("")).toBe(0);
   });
 });
@@ -1442,7 +1443,33 @@ describe("pumpSegment 时间戳间隔闸门", () => {
     expect(r.usedFileFallback).toBe(false);
     expect(counts.complete).toBe(0);
     expect(counts.preupload).toBe(1); // 回退会再开一次会话;这里不允许
-    expect(existsSync(join(dir, "gap.ts"))).toBe(true);
+    expect(existsSync(join(dir, "gap.held-gap.ts"))).toBe(true);
+  });
+
+  it("块上传已失败时也要扫描:跳变不得经整文件回退传出,spool 改名保留", { timeout: 30000 }, async () => {
+    const cap = CHUNK * 3;
+    installFakeFfmpeg(Buffer.alloc(cap, 5));
+    const counts = { preupload: 0, complete: 0 };
+    const ok = mkFetch(counts);
+    // Streaming PUTs fail so runSegment reports uploadError; the scan must still run.
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "PUT") return new Response("boom", { status: 500 });
+      return ok(input, init);
+    }) as unknown as typeof fetch;
+    const r = await pumpSegment({
+      cookiesPath: COOKIES, args: ["-fake"], fileName: "gapfail.ts", sizeCap: cap, spoolDir: dir, line: "txa",
+      fetchImpl,
+      probeDuration: async () => 60,
+      scanDtsGap: async () => ({ streamIndex: 1, fromSec: 10, toSec: 9000 }),
+      signal: new AbortController().signal,
+    });
+    expect(r.tsGap).toBeDefined();
+    expect(r.usedFileFallback).toBe(false);
+    expect(counts.preupload).toBe(1);
+    expect(counts.complete).toBe(0);
+    // Held spool is renamed so the orphan sweep pattern (plain spool name) cannot match it.
+    expect(existsSync(join(dir, "gapfail.ts"))).toBe(false);
+    expect(existsSync(join(dir, "gapfail.held-gap.ts"))).toBe(true);
   });
 
   it("干净 → 照常 complete", { timeout: 30000 }, async () => {
