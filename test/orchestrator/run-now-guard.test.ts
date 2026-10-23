@@ -124,8 +124,8 @@ describe("same-day derived `_HHMM` keys share the base key's guard (issue #292)"
       { force: false, self: { startMs: t0, endMs: t0 + 3 * HOUR } })).toMatch(/already has BV/);
   });
 
-  it("boundary: gap 60 min is the same broadcast (blocked), 61 min is a new one (allowed)", async () => {
-    for (const [gapMin, blocked] of [[59, true], [60, true], [61, false]] as const) {
+  it("boundary: gap 30 min is the same broadcast (blocked), 31 min is a new one (allowed)", async () => {
+    for (const [gapMin, blocked] of [[29, true], [30, true], [31, false]] as const) {
       const l = fresh();
       withBv(l, BASE, "BV1fffffffff"); // issue-guard: allow (fake BV fixture)
       span(l, BASE, t0, t0 + 2 * HOUR);

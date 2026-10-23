@@ -176,7 +176,7 @@ export function xmlKeepRule(side: "node" | "stage", stageAfterDone: boolean): bo
 
 export interface PipelineCfg {
   cleanMaxGapSec: number;
-  /** 断流重连合并窗(ms):结束距现在不足该窗的场暂不处理;聚类容差同窗。缺省 core `SAME_BROADCAST_GAP_MS`(60 分钟)。 */
+  /** 断流重连合并窗(ms):结束距现在不足该窗的场暂不处理(聚类容差不受它影响,恒为同场常量)。缺省 core `SAME_BROADCAST_GAP_MS`(30 分钟)。 */
   reconnectWindowMs?: number;
   /**
    * **磁盘水位闸门阈值(GB)** —— 与 reconciler 的磁盘看门狗**同一个配置键 / 同一个默认值**

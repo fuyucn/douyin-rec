@@ -463,9 +463,9 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
   const uploaderB = (plain: unknown, append: unknown, startMs: number, count = async (): Promise<number | null> => 2): RollingUploader =>
     new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: plain as never, appendGroupRaw: append as never, countPartsRaw: count, removeFile: noRemove, now: () => startMs + 3_600_000, minSegmentSec: 0 });
 
-  it("gap <= 60 min: B appends to A's BV (one submission, parts A then B); link is persisted", async () => {
+  it("gap <= 30 min: B appends to A's BV (one submission, parts A then B); link is persisted", async () => {
     const { dir, plain, append } = await runSessionA();
-    const b = sessionB(dir, 60);
+    const b = sessionB(dir, 30);
     const u = uploaderB(plain, append, b.startMs);
     b.paths.forEach((p) => u.noteSegment(p));
     await u.flush({ recordingActive: false });
@@ -480,9 +480,9 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
     expect(saved).toMatchObject({ bv: FAKE_BV, inheritedParts: 2, inheritedFrom: A_BASE, confirmed: [0] });
   });
 
-  it("gap 61 min: new broadcast → B creates its own submission", async () => {
+  it("gap 31 min: new broadcast → B creates its own submission", async () => {
     const { dir, plain, append } = await runSessionA();
-    const b = sessionB(dir, 61);
+    const b = sessionB(dir, 31);
     const plainB = vi.fn(async () => ["B", "V", "1second"].join(""));
     const u = uploaderB(plainB, append, b.startMs);
     b.paths.forEach((p) => u.noteSegment(p));
@@ -495,7 +495,7 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
   const writeLiveId = (dir: string, base: string, id: string): void =>
     writeFileSync(path.join(dir, `${base}.session.json`), JSON.stringify({ sessionBase: base, roomSlug: "123", platform: "douyin", liveSessionId: id }));
 
-  it("issue #320: gap <= 60 min but a different live id → new broadcast, B creates its own submission", async () => {
+  it("issue #320: gap <= 30 min but a different live id → new broadcast, B creates its own submission", async () => {
     const { dir, plain, append } = await runSessionA();
     const b = sessionB(dir, 26);
     writeLiveId(dir, A_BASE, "live-1");

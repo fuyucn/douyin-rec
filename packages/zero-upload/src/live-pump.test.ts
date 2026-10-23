@@ -2173,8 +2173,8 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
   }
   const archives = () => readdirSync(dir).filter((f) => f.includes(".archived-"));
 
-  it("61 min gap: starts a new submission and archives the old state", () => {
-    seed(61);
+  it("31 min gap: starts a new submission and archives the old state", () => {
+    seed(31);
     const logs: string[] = [];
     const s = open((m) => logs.push(m));
     expect(s.hasArchiveIdentity).toBe(false);
@@ -2186,8 +2186,8 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
     expect(logs.join("\n")).toContain("archived old state");
   });
 
-  it("59 and 60 min gaps continue the same submission", () => {
-    for (const ago of [59, 60]) {
+  it("29 and 30 min gaps continue the same submission", () => {
+    for (const ago of [29, 30]) {
       seed(ago - 0.01);
       const s = open();
       expect(s.bvid).toBe(FAKE_BV);
@@ -2230,7 +2230,7 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
   });
 
   it("within the gap and readable: continued, no alert, no archive", () => {
-    seed(30, { parts: [part(false)] });
+    seed(15, { parts: [part(false)] });
     const alerts: string[] = [];
     expect(openWithAlerts(alerts).bvid).toBe(FAKE_BV);
     expect(alerts.length).toBe(0);

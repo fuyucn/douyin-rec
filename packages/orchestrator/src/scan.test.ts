@@ -601,8 +601,8 @@ describe("scanRecordings stable rolling session boundaries (issue #292)", () => 
     expect(recs[0]!.tsFiles).toEqual([]);
     expect(recs[0]!.startMs).toBe(T0);
     expect(recs[0]!.endMs).toBe(T0 + 3 * 1_800_000);
-    // A next session 41 min after the real end still clusters with it (no fake gap from a zero-width span).
-    const next = { ...recs[0]!, sessionBase: "next", startMs: recs[0]!.endMs + 41 * 60_000, endMs: recs[0]!.endMs + 71 * 60_000 };
+    // A next session 21 min after the real end still clusters with it (no fake gap from a zero-width span).
+    const next = { ...recs[0]!, sessionBase: "next", startMs: recs[0]!.endMs + 21 * 60_000, endMs: recs[0]!.endMs + 51 * 60_000 };
     expect(clusterBroadcasts([{ workerId: "w", recordings: [recs[0]!, next] }])).toHaveLength(1);
   });
 

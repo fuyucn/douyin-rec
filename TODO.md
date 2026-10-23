@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-110 同场等待窗口由 60 分钟缩短为 30 分钟（issue [#358](https://github.com/fuyucn/douyin-rec/issues/358)）**
+  — 2026-10-23 认领,分支 `codex/issue-gap30-reconnect-window`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**;动同场口径与 hub 规则,RISK,需人拍板;人已指定 30 分钟）。
+  **做什么**：core 同场间隔常量由 60 改为 30 分钟,重连等待、聚类容差、手动重跑守卫、边录边传续稿共用;示例配置、文档、测试同步。
+  **为什么**：收播后固定等 60 分钟才建 job,上传晚一小时。
+  **验收**：间隔 30 分钟算同一场、31 分钟算新场;配置低于 30 分钟被抬到 30 并告警;全量测试 / 类型 / bundle 通过。
+
 - [~] **T-109 零落盘 FLV 源按单一偏移处理时间戳跳变（issue [#356](https://github.com/fuyucn/douyin-rec/issues/356)）**
   — 2026-10-22 认领,分支 `codex/issue-356-live-flv-timestamps`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**;上传路径,RISK,需人拍板;人已批准实现）。
   **做什么**：live-pump 的 ffmpeg 对 FLV 源加 `live_flv` 输入格式并提高日志级别,按分 P 统计时间戳不连续行;`complete` 前对 spool 做轻量 dts 间隔扫描,发现间隔则不 complete、保留 spool 并告警(数量封顶);HLS 回落不加该选项。

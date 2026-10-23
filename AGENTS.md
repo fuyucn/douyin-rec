@@ -293,9 +293,9 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
 - **身份/聚类**：录制端写 `{base}.session.json`（roomSlug=web_rid + platform + gaps）。`identity`
   按 **(platform, roomSlug)** 聚成一场（streamKey=`{platform}:{roomSlug}:{date}`）→ douyin/bilibili
   同房间号不撞、跨节点一致（不靠主播名）。
-  **同场口径（issue #292）**：相邻会话间隔 ≤ 60 分钟 = 同一场，> 60 分钟 = 新场次，唯一常量 core `SAME_BROADCAST_GAP_MS`
+  **同场口径（issue #292）**：相邻会话间隔 ≤ 30 分钟 = 同一场，> 30 分钟 = 新场次，唯一常量 core `SAME_BROADCAST_GAP_MS`
   （聚类 / `reconnectWindowMs` 缺省共用）；边录边传删段后扫描起点取会话边车 `startMs`，不随剩余分段漂移；同日 `_HHMM`
-  派生 job 与已有稿件无法证明相隔 > 60 分钟 → 自动路径 `needs_manual`、重跑 409（`run-now-guard`）。
+  派生 job 与已有稿件无法证明相隔 > 30 分钟 → 自动路径 `needs_manual`、重跑 409（`run-now-guard`）。
 - **选优**（`select.ts`）：覆盖度优先（coverage=1−gap/span）→ **完整录全（单会话无断流）优先**，
   多个完整取最长；**所有节点都断流（没人录全）→ 中断 + 通知 + 绝不删源**（留人工）。
   要烧弹幕时另加「有弹幕优先」（见 `selectWinner` 的 `requireDanmu`）。
