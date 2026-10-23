@@ -480,9 +480,9 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
     expect(saved).toMatchObject({ bv: FAKE_BV, inheritedParts: 2, inheritedFrom: A_BASE, confirmed: [0] });
   });
 
-  it("gap 61 min: new broadcast → B creates its own submission", async () => {
+  it("gap 31 min: new broadcast → B creates its own submission", async () => {
     const { dir, plain, append } = await runSessionA();
-    const b = sessionB(dir, 61);
+    const b = sessionB(dir, 31);
     const plainB = vi.fn(async () => ["B", "V", "1second"].join(""));
     const u = uploaderB(plainB, append, b.startMs);
     b.paths.forEach((p) => u.noteSegment(p));
@@ -495,7 +495,7 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
   const writeLiveId = (dir: string, base: string, id: string): void =>
     writeFileSync(path.join(dir, `${base}.session.json`), JSON.stringify({ sessionBase: base, roomSlug: "123", platform: "douyin", liveSessionId: id }));
 
-  it("issue #320: gap <= 60 min but a different live id → new broadcast, B creates its own submission", async () => {
+  it("issue #320: gap <= 30 min but a different live id → new broadcast, B creates its own submission", async () => {
     const { dir, plain, append } = await runSessionA();
     const b = sessionB(dir, 26);
     writeLiveId(dir, A_BASE, "live-1");

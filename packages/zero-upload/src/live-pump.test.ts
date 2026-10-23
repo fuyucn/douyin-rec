@@ -2173,8 +2173,8 @@ describe("same-broadcast rule on the room-keyed state (issue #293)", () => {
   }
   const archives = () => readdirSync(dir).filter((f) => f.includes(".archived-"));
 
-  it("61 min gap: starts a new submission and archives the old state", () => {
-    seed(61);
+  it("31 min gap: starts a new submission and archives the old state", () => {
+    seed(31);
     const logs: string[] = [];
     const s = open((m) => logs.push(m));
     expect(s.hasArchiveIdentity).toBe(false);

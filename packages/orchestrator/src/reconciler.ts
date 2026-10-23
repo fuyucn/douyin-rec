@@ -493,7 +493,9 @@ export class Reconciler {
 
     const broadcasts = clusterBroadcasts(
       invs.map((i) => ({ workerId: i.workerId, recordings: i.recordings })),
-      this.reconnectWindowMs,
+      // Clustering always uses the same-broadcast constant (like rolling upload and live-pump do);
+      // reconnectWindowMs only controls how long to wait before processing a finished broadcast.
+      SAME_BROADCAST_GAP_MS,
       this.platform,
       knownKeys,
       this.timeZone?.(),

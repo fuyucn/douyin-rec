@@ -393,6 +393,34 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
+  it("issue #358: a configured 60 min reconnectWindowMs does not widen clustering: a 45 min gap is not merged", async () => {
+    const ledger = freshLedger();
+    const t0 = Date.now() - 8 * 3_600_000;
+    const a = makeRec({
+      roomSlug: "wide-window-room", sessionBase: "主播名_2026-08-14_08-00-00",
+      startMs: t0, endMs: t0 + 3_600_000, durationSec: 3600,
+    });
+    const b = makeRec({
+      roomSlug: "wide-window-room", sessionBase: "主播名_2026-08-14_09-45-00",
+      startMs: t0 + 3_600_000 + 45 * 60_000, endMs: t0 + 2 * 3_600_000 + 45 * 60_000, durationSec: 3600,
+    });
+    const transports = new Map([["node-1", makeTransport("node-1", [a, b])]]);
+    const spyRunPipeline = vi.fn<(b: Broadcast, deps: PipelineDeps) => Promise<{ state: JobState; bv?: string }>>(
+      async (x) => { ledger.markDone(x.streamKey, "BV" + x.members.length); return { state: "done", bv: "BV" }; },
+    );
+    const reconciler = new Reconciler({
+      platform: "douyin", transports, ledger, pipelineDeps: makePipelineDeps(ledger, transports),
+      runPipeline: spyRunPipeline, settle: fastSettle, sleep: fastSleep, reconnectWindowMs: 3_600_000,
+    });
+    await reconciler.reconcileAll();
+    // Two broadcasts were formed (a derived `_HHMM` key exists) and no run merged both sessions into one.
+    const runs = spyRunPipeline.mock.calls.map((c) => c[0]);
+    expect(runs.length).toBeGreaterThan(0);
+    for (const r of runs) expect(r.members).toHaveLength(1);
+    expect(runs.some((r) => /_\d{4}$/.test(r.streamKey))).toBe(true);
+    ledger.close();
+  });
+
   it("issue #292: a drifted `_HHMM` job of a broadcast that already has a BV is parked as needs_manual, never run", async () => {
     const ledger = freshLedger();
     const baseKey = "douyin:drift-room:2026-08-14";
