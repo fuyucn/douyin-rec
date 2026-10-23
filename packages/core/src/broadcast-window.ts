@@ -29,7 +29,7 @@ export function isSameBroadcast(o: {
 }
 
 /**
- * Effective reconnect window / clustering tolerance: `max(configured, SAME_BROADCAST_GAP_MS)`, so a stale
+ * Effective reconnect wait window (clustering always uses the constant): `max(configured, SAME_BROADCAST_GAP_MS)`, so a stale
  * lower config value (e.g. the old 10-minute template default) cannot override the 30-minute rule.
  * `undefined` falls back to the constant; a value <= 0 is an explicit "disabled" and passes through unchanged.
  * `clamped` tells the caller the configured value was raised, so it can log once instead of clamping silently.
