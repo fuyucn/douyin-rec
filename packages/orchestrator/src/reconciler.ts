@@ -466,7 +466,7 @@ export class Reconciler {
     const { ms, clamped } = effectiveReconnectWindowMs(configured);
     if (clamped && !this.warnedWindowValues.has(configured!)) {
       this.warnedWindowValues.add(configured!);
-      console.warn(`[reconciler] reconnectWindowMs=${configured} 低于同场口径 ${SAME_BROADCAST_GAP_MS}ms,已按 ${ms}ms 生效(请把配置改为 >= 3600000)`);
+      console.warn(`[reconciler] reconnectWindowMs=${configured} 低于同场口径 ${SAME_BROADCAST_GAP_MS}ms,已按 ${ms}ms 生效(请把配置改为 >= 1800000)`);
     }
     return ms;
   }

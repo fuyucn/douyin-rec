@@ -85,7 +85,7 @@ export interface HubPipelineConfig {
    * >0 时,累计接近该值(最多超 20%)的连续段合并成一个 mp4 再上传;<=0 = 逐段上传。
    */
   segmentGroupSec?: number;
-  /** 断流重连合并窗(ms):结束距现在不足该窗的场先不处理,等可能的重连并成一簇。缺省 60 分钟(core `SAME_BROADCAST_GAP_MS`)。 */
+  /** 断流重连合并窗(ms):结束距现在不足该窗的场先不处理,等可能的重连并成一簇。缺省 30 分钟(core `SAME_BROADCAST_GAP_MS`)。 */
   reconnectWindowMs?: number;
   /** 清理开关(都默认 false)。**永不删 .xml/.ass**(弹幕源硬约束),清理只处理 .ts/.mp4。 */
   cleanup?: { stageSourceAfterMerge?: boolean; sourceAfterDone?: boolean; stageAfterDone?: boolean };

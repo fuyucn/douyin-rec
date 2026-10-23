@@ -463,9 +463,9 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
   const uploaderB = (plain: unknown, append: unknown, startMs: number, count = async (): Promise<number | null> => 2): RollingUploader =>
     new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: plain as never, appendGroupRaw: append as never, countPartsRaw: count, removeFile: noRemove, now: () => startMs + 3_600_000, minSegmentSec: 0 });
 
-  it("gap <= 60 min: B appends to A's BV (one submission, parts A then B); link is persisted", async () => {
+  it("gap <= 30 min: B appends to A's BV (one submission, parts A then B); link is persisted", async () => {
     const { dir, plain, append } = await runSessionA();
-    const b = sessionB(dir, 60);
+    const b = sessionB(dir, 30);
     const u = uploaderB(plain, append, b.startMs);
     b.paths.forEach((p) => u.noteSegment(p));
     await u.flush({ recordingActive: false });

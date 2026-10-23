@@ -181,7 +181,7 @@ dev 环境的处理:worker 的 sshd 默认 `SetEnv TZ=Asia/Shanghai`(与 serve �
 - `.ts` 必须是 ffprobe 读得出时长的真文件——`_inventory` 里 `ffprobeVideo` 真跑(不是 fake);用 ffmpeg 的 lavfi `testsrc` 生成,**video-only**(录制端本就无音轨)。
 - 会话 base = `{anchor}_{YYYY-MM-DD}_{HH-mm-ss}`,分段 `{base}_{NNN}.ts`,旁边放 `{base}.xml`(弹幕)与 `{base}.session.json`(`roomSlug`=房间号、`platform`、`gaps`)。 <!-- issue-guard: allow -->
 - **`startMs/endMs` 来自 mtime 与时长**:`touch -d @<epoch>` 把 mtime 设成「收播时刻」(比现在早一小时,过了 settle 窗口)。base 里的时间用同一 epoch 在容器 TZ 下渲染。
-- 同一场要在 node-1 / node-2 都放(同 `roomSlug`、起止时间间隔 ≤ 60 分钟(core `SAME_BROADCAST_GAP_MS`)内),才会被聚成一场、进选优。想造「node-2 有断流」就把 node-2 的 `totalGapSec` 写成 > 0。
+- 同一场要在 node-1 / node-2 都放(同 `roomSlug`、起止时间间隔 ≤ 30 分钟(core `SAME_BROADCAST_GAP_MS`)内),才会被聚成一场、进选优。想造「node-2 有断流」就把 node-2 的 `totalGapSec` 写成 > 0。
 
 ```bash
 seed() { # seed <容器> <anchor> <roomSlug> [段数] [每段秒] [gapSec]

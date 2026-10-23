@@ -342,9 +342,9 @@ describe("Reconciler", () => {
     ledger.close();
   });
 
-  it("issue #292: configured reconnectWindowMs=600000 still waits 60 min after the broadcast ends", async () => {
+  it("issue #292: configured reconnectWindowMs=600000 still waits 30 min after the broadcast ends", async () => {
     const ledger = freshLedger();
-    const endMs = Date.now() - 30 * 60_000; // ended 30 min ago: past the stale 10 min config, inside 60 min
+    const endMs = Date.now() - 15 * 60_000; // ended 15 min ago: past the stale 10 min config, inside 30 min
     const rec = makeRec({
       roomSlug: "clamp-wait-room", sessionBase: "主播名_2026-08-14_08-00-00",
       startMs: endMs - 3_600_000, endMs, durationSec: 3600,

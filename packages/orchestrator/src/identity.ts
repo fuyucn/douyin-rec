@@ -27,7 +27,7 @@ function hhmm(ms: number, tz: string): string { const z = zonedStamp(ms, tz); re
 
 /**
  * 跨节点把录像聚成「同一场直播」。**按 (platform, roomSlug) 分组**(douyin/bilibili 同房间号不撞),
- * 组内按时间窗(间隔 <= 60min 为同一场,core `SAME_BROADCAST_GAP_MS`)区间合并;两条录像都带平台 liveId 且不同时
+ * 组内按时间窗(间隔 <= 30min 为同一场,core `SAME_BROADCAST_GAP_MS`)区间合并;两条录像都带平台 liveId 且不同时
  * 一定拆开(issue #320)。liveId 在 master 侧只拆不并,见 `liveIdsConflict`。streamKey = `{platform}:{roomSlug}:{date}`(同日多簇追加 _HHMM)。
  * platform 取自每条 rec(scan 从 meta.json 读;旧录像 fallback douyin);defaultPlatform 仅作极端兜底。
  */
