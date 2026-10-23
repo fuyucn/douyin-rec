@@ -19,6 +19,7 @@ import {
   pumpSegment,
   reuploadSpoolFile,
   buildPipeFfmpegArgs,
+  countTsDiscontinuities,
   DEFAULT_SEGMENT_CAP,
   LivePumpSession,
   archivedSpoolPathsToKeep,
@@ -185,6 +186,23 @@ describe("buildPipeFfmpegArgs", () => {
     const args = buildPipeFfmpegArgs({ url: "https://x/live.flv", sizeCap: 1024 });
     expect(hasPair(args, "-map", "0")).toBe(true);
     expect(hasPair(args, "-map", "0:v")).toBe(false);
+  });
+
+  it("FLV URL 加 live_flv(排在 -i 之前);HLS 与本地文件不加", () => {
+    const flv = buildPipeFfmpegArgs({ url: "https://x/live.flv?k=1", sizeCap: 1024 });
+    expect(hasPair(flv, "-f", "live_flv")).toBe(true);
+    expect(flv.indexOf("live_flv")).toBeLessThan(flv.indexOf("-i"));
+    // 输出封装 `-f mpegts` 仍在 -i 之后,不能被输入侧选项顶掉。
+    expect(hasPair(flv, "-f", "mpegts")).toBe(true);
+    const hls = buildPipeFfmpegArgs({ url: "https://x/live.m3u8", sizeCap: 1024 });
+    expect(hls).not.toContain("live_flv");
+    const local = buildPipeFfmpegArgs({ url: "/tmp/x.flv", sizeCap: 1024 });
+    expect(local).not.toContain("live_flv");
+  });
+
+  it("日志级别为 warning,时间戳不连续警告才会到达计数器", () => {
+    const args = buildPipeFfmpegArgs({ url: "https://x/live.flv", sizeCap: 1024 });
+    expect(hasPair(args, "-loglevel", "warning")).toBe(true);
   });
 
   it("HTTP 头只去 HTTP 流,且 UA/Referer 用专属 flag", () => {
@@ -1369,6 +1387,121 @@ describe("失败回退:已录字节必须被用上,不能白躺盘上", () => {
     expect(r.stemOfCompleted).toBe("fb123");
     expect(r.uploadError).toBeUndefined();
     expect(r.streamedBytes).toBe(cap);
+  });
+});
+
+describe("countTsDiscontinuities", () => {
+  it("只数时间戳不连续类警告行", () => {
+    const text = [
+      "[flv @ 0x1] Timestamp discontinuity detected on stream 0 (a=1 b=2)",
+      "[mpegts @ 0x2] Non-monotonic DTS in output stream 0:1; previous: 5, current: 3; changing to 6.",
+      "[vost#0:0/copy @ 0x4] Non-monotonous DTS in output stream 0:0; previous: 9, current: 7; changing to 10.",
+      "[http @ 0x3] Stream ends prematurely",
+      "",
+    ].join("\n");
+    expect(countTsDiscontinuities(text)).toBe(3);
+    expect(countTsDiscontinuities("")).toBe(0);
+  });
+});
+
+describe("pumpSegment 时间戳间隔闸门", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-tsgap-")); });
+  afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+  const mkFetch = (counts: { preupload: number; complete: number }) =>
+    (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+      const u = new URL(url);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (u.pathname.endsWith("/preupload")) {
+        counts.preupload++;
+        return new Response(JSON.stringify({
+          chunk_size: CHUNK, auth: "auth", endpoint: "//upos-cs.bilivideo.com",
+          biz_id: "1", upos_uri: "upos://bucket/fake.ts", OK: 1,
+        }), { status: 200 });
+      }
+      if (method === "POST" && u.searchParams.has("uploads")) return new Response(JSON.stringify({ upload_id: "uid" }), { status: 200 });
+      if (method === "PUT") return new Response("", { status: 200 });
+      counts.complete++;
+      return new Response(JSON.stringify({ OK: 1, key: "bucket/ok123.ts" }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+  it("扫到跳变 → 不 complete、不走整文件回退、spool 保留", { timeout: 30000 }, async () => {
+    const cap = CHUNK * 3;
+    installFakeFfmpeg(Buffer.alloc(cap, 5));
+    const counts = { preupload: 0, complete: 0 };
+    const r = await pumpSegment({
+      cookiesPath: COOKIES, args: ["-fake"], fileName: "gap.ts", sizeCap: cap, spoolDir: dir, line: "txa",
+      fetchImpl: mkFetch(counts),
+      probeDuration: async () => 60,
+      scanDtsGap: async () => ({ streamIndex: 0, fromSec: 1249, toSec: 13750 }),
+      signal: new AbortController().signal,
+    });
+    expect(r.tsGap).toEqual({ streamIndex: 0, fromSec: 1249, toSec: 13750 });
+    expect(r.uploadError).toMatch(/时间戳跳变/);
+    expect(r.stemOfCompleted).toBeUndefined();
+    expect(r.usedFileFallback).toBe(false);
+    expect(counts.complete).toBe(0);
+    expect(counts.preupload).toBe(1); // 回退会再开一次会话;这里不允许
+    expect(existsSync(join(dir, "gap.held-gap.ts"))).toBe(true);
+  });
+
+  it("块上传已失败时也要扫描:跳变不得经整文件回退传出,spool 改名保留", { timeout: 30000 }, async () => {
+    const cap = CHUNK * 3;
+    installFakeFfmpeg(Buffer.alloc(cap, 5));
+    const counts = { preupload: 0, complete: 0 };
+    const ok = mkFetch(counts);
+    // Streaming PUTs fail so runSegment reports uploadError; the scan must still run.
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "PUT") return new Response("boom", { status: 500 });
+      return ok(input, init);
+    }) as unknown as typeof fetch;
+    const r = await pumpSegment({
+      cookiesPath: COOKIES, args: ["-fake"], fileName: "gapfail.ts", sizeCap: cap, spoolDir: dir, line: "txa",
+      fetchImpl,
+      probeDuration: async () => 60,
+      scanDtsGap: async () => ({ streamIndex: 1, fromSec: 10, toSec: 9000 }),
+      signal: new AbortController().signal,
+    });
+    expect(r.tsGap).toBeDefined();
+    expect(r.usedFileFallback).toBe(false);
+    expect(counts.preupload).toBe(1);
+    expect(counts.complete).toBe(0);
+    // Held spool is renamed so the orphan sweep pattern (plain spool name) cannot match it.
+    expect(existsSync(join(dir, "gapfail.ts"))).toBe(false);
+    expect(existsSync(join(dir, "gapfail.held-gap.ts"))).toBe(true);
+  });
+
+  it("干净 → 照常 complete", { timeout: 30000 }, async () => {
+    const cap = CHUNK * 3;
+    installFakeFfmpeg(Buffer.alloc(cap, 5));
+    const counts = { preupload: 0, complete: 0 };
+    const r = await pumpSegment({
+      cookiesPath: COOKIES, args: ["-fake"], fileName: "ok.ts", sizeCap: cap, spoolDir: dir, line: "txa",
+      fetchImpl: mkFetch(counts),
+      probeDuration: async () => 60,
+      scanDtsGap: async () => null,
+      signal: new AbortController().signal,
+    });
+    expect(r.tsGap).toBeUndefined();
+    expect(r.uploadError).toBeUndefined();
+    expect(r.stemOfCompleted).toBe("ok123");
+    expect(counts.complete).toBe(1);
+  });
+
+  it("扫描无法判定(undefined)→ 不拦截,按原流程 complete", { timeout: 30000 }, async () => {
+    const cap = CHUNK * 3;
+    installFakeFfmpeg(Buffer.alloc(cap, 5));
+    const counts = { preupload: 0, complete: 0 };
+    const r = await pumpSegment({
+      cookiesPath: COOKIES, args: ["-fake"], fileName: "unk.ts", sizeCap: cap, spoolDir: dir, line: "txa",
+      fetchImpl: mkFetch(counts),
+      probeDuration: async () => 60,
+      scanDtsGap: async () => undefined,
+      signal: new AbortController().signal,
+    });
+    expect(r.tsGap).toBeUndefined();
+    expect(r.stemOfCompleted).toBe("ok123");
   });
 });
 

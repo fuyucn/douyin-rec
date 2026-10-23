@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-109 零落盘 FLV 源按单一偏移处理时间戳跳变（issue [#356](https://github.com/fuyucn/douyin-rec/issues/356)）**
+  — 2026-10-22 认领,分支 `codex/issue-356-live-flv-timestamps`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**;上传路径,RISK,需人拍板;人已批准实现）。
+  **做什么**：live-pump 的 ffmpeg 对 FLV 源加 `live_flv` 输入格式并提高日志级别,按分 P 统计时间戳不连续行;`complete` 前对 spool 做轻量 dts 间隔扫描,发现间隔则不 complete、保留 spool 并告警(数量封顶);HLS 回落不加该选项。
+  **为什么**：B 站以「时间戳跳变」拒收部分分 P;现有参数只修段首,段中途归零或前跳原样透传,且 pipe 会把倒退钳平后无法事后修复。
+  **验收**：合成「归零 + 前跳」流输出单调且音视频不错位;HLS 不受影响;无 spool 时仍有计数日志;全量测试 / 类型 / bundle 通过。
+
 - [~] **T-108 零落盘台账键不再吞同房同日的真实录像（issue [#324](https://github.com/fuyucn/douyin-rec/issues/324)）**
   — 2026-10-22 基于当前 base 重做(原 PR #326 过期),分支 `codex/issue-324-zero-disk-ledger-key`（**未合并 / 未部署 / 未 close**;动台账键,RISK,需人拍板）。
   **做什么**：零落盘台账键改为独立的 `-zd` 命名空间并带开播时间;master 本机路径与副节点回执路径都用同一个函数;旧节点的回执在 master 侧重新取键;对账器遇到 done 键上未被认领的边录边传会话时告警一次。

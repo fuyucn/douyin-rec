@@ -50,7 +50,7 @@ import {
   type StudioVideo,
 } from "./upos-stream.js";
 import { isSameBroadcastGap, isUploadRateLimited, type DanmuMessage } from "@drec/core";
-import { ffprobeDuration } from "@drec/post-process";
+import { ffprobeDuration, ffprobeDtsGap, type DtsGap } from "@drec/post-process";
 
 export const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 
@@ -142,14 +142,22 @@ export function buildPipeFfmpegArgs(a: FfmpegPipeArgs): string[] {
   // ②它们**只对 http 源有效**,喂本地文件路径时同样报这个错(protocol 不支持),
   // 所以只在 `isHttp` 时加。注意 `-fs` 到点时 ffmpeg 的退出码是 **1 而非 0**
   // —— 那是「输出已满」的正常收尾,不是故障(真实直播段段如此,别被 exit=1 骗)。
+  // `live_flv` makes the flv demuxer treat the input as a live stream, so ffmpeg applies one
+  // offset per input file when the CDN resets timestamps mid-connection: audio and video stay
+  // on a common base. With the plain demuxer a forward jump passes through and a backward
+  // reset is clamped by the muxer, which cannot be repaired afterwards. FLV URLs only: an HLS
+  // fallback URL must not get a forced demuxer.
+  const liveFlv = isHttp && /\.flv(?:[?#]|$)/i.test(a.url) ? ["-f", "live_flv"] : [];
   const reconnect = isHttp
     ? ["-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "30"]
     : [];
   return [
-    "-loglevel", "error", "-y",
+    // `warning` (not `error`) so timestamp discontinuity lines reach {@link countTsDiscontinuities}.
+    "-loglevel", "warning", "-y",
     ...hdrs,
     "-fflags", "+genpts",
     ...reconnect,
+    ...liveFlv,
     "-i", a.url,
     "-fs", String(a.sizeCap),
     "-c", "copy", "-map", "0",
@@ -166,8 +174,32 @@ export interface SegmentExit {
   stderrTail: string;
 }
 
+/**
+ * Forward dts step (seconds) above which a finished part is held. The ffmpeg live_flv demuxer
+ * already corrects steps above its own 10s threshold, so what is left is a rare uncorrected
+ * jump; 30s keeps ordinary uplink stalls and PK switches from blocking good parts (the
+ * reported failures were thousands of seconds).
+ */
+export const DTS_GAP_FORWARD_SEC = 30;
+const defaultScanDtsGap = (path: string): Promise<DtsGap | null | undefined> => ffprobeDtsGap(path, DTS_GAP_FORWARD_SEC);
+
+/** Matches the ffmpeg warnings emitted when input timestamps jump or go backwards. */
+// ffmpeg 5.x says "Non-monotonous DTS", newer builds say "Non-monotonic DTS"; accept both.
+const TS_DISCONTINUITY_RE = /timestamp discontinuity|non-monoton(?:ic|ous) dts|non monotonically increasing dts/i;
+
+/** Count timestamp-discontinuity warning lines in a block of ffmpeg stderr text. */
+export function countTsDiscontinuities(text: string): number {
+  let n = 0;
+  for (const line of text.split("\n")) if (TS_DISCONTINUITY_RE.test(line)) n++;
+  return n;
+}
+
 export interface SegmentRunResult {
   exit: SegmentExit;
+  /** Timestamp-discontinuity warnings ffmpeg printed for this part (0 = none seen). */
+  tsDiscontinuities?: number;
+  /** First dts gap found by the pre-complete spool scan; set means the part is held, not submitted. */
+  tsGap?: DtsGap;
   /** 已成功上传的块数。0 = 一个都没传出去(纯文件回退)。 */
   chunksUploaded: number;
   /** 实际流出到 UPOS 的字节数。 */
@@ -972,9 +1004,21 @@ export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
   const spawnNow: SpawnFn = spawnOverride ?? ((cmd, args, opts) => spawn(cmd, args as string[], opts as never) as unknown as ChildProcessLike);
   const proc = spawnNow(FFMPEG, o.args, { stdio: ["ignore", "pipe", "pipe"] });
   let stderrTail = "";
+  let stderrPartial = "";
+  let tsDiscontinuities = 0;
   if (proc.stderr) {
     (proc.stderr as NodeJS.ReadableStream & { setEncoding(e: string): void }).setEncoding("utf-8");
-    proc.stderr.on("data", (c: unknown) => { stderrTail = (stderrTail + String(c)).slice(-4000); });
+    proc.stderr.on("data", (c: unknown) => {
+      const text = String(c);
+      stderrTail = (stderrTail + text).slice(-4000);
+      // Count per complete line: a warning can be split across two data events.
+      stderrPartial += text;
+      const nl = stderrPartial.lastIndexOf("\n");
+      if (nl >= 0) {
+        tsDiscontinuities += countTsDiscontinuities(stderrPartial.slice(0, nl));
+        stderrPartial = stderrPartial.slice(nl + 1);
+      }
+    });
   }
   const exited = new Promise<SegmentExit>((resolve) => {
     proc.on("close", (...a: unknown[]) => {
@@ -1057,8 +1101,9 @@ export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
   }
   await uploadTask;
   const exit = await exited;
+  tsDiscontinuities += countTsDiscontinuities(stderrPartial);
   return {
-    exit, chunksUploaded, streamedBytes, spooledBytes, uploadError,
+    exit, tsDiscontinuities, chunksUploaded, streamedBytes, spooledBytes, uploadError,
     // 「半截会话」= 有字节已 PUT、但调用方**无法 complete** 的情形:
     //   ① 真上传失败(网络/5xx)—— parts 可能不连续,不能 complete;
     //   ② 零块成功(从没传出去过,也没有会话可泄漏)。
@@ -1110,6 +1155,8 @@ export async function pumpSegment(o: {
   onFallback?: (spoolPath: string, bytes: number) => void;
   /** 时长自检接缝(测试注入;缺省 {@link ffprobeDuration})。 */
   probeDuration?: (path: string) => Promise<number>;
+  /** dts gap scan seam (tests inject; default {@link ffprobeDtsGap}). `undefined` = could not judge. */
+  scanDtsGap?: (path: string) => Promise<DtsGap | null | undefined>;
   signal?: AbortSignal;
   /** Keep the spool after completion (the caller confirms submission and cleans it up). */
   keepSpool?: boolean;
@@ -1177,6 +1224,32 @@ export async function pumpSegment(o: {
     durationSec = Math.max(0.001, Math.round((rec.sealedMs ?? 0) / 100) / 100);
   }
 
+  if (rec.tsDiscontinuities) {
+    o.log?.(`[live-pump] ⚠️ ${o.fileName}: ffmpeg 报告 ${rec.tsDiscontinuities} 次时间戳不连续(流内跳变或被复用器钳平)`);
+  }
+
+  // Pre-complete gate: a part is only visible in the archive after `complete` + submit, so a
+  // scan here can still keep a broken part out. Held parts skip BOTH complete and the
+  // whole-file fallback (that fallback would upload the same bad bytes), and this runs even
+  // when the chunk upload already failed, for the same reason.
+  if (spoolMode === "full" && rec.spooledBytes > 0 && durationSec > 0) {
+    let gap: DtsGap | null | undefined;
+    try { gap = await (o.scanDtsGap ?? defaultScanDtsGap)(spoolPath); } catch { gap = undefined; }
+    if (gap) {
+      rec.tsGap = gap;
+      // Rename so the orphan sweep (which only matches the plain spool name) keeps the sample.
+      let kept = spoolPath;
+      const heldPath = spoolPath.replace(/(\.[^./]+)?$/, ".held-gap$1");
+      try { renameSync(spoolPath, heldPath); kept = heldPath; } catch { /* keep under the original name */ }
+      const why = `时间戳跳变(流${gap.streamIndex}: ${gap.fromSec.toFixed(1)}s → ${gap.toSec.toFixed(1)}s),不投稿,spool 保留为 ${kept}`;
+      rec.uploadError = rec.uploadError ? `${rec.uploadError};${why}` : why;
+      // Chunks may already be on UPOS but this part will never complete.
+      if (rec.chunksUploaded > 0) rec.sessionLeaked = true;
+    } else if (gap === undefined) {
+      o.log?.(`[live-pump] ⚠️ ${o.fileName}: 时间戳扫描无法判定,按原流程继续`);
+    }
+  }
+
   let stem: string | undefined;
   let usedFallback = false;
 
@@ -1191,7 +1264,7 @@ export async function pumpSegment(o: {
   // 边录边传失败的每种情形(块失败 / 背压降级 / complete 失败 / 自检不过但内容可读)
   // 都不能让已录的字节白白躺在盘上。这里新开一个会话、用**精确文件大小**整体上传,
   // 与生产的 biliup 文件上传等价。UPOS 没有 abort,旧会话只能留着(见 sessionLeaked)。
-  if (spoolMode === "full" && rec.uploadError && rec.spooledBytes > 0 && durationSec > 0) {
+  if (spoolMode === "full" && rec.uploadError && !rec.tsGap && rec.spooledBytes > 0 && durationSec > 0) {
     const fb = await reuploadSpoolFile({
       cookiesPath: o.cookiesPath, fileName: o.fileName, spoolPath,
       line: o.line, fetchImpl: o.fetchImpl, signal: o.signal,

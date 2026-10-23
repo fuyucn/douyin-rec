@@ -335,6 +335,56 @@ export async function ffprobePacketStats(path: string, timeoutMs = FFPROBE_SCAN_
   return { spanSec: max - min, videoPackets: v, audioPackets: a, hasAudio: audioIdx.size > 0, gopPackets: gop, errorLines: r.errLines };
 }
 
+/** First timestamp discontinuity found by {@link ffprobeDtsGap}. */
+export interface DtsGap {
+  streamIndex: number;
+  /** dts_time (seconds) of the packet before the discontinuity. */
+  fromSec: number;
+  /** dts_time (seconds) of the packet after it. */
+  toSec: number;
+}
+
+/**
+ * Scan every packet's dts per stream and report the first discontinuity: a forward step above
+ * `forwardSec` or any backward step above `backwardSec`. Uses dts (monotonic per stream), not
+ * pts, so B-frame reordering is never read as a regression.
+ * Returns `null` = clean, `undefined` = could not judge (ffprobe failed / timed out / no packets);
+ * callers must treat `undefined` as "unknown", not as clean.
+ */
+export async function ffprobeDtsGap(
+  path: string,
+  forwardSec = 5,
+  backwardSec = 0.5,
+  timeoutMs = FFPROBE_SCAN_TIMEOUT_MS,
+): Promise<DtsGap | null | undefined> {
+  // Only audio and video count: sparse data / subtitle streams legitimately step by many seconds.
+  const st = await runFfprobe(["-v", "error", "-show_entries", "stream=index,codec_type", "-of", "csv=p=0", path], Math.min(timeoutMs, FFPROBE_HEADER_TIMEOUT_MS));
+  if (st.code !== 0) return undefined;
+  const media = new Set<number>();
+  for (const l of st.out.split("\n")) {
+    const f = l.trim().split(",");
+    const idx = f.map((x) => Number(x)).find((x) => x !== undefined && Number.isInteger(x) && x >= 0);
+    if (idx !== undefined && f.some((x) => x === "video" || x === "audio")) media.add(idx);
+  }
+  if (media.size === 0) return undefined;
+  const r = await runFfprobe(["-v", "error", "-show_entries", "packet=stream_index,dts_time", "-of", "csv=p=0", path], timeoutMs);
+  if (r.code !== 0) return undefined;
+  const prev = new Map<number, number>();
+  let seen = 0;
+  for (const l of r.out.split("\n")) {
+    const f = l.trim().split(",");
+    if (f.length < 2) continue;
+    const idx = Number(f[0]);
+    const t = parseFloat(f[1] ?? "");
+    if (!Number.isInteger(idx) || !media.has(idx) || !Number.isFinite(t)) continue;
+    seen++;
+    const p = prev.get(idx);
+    if (p !== undefined && (t - p > forwardSec || p - t > backwardSec)) return { streamIndex: idx, fromSec: p, toSec: t };
+    prev.set(idx, t);
+  }
+  return seen === 0 ? undefined : null;
+}
+
 /** 兼容入口:视频跨度 + 视频包数;无法判定 → packets=0。 */
 export async function ffprobeVideoSpan(path: string): Promise<{ spanSec: number; packets: number }> {
   const s = await ffprobePacketStats(path);
