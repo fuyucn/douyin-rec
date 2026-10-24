@@ -19,9 +19,9 @@ import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, freeGBOf, redactLogLines, recordingRoomDir, sanitizePathSegment, zonedStamp } from "@drec/core";
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -301,7 +301,7 @@ program
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
-      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe } = await import("@drec/zero-upload");
+      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe, migrateLegacyState } = await import("@drec/zero-upload");
       const {
         rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta,
         resolveStreamUploadTitle, resolveStreamPartTitle,
@@ -312,6 +312,20 @@ program
       // because they only serve manual debugging.
       const roomSlug = platform.extractRoomSlug(roomToUrl(o.room));
       const pumpRoom = zeroDiskRoom(platform, o.room);
+      // Issue #360: with the room layout on, spool/state/xml live in the room directory and the
+      // spool file carries the anchor name. The layout is read once per process; a running pump
+      // never changes directory underneath itself. Legacy stays at the output root.
+      const pumpLayout = readOutputLayout();
+      const pumpAnchor = o.name?.trim() || "";
+      const pumpSpoolDir = pumpLayout === "room"
+        ? (recordingRoomDir(opts.outDir, [pumpAnchor, roomSlug], {
+            platform: platform.id, roomSlug, anchorName: pumpAnchor || roomSlug,
+          }, { layout: "room" }) ?? opts.outDir)
+        : opts.outDir;
+      if (pumpSpoolDir !== opts.outDir) {
+        mkdirSync(pumpSpoolDir, { recursive: true });
+        migrateLegacyState(opts.outDir, pumpSpoolDir, pumpRoom, (m) => console.log(m));
+      }
       // Hub-managed side node (issue #331): the master-delivered object is the ONLY source of upload
       // metadata and the account to verify. The node's rule directory is empty, so reading it would
       // silently fall back to defaults (private visibility, default title). Refuse instead.
@@ -388,7 +402,7 @@ program
           // Anchor to the wall clock at connect time: parts are sealed by byte/duration, so a
           // single session-level axis is the only stable reference for burn/part slicing.
           const startMs = Date.now();
-          xmlPath = zeroDiskXmlPath(opts.outDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs);
+          xmlPath = zeroDiskXmlPath(pumpSpoolDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs, undefined, pumpAnchor);
           writer.open(xmlPath, { anchorName, roomId: platform.extractRoomSlug(roomToUrl(o.room)), videoStartMs: startMs });
           writerOpened = true;
           await danmuSource.start(roomToUrl(o.room), {
@@ -403,19 +417,19 @@ program
           if (writerOpened) writer.close();
         },
       } : undefined;
-      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${opts.outDir}/live-pump-<room>_<开播时间>.xml`);
+      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${pumpSpoolDir}/live-pump-<主播名>_<开播时间>.xml`);
       // Remove spools left by a pump killed mid-part. They never reached the state file, so
       // nothing else would ever delete them. Only old, unreferenced files are touched.
       // The keep-set is `spoolPathsToKeep` (single source of truth next to the state shape):
       // it covers `parts` *and* `pending`. `pending` is the WAL of an upload whose outcome was
       // never persisted, and recovery re-uploads that whole file — listing only `parts` would
       // delete the last copy of an interrupted part (real data loss, found by review #280).
-      const st = readLivePumpState(livePumpStatePath(opts.outDir, pumpRoom));
+      const st = readLivePumpState(livePumpStatePath(pumpSpoolDir, pumpRoom));
       // An unreadable live/archived state references unknown spool files: skip the sweep entirely.
-      if (spoolSweepSafe(opts.outDir, pumpRoom)) {
+      if (spoolSweepSafe(pumpSpoolDir, pumpRoom)) {
         sweepOrphanSpools({
-          spoolDir: opts.outDir,
-          knownSpoolPaths: [...spoolPathsToKeep(st), ...archivedSpoolPathsToKeep(opts.outDir, pumpRoom)],
+          spoolDir: pumpSpoolDir,
+          knownSpoolPaths: [...spoolPathsToKeep(st), ...archivedSpoolPathsToKeep(pumpSpoolDir, pumpRoom)],
           log: (m) => console.log(m),
         });
       } else {
@@ -461,7 +475,16 @@ program
           };
         },
         quality: (o.quality ?? cfg.quality ?? platform.defaultQuality) as RecordOpts["quality"],
-        spoolDir: opts.outDir,
+        spoolDir: pumpSpoolDir,
+        ...(pumpLayout === "room" ? {
+          // Issue #360: name carries the anchor and the broadcast start so a spool is
+          // identifiable outside the state file. Segment index is zero-padded to 3 like recordings.
+          spoolName: (seg: number) => {
+            const z = zonedStamp(streamStartMs);
+            const head = sanitizePathSegment(pumpAnchor || roomSlug).slice(0, 60) || roomSlug;
+            return `live-pump-${head}_${z.date}_${z.hh}-${z.mm}-${z.ss}_${String(seg).padStart(3, "0")}.ts`;
+          },
+        } : {}),
         title: streamTitle,
         titleForLive: (liveTitle) => resolveStreamUploadTitle({
           platform: platform.id,

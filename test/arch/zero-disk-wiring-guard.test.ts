@@ -39,7 +39,7 @@ describe("record --stream-upload wiring (zero-disk)", () => {
   it("normalizes the room before getStream / pump state", () => {
     expect(block).toContain("zeroDiskRoom(platform, o.room)");
     expect(block).toContain("room: pumpRoom");
-    expect(block).toContain("livePumpStatePath(opts.outDir, pumpRoom)");
+    expect(block).toContain("livePumpStatePath(pumpSpoolDir, pumpRoom)");
     expect(block).not.toContain("room: o.room");
   });
 

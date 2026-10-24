@@ -395,7 +395,9 @@ describe("Reconciler", () => {
 
   it("issue #358: a configured 60 min reconnectWindowMs does not widen clustering: a 45 min gap is not merged", async () => {
     const ledger = freshLedger();
-    const t0 = Date.now() - 8 * 3_600_000;
+    // Fixed date, not Date.now(): a run near midnight used to split the two sessions across
+    // different day keys, so the derived `_HHMM` assertion below failed depending on the clock.
+    const t0 = new Date("2026-08-14T00:00:00Z").getTime();
     const a = makeRec({
       roomSlug: "wide-window-room", sessionBase: "主播名_2026-08-14_08-00-00",
       startMs: t0, endMs: t0 + 3_600_000, durationSec: 3600,

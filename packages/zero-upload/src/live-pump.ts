@@ -403,6 +403,69 @@ export function archivedSpoolPathsToKeep(spoolDir: string, room: string): string
   return out;
 }
 
+/**
+ * Move a legacy root-level state file (and the spool files it references) into the room
+ * directory (issue #360). Best effort: when anything cannot be moved the old state is left in
+ * place and returned as-is, so a running broadcast keeps resuming instead of losing its WAL.
+ *
+ * The state file is moved last, so a crash mid-migration leaves the old state authoritative.
+ * Archived states move too, with their spool paths rewritten, because the orphan sweep uses
+ * those paths to protect unconfirmed parts.
+ */
+export function migrateLegacyState(
+  oldDir: string,
+  newDir: string,
+  room: string,
+  log: (msg: string) => void = () => {},
+): boolean {
+  if (oldDir === newDir) return false;
+  const oldState = livePumpStatePath(oldDir, room);
+  const newState = livePumpStatePath(newDir, room);
+  if (!existsSync(oldState) || existsSync(newState)) return false;
+  mkdirSync(newDir, { recursive: true });
+  const base = basename(oldState);
+  const moved = new Map<string, string>();
+  const moveSpool = (p: string): string => {
+    const done = moved.get(p);
+    if (done) return done;
+    const dest = join(newDir, basename(p));
+    try {
+      if (existsSync(p) && !existsSync(dest)) renameSync(p, dest);
+      else if (!existsSync(dest)) return p; // missing spool: keep the recorded path unchanged
+    } catch {
+      return p;
+    }
+    moved.set(p, dest);
+    return dest;
+  };
+  const rewrite = (st: LivePumpState): LivePumpState => ({
+    ...st,
+    parts: st.parts.map((part) => ({ ...part, spoolPath: moveSpool(part.spoolPath) })),
+    ...(st.pending ? { pending: { ...st.pending, spoolPath: moveSpool(st.pending.spoolPath) } } : {}),
+  });
+  try {
+    const state = readLivePumpState(oldState);
+    if (!state) return false; // unreadable: keep the legacy file where it is
+    const archivedPrefix = base + ARCHIVED_SUFFIX;
+    let archived: string[] = [];
+    try { archived = readdirSync(oldDir).filter((f) => f.startsWith(archivedPrefix)); } catch { /* none */ }
+    // Archived states first: they only protect spools, the live state is the one that must move last.
+    for (const f of archived) {
+      const st = readLivePumpState(join(oldDir, f));
+      if (!st) continue;
+      writeLivePumpState(join(newDir, f), rewrite(st));
+      unlinkSync(join(oldDir, f));
+    }
+    writeLivePumpState(newState, rewrite(state));
+    unlinkSync(oldState);
+    log(`[live-pump] 旧状态已迁入房间目录: ${newState}`);
+    return true;
+  } catch (e) {
+    log(`[live-pump] ⚠️ 旧状态迁入房间目录失败,继续使用旧位置: ${(e as Error)?.message ?? e}`);
+    return false;
+  }
+}
+
 export interface LivePumpSessionOpts {
   cookiesPath: string;
   room: string;
@@ -1486,6 +1549,12 @@ export interface RunLivePumpOptions {
   maxMs?: number;
   /** Max parts to record in this run (0/undefined = keep going until offline). */
   maxSegments?: number;
+  /**
+   * Per-part spool file name (issue #360). The CLI passes a room/anchored name when the room
+   * layout is on; without it the historical `live-pump-<epochMs>-<seg>.ts` name is kept so old
+   * nodes and tests behave unchanged.
+   */
+  spoolName?: (segIndex: number) => string;
   line?: string;
   /** Submit every completed part to the archive. Default true. */
   submit?: boolean;
@@ -1832,7 +1901,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     }
     if (seg === 0) log("[状态] 录制中");
 
-    const fileName = `live-pump-${Date.now()}-${seg}.ts`;
+    const fileName = o.spoolName ? o.spoolName(seg) : `live-pump-${Date.now()}-${seg}.ts`;
     const t0 = Date.now();
     const r = await pumpSegment({
       cookiesPath: o.cookiesPath,

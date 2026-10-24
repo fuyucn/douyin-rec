@@ -20,6 +20,7 @@ import {
   reuploadSpoolFile,
   buildPipeFfmpegArgs,
   countTsDiscontinuities,
+  migrateLegacyState,
   DEFAULT_SEGMENT_CAP,
   LivePumpSession,
   archivedSpoolPathsToKeep,
@@ -2404,4 +2405,80 @@ describe("part progress hook (issue #331)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 20_000);
+});
+
+describe("issue #360: spool naming and legacy state migration", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-360-")); });
+  afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+
+  it("spoolName option names each part after the anchor and the start stamp", async () => {
+    const names: string[] = [];
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 7));
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+      const u = new URL(url);
+      if (u.pathname.endsWith("/preupload")) {
+        return new Response(JSON.stringify({
+          chunk_size: CHUNK, auth: "auth", endpoint: "//upos-cs.bilivideo.com",
+          biz_id: "1", upos_uri: "upos://bucket/x.ts", OK: 1,
+        }), { status: 200 });
+      }
+      if ((init?.method ?? "GET").toUpperCase() === "PUT") return new Response("", { status: 200 });
+      return new Response(JSON.stringify({ OK: 1, key: "bucket/x.ts", upload_id: "uid" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const r = await runLivePump({
+      cookiesPath: COOKIES,
+      room: "room-360",
+      fetch: async () => ({ living: true, url: "https://x/live.flv" }),
+      quality: "origin",
+      spoolDir: dir,
+      title: "t",
+      tid: 21,
+      tag: "x",
+      private: true,
+      sizeCap: CHUNK * 2,
+      maxSegments: 1,
+      submit: false,
+      fetchImpl,
+      spoolName: (seg) => { const n = `live-pump-主播_2026-10-24_10-00-00_${String(seg).padStart(3, "0")}.ts`; names.push(n); return n; },
+      log: () => {},
+    });
+    // The fake ffmpeg bytes are not a real TS container, so the part fails its own self-check;
+    // what matters here is that the pump asked for the room-layout name before spawning.
+    expect(names).toEqual(["live-pump-主播_2026-10-24_10-00-00_000.ts"]);
+  });
+
+  it("migrateLegacyState moves the state and its spool into the room dir and rewrites the path", () => {
+    const room = "douyin:123:2026-10-24";
+    const oldDir = dir;
+    const newDir = join(dir, "主播_douyin_123");
+    const spool = join(oldDir, "live-pump-1792882544931-0.ts");
+    writeFileSync(spool, "x");
+    writeLivePumpState(livePumpStatePath(oldDir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      parts: [{ index: 0, spoolPath: spool, filename: "f", stem: "s", title: "P1", bytes: 1, durationSec: 1, confirmed: false }],
+      updatedAt: Date.now(),
+    });
+    expect(migrateLegacyState(oldDir, newDir, room)).toBe(true);
+    const moved = readLivePumpState(livePumpStatePath(newDir, room));
+    expect(moved?.parts[0]?.spoolPath).toBe(join(newDir, "live-pump-1792882544931-0.ts"));
+    expect(existsSync(join(newDir, "live-pump-1792882544931-0.ts"))).toBe(true);
+    expect(existsSync(spool)).toBe(false);
+    expect(existsSync(livePumpStatePath(oldDir, room))).toBe(false);
+  });
+
+  it("migrateLegacyState never overwrites an existing room state and leaves the old one in place", () => {
+    const room = "douyin:123:2026-10-24";
+    const newDir = join(dir, "room");
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "old", tid: 21, tag: "x", private: true, parts: [], updatedAt: Date.now(),
+    });
+    writeLivePumpState(livePumpStatePath(newDir, room), {
+      schemaVersion: 1, room, createdAt: 2, title: "new", tid: 21, tag: "x", private: true, parts: [], updatedAt: Date.now(),
+    });
+    expect(migrateLegacyState(dir, newDir, room)).toBe(false);
+    expect(readLivePumpState(livePumpStatePath(dir, room))?.title).toBe("old");
+    expect(readLivePumpState(livePumpStatePath(newDir, room))?.title).toBe("new");
+  });
 });
