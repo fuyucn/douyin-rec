@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, statSync, writeFileSync, existsSync, writeSync, mkdirSync, readdirSync, utimesSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
   acquireStreamWithBackoff,
@@ -2516,6 +2516,49 @@ describe("issue #360: spool naming and legacy state migration", () => {
     expect(existsSync(p1)).toBe(true);
     expect(existsSync(p2)).toBe(true);
     expect(readLivePumpState(livePumpStatePath(dir, room))?.title).toBe("t");
+  });
+
+  it("migrateLegacyState rolls back and removes the staged room state when a later write fails", () => {
+    const room = "douyin:123:2026-10-24";
+    const newDir = join(dir, "room");
+    const spool = join(dir, "live-pump-1792882544931-0.ts");
+    writeFileSync(spool, "x");
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      parts: [{ index: 0, spoolPath: spool, filename: "f", stem: "s", title: "P1", bytes: 1, durationSec: 1, confirmed: false }],
+      updatedAt: Date.now(),
+    });
+    // An archived state exists in the legacy dir; block its destination with a directory so the
+    // archived write throws after the spool already moved.
+    writeLivePumpState(`${livePumpStatePath(dir, room)}.archived-1`, {
+      schemaVersion: 1, room, createdAt: 1, title: "arch", tid: 21, tag: "x", private: true, parts: [], updatedAt: 1,
+    });
+    mkdirSync(newDir, { recursive: true });
+    mkdirSync(join(newDir, basename(livePumpStatePath(dir, room)) + ".archived-1"));
+    expect(migrateLegacyState(dir, newDir, room)).toBe("failed");
+    // Spool back in the legacy dir, no staged room state left behind, legacy state still there.
+    expect(existsSync(spool)).toBe(true);
+    expect(existsSync(livePumpStatePath(dir, room))).toBe(true);
+    expect(existsSync(livePumpStatePath(newDir, room))).toBe(false);
+  });
+
+  it("migrateLegacyState conflict leaves shared spools and the legacy state untouched", () => {
+    const room = "douyin:123:2026-10-24";
+    const newDir = join(dir, "room");
+    const spool = join(dir, "live-pump-1792882544931-0.ts");
+    writeFileSync(spool, "x");
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "old", tid: 21, tag: "x", private: true,
+      parts: [{ index: 0, spoolPath: spool, filename: "f", stem: "s", title: "P1", bytes: 1, durationSec: 1, confirmed: false }],
+      updatedAt: Date.now(),
+    });
+    writeLivePumpState(livePumpStatePath(newDir, room), {
+      schemaVersion: 1, room, createdAt: 2, title: "new", tid: 21, tag: "x", private: true, parts: [], updatedAt: Date.now(),
+    });
+    expect(migrateLegacyState(dir, newDir, room)).toBe("conflict");
+    expect(existsSync(spool)).toBe(true);
+    const legacy = readLivePumpState(livePumpStatePath(dir, room));
+    expect(legacy?.parts[0]?.spoolPath).toBe(spool);
   });
 
   it("migrateLegacyState reports conflict when the legacy state still has an unconfirmed part", () => {

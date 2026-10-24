@@ -454,32 +454,43 @@ export function migrateLegacyState(
     ...(st.pending ? { pending: { ...st.pending, spoolPath: moveSpool(st.pending.spoolPath) } } : {}),
   });
 
+  // Everything this attempt wrote, so a failure can restore the previous state exactly.
+  const written: string[] = [];
+  let previousRoomState: string | null = null;
   try {
-    const existing = readLivePumpState(newState);
+    const existingRaw = existsSync(newState) ? readFileSync(newState, "utf-8") : null;
+    const existing = existingRaw ? readLivePumpState(newState) : null;
+
     if (existing) {
-      // Idempotent retry: a crash may have left the new state pointing at legacy spools.
-      writeLivePumpState(newState, rewrite(existing));
+      // Conflict check FIRST: a legacy state with an unconfirmed WAL must not be touched, and
+      // moving spools before deciding would break the legacy copy the operator is told to check.
+      let legacy: LivePumpState | null = null;
       if (existsSync(oldState)) {
-        const legacy = readLivePumpState(oldState);
-        // An unreadable legacy file may hold an unconfirmed WAL: never delete it.
+        legacy = readLivePumpState(oldState);
         if (!legacy) {
           log(`[live-pump] ⚠️ 旧位置状态无法读取,拒绝自动清理: ${oldState}`);
           return "conflict";
         }
         if (legacy.pending || legacy.parts.some((x) => !x.confirmed)) {
-          // Two states for one room and one of them has an unconfirmed WAL: never guess.
           log(`[live-pump] ⚠️ 房间目录与旧位置各有一份状态,旧状态含未确认分 P,拒绝自动选择: ${oldState}`);
           return "conflict";
         }
-        unlinkSync(oldState);
       }
+      // Idempotent retry: a crash may have left the room state pointing at legacy spools.
+      previousRoomState = existingRaw;
+      const rewritten = rewrite(existing);
+      writeLivePumpState(newState, rewritten);
+      written.push(newState);
+      if (legacy) unlinkSync(oldState);
       return "ok";
     }
+
     if (!existsSync(oldState)) return "none";
     const state = readLivePumpState(oldState);
     if (!state) return "failed"; // unreadable: leave it authoritative at the legacy location
     // Stage a readable state at the new location first. Spools still live at their old paths.
     writeLivePumpState(newState, state);
+    written.push(newState);
     const rewritten = rewrite(state);
     const archivedPrefix = basename(oldState) + ARCHIVED_SUFFIX;
     let archived: string[] = [];
@@ -491,13 +502,24 @@ export function migrateLegacyState(
       archivedRewrites.push({ file: f, state: rewrite(st) });
     }
     writeLivePumpState(newState, rewritten);
-    for (const a2 of archivedRewrites) writeLivePumpState(join(newDir, a2.file), a2.state);
+    for (const a2 of archivedRewrites) {
+      const dest = join(newDir, a2.file);
+      writeLivePumpState(dest, a2.state);
+      written.push(dest);
+    }
     for (const f of archived) unlinkSync(join(oldDir, f));
     unlinkSync(oldState);
     log(`[live-pump] 旧状态已迁入房间目录: ${newState}`);
     return "ok";
   } catch (e) {
+    // All-or-nothing: restore the room state we overwrote (or delete the staged copy), remove
+    // archived copies written by this attempt, and move spools back. The legacy state stays.
     rollback();
+    try {
+      if (previousRoomState != null) writeFileSync(newState, previousRoomState, "utf-8");
+      else for (const f of written) if (f === newState) rmSync(f, { force: true });
+      for (const f of written) if (f !== newState) rmSync(f, { force: true });
+    } catch { /* best effort; the legacy state is still authoritative */ }
     log(`[live-pump] ⚠️ 旧状态迁入房间目录失败,继续使用旧位置: ${(e as Error)?.message ?? e}`);
     return "failed";
   }
