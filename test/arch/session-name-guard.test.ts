@@ -15,6 +15,11 @@ const OWNER = "packages/core/src/session-name.ts";
 /** 白名单:精确到「文件 + 变量名」,只豁免含该标记的那一行,文件其余行照常扫描。 */
 const ALLOW: { file: string; marker: string; reason: string }[] = [
   {
+    file: "packages/app/src/live-pump-spool.ts",
+    marker: "SPOOL_NAME_RE =",
+    reason: "0 落盘 spool 的孤儿清扫正则(issue #360):只匹配本模块创建的文件名,不做会话基名解析;held-gap 必须不匹配",
+  },
+  {
     file: "packages/orchestrator/src/session-plan.ts",
     marker: "UPLOAD_FILE_RE =",
     reason: "解析合并产物 `{base}_{NNN}[_danmu|_livechat].mp4` 的序号+变体,不是录制分段后缀",

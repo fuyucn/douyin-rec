@@ -2483,6 +2483,41 @@ describe("issue #360: spool naming and legacy state migration", () => {
     expect(readLivePumpState(livePumpStatePath(newDir, room))?.title).toBe("new");
   });
 
+  it("migrateLegacyState reports conflict and keeps the legacy file when it is unreadable next to a room state", () => {
+    const room = "douyin:123:2026-10-24";
+    const newDir = join(dir, "room");
+    writeLivePumpState(livePumpStatePath(newDir, room), {
+      schemaVersion: 1, room, createdAt: 2, title: "new", tid: 21, tag: "x", private: true, parts: [], updatedAt: Date.now(),
+    });
+    writeFileSync(livePumpStatePath(dir, room), "{not json");
+    expect(migrateLegacyState(dir, newDir, room)).toBe("conflict");
+    expect(existsSync(livePumpStatePath(dir, room))).toBe(true);
+  });
+
+  it("migrateLegacyState rolls back moved spools when a later rename fails", () => {
+    const room = "douyin:123:2026-10-24";
+    const newDir = join(dir, "room");
+    const p1 = join(dir, "live-pump-1792882544931-0.ts");
+    const p2 = join(dir, "live-pump-1792882544932-1.ts");
+    writeFileSync(p1, "a");
+    writeFileSync(p2, "b");
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      parts: [
+        { index: 0, spoolPath: p1, filename: "f", stem: "s", title: "P1", bytes: 1, durationSec: 1, confirmed: false },
+        { index: 1, spoolPath: p2, filename: "f", stem: "s", title: "P2", bytes: 1, durationSec: 1, confirmed: false },
+      ],
+      updatedAt: Date.now(),
+    });
+    mkdirSync(newDir, { recursive: true });
+    // Destination for the second spool already exists -> moveSpool throws mid-migration.
+    writeFileSync(join(newDir, "live-pump-1792882544932-1.ts"), "conflict");
+    expect(migrateLegacyState(dir, newDir, room)).toBe("failed");
+    expect(existsSync(p1)).toBe(true);
+    expect(existsSync(p2)).toBe(true);
+    expect(readLivePumpState(livePumpStatePath(dir, room))?.title).toBe("t");
+  });
+
   it("migrateLegacyState reports conflict when the legacy state still has an unconfirmed part", () => {
     const room = "douyin:123:2026-10-24";
     const newDir = join(dir, "room");

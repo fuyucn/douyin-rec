@@ -19,9 +19,7 @@ import { basename, join } from "node:path";
  *  - room layout: `live-pump-<anchor>_<date>_<HH-mm-ss>_<NNN>.ts`
  * The held-gap rename (`.held-gap.ts`) deliberately does NOT match: a held sample must survive.
  */
-// The three-digit segment suffix is spelled out (\d\d\d) on purpose: the architecture guard
-// forbids a second `_\d{3}` literal outside core's session-name module.
-const SPOOL_NAME_RE = /^live-pump-(?:\d+-\d+|.+(?:_\d\d\d\d-\d\d-\d\d_\d\d-\d\d-\d\d)_\d\d\d\d*)\.ts$/;
+const SPOOL_NAME_RE = /^live-pump-(?:\d+-\d+|.+(?:_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})_\d{3,})\.ts$/;
 /** Grace window protecting a file another pump may still be writing. */
 export const ORPHAN_SPOOL_GRACE_MS = 10 * 60_000;
 

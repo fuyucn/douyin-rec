@@ -426,6 +426,9 @@ export function migrateLegacyState(
   const newState = livePumpStatePath(newDir, room);
   mkdirSync(newDir, { recursive: true });
 
+  // Every spool moved so far, so a mid-way failure can be rolled back and the legacy state stays
+  // consistent with the files on disk (a half-moved set would make the fallback run lose parts).
+  const moved: Array<{ from: string; to: string }> = [];
   const moveSpool = (p: string): string => {
     if (dirname(p) !== oldDir) return p;
     const dest = join(newDir, basename(p));
@@ -436,7 +439,14 @@ export function migrateLegacyState(
     }
     if (!existsSync(p)) return p; // already moved (retry) or gone; keep the recorded path
     renameSync(p, dest);
+    moved.push({ from: p, to: dest });
     return dest;
+  };
+  const rollback = (): void => {
+    for (const m of moved.reverse()) {
+      try { if (existsSync(m.to) && !existsSync(m.from)) renameSync(m.to, m.from); } catch { /* best effort */ }
+    }
+    moved.length = 0;
   };
   const rewrite = (st: LivePumpState): LivePumpState => ({
     ...st,
@@ -451,8 +461,12 @@ export function migrateLegacyState(
       writeLivePumpState(newState, rewrite(existing));
       if (existsSync(oldState)) {
         const legacy = readLivePumpState(oldState);
-        const legacyUnconfirmed = !!legacy && (!!legacy.pending || legacy.parts.some((x) => !x.confirmed));
-        if (legacyUnconfirmed) {
+        // An unreadable legacy file may hold an unconfirmed WAL: never delete it.
+        if (!legacy) {
+          log(`[live-pump] ⚠️ 旧位置状态无法读取,拒绝自动清理: ${oldState}`);
+          return "conflict";
+        }
+        if (legacy.pending || legacy.parts.some((x) => !x.confirmed)) {
           // Two states for one room and one of them has an unconfirmed WAL: never guess.
           log(`[live-pump] ⚠️ 房间目录与旧位置各有一份状态,旧状态含未确认分 P,拒绝自动选择: ${oldState}`);
           return "conflict";
@@ -466,20 +480,24 @@ export function migrateLegacyState(
     if (!state) return "failed"; // unreadable: leave it authoritative at the legacy location
     // Stage a readable state at the new location first. Spools still live at their old paths.
     writeLivePumpState(newState, state);
-    writeLivePumpState(newState, rewrite(state));
+    const rewritten = rewrite(state);
     const archivedPrefix = basename(oldState) + ARCHIVED_SUFFIX;
     let archived: string[] = [];
     try { archived = readdirSync(oldDir).filter((f) => f.startsWith(archivedPrefix)); } catch { /* none */ }
+    const archivedRewrites: Array<{ file: string; state: LivePumpState }> = [];
     for (const f of archived) {
       const st = readLivePumpState(join(oldDir, f));
       if (!st) continue;
-      writeLivePumpState(join(newDir, f), rewrite(st));
-      unlinkSync(join(oldDir, f));
+      archivedRewrites.push({ file: f, state: rewrite(st) });
     }
+    writeLivePumpState(newState, rewritten);
+    for (const a2 of archivedRewrites) writeLivePumpState(join(newDir, a2.file), a2.state);
+    for (const f of archived) unlinkSync(join(oldDir, f));
     unlinkSync(oldState);
     log(`[live-pump] 旧状态已迁入房间目录: ${newState}`);
     return "ok";
   } catch (e) {
+    rollback();
     log(`[live-pump] ⚠️ 旧状态迁入房间目录失败,继续使用旧位置: ${(e as Error)?.message ?? e}`);
     return "failed";
   }

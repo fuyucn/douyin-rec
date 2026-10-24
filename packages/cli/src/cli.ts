@@ -418,7 +418,7 @@ program
           // Anchor to the wall clock at connect time: parts are sealed by byte/duration, so a
           // single session-level axis is the only stable reference for burn/part slicing.
           const startMs = Date.now();
-          xmlPath = zeroDiskXmlPath(pumpFilesDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs, undefined, pumpAnchor);
+          xmlPath = zeroDiskXmlPath(pumpFilesDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs, undefined, pumpLayout === "room" ? pumpAnchor : undefined);
           writer.open(xmlPath, { anchorName, roomId: platform.extractRoomSlug(roomToUrl(o.room)), videoStartMs: startMs });
           writerOpened = true;
           await danmuSource.start(roomToUrl(o.room), {
@@ -433,7 +433,7 @@ program
           if (writerOpened) writer.close();
         },
       } : undefined;
-      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${pumpFilesDir}/live-pump-<主播名>_<开播时间>.xml`);
+      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${pumpFilesDir}/live-pump-${pumpLayout === "room" ? "<主播名>_" : "<room>_"}<开播时间>.xml`);
       // Remove spools left by a pump killed mid-part. They never reached the state file, so
       // nothing else would ever delete them. Only old, unreferenced files are touched.
       // The keep-set is `spoolPathsToKeep` (single source of truth next to the state shape):
@@ -452,7 +452,21 @@ program
         // to clean. Only the legacy name generation matches there, so room-layout files in a
         // directory shared with an old run are not touched.
         if (pumpFilesDir !== opts.outDir) {
-          sweepOrphanSpools({ spoolDir: opts.outDir, knownSpoolPaths: [], log: (m) => console.log(m) });
+          // Root spools may still be referenced by another room's legacy state or by a legacy
+          // archived state: collect every root state's spools before sweeping. An unreadable
+          // root state means the keep-set is unknown, so skip (never guess).
+          const rootKeep: string[] = [];
+          let rootSafe = true;
+          try {
+            for (const f of readdirSync(opts.outDir)) {
+              if (!/^live-pump-.+\.state\.json(?:\..*)?$/.test(f)) continue;
+              const st2 = readLivePumpState(join(opts.outDir, f));
+              if (!st2) { rootSafe = false; break; }
+              rootKeep.push(...spoolPathsToKeep(st2));
+            }
+          } catch { /* no root dir: nothing to protect */ }
+          if (rootSafe) sweepOrphanSpools({ spoolDir: opts.outDir, knownSpoolPaths: rootKeep, log: (m) => console.log(m) });
+          else console.log("[live-pump] 根目录存在无法读取的旧状态,跳过根目录清扫(避免误删其引用的暂存文件)");
         }
       } else {
         console.log("[live-pump] 存在无法读取的旧状态,跳过孤儿 spool 清扫(避免误删其引用的暂存文件)");
