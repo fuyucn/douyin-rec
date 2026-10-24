@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-111 0 落盘 spool/状态/弹幕迁入房间目录并带主播名（issue [#360](https://github.com/fuyucn/douyin-rec/issues/360)）**
+  — 2026-10-24 认领,分支 `codex/issue-360-zero-disk-room-files`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**;动 0 落盘落盘路径与清扫,RISK,需人拍板）。
+  **做什么**：房间布局开启时,spool/状态/弹幕落在 `主播名_平台_房间号` 目录;spool 与弹幕文件名带主播名与开播时间;旧根目录状态与其引用 spool 原子迁入并改写路径;孤儿清扫同时认新旧两代名字,永不删 held-gap。
+  **为什么**：0 落盘三件套散落在录像根目录,文件名看不出房间与场次,和已上线的房间目录不一致。
+  **验收**：新会话三件套都在房间目录;旧状态窗口内可迁入续稿;旧格式 spool 仍可清扫与恢复;全量测试 / 类型 / bundle 通过。
+
 - [~] **T-110 同场等待窗口由 60 分钟缩短为 30 分钟（issue [#358](https://github.com/fuyucn/douyin-rec/issues/358)）**
   — 2026-10-23 认领,分支 `codex/issue-gap30-reconnect-window`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**;动同场口径与 hub 规则,RISK,需人拍板;人已指定 30 分钟）。
   **做什么**：core 同场间隔常量由 60 改为 30 分钟,重连等待、聚类容差、手动重跑守卫、边录边传续稿共用;示例配置、文档、测试同步。
