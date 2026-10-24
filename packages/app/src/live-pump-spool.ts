@@ -21,7 +21,7 @@ import { basename, join } from "node:path";
  */
 // The three-digit segment suffix is spelled out (\d\d\d) on purpose: the architecture guard
 // forbids a second `_\d{3}` literal outside core's session-name module.
-const SPOOL_NAME_RE = /^live-pump-(?:\d+-\d+|.+(?:_\d\d\d\d-\d\d-\d\d_\d\d-\d\d-\d\d)_\d\d\d)\.ts$/;
+const SPOOL_NAME_RE = /^live-pump-(?:\d+-\d+|.+(?:_\d\d\d\d-\d\d-\d\d_\d\d-\d\d-\d\d)_\d\d\d\d*)\.ts$/;
 /** Grace window protecting a file another pump may still be writing. */
 export const ORPHAN_SPOOL_GRACE_MS = 10 * 60_000;
 

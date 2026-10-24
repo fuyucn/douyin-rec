@@ -322,9 +322,25 @@ program
             platform: platform.id, roomSlug, anchorName: pumpAnchor || roomSlug,
           }, { layout: "room" }) ?? opts.outDir)
         : opts.outDir;
-      if (pumpSpoolDir !== opts.outDir) {
+      // A failed migration must never start a fresh archive: the unconfirmed WAL would stay at
+      // the legacy location and the new run would create a duplicate submission. Keep using the
+      // legacy directory for this process instead (it is readable by the same code paths).
+      let pumpFilesDir = pumpSpoolDir;
+      if (pumpFilesDir !== opts.outDir) {
         mkdirSync(pumpSpoolDir, { recursive: true });
-        migrateLegacyState(opts.outDir, pumpSpoolDir, pumpRoom, (m) => console.log(m));
+        const migrated = migrateLegacyState(opts.outDir, pumpSpoolDir, pumpRoom, (m) => console.log(m));
+        if (migrated === "conflict") {
+          // Two states, one with an unconfirmed WAL: picking either risks a duplicate archive or
+          // a stranded part. Refuse this run; a human must reconcile.
+          const msg = "0 落盘拒绝启动: 房间目录与旧位置各有一份状态,且旧状态含未确认分 P";
+          console.error(`[stream-upload] ${msg}`);
+          await notifier.notify({ kind: "error", stage: "0落盘", message: msg }).catch(() => {});
+          process.exit(2);
+        }
+        if (migrated === "failed") {
+          pumpFilesDir = opts.outDir;
+          console.log("[live-pump] ⚠️ 旧状态未能迁入房间目录,本次继续使用旧位置(不新开稿件)");
+        }
       }
       // Hub-managed side node (issue #331): the master-delivered object is the ONLY source of upload
       // metadata and the account to verify. The node's rule directory is empty, so reading it would
@@ -402,7 +418,7 @@ program
           // Anchor to the wall clock at connect time: parts are sealed by byte/duration, so a
           // single session-level axis is the only stable reference for burn/part slicing.
           const startMs = Date.now();
-          xmlPath = zeroDiskXmlPath(pumpSpoolDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs, undefined, pumpAnchor);
+          xmlPath = zeroDiskXmlPath(pumpFilesDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs, undefined, pumpAnchor);
           writer.open(xmlPath, { anchorName, roomId: platform.extractRoomSlug(roomToUrl(o.room)), videoStartMs: startMs });
           writerOpened = true;
           await danmuSource.start(roomToUrl(o.room), {
@@ -417,21 +433,27 @@ program
           if (writerOpened) writer.close();
         },
       } : undefined;
-      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${pumpSpoolDir}/live-pump-<主播名>_<开播时间>.xml`);
+      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${pumpFilesDir}/live-pump-<主播名>_<开播时间>.xml`);
       // Remove spools left by a pump killed mid-part. They never reached the state file, so
       // nothing else would ever delete them. Only old, unreferenced files are touched.
       // The keep-set is `spoolPathsToKeep` (single source of truth next to the state shape):
       // it covers `parts` *and* `pending`. `pending` is the WAL of an upload whose outcome was
       // never persisted, and recovery re-uploads that whole file — listing only `parts` would
       // delete the last copy of an interrupted part (real data loss, found by review #280).
-      const st = readLivePumpState(livePumpStatePath(pumpSpoolDir, pumpRoom));
+      const st = readLivePumpState(livePumpStatePath(pumpFilesDir, pumpRoom));
       // An unreadable live/archived state references unknown spool files: skip the sweep entirely.
-      if (spoolSweepSafe(pumpSpoolDir, pumpRoom)) {
+      if (spoolSweepSafe(pumpFilesDir, pumpRoom)) {
         sweepOrphanSpools({
-          spoolDir: pumpSpoolDir,
-          knownSpoolPaths: [...spoolPathsToKeep(st), ...archivedSpoolPathsToKeep(pumpSpoolDir, pumpRoom)],
+          spoolDir: pumpFilesDir,
+          knownSpoolPaths: [...spoolPathsToKeep(st), ...archivedSpoolPathsToKeep(pumpFilesDir, pumpRoom)],
           log: (m) => console.log(m),
         });
+        // Issue #360: spools orphaned in the root before the layout switch are nobody's else's
+        // to clean. Only the legacy name generation matches there, so room-layout files in a
+        // directory shared with an old run are not touched.
+        if (pumpFilesDir !== opts.outDir) {
+          sweepOrphanSpools({ spoolDir: opts.outDir, knownSpoolPaths: [], log: (m) => console.log(m) });
+        }
       } else {
         console.log("[live-pump] 存在无法读取的旧状态,跳过孤儿 spool 清扫(避免误删其引用的暂存文件)");
       }
@@ -475,7 +497,7 @@ program
           };
         },
         quality: (o.quality ?? cfg.quality ?? platform.defaultQuality) as RecordOpts["quality"],
-        spoolDir: pumpSpoolDir,
+        spoolDir: pumpFilesDir,
         ...(pumpLayout === "room" ? {
           // Issue #360: name carries the anchor and the broadcast start so a spool is
           // identifiable outside the state file. Segment index is zero-padded to 3 like recordings.

@@ -2460,7 +2460,7 @@ describe("issue #360: spool naming and legacy state migration", () => {
       parts: [{ index: 0, spoolPath: spool, filename: "f", stem: "s", title: "P1", bytes: 1, durationSec: 1, confirmed: false }],
       updatedAt: Date.now(),
     });
-    expect(migrateLegacyState(oldDir, newDir, room)).toBe(true);
+    expect(migrateLegacyState(oldDir, newDir, room)).toBe("ok");
     const moved = readLivePumpState(livePumpStatePath(newDir, room));
     expect(moved?.parts[0]?.spoolPath).toBe(join(newDir, "live-pump-1792882544931-0.ts"));
     expect(existsSync(join(newDir, "live-pump-1792882544931-0.ts"))).toBe(true);
@@ -2468,7 +2468,7 @@ describe("issue #360: spool naming and legacy state migration", () => {
     expect(existsSync(livePumpStatePath(oldDir, room))).toBe(false);
   });
 
-  it("migrateLegacyState never overwrites an existing room state and leaves the old one in place", () => {
+  it("migrateLegacyState never overwrites an existing room state", () => {
     const room = "douyin:123:2026-10-24";
     const newDir = join(dir, "room");
     writeLivePumpState(livePumpStatePath(dir, room), {
@@ -2477,8 +2477,33 @@ describe("issue #360: spool naming and legacy state migration", () => {
     writeLivePumpState(livePumpStatePath(newDir, room), {
       schemaVersion: 1, room, createdAt: 2, title: "new", tid: 21, tag: "x", private: true, parts: [], updatedAt: Date.now(),
     });
-    expect(migrateLegacyState(dir, newDir, room)).toBe(false);
-    expect(readLivePumpState(livePumpStatePath(dir, room))?.title).toBe("old");
+    // Both states exist: the room state is authoritative and the legacy file is left in place
+    // (the caller falls back to it only when the room state cannot be read at all).
+    expect(migrateLegacyState(dir, newDir, room)).toBe("ok");
     expect(readLivePumpState(livePumpStatePath(newDir, room))?.title).toBe("new");
+  });
+
+  it("migrateLegacyState reports conflict when the legacy state still has an unconfirmed part", () => {
+    const room = "douyin:123:2026-10-24";
+    const newDir = join(dir, "room");
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "old", tid: 21, tag: "x", private: true,
+      parts: [{ index: 0, spoolPath: join(dir, "p.ts"), filename: "f", stem: "s", title: "P1", bytes: 1, durationSec: 1, confirmed: false }],
+      updatedAt: Date.now(),
+    });
+    writeLivePumpState(livePumpStatePath(newDir, room), {
+      schemaVersion: 1, room, createdAt: 2, title: "new", tid: 21, tag: "x", private: true, parts: [], updatedAt: Date.now(),
+    });
+    expect(migrateLegacyState(dir, newDir, room)).toBe("conflict");
+  });
+
+  it("migrateLegacyState returns failed and moves nothing when the legacy state is unreadable", () => {
+    const room = "douyin:123:2026-10-24";
+    const newDir = join(dir, "room");
+    writeFileSync(livePumpStatePath(dir, room), "{not json");
+    const spool = join(dir, "live-pump-1792882544931-0.ts");
+    writeFileSync(spool, "x");
+    expect(migrateLegacyState(dir, newDir, room)).toBe("failed");
+    expect(existsSync(spool)).toBe(true);
   });
 });

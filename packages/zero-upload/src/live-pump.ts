@@ -405,37 +405,37 @@ export function archivedSpoolPathsToKeep(spoolDir: string, room: string): string
 
 /**
  * Move a legacy root-level state file (and the spool files it references) into the room
- * directory (issue #360). Best effort: when anything cannot be moved the old state is left in
- * place and returned as-is, so a running broadcast keeps resuming instead of losing its WAL.
+ * directory (issue #360). Returns true when the room directory now owns a readable state.
  *
- * The state file is moved last, so a crash mid-migration leaves the old state authoritative.
- * Archived states move too, with their spool paths rewritten, because the orphan sweep uses
- * those paths to protect unconfirmed parts.
+ * Crash-safe ordering: the new state is written first (still pointing at the legacy spool
+ * paths), then the spools move, then the state is rewritten with the new paths, and only then
+ * is the old state removed. A crash at any point leaves a readable state whose spool paths
+ * exist; the next start re-runs this idempotently. Never moves spools when the state cannot be
+ * read, so an unreadable WAL stays authoritative at the legacy location.
  */
+export type MigrateResult = "ok" | "none" | "failed" | "conflict";
+
 export function migrateLegacyState(
   oldDir: string,
   newDir: string,
   room: string,
   log: (msg: string) => void = () => {},
-): boolean {
-  if (oldDir === newDir) return false;
+): MigrateResult {
+  if (oldDir === newDir) return "none";
   const oldState = livePumpStatePath(oldDir, room);
   const newState = livePumpStatePath(newDir, room);
-  if (!existsSync(oldState) || existsSync(newState)) return false;
   mkdirSync(newDir, { recursive: true });
-  const base = basename(oldState);
-  const moved = new Map<string, string>();
+
   const moveSpool = (p: string): string => {
-    const done = moved.get(p);
-    if (done) return done;
+    if (dirname(p) !== oldDir) return p;
     const dest = join(newDir, basename(p));
-    try {
-      if (existsSync(p) && !existsSync(dest)) renameSync(p, dest);
-      else if (!existsSync(dest)) return p; // missing spool: keep the recorded path unchanged
-    } catch {
-      return p;
+    if (existsSync(dest)) {
+      // Both copies exist: refuse to guess which one the WAL means.
+      if (existsSync(p)) throw new Error(`spool 目标已存在: ${dest}`);
+      return dest;
     }
-    moved.set(p, dest);
+    if (!existsSync(p)) return p; // already moved (retry) or gone; keep the recorded path
+    renameSync(p, dest);
     return dest;
   };
   const rewrite = (st: LivePumpState): LivePumpState => ({
@@ -443,26 +443,45 @@ export function migrateLegacyState(
     parts: st.parts.map((part) => ({ ...part, spoolPath: moveSpool(part.spoolPath) })),
     ...(st.pending ? { pending: { ...st.pending, spoolPath: moveSpool(st.pending.spoolPath) } } : {}),
   });
+
   try {
+    const existing = readLivePumpState(newState);
+    if (existing) {
+      // Idempotent retry: a crash may have left the new state pointing at legacy spools.
+      writeLivePumpState(newState, rewrite(existing));
+      if (existsSync(oldState)) {
+        const legacy = readLivePumpState(oldState);
+        const legacyUnconfirmed = !!legacy && (!!legacy.pending || legacy.parts.some((x) => !x.confirmed));
+        if (legacyUnconfirmed) {
+          // Two states for one room and one of them has an unconfirmed WAL: never guess.
+          log(`[live-pump] ⚠️ 房间目录与旧位置各有一份状态,旧状态含未确认分 P,拒绝自动选择: ${oldState}`);
+          return "conflict";
+        }
+        unlinkSync(oldState);
+      }
+      return "ok";
+    }
+    if (!existsSync(oldState)) return "none";
     const state = readLivePumpState(oldState);
-    if (!state) return false; // unreadable: keep the legacy file where it is
-    const archivedPrefix = base + ARCHIVED_SUFFIX;
+    if (!state) return "failed"; // unreadable: leave it authoritative at the legacy location
+    // Stage a readable state at the new location first. Spools still live at their old paths.
+    writeLivePumpState(newState, state);
+    writeLivePumpState(newState, rewrite(state));
+    const archivedPrefix = basename(oldState) + ARCHIVED_SUFFIX;
     let archived: string[] = [];
     try { archived = readdirSync(oldDir).filter((f) => f.startsWith(archivedPrefix)); } catch { /* none */ }
-    // Archived states first: they only protect spools, the live state is the one that must move last.
     for (const f of archived) {
       const st = readLivePumpState(join(oldDir, f));
       if (!st) continue;
       writeLivePumpState(join(newDir, f), rewrite(st));
       unlinkSync(join(oldDir, f));
     }
-    writeLivePumpState(newState, rewrite(state));
     unlinkSync(oldState);
     log(`[live-pump] 旧状态已迁入房间目录: ${newState}`);
-    return true;
+    return "ok";
   } catch (e) {
     log(`[live-pump] ⚠️ 旧状态迁入房间目录失败,继续使用旧位置: ${(e as Error)?.message ?? e}`);
-    return false;
+    return "failed";
   }
 }
 
