@@ -86,15 +86,15 @@ describe("issue #360: room-layout spool names", () => {
   it("sweeps both generations but never the held-gap sample", () => {
     const dir = mkdtempSync(join(tmpdir(), "live-pump-sweep-360-"));
     try {
-      const old = join(dir, "live-pump-1792882544931-0.ts");
+      const old = join(dir, `live-pump-${Date.UTC(2026, 9, 24, 23, 22, 24)}-0.ts`);
       const room = join(dir, "live-pump-云念_2026-10-24_06-55-49_000.ts");
       const held = join(dir, "live-pump-云念_2026-10-24_06-55-49_000.held-gap.ts");
-      const state = join(dir, "live-pump-49773661843.state.json");
+      const state = join(dir, "live-pump-room360.state.json");
       for (const f of [old, room, held, state]) writeFileSync(f, "x");
       const oldTime = new Date(Date.now() - ORPHAN_SPOOL_GRACE_MS - 60_000);
       for (const f of [old, room, held, state]) utimesSync(f, oldTime, oldTime);
       const removed = sweepOrphanSpools({ spoolDir: dir, knownSpoolPaths: [] });
-      expect(removed.sort()).toEqual(["live-pump-1792882544931-0.ts", "live-pump-云念_2026-10-24_06-55-49_000.ts"].sort());
+      expect(removed.sort()).toEqual([`live-pump-${Date.UTC(2026, 9, 24, 23, 22, 24)}-0.ts`, "live-pump-云念_2026-10-24_06-55-49_000.ts"].sort());
       expect(existsSync(held)).toBe(true);
       expect(existsSync(state)).toBe(true);
     } finally { rmSync(dir, { recursive: true, force: true }); }

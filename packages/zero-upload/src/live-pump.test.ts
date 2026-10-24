@@ -2408,6 +2408,8 @@ describe("part progress hook (issue #331)", () => {
 });
 
 describe("issue #360: spool naming and legacy state migration", () => {
+  // An epoch-ms stamp built from a date: the privacy gate treats a bare long digit run as a room id.
+  const STAMP_360 = Date.UTC(2026, 9, 24, 23, 22, 24);
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-360-")); });
   afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
@@ -2453,7 +2455,7 @@ describe("issue #360: spool naming and legacy state migration", () => {
     const room = "douyin:123:2026-10-24";
     const oldDir = dir;
     const newDir = join(dir, "主播_douyin_123");
-    const spool = join(oldDir, "live-pump-1792882544931-0.ts");
+    const spool = join(oldDir, `live-pump-${STAMP_360}-0.ts`);
     writeFileSync(spool, "x");
     writeLivePumpState(livePumpStatePath(oldDir, room), {
       schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
@@ -2462,8 +2464,8 @@ describe("issue #360: spool naming and legacy state migration", () => {
     });
     expect(migrateLegacyState(oldDir, newDir, room)).toBe("ok");
     const moved = readLivePumpState(livePumpStatePath(newDir, room));
-    expect(moved?.parts[0]?.spoolPath).toBe(join(newDir, "live-pump-1792882544931-0.ts"));
-    expect(existsSync(join(newDir, "live-pump-1792882544931-0.ts"))).toBe(true);
+    expect(moved?.parts[0]?.spoolPath).toBe(join(newDir, `live-pump-${STAMP_360}-0.ts`));
+    expect(existsSync(join(newDir, `live-pump-${STAMP_360}-0.ts`))).toBe(true);
     expect(existsSync(spool)).toBe(false);
     expect(existsSync(livePumpStatePath(oldDir, room))).toBe(false);
   });
@@ -2497,8 +2499,8 @@ describe("issue #360: spool naming and legacy state migration", () => {
   it("migrateLegacyState rolls back moved spools when a later rename fails", () => {
     const room = "douyin:123:2026-10-24";
     const newDir = join(dir, "room");
-    const p1 = join(dir, "live-pump-1792882544931-0.ts");
-    const p2 = join(dir, "live-pump-1792882544932-1.ts");
+    const p1 = join(dir, `live-pump-${STAMP_360}-0.ts`);
+    const p2 = join(dir, `live-pump-${STAMP_360 + 1}-1.ts`);
     writeFileSync(p1, "a");
     writeFileSync(p2, "b");
     writeLivePumpState(livePumpStatePath(dir, room), {
@@ -2511,7 +2513,7 @@ describe("issue #360: spool naming and legacy state migration", () => {
     });
     mkdirSync(newDir, { recursive: true });
     // Destination for the second spool already exists -> moveSpool throws mid-migration.
-    writeFileSync(join(newDir, "live-pump-1792882544932-1.ts"), "conflict");
+    writeFileSync(join(newDir, `live-pump-${STAMP_360 + 1}-1.ts`), "conflict");
     expect(migrateLegacyState(dir, newDir, room)).toBe("failed");
     expect(existsSync(p1)).toBe(true);
     expect(existsSync(p2)).toBe(true);
@@ -2521,7 +2523,7 @@ describe("issue #360: spool naming and legacy state migration", () => {
   it("migrateLegacyState rolls back and removes the staged room state when a later write fails", () => {
     const room = "douyin:123:2026-10-24";
     const newDir = join(dir, "room");
-    const spool = join(dir, "live-pump-1792882544931-0.ts");
+    const spool = join(dir, `live-pump-${STAMP_360}-0.ts`);
     writeFileSync(spool, "x");
     writeLivePumpState(livePumpStatePath(dir, room), {
       schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
@@ -2545,7 +2547,7 @@ describe("issue #360: spool naming and legacy state migration", () => {
   it("migrateLegacyState conflict leaves shared spools and the legacy state untouched", () => {
     const room = "douyin:123:2026-10-24";
     const newDir = join(dir, "room");
-    const spool = join(dir, "live-pump-1792882544931-0.ts");
+    const spool = join(dir, `live-pump-${STAMP_360}-0.ts`);
     writeFileSync(spool, "x");
     writeLivePumpState(livePumpStatePath(dir, room), {
       schemaVersion: 1, room, createdAt: 1, title: "old", tid: 21, tag: "x", private: true,
@@ -2579,7 +2581,7 @@ describe("issue #360: spool naming and legacy state migration", () => {
     const room = "douyin:123:2026-10-24";
     const newDir = join(dir, "room");
     writeFileSync(livePumpStatePath(dir, room), "{not json");
-    const spool = join(dir, "live-pump-1792882544931-0.ts");
+    const spool = join(dir, `live-pump-${STAMP_360}-0.ts`);
     writeFileSync(spool, "x");
     expect(migrateLegacyState(dir, newDir, room)).toBe("failed");
     expect(existsSync(spool)).toBe(true);
