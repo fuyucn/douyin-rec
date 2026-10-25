@@ -301,7 +301,7 @@ program
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
-      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe, migrateLegacyState } = await import("@drec/zero-upload");
+      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe, resolvePumpDir } = await import("@drec/zero-upload");
       const {
         rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta,
         resolveStreamUploadTitle, resolveStreamPartTitle,
@@ -322,26 +322,14 @@ program
             platform: platform.id, roomSlug, anchorName: pumpAnchor || roomSlug,
           }, { layout: "room" }) ?? opts.outDir)
         : opts.outDir;
-      // A failed migration must never start a fresh archive: the unconfirmed WAL would stay at
-      // the legacy location and the new run would create a duplicate submission. Keep using the
-      // legacy directory for this process instead (it is readable by the same code paths).
-      let pumpFilesDir = pumpSpoolDir;
-      if (pumpFilesDir !== opts.outDir) {
-        mkdirSync(pumpSpoolDir, { recursive: true });
-        const migrated = migrateLegacyState(opts.outDir, pumpSpoolDir, pumpRoom, (m) => console.log(m));
-        if (migrated === "conflict") {
-          // Two states, one with an unconfirmed WAL: picking either risks a duplicate archive or
-          // a stranded part. Refuse this run; a human must reconcile.
-          const msg = "0 落盘拒绝启动: 房间目录与旧位置各有一份状态,且旧状态含未确认分 P";
-          console.error(`[stream-upload] ${msg}`);
-          await notifier.notify({ kind: "error", stage: "0落盘", message: msg }).catch(() => {});
-          process.exit(2);
-        }
-        if (migrated === "failed") {
-          pumpFilesDir = opts.outDir;
-          console.log("[live-pump] ⚠️ 旧状态未能迁入房间目录,本次继续使用旧位置(不新开稿件)");
-        }
-      }
+      // Sticky directory: a broadcast that already has a legacy state keeps using the root, so
+      // an upgrade never moves a live archive or its unconfirmed WAL. New broadcasts use the
+      // room directory. Nothing is migrated, so there is no half-migrated state to lose.
+      const pumpFilesDir = pumpLayout === "room"
+        ? resolvePumpDir(pumpSpoolDir, opts.outDir, pumpRoom)
+        : opts.outDir;
+      if (pumpFilesDir !== opts.outDir) mkdirSync(pumpFilesDir, { recursive: true });
+
       // Hub-managed side node (issue #331): the master-delivered object is the ONLY source of upload
       // metadata and the account to verify. The node's rule directory is empty, so reading it would
       // silently fall back to defaults (private visibility, default title). Refuse instead.

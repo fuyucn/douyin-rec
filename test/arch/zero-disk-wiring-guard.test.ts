@@ -40,8 +40,8 @@ describe("record --stream-upload wiring (zero-disk)", () => {
     expect(block).toContain("zeroDiskRoom(platform, o.room)");
     expect(block).toContain("room: pumpRoom");
     expect(block).toContain("livePumpStatePath(pumpFilesDir, pumpRoom)");
-    // The legacy root is still read, but only through the migration step that normalizes room first.
-    expect(block).toContain("migrateLegacyState(opts.outDir, pumpSpoolDir, pumpRoom");
+    // A broadcast that already has a legacy state stays at the root (sticky, no migration).
+    expect(block).toContain("resolvePumpDir(pumpSpoolDir, opts.outDir, pumpRoom)");
     expect(block).not.toContain("room: o.room");
   });
 

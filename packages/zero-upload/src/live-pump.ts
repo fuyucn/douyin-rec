@@ -310,18 +310,13 @@ export function readLivePumpState(path: string): LivePumpState | null {
   }
 }
 
-export function writeLivePumpState(
-  path: string,
-  state: LivePumpState,
-  opts: { preserveUpdatedAt?: boolean } = {},
-): void {
+export function writeLivePumpState(path: string, state: LivePumpState): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp.${process.pid}.${Date.now().toString(36)}`;
   try {
     const fd = openSync(tmp, "w", 0o600);
     try {
-      const updatedAt = opts.preserveUpdatedAt ? state.updatedAt : Date.now();
-      writeFileSync(fd, JSON.stringify({ ...state, updatedAt }, null, 2), "utf-8");
+      writeFileSync(fd, JSON.stringify({ ...state, updatedAt: Date.now() }, null, 2), "utf-8");
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -409,134 +404,17 @@ export function archivedSpoolPathsToKeep(spoolDir: string, room: string): string
 }
 
 /**
- * Move a legacy root-level state file (and the spool files it references) into the room
- * directory (issue #360). Returns true when the room directory now owns a readable state.
+ * Which directory a zero-disk run must use (issue #360).
  *
- * Crash-safe ordering: the new state is written first (still pointing at the legacy spool
- * paths), then the spools move, then the state is rewritten with the new paths, and only then
- * is the old state removed. A crash at any point leaves a readable state whose spool paths
- * exist; the next start re-runs this idempotently. Never moves spools when the state cannot be
- * read, so an unreadable WAL stays authoritative at the legacy location.
+ * Sticky rule, same as the stage resolver: a broadcast whose state already lives in the legacy
+ * root keeps writing there until that broadcast ends, so an upgrade never moves a session (or
+ * its unconfirmed WAL and spools) underneath a running archive. Only a room with no legacy
+ * state moves to the room directory. No file is ever moved: the legacy path stays authoritative
+ * for its own broadcast, which removes the whole class of half-migration data loss.
  */
-export type MigrateResult = "ok" | "none" | "failed" | "conflict";
-
-export function migrateLegacyState(
-  oldDir: string,
-  newDir: string,
-  room: string,
-  log: (msg: string) => void = () => {},
-): MigrateResult {
-  if (oldDir === newDir) return "none";
-  const oldState = livePumpStatePath(oldDir, room);
-  const newState = livePumpStatePath(newDir, room);
-  mkdirSync(newDir, { recursive: true });
-
-  // Every spool moved so far, so a mid-way failure can be rolled back and the legacy state stays
-  // consistent with the files on disk (a half-moved set would make the fallback run lose parts).
-  const moved: Array<{ from: string; to: string }> = [];
-  const moveSpool = (p: string): string => {
-    if (dirname(p) !== oldDir) return p;
-    const dest = join(newDir, basename(p));
-    if (existsSync(dest)) {
-      // Both copies exist: refuse to guess which one the WAL means.
-      if (existsSync(p)) throw new Error(`spool 目标已存在: ${dest}`);
-      return dest;
-    }
-    if (!existsSync(p)) return p; // already moved (retry) or gone; keep the recorded path
-    renameSync(p, dest);
-    moved.push({ from: p, to: dest });
-    return dest;
-  };
-  const rollback = (): void => {
-    for (const m of moved.reverse()) {
-      try { if (existsSync(m.to) && !existsSync(m.from)) renameSync(m.to, m.from); } catch { /* best effort */ }
-    }
-    moved.length = 0;
-  };
-  const rewrite = (st: LivePumpState): LivePumpState => ({
-    ...st,
-    updatedAt: st.updatedAt,
-    parts: st.parts.map((part) => ({ ...part, spoolPath: moveSpool(part.spoolPath) })),
-    ...(st.pending ? { pending: { ...st.pending, spoolPath: moveSpool(st.pending.spoolPath) } } : {}),
-  });
-
-  // Everything this attempt wrote, so a failure can restore the previous state exactly.
-  const written: string[] = [];
-  let previousRoomState: string | null = null;
-  try {
-    const existingRaw = existsSync(newState) ? readFileSync(newState, "utf-8") : null;
-    const existing = existingRaw ? readLivePumpState(newState) : null;
-    if (existingRaw != null && !existing) {
-      // An unreadable room state may hold an unconfirmed WAL. Overwriting it with the legacy
-      // state would destroy the only record of that part, so never touch it automatically.
-      log(`[live-pump] ⚠️ 房间目录状态无法读取,拒绝覆盖: ${newState}`);
-      return "conflict";
-    }
-
-    if (existing) {
-      // Conflict check FIRST: a legacy state with an unconfirmed WAL must not be touched, and
-      // moving spools before deciding would break the legacy copy the operator is told to check.
-      let legacy: LivePumpState | null = null;
-      if (existsSync(oldState)) {
-        legacy = readLivePumpState(oldState);
-        if (!legacy) {
-          log(`[live-pump] ⚠️ 旧位置状态无法读取,拒绝自动清理: ${oldState}`);
-          return "conflict";
-        }
-        if (legacy.pending || legacy.parts.some((x) => !x.confirmed)) {
-          log(`[live-pump] ⚠️ 房间目录与旧位置各有一份状态,旧状态含未确认分 P,拒绝自动选择: ${oldState}`);
-          return "conflict";
-        }
-      }
-      // Idempotent retry: a crash may have left the room state pointing at legacy spools.
-      previousRoomState = existingRaw;
-      const rewritten = rewrite(existing);
-      writeLivePumpState(newState, rewritten, { preserveUpdatedAt: true });
-      written.push(newState);
-      if (legacy) unlinkSync(oldState);
-      return "ok";
-    }
-
-    if (!existsSync(oldState)) return "none";
-    const state = readLivePumpState(oldState);
-    if (!state) return "failed"; // unreadable: leave it authoritative at the legacy location
-    // Stage a readable state at the new location first. Spools still live at their old paths.
-    // Keep the original `updatedAt`: the same-broadcast rollover (issue #293) uses it, and a
-    // fresh stamp would make an old broadcast look like it is still current.
-    writeLivePumpState(newState, state, { preserveUpdatedAt: true });
-    written.push(newState);
-    const rewritten = rewrite(state);
-    const archivedPrefix = basename(oldState) + ARCHIVED_SUFFIX;
-    let archived: string[] = [];
-    try { archived = readdirSync(oldDir).filter((f) => f.startsWith(archivedPrefix)); } catch { /* none */ }
-    const archivedRewrites: Array<{ file: string; state: LivePumpState }> = [];
-    for (const f of archived) {
-      const st = readLivePumpState(join(oldDir, f));
-      if (!st) continue;
-      archivedRewrites.push({ file: f, state: rewrite(st) });
-    }
-    writeLivePumpState(newState, rewritten, { preserveUpdatedAt: true });
-    for (const a2 of archivedRewrites) {
-      const dest = join(newDir, a2.file);
-      writeLivePumpState(dest, a2.state);
-      written.push(dest);
-    }
-    for (const f of archived) unlinkSync(join(oldDir, f));
-    unlinkSync(oldState);
-    log(`[live-pump] 旧状态已迁入房间目录: ${newState}`);
-    return "ok";
-  } catch (e) {
-    // All-or-nothing: restore the room state we overwrote (or delete the staged copy), remove
-    // archived copies written by this attempt, and move spools back. The legacy state stays.
-    rollback();
-    try {
-      if (previousRoomState != null) writeFileSync(newState, previousRoomState, "utf-8");
-      else for (const f of written) if (f === newState) rmSync(f, { force: true });
-      for (const f of written) if (f !== newState) rmSync(f, { force: true });
-    } catch { /* best effort; the legacy state is still authoritative */ }
-    log(`[live-pump] ⚠️ 旧状态迁入房间目录失败,继续使用旧位置: ${(e as Error)?.message ?? e}`);
-    return "failed";
-  }
+export function resolvePumpDir(roomDir: string, legacyDir: string, room: string): string {
+  if (roomDir === legacyDir) return legacyDir;
+  return existsSync(livePumpStatePath(legacyDir, room)) ? legacyDir : roomDir;
 }
 
 export interface LivePumpSessionOpts {
