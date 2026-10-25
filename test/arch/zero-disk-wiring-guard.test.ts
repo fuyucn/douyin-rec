@@ -42,6 +42,8 @@ describe("record --stream-upload wiring (zero-disk)", () => {
     expect(block).toContain("livePumpStatePath(pumpFilesDir, pumpRoom)");
     // A broadcast that already has a legacy state stays at the root (sticky, no migration).
     expect(block).toContain("resolvePumpDir(pumpSpoolDir, opts.outDir, pumpRoom)");
+    // Rollback check must read the room dir, not the legacy root (round-10 review).
+    expect(block).toContain("livePumpStatePath(roomDir, pumpRoom)");
     expect(block).not.toContain("room: o.room");
   });
 

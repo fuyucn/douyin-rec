@@ -317,11 +317,12 @@ program
       // never changes directory underneath itself. Legacy stays at the output root.
       const pumpLayout = readOutputLayout();
       const pumpAnchor = o.name?.trim() || "";
-      const pumpSpoolDir = pumpLayout === "room"
-        ? (recordingRoomDir(opts.outDir, [pumpAnchor, roomSlug], {
-            platform: platform.id, roomSlug, anchorName: pumpAnchor || roomSlug,
-          }, { layout: "room" }) ?? opts.outDir)
-        : opts.outDir;
+      // Always resolve the room directory, even in legacy layout: the rollback check below must
+      // inspect the room-dir state, not the root one.
+      const roomDir = recordingRoomDir(opts.outDir, [pumpAnchor, roomSlug], {
+        platform: platform.id, roomSlug, anchorName: pumpAnchor || roomSlug,
+      }, { layout: "room" }) ?? opts.outDir;
+      const pumpSpoolDir = pumpLayout === "room" ? roomDir : opts.outDir;
       // Sticky directory: a broadcast that already has a legacy state keeps using the root, so
       // an upgrade never moves a live archive or its unconfirmed WAL. New broadcasts use the
       // room directory. Nothing is migrated, so there is no half-migrated state to lose.
@@ -332,10 +333,11 @@ program
       // A rollback to the legacy layout must not strand a room-dir WAL: nothing would ever
       // re-upload those unconfirmed parts. Alert (and keep recording into the root, where the
       // legacy layout belongs) so a human can reconcile instead of silently losing the part.
-      if (pumpLayout !== "room") {
-        const roomState = readLivePumpState(livePumpStatePath(pumpSpoolDir, pumpRoom));
+      if (pumpLayout !== "room" && roomDir !== opts.outDir) {
+        const roomStatePath = livePumpStatePath(roomDir, pumpRoom);
+        const roomState = readLivePumpState(roomStatePath);
         if (roomState && (roomState.pending || roomState.parts.some((x) => !x.confirmed))) {
-          const msg = `0 落盘房间目录里还有未确认分 P,但当前是 legacy 布局,不会自动续传: ${livePumpStatePath(pumpSpoolDir, pumpRoom)}`;
+          const msg = `0 落盘房间目录里还有未确认分 P,但当前是 legacy 布局,不会自动续传: ${roomStatePath}`;
           console.error(`[stream-upload] ⚠️ ${msg}`);
           await notifier.notify({ kind: "error", stage: "0落盘", message: msg }).catch(() => {});
         }
