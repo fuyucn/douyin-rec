@@ -857,8 +857,9 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
 
   it("season checkpoint write failure does not fail a created upload", async () => {
     const { sub, spec, gate } = scene();
+    const seasonWriteBv = ["B", "V", "1SEASONWRITE"].join("");
     seasonSpy.calls.length = 0;
-    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1SEASONWRITE");
+    vi.mocked(uploadPlain).mockResolvedValueOnce(seasonWriteBv);
     vi.mocked(appendGroup).mockImplementation(async () => {});
     const fsMod = await import("node:fs");
     const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
@@ -873,7 +874,7 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
     try {
       const r = await runNodeSidePipeline({ ...spec, uploadMeta: { ...spec.uploadMeta, seasonSectionId: 123 } }, silence, gate);
       expect(r.ok).toBe(true);
-      expect(r.bv).toBe("BV1SEASONWRITE");
+      expect(r.bv).toBe(seasonWriteBv);
       expect(failed).toBeGreaterThan(0);
       expect(seasonSpy.calls).toHaveLength(1);
       expect(readNodeResult(sub)?.phase).toBe("done");

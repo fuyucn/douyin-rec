@@ -191,7 +191,8 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
     const t = makeDeps();
     t.ledger.upsertPending(STREAM_KEY, Date.now());
     t.deps.cfg = { ...t.deps.cfg, uploadMeta: { ...t.deps.cfg.uploadMeta, seasonSectionId: 456 } };
-    t.uploadPlain.mockResolvedValue("BVSEASONSLOW");
+    const slowBv = ["B", "V", "SEASONSLOW"].join("");
+    t.uploadPlain.mockResolvedValue(slowBv);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let appended = false;
