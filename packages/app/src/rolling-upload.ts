@@ -56,6 +56,7 @@ import {
   UploadGate,
   isSlotBusy,
   SLOT_BUSY_MARKER,
+  addArchiveToSeasonIfConfigured,
   resolveSeasonSectionId,
   type UploadSlot,
   type RollingSegment,
@@ -658,7 +659,6 @@ export class RollingUploader {
       tag: this.o.uploadMeta.tag,
       tid: this.o.uploadMeta.tid,
       desc: this.o.uploadMeta.desc,
-      ...(this.o.uploadMeta.seasonSectionId ? { seasonSectionId: this.o.uploadMeta.seasonSectionId } : {}),
       // 边录边传默认「仅自己可见」(公开不可逆);唯一显式 override = hub 规则 upload.private:false。
       public: this.o.uploadPrivate === false,
     };
@@ -697,6 +697,12 @@ export class RollingUploader {
         this.writeIntent(seg.index, "create");
         return up({ plain: { ...meta, video: seg.path, title } });
       }));
+      await addArchiveToSeasonIfConfigured({
+        cookiesPath: cookies,
+        sectionId: this.o.uploadMeta.seasonSectionId,
+        bvid: bv,
+        note: (m) => this.log(m),
+      });
       // 把「当段已确认」并入同一次写:建稿成功即确认段 0,防止 bv 与 confirmed 分两次写之间崩溃。
       confirmed.add(seg.index);
       this.state = { ...this.state, bv, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };

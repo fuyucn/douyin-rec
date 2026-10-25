@@ -4,7 +4,7 @@ import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
@@ -1216,6 +1216,16 @@ async function runPipelineInner(
   }
 
   const bv = ledger.get(streamKey)?.bv;
+  // Season association is a post-upload side effect: run it after the workflow pool has released
+  // its upload slot, and reconcile it for resumed runs that already have a BV.
+  if (bv) {
+    await addArchiveToSeasonIfConfigured({
+      cookiesPath: cfg.cookies,
+      sectionId: cfg.uploadMeta.seasonSectionId,
+      bvid: bv,
+      note: jlog,
+    });
+  }
   if (cfg.uploadMode !== "upload") {
     jlog(`stage 模式:合成完毕待人工上传`);
     closeStageReady(ledger, streamKey, cfg.uploadMode);

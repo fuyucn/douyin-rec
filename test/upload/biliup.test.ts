@@ -1,21 +1,7 @@
 // ts/test/upload/biliup.test.ts
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { biliupCookieHeader, buildUploadArgs, parseBV, uploadPlain } from "../../packages/app/src/upload/biliup.js";
 import { isUploadRateLimited } from "../../packages/core/src/upload-contract.js";
-
-afterEach(() => vi.unstubAllGlobals());
-
-function loginFile(): { dir: string; path: string } {
-  const dir = mkdtempSync(join(tmpdir(), "biliup-season-"));
-  const path = join(dir, "login.json");
-  writeFileSync(path, JSON.stringify({
-    cookie_info: { cookies: [{ name: "SESSDATA", value: "s" }, { name: "bili_jct", value: "csrf" }] },
-  }));
-  return { dir, path };
-}
 
 // 提交接口显式 web(app 默认更易触发 21566 风控,见 biliup.ts 的 uploadSubmit 注释)。
 const SUBMIT = ["--submit", "web"];
@@ -136,55 +122,6 @@ describe("biliup 包装", () => {
       lines: ["alia", "txa"],
     })).rejects.toThrow("登录已失效");
     expect(calls).toHaveLength(1);
-  });
-  it("uploadPlain：season 失败不影响上传成功，只写 note", async () => {
-    const notes: string[] = [];
-    const dir = mkdtempSync(join(tmpdir(), "biliup-season-"));
-    const bv = "BV" + "1abcdefghi";
-    try {
-      const got = await uploadPlain({
-        plain: {
-          video: "/o/x.mp4", cookies: join(dir, "missing.json"), title: "t", tag: "x", tid: 21, public: false,
-          seasonSectionId: 123, onNote: (m) => notes.push(m),
-        },
-        run: async () => `${bv} All files uploaded successfully`,
-      });
-      expect(got).toBe(bv);
-      expect(notes.join("\n")).toContain("[season]");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-  it("uploadPlain：配置 seasonSectionId 后在建稿成功后调用小节关联", async () => {
-    const { dir, path } = loginFile();
-    const bv = "BV" + "1abcdefghi";
-    const calls: string[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request) => {
-      const u = String(url);
-      calls.push(u);
-      if (u.includes("/x/vupre/web/archive/view")) {
-        return new Response(JSON.stringify({ code: 0, data: { archive: { aid: 456, title: "replay" }, videos: [{ cid: 789 }] } }), { status: 200 });
-      }
-      if (u.includes("/season/section/episodes/add")) {
-        return new Response(JSON.stringify({ code: 0, data: null }), { status: 200 });
-      }
-      return new Response(JSON.stringify({ code: -1 }), { status: 404 });
-    }) as unknown as typeof fetch);
-    try {
-      const notes: string[] = [];
-      const got = await uploadPlain({
-        plain: {
-          video: "/o/x.mp4", cookies: path, title: "t", tag: "x", tid: 21, public: false,
-          seasonSectionId: 123, onNote: (m) => notes.push(m),
-        },
-        run: async () => `${bv} All files uploaded successfully`,
-      });
-      expect(got).toBe(bv);
-      expect(calls.some((u) => u.includes("/season/section/episodes/add"))).toBe(true);
-      expect(notes.join("\n")).toContain(`已加入合集小节 123`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
   it("parseBV：从 biliup 输出抓 BV 号", () => {
     expect(parseBV("...投稿成功 BV1Ab4y1C7xY ...")).toBe("BV1Ab4y1C7xY");

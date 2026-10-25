@@ -71,6 +71,21 @@ describe("room editor form ↔ payload", () => {
     const g = { ...formFromRoom(mkRoom()), workers: ["vps1", "local"] };
     expect(ok(payloadFromForm(g, ctx)).processing?.workers).toEqual(["vps1", "local"]);
   });
+  it("seasonSectionId: empty inherits when never stored, clears when already stored, number when typed", () => {
+    const fresh = mkRoom();
+    const f1 = formFromRoom(fresh);
+    expect(f1.seasonSectionIdStored).toBe(false);
+    expect(ok(payloadFromForm(f1, ctx)).processing?.pipeline?.upload?.seasonSectionId).toBeUndefined();
+
+    const cleared = mkRoom();
+    (cleared.processing!.pipeline!.upload as { seasonSectionId?: number | null }).seasonSectionId = null;
+    const f2 = formFromRoom(cleared);
+    expect(f2.seasonSectionIdStored).toBe(true);
+    expect(ok(payloadFromForm(f2, ctx)).processing?.pipeline?.upload?.seasonSectionId).toBeNull();
+
+    const f3 = { ...formFromRoom(mkRoom()), seasonSectionId: "456" };
+    expect(ok(payloadFromForm(f3, ctx)).processing?.pipeline?.upload?.seasonSectionId).toBe(456);
+  });
   it("round-trips stored fields without silently changing them", () => {
     const p = ok(payloadFromForm(formFromRoom(mkRoom()), ctx));
     expect(p.recording).toMatchObject({ name: "n", quality: "origin", engine: "ffmpeg", segmentSec: 1800, danmu: 1, useCookie: true, scheduleStart: "20:00", scheduleEnd: "02:00", outputFormat: "original" });

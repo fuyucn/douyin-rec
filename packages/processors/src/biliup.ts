@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import {
-  addArchiveToSeasonWithNote, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
+  addArchiveToSeasonIfConfigured, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
   type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress, type UploadSlot,
 } from "@drec/core";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
@@ -268,14 +268,12 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   const bv = st.bv;
   // Season association runs after the upload slot is released: it is a best-effort side effect and
   // must not extend the node-wide slot hold. It is idempotent for a resumed row that already has a BV.
-  if (p.seasonSectionId) {
-    await addArchiveToSeasonWithNote({
-      cookiesPath: cookies,
-      sectionId: p.seasonSectionId,
-      bvid: bv,
-      note: (m) => ctx.log(m),
-    });
-  }
+  await addArchiveToSeasonIfConfigured({
+    cookiesPath: cookies,
+    sectionId: p.seasonSectionId,
+    bvid: bv,
+    note: (m) => ctx.log(m),
+  });
   const countParts = countPartsOf(deps);
   // params.bv: the draft exists and every input is a part still to append.
   // Row bv only (a resumed attempt of this job): inputs[0] is P1 and some later parts may already be on

@@ -71,10 +71,11 @@ export function parseZeroDiskDelivery(raw: unknown): ZeroDiskDeliveryParse {
     return bad("meta text fields must be strings");
   }
   const rawSeason = m.seasonSectionId;
-  if (rawSeason !== undefined && rawSeason !== null
-      && !(typeof rawSeason === "number" && Number.isSafeInteger(rawSeason) && rawSeason > 0)) {
-    return bad("meta.seasonSectionId must be a positive integer");
-  }
+  // Season association is optional: a bad optional value drops the feature instead of refusing
+  // the whole zero-disk delivery (the upload itself must still start).
+  const seasonSectionId = typeof rawSeason === "number" && Number.isSafeInteger(rawSeason) && rawSeason > 0
+    ? rawSeason
+    : undefined;
   if (!isKnownAccountKey(raw.accountKey)) return bad("accountKey missing or unknown");
   const credentialPath = optString(raw, "credentialPath");
   if (credentialPath === null) return bad("credentialPath must be a string");
@@ -90,7 +91,7 @@ export function parseZeroDiskDelivery(raw: unknown): ZeroDiskDeliveryParse {
         ...(titleTemplate ? { titleTemplate } : {}),
         ...(submissionTitleTemplate ? { submissionTitleTemplate } : {}),
         ...(partTitleTemplate ? { partTitleTemplate } : {}),
-        ...(rawSeason ? { seasonSectionId: rawSeason as number } : {}),
+        ...(seasonSectionId ? { seasonSectionId } : {}),
       },
       accountKey: raw.accountKey,
       ...(credentialPath ? { credentialPath } : {}),

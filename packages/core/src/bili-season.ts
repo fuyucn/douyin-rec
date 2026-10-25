@@ -201,7 +201,7 @@ export async function addArchiveToSeason(o: SeasonTarget): Promise<SeasonAddOutc
     // A lost response may still mean the server applied the add. Check before retrying or failing.
     const inSection = await sectionContainsAid(doFetch, cookie, sectionId, view.aid, timeoutMs);
     if (inSection === true) return { status: "already", sectionId, aid: view.aid };
-    if (inSection === false && r.ok && r.raw.code !== undefined && r.raw.code !== 0) {
+    if (r.ok && r.raw.code !== undefined && r.raw.code !== 0) {
       // A definite API rejection will not become success by retrying.
       break;
     }
@@ -239,4 +239,16 @@ export async function addArchiveToSeasonWithNote(
   }
   try { o.note?.(describeSeasonOutcome(outcome)); } catch { /* logging never fails an upload */ }
   return outcome;
+}
+
+/**
+ * Call-site entry point: no configured section = a silent skip, otherwise the same best-effort
+ * wrapper. Callers can invoke it unconditionally without repeating the config guard.
+ */
+export async function addArchiveToSeasonIfConfigured(
+  o: Omit<SeasonTarget, "sectionId"> & { sectionId?: number | null; note?: (msg: string) => void },
+): Promise<SeasonAddOutcome> {
+  const sectionId = normalizeSeasonSectionId(o.sectionId);
+  if (!sectionId) return { status: "skipped", reason: "合集小节 ID 未配置" };
+  return addArchiveToSeasonWithNote({ ...o, sectionId });
 }

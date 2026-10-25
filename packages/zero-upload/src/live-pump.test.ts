@@ -854,7 +854,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
   const seg = (): void => installFakeFfmpeg(Buffer.alloc(PART, 0x5a), { chunkEvery: 64 * 1024, delayMs: 1, delayBeforeCloseMs: 5 });
 
   /** 完整可跑的假 UPOS(建稿/追加都通);参数沿用既有成功组合。 */
-  function upos(chunkSize: number): typeof fetch {
+  function upos(chunkSize: number, opts: { seasonCalls?: string[] } = {}): typeof fetch {
     let created = false;
     writeFileSync(join(dir, "cookies.json"), JSON.stringify({
       cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
@@ -872,8 +872,13 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
         return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
       }
       if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
+      if (u.pathname === "/x2/creative/web/season/section/episodes/add") {
+        opts.seasonCalls?.push(u.pathname);
+        return Promise.resolve(json({ code: 0, data: null }));
+      }
+      if (u.pathname === "/x2/creative/web/season/section") return Promise.resolve(json({ code: 0, data: { episodes: [{ aid: 7 }] } }));
       // lookupArchive 读 `data.archive`(扁平形状会被当成空,append 因此失败)。
-      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: [] } }));
+      if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: [{ cid: 9, filename: "existing" }] } }));
       return Promise.resolve(json({ code: 0, data: {} }));
     }) as unknown as typeof fetch;
   }
@@ -897,6 +902,29 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
     const r = await run({ maxSegments: 2 });
     expect(r.segments).toHaveLength(2); // 没有排空 → 录满上限
     expect(r.ok, r.error ?? "").toBe(true);
+  }, 30_000);
+
+  it("seasonSectionId: 首次建稿加入合集,重启复用已有 BV 时再补一次", async () => {
+    const calls: string[] = [];
+    seg();
+    const first = await runLivePump({
+      ...base({ maxSegments: 1 }),
+      cookiesPath: join(dir, "cookies.json"),
+      fetchImpl: upos(64 * 1024, { seasonCalls: calls }),
+      seasonSectionId: 123,
+    });
+    expect(first.ok, first.error ?? "").toBe(true);
+    expect(calls).toHaveLength(1);
+
+    seg();
+    const resumed = await runLivePump({
+      ...base({ maxSegments: 1 }),
+      cookiesPath: join(dir, "cookies.json"),
+      fetchImpl: upos(64 * 1024, { seasonCalls: calls }),
+      seasonSectionId: 123,
+    });
+    expect(resumed.ok, resumed.error ?? "").toBe(true);
+    expect(calls).toHaveLength(2);
   }, 30_000);
 
   it("drainSignal 在首段后置位 → 只录完当前段就停(不腰斩)", async () => {

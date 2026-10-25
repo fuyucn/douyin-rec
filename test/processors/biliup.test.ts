@@ -37,6 +37,39 @@ describe("biliup processor (plan 038 T08)", () => {
     expect(run.mock.calls[0]![0]).toContain("append");
   });
 
+  it("seasonSectionId adds after create and again on a resumed row", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bili-season-"));
+    const login = join(dir, "login.json");
+    writeFileSync(login, JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("/x/vupre/web/archive/view")) {
+        return new Response(JSON.stringify({ code: 0, data: { archive: { aid: 7, title: "t" }, videos: [{ cid: 9 }] } }), { status: 200 });
+      }
+      if (u.includes("/season/section/episodes/add")) {
+        calls.push(u);
+        return new Response(JSON.stringify({ code: 0, data: null }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ code: -1 }), { status: 404 });
+    }) as unknown as typeof fetch);
+    try {
+      const run = vi.fn(async (argv: string[]) => argv[2] === "upload" ? "BV1aaaaaaaaa" : "ok"); // issue-guard: allow (fake BV fixture)
+      const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]" } });
+      await p.run(job(files(1), { cookies: login, seasonSectionId: 123 }), ctx());
+      expect(calls).toHaveLength(1);
+
+      const resumed = vi.fn(async () => "ok");
+      const p2 = makeBiliupProcessor({ run: resumed });
+      await p2.run(job(files(1), { cookies: login, bv: "BV1bbbbbbbbb", seasonSectionId: 123 }), ctx()); // issue-guard: allow (fake BV fixture)
+      expect(calls).toHaveLength(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("no-draft proof yes -> refuse to create; unknown -> refuse (manual)", async () => {
     const run = vi.fn(async () => "BV1ccccccccc"); // issue-guard: allow (fake BV fixture)
     const yes = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async (a: string[]) => a.includes("--pubed") ? JSON.stringify([{ bvid: "BV1ccccccccc", title: "t", duration: 60 }]) : "[]" } }); // issue-guard: allow (fake BV fixture)

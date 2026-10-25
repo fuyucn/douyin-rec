@@ -46,6 +46,8 @@ type FormState = RecordingValue & ProcessingValue & UploadValue & CleanupValue &
   recordingTouched: boolean;
   /** The source task's zero-disk sub-mode (stored on the task, not the rule). */
   streamUpload: boolean;
+  /** Whether the stored upload already carries the season key (including an explicit null). */
+  seasonSectionIdStored: boolean;
 };
 
 type RecordingHalf = Omit<RecordingValue, "name"> & { outputFormat: OutputFormat };
@@ -85,6 +87,7 @@ const BLANK: FormState = {
   submissionTitleTemplate: "",
   partTitleTemplate: "",
   seasonSectionId: "",
+  seasonSectionIdStored: false,
   clStageSourceAfterMerge: false,
   clSourceAfterDone: false,
   clKeepArchive: true,
@@ -120,6 +123,7 @@ function fromRule(r: HubRuleDTO): FormState {
     submissionTitleTemplate: c.upload?.submissionTitleTemplate ?? "",
     partTitleTemplate: c.upload?.partTitleTemplate ?? "",
     seasonSectionId: c.upload?.seasonSectionId ? String(c.upload.seasonSectionId) : "",
+    seasonSectionIdStored: !!c.upload && Object.prototype.hasOwnProperty.call(c.upload, "seasonSectionId"),
     sourceTaskId: r.recording?.sourceTaskId ?? null,
   };
 }
@@ -271,7 +275,9 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           titleTemplate: form.titleTemplate.trim() || undefined,
           submissionTitleTemplate: form.submissionTitleTemplate.trim() || undefined,
           partTitleTemplate: form.partTitleTemplate.trim() || undefined,
-          seasonSectionId: form.seasonSectionId.trim() ? Number(form.seasonSectionId) : null,
+          seasonSectionId: form.seasonSectionId.trim()
+            ? Number(form.seasonSectionId)
+            : (form.seasonSectionIdStored ? null : undefined),
         },
       },
     };

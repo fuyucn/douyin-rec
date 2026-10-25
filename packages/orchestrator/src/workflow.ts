@@ -3,7 +3,7 @@ import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
 import { humanBytes } from "./format.js";
-import { addArchiveToSeasonWithNote, effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
+import { effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 import { prepareUploadAlias } from "./session-plan.js";
@@ -235,8 +235,6 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
           tid: cfg.uploadMeta.tid,
           public: isPublic,
           desc: cfg.uploadMeta.desc,
-          ...(cfg.uploadMeta.seasonSectionId ? { seasonSectionId: cfg.uploadMeta.seasonSectionId } : {}),
-          onNote: c.log,
         });
         // checkpoint:P1 建稿成功即刻落库 bv —— 必须在这里(不能等 burn/split 完),
         // 否则 P1 成功后若后续节点失败,bv 丢失 → 重试重传 P1 → 重复稿。
@@ -852,17 +850,6 @@ export interface WorkflowRunOptions {
  */
 export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<WorkflowRunResult> {
   const { streamKey, nodes, edges, ctx, pool, forceRetry = new Set(), autoRetry = new Set() } = opts;
-  // A run that resumes after upload_plain is already done never reaches the create hook. Reconcile
-  // the season once here; the add is idempotent and a membership check turns "already there" into success.
-  const doneBv = ctx.ledger.getNodeState(streamKey, "upload_plain")?.state === "done" ? ctx.ledger.get(streamKey)?.bv : undefined;
-  if (doneBv && ctx.cfg.uploadMeta.seasonSectionId) {
-    await addArchiveToSeasonWithNote({
-      cookiesPath: ctx.cfg.cookies,
-      sectionId: ctx.cfg.uploadMeta.seasonSectionId,
-      bvid: doneBv,
-      note: (m) => ctx.log(m),
-    });
-  }
   const byKey = new Map(nodes.map((n) => [n.key, n]));
   const parents = new Map<WorkflowNodeKey, WorkflowNodeKey[]>();
   for (const [from, to] of edges) {

@@ -50,7 +50,7 @@ import {
   type StudioVideo,
 } from "./upos-stream.js";
 import {
-  addArchiveToSeasonWithNote,
+  addArchiveToSeasonIfConfigured,
   isSameBroadcastGap,
   isUploadRateLimited,
   type DanmuMessage,
@@ -842,8 +842,8 @@ export class LivePumpSession {
         return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 300) };
       }
       if (ok) {
-        if (pending.kind === "create" && this.o.seasonSectionId) {
-          await addArchiveToSeasonWithNote({
+        if (pending.kind === "create") {
+          await addArchiveToSeasonIfConfigured({
             cookiesPath: this.o.cookiesPath,
             sectionId: this.o.seasonSectionId,
             ...(aid ? { aid } : {}),
@@ -1773,8 +1773,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // A restart after the archive was created (e.g. during a deploy) never reaches the create
       // hook again. Reconcile the season once per session start; the add is idempotent and a
       // membership check turns an "already there" rejection into success.
-      if (o.seasonSectionId && (session.bvid || session.aid)) {
-        await addArchiveToSeasonWithNote({
+      if (session.bvid || session.aid) {
+        await addArchiveToSeasonIfConfigured({
           cookiesPath: o.cookiesPath,
           sectionId: o.seasonSectionId,
           ...(session.aid ? { aid: session.aid } : {}),
