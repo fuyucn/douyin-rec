@@ -42,6 +42,41 @@ export function RunNowDialog({
   onSubmit: (input: { key: string; winnerWorker?: string; force?: boolean }) => void | Promise<void>;
 }): ReactNode {
   const t = useT();
+  // Remount the body on each open so the first paint can never show last session's values.
+  return (
+    <Dialog
+      open={open}
+      onClose={() => !busy && onClose()}
+      title={t("hub.jobs.runNowTitle")}
+      description={t("hub.jobs.runNowDesc")}
+    >
+      {open && (
+        <RunNowForm
+          onClose={onClose}
+          runs={runs}
+          workers={workers}
+          roomPrefix={roomPrefix}
+          roomWorkerIds={roomWorkerIds}
+          today={today}
+          busy={busy}
+          onSubmit={onSubmit}
+        />
+      )}
+    </Dialog>
+  );
+}
+
+function RunNowForm({
+  onClose,
+  runs,
+  workers,
+  roomPrefix,
+  roomWorkerIds,
+  today,
+  busy,
+  onSubmit,
+}: Omit<Parameters<typeof RunNowDialog>[0], "open">): ReactNode {
+  const t = useT();
   const [runKey, setRunKey] = useState(CUSTOM_DATE);
   const [customDate, setCustomDate] = useState(today);
   const [winnerWorker, setWinnerWorker] = useState("");
@@ -50,16 +85,14 @@ export function RunNowDialog({
   // nothing happened when the old run already has a BV.
   const [newSubmission, setNewSubmission] = useState(true);
 
-  // Seed on every open, not on every render: runs refresh in the background and
-  // must not overwrite what the user is editing.
+  // Seed on mount: runs refresh in the background and must not overwrite what the user is editing.
   useEffect(() => {
-    if (!open) return;
     setRunKey(runs[0]?.streamKey ?? CUSTOM_DATE);
     setCustomDate(runs[0] ? runDate(runs[0].streamKey).slice(0, 10) : today);
     setWinnerWorker("");
     setNewSubmission(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, []);
 
   const selectedKey = runKey === CUSTOM_DATE ? `${roomPrefix}:${customDate.trim()}` : runKey;
   const validDate = runKey !== CUSTOM_DATE || /^\d{4}-\d{2}-\d{2}$/.test(customDate.trim());
@@ -85,12 +118,7 @@ export function RunNowDialog({
   };
 
   return (
-    <Dialog
-      open={open}
-      onClose={() => !busy && onClose()}
-      title={t("hub.jobs.runNowTitle")}
-      description={t("hub.jobs.runNowDesc")}
-    >
+    <>
       <div className="flex flex-col gap-4">
         <div>
           <label className="field-label">{t("hub.jobs.runNowDate")}</label>
@@ -152,6 +180,6 @@ export function RunNowDialog({
         }}
         onCancel={() => setPendingForce(null)}
       />
-    </Dialog>
+    </>
   );
 }

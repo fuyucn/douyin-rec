@@ -14,7 +14,7 @@
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronDown, History } from "lucide-react";
-import { api, type HubJobDTO, type RoomDTO, type WorkerDTO } from "../api/client";
+import { api, ApiError, type HubJobDTO, type RoomDTO, type WorkerDTO } from "../api/client";
 import { Button } from "./Button";
 import { JobLogDialog, RunCard } from "./HubJobs";
 import { RunNowDialog } from "./RunNowDialog";
@@ -122,7 +122,8 @@ export function RoomRunsPanel({
       setRunOpen(false);
       await refresh().catch(() => {});
     } catch (e) {
-      toast(errMessage(e), "error");
+      // A forceable 409 is handled by the dialog's confirm step; legacy behaviour shows only that confirm.
+      if (!(e instanceof ApiError && e.forceable && !force)) toast(errMessage(e), "error");
       throw e;
     } finally {
       setRunBusy(false);
