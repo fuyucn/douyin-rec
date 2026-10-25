@@ -433,32 +433,44 @@ program
       // never persisted, and recovery re-uploads that whole file — listing only `parts` would
       // delete the last copy of an interrupted part (real data loss, found by review #280).
       const st = readLivePumpState(livePumpStatePath(pumpFilesDir, pumpRoom));
-      // An unreadable live/archived state references unknown spool files: skip the sweep entirely.
-      if (spoolSweepSafe(pumpFilesDir, pumpRoom)) {
+      // One sweep over the root, with a keep-set built from EVERY root state. Sweeping the root
+      // with only this room's state (the old shape) deleted another room's unconfirmed spool:
+      // upload backoff can exceed the 10-minute orphan grace, so those files are not orphans.
+      // A state that cannot be read means the keep-set is unknown -> skip entirely.
+      const rootKeep: string[] = [];
+      let rootSafe = true;
+      try {
+        for (const f of readdirSync(opts.outDir)) {
+          if (!/^live-pump-.+\.state\.json(?:\..*)?$/.test(f)) continue;
+          if (f.includes(".tmp.")) continue; // a crash leftover, not a state
+          const st2 = readLivePumpState(join(opts.outDir, f));
+          if (!st2) { rootSafe = false; break; }
+          rootKeep.push(...spoolPathsToKeep(st2));
+        }
+      } catch (e) {
+        // Missing dir = nothing to sweep; any other error means we cannot prove the keep-set.
+        if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") rootSafe = false;
+      }
+      if (rootSafe) {
         sweepOrphanSpools({
-          spoolDir: pumpFilesDir,
-          knownSpoolPaths: [...spoolPathsToKeep(st), ...archivedSpoolPathsToKeep(pumpFilesDir, pumpRoom)],
+          spoolDir: opts.outDir,
+          knownSpoolPaths: [...rootKeep, ...archivedSpoolPathsToKeep(opts.outDir, pumpRoom)],
           log: (m) => console.log(m),
         });
-        // Root spools may belong to another room's state or an archived state, in either layout.
-        // Build the keep-set from EVERY root state whenever the root is swept (this run's own
-        // legacy session included), and skip the sweep if any state is unreadable: deleting a
-        // referenced spool is unrecoverable.
-        const rootKeep: string[] = [];
-        let rootSafe = true;
-        try {
-          for (const f of readdirSync(opts.outDir)) {
-            if (!/^live-pump-.+\.state\.json(?:\..*)?$/.test(f)) continue;
-            if (f.includes(".tmp.")) continue; // a crash leftover, not a state
-            const st2 = readLivePumpState(join(opts.outDir, f));
-            if (!st2) { rootSafe = false; break; }
-            rootKeep.push(...spoolPathsToKeep(st2));
-          }
-        } catch { /* no root dir: nothing to protect */ }
-        if (rootSafe) sweepOrphanSpools({ spoolDir: opts.outDir, knownSpoolPaths: rootKeep, log: (m) => console.log(m) });
-        else console.log("[live-pump] 根目录存在无法读取的旧状态,跳过根目录清扫(避免误删其引用的暂存文件)");
       } else {
-        console.log("[live-pump] 存在无法读取的旧状态,跳过孤儿 spool 清扫(避免误删其引用的暂存文件)");
+        console.log("[live-pump] 根目录存在无法读取的旧状态,跳过孤儿 spool 清扫(避免误删其引用的暂存文件)");
+      }
+      if (pumpFilesDir !== opts.outDir) {
+        // The room dir is swept separately: rootKeep only protects root spools.
+        if (spoolSweepSafe(pumpFilesDir, pumpRoom)) {
+          sweepOrphanSpools({
+            spoolDir: pumpFilesDir,
+            knownSpoolPaths: [...spoolPathsToKeep(st), ...archivedSpoolPathsToKeep(pumpFilesDir, pumpRoom)],
+            log: (m) => console.log(m),
+          });
+        } else {
+          console.log("[live-pump] 房间目录存在无法读取的旧状态,跳过该目录清扫(避免误删其引用的暂存文件)");
+        }
       }
       const abort = new AbortController();
       const onSig = (sig: string): void => {

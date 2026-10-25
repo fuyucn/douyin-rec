@@ -30,6 +30,9 @@ export function zeroDiskXmlPath(
   // Issue #360: the xml lives in the room directory and carries the anchor name, like the spool.
   // Without an anchor (legacy layout / unresolved name) the room slug keeps the old behaviour.
   // Legacy layout passes no anchor: keep the historical raw room slug byte-for-byte.
-  const head = anchorName?.trim() ? (sanitizePathSegment(anchorName.trim()) || roomSlug) : roomSlug;
+  // Cap the anchor like the spool name does: NAME_MAX is 255 bytes and the suffix adds ~30.
+  const head = anchorName?.trim()
+    ? (sanitizePathSegment(anchorName.trim()).slice(0, 60) || roomSlug)
+    : roomSlug;
   return join(outDir, `live-pump-${head}_${z.date}_${z.hh}-${z.mm}-${z.ss}.xml`);
 }
