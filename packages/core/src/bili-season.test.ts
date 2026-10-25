@@ -113,6 +113,40 @@ describe("addArchiveToSeason", () => {
     expect(posts).toBe(1);
   });
 
+  it("does not retry a definite rejection returned with HTTP 4xx", async () => {
+    let posts = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("/x/vupre/web/archive/view")) {
+        return json({ code: 0, data: { archive: { aid: 456, title: "replay" }, videos: [{ cid: 789 }] } });
+      }
+      if (u.includes("/season/section/episodes/add")) { posts++; return json({ code: 7, message: "denied" }, 400); }
+      if (u.includes("/season/section?id=123")) return json({ code: 0, data: { episodes: [] } });
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl });
+    expect(r.status).toBe("failed");
+    expect(posts).toBe(1);
+  });
+
+  it("does not re-POST when a lost response cannot be reconciled against the section", async () => {
+    let posts = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("/x/vupre/web/archive/view")) {
+        return json({ code: 0, data: { archive: { aid: 456, title: "replay" }, videos: [{ cid: 789 }] } });
+      }
+      if (u.includes("/season/section/episodes/add")) { posts++; throw new Error("socket closed after send"); }
+      if (u.includes("/season/section?id=123")) return json({ code: 7, message: "unknown" });
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl });
+    expect(r).toMatchObject({ status: "failed", error: expect.stringContaining("未重复提交") });
+    expect(posts).toBe(1);
+  });
+
   it("skips when the section id is off, and fails safely without a complete login", async () => {
     expect(await addArchiveToSeason({ cookiesPath: "/nope", sectionId: 0 })).toEqual({ status: "skipped", reason: "合集小节 ID 未配置" });
     const dir = mkdtempSync(join(tmpdir(), "season-test-"));

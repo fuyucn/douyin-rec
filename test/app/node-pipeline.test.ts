@@ -640,6 +640,18 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
     expect(final?.bv).toBe("BV1OLD");
   });
 
+  it("re-entry preserves a prior BV on disk before the part-count network read", async () => {
+    const { sub, spec, gate } = scene();
+    writeNodeResult(sub, { phase: "failed", ok: false, bv: "BV1OLD", error: "append 中断" }, silence);
+    vi.mocked(countVideoParts).mockRejectedValueOnce(new Error("count network down"));
+
+    await expect(runNodeSidePipeline(spec, silence, gate)).rejects.toThrow("count network down");
+
+    const onDisk = readNodeResult(sub);
+    expect(onDisk?.bv).toBe("BV1OLD");
+    expect(onDisk?.phase).toBe("failed");
+  });
+
   it("seasonSectionId: BV 先落盘,再关联;关联失败不影响上传", async () => {
     const { sub, spec, gate } = scene();
     seasonSpy.calls.length = 0;

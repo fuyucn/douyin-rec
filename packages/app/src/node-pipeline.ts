@@ -706,7 +706,10 @@ export async function runNodeSidePipeline(
   // ⚠️ 上传前先落 `uploading` 标记:此后一旦 ssh 回传断开,master 回读会看到它 →
   // 明确「结果不确定」→ 转人工,**绝不自动重传**(重复投稿不可逆)。这是「假失败」修复的另一半。
   let seasonState = prior?.seasonState;
-  writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "gate_wait", seasonState }, log);
+  writeNodeResult(stageSub, {
+    phase: "uploading", ok: false, step: "gate_wait",
+    bv: prior?.bv, products, confirmedParts: prior?.confirmedParts, seasonState,
+  }, log);
 
   // 上传:节点本地 cookies.json 优先,master 下发的兜底。
   //
@@ -798,7 +801,11 @@ export async function runNodeSidePipeline(
           note: log,
         });
         seasonState = season.status === "failed" ? "failed" : "done";
-        writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "submit", bv, products, confirmedParts: confirmed, seasonState }, log);
+        try {
+          writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "submit", bv, products, confirmedParts: confirmed, seasonState }, log);
+        } catch (e) {
+          log(`season 终态落盘失败(关联结果仍已生效): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+        }
       }
     } else {
       bv = await withGate(uploadGate, accountKey, () =>
@@ -819,7 +826,11 @@ export async function runNodeSidePipeline(
           note: log,
         });
         seasonState = season.status === "failed" ? "failed" : "done";
-        writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "submit", bv, products, confirmedParts: 1, seasonState }, log);
+        try {
+          writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "submit", bv, products, confirmedParts: 1, seasonState }, log);
+        } catch (e) {
+          log(`season 终态落盘失败(关联结果仍已生效): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+        }
       }
       confirmedParts = 1;
     }

@@ -905,9 +905,9 @@ export class LivePumpSession {
     }
   }
 
-  /** Restart hook: retry only when the persisted state says the association is still pending. */
+  /** Restart hook: retry pending work, plus legacy states that predate the season marker. */
   async reconcileSeason(fetchImpl?: typeof fetch): Promise<void> {
-    if (!this.o.seasonSectionId || this.state.seasonState !== "pending") return;
+    if (!this.o.seasonSectionId || (this.state.seasonState !== "pending" && this.state.seasonState !== undefined)) return;
     await this.associateSeason(fetchImpl ?? this.o.fetchImpl ?? fetch);
   }
 
@@ -1813,10 +1813,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           statePath: livePumpStatePath(o.spoolDir, o.room),
         } };
       }
-      // A restart after the archive was created (e.g. during a deploy) never reaches the create
-      // hook again. Reconcile the season once per session start; the add is idempotent and a
-      // membership check turns an "already there" rejection into success.
-      // A restart may find a persisted BV whose season call never ran (or was interrupted).
+      // A restart after the archive was created never reaches the create hook again. Reconcile the
+      // persisted BV when the marker is pending (or absent on legacy state); the add is idempotent.
       if (session.bvid || session.aid) await session.reconcileSeason(o.fetchImpl);
       if (session.hasUnconfirmed) {
         const pending = session.parts.filter((p) => !p.confirmed);

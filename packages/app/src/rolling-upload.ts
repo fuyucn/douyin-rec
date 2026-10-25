@@ -596,7 +596,7 @@ export class RollingUploader {
     }
     // A crash after the BV was saved but before the season call completed leaves "pending".
     // Reconcile it once per flush; the add is idempotent and never blocks an upload.
-    if (this.state.bv && this.state.seasonState === "pending") {
+    if (this.state.bv && (this.state.seasonState === "pending" || this.state.seasonState === undefined)) {
       await this.associateSeason(this.state.bv);
     }
 
@@ -702,7 +702,11 @@ export class RollingUploader {
       }
       if (link.kind === "inherit") {
         // Same broadcast (gap <= SAME_BROADCAST_GAP_MS): continue the predecessor's submission.
-        this.state = { ...this.state, bv: link.bv, inheritedParts: link.parts, inheritedFrom: link.from, updatedAt: this.now() };
+        this.state = {
+          ...this.state, bv: link.bv, inheritedParts: link.parts, inheritedFrom: link.from,
+          ...(this.o.uploadMeta.seasonSectionId ? { seasonState: "pending" as const } : {}),
+          updatedAt: this.now(),
+        };
         if (!this.persist()) throw new Error("sidecar 写失败(继承前序稿件),中止上传并保留源");
         this.log(`[rolling] 同一场断流重连:续用前序会话 ${link.from} 的稿件(已有 ${link.parts} 个分P),本会话段改为 append`);
         await this.associateSeason(link.bv);

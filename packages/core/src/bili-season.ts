@@ -217,9 +217,15 @@ export async function addArchiveToSeason(o: SeasonTarget): Promise<SeasonAddOutc
     if (checkBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)" };
     const inSection = await sectionContainsAid(doFetch, cookie, sectionId, view.aid, checkBudget);
     if (inSection === true) return { status: "already", sectionId, aid: view.aid };
-    if (r.ok && r.raw.code !== undefined && r.raw.code !== 0) {
+    const definiteRejection = r.raw.code !== undefined && r.raw.code !== 0;
+    if (definiteRejection) {
       // A definite API rejection will not become success by retrying.
       break;
+    }
+    if (inSection === null) {
+      // The POST outcome is unknown and membership could not be checked. Re-posting here can turn
+      // an already-applied add into a false "duplicate" failure, so stop and surface the uncertainty.
+      return { status: "failed", sectionId, error: `${last};小节成员状态未知,未重复提交` };
     }
     if (attempt === 0 && remaining() > 1_500) await sleep(1_500).catch(() => {});
   }
