@@ -57,6 +57,7 @@ import {
   isSlotBusy,
   SLOT_BUSY_MARKER,
   addArchiveToSeasonIfConfigured,
+  seasonCheckpointState,
   resolveSeasonSectionId,
   type UploadSlot,
   type RollingSegment,
@@ -430,29 +431,36 @@ export class RollingUploader {
    * not fail the upload or trigger a re-upload. The persisted seasonState makes an interrupted call
    * recoverable on the next run.
    */
-  private async associateSeason(bv: string): Promise<void> {
+  private async associateSeason(bv: string, reconcileFirst: boolean): Promise<void> {
     if (!this.o.uploadMeta.seasonSectionId) return;
-    if (this.state.seasonState === "done") return;
+    if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
     const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
     const outcome = await addArchiveToSeasonIfConfigured({
       cookiesPath: cookies,
       sectionId: this.o.uploadMeta.seasonSectionId,
       bvid: bv,
+      reconcileFirst,
       note: (m) => this.log(m),
     });
     this.state = {
       ...this.state,
-      seasonState: outcome.status === "failed" ? "failed" : "done",
+      seasonState: seasonCheckpointState(outcome),
       updatedAt: this.now(),
     };
     if (!this.persist()) this.log("[rolling] season 状态落盘失败,保留 pending,下次运行会重试");
   }
 
-  private queueSeason(bv: string): void {
+  private queueSeason(bv: string, reconcileFirst: boolean): void {
     if (!this.o.uploadMeta.seasonSectionId) return;
+    if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
     this.seasonTail = this.seasonTail
-      .then(() => this.associateSeason(bv))
+      .then(() => this.associateSeason(bv, reconcileFirst))
       .catch(() => undefined);
+  }
+
+  /** Drain the best-effort season call at session end; ordinary flushes never wait on it. */
+  drainSeason(): Promise<void> {
+    return this.seasonTail;
   }
 
   /**
@@ -605,8 +613,8 @@ export class RollingUploader {
     }
     // A crash after the BV was saved but before the season call completed leaves "pending".
     // Queue it off the part-upload path; the add is idempotent and the flush only waits at the end.
-    if (this.state.bv && (this.state.seasonState === "pending" || this.state.seasonState === undefined)) {
-      this.queueSeason(this.state.bv);
+    if (this.state.bv && this.state.seasonState === "pending") {
+      this.queueSeason(this.state.bv, true);
     }
 
     const uploaded: number[] = [];
@@ -646,7 +654,6 @@ export class RollingUploader {
         break;
       }
     }
-    await this.seasonTail;
     return { uploaded, deleted, ambiguous: [...ambiguous] };
   }
 
@@ -719,7 +726,7 @@ export class RollingUploader {
         };
         if (!this.persist()) throw new Error("sidecar 写失败(继承前序稿件),中止上传并保留源");
         this.log(`[rolling] 同一场断流重连:续用前序会话 ${link.from} 的稿件(已有 ${link.parts} 个分P),本会话段改为 append`);
-        this.queueSeason(link.bv);
+        this.queueSeason(link.bv, true);
       }
     }
     if (!this.state.bv) {
@@ -755,7 +762,7 @@ export class RollingUploader {
       };
       if (!this.persist()) throw new Error(`sidecar 写失败(建稿结果 BV=${bv}),状态不可信,保留源`);
       this.log(`[rolling] 段 ${seg.index} 建稿 BV=${bv}`);
-      this.queueSeason(bv);
+      this.queueSeason(bv, false);
       return;
     }
     const bv = this.state.bv;
@@ -935,6 +942,7 @@ export class RollingUploader {
     if (!peer.persist()) return this.waitForPredecessor(`${prev.base} 的 sidecar 无法写入`);
     this.log(`[rolling] 接管前序会话 ${prev.base} 的 ${leftovers.length} 个未确认分段(owner 已退出)`);
     await peer.flush({ recordingActive: false });
+    await peer.drainSeason();
     if (peer.stateUntrusted) return this.waitForPredecessor(`${prev.base} 的 sidecar 写失败`);
     if (peer.hasUploadablePending()) return this.waitForPredecessor(`${prev.base} 仍有分段待上传(槽忙/未完成)`);
     // The claim above stamped this live pid as owner; close it so the master does not keep waiting on it.
@@ -1265,8 +1273,10 @@ export function makeRollingUploadHookFactory(o: {
         void uploader.flush({ recordingActive: true }).catch(() => undefined);
       },
       onSessionEnd: async (): Promise<void> => {
-        try { await uploader.flush({ recordingActive: false }); }
-        finally { await uploader.markClosed(); }
+        try {
+          await uploader.flush({ recordingActive: false });
+          await uploader.drainSeason();
+        } finally { await uploader.markClosed(); }
       },
     };
   };

@@ -51,6 +51,7 @@ import {
 } from "./upos-stream.js";
 import {
   addArchiveToSeasonIfConfigured,
+  seasonCheckpointState,
   isSameBroadcastGap,
   isUploadRateLimited,
   type DanmuMessage,
@@ -504,6 +505,7 @@ export class LivePumpSession {
   private state: LivePumpState;
   private readonly log: (msg: string) => void;
   private stateUntrusted = false;
+  private seasonTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly o: LivePumpSessionOpts) {
     mkdirSync(o.spoolDir, { recursive: true });
@@ -793,7 +795,7 @@ export class LivePumpSession {
     }
     this.cleanupConfirmed();
     if (pending.kind === "create" && this.o.seasonSectionId) {
-      await this.associateSeason(doFetch);
+      this.queueSeason(doFetch, false);
     }
     return { ok: true, bvid: this.state.bvid, aid: this.state.aid };
   }
@@ -873,29 +875,21 @@ export class LivePumpSession {
    * Best-effort season association AFTER the BV is persisted. Never throws; records the outcome in
    * the state so an interrupted or failed call is visible and can be reconciled on restart.
    */
-  private async associateSeason(doFetch: typeof fetch): Promise<void> {
+  private async associateSeason(doFetch: typeof fetch, reconcileFirst: boolean): Promise<void> {
     if (!this.o.seasonSectionId) return;
-    // An older state file may carry a BV but no seasonState (written before this field existed).
-    if (this.state.seasonState === undefined) {
-      this.state = { ...this.state, seasonState: "pending", updatedAt: Date.now() };
-      try {
-        this.persist();
-      } catch (e) {
-        this.log(`[live-pump] season pending 状态落盘失败,本次仍尝试关联: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
-      }
-    }
-    if (this.state.seasonState === "done") return;
+    if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
     const outcome = await addArchiveToSeasonIfConfigured({
       cookiesPath: this.o.cookiesPath,
       sectionId: this.o.seasonSectionId,
       ...(this.state.aid ? { aid: this.state.aid } : {}),
       ...(this.state.bvid ? { bvid: this.state.bvid } : {}),
+      reconcileFirst,
       fetchImpl: doFetch,
       note: (m) => this.log(m),
     });
     this.state = {
       ...this.state,
-      seasonState: outcome.status === "failed" ? "failed" : "done",
+      seasonState: seasonCheckpointState(outcome),
       updatedAt: Date.now(),
     };
     try {
@@ -905,10 +899,24 @@ export class LivePumpSession {
     }
   }
 
-  /** Restart hook: retry pending work, plus legacy states that predate the season marker. */
+  private queueSeason(doFetch: typeof fetch, reconcileFirst: boolean): void {
+    if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
+    this.seasonTail = this.seasonTail
+      .then(() => this.associateSeason(doFetch, reconcileFirst))
+      .catch((e) => {
+        this.log(`[live-pump] season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      });
+  }
+
+  /** Wait for the best-effort season call at a run boundary, never on the part-upload path. */
+  drainSeason(): Promise<void> {
+    return this.seasonTail;
+  }
+
+  /** Restart hook: retry only an explicit pending checkpoint. */
   async reconcileSeason(fetchImpl?: typeof fetch): Promise<void> {
-    if (!this.o.seasonSectionId || (this.state.seasonState !== "pending" && this.state.seasonState !== undefined)) return;
-    await this.associateSeason(fetchImpl ?? this.o.fetchImpl ?? fetch);
+    if (!this.o.seasonSectionId || this.state.seasonState !== "pending") return;
+    await this.associateSeason(fetchImpl ?? this.o.fetchImpl ?? fetch, true);
   }
 
   private cleanupConfirmed(): void {
@@ -2080,6 +2088,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     statePath: livePumpStatePath(o.spoolDir, o.room),
   };
   } finally {
+    await session.drainSeason();
     await stopDanmu();
   }
 }

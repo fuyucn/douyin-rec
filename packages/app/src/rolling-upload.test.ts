@@ -10,7 +10,7 @@ import { UploadGate, rollingUploadSingleNode } from "@drec/core";
 
 const seasonHook = vi.hoisted(() => ({
   calls: [] as Array<{ bvid: string; persistedBv?: string; persistedState?: string }>,
-  onCall: undefined as undefined | ((o: { bvid?: string }) => void),
+  onCall: undefined as undefined | ((o: { bvid?: string }) => void | Promise<void>),
 }));
 vi.mock("@drec/core", async (orig) => {
   const m = await orig<typeof import("@drec/core")>();
@@ -19,7 +19,7 @@ vi.mock("@drec/core", async (orig) => {
     addArchiveToSeasonIfConfigured: async (o: Parameters<typeof m.addArchiveToSeasonIfConfigured>[0]) => {
       const call = { bvid: String(o.bvid ?? "") };
       seasonHook.calls.push(call);
-      seasonHook.onCall?.(o);
+      await seasonHook.onCall?.(o);
       return o.sectionId
         ? { status: "added" as const, sectionId: o.sectionId, aid: 1, cid: 1, title: "t" }
         : { status: "skipped" as const, reason: "season section id is off" };
@@ -100,12 +100,35 @@ describe("RollingUploader — 边录边传录制端执行", () => {
       });
       u.noteSegment(paths[0]);
       await u.flush({ recordingActive: false });
+      await u.drainSeason();
       expect(seasonHook.calls).toHaveLength(1);
       expect(seasonHook.calls[0]).toMatchObject({ bvid: FAKE_BV, persistedBv: FAKE_BV, persistedState: "pending" });
       expect((JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { seasonState?: string }).seasonState).toBe("done");
     } finally {
       seasonHook.onCall = undefined;
     }
+  });
+
+  it("flush does not wait for a slow season association; session end drains it", async () => {
+    seasonHook.calls.length = 0;
+    const { dir, paths } = mkSession(segNames(1));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    seasonHook.onCall = async () => { await gate; };
+    const u = new RollingUploader({
+      room,
+      uploadMeta: { ...uploadMeta, seasonSectionId: 456 },
+      gate: new FakeGate(), uploadPlainRaw: async () => FAKE_BV, appendGroupRaw: noopAppend,
+      removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+    });
+    u.noteSegment(paths[0]);
+    await u.flush({ recordingActive: false });
+    expect(seasonHook.calls).toHaveLength(1);
+    expect((JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { seasonState?: string }).seasonState).toBe("pending");
+    release();
+    await u.drainSeason();
+    expect((JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { seasonState?: string }).seasonState).toBe("done");
+    seasonHook.onCall = undefined;
   });
 
   it("只处理封口段:有后继段的旧段上传+删,正在写的最近段不动", async () => {
@@ -544,6 +567,7 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
     try {
       b.paths.forEach((p) => u.noteSegment(p));
       await u.flush({ recordingActive: false });
+      await u.drainSeason();
       expect(seasonHook.calls[0]).toMatchObject({ bvid: FAKE_BV, persistedBv: FAKE_BV, persistedState: "pending" });
     } finally {
       seasonHook.onCall = undefined;

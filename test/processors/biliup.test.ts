@@ -49,6 +49,9 @@ describe("biliup processor (plan 038 T08)", () => {
       if (u.includes("/x/vupre/web/archive/view")) {
         return new Response(JSON.stringify({ code: 0, data: { archive: { aid: 7, title: "t" }, videos: [{ cid: 9 }] } }), { status: 200 });
       }
+      if (u.includes("/season/section?id=123")) {
+        return new Response(JSON.stringify({ code: 0, data: { episodes: [] } }), { status: 200 });
+      }
       if (u.includes("/season/section/episodes/add")) {
         calls.push(u);
         return new Response(JSON.stringify({ code: 0, data: null }), { status: 200 });

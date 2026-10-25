@@ -9,7 +9,7 @@
  */
 import path from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { addArchiveToSeasonIfConfigured, effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, seasonCheckpointState, effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
 import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadableParts } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState, SyncLedger } from "./ledger.js";
@@ -555,6 +555,12 @@ export async function runSegmentPipeline(o: {
     + (burnLivechat ? uploadParts.filter((p) => p.livechat).length : 0);
   let bv = "";
   let p1Done = donePlain.has(0) || ledger.get(streamKey)?.bv != null;
+  let seasonTail: Promise<void> = Promise.resolve();
+  const startSeason = (reconcileFirst: boolean): void => {
+    seasonTail = seasonTail
+      .then(() => associateSegmentSeason(ledger, cfg, streamKey, jlog, reconcileFirst))
+      .catch((e) => jlog(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`));
+  };
   if (!p1Done) {
     jlog(`建稿 P1: ${path.basename(plainFiles[0])}(${plainFiles.length} 个 plain 段待传)`);
     // 分P标题(可选):P1 是整稿第一个分P → partIndex=1,总数=plain+danmu+livechat 全部段数。
@@ -572,15 +578,17 @@ export async function runSegmentPipeline(o: {
     jlog(`建稿完成: ${bv}`);
     // BV is durable now (setBv above); associate after the upload gate is released.
     if (cfg.uploadMeta.seasonSectionId) {
-      ledger.setSeasonState(streamKey, "pending");
-      await associateSegmentSeason(ledger, cfg, streamKey, jlog);
+      try { ledger.setSeasonState(streamKey, "pending"); }
+      catch (e) { jlog(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+      startSeason(false);
     }
   } else {
     bv = ledger.get(streamKey)?.bv ?? "";
     jlog(`建稿 P1 已存在,跳过(bv=${bv})`);
-    if (cfg.uploadMeta.seasonSectionId && bv && !["done", "failed"].includes(ledger.get(streamKey)?.seasonState ?? "")) {
-      ledger.setSeasonState(streamKey, "pending");
-      await associateSegmentSeason(ledger, cfg, streamKey, jlog);
+    if (cfg.uploadMeta.seasonSectionId && bv && ledger.get(streamKey)?.seasonState === "pending") {
+      try { ledger.setSeasonState(streamKey, "pending"); }
+      catch (e) { jlog(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+      startSeason(true);
     }
   }
   if (!bv) {
@@ -618,6 +626,7 @@ export async function runSegmentPipeline(o: {
   const livechatPaths = livechatFiles.map((f, i) => aliasFor("livechat", f, plainCount + danmuFiles.length + i + 1, totalParts));
   await appendSegmentGroup(streamKey, bv, "append_danmu", danmuPaths, burnDanmu, deps, jlog, isPublic, splitForUpload);
   await appendSegmentGroup(streamKey, bv, "append_livechat", livechatPaths, burnLivechat, deps, jlog, isPublic, splitForUpload);
+  await seasonTail;
 
   // 收口(与合并路径同一实现):上传确认后先延后回读分 P 数(#327),通过才标 done + 按配置清理;
   // 不符 / 读不到 → 转人工并保留全部源(含 stage 产物)。清理失败只标 clean_*(T12),终态恒为 done。
@@ -773,10 +782,13 @@ async function resumeSegmentAppends(
   const { ledger, notify, cfg } = deps;
   jlog(`分段续跑:已建稿 bv=${bv},只补 append`);
   // Resume path owns its own association: the original create may have been killed before the season
-  // call ran. Idempotent; never blocks the appends below.
-  if (cfg.uploadMeta.seasonSectionId && !["done", "failed"].includes(ledger.get(streamKey)?.seasonState ?? "")) {
-    ledger.setSeasonState(streamKey, "pending");
-    await associateSegmentSeason(ledger, cfg, streamKey, jlog);
+  // call ran. Start it before appends; the append loop does not wait for this bounded HTTP call.
+  let seasonTail: Promise<void> = Promise.resolve();
+  if (cfg.uploadMeta.seasonSectionId && ledger.get(streamKey)?.seasonState === "pending") {
+    try { ledger.setSeasonState(streamKey, "pending"); }
+    catch (e) { jlog(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+    seasonTail = associateSegmentSeason(ledger, cfg, streamKey, jlog, true)
+      .catch((e) => jlog(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`));
   }
   if (uploadParts.length === 0) {
     // 该场本来就 done(T12 收尾补跑:stageAfterDone 已把分P产物清空)→ 只补清理,
@@ -836,6 +848,7 @@ async function resumeSegmentAppends(
   const livechatFiles = uploadParts.map((p) => p.livechat).filter((f): f is string => !!f && existsSync(f));
   await appendSegmentGroup(streamKey, bv, "append_danmu", danmuFiles, burnDanmu, deps, jlog, isPublic, splitForUpload);
   await appendSegmentGroup(streamKey, bv, "append_livechat", livechatFiles, burnLivechat, deps, jlog, isPublic, splitForUpload);
+  await seasonTail;
   // 上传成功 → 同一收口闸门(补做「删源」:续跑此前漏了 sourceAfterDone)。分P模式不碰 stage 交付物。
   const rmStage = deps.rmStage ?? defaultRmStage;
   const fin = await finalizeAfterUpload({
@@ -888,6 +901,7 @@ async function associateSegmentSeason(
   cfg: PipelineCfg,
   streamKey: string,
   log: (msg: string) => void,
+  reconcileFirst: boolean,
 ): Promise<void> {
   const bv = ledger.get(streamKey)?.bv;
   if (!cfg.uploadMeta.seasonSectionId || !bv) return;
@@ -895,7 +909,9 @@ async function associateSegmentSeason(
     cookiesPath: cfg.cookies,
     sectionId: cfg.uploadMeta.seasonSectionId,
     bvid: bv,
+    reconcileFirst,
     note: log,
   });
-  ledger.setSeasonState(streamKey, outcome.status === "failed" ? "failed" : "done");
+  try { ledger.setSeasonState(streamKey, seasonCheckpointState(outcome)); }
+  catch (e) { log(`season terminal checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
 }

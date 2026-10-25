@@ -876,7 +876,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
         opts.seasonCalls?.push(u.pathname);
         return Promise.resolve(json({ code: 0, data: null }));
       }
-      if (u.pathname === "/x2/creative/web/season/section") return Promise.resolve(json({ code: 0, data: { episodes: [{ aid: 7 }] } }));
+      if (u.pathname === "/x2/creative/web/season/section") return Promise.resolve(json({ code: 0, data: { episodes: [] } }));
       // lookupArchive 读 `data.archive`(扁平形状会被当成空,append 因此失败)。
       if (u.pathname === "/x/vupre/web/archive/view") return Promise.resolve(json({ code: 0, data: { archive: { aid: 7, bvid: "BILIfake1", title: "t", tid: 21 }, videos: [{ cid: 9, filename: "existing" }] } }));
       return Promise.resolve(json({ code: 0, data: {} }));

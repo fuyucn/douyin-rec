@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { addArchiveToSeason, normalizeSeasonSectionId, resolveSeasonSectionId } from "./bili-season.js";
+import { addArchiveToSeason, normalizeSeasonSectionId, resolveSeasonSectionId, seasonCheckpointState } from "./bili-season.js";
 
 function loginFile(csrf = "csrf-token"): string {
   const dir = mkdtempSync(join(tmpdir(), "season-test-"));
@@ -109,7 +109,7 @@ describe("addArchiveToSeason", () => {
     }) as unknown as typeof fetch;
 
     const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl });
-    expect(r.status).toBe("failed");
+    expect(r).toMatchObject({ status: "failed", retryable: false });
     expect(posts).toBe(1);
   });
 
@@ -126,7 +126,7 @@ describe("addArchiveToSeason", () => {
     }) as unknown as typeof fetch;
 
     const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl });
-    expect(r.status).toBe("failed");
+    expect(r).toMatchObject({ status: "failed", retryable: false });
     expect(posts).toBe(1);
   });
 
@@ -146,7 +146,7 @@ describe("addArchiveToSeason", () => {
     }) as unknown as typeof fetch;
 
     const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl });
-    expect(r.status).toBe("failed");
+    expect(r).toMatchObject({ status: "failed", retryable: false });
     expect(posts).toBe(1);
   });
 
@@ -163,8 +163,42 @@ describe("addArchiveToSeason", () => {
     }) as unknown as typeof fetch;
 
     const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl });
-    expect(r).toMatchObject({ status: "failed", error: expect.stringContaining("未重复提交") });
+    expect(r).toMatchObject({ status: "failed", error: expect.stringContaining("未重复提交"), retryable: true });
     expect(posts).toBe(1);
+  });
+
+  it("resume checks membership before POSTing and skips an already-applied add", async () => {
+    let posts = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("/x/vupre/web/archive/view")) {
+        return json({ code: 0, data: { archive: { aid: 456, title: "replay" }, videos: [{ cid: 789 }] } });
+      }
+      if (u.includes("/season/section?id=123")) return json({ code: 0, data: { episodes: [{ aid: 456 }] } });
+      if (u.includes("/season/section/episodes/add")) { posts++; return json({ code: 0, data: null }); }
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl, reconcileFirst: true });
+    expect(r).toMatchObject({ status: "already", sectionId: 123, aid: 456 });
+    expect(posts).toBe(0);
+  });
+
+  it("resume does not POST when the preflight membership check is unavailable", async () => {
+    let posts = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("/x/vupre/web/archive/view")) {
+        return json({ code: 0, data: { archive: { aid: 456, title: "replay" }, videos: [{ cid: 789 }] } });
+      }
+      if (u.includes("/season/section?id=123")) return json({ code: 7, message: "unknown" });
+      if (u.includes("/season/section/episodes/add")) { posts++; return json({ code: 0, data: null }); }
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl, reconcileFirst: true });
+    expect(r).toMatchObject({ status: "failed", error: expect.stringContaining("未重复提交"), retryable: true });
+    expect(posts).toBe(0);
   });
 
   it("skips when the section id is off, and fails safely without a complete login", async () => {
@@ -173,6 +207,13 @@ describe("addArchiveToSeason", () => {
     const p = join(dir, "login.json");
     writeFileSync(p, JSON.stringify({ cookie_info: { cookies: [{ name: "SESSDATA", value: "s" }] } }));
     const r = await addArchiveToSeason({ cookiesPath: p, sectionId: 123 });
-    expect(r.status).toBe("failed");
+    expect(r).toMatchObject({ status: "failed", retryable: true });
+  });
+
+  it("keeps retryable failures pending and terminal rejections failed", () => {
+    expect(seasonCheckpointState({ status: "added", sectionId: 1, aid: 1, cid: 2, title: "t" })).toBe("done");
+    expect(seasonCheckpointState({ status: "already", sectionId: 1, aid: 1 })).toBe("done");
+    expect(seasonCheckpointState({ status: "failed", sectionId: 1, error: "timeout", retryable: true })).toBe("pending");
+    expect(seasonCheckpointState({ status: "failed", sectionId: 1, error: "denied", retryable: false })).toBe("failed");
   });
 });

@@ -3,7 +3,7 @@ import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
 import { humanBytes } from "./format.js";
-import { addArchiveToSeasonIfConfigured, effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, seasonCheckpointState, effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 import { prepareUploadAlias } from "./session-plan.js";
@@ -241,7 +241,10 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         ledger.setBv(streamKey, bv);
         // The BV is durable now. The executor associates the season after this upload slot is released
         // (see runWorkflowNodes), so the bounded HTTP call never extends the global upload chain.
-        if (cfg.uploadMeta.seasonSectionId) ledger.setSeasonState(streamKey, "pending");
+        if (cfg.uploadMeta.seasonSectionId) {
+          try { ledger.setSeasonState(streamKey, "pending"); }
+          catch (e) { c.log(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+        }
         // 分P核验基线(T11):P1 = plain 组第 0 段。合并路径此前**完全不写** sync_parts →
         // 期望段数恒 0、核验恒跳过(等于没核验),而分段路径有 —— 两条路径基线口径必须一致。
         // 合并路径的 plain 是单文件(不切分),故恒 1 个分 P;段号 0 起(与分段路径同一口径)。
@@ -853,6 +856,14 @@ export interface WorkflowRunOptions {
  */
 export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<WorkflowRunResult> {
   const { streamKey, nodes, edges, ctx, pool, forceRetry = new Set(), autoRetry = new Set() } = opts;
+  let seasonTail: Promise<void> = Promise.resolve();
+  const queueSeasonAfterUpload = (): void => {
+    seasonTail = seasonTail
+      .then(() => associateSeasonAfterUpload(ctx, streamKey))
+      .catch((e) => {
+        ctx.log(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      });
+  };
   const byKey = new Map(nodes.map((n) => [n.key, n]));
   const parents = new Map<WorkflowNodeKey, WorkflowNodeKey[]>();
   for (const [from, to] of edges) {
@@ -944,9 +955,9 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
       else if (node.resource === "upload") await pool.withUpload(body, streamKey);
       else if (node.resource === "net") await pool.withNet(body, streamKey);
       else await body();
-      // Season association is a post-upload side effect, not part of the upload slot. Run it only after
-      // withUpload has released, so its bounded HTTP budget cannot hold the global submission chain.
-      if (node.key === "upload_plain") await associateSeasonAfterUpload(ctx, streamKey);
+      // Season association starts only after withUpload has released, so its bounded HTTP budget
+      // cannot hold the global submission chain. Append nodes continue while it is in flight.
+      if (node.key === "upload_plain") queueSeasonAfterUpload();
       ctx.ledger.syncNodeState(streamKey, node.key, "done", { error: null });
       const detail = ctx.stepDetail(node.key);
       ctx.ledger.logStep(streamKey, node.key, "done", detail);
@@ -1010,6 +1021,7 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
     }
   }
   if (abortErr) throw abortErr;
+  await seasonTail;
   // 最后一轮 failed 父节点可能没来得及算到兄弟轨末尾节点 → 补算,保证返回结果完整(ledger 已 persist)。
   for (const node of nodes) compute(node.key);
 
@@ -1037,14 +1049,18 @@ export async function associateSeasonForJob(
   const row = ledger.get(streamKey);
   const bv = row?.bv;
   if (!cfg.uploadMeta.seasonSectionId || !bv || row?.seasonState === "done" || row?.seasonState === "failed") return;
-  ledger.setSeasonState(streamKey, "pending");
+  try { ledger.setSeasonState(streamKey, "pending"); }
+  catch (e) { log(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+  const reconcileFirst = row?.seasonState === "pending";
   const season = await addArchiveToSeasonIfConfigured({
     cookiesPath: cfg.cookies,
     sectionId: cfg.uploadMeta.seasonSectionId,
     bvid: bv,
+    reconcileFirst,
     note: log,
   });
-  ledger.setSeasonState(streamKey, season.status === "failed" ? "failed" : "done");
+  try { ledger.setSeasonState(streamKey, seasonCheckpointState(season)); }
+  catch (e) { log(`season terminal checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
 }
 
 function shSingleQuote(s: string): string {

@@ -187,6 +187,32 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
     expect(vi.mocked(addArchiveToSeasonIfConfigured)).toHaveBeenCalledWith(expect.objectContaining({ bvid: "BVSEASON", sectionId: 456 }));
   });
 
+  it("append nodes do not wait for a slow season association", async () => {
+    const t = makeDeps();
+    t.ledger.upsertPending(STREAM_KEY, Date.now());
+    t.deps.cfg = { ...t.deps.cfg, uploadMeta: { ...t.deps.cfg.uploadMeta, seasonSectionId: 456 } };
+    t.uploadPlain.mockResolvedValue("BVSEASONSLOW");
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let appended = false;
+    vi.mocked(addArchiveToSeasonIfConfigured).mockImplementationOnce(async () => {
+      await gate;
+      return { status: "added", sectionId: 456, aid: 1, cid: 1, title: "t" };
+    });
+    t.appendGroup.mockImplementation(async () => {
+      appended = true;
+      release();
+    });
+    const workflow = build(t);
+    const r = await runWorkflowNodes({
+      streamKey: STREAM_KEY, nodes: workflow.nodes, edges: workflow.edges,
+      ctx: workflow.ctx, pool: t.deps.pool!,
+    });
+    expect(r.ok).toBe(true);
+    expect(appended).toBe(true);
+    expect(t.ledger.get(STREAM_KEY)?.seasonState).toBe("done");
+  });
+
   it("P1 上传失败 → 兄弟 burn 轨照常完成;append 被 blocked 不悬挂", async () => {
     const t = makeDeps();
     t.uploadPlain.mockRejectedValue(new Error("network down"));

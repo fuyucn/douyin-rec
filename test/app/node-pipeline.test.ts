@@ -35,7 +35,7 @@ vi.mock("@drec/core", async (orig) => {
       if (seasonSpy.calls.at(-1)?.fail) {
         // Simulate the real wrapper's never-throw contract for a season-side failure.
         o.note?.("[season] 加入合集失败: simulated");
-        return { status: "failed", sectionId: o.sectionId ?? 1, error: "simulated" } as const;
+        return { status: "failed", sectionId: o.sectionId ?? 1, error: "simulated", retryable: true } as const;
       }
       return { status: "added", sectionId: o.sectionId ?? 1, aid: 1, cid: 1, title: "t" } as const;
     },
@@ -670,7 +670,7 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
       expect(r.bv).toBe("BV1NEW");
       expect(vi.mocked(uploadPlain)).toHaveBeenCalledTimes(1);
       expect(seasonSpy.calls.at(-1)).toMatchObject({ bvid: "BV1NEW", persistedBv: "BV1NEW" });
-      expect(readNodeResult(sub)?.seasonState).toBe("failed");
+      expect(readNodeResult(sub)?.seasonState).toBe("pending");
     } finally {
       seasonHook.onCall = undefined;
     }
@@ -849,6 +849,34 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
       const r = await runNodeSidePipeline(spec, silence, gate);
       expect(failed).toBeGreaterThan(0); // 确实触发过 step 落盘失败
       expect(r.ok).toBe(true);
+    } finally {
+      vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => actual.renameSync(from, to)) as never);
+      vi.mocked(uploadPlain).mockImplementation(async () => "BV1NEW");
+    }
+  });
+
+  it("season checkpoint write failure does not fail a created upload", async () => {
+    const { sub, spec, gate } = scene();
+    seasonSpy.calls.length = 0;
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1SEASONWRITE");
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+    const fsMod = await import("node:fs");
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    let failed = 0;
+    vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => {
+      if (String(from).endsWith(".tmp") && actual.readFileSync(from, "utf-8").includes('"seasonState":"pending"')) {
+        failed += 1;
+        throw new Error("EIO season write");
+      }
+      return actual.renameSync(from, to);
+    }) as never);
+    try {
+      const r = await runNodeSidePipeline({ ...spec, uploadMeta: { ...spec.uploadMeta, seasonSectionId: 123 } }, silence, gate);
+      expect(r.ok).toBe(true);
+      expect(r.bv).toBe("BV1SEASONWRITE");
+      expect(failed).toBeGreaterThan(0);
+      expect(seasonSpy.calls).toHaveLength(1);
+      expect(readNodeResult(sub)?.phase).toBe("done");
     } finally {
       vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => actual.renameSync(from, to)) as never);
       vi.mocked(uploadPlain).mockImplementation(async () => "BV1NEW");

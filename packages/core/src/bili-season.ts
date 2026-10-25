@@ -21,7 +21,7 @@ export type SeasonAddOutcome =
   | { status: "added"; sectionId: number; aid: number; cid: number; title: string }
   | { status: "already"; sectionId: number; aid: number }
   | { status: "skipped"; reason: string }
-  | { status: "failed"; sectionId: number; error: string };
+  | { status: "failed"; sectionId: number; error: string; retryable: boolean };
 
 interface SeasonTarget {
   sectionId: number;
@@ -29,6 +29,11 @@ interface SeasonTarget {
   aid?: number;
   bvid?: string;
   title?: string;
+  /**
+   * True when an earlier attempt may already have POSTed the add (resume/pending state).
+   * In that case membership is checked before POSTing, so an applied-but-unconfirmed add is not repeated.
+   */
+  reconcileFirst?: boolean;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   /** Overall deadline for the whole attempt; defaults to {@link SEASON_TOTAL_TIMEOUT_MS}. */
@@ -183,15 +188,27 @@ export async function addArchiveToSeason(o: SeasonTarget): Promise<SeasonAddOutc
 
   const cookie = cookieHeader(o.cookiesPath);
   const token = csrf(o.cookiesPath);
-  if (!cookie || !token) return { status: "failed", sectionId, error: "登录态不完整(缺少 Cookie 或 bili_jct)" };
+  if (!cookie || !token) {
+    return { status: "failed", sectionId, error: "登录态不完整(缺少 Cookie 或 bili_jct)", retryable: true };
+  }
 
   const doFetch = o.fetchImpl ?? fetch;
   const sleep = o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
 
   const viewBudget = budget();
-  if (viewBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)" };
+  if (viewBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)", retryable: true };
   const view = await resolveView(o, doFetch, cookie, viewBudget);
-  if (typeof view === "string") return { status: "failed", sectionId, error: view };
+  if (typeof view === "string") return { status: "failed", sectionId, error: view, retryable: true };
+
+  if (o.reconcileFirst) {
+    const checkBudget = budget();
+    if (checkBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)", retryable: true };
+    const inSection = await sectionContainsAid(doFetch, cookie, sectionId, view.aid, checkBudget);
+    if (inSection === true) return { status: "already", sectionId, aid: view.aid };
+    if (inSection === null) {
+      return { status: "failed", sectionId, error: "小节成员状态未知,未重复提交", retryable: true };
+    }
+  }
 
   const body = {
     sectionId,
@@ -201,9 +218,10 @@ export async function addArchiveToSeason(o: SeasonTarget): Promise<SeasonAddOutc
   const url = `${MEMBER}/x2/creative/web/season/section/episodes/add?csrf=${encodeURIComponent(token)}`;
 
   let last = "";
+  let retryable = true;
   for (let attempt = 0; attempt < 2; attempt++) {
     const postBudget = budget();
-    if (postBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)" };
+    if (postBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)", retryable: true };
     const r = await requestJson(
       doFetch,
       url,
@@ -214,11 +232,17 @@ export async function addArchiveToSeason(o: SeasonTarget): Promise<SeasonAddOutc
     last = r.ok ? `code=${String(r.raw.code ?? "?")} ${String(r.raw.message ?? "")}`.trim() : (r.error ?? "request failed");
     // A lost response may still mean the server applied the add. Check before retrying or failing.
     const checkBudget = budget();
-    if (checkBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)" };
+    if (checkBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)", retryable: true };
     const inSection = await sectionContainsAid(doFetch, cookie, sectionId, view.aid, checkBudget);
     if (inSection === true) return { status: "already", sectionId, aid: view.aid };
-    const definiteRejection = (r.status !== undefined && r.status >= 400 && r.status < 500)
-      || (r.raw.code !== undefined && r.raw.code !== 0);
+    const code = Number(r.raw.code);
+    const rateLimited = code === 601 || code === 21540 || code === 21566 || code === 21186
+      || /上传过快|上传视频过快|投稿过于频繁|请求过于频繁/i.test(String(r.raw.message ?? ""));
+    const definiteRejection = !rateLimited && (
+      (r.status !== undefined && r.status >= 400 && r.status < 500)
+      || (r.status !== undefined && r.status < 500 && r.raw.code !== undefined && r.raw.code !== 0)
+    );
+    retryable = !definiteRejection;
     if (definiteRejection) {
       // A definite API rejection will not become success by retrying.
       break;
@@ -226,11 +250,17 @@ export async function addArchiveToSeason(o: SeasonTarget): Promise<SeasonAddOutc
     if (inSection === null) {
       // The POST outcome is unknown and membership could not be checked. Re-posting here can turn
       // an already-applied add into a false "duplicate" failure, so stop and surface the uncertainty.
-      return { status: "failed", sectionId, error: `${last};小节成员状态未知,未重复提交` };
+      return { status: "failed", sectionId, error: `${last};小节成员状态未知,未重复提交`, retryable: true };
     }
     if (attempt === 0 && remaining() > 1_500) await sleep(1_500).catch(() => {});
   }
-  return { status: "failed", sectionId, error: last || "加入合集失败" };
+  return { status: "failed", sectionId, error: last || "加入合集失败", retryable };
+}
+
+/** Checkpoint state for a configured season attempt: retryable failures stay pending. */
+export function seasonCheckpointState(outcome: SeasonAddOutcome): "pending" | "done" | "failed" {
+  if (outcome.status !== "failed") return "done";
+  return outcome.retryable ? "pending" : "failed";
 }
 
 /** Human-readable one-line outcome for job logs. */
@@ -243,7 +273,7 @@ export function describeSeasonOutcome(r: SeasonAddOutcome): string {
     case "skipped":
       return `[season] 跳过:${r.reason}`;
     case "failed":
-      return `[season] 加入合集小节 ${r.sectionId} 失败:${r.error}`;
+      return `[season] 加入合集小节 ${r.sectionId} 失败${r.retryable ? "(可重试)" : ""}:${r.error}`;
   }
 }
 
@@ -258,7 +288,7 @@ export async function addArchiveToSeasonWithNote(
   try {
     outcome = await addArchiveToSeason(o);
   } catch (e) {
-    outcome = { status: "failed", sectionId: o.sectionId, error: String((e as Error)?.message ?? e).slice(0, 200) };
+    outcome = { status: "failed", sectionId: o.sectionId, error: String((e as Error)?.message ?? e).slice(0, 200), retryable: true };
   }
   try { o.note?.(describeSeasonOutcome(outcome)); } catch { /* logging never fails an upload */ }
   return outcome;

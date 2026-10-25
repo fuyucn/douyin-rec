@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import {
-  addArchiveToSeasonIfConfigured, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
+  addArchiveToSeasonIfConfigured, seasonCheckpointState, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
   type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress, type UploadSlot,
 } from "@drec/core";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
@@ -275,17 +275,23 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   // must not extend the node-wide slot hold. Persist pending before the network call so a killed
   // processor can resume without losing the intent.
   const seasonState = persistedSeasonState(job);
+  let seasonTail: Promise<void> = Promise.resolve();
   if (p.seasonSectionId && seasonState !== "done" && seasonState !== "failed") {
     try { ctx.setState?.({ seasonState: "pending" }); }
     catch (e) { ctx.log(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
-    const outcome = await addArchiveToSeasonIfConfigured({
-      cookiesPath: cookies,
-      sectionId: p.seasonSectionId,
-      bvid: bv,
-      note: (m) => ctx.log(m),
+    seasonTail = (async () => {
+      const outcome = await addArchiveToSeasonIfConfigured({
+        cookiesPath: cookies,
+        sectionId: p.seasonSectionId,
+        bvid: bv,
+        reconcileFirst: seasonState === "pending",
+        note: (m) => ctx.log(m),
+      });
+      try { ctx.setState?.({ seasonState: seasonCheckpointState(outcome) }); }
+      catch (e) { ctx.log(`season terminal checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+    })().catch((e) => {
+      ctx.log(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
     });
-    try { ctx.setState?.({ seasonState: outcome.status === "failed" ? "failed" : "done" }); }
-    catch (e) { ctx.log(`season terminal checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
   }
   const countParts = countPartsOf(deps);
   // params.bv: the draft exists and every input is a part still to append.
@@ -310,6 +316,7 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
       throw e;
     }
   }
+  await seasonTail;
   return { outputs: [], bv, note: `${basename(job.inputs[0] ?? "")} +${Math.max(0, files.length - 1)} parts` };
 }
 
