@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { ChevronDown, History } from "lucide-react";
 import { api, ApiError, type HubJobDTO, type RoomDTO, type WorkerDTO } from "../api/client";
 import { Button } from "./Button";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { JobLogDialog, RunCard } from "./HubJobs";
 import { RunNowDialog } from "./RunNowDialog";
 import type { FlowCfg } from "./flow-build";
@@ -51,6 +52,7 @@ export function RoomRunsPanel({
   const [busy, setBusy] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
   const [runBusy, setRunBusy] = useState(false);
+  const [forceRun, setForceRun] = useState<{ streamKey: string; message: string } | null>(null);
 
   // 稳定引用:workerName 只在 workers 变化时换,否则每次渲染新引用会击穿 RunCard 内
   // PipelineFlow 的 memo(既有 RoomDetail 同款注释,不是新问题)。
@@ -106,14 +108,35 @@ export function RoomRunsPanel({
       }),
     [withBusy, toast, t],
   );
-  const rerun = useCallback(
-    (streamKey: string) =>
-      withBusy(async () => {
-        await api.runHubJob({ streamKey });
-        toast(t("hub.jobs.started"), "info");
-      }),
-    [withBusy, toast, t],
-  );
+  const rerun = useCallback(async (streamKey: string): Promise<void> => {
+    setBusy(true);
+    try {
+      await api.runHubJob({ streamKey });
+      toast(t("hub.jobs.started"), "info");
+      await refresh().catch(() => {});
+    } catch (e) {
+      if (e instanceof ApiError && e.forceable) {
+        setForceRun({ streamKey, message: e.message });
+      } else {
+        toast(errMessage(e), "error");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh, toast, t]);
+
+  const forceRerun = async (streamKey: string): Promise<void> => {
+    setBusy(true);
+    try {
+      await api.runHubJob({ streamKey, force: true });
+      toast(t("hub.jobs.started"), "info");
+      await refresh().catch(() => {});
+    } catch (e) {
+      toast(errMessage(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const runNow = async ({ key, winnerWorker, force }: { key: string; winnerWorker?: string; force?: boolean }): Promise<void> => {
     setRunBusy(true);
@@ -197,6 +220,19 @@ export function RoomRunsPanel({
         today={todayYmdInTz(serverTz)}
         busy={runBusy}
         onSubmit={runNow}
+      />
+      <ConfirmDialog
+        open={forceRun !== null}
+        title={t("hub.jobs.runForceTitle")}
+        message={<><span className="block">{forceRun?.message}</span><span className="block mt-2">{t("hub.jobs.runForceHint")}</span></>}
+        confirmLabel={t("hub.jobs.runForceConfirm")}
+        destructive
+        onConfirm={() => {
+          const f = forceRun;
+          setForceRun(null);
+          if (f) void forceRerun(f.streamKey);
+        }}
+        onCancel={() => setForceRun(null)}
       />
       {/* 推送失效提示(与队列页/Hub 页同款),不静默停在旧值。 */}
       {stream.stale && (

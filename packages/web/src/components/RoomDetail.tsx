@@ -11,6 +11,7 @@ import { RunNowDialog } from "./RunNowDialog";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
 import { errMessage, useToast, useHubStream, usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
+import { shouldToastRunError } from "../lib/run-now";
 import { todayYmdInTz } from "../lib/tz";
 import { serverTimezoneAtom } from "../atoms";
 import { useT } from "../lib/i18n";
@@ -204,14 +205,18 @@ export function RoomDetail({
       toast(t("hub.jobs.started"), "info");
       void refresh().catch(() => {}); // 交互后主动刷新;失败由 stale 提示呈现
     } catch (e) {
-      // 409 that `force` can override (old BV / unfinished queue row): ask once instead of failing.
-      if (e instanceof ApiError && e.forceable && !force) {
-        setForceRun({ streamKey, winnerWorker, message: e.message });
-        return;
+      if (shouldToastRunError({ forceable: e instanceof ApiError && e.forceable, force })) {
+        toast(errMessage(e), "error");
       }
-      toast(errMessage(e), "error");
-      // Keep the dialog open and usable on a real failure.
       throw e;
+    }
+  };
+  // Run-card reruns have no dialog to own the 409 confirm; ask here instead.
+  const runFromCard = async (streamKey: string): Promise<void> => {
+    try {
+      await runNow(streamKey);
+    } catch (e) {
+      if (e instanceof ApiError && e.forceable) setForceRun({ streamKey, message: e.message });
     }
   };
   const openRun = (): void => {
@@ -352,7 +357,7 @@ export function RoomDetail({
               onToggle={toggleRun}
               onRetry={retryNode}
               onStop={stopJob}
-              onRunNow={(key) => void runNow(key).catch(() => {})}
+              onRunNow={(key) => void runFromCard(key)}
             />
           ))}
           {runs.length < total && (

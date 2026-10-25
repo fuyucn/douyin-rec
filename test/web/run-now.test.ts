@@ -59,6 +59,7 @@ describe("shouldToastRunError", () => {
 
   it("still reports non-forceable failures and failed force retries", () => {
     expect(shouldToastRunError({ forceable: false, force: false })).toBe(true);
+    expect(shouldToastRunError({ forceable: false, force: true })).toBe(true);
     expect(shouldToastRunError({ forceable: true, force: true })).toBe(true);
   });
 });
