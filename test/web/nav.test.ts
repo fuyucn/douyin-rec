@@ -13,4 +13,9 @@ describe("navItems", () => {
     expect(items.find((i) => i.to === "/")?.end).toBe(true);
     expect(items.find((i) => i.to === "/rooms")?.end).toBeFalsy();
   });
+  it("keeps legacy task and hub routes available while rooms parity work is in progress", () => {
+    const paths = navItems(true).map((i) => i.to);
+    expect(paths).toContain("/");
+    expect(paths).toContain("/hub");
+  });
 });

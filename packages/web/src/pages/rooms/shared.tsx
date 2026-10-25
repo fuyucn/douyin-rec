@@ -26,6 +26,8 @@ export interface RoomsData {
   taskOf: (r: RoomDTO) => Task | undefined;
   statusOf: (r: RoomDTO) => RoomStatus;
   refresh: () => Promise<void>;
+  /** Re-read the worker list after add/edit/delete/reorder. */
+  refreshWorkers: () => Promise<void>;
   stream: HubStreamHandle;
 }
 
@@ -46,6 +48,9 @@ export function useRoomsData(): RoomsData {
   const refreshRuns = useCallback(async (): Promise<void> => {
     const { rooms: rs } = await api.getLatestRuns();
     setRuns(new Map(rs.map((r) => [r.roomKey, r])));
+  }, []);
+  const refreshWorkers = useCallback(async (): Promise<void> => {
+    setWorkers(await api.listWorkers());
   }, []);
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -71,14 +76,14 @@ export function useRoomsData(): RoomsData {
   // The 5 s task poll also refreshes the connection time: room fetches are push-driven and can be minutes apart.
   usePolling(() => void api.listTasks().then((ts) => { setTasks(ts); mark("tasks", true); })
     .catch(() => mark("tasks", false)), 5_000);
-  usePolling(() => void api.listWorkers().then(setWorkers).catch(() => {}), 300_000);
+  usePolling(() => void refreshWorkers().catch(() => {}), 300_000);
   usePolling(() => void api.getHubStatus().then((s) => setHubEnabled(s.enabled)).catch(() => {}), 300_000);
 
   const taskById = useMemo(() => new Map(tasks.map((x) => [x.id, x])), [tasks]);
   const taskOf = useCallback((r: RoomDTO) => (r.recording?.taskId != null ? taskById.get(r.recording.taskId) : undefined), [taskById]);
   const conn = useMemo((): ConnState => connOf(fetches.rooms, fetches.tasks), [fetches]);
   const statusOf = useCallback((r: RoomDTO) => roomStatus(r, taskOf(r), runs.get(latestRunKey(r)) ?? null), [taskOf, runs]);
-  return { rooms, loaded, conn, workers, hubEnabled, taskOf, statusOf, refresh, stream };
+  return { rooms, loaded, conn, workers, hubEnabled, taskOf, statusOf, refresh, refreshWorkers, stream };
 }
 
 /** Display name: task name > anchor name > room id. */

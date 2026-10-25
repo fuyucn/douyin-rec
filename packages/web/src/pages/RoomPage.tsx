@@ -13,6 +13,7 @@ import { serverTimezoneAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { TaskLogPanel } from "../components/LogTerminal";
+import { MergePanel } from "../components/MergePanel";
 import { RollingProgressRows, useRoomRolling } from "../components/RollingProgress";
 import { RoomRunsPanel } from "../components/RoomRunsPanel";
 import { Tooltip } from "../components/Tooltip";
@@ -247,6 +248,7 @@ export function RoomPage(): ReactNode {
           <RoomRunsPanel room={room} workers={data.workers} collapsed />
         </section>
       </div>
+      {taskId !== null && <MergePanel taskId={taskId} />}
       {actions.dialogs}
     </>
   );

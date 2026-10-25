@@ -17,9 +17,13 @@ import { ChevronDown, History } from "lucide-react";
 import { api, type HubJobDTO, type RoomDTO, type WorkerDTO } from "../api/client";
 import { Button } from "./Button";
 import { JobLogDialog, RunCard } from "./HubJobs";
+import { RunNowDialog } from "./RunNowDialog";
 import type { FlowCfg } from "./flow-build";
 import { useHubStream, usePolling, useToast, errMessage } from "../lib/hooks";
 import { useT } from "../lib/i18n";
+import { todayYmdInTz } from "../lib/tz";
+import { serverTimezoneAtom } from "../atoms";
+import { useAtomValue } from "jotai";
 
 const PAGE = 20;
 
@@ -36,6 +40,7 @@ export function RoomRunsPanel({
 }): ReactNode {
   const t = useT();
   const toast = useToast();
+  const serverTz = useAtomValue(serverTimezoneAtom);
   const [runs, setRuns] = useState<HubJobDTO[]>([]);
   const [total, setTotal] = useState(0);
   const [loaded, setLoaded] = useState(false);
@@ -43,6 +48,8 @@ export function RoomRunsPanel({
   const [logKey, setLogKey] = useState<string | null>(null);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [runOpen, setRunOpen] = useState(false);
+  const [runBusy, setRunBusy] = useState(false);
 
   // 稳定引用:workerName 只在 workers 变化时换,否则每次渲染新引用会击穿 RunCard 内
   // PipelineFlow 的 memo(既有 RoomDetail 同款注释,不是新问题)。
@@ -107,6 +114,20 @@ export function RoomRunsPanel({
     [withBusy, toast, t],
   );
 
+  const runNow = async ({ key, winnerWorker }: { key: string; winnerWorker?: string }): Promise<void> => {
+    setRunBusy(true);
+    try {
+      await api.runHubJob({ streamKey: key, winnerWorker });
+      toast(t("hub.jobs.started"), "info");
+      setRunOpen(false);
+      await refresh().catch(() => {});
+    } catch (e) {
+      toast(errMessage(e), "error");
+    } finally {
+      setRunBusy(false);
+    }
+  };
+
   // cfg 交给 RunCard 画「计划图」(进行中 run 还没写 steps 时靠它画出待办节点)。
   const cfg = useMemo(() => (room.processing?.pipeline ?? undefined) as FlowCfg | undefined, [room.key, room.processing]);
 
@@ -114,7 +135,12 @@ export function RoomRunsPanel({
     <section className="run-list-shell">
       <div className="px-3 py-2.5 border-b border-hairline flex items-center justify-between gap-3">
         <span className="section-label">{t("rooms.runsHeading")}</span>
-        <span className="font-mono text-[11px] text-muted-soft">{total}</span>
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[11px] text-muted-soft">{total}</span>
+          <Button small variant="secondary" onClick={() => setRunOpen(true)}>
+            {t("hub.jobs.runNow")}
+          </Button>
+        </div>
       </div>
       <div className="p-1.5">
         {!loaded &&
@@ -156,6 +182,17 @@ export function RoomRunsPanel({
         )}
       </div>
       <JobLogDialog logKey={logKey} onClose={() => setLogKey(null)} />
+      <RunNowDialog
+        open={runOpen}
+        onClose={() => setRunOpen(false)}
+        runs={runs}
+        workers={workers}
+        roomPrefix={`${room.platform}:${room.roomSlug}`}
+        roomWorkerIds={room.processing?.workers}
+        today={todayYmdInTz(serverTz)}
+        busy={runBusy}
+        onSubmit={runNow}
+      />
       {/* 推送失效提示(与队列页/Hub 页同款),不静默停在旧值。 */}
       {stream.stale && (
         <div className="px-3 py-2 text-[11px]" style={{ color: "var(--warning-fg)" }}>

@@ -82,7 +82,7 @@ export function MergePanel({ taskId }: { taskId: number }): ReactNode {
   const running = job?.state === "running";
 
   return (
-    <section className="lg:col-span-3 border-t border-hairline pt-6">
+    <section className="border-t border-hairline mt-6 pt-6">
       <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
         <h3 className="section-label">{t("merge.title")}</h3>
         <div className="flex items-center gap-2">

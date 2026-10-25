@@ -7,11 +7,12 @@
  */
 import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { Activity, FileText, FolderOpen, LayoutGrid, Loader, Pencil, Play, Plus, Square, TriangleAlert } from "lucide-react";
-import type { RoomDTO } from "../api/client";
+import { Activity, FileText, FolderOpen, LayoutGrid, Loader, Pencil, Play, Plus, Server, Square, TriangleAlert } from "lucide-react";
+import { api, type RoomDTO, type WorkerStatus } from "../api/client";
 import { Button, IconButton } from "../components/Button";
 import { ConnStatus } from "../components/ConnStatus";
 import { HubStreamBanner } from "../components/HubStreamBanner";
+import { WorkersPanel } from "../components/WorkersPanel";
 import { AddRoomDialog } from "../modals/AddRoomDialog";
 import { useTicker } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -30,6 +31,8 @@ export function RoomsPage(): ReactNode {
   const actions = useRoomActions(data);
   const [filter, setFilter] = useState<Filter>("all");
   const [createOpen, setCreateOpen] = useState(false);
+  const [workersOpen, setWorkersOpen] = useState(false);
+  const [workerStatus, setWorkerStatus] = useState<Record<string, WorkerStatus>>({});
   // Relative times ("5 min ago") must keep moving even though the page is push-driven.
   const now = useTicker(30_000);
   const { rooms, loaded, statusOf } = data;
@@ -38,6 +41,13 @@ export function RoomsPage(): ReactNode {
   const count = (f: Filter): number => (f === "all" ? rooms.length : rooms.filter((r) => statusOf(r).kind === f).length);
   const shown = filter === "all" ? sorted : sorted.filter((r) => statusOf(r).kind === filter);
   const attention = sorted.filter((r) => statusOf(r).kind === "attention");
+
+  const openWorkers = (): void => {
+    setWorkersOpen(true);
+    void api.getWorkersStatus()
+      .then((list) => setWorkerStatus(Object.fromEntries(list.map((s) => [s.id, s]))))
+      .catch(() => {});
+  };
 
   const cell = (f: Filter, icon: ReactNode): ReactNode => (
     <div role="tab" tabIndex={0} aria-selected={filter === f}
@@ -60,8 +70,12 @@ export function RoomsPage(): ReactNode {
           <h1 className="headline text-[28px] sm:text-[32px] leading-tight">{t("room.title")}</h1>
           <p className="text-muted text-sm mt-1.5">{t("room.subtitle")}</p>
         </div>
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex w-full sm:w-auto flex-wrap items-center gap-2 sm:gap-3 min-w-0">
           <ConnStatus conn={data.conn} />
+          <Button small variant="secondary" onClick={openWorkers} className="min-w-0 flex-1 sm:flex-none">
+            <Server className="w-4 h-4" />
+            <span className="truncate">{t("hub.workers.pill", { count: data.workers.length })}</span>
+          </Button>
           <Button onClick={() => setCreateOpen(true)} aria-label={t("room.add")} className="rm-add">
             <Plus className="w-4 h-4" />
             <span className="rm-add-label">{t("room.add")}</span>
@@ -104,14 +118,14 @@ export function RoomsPage(): ReactNode {
         </div>
 
         <div className="hidden lg:block min-w-0 overflow-x-auto">
-          <table className="tasks">
+          <table className="tasks" style={{ tableLayout: "fixed" }}>
             <thead>
               <tr>
                 <th>{t("room.colRoom")}</th>
-                <th className="w-[150px]">{t("room.colLastDeliver")}</th>
-                <th className="w-[180px]">{t("room.colNodes")}</th>
-                <th className="w-[130px]">{t("room.colSchedule")}</th>
-                <th className="w-[260px]">{t("room.colStatus")}</th>
+                <th className="w-[118px]">{t("room.colLastDeliver")}</th>
+                <th className="w-[138px]">{t("room.colNodes")}</th>
+                <th className="w-[104px]">{t("room.colSchedule")}</th>
+                <th className="w-[178px]">{t("room.colStatus")}</th>
                 <th className="w-[150px] text-right">{t("room.colAction")}</th>
               </tr>
             </thead>
@@ -144,16 +158,18 @@ export function RoomsPage(): ReactNode {
                     </Link>
                   </td>
                   <td><DeliveryCell s={statusOf(r)} now={now} /></td>
-                  <td className="font-mono text-[11px] text-muted">{nodesText(r, data.workers, t("room.allNodes"))}</td>
+                  <td className="font-mono text-[11px] text-muted truncate max-w-0" title={nodesText(r, data.workers, t("room.allNodes"))}>{nodesText(r, data.workers, t("room.allNodes"))}</td>
                   <td>
                     {scheduleText(scheduleOf(r)) ? (
                       <span className="font-mono text-[12.5px] text-body tabular-nums whitespace-nowrap">{scheduleText(scheduleOf(r))}</span>
                     ) : <span className="text-muted-soft">-</span>}
                   </td>
                   <td>
-                    <div className="flex items-center gap-2 min-w-0">
+                    <div className="min-w-0">
                       <RoomBadge s={statusOf(r)} />
-                      <span className="text-[12px] text-muted truncate">{statusDetail(t, r, statusOf(r))}</span>
+                      <div className="text-[11px] text-muted truncate mt-0.5" title={statusDetail(t, r, statusOf(r))}>
+                        {statusDetail(t, r, statusOf(r))}
+                      </div>
                     </div>
                   </td>
                   <td className="text-right whitespace-nowrap">
@@ -173,6 +189,13 @@ export function RoomsPage(): ReactNode {
         workers={data.workers}
         onClose={() => setCreateOpen(false)}
         onSaved={() => { setCreateOpen(false); void data.refresh().catch(() => {}); }}
+      />
+      <WorkersPanel
+        open={workersOpen}
+        onClose={() => setWorkersOpen(false)}
+        workers={data.workers}
+        status={workerStatus}
+        onChanged={() => { void data.refreshWorkers().catch(() => {}); }}
       />
     </>
   );
@@ -208,7 +231,7 @@ function RoomActions({ room, data, actions }: {
       {task ? (
         enabled ? (
           <IconButton title={managed ? t("tasks.managedHint") : t("tasks.titleStop")} disabled={managed} onClick={() => actions.setEnabled(room, false)}>
-            <Square className="w-4 h-4" style={{ color: "var(--warning-fg)" }} fill="currentColor" />
+            <Square className="w-4 h-4" style={{ color: "var(--warning-fg)" }} />
           </IconButton>
         ) : (
           <IconButton title={managed ? t("tasks.managedHint") : t("tasks.titleStart")} disabled={managed} onClick={() => actions.setEnabled(room, true)}>

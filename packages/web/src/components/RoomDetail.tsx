@@ -2,12 +2,12 @@ import { Pencil, Play, Square, Timer, Trash2 } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, type HubJobDTO, type HubRuleDTO, type Task, type WorkerDTO } from "../api/client";
-import { RunCard, JobLogDialog, runDate } from "./HubJobs";
-import { Dialog } from "./Dialog";
+import { RunCard, JobLogDialog } from "./HubJobs";
 import { Button, IconButton } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Switch } from "./Switch";
 import { ExperimentalBadge } from "./ExperimentalBadge";
+import { RunNowDialog } from "./RunNowDialog";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
 import { errMessage, useToast, useHubStream, usePolling } from "../lib/hooks";
 import { roomId } from "../lib/labels";
@@ -17,24 +17,7 @@ import { useT } from "../lib/i18n";
 import type { FlowCfg } from "./flow-build";
 
 const PAGE = 20;
-const CUSTOM_DATE = "__custom__";
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
-
-/** 新建投稿序号:同 base key 已有 -N 则取最大 +1,否则从 -1 开始。 */
-function nextSubmissionNo(baseKey: string, runs: HubJobDTO[]): number {
-  const prefix = `${baseKey}-`;
-  const max = runs.reduce((acc, j) => {
-    const m = /-(\d+)$/.exec(j.streamKey);
-    return m && j.streamKey.startsWith(prefix) ? Math.max(acc, Number(m[1])) : acc;
-  }, 0);
-  return max + 1;
-}
-
-/** 去掉新建投稿的 -N 后缀(不能用裸 /-\d+$/ :日期本身以 -DD 结尾)。 */
-function submissionBaseKey(key: string): string {
-  const m = /^(.+?:\d{4}-\d{2}-\d{2}(?:_\d{4})?)-(\d+)$/.exec(key);
-  return m ? m[1] : key;
-}
 
 /** 产物 chips(plain 恒有;danmu/livechat 默认开,仅显式 false 才去掉)。 */
 function outputChips(r: HubRuleDTO): string[] {
@@ -82,14 +65,9 @@ export function RoomDetail({
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
-  const [runKey, setRunKey] = useState(CUSTOM_DATE);
   // 默认日期 = 后端设置时区的今天(不是浏览器本地日期,issue #155)。
   const serverTz = useAtomValue(serverTimezoneAtom);
-  const [runCustom, setRunCustom] = useState(todayYmdInTz(serverTz));
-  const [runWorker, setRunWorker] = useState("");
   const [runBusy, setRunBusy] = useState(false);
-  // 立即执行默认新建任务(id 自动 -1/-2),避免复用同一天旧任务导致“重试不像重试”。
-  const [runNew, setRunNew] = useState(true);
   // T18 房间级**动作**。与配置(编辑弹窗)分离:动作会改运行时状态,危险的要二次确认。
   const [drainBusy, setDrainBusy] = useState(false);
   const [stopOpen, setStopOpen] = useState(false);
@@ -235,34 +213,8 @@ export function RoomDetail({
     }
   };
   const openRun = (): void => {
-    setRunKey(runs[0]?.streamKey ?? CUSTOM_DATE);
-    setRunCustom(runs[0] ? runDate(runs[0].streamKey).slice(0, 10) : todayYmdInTz(serverTz));
-    setRunWorker("");
-    setRunNew(true);
     setRunOpen(true);
   };
-  const submitRun = async (): Promise<void> => {
-    const date = runCustom.trim();
-    if (runKey === CUSTOM_DATE && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      toast(t("hub.jobs.runNowDateHint"), "error");
-      return;
-    }
-    const selectedKey = runKey === CUSTOM_DATE ? `${rule.platform}:${rule.roomSlug}:${date}` : runKey;
-    const baseKey = submissionBaseKey(selectedKey);
-    const key = runNew ? `${baseKey}-${nextSubmissionNo(baseKey, runs)}` : selectedKey;
-    setRunBusy(true);
-    try {
-      await runNow(key, runWorker || undefined);
-      setRunOpen(false);
-    } finally {
-      setRunBusy(false);
-    }
-  };
-  const nextSubmissionKey = ((): string => {
-    const selectedKey = runKey === CUSTOM_DATE ? `${rule.platform}:${rule.roomSlug}:${runCustom.trim()}` : runKey;
-    const baseKey = submissionBaseKey(selectedKey);
-    return `${baseKey}-${nextSubmissionNo(baseKey, runs)}`;
-  })();
 
   // 参与 worker:rule.workers 有值=选中的这些;缺省/空=全部节点。
   const participating = rule.workers && rule.workers.length > 0 ? rule.workers.map(workerName) : null;
@@ -413,55 +365,25 @@ export function RoomDetail({
 
       <HubRuleDialog open={editOpen} onClose={() => setEditOpen(false)} rule={rule} onSaved={() => { onChanged(); void refresh().catch(() => {}); }} />
       <JobLogDialog logKey={logKey} onClose={() => setLogKey(null)} />
-      <Dialog
+      <RunNowDialog
         open={runOpen}
-        onClose={() => !runBusy && setRunOpen(false)}
-        title={t("hub.jobs.runNowTitle")}
-        description={t("hub.jobs.runNowDesc")}
-      >
-        <div className="flex flex-col gap-4">
-          <div>
-            <label className="field-label">{t("hub.jobs.runNowDate")}</label>
-            <select className="input" value={runKey} onChange={(e) => setRunKey(e.target.value)}>
-              {runs.map((j) => (
-                <option key={j.streamKey} value={j.streamKey}>{runDate(j.streamKey)}</option>
-              ))}
-              <option value={CUSTOM_DATE}>{t("hub.jobs.runNowCustom")}</option>
-            </select>
-          </div>
-          {runKey === CUSTOM_DATE && (
-            <div>
-              <label className="field-label">{t("hub.jobs.runNowDateHint")}</label>
-              <input className="input" value={runCustom} onChange={(e) => setRunCustom(e.target.value)} placeholder={todayYmdInTz(serverTz)} />
-            </div>
-          )}
-          <div>
-            <label className="field-label">{t("hub.jobs.runNowMode")}</label>
-            <select className="input" value={runNew ? "new" : "resume"} onChange={(e) => setRunNew(e.target.value === "new")}>
-              <option value="resume">{t("hub.jobs.runNowResume")}</option>
-              <option value="new">{t("hub.jobs.runNowNew")}</option>
-            </select>
-          </div>
-          {runNew && <p className="text-[12px] text-muted-soft">{t("hub.jobs.runNowNewHint", { key: nextSubmissionKey })}</p>}
-          <div>
-            <label className="field-label">{t("hub.jobs.runNowWorker")}</label>
-            <select className="input" value={runWorker} onChange={(e) => setRunWorker(e.target.value)}>
-              <option value="">{t("hub.jobs.runNowWorkerAuto")}</option>
-              {(rule.workers && rule.workers.length > 0 ? workers.filter((w) => rule.workers!.includes(w.id)) : workers).map((w) => (
-                <option key={w.id} value={w.id}>{w.name || w.id}</option>
-              ))}
-            </select>
-          </div>
-          <div className="flex justify-end gap-3">
-            <Button type="button" variant="secondary" disabled={runBusy} onClick={() => setRunOpen(false)}>
-              {t("hub.common.cancel")}
-            </Button>
-            <Button type="button" loading={runBusy} disabled={runBusy} onClick={() => void submitRun()}>
-              {t("hub.jobs.runNow")}
-            </Button>
-          </div>
-        </div>
-      </Dialog>
+        onClose={() => setRunOpen(false)}
+        runs={runs}
+        workers={workers}
+        roomPrefix={`${rule.platform}:${rule.roomSlug}`}
+        roomWorkerIds={rule.workers}
+        today={todayYmdInTz(serverTz)}
+        busy={runBusy}
+        onSubmit={async ({ key, winnerWorker }) => {
+          setRunBusy(true);
+          try {
+            await runNow(key, winnerWorker);
+            setRunOpen(false);
+          } finally {
+            setRunBusy(false);
+          }
+        }}
+      />
       <ConfirmDialog
         open={forceRun !== null}
         title={t("hub.jobs.runForceTitle")}
