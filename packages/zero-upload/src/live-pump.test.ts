@@ -2449,6 +2449,29 @@ describe("issue #360: zero-disk room files", () => {
     expect(names).toEqual(["live-pump-主播_2026-10-24_10-00-00_000.ts"]);
   });
 
+  it("resolvePumpDir keeps only an ACTIVE legacy broadcast at the root", () => {
+    const room = "douyin:123:2026-10-24";
+    const roomDir = join(dir, "主播_douyin_123");
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true, parts: [], updatedAt: Date.now(),
+    });
+    expect(resolvePumpDir(roomDir, dir, room)).toBe(dir);
+    // A finished broadcast (older than the same-broadcast window) moves to the room dir.
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true, parts: [],
+      updatedAt: Date.now() - 3 * 3_600_000,
+    });
+    // `writeLivePumpState` stamps updatedAt=now, so advance the clock instead of the state.
+    expect(resolvePumpDir(roomDir, dir, room, Date.now() + 3 * 3_600_000)).toBe(roomDir);
+    // An unconfirmed part keeps the WAL at the root regardless of age.
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      parts: [{ index: 0, spoolPath: join(dir, "p.ts"), filename: "f", stem: "s", title: "P1", bytes: 1, durationSec: 1, confirmed: false }],
+      updatedAt: Date.now() - 3 * 3_600_000,
+    });
+    expect(resolvePumpDir(roomDir, dir, room, Date.now() + 3 * 3_600_000)).toBe(dir);
+  });
+
   it("resolvePumpDir keeps a broadcast with a legacy state at the root", () => {
     const room = "douyin:123:2026-10-24";
     const roomDir = join(dir, "主播_douyin_123");

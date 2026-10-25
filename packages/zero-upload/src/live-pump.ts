@@ -412,9 +412,20 @@ export function archivedSpoolPathsToKeep(spoolDir: string, room: string): string
  * state moves to the room directory. No file is ever moved: the legacy path stays authoritative
  * for its own broadcast, which removes the whole class of half-migration data loss.
  */
-export function resolvePumpDir(roomDir: string, legacyDir: string, room: string): string {
+export function resolvePumpDir(
+  roomDir: string,
+  legacyDir: string,
+  room: string,
+  nowMs: number = Date.now(),
+): string {
   if (roomDir === legacyDir) return legacyDir;
-  return existsSync(livePumpStatePath(legacyDir, room)) ? legacyDir : roomDir;
+  const legacy = readLivePumpState(livePumpStatePath(legacyDir, room));
+  if (!legacy) return roomDir;
+  // Only an ACTIVE broadcast stays at the root: an unconfirmed part (its WAL is still needed) or
+  // a last activity inside the same-broadcast window. Anything older is a finished broadcast;
+  // keeping it at the root forever would mean upgraded rooms never reach the room directory.
+  if (legacy.pending || legacy.parts.some((p) => !p.confirmed)) return legacyDir;
+  return isSameBroadcastGap(nowMs - legacy.updatedAt) ? legacyDir : roomDir;
 }
 
 export interface LivePumpSessionOpts {

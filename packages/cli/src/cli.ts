@@ -436,26 +436,23 @@ program
           knownSpoolPaths: [...spoolPathsToKeep(st), ...archivedSpoolPathsToKeep(pumpFilesDir, pumpRoom)],
           log: (m) => console.log(m),
         });
-        // Issue #360: spools orphaned in the root before the layout switch are nobody's else's
-        // to clean. Only the legacy name generation matches there, so room-layout files in a
-        // directory shared with an old run are not touched.
-        if (pumpFilesDir !== opts.outDir) {
-          // Root spools may still be referenced by another room's legacy state or by a legacy
-          // archived state: collect every root state's spools before sweeping. An unreadable
-          // root state means the keep-set is unknown, so skip (never guess).
-          const rootKeep: string[] = [];
-          let rootSafe = true;
-          try {
-            for (const f of readdirSync(opts.outDir)) {
-              if (!/^live-pump-.+\.state\.json(?:\..*)?$/.test(f)) continue;
-              const st2 = readLivePumpState(join(opts.outDir, f));
-              if (!st2) { rootSafe = false; break; }
-              rootKeep.push(...spoolPathsToKeep(st2));
-            }
-          } catch { /* no root dir: nothing to protect */ }
-          if (rootSafe) sweepOrphanSpools({ spoolDir: opts.outDir, knownSpoolPaths: rootKeep, log: (m) => console.log(m) });
-          else console.log("[live-pump] 根目录存在无法读取的旧状态,跳过根目录清扫(避免误删其引用的暂存文件)");
-        }
+        // Root spools may belong to another room's state or an archived state, in either layout.
+        // Build the keep-set from EVERY root state whenever the root is swept (this run's own
+        // legacy session included), and skip the sweep if any state is unreadable: deleting a
+        // referenced spool is unrecoverable.
+        const rootKeep: string[] = [];
+        let rootSafe = true;
+        try {
+          for (const f of readdirSync(opts.outDir)) {
+            if (!/^live-pump-.+\.state\.json(?:\..*)?$/.test(f)) continue;
+            if (f.includes(".tmp.")) continue; // a crash leftover, not a state
+            const st2 = readLivePumpState(join(opts.outDir, f));
+            if (!st2) { rootSafe = false; break; }
+            rootKeep.push(...spoolPathsToKeep(st2));
+          }
+        } catch { /* no root dir: nothing to protect */ }
+        if (rootSafe) sweepOrphanSpools({ spoolDir: opts.outDir, knownSpoolPaths: rootKeep, log: (m) => console.log(m) });
+        else console.log("[live-pump] 根目录存在无法读取的旧状态,跳过根目录清扫(避免误删其引用的暂存文件)");
       } else {
         console.log("[live-pump] 存在无法读取的旧状态,跳过孤儿 spool 清扫(避免误删其引用的暂存文件)");
       }
@@ -506,7 +503,12 @@ program
           spoolName: (seg: number) => {
             const z = zonedStamp(streamStartMs);
             const head = sanitizePathSegment(pumpAnchor || roomSlug).slice(0, 60) || roomSlug;
-            return `live-pump-${head}_${z.date}_${z.hh}-${z.mm}-${z.ss}_${String(seg).padStart(3, "0")}.ts`;
+            const base = `live-pump-${head}_${z.date}_${z.hh}-${z.mm}-${z.ss}_${String(seg).padStart(3, "0")}`;
+            // A restart in the same second would otherwise reuse the name of an existing spool
+            // that the state may still reference. Never overwrite one.
+            let name = `${base}.ts`;
+            for (let n = 1; existsSync(join(pumpFilesDir, name)); n++) name = `${base}-${n}.ts`;
+            return name;
           },
         } : {}),
         title: streamTitle,
