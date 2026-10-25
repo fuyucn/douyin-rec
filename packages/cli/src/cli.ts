@@ -329,6 +329,17 @@ program
         ? resolvePumpDir(pumpSpoolDir, opts.outDir, pumpRoom)
         : opts.outDir;
       if (pumpFilesDir !== opts.outDir) mkdirSync(pumpFilesDir, { recursive: true });
+      // A rollback to the legacy layout must not strand a room-dir WAL: nothing would ever
+      // re-upload those unconfirmed parts. Alert (and keep recording into the root, where the
+      // legacy layout belongs) so a human can reconcile instead of silently losing the part.
+      if (pumpLayout !== "room") {
+        const roomState = readLivePumpState(livePumpStatePath(pumpSpoolDir, pumpRoom));
+        if (roomState && (roomState.pending || roomState.parts.some((x) => !x.confirmed))) {
+          const msg = `0 落盘房间目录里还有未确认分 P,但当前是 legacy 布局,不会自动续传: ${livePumpStatePath(pumpSpoolDir, pumpRoom)}`;
+          console.error(`[stream-upload] ⚠️ ${msg}`);
+          await notifier.notify({ kind: "error", stage: "0落盘", message: msg }).catch(() => {});
+        }
+      }
 
       // Hub-managed side node (issue #331): the master-delivered object is the ONLY source of upload
       // metadata and the account to verify. The node's rule directory is empty, so reading it would
@@ -410,7 +421,9 @@ program
           // opens with truncate). Never reuse an existing xml name.
           const xmlBase = zeroDiskXmlPath(pumpFilesDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs, undefined, pumpLayout === "room" ? pumpAnchor : undefined);
           xmlPath = xmlBase;
-          for (let n = 1; existsSync(xmlPath); n++) xmlPath = xmlBase.replace(/\.xml$/, `-${n}.xml`);
+          if (pumpLayout === "room") {
+            for (let n = 1; existsSync(xmlPath); n++) xmlPath = xmlBase.replace(/\.xml$/, `-${n}.xml`);
+          }
           writer.open(xmlPath, { anchorName, roomId: platform.extractRoomSlug(roomToUrl(o.room)), videoStartMs: startMs });
           writerOpened = true;
           await danmuSource.start(roomToUrl(o.room), {
