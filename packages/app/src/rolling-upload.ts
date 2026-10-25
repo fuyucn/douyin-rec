@@ -128,6 +128,11 @@ interface RollingState {
    * on it" (wait) from "owner gone mid-upload" (manual). Sidecars written before this field existed never have it.
    */
   closedAt?: number;
+  /**
+   * Season association state (issue #364). Persisted together with the BV so a crash between create and
+   * association is recoverable: "pending" = BV saved, add not confirmed; "done"/"failed" = terminal.
+   */
+  seasonState?: "pending" | "done" | "failed";
   updatedAt: number;
 }
 
@@ -419,6 +424,29 @@ export class RollingUploader {
   get ambiguousIndices(): number[] { return [...(this.state.ambiguous ?? [])]; }
 
   /**
+   * Best-effort season association after the BV is already durable. Never throws: a season failure must
+   * not fail the upload or trigger a re-upload. The persisted seasonState makes an interrupted call
+   * recoverable on the next run.
+   */
+  private async associateSeason(bv: string): Promise<void> {
+    if (!this.o.uploadMeta.seasonSectionId) return;
+    if (this.state.seasonState === "done") return;
+    const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+    const outcome = await addArchiveToSeasonIfConfigured({
+      cookiesPath: cookies,
+      sectionId: this.o.uploadMeta.seasonSectionId,
+      bvid: bv,
+      note: (m) => this.log(m),
+    });
+    this.state = {
+      ...this.state,
+      seasonState: outcome.status === "failed" ? "failed" : "done",
+      updatedAt: this.now(),
+    };
+    if (!this.persist()) this.log("[rolling] season 状态落盘失败,保留 pending,下次运行会重试");
+  }
+
+  /**
    * 原子写 sidecar(WAL 语义):先写临时文件 → fsync → rename 原子替换。失败**不静默**:
    * 置 `stateUntrusted`(保留源、停止自动上传/删源,转人工)并打日志。
    */
@@ -566,6 +594,11 @@ export class RollingUploader {
     if (pending.length > 0 && !this.state.bv && (await this.takeOverPredecessor()) === "wait") {
       return { uploaded: [], deleted: [], ambiguous: [...ambiguous] };
     }
+    // A crash after the BV was saved but before the season call completed leaves "pending".
+    // Reconcile it once per flush; the add is idempotent and never blocks an upload.
+    if (this.state.bv && this.state.seasonState === "pending") {
+      await this.associateSeason(this.state.bv);
+    }
 
     const uploaded: number[] = [];
     const deleted: string[] = [];
@@ -672,6 +705,7 @@ export class RollingUploader {
         this.state = { ...this.state, bv: link.bv, inheritedParts: link.parts, inheritedFrom: link.from, updatedAt: this.now() };
         if (!this.persist()) throw new Error("sidecar 写失败(继承前序稿件),中止上传并保留源");
         this.log(`[rolling] 同一场断流重连:续用前序会话 ${link.from} 的稿件(已有 ${link.parts} 个分P),本会话段改为 append`);
+        await this.associateSeason(link.bv);
       }
     }
     if (!this.state.bv) {
@@ -697,17 +731,17 @@ export class RollingUploader {
         this.writeIntent(seg.index, "create");
         return up({ plain: { ...meta, video: seg.path, title } });
       }));
-      await addArchiveToSeasonIfConfigured({
-        cookiesPath: cookies,
-        sectionId: this.o.uploadMeta.seasonSectionId,
-        bvid: bv,
-        note: (m) => this.log(m),
-      });
       // 把「当段已确认」并入同一次写:建稿成功即确认段 0,防止 bv 与 confirmed 分两次写之间崩溃。
       confirmed.add(seg.index);
-      this.state = { ...this.state, bv, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
+      // Persist the BV BEFORE the best-effort season call: a kill during that call must not lose the BV.
+      this.state = {
+        ...this.state, bv, uploading: undefined, confirmed: [...confirmed],
+        ...(this.o.uploadMeta.seasonSectionId ? { seasonState: "pending" as const } : {}),
+        updatedAt: this.now(),
+      };
       if (!this.persist()) throw new Error(`sidecar 写失败(建稿结果 BV=${bv}),状态不可信,保留源`);
       this.log(`[rolling] 段 ${seg.index} 建稿 BV=${bv}`);
+      await this.associateSeason(bv);
       return;
     }
     const bv = this.state.bv;

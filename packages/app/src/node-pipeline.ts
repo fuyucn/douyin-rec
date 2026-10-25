@@ -705,7 +705,8 @@ export async function runNodeSidePipeline(
 
   // ⚠️ 上传前先落 `uploading` 标记:此后一旦 ssh 回传断开,master 回读会看到它 →
   // 明确「结果不确定」→ 转人工,**绝不自动重传**(重复投稿不可逆)。这是「假失败」修复的另一半。
-  writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "gate_wait" }, log);
+  let seasonState = prior?.seasonState;
+  writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "gate_wait", seasonState }, log);
 
   // 上传:节点本地 cookies.json 优先,master 下发的兜底。
   //
@@ -765,7 +766,7 @@ export async function runNodeSidePipeline(
   const markStep = (step: NodeUploadStep): void => {
     try {
       writeNodeResult(stageSub, { phase: "uploading", ok: false, step, bv: bv || undefined, products,
-        confirmedParts: confirmedParts || undefined, intentPart }, log);
+        confirmedParts: confirmedParts || undefined, intentPart, seasonState }, log);
     } catch (e) {
       log(`上传子步骤落盘失败(忽略,仅可观测信息): ${String((e as Error)?.message ?? e)}`);
     }
@@ -785,12 +786,20 @@ export async function runNodeSidePipeline(
       nextIdx = confirmed;
       confirmedParts = confirmed;
       log(`幂等重入:稿件 ${bv} 已有 ${confirmed} 个分 P → 跳过建稿,从分 P ${nextIdx + 1}/${totalParts} 续 append`);
-      await addArchiveToSeasonIfConfigured({
-        cookiesPath: cookies,
-        sectionId: spec.uploadMeta.seasonSectionId,
-        bvid: bv,
-        note: log,
-      });
+      if (spec.uploadMeta.seasonSectionId && seasonState !== "done" && seasonState !== "failed") {
+        // Persist the intent with the BV before the best-effort network call, so a kill leaves
+        // a re-enterable "pending" state instead of silently losing the association.
+        seasonState = "pending";
+        writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "submit", bv, products, confirmedParts: confirmed, seasonState }, log);
+        const season = await addArchiveToSeasonIfConfigured({
+          cookiesPath: cookies,
+          sectionId: spec.uploadMeta.seasonSectionId,
+          bvid: bv,
+          note: log,
+        });
+        seasonState = season.status === "failed" ? "failed" : "done";
+        writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "submit", bv, products, confirmedParts: confirmed, seasonState }, log);
+      }
     } else {
       bv = await withGate(uploadGate, accountKey, () =>
         withRetry(
@@ -799,12 +808,19 @@ export async function runNodeSidePipeline(
         ),
       );
       log(`建稿成功 BV=${bv}`);
-      await addArchiveToSeasonIfConfigured({
-        cookiesPath: cookies,
-        sectionId: spec.uploadMeta.seasonSectionId,
-        bvid: bv,
-        note: log,
-      });
+      if (spec.uploadMeta.seasonSectionId) {
+        // Persist the BV BEFORE the season call: a kill during that call must not lose it.
+        seasonState = "pending";
+        writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "submit", bv, products, confirmedParts: 1, seasonState }, log);
+        const season = await addArchiveToSeasonIfConfigured({
+          cookiesPath: cookies,
+          sectionId: spec.uploadMeta.seasonSectionId,
+          bvid: bv,
+          note: log,
+        });
+        seasonState = season.status === "failed" ? "failed" : "done";
+        writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "submit", bv, products, confirmedParts: 1, seasonState }, log);
+      }
       confirmedParts = 1;
     }
 
@@ -836,13 +852,13 @@ export async function runNodeSidePipeline(
     // 建稿前失败(无 bv)不回退到 failed:留 `uploading` —— biliup 可能已建稿只是没拿到 BV,
     // 属「结果不确定」→ master 保守转人工(写 failed 会让 master 误判「确认没成」)。
     writeNodeResult(stageSub, { phase: bv ? "failed" : "uploading", ok: false, error: msg,
-      bv: bv || undefined, products, confirmedParts: confirmedParts || undefined }, log);
+      bv: bv || undefined, products, confirmedParts: confirmedParts || undefined, seasonState }, log);
     removeNodeExecutorPid(stageSub); // 本场执行体已收口(失败)→ 注销 pid,避免 `_node-abort` 误判仍活
     throw e;
   }
 
   // 上传成功即落 `done`:清理是 best-effort,即便清理阶段意外抛错,master 也应知道「稿件已建好」。
-  writeNodeResult(stageSub, { phase: "done", ok: true, bv, products }, log);
+  writeNodeResult(stageSub, { phase: "done", ok: true, bv, products, seasonState }, log);
 
   // 上传完成 → 清掉上传别名(硬链接,不占空间,但留在 stage 里会干扰后续幂等推导)。
   try { rmSync(path.join(stageSub, UPLOAD_ALIAS_DIR), { recursive: true, force: true }); } catch { /* 忽略 */ }

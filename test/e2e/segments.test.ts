@@ -1,10 +1,19 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { FULL_CLEANUP, ROOM, Scenario } from "./harness/scenario.js";
 import { pastStartMs } from "./harness/fake-recordings.js";
 import { expectHealthyDone } from "./harness/invariants.js";
 import { segWorkPath } from "../../packages/orchestrator/src/session-plan.js";
+import { addArchiveToSeasonIfConfigured } from "@drec/core";
+
+vi.mock("@drec/core", async (orig) => {
+  const m = await orig<typeof import("@drec/core")>();
+  return {
+    ...m,
+    addArchiveToSeasonIfConfigured: vi.fn(async () => ({ status: "added", sectionId: 1, aid: 1, cid: 1, title: "t" })),
+  };
+});
 
 let s: Scenario;
 afterEach(() => s?.dispose());
@@ -19,6 +28,23 @@ const names = (n: number, suffix = ""): string[] =>
   Array.from({ length: n }, (_, i) => `主播甲_2026-06-27_${String(i).padStart(3, "0")}${suffix}.mp4`);
 
 describe("e2e: 分段(mergeSegments=false)", () => {
+  it("seasonSectionId: 分段 P1 建稿后关联一次;续跑不会重复关联已 done 的场次", async () => {
+    vi.mocked(addArchiveToSeasonIfConfigured).mockClear();
+    s = await Scenario.create({ cfg: { uploadMeta: { tag: "t", tid: 21, seasonSectionId: 456 }, steps: { mergeSegments: false, burnDanmu: false, burnLivechat: false }, cleanup: FULL_CLEANUP } });
+    fiveSegments(s);
+    await s.reconcile();
+    const key = s.onlyKey();
+    expectHealthyDone(s, key, { parts: names(5) });
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).toHaveBeenCalledWith(expect.objectContaining({ sectionId: 456, bvid: expect.any(String) }));
+    expect(s.ledger.get(key)?.seasonState).toBe("done");
+
+    const calls = vi.mocked(addArchiveToSeasonIfConfigured).mock.calls.length;
+    await s.restart();
+    await s.reconcile();
+    expect(vi.mocked(addArchiveToSeasonIfConfigured).mock.calls.length).toBe(calls);
+  });
+
   it("不烧录:BV 分P数 = 录制分段数(5),顺序与段序一致", async () => {
     s = await Scenario.create({ cfg: { steps: { mergeSegments: false, burnDanmu: false, burnLivechat: false }, cleanup: FULL_CLEANUP } });
     fiveSegments(s);

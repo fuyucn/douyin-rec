@@ -258,6 +258,11 @@ export interface LivePumpState {
   /** Archive identity; absent until the first part is submitted. */
   bvid?: string;
   aid?: number;
+  /**
+   * Season association state (issue #364). Written together with the BV, before the best-effort
+   * season call, so a crash between create and association is recoverable on restart.
+   */
+  seasonState?: "pending" | "done" | "failed";
   /** Completed parts in submit order. Spool is deleted only after a part is confirmed. */
   parts: Array<{
     index: number;
@@ -769,6 +774,9 @@ export class LivePumpSession {
       ...this.state,
       bvid: result.bvid ?? this.state.bvid,
       aid: result.aid ?? this.state.aid,
+      // P1 create: the season call has NOT run yet. Persist "pending" now so a kill before it
+      // completes is reconciled on restart instead of silently skipping the association.
+      ...(pending.kind === "create" && this.o.seasonSectionId ? { seasonState: "pending" as const } : {}),
       parts: existing
         ? this.state.parts.map((p) => p.index === input.index ? { ...p, confirmed: true } : p)
         : [...this.state.parts, {
@@ -784,6 +792,9 @@ export class LivePumpSession {
       return { ok: false, error: `cannot persist confirmation: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
     }
     this.cleanupConfirmed();
+    if (pending.kind === "create" && this.o.seasonSectionId) {
+      await this.associateSeason(doFetch);
+    }
     return { ok: true, bvid: this.state.bvid, aid: this.state.aid };
   }
 
@@ -842,16 +853,6 @@ export class LivePumpSession {
         return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 300) };
       }
       if (ok) {
-        if (pending.kind === "create") {
-          await addArchiveToSeasonIfConfigured({
-            cookiesPath: this.o.cookiesPath,
-            sectionId: this.o.seasonSectionId,
-            ...(aid ? { aid } : {}),
-            ...(bvid ? { bvid } : {}),
-            fetchImpl: doFetch,
-            note: (m) => this.log(m),
-          });
-        }
         return { ok: true, ...(bvid ? { bvid } : {}), ...(aid ? { aid } : {}) };
       }
       const detail = `${pending.kind} failed: ${JSON.stringify(raw).slice(0, 300)}`;
@@ -866,6 +867,48 @@ export class LivePumpSession {
       await sleep(waitMs);
     }
     return { ok: false, error: `${lastError}(限流重试 ${maxAttempts} 次后仍失败)` };
+  }
+
+  /**
+   * Best-effort season association AFTER the BV is persisted. Never throws; records the outcome in
+   * the state so an interrupted or failed call is visible and can be reconciled on restart.
+   */
+  private async associateSeason(doFetch: typeof fetch): Promise<void> {
+    if (!this.o.seasonSectionId) return;
+    // An older state file may carry a BV but no seasonState (written before this field existed).
+    if (this.state.seasonState === undefined) {
+      this.state = { ...this.state, seasonState: "pending", updatedAt: Date.now() };
+      try {
+        this.persist();
+      } catch (e) {
+        this.log(`[live-pump] season pending 状态落盘失败,本次仍尝试关联: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      }
+    }
+    if (this.state.seasonState === "done") return;
+    const outcome = await addArchiveToSeasonIfConfigured({
+      cookiesPath: this.o.cookiesPath,
+      sectionId: this.o.seasonSectionId,
+      ...(this.state.aid ? { aid: this.state.aid } : {}),
+      ...(this.state.bvid ? { bvid: this.state.bvid } : {}),
+      fetchImpl: doFetch,
+      note: (m) => this.log(m),
+    });
+    this.state = {
+      ...this.state,
+      seasonState: outcome.status === "failed" ? "failed" : "done",
+      updatedAt: Date.now(),
+    };
+    try {
+      this.persist();
+    } catch (e) {
+      this.log(`[live-pump] season 状态落盘失败(保留 pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+    }
+  }
+
+  /** Restart hook: retry only when the persisted state says the association is still pending. */
+  async reconcileSeason(fetchImpl?: typeof fetch): Promise<void> {
+    if (!this.o.seasonSectionId || this.state.seasonState !== "pending") return;
+    await this.associateSeason(fetchImpl ?? this.o.fetchImpl ?? fetch);
   }
 
   private cleanupConfirmed(): void {
@@ -1773,16 +1816,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // A restart after the archive was created (e.g. during a deploy) never reaches the create
       // hook again. Reconcile the season once per session start; the add is idempotent and a
       // membership check turns an "already there" rejection into success.
-      if (session.bvid || session.aid) {
-        await addArchiveToSeasonIfConfigured({
-          cookiesPath: o.cookiesPath,
-          sectionId: o.seasonSectionId,
-          ...(session.aid ? { aid: session.aid } : {}),
-          ...(session.bvid ? { bvid: session.bvid } : {}),
-          ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
-          note: log,
-        });
-      }
+      // A restart may find a persisted BV whose season call never ran (or was interrupted).
+      if (session.bvid || session.aid) await session.reconcileSeason(o.fetchImpl);
       if (session.hasUnconfirmed) {
         const pending = session.parts.filter((p) => !p.confirmed);
         // One unconfirmed part whose spool survived is recoverable: re-upload the whole file and

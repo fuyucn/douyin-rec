@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { cleanupSourcesShared, consecutiveSidecarSkips, removeEmptyStageDir, xmlKeepRule, runPipeline, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 import { ResourcePool } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
-import { closeStageReady, STAGE_READY } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, closeStageReady, STAGE_READY } from "@drec/core";
 import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NotifyEvent } from "@drec/core";
@@ -25,6 +25,10 @@ vi.mock("@drec/core", async (orig) => {
   const fs = await import("node:fs");
   return {
     ...m,
+    addArchiveToSeasonIfConfigured: vi.fn(async (o: Parameters<typeof m.addArchiveToSeasonIfConfigured>[0]) =>
+      o.sectionId
+        ? { status: "added" as const, sectionId: o.sectionId, aid: 1, cid: 1, title: "t" }
+        : { status: "skipped" as const, reason: "season section id is off" }),
     linkOrCopy: (s: string, d: string, o?: Parameters<typeof m.linkOrCopy>[2]) =>
       m.linkOrCopy(s, d, linkFail.on ? {
         ...o,
@@ -172,6 +176,27 @@ function writePlainArtifacts(deps: TestDeps): void {
 }
 
 describe("runPipeline", () => {
+  it("merged resume reconciles a pending season once, without re-uploading", async () => {
+    vi.mocked(addArchiveToSeasonIfConfigured).mockClear();
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+    const deps = makeDeps();
+    deps.cfg = { ...deps.cfg, uploadMeta: { ...deps.cfg.uploadMeta, seasonSectionId: 456 } };
+    deps.ledger.upsertPending(broadcast.streamKey);
+    deps.ledger.setBv(broadcast.streamKey, "BVresume1");
+    deps.ledger.setSeasonState(broadcast.streamKey, "pending");
+
+    await runPipeline(broadcast, deps);
+
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).toHaveBeenCalledWith(expect.objectContaining({ bvid: "BVresume1", sectionId: 456 }));
+    expect(deps.ledger.get(broadcast.streamKey)?.seasonState).toBe("done");
+
+    await runPipeline(broadcast, deps);
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).toHaveBeenCalledTimes(1);
+    expect(deps.uploadPlain).not.toHaveBeenCalled();
+    deps.ledger.close();
+  });
+
   describe("xmlKeepRule(.xml/.ass 副本不变量:两处不能同时删光)", () => {
     it("保留 stage(stageAfterDone=false):可删节点源 .xml,不删 stage .xml", () => {
       expect(xmlKeepRule("node", false)).toBe(true);   // 节点源可删(副本在 stage)

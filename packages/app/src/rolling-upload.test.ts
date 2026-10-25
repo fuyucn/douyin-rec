@@ -7,6 +7,25 @@ import {
   resolveStreamUploadTitle, resolveStreamPartTitle,
 } from "./rolling-upload.js";
 import { UploadGate, rollingUploadSingleNode } from "@drec/core";
+
+const seasonHook = vi.hoisted(() => ({
+  calls: [] as Array<{ bvid: string; persistedBv?: string; persistedState?: string }>,
+  onCall: undefined as undefined | ((o: { bvid?: string }) => void),
+}));
+vi.mock("@drec/core", async (orig) => {
+  const m = await orig<typeof import("@drec/core")>();
+  return {
+    ...m,
+    addArchiveToSeasonIfConfigured: async (o: Parameters<typeof m.addArchiveToSeasonIfConfigured>[0]) => {
+      const call = { bvid: String(o.bvid ?? "") };
+      seasonHook.calls.push(call);
+      seasonHook.onCall?.(o);
+      return o.sectionId
+        ? { status: "added" as const, sectionId: o.sectionId, aid: 1, cid: 1, title: "t" }
+        : { status: "skipped" as const, reason: "season section id is off" };
+    },
+  };
+});
 // 假稿件号用拼接构造:隐私检查会拦裸 BV 号字面量。
 const FAKE_BV = ["B", "V", "1fake"].join("");
 
@@ -62,6 +81,32 @@ function writeSidecar(dir: string, overrides: Record<string, unknown>): void {
 
 describe("RollingUploader — 边录边传录制端执行", () => {
   afterEach(() => { vi.useRealTimers(); });
+
+  it("seasonSectionId: BV + pending are persisted before the association call", async () => {
+    seasonHook.calls.length = 0;
+    const { dir, paths } = mkSession(segNames(1));
+    const up = vi.fn(async () => FAKE_BV);
+    seasonHook.onCall = () => {
+      const st = JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { bv?: string; seasonState?: string };
+      const call = seasonHook.calls.at(-1)!;
+      call.persistedBv = st.bv;
+      call.persistedState = st.seasonState;
+    };
+    try {
+      const u = new RollingUploader({
+        room,
+        uploadMeta: { ...uploadMeta, seasonSectionId: 456 },
+        gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+      });
+      u.noteSegment(paths[0]);
+      await u.flush({ recordingActive: false });
+      expect(seasonHook.calls).toHaveLength(1);
+      expect(seasonHook.calls[0]).toMatchObject({ bvid: FAKE_BV, persistedBv: FAKE_BV, persistedState: "pending" });
+      expect((JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { seasonState?: string }).seasonState).toBe("done");
+    } finally {
+      seasonHook.onCall = undefined;
+    }
+  });
 
   it("只处理封口段:有后继段的旧段上传+删,正在写的最近段不动", async () => {
     const { paths } = mkSession(segNames(3));

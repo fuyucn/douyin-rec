@@ -12,10 +12,10 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { addArchiveToSeasonIfConfigured, effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
 import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadableParts } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
-import type { JobState } from "./ledger.js";
+import type { JobState, SyncLedger } from "./ledger.js";
 import { retry } from "./retry.js";
 import { prepareUploadAlias, SEG_WORK_DIR, segmentStem, segWorkPath, UPLOAD_ALIAS_DIR, type SegmentPlan } from "./session-plan.js";
-import { cleanupSourcesShared, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, removeEmptyStageDir, stageVideoLeftovers, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineDeps } from "./pipeline.js";
+import { cleanupSourcesShared, defaultRmStage, defaultSplitForUpload, finalizeAfterUpload, finalizeOnly, readdirSyncSafe, removeEmptyStageDir, stageVideoLeftovers, videoOnly, xmlKeepRule, type CleanupOutcome, type PipelineCfg, type PipelineDeps } from "./pipeline.js";
 
 /** 默认单段 remux(ts/flv → mp4,无损,-c copy + 时基钉 90000)。 */
 const defaultRemuxSegment = (src: string, out: string): Promise<void> =>
@@ -570,21 +570,18 @@ export async function runSegmentPipeline(o: {
     ledger.setBv(streamKey, bv); // 建稿成功即刻落库(与合并路径同一幂等边界)
     ledger.markPartDone(streamKey, "plain", 0); // P1 = 第 0 段
     jlog(`建稿完成: ${bv}`);
-    await addArchiveToSeasonIfConfigured({
-      cookiesPath: cfg.cookies,
-      sectionId: cfg.uploadMeta.seasonSectionId,
-      bvid: bv,
-      note: jlog,
-    });
+    // BV is durable now (setBv above); associate after the upload gate is released.
+    if (cfg.uploadMeta.seasonSectionId) {
+      ledger.setSeasonState(streamKey, "pending");
+      await associateSegmentSeason(ledger, cfg, streamKey, jlog);
+    }
   } else {
     bv = ledger.get(streamKey)?.bv ?? "";
     jlog(`建稿 P1 已存在,跳过(bv=${bv})`);
-    await addArchiveToSeasonIfConfigured({
-      cookiesPath: cfg.cookies,
-      sectionId: cfg.uploadMeta.seasonSectionId,
-      bvid: bv,
-      note: jlog,
-    });
+    if (cfg.uploadMeta.seasonSectionId && bv && !["done", "failed"].includes(ledger.get(streamKey)?.seasonState ?? "")) {
+      ledger.setSeasonState(streamKey, "pending");
+      await associateSegmentSeason(ledger, cfg, streamKey, jlog);
+    }
   }
   if (!bv) {
     jlog(`分段上传:已标 P1 完成但 bv 为空,转人工`);
@@ -775,6 +772,12 @@ async function resumeSegmentAppends(
 ): Promise<{ state: JobState; bv?: string; stageReady?: true }> {
   const { ledger, notify, cfg } = deps;
   jlog(`分段续跑:已建稿 bv=${bv},只补 append`);
+  // Resume path owns its own association: the original create may have been killed before the season
+  // call ran. Idempotent; never blocks the appends below.
+  if (cfg.uploadMeta.seasonSectionId && !["done", "failed"].includes(ledger.get(streamKey)?.seasonState ?? "")) {
+    ledger.setSeasonState(streamKey, "pending");
+    await associateSegmentSeason(ledger, cfg, streamKey, jlog);
+  }
   if (uploadParts.length === 0) {
     // 该场本来就 done(T12 收尾补跑:stageAfterDone 已把分P产物清空)→ 只补清理,
     // 绝不能把 done 打成 needs_manual(稿件是好的,只是源还没删)。
@@ -874,4 +877,25 @@ async function resumeSegmentAppends(
     catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 200); ledger.syncNodeState(streamKey, "clean_stage", "failed", { error: msg }); jlog(`清理失败(clean_stage):${msg}`); }
   }
   return { state: "done", bv };
+}
+
+/**
+ * Segment-path season association. The P1 create releases the upload gate before this runs; a crash
+ * between BV persistence and this call leaves "pending" for the resume path to retry.
+ */
+async function associateSegmentSeason(
+  ledger: SyncLedger,
+  cfg: PipelineCfg,
+  streamKey: string,
+  log: (msg: string) => void,
+): Promise<void> {
+  const bv = ledger.get(streamKey)?.bv;
+  if (!cfg.uploadMeta.seasonSectionId || !bv) return;
+  const outcome = await addArchiveToSeasonIfConfigured({
+    cookiesPath: cfg.cookies,
+    sectionId: cfg.uploadMeta.seasonSectionId,
+    bvid: bv,
+    note: log,
+  });
+  ledger.setSeasonState(streamKey, outcome.status === "failed" ? "failed" : "done");
 }

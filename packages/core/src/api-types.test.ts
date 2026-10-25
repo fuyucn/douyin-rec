@@ -62,4 +62,13 @@ describe("normalizeNodeResultFile 的可选 step(plan 038,issue #204)", () => {
     expect(r?.phase).toBe("uploading");
     expect(r?.step).toBeUndefined();
   });
+
+  it("seasonState is optional and invalid values are dropped without invalidating the result", () => {
+    for (const seasonState of ["pending", "done", "failed"] as const) {
+      expect(normalizeNodeResultFile({ phase: "uploading", ok: false, seasonState, atMs: 1 })?.seasonState).toBe(seasonState);
+    }
+    const r = normalizeNodeResultFile({ phase: "uploading", ok: false, seasonState: "weird", atMs: 1 });
+    expect(r?.phase).toBe("uploading");
+    expect(r?.seasonState).toBeUndefined();
+  });
 });

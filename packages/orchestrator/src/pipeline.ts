@@ -4,13 +4,13 @@ import type { Broadcast } from "./identity.js";
 import type { NodeRecording, Transport } from "./transport.js";
 import type { NodeUploadConfig } from "./node-upload-config.js";
 import type { JobState, SyncLedger } from "./ledger.js";
-import { addArchiveToSeasonIfConfigured, resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
+import { resolveSubmissionTitle, isAtomicTempName, formatPartTitle, isAppendAmbiguous, isJobAbort, isUploadRateLimited, burnFlags, pipelineBurns, effectiveStageFormat, resolveOutputStem, runWithJob, resolveJobLogPath, stageSessionDir, anchorNameOfSessionBase, type PathLayout, survivingArtifacts, throwIfAborted, closeStageReady, USER_STOP, VIDEO_EXT_ALT, SIDECAR_SKIP_PREFIX, SIDECAR_UNKNOWN_PREFIX, isSidecarSkipEvent, type BurnSteps, type NotifyEvent, type ScopedLogger } from "@drec/core";
 import type { OutputFormat, UploadOpts } from "@drec/core";
 import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
 import { humanBytes, sumBytes } from "./format.js";
-import { buildWorkflow, deriveStageProducts, runWorkflowNodes, ResourcePool, type StageProducts, type WorkflowNodeKey } from "./workflow.js";
+import { associateSeasonForJob, buildWorkflow, deriveStageProducts, runWorkflowNodes, ResourcePool, type StageProducts, type WorkflowNodeKey } from "./workflow.js";
 import { deriveSegmentPlan, stageProductPaths, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 import { runSegmentPipeline } from "./segment-pipeline.js";
 // 节点侧上传(experimental,plans/027):全部逻辑隔离在 node-side-upload.ts,便于快速开关/回退。
@@ -910,6 +910,7 @@ async function runPipelineInner(
   if (nodeStates.length > 0 && coreNodes.every((n) => nodeStates.find((r) => r.node === n)?.state === "done")) {
     const bv = ledger.get(streamKey)?.bv;
     jlog(`全部核心节点已 done,直接 markDone 收口`);
+    if (bv) await associateSeasonForJob(ledger, cfg, streamKey, jlog);
     ledger.markDone(streamKey, bv ?? "");
     return { state: "done", bv };
   }
@@ -1205,6 +1206,10 @@ async function runPipelineInner(
         .map((n) => n.node as WorkflowNodeKey),
     ),
   });
+  // Reconcile before the failure branch: upload_plain may have succeeded even when a sibling burn
+  // failed, and a resumed upload_plain does not execute its post-slot hook again.
+  const postWorkflowBv = cfg.uploadMode === "upload" ? ledger.get(streamKey)?.bv : undefined;
+  if (postWorkflowBv) await associateSeasonForJob(ledger, cfg, streamKey, jlog);
   if (!result.ok) {
     const errText = result.failed.length
       ? ledger.getNodeState(streamKey, result.failed[0])?.error ?? `节点失败: ${result.failed.join(",")}`
@@ -1216,16 +1221,6 @@ async function runPipelineInner(
   }
 
   const bv = ledger.get(streamKey)?.bv;
-  // Season association is a post-upload side effect: run it after the workflow pool has released
-  // its upload slot, and reconcile it for resumed runs that already have a BV.
-  if (bv) {
-    await addArchiveToSeasonIfConfigured({
-      cookiesPath: cfg.cookies,
-      sectionId: cfg.uploadMeta.seasonSectionId,
-      bvid: bv,
-      note: jlog,
-    });
-  }
   if (cfg.uploadMode !== "upload") {
     jlog(`stage 模式:合成完毕待人工上传`);
     closeStageReady(ledger, streamKey, cfg.uploadMode);
@@ -1311,6 +1306,8 @@ async function resumeAppends(
   const splitForUpload = deps.splitForUpload ?? defaultSplitForUpload;
   const { burnDanmu, burnLivechat } = burnFlags(cfg.steps);
   const isPublic = cfg.uploadPrivate === false;
+  // A kill after upload_plain persisted the BV but before its post-slot association leaves "pending".
+  await associateSeasonForJob(ledger, cfg, streamKey, jlog);
 
   // done 场的收尾补跑若在下面三处转人工:done 无出边,普通 setState 会被白名单拒绝 →
   // job 仍 done、告警照发、cleanupBackfillDue 周期性重复补跑刷告警。wasDone 时必须 force。

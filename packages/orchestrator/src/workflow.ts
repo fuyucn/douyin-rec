@@ -3,7 +3,7 @@ import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
 import { humanBytes } from "./format.js";
-import { effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 import { prepareUploadAlias } from "./session-plan.js";
@@ -239,6 +239,9 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         // checkpoint:P1 建稿成功即刻落库 bv —— 必须在这里(不能等 burn/split 完),
         // 否则 P1 成功后若后续节点失败,bv 丢失 → 重试重传 P1 → 重复稿。
         ledger.setBv(streamKey, bv);
+        // The BV is durable now. The executor associates the season after this upload slot is released
+        // (see runWorkflowNodes), so the bounded HTTP call never extends the global upload chain.
+        if (cfg.uploadMeta.seasonSectionId) ledger.setSeasonState(streamKey, "pending");
         // 分P核验基线(T11):P1 = plain 组第 0 段。合并路径此前**完全不写** sync_parts →
         // 期望段数恒 0、核验恒跳过(等于没核验),而分段路径有 —— 两条路径基线口径必须一致。
         // 合并路径的 plain 是单文件(不切分),故恒 1 个分 P;段号 0 起(与分段路径同一口径)。
@@ -941,6 +944,9 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
       else if (node.resource === "upload") await pool.withUpload(body, streamKey);
       else if (node.resource === "net") await pool.withNet(body, streamKey);
       else await body();
+      // Season association is a post-upload side effect, not part of the upload slot. Run it only after
+      // withUpload has released, so its bounded HTTP budget cannot hold the global submission chain.
+      if (node.key === "upload_plain") await associateSeasonAfterUpload(ctx, streamKey);
       ctx.ledger.syncNodeState(streamKey, node.key, "done", { error: null });
       const detail = ctx.stepDetail(node.key);
       ctx.ledger.logStep(streamKey, node.key, "done", detail);
@@ -1010,6 +1016,35 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
   const failed = nodes.filter((n) => state.get(n.key) === "failed").map((n) => n.key);
   const blocked = nodes.filter((n) => state.get(n.key) === "blocked").map((n) => n.key);
   return { ok: failed.length === 0 && blocked.length === 0, failed, blocked };
+}
+
+/**
+ * Best-effort season association owned by the merged workflow. The BV and "pending" marker are written
+ * by upload_plain before its upload slot is released; this runs after release and records the terminal
+ * state. Never throws, so a season-side failure cannot fail an otherwise successful upload.
+ */
+export async function associateSeasonAfterUpload(ctx: NodeRunContext, streamKey: string): Promise<void> {
+  await associateSeasonForJob(ctx.ledger, ctx.cfg, streamKey, (m) => ctx.log(m));
+}
+
+/** Shared by the merged workflow and its resume path; idempotent and never throws. */
+export async function associateSeasonForJob(
+  ledger: SyncLedger,
+  cfg: PipelineCfg,
+  streamKey: string,
+  log: (msg: string) => void,
+): Promise<void> {
+  const row = ledger.get(streamKey);
+  const bv = row?.bv;
+  if (!cfg.uploadMeta.seasonSectionId || !bv || row?.seasonState === "done" || row?.seasonState === "failed") return;
+  ledger.setSeasonState(streamKey, "pending");
+  const season = await addArchiveToSeasonIfConfigured({
+    cookiesPath: cfg.cookies,
+    sectionId: cfg.uploadMeta.seasonSectionId,
+    bvid: bv,
+    note: log,
+  });
+  ledger.setSeasonState(streamKey, season.status === "failed" ? "failed" : "done");
 }
 
 function shSingleQuote(s: string): string {

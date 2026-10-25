@@ -904,7 +904,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
     expect(r.ok, r.error ?? "").toBe(true);
   }, 30_000);
 
-  it("seasonSectionId: 首次建稿加入合集,重启复用已有 BV 时再补一次", async () => {
+  it("seasonSectionId: 首次建稿加入合集;重启只在 pending 时补一次", async () => {
     const calls: string[] = [];
     seg();
     const first = await runLivePump({
@@ -916,6 +916,12 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
     expect(first.ok, first.error ?? "").toBe(true);
     expect(calls).toHaveLength(1);
 
+    // Simulate a crash after the BV was persisted but before the season call completed.
+    const statePath = livePumpStatePath(dir, "dr");
+    const st = JSON.parse(readFileSync(statePath, "utf-8"));
+    st.seasonState = "pending";
+    writeLivePumpState(statePath, st);
+
     seg();
     const resumed = await runLivePump({
       ...base({ maxSegments: 1 }),
@@ -924,6 +930,17 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
       seasonSectionId: 123,
     });
     expect(resumed.ok, resumed.error ?? "").toBe(true);
+    expect(calls).toHaveLength(2);
+
+    // Once done, another restart must not associate again.
+    seg();
+    const again = await runLivePump({
+      ...base({ maxSegments: 1 }),
+      cookiesPath: join(dir, "cookies.json"),
+      fetchImpl: upos(64 * 1024, { seasonCalls: calls }),
+      seasonSectionId: 123,
+    });
+    expect(again.ok, again.error ?? "").toBe(true);
     expect(calls).toHaveLength(2);
   }, 30_000);
 

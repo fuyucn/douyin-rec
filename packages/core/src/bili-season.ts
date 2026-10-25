@@ -14,6 +14,8 @@ const MEMBER = "https://member.bilibili.com";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
 export const SEASON_API_TIMEOUT_MS = 10_000;
+/** Overall wall-clock budget for one association attempt (view + add + membership check). */
+export const SEASON_TOTAL_TIMEOUT_MS = 25_000;
 
 export type SeasonAddOutcome =
   | { status: "added"; sectionId: number; aid: number; cid: number; title: string }
@@ -29,6 +31,8 @@ interface SeasonTarget {
   title?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Overall deadline for the whole attempt; defaults to {@link SEASON_TOTAL_TIMEOUT_MS}. */
+  totalTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -170,15 +174,23 @@ export async function addArchiveToSeason(o: SeasonTarget): Promise<SeasonAddOutc
   const sectionId = normalizeSeasonSectionId(o.sectionId);
   if (!sectionId) return { status: "skipped", reason: "合集小节 ID 未配置" };
 
+  const deadline = Date.now() + (o.totalTimeoutMs ?? SEASON_TOTAL_TIMEOUT_MS);
+  const remaining = (): number => deadline - Date.now();
+  const budget = (): number | null => {
+    const left = remaining();
+    return left > 0 ? Math.min(o.timeoutMs ?? SEASON_API_TIMEOUT_MS, left) : null;
+  };
+
   const cookie = cookieHeader(o.cookiesPath);
   const token = csrf(o.cookiesPath);
   if (!cookie || !token) return { status: "failed", sectionId, error: "登录态不完整(缺少 Cookie 或 bili_jct)" };
 
   const doFetch = o.fetchImpl ?? fetch;
-  const timeoutMs = o.timeoutMs ?? SEASON_API_TIMEOUT_MS;
   const sleep = o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
 
-  const view = await resolveView(o, doFetch, cookie, timeoutMs);
+  const viewBudget = budget();
+  if (viewBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)" };
+  const view = await resolveView(o, doFetch, cookie, viewBudget);
   if (typeof view === "string") return { status: "failed", sectionId, error: view };
 
   const body = {
@@ -190,22 +202,26 @@ export async function addArchiveToSeason(o: SeasonTarget): Promise<SeasonAddOutc
 
   let last = "";
   for (let attempt = 0; attempt < 2; attempt++) {
+    const postBudget = budget();
+    if (postBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)" };
     const r = await requestJson(
       doFetch,
       url,
       { method: "POST", headers: headers(cookie), body: JSON.stringify(body) },
-      timeoutMs,
+      postBudget,
     );
     if (r.ok && r.raw.code === 0) return { status: "added", sectionId, aid: view.aid, cid: view.cid, title: view.title };
     last = r.ok ? `code=${String(r.raw.code ?? "?")} ${String(r.raw.message ?? "")}`.trim() : (r.error ?? "request failed");
     // A lost response may still mean the server applied the add. Check before retrying or failing.
-    const inSection = await sectionContainsAid(doFetch, cookie, sectionId, view.aid, timeoutMs);
+    const checkBudget = budget();
+    if (checkBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)" };
+    const inSection = await sectionContainsAid(doFetch, cookie, sectionId, view.aid, checkBudget);
     if (inSection === true) return { status: "already", sectionId, aid: view.aid };
     if (r.ok && r.raw.code !== undefined && r.raw.code !== 0) {
       // A definite API rejection will not become success by retrying.
       break;
     }
-    if (attempt === 0) await sleep(1_500).catch(() => {});
+    if (attempt === 0 && remaining() > 1_500) await sleep(1_500).catch(() => {});
   }
   return { status: "failed", sectionId, error: last || "加入合集失败" };
 }
