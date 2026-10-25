@@ -406,7 +406,11 @@ program
           // Anchor to the wall clock at connect time: parts are sealed by byte/duration, so a
           // single session-level axis is the only stable reference for burn/part slicing.
           const startMs = Date.now();
-          xmlPath = zeroDiskXmlPath(pumpFilesDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs, undefined, pumpLayout === "room" ? pumpAnchor : undefined);
+          // A same-second reconnect would otherwise truncate the previous run's danmu (the writer
+          // opens with truncate). Never reuse an existing xml name.
+          const xmlBase = zeroDiskXmlPath(pumpFilesDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs, undefined, pumpLayout === "room" ? pumpAnchor : undefined);
+          xmlPath = xmlBase;
+          for (let n = 1; existsSync(xmlPath); n++) xmlPath = xmlBase.replace(/\.xml$/, `-${n}.xml`);
           writer.open(xmlPath, { anchorName, roomId: platform.extractRoomSlug(roomToUrl(o.room)), videoStartMs: startMs });
           writerOpened = true;
           await danmuSource.start(roomToUrl(o.room), {

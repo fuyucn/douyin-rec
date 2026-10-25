@@ -419,12 +419,20 @@ export function resolvePumpDir(
   nowMs: number = Date.now(),
 ): string {
   if (roomDir === legacyDir) return legacyDir;
-  const legacy = readLivePumpState(livePumpStatePath(legacyDir, room));
-  if (!legacy) return roomDir;
+  const legacyPath = livePumpStatePath(legacyDir, room);
+  if (!existsSync(legacyPath)) return roomDir;
+  const legacy = readLivePumpState(legacyPath);
+  // An unreadable root state may hold an unconfirmed WAL: keep it where rolloverStaleState can
+  // archive it and raise the "needs a human" alert, exactly as the legacy layout did.
+  if (!legacy) return legacyDir;
   // Only an ACTIVE broadcast stays at the root: an unconfirmed part (its WAL is still needed) or
   // a last activity inside the same-broadcast window. Anything older is a finished broadcast;
   // keeping it at the root forever would mean upgraded rooms never reach the room directory.
   if (legacy.pending || legacy.parts.some((p) => !p.confirmed)) return legacyDir;
+  // A missing/corrupt timestamp cannot prove the broadcast ended; the legacy rollover falls back
+  // to file mtime, so stay at the root and let that same rule decide instead of splitting the
+  // session into a second archive.
+  if (typeof legacy.updatedAt !== "number" || !Number.isFinite(legacy.updatedAt)) return legacyDir;
   return isSameBroadcastGap(nowMs - legacy.updatedAt) ? legacyDir : roomDir;
 }
 

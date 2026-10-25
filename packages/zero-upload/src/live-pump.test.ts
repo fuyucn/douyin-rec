@@ -2449,6 +2449,20 @@ describe("issue #360: zero-disk room files", () => {
     expect(names).toEqual(["live-pump-主播_2026-10-24_10-00-00_000.ts"]);
   });
 
+  it("resolvePumpDir keeps an unreadable legacy state and a missing timestamp at the root", () => {
+    const room = "douyin:123:2026-10-24";
+    const roomDir = join(dir, "主播_douyin_123");
+    writeFileSync(livePumpStatePath(dir, room), "{truncated");
+    expect(resolvePumpDir(roomDir, dir, room)).toBe(dir);
+    rmSync(livePumpStatePath(dir, room));
+    const legacy = {
+      schemaVersion: 1 as const, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true, parts: [],
+    };
+    // Simulate a pre-updatedAt state file: the rollover falls back to mtime, so must we.
+    writeFileSync(livePumpStatePath(dir, room), JSON.stringify(legacy));
+    expect(resolvePumpDir(roomDir, dir, room)).toBe(dir);
+  });
+
   it("resolvePumpDir keeps only an ACTIVE legacy broadcast at the root", () => {
     const room = "douyin:123:2026-10-24";
     const roomDir = join(dir, "主播_douyin_123");
