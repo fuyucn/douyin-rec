@@ -248,7 +248,7 @@ export function RoomPage(): ReactNode {
           <RoomRunsPanel room={room} workers={data.workers} collapsed />
         </section>
       </div>
-      {taskId !== null && <MergePanel taskId={taskId} />}
+      {taskId !== null && <div className="mt-6"><MergePanel taskId={taskId} /></div>}
       {actions.dialogs}
     </>
   );

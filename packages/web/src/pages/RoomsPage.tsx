@@ -44,10 +44,12 @@ export function RoomsPage(): ReactNode {
 
   const openWorkers = (): void => {
     setWorkersOpen(true);
-    void api.getWorkersStatus()
+    void refreshWorkerStatus();
+  };
+  const refreshWorkerStatus = (): Promise<void> =>
+    api.getWorkersStatus()
       .then((list) => setWorkerStatus(Object.fromEntries(list.map((s) => [s.id, s]))))
       .catch(() => {});
-  };
 
   const cell = (f: Filter, icon: ReactNode): ReactNode => (
     <div role="tab" tabIndex={0} aria-selected={filter === f}
@@ -195,7 +197,10 @@ export function RoomsPage(): ReactNode {
         onClose={() => setWorkersOpen(false)}
         workers={data.workers}
         status={workerStatus}
-        onChanged={() => { void data.refreshWorkers().catch(() => {}); }}
+        onChanged={() => {
+          void data.refreshWorkers().catch(() => {});
+          void refreshWorkerStatus();
+        }}
       />
     </>
   );
@@ -231,7 +236,7 @@ function RoomActions({ room, data, actions }: {
       {task ? (
         enabled ? (
           <IconButton title={managed ? t("tasks.managedHint") : t("tasks.titleStop")} disabled={managed} onClick={() => actions.setEnabled(room, false)}>
-            <Square className="w-4 h-4" style={{ color: "var(--warning-fg)" }} />
+            <Square className="w-4 h-4" style={{ color: "var(--warning-fg)" }} fill="currentColor" />
           </IconButton>
         ) : (
           <IconButton title={managed ? t("tasks.managedHint") : t("tasks.titleStart")} disabled={managed} onClick={() => actions.setEnabled(room, true)}>

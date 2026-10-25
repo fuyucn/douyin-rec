@@ -114,15 +114,16 @@ export function RoomRunsPanel({
     [withBusy, toast, t],
   );
 
-  const runNow = async ({ key, winnerWorker }: { key: string; winnerWorker?: string }): Promise<void> => {
+  const runNow = async ({ key, winnerWorker, force }: { key: string; winnerWorker?: string; force?: boolean }): Promise<void> => {
     setRunBusy(true);
     try {
-      await api.runHubJob({ streamKey: key, winnerWorker });
+      await api.runHubJob({ streamKey: key, winnerWorker, force });
       toast(t("hub.jobs.started"), "info");
       setRunOpen(false);
       await refresh().catch(() => {});
     } catch (e) {
       toast(errMessage(e), "error");
+      throw e;
     } finally {
       setRunBusy(false);
     }

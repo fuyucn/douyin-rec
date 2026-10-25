@@ -6,9 +6,10 @@
  * legacy room detail and the unified room page share one implementation.
  */
 import { useEffect, useState, type ReactNode } from "react";
-import type { HubJobDTO, WorkerDTO } from "../api/client";
+import { ApiError, type HubJobDTO, type WorkerDTO } from "../api/client";
 import { runDate } from "./HubJobs";
 import { Button } from "./Button";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { Dialog } from "./Dialog";
 import { useT } from "../lib/i18n";
 import { runNowKey } from "../lib/run-now";
@@ -38,12 +39,13 @@ export function RunNowDialog({
   /** Today in the server timezone. */
   today: string;
   busy: boolean;
-  onSubmit: (input: { key: string; winnerWorker?: string }) => void | Promise<void>;
+  onSubmit: (input: { key: string; winnerWorker?: string; force?: boolean }) => void | Promise<void>;
 }): ReactNode {
   const t = useT();
   const [runKey, setRunKey] = useState(CUSTOM_DATE);
   const [customDate, setCustomDate] = useState(today);
   const [winnerWorker, setWinnerWorker] = useState("");
+  const [pendingForce, setPendingForce] = useState<{ key: string; winnerWorker?: string; message: string } | null>(null);
   // Default to a new submission: reusing the same id makes a retry look like
   // nothing happened when the old run already has a BV.
   const [newSubmission, setNewSubmission] = useState(true);
@@ -70,6 +72,18 @@ export function RunNowDialog({
     ? workers.filter((w) => roomWorkerIds.includes(w.id))
     : workers;
 
+  const submit = async (input: { key: string; winnerWorker?: string; force?: boolean }): Promise<void> => {
+    try {
+      await onSubmit(input);
+    } catch (e) {
+      if (e instanceof ApiError && e.forceable && !input.force) {
+        setPendingForce({ key: input.key, winnerWorker: input.winnerWorker, message: e.message });
+        return;
+      }
+      throw e;
+    }
+  };
+
   return (
     <Dialog
       open={open}
@@ -91,7 +105,7 @@ export function RunNowDialog({
           <div>
             <label className="field-label">{t("hub.jobs.runNowDateHint")}</label>
             <input className="input" value={customDate} onChange={(e) => setCustomDate(e.target.value)} placeholder={today} />
-            {!validDate && <p className="text-xs mt-1" style={{ color: "var(--error-fg)" }}>{t("hub.jobs.runNowDateHint")}</p>}
+            {!validDate && <p className="text-xs mt-1" style={{ color: "var(--error-fg)" }}>{t("hub.jobs.runNowDateInvalid")}</p>}
           </div>
         )}
         <div>
@@ -118,13 +132,26 @@ export function RunNowDialog({
           <Button
             type="button"
             loading={busy}
-            disabled={busy || !validDate || selectedKey === ""}
-            onClick={() => void onSubmit({ key: nextKey, winnerWorker: winnerWorker || undefined })}
+            disabled={busy || !validDate}
+            onClick={() => void submit({ key: nextKey, winnerWorker: winnerWorker || undefined }).catch(() => {})}
           >
             {t("hub.jobs.runNow")}
           </Button>
         </div>
       </div>
+      <ConfirmDialog
+        open={pendingForce !== null}
+        title={t("hub.jobs.runForceTitle")}
+        message={<><span className="block">{pendingForce?.message}</span><span className="block mt-2">{t("hub.jobs.runForceHint")}</span></>}
+        confirmLabel={t("hub.jobs.runForceConfirm")}
+        destructive
+        onConfirm={() => {
+          const p = pendingForce;
+          setPendingForce(null);
+          if (p) void submit({ key: p.key, winnerWorker: p.winnerWorker, force: true }).catch(() => {});
+        }}
+        onCancel={() => setPendingForce(null)}
+      />
     </Dialog>
   );
 }

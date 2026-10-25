@@ -374,10 +374,10 @@ export function RoomDetail({
         roomWorkerIds={rule.workers}
         today={todayYmdInTz(serverTz)}
         busy={runBusy}
-        onSubmit={async ({ key, winnerWorker }) => {
+        onSubmit={async (input) => {
           setRunBusy(true);
           try {
-            await runNow(key, winnerWorker);
+            await runNow(input.key, input.winnerWorker, input.force);
             setRunOpen(false);
           } finally {
             setRunBusy(false);
