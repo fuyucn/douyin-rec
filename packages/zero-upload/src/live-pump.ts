@@ -49,7 +49,13 @@ import {
   type UposPart,
   type StudioVideo,
 } from "./upos-stream.js";
-import { isSameBroadcastGap, isUploadRateLimited, type DanmuMessage } from "@drec/core";
+import {
+  addArchiveToSeason,
+  describeSeasonOutcome,
+  isSameBroadcastGap,
+  isUploadRateLimited,
+  type DanmuMessage,
+} from "@drec/core";
 import { ffprobeDuration, ffprobeDtsGap, type DtsGap } from "@drec/post-process";
 
 export const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
@@ -460,6 +466,8 @@ export interface LivePumpSessionOpts {
   line?: string;
   /** Chunk progress observer for resubmission. */
   onChunk?: (streamedBytes: number, chunksDone: number) => void;
+  /** Optional Bilibili season section id; added after the first successful create. */
+  seasonSectionId?: number;
   /** Error-level alert channel (same notifier as the other zero-disk alerts). Fired at most once per start. */
   onAlert?: (message: string) => void;
   /**
@@ -834,7 +842,19 @@ export class LivePumpSession {
       } catch (e) {
         return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 300) };
       }
-      if (ok) return { ok: true, ...(bvid ? { bvid } : {}), ...(aid ? { aid } : {}) };
+      if (ok) {
+        if (pending.kind === "create" && this.o.seasonSectionId) {
+          const outcome = await addArchiveToSeason({
+            cookiesPath: this.o.cookiesPath,
+            sectionId: this.o.seasonSectionId,
+            ...(aid ? { aid } : {}),
+            ...(bvid ? { bvid } : {}),
+            fetchImpl: doFetch,
+          });
+          this.log(describeSeasonOutcome(outcome));
+        }
+        return { ok: true, ...(bvid ? { bvid } : {}), ...(aid ? { aid } : {}) };
+      }
       const detail = `${pending.kind} failed: ${JSON.stringify(raw).slice(0, 300)}`;
       lastError = detail;
       if (!isUploadRateLimited(detail)) return { ok: false, error: detail };
@@ -1510,6 +1530,8 @@ export interface RunLivePumpOptions {
   titleForLive?: (liveTitle: string) => string;
   tid: number;
   tag: string;
+  /** Optional Bilibili season section id; added after the first successful create. */
+  seasonSectionId?: number;
   /** Archive description; omitted/empty = no description. */
   desc?: string;
   private?: boolean;
@@ -1724,6 +1746,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       tid: o.tid,
       tag: o.tag,
       ...(o.desc ? { desc: o.desc } : {}),
+      ...(o.seasonSectionId ? { seasonSectionId: o.seasonSectionId } : {}),
       private: o.private !== false,
       log,
       ...(o.onAlert ? { onAlert: o.onAlert } : {}),
@@ -1747,6 +1770,19 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
           statePath: livePumpStatePath(o.spoolDir, o.room),
         } };
+      }
+      // A restart after the archive was created (e.g. during a deploy) never reaches the create
+      // hook again. Reconcile the season once per session start; the add is idempotent and a
+      // membership check turns an "already there" rejection into success.
+      if (o.seasonSectionId && (session.bvid || session.aid)) {
+        const outcome = await addArchiveToSeason({
+          cookiesPath: o.cookiesPath,
+          sectionId: o.seasonSectionId,
+          ...(session.aid ? { aid: session.aid } : {}),
+          ...(session.bvid ? { bvid: session.bvid } : {}),
+          ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
+        });
+        log(describeSeasonOutcome(outcome));
       }
       if (session.hasUnconfirmed) {
         const pending = session.parts.filter((p) => !p.confirmed);

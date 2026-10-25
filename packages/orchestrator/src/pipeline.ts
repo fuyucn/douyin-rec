@@ -205,6 +205,7 @@ export interface PipelineCfg {
     titleTemplate?: string;
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
+    seasonSectionId?: number;
   };
   /** 渲染 {date}/{time} 回退用(sessionBase 解析不到时);缺省 Asia/Shanghai。 */
   timeZone?: string;

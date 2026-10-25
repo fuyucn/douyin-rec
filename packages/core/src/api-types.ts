@@ -105,6 +105,8 @@ export interface HubPipelineConfig {
     titleTemplate?: string;
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
+    /** Optional Bilibili season section id; added after a successful P1 create. Empty = off. */
+    seasonSectionId?: number | null;
   };
 }
 
@@ -789,6 +791,7 @@ export interface NodePipelineSpec {
     titleTemplate?: string;
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
+    seasonSectionId?: number;
   };
   uploadPrivate: boolean;
   timeZone?: string;

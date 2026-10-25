@@ -42,6 +42,7 @@ export function queueUploadInput(o: NodeSideUploadArgs): UploadInput {
       tid: cfg.uploadMeta.tid,
       tag: cfg.uploadMeta.tag,
       ...(cfg.uploadMeta.desc ? { desc: cfg.uploadMeta.desc } : {}),
+      ...(cfg.uploadMeta.seasonSectionId ? { seasonSectionId: cfg.uploadMeta.seasonSectionId } : {}),
       public: cfg.uploadPrivate === false,
       expectedDurationSec,
       ...(cfg.uploadMeta.partTitleTemplate ? { partTitleTemplate: cfg.uploadMeta.partTitleTemplate, titleCtx: ctx } : {}),

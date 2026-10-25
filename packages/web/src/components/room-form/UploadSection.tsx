@@ -17,6 +17,7 @@ export interface UploadValue {
   titleTemplate: string;
   submissionTitleTemplate: string;
   partTitleTemplate: string;
+  seasonSectionId: string;
 }
 
 interface Props {
@@ -142,6 +143,13 @@ export function UploadSection({ value: v, onChange, constraints: c, procEnabled,
                              onChange={(x) => onChange({ partTitleTemplate: x })}
                              presets={["{name}_P{part}", "{name}_{date}_P{part}", "{name}_{date}"]}
                              preview={v.partTitleTemplate.trim() ? previewPartTitles(v.partTitleTemplate, anchorName) : undefined} />
+              <label className="block sm:col-span-2">
+                <span className="field-label">{t("hub.ruleDialog.seasonSectionIdLabel")}</span>
+                <input type="number" min={1} className="input font-mono text-sm"
+                       placeholder={t("hub.ruleDialog.seasonSectionIdPlaceholder")}
+                       value={v.seasonSectionId} onChange={(e) => onChange({ seasonSectionId: e.target.value })} />
+                <p className="text-[11px] text-muted-soft mt-1">{t("hub.ruleDialog.seasonSectionIdHint")}</p>
+              </label>
               <label className="block sm:col-span-2">
                 <span className="field-label">{t("hub.ruleDialog.descLabel")}</span>
                 <textarea className="textarea font-mono text-sm" rows={4} placeholder={t("hub.ruleDialog.descPlaceholder")}

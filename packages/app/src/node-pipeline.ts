@@ -17,7 +17,7 @@
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync } from "node:fs";
 import path from "node:path";
 import {
-  linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, resolveSubmissionTitle, formatPartTitle, isAppendAmbiguous,
+  addArchiveToSeason, describeSeasonOutcome, linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, resolveSubmissionTitle, formatPartTitle, isAppendAmbiguous,
   isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, openUploadSlot, partTitleToFilename, resolveOutputStem, sanitizeStreamKey, stageSessionDir,
   processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type UploadSlot, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type NodeUploadStep, type UploadGateStore,
 } from "@drec/core";
@@ -716,7 +716,15 @@ export async function runNodeSidePipeline(
   const localCookies = process.env.BILIUP_COOKIE ?? rootBiliupCookies();
   const cookies = existsSync(localCookies) ? localCookies : (spec.cookies ?? localCookies);
   const publicUpload = !spec.uploadPrivate;
-  const meta = { cookies, tag: spec.uploadMeta.tag, tid: spec.uploadMeta.tid, desc: spec.uploadMeta.desc, public: publicUpload };
+  const meta = {
+    cookies,
+    tag: spec.uploadMeta.tag,
+    tid: spec.uploadMeta.tid,
+    desc: spec.uploadMeta.desc,
+    ...(spec.uploadMeta.seasonSectionId ? { seasonSectionId: spec.uploadMeta.seasonSectionId } : {}),
+    onNote: log,
+    public: publicUpload,
+  };
 
   const files = parts.map((p) => p.plain);
   log(`上传 ${files.length} 个分 P → B站`);
@@ -779,6 +787,10 @@ export async function runNodeSidePipeline(
       nextIdx = confirmed;
       confirmedParts = confirmed;
       log(`幂等重入:稿件 ${bv} 已有 ${confirmed} 个分 P → 跳过建稿,从分 P ${nextIdx + 1}/${totalParts} 续 append`);
+      if (spec.uploadMeta.seasonSectionId) {
+        const outcome = await addArchiveToSeason({ cookiesPath: cookies, sectionId: spec.uploadMeta.seasonSectionId, bvid: bv });
+        log(describeSeasonOutcome(outcome));
+      }
     } else {
       bv = await withGate(uploadGate, accountKey, () =>
         withRetry(

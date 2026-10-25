@@ -1,7 +1,16 @@
 // biliup process helpers shared by app and processors (plan 038 T05).
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { APPEND_AMBIGUOUS_MARKER, biliupCookieHeader, registerChild, throwIfAborted, type UploadLine, type UploadOpts } from "@drec/core";
+import {
+  addArchiveToSeason,
+  APPEND_AMBIGUOUS_MARKER,
+  biliupCookieHeader,
+  describeSeasonOutcome,
+  registerChild,
+  throwIfAborted,
+  type UploadLine,
+  type UploadOpts,
+} from "@drec/core";
 
 
 // 契约在 core(orchestrator 也要用,不能让 L4.5 反向依赖 L4);这里 re-export 保持既有调用点不变。
@@ -84,6 +93,26 @@ function isRetryableLineError(err: unknown): boolean {
     /connection error|error sending request|connection reset|unexpected eof|broken pipe|timed? out|gateway time-?out|http status server error|\b50[234]\b/i.test(msg)
     && /start=\d+.*end=\d+|uploader\.rs:\d+/i.test(msg)
   );
+}
+
+/**
+ * Best-effort season association after a successful P1 create. Never affects the upload result:
+ * the bytes and the draft are already irreversible, so a season failure is only a log note.
+ */
+async function addSeasonIfConfigured(bv: string, o: UploadOpts): Promise<void> {
+  if (!o.seasonSectionId) return;
+  try {
+    const outcome = await addArchiveToSeason({
+      cookiesPath: o.cookies,
+      sectionId: o.seasonSectionId,
+      bvid: bv,
+    });
+    try { o.onNote?.(describeSeasonOutcome(outcome)); } catch { /* notes never fail an upload */ }
+  } catch (e) {
+    try {
+      o.onNote?.(`[season] 加入合集失败:${String((e as Error)?.message ?? e).slice(0, 200)}`);
+    } catch { /* notes never fail an upload */ }
+  }
 }
 
 /** 构造 biliup upload 参数（纯函数）。照搬 merge-best-today 的命令。 */
@@ -176,6 +205,7 @@ export async function upload(o: UploadOpts): Promise<{ bv: string }> {
       const combined = await runBiliup(buildUploadArgs({ ...o, line }));
       const bv = parseBV(combined);
       if (!bv) throw new Error(`biliup 上传完成但解析不到 BV：${combined.slice(-300).trim()}`);
+      await addSeasonIfConfigured(bv, o);
       return { bv };
     } catch (e) {
       last = e;
@@ -217,6 +247,7 @@ export async function uploadPlain(o: {
       const out = await run(buildUploadArgs({ ...o.plain, line }));
       const bv = parseBV(out);
       if (!bv) throw new Error(`upload plain 完成但解析不到 BV：${out.slice(-300)}`);
+      await addSeasonIfConfigured(bv, o.plain);
       return bv;
     } catch (e) {
       last = e;

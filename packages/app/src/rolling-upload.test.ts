@@ -842,6 +842,23 @@ describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config >
     expect(resolveStreamUploadMeta("douyin", "999")).toEqual({ tid: 17, tag: "默认标签", partTitleTemplate: undefined, private: true });
   });
 
+  it("seasonSectionId 走规则 > 默认,非法值忽略", () => {
+    writeFileSync(path.join(root, "config", "hub.config.json"), JSON.stringify({
+      uploadDefaults: { tag: "默认标签", tid: 17, seasonSectionId: 321 },
+    }), "utf-8");
+    writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      pipeline: { upload: { mode: "rolling", tag: "规则标签", tid: 21, seasonSectionId: 456 } },
+    }), "utf-8");
+    expect(resolveRollingUploadMeta("douyin", "123").meta.seasonSectionId).toBe(456);
+    expect(resolveStreamUploadMeta("douyin", "123").seasonSectionId).toBe(456);
+
+    writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      pipeline: { upload: { mode: "rolling", tag: "规则标签", tid: 21, seasonSectionId: 0 } },
+    }), "utf-8");
+    expect(resolveRollingUploadMeta("douyin", "123").meta.seasonSectionId).toBe(321);
+    expect(resolveStreamUploadMeta("douyin", "123").seasonSectionId).toBe(321);
+  });
+
   it("禁用规则 / 仅 stage 规则不提供上传 metadata(防止私稿被旧规则改成公开)", () => {
     writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
       enabled: false,

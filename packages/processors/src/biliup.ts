@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import {
-  APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
+  addArchiveToSeason, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, describeSeasonOutcome, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
   type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress, type UploadSlot,
 } from "@drec/core";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
@@ -23,6 +23,8 @@ export interface BiliupParams {
   /** Part title template + render context (same as the blocking path); parts are uploaded under that name. */
   partTitleTemplate?: string;
   titleCtx?: TitleContext;
+  /** Optional Bilibili season section id; added after the P1 create succeeds. */
+  seasonSectionId?: number;
 }
 
 /** BV persisted on the queue row by an earlier attempt of this same job (P1 created by us, inputs[0] is P1). */
@@ -44,6 +46,7 @@ function params(job: ProcessJob): BiliupParams {
     bv: typeof persisted === "string" && persisted ? persisted : (typeof p.bv === "string" && p.bv ? p.bv : undefined),
     partTitleTemplate: typeof p.partTitleTemplate === "string" && p.partTitleTemplate.trim() ? p.partTitleTemplate : undefined,
     titleCtx: typeof p.titleCtx === "object" && p.titleCtx !== null ? p.titleCtx : undefined,
+    seasonSectionId: normalizeSeasonSectionId(p.seasonSectionId),
   };
 }
 
@@ -226,7 +229,16 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   const p = params(job);
   const files = aliasPartFiles(job.inputs, p.partTitleTemplate, p.titleCtx);
   const cookies = cookiesOf(p, deps);
-  const meta = { cookies, title: p.title, tid: p.tid, tag: p.tag, ...(p.desc ? { desc: p.desc } : {}), public: p.public === true };
+  const meta = {
+    cookies,
+    title: p.title,
+    tid: p.tid,
+    tag: p.tag,
+    ...(p.desc ? { desc: p.desc } : {}),
+    ...(p.seasonSectionId ? { seasonSectionId: p.seasonSectionId } : {}),
+    onNote: (m: string) => ctx.log(m),
+    public: p.public === true,
+  };
   const gate = deps.gate?.();
   const key = deps.accountKey?.(cookies) ?? "";
   // Every create/append takes a fresh quota slot, like the blocking path; gate_wait is never a stall.
@@ -243,6 +255,7 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   const total = sizes.reduce((a, b) => a + b, 0);
   const partAt = (i: number): void => sup.setPart(sizes.slice(0, i).reduce((a, b) => a + b, 0), sizes[i] ?? 0, total);
   st.bv = p.bv;
+  let createdNow = false;
   if (!st.bv) {
     sup.setStep("gate_wait");
     // Fail-closed before creating anything: without duration we cannot prove "no draft".
@@ -253,9 +266,16 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
     if (proof === "unknown") throw new Error("cannot confirm whether a draft exists; needs manual verification");
     partAt(0);
     st.bv = await slotted(() => uploadPlain({ plain: { ...meta, video: files[0]! }, run: sup.run }));
+    createdNow = true;
     ctx.setState?.({ bv: st.bv });
   }
   const bv = st.bv;
+  // A resumed row reuses the draft created by an earlier attempt, so the create hook never runs
+  // again. Reconcile the season once per processed row; the add is idempotent.
+  if (!createdNow && p.seasonSectionId) {
+    const outcome = await addArchiveToSeason({ cookiesPath: cookies, sectionId: p.seasonSectionId, bvid: bv });
+    ctx.log(describeSeasonOutcome(outcome));
+  }
   const countParts = countPartsOf(deps);
   // params.bv: the draft exists and every input is a part still to append.
   // Row bv only (a resumed attempt of this job): inputs[0] is P1 and some later parts may already be on

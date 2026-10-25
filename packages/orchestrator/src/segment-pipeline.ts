@@ -9,7 +9,7 @@
  */
 import path from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
+import { addArchiveToSeason, describeSeasonOutcome, effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
 import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadableParts } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
@@ -546,6 +546,8 @@ export async function runSegmentPipeline(o: {
   const plainOpts = {
     cookies: cfg.cookies, tag: cfg.uploadMeta.tag, tid: cfg.uploadMeta.tid,
     public: isPublic, desc: cfg.uploadMeta.desc,
+    ...(cfg.uploadMeta.seasonSectionId ? { seasonSectionId: cfg.uploadMeta.seasonSectionId } : {}),
+    onNote: jlog,
   };
   // 分 P checkpoint:每个已成功提交的段都落库(组名 "plain"),续跑据此精确跳过 → 不漏段、不重复。
   const donePlain = ledger.doneParts(streamKey, "plain");
@@ -573,6 +575,14 @@ export async function runSegmentPipeline(o: {
   } else {
     bv = ledger.get(streamKey)?.bv ?? "";
     jlog(`建稿 P1 已存在,跳过(bv=${bv})`);
+    if (bv && cfg.uploadMeta.seasonSectionId) {
+      const outcome = await addArchiveToSeason({
+        cookiesPath: cfg.cookies,
+        sectionId: cfg.uploadMeta.seasonSectionId,
+        bvid: bv,
+      });
+      jlog(describeSeasonOutcome(outcome));
+    }
   }
   if (!bv) {
     jlog(`分段上传:已标 P1 完成但 bv 为空,转人工`);

@@ -84,6 +84,7 @@ const BLANK: FormState = {
   titleTemplate: "",
   submissionTitleTemplate: "",
   partTitleTemplate: "",
+  seasonSectionId: "",
   clStageSourceAfterMerge: false,
   clSourceAfterDone: false,
   clKeepArchive: true,
@@ -118,6 +119,7 @@ function fromRule(r: HubRuleDTO): FormState {
     titleTemplate: c.upload?.titleTemplate ?? "",
     submissionTitleTemplate: c.upload?.submissionTitleTemplate ?? "",
     partTitleTemplate: c.upload?.partTitleTemplate ?? "",
+    seasonSectionId: c.upload?.seasonSectionId ? String(c.upload.seasonSectionId) : "",
     sourceTaskId: r.recording?.sourceTaskId ?? null,
   };
 }
@@ -269,6 +271,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           titleTemplate: form.titleTemplate.trim() || undefined,
           submissionTitleTemplate: form.submissionTitleTemplate.trim() || undefined,
           partTitleTemplate: form.partTitleTemplate.trim() || undefined,
+          seasonSectionId: form.seasonSectionId.trim() ? Number(form.seasonSectionId) : null,
         },
       },
     };

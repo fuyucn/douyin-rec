@@ -56,6 +56,7 @@ import {
   UploadGate,
   isSlotBusy,
   SLOT_BUSY_MARKER,
+  normalizeSeasonSectionId,
   type UploadSlot,
   type RollingSegment,
 } from "@drec/core";
@@ -256,6 +257,7 @@ export interface RollingUploaderOpts {
     titleTemplate?: string;
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
+    seasonSectionId?: number;
   };
   timeZone?: string;
   /** 缺省 true(仅自己可见);false = 公开。 */
@@ -656,6 +658,7 @@ export class RollingUploader {
       tag: this.o.uploadMeta.tag,
       tid: this.o.uploadMeta.tid,
       desc: this.o.uploadMeta.desc,
+      ...(this.o.uploadMeta.seasonSectionId ? { seasonSectionId: this.o.uploadMeta.seasonSectionId } : {}),
       // 边录边传默认「仅自己可见」(公开不可逆);唯一显式 override = hub 规则 upload.private:false。
       public: this.o.uploadPrivate === false,
     };
@@ -972,7 +975,7 @@ function resolveRollingUploadMetaInner(
   const ruleActive = rule?.enabled !== false && (mode === "upload" || mode === "rolling");
   let uploadDefaults: {
     tag?: string; tid?: number; desc?: string; titleTemplate?: string;
-    submissionTitleTemplate?: string; partTitleTemplate?: string;
+    submissionTitleTemplate?: string; partTitleTemplate?: string; seasonSectionId?: number;
   } = {};
   try {
     // `serve` may be running with --hub-config, settings, or inline JSON. The child record
@@ -992,6 +995,7 @@ function resolveRollingUploadMetaInner(
     /* 无 hub.config → 用规则/内置默认 */
   }
   const up = ruleActive ? rule?.pipeline?.upload : undefined;
+  const seasonSectionId = normalizeSeasonSectionId(up?.seasonSectionId) ?? normalizeSeasonSectionId(uploadDefaults.seasonSectionId);
   return {
     meta: {
       tag: up?.tag || uploadDefaults.tag || "直播,录像",
@@ -1000,6 +1004,7 @@ function resolveRollingUploadMetaInner(
       titleTemplate: (up?.titleTemplate ?? "").trim() || uploadDefaults.titleTemplate,
       submissionTitleTemplate: (up?.submissionTitleTemplate ?? "").trim() || uploadDefaults.submissionTitleTemplate,
       partTitleTemplate: (up?.partTitleTemplate ?? "").trim() || uploadDefaults.partTitleTemplate,
+      ...(seasonSectionId ? { seasonSectionId } : {}),
     },
     // 可见性:规则 upload.private 缺省 true(= 仅自己可见)。**保守默认 true**(公开是不可逆的曝光)。
     private: up?.private !== false,
@@ -1031,13 +1036,14 @@ export function resolveRollingUploadMeta(
 export function resolveStreamUploadMeta(
   platform: string,
   roomSlug: string,
-): { tid: number; tag: string; desc?: string; partTitleTemplate?: string; private: boolean } {
+): { tid: number; tag: string; desc?: string; partTitleTemplate?: string; seasonSectionId?: number; private: boolean } {
   const { meta, private: isPrivate } = resolveRollingUploadMetaInner(platform, roomSlug);
   return {
     tid: meta.tid,
     tag: meta.tag,
     ...(meta.desc ? { desc: meta.desc } : {}),
     ...(meta.partTitleTemplate ? { partTitleTemplate: meta.partTitleTemplate } : {}),
+    ...(meta.seasonSectionId ? { seasonSectionId: meta.seasonSectionId } : {}),
     private: isPrivate,
   };
 }

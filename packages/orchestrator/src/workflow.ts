@@ -235,6 +235,8 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
           tid: cfg.uploadMeta.tid,
           public: isPublic,
           desc: cfg.uploadMeta.desc,
+          ...(cfg.uploadMeta.seasonSectionId ? { seasonSectionId: cfg.uploadMeta.seasonSectionId } : {}),
+          onNote: c.log,
         });
         // checkpoint:P1 建稿成功即刻落库 bv —— 必须在这里(不能等 burn/split 完),
         // 否则 P1 成功后若后续节点失败,bv 丢失 → 重试重传 P1 → 重复稿。

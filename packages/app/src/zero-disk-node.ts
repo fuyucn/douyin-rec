@@ -245,6 +245,7 @@ export function buildZeroDiskDelivery(o: {
         ...(meta.titleTemplate ? { titleTemplate: meta.titleTemplate } : {}),
         ...(meta.submissionTitleTemplate ? { submissionTitleTemplate: meta.submissionTitleTemplate } : {}),
         ...(meta.partTitleTemplate ? { partTitleTemplate: meta.partTitleTemplate } : {}),
+        ...(meta.seasonSectionId ? { seasonSectionId: meta.seasonSectionId } : {}),
       },
       accountKey,
       ...(o.workerDataRoot ? { credentialPath: posix.join(o.workerDataRoot, "config", "biliup", "cookies.json") } : {}),

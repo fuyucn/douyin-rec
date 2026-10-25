@@ -25,6 +25,13 @@ export interface UploadOpts {
   public: boolean;
   desc?: string;
   line?: UploadLine;
+  /**
+   * Optional Bilibili season section id (issue #364). Bilibili has no ordinary-season field on the
+   * submit request, so the uploader adds the archive after a successful P1 create. Empty = off.
+   */
+  seasonSectionId?: number;
+  /** Best-effort note channel for post-upload side effects (season association). */
+  onNote?: (msg: string) => void;
 }
 
 /**
