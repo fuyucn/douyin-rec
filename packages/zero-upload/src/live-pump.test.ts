@@ -2544,6 +2544,30 @@ describe("issue #360: spool naming and legacy state migration", () => {
     expect(existsSync(livePumpStatePath(newDir, room))).toBe(false);
   });
 
+  it("migrateLegacyState refuses to overwrite an unreadable room state", () => {
+    const room = "douyin:123:2026-10-24";
+    const newDir = join(dir, "room");
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "legacy", tid: 21, tag: "x", private: true, parts: [], updatedAt: 1,
+    });
+    mkdirSync(newDir, { recursive: true });
+    writeFileSync(livePumpStatePath(newDir, room), "{truncated");
+    expect(migrateLegacyState(dir, newDir, room)).toBe("conflict");
+    expect(readFileSync(livePumpStatePath(newDir, room), "utf-8")).toBe("{truncated");
+  });
+
+  it("migrateLegacyState keeps the original updatedAt so an old broadcast still rolls over", () => {
+    const room = "douyin:123:2026-10-24";
+    const newDir = join(dir, "room");
+    const oldAt = Date.now() - 3 * 3_600_000;
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "old", tid: 21, tag: "x", private: true, parts: [], updatedAt: oldAt,
+    });
+    const before = readLivePumpState(livePumpStatePath(dir, room))?.updatedAt;
+    expect(migrateLegacyState(dir, newDir, room)).toBe("ok");
+    expect(readLivePumpState(livePumpStatePath(newDir, room))?.updatedAt).toBe(before);
+  });
+
   it("migrateLegacyState conflict leaves shared spools and the legacy state untouched", () => {
     const room = "douyin:123:2026-10-24";
     const newDir = join(dir, "room");

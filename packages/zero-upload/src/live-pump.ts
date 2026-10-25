@@ -310,13 +310,18 @@ export function readLivePumpState(path: string): LivePumpState | null {
   }
 }
 
-export function writeLivePumpState(path: string, state: LivePumpState): void {
+export function writeLivePumpState(
+  path: string,
+  state: LivePumpState,
+  opts: { preserveUpdatedAt?: boolean } = {},
+): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp.${process.pid}.${Date.now().toString(36)}`;
   try {
     const fd = openSync(tmp, "w", 0o600);
     try {
-      writeFileSync(fd, JSON.stringify({ ...state, updatedAt: Date.now() }, null, 2), "utf-8");
+      const updatedAt = opts.preserveUpdatedAt ? state.updatedAt : Date.now();
+      writeFileSync(fd, JSON.stringify({ ...state, updatedAt }, null, 2), "utf-8");
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -450,6 +455,7 @@ export function migrateLegacyState(
   };
   const rewrite = (st: LivePumpState): LivePumpState => ({
     ...st,
+    updatedAt: st.updatedAt,
     parts: st.parts.map((part) => ({ ...part, spoolPath: moveSpool(part.spoolPath) })),
     ...(st.pending ? { pending: { ...st.pending, spoolPath: moveSpool(st.pending.spoolPath) } } : {}),
   });
@@ -460,6 +466,12 @@ export function migrateLegacyState(
   try {
     const existingRaw = existsSync(newState) ? readFileSync(newState, "utf-8") : null;
     const existing = existingRaw ? readLivePumpState(newState) : null;
+    if (existingRaw != null && !existing) {
+      // An unreadable room state may hold an unconfirmed WAL. Overwriting it with the legacy
+      // state would destroy the only record of that part, so never touch it automatically.
+      log(`[live-pump] ⚠️ 房间目录状态无法读取,拒绝覆盖: ${newState}`);
+      return "conflict";
+    }
 
     if (existing) {
       // Conflict check FIRST: a legacy state with an unconfirmed WAL must not be touched, and
@@ -479,7 +491,7 @@ export function migrateLegacyState(
       // Idempotent retry: a crash may have left the room state pointing at legacy spools.
       previousRoomState = existingRaw;
       const rewritten = rewrite(existing);
-      writeLivePumpState(newState, rewritten);
+      writeLivePumpState(newState, rewritten, { preserveUpdatedAt: true });
       written.push(newState);
       if (legacy) unlinkSync(oldState);
       return "ok";
@@ -489,7 +501,9 @@ export function migrateLegacyState(
     const state = readLivePumpState(oldState);
     if (!state) return "failed"; // unreadable: leave it authoritative at the legacy location
     // Stage a readable state at the new location first. Spools still live at their old paths.
-    writeLivePumpState(newState, state);
+    // Keep the original `updatedAt`: the same-broadcast rollover (issue #293) uses it, and a
+    // fresh stamp would make an old broadcast look like it is still current.
+    writeLivePumpState(newState, state, { preserveUpdatedAt: true });
     written.push(newState);
     const rewritten = rewrite(state);
     const archivedPrefix = basename(oldState) + ARCHIVED_SUFFIX;
@@ -501,7 +515,7 @@ export function migrateLegacyState(
       if (!st) continue;
       archivedRewrites.push({ file: f, state: rewrite(st) });
     }
-    writeLivePumpState(newState, rewritten);
+    writeLivePumpState(newState, rewritten, { preserveUpdatedAt: true });
     for (const a2 of archivedRewrites) {
       const dest = join(newDir, a2.file);
       writeLivePumpState(dest, a2.state);
