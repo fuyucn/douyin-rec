@@ -857,6 +857,12 @@ describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config >
     }), "utf-8");
     expect(resolveRollingUploadMeta("douyin", "123").meta.seasonSectionId).toBe(321);
     expect(resolveStreamUploadMeta("douyin", "123").seasonSectionId).toBe(321);
+
+    writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      pipeline: { upload: { mode: "rolling", tag: "规则标签", tid: 21, seasonSectionId: null } },
+    }), "utf-8");
+    expect(resolveRollingUploadMeta("douyin", "123").meta.seasonSectionId).toBeUndefined();
+    expect(resolveStreamUploadMeta("douyin", "123").seasonSectionId).toBeUndefined();
   });
 
   it("禁用规则 / 仅 stage 规则不提供上传 metadata(防止私稿被旧规则改成公开)", () => {

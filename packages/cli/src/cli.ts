@@ -21,7 +21,7 @@ import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseOutputFormat, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, freeGBOf, redactLogLines, recordingRoomDir, sanitizePathSegment, zonedStamp } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, freeGBOf, redactLogLines, recordingRoomDir, sanitizePathSegment, zonedStamp } from "@drec/core";
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -34,7 +34,7 @@ import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
-import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
+import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
 import type { HubStarter, TaskStore } from "@drec/app";
 import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
@@ -364,9 +364,7 @@ program
       }
       // Explicit stream-upload flags only serve manual debugging; a managed run ignores them.
       const manual: Pick<RecordCliOpts, "streamUploadTid" | "streamUploadTag" | "streamUploadPrivate"> = delivery ? {} : o;
-      const streamMeta = delivery
-        ? { tid: delivery.meta.tid, tag: delivery.meta.tag, private: delivery.meta.private, ...(delivery.meta.desc ? { desc: delivery.meta.desc } : {}) }
-        : resolveStreamUploadMeta(platform.id, roomSlug);
+      const streamMeta = zeroDiskStreamMeta(delivery, resolveStreamUploadMeta(platform.id, roomSlug));
       const metaOverride = delivery ? { meta: delivery.meta } : {};
       // The stored task name is only a fallback; the live stream usually exposes the real
       // anchor. Both the XML metadata and `{name}` should use the real anchor once known.
@@ -1690,7 +1688,7 @@ const hubStarter: HubStarter = {
       const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform, slug));
       if (!rule || !rule.enabled) return null; // 无任务文件或已禁用 → hub 不处理该房间
       const p = rule.pipeline ?? {};
-      const seasonSectionId = normalizeSeasonSectionId(p.upload?.seasonSectionId) ?? normalizeSeasonSectionId(uploadDefaults.seasonSectionId);
+      const seasonSectionId = resolveSeasonSectionId(p.upload?.seasonSectionId, uploadDefaults.seasonSectionId);
       return {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         // 磁盘水位闸门(issue #8):同上,与 reconciler 看门狗同一个配置键与默认值(不新增第二套口径)。

@@ -2,10 +2,9 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import {
-  addArchiveToSeason,
+  addArchiveToSeasonWithNote,
   APPEND_AMBIGUOUS_MARKER,
   biliupCookieHeader,
-  describeSeasonOutcome,
   registerChild,
   throwIfAborted,
   type UploadLine,
@@ -101,18 +100,12 @@ function isRetryableLineError(err: unknown): boolean {
  */
 async function addSeasonIfConfigured(bv: string, o: UploadOpts): Promise<void> {
   if (!o.seasonSectionId) return;
-  try {
-    const outcome = await addArchiveToSeason({
-      cookiesPath: o.cookies,
-      sectionId: o.seasonSectionId,
-      bvid: bv,
-    });
-    try { o.onNote?.(describeSeasonOutcome(outcome)); } catch { /* notes never fail an upload */ }
-  } catch (e) {
-    try {
-      o.onNote?.(`[season] 加入合集失败:${String((e as Error)?.message ?? e).slice(0, 200)}`);
-    } catch { /* notes never fail an upload */ }
-  }
+  await addArchiveToSeasonWithNote({
+    cookiesPath: o.cookies,
+    sectionId: o.seasonSectionId,
+    bvid: bv,
+    ...(o.onNote ? { note: o.onNote } : {}),
+  });
 }
 
 /** 构造 biliup upload 参数（纯函数）。照搬 merge-best-today 的命令。 */

@@ -17,7 +17,7 @@
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync } from "node:fs";
 import path from "node:path";
 import {
-  addArchiveToSeason, describeSeasonOutcome, linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, resolveSubmissionTitle, formatPartTitle, isAppendAmbiguous,
+  addArchiveToSeasonWithNote, linkOrCopy, biliAccountKey, biliAccountKeyFromCookiesJson, resolveSubmissionTitle, formatPartTitle, isAppendAmbiguous,
   isUploadRateLimited, normalizeNodeResultFile, openUploadLimitStore, openUploadSlot, partTitleToFilename, resolveOutputStem, sanitizeStreamKey, stageSessionDir,
   processTimeZone, stampedSessionBaseOf as sessionBaseOfFile, STAGE_EXT_ALT, UploadGate, freeGBOf, type UploadSlot, type NodePipelineResult, type NodePipelineResultFile, type NodePipelineSpec, type NodeUploadStep, type UploadGateStore,
 } from "@drec/core";
@@ -788,8 +788,12 @@ export async function runNodeSidePipeline(
       confirmedParts = confirmed;
       log(`幂等重入:稿件 ${bv} 已有 ${confirmed} 个分 P → 跳过建稿,从分 P ${nextIdx + 1}/${totalParts} 续 append`);
       if (spec.uploadMeta.seasonSectionId) {
-        const outcome = await addArchiveToSeason({ cookiesPath: cookies, sectionId: spec.uploadMeta.seasonSectionId, bvid: bv });
-        log(describeSeasonOutcome(outcome));
+        await addArchiveToSeasonWithNote({
+          cookiesPath: cookies,
+          sectionId: spec.uploadMeta.seasonSectionId,
+          bvid: bv,
+          note: log,
+        });
       }
     } else {
       bv = await withGate(uploadGate, accountKey, () =>

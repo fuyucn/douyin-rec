@@ -3,7 +3,7 @@ import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
 import { humanBytes } from "./format.js";
-import { addArchiveToSeason, describeSeasonOutcome, effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
+import { addArchiveToSeasonWithNote, effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 import { prepareUploadAlias } from "./session-plan.js";
@@ -856,12 +856,12 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
   // the season once here; the add is idempotent and a membership check turns "already there" into success.
   const doneBv = ctx.ledger.getNodeState(streamKey, "upload_plain")?.state === "done" ? ctx.ledger.get(streamKey)?.bv : undefined;
   if (doneBv && ctx.cfg.uploadMeta.seasonSectionId) {
-    const outcome = await addArchiveToSeason({
+    await addArchiveToSeasonWithNote({
       cookiesPath: ctx.cfg.cookies,
       sectionId: ctx.cfg.uploadMeta.seasonSectionId,
       bvid: doneBv,
+      note: (m) => ctx.log(m),
     });
-    ctx.log(describeSeasonOutcome(outcome));
   }
   const byKey = new Map(nodes.map((n) => [n.key, n]));
   const parents = new Map<WorkflowNodeKey, WorkflowNodeKey[]>();

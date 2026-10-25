@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { addArchiveToSeason, normalizeSeasonSectionId } from "./bili-season.js";
+import { addArchiveToSeason, normalizeSeasonSectionId, resolveSeasonSectionId } from "./bili-season.js";
 
 function loginFile(csrf = "csrf-token"): string {
   const dir = mkdtempSync(join(tmpdir(), "season-test-"));
@@ -24,6 +24,15 @@ describe("normalizeSeasonSectionId", () => {
     for (const bad of [0, -1, 1.5, "abc", "", null, undefined, Number.MAX_SAFE_INTEGER + 1]) {
       expect(normalizeSeasonSectionId(bad)).toBeUndefined();
     }
+  });
+});
+
+describe("resolveSeasonSectionId", () => {
+  it("null is an explicit off; undefined inherits the default; invalid values fall back", () => {
+    expect(resolveSeasonSectionId(null, 321)).toBeUndefined();
+    expect(resolveSeasonSectionId(undefined, 321)).toBe(321);
+    expect(resolveSeasonSectionId(0, 321)).toBe(321);
+    expect(resolveSeasonSectionId(456, 321)).toBe(456);
   });
 });
 
@@ -65,6 +74,26 @@ describe("addArchiveToSeason", () => {
 
     const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl });
     expect(r).toMatchObject({ status: "already", sectionId: 123, aid: 456 });
+  });
+
+  it("treats a lost add response as success when the section already lists the archive", async () => {
+    let posts = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("/x/vupre/web/archive/view")) {
+        return json({ code: 0, data: { archive: { aid: 456, title: "replay" }, videos: [{ cid: 789 }] } });
+      }
+      if (u.includes("/season/section/episodes/add")) {
+        posts++;
+        throw new Error("socket closed after send");
+      }
+      if (u.includes("/season/section?id=123")) return json({ code: 0, data: { episodes: [{ aid: 456 }] } });
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl });
+    expect(r).toMatchObject({ status: "already", sectionId: 123, aid: 456 });
+    expect(posts).toBe(1);
   });
 
   it("reports a definite API rejection without retrying", async () => {

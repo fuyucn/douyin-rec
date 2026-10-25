@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import {
-  addArchiveToSeason, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, describeSeasonOutcome, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
+  addArchiveToSeasonWithNote, APPEND_AMBIGUOUS_MARKER, BILIUP_QUEUE_CAPABILITY, BILIUP_SLOT_CAPABILITY, isSlotBusy, SLOT_BUSY_MARKER, normalizeSeasonSectionId, UncertainOutcome, formatPartTitle, linkOrCopy, partTitleToFilename, probeChild,
   type ProcessContext, type ProcessJob, type ProcessResult, type Processor, type TitleContext, type UploadProgress, type UploadSlot,
 } from "@drec/core";
 import { appendGroup, countVideoParts, isAllFilesUploadedLine, runBiliup, uploadPlain, type BiliupHooks } from "./run-biliup.js";
@@ -235,8 +235,6 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
     tid: p.tid,
     tag: p.tag,
     ...(p.desc ? { desc: p.desc } : {}),
-    ...(p.seasonSectionId ? { seasonSectionId: p.seasonSectionId } : {}),
-    onNote: (m: string) => ctx.log(m),
     public: p.public === true,
   };
   const gate = deps.gate?.();
@@ -255,7 +253,6 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   const total = sizes.reduce((a, b) => a + b, 0);
   const partAt = (i: number): void => sup.setPart(sizes.slice(0, i).reduce((a, b) => a + b, 0), sizes[i] ?? 0, total);
   st.bv = p.bv;
-  let createdNow = false;
   if (!st.bv) {
     sup.setStep("gate_wait");
     // Fail-closed before creating anything: without duration we cannot prove "no draft".
@@ -266,15 +263,18 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
     if (proof === "unknown") throw new Error("cannot confirm whether a draft exists; needs manual verification");
     partAt(0);
     st.bv = await slotted(() => uploadPlain({ plain: { ...meta, video: files[0]! }, run: sup.run }));
-    createdNow = true;
     ctx.setState?.({ bv: st.bv });
   }
   const bv = st.bv;
-  // A resumed row reuses the draft created by an earlier attempt, so the create hook never runs
-  // again. Reconcile the season once per processed row; the add is idempotent.
-  if (!createdNow && p.seasonSectionId) {
-    const outcome = await addArchiveToSeason({ cookiesPath: cookies, sectionId: p.seasonSectionId, bvid: bv });
-    ctx.log(describeSeasonOutcome(outcome));
+  // Season association runs after the upload slot is released: it is a best-effort side effect and
+  // must not extend the node-wide slot hold. It is idempotent for a resumed row that already has a BV.
+  if (p.seasonSectionId) {
+    await addArchiveToSeasonWithNote({
+      cookiesPath: cookies,
+      sectionId: p.seasonSectionId,
+      bvid: bv,
+      note: (m) => ctx.log(m),
+    });
   }
   const countParts = countPartsOf(deps);
   // params.bv: the draft exists and every input is a part still to append.

@@ -56,7 +56,7 @@ import {
   UploadGate,
   isSlotBusy,
   SLOT_BUSY_MARKER,
-  normalizeSeasonSectionId,
+  resolveSeasonSectionId,
   type UploadSlot,
   type RollingSegment,
 } from "@drec/core";
@@ -995,7 +995,7 @@ function resolveRollingUploadMetaInner(
     /* 无 hub.config → 用规则/内置默认 */
   }
   const up = ruleActive ? rule?.pipeline?.upload : undefined;
-  const seasonSectionId = normalizeSeasonSectionId(up?.seasonSectionId) ?? normalizeSeasonSectionId(uploadDefaults.seasonSectionId);
+  const seasonSectionId = resolveSeasonSectionId(up?.seasonSectionId, uploadDefaults.seasonSectionId);
   return {
     meta: {
       tag: up?.tag || uploadDefaults.tag || "直播,录像",

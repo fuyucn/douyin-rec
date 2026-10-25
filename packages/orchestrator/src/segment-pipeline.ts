@@ -9,7 +9,7 @@
  */
 import path from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { addArchiveToSeason, describeSeasonOutcome, effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
+import { addArchiveToSeasonWithNote, effectiveStageFormat, linkOrCopy, burnFlags, isAppendAmbiguous, isUploadRateLimited, stageExt, throwIfAborted, closeStageReady } from "@drec/core";
 import { isCompleteMedia, planSegmentGroups, renderXmlWindowToXml, unreadableParts } from "@drec/post-process";
 import type { Broadcast } from "./identity.js";
 import type { JobState } from "./ledger.js";
@@ -576,12 +576,12 @@ export async function runSegmentPipeline(o: {
     bv = ledger.get(streamKey)?.bv ?? "";
     jlog(`建稿 P1 已存在,跳过(bv=${bv})`);
     if (bv && cfg.uploadMeta.seasonSectionId) {
-      const outcome = await addArchiveToSeason({
+      await addArchiveToSeasonWithNote({
         cookiesPath: cfg.cookies,
         sectionId: cfg.uploadMeta.seasonSectionId,
         bvid: bv,
+        note: jlog,
       });
-      jlog(describeSeasonOutcome(outcome));
     }
   }
   if (!bv) {

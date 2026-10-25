@@ -15,9 +15,6 @@ const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 
 export const SEASON_API_TIMEOUT_MS = 10_000;
 
-/** Highest accepted section id. Guards against a pasted archive id or a typo. */
-const MAX_SECTION_ID = 2 ** 48;
-
 export type SeasonAddOutcome =
   | { status: "added"; sectionId: number; aid: number; cid: number; title: string }
   | { status: "already"; sectionId: number; aid: number }
@@ -38,7 +35,17 @@ interface SeasonTarget {
 /** Normalize a configured section id: positive safe integer, otherwise undefined (feature off). */
 export function normalizeSeasonSectionId(value: unknown): number | undefined {
   const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
-  return typeof n === "number" && Number.isSafeInteger(n) && n > 0 && n <= MAX_SECTION_ID ? n : undefined;
+  return typeof n === "number" && Number.isSafeInteger(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * Resolve a room rule against the global default.
+ * `null` is an explicit "off" and must not fall back; `undefined` inherits.
+ */
+export function resolveSeasonSectionId(ruleValue: unknown, defaultValue: unknown): number | undefined {
+  if (ruleValue === null) return undefined;
+  const fromRule = normalizeSeasonSectionId(ruleValue);
+  return fromRule ?? normalizeSeasonSectionId(defaultValue);
 }
 
 function timeoutSignal(ms: number): AbortSignal | undefined {
@@ -215,4 +222,21 @@ export function describeSeasonOutcome(r: SeasonAddOutcome): string {
     case "failed":
       return `[season] 加入合集小节 ${r.sectionId} 失败:${r.error}`;
   }
+}
+
+/**
+ * Best-effort wrapper used by every upload/resume path. Guarantees the season step never throws and
+ * that its outcome reaches the job log through one place.
+ */
+export async function addArchiveToSeasonWithNote(
+  o: SeasonTarget & { note?: (msg: string) => void },
+): Promise<SeasonAddOutcome> {
+  let outcome: SeasonAddOutcome;
+  try {
+    outcome = await addArchiveToSeason(o);
+  } catch (e) {
+    outcome = { status: "failed", sectionId: o.sectionId, error: String((e as Error)?.message ?? e).slice(0, 200) };
+  }
+  try { o.note?.(describeSeasonOutcome(outcome)); } catch { /* logging never fails an upload */ }
+  return outcome;
 }

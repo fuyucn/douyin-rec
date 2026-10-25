@@ -281,6 +281,9 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     ev.preventDefault();
     if (!isEdit && form.sourceTaskId === null) { toast(t("hub.ruleDialog.sourceTaskRequired"), "error"); return; }
     if (workersInvalid) { toast(t("hub.ruleDialog.workersRequired"), "error"); return; }
+    if (form.seasonSectionId.trim() && !(Number.isInteger(Number(form.seasonSectionId)) && Number(form.seasonSectionId) > 0)) {
+      toast(t("room.editor.fieldInvalid"), "error"); return;
+    }
     const sched = splitSchedule(form.schedule);
     if (!sched) { toast(t("rooms.scheduleInvalid"), "error"); return; }
     const payload = buildPayload();

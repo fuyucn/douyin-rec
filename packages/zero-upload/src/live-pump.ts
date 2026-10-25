@@ -50,8 +50,7 @@ import {
   type StudioVideo,
 } from "./upos-stream.js";
 import {
-  addArchiveToSeason,
-  describeSeasonOutcome,
+  addArchiveToSeasonWithNote,
   isSameBroadcastGap,
   isUploadRateLimited,
   type DanmuMessage,
@@ -844,14 +843,14 @@ export class LivePumpSession {
       }
       if (ok) {
         if (pending.kind === "create" && this.o.seasonSectionId) {
-          const outcome = await addArchiveToSeason({
+          await addArchiveToSeasonWithNote({
             cookiesPath: this.o.cookiesPath,
             sectionId: this.o.seasonSectionId,
             ...(aid ? { aid } : {}),
             ...(bvid ? { bvid } : {}),
             fetchImpl: doFetch,
+            note: (m) => this.log(m),
           });
-          this.log(describeSeasonOutcome(outcome));
         }
         return { ok: true, ...(bvid ? { bvid } : {}), ...(aid ? { aid } : {}) };
       }
@@ -1775,14 +1774,14 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // hook again. Reconcile the season once per session start; the add is idempotent and a
       // membership check turns an "already there" rejection into success.
       if (o.seasonSectionId && (session.bvid || session.aid)) {
-        const outcome = await addArchiveToSeason({
+        await addArchiveToSeasonWithNote({
           cookiesPath: o.cookiesPath,
           sectionId: o.seasonSectionId,
           ...(session.aid ? { aid: session.aid } : {}),
           ...(session.bvid ? { bvid: session.bvid } : {}),
           ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
+          note: log,
         });
-        log(describeSeasonOutcome(outcome));
       }
       if (session.hasUnconfirmed) {
         const pending = session.parts.filter((p) => !p.confirmed);
