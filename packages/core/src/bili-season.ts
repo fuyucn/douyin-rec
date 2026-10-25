@@ -11,9 +11,7 @@ import { readFileSync } from "node:fs";
 import { biliupCookieHeader, biliupCsrf } from "./upload-gate.js";
 
 const MEMBER = "https://member.bilibili.com";
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
 export const SEASON_API_TIMEOUT_MS = 10_000;
 
