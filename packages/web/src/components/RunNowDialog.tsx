@@ -5,7 +5,7 @@
  * node. Key construction and the API call stay with the caller so both the
  * legacy room detail and the unified room page share one implementation.
  */
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { ApiError, type HubJobDTO, type WorkerDTO } from "../api/client";
 import { runDate } from "./HubJobs";
 import { Button } from "./Button";
@@ -77,22 +77,13 @@ function RunNowForm({
   onSubmit,
 }: Omit<Parameters<typeof RunNowDialog>[0], "open">): ReactNode {
   const t = useT();
-  const [runKey, setRunKey] = useState(CUSTOM_DATE);
-  const [customDate, setCustomDate] = useState(today);
+  const [runKey, setRunKey] = useState(() => runs[0]?.streamKey ?? CUSTOM_DATE);
+  const [customDate, setCustomDate] = useState(() => runs[0] ? runDate(runs[0].streamKey).slice(0, 10) : today);
   const [winnerWorker, setWinnerWorker] = useState("");
   const [pendingForce, setPendingForce] = useState<{ key: string; winnerWorker?: string; message: string } | null>(null);
   // Default to a new submission: reusing the same id makes a retry look like
   // nothing happened when the old run already has a BV.
   const [newSubmission, setNewSubmission] = useState(true);
-
-  // Seed on mount: runs refresh in the background and must not overwrite what the user is editing.
-  useEffect(() => {
-    setRunKey(runs[0]?.streamKey ?? CUSTOM_DATE);
-    setCustomDate(runs[0] ? runDate(runs[0].streamKey).slice(0, 10) : today);
-    setWinnerWorker("");
-    setNewSubmission(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const selectedKey = runKey === CUSTOM_DATE ? `${roomPrefix}:${customDate.trim()}` : runKey;
   const validDate = runKey !== CUSTOM_DATE || /^\d{4}-\d{2}-\d{2}$/.test(customDate.trim());

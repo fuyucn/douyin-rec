@@ -23,6 +23,7 @@ import { useHubStream, usePolling, useToast, errMessage } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { todayYmdInTz } from "../lib/tz";
 import { serverTimezoneAtom } from "../atoms";
+import { shouldToastRunError } from "../lib/run-now";
 import { useAtomValue } from "jotai";
 
 const PAGE = 20;
@@ -123,7 +124,9 @@ export function RoomRunsPanel({
       await refresh().catch(() => {});
     } catch (e) {
       // A forceable 409 is handled by the dialog's confirm step; legacy behaviour shows only that confirm.
-      if (!(e instanceof ApiError && e.forceable && !force)) toast(errMessage(e), "error");
+      if (shouldToastRunError({ forceable: e instanceof ApiError && e.forceable, force: force === true })) {
+        toast(errMessage(e), "error");
+      }
       throw e;
     } finally {
       setRunBusy(false);

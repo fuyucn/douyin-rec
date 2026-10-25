@@ -35,3 +35,8 @@ export function runNowKey(input: {
   const base = submissionBaseKey(input.selectedKey);
   return `${base}-${nextSubmissionNo(base, input.existingKeys)}`;
 }
+
+/** Whether a failed run should toast. A forceable 409 is handed to the confirm dialog instead. */
+export function shouldToastRunError(input: { forceable: boolean; force: boolean }): boolean {
+  return !input.forceable || input.force;
+}

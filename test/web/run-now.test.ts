@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextSubmissionNo, runNowKey, submissionBaseKey } from "../../packages/web/src/lib/run-now.js";
+import { nextSubmissionNo, runNowKey, shouldToastRunError, submissionBaseKey } from "../../packages/web/src/lib/run-now.js";
 
 const BASE = "douyin:123:2026-10-24";
 
@@ -49,5 +49,16 @@ describe("runNowKey", () => {
       existingKeys: [`${BASE}-1`, `${BASE}-3`, `${BASE}-4`],
       newSubmission: true,
     })).toBe(`${BASE}-5`);
+  });
+});
+
+describe("shouldToastRunError", () => {
+  it("suppresses a forceable 409 until the user confirms force", () => {
+    expect(shouldToastRunError({ forceable: true, force: false })).toBe(false);
+  });
+
+  it("still reports non-forceable failures and failed force retries", () => {
+    expect(shouldToastRunError({ forceable: false, force: false })).toBe(true);
+    expect(shouldToastRunError({ forceable: true, force: true })).toBe(true);
   });
 });

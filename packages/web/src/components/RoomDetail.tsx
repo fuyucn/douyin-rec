@@ -210,6 +210,8 @@ export function RoomDetail({
         return;
       }
       toast(errMessage(e), "error");
+      // Keep the dialog open and usable on a real failure.
+      throw e;
     }
   };
   const openRun = (): void => {
@@ -350,7 +352,7 @@ export function RoomDetail({
               onToggle={toggleRun}
               onRetry={retryNode}
               onStop={stopJob}
-              onRunNow={(key) => void runNow(key)}
+              onRunNow={(key) => void runNow(key).catch(() => {})}
             />
           ))}
           {runs.length < total && (
@@ -393,7 +395,7 @@ export function RoomDetail({
         onConfirm={() => {
           const r = forceRun;
           setForceRun(null);
-          if (r) void runNow(r.streamKey, r.winnerWorker, true);
+          if (r) void runNow(r.streamKey, r.winnerWorker, true).catch(() => {});
         }}
         onCancel={() => setForceRun(null)}
       />
