@@ -336,7 +336,7 @@ program
       if (pumpLayout !== "room" && roomDir !== opts.outDir) {
         const roomStatePath = livePumpStatePath(roomDir, pumpRoom);
         const roomState = readLivePumpState(roomStatePath);
-        if (roomState && (roomState.pending || roomState.parts.some((x) => !x.confirmed))) {
+        if (roomState && (roomState.pending || roomState.parts.some((x) => !x?.confirmed))) {
           const msg = `0 落盘房间目录里还有未确认分 P,但当前是 legacy 布局,不会自动续传: ${roomStatePath}`;
           console.error(`[stream-upload] ⚠️ ${msg}`);
           await notifier.notify({ kind: "error", stage: "0落盘", message: msg }).catch(() => {});

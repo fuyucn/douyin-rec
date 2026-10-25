@@ -428,7 +428,7 @@ export function resolvePumpDir(
   // Only an ACTIVE broadcast stays at the root: an unconfirmed part (its WAL is still needed) or
   // a last activity inside the same-broadcast window. Anything older is a finished broadcast;
   // keeping it at the root forever would mean upgraded rooms never reach the room directory.
-  if (legacy.pending || legacy.parts.some((p) => !p.confirmed)) return legacyDir;
+  if (legacy.pending || legacy.parts.some((p) => !p?.confirmed)) return legacyDir;
   // A missing/corrupt timestamp cannot prove the broadcast ended; the legacy rollover falls back
   // to file mtime, so stay at the root and let that same rule decide instead of splitting the
   // session into a second archive.
