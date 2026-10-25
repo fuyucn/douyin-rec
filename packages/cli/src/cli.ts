@@ -19,9 +19,9 @@ import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
 import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline-commands.js";
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, freeGBOf, redactLogLines } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, freeGBOf, redactLogLines, recordingRoomDir, sanitizePathSegment, zonedStamp } from "@drec/core";
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -301,7 +301,7 @@ program
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
-      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe } = await import("@drec/zero-upload");
+      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe, resolvePumpDir } = await import("@drec/zero-upload");
       const {
         rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta,
         resolveStreamUploadTitle, resolveStreamPartTitle,
@@ -312,6 +312,37 @@ program
       // because they only serve manual debugging.
       const roomSlug = platform.extractRoomSlug(roomToUrl(o.room));
       const pumpRoom = zeroDiskRoom(platform, o.room);
+      // Issue #360: with the room layout on, spool/state/xml live in the room directory and the
+      // spool file carries the anchor name. The layout is read once per process; a running pump
+      // never changes directory underneath itself. Legacy stays at the output root.
+      const pumpLayout = readOutputLayout();
+      const pumpAnchor = o.name?.trim() || "";
+      // Always resolve the room directory, even in legacy layout: the rollback check below must
+      // inspect the room-dir state, not the root one.
+      const roomDir = recordingRoomDir(opts.outDir, [pumpAnchor, roomSlug], {
+        platform: platform.id, roomSlug, anchorName: pumpAnchor || roomSlug,
+      }, { layout: "room" }) ?? opts.outDir;
+      const pumpSpoolDir = pumpLayout === "room" ? roomDir : opts.outDir;
+      // Sticky directory: a broadcast that already has a legacy state keeps using the root, so
+      // an upgrade never moves a live archive or its unconfirmed WAL. New broadcasts use the
+      // room directory. Nothing is migrated, so there is no half-migrated state to lose.
+      const pumpFilesDir = pumpLayout === "room"
+        ? resolvePumpDir(pumpSpoolDir, opts.outDir, pumpRoom)
+        : opts.outDir;
+      if (pumpFilesDir !== opts.outDir) mkdirSync(pumpFilesDir, { recursive: true });
+      // A rollback to the legacy layout must not strand a room-dir WAL: nothing would ever
+      // re-upload those unconfirmed parts. Alert (and keep recording into the root, where the
+      // legacy layout belongs) so a human can reconcile instead of silently losing the part.
+      if (pumpLayout !== "room" && roomDir !== opts.outDir) {
+        const roomStatePath = livePumpStatePath(roomDir, pumpRoom);
+        const roomState = readLivePumpState(roomStatePath);
+        if (roomState && (roomState.pending || roomState.parts.some((x) => !x?.confirmed))) {
+          const msg = `0 落盘房间目录里还有未确认分 P,但当前是 legacy 布局,不会自动续传: ${roomStatePath}`;
+          console.error(`[stream-upload] ⚠️ ${msg}`);
+          await notifier.notify({ kind: "error", stage: "0落盘", message: msg }).catch(() => {});
+        }
+      }
+
       // Hub-managed side node (issue #331): the master-delivered object is the ONLY source of upload
       // metadata and the account to verify. The node's rule directory is empty, so reading it would
       // silently fall back to defaults (private visibility, default title). Refuse instead.
@@ -388,7 +419,13 @@ program
           // Anchor to the wall clock at connect time: parts are sealed by byte/duration, so a
           // single session-level axis is the only stable reference for burn/part slicing.
           const startMs = Date.now();
-          xmlPath = zeroDiskXmlPath(opts.outDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs);
+          // A same-second reconnect would otherwise truncate the previous run's danmu (the writer
+          // opens with truncate). Never reuse an existing xml name.
+          const xmlBase = zeroDiskXmlPath(pumpFilesDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs, undefined, pumpLayout === "room" ? pumpAnchor : undefined);
+          xmlPath = xmlBase;
+          if (pumpLayout === "room") {
+            for (let n = 1; existsSync(xmlPath); n++) xmlPath = xmlBase.replace(/\.xml$/, `-${n}.xml`);
+          }
           writer.open(xmlPath, { anchorName, roomId: platform.extractRoomSlug(roomToUrl(o.room)), videoStartMs: startMs });
           writerOpened = true;
           await danmuSource.start(roomToUrl(o.room), {
@@ -403,23 +440,52 @@ program
           if (writerOpened) writer.close();
         },
       } : undefined;
-      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${opts.outDir}/live-pump-<room>_<开播时间>.xml`);
+      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${pumpFilesDir}/live-pump-${pumpLayout === "room" ? "<主播名>_" : "<room>_"}<开播时间>.xml`);
       // Remove spools left by a pump killed mid-part. They never reached the state file, so
       // nothing else would ever delete them. Only old, unreferenced files are touched.
       // The keep-set is `spoolPathsToKeep` (single source of truth next to the state shape):
       // it covers `parts` *and* `pending`. `pending` is the WAL of an upload whose outcome was
       // never persisted, and recovery re-uploads that whole file — listing only `parts` would
       // delete the last copy of an interrupted part (real data loss, found by review #280).
-      const st = readLivePumpState(livePumpStatePath(opts.outDir, pumpRoom));
-      // An unreadable live/archived state references unknown spool files: skip the sweep entirely.
-      if (spoolSweepSafe(opts.outDir, pumpRoom)) {
+      const st = readLivePumpState(livePumpStatePath(pumpFilesDir, pumpRoom));
+      // One sweep over the root, with a keep-set built from EVERY root state. Sweeping the root
+      // with only this room's state (the old shape) deleted another room's unconfirmed spool:
+      // upload backoff can exceed the 10-minute orphan grace, so those files are not orphans.
+      // A state that cannot be read means the keep-set is unknown -> skip entirely.
+      const rootKeep: string[] = [];
+      let rootSafe = true;
+      try {
+        for (const f of readdirSync(opts.outDir)) {
+          if (!/^live-pump-.+\.state\.json(?:\..*)?$/.test(f)) continue;
+          if (f.includes(".tmp.")) continue; // a crash leftover, not a state
+          const st2 = readLivePumpState(join(opts.outDir, f));
+          if (!st2) { rootSafe = false; break; }
+          rootKeep.push(...spoolPathsToKeep(st2));
+        }
+      } catch (e) {
+        // Missing dir = nothing to sweep; any other error means we cannot prove the keep-set.
+        if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") rootSafe = false;
+      }
+      if (rootSafe) {
         sweepOrphanSpools({
           spoolDir: opts.outDir,
-          knownSpoolPaths: [...spoolPathsToKeep(st), ...archivedSpoolPathsToKeep(opts.outDir, pumpRoom)],
+          knownSpoolPaths: [...rootKeep, ...archivedSpoolPathsToKeep(opts.outDir, pumpRoom)],
           log: (m) => console.log(m),
         });
       } else {
-        console.log("[live-pump] 存在无法读取的旧状态,跳过孤儿 spool 清扫(避免误删其引用的暂存文件)");
+        console.log("[live-pump] 根目录存在无法读取的旧状态,跳过孤儿 spool 清扫(避免误删其引用的暂存文件)");
+      }
+      if (pumpFilesDir !== opts.outDir) {
+        // The room dir is swept separately: rootKeep only protects root spools.
+        if (spoolSweepSafe(pumpFilesDir, pumpRoom)) {
+          sweepOrphanSpools({
+            spoolDir: pumpFilesDir,
+            knownSpoolPaths: [...spoolPathsToKeep(st), ...archivedSpoolPathsToKeep(pumpFilesDir, pumpRoom)],
+            log: (m) => console.log(m),
+          });
+        } else {
+          console.log("[live-pump] 房间目录存在无法读取的旧状态,跳过该目录清扫(避免误删其引用的暂存文件)");
+        }
       }
       const abort = new AbortController();
       const onSig = (sig: string): void => {
@@ -461,7 +527,21 @@ program
           };
         },
         quality: (o.quality ?? cfg.quality ?? platform.defaultQuality) as RecordOpts["quality"],
-        spoolDir: opts.outDir,
+        spoolDir: pumpFilesDir,
+        ...(pumpLayout === "room" ? {
+          // Issue #360: name carries the anchor and the broadcast start so a spool is
+          // identifiable outside the state file. Segment index is zero-padded to 3 like recordings.
+          spoolName: (seg: number) => {
+            const z = zonedStamp(streamStartMs);
+            const head = sanitizePathSegment(pumpAnchor || roomSlug).slice(0, 60) || roomSlug;
+            const base = `live-pump-${head}_${z.date}_${z.hh}-${z.mm}-${z.ss}_${String(seg).padStart(3, "0")}`;
+            // A restart in the same second would otherwise reuse the name of an existing spool
+            // that the state may still reference. Never overwrite one.
+            let name = `${base}.ts`;
+            for (let n = 1; existsSync(join(pumpFilesDir, name)); n++) name = `${base}-${n}.ts`;
+            return name;
+          },
+        } : {}),
         title: streamTitle,
         titleForLive: (liveTitle) => resolveStreamUploadTitle({
           platform: platform.id,

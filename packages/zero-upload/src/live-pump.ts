@@ -403,6 +403,39 @@ export function archivedSpoolPathsToKeep(spoolDir: string, room: string): string
   return out;
 }
 
+/**
+ * Which directory a zero-disk run must use (issue #360).
+ *
+ * Sticky rule, same as the stage resolver: a broadcast whose state already lives in the legacy
+ * root keeps writing there until that broadcast ends, so an upgrade never moves a session (or
+ * its unconfirmed WAL and spools) underneath a running archive. Only a room with no legacy
+ * state moves to the room directory. No file is ever moved: the legacy path stays authoritative
+ * for its own broadcast, which removes the whole class of half-migration data loss.
+ */
+export function resolvePumpDir(
+  roomDir: string,
+  legacyDir: string,
+  room: string,
+  nowMs: number = Date.now(),
+): string {
+  if (roomDir === legacyDir) return legacyDir;
+  const legacyPath = livePumpStatePath(legacyDir, room);
+  if (!existsSync(legacyPath)) return roomDir;
+  const legacy = readLivePumpState(legacyPath);
+  // An unreadable root state may hold an unconfirmed WAL: keep it where rolloverStaleState can
+  // archive it and raise the "needs a human" alert, exactly as the legacy layout did.
+  if (!legacy) return legacyDir;
+  // Only an ACTIVE broadcast stays at the root: an unconfirmed part (its WAL is still needed) or
+  // a last activity inside the same-broadcast window. Anything older is a finished broadcast;
+  // keeping it at the root forever would mean upgraded rooms never reach the room directory.
+  if (legacy.pending || legacy.parts.some((p) => !p?.confirmed)) return legacyDir;
+  // A missing/corrupt timestamp cannot prove the broadcast ended; the legacy rollover falls back
+  // to file mtime, so stay at the root and let that same rule decide instead of splitting the
+  // session into a second archive.
+  if (typeof legacy.updatedAt !== "number" || !Number.isFinite(legacy.updatedAt)) return legacyDir;
+  return isSameBroadcastGap(nowMs - legacy.updatedAt) ? legacyDir : roomDir;
+}
+
 export interface LivePumpSessionOpts {
   cookiesPath: string;
   room: string;
@@ -1486,6 +1519,12 @@ export interface RunLivePumpOptions {
   maxMs?: number;
   /** Max parts to record in this run (0/undefined = keep going until offline). */
   maxSegments?: number;
+  /**
+   * Per-part spool file name (issue #360). The CLI passes a room/anchored name when the room
+   * layout is on; without it the historical `live-pump-<epochMs>-<seg>.ts` name is kept so old
+   * nodes and tests behave unchanged.
+   */
+  spoolName?: (segIndex: number) => string;
   line?: string;
   /** Submit every completed part to the archive. Default true. */
   submit?: boolean;
@@ -1832,7 +1871,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     }
     if (seg === 0) log("[状态] 录制中");
 
-    const fileName = `live-pump-${Date.now()}-${seg}.ts`;
+    const fileName = o.spoolName ? o.spoolName(seg) : `live-pump-${Date.now()}-${seg}.ts`;
     const t0 = Date.now();
     const r = await pumpSegment({
       cookiesPath: o.cookiesPath,

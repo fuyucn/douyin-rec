@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, statSync, writeFileSync, existsSync, writeSync, mkdirSync, readdirSync, utimesSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
   acquireStreamWithBackoff,
@@ -20,6 +20,7 @@ import {
   reuploadSpoolFile,
   buildPipeFfmpegArgs,
   countTsDiscontinuities,
+  resolvePumpDir,
   DEFAULT_SEGMENT_CAP,
   LivePumpSession,
   archivedSpoolPathsToKeep,
@@ -2404,4 +2405,100 @@ describe("part progress hook (issue #331)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 20_000);
+});
+
+describe("issue #360: zero-disk room files", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-360-")); });
+  afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+
+  it("spoolName option names each part after the anchor and the start stamp", async () => {
+    const names: string[] = [];
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 7));
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+      const u = new URL(url);
+      if (u.pathname.endsWith("/preupload")) {
+        return new Response(JSON.stringify({
+          chunk_size: CHUNK, auth: "auth", endpoint: "//upos-cs.bilivideo.com",
+          biz_id: "1", upos_uri: "upos://bucket/x.ts", OK: 1,
+        }), { status: 200 });
+      }
+      if ((init?.method ?? "GET").toUpperCase() === "PUT") return new Response("", { status: 200 });
+      return new Response(JSON.stringify({ OK: 1, key: "bucket/x.ts", upload_id: "uid" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const r = await runLivePump({
+      cookiesPath: COOKIES,
+      room: "room-360",
+      fetch: async () => ({ living: true, url: "https://x/live.flv" }),
+      quality: "origin",
+      spoolDir: dir,
+      title: "t",
+      tid: 21,
+      tag: "x",
+      private: true,
+      sizeCap: CHUNK * 2,
+      maxSegments: 1,
+      submit: false,
+      fetchImpl,
+      spoolName: (seg) => { const n = `live-pump-主播_2026-10-24_10-00-00_${String(seg).padStart(3, "0")}.ts`; names.push(n); return n; },
+      log: () => {},
+    });
+    // The fake ffmpeg bytes are not a real TS container, so the part fails its own self-check;
+    // what matters here is that the pump asked for the room-layout name before spawning.
+    expect(names).toEqual(["live-pump-主播_2026-10-24_10-00-00_000.ts"]);
+  });
+
+  it("resolvePumpDir keeps an unreadable legacy state and a missing timestamp at the root", () => {
+    const room = "douyin:123:2026-10-24";
+    const roomDir = join(dir, "主播_douyin_123");
+    writeFileSync(livePumpStatePath(dir, room), "{truncated");
+    expect(resolvePumpDir(roomDir, dir, room)).toBe(dir);
+    rmSync(livePumpStatePath(dir, room));
+    const legacy = {
+      schemaVersion: 1 as const, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true, parts: [],
+    };
+    // Simulate a pre-updatedAt state file: the rollover falls back to mtime, so must we.
+    writeFileSync(livePumpStatePath(dir, room), JSON.stringify(legacy));
+    expect(resolvePumpDir(roomDir, dir, room)).toBe(dir);
+  });
+
+  it("resolvePumpDir keeps only an ACTIVE legacy broadcast at the root", () => {
+    const room = "douyin:123:2026-10-24";
+    const roomDir = join(dir, "主播_douyin_123");
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true, parts: [], updatedAt: Date.now(),
+    });
+    expect(resolvePumpDir(roomDir, dir, room)).toBe(dir);
+    // A finished broadcast (older than the same-broadcast window) moves to the room dir.
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true, parts: [],
+      updatedAt: Date.now() - 3 * 3_600_000,
+    });
+    // `writeLivePumpState` stamps updatedAt=now, so advance the clock instead of the state.
+    expect(resolvePumpDir(roomDir, dir, room, Date.now() + 3 * 3_600_000)).toBe(roomDir);
+    // An unconfirmed part keeps the WAL at the root regardless of age.
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      parts: [{ index: 0, spoolPath: join(dir, "p.ts"), filename: "f", stem: "s", title: "P1", bytes: 1, durationSec: 1, confirmed: false }],
+      updatedAt: Date.now() - 3 * 3_600_000,
+    });
+    expect(resolvePumpDir(roomDir, dir, room, Date.now() + 3 * 3_600_000)).toBe(dir);
+  });
+
+  it("resolvePumpDir keeps a broadcast with a legacy state at the root", () => {
+    const room = "douyin:123:2026-10-24";
+    const roomDir = join(dir, "主播_douyin_123");
+    expect(resolvePumpDir(roomDir, dir, room)).toBe(roomDir);
+    writeLivePumpState(livePumpStatePath(dir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true, parts: [], updatedAt: Date.now(),
+    });
+    expect(resolvePumpDir(roomDir, dir, room)).toBe(dir);
+    // A room state alone (new broadcast) uses the room dir.
+    rmSync(livePumpStatePath(dir, room));
+    writeLivePumpState(livePumpStatePath(roomDir, room), {
+      schemaVersion: 1, room, createdAt: 1, title: "t", tid: 21, tag: "x", private: true, parts: [], updatedAt: Date.now(),
+    });
+    expect(resolvePumpDir(roomDir, dir, room)).toBe(roomDir);
+  });
 });

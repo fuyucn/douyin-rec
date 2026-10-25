@@ -5,7 +5,7 @@
  * 清扫必须极窄:只删「本模块命名 + 不在 state + 超过宽限期」的文件。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sweepOrphanSpools, ORPHAN_SPOOL_GRACE_MS } from "../../packages/app/src/live-pump-spool.js";
@@ -80,4 +80,49 @@ describe("sweepOrphanSpools", () => {
     expect(sweepOrphanSpools({ spoolDir: join(dir, "missing"), knownSpoolPaths: [] })).toEqual([]);
   });
 
+});
+
+describe("issue #360: room-layout spool names", () => {
+  it("sweeps both generations but never the held-gap sample", () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-sweep-360-"));
+    try {
+      const old = join(dir, `live-pump-${Date.UTC(2026, 9, 24, 23, 22, 24)}-0.ts`);
+      const room = join(dir, "live-pump-云念_2026-10-24_06-55-49_000.ts");
+      const suffixed = join(dir, "live-pump-云念_2026-10-24_06-55-49_000-1.ts");
+      const held = join(dir, "live-pump-云念_2026-10-24_06-55-49_000.held-gap.ts");
+      const state = join(dir, "live-pump-room360.state.json");
+      for (const f of [old, room, suffixed, held, state]) writeFileSync(f, "x");
+      const oldTime = new Date(Date.now() - ORPHAN_SPOOL_GRACE_MS - 60_000);
+      for (const f of [old, room, suffixed, held, state]) utimesSync(f, oldTime, oldTime);
+      const removed = sweepOrphanSpools({ spoolDir: dir, knownSpoolPaths: [] });
+      expect(removed.sort()).toEqual([
+        `live-pump-${Date.UTC(2026, 9, 24, 23, 22, 24)}-0.ts`,
+        "live-pump-云念_2026-10-24_06-55-49_000.ts",
+        "live-pump-云念_2026-10-24_06-55-49_000-1.ts",
+      ].sort());
+      expect(existsSync(held)).toBe(true);
+      expect(existsSync(state)).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe("issue #360: root sweep keep-set", () => {
+  it("keeps another room's unconfirmed spool past the grace window", () => {
+    const dir = mkdtempSync(join(tmpdir(), "live-pump-keep-360-"));
+    try {
+      const other = join(dir, "live-pump-otherroom.state.json");
+      const otherSpool = join(dir, "live-pump-otherroom_2026-10-24_10-00-00_000.ts");
+      writeFileSync(otherSpool, "x");
+      writeFileSync(other, JSON.stringify({
+        schemaVersion: 1, room: "douyin:999:2026-10-24", createdAt: 1, title: "t", tid: 21, tag: "x",
+        private: true, parts: [{ index: 0, spoolPath: otherSpool, filename: "f", stem: "s", title: "P1", bytes: 1, durationSec: 1, confirmed: false }],
+        updatedAt: 1,
+      }));
+      const stale = new Date(Date.now() - ORPHAN_SPOOL_GRACE_MS - 60_000);
+      utimesSync(otherSpool, stale, stale);
+      const keep = spoolPathsToKeep(JSON.parse(readFileSync(other, "utf-8")));
+      expect(sweepOrphanSpools({ spoolDir: dir, knownSpoolPaths: keep })).toEqual([]);
+      expect(existsSync(otherSpool)).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });
