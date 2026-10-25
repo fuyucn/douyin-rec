@@ -313,6 +313,8 @@ export interface RollingUploaderOpts {
  *   - 建稿 BV 经 {@link bv} 暴露,供调用方回传 master(可选)。
  */
 export class RollingUploader {
+  /** Season calls are best-effort and must not delay the next part upload. */
+  private seasonTail: Promise<void> = Promise.resolve();
   private readonly o: RollingUploaderOpts;
   private readonly log: (m: string) => void;
   private readonly gate: UploadGate;
@@ -444,6 +446,13 @@ export class RollingUploader {
       updatedAt: this.now(),
     };
     if (!this.persist()) this.log("[rolling] season 状态落盘失败,保留 pending,下次运行会重试");
+  }
+
+  private queueSeason(bv: string): void {
+    if (!this.o.uploadMeta.seasonSectionId) return;
+    this.seasonTail = this.seasonTail
+      .then(() => this.associateSeason(bv))
+      .catch(() => undefined);
   }
 
   /**
@@ -595,9 +604,9 @@ export class RollingUploader {
       return { uploaded: [], deleted: [], ambiguous: [...ambiguous] };
     }
     // A crash after the BV was saved but before the season call completed leaves "pending".
-    // Reconcile it once per flush; the add is idempotent and never blocks an upload.
+    // Queue it off the part-upload path; the add is idempotent and the flush only waits at the end.
     if (this.state.bv && (this.state.seasonState === "pending" || this.state.seasonState === undefined)) {
-      await this.associateSeason(this.state.bv);
+      this.queueSeason(this.state.bv);
     }
 
     const uploaded: number[] = [];
@@ -637,6 +646,7 @@ export class RollingUploader {
         break;
       }
     }
+    await this.seasonTail;
     return { uploaded, deleted, ambiguous: [...ambiguous] };
   }
 
@@ -709,7 +719,7 @@ export class RollingUploader {
         };
         if (!this.persist()) throw new Error("sidecar 写失败(继承前序稿件),中止上传并保留源");
         this.log(`[rolling] 同一场断流重连:续用前序会话 ${link.from} 的稿件(已有 ${link.parts} 个分P),本会话段改为 append`);
-        await this.associateSeason(link.bv);
+        this.queueSeason(link.bv);
       }
     }
     if (!this.state.bv) {
@@ -745,7 +755,7 @@ export class RollingUploader {
       };
       if (!this.persist()) throw new Error(`sidecar 写失败(建稿结果 BV=${bv}),状态不可信,保留源`);
       this.log(`[rolling] 段 ${seg.index} 建稿 BV=${bv}`);
-      await this.associateSeason(bv);
+      this.queueSeason(bv);
       return;
     }
     const bv = this.state.bv;

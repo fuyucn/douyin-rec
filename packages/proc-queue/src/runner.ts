@@ -322,6 +322,7 @@ export class ProcRunner {
       setState: (patch) => {
         if (patch.step !== undefined) this.o.store.updateStep(job.jobId, patch.step);
         if (patch.bv !== undefined) this.o.store.setBv(job.jobId, patch.bv ?? "");
+        if (patch.seasonState !== undefined) this.o.store.setSeasonState(job.jobId, patch.seasonState);
         if (patch.childPid !== undefined) this.o.store.setChildPid(job.jobId, patch.childPid, patch.childPidStartedAt ?? null);
         if (patch.progress !== undefined) this.o.store.setProgress(job.jobId, patch.progress);
       },

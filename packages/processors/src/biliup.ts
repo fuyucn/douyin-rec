@@ -33,6 +33,11 @@ function persistedBv(job: ProcessJob): string | undefined {
   return typeof v === "string" && v ? v : undefined;
 }
 
+function persistedSeasonState(job: ProcessJob): "pending" | "done" | "failed" | undefined {
+  const s = (job as { seasonState?: unknown }).seasonState;
+  return s === "pending" || s === "done" || s === "failed" ? s : undefined;
+}
+
 function params(job: ProcessJob): BiliupParams {
   const p = job.params as Partial<BiliupParams>;
   const persisted = persistedBv(job);
@@ -267,13 +272,21 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   }
   const bv = st.bv;
   // Season association runs after the upload slot is released: it is a best-effort side effect and
-  // must not extend the node-wide slot hold. It is idempotent for a resumed row that already has a BV.
-  await addArchiveToSeasonIfConfigured({
-    cookiesPath: cookies,
-    sectionId: p.seasonSectionId,
-    bvid: bv,
-    note: (m) => ctx.log(m),
-  });
+  // must not extend the node-wide slot hold. Persist pending before the network call so a killed
+  // processor can resume without losing the intent.
+  const seasonState = persistedSeasonState(job);
+  if (p.seasonSectionId && seasonState !== "done" && seasonState !== "failed") {
+    try { ctx.setState?.({ seasonState: "pending" }); }
+    catch (e) { ctx.log(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+    const outcome = await addArchiveToSeasonIfConfigured({
+      cookiesPath: cookies,
+      sectionId: p.seasonSectionId,
+      bvid: bv,
+      note: (m) => ctx.log(m),
+    });
+    try { ctx.setState?.({ seasonState: outcome.status === "failed" ? "failed" : "done" }); }
+    catch (e) { ctx.log(`season terminal checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+  }
   const countParts = countPartsOf(deps);
   // params.bv: the draft exists and every input is a part still to append.
   // Row bv only (a resumed attempt of this job): inputs[0] is P1 and some later parts may already be on

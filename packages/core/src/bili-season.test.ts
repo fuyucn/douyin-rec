@@ -130,6 +130,26 @@ describe("addArchiveToSeason", () => {
     expect(posts).toBe(1);
   });
 
+  it("does not retry a non-JSON HTTP 4xx rejection", async () => {
+    let posts = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("/x/vupre/web/archive/view")) {
+        return json({ code: 0, data: { archive: { aid: 456, title: "replay" }, videos: [{ cid: 789 }] } });
+      }
+      if (u.includes("/season/section/episodes/add")) {
+        posts++;
+        return new Response("forbidden", { status: 403, headers: { "Content-Type": "text/html" } });
+      }
+      if (u.includes("/season/section?id=123")) return json({ code: 0, data: { episodes: [] } });
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl });
+    expect(r.status).toBe("failed");
+    expect(posts).toBe(1);
+  });
+
   it("does not re-POST when a lost response cannot be reconciled against the section", async () => {
     let posts = 0;
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {

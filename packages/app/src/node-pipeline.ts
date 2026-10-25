@@ -841,7 +841,7 @@ export async function runNodeSidePipeline(
       // 收尾 / 抛错时才写,执行体被 ssh 超时 / SIGKILL 杀掉就丢 BV → 「B站已有稿件、台账无任何 BV」;
       // 此后被杀,回读 `intentPart > confirmedParts` = 这次追加结果未知,其余已确认。
       intentPart = i + 1;
-      writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "gate_wait", bv, products, confirmedParts, intentPart }, log);
+      writeNodeResult(stageSub, { phase: "uploading", ok: false, step: "gate_wait", bv, products, confirmedParts, intentPart, seasonState }, log);
       // 单文件 append → 安全重试(601 冷却后重试;其余错误只要「结果不确定」就不重试)。
       await withGate(uploadGate, accountKey, () =>
         withRetry(

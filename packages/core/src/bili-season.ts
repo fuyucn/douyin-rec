@@ -62,12 +62,12 @@ async function requestJson(
   url: string,
   init: RequestInit,
   timeoutMs: number,
-): Promise<{ raw: Record<string, unknown>; ok: boolean; error?: string }> {
+): Promise<{ raw: Record<string, unknown>; ok: boolean; status?: number; error?: string }> {
   try {
     const res = await doFetch(url, { ...init, signal: timeoutSignal(timeoutMs) });
     const raw = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok) return { raw, ok: false, error: `HTTP ${res.status}` };
-    return { raw, ok: true };
+    if (!res.ok) return { raw, ok: false, status: res.status, error: `HTTP ${res.status}` };
+    return { raw, ok: true, status: res.status };
   } catch (e) {
     return { raw: {}, ok: false, error: String((e as Error)?.message ?? e).slice(0, 200) };
   }
@@ -217,7 +217,8 @@ export async function addArchiveToSeason(o: SeasonTarget): Promise<SeasonAddOutc
     if (checkBudget === null) return { status: "failed", sectionId, error: "加入合集超时(总预算耗尽)" };
     const inSection = await sectionContainsAid(doFetch, cookie, sectionId, view.aid, checkBudget);
     if (inSection === true) return { status: "already", sectionId, aid: view.aid };
-    const definiteRejection = r.raw.code !== undefined && r.raw.code !== 0;
+    const definiteRejection = (r.status !== undefined && r.status >= 400 && r.status < 500)
+      || (r.raw.code !== undefined && r.raw.code !== 0);
     if (definiteRejection) {
       // A definite API rejection will not become success by retrying.
       break;

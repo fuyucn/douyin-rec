@@ -58,12 +58,21 @@ describe("biliup processor (plan 038 T08)", () => {
     try {
       const run = vi.fn(async (argv: string[]) => argv[2] === "upload" ? "BV1aaaaaaaaa" : "ok"); // issue-guard: allow (fake BV fixture)
       const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]" } });
-      await p.run(job(files(1), { cookies: login, seasonSectionId: 123 }), ctx());
+      const c1 = ctx();
+      await p.run(job(files(1), { cookies: login, seasonSectionId: 123 }), c1);
       expect(calls).toHaveLength(1);
+      const setState = (c1 as unknown as { setState: ReturnType<typeof vi.fn> }).setState;
+      expect(setState).toHaveBeenCalledWith({ seasonState: "pending" });
+      expect(setState).toHaveBeenCalledWith({ seasonState: "done" });
 
       const resumed = vi.fn(async () => "ok");
       const p2 = makeBiliupProcessor({ run: resumed });
       await p2.run(job(files(1), { cookies: login, bv: "BV1bbbbbbbbb", seasonSectionId: 123 }), ctx()); // issue-guard: allow (fake BV fixture)
+      expect(calls).toHaveLength(2);
+
+      const done = job(files(1), { cookies: login, bv: "BV1bbbbbbbbb", seasonSectionId: 123 }) as Record<string, unknown>; // issue-guard: allow (fake BV fixture)
+      done.seasonState = "done";
+      await p2.run(done as never, ctx());
       expect(calls).toHaveLength(2);
     } finally {
       vi.unstubAllGlobals();
