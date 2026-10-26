@@ -776,14 +776,44 @@ table.tasks tbody tr:last-child td {
   color: var(--ink);
   background: var(--surface);
 }
+.topbar-advanced {
+  position: relative;
+}
+.topbar-advanced > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.topbar-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+.topbar-advanced-trigger {
+  gap: 4px;
+}
+.topbar-advanced-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  min-width: 148px;
+  padding: 5px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--raised);
+  box-shadow: 0 12px 32px color-mix(in srgb, black 18%, transparent);
+}
+.topbar-advanced-menu .topbar-link {
+  width: 100%;
+  justify-content: flex-start;
+}
 /* Phone: the 56px rail cannot fit CJK page labels next to the brand.
    Keep them visible as a second row instead of `hidden sm:flex`. */
 .topbar-mobile-nav {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
   padding: 0 16px 10px;
-  overflow-x: auto;
+  overflow: visible;
   scrollbar-width: none;
 }
 .topbar-mobile-nav::-webkit-scrollbar {

@@ -9,6 +9,7 @@ import { TopNav } from "./layout/TopNav";
 import { useRefreshCookie } from "./lib/hooks";
 import { useEventNotifications } from "./lib/notifications";
 import { HubPage } from "./pages/HubPage";
+import { HomePage } from "./pages/HomePage";
 import { RoomPage } from "./pages/RoomPage";
 import { RoomsPage } from "./pages/RoomsPage";
 import { QueuePage } from "./pages/QueuePage";
@@ -35,7 +36,8 @@ export function App(): ReactNode {
       <TopNav />
       <main className="flex-1 w-full min-w-0 max-w-[1200px] mx-auto px-4 sm:px-6 py-8 sm:py-10">
         <Routes>
-          <Route path="/" element={<TaskList />} />
+          <Route path="/" element={<HomePage />} />
+          <Route path="/tasks" element={<TaskList />} />
           <Route path="/task/:id" element={<TaskDetail />} />
           <Route path="/queue" element={<QueuePage />} />
           <Route path="/hub" element={<HubPage />} />
@@ -43,7 +45,7 @@ export function App(): ReactNode {
           <Route path="/rooms" element={<RoomsPage />} />
           <Route path="/rooms/:key" element={<RoomPage />} />
           <Route path="/hub/:key" element={<HubPage />} />
-          <Route path="*" element={<TaskList />} />
+          <Route path="*" element={<HomePage />} />
         </Routes>
       </main>
       <Footer />

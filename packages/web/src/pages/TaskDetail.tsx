@@ -71,7 +71,7 @@ export function TaskDetail(): ReactNode {
     try {
       await api.deleteTask(taskId);
       toast(t("tasks.deleted", { id: taskId }), "info");
-      navigate("/");
+      navigate("/tasks");
     } catch (e) {
       toast(t("tasks.deleteFailed", { msg: errMessage(e) }), "error");
     }
@@ -86,7 +86,7 @@ export function TaskDetail(): ReactNode {
   return (
     <>
       <Link
-        to="/"
+        to="/tasks"
         onClick={(e) => { if (cameFromApp) { e.preventDefault(); navigate(-1); } }}
         className="inline-flex items-center gap-1.5 text-sm text-muted hover:text-ink transition-colors mb-5"
       >
