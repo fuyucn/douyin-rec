@@ -87,6 +87,14 @@ export function roomId(room: string): string {
   return q >= 0 ? r.slice(0, q) : r;
 }
 
+/**
+ * Compact room identifier for list cells. Prefer the server-normalized slug:
+ * non-Douyin URLs otherwise make the name/room column wrap or truncate hard.
+ */
+export function roomDisplayId(room: { room: string; roomSlug?: string | null }): string {
+  return room.roomSlug?.trim() || roomId(room.room);
+}
+
 /** 房间可点击链接(详情页「打开直播间」用):规范 https URL。 */
 export function roomHref(room: string): string {
   if (/^https?:\/\//.test(room)) return room; // 已是 URL(入库已归一化、剥 query)

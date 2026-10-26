@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-20
+> 最后更新：2026-10-26
 
 ## 状态约定
 
@@ -14,6 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-112 Rooms 列表「名称 / 房间」列压缩为平台徽标 + 房间 slug（issue [#366](https://github.com/fuyucn/douyin-rec/issues/366)）**（2026-10-26）
+  — 用户直接指派的前端微调。长 Bilibili/快手 URL 与交付方式拼在同一副标题里,把该列撑得难读。
+  **做什么**:优先取服务端归一化 `roomSlug`(缺失才回落 `roomId(room)`),桌面与窄屏统一为「平台徽标 + 房间标识」;交付方式/公开状态移到行 tooltip,名称列只保留身份信息。新增 `roomDisplayId` 纯函数与用例。
+  **验收**:`pnpm typecheck`、`packages/web` 的 `pnpm build`、`pnpm bundle`(0.0.229)、新用例通过;全量 `pnpm test` 全绿。
+
 - [~] **T-113 投稿成功后自动加入 B 站合集小节（issue [#364](https://github.com/fuyucn/douyin-rec/issues/364)）**
   — 2026-10-25 认领,分支 `codex/issue-364-season-section-id`,base `feat/hub-optimization`（**未合并 / 未部署**;动上传路径,RISK,用户已明确要求实现）。
   **做什么**：新增可选 `seasonSectionId`;投稿成功后调用创作中心 `episodes/add`;取 cid 走 UP 主视角接口;只在 P1 建稿后调用;失败只告警。

@@ -15,7 +15,7 @@ import { HubStreamBanner } from "../components/HubStreamBanner";
 import { AddRoomDialog } from "../modals/AddRoomDialog";
 import { useTicker } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { roomId, scheduleText } from "../lib/labels";
+import { roomDisplayId, scheduleText } from "../lib/labels";
 import { sortByStatus, type RoomStatusKind } from "../lib/room-status";
 import { DeliveryCell, deliverText, nodesText, roomName, RoomBadge, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
 
@@ -132,14 +132,24 @@ export function RoomsPage(): ReactNode {
               {loaded && shown.map((r) => (
                 <tr key={r.key}>
                   <td>
-                    <Link to={`/rooms/${encodeURIComponent(r.key)}`} className="group block min-w-0">
+                    <Link
+                      to={`/rooms/${encodeURIComponent(r.key)}`}
+                      className="group block min-w-0"
+                      title={[
+                        r.room,
+                        r.processing ? deliverText(t, r) : null,
+                        r.processing?.pipeline?.upload?.private === false ? t("room.publicShort") : null,
+                      ].filter(Boolean).join(" · ")}
+                    >
                       <div className="flex items-center gap-2 min-w-0">
                         <span className="font-medium text-ink truncate group-hover:underline">{roomName(r)}</span>
                         {actions.managedOf(r) && <span className="badge badge-muted shrink-0">{t("tasks.managed")}</span>}
                       </div>
-                      <div className="font-mono text-xs text-muted mt-0.5 truncate" title={r.room}>
-                        {roomId(r.room)} · {r.platform} · {deliverText(t, r)}
-                        {r.processing?.pipeline?.upload?.private === false && ` · ${t("room.publicShort")}`}
+                      <div className="mt-1 flex items-center gap-1.5 min-w-0">
+                        <span className="badge badge-muted shrink-0 !h-[18px] !px-1.5 !text-[10px] uppercase">
+                          {r.platform}
+                        </span>
+                        <span className="font-mono text-xs text-muted truncate">{roomDisplayId(r)}</span>
                       </div>
                     </Link>
                   </td>
@@ -235,9 +245,14 @@ function RoomCompactRow({ room, data, actions, now }: {
   return (
     <div className="task-compact px-4 py-3.5">
       <div className="flex items-start justify-between gap-3">
-        <Link to={`/rooms/${encodeURIComponent(room.key)}`} className="min-w-0 group">
+        <Link to={`/rooms/${encodeURIComponent(room.key)}`} className="min-w-0 group" title={room.room}>
           <div className="font-medium text-ink truncate group-hover:underline">{roomName(room)}</div>
-          <div className="font-mono text-xs text-muted mt-0.5 truncate">{roomId(room.room)} · {room.platform}</div>
+          <div className="mt-1 flex items-center gap-1.5 min-w-0">
+            <span className="badge badge-muted shrink-0 !h-[18px] !px-1.5 !text-[10px] uppercase">
+              {room.platform}
+            </span>
+            <span className="font-mono text-xs text-muted truncate">{roomDisplayId(room)}</span>
+          </div>
         </Link>
         <RoomActions room={room} data={data} actions={actions} />
       </div>

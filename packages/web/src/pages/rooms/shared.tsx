@@ -9,7 +9,7 @@ import { connOf } from "../../lib/conn";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useHubStream, usePolling, errMessage, useToast, type HubStreamHandle } from "../../lib/hooks";
 import { useT } from "../../lib/i18n";
-import { roomId, scheduleText } from "../../lib/labels";
+import { roomDisplayId, scheduleText } from "../../lib/labels";
 import { ageOf, lastDelivery, type Delivery } from "../../lib/last-delivery";
 import { lastRunHint, latestRunKey, roomStatus, type LatestRun, type RoomStatus } from "../../lib/room-status";
 import { PHASE_STYLE } from "../../lib/task-status";
@@ -83,7 +83,7 @@ export function useRoomsData(): RoomsData {
 
 /** Display name: task name > anchor name > room id. */
 export function roomName(r: RoomDTO): string {
-  return r.recording?.name || r.recording?.anchorName || roomId(r.room);
+  return r.recording?.name || r.recording?.anchorName || roomDisplayId(r);
 }
 
 export function nodesText(r: RoomDTO, workers: WorkerDTO[], all: string): string {
