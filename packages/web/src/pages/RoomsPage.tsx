@@ -3,7 +3,7 @@
  *
  * Same visual language as the tasks page (telemetry band, table shell, chips/badges, icon
  * actions) so the two screens read as one product; the telemetry band doubles as the filter.
- * Coexists with the Tasks and Hub pages (untouched); data comes from the same APIs.
+ * Legacy Tasks/Hub routes remain available during rollout; Rooms is the master's primary UI.
  */
 import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";

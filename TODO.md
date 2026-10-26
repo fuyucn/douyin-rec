@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-118 master 导航撤下 Tasks/Hub，保留旧路由兼容（issue [#374](https://github.com/fuyucn/douyin-rec/issues/374)）**（2026-10-26）
+  — 分阶段退役旧页的第一步。Rooms 已覆盖录制、日志、合成、节点管理、workflow 与重跑，master 无需再把 Tasks/Hub 暴露为日常入口。
+  **做什么**: master 的 Advanced 菜单只保留 Queue；Tasks/Hub 旧路由继续可访问；worker 仍以 Tasks 为首页并保留 Tasks 导航。
+  **为什么**: 先撤导航验证实际使用无缺口，再决定重定向与删组件，避免一次性移除造成回退困难。
+  **验收**: master/worker 导航分组正确；旧路由直达仍可用；导航测试、类型、Web 构建、i18n、全量测试与 bundle 通过；桌面/手机无溢出。
+
 - [~] **T-117 Rooms 首页化并把 Tasks/Hub/Queue 收进高级导航（issue [#372](https://github.com/fuyucn/douyin-rec/issues/372)）**（2026-10-26）
   — `plans/037` 的首页切换步骤。Rooms 已具备统一管理能力，但 `/` 仍指向 Tasks，旧入口继续平铺。
   **做什么**: master 的 `/` 显示 Rooms，主导航只保留 Rooms，Tasks/Hub/Queue 收进可展开的高级入口；worker 仍以 Tasks 为首页；旧路由全部保留。

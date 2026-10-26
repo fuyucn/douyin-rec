@@ -37,11 +37,12 @@ export function App(): ReactNode {
       <main className="flex-1 w-full min-w-0 max-w-[1200px] mx-auto px-4 sm:px-6 py-8 sm:py-10">
         <Routes>
           <Route path="/" element={<HomePage />} />
+          {/* Legacy master routes stay addressable while Rooms becomes the primary workflow. */}
           <Route path="/tasks" element={<TaskList />} />
           <Route path="/task/:id" element={<TaskDetail />} />
           <Route path="/queue" element={<QueuePage />} />
           <Route path="/hub" element={<HubPage />} />
-          {/* T20 第1步:统一房间页(并存版)。**刻意不进主导航** —— 先用起来,确认好用再谈退役旧页。 */}
+          {/* Rooms is the master home; old pages remain as compatibility routes during rollout. */}
           <Route path="/rooms" element={<RoomsPage />} />
           <Route path="/rooms/:key" element={<RoomPage />} />
           <Route path="/hub/:key" element={<HubPage />} />

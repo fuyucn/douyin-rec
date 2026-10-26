@@ -2,7 +2,7 @@
 
 export interface NavItem {
   to: string;
-  /** i18n key; "Hub" is a literal label. */
+  /** i18n key. */
   labelKey: string;
   end?: boolean;
 }
@@ -19,9 +19,10 @@ export function homeTarget(hubEnabled: boolean | null): "/rooms" | "/tasks" | nu
 }
 
 /**
- * Rooms / Hub / Queue need master-only endpoints (`/api/hub/*`, incl. the hub change stream that
- * answers 503 on a worker), so they only show when hub is enabled. Order on master: rooms first
- * (one-stop entry: list → detail → edit), then tasks, Hub (configure) and queue (observe).
+ * Rooms / Queue need master-only endpoints (`/api/hub/*`, incl. the hub change stream that
+ * answers 503 on a worker), so they only show when hub is enabled. Tasks and Hub remain available
+ * as legacy routes, but master navigation now uses Rooms as the one-stop entry; Queue is the only
+ * remaining advanced view.
  */
 export function navSections(hubEnabled: boolean): NavSections {
   if (!hubEnabled) {
@@ -32,10 +33,6 @@ export function navSections(hubEnabled: boolean): NavSections {
   }
   return {
     primary: [{ to: "/rooms", labelKey: "nav.rooms" }],
-    advanced: [
-      { to: "/tasks", labelKey: "nav.tasksList", end: true },
-      { to: "/hub", labelKey: "Hub" },
-      { to: "/queue", labelKey: "nav.queue", end: true },
-    ],
+    advanced: [{ to: "/queue", labelKey: "nav.queue", end: true }],
   };
 }
