@@ -1,7 +1,7 @@
 import { useAtomValue } from "jotai";
-import { useState, type ReactNode } from "react";
-import { Link, NavLink } from "react-router-dom";
-import { Settings } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Link, NavLink, useLocation } from "react-router-dom";
+import { ChevronDown, Settings } from "lucide-react";
 import { cookieStatusAtom, hubEnabledAtom } from "../atoms";
 import { RecordGlyph } from "../components/Brand";
 import { ThemeToggle } from "../components/ThemeToggle";
@@ -9,25 +9,62 @@ import { CookieDialog } from "../modals/CookieDialog";
 import { QrLoginDialog } from "../modals/QrLoginDialog";
 import { SettingsDialog } from "../modals/SettingsDialog";
 import { useT } from "../lib/i18n";
-import { navItems } from "../lib/nav";
+import { navSections } from "../lib/nav";
 
 /** 页面入口。桌面放进顶栏;手机一行放不下中文标签,改到第二行,避免被 hidden 掉。 */
 function PageLinks({ className }: { className: string }): ReactNode {
   const t = useT();
   const hubEnabled = useAtomValue(hubEnabledAtom);
-  const items = navItems(hubEnabled === true).map((i) => ({ ...i, label: i.labelKey === "Hub" ? "Hub" : t(i.labelKey) }));
+  const location = useLocation();
+  const details = useRef<HTMLDetailsElement>(null);
+  const sections = navSections(hubEnabled === true);
+  const label = (key: string): string => key === "Hub" ? "Hub" : t(key);
+  const matches = (item: (typeof sections.primary)[number]): boolean =>
+    location.pathname === item.to
+    || (!item.end && location.pathname.startsWith(`${item.to}/`))
+    || (item.to === "/tasks" && location.pathname.startsWith("/task/"));
+  const advancedActive = sections.advanced.some(matches);
+  useEffect(() => {
+    const closeOutside = (event: PointerEvent): void => {
+      if (details.current?.open && !details.current.contains(event.target as Node)) details.current.open = false;
+    };
+    const closeEscape = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || !details.current?.open) return;
+      details.current.open = false;
+      details.current.querySelector("summary")?.focus();
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeEscape);
+    };
+  }, []);
+  const link = (item: (typeof sections.primary)[number]): ReactNode => (
+    <NavLink
+      key={item.to}
+      to={item.to}
+      end={item.end}
+      onClick={() => { if (details.current) details.current.open = false; }}
+      className={({ isActive }) => `topbar-link shrink-0 ${isActive ? "topbar-link-active" : ""}`}
+    >
+      {label(item.labelKey)}
+    </NavLink>
+  );
   return (
     <nav className={className} aria-label={t("nav.title")}>
-      {items.map((item) => (
-        <NavLink
-          key={item.to}
-          to={item.to}
-          end={item.end}
-          className={({ isActive }) => `topbar-link shrink-0 ${isActive ? "topbar-link-active" : ""}`}
-        >
-          {item.label}
-        </NavLink>
-      ))}
+      {sections.primary.map(link)}
+      {sections.advanced.length > 0 && (
+        <details ref={details} className="topbar-advanced">
+          <summary className={`topbar-link topbar-advanced-trigger shrink-0${advancedActive ? " topbar-link-active" : ""}`}>
+            {t("nav.advanced")}
+            <ChevronDown className="w-3 h-3" />
+          </summary>
+          <div className="topbar-advanced-menu">
+            {sections.advanced.map(link)}
+          </div>
+        </details>
+      )}
     </nav>
   );
 }

@@ -7,17 +7,35 @@ export interface NavItem {
   end?: boolean;
 }
 
+export interface NavSections {
+  primary: NavItem[];
+  advanced: NavItem[];
+}
+
+/** null = hub capability still loading; master redirects to Rooms; worker renders Tasks in place. */
+export function homeTarget(hubEnabled: boolean | null): "/rooms" | "/tasks" | null {
+  if (hubEnabled === null) return null;
+  return hubEnabled ? "/rooms" : "/tasks";
+}
+
 /**
  * Rooms / Hub / Queue need master-only endpoints (`/api/hub/*`, incl. the hub change stream that
  * answers 503 on a worker), so they only show when hub is enabled. Order on master: rooms first
  * (one-stop entry: list → detail → edit), then tasks, Hub (configure) and queue (observe).
  */
-export function navItems(hubEnabled: boolean): NavItem[] {
-  if (!hubEnabled) return [{ to: "/", labelKey: "nav.tasksList", end: true }];
-  return [
-    { to: "/rooms", labelKey: "nav.rooms" },
-    { to: "/", labelKey: "nav.tasksList", end: true },
-    { to: "/hub", labelKey: "Hub" },
-    { to: "/queue", labelKey: "nav.queue" },
-  ];
+export function navSections(hubEnabled: boolean): NavSections {
+  if (!hubEnabled) {
+    return {
+      primary: [{ to: "/", labelKey: "nav.tasksList", end: true }],
+      advanced: [],
+    };
+  }
+  return {
+    primary: [{ to: "/rooms", labelKey: "nav.rooms" }],
+    advanced: [
+      { to: "/tasks", labelKey: "nav.tasksList", end: true },
+      { to: "/hub", labelKey: "Hub" },
+      { to: "/queue", labelKey: "nav.queue", end: true },
+    ],
+  };
 }
