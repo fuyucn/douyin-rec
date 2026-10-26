@@ -280,7 +280,8 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
     let checkpointReady = seasonState === "pending";
     if (!checkpointReady) {
       try {
-        ctx.setState?.({ seasonState: "pending" });
+        if (!ctx.setState) throw new Error("process context has no checkpoint writer");
+        ctx.setState({ seasonState: "pending" });
         checkpointReady = true;
       } catch (e) {
         ctx.log(`season pending checkpoint not saved; skipping association: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
@@ -310,7 +311,9 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   if (persistedBv(job) && !(job.params as { bv?: unknown }).bv) {
     const onServer = countParts ? await countParts(bv, cookies).catch(() => null) : null;
     if (onServer == null || onServer < 1 || onServer > files.length) {
-      throw new Error(`${APPEND_AMBIGUOUS_MARKER} resumed upload of ${bv} cannot confirm how many parts are already on the archive (count=${onServer ?? "unknown"}); needs manual verification`);
+      const err = new Error(`${APPEND_AMBIGUOUS_MARKER} resumed upload of ${bv} cannot confirm how many parts are already on the archive (count=${onServer ?? "unknown"}); needs manual verification`);
+      await seasonTail;
+      throw err;
     }
     appendFrom = onServer;
   }

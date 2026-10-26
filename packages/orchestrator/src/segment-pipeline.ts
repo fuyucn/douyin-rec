@@ -580,22 +580,16 @@ export async function runSegmentPipeline(o: {
     if (cfg.uploadMeta.seasonSectionId) {
       try { ledger.setSeasonState(streamKey, "pending"); }
       catch (e) { jlog(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
-      if (ledger.get(streamKey)?.seasonState !== "pending") {
+      if (ledger.get(streamKey)?.seasonState === "pending") {
+        startSeason(false);
+      } else {
         jlog(`season pending checkpoint not saved: skip association`);
-        return { state: "done", bv };
       }
-      startSeason(false);
     }
   } else {
     bv = ledger.get(streamKey)?.bv ?? "";
     jlog(`建稿 P1 已存在,跳过(bv=${bv})`);
     if (cfg.uploadMeta.seasonSectionId && bv && ledger.get(streamKey)?.seasonState === "pending") {
-      try { ledger.setSeasonState(streamKey, "pending"); }
-      catch (e) { jlog(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
-      if (ledger.get(streamKey)?.seasonState !== "pending") {
-        jlog(`season pending checkpoint not saved: skip association`);
-        return { state: "done", bv };
-      }
       startSeason(true);
     }
   }
@@ -793,8 +787,6 @@ async function resumeSegmentAppends(
   // call ran. Start it before appends; the append loop does not wait for this bounded HTTP call.
   let seasonTail: Promise<void> = Promise.resolve();
   if (cfg.uploadMeta.seasonSectionId && ledger.get(streamKey)?.seasonState === "pending") {
-    try { ledger.setSeasonState(streamKey, "pending"); }
-    catch (e) { jlog(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
     seasonTail = associateSegmentSeason(ledger, cfg, streamKey, jlog, true)
       .catch((e) => jlog(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`));
   }

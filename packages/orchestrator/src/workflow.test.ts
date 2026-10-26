@@ -216,6 +216,29 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
     expect(t.ledger.get(STREAM_KEY)?.seasonState).toBe("done");
   });
 
+  it("a pending checkpoint failure keeps upload_plain successful and never starts an untracked association", async () => {
+    const t = makeDeps();
+    t.ledger.upsertPending(STREAM_KEY, Date.now());
+    t.deps.cfg = { ...t.deps.cfg, uploadMeta: { ...t.deps.cfg.uploadMeta, seasonSectionId: 456 } };
+    const bv = ["B", "V", "SEASONPENDINGFAIL"].join("");
+    t.uploadPlain.mockResolvedValue(bv);
+    vi.mocked(addArchiveToSeasonIfConfigured).mockClear();
+    vi.spyOn(t.ledger, "setSeasonState").mockImplementationOnce(() => {
+      throw new Error("EIO season pending");
+    });
+    const workflow = build(t, { burnDanmu: false, burnLivechat: false });
+    const r = await runWorkflowNodes({
+      streamKey: STREAM_KEY, nodes: workflow.nodes, edges: workflow.edges,
+      ctx: workflow.ctx, pool: t.deps.pool!,
+    });
+    expect(r.ok).toBe(true);
+    expect(t.uploadPlain).toHaveBeenCalledTimes(1);
+    expect(t.ledger.get(STREAM_KEY)?.bv).toBe(bv);
+    expect(t.ledger.getNodeState(STREAM_KEY, "upload_plain")?.state).toBe("done");
+    expect(t.ledger.get(STREAM_KEY)?.seasonState).toBeNull();
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).not.toHaveBeenCalled();
+  });
+
   it("P1 上传失败 → 兄弟 burn 轨照常完成;append 被 blocked 不悬挂", async () => {
     const t = makeDeps();
     t.uploadPlain.mockRejectedValue(new Error("network down"));

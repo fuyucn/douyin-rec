@@ -244,9 +244,6 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         if (cfg.uploadMeta.seasonSectionId) {
           try { ledger.setSeasonState(streamKey, "pending"); }
           catch (e) { c.log(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
-          // If the pending marker could not be persisted, do not start the association: resume would
-          // use reconcileFirst=false and post again, so the intent must be durable first.
-          if (ledger.get(streamKey)?.seasonState !== "pending") return;
         }
         // 分P核验基线(T11):P1 = plain 组第 0 段。合并路径此前**完全不写** sync_parts →
         // 期望段数恒 0、核验恒跳过(等于没核验),而分段路径有 —— 两条路径基线口径必须一致。
@@ -1023,8 +1020,8 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
       }
     }
   }
-  if (abortErr) throw abortErr;
   await seasonTail;
+  if (abortErr) throw abortErr;
   // 最后一轮 failed 父节点可能没来得及算到兄弟轨末尾节点 → 补算,保证返回结果完整(ledger 已 persist)。
   for (const node of nodes) compute(node.key);
 
@@ -1058,8 +1055,6 @@ export async function associateSeasonForJob(
   const pendingNow = row?.seasonState === "pending";
   if (!cfg.uploadMeta.seasonSectionId || !bv || row?.seasonState === "done" || row?.seasonState === "failed") return;
   if (!pendingNow) return;
-  try { ledger.setSeasonState(streamKey, "pending"); }
-  catch (e) { log(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
   const reconcileFirst = opts.reconcileFirst ?? true;
   const season = await addArchiveToSeasonIfConfigured({
     cookiesPath: cfg.cookies,
