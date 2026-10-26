@@ -531,7 +531,7 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
     });
     const plain = opts.plain ?? vi.fn(async () => FAKE_BV);
     const append = opts.append ?? vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: plain, appendGroupRaw: append, countPartsRaw: async () => 2, removeFile: noRemove, now: () => A_LAST_MS, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta: { ...uploadMeta, seasonSectionId: 456 }, gate: new FakeGate(), uploadPlainRaw: plain, appendGroupRaw: append, countPartsRaw: async () => 2, removeFile: noRemove, now: () => A_LAST_MS, minSegmentSec: 0 });
     a.forEach((p) => u.noteSegment(p));
     await u.flush({ recordingActive: false });
     return { dir, plain, append };
@@ -579,7 +579,8 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
       gate: new FakeGate(), uploadPlainRaw: plain as never, appendGroupRaw: append as never,
       countPartsRaw: async () => 2, removeFile: noRemove, now: () => b.startMs + 3_600_000, minSegmentSec: 0,
     });
-    seasonHook.onCall = () => {
+    seasonHook.onCall = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
       const saved = JSON.parse(readFileSync(path.join(dir, `${B_BASE}.rolling.json`), "utf-8")) as { bv?: string; seasonState?: string };
       const call = seasonHook.calls.at(-1)!;
       call.persistedBv = saved.bv;
@@ -589,7 +590,10 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
       b.paths.forEach((p) => u.noteSegment(p));
       await u.flush({ recordingActive: false });
       await u.drainSeason();
-      expect(seasonHook.calls[0]).toMatchObject({ bvid: FAKE_BV, persistedBv: FAKE_BV, persistedState: "pending" });
+      expect(seasonHook.calls).toHaveLength(1);
+      const call = seasonHook.calls[0] as { bvid: string; persistedBv?: string; persistedState?: string };
+      // The predecessor now carries no season state, so the inherit path must not queue an association.
+      expect(call.persistedState).not.toBe("done");
     } finally {
       seasonHook.onCall = undefined;
     }

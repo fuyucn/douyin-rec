@@ -140,7 +140,7 @@ interface RollingState {
 /** Outcome of looking for a predecessor session whose submission this session should continue. */
 type PredecessorLink =
   | { kind: "none" }
-  | { kind: "inherit"; bv: string; parts: number; from: string }
+  | { kind: "inherit"; bv: string; parts: number; from: string; seasonState?: "pending" | "done" | "failed" }
   | { kind: "uncertain"; reason: string };
 
 /** sidecar schema 版本(WAL 字段演进;老文件无此字段 = v1,读时兼容)。 */
@@ -735,13 +735,17 @@ export class RollingUploader {
       if (link.kind === "inherit") {
         // Same broadcast (gap <= SAME_BROADCAST_GAP_MS): continue the predecessor's submission.
         this.state = {
-          ...this.state, bv: link.bv, inheritedParts: link.parts, inheritedFrom: link.from,
-          ...(this.o.uploadMeta.seasonSectionId ? { seasonState: "pending" as const } : {}),
+      ...this.state, bv: link.bv, inheritedParts: link.parts, inheritedFrom: link.from,
+      ...(this.o.uploadMeta.seasonSectionId && link.seasonState === "pending"
+        ? { seasonState: "pending" as const }
+        : {}),
           updatedAt: this.now(),
         };
         if (!this.persist()) throw new Error("sidecar 写失败(继承前序稿件),中止上传并保留源");
         this.log(`[rolling] 同一场断流重连:续用前序会话 ${link.from} 的稿件(已有 ${link.parts} 个分P),本会话段改为 append`);
-        this.queueSeason(link.bv, true);
+        if (this.o.uploadMeta.seasonSectionId && link.seasonState === "pending") {
+          this.queueSeason(link.bv, true);
+        }
       }
     }
     if (!this.state.bv) {
@@ -884,7 +888,7 @@ export class RollingUploader {
     if (!s.bv) return { kind: "uncertain", reason: `${prev.base} 无稿件号` };
     const inherited = s.inheritedParts ?? 0;
     if (!Number.isInteger(inherited) || inherited < 0) return { kind: "uncertain", reason: `${prev.base} 继承分P数非法` };
-    return { kind: "inherit", bv: s.bv, parts: inherited + s.confirmed.length, from: prev.base };
+    return { kind: "inherit", bv: s.bv, parts: inherited + s.confirmed.length, from: prev.base, seasonState: s.seasonState };
   }
 
   /** Is the process that owned predecessor sidecar `s` possibly still running? Unknown owner → judged by file activity. */

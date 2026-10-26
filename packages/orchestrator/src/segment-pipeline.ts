@@ -580,6 +580,10 @@ export async function runSegmentPipeline(o: {
     if (cfg.uploadMeta.seasonSectionId) {
       try { ledger.setSeasonState(streamKey, "pending"); }
       catch (e) { jlog(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+      if (ledger.get(streamKey)?.seasonState !== "pending") {
+        jlog(`season pending checkpoint not saved: skip association`);
+        return { state: "done", bv };
+      }
       startSeason(false);
     }
   } else {
@@ -588,6 +592,10 @@ export async function runSegmentPipeline(o: {
     if (cfg.uploadMeta.seasonSectionId && bv && ledger.get(streamKey)?.seasonState === "pending") {
       try { ledger.setSeasonState(streamKey, "pending"); }
       catch (e) { jlog(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+      if (ledger.get(streamKey)?.seasonState !== "pending") {
+        jlog(`season pending checkpoint not saved: skip association`);
+        return { state: "done", bv };
+      }
       startSeason(true);
     }
   }

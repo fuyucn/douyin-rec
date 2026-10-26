@@ -305,18 +305,25 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
     }
     appendFrom = onServer;
   }
-  for (let i = appendFrom; i < files.length; i++) {
-    sup.setStep("gate_wait");
-    partAt(i);
-    try {
-      await slotted(() => appendGroup({ ...meta, bv, files: [files[i]!], run: sup.run, ...(countParts ? { countParts: () => countParts(bv, cookies) } : {}) }));
-    } catch (e) {
-      const msg = String((e as Error)?.message ?? e);
-      if (msg.includes(APPEND_AMBIGUOUS_MARKER)) throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${msg}`);
-      throw e;
+  let appendErr: unknown;
+  try {
+    for (let i = appendFrom; i < files.length; i++) {
+      sup.setStep("gate_wait");
+      partAt(i);
+      try {
+        await slotted(() => appendGroup({ ...meta, bv, files: [files[i]!], run: sup.run, ...(countParts ? { countParts: () => countParts(bv, cookies) } : {}) }));
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e);
+        if (msg.includes(APPEND_AMBIGUOUS_MARKER)) throw new Error(`${APPEND_AMBIGUOUS_MARKER} ${msg}`);
+        throw e;
+      }
     }
+  } catch (e) {
+    appendErr = e;
+  } finally {
+    await seasonTail;
   }
-  await seasonTail;
+  if (appendErr) throw appendErr;
   return { outputs: [], bv, note: `${basename(job.inputs[0] ?? "")} +${Math.max(0, files.length - 1)} parts` };
 }
 
