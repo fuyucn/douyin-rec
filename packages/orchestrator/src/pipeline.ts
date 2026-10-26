@@ -10,7 +10,7 @@ import { groupSessionsInDir } from "@drec/post-process";
 import { selectWinner } from "./select.js";
 import { retry } from "./retry.js";
 import { humanBytes, sumBytes } from "./format.js";
-import { buildWorkflow, deriveStageProducts, runWorkflowNodes, ResourcePool, type StageProducts, type WorkflowNodeKey } from "./workflow.js";
+import { associateSeasonForJob, buildWorkflow, deriveStageProducts, runWorkflowNodes, ResourcePool, type StageProducts, type WorkflowNodeKey } from "./workflow.js";
 import { deriveSegmentPlan, stageProductPaths, UPLOAD_ALIAS_DIR } from "./session-plan.js";
 import { runSegmentPipeline } from "./segment-pipeline.js";
 // 节点侧上传(experimental,plans/027):全部逻辑隔离在 node-side-upload.ts,便于快速开关/回退。
@@ -205,6 +205,7 @@ export interface PipelineCfg {
     titleTemplate?: string;
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
+    seasonSectionId?: number;
   };
   /** 渲染 {date}/{time} 回退用(sessionBase 解析不到时);缺省 Asia/Shanghai。 */
   timeZone?: string;
@@ -909,6 +910,7 @@ async function runPipelineInner(
   if (nodeStates.length > 0 && coreNodes.every((n) => nodeStates.find((r) => r.node === n)?.state === "done")) {
     const bv = ledger.get(streamKey)?.bv;
     jlog(`全部核心节点已 done,直接 markDone 收口`);
+    if (bv) await associateSeasonForJob(ledger, cfg, streamKey, jlog);
     ledger.markDone(streamKey, bv ?? "");
     return { state: "done", bv };
   }
@@ -1204,6 +1206,10 @@ async function runPipelineInner(
         .map((n) => n.node as WorkflowNodeKey),
     ),
   });
+  // Reconcile before the failure branch: upload_plain may have succeeded even when a sibling burn
+  // failed, and a resumed upload_plain does not execute its post-slot hook again.
+  const postWorkflowBv = cfg.uploadMode === "upload" ? ledger.get(streamKey)?.bv : undefined;
+  if (postWorkflowBv) await associateSeasonForJob(ledger, cfg, streamKey, jlog);
   if (!result.ok) {
     const errText = result.failed.length
       ? ledger.getNodeState(streamKey, result.failed[0])?.error ?? `节点失败: ${result.failed.join(",")}`
@@ -1300,6 +1306,19 @@ async function resumeAppends(
   const splitForUpload = deps.splitForUpload ?? defaultSplitForUpload;
   const { burnDanmu, burnLivechat } = burnFlags(cfg.steps);
   const isPublic = cfg.uploadPrivate === false;
+  // A kill after upload_plain persisted the BV but before its post-slot association leaves "pending".
+  // Run it as a tail so the append work below never waits on this bounded HTTP call.
+  const seasonTail = associateSeasonForJob(ledger, cfg, streamKey, jlog).catch((e) => {
+    jlog(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+  });
+  const drainSeason = async <T>(result: T): Promise<T> => {
+    await seasonTail;
+    return result;
+  };
+  const drainSeasonOnThrow = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try { return await fn(); }
+    catch (e) { await seasonTail; throw e; }
+  };
 
   // done 场的收尾补跑若在下面三处转人工:done 无出边,普通 setState 会被白名单拒绝 →
   // job 仍 done、告警照发、cleanupBackfillDue 周期性重复补跑刷告警。wasDone 时必须 force。
@@ -1311,12 +1330,12 @@ async function resumeAppends(
     // (那会让 UI 显示"待人工",而实际上稿件好好的)。走「只清理」收口。
     if (wasDone) {
       jlog(`续跑:job 已 done 且 stage 产物已清理 → 只补收尾清理(不重跑上传)`);
-      return await finalizeOnly(streamKey, bv, deps, jlog, notify, members, stageSub);
+      return await drainSeason(await finalizeOnly(streamKey, bv, deps, jlog, notify, members, stageSub));
     }
     jlog(`续跑失败:stage 产物缺失(可能已清理),转人工。`);
     ledger.setState(streamKey, "needs_manual", { error: `续跑失败:bv=${bv} 但 stage 产物缺失,请人工补 append` });
     notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });
-    return { state: "needs_manual", bv };
+    return await drainSeason({ state: "needs_manual", bv });
   }
   // 续跑前先修复失败的烧录节点:docker crash / 中断可能留下半成品(文件在但缺 moov),
   // 直接 append 会把坏文件传上去;烧录是本地产物,重烧不会重复投稿。
@@ -1345,7 +1364,7 @@ async function resumeAppends(
       jlog(`续跑重烧 ${br.step} 失败,转人工: ${err}`);
       ledger.setState(streamKey, "needs_manual", { error: err }, { force: wasDone });
       notify({ kind: "error", stage: "上传", message: `续跑重烧 ${br.step} 失败,请人工处理: ${err}` });
-      return { state: "needs_manual", bv };
+      return await drainSeason({ state: "needs_manual", bv });
     }
   }
   const need = [
@@ -1358,12 +1377,12 @@ async function resumeAppends(
     // 不能把 done 打成 needs_manual。成品只缺一部分(如有 plain 缺 danmu)= 真不一致,仍转人工。
     if (wasDone && ![prod.plain, prod.danmuMp4, prod.livechatMp4].some((f) => existsSync(f))) {
       jlog(`续跑:job 已 done 且 stage 分P产物已清理 → 只补收尾清理(不重跑上传)`);
-      return await finalizeOnly(streamKey, bv, deps, jlog, notify, members, stageSub);
+      return await drainSeason(await finalizeOnly(streamKey, bv, deps, jlog, notify, members, stageSub));
     }
     jlog(`续跑失败:stage 产物缺失(可能已清理),转人工。need=${JSON.stringify(need)}`);
     ledger.setState(streamKey, "needs_manual", { error: `续跑失败:bv=${bv} 但 stage 产物缺失,请人工补 append` }, { force: wasDone });
     notify({ kind: "error", stage: "上传", message: `续跑失败:${bv} 产物缺失,请人工处理(补 append 或删稿重来)` });
-    return { state: "needs_manual", bv };
+    return await drainSeason({ state: "needs_manual", bv });
   }
 
   const groups: Array<{ step: "append_danmu" | "append_livechat"; mp4: string; on: boolean }> = [
@@ -1380,7 +1399,7 @@ async function resumeAppends(
       jlog(`续跑无法安全处理多段组 ${g.step}(${files.length} 段,可能已 append 部分)→ 转人工`);
       ledger.setState(streamKey, "needs_manual", { error: `续跑遇多段组 ${g.step}(${files.length} 段),无法安全续传,请人工核对分 P` }, { force: wasDone });
       notify({ kind: "error", stage: "上传", message: `${bv} 续跑遇多段组 ${g.step},无法安全续传,请人工核对分 P` });
-      return { state: "needs_manual", bv };
+      return await drainSeason({ state: "needs_manual", bv });
     }
     jlog(`续跑 append 开始: ${g.step} (${files.length} 段)`);
     ledger.logStep(streamKey, g.step, "start");
@@ -1392,12 +1411,12 @@ async function resumeAppends(
       deps.pool
         ? deps.pool.withUpload(() => appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic }), streamKey)
         : appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic });
-    await retry(submit, {
+    await drainSeasonOnThrow(() => retry(submit, {
       tries,
       backoffMs: 60_000,
       sleep: deps.sleep,
       onRetry: (attempt, err) => jlog(`续跑 append ${g.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
-    });
+    }));
     // 续跑补的 append 同样要记 checkpoint(T11.8):否则核验基线只含首轮提交的组,
     // 续跑补上的分 P 不计入期望 → 假 mismatch。
     for (let i = 0; i < files.length; i++) {
@@ -1418,15 +1437,16 @@ async function resumeAppends(
       stagePulledSources: members.flatMap((m) => m.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f)))),
       rmStage: rmStageFn, log: jlog,
     });
-  const fin = await finalizeAfterUpload({
+  const fin = await drainSeasonOnThrow(() => finalizeAfterUpload({
     streamKey, bv, deps, log: jlog, notify, cleanupSources,
     on: { plain: true, danmu: burnDanmu, livechat: burnLivechat },
     commitDone: () => {
       ledger.markDone(streamKey, bv);
       notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
     },
-  });
-  if (fin.blocked) return { state: "needs_manual", bv };
+  }));
+  if (fin.blocked) return await drainSeason({ state: "needs_manual", bv });
+  await seasonTail;
 
   // 可选:done 后删 stage 产物(与主路径同一开关;续跑不删 slave 源)。
   if (cfg.cleanup?.stageAfterDone) {

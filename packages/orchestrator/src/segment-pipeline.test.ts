@@ -1,6 +1,11 @@
 // 分段上传路径的弹幕窗口/分组纯函数回归(2026-10-09「什么鱼」livechat 分 P 缺失根因)。
-import { describe, it, expect } from "vitest";
-import { sessionWindowOffsets, splitGroupsBySession, derivePartXmlPath, planPartXmlDerivation } from "./segment-pipeline.js";
+import { describe, it, expect, vi } from "vitest";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { SyncLedger } from "./ledger.js";
+import type { PipelineDeps } from "./pipeline.js";
+import { runSegmentPipeline, sessionWindowOffsets, splitGroupsBySession, derivePartXmlPath, planPartXmlDerivation } from "./segment-pipeline.js";
 
 /** 供 planPartXmlDerivation 的构造件(window 为 null = 无弹幕段)。 */
 const part = (index: number, window: { startSec: number; endSec: number; xmlPath: string } | null) => ({
@@ -111,5 +116,77 @@ describe("planPartXmlDerivation：派生 per-分P 弹幕 xml 的命名/窗口/�
       part(0, { startSec: 0, endSec: 100, xmlPath: "/stage/show.xml" }),
     ]);
     expect(plans[0].ok).toBe(true);
+  });
+});
+
+describe("runSegmentPipeline season checkpoint", () => {
+  it("continues appending remaining plain parts when the pending checkpoint cannot be persisted", async () => {
+    const root = mkdtempSync(join(tmpdir(), "segment-season-pending-"));
+    const stageDir = join(root, "stage");
+    const stageSub = join(stageDir, "room");
+    mkdirSync(stageSub, { recursive: true });
+    const src = [0, 1].map((i) => {
+      const p = join(stageSub, `show_${i}.ts`);
+      writeFileSync(p, "x");
+      return p;
+    });
+    const ledger = new SyncLedger(join(root, "sync.db"));
+    const streamKey = "douyin:season-segment:2026-10-26";
+    ledger.upsertPending(streamKey, Date.now());
+    ledger.setState(streamKey, "syncing");
+    vi.spyOn(ledger, "setBvAndSeasonState").mockImplementation(() => {
+      throw new Error("EIO season pending");
+    });
+    const uploadPlain = vi.fn(async () => ["B", "V", "SEGMENTPENDING"].join(""));
+    const appendGroup = vi.fn(async () => {});
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ code: 0, data: null }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+    const deps = {
+      transports: new Map(),
+      ledger,
+      sh: async () => {},
+      uploadPlain,
+      appendGroup,
+      remuxSegment: async (_src: string, out: string) => {
+        mkdirSync(dirname(out), { recursive: true });
+        writeFileSync(out, "x");
+      },
+      segmentDuration: async () => 10,
+      splitForUpload: async (file: string) => [file],
+      rmStage: async () => {},
+      notify: vi.fn(),
+      cfg: {
+        cleanMaxGapSec: 30,
+        stageDir,
+        cookies: "/tmp/cookies.json",
+        uploadMode: "upload",
+        uploadMeta: { tag: "直播录像", tid: 21, seasonSectionId: 456 },
+        steps: { mergeSegments: false },
+        cleanup: {},
+        minSegmentSec: 0,
+      },
+    } as unknown as PipelineDeps;
+    const members = [{ workerId: "local", rec: { tsFiles: src } }] as never;
+
+    try {
+      const r = await runSegmentPipeline({
+        streamKey,
+        deps,
+        jlog: () => {},
+        stageSub,
+        winnerMembers: members,
+        allMembers: members,
+        dateName: "show_2026-10-26",
+      });
+
+      expect(r).toMatchObject({ state: "done", bv: ["B", "V", "SEGMENTPENDING"].join("") });
+      expect(uploadPlain).toHaveBeenCalledTimes(1);
+      expect(appendGroup).toHaveBeenCalledTimes(1);
+      expect(ledger.doneParts(streamKey, "plain")).toEqual(new Set([0, 1]));
+      expect(ledger.get(streamKey)?.seasonState).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

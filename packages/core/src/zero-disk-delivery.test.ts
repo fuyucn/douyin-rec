@@ -51,6 +51,19 @@ describe("parseZeroDiskDelivery — strict, no defaults", () => {
     const r = parseZeroDiskDelivery({ v: 1, meta: { tid: 21, tag: "x", private: true }, accountKey: "bilibili:1" });
     expect(r.ok).toBe(true);
   });
+  it("seasonSectionId is optional; a bad value is dropped instead of refusing the delivery", () => {
+    const good = parseZeroDiskDelivery({ ...GOOD, meta: { ...GOOD.meta, seasonSectionId: 123 } });
+    expect(good.ok).toBe(true);
+    if (good.ok) expect(good.value.meta.seasonSectionId).toBe(123);
+    for (const bad of [0, -1, 1.5, "123"]) {
+      const r = parseZeroDiskDelivery({ ...GOOD, meta: { ...GOOD.meta, seasonSectionId: bad } });
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.value.meta.seasonSectionId).toBeUndefined();
+    }
+    const absent = parseZeroDiskDelivery({ ...GOOD, meta: { ...GOOD.meta, seasonSectionId: null } });
+    expect(absent.ok).toBe(true);
+    if (absent.ok) expect(absent.value.meta.seasonSectionId).toBeUndefined();
+  });
 });
 
 describe("account verdict", () => {

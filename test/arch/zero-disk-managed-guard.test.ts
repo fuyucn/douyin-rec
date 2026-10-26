@@ -35,7 +35,7 @@ describe("record --stream-upload on a hub-managed node", () => {
     expect(block).toContain("const manual");
     expect(block).toContain("delivery ? {} : o");
     // the title/tag/tid/visibility come from the delivered meta, not the node's own defaults
-    expect(block).toMatch(/const streamMeta = delivery\s*\? \{ tid: delivery\.meta\.tid, tag: delivery\.meta\.tag, private: delivery\.meta\.private/);
+    expect(block).toContain("const streamMeta = zeroDiskStreamMeta(delivery, resolveStreamUploadMeta(");
     expect(block).not.toMatch(/o\.streamUpload(Tid|Tag|Private)/); // only through `manual`
     // all three title resolvers receive the delivered meta
     expect((block.match(/\.\.\.metaOverride/g) ?? []).length).toBe(3);

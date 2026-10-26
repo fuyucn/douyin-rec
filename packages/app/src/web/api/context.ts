@@ -228,6 +228,11 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
       const e = validateLooseTitleTemplate(String(loose));
       if (e) return e;
     }
+    const season = input.pipeline?.upload?.seasonSectionId as unknown;
+    if (season !== undefined && season !== null
+        && !(typeof season === "number" && Number.isSafeInteger(season) && season > 0)) {
+      return `upload.seasonSectionId 必须是正整数或 null,收到 ${JSON.stringify(season)}`;
+    }
     return null;
   };
 

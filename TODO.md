@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-113 投稿成功后自动加入 B 站合集小节（issue [#364](https://github.com/fuyucn/douyin-rec/issues/364)）**
+  — 2026-10-25 认领,分支 `codex/issue-364-season-section-id`,base `feat/hub-optimization`（**未合并 / 未部署**;动上传路径,RISK,用户已明确要求实现）。
+  **做什么**：新增可选 `seasonSectionId`;投稿成功后调用创作中心 `episodes/add`;取 cid 走 UP 主视角接口;只在 P1 建稿后调用;失败只告警。
+  **为什么**：B 站普通合集不能在投稿请求里提交,只能投稿后关联;现在每场都要人工去创作中心加入合集。
+  **验收**：两条上传路径共用同一实现;审核中的稿件也能加入;未配置时零行为变化;全量测试 / 类型 / Web 构建 / i18n / bundle 通过。
+
 - [~] **T-111 0 落盘 spool/状态/弹幕迁入房间目录并带主播名（issue [#360](https://github.com/fuyucn/douyin-rec/issues/360)）**
   — 2026-10-24 认领,分支 `codex/issue-360-zero-disk-room-files`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**;动 0 落盘落盘路径与清扫,RISK,需人拍板）。
   **做什么**：房间布局开启时,spool/状态/弹幕落在 `主播名_平台_房间号` 目录;spool 与弹幕文件名带主播名与开播时间;旧根目录状态与其引用 spool 原子迁入并改写路径;孤儿清扫同时认新旧两代名字,永不删 held-gap。

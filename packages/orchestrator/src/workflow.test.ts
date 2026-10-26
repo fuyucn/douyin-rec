@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
-import { JobAbortedError, USER_STOP, abortJob, runWithJob, throwIfAborted } from "@drec/core";
+import { JobAbortedError, USER_STOP, abortJob, runWithJob, throwIfAborted, addArchiveToSeasonIfConfigured } from "@drec/core";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,14 @@ import {
 import { SyncLedger } from "./ledger.js";
 import { JobDispatcher } from "./job-dispatcher.js";
 import type { PipelineDeps } from "./pipeline.js";
+
+vi.mock("@drec/core", async (orig) => {
+  const m = await orig<typeof import("@drec/core")>();
+  return {
+    ...m,
+    addArchiveToSeasonIfConfigured: vi.fn(async () => ({ status: "added", sectionId: 1, aid: 1, cid: 1, title: "t" })),
+  };
+});
 
 const STREAM_KEY = "douyin:test-room:2026-06-27";
 const DATE_NAME = "主播名_2026-06-27";
@@ -149,6 +157,88 @@ function minimalCtx(t: TestDeps, pool: ResourcePool): NodeRunContext {
 }
 
 describe("runWorkflowNodes — 安全阀与分支隔离", () => {
+  it("seasonSectionId: upload_plain persists BV then associates; a later burn failure cannot skip it", async () => {
+    const t = makeDeps();
+    t.ledger.upsertPending(STREAM_KEY, Date.now());
+    t.deps.cfg = { ...t.deps.cfg, uploadMeta: { ...t.deps.cfg.uploadMeta, seasonSectionId: 456 } };
+    t.uploadPlain.mockResolvedValue("BVSEASON");
+    vi.mocked(addArchiveToSeasonIfConfigured).mockImplementationOnce(async () => {
+      // The global upload chain must already be released when the bounded season HTTP call starts.
+      expect(t.deps.pool!.snapshot().upload.active).toBe(0);
+      return { status: "added", sectionId: 456, aid: 1, cid: 1, title: "t" };
+    });
+    // Burn fails after upload: association must already have happened.
+    t.sh.mockImplementation(async (cmd: string) => {
+      if (cmd.includes(" merge ")) {
+        writeFileSync(t.products.plain, "x");
+        writeFileSync(t.products.plainXml, "x");
+      } else if (cmd.includes("--style danmu")) {
+        throw new Error("burn down");
+      }
+    });
+    const workflow = build(t);
+    const r = await runWorkflowNodes({
+      streamKey: STREAM_KEY, nodes: workflow.nodes, edges: workflow.edges,
+      ctx: workflow.ctx, pool: t.deps.pool!,
+    });
+    expect(r.ok).toBe(false);
+    expect(t.ledger.get(STREAM_KEY)?.bv).toBe("BVSEASON");
+    expect(t.ledger.get(STREAM_KEY)?.seasonState).toBe("done");
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).toHaveBeenCalledWith(
+      expect.objectContaining({ bvid: "BVSEASON", sectionId: 456, reconcileFirst: false }),
+    );
+  });
+
+  it("append nodes do not wait for a slow season association", async () => {
+    const t = makeDeps();
+    t.ledger.upsertPending(STREAM_KEY, Date.now());
+    t.deps.cfg = { ...t.deps.cfg, uploadMeta: { ...t.deps.cfg.uploadMeta, seasonSectionId: 456 } };
+    const slowBv = ["B", "V", "SEASONSLOW"].join("");
+    t.uploadPlain.mockResolvedValue(slowBv);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let appended = false;
+    vi.mocked(addArchiveToSeasonIfConfigured).mockImplementationOnce(async () => {
+      await gate;
+      return { status: "added", sectionId: 456, aid: 1, cid: 1, title: "t" };
+    });
+    t.appendGroup.mockImplementation(async () => {
+      appended = true;
+      release();
+    });
+    const workflow = build(t);
+    const r = await runWorkflowNodes({
+      streamKey: STREAM_KEY, nodes: workflow.nodes, edges: workflow.edges,
+      ctx: workflow.ctx, pool: t.deps.pool!,
+    });
+    expect(r.ok).toBe(true);
+    expect(appended).toBe(true);
+    expect(t.ledger.get(STREAM_KEY)?.seasonState).toBe("done");
+  });
+
+  it("a pending checkpoint failure keeps upload_plain successful and never starts an untracked association", async () => {
+    const t = makeDeps();
+    t.ledger.upsertPending(STREAM_KEY, Date.now());
+    t.deps.cfg = { ...t.deps.cfg, uploadMeta: { ...t.deps.cfg.uploadMeta, seasonSectionId: 456 } };
+    const bv = ["B", "V", "SEASONPENDINGFAIL"].join("");
+    t.uploadPlain.mockResolvedValue(bv);
+    vi.mocked(addArchiveToSeasonIfConfigured).mockClear();
+    vi.spyOn(t.ledger, "setBvAndSeasonState").mockImplementation(() => {
+      throw new Error("EIO season pending");
+    });
+    const workflow = build(t, { burnDanmu: false, burnLivechat: false });
+    const r = await runWorkflowNodes({
+      streamKey: STREAM_KEY, nodes: workflow.nodes, edges: workflow.edges,
+      ctx: workflow.ctx, pool: t.deps.pool!,
+    });
+    expect(r.ok).toBe(true);
+    expect(t.uploadPlain).toHaveBeenCalledTimes(1);
+    expect(t.ledger.get(STREAM_KEY)?.bv).toBe(bv);
+    expect(t.ledger.getNodeState(STREAM_KEY, "upload_plain")?.state).toBe("done");
+    expect(t.ledger.get(STREAM_KEY)?.seasonState).toBeNull();
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).not.toHaveBeenCalled();
+  });
+
   it("P1 上传失败 → 兄弟 burn 轨照常完成;append 被 blocked 不悬挂", async () => {
     const t = makeDeps();
     t.uploadPlain.mockRejectedValue(new Error("network down"));

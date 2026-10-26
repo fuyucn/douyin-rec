@@ -126,6 +126,17 @@ export function biliupCookieHeader(data: unknown): string | null {
   return pairs.length > 0 ? pairs.join("; ") : null;
 }
 
+/** Read the CSRF token (`bili_jct`) from a parsed biliup login file, or null when absent. */
+export function biliupCsrf(data: unknown): string | null {
+  const root = data as { cookie_info?: { cookies?: unknown }; cookies?: unknown } | null;
+  const raw = root?.cookie_info?.cookies ?? root?.cookies ?? data;
+  if (!Array.isArray(raw)) return null;
+  const value = raw
+    .map((item) => item as { name?: unknown; value?: unknown })
+    .find((c) => c?.name === "bili_jct")?.value;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 /**
  * 字段消毒:坏数据(非有限数/非数组/非升序/窗口外)在此收敛,不进内存态。
  * orchestrator/upload-limits.ts 直接 re-export 本函数(单一真理源,勿复制第二份)。

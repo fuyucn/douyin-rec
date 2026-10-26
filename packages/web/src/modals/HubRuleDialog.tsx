@@ -46,6 +46,8 @@ type FormState = RecordingValue & ProcessingValue & UploadValue & CleanupValue &
   recordingTouched: boolean;
   /** The source task's zero-disk sub-mode (stored on the task, not the rule). */
   streamUpload: boolean;
+  /** Whether the stored upload already carries the season key (including an explicit null). */
+  seasonSectionIdStored: boolean;
 };
 
 type RecordingHalf = Omit<RecordingValue, "name"> & { outputFormat: OutputFormat };
@@ -84,6 +86,8 @@ const BLANK: FormState = {
   titleTemplate: "",
   submissionTitleTemplate: "",
   partTitleTemplate: "",
+  seasonSectionId: "",
+  seasonSectionIdStored: false,
   clStageSourceAfterMerge: false,
   clSourceAfterDone: false,
   clKeepArchive: true,
@@ -118,6 +122,8 @@ function fromRule(r: HubRuleDTO): FormState {
     titleTemplate: c.upload?.titleTemplate ?? "",
     submissionTitleTemplate: c.upload?.submissionTitleTemplate ?? "",
     partTitleTemplate: c.upload?.partTitleTemplate ?? "",
+    seasonSectionId: c.upload?.seasonSectionId ? String(c.upload.seasonSectionId) : "",
+    seasonSectionIdStored: !!c.upload && Object.prototype.hasOwnProperty.call(c.upload, "seasonSectionId"),
     sourceTaskId: r.recording?.sourceTaskId ?? null,
   };
 }
@@ -269,6 +275,9 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           titleTemplate: form.titleTemplate.trim() || undefined,
           submissionTitleTemplate: form.submissionTitleTemplate.trim() || undefined,
           partTitleTemplate: form.partTitleTemplate.trim() || undefined,
+          seasonSectionId: form.seasonSectionId.trim()
+            ? Number(form.seasonSectionId)
+            : (form.seasonSectionIdStored ? null : undefined),
         },
       },
     };
@@ -278,6 +287,9 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     ev.preventDefault();
     if (!isEdit && form.sourceTaskId === null) { toast(t("hub.ruleDialog.sourceTaskRequired"), "error"); return; }
     if (workersInvalid) { toast(t("hub.ruleDialog.workersRequired"), "error"); return; }
+    if (form.seasonSectionId.trim() && !(Number.isInteger(Number(form.seasonSectionId)) && Number(form.seasonSectionId) > 0)) {
+      toast(t("room.editor.fieldInvalid"), "error"); return;
+    }
     const sched = splitSchedule(form.schedule);
     if (!sched) { toast(t("rooms.scheduleInvalid"), "error"); return; }
     const payload = buildPayload();

@@ -68,6 +68,7 @@ export interface ProcJobRecord extends ProcessJob {
   seq: number | null;
   step: string | null;
   bv: string | null;
+  seasonState: "pending" | "done" | "failed" | null;
   childPid: number | null;
   childPidStartedAt: string | null;
   prepJobId: string | null;
@@ -142,6 +143,9 @@ function toRecord(r: Row): ProcJobRecord {
     seq: r.seq == null ? null : Number(r.seq),
     step: r.step == null ? null : String(r.step),
     bv: r.bv == null ? null : String(r.bv),
+    seasonState: r.seasonState === "pending" || r.seasonState === "done" || r.seasonState === "failed"
+      ? r.seasonState
+      : null,
     childPid: r.childPid == null ? null : Number(r.childPid),
     childPidStartedAt: r.childPidStartedAt == null ? null : String(r.childPidStartedAt),
     prepJobId: r.prepJobId == null ? null : String(r.prepJobId),
@@ -397,6 +401,18 @@ export class ProcQueueStore {
   setBv(jobId: string, bv: string): boolean {
     return this.tx(() => this.db.prepare("UPDATE proc_jobs SET bv=?, updatedAt=? WHERE jobId=?")
       .run(bv, this.now(), jobId).changes > 0);
+  }
+
+  /** Persist a newly created BV together with its season intent in one row update. */
+  setBvAndSeasonState(jobId: string, bv: string, state: "pending" | "done" | "failed" | null): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET bv=?, seasonState=?, updatedAt=? WHERE jobId=?")
+      .run(bv, state, this.now(), jobId).changes > 0);
+  }
+
+  /** Persist the best-effort Bilibili season association checkpoint. */
+  setSeasonState(jobId: string, state: "pending" | "done" | "failed" | null): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET seasonState=?, updatedAt=? WHERE jobId=?")
+      .run(state, this.now(), jobId).changes > 0);
   }
 
   setChildPid(jobId: string, pid: number | null, startedAt: string | null = null): boolean {

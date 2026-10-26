@@ -21,7 +21,7 @@ import { applyNodeDataRoot, registerNodePipelineCommands } from "./node-pipeline
 import { registerRecoverOrderCommands } from "./hub-recover-order-commands.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, parseOutputFormat, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, freeGBOf, redactLogLines, recordingRoomDir, sanitizePathSegment, zonedStamp } from "@drec/core";
+import { ZERO_DISK_DELIVERY_ENV, biliAccountKey, burnFlags, effectiveStageFormat, closeStageReady, isUploadingMode, loadConfig, normalizeSeasonSectionId, parseOutputFormat, resolveSeasonSectionId, stageExt, resolveDiskMinGB, resolveJobLogPath, stageSessionDir, ttlMemoAsync, freeGBOf, redactLogLines, recordingRoomDir, sanitizePathSegment, zonedStamp } from "@drec/core";
 import type { EnqueueRequest, HubResources, ProcActiveDTO, OutputFormat, StageFormat } from "@drec/core";
 import { RecordingSession, XmlDanmuWriter } from "@drec/manager";
 import "./providers-register.js"; // 副作用：注册内置平台 + 下载引擎
@@ -34,7 +34,7 @@ import { FONTS_DIR } from "@drec/post-process";
 import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
-import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
+import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
 import type { HubStarter, TaskStore } from "@drec/app";
 import { applyTimezoneFromDb, dbPathForDataRoot, effectiveTimezone } from "@drec/app";
 import type { UploadOpts } from "@drec/core";
@@ -364,9 +364,7 @@ program
       }
       // Explicit stream-upload flags only serve manual debugging; a managed run ignores them.
       const manual: Pick<RecordCliOpts, "streamUploadTid" | "streamUploadTag" | "streamUploadPrivate"> = delivery ? {} : o;
-      const streamMeta = delivery
-        ? { tid: delivery.meta.tid, tag: delivery.meta.tag, private: delivery.meta.private, ...(delivery.meta.desc ? { desc: delivery.meta.desc } : {}) }
-        : resolveStreamUploadMeta(platform.id, roomSlug);
+      const streamMeta = zeroDiskStreamMeta(delivery, resolveStreamUploadMeta(platform.id, roomSlug));
       const metaOverride = delivery ? { meta: delivery.meta } : {};
       // The stored task name is only a fallback; the live stream usually exposes the real
       // anchor. Both the XML metadata and `{name}` should use the real anchor once known.
@@ -563,6 +561,7 @@ program
         tid: Number(manual.streamUploadTid ?? streamMeta.tid),
         tag: manual.streamUploadTag ?? streamMeta.tag,
         ...(streamMeta.desc ? { desc: streamMeta.desc } : {}),
+        ...(streamMeta.seasonSectionId ? { seasonSectionId: streamMeta.seasonSectionId } : {}),
         private: manual.streamUploadPrivate === undefined ? streamMeta.private : manual.streamUploadPrivate !== "0",
         sizeCap,
         maxMs: streamPartMaxMs(o.streamUploadSec, o.segment),
@@ -1327,8 +1326,8 @@ const hubStarter: HubStarter = {
       /** 上传后延后回读分 P 数的总窗口(ms);缺省 10 分钟。主控路径删最后一份源之前必须回读一致,否则保留源并转人工(issues #92 / #327)。 */
       sideCheckDelayMs?: number;
       /** 投稿默认(per-task 文件留空时回退);旧字段 uploadMeta 也认(迁移兼容)。 */
-      uploadDefaults?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string };
-      uploadMeta?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string };
+      uploadDefaults?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string; seasonSectionId?: number };
+      uploadMeta?: { tag?: string; tid?: number; desc?: string; titleTemplate?: string; submissionTitleTemplate?: string; partTitleTemplate?: string; seasonSectionId?: number };
       /** Max settle wait before reconciler proceeds regardless (seconds). */
       maxWaitSec?: number;
       /** Settle poll interval (seconds). */
@@ -1549,6 +1548,7 @@ const hubStarter: HubStarter = {
     const diskMinGB = resolveDiskMinGB(hubCfg.resources?.diskMinGB, (m) => console.warn(m)).gb;
     const defaultTag = uploadDefaults.tag ?? "直播,录像";
     const defaultTid = uploadDefaults.tid ?? 21;
+    const defaultSeasonSectionId = normalizeSeasonSectionId(uploadDefaults.seasonSectionId);
 
     const { spawn } = await import("node:child_process");
     // T15:并行度/内存门槛**每轮热读**(UI 改完立即生效,无需重启)。
@@ -1674,6 +1674,7 @@ const hubStarter: HubStarter = {
           titleTemplate: uploadDefaults.titleTemplate,
           submissionTitleTemplate: uploadDefaults.submissionTitleTemplate,
           partTitleTemplate: uploadDefaults.partTitleTemplate,
+          ...(defaultSeasonSectionId ? { seasonSectionId: defaultSeasonSectionId } : {}),
         },
         timeZone: effectiveTimezone(opts.store),
       },
@@ -1687,6 +1688,7 @@ const hubStarter: HubStarter = {
       const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform, slug));
       if (!rule || !rule.enabled) return null; // 无任务文件或已禁用 → hub 不处理该房间
       const p = rule.pipeline ?? {};
+      const seasonSectionId = resolveSeasonSectionId(p.upload?.seasonSectionId, uploadDefaults.seasonSectionId);
       return {
         cleanMaxGapSec: hubCfg.cleanMaxGapSec ?? 30,
         // 磁盘水位闸门(issue #8):同上,与 reconciler 看门狗同一个配置键与默认值(不新增第二套口径)。
@@ -1703,6 +1705,7 @@ const hubStarter: HubStarter = {
           titleTemplate: (p.upload?.titleTemplate ?? "").trim() || uploadDefaults.titleTemplate,
           submissionTitleTemplate: (p.upload?.submissionTitleTemplate ?? "").trim() || uploadDefaults.submissionTitleTemplate,
           partTitleTemplate: (p.upload?.partTitleTemplate ?? "").trim() || uploadDefaults.partTitleTemplate,
+          ...(seasonSectionId ? { seasonSectionId } : {}),
         },
         timeZone: effectiveTimezone(opts.store),
         steps: p.steps,

@@ -23,6 +23,8 @@ export interface ZeroDiskUploadMeta {
   titleTemplate?: string;
   submissionTitleTemplate?: string;
   partTitleTemplate?: string;
+  /** Optional Bilibili season section id; the node adds the archive after its first submit. */
+  seasonSectionId?: number;
 }
 
 /** Everything a hub-managed node needs to run a zero-disk room without reading master config. */
@@ -68,6 +70,12 @@ export function parseZeroDiskDelivery(raw: unknown): ZeroDiskDeliveryParse {
   if (desc === null || titleTemplate === null || submissionTitleTemplate === null || partTitleTemplate === null) {
     return bad("meta text fields must be strings");
   }
+  const rawSeason = m.seasonSectionId;
+  // Season association is optional: a bad optional value drops the feature instead of refusing
+  // the whole zero-disk delivery (the upload itself must still start).
+  const seasonSectionId = typeof rawSeason === "number" && Number.isSafeInteger(rawSeason) && rawSeason > 0
+    ? rawSeason
+    : undefined;
   if (!isKnownAccountKey(raw.accountKey)) return bad("accountKey missing or unknown");
   const credentialPath = optString(raw, "credentialPath");
   if (credentialPath === null) return bad("credentialPath must be a string");
@@ -83,6 +91,7 @@ export function parseZeroDiskDelivery(raw: unknown): ZeroDiskDeliveryParse {
         ...(titleTemplate ? { titleTemplate } : {}),
         ...(submissionTitleTemplate ? { submissionTitleTemplate } : {}),
         ...(partTitleTemplate ? { partTitleTemplate } : {}),
+        ...(seasonSectionId ? { seasonSectionId } : {}),
       },
       accountKey: raw.accountKey,
       ...(credentialPath ? { credentialPath } : {}),

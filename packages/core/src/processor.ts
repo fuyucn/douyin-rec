@@ -59,7 +59,10 @@ export interface ProcessContext {
    */
   alert(msg: string): void;
   /** Persist observable progress fields (step / bv / child pid). Processor never touches the store. */
-  setState?(patch: { step?: string | null; bv?: string | null; childPid?: number | null; childPidStartedAt?: string | null; progress?: UploadProgress | null }): void;
+  setState?(patch: {
+    step?: string | null; bv?: string | null; seasonState?: "pending" | "done" | "failed" | null;
+    childPid?: number | null; childPidStartedAt?: string | null; progress?: UploadProgress | null;
+  }): void;
 }
 
 /** Byte progress of a running transfer; the shape lives in api-types so the web build can share it. */

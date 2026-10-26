@@ -60,6 +60,12 @@ export interface JobRow {
    */
   ackedAt?: number | null;
   ackNote?: string | null;
+  /**
+   * Bilibili season association state for this archive (issue #364).
+   * NULL = feature off / never attempted; "pending" = BV persisted but the add may not have landed;
+   * "done" = the archive is confirmed in the section; "failed" = a definite failure, surfaced to a human.
+   */
+  seasonState?: "pending" | "done" | "failed" | null;
   updatedAt: number;
 }
 
@@ -122,9 +128,12 @@ export class SyncLedger {
     // Manual review mark for needs_manual rows (issue #312). NULL = not reviewed.
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackedAt INTEGER"); } catch { /* column exists */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackNote TEXT"); } catch { /* column exists */ }
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN seasonState TEXT"); } catch { /* column exists */ }
     // transition() names these columns on every state change, so a failed ALTER must surface here, not later.
     const cols = new Set((this.db.prepare("PRAGMA table_info(sync_jobs)").all() as Array<{ name: string }>).map((c) => c.name));
-    if (!cols.has("ackedAt") || !cols.has("ackNote")) throw new Error("sync_jobs migration failed: ackedAt/ackNote columns missing");
+    if (!cols.has("ackedAt") || !cols.has("ackNote") || !cols.has("seasonState")) {
+      throw new Error("sync_jobs migration failed: ackedAt/ackNote/seasonState columns missing");
+    }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -280,6 +289,15 @@ export class SyncLedger {
   setBv(streamKey: string, bv: string): void {
     const at = this.now();
     this.db.prepare("UPDATE sync_jobs SET bv=?, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
+  }
+  /** Persist the BV and season intent atomically so a kill cannot leave one without the other. */
+  setBvAndSeasonState(streamKey: string, bv: string, state: JobRow["seasonState"]): void {
+    this.db.prepare("UPDATE sync_jobs SET bv=?, seasonState=?, updatedAt=? WHERE streamKey=?")
+      .run(bv, state ?? null, this.now(), streamKey);
+  }
+  /** Season association state (issue #364); NULL clears it when the feature is off. */
+  setSeasonState(streamKey: string, state: JobRow["seasonState"]): void {
+    this.db.prepare("UPDATE sync_jobs SET seasonState=?, updatedAt=? WHERE streamKey=?").run(state ?? null, this.now(), streamKey);
   }
   /** 锁定本场产物 stem(不改 state、不写事件)。已有值不覆盖。 */
   setOutputStem(streamKey: string, stem: string): void {

@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 const DDL = `
 CREATE TABLE IF NOT EXISTS proc_jobs(
   jobId TEXT PRIMARY KEY,
@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS proc_jobs(
   seq INTEGER,
   step TEXT,
   bv TEXT,
+  seasonState TEXT,
   childPid INTEGER,
   childPidStartedAt TEXT,
   prepJobId TEXT,
@@ -74,6 +75,9 @@ export const V2_COLUMNS: readonly [string, string][] = [
 /** Columns added in v2 -> v3 (plan 038 PR5: byte progress JSON for the queue page). */
 export const V3_COLUMNS: readonly [string, string][] = [["progress", "TEXT"]];
 
+/** Columns added in v4 -> v5 (Bilibili season association checkpoint). */
+export const V5_COLUMNS: readonly [string, string][] = [["seasonState", "TEXT"]];
+
 type Row = Record<string, unknown>;
 
 /**
@@ -88,7 +92,7 @@ export function migrateSchema(db: DatabaseSync): void {
       if (v < 1) db.exec(DDL);
       if (v >= 1) {
         const cols = new Set((db.prepare("PRAGMA table_info(proc_jobs)").all() as Row[]).map((r) => String(r.name)));
-        for (const [name, type] of [...V2_COLUMNS, ...V3_COLUMNS]) {
+        for (const [name, type] of [...V2_COLUMNS, ...V3_COLUMNS, ...V5_COLUMNS]) {
           if (!cols.has(name)) db.exec(`ALTER TABLE proc_jobs ADD COLUMN ${name} ${type}`);
         }
       }
