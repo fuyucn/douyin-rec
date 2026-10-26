@@ -20,8 +20,7 @@ function PageLinks({ className }: { className: string }): ReactNode {
   const sections = navSections(hubEnabled === true);
   const matches = (item: (typeof sections.primary)[number]): boolean =>
     location.pathname === item.to
-    || (!item.end && location.pathname.startsWith(`${item.to}/`))
-    || (item.to === "/tasks" && location.pathname.startsWith("/task/"));
+    || (!item.end && location.pathname.startsWith(`${item.to}/`));
   const advancedActive = sections.advanced.some(matches);
   useEffect(() => {
     const closeOutside = (event: PointerEvent): void => {
