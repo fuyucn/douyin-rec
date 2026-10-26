@@ -1,5 +1,5 @@
 import { useAtomValue } from "jotai";
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { ChevronDown, Settings } from "lucide-react";
 import { cookieStatusAtom, hubEnabledAtom } from "../atoms";
@@ -19,7 +19,27 @@ function PageLinks({ className }: { className: string }): ReactNode {
   const details = useRef<HTMLDetailsElement>(null);
   const sections = navSections(hubEnabled === true);
   const label = (key: string): string => key === "Hub" ? "Hub" : t(key);
-  const advancedActive = sections.advanced.some((item) => location.pathname === item.to || (!item.end && location.pathname.startsWith(`${item.to}/`)));
+  const matches = (item: (typeof sections.primary)[number]): boolean =>
+    location.pathname === item.to
+    || (!item.end && location.pathname.startsWith(`${item.to}/`))
+    || (item.to === "/tasks" && location.pathname.startsWith("/task/"));
+  const advancedActive = sections.advanced.some(matches);
+  useEffect(() => {
+    const closeOutside = (event: PointerEvent): void => {
+      if (details.current?.open && !details.current.contains(event.target as Node)) details.current.open = false;
+    };
+    const closeEscape = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || !details.current?.open) return;
+      details.current.open = false;
+      details.current.querySelector("summary")?.focus();
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeEscape);
+    };
+  }, []);
   const link = (item: (typeof sections.primary)[number]): ReactNode => (
     <NavLink
       key={item.to}
