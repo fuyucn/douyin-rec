@@ -197,6 +197,21 @@ describe("runPipeline", () => {
     deps.ledger.close();
   });
 
+  it("a legacy row with no season state is never associated", async () => {
+    vi.mocked(addArchiveToSeasonIfConfigured).mockClear();
+    const broadcast = makeBroadcast([{ workerId: "node-1", rec: makeRec() }]);
+    const deps = makeDeps();
+    deps.cfg = { ...deps.cfg, uploadMeta: { ...deps.cfg.uploadMeta, seasonSectionId: 456 } };
+    deps.ledger.upsertPending(broadcast.streamKey);
+    deps.ledger.setBv(broadcast.streamKey, SHARED_BV2);
+
+    await runPipeline(broadcast, deps);
+
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).not.toHaveBeenCalled();
+    expect(deps.ledger.get(broadcast.streamKey)?.seasonState ?? null).toBeNull();
+    deps.ledger.close();
+  });
+
   describe("xmlKeepRule(.xml/.ass 副本不变量:两处不能同时删光)", () => {
     it("保留 stage(stageAfterDone=false):可删节点源 .xml,不删 stage .xml", () => {
       expect(xmlKeepRule("node", false)).toBe(true);   // 节点源可删(副本在 stage)

@@ -854,7 +854,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
   const seg = (): void => installFakeFfmpeg(Buffer.alloc(PART, 0x5a), { chunkEvery: 64 * 1024, delayMs: 1, delayBeforeCloseMs: 5 });
 
   /** 完整可跑的假 UPOS(建稿/追加都通);参数沿用既有成功组合。 */
-  function upos(chunkSize: number, opts: { seasonCalls?: string[] } = {}): typeof fetch {
+  function upos(chunkSize: number, opts: { seasonCalls?: string[]; failSeasonState?: () => void } = {}): typeof fetch {
     let created = false;
     writeFileSync(join(dir, "cookies.json"), JSON.stringify({
       cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
@@ -874,6 +874,7 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
       if (u.pathname === "/x/vu/web/edit") return Promise.resolve(json({ code: 0, data: { aid: 7, bvid: "BILIfake1" } }));
       if (u.pathname === "/x2/creative/web/season/section/episodes/add") {
         opts.seasonCalls?.push(u.pathname);
+        opts.failSeasonState?.();
         return Promise.resolve(json({ code: 0, data: null }));
       }
       if (u.pathname === "/x2/creative/web/season/section") return Promise.resolve(json({ code: 0, data: { episodes: [] } }));
@@ -902,6 +903,32 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
     const r = await run({ maxSegments: 2 });
     expect(r.segments).toHaveLength(2); // 没有排空 → 录满上限
     expect(r.ok, r.error ?? "").toBe(true);
+  }, 30_000);
+
+  it("seasonSectionId: season 状态落盘失败不影响后续分 P", async () => {
+    const calls: string[] = [];
+    const spool0 = join(dir, "p0.ts");
+    const spool1 = join(dir, "p1.ts");
+    writeFileSync(spool0, "x");
+    writeFileSync(spool1, "x");
+    const session = new LivePumpSession({
+      cookiesPath: join(dir, "cookies.json"),
+      room: "dr", spoolDir: dir,
+      title: "t", tid: 21, tag: "x", private: true,
+      seasonSectionId: 123,
+      cleanupConfirmedSpool: false,
+      fetchImpl: upos(64 * 1024, { seasonCalls: calls }),
+    });
+    session.failSeasonWriteOnce();
+    const first = await session.submitPart({ index: 0, spoolPath: spool0, stem: "p0", title: "p0", bytes: 1, durationSec: 10 });
+    await session.drainSeason();
+    expect(first.ok, first.error ?? "").toBe(true);
+    expect(calls).toHaveLength(1);
+    // The part confirmation is authoritative, so the next part is still accepted after the failure.
+    const second = await session.submitPart({ index: 1, spoolPath: spool1, stem: "p1", title: "p1", bytes: 1, durationSec: 10 });
+    expect(second.ok, second.error ?? "").toBe(true);
+    const st = JSON.parse(readFileSync(livePumpStatePath(dir, "dr"), "utf-8")) as { parts: Array<{ confirmed: boolean }> };
+    expect(st.parts.filter((p) => p.confirmed)).toHaveLength(2);
   }, 30_000);
 
   it("seasonSectionId: 首次建稿加入合集;重启只在 pending 时补一次", async () => {

@@ -771,7 +771,7 @@ export async function runNodeSidePipeline(
     try {
       writeNodeResult(stageSub, {
         phase: "uploading", ok: false, step: "submit", bv: extra.bv, products,
-        confirmedParts: extra.confirmedParts, seasonState: state,
+        confirmedParts: extra.confirmedParts, intentPart, seasonState: state,
       }, log);
       seasonState = state;
     } catch (e) {
@@ -801,7 +801,9 @@ export async function runNodeSidePipeline(
         reconcileFirst,
         note: log,
       });
-      persistSeasonState(seasonCheckpointState(season), { bv: bvid, confirmedParts: confirmed });
+      // Re-read the live counters: the season call can finish while an append is in flight, and a
+      // stale snapshot would drop the intent and the real part count from the operator's evidence.
+      persistSeasonState(seasonCheckpointState(season), { bv: bvid, confirmedParts: confirmedParts || confirmed });
     }).catch((e) => {
       log(`season 关联异常(保留 pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
     });

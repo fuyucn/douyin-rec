@@ -506,6 +506,7 @@ export class LivePumpSession {
   private readonly log: (msg: string) => void;
   private stateUntrusted = false;
   private seasonTail: Promise<void> = Promise.resolve();
+  private seasonWriteFails = false;
 
   constructor(private readonly o: LivePumpSessionOpts) {
     mkdirSync(o.spoolDir, { recursive: true });
@@ -610,11 +611,13 @@ export class LivePumpSession {
     return { ok: true, bvid: submitted.bvid, aid: submitted.aid };
   }
 
-  private persist(): void {
+  private persist(opts?: { seasonOnly?: boolean }): void {
     try {
       writeLivePumpState(this.statePath, this.state);
     } catch (e) {
-      this.stateUntrusted = true;
+      // Only authoritative upload state fails closed. The season field is metadata: losing it must
+      // never make confirmed parts untrusted and refuse the next part.
+      if (!opts?.seasonOnly) this.stateUntrusted = true;
       throw e;
     }
   }
@@ -893,9 +896,13 @@ export class LivePumpSession {
       updatedAt: Date.now(),
     };
     try {
-      this.persist();
+      if (this.seasonWriteFails) {
+        this.seasonWriteFails = false;
+        throw new Error("injected season checkpoint write failure");
+      }
+      this.persist({ seasonOnly: true });
     } catch (e) {
-      this.log(`[live-pump] season 状态落盘失败(保留 pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      this.log(`[live-pump] season 状态落盘失败(保留 pending,不影响后续分 P): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
     }
   }
 
@@ -911,6 +918,11 @@ export class LivePumpSession {
   /** Wait for the best-effort season call at a run boundary, never on the part-upload path. */
   drainSeason(): Promise<void> {
     return this.seasonTail;
+  }
+
+  /** Test seam: make the next season checkpoint write fail (metadata only, parts still accepted). */
+  failSeasonWriteOnce(): void {
+    this.seasonWriteFails = true;
   }
 
   /** Restart hook: retry only an explicit pending checkpoint. */

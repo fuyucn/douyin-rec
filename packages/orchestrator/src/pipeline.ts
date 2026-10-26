@@ -1307,7 +1307,10 @@ async function resumeAppends(
   const { burnDanmu, burnLivechat } = burnFlags(cfg.steps);
   const isPublic = cfg.uploadPrivate === false;
   // A kill after upload_plain persisted the BV but before its post-slot association leaves "pending".
-  await associateSeasonForJob(ledger, cfg, streamKey, jlog);
+  // Run it as a tail so the append work below never waits on this bounded HTTP call.
+  const seasonTail = associateSeasonForJob(ledger, cfg, streamKey, jlog).catch((e) => {
+    jlog(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+  });
 
   // done 场的收尾补跑若在下面三处转人工:done 无出边,普通 setState 会被白名单拒绝 →
   // job 仍 done、告警照发、cleanupBackfillDue 周期性重复补跑刷告警。wasDone 时必须 force。
@@ -1435,6 +1438,7 @@ async function resumeAppends(
     },
   });
   if (fin.blocked) return { state: "needs_manual", bv };
+  await seasonTail;
 
   // 可选:done 后删 stage 产物(与主路径同一开关;续跑不删 slave 源)。
   if (cfg.cleanup?.stageAfterDone) {

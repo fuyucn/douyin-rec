@@ -859,7 +859,7 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
   let seasonTail: Promise<void> = Promise.resolve();
   const queueSeasonAfterUpload = (): void => {
     seasonTail = seasonTail
-      .then(() => associateSeasonAfterUpload(ctx, streamKey))
+      .then(() => associateSeasonAfterUpload(ctx, streamKey, false))
       .catch((e) => {
         ctx.log(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
       });
@@ -1035,8 +1035,8 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
  * by upload_plain before its upload slot is released; this runs after release and records the terminal
  * state. Never throws, so a season-side failure cannot fail an otherwise successful upload.
  */
-export async function associateSeasonAfterUpload(ctx: NodeRunContext, streamKey: string): Promise<void> {
-  await associateSeasonForJob(ctx.ledger, ctx.cfg, streamKey, (m) => ctx.log(m));
+export async function associateSeasonAfterUpload(ctx: NodeRunContext, streamKey: string, reconcileFirst = true): Promise<void> {
+  await associateSeasonForJob(ctx.ledger, ctx.cfg, streamKey, (m) => ctx.log(m), { reconcileFirst });
 }
 
 /** Shared by the merged workflow and its resume path; idempotent and never throws. */
@@ -1045,13 +1045,19 @@ export async function associateSeasonForJob(
   cfg: PipelineCfg,
   streamKey: string,
   log: (msg: string) => void,
+  opts: { reconcileFirst?: boolean } = {},
 ): Promise<void> {
   const row = ledger.get(streamKey);
   const bv = row?.bv;
+  // Only an explicit "pending" checkpoint (or a fresh create that just persisted it) is associated.
+  // Legacy rows without any seasonState were never requested, so enabling the feature must never
+  // retroactively add old archives.
+  const pendingNow = row?.seasonState === "pending";
   if (!cfg.uploadMeta.seasonSectionId || !bv || row?.seasonState === "done" || row?.seasonState === "failed") return;
+  if (!pendingNow) return;
   try { ledger.setSeasonState(streamKey, "pending"); }
   catch (e) { log(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
-  const reconcileFirst = row?.seasonState === "pending";
+  const reconcileFirst = opts.reconcileFirst ?? true;
   const season = await addArchiveToSeasonIfConfigured({
     cookiesPath: cfg.cookies,
     sectionId: cfg.uploadMeta.seasonSectionId,

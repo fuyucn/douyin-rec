@@ -109,6 +109,27 @@ describe("RollingUploader — 边录边传录制端执行", () => {
     }
   });
 
+  it("a season checkpoint write failure keeps uploading the next parts", async () => {
+    seasonHook.calls.length = 0;
+    const { paths } = mkSession(segNames(3));
+    const u = new RollingUploader({
+      room,
+      uploadMeta: { ...uploadMeta, seasonSectionId: 456 },
+      gate: new FakeGate(), uploadPlainRaw: async () => FAKE_BV, appendGroupRaw: noopAppend,
+      removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+    });
+    u.failSeasonWriteOnce();
+    paths.forEach((p) => u.noteSegment(p));
+    const r = await u.flush({ recordingActive: false });
+    await u.drainSeason();
+    // Losing the season metadata must not stop the session: the authoritative upload state is
+    // already on disk, so the appends still run and the sources are still cleaned up.
+    expect(r.uploaded.sort()).toEqual([0, 1, 2]);
+    expect(r.ambiguous).toEqual([]);
+    expect(seasonHook.calls).toHaveLength(1);
+    expect(u.bv).toBe(FAKE_BV);
+  });
+
   it("flush does not wait for a slow season association; session end drains it", async () => {
     seasonHook.calls.length = 0;
     const { dir, paths } = mkSession(segNames(1));

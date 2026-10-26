@@ -184,7 +184,9 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
     expect(r.ok).toBe(false);
     expect(t.ledger.get(STREAM_KEY)?.bv).toBe("BVSEASON");
     expect(t.ledger.get(STREAM_KEY)?.seasonState).toBe("done");
-    expect(vi.mocked(addArchiveToSeasonIfConfigured)).toHaveBeenCalledWith(expect.objectContaining({ bvid: "BVSEASON", sectionId: 456 }));
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).toHaveBeenCalledWith(
+      expect.objectContaining({ bvid: "BVSEASON", sectionId: 456, reconcileFirst: false }),
+    );
   });
 
   it("append nodes do not wait for a slow season association", async () => {

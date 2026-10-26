@@ -139,7 +139,7 @@ describe("addArchiveToSeason", () => {
       }
       if (u.includes("/season/section/episodes/add")) {
         posts++;
-        return new Response("forbidden", { status: 403, headers: { "Content-Type": "text/html" } });
+        return new Response("bad request", { status: 400, headers: { "Content-Type": "text/html" } });
       }
       if (u.includes("/season/section?id=123")) return json({ code: 0, data: { episodes: [] } });
       return json({}, 404);
@@ -148,6 +148,46 @@ describe("addArchiveToSeason", () => {
     const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl });
     expect(r).toMatchObject({ status: "failed", retryable: false });
     expect(posts).toBe(1);
+  });
+
+  it("keeps HTTP 429 throttling retryable so a later run can add the archive", async () => {
+    let posts = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("/x/vupre/web/archive/view")) {
+        return json({ code: 0, data: { archive: { aid: 456, title: "replay" }, videos: [{ cid: 789 }] } });
+      }
+      if (u.includes("/season/section/episodes/add")) {
+        posts++;
+        return new Response(JSON.stringify({ code: -500, message: "too many requests" }), { status: 429 });
+      }
+      if (u.includes("/season/section?id=123")) return json({ code: 0, data: { episodes: [] } });
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl, sleep: async () => {} });
+    expect(r).toMatchObject({ status: "failed", retryable: true });
+    expect(posts).toBe(2);
+  });
+
+  it("keeps a 403 login answer retryable", async () => {
+    let posts = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("/x/vupre/web/archive/view")) {
+        return json({ code: 0, data: { archive: { aid: 456, title: "replay" }, videos: [{ cid: 789 }] } });
+      }
+      if (u.includes("/season/section/episodes/add")) {
+        posts++;
+        return new Response("forbidden", { status: 403, headers: { "Content-Type": "text/html" } });
+      }
+      if (u.includes("/season/section?id=123")) return json({ code: 0, data: { episodes: [] } });
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    const r = await addArchiveToSeason({ cookiesPath: loginFile(), sectionId: 123, aid: 456, fetchImpl, sleep: async () => {} });
+    expect(r).toMatchObject({ status: "failed", retryable: true });
+    expect(posts).toBe(2);
   });
 
   it("does not re-POST when a lost response cannot be reconciled against the section", async () => {

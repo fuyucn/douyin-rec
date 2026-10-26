@@ -316,6 +316,7 @@ export interface RollingUploaderOpts {
 export class RollingUploader {
   /** Season calls are best-effort and must not delay the next part upload. */
   private seasonTail: Promise<void> = Promise.resolve();
+  private seasonWriteFails = false;
   private readonly o: RollingUploaderOpts;
   private readonly log: (m: string) => void;
   private readonly gate: UploadGate;
@@ -434,6 +435,7 @@ export class RollingUploader {
   private async associateSeason(bv: string, reconcileFirst: boolean): Promise<void> {
     if (!this.o.uploadMeta.seasonSectionId) return;
     if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
+    if (!this.state.sessionBase || !this.segDir) return;
     const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
     const outcome = await addArchiveToSeasonIfConfigured({
       cookiesPath: cookies,
@@ -442,12 +444,20 @@ export class RollingUploader {
       reconcileFirst,
       note: (m) => this.log(m),
     });
-    this.state = {
-      ...this.state,
-      seasonState: seasonCheckpointState(outcome),
-      updatedAt: this.now(),
-    };
-    if (!this.persist()) this.log("[rolling] season 状态落盘失败,保留 pending,下次运行会重试");
+    const seasonState = seasonCheckpointState(outcome);
+    try {
+      if (this.seasonWriteFails) {
+        this.seasonWriteFails = false;
+        throw new Error("injected season checkpoint write failure");
+      }
+      // Season metadata is best-effort and must never set stateUntrusted: the sidecar still
+      // carries the authoritative upload progress, and losing this field cannot justify
+      // stopping the session's uploads and keeping every source.
+      writeStateFile(this.segDir, { ...this.state, seasonState, updatedAt: this.now() }, this.pid, this.now());
+      this.state = { ...this.state, seasonState, updatedAt: this.now() };
+    } catch (e) {
+      this.log(`[rolling] season 状态落盘失败(保留 pending,不影响上传): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+    }
   }
 
   private queueSeason(bv: string, reconcileFirst: boolean): void {
@@ -461,6 +471,11 @@ export class RollingUploader {
   /** Drain the best-effort season call at session end; ordinary flushes never wait on it. */
   drainSeason(): Promise<void> {
     return this.seasonTail;
+  }
+
+  /** Test seam: make the next season checkpoint write fail (metadata only, uploads continue). */
+  failSeasonWriteOnce(): void {
+    this.seasonWriteFails = true;
   }
 
   /**
