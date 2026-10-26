@@ -385,6 +385,13 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                             <span className="field-label">{t("room.editor.tag")}</span>
                             <input className="input" placeholder={t("hub.ruleDialog.tagPlaceholder")} value={form.tag} onChange={(e) => update({ tag: e.target.value })} />
                           </label>
+                          <label className="block col-span-2">
+                            <span className="field-label">{t("hub.ruleDialog.seasonSectionIdLabel")}</span>
+                            <input type="number" min={1} className="input font-mono text-sm"
+                                   placeholder={t("hub.ruleDialog.seasonSectionIdPlaceholder")}
+                                   value={form.seasonSectionId} onChange={(e) => update({ seasonSectionId: e.target.value })} />
+                            <p className="text-[11px] text-muted-soft mt-1">{t("hub.ruleDialog.seasonSectionIdHint")}</p>
+                          </label>
                           {([
                             ["titleTemplate", "room.editor.titleTemplate", "{name}_{date}"],
                             ["submissionTitleTemplate", "room.editor.submissionTitle", t("hub.ruleDialog.submissionTitleTemplatePlaceholder")],

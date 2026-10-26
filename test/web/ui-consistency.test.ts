@@ -61,3 +61,11 @@ describe("room links (issue #197)", () => {
     expect(read("pages", "TaskDetail.tsx")).not.toMatch(/`\/hub\//);
   });
 });
+
+describe("rooms editor upload fields", () => {
+  it("exposes the Bilibili season section id from the unified room editor (#370)", () => {
+    const editor = readFileSync(join(SRC, "modals", "RoomEditor.tsx"), "utf-8");
+    expect(editor).toContain('t("hub.ruleDialog.seasonSectionIdLabel")');
+    expect(editor).toContain("value={form.seasonSectionId}");
+  });
+});
