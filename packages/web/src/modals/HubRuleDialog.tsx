@@ -19,6 +19,7 @@ import { UploadSection, type UploadValue } from "../components/room-form/UploadS
 import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, scheduleInput, splitSchedule } from "../lib/labels";
+import { isValidSeasonSectionIdInput, seasonSectionIdPayload } from "../lib/room-editor-form";
 import {
   cookieReadyFor, deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, outputFormatFromStored, settledMethod, shownOutputFormat, storedFromForm, type FormFacts,
 } from "../lib/room-form-rules";
@@ -275,9 +276,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           titleTemplate: form.titleTemplate.trim() || undefined,
           submissionTitleTemplate: form.submissionTitleTemplate.trim() || undefined,
           partTitleTemplate: form.partTitleTemplate.trim() || undefined,
-          seasonSectionId: form.seasonSectionId.trim()
-            ? Number(form.seasonSectionId)
-            : (form.seasonSectionIdStored ? null : undefined),
+          seasonSectionId: seasonSectionIdPayload(form.seasonSectionId, form.seasonSectionIdStored),
         },
       },
     };
@@ -287,7 +286,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     ev.preventDefault();
     if (!isEdit && form.sourceTaskId === null) { toast(t("hub.ruleDialog.sourceTaskRequired"), "error"); return; }
     if (workersInvalid) { toast(t("hub.ruleDialog.workersRequired"), "error"); return; }
-    if (form.seasonSectionId.trim() && !(Number.isInteger(Number(form.seasonSectionId)) && Number(form.seasonSectionId) > 0)) {
+    if (form.uploadOn && !isValidSeasonSectionIdInput(form.seasonSectionId)) {
       toast(t("room.editor.fieldInvalid"), "error"); return;
     }
     const sched = splitSchedule(form.schedule);

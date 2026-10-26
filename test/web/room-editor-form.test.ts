@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_TITLE_TEMPLATES, factsOf, formFromRoom, payloadFromForm, ruleFactsOf, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { DEFAULT_TITLE_TEMPLATES, factsOf, formFromRoom, isValidSeasonSectionIdInput, payloadFromForm, ruleFactsOf, seasonSectionIdPatch, seasonSectionIdPayload, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
 import { deriveConstraints, settledMethod } from "../../packages/web/src/lib/room-form-rules.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
@@ -85,6 +85,23 @@ describe("room editor form ↔ payload", () => {
 
     const f3 = { ...formFromRoom(mkRoom()), seasonSectionId: "456" };
     expect(ok(payloadFromForm(f3, ctx)).processing?.pipeline?.upload?.seasonSectionId).toBe(456);
+  });
+  it("seasonSectionId: invalid values are rejected only while upload is on", () => {
+    for (const value of ["-3", "0", "1.5", "1e3", "abc", String(Number.MAX_SAFE_INTEGER + 1)]) {
+      expect(isValidSeasonSectionIdInput(value)).toBe(false);
+    }
+    expect(isValidSeasonSectionIdInput(" 456 ")).toBe(true);
+    expect(seasonSectionIdPatch("", false)).toBeUndefined();
+    expect(seasonSectionIdPatch("", true)).toBeNull();
+    expect(seasonSectionIdPatch("456", false)).toBe(456);
+    expect(seasonSectionIdPayload("-3", true)).toBeUndefined();
+    expect(seasonSectionIdPayload("456", true)).toBe(456);
+    const on = { ...formFromRoom(mkRoom()), uploadOn: true, seasonSectionId: "-3" };
+    expect(payloadFromForm(on, ctx)).toEqual({ ok: false, error: "seasonSectionId" });
+    const off = { ...formFromRoom(mkRoom()), uploadOn: false, seasonSectionId: "-3" };
+    const r = payloadFromForm(off, ctx);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.payload.processing?.pipeline?.upload?.seasonSectionId).toBeUndefined();
   });
   it("round-trips stored fields without silently changing them", () => {
     const p = ok(payloadFromForm(formFromRoom(mkRoom()), ctx));

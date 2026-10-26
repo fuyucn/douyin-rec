@@ -14,6 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-116 Rooms 编辑器补齐 B站合集小节 ID（issue [#370](https://github.com/fuyucn/douyin-rec/issues/370)）**（2026-10-26）
+  — #364 已支持后端与旧 Hub 规则弹窗，但统一房间编辑器第 3 步漏了输入框，用户无法在 Rooms 中配置。
+  **做什么**: 在 Rooms 上传步骤显示正整数合集小节 ID；留空关闭，已有值回显，清空已存值保存为 null，并加 UI 漂移守卫。
+  **验收**: 表单映射三种语义继续通过；Rooms 输入可见；typecheck、Web 构建、i18n、全量测试与 bundle 通过；桌面和手机实看无溢出。
+
 - [~] **T-115 统一房间页补齐节点管理、自定义重跑与录制会话合成（issue [#362](https://github.com/fuyucn/douyin-rec/issues/362)）**
   — 2026-10-24 认领,分支 `codex/issue-362-rooms-parity`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：把节点管理搬进统一房间列表页;把按日期/节点的自定义重跑搬进统一房间详情页;把录制会话合成搬进统一房间详情页。旧 Tasks/Hub 页面与路由保留。
