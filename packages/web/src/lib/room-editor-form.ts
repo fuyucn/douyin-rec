@@ -69,6 +69,19 @@ export const DEFAULT_TITLE_TEMPLATES = {
   partTitleTemplate: "P{part}",
 } as const;
 
+/** Empty clears/disables the association; otherwise the API accepts only a positive integer section id. */
+export function isValidSeasonSectionIdInput(raw: string): boolean {
+  const value = raw.trim();
+  return value === "" || (/^\d+$/.test(value) && Number(value) > 0 && Number.isSafeInteger(Number(value)));
+}
+
+/** Empty inherits when the key was never stored, clears when it exists, and parses a valid number otherwise. */
+export function seasonSectionIdPatch(raw: string, stored: boolean): number | null | undefined {
+  const value = raw.trim();
+  if (!value) return stored ? null : undefined;
+  return Number(value);
+}
+
 export function formFromRoom(r: RoomDTO): RoomForm {
   const rec = r.recording;
   const p = r.processing?.pipeline ?? {};
@@ -143,7 +156,7 @@ export function ruleFactsOf(f: RoomForm, ctx: RoomContext): FormFacts {
   return factsOf(f, { ...ctx, hasRule: true });
 }
 
-export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; error: "schedule" };
+export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; error: "schedule" | "seasonSectionId" };
 
 /**
  * Form → payload. `recording.enabled` is deliberately NOT sent: the list/detail switch owns it,
@@ -153,6 +166,7 @@ export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; er
 export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   const sched = splitSchedule(f.schedule);
   if (!sched) return { ok: false, error: "schedule" };
+  if (!isValidSeasonSectionIdInput(f.seasonSectionId)) return { ok: false, error: "seasonSectionId" };
   const stored = storedFromForm(ruleFactsOf(f, ctx));
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
   const recording: RoomPayload["recording"] = ctx.hasRecording
@@ -204,9 +218,7 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
             titleTemplate: trimOrUndef(f.titleTemplate),
             submissionTitleTemplate: trimOrUndef(f.submissionTitleTemplate),
             partTitleTemplate: trimOrUndef(f.partTitleTemplate),
-            seasonSectionId: f.seasonSectionId.trim()
-              ? Number(f.seasonSectionId)
-              : (f.seasonSectionIdStored ? null : undefined),
+            seasonSectionId: seasonSectionIdPatch(f.seasonSectionId, f.seasonSectionIdStored),
           },
         },
       },

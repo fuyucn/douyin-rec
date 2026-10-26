@@ -20,11 +20,12 @@ import { Button, IconButton } from "../components/Button";
 import { ExperimentalBadge } from "../components/ExperimentalBadge";
 import { Switch } from "../components/Switch";
 import { CleanupSection } from "../components/room-form/CleanupSection";
+import { SeasonSectionField } from "../components/room-form/SeasonSectionField";
 import { RuleSwitch, ToggleRow } from "../components/room-form/parts";
 import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
-import { factsOf, formFromRoom, ruleFactsOf, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
+import { factsOf, formFromRoom, isValidSeasonSectionIdInput, ruleFactsOf, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
 import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
 import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
@@ -134,11 +135,13 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
     // Native min= validation only reaches inputs of the visible step, so re-check the numeric fields here.
     const bad: StepId | null = form.segmentSec.trim() !== "" && Number(form.segmentSec) < 0 ? "record"
       : form.uploadOn && form.tid.trim() !== "" && Number(form.tid) < 1 ? "upload"
-      : form.uploadOn && form.seasonSectionId.trim() !== ""
-        && !(Number.isInteger(Number(form.seasonSectionId)) && Number(form.seasonSectionId) > 0) ? "upload" : null;
+      : !isValidSeasonSectionIdInput(form.seasonSectionId) ? "upload" : null;
     if (bad) { setStep(bad); toast(t("room.editor.fieldInvalid"), "error"); return; }
     const r = payloadFromForm(form, ctx);
-    if (!r.ok) { toast(t("rooms.scheduleInvalid"), "error"); return; }
+    if (!r.ok) {
+      toast(t(r.error === "schedule" ? "rooms.scheduleInvalid" : "room.editor.fieldInvalid"), "error");
+      return;
+    }
     setBusy(true);
     try {
       await api.updateRoom(room.key, r.payload);
@@ -385,13 +388,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                             <span className="field-label">{t("room.editor.tag")}</span>
                             <input className="input" placeholder={t("hub.ruleDialog.tagPlaceholder")} value={form.tag} onChange={(e) => update({ tag: e.target.value })} />
                           </label>
-                          <label className="block col-span-2">
-                            <span className="field-label">{t("hub.ruleDialog.seasonSectionIdLabel")}</span>
-                            <input type="number" min={1} className="input font-mono text-sm"
-                                   placeholder={t("hub.ruleDialog.seasonSectionIdPlaceholder")}
-                                   value={form.seasonSectionId} onChange={(e) => update({ seasonSectionId: e.target.value })} />
-                            <p className="text-[11px] text-muted-soft mt-1">{t("hub.ruleDialog.seasonSectionIdHint")}</p>
-                          </label>
+                          <SeasonSectionField value={form.seasonSectionId} onChange={(seasonSectionId) => update({ seasonSectionId })} />
                           {([
                             ["titleTemplate", "room.editor.titleTemplate", "{name}_{date}"],
                             ["submissionTitleTemplate", "room.editor.submissionTitle", t("hub.ruleDialog.submissionTitleTemplatePlaceholder")],
