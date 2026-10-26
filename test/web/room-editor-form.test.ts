@@ -87,7 +87,7 @@ describe("room editor form ↔ payload", () => {
     expect(ok(payloadFromForm(f3, ctx)).processing?.pipeline?.upload?.seasonSectionId).toBe(456);
   });
   it("seasonSectionId: invalid values are rejected only while upload is on", () => {
-    for (const value of ["-3", "0", "1.5", "1e3", "abc", "9007199254740992"]) {
+    for (const value of ["-3", "0", "1.5", "1e3", "abc", String(Number.MAX_SAFE_INTEGER + 1)]) {
       expect(isValidSeasonSectionIdInput(value)).toBe(false);
     }
     expect(isValidSeasonSectionIdInput(" 456 ")).toBe(true);
