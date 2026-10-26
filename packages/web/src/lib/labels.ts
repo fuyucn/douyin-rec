@@ -1,5 +1,5 @@
 /** Shared display-label helpers (quality, schedule, clock formatting). */
-import type { PlatformDTO, Task } from "../api/client";
+import type { PlatformDTO, RoomDTO, Task } from "../api/client";
 import { fmtDateTimeInTz } from "./tz";
 
 export const QUALITY_SHORT: Record<string, string> = {
@@ -93,6 +93,11 @@ export function roomId(room: string): string {
  */
 export function roomDisplayId(room: { room: string; roomSlug?: string | null }): string {
   return room.roomSlug?.trim() || roomId(room.room);
+}
+
+/** Display name: task name > anchor name > compact room identifier. */
+export function roomName(room: RoomDTO): string {
+  return room.recording?.name || room.recording?.anchorName || roomDisplayId(room);
 }
 
 /** 房间可点击链接(详情页「打开直播间」用):规范 https URL。 */

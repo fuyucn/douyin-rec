@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { roomDisplayId } from "../../packages/web/src/lib/labels";
+import { roomDisplayId, roomName } from "../../packages/web/src/lib/labels";
+import type { RoomDTO } from "../../packages/web/src/api/client";
 
 describe("roomDisplayId - compact room identifier for list cells", () => {
   it("prefers the normalized slug over long platform URLs", () => {
@@ -22,5 +23,20 @@ describe("roomDisplayId - compact room identifier for list cells", () => {
       "767116735823", // issue-guard: allow
     );
     expect(roomDisplayId({ room: "123456" })).toBe("123456");
+  });
+});
+
+describe("roomName - shared room display fallback", () => {
+  it("uses the compact room identifier when task and anchor names are absent", () => {
+    const room = {
+      key: "douyin.slug",
+      platform: "douyin",
+      roomSlug: "slug",
+      room: "https://live.douyin.com/123456",
+      recording: null,
+      processing: null,
+    } satisfies RoomDTO;
+
+    expect(roomName(room)).toBe("slug");
   });
 });
