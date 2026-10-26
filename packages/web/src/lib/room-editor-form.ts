@@ -82,15 +82,6 @@ export function seasonSectionIdPatch(raw: string, stored: boolean): number | nul
   return Number(value);
 }
 
-/**
- * Turning upload off hides the season field, so an invalid leftover value would block save with no
- * visible cause. Drop only invalid values; a valid id is kept for the next time upload is enabled.
- */
-export function seasonSectionIdOnUploadToggle(current: string, uploadOn: boolean): string {
-  if (uploadOn || isValidSeasonSectionIdInput(current)) return current;
-  return "";
-}
-
 export function formFromRoom(r: RoomDTO): RoomForm {
   const rec = r.recording;
   const p = r.processing?.pipeline ?? {};
@@ -175,7 +166,7 @@ export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; er
 export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   const sched = splitSchedule(f.schedule);
   if (!sched) return { ok: false, error: "schedule" };
-  if (!isValidSeasonSectionIdInput(f.seasonSectionId)) return { ok: false, error: "seasonSectionId" };
+  if (f.uploadOn && !isValidSeasonSectionIdInput(f.seasonSectionId)) return { ok: false, error: "seasonSectionId" };
   const stored = storedFromForm(ruleFactsOf(f, ctx));
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
   const recording: RoomPayload["recording"] = ctx.hasRecording
@@ -227,7 +218,9 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
             titleTemplate: trimOrUndef(f.titleTemplate),
             submissionTitleTemplate: trimOrUndef(f.submissionTitleTemplate),
             partTitleTemplate: trimOrUndef(f.partTitleTemplate),
-            seasonSectionId: seasonSectionIdPatch(f.seasonSectionId, f.seasonSectionIdStored),
+            seasonSectionId: isValidSeasonSectionIdInput(f.seasonSectionId)
+              ? seasonSectionIdPatch(f.seasonSectionId, f.seasonSectionIdStored)
+              : undefined,
           },
         },
       },

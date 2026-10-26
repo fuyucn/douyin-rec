@@ -25,7 +25,7 @@ import { RuleSwitch, ToggleRow } from "../components/room-form/parts";
 import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
-import { factsOf, formFromRoom, isValidSeasonSectionIdInput, ruleFactsOf, payloadFromForm, seasonSectionIdOnUploadToggle, type RoomContext, type RoomForm } from "../lib/room-editor-form";
+import { factsOf, formFromRoom, isValidSeasonSectionIdInput, ruleFactsOf, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
 import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
 import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
@@ -135,7 +135,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
     // Native min= validation only reaches inputs of the visible step, so re-check the numeric fields here.
     const bad: StepId | null = form.segmentSec.trim() !== "" && Number(form.segmentSec) < 0 ? "record"
       : form.uploadOn && form.tid.trim() !== "" && Number(form.tid) < 1 ? "upload"
-      : !isValidSeasonSectionIdInput(form.seasonSectionId) ? "upload" : null;
+      : form.uploadOn && !isValidSeasonSectionIdInput(form.seasonSectionId) ? "upload" : null;
     if (bad) { setStep(bad); toast(t("room.editor.fieldInvalid"), "error"); return; }
     const r = payloadFromForm(form, ctx);
     if (!r.ok) {
@@ -323,8 +323,7 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                     <>
                       <div>
                         <span className="field-label">{t("room.editor.after")}</span>
-                        <Seg value={form.uploadOn ? "upload" : "archive"}
-                             onChange={(v) => update({ uploadOn: v === "upload", seasonSectionId: seasonSectionIdOnUploadToggle(form.seasonSectionId, v === "upload") })}
+                        <Seg value={form.uploadOn ? "upload" : "archive"} onChange={(v) => update({ uploadOn: v === "upload" })}
                              items={[{ id: "archive", label: t("room.archiveMode") }, { id: "upload", label: t("room.uploadMode") }]} />
                         {!form.uploadOn && <p className="text-xs text-muted mt-1">{t("room.editor.uploadOffHint")}</p>}
                       </div>

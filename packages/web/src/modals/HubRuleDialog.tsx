@@ -276,7 +276,9 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           titleTemplate: form.titleTemplate.trim() || undefined,
           submissionTitleTemplate: form.submissionTitleTemplate.trim() || undefined,
           partTitleTemplate: form.partTitleTemplate.trim() || undefined,
-          seasonSectionId: seasonSectionIdPatch(form.seasonSectionId, form.seasonSectionIdStored),
+          seasonSectionId: isValidSeasonSectionIdInput(form.seasonSectionId)
+            ? seasonSectionIdPatch(form.seasonSectionId, form.seasonSectionIdStored)
+            : undefined,
         },
       },
     };
@@ -286,7 +288,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     ev.preventDefault();
     if (!isEdit && form.sourceTaskId === null) { toast(t("hub.ruleDialog.sourceTaskRequired"), "error"); return; }
     if (workersInvalid) { toast(t("hub.ruleDialog.workersRequired"), "error"); return; }
-    if (!isValidSeasonSectionIdInput(form.seasonSectionId)) {
+    if (form.uploadOn && !isValidSeasonSectionIdInput(form.seasonSectionId)) {
       toast(t("room.editor.fieldInvalid"), "error"); return;
     }
     const sched = splitSchedule(form.schedule);
