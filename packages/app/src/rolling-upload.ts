@@ -56,6 +56,9 @@ import {
   UploadGate,
   isSlotBusy,
   SLOT_BUSY_MARKER,
+  addArchiveToSeasonIfConfigured,
+  seasonCheckpointState,
+  resolveSeasonSectionId,
   type UploadSlot,
   type RollingSegment,
 } from "@drec/core";
@@ -126,13 +129,18 @@ interface RollingState {
    * on it" (wait) from "owner gone mid-upload" (manual). Sidecars written before this field existed never have it.
    */
   closedAt?: number;
+  /**
+   * Season association state (issue #364). Persisted together with the BV so a crash between create and
+   * association is recoverable: "pending" = BV saved, add not confirmed; "done"/"failed" = terminal.
+   */
+  seasonState?: "pending" | "done" | "failed";
   updatedAt: number;
 }
 
 /** Outcome of looking for a predecessor session whose submission this session should continue. */
 type PredecessorLink =
   | { kind: "none" }
-  | { kind: "inherit"; bv: string; parts: number; from: string }
+  | { kind: "inherit"; bv: string; parts: number; from: string; seasonState?: "pending" | "done" | "failed" }
   | { kind: "uncertain"; reason: string };
 
 /** sidecar schema 版本(WAL 字段演进;老文件无此字段 = v1,读时兼容)。 */
@@ -256,6 +264,7 @@ export interface RollingUploaderOpts {
     titleTemplate?: string;
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
+    seasonSectionId?: number;
   };
   timeZone?: string;
   /** 缺省 true(仅自己可见);false = 公开。 */
@@ -305,6 +314,9 @@ export interface RollingUploaderOpts {
  *   - 建稿 BV 经 {@link bv} 暴露,供调用方回传 master(可选)。
  */
 export class RollingUploader {
+  /** Season calls are best-effort and must not delay the next part upload. */
+  private seasonTail: Promise<void> = Promise.resolve();
+  private seasonWriteFails = false;
   private readonly o: RollingUploaderOpts;
   private readonly log: (m: string) => void;
   private readonly gate: UploadGate;
@@ -414,6 +426,57 @@ export class RollingUploader {
   get confirmedIndices(): number[] { return [...this.state.confirmed]; }
   /** 结果不确定段号(转人工;诊断/测试)。 */
   get ambiguousIndices(): number[] { return [...(this.state.ambiguous ?? [])]; }
+
+  /**
+   * Best-effort season association after the BV is already durable. Never throws: a season failure must
+   * not fail the upload or trigger a re-upload. The persisted seasonState makes an interrupted call
+   * recoverable on the next run.
+   */
+  private async associateSeason(bv: string, reconcileFirst: boolean): Promise<void> {
+    if (!this.o.uploadMeta.seasonSectionId) return;
+    if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
+    if (!this.state.sessionBase || !this.segDir) return;
+    const cookies = this.o.cookies ?? process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+    const outcome = await addArchiveToSeasonIfConfigured({
+      cookiesPath: cookies,
+      sectionId: this.o.uploadMeta.seasonSectionId,
+      bvid: bv,
+      reconcileFirst,
+      note: (m) => this.log(m),
+    });
+    const seasonState = seasonCheckpointState(outcome);
+    try {
+      if (this.seasonWriteFails) {
+        this.seasonWriteFails = false;
+        throw new Error("injected season checkpoint write failure");
+      }
+      // Season metadata is best-effort and must never set stateUntrusted: the sidecar still
+      // carries the authoritative upload progress, and losing this field cannot justify
+      // stopping the session's uploads and keeping every source.
+      writeStateFile(this.segDir, { ...this.state, seasonState, updatedAt: this.now() }, this.pid, this.now());
+      this.state = { ...this.state, seasonState, updatedAt: this.now() };
+    } catch (e) {
+      this.log(`[rolling] season 状态落盘失败(保留 pending,不影响上传): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+    }
+  }
+
+  private queueSeason(bv: string, reconcileFirst: boolean): void {
+    if (!this.o.uploadMeta.seasonSectionId) return;
+    if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
+    this.seasonTail = this.seasonTail
+      .then(() => this.associateSeason(bv, reconcileFirst))
+      .catch(() => undefined);
+  }
+
+  /** Drain the best-effort season call at session end; ordinary flushes never wait on it. */
+  drainSeason(): Promise<void> {
+    return this.seasonTail;
+  }
+
+  /** Test seam: make the next season checkpoint write fail (metadata only, uploads continue). */
+  failSeasonWriteOnce(): void {
+    this.seasonWriteFails = true;
+  }
 
   /**
    * 原子写 sidecar(WAL 语义):先写临时文件 → fsync → rename 原子替换。失败**不静默**:
@@ -563,6 +626,11 @@ export class RollingUploader {
     if (pending.length > 0 && !this.state.bv && (await this.takeOverPredecessor()) === "wait") {
       return { uploaded: [], deleted: [], ambiguous: [...ambiguous] };
     }
+    // A crash after the BV was saved but before the season call completed leaves "pending".
+    // Queue it off the part-upload path; the add is idempotent and the flush only waits at the end.
+    if (this.state.bv && this.state.seasonState === "pending") {
+      this.queueSeason(this.state.bv, true);
+    }
 
     const uploaded: number[] = [];
     const deleted: string[] = [];
@@ -666,9 +734,18 @@ export class RollingUploader {
       }
       if (link.kind === "inherit") {
         // Same broadcast (gap <= SAME_BROADCAST_GAP_MS): continue the predecessor's submission.
-        this.state = { ...this.state, bv: link.bv, inheritedParts: link.parts, inheritedFrom: link.from, updatedAt: this.now() };
+        this.state = {
+      ...this.state, bv: link.bv, inheritedParts: link.parts, inheritedFrom: link.from,
+      ...(this.o.uploadMeta.seasonSectionId && link.seasonState === "pending"
+        ? { seasonState: "pending" as const }
+        : {}),
+          updatedAt: this.now(),
+        };
         if (!this.persist()) throw new Error("sidecar 写失败(继承前序稿件),中止上传并保留源");
         this.log(`[rolling] 同一场断流重连:续用前序会话 ${link.from} 的稿件(已有 ${link.parts} 个分P),本会话段改为 append`);
+        if (this.o.uploadMeta.seasonSectionId && link.seasonState === "pending") {
+          this.queueSeason(link.bv, true);
+        }
       }
     }
     if (!this.state.bv) {
@@ -696,9 +773,15 @@ export class RollingUploader {
       }));
       // 把「当段已确认」并入同一次写:建稿成功即确认段 0,防止 bv 与 confirmed 分两次写之间崩溃。
       confirmed.add(seg.index);
-      this.state = { ...this.state, bv, uploading: undefined, confirmed: [...confirmed], updatedAt: this.now() };
+      // Persist the BV BEFORE the best-effort season call: a kill during that call must not lose the BV.
+      this.state = {
+        ...this.state, bv, uploading: undefined, confirmed: [...confirmed],
+        ...(this.o.uploadMeta.seasonSectionId ? { seasonState: "pending" as const } : {}),
+        updatedAt: this.now(),
+      };
       if (!this.persist()) throw new Error(`sidecar 写失败(建稿结果 BV=${bv}),状态不可信,保留源`);
       this.log(`[rolling] 段 ${seg.index} 建稿 BV=${bv}`);
+      this.queueSeason(bv, false);
       return;
     }
     const bv = this.state.bv;
@@ -805,7 +888,7 @@ export class RollingUploader {
     if (!s.bv) return { kind: "uncertain", reason: `${prev.base} 无稿件号` };
     const inherited = s.inheritedParts ?? 0;
     if (!Number.isInteger(inherited) || inherited < 0) return { kind: "uncertain", reason: `${prev.base} 继承分P数非法` };
-    return { kind: "inherit", bv: s.bv, parts: inherited + s.confirmed.length, from: prev.base };
+    return { kind: "inherit", bv: s.bv, parts: inherited + s.confirmed.length, from: prev.base, seasonState: s.seasonState };
   }
 
   /** Is the process that owned predecessor sidecar `s` possibly still running? Unknown owner → judged by file activity. */
@@ -878,6 +961,7 @@ export class RollingUploader {
     if (!peer.persist()) return this.waitForPredecessor(`${prev.base} 的 sidecar 无法写入`);
     this.log(`[rolling] 接管前序会话 ${prev.base} 的 ${leftovers.length} 个未确认分段(owner 已退出)`);
     await peer.flush({ recordingActive: false });
+    await peer.drainSeason();
     if (peer.stateUntrusted) return this.waitForPredecessor(`${prev.base} 的 sidecar 写失败`);
     if (peer.hasUploadablePending()) return this.waitForPredecessor(`${prev.base} 仍有分段待上传(槽忙/未完成)`);
     // The claim above stamped this live pid as owner; close it so the master does not keep waiting on it.
@@ -972,7 +1056,7 @@ function resolveRollingUploadMetaInner(
   const ruleActive = rule?.enabled !== false && (mode === "upload" || mode === "rolling");
   let uploadDefaults: {
     tag?: string; tid?: number; desc?: string; titleTemplate?: string;
-    submissionTitleTemplate?: string; partTitleTemplate?: string;
+    submissionTitleTemplate?: string; partTitleTemplate?: string; seasonSectionId?: number;
   } = {};
   try {
     // `serve` may be running with --hub-config, settings, or inline JSON. The child record
@@ -992,6 +1076,7 @@ function resolveRollingUploadMetaInner(
     /* 无 hub.config → 用规则/内置默认 */
   }
   const up = ruleActive ? rule?.pipeline?.upload : undefined;
+  const seasonSectionId = resolveSeasonSectionId(up?.seasonSectionId, uploadDefaults.seasonSectionId);
   return {
     meta: {
       tag: up?.tag || uploadDefaults.tag || "直播,录像",
@@ -1000,6 +1085,7 @@ function resolveRollingUploadMetaInner(
       titleTemplate: (up?.titleTemplate ?? "").trim() || uploadDefaults.titleTemplate,
       submissionTitleTemplate: (up?.submissionTitleTemplate ?? "").trim() || uploadDefaults.submissionTitleTemplate,
       partTitleTemplate: (up?.partTitleTemplate ?? "").trim() || uploadDefaults.partTitleTemplate,
+      ...(seasonSectionId ? { seasonSectionId } : {}),
     },
     // 可见性:规则 upload.private 缺省 true(= 仅自己可见)。**保守默认 true**(公开是不可逆的曝光)。
     private: up?.private !== false,
@@ -1031,13 +1117,14 @@ export function resolveRollingUploadMeta(
 export function resolveStreamUploadMeta(
   platform: string,
   roomSlug: string,
-): { tid: number; tag: string; desc?: string; partTitleTemplate?: string; private: boolean } {
+): { tid: number; tag: string; desc?: string; partTitleTemplate?: string; seasonSectionId?: number; private: boolean } {
   const { meta, private: isPrivate } = resolveRollingUploadMetaInner(platform, roomSlug);
   return {
     tid: meta.tid,
     tag: meta.tag,
     ...(meta.desc ? { desc: meta.desc } : {}),
     ...(meta.partTitleTemplate ? { partTitleTemplate: meta.partTitleTemplate } : {}),
+    ...(meta.seasonSectionId ? { seasonSectionId: meta.seasonSectionId } : {}),
     private: isPrivate,
   };
 }
@@ -1205,8 +1292,10 @@ export function makeRollingUploadHookFactory(o: {
         void uploader.flush({ recordingActive: true }).catch(() => undefined);
       },
       onSessionEnd: async (): Promise<void> => {
-        try { await uploader.flush({ recordingActive: false }); }
-        finally { await uploader.markClosed(); }
+        try {
+          await uploader.flush({ recordingActive: false });
+          await uploader.drainSeason();
+        } finally { await uploader.markClosed(); }
       },
     };
   };

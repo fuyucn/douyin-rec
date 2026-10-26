@@ -6,7 +6,27 @@ import {
   RollingUploader, looksLikeRecordProcess, makeRollingUploadHookFactory, resolveRollingUploadMeta, resolveStreamUploadMeta,
   resolveStreamUploadTitle, resolveStreamPartTitle,
 } from "./rolling-upload.js";
-import { UploadGate, rollingUploadSingleNode } from "@drec/core";
+import { UploadGate, rollingUploadSingleNode, type SeasonAddOutcome } from "@drec/core";
+
+const seasonHook = vi.hoisted(() => ({
+  calls: [] as Array<{ bvid: string; persistedBv?: string; persistedState?: string; reconcileFirst?: boolean }>,
+  onCall: undefined as undefined | ((o: { bvid?: string }) => void | Promise<void>),
+  result: undefined as SeasonAddOutcome | undefined,
+}));
+vi.mock("@drec/core", async (orig) => {
+  const m = await orig<typeof import("@drec/core")>();
+  return {
+    ...m,
+    addArchiveToSeasonIfConfigured: async (o: Parameters<typeof m.addArchiveToSeasonIfConfigured>[0]) => {
+      const call = { bvid: String(o.bvid ?? ""), reconcileFirst: o.reconcileFirst };
+      seasonHook.calls.push(call);
+      await seasonHook.onCall?.(o);
+      return seasonHook.result ?? (o.sectionId
+        ? { status: "added" as const, sectionId: o.sectionId, aid: 1, cid: 1, title: "t" }
+        : { status: "skipped" as const, reason: "season section id is off" });
+    },
+  };
+});
 // 假稿件号用拼接构造:隐私检查会拦裸 BV 号字面量。
 const FAKE_BV = ["B", "V", "1fake"].join("");
 
@@ -61,7 +81,77 @@ function writeSidecar(dir: string, overrides: Record<string, unknown>): void {
 }
 
 describe("RollingUploader — 边录边传录制端执行", () => {
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => { vi.useRealTimers(); seasonHook.onCall = undefined; seasonHook.result = undefined; });
+
+  it("seasonSectionId: BV + pending are persisted before the association call", async () => {
+    seasonHook.calls.length = 0;
+    const { dir, paths } = mkSession(segNames(1));
+    const up = vi.fn(async () => FAKE_BV);
+    seasonHook.onCall = () => {
+      const st = JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { bv?: string; seasonState?: string };
+      const call = seasonHook.calls.at(-1)!;
+      call.persistedBv = st.bv;
+      call.persistedState = st.seasonState;
+    };
+    try {
+      const u = new RollingUploader({
+        room,
+        uploadMeta: { ...uploadMeta, seasonSectionId: 456 },
+        gate: new FakeGate(), uploadPlainRaw: up, appendGroupRaw: noopAppend, removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+      });
+      u.noteSegment(paths[0]);
+      await u.flush({ recordingActive: false });
+      await u.drainSeason();
+      expect(seasonHook.calls).toHaveLength(1);
+      expect(seasonHook.calls[0]).toMatchObject({ bvid: FAKE_BV, persistedBv: FAKE_BV, persistedState: "pending" });
+      expect((JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { seasonState?: string }).seasonState).toBe("done");
+    } finally {
+      seasonHook.onCall = undefined;
+    }
+  });
+
+  it("a season checkpoint write failure keeps uploading the next parts", async () => {
+    seasonHook.calls.length = 0;
+    const { paths } = mkSession(segNames(3));
+    const u = new RollingUploader({
+      room,
+      uploadMeta: { ...uploadMeta, seasonSectionId: 456 },
+      gate: new FakeGate(), uploadPlainRaw: async () => FAKE_BV, appendGroupRaw: noopAppend,
+      removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+    });
+    u.failSeasonWriteOnce();
+    paths.forEach((p) => u.noteSegment(p));
+    const r = await u.flush({ recordingActive: false });
+    await u.drainSeason();
+    // Losing the season metadata must not stop the session: the authoritative upload state is
+    // already on disk, so the appends still run and the sources are still cleaned up.
+    expect(r.uploaded.sort()).toEqual([0, 1, 2]);
+    expect(r.ambiguous).toEqual([]);
+    expect(seasonHook.calls).toHaveLength(1);
+    expect(u.bv).toBe(FAKE_BV);
+  });
+
+  it("flush does not wait for a slow season association; session end drains it", async () => {
+    seasonHook.calls.length = 0;
+    const { dir, paths } = mkSession(segNames(1));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    seasonHook.onCall = async () => { await gate; };
+    const u = new RollingUploader({
+      room,
+      uploadMeta: { ...uploadMeta, seasonSectionId: 456 },
+      gate: new FakeGate(), uploadPlainRaw: async () => FAKE_BV, appendGroupRaw: noopAppend,
+      removeFile: noRemove, now: futureNow, minSegmentSec: 0,
+    });
+    u.noteSegment(paths[0]);
+    await u.flush({ recordingActive: false });
+    expect(seasonHook.calls).toHaveLength(1);
+    expect((JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { seasonState?: string }).seasonState).toBe("pending");
+    release();
+    await u.drainSeason();
+    expect((JSON.parse(readFileSync(sidecarPath(dir), "utf-8")) as { seasonState?: string }).seasonState).toBe("done");
+    seasonHook.onCall = undefined;
+  });
 
   it("只处理封口段:有后继段的旧段上传+删,正在写的最近段不动", async () => {
     const { paths } = mkSession(segNames(3));
@@ -442,7 +532,7 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
     });
     const plain = opts.plain ?? vi.fn(async () => FAKE_BV);
     const append = opts.append ?? vi.fn(async () => {});
-    const u = new RollingUploader({ room, uploadMeta, gate: new FakeGate(), uploadPlainRaw: plain, appendGroupRaw: append, countPartsRaw: async () => 2, removeFile: noRemove, now: () => A_LAST_MS, minSegmentSec: 0 });
+    const u = new RollingUploader({ room, uploadMeta: { ...uploadMeta, seasonSectionId: 456 }, gate: new FakeGate(), uploadPlainRaw: plain, appendGroupRaw: append, countPartsRaw: async () => 2, removeFile: noRemove, now: () => A_LAST_MS, minSegmentSec: 0 });
     a.forEach((p) => u.noteSegment(p));
     await u.flush({ recordingActive: false });
     return { dir, plain, append };
@@ -842,6 +932,29 @@ describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config >
     expect(resolveStreamUploadMeta("douyin", "999")).toEqual({ tid: 17, tag: "默认标签", partTitleTemplate: undefined, private: true });
   });
 
+  it("seasonSectionId 走规则 > 默认,非法值忽略", () => {
+    writeFileSync(path.join(root, "config", "hub.config.json"), JSON.stringify({
+      uploadDefaults: { tag: "默认标签", tid: 17, seasonSectionId: 321 },
+    }), "utf-8");
+    writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      pipeline: { upload: { mode: "rolling", tag: "规则标签", tid: 21, seasonSectionId: 456 } },
+    }), "utf-8");
+    expect(resolveRollingUploadMeta("douyin", "123").meta.seasonSectionId).toBe(456);
+    expect(resolveStreamUploadMeta("douyin", "123").seasonSectionId).toBe(456);
+
+    writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      pipeline: { upload: { mode: "rolling", tag: "规则标签", tid: 21, seasonSectionId: 0 } },
+    }), "utf-8");
+    expect(resolveRollingUploadMeta("douyin", "123").meta.seasonSectionId).toBe(321);
+    expect(resolveStreamUploadMeta("douyin", "123").seasonSectionId).toBe(321);
+
+    writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      pipeline: { upload: { mode: "rolling", tag: "规则标签", tid: 21, seasonSectionId: null } },
+    }), "utf-8");
+    expect(resolveRollingUploadMeta("douyin", "123").meta.seasonSectionId).toBeUndefined();
+    expect(resolveStreamUploadMeta("douyin", "123").seasonSectionId).toBeUndefined();
+  });
+
   it("禁用规则 / 仅 stage 规则不提供上传 metadata(防止私稿被旧规则改成公开)", () => {
     writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
       enabled: false,
@@ -1019,6 +1132,63 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
   const names = (ap: { mock: { calls: unknown[][] } }): string[] =>
     (ap.mock.calls as unknown as Array<[{ files: string[] }]>).map((c) => path.basename(c[0].files[0]!));
   const readA = (f: Fixture): Record<string, unknown> => JSON.parse(readFileSync(path.join(f.dir, `${A_BASE}.rolling.json`), "utf-8"));
+
+  const seasonUploaderB = (f: Fixture, append: ReturnType<typeof vi.fn>): RollingUploader =>
+    new RollingUploader({
+      room, uploadMeta: { ...uploadMeta, seasonSectionId: 456 }, gate: new FakeGate(), pid: B_PID,
+      stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove, isPidAlive: () => false,
+      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      now: () => f.bStartMs + 3_600_000,
+    });
+
+  it("inherits a predecessor's pending season state and retries with membership preflight", async () => {
+    seasonHook.calls.length = 0;
+    const f = setup({ sidecar: { seasonState: "pending" } });
+    const append = vi.fn(async () => {});
+    const u = seasonUploaderB(f, append);
+    seasonHook.onCall = async () => {
+      const saved = readA(f) as { bv?: string; seasonState?: string };
+      const call = seasonHook.calls.at(-1)!;
+      call.persistedBv = saved.bv;
+      call.persistedState = saved.seasonState;
+    };
+    try {
+      f.bPaths.forEach((p) => u.noteSegment(p));
+      await u.flush({ recordingActive: false });
+      await u.drainSeason();
+      expect(seasonHook.calls).toHaveLength(1);
+      expect(seasonHook.calls[0]).toMatchObject({
+        bvid: FAKE_BV, persistedBv: FAKE_BV, persistedState: "pending", reconcileFirst: true,
+      });
+      expect(readA(f).seasonState).toBe("done");
+    } finally { seasonHook.onCall = undefined; }
+  });
+
+  it("keeps a retryable predecessor season state pending across takeover and inheritance", async () => {
+    seasonHook.calls.length = 0;
+    seasonHook.result = { status: "failed", sectionId: 456, error: "timeout", retryable: true };
+    const f = setup({ sidecar: { seasonState: "pending" } });
+    const append = vi.fn(async () => {});
+    const u = seasonUploaderB(f, append);
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    await u.drainSeason();
+    expect(seasonHook.calls.length).toBeGreaterThanOrEqual(2);
+    expect(seasonHook.calls.at(-1)).toMatchObject({ bvid: FAKE_BV, reconcileFirst: true });
+    expect((JSON.parse(readFileSync(path.join(f.dir, `${B_BASE}.rolling.json`), "utf-8")) as { seasonState?: string }).seasonState).toBe("pending");
+  });
+
+  it("does not retroactively associate a legacy predecessor without season state", async () => {
+    seasonHook.calls.length = 0;
+    const f = setup();
+    const append = vi.fn(async () => {});
+    const u = seasonUploaderB(f, append);
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    await u.drainSeason();
+    expect(seasonHook.calls).toHaveLength(0);
+    expect((JSON.parse(readFileSync(path.join(f.dir, `${B_BASE}.rolling.json`), "utf-8")) as { seasonState?: string }).seasonState).toBeUndefined();
+  });
 
   it("restart with A's 2 sealed unconfirmed segments: B appends A1, A2 then B0 (A's parts before B's)", async () => {
     const f = setup();

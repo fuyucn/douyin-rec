@@ -245,10 +245,31 @@ export function buildZeroDiskDelivery(o: {
         ...(meta.titleTemplate ? { titleTemplate: meta.titleTemplate } : {}),
         ...(meta.submissionTitleTemplate ? { submissionTitleTemplate: meta.submissionTitleTemplate } : {}),
         ...(meta.partTitleTemplate ? { partTitleTemplate: meta.partTitleTemplate } : {}),
+        ...(meta.seasonSectionId ? { seasonSectionId: meta.seasonSectionId } : {}),
       },
       accountKey,
       ...(o.workerDataRoot ? { credentialPath: posix.join(o.workerDataRoot, "config", "biliup", "cookies.json") } : {}),
     },
+  };
+}
+
+/** Stream-upload metadata for a run: a managed delivery wins over the node's local rule/default. */
+export interface ZeroDiskStreamMeta {
+  tid: number;
+  tag: string;
+  desc?: string;
+  seasonSectionId?: number;
+  private: boolean;
+}
+
+export function zeroDiskStreamMeta(delivery: import("@drec/core").ZeroDiskDelivery | undefined, fallback: ZeroDiskStreamMeta): ZeroDiskStreamMeta {
+  if (!delivery) return fallback;
+  return {
+    tid: delivery.meta.tid,
+    tag: delivery.meta.tag,
+    private: delivery.meta.private,
+    ...(delivery.meta.desc ? { desc: delivery.meta.desc } : {}),
+    ...(delivery.meta.seasonSectionId ? { seasonSectionId: delivery.meta.seasonSectionId } : {}),
   };
 }
 

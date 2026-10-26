@@ -19,7 +19,7 @@
  * 由分层保证而不是靠人记得。processors 只 re-export 它(保持旧导入点),不反向依赖。
  */
 import { existsSync, readFileSync } from "node:fs";
-import { biliupCookieHeader } from "@drec/core";
+import { biliupCookieHeader, biliupCsrf } from "@drec/core";
 
 /**
  * Read biliup cookies.json into a Cookie header, or null when the file is missing/unreadable.
@@ -277,15 +277,10 @@ export interface FindArchiveResult {
   raw: Record<string, unknown>;
 }
 
-/** 从已解析的 biliup cookies.json 取 csrf(bili_jct)。 */
+/** 从已解析的 biliup cookies.json 取 csrf(bili_jct);解析规则与 core 同源。 */
 function csrfOf(data: unknown): string {
-  const root = data as { cookie_info?: { cookies?: unknown }; cookies?: unknown } | null;
-  const raw = root?.cookie_info?.cookies ?? root?.cookies ?? data;
-  if (!Array.isArray(raw)) throw new Error("cookies 解析不到 cookie 列表,无法提交(登录态不完整)");
-  const jct = raw
-    .map((c) => c as { name?: unknown; value?: unknown })
-    .find((c) => c?.name === "bili_jct")?.value;
-  if (typeof jct !== "string" || !jct) throw new Error("cookies 里没有 bili_jct,无法提交(登录态不完整)");
+  const jct = biliupCsrf(data);
+  if (!jct) throw new Error("cookies 里没有 bili_jct,无法提交(登录态不完整)");
   return jct;
 }
 

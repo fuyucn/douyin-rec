@@ -133,7 +133,9 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
     if (managed) return;
     // Native min= validation only reaches inputs of the visible step, so re-check the numeric fields here.
     const bad: StepId | null = form.segmentSec.trim() !== "" && Number(form.segmentSec) < 0 ? "record"
-      : form.uploadOn && form.tid.trim() !== "" && Number(form.tid) < 1 ? "upload" : null;
+      : form.uploadOn && form.tid.trim() !== "" && Number(form.tid) < 1 ? "upload"
+      : form.uploadOn && form.seasonSectionId.trim() !== ""
+        && !(Number.isInteger(Number(form.seasonSectionId)) && Number(form.seasonSectionId) > 0) ? "upload" : null;
     if (bad) { setStep(bad); toast(t("room.editor.fieldInvalid"), "error"); return; }
     const r = payloadFromForm(form, ctx);
     if (!r.ok) { toast(t("rooms.scheduleInvalid"), "error"); return; }

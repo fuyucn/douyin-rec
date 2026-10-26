@@ -17,6 +17,7 @@ import {
   makeNodeSubmitGate,
   planZeroDiskSpec,
   resolveNodeUploadCredential,
+  zeroDiskStreamMeta,
   writeZeroDiskReceipt,
   writeZeroDiskStatus,
   zeroDiskNodeDir,
@@ -82,6 +83,19 @@ describe("resolveNodeUploadCredential — node-local first, delivered path as fa
   it("an env path that does not exist is skipped, not trusted", () => {
     const r = resolveNodeUploadCredential({ env: { BILIUP_COOKIE: "/nope" }, nodeDefaultPath: "/d", exists: (p) => p === "/d" });
     expect(r?.source).toBe("node-default");
+  });
+});
+
+describe("zeroDiskStreamMeta", () => {
+  it("a managed delivery wins and carries seasonSectionId; without one the local meta is used", () => {
+    const delivery = {
+      v: 1 as const,
+      meta: { tid: 17, tag: "managed", private: false, seasonSectionId: 456 },
+      accountKey: "bilibili:1",
+    };
+    const fallback = { tid: 21, tag: "local", private: true, seasonSectionId: 123 };
+    expect(zeroDiskStreamMeta(delivery, fallback)).toEqual({ tid: 17, tag: "managed", private: false, seasonSectionId: 456 });
+    expect(zeroDiskStreamMeta(undefined, fallback)).toBe(fallback);
   });
 });
 

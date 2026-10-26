@@ -105,6 +105,8 @@ export interface HubPipelineConfig {
     titleTemplate?: string;
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
+    /** Optional Bilibili season section id; added after a successful P1 create. Empty = off. */
+    seasonSectionId?: number | null;
   };
 }
 
@@ -789,6 +791,7 @@ export interface NodePipelineSpec {
     titleTemplate?: string;
     submissionTitleTemplate?: string;
     partTitleTemplate?: string;
+    seasonSectionId?: number;
   };
   uploadPrivate: boolean;
   timeZone?: string;
@@ -862,6 +865,11 @@ export interface NodePipelineResultFile {
   /** 失败原因(ok=false)。 */
   error?: string;
   /**
+   * Best-effort Bilibili season association state. "pending" is written with the BV before the
+   * association call, so a killed executor can retry after re-entry instead of losing the intent.
+   */
+  seasonState?: "pending" | "done" | "failed";
+  /**
    * 上传子步骤(plan 038,issue #204)。**只是可观测信息**:master 的成败 / 重试判定一律只看 `phase`,
    * 旧 master 不认识该字段也无影响;`phase` 词表不变(新增 phase 会被旧 master 归一成 null → 误判「确认没成」)。
    * 旧 bundle 不写 → 缺省 = 未知。
@@ -903,6 +911,9 @@ export function normalizeNodeResultFile(parsed: unknown): NodePipelineResultFile
     confirmedParts: Number.isInteger(p.confirmedParts) && (p.confirmedParts as number) >= 0 ? p.confirmedParts : undefined,
     intentPart: Number.isInteger(p.intentPart) && (p.intentPart as number) >= 1 ? p.intentPart : undefined,
     error: typeof p.error === "string" ? p.error : undefined,
+    seasonState: p.seasonState === "pending" || p.seasonState === "done" || p.seasonState === "failed"
+      ? p.seasonState
+      : undefined,
     step: NODE_UPLOAD_STEPS.includes(p.step as NodeUploadStep) ? p.step : undefined,
     atMs: typeof p.atMs === "number" ? p.atMs : 0,
   };

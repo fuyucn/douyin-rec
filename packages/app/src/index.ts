@@ -67,7 +67,7 @@ export { refreshLocalRollingEffective, rollingSpecFields } from "./rolling-effec
 // Zero-disk on a side node (issue #331): node preflight / status + receipt files / master-side delivery object builder.
 export {
   zeroDiskNodePreflight, resolveNodeUploadCredential, writeZeroDiskStatus, writeZeroDiskReceipt, buildZeroDiskReport,
-  buildZeroDiskDelivery, planZeroDiskSpec, createZeroDiskReporter, zeroDiskNodeDir, ZERO_DISK_RECEIPT_TTL_MS, preflightManagedZeroDiskTask, makeNodeSubmitGate,
+  buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, createZeroDiskReporter, zeroDiskNodeDir, ZERO_DISK_RECEIPT_TTL_MS, preflightManagedZeroDiskTask, makeNodeSubmitGate,
 } from "./zero-disk-node.js";
 export type { ZeroDiskPreflight, ZeroDiskDeliveryBuild, ZeroDiskCredentialSource } from "./zero-disk-node.js";
 export type { RollingUploaderOpts } from "./rolling-upload.js";

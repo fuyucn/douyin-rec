@@ -23,7 +23,7 @@ describe("procQueueDbPath", () => {
 });
 
 describe("迁移", () => {
-  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): user_version=4, data kept, tables present", () => {
+  it("repeated first open is idempotent (same-process connections; real multi-process lives in store-multiproc.test.ts): user_version=5, data kept, tables present", () => {
     const s1 = env.open();
     const r = s1.enqueue(env.job("a.ts"), roots());
     expect(r.state).toBe("pending");
@@ -31,7 +31,7 @@ describe("迁移", () => {
     const s3 = env.open();
     expect(s3.get(r.jobId)?.state).toBe("pending");
     const raw = new DatabaseSync(env.dbPath);
-    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(4);
+    expect((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(5);
     const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((t) => t.name);
     expect(tables).toEqual(expect.arrayContaining(["proc_jobs", "proc_runner_lease", "proc_order_cursor", "proc_lease_reservation"]));
     raw.close();
@@ -619,7 +619,9 @@ describe("v2 -> v3 migration + progress (plan 038 PR5)", () => {
     const s = env.open();
     const cols = new Set((new DatabaseSync(env.dbPath).prepare("PRAGMA table_info(proc_jobs)").all() as Array<{ name: string }>).map((c) => c.name));
     expect(cols.has("progress")).toBe(true);
+    expect(cols.has("seasonState")).toBe(true);
     expect(s.get(r.jobId)?.progress).toBeNull();
+    expect(s.get(r.jobId)?.seasonState).toBeNull();
     s.close();
   });
 
@@ -713,7 +715,7 @@ describe("enqueueBatch and order generation (plan 038 T01)", () => {
     s.close();
   });
 
-  it("setters: updateStep only touches running rows; setBv/setChildPid/clearChildPid", () => {
+  it("setters: updateStep only touches running rows; setBv/setSeasonState/setChildPid/clearChildPid", () => {
     const s = env.open();
     lease(s, "A", "fake");
     const id = s.enqueue(env.job("a.ts"), roots()).jobId;
@@ -722,6 +724,12 @@ describe("enqueueBatch and order generation (plan 038 T01)", () => {
     expect(s.updateStep(id, "gate_wait")).toBe(true);
     expect(s.get(id)?.step).toBe("gate_wait");
     expect(s.setBv(id, "BV1x")).toBe(true);
+    expect(s.setSeasonState(id, "pending")).toBe(true);
+    expect(s.get(id)?.seasonState).toBe("pending");
+    expect(s.setBvAndSeasonState(id, "BV1atomic", "pending")).toBe(true);
+    expect(s.get(id)).toMatchObject({ bv: "BV1atomic", seasonState: "pending" });
+    expect(s.setSeasonState(id, "done")).toBe(true);
+    expect(s.get(id)?.seasonState).toBe("done");
     expect(s.setChildPid(id, 123, "start")).toBe(true);
     expect(s.get(id)?.childPid).toBe(123);
     expect(s.clearChildPid(id)).toBe(true);

@@ -53,6 +53,8 @@ export interface BiliupMeta {
   /** Part title template + render context; the node uploads each part under its rendered title. */
   partTitleTemplate?: string;
   titleCtx?: TitleContext;
+  /** Optional Bilibili season section id; added by the node after its P1 create succeeds. */
+  seasonSectionId?: number;
 }
 
 export type UploadDispatch =

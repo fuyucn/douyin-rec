@@ -42,6 +42,9 @@ export interface RoomForm {
   titleTemplate: string;
   submissionTitleTemplate: string;
   partTitleTemplate: string;
+  seasonSectionId: string;
+  /** Whether the stored rule already carries the key (including an explicit null). */
+  seasonSectionIdStored: boolean;
   clStageSourceAfterMerge: boolean;
   clSourceAfterDone: boolean;
   clKeepArchive: boolean;
@@ -97,6 +100,8 @@ export function formFromRoom(r: RoomDTO): RoomForm {
     titleTemplate: p.upload?.titleTemplate || DEFAULT_TITLE_TEMPLATES.titleTemplate,
     submissionTitleTemplate: p.upload?.submissionTitleTemplate || DEFAULT_TITLE_TEMPLATES.submissionTitleTemplate,
     partTitleTemplate: p.upload?.partTitleTemplate || DEFAULT_TITLE_TEMPLATES.partTitleTemplate,
+    seasonSectionId: p.upload?.seasonSectionId ? String(p.upload.seasonSectionId) : "",
+    seasonSectionIdStored: !!p.upload && Object.prototype.hasOwnProperty.call(p.upload, "seasonSectionId"),
     clStageSourceAfterMerge: p.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: p.cleanup?.sourceAfterDone === true,
     clKeepArchive: keepArchiveFromStored(p.cleanup?.stageAfterDone),
@@ -199,6 +204,9 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
             titleTemplate: trimOrUndef(f.titleTemplate),
             submissionTitleTemplate: trimOrUndef(f.submissionTitleTemplate),
             partTitleTemplate: trimOrUndef(f.partTitleTemplate),
+            seasonSectionId: f.seasonSectionId.trim()
+              ? Number(f.seasonSectionId)
+              : (f.seasonSectionIdStored ? null : undefined),
           },
         },
       },

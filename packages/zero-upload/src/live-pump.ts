@@ -49,7 +49,13 @@ import {
   type UposPart,
   type StudioVideo,
 } from "./upos-stream.js";
-import { isSameBroadcastGap, isUploadRateLimited, type DanmuMessage } from "@drec/core";
+import {
+  addArchiveToSeasonIfConfigured,
+  seasonCheckpointState,
+  isSameBroadcastGap,
+  isUploadRateLimited,
+  type DanmuMessage,
+} from "@drec/core";
 import { ffprobeDuration, ffprobeDtsGap, type DtsGap } from "@drec/post-process";
 
 export const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
@@ -253,6 +259,11 @@ export interface LivePumpState {
   /** Archive identity; absent until the first part is submitted. */
   bvid?: string;
   aid?: number;
+  /**
+   * Season association state (issue #364). Written together with the BV, before the best-effort
+   * season call, so a crash between create and association is recoverable on restart.
+   */
+  seasonState?: "pending" | "done" | "failed";
   /** Completed parts in submit order. Spool is deleted only after a part is confirmed. */
   parts: Array<{
     index: number;
@@ -460,6 +471,8 @@ export interface LivePumpSessionOpts {
   line?: string;
   /** Chunk progress observer for resubmission. */
   onChunk?: (streamedBytes: number, chunksDone: number) => void;
+  /** Optional Bilibili season section id; added after the first successful create. */
+  seasonSectionId?: number;
   /** Error-level alert channel (same notifier as the other zero-disk alerts). Fired at most once per start. */
   onAlert?: (message: string) => void;
   /**
@@ -492,6 +505,8 @@ export class LivePumpSession {
   private state: LivePumpState;
   private readonly log: (msg: string) => void;
   private stateUntrusted = false;
+  private seasonTail: Promise<void> = Promise.resolve();
+  private seasonWriteFails = false;
 
   constructor(private readonly o: LivePumpSessionOpts) {
     mkdirSync(o.spoolDir, { recursive: true });
@@ -596,11 +611,13 @@ export class LivePumpSession {
     return { ok: true, bvid: submitted.bvid, aid: submitted.aid };
   }
 
-  private persist(): void {
+  private persist(opts?: { seasonOnly?: boolean }): void {
     try {
       writeLivePumpState(this.statePath, this.state);
     } catch (e) {
-      this.stateUntrusted = true;
+      // Only authoritative upload state fails closed. The season field is metadata: losing it must
+      // never make confirmed parts untrusted and refuse the next part.
+      if (!opts?.seasonOnly) this.stateUntrusted = true;
       throw e;
     }
   }
@@ -762,6 +779,9 @@ export class LivePumpSession {
       ...this.state,
       bvid: result.bvid ?? this.state.bvid,
       aid: result.aid ?? this.state.aid,
+      // P1 create: the season call has NOT run yet. Persist "pending" now so a kill before it
+      // completes is reconciled on restart instead of silently skipping the association.
+      ...(pending.kind === "create" && this.o.seasonSectionId ? { seasonState: "pending" as const } : {}),
       parts: existing
         ? this.state.parts.map((p) => p.index === input.index ? { ...p, confirmed: true } : p)
         : [...this.state.parts, {
@@ -777,6 +797,9 @@ export class LivePumpSession {
       return { ok: false, error: `cannot persist confirmation: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
     }
     this.cleanupConfirmed();
+    if (pending.kind === "create" && this.o.seasonSectionId) {
+      this.queueSeason(doFetch, false);
+    }
     return { ok: true, bvid: this.state.bvid, aid: this.state.aid };
   }
 
@@ -834,7 +857,9 @@ export class LivePumpSession {
       } catch (e) {
         return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 300) };
       }
-      if (ok) return { ok: true, ...(bvid ? { bvid } : {}), ...(aid ? { aid } : {}) };
+      if (ok) {
+        return { ok: true, ...(bvid ? { bvid } : {}), ...(aid ? { aid } : {}) };
+      }
       const detail = `${pending.kind} failed: ${JSON.stringify(raw).slice(0, 300)}`;
       lastError = detail;
       if (!isUploadRateLimited(detail)) return { ok: false, error: detail };
@@ -847,6 +872,63 @@ export class LivePumpSession {
       await sleep(waitMs);
     }
     return { ok: false, error: `${lastError}(限流重试 ${maxAttempts} 次后仍失败)` };
+  }
+
+  /**
+   * Best-effort season association AFTER the BV is persisted. Never throws; records the outcome in
+   * the state so an interrupted or failed call is visible and can be reconciled on restart.
+   */
+  private async associateSeason(doFetch: typeof fetch, reconcileFirst: boolean): Promise<void> {
+    if (!this.o.seasonSectionId) return;
+    if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
+    const outcome = await addArchiveToSeasonIfConfigured({
+      cookiesPath: this.o.cookiesPath,
+      sectionId: this.o.seasonSectionId,
+      ...(this.state.aid ? { aid: this.state.aid } : {}),
+      ...(this.state.bvid ? { bvid: this.state.bvid } : {}),
+      reconcileFirst,
+      fetchImpl: doFetch,
+      note: (m) => this.log(m),
+    });
+    this.state = {
+      ...this.state,
+      seasonState: seasonCheckpointState(outcome),
+      updatedAt: Date.now(),
+    };
+    try {
+      if (this.seasonWriteFails) {
+        this.seasonWriteFails = false;
+        throw new Error("injected season checkpoint write failure");
+      }
+      this.persist({ seasonOnly: true });
+    } catch (e) {
+      this.log(`[live-pump] season 状态落盘失败(保留 pending,不影响后续分 P): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+    }
+  }
+
+  private queueSeason(doFetch: typeof fetch, reconcileFirst: boolean): void {
+    if (this.state.seasonState === "done" || this.state.seasonState === "failed") return;
+    this.seasonTail = this.seasonTail
+      .then(() => this.associateSeason(doFetch, reconcileFirst))
+      .catch((e) => {
+        this.log(`[live-pump] season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      });
+  }
+
+  /** Wait for the best-effort season call at a run boundary, never on the part-upload path. */
+  drainSeason(): Promise<void> {
+    return this.seasonTail;
+  }
+
+  /** Test seam: make the next season checkpoint write fail (metadata only, parts still accepted). */
+  failSeasonWriteOnce(): void {
+    this.seasonWriteFails = true;
+  }
+
+  /** Restart hook: retry only an explicit pending checkpoint. */
+  async reconcileSeason(fetchImpl?: typeof fetch): Promise<void> {
+    if (!this.o.seasonSectionId || this.state.seasonState !== "pending") return;
+    await this.associateSeason(fetchImpl ?? this.o.fetchImpl ?? fetch, true);
   }
 
   private cleanupConfirmed(): void {
@@ -1510,6 +1592,8 @@ export interface RunLivePumpOptions {
   titleForLive?: (liveTitle: string) => string;
   tid: number;
   tag: string;
+  /** Optional Bilibili season section id; added after the first successful create. */
+  seasonSectionId?: number;
   /** Archive description; omitted/empty = no description. */
   desc?: string;
   private?: boolean;
@@ -1724,6 +1808,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       tid: o.tid,
       tag: o.tag,
       ...(o.desc ? { desc: o.desc } : {}),
+      ...(o.seasonSectionId ? { seasonSectionId: o.seasonSectionId } : {}),
       private: o.private !== false,
       log,
       ...(o.onAlert ? { onAlert: o.onAlert } : {}),
@@ -1748,6 +1833,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           statePath: livePumpStatePath(o.spoolDir, o.room),
         } };
       }
+      // A restart after the archive was created never reaches the create hook again. Reconcile the
+      // persisted BV when the marker is pending (or absent on legacy state); the add is idempotent.
+      if (session.bvid || session.aid) await session.reconcileSeason(o.fetchImpl);
       if (session.hasUnconfirmed) {
         const pending = session.parts.filter((p) => !p.confirmed);
         // One unconfirmed part whose spool survived is recoverable: re-upload the whole file and
@@ -2012,6 +2100,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     statePath: livePumpStatePath(o.spoolDir, o.room),
   };
   } finally {
+    await session.drainSeason();
     await stopDanmu();
   }
 }

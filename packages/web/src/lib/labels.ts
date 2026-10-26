@@ -1,5 +1,5 @@
 /** Shared display-label helpers (quality, schedule, clock formatting). */
-import type { PlatformDTO, Task } from "../api/client";
+import type { PlatformDTO, RoomDTO, Task } from "../api/client";
 import { fmtDateTimeInTz } from "./tz";
 
 export const QUALITY_SHORT: Record<string, string> = {
@@ -85,6 +85,19 @@ export function roomId(room: string): string {
   if (/^\d+$/.test(r)) return r;
   const q = r.indexOf("?");
   return q >= 0 ? r.slice(0, q) : r;
+}
+
+/**
+ * Compact room identifier for list cells. Prefer the server-normalized slug:
+ * non-Douyin URLs otherwise make the name/room column wrap or truncate hard.
+ */
+export function roomDisplayId(room: { room: string; roomSlug?: string | null }): string {
+  return room.roomSlug?.trim() || roomId(room.room);
+}
+
+/** Display name: task name > anchor name > compact room identifier. */
+export function roomName(room: RoomDTO): string {
+  return room.recording?.name || room.recording?.anchorName || roomDisplayId(room);
 }
 
 /** 房间可点击链接(详情页「打开直播间」用):规范 https URL。 */

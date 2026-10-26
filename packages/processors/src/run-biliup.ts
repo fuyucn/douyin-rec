@@ -1,7 +1,14 @@
 // biliup process helpers shared by app and processors (plan 038 T05).
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { APPEND_AMBIGUOUS_MARKER, biliupCookieHeader, registerChild, throwIfAborted, type UploadLine, type UploadOpts } from "@drec/core";
+import {
+  APPEND_AMBIGUOUS_MARKER,
+  biliupCookieHeader,
+  registerChild,
+  throwIfAborted,
+  type UploadLine,
+  type UploadOpts,
+} from "@drec/core";
 
 
 // 契约在 core(orchestrator 也要用,不能让 L4.5 反向依赖 L4);这里 re-export 保持既有调用点不变。

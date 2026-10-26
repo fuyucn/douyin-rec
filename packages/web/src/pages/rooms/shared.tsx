@@ -9,7 +9,8 @@ import { connOf } from "../../lib/conn";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { useHubStream, usePolling, errMessage, useToast, type HubStreamHandle } from "../../lib/hooks";
 import { useT } from "../../lib/i18n";
-import { roomId, scheduleText } from "../../lib/labels";
+import { roomName, scheduleText } from "../../lib/labels";
+export { roomName } from "../../lib/labels";
 import { ageOf, lastDelivery, type Delivery } from "../../lib/last-delivery";
 import { lastRunHint, latestRunKey, roomStatus, type LatestRun, type RoomStatus } from "../../lib/room-status";
 import { PHASE_STYLE } from "../../lib/task-status";
@@ -84,11 +85,6 @@ export function useRoomsData(): RoomsData {
   const conn = useMemo((): ConnState => connOf(fetches.rooms, fetches.tasks), [fetches]);
   const statusOf = useCallback((r: RoomDTO) => roomStatus(r, taskOf(r), runs.get(latestRunKey(r)) ?? null), [taskOf, runs]);
   return { rooms, loaded, conn, workers, hubEnabled, taskOf, statusOf, refresh, refreshWorkers, stream };
-}
-
-/** Display name: task name > anchor name > room id. */
-export function roomName(r: RoomDTO): string {
-  return r.recording?.name || r.recording?.anchorName || roomId(r.room);
 }
 
 export function nodesText(r: RoomDTO, workers: WorkerDTO[], all: string): string {

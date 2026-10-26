@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-20
+> 最后更新：2026-10-26
 
 ## 状态约定
 
@@ -14,11 +14,27 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-- [~] **T-112 统一房间页补齐节点管理、自定义重跑与录制会话合成（issue [#362](https://github.com/fuyucn/douyin-rec/issues/362)）**
+- [~] **T-115 统一房间页补齐节点管理、自定义重跑与录制会话合成（issue [#362](https://github.com/fuyucn/douyin-rec/issues/362)）**
   — 2026-10-24 认领,分支 `codex/issue-362-rooms-parity`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**）。
   **做什么**：把节点管理搬进统一房间列表页;把按日期/节点的自定义重跑搬进统一房间详情页;把录制会话合成搬进统一房间详情页。旧 Tasks/Hub 页面与路由保留。
   **为什么**：统一房间页已覆盖主要路径,但上述三项仍只在旧页面里,现在还不能安全退役旧入口。
   **验收**：节点增删改/排序与健康、版本、磁盘信息可用;自定义重跑的新投稿序号规则与旧页一致;合成面板可列出会话并提交;旧页面仍可用;桌面与手机实看无横向溢出;全量测试 / 类型 / web 构建 / 文案检查通过。
+
+- [~] **T-114 Rooms roomName 名称兜底补直接回归用例（issue [#368](https://github.com/fuyucn/douyin-rec/issues/368)）**（2026-10-26）
+  — PR #367 的独立 review 非阻断项。`roomName` 已被列表、详情、提醒条和确认框共用，但现有用例只覆盖底层 `roomDisplayId`。
+  **做什么**: 新增 `roomName` 直接用例，锁住“无任务名/主播名时回退到紧凑房间标识”；将纯名称兜底下沉到无 UI 依赖的展示 helper，UI 模块保留兼容导出，避免根测试拉起 React 与弹窗依赖图。
+  **验收**: 目标用例通过；撤掉兜底逻辑后用例必须失败；typecheck、Web build、全量测试与 bundle（0.0.230）通过。
+
+- [~] **T-112 Rooms 列表「名称 / 房间」列压缩为平台徽标 + 房间 slug（issue [#366](https://github.com/fuyucn/douyin-rec/issues/366)）**（2026-10-26）
+  — 用户直接指派的前端微调。长 Bilibili/快手 URL 与交付方式拼在同一副标题里,把该列撑得难读。
+  **做什么**:优先取服务端归一化 `roomSlug`(缺失才回落 `roomId(room)`),桌面与窄屏统一为「平台徽标 + 房间标识」;交付方式/公开状态移到行 tooltip,名称列只保留身份信息。新增 `roomDisplayId` 纯函数与用例。
+  **验收**:`pnpm typecheck`、`packages/web` 的 `pnpm build`、`pnpm bundle`(0.0.229)、新用例通过;全量 `pnpm test` 全绿。
+
+- [~] **T-113 投稿成功后自动加入 B 站合集小节（issue [#364](https://github.com/fuyucn/douyin-rec/issues/364)）**
+  — 2026-10-25 认领,分支 `codex/issue-364-season-section-id`,base `feat/hub-optimization`（**未合并 / 未部署**;动上传路径,RISK,用户已明确要求实现）。
+  **做什么**：新增可选 `seasonSectionId`;投稿成功后调用创作中心 `episodes/add`;取 cid 走 UP 主视角接口;只在 P1 建稿后调用;失败只告警。
+  **为什么**：B 站普通合集不能在投稿请求里提交,只能投稿后关联;现在每场都要人工去创作中心加入合集。
+  **验收**：两条上传路径共用同一实现;审核中的稿件也能加入;未配置时零行为变化;全量测试 / 类型 / Web 构建 / i18n / bundle 通过。
 
 - [~] **T-111 0 落盘 spool/状态/弹幕迁入房间目录并带主播名（issue [#360](https://github.com/fuyucn/douyin-rec/issues/360)）**
   — 2026-10-24 认领,分支 `codex/issue-360-zero-disk-room-files`,base `feat/hub-optimization`（**未合并 / 未部署 / 未 close**;动 0 落盘落盘路径与清扫,RISK,需人拍板）。

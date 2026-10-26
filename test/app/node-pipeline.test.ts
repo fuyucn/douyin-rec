@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveTitles } from "../../packages/app/src/node-pipeline.js";
-import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson, stageSessionDir } from "@drec/core";
+import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson, stageSessionDir, addArchiveToSeasonIfConfigured } from "@drec/core";
 import { tryDirectTsLink, nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, runNodeSidePipeline, splitGroupsBySession, writeNodeResult, abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath } from "../../packages/app/src/node-pipeline.js";
 import { remuxSegment, ffprobeDuration } from "@drec/post-process";
 import { uploadPlain, appendGroup, countVideoParts, runBiliup } from "../../packages/app/src/upload/biliup.js";
@@ -22,11 +22,23 @@ vi.mock("node:fs", { spy: true });
 // 全局 setup 已先于本文件加载 @drec/core(其 node:fs 绑定不受上面的 spy 影响),
 // 故「硬链接不可用」改经 linkOrCopy 的注入口(fs)模拟 EXDEV。
 const linkFail = vi.hoisted(() => ({ on: false }));
+const seasonSpy = vi.hoisted(() => ({ calls: [] as Array<{ bvid?: string; persistedBv?: string; fail?: boolean }> }));
+const seasonHook = vi.hoisted(() => ({ onCall: undefined as undefined | ((o: { bvid?: string }) => void) }));
 vi.mock("@drec/core", async (orig) => {
   const m = await orig<typeof import("@drec/core")>();
   const fs = await import("node:fs");
   return {
     ...m,
+    addArchiveToSeasonIfConfigured: async (o: Parameters<typeof m.addArchiveToSeasonIfConfigured>[0]) => {
+      seasonSpy.calls.push({ bvid: o.bvid });
+      seasonHook.onCall?.(o);
+      if (seasonSpy.calls.at(-1)?.fail) {
+        // Simulate the real wrapper's never-throw contract for a season-side failure.
+        o.note?.("[season] 加入合集失败: simulated");
+        return { status: "failed", sectionId: o.sectionId ?? 1, error: "simulated", retryable: true } as const;
+      }
+      return { status: "added", sectionId: o.sectionId ?? 1, aid: 1, cid: 1, title: "t" } as const;
+    },
     linkOrCopy: (s: string, d: string, o?: Parameters<typeof m.linkOrCopy>[2]) =>
       m.linkOrCopy(s, d, linkFail.on ? {
         ...o,
@@ -628,6 +640,42 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
     expect(final?.bv).toBe("BV1OLD");
   });
 
+  it("re-entry preserves a prior BV on disk before the part-count network read", async () => {
+    const { sub, spec, gate } = scene();
+    writeNodeResult(sub, { phase: "failed", ok: false, bv: "BV1OLD", error: "append 中断" }, silence);
+    vi.mocked(countVideoParts).mockRejectedValueOnce(new Error("count network down"));
+
+    await expect(runNodeSidePipeline(spec, silence, gate)).rejects.toThrow("count network down");
+
+    const onDisk = readNodeResult(sub);
+    expect(onDisk?.bv).toBe("BV1OLD");
+    expect(onDisk?.phase).toBe("failed");
+  });
+
+  it("seasonSectionId: BV 先落盘,再关联;关联失败不影响上传", async () => {
+    const { sub, spec, gate } = scene();
+    seasonSpy.calls.length = 0;
+    seasonHook.onCall = (o) => {
+      // At the moment the season call runs, the node result must already carry the BV.
+      const onDisk = readNodeResult(sub);
+      seasonSpy.calls[seasonSpy.calls.length - 1]!.persistedBv = onDisk?.bv;
+      expect(onDisk?.seasonState).toBe("pending");
+      if (o.bvid === "BV1NEW") seasonSpy.calls[seasonSpy.calls.length - 1]!.fail = true;
+    };
+    try {
+      vi.mocked(uploadPlain).mockClear();
+      vi.mocked(appendGroup).mockClear();
+      const r = await runNodeSidePipeline({ ...spec, uploadMeta: { ...spec.uploadMeta, seasonSectionId: 123 } }, silence, gate);
+      expect(r.ok).toBe(true);
+      expect(r.bv).toBe("BV1NEW");
+      expect(vi.mocked(uploadPlain)).toHaveBeenCalledTimes(1);
+      expect(seasonSpy.calls.at(-1)).toMatchObject({ bvid: "BV1NEW", persistedBv: "BV1NEW" });
+      expect(readNodeResult(sub)?.seasonState).toBe("pending");
+    } finally {
+      seasonHook.onCall = undefined;
+    }
+  });
+
   it("failed + bv 但 countVideoParts=null(确认不了已建到第几)→ 抛错转人工、绝不重复建稿", async () => {
     const { sub, spec, gate } = scene();
     vi.mocked(uploadPlain).mockClear();
@@ -801,6 +849,35 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
       const r = await runNodeSidePipeline(spec, silence, gate);
       expect(failed).toBeGreaterThan(0); // 确实触发过 step 落盘失败
       expect(r.ok).toBe(true);
+    } finally {
+      vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => actual.renameSync(from, to)) as never);
+      vi.mocked(uploadPlain).mockImplementation(async () => "BV1NEW");
+    }
+  });
+
+  it("season pending checkpoint write failure does not POST an untracked association", async () => {
+    const { sub, spec, gate } = scene();
+    const seasonWriteBv = ["B", "V", "1SEASONWRITE"].join("");
+    seasonSpy.calls.length = 0;
+    vi.mocked(uploadPlain).mockResolvedValueOnce(seasonWriteBv);
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+    const fsMod = await import("node:fs");
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    let failed = 0;
+    vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => {
+      if (String(from).endsWith(".tmp") && actual.readFileSync(from, "utf-8").includes('"seasonState":"pending"')) {
+        failed += 1;
+        throw new Error("EIO season write");
+      }
+      return actual.renameSync(from, to);
+    }) as never);
+    try {
+      const r = await runNodeSidePipeline({ ...spec, uploadMeta: { ...spec.uploadMeta, seasonSectionId: 123 } }, silence, gate);
+      expect(r.ok).toBe(true);
+      expect(r.bv).toBe(seasonWriteBv);
+      expect(failed).toBeGreaterThan(0);
+      expect(seasonSpy.calls).toHaveLength(0);
+      expect(readNodeResult(sub)?.phase).toBe("done");
     } finally {
       vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => actual.renameSync(from, to)) as never);
       vi.mocked(uploadPlain).mockImplementation(async () => "BV1NEW");
