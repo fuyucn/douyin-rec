@@ -239,9 +239,14 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         // checkpoint:P1 建稿成功即刻落库 bv —— 必须在这里(不能等 burn/split 完),
         // 否则 P1 成功后若后续节点失败,bv 丢失 → 重试重传 P1 → 重复稿。
         if (cfg.uploadMeta.seasonSectionId) {
-          try { ledger.setBvAndSeasonState(streamKey, bv, "pending"); }
-          catch (e) {
-            c.log(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+          let saved = false;
+          let lastError: unknown;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try { ledger.setBvAndSeasonState(streamKey, bv, "pending"); saved = true; break; }
+            catch (e) { lastError = e; }
+          }
+          if (!saved) {
+            c.log(`season pending checkpoint not saved: ${String((lastError as Error)?.message ?? lastError).slice(0, 200)}`);
             ledger.setBv(streamKey, bv);
           }
         } else {

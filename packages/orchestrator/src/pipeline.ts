@@ -1315,6 +1315,10 @@ async function resumeAppends(
     await seasonTail;
     return result;
   };
+  const drainSeasonOnThrow = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try { return await fn(); }
+    catch (e) { await seasonTail; throw e; }
+  };
 
   // done 场的收尾补跑若在下面三处转人工:done 无出边,普通 setState 会被白名单拒绝 →
   // job 仍 done、告警照发、cleanupBackfillDue 周期性重复补跑刷告警。wasDone 时必须 force。
@@ -1407,12 +1411,12 @@ async function resumeAppends(
       deps.pool
         ? deps.pool.withUpload(() => appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic }), streamKey)
         : appendGroup({ bv, files, cookies: cfg.cookies, public: isPublic });
-    await retry(submit, {
+    await drainSeasonOnThrow(() => retry(submit, {
       tries,
       backoffMs: 60_000,
       sleep: deps.sleep,
       onRetry: (attempt, err) => jlog(`续跑 append ${g.step} 第 ${attempt} 次失败,重试: ${String((err as Error)?.message ?? err).slice(0, 200)}`),
-    });
+    }));
     // 续跑补的 append 同样要记 checkpoint(T11.8):否则核验基线只含首轮提交的组,
     // 续跑补上的分 P 不计入期望 → 假 mismatch。
     for (let i = 0; i < files.length; i++) {
@@ -1433,14 +1437,14 @@ async function resumeAppends(
       stagePulledSources: members.flatMap((m) => m.rec.tsFiles.map((f) => path.join(stageSub, path.basename(f)))),
       rmStage: rmStageFn, log: jlog,
     });
-  const fin = await finalizeAfterUpload({
+  const fin = await drainSeasonOnThrow(() => finalizeAfterUpload({
     streamKey, bv, deps, log: jlog, notify, cleanupSources,
     on: { plain: true, danmu: burnDanmu, livechat: burnLivechat },
     commitDone: () => {
       ledger.markDone(streamKey, bv);
       notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
     },
-  });
+  }));
   if (fin.blocked) return await drainSeason({ state: "needs_manual", bv });
   await seasonTail;
 

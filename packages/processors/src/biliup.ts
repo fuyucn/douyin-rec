@@ -270,12 +270,17 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
     partAt(0);
     st.bv = await slotted(() => uploadPlain({ plain: { ...meta, video: files[0]! }, run: sup.run }));
     if (p.seasonSectionId) {
-      try {
-        if (!ctx.setState) throw new Error("process context has no checkpoint writer");
-        ctx.setState({ bv: st.bv, seasonState: "pending" });
-        seasonCheckpointReady = true;
-      } catch (e) {
-        ctx.log(`season pending checkpoint not saved; skipping association: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          if (!ctx.setState) throw new Error("process context has no checkpoint writer");
+          ctx.setState({ bv: st.bv, seasonState: "pending" });
+          seasonCheckpointReady = true;
+          break;
+        } catch (e) { lastError = e; }
+      }
+      if (!seasonCheckpointReady) {
+        ctx.log(`season pending checkpoint not saved; skipping association: ${String((lastError as Error)?.message ?? lastError).slice(0, 200)}`);
         ctx.setState?.({ bv: st.bv });
       }
     } else {

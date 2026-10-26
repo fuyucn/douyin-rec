@@ -574,9 +574,14 @@ export async function runSegmentPipeline(o: {
       { tries: 3, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) },
     );
     if (cfg.uploadMeta.seasonSectionId) {
-      try { ledger.setBvAndSeasonState(streamKey, bv, "pending"); }
-      catch (e) {
-        jlog(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      let saved = false;
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { ledger.setBvAndSeasonState(streamKey, bv, "pending"); saved = true; break; }
+        catch (e) { lastError = e; }
+      }
+      if (!saved) {
+        jlog(`season pending checkpoint not saved: ${String((lastError as Error)?.message ?? lastError).slice(0, 200)}`);
         ledger.setBv(streamKey, bv);
       }
     } else {
@@ -803,6 +808,10 @@ async function resumeSegmentAppends(
     await seasonTail;
     return result;
   };
+  const drainSeasonOnThrow = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try { return await fn(); }
+    catch (e) { await seasonTail; throw e; }
+  };
   if (uploadParts.length === 0) {
     // 该场本来就 done(T12 收尾补跑:stageAfterDone 已把分P产物清空)→ 只补清理,
     // 绝不能把 done 打成 needs_manual(稿件是好的,只是源还没删)。
@@ -850,21 +859,23 @@ async function resumeSegmentAppends(
     }
     if (batch.length === 0) continue;
     jlog(`续跑 append plain 分 P ${idxs.join(",")}`);
-    await retry(
+    await drainSeasonOnThrow(() => retry(
       () => runUpload(deps, () => deps.appendGroup({ bv, files: batch, cookies: cfg.cookies, public: isPublic }), streamKey),
       { tries: batch.length === 1 ? 5 : 1, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
-    );
+    ));
     for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);
   }
   ledger.syncNodeState(streamKey, "upload_plain", "done", { error: null });
   const danmuFiles = uploadParts.map((p) => p.danmu).filter((f): f is string => !!f && existsSync(f));
   const livechatFiles = uploadParts.map((p) => p.livechat).filter((f): f is string => !!f && existsSync(f));
-  await appendSegmentGroup(streamKey, bv, "append_danmu", danmuFiles, burnDanmu, deps, jlog, isPublic, splitForUpload);
-  await appendSegmentGroup(streamKey, bv, "append_livechat", livechatFiles, burnLivechat, deps, jlog, isPublic, splitForUpload);
+  await drainSeasonOnThrow(async () => {
+    await appendSegmentGroup(streamKey, bv, "append_danmu", danmuFiles, burnDanmu, deps, jlog, isPublic, splitForUpload);
+    await appendSegmentGroup(streamKey, bv, "append_livechat", livechatFiles, burnLivechat, deps, jlog, isPublic, splitForUpload);
+  });
   await seasonTail;
   // 上传成功 → 同一收口闸门(补做「删源」:续跑此前漏了 sourceAfterDone)。分P模式不碰 stage 交付物。
   const rmStage = deps.rmStage ?? defaultRmStage;
-  const fin = await finalizeAfterUpload({
+  const fin = await drainSeasonOnThrow(() => finalizeAfterUpload({
     streamKey, bv, deps, log: jlog, notify,
     cleanupSources: () => cleanupSourcesShared({
       streamKey, ledger, transports: deps.transports, members: allMembers,
@@ -875,7 +886,7 @@ async function resumeSegmentAppends(
       ledger.markDone(streamKey, bv);
       notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
     },
-  });
+  }));
   if (fin.blocked) return await drainSeason({ state: "needs_manual", bv });
   // 上传成功 → stage 里的「拉来源段副本 + .work 中间产物」已冗余,可清(非交付物)。
   if (cfg.cleanup?.stageSourceAfterMerge) {

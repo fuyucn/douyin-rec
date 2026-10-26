@@ -134,7 +134,7 @@ describe("runSegmentPipeline season checkpoint", () => {
     const streamKey = "douyin:season-segment:2026-10-26";
     ledger.upsertPending(streamKey, Date.now());
     ledger.setState(streamKey, "syncing");
-    vi.spyOn(ledger, "setBvAndSeasonState").mockImplementationOnce(() => {
+    vi.spyOn(ledger, "setBvAndSeasonState").mockImplementation(() => {
       throw new Error("EIO season pending");
     });
     const uploadPlain = vi.fn(async () => ["B", "V", "SEGMENTPENDING"].join(""));

@@ -223,7 +223,7 @@ describe("runWorkflowNodes — 安全阀与分支隔离", () => {
     const bv = ["B", "V", "SEASONPENDINGFAIL"].join("");
     t.uploadPlain.mockResolvedValue(bv);
     vi.mocked(addArchiveToSeasonIfConfigured).mockClear();
-    vi.spyOn(t.ledger, "setBvAndSeasonState").mockImplementationOnce(() => {
+    vi.spyOn(t.ledger, "setBvAndSeasonState").mockImplementation(() => {
       throw new Error("EIO season pending");
     });
     const workflow = build(t, { burnDanmu: false, burnLivechat: false });
