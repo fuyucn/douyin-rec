@@ -868,7 +868,7 @@ export async function runNodeSidePipeline(
     // 建稿前失败(无 bv)不回退到 failed:留 `uploading` —— biliup 可能已建稿只是没拿到 BV,
     // 属「结果不确定」→ master 保守转人工(写 failed 会让 master 误判「确认没成」)。
     writeNodeResult(stageSub, { phase: bv ? "failed" : "uploading", ok: false, error: msg,
-      bv: bv || undefined, products, confirmedParts: confirmedParts || undefined, seasonState }, log);
+      bv: bv || undefined, products, confirmedParts: confirmedParts || undefined, intentPart, seasonState }, log);
     removeNodeExecutorPid(stageSub); // 本场执行体已收口(失败)→ 注销 pid,避免 `_node-abort` 误判仍活
     throw e;
   }

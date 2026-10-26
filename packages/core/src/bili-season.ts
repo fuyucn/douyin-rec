@@ -239,7 +239,8 @@ export async function addArchiveToSeason(o: SeasonTarget): Promise<SeasonAddOutc
     // Throttling and precondition answers are not rejections of the association: a cooled retry is
     // still able to add the archive, so they must stay retryable (601 / 21540 / 21566 / 21186 and
     // HTTP 429 / 412 / 403, where 403 usually means the login needs a refresh).
-    const throttledStatus = r.status === 429 || r.status === 412 || r.status === 403;
+    const authError = r.status === 401 || r.status === 403 || Number(r.raw.code) === -101;
+    const throttledStatus = r.status === 429 || r.status === 412 || authError;
     const rateLimited = throttledStatus || code === 601 || code === 21540 || code === 21566 || code === 21186
       || /上传过快|上传视频过快|投稿过于频繁|请求过于频繁/i.test(String(r.raw.message ?? ""));
     const definiteRejection = !rateLimited && (
