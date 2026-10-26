@@ -18,7 +18,6 @@ function PageLinks({ className }: { className: string }): ReactNode {
   const location = useLocation();
   const details = useRef<HTMLDetailsElement>(null);
   const sections = navSections(hubEnabled === true);
-  const label = (key: string): string => key === "Hub" ? "Hub" : t(key);
   const matches = (item: (typeof sections.primary)[number]): boolean =>
     location.pathname === item.to
     || (!item.end && location.pathname.startsWith(`${item.to}/`))
@@ -48,7 +47,7 @@ function PageLinks({ className }: { className: string }): ReactNode {
       onClick={() => { if (details.current) details.current.open = false; }}
       className={({ isActive }) => `topbar-link shrink-0 ${isActive ? "topbar-link-active" : ""}`}
     >
-      {label(item.labelKey)}
+      {t(item.labelKey)}
     </NavLink>
   );
   return (

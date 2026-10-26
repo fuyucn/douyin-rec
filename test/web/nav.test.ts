@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { homeTarget, navSections } from "../../packages/web/src/lib/nav.js";
 
 describe("navSections", () => {
@@ -7,15 +9,22 @@ describe("navSections", () => {
     expect(nav.primary.map((i) => i.to)).toEqual(["/"]);
     expect(nav.advanced).toEqual([]);
   });
-  it("master: rooms primary; tasks, hub, queue under advanced", () => {
+  it("master: rooms primary; queue is the only advanced item", () => {
     const nav = navSections(true);
     expect(nav.primary.map((i) => i.to)).toEqual(["/rooms"]);
-    expect(nav.advanced.map((i) => i.to)).toEqual(["/tasks", "/hub", "/queue"]);
+    expect(nav.advanced.map((i) => i.to)).toEqual(["/queue"]);
+    expect(nav.advanced[0]?.end).toBe(true);
   });
-  it("tasks matches exactly; /rooms also highlights on /rooms/:key", () => {
+  it("rooms also stays active on /rooms/:key", () => {
     const nav = navSections(true);
-    expect(nav.advanced.find((i) => i.to === "/tasks")?.end).toBe(true);
     expect(nav.primary.find((i) => i.to === "/rooms")?.end).toBeFalsy();
+  });
+  it("legacy Tasks/Hub routes remain available during the compatibility period", () => {
+    const app = readFileSync(join(__dirname, "..", "..", "packages", "web", "src", "App.tsx"), "utf-8");
+    expect(app).toContain('<Route path="/tasks"');
+    expect(app).toContain('<Route path="/task/:id"');
+    expect(app).toContain('<Route path="/hub"');
+    expect(app).toContain('<Route path="/hub/:key"');
   });
   it("home target waits for hub detection, then chooses Rooms on master and Tasks on worker", () => {
     expect(homeTarget(null)).toBeNull();
