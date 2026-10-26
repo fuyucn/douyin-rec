@@ -14,7 +14,7 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-- [~] **T-112 Rooms 列表「名称 / 房间」列压缩为平台徽标 + 房间 slug**（2026-10-26）
+- [~] **T-112 Rooms 列表「名称 / 房间」列压缩为平台徽标 + 房间 slug（issue [#366](https://github.com/fuyucn/douyin-rec/issues/366)）**（2026-10-26）
   — 用户直接指派的前端微调。长 Bilibili/快手 URL 与交付方式拼在同一副标题里,把该列撑得难读。
   **做什么**:优先取服务端归一化 `roomSlug`(缺失才回落 `roomId(room)`),桌面与窄屏统一为「平台徽标 + 房间标识」;交付方式/公开状态移到行 tooltip,名称列只保留身份信息。新增 `roomDisplayId` 纯函数与用例。
   **验收**:`pnpm typecheck`、`packages/web` 的 `pnpm build`、`pnpm bundle`(0.0.229)、新用例通过;全量 `pnpm test` 全绿。
