@@ -16,8 +16,8 @@
 ## 进行中
 - [~] **T-114 Rooms roomName 名称兜底补直接回归用例（issue [#368](https://github.com/fuyucn/douyin-rec/issues/368)）**（2026-10-26）
   — PR #367 的独立 review 非阻断项。`roomName` 已被列表、详情、提醒条和确认框共用，但现有用例只覆盖底层 `roomDisplayId`。
-  **做什么**:新增 `roomName` 直接用例，锁住“无任务名/主播名时回退到紧凑房间标识”，并补齐 vitest 的 Web 侧别名以便加载共享展示模块。
-  **验收**:目标用例通过；撤掉兜底逻辑后用例必须失败；typecheck 通过。仅测试与测试配置，不 bump、不 bundle。
+  **做什么**: 新增 `roomName` 直接用例，锁住“无任务名/主播名时回退到紧凑房间标识”；将纯名称兜底下沉到无 UI 依赖的展示 helper，UI 模块保留兼容导出，避免根测试拉起 React 与弹窗依赖图。
+  **验收**: 目标用例通过；撤掉兜底逻辑后用例必须失败；typecheck、Web build、全量测试与 bundle（0.0.230）通过。
 
 - [~] **T-112 Rooms 列表「名称 / 房间」列压缩为平台徽标 + 房间 slug（issue [#366](https://github.com/fuyucn/douyin-rec/issues/366)）**（2026-10-26）
   — 用户直接指派的前端微调。长 Bilibili/快手 URL 与交付方式拼在同一副标题里,把该列撑得难读。
