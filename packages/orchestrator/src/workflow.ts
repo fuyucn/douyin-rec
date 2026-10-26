@@ -238,13 +238,17 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         });
         // checkpoint:P1 建稿成功即刻落库 bv —— 必须在这里(不能等 burn/split 完),
         // 否则 P1 成功后若后续节点失败,bv 丢失 → 重试重传 P1 → 重复稿。
-        ledger.setBv(streamKey, bv);
+        if (cfg.uploadMeta.seasonSectionId) {
+          try { ledger.setBvAndSeasonState(streamKey, bv, "pending"); }
+          catch (e) {
+            c.log(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+            ledger.setBv(streamKey, bv);
+          }
+        } else {
+          ledger.setBv(streamKey, bv);
+        }
         // The BV is durable now. The executor associates the season after this upload slot is released
         // (see runWorkflowNodes), so the bounded HTTP call never extends the global upload chain.
-        if (cfg.uploadMeta.seasonSectionId) {
-          try { ledger.setSeasonState(streamKey, "pending"); }
-          catch (e) { c.log(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
-        }
         // 分P核验基线(T11):P1 = plain 组第 0 段。合并路径此前**完全不写** sync_parts →
         // 期望段数恒 0、核验恒跳过(等于没核验),而分段路径有 —— 两条路径基线口径必须一致。
         // 合并路径的 plain 是单文件(不切分),故恒 1 个分 P;段号 0 起(与分段路径同一口径)。

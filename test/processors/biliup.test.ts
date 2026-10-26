@@ -37,15 +37,17 @@ describe("biliup processor (plan 038 T08)", () => {
     expect(run.mock.calls[0]![0]).toContain("append");
   });
 
-  it("seasonSectionId adds after create and again on a resumed row", async () => {
+  it("seasonSectionId adds after create and resumes only a durable pending row", async () => {
     const dir = mkdtempSync(join(tmpdir(), "bili-season-"));
     const login = join(dir, "login.json");
     writeFileSync(login, JSON.stringify({
       cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
     }));
     const calls: string[] = [];
+    const urls: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request) => {
       const u = String(url);
+      urls.push(u);
       if (u.includes("/x/vupre/web/archive/view")) {
         return new Response(JSON.stringify({ code: 0, data: { archive: { aid: 7, title: "t" }, videos: [{ cid: 9 }] } }), { status: 200 });
       }
@@ -65,13 +67,20 @@ describe("biliup processor (plan 038 T08)", () => {
       await p.run(job(files(1), { cookies: login, seasonSectionId: 123 }), c1);
       expect(calls).toHaveLength(1);
       const setState = (c1 as unknown as { setState: ReturnType<typeof vi.fn> }).setState;
-      expect(setState).toHaveBeenCalledWith({ seasonState: "pending" });
+      expect(setState).toHaveBeenCalledWith({ bv: "BV1aaaaaaaaa", seasonState: "pending" }); // issue-guard: allow (fake BV fixture)
       expect(setState).toHaveBeenCalledWith({ seasonState: "done" });
 
       const resumed = vi.fn(async () => "ok");
       const p2 = makeBiliupProcessor({ run: resumed });
-      await p2.run(job(files(1), { cookies: login, bv: "BV1bbbbbbbbb", seasonSectionId: 123 }), ctx()); // issue-guard: allow (fake BV fixture)
+      const legacy = job(files(1), { cookies: login, bv: "BV1bbbbbbbbb", seasonSectionId: 123 }); // issue-guard: allow (fake BV fixture)
+      await p2.run(legacy, ctx());
+      expect(calls).toHaveLength(1); // a pre-feature BV must not gain a season retroactively
+
+      const pending = job(files(1), { cookies: login, bv: "BV1bbbbbbbbb", seasonSectionId: 123 }) as Record<string, unknown>; // issue-guard: allow (fake BV fixture)
+      pending.seasonState = "pending";
+      await p2.run(pending as never, ctx());
       expect(calls).toHaveLength(2);
+      expect(urls.filter((u) => u.includes("/season/section?id=123"))).toHaveLength(1);
 
       const done = job(files(1), { cookies: login, bv: "BV1bbbbbbbbb", seasonSectionId: 123 }) as Record<string, unknown>; // issue-guard: allow (fake BV fixture)
       done.seasonState = "done";
@@ -100,8 +109,24 @@ describe("biliup processor (plan 038 T08)", () => {
       const r = await p.run(job(files(1), { cookies: login, seasonSectionId: 123 }), c as never);
       expect(r.bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
       expect(fetchMock).not.toHaveBeenCalled();
-      expect(c.setState).toHaveBeenCalledWith({ seasonState: "pending" });
+      expect(c.setState).toHaveBeenCalledWith({ bv: "BV1aaaaaaaaa", seasonState: "pending" }); // issue-guard: allow (fake BV fixture)
       expect(c.setState).not.toHaveBeenCalledWith({ seasonState: "done" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not POST season when the process has no checkpoint writer", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ code: 0, data: null }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+    try {
+      const run = vi.fn(async (argv: string[]) => argv[2] === "upload" ? "BV1aaaaaaaaa" : "ok"); // issue-guard: allow (fake BV fixture)
+      const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]" } });
+      const c = ctx() as unknown as { setState?: unknown };
+      c.setState = undefined;
+      const r = await p.run(job(files(1), { seasonSectionId: 123 }), c as never);
+      expect(r.bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }

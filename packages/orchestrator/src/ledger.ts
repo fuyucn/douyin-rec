@@ -290,6 +290,11 @@ export class SyncLedger {
     const at = this.now();
     this.db.prepare("UPDATE sync_jobs SET bv=?, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
   }
+  /** Persist the BV and season intent atomically so a kill cannot leave one without the other. */
+  setBvAndSeasonState(streamKey: string, bv: string, state: JobRow["seasonState"]): void {
+    this.db.prepare("UPDATE sync_jobs SET bv=?, seasonState=?, updatedAt=? WHERE streamKey=?")
+      .run(bv, state ?? null, this.now(), streamKey);
+  }
   /** Season association state (issue #364); NULL clears it when the feature is off. */
   setSeasonState(streamKey: string, state: JobRow["seasonState"]): void {
     this.db.prepare("UPDATE sync_jobs SET seasonState=?, updatedAt=? WHERE streamKey=?").run(state ?? null, this.now(), streamKey);

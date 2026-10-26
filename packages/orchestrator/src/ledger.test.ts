@@ -53,6 +53,15 @@ describe("SyncLedger", () => {
     expect(l.get("k1")?.error).toBe("boom");
     l.close();
   });
+  it("setBvAndSeasonState writes the upload BV and season intent together", () => {
+    const l = fresh();
+    const bv = ["B", "V", "atomic"].join("");
+    l.upsertPending("k1");
+    l.setBvAndSeasonState("k1", bv, "pending");
+    expect(l.get("k1")?.bv).toBe(bv);
+    expect(l.get("k1")?.seasonState).toBe("pending");
+    l.close();
+  });
   it("状态转换自动记入 sync_job_events(时间线可复盘:每步起点=事件时刻)", () => {
     const l = fresh();
     l.upsertPending("k1");                       // → pending 事件

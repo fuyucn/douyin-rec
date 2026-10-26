@@ -258,6 +258,7 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   const total = sizes.reduce((a, b) => a + b, 0);
   const partAt = (i: number): void => sup.setPart(sizes.slice(0, i).reduce((a, b) => a + b, 0), sizes[i] ?? 0, total);
   st.bv = p.bv;
+  let seasonCheckpointReady = false;
   if (!st.bv) {
     sup.setStep("gate_wait");
     // Fail-closed before creating anything: without duration we cannot prove "no draft".
@@ -268,7 +269,18 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
     if (proof === "unknown") throw new Error("cannot confirm whether a draft exists; needs manual verification");
     partAt(0);
     st.bv = await slotted(() => uploadPlain({ plain: { ...meta, video: files[0]! }, run: sup.run }));
-    ctx.setState?.({ bv: st.bv });
+    if (p.seasonSectionId) {
+      try {
+        if (!ctx.setState) throw new Error("process context has no checkpoint writer");
+        ctx.setState({ bv: st.bv, seasonState: "pending" });
+        seasonCheckpointReady = true;
+      } catch (e) {
+        ctx.log(`season pending checkpoint not saved; skipping association: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+        ctx.setState?.({ bv: st.bv });
+      }
+    } else {
+      ctx.setState?.({ bv: st.bv });
+    }
   }
   const bv = st.bv;
   // Season association runs after the upload slot is released: it is a best-effort side effect and
@@ -276,32 +288,21 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   // processor can resume without losing the intent.
   const seasonState = persistedSeasonState(job);
   let seasonTail: Promise<void> = Promise.resolve();
-  if (p.seasonSectionId && seasonState !== "done" && seasonState !== "failed") {
-    let checkpointReady = seasonState === "pending";
-    if (!checkpointReady) {
-      try {
-        if (!ctx.setState) throw new Error("process context has no checkpoint writer");
-        ctx.setState({ seasonState: "pending" });
-        checkpointReady = true;
-      } catch (e) {
-        ctx.log(`season pending checkpoint not saved; skipping association: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
-      }
-    }
-    if (checkpointReady) {
-      seasonTail = (async () => {
-        const outcome = await addArchiveToSeasonIfConfigured({
-          cookiesPath: cookies,
-          sectionId: p.seasonSectionId,
-          bvid: bv,
-          reconcileFirst: seasonState === "pending",
-          note: (m) => ctx.log(m),
-        });
-        try { ctx.setState?.({ seasonState: seasonCheckpointState(outcome) }); }
-        catch (e) { ctx.log(`season terminal checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
-      })().catch((e) => {
-        ctx.log(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+  const checkpointReady = seasonCheckpointReady || seasonState === "pending";
+  if (p.seasonSectionId && checkpointReady) {
+    seasonTail = (async () => {
+      const outcome = await addArchiveToSeasonIfConfigured({
+        cookiesPath: cookies,
+        sectionId: p.seasonSectionId,
+        bvid: bv,
+        reconcileFirst: seasonState === "pending",
+        note: (m) => ctx.log(m),
       });
-    }
+      try { ctx.setState?.({ seasonState: seasonCheckpointState(outcome) }); }
+      catch (e) { ctx.log(`season terminal checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+    })().catch((e) => {
+      ctx.log(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+    });
   }
   const countParts = countPartsOf(deps);
   // params.bv: the draft exists and every input is a part still to append.

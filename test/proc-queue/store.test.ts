@@ -726,6 +726,8 @@ describe("enqueueBatch and order generation (plan 038 T01)", () => {
     expect(s.setBv(id, "BV1x")).toBe(true);
     expect(s.setSeasonState(id, "pending")).toBe(true);
     expect(s.get(id)?.seasonState).toBe("pending");
+    expect(s.setBvAndSeasonState(id, "BV1atomic", "pending")).toBe(true);
+    expect(s.get(id)).toMatchObject({ bv: "BV1atomic", seasonState: "pending" });
     expect(s.setSeasonState(id, "done")).toBe(true);
     expect(s.get(id)?.seasonState).toBe("done");
     expect(s.setChildPid(id, 123, "start")).toBe(true);

@@ -403,6 +403,12 @@ export class ProcQueueStore {
       .run(bv, this.now(), jobId).changes > 0);
   }
 
+  /** Persist a newly created BV together with its season intent in one row update. */
+  setBvAndSeasonState(jobId: string, bv: string, state: "pending" | "done" | "failed" | null): boolean {
+    return this.tx(() => this.db.prepare("UPDATE proc_jobs SET bv=?, seasonState=?, updatedAt=? WHERE jobId=?")
+      .run(bv, state, this.now(), jobId).changes > 0);
+  }
+
   /** Persist the best-effort Bilibili season association checkpoint. */
   setSeasonState(jobId: string, state: "pending" | "done" | "failed" | null): boolean {
     return this.tx(() => this.db.prepare("UPDATE proc_jobs SET seasonState=?, updatedAt=? WHERE jobId=?")

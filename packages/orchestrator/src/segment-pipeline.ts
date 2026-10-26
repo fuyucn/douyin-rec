@@ -573,13 +573,19 @@ export async function runSegmentPipeline(o: {
         : deps.uploadPlain({ ...plainOpts, video: p1Path, title: uploadTitle }), streamKey),
       { tries: 3, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) },
     );
-    ledger.setBv(streamKey, bv); // 建稿成功即刻落库(与合并路径同一幂等边界)
+    if (cfg.uploadMeta.seasonSectionId) {
+      try { ledger.setBvAndSeasonState(streamKey, bv, "pending"); }
+      catch (e) {
+        jlog(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+        ledger.setBv(streamKey, bv);
+      }
+    } else {
+      ledger.setBv(streamKey, bv); // 建稿成功即刻落库(与合并路径同一幂等边界)
+    }
     ledger.markPartDone(streamKey, "plain", 0); // P1 = 第 0 段
     jlog(`建稿完成: ${bv}`);
     // BV is durable now (setBv above); associate after the upload gate is released.
     if (cfg.uploadMeta.seasonSectionId) {
-      try { ledger.setSeasonState(streamKey, "pending"); }
-      catch (e) { jlog(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
       if (ledger.get(streamKey)?.seasonState === "pending") {
         startSeason(false);
       } else {
@@ -599,36 +605,39 @@ export async function runSegmentPipeline(o: {
     return { state: "needs_manual" };
   }
   // 其余 plain 段逐个 append(顺序 = 段序)。每个成功即 checkpoint;601 由队列冷却 + retry 吸收。
-  for (let i = 1; i < plainFiles.length; i += batchSize) {
-    const batch: string[] = [];
-    const idxs: number[] = [];
-    for (let j = i; j < Math.min(i + batchSize, plainFiles.length); j++) {
-      if (donePlain.has(j)) continue; // 续跑:已提交的段跳过
-      // B 站分P序号从 1 起;plain 组内第 j 段 = 整稿第 j+1 个分P。
-      batch.push(aliasFor("plain", plainFiles[j], j + 1, totalParts)); idxs.push(j);
+  try {
+    for (let i = 1; i < plainFiles.length; i += batchSize) {
+      const batch: string[] = [];
+      const idxs: number[] = [];
+      for (let j = i; j < Math.min(i + batchSize, plainFiles.length); j++) {
+        if (donePlain.has(j)) continue; // 续跑:已提交的段跳过
+        // B 站分P序号从 1 起;plain 组内第 j 段 = 整稿第 j+1 个分P。
+        batch.push(aliasFor("plain", plainFiles[j], j + 1, totalParts)); idxs.push(j);
+      }
+      if (batch.length === 0) continue;
+      jlog(`append plain 段 ${idxs.join(",")}: ${batch.length} 文件`);
+      const tries = batch.length === 1 ? 5 : 1;
+      await retry(
+        () => runUpload(deps, () => deps.appendGroup({ ...plainOpts, bv, files: batch }), streamKey),
+        { tries, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
+      );
+      for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);
     }
-    if (batch.length === 0) continue;
-    jlog(`append plain 段 ${idxs.join(",")}: ${batch.length} 文件`);
-    const tries = batch.length === 1 ? 5 : 1;
-    await retry(
-      () => runUpload(deps, () => deps.appendGroup({ ...plainOpts, bv, files: batch }), streamKey),
-      { tries, backoffMs: 60_000, sleep: deps.sleep, shouldRetry: (e) => isUploadRateLimited(e) || (batch.length === 1 && !isAppendAmbiguous(e)) },
-    );
-    for (const k of idxs) ledger.markPartDone(streamKey, "plain", k);
-  }
-  ledger.logStep(streamKey, "upload_plain", "done", `P1 + ${plainFiles.length - 1} 段`);
-  ledger.syncNodeState(streamKey, "upload_plain", "done", { error: null });
+    ledger.logStep(streamKey, "upload_plain", "done", `P1 + ${plainFiles.length - 1} 段`);
+    ledger.syncNodeState(streamKey, "upload_plain", "done", { error: null });
 
-  // ── 逐组 append:danmu 各段一组、livechat 各段一组(组内多段一次 append,顺序 = 段序)──
-  // 分P标题按「整稿分P序号」渲染:plain 占 1..N,danmu 接着 N+1..,livechat 再接着。
-  const plainCount = plainFiles.length;
-  const danmuFiles = uploadParts.map((p) => p.danmu).filter((f): f is string => !!f && existsSync(f));
-  const livechatFiles = uploadParts.map((p) => p.livechat).filter((f): f is string => !!f && existsSync(f));
-  const danmuPaths = danmuFiles.map((f, i) => aliasFor("danmu", f, plainCount + i + 1, totalParts));
-  const livechatPaths = livechatFiles.map((f, i) => aliasFor("livechat", f, plainCount + danmuFiles.length + i + 1, totalParts));
-  await appendSegmentGroup(streamKey, bv, "append_danmu", danmuPaths, burnDanmu, deps, jlog, isPublic, splitForUpload);
-  await appendSegmentGroup(streamKey, bv, "append_livechat", livechatPaths, burnLivechat, deps, jlog, isPublic, splitForUpload);
-  await seasonTail;
+    // ── 逐组 append:danmu 各段一组、livechat 各段一组(组内多段一次 append,顺序 = 段序)──
+    // 分P标题按「整稿分P序号」渲染:plain 占 1..N,danmu 接着 N+1..,livechat 再接着。
+    const plainCount = plainFiles.length;
+    const danmuFiles = uploadParts.map((p) => p.danmu).filter((f): f is string => !!f && existsSync(f));
+    const livechatFiles = uploadParts.map((p) => p.livechat).filter((f): f is string => !!f && existsSync(f));
+    const danmuPaths = danmuFiles.map((f, i) => aliasFor("danmu", f, plainCount + i + 1, totalParts));
+    const livechatPaths = livechatFiles.map((f, i) => aliasFor("livechat", f, plainCount + danmuFiles.length + i + 1, totalParts));
+    await appendSegmentGroup(streamKey, bv, "append_danmu", danmuPaths, burnDanmu, deps, jlog, isPublic, splitForUpload);
+    await appendSegmentGroup(streamKey, bv, "append_livechat", livechatPaths, burnLivechat, deps, jlog, isPublic, splitForUpload);
+  } finally {
+    await seasonTail;
+  }
 
   // 收口(与合并路径同一实现):上传确认后先延后回读分 P 数(#327),通过才标 done + 按配置清理;
   // 不符 / 读不到 → 转人工并保留全部源(含 stage 产物)。清理失败只标 clean_*(T12),终态恒为 done。
@@ -790,17 +799,21 @@ async function resumeSegmentAppends(
     seasonTail = associateSegmentSeason(ledger, cfg, streamKey, jlog, true)
       .catch((e) => jlog(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`));
   }
+  const drainSeason = async <T>(result: T): Promise<T> => {
+    await seasonTail;
+    return result;
+  };
   if (uploadParts.length === 0) {
     // 该场本来就 done(T12 收尾补跑:stageAfterDone 已把分P产物清空)→ 只补清理,
     // 绝不能把 done 打成 needs_manual(稿件是好的,只是源还没删)。
     if (ledger.get(streamKey)?.state === "done") {
       jlog(`分段续跑:job 已 done 且分P产物已清理 → 只补收尾清理`);
-      return await finalizeOnly(streamKey, bv, deps, jlog, notify, allMembers, stageSub);
+      return await drainSeason(await finalizeOnly(streamKey, bv, deps, jlog, notify, allMembers, stageSub));
     }
     jlog(`分段续跑失败:无可上传分 P`);
     ledger.setState(streamKey, "needs_manual", { error: `分段续跑失败:bv=${bv} 但无可上传分 P` });
     notify({ kind: "error", stage: "上传", message: `分段续跑失败:${bv} 产物缺失,请人工核对分 P` });
-    return { state: "needs_manual", bv };
+    return await drainSeason({ state: "needs_manual", bv });
   }
   // 烧录轨:主流程的烧录循环在续跑分叉**之后**,本函数拿到的 `uploadParts[].danmu/livechat` 恒为空。
   // 不回填的话 `appendSegmentGroup(files=[])` 会把该步骤标 skipped 并随后 markDone ——
@@ -825,7 +838,7 @@ async function resumeSegmentAppends(
     jlog(`⚠️ 续跑产物自检失败:${brokenResume.length}/${resumeFiles.length} 个分 P 读不出时长 → 拒绝 append:${names}`);
     ledger.setState(streamKey, "needs_manual", { error: `续跑产物自检失败:${brokenResume.length} 个分 P 读不出时长` });
     notify({ kind: "error", stage: "上传", message: `${streamKey} 续跑产物自检失败:${brokenResume.length} 个分 P 读不出时长,请人工核对` });
-    return { state: "needs_manual", bv };
+    return await drainSeason({ state: "needs_manual", bv });
   }
   const donePlain = ledger.doneParts(streamKey, "plain");
   const batchSize = Math.max(1, cfg.uploadBatchSize ?? 1);
@@ -863,7 +876,7 @@ async function resumeSegmentAppends(
       notify({ kind: "uploadDone", bv, url: `https://www.bilibili.com/video/${bv}`, streamKey });
     },
   });
-  if (fin.blocked) return { state: "needs_manual", bv };
+  if (fin.blocked) return await drainSeason({ state: "needs_manual", bv });
   // 上传成功 → stage 里的「拉来源段副本 + .work 中间产物」已冗余,可清(非交付物)。
   if (cfg.cleanup?.stageSourceAfterMerge) {
     const scratch = [

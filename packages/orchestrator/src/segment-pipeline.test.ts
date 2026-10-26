@@ -134,11 +134,13 @@ describe("runSegmentPipeline season checkpoint", () => {
     const streamKey = "douyin:season-segment:2026-10-26";
     ledger.upsertPending(streamKey, Date.now());
     ledger.setState(streamKey, "syncing");
-    vi.spyOn(ledger, "setSeasonState").mockImplementationOnce(() => {
+    vi.spyOn(ledger, "setBvAndSeasonState").mockImplementationOnce(() => {
       throw new Error("EIO season pending");
     });
     const uploadPlain = vi.fn(async () => ["B", "V", "SEGMENTPENDING"].join(""));
     const appendGroup = vi.fn(async () => {});
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ code: 0, data: null }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
     const deps = {
       transports: new Map(),
       ledger,
@@ -166,20 +168,25 @@ describe("runSegmentPipeline season checkpoint", () => {
     } as unknown as PipelineDeps;
     const members = [{ workerId: "local", rec: { tsFiles: src } }] as never;
 
-    const r = await runSegmentPipeline({
-      streamKey,
-      deps,
-      jlog: () => {},
-      stageSub,
-      winnerMembers: members,
-      allMembers: members,
-      dateName: "show_2026-10-26",
-    });
+    try {
+      const r = await runSegmentPipeline({
+        streamKey,
+        deps,
+        jlog: () => {},
+        stageSub,
+        winnerMembers: members,
+        allMembers: members,
+        dateName: "show_2026-10-26",
+      });
 
-    expect(r).toMatchObject({ state: "done", bv: ["B", "V", "SEGMENTPENDING"].join("") });
-    expect(uploadPlain).toHaveBeenCalledTimes(1);
-    expect(appendGroup).toHaveBeenCalledTimes(1);
-    expect(ledger.doneParts(streamKey, "plain")).toEqual(new Set([0, 1]));
-    expect(ledger.get(streamKey)?.seasonState).toBeNull();
+      expect(r).toMatchObject({ state: "done", bv: ["B", "V", "SEGMENTPENDING"].join("") });
+      expect(uploadPlain).toHaveBeenCalledTimes(1);
+      expect(appendGroup).toHaveBeenCalledTimes(1);
+      expect(ledger.doneParts(streamKey, "plain")).toEqual(new Set([0, 1]));
+      expect(ledger.get(streamKey)?.seasonState).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
