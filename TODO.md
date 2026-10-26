@@ -14,6 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-117 Rooms 首页化并把 Tasks/Hub/Queue 收进高级导航（issue [#372](https://github.com/fuyucn/douyin-rec/issues/372)）**（2026-10-26）
+  — `plans/037` 的首页切换步骤。Rooms 已具备统一管理能力，但 `/` 仍指向 Tasks，旧入口继续平铺。
+  **做什么**: master 的 `/` 显示 Rooms，主导航只保留 Rooms，Tasks/Hub/Queue 收进可展开的高级入口；worker 仍以 Tasks 为首页；旧路由全部保留。
+  **验收**: master/worker 首页分流正确；高级入口可键盘和触控操作；桌面/手机无溢出；类型、Web 构建、i18n、全量测试与 bundle 通过。
+
 - [~] **T-116 Rooms 编辑器补齐 B站合集小节 ID（issue [#370](https://github.com/fuyucn/douyin-rec/issues/370)）**（2026-10-26）
   — #364 已支持后端与旧 Hub 规则弹窗，但统一房间编辑器第 3 步漏了输入框，用户无法在 Rooms 中配置。
   **做什么**: 在 Rooms 上传步骤显示正整数合集小节 ID；留空关闭，已有值回显，清空已存值保存为 null，并加 UI 漂移守卫。
