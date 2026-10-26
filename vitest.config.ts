@@ -64,6 +64,7 @@ export default defineConfig({
       "@drec/zero-disk-policy": fileURLToPath(new URL("./packages/core/src/zero-disk-policy.ts", import.meta.url)),
       "@drec/hub-ledger-contract": fileURLToPath(new URL("./packages/core/src/hub-ledger-contract.ts", import.meta.url)),
       "@drec/output-format": fileURLToPath(new URL("./packages/core/src/output-format.ts", import.meta.url)),
+      "@drec/experimental": fileURLToPath(new URL("./packages/core/src/experimental.ts", import.meta.url)),
     },
   },
 });
