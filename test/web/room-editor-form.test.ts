@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_TITLE_TEMPLATES, factsOf, formFromRoom, isValidSeasonSectionIdInput, payloadFromForm, ruleFactsOf, seasonSectionIdPatch, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { DEFAULT_TITLE_TEMPLATES, factsOf, formFromRoom, isValidSeasonSectionIdInput, payloadFromForm, ruleFactsOf, seasonSectionIdOnUploadToggle, seasonSectionIdPatch, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
 import { deriveConstraints, settledMethod } from "../../packages/web/src/lib/room-form-rules.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
@@ -95,6 +95,14 @@ describe("room editor form ↔ payload", () => {
     expect(seasonSectionIdPatch("456", false)).toBe(456);
     const f = { ...formFromRoom(mkRoom()), uploadOn: false, seasonSectionId: "-3" };
     expect(payloadFromForm(f, ctx)).toEqual({ ok: false, error: "seasonSectionId" });
+  });
+  it("seasonSectionId: turning upload off drops an invalid leftover so the hidden field cannot block save", () => {
+    expect(seasonSectionIdOnUploadToggle("-3", false)).toBe("");
+    expect(seasonSectionIdOnUploadToggle("abc", false)).toBe("");
+    expect(seasonSectionIdOnUploadToggle("456", false)).toBe("456");
+    expect(seasonSectionIdOnUploadToggle("-3", true)).toBe("-3");
+    const f = { ...formFromRoom(mkRoom()), uploadOn: false, seasonSectionId: seasonSectionIdOnUploadToggle("-3", false) };
+    expect(payloadFromForm(f, ctx).ok).toBe(true);
   });
   it("round-trips stored fields without silently changing them", () => {
     const p = ok(payloadFromForm(formFromRoom(mkRoom()), ctx));
