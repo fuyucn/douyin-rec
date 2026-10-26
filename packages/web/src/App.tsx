@@ -10,6 +10,7 @@ import { useRefreshCookie } from "./lib/hooks";
 import { useEventNotifications } from "./lib/notifications";
 import { HubPage } from "./pages/HubPage";
 import { HomePage } from "./pages/HomePage";
+import { NodesPage } from "./pages/NodesPage";
 import { RoomPage } from "./pages/RoomPage";
 import { RoomsPage } from "./pages/RoomsPage";
 import { QueuePage } from "./pages/QueuePage";
@@ -39,6 +40,7 @@ export function App(): ReactNode {
           <Route path="/" element={<HomePage />} />
           {/* Legacy master routes stay addressable while Rooms becomes the primary workflow. */}
           <Route path="/tasks" element={<TaskList />} />
+          <Route path="/nodes" element={<NodesPage />} />
           <Route path="/task/:id" element={<TaskDetail />} />
           <Route path="/queue" element={<QueuePage />} />
           <Route path="/hub" element={<HubPage />} />

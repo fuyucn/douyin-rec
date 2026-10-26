@@ -6,20 +6,21 @@
  * (来自 master ResourcePool 的 waiting 快照)—— 两者是两个维度:行序=整体先后,位次=某池内先后。
  */
 import {
-  Activity, AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardCheck, Cpu, ExternalLink, FileText, Hourglass, Loader2, Search, Square, UploadCloud, X,
+  Activity, AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardCheck, ExternalLink, FileText, Hourglass, Loader2, Search, Square, UploadCloud, X,
 } from "lucide-react";
 import { useAtomValue } from "jotai";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type HubBlockedBroadcastDTO, type HubPoolSnapshotDTO, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type RollingDeliveryDTO } from "../api/client";
+import { api, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO } from "../api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/HubJobs";
 import { platformLabel, roomId } from "../lib/labels";
 import { errMessage, useHubStream, useTicker, useToast } from "../lib/hooks";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { NodesStrip } from "../components/NodesStrip";
 import { fmtBytes } from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
+import { AttentionCard, FleetPulse, LiveLane, LivePool, StageReadyRow } from "../components/QueueLive";
+import { queueSummary, splitQueue } from "../lib/queue-live";
 import { useT } from "../lib/i18n";
 import { fmtTimeInTz } from "../lib/tz";
 
@@ -51,114 +52,6 @@ function stepLabel(t: TFunc, step: string): string {
   const key = `hub.jobs.stepNode.${step}`;
   const label = t(key);
   return label === key ? step : label;
-}
-
-/**
- * 边录边传实时进度(F1):节点自己建稿 / 追加 / 删源,master 要等收播后才建 job,
- * 这段时间队列原本是空的。数据来自节点 5 秒状态轮询,只读。
- */
-function DeliveringPanel({ items, now }: { items: RollingDeliveryDTO[]; now: number }): ReactNode {
-  const t = useT();
-  if (items.length === 0) return null;
-  return (
-    <div className="mb-5">
-      <div className="section-label mb-2.5">{t("queue.section.delivering")}</div>
-      <div className="space-y-2">
-        {items.map((d) => {
-          const sec = Math.max(0, Math.round((now - d.checkedAt) / 1000));
-          return (
-            <div key={`${d.workerId}:${d.sessionBase}`} className="card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-              <span className="font-medium">{d.anchorName ?? d.roomSlug}</span>
-              <span className="text-muted-soft font-mono text-[11px]">{d.workerName}</span>
-              <span className="text-muted">{d.recording ? t("queue.delivering.recording") : t("queue.delivering.ended")}</span>
-              <span className="font-mono text-[12px]">{t("queue.delivering.progress", { c: d.confirmed, n: d.total })}</span>
-              {d.uploading && <span>{t("queue.delivering.pending")}</span>}
-              {typeof d.lockedBytes === "number" && d.lockedBytes > 0 && (
-                <span className="text-muted font-mono text-[12px]">{t("queue.delivering.locked", { size: fmtBytes(d.lockedBytes) })}</span>
-              )}
-              {d.ambiguous > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.delivering.unknown")} {d.ambiguous}</span>}
-              {d.bv ? (
-                <a className="font-mono text-[11px] text-muted hover:text-ink" href={`https://www.bilibili.com/video/${d.bv}`} target="_blank" rel="noreferrer">{d.bv}</a>
-              ) : (
-                <span className="text-muted-soft text-[12px]">{t("queue.delivering.noBv")}</span>
-              )}
-              <span className="ml-auto text-muted-soft font-mono text-[11px]">{t("queue.delivering.updated", { s: sec })}</span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/** Broadcasts waiting on an unreachable selected worker; read-only, nothing is uploaded or deleted meanwhile. */
-function BlockedPanel({ items, now }: { items: HubBlockedBroadcastDTO[]; now: number }): ReactNode {
-  const t = useT();
-  if (items.length === 0) return null;
-  return (
-    <div className="mb-5">
-      <div className="section-label mb-2.5">{t("queue.section.blocked")}</div>
-      <div className="space-y-2">
-        {items.map((b) => {
-          const min = Math.max(0, Math.round((now - b.sinceMs) / 60_000));
-          return (
-            <div key={b.streamKey} className="card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-              <span className="font-medium">{b.anchorName ?? b.roomSlug}</span>
-              <span className="text-muted-soft font-mono text-[11px]">{b.streamKey}</span>
-              <span style={{ color: "var(--error-fg)" }}>{t("queue.blocked.by", { nodes: b.workers.join(", ") })}</span>
-              <span className="text-muted font-mono text-[12px]">{t("queue.blocked.since", { min })}</span>
-              <span className="text-muted font-mono text-[12px]">
-                {b.threshold > 0 ? t("queue.blocked.rounds", { n: b.rounds, max: b.threshold }) : t("queue.blocked.roundsNoLimit", { n: b.rounds })}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/** 资源占用条:CPU / 上传窗口 / 冷却。 */
-function PoolBar({ pool }: { pool: HubPoolSnapshotDTO }): ReactNode {
-  const t = useT();
-  // 冷却倒数走**本地 tick**:服务端只在状态变化时推,靠 Date.now() 直接算不会自己走字。
-  const now = useTicker(1000);
-  const cooldownSec = pool.upload.cooldownUntil > now ? Math.round((pool.upload.cooldownUntil - now) / 1000) : 0;
-  return (
-    <div className="telemetry-bar telemetry-bar-cols-3 mb-5">
-      <div className="telemetry-cell">
-        <div className="flex flex-col gap-1.5 min-w-0">
-          <span className="telemetry-label">{t("queue.pool.cpu")}</span>
-          <span className="telemetry-value tabular-nums">
-            {pool.cpu.active}/{pool.cpu.max || "-"}
-            {pool.cpu.queued > 0 && <span className="text-muted-soft font-normal text-[13px]"> · {t("queue.pool.queued", { n: pool.cpu.queued })}</span>}
-          </span>
-        </div>
-        <span className="telemetry-icon"><Cpu className="w-4 h-4" /></span>
-      </div>
-      <div className="telemetry-cell">
-        <div className="flex flex-col gap-1.5 min-w-0">
-          <span className="telemetry-label">{t("queue.pool.upload")}</span>
-          <span className="telemetry-value tabular-nums">
-            {pool.upload.windowLimit > 0 ? `${pool.upload.windowUsed}/${pool.upload.windowLimit}` : t("queue.pool.unlimited")}
-            {pool.upload.queued > 0 && <span className="text-muted-soft font-normal text-[13px]"> · {t("queue.pool.queued", { n: pool.upload.queued })}</span>}
-          </span>
-        </div>
-        <span className="telemetry-icon"><UploadCloud className="w-4 h-4" /></span>
-      </div>
-      <div className="telemetry-cell">
-        <div className="flex flex-col gap-1.5 min-w-0">
-          <span className="telemetry-label">{t("queue.pool.cooldown")}</span>
-          <span className="telemetry-value tabular-nums" style={{ color: cooldownSec > 0 ? "var(--warning-fg)" : undefined }}>
-            {cooldownSec > 0 ? humanSec(cooldownSec) : t("queue.pool.noCooldown")}
-          </span>
-        </div>
-        <span className="telemetry-icon" style={cooldownSec > 0 ? { color: "var(--warning-fg)" } : undefined}>
-          <AlertTriangle className="w-4 h-4" />
-        </span>
-      </div>
-    </div>
-  );
 }
 
 /** A poll snapshot older than this is shown as stale (the master polls every minute). */
@@ -607,6 +500,7 @@ export function QueuePage(): ReactNode {
   /** 收到当前这份快照的本地时刻 —— 本地计时以它为基准递增。 */
   const [dataAt, setDataAt] = useState(() => Date.now());
   const [loaded, setLoaded] = useState(false);
+
   const [phase, setPhase] = useState<string[]>([]);
   const [states, setStates] = useState<string[]>([]);
   const [platform, setPlatform] = useState<string[]>([]);
@@ -648,6 +542,7 @@ export function QueuePage(): ReactNode {
   );
   // 推送驱动:master 走 /api/hub/stream,changed 即重拉;推送不可用自动退化为有界退避轮询。
   const stream = useHubStream(poll, { enabled: hubEnabled === true });
+
   // 计时/冷却本地每秒递增:服务端只在状态变化时推,不能指望它每秒重算。
   const now = useTicker(1000);
   // 筛选一变立刻重拉(不必等下一次推送/兜底 tick)。首次跳过 —— useHubStream 挂载时已拉过一次,
@@ -676,6 +571,11 @@ export function QueuePage(): ReactNode {
   const manualShown = (data?.active ?? []).filter((r) => r.state === "needs_manual").length;
   const manualTotal = data?.manualTotal ?? 0;
   const pool = data?.pool;
+  const sections = useMemo(
+    () => splitQueue(rows, data?.delivering ?? [], data?.blocked ?? []),
+    [rows, data?.delivering, data?.blocked],
+  );
+  const summary = queueSummary(sections, pool ?? null);
   const filtered = phase.length + states.length + platform.length + (debouncedQ ? 1 : 0) > 0;
 
   // hub 未启用(slave)→ 队列页无意义,给 child-node 提示(与 HubPage 同口径)。
@@ -702,18 +602,57 @@ export function QueuePage(): ReactNode {
 
       <HubStreamBanner handle={stream} />
 
-      {/* 节点健康独立一块:它按分钟级刷新,和秒级队列混在一起会让人以为节点也在实时变。 */}
-      <NodesStrip delivering={data?.delivering ?? []} />
+      <FleetPulse delivering={data?.delivering?.length ?? 0} />
 
       {!loaded ? (
         <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>
       ) : (
         <>
-          {/* 运行态 + 筛选合到一行:资源占用、边录边传、筛选器同属「现在在发生什么」。 */}
-          <div className="section-label mb-2.5">{t("queue.filter.groupRuntime")}</div>
-          {pool && <PoolBar pool={pool} />}
-          <DeliveringPanel items={data?.delivering ?? []} now={now} />
-          <BlockedPanel items={data?.blocked ?? []} now={now} />
+          <div className="section-label mb-2.5">{t("queue.live.title")}</div>
+          {pool && <LivePool pool={pool} />}
+          {sections.live.length === 0 ? (
+            <div className="card mb-5 flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3">
+              <Activity className="w-4 h-4" style={{ color: "var(--muted-soft)" }} />
+              <span className="text-[13px] font-medium text-ink">{sections.delivering.length ? t("queue.section.delivering") : t("queue.live.empty")}</span>
+              <span className="text-[12px] text-muted">{sections.delivering.length ? t("queue.fleet.delivering", { n: sections.delivering.length }) : t("queue.live.idleHint")}</span>
+            </div>
+          ) : (
+            <div className="space-y-2 mb-5">
+              {sections.live.map((item) => (
+                <LiveLane key={item.streamKey} item={item} now={now} dataAt={dataAt} onOpenLog={setLogKey} />
+              ))}
+            </div>
+          )}
+
+          <div className="section-label mb-2.5">{t("queue.attentionSection.title")}</div>
+          {sections.attention.length === 0 ? (
+            <div className="card px-4 py-3 mb-5 text-[12px] text-muted">{t("queue.attentionSection.empty")}</div>
+          ) : (
+            <div className="mb-5">
+              {sections.attention.map((g) => (
+                <AttentionCard key={g.kind} kind={g.kind} rows={g.rows} blocked={g.blocked} onOpenLog={setLogKey} defaultOpen={g.kind === "upload_unknown"} />
+              ))}
+            </div>
+          )}
+
+          {sections.stageReady.length > 0 && (
+            <details className="attention-group mb-5">
+              <summary>
+                <ChevronDown className="w-3.5 h-3.5 transition-transform" />
+                <span className="font-medium text-ink">{t("queue.attentionSection.stageTitle")}</span>
+                <span className="font-mono text-[11px] text-muted-soft">{sections.stageReady.length}</span>
+              </summary>
+              {sections.stageReady.map((item) => (
+                <StageReadyRow key={item.streamKey} item={item} onOpenLog={setLogKey} onAck={openAck} />
+              ))}
+            </details>
+          )}
+
+          <details className="mb-5">
+            <summary className="section-label cursor-pointer select-none">
+              {t("queue.history.title")} · {t("queue.history.summary", { done: summary.history - failedCount, failed: failedCount })}
+            </summary>
+            <div className="mt-3">
           <FilterBar
             phase={phase} states={states} platform={platform} q={q}
             onPhase={setPhase} onStates={setStates} onPlatform={setPlatform}
@@ -802,6 +741,8 @@ export function QueuePage(): ReactNode {
               </table>
             </div>
           </section>
+            </div>
+          </details>
         </>
       )}
 

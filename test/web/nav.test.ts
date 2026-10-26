@@ -9,9 +9,9 @@ describe("navSections", () => {
     expect(nav.primary.map((i) => i.to)).toEqual(["/"]);
     expect(nav.advanced).toEqual([]);
   });
-  it("master: rooms primary; queue is the only advanced item", () => {
+  it("master: rooms and nodes primary; queue is the only advanced item", () => {
     const nav = navSections(true);
-    expect(nav.primary.map((i) => i.to)).toEqual(["/rooms"]);
+    expect(nav.primary.map((i) => i.to)).toEqual(["/rooms", "/nodes"]);
     expect(nav.advanced.map((i) => i.to)).toEqual(["/queue"]);
     expect(nav.advanced[0]?.end).toBe(true);
   });
@@ -25,6 +25,7 @@ describe("navSections", () => {
     expect(app).toContain('<Route path="/task/:id"');
     expect(app).toContain('<Route path="/hub"');
     expect(app).toContain('<Route path="/hub/:key"');
+    expect(app).toContain('<Route path="/nodes"');
   });
   it("home target waits for hub detection, then chooses Rooms on master and Tasks on worker", () => {
     expect(homeTarget(null)).toBeNull();
