@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { roomDisplayId } from "../../packages/web/src/lib/labels";
-import { roomName } from "../../packages/web/src/pages/rooms/shared";
+import { roomDisplayId, roomName } from "../../packages/web/src/lib/labels";
 import type { RoomDTO } from "../../packages/web/src/api/client";
 
 describe("roomDisplayId - compact room identifier for list cells", () => {
