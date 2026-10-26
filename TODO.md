@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-119 Queue 改为实时运行态，并新增 Nodes 拓扑页（issue [#376](https://github.com/fuyucn/douyin-rec/issues/376)）**（2026-10-26）
+  — Queue 当前把节点、资源池、边录边传、告警和历史堆成一张长表；实测 38 行时 0 个 pipeline 在跑，主要信息被历史淹没。
+  **做什么**: Queue 拆成 NOW / ATTENTION / HISTORY；活动场次显示节点候选、胜出节点、当前步骤、后续步骤、真实计时和上传进度；告警按原因聚合；历史默认折叠；顶部节点卡改为紧凑健康摘要。新增 master-only `/nodes`，显示 master→worker 拓扑、在线/版本/磁盘/同步、承载房间与会话，并保留节点管理和日志。
+  **为什么**: 日常要快速回答「现在跑什么、什么要人处理、哪个节点在做什么」；节点健康与房间配置不应混在队列主视图里。
+  **验收**: 真实数据不隐藏、不伪造；筛选/搜索/日志/标记已核对/房间链接保持可用；stage 正常收档不混入紧急故障；桌面和手机无横向溢出；新增纯函数回归、全量测试、类型、Web 构建、i18n、bundle、pr-gate 与 risk scan 通过。
+
 - [~] **T-118 master 导航撤下 Tasks/Hub，保留旧路由兼容（issue [#374](https://github.com/fuyucn/douyin-rec/issues/374)）**（2026-10-26）
   — 分阶段退役旧页的第一步。Rooms 已覆盖录制、日志、合成、节点管理、workflow 与重跑，master 无需再把 Tasks/Hub 暴露为日常入口。
   **做什么**: master 的 Advanced 菜单只保留 Queue；Tasks/Hub 旧路由继续可访问；worker 仍以 Tasks 为首页并保留 Tasks 导航。
