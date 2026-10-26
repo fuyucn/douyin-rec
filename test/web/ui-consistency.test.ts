@@ -65,8 +65,12 @@ describe("room links (issue #197)", () => {
 describe("rooms editor upload fields", () => {
   it("exposes the Bilibili season section id from the unified room editor (#370)", () => {
     const editor = readFileSync(join(SRC, "modals", "RoomEditor.tsx"), "utf-8");
+    const hub = readFileSync(join(SRC, "modals", "HubRuleDialog.tsx"), "utf-8");
+    const upload = readFileSync(join(SRC, "components", "room-form", "UploadSection.tsx"), "utf-8");
     const field = readFileSync(join(SRC, "components", "room-form", "SeasonSectionField.tsx"), "utf-8");
     expect(editor).toContain("<SeasonSectionField");
+    expect(upload).toContain("<SeasonSectionField");
+    expect(hub).toContain("seasonSectionIdPayload");
     expect(field).toContain("value={value}");
   });
 });
