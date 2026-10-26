@@ -19,7 +19,7 @@ import { UploadSection, type UploadValue } from "../components/room-form/UploadS
 import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, scheduleInput, splitSchedule } from "../lib/labels";
-import { isValidSeasonSectionIdInput, seasonSectionIdPatch } from "../lib/room-editor-form";
+import { isValidSeasonSectionIdInput, seasonSectionIdPayload } from "../lib/room-editor-form";
 import {
   cookieReadyFor, deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, outputFormatFromStored, settledMethod, shownOutputFormat, storedFromForm, type FormFacts,
 } from "../lib/room-form-rules";
@@ -276,9 +276,7 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           titleTemplate: form.titleTemplate.trim() || undefined,
           submissionTitleTemplate: form.submissionTitleTemplate.trim() || undefined,
           partTitleTemplate: form.partTitleTemplate.trim() || undefined,
-          seasonSectionId: isValidSeasonSectionIdInput(form.seasonSectionId)
-            ? seasonSectionIdPatch(form.seasonSectionId, form.seasonSectionIdStored)
-            : undefined,
+          seasonSectionId: seasonSectionIdPayload(form.seasonSectionId, form.seasonSectionIdStored),
         },
       },
     };

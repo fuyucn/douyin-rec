@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_TITLE_TEMPLATES, factsOf, formFromRoom, isValidSeasonSectionIdInput, payloadFromForm, ruleFactsOf, seasonSectionIdPatch, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { DEFAULT_TITLE_TEMPLATES, factsOf, formFromRoom, isValidSeasonSectionIdInput, payloadFromForm, ruleFactsOf, seasonSectionIdPatch, seasonSectionIdPayload, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
 import { deriveConstraints, settledMethod } from "../../packages/web/src/lib/room-form-rules.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
@@ -93,6 +93,8 @@ describe("room editor form ↔ payload", () => {
     expect(seasonSectionIdPatch("", false)).toBeUndefined();
     expect(seasonSectionIdPatch("", true)).toBeNull();
     expect(seasonSectionIdPatch("456", false)).toBe(456);
+    expect(seasonSectionIdPayload("-3", true)).toBeUndefined();
+    expect(seasonSectionIdPayload("456", true)).toBe(456);
     const on = { ...formFromRoom(mkRoom()), uploadOn: true, seasonSectionId: "-3" };
     expect(payloadFromForm(on, ctx)).toEqual({ ok: false, error: "seasonSectionId" });
     const off = { ...formFromRoom(mkRoom()), uploadOn: false, seasonSectionId: "-3" };

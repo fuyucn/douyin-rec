@@ -82,6 +82,11 @@ export function seasonSectionIdPatch(raw: string, stored: boolean): number | nul
   return Number(value);
 }
 
+/** Invalid hidden leftovers are omitted so they neither persist nor clear an already stored association. */
+export function seasonSectionIdPayload(raw: string, stored: boolean): number | null | undefined {
+  return isValidSeasonSectionIdInput(raw) ? seasonSectionIdPatch(raw, stored) : undefined;
+}
+
 export function formFromRoom(r: RoomDTO): RoomForm {
   const rec = r.recording;
   const p = r.processing?.pipeline ?? {};
@@ -218,9 +223,7 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
             titleTemplate: trimOrUndef(f.titleTemplate),
             submissionTitleTemplate: trimOrUndef(f.submissionTitleTemplate),
             partTitleTemplate: trimOrUndef(f.partTitleTemplate),
-            seasonSectionId: isValidSeasonSectionIdInput(f.seasonSectionId)
-              ? seasonSectionIdPatch(f.seasonSectionId, f.seasonSectionIdStored)
-              : undefined,
+            seasonSectionId: seasonSectionIdPayload(f.seasonSectionId, f.seasonSectionIdStored),
           },
         },
       },
