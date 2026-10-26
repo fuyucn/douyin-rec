@@ -277,21 +277,30 @@ async function uploadAll(job: ProcessJob, ctx: ProcessContext, deps: BiliupDeps,
   const seasonState = persistedSeasonState(job);
   let seasonTail: Promise<void> = Promise.resolve();
   if (p.seasonSectionId && seasonState !== "done" && seasonState !== "failed") {
-    try { ctx.setState?.({ seasonState: "pending" }); }
-    catch (e) { ctx.log(`season pending checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
-    seasonTail = (async () => {
-      const outcome = await addArchiveToSeasonIfConfigured({
-        cookiesPath: cookies,
-        sectionId: p.seasonSectionId,
-        bvid: bv,
-        reconcileFirst: seasonState === "pending",
-        note: (m) => ctx.log(m),
+    let checkpointReady = seasonState === "pending";
+    if (!checkpointReady) {
+      try {
+        ctx.setState?.({ seasonState: "pending" });
+        checkpointReady = true;
+      } catch (e) {
+        ctx.log(`season pending checkpoint not saved; skipping association: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      }
+    }
+    if (checkpointReady) {
+      seasonTail = (async () => {
+        const outcome = await addArchiveToSeasonIfConfigured({
+          cookiesPath: cookies,
+          sectionId: p.seasonSectionId,
+          bvid: bv,
+          reconcileFirst: seasonState === "pending",
+          note: (m) => ctx.log(m),
+        });
+        try { ctx.setState?.({ seasonState: seasonCheckpointState(outcome) }); }
+        catch (e) { ctx.log(`season terminal checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
+      })().catch((e) => {
+        ctx.log(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
       });
-      try { ctx.setState?.({ seasonState: seasonCheckpointState(outcome) }); }
-      catch (e) { ctx.log(`season terminal checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
-    })().catch((e) => {
-      ctx.log(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
-    });
+    }
   }
   const countParts = countPartsOf(deps);
   // params.bv: the draft exists and every input is a part still to append.

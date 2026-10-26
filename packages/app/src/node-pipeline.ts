@@ -767,16 +767,18 @@ export async function runNodeSidePipeline(
   let seasonTail: Promise<void> = Promise.resolve();
   // 上传子步骤(plan 038):仅可观测信息,master 的成败判定只看 phase。落盘失败只记日志、不中断上传
   // (落 uploading 本身已在上方强制成功;这里是增量信息,丢一次不影响「结果不确定」的保守口径)。
-  const persistSeasonState = (state: "pending" | "done" | "failed", extra: { bv: string; confirmedParts: number }): void => {
+  const persistSeasonState = (state: "pending" | "done" | "failed", extra: { bv: string; confirmedParts: number }): boolean => {
     try {
       writeNodeResult(stageSub, {
         phase: "uploading", ok: false, step: "submit", bv: extra.bv, products,
         confirmedParts: extra.confirmedParts, intentPart, seasonState: state,
       }, log);
       seasonState = state;
+      return true;
     } catch (e) {
       // Season metadata is best-effort; losing it must never fail an upload that already created its BV.
-      log(`season 状态落盘失败(忽略,关联结果不受影响): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      log(`season 状态落盘失败: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      return false;
     }
   };
   const markStep = (step: NodeUploadStep): void => {
@@ -833,8 +835,11 @@ export async function runNodeSidePipeline(
       log(`建稿成功 BV=${bv}`);
       if (spec.uploadMeta.seasonSectionId) {
         // Persist the BV BEFORE the season call: a kill during that call must not lose it.
-        persistSeasonState("pending", { bv, confirmedParts: 1 });
-        startSeason(bv, 1, false);
+        if (persistSeasonState("pending", { bv, confirmedParts: 1 })) {
+          startSeason(bv, 1, false);
+        } else {
+          log("season pending 状态未落盘,跳过本次关联以避免不可恢复的重复提交");
+        }
       }
       confirmedParts = 1;
     }

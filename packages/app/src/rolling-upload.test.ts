@@ -6,23 +6,24 @@ import {
   RollingUploader, looksLikeRecordProcess, makeRollingUploadHookFactory, resolveRollingUploadMeta, resolveStreamUploadMeta,
   resolveStreamUploadTitle, resolveStreamPartTitle,
 } from "./rolling-upload.js";
-import { UploadGate, rollingUploadSingleNode } from "@drec/core";
+import { UploadGate, rollingUploadSingleNode, type SeasonAddOutcome } from "@drec/core";
 
 const seasonHook = vi.hoisted(() => ({
-  calls: [] as Array<{ bvid: string; persistedBv?: string; persistedState?: string }>,
+  calls: [] as Array<{ bvid: string; persistedBv?: string; persistedState?: string; reconcileFirst?: boolean }>,
   onCall: undefined as undefined | ((o: { bvid?: string }) => void | Promise<void>),
+  result: undefined as SeasonAddOutcome | undefined,
 }));
 vi.mock("@drec/core", async (orig) => {
   const m = await orig<typeof import("@drec/core")>();
   return {
     ...m,
     addArchiveToSeasonIfConfigured: async (o: Parameters<typeof m.addArchiveToSeasonIfConfigured>[0]) => {
-      const call = { bvid: String(o.bvid ?? "") };
+      const call = { bvid: String(o.bvid ?? ""), reconcileFirst: o.reconcileFirst };
       seasonHook.calls.push(call);
       await seasonHook.onCall?.(o);
-      return o.sectionId
+      return seasonHook.result ?? (o.sectionId
         ? { status: "added" as const, sectionId: o.sectionId, aid: 1, cid: 1, title: "t" }
-        : { status: "skipped" as const, reason: "season section id is off" };
+        : { status: "skipped" as const, reason: "season section id is off" });
     },
   };
 });
@@ -80,7 +81,7 @@ function writeSidecar(dir: string, overrides: Record<string, unknown>): void {
 }
 
 describe("RollingUploader — 边录边传录制端执行", () => {
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => { vi.useRealTimers(); seasonHook.onCall = undefined; seasonHook.result = undefined; });
 
   it("seasonSectionId: BV + pending are persisted before the association call", async () => {
     seasonHook.calls.length = 0;
@@ -567,36 +568,6 @@ describe("RollingUploader — 同一场断流重连续用稿件(#148)", () => {
     expect(u.bv).toBe(FAKE_BV);
     const saved = JSON.parse(readFileSync(path.join(dir, `${B_BASE}.rolling.json`), "utf-8"));
     expect(saved).toMatchObject({ bv: FAKE_BV, inheritedParts: 2, inheritedFrom: A_BASE, confirmed: [0] });
-  });
-
-  it("inherited BV persists season pending before association", async () => {
-    seasonHook.calls.length = 0;
-    const { dir, plain, append } = await runSessionA();
-    const b = sessionB(dir, 30);
-    const u = new RollingUploader({
-      room,
-      uploadMeta: { ...uploadMeta, seasonSectionId: 456 },
-      gate: new FakeGate(), uploadPlainRaw: plain as never, appendGroupRaw: append as never,
-      countPartsRaw: async () => 2, removeFile: noRemove, now: () => b.startMs + 3_600_000, minSegmentSec: 0,
-    });
-    seasonHook.onCall = async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const saved = JSON.parse(readFileSync(path.join(dir, `${B_BASE}.rolling.json`), "utf-8")) as { bv?: string; seasonState?: string };
-      const call = seasonHook.calls.at(-1)!;
-      call.persistedBv = saved.bv;
-      call.persistedState = saved.seasonState;
-    };
-    try {
-      b.paths.forEach((p) => u.noteSegment(p));
-      await u.flush({ recordingActive: false });
-      await u.drainSeason();
-      expect(seasonHook.calls).toHaveLength(1);
-      const call = seasonHook.calls[0] as { bvid: string; persistedBv?: string; persistedState?: string };
-      // The predecessor now carries no season state, so the inherit path must not queue an association.
-      expect(call.persistedState).not.toBe("done");
-    } finally {
-      seasonHook.onCall = undefined;
-    }
   });
 
   it("gap 31 min: new broadcast → B creates its own submission", async () => {
@@ -1161,6 +1132,63 @@ describe("RollingUploader — 接管前序会话残段(#46)", () => {
   const names = (ap: { mock: { calls: unknown[][] } }): string[] =>
     (ap.mock.calls as unknown as Array<[{ files: string[] }]>).map((c) => path.basename(c[0].files[0]!));
   const readA = (f: Fixture): Record<string, unknown> => JSON.parse(readFileSync(path.join(f.dir, `${A_BASE}.rolling.json`), "utf-8"));
+
+  const seasonUploaderB = (f: Fixture, append: ReturnType<typeof vi.fn>): RollingUploader =>
+    new RollingUploader({
+      room, uploadMeta: { ...uploadMeta, seasonSectionId: 456 }, gate: new FakeGate(), pid: B_PID,
+      stableCheckMs: 0, minSegmentSec: 0, removeFile: noRemove, isPidAlive: () => false,
+      uploadPlainRaw: vi.fn() as never, appendGroupRaw: append as never, countPartsRaw: async () => 1,
+      now: () => f.bStartMs + 3_600_000,
+    });
+
+  it("inherits a predecessor's pending season state and retries with membership preflight", async () => {
+    seasonHook.calls.length = 0;
+    const f = setup({ sidecar: { seasonState: "pending" } });
+    const append = vi.fn(async () => {});
+    const u = seasonUploaderB(f, append);
+    seasonHook.onCall = async () => {
+      const saved = readA(f) as { bv?: string; seasonState?: string };
+      const call = seasonHook.calls.at(-1)!;
+      call.persistedBv = saved.bv;
+      call.persistedState = saved.seasonState;
+    };
+    try {
+      f.bPaths.forEach((p) => u.noteSegment(p));
+      await u.flush({ recordingActive: false });
+      await u.drainSeason();
+      expect(seasonHook.calls).toHaveLength(1);
+      expect(seasonHook.calls[0]).toMatchObject({
+        bvid: FAKE_BV, persistedBv: FAKE_BV, persistedState: "pending", reconcileFirst: true,
+      });
+      expect(readA(f).seasonState).toBe("done");
+    } finally { seasonHook.onCall = undefined; }
+  });
+
+  it("keeps a retryable predecessor season state pending across takeover and inheritance", async () => {
+    seasonHook.calls.length = 0;
+    seasonHook.result = { status: "failed", sectionId: 456, error: "timeout", retryable: true };
+    const f = setup({ sidecar: { seasonState: "pending" } });
+    const append = vi.fn(async () => {});
+    const u = seasonUploaderB(f, append);
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    await u.drainSeason();
+    expect(seasonHook.calls.length).toBeGreaterThanOrEqual(2);
+    expect(seasonHook.calls.at(-1)).toMatchObject({ bvid: FAKE_BV, reconcileFirst: true });
+    expect((JSON.parse(readFileSync(path.join(f.dir, `${B_BASE}.rolling.json`), "utf-8")) as { seasonState?: string }).seasonState).toBe("pending");
+  });
+
+  it("does not retroactively associate a legacy predecessor without season state", async () => {
+    seasonHook.calls.length = 0;
+    const f = setup();
+    const append = vi.fn(async () => {});
+    const u = seasonUploaderB(f, append);
+    f.bPaths.forEach((p) => u.noteSegment(p));
+    await u.flush({ recordingActive: false });
+    await u.drainSeason();
+    expect(seasonHook.calls).toHaveLength(0);
+    expect((JSON.parse(readFileSync(path.join(f.dir, `${B_BASE}.rolling.json`), "utf-8")) as { seasonState?: string }).seasonState).toBeUndefined();
+  });
 
   it("restart with A's 2 sealed unconfirmed segments: B appends A1, A2 then B0 (A's parts before B's)", async () => {
     const f = setup();

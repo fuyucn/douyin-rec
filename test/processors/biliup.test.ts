@@ -82,6 +82,31 @@ describe("biliup processor (plan 038 T08)", () => {
     }
   });
 
+  it("does not POST season when the pending checkpoint cannot be persisted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bili-season-write-"));
+    const login = join(dir, "login.json");
+    writeFileSync(login, JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ code: 0, data: null }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+    try {
+      const run = vi.fn(async (argv: string[]) => argv[2] === "upload" ? "BV1aaaaaaaaa" : "ok"); // issue-guard: allow (fake BV fixture)
+      const p = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async () => "[]" } });
+      const c = ctx() as unknown as { setState: ReturnType<typeof vi.fn> };
+      c.setState = vi.fn((patch: { seasonState?: string }) => {
+        if (patch.seasonState === "pending") throw new Error("EIO season write");
+      });
+      const r = await p.run(job(files(1), { cookies: login, seasonSectionId: 123 }), c as never);
+      expect(r.bv).toBe("BV1aaaaaaaaa"); // issue-guard: allow (fake BV fixture)
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(c.setState).toHaveBeenCalledWith({ seasonState: "pending" });
+      expect(c.setState).not.toHaveBeenCalledWith({ seasonState: "done" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("no-draft proof yes -> refuse to create; unknown -> refuse (manual)", async () => {
     const run = vi.fn(async () => "BV1ccccccccc"); // issue-guard: allow (fake BV fixture)
     const yes = makeBiliupProcessor({ run, expectedDurationSec: 60, lookup: { run: async (a: string[]) => a.includes("--pubed") ? JSON.stringify([{ bvid: "BV1ccccccccc", title: "t", duration: 60 }]) : "[]" } }); // issue-guard: allow (fake BV fixture)

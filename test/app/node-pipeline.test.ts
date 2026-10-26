@@ -855,7 +855,7 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
     }
   });
 
-  it("season checkpoint write failure does not fail a created upload", async () => {
+  it("season pending checkpoint write failure does not POST an untracked association", async () => {
     const { sub, spec, gate } = scene();
     const seasonWriteBv = ["B", "V", "1SEASONWRITE"].join("");
     seasonSpy.calls.length = 0;
@@ -876,7 +876,7 @@ describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
       expect(r.ok).toBe(true);
       expect(r.bv).toBe(seasonWriteBv);
       expect(failed).toBeGreaterThan(0);
-      expect(seasonSpy.calls).toHaveLength(1);
+      expect(seasonSpy.calls).toHaveLength(0);
       expect(readNodeResult(sub)?.phase).toBe("done");
     } finally {
       vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => actual.renameSync(from, to)) as never);
