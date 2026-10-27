@@ -1,5 +1,5 @@
 /** controller「节点」总览条的纯函数(无 React 依赖,可直测)。 */
-import type { RollingDeliveryDTO, Task, WorkerStatus } from "../api/client";
+import type { RollingDeliveryDTO, Task, WorkerDTO, WorkerStatus } from "../api/client";
 
 /** 字节 → 人类可读(1 位小数,MB/GB)。 */
 export function fmtBytes(n: number): string {
@@ -8,6 +8,11 @@ export function fmtBytes(n: number): string {
 
 export const baseVersion = (v: string | undefined): string => (v ?? "").split("-")[0] ?? "";
 
+/** One online definition for Queue and Nodes: only a successful probe counts as online. */
+export function countOnlineNodes(nodes: readonly Pick<NodeSummary, "ok">[]): number {
+  return nodes.filter((n) => n.ok === true).length;
+}
+
 /** 房间在某节点上的展示状态。 */
 export type NodeRoomState = "recording" | "waiting" | "unavailable" | "disabled";
 
@@ -15,6 +20,9 @@ export type NodeRoomState = "recording" | "waiting" | "unavailable" | "disabled"
 export interface NodeRoom {
   key: string;
   label: string;
+  /** Platform + normalized room slug; keep both so equal slugs on different platforms never merge. */
+  platform?: string;
+  roomSlug?: string;
   state: NodeRoomState;
   /** 该状态的核对时刻(epoch ms);未知 = undefined。 */
   checkedAt?: number;
@@ -36,7 +44,7 @@ export function roomSlugOf(room: string | undefined): string {
   return base.split("/").pop() ?? base;
 }
 
-export type NodeTaskInput = Pick<Task, "recordingWorkers"> & Partial<Pick<Task, "room" | "name" | "anchorName" | "enabled">>;
+export type NodeTaskInput = Pick<Task, "recordingWorkers"> & Partial<Pick<Task, "platform" | "room" | "name" | "anchorName" | "enabled">>;
 
 export interface NodeSummary {
   id: string;
@@ -67,12 +75,13 @@ export interface NodeSummary {
   syncLag: boolean;
 }
 
-/** 纯函数:把三路数据汇成每节点一行。只含被任务 recordingWorkers 提到的节点(= 被分配的节点)。 */
+/** Pure model: configured workers, probe results, task assignments, and rolling sessions become one row per node. */
 export function summarizeNodes(
   tasks: readonly NodeTaskInput[],
   status: Record<string, WorkerStatus | undefined>,
   delivering: readonly RollingDeliveryDTO[],
   masterVersion: string,
+  workers: readonly Pick<WorkerDTO, "id" | "name">[] = [],
 ): NodeSummary[] {
   const byId = new Map<string, NodeSummary>();
   const ensure = (id: string, name: string): NodeSummary => {
@@ -96,37 +105,53 @@ export function summarizeNodes(
     }
     return n;
   };
-  // 房间行按 (节点, 平台无关的房间标识) 索引,供边录边传会话挂靠。
+  // Configured workers belong on the fleet even before they get a room assignment.
+  for (const w of workers) ensure(w.id, w.name || w.id);
+  // A probe can mention a worker that the configured list has not refreshed yet.
+  for (const id of Object.keys(status)) ensure(id, status[id]?.id ?? id);
+  // Room rows are keyed by (node, platform, slug). A bare slug is not globally unique.
   const roomIdx = new Map<string, NodeRoom>();
   for (const t of tasks) {
     const slug = roomSlugOf(t.room);
+    // Empty platform stays empty on the row; the identity uses the same fallback as deliveries.
+    const platform = t.platform ?? "";
     for (const w of t.recordingWorkers ?? []) {
       const n = ensure(w.workerId, w.workerName);
       if (w.state === "recording") n.recording++;
       else if (w.state === "unavailable") n.unavailable++;
       const state: NodeRoomState = w.state === "recording" ? "recording" : w.state === "unavailable" ? "unavailable"
         : t.enabled === false ? "disabled" : "waiting";
+      const identity = `${w.workerId}:${platform}:${slug || t.room || n.rooms.length}`;
       const row: NodeRoom = {
-        key: `${w.workerId}:${slug || t.room || n.rooms.length}`,
+        key: identity,
+        platform,
+        roomSlug: slug || undefined,
         // Same priority as notifications and the queue page (issue #53): task name first.
         label: t.name || t.anchorName || slug || "?",
         state, checkedAt: typeof w.checkedAt === "number" ? w.checkedAt : undefined, sessions: [],
       };
       n.rooms.push(row);
-      if (slug) roomIdx.set(`${w.workerId}:${slug}`, row);
+      if (slug) roomIdx.set(identity, row);
     }
   }
   for (const d of delivering) {
-    const n = byId.get(d.workerId);
-    if (!n) continue;
+    const n = ensure(d.workerId, d.workerName);
     n.rollingSessions++;
     n.lockedBytes += typeof d.lockedBytes === "number" ? d.lockedBytes : 0;
     n.ambiguous += d.ambiguous;
-    let row = roomIdx.get(`${d.workerId}:${d.roomSlug}`);
+    const identity = `${d.workerId}:${d.platform ?? ""}:${d.roomSlug}`;
+    let row = roomIdx.get(identity);
     if (!row) {
       // 任务清单里已没有的房间(遗留会话):照样列出,别让未确认分段「消失」。
-      row = { key: `${d.workerId}:${d.roomSlug}`, label: d.anchorName || d.roomSlug, state: d.recording ? "recording" : "disabled", sessions: [] };
-      roomIdx.set(`${d.workerId}:${d.roomSlug}`, row);
+      row = {
+        key: identity,
+        platform: d.platform ?? "",
+        roomSlug: d.roomSlug,
+        label: d.anchorName || d.roomSlug,
+        state: d.recording ? "recording" : "disabled",
+        sessions: [],
+      };
+      roomIdx.set(identity, row);
       n.rooms.push(row);
     }
     row.sessions.push(d);

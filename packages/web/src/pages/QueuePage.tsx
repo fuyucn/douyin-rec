@@ -6,20 +6,21 @@
  * (来自 master ResourcePool 的 waiting 快照)—— 两者是两个维度:行序=整体先后,位次=某池内先后。
  */
 import {
-  Activity, AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardCheck, Cpu, ExternalLink, FileText, Hourglass, Loader2, Search, Square, UploadCloud, X,
+  Activity, AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardCheck, ExternalLink, FileText, Hourglass, Loader2, Search, Square, UploadCloud, X,
 } from "lucide-react";
 import { useAtomValue } from "jotai";
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type HubBlockedBroadcastDTO, type HubPoolSnapshotDTO, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type RollingDeliveryDTO } from "../api/client";
+import { api, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type Task, type WorkerStatus } from "../api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/HubJobs";
 import { platformLabel, roomId } from "../lib/labels";
-import { errMessage, useHubStream, useTicker, useToast } from "../lib/hooks";
+import { errMessage, useHubStream, usePolling, useTicker, useToast } from "../lib/hooks";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { NodesStrip } from "../components/NodesStrip";
-import { fmtBytes } from "../lib/nodes-summary";
+import { baseVersion, fmtBytes, summarizeNodes } from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
+import { AttentionCard, FleetPulse, LiveLane, LivePool, StageReadyRow } from "../components/QueueLive";
+import { queueSummary, splitQueue } from "../lib/queue-live";
 import { useT } from "../lib/i18n";
 import { fmtTimeInTz } from "../lib/tz";
 
@@ -51,114 +52,6 @@ function stepLabel(t: TFunc, step: string): string {
   const key = `hub.jobs.stepNode.${step}`;
   const label = t(key);
   return label === key ? step : label;
-}
-
-/**
- * 边录边传实时进度(F1):节点自己建稿 / 追加 / 删源,master 要等收播后才建 job,
- * 这段时间队列原本是空的。数据来自节点 5 秒状态轮询,只读。
- */
-function DeliveringPanel({ items, now }: { items: RollingDeliveryDTO[]; now: number }): ReactNode {
-  const t = useT();
-  if (items.length === 0) return null;
-  return (
-    <div className="mb-5">
-      <div className="section-label mb-2.5">{t("queue.section.delivering")}</div>
-      <div className="space-y-2">
-        {items.map((d) => {
-          const sec = Math.max(0, Math.round((now - d.checkedAt) / 1000));
-          return (
-            <div key={`${d.workerId}:${d.sessionBase}`} className="card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-              <span className="font-medium">{d.anchorName ?? d.roomSlug}</span>
-              <span className="text-muted-soft font-mono text-[11px]">{d.workerName}</span>
-              <span className="text-muted">{d.recording ? t("queue.delivering.recording") : t("queue.delivering.ended")}</span>
-              <span className="font-mono text-[12px]">{t("queue.delivering.progress", { c: d.confirmed, n: d.total })}</span>
-              {d.uploading && <span>{t("queue.delivering.pending")}</span>}
-              {typeof d.lockedBytes === "number" && d.lockedBytes > 0 && (
-                <span className="text-muted font-mono text-[12px]">{t("queue.delivering.locked", { size: fmtBytes(d.lockedBytes) })}</span>
-              )}
-              {d.ambiguous > 0 && <span style={{ color: "var(--error-fg)" }}>{t("queue.delivering.unknown")} {d.ambiguous}</span>}
-              {d.bv ? (
-                <a className="font-mono text-[11px] text-muted hover:text-ink" href={`https://www.bilibili.com/video/${d.bv}`} target="_blank" rel="noreferrer">{d.bv}</a>
-              ) : (
-                <span className="text-muted-soft text-[12px]">{t("queue.delivering.noBv")}</span>
-              )}
-              <span className="ml-auto text-muted-soft font-mono text-[11px]">{t("queue.delivering.updated", { s: sec })}</span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/** Broadcasts waiting on an unreachable selected worker; read-only, nothing is uploaded or deleted meanwhile. */
-function BlockedPanel({ items, now }: { items: HubBlockedBroadcastDTO[]; now: number }): ReactNode {
-  const t = useT();
-  if (items.length === 0) return null;
-  return (
-    <div className="mb-5">
-      <div className="section-label mb-2.5">{t("queue.section.blocked")}</div>
-      <div className="space-y-2">
-        {items.map((b) => {
-          const min = Math.max(0, Math.round((now - b.sinceMs) / 60_000));
-          return (
-            <div key={b.streamKey} className="card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-              <span className="font-medium">{b.anchorName ?? b.roomSlug}</span>
-              <span className="text-muted-soft font-mono text-[11px]">{b.streamKey}</span>
-              <span style={{ color: "var(--error-fg)" }}>{t("queue.blocked.by", { nodes: b.workers.join(", ") })}</span>
-              <span className="text-muted font-mono text-[12px]">{t("queue.blocked.since", { min })}</span>
-              <span className="text-muted font-mono text-[12px]">
-                {b.threshold > 0 ? t("queue.blocked.rounds", { n: b.rounds, max: b.threshold }) : t("queue.blocked.roundsNoLimit", { n: b.rounds })}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/** 资源占用条:CPU / 上传窗口 / 冷却。 */
-function PoolBar({ pool }: { pool: HubPoolSnapshotDTO }): ReactNode {
-  const t = useT();
-  // 冷却倒数走**本地 tick**:服务端只在状态变化时推,靠 Date.now() 直接算不会自己走字。
-  const now = useTicker(1000);
-  const cooldownSec = pool.upload.cooldownUntil > now ? Math.round((pool.upload.cooldownUntil - now) / 1000) : 0;
-  return (
-    <div className="telemetry-bar telemetry-bar-cols-3 mb-5">
-      <div className="telemetry-cell">
-        <div className="flex flex-col gap-1.5 min-w-0">
-          <span className="telemetry-label">{t("queue.pool.cpu")}</span>
-          <span className="telemetry-value tabular-nums">
-            {pool.cpu.active}/{pool.cpu.max || "-"}
-            {pool.cpu.queued > 0 && <span className="text-muted-soft font-normal text-[13px]"> · {t("queue.pool.queued", { n: pool.cpu.queued })}</span>}
-          </span>
-        </div>
-        <span className="telemetry-icon"><Cpu className="w-4 h-4" /></span>
-      </div>
-      <div className="telemetry-cell">
-        <div className="flex flex-col gap-1.5 min-w-0">
-          <span className="telemetry-label">{t("queue.pool.upload")}</span>
-          <span className="telemetry-value tabular-nums">
-            {pool.upload.windowLimit > 0 ? `${pool.upload.windowUsed}/${pool.upload.windowLimit}` : t("queue.pool.unlimited")}
-            {pool.upload.queued > 0 && <span className="text-muted-soft font-normal text-[13px]"> · {t("queue.pool.queued", { n: pool.upload.queued })}</span>}
-          </span>
-        </div>
-        <span className="telemetry-icon"><UploadCloud className="w-4 h-4" /></span>
-      </div>
-      <div className="telemetry-cell">
-        <div className="flex flex-col gap-1.5 min-w-0">
-          <span className="telemetry-label">{t("queue.pool.cooldown")}</span>
-          <span className="telemetry-value tabular-nums" style={{ color: cooldownSec > 0 ? "var(--warning-fg)" : undefined }}>
-            {cooldownSec > 0 ? humanSec(cooldownSec) : t("queue.pool.noCooldown")}
-          </span>
-        </div>
-        <span className="telemetry-icon" style={cooldownSec > 0 ? { color: "var(--warning-fg)" } : undefined}>
-          <AlertTriangle className="w-4 h-4" />
-        </span>
-      </div>
-    </div>
-  );
 }
 
 /** A poll snapshot older than this is shown as stale (the master polls every minute). */
@@ -427,14 +320,14 @@ function QueueCard({ item, index, tz, onOpenLog, onAck }: { item: QueueItemDTO; 
             <a className="font-mono text-[11px] text-muted hover:text-ink" href={`https://www.bilibili.com/video/${item.bv}`} target="_blank" rel="noreferrer">{item.bv}</a>
           )}
           {item.state === "needs_manual" && (
-            <button type="button" title={t("queue.ack.action")} onClick={() => onAck(item.streamKey)} className="icon-btn !w-7 !h-7">
+            <button type="button" title={t("queue.ack.action")} aria-label={t("queue.ack.action")} onClick={() => onAck(item.streamKey)} className="icon-btn !w-7 !h-7">
               <ClipboardCheck className="w-3.5 h-3.5" />
             </button>
           )}
-          <button type="button" title={t("hub.jobs.viewLog")} onClick={() => onOpenLog(item.streamKey)} className="icon-btn !w-7 !h-7">
+          <button type="button" title={t("hub.jobs.viewLog")} aria-label={t("hub.jobs.viewLog")} onClick={() => onOpenLog(item.streamKey)} className="icon-btn !w-7 !h-7">
             <FileText className="w-3.5 h-3.5" />
           </button>
-          <Link to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`} title={t("queue.openRoom")} className="icon-btn !w-7 !h-7">
+          <Link to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`} title={t("queue.openRoom")} aria-label={t("queue.openRoom")} className="icon-btn !w-7 !h-7">
             <ExternalLink className="w-3.5 h-3.5" />
           </Link>
         </span>
@@ -571,6 +464,7 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
             <button
               type="button"
               title={t("queue.ack.action")}
+              aria-label={t("queue.ack.action")}
               onClick={() => onAck(item.streamKey)}
               className="icon-btn !w-7 !h-7"
             >
@@ -580,6 +474,7 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
           <button
             type="button"
             title={t("hub.jobs.viewLog")}
+            aria-label={t("hub.jobs.viewLog")}
             onClick={() => onOpenLog(item.streamKey)}
             className="icon-btn !w-7 !h-7"
           >
@@ -588,6 +483,7 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
           <Link
             to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`}
             title={t("queue.openRoom")}
+            aria-label={t("queue.openRoom")}
             className="icon-btn !w-7 !h-7"
           >
             <ExternalLink className="w-3.5 h-3.5" />
@@ -598,6 +494,96 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
   );
 }
 
+/** Completed-only table, memoized because the live lanes tick every second. */
+const HistorySection = memo(function HistorySection({
+  items, filtered, tz, sort, onToggleSort, onOpenLog, onAck,
+}: {
+  items: QueueItemDTO[];
+  filtered: boolean;
+  tz: string;
+  sort: "newest" | "oldest";
+  onToggleSort: () => void;
+  onOpenLog: (key: string) => void;
+  onAck: (key: string) => void;
+}): ReactNode {
+  const t = useT();
+  return (
+    <details className="mb-5">
+      <summary className="section-label cursor-pointer select-none">
+        {t("queue.history.title")} · {t("queue.history.doneSummary", { done: items.length })}
+      </summary>
+      <div className="mt-3">
+        {/* Mobile uses cards so the wide table cannot overflow or inflate every row. */}
+        <div className="sm:hidden space-y-2">
+          {items.length === 0 ? (
+            <div className="card p-8 text-center text-muted-soft text-sm">
+              {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
+            </div>
+          ) : (
+            items.map((it, i) => (
+              <QueueCard key={it.streamKey} item={it} index={i + 1} tz={tz} onOpenLog={onOpenLog} onAck={onAck} />
+            ))
+          )}
+        </div>
+        <section className="table-shell hidden sm:block">
+          <div className="overflow-x-auto">
+            <table className="tasks">
+              <thead>
+                <tr>
+                  <th className="w-14">#</th>
+                  <th>{t("queue.col.room")}</th>
+                  <th className="w-44">{t("queue.col.status")}</th>
+                  <th>{t("queue.col.flow")}</th>
+                  <th className="w-28">
+                    <button
+                      type="button"
+                      onClick={onToggleSort}
+                      className="inline-flex items-center gap-1 cursor-pointer"
+                      style={{ color: "inherit", font: "inherit" }}
+                      title={t(sort === "newest" ? "queue.sort.newestTip" : "queue.sort.oldestTip")}
+                    >
+                      {t("queue.col.enqueued")}
+                      <ChevronDown
+                        className={`w-3 h-3 transition-transform ${sort === "oldest" ? "" : "rotate-180"}`}
+                        style={{ opacity: 0.75 }}
+                      />
+                    </button>
+                  </th>
+                  <th className="w-14 text-right" aria-label={t("queue.col.actions")} />
+                </tr>
+              </thead>
+              <tbody>
+                {items.length === 0 ? (
+                  <tr>
+                    <td colSpan={6}>
+                      <div className="text-center text-muted-soft text-sm py-10">
+                        {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  items.map((it, i) => (
+                    <QueueRow
+                      key={it.streamKey}
+                      item={it}
+                      index={i + 1}
+                      tz={tz}
+                      now={0}
+                      dataAt={0}
+                      onOpenLog={onOpenLog}
+                      onAck={onAck}
+                    />
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </details>
+  );
+});
+
 /** 处理队列页(#/queue):datatable,入队时间排序 + 筛选。 */
 export function QueuePage(): ReactNode {
   const t = useT();
@@ -607,6 +593,16 @@ export function QueuePage(): ReactNode {
   /** 收到当前这份快照的本地时刻 —— 本地计时以它为基准递增。 */
   const [dataAt, setDataAt] = useState(() => Date.now());
   const [loaded, setLoaded] = useState(false);
+  // Fleet health is separate from the queue ledger: tasks/status are slow-moving and ssh-backed.
+  const [fleetTasks, setFleetTasks] = useState<Task[]>([]);
+  const [fleetStatus, setFleetStatus] = useState<Record<string, WorkerStatus | undefined>>({});
+  const [fleetWorkers, setFleetWorkers] = useState<Array<{ id: string; name: string }>>([]);
+  const [fleetTasksStale, setFleetTasksStale] = useState(false);
+  const [fleetWorkersStale, setFleetWorkersStale] = useState(false);
+  const [fleetVersionStale, setFleetVersionStale] = useState(false);
+  const [fleetStatusStale, setFleetStatusStale] = useState(false);
+  const [masterVersion, setMasterVersion] = useState("");
+
   const [phase, setPhase] = useState<string[]>([]);
   const [states, setStates] = useState<string[]>([]);
   const [platform, setPlatform] = useState<string[]>([]);
@@ -618,7 +614,7 @@ export function QueuePage(): ReactNode {
   const [ackKey, setAckKey] = useState<string | null>(null);
   const [ackNote, setAckNote] = useState("");
   const toast = useToast();
-  const openAck = (key: string): void => { setAckKey(key); setAckNote(""); };
+  const openAck = useCallback((key: string): void => { setAckKey(key); setAckNote(""); }, []);
   // 输入框每键都触发 → 延迟 250ms 再请求,避免逐字打请求。
   const [debouncedQ, setDebouncedQ] = useState("");
   useEffect(() => {
@@ -648,6 +644,41 @@ export function QueuePage(): ReactNode {
   );
   // 推送驱动:master 走 /api/hub/stream,changed 即重拉;推送不可用自动退化为有界退避轮询。
   const stream = useHubStream(poll, { enabled: hubEnabled === true });
+  usePolling(
+    () => api.listTasks()
+      .then((tasks) => { setFleetTasks(tasks); setFleetTasksStale(false); })
+      .catch(() => setFleetTasksStale(true)),
+    30_000,
+    hubEnabled === true,
+  );
+  usePolling(
+    () => api.listWorkers()
+      .then((list) => {
+        setFleetWorkers(list.map((w) => ({ id: w.id, name: w.name })));
+        setFleetWorkersStale(false);
+      })
+      .catch(() => setFleetWorkersStale(true)),
+    300_000,
+    hubEnabled === true,
+  );
+  usePolling(
+    () => api.getWorkersStatus()
+      .then((list) => {
+        setFleetStatus(Object.fromEntries(list.map((s) => [s.id, s])));
+        setFleetStatusStale(false);
+      })
+      .catch(() => setFleetStatusStale(true)),
+    60_000,
+    hubEnabled === true,
+  );
+  usePolling(
+    () => api.getVersion()
+      .then((r) => { setMasterVersion(baseVersion(r.version)); setFleetVersionStale(false); })
+      .catch(() => setFleetVersionStale(true)),
+    300_000,
+    hubEnabled === true,
+  );
+
   // 计时/冷却本地每秒递增:服务端只在状态变化时推,不能指望它每秒重算。
   const now = useTicker(1000);
   // 筛选一变立刻重拉(不必等下一次推送/兜底 tick)。首次跳过 —— useHubStream 挂载时已拉过一次,
@@ -659,7 +690,7 @@ export function QueuePage(): ReactNode {
   }, [poll]);
 
   const reset = (): void => { setPhase([]); setStates([]); setPlatform([]); setQ(""); };
-  const onToggleSort = (): void => setSort((v) => (v === "newest" ? "oldest" : "newest"));
+  const onToggleSort = useCallback((): void => setSort((v) => (v === "newest" ? "oldest" : "newest")), []);
   // rows = 进行中 + 已完成,**同一张表**(像日志的时间轴)。前端只渲染它。
   const rows = data?.rows ?? [];
   // 摘要分四类:真正在跑 / 待人工上传(stage 正常收口)/ 需要处理(失败·停止)/ 已完成。
@@ -668,14 +699,22 @@ export function QueuePage(): ReactNode {
   const uploadCount = rows.filter((r) => r.phase === "waiting_upload").length;
   // Same colour rule as HubJobs.stateColor: red only for a failed run, amber for "needs a person".
   const failedCount = rows.filter((r) => r.phase === "failed").length;
-  const attentionCount = rows.filter((r) => r.phase === "waiting_manual" || r.phase === "failed").length;
-  const stoppedCount = rows.filter((r) => r.phase === "stopped").length;
   const doneCount = rows.filter((r) => r.phase === "done").length;
   // The server caps the needs_manual inbox (manualLimit); say so instead of implying the list is complete.
   // Only meaningful without filters: `active` is filtered server-side, so a filter would look like "more hidden".
   const manualShown = (data?.active ?? []).filter((r) => r.state === "needs_manual").length;
   const manualTotal = data?.manualTotal ?? 0;
   const pool = data?.pool;
+  const sections = useMemo(
+    () => splitQueue(rows, data?.delivering ?? [], data?.blocked ?? []),
+    [rows, data?.delivering, data?.blocked],
+  );
+  const fleetNodes = useMemo(
+    () => summarizeNodes(fleetTasks, fleetStatus, data?.delivering ?? [], masterVersion, fleetWorkers),
+    [fleetTasks, fleetStatus, data?.delivering, masterVersion, fleetWorkers],
+  );
+  const summary = queueSummary(sections, pool ?? null);
+  const attentionCount = summary.attention;
   const filtered = phase.length + states.length + platform.length + (debouncedQ ? 1 : 0) > 0;
 
   // hub 未启用(slave)→ 队列页无意义,给 child-node 提示(与 HubPage 同口径)。
@@ -702,18 +741,16 @@ export function QueuePage(): ReactNode {
 
       <HubStreamBanner handle={stream} />
 
-      {/* 节点健康独立一块:它按分钟级刷新,和秒级队列混在一起会让人以为节点也在实时变。 */}
-      <NodesStrip delivering={data?.delivering ?? []} />
+      <FleetPulse
+        nodes={fleetNodes}
+        delivering={data?.delivering?.length ?? 0}
+        stale={fleetStatusStale || fleetTasksStale || fleetWorkersStale || fleetVersionStale}
+      />
 
       {!loaded ? (
         <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>
       ) : (
         <>
-          {/* 运行态 + 筛选合到一行:资源占用、边录边传、筛选器同属「现在在发生什么」。 */}
-          <div className="section-label mb-2.5">{t("queue.filter.groupRuntime")}</div>
-          {pool && <PoolBar pool={pool} />}
-          <DeliveringPanel items={data?.delivering ?? []} now={now} />
-          <BlockedPanel items={data?.blocked ?? []} now={now} />
           <FilterBar
             phase={phase} states={states} platform={platform} q={q}
             onPhase={setPhase} onStates={setStates} onPlatform={setPlatform}
@@ -726,7 +763,6 @@ export function QueuePage(): ReactNode {
                 {attentionCount > 0 && (
                   <span style={{ color: failedCount > 0 ? "var(--error-fg)" : "var(--warning-fg)" }}>{t("queue.summary.attention", { n: attentionCount })}</span>
                 )}
-                {stoppedCount > 0 && <span>{t("queue.summary.stopped", { n: stoppedCount })}</span>}
                 {!filtered && manualTotal > manualShown && (
                   <span style={{ color: "var(--warning-fg)" }}>{t("queue.summary.manualMore", { total: manualTotal, shown: manualShown })}</span>
                 )}
@@ -735,73 +771,63 @@ export function QueuePage(): ReactNode {
               </>
             }
           />
-          <div className="section-label mb-2.5">{t("queue.section.all")}</div>
-        {/* 窄屏(<sm):表格 5+ 列在手机上必然横向溢出且行高爆炸 → 改卡片式,信息不丢。 */}
-        <div className="sm:hidden space-y-2">
-          {rows.length === 0 ? (
-            <div className="card p-8 text-center text-muted-soft text-sm">
-              {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
+          <div className="section-label mb-2.5">{t("queue.live.title")}</div>
+          {pool && <LivePool pool={pool} />}
+          {sections.live.length === 0 ? (
+            <div className="card mb-5 flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3">
+              <Activity className="w-4 h-4" style={{ color: "var(--muted-soft)" }} />
+              <span className="text-[13px] font-medium text-ink">{sections.delivering.length ? t("queue.section.delivering") : t("queue.live.empty")}</span>
+              <span className="text-[12px] text-muted">{sections.delivering.length ? t("queue.fleet.delivering", { n: sections.delivering.length }) : t("queue.live.idleHint")}</span>
             </div>
           ) : (
-            rows.map((it, i) => (
-              <QueueCard key={it.streamKey} item={it} index={i + 1} tz={tz} onOpenLog={setLogKey} onAck={openAck} />
-            ))
-          )}
-          </div>
-          <section className="table-shell hidden sm:block">
-            <div className="overflow-x-auto">
-              <table className="tasks">
-                <thead>
-                  <tr>
-                    <th className="w-14">#</th>
-                    <th>{t("queue.col.room")}</th>
-                    <th className="w-44">{t("queue.col.status")}</th>
-                    <th>{t("queue.col.flow")}</th>
-                    <th className="w-28">
-                      <button
-                        type="button"
-                        onClick={onToggleSort}
-                        className="inline-flex items-center gap-1 cursor-pointer"
-                        style={{ color: "inherit", font: "inherit" }}
-                        title={t(sort === "newest" ? "queue.sort.newestTip" : "queue.sort.oldestTip")}
-                      >
-                        {t("queue.col.enqueued")}
-                        <ChevronDown
-                          className={`w-3 h-3 transition-transform ${sort === "oldest" ? "" : "rotate-180"}`}
-                          style={{ opacity: 0.75 }}
-                        />
-                      </button>
-                    </th>
-                    <th className="w-14 text-right" aria-label={t("queue.col.actions")} />
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.length === 0 ? (
-                    <tr>
-                      <td colSpan={6}>
-                        <div className="text-center text-muted-soft text-sm py-10">
-                          {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    rows.map((it, i) => (
-                      <QueueRow
-                        key={it.streamKey}
-                        item={it}
-                        index={i + 1}
-                        tz={tz}
-                        now={now}
-                        dataAt={dataAt}
-                        onOpenLog={setLogKey}
-                        onAck={openAck}
-                      />
-                    ))
-                  )}
-                </tbody>
-              </table>
+            <div className="space-y-2 mb-5">
+              {sections.live.map((item) => (
+                <LiveLane key={item.streamKey} item={item} now={now} dataAt={dataAt} onOpenLog={setLogKey} />
+              ))}
             </div>
-          </section>
+          )}
+
+          <div className="section-label mb-2.5">{t("queue.attentionSection.title")}</div>
+          {sections.attention.length === 0 ? (
+            <div className="card px-4 py-3 mb-5 text-[12px] text-muted">{t("queue.attentionSection.empty")}</div>
+          ) : (
+            <div className="mb-5">
+              {sections.attention.map((g, i) => (
+                <AttentionCard
+                  key={g.kind}
+                  kind={g.kind}
+                  rows={g.rows}
+                  blocked={g.blocked}
+                  onOpenLog={setLogKey}
+                  onAck={openAck}
+                  defaultOpen={i === 0}
+                />
+              ))}
+            </div>
+          )}
+
+          {sections.stageReady.length > 0 && (
+            <details className="attention-group mb-5">
+              <summary>
+                <ChevronDown className="w-3.5 h-3.5 transition-transform" />
+                <span className="font-medium text-ink">{t("queue.attentionSection.stageTitle")}</span>
+                <span className="font-mono text-[11px] text-muted-soft">{sections.stageReady.length}</span>
+              </summary>
+              {sections.stageReady.map((item) => (
+                <StageReadyRow key={item.streamKey} item={item} onOpenLog={setLogKey} onAck={openAck} />
+              ))}
+            </details>
+          )}
+
+          <HistorySection
+            items={sections.history}
+            filtered={filtered}
+            tz={tz}
+            sort={sort}
+            onToggleSort={onToggleSort}
+            onOpenLog={setLogKey}
+            onAck={openAck}
+          />
         </>
       )}
 
