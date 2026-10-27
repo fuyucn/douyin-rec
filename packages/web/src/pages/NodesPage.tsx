@@ -161,7 +161,7 @@ export function NodesPage(): ReactNode {
           <span className="telemetry-icon"><Database className="w-4 h-4" /></span>
         </div>
         <div className="telemetry-cell">
-          <div className="flex flex-col gap-1.5"><span className="telemetry-label">{t("nodes.relation")}</span><span className="telemetry-value-sm truncate">master → {nodes.filter((n) => n.id !== "local").length}</span></div>
+          <div className="flex flex-col gap-1.5"><span className="telemetry-label">{t("nodes.relation")}</span><span className="telemetry-value-sm truncate">{t("nodes.topology", { n: nodes.filter((n) => n.id !== "local").length })}</span></div>
           <span className="telemetry-icon"><ChevronRight className="w-4 h-4" /></span>
         </div>
       </div>
@@ -187,7 +187,10 @@ export function NodesPage(): ReactNode {
         onClose={() => setWorkersOpen(false)}
         workers={workers}
         status={Object.fromEntries(Object.entries(status).filter((x): x is [string, WorkerStatus] => x[1] !== undefined))}
-        onChanged={() => void refresh().catch(() => {})}
+        onChanged={() => {
+          void refresh().catch(() => {});
+          void api.listWorkers().then(setWorkers).catch(() => {});
+        }}
       />
       <NodeLogsDialog workerId={logsFor?.id ?? null} workerName={logsFor?.name ?? ""} onClose={() => setLogsFor(null)} />
     </>
@@ -236,7 +239,9 @@ function NodeCard({ n, now, onLogs }: { n: NodeView; now: number; onLogs: () => 
           {n.rooms.map((r) => (
             <div key={r.key} className="node-room-row">
               <span className="dot" style={{ background: NODE_STATE_COLOR[r.state] }} />
-              <Link to={nodeRoomHref(r)} className="text-[13px] text-ink hover:underline truncate">{r.label}</Link>
+              {nodeRoomHref(r)
+                ? <Link to={nodeRoomHref(r)} className="text-[13px] text-ink hover:underline truncate">{r.label}</Link>
+                : <span className="text-[13px] text-ink truncate">{r.label}</span>}
               <span className="font-mono text-[10px] text-muted-soft">{r.platform} · {r.roomSlug}</span>
               <span className="text-[11px] text-muted ml-auto">{t(`queue.nodes.state.${r.state}`)}</span>
               {r.sessions.map((s) => (

@@ -53,13 +53,13 @@ export function buildNodes(
   return base.map((n) => {
     const roomsOut: NodeRoomView[] = n.rooms.map((nr) => {
       const roomSlug = nr.roomSlug ?? nr.key.split(":").slice(2).join(":");
-      const platform = nr.platform ?? "";
+      const platform = nr.platform || "";
       const room = bySlug.get(`${platform}:${roomSlug}`);
       const task = tasks.find((t) => (t.platform ?? "") === platform && roomSlugOf(t.room) === roomSlug);
       return {
         key: nr.key,
         label: nr.label,
-        platform: room?.platform ?? task?.platform ?? platform ?? "douyin",
+        platform: room?.platform || task?.platform || platform,
         roomSlug,
         state: nr.state,
         taskId: task?.id ?? room?.recording?.taskId ?? null,
@@ -84,8 +84,9 @@ export function buildNodes(
   });
 }
 
-/** Link a node room to its unified room detail when the slug is known. */
+/** Link a node room to its unified room detail. Empty = identity is incomplete, so do not link. */
 export function nodeRoomHref(room: Pick<NodeRoomView, "platform" | "roomSlug">): string {
+  if (!room.platform || !room.roomSlug) return "";
   return `/rooms/${encodeURIComponent(`${room.platform}.${room.roomSlug}`)}`;
 }
 

@@ -113,8 +113,8 @@ export function summarizeNodes(
   const roomIdx = new Map<string, NodeRoom>();
   for (const t of tasks) {
     const slug = roomSlugOf(t.room);
-    // Unknown platforms still need a stable identity; deliveries always carry a platform.
-    const platform = t.platform ?? "unknown";
+    // Empty platform stays empty on the row; the identity uses the same fallback as deliveries.
+    const platform = t.platform ?? "";
     for (const w of t.recordingWorkers ?? []) {
       const n = ensure(w.workerId, w.workerName);
       if (w.state === "recording") n.recording++;
@@ -124,7 +124,7 @@ export function summarizeNodes(
       const identity = `${w.workerId}:${platform}:${slug || t.room || n.rooms.length}`;
       const row: NodeRoom = {
         key: identity,
-        platform: t.platform ?? "",
+        platform,
         roomSlug: slug || undefined,
         // Same priority as notifications and the queue page (issue #53): task name first.
         label: t.name || t.anchorName || slug || "?",
@@ -139,13 +139,13 @@ export function summarizeNodes(
     n.rollingSessions++;
     n.lockedBytes += typeof d.lockedBytes === "number" ? d.lockedBytes : 0;
     n.ambiguous += d.ambiguous;
-    const identity = `${d.workerId}:${d.platform}:${d.roomSlug}`;
+    const identity = `${d.workerId}:${d.platform ?? ""}:${d.roomSlug}`;
     let row = roomIdx.get(identity);
     if (!row) {
       // 任务清单里已没有的房间(遗留会话):照样列出,别让未确认分段「消失」。
       row = {
         key: identity,
-        platform: d.platform,
+        platform: d.platform ?? "",
         roomSlug: d.roomSlug,
         label: d.anchorName || d.roomSlug,
         state: d.recording ? "recording" : "disabled",

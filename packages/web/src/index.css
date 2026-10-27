@@ -1147,6 +1147,16 @@ table.tasks tbody tr:last-child td {
   from { background-position: 100% 0; }
   to { background-position: -100% 0; }
 }
+@media (prefers-reduced-motion: reduce) {
+  .live-lane,
+  .node-card {
+    animation: none;
+  }
+  .live-flow-step[data-state="current"]::after {
+    animation: none;
+    background: var(--accent);
+  }
+}
 .live-candidates {
   display: flex;
   flex-wrap: wrap;

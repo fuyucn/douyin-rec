@@ -36,8 +36,8 @@ function uploadLine(item: QueueItemDTO, t: TFunc): ReactNode {
         <span>{u.nodeId}</span>
         <span>{u.phase}{u.step ? ` · ${u.step}` : ""}</span>
         {p && <span>{fmtBytes(p.doneBytes)} / {fmtBytes(p.totalBytes)}</span>}
-        {p?.bps && <span>{fmtBytes(p.bps)}/s</span>}
-        {u.attempts && u.attempts > 1 && <span>{t("queue.nodeUpload.attempt", { n: u.attempts })}</span>}
+        {p?.bps != null && p.bps > 0 && <span>{fmtBytes(p.bps)}/s</span>}
+        {u.attempts != null && u.attempts > 1 && <span>{t("queue.nodeUpload.attempt", { n: u.attempts })}</span>}
       </div>
       {pct != null && <div className="live-progress"><span style={{ width: `${pct}%` }} /></div>}
     </div>

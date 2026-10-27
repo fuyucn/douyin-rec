@@ -74,4 +74,13 @@ describe("nodes page model", () => {
   it("room links use the unified key and encode it", () => {
     expect(nodeRoomHref({ platform: "douyin", roomSlug: "1" })).toBe("/rooms/douyin.1");
   });
+
+  it("an unknown platform is rendered without a leading dot in the room key", () => {
+    const out = buildNodes([], [], workers, {}, [
+      { workerId: "w1", workerName: "worker-one", platform: "", roomSlug: "9", anchorName: "Unknown", sessionBase: "s", bv: null, confirmed: 0, total: 1, ambiguous: 0, uploading: null, recording: true, checkedAt: 1 },
+    ], "0.0.234");
+    const room = out.find((n) => n.id === "w1")?.rooms[0];
+    expect(room?.platform).toBe("");
+    expect(nodeRoomHref(room!)).toBe("");
+  });
 });
