@@ -66,7 +66,7 @@ export function usePlatformCookieStatuses(enabled: boolean): CookieStatus[] | nu
  * 重入守卫:上一次 tick 还没结束就跳过本次(慢请求下不会堆积成一串并发请求)。
  * 注意:守卫只防「并发」,不排队 —— 需要「期间有新触发必须补一次」的语义请用 `useHubStream`。
  */
-export function usePolling(fn: () => void, ms: number, enabled = true): void {
+export function usePolling(fn: () => void | Promise<void>, ms: number, enabled = true): void {
   const ref = useRef(fn);
   ref.current = fn;
   const running = useRef(false);

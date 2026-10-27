@@ -113,7 +113,8 @@ export function summarizeNodes(
   const roomIdx = new Map<string, NodeRoom>();
   for (const t of tasks) {
     const slug = roomSlugOf(t.room);
-    const platform = t.platform ?? "";
+    // Unknown platforms still need a stable identity; deliveries always carry a platform.
+    const platform = t.platform ?? "unknown";
     for (const w of t.recordingWorkers ?? []) {
       const n = ensure(w.workerId, w.workerName);
       if (w.state === "recording") n.recording++;
@@ -123,7 +124,7 @@ export function summarizeNodes(
       const identity = `${w.workerId}:${platform}:${slug || t.room || n.rooms.length}`;
       const row: NodeRoom = {
         key: identity,
-        platform,
+        platform: t.platform ?? "",
         roomSlug: slug || undefined,
         // Same priority as notifications and the queue page (issue #53): task name first.
         label: t.name || t.anchorName || slug || "?",

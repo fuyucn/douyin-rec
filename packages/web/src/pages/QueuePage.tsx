@@ -645,14 +645,14 @@ export function QueuePage(): ReactNode {
   // 推送驱动:master 走 /api/hub/stream,changed 即重拉;推送不可用自动退化为有界退避轮询。
   const stream = useHubStream(poll, { enabled: hubEnabled === true });
   usePolling(
-    () => void api.listTasks()
+    () => api.listTasks()
       .then((tasks) => { setFleetTasks(tasks); setFleetTasksStale(false); })
       .catch(() => setFleetTasksStale(true)),
     30_000,
     hubEnabled === true,
   );
   usePolling(
-    () => void api.listWorkers()
+    () => api.listWorkers()
       .then((list) => {
         setFleetWorkers(list.map((w) => ({ id: w.id, name: w.name })));
         setFleetWorkersStale(false);
@@ -662,7 +662,7 @@ export function QueuePage(): ReactNode {
     hubEnabled === true,
   );
   usePolling(
-    () => void api.getWorkersStatus()
+    () => api.getWorkersStatus()
       .then((list) => {
         setFleetStatus(Object.fromEntries(list.map((s) => [s.id, s])));
         setFleetStatusStale(false);
@@ -672,7 +672,7 @@ export function QueuePage(): ReactNode {
     hubEnabled === true,
   );
   usePolling(
-    () => void api.getVersion()
+    () => api.getVersion()
       .then((r) => { setMasterVersion(baseVersion(r.version)); setFleetVersionStale(false); })
       .catch(() => setFleetVersionStale(true)),
     300_000,

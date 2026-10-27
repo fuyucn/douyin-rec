@@ -37,6 +37,9 @@ export function NodesPage(): ReactNode {
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
   const [status, setStatus] = useState<Record<string, WorkerStatus | undefined>>({});
   const [delivering, setDelivering] = useState<RollingDeliveryDTO[]>([]);
+  const [tasksStale, setTasksStale] = useState(false);
+  const [workersStale, setWorkersStale] = useState(false);
+  const [versionStale, setVersionStale] = useState(false);
   const [statusStale, setStatusStale] = useState(false);
   const [deliveryStale, setDeliveryStale] = useState(false);
   const [masterVersion, setMasterVersion] = useState("");
@@ -52,6 +55,9 @@ export function NodesPage(): ReactNode {
       const [ts, rs] = await Promise.all([api.listTasks(), api.listRooms()]);
       setTasks(ts);
       setRooms(rs);
+      setTasksStale(false);
+    } catch {
+      setTasksStale(true);
     } finally {
       setLoaded(true);
     }
@@ -80,11 +86,25 @@ export function NodesPage(): ReactNode {
   }, []);
   // Push refresh only touches task/room state. The heavier delivery snapshot is polled separately.
   const stream = useHubStream(refresh, { enabled: hubEnabled === true });
-  usePolling(() => void refreshDelivering().catch(() => {}), 30_000, hubEnabled === true);
-  usePolling(() => void refreshStatus().catch(() => {}), 60_000, hubEnabled === true);
-  usePolling(() => void refresh().catch(() => {}), 30_000, hubEnabled === true);
-  usePolling(() => void api.listWorkers().then(setWorkers).catch(() => {}), 300_000, hubEnabled === true);
-  usePolling(() => void api.getVersion().then((r) => setMasterVersion(r.version.split("-")[0] ?? "")).catch(() => {}), 300_000, hubEnabled === true);
+  usePolling(refreshDelivering, 30_000, hubEnabled === true);
+  usePolling(refreshStatus, 60_000, hubEnabled === true);
+  usePolling(refresh, 30_000, hubEnabled === true);
+  usePolling(async () => {
+    try {
+      setWorkers(await api.listWorkers());
+      setWorkersStale(false);
+    } catch {
+      setWorkersStale(true);
+    }
+  }, 300_000, hubEnabled === true);
+  usePolling(async () => {
+    try {
+      setMasterVersion((await api.getVersion()).version.split("-")[0] ?? "");
+      setVersionStale(false);
+    } catch {
+      setVersionStale(true);
+    }
+  }, 300_000, hubEnabled === true);
 
   const nodes = useMemo(
     () => buildNodes(tasks, rooms, workers, status, delivering, masterVersion),
@@ -117,9 +137,10 @@ export function NodesPage(): ReactNode {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <ConnStatus conn={stream.lastOkAt ? { ok: !stream.stale, at: stream.lastOkAt } : null} />
+          {(tasksStale || workersStale || versionStale) && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.assignmentStale")}</span>}
           {statusStale && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.healthStale")}</span>}
           {deliveryStale && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.liveStale")}</span>}
-          <IconButton title={t("nodes.refresh")} onClick={() => void Promise.all([refresh(), refreshStatus(), refreshDelivering()]).catch(() => {})}>
+          <IconButton title={t("nodes.refresh")} onClick={() => void Promise.all([refresh(), refreshStatus(), refreshDelivering()])}>
             <RefreshCw className="w-4 h-4" />
           </IconButton>
           <Button small variant="secondary" onClick={() => setWorkersOpen(true)}><Users className="w-4 h-4" />{t("nodes.manage")}</Button>
@@ -140,7 +161,7 @@ export function NodesPage(): ReactNode {
           <span className="telemetry-icon"><Database className="w-4 h-4" /></span>
         </div>
         <div className="telemetry-cell">
-          <div className="flex flex-col gap-1.5"><span className="telemetry-label">{t("nodes.relation")}</span><span className="telemetry-value-sm truncate">master → {Math.max(0, nodes.length - 1)}</span></div>
+          <div className="flex flex-col gap-1.5"><span className="telemetry-label">{t("nodes.relation")}</span><span className="telemetry-value-sm truncate">master → {nodes.filter((n) => n.id !== "local").length}</span></div>
           <span className="telemetry-icon"><ChevronRight className="w-4 h-4" /></span>
         </div>
       </div>
