@@ -8,6 +8,11 @@ export function fmtBytes(n: number): string {
 
 export const baseVersion = (v: string | undefined): string => (v ?? "").split("-")[0] ?? "";
 
+/** One online definition for Queue and Nodes: only a successful probe counts as online. */
+export function countOnlineNodes(nodes: readonly Pick<NodeSummary, "ok">[]): number {
+  return nodes.filter((n) => n.ok === true).length;
+}
+
 /** 房间在某节点上的展示状态。 */
 export type NodeRoomState = "recording" | "waiting" | "unavailable" | "disabled";
 
@@ -70,7 +75,7 @@ export interface NodeSummary {
   syncLag: boolean;
 }
 
-/** 纯函数:把三路数据汇成每节点一行。只含被任务 recordingWorkers 提到的节点(= 被分配的节点)。 */
+/** Pure model: configured workers, probe results, task assignments, and rolling sessions become one row per node. */
 export function summarizeNodes(
   tasks: readonly NodeTaskInput[],
   status: Record<string, WorkerStatus | undefined>,
@@ -129,8 +134,7 @@ export function summarizeNodes(
     }
   }
   for (const d of delivering) {
-    const n = byId.get(d.workerId);
-    if (!n) continue;
+    const n = ensure(d.workerId, d.workerName);
     n.rollingSessions++;
     n.lockedBytes += typeof d.lockedBytes === "number" ? d.lockedBytes : 0;
     n.ambiguous += d.ambiguous;

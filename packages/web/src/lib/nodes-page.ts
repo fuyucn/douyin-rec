@@ -50,58 +50,6 @@ export function buildNodes(
   const bySlug = new Map(rooms.map((r) => [`${r.platform}:${r.roomSlug}`, r]));
   const base = summarizeNodes(tasks, status, delivering, masterVersion, workers);
   const workerNames = new Map(workers.map((w) => [w.id, w.name || w.host || w.id]));
-  // `summarizeNodes` only creates nodes referenced by tasks. A rolling session can outlive its task
-  // row (or arrive before the task list refreshes), so seed those nodes here instead of hiding them.
-  for (const d of delivering) {
-    if (base.some((n) => n.id === d.workerId)) continue;
-    const s = status[d.workerId];
-    base.push({
-      id: d.workerId,
-      name: d.workerName || workerNames.get(d.workerId) || d.workerId,
-      ok: s?.ok,
-      error: s?.error,
-      version: s?.appVersion,
-      drift: false,
-      diskFreeGB: typeof s?.diskFreeGB === "number" ? s.diskFreeGB : undefined,
-      diskLow: false,
-      diskMinGB: s?.diskMinGB,
-      recording: 0,
-      unavailable: 0,
-      rollingSessions: 0,
-      lockedBytes: 0,
-      ambiguous: 0,
-      rooms: [],
-      appliedVersion: s?.appliedVersion,
-      expectedVersion: s?.expectedVersion,
-      appliedAt: s?.appliedAt,
-      syncError: s?.syncError,
-      syncLag: !!(s?.ok && s.expectedVersion != null && s.appliedVersion != null && s.expectedVersion !== s.appliedVersion),
-    });
-  }
-  // Re-run only the delivery attachment for seeded nodes; summarizeNodes already attached task rooms.
-  for (const n of base) {
-    if (n.rollingSessions > 0) continue;
-    for (const d of delivering) {
-      if (d.workerId !== n.id) continue;
-      n.rollingSessions++;
-      n.lockedBytes += typeof d.lockedBytes === "number" ? d.lockedBytes : 0;
-      n.ambiguous += d.ambiguous;
-      const identity = `${d.workerId}:${d.platform}:${d.roomSlug}`;
-      let row = n.rooms.find((r) => r.key === identity);
-      if (!row) {
-        row = {
-          key: identity,
-          platform: d.platform,
-          roomSlug: d.roomSlug,
-          label: d.anchorName || d.roomSlug,
-          state: d.recording ? "recording" : "disabled",
-          sessions: [],
-        };
-        n.rooms.push(row);
-      }
-      row.sessions.push(d);
-    }
-  }
   return base.map((n) => {
     const roomsOut: NodeRoomView[] = n.rooms.map((nr) => {
       const roomSlug = nr.roomSlug ?? nr.key.split(":").slice(2).join(":");

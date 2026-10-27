@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { summarizeNodes, fmtBytes, roomSlugOf } from "../../packages/web/src/lib/nodes-summary.js";
+import { countOnlineNodes, summarizeNodes, fmtBytes, roomSlugOf } from "../../packages/web/src/lib/nodes-summary.js";
 import type { RollingDeliveryDTO, Task, WorkerStatus } from "../../packages/web/src/api/client.js";
 
 const task = (...ws: Array<[string, "recording" | "not_recording" | "unavailable"]>): Pick<Task, "recordingWorkers"> => ({
@@ -12,19 +12,21 @@ const del = (workerId: string, over: Partial<RollingDeliveryDTO> = {}): RollingD
 const st = (over: Partial<WorkerStatus>): WorkerStatus => ({ id: "a", ok: true, ...over });
 
 describe("summarizeNodes", () => {
-  it("只含被任务选中的节点;按名字排序;统计在录/未知房间数", () => {
+  it("task assignments create nodes; sorts by name and counts recording/unknown rooms", () => {
     const r = summarizeNodes([task(["b", "recording"], ["a", "not_recording"]), task(["b", "unavailable"])], {}, [], "");
     expect(r.map((n) => n.id)).toEqual(["a", "b"]);
     expect(r.find((n) => n.id === "b")).toMatchObject({ recording: 1, unavailable: 1 });
     expect(r.find((n) => n.id === "a")).toMatchObject({ recording: 0, unavailable: 0 });
   });
 
-  it("未分配节点不显示,但已配置的 worker 和探测到的节点仍进入 fleet", () => {
+  it("configured workers, probed nodes, and orphan deliveries all enter the fleet", () => {
     expect(summarizeNodes([], {}, [], "0.0.1")).toEqual([]);
     expect(summarizeNodes([{ recordingWorkers: undefined }], {}, [], "")).toEqual([]);
     expect(summarizeNodes([], {}, [], "", [{ id: "idle", name: "Idle node" }]).map((n) => [n.id, n.name]))
       .toEqual([["idle", "Idle node"]]);
     expect(summarizeNodes([], { a: st({}) }, [], "0.0.1").map((n) => n.id)).toEqual(["a"]);
+    expect(summarizeNodes([], {}, [del("orphan", { roomSlug: "9" })], "").map((n) => [n.id, n.rollingSessions]))
+      .toEqual([["orphan", 1]]);
   });
 
   it("磁盘:低于水位 → diskLow;水位 0(关闭)/ 缺字段 → 不标红", () => {
@@ -54,12 +56,13 @@ describe("summarizeNodes", () => {
     expect(r[0]).toMatchObject({ ok: false, error: "timeout", drift: false });
   });
 
-  it("边录边传:按节点累加会话数/未确认占盘/未知段数;缺 lockedBytes 按 0;不属于任何已选节点的忽略", () => {
+  it("边录边传:按节点累加会话数/未确认占盘/未知段数;缺 lockedBytes 按 0;孤立会话也保留节点", () => {
     const r = summarizeNodes([task(["a", "recording"])], {}, [
       del("a", { lockedBytes: 1000, ambiguous: 1 }), del("a", { lockedBytes: 500 }), del("a"), del("zzz", { lockedBytes: 9 }),
     ], "");
-    expect(r).toHaveLength(1);
+    expect(r).toHaveLength(2);
     expect(r[0]).toMatchObject({ rollingSessions: 3, lockedBytes: 1500, ambiguous: 1 });
+    expect(r[1]).toMatchObject({ id: "zzz", rollingSessions: 1, lockedBytes: 9 });
   });
 });
 
@@ -68,6 +71,12 @@ describe("fmtBytes", () => {
     expect(fmtBytes(49_350_000)).toBe("49.4 MB");
     expect(fmtBytes(3_400_000_000)).toBe("3.4 GB");
     expect(fmtBytes(10)).toBe("0.1 MB");
+  });
+});
+
+describe("countOnlineNodes", () => {
+  it("counts only successful probes; unknown stays checking", () => {
+    expect(countOnlineNodes([{ ok: true }, { ok: false }, { ok: undefined }])).toBe(1);
   });
 });
 

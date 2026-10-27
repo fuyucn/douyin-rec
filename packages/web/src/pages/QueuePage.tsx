@@ -9,7 +9,7 @@ import {
   Activity, AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardCheck, ExternalLink, FileText, Hourglass, Loader2, Search, Square, UploadCloud, X,
 } from "lucide-react";
 import { useAtomValue } from "jotai";
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type Task, type WorkerStatus } from "../api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
@@ -320,14 +320,14 @@ function QueueCard({ item, index, tz, onOpenLog, onAck }: { item: QueueItemDTO; 
             <a className="font-mono text-[11px] text-muted hover:text-ink" href={`https://www.bilibili.com/video/${item.bv}`} target="_blank" rel="noreferrer">{item.bv}</a>
           )}
           {item.state === "needs_manual" && (
-            <button type="button" title={t("queue.ack.action")} onClick={() => onAck(item.streamKey)} className="icon-btn !w-7 !h-7">
+            <button type="button" title={t("queue.ack.action")} aria-label={t("queue.ack.action")} onClick={() => onAck(item.streamKey)} className="icon-btn !w-7 !h-7">
               <ClipboardCheck className="w-3.5 h-3.5" />
             </button>
           )}
-          <button type="button" title={t("hub.jobs.viewLog")} onClick={() => onOpenLog(item.streamKey)} className="icon-btn !w-7 !h-7">
+          <button type="button" title={t("hub.jobs.viewLog")} aria-label={t("hub.jobs.viewLog")} onClick={() => onOpenLog(item.streamKey)} className="icon-btn !w-7 !h-7">
             <FileText className="w-3.5 h-3.5" />
           </button>
-          <Link to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`} title={t("queue.openRoom")} className="icon-btn !w-7 !h-7">
+          <Link to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`} title={t("queue.openRoom")} aria-label={t("queue.openRoom")} className="icon-btn !w-7 !h-7">
             <ExternalLink className="w-3.5 h-3.5" />
           </Link>
         </span>
@@ -464,6 +464,7 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
             <button
               type="button"
               title={t("queue.ack.action")}
+              aria-label={t("queue.ack.action")}
               onClick={() => onAck(item.streamKey)}
               className="icon-btn !w-7 !h-7"
             >
@@ -473,6 +474,7 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
           <button
             type="button"
             title={t("hub.jobs.viewLog")}
+            aria-label={t("hub.jobs.viewLog")}
             onClick={() => onOpenLog(item.streamKey)}
             className="icon-btn !w-7 !h-7"
           >
@@ -481,6 +483,7 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
           <Link
             to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`}
             title={t("queue.openRoom")}
+            aria-label={t("queue.openRoom")}
             className="icon-btn !w-7 !h-7"
           >
             <ExternalLink className="w-3.5 h-3.5" />
@@ -490,6 +493,96 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
     </tr>
   );
 }
+
+/** Completed-only table, memoized because the live lanes tick every second. */
+const HistorySection = memo(function HistorySection({
+  items, filtered, tz, sort, onToggleSort, onOpenLog, onAck,
+}: {
+  items: QueueItemDTO[];
+  filtered: boolean;
+  tz: string;
+  sort: "newest" | "oldest";
+  onToggleSort: () => void;
+  onOpenLog: (key: string) => void;
+  onAck: (key: string) => void;
+}): ReactNode {
+  const t = useT();
+  return (
+    <details className="mb-5">
+      <summary className="section-label cursor-pointer select-none">
+        {t("queue.history.title")} · {t("queue.history.doneSummary", { done: items.length })}
+      </summary>
+      <div className="mt-3">
+        {/* 窄屏(<sm):表格 5+ 列在手机上必然横向溢出且行高爆炸 → 改卡片式,信息不丢。 */}
+        <div className="sm:hidden space-y-2">
+          {items.length === 0 ? (
+            <div className="card p-8 text-center text-muted-soft text-sm">
+              {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
+            </div>
+          ) : (
+            items.map((it, i) => (
+              <QueueCard key={it.streamKey} item={it} index={i + 1} tz={tz} onOpenLog={onOpenLog} onAck={onAck} />
+            ))
+          )}
+        </div>
+        <section className="table-shell hidden sm:block">
+          <div className="overflow-x-auto">
+            <table className="tasks">
+              <thead>
+                <tr>
+                  <th className="w-14">#</th>
+                  <th>{t("queue.col.room")}</th>
+                  <th className="w-44">{t("queue.col.status")}</th>
+                  <th>{t("queue.col.flow")}</th>
+                  <th className="w-28">
+                    <button
+                      type="button"
+                      onClick={onToggleSort}
+                      className="inline-flex items-center gap-1 cursor-pointer"
+                      style={{ color: "inherit", font: "inherit" }}
+                      title={t(sort === "newest" ? "queue.sort.newestTip" : "queue.sort.oldestTip")}
+                    >
+                      {t("queue.col.enqueued")}
+                      <ChevronDown
+                        className={`w-3 h-3 transition-transform ${sort === "oldest" ? "" : "rotate-180"}`}
+                        style={{ opacity: 0.75 }}
+                      />
+                    </button>
+                  </th>
+                  <th className="w-14 text-right" aria-label={t("queue.col.actions")} />
+                </tr>
+              </thead>
+              <tbody>
+                {items.length === 0 ? (
+                  <tr>
+                    <td colSpan={6}>
+                      <div className="text-center text-muted-soft text-sm py-10">
+                        {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  items.map((it, i) => (
+                    <QueueRow
+                      key={it.streamKey}
+                      item={it}
+                      index={i + 1}
+                      tz={tz}
+                      now={0}
+                      dataAt={0}
+                      onOpenLog={onOpenLog}
+                      onAck={onAck}
+                    />
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </details>
+  );
+});
 
 /** 处理队列页(#/queue):datatable,入队时间排序 + 筛选。 */
 export function QueuePage(): ReactNode {
@@ -504,6 +597,7 @@ export function QueuePage(): ReactNode {
   const [fleetTasks, setFleetTasks] = useState<Task[]>([]);
   const [fleetStatus, setFleetStatus] = useState<Record<string, WorkerStatus | undefined>>({});
   const [fleetWorkers, setFleetWorkers] = useState<Array<{ id: string; name: string }>>([]);
+  const [fleetStatusStale, setFleetStatusStale] = useState(false);
   const [masterVersion, setMasterVersion] = useState("");
 
   const [phase, setPhase] = useState<string[]>([]);
@@ -517,7 +611,7 @@ export function QueuePage(): ReactNode {
   const [ackKey, setAckKey] = useState<string | null>(null);
   const [ackNote, setAckNote] = useState("");
   const toast = useToast();
-  const openAck = (key: string): void => { setAckKey(key); setAckNote(""); };
+  const openAck = useCallback((key: string): void => { setAckKey(key); setAckNote(""); }, []);
   // 输入框每键都触发 → 延迟 250ms 再请求,避免逐字打请求。
   const [debouncedQ, setDebouncedQ] = useState("");
   useEffect(() => {
@@ -547,7 +641,7 @@ export function QueuePage(): ReactNode {
   );
   // 推送驱动:master 走 /api/hub/stream,changed 即重拉;推送不可用自动退化为有界退避轮询。
   const stream = useHubStream(poll, { enabled: hubEnabled === true });
-  usePolling(() => void api.listTasks().then(setFleetTasks).catch(() => {}), 10_000, hubEnabled === true);
+  usePolling(() => void api.listTasks().then(setFleetTasks).catch(() => {}), 30_000, hubEnabled === true);
   usePolling(
     () => void api.listWorkers()
       .then((list) => setFleetWorkers(list.map((w) => ({ id: w.id, name: w.name }))))
@@ -557,8 +651,11 @@ export function QueuePage(): ReactNode {
   );
   usePolling(
     () => void api.getWorkersStatus()
-      .then((list) => setFleetStatus(Object.fromEntries(list.map((s) => [s.id, s]))))
-      .catch(() => {}),
+      .then((list) => {
+        setFleetStatus(Object.fromEntries(list.map((s) => [s.id, s])));
+        setFleetStatusStale(false);
+      })
+      .catch(() => setFleetStatusStale(true)),
     60_000,
     hubEnabled === true,
   );
@@ -579,7 +676,7 @@ export function QueuePage(): ReactNode {
   }, [poll]);
 
   const reset = (): void => { setPhase([]); setStates([]); setPlatform([]); setQ(""); };
-  const onToggleSort = (): void => setSort((v) => (v === "newest" ? "oldest" : "newest"));
+  const onToggleSort = useCallback((): void => setSort((v) => (v === "newest" ? "oldest" : "newest")), []);
   // rows = 进行中 + 已完成,**同一张表**(像日志的时间轴)。前端只渲染它。
   const rows = data?.rows ?? [];
   // 摘要分四类:真正在跑 / 待人工上传(stage 正常收口)/ 需要处理(失败·停止)/ 已完成。
@@ -588,7 +685,6 @@ export function QueuePage(): ReactNode {
   const uploadCount = rows.filter((r) => r.phase === "waiting_upload").length;
   // Same colour rule as HubJobs.stateColor: red only for a failed run, amber for "needs a person".
   const failedCount = rows.filter((r) => r.phase === "failed").length;
-  const attentionCount = rows.filter((r) => r.phase === "waiting_manual" || r.phase === "failed").length;
   const stoppedCount = rows.filter((r) => r.phase === "stopped").length;
   const doneCount = rows.filter((r) => r.phase === "done").length;
   // The server caps the needs_manual inbox (manualLimit); say so instead of implying the list is complete.
@@ -605,6 +701,7 @@ export function QueuePage(): ReactNode {
     [fleetTasks, fleetStatus, data?.delivering, masterVersion, fleetWorkers],
   );
   const summary = queueSummary(sections, pool ?? null);
+  const attentionCount = summary.attention;
   const filtered = phase.length + states.length + platform.length + (debouncedQ ? 1 : 0) > 0;
 
   // hub 未启用(slave)→ 队列页无意义,给 child-node 提示(与 HubPage 同口径)。
@@ -631,7 +728,7 @@ export function QueuePage(): ReactNode {
 
       <HubStreamBanner handle={stream} />
 
-      <FleetPulse nodes={fleetNodes} delivering={data?.delivering?.length ?? 0} />
+      <FleetPulse nodes={fleetNodes} delivering={data?.delivering?.length ?? 0} stale={fleetStatusStale} />
 
       {!loaded ? (
         <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>
@@ -706,79 +803,15 @@ export function QueuePage(): ReactNode {
             </details>
           )}
 
-          <details className="mb-5">
-            <summary className="section-label cursor-pointer select-none">
-              {t("queue.history.title")} · {t("queue.history.doneSummary", { done: summary.history })}
-            </summary>
-            <div className="mt-3">
-        {/* 窄屏(<sm):表格 5+ 列在手机上必然横向溢出且行高爆炸 → 改卡片式,信息不丢。 */}
-        <div className="sm:hidden space-y-2">
-          {sections.history.length === 0 ? (
-            <div className="card p-8 text-center text-muted-soft text-sm">
-              {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
-            </div>
-          ) : (
-            sections.history.map((it, i) => (
-              <QueueCard key={it.streamKey} item={it} index={i + 1} tz={tz} onOpenLog={setLogKey} onAck={openAck} />
-            ))
-          )}
-          </div>
-          <section className="table-shell hidden sm:block">
-            <div className="overflow-x-auto">
-              <table className="tasks">
-                <thead>
-                  <tr>
-                    <th className="w-14">#</th>
-                    <th>{t("queue.col.room")}</th>
-                    <th className="w-44">{t("queue.col.status")}</th>
-                    <th>{t("queue.col.flow")}</th>
-                    <th className="w-28">
-                      <button
-                        type="button"
-                        onClick={onToggleSort}
-                        className="inline-flex items-center gap-1 cursor-pointer"
-                        style={{ color: "inherit", font: "inherit" }}
-                        title={t(sort === "newest" ? "queue.sort.newestTip" : "queue.sort.oldestTip")}
-                      >
-                        {t("queue.col.enqueued")}
-                        <ChevronDown
-                          className={`w-3 h-3 transition-transform ${sort === "oldest" ? "" : "rotate-180"}`}
-                          style={{ opacity: 0.75 }}
-                        />
-                      </button>
-                    </th>
-                    <th className="w-14 text-right" aria-label={t("queue.col.actions")} />
-                  </tr>
-                </thead>
-                <tbody>
-                  {sections.history.length === 0 ? (
-                    <tr>
-                      <td colSpan={6}>
-                        <div className="text-center text-muted-soft text-sm py-10">
-                          {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    sections.history.map((it, i) => (
-                      <QueueRow
-                        key={it.streamKey}
-                        item={it}
-                        index={i + 1}
-                        tz={tz}
-                        now={now}
-                        dataAt={dataAt}
-                        onOpenLog={setLogKey}
-                        onAck={openAck}
-                      />
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-            </div>
-          </details>
+          <HistorySection
+            items={sections.history}
+            filtered={filtered}
+            tz={tz}
+            sort={sort}
+            onToggleSort={onToggleSort}
+            onOpenLog={setLogKey}
+            onAck={openAck}
+          />
         </>
       )}
 

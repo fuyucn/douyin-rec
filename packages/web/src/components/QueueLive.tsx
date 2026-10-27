@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Activity, ArrowRight, Check, ChevronDown, Clock3, ExternalLink, FileText, Gauge, Loader2, Timer } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { HubBlockedBroadcastDTO, HubPoolSnapshotDTO, QueueItemDTO } from "../api/client";
@@ -6,7 +6,7 @@ import { humanSec, JobLogDialog } from "./HubJobs";
 import { useT } from "../lib/i18n";
 import { platformLabel, roomId } from "../lib/labels";
 import { liveStepLabel } from "../lib/queue-live";
-import { fmtBytes, type NodeSummary } from "../lib/nodes-summary";
+import { countOnlineNodes, fmtBytes, type NodeSummary } from "../lib/nodes-summary";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -99,7 +99,7 @@ export function LiveLane({ item, now, dataAt, onOpenLog }: {
         </Link>
       </div>
 
-      <div className="live-flow" aria-label={t("queue.live.current")}>
+      <div className="live-flow" role="group" aria-label={t("queue.live.current")}>
         {done.map((s) => (
           <div key={`d-${s}`} className="live-flow-step" data-state="done">
             <div className="flex items-center gap-1.5 text-[11px] font-mono"><Check className="w-3 h-3" style={{ color: "var(--success-fg)" }} />{stepLabel(t, s)}</div>
@@ -171,9 +171,10 @@ export function AttentionCard({ kind, rows, blocked, onOpenLog, onAck, defaultOp
   defaultOpen?: boolean;
 }): ReactNode {
   const t = useT();
+  const [open, setOpen] = useState(defaultOpen);
   const count = rows.length + blocked.length;
   return (
-    <details className="attention-group" open={defaultOpen || undefined}>
+    <details className="attention-group" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary>
         <ChevronDown className="w-3.5 h-3.5 transition-transform" />
         <span className="font-medium text-ink">{t(`queue.attention.${kind}`)}</span>
@@ -217,13 +218,14 @@ export function QueueLogDialog({ logKey, onClose }: { logKey: string | null; onC
 }
 
 /** Compact node health entry for Queue. The full topology lives on `/nodes`. */
-export function FleetPulse({ nodes, delivering }: {
+export function FleetPulse({ nodes, delivering, stale = false }: {
   nodes: readonly NodeSummary[];
   delivering: number;
+  stale?: boolean;
 }): ReactNode {
   const t = useT();
   const total = nodes.length;
-  const online = nodes.filter((n) => n.ok === true).length;
+  const online = countOnlineNodes(nodes);
   const recording = nodes.reduce((n, node) => n + node.recording, 0);
   const diskLow = nodes.filter((n) => n.diskLow).length;
   const drift = nodes.filter((n) => n.drift || n.syncLag).length;
@@ -241,6 +243,7 @@ export function FleetPulse({ nodes, delivering }: {
       <span className="text-[12px] text-muted">{t("queue.fleet.delivering", { n: delivering })}</span>
       {diskLow > 0 && <span className="text-[12px]" style={{ color: "var(--error-fg)" }}>{t("queue.fleet.diskLow", { n: diskLow })}</span>}
       {drift > 0 && <span className="text-[12px]" style={{ color: "var(--warning-fg)" }}>{t("queue.fleet.drift", { n: drift })}</span>}
+      {stale && <span className="text-[12px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.healthStale")}</span>}
       <Link to="/nodes" className="ml-auto inline-flex items-center gap-1 text-[12px] text-ink hover:underline">
         {t("queue.fleet.open")} <ArrowRight className="w-3.5 h-3.5" />
       </Link>

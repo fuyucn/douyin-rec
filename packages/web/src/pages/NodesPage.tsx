@@ -8,7 +8,7 @@ import { NodeLogsDialog } from "../components/NodeLogsDialog";
 import { WorkersPanel } from "../components/WorkersPanel";
 import { useHubStream, usePolling, useTicker } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { fmtBytes } from "../lib/nodes-summary";
+import { countOnlineNodes, fmtBytes } from "../lib/nodes-summary";
 import { buildNodes, nodeCounts, nodeRoomHref, nodeRoleLabel, type NodeRoomView, type NodeView } from "../lib/nodes-page";
 import { useAtomValue } from "jotai";
 import { hubEnabledAtom } from "../atoms";
@@ -71,12 +71,9 @@ export function NodesPage(): ReactNode {
     const q = await api.getHubQueue();
     setDelivering(q.delivering ?? []);
   }, []);
-  // Delivery data rides the same stream refresh; a queue failure marks the stream stale.
-  const refreshAll = useMemo(() => async (): Promise<void> => {
-    await Promise.all([refreshDelivering(), refresh()]);
-  }, [refresh, refreshDelivering]);
-  const stream = useHubStream(refreshAll, { enabled: hubEnabled === true });
-  usePolling(() => void refreshDelivering().catch(() => {}), 15_000, hubEnabled === true);
+  // Push refresh only touches task/room state. The heavier delivery snapshot is polled separately.
+  const stream = useHubStream(refresh, { enabled: hubEnabled === true });
+  usePolling(() => void refreshDelivering().catch(() => {}), 30_000, hubEnabled === true);
   usePolling(() => void refreshStatus().catch(() => {}), 60_000, hubEnabled === true);
   usePolling(() => void refresh().catch(() => {}), 30_000, hubEnabled === true);
   usePolling(() => void api.listWorkers().then(setWorkers).catch(() => {}), 300_000, hubEnabled === true);
@@ -86,7 +83,7 @@ export function NodesPage(): ReactNode {
     () => buildNodes(tasks, rooms, workers, status, delivering, masterVersion),
     [tasks, rooms, workers, status, delivering, masterVersion],
   );
-  const online = nodes.filter((n) => n.ok !== false).length;
+  const online = countOnlineNodes(nodes);
   const recording = nodes.reduce((n, x) => n + x.recordingRooms, 0);
   const sessions = nodes.reduce((n, x) => n + x.rollingSessions, 0);
 

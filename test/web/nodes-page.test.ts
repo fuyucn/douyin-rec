@@ -24,6 +24,11 @@ function room(patch: Partial<RoomDTO>): RoomDTO {
 }
 
 describe("nodes page model", () => {
+  it("lists configured workers even when they have no assigned rooms", () => {
+    const out = buildNodes([], [], workers, {}, [], "0.0.234");
+    expect(out.map((n) => [n.id, n.rooms.length])).toEqual([["local", 0], ["w1", 0]]);
+  });
+
   it("puts the controller first and counts active/recording rooms", () => {
     const tasks = [
       task({ id: 1, recordingWorkers: [
