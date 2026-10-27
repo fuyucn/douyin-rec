@@ -17,7 +17,13 @@ import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/
 import { platformLabel, roomId } from "../lib/labels";
 import { errMessage, useHubStream, usePolling, useTicker, useToast } from "../lib/hooks";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { baseVersion, fmtBytes, summarizeNodes } from "../lib/nodes-summary";
+import {
+  baseVersion,
+  fmtBytes,
+  settleNodeHealthProbe,
+  summarizeNodes,
+  type NodeHealthProbe,
+} from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { AttentionCard, FleetPulse, LiveLane, LivePool, StageReadyRow } from "../components/QueueLive";
 import { queueSummary, splitQueue } from "../lib/queue-live";
@@ -602,7 +608,7 @@ export function QueuePage(): ReactNode {
   const [fleetVersionStale, setFleetVersionStale] = useState(false);
   const [fleetStatusStale, setFleetStatusStale] = useState(false);
   const [fleetWorkersLoaded, setFleetWorkersLoaded] = useState(false);
-  const [fleetStatusLoaded, setFleetStatusLoaded] = useState(false);
+  const [fleetHealthProbe, setFleetHealthProbe] = useState<NodeHealthProbe>("loading");
   const [masterVersion, setMasterVersion] = useState("");
 
   const [phase, setPhase] = useState<string[]>([]);
@@ -669,9 +675,12 @@ export function QueuePage(): ReactNode {
       .then((list) => {
         setFleetStatus(Object.fromEntries(list.map((s) => [s.id, s])));
         setFleetStatusStale(false);
+        setFleetHealthProbe((previous) => settleNodeHealthProbe(previous, "ok"));
       })
-      .catch(() => setFleetStatusStale(true))
-      .finally(() => setFleetStatusLoaded(true)),
+      .catch(() => {
+        setFleetStatusStale(true);
+        setFleetHealthProbe((previous) => settleNodeHealthProbe(previous, "error"));
+      }),
     60_000,
     hubEnabled === true,
   );
@@ -748,7 +757,7 @@ export function QueuePage(): ReactNode {
       <FleetPulse
         nodes={fleetNodes}
         delivering={data?.delivering?.length ?? 0}
-        healthLoaded={fleetStatusLoaded}
+        healthProbe={fleetHealthProbe}
         directoryLoaded={fleetWorkersLoaded}
         stale={fleetStatusStale || fleetTasksStale || fleetWorkersStale || fleetVersionStale}
       />

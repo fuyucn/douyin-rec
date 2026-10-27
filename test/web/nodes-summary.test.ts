@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   countNodeHealth,
-  countOnlineNodes,
   fmtBytes,
   nodeHealthState,
   roomSlugOf,
+  settleNodeHealthProbe,
   summarizeNodes,
 } from "../../packages/web/src/lib/nodes-summary.js";
 import type { RollingDeliveryDTO, Task, WorkerStatus } from "../../packages/web/src/api/client.js";
@@ -81,27 +81,31 @@ describe("fmtBytes", () => {
   });
 });
 
-describe("countOnlineNodes", () => {
-  it("counts only successful probes; unknown stays checking", () => {
-    expect(countOnlineNodes([{ ok: true }, { ok: false }, { ok: undefined }])).toBe(1);
-  });
-});
-
 describe("node health states", () => {
   it("distinguishes checking from no status after the probe settles", () => {
-    expect(nodeHealthState({ ok: undefined }, false)).toBe("checking");
-    expect(nodeHealthState({ ok: undefined }, true)).toBe("unknown");
-    expect(nodeHealthState({ ok: true }, true)).toBe("online");
-    expect(nodeHealthState({ ok: false }, true)).toBe("offline");
+    expect(nodeHealthState({ ok: undefined }, "loading")).toBe("checking");
+    expect(nodeHealthState({ ok: undefined }, "failed")).toBe("probe-failed");
+    expect(nodeHealthState({ ok: undefined }, "ready")).toBe("unknown");
+    expect(nodeHealthState({ ok: true }, "ready")).toBe("online");
+    expect(nodeHealthState({ ok: false }, "ready")).toBe("offline");
   });
 
-  it("counts all four states without treating unknown as online", () => {
+  it("settles first failures as failed while keeping the last good snapshot on later failures", () => {
+    expect(settleNodeHealthProbe("loading", "error")).toBe("failed");
+    expect(settleNodeHealthProbe("failed", "ok")).toBe("ready");
+    expect(settleNodeHealthProbe("ready", "error")).toBe("ready");
+  });
+
+  it("counts all states without treating unknown as online", () => {
     const nodes = [{ ok: true }, { ok: false }, { ok: undefined }, { ok: undefined }];
-    expect(countNodeHealth(nodes, false)).toMatchObject({
-      total: 4, checking: 4, unknown: 0, online: 0, offline: 0,
+    expect(countNodeHealth(nodes, "loading")).toMatchObject({
+      total: 4, checking: 4, probeFailed: 0, unknown: 0, online: 0, offline: 0,
     });
-    expect(countNodeHealth(nodes, true)).toMatchObject({
-      total: 4, checking: 0, unknown: 2, online: 1, offline: 1,
+    expect(countNodeHealth(nodes, "failed")).toMatchObject({
+      total: 4, checking: 0, probeFailed: 4, unknown: 0, online: 0, offline: 0,
+    });
+    expect(countNodeHealth(nodes, "ready")).toMatchObject({
+      total: 4, checking: 0, probeFailed: 0, unknown: 2, online: 1, offline: 1,
     });
   });
 });

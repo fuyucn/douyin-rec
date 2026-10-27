@@ -8,37 +8,51 @@ export function fmtBytes(n: number): string {
 
 export const baseVersion = (v: string | undefined): string => (v ?? "").split("-")[0] ?? "";
 
-/** One online definition for Queue and Nodes: only a successful probe counts as online. */
-export function countOnlineNodes(nodes: readonly Pick<NodeSummary, "ok">[]): number {
-  return nodes.filter((n) => n.ok === true).length;
-}
-
 /**
- * Four user-visible health states. `ok=undefined` is not enough on its own: before the first
- * probe settles it means "checking", while after it settles it means "no status was returned".
+ * Probe-level state is separate from per-node status: a failed probe says nothing about whether
+ * any node is healthy, while a successful probe may still omit one node.
  */
-export type NodeHealthState = "checking" | "unknown" | "online" | "offline";
+export type NodeHealthProbe = "loading" | "failed" | "ready";
+export type NodeHealthProbeResult = "ok" | "error";
+
+/** User-visible health states derived from the probe state plus the per-node result. */
+export type NodeHealthState = "checking" | "probe-failed" | "unknown" | "online" | "offline";
 
 export interface NodeHealthCounts {
   total: number;
   checking: number;
+  probeFailed: number;
   unknown: number;
   online: number;
   offline: number;
 }
 
-export function nodeHealthState(node: Pick<NodeSummary, "ok">, healthLoaded: boolean): NodeHealthState {
-  if (!healthLoaded) return "checking";
+/**
+ * A failed first probe becomes "failed"; a failed refresh keeps the last good snapshot so callers
+ * can show stale-but-useful health instead of pretending every node lost its status.
+ */
+export function settleNodeHealthProbe(previous: NodeHealthProbe, result: NodeHealthProbeResult): NodeHealthProbe {
+  if (result === "ok") return "ready";
+  return previous === "ready" ? "ready" : "failed";
+}
+
+export function nodeHealthState(node: Pick<NodeSummary, "ok">, probe: NodeHealthProbe): NodeHealthState {
+  if (probe === "loading") return "checking";
+  if (probe === "failed") return "probe-failed";
   if (node.ok === undefined) return "unknown";
   return node.ok ? "online" : "offline";
 }
 
 export function countNodeHealth(
   nodes: readonly Pick<NodeSummary, "ok">[],
-  healthLoaded: boolean,
+  probe: NodeHealthProbe,
 ): NodeHealthCounts {
-  const counts: NodeHealthCounts = { total: nodes.length, checking: 0, unknown: 0, online: 0, offline: 0 };
-  for (const node of nodes) counts[nodeHealthState(node, healthLoaded)]++;
+  const counts: NodeHealthCounts = { total: nodes.length, checking: 0, probeFailed: 0, unknown: 0, online: 0, offline: 0 };
+  for (const node of nodes) {
+    const state = nodeHealthState(node, probe);
+    if (state === "probe-failed") counts.probeFailed++;
+    else counts[state]++;
+  }
   return counts;
 }
 

@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { Activity, ChevronRight, CircleHelp, Database, FileText, HardDrive, Loader2, Plus, RefreshCw, Server, Users } from "lucide-react";
+import { Activity, ChevronRight, CircleAlert, CircleHelp, Database, FileText, HardDrive, Loader2, Plus, RefreshCw, Server, Users } from "lucide-react";
 import { api, type RollingDeliveryDTO, type RoomDTO, type Task, type WorkerDTO, type WorkerStatus } from "../api/client";
 import { Button, IconButton } from "../components/Button";
 import { ConnStatus } from "../components/ConnStatus";
@@ -8,7 +8,14 @@ import { NodeLogsDialog } from "../components/NodeLogsDialog";
 import { WorkersPanel } from "../components/WorkersPanel";
 import { useHubStream, usePolling, useTicker } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { countNodeHealth, fmtBytes, nodeHealthState, type NodeHealthState } from "../lib/nodes-summary";
+import {
+  countNodeHealth,
+  fmtBytes,
+  nodeHealthState,
+  settleNodeHealthProbe,
+  type NodeHealthProbe,
+  type NodeHealthState,
+} from "../lib/nodes-summary";
 import { buildNodes, nodeCounts, nodeRoomHref, nodeRoleLabel, type NodeRoomView, type NodeView } from "../lib/nodes-page";
 import { useAtomValue } from "jotai";
 import { hubEnabledAtom } from "../atoms";
@@ -45,7 +52,7 @@ export function NodesPage(): ReactNode {
   const [masterVersion, setMasterVersion] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [workersLoaded, setWorkersLoaded] = useState(false);
-  const [statusLoaded, setStatusLoaded] = useState(false);
+  const [healthProbe, setHealthProbe] = useState<NodeHealthProbe>("loading");
   const [workersOpen, setWorkersOpen] = useState(false);
   const [logsFor, setLogsFor] = useState<{ id: string; name: string } | null>(null);
   // Relative timestamps keep moving between the slower health probes.
@@ -69,12 +76,12 @@ export function NodesPage(): ReactNode {
       const ss = await api.getWorkersStatus();
       setStatus(Object.fromEntries(ss.map((s) => [s.id, s])));
       setStatusStale(false);
+      setHealthProbe((previous) => settleNodeHealthProbe(previous, "ok"));
     } catch {
       // Keep the last good probe, but make the staleness visible instead of pretending it is live.
       setStatusStale(true);
-    } finally {
-      // A failed first probe must become "unknown", never an infinite loading state.
-      setStatusLoaded(true);
+      // A failed first probe becomes "failed", never an infinite loading state.
+      setHealthProbe((previous) => settleNodeHealthProbe(previous, "error"));
     }
   }, []);
   const refreshWorkers = useMemo(() => async (): Promise<void> => {
@@ -118,7 +125,7 @@ export function NodesPage(): ReactNode {
     () => buildNodes(tasks, rooms, workers, status, delivering, masterVersion),
     [tasks, rooms, workers, status, delivering, masterVersion],
   );
-  const health = countNodeHealth(nodes, statusLoaded);
+  const health = countNodeHealth(nodes, healthProbe);
   const recording = nodes.reduce((n, x) => n + x.recordingRooms, 0);
   const sessions = nodes.reduce((n, x) => n + x.rollingSessions, 0);
 
@@ -157,7 +164,7 @@ export function NodesPage(): ReactNode {
 
       <div className="telemetry-bar mb-5">
         <div className="telemetry-cell">
-          <div className="flex min-w-0 flex-col gap-1.5">
+          <div className="flex min-w-0 flex-col gap-1.5" role="status" aria-live="polite">
             <span className="telemetry-label">{t("nodes.online")}</span>
             <span className="telemetry-value tabular-nums">{health.online}/{health.total}</span>
             {health.checking > 0 && (
@@ -169,6 +176,11 @@ export function NodesPage(): ReactNode {
             {health.unknown > 0 && (
               <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>
                 {t("nodes.noStatusCount", { n: health.unknown })}
+              </span>
+            )}
+            {health.probeFailed > 0 && (
+              <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>
+                {t("nodes.probeFailedCount", { n: health.probeFailed })}
               </span>
             )}
           </div>
@@ -203,7 +215,7 @@ export function NodesPage(): ReactNode {
               key={n.id}
               n={n}
               now={now}
-              healthLoaded={statusLoaded}
+              healthProbe={healthProbe}
               onLogs={() => setLogsFor({ id: n.id, name: n.name })}
             />
           ))}
@@ -229,15 +241,23 @@ function NodeHealthBadge({ health }: { health: NodeHealthState }): ReactNode {
   const t = useT();
   if (health === "checking") {
     return (
-      <span className="badge badge-muted" role="status">
+      <span className="badge badge-muted">
         <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
         {t("nodes.checking")}
       </span>
     );
   }
+  if (health === "probe-failed") {
+    return (
+      <span className="badge badge-orange">
+        <CircleAlert className="h-3 w-3" aria-hidden="true" />
+        {t("nodes.probeFailed")}
+      </span>
+    );
+  }
   if (health === "unknown") {
     return (
-      <span className="badge badge-muted" title={t("nodes.noStatusHint")}>
+      <span className="badge badge-muted">
         <CircleHelp className="h-3 w-3" aria-hidden="true" />
         {t("nodes.noStatus")}
       </span>
@@ -246,11 +266,17 @@ function NodeHealthBadge({ health }: { health: NodeHealthState }): ReactNode {
   return <span className={`badge ${health === "online" ? "badge-success" : "badge-error"}`}>{t(`nodes.${health}`)}</span>;
 }
 
-function NodeCard({ n, now, healthLoaded, onLogs }: { n: NodeView; now: number; healthLoaded: boolean; onLogs: () => void }): ReactNode {
+function NodeCard({ n, now, healthProbe, onLogs }: { n: NodeView; now: number; healthProbe: NodeHealthProbe; onLogs: () => void }): ReactNode {
   const t = useT();
   const counts = nodeCounts(n);
-  const health = nodeHealthState(n, healthLoaded);
-  const dot = health === "online" ? "var(--success)" : health === "offline" ? "var(--error)" : "var(--muted-soft)";
+  const health = nodeHealthState(n, healthProbe);
+  const dot = health === "online"
+    ? "var(--success)"
+    : health === "offline"
+      ? "var(--error)"
+      : health === "probe-failed"
+        ? "var(--warning)"
+        : "var(--muted-soft)";
   return (
     <section
       className="node-card"
@@ -276,6 +302,8 @@ function NodeCard({ n, now, healthLoaded, onLogs }: { n: NodeView; now: number; 
             {n.uncertainSessions > 0 && <span style={{ color: "var(--warning-fg)" }}>{t("nodes.uncertain", { n: n.uncertainSessions })}</span>}
           </div>
           {health === "offline" && n.error && <div className="mt-1 text-[11px]" style={{ color: "var(--error-fg)" }}>{n.error}</div>}
+          {health === "probe-failed" && <div className="mt-1 text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.probeFailedHint")}</div>}
+          {health === "unknown" && <div className="mt-1 text-[11px] text-muted-soft">{t("nodes.noStatusHint")}</div>}
           {n.syncLag && <div className="mt-1 text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.syncLag", { expected: n.expectedVersion ?? "-", applied: n.appliedVersion ?? "-" })}</div>}
           {!n.syncLag && n.appliedAt && <div className="mt-1 text-[11px] text-muted-soft">{t("nodes.synced", { ago: ago(n.appliedAt, now) })}</div>}
         </div>
