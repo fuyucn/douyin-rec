@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   countNodeHealth,
+  deriveNodeHealthProbe,
   fmtBytes,
   nodeHealthState,
   roomSlugOf,
-  settleNodeHealthProbe,
   summarizeNodes,
 } from "../../packages/web/src/lib/nodes-summary.js";
 import type { RollingDeliveryDTO, Task, WorkerStatus } from "../../packages/web/src/api/client.js";
@@ -90,10 +90,15 @@ describe("node health states", () => {
     expect(nodeHealthState({ ok: false }, "ready")).toBe("offline");
   });
 
-  it("settles first failures as failed while keeping the last good snapshot on later failures", () => {
-    expect(settleNodeHealthProbe("loading", "error")).toBe("failed");
-    expect(settleNodeHealthProbe("failed", "ok")).toBe("ready");
-    expect(settleNodeHealthProbe("ready", "error")).toBe("ready");
+  it("waits for both first loads, then treats empty status with workers as probe failure", () => {
+    expect(deriveNodeHealthProbe({ statusSettled: false, statusHasSnapshot: false, workersLoaded: true, workerCount: 3 })).toBe("loading");
+    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: false, workersLoaded: false, workerCount: 0 })).toBe("loading");
+    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: false, workersLoaded: true, workerCount: 3 })).toBe("failed");
+    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: false, workersLoaded: true, workerCount: 0 })).toBe("ready");
+  });
+
+  it("keeps the last good snapshot when a later refresh fails", () => {
+    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: true, workersLoaded: true, workerCount: 3 })).toBe("ready");
   });
 
   it("counts all states without treating unknown as online", () => {

@@ -13,7 +13,6 @@ export const baseVersion = (v: string | undefined): string => (v ?? "").split("-
  * any node is healthy, while a successful probe may still omit one node.
  */
 export type NodeHealthProbe = "loading" | "failed" | "ready";
-export type NodeHealthProbeResult = "ok" | "error";
 
 /** User-visible health states derived from the probe state plus the per-node result. */
 export type NodeHealthState = "checking" | "probe-failed" | "unknown" | "online" | "offline";
@@ -27,13 +26,25 @@ export interface NodeHealthCounts {
   offline: number;
 }
 
+export interface NodeHealthProbeInput {
+  /** The health request has completed, successfully or not. */
+  statusSettled: boolean;
+  /** At least one non-empty status snapshot has been received. */
+  statusHasSnapshot: boolean;
+  /** The configured-worker directory has completed its first load. */
+  workersLoaded: boolean;
+  workerCount: number;
+}
+
 /**
- * A failed first probe becomes "failed"; a failed refresh keeps the last good snapshot so callers
- * can show stale-but-useful health instead of pretending every node lost its status.
+ * Derive the probe state without hiding backend behavior: the status endpoint may return an empty
+ * 200 when every probe failed. Empty + configured workers is therefore a failed probe, not "no
+ * status on every node". A later failure keeps `statusHasSnapshot` true and remains ready.
  */
-export function settleNodeHealthProbe(previous: NodeHealthProbe, result: NodeHealthProbeResult): NodeHealthProbe {
-  if (result === "ok") return "ready";
-  return previous === "ready" ? "ready" : "failed";
+export function deriveNodeHealthProbe(input: NodeHealthProbeInput): NodeHealthProbe {
+  if (!input.statusSettled || !input.workersLoaded) return "loading";
+  if (input.statusHasSnapshot) return "ready";
+  return input.workerCount > 0 ? "failed" : "ready";
 }
 
 export function nodeHealthState(node: Pick<NodeSummary, "ok">, probe: NodeHealthProbe): NodeHealthState {

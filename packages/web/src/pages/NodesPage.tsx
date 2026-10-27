@@ -10,9 +10,9 @@ import { useHubStream, usePolling, useTicker } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import {
   countNodeHealth,
+  deriveNodeHealthProbe,
   fmtBytes,
   nodeHealthState,
-  settleNodeHealthProbe,
   type NodeHealthProbe,
   type NodeHealthState,
 } from "../lib/nodes-summary";
@@ -52,7 +52,8 @@ export function NodesPage(): ReactNode {
   const [masterVersion, setMasterVersion] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [workersLoaded, setWorkersLoaded] = useState(false);
-  const [healthProbe, setHealthProbe] = useState<NodeHealthProbe>("loading");
+  const [statusSettled, setStatusSettled] = useState(false);
+  const [statusHasSnapshot, setStatusHasSnapshot] = useState(false);
   const [workersOpen, setWorkersOpen] = useState(false);
   const [logsFor, setLogsFor] = useState<{ id: string; name: string } | null>(null);
   // Relative timestamps keep moving between the slower health probes.
@@ -76,12 +77,13 @@ export function NodesPage(): ReactNode {
       const ss = await api.getWorkersStatus();
       setStatus(Object.fromEntries(ss.map((s) => [s.id, s])));
       setStatusStale(false);
-      setHealthProbe((previous) => settleNodeHealthProbe(previous, "ok"));
+      if (ss.length > 0) setStatusHasSnapshot(true);
     } catch {
       // Keep the last good probe, but make the staleness visible instead of pretending it is live.
       setStatusStale(true);
-      // A failed first probe becomes "failed", never an infinite loading state.
-      setHealthProbe((previous) => settleNodeHealthProbe(previous, "error"));
+    } finally {
+      // Empty is not success by itself: with configured workers it means every probe failed.
+      setStatusSettled(true);
     }
   }, []);
   const refreshWorkers = useMemo(() => async (): Promise<void> => {
@@ -125,6 +127,12 @@ export function NodesPage(): ReactNode {
     () => buildNodes(tasks, rooms, workers, status, delivering, masterVersion),
     [tasks, rooms, workers, status, delivering, masterVersion],
   );
+  const healthProbe = deriveNodeHealthProbe({
+    statusSettled,
+    statusHasSnapshot,
+    workersLoaded,
+    workerCount: workers.length,
+  });
   const health = countNodeHealth(nodes, healthProbe);
   const recording = nodes.reduce((n, x) => n + x.recordingRooms, 0);
   const sessions = nodes.reduce((n, x) => n + x.rollingSessions, 0);
@@ -153,7 +161,7 @@ export function NodesPage(): ReactNode {
         <div className="flex flex-wrap items-center gap-2">
           <ConnStatus conn={stream.lastOkAt ? { ok: !stream.stale, at: stream.lastOkAt } : null} />
           {(tasksStale || workersStale || versionStale) && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.assignmentStale")}</span>}
-          {statusStale && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.healthStale")}</span>}
+          {(statusStale || healthProbe === "failed") && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.healthStale")}</span>}
           {deliveryStale && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.liveStale")}</span>}
           <IconButton title={t("nodes.refresh")} onClick={() => void Promise.all([refresh(), refreshStatus(), refreshDelivering()])}>
             <RefreshCw className="w-4 h-4" />
