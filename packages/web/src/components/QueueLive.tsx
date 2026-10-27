@@ -1,12 +1,12 @@
 import type { ReactNode } from "react";
 import { Activity, ArrowRight, Check, ChevronDown, Clock3, ExternalLink, FileText, Gauge, Loader2, Timer } from "lucide-react";
 import { Link } from "react-router-dom";
-import type { HubPoolSnapshotDTO, QueueItemDTO } from "../api/client";
+import type { HubBlockedBroadcastDTO, HubPoolSnapshotDTO, QueueItemDTO } from "../api/client";
 import { humanSec, JobLogDialog } from "./HubJobs";
 import { useT } from "../lib/i18n";
 import { platformLabel, roomId } from "../lib/labels";
 import { liveStepLabel } from "../lib/queue-live";
-import { fmtBytes } from "../lib/nodes-summary";
+import { fmtBytes, type NodeSummary } from "../lib/nodes-summary";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -59,7 +59,10 @@ export function LiveLane({ item, now, dataAt, onOpenLog }: {
   const elapsed = item.currentStepSec != null ? Math.max(0, Math.round(item.currentStepSec + drift)) : null;
   const eta = item.etaSec != null ? Math.max(0, Math.round(item.etaSec - drift)) : null;
   const done = item.doneSteps.map((s) => s.step);
-  const current = liveStepLabel(item);
+  const currentKey = liveStepLabel(item);
+  const current = currentKey === "queued" || currentKey === "cpu" || currentKey === "net" || currentKey === "upload"
+    ? `${t("queue.live.waiting")}${item.resource ? ` · ${item.resource.toUpperCase()}` : ""}`
+    : currentKey === "preparing" ? t("queue.doing.preparing") : stepLabel(t, currentKey);
   const next = item.nextSteps;
   const phaseText = item.phase === "queued"
     ? `${t("queue.live.waiting")}${item.queuePosition ? ` · ${t("queue.live.queueAt", { n: item.queuePosition })}` : ""}`
@@ -105,7 +108,7 @@ export function LiveLane({ item, now, dataAt, onOpenLog }: {
         <div className="live-flow-step" data-state="current">
           <div className="flex items-center gap-1.5 text-[11px] font-mono">
             {item.phase === "queued" ? <Clock3 className="w-3 h-3" /> : <Loader2 className="w-3 h-3 animate-spin" />}
-            {stepLabel(t, current)}
+            {current}
           </div>
           {item.queuePosition != null && <div className="text-[10px] text-muted mt-1">{t("queue.live.queueAt", { n: item.queuePosition })}</div>}
         </div>
@@ -144,11 +147,12 @@ export function LivePool({ pool }: { pool: HubPoolSnapshotDTO }): ReactNode {
 }
 
 /** Collapsible attention cause with a few concrete examples; the full list remains in History. */
-export function AttentionCard({ kind, rows, blocked, onOpenLog, defaultOpen = false }: {
+export function AttentionCard({ kind, rows, blocked, onOpenLog, onAck, defaultOpen = false }: {
   kind: string;
   rows: QueueItemDTO[];
-  blocked: Array<{ streamKey: string; roomSlug: string; workers: string[] }>;
+  blocked: HubBlockedBroadcastDTO[];
   onOpenLog: (key: string) => void;
+  onAck: (key: string) => void;
   defaultOpen?: boolean;
 }): ReactNode {
   const t = useT();
@@ -165,13 +169,28 @@ export function AttentionCard({ kind, rows, blocked, onOpenLog, defaultOpen = fa
           <span className="font-medium text-ink">{r.anchorName ?? roomId(r.roomSlug)}</span>
           <span className="font-mono text-[11px] text-muted-soft">{sessionLabel(r.streamKey)}</span>
           <span className="text-[11px] text-muted truncate max-w-full" title={r.error ?? undefined}>{r.error}</span>
-          <button type="button" className="icon-btn !w-7 !h-7 ml-auto" title={t("hub.jobs.viewLog")} onClick={() => onOpenLog(r.streamKey)}><FileText className="w-3.5 h-3.5" /></button>
+          <span className="ml-auto inline-flex items-center gap-0.5">
+            {r.state === "needs_manual" && (
+              <button type="button" className="icon-btn !w-7 !h-7" title={t("queue.ack.action")} onClick={() => onAck(r.streamKey)}>
+                <Check className="w-3.5 h-3.5" />
+              </button>
+            )}
+            <button type="button" className="icon-btn !w-7 !h-7" title={t("hub.jobs.viewLog")} onClick={() => onOpenLog(r.streamKey)}>
+              <FileText className="w-3.5 h-3.5" />
+            </button>
+            <Link to={`/rooms/${encodeURIComponent(`${r.platform}.${r.roomSlug}`)}`} className="icon-btn !w-7 !h-7" title={t("queue.openRoom")}>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </Link>
+          </span>
         </div>
       ))}
       {blocked.map((b) => (
         <div key={b.streamKey} className="attention-row">
-          <span className="font-medium text-ink">{b.roomSlug}</span>
+          <span className="font-medium text-ink">{b.anchorName ?? b.roomSlug}</span>
           <span className="text-[11px]" style={{ color: "var(--error-fg)" }}>{t("queue.blocked.by", { nodes: b.workers.join(", ") })}</span>
+          <Link to={`/rooms/${encodeURIComponent(`${b.platform}.${b.roomSlug}`)}`} className="icon-btn !w-7 !h-7 ml-auto" title={t("queue.openRoom")}>
+            <ExternalLink className="w-3.5 h-3.5" />
+          </Link>
         </div>
       ))}
     </details>
@@ -183,12 +202,30 @@ export function QueueLogDialog({ logKey, onClose }: { logKey: string | null; onC
 }
 
 /** Compact node health entry for Queue. The full topology lives on `/nodes`. */
-export function FleetPulse({ delivering }: { delivering: number }): ReactNode {
+export function FleetPulse({ nodes, delivering }: {
+  nodes: readonly NodeSummary[];
+  delivering: number;
+}): ReactNode {
   const t = useT();
+  const total = nodes.length;
+  const online = nodes.filter((n) => n.ok === true).length;
+  const recording = nodes.reduce((n, node) => n + node.recording, 0);
+  const diskLow = nodes.filter((n) => n.diskLow).length;
+  const drift = nodes.filter((n) => n.drift || n.syncLag).length;
   return (
     <div className="card mb-5 flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-3">
       <span className="section-label">{t("queue.fleet.title")}</span>
+      <span className="inline-flex items-center gap-1.5 text-[12px]">
+        <span
+          className="dot"
+          style={{ background: total === 0 ? "var(--muted-soft)" : online === total ? "var(--success)" : "var(--warning)" }}
+        />
+        {total === 0 ? t("queue.fleet.noNodes") : t("queue.fleet.online", { ok: online, total })}
+      </span>
+      <span className="text-[12px] text-muted">{t("queue.fleet.recording", { n: recording })}</span>
       <span className="text-[12px] text-muted">{t("queue.fleet.delivering", { n: delivering })}</span>
+      {diskLow > 0 && <span className="text-[12px]" style={{ color: "var(--error-fg)" }}>{t("queue.fleet.diskLow", { n: diskLow })}</span>}
+      {drift > 0 && <span className="text-[12px]" style={{ color: "var(--warning-fg)" }}>{t("queue.fleet.drift", { n: drift })}</span>}
       <Link to="/nodes" className="ml-auto inline-flex items-center gap-1 text-[12px] text-ink hover:underline">
         {t("queue.fleet.open")} <ArrowRight className="w-3.5 h-3.5" />
       </Link>

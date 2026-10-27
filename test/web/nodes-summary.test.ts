@@ -70,7 +70,7 @@ describe("fmtBytes", () => {
 
 describe("节点卡片的房间行", () => {
   const rt = (room: string, anchorName: string | null, enabled: boolean, ...ws: Array<[string, "recording" | "not_recording" | "unavailable"]>) => ({
-    room, anchorName, name: null, enabled,
+    platform: "douyin", room, anchorName, name: null, enabled,
     recordingWorkers: ws.map(([workerId, state]) => ({ workerId, workerName: `N-${workerId}`, state })),
   }) as unknown as Parameters<typeof summarizeNodes>[0][number];
 
@@ -97,6 +97,19 @@ describe("节点卡片的房间行", () => {
     ], "");
     expect(r.find((n) => n.id === "a")!.rooms[0]!.sessions.map((s) => s.sessionBase)).toEqual(["s1"]);
     expect(r.find((n) => n.id === "b")!.rooms[0]!.sessions.map((s) => s.sessionBase)).toEqual(["s2"]);
+  });
+
+  it("同 slug 的不同平台不合并房间行,会话按平台挂靠", () => {
+    const dy = { ...rt("https://live.douyin.com/7", "抖音", true, ["a", "recording"]), platform: "douyin" };
+    const bl = { ...rt("https://live.bilibili.com/7", "B站", true, ["a", "recording"]), platform: "bilibili" };
+    const r = summarizeNodes([dy, bl], {}, [
+      del("a", { platform: "douyin", roomSlug: "7", sessionBase: "dy" }),
+      del("a", { platform: "bilibili", roomSlug: "7", sessionBase: "bl" }),
+    ], "");
+    expect(r[0]!.rooms.map((x) => [x.platform, x.roomSlug, x.sessions.map((s) => s.sessionBase)])).toEqual([
+      ["bilibili", "7", ["bl"]],
+      ["douyin", "7", ["dy"]],
+    ]);
   });
 
   it("任务清单里没有的遗留会话也列出(未确认分段不能消失)", () => {

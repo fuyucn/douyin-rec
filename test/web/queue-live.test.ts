@@ -88,6 +88,27 @@ describe("queue live sections", () => {
     expect(attentionKindOf(rows[2]!)).toBe("part_unknown");
   });
 
+  it("keeps failed runs in ATTENTION and out of history", () => {
+    const rows = [
+      row({ streamKey: "f", phase: "failed", error: "ffmpeg 失败:exit 1" }),
+      row({ streamKey: "d", phase: "done" }),
+    ];
+    const s = splitQueue(rows, [], []);
+    expect(s.attention.map((g) => [g.kind, g.rows.map((r) => r.streamKey)])).toEqual([
+      ["node_failure", ["f"]],
+    ]);
+    expect(s.history.map((r) => r.streamKey)).toEqual(["d"]);
+  });
+
+  it("classifies a node upload failure before part-review wording", () => {
+    const failed = row({
+      streamKey: "n",
+      phase: "waiting_manual",
+      error: "节点侧上传失败:append 分 P 2 时 ssh rc=255",
+    });
+    expect(attentionKindOf(failed)).toBe("node_failure");
+  });
+
   it("promotes blocked broadcasts into attention without inventing ledger rows", () => {
     const blocked: HubBlockedBroadcastDTO = {
       streamKey: "douyin:9:2026-10-26", platform: "douyin", roomSlug: "9", workers: ["a"],

@@ -6,7 +6,7 @@ import { Button, IconButton } from "../components/Button";
 import { ConnStatus } from "../components/ConnStatus";
 import { NodeLogsDialog } from "../components/NodeLogsDialog";
 import { WorkersPanel } from "../components/WorkersPanel";
-import { useHubStream, usePolling } from "../lib/hooks";
+import { useHubStream, usePolling, useTicker } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { fmtBytes } from "../lib/nodes-summary";
 import { buildNodes, nodeCounts, nodeRoomHref, nodeRoleLabel, type NodeRoomView, type NodeView } from "../lib/nodes-page";
@@ -41,25 +41,48 @@ export function NodesPage(): ReactNode {
   const [loaded, setLoaded] = useState(false);
   const [workersOpen, setWorkersOpen] = useState(false);
   const [logsFor, setLogsFor] = useState<{ id: string; name: string } | null>(null);
-  const [now, setNow] = useState(() => Date.now());
+  // Relative timestamps keep moving between the slower health probes.
+  const now = useTicker(30_000);
 
   const refresh = useMemo(() => async (): Promise<void> => {
     try {
-      const [ts, rs, ws, ss, q] = await Promise.all([
-        api.listTasks(), api.listRooms(), api.listWorkers(), api.getWorkersStatus(), api.getHubQueue(),
-      ]);
+      // Task/room data drives assignments and changes often; ssh-backed health probes run separately.
+      const [ts, rs] = await Promise.all([api.listTasks(), api.listRooms()]);
       setTasks(ts);
       setRooms(rs);
-      setWorkers(ws);
-      setStatus(Object.fromEntries(ss.map((s) => [s.id, s])));
-      setDelivering(q.delivering ?? []);
-      setNow(Date.now());
     } finally {
       setLoaded(true);
     }
   }, []);
-  const stream = useHubStream(refresh, { enabled: hubEnabled === true });
-  usePolling(() => void refresh().catch(() => {}), 15_000, hubEnabled === true);
+  const refreshStatus = useMemo(() => async (): Promise<void> => {
+    try {
+      const ss = await api.getWorkersStatus();
+      setStatus(Object.fromEntries(ss.map((s) => [s.id, s])));
+    } catch {
+      /* Keep the previous probe result; the next probe retries. */
+    }
+  }, []);
+  // The queue snapshot is only used for live delivery sessions. Keep it on the same push refresh,
+  // but never let its failure hide task/room/health data.
+  const refreshDelivering = useMemo(() => async (): Promise<void> => {
+    try {
+      const q = await api.getHubQueue();
+      setDelivering(q.delivering ?? []);
+    } catch {
+      /* Keep the previous delivery snapshot; stream stale state covers request failures. */
+    }
+  }, []);
+  // Delivery data rides the same stream refresh but never blocks or fails the health/task refresh.
+  const refreshAll = useMemo(() => async (): Promise<void> => {
+    void refreshDelivering();
+    void refreshStatus();
+    await refresh();
+  }, [refresh, refreshDelivering, refreshStatus]);
+  const stream = useHubStream(refreshAll, { enabled: hubEnabled === true });
+  usePolling(() => void refreshDelivering().catch(() => {}), 15_000, hubEnabled === true);
+  usePolling(() => void refreshStatus().catch(() => {}), 60_000, hubEnabled === true);
+  usePolling(() => void refresh().catch(() => {}), 30_000, hubEnabled === true);
+  usePolling(() => void api.listWorkers().then(setWorkers).catch(() => {}), 300_000, hubEnabled === true);
   usePolling(() => void api.getVersion().then((r) => setMasterVersion(r.version.split("-")[0] ?? "")).catch(() => {}), 300_000, hubEnabled === true);
 
   const nodes = useMemo(

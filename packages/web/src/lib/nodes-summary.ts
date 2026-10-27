@@ -15,6 +15,9 @@ export type NodeRoomState = "recording" | "waiting" | "unavailable" | "disabled"
 export interface NodeRoom {
   key: string;
   label: string;
+  /** Platform + normalized room slug; keep both so equal slugs on different platforms never merge. */
+  platform?: string;
+  roomSlug?: string;
   state: NodeRoomState;
   /** 该状态的核对时刻(epoch ms);未知 = undefined。 */
   checkedAt?: number;
@@ -36,7 +39,7 @@ export function roomSlugOf(room: string | undefined): string {
   return base.split("/").pop() ?? base;
 }
 
-export type NodeTaskInput = Pick<Task, "recordingWorkers"> & Partial<Pick<Task, "room" | "name" | "anchorName" | "enabled">>;
+export type NodeTaskInput = Pick<Task, "recordingWorkers"> & Partial<Pick<Task, "platform" | "room" | "name" | "anchorName" | "enabled">>;
 
 export interface NodeSummary {
   id: string;
@@ -96,24 +99,28 @@ export function summarizeNodes(
     }
     return n;
   };
-  // 房间行按 (节点, 平台无关的房间标识) 索引,供边录边传会话挂靠。
+  // Room rows are keyed by (node, platform, slug). A bare slug is not globally unique.
   const roomIdx = new Map<string, NodeRoom>();
   for (const t of tasks) {
     const slug = roomSlugOf(t.room);
+    const platform = t.platform ?? "";
     for (const w of t.recordingWorkers ?? []) {
       const n = ensure(w.workerId, w.workerName);
       if (w.state === "recording") n.recording++;
       else if (w.state === "unavailable") n.unavailable++;
       const state: NodeRoomState = w.state === "recording" ? "recording" : w.state === "unavailable" ? "unavailable"
         : t.enabled === false ? "disabled" : "waiting";
+      const identity = `${w.workerId}:${platform}:${slug || t.room || n.rooms.length}`;
       const row: NodeRoom = {
-        key: `${w.workerId}:${slug || t.room || n.rooms.length}`,
+        key: identity,
+        platform,
+        roomSlug: slug || undefined,
         // Same priority as notifications and the queue page (issue #53): task name first.
         label: t.name || t.anchorName || slug || "?",
         state, checkedAt: typeof w.checkedAt === "number" ? w.checkedAt : undefined, sessions: [],
       };
       n.rooms.push(row);
-      if (slug) roomIdx.set(`${w.workerId}:${slug}`, row);
+      if (slug) roomIdx.set(identity, row);
     }
   }
   for (const d of delivering) {
@@ -122,11 +129,19 @@ export function summarizeNodes(
     n.rollingSessions++;
     n.lockedBytes += typeof d.lockedBytes === "number" ? d.lockedBytes : 0;
     n.ambiguous += d.ambiguous;
-    let row = roomIdx.get(`${d.workerId}:${d.roomSlug}`);
+    const identity = `${d.workerId}:${d.platform}:${d.roomSlug}`;
+    let row = roomIdx.get(identity);
     if (!row) {
       // 任务清单里已没有的房间(遗留会话):照样列出,别让未确认分段「消失」。
-      row = { key: `${d.workerId}:${d.roomSlug}`, label: d.anchorName || d.roomSlug, state: d.recording ? "recording" : "disabled", sessions: [] };
-      roomIdx.set(`${d.workerId}:${d.roomSlug}`, row);
+      row = {
+        key: identity,
+        platform: d.platform,
+        roomSlug: d.roomSlug,
+        label: d.anchorName || d.roomSlug,
+        state: d.recording ? "recording" : "disabled",
+        sessions: [],
+      };
+      roomIdx.set(identity, row);
       n.rooms.push(row);
     }
     row.sessions.push(d);

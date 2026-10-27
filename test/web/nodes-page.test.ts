@@ -48,6 +48,24 @@ describe("nodes page model", () => {
     expect(w1.uncertainSessions).toBe(1);
   });
 
+  it("keeps equal room slugs on different platforms separate", () => {
+    const tasks = [
+      task({ id: 1, platform: "douyin", room: "https://live.douyin.com/7", recordingWorkers: [
+        { workerId: "w1", workerName: "worker-one", state: "recording", checkedAt: 1 },
+      ] }),
+      task({ id: 2, platform: "bilibili", room: "https://live.bilibili.com/7", recordingWorkers: [
+        { workerId: "w1", workerName: "worker-one", state: "not_recording", checkedAt: 1 },
+      ] }),
+    ];
+    const out = buildNodes(tasks, [], workers, { w1: { id: "w1", ok: true } }, [], "0.0.234");
+    const w1 = out.find((n) => n.id === "w1")!;
+    expect(w1.rooms.map((r) => [r.platform, r.roomSlug, r.taskId])).toEqual([
+      ["douyin", "7", 1],
+      ["bilibili", "7", 2],
+    ]);
+    expect(new Set(w1.rooms.map((r) => r.key)).size).toBe(2);
+  });
+
   it("room links use the unified key and encode it", () => {
     expect(nodeRoomHref({ platform: "douyin", roomSlug: "1" })).toBe("/rooms/douyin.1");
   });

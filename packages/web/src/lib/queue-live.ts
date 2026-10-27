@@ -56,9 +56,9 @@ export function attentionKindOf(row: QueueItemDTO): AttentionKind {
   if (row.phase === "stopped") return "stopped";
   if (row.phase === "waiting_upload") return "stage_ready";
   const err = row.error ?? "";
+  if (/节点侧上传失败|ssh rc|ssh 超时|ffmpeg 失败|上传失败/i.test(err)) return "node_failure";
   if (/节点已开始上传但结果未知|上传结果未知|结果不确定|uncertain/i.test(err)) return "upload_unknown";
   if (/不确定段|人工核对分\s*P|分\s*P/i.test(err)) return "part_unknown";
-  if (/节点侧上传失败|ssh rc|ssh 超时|ffmpeg 失败|上传失败/i.test(err)) return "node_failure";
   return "other";
 }
 
@@ -75,10 +75,10 @@ export function groupAttention(rows: readonly QueueItemDTO[], blocked: readonly 
     groups.set(kind, g);
   };
   for (const row of rows) {
-    if (row.phase === "done" || row.phase === "failed") continue;
+    if (row.phase === "done") continue;
     if (LIVE_PHASES.has(row.phase)) continue;
     if (row.phase === "waiting_upload") continue;
-    if (row.phase === "waiting_manual" || row.phase === "stopped") add(attentionKindOf(row), row);
+    if (row.phase === "waiting_manual" || row.phase === "stopped" || row.phase === "failed") add(attentionKindOf(row), row);
   }
   for (const b of blocked) {
     const g = groups.get("blocked") ?? { kind: "blocked", rows: [], blocked: [], rooms: 0 };
@@ -106,9 +106,9 @@ export function splitQueue(
   blocked: readonly HubBlockedBroadcastDTO[],
 ): QueueSections {
   const live = sortLive(rows.filter((r) => LIVE_PHASES.has(r.phase)));
-  const realAttention = rows.filter((r) => r.phase === "waiting_manual" || r.phase === "stopped");
+  const realAttention = rows.filter((r) => r.phase === "waiting_manual" || r.phase === "stopped" || r.phase === "failed");
   const stageReady = rows.filter((r) => r.phase === "waiting_upload");
-  const history = rows.filter((r) => r.phase === "done" || r.phase === "failed");
+  const history = rows.filter((r) => r.phase === "done");
   return {
     live,
     attention: groupAttention(realAttention, blocked),
@@ -144,6 +144,6 @@ export function queueSummary(sections: QueueSections, pool: HubPoolSnapshotDTO |
 
 /** A compact, deterministic status label for a queue row (used by lanes and history). */
 export function liveStepLabel(row: QueueItemDTO): string {
-  if (row.phase === "queued") return row.resource ? `waiting:${row.resource}` : "queued";
+  if (row.phase === "queued") return row.resource ?? "queued";
   return row.currentNode ?? "preparing";
 }

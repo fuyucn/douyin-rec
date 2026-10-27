@@ -86,12 +86,14 @@ export function buildNodes(
       n.rollingSessions++;
       n.lockedBytes += typeof d.lockedBytes === "number" ? d.lockedBytes : 0;
       n.ambiguous += d.ambiguous;
-      const slug = d.roomSlug;
-      let row = n.rooms.find((r) => r.key === `${d.workerId}:${slug}`);
+      const identity = `${d.workerId}:${d.platform}:${d.roomSlug}`;
+      let row = n.rooms.find((r) => r.key === identity);
       if (!row) {
         row = {
-          key: `${d.workerId}:${slug}`,
-          label: d.anchorName || slug,
+          key: identity,
+          platform: d.platform,
+          roomSlug: d.roomSlug,
+          label: d.anchorName || d.roomSlug,
           state: d.recording ? "recording" : "disabled",
           sessions: [],
         };
@@ -102,14 +104,15 @@ export function buildNodes(
   }
   return base.map((n) => {
     const roomsOut: NodeRoomView[] = n.rooms.map((nr) => {
-      const slug = nr.key.slice(nr.key.indexOf(":") + 1);
-      const room = [...bySlug.values()].find((r) => r.roomSlug === slug);
-      const task = tasks.find((t) => roomSlugOf(t.room) === slug);
+      const roomSlug = nr.roomSlug ?? nr.key.split(":").slice(2).join(":");
+      const platform = nr.platform ?? "";
+      const room = bySlug.get(`${platform}:${roomSlug}`);
+      const task = tasks.find((t) => (t.platform ?? "") === platform && roomSlugOf(t.room) === roomSlug);
       return {
         key: nr.key,
         label: nr.label,
-        platform: room?.platform ?? task?.platform ?? "douyin",
-        roomSlug: slug,
+        platform: room?.platform ?? task?.platform ?? platform ?? "douyin",
+        roomSlug,
         state: nr.state,
         taskId: task?.id ?? room?.recording?.taskId ?? null,
         checkedAt: nr.checkedAt,

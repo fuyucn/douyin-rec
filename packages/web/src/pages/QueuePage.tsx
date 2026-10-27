@@ -11,13 +11,13 @@ import {
 import { useAtomValue } from "jotai";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO } from "../api/client";
+import { api, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type Task, type WorkerStatus } from "../api/client";
 import { hubEnabledAtom, serverTimezoneAtom } from "../atoms";
 import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/HubJobs";
 import { platformLabel, roomId } from "../lib/labels";
-import { errMessage, useHubStream, useTicker, useToast } from "../lib/hooks";
+import { errMessage, useHubStream, usePolling, useTicker, useToast } from "../lib/hooks";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { fmtBytes } from "../lib/nodes-summary";
+import { baseVersion, fmtBytes, summarizeNodes } from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { AttentionCard, FleetPulse, LiveLane, LivePool, StageReadyRow } from "../components/QueueLive";
 import { queueSummary, splitQueue } from "../lib/queue-live";
@@ -500,6 +500,10 @@ export function QueuePage(): ReactNode {
   /** 收到当前这份快照的本地时刻 —— 本地计时以它为基准递增。 */
   const [dataAt, setDataAt] = useState(() => Date.now());
   const [loaded, setLoaded] = useState(false);
+  // Fleet health is separate from the queue ledger: tasks/status are slow-moving and ssh-backed.
+  const [fleetTasks, setFleetTasks] = useState<Task[]>([]);
+  const [fleetStatus, setFleetStatus] = useState<Record<string, WorkerStatus | undefined>>({});
+  const [masterVersion, setMasterVersion] = useState("");
 
   const [phase, setPhase] = useState<string[]>([]);
   const [states, setStates] = useState<string[]>([]);
@@ -542,6 +546,19 @@ export function QueuePage(): ReactNode {
   );
   // 推送驱动:master 走 /api/hub/stream,changed 即重拉;推送不可用自动退化为有界退避轮询。
   const stream = useHubStream(poll, { enabled: hubEnabled === true });
+  usePolling(() => void api.listTasks().then(setFleetTasks).catch(() => {}), 10_000, hubEnabled === true);
+  usePolling(
+    () => void api.getWorkersStatus()
+      .then((list) => setFleetStatus(Object.fromEntries(list.map((s) => [s.id, s]))))
+      .catch(() => {}),
+    60_000,
+    hubEnabled === true,
+  );
+  usePolling(
+    () => void api.getVersion().then((r) => setMasterVersion(baseVersion(r.version))).catch(() => {}),
+    300_000,
+    hubEnabled === true,
+  );
 
   // 计时/冷却本地每秒递增:服务端只在状态变化时推,不能指望它每秒重算。
   const now = useTicker(1000);
@@ -575,6 +592,10 @@ export function QueuePage(): ReactNode {
     () => splitQueue(rows, data?.delivering ?? [], data?.blocked ?? []),
     [rows, data?.delivering, data?.blocked],
   );
+  const fleetNodes = useMemo(
+    () => summarizeNodes(fleetTasks, fleetStatus, data?.delivering ?? [], masterVersion),
+    [fleetTasks, fleetStatus, data?.delivering, masterVersion],
+  );
   const summary = queueSummary(sections, pool ?? null);
   const filtered = phase.length + states.length + platform.length + (debouncedQ ? 1 : 0) > 0;
 
@@ -602,12 +623,33 @@ export function QueuePage(): ReactNode {
 
       <HubStreamBanner handle={stream} />
 
-      <FleetPulse delivering={data?.delivering?.length ?? 0} />
+      <FleetPulse nodes={fleetNodes} delivering={data?.delivering?.length ?? 0} />
 
       {!loaded ? (
         <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>
       ) : (
         <>
+          <FilterBar
+            phase={phase} states={states} platform={platform} q={q}
+            onPhase={setPhase} onStates={setStates} onPlatform={setPlatform}
+            onQ={setQ}
+            onReset={reset}
+            summary={
+              <>
+                <span>{t("queue.summary.running", { n: runningCount })}</span>
+                {uploadCount > 0 && <span>{t("queue.summary.upload", { n: uploadCount })}</span>}
+                {attentionCount > 0 && (
+                  <span style={{ color: failedCount > 0 ? "var(--error-fg)" : "var(--warning-fg)" }}>{t("queue.summary.attention", { n: attentionCount })}</span>
+                )}
+                {stoppedCount > 0 && <span>{t("queue.summary.stopped", { n: stoppedCount })}</span>}
+                {!filtered && manualTotal > manualShown && (
+                  <span style={{ color: "var(--warning-fg)" }}>{t("queue.summary.manualMore", { total: manualTotal, shown: manualShown })}</span>
+                )}
+                {(data?.manualAcked ?? 0) > 0 && <span>{t("queue.summary.acked", { n: data?.manualAcked ?? 0 })}</span>}
+                <span>{t("queue.summary.done", { n: doneCount })}</span>
+              </>
+            }
+          />
           <div className="section-label mb-2.5">{t("queue.live.title")}</div>
           {pool && <LivePool pool={pool} />}
           {sections.live.length === 0 ? (
@@ -630,7 +672,15 @@ export function QueuePage(): ReactNode {
           ) : (
             <div className="mb-5">
               {sections.attention.map((g) => (
-                <AttentionCard key={g.kind} kind={g.kind} rows={g.rows} blocked={g.blocked} onOpenLog={setLogKey} defaultOpen={g.kind === "upload_unknown"} />
+                <AttentionCard
+                  key={g.kind}
+                  kind={g.kind}
+                  rows={g.rows}
+                  blocked={g.blocked}
+                  onOpenLog={setLogKey}
+                  onAck={openAck}
+                  defaultOpen={g.kind === "upload_unknown"}
+                />
               ))}
             </div>
           )}
@@ -650,39 +700,17 @@ export function QueuePage(): ReactNode {
 
           <details className="mb-5">
             <summary className="section-label cursor-pointer select-none">
-              {t("queue.history.title")} · {t("queue.history.summary", { done: summary.history - failedCount, failed: failedCount })}
+              {t("queue.history.title")} · {t("queue.history.doneSummary", { done: summary.history })}
             </summary>
             <div className="mt-3">
-          <FilterBar
-            phase={phase} states={states} platform={platform} q={q}
-            onPhase={setPhase} onStates={setStates} onPlatform={setPlatform}
-            onQ={setQ}
-            onReset={reset}
-            summary={
-              <>
-                <span>{t("queue.summary.running", { n: runningCount })}</span>
-                {uploadCount > 0 && <span>{t("queue.summary.upload", { n: uploadCount })}</span>}
-                {attentionCount > 0 && (
-                  <span style={{ color: failedCount > 0 ? "var(--error-fg)" : "var(--warning-fg)" }}>{t("queue.summary.attention", { n: attentionCount })}</span>
-                )}
-                {stoppedCount > 0 && <span>{t("queue.summary.stopped", { n: stoppedCount })}</span>}
-                {!filtered && manualTotal > manualShown && (
-                  <span style={{ color: "var(--warning-fg)" }}>{t("queue.summary.manualMore", { total: manualTotal, shown: manualShown })}</span>
-                )}
-                {(data?.manualAcked ?? 0) > 0 && <span>{t("queue.summary.acked", { n: data?.manualAcked ?? 0 })}</span>}
-                <span>{t("queue.summary.done", { n: doneCount })}</span>
-              </>
-            }
-          />
-          <div className="section-label mb-2.5">{t("queue.section.all")}</div>
         {/* 窄屏(<sm):表格 5+ 列在手机上必然横向溢出且行高爆炸 → 改卡片式,信息不丢。 */}
         <div className="sm:hidden space-y-2">
-          {rows.length === 0 ? (
+          {sections.history.length === 0 ? (
             <div className="card p-8 text-center text-muted-soft text-sm">
               {filtered ? t("queue.filter.noMatch") : t("queue.empty")}
             </div>
           ) : (
-            rows.map((it, i) => (
+            sections.history.map((it, i) => (
               <QueueCard key={it.streamKey} item={it} index={i + 1} tz={tz} onOpenLog={setLogKey} onAck={openAck} />
             ))
           )}
@@ -715,7 +743,7 @@ export function QueuePage(): ReactNode {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.length === 0 ? (
+                  {sections.history.length === 0 ? (
                     <tr>
                       <td colSpan={6}>
                         <div className="text-center text-muted-soft text-sm py-10">
@@ -724,7 +752,7 @@ export function QueuePage(): ReactNode {
                       </td>
                     </tr>
                   ) : (
-                    rows.map((it, i) => (
+                    sections.history.map((it, i) => (
                       <QueueRow
                         key={it.streamKey}
                         item={it}
