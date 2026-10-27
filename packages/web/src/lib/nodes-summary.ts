@@ -1,5 +1,5 @@
 /** controller「节点」总览条的纯函数(无 React 依赖,可直测)。 */
-import type { RollingDeliveryDTO, Task, WorkerStatus } from "../api/client";
+import type { RollingDeliveryDTO, Task, WorkerDTO, WorkerStatus } from "../api/client";
 
 /** 字节 → 人类可读(1 位小数,MB/GB)。 */
 export function fmtBytes(n: number): string {
@@ -76,6 +76,7 @@ export function summarizeNodes(
   status: Record<string, WorkerStatus | undefined>,
   delivering: readonly RollingDeliveryDTO[],
   masterVersion: string,
+  workers: readonly Pick<WorkerDTO, "id" | "name">[] = [],
 ): NodeSummary[] {
   const byId = new Map<string, NodeSummary>();
   const ensure = (id: string, name: string): NodeSummary => {
@@ -99,6 +100,10 @@ export function summarizeNodes(
     }
     return n;
   };
+  // Configured workers belong on the fleet even before they get a room assignment.
+  for (const w of workers) ensure(w.id, w.name || w.id);
+  // A probe can mention a worker that the configured list has not refreshed yet.
+  for (const id of Object.keys(status)) ensure(id, status[id]?.id ?? id);
   // Room rows are keyed by (node, platform, slug). A bare slug is not globally unique.
   const roomIdx = new Map<string, NodeRoom>();
   for (const t of tasks) {

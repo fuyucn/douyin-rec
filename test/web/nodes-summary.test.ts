@@ -19,9 +19,12 @@ describe("summarizeNodes", () => {
     expect(r.find((n) => n.id === "a")).toMatchObject({ recording: 0, unavailable: 0 });
   });
 
-  it("没有任何任务选中 → 空(未分配节点不显示)", () => {
-    expect(summarizeNodes([], { a: st({}) }, [], "0.0.1")).toEqual([]);
+  it("未分配节点不显示,但已配置的 worker 和探测到的节点仍进入 fleet", () => {
+    expect(summarizeNodes([], {}, [], "0.0.1")).toEqual([]);
     expect(summarizeNodes([{ recordingWorkers: undefined }], {}, [], "")).toEqual([]);
+    expect(summarizeNodes([], {}, [], "", [{ id: "idle", name: "Idle node" }]).map((n) => [n.id, n.name]))
+      .toEqual([["idle", "Idle node"]]);
+    expect(summarizeNodes([], { a: st({}) }, [], "0.0.1").map((n) => n.id)).toEqual(["a"]);
   });
 
   it("磁盘:低于水位 → diskLow;水位 0(关闭)/ 缺字段 → 不标红", () => {

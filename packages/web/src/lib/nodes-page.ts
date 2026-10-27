@@ -48,7 +48,7 @@ export function buildNodes(
   masterVersion: string,
 ): NodeView[] {
   const bySlug = new Map(rooms.map((r) => [`${r.platform}:${r.roomSlug}`, r]));
-  const base = summarizeNodes(tasks, status, delivering, masterVersion);
+  const base = summarizeNodes(tasks, status, delivering, masterVersion, workers);
   const workerNames = new Map(workers.map((w) => [w.id, w.name || w.host || w.id]));
   // `summarizeNodes` only creates nodes referenced by tasks. A rolling session can outlive its task
   // row (or arrive before the task list refreshes), so seed those nodes here instead of hiding them.

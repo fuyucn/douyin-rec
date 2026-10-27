@@ -1200,6 +1200,8 @@ table.tasks tbody tr:last-child td {
 }
 .attention-group > summary::-webkit-details-marker { display: none; }
 .attention-group[open] > summary { border-bottom: 1px solid var(--hairline); }
+.attention-group[open] > summary .lucide-chevron-down { transform: rotate(180deg); }
+.attention-group > summary .lucide-chevron-down { transition: transform 160ms var(--ease-out); }
 .attention-row {
   display: flex;
   flex-wrap: wrap;

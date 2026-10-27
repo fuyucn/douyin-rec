@@ -503,6 +503,7 @@ export function QueuePage(): ReactNode {
   // Fleet health is separate from the queue ledger: tasks/status are slow-moving and ssh-backed.
   const [fleetTasks, setFleetTasks] = useState<Task[]>([]);
   const [fleetStatus, setFleetStatus] = useState<Record<string, WorkerStatus | undefined>>({});
+  const [fleetWorkers, setFleetWorkers] = useState<Array<{ id: string; name: string }>>([]);
   const [masterVersion, setMasterVersion] = useState("");
 
   const [phase, setPhase] = useState<string[]>([]);
@@ -547,6 +548,13 @@ export function QueuePage(): ReactNode {
   // 推送驱动:master 走 /api/hub/stream,changed 即重拉;推送不可用自动退化为有界退避轮询。
   const stream = useHubStream(poll, { enabled: hubEnabled === true });
   usePolling(() => void api.listTasks().then(setFleetTasks).catch(() => {}), 10_000, hubEnabled === true);
+  usePolling(
+    () => void api.listWorkers()
+      .then((list) => setFleetWorkers(list.map((w) => ({ id: w.id, name: w.name }))))
+      .catch(() => {}),
+    300_000,
+    hubEnabled === true,
+  );
   usePolling(
     () => void api.getWorkersStatus()
       .then((list) => setFleetStatus(Object.fromEntries(list.map((s) => [s.id, s]))))
@@ -593,8 +601,8 @@ export function QueuePage(): ReactNode {
     [rows, data?.delivering, data?.blocked],
   );
   const fleetNodes = useMemo(
-    () => summarizeNodes(fleetTasks, fleetStatus, data?.delivering ?? [], masterVersion),
-    [fleetTasks, fleetStatus, data?.delivering, masterVersion],
+    () => summarizeNodes(fleetTasks, fleetStatus, data?.delivering ?? [], masterVersion, fleetWorkers),
+    [fleetTasks, fleetStatus, data?.delivering, masterVersion, fleetWorkers],
   );
   const summary = queueSummary(sections, pool ?? null);
   const filtered = phase.length + states.length + platform.length + (debouncedQ ? 1 : 0) > 0;

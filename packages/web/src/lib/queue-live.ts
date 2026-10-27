@@ -56,7 +56,7 @@ export function attentionKindOf(row: QueueItemDTO): AttentionKind {
   if (row.phase === "stopped") return "stopped";
   if (row.phase === "waiting_upload") return "stage_ready";
   const err = row.error ?? "";
-  if (/节点侧上传失败|ssh rc|ssh 超时|ffmpeg 失败|上传失败/i.test(err)) return "node_failure";
+  if (/节点侧上传失败|ssh rc|ssh 超时|上传失败/i.test(err)) return "node_failure";
   if (/节点已开始上传但结果未知|上传结果未知|结果不确定|uncertain/i.test(err)) return "upload_unknown";
   if (/不确定段|人工核对分\s*P|分\s*P/i.test(err)) return "part_unknown";
   return "other";

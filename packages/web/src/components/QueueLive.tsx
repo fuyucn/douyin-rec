@@ -91,10 +91,10 @@ export function LiveLane({ item, now, dataAt, onOpenLog }: {
             <span className="live-candidate" data-winner="true"><Check className="w-3 h-3" />{item.winnerWorker}</span>
           </span>
         )}
-        <button type="button" className="icon-btn !w-7 !h-7 ml-auto" title={t("hub.jobs.viewLog")} onClick={() => onOpenLog(item.streamKey)}>
+        <button type="button" className="icon-btn !w-7 !h-7 ml-auto" title={t("hub.jobs.viewLog")} aria-label={t("hub.jobs.viewLog")} onClick={() => onOpenLog(item.streamKey)}>
           <FileText className="w-3.5 h-3.5" />
         </button>
-        <Link to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`} className="icon-btn !w-7 !h-7" title={t("queue.openRoom")}>
+        <Link to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`} className="icon-btn !w-7 !h-7" title={t("queue.openRoom")} aria-label={t("queue.openRoom")}>
           <ExternalLink className="w-3.5 h-3.5" />
         </Link>
       </div>
@@ -128,14 +128,29 @@ export function LiveLane({ item, now, dataAt, onOpenLog }: {
 export function LivePool({ pool }: { pool: HubPoolSnapshotDTO }): ReactNode {
   const t = useT();
   const cooldown = Math.max(0, Math.round((pool.upload.cooldownUntil - Date.now()) / 1000));
+  const uploadUsage = pool.upload.windowLimit > 0
+    ? `${pool.upload.windowUsed}/${pool.upload.windowLimit}`
+    : t("queue.pool.unlimited");
   return (
     <div className="telemetry-bar telemetry-bar-cols-3 mb-5">
       <div className="telemetry-cell">
-        <div className="flex flex-col gap-1.5"><span className="telemetry-label">{t("queue.pool.cpu")}</span><span className="telemetry-value tabular-nums">{pool.cpu.active}/{pool.cpu.max || "-"}</span></div>
+        <div className="flex flex-col gap-1.5">
+          <span className="telemetry-label">{t("queue.pool.cpu")}</span>
+          <span className="telemetry-value tabular-nums">
+            {pool.cpu.active}/{pool.cpu.max || "-"}
+            {pool.cpu.queued > 0 && <span className="text-muted-soft font-normal text-[13px]"> · {t("queue.pool.queued", { n: pool.cpu.queued })}</span>}
+          </span>
+        </div>
         <span className="telemetry-icon"><Gauge className="w-4 h-4" /></span>
       </div>
       <div className="telemetry-cell">
-        <div className="flex flex-col gap-1.5"><span className="telemetry-label">{t("queue.pool.upload")}</span><span className="telemetry-value tabular-nums">{pool.upload.windowUsed}/{pool.upload.windowLimit || "-"}</span></div>
+        <div className="flex flex-col gap-1.5">
+          <span className="telemetry-label">{t("queue.pool.upload")}</span>
+          <span className="telemetry-value tabular-nums">
+            {uploadUsage}
+            {pool.upload.queued > 0 && <span className="text-muted-soft font-normal text-[13px]"> · {t("queue.pool.queued", { n: pool.upload.queued })}</span>}
+          </span>
+        </div>
         <span className="telemetry-icon"><ArrowRight className="w-4 h-4" /></span>
       </div>
       <div className="telemetry-cell">
@@ -171,14 +186,14 @@ export function AttentionCard({ kind, rows, blocked, onOpenLog, onAck, defaultOp
           <span className="text-[11px] text-muted truncate max-w-full" title={r.error ?? undefined}>{r.error}</span>
           <span className="ml-auto inline-flex items-center gap-0.5">
             {r.state === "needs_manual" && (
-              <button type="button" className="icon-btn !w-7 !h-7" title={t("queue.ack.action")} onClick={() => onAck(r.streamKey)}>
+              <button type="button" className="icon-btn !w-7 !h-7" title={t("queue.ack.action")} aria-label={t("queue.ack.action")} onClick={() => onAck(r.streamKey)}>
                 <Check className="w-3.5 h-3.5" />
               </button>
             )}
-            <button type="button" className="icon-btn !w-7 !h-7" title={t("hub.jobs.viewLog")} onClick={() => onOpenLog(r.streamKey)}>
+            <button type="button" className="icon-btn !w-7 !h-7" title={t("hub.jobs.viewLog")} aria-label={t("hub.jobs.viewLog")} onClick={() => onOpenLog(r.streamKey)}>
               <FileText className="w-3.5 h-3.5" />
             </button>
-            <Link to={`/rooms/${encodeURIComponent(`${r.platform}.${r.roomSlug}`)}`} className="icon-btn !w-7 !h-7" title={t("queue.openRoom")}>
+            <Link to={`/rooms/${encodeURIComponent(`${r.platform}.${r.roomSlug}`)}`} className="icon-btn !w-7 !h-7" title={t("queue.openRoom")} aria-label={t("queue.openRoom")}>
               <ExternalLink className="w-3.5 h-3.5" />
             </Link>
           </span>
@@ -188,7 +203,7 @@ export function AttentionCard({ kind, rows, blocked, onOpenLog, onAck, defaultOp
         <div key={b.streamKey} className="attention-row">
           <span className="font-medium text-ink">{b.anchorName ?? b.roomSlug}</span>
           <span className="text-[11px]" style={{ color: "var(--error-fg)" }}>{t("queue.blocked.by", { nodes: b.workers.join(", ") })}</span>
-          <Link to={`/rooms/${encodeURIComponent(`${b.platform}.${b.roomSlug}`)}`} className="icon-btn !w-7 !h-7 ml-auto" title={t("queue.openRoom")}>
+          <Link to={`/rooms/${encodeURIComponent(`${b.platform}.${b.roomSlug}`)}`} className="icon-btn !w-7 !h-7 ml-auto" title={t("queue.openRoom")} aria-label={t("queue.openRoom")}>
             <ExternalLink className="w-3.5 h-3.5" />
           </Link>
         </div>
@@ -246,13 +261,13 @@ export function StageReadyRow({ item, onOpenLog, onAck }: {
       <span className="font-mono text-[11px] text-muted-soft">{sessionLabel(item.streamKey)}</span>
       <span className="text-[11px] text-muted">{t("queue.attention.stage_ready")}</span>
       <span className="ml-auto inline-flex items-center gap-0.5">
-        <button type="button" className="icon-btn !w-7 !h-7" title={t("queue.ack.action")} onClick={() => onAck(item.streamKey)}>
+        <button type="button" className="icon-btn !w-7 !h-7" title={t("queue.ack.action")} aria-label={t("queue.ack.action")} onClick={() => onAck(item.streamKey)}>
           <Check className="w-3.5 h-3.5" />
         </button>
-        <button type="button" className="icon-btn !w-7 !h-7" title={t("hub.jobs.viewLog")} onClick={() => onOpenLog(item.streamKey)}>
+        <button type="button" className="icon-btn !w-7 !h-7" title={t("hub.jobs.viewLog")} aria-label={t("hub.jobs.viewLog")} onClick={() => onOpenLog(item.streamKey)}>
           <FileText className="w-3.5 h-3.5" />
         </button>
-        <Link to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`} className="icon-btn !w-7 !h-7" title={t("queue.openRoom")}>
+        <Link to={`/rooms/${encodeURIComponent(`${item.platform}.${item.roomSlug}`)}`} className="icon-btn !w-7 !h-7" title={t("queue.openRoom")} aria-label={t("queue.openRoom")}>
           <ExternalLink className="w-3.5 h-3.5" />
         </Link>
       </span>

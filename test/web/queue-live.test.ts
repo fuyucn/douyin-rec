@@ -90,7 +90,7 @@ describe("queue live sections", () => {
 
   it("keeps failed runs in ATTENTION and out of history", () => {
     const rows = [
-      row({ streamKey: "f", phase: "failed", error: "ffmpeg 失败:exit 1" }),
+      row({ streamKey: "f", phase: "failed", error: "节点侧上传失败:ssh rc=255" }),
       row({ streamKey: "d", phase: "done" }),
     ];
     const s = splitQueue(rows, [], []);
@@ -107,6 +107,10 @@ describe("queue live sections", () => {
       error: "节点侧上传失败:append 分 P 2 时 ssh rc=255",
     });
     expect(attentionKindOf(failed)).toBe("node_failure");
+  });
+
+  it("does not label a master-side ffmpeg failure as a node upload failure", () => {
+    expect(attentionKindOf(row({ streamKey: "f", phase: "failed", error: "ffmpeg 失败:exit 1" }))).toBe("other");
   });
 
   it("promotes blocked broadcasts into attention without inventing ledger rows", () => {

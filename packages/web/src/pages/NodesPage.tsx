@@ -37,6 +37,7 @@ export function NodesPage(): ReactNode {
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
   const [status, setStatus] = useState<Record<string, WorkerStatus | undefined>>({});
   const [delivering, setDelivering] = useState<RollingDeliveryDTO[]>([]);
+  const [statusStale, setStatusStale] = useState(false);
   const [masterVersion, setMasterVersion] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [workersOpen, setWorkersOpen] = useState(false);
@@ -58,26 +59,22 @@ export function NodesPage(): ReactNode {
     try {
       const ss = await api.getWorkersStatus();
       setStatus(Object.fromEntries(ss.map((s) => [s.id, s])));
+      setStatusStale(false);
     } catch {
-      /* Keep the previous probe result; the next probe retries. */
+      // Keep the last good probe, but make the staleness visible instead of pretending it is live.
+      setStatusStale(true);
     }
   }, []);
-  // The queue snapshot is only used for live delivery sessions. Keep it on the same push refresh,
-  // but never let its failure hide task/room/health data.
+  // The queue snapshot is only used for live delivery sessions. It rides the push refresh, but a
+  // failure must surface through the stream stale marker rather than silently freezing the view.
   const refreshDelivering = useMemo(() => async (): Promise<void> => {
-    try {
-      const q = await api.getHubQueue();
-      setDelivering(q.delivering ?? []);
-    } catch {
-      /* Keep the previous delivery snapshot; stream stale state covers request failures. */
-    }
+    const q = await api.getHubQueue();
+    setDelivering(q.delivering ?? []);
   }, []);
-  // Delivery data rides the same stream refresh but never blocks or fails the health/task refresh.
+  // Delivery data rides the same stream refresh; a queue failure marks the stream stale.
   const refreshAll = useMemo(() => async (): Promise<void> => {
-    void refreshDelivering();
-    void refreshStatus();
-    await refresh();
-  }, [refresh, refreshDelivering, refreshStatus]);
+    await Promise.all([refreshDelivering(), refresh()]);
+  }, [refresh, refreshDelivering]);
   const stream = useHubStream(refreshAll, { enabled: hubEnabled === true });
   usePolling(() => void refreshDelivering().catch(() => {}), 15_000, hubEnabled === true);
   usePolling(() => void refreshStatus().catch(() => {}), 60_000, hubEnabled === true);
@@ -112,7 +109,10 @@ export function NodesPage(): ReactNode {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <ConnStatus conn={stream.lastOkAt ? { ok: !stream.stale, at: stream.lastOkAt } : null} />
-          <IconButton title={t("nodes.refresh")} onClick={() => void refresh().catch(() => {})}><RefreshCw className="w-4 h-4" /></IconButton>
+          {statusStale && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.healthStale")}</span>}
+          <IconButton title={t("nodes.refresh")} onClick={() => void Promise.all([refresh(), refreshStatus(), refreshDelivering()]).catch(() => {})}>
+            <RefreshCw className="w-4 h-4" />
+          </IconButton>
           <Button small variant="secondary" onClick={() => setWorkersOpen(true)}><Users className="w-4 h-4" />{t("nodes.manage")}</Button>
         </div>
       </div>
