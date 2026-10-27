@@ -17,7 +17,15 @@ import { humanSec, humanSecFull, stateColor, JobLogDialog } from "../components/
 import { platformLabel, roomId } from "../lib/labels";
 import { errMessage, useHubStream, usePolling, useTicker, useToast } from "../lib/hooks";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { baseVersion, fmtBytes, summarizeNodes } from "../lib/nodes-summary";
+import {
+  baseVersion,
+  deriveNodeHealthProbe,
+  fmtBytes,
+  INITIAL_NODE_HEALTH_LOAD_STATE,
+  loadNodeHealthSnapshot,
+  summarizeNodes,
+  type NodeHealthLoadState,
+} from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { AttentionCard, FleetPulse, LiveLane, LivePool, StageReadyRow } from "../components/QueueLive";
 import { queueSummary, splitQueue } from "../lib/queue-live";
@@ -600,7 +608,9 @@ export function QueuePage(): ReactNode {
   const [fleetTasksStale, setFleetTasksStale] = useState(false);
   const [fleetWorkersStale, setFleetWorkersStale] = useState(false);
   const [fleetVersionStale, setFleetVersionStale] = useState(false);
-  const [fleetStatusStale, setFleetStatusStale] = useState(false);
+  const [fleetWorkersLoaded, setFleetWorkersLoaded] = useState(false);
+  const [fleetHealthLoad, setFleetHealthLoad] = useState<NodeHealthLoadState>(INITIAL_NODE_HEALTH_LOAD_STATE);
+  const fleetHealthLoadRef = useRef<NodeHealthLoadState>(INITIAL_NODE_HEALTH_LOAD_STATE);
   const [masterVersion, setMasterVersion] = useState("");
 
   const [phase, setPhase] = useState<string[]>([]);
@@ -657,17 +667,18 @@ export function QueuePage(): ReactNode {
         setFleetWorkers(list.map((w) => ({ id: w.id, name: w.name })));
         setFleetWorkersStale(false);
       })
-      .catch(() => setFleetWorkersStale(true)),
+      .catch(() => setFleetWorkersStale(true))
+      .finally(() => setFleetWorkersLoaded(true)),
     300_000,
     hubEnabled === true,
   );
   usePolling(
-    () => api.getWorkersStatus()
-      .then((list) => {
-        setFleetStatus(Object.fromEntries(list.map((s) => [s.id, s])));
-        setFleetStatusStale(false);
-      })
-      .catch(() => setFleetStatusStale(true)),
+    async () => {
+      const result = await loadNodeHealthSnapshot(api.getWorkersStatus, fleetHealthLoadRef.current);
+      if (result.statuses) setFleetStatus(Object.fromEntries(result.statuses.map((s) => [s.id, s])));
+      fleetHealthLoadRef.current = result.state;
+      setFleetHealthLoad(result.state);
+    },
     60_000,
     hubEnabled === true,
   );
@@ -713,6 +724,11 @@ export function QueuePage(): ReactNode {
     () => summarizeNodes(fleetTasks, fleetStatus, data?.delivering ?? [], masterVersion, fleetWorkers),
     [fleetTasks, fleetStatus, data?.delivering, masterVersion, fleetWorkers],
   );
+  const fleetHealthProbe = deriveNodeHealthProbe({
+    statusSettled: fleetHealthLoad.statusSettled,
+    statusHasSnapshot: fleetHealthLoad.statusHasSnapshot,
+    workersLoaded: fleetWorkersLoaded,
+  });
   const summary = queueSummary(sections, pool ?? null);
   const attentionCount = summary.attention;
   const filtered = phase.length + states.length + platform.length + (debouncedQ ? 1 : 0) > 0;
@@ -744,7 +760,9 @@ export function QueuePage(): ReactNode {
       <FleetPulse
         nodes={fleetNodes}
         delivering={data?.delivering?.length ?? 0}
-        stale={fleetStatusStale || fleetTasksStale || fleetWorkersStale || fleetVersionStale}
+        healthProbe={fleetHealthProbe}
+        directoryLoaded={fleetWorkersLoaded}
+        stale={fleetHealthLoad.statusStale || fleetHealthProbe === "failed" || fleetTasksStale || fleetWorkersStale || fleetVersionStale}
       />
 
       {!loaded ? (

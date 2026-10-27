@@ -8,9 +8,109 @@ export function fmtBytes(n: number): string {
 
 export const baseVersion = (v: string | undefined): string => (v ?? "").split("-")[0] ?? "";
 
-/** One online definition for Queue and Nodes: only a successful probe counts as online. */
-export function countOnlineNodes(nodes: readonly Pick<NodeSummary, "ok">[]): number {
-  return nodes.filter((n) => n.ok === true).length;
+/**
+ * Probe-level state is separate from per-node status: a failed probe says nothing about whether
+ * any node is healthy, while a successful probe may still omit one node.
+ */
+export type NodeHealthProbe = "loading" | "failed" | "ready";
+
+/** User-visible health states derived from the probe state plus the per-node result. */
+export type NodeHealthState = "checking" | "probe-failed" | "unknown" | "online" | "offline";
+
+export interface NodeHealthCounts {
+  total: number;
+  checking: number;
+  probeFailed: number;
+  unknown: number;
+  online: number;
+  offline: number;
+}
+
+export interface NodeHealthProbeInput {
+  /** The health request has completed, successfully or not. */
+  statusSettled: boolean;
+  /** At least one non-empty status snapshot has been received. */
+  statusHasSnapshot: boolean;
+  /** The configured-worker directory has completed its first load. */
+  workersLoaded: boolean;
+}
+
+/**
+ * Derive the probe state without hiding backend behavior: the status endpoint may return an empty
+ * 200 when every probe failed. With no snapshot, the settled result is a failed probe. A later
+ * failure keeps `statusHasSnapshot` true and remains ready.
+ */
+export function deriveNodeHealthProbe(input: NodeHealthProbeInput): NodeHealthProbe {
+  if (!input.statusSettled || !input.workersLoaded) return "loading";
+  if (input.statusHasSnapshot) return "ready";
+  return "failed";
+}
+
+export interface NodeHealthLoadState {
+  statusSettled: boolean;
+  statusHasSnapshot: boolean;
+  statusStale: boolean;
+}
+
+export const INITIAL_NODE_HEALTH_LOAD_STATE: NodeHealthLoadState = {
+  statusSettled: false,
+  statusHasSnapshot: false,
+  statusStale: false,
+};
+
+export interface NodeHealthLoadResult {
+  state: NodeHealthLoadState;
+  statuses?: WorkerStatus[];
+}
+
+/**
+ * One testable load path for Nodes and Queue. An empty 200 is stale/failed, a thrown request keeps
+ * the previous snapshot, and a non-empty result replaces the snapshot. Empty responses omit
+ * `statuses` so callers never replace a good snapshot with `{}`.
+ */
+export async function loadNodeHealthSnapshot(
+  fetcher: () => Promise<WorkerStatus[]>,
+  previous: NodeHealthLoadState,
+): Promise<NodeHealthLoadResult> {
+  try {
+    const statuses = await fetcher();
+    return {
+      ...(statuses.length > 0 ? { statuses } : {}),
+      state: {
+        statusSettled: true,
+        statusHasSnapshot: previous.statusHasSnapshot || statuses.length > 0,
+        statusStale: statuses.length === 0,
+      },
+    };
+  } catch {
+    return {
+      state: {
+        statusSettled: true,
+        statusHasSnapshot: previous.statusHasSnapshot,
+        statusStale: true,
+      },
+    };
+  }
+}
+
+export function nodeHealthState(node: Pick<NodeSummary, "ok">, probe: NodeHealthProbe): NodeHealthState {
+  if (probe === "loading") return "checking";
+  if (probe === "failed") return "probe-failed";
+  if (node.ok === undefined) return "unknown";
+  return node.ok ? "online" : "offline";
+}
+
+export function countNodeHealth(
+  nodes: readonly Pick<NodeSummary, "ok">[],
+  probe: NodeHealthProbe,
+): NodeHealthCounts {
+  const counts: NodeHealthCounts = { total: nodes.length, checking: 0, probeFailed: 0, unknown: 0, online: 0, offline: 0 };
+  for (const node of nodes) {
+    const state = nodeHealthState(node, probe);
+    if (state === "probe-failed") counts.probeFailed++;
+    else counts[state]++;
+  }
+  return counts;
 }
 
 /** 房间在某节点上的展示状态。 */

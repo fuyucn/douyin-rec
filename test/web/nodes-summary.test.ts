@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { countOnlineNodes, summarizeNodes, fmtBytes, roomSlugOf } from "../../packages/web/src/lib/nodes-summary.js";
+import {
+  countNodeHealth,
+  deriveNodeHealthProbe,
+  fmtBytes,
+  INITIAL_NODE_HEALTH_LOAD_STATE,
+  loadNodeHealthSnapshot,
+  nodeHealthState,
+  roomSlugOf,
+  summarizeNodes,
+} from "../../packages/web/src/lib/nodes-summary.js";
 import type { RollingDeliveryDTO, Task, WorkerStatus } from "../../packages/web/src/api/client.js";
 
 const task = (...ws: Array<[string, "recording" | "not_recording" | "unavailable"]>): Pick<Task, "recordingWorkers"> => ({
@@ -74,9 +83,68 @@ describe("fmtBytes", () => {
   });
 });
 
-describe("countOnlineNodes", () => {
-  it("counts only successful probes; unknown stays checking", () => {
-    expect(countOnlineNodes([{ ok: true }, { ok: false }, { ok: undefined }])).toBe(1);
+describe("node health states", () => {
+  it("distinguishes checking from no status after the probe settles", () => {
+    expect(nodeHealthState({ ok: undefined }, "loading")).toBe("checking");
+    expect(nodeHealthState({ ok: undefined }, "failed")).toBe("probe-failed");
+    expect(nodeHealthState({ ok: undefined }, "ready")).toBe("unknown");
+    expect(nodeHealthState({ ok: true }, "ready")).toBe("online");
+    expect(nodeHealthState({ ok: false }, "ready")).toBe("offline");
+  });
+
+  it("waits for both first loads, then treats a settled empty result as probe failure", () => {
+    expect(deriveNodeHealthProbe({ statusSettled: false, statusHasSnapshot: false, workersLoaded: true })).toBe("loading");
+    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: false, workersLoaded: false })).toBe("loading");
+    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: false, workersLoaded: true })).toBe("failed");
+  });
+
+  it("keeps the last good snapshot when a later refresh fails", () => {
+    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: true, workersLoaded: true })).toBe("ready");
+  });
+
+  it("turns empty 200 and thrown requests into settled failures, while preserving a prior snapshot", async () => {
+    const ok = await loadNodeHealthSnapshot(async () => [st({ id: "a" })], INITIAL_NODE_HEALTH_LOAD_STATE);
+    expect(ok.statuses).toHaveLength(1);
+    expect(ok.state).toMatchObject({ statusSettled: true, statusHasSnapshot: true, statusStale: false });
+    expect(deriveNodeHealthProbe({ ...ok.state, workersLoaded: true })).toBe("ready");
+
+    const empty = await loadNodeHealthSnapshot(async () => [], INITIAL_NODE_HEALTH_LOAD_STATE);
+    expect(empty.statuses).toBeUndefined();
+    expect(empty.state).toMatchObject({ statusSettled: true, statusHasSnapshot: false, statusStale: true });
+    expect(deriveNodeHealthProbe({ ...empty.state, workersLoaded: true })).toBe("failed");
+
+    const laterEmpty = await loadNodeHealthSnapshot(
+      async () => [],
+      { statusSettled: true, statusHasSnapshot: true, statusStale: false },
+    );
+    expect(laterEmpty.statuses).toBeUndefined();
+    expect(laterEmpty.state).toMatchObject({ statusSettled: true, statusHasSnapshot: true, statusStale: true });
+    expect(deriveNodeHealthProbe({ ...laterEmpty.state, workersLoaded: true })).toBe("ready");
+
+    const thrown = await loadNodeHealthSnapshot(async () => { throw new Error("probe unavailable"); }, INITIAL_NODE_HEALTH_LOAD_STATE);
+    expect(thrown.statuses).toBeUndefined();
+    expect(thrown.state).toMatchObject({ statusSettled: true, statusHasSnapshot: false, statusStale: true });
+    expect(deriveNodeHealthProbe({ ...thrown.state, workersLoaded: true })).toBe("failed");
+
+    const laterFailure = await loadNodeHealthSnapshot(
+      async () => { throw new Error("probe unavailable"); },
+      { statusSettled: true, statusHasSnapshot: true, statusStale: false },
+    );
+    expect(laterFailure.state).toMatchObject({ statusSettled: true, statusHasSnapshot: true, statusStale: true });
+    expect(deriveNodeHealthProbe({ ...laterFailure.state, workersLoaded: true })).toBe("ready");
+  });
+
+  it("counts all states without treating unknown as online", () => {
+    const nodes = [{ ok: true }, { ok: false }, { ok: undefined }, { ok: undefined }];
+    expect(countNodeHealth(nodes, "loading")).toMatchObject({
+      total: 4, checking: 4, probeFailed: 0, unknown: 0, online: 0, offline: 0,
+    });
+    expect(countNodeHealth(nodes, "failed")).toMatchObject({
+      total: 4, checking: 0, probeFailed: 4, unknown: 0, online: 0, offline: 0,
+    });
+    expect(countNodeHealth(nodes, "ready")).toMatchObject({
+      total: 4, checking: 0, probeFailed: 0, unknown: 2, online: 1, offline: 1,
+    });
   });
 });
 

@@ -6,7 +6,7 @@ import { humanSec, JobLogDialog } from "./HubJobs";
 import { useT } from "../lib/i18n";
 import { platformLabel, roomId } from "../lib/labels";
 import { liveStepLabel } from "../lib/queue-live";
-import { countOnlineNodes, fmtBytes, type NodeSummary } from "../lib/nodes-summary";
+import { countNodeHealth, fmtBytes, type NodeHealthProbe, type NodeSummary } from "../lib/nodes-summary";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -218,27 +218,48 @@ export function QueueLogDialog({ logKey, onClose }: { logKey: string | null; onC
 }
 
 /** Compact node health entry for Queue. The full topology lives on `/nodes`. */
-export function FleetPulse({ nodes, delivering, stale = false }: {
+export function FleetPulse({ nodes, delivering, healthProbe = "ready", directoryLoaded = true, stale = false }: {
   nodes: readonly NodeSummary[];
   delivering: number;
+  healthProbe?: NodeHealthProbe;
+  directoryLoaded?: boolean;
   stale?: boolean;
 }): ReactNode {
   const t = useT();
   const total = nodes.length;
-  const online = countOnlineNodes(nodes);
+  const health = countNodeHealth(nodes, healthProbe);
   const recording = nodes.reduce((n, node) => n + node.recording, 0);
   const diskLow = nodes.filter((n) => n.diskLow).length;
   const drift = nodes.filter((n) => n.drift || n.syncLag).length;
+  const healthColor = health.online === total ? "var(--success)" : "var(--warning)";
   return (
     <div className="card mb-5 flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-3">
       <span className="section-label">{t("queue.fleet.title")}</span>
-      <span className="inline-flex items-center gap-1.5 text-[12px]">
+      <span className="inline-flex items-center gap-1.5 text-[12px]" role="status" aria-live="polite">
         <span
           className="dot"
-          style={{ background: total === 0 ? "var(--muted-soft)" : online === total ? "var(--success)" : "var(--warning)" }}
+          style={{ background: total === 0 || healthProbe === "loading" ? "var(--muted-soft)" : healthColor }}
         />
-        {total === 0 ? t("queue.fleet.noNodes") : t("queue.fleet.online", { ok: online, total })}
+        {total === 0
+          ? (directoryLoaded ? t("queue.fleet.noNodes") : (
+              <>
+                <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                {t("queue.fleet.loading")}
+              </>
+            ))
+          : healthProbe === "loading"
+            ? (
+                <>
+                  <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                  {t("queue.fleet.checking", { n: total })}
+                </>
+              )
+            : healthProbe === "failed"
+              ? t("queue.fleet.probeFailed")
+              : t("queue.fleet.online", { ok: health.online, total })}
       </span>
+      {health.unknown > 0 && <span className="text-[12px]" style={{ color: "var(--warning-fg)" }}>{t("queue.fleet.noStatus", { n: health.unknown })}</span>}
+      {health.offline > 0 && <span className="text-[12px]" style={{ color: "var(--error-fg)" }}>{t("queue.fleet.offline", { n: health.offline })}</span>}
       <span className="text-[12px] text-muted">{t("queue.fleet.recording", { n: recording })}</span>
       <span className="text-[12px] text-muted">{t("queue.fleet.delivering", { n: delivering })}</span>
       {diskLow > 0 && <span className="text-[12px]" style={{ color: "var(--error-fg)" }}>{t("queue.fleet.diskLow", { n: diskLow })}</span>}
