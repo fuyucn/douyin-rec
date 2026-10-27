@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { countOnlineNodes, summarizeNodes, fmtBytes, roomSlugOf } from "../../packages/web/src/lib/nodes-summary.js";
+import {
+  countNodeHealth,
+  countOnlineNodes,
+  fmtBytes,
+  nodeHealthState,
+  roomSlugOf,
+  summarizeNodes,
+} from "../../packages/web/src/lib/nodes-summary.js";
 import type { RollingDeliveryDTO, Task, WorkerStatus } from "../../packages/web/src/api/client.js";
 
 const task = (...ws: Array<[string, "recording" | "not_recording" | "unavailable"]>): Pick<Task, "recordingWorkers"> => ({
@@ -77,6 +84,25 @@ describe("fmtBytes", () => {
 describe("countOnlineNodes", () => {
   it("counts only successful probes; unknown stays checking", () => {
     expect(countOnlineNodes([{ ok: true }, { ok: false }, { ok: undefined }])).toBe(1);
+  });
+});
+
+describe("node health states", () => {
+  it("distinguishes checking from no status after the probe settles", () => {
+    expect(nodeHealthState({ ok: undefined }, false)).toBe("checking");
+    expect(nodeHealthState({ ok: undefined }, true)).toBe("unknown");
+    expect(nodeHealthState({ ok: true }, true)).toBe("online");
+    expect(nodeHealthState({ ok: false }, true)).toBe("offline");
+  });
+
+  it("counts all four states without treating unknown as online", () => {
+    const nodes = [{ ok: true }, { ok: false }, { ok: undefined }, { ok: undefined }];
+    expect(countNodeHealth(nodes, false)).toMatchObject({
+      total: 4, checking: 4, unknown: 0, online: 0, offline: 0,
+    });
+    expect(countNodeHealth(nodes, true)).toMatchObject({
+      total: 4, checking: 0, unknown: 2, online: 1, offline: 1,
+    });
   });
 });
 

@@ -601,6 +601,8 @@ export function QueuePage(): ReactNode {
   const [fleetWorkersStale, setFleetWorkersStale] = useState(false);
   const [fleetVersionStale, setFleetVersionStale] = useState(false);
   const [fleetStatusStale, setFleetStatusStale] = useState(false);
+  const [fleetWorkersLoaded, setFleetWorkersLoaded] = useState(false);
+  const [fleetStatusLoaded, setFleetStatusLoaded] = useState(false);
   const [masterVersion, setMasterVersion] = useState("");
 
   const [phase, setPhase] = useState<string[]>([]);
@@ -657,7 +659,8 @@ export function QueuePage(): ReactNode {
         setFleetWorkers(list.map((w) => ({ id: w.id, name: w.name })));
         setFleetWorkersStale(false);
       })
-      .catch(() => setFleetWorkersStale(true)),
+      .catch(() => setFleetWorkersStale(true))
+      .finally(() => setFleetWorkersLoaded(true)),
     300_000,
     hubEnabled === true,
   );
@@ -667,7 +670,8 @@ export function QueuePage(): ReactNode {
         setFleetStatus(Object.fromEntries(list.map((s) => [s.id, s])));
         setFleetStatusStale(false);
       })
-      .catch(() => setFleetStatusStale(true)),
+      .catch(() => setFleetStatusStale(true))
+      .finally(() => setFleetStatusLoaded(true)),
     60_000,
     hubEnabled === true,
   );
@@ -744,6 +748,8 @@ export function QueuePage(): ReactNode {
       <FleetPulse
         nodes={fleetNodes}
         delivering={data?.delivering?.length ?? 0}
+        healthLoaded={fleetStatusLoaded}
+        directoryLoaded={fleetWorkersLoaded}
         stale={fleetStatusStale || fleetTasksStale || fleetWorkersStale || fleetVersionStale}
       />
 

@@ -13,6 +13,35 @@ export function countOnlineNodes(nodes: readonly Pick<NodeSummary, "ok">[]): num
   return nodes.filter((n) => n.ok === true).length;
 }
 
+/**
+ * Four user-visible health states. `ok=undefined` is not enough on its own: before the first
+ * probe settles it means "checking", while after it settles it means "no status was returned".
+ */
+export type NodeHealthState = "checking" | "unknown" | "online" | "offline";
+
+export interface NodeHealthCounts {
+  total: number;
+  checking: number;
+  unknown: number;
+  online: number;
+  offline: number;
+}
+
+export function nodeHealthState(node: Pick<NodeSummary, "ok">, healthLoaded: boolean): NodeHealthState {
+  if (!healthLoaded) return "checking";
+  if (node.ok === undefined) return "unknown";
+  return node.ok ? "online" : "offline";
+}
+
+export function countNodeHealth(
+  nodes: readonly Pick<NodeSummary, "ok">[],
+  healthLoaded: boolean,
+): NodeHealthCounts {
+  const counts: NodeHealthCounts = { total: nodes.length, checking: 0, unknown: 0, online: 0, offline: 0 };
+  for (const node of nodes) counts[nodeHealthState(node, healthLoaded)]++;
+  return counts;
+}
+
 /** 房间在某节点上的展示状态。 */
 export type NodeRoomState = "recording" | "waiting" | "unavailable" | "disabled";
 
