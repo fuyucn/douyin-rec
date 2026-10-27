@@ -14,13 +14,6 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
-- [!] **T-120 节点健康状态区分加载中与无状态（issue [#378](https://github.com/fuyucn/douyin-rec/issues/378)）**（2026-10-27）
-  — Nodes 页和 Queue 的节点摘要当前都用灰点表示 `ok=undefined`，无法区分首次探测尚未返回与该节点确实没有状态。
-  **阻塞**: 第三轮独立 review 发现「已有快照后空 200 会清空节点状态」；按返工上限已转 `needs-decision`，等待是否允许一次定向返工的决定。
-  **做什么**: 首次健康探测未完成时显示旋转 loading indicator 和「检测中」；探测完成但缺少节点状态时显示「无状态」；在线/离线语义不变，未知状态不计入在线；Nodes 顶部汇总与 Queue 节点摘要同步显示检测中/无状态数量。
-  **为什么**: 页面刚打开与节点状态缺失外观相同，容易误判为节点故障。
-  **验收**: 四种健康状态有纯函数回归；首轮失败后不会永久转圈；在线/离线/未知计数正确；桌面与手机无横向溢出；全量测试、类型、Web 构建、i18n、bundle、隐私门与 risk scan 通过。
-
 - [~] **T-119 Queue 改为实时运行态，并新增 Nodes 拓扑页（issue [#376](https://github.com/fuyucn/douyin-rec/issues/376)）**（2026-10-26）
   — Queue 当前把节点、资源池、边录边传、告警和历史堆成一张长表；实测 38 行时 0 个 pipeline 在跑，主要信息被历史淹没。
   **做什么**: Queue 拆成 NOW / ATTENTION / HISTORY；活动场次显示节点候选、胜出节点、当前步骤、后续步骤、真实计时和上传进度；告警按原因聚合；历史默认折叠；顶部节点卡改为紧凑健康摘要。新增 master-only `/nodes`，显示 master→worker 拓扑、在线/版本/磁盘/同步、承载房间与会话，并保留节点管理和日志。
@@ -699,6 +692,8 @@
   属模型取舍，不是可顺手加的功能。**为什么**：冗余模型把轮询量乘了 N，是 VPS 被限流的根因之一。
 
 ## 已完成
+- [x] **T-120 节点健康状态区分加载中与无状态（issue [#378](https://github.com/fuyucn/douyin-rec/issues/378)）**（2026-10-27）
+  — PR [#379](https://github.com/fuyucn/douyin-rec/pull/379) 已合并并部署（0.0.236-bace9f，controller 与两个 worker 全部升级且健康）。Nodes/Queue 现在区分 loading、探测失败、无状态、在线、离线；空 200 和 HTTP 失败不会覆盖上一次健康快照。回归覆盖 loading/failed/ready、初始空响应、HTTP 失败和 empty-after-good-snapshot；全量 3804 tests、typecheck、Web build、i18n、bundle 与线上 `/nodes` HTTP 200 均通过，issue 已关闭。
 - [x] **T-93 0 落盘下播后进程不再 code=1 退出重启循环(issue [#308](https://github.com/fuyucn/douyin-rec/issues/308))**（2026-10-20）
   — PR [#319](https://github.com/fuyucn/douyin-rec/pull/319) 已合并(0.0.207,独立 Opus 审查 2 轮:第 1 轮 FAIL 已修,第 2 轮 PASS;CI 绿;`pr-risk-scan` = RISK,owner 预授权合并)。未部署,生产确认待下次部署。
   **做了什么**:0 落盘 `waitForBroadcast` 在打开稿件会话前留在进程内每 30s 探测,停止/排空才结束(`idle` exit 0);同场判定移到开播时刻;有可补传的未确认分 P 时等待前先恢复;弹幕开播后才连;TaskManager 重启耗尽后 daemon 冷却 10 分钟不自动拉起(手动启停清除)。经验回写 AGENTS.md「任务系统」段。
