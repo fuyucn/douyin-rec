@@ -3,6 +3,8 @@ import {
   countNodeHealth,
   deriveNodeHealthProbe,
   fmtBytes,
+  INITIAL_NODE_HEALTH_LOAD_STATE,
+  loadNodeHealthSnapshot,
   nodeHealthState,
   roomSlugOf,
   summarizeNodes,
@@ -90,15 +92,38 @@ describe("node health states", () => {
     expect(nodeHealthState({ ok: false }, "ready")).toBe("offline");
   });
 
-  it("waits for both first loads, then treats empty status with workers as probe failure", () => {
-    expect(deriveNodeHealthProbe({ statusSettled: false, statusHasSnapshot: false, workersLoaded: true, workerCount: 3 })).toBe("loading");
-    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: false, workersLoaded: false, workerCount: 0 })).toBe("loading");
-    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: false, workersLoaded: true, workerCount: 3 })).toBe("failed");
-    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: false, workersLoaded: true, workerCount: 0 })).toBe("ready");
+  it("waits for both first loads, then treats a settled empty result as probe failure", () => {
+    expect(deriveNodeHealthProbe({ statusSettled: false, statusHasSnapshot: false, workersLoaded: true })).toBe("loading");
+    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: false, workersLoaded: false })).toBe("loading");
+    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: false, workersLoaded: true })).toBe("failed");
   });
 
   it("keeps the last good snapshot when a later refresh fails", () => {
-    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: true, workersLoaded: true, workerCount: 3 })).toBe("ready");
+    expect(deriveNodeHealthProbe({ statusSettled: true, statusHasSnapshot: true, workersLoaded: true })).toBe("ready");
+  });
+
+  it("turns empty 200 and thrown requests into settled failures, while preserving a prior snapshot", async () => {
+    const ok = await loadNodeHealthSnapshot(async () => [st({ id: "a" })], INITIAL_NODE_HEALTH_LOAD_STATE);
+    expect(ok.statuses).toHaveLength(1);
+    expect(ok.state).toMatchObject({ statusSettled: true, statusHasSnapshot: true, statusStale: false });
+    expect(deriveNodeHealthProbe({ ...ok.state, workersLoaded: true })).toBe("ready");
+
+    const empty = await loadNodeHealthSnapshot(async () => [], INITIAL_NODE_HEALTH_LOAD_STATE);
+    expect(empty.statuses).toEqual([]);
+    expect(empty.state).toMatchObject({ statusSettled: true, statusHasSnapshot: false, statusStale: true });
+    expect(deriveNodeHealthProbe({ ...empty.state, workersLoaded: true })).toBe("failed");
+
+    const thrown = await loadNodeHealthSnapshot(async () => { throw new Error("probe unavailable"); }, INITIAL_NODE_HEALTH_LOAD_STATE);
+    expect(thrown.statuses).toBeUndefined();
+    expect(thrown.state).toMatchObject({ statusSettled: true, statusHasSnapshot: false, statusStale: true });
+    expect(deriveNodeHealthProbe({ ...thrown.state, workersLoaded: true })).toBe("failed");
+
+    const laterFailure = await loadNodeHealthSnapshot(
+      async () => { throw new Error("probe unavailable"); },
+      { statusSettled: true, statusHasSnapshot: true, statusStale: false },
+    );
+    expect(laterFailure.state).toMatchObject({ statusSettled: true, statusHasSnapshot: true, statusStale: true });
+    expect(deriveNodeHealthProbe({ ...laterFailure.state, workersLoaded: true })).toBe("ready");
   });
 
   it("counts all states without treating unknown as online", () => {

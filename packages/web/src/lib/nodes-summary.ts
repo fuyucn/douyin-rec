@@ -33,18 +33,63 @@ export interface NodeHealthProbeInput {
   statusHasSnapshot: boolean;
   /** The configured-worker directory has completed its first load. */
   workersLoaded: boolean;
-  workerCount: number;
 }
 
 /**
  * Derive the probe state without hiding backend behavior: the status endpoint may return an empty
- * 200 when every probe failed. Empty + configured workers is therefore a failed probe, not "no
- * status on every node". A later failure keeps `statusHasSnapshot` true and remains ready.
+ * 200 when every probe failed. With no snapshot, the settled result is a failed probe. A later
+ * failure keeps `statusHasSnapshot` true and remains ready.
  */
 export function deriveNodeHealthProbe(input: NodeHealthProbeInput): NodeHealthProbe {
   if (!input.statusSettled || !input.workersLoaded) return "loading";
   if (input.statusHasSnapshot) return "ready";
-  return input.workerCount > 0 ? "failed" : "ready";
+  return "failed";
+}
+
+export interface NodeHealthLoadState {
+  statusSettled: boolean;
+  statusHasSnapshot: boolean;
+  statusStale: boolean;
+}
+
+export const INITIAL_NODE_HEALTH_LOAD_STATE: NodeHealthLoadState = {
+  statusSettled: false,
+  statusHasSnapshot: false,
+  statusStale: false,
+};
+
+export interface NodeHealthLoadResult {
+  state: NodeHealthLoadState;
+  statuses?: WorkerStatus[];
+}
+
+/**
+ * One testable load path for Nodes and Queue. An empty 200 is stale/failed, a thrown request keeps
+ * the previous snapshot, and a non-empty result replaces the snapshot.
+ */
+export async function loadNodeHealthSnapshot(
+  fetcher: () => Promise<WorkerStatus[]>,
+  previous: NodeHealthLoadState,
+): Promise<NodeHealthLoadResult> {
+  try {
+    const statuses = await fetcher();
+    return {
+      statuses,
+      state: {
+        statusSettled: true,
+        statusHasSnapshot: previous.statusHasSnapshot || statuses.length > 0,
+        statusStale: statuses.length === 0,
+      },
+    };
+  } catch {
+    return {
+      state: {
+        statusSettled: true,
+        statusHasSnapshot: previous.statusHasSnapshot,
+        statusStale: true,
+      },
+    };
+  }
 }
 
 export function nodeHealthState(node: Pick<NodeSummary, "ok">, probe: NodeHealthProbe): NodeHealthState {

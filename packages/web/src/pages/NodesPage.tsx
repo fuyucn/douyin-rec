@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Activity, ChevronRight, CircleAlert, CircleHelp, Database, FileText, HardDrive, Loader2, Plus, RefreshCw, Server, Users } from "lucide-react";
 import { api, type RollingDeliveryDTO, type RoomDTO, type Task, type WorkerDTO, type WorkerStatus } from "../api/client";
@@ -12,9 +12,12 @@ import {
   countNodeHealth,
   deriveNodeHealthProbe,
   fmtBytes,
+  INITIAL_NODE_HEALTH_LOAD_STATE,
+  loadNodeHealthSnapshot,
   nodeHealthState,
   type NodeHealthProbe,
   type NodeHealthState,
+  type NodeHealthLoadState,
 } from "../lib/nodes-summary";
 import { buildNodes, nodeCounts, nodeRoomHref, nodeRoleLabel, type NodeRoomView, type NodeView } from "../lib/nodes-page";
 import { useAtomValue } from "jotai";
@@ -47,13 +50,12 @@ export function NodesPage(): ReactNode {
   const [tasksStale, setTasksStale] = useState(false);
   const [workersStale, setWorkersStale] = useState(false);
   const [versionStale, setVersionStale] = useState(false);
-  const [statusStale, setStatusStale] = useState(false);
   const [deliveryStale, setDeliveryStale] = useState(false);
   const [masterVersion, setMasterVersion] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [workersLoaded, setWorkersLoaded] = useState(false);
-  const [statusSettled, setStatusSettled] = useState(false);
-  const [statusHasSnapshot, setStatusHasSnapshot] = useState(false);
+  const [healthLoad, setHealthLoad] = useState<NodeHealthLoadState>(INITIAL_NODE_HEALTH_LOAD_STATE);
+  const healthLoadRef = useRef<NodeHealthLoadState>(INITIAL_NODE_HEALTH_LOAD_STATE);
   const [workersOpen, setWorkersOpen] = useState(false);
   const [logsFor, setLogsFor] = useState<{ id: string; name: string } | null>(null);
   // Relative timestamps keep moving between the slower health probes.
@@ -73,25 +75,17 @@ export function NodesPage(): ReactNode {
     }
   }, []);
   const refreshStatus = useMemo(() => async (): Promise<void> => {
-    try {
-      const ss = await api.getWorkersStatus();
-      setStatus(Object.fromEntries(ss.map((s) => [s.id, s])));
-      setStatusStale(false);
-      if (ss.length > 0) setStatusHasSnapshot(true);
-    } catch {
-      // Keep the last good probe, but make the staleness visible instead of pretending it is live.
-      setStatusStale(true);
-    } finally {
-      // Empty is not success by itself: with configured workers it means every probe failed.
-      setStatusSettled(true);
-    }
+    const result = await loadNodeHealthSnapshot(api.getWorkersStatus, healthLoadRef.current);
+    if (result.statuses) setStatus(Object.fromEntries(result.statuses.map((s) => [s.id, s])));
+    healthLoadRef.current = result.state;
+    setHealthLoad(result.state);
   }, []);
-  const refreshWorkers = useMemo(() => async (): Promise<void> => {
+  const refreshWorkers = useMemo(() => async (silentFailure = false): Promise<void> => {
     try {
       setWorkers(await api.listWorkers());
       setWorkersStale(false);
     } catch {
-      setWorkersStale(true);
+      if (!silentFailure) setWorkersStale(true);
     } finally {
       setWorkersLoaded(true);
     }
@@ -128,14 +122,20 @@ export function NodesPage(): ReactNode {
     [tasks, rooms, workers, status, delivering, masterVersion],
   );
   const healthProbe = deriveNodeHealthProbe({
-    statusSettled,
-    statusHasSnapshot,
+    statusSettled: healthLoad.statusSettled,
+    statusHasSnapshot: healthLoad.statusHasSnapshot,
     workersLoaded,
-    workerCount: workers.length,
   });
   const health = countNodeHealth(nodes, healthProbe);
   const recording = nodes.reduce((n, x) => n + x.recordingRooms, 0);
   const sessions = nodes.reduce((n, x) => n + x.rollingSessions, 0);
+  const healthAnnouncement = [
+    health.checking > 0 ? t("nodes.checkingCount", { n: health.checking }) : "",
+    health.probeFailed > 0 ? t("nodes.probeFailedCount", { n: health.probeFailed }) : "",
+    health.unknown > 0 ? t("nodes.noStatusCount", { n: health.unknown }) : "",
+    health.offline > 0 ? t("nodes.offlineCount", { n: health.offline }) : "",
+    t("nodes.onlineCount", { online: health.online, total: health.total }),
+  ].filter(Boolean).join(" · ");
 
   if (hubEnabled === null) {
     return <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>;
@@ -161,7 +161,7 @@ export function NodesPage(): ReactNode {
         <div className="flex flex-wrap items-center gap-2">
           <ConnStatus conn={stream.lastOkAt ? { ok: !stream.stale, at: stream.lastOkAt } : null} />
           {(tasksStale || workersStale || versionStale) && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.assignmentStale")}</span>}
-          {(statusStale || healthProbe === "failed") && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.healthStale")}</span>}
+          {(healthLoad.statusStale || healthProbe === "failed") && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.healthStale")}</span>}
           {deliveryStale && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.liveStale")}</span>}
           <IconButton title={t("nodes.refresh")} onClick={() => void Promise.all([refresh(), refreshStatus(), refreshDelivering()])}>
             <RefreshCw className="w-4 h-4" />
@@ -172,7 +172,7 @@ export function NodesPage(): ReactNode {
 
       <div className="telemetry-bar mb-5">
         <div className="telemetry-cell">
-          <div className="flex min-w-0 flex-col gap-1.5" role="status" aria-live="polite">
+          <div className="flex min-w-0 flex-col gap-1.5">
             <span className="telemetry-label">{t("nodes.online")}</span>
             <span className="telemetry-value tabular-nums">{health.online}/{health.total}</span>
             {health.checking > 0 && (
@@ -191,6 +191,7 @@ export function NodesPage(): ReactNode {
                 {t("nodes.probeFailedCount", { n: health.probeFailed })}
               </span>
             )}
+            <span className="sr-only" role="status" aria-live="polite">{healthAnnouncement}</span>
           </div>
           <span className="telemetry-icon"><Server className="w-4 h-4" /></span>
         </div>
@@ -237,7 +238,7 @@ export function NodesPage(): ReactNode {
         status={Object.fromEntries(Object.entries(status).filter((x): x is [string, WorkerStatus] => x[1] !== undefined))}
         onChanged={() => {
           void refresh().catch(() => {});
-          void refreshWorkers().catch(() => {});
+          void refreshWorkers(true).catch(() => {});
         }}
       />
       <NodeLogsDialog workerId={logsFor?.id ?? null} workerName={logsFor?.name ?? ""} onClose={() => setLogsFor(null)} />

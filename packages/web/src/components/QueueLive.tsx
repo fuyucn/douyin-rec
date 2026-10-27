@@ -235,7 +235,7 @@ export function FleetPulse({ nodes, delivering, healthProbe = "ready", directory
   return (
     <div className="card mb-5 flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-3">
       <span className="section-label">{t("queue.fleet.title")}</span>
-      <span className="inline-flex items-center gap-1.5 text-[12px]">
+      <span className="inline-flex items-center gap-1.5 text-[12px]" role="status" aria-live="polite">
         <span
           className="dot"
           style={{ background: total === 0 || healthProbe === "loading" ? "var(--muted-soft)" : healthColor }}

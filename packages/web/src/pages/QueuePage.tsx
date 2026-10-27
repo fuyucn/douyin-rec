@@ -21,7 +21,10 @@ import {
   baseVersion,
   deriveNodeHealthProbe,
   fmtBytes,
+  INITIAL_NODE_HEALTH_LOAD_STATE,
+  loadNodeHealthSnapshot,
   summarizeNodes,
+  type NodeHealthLoadState,
 } from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
 import { AttentionCard, FleetPulse, LiveLane, LivePool, StageReadyRow } from "../components/QueueLive";
@@ -605,10 +608,9 @@ export function QueuePage(): ReactNode {
   const [fleetTasksStale, setFleetTasksStale] = useState(false);
   const [fleetWorkersStale, setFleetWorkersStale] = useState(false);
   const [fleetVersionStale, setFleetVersionStale] = useState(false);
-  const [fleetStatusStale, setFleetStatusStale] = useState(false);
   const [fleetWorkersLoaded, setFleetWorkersLoaded] = useState(false);
-  const [fleetStatusSettled, setFleetStatusSettled] = useState(false);
-  const [fleetStatusHasSnapshot, setFleetStatusHasSnapshot] = useState(false);
+  const [fleetHealthLoad, setFleetHealthLoad] = useState<NodeHealthLoadState>(INITIAL_NODE_HEALTH_LOAD_STATE);
+  const fleetHealthLoadRef = useRef<NodeHealthLoadState>(INITIAL_NODE_HEALTH_LOAD_STATE);
   const [masterVersion, setMasterVersion] = useState("");
 
   const [phase, setPhase] = useState<string[]>([]);
@@ -671,14 +673,12 @@ export function QueuePage(): ReactNode {
     hubEnabled === true,
   );
   usePolling(
-    () => api.getWorkersStatus()
-      .then((list) => {
-        setFleetStatus(Object.fromEntries(list.map((s) => [s.id, s])));
-        setFleetStatusStale(false);
-        if (list.length > 0) setFleetStatusHasSnapshot(true);
-      })
-      .catch(() => setFleetStatusStale(true))
-      .finally(() => setFleetStatusSettled(true)),
+    async () => {
+      const result = await loadNodeHealthSnapshot(api.getWorkersStatus, fleetHealthLoadRef.current);
+      if (result.statuses) setFleetStatus(Object.fromEntries(result.statuses.map((s) => [s.id, s])));
+      fleetHealthLoadRef.current = result.state;
+      setFleetHealthLoad(result.state);
+    },
     60_000,
     hubEnabled === true,
   );
@@ -725,10 +725,9 @@ export function QueuePage(): ReactNode {
     [fleetTasks, fleetStatus, data?.delivering, masterVersion, fleetWorkers],
   );
   const fleetHealthProbe = deriveNodeHealthProbe({
-    statusSettled: fleetStatusSettled,
-    statusHasSnapshot: fleetStatusHasSnapshot,
+    statusSettled: fleetHealthLoad.statusSettled,
+    statusHasSnapshot: fleetHealthLoad.statusHasSnapshot,
     workersLoaded: fleetWorkersLoaded,
-    workerCount: fleetWorkers.length,
   });
   const summary = queueSummary(sections, pool ?? null);
   const attentionCount = summary.attention;
@@ -763,7 +762,7 @@ export function QueuePage(): ReactNode {
         delivering={data?.delivering?.length ?? 0}
         healthProbe={fleetHealthProbe}
         directoryLoaded={fleetWorkersLoaded}
-        stale={fleetStatusStale || fleetHealthProbe === "failed" || fleetTasksStale || fleetWorkersStale || fleetVersionStale}
+        stale={fleetHealthLoad.statusStale || fleetHealthProbe === "failed" || fleetTasksStale || fleetWorkersStale || fleetVersionStale}
       />
 
       {!loaded ? (
