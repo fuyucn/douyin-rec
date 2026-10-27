@@ -109,9 +109,17 @@ describe("node health states", () => {
     expect(deriveNodeHealthProbe({ ...ok.state, workersLoaded: true })).toBe("ready");
 
     const empty = await loadNodeHealthSnapshot(async () => [], INITIAL_NODE_HEALTH_LOAD_STATE);
-    expect(empty.statuses).toEqual([]);
+    expect(empty.statuses).toBeUndefined();
     expect(empty.state).toMatchObject({ statusSettled: true, statusHasSnapshot: false, statusStale: true });
     expect(deriveNodeHealthProbe({ ...empty.state, workersLoaded: true })).toBe("failed");
+
+    const laterEmpty = await loadNodeHealthSnapshot(
+      async () => [],
+      { statusSettled: true, statusHasSnapshot: true, statusStale: false },
+    );
+    expect(laterEmpty.statuses).toBeUndefined();
+    expect(laterEmpty.state).toMatchObject({ statusSettled: true, statusHasSnapshot: true, statusStale: true });
+    expect(deriveNodeHealthProbe({ ...laterEmpty.state, workersLoaded: true })).toBe("ready");
 
     const thrown = await loadNodeHealthSnapshot(async () => { throw new Error("probe unavailable"); }, INITIAL_NODE_HEALTH_LOAD_STATE);
     expect(thrown.statuses).toBeUndefined();

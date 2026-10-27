@@ -65,7 +65,8 @@ export interface NodeHealthLoadResult {
 
 /**
  * One testable load path for Nodes and Queue. An empty 200 is stale/failed, a thrown request keeps
- * the previous snapshot, and a non-empty result replaces the snapshot.
+ * the previous snapshot, and a non-empty result replaces the snapshot. Empty responses omit
+ * `statuses` so callers never replace a good snapshot with `{}`.
  */
 export async function loadNodeHealthSnapshot(
   fetcher: () => Promise<WorkerStatus[]>,
@@ -74,7 +75,7 @@ export async function loadNodeHealthSnapshot(
   try {
     const statuses = await fetcher();
     return {
-      statuses,
+      ...(statuses.length > 0 ? { statuses } : {}),
       state: {
         statusSettled: true,
         statusHasSnapshot: previous.statusHasSnapshot || statuses.length > 0,
