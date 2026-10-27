@@ -38,6 +38,7 @@ export function NodesPage(): ReactNode {
   const [status, setStatus] = useState<Record<string, WorkerStatus | undefined>>({});
   const [delivering, setDelivering] = useState<RollingDeliveryDTO[]>([]);
   const [statusStale, setStatusStale] = useState(false);
+  const [deliveryStale, setDeliveryStale] = useState(false);
   const [masterVersion, setMasterVersion] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [workersOpen, setWorkersOpen] = useState(false);
@@ -65,11 +66,17 @@ export function NodesPage(): ReactNode {
       setStatusStale(true);
     }
   }, []);
-  // The queue snapshot is only used for live delivery sessions. It rides the push refresh, but a
-  // failure must surface through the stream stale marker rather than silently freezing the view.
+  // The queue snapshot is only used for live delivery sessions. Poll it separately and show stale
+  // state if it fails instead of silently freezing the last snapshot.
   const refreshDelivering = useMemo(() => async (): Promise<void> => {
-    const q = await api.getHubQueue();
-    setDelivering(q.delivering ?? []);
+    try {
+      const q = await api.getHubQueue();
+      setDelivering(q.delivering ?? []);
+      setDeliveryStale(false);
+    } catch {
+      // Keep the last snapshot but never present frozen sessions as live.
+      setDeliveryStale(true);
+    }
   }, []);
   // Push refresh only touches task/room state. The heavier delivery snapshot is polled separately.
   const stream = useHubStream(refresh, { enabled: hubEnabled === true });
@@ -86,6 +93,10 @@ export function NodesPage(): ReactNode {
   const online = countOnlineNodes(nodes);
   const recording = nodes.reduce((n, x) => n + x.recordingRooms, 0);
   const sessions = nodes.reduce((n, x) => n + x.rollingSessions, 0);
+
+  if (hubEnabled === null) {
+    return <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>;
+  }
 
   if (hubEnabled === false) {
     return (
@@ -107,6 +118,7 @@ export function NodesPage(): ReactNode {
         <div className="flex flex-wrap items-center gap-2">
           <ConnStatus conn={stream.lastOkAt ? { ok: !stream.stale, at: stream.lastOkAt } : null} />
           {statusStale && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.healthStale")}</span>}
+          {deliveryStale && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.liveStale")}</span>}
           <IconButton title={t("nodes.refresh")} onClick={() => void Promise.all([refresh(), refreshStatus(), refreshDelivering()]).catch(() => {})}>
             <RefreshCw className="w-4 h-4" />
           </IconButton>

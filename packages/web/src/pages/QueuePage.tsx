@@ -513,7 +513,7 @@ const HistorySection = memo(function HistorySection({
         {t("queue.history.title")} · {t("queue.history.doneSummary", { done: items.length })}
       </summary>
       <div className="mt-3">
-        {/* 窄屏(<sm):表格 5+ 列在手机上必然横向溢出且行高爆炸 → 改卡片式,信息不丢。 */}
+        {/* Mobile uses cards so the wide table cannot overflow or inflate every row. */}
         <div className="sm:hidden space-y-2">
           {items.length === 0 ? (
             <div className="card p-8 text-center text-muted-soft text-sm">
@@ -597,6 +597,9 @@ export function QueuePage(): ReactNode {
   const [fleetTasks, setFleetTasks] = useState<Task[]>([]);
   const [fleetStatus, setFleetStatus] = useState<Record<string, WorkerStatus | undefined>>({});
   const [fleetWorkers, setFleetWorkers] = useState<Array<{ id: string; name: string }>>([]);
+  const [fleetTasksStale, setFleetTasksStale] = useState(false);
+  const [fleetWorkersStale, setFleetWorkersStale] = useState(false);
+  const [fleetVersionStale, setFleetVersionStale] = useState(false);
   const [fleetStatusStale, setFleetStatusStale] = useState(false);
   const [masterVersion, setMasterVersion] = useState("");
 
@@ -641,11 +644,20 @@ export function QueuePage(): ReactNode {
   );
   // 推送驱动:master 走 /api/hub/stream,changed 即重拉;推送不可用自动退化为有界退避轮询。
   const stream = useHubStream(poll, { enabled: hubEnabled === true });
-  usePolling(() => void api.listTasks().then(setFleetTasks).catch(() => {}), 30_000, hubEnabled === true);
+  usePolling(
+    () => void api.listTasks()
+      .then((tasks) => { setFleetTasks(tasks); setFleetTasksStale(false); })
+      .catch(() => setFleetTasksStale(true)),
+    30_000,
+    hubEnabled === true,
+  );
   usePolling(
     () => void api.listWorkers()
-      .then((list) => setFleetWorkers(list.map((w) => ({ id: w.id, name: w.name }))))
-      .catch(() => {}),
+      .then((list) => {
+        setFleetWorkers(list.map((w) => ({ id: w.id, name: w.name })));
+        setFleetWorkersStale(false);
+      })
+      .catch(() => setFleetWorkersStale(true)),
     300_000,
     hubEnabled === true,
   );
@@ -660,7 +672,9 @@ export function QueuePage(): ReactNode {
     hubEnabled === true,
   );
   usePolling(
-    () => void api.getVersion().then((r) => setMasterVersion(baseVersion(r.version))).catch(() => {}),
+    () => void api.getVersion()
+      .then((r) => { setMasterVersion(baseVersion(r.version)); setFleetVersionStale(false); })
+      .catch(() => setFleetVersionStale(true)),
     300_000,
     hubEnabled === true,
   );
@@ -685,7 +699,6 @@ export function QueuePage(): ReactNode {
   const uploadCount = rows.filter((r) => r.phase === "waiting_upload").length;
   // Same colour rule as HubJobs.stateColor: red only for a failed run, amber for "needs a person".
   const failedCount = rows.filter((r) => r.phase === "failed").length;
-  const stoppedCount = rows.filter((r) => r.phase === "stopped").length;
   const doneCount = rows.filter((r) => r.phase === "done").length;
   // The server caps the needs_manual inbox (manualLimit); say so instead of implying the list is complete.
   // Only meaningful without filters: `active` is filtered server-side, so a filter would look like "more hidden".
@@ -728,7 +741,11 @@ export function QueuePage(): ReactNode {
 
       <HubStreamBanner handle={stream} />
 
-      <FleetPulse nodes={fleetNodes} delivering={data?.delivering?.length ?? 0} stale={fleetStatusStale} />
+      <FleetPulse
+        nodes={fleetNodes}
+        delivering={data?.delivering?.length ?? 0}
+        stale={fleetStatusStale || fleetTasksStale || fleetWorkersStale || fleetVersionStale}
+      />
 
       {!loaded ? (
         <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>
@@ -746,7 +763,6 @@ export function QueuePage(): ReactNode {
                 {attentionCount > 0 && (
                   <span style={{ color: failedCount > 0 ? "var(--error-fg)" : "var(--warning-fg)" }}>{t("queue.summary.attention", { n: attentionCount })}</span>
                 )}
-                {stoppedCount > 0 && <span>{t("queue.summary.stopped", { n: stoppedCount })}</span>}
                 {!filtered && manualTotal > manualShown && (
                   <span style={{ color: "var(--warning-fg)" }}>{t("queue.summary.manualMore", { total: manualTotal, shown: manualShown })}</span>
                 )}
@@ -776,7 +792,7 @@ export function QueuePage(): ReactNode {
             <div className="card px-4 py-3 mb-5 text-[12px] text-muted">{t("queue.attentionSection.empty")}</div>
           ) : (
             <div className="mb-5">
-              {sections.attention.map((g) => (
+              {sections.attention.map((g, i) => (
                 <AttentionCard
                   key={g.kind}
                   kind={g.kind}
@@ -784,7 +800,7 @@ export function QueuePage(): ReactNode {
                   blocked={g.blocked}
                   onOpenLog={setLogKey}
                   onAck={openAck}
-                  defaultOpen={g.kind === "upload_unknown"}
+                  defaultOpen={i === 0}
                 />
               ))}
             </div>

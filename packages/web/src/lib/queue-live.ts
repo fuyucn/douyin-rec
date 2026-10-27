@@ -15,7 +15,6 @@ import type {
 export type AttentionKind =
   | "upload_unknown"
   | "part_unknown"
-  | "stage_ready"
   | "node_failure"
   | "stopped"
   | "blocked"
@@ -54,7 +53,6 @@ export function sortLive(rows: readonly QueueItemDTO[]): QueueItemDTO[] {
 /** Classify a real-attention row by its operator-facing cause. */
 export function attentionKindOf(row: QueueItemDTO): AttentionKind {
   if (row.phase === "stopped") return "stopped";
-  if (row.phase === "waiting_upload") return "stage_ready";
   const err = row.error ?? "";
   // `node_upload` and node-side ssh failures are explicit; a master-side upload failure is not.
   if (/节点侧上传失败|ssh rc|ssh 超时/i.test(err)) return "node_failure";
@@ -64,7 +62,7 @@ export function attentionKindOf(row: QueueItemDTO): AttentionKind {
 }
 
 const ATTENTION_ORDER: AttentionKind[] = [
-  "upload_unknown", "part_unknown", "node_failure", "blocked", "other", "stage_ready", "stopped",
+  "upload_unknown", "part_unknown", "node_failure", "blocked", "other", "stopped",
 ];
 
 /** Group attention rows by cause and count distinct rooms; stage-ready rows stay separate. */

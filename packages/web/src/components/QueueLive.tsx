@@ -60,7 +60,7 @@ export function LiveLane({ item, now, dataAt, onOpenLog }: {
   const eta = item.etaSec != null ? Math.max(0, Math.round(item.etaSec - drift)) : null;
   const done = item.doneSteps.map((s) => s.step);
   const currentKey = liveStepLabel(item);
-  const current = currentKey === "queued" || currentKey === "cpu" || currentKey === "net" || currentKey === "upload"
+  const current = item.phase === "queued"
     ? `${t("queue.live.waiting")}${item.resource ? ` · ${item.resource.toUpperCase()}` : ""}`
     : currentKey === "preparing" ? t("queue.doing.preparing") : stepLabel(t, currentKey);
   const next = item.nextSteps;

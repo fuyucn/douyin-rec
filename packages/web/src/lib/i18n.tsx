@@ -586,7 +586,7 @@ const DICT = {
       relation: "主控 → 节点",
       assigned: "已分配",
       unassigned: "未分配",
-      refresh: "刷新节点", healthStale: "节点健康探测失败,显示上次结果",
+      refresh: "刷新节点", healthStale: "节点健康探测失败,显示上次结果", liveStale: "实时会话数据获取失败,显示上次结果",
     },
   },
   en: {
@@ -1122,7 +1122,7 @@ const DICT = {
       relation: "Controller → nodes",
       assigned: "Assigned",
       unassigned: "Unassigned",
-      refresh: "Refresh nodes", healthStale: "Health probe failed; showing the last result",
+      refresh: "Refresh nodes", healthStale: "Health probe failed; showing the last result", liveStale: "Live-session refresh failed; showing the last result",
     },
   },
 };
