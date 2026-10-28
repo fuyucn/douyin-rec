@@ -11,11 +11,13 @@ describe("live direct upload naming", () => {
     expect(I18N_SOURCE).toContain('name: "直播直传"');
     expect(I18N_SOURCE).toContain('streamUpload: "直播直传"');
     expect(I18N_SOURCE).toContain('zeroDisk: "直播直传（不写本地视频）"');
+    expect(I18N_SOURCE).toContain('zeroDiskSpool: "保留本地回退文件（推荐开启）"');
     expect(I18N_SOURCE).toContain('title: "直播直传节点"');
-    expect(I18N_SOURCE).toContain('name: "Live direct upload"');
-    expect(I18N_SOURCE).toContain('streamUpload: "Live direct upload"');
-    expect(I18N_SOURCE).toContain('zeroDisk: "Live direct upload (no local video)"');
-    expect(I18N_SOURCE).toContain('title: "Live direct upload node"');
+    expect(I18N_SOURCE).toContain('name: "Live upload"');
+    expect(I18N_SOURCE).toContain('streamUpload: "Live upload"');
+    expect(I18N_SOURCE).toContain('zeroDisk: "Live upload (no local video)"');
+    expect(I18N_SOURCE).toContain('zeroDiskSpool: "Keep a local fallback file (recommended)"');
+    expect(I18N_SOURCE).toContain('title: "Live upload node"');
   });
 
   it("does not expose the old zero-disk implementation wording in the UI dictionary", () => {

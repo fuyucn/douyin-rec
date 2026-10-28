@@ -13,7 +13,7 @@ import "./load-env.js"; // 副作用:必须最先 import——从 <cwd>/.env 灌
                          // 抢在下面 @drec/app 的 DEFAULT_COOKIES(模块加载时就读 env)求值之前生效。
 import { SyncGate } from "./sync-gate.js";
 import { streamPartMaxMs } from "./stream-part-duration.js";
-import { zeroDiskRoom, zeroDiskXmlPath } from "./zero-disk-room.js";
+import { zeroDiskRoom, zeroDiskSpoolName, zeroDiskXmlPath } from "./zero-disk-room.js";
 import { zeroDiskUploadCookie } from "./zero-disk-upload-cookie.js";
 import { Command } from "commander";
 // 节点侧上传(experimental,plans/027)的节点侧命令(隔离在独立文件,便于快速开关/回退)。
@@ -207,14 +207,14 @@ program
   .option("--danmu-xml-mode <mode>", "弹幕 xml 粒度: session(整场一个,默认) | segment(逐段一个)")
   .option("--reconnect <sec>", "断流快速重连等待(秒) (默认 5)")
   .option("--rolling-upload <0|1>", "边录边传: 1=录制中每封口一段就上传并删该段源 0=整场录完再处理 (默认 0)")
-  .option("--stream-upload <0|1>", "流式直传(0 落盘): 1=ffmpeg stdout 直传 UPOS 并续同一稿件,上传确认后删 spool;0=关闭(默认)")
+  .option("--stream-upload <0|1>", "直播直传: 1=ffmpeg stdout 直传 UPOS 并续同一稿件,上传确认后删本地回退文件;0=关闭(默认)")
   .option("--stream-upload-size <bytes>", "流式直传每 P 字节上界(默认对齐后的 1GiB)")
   .option("--stream-upload-sec <sec>", "流式直传每 P 时长阈值(秒),与 --stream-upload-size 谁先到算一 P")
   .option("--stream-upload-stall-sec <sec>", "流式直传无写入看门狗(秒;默认 300,最低 60):超时自动封口并追稿")
   .option("--stream-upload-recover-sec <sec>", "流式直传停滞后的自动恢复窗口(秒;默认 1200,最低 60)")
   .option("--stream-upload-tid <tid>", "流式直传投稿分区(默认 21)")
   .option("--stream-upload-tag <tag>", "流式直传标签(逗号分隔;省略=hub 规则/hub.config 默认)")
-  .option("--stream-upload-spool <full|none>", "流式直传是否保留本地 spool: full=可整文件回退(默认), none=真 0 落盘", "full")
+  .option("--stream-upload-spool <full|none>", "直播直传是否保留本地回退文件: full=可整文件回退(默认), none=不留本地副本", "full")
   .option("--zero-disk-managed <0|1>", "(内部) hub 受管侧节点的 0 落盘:元数据/账号校验只取 master 下发对象,缺失即拒绝启动")
   .option("--stream-upload-private <0|1>", "流式直传仅自己可见(省略=hub 规则/hub.config 默认,保守为 1)")
   .option("--output-format <fmt>", "节点侧输出格式 original|mp4|mkv: 分段封口后原地 remux 成所选容器、校验通过后删原文件 (默认 original=不转)")
@@ -341,9 +341,9 @@ program
         const roomStatePath = livePumpStatePath(roomDir, pumpRoom);
         const roomState = readLivePumpState(roomStatePath);
         if (roomState && (roomState.pending || roomState.parts.some((x) => !x?.confirmed))) {
-          const msg = `0 落盘房间目录里还有未确认分 P,但当前是 legacy 布局,不会自动续传: ${roomStatePath}`;
-          console.error(`[stream-upload] ⚠️ ${msg}`);
-          await notifier.notify({ kind: "error", stage: "0落盘", message: msg }).catch(() => {});
+          const msg = `直播直传房间目录里还有未确认分 P,但当前是 legacy 布局,不会自动续传: ${roomStatePath}`;
+          console.error(`[直播直传] ⚠️ ${msg}`);
+          await notifier.notify({ kind: "error", stage: "直播直传", message: msg }).catch(() => {});
         }
       }
 
@@ -357,14 +357,14 @@ program
         const pre = zeroDiskNodePreflight(process.env[ZERO_DISK_DELIVERY_ENV]);
         if (!pre.ok) {
           writeZeroDiskStatus({ platform: platform.id, roomSlug, state: "refused", code: pre.refusal.code, message: pre.refusal.message, parts: 0 });
-          const msg = `0 落盘拒绝启动 [${pre.refusal.code}]: ${pre.refusal.message}`;
-          console.error(`[stream-upload] ${msg}`);
-          await notifier.notify({ kind: "error", stage: "0落盘", message: msg }).catch(() => {});
+          const msg = `直播直传拒绝启动 [${pre.refusal.code}]: ${pre.refusal.message}`;
+          console.error(`[直播直传] ${msg}`);
+          await notifier.notify({ kind: "error", stage: "直播直传", message: msg }).catch(() => {});
           process.exit(2);
         }
         delivery = pre.delivery;
         managedCookies = pre.cookiesPath;
-        console.log(`[stream-upload] 节点预检通过(上传登录来源=${pre.credentialSource},账号与 master 配置一致)`);
+        console.log(`[直播直传] 节点预检通过(上传登录来源=${pre.credentialSource},账号与 master 配置一致)`);
       }
       // Explicit stream-upload flags only serve manual debugging; a managed run ignores them.
       const manual: Pick<RecordCliOpts, "streamUploadTid" | "streamUploadTag" | "streamUploadPrivate"> = delivery ? {} : o;
@@ -399,7 +399,7 @@ program
         ...metaOverride,
       });
       console.log(
-        `[rec] 流式直传(0 落盘)已开启:room=${o.room} sizeCap=${sizeCap} ` +
+        `[rec] 直播直传已开启:room=${o.room} sizeCap=${sizeCap} ` +
         `sec=${o.streamUploadSec ?? (Number(o.segment ?? 0) > 0 ? `${o.segment}(--segment)` : "字节兜底")} ` +
         `stall=${stallTimeoutMs / 1000}s recover=${recoverWindowMs / 1000}s ` +
         `tid=${manual.streamUploadTid ?? streamMeta.tid}${managed ? " (master 下发)" : ""}`,
@@ -420,7 +420,7 @@ program
           }) ?? null;
       // Per-run file name (issue #329): fixed only once the danmu actually starts.
       let xmlPath = "";
-      const writer = danmuSource ? new XmlDanmuWriter({ log: (m) => console.warn(`[live-pump] ⚠️ ${m}`) }) : null;
+      const writer = danmuSource ? new XmlDanmuWriter({ log: (m) => console.warn(`[直播直传] ⚠️ ${m}`) }) : null;
       let writerOpened = false;
       const danmu = danmuSource && writer ? {
         get xmlPath(): string { return xmlPath; },
@@ -433,7 +433,7 @@ program
           const xmlBase = zeroDiskXmlPath(pumpFilesDir, platform.extractRoomSlug(roomToUrl(o.room)), startMs, undefined, pumpLayout === "room" ? pumpAnchor : undefined);
           xmlPath = xmlBase;
           if (pumpLayout === "room") {
-            for (let n = 1; existsSync(xmlPath); n++) xmlPath = xmlBase.replace(/\.xml$/, `-${n}.xml`);
+            for (let n = 1; existsSync(xmlPath); n++) xmlPath = xmlBase.replace(/\.live\.xml$/, `-${n}.live.xml`);
           }
           writer.open(xmlPath, { anchorName, roomId: platform.extractRoomSlug(roomToUrl(o.room)), videoStartMs: startMs });
           writerOpened = true;
@@ -442,14 +442,14 @@ program
             cookies: o.cookies,
             outDir: opts.outDir,
             segmentSec: 0,
-          }, (m) => writer.add(m), (msg) => console.error(`[live-pump] ⚠️ 弹幕: ${msg}`));
+          }, (m) => writer.add(m), (msg) => console.error(`[直播直传] ⚠️ 弹幕: ${msg}`));
         },
         stop: async (): Promise<void> => {
           await danmuSource.stop().catch(() => {});
           if (writerOpened) writer.close();
         },
       } : undefined;
-      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${pumpFilesDir}/live-pump-${pumpLayout === "room" ? "<主播名>_" : "<room>_"}<开播时间>.xml`);
+      if (danmuSource) console.log(`[rec] 弹幕落盘(唯一落盘产物): ${pumpFilesDir}/<开播时间>.live.xml`);
       // Remove spools left by a pump killed mid-part. They never reached the state file, so
       // nothing else would ever delete them. Only old, unreferenced files are touched.
       // The keep-set is `spoolPathsToKeep` (single source of truth next to the state shape):
@@ -482,7 +482,7 @@ program
           log: (m) => console.log(m),
         });
       } else {
-        console.log("[live-pump] 根目录存在无法读取的旧状态,跳过孤儿 spool 清扫(避免误删其引用的暂存文件)");
+        console.log("[直播直传] 根目录存在无法读取的旧状态,跳过孤儿 spool 清扫(避免误删其引用的暂存文件)");
       }
       if (pumpFilesDir !== opts.outDir) {
         // The room dir is swept separately: rootKeep only protects root spools.
@@ -493,12 +493,12 @@ program
             log: (m) => console.log(m),
           });
         } else {
-          console.log("[live-pump] 房间目录存在无法读取的旧状态,跳过该目录清扫(避免误删其引用的暂存文件)");
+          console.log("[直播直传] 房间目录存在无法读取的旧状态,跳过该目录清扫(避免误删其引用的暂存文件)");
         }
       }
       const abort = new AbortController();
       const onSig = (sig: string): void => {
-        console.log(`[stream-upload] 收到 ${sig},停止录制并中止当前分 P`);
+        console.log(`[直播直传] 收到 ${sig},停止录制并中止当前分 P`);
         abort.abort();
       };
       process.on("SIGINT", () => onSig("SIGINT"));
@@ -537,20 +537,17 @@ program
         },
         quality: (o.quality ?? cfg.quality ?? platform.defaultQuality) as RecordOpts["quality"],
         spoolDir: pumpFilesDir,
-        ...(pumpLayout === "room" ? {
-          // Issue #360: name carries the anchor and the broadcast start so a spool is
-          // identifiable outside the state file. Segment index is zero-padded to 3 like recordings.
-          spoolName: (seg: number) => {
-            const z = zonedStamp(streamStartMs);
-            const head = sanitizePathSegment(pumpAnchor || roomSlug).slice(0, 60) || roomSlug;
-            const base = `live-pump-${head}_${z.date}_${z.hh}-${z.mm}-${z.ss}_${String(seg).padStart(3, "0")}`;
-            // A restart in the same second would otherwise reuse the name of an existing spool
-            // that the state may still reference. Never overwrite one.
-            let name = `${base}.ts`;
-            for (let n = 1; existsSync(join(pumpFilesDir, name)); n++) name = `${base}-${n}.ts`;
-            return name;
-          },
-        } : {}),
+        // New sessions use a time-first name with a `.live` suffix. The room directory already
+        // carries platform/room identity; the legacy root also gets the anchor/room prefix.
+        spoolName: (seg: number) => {
+          const head = pumpAnchor || roomSlug;
+          let name = zeroDiskSpoolName(head, streamStartMs, seg);
+          // A restart in the same second would otherwise reuse a name the state may reference.
+          for (let n = 1; existsSync(join(pumpFilesDir, name)); n++) {
+            name = zeroDiskSpoolName(head, streamStartMs, seg, undefined, n);
+          }
+          return name;
+        },
         title: streamTitle,
         titleForLive: (liveTitle) => resolveStreamUploadTitle({
           platform: platform.id,
@@ -587,7 +584,7 @@ program
         waitForBroadcast: true,
         danmu,
         log: (m) => console.log(m),
-        onAlert: (message) => { void notifier.notify({ kind: "error", stage: "0落盘", message }).catch(() => {}); },
+        onAlert: (message) => { void notifier.notify({ kind: "error", stage: "直播直传", message }).catch(() => {}); },
         // Managed nodes share the account's submission window with the node's other uploads and
         // report part progress to the master console (issue #331).
         ...(delivery ? {
@@ -595,7 +592,7 @@ program
           onPartConfirmed: (info: { count: number; bvid?: string }) => reporter?.partConfirmed(info),
         } : {}),
       }).then(async (res) => {
-        console.log(`[stream-upload] ${JSON.stringify(res)}`);
+        console.log(`[直播直传] ${JSON.stringify(res)}`);
         // Record the upload outcome in the hub ledger. A zero-disk run leaves no recording
         // files for the pipeline to scan, so without this the room would never show an outcome.
         // Best effort: the archive already exists, so a ledger failure must not fail the run.
@@ -605,10 +602,10 @@ program
           const fin = reporter.finish({ ok: res.ok, ...(res.bvid ? { bvid: res.bvid } : {}), ...(res.error ? { error: res.error } : {}), segments: res.segments.length });
           if (fin.receiptError) {
             // The archive exists but the master cannot learn about it: say so loudly.
-            console.error(`[stream-upload] ⚠️ ${fin.receiptError}`);
-            await notifier.notify({ kind: "error", stage: "0落盘", message: fin.receiptError }).catch(() => {});
+            console.error(`[直播直传] ⚠️ ${fin.receiptError}`);
+            await notifier.notify({ kind: "error", stage: "直播直传", message: fin.receiptError }).catch(() => {});
           } else if (fin.receiptWritten) {
-            console.log(`[stream-upload] 回执已写入,等待 master 拉取并记台账: ${res.bvid}`);
+            console.log(`[直播直传] 回执已写入,等待 master 拉取并记台账: ${res.bvid}`);
           }
         } else if (res.ok && res.bvid) {
           const r = recordStreamUpload({
@@ -621,8 +618,8 @@ program
             startMs: streamStartMs,
           });
           console.log(r.ok
-            ? `[stream-upload] 台账已记录: ${r.bvid}${r.alreadyTerminal ? "(已是终态,未覆盖)" : ""}`
-            : `[stream-upload] ⚠️ 台账记录失败(不影响已上传稿件): ${r.error}`);
+            ? `[直播直传] 台账已记录: ${r.bvid}${r.alreadyTerminal ? "(已是终态,未覆盖)" : ""}`
+            : `[直播直传] ⚠️ 台账记录失败(不影响已上传稿件): ${r.error}`);
         }
         // `ok:true` covers three endings: parts delivered, `idle` and `no-stream`. With
         // `waitForBroadcast` the pump never gives up waiting on its own (issue #308); `idle` means
@@ -633,15 +630,15 @@ program
         // An `ok:false` run may already have delivered parts, so only its error text is logged.
         const clean = res.ok && res.outcome !== "no-stream";
         if (res.ok && res.outcome === "idle") {
-          console.log("[stream-upload] 本次未录到分 P(等待中被停止,或开播后立即断流),正常退出");
+          console.log("[直播直传] 本次未录到分 P(等待中被停止,或开播后立即断流),正常退出");
         } else if (res.ok && res.outcome === "no-stream") {
-          console.error("[stream-upload] 本场没有上传任何分 P(取不到流),按失败退出并交由调度重试");
+          console.error("[直播直传] 本场没有上传任何分 P(取不到流),按失败退出并交由调度重试");
         } else if (!res.ok && res.error) {
-          console.error(`[stream-upload] 本场以失败收尾: ${res.error}`);
+          console.error(`[直播直传] 本场以失败收尾: ${res.error}`);
         }
         process.exit(clean ? 0 : 1);
       }).catch((e) => {
-        console.error(`[stream-upload] 失败: ${(e as Error).message}`);
+        console.error(`[直播直传] 失败: ${(e as Error).message}`);
         reporter?.failed((e as Error).message);
         process.exit(1);
       });
@@ -840,11 +837,11 @@ program
     const platform = platformForRoom(room);
     const sizeCap = alignFileSize(Number(o.size));
     if (sizeCap !== Number(o.size)) {
-      process.stderr.write(`[live-pump] size ${o.size} 未按 10MiB 对齐 → 用 ${sizeCap}\n`);
+      process.stderr.write(`[直播直传] size ${o.size} 未按 10MiB 对齐 → 用 ${sizeCap}\n`);
     }
     if (sizeCap !== DEFAULT_SEGMENT_CAP && o.size === String(DEFAULT_SEGMENT_CAP)) {
       // 走到这里说明用户手改过 --size;提示真实生效值,避免「我设了 1GiB 怎么变成 1030MiB」。
-      process.stderr.write(`[live-pump] 默认上界已按 10MiB 对齐为 ${DEFAULT_SEGMENT_CAP}(1GiB=102.4×10MiB,不对齐)\n`);
+      process.stderr.write(`[直播直传] 默认上界已按 10MiB 对齐为 ${DEFAULT_SEGMENT_CAP}(1GiB=102.4×10MiB,不对齐)\n`);
     }
     const spoolDir = o.spoolDir ?? `${tmpdir()}/live-pump`;
     const maxSegments = Math.max(1, Number(o.segments));
@@ -881,7 +878,7 @@ program
       ...(res.error ? { error: res.error } : {}),
       ...(res.archiveExists ? { archiveExists: true } : {}),
     };
-    process.stderr.write(`[live-pump] 状态保留在 ${res.statePath}(确认过的 spool 已清理)\n`);
+    process.stderr.write(`[直播直传] 状态保留在 ${res.statePath}(确认过的 spool 已清理)\n`);
     process.stdout.write(JSON.stringify(out) + "\n");
     if (!res.ok) process.exitCode = 1;
   });
@@ -1530,7 +1527,7 @@ const hubStarter: HubStarter = {
         return res;
       },
       log: (m) => opts.log(m),
-      alert: (message) => opts.onEvent({ kind: "error", stage: "0落盘", message }),
+      alert: (message) => opts.onEvent({ kind: "error", stage: "直播直传", message }),
     });
     /** Targets the master currently expects to run zero-disk: (room, non-local node) pairs. */
     const zeroDiskTargetList = (): Array<{ workerId: string; platform: string; roomSlug: string }> => {

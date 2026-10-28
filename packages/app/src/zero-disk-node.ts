@@ -230,7 +230,7 @@ export function buildZeroDiskDelivery(o: {
 }): ZeroDiskDeliveryBuild {
   const accountKey = resolveUploadAccountKey(o.masterCookiesPath);
   if (!isKnownAccountKey(accountKey)) {
-    return { ok: false, error: "主控的 B 站上传账号无法识别(未登录或登录文件缺少账号 ID),无法校验节点账号,暂不下发 0 落盘" };
+    return { ok: false, error: "主控的 B 站上传账号无法识别(未登录或登录文件缺少账号 ID),无法校验节点账号,暂不下发直播直传" };
   }
   const { meta, private: isPrivate } = resolveRollingUploadMeta(o.platform, o.roomSlug);
   return {
@@ -301,7 +301,7 @@ export function makeNodeSubmitGate(o: {
       const claimed = store.tryClaim
         ? store.tryClaim(key, now(), NODE_UPLOAD_WINDOW_MS, NODE_UPLOAD_RATE_LIMIT)
         : false;
-      if (!claimed) log("[live-pump] account upload window is busy or cooling; submitting anyway (live stream cannot wait)");
+      if (!claimed) log("[直播直传] account upload window is busy or cooling; submitting anyway (live stream cannot wait)");
     },
     noteRateLimited(): void {
       gate.recordRateLimit(key, NODE_UPLOAD_COOLDOWN_MS);

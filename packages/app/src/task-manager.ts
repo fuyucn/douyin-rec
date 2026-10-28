@@ -264,7 +264,7 @@ export class TaskManager {
       if (clash !== undefined) {
         const other = this.store.getTask(clash);
         this.log(
-          `[task_manager] 拒绝启动 id=${taskId}:同一房间已有 0 落盘任务 id=${clash}` +
+          `[task_manager] 拒绝启动 id=${taskId}:同一房间已有直播直传任务 id=${clash}` +
           `(${other?.name ?? other?.room})在录,同时录会产出两个重复稿件且无法删除`,
         );
         return false;
@@ -420,7 +420,7 @@ export class TaskManager {
     // task `error`, logs the reason and alerts once (no restart loop, nothing is uploaded).
     if (task.streamUpload && task.managedBy === "hub") {
       const pre = this.zeroDiskPreflight(task);
-      if (!pre.ok) throw new Error(`0 落盘拒绝启动 [${pre.refusal.code}]: ${pre.refusal.message}`);
+      if (!pre.ok) throw new Error(`直播直传拒绝启动 [${pre.refusal.code}]: ${pre.refusal.message}`);
     }
     // Platform-aware cookie resolution, shared with buildSessionForTask.
     const effective = {
@@ -522,7 +522,7 @@ export class TaskManager {
         wasDraining
           ? `[task_manager] ✓ 任务 id=${taskId} 直播自然收播，排空完成，已停止`
           : zeroDiskFinalized
-            ? `[task_manager] ✓ 任务 id=${taskId} 0 落盘直传已自行收尾(exit 0),已停止`
+            ? `[task_manager] ✓ 任务 id=${taskId} 直播直传已自行收尾(exit 0),已停止`
             : `[task_manager] ✓ 任务 id=${taskId} 已正常停止`,
       );
       return;

@@ -89,18 +89,30 @@ describe("issue #360: room-layout spool names", () => {
       const old = join(dir, `live-pump-${Date.UTC(2026, 9, 24, 23, 22, 24)}-0.ts`);
       const room = join(dir, "live-pump-云念_2026-10-24_06-55-49_000.ts");
       const suffixed = join(dir, "live-pump-云念_2026-10-24_06-55-49_000-1.ts");
+      const live = join(dir, "云念_2026-10-24_06-55-49_000.live.ts");
+      const liveSuffixed = join(dir, "云念_2026-10-24_06-55-49_000-1.live.ts");
+      const manualStamp = String(1.7e12);
+      const liveManualName = `${manualStamp}_000.live.ts`;
+      const liveManual = join(dir, liveManualName);
+      const normalRecording = join(dir, "云念_2026-10-24_000.ts");
       const held = join(dir, "live-pump-云念_2026-10-24_06-55-49_000.held-gap.ts");
+      const liveHeld = join(dir, "云念_2026-10-24_06-55-49_000.live.held-gap.ts");
       const state = join(dir, "live-pump-room360.state.json");
-      for (const f of [old, room, suffixed, held, state]) writeFileSync(f, "x");
+      for (const f of [old, room, suffixed, live, liveSuffixed, liveManual, normalRecording, held, liveHeld, state]) writeFileSync(f, "x");
       const oldTime = new Date(Date.now() - ORPHAN_SPOOL_GRACE_MS - 60_000);
-      for (const f of [old, room, suffixed, held, state]) utimesSync(f, oldTime, oldTime);
+      for (const f of [old, room, suffixed, live, liveSuffixed, liveManual, normalRecording, held, liveHeld, state]) utimesSync(f, oldTime, oldTime);
       const removed = sweepOrphanSpools({ spoolDir: dir, knownSpoolPaths: [] });
       expect(removed.sort()).toEqual([
         `live-pump-${Date.UTC(2026, 9, 24, 23, 22, 24)}-0.ts`,
         "live-pump-云念_2026-10-24_06-55-49_000.ts",
         "live-pump-云念_2026-10-24_06-55-49_000-1.ts",
+        "云念_2026-10-24_06-55-49_000.live.ts",
+        "云念_2026-10-24_06-55-49_000-1.live.ts",
+        liveManualName,
       ].sort());
+      expect(existsSync(normalRecording)).toBe(true);
       expect(existsSync(held)).toBe(true);
+      expect(existsSync(liveHeld)).toBe(true);
       expect(existsSync(state)).toBe(true);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });

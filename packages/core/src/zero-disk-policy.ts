@@ -31,17 +31,17 @@ export function zeroDiskRuleError(
   // zero-disk room without forcing the user to turn the sub-option off first.
   if (rule.enabled === false) return null;
   if (normalizeUploadMode(rule.mode) !== "rolling") {
-    return "0 落盘只能在 rolling 上传方式下使用";
+    return "直播直传只能在 rolling 上传方式下使用";
   }
   if (pipelineBurns(rule.steps)) {
-    return "0 落盘只能在关闭烧录后使用(rolling 只上传 plain,烧录分 P 会被丢掉)";
+    return "直播直传只能在关闭烧录后使用(rolling 只上传 plain,烧录分 P 会被丢掉)";
   }
   const workers = rule.workers ?? [];
   if (workers.length === 0) {
-    return "0 落盘必须恰好勾选一个节点(本机或某个远端节点)";
+    return "直播直传必须恰好勾选一个节点(本机或某个远端节点)";
   }
   if (workers.length > 1) {
-    return "0 落盘只能勾选一个节点:多个节点同录会各自建稿,稿件无法删除";
+    return "直播直传只能勾选一个节点:多个节点同录会各自建稿,稿件无法删除";
   }
   return null;
 }
