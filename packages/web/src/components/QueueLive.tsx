@@ -16,11 +16,11 @@ function stepLabel(t: TFunc, step: string): string {
   return label === key ? step : label;
 }
 
-function sessionLabel(streamKey: string): string {
+function sessionLabel(streamKey: string, t: TFunc): string {
   const suffix = streamKey.split(":").slice(2).join(":");
   const m = /^(\d{4}-\d{2}-\d{2})(?:_(\d{2})(\d{2}))?(-zd)?$/.exec(suffix);
   if (!m) return suffix;
-  return `${m[1]!.slice(5)}${m[2] ? ` ${m[2]}:${m[3]}` : ""}${m[4] ? " · 0落盘" : ""}`;
+  return `${m[1]!.slice(5)}${m[2] ? ` ${m[2]}:${m[3]}` : ""}${m[4] ? ` · ${t("queue.live.directTag")}` : ""}`;
 }
 
 /** Real node-upload telemetry; no synthetic percentages. */
@@ -74,7 +74,7 @@ export function LiveLane({ item, now, dataAt, onOpenLog }: {
         <div className="min-w-0">
           <div className="flex items-baseline gap-2 min-w-0">
             <span className="font-medium text-ink truncate">{item.anchorName ?? roomId(item.roomSlug)}</span>
-            <span className="font-mono text-[11px] text-muted-soft shrink-0">{sessionLabel(item.streamKey)}</span>
+            <span className="font-mono text-[11px] text-muted-soft shrink-0">{sessionLabel(item.streamKey, t)}</span>
           </div>
           <div className="font-mono text-[11px] text-muted-soft mt-0.5">
             {platformLabel(item.platform)} · {item.roomSlug}
@@ -183,7 +183,7 @@ export function AttentionCard({ kind, rows, blocked, onOpenLog, onAck, defaultOp
       {rows.map((r) => (
         <div key={r.streamKey} className="attention-row">
           <span className="font-medium text-ink">{r.anchorName ?? roomId(r.roomSlug)}</span>
-          <span className="font-mono text-[11px] text-muted-soft">{sessionLabel(r.streamKey)}</span>
+          <span className="font-mono text-[11px] text-muted-soft">{sessionLabel(r.streamKey, t)}</span>
           <span className="text-[11px] text-muted truncate max-w-full" title={r.error ?? undefined}>{r.error}</span>
           <span className="ml-auto inline-flex items-center gap-0.5">
             {r.state === "needs_manual" && (
@@ -282,7 +282,7 @@ export function StageReadyRow({ item, onOpenLog, onAck }: {
   return (
     <div className="attention-row">
       <span className="font-medium text-ink">{item.anchorName ?? roomId(item.roomSlug)}</span>
-      <span className="font-mono text-[11px] text-muted-soft">{sessionLabel(item.streamKey)}</span>
+      <span className="font-mono text-[11px] text-muted-soft">{sessionLabel(item.streamKey, t)}</span>
       <span className="text-[11px] text-muted">{t("queue.attention.stage_ready")}</span>
       <span className="ml-auto inline-flex items-center gap-0.5">
         <button type="button" className="icon-btn !w-7 !h-7" title={t("queue.ack.action")} aria-label={t("queue.ack.action")} onClick={() => onAck(item.streamKey)}>
