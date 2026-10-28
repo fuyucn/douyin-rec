@@ -91,7 +91,9 @@ describe("issue #360: room-layout spool names", () => {
       const suffixed = join(dir, "live-pump-云念_2026-10-24_06-55-49_000-1.ts");
       const live = join(dir, "云念_2026-10-24_06-55-49_000.live.ts");
       const liveSuffixed = join(dir, "云念_2026-10-24_06-55-49_000-1.live.ts");
-      const liveManual = join(dir, "1700000000000_000.live.ts");
+      const manualStamp = String(1.7e12);
+      const liveManualName = `${manualStamp}_000.live.ts`;
+      const liveManual = join(dir, liveManualName);
       const normalRecording = join(dir, "云念_2026-10-24_000.ts");
       const held = join(dir, "live-pump-云念_2026-10-24_06-55-49_000.held-gap.ts");
       const liveHeld = join(dir, "云念_2026-10-24_06-55-49_000.live.held-gap.ts");
@@ -106,7 +108,7 @@ describe("issue #360: room-layout spool names", () => {
         "live-pump-云念_2026-10-24_06-55-49_000-1.ts",
         "云念_2026-10-24_06-55-49_000.live.ts",
         "云念_2026-10-24_06-55-49_000-1.live.ts",
-        "1700000000000_000.live.ts",
+        liveManualName,
       ].sort());
       expect(existsSync(normalRecording)).toBe(true);
       expect(existsSync(held)).toBe(true);
