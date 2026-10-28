@@ -380,8 +380,8 @@ function rolloverStaleState(path: string, room: string, nowMs: number, log: (msg
     let archived = `${path}${ARCHIVED_SUFFIX}${nowMs}`;
     for (let n = 1; existsSync(archived); n++) archived = `${path}${ARCHIVED_SUFFIX}${nowMs}-${n}`; // rename would overwrite
     renameSync(path, archived);
-    const msg = `0 落盘旧状态${reason},已原样归档到 ${archived}(含未确认分 P 与暂存文件),本场开新稿件继续录制,需人工核对旧稿件`;
-    log(`[live-pump] ${reason}; archived old state to ${archived}, starting a new submission`);
+    const msg = `直播直传旧状态${reason},已原样归档到 ${archived}(含未确认分 P 与暂存文件),本场开新稿件继续录制,需人工核对旧稿件`;
+    log(`[直播直传] ${reason}; archived old state to ${archived}, starting a new submission`);
     return alert ? msg : "";
   };
   const state = readLivePumpState(path);
@@ -546,7 +546,7 @@ export class LivePumpSession {
     if (loaded) {
       // A resumed session belongs to the archive created by the original title. Keep that
       // identity, but record the caller's current options for diagnostics.
-      this.log(`[live-pump] resumed state ${this.statePath} (${loaded.parts.length} parts, title=${loaded.title})`);
+      this.log(`[直播直传] resumed state ${this.statePath} (${loaded.parts.length} parts, title=${loaded.title})`);
     }
   }
 
@@ -601,7 +601,7 @@ export class LivePumpSession {
       return { ok: false, error: `spool missing for unconfirmed part ${target.index}: ${target.spoolPath}` };
     }
     if (bytes <= 0) return { ok: false, error: `spool empty for unconfirmed part ${target.index}` };
-    this.log(`[live-pump] 分 P ${target.index} 未确认,按整文件重传补齐(${target.spoolPath})`);
+    this.log(`[直播直传] 分 P ${target.index} 未确认,按整文件重传补齐(${target.spoolPath})`);
     const fb = await reuploadSpoolFile({
       cookiesPath: this.o.cookiesPath,
       fileName: target.filename,
@@ -939,7 +939,7 @@ export class LivePumpSession {
       try { this.o.submitGate?.noteRateLimited(); } catch { /* accounting must never block a submit */ }
       const waitMs = Math.min(baseMs * 2 ** attempt, 300_000);
       this.log(
-        `[live-pump] ${pending.kind} 命中投稿限流(${JSON.stringify(raw).slice(0, 120)}),` +
+        `[直播直传] ${pending.kind} 命中投稿限流(${JSON.stringify(raw).slice(0, 120)}),` +
         `${waitMs / 1000}s 后重试(${attempt + 2}/${maxAttempts})`,
       );
       await sleepUnlessAborted(waitMs, [signal], sleep);
@@ -976,7 +976,7 @@ export class LivePumpSession {
       }
       this.persist({ seasonOnly: true });
     } catch (e) {
-      this.log(`[live-pump] season 状态落盘失败(保留 pending,不影响后续分 P): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      this.log(`[直播直传] season 状态落盘失败(保留 pending,不影响后续分 P): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
     }
   }
 
@@ -985,7 +985,7 @@ export class LivePumpSession {
     this.seasonTail = this.seasonTail
       .then(() => this.associateSeason(doFetch, reconcileFirst))
       .catch((e) => {
-        this.log(`[live-pump] season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+        this.log(`[直播直传] season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
       });
   }
 
@@ -1013,9 +1013,9 @@ export class LivePumpSession {
       if (!existsSync(p.spoolPath)) continue;
       try {
         rmSync(p.spoolPath, { force: true });
-        this.log(`[live-pump] confirmed part ${p.index}, removed spool ${p.spoolPath}`);
+        this.log(`[直播直传] confirmed part ${p.index}, removed spool ${p.spoolPath}`);
       } catch (e) {
-        this.log(`[live-pump] confirmed part ${p.index}, spool cleanup failed: ${String((e as Error)?.message ?? e)}`);
+        this.log(`[直播直传] confirmed part ${p.index}, spool cleanup failed: ${String((e as Error)?.message ?? e)}`);
       }
     }
   }
@@ -1466,7 +1466,7 @@ export async function pumpSegment(o: {
       // Must log: this backoff can total ~48 minutes (30s doubling, capped at 300s, 8 tries).
       // Silent, it looks exactly like a hang — no ffmpeg output, no log, no error.
       const waitMs = Math.min(30_000 * 2 ** attempt, 300_000);
-      o.log?.(`[live-pump] preupload 命中限流,${waitMs / 1000}s 后重试(${attempt + 2}/9): ${o.fileName}`);
+      o.log?.(`[直播直传] preupload 命中限流,${waitMs / 1000}s 后重试(${attempt + 2}/9): ${o.fileName}`);
       await sleepUnlessAborted(waitMs, [o.signal]);
       if (o.signal?.aborted) throw new Error("live-pump aborted during preupload backoff");
     }
@@ -1517,7 +1517,7 @@ export async function pumpSegment(o: {
   }
 
   if (rec.tsDiscontinuities) {
-    o.log?.(`[live-pump] ⚠️ ${o.fileName}: ffmpeg 报告 ${rec.tsDiscontinuities} 次时间戳不连续(流内跳变或被复用器钳平)`);
+    o.log?.(`[直播直传] ⚠️ ${o.fileName}: ffmpeg 报告 ${rec.tsDiscontinuities} 次时间戳不连续(流内跳变或被复用器钳平)`);
   }
 
   // Pre-complete gate: a part is only visible in the archive after `complete` + submit, so a
@@ -1538,7 +1538,7 @@ export async function pumpSegment(o: {
       // Chunks may already be on UPOS but this part will never complete.
       if (rec.chunksUploaded > 0) rec.sessionLeaked = true;
     } else if (gap === undefined) {
-      o.log?.(`[live-pump] ⚠️ ${o.fileName}: 时间戳扫描无法判定,按原流程继续`);
+      o.log?.(`[直播直传] ⚠️ ${o.fileName}: 时间戳扫描无法判定,按原流程继续`);
     }
   }
 
@@ -1787,8 +1787,7 @@ export interface RunLivePumpOptions {
   maxSegments?: number;
   /**
    * Per-part spool file name (issue #360). The CLI passes a room/anchored name when the room
-   * layout is on; without it the historical `live-pump-<epochMs>-<seg>.ts` name is kept so old
-   * nodes and tests behave unchanged.
+   * layout is on; without it the time-first `.live.ts` name is used.
    */
   spoolName?: (segIndex: number) => string;
   line?: string;
@@ -1978,7 +1977,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     for (let misses = 0; ; misses++) {
       if (await stopRequested()) return null;
       if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
-        log(`[live-pump] 停滞恢复窗口已耗尽(${Math.round((o.recoverWindowMs ?? DEFAULT_RECOVERY_WINDOW_MS) / 60_000)} 分钟),结束本次录制`);
+        log(`[直播直传] 停滞恢复窗口已耗尽(${Math.round((o.recoverWindowMs ?? DEFAULT_RECOVERY_WINDOW_MS) / 60_000)} 分钟),结束本次录制`);
         return null;
       }
       // One attempt per poll (no backoff retries): the interval itself is the retry cadence.
@@ -1989,7 +1988,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // Log the first miss and then roughly every 10 minutes, so a long wait is visible
       // without flooding the task log.
       if (misses % Math.max(1, Math.round(600_000 / idlePollMs)) === 0) {
-        log(`[live-pump] 未开播,每 ${idlePollMs / 1000}s 探测一次(留在进程内等待)`);
+        log(`[直播直传] 未开播,每 ${idlePollMs / 1000}s 探测一次(留在进程内等待)`);
       }
       const waitMs = deadlineMs === undefined ? idlePollMs : Math.max(0, Math.min(idlePollMs, deadlineMs - Date.now()));
       if (waitMs <= 0) continue;
@@ -2027,8 +2026,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       if (!recovered.ok) {
         log(
           recovered.archiveExists
-            ? `[live-pump] 稿件已存在但状态不确定,禁止新建稿件: ${recovered.reason}`
-            : `[live-pump] 恢复失败,停止以避免重复建稿: ${recovered.reason}`,
+            ? `[直播直传] 稿件已存在但状态不确定,禁止新建稿件: ${recovered.reason}`
+            : `[直播直传] 恢复失败,停止以避免重复建稿: ${recovered.reason}`,
         );
         return { fail: {
           ok: false, error: recovered.reason, archiveExists: !!recovered.archiveExists,
@@ -2044,7 +2043,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         // One unconfirmed part whose spool survived is recoverable: re-upload the whole file and
         // append it. More than one (or a missing spool) means a real gap, so stop for a human.
         if (pending.length === 1 && existsSync(pending[0]!.spoolPath)) {
-          log(`[live-pump] 有 1 个未确认分 P(索引 ${pending[0]!.index}),按整文件重传补齐`);
+          log(`[直播直传] 有 1 个未确认分 P(索引 ${pending[0]!.index}),按整文件重传补齐`);
           const fixed = await session.resubmitUnconfirmedPart();
           if (!fixed.ok) {
             return { fail: {
@@ -2055,7 +2054,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           }
         } else {
           const error = `unconfirmed parts: ${pending.map((p) => p.index).join(",")}`;
-          log(`[live-pump] 有 ${pending.length} 个未确认分 P;为避免重复/空洞,拒绝继续录制上传`);
+          log(`[直播直传] 有 ${pending.length} 个未确认分 P;为避免重复/空洞,拒绝继续录制上传`);
           return { fail: {
             ok: false, error, bvid: session.bvid, aid: session.aid,
             title: session.archiveTitle, segments: [], spoolDir: o.spoolDir,
@@ -2075,7 +2074,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       ? readLivePumpState(livePumpStatePath(o.spoolDir, o.room))
       : undefined;
     if (o.submit !== false && st !== undefined && (!st || !!st.pending || st.parts.some((p) => !p.confirmed))) {
-      log("[live-pump] 上次运行留有未确认分 P,等待开播前先恢复");
+      log("[直播直传] 上次运行留有未确认分 P,等待开播前先恢复");
       const pre = await openSession();
       if ("fail" in pre) return pre.fail;
     }
@@ -2109,15 +2108,15 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     try {
       await o.danmu.start((m) => { /* writer is owned by the caller's start() */ });
       danmuStarted = true;
-      log(`[live-pump] 弹幕已连接 → ${o.danmu.xmlPath}`);
+      log(`[直播直传] 弹幕已连接 → ${o.danmu.xmlPath}`);
     } catch (e) {
-      log(`[live-pump] ⚠️ 弹幕连接失败(不影响视频上传): ${(e as Error).message}`);
+      log(`[直播直传] ⚠️ 弹幕连接失败(不影响视频上传): ${(e as Error).message}`);
     }
   };
   const stopDanmu = async (): Promise<void> => {
     if (!danmuStarted || !o.danmu) return;
     danmuStarted = false;
-    await o.danmu.stop().catch((e: unknown) => log(`[live-pump] ⚠️ 弹幕停止失败: ${(e as Error).message}`));
+    await o.danmu.stop().catch((e: unknown) => log(`[直播直传] ⚠️ 弹幕停止失败: ${(e as Error).message}`));
   };
 
   const segments: LivePumpSegmentReport[] = [];
@@ -2130,7 +2129,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     if (await o.shouldStop?.()) break;
     if (recoveryDeadline !== undefined && Date.now() >= recoveryDeadline) {
       recoveryTimedOut = true;
-      log("[live-pump] 停滞恢复窗口结束,停止本次录制;下次运行会重新等待开播");
+      log("[直播直传] 停滞恢复窗口结束,停止本次录制;下次运行会重新等待开播");
       break;
     }
     // Window-end drain. Checked between parts only: the broadcast is never cut here, so the
@@ -2141,7 +2140,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // preupload backoff), and "no new parts appearing" looks identical to a hang.
       if (!drainLogged) {
         drainLogged = true;
-        log("[live-pump] 窗口结束已排空:不再开录下一场,当前分 P 传完后收尾");
+        log("[直播直传] 窗口结束已排空:不再开录下一场,当前分 P 传完后收尾");
       }
       break;
     }
@@ -2155,7 +2154,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       if (!s) {
         if (await stopRequested()) break;
         recoveryTimedOut = true;
-        log("[live-pump] 停滞恢复窗口结束,停止本次录制;下次运行会重新等待开播");
+        log("[直播直传] 停滞恢复窗口结束,停止本次录制;下次运行会重新等待开播");
         break;
       }
     } else {
@@ -2163,8 +2162,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         room: o.room,
         fetch: o.fetch,
         quality: o.quality,
-        onRetry: (waitMs, attempt, max) => log(`[live-pump] 段${seg + 1} 取流失败,${waitMs / 1000}s 后重试(${attempt}/${max})`),
-        onGiveUp: (attempts) => log(`[live-pump] 连续 ${attempts} 次取不到流,按收播收尾(已录分 P 不受影响)`),
+        onRetry: (waitMs, attempt, max) => log(`[直播直传] 段${seg + 1} 取流失败,${waitMs / 1000}s 后重试(${attempt}/${max})`),
+        onGiveUp: (attempts) => log(`[直播直传] 连续 ${attempts} 次取不到流,按收播收尾(已录分 P 不受影响)`),
         sleep,
       });
     }
@@ -2173,15 +2172,15 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     if (s.title?.trim()) liveTitle = s.title.trim();
     if (o.titleForLive && s.title) {
       const nextTitle = o.titleForLive(s.title);
-      if (session.setTitleIfFresh(nextTitle)) log(`[live-pump] 稿件标题已按直播标题渲染: ${nextTitle}`);
+      if (session.setTitleIfFresh(nextTitle)) log(`[直播直传] 稿件标题已按直播标题渲染: ${nextTitle}`);
     } else if (o.titleForLive) {
       // No live title from this platform, but the anchor/start time may still have changed.
       const nextTitle = o.titleForLive("");
-      if (session.setTitleIfFresh(nextTitle)) log(`[live-pump] 稿件标题已按取流信息重渲染: ${nextTitle}`);
+      if (session.setTitleIfFresh(nextTitle)) log(`[直播直传] 稿件标题已按取流信息重渲染: ${nextTitle}`);
     }
     log("[状态] 录制中");
 
-    const fileName = o.spoolName ? o.spoolName(seg) : `live-pump-${Date.now()}-${seg}.ts`;
+    const fileName = o.spoolName ? o.spoolName(seg) : `${Date.now()}_${String(seg).padStart(3, "0")}.live.ts`;
     const t0 = Date.now();
     const r = await pumpSegment({
       cookiesPath: o.cookiesPath,
@@ -2199,9 +2198,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       spoolMode: o.spoolMode ?? "full",
       queueCapacity: o.queueCapacity,
       log,
-      onFallback: (p, b) => log(`[live-pump] ↺ 段${seg + 1} 走整文件回退重传: ${(b / MiB).toFixed(1)}MiB (${p})`),
+      onFallback: (p, b) => log(`[直播直传] ↺ 段${seg + 1} 走整文件回退重传: ${(b / MiB).toFixed(1)}MiB (${p})`),
       maxMs: o.maxMs,
-      onChunk: (b, n) => log(`[live-pump] 段${seg + 1} 第 ${n} 块完成,累计 ${(b / MiB).toFixed(1)}MiB`),
+      onChunk: (b, n) => log(`[直播直传] 段${seg + 1} 第 ${n} 块完成,累计 ${(b / MiB).toFixed(1)}MiB`),
     });
     const base: LivePumpSegmentReport = {
       seg: seg + 1,
@@ -2218,7 +2217,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     if (r.sealedBy === "stalled") {
       const silentSec = Math.max(1, Math.ceil((r.stalledMs ?? 0) / 1000));
       log("[状态] 录制停滞");
-      log(`[live-pump] 段${seg + 1} 源流已 ${silentSec}s 无写入,自动封口并尝试追到当前稿件`);
+      log(`[直播直传] 段${seg + 1} 源流已 ${silentSec}s 无写入,自动封口并尝试追到当前稿件`);
     }
     // No bytes means there is nothing to append. Recover the source instead of turning a dead
     // socket into a permanent task failure.
@@ -2228,7 +2227,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         continue;
       }
       if (!r.uploadError) {
-        log("[live-pump] 本段没有写入,判定已收播");
+        log("[直播直传] 本段没有写入,判定已收播");
         break;
       }
       // A non-stalled empty part with an upload error is a real failure. Fall through to the
@@ -2286,7 +2285,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         }
         if (Date.now() >= deadline) return { ok: false, error: lastError || "自动重试窗口耗尽" };
         const sleepMs = Math.max(0, Math.min(waitMs, deadline - Date.now()));
-        log(`[live-pump] 段${seg + 1} 自动重试上传,${Math.max(1, Math.ceil(sleepMs / 1000))}s 后继续: ${lastError}`);
+        log(`[直播直传] 段${seg + 1} 自动重试上传,${Math.max(1, Math.ceil(sleepMs / 1000))}s 后继续: ${lastError}`);
         await sleepUnlessAborted(sleepMs, [o.signal], o.sleep);
         waitMs = Math.min(60_000, Math.max(1_000, waitMs * 2));
       }
@@ -2296,7 +2295,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     // to fall back to. Treating it as a warning would silently lose video — it is a hard error.
     if ((o.spoolMode ?? "full") === "none" && r.backpressured) {
       const error = "上传跟不上录制且未保留本地 spool:该分 P 已丢失";
-      log(`[live-pump] ⚠️ 段${seg + 1} ${error}`);
+      log(`[直播直传] ⚠️ 段${seg + 1} ${error}`);
       return {
         ok: false, error, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
         segments: [...segments, { ...base, uploadError: error }],
@@ -2307,7 +2306,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     if (r.uploadError || !r.spoolDurationSec) {
       let error = r.uploadError ?? "缺 duration(产物不可投)";
       const where = (o.spoolMode ?? "full") === "none" ? "无本地副本" : `spool ${(r.spooledBytes / MiB).toFixed(1)}MiB`;
-      log(`[live-pump] ⚠️ 段${seg + 1} 未可投,不进入稿件: ${error}(${where})`);
+      log(`[直播直传] ⚠️ 段${seg + 1} 未可投,不进入稿件: ${error}(${where})`);
       // Keep recoverable bytes in the WAL before returning. Without this, the orphan sweep can
       // delete the only spool copy after its grace period while the uploader is offline.
       const persistError = persistUnconfirmed();
@@ -2326,7 +2325,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
             bytes: r.spooledBytes,
             spoolDurationSec: r.spoolDurationSec ?? 0,
           });
-          log(`[live-pump] 段${seg + 1} 自动重试成功,已追到稿件 ${retried.bvid ?? session.bvid ?? retried.aid ?? "当前稿件"}`);
+          log(`[直播直传] 段${seg + 1} 自动重试成功,已追到稿件 ${retried.bvid ?? session.bvid ?? retried.aid ?? "当前稿件"}`);
           log("[状态] 分P已确认");
           try {
             const bv = retried.bvid ?? session.bvid;
@@ -2345,7 +2344,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // exit code) discard real uploaded parts just because the *last* segment was cut short
       // by the stop signal.
       if (r.sealedBy === "abort" && segments.some((x) => x.stem)) {
-        log("[live-pump] 已停止,此前分 P 均已入稿:按成功收尾");
+        log("[直播直传] 已停止,此前分 P 均已入稿:按成功收尾");
         segments.push({ ...base, uploadError: error });
         break;
       }
@@ -2384,7 +2383,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         durationSec: r.spoolDurationSec,
       }, o.signal);
       if (!submitted.ok) {
-        log(`[live-pump] 段${seg + 1} 稿件提交失败${(o.spoolMode ?? "full") === "none" ? "(无本地副本)" : ",保留 spool"}: ${submitted.error}`);
+        log(`[直播直传] 段${seg + 1} 稿件提交失败${(o.spoolMode ?? "full") === "none" ? "(无本地副本)" : ",保留 spool"}: ${submitted.error}`);
         return {
           ok: false, error: submitted.error, bvid: session.bvid, aid: session.aid,
           title: session.archiveTitle, segments: [...segments, { ...report, uploadError: submitted.error }],
@@ -2392,7 +2391,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         };
       }
       log(
-        `[live-pump] 段${seg + 1} 已确认到稿件 ${submitted.bvid ?? submitted.aid}` +
+        `[直播直传] 段${seg + 1} 已确认到稿件 ${submitted.bvid ?? submitted.aid}` +
         `${r.usedFileFallback ? " (整文件回退)" : ""}`,
       );
       log("[状态] 分P已确认");
@@ -2406,21 +2405,21 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     // deadline cut off a healthy broadcast later in the same run.
     recoveryDeadline = recoveryDeadlineAfterPart(r.sealedBy, Date.now(), recoverWindowMs);
     const disk = (o.spoolMode ?? "full") === "none"
-      ? "无本地 spool(真 0 落盘)"
+      ? "无本地回退文件(真直播直传)"
       : `spool ${(r.spooledBytes / MiB).toFixed(1)}MiB`;
     log(
-      `[live-pump] 段${seg + 1} 结束: ${r.chunksUploaded} 块 / ${(r.streamedBytes / MiB).toFixed(1)}MiB,` +
+      `[直播直传] 段${seg + 1} 结束: ${r.chunksUploaded} 块 / ${(r.streamedBytes / MiB).toFixed(1)}MiB,` +
       `${disk},ffmpeg exit=${r.exit.code}`,
     );
     // Degradation must be explicit: silent backpressure turns streaming upload into "disk only".
     if (r.backpressured) {
-      log(`[live-pump] ⚠️ 上传跟不上录制,本段已降级为纯落盘(${(r.streamedBytes / MiB).toFixed(1)}/${(r.spooledBytes / MiB).toFixed(1)}MiB 流出)`);
+      log(`[直播直传] ⚠️ 上传跟不上录制,本段已降级为纯落盘(${(r.streamedBytes / MiB).toFixed(1)}/${(r.spooledBytes / MiB).toFixed(1)}MiB 流出)`);
     }
-    if (r.sessionLeaked) log("[live-pump] ⚠️ UPOS 会话半截泄漏:协议无 abort,须按原文件重传覆盖");
+    if (r.sessionLeaked) log("[直播直传] ⚠️ UPOS 会话半截泄漏:协议无 abort,须按原文件重传覆盖");
     // A tiny part at a normal stream end is usually the last few packets, not a useful P.
     // A stalled part is different: it is the tail we are explicitly trying to preserve.
     if (r.spooledBytes < MIN_PART_BYTES && r.sealedBy !== "stalled") {
-      log("[live-pump] 本段 < 1MiB,判定已收播");
+      log("[直播直传] 本段 < 1MiB,判定已收播");
       break;
     }
   }

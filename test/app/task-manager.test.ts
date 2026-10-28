@@ -142,7 +142,7 @@ describe("TaskManager", () => {
     expect(mgr.start(b)).toBe(false);
     expect(spawner.spawned).toHaveLength(1);
     expect(mgr.isRunning(b)).toBe(false);
-    expect(logs.join("\n")).toContain("0 落盘");
+    expect(logs.join("\n")).toContain("直播直传");
   });
 
   it("不同房间的 0 落盘任务互不挡(多房间并发仍可同时录)", () => {

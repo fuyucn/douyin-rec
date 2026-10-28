@@ -34,5 +34,19 @@ export function zeroDiskXmlPath(
   const head = anchorName?.trim()
     ? (sanitizePathSegment(anchorName.trim()).slice(0, 60) || roomSlug)
     : roomSlug;
-  return join(outDir, `live-pump-${head}_${z.date}_${z.hh}-${z.mm}-${z.ss}.xml`);
+  return join(outDir, `${head}_${z.date}_${z.hh}-${z.mm}-${z.ss}.live.xml`);
+}
+
+/** New live-upload spool naming: time-first, with a `.live` suffix before the media extension. */
+export function zeroDiskSpoolName(
+  head: string,
+  startMs: number,
+  seg: number,
+  timeZone: string = processTimeZone(),
+  collision = 0,
+): string {
+  const z = zonedStamp(startMs, timeZone);
+  const safeHead = sanitizePathSegment(head).slice(0, 60) || "room";
+  const suffix = collision > 0 ? `-${collision}` : "";
+  return `${safeHead}_${z.date}_${z.hh}-${z.mm}-${z.ss}_${String(seg).padStart(3, "0")}${suffix}.live.ts`;
 }
