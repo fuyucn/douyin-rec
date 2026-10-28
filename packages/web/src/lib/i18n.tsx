@@ -50,7 +50,7 @@ export function useT(): (key: string, vars?: Record<string, string | number>) =>
 
 // ── 词典(= i18next resources)──────────────────────────────────────────────────
 // zh / en 同构。新增文案两边都加。值里用单花括号 {var} 占位;计数键用 _one/_other + {count}。
-export const DICT = {
+const DICT = {
   zh: {
     common: { back: "返回", cancel: "取消", confirm: "确定", save: "保存", delete: "删除", refresh: "刷新", close: "关闭", optional: "可选", on: "开", off: "关", yes: "是", no: "否", localTimeTooltip: "当前时区：{serverTz}\n你的本地时间：{local}" },
     nav: { title: "抖音录制控制台", rooms: "房间", nodes: "节点", tasksList: "录制任务", queue: "处理队列", advanced: "高级", login: "扫码登录", paste: "手动粘贴", clear: "清除", notif: "站内提醒设置" },
