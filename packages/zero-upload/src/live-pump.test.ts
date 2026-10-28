@@ -1058,6 +1058,26 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
     expect(r.segments).toHaveLength(0);
   }, 10_000);
 
+  it("非停滞的零字节上传错误直接失败，不进入恢复循环", async () => {
+    writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    installFakeFfmpeg(Buffer.alloc(0));
+    const { fake } = makeUploadFetch({ failAllPuts: true });
+    const r = await runLivePump({
+      ...base({ maxSegments: 100 }),
+      cookiesPath: join(dir, "cookies.json"),
+      fetchImpl: fake,
+      sizeCap: CHUNK,
+      maxMs: 10_000,
+      log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toBeTruthy();
+    expect(r.error).not.toContain("恢复窗口");
+    expect(r.segments[0]?.uploadError).toBeTruthy();
+  }, 10_000);
+
   it("上传 complete 失败后在同一运行内自动重试并追稿", async () => {
     writeFileSync(join(dir, "cookies.json"), JSON.stringify({
       cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },

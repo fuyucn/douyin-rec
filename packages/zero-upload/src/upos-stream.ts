@@ -76,6 +76,8 @@ export interface PreuploadOptions {
   preuploadBase?: string;
   /** 覆盖 fetch(测试注入)。 */
   fetchImpl?: typeof fetch;
+  /** Hard-stop signal; rate-limit backoff remains bounded by the caller as well. */
+  signal?: AbortSignal;
 }
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -125,7 +127,7 @@ export async function preupload(o: PreuploadOptions): Promise<PreuploadResult> {
   });
   const res = await doFetch(`${base}/preupload?${query.toString()}`, {
     headers: { "User-Agent": UA, Referer: "https://member.bilibili.com/", Cookie: cookie },
-    signal: controlSignal(),
+    signal: controlSignal(o.signal),
   });
   const j = (await res.json()) as RawUposBucket;
   if (isRateLimitedBody(j)) throw new UposRateLimited(j as Record<string, unknown>);

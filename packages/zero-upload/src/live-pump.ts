@@ -622,7 +622,7 @@ export class LivePumpSession {
       title: target.title,
       bytes: fb.bytes,
       durationSec: target.durationSec,
-    });
+    }, signal);
     if (!submitted.ok) return { ok: false, error: submitted.error };
     return { ok: true, bvid: submitted.bvid, aid: submitted.aid };
   }
@@ -801,7 +801,7 @@ export class LivePumpSession {
     title: string;
     bytes: number;
     durationSec: number;
-  }): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string }> {
+  }, signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string }> {
     if (this.stateUntrusted) {
       return { ok: false, error: "state sidecar is untrusted; refusing to submit (manual recovery required)" };
     }
@@ -836,7 +836,7 @@ export class LivePumpSession {
       return { ok: false, error: `cannot persist upload intent: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
     }
 
-    const result = await this.submitWithRateLimitRetry(pending, video, doFetch);
+    const result = await this.submitWithRateLimitRetry(pending, video, doFetch, signal);
     if (!result.ok) return { ok: false, error: result.error };
     this.state = {
       ...this.state,
@@ -887,6 +887,7 @@ export class LivePumpSession {
     pending: NonNullable<LivePumpState["pending"]>,
     video: StudioVideo,
     doFetch: typeof fetch,
+    signal?: AbortSignal,
   ): Promise<{ ok: true; bvid?: string; aid?: number } | { ok: false; error: string }> {
     const sleep = this.o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
     const baseMs = this.o.rateLimitBaseMs ?? 60_000;
@@ -941,7 +942,8 @@ export class LivePumpSession {
         `[live-pump] ${pending.kind} 命中投稿限流(${JSON.stringify(raw).slice(0, 120)}),` +
         `${waitMs / 1000}s 后重试(${attempt + 2}/${maxAttempts})`,
       );
-      await sleep(waitMs);
+      await sleepUnlessAborted(waitMs, [signal], sleep);
+      if (signal?.aborted) return { ok: false, error: "submit aborted" };
     }
     return { ok: false, error: `${lastError}(限流重试 ${maxAttempts} 次后仍失败)` };
   }
@@ -1229,6 +1231,7 @@ export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
       if (!stdout || state?.destroyed || state?.readableEnded) return;
       try { stdout.destroy?.(new Error("live-pump: ffmpeg stdout did not close after kill")); } catch { /* already gone */ }
     }, o.destroyGraceMs ?? 5_000);
+    stdoutDestroyTimer.unref?.();
   };
   const exited = new Promise<SegmentExit>((resolve) => {
     proc.on("close", (...a: unknown[]) => {
@@ -1363,11 +1366,14 @@ export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
   const exit = await Promise.race([
     exited,
     new Promise<SegmentExit>((resolve) => {
-      const timer = setTimeout(() => resolve({
-        code: null,
-        signal: sealedBy === "abort" ? "SIGTERM" : "SIGKILL",
-        stderrTail,
-      }), o.exitGraceMs ?? 10_000);
+      const timer = setTimeout(() => {
+        stopChild();
+        resolve({
+          code: null,
+          signal: sealedBy === "abort" ? "SIGTERM" : "SIGKILL",
+          stderrTail,
+        });
+      }, o.exitGraceMs ?? 10_000);
       timer.unref?.();
     }),
   ]);
@@ -1452,7 +1458,7 @@ export async function pumpSegment(o: {
     try {
       session = await preupload({
         cookiesPath: o.cookiesPath, fileName: o.fileName, totalSize: o.sizeCap,
-        line: o.line, fetchImpl: o.fetchImpl,
+        line: o.line, fetchImpl: o.fetchImpl, ...(o.signal ? { signal: o.signal } : {}),
       });
       break;
     } catch (e) {
@@ -1461,7 +1467,8 @@ export async function pumpSegment(o: {
       // Silent, it looks exactly like a hang — no ffmpeg output, no log, no error.
       const waitMs = Math.min(30_000 * 2 ** attempt, 300_000);
       o.log?.(`[live-pump] preupload 命中限流,${waitMs / 1000}s 后重试(${attempt + 2}/9): ${o.fileName}`);
-      await new Promise((res) => setTimeout(res, waitMs));
+      await sleepUnlessAborted(waitMs, [o.signal]);
+      if (o.signal?.aborted) throw new Error("live-pump aborted during preupload backoff");
     }
   }
 
@@ -1619,12 +1626,13 @@ async function reuploadOpenSpool(
     try {
       session = await preupload({
         cookiesPath: o.cookiesPath, fileName: o.fileName, totalSize,
-        line: o.line, fetchImpl: o.fetchImpl,
+        line: o.line, fetchImpl: o.fetchImpl, ...(o.signal ? { signal: o.signal } : {}),
       });
       break;
     } catch (e) {
       if (!(e instanceof UposRateLimited) || attempt >= 8) throw e;
-      await new Promise((res) => setTimeout(res, Math.min(30_000 * 2 ** attempt, 300_000)));
+      await sleepUnlessAborted(Math.min(30_000 * 2 ** attempt, 300_000), [o.signal]);
+      if (o.signal?.aborted) throw new Error("live-pump aborted during preupload backoff");
     }
   }
 
@@ -2215,12 +2223,16 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     // No bytes means there is nothing to append. Recover the source instead of turning a dead
     // socket into a permanent task failure.
     if (r.spooledBytes === 0) {
-      if (r.sealedBy !== "stalled" && !r.uploadError) {
+      if (r.sealedBy === "stalled") {
+        recoveryDeadline ??= Date.now() + recoverWindowMs;
+        continue;
+      }
+      if (!r.uploadError) {
         log("[live-pump] 本段没有写入,判定已收播");
         break;
       }
-      recoveryDeadline ??= Date.now() + recoverWindowMs;
-      continue;
+      // A non-stalled empty part with an upload error is a real failure. Fall through to the
+      // existing error return; treating it as a source stall would spin preupload forever.
     }
 
     const unconfirmedIndex = session.nextPartIndex;
@@ -2243,7 +2255,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       let waitMs = Math.min(5_000, recoverWindowMs);
       let lastError = "";
       for (;;) {
-        if (o.signal?.aborted || o.drainSignal?.aborted) return { ok: false, error: "stopped" };
+        // Drain means "finish this part, do not start another"; a hard signal is the only thing
+        // that should abort the current spool retry.
+        if (o.signal?.aborted) return { ok: false, error: "stopped" };
         const recovered = await session.recover().catch((e: unknown) => ({
           ok: false,
           reason: String((e as Error)?.message ?? e).slice(0, 200),
@@ -2273,7 +2287,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         if (Date.now() >= deadline) return { ok: false, error: lastError || "自动重试窗口耗尽" };
         const sleepMs = Math.max(0, Math.min(waitMs, deadline - Date.now()));
         log(`[live-pump] 段${seg + 1} 自动重试上传,${Math.max(1, Math.ceil(sleepMs / 1000))}s 后继续: ${lastError}`);
-        await sleepUnlessAborted(sleepMs, [o.signal, o.drainSignal], o.sleep);
+        await sleepUnlessAborted(sleepMs, [o.signal], o.sleep);
         waitMs = Math.min(60_000, Math.max(1_000, waitMs * 2));
       }
     };
@@ -2368,7 +2382,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         title: o.partTitle?.(nextIndex + 1, liveTitle) ?? fileName.replace(/\.[^.]+$/, ""),
         bytes: r.spooledBytes,
         durationSec: r.spoolDurationSec,
-      });
+      }, o.signal);
       if (!submitted.ok) {
         log(`[live-pump] 段${seg + 1} 稿件提交失败${(o.spoolMode ?? "full") === "none" ? "(无本地副本)" : ",保留 spool"}: ${submitted.error}`);
         return {
