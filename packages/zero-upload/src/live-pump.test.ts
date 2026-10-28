@@ -15,6 +15,7 @@ import {
   acquireStreamWithBackoff,
   zeroDiskPartLost,
   ZERO_DISK_PART_LOST,
+  recoveryDeadlineAfterPart,
   alignFileSize,
   pumpSegment,
   reuploadSpoolFile,
@@ -24,6 +25,7 @@ import {
   DEFAULT_SEGMENT_CAP,
   LivePumpSession,
   archivedSpoolPathsToKeep,
+  spoolPathsToKeep,
   spoolSweepSafe,
   readLivePumpState,
   writeLivePumpState,
@@ -68,7 +70,7 @@ function session(): PreuploadResult {
  * 会回答 preupload 的假 fetch —— 整文件回退路径自己要先建会话。
  * `completeReject` = 让 complete 失败,验证失败不被静默。
  */
-function makeUploadFetch(opts: { completeReject?: boolean; onPut?: () => void } = {}) {
+function makeUploadFetch(opts: { completeReject?: boolean; onPut?: () => void; failAllPuts?: boolean } = {}) {
   const puts: Array<{ partNumber: string; bytes: number; body?: Buffer }> = [];
   const fake = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
@@ -84,6 +86,7 @@ function makeUploadFetch(opts: { completeReject?: boolean; onPut?: () => void } 
       return new Response(JSON.stringify({ upload_id: "uid" }), { status: 200 });
     }
     if (method === "PUT") {
+      if (opts.failAllPuts) return new Response("boom", { status: 500 });
       const ab = init?.body as ArrayBuffer | undefined;
       puts.push({ partNumber: u.searchParams.get("partNumber") ?? "0", bytes: ab?.byteLength ?? 0, body: ab ? Buffer.from(ab) : undefined });
       opts.onPut?.();
@@ -96,7 +99,7 @@ function makeUploadFetch(opts: { completeReject?: boolean; onPut?: () => void } 
 }
 
 /** 假 fetch:记录 PUT 的分块参数,可按 partNumber 注入失败。 */
-function makeFetch(opts: { failPutAt?: number } = {}) {
+function makeFetch(opts: { failPutAt?: number; failAllPuts?: boolean } = {}) {
   const puts: Array<{ partNumber: string; bytes: number }> = [];
   const fake = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -106,7 +109,7 @@ function makeFetch(opts: { failPutAt?: number } = {}) {
     }
     if ((init?.method ?? "GET").toUpperCase() === "PUT") {
       const partNumber = u.searchParams.get("partNumber") ?? "0";
-      if (opts.failPutAt === Number(partNumber)) return new Response("boom", { status: 500 });
+      if (opts.failAllPuts || opts.failPutAt === Number(partNumber)) return new Response("boom", { status: 500 });
       const body = init?.body;
       puts.push({ partNumber, bytes: body instanceof ArrayBuffer ? body.byteLength : 0 });
       return new Response("", { status: 200 });
@@ -119,17 +122,37 @@ function makeFetch(opts: { failPutAt?: number } = {}) {
 /** 假 ffmpeg:把 data 按小块推给 stdout,推完后(等 delayMs)才触发 close。 */
 function installFakeFfmpeg(
   data: Buffer,
-  opts: { delayBeforeCloseMs?: number; chunkEvery?: number; delayMs?: number } = {},
-): void {
+  opts: {
+    delayBeforeCloseMs?: number;
+    chunkEvery?: number;
+    delayMs?: number;
+    holdOpen?: boolean | ((spawnIndex: number) => boolean);
+    killEndsStdout?: boolean;
+  } = {},
+): { kills: NodeJS.Signals[] } {
+  const kills: NodeJS.Signals[] = [];
+  let spawnIndex = 0;
   const spawn: SpawnFn = (() => {
+    const currentSpawn = spawnIndex++;
+    const holdOpen = typeof opts.holdOpen === "function" ? opts.holdOpen(currentSpawn) : opts.holdOpen;
     const stdout = new PassThrough();
     const stderr = new PassThrough();
     const events = {} as Record<string, Array<(...a: unknown[]) => void>>;
+    let closed = false;
+    const close = (code: number | null, signal: string | null): void => {
+      if (closed) return;
+      closed = true;
+      for (const fn of events.close ?? []) fn(code, signal);
+    };
     const proc: ChildProcessLike = {
       stdout,
       stderr,
       on(ev, fn) { (events[ev] ??= []).push(fn); },
-      kill() { for (const fn of events.close ?? []) fn(null, "SIGKILL"); },
+      kill(sig) {
+        kills.push(sig ?? "SIGKILL");
+        if (opts.killEndsStdout !== false) stdout.end();
+        setTimeout(() => close(null, "SIGKILL"), 1);
+      },
     };
     (async (): Promise<void> => {
       const every = opts.chunkEvery ?? 256;
@@ -138,13 +161,15 @@ function installFakeFfmpeg(
         stdout.write(data.subarray(i, i + every));
         if (delay > 0) await new Promise((r) => setTimeout(r, delay));
       }
+      if (holdOpen) return;
       stdout.end();
       await new Promise((r) => setTimeout(r, opts.delayBeforeCloseMs ?? 5));
-      for (const fn of events.close ?? []) fn(0, null);
+      close(0, null);
     })();
     return proc;
   }) as SpawnFn;
   setSpawnForTest(spawn);
+  return { kills };
 }
 
 afterEach(() => { setSpawnForTest(undefined); });
@@ -230,6 +255,13 @@ describe("alignFileSize", () => {
     expect(1024 * 1024 * 1024 % (10 * 1024 * 1024)).not.toBe(0);
     expect(DEFAULT_SEGMENT_CAP).toBe(alignFileSize(1024 * 1024 * 1024));
     expect(DEFAULT_SEGMENT_CAP).toBe(1030 * 1024 * 1024);
+  });
+});
+
+describe("恢复窗口只属于当前停滞", () => {
+  it("normal progress clears the previous deadline; another stall starts a fresh one", () => {
+    expect(recoveryDeadlineAfterPart("cap", 1000, 500)).toBeUndefined();
+    expect(recoveryDeadlineAfterPart("stalled", 1000, 500)).toBe(1500);
   });
 });
 
@@ -343,6 +375,48 @@ describe("runSegment", () => {
     const r = await p;
     expect(statSync(join(dir, "cancel.mkv")).size).toBe(r.spooledBytes);
   });
+
+  it("stdout 长时间无数据 → 看门狗杀 ffmpeg 并标记 stalled(仍有字节)", async () => {
+    const total = CHUNK * 2;
+    const { fake } = makeFetch();
+    const ffmpeg = installFakeFfmpeg(Buffer.alloc(total, 9), { holdOpen: true });
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: total * 2, spoolPath: join(dir, "stall.mkv"),
+      session: session(), fetchImpl: fake, stallTimeoutMs: 20,
+    });
+    expect(r.sealedBy).toBe("stalled");
+    expect(r.spooledBytes).toBe(total);
+    expect(r.stalledMs).toBeGreaterThanOrEqual(20);
+    expect(ffmpeg.kills).toContain("SIGKILL");
+    expect(statSync(join(dir, "stall.mkv")).size).toBe(total);
+  });
+
+  it("stdout 长时间无数据且零字节 → 看门狗仍能结束本段", async () => {
+    const { fake } = makeFetch();
+    const ffmpeg = installFakeFfmpeg(Buffer.alloc(0), { holdOpen: true });
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: CHUNK, spoolPath: join(dir, "empty-stall.mkv"),
+      session: session(), fetchImpl: fake, stallTimeoutMs: 20,
+    });
+    expect(r.sealedBy).toBe("stalled");
+    expect(r.spooledBytes).toBe(0);
+    expect(ffmpeg.kills).toContain("SIGKILL");
+  });
+
+  it("kill 后 stdout 仍不关闭 → 兜底 destroy,进程关闭事件也不能无限等待", async () => {
+    const { fake } = makeFetch();
+    const ffmpeg = installFakeFfmpeg(Buffer.alloc(0), {
+      holdOpen: true,
+      killEndsStdout: false,
+    });
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: CHUNK, spoolPath: join(dir, "destroy-stall.mkv"),
+      session: session(), fetchImpl: fake, stallTimeoutMs: 20,
+      destroyGraceMs: 20, exitGraceMs: 50,
+    });
+    expect(r.sealedBy).toBe("stalled");
+    expect(ffmpeg.kills).toContain("SIGKILL");
+  });
 });
 
 describe("双阈值结算:字节兜底 与 时长,谁先到算一 P", () => {
@@ -367,6 +441,18 @@ describe("双阈值结算:字节兜底 与 时长,谁先到算一 P", () => {
     expect(r.streamedBytes).toBe(puts.reduce((a, p) => a + p.bytes, 0));
     // 时长结算是**正常收尾**:sealedBy 告诉调用方「到点了」,不是「流断了」。
     expect(r.sealedBy).toBe("duration");
+  });
+
+  it("时长到点但 stdout 无数据 → 也必须杀死 ffmpeg,不能继续挂住", async () => {
+    const ffmpeg = installFakeFfmpeg(Buffer.alloc(0), { holdOpen: true });
+    const { fake } = makeFetch();
+    const r = await runSegment({
+      args: ["-fake"], sizeCap: CHUNK, spoolPath: join(dir, "silent-duration.mkv"),
+      session: session(), fetchImpl: fake, seal: { maxBytes: CHUNK, maxMs: 20 },
+    });
+    expect(r.sealedBy).toBe("duration");
+    expect(r.spooledBytes).toBe(0);
+    expect(ffmpeg.kills).toContain("SIGKILL");
   });
 
   it("字节兜底先到 → 走原来的完整收尾路径", async () => {
@@ -760,6 +846,34 @@ describe("录制相位标记(TaskManager 靠它区分「等待开播」与「录
   }, 20_000);
 });
 
+describe("停滞上传失败:spool 必须先进入 WAL,再允许重启恢复", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-wal-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("上传和整文件回退都失败时,未确认分 P 仍在 state 中且清扫器会保留 spool", async () => {
+    writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    installFakeFfmpeg(Buffer.alloc(CHUNK * 2, 0x5a), { holdOpen: true });
+    const { fake } = makeUploadFetch({ failAllPuts: true });
+    const r = await runLivePump({
+      cookiesPath: join(dir, "cookies.json"), room: "wal", spoolDir: dir, title: "t",
+      tid: 21, tag: "x", private: true, sizeCap: CHUNK * 4, maxMs: 10_000,
+      maxSegments: 1, quality: "origin", submit: true, spoolMode: "full",
+      fetchImpl: fake, probeDuration: async () => 60, scanDtsGap: async () => null,
+      stallTimeoutMs: 20, autoRetryUpload: false,
+      fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
+    });
+    expect(r.ok).toBe(false);
+    const state = readLivePumpState(livePumpStatePath(dir, "wal"));
+    expect(state?.parts).toHaveLength(1);
+    expect(state?.parts[0]?.confirmed).toBe(false);
+    expect(existsSync(state!.parts[0]!.spoolPath)).toBe(true);
+    expect(spoolPathsToKeep(state)).toContain(state!.parts[0]!.spoolPath);
+  }, 20_000);
+});
+
 describe("多房间并发:各自独立稿件与状态,互不串稿", () => {
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "live-pump-conc-")); });
@@ -851,7 +965,9 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
    */
   const MiB = 1024 * 1024;
   const PART = 12 * MiB;                 // 每段 12 MiB,稳稳越过 1 MiB 门槛
-  const seg = (): void => installFakeFfmpeg(Buffer.alloc(PART, 0x5a), { chunkEvery: 64 * 1024, delayMs: 1, delayBeforeCloseMs: 5 });
+  const seg = (): void => {
+    installFakeFfmpeg(Buffer.alloc(PART, 0x5a), { chunkEvery: 64 * 1024, delayMs: 1, delayBeforeCloseMs: 5 });
+  };
 
   /** 完整可跑的假 UPOS(建稿/追加都通);参数沿用既有成功组合。 */
   function upos(chunkSize: number, opts: { seasonCalls?: string[]; failSeasonState?: () => void } = {}): typeof fetch {
@@ -897,6 +1013,119 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
   });
   const run = (o: { drainSignal?: AbortSignal; signal?: AbortSignal; maxSegments?: number; log?: (m: string) => void } = {}): Promise<ReturnType<typeof runLivePump> extends Promise<infer R> ? R : never> =>
     runLivePump({ ...base(o), cookiesPath: join(dir, "cookies.json"), fetchImpl: upos(64 * 1024), ...(o.log ? { log: o.log } : {}) });
+
+  it("源流无写入达到阈值 → 自动封口并继续追到同一稿件", async () => {
+    const logs: string[] = [];
+    const partBytes = 1_100_000;
+    const ffmpeg = installFakeFfmpeg(Buffer.alloc(partBytes, 0x5a), {
+      holdOpen: (spawnIndex) => spawnIndex === 0,
+      chunkEvery: 64 * 1024,
+    });
+    const r = await runLivePump({
+      ...base({ maxSegments: 2 }),
+      cookiesPath: join(dir, "cookies.json"),
+      fetchImpl: upos(64 * 1024),
+      sizeCap: 2 * 1024 * 1024,
+      maxMs: 10_000,
+      stallTimeoutMs: 20,
+      recoverWindowMs: 500,
+      queueCapacity: 64,
+      log: (m) => logs.push(m),
+    });
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.segments).toHaveLength(2);
+    expect(r.bvid).toBe("BILIfake1");
+    expect(ffmpeg.kills.length).toBeGreaterThan(0);
+    expect(logs).toContain("[状态] 录制停滞");
+    expect(logs.some((m) => m.includes("自动封口并尝试追到当前稿件"))).toBe(true);
+  }, 20_000);
+
+  it("连续零字节停滞不会无限重置恢复窗口", async () => {
+    installFakeFfmpeg(Buffer.alloc(0), { holdOpen: true });
+    const r = await runLivePump({
+      ...base({ maxSegments: 0 }),
+      cookiesPath: join(dir, "cookies.json"),
+      fetchImpl: upos(64 * 1024),
+      sizeCap: CHUNK,
+      maxMs: 10_000,
+      stallTimeoutMs: 20,
+      recoverWindowMs: 1000,
+      idlePollMs: 20,
+      log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("恢复窗口");
+    expect(r.segments).toHaveLength(0);
+  }, 10_000);
+
+  it("非停滞的零字节上传错误直接失败，不进入恢复循环", async () => {
+    writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    installFakeFfmpeg(Buffer.alloc(0));
+    const { fake } = makeUploadFetch({ failAllPuts: true });
+    const r = await runLivePump({
+      ...base({ maxSegments: 100 }),
+      cookiesPath: join(dir, "cookies.json"),
+      fetchImpl: fake,
+      sizeCap: CHUNK,
+      maxMs: 10_000,
+      log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toBeTruthy();
+    expect(r.error).not.toContain("恢复窗口");
+    expect(r.segments[0]?.uploadError).toBeTruthy();
+  }, 10_000);
+
+  it("上传 complete 失败后在同一运行内自动重试并追稿", async () => {
+    writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    let preuploads = 0;
+    let completes = 0;
+    const logs: string[] = [];
+    const fake = (async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const method = (init?.method ?? "GET").toUpperCase();
+      const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+      if (u.pathname.endsWith("/preupload")) {
+        preuploads++;
+        return json({
+          OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1",
+          endpoint: "//upos.test", upos_uri: `upos://b/p${preuploads}.ts`,
+        });
+      }
+      if (method === "POST" && u.searchParams.has("uploads")) return json({ upload_id: `uid-${preuploads}` });
+      if (method === "PUT") return new Response("", { status: 200 });
+      if (method === "POST" && u.hostname.includes("upos.test")) {
+        completes++;
+        return completes <= 2 ? json({ OK: 0 }) : json({ OK: 1, key: "bucket/recovered.ts" });
+      }
+      if (u.pathname === "/x/vu/web/add/v3") return json({ code: 0, data: { aid: 7, bvid: "BILIretry" } });
+      return new Response(JSON.stringify({ code: 1, message: "unexpected" }), { status: 500 });
+    }) as unknown as typeof fetch;
+    installFakeFfmpeg(Buffer.alloc(1100, 0x5a), { holdOpen: true });
+    const r = await runLivePump({
+      ...base({ maxSegments: 1 }),
+      cookiesPath: join(dir, "cookies.json"),
+      fetchImpl: fake,
+      sizeCap: 4096,
+      maxMs: 10_000,
+      spoolMode: "full",
+      stallTimeoutMs: 20,
+      recoverWindowMs: 1000,
+      probeDuration: async () => 60,
+      scanDtsGap: async () => null,
+      queueCapacity: 64,
+      log: (m) => logs.push(m),
+    });
+    expect(r.ok, `${r.error ?? ""}\n${logs.join("\n")}`).toBe(true);
+    expect(r.bvid).toBe("BILIretry");
+    expect(completes).toBe(3);
+    expect(r.segments[0]?.stem).toBe("recovered");
+    expect(readLivePumpState(livePumpStatePath(dir, "dr"))?.parts[0]?.stem).toBe("recovered");
+  }, 10_000);
 
   it("drainSignal 一直未置位 → 一路录到上限(对照组)", async () => {
     seg();
@@ -2098,6 +2327,51 @@ describe("LivePumpSession: one durable archive, append as parts finish", () => {
     expect(r.ok).toBe(true);
     expect(completes).toBeGreaterThan(0);
     expect(readLivePumpState(statePath)?.parts.every((p) => p.confirmed)).toBe(true);
+    expect(existsSync(spool)).toBe(false);
+  });
+
+  it("can recover the first unconfirmed part without an archive identity by creating it", async () => {
+    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const u = new URL(url);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (u.pathname.endsWith("/preupload")) {
+        return new Response(JSON.stringify({
+          chunk_size: CHUNK, auth: "a", endpoint: "//upos-cs.bilivideo.com",
+          biz_id: "1", upos_uri: "upos://bucket/first.ts", OK: 1,
+        }), { status: 200 });
+      }
+      if (method === "POST" && u.searchParams.has("uploads")) {
+        return new Response(JSON.stringify({ upload_id: "uid-first" }), { status: 200 });
+      }
+      if (method === "PUT") return new Response("", { status: 200 });
+      if (method === "POST" && u.hostname.includes("bilivideo")) {
+        return new Response(JSON.stringify({ OK: 1, key: "bucket/first.ts" }), { status: 200 });
+      }
+      if (u.pathname === "/x/vu/web/add/v3") {
+        return new Response(JSON.stringify({ code: 0, data: { aid: 7, bvid: "BILIcreated" } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ code: 1, message: "unexpected request" }), { status: 500 });
+    }) as unknown as typeof fetch;
+    const statePath = join(dir, "live-pump-first.state.json");
+    const spool = join(dir, "first.ts");
+    writeFileSync(spool, "first-part-bytes");
+    writeLivePumpState(statePath, {
+      schemaVersion: 1, room: "first", createdAt: 1, title: "t", tid: 21, tag: "x", private: true,
+      parts: [{
+        index: 0, spoolPath: spool, filename: "first.ts", stem: "", title: "P1",
+        bytes: 15, durationSec: 10, confirmed: false,
+      }],
+      updatedAt: 1,
+    });
+    const session = new LivePumpSession({
+      cookiesPath: COOKIES, room: "first", spoolDir: dir, title: "t",
+      tid: 21, tag: "x", private: true, fetchImpl: impl,
+    });
+    const r = await session.resubmitUnconfirmedPart();
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(r.bvid).toBe("BILIcreated");
+    expect(readLivePumpState(statePath)?.parts[0]?.confirmed).toBe(true);
     expect(existsSync(spool)).toBe(false);
   });
 

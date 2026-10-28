@@ -476,13 +476,17 @@ describe("TaskManager", () => {
     await mgr.stop(id);
   });
 
-  it("tracks recording phase from `[状态]` lines (录制中 / 等待开播)", async () => {
+  it("tracks recording phase from `[状态]` lines (录制中 / 录制停滞 / 等待开播)", async () => {
     const id = addTask();
     const spawner = new MockSpawner();
     const mgr = new TaskManager(store, spawner, { log: () => {} });
 
     mgr.start(id);
     expect(mgr.isRecording(id)).toBe(false); // 刚启动=等待开播
+    spawner.last(id).emitLog("[task 1] [状态] 录制中");
+    expect(mgr.isRecording(id)).toBe(true);
+    spawner.last(id).emitLog("[task 1] [状态] 录制停滞");
+    expect(mgr.isRecording(id)).toBe(false);
     spawner.last(id).emitLog("[task 1] [状态] 录制中");
     expect(mgr.isRecording(id)).toBe(true);
     spawner.last(id).emitLog("[task 1] [状态] 等待开播"); // 断流回到等待

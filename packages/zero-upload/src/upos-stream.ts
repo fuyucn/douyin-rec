@@ -76,9 +76,17 @@ export interface PreuploadOptions {
   preuploadBase?: string;
   /** 覆盖 fetch(测试注入)。 */
   fetchImpl?: typeof fetch;
+  /** Hard-stop signal; rate-limit backoff remains bounded by the caller as well. */
+  signal?: AbortSignal;
 }
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const CONTROL_TIMEOUT_MS = 60_000;
+
+function controlSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(CONTROL_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
 
 /**
  * B 站限流:preupload 会以 HTTP 406 + `{"code":601,"message":"您上传视频过快…"}`
@@ -119,6 +127,7 @@ export async function preupload(o: PreuploadOptions): Promise<PreuploadResult> {
   });
   const res = await doFetch(`${base}/preupload?${query.toString()}`, {
     headers: { "User-Agent": UA, Referer: "https://member.bilibili.com/", Cookie: cookie },
+    signal: controlSignal(o.signal),
   });
   const j = (await res.json()) as RawUposBucket;
   if (isRateLimitedBody(j)) throw new UposRateLimited(j as Record<string, unknown>);
@@ -355,6 +364,7 @@ export async function lookupArchive(o: {
     try {
       res = await doFetch(url, {
         headers: { "User-Agent": UA, Cookie: cookie, Referer: "https://member.bilibili.com/" },
+        signal: controlSignal(),
       });
     } catch {
       transportFailures++;
@@ -436,6 +446,7 @@ export async function findArchiveByTitle(o: {
     try {
       res = await doFetch(`https://member.bilibili.com/x/web/archives?status=${status}&pn=1`, {
         headers: { "User-Agent": UA, Cookie: cookie, Referer: "https://member.bilibili.com/" },
+        signal: controlSignal(),
       });
     } catch {
       continue;
@@ -529,6 +540,7 @@ export async function submitStudio(o: StudioInput): Promise<SubmitResult> {
     method: "POST",
     headers: { "Content-Type": "application/json", "User-Agent": UA, Cookie: cookie, Referer: "https://member.bilibili.com/" },
     body: JSON.stringify(studio),
+    signal: controlSignal(),
   });
   const raw = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   const data = (raw.data ?? {}) as { aid?: number; bvid?: string };
@@ -648,7 +660,7 @@ export async function uploadChunks(o: UploadOptions): Promise<UposPart[]> {
       declaredTotal = uploadedBytes + body.length;
     }
     const params = new URLSearchParams({
-      uploadId: await uploadIdOf(session, doFetch),
+      uploadId: await uploadIdOf(session, doFetch, o.signal),
       chunks: String(chunks),
       total: String(declaredTotal),
       chunk: String(i),
@@ -687,11 +699,12 @@ export async function complete(o: {
   session: PreuploadResult;
   parts: UposPart[];
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
 }): Promise<CompleteResult> {
   const doFetch = o.fetchImpl ?? fetch;
   const url = new URL(o.session.url);
   url.searchParams.set("name", o.session.fileName);
-  url.searchParams.set("uploadId", await uploadIdOf(o.session, doFetch));
+  url.searchParams.set("uploadId", await uploadIdOf(o.session, doFetch, o.signal));
   url.searchParams.set("biz_id", o.session.bucket.bizId);
   url.searchParams.set("output", "json");
   url.searchParams.set("profile", "ugcupos/bup");
@@ -699,6 +712,7 @@ export async function complete(o: {
     method: "POST",
     headers: { "X-Upos-Auth": o.session.bucket.auth, "Content-Type": "application/json", "User-Agent": UA },
     body: JSON.stringify({ parts: o.parts }),
+    signal: controlSignal(o.signal),
   });
   const raw = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok || raw.OK !== 1) return { ok: false, raw: { ...raw, httpStatus: res.status } };
@@ -708,7 +722,7 @@ export async function complete(o: {
 }
 
 /** upload_id 由 POST {url}?uploads&output=json 换取;一个会话只取一次。 */
-async function uploadIdOf(session: PreuploadResult, doFetch: typeof fetch): Promise<string> {
+async function uploadIdOf(session: PreuploadResult, doFetch: typeof fetch, signal?: AbortSignal): Promise<string> {
   const cached = (session as { _uploadId?: string })._uploadId;
   if (cached) return cached;
   const url = new URL(session.url);
@@ -717,6 +731,7 @@ async function uploadIdOf(session: PreuploadResult, doFetch: typeof fetch): Prom
   const res = await doFetch(url.toString(), {
     method: "POST",
     headers: { "X-Upos-Auth": session.bucket.auth, "User-Agent": UA },
+    signal: controlSignal(signal),
   });
   const j = (await res.json()) as { upload_id?: string };
   if (!res.ok || !j.upload_id) throw new Error(`换取 upload_id 失败: HTTP ${res.status}`);
