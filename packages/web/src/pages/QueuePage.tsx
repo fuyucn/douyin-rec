@@ -38,7 +38,7 @@ type TFunc = (key: string, vars?: Record<string, string | number>) => string;
  * streamKey `{platform}:{roomSlug}:{date}[_HHMM][-zd]` → 场次时间展示。
  * 同日多场时 `_HHMM` 是关键区分(如 2026-10-07_2101 = 21:01 开播),加 `·` 分隔更易读。
  */
-function sessionTime(streamKey: string): string {
+function sessionTime(streamKey: string, t: TFunc): string {
   const suffix = streamKey.split(":").slice(2).join(":"); // "2026-10-07_2101"
   const m = /^(\d{4}-\d{2}-\d{2})(?:_(\d{2})(\d{2}))?(-zd)?$/.exec(suffix);
   if (!m) return suffix;
@@ -46,7 +46,7 @@ function sessionTime(streamKey: string): string {
   const short = date.slice(5); // MM-DD
   if (!hh) return short;
   // `-zd` = zero-disk run (issue #324): show it as a tag instead of the raw suffix.
-  if (zd) return `${short} ${hh}:${mm} · 0落盘`;
+  if (zd) return `${short} ${hh}:${mm} · ${t("queue.live.directTag")}`;
   // _HHMM 是录制端按**本地时区**写的,直接用字符串,不再转时区(避免二次偏移)。
   return `${short} ${hh}:${mm}`;
 }
@@ -293,7 +293,7 @@ function QueueCard({ item, index, tz, onOpenLog, onAck }: { item: QueueItemDTO; 
         <div className="min-w-0">
           <div className="flex items-baseline gap-2">
             <span className="font-medium text-ink truncate">{item.anchorName ?? roomId(item.roomSlug)}</span>
-            <span className="font-mono text-[11px] text-muted tabular-nums shrink-0">{sessionTime(item.streamKey)}</span>
+            <span className="font-mono text-[11px] text-muted tabular-nums shrink-0">{sessionTime(item.streamKey, t)}</span>
           </div>
           <div className="font-mono text-[11px] text-muted-soft mt-0.5">#{index} · {platformLabel(item.platform)} · {roomId(item.roomSlug)}</div>
         </div>
@@ -375,7 +375,7 @@ function QueueRow({ item, index, tz, now, dataAt, onOpenLog, onAck }: { item: Qu
             房间号是定长标识,用 nowrap 保证不被拆成两行。 */}
         <div className="flex items-baseline gap-2 min-w-0">
           <span className="font-medium text-ink truncate">{item.anchorName ?? roomId(item.roomSlug)}</span>
-          <span className="font-mono text-[11px] text-muted tabular-nums shrink-0">{sessionTime(item.streamKey)}</span>
+          <span className="font-mono text-[11px] text-muted tabular-nums shrink-0">{sessionTime(item.streamKey, t)}</span>
         </div>
         <div className="font-mono text-[11px] text-muted-soft mt-0.5 truncate">
           {platformLabel(item.platform)} · <span className="whitespace-nowrap">{roomId(item.roomSlug)}</span>
