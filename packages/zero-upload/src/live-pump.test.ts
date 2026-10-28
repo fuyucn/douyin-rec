@@ -15,6 +15,7 @@ import {
   acquireStreamWithBackoff,
   zeroDiskPartLost,
   ZERO_DISK_PART_LOST,
+  recoveryDeadlineAfterPart,
   alignFileSize,
   pumpSegment,
   reuploadSpoolFile,
@@ -254,6 +255,13 @@ describe("alignFileSize", () => {
     expect(1024 * 1024 * 1024 % (10 * 1024 * 1024)).not.toBe(0);
     expect(DEFAULT_SEGMENT_CAP).toBe(alignFileSize(1024 * 1024 * 1024));
     expect(DEFAULT_SEGMENT_CAP).toBe(1030 * 1024 * 1024);
+  });
+});
+
+describe("恢复窗口只属于当前停滞", () => {
+  it("normal progress clears the previous deadline; another stall starts a fresh one", () => {
+    expect(recoveryDeadlineAfterPart("cap", 1000, 500)).toBeUndefined();
+    expect(recoveryDeadlineAfterPart("stalled", 1000, 500)).toBe(1500);
   });
 });
 

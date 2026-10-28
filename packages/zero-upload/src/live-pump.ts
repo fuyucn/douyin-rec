@@ -590,7 +590,7 @@ export class LivePumpSession {
    * check. Callers must only invoke this when no other part is pending; a missing archive identity
    * is safe for the first unconfirmed part because `submitPart` then creates the archive path.
    */
-  async resubmitUnconfirmedPart(): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string }> {
+  async resubmitUnconfirmedPart(signal?: AbortSignal): Promise<{ ok: boolean; bvid?: string; aid?: number; error?: string }> {
     if (this.stateUntrusted) return { ok: false, error: "state sidecar is untrusted" };
     if (this.state.pending) return { ok: false, error: "another submit is pending" };
     const target = this.state.parts.find((p) => !p.confirmed);
@@ -609,10 +609,12 @@ export class LivePumpSession {
       line: this.o.line ?? "txa",
       fetchImpl: doFetch,
       onChunk: this.o.onChunk,
+      ...(signal ? { signal } : {}),
     });
     if (!fb.ok || !fb.stem) {
       return { ok: false, error: `resubmit upload failed: ${fb.error ?? "no stem"}` };
     }
+    if (signal?.aborted) return { ok: false, error: "resubmit aborted" };
     const submitted = await this.submitPart({
       index: target.index,
       spoolPath: target.spoolPath,
@@ -1296,8 +1298,7 @@ export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
       // 上传侧此刻就卡在 readChunk 上等这一块,晚一步它就会按 sizeCap 算错长度。
       if (o.signal?.aborted) { sealedBy = "abort"; pushTail(); break; }
       if (durationHit) { sealedBy = "duration"; pushTail(); break; }
-      if (stalled) { sealedBy = "stalled"; pushTail(); break; }
-      lastDataAt = Date.now();
+      if (!stalled) lastDataAt = Date.now();
       // stdout 可能是 Buffer / Uint8Array / string(测试用 PassThrough 推的都算)。
       const buf = typeof data === "string" ? Buffer.from(data) : Buffer.from(data as Uint8Array);
       // `-fs` 是「到点停止」,实测略微超出 → 超出的部分既不入盘也不能成为合法尾块。
@@ -1322,6 +1323,9 @@ export async function runSegment(o: RunSegmentOpts): Promise<SegmentRunResult> {
       }
       // `-fs` 到点后 ffmpeg 仍可能多吐几 KB;已写满声明值就没必要继续读了。
       if (spooledBytes >= o.sizeCap) break;
+      // The watchdog may have fired just as the pipe delivered a final chunk. Persist that
+      // chunk first, then stop; do not discard bytes that were already read.
+      if (stalled) { sealedBy = "stalled"; pushTail(); break; }
     }
   } catch (e) {
     // Destroying stdout after a watchdog kill is expected to reject the async iterator. Keep
@@ -1902,6 +1906,15 @@ export function zeroDiskPartLost(
   return (spoolMode ?? "full") === "none" && backpressured === true;
 }
 
+/** A recovery deadline belongs only to the current stalled segment; normal progress clears it. */
+export function recoveryDeadlineAfterPart(
+  sealedBy: SegmentRunResult["sealedBy"],
+  nowMs: number,
+  windowMs: number,
+): number | undefined {
+  return sealedBy === "stalled" ? nowMs + windowMs : undefined;
+}
+
 /** Default poll interval while no broadcast is live; keeps risk-control pressure at file-recorder level. */
 export const IDLE_POLL_MS = 30_000;
 
@@ -2239,12 +2252,15 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
           lastError = recovered.reason ?? "状态恢复失败";
         } else {
           const submitted: { ok: boolean; bvid?: string; aid?: number; error?: string } =
-            await session.resubmitUnconfirmedPart().catch((e: unknown) => ({
+            await session.resubmitUnconfirmedPart(o.signal).catch((e: unknown) => ({
               ok: false,
               error: String((e as Error)?.message ?? e).slice(0, 200),
             }));
           if (submitted.ok) {
             const part = session.parts.find((p) => p.index === unconfirmedIndex && p.confirmed);
+            if (!part) {
+              return { ok: false, error: `自动重试未确认目标分 P(索引 ${unconfirmedIndex})` };
+            }
             return {
               ok: true,
               ...(part?.stem ? { stem: part.stem } : {}),
@@ -2282,8 +2298,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // delete the only spool copy after its grace period while the uploader is offline.
       const persistError = persistUnconfirmed();
       if (persistError) error = `${error};${persistError}`;
+      const persisted = persistError === undefined;
       if (r.sealedBy === "stalled" && o.autoRetryUpload !== false
-        && (o.spoolMode ?? "full") === "full" && !r.tsGap && r.spooledBytes > 0
+        && persisted && (o.spoolMode ?? "full") === "full" && !r.tsGap && r.spooledBytes > 0
         && !o.signal?.aborted && !o.drainSignal?.aborted) {
         const retried = await retryUnconfirmed();
         if (retried.ok) {
@@ -2371,7 +2388,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       } catch { /* progress reporting must never fail an upload */ }
     }
     segments.push(report);
-    if (r.sealedBy === "stalled") recoveryDeadline = Date.now() + recoverWindowMs;
+    // A normal part with bytes proves the source is producing again. Do not let an old stall
+    // deadline cut off a healthy broadcast later in the same run.
+    recoveryDeadline = recoveryDeadlineAfterPart(r.sealedBy, Date.now(), recoverWindowMs);
     const disk = (o.spoolMode ?? "full") === "none"
       ? "无本地 spool(真 0 落盘)"
       : `spool ${(r.spooledBytes / MiB).toFixed(1)}MiB`;
