@@ -44,7 +44,7 @@ export function buildTasks(ctx: ApiCtx) {
       // 0 落盘边录边传与滚动边录边传互斥(单一判定 = core.streamUploadConflicts)。
       // 手动建任务的 rollingEffective 由 store 从旧开关派生,故这里用同口径比较。
       if (streamUploadConflicts(input.streamUpload, input.rollingUpload === true)) {
-        return err(400, "streamUpload 与 rollingUpload 互斥:0 落盘不写盘,滚动上传靠文件");
+        return err(400, "streamUpload 与 rollingUpload 互斥:直播直传不写盘,滚动上传靠文件");
       }
       // A zero-disk task must be a rolling sub-mode. Validate the room rule up front so a
       // task created from the Tasks page cannot bypass the Rooms editor guard.
@@ -108,7 +108,7 @@ export function buildTasks(ctx: ApiCtx) {
       if ("streamUploadSpool" in input) patch.streamUploadSpool = input.streamUploadSpool !== false;
       // 互斥校验用**patch 后的生效值**(只改了其中一边时也要挡住另一边的存量值)。
       if (streamUploadConflicts(patch.streamUpload ?? existing.streamUpload, patch.rollingUpload ?? existing.rollingUpload)) {
-        return err(400, "streamUpload 与 rollingUpload 互斥:0 落盘不写盘,滚动上传靠文件");
+        return err(400, "streamUpload 与 rollingUpload 互斥:直播直传不写盘,滚动上传靠文件");
       }
       // Zero-disk must be valid for the room the task will actually live in after this patch,
       // not just the room it had before. A plain room change can otherwise walk a live task

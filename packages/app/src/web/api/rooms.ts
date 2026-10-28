@@ -343,7 +343,7 @@ export function buildRooms(ctx: ApiCtx) {
           patch.streamUpload ?? before.recording?.streamUpload,
           patch.rollingUpload ?? before.recording?.rollingUpload,
         )) {
-          return err(400, "streamUpload 与 rollingUpload 互斥:0 落盘不写盘,滚动上传靠文件");
+          return err(400, "streamUpload 与 rollingUpload 互斥:直播直传不写盘,滚动上传靠文件");
         }
         if ("outputFormat" in rec) {
           try { patch.outputFormat = parseOutputFormat(rec.outputFormat); } catch (e) { return err(400, (e as Error).message); }

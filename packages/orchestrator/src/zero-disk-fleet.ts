@@ -172,7 +172,7 @@ export class ZeroDiskFleet {
     this.log(`[zero-disk] ⚠️ 回执记账失败(下轮重试) worker=${w.id} room=${r.platform}:${r.roomSlug}: ${res.error ?? "unknown"}`);
     if (!this.alerted.has(r.id)) {
       this.alerted.add(r.id);
-      this.o.alert?.(`0 落盘回执无法记入 master 台账(稿件已上传,将自动重试): 节点 ${w.name} 房间 ${r.platform}:${r.roomSlug}: ${res.error ?? "unknown"}`);
+      this.o.alert?.(`直播直传回执无法记入 master 台账(稿件已上传,将自动重试): 节点 ${w.name} 房间 ${r.platform}:${r.roomSlug}: ${res.error ?? "unknown"}`);
     }
   }
 

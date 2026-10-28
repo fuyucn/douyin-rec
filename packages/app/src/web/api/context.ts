@@ -297,7 +297,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     // must never be newly bound as a rule source. `zeroDiskErrorFor` is authoritative for
     // the rolling/no-burn/local checks.
     if (t.streamUpload && boundRule?.recording?.sourceTaskId !== t.id && boundRule != null) {
-      return "该任务开启了 0 落盘流式直传,不产生录像文件,不能绑定 hub 规则(请改用普通录制任务)";
+      return "该任务开启了直播直传,不产生录像文件,不能绑定 hub 规则(请改用普通录制任务)";
     }
     return null;
   };
@@ -309,7 +309,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
   ): string | null => {
     if (streamUpload !== true) return null;
-    if (!sourceTaskId) return "0 落盘必须绑定一个录制任务";
+    if (!sourceTaskId) return "直播直传必须绑定一个录制任务";
     return zeroDiskRuleError(true, rule);
   };
 

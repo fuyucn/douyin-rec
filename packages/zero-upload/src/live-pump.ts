@@ -2242,7 +2242,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       const note = session.noteUnconfirmedPart({
         index: unconfirmedIndex,
         spoolPath: `${o.spoolDir.replace(/\/$/, "")}/${fileName}`,
-        title: o.partTitle?.(unconfirmedIndex + 1, liveTitle) ?? fileName.replace(/\.[^.]+$/, ""),
+        title: o.partTitle?.(unconfirmedIndex + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
         bytes: r.spooledBytes,
         durationSec: r.spoolDurationSec ?? 0,
         ...(r.stemOfCompleted ? { stem: r.stemOfCompleted } : {}),
@@ -2378,7 +2378,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         index: nextIndex,
         spoolPath: `${o.spoolDir.replace(/\/$/, "")}/${fileName}`,
         stem,
-        title: o.partTitle?.(nextIndex + 1, liveTitle) ?? fileName.replace(/\.[^.]+$/, ""),
+        title: o.partTitle?.(nextIndex + 1, liveTitle) ?? fileName.replace(/\.live(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, ""),
         bytes: r.spooledBytes,
         durationSec: r.spoolDurationSec,
       }, o.signal);
