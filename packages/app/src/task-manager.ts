@@ -463,6 +463,9 @@ export class TaskManager {
       if (msg.includes("[状态] 录制中")) {
         if (!this.recordingPhase.get(taskId)) this.notifyRecordingState(taskId);
         this.recordingPhase.set(taskId, true);
+      } else if (msg.includes("[状态] 录制停滞")) {
+        if (this.recordingPhase.get(taskId)) this.notifyRecordingState(taskId);
+        this.recordingPhase.set(taskId, false);
       } else if (msg.includes("[状态] 等待开播")) {
         if (this.recordingPhase.get(taskId)) this.notifyRecordingState(taskId);
         this.recordingPhase.set(taskId, false);

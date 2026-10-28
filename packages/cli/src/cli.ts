@@ -96,6 +96,8 @@ interface RecordCliOpts {
   streamUpload?: string;
   streamUploadSize?: string;
   streamUploadSec?: string;
+  streamUploadStallSec?: string;
+  streamUploadRecoverSec?: string;
   streamUploadTid?: string;
   streamUploadTag?: string;
   streamUploadPrivate?: string;
@@ -208,6 +210,8 @@ program
   .option("--stream-upload <0|1>", "流式直传(0 落盘): 1=ffmpeg stdout 直传 UPOS 并续同一稿件,上传确认后删 spool;0=关闭(默认)")
   .option("--stream-upload-size <bytes>", "流式直传每 P 字节上界(默认对齐后的 1GiB)")
   .option("--stream-upload-sec <sec>", "流式直传每 P 时长阈值(秒),与 --stream-upload-size 谁先到算一 P")
+  .option("--stream-upload-stall-sec <sec>", "流式直传无写入看门狗(秒;默认 300,最低 60):超时自动封口并追稿")
+  .option("--stream-upload-recover-sec <sec>", "流式直传停滞后的自动恢复窗口(秒;默认 1200,最低 60)")
   .option("--stream-upload-tid <tid>", "流式直传投稿分区(默认 21)")
   .option("--stream-upload-tag <tag>", "流式直传标签(逗号分隔;省略=hub 规则/hub.config 默认)")
   .option("--stream-upload-spool <full|none>", "流式直传是否保留本地 spool: full=可整文件回退(默认), none=真 0 落盘", "full")
@@ -301,7 +305,7 @@ program
     if (streamUploadEnabled) {
       // 直连新包(不再经 processors re-export):生产路径的依赖要明确,否则"换实现"
       // 看起来像改 processors,容易连带碰到后处理插件层。
-      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe, resolvePumpDir } = await import("@drec/zero-upload");
+      const { runLivePump, alignFileSize, DEFAULT_SEGMENT_CAP, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_RECOVERY_WINDOW_MS, readLivePumpState, livePumpStatePath, spoolPathsToKeep, archivedSpoolPathsToKeep, spoolSweepSafe, resolvePumpDir } = await import("@drec/zero-upload");
       const {
         rootBiliupCookies, sweepOrphanSpools, resolveStreamUploadMeta,
         resolveStreamUploadTitle, resolveStreamPartTitle,
@@ -378,6 +382,12 @@ program
       // not the process start (a task may sit in "waiting for stream" for hours).
       let streamStartMs = Date.now();
       let streamStarted = false;
+      const secondsSetting = (raw: string | undefined, fallback: number): number => {
+        const n = Number(raw);
+        return Number.isFinite(n) && n > 0 ? Math.max(60_000, Math.round(n * 1000)) : fallback;
+      };
+      const stallTimeoutMs = secondsSetting(o.streamUploadStallSec, DEFAULT_STALL_TIMEOUT_MS);
+      const recoverWindowMs = secondsSetting(o.streamUploadRecoverSec, DEFAULT_RECOVERY_WINDOW_MS);
       // A resumed session keeps the archive identity from its state file; only a fresh session
       // uses this title. `--name` is the anchor/output name, not a title override, so hub title
       // templates remain effective for named tasks.
@@ -391,6 +401,7 @@ program
       console.log(
         `[rec] 流式直传(0 落盘)已开启:room=${o.room} sizeCap=${sizeCap} ` +
         `sec=${o.streamUploadSec ?? (Number(o.segment ?? 0) > 0 ? `${o.segment}(--segment)` : "字节兜底")} ` +
+        `stall=${stallTimeoutMs / 1000}s recover=${recoverWindowMs / 1000}s ` +
         `tid=${manual.streamUploadTid ?? streamMeta.tid}${managed ? " (master 下发)" : ""}`,
       );
       // Danmu still goes to disk on the zero-disk path (the only artifact that does).
@@ -565,6 +576,8 @@ program
         private: manual.streamUploadPrivate === undefined ? streamMeta.private : manual.streamUploadPrivate !== "0",
         sizeCap,
         maxMs: streamPartMaxMs(o.streamUploadSec, o.segment),
+        stallTimeoutMs,
+        recoverWindowMs,
         maxSegments: 0,
         submit: true,
         spoolMode: o.streamUploadSpool === "none" ? "none" : "full",
