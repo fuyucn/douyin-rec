@@ -463,6 +463,10 @@ export class TaskManager {
       if (msg.includes("[状态] 录制中")) {
         if (!this.recordingPhase.get(taskId)) this.notifyRecordingState(taskId);
         this.recordingPhase.set(taskId, true);
+      } else if (msg.includes("[状态] 分P已确认")) {
+        // A real part reached the archive: this run made progress, so a later network
+        // failure gets a fresh restart budget instead of inheriting startup-crash counts.
+        this.restarts.set(taskId, 0);
       } else if (msg.includes("[状态] 录制停滞")) {
         if (this.recordingPhase.get(taskId)) this.notifyRecordingState(taskId);
         this.recordingPhase.set(taskId, false);

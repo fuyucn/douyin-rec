@@ -854,7 +854,7 @@ describe("停滞上传失败:spool 必须先进入 WAL,再允许重启恢复", (
       tid: 21, tag: "x", private: true, sizeCap: CHUNK * 4, maxMs: 10_000,
       maxSegments: 1, quality: "origin", submit: true, spoolMode: "full",
       fetchImpl: fake, probeDuration: async () => 60, scanDtsGap: async () => null,
-      stallTimeoutMs: 20,
+      stallTimeoutMs: 20, autoRetryUpload: false,
       fetch: async () => ({ living: true, url: "http://x/y.ts" }), sleep: async () => {},
     });
     expect(r.ok).toBe(false);
@@ -1031,6 +1031,73 @@ describe("窗口结束排空(SIGUSR2):不腰斩当前段", () => {
     expect(logs).toContain("[状态] 录制停滞");
     expect(logs.some((m) => m.includes("自动封口并尝试追到当前稿件"))).toBe(true);
   }, 20_000);
+
+  it("连续零字节停滞不会无限重置恢复窗口", async () => {
+    installFakeFfmpeg(Buffer.alloc(0), { holdOpen: true });
+    const r = await runLivePump({
+      ...base({ maxSegments: 0 }),
+      cookiesPath: join(dir, "cookies.json"),
+      fetchImpl: upos(64 * 1024),
+      sizeCap: CHUNK,
+      maxMs: 10_000,
+      stallTimeoutMs: 20,
+      recoverWindowMs: 1000,
+      idlePollMs: 20,
+      log: () => {},
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("恢复窗口");
+    expect(r.segments).toHaveLength(0);
+  }, 10_000);
+
+  it("上传 complete 失败后在同一运行内自动重试并追稿", async () => {
+    writeFileSync(join(dir, "cookies.json"), JSON.stringify({
+      cookie_info: { cookies: [{ name: "SESSDATA", value: "x" }, { name: "bili_jct", value: "csrf" }] },
+    }));
+    let preuploads = 0;
+    let completes = 0;
+    const logs: string[] = [];
+    const fake = (async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const method = (init?.method ?? "GET").toUpperCase();
+      const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200 });
+      if (u.pathname.endsWith("/preupload")) {
+        preuploads++;
+        return json({
+          OK: 1, chunk_size: CHUNK, auth: "a", biz_id: "1",
+          endpoint: "//upos.test", upos_uri: `upos://b/p${preuploads}.ts`,
+        });
+      }
+      if (method === "POST" && u.searchParams.has("uploads")) return json({ upload_id: `uid-${preuploads}` });
+      if (method === "PUT") return new Response("", { status: 200 });
+      if (method === "POST" && u.hostname.includes("upos.test")) {
+        completes++;
+        return completes <= 2 ? json({ OK: 0 }) : json({ OK: 1, key: "bucket/recovered.ts" });
+      }
+      if (u.pathname === "/x/vu/web/add/v3") return json({ code: 0, data: { aid: 7, bvid: "BILIretry" } });
+      return new Response(JSON.stringify({ code: 1, message: "unexpected" }), { status: 500 });
+    }) as unknown as typeof fetch;
+    installFakeFfmpeg(Buffer.alloc(1100, 0x5a), { holdOpen: true });
+    const r = await runLivePump({
+      ...base({ maxSegments: 1 }),
+      cookiesPath: join(dir, "cookies.json"),
+      fetchImpl: fake,
+      sizeCap: 4096,
+      maxMs: 10_000,
+      spoolMode: "full",
+      stallTimeoutMs: 20,
+      recoverWindowMs: 1000,
+      probeDuration: async () => 60,
+      scanDtsGap: async () => null,
+      queueCapacity: 64,
+      log: (m) => logs.push(m),
+    });
+    expect(r.ok, `${r.error ?? ""}\n${logs.join("\n")}`).toBe(true);
+    expect(r.bvid).toBe("BILIretry");
+    expect(completes).toBe(3);
+    expect(r.segments[0]?.stem).toBe("recovered");
+    expect(readLivePumpState(livePumpStatePath(dir, "dr"))?.parts[0]?.stem).toBe("recovered");
+  }, 10_000);
 
   it("drainSignal 一直未置位 → 一路录到上限(对照组)", async () => {
     seg();
