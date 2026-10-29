@@ -4,7 +4,9 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { createServer, type Server } from "node:http";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const SCRIPT = join(import.meta.dirname, "..", "..", "scripts", "install-worker.sh");
@@ -20,9 +22,9 @@ function serve(tasks: string, proc: string, status = 200): Promise<number> {
   });
 }
 
-function check(port: number): Promise<{ code: number; out: string }> {
+function check(port: number, env?: NodeJS.ProcessEnv): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
-    execFile("sh", [SCRIPT, "--check-busy", "--port", String(port)], (err, stdout, stderr) => {
+    execFile("sh", [SCRIPT, "--check-busy", "--port", String(port)], env ? { env } : {}, (err, stdout, stderr) => {
       resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, out: stdout + stderr });
     });
   });
@@ -60,6 +62,19 @@ describe("install-worker --check-busy", () => {
     const r = await check(port);
     expect(r.code).toBe(1);
     expect(r.out).toContain("unavailable");
+  });
+  it("node missing from PATH fails closed instead of reporting idle", async () => {
+    const port = await serve(JSON.stringify([{ id: 1, recording: true }]), "{}");
+    // A PATH holding only the tools the script needs, so the result cannot depend on where node lives.
+    const bin = mkdtempSync(join(tmpdir(), "no-node-"));
+    for (const tool of ["curl", "sed", "grep", "awk", "cat", "tr", "printf"]) {
+      const real = execFileSync("sh", ["-c", `command -v ${tool}`]).toString().trim();
+      if (real) symlinkSync(real, join(bin, tool));
+    }
+    const r = await check(port, { PATH: bin });
+    rmSync(bin, { recursive: true, force: true });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("node missing");
   });
   it("unreachable API (service not running) is idle", async () => {
     expect(await check(1)).toMatchObject({ code: 0 });

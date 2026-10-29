@@ -286,7 +286,7 @@ esac
 node_busy_reason() {
   command -v curl >/dev/null 2>&1 || { printf 'curl missing, cannot check'; return 0; }
   _n="${NODE_BIN:-$(command -v node || true)}"
-  [ -n "$_n" ] || { printf 'node missing, cannot check'; return 0; }
+  { [ -n "$_n" ] && command -v "$_n" >/dev/null 2>&1; } || { printf 'node missing, cannot check'; return 0; }
   # Only "connection refused" (curl 7) proves the service is down. An HTTP error, a timeout or any
   # other failure means a node we cannot read, which must count as busy.
   _rc=0
