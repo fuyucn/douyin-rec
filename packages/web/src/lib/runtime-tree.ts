@@ -16,6 +16,7 @@ import type {
   WorkerDTO,
   WorkerStatus,
 } from "../api/client";
+import { pipelineBurns } from "@drec/rolling-policy";
 import type { LiveDetailEntry } from "./zero-disk-status";
 
 export type RuntimeMode = "live-direct" | "rolling" | "node-upload" | "upload" | "archive";
@@ -111,7 +112,9 @@ export function runtimeMode(room: RoomDTO, task?: Task): RuntimeMode {
   if (streamUpload) return "live-direct";
   if (upload?.mode === "rolling") return "rolling";
   if (upload?.mode === "upload") {
-    return room.processing?.pipeline?.steps?.nodeSideUpload ? "node-upload" : "upload";
+    // Node-side upload is ignored by the backend whenever burn-in is on (burn flags default to ON).
+    const steps = room.processing?.pipeline?.steps;
+    return steps?.nodeSideUpload && !pipelineBurns(steps) ? "node-upload" : "upload";
   }
   return "archive";
 }
@@ -147,8 +150,7 @@ function stageFromSteps(item: QueueItemDTO, key: RuntimeStageKey): StageState {
 }
 
 function needsBurn(room: RoomDTO): boolean {
-  const steps = room.processing?.pipeline?.steps;
-  return !!(steps?.burnDanmu || steps?.burnLivechat);
+  return pipelineBurns(room.processing?.pipeline?.steps);
 }
 
 function mergeSegments(room: RoomDTO): boolean {
@@ -295,7 +297,9 @@ function workerPipelineStages(mode: RuntimeMode, state: NodeState, item: QueueIt
       : state === "idle"
         ? "done"
         : "unknown";
-  const record: RuntimeStage = { key: "record", state: recordState, note: state === "recording" ? { kind: "recording" } : { kind: "recorded" } };
+  const record: RuntimeStage = recordState === "running"
+    ? { key: "record", state: "running", note: { kind: "recording" } }
+    : { key: "record", state: recordState === "done" ? "waiting" : recordState };
   if (mode === "node-upload") {
     return [
       record,
@@ -367,7 +371,9 @@ function collectEvents(entries: LiveDetailEntry[]): RuntimeEvent[] {
 
 /** Build the full tree model from the room page's already-loaded data. */
 export function buildRuntimeTree(input: RuntimeTreeInput): RuntimeTreeModel {
-  const { room, task, detail, workers, workerStatus = [], rolling = [], queueItem, live = [], run } = input;
+  const { room, task, detail, workers, workerStatus = [], rolling = [], live = [], run } = input;
+  // A finished/failed queue row belongs to a previous run: it must not decide the current winner or stages.
+  const queueItem = input.queueItem && input.queueItem.phase !== "done" && input.queueItem.phase !== "failed" ? input.queueItem : null;
   const mode = runtimeMode(room, task);
   const liveByWorker = new Map<string, LiveDetailEntry[]>();
   for (const entry of live) {
@@ -443,7 +449,7 @@ export function buildRuntimeTree(input: RuntimeTreeInput): RuntimeTreeModel {
   });
 
   const hubStages = mode === "live-direct"
-    ? hubLiveStages(live[0], queueItem, run)
+    ? hubLiveStages(winnerId ? liveByWorker.get(winnerId)?.[0] ?? live[0] : live[0], queueItem, run)
     : mode === "rolling"
       ? hubRollingStages(rolling)
       : hubPipelineStages(room, mode, queueItem, run);

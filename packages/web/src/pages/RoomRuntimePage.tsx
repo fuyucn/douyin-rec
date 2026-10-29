@@ -56,15 +56,16 @@ export function RoomRuntimePage(): ReactNode {
   const queueRoom = useRef<{ platform: string; roomSlug: string } | null>(null);
   useEffect(() => {
     queueRoom.current = room ? { platform: room.platform, roomSlug: room.roomSlug } : null;
-  }, [room]);
+  }, [room?.platform, room?.roomSlug]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setQueueItem(null); }, [key]);
   usePolling(() => {
     const target = queueRoom.current;
     if (!target) return;
     void api.getHubQueue({ q: target.roomSlug }).then((q) => {
-      const items = [...q.active, ...q.rows];
-      const found = items.find((i) => i.platform === target.platform && i.roomSlug === target.roomSlug) ?? null;
-      setQueueItem(found);
-    }).catch(() => setQueueItem(null));
+      // Only in-flight rows: `rows` also carries finished runs whose winner/BV are history, not the current run.
+      const found = q.active.find((i) => i.platform === target.platform && i.roomSlug === target.roomSlug) ?? null;
+      if (queueRoom.current === target) setQueueItem(found);
+    }).catch(() => { if (queueRoom.current === target) setQueueItem(null); });
   }, 15_000, !!room);
 
   const rolling = useRoomRolling(room ? room.roomSlug : null);

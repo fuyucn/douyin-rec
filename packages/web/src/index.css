@@ -1889,7 +1889,7 @@ table.tasks tbody tr:last-child td {
 .rt-readonly { font-family: var(--font-mono); font-size: 10px; color: var(--muted-soft); text-transform: uppercase; }
 
 .rt-wrap { position: relative; padding-top: 18px; }
-.rt-svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.rt-svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; z-index: 0; }
 .rt-svg path { stroke: color-mix(in srgb, var(--accent) 42%, transparent); stroke-width: 1.5; fill: none; }
 
 .rt-root { position: relative; z-index: 1; margin: 0 auto; max-width: 620px; }
@@ -1993,8 +1993,10 @@ table.tasks tbody tr:last-child td {
 .rt-event-detail { color: var(--muted); }
 .rt-empty { padding: 14px 0; font-size: 12px; color: var(--muted); text-align: center; }
 
+/* Wrapped grids make the single trunk cross cards: drop the connectors below the desktop width. */
 @media (max-width: 1023px) {
-  .rt-branches { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rt-svg { display: none; }
+  .rt-branches { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 24px; }
 }
 @media (max-width: 720px) {
   .rt-svg { display: none; }

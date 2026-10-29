@@ -154,7 +154,7 @@ describe("runtimeMode", () => {
   it("prefers live direct, then rolling, then node-side upload, then upload, then archive", () => {
     expect(runtimeMode(room(), task())).toBe("upload");
     expect(runtimeMode(room({ processing: { enabled: true, pipeline: { upload: { mode: "stage" } } } }), task())).toBe("archive");
-    expect(runtimeMode(room({ processing: { enabled: true, pipeline: { steps: { nodeSideUpload: true }, upload: { mode: "upload" } } } }), task())).toBe("node-upload");
+    expect(runtimeMode(room({ processing: { enabled: true, pipeline: { steps: { nodeSideUpload: true, burnDanmu: false, burnLivechat: false }, upload: { mode: "upload" } } } }), task())).toBe("node-upload");
     expect(runtimeMode(room({ processing: { enabled: true, pipeline: { upload: { mode: "rolling" } } } }), task())).toBe("rolling");
     expect(runtimeMode(room({ recording: { ...room().recording!, streamUpload: true } }), task())).toBe("live-direct");
   });
@@ -240,7 +240,7 @@ describe("buildRuntimeTree", () => {
 
   it("marks configured-off hub stages as skipped and reads running steps from the queue", () => {
     const model = buildRuntimeTree(base({
-      room: room({ processing: { enabled: true, pipeline: { steps: { mergeSegments: false }, upload: { mode: "upload" } } } }),
+      room: room({ processing: { enabled: true, pipeline: { steps: { mergeSegments: false, burnDanmu: false, burnLivechat: false }, upload: { mode: "upload" } } } }),
       queueItem: queueItem({
         phase: "running",
         currentNode: "upload_plain",
@@ -293,5 +293,33 @@ describe("buildRuntimeTree", () => {
       ],
     }));
     expect(model.events.map((e) => e.at)).toEqual([50, 10]);
+  });
+
+  it("treats missing burn flags as burn ON, like the backend", () => {
+    const r = room({ processing: { enabled: true, pipeline: { steps: { nodeSideUpload: true }, upload: { mode: "upload" } } } });
+    expect(runtimeMode(r, task())).toBe("upload");
+    const hub = buildRuntimeTree(base({ room: r })).nodes.find((n) => n.role === "controller")!;
+    expect(hub.stages.find((s) => s.key === "burn")?.state).not.toBe("skipped");
+  });
+
+  it("ignores a finished queue row when choosing the current winner", () => {
+    const model = buildRuntimeTree(base({
+      task: task({ recordingWorkers: [
+        { workerId: "a", workerName: "worker A", state: "recording", checkedAt: 1 },
+        { workerId: "b", workerName: "worker B", state: "not_recording", checkedAt: 1 },
+      ] }),
+      queueItem: queueItem({ winnerWorker: "b", phase: "done", bv: "BVold" }),
+    }));
+    expect(model.winnerId).toBe("a");
+    expect(model.nodes.find((n) => n.id === "b")?.role).toBe("standby");
+  });
+
+  it("does not show an idle standby as having finished recording", () => {
+    const model = buildRuntimeTree(base({
+      task: task({ recordingWorkers: [{ workerId: "b", workerName: "worker B", state: "not_recording", checkedAt: 1 }] }),
+    }));
+    const rec = model.nodes.find((n) => n.id === "b")!.stages[0];
+    expect(rec.state).toBe("waiting");
+    expect(rec.note).toBeUndefined();
   });
 });
