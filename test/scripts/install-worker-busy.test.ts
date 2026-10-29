@@ -24,7 +24,7 @@ function serve(tasks: string, proc: string, status = 200): Promise<number> {
 
 function check(port: number, env?: NodeJS.ProcessEnv): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
-    execFile("sh", [SCRIPT, "--check-busy", "--port", String(port)], env ? { env } : {}, (err, stdout, stderr) => {
+    execFile("/bin/sh", [SCRIPT, "--check-busy", "--port", String(port)], env ? { env } : {}, (err, stdout, stderr) => {
       resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, out: stdout + stderr });
     });
   });
@@ -67,7 +67,7 @@ describe("install-worker --check-busy", () => {
     const port = await serve(JSON.stringify([{ id: 1, recording: true }]), "{}");
     // A PATH holding only the tools the script needs, so the result cannot depend on where node lives.
     const bin = mkdtempSync(join(tmpdir(), "no-node-"));
-    for (const tool of ["curl", "sed", "grep", "awk", "cat", "tr", "printf"]) {
+    for (const tool of ["curl", "sed", "grep", "awk", "cat", "tr", "uname", "id", "dirname", "basename"]) {
       const real = execFileSync("sh", ["-c", `command -v ${tool}`]).toString().trim();
       if (real) symlinkSync(real, join(bin, tool));
     }
