@@ -36,17 +36,21 @@ export class LiveUploadReporter implements LivePumpReporter {
     const terminal = existing?.current
       ? existing.current.state === "finished" || existing.current.state === "failed" || existing.current.state === "stopped"
       : false;
+    const meaningful = !!existing?.current && (!!existing.current.sessionId || existing.current.parts.length > 0);
     const fresh = (): LiveRunTracker => createLiveRunTracker({ mode: "zero-disk", platform: o.platform, roomSlug: o.roomSlug, now: o.now });
     this.tracker = !existing?.current
       ? fresh()
+      : terminal && !meaningful
+        // An idle "finished" run has no session/parts; it must not evict the last real run.
+        ? { current: fresh().current, ...(existing.previous ? { previous: existing.previous } : {}) }
       : terminal
-        // A new process starts a new archive: keep the finished run for review, never turn it
-        // into a live "waiting" row or copy it into current.
-        ? { current: fresh().current, previous: existing.current }
+        // Keep a real terminal archive in current until run_start/run_resume decides whether it
+        // resumes the same session or rotates to previous.
+        ? { current: existing.current, ...(existing.previous ? { previous: existing.previous } : {}) }
         : { current: existing.current, ...(existing.previous ? { previous: existing.previous } : {}) };
     // A fresh/terminal room gets the initial waiting snapshot; a resumable non-terminal archive
     // keeps its old pid/state until the first real event.
-    if (!existing?.current || terminal) this.flush();
+    if (!existing?.current || (terminal && !meaningful)) this.flush();
   }
 
   private readonly writeEveryMs: number;
@@ -54,7 +58,7 @@ export class LiveUploadReporter implements LivePumpReporter {
 
   event(e: LiveEvent): void {
     this.tracker = applyLiveEvent(this.tracker, e);
-    const terminal = e.kind === "run_end" || e.kind === "run_start" || e.kind === "part_confirmed" || e.kind === "part_failed";
+    const terminal = e.kind === "run_end" || e.kind === "run_start" || e.kind === "run_resume" || e.kind === "part_confirmed" || e.kind === "part_failed";
     if (terminal) this.flush();
     else this.throttledFlush();
   }

@@ -92,6 +92,35 @@ export function createLiveRunTracker(o: {
  * in place (keeping waiting/live events); a different sessionId rotates current -> previous.
  */
 export function applyLiveEvent(state: LiveRunTracker, e: LiveEvent): LiveRunTracker {
+  const terminalBound = !!state.current.sessionId
+    && (state.current.state === "finished" || state.current.state === "failed" || state.current.state === "stopped");
+  if (terminalBound && e.kind === "waiting") {
+    // A restart starts by waiting. Keep the terminal archive for review, but do not let the
+    // waiting state overwrite it; a following run_resume may restore it for a crash resume.
+    return {
+      current: {
+        schemaVersion: 1,
+        mode: state.current.mode,
+        platform: state.current.platform,
+        roomSlug: state.current.roomSlug,
+        state: "waiting",
+        startedAt: e.at,
+        updatedAt: e.at,
+        parts: [],
+        events: [clone(e)],
+      },
+      previous: clone(state.current),
+    };
+  }
+  if (!state.current.sessionId && state.previous && e.kind === "run_resume"
+    && e.session?.sessionId === state.previous.sessionId) {
+    const restored = clone(state.previous);
+    restored.state = "streaming";
+    restored.updatedAt = Math.max(restored.updatedAt, e.at);
+    restored.events.push(clone(e));
+    return { current: cap(restored) };
+  }
+  if (terminalBound && (e.kind === "waiting" || e.kind === "live")) return state;
   const next: LiveRunTracker = { current: clone(state.current), ...(state.previous ? { previous: clone(state.previous) } : {}) };
   const s = next.current;
   s.updatedAt = Math.max(s.updatedAt, e.at);

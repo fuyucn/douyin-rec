@@ -98,4 +98,37 @@ describe("LiveUploadReporter", () => {
     expect(beforeAnyEvent?.previous?.parts).toHaveLength(1);
     expect(beforeAnyEvent?.previous?.bvid).toBe("BVkeep");
   });
+
+  it("two restarts do not let an empty waiting-only run evict the real previous run", () => {
+    const a = new LiveUploadReporter({ platform: "douyin", roomSlug: "r7", writeEveryMs: 1 });
+    a.event({ at: 1, kind: "run_start", session: session("r7:1", 1) });
+    a.event({ at: 2, kind: "part_confirmed", part: 0, bvid: "BVkeep" });
+    a.event({ at: 3, kind: "run_end", outcome: "finished" });
+    const b = new LiveUploadReporter({ platform: "douyin", roomSlug: "r7", writeEveryMs: 1 });
+    b.event({ at: 4, kind: "waiting" });
+    b.event({ at: 5, kind: "run_end", outcome: "finished" }); // stopped while waiting, no session
+    const c = new LiveUploadReporter({ platform: "douyin", roomSlug: "r7", writeEveryMs: 1 });
+    c.event({ at: 6, kind: "waiting" });
+    expect(c.read()?.previous?.sessionId).toBe("r7:1");
+    expect(c.read()?.previous?.bvid).toBe("BVkeep");
+    expect(c.read()?.current?.sessionId).toBeUndefined();
+  });
+
+  it("run_resume after a crashed same archive continues the existing parts", () => {
+    const path = liveUploadPath("douyin", "r8");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({
+      v: 1, platform: "douyin", roomSlug: "r8", pid: 999_999, updatedAt: 5,
+      current: {
+        schemaVersion: 1, mode: "zero-disk", sessionId: "r8:1", createdAt: 1,
+        platform: "douyin", roomSlug: "r8", state: "stopped", startedAt: 1, updatedAt: 5,
+        parts: [{ index: 0, phase: "confirmed", uploadedBytes: 10, chunks: 1 }], events: [],
+      },
+    } satisfies LiveFile));
+    const r = new LiveUploadReporter({ platform: "douyin", roomSlug: "r8", writeEveryMs: 1 });
+    r.event({ at: 6, kind: "waiting" });
+    r.event({ at: 7, kind: "run_resume", session: { sessionId: "r8:1", createdAt: 1, resumed: true } });
+    expect(r.read()?.current?.state).toBe("streaming");
+    expect(r.read()?.current?.parts).toHaveLength(1);
+  });
 });
