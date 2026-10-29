@@ -133,6 +133,9 @@ export function RoomPage(): ReactNode {
               {t("tasks.stop")}
             </Button>
           )}
+          <Link className="btn-secondary btn-sm" to={`/rooms/${encodeURIComponent(room.key)}/runtime`}>
+            {t("room.runtime.open")}
+          </Link>
           <Button small variant="secondary" onClick={() => actions.edit(room)}>{t("room.detail.edit")}</Button>
         </div>
       </div>
