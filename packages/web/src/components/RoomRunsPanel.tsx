@@ -14,10 +14,11 @@
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronDown, History } from "lucide-react";
-import { api, ApiError, type HubJobDTO, type RoomDTO, type WorkerDTO } from "../api/client";
+import { api, ApiError, type HubJobDTO, type RoomDTO, type RollingDeliveryDTO, type Task, type WorkerDTO } from "../api/client";
 import { Button } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { JobLogDialog, RunCard } from "./HubJobs";
+import { CurrentRunTree } from "./CurrentRunTree";
 import { RunNowDialog } from "./RunNowDialog";
 import type { FlowCfg } from "./flow-build";
 import { useHubStream, usePolling, useToast, errMessage } from "../lib/hooks";
@@ -33,12 +34,17 @@ export function RoomRunsPanel({
   room,
   workers,
   collapsed = false,
+  task,
+  rolling = [],
 }: {
   room: RoomDTO;
   /** 节点 id→友好名(与本页配置半边共用同一份,查不到回落 id)。 */
   workers: WorkerDTO[];
   /** Start with every run collapsed (the detail page keeps its summary within one screen). */
   collapsed?: boolean;
+  /** Live-upload / rolling progress of the running broadcast (shown as a per-part tree above the history). */
+  task?: Task;
+  rolling?: RollingDeliveryDTO[];
 }): ReactNode {
   const t = useT();
   const toast = useToast();
@@ -160,6 +166,8 @@ export function RoomRunsPanel({
   const cfg = useMemo(() => (room.processing?.pipeline ?? undefined) as FlowCfg | undefined, [room.key, room.processing]);
 
   return (
+    <>
+    <CurrentRunTree task={task} rolling={rolling} workers={workers} />
     <section className="run-list-shell">
       <div className="px-3 py-2.5 border-b border-hairline flex items-center justify-between gap-3">
         <span className="section-label">{t("rooms.runsHeading")}</span>
@@ -241,5 +249,6 @@ export function RoomRunsPanel({
         </div>
       )}
     </section>
+    </>
   );
 }

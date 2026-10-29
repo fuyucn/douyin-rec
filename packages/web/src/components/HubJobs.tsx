@@ -12,6 +12,8 @@ import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
 import { useT } from "../lib/i18n";
 import { buildFlow, pickMetric, type FlowCfg } from "./flow-build";
+import { RunTreeView } from "./RunTree";
+import { pipelineTree, rootStateOf } from "../lib/run-tree";
 import { deriveStepStatuses, stepDetail, type NodeStatus } from "../lib/hub-job-steps";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
@@ -397,6 +399,8 @@ export function RunCard({
   const t = useT();
   const labels = stepLabelMap(t);
   const [pendingRetry, setPendingRetry] = useState<{ node: string } | null>(null);
+  // Tree is the default view; the flow view stays one click away because it carries per-node retry.
+  const [view, setView] = useState<"tree" | "flow">("tree");
   // 稳定引用(仅 onRetry / streamKey 变化时才换):PipelineFlow memo 比较 onRetry 引用,
   // 若每帧新建箭头函数会击穿 memo → 每次轮询冲刷 React Flow 导致偶发空白。
   const requestRetry = useCallback((node: string): void => {
@@ -511,7 +515,26 @@ export function RunCard({
       )}
       {expanded && (
         <div className="mt-3 pt-3 border-t border-hairline overflow-x-auto" onClick={(e) => e.stopPropagation()}>
-          <PipelineFlow job={job} workerName={workerName} cfg={cfg} onRetry={onRetry ? requestRetry : undefined} />
+          <div className="flex gap-1 mb-3">
+            {(["tree", "flow"] as const).map((v) => (
+              <button key={v} type="button" className={`rt-stages-toggle ${view === v ? "text-ink" : ""}`} aria-pressed={view === v} onClick={() => setView(v)}>
+                {t(v === "tree" ? "room.runTree.viewTree" : "room.runTree.viewFlow")}
+              </button>
+            ))}
+          </div>
+          {view === "tree" ? (
+            <RunTreeView
+              root={{
+                title: job.streamKey.split(":").slice(2).join(":") || job.streamKey,
+                sub: labels[job.state] ?? job.state,
+                state: rootStateOf(job),
+                bv: job.bv,
+              }}
+              tree={pipelineTree(job, cfg, workerName ?? ((id) => id))}
+            />
+          ) : (
+            <PipelineFlow job={job} workerName={workerName} cfg={cfg} onRetry={onRetry ? requestRetry : undefined} />
+          )}
         </div>
       )}
       <ConfirmDialog

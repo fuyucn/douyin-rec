@@ -275,6 +275,11 @@ const DICT = {
         backToList: "房间列表", info: "房间信息", process: "处理", procOn: "已启用", noRule: "未配置处理",
         merge: "合成方式", mergeOne: "合并成一个", mergeSplit: "按分段",
       },
+      runTree: {
+        viewTree: "运行树", viewFlow: "流程图", step: { stream: "录制+上传", seal: "封口", submit: "提交", confirm: "确认" },
+        confirmedFold: "已确认 {n} 个分 P", pending: "待传 {n} 个", noParts: "暂无分 P", hubChain: "hub 处理链",
+        cover: "覆盖 {pct}% · {min} 分钟", gap: "有缺口", noHistory: "无历史", current: "当前场次", root: "第 {n} 场", zoomIn: "放大", zoomOut: "缩小", fit: "适应",
+      },
       runtime: {
         open: "运行树", backToDetail: "返回房间详情", preview: "预览版",
         title: "运行责任树", subtitle: "同一场直播里，节点、winner 与 hub 各自处在什么阶段。",
@@ -862,6 +867,11 @@ const DICT = {
         local: "local",
         backToList: "Room list", info: "Room info", process: "Processing", procOn: "On", noRule: "No processing rule",
         merge: "Output", mergeOne: "Merged into one", mergeSplit: "Per segment",
+      },
+      runTree: {
+        viewTree: "Tree", viewFlow: "Flow", step: { stream: "Record+upload", seal: "Seal", submit: "Submit", confirm: "Confirm" },
+        confirmedFold: "{n} part(s) confirmed", pending: "{n} pending", noParts: "No parts yet", hubChain: "hub pipeline",
+        cover: "{pct}% coverage · {min} min", gap: "gaps", noHistory: "No history", current: "Current run", root: "Run {n}", zoomIn: "Zoom in", zoomOut: "Zoom out", fit: "Fit",
       },
       runtime: {
         open: "Runtime tree", backToDetail: "Back to room details", preview: "Preview",
