@@ -82,4 +82,17 @@ describe("LiveUploadReporter", () => {
     });
     expect(() => r.event({ at: 1, kind: "run_end", outcome: "finished" })).not.toThrow();
   });
+
+  it("a new reporter preserves a finished run instead of overwriting it with waiting", () => {
+    const first = new LiveUploadReporter({ platform: "douyin", roomSlug: "r6", writeEveryMs: 1 });
+    first.event({ at: 1, kind: "run_start", session: session("r6:1", 1) });
+    first.event({ at: 2, kind: "part_streaming", part: 0 });
+    first.event({ at: 3, kind: "part_confirmed", part: 0, bvid: "BVkeep" });
+    first.event({ at: 4, kind: "run_end", outcome: "finished" });
+    const second = new LiveUploadReporter({ platform: "douyin", roomSlug: "r6", writeEveryMs: 1 });
+    const beforeAnyEvent = second.read();
+    expect(beforeAnyEvent?.current?.state).toBe("finished");
+    expect(beforeAnyEvent?.current?.parts).toHaveLength(1);
+    expect(beforeAnyEvent?.current?.bvid).toBe("BVkeep");
+  });
 });

@@ -27,13 +27,18 @@ export class LiveUploadReporter implements LivePumpReporter {
     writeEveryMs?: number;
     write?: (path: string, value: unknown) => void;
   }) {
-    this.tracker = createLiveRunTracker({ mode: "zero-disk", platform: o.platform, roomSlug: o.roomSlug, now: o.now });
     this.path = liveUploadPath(o.platform, o.roomSlug);
     this.platform = o.platform;
     this.roomSlug = o.roomSlug;
     this.writeEveryMs = o.writeEveryMs ?? 5_000;
     this.writeImpl = o.write ?? writeJsonAtomic;
-    this.flush();
+    const existing = readLiveUploadFile(this.path);
+    this.tracker = existing?.current
+      ? { current: existing.current, ...(existing.previous ? { previous: existing.previous } : {}) }
+      : createLiveRunTracker({ mode: "zero-disk", platform: o.platform, roomSlug: o.roomSlug, now: o.now });
+    // Do not stamp a new pid onto an old snapshot before the first event: a killed run must stay
+    // stopped until the new run actually starts. A fresh room gets its initial waiting snapshot.
+    if (!existing?.current) this.flush();
   }
 
   private readonly writeEveryMs: number;

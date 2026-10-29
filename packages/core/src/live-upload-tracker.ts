@@ -21,7 +21,7 @@ function cap(s: LiveUploadSnapshot): LiveUploadSnapshot {
   return {
     ...s,
     events: s.events.slice(-LIVE_EVENT_LIMIT),
-    parts: s.parts.slice(0, LIVE_PART_LIMIT),
+    parts: s.parts.slice(-LIVE_PART_LIMIT),
   };
 }
 
@@ -122,7 +122,7 @@ export function applyLiveEvent(state: LiveRunTracker, e: LiveEvent): LiveRunTrac
         return next;
       }
     }
-    s.state = e.kind === "run_resume" ? "streaming" : s.state;
+    s.state = "streaming";
   } else if (e.kind === "waiting") {
     s.state = "waiting";
   } else if (e.kind === "live") {
