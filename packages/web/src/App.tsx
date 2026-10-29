@@ -12,6 +12,7 @@ import { HubPage } from "./pages/HubPage";
 import { HomePage } from "./pages/HomePage";
 import { NodesPage } from "./pages/NodesPage";
 import { RoomPage } from "./pages/RoomPage";
+import { RoomRuntimePage } from "./pages/RoomRuntimePage";
 import { RoomsPage } from "./pages/RoomsPage";
 import { QueuePage } from "./pages/QueuePage";
 import { TaskDetail } from "./pages/TaskDetail";
@@ -47,6 +48,7 @@ export function App(): ReactNode {
           {/* Rooms is the master home; old pages remain as compatibility routes during rollout. */}
           <Route path="/rooms" element={<RoomsPage />} />
           <Route path="/rooms/:key" element={<RoomPage />} />
+          <Route path="/rooms/:key/runtime" element={<RoomRuntimePage />} />
           <Route path="/hub/:key" element={<HubPage />} />
           <Route path="*" element={<HomePage />} />
         </Routes>
