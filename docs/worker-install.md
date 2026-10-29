@@ -76,6 +76,8 @@ curl -fsSL https://raw.githubusercontent.com/fuyucn/douyin-rec/main/scripts/inst
 - 同一条命令重复运行即升级。**升级前**脚本检查节点没有录制、没有上传在途(`--check-busy` 可单独运行,
   退出码 1 = 忙);忙时拒绝重启,`--force` 才跳过。**升级后**核对节点 `/api/version` 以目标版本开头,
   不一致或 API 无响应则退出码非 0。
+- 节点答复读不到(HTTP 错误、超时)按忙处理,只有连接被拒绝才视为服务没在运行。`--no-start` 仍会覆盖文件,
+  对忙节点慎用。
 - 现有节点布局与默认值不同时,用 `--root`、`--service` 等参数适配,先 `--dry-run`。
 - 部署开发版后要记录「节点、版本、分支、提交」,避免忘记回到 stable。
 

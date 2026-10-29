@@ -61,6 +61,7 @@ Options:
   --with-upload           Also install biliup (needed for node-side upload, experimental)
   --dry-run               Validate arguments and archive without writing to the system
   --check-busy            Only check whether the running node is recording/uploading (exit 1 = busy)
+  --verify-version <a> <b> Internal: exit 0 if reported version <b> matches installed <a>
   --force                 Install even if the running node is recording or uploading
   -h, --help              Show help
 EOF
@@ -99,6 +100,15 @@ need_value() {
   [ "$#" -ge 2 ] || fail "$1 requires a value"
 }
 
+# The API reports "<x.y.z>-<6 hex sha>" (a bundle built without git says "-dev" and is rejected).
+# Succeeds only for exactly the installed version, bare or with that sha suffix.
+version_ok() {
+  _want="$1"; _got="$2"
+  [ "$_got" = "$_want" ] && return 0
+  case "$_got" in "$_want"-*) ;; *) return 1 ;; esac
+  printf '%s' "${_got#"$_want"-}" | grep -Eq '^[0-9a-f]{6}$'
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --version) need_value "$@"; VERSION="$2"; shift 2 ;;
@@ -117,6 +127,7 @@ while [ "$#" -gt 0 ]; do
     --dry-run) DRY_RUN=1; shift ;;
     --check-busy) CHECK_BUSY=1; shift ;;
     --force) FORCE=1; shift ;;
+    --verify-version) [ "$#" -ge 3 ] || fail "--verify-version needs <installed> <reported>"; version_ok "$2" "$3"; exit $? ;;
     -h|--help) usage; exit 0 ;;
     *) fail "Unknown argument: $1" ;;
   esac
@@ -276,7 +287,12 @@ node_busy_reason() {
   command -v curl >/dev/null 2>&1 || { printf 'curl missing, cannot check'; return 0; }
   _n="${NODE_BIN:-$(command -v node || true)}"
   [ -n "$_n" ] || { printf 'node missing, cannot check'; return 0; }
-  _tasks="$(curl -fsS -m 10 "${API_URL}/api/tasks" 2>/dev/null)" || return 1
+  # Only "connection refused" (curl 7) proves the service is down. An HTTP error, a timeout or any
+  # other failure means a node we cannot read, which must count as busy.
+  _rc=0
+  _tasks="$(curl -fsS -m 10 "${API_URL}/api/tasks" 2>/dev/null)" || _rc=$?
+  if [ "$_rc" -eq 7 ]; then return 1; fi
+  if [ "$_rc" -ne 0 ]; then printf 'task list unavailable (curl exit %s)' "$_rc"; return 0; fi
   _proc="$(curl -sS -m 10 "${API_URL}/api/proc/active" 2>/dev/null || true)"
   printf '%s\n%s' "$_tasks" "$_proc" | "$_n" -e '
     const [t, p] = require("fs").readFileSync(0, "utf8").split("\n");
@@ -597,8 +613,10 @@ if [ "$START" -eq 1 ] && command -v curl >/dev/null 2>&1; then
     printf '%s started but the API has not responded; check journalctl -u %s\n' "$ROLE" "$SERVICE" >&2
     exit 1
   fi
-  case "$_got" in
-    "$INSTALLED_VERSION"|"$INSTALLED_VERSION"-*) printf '✓ %s running %s at %s\n' "$ROLE" "$_got" "$API_URL" ;;
-    *) printf 'Version mismatch: installed %s but the node reports %s\n' "$INSTALLED_VERSION" "$_got" >&2; exit 1 ;;
-  esac
+  if version_ok "$INSTALLED_VERSION" "$_got"; then
+    printf '✓ %s running %s at %s\n' "$ROLE" "$_got" "$API_URL"
+  else
+    printf 'Version mismatch: installed %s but the node reports %s\n' "$INSTALLED_VERSION" "$_got" >&2
+    exit 1
+  fi
 fi
