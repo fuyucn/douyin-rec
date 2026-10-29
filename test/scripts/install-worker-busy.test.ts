@@ -16,7 +16,7 @@ function serve(tasks: string, proc: string): Promise<number> {
       if (req.url === "/api/tasks") res.end(tasks);
       else if (req.url === "/api/proc/active") res.end(proc);
       else { res.statusCode = 404; res.end(); }
-    }).listen(0, "127.0.0.1", () => resolve((server!.address() as { port: number }).port));
+    }).listen(0, () => resolve((server!.address() as { port: number }).port));
   });
 }
 
