@@ -25,6 +25,8 @@ export interface ZeroDiskUploadMeta {
   partTitleTemplate?: string;
   /** Optional Bilibili season section id; the node adds the archive after its first submit. */
   seasonSectionId?: number;
+  /** Optional per-part byte cap in MiB; absent = built-in default. */
+  partSizeMiB?: number;
 }
 
 /** Everything a hub-managed node needs to run a zero-disk room without reading master config. */
@@ -47,6 +49,14 @@ const optString = (o: Record<string, unknown>, k: string): string | undefined | 
   if (v === undefined || v === null) return undefined;
   return typeof v === "string" ? v : null;
 };
+
+/** Allowed per-part size range (MiB) for live upload; shared by API validation and delivery parsing. */
+export const PART_SIZE_MIB_MIN = 100;
+export const PART_SIZE_MIB_MAX = 4096;
+
+export function isValidPartSizeMiB(x: unknown): x is number {
+  return typeof x === "number" && Number.isInteger(x) && x >= PART_SIZE_MIB_MIN && x <= PART_SIZE_MIB_MAX;
+}
 
 /** Account keys that identify no account (`bilibili:unknown`, empty) cannot be verified. */
 export function isKnownAccountKey(key: unknown): key is string {
@@ -76,6 +86,9 @@ export function parseZeroDiskDelivery(raw: unknown): ZeroDiskDeliveryParse {
   const seasonSectionId = typeof rawSeason === "number" && Number.isSafeInteger(rawSeason) && rawSeason > 0
     ? rawSeason
     : undefined;
+  // Optional like the season id: an out-of-range value falls back to the default instead of refusing.
+  const rawSize = m.partSizeMiB;
+  const partSizeMiB = isValidPartSizeMiB(rawSize) ? rawSize : undefined;
   if (!isKnownAccountKey(raw.accountKey)) return bad("accountKey missing or unknown");
   const credentialPath = optString(raw, "credentialPath");
   if (credentialPath === null) return bad("credentialPath must be a string");
@@ -92,6 +105,7 @@ export function parseZeroDiskDelivery(raw: unknown): ZeroDiskDeliveryParse {
         ...(submissionTitleTemplate ? { submissionTitleTemplate } : {}),
         ...(partTitleTemplate ? { partTitleTemplate } : {}),
         ...(seasonSectionId ? { seasonSectionId } : {}),
+        ...(partSizeMiB ? { partSizeMiB } : {}),
       },
       accountKey: raw.accountKey,
       ...(credentialPath ? { credentialPath } : {}),

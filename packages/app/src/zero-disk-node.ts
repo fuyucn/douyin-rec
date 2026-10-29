@@ -232,7 +232,7 @@ export function buildZeroDiskDelivery(o: {
   if (!isKnownAccountKey(accountKey)) {
     return { ok: false, error: "主控的 B 站上传账号无法识别(未登录或登录文件缺少账号 ID),无法校验节点账号,暂不下发直播直传" };
   }
-  const { meta, private: isPrivate } = resolveRollingUploadMeta(o.platform, o.roomSlug);
+  const { meta, private: isPrivate, partSizeMiB } = resolveRollingUploadMeta(o.platform, o.roomSlug);
   return {
     ok: true,
     delivery: {
@@ -246,6 +246,7 @@ export function buildZeroDiskDelivery(o: {
         ...(meta.submissionTitleTemplate ? { submissionTitleTemplate: meta.submissionTitleTemplate } : {}),
         ...(meta.partTitleTemplate ? { partTitleTemplate: meta.partTitleTemplate } : {}),
         ...(meta.seasonSectionId ? { seasonSectionId: meta.seasonSectionId } : {}),
+        ...(partSizeMiB ? { partSizeMiB } : {}),
       },
       accountKey,
       ...(o.workerDataRoot ? { credentialPath: posix.join(o.workerDataRoot, "config", "biliup", "cookies.json") } : {}),
@@ -259,6 +260,7 @@ export interface ZeroDiskStreamMeta {
   tag: string;
   desc?: string;
   seasonSectionId?: number;
+  partSizeMiB?: number;
   private: boolean;
 }
 
@@ -270,6 +272,7 @@ export function zeroDiskStreamMeta(delivery: import("@drec/core").ZeroDiskDelive
     private: delivery.meta.private,
     ...(delivery.meta.desc ? { desc: delivery.meta.desc } : {}),
     ...(delivery.meta.seasonSectionId ? { seasonSectionId: delivery.meta.seasonSectionId } : {}),
+    ...(delivery.meta.partSizeMiB ? { partSizeMiB: delivery.meta.partSizeMiB } : {}),
   };
 }
 

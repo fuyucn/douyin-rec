@@ -373,7 +373,10 @@ program
       // The stored task name is only a fallback; the live stream usually exposes the real
       // anchor. Both the XML metadata and `{name}` should use the real anchor once known.
       let anchorName = o.name?.trim() || roomSlug;
-      const sizeCap = alignFileSize(Number(o.streamUploadSize ?? DEFAULT_SEGMENT_CAP));
+      // Explicit flag (manual debugging) > per-room rule / master delivery (MiB) > built-in default.
+      const sizeCap = alignFileSize(o.streamUploadSize !== undefined
+        ? Number(o.streamUploadSize)
+        : streamMeta.partSizeMiB ? streamMeta.partSizeMiB * 1024 * 1024 : DEFAULT_SEGMENT_CAP);
       const uploadCookies = managedCookies ?? zeroDiskUploadCookie(process.env, rootBiliupCookies());
       // Status + receipt for the master (managed only); one receipt id per process run.
       const reporter = delivery ? createZeroDiskReporter({ platform: platform.id, roomSlug }) : null;

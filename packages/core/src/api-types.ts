@@ -107,6 +107,8 @@ export interface HubPipelineConfig {
     partTitleTemplate?: string;
     /** Optional Bilibili season section id; added after a successful P1 create. Empty = off. */
     seasonSectionId?: number | null;
+    /** Optional per-part byte cap (MiB) for live upload; empty/null = built-in default. */
+    partSizeMiB?: number | null;
   };
 }
 

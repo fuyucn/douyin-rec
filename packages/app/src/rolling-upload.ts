@@ -59,6 +59,7 @@ import {
   addArchiveToSeasonIfConfigured,
   seasonCheckpointState,
   resolveSeasonSectionId,
+  isValidPartSizeMiB,
   type UploadSlot,
   type RollingSegment,
 } from "@drec/core";
@@ -1047,7 +1048,7 @@ export class RollingUploader {
 function resolveRollingUploadMetaInner(
   platform: string,
   roomSlug: string,
-): { meta: RollingUploaderOpts["uploadMeta"]; private: boolean } {
+): { meta: RollingUploaderOpts["uploadMeta"]; private: boolean; partSizeMiB?: number } {
   // hub 规则(现读不缓存;无规则/坏 JSON → null)。A disabled rule or a stage-only rule
   // must not leak upload metadata: a manually started stream-upload task could otherwise
   // inherit a stale `private:false` and publish irreversibly.
@@ -1089,6 +1090,7 @@ function resolveRollingUploadMetaInner(
     },
     // 可见性:规则 upload.private 缺省 true(= 仅自己可见)。**保守默认 true**(公开是不可逆的曝光)。
     private: up?.private !== false,
+    ...(isValidPartSizeMiB(up?.partSizeMiB) ? { partSizeMiB: up.partSizeMiB } : {}),
   };
 }
 
@@ -1102,7 +1104,7 @@ function resolveRollingUploadMetaInner(
 export function resolveRollingUploadMeta(
   platform: string,
   roomSlug: string,
-): { meta: RollingUploaderOpts["uploadMeta"]; private: boolean } {
+): { meta: RollingUploaderOpts["uploadMeta"]; private: boolean; partSizeMiB?: number } {
   return resolveRollingUploadMetaInner(platform, roomSlug);
 }
 
@@ -1117,14 +1119,15 @@ export function resolveRollingUploadMeta(
 export function resolveStreamUploadMeta(
   platform: string,
   roomSlug: string,
-): { tid: number; tag: string; desc?: string; partTitleTemplate?: string; seasonSectionId?: number; private: boolean } {
-  const { meta, private: isPrivate } = resolveRollingUploadMetaInner(platform, roomSlug);
+): { tid: number; tag: string; desc?: string; partTitleTemplate?: string; seasonSectionId?: number; partSizeMiB?: number; private: boolean } {
+  const { meta, private: isPrivate, partSizeMiB } = resolveRollingUploadMetaInner(platform, roomSlug);
   return {
     tid: meta.tid,
     tag: meta.tag,
     ...(meta.desc ? { desc: meta.desc } : {}),
     ...(meta.partTitleTemplate ? { partTitleTemplate: meta.partTitleTemplate } : {}),
     ...(meta.seasonSectionId ? { seasonSectionId: meta.seasonSectionId } : {}),
+    ...(partSizeMiB ? { partSizeMiB } : {}),
     private: isPrivate,
   };
 }

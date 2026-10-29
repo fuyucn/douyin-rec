@@ -25,7 +25,7 @@ import { RuleSwitch, ToggleRow } from "../components/room-form/parts";
 import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { pickPlatform, qualityLabel } from "../lib/labels";
-import { factsOf, formFromRoom, isValidSeasonSectionIdInput, ruleFactsOf, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
+import { factsOf, formFromRoom, isValidPartSizeInput, isValidSeasonSectionIdInput, PART_SIZE_MIB_MAX, PART_SIZE_MIB_MIN, ruleFactsOf, payloadFromForm, type RoomContext, type RoomForm } from "../lib/room-editor-form";
 import { burnVersionsApply, deriveConstraints, flowSummary, settledMethod, shownOutputFormat, type Lock, type UploadMethod } from "../lib/room-form-rules";
 import { accountToggleCopy, cookieReadyFor } from "../lib/room-form-rules";
 
@@ -135,7 +135,8 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
     // Native min= validation only reaches inputs of the visible step, so re-check the numeric fields here.
     const bad: StepId | null = form.segmentSec.trim() !== "" && Number(form.segmentSec) < 0 ? "record"
       : form.uploadOn && form.tid.trim() !== "" && Number(form.tid) < 1 ? "upload"
-      : form.uploadOn && !isValidSeasonSectionIdInput(form.seasonSectionId) ? "upload" : null;
+      : form.uploadOn && !isValidSeasonSectionIdInput(form.seasonSectionId) ? "upload"
+      : form.uploadOn && !isValidPartSizeInput(form.partSizeMiB) ? "upload" : null;
     if (bad) { setStep(bad); toast(t("room.editor.fieldInvalid"), "error"); return; }
     const r = payloadFromForm(form, ctx);
     if (!r.ok) {
@@ -389,6 +390,15 @@ export function RoomEditor({ room, managed, onClose, onSaved, onDelete }: Props)
                             <input className="input" placeholder={t("hub.ruleDialog.tagPlaceholder")} value={form.tag} onChange={(e) => update({ tag: e.target.value })} />
                           </label>
                           <SeasonSectionField value={form.seasonSectionId} onChange={(seasonSectionId) => update({ seasonSectionId })} />
+                          {form.streamUpload && (
+                            <label className="block sm:col-span-2">
+                              <span className="field-label">{t("room.editor.partSize")}</span>
+                              <input type="number" min={PART_SIZE_MIB_MIN} max={PART_SIZE_MIB_MAX} className="input font-mono text-sm"
+                                     placeholder={t("room.editor.partSizePlaceholder")}
+                                     value={form.partSizeMiB} onChange={(e) => update({ partSizeMiB: e.target.value })} />
+                              <p className="text-[11px] text-muted-soft mt-1">{t("room.editor.partSizeHint", { min: PART_SIZE_MIB_MIN, max: PART_SIZE_MIB_MAX })}</p>
+                            </label>
+                          )}
                           {([
                             ["titleTemplate", "room.editor.titleTemplate", "{name}_{date}"],
                             ["submissionTitleTemplate", "room.editor.submissionTitle", t("hub.ruleDialog.submissionTitleTemplatePlaceholder")],
