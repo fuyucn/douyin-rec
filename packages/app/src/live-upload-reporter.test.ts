@@ -90,9 +90,12 @@ describe("LiveUploadReporter", () => {
     first.event({ at: 3, kind: "part_confirmed", part: 0, bvid: "BVkeep" });
     first.event({ at: 4, kind: "run_end", outcome: "finished" });
     const second = new LiveUploadReporter({ platform: "douyin", roomSlug: "r6", writeEveryMs: 1 });
+    second.event({ at: 5, kind: "waiting" });
     const beforeAnyEvent = second.read();
-    expect(beforeAnyEvent?.current?.state).toBe("finished");
-    expect(beforeAnyEvent?.current?.parts).toHaveLength(1);
-    expect(beforeAnyEvent?.current?.bvid).toBe("BVkeep");
+    expect(beforeAnyEvent?.current?.state).toBe("waiting");
+    expect(beforeAnyEvent?.current?.sessionId).toBeUndefined();
+    expect(beforeAnyEvent?.previous?.state).toBe("finished");
+    expect(beforeAnyEvent?.previous?.parts).toHaveLength(1);
+    expect(beforeAnyEvent?.previous?.bvid).toBe("BVkeep");
   });
 });

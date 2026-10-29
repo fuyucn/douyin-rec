@@ -33,12 +33,20 @@ export class LiveUploadReporter implements LivePumpReporter {
     this.writeEveryMs = o.writeEveryMs ?? 5_000;
     this.writeImpl = o.write ?? writeJsonAtomic;
     const existing = readLiveUploadFile(this.path);
-    this.tracker = existing?.current
-      ? { current: existing.current, ...(existing.previous ? { previous: existing.previous } : {}) }
-      : createLiveRunTracker({ mode: "zero-disk", platform: o.platform, roomSlug: o.roomSlug, now: o.now });
-    // Do not stamp a new pid onto an old snapshot before the first event: a killed run must stay
-    // stopped until the new run actually starts. A fresh room gets its initial waiting snapshot.
-    if (!existing?.current) this.flush();
+    const terminal = existing?.current
+      ? existing.current.state === "finished" || existing.current.state === "failed" || existing.current.state === "stopped"
+      : false;
+    const fresh = (): LiveRunTracker => createLiveRunTracker({ mode: "zero-disk", platform: o.platform, roomSlug: o.roomSlug, now: o.now });
+    this.tracker = !existing?.current
+      ? fresh()
+      : terminal
+        // A new process starts a new archive: keep the finished run for review, never turn it
+        // into a live "waiting" row or copy it into current.
+        ? { current: fresh().current, previous: existing.current }
+        : { current: existing.current, ...(existing.previous ? { previous: existing.previous } : {}) };
+    // A fresh/terminal room gets the initial waiting snapshot; a resumable non-terminal archive
+    // keeps its old pid/state until the first real event.
+    if (!existing?.current || terminal) this.flush();
   }
 
   private readonly writeEveryMs: number;
