@@ -67,6 +67,20 @@ curl -fsSL https://raw.githubusercontent.com/fuyucn/douyin-rec/main/scripts/inst
 --dry-run               检查参数和归档，不写系统
 ```
 
+## 版本与升级
+
+- **stable**:`main` 上的版本发成正式 Release,安装脚本默认(`latest`)装它。
+- **开发版**:其他分支只在需要部署时才发布,标为 prerelease,版本仍是 `x.y.z`,只能显式指定:
+  `--version x.y.z`(或 `--archive`)。prerelease 不占用 `latest`;回到 stable = 不带 `--version` 重装。
+- 版本已存在时发布流程直接失败,不覆盖已有 Release;开发分支部署前先 bump 到 main 上未用过的版本。
+- 同一条命令重复运行即升级。**升级前**脚本检查节点没有录制、没有上传在途(`--check-busy` 可单独运行,
+  退出码 1 = 忙);忙时拒绝重启,`--force` 才跳过。**升级后**核对节点 `/api/version` 以目标版本开头,
+  不一致或 API 无响应则退出码非 0。
+- 节点答复读不到(HTTP 错误、超时)按忙处理,只有连接被拒绝才视为服务没在运行。`--no-start` 不做忙检查且仍会覆盖文件,
+  对忙节点慎用。
+- 现有节点布局与默认值不同时,用 `--root`、`--service` 等参数适配,先 `--dry-run`。
+- 部署开发版后要记录「节点、版本、分支、提交」,避免忘记回到 stable。
+
 ## Packages 与角色
 
 默认安装完整 worker package：
