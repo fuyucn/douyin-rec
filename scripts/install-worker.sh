@@ -35,6 +35,8 @@ PACKAGES_EXPLICIT=0
 ROLE_EXPLICIT=0
 DRY_RUN=0
 START=1
+FORCE=0
+CHECK_BUSY=0
 # 节点侧上传(experimental,见 plans/027):装 biliup 二进制到 <root>/bin。默认关(worker 保持轻量)。
 WITH_UPLOAD="${DREC_WITH_UPLOAD:-0}"
 
@@ -58,6 +60,8 @@ Options:
   --no-start              Install without starting the service
   --with-upload           Also install biliup (needed for node-side upload, experimental)
   --dry-run               Validate arguments and archive without writing to the system
+  --check-busy            Only check whether the running node is recording/uploading (exit 1 = busy)
+  --force                 Install even if the running node is recording or uploading
   -h, --help              Show help
 EOF
 }
@@ -111,6 +115,8 @@ while [ "$#" -gt 0 ]; do
     --with-upload) WITH_UPLOAD=1; shift ;;
     --no-start) START=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --check-busy) CHECK_BUSY=1; shift ;;
+    --force) FORCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "Unknown argument: $1" ;;
   esac
@@ -221,7 +227,7 @@ case "$RAW_ARCH" in
   *) fail "Unsupported architecture: $RAW_ARCH (supported: amd64 / arm64)" ;;
 esac
 
-if [ "$DRY_RUN" -eq 0 ]; then
+if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_BUSY" -eq 0 ]; then
   [ "$OS" = "Linux" ] || fail "install-worker.sh currently supports Linux only"
   [ "$(id -u)" -eq 0 ] || fail "Root privileges required; run with sudo sh -s -- ..."
   command -v systemctl >/dev/null 2>&1 || fail "systemctl not found"
@@ -262,6 +268,35 @@ case "$API_HOST" in
   *:*) API_URL="http://[${API_HOST}]:${PORT}" ;;
   *) API_URL="http://${API_HOST}:${PORT}" ;;
 esac
+
+# Upgrade guard: restarting the service kills a recording in progress, so refuse while the
+# node reports a task recording or an upload job running. An unreachable API means the node
+# is not running (fresh install / stopped service) and is not busy. Unknown answers are busy.
+node_busy_reason() {
+  command -v curl >/dev/null 2>&1 || { printf 'curl missing, cannot check'; return 0; }
+  _n="${NODE_BIN:-$(command -v node || true)}"
+  [ -n "$_n" ] || { printf 'node missing, cannot check'; return 0; }
+  _tasks="$(curl -fsS -m 10 "${API_URL}/api/tasks" 2>/dev/null)" || return 1
+  _proc="$(curl -sS -m 10 "${API_URL}/api/proc/active" 2>/dev/null || true)"
+  printf '%s\n%s' "$_tasks" "$_proc" | "$_n" -e '
+    const [t, p] = require("fs").readFileSync(0, "utf8").split("\n");
+    let rec = 0, up = 0;
+    try { rec = JSON.parse(t).filter((x) => x.recording === true).length; } catch { console.log("unreadable task list"); process.exit(0); }
+    try { up = (JSON.parse(p).running || {}).biliup || 0; } catch { /* old node without the queue: no upload signal */ }
+    if (rec > 0) console.log(rec + " task(s) recording");
+    else if (up > 0) console.log(up + " upload job(s) running");
+    else process.exit(1);
+  ' && return 0 || return 1
+}
+
+if [ "$CHECK_BUSY" -eq 1 ]; then
+  if reason="$(node_busy_reason)"; then
+    printf 'busy: %s\n' "$reason" >&2
+    exit 1
+  fi
+  printf 'idle\n'
+  exit 0
+fi
 
 if [ -z "$ARCHIVE" ]; then
   case "$VERSION" in
@@ -370,6 +405,12 @@ if [ "$DRY_RUN" -eq 1 ]; then
   printf '  role:     %s\n' "$ROLE"
   printf '  tunnel:  %s (authentication must be configured separately)\n' "$TUNNEL"
   exit 0
+fi
+
+if [ "$START" -eq 1 ] && [ "$FORCE" -eq 0 ]; then
+  if reason="$(node_busy_reason)"; then
+    fail "Node is busy ($reason); not restarting. Retry when idle or pass --force"
+  fi
 fi
 
 SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
@@ -544,8 +585,20 @@ printf '\nLocal self-check:\n'
 printf '  node %s/dist/douyin-rec.mjs _tasks %s\n' "$ROOT" "$ROOT"
 
 if [ "$START" -eq 1 ] && command -v curl >/dev/null 2>&1; then
-  sleep 1
-  curl -fsS "${API_URL}/api/version" >/dev/null \
-    && printf '✓ %s API responded at %s\n' "$ROLE" "$API_URL" \
-    || printf 'Warning: %s started but the API has not responded yet; check journalctl -u %s\n' "$ROLE" "$SERVICE" >&2
+  # The API reports "<x.y.z>-<sha>"; the release version must be its prefix, otherwise the
+  # node came back on something other than what was just installed.
+  _got=""
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 2
+    _got="$(curl -fsS -m 5 "${API_URL}/api/version" 2>/dev/null | sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p')"
+    [ -n "$_got" ] && break
+  done
+  if [ -z "$_got" ]; then
+    printf '%s started but the API has not responded; check journalctl -u %s\n' "$ROLE" "$SERVICE" >&2
+    exit 1
+  fi
+  case "$_got" in
+    "$INSTALLED_VERSION"|"$INSTALLED_VERSION"-*) printf '✓ %s running %s at %s\n' "$ROLE" "$_got" "$API_URL" ;;
+    *) printf 'Version mismatch: installed %s but the node reports %s\n' "$INSTALLED_VERSION" "$_got" >&2; exit 1 ;;
+  esac
 fi

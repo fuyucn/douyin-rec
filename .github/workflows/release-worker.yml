@@ -55,13 +55,21 @@ jobs:
       - name: Build worker archives
         run: scripts/build-worker-release.sh --version "${GITHUB_REF_NAME#v}" --arch all
 
+      # Stable = the tagged commit is on main (becomes "latest"); anything else is a prerelease that
+      # is only installed with an explicit --version. An existing release is never overwritten.
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --generate-notes
-          gh release upload "$GITHUB_REF_NAME" \
-            dist/releases/*.tar.gz \
-            dist/releases/*.sha256 \
-            --clobber
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists; refusing to overwrite" >&2
+            exit 1
+          fi
+          git fetch origin main --quiet
+          if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            flags="--latest"
+          else
+            flags="--prerelease --latest=false"
+          fi
+          gh release create "$GITHUB_REF_NAME" --generate-notes $flags \
+            dist/releases/*.tar.gz dist/releases/*.sha256
