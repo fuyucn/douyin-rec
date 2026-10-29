@@ -258,7 +258,7 @@ export function RoomPage(): ReactNode {
               <TaskLogPanel taskId={taskId} running={!!task?.running} open={logsOpen} onToggle={toggleLogs} />
             </div>
           )}
-          <RoomRunsPanel room={room} workers={data.workers} collapsed />
+          <RoomRunsPanel room={room} workers={data.workers} collapsed task={task} rolling={rolling} />
         </section>
       </div>
       {taskId !== null && <div className="mt-6"><MergePanel taskId={taskId} /></div>}
