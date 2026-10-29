@@ -25,7 +25,8 @@ function useConnectors(ref: React.RefObject<HTMLDivElement | null>, signature: s
     const draw = (): void => {
       const root = wrap.querySelector<HTMLElement>("[data-rt-root]");
       const heads = Array.from(wrap.querySelectorAll<HTMLElement>("[data-rt-head]"));
-      if (!root || heads.length === 0 || window.matchMedia("(max-width: 720px)").matches) {
+      // More than 4 branches wrap to a second row: a single trunk would cross cards, so draw none.
+      if (!root || heads.length === 0 || heads.length > 4 || window.matchMedia("(max-width: 1023px)").matches) {
         setPaths([]);
         return;
       }

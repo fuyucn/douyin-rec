@@ -322,4 +322,19 @@ describe("buildRuntimeTree", () => {
     expect(rec.state).toBe("waiting");
     expect(rec.note).toBeUndefined();
   });
+
+  it("does not let the previous finished run decide this broadcast's hub stages or BV", () => {
+    const model = buildRuntimeTree(base({
+      task: task({ recordingWorkers: [{ workerId: "a", workerName: "worker A", state: "recording", checkedAt: 1 }] }),
+      run: { state: "done", bv: "BVold" },
+    }));
+    const hub = model.nodes.find((n) => n.role === "controller")!;
+    expect(hub.stages.find((s) => s.key === "upload")?.state).not.toBe("done");
+    expect(model.bvid).toBeNull();
+  });
+
+  it("follows the backend when rolling is configured but not effective", () => {
+    const r = room({ processing: { enabled: true, pipeline: { upload: { mode: "rolling" } }, rollingPolicy: { effective: false, reason: "multi-node" } } });
+    expect(runtimeMode(r, task())).toBe("upload");
+  });
 });

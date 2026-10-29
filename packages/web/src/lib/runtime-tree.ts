@@ -110,8 +110,9 @@ export function runtimeMode(room: RoomDTO, task?: Task): RuntimeMode {
   // a stale task object must not hide a live-direct room.
   const streamUpload = task?.streamUpload === true || room.recording?.streamUpload === true;
   if (streamUpload) return "live-direct";
-  if (upload?.mode === "rolling") return "rolling";
-  if (upload?.mode === "upload") {
+  // The backend turns rolling off (e.g. several nodes selected) and runs the full pipeline: follow it.
+  if (upload?.mode === "rolling" && room.processing?.rollingPolicy?.effective !== false) return "rolling";
+  if (upload?.mode === "upload" || upload?.mode === "rolling") {
     // Node-side upload is ignored by the backend whenever burn-in is on (burn flags default to ON).
     const steps = room.processing?.pipeline?.steps;
     return steps?.nodeSideUpload && !pipelineBurns(steps) ? "node-upload" : "upload";
@@ -371,7 +372,7 @@ function collectEvents(entries: LiveDetailEntry[]): RuntimeEvent[] {
 
 /** Build the full tree model from the room page's already-loaded data. */
 export function buildRuntimeTree(input: RuntimeTreeInput): RuntimeTreeModel {
-  const { room, task, detail, workers, workerStatus = [], rolling = [], live = [], run } = input;
+  const { room, task, detail, workers, workerStatus = [], rolling = [], live = [] } = input;
   // A finished/failed queue row belongs to a previous run: it must not decide the current winner or stages.
   const queueItem = input.queueItem && input.queueItem.phase !== "done" && input.queueItem.phase !== "failed" ? input.queueItem : null;
   const mode = runtimeMode(room, task);
@@ -407,6 +408,12 @@ export function buildRuntimeTree(input: RuntimeTreeInput): RuntimeTreeModel {
 
   const states = new Map<string, NodeState>();
   for (const id of ids) states.set(id, nodeStateFromWorker(id, task, liveByWorker, rollingByWorker));
+
+  // The room's latest run is usually the previous, finished one: while a node is recording a new
+  // stream it must not mark this broadcast's hub stages or BV as done.
+  const recordingNow = ids.some((id) => states.get(id) === "recording" || states.get(id) === "uploading");
+  const terminal = input.run && ["done", "failed", "needs_manual"].includes(input.run.state);
+  const run = recordingNow && terminal ? null : input.run;
 
   // Winner priority: the ledger's own winner, then an active live node, then a recording worker,
   // then a rolling row. No winner is reported when nothing is running — the UI shows "not selected".

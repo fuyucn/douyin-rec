@@ -286,7 +286,7 @@ const DICT = {
         events: "事件流", eventsHint: "最新 {n} 条 · 按时间排序", noEvents: "暂无事件流数据",
         noNodes: "暂无参与节点", stages: "{n} 个阶段", diskFree: "磁盘剩余 {gb} GB",
         mode: { "live-direct": "直播直传", rolling: "边录边传", "node-upload": "节点直传", upload: "投稿 B站", archive: "存档" },
-        role: { winner: "Winner · 录制中", candidate: "Candidate · 候补", standby: "Standby · 待命", controller: "Controller · 台账" },
+        role: { winner: "Winner · 胜出", candidate: "Candidate · 候补", standby: "Standby · 待命", controller: "Controller · 台账" },
         nodeState: { recording: "录制中", uploading: "上传中", syncing: "同步中", idle: "空闲", offline: "离线", unknown: "未知" },
         overall: { live: "进行中", running: "处理中", done: "已完成", attention: "需处理", waiting: "等待中" },
         stage: {
@@ -874,7 +874,7 @@ const DICT = {
         events: "Event stream", eventsHint: "Latest {n} · newest first", noEvents: "No event stream data yet",
         noNodes: "No participating nodes", stages: "{n} steps", diskFree: "disk {gb} GB free",
         mode: { "live-direct": "Live upload", rolling: "Rolling upload", "node-upload": "Node upload", upload: "Upload to Bilibili", archive: "Archive" },
-        role: { winner: "Winner · recording", candidate: "Candidate · standby", standby: "Standby", controller: "Controller · ledger" },
+        role: { winner: "Winner", candidate: "Candidate · standby", standby: "Standby", controller: "Controller · ledger" },
         nodeState: { recording: "Recording", uploading: "Uploading", syncing: "Syncing", idle: "Idle", offline: "Offline", unknown: "Unknown" },
         overall: { live: "Live", running: "Running", done: "Done", attention: "Needs action", waiting: "Waiting" },
         stage: {

@@ -38,6 +38,7 @@ export function RoomRuntimePage(): ReactNode {
     void api.getTask(id).then((d) => { if (taskRef.current === id) setDetail(d); }).catch(() => {});
   }, 5_000, live);
   useEffect(() => { taskRef.current = taskId; setDetail(null); }, [taskId]);
+  useEffect(() => { if (!live) setDetail(null); }, [live]);
 
   const [liveEntries, setLiveEntries] = useState<LiveDetailEntry[]>([]);
   const liveRef = useRef(taskId);
