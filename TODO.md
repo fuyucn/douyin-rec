@@ -14,6 +14,11 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-125 直播直传每 P 大小按房间配置（issue [#389](https://github.com/fuyucn/douyin-rec/issues/389)）**（2026-10-29）
+  — 默认上界之外，用户要求每个房间可单独设置，且走规则/配置而不是命令行参数。
+  **做什么**: 房间规则上传配置新增可选「每 P 大小(MiB)」；本机经规则解析、受管侧节点经 master 下发对象取值；房间编辑器上传步骤加输入框并校验范围；留空 = 内置默认。
+  **验收**: 留空行为不变；设置后新进程按所设上界(10MiB 对齐)结算；越界被 API 拒绝、下发对象里越界值回落默认；全量测试 / 类型 / Web 构建 / i18n / bundle 通过。
+
 - [~] **T-124 直播直传默认分 P 字节上界 1GiB → 1.5GiB（issue [#387](https://github.com/fuyucn/douyin-rec/issues/387)）**（2026-10-28）
   — 用户直接指派：默认分段上界从 1GiB 提高到 1.5GiB。
   **做什么**: `DEFAULT_SEGMENT_CAP` 由 `alignFileSize(1024**3)` 改为 `alignFileSize(1.5 * 1024**3)`（= 1540MiB，保持 10MiB 对齐）；同步 CLI `--stream-upload-size` / `_live-pump --size` 说明和 Web 中英文「默认 1.5GB」；单测钉住新对齐值。
