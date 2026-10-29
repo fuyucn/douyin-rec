@@ -955,6 +955,20 @@ describe("0 落盘稿件 metadata 与边录边传同口径(规则 > hub.config >
     expect(resolveStreamUploadMeta("douyin", "123").seasonSectionId).toBeUndefined();
   });
 
+  it("partSizeMiB 只来自启用的规则;越界/空值回落默认", () => {
+    const rule = (size: unknown, extra: object = {}) => writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
+      ...extra, pipeline: { upload: { mode: "rolling", tag: "规则标签", tid: 21, partSizeMiB: size } },
+    }), "utf-8");
+    rule(2048);
+    expect(resolveStreamUploadMeta("douyin", "123").partSizeMiB).toBe(2048);
+    for (const bad of [null, 0, 99, 4097, 1.5, "2048"]) {
+      rule(bad);
+      expect(resolveStreamUploadMeta("douyin", "123").partSizeMiB).toBeUndefined();
+    }
+    rule(2048, { enabled: false });
+    expect(resolveStreamUploadMeta("douyin", "123").partSizeMiB).toBeUndefined();
+  });
+
   it("禁用规则 / 仅 stage 规则不提供上传 metadata(防止私稿被旧规则改成公开)", () => {
     writeFileSync(path.join(root, "config", "hub", "douyin.123.json"), JSON.stringify({
       enabled: false,

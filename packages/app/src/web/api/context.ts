@@ -6,6 +6,7 @@
  */
 import {
   isUploadingMode, normalizeUploadMode, pipelineBurns, resolveRollingPolicy, rollingReasonText, listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
+  isValidPartSizeMiB, PART_SIZE_MIB_MIN, PART_SIZE_MIB_MAX,
   zeroDiskRuleError, redactTaskSecrets, recordingRoomDir, recordingRoomDirCandidates,
   type WorkerDTO, type HubPipelineConfig, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO,
 } from "@drec/core";
@@ -232,6 +233,10 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     if (season !== undefined && season !== null
         && !(typeof season === "number" && Number.isSafeInteger(season) && season > 0)) {
       return `upload.seasonSectionId 必须是正整数或 null,收到 ${JSON.stringify(season)}`;
+    }
+    const size = input.pipeline?.upload?.partSizeMiB as unknown;
+    if (size !== undefined && size !== null && !isValidPartSizeMiB(size)) {
+      return `upload.partSizeMiB 必须是 ${PART_SIZE_MIB_MIN}-${PART_SIZE_MIB_MAX} 的整数或 null,收到 ${JSON.stringify(size)}`;
     }
     return null;
   };

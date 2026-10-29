@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_TITLE_TEMPLATES, factsOf, formFromRoom, isValidSeasonSectionIdInput, payloadFromForm, ruleFactsOf, seasonSectionIdPatch, seasonSectionIdPayload, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
+import { DEFAULT_TITLE_TEMPLATES, factsOf, formFromRoom, isValidPartSizeInput, isValidSeasonSectionIdInput, partSizePayload, payloadFromForm, ruleFactsOf, seasonSectionIdPatch, seasonSectionIdPayload, webhookPatch, type RoomContext } from "../../packages/web/src/lib/room-editor-form.js";
 import { deriveConstraints, settledMethod } from "../../packages/web/src/lib/room-form-rules.js";
 import type { RoomDTO } from "../../packages/web/src/api/client.js";
 
@@ -102,6 +102,18 @@ describe("room editor form ↔ payload", () => {
     const r = payloadFromForm(off, ctx);
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.payload.processing?.pipeline?.upload?.seasonSectionId).toBeUndefined();
+  });
+  it("part size: empty inherits/clears, range enforced, invalid blocks save only when upload is on", () => {
+    expect(isValidPartSizeInput("")).toBe(true);
+    for (const bad of ["99", "4097", "1.5", "-1", "abc"]) expect(isValidPartSizeInput(bad)).toBe(false);
+    expect(partSizePayload("", false)).toBeUndefined();
+    expect(partSizePayload("", true)).toBeNull();
+    expect(partSizePayload("2048", false)).toBe(2048);
+    expect(partSizePayload("99", true)).toBeUndefined();
+    const on = { ...formFromRoom(mkRoom()), uploadOn: true, partSizeMiB: "99" };
+    expect(payloadFromForm(on, ctx)).toEqual({ ok: false, error: "partSizeMiB" });
+    const ok = payloadFromForm({ ...on, partSizeMiB: "2048" }, ctx);
+    expect(ok.ok && ok.payload.processing?.pipeline?.upload?.partSizeMiB).toBe(2048);
   });
   it("round-trips stored fields without silently changing them", () => {
     const p = ok(payloadFromForm(formFromRoom(mkRoom()), ctx));

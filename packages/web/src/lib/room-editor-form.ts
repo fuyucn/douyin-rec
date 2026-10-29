@@ -45,6 +45,9 @@ export interface RoomForm {
   seasonSectionId: string;
   /** Whether the stored rule already carries the key (including an explicit null). */
   seasonSectionIdStored: boolean;
+  /** Live upload per-part size in MiB; empty = built-in default. */
+  partSizeMiB: string;
+  partSizeMiBStored: boolean;
   clStageSourceAfterMerge: boolean;
   clSourceAfterDone: boolean;
   clKeepArchive: boolean;
@@ -87,6 +90,23 @@ export function seasonSectionIdPayload(raw: string, stored: boolean): number | n
   return isValidSeasonSectionIdInput(raw) ? seasonSectionIdPatch(raw, stored) : undefined;
 }
 
+/** Mirrors the API range (core PART_SIZE_MIB_*); the web package does not depend on core. */
+export const PART_SIZE_MIB_MIN = 100;
+export const PART_SIZE_MIB_MAX = 4096;
+
+/** Empty (default) or an integer inside the range the API accepts. */
+export function isValidPartSizeInput(raw: string): boolean {
+  const v = raw.trim();
+  return v === "" || (/^\d+$/.test(v) && Number(v) >= PART_SIZE_MIB_MIN && Number(v) <= PART_SIZE_MIB_MAX);
+}
+
+/** Empty inherits when never stored, clears (null) when stored, otherwise the number; invalid input is omitted. */
+export function partSizePayload(raw: string, stored: boolean): number | null | undefined {
+  if (!isValidPartSizeInput(raw)) return undefined;
+  const v = raw.trim();
+  return v ? Number(v) : stored ? null : undefined;
+}
+
 export function formFromRoom(r: RoomDTO): RoomForm {
   const rec = r.recording;
   const p = r.processing?.pipeline ?? {};
@@ -120,6 +140,8 @@ export function formFromRoom(r: RoomDTO): RoomForm {
     partTitleTemplate: p.upload?.partTitleTemplate || DEFAULT_TITLE_TEMPLATES.partTitleTemplate,
     seasonSectionId: p.upload?.seasonSectionId ? String(p.upload.seasonSectionId) : "",
     seasonSectionIdStored: !!p.upload && Object.prototype.hasOwnProperty.call(p.upload, "seasonSectionId"),
+    partSizeMiB: p.upload?.partSizeMiB ? String(p.upload.partSizeMiB) : "",
+    partSizeMiBStored: !!p.upload && Object.prototype.hasOwnProperty.call(p.upload, "partSizeMiB"),
     clStageSourceAfterMerge: p.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: p.cleanup?.sourceAfterDone === true,
     clKeepArchive: keepArchiveFromStored(p.cleanup?.stageAfterDone),
@@ -161,7 +183,7 @@ export function ruleFactsOf(f: RoomForm, ctx: RoomContext): FormFacts {
   return factsOf(f, { ...ctx, hasRule: true });
 }
 
-export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; error: "schedule" | "seasonSectionId" };
+export type PayloadResult = { ok: true; payload: RoomPayload } | { ok: false; error: "schedule" | "seasonSectionId" | "partSizeMiB" };
 
 /**
  * Form → payload. `recording.enabled` is deliberately NOT sent: the list/detail switch owns it,
@@ -172,6 +194,7 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
   const sched = splitSchedule(f.schedule);
   if (!sched) return { ok: false, error: "schedule" };
   if (f.uploadOn && !isValidSeasonSectionIdInput(f.seasonSectionId)) return { ok: false, error: "seasonSectionId" };
+  if (f.uploadOn && !isValidPartSizeInput(f.partSizeMiB)) return { ok: false, error: "partSizeMiB" };
   const stored = storedFromForm(ruleFactsOf(f, ctx));
   const trimOrUndef = (s: string): string | undefined => s.trim() || undefined;
   const recording: RoomPayload["recording"] = ctx.hasRecording
@@ -224,6 +247,7 @@ export function payloadFromForm(f: RoomForm, ctx: RoomContext): PayloadResult {
             submissionTitleTemplate: trimOrUndef(f.submissionTitleTemplate),
             partTitleTemplate: trimOrUndef(f.partTitleTemplate),
             seasonSectionId: seasonSectionIdPayload(f.seasonSectionId, f.seasonSectionIdStored),
+            partSizeMiB: partSizePayload(f.partSizeMiB, f.partSizeMiBStored),
           },
         },
       },
