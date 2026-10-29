@@ -6,12 +6,11 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Loader2, CircleHelp } from "lucide-react";
 import { useT } from "../lib/i18n";
-import type { PartRow, PartsNode, PipelineTree, RunTree as RunTreeModel, StepState } from "../lib/run-tree";
+import { foldedCount, treeEdges, type PartRow, type TreeEdge, type PartsNode, type PipelineTree, type RunTree as RunTreeModel, type StepState } from "../lib/run-tree";
 
 const MiB = 1024 * 1024;
-type Edge = [from: string, to: string, dashed?: boolean];
 
-function useEdges(ref: React.RefObject<HTMLDivElement | null>, edges: Edge[], signature: string): Array<{ d: string; dashed: boolean }> {
+function useEdges(ref: React.RefObject<HTMLDivElement | null>, edges: TreeEdge[], signature: string): Array<{ d: string; dashed: boolean }> {
   const [paths, setPaths] = useState<Array<{ d: string; dashed: boolean }>>([]);
   useLayoutEffect(() => {
     const wrap = ref.current;
@@ -49,8 +48,8 @@ export function RunTreeView({ root, tree }: { root: RunTreeRoot; tree: RunTreeMo
   const outerRef = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ k: 1, x: 0, y: 0 });
   const [height, setHeight] = useState<number | null>(null);
-  const { edges, body } = tree.kind === "parts" ? partsBody(tree.nodes) : pipelineBody(tree);
-  const paths = useEdges(wrapRef, edges.list, JSON.stringify(tree) + view.k);
+  const body = tree.kind === "parts" ? partsBody(tree.nodes) : pipelineBody(tree);
+  const paths = useEdges(wrapRef, treeEdges(tree), JSON.stringify(tree) + view.k);
 
   const desktop = (): boolean => window.matchMedia("(min-width: 1024px)").matches;
   // Fit the whole tree into the panel width (never enlarge past 100%).
@@ -142,26 +141,18 @@ function RootCard({ root }: { root: RunTreeRoot }): ReactNode {
   );
 }
 
-interface Body { edges: { rootTo: string[]; list: Edge[] }; body: ReactNode }
-
-function partsBody(nodes: PartsNode[]): Body {
-  const list: Edge[] = [];
-  const rootTo = nodes.map((n) => `n:${n.id}`);
-  for (const n of nodes) for (const p of n.parts.filter((x) => !x.collapsed)) list.push([`n:${n.id}`, `p:${n.id}:${p.index}`]);
-  for (const n of nodes) if (n.parts.some((p) => p.collapsed) || n.confirmed > 0 || n.pending > 0) list.push([`n:${n.id}`, `s:${n.id}`]);
-  const body = (
+function partsBody(nodes: PartsNode[]): ReactNode {
+  return (
     <div className="tr-col tr-groups">
       {nodes.map((n) => <PartsGroup key={n.id} node={n} />)}
     </div>
   );
-  return { edges: { rootTo, list: [...rootTo.slice(1).map((to) => ["root", to] as Edge), ...list] }, body };
 }
 
 function PartsGroup({ node }: { node: PartsNode }): ReactNode {
   const t = useT();
   const open = node.parts.filter((p) => !p.collapsed);
-  const folded = node.parts.filter((p) => p.collapsed);
-  const summary = Math.max(node.confirmed, folded.length);
+  const summary = foldedCount(node);
   return (
     <div className={`tr-group tr-role-${node.role}`}>
       <div className="tr-card tr-node" data-tr-id={`n:${node.id}`}>
@@ -206,22 +197,14 @@ function PartCard({ part, id }: { part: PartRow; id: string }): ReactNode {
   );
 }
 
-function pipelineBody(tree: PipelineTree): Body {
-  const list: Edge[] = [];
-  const hasCands = tree.candidates.length > 0;
-  const rootTo = hasCands ? tree.candidates.map((c) => `c:${c.id}`) : ["sel"];
-  if (hasCands) {
-    for (const c of tree.candidates) list.push([`c:${c.id}`, "sel", !c.winner]);
-  }
-  if (tree.steps.length > 0) list.push(["sel", `h:${tree.steps[0].key}`]);
-  const body = (
+function pipelineBody(tree: PipelineTree): ReactNode {
+  return (
     <>
-      {hasCands && <div className="tr-col tr-cands">{tree.candidates.map((c) => <CandidateCard key={c.id} c={c} />)}</div>}
+      {tree.candidates.length > 0 && <div className="tr-col tr-cands">{tree.candidates.map((c) => <CandidateCard key={c.id} c={c} />)}</div>}
       <div className="tr-col"><SelectCard state={tree.selectState} /></div>
       <div className="tr-col tr-chain-col"><HubChain tree={tree} /></div>
     </>
   );
-  return { edges: { rootTo, list: [...rootTo.slice(1).map((to) => ["root", to] as Edge), ...list] }, body };
 }
 
 function CandidateCard({ c }: { c: PipelineTree["candidates"][number] }): ReactNode {

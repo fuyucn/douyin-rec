@@ -8,6 +8,7 @@
  */
 import type { HubJobDTO, RollingDeliveryDTO } from "../api/client";
 import type { LivePartView, LiveUploadSnapshot } from "@drec/contracts";
+import { STAGE_READY } from "@drec/hub-ledger-contract";
 import { presentSet, type FlowCfg } from "../components/flow-build";
 
 export type StepState = "done" | "running" | "waiting" | "failed" | "skipped" | "unknown";
@@ -157,4 +158,43 @@ export function pipelineTree(job: HubJobDTO, cfg: FlowCfg | undefined, workerNam
     selectState,
     steps,
   };
+}
+
+/** The run's own state for the root card. A stage/archive close-out and a user stop are `needs_manual` but not faults. */
+export function rootStateOf(job: Pick<HubJobDTO, "state" | "error">): StepState {
+  if (job.state === "done") return "done";
+  if (job.state === "failed") return "failed";
+  if (job.state === "needs_manual") {
+    if (job.error === STAGE_READY) return "done";
+    if (job.error === "用户停止") return "skipped"; // exact value of core's USER_STOP (api-types: error === "用户停止")
+    return "failed";
+  }
+  return "running";
+}
+
+export type TreeEdge = [from: string, to: string, dashed?: boolean];
+
+/** Connector list; ids match the `data-tr-id` of the cards the component renders. */
+export function treeEdges(tree: RunTree): TreeEdge[] {
+  const out: TreeEdge[] = [];
+  if (tree.kind === "parts") {
+    for (const n of tree.nodes) {
+      out.push(["root", `n:${n.id}`]);
+      for (const p of n.parts) if (!p.collapsed) out.push([`n:${n.id}`, `p:${n.id}:${p.index}`]);
+      if (foldedCount(n) > 0 || n.pending > 0) out.push([`n:${n.id}`, `s:${n.id}`]);
+    }
+    return out;
+  }
+  if (tree.candidates.length === 0) out.push(["root", "sel"]);
+  for (const c of tree.candidates) {
+    out.push(["root", `c:${c.id}`]);
+    out.push([`c:${c.id}`, "sel", !c.winner]);
+  }
+  if (tree.steps.length > 0) out.push(["sel", `h:${tree.steps[0].key}`]);
+  return out;
+}
+
+/** Confirmed parts shown as one folded line. */
+export function foldedCount(n: PartsNode): number {
+  return Math.max(n.confirmed, n.parts.filter((p) => p.collapsed).length);
 }

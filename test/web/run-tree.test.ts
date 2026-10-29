@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { liveNode, partSteps, pipelineTree, rollingNode } from "../../packages/web/src/lib/run-tree.js";
+import { liveNode, partSteps, pipelineTree, rollingNode, rootStateOf, treeEdges } from "../../packages/web/src/lib/run-tree.js";
 import type { HubJobDTO, RollingDeliveryDTO } from "../../packages/web/src/api/client.js";
 import type { LiveUploadSnapshot } from "../../packages/core/src/live-upload.js";
 
@@ -89,5 +89,44 @@ describe("pipelineTree", () => {
     const t = pipelineTree(job({ steps: [{ step: "node_upload", phase: "start", at: 1 }] }), undefined, name);
     expect(t.steps.map((s) => s.key)).toContain("node_upload");
     expect(t.steps.map((s) => s.key)).not.toContain("pull");
+  });
+});
+
+describe("rootStateOf", () => {
+  it("does not paint a normal archive close-out or a user stop as a failure", () => {
+    expect(rootStateOf({ state: "needs_manual", error: "已存档待人工上传(stage 模式正常收口)" })).toBe("done");
+    expect(rootStateOf({ state: "needs_manual", error: "用户停止" })).toBe("skipped");
+    expect(rootStateOf({ state: "needs_manual", error: "上传失败" })).toBe("failed");
+    expect(rootStateOf({ state: "needs_manual", error: null })).toBe("failed");
+    expect(rootStateOf({ state: "failed", error: "x" })).toBe("failed");
+    expect(rootStateOf({ state: "done", error: null })).toBe("done");
+    expect(rootStateOf({ state: "merging", error: null })).toBe("running");
+  });
+});
+
+describe("treeEdges", () => {
+  it("connects the root to every first-level child, including a single one", () => {
+    const one = liveNode(snap({ currentPart: { index: 0, phase: "streaming", uploadedBytes: 1, chunks: 1 } }), "a", "A", "winner");
+    expect(treeEdges({ kind: "parts", nodes: [one] })).toEqual([["root", "n:a"], ["n:a", "p:a:0"]]);
+    const noCands = pipelineTree(job(), undefined, (id) => id);
+    expect(treeEdges(noCands)[0]).toEqual(["root", "sel"]);
+  });
+
+  it("connects the root to each candidate and draws only non-winners dashed into select", () => {
+    const t = pipelineTree(job({ candidates: [
+      { worker: "a", coverage: 1, durationSec: 60, complete: true, isWinner: true },
+      { worker: "b", coverage: 1, durationSec: 60, complete: true, isWinner: false },
+    ] }), undefined, (id) => id);
+    const e = treeEdges(t);
+    expect(e.filter(([f]) => f === "root").map(([, to]) => to)).toEqual(["c:a", "c:b"]);
+    expect(e.filter(([, to]) => to === "sel")).toEqual([["c:a", "sel", false], ["c:b", "sel", true]]);
+    expect(e.at(-1)?.[0]).toBe("sel");
+  });
+
+  it("links a node to its folded summary only when there is something folded", () => {
+    const n = liveNode(snap({ parts: [{ index: 0, phase: "confirmed", uploadedBytes: 1, bytes: 1, chunks: 1 }] }), "a", "A", "winner");
+    expect(treeEdges({ kind: "parts", nodes: [n] }).some(([, to]) => to === "s:a")).toBe(true);
+    const empty = liveNode(snap(), "b", "B", "standby");
+    expect(treeEdges({ kind: "parts", nodes: [empty] }).some(([, to]) => to === "s:b")).toBe(false);
   });
 });

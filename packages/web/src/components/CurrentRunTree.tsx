@@ -27,7 +27,9 @@ export function CurrentRunTree({ task, rolling, workers }: { task: Task | undefi
   const nodes: PartsNode[] = [];
   if (live) {
     const snaps = entries.flatMap((e) => (e.current ? [{ e, s: e.current }] : []));
-    const newest = [...snaps].sort((a, b) => b.s.updatedAt - a.s.updatedAt)[0];
+    // Only a node that is actually streaming / submitting can be the winner (same rule as the runtime page).
+    const active = snaps.filter(({ s }) => s.state === "streaming" || s.state === "submitting");
+    const newest = [...active].sort((a, b) => b.s.updatedAt - a.s.updatedAt)[0];
     for (const { e, s } of snaps) nodes.push(liveNode(s, e.workerId, name(e.workerId, e.workerName), e === newest?.e ? "winner" : "standby"));
   } else {
     const byWorker = new Map<string, RollingDeliveryDTO[]>();

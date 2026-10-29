@@ -13,7 +13,7 @@ import { Tooltip } from "./Tooltip";
 import { useT } from "../lib/i18n";
 import { buildFlow, pickMetric, type FlowCfg } from "./flow-build";
 import { RunTreeView } from "./RunTree";
-import { pipelineTree } from "../lib/run-tree";
+import { pipelineTree, rootStateOf } from "../lib/run-tree";
 import { deriveStepStatuses, stepDetail, type NodeStatus } from "../lib/hub-job-steps";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
@@ -527,7 +527,7 @@ export function RunCard({
               root={{
                 title: job.streamKey.split(":").slice(2).join(":") || job.streamKey,
                 sub: labels[job.state] ?? job.state,
-                state: job.state === "done" ? "done" : job.state === "failed" || job.state === "needs_manual" ? "failed" : "running",
+                state: rootStateOf(job),
                 bv: job.bv,
               }}
               tree={pipelineTree(job, cfg, workerName ?? ((id) => id))}
