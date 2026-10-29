@@ -23,7 +23,8 @@ describe("partSteps", () => {
     expect(partSteps("submitting").map((s) => s.state)).toEqual(["done", "done", "running", "waiting"]);
     expect(partSteps("confirmed").every((s) => s.state === "done")).toBe(true);
     expect(partSteps("unconfirmed")[3].state).toBe("unknown");
-    expect(partSteps("failed")[2].state).toBe("failed");
+    // A failed part keeps no step claim: the snapshot does not say which step failed.
+    expect(partSteps("failed").every((s) => s.state === "unknown")).toBe(true);
   });
 });
 
@@ -41,6 +42,7 @@ describe("liveNode", () => {
   it("keeps a failed part open and red", () => {
     const n = liveNode(snap({ parts: [{ index: 0, phase: "failed", uploadedBytes: 1, chunks: 1 }] }), "a", "A", "winner");
     expect(n.parts[0]).toMatchObject({ state: "failed", collapsed: false });
+    expect(n.parts[0].steps.some((s) => s.state === "done")).toBe(false);
   });
 });
 
@@ -50,6 +52,7 @@ describe("rollingNode", () => {
     const n = rollingNode(rows, "a", "A", "winner");
     expect(n.confirmed).toBe(2);
     expect(n.pending).toBe(1);
+    expect(n.ambiguous).toBe(1);
     expect(n.parts).toHaveLength(1);
     expect(n.parts[0].steps[2].state).toBe("running");
   });

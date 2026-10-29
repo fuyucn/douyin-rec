@@ -160,10 +160,11 @@ function PartsGroup({ node }: { node: PartsNode }): ReactNode {
         <div className="tr-title">{node.name}</div>
       </div>
       <div className="tr-parts">
-        {(summary > 0 || node.pending > 0) && (
+        {(summary > 0 || node.pending > 0 || node.ambiguous > 0) && (
           <div className="tr-card tr-fold" data-tr-id={`s:${node.id}`}>
             {summary > 0 && <span className="tr-pill tr-green">{t("room.runTree.confirmedFold", { n: summary })}</span>}
             {node.pending > 0 && <span className="tr-pill">{t("room.runTree.pending", { n: node.pending })}</span>}
+            {node.ambiguous > 0 && <span className="tr-pill tr-red">{t("room.runtime.note.ambiguous", { n: node.ambiguous })}</span>}
           </div>
         )}
         {open.map((p) => <PartCard key={p.index} part={p} id={`p:${node.id}:${p.index}`} />)}
@@ -180,6 +181,7 @@ function PartCard({ part, id }: { part: PartRow; id: string }): ReactNode {
     <div className={`tr-card tr-part tr-part-${part.state}`} data-tr-id={id}>
       <span className="tr-pn">P{part.index + 1}</span>
       <div className="tr-chain">
+        {part.state === "failed" && <span title={part.error}><StatePill state="failed" /></span>}
         {part.steps.map((s, i) => (
           <span key={s.key} className="tr-chain-item">
             {i > 0 && <span className="tr-arrow">→</span>}

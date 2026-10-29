@@ -19,6 +19,7 @@ export interface PartRow {
   index: number;
   steps: TreeStep[];
   state: StepState;
+  error?: string;
   bytes?: number;
   capBytes?: number;
   /** Confirmed parts fold into one line; the current / failed one stays open. */
@@ -32,6 +33,8 @@ export interface PartsNode {
   parts: PartRow[];
   /** Rolling has counts only: parts after the listed ones that are not yet uploaded. */
   pending: number;
+  /** Rolling segments whose upload result is unknown (needs a manual check). */
+  ambiguous: number;
   confirmed: number;
 }
 
@@ -66,7 +69,8 @@ export function partSteps(phase: LivePartView["phase"]): TreeStep[] {
     case "submitting": return at(["done", "done", "running", "waiting"]);
     case "confirmed": return at(["done", "done", "done", "done"]);
     case "unconfirmed": return at(["done", "done", "done", "unknown"]);
-    case "failed": return at(["done", "done", "failed", "waiting"]);
+    // The snapshot only keeps the phase, so the step that failed is lost: claim none of them.
+    case "failed": return at(["unknown", "unknown", "unknown", "unknown"]);
   }
 }
 
@@ -86,7 +90,8 @@ export function liveNode(snapshot: LiveUploadSnapshot, id: string, name: string,
     byIndex.set(p.index, {
       index: p.index,
       steps,
-      state: rowState(steps),
+      state: p.phase === "failed" ? "failed" : rowState(steps),
+      ...(p.error ? { error: p.error } : {}),
       bytes: p.bytes ?? p.uploadedBytes,
       collapsed: p.phase === "confirmed",
     });
@@ -97,14 +102,14 @@ export function liveNode(snapshot: LiveUploadSnapshot, id: string, name: string,
     byIndex.set(cur.index, {
       index: cur.index,
       steps,
-      state: rowState(steps),
+      state: cur.phase === "failed" ? "failed" : rowState(steps),
       bytes: cur.uploadedBytes,
       ...(cur.bytes ? { capBytes: cur.bytes } : {}),
       collapsed: false,
     });
   }
   const parts = [...byIndex.values()].sort((a, b) => a.index - b.index);
-  return { id, name, role, parts, pending: 0, confirmed: parts.filter((p) => p.state === "done").length };
+  return { id, name, role, parts, pending: 0, ambiguous: 0, confirmed: parts.filter((p) => p.state === "done").length };
 }
 
 /** Rolling progress only has counts, so earlier parts are one summary and only the live one is a row. */
@@ -121,7 +126,7 @@ export function rollingNode(rows: RollingDeliveryDTO[], id: string, name: string
     parts.push({ index: up.index, steps, state: "running", collapsed: false });
   }
   const ambiguous = rows.reduce((n, r) => n + r.ambiguous, 0);
-  return { id, name, role, parts, confirmed, pending: Math.max(0, total - confirmed - (up ? 1 : 0) - ambiguous) };
+  return { id, name, role, parts, confirmed, ambiguous, pending: Math.max(0, total - confirmed - (up ? 1 : 0) - ambiguous) };
 }
 
 const ORDER = [
@@ -181,7 +186,7 @@ export function treeEdges(tree: RunTree): TreeEdge[] {
     for (const n of tree.nodes) {
       out.push(["root", `n:${n.id}`]);
       for (const p of n.parts) if (!p.collapsed) out.push([`n:${n.id}`, `p:${n.id}:${p.index}`]);
-      if (foldedCount(n) > 0 || n.pending > 0) out.push([`n:${n.id}`, `s:${n.id}`]);
+      if (foldedCount(n) > 0 || n.pending > 0 || n.ambiguous > 0) out.push([`n:${n.id}`, `s:${n.id}`]);
     }
     return out;
   }
