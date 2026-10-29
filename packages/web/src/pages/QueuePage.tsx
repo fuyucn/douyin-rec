@@ -27,8 +27,8 @@ import {
   type NodeHealthLoadState,
 } from "../lib/nodes-summary";
 import { HubStreamBanner } from "../components/HubStreamBanner";
-import { AttentionCard, FleetPulse, LiveLane, LivePool, StageReadyRow } from "../components/QueueLive";
-import { queueSummary, splitQueue } from "../lib/queue-live";
+import { AttentionCard, FleetPulse, LiveLane, LivePool, LiveUploadLanes, StageReadyRow } from "../components/QueueLive";
+import { liveUploadLanes, queueSummary, splitQueue } from "../lib/queue-live";
 import { useT } from "../lib/i18n";
 import { fmtTimeInTz } from "../lib/tz";
 
@@ -804,6 +804,8 @@ export function QueuePage(): ReactNode {
               ))}
             </div>
           )}
+
+          <LiveUploadLanes lanes={liveUploadLanes(fleetTasks)} now={now} />
 
           <div className="section-label mb-2.5">{t("queue.attentionSection.title")}</div>
           {sections.attention.length === 0 ? (

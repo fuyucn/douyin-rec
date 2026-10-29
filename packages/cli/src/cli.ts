@@ -31,7 +31,7 @@ import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-proc
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
-import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout } from "@drec/app";
+import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout, LiveUploadReporter } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
@@ -369,6 +369,8 @@ program
       // Explicit stream-upload flags only serve manual debugging; a managed run ignores them.
       const manual: Pick<RecordCliOpts, "streamUploadTid" | "streamUploadTag" | "streamUploadPrivate"> = delivery ? {} : o;
       const streamMeta = zeroDiskStreamMeta(delivery, resolveStreamUploadMeta(platform.id, roomSlug));
+      // Display-only timeline. It is independent of the managed receipt reporter below.
+      const liveReporter = new LiveUploadReporter({ platform: platform.id, roomSlug });
       const metaOverride = delivery ? { meta: delivery.meta } : {};
       // The stored task name is only a fallback; the live stream usually exposes the real
       // anchor. Both the XML metadata and `{name}` should use the real anchor once known.
@@ -588,6 +590,7 @@ program
         danmu,
         log: (m) => console.log(m),
         onAlert: (message) => { void notifier.notify({ kind: "error", stage: "直播直传", message }).catch(() => {}); },
+        reporter: liveReporter,
         // Managed nodes share the account's submission window with the node's other uploads and
         // report part progress to the master console (issue #331).
         ...(delivery ? {
@@ -632,6 +635,8 @@ program
         // callers only) stays a failure as a backstop (review #280 P1).
         // An `ok:false` run may already have delivered parts, so only its error text is logged.
         const clean = res.ok && res.outcome !== "no-stream";
+        const outcome = clean ? "finished" : abort.signal.aborted || drain.signal.aborted ? "stopped" : "failed";
+        liveReporter.event({ at: Date.now(), kind: "run_end", outcome, ...(res.error ? { message: res.error } : {}) });
         if (res.ok && res.outcome === "idle") {
           console.log("[直播直传] 本次未录到分 P(等待中被停止,或开播后立即断流),正常退出");
         } else if (res.ok && res.outcome === "no-stream") {
@@ -642,6 +647,7 @@ program
         process.exit(clean ? 0 : 1);
       }).catch((e) => {
         console.error(`[直播直传] 失败: ${(e as Error).message}`);
+        liveReporter.event({ at: Date.now(), kind: "run_end", outcome: "failed", message: (e as Error).message });
         reporter?.failed((e as Error).message);
         process.exit(1);
       });
@@ -1199,6 +1205,11 @@ let hubRunNow:
 let hubRecordingSnapshot = new Map<string, RecordingWorkerStatusDTO[]>();
 /** Zero-disk side-node status snapshot (issue #331); replaced wholesale on each hub sync tick, display only. */
 let hubZeroDiskSnapshot = new Map<string, ZeroDiskNodeStatusDTO[]>();
+let hubZeroDiskLive: ((platform: string, roomSlug: string) => Array<{
+  workerId: string; workerName: string;
+  current?: import("@drec/core").LiveUploadSnapshot;
+  previous?: import("@drec/core").LiveUploadSnapshot;
+}>) | undefined;
 /** 各节点边录边传的实时进度(F1;随 5 秒状态轮询整体替换,只读展示)。 */
 let hubDeliverySnapshot: RollingDeliveryDTO[] = [];
 /** probeAllWorkers 的结果缓存 TTL。 */
@@ -1209,6 +1220,11 @@ const readRecordingWorkers = (platform: string, roomSlug: string): RecordingWork
   hubRecordingSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
 const readZeroDiskStatus = (platform: string, roomSlug: string): ZeroDiskNodeStatusDTO[] =>
   hubZeroDiskSnapshot.get(recordingSnapshotKey(platform, roomSlug)) ?? [];
+const readZeroDiskLive = (platform: string, roomSlug: string): Array<{
+  workerId: string; workerName: string;
+  current?: import("@drec/core").LiveUploadSnapshot;
+  previous?: import("@drec/core").LiveUploadSnapshot;
+}> => hubZeroDiskLive?.(platform, roomSlug) ?? [];
 /** master 资源池快照提供者(由 hubStarter.start 注入,读同一 ResourcePool 实例);未启动 → undefined。 */
 let hubPoolSnapshot: (() => HubPoolSnapshotDTO) | undefined;
 /** Blocked-broadcast provider (injected by hubStarter.start from the live Reconciler); hub not started → empty. */
@@ -1296,6 +1312,7 @@ const hubStarter: HubStarter = {
   requestSyncTasks: requestHubSync,
   recordingWorkers: readRecordingWorkers,
   zeroDiskStatus: readZeroDiskStatus,
+  readZeroDiskLive,
   nodeTaskLogs: requestNodeTaskLogs,
   nodeTasks: requestNodeTasks,
   rollingDelivery: readRollingDelivery,
@@ -1532,6 +1549,12 @@ const hubStarter: HubStarter = {
       log: (m) => opts.log(m),
       alert: (message) => opts.onEvent({ kind: "error", stage: "直播直传", message }),
     });
+    hubZeroDiskLive = (platform, roomSlug) => loadWorkers()
+      .filter((w) => w.kind !== "local")
+      .flatMap((w) => {
+        const lv = zeroDiskFleet.live(w.id, platform, roomSlug);
+        return lv ? [{ workerId: w.id, workerName: w.name ?? w.id, ...lv }] : [];
+      });
     /** Targets the master currently expects to run zero-disk: (room, non-local node) pairs. */
     const zeroDiskTargetList = (): Array<{ workerId: string; platform: string; roomSlug: string }> => {
       const out: Array<{ workerId: string; platform: string; roomSlug: string }> = [];
@@ -2160,6 +2183,7 @@ const hubStarter: HubStarter = {
       if (recordingStatusTimer) clearTimeout(recordingStatusTimer);
       hubRecordingSnapshot = new Map();
       hubZeroDiskSnapshot = new Map();
+      hubZeroDiskLive = undefined;
       hubSyncTasks = undefined;
       hubSyncGate.unbind(); // 必须解绑:否则 stop 之后的同步请求会打到已停的旧 runner(自审发现)
       hubRetryNode = undefined;

@@ -13,6 +13,7 @@ import type { TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
 import { redactLogLines } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
+import { liveUploadPath, readLiveUploadFile } from "../../zero-disk-node.js";
 
 /** Web 停止请求最多同步等待的时间(ms)。普通任务几秒内退出;rolling 任务可能在传末段,超时先返回。 */
 const STOP_WAIT_MS = 15_000;
@@ -178,6 +179,21 @@ export function buildTasks(ctx: ApiCtx) {
       // 出网前脱敏:日志里可能带 cookie(vendored 取流代码在异常信息里打印整串)。
       // 这里覆盖「节点自己的网页」与「master 代查(F3)」两条出口。
       return { status: 200, body: { lines: redactLogLines(manager.getLogs(id)) } };
+    },
+
+    getTaskLive(id: number): ApiResult {
+      const t = store.getTask(id);
+      if (!t) return err(404, `未找到任务 id=${id}`);
+      if (!t.streamUpload) return err(404, "任务未开启直播直传");
+      const p = platformForRoom(t.room);
+      const roomSlug = p.extractRoomSlug(t.room);
+      const entries: Array<{ workerId: string; workerName: string; current?: unknown; previous?: unknown }> = [];
+      if (t.managedBy !== "hub") {
+        const local = readLiveUploadFile(liveUploadPath(p.id, roomSlug));
+        if (local) entries.push({ workerId: "local", workerName: "本机", ...local });
+      }
+      entries.push(...(deps.zeroDiskLive?.(p.id, roomSlug) ?? []));
+      return { status: 200, body: { entries } };
     },
 
     async deleteTask(id: number): Promise<ApiResult> {

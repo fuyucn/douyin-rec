@@ -114,6 +114,11 @@ export interface ApiDeps {
   recordingWorkers?: (platform: string, roomSlug: string) => RecordingWorkerStatusDTO[];
   /** Cached zero-disk side-node status reader (issue #331); only on a master hub. */
   zeroDiskStatus?: (platform: string, roomSlug: string) => ZeroDiskNodeStatusDTO[];
+  /** Full current/previous timeline entries for a room (managed nodes; local is read directly). */
+  zeroDiskLive?: (platform: string, roomSlug: string) => Array<{
+    workerId: string; workerName: string; current?: import("@drec/core").LiveUploadSnapshot;
+    previous?: import("@drec/core").LiveUploadSnapshot;
+  }>;
   /**
    * 节点侧 master 下发快照目录(`<数据根>/config/managed`)。提供时,受管任务视图带 `assigned`
    * (取自快照里 master 算好的归属标记;缺失/旧 master 不带 → 省略 = 视为归属)。省略 = 不带(master/单机)。
@@ -261,6 +266,7 @@ export interface Api {
   getTask(id: number): ApiResult;
   /** GET /api/tasks/:id/logs — captured recorder log lines. 404 if missing. */
   getTaskLogs(id: number): ApiResult;
+  getTaskLive(id: number): ApiResult;
   deleteTask(id: number): Promise<ApiResult>;
   /** POST /api/tasks/:id/refresh-anchor — 触发后台重新抓取主播名(匿名,fire-and-forget)。供 _apply-tasks 在 VPS 侧调用。 */
   refreshTaskAnchor(id: number): ApiResult;

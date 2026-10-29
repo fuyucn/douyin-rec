@@ -74,3 +74,13 @@ describe("rooms editor upload fields", () => {
     expect(field).toContain("value={value}");
   });
 });
+
+describe("live upload timeline wiring", () => {
+  it("room page renders the timeline from the zero-disk summaries", () => {
+    const page = readFileSync(join(SRC, "pages", "RoomPage.tsx"), "utf-8");
+    const component = readFileSync(join(SRC, "components", "LiveUploadTimeline.tsx"), "utf-8");
+    expect(page).toContain("<LiveUploadTimeline");
+    expect(page).toContain("task.zeroDisk?.some((z) => z.live)");
+    expect(component).toContain("api.getTaskLive");
+  });
+});

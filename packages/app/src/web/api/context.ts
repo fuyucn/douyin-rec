@@ -7,7 +7,7 @@
 import {
   isUploadingMode, normalizeUploadMode, pipelineBurns, resolveRollingPolicy, rollingReasonText, listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
   isValidPartSizeMiB, PART_SIZE_MIB_MIN, PART_SIZE_MIB_MAX,
-  zeroDiskRuleError, redactTaskSecrets, recordingRoomDir, recordingRoomDirCandidates,
+  zeroDiskRuleError, redactTaskSecrets, recordingRoomDir, recordingRoomDirCandidates, liveUploadSummary,
   type WorkerDTO, type HubPipelineConfig, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO,
 } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
@@ -18,6 +18,7 @@ import { readBiliupCookieHeader } from "../../upload/biliup.js";
 import { listHubJobs } from "../../hub-jobs.js";
 import { nodeOutputFormatLock } from "../../node-remux.js";
 import { readManagedState } from "../../managed-state.js";
+import { liveUploadPath, readLiveUploadFile } from "../../zero-disk-node.js";
 import { hasSessionCookie, parseCookieExpiry } from "../../cookie-utils.js";
 import type { ApiDeps, ApiResult, CookieStatus, TaskView, TaskDetailView } from "./types.js";
 
@@ -120,6 +121,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
   // 节点侧归属标记(issue #73):读 master 下发快照 rooms.json(现读,1s 缓存摊薄列表 N 次读)。
   // 缺快照/损坏/旧 master 不带字段 → 空 map → 视为归属(旧行为,全显示)。
   let assignedCache: { at: number; map: Map<string, boolean> } | null = null;
+  let liveCache: { at: number; data: ReturnType<typeof readLiveUploadFile> } | null = null;
   const assignedMap = (): Map<string, boolean> => {
     const dir = deps.managedStateDir;
     if (!dir) return new Map();
@@ -139,11 +141,26 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     let zeroDisk: ZeroDiskNodeStatusDTO[] | undefined;
     const stopping = manager.isStopping(t.id) || undefined;
     let hubRule: TaskView["hubRule"];
+    const platform = platformForRoom(t.room);
+    const roomSlug = platform.extractRoomSlug(t.room);
+    if (t.streamUpload) {
+      const managed = deps.zeroDiskStatus?.(platform.id, roomSlug) ?? [];
+      zeroDisk = [...managed];
+      if (t.managedBy !== "hub") {
+        if (!liveCache || Date.now() - liveCache.at >= 1000) {
+          liveCache = { at: Date.now(), data: readLiveUploadFile(liveUploadPath(platform.id, roomSlug)) };
+        }
+        const snap = liveCache.data?.current ?? liveCache.data?.previous;
+        if (snap) zeroDisk.push({
+          workerId: "local", workerName: "本机", state: "ok",
+          run: snap.state === "waiting" ? "running" : snap.state === "finished" ? "finished" : snap.state === "failed" ? "failed" : snap.state === "stopped" ? "stopped" : "running",
+          live: liveUploadSummary(snap), checkedAt: Date.now(),
+        });
+      }
+      if (!zeroDisk.length) zeroDisk = undefined;
+    }
     if (deps.recordingWorkers || deps.hubEnabled) {
-      const platform = platformForRoom(t.room);
-      const roomSlug = platform.extractRoomSlug(t.room);
       if (deps.recordingWorkers) workers = deps.recordingWorkers(platform.id, roomSlug);
-      if (deps.zeroDiskStatus && t.streamUpload) zeroDisk = deps.zeroDiskStatus(platform.id, roomSlug);
       if (deps.hubEnabled) {
         const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug));
         if (rule) {

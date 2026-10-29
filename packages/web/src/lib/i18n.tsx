@@ -256,6 +256,17 @@ const DICT = {
         blocked: "主控暂不能下发(详情见提示)", refused: "已拒绝启动",
         refusedAccountMismatch: "已拒绝启动:节点上传账号与主控配置不一致", refusedAccountUnknown: "已拒绝启动:无法确认上传账号",
         refusedCredential: "已拒绝启动:节点上没有 B 站上传登录", refusedDelivery: "已拒绝启动:主控未下发上传设置",
+        live: {
+          title: "直播直传进度", empty: "暂无直播直传数据", currentPart: "正在处理 P{n}", phaseLabel: "阶段", updated: "更新于 {time}",
+          noEvents: "暂无事件",
+          state: { waiting: "等待开播", streaming: "录制并上传中", submitting: "提交分 P 中", finished: "已完成", failed: "失败", stopped: "已停止" },
+          phase: { streaming: "录制上传中", sealing: "封口中", submitting: "提交中", confirmed: "已确认", unconfirmed: "待确认", failed: "失败" },
+          event: {
+            run_start: "开始新场次", run_resume: "恢复同场次", waiting: "等待开播", live: "检测到开播", part_streaming: "开始分段", part_sealed: "分段封口",
+            part_submit: "提交分 P", part_confirmed: "分 P 已确认", part_unconfirmed: "分 P 待确认", part_retry: "重试分 P", part_failed: "分 P 失败",
+            recovered: "恢复未确认分 P", stalled: "源流停滞", season_pending: "合集待关联", season_done: "合集已关联", season_failed: "合集关联失败", run_end: "场次结束",
+          },
+        },
       },
       detail: {
         back: "房间", edit: "编辑", drain: "录完这场再停", recorded: "已录", nodes: "节点", lastRun: "最近一场", deliver: "交付",
@@ -527,6 +538,7 @@ const DICT = {
         waiting: "等待资源", current: "当前步骤", next: "接下来", done: "已完成", started: "已运行", eta: "预计剩余",
         queueAt: "资源队列第 {n} 位", upload: "上传进度", heartbeat: "心跳", updated: "数据更新于 {s} 秒前", directTag: "直播直传",
       },
+      liveUpload: { state: "直播直传 · {state}" },
       attentionSection: {
         title: "需要处理", empty: "没有需要人工处理的事故", stageTitle: "正常存档（无需故障处理）",
         count: "{rooms} 个房间 · {rows} 条记录", show: "展开", hide: "收起",
@@ -802,6 +814,17 @@ const DICT = {
         blocked: "Master cannot push this yet (see tooltip)", refused: "Refused to start",
         refusedAccountMismatch: "Refused: the node's upload account differs from the master's", refusedAccountUnknown: "Refused: the upload account cannot be identified",
         refusedCredential: "Refused: no Bilibili upload login on the node", refusedDelivery: "Refused: the master did not deliver upload settings",
+        live: {
+          title: "Live upload progress", empty: "No live-upload data yet", currentPart: "Working on P{n}", phaseLabel: "Phase", updated: "Updated {time}",
+          noEvents: "No events yet",
+          state: { waiting: "Waiting", streaming: "Recording + uploading", submitting: "Submitting part", finished: "Finished", failed: "Failed", stopped: "Stopped" },
+          phase: { streaming: "Streaming", sealing: "Sealing", submitting: "Submitting", confirmed: "Confirmed", unconfirmed: "Unconfirmed", failed: "Failed" },
+          event: {
+            run_start: "Run started", run_resume: "Run resumed", waiting: "Waiting for stream", live: "Stream live", part_streaming: "Part started", part_sealed: "Part sealed",
+            part_submit: "Part submitted", part_confirmed: "Part confirmed", part_unconfirmed: "Part unconfirmed", part_retry: "Part retry", part_failed: "Part failed",
+            recovered: "Recovered part", stalled: "Source stalled", season_pending: "Season pending", season_done: "Season linked", season_failed: "Season failed", run_end: "Run ended",
+          },
+        },
       },
       detail: {
         back: "Rooms", edit: "Edit", drain: "Stop after this stream", recorded: "Recorded", nodes: "Nodes", lastRun: "Last run", deliver: "Delivery",
@@ -1071,6 +1094,7 @@ const DICT = {
         waiting: "Waiting for a resource", current: "Current step", next: "Next", done: "Done", started: "Running for", eta: "ETA",
         queueAt: "Resource queue #{n}", upload: "Upload", heartbeat: "Heartbeat", updated: "Data updated {s}s ago", directTag: "Live direct",
       },
+      liveUpload: { state: "Live upload · {state}" },
       attentionSection: {
         title: "Needs attention", empty: "No real incidents need a person", stageTitle: "Normal archives (not failures)",
         count: "{rooms} rooms · {rows} rows", show: "Expand", hide: "Collapse",

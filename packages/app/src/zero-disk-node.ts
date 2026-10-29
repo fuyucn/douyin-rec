@@ -18,11 +18,14 @@ import {
   normalizeZeroDiskStatus,
   parseZeroDiskDelivery,
   zeroDiskAccountVerdict,
+  normalizeLiveUploadSnapshot,
+  capLiveUploadSnapshot,
   type ZeroDiskDelivery,
   type ZeroDiskNodeStatus,
   type ZeroDiskReceipt,
   type ZeroDiskRefusal,
   type ZeroDiskReport,
+  type LiveUploadSnapshot,
   type UploadGateStore,
   openUploadLimitStore,
 } from "@drec/core";
@@ -129,7 +132,7 @@ export function zeroDiskNodeDir(): string {
 const safeName = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, "_");
 
 /** Atomic JSON write (tmp + rename): the master may read at any moment. */
-function writeJsonAtomic(path: string, value: unknown): void {
+export function writeJsonAtomic(path: string, value: unknown): void {
   mkdirSync(join(path, ".."), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(value) + "\n");
@@ -140,6 +143,54 @@ type StatusFile = ZeroDiskNodeStatus & { pid?: number };
 
 const statusPath = (platform: string, roomSlug: string): string =>
   join(zeroDiskNodeDir(), "status", `${safeName(platform)}.${safeName(roomSlug)}.json`);
+
+export interface LiveFile {
+  v: 1;
+  platform: string;
+  roomSlug: string;
+  pid: number;
+  updatedAt: number;
+  current?: LiveUploadSnapshot;
+  previous?: LiveUploadSnapshot;
+}
+
+export const liveUploadPath = (platform: string, roomSlug: string): string =>
+  join(zeroDiskNodeDir(), "live", `${safeName(platform)}.${safeName(roomSlug)}.json`);
+
+/** Read one room's timeline; a dead pid turns a non-terminal current into `stopped`. */
+export function readLiveUploadFile(
+  path: string,
+  opts: { isAlive?: (pid: unknown) => boolean } = {},
+): { current?: LiveUploadSnapshot; previous?: LiveUploadSnapshot } | null {
+  let raw: LiveFile;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf-8")) as LiveFile;
+  } catch {
+    return null;
+  }
+  if (!raw || raw.v !== 1) return null;
+  const alive = opts.isAlive ?? pidAlive;
+  const current = raw.current ? normalizeLiveUploadSnapshot(raw.current) : undefined;
+  const previous = raw.previous ? normalizeLiveUploadSnapshot(raw.previous) : undefined;
+  if (current && raw.pid > 0 && !alive(raw.pid)
+    && current.state !== "finished" && current.state !== "failed" && current.state !== "stopped") {
+    current.state = "stopped";
+    current.updatedAt = Math.max(current.updatedAt, raw.updatedAt ?? current.updatedAt);
+  }
+  return current || previous ? { ...(current ? { current } : {}), ...(previous ? { previous } : {}) } : null;
+}
+
+/** Remove stale live files; mirrors receipt retention. */
+export function pruneLiveFiles(now = Date.now()): void {
+  const dir = join(zeroDiskNodeDir(), "live");
+  try {
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".json")) continue;
+      const p = join(dir, f);
+      if (now - statSync(p).mtimeMs > ZERO_DISK_RECEIPT_TTL_MS) rmSync(p, { force: true });
+    }
+  } catch { /* best effort */ }
+}
 
 /** Write the per-room status. Failures are swallowed: status is observability, never a reason to stop uploading. */
 export function writeZeroDiskStatus(s: Omit<ZeroDiskNodeStatus, "v" | "updatedAt">, now: number = Date.now()): void {
@@ -183,7 +234,7 @@ function readJsonDir(dir: string): unknown[] {
   return out;
 }
 
-function pidAlive(pid: unknown): boolean {
+export function pidAlive(pid: unknown): boolean {
   if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
 }
@@ -205,7 +256,27 @@ export function buildZeroDiskReport(o: { isAlive?: (pid: unknown) => boolean } =
     const pid = (raw as { pid?: unknown }).pid;
     status.push(s.state === "running" && !alive(pid) ? { ...s, state: "stopped" } : s);
   }
-  return { v: 1, receipts, status };
+  const live: NonNullable<ZeroDiskReport["live"]> = [];
+  const liveDir = join(zeroDiskNodeDir(), "live");
+  try {
+    for (const f of readdirSync(liveDir)) {
+      if (!f.endsWith(".json")) continue;
+      const p = join(liveDir, f);
+      const r = readLiveUploadFile(p, { isAlive: alive });
+      if (!r?.current) continue;
+      const raw = JSON.parse(readFileSync(p, "utf-8")) as Partial<LiveFile>;
+      if (typeof raw.platform !== "string" || typeof raw.roomSlug !== "string") continue;
+      const terminal = r.current.state === "finished" || r.current.state === "failed" || r.current.state === "stopped";
+      const recent = Date.now() - r.current.updatedAt < 24 * 60 * 60_000;
+      live.push({
+        platform: raw.platform,
+        roomSlug: raw.roomSlug,
+        ...(terminal && !recent ? {} : { current: capLiveUploadSnapshot(r.current) }),
+        ...(!terminal || recent ? (r.previous ? { previous: capLiveUploadSnapshot(r.previous) } : {}) : {}),
+      });
+    }
+  } catch { /* no live dir yet */ }
+  return { v: 1, receipts, status, ...(live.length ? { live } : {}) };
 }
 
 // ───────────────────────── master side: what to ship ─────────────────────────

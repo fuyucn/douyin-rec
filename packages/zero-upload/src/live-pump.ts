@@ -55,6 +55,7 @@ import {
   isSameBroadcastGap,
   isUploadRateLimited,
   type DanmuMessage,
+  type LivePumpReporter,
 } from "@drec/core";
 import { ffprobeDuration, ffprobeDtsGap, type DtsGap } from "@drec/post-process";
 
@@ -486,6 +487,8 @@ export interface LivePumpSessionOpts {
   onChunk?: (streamedBytes: number, chunksDone: number) => void;
   /** Optional Bilibili season section id; added after the first successful create. */
   seasonSectionId?: number;
+  /** Display-only run timeline sink; errors are swallowed. */
+  reporter?: LivePumpReporter;
   /** Error-level alert channel (same notifier as the other zero-disk alerts). Fired at most once per start. */
   onAlert?: (message: string) => void;
   /**
@@ -520,6 +523,7 @@ export class LivePumpSession {
   private stateUntrusted = false;
   private seasonTail: Promise<void> = Promise.resolve();
   private seasonWriteFails = false;
+  private readonly resumed: boolean;
 
   constructor(private readonly o: LivePumpSessionOpts) {
     mkdirSync(o.spoolDir, { recursive: true });
@@ -528,6 +532,7 @@ export class LivePumpSession {
     const rolloverAlert = rolloverStaleState(this.statePath, o.room, Date.now(), this.log);
     if (rolloverAlert) o.onAlert?.(rolloverAlert);
     const loaded = readLivePumpState(this.statePath);
+    this.resumed = !!loaded;
     if (loaded && loaded.room !== o.room) {
       throw new Error(`live-pump state room mismatch: ${loaded.room} != ${o.room}`);
     }
@@ -551,6 +556,10 @@ export class LivePumpSession {
   }
 
   get bvid(): string | undefined { return this.state.bvid; }
+  /** Archive identity for the run timeline; `resumed` distinguishes run_resume from run_start. */
+  get sessionInfo(): { sessionId: string; createdAt: number; resumed: boolean } {
+    return { sessionId: `${this.state.room}:${this.state.createdAt}`, createdAt: this.state.createdAt, resumed: this.resumed };
+  }
   get aid(): number | undefined { return this.state.aid; }
   get parts(): LivePumpState["parts"] { return [...this.state.parts]; }
   /** True when any recorded part is still unconfirmed or an irreversible request is pending. */
@@ -693,6 +702,9 @@ export class LivePumpSession {
   async recover(): Promise<{ ok: boolean; reason?: string; archiveExists?: boolean }> {
     const p = this.state.pending;
     if (!p) return { ok: true };
+    const reportRecovered = (): void => {
+      try { this.o.reporter?.event({ at: Date.now(), kind: "recovered", part: p.partIndex }); } catch { /* observability */ }
+    };
     const doFetch = this.o.fetchImpl ?? fetch;
     const markPending = (confirmed: boolean): void => {
       const existing = this.state.parts.find((x) => x.index === p.partIndex);
@@ -732,6 +744,7 @@ export class LivePumpSession {
         } catch (e) {
           return { ok: false, reason: `create did not happen but cannot persist recovery: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
         }
+        reportRecovered();
         return { ok: true };
       }
       if (!found.ok || !found.archive) {
@@ -759,6 +772,7 @@ export class LivePumpSession {
         return { ok: false, archiveExists: true, reason: `recovered archive but cannot persist state: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
       }
       this.cleanupConfirmed();
+      reportRecovered();
       return { ok: true };
     }
     if (!this.state.bvid && !this.state.aid) {
@@ -790,6 +804,7 @@ export class LivePumpSession {
       return { ok: false, archiveExists: true, reason: `recovered append but cannot persist state: ${String((e as Error)?.message ?? e).slice(0, 200)}` };
     }
     this.cleanupConfirmed();
+    reportRecovered();
     return { ok: true };
   }
 
@@ -863,6 +878,9 @@ export class LivePumpSession {
         }],
       pending: undefined,
     };
+    if (pending.kind === "create" && this.o.seasonSectionId) {
+      try { this.o.reporter?.event({ at: Date.now(), kind: "season_pending", part: input.index }); } catch { /* observability */ }
+    }
     try {
       this.persist();
     } catch (e) {
@@ -969,6 +987,10 @@ export class LivePumpSession {
       seasonState: seasonCheckpointState(outcome),
       updatedAt: Date.now(),
     };
+    try {
+      const kind = this.state.seasonState === "done" ? "season_done" : this.state.seasonState === "failed" ? "season_failed" : "season_pending";
+      this.o.reporter?.event({ at: Date.now(), kind });
+    } catch { /* observability */ }
     try {
       if (this.seasonWriteFails) {
         this.seasonWriteFails = false;
@@ -1798,6 +1820,8 @@ export interface RunLivePumpOptions {
   log?: (msg: string) => void;
   /** Shared account accounting for archive submissions (see {@link LivePumpSessionOpts.submitGate}). */
   submitGate?: SubmitGate;
+  /** Display-only run timeline sink; errors are swallowed and never change upload behavior. */
+  reporter?: LivePumpReporter;
   /**
    * Called after each part is confirmed into the archive: `count` = parts confirmed so far (including
    * earlier runs of the same archive). Progress for the master console; throwing is swallowed.
@@ -1963,11 +1987,18 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
   const log = o.log ?? ((m: string) => process.stderr.write(`${m}\n`));
   const sleep = o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const maxSegments = Math.max(0, o.maxSegments ?? 0);
+  const emit = (e: Parameters<LivePumpReporter["event"]>[0]): void => {
+    try { o.reporter?.event(e); } catch { /* observability only */ }
+  };
+  const progress = (p: { part: number; uploadedBytes: number; chunks: number }): void => {
+    try { o.reporter?.progress(p); } catch { /* observability only */ }
+  };
   /** Live title seen on the first acquisition (platforms may not expose one). */
   let liveTitle: string | undefined;
   // TaskManager derives the task's recording phase from these exact markers
   // (`[状态] 录制中` / `[状态] 等待开播`). Without them a zero-disk task shows as "running"
   // but never "recording", so the UI cannot tell waiting-for-stream from actually recording.
+  emit({ at: Date.now(), kind: "waiting" });
   log("[状态] 等待开播");
   const idlePollMs = o.idlePollMs ?? IDLE_POLL_MS;
   const stopRequested = async (): Promise<boolean> =>
@@ -2019,6 +2050,13 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // override as the segment uploader, or a fake transport would silently fall back to the
       // real network (real bug: a fake-UPOS run hit live Bilibili and got -400).
       fetchImpl: o.fetchImpl,
+      ...(o.reporter ? { reporter: o.reporter } : {}),
+    });
+    const info = session.sessionInfo;
+    emit({
+      at: Date.now(),
+      kind: info.resumed ? "run_resume" : "run_start",
+      session: info,
     });
 
     if (o.submit !== false) {
@@ -2168,6 +2206,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       });
     }
     if (!s.living || !s.url) break;
+    emit({ at: Date.now(), kind: "live" });
     await startDanmuOnce();
     if (s.title?.trim()) liveTitle = s.title.trim();
     if (o.titleForLive && s.title) {
@@ -2182,6 +2221,8 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
 
     const fileName = o.spoolName ? o.spoolName(seg) : `${Date.now()}_${String(seg).padStart(3, "0")}.live.ts`;
     const t0 = Date.now();
+    const streamingPart = session.nextPartIndex;
+    emit({ at: Date.now(), kind: "part_streaming", part: streamingPart });
     const r = await pumpSegment({
       cookiesPath: o.cookiesPath,
       args: buildPipeFfmpegArgs({ url: s.url, headers: s.headers, sizeCap: o.sizeCap }),
@@ -2200,8 +2241,12 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       log,
       onFallback: (p, b) => log(`[直播直传] ↺ 段${seg + 1} 走整文件回退重传: ${(b / MiB).toFixed(1)}MiB (${p})`),
       maxMs: o.maxMs,
-      onChunk: (b, n) => log(`[直播直传] 段${seg + 1} 第 ${n} 块完成,累计 ${(b / MiB).toFixed(1)}MiB`),
+      onChunk: (b, n) => {
+        log(`[直播直传] 段${seg + 1} 第 ${n} 块完成,累计 ${(b / MiB).toFixed(1)}MiB`);
+        progress({ part: streamingPart, uploadedBytes: b, chunks: n });
+      },
     });
+    emit({ at: Date.now(), kind: "part_sealed", part: streamingPart, bytes: r.spooledBytes });
     const base: LivePumpSegmentReport = {
       seg: seg + 1,
       chunks: r.chunksUploaded,
@@ -2215,6 +2260,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     };
 
     if (r.sealedBy === "stalled") {
+      emit({ at: Date.now(), kind: "stalled", part: streamingPart, bytes: r.spooledBytes, message: `${Math.max(1, Math.ceil((r.stalledMs ?? 0) / 1000))}s no data` });
       const silentSec = Math.max(1, Math.ceil((r.stalledMs ?? 0) / 1000));
       log("[状态] 录制停滞");
       log(`[直播直传] 段${seg + 1} 源流已 ${silentSec}s 无写入,自动封口并尝试追到当前稿件`);
@@ -2247,9 +2293,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         durationSec: r.spoolDurationSec ?? 0,
         ...(r.stemOfCompleted ? { stem: r.stemOfCompleted } : {}),
       });
+      if (note.ok) emit({ at: Date.now(), kind: "part_unconfirmed", part: unconfirmedIndex, bytes: r.spooledBytes });
       return note.ok ? undefined : (note.error ?? "无法记录未确认分 P");
     };
     const retryUnconfirmed = async (): Promise<{ ok: boolean; stem?: string; bvid?: string; aid?: number; error?: string }> => {
+      emit({ at: Date.now(), kind: "part_retry", part: unconfirmedIndex });
       const deadline = Date.now() + recoverWindowMs;
       let waitMs = Math.min(5_000, recoverWindowMs);
       let lastError = "";
@@ -2270,6 +2318,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
               error: String((e as Error)?.message ?? e).slice(0, 200),
             }));
           if (submitted.ok) {
+            emit({ at: Date.now(), kind: "part_confirmed", part: unconfirmedIndex });
             const part = session.parts.find((p) => p.index === unconfirmedIndex && p.confirmed);
             if (!part) {
               return { ok: false, error: `自动重试未确认目标分 P(索引 ${unconfirmedIndex})` };
@@ -2296,6 +2345,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     if ((o.spoolMode ?? "full") === "none" && r.backpressured) {
       const error = "上传跟不上录制且未保留本地 spool:该分 P 已丢失";
       log(`[直播直传] ⚠️ 段${seg + 1} ${error}`);
+      emit({ at: Date.now(), kind: "part_failed", part: streamingPart, message: error });
       return {
         ok: false, error, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
         segments: [...segments, { ...base, uploadError: error }],
@@ -2348,6 +2398,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         segments.push({ ...base, uploadError: error });
         break;
       }
+      emit({ at: Date.now(), kind: "part_failed", part: unconfirmedIndex, message: error });
       return {
         ok: false, error, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
         segments: [...segments, { ...base, uploadError: error }],
@@ -2360,6 +2411,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       let error = "complete 未返回 UPOS stem";
       const persistError = persistUnconfirmed();
       if (persistError) error = `${error};${persistError}`;
+      emit({ at: Date.now(), kind: "part_failed", part: unconfirmedIndex, message: error });
       return {
         ok: false, error, bvid: session.bvid, aid: session.aid, title: session.archiveTitle,
         segments: [...segments, { ...base, spoolDurationSec: r.spoolDurationSec, uploadError: error }],
@@ -2374,6 +2426,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       // Resume from the last known part: a restarted run must not reuse an index that is
       // already confirmed, or the new part overwrites the record and its spool leaks.
       const nextIndex = session.nextPartIndex;
+      emit({ at: Date.now(), kind: "part_submit", part: nextIndex });
       const submitted = await session.submitPart({
         index: nextIndex,
         spoolPath: `${o.spoolDir.replace(/\/$/, "")}/${fileName}`,
@@ -2384,6 +2437,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       }, o.signal);
       if (!submitted.ok) {
         log(`[直播直传] 段${seg + 1} 稿件提交失败${(o.spoolMode ?? "full") === "none" ? "(无本地副本)" : ",保留 spool"}: ${submitted.error}`);
+        emit({ at: Date.now(), kind: "part_failed", part: nextIndex, message: submitted.error });
         return {
           ok: false, error: submitted.error, bvid: session.bvid, aid: session.aid,
           title: session.archiveTitle, segments: [...segments, { ...report, uploadError: submitted.error }],
@@ -2394,6 +2448,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         `[直播直传] 段${seg + 1} 已确认到稿件 ${submitted.bvid ?? submitted.aid}` +
         `${r.usedFileFallback ? " (整文件回退)" : ""}`,
       );
+      emit({ at: Date.now(), kind: "part_confirmed", part: nextIndex, ...(submitted.bvid ? { message: submitted.bvid } : {}) });
       log("[状态] 分P已确认");
       try {
         const bv = submitted.bvid ?? session.bvid;
