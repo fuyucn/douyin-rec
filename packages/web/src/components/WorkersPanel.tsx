@@ -1,4 +1,5 @@
 import { GripVertical, Pencil, Plus, Trash2, X } from "lucide-react";
+import { WarnGlyph } from "./WarnGlyph";
 import { useEffect, useState, type ReactNode } from "react";
 import { api, type WorkerDTO, type WorkerStatus } from "../api/client";
 import { Button, IconButton } from "./Button";
@@ -27,6 +28,18 @@ export function WorkersPanel({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<WorkerDTO | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  /** master 自己的版本(T16 漂移对照的基准)。拉不到就不判漂移,不显示假告警。 */
+  const [masterVersion, setMasterVersion] = useState<string>("");
+
+  // T16:拿 master 版本作为对照基准。失败静默(没有基准就不判漂移)。
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    void api.getVersion()
+      .then((r) => { if (alive) setMasterVersion(r.version.split("-")[0] ?? ""); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [open]);
 
   // Esc 关闭(仅 open 时挂监听)。
   useEffect(() => {
@@ -65,6 +78,28 @@ export function WorkersPanel({
     const s = status[w.id];
     if (!s) return t("hub.workers.statusChecking");
     return s.ok ? t("hub.workers.statusOk") : (s.error ?? t("hub.workerDialog.unknownError"));
+  };
+
+  /**
+   * 版本漂移提示(T16)。返回 null = 无告警。
+   *
+   * 两类漂移,严重度不同:
+   *  - **bundle 版本不一致**(节点跑旧代码)→ 新字段/新语义在它上面不生效,是最危险的一类;
+   *  - **期望版本未应用**(expected ≠ applied)→ 同步失败或滞后。
+   * 只在能拿到数据时判断:拿不到(旧 bundle 没有 _node-status)就**不显示**,而不是报「未知」
+   * —— 否则升级过程中满屏假告警。
+   */
+  const driftOf = (w: WorkerDTO): { text: string; warn: boolean } | null => {
+    const s = status[w.id];
+    if (!s?.ok) return null;
+    if (!s.appVersion) return null;   // 旧 bundle 不回执 → 不判(避免假告警)
+    if (masterVersion && s.appVersion.split("-")[0] !== masterVersion) {
+      return { text: t("hub.workers.versionDrift", { node: s.appVersion, master: masterVersion }), warn: true };
+    }
+    if (s.expectedVersion != null && s.appliedVersion != null && s.expectedVersion !== s.appliedVersion) {
+      return { text: t("hub.workers.syncLag", { applied: String(s.appliedVersion), expected: String(s.expectedVersion) }), warn: true };
+    }
+    return null;
   };
 
   // 拖拽排序:drop 后把完整 id 顺序 POST 回 hub.config.json(数组序 = 显示序)。
@@ -143,7 +178,37 @@ export function WorkersPanel({
                 <div className="font-medium text-ink truncate">{w.name}</div>
                 <div className="font-mono text-[11px] text-muted-soft truncate">
                   {w.kind}{w.host ? ` · ${w.host}` : ""}
+                  {/* T16:节点 bundle 版本。只有节点回了执才显示(旧 bundle 不回执 → 不显示,不造假信息)。 */}
+                  {status[w.id]?.ok && status[w.id]?.appVersion ? ` · v${status[w.id]!.appVersion!.split("-")[0]}` : ""}
                 </div>
+                {(() => {
+                  const d = driftOf(w);
+                  if (!d) return null;
+                  return (
+                    <div className="text-[11px] mt-1" style={{ color: "var(--warning)" }} title={d.text}>
+                      <WarnGlyph />{d.text}
+                    </div>
+                  );
+                })()}
+                {(() => {
+                  // F2:磁盘剩余(旧 bundle/探测失败时没有该字段 → 不显示)。低于 master 水位标红。
+                  const s = status[w.id];
+                  if (!s?.ok || typeof s.diskFreeGB !== "number") return null;
+                  const low = typeof s.diskMinGB === "number" && s.diskMinGB > 0 && s.diskFreeGB < s.diskMinGB;
+                  return (
+                    <div className="text-[11px] mt-1" style={{ color: low ? "var(--error-fg)" : "var(--muted-soft)" }}>
+                      {low && <WarnGlyph />}{t("hub.workers.diskFree", { gb: s.diskFreeGB.toFixed(1) })}
+                      {low ? ` · ${t("hub.workers.diskLow", { min: String(s.diskMinGB) })}` : ""}
+                    </div>
+                  );
+                })()}
+                {w.capabilities && w.capabilities.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {w.capabilities.map((c) => (
+                      <span key={c} className="font-mono text-[10px] px-1.5 py-0.5 border border-hairline text-muted-soft" style={{ borderRadius: "var(--r-pill, 999px)" }}>{c}</span>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="inline-flex items-center gap-2 shrink-0">
                 <IconButton title={t("hub.common.edit")} onClick={() => openEdit(w)}>

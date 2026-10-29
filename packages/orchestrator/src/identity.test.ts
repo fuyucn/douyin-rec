@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { clusterBroadcasts } from "./identity.js";
 import type { NodeRecording } from "./transport.js";
 
@@ -118,5 +118,90 @@ describe("clusterBroadcasts", () => {
     );
     expect(out).toHaveLength(1);
     expect(out[0].streamKey).toBe("douyin:411:2026-08-14");
+  });
+});
+
+describe("clusterBroadcasts same-broadcast gap boundary (issue #292, default tolerance = 30 min)", () => {
+  const t0 = new Date("2026-08-14T08:00:00Z").getTime();
+  const two = (gapMin: number) => clusterBroadcasts([{ workerId: "w", recordings: [
+    rec({ sessionBase: "a", startMs: t0, endMs: t0 + 30 * 60_000 }),
+    rec({ sessionBase: "b", startMs: t0 + (30 + gapMin) * 60_000, endMs: t0 + (60 + gapMin) * 60_000 }),
+  ] }]);
+  it("gap 29 min and exactly 30 min → one broadcast", () => {
+    expect(two(29)).toHaveLength(1);
+    expect(two(30)).toHaveLength(1);
+  });
+  it("gap 31 min → two broadcasts with distinct keys", () => {
+    const out = two(31);
+    expect(out).toHaveLength(2);
+    expect(out[1]!.streamKey).toMatch(/_\d{4}$/);
+  });
+});
+
+describe("clusterBroadcasts streamKey 日期按设置时区(issue #155)", () => {
+  const prevTZ = process.env.TZ;
+  afterEach(() => {
+    if (prevTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTZ;
+  });
+  // 北京 2026-09-13 01:30 开播 = 洛杉矶 09-12 10:30
+  const startMs = Date.parse("2026-09-12T17:30:00Z");
+  const run = (tz?: string) =>
+    clusterBroadcasts(
+      [{ workerId: "w", recordings: [rec({ startMs, endMs: startMs + 3_600_000 })] }],
+      undefined, "douyin", [], tz,
+    )[0]!.streamKey;
+
+  it("显式 timeZone 优先于进程本地时区;缺省取进程生效时区(env TZ = 设置)", () => {
+    process.env.TZ = "America/Los_Angeles";
+    // 缺省 = 进程生效时区(serve/独立 CLI 启动时已把设置写进 env);显式传设置时区 → 北京日期。
+    expect(run()).toBe("douyin:411:2026-09-12");
+    expect(run("Asia/Shanghai")).toBe("douyin:411:2026-09-13");
+  });
+  it("未设 TZ 且宿主机本地为美西:默认北京日期", () => {
+    delete process.env.TZ;
+    expect(run()).toBe("douyin:411:2026-09-13");
+  });
+  it("同日第二场 _HHMM 后缀也按设置时区", () => {
+    const a = Date.parse("2026-09-12T17:30:00Z"); // 北京 09-13 01:30
+    const b = Date.parse("2026-09-12T20:00:00Z"); // 北京 09-13 04:00(相隔 > 容差 → 两簇)
+    const out = clusterBroadcasts(
+      [{ workerId: "w", recordings: [rec({ startMs: a, endMs: a + 1_000_000 }), rec({ startMs: b, endMs: b + 1_000_000 })] }],
+      undefined, "douyin", [], "Asia/Shanghai",
+    );
+    expect(out.map((x) => x.streamKey).sort()).toEqual(["douyin:411:2026-09-13_0130", "douyin:411:2026-09-13_0400"]);
+  });
+});
+
+describe("clusterBroadcasts × live id (issue #320)", () => {
+  const T0 = Date.UTC(2026, 9, 20, 4, 0, 0);
+  const rec = (startMin: number, endMin: number, liveSessionId?: string) => ({
+    roomSlug: "r1", platform: "douyin", sessionBase: `s${startMin}`, tsFiles: [], durationSec: 0, totalGapSec: 0,
+    startMs: T0 + startMin * 60_000, endMs: T0 + endMin * 60_000, ...(liveSessionId ? { liveSessionId } : {}),
+  });
+  const cluster = (recs: ReturnType<typeof rec>[]) => clusterBroadcasts([{ workerId: "w1", recordings: recs }], undefined, "douyin", [], "UTC");
+
+  it("26 min apart with different live ids → two broadcasts", () => {
+    expect(cluster([rec(0, 22, "a"), rec(48, 200, "b")])).toHaveLength(2);
+  });
+  it("84 min apart with the same live id → still two jobs on the master (live id only splits; #321 review)", () => {
+    expect(cluster([rec(0, 60, "a"), rec(144, 200, "a")])).toHaveLength(2);
+  });
+  it("#321 review: two id-split clusters near a known base job → only the closest keeps the base key", () => {
+    const base = "douyin:r1:2026-10-20";
+    const out = clusterBroadcasts([{ workerId: "w1", recordings: [rec(0, 22, "a"), rec(48, 200, "b")] }], undefined, "douyin",
+      [{ streamKey: base, startMs: T0 }], "UTC");
+    expect(out.map((b) => b.streamKey)).toEqual([base, `${base}_0448`]);
+  });
+  it("#321 review: truly overlapping spans stay one broadcast even with different ids", () => {
+    expect(cluster([rec(0, 60, "a"), rec(30, 90, "b")])).toHaveLength(1);
+  });
+  it("an id-less member does not bridge two broadcasts with different live ids", () => {
+    const out = cluster([rec(0, 30, "a"), rec(10, 200), rec(50, 200, "b")]);
+    expect(out.map((b) => b.members.map((m) => m.rec.liveSessionId ?? "-"))).toEqual([["a", "-"], ["b"]]);
+  });
+  it("no live id → time window as before", () => {
+    expect(cluster([rec(0, 22), rec(48, 200)])).toHaveLength(1);
+    expect(cluster([rec(0, 60), rec(144, 200)])).toHaveLength(2);
   });
 });

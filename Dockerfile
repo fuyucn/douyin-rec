@@ -57,9 +57,13 @@ WORKDIR /app
 
 # SSH 到 VPS 用挂载进来的 key(compose 挂 /root/.ssh/vps.key);SshTransport 不带 -i,靠此 config 指定。
 # host 用 tailnet IP(经 sidecar 可达);User/Key/免交互全在这。known_hosts 走 /dev/null + accept-new。
+#
+# 用通配而非逐个列举:新增 worker 只改 hub.config.json 即可,不必回来改 Dockerfile 重建镜像。
+# 之前写死 'Host 100.97.21.80' 导致后加的 worker 走了 ssh 默认用户(root)→ Permission denied。
+# 覆盖 tailnet 的 IPv4 CGNAT 段(100.64.0.0/10)与 MagicDNS 名(*.ts.net)。
 RUN if [ "$IMAGE_ROLE" = "master" ]; then \
       mkdir -p /root/.ssh && chmod 700 /root/.ssh && printf '%s\n' \
-        'Host 100.97.21.80' \
+        'Host 100.* *.ts.net' \
         '  User ubuntu' \
         '  IdentityFile /root/.ssh/vps.key' \
         '  IdentitiesOnly yes' \
@@ -71,7 +75,10 @@ RUN if [ "$IMAGE_ROLE" = "master" ]; then \
 # mesio 录制引擎(可选 recorder)：build 时按平台拉 linux 二进制到 /app/bin（与本机 ./bin 约定一致，
 # 不污染系统 /usr/local/bin）。版本由脚本内 PINNED_VERSION 存档；升级改脚本即可。bookworm=glibc → gnu。
 COPY scripts/install-mesio.sh /tmp/install-mesio.sh
-RUN MESIO_LIBC=gnu sh /tmp/install-mesio.sh /app/bin && rm /tmp/install-mesio.sh
+# 用 musl(静态链接):gnu 版依赖系统 glibc,实测在 Ubuntu 22.04(glibc 2.35)上
+# 会因需要 GLIBC 2.38/2.39 而无法启动(线上踩坑:录制显示"进行中"但不落盘)。
+# 静态版不挑系统 glibc。
+RUN MESIO_LIBC=musl sh /tmp/install-mesio.sh /app/bin && rm /tmp/install-mesio.sh
 
 # biliup:docker 当 master 时 auto-private 上传用(orchestrator runBiliup spawn 裸 "biliup")。
 # 装到 /usr/local/bin 上 PATH;cookies 走挂载卷 /output-data/config/biliup/cookies.json(BILIUP_COOKIE env)。

@@ -1,9 +1,12 @@
 // packages/orchestrator/src/scan.test.ts
-import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { describe, it, expect, onTestFinished, vi } from "vitest";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scanRecordings } from "./scan.js";
+import { clusterBroadcasts } from "./identity.js";
+import { ROLLING_ACTIVE_MAX_QUIET_MS, rollingOwnerActive, scanInventory, scanRecordings, scanRollingSessions, scanUnclaimedSegments } from "./scan.js";
+// 假稿件号用拼接构造:隐私检查会拦裸 BV 号字面量。
+const FAKE_BV = ["B", "V", "1fake"].join("");
 
 describe("scanRecordings", () => {
   it("聚合会话分段时长 + 读 gaps + 映射 roomSlug", async () => {
@@ -26,6 +29,125 @@ describe("scanRecordings", () => {
     expect(recordings[0].totalGapSec).toBe(10);
     expect(recordings[0].startMs).toBe(1_700_000_000_000);
     expect(recordings[0].endMs).toBe(1_700_001_800_000);
+  });
+
+  it("issue #336: a room-layout dir names its room, so sidecar-less recordings cluster with the old-layout dir of the same room", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-room-"));
+    // old layout: anchor-name dir, room known from the session sidecar
+    const oldDir = join(root, "OldName"); mkdirSync(oldDir);
+    writeFileSync(join(oldDir, "OldName_2026-06-27_07-00-00_000.ts"), "x");
+    writeFileSync(join(oldDir, "OldName_2026-06-27_07-00-00.session.json"), JSON.stringify({ roomSlug: "555", platform: "douyin", gaps: [] }));
+    // new layout: no sidecar at all (old recording copied in / sidecar lost); the dir suffix is the only room evidence
+    const newDir = join(root, "NewName_douyin_555"); mkdirSync(newDir);
+    writeFileSync(join(newDir, "NewName_2026-06-27_09-30-00_000.ts"), "x");
+    const other = join(root, "Other_bilibili_777"); mkdirSync(other);
+    writeFileSync(join(other, "Other_2026-06-27_09-30-00_000.ts"), "x");
+
+    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1_700_000_000_000, endMs: 1_700_000_060_000 }));
+    const byBase = Object.fromEntries(recs.map((r) => [r.sessionBase, r]));
+    expect(byBase["NewName_2026-06-27_09-30-00"]).toMatchObject({ roomSlug: "555", platform: "douyin" });
+    expect(byBase["OldName_2026-06-27_07-00-00"]).toMatchObject({ roomSlug: "555", platform: "douyin" });
+    expect(byBase["Other_2026-06-27_09-30-00"]).toMatchObject({ roomSlug: "777", platform: "bilibili" });
+    // same (platform, room) => one broadcast across the two directories
+    const b = clusterBroadcasts([{ workerId: "n", recordings: recs.filter((r) => r.roomSlug === "555") }] as never, 60_000_000);
+    expect(b).toHaveLength(1);
+    expect(b[0].members[0].rec.roomSlug).toBe("555");
+  });
+
+  it("issue #336: an old anchor-name dir that merely looks like a room dir keeps its task mapping (mapping beats the suffix)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-look-"));
+    const dir = join(root, "Fan_douyin_club"); mkdirSync(dir);
+    writeFileSync(join(dir, "Fan_douyin_club_2026-06-27_07-00-00_000.ts"), "x");
+    const recs = await scanRecordings(root, { "Fan_douyin_club": "321" }, async () => ({ durationSec: 60, startMs: 1_700_000_000_000, endMs: 1_700_000_060_000 }));
+    expect(recs[0]).toMatchObject({ roomSlug: "321", platform: "douyin" });
+    const recs2 = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1_700_000_000_000, endMs: 1_700_000_060_000 }));
+    expect(recs2[0]).toMatchObject({ roomSlug: "club", platform: "douyin" }); // no mapping: the suffix is the only evidence
+  });
+
+  it("totalBytes = 本场所有 .ts 的字节数之和(issue #25 ①);无 ts 的会话不上报", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播B"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播B_2026-06-27_09-00_000.ts"), Buffer.alloc(1000));
+    writeFileSync(join(dir, "主播B_2026-06-27_09-00_001.ts"), Buffer.alloc(2500));
+    // 另一场:ts 已被边录边传删空,只剩 rolling.json(带 bv)
+    writeFileSync(join(dir, "主播B_2026-06-27_12-00.rolling.json"), JSON.stringify({ bv: "BV1X", parts: [] }));
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 10, startMs: 1_700_000_000_000, endMs: 1_700_000_010_000 }));
+    const withTs = rs.find((r) => r.tsFiles.length === 2)!;
+    expect(withTs.totalBytes).toBe(3500);
+    const noTs = rs.find((r) => r.tsFiles.length === 0);
+    if (noTs) expect(noTs.totalBytes).toBeUndefined();
+  });
+
+  it("issue #87:无 ts 的会话优先用 sidecar 的绝对起止时间戳(不靠文件名反解)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播C"); mkdirSync(dir);
+    // 段已被边录边传删空 → 只剩 rolling(bv) + session 边车。
+    writeFileSync(join(dir, "主播C_2026-06-27_12-00.rolling.json"), JSON.stringify({ bv: FAKE_BV, parts: [] }));
+    const sidecarStart = 1_700_050_000_000;
+    // 文件名墙钟(12:00)故意与 sidecar 的绝对 epoch 不一致,断言取的是 sidecar 值。
+    writeFileSync(join(dir, "主播C_2026-06-27_12-00.session.json"),
+      JSON.stringify({ roomSlug: "888", platform: "douyin", startMs: sidecarStart, timeZone: "Asia/Shanghai" }));
+
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    const rec = rs.find((r) => r.tsFiles.length === 0 && r.roomSlug === "888")!;
+    expect(rec.startMs).toBe(sidecarStart);
+    expect(rec.endMs).toBe(sidecarStart);   // 无分段 → 零跨度(不读 sidecar endMs)
+  });
+
+  it("issue #320: the session sidecar's live id reaches the recording; absent stays absent", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播L"); mkdirSync(dir);
+    for (const [b, extra] of [["主播L_2026-06-27_12-00-00", { liveSessionId: "live-1" }], ["主播L_2026-06-27_14-00-00", {}]] as const) {
+      writeFileSync(join(dir, `${b}.rolling.json`), JSON.stringify({ bv: FAKE_BV, confirmed: [] }));
+      writeFileSync(join(dir, `${b}.session.json`), JSON.stringify({ roomSlug: "555", platform: "douyin", ...extra }));
+    }
+    const rs = (await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 })))
+      .filter((r) => r.roomSlug === "555").sort((a, b) => a.sessionBase.localeCompare(b.sessionBase));
+    expect(rs.map((r) => r.liveSessionId)).toEqual(["live-1", undefined]);
+  });
+
+  it("issue #87:老 sidecar 无时间戳字段 → 回退文件名解析(向后兼容)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播D"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播D_2026-06-27_12-00-00.rolling.json"), JSON.stringify({ bv: FAKE_BV, parts: [] }));
+    // 老格式:只有身份,无 startMs/endMs/timeZone。
+    writeFileSync(join(dir, "主播D_2026-06-27_12-00-00.session.json"),
+      JSON.stringify({ roomSlug: "777", platform: "douyin" }));
+
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    const rec = rs.find((r) => r.roomSlug === "777")!;
+    expect(rec.startMs).toBeGreaterThan(0);
+    expect(rec.endMs).toBe(rec.startMs);
+  });
+
+  it("issue #87:有 ts 的会话仍用 ffprobe 的起止时间(sidecar 不覆盖,零回归)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播E"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播E_2026-06-27_12-00-00_000.ts"), "x");
+    writeFileSync(join(dir, "主播E_2026-06-27_12-00-00.session.json"),
+      JSON.stringify({ roomSlug: "666", platform: "douyin", startMs: 1_600_000_000_000, endMs: 1_600_000_600_000, timeZone: "Asia/Shanghai" }));
+
+    const probeStart = 1_700_000_000_000;
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 10, startMs: probeStart, endMs: probeStart + 10_000 }));
+    const rec = rs.find((r) => r.roomSlug === "666")!;
+    expect(rec.startMs).toBe(probeStart);
+    expect(rec.endMs).toBe(probeStart + 10_000);
+  });
+
+  it("issue #87:sidecar startMs 非法(0/秒级/字符串)→ 回退文件名解析", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const bad: Array<[string, unknown]> = [["555", 0], ["556", 1_700_000_000], ["557", "x"]];
+    for (const [slug, v] of bad) {
+      const dir = join(root, slug); mkdirSync(dir);
+      writeFileSync(join(dir, `${slug}_2026-06-27_12-00-00.rolling.json`), JSON.stringify({ bv: FAKE_BV, parts: [] }));
+      writeFileSync(join(dir, `${slug}_2026-06-27_12-00-00.session.json`),
+        JSON.stringify({ roomSlug: slug, platform: "douyin", startMs: v }));
+    }
+    const rs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    for (const [slug] of bad) {
+      const rec = rs.find((r) => r.roomSlug === slug)!;
+      expect(rec.startMs).toBeGreaterThan(1e12);   // 文件名解析(本地时区)而非坏值
+    }
   });
 
   it("未命中 taskRooms 时 fallback 使用目录名作 roomSlug", async () => {
@@ -56,6 +178,45 @@ describe("scanRecordings", () => {
     expect(withXml[0].xmlPath).toBe(join(dir, "主播A_2026-06-27_08-00.xml"));
   });
 
+  it("danmuCount:数 <d>/<gift>/<member>;仅表头的空 xml → 0", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00_000.ts"), "x");
+    writeFileSync(
+      join(dir, "主播A_2026-06-27_08-00.xml"),
+      `<?xml version="1.0"?><i><metadata><video_start_time>0</video_start_time></metadata>` +
+        `<d p="1,1,25,16777215,1000,0,u,1,0" user="a">hi</d>` +
+        `<d p="2,1,25,16777215,2000,0,u,1,0" user="b">yo</d>` +
+        `<gift user="a" ts="3000"/>` +
+        `<member user="c" ts="4000"/>` +
+        `</i>`,
+    );
+    const r = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1, endMs: 2 }));
+    expect(r[0].danmuCount).toBe(4); // 2 d + 1 gift + 1 member
+  });
+
+  it("danmuCount:仅表头(只有样式表,无消息)→ 0", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00_000.ts"), "x");
+    // 表头 + 样式表(含 <html>/<style> 等,但无 <d /<gift /<member)
+    writeFileSync(
+      join(dir, "主播A_2026-06-27_08-00.xml"),
+      `<i><metadata><video_start_time>1791437768885</video_start_time></metadata>` +
+        `<RecorderXmlStyle><z:stylesheet><html><style>body{margin:0}</style></html></z:stylesheet></RecorderXmlStyle></i>`,
+    );
+    const r = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1, endMs: 2 }));
+    expect(r[0].danmuCount).toBe(0);
+  });
+
+  it("danmuCount:无 xml → 0", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00_000.ts"), "x");
+    const r = await scanRecordings(root, {}, async () => ({ durationSec: 60, startMs: 1, endMs: 2 }));
+    expect(r[0].danmuCount).toBe(0);
+  });
+
   it("recordings 目录不存在时返回空数组（不抛异常）", async () => {
     const recordings = await scanRecordings(
       "/does/not/exist",
@@ -81,5 +242,392 @@ describe("scanRecordings", () => {
     expect(recordings).toHaveLength(2);
     const slugs = recordings.map((r) => r.roomSlug).sort();
     expect(slugs).toEqual(["111", "222"]);
+  });
+
+  it("issue #143:边车存在时填 sessionJsonPath(随 pull 进 stage);缺失则不填(老录像/旧行为)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    const withSc = "主播A_2026-06-27_08-00-00", noSc = "主播A_2026-06-27_09-00-00";
+    writeFileSync(join(dir, `${withSc}.mkv`), "x");
+    writeFileSync(join(dir, `${withSc}.session.json`), JSON.stringify({ roomSlug: "888", platform: "douyin", nodeFormat: "mkv" }));
+    writeFileSync(join(dir, `${noSc}.ts`), "x");
+    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 1, startMs: 0, endMs: 1 }));
+    const a = recs.find((r) => r.sessionBase === withSc)!;
+    const b = recs.find((r) => r.sessionBase === noSc)!;
+    expect(a.tsFiles).toEqual([join(dir, `${withSc}.mkv`)]);
+    expect(a.sessionJsonPath).toBe(join(dir, `${withSc}.session.json`));
+    expect("sessionJsonPath" in b).toBe(false);
+  });
+
+  it("T-33:段被删空但留下 .rolling.json → 仍产出(带 rolling.bv),供 master 收口", async () => {
+    const prevTZ0 = process.env.TZ;
+    delete process.env.TZ;
+    onTestFinished(() => { if (prevTZ0 === undefined) delete process.env.TZ; else process.env.TZ = prevTZ0; });
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    // 边录边传:各段确认后已被删,只剩 session sidecar + rolling sidecar + xml。
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.session.json"),
+      JSON.stringify({ sessionBase: "主播A_2026-06-27_08-00-00", roomSlug: "888", platform: "douyin" }));
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.xml"), "x");
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"),
+      JSON.stringify({ bv: FAKE_BV, confirmed: [0, 1], ambiguous: [] }));
+
+    const recordings = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    expect(recordings).toHaveLength(1);
+    expect(recordings[0].roomSlug).toBe("888");
+    expect(recordings[0].tsFiles).toEqual([]);
+    expect(recordings[0].rolling?.bv).toBe(FAKE_BV);
+    expect(recordings[0].rolling?.confirmed).toEqual([0, 1]);
+    // startMs 从会话 base 时间戳兜底(不是 0,否则聚类算出 1970-01-01 的 streamKey)。
+    // 墙钟按设置时区还原(issue #155):未设 TZ → 北京 08:00 = UTC 00:00。
+    expect(recordings[0].startMs).toBe(Date.UTC(2026, 5, 27, 0, 0, 0));
+  });
+
+  it("T-33 兜底 startMs 不看宿主机本地时区:env TZ=美西(设置=美西)→ 墙钟按美西还原", async () => {
+    const prevTZ = process.env.TZ;
+    process.env.TZ = "America/Los_Angeles";
+    try {
+      const root = mkdtempSync(join(tmpdir(), "scan-"));
+      const dir = join(root, "主播A"); mkdirSync(dir);
+      writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.session.json"),
+        JSON.stringify({ sessionBase: "主播A_2026-06-27_08-00-00", roomSlug: "888", platform: "douyin" }));
+      writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"),
+        JSON.stringify({ bv: FAKE_BV, confirmed: [0], ambiguous: [] }));
+      const recordings = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+      expect(recordings[0].startMs).toBe(Date.UTC(2026, 5, 27, 15, 0, 0)); // PDT = UTC-7
+    } finally {
+      if (prevTZ === undefined) delete process.env.TZ; else process.env.TZ = prevTZ;
+    }
+  });
+
+  it("T-33:无 rolling.json 且无 ts 的目录不产出(不误报空会话)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.xml"), "x"); // 只有 xml,无 ts 无 rolling
+    const recordings = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    expect(recordings).toHaveLength(0);
+  });
+
+  it("#57 R1:完整透传边传进度(含 uploading 意图);非法形状/旧文件缺字段按缺省", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    const put = (base: string, rolling: unknown): void => {
+      writeFileSync(join(dir, `${base}.ts`), "x");
+      writeFileSync(join(dir, `${base}.rolling.json`), JSON.stringify(rolling));
+    };
+    put("主播A_2026-06-27_08-00-00", { confirmed: [], uploading: { index: 0, kind: "create" } });
+    put("主播A_2026-06-27_09-00-00", { bv: "BV1x", confirmed: [0], uploading: { index: 1, kind: "append" } });
+    put("主播A_2026-06-27_10-00-00", { bv: "BV1y", confirmed: [0] }); // 旧节点:无 uploading
+    put("主播A_2026-06-27_11-00-00", { confirmed: [], uploading: { index: "0", kind: "weird" } }); // 非法
+    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 1, startMs: 1, endMs: 2 }));
+    const by = (h: string) => recs.find((r) => r.sessionBase.includes(`_${h}-`))!.rolling!;
+    expect(by("08").uploading).toEqual({ index: 0, kind: "create" });
+    expect(by("08").bv).toBeUndefined();
+    expect(by("09").uploading).toEqual({ index: 1, kind: "append" });
+    expect(by("10").uploading).toBeUndefined();
+    expect(by("11").uploading).toBeUndefined();
+  });
+
+  it("#57 R1:无 ts、无 bv 但留有建稿意图 → 仍产出(主控才能转人工)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"),
+      JSON.stringify({ confirmed: [], uploading: { index: 0, kind: "create" } }));
+    const recs = await scanRecordings(root, {}, async () => ({ durationSec: 0, startMs: 0, endMs: 0 }));
+    expect(recs).toHaveLength(1);
+    expect(recs[0].rolling?.uploading?.kind).toBe("create");
+  });
+});
+
+describe("scanRollingSessions(F1:边录边传实时进度,只读 sidecar)", () => {
+  const mk = (root: string, anchor: string, base: string, rolling: object, session: object | null = { roomSlug: "777", platform: "douyin" }): void => {
+    const dir = join(root, anchor); mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${base}.rolling.json`), JSON.stringify(rolling));
+    if (session) writeFileSync(join(dir, `${base}.session.json`), JSON.stringify(session));
+  };
+  const seg = (n: number) => Array.from({ length: n }, (_, i) => ({ index: i, path: `/x/${i}.ts` }));
+  const active = [{ platform: "douyin", roomSlug: "777" }];
+
+  it("在录房间的最新会话:带 BV / 已确认数 / 总段数 / recording=true", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    mk(root, "A", "A_2026-10-15_03-00-00", { segments: seg(9), confirmed: [0, 1, 2, 3, 4, 5, 6, 7], bv: "BV1X", startMs: 2000 });
+    const r = scanRollingSessions(root, active);
+    expect(r).toEqual([{ platform: "douyin", roomSlug: "777", sessionBase: "A_2026-10-15_03-00-00", bv: "BV1X", confirmed: 8, total: 9, ambiguous: 0, uploading: undefined, lockedBytes: 0, recording: true }]);
+  });
+
+  it("lockedBytes = 序号不在 confirmed 且文件仍在的分段字节之和;已确认/已删的不算", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    const dir = join(root, "A"); mkdirSync(dir);
+    writeFileSync(join(dir, "s0.ts"), Buffer.alloc(100)); // 已确认但文件还在(尚未删):不算
+    writeFileSync(join(dir, "s1.ts"), Buffer.alloc(300)); // 未确认:算
+    writeFileSync(join(dir, "s2.ts"), Buffer.alloc(50));  // 未确认:算
+    // s3 未确认但文件已不存在:不算
+    const segments = [0, 1, 2, 3].map((i) => ({ index: i, path: join(dir, `s${i}.ts`) }));
+    mk(root, "A", "A_lock", { segments, confirmed: [0], bv: "BV1", startMs: 1 });
+    expect(scanRollingSessions(root, active)[0]!.lockedBytes).toBe(350);
+  });
+
+  it("同房间旧会话(已收口、无未决项)不纳入;只认在录房间的最新会话", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    mk(root, "A", "A_old", { segments: seg(3), confirmed: [0, 1, 2], bv: "BVOLD", startMs: 1000 });
+    mk(root, "A", "A_new", { segments: seg(2), confirmed: [0], bv: "BVNEW", startMs: 2000 });
+    expect(scanRollingSessions(root, active).map((s) => s.sessionBase)).toEqual(["A_new"]);
+  });
+
+  it("房间不在录 + 无未决项 → 不纳入;不在录但有 ambiguous / uploading → 纳入(收播后仍需关注)", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    mk(root, "A", "A_done", { segments: seg(2), confirmed: [0, 1], bv: "BV1", startMs: 1 });
+    mk(root, "B", "B_amb", { segments: seg(3), confirmed: [0], ambiguous: [1], bv: "BV2", startMs: 1 }, { roomSlug: "888", platform: "douyin" });
+    mk(root, "C", "C_up", { segments: seg(1), confirmed: [], uploading: { index: 0, kind: "create" }, startMs: 1 }, { roomSlug: "999", platform: "douyin" });
+    const r = scanRollingSessions(root, []);
+    expect(r.map((s) => s.sessionBase).sort()).toEqual(["B_amb", "C_up"]);
+    expect(r.find((s) => s.sessionBase === "B_amb")).toMatchObject({ ambiguous: 1, recording: false, bv: "BV2" });
+    expect(r.find((s) => s.sessionBase === "C_up")).toMatchObject({ uploading: { index: 0, kind: "create" }, bv: undefined });
+  });
+
+  it("损坏 sidecar / 无房间身份 → 跳过,绝不抛;目录不存在 → []", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    mkdirSync(join(root, "A"));
+    writeFileSync(join(root, "A", "bad.rolling.json"), "{not json");
+    mk(root, "B", "B_nosess", { segments: seg(1), confirmed: [], startMs: 1 }, null);
+    expect(scanRollingSessions(root, active)).toEqual([]);
+    expect(scanRollingSessions(join(root, "nope"), active)).toEqual([]);
+  });
+
+  it("同 roomSlug 不同平台互不误判在录", () => {
+    const root = mkdtempSync(join(tmpdir(), "rs-"));
+    mk(root, "A", "A_bili", { segments: seg(1), confirmed: [0], startMs: 5 }, { roomSlug: "777", platform: "bilibili" });
+    expect(scanRollingSessions(root, [{ platform: "douyin", roomSlug: "777" }])).toEqual([]);
+  });
+});
+
+describe("scanInventory (unclaimed converted segments, detection only)", () => {
+  const S = 1_700_123_456_000;
+  const probe = (calls: string[]) => async (f: string) => {
+    calls.push(f);
+    return { durationSec: 60, startMs: 1_700_000_000_000, endMs: 1_700_000_060_000 };
+  };
+  const sidecar = (dir: string, base: string, body: unknown) =>
+    writeFileSync(join(dir, `${base}.session.json`), typeof body === "string" ? body : JSON.stringify(body));
+  const withTz = async <T>(tz: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = process.env.TZ;
+    process.env.TZ = tz;
+    try { return await fn(); } finally { if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev; }
+  };
+
+  function fixture(): string {
+    const root = mkdtempSync(join(tmpdir(), "scan-inv-"));
+    const a = join(root, "A"); mkdirSync(a);
+    const room = { roomSlug: "888", platform: "douyin" };
+    writeFileSync(join(a, "A_2026-06-27_08-00-00_000.ts"), "x");
+    sidecar(a, "A_2026-06-27_08-00-00", room);
+    // Converted and declared: claimed by groupSessions, must not be reported.
+    writeFileSync(join(a, "A_2026-06-27_09-00-00_000.mp4"), "x");
+    sidecar(a, "A_2026-06-27_09-00-00", { ...room, nodeFormat: "mp4" });
+    // Orphan with a full sidecar lacking nodeFormat; its startMs (S) deliberately differs from the stamp.
+    writeFileSync(join(a, "A_2026-06-27_10-00-00_000.mp4"), "xx");
+    writeFileSync(join(a, "A_2026-06-27_10-00-00_001.mp4"), "xxx");
+    sidecar(a, "A_2026-06-27_10-00-00", { roomSlug: "777", platform: "bilibili", startMs: S });
+    // Orphan with an unparsable sidecar: room comes from the agreeing siblings (08 + 09).
+    writeFileSync(join(a, "A_2026-06-27_11-00-00_000.mkv"), "x");
+    sidecar(a, "A_2026-06-27_11-00-00", "{bad");
+    const b = join(root, "B"); mkdirSync(b);
+    writeFileSync(join(b, "B_2026-06-27_12-00-00_000.mp4"), "x");
+    const c = join(root, "C"); mkdirSync(c);
+    writeFileSync(join(c, "C_1960-01-01_00-00-00_000.mp4"), "x");
+    sidecar(c, "C_1960-01-01_00-00-00", { startMs: 0 });
+    return root;
+  }
+
+  it("recordings equal scanRecordings byte for byte", async () => {
+    const root = fixture();
+    const expected = await scanRecordings(root, { A: "888" }, probe([]));
+    const inv = await scanInventory(root, { A: "888" }, probe([]));
+    expect(inv.recordings).toEqual(expected);
+    expect(JSON.stringify(inv.recordings)).toBe(JSON.stringify(expected));
+  });
+
+  it("never ffprobes orphan files", async () => {
+    const root = fixture();
+    const calls: string[] = [];
+    const inv = await scanInventory(root, {}, probe(calls));
+    expect(inv.unclaimedSegments!.length).toBeGreaterThan(0);
+    for (const u of inv.unclaimedSegments!) expect(calls).not.toContain(u.path);
+    // The claimed mp4 is still probed by scanRecordings: the fake really records calls.
+    expect(calls.some((f) => f.endsWith("A_2026-06-27_09-00-00_000.mp4"))).toBe(true);
+  });
+
+  it("reports orphans with sidecar shape, stamp source, room and segmentSec; claimed mp4 is not reported", async () => {
+    const root = fixture();
+    const inv = await withTz("Asia/Shanghai", () =>
+      scanInventory(root, {}, probe([]), { segmentSecByAnchor: { B: 1800 } }));
+    const byName = new Map(inv.unclaimedSegments!.map((u) => [u.path.slice(root.length + 1), u]));
+    expect([...byName.keys()]).toEqual([
+      "A/A_2026-06-27_10-00-00_000.mp4",
+      "A/A_2026-06-27_10-00-00_001.mp4",
+      "A/A_2026-06-27_11-00-00_000.mkv",
+      "B/B_2026-06-27_12-00-00_000.mp4",
+      "C/C_1960-01-01_00-00-00_000.mp4",
+    ]);
+    expect(inv.unclaimedTruncated).toBe(0);
+
+    expect(byName.get("A/A_2026-06-27_10-00-00_001.mp4")).toMatchObject({
+      sizeBytes: 3, sessionBase: "A_2026-06-27_10-00-00", segmentIndex: 1,
+      stampMs: S, stampSource: "sidecar", sidecar: "full",
+      platform: "bilibili", roomSlug: "777", segmentSec: null,
+    });
+    expect(byName.get("A/A_2026-06-27_11-00-00_000.mkv")).toMatchObject({
+      sidecar: "unparsable", stampSource: "filename", stampMs: Date.UTC(2026, 5, 27, 3, 0, 0),
+      platform: "douyin", roomSlug: "888",
+    });
+    expect(byName.get("B/B_2026-06-27_12-00-00_000.mp4")).toMatchObject({
+      sidecar: "missing", stampSource: "filename", stampMs: Date.UTC(2026, 5, 27, 4, 0, 0),
+      platform: null, roomSlug: null, segmentSec: 1800,
+    });
+    // Pre-epoch stamp and a zero sidecar startMs: reported as unknown, never as epoch 0 or negative.
+    expect(byName.get("C/C_1960-01-01_00-00-00_000.mp4")).toMatchObject({
+      sidecar: "minimal", stampMs: null, stampSource: null,
+    });
+  });
+
+  it("sidecar startMs wins regardless of process time zone", async () => {
+    const root = fixture();
+    for (const tz of ["Asia/Shanghai", "America/Los_Angeles"]) {
+      const { unclaimedSegments } = await withTz(tz, async () => scanUnclaimedSegments(root));
+      const hit = unclaimedSegments.find((u) => u.path.endsWith("A_2026-06-27_10-00-00_000.mp4"))!;
+      expect(hit.stampMs).toBe(S);
+      expect(hit.stampSource).toBe("sidecar");
+    }
+  });
+
+  it("infers no room when siblings disagree", () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-inv-"));
+    const d = join(root, "D"); mkdirSync(d);
+    writeFileSync(join(d, "D_2026-06-27_08-00-00_000.ts"), "x");
+    sidecar(d, "D_2026-06-27_08-00-00", { roomSlug: "1", platform: "douyin" });
+    writeFileSync(join(d, "D_2026-06-27_09-00-00_000.ts"), "x");
+    sidecar(d, "D_2026-06-27_09-00-00", { roomSlug: "2", platform: "douyin" });
+    writeFileSync(join(d, "D_2026-06-27_10-00-00_000.mp4"), "x");
+    const [hit] = scanUnclaimedSegments(root).unclaimedSegments;
+    expect(hit).toMatchObject({ sidecar: "missing", platform: null, roomSlug: null });
+  });
+
+  it("caps the list by path and counts the rest; empty tree → [] and 0", () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-inv-"));
+    const d = join(root, "E"); mkdirSync(d);
+    for (const i of ["002", "000", "001"]) writeFileSync(join(d, `E_2026-06-27_08-00-00_${i}.mp4`), "x");
+    const capped = scanUnclaimedSegments(root, { cap: 2 });
+    expect(capped.unclaimedSegments.map((u) => u.segmentIndex)).toEqual([0, 1]);
+    expect(capped.unclaimedTruncated).toBe(1);
+
+    const empty = scanUnclaimedSegments(mkdtempSync(join(tmpdir(), "scan-inv-")));
+    expect(empty).toEqual({ unclaimedSegments: [], unclaimedTruncated: 0 });
+  });
+
+  it.skipIf(process.getuid?.() === 0)("skips an unreadable anchor dir without losing other anchors' orphans", () => {
+    const root = mkdtempSync(join(tmpdir(), "scan-inv-"));
+    const ok = join(root, "F"); mkdirSync(ok);
+    writeFileSync(join(ok, "F_2026-06-27_08-00-00_000.mp4"), "x");
+    const locked = join(root, "G"); mkdirSync(locked);
+    writeFileSync(join(locked, "G_2026-06-27_08-00-00_000.mp4"), "x");
+    chmodSync(locked, 0o000);
+    onTestFinished(() => chmodSync(locked, 0o755));
+    const { unclaimedSegments } = scanUnclaimedSegments(root);
+    expect(unclaimedSegments.map((u) => u.path)).toEqual([join(ok, "F_2026-06-27_08-00-00_000.mp4")]);
+  });
+
+  it("orphan pass failure keeps recordings, omits orphan fields and warns once", async () => {
+    vi.resetModules();
+    vi.doMock("./unclaimed.js", async (orig) => ({
+      ...(await orig<typeof import("./unclaimed.js")>()),
+      classifyUnclaimedFiles: () => { throw new Error("boom"); },
+    }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    onTestFinished(() => { vi.doUnmock("./unclaimed.js"); vi.resetModules(); warn.mockRestore(); });
+    const scan = await import("./scan.js");
+    const root = fixture();
+    const expected = await scanRecordings(root, { A: "888" }, probe([]));
+    const inv = await scan.scanInventory(root, { A: "888" }, probe([]));
+    expect(JSON.stringify(inv.recordings)).toBe(JSON.stringify(expected));
+    expect(inv).not.toHaveProperty("unclaimedSegments");
+    expect(inv).not.toHaveProperty("unclaimedTruncated");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain("boom");
+  });
+});
+
+describe("scanRecordings stable rolling session boundaries (issue #292)", () => {
+  const T0 = Date.UTC(2026, 5, 27, 0, 0, 0); // 08:00 in the default settings timezone
+  const seg = (i: number): string => `主播A_2026-06-27_08-00-00_00${i}.ts`;
+  const probeBySeg = (file: string): { durationSec: number; startMs: number; endMs: number } => {
+    const i = Number(/_00(\d)\.ts$/.exec(file)![1]);
+    return { durationSec: 1800, startMs: T0 + i * 1_800_000, endMs: T0 + (i + 1) * 1_800_000 };
+  };
+  const setup = (): { root: string; dir: string } => {
+    const prevTZ = process.env.TZ;
+    delete process.env.TZ;
+    onTestFinished(() => { if (prevTZ === undefined) delete process.env.TZ; else process.env.TZ = prevTZ; });
+    const root = mkdtempSync(join(tmpdir(), "scan-"));
+    const dir = join(root, "主播A"); mkdirSync(dir);
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.session.json"),
+      JSON.stringify({ roomSlug: "888", platform: "douyin", startMs: T0 }));
+    writeFileSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"),
+      JSON.stringify({ bv: FAKE_BV, confirmed: [0, 1], segments: [], startMs: T0 + 1_800_000, updatedAt: T0 + 3 * 1_800_000 }));
+    for (const i of [0, 1, 2]) writeFileSync(join(dir, seg(i)), "x");
+    return { root, dir };
+  };
+  const keyOf = (recs: Awaited<ReturnType<typeof scanRecordings>>): string =>
+    clusterBroadcasts([{ workerId: "w", recordings: recs }])[0]!.streamKey;
+
+  it("deleting the earliest confirmed segments does not move startMs or the job key", async () => {
+    const { root, dir } = setup();
+    const before = await scanRecordings(root, {}, async (f) => probeBySeg(f));
+    expect(before[0]!.startMs).toBe(T0);
+    rmSync(join(dir, seg(0)));
+    const after = await scanRecordings(root, {}, async (f) => probeBySeg(f));
+    expect(after[0]!.tsFiles).toHaveLength(2);
+    expect(after[0]!.startMs).toBe(T0); // without the fix: T0 + 30 min (earliest surviving segment)
+    expect(keyOf(after)).toBe(keyOf(before));
+    rmSync(join(dir, seg(1)));
+    const later = await scanRecordings(root, {}, async (f) => probeBySeg(f));
+    expect(later[0]!.startMs).toBe(T0);
+    expect(keyOf(later)).toBe(keyOf(before));
+  });
+
+  it("a session whose segments were all deleted gets a non-zero-width span from the rolling sidecar", async () => {
+    const { root, dir } = setup();
+    for (const i of [0, 1, 2]) rmSync(join(dir, seg(i)));
+    const recs = await scanRecordings(root, {}, async (f) => probeBySeg(f));
+    expect(recs[0]!.tsFiles).toEqual([]);
+    expect(recs[0]!.startMs).toBe(T0);
+    expect(recs[0]!.endMs).toBe(T0 + 3 * 1_800_000);
+    // A next session 21 min after the real end still clusters with it (no fake gap from a zero-width span).
+    const next = { ...recs[0]!, sessionBase: "next", startMs: recs[0]!.endMs + 21 * 60_000, endMs: recs[0]!.endMs + 51 * 60_000 };
+    expect(clusterBroadcasts([{ workerId: "w", recordings: [recs[0]!, next] }])).toHaveLength(1);
+  });
+
+  it("non-rolling sessions keep the pure ffprobe start (no sidecar override)", async () => {
+    const { root, dir } = setup();
+    rmSync(join(dir, "主播A_2026-06-27_08-00-00.rolling.json"));
+    rmSync(join(dir, seg(0)));
+    const recs = await scanRecordings(root, {}, async (f) => probeBySeg(f));
+    expect(recs[0]!.startMs).toBe(T0 + 1_800_000);
+  });
+});
+
+describe("rollingOwnerActive (issue #309)", () => {
+  const now = 1_800_000_000_000;
+  const alive = (): boolean => true;
+  const dead = (): boolean => false;
+  it("legacy sidecar without an owner pid is unknown", () => {
+    expect(rollingOwnerActive({ updatedAt: now }, now, alive)).toBeUndefined();
+  });
+  it("live owner that has not closed the session is active", () => {
+    expect(rollingOwnerActive({ ownerPid: 42, updatedAt: now - 60_000 }, now, alive)).toBe(true);
+  });
+  it("closed session, dead owner, or a long-quiet sidecar is not active", () => {
+    expect(rollingOwnerActive({ ownerPid: 42, closedAt: now, updatedAt: now }, now, alive)).toBe(false);
+    expect(rollingOwnerActive({ ownerPid: 42, updatedAt: now }, now, dead)).toBe(false);
+    expect(rollingOwnerActive({ ownerPid: 42, heartbeatAt: now - ROLLING_ACTIVE_MAX_QUIET_MS - 1, updatedAt: 0 }, now, alive)).toBe(false);
   });
 });

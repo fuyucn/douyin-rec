@@ -1,9 +1,29 @@
 export * from "./transport.js";
-export { scanRecordings } from "./scan.js";
+export { scanInventory, scanRecordings, scanRollingSessions } from "./scan.js";
 export type { FfprobeAdapter } from "./scan.js";
+export type { UnclaimedSegment, SidecarShape } from "./unclaimed.js";
+export { classifyUnclaimedFiles, segmentSecByAnchorOf, UNCLAIMED_CAP } from "./unclaimed.js";
 export { Reconciler } from "./reconciler.js";
+// 能力门控纯函数已下沉 @drec/core(app L4 的「本机抑制」也要用;见 core/src/capabilities.ts)。
+// 这里 re-export 保持 orchestrator 现有消费方(cli/reconciler)导入路径不变。
+export { satisfiesCapabilities, gateWorkers, explainRejections } from "@drec/core";
+export type { CapabilityRejection } from "@drec/core";
 export { EndDebouncer } from "./trigger.js";
 export { SyncLedger } from "./ledger.js";
+export { recordStreamUpload, recordZeroDiskReceipt } from "./stream-upload-ledger.js";
+export { ZeroDiskFleet, blockedKey, UNSUPPORTED_REASON, type ZeroDiskWorker, type ZeroDiskTarget, type ZeroDiskSupport } from "./zero-disk-fleet.js";
+export type { RecordStreamUploadOpts, RecordStreamUploadResult } from "./stream-upload-ledger.js";
+export {
+  advanceUpload, ensureUploadPlan, planJobIds,
+  type UploadPlan, type UploadDispatch, type UploadInput, type BiliupMeta, type PrepSpec as UploadPrepSpec,
+} from "./node-upload-queue.js";
+export { applyUploadOutcome, completeFromDispatch, mapUploadOutcome, type UploadOutcome } from "./node-upload-complete.js";
+export { uploadStatusOf } from "./node-upload-status.js";
+export { createUploadQueuePoller, type UploadPollerOpts } from "./node-upload-poll.js";
+export {
+  QUEUE_CAPABILITY, DEFAULT_NODE_UPLOAD, parseNodeUploadConfig, decideUploadMode, canFallbackToBlocking, rollingEnabledCount,
+  type NodeUploadConfig, type QueueGateInput, type UploadModeDecision,
+} from "./node-upload-config.js";
 export type { PipelineDeps, PipelineCfg, PipelineSteps, PipelineCleanup } from "./pipeline.js";
 export {
   buildWorkflow,
@@ -22,6 +42,25 @@ export type {
   ResourcePoolCfg,
   StageProducts,
 } from "./workflow.js";
+export { openUploadLimitStore, sanitizeUploadLimitState } from "./upload-limits.js";
+export type { UploadLimitState, UploadLimitStore } from "./upload-limits.js";
+// verify.ts 的纯判定/推导函数(T32 重核工具也要用;单一真理源,不在工具里另写一份)。
+export {
+  expectedPartCount,
+  submittedPlanFromLedger,
+  partCountOf,
+  verifyParts,
+  verifyUploaded,
+  verifyAllowsCleanup,
+  verifyBlocksOnMismatch,
+  isRetryableVerify,
+  verifyMessage,
+  PART_GROUP_ALIASES,
+  PART_GROUP_CANONICAL,
+} from "./verify.js";
+export type { VerifyGroup, VerifyResult, VerifyOpts, PartsReader, SubmittedPlan } from "./verify.js";
+export { planSurvivorRemux, dispatchSurvivorRemux, pollFollowups, parseFollowups, STAGE_TARGET } from "./finalize-format.js";
+export type { FinalizeFormatDeps, StageProcChannel, Followups, FollowupItem } from "./finalize-format.js";
 export { LocalTransport } from "./transport-local.js";
 export { SshTransport } from "./transport-ssh.js";
 export { startHub } from "./hub.js";
@@ -30,7 +69,7 @@ import { registerTransport } from "./transport.js";
 import type { ActiveRecordingRoom, ApplyTasksResult } from "./transport.js";
 import { LocalTransport } from "./transport-local.js";
 import { SshTransport } from "./transport-ssh.js";
-import type { NodeTaskDTO, RemoteTaskSpec } from "@drec/core";
+import type { EnqueueRequest, EnqueueResponse, NodeTaskDTO, ProcessReceipt, RemoteTaskSpec } from "@drec/core";
 
 export function registerBuiltinTransports(deps: {
   ffprobe: (file: string) => Promise<{ durationSec: number; startMs: number; endMs: number }>;
@@ -43,7 +82,13 @@ export function registerBuiltinTransports(deps: {
   /** hub 任务同步:读本机任务清单(local worker = master 自身)。 */
   listTasks?: () => NodeTaskDTO[];
   /** hub 任务同步:把期望任务应用到本机 store。 */
-  applyTasks?: (input: { desired: RemoteTaskSpec[] }) => ApplyTasksResult;
+  applyTasks?: (input: { desired: RemoteTaskSpec[]; force?: boolean; expectedVersion?: number }) => ApplyTasksResult;
+  /** 处理任务表通道(plans/036 T9a):按 worker 的数据根执行入队 / 回执;不传 = local worker 不支持。 */
+  procChannel?: {
+    enqueue(dataRoot: string, req: EnqueueRequest): EnqueueResponse;
+    procStatus(dataRoot: string, jobIds: string[]): ProcessReceipt[];
+    procCancel?(dataRoot: string, jobIds: string[]): ProcessReceipt[];
+  };
 }): void {
   const taskRooms = deps.taskRooms ?? {};
   registerTransport("local", (cfg) =>
@@ -56,6 +101,13 @@ export function registerBuiltinTransports(deps: {
       activeRecordingRooms: deps.activeRecordingRooms,
       listTasks: deps.listTasks,
       applyTasks: deps.applyTasks,
+      ...(deps.procChannel
+        ? {
+            enqueue: (req: EnqueueRequest) => deps.procChannel!.enqueue(cfg.dataRoot!, req),
+            procStatus: (ids: string[]) => deps.procChannel!.procStatus(cfg.dataRoot!, ids),
+            ...(deps.procChannel!.procCancel ? { procCancel: (ids: string[]) => deps.procChannel!.procCancel!(cfg.dataRoot!, ids) } : {}),
+          }
+        : {}),
     }),
   );
   registerTransport("ssh", (cfg) =>

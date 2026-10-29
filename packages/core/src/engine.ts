@@ -48,6 +48,19 @@ export interface DownloadEngine {
   /** 引擎 id,如 "ffmpeg" | "mesio"(= Platform.engines 里的值 / task.engine)。 */
   id: string;
   spawn(a: EngineSpawnArgs): EngineSpawnResult;
+  /**
+   * **可运行性自检**(可选)。返回 null = 可用;返回字符串 = 不可用原因。
+   *
+   * 为什么必须有:`mesio` 是外部二进制,可能「文件存在且可执行」但**跑不起来**
+   * (实测:VPS 上的 mesio 需要 GLIBC 2.38/2.39,而 Ubuntu 22.04 只有 2.35 →
+   * 每次 spawn 立即退出 code=1 → 会话判定「短命录制」→ 退避重连 → **看起来在录,
+   * 实际一个字节没落盘**,而且连续失败会把退避拉到 300s,用户很久才发现)。
+   * 有了自检,可以在**选引擎时**就发现不可用并回落到 ffmpeg,而不是让录制反复失败。
+   *
+   * 实现要求:**必须快**(启动前调用,不能拖慢起播)——建议 `--version` + 短超时。
+   * 不实现 = 视为可用(向后兼容既有引擎)。
+   */
+  probe?(): string | null;
 }
 
 const engines = new Map<string, DownloadEngine>();

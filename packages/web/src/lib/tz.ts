@@ -26,6 +26,12 @@ export function fmtTimeInTz(date: Date, tz: string): string {
   return `${p.hour}:${p.minute}`;
 }
 
+/** 此刻在 tz 下的日历日 "YYYY-MM-DD";tz 为空(后端时区未加载完)才回落浏览器本地时区。 */
+export function todayYmdInTz(tz: string, now: Date = new Date()): string {
+  const p = partsMap(now, tz, { year: "numeric", month: "2-digit", day: "2-digit" });
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
 /** "YYYY-MM-DD HH:MM:SS",tz 为空则用浏览器本地时区。 */
 export function fmtDateTimeInTz(date: Date, tz: string): string {
   const p = partsMap(date, tz, {

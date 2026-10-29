@@ -60,6 +60,9 @@ services:
       # 可选值见 `biliup upload --help` 的 --line（如 alia / txa / bda2）。
       BILIUP_UPLOAD_LINE: ${BILIUP_UPLOAD_LINE:-}
       BILIUP_UPLOAD_LINES: ${BILIUP_UPLOAD_LINES:-}
+      # 投稿提交接口：默认 web（biliup CLI 默认 app 更易触发 21566「投稿过于频繁」风控）。
+      # 需要回退旧行为时设 BILIUP_SUBMIT=app（可选 app|web|b-cut-android）。
+      BILIUP_SUBMIT: ${BILIUP_SUBMIT:-}
       DOUYIN_REC_STATIC: /app/web/dist
       # 可选 Discord 通知 webhook。
       DISCORD_WEBHOOK: ${DISCORD_WEBHOOK:-}

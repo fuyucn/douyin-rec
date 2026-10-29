@@ -2,8 +2,9 @@
 
 记录 2026-09-23~24 的「任务 57 开播没录」排查结论与修复。
 
-> **2026-10-06 更新**:取流已改为 **`livedetail` API 优先、页面刮取兜底**(见下「修复 2」)。
-> 页面那条路径仍是风控重灾区,新代码正常情况不再走它。
+> **2026-10-08 重要修正 —— 见文末「修复 3」**:2026-10-06 的「API 优先」方向是**错的**,
+> `livedetail` API **已被平台下线**(对任意 id 都返回同一桩数据),据此判「未开播」导致**全节点漏录**。
+> 现改为**页面优先、API 仅兜底**,并对持续风控**递进退避**。
 
 ## 症状
 
@@ -69,3 +70,122 @@ GET https://live.kuaishou.com/live_api/liveroom/livedetail?principalId={userId}
 
 - 被限流后**继续高频请求会延长冷却**；最快恢复方式是停掉该平台的轮询几小时。
 - hub 规则的 `workers` 决定「谁录」：只在 `local` 时本机实跑；只勾远端时本机自动让位。
+
+---
+
+## 修复 3:`livedetail` 已下线 → 改回「页面优先」+ 递进退避(2026-10-08)
+
+### 真凶(与 IP 无关,影响所有节点)
+
+2026-10-06 的「API 优先」建立在一个**当时就不成立的假设**上:以为 `livedetail` 是权威数据源。
+2026-10-08 实测证明该接口**已被平台下线**:
+
+```
+GET /live_api/liveroom/livedetail?principalId={任意值}
+→ {"data":{"result":2,"liveStream":{"playUrls":{"h264":{},"hevc":{}},"url":".../live/undefined"},
+   "author":{"living":false,...}}}   # 634 字节
+```
+
+- 对**真房间号 / 主播 id(`donghaogege`) / 不存在的乱码 id / 完全不带参数** → 返回**逐字节相同**
+  (去掉 `timestamp` 后)的桩数据。即「`result:2` / `living:false`」**与是否在播无关**,是下线占位。
+- 旧 `getStreamViaApi` 只要 `data` 存在就返回 `{living:false}`(非 null)→ `getStream` 立即返回,
+  **永不回退页面**;`getLiving` 同理返回 `false`(不抛错,连失败告警都绕过)。
+- **后果:任何节点(含 IP 完全干净的 VPS1/VPS2)都录不到快手直播**,任务一直「等待开播」。
+  这是任务 75 漏录的根因,不是限流。
+
+同一时刻,页面 SSR 路径(`GET /u/{id}`)是**好的**:干净出口实测返回完整 `playUrls`
+(`h264` `bitrate:2000` → `hw-origin.pull.yximgs.com/...flv`),且该流可拉(`HTTP 200 video/x-flv`)。
+
+### 修复
+
+1. **取流改回「页面优先、API 仅兜底」**(`packages/kuaishou-live/src/stream/index.ts`):
+   - `getStream`/`getLiving` 先走页面 SSR;只有**页面请求本身失败**(网络/HTTP/改版/无 `__INITIAL_STATE__`)
+     才试一次 API。
+   - **API 只认「拿到可播流 URL」这一种结果**;拿不到一律 `null`(= 不可用),**绝不返回 `{living:false}`** ——
+     否则下线的桩又会被当成「权威未开播」。
+   - 页面解析失败时:HTML 含限流文案(`请求过快`/`稍后重试`/`操作太快`/`访问过于频繁`)→ 报 `throttledReason`;
+     否则**抛错**(= 未知),交给录制器失败告警,**不静默成「未开播」**。
+2. **持续风控递进退避**(`packages/record-engine/src/index.ts`):风控探测间隔由固定 5 分钟改为
+   **逐次翻倍 5→10→20→30 分钟封顶**,探到正常即复位。依据「越打越冷」:固定频率不足以让 IP 冷却。
+3. **测试**:`packages/kuaishou-live/src/stream/index.test.ts` 重写为 12 条(含★回归:
+   「API 返回下线桩 → 页面在播照样录」「页面失败+API 桩 → 抛错不静默」);
+   `record-engine` 补 2 条退避用例。
+
+### 实测验证(2026-10-08,同一房间 `3x2ys8px8zgu9ba`)
+
+| 出口 | 旧代码 | 新代码 |
+|---|---|---|
+| VPS1(干净) | `{living:false}` ← 静默漏录 | `{living:true, url: https://hw-origin...flv, owner:"董浩406..."}` |
+| VPS2(干净) | `{living:false}` ← 静默漏录 | `{living:true, url: https://hw-origin...flv}` |
+| 本机(docker master,被限流) | `{living:false}` | `{living:false, throttledReason:"请求过快，请稍后重试"}`(显式风控,不伪装) |
+
+### 恢复被限流 IP 的做法
+
+1. **停止该 IP 对快手的所有轮询**,冷却数小时(继续高频请求会延长冷却)。
+2. 冷却期把快手任务交给干净出口(VPS);hub 规则 `workers` **只勾 1 台**,不要多节点冗余
+   (每多一个节点轮询就多一份请求量,是限流主因之一)。
+3. 恢复后常态轮询已放宽到 5 分钟 + 风控时递进退避(见上),不会再按 30s 猛打。
+
+---
+
+## 外部同类问题与解法对照(2026-10-08)
+
+### 48tools #128 —— 症状与我们完全相同
+
+[duan602728596/48tools#128](https://github.com/duan602728596/48tools/issues/128):
+「快手直播手动录制一直显示**录制失败或者直播未开启**,自动录制也不起作用」——
+与我们 task 75「一直等待开播」一字不差。作者(duan602728596)的判定与建议:
+
+> 建议检查当前的网络环境,很有可能是**风控了,被拉黑了**。
+> 这个就是风控,**一般海外 IP 容易出现**。尽量用**国内 IP**,还有就是**不要太频繁刷新**。
+
+⚠️ 对我们的意义:本地(Comcast San Jose)与 VPS1/VPS2(Oracle San Jose)**三个出口全在美国**,
+按作者经验属于「容易触发风控」的 IP 段 —— 这是结构性劣势,当前无法改变。
+
+**48tools v4.17.0 的修复**(commit `b5154dd`,2025-03-06)changelog 原文:
+
+> 修复由于快手直播的 initialState 数据结构变化,导致无法获得直播流地址的问题。
+> **使用浏览器的 fetch 替代 got 来请求快手直播的数据,解决请求过快的风控问题。**
+
+三处改动:
+1. `requestLiveHtml` 由 `got` 换成 **Electron 渲染进程的浏览器 `fetch`**;
+2. 请求头写 `Cookie1` → 主进程 `onBeforeSendHeaders` 拦截器改写成 `Cookie`
+   (浏览器 fetch 禁止直接设 `Cookie` 头),并补 `Host`/`Referer`/`User-Agent`;
+3. `errorType` 显式当错误抛出(不再静默当「未开播」)—— 与我们「修复 3」同向。
+
+### 我们的 A/B 实测:浏览器 fetch 的收益**不可复现**(证伪)
+
+2026-10-08 在**同一被限流出口**(本地家宽)做浏览器 fetch vs Node fetch 对照:
+
+| 轮次 | Node fetch | 浏览器 fetch(48tools 方案) |
+|---|---|---|
+| 第 1 轮(2 个在播房间) | 限流 | **成功**(93KB / `isLiving:true` + 真实流 URL) |
+| 第 2 轮(同房间各 5 次) | OK=3 / 限流=2 | **限流=5** |
+| 第 3 轮(带/不带 cookie 对照) | 全限流 | 全限流 |
+
+**结论:决定性变量是请求速率,不是「浏览器 vs Node」。** 第 2/3 轮是我自己连续测试把 IP
+重新打回限流后跑的,三组全 57569 字节风控页。48tools 之所以「有效」,更可能是因为
+**它只在点击录制时请求一次(不轮询)**——我们已用「5 分钟 + 递进退避」覆盖了这一点。
+
+次要因素(**推断,未证实**):Chromium 的 TLS/HTTP2 指纹比 Node undici 更接近真实浏览器。
+
+### 采纳的动作(本仓库)
+
+**补全浏览器请求头**(`packages/kuaishou-live/src/stream/index.ts` 的 `chromeHeaders`):
+原先只发 `User-Agent` + `Referer`,现补齐 `Accept`/`Accept-Language`(zh-CN)/`sec-ch-ua`/
+`sec-ch-ua-mobile`/`sec-ch-ua-platform`/`Upgrade-Insecure-Requests`/`sec-fetch-site|mode|dest|user`。
+- 文档导航(首页预热、直播间页)→ `navigate` + `document` + `Upgrade-Insecure-Requests:1`;
+- XHR(`livedetail`)→ `cors` + `empty`;
+- **不手写 `Accept-Encoding`**(交给 fetch/undici 自行协商,避免拿到未解压响应体)。
+- 补 2 条测试锁定头部内容(`stream/index.test.ts`)。
+
+**未采纳**:浏览器 fetch 兜底(需引入 Playwright 常驻,收益实测不可复现、成本高);
+换国内 IP(结构性,非代码可解)。
+
+### 另一处佐证:`result:2` 的语义
+
+[KByteArray/ordinaryroad-live-chat-client](https://github.com/KByteArray/ordinaryroad-live-chat-client-old)
+的 `KuaishouApis.responseInterceptor` 把 `livedetail` 的 `result` 明确分派:
+`2 → "请求过快，请稍后重试"`、`400002 → "需要进行验证"`,仅 `1` 为正常、`671/677` 为未开播,
+**其余一律抛异常**(绝不静默当未开播)。这独立印证了我们「修复 3」的判断:`result:2` 是限流,
+不是「未开播」——旧代码把它当权威结论正是全节点漏录的根因。

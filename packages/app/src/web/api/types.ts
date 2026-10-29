@@ -10,7 +10,8 @@ import type { MergeJobStore } from "../../merge-jobs.js";
 import type { Task, TaskStore } from "../../store.js";
 import type { EventCenter, NotifWebhookToggles } from "@drec/observability";
 import type {
-  RecordingWorkerStatusDTO, HubRulePayload, HubPoolSnapshotDTO, WorkerTestResult,
+  RecordingWorkerStatusDTO, HubRulePayload, HubPoolSnapshotDTO, WorkerTestResult, RoomPayload, OutputFormatLock,
+  TaskSecrets, RedactedTaskSecrets, ZeroDiskNodeStatusDTO,
 } from "@drec/core";
 
 export interface ApiResult {
@@ -24,6 +25,10 @@ export interface ManagerLike {
   isRunning(id: number): boolean;
   start(id: number): boolean;
   stop(id: number): Promise<void>;
+  /** 硬停并最多等 ms:true = 已退出,false = 超时仍在收尾(停止进行中)。 */
+  stopWithin(id: number, ms: number): Promise<boolean>;
+  /** 该任务是否正在硬停收尾(rolling 任务末段上传中)。 */
+  isStopping(id: number): boolean;
   /** Window-end / disable drain: stop looking for new streams, let current finish. */
   stopGraceful(id: number): Promise<void>;
   /** Live runtime (running + startedAt + elapsedMs) for the 详情 page. */
@@ -32,6 +37,8 @@ export interface ManagerLike {
   getAnchorName(id: number): string | null;
   /** 是否真正在录视频（区分「录制中」vs running 但「等待开播中」）。 */
   isRecording(id: number): boolean;
+  /** 边录边传「实际生效 vs 期望」(issue #89);不在跑 → null。可选:旧的测试替身可不实现。 */
+  rollingStatus?(id: number): { applied: boolean; desired: boolean; drift: boolean } | null;
   /** Per-task captured log lines (oldest → newest) for the 日志 console. */
   getLogs(id: number): string[];
 }
@@ -77,16 +84,46 @@ export interface ApiDeps {
   syncDbPath?: string;
   /** hub.config.json 路径;省略回落 rootHubConfig()。 */
   hubConfigPath?: string;
+  /**
+   * master **实际解析到的** hub 配置来源(T15)。
+   *
+   * 为什么不能只靠 hubConfigPath:用户可以用 `--hub-config <别的文件>` 或在 settings 里存配置,
+   * 此时 rootHubConfig() 指向的文件**根本没被使用**。UI 若盲目写它,表现为「改了不生效」。
+   * 省略 = 不提供(资源端点返回 400)。
+   */
+  hubConfigSource?: () => { json: string | undefined; path?: string; source: "arg-file" | "settings" | "root-file" | "inline" };
+  /**
+   * 手动启动任务时的磁盘水位准入(issue #96):低于水位 → 启动接口返回明确错误,不改任务状态。
+   * 常驻任务的新一场开播另由录制子进程自己的闸门拦截。省略 = 不检查(行为不变)。
+   */
+  admitStart?: (taskOutDir?: string | null) => { ok: true } | { ok: false; reason: string };
   /** biliup cookies.json 路径;省略回落 DEFAULT_COOKIES(测试注入用)。 */
   biliupCookiesPath?: string;
   /** 连接测试(CLI 注入,能 import orchestrator)。省略 → 端点返回「hub 未启用」。 */
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<WorkerTestResult>;
   /** 批量存活探针(CLI 注入)。省略(hub 未开)→ status 端点返回 []。 */
-  probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  probeAllWorkers?: () => Promise<import("@drec/core").WorkerStatus[]>;
+  /**
+   * master 代查某节点的任务日志尾巴(F3;CLI 注入,内部走 Transport)。
+   * 省略 → 该端点返回 400(hub 未启用),不静默 404/空表。
+   */
+  nodeTaskLogs?: (workerId: string, taskId: number, lines: number) => Promise<import("@drec/core").NodeTaskLogsDTO>;
+  /** master 读某节点的任务清单(F3;CLI 注入,内部走 Transport)。省略 → 端点 400。 */
+  nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
   /** 录制节点状态缓存读取;避免每次列任务都同步 SSH。 */
   recordingWorkers?: (platform: string, roomSlug: string) => RecordingWorkerStatusDTO[];
-  /** 立即触发一次 hub 任务同步(hub 规则/worker 变更后由 web API 调用;省略=只等周期 tick)。 */
-  requestSyncTasks?: () => void;
+  /** Cached zero-disk side-node status reader (issue #331); only on a master hub. */
+  zeroDiskStatus?: (platform: string, roomSlug: string) => ZeroDiskNodeStatusDTO[];
+  /**
+   * 节点侧 master 下发快照目录(`<数据根>/config/managed`)。提供时,受管任务视图带 `assigned`
+   * (取自快照里 master 算好的归属标记;缺失/旧 master 不带 → 省略 = 视为归属)。省略 = 不带(master/单机)。
+   */
+  managedStateDir?: string;
+  /**
+   * 立即触发一次 hub 任务同步(hub 规则/worker 变更后由 web API 调用;省略=只等周期 tick)。
+   * `force=true` 让节点跳过 T-2 期望骤减安全阀(用户显式确认缩容/清空)。
+   */
+  requestSyncTasks?: (opts?: { force?: boolean }) => void;
   /**
    * master 本机抑制名单:返回「由 hub 规则切到远端节点录制,本机不应实跑」的源任务 id。
    * `startTask` 据此决定只置 enabled(意图)还是真的起子进程 —— 否则手动启动会绕过
@@ -97,20 +134,36 @@ export interface ApiDeps {
   retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 停一场后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
   stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
+  /** Mark / unmark a needs_manual run as reviewed (issue #312; CLI 注入)。省略 → 端点返回「hub 未启用」。 */
+  ackJob?: (streamKey: string, opts: { note?: string; undo?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 立刻跑一场已有录像的后处理(CLI 注入)。省略 → 端点返回「hub 未启用」。 */
-  runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
+  runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>;
   /** master 资源池快照(CLI 注入,读同一 ResourcePool 实例)。省略/未就绪 → 队列页无排队位次(全 0)。 */
+  /** 边录边传的实时进度(F1;省略 = 不展示)。 */
+  rollingDelivery?: () => import("@drec/core").RollingDeliveryDTO[];
+  blockedBroadcasts?: () => import("@drec/core").HubBlockedBroadcastDTO[];
   poolSnapshot?: () => HubPoolSnapshotDTO | undefined;
 }
 
 /** A task enriched with its live running state for client display. */
-export interface TaskView extends Task {
+export interface TaskView extends Omit<Task, keyof TaskSecrets | "zeroDiskDelivery">, RedactedTaskSecrets {
   running: boolean;
   /** 抓取到的主播名（运行时解析，未设 name 时 UI 用它显示），未知为 null。 */
   anchorName: string | null;
   /** true=真正在录视频；false 且 running=true → 进程在跑但「等待开播中」。 */
   recording: boolean;
+  /** 硬停收尾中(rolling 任务在传末段,最长约 10 分钟)。UI 用它显示「停止中」并禁用按钮。 */
+  stopping?: boolean;
+  /** 输出格式被锁的原因(与 core TaskDTO.outputFormatLock 同义;省略 = 不锁)。 */
+  outputFormatLock?: OutputFormatLock;
   recordingWorkers?: RecordingWorkerStatusDTO[];
+  /** Zero-disk side-node state (issue #331): one per selected non-local node; omitted when none. */
+  zeroDisk?: ZeroDiskNodeStatusDTO[];
+  /**
+   * issue #73:master 判定「本节点是否被派发这个受管任务」。false=停用保留的未分配残留。
+   * 仅受管任务且快照里有标记时才有;省略 = 视为归属(旧 master / 非受管 / 无快照)。
+   */
+  assigned?: boolean;
   /** hub 规则摘要(仅 master、房间有规则时);列表用它显示 hub 关联并跳转。 */
   hubRule?: {
     key: string;
@@ -144,6 +197,17 @@ export interface CreateTaskInput {
   scheduleEnd?: string | null;
   /** 任务专属 Discord webhook;空/省略 = 回落全局。 */
   webhook?: string | null;
+  /** 边录边传开关(T-33,默认 false)。 */
+  rollingUpload?: boolean;
+  /**
+   * 0 落盘流式直传开关(plans/039,默认 false)。与 `rollingUpload` **互斥**:
+   * 前者不写盘、后者靠文件滚动上传,同时为真 API 回 400。
+   */
+  streamUpload?: boolean;
+  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  streamUploadSpool?: boolean;
+  /** 输出格式(issue #137;白名单见 core `OUTPUT_FORMATS`,非法值(含空串)→ 400;缺省 = original / 不改)。 */
+  outputFormat?: string;
 }
 
 /**
@@ -166,6 +230,17 @@ export interface UpdateTaskInput {
   scheduleEnd?: string | null;
   /** 任务专属 Discord webhook;空/省略 = 回落全局。 */
   webhook?: string | null;
+  /** 边录边传开关(T-33,默认 false)。 */
+  rollingUpload?: boolean;
+  /**
+   * 0 落盘流式直传开关(plans/039,默认 false)。与 `rollingUpload` **互斥**:
+   * 前者不写盘、后者靠文件滚动上传,同时为真 API 回 400。
+   */
+  streamUpload?: boolean;
+  /** 0 落盘是否保留本地 spool(默认 true);false = 真 0 落盘、失败无本地回退。 */
+  streamUploadSpool?: boolean;
+  /** 输出格式(issue #137;白名单见 core `OUTPUT_FORMATS`,非法值(含空串)→ 400;缺省 = original / 不改)。 */
+  outputFormat?: string;
 }
 
 /** Public status of one platform cookie (never leaks the raw value). */
@@ -191,6 +266,8 @@ export interface Api {
   refreshTaskAnchor(id: number): ApiResult;
   startTask(id: number): ApiResult;
   stopTask(id: number, opts?: { internal?: boolean }): Promise<ApiResult>;
+  /** POST /api/tasks/:id/drain — 优雅排空:当前这场录完再停(不腰斩)。 */
+  drainTask(id: number): Promise<ApiResult>;
   /** POST /api/login/qr { platform? } — start a QR-login → { sessionId, qrPng }. */
   startLogin(input?: { platform?: string }): Promise<ApiResult>;
   /** GET /api/login/qr/:sid — poll → { state, cookie? }. */
@@ -243,6 +320,18 @@ export interface Api {
   listPlatforms(): ApiResult;
   /** GET /api/hub/status — 本节点是否 master(启用了 hub)。前端据此显示/隐藏 Hub 页。 */
   hubStatus(): ApiResult;
+  /** GET /api/hub/resources — 资源闸门当前值 + 来源(改写回哪)。 */
+  getHubResources(): ApiResult;
+  /** PUT /api/hub/resources — 改并行度等,立即生效;非法值 400 且不写坏配置。 */
+  putHubResources(patch: Record<string, unknown>): ApiResult;
+  /** GET /api/rooms —— 全部房间(录制+处理两半合并视图)。 */
+  listRooms(): ApiResult;
+  /** GET /api/rooms/:key — 单个房间;两半都没有 → 404。 */
+  getRoom(key: string): ApiResult;
+  /** PUT /api/rooms/:key — 一次改两半(各自可选);第二步失败回滚第一步,不留半成功。 */
+  updateRoom(key: string, input: RoomPayload): ApiResult;
+  /** POST /api/hub/apply[?force=1] — 立刻触发一次全节点任务同步;force=跳过节点骤减安全阀(T-2)。 */
+  applyHubTasks(opts?: { force?: boolean }): ApiResult;
   /** GET /api/hub/rules — 所有多节点 hub 后处理规则(按 {platform}.{roomSlug})。 */
   listHubRules(): ApiResult;
   /** POST /api/hub/rules { room, enabled?, pipeline? } — 新建/覆盖一条 hub 规则。 */
@@ -269,8 +358,13 @@ export interface Api {
   retryHubNode(streamKey: string, input: { node?: string; force?: boolean }): Promise<ApiResult>;
   /** POST /api/hub/jobs/:key/stop — 停一场后处理,不动录制。 */
   stopHubJob(streamKey: string): Promise<ApiResult>;
-  /** POST /api/hub/jobs/run { streamKey, winnerWorker?, wait? } — 立刻跑一场已有录像的后处理。 */
-  runHubJob(input: { streamKey?: string; winnerWorker?: string; wait?: boolean }): Promise<ApiResult>;
+  /**
+   * POST /api/hub/jobs/:key/ack { note } | { undo: true } — 标记待人工任务「已核对」(或撤销)。
+   * 不改状态、不删记录;只让它离开队列的待人工列表(issue #312)。
+   */
+  ackHubJob(streamKey: string, input: { note?: string; undo?: boolean }): Promise<ApiResult>;
+  /** POST /api/hub/jobs/run { streamKey, winnerWorker?, wait?, force? } — 立刻跑一场已有录像的后处理。 */
+  runHubJob(input: { streamKey?: string; winnerWorker?: string; wait?: boolean; force?: boolean }): Promise<ApiResult>;
   /** GET /api/hub/workers — 列出录制 worker(hub 未启用 → 400)。 */
   listWorkers(): ApiResult;
   /** POST /api/hub/workers — 新建 worker。 */
@@ -285,4 +379,8 @@ export interface Api {
   testWorker(input: { kind?: string; host?: string; dataRoot?: string; apiUrl?: string }): Promise<ApiResult>;
   /** GET /api/hub/workers/status — 并行 ping 所有已配置 worker(未注入 probeAllWorkers → [])。 */
   workersStatus(): Promise<ApiResult>;
+  /** GET /api/hub/workers/:id/tasks — master 读该节点的任务清单(F3,只读)。 */
+  nodeTasks(workerId: string): Promise<ApiResult>;
+  /** GET /api/hub/workers/:id/tasks/:taskId/logs — master 代查该节点某任务的日志尾巴(F3)。 */
+  nodeTaskLogs(workerId: string, taskId: number, lines?: number): Promise<ApiResult>;
 }

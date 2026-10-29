@@ -1,14 +1,15 @@
 /**
  * @drec/kuaishou-live / stream — 快手直播取流(取流 = stream resolution)。
  *
- * 两条取流路径,**API 优先、页面兜底**:
- *   1. `GET /live_api/liveroom/livedetail?principalId={userId}` — 匿名可访问的 JSON 接口,
- *      payload 仅数 KB(页面 HTML 约 59KB),不依赖前端 SSR。对接法同 biliup kuaishou.rs。
- *      这是限流压力最小的路径 —— 页面接口按 IP 限流很紧(见 docs/kuaishou-rate-limit.md),
- *      走 API 可显著降低触发风控的概率。
- *   2. 直播间页 SSR:`fetch /u/{userId}` → 抠 `window.__INITIAL_STATE__`
+ * 取流路径,**页面优先、API 兜底**(2026-10-08 修正:此前是「API 优先」,方向反了):
+ *   1. 直播间页 SSR(主):`fetch /u/{userId}` → 抠 `window.__INITIAL_STATE__`
  *      → `liveroom.playList[0]{ liveStream{playUrls,hlsPlayUrl}, author{name}, isLiving, errorType }`。
- *      API 结构变化/被拒时回退这条(已长期验证的路径),保证录制不因改版而彻底失效。
+ *      与浏览器同源,是唯一能稳定拿到真实流的路径(实测未被限流的出口返回完整 playUrls)。
+ *   2. `GET /live_api/liveroom/livedetail?principalId={userId}`(仅兜底):该接口**已被平台下线** ——
+ *      2026-10-08 实测对**任意** principalId(真房间号 / 主播 id / 不存在的乱码 / 空)都返回同一份
+ *      634 字节桩数据(`result:2` / `author.living:false` / `playUrls:{h264:{},hevc:{}}`),与是否在播
+ *      无关。故它**不可作判活/未开播依据**(旧代码正是被它误导:在播也报 living:false 且不回退页面);
+ *      只在页面请求**本身失败**时试一次,拿不到可播流就抛错(不静默)。
  *
  * 坑位:
  *   - 两条路径都要先访问首页预热 + 随机 3~4s(同 biliup warmup):真实用户进直播间必然先过首页,
@@ -37,6 +38,34 @@ const QUALITY_MAX_BITRATE: Record<string, number> = {
 export const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
+/**
+ * 补全「真实 Chrome(Windows)」常见请求头,降低被判定为爬虫的概率。
+ *
+ * 依据:48tools #128 / ordinaryroad 的快手实现都发全套浏览器头(而我们原先只有 UA + Referer)。
+ * 快手按出口 IP + 行为特征限流,头部过于精简(缺 `sec-*`/`Upgrade-Insecure-Requests`)会放大
+ * 与真实浏览器的差异。**注意**:不要手写 `Accept-Encoding` —— 交给 fetch(undici) 自行协商,
+ * 否则可能拿到未解压的响应体。
+ */
+function chromeHeaders(accept: string, referer: string, opts?: { cookies?: string; fetchDest?: string; fetchSite?: string }): Record<string, string> {
+  const headers: Record<string, string> = {
+    "User-Agent": UA,
+    "Accept": accept,
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Upgrade-Insecure-Requests": "1",
+    Referer: referer,
+  };
+  // 文档类请求(导航到页面)带 sec-fetch-*;XHR/JSON 请求用 same-origin + empty。
+  headers["sec-fetch-site"] = opts?.fetchSite ?? "same-origin";
+  headers["sec-fetch-mode"] = opts?.fetchDest === "document" ? "navigate" : "cors";
+  headers["sec-fetch-dest"] = opts?.fetchDest ?? "empty";
+  if (opts?.fetchDest === "document") headers["sec-fetch-user"] = "?1";
+  if (opts?.cookies) headers.Cookie = opts.cookies;
+  return headers;
+}
+
 /** 录制拉流要带的头(yximgs CDN 宽松,带上 UA/Referer 更稳)。 */
 export const STREAM_HEADERS: Record<string, string> = {
   Referer: "https://live.kuaishou.com/",
@@ -63,8 +92,11 @@ interface KsPlayItem {
 
 /**
  * `/live_api/liveroom/livedetail` 响应(只声明我们用到的字段)。
- * `data.result`:1=在播可取流 / 22=未开播 / 671=封禁或不可见(同 biliup 的判定)。
- * `data.author.living` 比页面版的 `isLiving` 更权威;开播时以它 + 是否有可用流共同判定。
+ *
+ * ⚠️ **该接口已于 2026-10-08 实测下线**:对任意 principalId 都返回同一桩数据
+ * (`result:2` / `author.living:false` / `playUrls` 全空),与是否在播无关。
+ * 因此 `result`/`author.living` **不可作为判活依据**(旧代码正因此全节点漏录);
+ * 本类型仅用于「万一接口恢复」时读取可播流,详见 getStreamViaApi 的注释。
  */
 interface KsLiveDetail {
   data?: {
@@ -97,8 +129,12 @@ function randomWarmupDelayMs(): number {
  */
 async function warmup(cookies?: string): Promise<void> {
   try {
-    const headers: Record<string, string> = { "User-Agent": UA, Referer: `${KS_HOME}/` };
-    if (cookies) headers.Cookie = cookies;
+    // 首页是文档导航 → 用 navigate/document 语义的头(与真实浏览器打开首页一致)。
+    const headers = chromeHeaders(
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      `${KS_HOME}/`,
+      { cookies, fetchDest: "document", fetchSite: "none" },
+    );
     await fetch(`${KS_HOME}/`, { headers, signal: AbortSignal.timeout(10_000) });
   } catch {
     /* 预热失败不阻断取流 */
@@ -108,13 +144,7 @@ async function warmup(cookies?: string): Promise<void> {
 
 /** 拉 livedetail JSON。返回 null = 网络/解析失败(调用方回退页面刮取)。 */
 async function fetchLiveDetail(userId: string, cookies?: string): Promise<KsLiveDetail | null> {
-  const headers: Record<string, string> = {
-    "User-Agent": UA,
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    Referer: `${KS_HOME}/`,
-  };
-  if (cookies) headers.Cookie = cookies;
+  const headers = chromeHeaders("application/json, text/plain, */*", `${KS_HOME}/`, { cookies });
   const res = await fetch(
     `${KS_HOME}/live_api/liveroom/livedetail?principalId=${encodeURIComponent(userId)}`,
     { headers, signal: AbortSignal.timeout(15_000) },
@@ -125,12 +155,12 @@ async function fetchLiveDetail(userId: string, cookies?: string): Promise<KsLive
 
 /** fetch 直播间页 HTML。带 UA/语言头;cookies 可选(风控场景可带登录 Cookie)。 */
 async function fetchRoomHtml(userId: string, cookies?: string): Promise<string> {
-  const headers: Record<string, string> = {
-    "User-Agent": UA,
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    Referer: "https://live.kuaishou.com/",
-  };
-  if (cookies) headers.Cookie = cookies;
+  // 直播间页是文档导航 → document 语义;Referer 用首页(模拟「从首页点进直播间」)。
+  const headers = chromeHeaders(
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    `${KS_HOME}/`,
+    { cookies, fetchDest: "document", fetchSite: "same-origin" },
+  );
   const res = await fetch(`${KS_HOME}/u/${encodeURIComponent(userId)}`, {
     headers,
     signal: AbortSignal.timeout(15_000),
@@ -193,10 +223,31 @@ export interface KsRoomInfo {
   throttled?: string;
 }
 
+/**
+ * 页面里出现这些文案 = 被风控(不是「未开播」)。用于 `__INITIAL_STATE__` 解析失败时兜底判定:
+ * 强风控会直接返回验证码/提示页,连 `__INITIAL_STATE__` 都没有。
+ */
+const THROTTLE_MARKERS = ["请求过快", "稍后重试", "操作太快", "访问过于频繁"];
+
+function detectThrottleInHtml(html: string): string | null {
+  for (const m of THROTTLE_MARKERS) {
+    if (html.includes(m)) return m;
+  }
+  return null;
+}
+
 /** 拉页解析出的房间信息(主播名 + 是否在播);风控时附 throttled 让调用方区分「未开播」与「未知」,fetch 失败抛错。 */
 export async function getRoomInfo(userId: string, cookies?: string): Promise<KsRoomInfo> {
   const html = await fetchRoomHtml(userId, cookies);
-  const item = findPlayItem(parseInitialState(html));
+  let item: KsPlayItem | null;
+  try {
+    item = findPlayItem(parseInitialState(html));
+  } catch (e) {
+    // 没有 __INITIAL_STATE__(强风控页/改版):含限流文案 → 报风控;否则原样抛出(未知)。
+    const throttle = detectThrottleInHtml(html);
+    if (throttle) return { living: false, name: null, throttled: throttle };
+    throw e;
+  }
   if (!item) return { living: false, name: null };
   const name = item.author?.name?.trim() || null;
   const ls = item.liveStream;
@@ -237,10 +288,13 @@ function pickFromLiveStream(
 }
 
 /**
- * 取流主路径:走 livedetail API(轻量、限流压力小)。
- * 返回:
- *   - `null` = 这次调用本身失败(网络/JSON 解析)→ 调用方回退页面刮取;
- *   - `{ living:false }` = 平台答复了但没给出可播流(未开播/封禁)—— 不再回退页面。
+ * API 兜底路径(`/live_api/liveroom/livedetail`)。**该接口已下线**(见文件头说明):
+ * 2026-10-08 实测对任意 principalId 都返回同一桩数据,拿不到 representation。
+ *
+ * 因此这里**只认「拿到可播流 URL」这一种结果**:
+ *   - 有可播 URL → `{ living:true, url }`(接口万一恢复则能派上用场);
+ *   - 其余一律 `null`(= 不可用)——**绝不返回 `{living:false}`**,否则「接口下线的桩」会被
+ *     误当成「主播未开播」这一权威结论(旧代码正是这么漏录的)。
  */
 async function getStreamViaApi(
   userId: string,
@@ -251,7 +305,7 @@ async function getStreamViaApi(
   try {
     detail = await fetchLiveDetail(userId, cookies);
   } catch {
-    return null; // 网络异常 → 交给页面路径兜底
+    return null; // 网络异常 → 不可用
   }
   if (!detail?.data) return null;
 
@@ -260,31 +314,32 @@ async function getStreamViaApi(
   // 标题(caption)带进产物命名,比纯 {name}_{date} 信息量大。
   const title = ls?.caption?.trim() || undefined;
   const url = pickFromLiveStream(ls ?? null, quality);
-  /**
-   * 在播判定以「拿到可播流 URL」为准,而不是 result 码:
-   *   - result 是未公开的内部码(观察到离线时为 2,biliup 按 1/22/671 分支),依赖它有风险;
-   *   - 离线时 liveStream.url 会是 ".../live/undefined" 这类占位,但 playUrls 里没有真实
-   *     representation → pickFromLiveStream 返回 undefined,足以区分。
-   * 因此:有可播 URL 且 author 未明确 living=false → 在播;否则未开播。
-   */
-  const living = Boolean(url) && author?.living !== false;
-  return living
-    ? { living: true, url, owner, title, headers: STREAM_HEADERS, raw: detail }
-    : { living: false, owner, title, raw: detail };
+  // 无 representation(下线的桩:playUrls 全空 + url 是 ".../live/undefined")→ 不可用。
+  if (!url) return null;
+  return { living: true, url, owner, title, headers: STREAM_HEADERS, raw: detail };
 }
 
 /**
- * 取流:userId → 可录制流(living/url/owner/headers)。未开播/风控 payload 缺失 → {living:false}。
- * `cookies` 可选:带上以登录态防风控;不带匿名取(默认)。
+ * 页面 SSR 主路径:`fetch /u/{userId}` → 抠 `__INITIAL_STATE__` → 解析 playList[0]。
+ *
+ * 语义:
+ *   - 页面正常解析 → `{living:true,url}` 或 `{living:false}`(权威「未开播」);被限流时带
+ *     `throttledReason`(让录制器降频 + 告警,而非伪装成未开播)。
+ *   - 页面请求**本身失败**(网络/HTTP/无 `__INITIAL_STATE__`/改版)→ **抛错** = 未知,交给
+ *     调用方决定(兜底 API / 告警),绝不静默返回 `living:false`。
  */
-export async function getStream(userId: string, quality: string, cookies?: string): Promise<PlatformStream> {
-  // API 优先(轻量、少触发风控);失败才回退页面刮取(已长期验证的兜底路径)。
-  await warmup(cookies);
-  const viaApi = await getStreamViaApi(userId, quality, cookies);
-  if (viaApi) return viaApi;
-
-  const html = await fetchRoomHtml(userId, cookies);
-  const item = findPlayItem(parseInitialState(html));
+async function getStreamViaPage(userId: string, quality: string, cookies?: string): Promise<PlatformStream> {
+  const html = await fetchRoomHtml(userId, cookies); // 请求失败 → 抛错(未知)
+  let item: KsPlayItem | null;
+  try {
+    item = findPlayItem(parseInitialState(html));
+  } catch (e) {
+    // 页面没有 __INITIAL_STATE__(强风控/验证码页/改版):HTML 里若含限流文案 → 当风控上报;
+    // 否则原样抛出(未知,交给兜底/告警),不伪装成「未开播」。
+    const throttle = detectThrottleInHtml(html);
+    if (throttle) return { living: false, raw: null, throttledReason: throttle };
+    throw e;
+  }
   const raw = item ?? null;
   if (!item) return { living: false, raw };
   const owner = item.author?.name?.trim() || undefined;
@@ -302,8 +357,31 @@ export async function getStream(userId: string, quality: string, cookies?: strin
     if (rep) break;
   }
   const url = rep?.url ?? ls.hlsPlayUrl;
-  if (!url || !item.isLiving) return { living: false, owner, raw };
+  // **以「拿到可播流 URL」为唯一在播依据**(与 biliup / DouyinLiveRecorder 一致,不依赖 isLiving 字段):
+  // 有 URL 就能录;离线样本实测 playUrls 全空(自然 url 为空)→ 判未开播,与 isLiving:false 一致。
+  if (!url) return { living: false, owner, raw };
   return { living: true, url, owner, headers: STREAM_HEADERS, raw };
+}
+
+/**
+ * 取流:userId → 可录制流(living/url/owner/headers)。
+ *
+ * **页面优先、API 兜底**(2026-10-08 修正):页面是唯一能稳定拿到真实流的路径(livedetail 已下线)。
+ * 仅当页面请求**本身失败**时才试一次 API(万一接口恢复);两者都拿不到就**抛错**(未知),
+ * 由录制器的失败告警路径处理 —— 绝不把「查不到」静默成「未开播」。
+ *
+ * `cookies` 可选:带上以登录态防风控;不带匿名取(默认)。
+ */
+export async function getStream(userId: string, quality: string, cookies?: string): Promise<PlatformStream> {
+  await warmup(cookies);
+  try {
+    return await getStreamViaPage(userId, quality, cookies);
+  } catch (pageErr) {
+    // 页面路径失败(网络/HTTP/改版)→ API 兜底一次;仍拿不到可播流 → 抛原错(未知,不静默)。
+    const viaApi = await getStreamViaApi(userId, quality, cookies).catch(() => null);
+    if (viaApi) return viaApi;
+    throw pageErr;
+  }
 }
 
 /**
@@ -312,10 +390,15 @@ export async function getStream(userId: string, quality: string, cookies?: strin
  * 「主播已下播」而提前收尾/漏录(见 docs/kuaishou-rate-limit.md)。
  */
 export async function getLiving(userId: string): Promise<boolean> {
-  // 判活也优先走 API(drain 收播判定 / 重连都会调它,不该每次都拉 59KB 页面)。
-  const viaApi = await getStreamViaApi(userId, "OD");
-  if (viaApi) return viaApi.living;
-  const info = await getRoomInfo(userId);
-  if (info.throttled) throw new Error(`kuaishou 风控/接口异常: ${info.throttled}`);
-  return info.living;
+  let page: PlatformStream;
+  try {
+    page = await getStreamViaPage(userId, "OD");
+  } catch (pageErr) {
+    // 页面失败 → API 兜底(仅信任「拿到可播流」);否则抛原错 = 未知。
+    const viaApi = await getStreamViaApi(userId, "OD").catch(() => null);
+    if (viaApi) return viaApi.living;
+    throw pageErr;
+  }
+  if (page.throttledReason) throw new Error(`kuaishou 风控/接口异常: ${page.throttledReason}`);
+  return page.living;
 }

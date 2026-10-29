@@ -17,6 +17,8 @@ export interface CandidateMetrics {
   startMs: number;
   endMs: number;
   totalGapSec: number;
+  /** 该 worker 本场弹幕条目数(各会话求和)。0 = 无弹幕/仅表头空 xml。 */
+  danmuCount: number;
 }
 
 export interface Selection {
@@ -61,7 +63,16 @@ function workerMetrics(sessions: BroadcastMember[]): {
   };
 }
 
-export function selectWinner(b: Broadcast, cleanMaxGapSec: number): Selection {
+/**
+ * 选优。
+ *
+ * @param requireDanmu 本场后处理是否需要弹幕(烧 danmu/livechat 版)。为 true 且组内**存在**有弹幕的
+ *   成员时,「有弹幕」优先于覆盖率/时长 —— 因为烧录只取 winner 自己的 xml(`pipeline.ts` 的 `xmlArg`),
+ *   若让「视频覆盖更高但 xml 为空」的节点胜出,上传的弹幕就是空的,哪怕同组另一节点弹幕完好。
+ *   `clean`(视频是否盖住整场)仍是**第一优先级**:不能为弹幕牺牲「录全」这个正确性闸门。
+ *   缺省 false → 排序键恒为 0,**行为与改动前完全一致**(向后兼容)。
+ */
+export function selectWinner(b: Broadcast, cleanMaxGapSec: number, requireDanmu = false): Selection {
   if (b.members.length === 0) return { winnerMembers: [], winner: null, clean: false, perNode: [] };
   const byWorker = new Map<string, BroadcastMember[]>();
   for (const m of b.members) {
@@ -72,7 +83,8 @@ export function selectWinner(b: Broadcast, cleanMaxGapSec: number): Selection {
   const perNode: CandidateMetrics[] = [...byWorker.entries()].map(([workerId, sessions]) => {
     const { startMs, endMs, spanSec, gapSec, durationSec } = workerMetrics(sessions);
     const coverage = spanSec <= 0 ? 1 : Math.max(0, Math.min(1, 1 - gapSec / spanSec));
-    return { workerId, coverage, durationSec, startMs, endMs, totalGapSec: gapSec };
+    const danmuCount = sessions.reduce((s, m) => s + (m.rec.danmuCount ?? 0), 0);
+    return { workerId, coverage, durationSec, startMs, endMs, totalGapSec: gapSec, danmuCount };
   });
   const prefOf = (sessions: BroadcastMember[]): { coverage: number; durationSec: number } => {
     const { spanSec, gapSec, durationSec } = workerMetrics(sessions);
@@ -97,13 +109,18 @@ export function selectWinner(b: Broadcast, cleanMaxGapSec: number): Selection {
     sessions: sortSessions(sessions),
     clean: allClean(sessions) && coversBroadcast(sessions),
   }));
-  // 先比各节点同一场:完整优先,同等完整度下单会话(没断网重连)优先,
-  // 再取覆盖更高 / 总时长更长。
+  // 组内是否有人真的录到弹幕 —— 没人有时「弹幕优先」失效(否则全 0,排序键恒等,等于不生效)。
+  const anyDanmu = requireDanmu && groups.some((g) => g.sessions.some((m) => (m.rec.danmuCount ?? 0) > 0));
+  const danmuRank = (sessions: BroadcastMember[]): number =>
+    anyDanmu && sessions.some((m) => (m.rec.danmuCount ?? 0) > 0) ? 1 : 0;
+  // 先比各节点同一场:完整优先,再「有弹幕」优先(仅 requireDanmu 且组内有人有弹幕时),
+  // 同等完整度下单会话(没断网重连)优先,再取覆盖更高 / 总时长更长。
   const ranked = [...groups].sort(
     (a, c) => {
       const pa = prefOf(a.sessions);
       const pc = prefOf(c.sessions);
       return Number(c.clean) - Number(a.clean)
+        || danmuRank(c.sessions) - danmuRank(a.sessions)
         || a.sessions.length - c.sessions.length
         || pc.coverage - pa.coverage
         || pc.durationSec - pa.durationSec;

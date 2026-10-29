@@ -16,6 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # 同 ci.yml：本工作流也跑 `pnpm test`，其中含架构文档漂移守护，需全历史才能统计
+        # 每包近 90 天提交数，否则浅克隆下该守护恒红挡住发布(见 issue #11)。
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:

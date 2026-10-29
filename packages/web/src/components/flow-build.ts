@@ -23,20 +23,30 @@ export function presentSet(
   cfg: FlowCfg | undefined,
 ): Set<string> {
   const has = (k: string): boolean => job.steps.some((s) => s.step === k);
-  const p = new Set<string>(["select", "pull", "merge"]);
+  // 节点侧上传(experimental)是 pull 的**替代路径**:节点本地 remux + 上传,没有 pull 回 master,
+  // 也没有 master 侧 merge。故其前奏是 `select → node_upload`;常规路径仍是 select → pull → merge。
+  const nodeSide = has("node_upload");
+  const p = new Set<string>(nodeSide ? ["select", "node_upload"] : ["select", "pull", "merge"]);
   for (const k of OPTIONAL) if (has(k)) p.add(k); // 已跑过的一律画(兜底 + 终态即全部依据)
+  // 进行中(未到终态)时按规则配置补全:终态则以 job.steps 实际跑过的为准(上面的兜底已加)。
+  // nodeSide 澄清:节点侧上传**没有** master 侧 burn / merge / upload / pull,故不按配置臆造这些;
+  // 但其收尾仍会删节点源(cleanupSourcesShared → clean_source),这一步要如实画出来。
   if (!TERMINAL.has(job.state) && cfg) {
     const st = cfg.steps ?? {};
-    const up = cfg.upload?.mode === "upload";
+    const up = cfg.upload?.mode === "upload" || cfg.upload?.mode === "rolling";
     const cl = cfg.cleanup ?? {};
-    if (st.burnDanmu !== false) p.add("burn_danmu");
-    if (st.burnLivechat !== false) p.add("burn_livechat");
-    if (up) p.add("upload_plain");
-    if (up && st.burnDanmu !== false) p.add("append_danmu");
-    if (up && st.burnLivechat !== false) p.add("append_livechat");
-    if (cl.stageSourceAfterMerge) p.add("clean_stage_src");
+    if (!nodeSide) {
+      if (st.burnDanmu !== false) p.add("burn_danmu");
+      if (st.burnLivechat !== false) p.add("burn_livechat");
+      if (up) p.add("upload_plain");
+      if (up && st.burnDanmu !== false) p.add("append_danmu");
+      if (up && st.burnLivechat !== false) p.add("append_livechat");
+      // stage 侧清理只在常规路径存在:节点侧从不把源段拉进 stage(无 pull),无副本可删。
+      if (cl.stageSourceAfterMerge) p.add("clean_stage_src");
+      if (cl.stageAfterDone) p.add("clean_stage");
+    }
+    // 删节点源两路都有:节点侧 keepNodeXml 保 xml,但录像源照删。
     if (cl.sourceAfterDone) p.add("clean_source");
-    if (cl.stageAfterDone) p.add("clean_stage");
   }
   return p;
 }
@@ -48,7 +58,9 @@ export function buildFlow(
   const p = presentSet(job, cfg);
   const keep = (arr: string[]): string[] => arr.filter((k) => p.has(k));
   // 分段模式仍走 select → pull → merge(此处 merge 节点 = 逐段 remux 产出 plain 段)。
-  const spine = ["select", "pull", "merge"];
+  // 节点侧上传无 pull/merge(见 presentSet):spine 换成 select → node_upload。
+  const spine = p.has("node_upload") ? ["select", "node_upload"] : ["select", "pull", "merge"];
+  const spineTail = spine[spine.length - 1]; // 常规="merge";节点侧="node_upload"
   // 并行轨:merge 后同时起跑。danmu/livechat 各自 burn → append,upload_plain(P1)独立轨,
   // clean_stage_src 也可选并行(拆 pipeline 后结构:烧录与上传互不等,append 串行在轨内)。
   const lanes = [
@@ -71,18 +83,19 @@ export function buildFlow(
   const tailStart = forkStart + forkWidth;
   tail.forEach((k, i) => nodes.push({ key: k, x: (tailStart + i) * COL, y: Y_MID }));
 
-  const edges: Array<[string, string]> = [["select", "pull"], ["pull", "merge"]];
+  const edges: Array<[string, string]> = [];
   const chain = (arr: string[]): void => { for (let i = 0; i + 1 < arr.length; i++) edges.push([arr[i], arr[i + 1]]); };
+  chain(spine);
   lanes.forEach((lane) => chain(lane));
   // append_danmu(P2) 完成后才追 append_livechat(P3),保证 B 站分 P 顺序。
   if (p.has("append_danmu") && p.has("append_livechat")) edges.push(["append_danmu", "append_livechat"]);
   chain(tail);
   const joinTarget = tail[0]; // 恒有(至少 __term__)
   lanes.forEach((lane) => {
-    edges.push(["merge", lane[0]]);
+    edges.push([spineTail, lane[0]]);
     edges.push([lane[lane.length - 1], joinTarget]);
   });
-  if (lanes.length === 0) edges.push(["merge", joinTarget]);
+  if (lanes.length === 0) edges.push([spineTail, joinTarget]);
 
   return { nodes, edges };
 }

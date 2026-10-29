@@ -4,17 +4,20 @@
  * 从原 web/api.ts 的 makeApi() 闭包里抽出:凡被 ≥2 个域用到的辅助都放这里,
  * 避免域文件之间互相 import(会造成循环)。各域统一签名 `buildXxx(ctx: ApiCtx)`。
  */
-import { join } from "node:path";
 import {
-  listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
-  type WorkerDTO, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO,
+  isUploadingMode, normalizeUploadMode, pipelineBurns, resolveRollingPolicy, rollingReasonText, listPlatforms, platformForRoom, validateTitleTemplate, validateLooseTitleTemplate,
+  isValidPartSizeMiB, PART_SIZE_MIB_MIN, PART_SIZE_MIB_MAX,
+  zeroDiskRuleError, redactTaskSecrets, recordingRoomDir, recordingRoomDirCandidates,
+  type WorkerDTO, type HubPipelineConfig, type HubRulePayload, type HubRuleDTO, type BiliupAuthStatus, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO,
 } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
 import * as workerStore from "../../worker-store.js";
-import { rootHubDir, rootHubConfig, resolveOutputDir } from "../../paths.js";
+import { rootHubDir, rootHubConfig, resolveOutputDir, readOutputLayout } from "../../paths.js";
 import { resolveTaskCookies, type Task } from "../../store.js";
 import { readBiliupCookieHeader } from "../../upload/biliup.js";
 import { listHubJobs } from "../../hub-jobs.js";
+import { nodeOutputFormatLock } from "../../node-remux.js";
+import { readManagedState } from "../../managed-state.js";
 import { hasSessionCookie, parseCookieExpiry } from "../../cookie-utils.js";
 import type { ApiDeps, ApiResult, CookieStatus, TaskView, TaskDetailView } from "./types.js";
 
@@ -35,9 +38,30 @@ export interface ApiCtx {
   view: (t: Task) => TaskView;
   detailView: (t: Task) => TaskDetailView;
   validateWorkers: (input: HubRulePayload) => string | null;
-  validatePipeline: (input: HubRulePayload) => string | null;
+  validatePipeline: (input: HubRulePayload, existing?: HubPipelineConfig) => string | null;
   hubRuleView: (r: hubStore.HubRule) => HubRuleDTO;
-  recordingError: (sourceTaskId: number | null | undefined, roomSlug: string) => string | null;
+  recordingError: (
+    sourceTaskId: number | null | undefined,
+    roomSlug: string,
+    /** An already-bound rule: a zero-disk task may keep its existing source binding. */
+    boundRule?: { recording?: { sourceTaskId?: number | null } | null } | null,
+  ) => string | null;
+  zeroDiskErrorFor: (
+    sourceTaskId: number | null | undefined,
+    streamUpload: boolean | null | undefined,
+    rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+  ) => string | null;
+  /** Validate a rule against every zero-disk task already sitting in the same room. */
+  zeroDiskRoomError: (
+    platform: string,
+    roomSlug: string,
+    rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+    /** The task this request is writing; its post-write flag overrides the persisted one. */
+    override?: { taskId: number | null; streamUpload: boolean },
+  ) => string | null;
+  settleLegacyRolling: (sourceTaskId: number | null | undefined, mode: unknown) => void;
+  /** Every directory that may hold this task's recordings (current layout first, old layout after), existing or not. */
+  recordingsDirs: (t: Task) => string[];
   recordingsDir: (t: Task) => string | null;
   platformCookie: (platform: string) => { value: string | null; source: CookieStatus["source"] };
   biliupStatus: () => BiliupAuthStatus;
@@ -93,14 +117,33 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     })().catch(() => {}).finally(() => anchorInFlight.delete(taskId));
   };
 
+  // 节点侧归属标记(issue #73):读 master 下发快照 rooms.json(现读,1s 缓存摊薄列表 N 次读)。
+  // 缺快照/损坏/旧 master 不带字段 → 空 map → 视为归属(旧行为,全显示)。
+  let assignedCache: { at: number; map: Map<string, boolean> } | null = null;
+  const assignedMap = (): Map<string, boolean> => {
+    const dir = deps.managedStateDir;
+    if (!dir) return new Map();
+    const now = Date.now();
+    if (assignedCache && now - assignedCache.at < 1000) return assignedCache.map;
+    const map = new Map<string, boolean>();
+    for (const s of readManagedState(dir)?.desired ?? []) {
+      if (typeof s.assigned === "boolean") map.set(`${s.platform}:${s.roomSlug}`, s.assigned);
+    }
+    assignedCache = { at: now, map };
+    return map;
+  };
+
   // 显示用主播名:运行时(录制中 [主播] 日志解析)优先,否则持久化的(创建时抓的)。
   const view = (t: Task): TaskView => {
     let workers: RecordingWorkerStatusDTO[] | undefined;
+    let zeroDisk: ZeroDiskNodeStatusDTO[] | undefined;
+    const stopping = manager.isStopping(t.id) || undefined;
     let hubRule: TaskView["hubRule"];
     if (deps.recordingWorkers || deps.hubEnabled) {
       const platform = platformForRoom(t.room);
       const roomSlug = platform.extractRoomSlug(t.room);
       if (deps.recordingWorkers) workers = deps.recordingWorkers(platform.id, roomSlug);
+      if (deps.zeroDiskStatus && t.streamUpload) zeroDisk = deps.zeroDiskStatus(platform.id, roomSlug);
       if (deps.hubEnabled) {
         const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug));
         if (rule) {
@@ -115,19 +158,34 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
           }
           hubRule = {
             key: rule.key, enabled: rule.enabled, steps,
-            uploadMode: p.upload?.mode === "upload" ? "upload" : "stage", lastRun,
+            uploadMode: isUploadingMode(p.upload?.mode) ? "upload" : "stage", lastRun,
           };
         }
       }
     }
+    // 只对受管任务带 assigned;非受管任务(用户自建)永远归属本节点。
+    const assigned = t.managedBy === "hub" && deps.managedStateDir
+      ? (() => {
+          const platform = platformForRoom(t.room);
+          return assignedMap().get(`${platform.id}:${platform.extractRoomSlug(t.room)}`);
+        })()
+      : undefined;
+    const rollingStatus = manager.rollingStatus?.(t.id) ?? null;
+    // 与 spawn 前的唯一判定点同源(不看 deps.hubEnabled:后端实际是否替换就是这个口径)。
+    const outputFormatLock = nodeOutputFormatLock(t, hubDir);
     return {
-      ...t,
+      ...redactTaskSecrets(t),
+      ...(assigned !== undefined ? { assigned } : {}),
       running: manager.isRunning(t.id),
+      ...(stopping ? { stopping } : {}),
       anchorName: manager.getAnchorName(t.id) ?? t.anchorName,
       recording: manager.isRecording(t.id),
+      ...(rollingStatus ? { rollingApplied: rollingStatus.applied, ...(rollingStatus.drift ? { rollingPending: true } : {}) } : {}),
       // 空数组不下发:前端 recordingWorkers?.length 判定依赖它。
       ...(workers && workers.length > 0 ? { recordingWorkers: workers } : {}),
+      ...(zeroDisk && zeroDisk.length > 0 ? { zeroDisk } : {}),
       ...(hubRule ? { hubRule } : {}),
+      ...(outputFormatLock ? { outputFormatLock } : {}),
     };
   };
   const detailView = (t: Task): TaskDetailView => ({ ...view(t), runtime: manager.getRuntime(t.id) });
@@ -143,7 +201,24 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     if (missing.length > 0) return `workers 含未配置的 worker id: ${[...new Set(missing)].join(", ")}`;
     return null;
   };
-  const validatePipeline = (input: HubRulePayload): string | null => {
+  const validatePipeline = (input: HubRulePayload, existing?: HubPipelineConfig): string | null => {
+    // upload.mode 只认 stage/upload/rolling(issue #40);未给 = 沿用,不校验。
+    const mode = input.pipeline?.upload?.mode as unknown;
+    if (mode != null && String(mode).trim() && !["stage", "upload", "rolling"].includes(String(mode))) {
+      return `upload.mode 只能是 stage / upload / rolling,收到 ${JSON.stringify(mode)}`;
+    }
+    // 烧录互斥(issue #48):rolling 只传 plain,与烧录同开会静默丢弃弹幕版/互动版分P → 保存即拒。
+    // 按**合并后**的结果判(PATCH 只改烧录开关、mode 沿用已存的 rolling 也要拦);
+    // 本次没碰 mode / 烧录开关则不判,避免存量坏规则卡死无关的编辑(它在生效判定里已是 needs-burn)。
+    const touched = input.pipeline?.upload?.mode !== undefined
+      || input.pipeline?.steps === null // steps 置空 = 回到默认(烧录开),同样要过守卫
+      || input.pipeline?.steps?.burnDanmu !== undefined || input.pipeline?.steps?.burnLivechat !== undefined;
+    if (touched) {
+      const merged = hubStore.mergePipeline(existing, input.pipeline);
+      if (normalizeUploadMode(merged.upload?.mode) === "rolling" && pipelineBurns(merged.steps)) {
+        return `边录边传(rolling)与烧录互斥:${rollingReasonText("needs-burn")}`;
+      }
+    }
     const tmpl = input.pipeline?.upload?.titleTemplate;
     if (tmpl != null && String(tmpl).trim()) {
       const e = validateTitleTemplate(String(tmpl));
@@ -153,6 +228,15 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
       if (loose == null || !String(loose).trim()) continue;
       const e = validateLooseTitleTemplate(String(loose));
       if (e) return e;
+    }
+    const season = input.pipeline?.upload?.seasonSectionId as unknown;
+    if (season !== undefined && season !== null
+        && !(typeof season === "number" && Number.isSafeInteger(season) && season > 0)) {
+      return `upload.seasonSectionId 必须是正整数或 null,收到 ${JSON.stringify(season)}`;
+    }
+    const size = input.pipeline?.upload?.partSizeMiB as unknown;
+    if (size !== undefined && size !== null && !isValidPartSizeMiB(size)) {
+      return `upload.partSizeMiB 必须是 ${PART_SIZE_MIB_MIN}-${PART_SIZE_MIB_MAX} 的整数或 null,收到 ${JSON.stringify(size)}`;
     }
     return null;
   };
@@ -173,7 +257,18 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     return {
       key: r.key, roomSlug: r.roomSlug,
       room: r.room || srcTask?.room || "",
-      platform: r.platform, enabled: r.enabled, pipeline: r.pipeline,
+      platform: r.platform, enabled: r.enabled,
+      // 读取时迁移(issue #40):规则已是 upload、而源任务还带旧边录边传开关 → 对外按 rolling 展示
+      // (与 resolveRollingPolicy 的生效语义一致);保存时才写回规则文件。
+      // 开着烧录时旧开关不再迁成 rolling(判定为 needs-burn),否则表单会带着被禁用的 rolling 值保存而被 400。
+      pipeline: normalizeUploadMode(r.pipeline?.upload?.mode) === "upload" && srcTask?.rollingUpload && !pipelineBurns(r.pipeline?.steps)
+        ? { ...r.pipeline, upload: { ...r.pipeline.upload, mode: "rolling" } }
+        : r.pipeline,
+      // 边录边传的判定结果 + 原因(与录制端同一唯一判定),界面据此说明「为什么没生效」。
+      rollingPolicy: resolveRollingPolicy(
+        { enabled: r.enabled, mode: r.pipeline?.upload?.mode, workers: r.workers, steps: r.pipeline?.steps },
+        srcTask?.rollingUpload ?? false,
+      ),
       workers: r.workers, requires: r.requires, recording: r.recording,
       sourceTask: srcTask
         ? { id: srcTask.id, room: srcTask.room, name: srcTask.name, anchorName: srcTask.anchorName, enabled: srcTask.enabled }
@@ -182,26 +277,97 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
     };
   };
 
-  const recordingError = (sourceTaskId: number | null | undefined, roomSlug: string): string | null => {
+  /**
+   * 规则 mode 被**显式保存**后收口旧 task 开关(issue #40):保存的是 stage/upload(非 rolling)→ 源任务旧开关
+   * 清为 false,否则「规则选了 upload 却因旧开关仍边录边传」。保存 rolling 不动旧开关(便于回滚)。
+   * 未给 mode(沿用)→ 不动。
+   */
+  const settleLegacyRolling = (sourceTaskId: number | null | undefined, mode: unknown): void => {
+    if (!sourceTaskId || normalizeUploadMode(mode) === undefined || normalizeUploadMode(mode) === "rolling") return;
+    const t = store.getTask(Number(sourceTaskId));
+    if (t?.rollingUpload) store.updateTask(t.id, { rollingUpload: false });
+  };
+
+  const recordingError = (
+    sourceTaskId: number | null | undefined,
+    roomSlug: string,
+    boundRule?: { recording?: { sourceTaskId?: number | null } | null } | null,
+  ): string | null => {
     if (!sourceTaskId) return null;
     const t = store.getTask(Number(sourceTaskId));
     if (!t) return "recording.sourceTaskId 指向的任务不存在";
     if (platformForRoom(t.room).extractRoomSlug(t.room) !== roomSlug) return "recording.sourceTaskId 与规则房间不一致";
+    // Zero-disk tasks have no files for the hub scanner. They may keep an existing rule
+    // binding (zero-disk is its rolling sub-mode and reports its own ledger result), but
+    // must never be newly bound as a rule source. `zeroDiskErrorFor` is authoritative for
+    // the rolling/no-burn/local checks.
+    if (t.streamUpload && boundRule?.recording?.sourceTaskId !== t.id && boundRule != null) {
+      return "该任务开启了直播直传,不产生录像文件,不能绑定 hub 规则(请改用普通录制任务)";
+    }
     return null;
   };
 
-  // 名字净化成单个安全路径段(与 @drec/record-engine 的 sanitizePathSegment 同规则)。
-  const sanitizeSeg = (name: string): string =>
-    name.replace(/[/\\:*?"<>|]/g, "")
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x1f\x7f]/g, "")
-      .replace(/\s+/g, " ").trim();
+  /** Zero-disk is a rolling sub-mode: validate it against the rule being saved. */
+  const zeroDiskErrorFor = (
+    sourceTaskId: number | null | undefined,
+    streamUpload: boolean | null | undefined,
+    rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+  ): string | null => {
+    if (streamUpload !== true) return null;
+    if (!sourceTaskId) return "直播直传必须绑定一个录制任务";
+    return zeroDiskRuleError(true, rule);
+  };
 
+  /**
+   * Rules are validated against the whole room, not just the bound source task. A second
+   * zero-disk task in the same room still runs with `--stream-upload` even if the rule's source
+   * task changed, so degrading the rule must be rejected while any such task exists.
+   */
+  const zeroDiskRoomError = (
+    platform: string,
+    roomSlug: string,
+    rule: { enabled?: boolean; mode?: unknown; workers?: readonly string[]; steps?: { burnDanmu?: boolean; burnLivechat?: boolean } | null } | null | undefined,
+    override?: { taskId: number | null; streamUpload: boolean },
+  ): string | null => {
+    const affected = store.listTasks().filter((t) => {
+      // Read the post-write value for the task being saved: turning zero-disk off in the
+      // same request that leaves rolling must not trip over its stale persisted `true`.
+      const streamUpload = override && t.id === override.taskId ? override.streamUpload : t.streamUpload;
+      if (!streamUpload) return false;
+      try {
+        const p = platformForRoom(t.room);
+        return p.id === platform && p.extractRoomSlug(t.room) === roomSlug;
+      } catch {
+        return false;
+      }
+    });
+    for (const t of affected) {
+      const err = zeroDiskRuleError(true, rule);
+      if (err) return `任务 #${t.id} ${err}`;
+    }
+    return null;
+  };
+
+  const roomOfTask = (t: Task): { platform: string; roomSlug: string } | undefined => {
+    try {
+      const p = platformForRoom(t.room);
+      return { platform: p.id, roomSlug: p.extractRoomSlug(t.room) };
+    } catch { return undefined; }
+  };
+  /** Recording dir where NEW sessions of this task go (the layout switch decides). */
   const recordingsDir = (t: Task): string | null => {
     const outDir = resolveOutputDir(t.outDir);
     const anchor = manager.getAnchorName(t.id) ?? t.anchorName ?? "";
-    const sub = (t.name ? sanitizeSeg(t.name) : "") || (anchor ? sanitizeSeg(anchor) : "");
-    return sub ? join(outDir, sub) : null;
+    const room = roomOfTask(t);
+    return recordingRoomDir(outDir, [t.name, anchor], room ? { ...room, anchorName: t.name || anchor } : undefined, { layout: readOutputLayout() });
+  };
+  /** Both layouts' directories: old sessions stay visible after the switch (they are read-only history, not migrated). */
+  const recordingsDirs = (t: Task): string[] => {
+    const outDir = resolveOutputDir(t.outDir);
+    const anchor = manager.getAnchorName(t.id) ?? t.anchorName ?? "";
+    const all = recordingRoomDirCandidates(outDir, [t.name, anchor], roomOfTask(t));
+    const primary = recordingsDir(t);
+    return primary ? [primary, ...all.filter((d) => d !== primary)] : all;
   };
 
   const platformCookie = (platform: string): { value: string | null; source: CookieStatus["source"] } => {
@@ -241,7 +407,7 @@ export function buildCtx(deps: ApiDeps): ApiCtx {
   return {
     deps, store, manager, hubDir, hubConfigPath,
     err, isHubSourceTask, workerToDto, resolveAnchorBg, view, detailView,
-    validateWorkers, validatePipeline, hubRuleView, recordingError, recordingsDir,
+    validateWorkers, validatePipeline, hubRuleView, recordingError, zeroDiskErrorFor, zeroDiskRoomError, settleLegacyRolling, recordingsDir, recordingsDirs,
     platformCookie, biliupStatus, validCookiePlatform,
     normWebhook, toUseCookie, cookieStatus,
   };

@@ -75,12 +75,15 @@ importers:
       '@drec/post-process':
         specifier: workspace:*
         version: link:../post-process
+      '@drec/proc-queue':
+        specifier: workspace:*
+        version: link:../proc-queue
+      '@drec/processors':
+        specifier: workspace:*
+        version: link:../processors
       '@drec/record-engine':
         specifier: workspace:*
         version: link:../record-engine
-      '@drec/tui':
-        specifier: workspace:*
-        version: link:../tui
       commander:
         specifier: ^12.0.0
         version: 12.1.0
@@ -90,12 +93,6 @@ importers:
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
-      ws:
-        specifier: ^8.0.0
-        version: 8.21.0
-      yaml:
-        specifier: ^2.5.0
-        version: 2.9.0
     devDependencies:
       '@types/qrcode':
         specifier: ^1.5.6
@@ -136,15 +133,21 @@ importers:
       '@drec/post-process':
         specifier: workspace:*
         version: link:../post-process
+      '@drec/proc-queue':
+        specifier: workspace:*
+        version: link:../proc-queue
+      '@drec/processors':
+        specifier: workspace:*
+        version: link:../processors
       '@drec/record-engine':
         specifier: workspace:*
         version: link:../record-engine
+      '@drec/zero-upload':
+        specifier: workspace:*
+        version: link:../zero-upload
       commander:
         specifier: ^12.0.0
         version: 12.1.0
-      yaml:
-        specifier: ^2.5.0
-        version: 2.9.0
 
   packages/core:
     dependencies:
@@ -212,7 +215,35 @@ importers:
         specifier: workspace:*
         version: link:../post-process
 
-  packages/post-process: {}
+  packages/post-process:
+    dependencies:
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
+      eastasianwidth:
+        specifier: ^0.3.0
+        version: 0.3.0
+      fast-xml-parser:
+        specifier: ^5.8.0
+        version: 5.8.0
+
+  packages/proc-queue:
+    dependencies:
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/processors:
+    dependencies:
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
+      '@drec/post-process':
+        specifier: workspace:*
+        version: link:../post-process
+      '@drec/zero-upload':
+        specifier: workspace:*
+        version: link:../zero-upload
 
   packages/record-engine:
     dependencies:
@@ -231,6 +262,15 @@ importers:
       react:
         specifier: ^19.2.7
         version: 19.2.7
+
+  packages/zero-upload:
+    dependencies:
+      '@drec/core':
+        specifier: workspace:*
+        version: link:../core
+      '@drec/post-process':
+        specifier: workspace:*
+        version: link:../post-process
 
 packages:
 

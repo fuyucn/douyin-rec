@@ -15,9 +15,12 @@ import { resolveOutputDir } from "../paths.js";
  *   ["record", "--room", room, "--quality", q, "--engine", e,
  *    "--danmu", "1"|"0", "--out", dir, "--segment", String(sec),
  *    ...(name ? ["--name", name] : []),
- *    ...(cookies ? ["--cookies", cookies] : [])]
+ *    ...(cookiesFile ? ["--cookies-file", cookiesFile] : [])]
+ *
+ * 登录凭证(task.cookies)**永不**进 argv:调用方先把它写进 0600 文件(credential-file.ts),
+ * 再把路径作 `cookiesFile` 传入。无文件路径 = 不带凭证 flag。
  */
-export function buildRecordArgs(task: Task): string[] {
+export function buildRecordArgs(task: Task, cookiesFile?: string): string[] {
   const args = [
     "record",
     "--room",
@@ -39,9 +42,37 @@ export function buildRecordArgs(task: Task): string[] {
   if (task.name) {
     // per-streamer output subfolder + filename prefix
     args.push("--name", task.name);
+  } else if (task.streamUpload && task.anchorName) {
+    // Zero-disk only: it has no recording filename to inherit the anchor from, so a cached
+    // anchor keeps title templates and danmu metadata from falling back to the room slug.
+    // Deliberately scoped to streamUpload: the normal recorder resolves the owner itself from
+    // each stream, and a stale cached name would rename its output subfolder.
+    args.push("--name", task.anchorName);
   }
-  if (task.cookies) {
-    args.push("--cookies", task.cookies);
+  if (cookiesFile) {
+    args.push("--cookies-file", cookiesFile);
+  }
+  // 边录边传(T-33):录制端**只读 master 派生的 `rollingEffective`**(issue #40),不读旧开关/规则;
+  // 仅生效时下发(默认关 = 不带该 flag,行为不变)。
+  // 0 落盘(plans/039)优先:两者同时为真时不传 `--rolling-upload`,避免 `record` 互斥检查退出 2。
+  if (task.rollingEffective && !task.streamUpload) {
+    args.push("--rolling-upload", "1");
+  }
+  // 0 落盘边录边传:ffmpeg 管道 stdout → UPOS 直传,源录像不落盘。与 rolling 互斥(见上)。
+  if (task.streamUpload) {
+    args.push("--stream-upload", "1");
+    // 默认保留 spool(可整文件回退);显式关掉 = 真 0 落盘,失败无本地回退。
+    if (task.streamUploadSpool === false) args.push("--stream-upload-spool", "none");
+    // Hub-managed side node (issue #331): the child must take its upload metadata and account check
+    // from the master-delivered object (env, see spawner) and never from local rule files.
+    if (task.managedBy === "hub") args.push("--zero-disk-managed", "1");
+  }
+  // 节点侧原地替换(issue #137):`task.outputFormat` 在这里已是**判定后的生效值**(TaskManager.spawnFor 经
+  // resolveNodeOutputFormat 算定:hub 受管 / 有规则绑定 / 边录边传 → original)。original = 不带 flag,行为不变。
+  if (task.outputFormat && task.outputFormat !== "original") {
+    // 任务标识只给封口转换队列用(入队行归属任务 → serve 侧失败告警按任务归属);无 outputFormat 时无人消费,不带。
+    if (typeof task.id === "number") args.push("--task-id", String(task.id));
+    args.push("--output-format", task.outputFormat); // 保持末尾(既有用例/约定)
   }
   return args;
 }

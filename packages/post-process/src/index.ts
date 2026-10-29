@@ -1,13 +1,20 @@
 // @drec/post-process — 后处理(纯函数):多会话拼接 / 弹幕 ASS 渲染 / ffmpeg 烧录 / 字体。
-export { groupSessions, mergeSession } from "./concat.js";
+export { groupSessions, groupSessionsInDir, isSplitPartName, mergeSession, readNodeFormats, type GroupSessionsOpts } from "./concat.js";
 export { burn } from "./burn.js";
 export { FONTS_DIR } from "./fonts.js";
 export { renderXmlToAss, renderXmlToLivechat } from "./ass/render.js";
 export { renderSegmentsToAss } from "./ass/multi.js";
-export { remuxSegment, buildRemuxArgs, renderXmlWindowToAss, planSegmentGroups, type SegmentStyle } from "./segment.js";
-export { mergeXmlContents, type MergeXmlSession } from "./merge-xml.js";
+export { remuxSegment, buildRemuxArgs, renderXmlWindowToAss, planSegmentGroups, type SegmentStyle, type RemuxSegmentOpts } from "./segment.js";
+export { atomicPartPath, withAtomicOutput, runFfmpegAtomic, unreadableParts, isCompleteMedia } from "./artifact.js";
+export {
+  mergeXmlContents,
+  renderXmlWindowToXml,
+  type MergeXmlSession,
+  type XmlWindowRenderResult,
+} from "./merge-xml.js";
 export { mergeSessions, type MergeSessionInput } from "./merge.js";
-export { runFfmpeg, ffprobeDuration, ffprobeVideo } from "./ffmpeg.js";
+export type { PacketStats } from "./ffmpeg.js";
+export { runFfmpeg, ffprobeDuration, ffprobeVideo, ffprobeVideoSpan, ffprobePacketStats, ffprobeDtsGap, type DtsGap, runFfprobe, FFPROBE_SCAN_TIMEOUT_MS, FFPROBE_HEADER_TIMEOUT_MS } from "./ffmpeg.js";
 export {
   scanMediaErrors,
   parseFfmpegErrors,

@@ -1,0 +1,355 @@
+import { useMemo, useRef, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
+import { Activity, ChevronRight, CircleAlert, CircleHelp, Database, FileText, HardDrive, Loader2, Plus, RefreshCw, Server, Users } from "lucide-react";
+import { api, type RollingDeliveryDTO, type RoomDTO, type Task, type WorkerDTO, type WorkerStatus } from "../api/client";
+import { Button, IconButton } from "../components/Button";
+import { ConnStatus } from "../components/ConnStatus";
+import { NodeLogsDialog } from "../components/NodeLogsDialog";
+import { WorkersPanel } from "../components/WorkersPanel";
+import { useHubStream, usePolling, useTicker } from "../lib/hooks";
+import { useT } from "../lib/i18n";
+import {
+  countNodeHealth,
+  deriveNodeHealthProbe,
+  fmtBytes,
+  INITIAL_NODE_HEALTH_LOAD_STATE,
+  loadNodeHealthSnapshot,
+  nodeHealthState,
+  type NodeHealthProbe,
+  type NodeHealthState,
+  type NodeHealthLoadState,
+} from "../lib/nodes-summary";
+import { buildNodes, nodeCounts, nodeRoomHref, nodeRoleLabel, type NodeRoomView, type NodeView } from "../lib/nodes-page";
+import { useAtomValue } from "jotai";
+import { hubEnabledAtom } from "../atoms";
+
+const NODE_STATE_COLOR: Record<NodeRoomView["state"], string> = {
+  recording: "var(--success)",
+  unavailable: "var(--warning)",
+  waiting: "var(--muted-soft)",
+  disabled: "var(--hairline)",
+};
+
+function ago(ms: number | null | undefined, now: number): string {
+  if (!ms) return "-";
+  const s = Math.max(0, Math.round((now - ms) / 1000));
+  if (s < 90) return `${s}s`;
+  if (s < 5400) return `${Math.round(s / 60)}m`;
+  return `${Math.round(s / 3600)}h`;
+}
+
+/** Master-only Nodes page: topology, health, assignments, and live rolling sessions. */
+export function NodesPage(): ReactNode {
+  const t = useT();
+  const hubEnabled = useAtomValue(hubEnabledAtom);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [rooms, setRooms] = useState<RoomDTO[]>([]);
+  const [workers, setWorkers] = useState<WorkerDTO[]>([]);
+  const [status, setStatus] = useState<Record<string, WorkerStatus | undefined>>({});
+  const [delivering, setDelivering] = useState<RollingDeliveryDTO[]>([]);
+  const [tasksStale, setTasksStale] = useState(false);
+  const [workersStale, setWorkersStale] = useState(false);
+  const [versionStale, setVersionStale] = useState(false);
+  const [deliveryStale, setDeliveryStale] = useState(false);
+  const [masterVersion, setMasterVersion] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [workersLoaded, setWorkersLoaded] = useState(false);
+  const [healthLoad, setHealthLoad] = useState<NodeHealthLoadState>(INITIAL_NODE_HEALTH_LOAD_STATE);
+  const healthLoadRef = useRef<NodeHealthLoadState>(INITIAL_NODE_HEALTH_LOAD_STATE);
+  const [workersOpen, setWorkersOpen] = useState(false);
+  const [logsFor, setLogsFor] = useState<{ id: string; name: string } | null>(null);
+  // Relative timestamps keep moving between the slower health probes.
+  const now = useTicker(30_000);
+
+  const refresh = useMemo(() => async (): Promise<void> => {
+    try {
+      // Task/room data drives assignments and changes often; ssh-backed health probes run separately.
+      const [ts, rs] = await Promise.all([api.listTasks(), api.listRooms()]);
+      setTasks(ts);
+      setRooms(rs);
+      setTasksStale(false);
+    } catch {
+      setTasksStale(true);
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+  const refreshStatus = useMemo(() => async (): Promise<void> => {
+    const result = await loadNodeHealthSnapshot(api.getWorkersStatus, healthLoadRef.current);
+    if (result.statuses) setStatus(Object.fromEntries(result.statuses.map((s) => [s.id, s])));
+    healthLoadRef.current = result.state;
+    setHealthLoad(result.state);
+  }, []);
+  const refreshWorkers = useMemo(() => async (silentFailure = false): Promise<void> => {
+    try {
+      setWorkers(await api.listWorkers());
+      setWorkersStale(false);
+    } catch {
+      if (!silentFailure) setWorkersStale(true);
+    } finally {
+      setWorkersLoaded(true);
+    }
+  }, []);
+  // The queue snapshot is only used for live delivery sessions. Poll it separately and show stale
+  // state if it fails instead of silently freezing the last snapshot.
+  const refreshDelivering = useMemo(() => async (): Promise<void> => {
+    try {
+      const q = await api.getHubQueue();
+      setDelivering(q.delivering ?? []);
+      setDeliveryStale(false);
+    } catch {
+      // Keep the last snapshot but never present frozen sessions as live.
+      setDeliveryStale(true);
+    }
+  }, []);
+  // Push refresh only touches task/room state. The heavier delivery snapshot is polled separately.
+  const stream = useHubStream(refresh, { enabled: hubEnabled === true });
+  usePolling(refreshDelivering, 30_000, hubEnabled === true);
+  usePolling(refreshStatus, 60_000, hubEnabled === true);
+  usePolling(refresh, 30_000, hubEnabled === true);
+  usePolling(refreshWorkers, 300_000, hubEnabled === true);
+  usePolling(async () => {
+    try {
+      setMasterVersion((await api.getVersion()).version.split("-")[0] ?? "");
+      setVersionStale(false);
+    } catch {
+      setVersionStale(true);
+    }
+  }, 300_000, hubEnabled === true);
+
+  const nodes = useMemo(
+    () => buildNodes(tasks, rooms, workers, status, delivering, masterVersion),
+    [tasks, rooms, workers, status, delivering, masterVersion],
+  );
+  const healthProbe = deriveNodeHealthProbe({
+    statusSettled: healthLoad.statusSettled,
+    statusHasSnapshot: healthLoad.statusHasSnapshot,
+    workersLoaded,
+  });
+  const health = countNodeHealth(nodes, healthProbe);
+  const recording = nodes.reduce((n, x) => n + x.recordingRooms, 0);
+  const sessions = nodes.reduce((n, x) => n + x.rollingSessions, 0);
+  const healthAnnouncement = [
+    health.checking > 0 ? t("nodes.checkingCount", { n: health.checking }) : "",
+    health.probeFailed > 0 ? t("nodes.probeFailedCount", { n: health.probeFailed }) : "",
+    health.unknown > 0 ? t("nodes.noStatusCount", { n: health.unknown }) : "",
+    health.offline > 0 ? t("nodes.offlineCount", { n: health.offline }) : "",
+    t("nodes.onlineCount", { online: health.online, total: health.total }),
+  ].filter(Boolean).join(" · ");
+
+  if (hubEnabled === null) {
+    return <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>;
+  }
+
+  if (hubEnabled === false) {
+    return (
+      <div className="card p-10 flex flex-col items-center gap-4 text-center">
+        <Server className="w-10 h-10" style={{ color: "var(--muted-soft)" }} />
+        <h1 className="headline text-[22px]">{t("nodes.title")}</h1>
+        <p className="text-muted text-sm max-w-md">{t("nodes.childDesc")}</p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
+        <div className="min-w-0">
+          <h1 className="headline text-[28px] sm:text-[32px] leading-tight">{t("nodes.title")}</h1>
+          <p className="text-muted text-sm mt-1.5">{t("nodes.subtitle")}</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <ConnStatus conn={stream.lastOkAt ? { ok: !stream.stale, at: stream.lastOkAt } : null} />
+          {(tasksStale || workersStale || versionStale) && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.assignmentStale")}</span>}
+          {(healthLoad.statusStale || healthProbe === "failed") && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.healthStale")}</span>}
+          {deliveryStale && <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.liveStale")}</span>}
+          <IconButton title={t("nodes.refresh")} onClick={() => void Promise.all([refresh(), refreshStatus(), refreshDelivering()])}>
+            <RefreshCw className="w-4 h-4" />
+          </IconButton>
+          <Button small variant="secondary" onClick={() => setWorkersOpen(true)}><Users className="w-4 h-4" />{t("nodes.manage")}</Button>
+        </div>
+      </div>
+
+      <div className="telemetry-bar mb-5">
+        <div className="telemetry-cell">
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <span className="telemetry-label">{t("nodes.online")}</span>
+            <span className="telemetry-value tabular-nums">{health.online}/{health.total}</span>
+            {health.checking > 0 && (
+              <span className="inline-flex items-center gap-1 text-[11px] text-muted">
+                <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                {t("nodes.checkingCount", { n: health.checking })}
+              </span>
+            )}
+            {health.unknown > 0 && (
+              <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>
+                {t("nodes.noStatusCount", { n: health.unknown })}
+              </span>
+            )}
+            {health.probeFailed > 0 && (
+              <span className="text-[11px]" style={{ color: "var(--warning-fg)" }}>
+                {t("nodes.probeFailedCount", { n: health.probeFailed })}
+              </span>
+            )}
+            <span className="sr-only" role="status" aria-live="polite">{healthAnnouncement}</span>
+          </div>
+          <span className="telemetry-icon"><Server className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5"><span className="telemetry-label">{t("nodes.recording")}</span><span className="telemetry-value tabular-nums">{recording}</span></div>
+          <span className="telemetry-icon"><Activity className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5"><span className="telemetry-label">{t("nodes.sessionsShort")}</span><span className="telemetry-value tabular-nums">{sessions}</span></div>
+          <span className="telemetry-icon"><Database className="w-4 h-4" /></span>
+        </div>
+        <div className="telemetry-cell">
+          <div className="flex flex-col gap-1.5"><span className="telemetry-label">{t("nodes.relation")}</span><span className="telemetry-value-sm truncate">{t("nodes.topology", { n: nodes.filter((n) => n.id !== "local").length })}</span></div>
+          <span className="telemetry-icon"><ChevronRight className="w-4 h-4" /></span>
+        </div>
+      </div>
+
+      {!loaded || (!workersLoaded && nodes.length === 0) ? (
+        <div className="py-10 text-center text-muted">{t("hub.common.loading")}</div>
+      ) : nodes.length === 0 ? (
+        <div className="empty-state">
+          <Server className="w-10 h-10" style={{ color: "var(--muted-soft)" }} />
+          <div className="text-sm font-medium text-ink">{t("nodes.empty")}</div>
+          <Button small onClick={() => setWorkersOpen(true)}><Plus className="w-4 h-4" />{t("nodes.add")}</Button>
+        </div>
+      ) : (
+        <div className="node-topology">
+          {nodes.map((n) => (
+            <NodeCard
+              key={n.id}
+              n={n}
+              now={now}
+              healthProbe={healthProbe}
+              onLogs={() => setLogsFor({ id: n.id, name: n.name })}
+            />
+          ))}
+        </div>
+      )}
+
+      <WorkersPanel
+        open={workersOpen}
+        onClose={() => setWorkersOpen(false)}
+        workers={workers}
+        status={Object.fromEntries(Object.entries(status).filter((x): x is [string, WorkerStatus] => x[1] !== undefined))}
+        onChanged={() => {
+          void refresh().catch(() => {});
+          void refreshWorkers(true).catch(() => {});
+        }}
+      />
+      <NodeLogsDialog workerId={logsFor?.id ?? null} workerName={logsFor?.name ?? ""} onClose={() => setLogsFor(null)} />
+    </>
+  );
+}
+
+function NodeHealthBadge({ health }: { health: NodeHealthState }): ReactNode {
+  const t = useT();
+  if (health === "checking") {
+    return (
+      <span className="badge badge-muted">
+        <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+        {t("nodes.checking")}
+      </span>
+    );
+  }
+  if (health === "probe-failed") {
+    return (
+      <span className="badge badge-orange">
+        <CircleAlert className="h-3 w-3" aria-hidden="true" />
+        {t("nodes.probeFailed")}
+      </span>
+    );
+  }
+  if (health === "unknown") {
+    return (
+      <span className="badge badge-muted">
+        <CircleHelp className="h-3 w-3" aria-hidden="true" />
+        {t("nodes.noStatus")}
+      </span>
+    );
+  }
+  return <span className={`badge ${health === "online" ? "badge-success" : "badge-error"}`}>{t(`nodes.${health}`)}</span>;
+}
+
+function NodeCard({ n, now, healthProbe, onLogs }: { n: NodeView; now: number; healthProbe: NodeHealthProbe; onLogs: () => void }): ReactNode {
+  const t = useT();
+  const counts = nodeCounts(n);
+  const health = nodeHealthState(n, healthProbe);
+  const dot = health === "online"
+    ? "var(--success)"
+    : health === "offline"
+      ? "var(--error)"
+      : health === "probe-failed"
+        ? "var(--warning)"
+        : "var(--muted-soft)";
+  return (
+    <section
+      className="node-card"
+      data-controller={n.id === "local" || undefined}
+      data-offline={health === "offline" || undefined}
+      data-health={health}
+      aria-busy={health === "checking" || undefined}
+    >
+      <div className="flex flex-wrap items-start gap-3 px-4 py-3">
+        <span className="dot mt-1.5" style={{ background: dot }} />
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-baseline gap-2">
+            <h2 className="font-medium text-ink truncate">{n.name}</h2>
+            <span className="badge badge-muted">{nodeRoleLabel(n.id, t)}</span>
+            {n.version && <span className="font-mono text-[11px]" style={{ color: n.drift ? "var(--warning-fg)" : "var(--muted-soft)" }}>v{n.version.split("-")[0]}</span>}
+            <NodeHealthBadge health={health} />
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-muted-soft">
+            <span>{t("nodes.activeRooms", { n: counts.active })}</span>
+            {counts.recording > 0 && <span style={{ color: "var(--success-fg)" }}>{t("nodes.recordingRooms", { n: counts.recording })}</span>}
+            {n.rollingSessions > 0 && <span>{t("nodes.sessions", { n: n.rollingSessions })}</span>}
+            {typeof n.diskFreeGB === "number" && <span style={{ color: n.diskLow ? "var(--error-fg)" : undefined }}><HardDrive className="inline w-3 h-3" /> {t("nodes.disk", { gb: n.diskFreeGB.toFixed(1) })}</span>}
+            {n.uncertainSessions > 0 && <span style={{ color: "var(--warning-fg)" }}>{t("nodes.uncertain", { n: n.uncertainSessions })}</span>}
+          </div>
+          {health === "offline" && n.error && <div className="mt-1 text-[11px]" style={{ color: "var(--error-fg)" }}>{n.error}</div>}
+          {health === "probe-failed" && <div className="mt-1 text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.probeFailedHint")}</div>}
+          {health === "unknown" && <div className="mt-1 text-[11px] text-muted-soft">{t("nodes.noStatusHint")}</div>}
+          {n.syncLag && <div className="mt-1 text-[11px]" style={{ color: "var(--warning-fg)" }}>{t("nodes.syncLag", { expected: n.expectedVersion ?? "-", applied: n.appliedVersion ?? "-" })}</div>}
+          {!n.syncLag && n.appliedAt && <div className="mt-1 text-[11px] text-muted-soft">{t("nodes.synced", { ago: ago(n.appliedAt, now) })}</div>}
+        </div>
+        <div className="ml-auto flex items-center gap-1">
+          <Button small variant="secondary" onClick={onLogs}><FileText className="w-3.5 h-3.5" />{t("nodes.logs")}</Button>
+        </div>
+      </div>
+      {n.rooms.length === 0 ? (
+        <div className="node-room-row text-[12px] text-muted-soft">{t("nodes.noRooms")}</div>
+      ) : (
+        <details>
+          <summary className="node-room-row cursor-pointer select-none">
+            <span className="section-label">{t("nodes.rooms")}</span>
+            <span className="font-mono text-[11px] text-muted-soft">{n.rooms.length}</span>
+            <ChevronRight className="w-3.5 h-3.5 ml-auto transition-transform" />
+          </summary>
+          {n.rooms.map((r) => (
+            <div key={r.key} className="node-room-row">
+              <span className="dot" style={{ background: NODE_STATE_COLOR[r.state] }} />
+              {nodeRoomHref(r)
+                ? <Link to={nodeRoomHref(r)} className="text-[13px] text-ink hover:underline truncate">{r.label}</Link>
+                : <span className="text-[13px] text-ink truncate">{r.label}</span>}
+              <span className="font-mono text-[10px] text-muted-soft">{r.platform} · {r.roomSlug}</span>
+              <span className="text-[11px] text-muted ml-auto">{t(`queue.nodes.state.${r.state}`)}</span>
+              {r.sessions.map((s) => (
+                <div key={s.sessionBase} className="node-session w-full">
+                  {t("nodes.sessionProgress", { c: s.confirmed, n: s.total })}
+                  {s.uploading && <span> · {t("nodes.uploading")}</span>}
+                  {s.ambiguous > 0 && <span style={{ color: "var(--warning-fg)" }}> · {t("nodes.unknown", { n: s.ambiguous })}</span>}
+                  {s.lockedBytes ? <span> · {t("nodes.locked", { size: fmtBytes(s.lockedBytes) })}</span> : null}
+                  {s.bv ? <a className="ml-2 hover:text-ink" href={`https://www.bilibili.com/video/${s.bv}`} target="_blank" rel="noreferrer">{s.bv}</a> : <span> · {t("nodes.noBv")}</span>}
+                </div>
+              ))}
+            </div>
+          ))}
+        </details>
+      )}
+    </section>
+  );
+}

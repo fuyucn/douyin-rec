@@ -16,13 +16,19 @@
 import { resolve, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { createLogger, platformForRoom, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
+import { createLogger, platformForRoom, recordingRoomDir, sanitizePathSegment, processTimeZone, zonedStamp, type AdmitDecision, type DownloadEngine, type Platform, type PlatformStream, type Recorder, type RecordOpts, type RecorderEvents } from "@drec/core";
 import { logStreamMeta, type StreamMetaSource } from "@drec/ffmpeg-recorder-extra";
 
 const log = createLogger("stream_recorder");
 
 export const POLL_MS = 30_000;        // 开播探测间隔
 export const THROTTLE_POLL_MS = 5 * 60_000; // 风控降频探测间隔(冷却期少打扰平台,代价是开播检测延迟)
+/**
+ * 风控**持续**时的探测间隔上限:每次连续探到风控就翻倍(5→10→20→30 分钟封顶),
+ * 一旦探到正常即复位。依据:平台限流是「越打越冷」——被限后继续高频请求会延长冷却
+ * (见 docs/kuaishou-rate-limit.md「运营注意」),所以要**递进退避**而非固定频率。
+ */
+export const THROTTLE_MAX_POLL_MS = 30 * 60_000;
 export const FAIL_ALERT = 3;          // 连续「取流+判活均失败」首次告警阈值(≈1.5 分钟)
 export const ALERT_REPEAT = 20;       // 持续失败每隔此次数再提醒(≈10 分钟)
 export const STALL_CHECK_MS = 15_000; // 卡死看门狗检查间隔
@@ -39,24 +45,35 @@ export type { PlatformStream };
 export { ffmpegEngine, buildFfmpegArgs } from "./engines/ffmpeg.js";
 export { mesioEngine, buildMesioArgs, resolveMesioBin } from "./engines/mesio.js";
 
-/** {name}_{YYYY-MM-DD_HH-MM-SS} 会话起始时间戳(分段文件名用)。 */
-export function stamp(d: Date): string {
-  const p = (n: number): string => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+/**
+ * {name}_{YYYY-MM-DD_HH-MM-SS} 会话起始时间戳(分段文件名用)。
+ * 按**设置时区**(缺省 = 进程生效时区 → 北京时间)算,不看宿主机本地时区(issue #155)。
+ */
+export function stamp(d: Date, timeZone: string = processTimeZone()): string {
+  const z = zonedStamp(d.getTime(), timeZone);
+  return `${z.date}_${z.hh}-${z.mm}-${z.ss}`;
 }
 
 /**
- * 子目录/文件名清洗:删非法字符(/ \ : * ? " < > |)+ 控制符,折叠空白,trim(不截断)。
- * **必须与合并 UI(api.ts recordingsDir → sanitizeSeg)一致**——否则落盘目录名与读取算出的对不上。
+ * One-line broadcast identity for diagnostics: the platform's per-broadcast id plus the stream
+ * URL host+path. Query strings are dropped because they carry signatures and expiry, which
+ * change on every fetch and would make two fetches of the same broadcast look different.
  */
-export function sanitizePathSegment(name: string): string {
-  return name
-    .replace(/[/\\:*?"<>|]/g, "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\x00-\x1f\x7f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+export function describeStreamIdentity(probe: Pick<PlatformStream, "url" | "liveSessionId">): string {
+  let streamPath = "-";
+  if (probe.url) {
+    try {
+      const u = new URL(probe.url);
+      streamPath = `${u.host}${u.pathname}`;
+    } catch {
+      streamPath = "unparsable";
+    }
+  }
+  return `liveSessionId=${probe.liveSessionId || "-"} streamPath=${streamPath}`;
 }
+
+/** Re-exported for existing importers; the rule itself lives in core output-paths (issue #333). */
+export { sanitizePathSegment };
 
 export class PollingRecorder implements Recorder {
   readonly name: string;
@@ -70,12 +87,18 @@ export class PollingRecorder implements Recorder {
   protected quality: RecordOpts["quality"] = "origin";
   protected outDir = "";
   protected outName?: string;
+  /** New-session directory layout (issue #336); legacy unless the node switch is on. */
+  protected outputLayout: "legacy" | "room" = "legacy";
   /** 任务 cookie:原样透传给 platform.getStream,平台自决用不用(抖音忽略保持匿名,bilibili 可用)。 */
   protected cookies?: string;
   protected segSec = 0;
   protected ev: RecorderEvents | null = null;
 
   protected stopped = false;
+  /** 新一场开播的准入闸门(issue #96);undefined = 放行。 */
+  private admit?: () => AdmitDecision;
+  /** 上一次被拒绝的原因(同一原因只在首次打日志,放行后复位;避免每 30s 轮询刷屏)。 */
+  private lastAdmitDenied: string | null = null;
   /** drain:停开播轮询、不再录下一场,但不腰斩当前进程。 */
   protected noNewSession = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -101,6 +124,8 @@ export class PollingRecorder implements Recorder {
   private pollDelayMs = POLL_MS;
   /** 最近一次风控提示(去重:同一文案只在进入时打一次,解除时再打恢复日志)。 */
   private lastThrottledReason: string | null = null;
+  /** 连续探到风控的次数(递进退避用;探到正常即清零)。 */
+  private throttleHits = 0;
 
   /** 注入下载引擎(ffmpeg / mesio)。name 取引擎 id,便于日志/识别。 */
   constructor(engine: DownloadEngine) {
@@ -122,7 +147,15 @@ export class PollingRecorder implements Recorder {
     if (probe.raw) logStreamMeta(url, probe.raw as StreamMetaSource, this.quality);
 
     const safe = sanitizePathSegment(this.outName || owner) || this.channelId;
-    const dir = join(this.outDir, safe);
+    // Directory via the core resolver. Legacy: <out>/<name> (channel id when the name is empty), exactly as before.
+    // Room layout: the suffix-matched `<name>_<platform>_<room>` dir (the one this process created on its first
+    // spawn, or an earlier one; an anchor rename never moves it), else a new one. Old name dirs are history.
+    const dir = recordingRoomDir(
+      this.outDir,
+      this.outName || owner,
+      { platform: this.platform.id, roomSlug: this.channelId, anchorName: this.outName || owner },
+      { layout: this.outputLayout, warn: (m) => log.warn(m) },
+    ) ?? join(this.outDir, this.channelId);
     try {
       mkdirSync(dir, { recursive: true });
     } catch (e) {
@@ -147,7 +180,7 @@ export class PollingRecorder implements Recorder {
     });
     this.engineCleanup = cleanup ?? null;
     // 登记 proc + onLive + onSegment(会话首段)+ 卡死看门狗 + close/error 接线。
-    this.beginRecording(proc, owner, title, sessionFirstPath);
+    this.beginRecording(proc, owner, title, sessionFirstPath, probe.liveSessionId);
   }
 
   async start(roomUrl: string, opts: RecordOpts, ev: RecorderEvents): Promise<void> {
@@ -162,7 +195,9 @@ export class PollingRecorder implements Recorder {
     this.cookies = opts.cookies;
     this.outDir = resolve(opts.outDir);
     this.outName = opts.name?.trim() || undefined;
+    this.outputLayout = opts.outputLayout === "room" ? "room" : "legacy";
     this.segSec = opts.segmentSec > 0 ? opts.segmentSec : 0;
+    this.admit = opts.admit;
 
     let slug = this.platform.extractRoomSlug(roomUrl);
     // extractRoomSlug 没把 URL 解析成房间号(仍是 URL)→ 多半是短链,试平台短链解析。
@@ -189,18 +224,38 @@ export class PollingRecorder implements Recorder {
       this.probeFails = 0; // 取流成功 → 清零
       if (this.stopped) return;
       if (probe.throttledReason) {
-        // 风控(平台页可达但被限流)→ 显式日志 + 降频轮询,避免把风控伪装成「主播没开播」掩盖漏录。
-        this.pollDelayMs = Math.max(this.basePollMs, THROTTLE_POLL_MS);
+        // 风控(平台页可达但被限流)→ 显式日志 + **递进退避**降频,避免把风控伪装成「主播没开播」掩盖漏录。
+        // 持续被限时探测间隔逐次翻倍(5→10→20→30 分钟封顶):越打越冷,必须真正降下来才可能恢复。
+        this.throttleHits++;
+        const backoff = Math.min(THROTTLE_POLL_MS * 2 ** (this.throttleHits - 1), THROTTLE_MAX_POLL_MS);
+        this.pollDelayMs = Math.max(this.basePollMs, backoff);
         if (probe.throttledReason !== this.lastThrottledReason) {
           this.lastThrottledReason = probe.throttledReason;
-          log.warn(`平台风控:${probe.throttledReason} —— ${Math.round(this.pollDelayMs / 60000)} 分钟一探(冷却期少打扰平台;解除前若在播会漏录)`);
+          log.warn(`平台风控:${probe.throttledReason} —— ${Math.round(this.pollDelayMs / 60000)} 分钟一探(持续被限会逐次退避;冷却期少打扰平台,解除前若在播会漏录)`);
         }
       } else if (this.lastThrottledReason) {
         log.info(`风控解除,恢复正常轮询`);
         this.lastThrottledReason = null;
+        this.throttleHits = 0;
         this.pollDelayMs = this.basePollMs;
       }
       if (probe.living && probe.url) {
+        // 新一场开播的准入闸门(issue #96):拒绝 → 不起录、保持等待开播、下一轮再试(空间恢复后自动开始)。
+        // 判定抛错视为放行:探测失败绝不能误拦录制(与磁盘看门狗「查不到不拦」同口径)。
+        let decision: AdmitDecision = { ok: true };
+        try { decision = this.admit?.() ?? decision; } catch { /* 放行 */ }
+        if (!decision.ok) {
+          const dedupeKey = decision.key ?? decision.reason;
+          if (dedupeKey !== this.lastAdmitDenied) {
+            this.lastAdmitDenied = dedupeKey;
+            log.warn(`新一场开播被准入闸门拒绝:${decision.reason}(保持等待,条件恢复后自动开始)`);
+          }
+          this.scheduleNextPoll();
+          return;
+        }
+        if (this.lastAdmitDenied) { log.info(`准入闸门放行,开始录制新一场`); this.lastAdmitDenied = null; }
+        // Logged on every spawn (first start and each reconnect) to verify broadcast identity.
+        log.info(`[session-id] ${describeStreamIdentity(probe)}`);
         this.spawnRecording(probe.url, probe, String(probe.owner ?? ""), String(probe.title ?? ""));
         return;
       }
@@ -242,13 +297,13 @@ export class PollingRecorder implements Recorder {
    * 引擎 spawn 后调用:登记 proc + onLive + onSegment(首段)+ 起卡死看门狗 + wire close/error。
    * 进程退出后由 reportExitThenOffline 判别下播/断流 → onOffline(由 RecordingSession 决定重连)。
    */
-  protected beginRecording(proc: ChildProcess, owner: string, title: string, firstSegment?: string): void {
+  protected beginRecording(proc: ChildProcess, owner: string, title: string, firstSegment?: string, liveSessionId?: string): void {
     const ev = this.ev;
     if (!ev) return;
     this.proc = proc;
     this.lastAdvanceAt = Date.now(); // 起始宽限
     this.startStallWatch(proc);
-    ev.onLive({ anchorName: owner, title: title || undefined });
+    ev.onLive({ anchorName: owner, title: title || undefined, ...(liveSessionId ? { liveSessionId } : {}) });
     if (firstSegment) ev.onSegment(firstSegment);
     proc.on("close", (code) => {
       this.proc = null;
@@ -281,6 +336,21 @@ export class PollingRecorder implements Recorder {
   /** 录制有前进时调用(刷新看门狗健康时刻)。ffmpeg=time= 推进;mesio=输出文件增长。 */
   protected markProgress(): void {
     this.lastAdvanceAt = Date.now();
+  }
+
+  /**
+   * T14 契约实现:**复用**卡死看门狗的 `lastAdvanceAt`(不引入第二套时钟/看门狗)。
+   *   - 没有活跃进程 → `null`(此刻没有录制,「进度年龄」无意义)
+   *   - 有进程但 `lastAdvanceAt===0`(从未 markProgress,理论上 beginRecording 会先置,兜底)
+   *     → `null`(**绝不能**返回 `Date.now()-0` 的 ~56 年,会被上层误判成「卡死」)
+   *   - 否则 `Date.now() - lastAdvanceAt`
+   * 上层只在 `null` 时回落到「无信号规则」,故这里宁保守不冒进。
+   */
+  lastProgressAgeMs(): number | null {
+    const proc = this.proc;
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return null; // 无活跃录制
+    if (this.lastAdvanceAt <= 0) return null;
+    return Math.max(0, Date.now() - this.lastAdvanceAt);
   }
 
   /**

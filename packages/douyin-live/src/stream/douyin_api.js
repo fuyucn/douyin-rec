@@ -159,6 +159,7 @@ async function getRoomInfoByUserWeb(secUserId, opts = {}) {
     if (!res.data.includes("直播中")) {
         return {
             living: false,
+            isLiveRadio: false,
             nickname: "",
             sec_uid: "",
             avatar: "",
@@ -190,22 +191,46 @@ async function getRoomInfoByUserWeb(secUserId, opts = {}) {
     try {
         // console.log(userJsonStr);
         const userData = JSON.parse(userJsonStr);
-        // console.log(JSON.stringify(userData, null, 2));
-        // const roomData = JSON.parse(roomJsonStr);
-        // console.log(roomData);
-        // const roomInfo = data.state.roomStore.roomInfo;
-        // const streamData = data.state.streamStore.streamData;
+        // 从用户页 roomData 重建取流所需结构(上游 1.17.x 补):用户页只给 flv_pull_url 的 map,
+        // 需按画质 key 反查出各档 flv,拼成与 web 端点同形的 live_core_sdk_data.pull_data.stream_data,
+        // 否则 stream_url 为 null → userHTML 路径取不到流(见 SOURCE.md「上游修复对照」)。
+        const roomData = userData?.user?.user?.roomData;
+        const streamUrl = roomData?.stream_url;
+        let liveCoreSdkData = null;
+        if (streamUrl) {
+            liveCoreSdkData = { live_core_sdk_data: streamUrl.live_core_sdk_data };
+            if (liveCoreSdkData?.live_core_sdk_data?.pull_data) {
+                const flvPullUrl = streamUrl.flv_pull_url;
+                const streamData = {};
+                // or4 = 原画(用户页的 key 与 web 端点不同名)→ 归一为 origin。
+                for (const quality of [{ key: "or4", desc: "原画" }, ...qualityList]) {
+                    const flvUrls = Object.values(flvPullUrl ?? {});
+                    if (flvUrls.some((u) => u.includes(`${quality.key}`))) {
+                        const u = flvUrls.find((x) => x.includes(`${quality.key}`));
+                        const convertedQuality = quality.key === "or4" ? "origin" : quality.key;
+                        streamData[convertedQuality] = { main: { flv: u, hls: "" } };
+                    }
+                }
+                liveCoreSdkData.live_core_sdk_data.pull_data.stream_data = streamData;
+            }
+            else {
+                liveCoreSdkData = null;
+            }
+        }
         return {
             living: userData?.user?.user?.roomData?.status === 2,
+            isLiveRadio: roomData?.live_type_audio ?? false,
             nickname: userData?.user?.user?.nickname ?? "",
             sec_uid: userData?.user?.user?.secUid ?? "",
             avatar: userData?.user?.user?.avatar ?? "",
-            api: "webHTML",
+            // 本函数 = userHTML 端点(由 getRoomInfo 的 `api === "userHTML"` 分支调用)。
+            // 之前误标 "webHTML" 会让 getRoomInfo 里按 data.api 走的返回分支错判 —— 已修(与上游一致)。
+            api: "userHTML",
             room: {
                 title: "",
                 cover: "",
                 id_str: userData?.user?.user?.roomIdStr,
-                stream_url: null,
+                stream_url: liveCoreSdkData,
             },
         };
     }
@@ -250,8 +275,12 @@ async function getRoomInfoByHtml(webRoomId, opts = {}) {
         const data = JSON.parse(jsonStr);
         const roomInfo = data.state.roomStore.roomInfo;
         const streamData = data.state.streamStore.streamData;
+        // 直播电台(音频直播):enter_mode === 1。这类直播间 room.status 不一定是 2,靠 enter_mode 补判,
+        // 否则会被当成「未开播」→ 漏录(上游 1.17.1/1.17.2 修复,见 SOURCE.md)。
+        const isLiveRadio = roomInfo.enter_mode == 1;
         return {
-            living: roomInfo?.room?.status === 2,
+            living: roomInfo?.room?.status === 2 || isLiveRadio,
+            isLiveRadio,
             nickname: roomInfo?.anchor?.nickname ?? "",
             sec_uid: roomInfo?.anchor?.sec_uid ?? "",
             avatar: roomInfo?.anchor?.avatar_thumb?.url_list?.[0] ?? "",
@@ -316,6 +345,7 @@ async function getRoomInfoByWeb(webRoomId, opts = {}) {
         // 直播已结束
         return {
             living: false,
+            isLiveRadio: false,
             nickname: "",
             sec_uid: "",
             avatar: "",
@@ -332,7 +362,10 @@ async function getRoomInfoByWeb(webRoomId, opts = {}) {
     const data = res.data.data;
     const room = data?.data?.[0];
     return {
-        living: data?.room_status === 0,
+        // room_status:0=普通直播,1=直播电台(音频直播)。只判 0 会把电台误判成未开播 → 漏录
+        // (上游 1.17.1/1.17.2 修复,见 SOURCE.md「上游修复对照」)。
+        living: data?.room_status === 0 || data?.room_status === 1,
+        isLiveRadio: data?.room_status === 1,
         nickname: data?.user?.nickname ?? "",
         avatar: data?.user?.avatar_thumb?.url_list?.[0] ?? "",
         sec_uid: data?.user?.sec_uid ?? "",
@@ -371,6 +404,7 @@ async function getRoomInfoByMobile(secUserId, opts = {}) {
     const room = res?.data?.data?.room;
     return {
         living: room?.status === 2,
+        isLiveRadio: room?.live_type_audio ?? false,
         nickname: room?.owner?.nickname,
         sec_uid: room?.owner?.sec_uid,
         avatar: room?.owner?.avatar_thumb?.url_list?.[0],
@@ -419,6 +453,7 @@ export async function getRoomInfo(webRoomId, opts = {}) {
     if (api === "userHTML") {
         return {
             living: data.living,
+            isLiveRadio: data.isLiveRadio,
             roomId: webRoomId,
             owner: data.nickname,
             title: room?.title ?? data.nickname,
@@ -435,6 +470,7 @@ export async function getRoomInfo(webRoomId, opts = {}) {
     if (room?.stream_url == null) {
         return {
             living: false,
+            isLiveRadio: data.isLiveRadio,
             roomId: webRoomId,
             owner: data.nickname,
             title: room?.title ?? data.nickname,
@@ -515,6 +551,7 @@ export async function getRoomInfo(webRoomId, opts = {}) {
     // console.log(JSON.stringify(sources, null, 2), qualities);
     return {
         living: data.living,
+        isLiveRadio: data.isLiveRadio,
         roomId: webRoomId,
         owner: data.nickname,
         title: room.title,

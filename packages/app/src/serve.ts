@@ -7,26 +7,34 @@
  * **命令定义**(`task serve` 的选项/描述)在 cli(T-22 第 4 步:命令定义属入口层);
  * 本文件只负责「拿到已解析的选项后怎么把服务跑起来」。cli 通过 `runServe(opts, deps)` 调它。
  */
-import { mkdirSync } from "node:fs";
-import { createLogger } from "@drec/core";
+import { mkdirSync, statfsSync } from "node:fs";
+import { join } from "node:path";
+import { createLogger, freeBytesOf, freeGBOf } from "@drec/core";
 import { TaskStore, resolveTaskWebhook } from "./store.js";
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
-import { ensureHubConfigExample, ensureNodeIdentity, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
+import { drecRoot, procQueueDbPath, ensureHubConfigExample, ensureNodeIdentity, rootConfigDir, rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
 import { localSuppressedSourceTaskIds } from "./hub-store.js";
+import { refreshLocalRollingEffective } from "./rolling-effective.js";
+import { resolveNodeOutputFormat } from "./node-remux.js";
 import * as workerStore from "./worker-store.js";
 import { applyTimezone } from "./timezone.js";
-import { makeNotifier, resolveWebhookToggles } from "@drec/observability";
-import { TaskDaemon } from "./daemon.js";
+import { makeNotifier, resolveWebhookToggles, type HubLabelLookup } from "@drec/observability";
+import { enrichHubEventSafely, makeHubLabelLookup, taskDisplayName } from "./hub-label-lookup.js";
+import { TaskDaemon, resolveDiskWatermark } from "./daemon.js";
+import { makeManualStartAdmit, currentDiskMinGB } from "./disk-gate.js";
+import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue";
 import { TaskManager } from "./task-manager.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
+import { sweepCredentialFiles } from "./process/credential-file.js";
 import { createWebServer } from "./web/server.js";
+import { HubWatch } from "./hub-watch.js";
 import { QrLoginManager } from "./login/login-manager.js";
 import { PlaywrightQrLogin } from "./login/qr-login.js";
 import { BiliQrLogin } from "./login/bili-qr-login.js";
 import { KuaishouQrLogin } from "./login/kuaishou-qr-login.js";
-import { resolveHubConfigJson, type HubStarter } from "./cli-task.js";
+import { resolveHubConfig, resolveHubConfigJson, type HubStarter } from "./cli-task.js";
 
 /** `task serve` 已解析的选项。 */
 // serve 命令的日志 scope(与拆分前 cli-task.ts 一致)。
@@ -75,6 +83,12 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     const node = ensureNodeIdentity();
     console.log(`[node] 身份 = ${node.nodeId}${node.hostname ? ` (${node.hostname})` : ""}`);
 
+    // Credential files left by a force-killed previous serve: no live child needs them (each
+    // child reads its file once at startup), and nothing has been spawned yet in this process.
+    const swept = sweepCredentialFiles();
+    if (swept.removed > 0) console.log(`[cred] 启动清扫:删除残留录制凭证文件 ${swept.removed} 个`);
+    for (const f of swept.failed) console.error(`[cred] 启动清扫失败: ${f}`);
+
     // ONE manager drives both the web (manual start/stop) and, if requested,
     // the scheduler (automatic start/stop). They share the same subprocess
     // lifecycle + crash auto-restart.
@@ -93,18 +107,37 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // Per-task log ring buffer shared with the manager so the Web 详情/日志
     // 页面 can tail each recorder subprocess's captured output.
     const logStore = new TaskLogStore();
+    // T17:HubWatch 必须**在 manager 之前**构造 —— TaskManager 的录制状态回调要打到这里,
+    // 而 SSE 路由也要注入同一个实例(两处必须是同一个,否则「推了但没人听」)。
+    // hubWatch 自身要在后面 hubEnabled 确定后再 start(见下),构造与 start 分开是为了这个顺序。
+    let hubWatch: HubWatch | null = null;
+
+    // hub 是否启用在 manager 之后才确定(见下),起录兜底用可变标志读取。
+    let rollingGuardOn = false;
     const manager = new TaskManager(store, spawner, {
       autoRestart: true,
+      // 边录边传 S3 兜底:master 起录前对该本机任务按当前规则现算一次生效值,再构造 record 参数。
+      beforeSpawn: (taskId) => {
+        if (rollingGuardOn) refreshLocalRollingEffective(store, rootHubDir(), [taskId], (m) => console.log(m));
+      },
+      // 节点侧原地替换容器(issue #137)的唯一判定点:每次 spawn 现读规则文件,
+      // 无后处理的任务才把所选格式交给子进程;受管 / 有规则 / 边录边传一律 original。
+      nodeOutputFormat: (task) => resolveNodeOutputFormat(task, rootHubDir()),
       log: (m) => console.log(m),
       logStore,
+      // 录制状态(起停/开播/收播/崩溃)→ 立刻推一次 changed。
+      // 台账指纹看不见这些变化(见 TaskManager.onRecordingStateChanged 注释),
+      // 少了这一跳,房间页在开播/收播那几秒会是陈旧的。
+      onRecordingStateChanged: () => hubWatch?.notifyChanged(),
       // 重启耗尽彻底停 → 告警(events 在下方初始化,回调在崩溃时才触发,届时已就绪)。
       onTaskDown: (taskId, reason) => {
         const t = store.getTask(taskId);
-        events.emit(taskId, { kind: "error", stage: "录制中断", message: `任务「${t?.name ?? t?.anchorName ?? taskId}」${reason}` });
+        const name = t ? taskDisplayName(t, manager.getAnchorName(taskId)) : String(taskId);
+        events.emit(taskId, { kind: "error", stage: "录制中断", message: `任务「${name}」${reason}` });
       },
       // 子进程结构化告警(取流失败/卡死/录制错误)→ 站内 toast(webhook 子进程已发,故 webhook:false 不重发)。
-      onAlert: (taskId, stage, message) => {
-        events.emit(taskId, { kind: "error", stage, message }, { webhook: false });
+      onAlert: (taskId, stage, message, ctx) => {
+        events.emit(taskId, { kind: "error", stage, message, ...(ctx ? { ctx } : {}) }, { webhook: false });
       },
     });
 
@@ -138,26 +171,115 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // hub 是否在本节点启用(master)?= --hub + 有 hubStarter + 能解析出 hub 配置。
     // slave(无 --hub)= false → 前端据此隐藏 Hub 页 / 显示 child node 提示。
     const hubEnabled = !!(o.hub && hubStarter && resolveHubConfigJson(o.hubConfig, store));
+    // 边录边传生效值(issue #40):首轮 hub 同步前,先用唯一判定刷新绑定了规则的本机任务,
+    // 堵住「同步未跑完、daemon 已起录」窗口里按旧开关放行而绕过多节点重复投稿闸门。失败只告警(回落旧开关迁移)。
+    rollingGuardOn = hubEnabled;
+    if (hubEnabled) {
+      try {
+        const n = refreshLocalRollingEffective(store, rootHubDir(), undefined, (m) => console.log(m));
+        console.log(`[rolling] 启动刷新边录边传生效值:${n} 个任务绑定 hub 规则`);
+      } catch (e) {
+        console.warn(`[rolling] 启动刷新边录边传生效值失败(回落旧开关迁移):${String((e as Error)?.message ?? e)}`);
+      }
+    }
     // hub 台账路径与 cli hubStarter 同一推导(<db>-sync.db)——「hub 任务」端点读它展示进度/ETA/日志。
     const syncDbPath = resolveDbPath(o.db).replace(/\.db$/, "-sync.db");
+    // T4:台账变更监视 → SSE(/api/hub/stream)。
+    // **只在 master 起**:sync 台账的唯一写端是本节点的 orchestrator,slave 上那份文件永远不变
+    // → 白白空转 1s 定时器、永远不推。不注入则该路由显式 503(而非静默 404/空流)。
+    hubWatch = hubEnabled ? new HubWatch(syncDbPath, { log: (m) => serveLog.info(m) }) : null;
+    hubWatch?.start();
+    // 录制子进程继承本进程环境:把**当前生效的那份** hub 配置交给子进程,使其磁盘水位闸门
+    // 与 serve(手动启动 / daemon)读同一份配置(issue #96)。
+    //
+    // 为什么不能只处理 arg-file:配置来源有四种(arg 文件 / inline JSON / settings 表 / 根文件),
+    // 只传 arg-file 时,settings/inline 这两种来源下子进程会**回落去读根文件** —— 那份可能根本
+    // 不是用户在用的一份(例如 UI 把 diskMinGB 设成 0 关闭闸门,却存在 settings 表里),
+    // 结果子进程按根文件/默认 10GB 继续拦录,表现为「关了闸门还在拦」。
+    // 统一做法:文件来源传路径(零拷贝、可热改);非文件来源(inline/settings)把 JSON 内容
+    // 经环境变量传给子进程,口径与 daemon 完全一致。
+    {
+      const hubSrc = resolveHubConfig(o.hubConfig, store);
+      if (hubSrc.source === "arg-file" && hubSrc.path) {
+        process.env.DOUYIN_REC_HUB_CONFIG = hubSrc.path;
+        delete process.env.DOUYIN_REC_HUB_CONFIG_JSON;
+      } else if (hubSrc.json !== undefined) {
+        process.env.DOUYIN_REC_HUB_CONFIG_JSON = hubSrc.json;
+        delete process.env.DOUYIN_REC_HUB_CONFIG;
+      } else {
+        // 完全没配置:清掉两者,让子进程按默认水位(与 daemon 的 undefined 分支一致)。
+        delete process.env.DOUYIN_REC_HUB_CONFIG;
+        delete process.env.DOUYIN_REC_HUB_CONFIG_JSON;
+      }
+    }
+    // 处理任务表 + 租约执行循环(plans/036 T3)。无注册处理器时空转;库打不开只告警、不拖垮 serve
+    // (`/api/proc/*` 回 503)。serve 遇他人(record 子进程)持有租约 → 置 handover 请求,不抢正在跑的 job。
+    let procStore: ProcQueueStore | null = null;
+    let procRunner: ProcRunner | null = null;
+    try {
+      procStore = new ProcQueueStore(procQueueDbPath(), { log: (m) => serveLog.warn(m) });
+      const numSetting = (key: string): number | undefined => {
+        const n = Number(store.getSetting(key));
+        return Number.isFinite(n) && n > 0 ? n : undefined;
+      };
+      procRunner = new ProcRunner({
+        store: procStore,
+        owner: `serve:${process.pid}:${Date.now()}`,
+        requestHandover: true,
+        diskMinGB: () => currentDiskMinGB((m) => serveLog.warn(m)),
+        alert: (taskId, message) => events.emit(taskId ?? null, { kind: "error", stage: "后处理", message }),
+        log: (m) => serveLog.info(m),
+        // 节点 settings `procLimits.<lane>`(默认 1,如 remux 的 copy 通道)与 `procShutdownWaitMs`(默认 15min)。
+        limiter: new SimpleSlotLimiter((_resource, lane) => numSetting(`procLimits.${lane}`) ?? 1),
+        shutdownWaitMs: numSetting("procShutdownWaitMs"),
+      });
+      procRunner.start();
+    } catch (e) {
+      serveLog.error("[proc] 处理任务表启动失败(后处理任务不可用,录制不受影响):", e);
+      procStore?.close();
+      procStore = null;
+      procRunner = null;
+    }
+    const procRunnerRef = procRunner;
+    const procStoreRef = procStore;
     const server = createWebServer({
+      procActive: procRunnerRef ? () => procRunnerRef.active() : undefined,
+      procPurge: procStoreRef ? (o) => ({ deleted: procStoreRef.gc({ purgeFailed: o.purgeFailed }) }) : undefined,
       store, manager, login, events, hubEnabled, syncDbPath, hubConfigPath: rootHubConfig(),
+      // T15:告诉 API「master 实际在用哪份 hub 配置」—— UI 改 resources 必须写回那一份,
+      // 而不是盲目写 rootHubConfig()(用户用 --hub-config / settings 时那是另一份文件)。
+      // 用**函数**而非快照:配置来源不随运行变,但保持与 resolveHubConfig 同一口径、不缓存。
+      hubConfigSource: () => resolveHubConfig(o.hubConfig, store),
       // hub 未启用不注入 → 端点回落 400(与 hub.start 一致的开关逻辑)。
       testWorker: hubEnabled ? hubStarter?.testWorker : undefined,
       probeAllWorkers: hubEnabled ? hubStarter?.probeAllWorkers : undefined,
+      nodeTaskLogs: hubEnabled ? hubStarter?.nodeTaskLogs : undefined,
+      nodeTasks: hubEnabled ? hubStarter?.nodeTasks : undefined,
       recordingWorkers: hubEnabled ? hubStarter?.recordingWorkers : undefined,
+      zeroDiskStatus: hubEnabled ? hubStarter?.zeroDiskStatus : undefined,
+      // issue #73:与 `_apply-tasks` 同目录(<数据根>/config/managed),节点列表据快照里的 assigned 标记过滤。
+      managedStateDir: join(rootConfigDir(), "managed"),
+      rollingDelivery: hubEnabled ? hubStarter?.rollingDelivery : undefined,
+      blockedBroadcasts: hubEnabled ? hubStarter?.blockedBroadcasts : undefined,
       poolSnapshot: hubEnabled ? hubStarter?.poolSnapshot : undefined,
       requestSyncTasks: hubEnabled ? hubStarter?.requestSyncTasks : undefined,
+      // 手动启动的磁盘水位准入(issue #96):与 daemon 同源的水位配置,每次现读(热改生效);测默认输出目录所在卷。
+      // 与录制子进程同一份水位配置(effectiveHubConfigPath)与同一目录口径(任务自己的 outDir)。
+      admitStart: makeManualStartAdmit((d) => resolveOutputDir(d ?? undefined)),
       // 与 daemon 同源:规则把源任务交给远端(workers 不含 local)时,本机不实跑。
+      // 能力门控(T-10):远端还需满足规则的 requires 才算「有人接」(与 reconciler 同判定)。
       localSuppressedIds: hubEnabled
-        ? () => localSuppressedSourceTaskIds(
-            rootHubDir(),
-            new Set(workerStore.listWorkers(rootHubConfig()).map((w) => w.id)),
-          )
+        ? () => {
+            const workers = workerStore.listWorkers(rootHubConfig());
+            const caps = new Map(workers.map((w) => [w.id, w.capabilities]));
+            return localSuppressedSourceTaskIds(rootHubDir(), new Set(caps.keys()), (id) => caps.get(id));
+          }
         : undefined,
       retryNode: hubEnabled ? hubStarter?.retryNode : undefined,
       stopJob: hubEnabled ? hubStarter?.stopJob : undefined,
+      ackJob: hubEnabled ? hubStarter?.ackJob : undefined,
       runNow: hubEnabled ? hubStarter?.runNow : undefined,
+      hubWatch: hubWatch ?? undefined,
       log: (m) => console.log(m),
     });
 
@@ -170,7 +292,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         const prev = lastRec.get(t.id);
         lastRec.set(t.id, rec);
         if (prev === undefined || rec === prev) continue;
-        const anchor = manager.getAnchorName(t.id) ?? t.anchorName ?? t.name ?? t.room;
+        const anchor = taskDisplayName(t, manager.getAnchorName(t.id));
         events.emit(
           t.id,
           rec
@@ -191,7 +313,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
           const dir = resolveOutputDir(null);
           mkdirSync(dir, { recursive: true }); // 确保存在,statfs 才能查到该卷
           const st = await statfs(dir);
-          const freeGB = (Number(st.bavail) * Number(st.bsize)) / 1e9;
+          const freeGB = freeGBOf(st);
           if (freeGB < DISK_MIN_GB) {
             if (!diskAlerted) {
               diskAlerted = true;
@@ -262,16 +384,31 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
 
     let daemon: TaskDaemon | undefined;
     if (o.schedule) {
+      const diskWatermark = resolveDiskWatermark(resolveHubConfigJson(o.hubConfig, store), (m) => console.warn(m));
+      console.log(`[disk] 水位 = ${diskWatermark.bytes / 1e9} GB(来源:${diskWatermark.source})`);
       daemon = new TaskDaemon(store, manager, {
         log: (m) => console.log(m),
         // master(--hub)有效:规则把源任务交给远端节点(workers 不含 local)时,本机不再实跑该任务,
         // 避免本机持续轮询(触发风控)或双节点重复录制。daemon tick 现读规则文件,手改即时生效。
+        // 能力门控(T-10):远端还要满足规则的 requires 才算「有人接」,否则本机不抑制(防两头不录)。
         localSuppressedIds: hubEnabled
-          ? () => localSuppressedSourceTaskIds(
-              rootHubDir(),
-              new Set(workerStore.listWorkers(rootHubConfig()).map((w) => w.id)),
-            )
+          ? () => {
+              const workers = workerStore.listWorkers(rootHubConfig());
+              const caps = new Map(workers.map((w) => [w.id, w.capabilities]));
+              return localSuppressedSourceTaskIds(rootHubDir(), new Set(caps.keys()), (id) => caps.get(id));
+            }
           : undefined,
+        // 磁盘低水位闸门(T-33 不变量 6):剩余低于水位 → 拒绝启动新任务(绝不用删未确认源腾空间,
+        // 也不截断已在录的场)。阈值取 hub.config resources.diskMinGB(与 master 磁盘看门狗同源)。
+        freeBytes: () => {
+          // 数据根与录像目录同卷;录像目录可能尚未创建(全新部署)→ 依次回退数据根。
+          // 都取不到(异常)→ null = 不拦(避免把探测失败当爆盘误停,已有磁盘看门狗告警兜底)。
+          for (const p of [resolveOutputDir(undefined), drecRoot()]) {
+            try { return freeBytesOf(statfsSync(p)); } catch { /* 试下一个 */ }
+          }
+          return null;
+        },
+        diskWatermarkBytes: diskWatermark.bytes,
       });
     }
 
@@ -279,15 +416,24 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // Hub 逻辑由 cli (L5) 通过 hubStarter 回调注入，app (L4) 不直接依赖 @drec/orchestrator，
     // 避免 app→orchestrator→app 的循环依赖（orchestrator 依赖 app 的 UploadOpts 等类型）。
     let stopHub: (() => void) | undefined;
+    // 每次发事件现取(任务/节点可在运行中增删);补全失败退回原事件,不影响 hub 流程。
+    const hubLabelLookup = (): HubLabelLookup => makeHubLabelLookup({
+      tasks: () => store.listTasks(),
+      workers: () => workerStore.listWorkers(rootHubConfig()),
+      liveAnchor: (id) => manager.getAnchorName(id),
+    });
     if (o.hub && hubStarter) {
       void hubStarter.start({
         hubConfigJson: resolveHubConfigJson(o.hubConfig, store),
+        // T15:传原始入参,让 hubStarter 能热读「当前生效的那份」配置(见 HubStarter 注释)。
+        hubConfigArg: o.hubConfig,
         // 解析后的 db 路径(--db 省略+DOUYIN_REC_ROOT 时 → <root>/db/douyin-rec.db),
         // 使 hub 台账 <…>-sync.db 落数据根而非 cwd。
         dbPath: resolveDbPath(o.db),
         store,
         manager,
-        onEvent: (e) => { events.emit(null, e); },
+        // 发送前补主播名/日期/节点名:hub 事件原本只带房间号与 streamKey,webhook 里看不出是哪个直播间。
+        onEvent: (e) => { events.emit(null, enrichHubEventSafely(e, hubLabelLookup, (m) => serveLog.warn(m))); },
         log: (m) => serveLog.info(m),
         warn: (m) => serveLog.warn(m),
       }).then((stop) => { stopHub = stop; }).catch((err) => {
@@ -301,23 +447,30 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     const shutdown = (sig: string): void => {
       if (stopping) return;
       stopping = true;
+      // 首步:停 runner(停认领 → 可中断 job 回 pending → 删租约),与 daemon 停止并行、都等完再关 http。
+      const stopRunner = (procRunnerRef ? procRunnerRef.stop() : Promise.resolve()).catch((err: unknown) => {
+        serveLog.error("[proc] runner 停止出错:", err);
+      });
       clearInterval(recWatch);
       clearInterval(diskWatch);
       clearInterval(cookieWatch);
       if (canaryWatch) clearInterval(canaryWatch);
+      hubWatch?.stop();
       if (stopHub) stopHub();
       serveLog.info(`\n收到 ${sig}，正在关闭…`);
       // Stop scheduler ticks first (so it won't re-start a task), then stop
       // every running recorder, then close the http server.
       const stopDaemon = daemon ? daemon.stop() : manager.stopAll();
-      void Promise.resolve(stopDaemon)
+      void Promise.all([Promise.resolve(stopDaemon), stopRunner])
         .then(() => new Promise<void>((r) => server.close(() => r())))
         .then(() => {
+          procStoreRef?.close();
           store.close();
           serveLog.info("已关闭");
           process.exit(0);
         })
         .catch((err: unknown) => {
+          procStoreRef?.close();
           store.close();
           serveLog.error("关闭时出错:", err);
           process.exit(1);

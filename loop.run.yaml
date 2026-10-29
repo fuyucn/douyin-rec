@@ -1,0 +1,17 @@
+# swe-loop bindings for plan 038 / issue #207
+prompt: plans/038_node_upload_queue.md
+repo: .
+tasks_file: ./sandbox/tasks.json
+test_command: "pnpm test"
+sandbox_root: ./sandbox
+iter_strategy: branches
+pr_mode: single
+base_branch: feat/hub-optimization
+task_budget: 6
+patience: 2
+quality_thresholds:
+  max_comment_block: 8
+  max_comment_line_len: 120
+  max_func_loc: 80
+  max_nesting: 4
+  max_file_loc: 600

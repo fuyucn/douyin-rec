@@ -1,6 +1,6 @@
 import { readdirSync } from "node:fs";
-import { copyFileSync, existsSync, linkSync, mkdirSync, rmSync } from "node:fs";
-import { partTitleToFilename } from "@drec/core";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { linkOrCopy, partTitleToFilename, stageExt, stampedSessionBaseOf, STAGE_EXT_ALT, type StageFormat } from "@drec/core";
 
 /** 该场 stage 合成产物的确定性路径(merge 后 / 续跑反推)。 */
 export interface StageProducts {
@@ -30,13 +30,9 @@ export interface StageProducts {
   xmlArg: string;
 }
 
-/**
- * `主播名_2026-08-10_23-08-10` 的会话文件 → 会话 base。识别三种分段后缀:
- * `-PART01`(biliLive)、`_PART001`(biliLive 下划线)、`_000`(本项目录制器/DLR/ffmpeg 的裸段号)。
- */
+/** `主播名_2026-08-10_23-08-10` 的会话文件 → 会话 base;规则见 core `stampedSessionBaseOf`。 */
 export function sessionBaseOfFile(name: string): string | undefined {
-  const m = /^(.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:-PART\d+|_PART\d+|_\d{3,})?\.(?:ts|flv|xml|mp4)$/i.exec(name);
-  return m?.[1];
+  return stampedSessionBaseOf(name);
 }
 
 /** 从文件名集合提取全部会话 base，排序并去重(同一场多分段只算一次)。 */
@@ -49,19 +45,38 @@ function joinPath(dir: string, name: string): string {
   return `${dir}/${name}`;
 }
 
-/** 从 stageSub 目录按确定命名反推产物路径;连一个源文件都找不到 → null。 */
-export function deriveStageProducts(stageSub: string): StageProducts | null {
+/** `{dateName}[_danmu|_livechat]{ext}` 三个视频产物路径(合并路径的确定命名,唯一出处)。 */
+export function stageProductPaths(
+  dir: string,
+  dateName: string,
+  fmt: StageFormat = "mp4",
+): Pick<StageProducts, "plain" | "danmuMp4" | "livechatMp4"> {
+  const ext = stageExt(fmt);
+  return {
+    plain: joinPath(dir, `${dateName}${ext}`),
+    danmuMp4: joinPath(dir, `${dateName}_danmu${ext}`),
+    livechatMp4: joinPath(dir, `${dateName}_livechat${ext}`),
+  };
+}
+
+/**
+ * 从 stageSub 目录按确定命名反推产物路径;连一个源文件都找不到 → null。
+ * `fmt` = 该场后处理产物容器(core `effectiveStageFormat` 算出);缺省 mp4(现状)。
+ * 字段名 `danmuMp4`/`livechatMp4` 是历史命名,实际扩展名随 `fmt`。
+ */
+export function deriveStageProducts(stageSub: string, fmt: StageFormat = "mp4"): StageProducts | null {
   let files: string[];
   try { files = readdirSync(stageSub); } catch { return null; }
-  const danmu = files.find((f) => f.endsWith("_danmu.mp4"));
-  const livechat = files.find((f) => f.endsWith("_livechat.mp4"));
-  const plainF = files.find((f) => f.endsWith(".mp4") && !f.endsWith("_danmu.mp4") && !f.endsWith("_livechat.mp4"));
+  const ext = stageExt(fmt);
+  const danmu = files.find((f) => f.endsWith(`_danmu${ext}`));
+  const livechat = files.find((f) => f.endsWith(`_livechat${ext}`));
+  const plainF = files.find((f) => f.endsWith(ext) && !f.endsWith(`_danmu${ext}`) && !f.endsWith(`_livechat${ext}`));
   let dateName: string | undefined;
   let sessionBase = "";
   let sessionBases: string[] = [];
-  if (danmu) dateName = danmu.slice(0, -"_danmu.mp4".length);
-  else if (livechat) dateName = livechat.slice(0, -"_livechat.mp4".length);
-  else if (plainF) dateName = plainF.slice(0, -".mp4".length);
+  if (danmu) dateName = danmu.slice(0, -`_danmu${ext}`.length);
+  else if (livechat) dateName = livechat.slice(0, -`_livechat${ext}`.length);
+  else if (plainF) dateName = plainF.slice(0, -ext.length);
   if (!dateName) {
     // merge 还没产出时(失败重跑):从拉来的源段反推 dateName + 完整 sessionBase。
     sessionBases = sessionBasesOfFiles(files);
@@ -77,9 +92,7 @@ export function deriveStageProducts(stageSub: string): StageProducts | null {
     dateName,
     sessionBase,
     sessionBases,
-    plain: joinPath(stageSub, dateName + ".mp4"),
-    danmuMp4: joinPath(stageSub, dateName + "_danmu.mp4"),
-    livechatMp4: joinPath(stageSub, dateName + "_livechat.mp4"),
+    ...stageProductPaths(stageSub, dateName, fmt),
     plainXml: joinPath(stageSub, dateName + ".xml"),
     xmlArg: xmlFile ? joinPath(stageSub, xmlFile) : "",
   };
@@ -90,12 +103,13 @@ export function withOutputStem(p: StageProducts, stem: string): StageProducts {
   const s = stem.trim();
   if (!s || s === p.dateName) return p;
   const dir = p.plain.slice(0, p.plain.lastIndexOf("/") + 1);
+  const ext = p.plain.slice(p.plain.lastIndexOf(".")); // 沿用传入产物的容器扩展名
   return {
     ...p,
     dateName: s,
-    plain: `${dir}${s}.mp4`,
-    danmuMp4: `${dir}${s}_danmu.mp4`,
-    livechatMp4: `${dir}${s}_livechat.mp4`,
+    plain: `${dir}${s}${ext}`,
+    danmuMp4: `${dir}${s}_danmu${ext}`,
+    livechatMp4: `${dir}${s}_livechat${ext}`,
     plainXml: `${dir}${s}.xml`,
   };
 }
@@ -198,11 +212,7 @@ export function prepareUploadAlias(
     mkdirSync(dir, { recursive: true });
     // 续跑:上一次留下的别名先移除,保证指向最新产物(同名不同内容时不会串)。
     if (existsSync(dst)) rmSync(dst, { force: true });
-    try {
-      linkSync(canonical, dst);
-    } catch {
-      copyFileSync(canonical, dst); // 跨设备/不支持硬链接 → 复制
-    }
+    linkOrCopy(canonical, dst);
     return dst;
   } catch {
     return canonical; // 别名失败不影响上传(回落原名)
@@ -216,13 +226,13 @@ export function prepareUploadAlias(
  */
 export const SEG_WORK_DIR = ".work";
 
-/** 内部段文件路径:`<stageSub>/.work/<origIdx>.mp4`(origIdx = 源段在整场中的原始序号)。 */
-export function segWorkPath(stageSub: string, origIdx: number): string {
-  return `${stageSub}/${SEG_WORK_DIR}/${String(origIdx).padStart(3, "0")}.mp4`;
+/** 内部段文件路径:`<stageSub>/.work/<origIdx>.<ext>`(origIdx = 源段在整场中的原始序号)。 */
+export function segWorkPath(stageSub: string, origIdx: number, fmt: StageFormat = "mp4"): string {
+  return `${stageSub}/${SEG_WORK_DIR}/${String(origIdx).padStart(3, "0")}${stageExt(fmt)}`;
 }
 
-/** 规范上传产物名:`{dateName}_{NNN}[_danmu|_livechat].mp4`。 */
-const UPLOAD_FILE_RE = /^(.*)_(\d{3})(?:_(danmu|livechat))?\.mp4$/;
+/** 规范上传产物名:`{dateName}_{NNN}[_danmu|_livechat].{mp4|mkv}`(扩展名全集来自注册表)。 */
+const UPLOAD_FILE_RE = new RegExp(`^(.*)_(\\d{3})(?:_(danmu|livechat))?\\.(${STAGE_EXT_ALT})$`);
 
 /**
  * 从 stageSub 反推**已产出的分 P 产物**(续跑幂等用)。
@@ -230,13 +240,13 @@ const UPLOAD_FILE_RE = /^(.*)_(\d{3})(?:_(danmu|livechat))?\.mp4$/;
  * 旧版内部名 `_segNNN` / `_gNNN` 一律忽略(不再产、也绝不当作上传产物)。
  * `allowedIndices` = 本次有效段号白名单(调用方按碎片阈值算好),防止把历史残留当分 P。
  */
-export function deriveSegmentPlan(stageSub: string, allowedIndices?: ReadonlySet<number>): SegmentPlan | null {
+export function deriveSegmentPlan(stageSub: string, allowedIndices?: ReadonlySet<number>, fmt: StageFormat = "mp4"): SegmentPlan | null {
   let files: string[];
   try { files = readdirSync(stageSub); } catch { return null; }
   const byIdx = new Map<number, { dateName: string; plain?: string; danmu?: string; livechat?: string }>();
   for (const f of files) {
     const m = UPLOAD_FILE_RE.exec(f);
-    if (!m) continue;
+    if (!m || `.${m[4]}` !== stageExt(fmt)) continue; // 只认本场生效容器(换格式后旧容器残留不当分 P)
     const [, dateName, num, kind] = m;
     const idx = Number(num);
     if (allowedIndices && !allowedIndices.has(idx)) continue;

@@ -72,7 +72,10 @@ export function readyNodes(doneOrSkipped: ReadonlySet<string>): HubFlowNode[] {
   });
 }
 
-/** 步骤名 → 是否 pipeline 节点(供 web 过滤 select/pull/clean_*)。 */
+/**
+ * 步骤名 → 是否 pipeline 节点(供 web 过滤前奏/收尾)。
+ * `node_upload` 是 pull 的替代前奏(节点本地 remux + 上传),**不是** DAG 节点 → 恒返回 false。
+ */
 export function isHubFlowNode(step: string): step is HubFlowNode {
   return (["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat"] as const)
     .includes(step as HubFlowNode);
@@ -88,3 +91,21 @@ export function isHubFlowNode(step: string): step is HubFlowNode {
 type _AllFlowNodesAreStepNames = Exclude<HubFlowNode, HubStepName> extends never ? true : never;
 const _FLOW_NODE_CHECK: _AllFlowNodesAreStepNames = true;
 void _FLOW_NODE_CHECK;
+
+/** Ledger `pull` detail prefix for "skipped this round because the session sidecar is confirmed gone". */
+export const SIDECAR_SKIP_PREFIX = "跳过·";
+/**
+ * Ledger `pull` detail prefix for "skipped this round, could not confirm". Never counts toward the
+ * limit: an unreachable node is a connectivity problem, and the reconciler already alerts on nodes
+ * that fail inventory for several rounds.
+ */
+export const SIDECAR_UNKNOWN_PREFIX = "未确认·";
+/**
+ * Whether a step event is a sidecar skip. New rows use phase `skipped`; rows written before issue #176
+ * logged the same skip as `done`, and only the detail prefix tells them apart from a real pull.
+ */
+export function isSidecarSkipEvent(e: { phase: string; detail?: string | null }): boolean {
+  if (e.phase === "skipped") return true;
+  return e.phase === "done" && !!e.detail
+    && (e.detail.startsWith(SIDECAR_SKIP_PREFIX) || e.detail.startsWith(SIDECAR_UNKNOWN_PREFIX));
+}

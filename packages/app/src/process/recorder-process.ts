@@ -12,6 +12,7 @@
  * the cli path or how a Task maps to args. That belongs to the Spawner.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { removeCredentialFile } from "./credential-file.js";
 
 /** Info passed to onExit listeners. */
 export interface ExitInfo {
@@ -61,6 +62,14 @@ export interface ChildRecorderProcessOpts {
   onLog?: (msg: string) => void;
   /** ms to wait after SIGTERM before SIGKILL. Default 10_000. */
   killTimeoutMs?: number;
+  /**
+   * SIGTERM 只发子进程本身,不发整个进程组(SIGKILL 兜底仍打进程组)。
+   * 边录边传任务需要:组内还有正在上传上一段的 biliup,吃到 SIGTERM 会立刻死、上一段变「结果未知」,
+   * 并因头阻塞把末段也挡住;子进程自己会走 stop() 收 ffmpeg 并等上传完成。默认 false。
+   */
+  termChildOnly?: boolean;
+  /** 子进程退出(正常/崩溃/spawn 失败)后删除的文件,如 0600 登录凭证文件。 */
+  cleanupFiles?: string[];
 }
 
 export class ChildRecorderProcess implements RecorderProcess {
@@ -72,7 +81,9 @@ export class ChildRecorderProcess implements RecorderProcess {
   /** Constructor-injected log sink (spawner → console). The `onLog()` METHOD
    * registers ADDITIONAL listeners (e.g. the manager's ring-buffer). */
   private readonly injectedLog: (msg: string) => void;
-  private readonly killTimeoutMs: number;
+  readonly killTimeoutMs: number;
+  readonly termChildOnly: boolean;
+  private readonly cleanupFiles: string[];
 
   private child: ChildProcess | null = null;
   private expected = false;
@@ -93,6 +104,8 @@ export class ChildRecorderProcess implements RecorderProcess {
     this.env = opts.env;
     this.injectedLog = opts.onLog ?? ((): void => {});
     this.killTimeoutMs = opts.killTimeoutMs ?? 10_000;
+    this.termChildOnly = opts.termChildOnly ?? false;
+    this.cleanupFiles = opts.cleanupFiles ?? [];
   }
 
   get pid(): number | undefined {
@@ -100,24 +113,34 @@ export class ChildRecorderProcess implements RecorderProcess {
   }
 
   start(): void {
-    if (this.child) return;
+    // exited without a child = an earlier synchronous spawn throw; this object is spent.
+    if (this.child || this.exited) return;
     this.exitPromise = new Promise<void>((resolve) => {
       this.resolveExit = resolve;
     });
     // detached:true → 子进程成进程组 leader,硬停时用 process.kill(-pid) 一并收割它 spawn 的
     // ffmpeg 孙进程(否则 node 被 SIGKILL 后 ffmpeg 成孤儿继续写盘/占流)。
-    this.child = spawn(this.command, this.args, {
-      cwd: this.cwd,
-      env: this.env, // undefined → 继承 process.env;有值时已是 {...process.env, MESIO_PATH} 合并结果
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
-    });
+    try {
+      this.child = spawn(this.command, this.args, {
+        cwd: this.cwd,
+        env: this.env, // undefined → 继承 process.env;有值时已是 {...process.env, MESIO_PATH} 合并结果
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      });
+    } catch (e) {
+      // A synchronous spawn throw never emits exit/error, so clean up here or the credential file leaks.
+      this.exited = true;
+      this.cleanup();
+      this.resolveExit?.();
+      throw e;
+    }
 
     this.child.stdout?.on("data", (b: Buffer) => this.pipe(b));
     this.child.stderr?.on("data", (b: Buffer) => this.pipe(b));
 
     this.child.on("exit", (code, signal) => {
       this.exited = true;
+      this.cleanup();
       const info: ExitInfo = { code, signal, expected: this.expected };
       for (const cb of this.exitListeners) cb(info);
       this.resolveExit?.();
@@ -127,6 +150,7 @@ export class ChildRecorderProcess implements RecorderProcess {
       // 'error' may fire without 'exit' (e.g. ENOENT) — synthesize an exit.
       if (!this.exited) {
         this.exited = true;
+        this.cleanup();
         const info: ExitInfo = { code: null, signal: null, expected: this.expected };
         for (const cb of this.exitListeners) cb(info);
         this.resolveExit?.();
@@ -134,12 +158,27 @@ export class ChildRecorderProcess implements RecorderProcess {
     });
   }
 
+  /** 删 cleanupFiles;失败只记日志(不能因清理失败吞掉退出事件),但不静默。 */
+  private cleanup(): void {
+    for (const f of this.cleanupFiles) {
+      try {
+        removeCredentialFile(f);
+      } catch (e) {
+        this.emitLog(`[task ${this.taskId}] 清理临时文件失败(${f}): ${String(e)}`);
+      }
+    }
+  }
+
   async stop(): Promise<void> {
     this.expected = true;
     const child = this.child;
     if (!child || this.exited) return;
 
-    this.killGroup("SIGTERM");
+    if (this.termChildOnly) {
+      try { child.kill("SIGTERM"); } catch { /* already gone */ }
+    } else {
+      this.killGroup("SIGTERM");
+    }
     const timer = setTimeout(() => {
       if (!this.exited) this.killGroup("SIGKILL");
     }, this.killTimeoutMs);

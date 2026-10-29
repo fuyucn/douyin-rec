@@ -6,9 +6,10 @@
  */
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
-import { HUB_JOB_STATES, QUEUE_PHASES, platformForRoom, type QueuePhase } from "@drec/core";
+import { HUB_JOB_STATES, QUEUE_PHASES, isUploadingMode, platformForRoom, type QueuePhase } from "@drec/core";
 import { listHubJobs, readHubJobLog, latestRunPerRoom, buildQueueView } from "../../hub-jobs.js";
 import * as hubStore from "../../hub-store.js";
+import { knownTaskName } from "../../hub-label-lookup.js";
 
 export function buildHubJobs(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
@@ -61,14 +62,14 @@ export function buildHubJobs(ctx: ApiCtx) {
         };
       }
       try {
-        // 一次 listTasks 建 roomSlug+platform → 主播名映射(hubRuleView 也是这个优先级)。
+        // 一次 listTasks 建 roomSlug+platform → 显示名映射;名称走与通知相同的 core 链路(#53)。
         const tasks = store.listTasks();
         const anchorOf = (platform: string, roomSlug: string): string | null => {
           const t = tasks.find(
             (task) => platformForRoom(task.room).id === platform
               && platformForRoom(task.room).extractRoomSlug(task.room) === roomSlug,
           );
-          return t ? manager.getAnchorName(t.id) ?? t.anchorName ?? t.name ?? null : null;
+          return t ? knownTaskName(t, manager.getAnchorName(t.id)) : null;
         };
         // query 过滤白名单校验:只认契约里的常量(防任意串进 Set;也防前端拼错静默返回空)。
         const csv = (v?: string[]): string[] =>
@@ -85,17 +86,29 @@ export function buildHubJobs(ctx: ApiCtx) {
           const out = new Set<string>();
           if (p.steps?.burnDanmu === false) out.add("burn_danmu");
           if (p.steps?.burnLivechat === false) out.add("burn_livechat");
-          if (p.upload?.mode !== "upload") {
+          if (!isUploadingMode(p.upload?.mode)) {
             out.add("upload_plain").add("append_danmu").add("append_livechat");
           }
           return out;
         };
-        return { status: 200, body: buildQueueView(deps.syncDbPath, {
+        const view = buildQueueView(deps.syncDbPath, {
           anchorOf, disabledOf, pool: deps.poolSnapshot?.(),
           phase: phaseFilter, states: stateFilter, platform: opts.platform, q: opts.q,
           // sort 白名单:只认 newest / oldest,其它回落 newest(不静默改变语义)。
           sort: opts.sort === "oldest" ? "oldest" : "newest",
-        }) };
+        });
+        // 边录边传实时进度(F1):节点状态轮询的快照,补主播名;不受 phase/states 筛选影响,平台与关键字筛选照常生效。
+        const q = (opts.q ?? "").trim().toLowerCase();
+        const plats = csv(opts.platform);
+        const delivering = (deps.rollingDelivery?.() ?? [])
+          .map((d) => ({ ...d, anchorName: anchorOf(d.platform, d.roomSlug) }))
+          .filter((d) => plats.length === 0 || plats.includes(d.platform))
+          .filter((d) => !q || `${d.anchorName ?? ""} ${d.roomSlug} ${d.sessionBase} ${d.bv ?? ""}`.toLowerCase().includes(q));
+        const blocked = (deps.blockedBroadcasts?.() ?? [])
+          .map((b) => ({ ...b, anchorName: anchorOf(b.platform, b.roomSlug) }))
+          .filter((b) => plats.length === 0 || plats.includes(b.platform))
+          .filter((b) => !q || `${b.anchorName ?? ""} ${b.roomSlug} ${b.streamKey} ${b.workers.join(" ")}`.toLowerCase().includes(q));
+        return { status: 200, body: { ...view, delivering, blocked } };
       } catch (e) {
         return err(500, `读 hub 队列失败: ${String((e as Error)?.message ?? e)}`);
       }
@@ -114,13 +127,21 @@ export function buildHubJobs(ctx: ApiCtx) {
       return r.ok ? { status: 200, body: r } : { status: r.code ?? 400, body: r };
     },
 
-    async runHubJob(input: { streamKey?: string; winnerWorker?: string; wait?: boolean }): Promise<ApiResult> {
+    async ackHubJob(streamKey: string, input: { note?: string; undo?: boolean }): Promise<ApiResult> {
+      if (!deps.syncDbPath || !deps.ackJob) return err(400, "hub 未启用(核对标记未注入)");
+      const note = typeof input.note === "string" ? input.note : undefined;
+      const r = await deps.ackJob(streamKey, { note, undo: input.undo === true });
+      return r.ok ? { status: 200, body: r } : { status: r.code ?? 400, body: r };
+    },
+
+    async runHubJob(input: { streamKey?: string; winnerWorker?: string; wait?: boolean; force?: boolean }): Promise<ApiResult> {
       if (!deps.syncDbPath || !deps.runNow) return err(400, "hub 未启用(立即执行未注入)");
       if (!input.streamKey) return err(400, "streamKey 必填");
       const r = await deps.runNow({
         streamKey: input.streamKey,
         winnerWorker: input.winnerWorker,
         wait: input.wait === true,
+        force: input.force === true,
       });
       return r.ok ? { status: r.code ?? 202, body: r } : { status: r.code ?? 400, body: r };
     },

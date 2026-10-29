@@ -16,6 +16,10 @@ import { getStream, getInfo, resolveShortURL, resolveWebRid } from "./stream/ind
 export { getStream, getInfo, resolveShortURL, resolveWebRid } from "./stream/index.js";
 export type { GetStreamResult, GetInfoResult, StreamProfile, SourceProfile } from "./stream/index.js";
 
+// API 模式读取已提取到 ./api-mode.js(单一真理源;probe.ts 也用它,避免循环引用)。
+import { resolveApiMode } from "./api-mode.js";
+export { resolveApiMode } from "./api-mode.js";
+
 /** 抖音画质档(从高到低)。通用层用 string;此处是抖音的具体取值。 */
 export const DOUYIN_QUALITIES = ["origin", "uhd", "hd", "sd", "ld"] as const;
 export type DouyinQuality = (typeof DOUYIN_QUALITIES)[number];
@@ -60,7 +64,8 @@ export async function resolveDouyinWebRid(room: string): Promise<string | null> 
   if (/^\d+$/.test(slug)) return slug;
 
   try {
-    const info = await getInfo(slug, { api: "webHTML" });
+    // 均衡模式:反查 web_rid 也要能在 webHTML 被拦的出口(VPS)拿到 id_str + sec_uid。
+    const info = await getInfo(slug, { api: "balance" });
     const roomId = String(info?.liveId ?? "").trim();
     const secUid = String(info?.uid ?? "").trim();
     if (!roomId || !secUid) return null;
@@ -72,11 +77,30 @@ export async function resolveDouyinWebRid(room: string): Promise<string | null> 
 }
 
 /**
+ * 各 web_rid 最近一次解析到的 sec_uid。mobile 接口必须带 sec_user_id 才能用,而它自己
+ * 不回传 sec_uid —— 只能靠 webHTML/web 顺带拿到的值缓存,供后续 mobile 回落使用。
+ */
+const secUidCache = new Map<string, string>();
+
+/**
  * 解析「本场直播的 liveId」(抖音弹幕 WS 连接需要的 id,不是房间 web_rid/slug)。失败返 null。
  *
- * ⚠️ 用 api:"webHTML"(解析 live.douyin.com/{web_rid} 页 render_data 的 room.id_str)——默认
- * api:"web" 走 webcast/room/web/enter,会在开播切换瞬间返回**陈旧 liveId**(连上 WS 却整场 0 弹幕),
- * 且 enter API 地域受限 + 带 cookie 踢手机。HTML 页 id_str 始终是当前这场。仍匿名解析(liveId 公开)。
+ * **均衡模式**(2026-10-07):走 `api:"balance"` → `APILoadBalancer` 自动挑 api type
+ * (按 priority + 加权随机),失败端点自动禁用/自愈。为什么不再手写「webHTML→web→mobile」回落链:
+ *   1. **webHTML 抓的是房间 HTML 页**,出口 IP 被 argus 判为机器人时返回「验证码中间页」(6KB,无
+ *      render_data)。手写链把它排第一 → **每次都白试一次**,这本身就在给风控喂信号(我们上次被限流的成因)。
+ *      均衡器则会在连续失败后**自动禁用它**。
+ *   2. **mobile 需要 sec_uid**,手写链依赖「前面接口顺带缓存」,链条一断就跳过;均衡器里 mobile 无 uid
+ *      会内部回落 web(`getRoomInfo` 的兼容逻辑),不需要外部喂。
+ *
+ * 实测(2026-10-07,同房间 `68133201791`):家宽 10/10、VPS1 10/10(自动摘掉被拦的 webHTML → 全程 web)、
+ * VPS2 10/10,三者 liveId 一致。均衡模式在三环境都拿到当场 liveId。
+ *
+ * 仍全程匿名解析(liveId 公开);带会话 cookie 调 enter API 会异地登录踢手机,见
+ * docs/douyin-kick-investigation.md。
+ *
+ * **兜底**:均衡器把端点全禁用(或全失败)时抛错 → 这里再手工试一次 `web`(最稳、不依赖 HTML 页),
+ * 仍失败才返 null(上层按「解析失败」告警,不静默)。
  *
  * 抖音弹幕专属;两个抖音弹幕 provider(vendored / npm)共用 → 调本函数。
  */
@@ -89,13 +113,38 @@ export async function resolveDouyinLiveId(roomUrl: string): Promise<string | nul
       log.error(`短链解析失败 (${roomUrl}):`, (e as Error)?.message ?? e);
     }
   }
+
+  // 1) 按配置的 API 模式(默认 balance:自动挑 api type + 失败端点自愈)。带上缓存的 sec_uid(让 mobile 可用)。
+  const mode = resolveApiMode();
+  const cachedUid = secUidCache.get(slug);
   try {
-    const info = await getInfo(slug, { api: "webHTML" });
-    return String(info?.liveId ?? "") || null;
+    const info = await getInfo(slug, { api: mode, ...(cachedUid ? { uid: cachedUid } : {}) });
+    const liveId = String(info?.liveId ?? "").trim();
+    const uid = String(info?.uid ?? "").trim();
+    if (uid) secUidCache.set(slug, uid);
+    if (liveId) return liveId;
+    log.warn(`api=${mode} 未解析到 liveId room=${slug},兜底试 web`);
   } catch (e) {
-    log.error(`解析 liveId 失败 room=${slug}:`, (e as Error)?.message ?? e);
-    return null;
+    log.warn(`api=${mode} 解析失败 room=${slug}: ${(e as Error)?.message ?? e},兜底试 web`);
   }
+
+  // 2) 兜底:直接试 web(最稳,不依赖房间 HTML 页;也不经均衡器,避免「端点全被禁用」时无路可走)。
+  try {
+    const info = await getInfo(slug, { api: "web" });
+    const liveId = String(info?.liveId ?? "").trim();
+    const uid = String(info?.uid ?? "").trim();
+    if (uid) secUidCache.set(slug, uid);
+    if (liveId) {
+      log.info(`liveId 经 web 兜底解析 room=${slug}`);
+      return liveId;
+    }
+    log.warn(`web 兜底未解析到 liveId room=${slug}`);
+  } catch (e) {
+    log.error(`web 兜底解析失败 room=${slug}:`, (e as Error)?.message ?? e);
+  }
+
+  log.error(`解析 liveId 失败(balance + web 均未成功)room=${slug}`);
+  return null;
 }
 
 /**
@@ -136,24 +185,30 @@ export const douyinPlatform: Platform = {
     return id ? String(id) : null;
   },
   async fetchAnchorName(room) {
-    const owner = String((await getInfo(extractRoomSlug(room), {})).owner ?? "").trim();
+    // 用同一 API 模式:默认 balance 保证在 webHTML 被拦的出口(VPS)也能解析主播名。
+    const owner = String((await getInfo(extractRoomSlug(room), { api: resolveApiMode() })).owner ?? "").trim();
     return owner || null;
   },
   async getStream(channelId, quality, _cookies): Promise<PlatformStream> {
     // 抖音**故意忽略** cookie 参数 → 始终匿名取流:其内部 webcast/room/web/enter 鉴权传会话 cookie
     // 会异地登录踢手机主号(见 docs/douyin-kick-investigation.md)。cookie 只用于弹幕(connectDanmu)。
     void _cookies;
-    const res = await getStream({ channelId, quality, formatPriorities: ["flv", "hls"] } as Parameters<typeof getStream>[0]);
+    // ⚠️ 不要硬编码 api —— 必须走 `resolveApiMode()`(全局设置,UI 可选;默认 balance)。
+    // 硬编码会无视用户在设置里的选择,且失去 balance 的失败自愈(见 resolveApiMode 注释)。
+    // 取流路径在 stream.js 内对 balance 额外排除 webHTML/userHTML(它们恒 streams=0)。
+    const res = await getStream({ channelId, quality, api: resolveApiMode(), formatPriorities: ["flv", "hls"] } as Parameters<typeof getStream>[0]);
     return {
       living: !!res?.living,
       url: res?.currentStream?.url,
       owner: res?.owner != null ? String(res.owner) : undefined,
       title: res?.title != null ? String(res.title) : undefined,
+      ...(res?.liveId ? { liveSessionId: String(res.liveId) } : {}),
       raw: res, // 完整结果留给录制器子类(logStreamMeta 等)
     };
   },
   async getLiving(channelId) {
-    return !!(await getInfo(channelId, {})).living;
+    // 判活同用该模式(别硬编码):默认 balance 可避免单点(如 webHTML 被拦)把「在播」误判成「未开播」。
+    return !!(await getInfo(channelId, { api: resolveApiMode() })).living;
   },
   // 弹幕收进平台:返回未 start 的 DouyinDanmuSource(manager 在 onLive 才 start)。
   connectDanmu: () => new DouyinDanmuSource(),

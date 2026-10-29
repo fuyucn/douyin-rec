@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RecordingSession, sessionXmlPath } from "@drec/manager";
+import { RecordingSession, sessionXmlPath, STABLE_RECORD_MS, SHORT_LIVED_ALARM } from "@drec/manager";
 import {
   registerPlatform, _resetPlatforms, type Platform, type Recorder, type DanmuSource,
   type RecorderEvents, type RecordOpts, type DanmuMessage,
@@ -17,12 +17,20 @@ function makeOpts(outDir: string): RecordOpts {
 class MockDlrRecorder implements Recorder {
   name = "mock-dlr"; providesDanmu = false;
   ev!: RecorderEvents;
+  /** 测试可设:onLive 时携带的标题(模拟「开播才知道标题」)。 */
+  liveTitle?: string;
+  /**
+   * T14:进度信号。默认 null = 「无信号」(等价于未实现 lastProgressAgeMs 的老 recorder,
+   * 由 session 回落「时长够即算成功」)。测试可设具体毫秒龄覆盖「退出前是否还在落盘」。
+   */
+  progressAgeMs: number | null = null;
   async start(_url: string, _opts: RecordOpts, ev: RecorderEvents) {
     this.ev = ev;
-    ev.onLive({ anchorName: "主播X" });
+    ev.onLive({ anchorName: "主播X", title: this.liveTitle });
     ev.onSegment(join(_opts.outDir, "seg_000.ts"));
   }
   async stop() {}
+  lastProgressAgeMs(): number | null { return this.progressAgeMs; }
 }
 class MockDanmuSource implements DanmuSource {
   name = "mock-danmu";
@@ -110,6 +118,149 @@ describe("RecordingSession", () => {
     expect(sj.platform).toBe("douyin");
   });
 
+  it("T-20:开播时才拿到的直播标题写进 session.json({title} 渲染依赖它)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-title-"));
+    const rec = new MockDlrRecorder();
+    rec.liveTitle = "今晚八点开播";   // 开播回调才带 title(平台 getStream 只在 living 时返回)
+    const sess = new RecordingSession(rec);
+    // start 时 title 未知(空)→ sidecar 起初无 title
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "主播X" });
+    await sess.stop();
+    const sj = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")))
+      .find((d) => d.title);
+    expect(sj?.title).toBe("今晚八点开播");
+  });
+
+  it("T-20:start 时已知 title 也写进 sidecar(两条路径都要有)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-title2-"));
+    const rec = new MockDlrRecorder();
+    const sess = new RecordingSession(rec);
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "主播X", title: "开播前已知标题" });
+    await sess.stop();
+    const sj = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")))
+      .find((d) => d.title);
+    expect(sj?.title).toBe("开播前已知标题");
+  });
+
+  // issue #87:把绝对起录时刻 + 生效时区写进 sidecar,供下游格式化,不再靠文件名/进程时区反解。
+  it("issue #87:会话 sidecar 记录权威 startMs(起录绝对时刻)+ 生效时区", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-tz-"));
+    const rec = new MockDlrRecorder();
+    const sess = new RecordingSession(rec, { timeZone: "Asia/Shanghai" });
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "主播X" });
+    await sess.stop();
+    const files = readdirSync(dir).filter((f) => f.endsWith(".session.json"));
+    expect(files.length).toBeGreaterThanOrEqual(1);
+    // 断言**每一份** sidecar 都带 startMs(不止 `.find` 命中一份)。
+    for (const f of files) {
+      const d = JSON.parse(readFileSync(join(dir, f), "utf-8")) as { startMs?: number; timeZone?: string };
+      expect(typeof d.startMs).toBe("number");
+      expect(d.startMs!).toBeGreaterThan(0);
+      expect(d.timeZone).toBe("Asia/Shanghai");
+    }
+  });
+
+  // issue #87:同一进程跨场时,本场 startMs 必须取**本场** onLive 时刻,不能复用首场(否则无分段场次归错日)。
+  it("issue #87:同进程两场各自 startMs(不复用首场)", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-start-2b-"));
+    let stampSeq = 0;
+    const stamps = ["00-00-01", "01-00-00"];
+    class ReBroadcastRecorder implements Recorder {
+      name = "mock-rebroadcast"; providesDanmu = false;
+      ev!: RecorderEvents;
+      isLive = async () => false;                  // 每次 onOffline 都判「已下播」→ 第二场
+      async start(_u: string, o: RecordOpts, ev: RecorderEvents) {
+        this.ev = ev;
+        ev.onLive({ anchorName: "主播T" });
+        ev.onSegment(join(o.outDir, `主播T_2026-10-09_${stamps[stampSeq++]}_000.ts`));
+      }
+      async stop() {}
+    }
+    const sess = new RecordingSession(new ReBroadcastRecorder(), { reconnectDelaySec: 0.01, timeZone: "Asia/Shanghai" });
+    vi.setSystemTime(1_700_000_000_000);
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "" });
+    await vi.advanceTimersByTimeAsync(1);          // 第一场:onLive @ t0
+    vi.setSystemTime(1_700_003_600_000);            // +1h
+    (sess as unknown as { recorder: ReBroadcastRecorder }).recorder.ev.onOffline();
+    await vi.advanceTimersByTimeAsync(200);         // 下播 → 重连 → 第二场:onLive @ t0+1h 起
+    await sess.stop();
+    const rows = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")) as { sessionBase: string; startMs: number })
+      .sort((a, b) => a.sessionBase.localeCompare(b.sessionBase));
+    expect(rows.length).toBe(2);
+    expect(rows[0]!.startMs).toBe(1_700_000_000_000);
+    expect(rows[1]!.startMs).toBeGreaterThanOrEqual(1_700_003_600_000);  // 修复前会等于首场时刻
+  });
+
+  // 缺陷:同一录制进程跨场(下播 → 主播重新开播)时,第二场沿用第一场的标题 → 稿件 {title} 张冠李戴。
+  // 复现于 2026-10-09(video-rec-2 task 11:20:36 那场收播后进程继续轮询等下一场)。
+  it("T-20b:下播后第二场 → sidecar 用**第二场**的标题(不沿用第一场)", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-title-rebroadcast-"));
+    let title = "第一场标题";
+    let stampSeq = 0;
+    const stamps = ["00-00-01", "01-00-00", "02-00-00"];
+    class ReBroadcastRecorder implements Recorder {
+      name = "mock-rebroadcast"; providesDanmu = false;
+      ev!: RecorderEvents;
+      isLive = async () => false;              // 每次 onOffline 都判「主播已下播」→ 第二场
+      async start(_u: string, o: RecordOpts, ev: RecorderEvents) {
+        this.ev = ev;
+        ev.onLive({ anchorName: "主播T", title });
+        ev.onSegment(join(o.outDir, `主播T_2026-10-09_${stamps[stampSeq++]}_000.ts`));
+      }
+      async stop() {}
+    }
+    const sess = new RecordingSession(new ReBroadcastRecorder(), { reconnectDelaySec: 0.01 });
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "" });
+    await vi.advanceTimersByTimeAsync(1);       // 第一场 onLive/onSegment
+    title = "第二场标题";                        // 下一场标题变了
+    (sess as unknown as { recorder: ReBroadcastRecorder }).recorder.ev.onOffline();
+    await vi.advanceTimersByTimeAsync(200);      // 下播 → 重连 → 第二场 onLive/onSegment
+    await sess.stop();
+    const rows = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")) as { sessionBase: string; title?: string })
+      .sort((a, b) => a.sessionBase.localeCompare(b.sessionBase));
+    expect(rows.length).toBe(2);
+    expect(rows[0]!.title).toBe("第一场标题");
+    expect(rows[1]!.title).toBe("第二场标题");   // 修复前这里会是「第一场标题」
+  });
+
+  it("issue #320: each session sidecar records its own platform live id; a spawn without one writes none", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-liveid-"));
+    const ids: Array<string | undefined> = ["live-1", undefined];
+    let stampSeq = 0;
+    const stamps = ["00-00-01", "01-00-00"];
+    class LiveIdRecorder implements Recorder {
+      name = "mock-liveid"; providesDanmu = false;
+      ev!: RecorderEvents;
+      isLive = async () => false;
+      async start(_u: string, o: RecordOpts, ev: RecorderEvents) {
+        this.ev = ev;
+        const id = ids[stampSeq];
+        ev.onLive({ anchorName: "主播T", ...(id ? { liveSessionId: id } : {}) });
+        ev.onSegment(join(o.outDir, `主播T_2026-10-09_${stamps[stampSeq++]}_000.ts`));
+      }
+      async stop() {}
+    }
+    const sess = new RecordingSession(new LiveIdRecorder(), { reconnectDelaySec: 0.01 });
+    await sess.start("https://live.douyin.com/123", makeOpts(dir), { anchorName: "" });
+    await vi.advanceTimersByTimeAsync(1);
+    (sess as unknown as { recorder: LiveIdRecorder }).recorder.ev.onOffline();
+    await vi.advanceTimersByTimeAsync(200);
+    await sess.stop();
+    const rows = readdirSync(dir).filter((f) => f.endsWith(".session.json"))
+      .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")) as { sessionBase: string; liveSessionId?: string })
+      .sort((a, b) => a.sessionBase.localeCompare(b.sessionBase));
+    expect(rows.length).toBe(2);
+    expect(rows[0]!.liveSessionId).toBe("live-1");
+    expect(rows[1]!.liveSessionId).toBeUndefined(); // must not inherit the previous broadcast's id
+  });
+
   it("弹幕只在 onLive 后启动：recorder 未 fire onLive(等开播)→ 弹幕不连(防开播前陈旧 liveId)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sess-"));
     // 模拟 daemon 定时起、但房间还没开播:recorder 在轮询,不 fire onLive。
@@ -190,6 +341,9 @@ describe("RecordingSession", () => {
     expect(sessionXmlPath(`${b}-PART012.ts`)).toBe(`${b}.xml`);
     expect(sessionXmlPath(`${b}_000.ts`)).toBe(`${b}.xml`);      // DLR 分段
     expect(sessionXmlPath(`${b}.ts`)).toBe(`${b}.xml`);          // 不分段
+    // issue #50:manager 原先漏认 _PART<n>(得到 {base}_PART000.xml),现与其余调用点对齐
+    expect(sessionXmlPath(`${b}_PART000.ts`)).toBe(`${b}.xml`);
+    expect(sessionXmlPath(`${b}_PART012.flv`)).toBe(`${b}.xml`);
     // 会话基名里的时间 HH-MM-SS 用连字符，不会被 _\d{3,} 误剥
   });
 
@@ -341,6 +495,25 @@ describe("RecordingSession", () => {
     expect(events.some((e) => e.kind === "recordEnd")).toBe(true);
   });
 
+  it("通知带上下文(#53 N4):任务名优先于平台主播名,附平台与房间号;无任务名用主播名", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sess-notify-ctx-"));
+    const events: NotifyEvent[] = [];
+    const notifier: Notifier = { async notify(e) { events.push(e); } };
+    const sess = new RecordingSession(new MockDlrRecorder(), { notifier });
+    await sess.start("https://live.douyin.com/123", { ...makeOpts(dir), name: "任务名" }, { anchorName: "主播X" });
+    await sess.stop();
+    const start = events.find((e) => e.kind === "recordStart");
+    expect(start).toMatchObject({ anchor: "任务名", ctx: { name: "任务名", nameSource: "task", platform: "douyin", roomSlug: "123" } });
+    expect(events.find((e) => e.kind === "recordEnd")).toMatchObject({ anchor: "任务名", ctx: { nameSource: "task" } });
+
+    const dir2 = mkdtempSync(join(tmpdir(), "sess-notify-ctx2-"));
+    const events2: NotifyEvent[] = [];
+    const sess2 = new RecordingSession(new MockDlrRecorder(), { notifier: { async notify(e) { events2.push(e); } } });
+    await sess2.start("https://live.douyin.com/123", makeOpts(dir2), { anchorName: "主播X" });
+    await sess2.stop();
+    expect(events2.find((e) => e.kind === "recordStart")).toMatchObject({ anchor: "主播X", ctx: { name: "主播X", nameSource: "live" } });
+  });
+
   it("stop() 默认 → recordEnd reason=手动停止", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sess-stop-reason-"));
     const events: NotifyEvent[] = [];
@@ -380,6 +553,8 @@ describe("RecordingSession", () => {
     rec.ev.onOffline();                     // 抖动断流
     await vi.runAllTimersAsync();           // 判别 true → 不发 recordEnd;重连 onLive → recordReconnect
     expect(events.some((e) => e.kind === "recordReconnect")).toBe(true);
+    // #53 N4: the reconnect warning carries the same context as start / end.
+    expect(events.find((e) => e.kind === "recordReconnect")?.ctx).toMatchObject({ platform: "douyin", roomSlug: "123" });
     expect(events.filter((e) => e.kind === "recordStart").length).toBe(1); // 重连不重复发开播
     expect(events.some((e) => e.kind === "recordEnd")).toBe(false);        // 抖动不是结束
     await sess.stop();
@@ -397,6 +572,8 @@ describe("RecordingSession", () => {
     dm.onAlert?.("连上但 3 分钟 0 条");
     await sess.stop();
     expect(events.some((e) => e.kind === "error" && e.stage === "弹幕")).toBe(true);
+    // #53 N4: session error alerts carry context too (name by the shared chain).
+    expect(events.find((e) => e.kind === "error" && e.stage === "弹幕")?.ctx).toMatchObject({ name: "主播X", roomSlug: "123" });
   });
 
   it("弹幕 start 抛错 → session catch 后 notify {kind:error,stage:弹幕}(不影响录制)", async () => {
@@ -596,5 +773,157 @@ describe("RecordingSession.drain (窗口结束排空)", () => {
     await sess.stop();
     await sess.drain();
     expect(rec.drainCount).toBe(0);            // 已停，不再排空
+  });
+
+  // ── T14 录制健康:以有效落盘判成功 + 短命录制熔断 ────────────────────────────
+  /**
+   * 可编排的短命/稳定录制 mock:每次 start() 记下时刻并 fire onLive;**断流由测试手动**
+   * `rec.ev.onOffline()` 驱动(不自动连抛,避免一次 advance 里级联重启,导致断言不可测)。
+   * progressAgeMs=null 表示 recorder 无进度信号(老 recorder 回落路径);给数值则模拟
+   * 「退出前最后落盘前进距今多久」。测试通过先 advance 录制时长、再手动断开来模拟长短命。
+   */
+  class ScriptedRecorder implements Recorder {
+    name = "mock-scripted"; providesDanmu = false;
+    ev!: RecorderEvents;
+    startedAt: number[] = [];
+    progressAgeMs: number | null;
+    constructor(progressAgeMs: number | null = null) { this.progressAgeMs = progressAgeMs; }
+    async start(_u: string, o: RecordOpts, ev: RecorderEvents) {
+      this.ev = ev;
+      this.startedAt.push(Date.now());
+      ev.onLive({ anchorName: "主播S" });
+      ev.onSegment(join(o.outDir, `seg_${this.startedAt.length}.ts`));
+    }
+    async stop() {}
+    async isLive() { return true; }   // 抖动断流(不是真下播)→ session 会继续重连
+    lastProgressAgeMs(): number | null { return this.progressAgeMs; }
+  }
+
+  it("T14:连续短命录制 → 退避真递增(不再固定 5s 无限重连)", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-shortlived-"));
+    const rec = new ScriptedRecorder();         // 无进度信号 → 回落判据(时长够即算成功)
+    const sess = new RecordingSession(rec, { danmuEnabled: false, reconnectDelaySec: 5 });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+
+    // 每轮:录 2s → 手动断流 → **精确**走完本轮退避(2^(n) 翻倍)→ 又一次 start。
+    // ⚠️ 必须精确 advance:多推进的时间会漏进下一场,让「本场时长」虚高、误判为录稳。
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(2_000);   // 本场只录了 2s(短命)
+      rec.ev.onOffline();
+      await vi.advanceTimersByTimeAsync(5_000 * 2 ** (i + 1)); // 退避 10/20/40/80s
+    }
+    expect(rec.startedAt.length).toBe(5);
+    const gaps: number[] = [];
+    for (let i = 1; i < rec.startedAt.length; i++) gaps.push(rec.startedAt[i] - rec.startedAt[i - 1]);
+    // 间隔 = 本场 2s + 退避(10/20/40/80):退避真在翻倍,不是恒 5s。
+    expect(gaps).toEqual([12_000, 22_000, 42_000, 82_000]);
+    await sess.stop();
+  });
+
+  it("T14:录够 STABLE_RECORD_MS 才断 → 退避复位(不误伤长直播)", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-stable-"));
+    const rec = new ScriptedRecorder(1_000); // 退出前 1s 还在落盘(有效落盘)
+    const sess = new RecordingSession(rec, { danmuEnabled: false, reconnectDelaySec: 5 });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    // 前 3 次短命把退避推到 40s(第 4 场前的退避是 40s)。
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(2_000);
+      rec.ev.onOffline();
+      await vi.advanceTimersByTimeAsync(5_000 * 2 ** (i + 1));
+    }
+    expect(rec.startedAt.length).toBe(4);
+    // 现在这一场录满 STABLE_RECORD_MS 再断 → 判「录稳」→ 退避复位到基准 5s。
+    await vi.advanceTimersByTimeAsync(STABLE_RECORD_MS + 5_000); // 稳定录制(>120s 且进度 1s 前)
+    rec.ev.onOffline();
+    const beforeLast = rec.startedAt.length;
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(rec.startedAt.length).toBe(beforeLast + 1);
+    // 未复位的话这一拍要等 80s;复位后只等基准 5s。
+    expect(rec.startedAt[beforeLast] - rec.startedAt[beforeLast - 1]).toBe(STABLE_RECORD_MS + 10_000);
+    await sess.stop();
+  });
+
+  it("T14:达 SHORT_LIVED_ALARM 次短命 → 发一次「录制健康」error 告警", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-alarm-"));
+    const events: NotifyEvent[] = [];
+    const notifier: Notifier = { async notify(e) { events.push(e); } };
+    const rec = new ScriptedRecorder();
+    const sess = new RecordingSession(rec, { notifier, danmuEnabled: false, reconnectDelaySec: 5 });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    for (let i = 0; i < SHORT_LIVED_ALARM + 2; i++) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      rec.ev.onOffline();
+      await vi.advanceTimersByTimeAsync(5_000 * 2 ** Math.min(i + 1, 6)); // 封顶前足够走完
+    }
+    const alarms = events.filter((e) => e.kind === "error" && e.stage === "录制健康");
+    expect(alarms.length).toBe(1);                                  // 只在跨阈值那一次报,不刷屏
+    expect(alarms[0].message).toContain("起播即断");
+    expect(rec.startedAt.length).toBe(SHORT_LIVED_ALARM + 3);        // 告警后**仍在重连**,不放弃
+    await sess.stop();
+  });
+
+  it("T14:无 lastProgressAgeMs 的 recorder(向后兼容)→ 时长够即算录稳,按基准退避重连", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-nosignal-"));
+    /** 完全不实现 lastProgressAgeMs 的老 recorder(该成员可选 → 未实现也能编译)。 */
+    class LegacyRecorder implements Recorder {
+      name = "mock-legacy"; providesDanmu = false;
+      ev!: RecorderEvents; n = 0;
+      async start(_u: string, o: RecordOpts, ev: RecorderEvents) {
+        this.ev = ev; this.n++;
+        ev.onLive({ anchorName: "L" });
+        ev.onSegment(join(o.outDir, `seg_${this.n}.ts`));
+      }
+      async stop() {}
+      async isLive() { return true; }
+    }
+    const rec = new LegacyRecorder();
+    const sess = new RecordingSession(rec, { danmuEnabled: false, reconnectDelaySec: 5 });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    await vi.advanceTimersByTimeAsync(STABLE_RECORD_MS + 5_000); // 录满 → 断
+    rec.ev.onOffline();
+    await vi.advanceTimersByTimeAsync(5_001);                    // 无信号 → 回落:不判短命,基准退避
+    expect(rec.n).toBe(2);
+    await sess.stop();
+  });
+
+  it("T14:时长够但退出前长时间无落盘前进 → 仍算不稳定(有效落盘才算成功)", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-stale-"));
+    const rec = new ScriptedRecorder(STABLE_RECORD_MS * 2);      // 进度已停 240s
+    const sess = new RecordingSession(rec, { danmuEnabled: false, reconnectDelaySec: 5 });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "A" });
+    const runMs = STABLE_RECORD_MS + 5_000;
+    await vi.advanceTimersByTimeAsync(runMs);            // 录了够久,但退出前无落盘前进
+    rec.ev.onOffline();
+    await vi.advanceTimersByTimeAsync(10_000);           // 退避已从 5s 翻到 10s(=不稳定,未复位)
+    expect(rec.startedAt.length).toBe(2);
+    expect(rec.startedAt[1] - rec.startedAt[0]).toBe(runMs + 10_000);
+    await sess.stop();
+  });
+
+  it("T14:主播正常下播不算「起播即断」,不累加短命计数、不误报警", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "sess-cleanend-"));
+    const events: NotifyEvent[] = [];
+    const notifier: Notifier = { async notify(e) { events.push(e); } };
+    // 每次都只录 2s 就「下播」(isLive=false):连续 SHORT_LIVED_ALARM+2 场
+    const rec = new OfflineMock();
+    rec.isLiveResults = Array(SHORT_LIVED_ALARM + 3).fill(false);
+    const sess = new RecordingSession(rec, { notifier, danmuEnabled: false, reconnectDelaySec: 0.01 });
+    await sess.start("https://live.douyin.com/1", makeOpts(dir), { anchorName: "" });
+    for (let i = 0; i < SHORT_LIVED_ALARM + 2; i++) {
+      await vi.advanceTimersByTimeAsync(2_000);
+      rec.ev.onOffline();                       // 正常下播
+      await vi.runAllTimersAsync();             // 重连(下播后仍继续轮询等下一场)
+    }
+    // 正常下播不该触发「录制健康」告警(否则一天正常收播就误报风控)
+    expect(events.filter((e) => e.kind === "error" && e.stage === "录制健康")).toEqual([]);
+    // 退避也不该被短命加深:每轮都回到基准 0.01s
+    expect(rec.startCount).toBeGreaterThanOrEqual(SHORT_LIVED_ALARM + 2);
+    await sess.stop();
   });
 });

@@ -4,7 +4,6 @@ import {
   FileText,
   FolderOpen,
   LayoutGrid,
-  Network,
   Pencil,
   Play,
   Plus,
@@ -16,22 +15,78 @@ import {
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, type Task } from "../api/client";
-import { connAtom, serverTimezoneAtom, tasksAtom } from "../atoms";
+import { connAtom, hubEnabledAtom, serverTimezoneAtom, tasksAtom } from "../atoms";
+import { isUnassignedHidden } from "../lib/assigned";
 import { DanmuBadge, StatusBadge } from "../components/Badge";
-import { stateColor } from "../components/HubJobs";
 import { Button, IconButton } from "../components/Button";
 import { Tooltip } from "../components/Tooltip";
 import { errMessage, useToast, usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { QUALITY_SHORT, roomId, scheduleText } from "../lib/labels";
-import { fmtTimeInTz, localScheduleTooltip, localTimeTooltip } from "../lib/tz";
+import { localScheduleTooltip } from "../lib/tz";
 import { CreateEditTaskDialog } from "../modals/CreateEditTaskDialog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ConnStatus } from "../components/ConnStatus";
+
+/** 窄屏不用多列表格:状态徽章和房间 URL 会把列撑出屏幕。一行一块,信息仍在。 */
+function TaskCompactRow({ task }: { task: Task }): ReactNode {
+  const t = useT();
+  const name = task.name || task.anchorName;
+  const room = roomId(task.room);
+  return (
+    <div className="task-compact px-4 py-3.5">
+      <div className="flex items-start justify-between gap-3">
+        <Link to={`/task/${task.id}`} className="min-w-0 group">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-medium text-ink truncate group-hover:underline">
+              {name || room}
+            </span>
+            {task.managedBy === "hub" && (
+              <span className="badge badge-muted shrink-0" title={t("tasks.managedHint")}>
+                {t("tasks.managed")}
+              </span>
+            )}
+          </div>
+          {name && (
+            <div className="font-mono text-xs text-muted mt-0.5 truncate" title={room}>
+              {room}
+            </div>
+          )}
+        </Link>
+        <Link className="btn-icon shrink-0" to={`/task/${task.id}`} title={t("tasks.titleDetail")}>
+          <FileText className="w-4 h-4" />
+        </Link>
+      </div>
+      <div className="mt-2 max-w-full">
+        <StatusBadge
+          running={task.running}
+          status={task.status}
+          enabled={task.enabled}
+          recording={task.recording}
+          stopping={task.stopping}
+          recordingWorkers={task.recordingWorkers}
+        />
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        <span className="chip !h-5 !text-[10px]">{QUALITY_SHORT[task.quality] ?? task.quality}</span>
+        <DanmuBadge task={task} />
+        {scheduleText(task) && (
+          <span className="font-mono text-[11px] text-muted-soft tabular-nums">{scheduleText(task)}</span>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /** The list page (#/): create form trigger + task table, 2s polling refresh. */
 export function TaskList(): ReactNode {
   const t = useT();
-  const [tasks, setTasks] = useAtom(tasksAtom);
+  const [allTasks, setTasks] = useAtom(tasksAtom);
+  const hubEnabled = useAtomValue(hubEnabledAtom);
+  const [showUnassigned, setShowUnassigned] = useState(false);
+  // 仅节点(非 master)过滤;master 总览不变。hubEnabled 未知(null)时也不过滤,避免闪烁式误藏。
+  const hiddenCount = hubEnabled === false ? allTasks.filter(isUnassignedHidden).length : 0;
+  const tasks = hubEnabled === false && !showUnassigned ? allTasks.filter((x) => !isUnassignedHidden(x)) : allTasks;
   const [conn, setConn] = useAtom(connAtom);
   const serverTz = useAtomValue(serverTimezoneAtom);
   const toast = useToast();
@@ -109,39 +164,24 @@ export function TaskList(): ReactNode {
     !t.running &&
     t.status !== "error",
   ).length;
-  const errors = tasks.filter((t) =>
-    t.status === "error" || t.recordingWorkers?.some((worker) => worker.state === "unavailable"),
-  ).length;
+  // A task's own error is not the same as "we can't tell" (node unreachable): count them apart.
+  const errors = tasks.filter((t) => t.status === "error").length;
+  const unknown = tasks.filter((t) => t.status !== "error" && t.recordingWorkers?.some((worker) => worker.state === "unavailable")).length;
 
   return (
     <>
-      <div className="flex items-end justify-between gap-3 mb-6">
-        <div>
+      <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3 mb-6">
+        <div className="min-w-0 max-w-full">
           <h1 className="headline text-[28px] sm:text-[32px] leading-tight">{t("tasks.pageTitle")}</h1>
           <p className="text-muted text-sm mt-1.5">{t("tasks.pageSubtitle")}</p>
         </div>
-        <div className="flex items-center gap-3">
-          {conn && (
-            <Tooltip
-              content={
-                conn.ok
-                  ? localTimeTooltip(new Date(conn.at), serverTz, (tz, local) =>
-                      t("common.localTimeTooltip", { serverTz: tz, local }),
-                    )
-                  : undefined
-              }
-            >
-              <span
-                className="hidden sm:inline-flex items-center gap-1.5 text-xs"
-                style={{ color: conn.ok ? "var(--success-fg)" : "var(--error-fg)" }}
-              >
-                <span className="dot" style={{ background: conn.ok ? "var(--success)" : "var(--error)" }} />
-                {conn.ok
-                  ? t("tasks.connected", { time: fmtTimeInTz(new Date(conn.at), serverTz) })
-                  : t("tasks.connFailed")}
-              </span>
-            </Tooltip>
-          )}
+        <div className="flex items-center gap-3 shrink-0">
+          <ConnStatus conn={conn} />
+          {hiddenCount > 0 || showUnassigned ? (
+            <Button small variant="secondary" onClick={() => setShowUnassigned((v) => !v)}>
+              {t(showUnassigned ? "tasks.hideUnassigned" : "tasks.showUnassigned", { n: allTasks.filter(isUnassignedHidden).length })}
+            </Button>
+          ) : null}
           <Button onClick={openCreate}>
             <Plus className="w-4 h-4" />
             {t("tasks.add")}
@@ -175,38 +215,57 @@ export function TaskList(): ReactNode {
           <div className="flex flex-col gap-1.5 min-w-0">
             <span className="telemetry-label">{t("tasks.metricError")}</span>
             <span className="telemetry-value tabular-nums" style={{ color: errors ? "var(--error-fg)" : "var(--muted-soft)" }}>{errors}</span>
+            {unknown > 0 && <span className="text-[11px] text-muted-soft">{t("tasks.unknownCount", { n: unknown })}</span>}
           </div>
           <span className="telemetry-icon" style={errors ? { color: "var(--error-fg)" } : undefined}><TriangleAlert className="w-4 h-4" /></span>
         </div>
       </div>
 
       <section className="table-shell">
-        <div className="overflow-x-auto">
+        <div className="lg:hidden">
+          {!loaded &&
+            [0, 1, 2].map((i) => (
+              <div key={i} className="task-compact px-4 py-3.5" aria-hidden="true">
+                <span className="skeleton block h-4 w-40 max-w-full" />
+                <span className="skeleton block h-3 w-28 max-w-full mt-2" />
+                <span className="skeleton block h-5 w-36 max-w-full mt-2" />
+              </div>
+            ))}
+          {loaded && tasks.length === 0 && (
+            <div className="empty-state">
+              <FolderOpen className="w-10 h-10" style={{ color: "var(--muted-soft)" }} />
+              <div className="text-sm font-medium text-ink">{t("tasks.noneYet")}</div>
+              <Button small onClick={openCreate}>{t("tasks.add")}</Button>
+            </div>
+          )}
+          {loaded && tasks.map((task) => <TaskCompactRow key={task.id} task={task} />)}
+        </div>
+
+        <div className="hidden lg:block min-w-0 overflow-x-auto">
           <table className="tasks">
             <thead>
               <tr>
-                <th className="hidden sm:table-cell w-10 sm:w-12">ID</th>
-                {/* 名称列给足最小宽度,否则窄屏会被固定宽的 Status/Actions 挤成一字一行。 */}
-                <th className="sm:min-w-[200px]">{t("tasks.colName")}</th>
-                <th className="hidden md:table-cell w-[90px]">{t("tasks.colQuality")}</th>
-                <th className="hidden md:table-cell w-[90px]">{t("tasks.colDanmu")}</th>
-                <th className="hidden lg:table-cell w-[110px]">{t("tasks.colSchedule")}</th>
-                <th className="w-[150px] sm:w-[220px]">{t("tasks.colStatus")}</th>
-                <th className="w-[56px] sm:w-[130px] text-right">{t("tasks.colAction")}</th>
+                <th className="w-12">{t("tasks.colId")}</th>
+                <th>{t("tasks.colName")}</th>
+                <th className="w-[90px]">{t("tasks.colQuality")}</th>
+                <th className="w-[90px]">{t("tasks.colDanmu")}</th>
+                <th className="w-[110px]">{t("tasks.colSchedule")}</th>
+                <th className="w-[220px]">{t("tasks.colStatus")}</th>
+                <th className="w-[168px] text-right">{t("tasks.colAction")}</th>
               </tr>
             </thead>
             <tbody>
               {!loaded &&
                 [0, 1, 2].map((i) => (
                   <tr key={i} aria-hidden="true">
-                    <td className="hidden sm:table-cell"><span className="skeleton block h-4 w-8" /></td>
+                    <td><span className="skeleton block h-4 w-8" /></td>
                     <td>
                       <span className="skeleton block h-4 w-40 max-w-full" />
                       <span className="skeleton block h-3 w-28 max-w-full mt-2" />
                     </td>
-                    <td className="hidden md:table-cell"><span className="skeleton block h-4 w-12" /></td>
-                    <td className="hidden md:table-cell"><span className="skeleton block h-4 w-16" /></td>
-                    <td className="hidden lg:table-cell"><span className="skeleton block h-4 w-20" /></td>
+                    <td><span className="skeleton block h-4 w-12" /></td>
+                    <td><span className="skeleton block h-4 w-16" /></td>
+                    <td><span className="skeleton block h-4 w-20" /></td>
                     <td><span className="skeleton block h-4 w-24" /></td>
                     <td>
                       <div className="flex justify-end gap-1.5">
@@ -222,9 +281,7 @@ export function TaskList(): ReactNode {
                     <div className="empty-state">
                       <FolderOpen className="w-10 h-10" style={{ color: "var(--muted-soft)" }} />
                       <div className="text-sm font-medium text-ink">{t("tasks.noneYet")}</div>
-                      <Button small onClick={openCreate}>
-                        {t("tasks.add")}
-                      </Button>
+                      <Button small onClick={openCreate}>{t("tasks.add")}</Button>
                     </div>
                   </td>
                 </tr>
@@ -232,75 +289,46 @@ export function TaskList(): ReactNode {
               {loaded &&
                 tasks.map((task) => (
                   <tr key={task.id}>
-                    <td className="hidden sm:table-cell font-mono text-muted-soft">{task.id}</td>
+                    <td className="font-mono text-muted-soft">{task.id}</td>
                     <td>
-                      <Link to={`/task/${task.id}`} className="group block cursor-pointer">
+                      <Link to={`/task/${task.id}`} className="group block min-w-0 cursor-pointer">
                         {task.name || task.anchorName ? (
                           <>
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="font-medium text-ink group-hover:underline">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="font-medium text-ink truncate group-hover:underline">
                                 {task.name || task.anchorName}
                               </span>
                               {task.managedBy === "hub" && (
-                                <span className="badge badge-muted" title={t("tasks.managedHint")}>
+                                <span className="badge badge-muted shrink-0" title={t("tasks.managedHint")}>
                                   {t("tasks.managed")}
                                 </span>
                               )}
                             </div>
-                            <div className="font-mono text-xs text-muted mt-0.5 break-all">{roomId(task.room)}</div>
-                            {/* hub 关联:该任务的后处理配了什么 + 上次结果,可点进 hub 房间页。 */}
-                            {task.hubRule && (
-                              <Link
-                                to={`/hub/${encodeURIComponent(task.hubRule.key)}`}
-                                className="inline-flex items-center gap-1.5 mt-1.5 text-[11px] text-muted hover:text-ink"
-                                onClick={(e) => e.stopPropagation()}
-                                title={t("tasks.hubLinked")}
-                              >
-                                <Network className="w-3 h-3 shrink-0" />
-                                <span className="chip !h-5 !text-[10px]">
-                                  {task.hubRule.uploadMode === "upload" ? t("tasks.hubUpload") : t("tasks.hubStage")}
-                                </span>
-                                <span className="font-mono text-muted-soft">{task.hubRule.steps.join(" · ")}</span>
-                                {!task.hubRule.enabled && <span className="text-muted-soft">({t("tasks.hubDisabled")})</span>}
-                                {task.hubRule.lastRun && (
-                                  <span className="font-mono" style={{ color: stateColor(task.hubRule.lastRun.state) }}>
-                                    {task.hubRule.lastRun.bv ?? task.hubRule.lastRun.state}
-                                  </span>
-                                )}
-                              </Link>
-                            )}
-                            {/* 窄屏:Quality/Danmu/Schedule 列已隐藏,这里以紧凑 meta 行补上,信息不丢。 */}
-                            <div className="flex items-center gap-2 flex-wrap mt-1.5 md:hidden">
-                              <span className="chip !h-5 !text-[10px]">{QUALITY_SHORT[task.quality] ?? task.quality}</span>
-                              <DanmuBadge task={task} />
-                              {scheduleText(task) && (
-                                <span className="font-mono text-[11px] text-muted-soft tabular-nums">{scheduleText(task)}</span>
-                              )}
+                            <div className="font-mono text-xs text-muted mt-0.5 truncate" title={roomId(task.room)}>
+                              {roomId(task.room)}
                             </div>
                           </>
                         ) : (
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-mono text-[13px] font-medium text-ink break-all group-hover:underline">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-mono text-[13px] font-medium text-ink truncate group-hover:underline" title={roomId(task.room)}>
                               {roomId(task.room)}
                             </span>
                             {task.managedBy === "hub" && (
-                              <span className="badge badge-muted" title={t("tasks.managedHint")}>
+                              <span className="badge badge-muted shrink-0" title={t("tasks.managedHint")}>
                                 {t("tasks.managed")}
                               </span>
                             )}
                           </div>
                         )}
                       </Link>
+                                    </td>
+                    <td>
+                      <span className="chip">{QUALITY_SHORT[task.quality] ?? task.quality}</span>
                     </td>
-                    <td className="hidden md:table-cell">
-                      <span className="chip">
-                        {QUALITY_SHORT[task.quality] ?? task.quality}
-                      </span>
-                    </td>
-                    <td className="hidden md:table-cell">
+                    <td>
                       <DanmuBadge task={task} />
                     </td>
-                    <td className="hidden lg:table-cell">
+                    <td>
                       {scheduleText(task) ? (
                         <Tooltip
                           content={
@@ -311,7 +339,7 @@ export function TaskList(): ReactNode {
                               : undefined
                           }
                         >
-                          <span className="font-mono text-[12.5px] text-body tabular-nums">{scheduleText(task)}</span>
+                          <span className="font-mono text-[12.5px] text-body tabular-nums whitespace-nowrap">{scheduleText(task)}</span>
                         </Tooltip>
                       ) : (
                         <span className="text-muted-soft">-</span>
@@ -322,15 +350,13 @@ export function TaskList(): ReactNode {
                         running={task.running}
                         status={task.status}
                         enabled={task.enabled}
+                        stopping={task.stopping}
                         recording={task.recording}
                         recordingWorkers={task.recordingWorkers}
                       />
                     </td>
                     <td className="text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1.5 justify-end">
-                        {/* 窄屏(<sm):只留「详情」入口,避免 4 个图标挤爆手机宽度;
-                            完整操作在详情页可用。 */}
-                        <div className="hidden sm:flex items-center gap-1.5">
                         {task.enabled ? (
                           <IconButton
                             title={task.managedBy === "hub" ? t("tasks.managedHint") : t("tasks.titleStop")}
@@ -366,12 +392,6 @@ export function TaskList(): ReactNode {
                             </IconButton>
                           </>
                         )}
-                        </div>
-                        <span className="sm:hidden inline-flex">
-                          <Link className="btn-icon" to={`/task/${task.id}`} title={t("tasks.titleDetail")}>
-                            <FileText className="w-4 h-4" />
-                          </Link>
-                        </span>
                       </div>
                     </td>
                   </tr>

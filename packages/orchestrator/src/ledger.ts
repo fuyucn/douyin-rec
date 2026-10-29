@@ -3,6 +3,39 @@ import type { HubJobState, HubNodeStateName, HubStepName } from "@drec/core";
 
 // 状态/步骤名的**唯一真理 = core 的只读契约**(app 的 hub 任务页只读同一张库,靠它对齐)。
 export type JobState = HubJobState;
+
+/**
+ * job 状态转换白名单(from → 允许的 to)。**由现有调用点推导**,不是凭空设计:
+ * - 主线 pending → syncing(pipeline 选优后)→ merging → uploading(仅分段上传)→ done / needs_manual;
+ * - 任意非终态可 → failed(markFailed / sweepStale)、→ needs_manual(停止 / 转人工)、→ done(上传成功是事实);
+ * - 重入:failed → syncing(reconciler 自动重试)、{非 done} → retrying(runNow / retryNode);
+ * - needs_manual 只能被人工 → retrying / done(hub-recheck 翻正);**不得 → failed**,否则
+ *   「用户已停止」的场被还在跑的 pipeline 迟到的 markFailed 改回 failed,reconciler 会自动重跑。
+ * - done 是终态,无出边;人工重跑须显式 `{ force: true }`(runNow / retryNode)。
+ * 同态(含 done → done 的幂等收尾、failed → failed 的 fails 自增)恒允许,不列在表里。
+ */
+export const ALLOWED_TRANSITIONS: Readonly<Record<JobState, readonly JobState[]>> = {
+  pending: ["settling", "syncing", "retrying", "failed", "needs_manual", "done"],
+  settling: ["syncing", "retrying", "failed", "needs_manual", "done"],
+  syncing: ["merging", "retrying", "failed", "needs_manual", "done"],
+  merging: ["uploading", "retrying", "failed", "needs_manual", "done"],
+  uploading: ["retrying", "failed", "needs_manual", "done"],
+  retrying: ["syncing", "failed", "needs_manual", "done"],
+  failed: ["syncing", "retrying", "needs_manual", "done"],
+  needs_manual: ["retrying", "done"],
+  done: [],
+};
+
+/** from→to 是否合法。库里不认识的旧状态一律放行:行仍可读,也允许被改写回合法状态自愈。 */
+export function isTransitionAllowed(from: string, to: JobState): boolean {
+  if (from === to) return true;
+  const allowed = (ALLOWED_TRANSITIONS as Record<string, readonly JobState[] | undefined>)[from];
+  return allowed === undefined || allowed.includes(to);
+}
+
+/** 状态写入的显式覆盖:仅供人工重跑(runNow / retryNode)把 done 拨回进行中。 */
+export interface TransitionOpts { force?: boolean }
+
 export interface JobRow {
   streamKey: string;
   state: JobState;
@@ -14,6 +47,25 @@ export interface JobRow {
   startMs?: number | null;
   /** 本场 stage stem / B 站标题(首次 merge 锁定,改模板不影响重跑)。旧库为 null。 */
   outputStem?: string | null;
+  /** 收尾后留存转格式的跟随状态(JSON,见 finalize-format `Followups`;plans/036 T9b)。旧库 / 未派发为 null。 */
+  followups?: string | null;
+  /** Node upload queue plan (JSON, see node-upload-queue `UploadPlan`; plan 038 T12). Old rows / never queued: null. */
+  uploadPlan?: string | null;
+  /** Last queue poll snapshot (JSON `NodeUploadStatusDTO`; plan 038 PR5, display only). */
+  uploadStatus?: string | null;
+  /**
+   * Manual review mark on a `needs_manual` row (issue #312): when a person/agent confirmed the case needs no
+   * further action. The row keeps its state, history and log; the queue inbox just stops listing it.
+   * Cleared automatically when the job changes state or re-enters needs_manual for a different reason.
+   */
+  ackedAt?: number | null;
+  ackNote?: string | null;
+  /**
+   * Bilibili season association state for this archive (issue #364).
+   * NULL = feature off / never attempted; "pending" = BV persisted but the add may not have landed;
+   * "done" = the archive is confirmed in the section; "failed" = a definite failure, surfaced to a human.
+   */
+  seasonState?: "pending" | "done" | "failed" | null;
   updatedAt: number;
 }
 
@@ -26,6 +78,8 @@ export interface CandidateRow {
   startMs: number;
   endMs: number;
   totalGapSec: number;
+  /** 该 worker 本场弹幕条目数(0 = 无弹幕/仅表头空 xml;旧库/未统计为 NULL)。 */
+  danmuCount?: number | null;
   isWinner: number; // 0/1（sqlite 无 bool）
   updatedAt: number;
 }
@@ -35,8 +89,12 @@ export interface JobEvent { streamKey: string; state: JobState; at: number; }
 
 /** pipeline 细粒度子步骤规范名(流程图节点)。upload/append 仅 upload 模式有。 */
 export type StepName = HubStepName;
-/** 子步骤事件:start/done 配对(能算每步耗时 + 判断当前在跑哪步;异步并行的两轨各有各的起止)。 */
-export interface StepEvent { streamKey: string; step: StepName; phase: "start" | "done"; at: number; detail?: string }
+/**
+ * Sub-step events: start/done pair for duration and the currently running step (parallel branches
+ * each have their own pair). `skipped` means the step was deliberately not run this round.
+ */
+export type StepPhase = "start" | "done" | "skipped";
+export interface StepEvent { streamKey: string; step: StepName; phase: StepPhase; at: number; detail?: string }
 
 /** 单节点状态(workflow 安全阀 + 单节点重跑)。与 StepName 同 key。 */
 export type NodeStateName = HubNodeStateName;
@@ -61,6 +119,21 @@ export class SyncLedger {
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN fails INTEGER NOT NULL DEFAULT 0"); } catch { /* 列已存在 */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN startMs INTEGER"); } catch { /* 列已存在 */ }
     try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN outputStem TEXT"); } catch { /* 列已存在 */ }
+    // 收尾后留存转格式的跟随状态(T9b;JSON)。旧库补列,老行为 NULL = 从未派发。
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN followups TEXT"); } catch { /* 列已存在 */ }
+    // Node upload queue plan (plan 038 T12): persisted job ids per order. Old rows stay NULL = never queued.
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN uploadPlan TEXT"); } catch { /* column exists */ }
+    // Last queue poll snapshot for the queue page (plan 038 PR5). Display only; NULL = never polled.
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN uploadStatus TEXT"); } catch { /* column exists */ }
+    // Manual review mark for needs_manual rows (issue #312). NULL = not reviewed.
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackedAt INTEGER"); } catch { /* column exists */ }
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN ackNote TEXT"); } catch { /* column exists */ }
+    try { this.db.exec("ALTER TABLE sync_jobs ADD COLUMN seasonState TEXT"); } catch { /* column exists */ }
+    // transition() names these columns on every state change, so a failed ALTER must surface here, not later.
+    const cols = new Set((this.db.prepare("PRAGMA table_info(sync_jobs)").all() as Array<{ name: string }>).map((c) => c.name));
+    if (!cols.has("ackedAt") || !cols.has("ackNote") || !cols.has("seasonState")) {
+      throw new Error("sync_jobs migration failed: ackedAt/ackNote/seasonState columns missing");
+    }
     // 选优候选明细:每场每节点一行,记 coverage/时长/起止/缺口 + 是否胜出,供事后复盘选优依据。
     this.db.exec(`CREATE TABLE IF NOT EXISTS sync_candidates(
       streamKey TEXT NOT NULL, workerId TEXT NOT NULL,
@@ -68,6 +141,8 @@ export class SyncLedger {
       startMs INTEGER NOT NULL, endMs INTEGER NOT NULL, totalGapSec REAL NOT NULL,
       isWinner INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
       PRIMARY KEY(streamKey, workerId))`);
+    // 既有库迁移:补 danmuCount 列(选优「为什么这台赢」的弹幕维度;已存在则忽略)。
+    try { this.db.exec("ALTER TABLE sync_candidates ADD COLUMN danmuCount INTEGER"); } catch { /* 列已存在 */ }
     // 既有库列改名 tenant→worker(fresh DB 上旧列不存在会抛 → 吞掉;SQLite ≥3.25 支持 PK 列改名)。
     try { this.db.exec("ALTER TABLE sync_jobs RENAME COLUMN winnerTenant TO winnerWorker"); } catch { /* 已是新列名或 fresh */ }
     try { this.db.exec("ALTER TABLE sync_candidates RENAME COLUMN tenantId TO workerId"); } catch { /* 已是新列名或 fresh */ }
@@ -99,7 +174,7 @@ export class SyncLedger {
     this.db.prepare("INSERT INTO sync_job_events(streamKey,state,at) VALUES(?,?,?)").run(streamKey, state, at);
   }
   /** 记一个子步骤 start/done(pipeline 调用;流程图用)。 */
-  logStep(streamKey: string, step: StepName, phase: "start" | "done", detail?: string): void {
+  logStep(streamKey: string, step: StepName, phase: StepPhase, detail?: string): void {
     this.db.prepare("INSERT INTO sync_job_steps(streamKey,step,phase,at,detail) VALUES(?,?,?,?,?)")
       .run(streamKey, step, phase, this.now(), detail ?? null);
   }
@@ -140,21 +215,89 @@ export class SyncLedger {
     const r = this.db.prepare("SELECT * FROM sync_jobs WHERE streamKey=?").get(streamKey) as unknown as JobRow | undefined;
     return r ?? null;
   }
-  setState(streamKey: string, state: JobState, patch: { winnerWorker?: string; error?: string } = {}): void {
+  /**
+   * 受白名单约束的状态写入:合法才写库 + 记事件,返回 true;
+   * 非法(含无此 job、并发下已被别处改走)→ 不写库、不动 updatedAt、console.warn、返回 false,**不 throw**。
+   * 用「按读到的旧状态比较再写」(CAS)而非先查后盲写,并发/重入下也不会覆盖终态。
+   */
+  private transition(
+    streamKey: string,
+    to: JobState,
+    set: string,
+    args: Array<string | number | null>,
+    force = false,
+    reopen: (cur: JobRow) => boolean = (cur) => cur.state !== to,
+  ): boolean {
+    const cur = this.get(streamKey);
+    if (!cur) {
+      console.warn(`[ledger] 拒绝状态转换 ${streamKey}: → ${to}(无此 job)`);
+      return false;
+    }
+    if (!force && !isTransitionAllowed(cur.state, to)) {
+      console.warn(`[ledger] 拒绝非法状态转换 ${streamKey}: ${cur.state} → ${to}`);
+      return false;
+    }
     const at = this.now();
-    this.db.prepare("UPDATE sync_jobs SET state=?, winnerWorker=COALESCE(?,winnerWorker), error=?, updatedAt=? WHERE streamKey=?")
-      .run(state, patch.winnerWorker ?? null, patch.error ?? null, at, streamKey);
-    this.logEvent(streamKey, state, at);
+    // A state change (or a new needs_manual reason) is a new case: drop any earlier review mark.
+    const clearAck = reopen(cur) ? "ackedAt=NULL, ackNote=NULL, " : "";
+    const r = this.db.prepare(`UPDATE sync_jobs SET state=?, ${set}, ${clearAck}updatedAt=? WHERE streamKey=? AND state=?`)
+      .run(to, ...args, at, streamKey, cur.state);
+    if (Number(r.changes) === 0) {
+      console.warn(`[ledger] 拒绝状态转换 ${streamKey}: ${cur.state} → ${to}(状态已被并发改写)`);
+      return false;
+    }
+    this.logEvent(streamKey, to, at);
+    return true;
   }
-  markDone(streamKey: string, bv: string): void {
-    const at = this.now();
-    this.db.prepare("UPDATE sync_jobs SET state='done', bv=?, error=NULL, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
-    this.logEvent(streamKey, "done", at);
+  setState(
+    streamKey: string,
+    state: JobState,
+    patch: { winnerWorker?: string; error?: string } = {},
+    opts: TransitionOpts = {},
+  ): boolean {
+    return this.transition(streamKey, state, "winnerWorker=COALESCE(?,winnerWorker), error=?",
+      [patch.winnerWorker ?? null, patch.error ?? null], opts.force === true,
+      (cur) => cur.state !== state || (state === "needs_manual" && (patch.error ?? null) !== (cur.error ?? null)));
+  }
+  /**
+   * Set (note = text) or clear (note = null) the manual review mark of a `needs_manual` row (issue #312).
+   * Compare-and-set on the state: a row that moved on meanwhile is left alone and false is returned.
+   * Does not change state, events or `updatedAt` (the age of the case stays the age of the case).
+   */
+  ackManual(streamKey: string, note: string | null): boolean {
+    const at = note === null ? null : this.now();
+    const r = this.db.prepare("UPDATE sync_jobs SET ackedAt=?, ackNote=? WHERE streamKey=? AND state='needs_manual'")
+      .run(at, note, streamKey);
+    return Number(r.changes) > 0;
+  }
+  /**
+   * 流程内推进(syncing/merging/uploading):done 场的收尾补跑会重入这些阶段,
+   * done 是终态 → 静默跳过(不 warn、不改库),流程照常往下走到收尾。
+   */
+  advanceState(
+    streamKey: string,
+    state: JobState,
+    patch: { winnerWorker?: string; error?: string } = {},
+  ): boolean {
+    if (this.get(streamKey)?.state === "done") return false;
+    return this.setState(streamKey, state, patch);
+  }
+  markDone(streamKey: string, bv: string): boolean {
+    return this.transition(streamKey, "done", "bv=?, error=NULL", [bv]);
   }
   /** checkpoint:P1 上传成功即落 bv 列(不改 state、不写事件)。续跑靠它判断"已建稿"。 */
   setBv(streamKey: string, bv: string): void {
     const at = this.now();
     this.db.prepare("UPDATE sync_jobs SET bv=?, updatedAt=? WHERE streamKey=?").run(bv, at, streamKey);
+  }
+  /** Persist the BV and season intent atomically so a kill cannot leave one without the other. */
+  setBvAndSeasonState(streamKey: string, bv: string, state: JobRow["seasonState"]): void {
+    this.db.prepare("UPDATE sync_jobs SET bv=?, seasonState=?, updatedAt=? WHERE streamKey=?")
+      .run(bv, state ?? null, this.now(), streamKey);
+  }
+  /** Season association state (issue #364); NULL clears it when the feature is off. */
+  setSeasonState(streamKey: string, state: JobRow["seasonState"]): void {
+    this.db.prepare("UPDATE sync_jobs SET seasonState=?, updatedAt=? WHERE streamKey=?").run(state ?? null, this.now(), streamKey);
   }
   /** 锁定本场产物 stem(不改 state、不写事件)。已有值不覆盖。 */
   setOutputStem(streamKey: string, stem: string): void {
@@ -162,6 +305,61 @@ export class SyncLedger {
     if (existing) return;
     const at = this.now();
     this.db.prepare("UPDATE sync_jobs SET outputStem=?, updatedAt=? WHERE streamKey=?").run(stem, at, streamKey);
+  }
+  /**
+   * 认领「收尾后留存转格式」的派发权(T9b):仅当 `followups` 仍为 NULL 时写入初值并返回 true;
+   * 已被认领(含历史派发过的场)→ false。这是「每场只派发一次」的唯一闸门(done 场收尾补跑会重入 runPipeline)。
+   * 不改 state、不写事件、**不碰 updatedAt**(跟随状态不该扰动 listRecent 排序与 sweepStale 判定)。
+   */
+  claimFollowups(streamKey: string, initial: string): boolean {
+    const r = this.db.prepare("UPDATE sync_jobs SET followups=? WHERE streamKey=? AND followups IS NULL").run(initial, streamKey);
+    return Number(r.changes) > 0;
+  }
+  /** 覆盖写跟随状态(不碰 updatedAt)。无此 job → 无操作。 */
+  setFollowups(streamKey: string, json: string): void {
+    this.db.prepare("UPDATE sync_jobs SET followups=? WHERE streamKey=?").run(json, streamKey);
+  }
+  getFollowups(streamKey: string): string | null {
+    const r = this.db.prepare("SELECT followups FROM sync_jobs WHERE streamKey=?").get(streamKey) as { followups?: string | null } | undefined;
+    return r?.followups ?? null;
+  }
+  /**
+   * Claim the right to persist the upload plan: writes only while `uploadPlan` is NULL (first writer wins).
+   * Must happen before any enqueue so a re-entry reuses the same job ids and generation.
+   * Does not touch state, events or `updatedAt`.
+   */
+  claimUploadPlan(streamKey: string, json: string): boolean {
+    const r = this.db.prepare("UPDATE sync_jobs SET uploadPlan=? WHERE streamKey=? AND uploadPlan IS NULL").run(json, streamKey);
+    return Number(r.changes) > 0;
+  }
+  /** Overwrite the plan (recovery moves an order to a new generation). No such job: no-op. */
+  setUploadPlan(streamKey: string, json: string): void {
+    this.db.prepare("UPDATE sync_jobs SET uploadPlan=? WHERE streamKey=?").run(json, streamKey);
+  }
+  /** Store the latest queue observation; does not bump updatedAt (the poller's touch owns liveness). */
+  setUploadStatus(streamKey: string, json: string): void {
+    this.db.prepare("UPDATE sync_jobs SET uploadStatus=? WHERE streamKey=?").run(json, streamKey);
+  }
+  getUploadPlan(streamKey: string): string | null {
+    const r = this.db.prepare("SELECT uploadPlan FROM sync_jobs WHERE streamKey=?").get(streamKey) as { uploadPlan?: string | null } | undefined;
+    return r?.uploadPlan ?? null;
+  }
+  /** Orders that have a queue plan and are not yet terminal in the ledger (the queue poller's work list). */
+  listUploadPlans(): Array<{ streamKey: string; state: JobState; uploadPlan: string }> {
+    return this.db.prepare("SELECT streamKey, state, uploadPlan FROM sync_jobs WHERE uploadPlan IS NOT NULL AND state NOT IN('done','needs_manual')")
+      .all() as unknown as Array<{ streamKey: string; state: JobState; uploadPlan: string }>;
+  }
+  /** Refresh `updatedAt` without changing state: proof of life for a queue-managed order (keeps sweepStale off it). */
+  touch(streamKey: string): void {
+    this.db.prepare("UPDATE sync_jobs SET updatedAt=? WHERE streamKey=?").run(this.now(), streamKey);
+  }
+  /**
+   * 仍有未终结项的场(对账轮询用)。判据 = JSON 里的 `"open":true`(finalize-format 写入,`JSON.stringify` 无空格);
+   * 全部终结后写回 `open:false`,于是历史 done 场不会每轮被扫描解析。
+   */
+  listOpenFollowups(): Array<{ streamKey: string; followups: string }> {
+    return this.db.prepare("SELECT streamKey, followups FROM sync_jobs WHERE followups LIKE '%\"open\":true%'")
+      .all() as unknown as Array<{ streamKey: string; followups: string }>;
   }
   /** 某 step 的最新事件是否为 done(续跑用:跳过已完成的 append 组)。无该 step 事件 → false。 */
   isStepDone(streamKey: string, step: StepName): boolean {
@@ -227,8 +425,13 @@ export class SyncLedger {
     const last = new Map<string, { phase: string; at: number }>();
     for (const s of steps) last.set(s.step, { phase: s.phase, at: s.at });
     for (const [step, e] of last) {
-      if (step === "select" || step === "pull") continue; // 前奏不进节点表(UI 仍按 steps 画)
+      // 前奏不进节点表(UI 仍按 steps 画)。node_upload 与 pull 同为「拉取/处理后上传」的前奏:
+      // 回填它 = 给旧 job 造一个可能被 reconciler 当成可重试的节点 —— 而节点侧一旦跑过就可能已建稿,
+      // 故与 pull 同口径排除(真正的闸门仍是失败路径写的 upload_plain failed)。
+      if (step === "select" || step === "pull" || step === "node_upload") continue;
       const name = step as StepName;
+      // A skip is not a failure and not a completion: it carries no node verdict at all.
+      if (e.phase === "skipped") continue;
       this.syncNodeState(streamKey, name, e.phase === "done" ? "done" : "failed", {
         error: e.phase === "done" ? undefined : "上次中断/失败",
       });
@@ -284,11 +487,8 @@ export class SyncLedger {
     }
   }
   /** pipeline 抛错时:置 failed + 记 error + fails 自增(供重试上限判定)。 */
-  markFailed(streamKey: string, error: string): void {
-    const at = this.now();
-    this.db.prepare("UPDATE sync_jobs SET state='failed', error=?, fails=fails+1, updatedAt=? WHERE streamKey=?")
-      .run(error, at, streamKey);
-    this.logEvent(streamKey, "failed", at);
+  markFailed(streamKey: string, error: string): boolean {
+    return this.transition(streamKey, "failed", "error=?, fails=fails+1", [error]);
   }
   /** 某场的状态转换时间线(升序)。 */
   getEvents(streamKey: string): JobEvent[] {
@@ -313,20 +513,21 @@ export class SyncLedger {
   /** 记录某场各节点的选优候选指标(幂等覆盖)。winnerWorkerId 标记哪台胜出。 */
   recordCandidates(
     streamKey: string,
-    cands: Array<{ workerId: string; coverage: number; durationSec: number; startMs: number; endMs: number; totalGapSec: number }>,
+    cands: Array<{ workerId: string; coverage: number; durationSec: number; startMs: number; endMs: number; totalGapSec: number; danmuCount?: number }>,
     winnerWorkerId?: string,
   ): void {
     const now = this.now();
     const stmt = this.db.prepare(
-      `INSERT INTO sync_candidates(streamKey,workerId,coverage,durationSec,startMs,endMs,totalGapSec,isWinner,updatedAt)
-       VALUES(?,?,?,?,?,?,?,?,?)
+      `INSERT INTO sync_candidates(streamKey,workerId,coverage,durationSec,startMs,endMs,totalGapSec,danmuCount,isWinner,updatedAt)
+       VALUES(?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(streamKey,workerId) DO UPDATE SET
          coverage=excluded.coverage, durationSec=excluded.durationSec,
          startMs=excluded.startMs, endMs=excluded.endMs, totalGapSec=excluded.totalGapSec,
+         danmuCount=excluded.danmuCount,
          isWinner=excluded.isWinner, updatedAt=excluded.updatedAt`,
     );
     for (const c of cands) {
-      stmt.run(streamKey, c.workerId, c.coverage, c.durationSec, c.startMs, c.endMs, c.totalGapSec,
+      stmt.run(streamKey, c.workerId, c.coverage, c.durationSec, c.startMs, c.endMs, c.totalGapSec, c.danmuCount ?? null,
         c.workerId === winnerWorkerId ? 1 : 0, now);
     }
   }

@@ -1,4 +1,4 @@
-import { Activity, ChevronLeft, GripVertical, Network, Plus, Radio, Server } from "lucide-react";
+import { Activity, ChevronLeft, GripVertical, Network, Plus, Radio, Server, TriangleAlert } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAtomValue } from "jotai";
@@ -6,11 +6,13 @@ import { api, type HubRuleDTO, type WorkerDTO, type WorkerStatus } from "../api/
 import { hubEnabledAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { LatestRunBadge } from "../components/HubJobs";
+import { runNeedsAttention } from "../lib/room-status";
 import { RoomDetail } from "../components/RoomDetail";
 import { WorkersPanel } from "../components/WorkersPanel";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
 import { useDragReorder } from "../lib/dragReorder";
-import { usePolling, useToast, errMessage } from "../lib/hooks";
+import { useHubStream, usePolling, useToast, errMessage } from "../lib/hooks";
+import { HubStreamBanner } from "../components/HubStreamBanner";
 import { roomId } from "../lib/labels";
 import { useT } from "../lib/i18n";
 
@@ -27,7 +29,10 @@ export function HubPage(): ReactNode {
   /** 全部非终态 run 的**数量**(Active 指标;用后端 total 权威计数,不受分页 limit 截断)。 */
   const [activeRuns, setActiveRuns] = useState(0);
   /** 每个房间最新一条 run(徽标用;权威来源,不受「最近 N 条」分页影响)。 */
-  const [latestByRoom, setLatestByRoom] = useState<Record<string, { streamKey: string; state: string; bv: string | null; updatedAt: number }>>({});
+  const [latestByRoom, setLatestByRoom] = useState<Record<string, { streamKey: string; state: string; bv: string | null; updatedAt: number; manualPhase?: string | null }>>({});
+  // Rooms whose LATEST RUN needs a person. Not the room-list status: that one also folds in live
+  // recording and paused/disabled state, so the two numbers can legitimately differ.
+  const attentionRooms = Object.values(latestByRoom).filter((r) => runNeedsAttention(r)).length;
   const [loaded, setLoaded] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
@@ -37,10 +42,11 @@ export function HubPage(): ReactNode {
   const refresh = async (): Promise<void> => {
     try {
       setRules(await api.listHubRules());
-    } catch {
-      /* 静默:轮询会重试 */
-    } finally {
       setLoaded(true);
+    } catch (e) {
+      // 不静默:reject 让 useHubStream 置 stale(页面显示「数据可能已过期」),规则列表不会悄悄停在旧值。
+      setLoaded(true);
+      throw e;
     }
     // Active 指标必须统计**全部**非终态 run,不能用上面「最近 20 条」的 jobs(数据一多会恒为 0)。
     // 用 states 精确过滤 + 读后端 total(权威计数,不受 limit 截断)。
@@ -57,7 +63,8 @@ export function HubPage(): ReactNode {
       /* 忽略 */
     }
   };
-  usePolling(() => void refresh(), 3000);
+  // 推送驱动:run 状态变化由 /api/hub/stream 推;推送不可用自动退化为有界退避轮询。
+  const stream = useHubStream(refresh, { enabled: hubEnabled === true });
 
   const refreshWorkers = async (): Promise<void> => {
     try {
@@ -76,12 +83,13 @@ export function HubPage(): ReactNode {
       /* 保留上次 status */
     }
   };
-  // worker 存活轮询周期(ms):5 分钟(沿用原 WorkersCard 常量)。
+  // worker 存活轮询周期(ms):5 分钟(沿用原 WorkersCard 常量)。与规则/run 刷新**解耦**:
+  // worker 健康变化与 hub 台账无关,不该跟着每次 changed 一起重拉。
   usePolling(() => void fetchWorkerStatus(), 300_000, hubEnabled === true);
 
   /** 某规则(房间)的历次 run,新→旧:streamKey 前缀 `{platform}:{roomSlug}:` 匹配。 */
   /** 房间徽标用的「最新一条 run」:走 latestByRoom(权威端点),而不是 jobs(受最近 N 条分页限制)。 */
-  const latestRunOf = (r: HubRuleDTO): { state: string; currentStepSec?: number | null } | undefined =>
+  const latestRunOf = (r: HubRuleDTO): { state: string; manualPhase?: string | null; currentStepSec?: number | null } | undefined =>
     latestByRoom[`${r.platform}:${r.roomSlug}`];
 
   const toast = useToast();
@@ -95,7 +103,7 @@ export function HubPage(): ReactNode {
         setRules(await api.reorderHubRules(keys));
       } catch (e) {
         toast(errMessage(e), "error");
-        void refresh();
+        void refresh().catch(() => {}); // 交互后主动刷新:失败已由 stale 提示呈现
       }
     },
   });
@@ -154,13 +162,14 @@ export function HubPage(): ReactNode {
         </div>
       </div>
 
+      <HubStreamBanner handle={stream} />
       <div className="telemetry-bar telemetry-bar-cols-3 mb-5">
         <div className="telemetry-cell">
           <div className="flex flex-col gap-1.5 min-w-0">
-            <span className="telemetry-label">{t("hub.page.metricRules")}</span>
-            <span className="telemetry-value tabular-nums">{rules.length}</span>
+            <span className="telemetry-label">{t("hub.page.metricAttention")}</span>
+            <span className="telemetry-value tabular-nums" style={{ color: attentionRooms ? "var(--warning-fg)" : "var(--muted-soft)" }}>{attentionRooms}</span>
           </div>
-          <span className="telemetry-icon"><Radio className="w-4 h-4" /></span>
+          <span className="telemetry-icon" style={attentionRooms ? { color: "var(--warning-fg)" } : undefined}><TriangleAlert className="w-4 h-4" /></span>
         </div>
         <div className="telemetry-cell">
           <div className="flex flex-col gap-1.5 min-w-0">
@@ -233,7 +242,8 @@ export function HubPage(): ReactNode {
                         )}
                       </div>
                       <div className="flex items-center gap-1.5">
-                        <span className="dot" style={{ background: r.enabled ? "var(--success)" : "var(--muted-soft)" }} />
+                        {/* Neutral, not green: green means "recording" everywhere else; this only says the rule is on. */}
+                        <span className="dot" style={{ background: r.enabled ? "var(--ink)" : "var(--muted-soft)" }} />
                         <LatestRunBadge run={latestRunOf(r)} />
                       </div>
                     </button>
@@ -258,7 +268,7 @@ export function HubPage(): ReactNode {
               <RoomDetail
                 key={selectedRule.key}
                 rule={selectedRule}
-                onChanged={() => void refresh()}
+                onChanged={() => void refresh().catch(() => {})}
                 onDeleted={() => navigate("/hub")}
               />
             ) : (
@@ -268,7 +278,7 @@ export function HubPage(): ReactNode {
         </div>
       )}
 
-      <HubRuleDialog open={dialogOpen} onClose={() => setDialogOpen(false)} rule={null} onSaved={() => void refresh()} />
+      <HubRuleDialog open={dialogOpen} onClose={() => setDialogOpen(false)} rule={null} onSaved={() => void refresh().catch(() => {})} />
 
       <WorkersPanel
         open={panelOpen}

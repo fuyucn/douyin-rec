@@ -1,0 +1,22 @@
+# mirror 档覆盖(issue #88)。只由 scripts/e2e-verify.sh 在 DREC_MIRROR=1 / `up --mirror` 时叠加到 compose.yml。
+# 用途:把 dev 当成「真 dev server」——数据根由 prd(docker-data)只读复制而来(真抖音 cookies、任务、hub 规则),
+# 三个节点都能出外网,开任务后真取流、真录制、真走 hub 链路。平时关着,测试时才 up。
+#
+# 与 internal 档的差别:
+#   1) 三个容器都额外接入一个非 internal 的出口网络(worker 要真取流);drec-devnet 仍是 internal,节点间 ssh/rsync 走它;
+#   2) controller 只发布 127.0.0.1:${DREC_MIRROR_PORT:-7871} → 7860(看 UI),不绑 0.0.0.0、不与 prd 的 7860 冲突。  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
+# 物理上投不了稿:镜像里是假 biliup,数据根里只有 FAKE-DEV 的 biliup cookies(真 biliup cookies 不复制);
+# 种子数据里任务全 enabled=0、hub 规则 upload.mode 一律改 stage、webhook 清空。
+services:
+  controller:
+    networks: [drec-devnet, drec-devnet-egress]
+    ports:
+      - "127.0.0.1:${DREC_MIRROR_PORT:-7871}:7860"  # issue-guard: allow(dev 测试夹具:本机回环地址/假房间号)
+  node-1:
+    networks: [drec-devnet, drec-devnet-egress]
+  node-2:
+    networks: [drec-devnet, drec-devnet-egress]
+
+networks:
+  drec-devnet-egress:
+    name: drec-devnet-egress${DREC_DEV_SUFFIX:-}

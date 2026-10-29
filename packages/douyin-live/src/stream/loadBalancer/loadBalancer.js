@@ -38,8 +38,14 @@ export class APILoadBalancer {
     /**
      * 获取下一个可用的 API 端点
      * 使用加权轮询算法，优先选择权重高且未被禁用的端点
+     *
+     * ⚠️ 本地扩展(上游无此参数):`exclude` 排除本场景不适用的端点(如取流排除 webHTML/userHTML)。
+     * 重新 vendor 上游时务必保留,否则取流可能选中恒无流的端点。
+     *
+     * 注:`priority` 只影响**排序顺序**,不影响选中概率 —— 实际选择是按 `weight` 的加权随机,
+     * 排序后遍历顺序对随机结果无影响。当前四端点 weight 全 1 → 等概率。要改概率请调 `weight`。
      */
-    getNextEndpoint() {
+    getNextEndpoint(exclude) {
         const now = Date.now();
         // 清理过期的禁用状态
         this.endpoints.forEach((status) => {
@@ -48,8 +54,11 @@ export class APILoadBalancer {
                 status.failureCount = Math.max(0, status.failureCount - 1); // 部分恢复
             }
         });
-        // 获取可用的端点
-        const availableEndpoints = this.endpoints.filter((status) => !status.isBlocked);
+        // 获取可用的端点(exclude:本场景不适用的端点,如取流时排除只能做状态检测的 userHTML)
+        const skip = exclude && exclude.length > 0 ? new Set(exclude) : null;
+        const availableEndpoints = this.endpoints.filter(
+            (status) => !status.isBlocked && !(skip && skip.has(status.endpoint.name)),
+        );
         if (availableEndpoints.length === 0) {
             return null; // 所有端点都被禁用
         }
@@ -112,19 +121,36 @@ export class APILoadBalancer {
      * 使用负载均衡策略调用 getRoomInfo
      */
     async callWithLoadBalance(webRoomId, opts = {}) {
-        const maxAttempts = this.endpoints.length;
+        // ⚠️ 这是对上游 vendored 副本的**本地扩展**,重新 vendor 上游时务必保留(见 SOURCE.md「我们的扩展」)。
+        //   exclude  —— 本场景不适用的端点(取流时排除 webHTML/userHTML:它们恒无流,见 stream.js)。
+        //   validate —— 结果可用性校验(可选)。上游缺这个:某些端点**不抛错但返回不可用结果**
+        //               (如被风控 → living:false 且无 sources),上游会当成功返回、停止重试,
+        //               调用方随后才炸「未找到对应的流」(VPS2 实测踩过)。传了 validate 后:
+        //               返回 falsy 即按失败处理(记 failure + 换下一个端点)。
+        const { exclude, validate, ...roomOpts } = opts;
+        const skip = exclude && exclude.length > 0 ? new Set(exclude) : null;
+        const maxAttempts = this.endpoints.filter((s) => !(skip && skip.has(s.endpoint.name))).length;
         let lastError = null;
+        // ⚠️ 本地扩展(上游 bug):单次调用内不重复试同一个端点。上游无此去重 → getNextEndpoint
+        // 可能反复随机选中同一个刚失败的端点,「试遍所有端点」退化成「重试同一个」(最多 N 次都白跑)。
+        // 已试过的并入 exclude。重新 vendor 时务必保留。
+        const tried = [];
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            const endpointStatus = this.getNextEndpoint();
+            const endpointStatus = this.getNextEndpoint([...(exclude ?? []), ...tried]);
             if (!endpointStatus) {
                 throw new Error("所有 API 端点都不可用，请稍后重试");
             }
             const apiType = endpointStatus.endpoint.name;
+            tried.push(apiType);
             try {
                 const result = await getRoomInfo(webRoomId, {
-                    ...opts,
+                    ...roomOpts,
                     api: apiType,
                 });
+                // 结果不可用(如取流时该端点无流)→ 记失败并换下一个端点,而不是当成功返回。
+                if (typeof validate === "function" && !validate(result)) {
+                    throw new Error(`端点 ${apiType} 返回不可用结果(validate 未通过)`);
+                }
                 // 调用成功，记录成功状态
                 this.recordSuccess(apiType);
                 return result;

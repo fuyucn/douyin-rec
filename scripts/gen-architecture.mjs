@@ -15,12 +15,18 @@
  * 用法:
  *   node scripts/gen-architecture.mjs            # 生成 docs/architecture.html
  *   node scripts/gen-architecture.mjs --days 30  # 换热度窗口
- *   node scripts/gen-architecture.mjs --check    # 只校验现有产物是否与仓库一致(CI/自审用)
+ *   node scripts/gen-architecture.mjs --check    # 只校验「结构」是否与仓库一致(CI/自审用)
+ *
+ * --check 只比对结构性内容(包清单 / 依赖边 / 层级 / 角色 / 流程图 / mermaid 图),
+ * **不比对**生成时间与热度统计(各包 LOC、文件数、测试数、近 N 天提交数)——后者每次提交都会变,
+ * 计入比对会让任何提交都变红(issue #29)。生成物里内嵌一份结构 JSON(#arch-structure),
+ * --check 拿它与仓库现算的结构比对;生成行为本身(热图数字照常写入)不变。
  */
 import { readFileSync, writeFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assignTopTestsToPackages } from "./test-package-classify.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PKG_DIR = join(ROOT, "packages");
@@ -87,13 +93,9 @@ for (const dir of readdirSync(PKG_DIR)) {
 }
 // 顶层 test/ 目录里的用例按「文件名含包名」归类(粗粒度,够热图用)。
 const topTests = walk(join(ROOT, "test")).filter((f) => /\.test\.ts$/.test(f));
-for (const t of topTests) {
-  const base = t.toLowerCase();
-  for (const p of pkgs) {
-    const short = p.dir.replace(/-live$/, "").replace(/-/g, "");
-    if (base.includes(p.dir) || base.includes(short)) p.srcTests += 1;
-  }
-}
+// 归类逻辑抽到 scripts/test-package-classify.mjs(纯函数、可 import、便于单测钉死
+// 「只依赖相对 ROOT 的路径」这条回归,issue #20);行为与原内联写法逐字一致。
+assignTopTestsToPackages(pkgs, topTests, ROOT);
 // 前端是独立 Vite 工程(非 @drec 包),单独统计。
 const webDir = join(PKG_DIR, "web", "src");
 const webCode = walk(webDir).filter((f) => /\.(ts|tsx)$/.test(f) && !/\.test\./.test(f));
@@ -124,7 +126,7 @@ function textOn(rgb) {
 }
 
 const RANK_LABEL = {
-  0: "L0 · 基础叶子", 0.5: "L0.5 · 可观测性", 1: "L1 · 引擎轴(共享)",
+  0: "L0 · 基础叶子", 0.3: "L0.3 · 处理任务队列", 0.4: "L0.4 · 处理器实现", 0.5: "L0.5 · 可观测性", 1: "L1 · 引擎轴(共享)",
   1.5: "L1.5 · 平台轴(可插拔)", 3: "L3 · 会话编排", 4: "L4 · 有状态应用",
   4.5: "L4.5 · 多节点 hub", 5: "L5 · 入口",
 };
@@ -134,7 +136,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 
 // ── 语义角色 → 颜色(Archify 风格:深色底 + 语义色) ──────────────────────────────
 const SEMANTIC = {
-  "@drec/core": "core", "@drec/observability": "core", "@drec/post-process": "core",
+  "@drec/core": "core", "@drec/observability": "core", "@drec/post-process": "core", "@drec/proc-queue": "core", "@drec/processors": "core",
   "@drec/tui": "core", "@drec/ffmpeg-recorder-extra": "core",
   "@drec/record-engine": "engine",
   "@drec/douyin-live": "platform", "@drec/bilibili-live": "platform", "@drec/kuaishou-live": "platform",
@@ -181,6 +183,37 @@ const FLOWS = [
     edges: [["cron","proc"],["proc","poll"],["poll","plat"],["poll","live"],["live","dl"],["live","dm"],["dm","xml"],["dl","xml"]],
   },
   {
+    id: "realtime", title: "③ 实时状态（030 计划：SSE 取代轮询）", sub: "写入方 → HubWatch 指纹 → SSE → 三个页面",
+    planned: true,
+    nodes: [
+      ["w1", "任务/录制状态", "起停 · 开播", "app"],
+      ["w2", "sync 台账", "状态/步骤/分P", "hub"],
+      ["w3", "资源池快照", "cpu/net/upload", "hub"],
+      ["hw", "HubWatch", "指纹 1s + 去抖", "app"],
+      ["sse", "SSE 端点", "/api/hub/stream", "app"],
+      ["q", "QueuePage", "本地 1s 计时", "app"],
+      ["hf", "HubWorkflow", "PipelineFlow", "app"],
+      ["rm", "RoomsPage", "状态 + 动作", "app"],
+    ],
+    edges: [["w1","hw"],["w2","hw"],["w3","hw"],["hw","sse"],["sse","q"],["sse","hf"],["sse","rm"]],
+    note: "断线退化为指数退避兜底轮询(3s→30s,隐藏页暂停);页面不再各自 setInterval 拉整份数据",
+  },
+  {
+    id: "fanout", title: "④ 编排（030 计划：跨房间非阻塞派发）", sub: "reconcileAll 两阶段：先建 job，再交给有界并发 dispatcher",
+    planned: true,
+    nodes: [
+      ["inv2", "listInventory", "各节点清单", "hub"],
+      ["clu2", "聚类 + 过滤", "(platform,roomSlug)", "hub"],
+      ["job", "建 job", "upsertPending", "hub"],
+      ["disp", "JobDispatcher", "有界并发 2", "hub"],
+      ["lock", "withStreamLock", "同场串行", "hub"],
+      ["pipe", "pipeline", "选优→拉取→合成→上传", "hub"],
+      ["gate", "ResourcePool", "cpu/net/upload", "hub"],
+    ],
+    edges: [["inv2","clu2"],["clu2","job"],["job","disp"],["disp","lock"],["lock","pipe"],["pipe","gate"]],
+    note: "仍 await dispatcher.drain()：保留 hub 的 running 守卫；收益是后一房间的 job 行立即可见 + net/upload 与前一房间 CPU 重叠",
+  },
+  {
     id: "hub", title: "② 多节点 hub 后处理", sub: "节点录制 → master 选优 → 合并/烧录/上传",
     nodes: [
       ["intent", "控制台意图", "任务页启停 + Hub 页选节点", "app"],
@@ -196,6 +229,18 @@ const FLOWS = [
     edges: [["intent","sync"],["sync","nodes"],["nodes","inv"],["inv","clu"],["clu","sel"],["sel","pull"],["pull","mg"],["mg","up"]],
     note: "experimental:不烧录的房间可走 nodeSideUpload —— winner 节点本地 remux+上传,跳过 pull(见 plans/027)",
   },
+];
+
+// ── 030 计划改进(未落地;数据来自 plans/030_tasks.json,人工同步,不参与 --check 漂移)─────
+const PLANNED = [
+  { area: "HubWatch + SSE", where: "app/hub-watch.ts(新) · web/server.ts · web 三页", change: "/api/hub/stream 推送 changed;前端 useHubStream 取代 3s 轮询,本地 1s 计时,断线退避兜底", why: "队列/workflow 不实时、慢请求覆盖新值、无人知断连" },
+  { area: "JobDispatcher", where: "orchestrator/job-dispatcher.ts(新) · reconciler.ts", change: "reconcileAll 拆两阶段:先建全部 job,再有界并发执行(同房间串行)", why: "单场长上传阻塞后面所有房间建 job" },
+  { area: "UploadGate(共享冷却)", where: "core/upload-gate.ts(新) · orchestrator · app/node-pipeline", change: "601/21566 冷却与窗口持久化,按账号键(master 与节点侧共用)", why: "冷却只在内存,重启即丢;节点侧上传完全绕过限流" },
+  { area: "控制面安全阀", where: "app/task-sync.ts · core/worker-contract.ts · CLI", change: "审计快照 + 空期望/骤减守卫 + 显式 force;规则 disabled=停用保留,规则消失=两阶段删除", why: "master 配置不可读 → 节点受管任务被清空(实测)" },
+  { area: "统一房间入口(低风险版)", where: "app/web/api/rooms.ts(新) · web/modals/HubRuleDialog.tsx · web/components/RoomDetail.tsx", change: "PUT /api/rooms/:key 一次改两半;Hub 弹窗内联录制 + 房间级动作条;既有页面行为零变更", why: "一个房间要在两个页面各配一半,易半成功" },
+  { area: "产物核验 + 清理", where: "orchestrator/verify.ts(新) · pipeline/segment-pipeline · reconciler", change: "按实际提交段数核验分 P 再删源;清理失败可见、可重试、可维护清理孤儿", why: "什么鱼 livechat 分P 丢失且源已被删,无法补烧" },
+  { area: "录制健康熔断", where: "manager/index.ts · core/types.ts · record-engine", change: "以「时长 + 进度新鲜」判稳定才清零退避;连续短命熔断告警", why: "1650 次 5s 重连风暴、全程 0 有效分段" },
+  { area: "版本可见性", where: "app/managed-state.ts · transport-ssh · web/WorkersPanel", change: "节点回执 appliedVersion/bundleVersion;版本漂移告警", why: "多节点分发无版本面,错配静默" },
 ];
 
 function flowSvg(flow) {
@@ -262,6 +307,9 @@ const PKG_BLURB = {
   "@drec/core": "Platform / DownloadEngine 契约<br/>+ 注册表 + types/config/notify/api-types",
   "@drec/observability": "Notifier / EventCenter / 日志",
   "@drec/post-process": "concat / burn / ass / merge / ffmpeg / fonts",
+  "@drec/proc-queue": "ProcQueueStore 持久任务表(sqlite)<br/>ProcRunner 租约 / 心跳 / fencing / 关停",
+  "@drec/zero-upload": "0 落盘流式直传(自研 UPOS)<br/>live-pump: 一段一 ffmpeg 边录边传",
+  "@drec/processors": "remux 处理器(校验 / 原地转换 / recover);加处理器 = 一个模块 + 注册一行",
   "@drec/tui": "Ink 终端控制台 (独立 bundle)",
   "@drec/ffmpeg-recorder-extra": "logStreamMeta + detectDevice",
   "@drec/record-engine": "通用 PollingRecorder<br/>下载引擎: ffmpeg(.ts) / mesio(.flv)",
@@ -274,7 +322,8 @@ const PKG_BLURB = {
   "@drec/cli": "record / merge / burn / probe + task 命令组<br/>providers-register: 注册平台 + 引擎",
 };
 const NODE_ID = {
-  "@drec/core": "core", "@drec/observability": "observ", "@drec/post-process": "post",
+  "@drec/core": "core", "@drec/observability": "observ", "@drec/post-process": "post", "@drec/proc-queue": "procq", "@drec/zero-upload": "zeroup",
+  "@drec/processors": "procs",
   "@drec/tui": "tui", "@drec/ffmpeg-recorder-extra": "extra", "@drec/record-engine": "engine",
   "@drec/douyin-live": "douyin", "@drec/bilibili-live": "bilibili", "@drec/kuaishou-live": "kuaishou",
   "@drec/manager": "manager", "@drec/app": "app", "@drec/orchestrator": "orch", "@drec/cli": "cli",
@@ -322,7 +371,32 @@ function buildMermaid() {
   return lines.join("\n");
 }
 
+// ── 030 计划的结构化任务(plans/030_tasks.json):存在则由它渲染任务表 → 不手工同步 ─────
+const PLAN_FILE = join(ROOT, "plans", "030_tasks.json");
+const PLAN = existsSync(PLAN_FILE) ? JSON.parse(readFileSync(PLAN_FILE, "utf-8")) : null;
+// 里程碑/状态直接来自 030 计划本身(不另维护一份),缺省按里程碑顺序推断。
+const PLAN_MILESTONE = {};
+for (const m of (PLAN?.milestones ?? [])) for (const t of m.tasks) PLAN_MILESTONE[t] = m.id;
+const PLAN_STATUS = { "decision-gated": "需你确认后立项", deferred: "后置/可选" };
+const planTasks = PLAN ? PLAN.tasks : [];
+
 const MERMAID = buildMermaid();
+
+// ── 结构指纹:--check 只比这份(无时间戳、无热度数字、与排序无关)─────────────────────
+const STRUCTURE = {
+  packages: all.map((p) => ({ dir: p.dir, name: p.name, rank: p.rank, role: roleOf(p.name).name, deps: [...p.deps].sort() }))
+    .sort((a, b) => a.name.localeCompare(b.name)),
+  edges: edges.map(([a, b]) => `${a} -> ${b}`).sort(),
+  rankLabels: Object.fromEntries([...new Set(all.map((p) => p.rank))].map((r) => [r, RANK_LABEL[r] ?? `rank ${r}`])),
+  flows: FLOWS,
+  planned: PLANNED,
+  milestones: PLAN?.milestones ?? [],
+  tasks: planTasks,
+  mermaid: MERMAID,
+};
+// 放进 <script type="application/json">:转义 < 防止提前闭合标签。
+const STRUCTURE_JSON = JSON.stringify(STRUCTURE, null, 1).replace(/</g, "\\u003c");
+const STRUCTURE_RE = /<script type="application\/json" id="arch-structure">([\s\S]*?)<\/script>/;
 
 const html = `<!doctype html>
 <html lang="zh-CN" data-theme="dark">
@@ -445,10 +519,47 @@ const html = `<!doctype html>
   ${FLOWS.map((f) => `<div class="band">
     <div class="blabel">${esc(f.title)} — ${esc(f.sub)}</div>
     ${flowSvg(f)}
-    ${f.note ? `<div class="note"><b>实验特性</b> · ${esc(f.note)}</div>` : ""}
+    ${f.planned ? `<div class="note"><b>计划中(030 未落地)</b> · 见 plans/030_hub_tasks_optimization.md</div>` : ""}
+    ${f.note ? `<div class="note">${f.planned ? "" : "<b>实验特性</b> · "}${esc(f.note)}</div>` : ""}
   </div>`).join("\n  ")}
 
-  <h2>包明细</h2>
+  ${(PLAN?.milestones ?? []).length ? `<h2>030 里程碑（分批发版 · 来自 plans/030_tasks.json）</h2>
+  <table>
+    <thead><tr><th>里程碑</th><th>名称</th><th>任务</th><th>发布门槛</th></tr></thead>
+    <tbody>${PLAN.milestones.map((m) => `<tr>
+      <td><code>${esc(m.id)}</code></td>
+      <td>${esc(m.name)}</td>
+      <td>${esc(m.tasks.join(" "))}</td>
+      <td>${esc(m.ship_gate)}</td>
+    </tr>`).join("\n    ")}</tbody>
+  </table>
+
+  ` : ""}  <h2>030 计划改进（未落地 · 见 plans/030_tasks.json）</h2>
+  <table>
+    <thead><tr><th>组件</th><th>落点</th><th>改什么</th><th>为什么</th></tr></thead>
+    <tbody>${PLANNED.map((r) => `<tr>
+      <td><code>${esc(r.area)}</code></td>
+      <td>${esc(r.where)}</td>
+      <td>${esc(r.change)}</td>
+      <td>${esc(r.why)}</td>
+    </tr>`).join("\n    ")}</tbody>
+  </table>
+
+  ${planTasks.length ? `<h2>030 任务清单（来自 plans/030_tasks.json · 未落地）</h2>
+  <table>
+    <thead><tr><th>id</th><th>里程碑</th><th>任务</th><th>serves</th><th>依赖</th><th>状态</th><th class="n">估 LOC</th></tr></thead>
+    <tbody>${planTasks.map((t) => `<tr>
+      <td><code>${esc(t.id)}</code></td>
+      <td>${esc(PLAN_MILESTONE[t.id] ?? "-")}</td>
+      <td>${esc(t.title)}</td>
+      <td>${esc((t.serves || []).join(","))}</td>
+      <td>${esc((t.depends_on || []).join(",") || "—")}</td>
+      <td>${esc(PLAN_STATUS[t.status] ?? "计划中")}</td>
+      <td class="n">${t.estimated_loc ?? ""}</td>
+    </tr>`).join("\n    ")}</tbody>
+  </table>
+
+` : ""}  <h2>包明细</h2>
   <table>
     <thead><tr><th>包</th><th>层</th><th>角色</th><th class="n">LOC</th><th class="n">文件</th><th class="n">测试</th><th class="n">近 ${DAYS} 天提交</th></tr></thead>
     <tbody>${all.map((p) => `<tr>
@@ -469,6 +580,7 @@ const html = `<!doctype html>
     <b>本图自动生成</b>,不会与 architecture.md 漂移;手改会被下次生成覆盖。
   </div>
 </div>
+<script type="application/json" id="arch-structure">${STRUCTURE_JSON}</script>
 <script>
   const root = document.documentElement;
   document.getElementById("theme").onclick = () => {
@@ -497,15 +609,18 @@ function patchMarkdown(checkOnly) {
 
 if (CHECK) {
   const cur = existsSync(OUT) ? readFileSync(OUT, "utf-8") : "";
-  const strip = (s) => s.replace(/生成 · 热度窗口近 \d+ 天 · [^<]*/, "");
-  const htmlDrift = strip(cur) !== strip(html);
+  const m = STRUCTURE_RE.exec(cur);
+  let htmlDrift = true;
+  if (m) {
+    try { htmlDrift = JSON.stringify(JSON.parse(m[1])) !== JSON.stringify(STRUCTURE); } catch { /* 损坏 → 视为漂移 */ }
+  }
   const mdDrift = patchMarkdown(true);
   if (htmlDrift || mdDrift) {
     const which = [htmlDrift && "architecture.html", mdDrift && "architecture.md"].filter(Boolean).join(" / ");
-    console.error(`${which} 与仓库不一致,请跑: node scripts/gen-architecture.mjs`);
+    console.error(`${which} 的结构(包/依赖边/层级/流程图)与仓库不一致,请跑: node scripts/gen-architecture.mjs`);
     process.exit(1);
   }
-  console.log("architecture.html + architecture.md 与仓库一致 ✓");
+  console.log("architecture.html + architecture.md 结构与仓库一致 ✓(热度统计不参与比对)");
 } else {
   writeFileSync(OUT, html);
   const mdChanged = patchMarkdown(false);

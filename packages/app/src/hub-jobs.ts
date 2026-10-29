@@ -10,18 +10,18 @@
  */
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
 import {
-  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, readyNodes, USER_STOP,
-  type HubPoolSnapshotDTO, type HubQueueDTO, type QueueItemDTO, type QueuePhase,
+  HUB_TABLE_NAMES, HUB_TERMINAL_STATES, HUB_FLOW_ORDER, isSidecarSkipEvent, readyNodes, STAGE_READY, USER_STOP,
+  jobLogPathCandidates,
+  type HubPoolSnapshotDTO, type HubQueueDTO, type NodeUploadStatusDTO, type QueueItemDTO, type QueuePhase,
 } from "@drec/core";
-import { rootHubConfig, rootStageDir } from "./paths.js";
+import { rootHubConfig, rootLogsDir, rootStageDir } from "./paths.js";
 
 export interface HubJobEvent { state: string; at: number; }
-/** 细粒度子步骤事件(start/done)—— 驱动前端 fork/join 流程图。 */
+/** 细粒度子步骤事件(start/done/skipped)—— 驱动前端 fork/join 流程图。 */
 export interface HubJobStep { step: string; phase: string; at: number; detail?: string }
 /** 选优候选(流程图 select 步 fan-in 节点)。 */
-export interface HubJobCandidate { worker: string; coverage: number; durationSec: number; complete: boolean; isWinner: boolean; }
+export interface HubJobCandidate { worker: string; coverage: number; durationSec: number; complete: boolean; isWinner: boolean; danmuCount?: number | null; }
 /** 单个 workflow 节点的安全阀状态(空=旧 run,前端回落 steps 推导)。 */
 export interface HubJobNodeState { node: string; state: string; error: string | null; attempts: number; updatedAt: number }
 export interface HubJobView {
@@ -50,6 +50,11 @@ export interface HubJobView {
   videoDurationSec: number | null;
   /** 该场 job.log 是否存在(存在才给「查看日志」入口)。 */
   hasLog: boolean;
+  /** Queue-managed node upload status (plan 038 PR5); null = not a queued node upload. */
+  nodeUpload: NodeUploadStatusDTO | null;
+  /** Review mark on a needs_manual run (issue #312); null = not reviewed / ledger predates the column. */
+  ackedAt: number | null;
+  ackNote: string | null;
 }
 
 /** 终态集合(唯一真理 = core 的 hub 台账契约,与 orchestrator SyncLedger 对齐)。 */
@@ -60,8 +65,28 @@ const TERMINAL_SQL = HUB_TERMINAL_STATES.map((s) => `'${s}'`).join(",");
 const HISTORY_TABLES = HUB_TABLE_NAMES;
 /** 无历史数据时的保守「步骤耗时/视频时长」比率(按 2026-07 实测:烧录 veryfast ~0.11×,上传取决于带宽)。 */
 const FALLBACK_RATE: Record<string, number> = { pending: 0.01, settling: 0.05, syncing: 0.1, merging: 0.3, uploading: 0.6 };
+/** 只读连接等写锁的预算(ms)。见 openLedger 注释 —— 不设会静默空队列。 */
+const LEDGER_BUSY_TIMEOUT_MS = 3000;
 
-function sanitizeKey(key: string): string { return key.replace(/[:/]/g, "_"); }
+
+/**
+ * 打开台账只读连接。
+ *
+ * **`PRAGMA busy_timeout` 是必需的,不是优化**:orchestrator SyncLedger 是唯一写端,
+ * 它在写事务里时,任何只读连接拿不到共享锁就立刻 `SQLITE_BUSY` 抛错。没有这条 pragma 时
+ * 上层 catch 会**静默回落成空结果** → 表现为「队列页莫名其妙空了 / hub 任务列表清零」,
+ * 而且越是台账忙(上传高峰)越发,极难定位。3s 预算覆盖一次短写事务。
+ *
+ * 注意:这里**只**加 busy_timeout,不动 `DatabaseSync` 的 `readOnly` 开关 —— node:sqlite 的
+ * readOnly 已拒绝写语句,再加 `PRAGMA query_only` 是重复的。
+ */
+function openLedger(syncDbPath: string): DatabaseSync {
+  const db = new DatabaseSync(syncDbPath, { readOnly: true });
+  try {
+    db.exec(`PRAGMA busy_timeout=${LEDGER_BUSY_TIMEOUT_MS}`);
+  } catch { /* 极老 sqlite 不支持该 pragma → 保持默认 */ }
+  return db;
+}
 
 /** room key `{platform}.{roomSlug}` → streamKey 前缀 `{platform}:{roomSlug}:`(仅替换首个点)。 */
 function roomKeyToStreamPrefix(roomKey: string): string {
@@ -74,7 +99,7 @@ function roomKeyToStreamPrefix(roomKey: string): string {
  */
 export function activeHubJobKeys(syncDbPath: string, roomKey: string): string[] {
   if (!existsSync(syncDbPath)) return [];
-  const db = new DatabaseSync(syncDbPath, { readOnly: true });
+  const db = openLedger(syncDbPath);
   try {
     return (db.prepare(
       `SELECT streamKey FROM sync_jobs WHERE streamKey LIKE ? AND state NOT IN (${TERMINAL_SQL}) ORDER BY updatedAt DESC`,
@@ -97,7 +122,7 @@ export interface DeleteHubHistoryResult {
  * 删除某房间的全部历史 run:五张台账表 + 各场 job.log。
  * 表结构即契约;旧库缺表按存在表删,不炸。无 sync db → 空结果。
  */
-export function deleteHubJobHistory(syncDbPath: string, roomKey: string, stageDir = hubStageDir()): DeleteHubHistoryResult {
+export function deleteHubJobHistory(syncDbPath: string, roomKey: string, stageDir = hubStageDir(), logsDir = hubLogsDir()): DeleteHubHistoryResult {
   const prefix = roomKeyToStreamPrefix(roomKey);
   if (!existsSync(syncDbPath)) return { deleted: 0, streamKeys: [] };
   const db = new DatabaseSync(syncDbPath);
@@ -118,7 +143,10 @@ export function deleteHubJobHistory(syncDbPath: string, roomKey: string, stageDi
   }
   const streamKeys = rows.map((r) => r.streamKey);
   for (const key of streamKeys) {
-    try { rmSync(jobLogPath(key, stageDir), { force: true }); } catch { /* 日志不存在/权限 → 不阻断 */ }
+    // Both locations: the log may be in the new logs dir or, for sessions older than the move, in stage.
+    for (const p of jobLogPaths(key, stageDir, logsDir)) {
+      try { rmSync(p, { force: true }); } catch { /* 日志不存在/权限 → 不阻断 */ }
+    }
   }
   return { deleted: streamKeys.length, streamKeys };
 }
@@ -135,12 +163,64 @@ export function hubStageDir(): string {
   return rootStageDir();
 }
 
-/** 该场 job.log 的绝对路径(不保证存在)。 */
-export function jobLogPath(streamKey: string, stageDir = hubStageDir()): string {
-  return join(stageDir, sanitizeKey(streamKey), "job.log");
+/** Job log root (outside stage, kept forever). */
+export function hubLogsDir(): string {
+  return rootLogsDir();
 }
 
-interface RawJob { streamKey: string; state: string; winnerWorker: string | null; bv: string | null; error: string | null; fails: number; updatedAt: number; }
+/** Every path this session's job log may be at (new location first, legacy stage location second). */
+export function jobLogPaths(streamKey: string, stageDir = hubStageDir(), logsDir = hubLogsDir()): string[] {
+  return jobLogPathCandidates(stageDir, streamKey, logsDir);
+}
+
+/** Where this session's job log is written (not guaranteed to exist). */
+export function jobLogPath(streamKey: string, stageDir = hubStageDir(), logsDir = hubLogsDir()): string {
+  return jobLogPaths(streamKey, stageDir, logsDir)[0];
+}
+
+/** The job log that exists on disk (new or legacy location), or null. */
+function existingJobLog(streamKey: string, stageDir: string, logsDir: string): string | null {
+  return jobLogPaths(streamKey, stageDir, logsDir).find((p) => existsSync(p)) ?? null;
+}
+
+interface RawJob {
+  streamKey: string; state: string; winnerWorker: string | null; bv: string | null; error: string | null;
+  fails: number; updatedAt: number; uploadStatus?: string | null; ackedAt?: number | null; ackNote?: string | null;
+}
+
+/**
+ * Whether the ledger already has the review-mark columns (added by SyncLedger on start, issue #312).
+ * The app opens the ledger read-only and must not assume them: a query naming a missing column throws,
+ * and listHubJobs turns that into an empty result — the queue would silently go blank.
+ */
+function hasAckColumns(db: DatabaseSync): boolean {
+  try {
+    const cols = db.prepare("PRAGMA table_info(sync_jobs)").all() as unknown as { name: string }[];
+    return cols.some((c) => c.name === "ackedAt");
+  } catch {
+    return false;
+  }
+}
+
+/** Older snapshots than this no longer drive the ETA (the node stopped answering). */
+const NODE_UPLOAD_ETA_FRESH_MS = 5 * 60_000;
+
+/** Display-only JSON written by the master poller; malformed / old rows read as null. */
+export function parseNodeUploadStatus(raw: string | null | undefined): NodeUploadStatusDTO | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as NodeUploadStatusDTO;
+    return v && typeof v.nodeId === "string" && typeof v.phase === "string" && typeof v.polledAt === "number" ? v : null;
+  } catch { return null; }
+}
+
+/** ETA from measured bytes/s of a running transfer; null when there is nothing fresh to measure. */
+export function nodeUploadEtaSec(s: NodeUploadStatusDTO | null, now: number): number | null {
+  const p = s?.progress;
+  if (!s || !p || s.phase !== "biliup" || s.state !== "running" || now - s.polledAt > NODE_UPLOAD_ETA_FRESH_MS) return null;
+  if (!p.bps || p.bps <= 0 || p.totalBytes <= p.doneBytes) return null;
+  return Math.ceil((p.totalBytes - p.doneBytes) / p.bps);
+}
 
 /**
  * 历史步骤速率:最近 done 的 job 里,step 耗时 / winner 视频时长 的中位数。
@@ -171,6 +251,18 @@ function historicalRates(db: DatabaseSync): Map<string, number> {
 }
 
 export interface ListHubJobsOpts {
+  /**
+   * 只取 `sync_jobs.error` **不等于**该值的行(NULL / 空串算「不等于」)——
+   * issue #188:把 stage 正常收口(STAGE_READY)从 needs_manual 里摘出去,让真事故不被它挤出窗口。
+   */
+  excludeError?: string;
+  /** 与 excludeError 互斥的取反:只取 error 等于该值的行。 */
+  onlyError?: string;
+  /**
+   * Review-mark filter (issue #312): false = only unreviewed rows, true = only reviewed rows, omitted = both.
+   * On a ledger without the columns every row counts as unreviewed.
+   */
+  acked?: boolean;
   /** 只列某房间的 run(key=`{platform}.{roomSlug}`;streamKey 前缀 `{platform}:{roomSlug}:` 过滤)。省略=全部房间。 */
   room?: string;
   /**
@@ -186,6 +278,8 @@ export interface ListHubJobsOpts {
   offset?: number;
   now?: number;
   stageDir?: string;
+  /** Job log root (default: data-root logs dir). */
+  logsDir?: string;
 }
 
 export interface HubJobsResult {
@@ -195,13 +289,127 @@ export interface HubJobsResult {
 }
 
 /**
+ * 批量取一批 job 的附属表(events/steps/candidates/nodeStates),按 streamKey 分桶。
+ *
+ * **为什么批量**:逐条查询是典型 N+1 —— 队列页 `limit:200` 就是 800 次 prepare+all,
+ * 每次都要在 VDBE 里重新过一遍 B-tree 查找。改成 `streamKey IN (...)` 一条语句,
+ * 查询条数与 job 数解耦(4 条常数),摊到 O(1) 次全表/索引扫描。
+ *
+ * **保持逐条语义不变**(T5 的等价性要求):
+ *   - 排序在**内存**里按原 SQL 的 ORDER BY 重做(全局排序后分桶 == 每组各自排序,
+ *     因为 key 是分组键,组内相对序由 ORDER BY 决定,与组间无关);
+ *   - 每张表独立 try/catch:旧库缺某张表只影响该表,不牵连其他表(逐条版的降级粒度是「每 job 每表」,
+ *     批量版是「全批每表」—— 因为缺表是**库级**事实(同一个 db 文件),粒度差异不会改变结果);
+ *   - steps 的 `detail` 列:新库有、旧库没有 → 先试带 detail,失败再试不带(与逐条版同款回退)。
+ *
+ * **IN 的规模**:keys 来自 `LIMIT ?`(队列页上限 200、详情页个位数),远小于 sqlite 默认
+ * SQLITE_MAX_VARIABLE_NUMBER(999/32766),无需分批切片。若将来 limit 被放大到千级,
+ * 需要按 900 一组切片 —— 这里加一道保护,超限时切片而不是让 sqlite 报 `too many SQL variables`。
+ */
+const IN_CHUNK = 900;
+
+interface AttachedBuckets {
+  events: Map<string, (HubJobEvent & { rid: number })[]>;
+  steps: Map<string, (HubJobStep & { rid: number })[]>;
+  candidates: Map<string, HubJobCandidate[]>;
+  nodeStates: Map<string, HubJobNodeState[]>;
+}
+/** events/steps 桶带内部 `rid`(rowid)仅用于组内稳定排序,组装 view 时剥掉。 */
+type AttachedTables = AttachedBuckets;
+
+function batchAttached(db: DatabaseSync, keys: readonly string[]): AttachedTables {
+  const out: AttachedTables = { events: new Map(), steps: new Map(), candidates: new Map(), nodeStates: new Map() };
+  const uniq = [...new Set(keys)];
+  if (uniq.length === 0) return out;
+
+  /** 把一批 streamKey 的行按 streamKey 分桶;每行映射函数负责字段语义。 */
+  const group = <T>(rows: readonly Record<string, unknown>[], map: (r: Record<string, unknown>) => T): Map<string, T[]> => {
+    const m = new Map<string, T[]>();
+    for (const r of rows) {
+      const k = r.streamKey as string;
+      const arr = m.get(k);
+      if (arr) arr.push(map(r));
+      else m.set(k, [map(r)]);
+    }
+    return m;
+  };
+
+  /**
+   * 按 IN 切片执行一次查询;返回全部命中行(各片自行排序,组内序在下面统一重排)。
+   * `ok=false` = 查询本身失败(旧库缺表/缺列/被锁)→ 调用方据此决定回退还是降级为空。
+   * 区分「查询失败」与「查询成功但 0 行」是必须的:steps 的 detail 回退要靠它判断
+   * (0 行可能是这张表本来就空,不能当成「列不存在」).
+   */
+  const queryIn = (sql: (ph: string) => string): { rows: Record<string, unknown>[]; ok: boolean } => {
+    const rows: Record<string, unknown>[] = [];
+    for (let i = 0; i < uniq.length; i += IN_CHUNK) {
+      const chunk = uniq.slice(i, i + IN_CHUNK);
+      try {
+        rows.push(...(db.prepare(sql(chunk.map(() => "?").join(",")))
+          .all(...chunk) as unknown as Record<string, unknown>[]));
+      } catch { return { rows, ok: false }; /* 旧库缺表/缺列 → 该表降级 */ }
+    }
+    return { rows, ok: true };
+  };
+
+  // events:ORDER BY at ASC, rowid ASC。
+  // **rowid 必须带上**:at 是 ms 精度,一次 pipeline 推进的多个事件可以同毫秒;
+  // 只按 at 排会在并列时退化成「IN 查询的返回顺序」(sqlite 不保证该顺序),事件顺序会在两次刷新间跳动。
+  out.events = group(
+    queryIn((ph) => `SELECT streamKey, state, at, rowid AS rid FROM sync_job_events WHERE streamKey IN (${ph})`).rows,
+    (r) => ({ state: r.state as string, at: Number(r.at), rid: Number(r.rid) }),
+  );
+  for (const arr of out.events.values()) arr.sort((a, b) => a.at - b.at || a.rid - b.rid);
+
+  // steps:ORDER BY at ASC, rowid ASC;detail 列旧库可能没有。
+  let stepRows = queryIn((ph) => `SELECT streamKey, step, phase, at, detail, rowid AS rid FROM sync_job_steps WHERE streamKey IN (${ph})`);
+  if (!stepRows.ok) {
+    // 带 detail 的查询失败(列不存在)→ 回退不带 detail。
+    stepRows = queryIn((ph) => `SELECT streamKey, step, phase, at, rowid AS rid FROM sync_job_steps WHERE streamKey IN (${ph})`);
+  }
+  out.steps = group(stepRows.rows, (r) => ({
+    step: r.step as string, phase: r.phase as string, at: Number(r.at), rid: Number(r.rid),
+    detail: (r.detail as string | undefined) ?? undefined,
+  }));
+  for (const arr of out.steps.values()) arr.sort((a, b) => a.at - b.at || a.rid - b.rid);
+
+  // candidates:ORDER BY isWinner DESC, coverage DESC
+  out.candidates = group(
+    queryIn((ph) => `SELECT streamKey, workerId, coverage, durationSec, totalGapSec, danmuCount, isWinner
+                     FROM sync_candidates WHERE streamKey IN (${ph})`).rows,
+    (r) => ({
+      worker: r.workerId as string,
+      coverage: Number(r.coverage),
+      durationSec: Number(r.durationSec),
+      danmuCount: r.danmuCount == null ? null : Number(r.danmuCount),
+      complete: Number(r.totalGapSec) <= 0,
+      isWinner: Number(r.isWinner) === 1,
+    }),
+  );
+  for (const arr of out.candidates.values()) {
+    arr.sort((a, b) => (a.isWinner === b.isWinner ? b.coverage - a.coverage : a.isWinner ? -1 : 1));
+  }
+
+  // nodeStates:ORDER BY node ASC
+  out.nodeStates = group(
+    queryIn((ph) => `SELECT streamKey, node, state, error, attempts, updatedAt FROM sync_node_states WHERE streamKey IN (${ph})`).rows,
+    (r) => ({
+      node: r.node as string, state: r.state as string, error: (r.error as string | null) ?? null,
+      attempts: Number(r.attempts), updatedAt: Number(r.updatedAt),
+    }),
+  );
+  for (const arr of out.nodeStates.values()) arr.sort((a, b) => (a.node < b.node ? -1 : a.node > b.node ? 1 : 0));
+  return out;
+}
+
+/**
  * hub run 列表(分页 + 可按房间过滤)。无 sync db / 表还没建 → 空(slave/hub 未开过属正常)。
  * room 给定 → 只列该房间的历次 run(GitHub「某 workflow 的 run 列表」);省略 → 全房间最近 N。
  */
 export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): HubJobsResult {
-  const { room, limit = 10, offset = 0, now = Date.now(), stageDir = hubStageDir() } = opts;
+  const { room, limit = 10, offset = 0, now = Date.now(), stageDir = hubStageDir(), logsDir = hubLogsDir() } = opts;
   if (!existsSync(syncDbPath)) return { jobs: [], total: 0 };
-  const db = new DatabaseSync(syncDbPath, { readOnly: true });
+  const db = openLedger(syncDbPath);
   // room key `{platform}.{roomSlug}` → streamKey 前缀 `{platform}:{roomSlug}:`(仅替换首个点)。
   const prefix = room ? room.replace(".", ":") + ":" : null;
   try {
@@ -220,6 +428,22 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         where.push(`state NOT IN (${opts.excludeStates.map(() => "?").join(",")})`);
         params.push(...opts.excludeStates);
       }
+      // error 过滤与 states/excludeStates 正交,可叠加。COALESCE 让 NULL / 空串都算「无标记」。
+      // **精确相等**,不做任何 trim:STAGE_READY 由 closeStageReady 原样写入(值固定),
+      // trim 只会造出「SQL 判一种、JS 判另一种」的第二套口径(实测 NBSP/换行两边结论相反)。
+      // 相等判定在 SQL 与 toRow 里必须字面相同,改一处就要改另一处。
+      if (opts.excludeError !== undefined) {
+        where.push("COALESCE(error, '') <> ?");
+        params.push(opts.excludeError);
+      }
+      if (opts.onlyError !== undefined) {
+        where.push("error = ?");
+        params.push(opts.onlyError);
+      }
+      if (opts.acked !== undefined) {
+        if (hasAckColumns(db)) where.push(opts.acked ? "ackedAt IS NOT NULL" : "ackedAt IS NULL");
+        else if (opts.acked) return { jobs: [], total: 0 }; // old ledger: nothing can be reviewed yet
+      }
       const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
       total = Number((db.prepare(`SELECT COUNT(*) AS n FROM sync_jobs${whereSql}`)
         .get(...params) as unknown as { n: number }).n);
@@ -227,41 +451,14 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
         .all(...params, limit, offset) as unknown as RawJob[];
     } catch { return { jobs: [], total: 0 }; } // 旧库无表
     const rates = historicalRates(db);
+    // T5:附属表**一次性批量取**,内存分桶 —— 原实现是每个 job 4 条查询(limit 200 active
+    // = 800+ 次 prepare/all),实测拖慢队列页。批量化后查询条数与 job 数**无关**。
+    const attached = batchAttached(db, jobs.map((j) => j.streamKey));
     const views = jobs.map((j) => {
-      let events: HubJobEvent[] = [];
-      try {
-        events = db.prepare("SELECT state, at FROM sync_job_events WHERE streamKey=? ORDER BY at ASC, rowid ASC")
-          .all(j.streamKey) as unknown as HubJobEvent[];
-      } catch { /* 旧库无 events 表 → 空时间线 */ }
-      let steps: HubJobStep[] = [];
-      try {
-        steps = db.prepare("SELECT step, phase, at, detail FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
-          .all(j.streamKey) as unknown as HubJobStep[];
-      } catch {
-        try {
-          steps = db.prepare("SELECT step, phase, at FROM sync_job_steps WHERE streamKey=? ORDER BY at ASC, rowid ASC")
-            .all(j.streamKey) as unknown as HubJobStep[];
-        } catch { /* 旧库无表 → 空(前端回落粗粒度) */ }
-      }
-      let candidates: HubJobCandidate[] = [];
-      try {
-        const rows = db.prepare(
-          "SELECT workerId, coverage, durationSec, totalGapSec, isWinner FROM sync_candidates WHERE streamKey=? ORDER BY isWinner DESC, coverage DESC",
-        ).all(j.streamKey) as unknown as { workerId: string; coverage: number; durationSec: number; totalGapSec: number; isWinner: number }[];
-        candidates = rows.map((c) => ({
-          worker: c.workerId,
-          coverage: Number(c.coverage),
-          durationSec: Number(c.durationSec),
-          complete: Number(c.totalGapSec) <= 0,
-          isWinner: Number(c.isWinner) === 1,
-        }));
-      } catch { /* 旧库无表 → 无候选(前端 select 步不画 fan-in) */ }
-      let nodeStates: HubJobNodeState[] = [];
-      try {
-        nodeStates = db.prepare(
-          "SELECT node, state, error, attempts, updatedAt FROM sync_node_states WHERE streamKey=? ORDER BY node ASC",
-        ).all(j.streamKey) as unknown as HubJobNodeState[];
-      } catch { /* 旧库无表 → 空(前端回落 steps) */ }
+      const events = attached.events.get(j.streamKey) ?? [];
+      const steps = attached.steps.get(j.streamKey) ?? [];
+      const candidates = attached.candidates.get(j.streamKey) ?? [];
+      const nodeStates = attached.nodeStates.get(j.streamKey) ?? [];
       const videoDurationSec = candidates.find((c) => c.isWinner)?.durationSec ?? null;
       const terminal = TERMINAL.has(j.state);
       const stepStart = events.length ? events[events.length - 1].at : j.updatedAt;
@@ -275,22 +472,41 @@ export function listHubJobs(syncDbPath: string, opts: ListHubJobsOpts = {}): Hub
           etaSec = remain > 0 ? remain : null;
         }
       }
+      // A queued node upload measures its own rate; that beats the historical step-rate guess.
+      const nodeUpload = terminal ? null : parseNodeUploadStatus(j.uploadStatus);
+      etaSec = nodeUploadEtaSec(nodeUpload, now) ?? etaSec;
       return {
         streamKey: j.streamKey, state: j.state,
         winnerWorker: j.winnerWorker ?? null, candidates, bv: j.bv ?? null, error: j.error ?? null,
         fails: Number(j.fails ?? 0), updatedAt: Number(j.updatedAt),
         startedAt: events.length ? Number(events[0].at) : null,
+        // rid 只是组内排序用的内部字段,不外泄(HubJobView 是公开 DTO 契约)。
         events: events.map((e) => ({ state: e.state, at: Number(e.at) })),
         steps: steps.map((s) => ({ step: s.step, phase: s.phase, at: Number(s.at), detail: s.detail ?? undefined })),
         nodeStates,
         currentStepSec, etaSec, videoDurationSec,
-        hasLog: existsSync(jobLogPath(j.streamKey, stageDir)),
+        hasLog: existingJobLog(j.streamKey, stageDir, logsDir) !== null,
+        nodeUpload,
+        ackedAt: j.ackedAt == null ? null : Number(j.ackedAt),
+        ackNote: j.ackNote ?? null,
       };
     });
     return { jobs: views, total };
   } finally {
     db.close();
   }
+}
+
+/**
+ * `needs_manual` 细分:stage 正常收口 / 用户停止 / 真故障。队列视图与 latest-runs 共用这一处,
+ * 房间列表才不会和队列页对同一场给出相反结论(issue #190)。
+ *
+ * stage 正常收口由**显式常量**标记(精确相等,不 trim);空 error = 数据异常,按真故障渲染。
+ */
+export function needsManualPhaseOf(error: string | null | undefined): QueuePhase {
+  if (error === STAGE_READY) return "waiting_upload";
+  if ((error ?? "").trim() === USER_STOP) return "stopped";
+  return "waiting_manual";
 }
 
 /**
@@ -310,11 +526,13 @@ export interface LatestRunPerRoom {
   state: string;
   bv: string | null;
   updatedAt: number;
+  /** 仅 `state=needs_manual` 才有(与队列同源的细分);其余状态为 null。旧 master 无此字段。 */
+  manualPhase: QueuePhase | null;
 }
 
 export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
   if (!existsSync(syncDbPath)) return [];
-  const db = new DatabaseSync(syncDbPath, { readOnly: true });
+  const db = openLedger(syncDbPath);
   try {
     // 注意:streamKey 形如 `{platform}:{roomSlug}:{date}[_HHMM]`,前两段是房间身份。
     // SQLite 无内置 split,用两次 instr + substr 取前两段作为分组键。
@@ -323,9 +541,9 @@ export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
         substr(streamKey, 1,
           instr(substr(streamKey, instr(streamKey, ':') + 1), ':') + instr(streamKey, ':')
         ) AS roomKey,
-        streamKey, state, bv, updatedAt
+        streamKey, state, bv, updatedAt, error
       FROM (
-        SELECT streamKey, state, bv, updatedAt,
+        SELECT streamKey, state, bv, updatedAt, error,
                ROW_NUMBER() OVER (
                  PARTITION BY substr(streamKey, 1,
                    instr(substr(streamKey, instr(streamKey, ':') + 1), ':') + instr(streamKey, ':')
@@ -335,9 +553,15 @@ export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
         FROM sync_jobs
       )
       WHERE rn = 1
-    `).all() as unknown as LatestRunPerRoom[];
+    `).all() as unknown as Array<Omit<LatestRunPerRoom, "manualPhase"> & { error: string | null }>;
     // SQL 切出的 roomKey 带尾冒号(`douyin:123:`);统一去掉,与前端 `${platform}:${roomSlug}` 对齐。
-    return rows.map((r) => ({ ...r, roomKey: r.roomKey.replace(/:$/, ""), updatedAt: Number(r.updatedAt) }));
+    // error 只用来推导 manualPhase,不外泄(原始文案可能含路径/主机信息)。
+    return rows.map(({ error, ...r }) => ({
+      ...r,
+      roomKey: r.roomKey.replace(/:$/, ""),
+      updatedAt: Number(r.updatedAt),
+      manualPhase: r.state === "needs_manual" ? needsManualPhaseOf(error) : null,
+    }));
   } catch {
     return []; // 旧库无表
   } finally {
@@ -346,9 +570,9 @@ export function latestRunPerRoom(syncDbPath: string): LatestRunPerRoom[] {
 }
 
 /** 读该场 job.log 尾部(默认 64KB;不存在 → null)。 */
-export function readHubJobLog(streamKey: string, tailBytes = 65536, stageDir = hubStageDir()): string | null {
-  const p = jobLogPath(streamKey, stageDir);
-  if (!existsSync(p)) return null;
+export function readHubJobLog(streamKey: string, tailBytes = 65536, stageDir = hubStageDir(), logsDir = hubLogsDir()): string | null {
+  const p = existingJobLog(streamKey, stageDir, logsDir);
+  if (!p) return null;
   const size = statSync(p).size;
   const buf = readFileSync(p);
   return buf.subarray(Math.max(0, size - tailBytes)).toString("utf-8");
@@ -360,7 +584,12 @@ function splitStreamKey(streamKey: string): { platform: string; roomSlug: string
   return { platform: parts[0] ?? "", roomSlug: parts[1] ?? "" };
 }
 
-/** 资源节点判定(与 orchestrator workflow 的 node.resource 对齐):merge/burn=占用 CPU,上传类=占用上传队列。 */
+/**
+ * 资源节点判定(与 orchestrator workflow 的 node.resource 对齐):merge/burn=占用 CPU,上传类=占用上传队列。
+ *
+ * `node_upload`(节点侧上传)不占 **master** 的任何资源:remux + 上传都在节点本地跑,不消耗
+ * master 的 CPU 闸门,也不占用 master 的上传窗口 → 返回 null(否则会虚占队列位次,误导排队判定)。
+ */
 function resourceOfNode(node: string | null): "cpu" | "net" | "upload" | null {
   if (!node) return null;
   if (node === "upload_plain" || node === "append_danmu" || node === "append_livechat") return "upload";
@@ -403,12 +632,23 @@ export interface BuildQueueOpts {
   sort?: "newest" | "oldest";
   /**
    * 「待人工」最多列几条(默认 20)。needs_manual 是终态、却要留在进行中列表;
-   * stage 模式的正常收口也是它(pipeline.ts:480)→ 长期 master 会堆积,必须 cap 否则淹没进行中区。
+   * stage 模式的正常收口也是它 → 长期 master 会堆积,必须 cap 否则淹没进行中区。
+   * 该上限**只约束真事故**;stage 正常收口另走一个同上限的查询(见 buildQueueView)。
    */
   manualLimit?: number;
   now?: number;
   stageDir?: string;
+  /** Job log root (default: data-root logs dir). */
+  logsDir?: string;
 }
+
+/**
+ * `needs_manual` 却没有 error 的行的兜底文案(issue #188 验收 2)。
+ *
+ * 这类行 = 数据异常(某条路径漏写了原因),或是**修复部署前**遗留的旧行(2026-10 前 stage 正常
+ * 收口不写 error)。红色「待人工」旁边必须有一句可读的原因,不能只留一个空红的标签。
+ */
+const UNKNOWN_MANUAL_REASON = "缺少失败原因(数据异常或修复前遗留的旧记录,请核对后标记已核对)";
 
 const EMPTY_POOL: HubPoolSnapshotDTO = {
   cpu: { active: 0, queued: 0, max: 0 },
@@ -426,18 +666,31 @@ const EMPTY_POOL: HubPoolSnapshotDTO = {
  * - doneSteps:该场已完成子步骤(做了什么);nextSteps:按 core DAG 推导(下面做什么)。
  */
 export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): HubQueueDTO {
-  const { pool = EMPTY_POOL, recentLimit = 8, manualLimit = 20, stageDir = hubStageDir() } = opts;
+  const { pool = EMPTY_POOL, recentLimit = 8, manualLimit = 20, stageDir = hubStageDir(), logsDir = hubLogsDir() } = opts;
   // **不要**用「取最近 N 条再客户端过滤」:台账超过 N 行后,updatedAt 较旧的**正在处理**场
   // 会被新完成的历史挤出结果 → 队列页整场消失(实测 1 active + 520 done → active=[])。
   // 故分两条精确查询:①非终态 ∪ needs_manual(=active) ②终态按 updatedAt 倒序取 recentLimit(=recent)。
   const activeRows = listHubJobs(syncDbPath, {
-    excludeStates: [...TERMINAL], limit: 200, offset: 0, now: opts.now, stageDir,
+    excludeStates: [...TERMINAL], limit: 200, offset: 0, now: opts.now, stageDir, logsDir,
   });
+  // needs_manual 一分为二,**在 SQL 层分**:真事故(error 非 STAGE_READY)单独查并按 manualLimit 截断;
+  // stage 正常收口另查一个有限额。放在内存里分堆是错的 —— stage 收口是终态、只增不减,
+  // 任何固定窗口最终都会被它占满,真事故从 active 和 rows 里一起消失(issue #188 审查发现)。
   const manualRows = listHubJobs(syncDbPath, {
-    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir,
+    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir, logsDir,
+    excludeError: STAGE_READY, acked: false,
+  });
+  // Reviewed runs (issue #312) leave the inbox but stay in the ledger; only their count is reported.
+  const manualAcked = listHubJobs(syncDbPath, {
+    states: ["needs_manual"], limit: 0, offset: 0, now: opts.now, stageDir, logsDir,
+    acked: true,
+  }).total;
+  const stageReadyRows = listHubJobs(syncDbPath, {
+    states: ["needs_manual"], limit: manualLimit, offset: 0, now: opts.now, stageDir, logsDir,
+    onlyError: STAGE_READY, acked: false,
   });
   const recentRows = listHubJobs(syncDbPath, {
-    states: ["done", "failed"], limit: recentLimit, offset: 0, now: opts.now, stageDir,
+    states: ["done", "failed"], limit: recentLimit, offset: 0, now: opts.now, stageDir, logsDir,
   });
   // 同一场可能登记多条 waiting(两个 burn 同抢 cpu + upload)→ 取**最早**那条(最急)作代表,
   // 其余忽略(位次取该资源队列内的真实序号)。
@@ -460,18 +713,12 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     // 终态(done/failed)也成行(同表渲染):phase 直接取终态名,无「正在做/下面做」概念。
     // needs_manual 细分三态 —— 用 error 区分「正常收口(stage 待上传)/ 用户停止 / 真故障」,
     // 否则 8 条正常态和 2 条故障同色,告警疲劳(实测踩过)。
-    const needsManualPhase = (): QueuePhase => {
-      const err = (job.error ?? "").trim();
-      if (!err) return "waiting_upload"; // 无错误 = stage 模式正常收口(pipeline.ts 只 setState 不置 error)
-      if (err === USER_STOP) return "stopped";
-      return "waiting_manual"; // 真故障
-    };
     const phase: QueuePhase = job.state === "done"
       ? "done"
       : job.state === "failed"
         ? "failed"
         : job.state === "needs_manual"
-          ? needsManualPhase()
+          ? needsManualPhaseOf(job.error)
           : waiting
             ? "queued"
             : job.state === "pending" || job.state === "settling"
@@ -515,7 +762,11 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
       winnerWorker: job.winnerWorker,
       fails: job.fails,
       updatedAt: job.updatedAt,
-      error: job.error ?? null,
+      // 空 error 的 needs_manual 行补一句兜底说明(见 UNKNOWN_MANUAL_REASON);
+      // 其余行原样透出。
+      error: (job.state === "needs_manual" && !(job.error ?? "").trim())
+        ? UNKNOWN_MANUAL_REASON
+        : job.error ?? null,
       bv: job.bv ?? null,
       videoDurationSec: job.videoDurationSec,
       // 收尾时刻 = 末个事件(终态那次的时刻);非终态 null。
@@ -524,9 +775,13 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
         : null,
       // 入队时刻 = 首个事件(pending);startedAt 即 events[0].at,台账有事件就必有。
       enqueuedAt: job.startedAt,
+      nodeUpload: job.nodeUpload,
     };
   };
 
+  // needs_manual 要一分为二:**stage 模式正常收口**(error=STAGE_READY)不是要人救的火,
+  // 混进 active 会淹没真事故(实测 20 条里 2 条是这种噪音)→ 只留在 rows 时间轴里。
+  // 真事故(用户停止 / 各类失败)照旧进 active,人工收件箱只装真事故。
   for (const job of [...activeRows.jobs, ...manualRows.jobs]) active.push(toRow(job));
   // 已完成/失败的场也进 rows —— 前端渲染**一张表**(像日志),完成的行 phase=done/failed。
   // 独立拉一批终态(数量 = recentLimit),与 active 合并成单一时间轴。
@@ -548,7 +803,7 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
   // rows:进行中 + 已完成,**同一时间轴、同一张表**(像日志)。finished 段的排序键用
   // finishedAt(收尾时刻)而非 enqueuedAt —— 否则「今天早上录、刚上传完」的稿会因入队早
   // 沉到列表底部,而用户关心的是「刚刚发生了什么」。进行中段仍用 enqueuedAt(队列语义)。
-  const rows: QueueItemDTO[] = [...active, ...finishedRows];
+  const rows: QueueItemDTO[] = [...active, ...stageReadyRows.jobs.map(toRow), ...finishedRows];
   rows.sort((a, b) => {
     const key = (r: QueueItemDTO): number =>
       r.phase === "done" || r.phase === "failed" ? (r.finishedAt ?? r.updatedAt) : (r.enqueuedAt ?? r.updatedAt);
@@ -578,6 +833,9 @@ export function buildQueueView(syncDbPath: string, opts: BuildQueueOpts = {}): H
     rows: rows.filter(keep),
     recent: recent.slice(0, recentLimit),
     pool,
+    // Totals ignore the filters on purpose: they size the whole inbox, not the current view.
+    manualTotal: manualRows.total,
+    manualAcked,
   };
 }
 
@@ -586,7 +844,8 @@ function doneStepsOf(job: HubJobView): HubJobStep[] {
   const seen = new Set<string>();
   const out: HubJobStep[] = [];
   for (const s of job.steps) {
-    if (s.phase !== "done" || seen.has(s.step)) continue;
+    // A legacy sidecar skip was logged as `done` but nothing ran (issue #176).
+    if (s.phase !== "done" || isSidecarSkipEvent(s) || seen.has(s.step)) continue;
     seen.add(s.step);
     out.push(s);
   }

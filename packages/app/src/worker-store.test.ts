@@ -25,6 +25,35 @@ describe("worker-store(文件版 CRUD)", () => {
     expect(w2.id).toBe("worker-2");
     expect(w2.name).toBe("备机");
   });
+  it("capabilities 创建/更新往返:去空白/去重/保序;空数组清空该字段", () => {
+    const w = createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d", capabilities: [" danmu:douyin ", "burn", "danmu:douyin", ""] });
+    expect(w.capabilities).toEqual(["danmu:douyin", "burn"]);        // trim + 去重 + 去空
+    expect(read().workers.find((x: { id: string }) => x.id === "worker-1").capabilities).toEqual(["danmu:douyin", "burn"]);
+    const u = updateWorker(cfg, "worker-1", { capabilities: ["upload"] });
+    expect(u!.capabilities).toEqual(["upload"]);
+    const cleared = updateWorker(cfg, "worker-1", { capabilities: [] });
+    expect(cleared!.capabilities).toBeUndefined();                    // 空数组 → 清空字段
+    expect(read().workers.find((x: { id: string }) => x.id === "worker-1").capabilities).toBeUndefined();
+  });
+  it("capabilities 未传时更新其他字段 → 能力保留", () => {
+    createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d", capabilities: ["danmu:douyin"] });
+    const u = updateWorker(cfg, "worker-1", { name: "改名" });
+    expect(u!.capabilities).toEqual(["danmu:douyin"]);
+  });
+  it("显式 id(节点自报 nodeId)→ 用它作 id,不推进 workerSeq", () => {
+    const w = createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d", id: "a1b2c3d4-uuid" });
+    expect(w.id).toBe("a1b2c3d4-uuid");
+    expect(read().workerSeq).toBe(0);   // 显式 id 不占序号
+    // 之后自分配仍从 worker-1 起
+    expect(createWorker(cfg, { kind: "ssh", host: "h2", dataRoot: "/d" }).id).toBe("worker-1");
+  });
+  it("显式 id 重复 → 抛错(防重复添加同一节点)", () => {
+    createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d", id: "same-id" });
+    expect(() => createWorker(cfg, { kind: "ssh", host: "h2", dataRoot: "/d", id: "same-id" })).toThrow(/已存在/);
+  });
+  it("显式 id 为保留字 local → 抛错", () => {
+    expect(() => createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d", id: "local" })).toThrow(/保留/);
+  });
   it("seq 不复用:删了 worker-1 再 create 得 worker-2", () => {
     createWorker(cfg, { kind: "ssh", host: "h", dataRoot: "/d" }); // worker-1
     expect(deleteWorker(cfg, "worker-1")).toBe(true);

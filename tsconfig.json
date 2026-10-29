@@ -14,6 +14,9 @@
     "paths": {
       "@drec/core": ["./packages/core/src/index.ts"],
       "@drec/manager": ["./packages/manager/src/index.ts"],
+      "@drec/proc-queue": ["./packages/proc-queue/src/index.ts"],
+      "@drec/processors": ["./packages/processors/src/index.ts"],
+      "@drec/zero-upload": ["./packages/zero-upload/src/index.ts"],
       "@drec/post-process": ["./packages/post-process/src/index.ts"],
       "@drec/tui": ["./packages/tui/src/index.ts"],
       "@drec/douyin-live": ["./packages/douyin-live/src/index.ts"],

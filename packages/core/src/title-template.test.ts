@@ -1,17 +1,23 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import {
   applyTitleTemplate,
   DEFAULT_TITLE_TEMPLATE,
   formatBiliTitle,
   formatUploadTitle,
   formatPartTitle,
+  isSafeStem,
   partTitleToFilename,
   parseSessionStamp,
   resolveOutputStem,
+  resolveSubmissionTitle,
+  sanitizeStem,
   sanitizeLiveTitle,
   validateLooseTitleTemplate,
   validateTitleTemplate,
   zonedStamp,
+  resolveTimeZone,
+  processTimeZone,
+  epochFromZonedParts,
 } from "./title-template.js";
 
 describe("parseSessionStamp", () => {
@@ -111,6 +117,70 @@ describe("resolveOutputStem", () => {
       sessionBase: "某某_2026-09-12_14-30-05",
       existingStem: "旧_2026-09-12",
     })).toBe("旧_2026-09-12");
+  });
+
+  // #171: anchor names with emoji / full-width symbols / dots must not fail the job.
+  it.each([
+    ["emoji", "某某🌟喵_2026-09-12_14-30-05", "某某喵_2026-09-12"],
+    ["emoji with variation selector", "某某❤️喵_2026-09-12_14-30-05", "某某喵_2026-09-12"],
+    ["emoji with skin tone", "某某👍🏽喵_2026-09-12_14-30-05", "某某喵_2026-09-12"],
+    ["full-width punctuation", "某某「小号」！_2026-09-12_14-30-05", "某某-小号_2026-09-12"],
+    ["dots", "a.b.c_2026-09-12_14-30-05", "a-b-c_2026-09-12"],
+    ["leading symbol", "🌟某某_2026-09-12_14-30-05", "某某_2026-09-12"],
+  ])("非法字符清洗成合法 stem(%s)", (_label, sessionBase, want) => {
+    const stem = resolveOutputStem({ sessionBase, timeZone: "Asia/Shanghai" });
+    expect(stem).toBe(want);
+    expect(isSafeStem(stem)).toBe(true);
+    // Rerun-stable.
+    expect(resolveOutputStem({ sessionBase, timeZone: "Asia/Shanghai" })).toBe(stem);
+  });
+});
+
+describe("sanitizeStem", () => {
+  it("合法 stem 原样返回(含 -- 也不折叠,保证老 stem 不变)", () => {
+    expect(sanitizeStem("某某_2026-09-12")).toBe("某某_2026-09-12");
+    expect(sanitizeStem("a--b_2026")).toBe("a--b_2026");
+  });
+  it("全是非法字符 → 空串", () => {
+    expect(sanitizeStem("🌟🌟")).toBe("");
+  });
+  it("emoji 被忽略,不留下分隔符", () => {
+    expect(sanitizeStem("某某🌟喵")).toBe("某某喵");
+    expect(sanitizeStem("某某❤️喵")).toBe("某某喵");
+    expect(sanitizeStem("👨‍👩‍👧某某")).toBe("某某");
+    expect(sanitizeStem("🇨🇳某某")).toBe("某某");
+  });
+  it("名字全是非法字符:不留前导下划线", () => {
+    expect(resolveOutputStem({ sessionBase: "🌟🌟_2026-09-12_14-30-05", timeZone: "Asia/Shanghai" })).toBe("2026-09-12");
+  });
+  it("已合法的名字不做 NFC 改写", () => {
+    expect(sanitizeStem("\uF900_2026-09-12")).toBe("\uF900_2026-09-12");
+  });
+  it("长 emoji 名字:按清洗后长度判断,不误报超长", () => {
+    const name = "啊".repeat(30) + "🌟".repeat(20);
+    const stem = resolveOutputStem({ sessionBase: `${name}_2026-09-12_14-30-05`, timeZone: "Asia/Shanghai" });
+    expect(stem).toBe(`${"啊".repeat(30)}_2026-09-12`);
+  });
+});
+
+describe("resolveSubmissionTitle", () => {
+  const ctx = { sessionBase: "某某🌟.喵_2026-09-12_14-30-05", timeZone: "Asia/Shanghai" };
+  it("未配稿件模板:标题保留原始字符,stem 是清洗后的", () => {
+    const stem = resolveOutputStem({ ...ctx });
+    expect(stem).toBe("某某-喵_2026-09-12");
+    expect(resolveSubmissionTitle({ stem, ctx })).toBe("某某🌟.喵_2026-09-12");
+  });
+  it("稿件模板优先", () => {
+    expect(resolveSubmissionTitle({ submissionTemplate: "{name} 回放", stem: "x", ctx })).toBe("某某🌟.喵 回放");
+  });
+  it("锁定 stem 后改了模板 → 仍用锁定 stem(续跑稳定)", () => {
+    expect(resolveSubmissionTitle({ template: "{name}_{date}_{HHmmss}", stem: "某某-喵_2026-09-12", ctx }))
+      .toBe("某某-喵_2026-09-12");
+  });
+  it("合法名字:标题 === stem(行为不变)", () => {
+    const c = { sessionBase: "某某_2026-09-12_14-30-05", timeZone: "Asia/Shanghai" };
+    const stem = resolveOutputStem({ ...c, template: "{name}_{date}_{HHmmss}" });
+    expect(resolveSubmissionTitle({ template: "{name}_{date}_{HHmmss}", stem, ctx: c })).toBe(stem);
   });
 });
 
@@ -244,11 +314,69 @@ describe("分 P 标题(与稿件名分开)", () => {
     const ctx = { sessionBase: "某某_2026-09-12_14-30-05" };
     // 文件名规则(stage stem 侧):严格字符集
     expect(formatUploadTitle("{name}_{date}_{HH}-{mm}-{ss}", ctx)).toBe("某某_2026-09-12_14-30-05");
-    // 稿件名:可含空格(文件名侧会拒绝,这里必须允许)
+    // 稿件名:可含空格(文件名侧会清洗,这里必须保留)
     expect(formatBiliTitle("{name}_{date} 直播回放", ctx)).toBe("某某_2026-09-12 直播回放");
-    expect(() => formatUploadTitle("{name}_{date} 直播回放", ctx)).toThrow();
+    expect(formatUploadTitle("{name}_{date} 直播回放", ctx)).toBe("某某_2026-09-12-直播回放");
     // 分P名:可含空格,渲染成宽松标题;类型后缀自动加
     expect(formatPartTitle("P{part} 弹幕版", { ...ctx, partIndex: 2, partTotal: 3 }, "danmu"))
       .toBe("P2 弹幕版_danmu");
+  });
+});
+
+describe("设置时区口径(issue #155)", () => {
+  const prevTZ = process.env.TZ;
+  afterEach(() => {
+    if (prevTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTZ;
+  });
+  // 北京 2026-09-13 01:30:05 = UTC 09-12 17:30:05 = 洛杉矶 09-12 10:30:05
+  const ms = Date.parse("2026-09-12T17:30:05Z");
+
+  it("resolveTimeZone: 空/非法 → 北京时间;合法原样", () => {
+    expect(resolveTimeZone(undefined)).toBe("Asia/Shanghai");
+    expect(resolveTimeZone("  ")).toBe("Asia/Shanghai");
+    expect(resolveTimeZone("Not/AZone")).toBe("Asia/Shanghai");
+    expect(resolveTimeZone(" America/Los_Angeles ")).toBe("America/Los_Angeles");
+  });
+
+  it("processTimeZone: 只看 process.env.TZ,未设 → 北京(不回落宿主机本地时区)", () => {
+    delete process.env.TZ;
+    expect(processTimeZone()).toBe("Asia/Shanghai");
+    process.env.TZ = "America/Los_Angeles";
+    expect(processTimeZone()).toBe("America/Los_Angeles");
+  });
+
+  it("进程时区为美西、未显式传 timeZone:标题日期仍是北京日期(次日凌晨场次)", () => {
+    process.env.TZ = "America/Los_Angeles";
+    expect(formatUploadTitle("{name}_{date}", { sessionBase: "某某", startMs: ms })).toBe("某某_2026-09-13");
+    expect(formatBiliTitle("{name}_{date}_{HHmm}", { sessionBase: "某某", startMs: ms })).toBe("某某_2026-09-13_0130");
+  });
+
+  it("北京晚间场次(美西同日白天):北京日期", () => {
+    process.env.TZ = "America/Los_Angeles";
+    const evening = Date.parse("2026-09-12T14:00:00Z"); // 北京 22:00 / 洛杉矶 07:00
+    expect(formatUploadTitle("{name}_{date}", { sessionBase: "某某", startMs: evening })).toBe("某某_2026-09-12");
+  });
+
+  it("已锁定 outputStem 不受时区影响(向后兼容)", () => {
+    process.env.TZ = "America/Los_Angeles";
+    expect(resolveOutputStem({ sessionBase: "某某", startMs: ms, existingStem: "某某_2026-09-12" })).toBe("某某_2026-09-12");
+  });
+});
+
+describe("epochFromZonedParts(zonedStamp 的逆)", () => {
+  it("北京墙钟 → epoch;与宿主机本地时区无关", () => {
+    expect(epochFromZonedParts(2026, 9, 13, 1, 30, 5, "Asia/Shanghai")).toBe(Date.parse("2026-09-12T17:30:05Z"));
+    expect(epochFromZonedParts(2026, 9, 12, 10, 30, 5, "America/Los_Angeles")).toBe(Date.parse("2026-09-12T17:30:05Z"));
+  });
+  it("与 zonedStamp 互逆(含跨日 / 夏令时一侧)", () => {
+    for (const tz of ["Asia/Shanghai", "America/Los_Angeles", "Europe/London"]) {
+      for (const iso of ["2026-01-15T03:04:05Z", "2026-07-01T23:59:59Z", "2026-03-08T10:00:00Z"]) {
+        const ms = Date.parse(iso);
+        const z = zonedStamp(ms, tz);
+        const [y, mo, d] = z.date.split("-").map(Number);
+        expect(epochFromZonedParts(y!, mo!, d!, Number(z.hh), Number(z.mm), Number(z.ss), tz)).toBe(ms);
+      }
+    }
   });
 });

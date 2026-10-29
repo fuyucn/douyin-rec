@@ -59,6 +59,8 @@ export interface DanmaClient {
   on(event: "gift", cb: (m: _GiftMsg) => void): unknown;
   on(event: "member", cb: (m: _MemberMsg) => void): unknown;
   on(event: "error", cb: (e: Error) => void): unknown;
+  /** 自动重连耗尽(连续闪断达上限)→ 本场永久放弃,上层应停采集并告警。 */
+  on(event: "exhausted", cb: (attempts: number) => void): unknown;
   /** WebcastControlMessage action===3(疑似下播)。仅提示,须由权威 getLiving 复核。 */
   on(event: "control", cb: (e: { action: number; tips: string }) => void): unknown;
   connect(): Promise<void>;
@@ -156,7 +158,9 @@ export abstract class ListenerDanmuSource implements DanmuSource {
 
     const client = new Ctor(liveId, {
       autoStart: false,
-      autoReconnect: 10,
+      // 上限 5:连续闪断(连上即被踢)时快速熔断,避免无限重连把出口 IP 刷进风控。
+      // 存活满 60s 才清零计数,所以正常「偶发断流重连」不受影响。
+      autoReconnect: 5,
       cookie: wsCookie,
     });
     this.client = client;
@@ -219,6 +223,17 @@ export abstract class ListenerDanmuSource implements DanmuSource {
         this.wsErrorAlerted = true;
         alert(`弹幕 WS 错误(后续重连错误不再重复告警): ${err?.message ?? err}`);
       }
+    });
+
+    // 自动重连耗尽:连续闪断(连上即被踢)达上限 → **永久停止本场重连**,不再无限刷。
+    // 这是防止出口 IP 被风控拉黑的关键闸门:历史缺陷里重连上限形同虚设,某房间 4 小时重连近千次。
+    client.on("exhausted", (attempts: number) => {
+      log.warn(`${this.name} 自动重连 ${attempts} 次仍无法稳定连接,本场放弃弹幕采集(不再重连)`);
+      alert(
+        `弹幕连续重连 ${attempts} 次均失败(疑似被风控/网络异常),已停止重连以免刷爆出口 IP。` +
+          `本场不再抓弹幕,不影响视频录制。room=${roomUrl} liveId=${liveId}`,
+      );
+      this.clearSilentWatch();
     });
 
     // WebcastControlMessage action===3:平台宣告本场疑似结束。**只作提示**——可能是主播真下播,

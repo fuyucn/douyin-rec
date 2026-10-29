@@ -4,11 +4,17 @@ import { api, type Task, type TaskPayload, type PlatformDTO } from "../api/clien
 import { cookieStatusAtom, serverTimezoneAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
-import { Switch } from "../components/Switch";
+import { NotifySection } from "../components/room-form/NotifySection";
+import { webhookPatch } from "../lib/room-editor-form";
+import { RecordingSection } from "../components/room-form/RecordingSection";
+import { ToggleRow } from "../components/room-form/parts";
+import { ExperimentalBadge } from "../components/ExperimentalBadge";
 import { Tooltip } from "../components/Tooltip";
-import { errMessage, useToast } from "../lib/hooks";
+import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { qualityLabel, scheduleInput } from "../lib/labels";
+import { pickPlatform, scheduleInput } from "../lib/labels";
+import { cookieLock, cookieReadyFor, outputFormatFromStored, taskOutputFormatLock } from "../lib/room-form-rules";
+import type { OutputFormat } from "@drec/output-format";
 import { fmtTimeInTz, localTimeTooltip } from "../lib/tz";
 
 interface Props {
@@ -29,7 +35,15 @@ interface FormState {
   schedule: string;
   danmu: boolean;
   useCookie: boolean;
+  outputFormat: OutputFormat;
+  /** New webhook typed by the user; the stored one is never sent to the client (see webhookPatch). */
   webhook: string;
+  hasWebhook: boolean;
+  webhookClear: boolean;
+  /** 0 落盘流式直传(plans/039):源录像不落盘,边录边传 B 站。 */
+  streamUpload: boolean;
+  /** 真 0 落盘 = 连 spool 都不写;代价是分 P 上传失败时没有本地回退源。 */
+  streamUploadSpool: boolean;
 }
 
 const BLANK: FormState = {
@@ -41,7 +55,12 @@ const BLANK: FormState = {
   schedule: "",
   danmu: true,
   useCookie: true,
+  outputFormat: "original",
   webhook: "",
+  hasWebhook: false,
+  webhookClear: false,
+  streamUpload: false,
+  streamUploadSpool: true,
 };
 
 function fromTask(t: Task): FormState {
@@ -54,27 +73,14 @@ function fromTask(t: Task): FormState {
     schedule: scheduleInput(t),
     danmu: !!t.danmu,
     useCookie: !!t.useCookie,
-    webhook: t.webhook ?? "",
+    outputFormat: outputFormatFromStored(t.outputFormat),
+    webhook: "",
+    hasWebhook: t.hasWebhook === true,
+    webhookClear: false,
+    // 旧后端不下发该字段 → undefined → false(行为同改前)。
+    streamUpload: t.streamUpload === true,
+    streamUploadSpool: t.streamUploadSpool !== false,
   };
-}
-
-/**
- * 按直播间地址判平台(客户端,最简单):http(s) URL 用各平台 urlPattern 匹配;裸房间号或无命中
- * → 回落 platforms[0](默认平台,与后端 platformForRoom 一致)。平台决定画质/录制器/弹幕选项。
- */
-function pickPlatform(room: string, platforms: PlatformDTO[]): PlatformDTO | undefined {
-  if (!platforms.length) return undefined;
-  if (/^https?:\/\//.test(room)) {
-    for (const p of platforms) {
-      if (!p.urlPattern) continue;
-      try {
-        if (new RegExp(p.urlPattern).test(room)) return p;
-      } catch {
-        /* 坏 pattern 跳过 */
-      }
-    }
-  }
-  return platforms[0];
 }
 
 /** 时区后缀(" · Asia/Shanghai"),{tz} 插值。 */
@@ -93,7 +99,7 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
   const serverTz = useAtomValue(serverTimezoneAtom);
   // 含礼物需要已登录的全局 cookie；没有则禁用「弹幕含礼物」开关（拿不到礼物）。
   const cookieStatus = useAtomValue(cookieStatusAtom);
-  const cookieReady = !!cookieStatus?.hasSession;
+  const cookieStatuses = usePlatformCookieStatuses(open);
 
   // 平台清单(画质/录制器/弹幕选项的来源)。打开时拉一次,失败静默(选项退化为当前值)。
   useEffect(() => {
@@ -131,10 +137,16 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
     setForm((f) => ({ ...f, [key]: value }));
   }
 
-  // 选项列表:平台清单 + 当前值(确保当前值始终可见,即便平台未加载完)。
-  const opts = (list: readonly string[] | undefined, current: string): string[] =>
-    [...new Set([...(list ?? []), current].filter(Boolean))];
+  // 输出格式只对无后处理的任务生效(节点侧原地替换);后端判定不适用(受管 / 有规则 / 边录边传)→ 锁定,不随保存提交(避免改掉规则侧的存档格式)。
+  const formatLock = taskOutputFormatLock({ outputFormatLock: task?.outputFormatLock });
   const danmuAvailable = plat ? plat.hasDanmu : true;
+  // 抖音取流恒匿名,Cookie 只服务弹幕;B站/快手用它取流(锁定口径见 room-form-rules)。
+  const cookieForStream = plat ? plat.id !== "douyin" : false;
+  const cookieReady = cookieReadyFor(plat?.id, cookieStatuses, !!cookieStatus?.hasSession);
+  // Zero-disk is configured on the room editor (rolling sub-option); the task dialog only
+  // shows the legacy switch for tasks that already carry it. New/changed zero-disk settings
+  // must go through the room editor so the rule and task are written together.
+  const zeroDiskManaged = isEdit && task?.streamUpload === true;
 
   async function submit(ev: FormEvent): Promise<void> {
     ev.preventDefault();
@@ -145,10 +157,13 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
       engine: form.engine || undefined,
       segmentSec: Number(form.segmentSec) || 0,
       danmu: form.danmu ? 1 : 0,
-      // 顶部统一管理全局 cookie；此开关决定本任务是否带 cookie 抓弹幕。
-      useCookie: cookieReady && form.useCookie,
+      // 原值提交:未登录时开关只是锁定显示,不能借保存把任务的 Cookie 设置改掉(与房间面板 / 规则弹窗同口径)。
+      useCookie: form.useCookie,
       schedule: form.schedule.trim() || null,
-      webhook: form.webhook.trim() || null,
+      ...webhookPatch(form.webhook, form.webhookClear),
+      // Preserve the stored zero-disk fields; the room editor is the only writer.
+      ...(zeroDiskManaged ? { streamUpload: form.streamUpload, streamUploadSpool: form.streamUploadSpool } : {}),
+      ...(formatLock.locked ? {} : { outputFormat: form.outputFormat }),
     };
     setBusy(true);
     try {
@@ -178,73 +193,24 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
         </p>
       )}
 
-      <form className="grid grid-cols-1 sm:grid-cols-2 gap-4" onSubmit={submit}>
-        <div className="sm:col-span-2">
-          <label className="field-label">
-            {t("dialog.room")}<span className="text-error-fg">*</span>
-          </label>
-          <input
-            required
-            className="input"
-            placeholder={t("dialog.roomPlaceholder")}
-            value={form.room}
-            onChange={(e) => set("room", e.target.value)}
-          />
-          {plat && <p className="mt-1 text-xs text-muted-soft">{t("dialog.platform", { id: plat.id })}</p>}
-        </div>
-
-        <div>
-          <label className="field-label">{t("dialog.name")}</label>
-          <input
-            className="input"
-            placeholder={t("dialog.namePlaceholder")}
-            value={form.name}
-            onChange={(e) => set("name", e.target.value)}
-          />
-        </div>
-
-        <div>
-          <label className="field-label">{t("dialog.quality")}</label>
-          <select className="select" value={form.quality} onChange={(e) => set("quality", e.target.value)}>
-            {opts(plat?.qualities, form.quality).map((q) => (
-              <option key={q} value={q}>
-                {qualityLabel(q)}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label className="field-label">{t("dialog.recorder")}</label>
-          <select className="select" value={form.engine} onChange={(e) => set("engine", e.target.value)}>
-            {opts(plat?.engines, form.engine).map((e) => (
-              <option key={e} value={e}>
-                {e}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label className="field-label">{t("dialog.segment")}</label>
-          <input
-            type="number"
-            min={0}
-            className="input"
-            value={form.segmentSec}
-            onChange={(e) => set("segmentSec", e.target.value)}
-          />
-        </div>
-
-        <div>
-          <label className="field-label">{t("dialog.scheduleWindow")}</label>
-          <input
-            className="input"
-            placeholder={t("dialog.schedulePlaceholder")}
-            value={form.schedule}
-            onChange={(e) => set("schedule", e.target.value)}
-          />
-          <p className="mt-1 text-xs text-muted-soft">
+      <form className="space-y-7" onSubmit={submit}>
+        <RecordingSection
+          value={{ ...form, recEnabled: true }}
+          onChange={(patch) => setForm((f) => ({ ...f, ...patch }))}
+          showName
+          outputFormat={{
+            value: form.outputFormat,
+            shown: form.outputFormat,
+            lock: formatLock,
+            hintKey: "dialog.outputFormatHint",
+            onChange: (outputFormat) => set("outputFormat", outputFormat),
+          }}
+          qualities={plat?.qualities ?? []}
+          engines={plat?.engines ?? []}
+          danmuAvailable={danmuAvailable}
+          cookie={cookieLock({ danmu: form.danmu, danmuAvailable, cookieReady, cookieForStream })}
+          cookieForStream={cookieForStream}
+          scheduleHint={
             <Tooltip
               content={localTimeTooltip(new Date(), serverTz, (tz, local) =>
                 t("common.localTimeTooltip", { serverTz: tz, local }),
@@ -252,53 +218,42 @@ export function CreateEditTaskDialog({ open, onClose, task, onSaved }: Props): R
             >
               <span>{t("dialog.schedHint", { now: fmtTimeInTz(new Date(), serverTz), tz: schedTzLabel(serverTz) })}</span>
             </Tooltip>
-          </p>
-        </div>
-
-        <div className="sm:col-span-2">
-          <label className="field-label">{t("dialog.webhook")}</label>
-          <input
-            className="input"
-            placeholder={t("dialog.webhookPlaceholder")}
-            value={form.webhook}
-            onChange={(e) => set("webhook", e.target.value)}
-          />
-          <p className="mt-1 text-xs text-muted-soft">{t("dialog.webhookHint")}</p>
-        </div>
-
-        <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3 mt-1">
-          <label
-            className="switch-row"
-            data-disabled={!danmuAvailable}
-          >
-            <span className="flex flex-col">
-              <span className="text-sm font-medium text-ink">{t("dialog.recDanmu")}</span>
-              <span className="text-xs text-muted mt-0.5">
-                {danmuAvailable ? (form.danmu ? t("common.on") : t("common.off")) : t("dialog.danmuNone")}
-              </span>
-            </span>
-            <Switch checked={danmuAvailable && form.danmu} onCheckedChange={(v) => set("danmu", v)} name="danmu" disabled={!danmuAvailable} />
-          </label>
-          <label
-            className="switch-row"
-            data-disabled={!cookieReady || !danmuAvailable}
-          >
-            <span className="flex flex-col">
-              <span className="text-sm font-medium text-ink">{t("dialog.danmuGift")}</span>
-              <span className="text-xs text-muted mt-0.5">
-                {!cookieReady ? t("dialog.giftNeedCookie") : form.useCookie ? t("dialog.giftOn") : t("dialog.giftOff")}
-              </span>
-            </span>
-            <Switch
-              checked={cookieReady && danmuAvailable && form.useCookie}
-              onCheckedChange={(v) => set("useCookie", v)}
-              name="useCookie"
-              disabled={!cookieReady || !danmuAvailable}
+          }
+        >
+          <div>
+            <label className="field-label">
+              {t("dialog.room")}<span className="text-error-fg">*</span>
+            </label>
+            <input
+              required
+              className="input"
+              placeholder={t("dialog.roomPlaceholder")}
+              value={form.room}
+              onChange={(e) => set("room", e.target.value)}
             />
-          </label>
-        </div>
+            {plat && <p className="mt-1 text-xs text-muted-soft">{t("dialog.platform", { id: plat.id })}</p>}
+          </div>
+        </RecordingSection>
+        <NotifySection webhook={form.webhook} onChange={(v) => set("webhook", v)}
+                       hasStored={form.hasWebhook} clear={form.webhookClear} onClearChange={(v) => set("webhookClear", v)} />
+        {/* 边录边传已迁到 hub 规则(上传方式 = 边录边传,issue #40);task 只保留录制参数。
+            旧开关为 true 的任务只读提示一下,不可在此修改。 */}
+        {isEdit && task?.rollingUpload === true && <p className="text-xs text-muted">{t("rooms.rollingLegacyNote")}</p>}
+        {/* Zero-disk moved under the room editor's rolling sub-option. Keep the legacy
+            read-only switch visible so an existing task is not silently changed here. */}
+        {zeroDiskManaged && (
+          <ToggleRow
+            label={t("dialog.streamUpload")}
+            hint={t("dialog.streamUploadMoved")}
+            checked={form.streamUpload}
+            onChange={() => {}}
+            lock={{ locked: true }}
+            lockedChecked
+            badge={<ExperimentalBadge id="stream-upload" />}
+          />
+        )}
 
-        <div className="sm:col-span-2 flex justify-end gap-3 mt-3">
+        <div className="flex justify-end gap-3">
           <Button type="button" variant="secondary" onClick={onClose}>
             {t("common.cancel")}
           </Button>

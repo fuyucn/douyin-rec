@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { decide, TaskDaemon } from "../../packages/app/src/daemon.js";
+import { describe, it, expect, vi } from "vitest";
+import { decide, TaskDaemon, resolveDiskWatermarkBytes, resolveDiskWatermark } from "../../packages/app/src/daemon.js";
 import { TaskManager } from "../../packages/app/src/task-manager.js";
 import { TaskStore, type Task } from "../../packages/app/src/store.js";
 import type { Spawner } from "../../packages/app/src/process/spawner.js";
@@ -25,6 +25,7 @@ function mkTask(
     scheduleEnd,
     status: "stopped",
     useCookie: true,
+    rollingUpload: false, rollingEffective: false,
     enabled,
     createdAt: "2026-06-12T00:00:00.000Z",
   };
@@ -152,6 +153,35 @@ class MockSpawner implements Spawner {
 }
 
 describe("TaskDaemon — composition with TaskManager", () => {
+  it("does not restart a task the manager gave up on until the cooldown passes (#308)", async () => {
+    const store = new TaskStore(":memory:");
+    const id = store.addTask({ room: "r", enabled: true }).id;
+    const spawner = new MockSpawner();
+    let now = 5_000_000;
+    const logs: string[] = [];
+    const mgr = new TaskManager(store, spawner, {
+      autoRestart: true, maxRestarts: 1, restartDelayMs: 0, giveUpCooldownMs: 600_000,
+      schedule: (cb) => cb(), log: () => {}, clock: () => now,
+    });
+    const daemon = new TaskDaemon(store, mgr, { now: () => localAt(7), log: (m) => logs.push(m) });
+    const crash = (): void => {
+      const p = spawner.spawned.at(-1)!;
+      (p as unknown as { cbs: ((i: ExitInfo) => void)[] }).cbs.forEach((cb) => cb({ code: 1, signal: null, expected: false }));
+    };
+
+    await daemon.tick(); // spawn #1
+    crash(); // restart #1 -> spawn #2
+    crash(); // gives up
+    expect(spawner.spawned).toHaveLength(2);
+    await daemon.tick();
+    await daemon.tick();
+    expect(spawner.spawned).toHaveLength(2); // the old loop restarted it here (~20s later)
+    expect(logs.filter((m) => m.includes("重启次数已耗尽"))).toHaveLength(1);
+    now += 600_000;
+    await daemon.tick();
+    expect(spawner.spawned).toHaveLength(3);
+  });
+
   it("starts an eligible task via the manager (spawns a subprocess) on tick", async () => {
     const store = new TaskStore(":memory:");
     const id = store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true }).id;
@@ -175,6 +205,45 @@ describe("TaskDaemon — composition with TaskManager", () => {
     await daemon.tick();
     expect(spawner.spawned).toHaveLength(0);
     expect(daemon.activeIds()).toEqual(new Set());
+  });
+
+  it("T-33:磁盘低于水位 → 拒绝启动新任务,但已在录的场照常停/不收影响", async () => {
+    const store = new TaskStore(":memory:");
+    store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true });
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {} });
+    // 剩余 2GB < 水位 10GB → 拒绝启动。
+    const daemon = new TaskDaemon(store, mgr, {
+      now: () => localAt(7), log: () => {},
+      freeBytes: () => 2e9, diskWatermarkBytes: 10e9,
+    });
+    await daemon.tick();
+    expect(spawner.spawned).toHaveLength(0);
+    expect(daemon.activeIds()).toEqual(new Set());
+  });
+
+  it("T-33:磁盘达到水位 → 启动新任务;查不到剩余(返回 null)→ 不拦(保守放行,已有看门狗告警)", async () => {
+    const store = new TaskStore(":memory:");
+    store.addTask({ room: "r", scheduleStart: "06:00", scheduleEnd: "09:00", enabled: true });
+    const spawner = new MockSpawner();
+    const mgr = new TaskManager(store, spawner, { log: () => {} });
+    // 达到水位(2GB == 2GB)→ 放行。
+    const daemonOk = new TaskDaemon(store, mgr, {
+      now: () => localAt(7), log: () => {},
+      freeBytes: () => 2e9, diskWatermarkBytes: 2e9,
+    });
+    await daemonOk.tick();
+    expect(spawner.spawned).toHaveLength(1);
+
+    // 新实例:查不到剩余 → 不拦(避免把「探测失败」当「爆盘」误停)。
+    const spawner2 = new MockSpawner();
+    const mgr2 = new TaskManager(store, spawner2, { log: () => {} });
+    const daemonUnknown = new TaskDaemon(store, mgr2, {
+      now: () => localAt(7), log: () => {},
+      freeBytes: () => null, diskWatermarkBytes: 10e9,
+    });
+    await daemonUnknown.tick();
+    expect(spawner2.spawned).toHaveLength(1);
   });
 
   it("stops a running task once it leaves its window", async () => {
@@ -290,5 +359,50 @@ describe("TaskDaemon — composition with TaskManager", () => {
     await daemon.stop();
     expect(mgr.runningIds()).toEqual([]);
     await daemon.stop(); // idempotent
+  });
+});
+
+describe("resolveDiskWatermarkBytes — worker 无 hub 配置时水位不得静默为 0", () => {
+  it("无配置(worker)→ 默认 10GB", () => {
+    expect(resolveDiskWatermarkBytes(undefined)).toBe(10e9);
+  });
+  it("配置里没有 resources.diskMinGB → 默认 10GB", () => {
+    expect(resolveDiskWatermarkBytes("{}")).toBe(10e9);
+    expect(resolveDiskWatermarkBytes('{"resources":{}}')).toBe(10e9);
+  });
+  it("配置值照常生效", () => {
+    expect(resolveDiskWatermarkBytes('{"resources":{"diskMinGB":25}}')).toBe(25e9);
+  });
+  it("显式 <=0 = 关闭(与 reconciler 同语义)", () => {
+    expect(resolveDiskWatermarkBytes('{"resources":{"diskMinGB":0}}')).toBe(0);
+    expect(resolveDiskWatermarkBytes('{"resources":{"diskMinGB":-1}}')).toBe(0);
+  });
+  it("非数字 / JSON 损坏 → 回落默认(宁可拦)", () => {
+    expect(resolveDiskWatermarkBytes('{"resources":{"diskMinGB":"abc"}}')).toBe(10e9);
+    expect(resolveDiskWatermarkBytes("{not json")).toBe(10e9);
+  });
+  it("JSON 损坏 / 非数字 → warn 被调用(不静默)", () => {
+    const warn = vi.fn();
+    expect(resolveDiskWatermarkBytes("{not json", warn)).toBe(10e9);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("JSON");
+    warn.mockClear();
+    expect(resolveDiskWatermarkBytes('{"resources":{"diskMinGB":"abc"}}', warn)).toBe(10e9);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("diskMinGB");
+  });
+  it("正常配置 / 缺省 / 显式关闭 → 不告警", () => {
+    const warn = vi.fn();
+    resolveDiskWatermarkBytes('{"resources":{"diskMinGB":25}}', warn);
+    resolveDiskWatermarkBytes(undefined, warn);
+    resolveDiskWatermarkBytes("{}", warn);
+    resolveDiskWatermarkBytes('{"resources":{"diskMinGB":0}}', warn);
+    expect(warn).not.toHaveBeenCalled();
+  });
+  it("来源:配置 / 默认 / 关闭", () => {
+    expect(resolveDiskWatermark('{"resources":{"diskMinGB":25}}').source).toBe("配置");
+    expect(resolveDiskWatermark(undefined).source).toBe("默认");
+    expect(resolveDiskWatermark("{not json").source).toBe("默认");
+    expect(resolveDiskWatermark('{"resources":{"diskMinGB":0}}')).toEqual({ bytes: 0, source: "关闭" });
   });
 });

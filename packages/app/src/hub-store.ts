@@ -14,7 +14,7 @@
  */
 import { readdirSync, readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { platformForRoom, type HubPipelineConfig, type HubRecordingConfig } from "@drec/core";
+import { platformForRoom, isWorkerAssigned, type HubPipelineConfig, type HubRecordingConfig } from "@drec/core";
 import { normalizeRoom } from "./store.js";
 
 /** 一条 hub 规则(内存表示;持久化为 {key}.json)。 */
@@ -30,6 +30,12 @@ export interface HubRule {
   recording?: HubRecordingConfig;
   /** 选中参与该房间 hub 处理的 worker id;缺省/空 = 全部(向后兼容)。 */
   workers?: string[];
+  /**
+   * 该房间需要的 worker 能力(能力门控)。非空时,只有 `capabilities ⊇ requires` 的 worker 才参与
+   * 该房间的录制下发与后处理;**与 workers 是交集**(先按 workers 勾选,再按 requires 过滤)。
+   * 缺省/空 = 无能力要求(向后兼容)。例:`["danmu:douyin"]` → 只派给出口能拿到弹幕的节点。
+   */
+  requires?: string[];
   /** 列表自定义排序(可拖拽调整);越小越靠前,缺省 = 未排过序(按 key 兜底)。 */
   order?: number;
 }
@@ -41,12 +47,43 @@ interface HubFile {
   pipeline?: HubPipelineConfig;
   recording?: HubRecordingConfig;
   workers?: string[];
+  requires?: string[];
   order?: number;
 }
 
 /** 组合 key:平台 + 房间号,两段都不含点。 */
 export function hubKey(platform: string, roomSlug: string): string {
   return `${platform}.${roomSlug}`;
+}
+
+/**
+ * **深合并** pipeline 补丁(不整体替换)。
+ *
+ * 为什么必须合并:前端只能提交它**知道的**字段。若这里整体替换,一次只改画质/步骤的保存
+ * 就会把规则里其它 pipeline 字段(`cleanup` 清理开关、`titleTemplate` 等标题模板、
+ * `uploadBatchSize`/`minSegmentSec` 分段调优)静默抹掉 —— 而它们不在该表单里,
+ * 用户看不出「我只是点了个保存,清理策略就没了」。这是**静默数据丢失**,必须避免。
+ *
+ * 语义:标量/字符串直接覆盖;`steps` 与 `upload` 这两层对象再合并一层
+ * (这样「只改 steps 里的一个开关」不会把 upload 的 tag/tid/desc 清空)。
+ * 显式传 `undefined` 的键**跳过**(= 不改该字段),保留其它键。
+ * 注意:因此**无法**用本函数清空单个字段(需清空就传空串/null,不要传 undefined)。
+ */
+export function mergePipeline(
+  prev: HubPipelineConfig | undefined,
+  patch: HubPipelineConfig | undefined,
+): HubPipelineConfig {
+  const base: HubPipelineConfig = { ...(prev ?? {}) };
+  if (!patch) return base;
+  for (const [k, v] of Object.entries(patch) as [keyof HubPipelineConfig, unknown][]) {
+    if (v === undefined) continue;
+    if ((k === "steps" || k === "upload") && v && typeof v === "object") {
+      base[k] = { ...(base[k] as object), ...(v as object) } as never;
+    } else {
+      (base as Record<string, unknown>)[k] = v;
+    }
+  }
+  return base;
 }
 
 /** 由 room 派生 platform + roomSlug + key(唯一真理 = 平台的 extractRoomSlug)。 */
@@ -78,6 +115,8 @@ function fileToRule(stem: string, raw: HubFile): HubRule {
     recording: raw.recording,
     // workers 缺省 = undefined(= 全部 worker,向后兼容)。只在文件显式含时透出。
     workers: raw.workers,
+    // requires 缺省 = undefined(= 无能力要求)。空数组视为无要求(等价缺省)。
+    requires: raw.requires?.length ? raw.requires : undefined,
     order: raw.order,
   };
 }
@@ -137,15 +176,27 @@ export function getHubRule(dir: string, key: string): HubRule | null {
  *
  * 传入 knownWorkerIds(= 当前 hub.config.json 的 worker id 集合):规则里若只剩已删除的
  * 幽灵 id,则**不抑制**本机 —— 否则会出现「本机不录、远端也没人接」的静默漏录。
+ *
+ * **能力门控(T-10)**:候选远端 worker 还要满足规则的 `requires`(能力 ⊇ 要求)才算「有人接」。
+ * 否则会出现「本机被抑制、远端因缺能力被 reconciler 排除」→ 两头都不录的静默漏录。
+ * 与 reconciler 用**同一套判定**(core 的 `satisfiesCapabilities`,单一真理源)。
  */
-export function localSuppressedSourceTaskIds(dir: string, knownWorkerIds: ReadonlySet<string>): Set<number> {
+export function localSuppressedSourceTaskIds(
+  dir: string,
+  knownWorkerIds: ReadonlySet<string>,
+  capabilitiesOf?: (workerId: string) => readonly string[] | undefined,
+): Set<number> {
   const out = new Set<number>();
   for (const rule of listHubRules(dir)) {
     if (!rule.enabled) continue;
     const tid = rule.recording?.sourceTaskId;
     if (tid == null) continue;
     const ws = rule.workers;
-    const hasRemote = !!ws?.some((id) => id !== "local" && knownWorkerIds.has(id));
+    // 远端必须「存在 + 能力满足 requires」才算有人接(缺能力 → reconciler 也会排除它)。
+    // 与 master 下发/reconciler 同一判定(core isWorkerAssigned):勾选 ∧ 规则启用 ∧ 能力满足。
+    const hasRemote = !!ws?.some(
+      (id) => id !== "local" && knownWorkerIds.has(id) && isWorkerAssigned(rule, id, capabilitiesOf?.(id)),
+    );
     if (ws && ws.length > 0 && !ws.includes("local") && hasRemote) out.add(tid);
   }
   return out;
@@ -161,7 +212,9 @@ export function upsertHubRule(
     enabled?: boolean;
     pipeline?: HubPipelineConfig;
     recording?: HubRecordingConfig;
-    workers?: string[];
+    /** undefined = keep existing; null = clear (all nodes); a list overrides. */
+    workers?: string[] | null;
+    requires?: string[];
   },
 ): HubRule {
   const key = hubKey(input.platform, input.roomSlug);
@@ -169,31 +222,36 @@ export function upsertHubRule(
   writeRule(dir, key, {
     ...(input.room ? { room: normalizeRoom(input.room) } : {}),
     enabled: input.enabled ?? existing?.enabled ?? true,
-    pipeline: input.pipeline ?? existing?.pipeline ?? {},
+    // pipeline **深合并**(不是整体替换):调用方(尤其 web 表单)只提交它知道的字段,
+    // 整体替换会静默抹掉 cleanup / 标题模板等它没提交的字段。见 mergePipeline 注释。
+    pipeline: mergePipeline(existing?.pipeline, input.pipeline),
     recording: input.recording ?? existing?.recording,
-    // workers 缺省沿用已有(undefined = 全部);显式传才覆盖。
-    workers: input.workers ?? existing?.workers,
+    // workers 缺省沿用已有(undefined = 全部);显式传才覆盖;null = 显式清空回「全部节点」。
+    workers: input.workers === null ? undefined : input.workers ?? existing?.workers,
+    // requires 缺省沿用已有(undefined = 无能力要求);显式传才覆盖(空数组 = 清空要求)。
+    requires: input.requires ?? existing?.requires,
     // order 同理:只在 reorderHubRules 显式写入;upsert/update 均沿用。
     order: existing?.order,
   });
   return getHubRule(dir, key)!;
 }
 
-/** 部分更新(enabled / pipeline / workers);不存在返回 null。 */
+/** 部分更新(enabled / pipeline / workers / requires);不存在返回 null。 */
 export function updateHubRule(
   dir: string,
   key: string,
-  patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[] },
+  patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[]; requires?: string[] },
 ): HubRule | null {
   const existing = readRule(dir, key);
   if (!existing) return null;
   writeRule(dir, key, {
     ...(existing.room ? { room: existing.room } : {}),
     enabled: patch.enabled ?? existing.enabled,
-    pipeline: patch.pipeline ?? existing.pipeline,
+    pipeline: mergePipeline(existing.pipeline, patch.pipeline),
     recording: patch.recording ?? existing.recording,
     // 部分更新:未传 workers 沿用已有;传了(UI 总传非空列表)才覆盖。
     workers: patch.workers ?? existing.workers,
+    requires: patch.requires ?? existing.requires,
     order: existing.order,
   });
   return getHubRule(dir, key);
@@ -214,6 +272,7 @@ export function reorderHubRules(dir: string, keys: string[]): HubRule[] {
       pipeline: r.pipeline,
       recording: r.recording,
       workers: r.workers,
+      requires: r.requires,
       order: i,
     });
   }

@@ -6,7 +6,7 @@
  * All operations are synchronous (node:sqlite is sync).
  */
 import type { DatabaseSync } from "node:sqlite";
-import { getPlatform, platformForRoom } from "@drec/core";
+import { getPlatform, parseOutputFormat, platformForRoom, readOutputFormat, resolveRollingPolicy, type OutputFormat } from "@drec/core";
 import { openDb } from "./db.js";
 
 export type TaskStatus = "stopped" | "running" | "error" | "pending" | "draining";
@@ -61,6 +61,41 @@ export interface Task {
    * 配置由 hub 同步维护，Web UI/API 禁止编辑、删除。普通录制/调度路径不关心该字段。
    */
   managedBy: string | null;
+  /**
+   * **旧**边录边传开关(T-33):issue #40 起配置入口迁到 hub 规则 `pipeline.upload.mode="rolling"`,
+   * task 只保留录制参数。该列保留不删,仅作**迁移来源**(旧值 true 且规则未配置 ≡ rolling,
+   * 见 core `resolveRollingPolicy`)与旧值只读展示;新建/编辑 Web 表单不再暴露。
+   */
+  rollingUpload: boolean;
+  /**
+   * 边录边传**生效值**(只读派生字段):master 用 `resolveRollingPolicy` 算出并写入;**录制端只读它**,
+   * 不再自行读规则/判定。列为 NULL(尚未派生:旧库、无 hub 规则的单机任务)→ 读取时按旧开关迁移
+   * (旧开关 true ≡ rolling)。见 plans/031 的不变量 —— 本字段只改配置归属,不改上传/删源行为。
+   */
+  rollingEffective: boolean;
+  /**
+   * 0 落盘边录边传(zero-disk streaming upload, plans/039):ffmpeg 管道 stdout → UPOS 直传,
+   * 源录像不落盘;以「字节上限 或 时长上限」先到者结算一个分 P,后续分 P append 到同一稿件。
+   * 与 `rollingEffective` **互斥**(两者都要写盘 vs 不写盘);不是派生字段,纯用户开关。
+   */
+  streamUpload: boolean;
+  /**
+   * 0 落盘是否保留本地 spool(默认 true)。false = 真 0 落盘:视频字节完全不写盘,
+   * 代价是该分 P 上传失败时没有本地回退源。仅 streamUpload=true 时有意义。
+   */
+  streamUploadSpool: boolean;
+  /**
+   * Zero-disk upload metadata shipped by the master (issue #331), as RAW JSON text: only set on hub-managed
+   * side-node tasks. The store does not validate; the use site (`zeroDiskNodePreflight`) parses it strictly
+   * with core `parseZeroDiskDelivery`, and a bad value refuses to start.
+   * null = not shipped (master-local task / legacy behavior unchanged).
+   */
+  zeroDiskDelivery: string | null;
+  /**
+   * 输出格式(issue #137,白名单见 core `OUTPUT_FORMATS`):`original`(缺省,现状)| `mp4` | `mkv`。
+   * 本期只作用于**后处理产物容器**(存档形态);投稿形态恒 mp4(见 core `effectiveStageFormat`)。
+   */
+  outputFormat: OutputFormat;
 }
 
 /** Fields accepted when adding a task. Defaults applied for omitted values. */
@@ -91,6 +126,16 @@ export interface TaskInput {
   managedBy?: string | null;
   /** 主播名(收编/下发时同步 master 侧);省略 = null。仅内部同步路径可写,Web 不暴露。 */
   anchorName?: string | null;
+  /** **旧**边录边传开关(T-33,默认 false);见 Task.rollingUpload(新配置入口在 hub 规则)。 */
+  rollingUpload?: boolean;
+  /** 0 落盘边录边传(默认 false);与 rollingUpload/rollingEffective 互斥。 */
+  streamUpload?: boolean;
+  /** 0 落盘是否保留 spool(默认 true);false = 真 0 落盘。 */
+  streamUploadSpool?: boolean;
+  /** Raw zero-disk delivery JSON from the master (issue #331); written only by the internal sync path. */
+  zeroDiskDelivery?: string | null;
+  /** 输出格式(缺省 original);白名单外的值 → addTask 抛错(API 层先校验并回 400)。 */
+  outputFormat?: OutputFormat;
 }
 
 /** Raw row shape as returned by node:sqlite (danmu/segmentSec are bigint-or-number). */
@@ -114,6 +159,12 @@ interface TaskRow {
   anchorName: string | null;
   webhook: string | null;
   managedBy: string | null;
+  rollingUpload: number;
+  streamUpload: number;
+  streamUploadSpool: number;
+  zeroDiskDelivery?: string | null;
+  rollingEffective: number | null;
+  outputFormat: string | null;
 }
 
 /**
@@ -173,6 +224,15 @@ function rowToTask(r: TaskRow): Task {
     anchorName: r.anchorName ?? null,
     webhook: r.webhook ?? null,
     managedBy: r.managedBy ?? null,
+    rollingUpload: Number(r.rollingUpload) !== 0,
+    // 派生值缺失(NULL)→ 读取时迁移:无规则信息可用,等价「规则未配置」→ 旧开关 true ≡ rolling。
+    streamUpload: Number(r.streamUpload) !== 0,
+    streamUploadSpool: r.streamUploadSpool == null ? true : Number(r.streamUploadSpool) !== 0,
+    zeroDiskDelivery: r.zeroDiskDelivery ?? null,
+    rollingEffective: r.rollingEffective == null
+      ? resolveRollingPolicy(null, Number(r.rollingUpload) !== 0).effective
+      : Number(r.rollingEffective) !== 0,
+    outputFormat: readOutputFormat(r.outputFormat),
   };
 }
 
@@ -221,8 +281,9 @@ export class TaskStore {
     const stmt = this.db.prepare(
       `INSERT INTO tasks
          (room, platform, name, quality, engine, danmu, segmentSec, cookies, outDir,
-          scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook, managedBy, anchorName)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          scheduleStart, scheduleEnd, status, useCookie, enabled, createdAt, webhook, managedBy, anchorName,
+          rollingUpload, streamUpload, streamUploadSpool, outputFormat, zeroDiskDelivery)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       room,
@@ -243,6 +304,11 @@ export class TaskStore {
       input.webhook ?? null,
       input.managedBy ?? null,
       input.anchorName ?? null,
+      (input.rollingUpload ?? false) ? 1 : 0,
+      (input.streamUpload ?? false) ? 1 : 0,
+      (input.streamUploadSpool ?? true) ? 1 : 0,
+      parseOutputFormat(input.outputFormat),
+      input.zeroDiskDelivery ?? null,
     );
     const id = Number(info.lastInsertRowid);
     const task = this.getTask(id);
@@ -277,7 +343,14 @@ export class TaskStore {
         | "useCookie"
         | "enabled"
         | "webhook"
+        | "rollingUpload"
+        | "streamUpload"
+        | "streamUploadSpool"
+        | "outputFormat"
+        | "zeroDiskDelivery"
       > & {
+        /** 派生生效值(仅 master 同步/启动刷新可写);null = 清空,回落旧开关迁移。 */
+        rollingEffective?: boolean | null;
         /** 自动抓取的主播名(收编时同步 master 侧名称;不在 TaskInput 上,仅 updateTask 可写)。 */
         anchorName?: string | null;
       }
@@ -328,6 +401,18 @@ export class TaskStore {
     if ("enabled" in patch) set("enabled", patch.enabled ? 1 : 0);
     if ("webhook" in patch) set("webhook", patch.webhook ?? null);
     if ("anchorName" in patch) set("anchorName", patch.anchorName ?? null);
+    // undefined = 未给(沿用);非法值抛错(API 层先校验回 400)。
+    if (patch.outputFormat !== undefined) set("outputFormat", parseOutputFormat(patch.outputFormat));
+    if ("rollingUpload" in patch) set("rollingUpload", patch.rollingUpload ? 1 : 0);
+    if ("streamUpload" in patch) set("streamUpload", patch.streamUpload ? 1 : 0);
+    if ("streamUploadSpool" in patch) set("streamUploadSpool", patch.streamUploadSpool ? 1 : 0);
+    if ("zeroDiskDelivery" in patch) set("zeroDiskDelivery", patch.zeroDiskDelivery ?? null);
+    if ("rollingEffective" in patch) {
+      set("rollingEffective", patch.rollingEffective == null ? null : patch.rollingEffective ? 1 : 0);
+    } else if ("rollingUpload" in patch) {
+      // 旧开关被改写而没带派生值 → 旧派生值已过时,清空回落旧开关迁移(hub 源任务下一轮同步会重算)。
+      set("rollingEffective", null);
+    }
 
     if (cols.length === 0) return this.getTask(id); // nothing to change
 

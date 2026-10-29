@@ -9,14 +9,35 @@ import type { ApiResult } from "./types.js";
 import type { HubRulePayload, HubPipelineConfig, HubRecordingConfig } from "@drec/core";
 import { platformForRoom } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
+import { refreshLocalRollingEffective } from "../../rolling-effective.js";
 import { activeHubJobKeys, deleteHubJobHistory } from "../../hub-jobs.js";
 
 export function buildHubRules(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
-    err, validateWorkers, validatePipeline, hubRuleView, recordingError } = ctx;
+    err, validateWorkers, validatePipeline, hubRuleView, recordingError, zeroDiskErrorFor, zeroDiskRoomError } = ctx;
   return {
     hubStatus(): ApiResult {
       return { status: 200, body: { enabled: deps.hubEnabled ?? false } };
+    },
+
+    /**
+     * POST /api/hub/apply?force=1 — 立刻触发一次全节点任务同步。
+     *
+     * `force=1` 让节点跳过 T-2 期望骤减安全阀:这是「用户确认要把房间从某节点撤下 /
+     * 清空某节点受管任务」的唯一合法出口(没有它,合法缩容与「master 读不到规则」这两种
+     * 情况在节点侧无法区分,守卫会一直拦 → 旧节点继续双录)。
+     *
+     * 语义要点:
+     * - **异步**:只触发不等待节点往返(节点可能离线);结果看 serve 日志的
+     *   `[hub] 任务同步 …` / `被节点安全阀拒绝` 行。
+     * - **非 master 返回 400**:单机/worker 节点没有 hub 编排,假装成功会让 UI 显示「已同步」。
+     * - force 由 cli 侧**累积**到合并补跑那一轮,同步在途时点也不会丢(见 cli requestHubSync)。
+     */
+    applyHubTasks(opts?: { force?: boolean }): ApiResult {
+      if (!(deps.hubEnabled ?? false)) return err(400, "本节点未启用 hub(master)");
+      if (!deps.requestSyncTasks) return err(400, "hub 任务同步未就绪");
+      deps.requestSyncTasks({ force: opts?.force === true });
+      return { status: 202, body: { triggered: true, force: opts?.force === true } };
     },
 
     listHubRules(): ApiResult {
@@ -26,14 +47,37 @@ export function buildHubRules(ctx: ApiCtx) {
     createHubRule(input: HubRulePayload): ApiResult {
       const werr = validateWorkers(input);
       if (werr) return err(400, werr);
-      const perr = validatePipeline(input);
-      if (perr) return err(400, perr);
       const sourceTaskId = input.recording?.sourceTaskId;
       if (!sourceTaskId) return err(400, "新建 hub 规则必须绑定 source task（房间取自该任务）");
       const task = store.getTask(Number(sourceTaskId));
       if (!task) return err(400, "recording.sourceTaskId 指向的任务不存在");
       const platform = platformForRoom(task.room);
       const roomSlug = platform.extractRoomSlug(task.room);
+      // Reuse the shared existence/room check. A zero-disk source is allowed only when this
+      // create call itself is the rolling rule that makes zero-disk legal; the check below
+      // rejects every other case.
+      const rerr = task.streamUpload ? null : recordingError(sourceTaskId, roomSlug);
+      if (rerr) return err(400, rerr);
+      // 同房间规则已存在时 upsert 会深合并 pipeline → 按合并后校验。
+      const existingRule = hubStore.getHubRule(hubDir, hubStore.hubKey(platform.id, roomSlug));
+      const perr = validatePipeline(input, existingRule?.pipeline);
+      if (perr) return err(400, perr);
+      // create is an upsert: validate what will be stored (merged), not just the request body.
+      const merged = hubStore.mergePipeline(existingRule?.pipeline, input.pipeline);
+      const ruleView = {
+        enabled: input.enabled ?? existingRule?.enabled,
+        mode: merged.upload?.mode,
+        workers: input.workers ?? existingRule?.workers,
+        steps: merged.steps,
+      };
+      const zerr = zeroDiskErrorFor(
+        sourceTaskId,
+        task.streamUpload,
+        ruleView,
+      );
+      if (zerr) return err(400, zerr);
+      const roomErr = zeroDiskRoomError(platform.id, roomSlug, ruleView);
+      if (roomErr) return err(400, roomErr);
       try {
         const rule = hubStore.upsertHubRule(hubDir, {
           platform: platform.id,
@@ -45,6 +89,8 @@ export function buildHubRules(ctx: ApiCtx) {
           workers: input.workers,
           requires: input.requires,
         });
+        // 新建规则不收口旧开关:此前没有规则可展示「迁移后的 rolling」,旧开关 true 的任务保持 rolling(同改前)。
+        refreshLocalRollingEffective(store, hubDir);
         deps.requestSyncTasks?.();
         return { status: 201, body: hubRuleView(rule) };
       } catch (e) {
@@ -55,12 +101,38 @@ export function buildHubRules(ctx: ApiCtx) {
     updateHubRule(key: string, input: HubRulePayload): ApiResult {
       const werr = validateWorkers(input);
       if (werr) return err(400, werr);
-      const perr = validatePipeline(input);
+      const perr = validatePipeline(input, hubStore.getHubRule(hubDir, key)?.pipeline);
       if (perr) return err(400, perr);
       const dot = key.indexOf(".");
       const ruleSlug = dot < 0 ? key : key.slice(dot + 1);
-      const rerr = recordingError(input.recording?.sourceTaskId, ruleSlug);
+      const existingRule = hubStore.getHubRule(hubDir, key);
+      const rerr = recordingError(input.recording?.sourceTaskId, ruleSlug, existingRule);
       if (rerr) return err(400, rerr);
+      const sourceTaskId = input.recording?.sourceTaskId ?? existingRule?.recording?.sourceTaskId ?? null;
+      const sourceTask = sourceTaskId ? store.getTask(Number(sourceTaskId)) : null;
+      const merged = hubStore.mergePipeline(existingRule?.pipeline, input.pipeline);
+      const zerr = zeroDiskErrorFor(
+        sourceTaskId,
+        sourceTask?.streamUpload,
+        {
+          enabled: input.enabled ?? existingRule?.enabled,
+          mode: merged.upload?.mode,
+          workers: input.workers ?? existingRule?.workers,
+          steps: merged.steps,
+        },
+      );
+      if (zerr) return err(400, zerr);
+      const roomErr = zeroDiskRoomError(
+        key.slice(0, key.indexOf(".")),
+        ruleSlug,
+        {
+          enabled: input.enabled ?? existingRule?.enabled,
+          mode: merged.upload?.mode,
+          workers: input.workers ?? existingRule?.workers,
+          steps: merged.steps,
+        },
+      );
+      if (roomErr) return err(400, roomErr);
       const patch: { enabled?: boolean; pipeline?: HubPipelineConfig; recording?: HubRecordingConfig; workers?: string[]; requires?: string[] } = {};
       if ("enabled" in input) patch.enabled = input.enabled;
       if ("pipeline" in input) patch.pipeline = input.pipeline;
@@ -69,6 +141,9 @@ export function buildHubRules(ctx: ApiCtx) {
       if ("requires" in input) patch.requires = input.requires;
       const updated = hubStore.updateHubRule(hubDir, key, patch);
       if (!updated) return err(404, `未找到 hub 规则 key=${key}`);
+      ctx.settleLegacyRolling(updated.recording?.sourceTaskId, input.pipeline?.upload?.mode);
+      // 解绑(sourceTaskId 清空)/停用/换 mode 后立刻重算本机派生值,不等下一个同步 tick。
+      refreshLocalRollingEffective(store, hubDir);
       deps.requestSyncTasks?.();
       return { status: 200, body: hubRuleView(updated) };
     },
@@ -85,6 +160,7 @@ export function buildHubRules(ctx: ApiCtx) {
       const history = deps.syncDbPath ? deleteHubJobHistory(deps.syncDbPath, key) : { deleted: 0, streamKeys: [] };
       const ok = hubStore.removeHubRule(hubDir, key);
       if (!ok) return err(404, `未找到 hub 规则 key=${key}`);
+      refreshLocalRollingEffective(store, hubDir); // 规则已删:本机源任务派生值回落,不再边传
       deps.requestSyncTasks?.();
       return { status: 200, body: { ok: true, key, deletedHistory: history.deleted } };
     },

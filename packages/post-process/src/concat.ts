@@ -1,51 +1,27 @@
 // ts/src/core/post/concat.ts
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
+import { isAtomicTempName, isOutputFormat, isVideoFileName, segmentIndexOf, sessionBaseOf, stageContainerOfPath, stampedSessionBaseOf, STAGE_CONTAINERS, type StageFormat } from "@drec/core";
 import { runFfmpeg } from "./ffmpeg.js";
+import { runFfmpegAtomic } from "./artifact.js";
 
 /**
- * 从视频分段文件名取会话基名（剥分段后缀 + 容器后缀）。
- * 支持容器 .ts（ffmpeg/DLR/biliLive）与 .flv（mesio 引擎，低配无 ffmpeg 路径）。
- * 分段后缀三种格式：
- *   - biliLive: {base}-PART000  → 剥 -PART\d+
- *   - biliLive/_PART: {base}_PART000 → 剥 _PART\d+
- *   - DLR/mesio: {base}_000     → 剥 _\d{3,}
- * 与一期 sessionXmlPath 同规则。
+ * 从视频分段文件名取会话基名(剥分段后缀 + 容器后缀);规则见 core `sessionBaseOf`。
+ * 容器 .ts(ffmpeg/DLR/biliLive)与 .flv(mesio)均认。
  */
 export function sessionBase(tsName: string): string {
-  return basename(tsName)
-    .replace(/\.(ts|flv)$/i, "")
-    .replace(/(?:-PART\d+|_PART\d+|_\d{3,})$/, "");
+  return sessionBaseOf(tsName);
 }
 
-/**
- * 段号（无后缀 = -1，使单文件排在所有分段之前）。
- * 匹配 -PART000（biliLive 带短横线）、_PART000（biliLive 带下划线）或 _000（DLR/mesio 3+位）。
- * 容器 .ts / .flv 均认。
- */
-function segIndex(name: string): number {
-  // 与 sessionBase 剥离口径一致:PART<n> 任意位,裸 _<n> 须 3+ 位(避免把 base 尾部短数字误当段号)。
-  const m = name.match(/(?:-PART(\d+)|_PART(\d+)|_(\d{3,}))\.(ts|flv)$/i);
-  return m ? Number(m[1] ?? m[2] ?? m[3]) : -1;
-}
-
-/** .xml 文件的段号（无段号 = -1），用于 DLR per-segment xml（{base}_NNN.xml）排序。 */
-function xmlSegIndex(name: string): number {
-  const m = name.match(/(?:-PART(\d+)|_PART(\d+)|_(\d{3,}))\.xml$/i);
-  return m ? Number(m[1] ?? m[2] ?? m[3]) : -1;
-}
-
-/** 取 .xml 文件名的会话基名（剥分段后缀 + .xml），与 sessionBase 同规则。 */
+/** 取 .xml 文件名的会话基名(剥分段后缀 + .xml),与 sessionBase 同规则。 */
 export function xmlSessionBase(xmlName: string): string {
-  return basename(xmlName)
-    .replace(/\.xml$/i, "")
-    .replace(/(?:-PART\d+|_PART\d+|_\d{3,})$/, "");
+  return sessionBaseOf(xmlName);
 }
 
 /** 按段号数字排序（非字典序）；无段号的文件（单 {base}.ts）排最前。 */
 export function sortSegments(files: string[]): string[] {
-  return [...files].sort((a, b) => segIndex(a) - segIndex(b));
+  return [...files].sort((a, b) => segmentIndexOf(a) - segmentIndexOf(b));
 }
 
 export interface SessionGroup {
@@ -57,6 +33,52 @@ export interface SessionGroup {
   segmentXmls: string[];
 }
 
+export interface GroupSessionsOpts {
+  /**
+   * 会话基名 → 节点侧原地替换后的容器(读自该会话的 `{base}.session.json`,见 {@link readNodeFormats})。
+   * 只有**录制目录**的调用方才传;不传 = 一个 mp4/mkv 都不收(stage / 合并模式 / 默认 original 与 base 一致)。
+   */
+  nodeFormats?: ReadonlyMap<string, StageFormat>;
+}
+
+/**
+ * 读目录里各会话 `{base}.session.json` 的 `nodeFormat`(节点侧原地替换留的标记)。
+ * 老文件缺字段 = 未转换(不入表);损坏/非白名单值同样忽略,绝不抛。
+ * `files` = 该目录的文件名列表(只挑 `.session.json`)。
+ */
+export function readNodeFormats(dir: string, files: string[]): Map<string, StageFormat> {
+  const out = new Map<string, StageFormat>();
+  for (const f of files) {
+    if (!f.endsWith(".session.json")) continue;
+    try {
+      const d = JSON.parse(readFileSync(join(dir, basename(f)), "utf-8")) as { nodeFormat?: unknown };
+      const nf = d.nodeFormat;
+      if (typeof nf === "string" && isOutputFormat(nf) && nf !== "original") {
+        out.set(basename(f).slice(0, -".session.json".length), nf);
+      }
+    } catch { /* 缺失/损坏 → 视为未转换 */ }
+  }
+  return out;
+}
+
+/**
+ * 目录 → 会话分组,**带上该目录里 session.json 声明的节点侧容器**(issue #143):
+ * 所有「在真实目录上分组」的调用点共用这一个入口,避免有的认 mp4/mkv 分段、有的不认。
+ * `files` 缺省 = `readdirSync(dir)`;调用方已有列表时传入避免重复读盘。
+ * 目录里没有 session.json(或无 nodeFormat)= 与裸 `groupSessions(files)` 完全一致。
+ */
+export function groupSessionsInDir(dir: string, files: string[] = readdirSync(dir)): Record<string, SessionGroup> {
+  return groupSessions(files, { nodeFormats: readNodeFormats(dir, files) });
+}
+
+/** 切分产物判定不用正则(session-name-guard 禁止在 core 之外写分段序号正则):stem 末尾 `_part` + 纯数字。 */
+export function isSplitPartName(f: string): boolean {
+  const stem = f.slice(0, f.lastIndexOf("."));
+  const i = stem.lastIndexOf("_part");
+  const tail = stem.slice(i + 5);
+  return i >= 0 && tail.length > 0 && [...tail].every((c) => c >= "0" && c <= "9");
+}
+
 /**
  * 文件名列表 → { base: SessionGroup }，ts/segmentXmls 已按段号排序。
  *
@@ -65,13 +87,27 @@ export interface SessionGroup {
  *   - `segmentXmls`: DLR/VPS per-segment {base}_NNN.xml，与 ts[i] 一一对齐
  * 两者按各自规律就地填充；调用方按需选用（多段烧录优先 segmentXmls）。
  */
-export function groupSessions(files: string[]): Record<string, SessionGroup> {
+export function groupSessions(files: string[], opts: GroupSessionsOpts = {}): Record<string, SessionGroup> {
   const out: Record<string, SessionGroup> = {};
   const ensure = (b: string): SessionGroup => (out[b] ??= { ts: [], xml: null, segmentXmls: [] });
 
-  // First pass: collect video segments (.ts ffmpeg/DLR/biliLive、.flv mesio)
+  // First pass: collect video segments。录制原生容器 .ts(ffmpeg/DLR/biliLive)/.flv(mesio)恒认(与 base 一致);
+  // .mp4/.mkv 只有一种来源是源录像 —— 节点侧原地替换(issue #137):该会话的 session.json 声明了
+  // `nodeFormat`(`opts.nodeFormats`)且扩展名与之相符,带段号与无段号单文件都收。其余一律不收:
+  //   - 无声明(默认 original / stage 目录 / 合并模式):`{base}.mp4` 是合并产物、`{dateName}_{NNN}.mp4` 是
+  //     分段模式产出的分 P(标题模板含时间时形如分段),收了会在收口/重跑时被当源删掉或重复合并;
+  //   - 带 part 序号的切分产物 `{stem}_part{N}.mp4`(split.ts 小写命名)不是分段,声明了也不收;
+  //   - `_danmu`/`_livechat` 烧录产物、无时间戳基名的产物天然不带时间戳,同样被挡在外面。
+  const NATIVE = /\.(ts|flv)$/i;
   for (const f of files) {
-    if (/\.(ts|flv)$/i.test(f)) {
+    // 原子落盘临时名(`.x.part.ts` 等,崩溃残留)不是分段:原生容器也不例外。
+    if (isAtomicTempName(f)) continue;
+    if (NATIVE.test(f)) {
+      ensure(sessionBase(f)).ts.push(f);
+    } else if (isVideoFileName(f)) {
+      if (isSplitPartName(f) || !stampedSessionBaseOf(basename(f))) continue;
+      const declared = opts.nodeFormats?.get(sessionBase(f));
+      if (!declared || !f.toLowerCase().endsWith(STAGE_CONTAINERS[declared].ext)) continue;
       ensure(sessionBase(f)).ts.push(f);
     }
   }
@@ -81,7 +117,7 @@ export function groupSessions(files: string[]): Record<string, SessionGroup> {
   //   - {base}_NNN.xml / -PARTNNN.xml → per-segment segmentXmls
   for (const f of files) {
     if (!/\.xml$/i.test(f)) continue;
-    const seg = xmlSegIndex(f);
+    const seg = segmentIndexOf(f);
     if (seg < 0) {
       // 会话级：basename 去掉 .xml 即为 base
       const b = basename(f).replace(/\.xml$/i, "");
@@ -95,7 +131,7 @@ export function groupSessions(files: string[]): Record<string, SessionGroup> {
   // Sort each session's ts + segmentXmls array by segment index
   for (const b of Object.keys(out)) {
     out[b].ts = sortSegments(out[b].ts);
-    out[b].segmentXmls.sort((a, c) => xmlSegIndex(a) - xmlSegIndex(c));
+    out[b].segmentXmls.sort((a, c) => segmentIndexOf(a) - segmentIndexOf(c));
   }
 
   return out;
@@ -103,6 +139,7 @@ export function groupSessions(files: string[]): Record<string, SessionGroup> {
 
 /**
  * 合并一组分段 .ts 文件 → outMp4（同会话 -c copy 无损）。
+ * 输出容器(mp4/mkv)由 `outMp4` 扩展名决定,封装参数取自 core 注册表。
  * 写 concat 列表到临时目录，完成后清理。
  */
 export async function mergeSession(
@@ -136,15 +173,17 @@ export async function mergeSession(
       normalized.map((p) => `file '${p}'`).join("\n") + "\n",
       "utf-8",
     );
-    await runFfmpeg([
+    // 拼好的成品走原子收尾(`.part` → rename):被强杀时不会留下「最终名存在但没写完」的成品,
+    // 否则下游会把它当已完成产物复用/上传(见 artifact.ts 注释)。
+    await runFfmpegAtomic([
       "-y",
       "-f", "concat",
       "-safe", "0",
       "-i", list,
       "-c", "copy",
-      "-movflags", "+faststart",
+      ...stageContainerOfPath(outMp4).finalizeArgs,
       outMp4,
-    ]);
+    ], outMp4);   // faststart 收尾静默由 runFfmpeg 的 CPU 探针兜住
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

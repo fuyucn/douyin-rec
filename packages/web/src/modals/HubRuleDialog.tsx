@@ -1,10 +1,28 @@
+/**
+ * HubRuleDialog — Hub 规则的创建 / 编辑弹窗:绑定源任务 + 录制半边 + 节点 + 处理 / 上传 / 清理。
+ * 分区与字段依赖与房间面板共用 components/room-form + lib/room-form-rules(issue #126)。
+ */
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { api, type HubRuleDTO, type HubRulePayload, type Task, type WorkerDTO } from "../api/client";
+import { useAtomValue } from "jotai";
+import { api, type HubRuleDTO, type HubRulePayload, type PlatformDTO, type Task, type WorkerDTO } from "../api/client";
+import { cookieStatusAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
-import { Switch } from "../components/Switch";
-import { errMessage, useToast } from "../lib/hooks";
+import { CleanupSection, type CleanupValue } from "../components/room-form/CleanupSection";
+import { FlowSummary } from "../components/room-form/FlowSummary";
+import type { OutputFormat } from "@drec/output-format";
+import { NodesSection } from "../components/room-form/NodesSection";
+import { ProcessingSection, type ProcessingValue } from "../components/room-form/ProcessingSection";
+import { RecordingSection, type RecordingValue } from "../components/room-form/RecordingSection";
+import { RuleSwitch } from "../components/room-form/parts";
+import { UploadSection, type UploadValue } from "../components/room-form/UploadSection";
+import { errMessage, usePlatformCookieStatuses, useToast } from "../lib/hooks";
 import { useT } from "../lib/i18n";
+import { pickPlatform, scheduleInput, splitSchedule } from "../lib/labels";
+import { isValidSeasonSectionIdInput, seasonSectionIdPayload } from "../lib/room-editor-form";
+import {
+  cookieReadyFor, deriveConstraints, flowSummary, keepArchiveFromStored, methodFromStored, outputFormatFromStored, settledMethod, shownOutputFormat, storedFromForm, type FormFacts,
+} from "../lib/room-form-rules";
 
 interface Props {
   open: boolean;
@@ -14,76 +32,99 @@ interface Props {
   onSaved: () => void;
 }
 
-interface FormState {
-  room: string;
-  enabled: boolean;
-  /** 选中的 worker id 列表;新建默认空(需用户选 ≥1);编辑无 workers 的老规则预勾全部当前 worker。 */
+type FormState = RecordingValue & ProcessingValue & UploadValue & CleanupValue & {
+  /** 输出格式(源任务字段;缺省 original)。 */
+  outputFormat: OutputFormat;
+  /** 选中的 worker id;新建默认空(需选 ≥1);编辑无 workers 的老规则预勾全部当前 worker。 */
   workers: string[];
-  burnDanmu: boolean;
-  burnLivechat: boolean;
-  /** 合并分段成一片(默认 true);false = 不合并,按录制分段逐个上传(每段一个分 P)。 */
-  mergeSegments: boolean;
-  /** (实验)节点侧上传:不烧录时 winner 节点本地 remux + 上传,省掉录像回传。默认 false。 */
-  nodeSideUpload: boolean;
-  clStageSourceAfterMerge: boolean;
-  clSourceAfterDone: boolean;
-  clStageAfterDone: boolean;
-  uploadMode: string; // "stage" | "upload"
-  uploadPrivate: boolean; // 仅 upload 有意义:true=仅自己可见,false=公开
-  uploadTag: string;
-  uploadTid: string;
-  uploadDesc: string;
-  uploadTitle: string;
-  uploadSubmissionTitle: string;
-  uploadPartTitle: string;
+  /** 能力门控:与 workers 取交集。空 = 无要求。 */
+  requires: string[];
   /** 绑定的 master 任务 id;null = 不下发录制。 */
   sourceTaskId: number | null;
+  /**
+   * 用户是否改过录制字段:阻止「tasks 迟到 / 换源任务 → 回显覆盖正在填的值」。表单草稿态,不提交。
+   */
+  recordingTouched: boolean;
+  /** The source task's zero-disk sub-mode (stored on the task, not the rule). */
+  streamUpload: boolean;
+  /** Whether the stored upload already carries the season key (including an explicit null). */
+  seasonSectionIdStored: boolean;
+};
+
+type RecordingHalf = Omit<RecordingValue, "name"> & { outputFormat: OutputFormat };
+
+/** 录制半边从「已绑定的 task」回显(rule 里没有画质/分段这些字段)。没有 task 时给保守默认。 */
+function recordingFromTask(task: Task | null): RecordingHalf {
+  if (!task) {
+    return { recEnabled: true, quality: "", engine: "", danmu: true, useCookie: true, segmentSec: "1800", schedule: "", outputFormat: "original" };
+  }
+  return {
+    recEnabled: task.enabled,
+    quality: task.quality,
+    engine: task.engine,
+    danmu: !!task.danmu,
+    useCookie: !!task.useCookie,
+    segmentSec: String(task.segmentSec ?? 1800),
+    outputFormat: outputFormatFromStored(task.outputFormat),
+    schedule: scheduleInput(task),
+  };
 }
 
 const BLANK: FormState = {
-  room: "",
-  enabled: true,
-  workers: [],
+  ...recordingFromTask(null),
+  name: "",
+  procEnabled: true,
+  mergeSegments: true,
   burnDanmu: true,
   burnLivechat: true,
-  mergeSegments: true,
-  nodeSideUpload: false,
+  uploadOn: false,
+  method: "after",
+  tsDirect: false,
+  uploadPrivate: true,
+  tid: "21",
+  tag: "",
+  desc: "",
+  titleTemplate: "",
+  submissionTitleTemplate: "",
+  partTitleTemplate: "",
+  seasonSectionId: "",
+  seasonSectionIdStored: false,
   clStageSourceAfterMerge: false,
   clSourceAfterDone: false,
-  clStageAfterDone: false,
-  uploadMode: "stage",
-  uploadPrivate: true,
-  uploadTag: "",
-  uploadTid: "21",
-  uploadDesc: "",
-  uploadTitle: "",
-  uploadSubmissionTitle: "",
-  uploadPartTitle: "",
+  clKeepArchive: true,
+  workers: [],
+  requires: [],
   sourceTaskId: null,
+  recordingTouched: false,
+  streamUpload: false,
 };
 
 function fromRule(r: HubRuleDTO): FormState {
   const c = r.pipeline ?? {};
   return {
-    room: r.room ?? "",
-    enabled: r.enabled,
+    ...BLANK,
+    procEnabled: r.enabled,
     // 显式列表回显;无 workers(老规则)先给空,加载 worker 列表后在 effect 里预勾全部。
     workers: r.workers ?? [],
+    requires: r.requires ?? [],
     burnDanmu: c.steps?.burnDanmu !== false,
     burnLivechat: c.steps?.burnLivechat !== false,
     mergeSegments: c.steps?.mergeSegments !== false,
-    nodeSideUpload: c.steps?.nodeSideUpload === true,
+    tsDirect: c.steps?.tsDirect === true,
+    ...methodFromStored(c.upload?.mode, c.steps?.nodeSideUpload === true),
+    streamUpload: false,
     clStageSourceAfterMerge: c.cleanup?.stageSourceAfterMerge === true,
     clSourceAfterDone: c.cleanup?.sourceAfterDone === true,
-    clStageAfterDone: c.cleanup?.stageAfterDone === true,
-    uploadMode: c.upload?.mode === "upload" ? "upload" : "stage",
+    clKeepArchive: keepArchiveFromStored(c.cleanup?.stageAfterDone),
     uploadPrivate: c.upload?.private !== false,
-    uploadTag: c.upload?.tag ?? "",
-    uploadTid: String(c.upload?.tid ?? 21),
-    uploadDesc: c.upload?.desc ?? "",
-    uploadTitle: c.upload?.titleTemplate ?? "",
-    uploadSubmissionTitle: c.upload?.submissionTitleTemplate ?? "",
-    uploadPartTitle: c.upload?.partTitleTemplate ?? "",
+    tag: c.upload?.tag ?? "",
+    tid: String(c.upload?.tid ?? 21),
+    desc: c.upload?.desc ?? "",
+    titleTemplate: c.upload?.titleTemplate ?? "",
+    submissionTitleTemplate: c.upload?.submissionTitleTemplate ?? "",
+    partTitleTemplate: c.upload?.partTitleTemplate ?? "",
+    seasonSectionId: c.upload?.seasonSectionId ? String(c.upload.seasonSectionId) : "",
+    seasonSectionIdStored: !!c.upload && Object.prototype.hasOwnProperty.call(c.upload, "seasonSectionId"),
     sourceTaskId: r.recording?.sourceTaskId ?? null,
   };
 }
@@ -98,50 +139,29 @@ function slugOfRoom(room: string): string {
   return q >= 0 ? r.slice(0, q) : r;
 }
 
+const RECORDING_KEYS = new Set<string>(["recEnabled", "quality", "engine", "danmu", "useCookie", "segmentSec", "schedule", "outputFormat"]);
 
-const TITLE_TOKEN_RE = /\{([A-Za-z]+)\}/g;
-function previewTitle(template: string, name: string, partSample?: { part: string; parts: string; kind: string }): string {
-  const t = template.trim() || "{name}_{date}";
-  const parts: Record<string, string> = {
-    name, user: name, owner: name,
-    // 直播标题是主播自由输入,预览用一个像样的样例。
-    title: "今晚直播标题",
-    // 分P相关:未传样例(稿件名模板)时渲染成空,与后端一致。
-    part: partSample?.part ?? "",
-    parts: partSample?.parts ?? "",
-    date: "2026-09-12",
-    time: "14-30-05",
-    datetime: "2026-09-12_14-30-05",
-    yyyy: "2026", YYYY: "2026", year: "2026",
-    MM: "09", month: "09",
-    dd: "12", day: "12",
-    HH: "14", hh: "14", hour: "14",
-    mm: "30", min: "30",
-    ss: "05", sec: "05",
-    HHmm: "1430",
-    HHmmss: "143005",
-  };
-  const base = t.replace(TITLE_TOKEN_RE, (raw, key: string) => parts[key] ?? raw);
-  // 类型后缀由后端自动追加(plain 无 / _danmu / _livechat),预览同口径。
-  const kind = partSample?.kind;
-  const suffix = kind === "danmu" ? "_danmu" : kind === "livechat" ? "_livechat" : "";
-  return `${base}${suffix}`;
-}
-
-/** Hub 规则的创建/编辑弹窗:按房间(roomSlug)配置后处理 pipeline。 */
 export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNode {
   const isEdit = rule !== null;
   const t = useT();
   const toast = useToast();
+  const douyinReady = !!useAtomValue(cookieStatusAtom)?.hasSession;
+  const cookieStatuses = usePlatformCookieStatuses(open);
   const [form, setForm] = useState<FormState>(BLANK);
   const [busy, setBusy] = useState(false);
   const [workers, setWorkers] = useState<WorkerDTO[]>([]);
   const [workersError, setWorkersError] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [tasksError, setTasksError] = useState(false);
+  /** 平台能力表(quality/engine 合法值):决定录制区块的下拉候选,避免手写一份平台清单。 */
+  const [platforms, setPlatforms] = useState<PlatformDTO[]>([]);
 
+  // 打开时用「规则 + 它绑定的 task」初始化;tasks 迟到时由下面的 effect 补录制半边回显。
   useEffect(() => {
-    if (open) setForm(rule ? fromRule(rule) : BLANK);
+    if (!open) return;
+    if (!rule) { setForm(BLANK); return; }
+    const task = tasks.find((x) => x.id === rule.recording?.sourceTaskId) ?? null;
+    setForm({ ...fromRule(rule), ...recordingFromTask(task), streamUpload: task?.streamUpload === true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, rule?.key]);
 
@@ -164,70 +184,169 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, rule?.key]);
 
+  // 平台清单:quality/engine 的合法值随平台而变(白嫖 Platform 注册表,不在前端硬编码)。
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    api.getPlatforms()
+      .then((r) => { if (alive) setPlatforms(r.platforms ?? []); })
+      .catch(() => { if (alive) setPlatforms([]); });   // 拉不到就退化成自由输入,别让弹窗打不开
+    return () => { alive = false; };
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     let alive = true;
     setTasksError(false);
     api.listTasks()
-      .then((ts) => { if (alive) setTasks(ts); })
+      .then((ts) => {
+        if (!alive) return;
+        setTasks(ts);
+        // 编辑模式下 tasks 是**后到**的:此刻才能把录制半边按真实 task 回显。
+        // 只在「用户还没手动改过录制字段」时覆盖,否则会把用户正在填的值冲掉。
+        if (rule) {
+          setForm((f) => (f.recordingTouched
+            ? f
+            : {
+                ...f,
+                ...recordingFromTask(ts.find((x) => x.id === (rule.recording?.sourceTaskId ?? -1)) ?? null),
+                streamUpload: ts.find((x) => x.id === (rule.recording?.sourceTaskId ?? -1))?.streamUpload === true,
+              }));
+        }
+      })
       .catch(() => { if (alive) setTasksError(true); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, rule?.key]);
 
-  const toggleWorker = (id: string): void =>
-    setForm((f) => ({
-      ...f,
-      workers: f.workers.includes(id) ? f.workers.filter((x) => x !== id) : [...f.workers, id],
-    }));
-  // 新建必须选 ≥1;编辑同理(编辑老规则已预勾全部,用户主动清空也要拦)。
-  const workersInvalid = form.workers.length === 0;
   const selectedTask = tasks.find((task) => task.id === form.sourceTaskId) ?? null;
+  // 画质/引擎候选 = 该房间所属平台的白名单(与任务弹窗共用 pickPlatform)。
+  const plat = pickPlatform(selectedTask?.room ?? rule?.room ?? "", platforms);
   // 新建:任务决定房间,候选 = 全部任务;编辑:房间已固定,只允许同房间任务。
-  const sourceCandidates = rule
-    ? tasks.filter((task) => slugOfRoom(task.room) === rule.roomSlug)
-    : tasks;
+  const sourceCandidates = rule ? tasks.filter((task) => slugOfRoom(task.room) === rule.roomSlug) : tasks;
+  const platformId = plat?.id ?? (rule?.key.split(".")[0] ?? "douyin");
+  const factsOf = (f: FormState): FormFacts => ({
+    ...f,
+    danmuAvailable: plat ? plat.hasDanmu : true,
+    cookieReady: cookieReadyFor(platformId, cookieStatuses, douyinReady),
+    cookieForStream: platformId !== "douyin",
+    hasRule: true,
+    streamUpload: f.streamUpload,
+  });
+  const facts = factsOf(form);
+  const c = deriveConstraints(facts);
+  const workersInvalid = form.workers.length === 0;
 
-  function set<K extends keyof FormState>(key: K, value: FormState[K]): void {
-    setForm((f) => ({ ...f, [key]: value }));
+  // 每次改动后结算上传方式(失效即回落);动了录制字段就不再被迟到回显覆盖。
+  const update = (patch: Partial<FormState>): void =>
+    setForm((f) => {
+      const next = { ...f, ...patch, ...(Object.keys(patch).some((k) => RECORDING_KEYS.has(k)) ? { recordingTouched: true } : {}) };
+      return { ...next, method: settledMethod(factsOf(next)) };
+    });
+  // 换源任务:录制半边改按新任务回显(否则保存会把表单默认值写到该任务上)。
+  const pickSource = (id: number | null): void => {
+    const task = tasks.find((x) => x.id === id) ?? null;
+    setForm((f) => ({ ...f, sourceTaskId: id, streamUpload: task?.streamUpload === true, ...(f.recordingTouched ? {} : recordingFromTask(task)) }));
+  };
+  const toggleIn = (list: string[], x: string): string[] => (list.includes(x) ? list.filter((y) => y !== x) : [...list, x]);
+
+  function buildPayload(): HubRulePayload {
+    const stored = storedFromForm(facts);
+    return {
+      enabled: form.procEnabled,
+      workers: form.workers,
+      requires: form.requires,
+      recording: { sourceTaskId: form.sourceTaskId },
+      pipeline: {
+        steps: {
+          mergeSegments: form.mergeSegments, burnDanmu: stored.burnDanmu, burnLivechat: stored.burnLivechat,
+          nodeSideUpload: stored.nodeSideUpload, tsDirect: form.tsDirect,
+        },
+        cleanup: {
+          stageSourceAfterMerge: form.clStageSourceAfterMerge,
+          sourceAfterDone: form.clSourceAfterDone,
+          stageAfterDone: stored.stageAfterDone,
+        },
+        upload: {
+          mode: stored.mode,
+          private: form.uploadPrivate,
+          tag: form.tag.trim() || undefined,
+          tid: Number(form.tid) || 21,
+          desc: form.desc.trim() || undefined,
+          titleTemplate: form.titleTemplate.trim() || undefined,
+          submissionTitleTemplate: form.submissionTitleTemplate.trim() || undefined,
+          partTitleTemplate: form.partTitleTemplate.trim() || undefined,
+          seasonSectionId: seasonSectionIdPayload(form.seasonSectionId, form.seasonSectionIdStored),
+        },
+      },
+    };
   }
 
   async function submit(ev: FormEvent): Promise<void> {
     ev.preventDefault();
-    if (!isEdit && form.sourceTaskId === null) {
-      toast(t("hub.ruleDialog.sourceTaskRequired"), "error");
-      return;
-    }
+    if (!isEdit && form.sourceTaskId === null) { toast(t("hub.ruleDialog.sourceTaskRequired"), "error"); return; }
     if (workersInvalid) { toast(t("hub.ruleDialog.workersRequired"), "error"); return; }
-    const payload: HubRulePayload = {
-      enabled: form.enabled,
-      workers: form.workers,
-      recording: { sourceTaskId: form.sourceTaskId },
-      pipeline: {
-        steps: { mergeSegments: form.mergeSegments, burnDanmu: form.burnDanmu, burnLivechat: form.burnLivechat, nodeSideUpload: form.nodeSideUpload },
-        cleanup: {
-          stageSourceAfterMerge: form.clStageSourceAfterMerge,
-          sourceAfterDone: form.clSourceAfterDone,
-          stageAfterDone: form.clStageAfterDone,
-        },
-        upload: {
-          mode: form.uploadMode === "upload" ? "upload" : "stage",
-          private: form.uploadPrivate,
-          tag: form.uploadTag.trim() || undefined,
-          tid: Number(form.uploadTid) || 21,
-          desc: form.uploadDesc.trim() || undefined,
-          titleTemplate: form.uploadTitle.trim() || undefined,
-          submissionTitleTemplate: form.uploadSubmissionTitle.trim() || undefined,
-          partTitleTemplate: form.uploadPartTitle.trim() || undefined,
-        },
-      },
-    };
+    if (form.uploadOn && !isValidSeasonSectionIdInput(form.seasonSectionId)) {
+      toast(t("room.editor.fieldInvalid"), "error"); return;
+    }
+    const sched = splitSchedule(form.schedule);
+    if (!sched) { toast(t("rooms.scheduleInvalid"), "error"); return; }
+    const payload = buildPayload();
+    const stored = storedFromForm(facts);
+    // 定时窗口必须成对发 scheduleStart/End:后端不认单个 schedule 字段(此前在这里静默丢失)。
+    const recording = form.sourceTaskId === null
+      ? undefined
+      : {
+          enabled: form.recEnabled,
+          ...(form.quality.trim() ? { quality: form.quality.trim() } : {}),
+          ...(form.engine.trim() ? { engine: form.engine.trim() } : {}),
+          danmu: form.danmu ? 1 : 0,
+          useCookie: form.useCookie,
+          ...(Number(form.segmentSec) > 0 ? { segmentSec: Number(form.segmentSec) } : {}),
+          outputFormat: stored.outputFormat,
+          // Leaving rolling clears zero-disk in the same write, so the rule can never be
+          // saved in a state the backend would reject on reopen.
+          streamUpload: stored.mode === "rolling" && facts.streamUpload,
+          ...sched,
+        };
+    // 编辑时换了源任务 → 规则也要重新绑定(PUT rooms 的 processing 不含 sourceTaskId)。
+    const sourceTaskChanged = isEdit && rule.recording?.sourceTaskId !== form.sourceTaskId;
+
     setBusy(true);
     try {
-      if (isEdit) await api.updateHubRule(rule.key, payload);
-      else await api.createHubRule(payload);
+      if (isEdit) {
+        // 一次 PUT 两半(后端第二步失败会回滚第一步,不留半成功)。enabled 属于 processing 内部。
+        await api.updateRoom(rule.key, {
+          processing: { enabled: payload.enabled, pipeline: payload.pipeline, workers: payload.workers, requires: payload.requires },
+          ...(recording ? { recording } : {}),
+        });
+        if (sourceTaskChanged) {
+          try {
+            await api.updateHubRule(rule.key, { recording: { sourceTaskId: form.sourceTaskId } });
+          } catch (e2) {
+            toast(t("hub.ruleDialog.reboundFailed", { error: errMessage(e2) }), "error");
+            onSaved();
+            return;
+          }
+        }
+        onClose();
+        toast(t("hub.ruleDialog.updated"), "success");
+        onSaved();
+        return;
+      }
+      // 新建:先建规则拿到 key,再 PUT 录制半边 —— 两步;第二步失败要说清楚是哪半边。
+      const created = await api.createHubRule(payload);
+      if (recording) {
+        try {
+          await api.updateRoom(created.key, { recording });
+        } catch (e2) {
+          toast(t("hub.ruleDialog.createdButRecordingFailed", { error: errMessage(e2) }), "error");
+          onSaved();
+          return; // 保持弹窗打开:改完录制字段可直接再保存,不会重复建规则
+        }
+      }
       onClose();
-      toast(isEdit ? t("hub.ruleDialog.updated") : t("hub.ruleDialog.created"), "success");
+      toast(t("hub.ruleDialog.created"), "success");
       onSaved();
     } catch (e) {
       toast(errMessage(e), "error");
@@ -235,6 +354,9 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
       setBusy(false);
     }
   }
+
+  const roomText = isEdit ? rule.room : selectedTask?.room;
+  const roomSlug = isEdit ? rule.roomSlug : selectedTask ? slugOfRoom(selectedTask.room) : "";
 
   return (
     <Dialog
@@ -244,62 +366,8 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
       title={isEdit ? t("hub.ruleDialog.editTitle") : t("hub.ruleDialog.createTitle")}
       description={t("hub.ruleDialog.desc")}
     >
-      <form className="grid grid-cols-1 sm:grid-cols-2 gap-4" onSubmit={submit}>
-        <div className="sm:col-span-2">
-          <label className="field-label">{isEdit ? t("hub.ruleDialog.roomLabel") : t("hub.ruleDialog.roomFromTaskLabel")}</label>
-          {isEdit ? (
-            <div className="font-mono text-sm text-body break-all">
-              {rule.room}
-              <span className="text-muted-soft ml-2">{t("hub.ruleDialog.roomSlugSuffix", { slug: rule.roomSlug })}</span>
-            </div>
-          ) : selectedTask ? (
-            <div className="font-mono text-sm text-body break-all">
-              {selectedTask.room}
-              <span className="text-muted-soft ml-2">{t("hub.ruleDialog.roomSlugSuffix", { slug: slugOfRoom(selectedTask.room) })}</span>
-            </div>
-          ) : (
-            <p className="text-xs text-muted">{t("hub.ruleDialog.roomFromTaskHint")}</p>
-          )}
-        </div>
-
-        <label className="sm:col-span-2 switch-row">
-          <span className="flex flex-col">
-            <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.enabledLabel")}</span>
-            <span className="text-xs text-muted mt-0.5">{t("hub.ruleDialog.enabledHint")}</span>
-          </span>
-          <Switch checked={form.enabled} onCheckedChange={(v) => set("enabled", v)} name="enabled" />
-        </label>
-
-        {/* ── Section: 参与 Worker(多选;硬过滤,至少 1)── */}
-        <div className="sm:col-span-2">
-          <h3 className="form-section">{t("hub.ruleDialog.workersSection")}</h3>
-          <p className="text-xs text-muted mb-2">{t("hub.ruleDialog.workersHint")}</p>
-          {workersError ? (
-            <p className="text-xs text-error-fg">{t("hub.ruleDialog.workersLoadFailed")}</p>
-          ) : workers.length === 0 ? (
-            <p className="text-xs text-muted">{t("hub.ruleDialog.workersEmpty")}</p>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {workers.map((w) => (
-                <label key={w.id} className="switch-row">
-                  <span className="flex flex-col">
-                    <span className="text-sm font-medium text-ink">{w.name}</span>
-                    <span className="text-xs text-muted mt-0.5 font-mono">{w.kind}{w.host ? ` · ${w.host}` : ""}</span>
-                  </span>
-                  <Switch checked={form.workers.includes(w.id)} onCheckedChange={() => toggleWorker(w.id)} name={`worker-${w.id}`} />
-                </label>
-              ))}
-            </div>
-          )}
-          {workersInvalid && !workersError && workers.length > 0 && (
-            <p className="text-xs mt-2 text-error-fg">{t("hub.ruleDialog.workersRequired")}</p>
-          )}
-        </div>
-
-        {/* ── Section: 录制下发(绑定 master 任务 → 自动同步到勾选节点)── */}
-        <div className="sm:col-span-2">
-          <h3 className="form-section">{t("hub.ruleDialog.recordingSection")}</h3>
-          <p className="text-xs text-muted mb-2">{t("hub.ruleDialog.recordingHint")}</p>
+      <form className="space-y-7" onSubmit={submit}>
+        <section className="space-y-2">
           <label className="field-label">
             {t("hub.ruleDialog.sourceTaskLabel")}{!isEdit && <span className="text-error-fg">*</span>}
           </label>
@@ -308,14 +376,8 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
           ) : sourceCandidates.length === 0 ? (
             <p className="text-xs text-muted">{t("hub.ruleDialog.sourceTasksEmpty")}</p>
           ) : (
-            <select
-              className="input"
-              value={form.sourceTaskId === null ? "" : String(form.sourceTaskId)}
-              onChange={(e) => {
-                const v = e.target.value;
-                set("sourceTaskId", v === "" ? null : Number(v));
-              }}
-            >
+            <select className="input" value={form.sourceTaskId === null ? "" : String(form.sourceTaskId)}
+                    onChange={(e) => pickSource(e.target.value === "" ? null : Number(e.target.value))}>
               <option value="">{isEdit ? t("hub.ruleDialog.sourceTaskNone") : t("hub.ruleDialog.sourceTaskChoose")}</option>
               {sourceCandidates.map((task) => (
                 <option key={task.id} value={String(task.id)}>
@@ -325,175 +387,35 @@ export function HubRuleDialog({ open, onClose, rule, onSaved }: Props): ReactNod
               ))}
             </select>
           )}
-        </div>
-
-        {/* ── Section: 流水线 pipeline(产出 + 清理)── */}
-        <div className="sm:col-span-2">
-          <h3 className="form-section">{t("hub.ruleDialog.pipelineSection")}</h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {([
-              ["mergeSegments", t("hub.ruleDialog.toggleMergeSegmentsLabel"), t("hub.ruleDialog.toggleMergeSegmentsSub")],
-              ["nodeSideUpload", t("hub.ruleDialog.toggleNodeSideUploadLabel"), t("hub.ruleDialog.toggleNodeSideUploadSub")],
-              ["burnDanmu", t("hub.ruleDialog.toggleBurnDanmuLabel"), t("hub.ruleDialog.toggleBurnDanmuSub")],
-              ["burnLivechat", t("hub.ruleDialog.toggleBurnLivechatLabel"), t("hub.ruleDialog.toggleBurnLivechatSub")],
-              ["clStageSourceAfterMerge", t("hub.ruleDialog.toggleClStageSourceAfterMergeLabel"), t("hub.ruleDialog.toggleClStageSourceAfterMergeSub")],
-              ["clSourceAfterDone", t("hub.ruleDialog.toggleClSourceAfterDoneLabel"), t("hub.ruleDialog.toggleClSourceAfterDoneSub")],
-              ["clStageAfterDone", t("hub.ruleDialog.toggleClStageAfterDoneLabel"), t("hub.ruleDialog.toggleClStageAfterDoneSub")],
-            ] as const).map(([key, label, sub]) => (
-              <label key={key} className="switch-row">
-                <span className="flex flex-col">
-                  <span className="text-sm font-medium text-ink">{label}</span>
-                  <span className="text-xs text-muted mt-0.5">{sub}</span>
-                </span>
-                <Switch checked={form[key]} onCheckedChange={(v) => set(key, v)} name={key} />
-              </label>
-            ))}
-          </div>
-        </div>
-
-        {/* ── Section: Bilibili 上传(总开关 + 开启后才显示投稿明细)── */}
-        <div className="sm:col-span-2">
-          <h3 className="form-section">{t("hub.ruleDialog.uploadSection")}</h3>
-          {/* 上传 B站总开关:off=stage(只合成不传) on=upload(自动传) */}
-          <label className="switch-row">
-            <span className="flex flex-col">
-              <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.uploadToggleLabel")}</span>
-              <span className="text-xs text-muted mt-0.5">{form.uploadMode === "upload" ? t("hub.ruleDialog.uploadOnHint") : t("hub.ruleDialog.uploadOffHint")}</span>
-            </span>
-            <Switch
-              checked={form.uploadMode === "upload"}
-              onCheckedChange={(v) => set("uploadMode", v ? "upload" : "stage")}
-              name="uploadOn"
-            />
-          </label>
-
-          {/* 只有开了上传才显示后面的投稿明细 */}
-          {form.uploadMode === "upload" && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
-              <label className="switch-row">
-                <span className="flex flex-col">
-                  <span className="text-sm font-medium text-ink">{t("hub.ruleDialog.publicLabel")}</span>
-                  <span className="text-xs text-muted mt-0.5">{form.uploadPrivate ? t("hub.ruleDialog.privateHint") : t("hub.ruleDialog.publicHint")}</span>
-                </span>
-                <Switch checked={!form.uploadPrivate} onCheckedChange={(v) => set("uploadPrivate", !v)} name="uploadPublic" />
-              </label>
-              <div>
-                <label className="field-label">{t("hub.ruleDialog.tidLabel")}</label>
-                <input type="number" min={1} className="input" value={form.uploadTid} onChange={(e) => set("uploadTid", e.target.value)} />
-              </div>
-              <div className="sm:col-span-2">
-                <label className="field-label">{t("hub.ruleDialog.tagLabel")}</label>
-                <input className="input" placeholder={t("hub.ruleDialog.tagPlaceholder")} value={form.uploadTag} onChange={(e) => set("uploadTag", e.target.value)} />
-              </div>
-              <div className="sm:col-span-2">
-                <label className="field-label">{t("hub.ruleDialog.titleTemplateLabel")}</label>
-                <input
-                  className="input font-mono text-sm"
-                  placeholder="{name}_{date}"
-                  value={form.uploadTitle}
-                  onChange={(e) => set("uploadTitle", e.target.value)}
-                />
-                <div className="flex flex-wrap gap-1.5 mt-1.5">
-                  {(["{name}_{date}", "{name}_{date}_{HH}-{mm}", "{name}_{date}_{HH}-{mm}-{ss}", "{name}_{title}_{date}"] as const).map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      className="text-[11px] font-mono px-2 py-0.5 rounded border border-hairline text-muted hover:text-ink"
-                      onClick={() => set("uploadTitle", preset)}
-                    >
-                      {preset}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[11px] text-muted-soft mt-1">
-                  {t("hub.ruleDialog.titleTemplateHint")}
-                  <span className="font-mono text-body ml-1">{previewTitle(form.uploadTitle, selectedTask?.name || rule?.anchorName || "主播名")}</span>
-                </p>
-              </div>
-              <div className="sm:col-span-2">
-                <label className="field-label">{t("hub.ruleDialog.submissionTitleTemplateLabel")}</label>
-                <input
-                  className="input font-mono text-sm"
-                  placeholder={t("hub.ruleDialog.submissionTitleTemplatePlaceholder")}
-                  value={form.uploadSubmissionTitle}
-                  onChange={(e) => set("uploadSubmissionTitle", e.target.value)}
-                />
-                <div className="flex flex-wrap gap-1.5 mt-1.5">
-                  {(["{name}_{date}", "{name}_{date} 直播回放", "{name}_{title}"] as const).map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      className="text-[11px] font-mono px-2 py-0.5 rounded border border-hairline text-muted hover:text-ink"
-                      onClick={() => set("uploadSubmissionTitle", preset)}
-                    >
-                      {preset}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[11px] text-muted-soft mt-1">
-                  {t("hub.ruleDialog.submissionTitleTemplateHint")}
-                  <span className="font-mono text-body ml-1">
-                    {previewTitle(form.uploadSubmissionTitle || form.uploadTitle, selectedTask?.name || rule?.anchorName || "主播名")}
-                  </span>
-                </p>
-              </div>
-              <div className="sm:col-span-2">
-                <label className="field-label">{t("hub.ruleDialog.partTitleTemplateLabel")}</label>
-                <input
-                  className="input font-mono text-sm"
-                  placeholder={t("hub.ruleDialog.partTitleTemplatePlaceholder")}
-                  value={form.uploadPartTitle}
-                  onChange={(e) => set("uploadPartTitle", e.target.value)}
-                />
-                <div className="flex flex-wrap gap-1.5 mt-1.5">
-                  {(["{name}_P{part}", "{name}_{date}_P{part}", "{name}_{date}"] as const).map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      className="text-[11px] font-mono px-2 py-0.5 rounded border border-hairline text-muted hover:text-ink"
-                      onClick={() => set("uploadPartTitle", preset)}
-                    >
-                      {preset}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[11px] text-muted-soft mt-1">
-                  {t("hub.ruleDialog.partTitleTemplateHint")}
-                  {form.uploadPartTitle.trim() && (
-                    <span className="font-mono text-body ml-1">
-                      {([
-                        { part: "1", kind: "plain" },
-                        { part: "2", kind: "danmu" },
-                        { part: "3", kind: "livechat" },
-                      ] as const)
-                        .map((s) => previewTitle(
-                          form.uploadPartTitle,
-                          selectedTask?.name || rule?.anchorName || "主播名",
-                          { part: s.part, parts: "3", kind: s.kind },
-                        ))
-                        .join(" / ")}
-                    </span>
-                  )}
-                </p>
-              </div>
-              <div className="sm:col-span-2">
-                <label className="field-label">{t("hub.ruleDialog.descLabel")}</label>
-                <textarea
-                  className="textarea font-mono text-sm"
-                  rows={4}
-                  placeholder={t("hub.ruleDialog.descPlaceholder")}
-                  value={form.uploadDesc}
-                  onChange={(e) => set("uploadDesc", e.target.value)}
-                />
-              </div>
-            </div>
+          {roomText ? (
+            <p className="font-mono text-xs text-muted break-all">
+              {roomText}<span className="text-muted-soft ml-2">{t("hub.ruleDialog.roomSlugSuffix", { slug: roomSlug })}</span>
+            </p>
+          ) : (
+            <p className="text-xs text-muted">{t("hub.ruleDialog.roomFromTaskHint")}</p>
           )}
-        </div>
+        </section>
 
-        <div className="sm:col-span-2 flex justify-end gap-3 mt-3">
-          <Button type="button" variant="secondary" onClick={onClose}>
-            {t("hub.common.cancel")}
-          </Button>
+        <FlowSummary steps={flowSummary(facts, form.sourceTaskId !== null && form.recEnabled)} />
+        <RuleSwitch checked={form.procEnabled} onChange={(procEnabled) => update({ procEnabled })} />
+        {form.sourceTaskId !== null ? (
+          <RecordingSection value={form} onChange={update} showEnabled
+                            outputFormat={{ value: form.outputFormat, shown: shownOutputFormat(facts), lock: c.outputFormat, onChange: (outputFormat) => update({ outputFormat }) }}
+                            qualities={plat?.qualities ?? []} engines={plat?.engines ?? []}
+                            danmuAvailable={facts.danmuAvailable} cookie={c.cookie} cookieForStream={facts.cookieForStream} />
+        ) : (
+          <p className="text-xs text-muted">{t("hub.ruleDialog.recordingNoTask")}</p>
+        )}
+        <NodesSection workers={workers} selected={form.workers} requires={form.requires} loadError={workersError} requireOne
+                      onToggle={(id) => update({ workers: toggleIn(form.workers, id) })}
+                      onToggleRequire={(cap) => update({ requires: toggleIn(form.requires, cap) })} />
+        <ProcessingSection value={form} onChange={update} burn={c.burn} />
+        <UploadSection value={form} onChange={update} constraints={c} procEnabled={form.procEnabled}
+                       anchorName={selectedTask?.name || rule?.anchorName || "主播名"} />
+        <CleanupSection value={form} onChange={update} constraints={c} procEnabled={form.procEnabled} />
+
+        <div className="flex justify-end gap-3">
+          <Button type="button" variant="secondary" onClick={onClose}>{t("hub.common.cancel")}</Button>
           <Button type="submit" disabled={busy || workersInvalid} loading={busy}>
             {isEdit ? t("hub.common.save") : t("hub.common.create")}
           </Button>

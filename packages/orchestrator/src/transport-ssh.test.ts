@@ -1,10 +1,11 @@
 // packages/orchestrator/src/transport-ssh.test.ts
 import { describe, it, expect, afterEach } from "vitest";
-import { existsSync, rmSync, mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, rmSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SshTransport, buildRsyncArgs } from "./transport-ssh.js";
-import { recordingStatusWorkerIds } from "./transport.js";
+import { ProcUnsupported, recordingStatusWorkerIds, type NodeRecording } from "./transport.js";
+import { summarizeRsyncStderr } from "./transport-ssh.js";
 
 describe("recordingStatusWorkerIds", () => {
   const all = ["local", "vps2", "vps3"];
@@ -34,6 +35,58 @@ describe("recordingStatusWorkerIds", () => {
 });
 
 describe("SshTransport", () => {
+  describe("recordingStatus(F1:在录房间 + 边录边传进度)", () => {
+    const sess = { platform: "douyin", roomSlug: "123", sessionBase: "A_1", bv: "BV1X", confirmed: 2, total: 3, ambiguous: 0, recording: true };
+    const mkT = (run: (argv: string[]) => Promise<string>) =>
+      new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+
+    it("新 bundle:一次命令同时拿到 rooms 与 rolling", async () => {
+      const calls: string[] = [];
+      const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ rooms: [{ platform: "douyin", roomSlug: "123" }], rolling: [sess] }); });
+      await expect(t.recordingStatus()).resolves.toEqual({ rooms: [{ platform: "douyin", roomSlug: "123" }], rolling: [sess] });
+      expect(calls).toHaveLength(1);
+    });
+
+    it("lockedBytes:合法数字原样透传;脏值(负数/NaN/字符串)丢字段、条目保留", async () => {
+      const good = { ...sess, lockedBytes: 1234 };
+      const t = mkT(async () => JSON.stringify({ rooms: [], rolling: [good, { ...sess, sessionBase: "B", lockedBytes: -5 }, { ...sess, sessionBase: "C", lockedBytes: "9" }] }));
+      const r = (await t.recordingStatus()).rolling;
+      expect(r[0]!.lockedBytes).toBe(1234);
+      expect(r).toHaveLength(3);
+      expect(r[1]!.lockedBytes).toBeUndefined();
+      expect(r[2]!.lockedBytes).toBeUndefined();
+    });
+
+    it("旧 bundle(只有 rooms)→ rolling=[],不报错", async () => {
+      const t = mkT(async () => JSON.stringify({ rooms: [{ platform: "douyin", roomSlug: "123" }] }));
+      await expect(t.recordingStatus()).resolves.toEqual({ rooms: [{ platform: "douyin", roomSlug: "123" }], rolling: [] });
+    });
+
+    it("rolling 里形状不合法的条目被丢弃(不让脏数据进 UI)", async () => {
+      const noCounts = { platform: "douyin", roomSlug: "1", sessionBase: "s" };           // 缺 confirmed / total
+      const noBase = { platform: "douyin", roomSlug: "1", confirmed: 1, total: 2 };       // 缺 sessionBase
+      const t = mkT(async () => JSON.stringify({ rooms: [], rolling: [sess, { platform: "douyin" }, noCounts, noBase, null, "x"] }));
+      expect((await t.recordingStatus()).rolling).toEqual([sess]);
+    });
+
+    it("网络类错误照常抛(不被当成「不支持」吞掉)", async () => {
+      let n = 0;
+      const t = mkT(async () => { n++; throw new Error("ssh 超时 8000ms 被杀"); });
+      await expect(t.recordingStatus()).rejects.toThrow(/超时/);
+      expect(n).toBe(1); // 不得再走降级回退路径(否则一次抖动会多打一轮 ssh,且可能掩盖原错误)
+    });
+
+    it("命令不存在 → 降级到 activeRecordingRooms 回退路径,rolling=[]", async () => {
+      const t = mkT(async (argv) => {
+        const cmd = argv.join(" ");
+        if (cmd.includes("_recording-status")) throw new Error("error: unknown command '_recording-status'");
+        if (cmd.includes("_tasks")) return JSON.stringify({ tasks: [] });
+        return "true";
+      });
+      await expect(t.recordingStatus()).resolves.toEqual({ rooms: [], rolling: [] });
+    });
+  });
+
   describe("activeRecordingRooms", () => {
     const okOut = JSON.stringify({ rooms: [{ platform: "douyin", roomSlug: "123" }] });
 
@@ -94,6 +147,41 @@ describe("SshTransport", () => {
     expect(args).toContain("/stage/x");
   });
 
+  it("summarizeRsyncStderr:丢弃进度行,保留真正的错误(T-19:失败要能看到原因)", () => {
+    // 典型:进度行 + 真错误混在 stderr 里。
+    const raw =
+      "  1,234,567  45%  1.23MB/s    0:00:12 (xfr#3, to-chk=10/20)\n" +
+      "rsync: [sender] change_dir \"/data/rec\" failed: No such file or directory (2)\n" +
+      "rsync error: some files/attrs were not transferred (see previous errors) (code 23)\n";
+    const s = summarizeRsyncStderr(raw);
+    expect(s).not.toContain("%");                       // 进度行被丢弃
+    expect(s).toContain("No such file or directory");   // 真错误保留
+    expect(s).toContain("code 23");
+  });
+
+  it("summarizeRsyncStderr:只剩进度行 → 空串(不输出噪声)", () => {
+    const raw = "  1,000  10%  0.5MB/s  0:00:01\n  2,000  20%  0.6MB/s  0:00:02\nxfr#4\n";
+    expect(summarizeRsyncStderr(raw)).toBe("");
+  });
+
+  it("summarizeRsyncStderr:只保留最后 3 行并限长(防长输出灌爆错误消息)", () => {
+    const raw = Array.from({ length: 10 }, (_, i) => `err line ${i}`).join("\n");
+    const s = summarizeRsyncStderr(raw);
+    expect(s).toContain("err line 9");
+    expect(s).not.toContain("err line 6");   // 只留最后 3 行
+    expect(s.length).toBeLessThanOrEqual(400);
+  });
+
+  it("pull:rsync 失败时错误消息带上 stderr 尾部(T-19:不再只报退出码)", async () => {
+    // 注入的 rsync 直接抛带 stderr 的错误(模拟真实失败路径),断言 pull 不吞掉该信息。
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "~/drec",
+      run: async () => "{}",
+      rsync: async () => { throw new Error(`rsync rc=12: rsync: command not found(vps:/x)`); } });
+    const dir = mkdtempSync(join(tmpdir(), "rsync-err-"));
+    await expect(t.pull(["a.ts"], dir)).rejects.toThrow(/command not found/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("listInventory 解析远端 JSON 输出", async () => {
     const fakeJson = JSON.stringify({ recordings: [
       { roomSlug: "411", sessionBase: "z_2026-06-27_07-54", tsFiles: ["a_000.ts"], xmlPath: "z.xml",
@@ -105,6 +193,62 @@ describe("SshTransport", () => {
     expect(inv.workerId).toBe("vps");
     expect(inv.recordings[0].roomSlug).toBe("411");
     expect(inv.recordings[0].durationSec).toBe(3600);
+  });
+
+  describe("listInventory unclaimed fields (#225)", () => {
+    const recordings = [
+      { roomSlug: "411", sessionBase: "z_2026-06-27_07-54", tsFiles: ["a_000.ts"], xmlPath: "z.xml",
+        durationSec: 3600, startMs: 1_700_000_000_000, endMs: 1_700_003_600_000, totalGapSec: 0 },
+    ];
+    const seg = {
+      path: "/d/recordings/A/A_2026-06-27_10-00-00_000.mp4", sizeBytes: 10, mtimeMs: 1_700_000_000_000,
+      sessionBase: "A_2026-06-27_10-00-00", segmentIndex: 0, stampMs: 1_700_000_000_000, stampSource: "filename",
+      sidecar: "missing", platform: null, roomSlug: null, segmentSec: 1800,
+    };
+    const mkInv = (payload: unknown) => new SshTransport({ id: "vps", host: "h", dataRoot: "/d",
+      run: async () => JSON.stringify(payload), rsync: async () => {} }).listInventory();
+
+    it("new worker output → recordings plus validated unclaimed fields", async () => {
+      const inv = await mkInv({ recordings, unclaimedSegments: [seg], unclaimedTruncated: 3 });
+      expect(inv).toEqual({ workerId: "vps", recordings, unclaimedSegments: [seg], unclaimedTruncated: 3 });
+    });
+
+    it("old master parse shape still yields identical recordings from new output", () => {
+      const out = JSON.stringify({ recordings, unclaimedSegments: [seg], unclaimedTruncated: 0 });
+      expect((JSON.parse(out) as { recordings: NodeRecording[] }).recordings).toEqual(recordings);
+    });
+
+    it("old worker output (recordings only) → no unclaimed keys (unknown)", async () => {
+      const inv = await mkInv({ recordings });
+      expect(inv).toEqual({ workerId: "vps", recordings });
+      expect(inv).not.toHaveProperty("unclaimedSegments");
+      expect(inv).not.toHaveProperty("unclaimedTruncated");
+    });
+
+    it("[] is reported as none, not unknown", async () => {
+      const inv = await mkInv({ recordings, unclaimedSegments: [], unclaimedTruncated: 0 });
+      expect(inv.unclaimedSegments).toEqual([]);
+      expect(inv.unclaimedTruncated).toBe(0);
+    });
+
+    const malformed: Array<[string, unknown]> = [
+      ["entry missing path", { recordings, unclaimedSegments: [{ ...seg, path: undefined }], unclaimedTruncated: 0 }],
+      ["entry with bad sidecar shape", { recordings, unclaimedSegments: [seg, { ...seg, sidecar: "weird" }], unclaimedTruncated: 0 }],
+      ["entry with string segmentSec", { recordings, unclaimedSegments: [{ ...seg, segmentSec: "1800" }], unclaimedTruncated: 0 }],
+      ["null entry", { recordings, unclaimedSegments: [null], unclaimedTruncated: 0 }],
+      ["missing truncated", { recordings, unclaimedSegments: [seg] }],
+      ["negative truncated", { recordings, unclaimedSegments: [seg], unclaimedTruncated: -1 }],
+      ["fractional truncated", { recordings, unclaimedSegments: [seg], unclaimedTruncated: 1.5 }],
+      ["non-array segments", { recordings, unclaimedSegments: { 0: seg }, unclaimedTruncated: 0 }],
+    ];
+    for (const [name, payload] of malformed) {
+      it(`malformed (${name}) → no unclaimed keys, recordings intact`, async () => {
+        const inv = await mkInv(payload);
+        expect(inv.recordings).toEqual(recordings);
+        expect(inv).not.toHaveProperty("unclaimedSegments");
+        expect(inv).not.toHaveProperty("unclaimedTruncated");
+      });
+    }
   });
 
   it("listInventory 发送包含 _inventory 和 dataRoot 的命令", async () => {
@@ -185,14 +329,47 @@ describe("SshTransport", () => {
     expect(calls).toEqual([["/r/a.ts", localDir], ["/r/b.ts", localDir]]);
   });
 
-  it("exists：远端全在→true,缺→false,空列表→true,ssh 抛错→false", async () => {
+  // Contract (issue #146): false means the node answered MISSING; ssh failure / timeout / unparsable
+  // output must THROW. Reading a dropped link as "the file was deleted" escalates healthy sessions.
+  it("exists：远端全在→true,缺→false,空列表→true", async () => {
     const ok = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "OK\n", rsync: async () => {} });
     const miss = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "MISSING\n", rsync: async () => {} });
-    const fail = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => { throw new Error("x"); }, rsync: async () => {} });
     expect(await ok.exists(["/a", "/b"])).toBe(true);
     expect(await miss.exists(["/a"])).toBe(false);
     expect(await ok.exists([])).toBe(true);
-    expect(await fail.exists(["/a"])).toBe(false);
+  });
+
+  it("exists: ssh error (unreachable) throws instead of returning false", async () => {
+    const fail = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => { throw new Error("ssh rc=255"); }, rsync: async () => {} });
+    await expect(fail.exists(["/a"])).rejects.toThrow(/ssh rc=255/);
+  });
+
+  it("exists: unparsable output (empty / banner noise) throws instead of returning false", async () => {
+    const empty = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "\n", rsync: async () => {} });
+    const banner = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "Welcome to Ubuntu!\n", rsync: async () => {} });
+    await expect(empty.exists(["/a"])).rejects.toThrow(/无法解析/);
+    await expect(banner.exists(["/a"])).rejects.toThrow(/无法解析/);
+  });
+
+  it("exists: parses only the last non-empty line, so a banner containing MISSING/OK cannot flip the verdict", async () => {
+    const bannerMissing = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "MISSING\nOK\n", rsync: async () => {} });
+    const bannerOk = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "OK\nMISSING\n", rsync: async () => {} });
+    expect(await bannerMissing.exists(["/a"])).toBe(true);   // last line wins: OK
+    expect(await bannerOk.exists(["/a"])).toBe(false);       // last line wins: MISSING
+  });
+
+  it("exists: trims CRLF and trailing spaces; ignores blank lines", async () => {
+    const crlf = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "banner\r\n\r\n OK \r\n", rsync: async () => {} });
+    const missing = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "\r\n MISSING \t\n\n", rsync: async () => {} });
+    expect(await crlf.exists(["/a"])).toBe(true);
+    expect(await missing.exists(["/a"])).toBe(false);
+  });
+
+  it("exists: all-whitespace or unknown trailing text is not a verdict", async () => {
+    const blank = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => " \r\n\t\n", rsync: async () => {} });
+    const unknown = new SshTransport({ id: "v", host: "h", dataRoot: "/d", run: async () => "OK\nplease retry\n", rsync: async () => {} });
+    await expect(blank.exists(["/a"])).rejects.toThrow(/无法解析/);
+    await expect(unknown.exists(["/a"])).rejects.toThrow(/无法解析/);
   });
 
   describe("ping(轻量存活探针)", () => {
@@ -217,5 +394,159 @@ describe("SshTransport", () => {
         rsync: async () => {} });
       await expect(t.ping()).rejects.toThrow(/超时|timeout/i);
     });
+  });
+});
+
+/**
+ * issue #2 A2:master 主动终止节点执行体 + started 回读白名单。
+ *
+ * 钉死两条:① `abortNodePipeline` 把 `_node-abort <dataRoot> <streamKey>` 发到节点并按 JSON 解析
+ * `aborted`,任何异常(旧 bundle unknown command / 不可达 / 超时)一律降级 `{ aborted:false }`
+ * **绝不抛** —— 它在失败收口路径上,异常只会掩盖原始错误;② ssh 回读 `nodeResult` 接受新增的
+ * `started` phase(与 app 侧共用 core 的归一白名单,杜绝两处漂移把 started 当 null 吞掉)。
+ */
+describe("SshTransport.abortNodePipeline / nodeResult(started)", () => {
+  it("abortNodePipeline 发 _node-abort + streamKey,解析 aborted=true", async () => {
+    const captured: string[][] = [];
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec",
+      run: async (argv) => { captured.push(argv); return JSON.stringify({ aborted: true, killed: [4242], detail: "已终止" }); },
+      rsync: async () => {} });
+    await expect(t.abortNodePipeline!("douyin:123:2026-10-12")).resolves.toMatchObject({ aborted: true });
+    const cmd = captured[0].join(" ");
+    expect(cmd).toContain("_node-abort");
+    expect(cmd).toContain("/data/drec");
+    expect(cmd).toContain("'douyin:123:2026-10-12'");
+  });
+
+  it("旧 bundle(unknown command)→ aborted=false + 旧版本说明,**不抛**", async () => {
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {},
+      run: async () => { throw new Error("ssh rc=1: error: unknown command '_node-abort'"); } });
+    const r = await t.abortNodePipeline!("douyin:1:2");
+    expect(r.aborted).toBe(false);
+    expect(r.detail).toContain("旧版本");
+  });
+
+  it("网络/超时 → aborted=false + 不可达说明,不抛(掩盖原始错误更糟)", async () => {
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {},
+      run: async () => { throw new Error("ssh 超时 8000ms 被杀"); } });
+    const r = await t.abortNodePipeline!("douyin:1:2");
+    expect(r.aborted).toBe(false);
+    expect(r.detail).toContain("不可达");
+  });
+
+  it("nodeResult 接受 started(白名单与 app 共用 core 归一,不再各写一份)", async () => {
+    const t = new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {},
+      run: async () => JSON.stringify({ phase: "started", ok: false, atMs: 1 }) });
+    const r = await t.nodeResult!("douyin:1:2");
+    expect(r).not.toBeNull();
+    expect(r?.phase).toBe("started");
+  });
+});
+
+describe("nodePipeline 按调用传入的超时(issue #25 ①,真实 spawn,PATH 上放假 ssh)", () => {
+  const savedPath = process.env.PATH;
+  afterEach(() => { process.env.PATH = savedPath; });
+  const withFakeSsh = (sleepSec: number): void => {
+    const bin = mkdtempSync(join(tmpdir(), "fake-ssh-"));
+    writeFileSync(join(bin, "ssh"), `#!/bin/sh\nsleep ${sleepSec}\necho '{"ok":true,"bv":"BV1FAKE"}'\n`);
+    chmodSync(join(bin, "ssh"), 0o755);
+    process.env.PATH = `${bin}:${savedPath}`;
+  };
+  const spec = { streamKey: "k" } as never;
+  const mk = () => new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", rsync: async () => {} });
+
+  it("传入的 timeoutMs 生效:远端比预算慢 → 按该预算被杀(而不是默认 30 分钟)", async () => {
+    withFakeSsh(5);
+    await expect(mk().nodePipeline(spec, { timeoutMs: 150 })).rejects.toThrow(/ssh 超时 150ms/);
+  });
+
+  it("预算足够 → 正常返回 BV;不传 opts → 仍走默认通道", async () => {
+    withFakeSsh(0);
+    expect((await mk().nodePipeline(spec, { timeoutMs: 5000 })).bv).toBe("BV1FAKE");
+    expect((await mk().nodePipeline(spec)).bv).toBe("BV1FAKE");
+  });
+});
+
+describe("SshTransport.taskLogs(F3:master 代查节点日志)", () => {
+  const mkT = (run: (argv: string[]) => Promise<string>) =>
+    new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+
+  it("透传行数并原样返回行;带 error 时也返回(不当失败抛错)", async () => {
+    const calls: string[] = [];
+    const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ lines: ["x", "y"] }); });
+    await expect(t.taskLogs(7, 200)).resolves.toEqual({ lines: ["x", "y"] });
+    expect(calls[0]).toContain("_task-logs /data/drec 7 200");
+
+    const t2 = mkT(async () => JSON.stringify({ lines: [], error: "serve 未起" }));
+    await expect(t2.taskLogs(7, 50)).resolves.toEqual({ lines: [], error: "serve 未起" });
+  });
+
+  it("脏数据清洗:非字符串行丢弃、非字符串 error 忽略", async () => {
+    const t = mkT(async () => JSON.stringify({ lines: ["ok", 1, null, "ok2"], error: 42 }));
+    await expect(t.taskLogs(1, 10)).resolves.toEqual({ lines: ["ok", "ok2"] });
+    const t2 = mkT(async () => JSON.stringify({ lines: "not-an-array" }));
+    await expect(t2.taskLogs(1, 10)).resolves.toEqual({ lines: [] });
+  });
+});
+
+describe("SshTransport.recoverOrder / procCancel", () => {
+  const mkT = (run: (argv: string[]) => Promise<string>) =>
+    new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+  const plan = { ok: true, orderKey: "o1", fromGeneration: 1, newGeneration: 2, jobs: [], notes: [] };
+
+  it("sends a base64 request to _recover-order and returns the parsed result", async () => {
+    const calls: string[] = [];
+    const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ plan, applied: false }); });
+    const req = { orderKey: "o1", mode: "prep" as const };
+    await expect(t.recoverOrder(req)).resolves.toEqual({ plan, applied: false });
+    const b64 = calls[0]!.split(" ").pop()!;
+    expect(calls[0]).toContain("_recover-order /data/drec");
+    expect(JSON.parse(Buffer.from(b64, "base64").toString("utf8"))).toEqual(req);
+  });
+
+  it("maps an unknown-command failure to ProcUnsupported", async () => {
+    const t = mkT(async () => { throw new Error("error: unknown command '_recover-order'"); });
+    await expect(t.recoverOrder({ orderKey: "o1", mode: "prep" })).rejects.toBeInstanceOf(ProcUnsupported);
+  });
+
+  it("surfaces node-reported errors and rejects malformed payloads", async () => {
+    await expect(mkT(async () => JSON.stringify({ error: "boom" })).recoverOrder({ orderKey: "o1", mode: "prep" })).rejects.toThrow(/boom/);
+    await expect(mkT(async () => JSON.stringify({ nope: 1 })).recoverOrder({ orderKey: "o1", mode: "prep" })).rejects.toThrow(/invalid/);
+  });
+
+  it("procCancel maps unknown command to ProcUnsupported and returns receipts otherwise", async () => {
+    const receipts = [{ jobId: "j1", state: "cancelled" }];
+    await expect(mkT(async () => JSON.stringify({ receipts })).procCancel(["j1"])).resolves.toEqual(receipts);
+    const old = mkT(async () => { throw new Error("error: unknown command '_proc-cancel'"); });
+    await expect(old.procCancel(["j1"])).rejects.toBeInstanceOf(ProcUnsupported);
+  });
+});
+
+describe("SshTransport.zeroDiskReport / nodeCapabilities.zeroDisk (issue #331)", () => {
+  const mkT = (run: (argv: string[]) => Promise<string>) =>
+    new SshTransport({ id: "vps", host: "h", dataRoot: "/data/drec", run, rsync: async () => {} });
+  const receipt = { v: 1, id: "douyin:1:5", platform: "douyin", roomSlug: "1", streamKey: "douyin:1:2026-10-20", bvid: "BVfake1", parts: 2, atMs: 5 };
+
+  it("calls the hidden read-only command with the node data root and parses the report", async () => {
+    const calls: string[] = [];
+    const t = mkT(async (argv) => { calls.push(argv.join(" ")); return JSON.stringify({ v: 1, receipts: [receipt, { junk: true }], status: [] }); });
+    const r = await t.zeroDiskReport();
+    expect(calls[0]).toContain("_zero-disk-report /data/drec");
+    expect(r?.receipts).toEqual([receipt]);
+  });
+  it("an old bundle (unknown command) means unsupported (null), not a failure", async () => {
+    const old = mkT(async () => { throw new Error("ssh rc=1: error: unknown command '_zero-disk-report'"); });
+    await expect(old.zeroDiskReport()).resolves.toBeNull();
+  });
+  it("an unreachable node / bad output throws, so the caller marks it offline instead of 'no receipts'", async () => {
+    await expect(mkT(async () => { throw new Error("ssh rc=255"); }).zeroDiskReport()).rejects.toThrow("255");
+    await expect(mkT(async () => JSON.stringify({ error: "disk" })).zeroDiskReport()).rejects.toThrow("disk");
+    await expect(mkT(async () => JSON.stringify({ nope: 1 })).zeroDiskReport()).rejects.toThrow("unrecognized");
+  });
+  it("_node-capabilities: zeroDisk is true only when the node says so (old bundles omit it)", async () => {
+    const caps = (extra: object) => mkT(async () => JSON.stringify({ biliup: true, cookies: true, diskFreeGB: 5, ...extra })).nodeCapabilities();
+    expect((await caps({ zeroDisk: true })).zeroDisk).toBe(true);
+    expect((await caps({})).zeroDisk).toBe(false);
+    expect((await caps({ zeroDisk: "yes" })).zeroDisk).toBe(false);
   });
 });

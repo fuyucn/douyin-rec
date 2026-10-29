@@ -7,10 +7,10 @@
  *
  * Uses a real in-memory TaskStore + a trivial mock manager (no subprocess).
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../../packages/app/src/store.js";
@@ -32,6 +32,13 @@ class MockManager implements ManagerLike {
   }
   async stop(id: number): Promise<void> {
     this.running.delete(id);
+  }
+  async stopWithin(id: number, _ms: number): Promise<boolean> {
+    await this.stop(id);
+    return true;
+  }
+  isStopping(_id: number): boolean {
+    return false;
   }
   async stopGraceful(id: number): Promise<void> {
     this.running.delete(id);
@@ -68,6 +75,8 @@ describe("matchRoute", () => {
     expect(matchRoute("POST", "/api/tasks/7/refresh-anchor")).toMatchObject({ name: "refreshTaskAnchor", id: 7 });
     expect(matchRoute("POST", "/api/tasks/7/start")).toMatchObject({ name: "startTask", id: 7 });
     expect(matchRoute("POST", "/api/tasks/7/stop")).toMatchObject({ name: "stopTask", id: 7 });
+    // T18:排空是独立路由(不是 stop 的一个参数)—— 语义不同,不能靠 body 区分
+    expect(matchRoute("POST", "/api/tasks/7/drain")).toMatchObject({ name: "drainTask", id: 7 });
     expect(matchRoute("GET", "/api/tasks/7/logs")).toMatchObject({ name: "getTaskLogs", id: 7 });
     expect(matchRoute("POST", "/api/login/qr")).toMatchObject({ name: "startLogin", needsBody: true });
     expect(matchRoute("GET", "/api/login/qr/login-abc_1")).toMatchObject({
@@ -83,6 +92,9 @@ describe("matchRoute", () => {
     expect(matchRoute("POST", "/api/cookies/bilibili")).toMatchObject({ name: "setCookiePlatform", slug: "bilibili", needsBody: true });
     expect(matchRoute("DELETE", "/api/cookies/bilibili")).toMatchObject({ name: "clearCookiePlatform", slug: "bilibili" });
     expect(matchRoute("GET", "/api/hub/status")?.name).toBe("hubStatus");
+    // T-2:force 通道入口(POST + query,无 body)
+    expect(matchRoute("POST", "/api/hub/apply")?.name).toBe("applyHubTasks");
+    expect(matchRoute("GET", "/api/hub/apply")).toBeNull();
     expect(matchRoute("GET", "/api/hub/rules")?.name).toBe("listHubRules");
     expect(matchRoute("POST", "/api/hub/rules")).toMatchObject({ name: "createHubRule", needsBody: true });
     expect(matchRoute("PATCH", "/api/hub/rules/douyin.123456")).toMatchObject({ name: "updateHubRule", slug: "douyin.123456", needsBody: true });
@@ -112,6 +124,11 @@ describe("matchRoute", () => {
     expect(matchRoute("POST", "/api/hub/jobs/douyin%3A123%3A2026-08-10/stop")).toMatchObject({
       name: "stopHubJob",
       sid: "douyin:123:2026-08-10",
+    });
+    expect(matchRoute("POST", "/api/hub/jobs/douyin%3A123%3A2026-08-10/ack")).toMatchObject({
+      name: "ackHubJob",
+      sid: "douyin:123:2026-08-10",
+      needsBody: true,
     });
     expect(matchRoute("GET", "/api/platforms")?.name).toBe("listPlatforms");
     expect(matchRoute("GET", "/api/webhook")?.name).toBe("getWebhook");
@@ -182,6 +199,63 @@ describe("createWebServer (live)", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/text\/html/);
     expect(await res.text()).toMatch(/<!DOCTYPE html>/i);
+  });
+
+  // T-2 端到端:HTTP → 路由 → api → requestSyncTasks({force})。
+  // 只在 master(hubEnabled)且注入了 requestSyncTasks 时才 202,否则 400 —— 语义见 hub-rules.applyHubTasks。
+  it("POST /api/hub/apply?force=1 → 202 且 requestSyncTasks 收到 force", async () => {
+    const requestSyncTasks = vi.fn();
+    const s2 = createWebServer({
+      store, manager: new MockManager(), log: () => {},
+      resolveAnchor: async () => null, resolveShortUrl: async () => null,
+      hubDir, hubEnabled: true, requestSyncTasks,
+    });
+    await new Promise<void>((r) => s2.listen(0, "127.0.0.1", r));
+    const b2 = `http://127.0.0.1:${(s2.address() as AddressInfo).port}`;
+    try {
+      const forced = await fetch(`${b2}/api/hub/apply?force=1`, { method: "POST" });
+      expect(forced.status).toBe(202);
+      expect(requestSyncTasks).toHaveBeenLastCalledWith({ force: true });
+      await fetch(`${b2}/api/hub/apply`, { method: "POST" });
+      expect(requestSyncTasks).toHaveBeenLastCalledWith({ force: false });
+    } finally {
+      await new Promise<void>((r) => s2.close(() => r()));
+    }
+    // 非 master(默认 beforeEach 没注入 hubEnabled)→ 400,不触发同步
+    const slave = await fetch(`${base}/api/hub/apply?force=1`, { method: "POST" });
+    expect(slave.status).toBe(400);
+    expect(requestSyncTasks).toHaveBeenCalledTimes(2);
+  });
+
+  // 回归:资源端点必须**经由 server.ts 的 deps 转发**生效。
+  // 之前我在 WebServerDeps 加了 hubConfigSource 却忘了转进 makeApi,
+  // 而 web-api.test 直接往 makeApi 注入 → 两端各自绿,线上却是「hub 未启用」(自审发现)。
+  it("GET /api/hub/resources 经由 server deps 转发(hubConfigSource 不能只加在类型上)", async () => {
+    const cfgPath = join(hubDir, "hub.config.json");
+    writeFileSync(cfgPath, JSON.stringify({ resources: { maxCpuParallel: 1 } }), "utf-8");
+    const s2 = createWebServer({
+      store, manager: new MockManager(), log: () => {},
+      resolveAnchor: async () => null, resolveShortUrl: async () => null,
+      hubDir, hubEnabled: true,
+      hubConfigSource: () => ({ json: readFileSync(cfgPath, "utf-8"), path: cfgPath, source: "root-file" }),
+    });
+    await new Promise<void>((r) => s2.listen(0, "127.0.0.1", r));
+    const b2 = `http://127.0.0.1:${(s2.address() as AddressInfo).port}`;
+    try {
+      const got = await fetch(`${b2}/api/hub/resources`);
+      expect(got.status).toBe(200);
+      const body = (await got.json()) as { source: string; resources: { maxCpuParallel: number } };
+      expect(body.source).toBe("root-file");
+      const put = await fetch(`${b2}/api/hub/resources`, {
+        method: "PUT", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ maxCpuParallel: 4 }),
+      });
+      expect(put.status).toBe(200);
+      expect((JSON.parse(readFileSync(cfgPath, "utf-8")) as { resources: { maxCpuParallel: number } })
+        .resources.maxCpuParallel).toBe(4);
+    } finally {
+      await new Promise<void>((r) => s2.close(() => r()));
+    }
   });
 
   it("GET /api/tasks → json list", async () => {

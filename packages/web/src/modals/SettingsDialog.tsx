@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
 import { ClipboardPaste } from "lucide-react";
-import { api } from "../api/client";
+import { api, type HubResources } from "../api/client";
 import { cookieStatusAtom, serverTimezoneAtom } from "../atoms";
 import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
@@ -12,7 +12,29 @@ import { useT, useLang } from "../lib/i18n";
 import { getToggles, setToggle, NOTIF_KEYS, type NotifKey } from "../lib/notifications";
 import type { BiliupAuthStatus, CookieStatus, NotifWebhookToggles } from "@drec/contracts";
 
-type Tab = "account" | "engine" | "notif" | "about";
+type Tab = "account" | "engine" | "notif" | "resources" | "about";
+
+/**
+ * 资源闸门可调项(表驱动,而不是手写 8 份 JSX)。
+ * min 必须与后端 hub-config-store 的 validateResources **完全一致** ——
+ * 前端拦一道只是少一次往返,后端才是权威;两边不一致会出现「前端允许、后端 400」。
+ */
+const RESOURCE_FIELDS: Array<{
+  key: keyof HubResources;
+  min: number;
+  label: string;
+  hint: string;
+}> = [
+  { key: "maxCpuParallel", min: 1, label: "settings.resCpu", hint: "settings.resCpuHint" },
+  { key: "maxNetParallel", min: 0, label: "settings.resNet", hint: "settings.resNetHint" },
+  { key: "maxConcurrentPipelines", min: 1, label: "settings.resPipelines", hint: "settings.resPipelinesHint" },
+  { key: "minBurnFreeMemMB", min: 0, label: "settings.resMem", hint: "settings.resMemHint" },
+  { key: "minMergeFreeMemMB", min: 0, label: "settings.resMergeMem", hint: "settings.resMergeMemHint" },
+  { key: "memWaitTimeoutMs", min: 0, label: "settings.resMemWait", hint: "settings.resMemWaitHint" },
+  { key: "uploadRateLimit", min: 1, label: "settings.resRateLimit", hint: "settings.resRateLimitHint" },
+  { key: "uploadRateWindowMs", min: 1, label: "settings.resRateWindow", hint: "settings.resRateWindowHint" },
+  { key: "uploadCooldownMs", min: 0, label: "settings.resCooldown", hint: "settings.resCooldownHint" },
+];
 
 /** 固定几个常用大时区(够用即可,不需要全量 IANA 列表)。 */
 const TIMEZONE_OPTIONS = [
@@ -56,7 +78,18 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
   const [mesioPath, setMesioPath] = useState("");
   const [mesioDefault, setMesioDefault] = useState("");
   const [savingMesio, setSavingMesio] = useState(false);
+  /** 抖音 API 模式(取流 + 弹幕 liveId 用哪个端点)。 */
+  const [apiMode, setApiMode] = useState("");
+  const [apiModeDefault, setApiModeDefault] = useState("balance");
+  const [apiModeOptions, setApiModeOptions] = useState<string[]>([]);
+  const [savingApiMode, setSavingApiMode] = useState(false);
   const [timezone, setTimezone] = useState("");
+  // T15:资源闸门。resSource 决定「保存写去哪」;inline 时禁用保存并说明原因,
+  // 而不是让用户点保存后拿到一个「成功」但重启即丢的配置(那是假成功)。
+  const [resources, setResources] = useState<HubResources | null>(null);
+  const [resSource, setResSource] = useState<string>("");
+  const [savingRes, setSavingRes] = useState(false);
+  const [resError, setResError] = useState("");
   const [tzDefault, setTzDefault] = useState("");
   const [tzEffective, setTzEffective] = useState("");
   const [savingTz, setSavingTz] = useState(false);
@@ -72,6 +105,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     void api.getNotifSettings().then((r) => setWebhookToggles(r)).catch(() => {});
     void api.getWebhook().then((r) => { setHasWebhook(r.hasWebhook); setWebhook(""); }).catch(() => {});
     void api.getMesioPath().then((r) => { setMesioPath(r.mesioPath); setMesioDefault(r.default); }).catch(() => {});
+    void api.getDouyinApiMode().then((r) => { setApiMode(r.mode); setApiModeDefault(r.default); setApiModeOptions(r.options); }).catch(() => {});
     void api
       .getTimezone()
       .then((r) => {
@@ -82,7 +116,32 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       })
       .catch(() => {});
     void api.getVersion().then((r) => setVersion(r.version)).catch(() => {});
+    // T15:slave/未启用 hub → 400 是正常态(该页只在 master 有意义),静默忽略即可,
+    // 但要把上次的值清掉,否则切换节点后会显示上一个 master 的并行度(假信息)。
+    setResources(null);
+    setResSource("");
+    void api
+      .getHubResources()
+      .then((r) => { setResources(r.resources); setResSource(r.source); })
+      .catch(() => {});
   }, [open]);
+
+  /** 保存资源闸门。后端拒绝时把原因原样显示(非法值/无法持久化),不假装成功。 */
+  const saveResources = async (): Promise<void> => {
+    if (!resources) return;
+    setSavingRes(true);
+    setResError("");
+    try {
+      const r = await api.putHubResources(resources);
+      setResources(r.resources);
+      toast(t("settings.resourcesSaved"), "success");
+    } catch (e) {
+      setResError(errMessage(e));
+      toast(errMessage(e), "error");
+    } finally {
+      setSavingRes(false);
+    }
+  };
 
   const flip = (key: NotifKey, on: boolean): void => {
     setToggles((s) => ({ ...s, [key]: on }));
@@ -165,6 +224,22 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
       toast(t("settings.mesioFailed", { msg: errMessage(e) }), "error");
     } finally {
       setSavingMesio(false);
+    }
+  };
+
+  const saveApiMode = async (mode: string): Promise<void> => {
+    setApiMode(mode); // 乐观更新(下拉立即反映选择)
+    setSavingApiMode(true);
+    try {
+      const r = await api.setDouyinApiMode(mode);
+      setApiMode(r.mode);
+      setApiModeDefault(r.default);
+      setApiModeOptions(r.options);
+      toast(t("settings.apiModeSaved"), "success");
+    } catch (e) {
+      toast(t("settings.apiModeFailed", { msg: errMessage(e) }), "error");
+    } finally {
+      setSavingApiMode(false);
     }
   };
 
@@ -257,6 +332,7 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
     { id: "engine", label: t("settings.tabEngine") },
     { id: "account", label: t("settings.tabAccount") },
     { id: "notif", label: t("settings.tabNotif") },
+    { id: "resources", label: t("settings.tabResources") },
     { id: "about", label: t("settings.tabAbout") },
   ];
 
@@ -363,6 +439,24 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
             {t("settings.mesioHint", { path: mesioDefault || "bin/mesio" })}
           </p>
 
+          <h4 className="form-section mt-6">{t("settings.apiModeSection")}</h4>
+          <label className="field-label" htmlFor="settings-douyin-api-mode">
+            {t("settings.apiModeLabel")}
+          </label>
+          <select
+            id="settings-douyin-api-mode"
+            className="input text-xs font-mono"
+            value={apiMode || apiModeDefault}
+            disabled={savingApiMode}
+            onChange={(e) => void saveApiMode(e.target.value)}
+          >
+            {(apiModeOptions.length > 0 ? apiModeOptions : [apiModeDefault]).map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-muted-soft">{t("settings.apiModeHint")}</p>
+          <p className="mt-1 text-xs text-muted-soft">{t("settings.apiModeDetail")}</p>
+
           <h4 className="form-section mt-6">{t("settings.tzSection")}</h4>
           <label className="field-label">{t("settings.tzLabel")}</label>
           <div className="flex gap-2">
@@ -383,6 +477,51 @@ export function SettingsDialog({ open, onClose, onOpenQr, onOpenPaste }: Props):
           <p className="mt-1 text-xs text-muted-soft">
             {t("settings.tzHint", { default: tzDefault || "Asia/Shanghai", effective: tzEffective || "…" })}
           </p>
+        </div>
+      )}
+
+      {tab === "resources" && (
+        <div className="settings-tab-body space-y-4">
+          <h4 className="form-section">{t("settings.resourcesSection")}</h4>
+          <p className="text-xs text-muted">{t("settings.resourcesHint")}</p>
+          {!resources ? (
+            <p className="text-sm text-muted">{t("settings.resourcesUnavailable")}</p>
+          ) : (
+            <>
+              {/* inline 来源 = --hub-config 传的是 JSON 串,没有文件可写。
+                  明确禁用保存并说明原因,而不是点保存拿到「成功」但重启即丢。 */}
+              {resSource === "inline" && (
+                <p className="text-xs text-error-fg">{t("settings.resourcesInline")}</p>
+              )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {RESOURCE_FIELDS.map((f) => (
+                  <label key={f.key} className="block">
+                    <span className="field-label">{t(f.label)}</span>
+                    <input
+                      className="input"
+                      type="number"
+                      min={f.min}
+                      value={String(resources[f.key] ?? "")}
+                      onChange={(e) => {
+                        // 计算属性打出的对象需要重新标注类型,否则 TS 推成
+                        // { [x: string]: string|number|symbol } —— 直接构造一个新对象。
+                        const v = Number(e.target.value);
+                        setResources({ ...resources, [f.key]: v } as HubResources);
+                      }}
+                    />
+                    <span className="text-xs text-muted mt-1 block">{t(f.hint)}</span>
+                  </label>
+                ))}
+              </div>
+              {resError ? <p className="text-xs text-error-fg">{resError}</p> : null}
+              <div className="flex items-center gap-3">
+                <Button type="button" disabled={savingRes || resSource === "inline"} onClick={() => void saveResources()}>
+                  {savingRes ? t("settings.saving") : t("settings.resourcesSave")}
+                </Button>
+                <span className="text-xs text-muted">{t("settings.resourcesEffectiveHint")}</span>
+              </div>
+            </>
+          )}
         </div>
       )}
 

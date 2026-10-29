@@ -1,5 +1,5 @@
 /** Shared display-label helpers (quality, schedule, clock formatting). */
-import type { Task } from "../api/client";
+import type { PlatformDTO, RoomDTO, Task } from "../api/client";
 import { fmtDateTimeInTz } from "./tz";
 
 export const QUALITY_SHORT: Record<string, string> = {
@@ -87,6 +87,19 @@ export function roomId(room: string): string {
   return q >= 0 ? r.slice(0, q) : r;
 }
 
+/**
+ * Compact room identifier for list cells. Prefer the server-normalized slug:
+ * non-Douyin URLs otherwise make the name/room column wrap or truncate hard.
+ */
+export function roomDisplayId(room: { room: string; roomSlug?: string | null }): string {
+  return room.roomSlug?.trim() || roomId(room.room);
+}
+
+/** Display name: task name > anchor name > compact room identifier. */
+export function roomName(room: RoomDTO): string {
+  return room.recording?.name || room.recording?.anchorName || roomDisplayId(room);
+}
+
 /** 房间可点击链接(详情页「打开直播间」用):规范 https URL。 */
 export function roomHref(room: string): string {
   if (/^https?:\/\//.test(room)) return room; // 已是 URL(入库已归一化、剥 query)
@@ -116,4 +129,35 @@ export function fmtClock(ms: number | null | undefined): string {
 export function fmtStartedAt(epochMs: number | null | undefined, tz: string): string {
   if (epochMs == null) return "-";
   return fmtDateTimeInTz(new Date(epochMs), tz);
+}
+
+/**
+ * 按直播间地址判平台(客户端):http(s) URL 用各平台 urlPattern 匹配;裸房间号或无命中
+ * → 回落 platforms[0](默认平台,与后端 platformForRoom 一致)。平台决定画质/录制器/弹幕选项。
+ *
+ * **放在这里而不是各自 dialog 里**:CreateEditTaskDialog 与 HubRuleDialog(T10)都要用,
+ * 两份拷贝迟早会漂移(某一处加了新平台的兼容处理,另一处没加 → 同一房间两个页面显示不同画质)。
+ */
+export function pickPlatform(room: string, platforms: PlatformDTO[]): PlatformDTO | undefined {
+  if (!platforms.length) return undefined;
+  if (/^https?:\/\//.test(room)) {
+    for (const p of platforms) {
+      if (!p.urlPattern) continue;
+      try {
+        if (new RegExp(p.urlPattern).test(room)) return p;
+      } catch {
+        /* 坏 pattern 跳过 */
+      }
+    }
+  }
+  return platforms[0];
+}
+
+
+/** "HH:MM-HH:MM" → 成对端点;空串 = 全天(两端 null);拆不开 → null。真正的格式校验在后端 parseSchedule。 */
+export function splitSchedule(sched: string): { scheduleStart: string | null; scheduleEnd: string | null } | null {
+  const s = sched.trim();
+  if (!s) return { scheduleStart: null, scheduleEnd: null };
+  const m = /^(.+?)-(.+)$/.exec(s);
+  return m ? { scheduleStart: m[1].trim(), scheduleEnd: m[2].trim() } : null;
 }

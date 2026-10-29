@@ -6,11 +6,16 @@
  */
 import type { ApiCtx } from "./context.js";
 import type { ApiResult } from "./types.js";
-import { platformForRoom, listPlatforms } from "@drec/core";
+import { parseOutputFormat, platformForRoom, listPlatforms, streamUploadConflicts, zeroDiskRuleError, type OutputFormat } from "@drec/core";
 import { inWindow, nowMinutesLocal } from "../../scheduler.js";
 import type { CreateTaskInput, UpdateTaskInput, TaskView } from "./types.js";
 import type { TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
+import { redactLogLines } from "@drec/core";
+import * as hubStore from "../../hub-store.js";
+
+/** Web 停止请求最多同步等待的时间(ms)。普通任务几秒内退出;rolling 任务可能在传末段,超时先返回。 */
+const STOP_WAIT_MS = 15_000;
 
 export function buildTasks(ctx: ApiCtx) {
   const { deps, store, manager, hubDir, hubConfigPath,
@@ -34,6 +39,22 @@ export function buildTasks(ctx: ApiCtx) {
         }
       }
 
+      let outputFormat: OutputFormat;
+      try { outputFormat = parseOutputFormat(input.outputFormat); } catch (e) { return err(400, (e as Error).message); }
+      // 0 落盘边录边传与滚动边录边传互斥(单一判定 = core.streamUploadConflicts)。
+      // 手动建任务的 rollingEffective 由 store 从旧开关派生,故这里用同口径比较。
+      if (streamUploadConflicts(input.streamUpload, input.rollingUpload === true)) {
+        return err(400, "streamUpload 与 rollingUpload 互斥:直播直传不写盘,滚动上传靠文件");
+      }
+      // A zero-disk task must be a rolling sub-mode. Validate the room rule up front so a
+      // task created from the Tasks page cannot bypass the Rooms editor guard.
+      const roomPlatform = platformForRoom(room);
+      const roomSlug = roomPlatform.extractRoomSlug(room);
+      const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(roomPlatform.id, roomSlug));
+      const zerr = zeroDiskRuleError(input.streamUpload, rule
+        ? { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers, steps: rule.pipeline?.steps }
+        : null);
+      if (zerr) return err(400, zerr);
       const task = store.addTask({
         room,
         name: input.name ?? null,
@@ -47,6 +68,10 @@ export function buildTasks(ctx: ApiCtx) {
         scheduleStart,
         scheduleEnd,
         webhook: normWebhook(input.webhook),
+        rollingUpload: input.rollingUpload === true,
+        streamUpload: input.streamUpload === true,
+        streamUploadSpool: input.streamUploadSpool !== false,
+        outputFormat,
       });
       // 创建即抓主播名（不等开始录制）；后台写回，UI 轮询即显示。
       resolveAnchorBg(task.id, task.room);
@@ -78,6 +103,31 @@ export function buildTasks(ctx: ApiCtx) {
       if ("cookies" in input) patch.cookies = input.cookies ?? null;
       if ("outDir" in input) patch.outDir = input.outDir ?? null;
       if ("webhook" in input) patch.webhook = normWebhook(input.webhook);
+      if ("rollingUpload" in input) patch.rollingUpload = input.rollingUpload === true;
+      if ("streamUpload" in input) patch.streamUpload = input.streamUpload === true;
+      if ("streamUploadSpool" in input) patch.streamUploadSpool = input.streamUploadSpool !== false;
+      // 互斥校验用**patch 后的生效值**(只改了其中一边时也要挡住另一边的存量值)。
+      if (streamUploadConflicts(patch.streamUpload ?? existing.streamUpload, patch.rollingUpload ?? existing.rollingUpload)) {
+        return err(400, "streamUpload 与 rollingUpload 互斥:直播直传不写盘,滚动上传靠文件");
+      }
+      // Zero-disk must be valid for the room the task will actually live in after this patch,
+      // not just the room it had before. A plain room change can otherwise walk a live task
+      // into a non-rolling/burning/multi-node rule while `--stream-upload` stays on.
+      if ((patch.streamUpload ?? existing.streamUpload) === true) {
+        const room = (patch.room ?? existing.room);
+        const p = platformForRoom(room);
+        const rule = hubStore.getHubRule(hubDir, hubStore.hubKey(p.id, p.extractRoomSlug(room)));
+        const zerr = zeroDiskRuleError(true, rule
+          ? { enabled: rule.enabled, mode: rule.pipeline?.upload?.mode, workers: rule.workers, steps: rule.pipeline?.steps }
+          : null);
+        if (zerr) return err(400, zerr);
+      }
+      // A task that is already the source of a rolling rule may switch to zero-disk:
+      // zero-disk is that rule's sub-mode and reports its own ledger result. The zero-disk
+      // rule check above rejects any non-rolling / burning / multi-node rule.
+      if ("outputFormat" in input) {
+        try { patch.outputFormat = parseOutputFormat(input.outputFormat); } catch (e) { return err(400, (e as Error).message); }
+      }
 
       // schedule "HH:MM-HH:MM" wins over explicit scheduleStart/End if present.
       if (input.schedule !== undefined) {
@@ -125,7 +175,9 @@ export function buildTasks(ctx: ApiCtx) {
     getTaskLogs(id: number): ApiResult {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
-      return { status: 200, body: { lines: manager.getLogs(id) } };
+      // 出网前脱敏:日志里可能带 cookie(vendored 取流代码在异常信息里打印整串)。
+      // 这里覆盖「节点自己的网页」与「master 代查(F3)」两条出口。
+      return { status: 200, body: { lines: redactLogLines(manager.getLogs(id)) } };
     },
 
     async deleteTask(id: number): Promise<ApiResult> {
@@ -152,6 +204,14 @@ export function buildTasks(ctx: ApiCtx) {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
       if (t.managedBy === "hub") return err(403, `任务 id=${id} 由 hub 管理，请在 master 上操作`);
+      // 磁盘水位准入(issue #96):手动启动此前绕过闸门。**只在这次点击会真的起录制进程时**才检查
+      // (已在跑 / 不在窗口内 / 被 hub 抑制时点「启动 / 启用」不会起进程,不该因低水位被拒)。
+      // 低于水位 → 明确报错且**不改任务状态**(不置 enabled),避免「已启用却不会录」的假象;测任务自己的输出目录。
+      const wouldStart = !manager.isRunning(id)
+        && !deps.localSuppressedIds?.()?.has(id)
+        && inWindow(nowMinutesLocal(new Date()), t.scheduleStart, t.scheduleEnd);
+      const admit = wouldStart ? deps.admitStart?.(t.outDir) : undefined;
+      if (admit && !admit.ok) return err(409, `磁盘空间不足,未启动任务 id=${id}:${admit.reason}`);
       try {
         store.setEnabled(id, true);
         // hub 语义:该任务是某条规则的源任务、且规则已把录制切给远端节点(workers 不含 local)
@@ -171,6 +231,32 @@ export function buildTasks(ctx: ApiCtx) {
       return { status: 200, body: view(store.getTask(id)!) };
     },
 
+    /**
+     * POST /api/tasks/:id/drain —— **优雅排空**:停止寻找新开播,让当前这场录到自然收播。
+     *
+     * 与 stopTask 的区别是本任务存在的原因:硬停会**截断当前录像**(子进程被杀,分段不完整),
+     * 而广播通常还在进行。窗口结束/临时停用时想要的是「不再接新场,但别腰斩现在这场」。
+     */
+    async drainTask(id: number): Promise<ApiResult> {
+      const t = store.getTask(id);
+      if (!t) return err(404, `未找到任务 id=${id}`);
+      if (t.managedBy === "hub") return err(403, `任务 id=${id} 由 hub 管理,请在 master 上操作`);
+      if (!manager.isRunning(id)) {
+        // 没在跑就没什么可排空的:说清楚,别给一个「成功」让人以为改了状态。
+        return err(409, "该任务当前没有在录制,无需排空");
+      }
+      try {
+        // 排空的下游语义 = 「窗口结束」:置停用 + 优雅停(不会再被 daemon 拉起)。
+        store.setEnabled(id, false);
+        await manager.stopGraceful(id);
+      } catch (e) {
+        try { store.setEnabled(id, true); } catch { /* 回滚失败以原始错误为准 */ }
+        return err(500, `排空失败: ${(e as Error).message}`);
+      }
+      if (isHubSourceTask(id)) deps.requestSyncTasks?.();
+      return { status: 200, body: view(store.getTask(id)!) };
+    },
+
     async stopTask(id: number, opts: { internal?: boolean } = {}): Promise<ApiResult> {
       const t = store.getTask(id);
       if (!t) return err(404, `未找到任务 id=${id}`);
@@ -181,7 +267,8 @@ export function buildTasks(ctx: ApiCtx) {
       }
       try {
         store.setEnabled(id, false);
-        if (manager.isRunning(id)) await manager.stop(id);
+        // 最多等 STOP_WAIT_MS:普通任务几秒内退出;rolling 任务要给末段上传留时间,超时就先返回(仍在停止中)。
+        if (manager.isRunning(id)) await manager.stopWithin(id, STOP_WAIT_MS);
       } catch (e) {
         try { store.setEnabled(id, true); } catch { /* 回滚失败以原始错误为准 */ }
         return err(500, `停止任务失败: ${(e as Error).message}`);

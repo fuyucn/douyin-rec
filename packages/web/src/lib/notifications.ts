@@ -5,9 +5,10 @@
  * 每类提醒的开关存 localStorage(纯前端偏好,无需后端);默认全开。
  */
 import { useEffect, useRef } from "react";
-import { showToast, type ToastType } from "./hooks";
+import { showToast } from "./hooks";
 import { useT } from "./i18n";
-import { api, type AppEventDTO } from "../api/client";
+import { api } from "../api/client";
+import { describeEvent } from "./notification-text";
 import type { NotifKey } from "@drec/contracts";
 
 export type { NotifKey };
@@ -36,45 +37,6 @@ export function setToggle(key: NotifKey, on: boolean): void {
   }
 }
 
-/** 取路径末段(显示用)。 */
-function baseName(p?: string): string {
-  if (!p) return "";
-  const parts = p.split(/[/\\]/);
-  return parts[parts.length - 1] || p;
-}
-
-type T = (key: string, vars?: Record<string, string | number>) => string;
-
-/** 事件 → { 开关键, 文案(经 i18n), toast 类型 };null = 不提醒此类。 */
-function describe(e: AppEventDTO, t: T): { key: NotifKey; message: string; type: ToastType } | null {
-  const ev = e.event as Record<string, unknown> & { kind: string };
-  const s = (k: string): string => String(ev[k] ?? "");
-  switch (ev.kind) {
-    case "recordStart":
-      return { key: "live", message: t("notif.evLive", { anchor: s("anchor") }), type: "info" };
-    case "recordEnd": {
-      const reason = s("reason");
-      return { key: "recordEnd", message: t("notif.evRecordEnd", { anchor: s("anchor"), reason: reason ? `（${reason}）` : "" }), type: "success" };
-    }
-    case "recordReconnect":
-      return { key: "live", message: t("notif.evReconnect", { anchor: s("anchor"), sec: s("downSec") }), type: "warning" };
-    case "mergeDone":
-      return { key: "merge", message: t("notif.evMerge", { file: baseName(s("file")) }), type: "success" };
-    case "burnDone":
-      return { key: "merge", message: t("notif.evBurn", { file: baseName(s("file")) }), type: "success" };
-    case "uploadDone":
-      return { key: "merge", message: t("notif.evUpload", { bv: s("bv") }), type: "success" };
-    case "hubTaskStart": {
-      const workers = Array.isArray(ev.workers) ? (ev.workers as unknown[]).length : 0;
-      return { key: "hub", message: t("notif.evHubStart", { room: s("room"), count: workers }), type: "info" };
-    }
-    case "error":
-      return { key: "error", message: t("notif.evError", { stage: s("stage"), message: s("message") }), type: "error" };
-    default:
-      return null;
-  }
-}
-
 /** 挂载一次(App 级):轮询站内事件流 → 按开关弹 toast。 */
 export function useEventNotifications(): void {
   const t = useT();
@@ -94,7 +56,7 @@ export function useEventNotifications(): void {
         if (!alive) return;
         const toggles = getToggles();
         for (const e of events) {
-          const d = describe(e, t);
+          const d = describeEvent(e, t);
           if (d && toggles[d.key]) showToast(d.message, d.type);
         }
       } catch {

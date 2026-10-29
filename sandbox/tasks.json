@@ -1,0 +1,1824 @@
+{
+  "objective": "Implement plan 038: node-side biliup uploads run through the per-node proc-queue with per-session ordering, step-level progress, crash recovery, idempotent master dispatch, and progress-based death instead of total-wall-time death.",
+  "end_state": "A session's P1 and appends are enqueued atomically, executed in order on the owning node, survive restart without a second upload, and are judged dead only by byte-progress stall; master can cancel/recover and the deploy guard sees in-flight uploads.",
+  "non_goals": [
+    "PR7/PR8: splitting transfer and submit into separate biliup calls, part reuse, and delete-source-after-review.",
+    "PR4 rolling-upload shared slot: deliberately deferred; needs a separate design (cross-process lease).",
+    "PR5 queue UI and PR6 tools hub-attach-bv / hub-clean-sources are out of scope for this plan.",
+    "No behavior change to the blocking path; only behavior-preserving extraction with regression tests.",
+    "No real uploads during development, except T14: a human-authorized upload that the agent only observes passively."
+  ],
+  "environment": {
+    "language": "typescript",
+    "runtime": "Node 24 ESM",
+    "package_manager": "pnpm workspace",
+    "os": "macOS dev / Linux nodes",
+    "test_command": "pnpm test",
+    "notes": "Also run pnpm typecheck, pnpm arch:check, pnpm bundle. Remote enqueue currently accepts only kind=remux. Every feat/fix task must bump root package.json patch and run pnpm bundle; PR base is feat/hub-optimization; one issue per branch; CI checks pnpm test, typecheck, arch:check. T06/T14 output must pass scripts/issue-guard.py before being committed. Branch strategy: one child issue per task (Refs #207), one branch, one PR with base feat/hub-optimization; merge sequentially in order. #207 accept covers the scope; each child issue inherits accept unless it is needs-decision. Governance: user authorized implementation scope on 2026-10-16 (issue #207 accept); no deploy/upload/delete. T14 real upload stays human-only; T16 deploy guard and T17 -N semantics remain needs-decision."
+  },
+  "components": [
+    {
+      "id": "c1",
+      "name": "proc-queue store v2",
+      "description": "Schema migration, order/generation gating, cursor rotation, batch enqueue, shutdown/retry transitions."
+    },
+    {
+      "id": "c2",
+      "name": "upload-prep processor",
+      "description": "Non-destructive remux/merge prep into stage, used before biliup jobs."
+    },
+    {
+      "id": "c3",
+      "name": "biliup processor",
+      "description": "biliup execution with step progress, transfer retry after no-draft proof, submit uncertainty."
+    },
+    {
+      "id": "c4",
+      "name": "node RPC",
+      "description": "Batch atomic _enqueue, _proc-cancel, capability negotiation."
+    },
+    {
+      "id": "c5",
+      "name": "master dispatch",
+      "description": "Idempotent uploadPlan, polling, sweep exemption, 409 rules, deploy guard."
+    },
+    {
+      "id": "c6",
+      "name": "stall measurement",
+      "description": "Real-node measurement of byte-progress signals before enabling stall-based death."
+    }
+  ],
+  "open_questions": [
+    "Stall signal (/proc io vs checkpoint mtime vs pty) requires one authorized real upload on a node; until then T15 stays blocked and stall death is not enabled.",
+    "PR4 rolling-upload shared slot is deferred and needs its own design before implementation.",
+    "Whether to keep the -N 409 semantic change must be confirmed by the user before T17 ships.",
+    "T17 (409 -N semantic change + deploy guard change) is needs-decision; user must approve before it starts.",
+    "If a full-state archive listing proves impossible (T06), queue mode must stay disabled; decide fallback then.",
+    "Queue mode is refused on nodes that still run rolling upload until PR4 shared-slot design lands; track as a blocker, not a silent gap.",
+    "If T16 (deploy guard) or T17 (-N 409) is declined: ship T15 code but never emit biliup-queue; queue stays off."
+  ],
+  "tasks": [
+    {
+      "id": "T01",
+      "title": "proc-queue v2 migration + atomic batch enqueue",
+      "serves": [
+        "c1"
+      ],
+      "description": "Versioned v1->v2 migration adding order/step/bv/pid/prep columns and proc_order_cursor, plus enqueueBatch that is all-or-nothing.",
+      "building_blocks": [
+        "versioned migrate steps",
+        "enqueueBatch",
+        "nextOrderGeneration"
+      ],
+      "tools": [
+        "vitest",
+        "node:sqlite"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/proc-queue/src/store.ts",
+          "action": "modify",
+          "what": "v2 columns, cursor table, batch enqueue"
+        },
+        {
+          "path": "test/proc-queue/store.test.ts",
+          "action": "modify",
+          "what": "migration and batch tests"
+        },
+        {
+          "path": "test/proc-queue/store-multiproc.test.ts",
+          "action": "modify",
+          "what": "concurrent upgrade and batch atomicity"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T01.1",
+          "description": "Replace migrate() with ordered steps; v1->v2 ALTER TABLE ADD COLUMN for 8 columns and CREATE TABLE proc_order_cursor."
+        },
+        {
+          "id": "T01.2",
+          "description": "Add nextOrderGeneration(orderKey)."
+        },
+        {
+          "id": "T01.3",
+          "description": "Add enqueueBatch(jobs) in one transaction with per-job results."
+        },
+        {
+          "id": "T01.4",
+          "description": "Add updateStep/setBv/setChildPid/clearChildPid methods."
+        }
+      ],
+      "tests": [
+        {
+          "description": "v1 DB gains 8 columns and cursor table; concurrent upgrade idempotent",
+          "kind": "unit"
+        },
+        {
+          "description": "one invalid job rejects the whole batch",
+          "kind": "unit"
+        },
+        {
+          "description": "nextOrderGeneration is shared across seq=1..N",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "existing v1 DB upgrades in place",
+        "batch is all-or-nothing",
+        "no changes to orderKey NULL behavior",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [],
+      "estimated_loc": 260,
+      "suggested_skills": []
+    },
+    {
+      "id": "T03",
+      "title": "claim ordering, cursor rotation, retry transitions",
+      "serves": [
+        "c1"
+      ],
+      "description": "Extend claim with notBefore, same-generation seq gating, prep dependency, and orderKey cursor rotation; add transfer-retry/order-blocked reasons and retryTransfer without touching attempts. Cascade helpers are split into T03b.",
+      "building_blocks": [
+        "claim gating",
+        "proc_order_cursor",
+        "transfer-retry",
+        "order-blocked cascade"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/proc-queue/src/store.ts",
+          "action": "modify",
+          "what": "claim and retryTransfer"
+        },
+        {
+          "path": "packages/core/src/processor.ts",
+          "action": "modify",
+          "what": "transition reasons and canTransition"
+        },
+        {
+          "path": "test/proc-queue/store.test.ts",
+          "action": "modify",
+          "what": "ordering/cursor/retry"
+        },
+        {
+          "path": "test/core/processor.test.ts",
+          "action": "modify",
+          "what": "transition matrix"
+        },
+        {
+          "path": "packages/proc-queue/src/lease.ts",
+          "action": "create",
+          "what": "lease logic split out"
+        },
+        {
+          "path": "packages/proc-queue/src/lease-types.ts",
+          "action": "create",
+          "what": "lease row types"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T03.1",
+          "description": "Extend claim: notBefore filter, same orderKey+generation seq gate, prep done gate, cursor ordering/update."
+        },
+        {
+          "id": "T03.2",
+          "description": "Add reasons transfer-retry and order-blocked; only allow running->pending for transfer-retry with step gate_wait/transfer and confirmed child exit."
+        },
+        {
+          "id": "T03.3",
+          "description": "retryTransfer sets pending+notBefore without attempts+1."
+        },
+        {
+          "id": "T03.9",
+          "description": "confirmedChildExit is a boolean supplied by runner (which owns the child process); store never probes processes."
+        }
+      ],
+      "tests": [
+        {
+          "description": "seq 2 stays pending until seq 1 done",
+          "kind": "unit"
+        },
+        {
+          "description": "old generation terminal rows do not block new generation",
+          "kind": "unit"
+        },
+        {
+          "description": "cursor rotates between two orderKeys",
+          "kind": "unit"
+        },
+        {
+          "description": "orderKey NULL kinds keep createdAt FIFO",
+          "kind": "unit"
+        },
+        {
+          "description": "transfer-retry rejected for submit and for failed->pending",
+          "kind": "unit"
+        },
+        {
+          "description": "orderKey NULL rows keep createdAt FIFO",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "ordering isolated per generation",
+        "rotation proven by two streams",
+        "non-biliup kinds unchanged",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T01"
+      ],
+      "estimated_loc": 320,
+      "suggested_skills": []
+    },
+    {
+      "id": "T03b",
+      "title": "order-blocked and prep-failed cascades",
+      "serves": [
+        "c1"
+      ],
+      "description": "Store helpers cascading cancellation within the same orderKey+generation, invoked by runner.",
+      "building_blocks": [
+        "cascadeOrderBlocked",
+        "cascadePrepFailed"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/proc-queue/src/store.ts",
+          "action": "modify",
+          "what": "cascade helpers"
+        },
+        {
+          "path": "test/proc-queue/store.test.ts",
+          "action": "modify",
+          "what": "cascade tests"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T03b.1",
+          "description": "cascadeOrderBlocked: larger seq only, same generation, once."
+        },
+        {
+          "id": "T03b.2",
+          "description": "cascadePrepFailed: all biliup rows of the order, once."
+        }
+      ],
+      "tests": [
+        {
+          "description": "order-blocked: larger seq only, same generation, alert once",
+          "kind": "unit"
+        },
+        {
+          "description": "order-prep-failed: all rows of order, alert once",
+          "kind": "unit"
+        },
+        {
+          "description": "cross-generation rows untouched",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "cascades are single-source helpers",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T03"
+      ],
+      "estimated_loc": 150,
+      "suggested_skills": [],
+      "blocked": false
+    },
+    {
+      "id": "T02",
+      "title": "processor contract: step/bv/childPid + shutdown verify hook",
+      "serves": [
+        "c1",
+        "c3"
+      ],
+      "description": "Extend core Processor contract so processors can persist step/bv/childPid and so the runner can ask a processor to verify a stopped child and prove no external commit, without proc-queue depending on processors. Runner wiring for setState, bv, transfer-retry and cascade is part of this task; shutdown wiring stays in T09.",
+      "building_blocks": [
+        "ProcessContext.setState",
+        "ProcessResult.bv",
+        "Processor.verifyStopped"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/core/src/processor.ts",
+          "action": "modify",
+          "what": "context/result/hook"
+        },
+        {
+          "path": "test/core/processor.test.ts",
+          "action": "modify",
+          "what": "contract tests"
+        },
+        {
+          "path": "packages/proc-queue/src/runner.ts",
+          "action": "modify",
+          "what": "inject setState, persist bv, handle retry result, call cascade"
+        },
+        {
+          "path": "test/proc-queue/runner.test.ts",
+          "action": "modify",
+          "what": "runner behavior"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T02.1",
+          "description": "Add ctx.setState({step?,bv?,childPid?,childPidStartedAt?}) writing through an injected store callback (no proc-queue import in processors)."
+        },
+        {
+          "id": "T02.2",
+          "description": "Add optional ProcessResult.bv surfaced by runner into store.setBv."
+        },
+        {
+          "id": "T02.3",
+          "description": "Add optional Processor.verifyStopped hook to the contract; runner integration is T09."
+        }
+      ],
+      "tests": [
+        {
+          "description": "runner persists setState fields and bv, handles retry result, calls cascade",
+          "kind": "unit"
+        },
+        {
+          "description": "remux shutdown after abort timeout still returns pending",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "processors never import proc-queue",
+        "runner persists bv and handles retry/cascade",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T01",
+        "T03",
+        "T03b"
+      ],
+      "estimated_loc": 160,
+      "suggested_skills": [],
+      "blocked": false
+    },
+    {
+      "id": "T04",
+      "title": "upload-prep processor (non-destructive)",
+      "serves": [
+        "c2"
+      ],
+      "description": "New kind=upload-prep processor plus a behavior-preserving extraction: shared merge/hardlink helpers move to post-process, and node-pipeline imports them instead of keeping a duplicate. Blocking behavior must not change (regression tests).",
+      "building_blocks": [
+        "uploadPrepProcessor",
+        "source preservation"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/processors/src/upload-prep.ts",
+          "action": "create",
+          "what": "processor"
+        },
+        {
+          "path": "packages/processors/src/index.ts",
+          "action": "modify",
+          "what": "export"
+        },
+        {
+          "path": "packages/cli/src/providers-register.ts",
+          "action": "modify",
+          "what": "register"
+        },
+        {
+          "path": "test/processors/upload-prep.test.ts",
+          "action": "create",
+          "what": "preservation and failure tests"
+        },
+        {
+          "path": "packages/post-process/src/node-prep.ts",
+          "action": "create",
+          "what": "extracted merge/hardlink helpers (no app imports)"
+        },
+        {
+          "path": "packages/app/src/node-pipeline.ts",
+          "action": "modify",
+          "what": "import shared helpers; behavior unchanged"
+        },
+        {
+          "path": "test/app/node-pipeline.test.ts",
+          "action": "modify",
+          "what": "prep behavior regression"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T04.1",
+          "description": "Extract only mergeSession/remuxSegment usage and hardlink helper from node-pipeline into post-process/processors; tsDirect remains in app if not portable."
+        },
+        {
+          "id": "T04.2",
+          "description": "Mark retryable=true; validate explicit inputs under allowed roots."
+        },
+        {
+          "id": "T04.3",
+          "description": "On failure remove partial outputs only, never recordings."
+        },
+        {
+          "id": "T04.5",
+          "description": "Extract needed merge/hardlink logic into post-process; do not import app from processors."
+        },
+        {
+          "id": "T04.8",
+          "description": "Implement recover(): remove orphan .work partials from prior attempt; never touch recordings."
+        }
+      ],
+      "tests": [
+        {
+          "description": "success writes complete stage outputs and leaves source inode/content",
+          "kind": "unit"
+        },
+        {
+          "description": "failure leaves no partial output and no source deletion",
+          "kind": "unit"
+        },
+        {
+          "description": "retryable with notBefore; exhausted -> failed and order-prep-failed cascade hook",
+          "kind": "unit"
+        },
+        {
+          "description": "node-pipeline prep regression: same outputs/inodes as before",
+          "kind": "unit"
+        },
+        {
+          "description": "crash leaves orphan .work; recover removes it and reruns",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "recordings are never deleted",
+        "outputs pass the same verifyRemuxed/isCompleteMedia check used by remux",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "arch:check and layering test pass",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T01",
+        "T02",
+        "T03",
+        "T03b"
+      ],
+      "estimated_loc": 280,
+      "suggested_skills": [],
+      "estimate": 280
+    },
+    {
+      "id": "T05",
+      "title": "relocate biliup runner into processors (layering fix)",
+      "serves": [
+        "c3"
+      ],
+      "description": "Move runBiliup and argv builders into packages/processors so the biliup processor can use them without depending on app; app re-exports for compatibility.",
+      "building_blocks": [
+        "processors/run-biliup",
+        "app re-export"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/processors/src/run-biliup.ts",
+          "action": "create",
+          "what": "runBiliup + hooks + buildUploadArgs"
+        },
+        {
+          "path": "packages/app/src/upload/biliup.ts",
+          "action": "modify",
+          "what": "re-export from processors"
+        },
+        {
+          "path": "test/app/biliup-run-hooks.test.ts",
+          "action": "modify",
+          "what": "import path/behavior unchanged"
+        },
+        {
+          "path": "test/arch/layering.test.ts",
+          "action": "modify",
+          "what": "ensure no processors->app dependency"
+        },
+        {
+          "path": "packages/processors/package.json",
+          "action": "modify",
+          "what": "dependency declarations if needed"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T05.1",
+          "description": "Move runBiliup, buildUploadArgs, parseBV and line splitting."
+        },
+        {
+          "id": "T05.2",
+          "description": "Keep app API exports identical via re-export."
+        },
+        {
+          "id": "T05.3",
+          "description": "Run arch:check and all upload tests."
+        },
+        {
+          "id": "T05.4",
+          "description": "Remove app paths dependency: runBiliup/buildUploadArgs take cookiesPath explicitly; app passes rootBiliupCookies()."
+        },
+        {
+          "id": "T05.5",
+          "description": "Move countVideoParts into processors/run-biliup and re-export from app; processors must not import app."
+        }
+      ],
+      "tests": [
+        {
+          "description": "existing app tests pass unchanged",
+          "kind": "unit"
+        },
+        {
+          "description": "grep proves processors does not import app or orchestrator",
+          "kind": "unit"
+        },
+        {
+          "description": "processors does not import app paths; default path supplied by caller",
+          "kind": "unit"
+        },
+        {
+          "description": "countVideoParts works from processors and app re-export",
+          "kind": "unit"
+        },
+        {
+          "description": "argv snapshot for watermark/copyright/is-only-self preserved",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "no layering violation",
+        "app behavior unchanged",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [],
+      "estimated_loc": 180,
+      "suggested_skills": []
+    },
+    {
+      "id": "T06",
+      "title": "read-only survey: archive list across all states",
+      "serves": [
+        "c3"
+      ],
+      "description": "Read-only research: can biliup list or the underlying API enumerate all archive states with title/time/duration? Record exact command and sanitized sample. No uploads.",
+      "building_blocks": [
+        "biliup list survey"
+      ],
+      "tools": [
+        "biliup",
+        "jq"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "docs/node-upload-archive-lookup.md",
+          "action": "create",
+          "what": "commands and sample"
+        },
+        {
+          "path": "test/processors/archive-lookup.fixture.json",
+          "action": "create",
+          "what": "sanitized sample from read-only listing"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T06.1",
+          "description": "Inspect biliup list flags and countVideoParts API."
+        },
+        {
+          "id": "T06.2",
+          "description": "Record state coverage and sanitized sample."
+        },
+        {
+          "id": "T06.3",
+          "description": "Run scripts/issue-guard.py on the doc and fixture before commit."
+        },
+        {
+          "id": "T06.4",
+          "description": "Document blocking fallback: infeasible lookup => downstream tasks [!], queue stays off."
+        },
+        {
+          "id": "T06.6",
+          "description": "Use the node-local biliup cookie read-only; do not print it; run issue-guard on doc/fixture."
+        }
+      ],
+      "tests": [
+        {
+          "description": "documented command returns a non-in-review sample or documents limitation",
+          "kind": "manual"
+        }
+      ],
+      "acceptance_criteria": [
+        "feasibility proven or limitation documented before T07",
+        "If not feasible, mark T07/T08/T09/T11 blocked and keep queue disabled; record unblock condition",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)",
+        "If infeasible: T07/T08/T09/T10/T11/T12 blocked; queue stays off"
+      ],
+      "depends_on": [],
+      "estimated_loc": 60,
+      "suggested_skills": [],
+      "blocked": false
+    },
+    {
+      "id": "T07",
+      "title": "archive lookup + child identity probe",
+      "serves": [
+        "c3"
+      ],
+      "description": "Injected archive finder across all states and a single child-identity probe (Linux /proc stat starttime, macOS ps lstart). Hand-written fixtures now; real fixture added by T14 later.",
+      "building_blocks": [
+        "findRecentArchive",
+        "childIdentity"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/processors/src/archive-lookup.ts",
+          "action": "create",
+          "what": "finder"
+        },
+        {
+          "path": "packages/processors/src/child-identity.ts",
+          "action": "create",
+          "what": "pid+startedAt probe"
+        },
+        {
+          "path": "test/processors/archive-lookup.test.ts",
+          "action": "create",
+          "what": "published/returned/unknown fixtures"
+        },
+        {
+          "path": "test/processors/child-identity.test.ts",
+          "action": "create",
+          "what": "pid reuse cases"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T07.1",
+          "description": "findRecentArchive(cookiesPath, title, windowMs) via injected runner; all states; ambiguous -> null."
+        },
+        {
+          "id": "T07.2",
+          "description": "childIdentity(pid) returns startedAt and cmdline via injectable platform probe; mismatch/unknown -> null."
+        }
+      ],
+      "tests": [
+        {
+          "description": "published archive not in review list still found",
+          "kind": "unit"
+        },
+        {
+          "description": "title collision resolved by duration/parts; ambiguous -> null",
+          "kind": "unit"
+        },
+        {
+          "description": "pid reuse mismatch detected",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "finder can prove existing or unknown; never treats unknown as no-draft",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T05",
+        "T06"
+      ],
+      "estimated_loc": 160,
+      "suggested_skills": [],
+      "blocked": false,
+      "blocked_if": "T06 infeasible"
+    },
+    {
+      "id": "T08",
+      "title": "biliup processor without stall death",
+      "serves": [
+        "c3"
+      ],
+      "description": "kind=biliup processor with step persistence, gate_wait, transfer/submit, no-draft proof across all archive states, child identity checks, and uncertain on submit.",
+      "building_blocks": [
+        "biliupProcessor",
+        "findRecentArchive",
+        "child identity check",
+        "fake biliup binary only (no real uploads in tests)"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/processors/src/biliup.ts",
+          "action": "create",
+          "what": "processor"
+        },
+        {
+          "path": "packages/processors/src/index.ts",
+          "action": "modify",
+          "what": "export"
+        },
+        {
+          "path": "packages/cli/src/providers-register.ts",
+          "action": "modify",
+          "what": "register"
+        },
+        {
+          "path": "test/processors/biliup.test.ts",
+          "action": "create",
+          "what": "retry/submit/shutdown"
+        },
+        {
+          "path": "packages/proc-queue/src/runner.ts",
+          "action": "modify",
+          "what": "lane limit source"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T08.1",
+          "description": "Use findRecentArchive from T07 for no-draft proof; unknown -> uncertain."
+        },
+        {
+          "id": "T08.2",
+          "description": "run(): gate_wait -> transfer -> submit with updateStep at each transition."
+        },
+        {
+          "id": "T08.3",
+          "description": "transfer failure: verify child exited by pid+startedAt and no recent archive; else uncertain."
+        },
+        {
+          "id": "T08.4",
+          "description": "submit uncertainty: never retry; finish uncertain."
+        },
+        {
+          "id": "T08.5",
+          "description": "append reads BV from seq=1 done row with the same orderKey and generation only."
+        },
+        {
+          "id": "T08.9",
+          "description": "Enforce per-node biliup concurrency via proc-queue lane limit (node settings), default 1; nodeUpload.concurrency is only the default source."
+        },
+        {
+          "id": "T08.10",
+          "description": "Biliup processor receives the node-local UploadGate instance from runner (same sqlite store as blocking path), never creates a second gate."
+        }
+      ],
+      "tests": [
+        {
+          "description": "transfer failure with no archive -> pending; unknown -> uncertain",
+          "kind": "unit"
+        },
+        {
+          "description": "published-but-not-is-pubing archive is still detected",
+          "kind": "unit"
+        },
+        {
+          "description": "submit failure never uploads twice",
+          "kind": "unit"
+        },
+        {
+          "description": "append uses countVideoParts; attempts = claim1+retry2",
+          "kind": "unit"
+        },
+        {
+          "description": "step=submit write failure -> uncertain, no submit",
+          "kind": "unit"
+        },
+        {
+          "description": "append refuses BV from a different generation",
+          "kind": "unit"
+        },
+        {
+          "description": "no total-wall-time kill exists in processor or runner",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "no path uploads twice",
+        "step persisted at each transition",
+        "stall death NOT implemented here",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)",
+        "Before T15: lane slot is not released while a child may be alive; record as known gap",
+        "Known gap: manual local enqueue before T15 has no stall death"
+      ],
+      "depends_on": [
+        "T02",
+        "T03",
+        "T05",
+        "T07"
+      ],
+      "estimated_loc": 300,
+      "suggested_skills": [],
+      "blocked_if": "T06 infeasible"
+    },
+    {
+      "id": "T09",
+      "title": "biliup restart recovery, shutdown, child identity",
+      "serves": [
+        "c3"
+      ],
+      "description": "Recovery matrix and shutdown behavior for biliup jobs: step-aware orphan handling, pid+startedAt identity on Linux/macOS, hasIntent by step, slot retention is handled by T15.",
+      "building_blocks": [
+        "settleOrphan rerun",
+        "pid identity probe",
+        "shutdown hasIntent"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/processors/src/biliup-recover.ts",
+          "action": "create",
+          "what": "recovery/shutdown helpers"
+        },
+        {
+          "path": "packages/proc-queue/src/runner.ts",
+          "action": "modify",
+          "what": "hasIntent by step"
+        },
+        {
+          "path": "packages/proc-queue/src/store.ts",
+          "action": "modify",
+          "what": "releaseForShutdown step"
+        },
+        {
+          "path": "test/processors/biliup-recover.test.ts",
+          "action": "create",
+          "what": "matrix and pid reuse"
+        },
+        {
+          "path": "packages/core/src/processor.ts",
+          "action": "modify",
+          "what": "shutdown-abort relaxation + verify hook call"
+        },
+        {
+          "path": "test/proc-queue/runner.test.ts",
+          "action": "modify",
+          "what": "runner behavior"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T09.1",
+          "description": "restart matrix gate_wait/transfer/submit x bv/no-bv."
+        },
+        {
+          "id": "T09.2",
+          "description": "Use child-identity module from T07; mismatch/unknown -> uncertain."
+        },
+        {
+          "id": "T09.3",
+          "description": "shutdown transfer -> pending only after child exit + no-draft; else uncertain; submit -> uncertain."
+        },
+        {
+          "id": "T09.4",
+          "description": "Own all shutdown wiring: runner calls verifyStopped, hasIntent by step, releaseForShutdown step, and relax canTransition shutdown-abort for biliup gate_wait/transfer."
+        },
+        {
+          "id": "T09.5",
+          "description": "Runner calls verifyStopped on shutdown timeout; missing hook -> uncertain for biliup only."
+        }
+      ],
+      "tests": [
+        {
+          "description": "restart matrix all cases",
+          "kind": "unit"
+        },
+        {
+          "description": "pid reuse mismatch not treated as own child",
+          "kind": "unit"
+        },
+        {
+          "description": "shutdown live child -> uncertain; clean transfer -> pending",
+          "kind": "unit"
+        },
+        {
+          "description": "crash between intent write and spawn -> pending; settleOrphan rerun keeps attempts",
+          "kind": "unit"
+        },
+        {
+          "description": "shutdown-abort allowed for biliup transfer, rejected for submit; remux unchanged",
+          "kind": "unit"
+        },
+        {
+          "description": "crash after All-files-uploaded before submit write -> uncertain",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "no second upload after restart/shutdown",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)",
+        "Before T15: lane slot is not released while a child may be alive; record as known gap"
+      ],
+      "depends_on": [
+        "T02",
+        "T07",
+        "T08"
+      ],
+      "estimated_loc": 260,
+      "suggested_skills": [],
+      "blocked": false,
+      "blocked_if": "T06 infeasible"
+    },
+    {
+      "id": "T10a",
+      "title": "node RPC batch enqueue and capability",
+      "serves": [
+        "c4"
+      ],
+      "description": "Batch atomic _enqueue for biliup behind biliup-queue capability, plus capability reporting for upload-prep/biliup.",
+      "building_blocks": [
+        "batch enqueue",
+        "capability"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/app/src/node-enqueue.ts",
+          "action": "modify",
+          "what": "batch+capability"
+        },
+        {
+          "path": "packages/cli/src/cli.ts",
+          "action": "modify",
+          "what": "hidden commands"
+        },
+        {
+          "path": "packages/orchestrator/src/transport.ts",
+          "action": "modify",
+          "what": "optional methods"
+        },
+        {
+          "path": "packages/orchestrator/src/transport-ssh.ts",
+          "action": "modify",
+          "what": "ssh methods"
+        },
+        {
+          "path": "test/app/node-enqueue.test.ts",
+          "action": "modify",
+          "what": "batch"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T10a.1",
+          "description": "Use enqueueBatch; per-job results; no partial batch."
+        },
+        {
+          "id": "T10a.2",
+          "description": "Accept biliup only when local biliup-queue capability exists."
+        },
+        {
+          "id": "T10a.3",
+          "description": "Capability list includes remux/upload-prep/biliup."
+        }
+      ],
+      "tests": [
+        {
+          "description": "one invalid job enqueues none",
+          "kind": "unit"
+        },
+        {
+          "description": "biliup rejected before biliup-queue capability",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "backward compatible",
+        "no partial batches",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T04",
+        "T05",
+        "T09"
+      ],
+      "estimated_loc": 200,
+      "suggested_skills": [],
+      "blocked": false
+    },
+    {
+      "id": "T10b",
+      "title": "node RPC cancel and receipt fields",
+      "serves": [
+        "c4"
+      ],
+      "description": "_proc-cancel and ProcessReceipt with bv/step; cancel of running goes through child-exit + no-draft verification.",
+      "building_blocks": [
+        "_proc-cancel",
+        "ProcessReceipt"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/core/src/processor.ts",
+          "action": "modify",
+          "what": "receipt bv/step"
+        },
+        {
+          "path": "packages/app/src/node-enqueue.ts",
+          "action": "modify",
+          "what": "cancel"
+        },
+        {
+          "path": "packages/cli/src/cli.ts",
+          "action": "modify",
+          "what": "cancel command"
+        },
+        {
+          "path": "test/app/node-enqueue.test.ts",
+          "action": "modify",
+          "what": "cancel"
+        },
+        {
+          "path": "test/orchestrator/node-side-upload.test.ts",
+          "action": "modify",
+          "what": "fake method name"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T10b.1",
+          "description": "Cancel pending -> cancelled; running -> verify then cancelled/uncertain."
+        },
+        {
+          "id": "T10b.2",
+          "description": "Receipt includes bv and step."
+        }
+      ],
+      "tests": [
+        {
+          "description": "cancel pending vs running-with-proof",
+          "kind": "unit"
+        },
+        {
+          "description": "receipt includes bv/step",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "no cancel without verification",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T10a",
+        "T09"
+      ],
+      "estimated_loc": 160,
+      "suggested_skills": [],
+      "blocked": false
+    },
+    {
+      "id": "T11",
+      "title": "hub-recover-order tool",
+      "serves": [
+        "c5"
+      ],
+      "description": "Runs on the node and is invoked via hidden RPC _recover-order (same transport as other node commands); operator may also run it locally on the node. This task writes queue rows only and never deletes sources.",
+      "building_blocks": [
+        "hub-recover-order"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/cli/src/hub-recover-order.ts",
+          "action": "create",
+          "what": "command + planner"
+        },
+        {
+          "path": "test/cli/hub-recover-order.test.ts",
+          "action": "create",
+          "what": "dry-run/apply cases"
+        },
+        {
+          "path": "packages/cli/src/cli.ts",
+          "action": "modify",
+          "what": "hidden _recover-order command"
+        },
+        {
+          "path": "packages/orchestrator/src/transport.ts",
+          "action": "modify",
+          "what": "optional recoverOrder"
+        },
+        {
+          "path": "packages/orchestrator/src/transport-ssh.ts",
+          "action": "modify",
+          "what": "ssh recoverOrder"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T11.1",
+          "description": "Plan new generation per orderKey; --bv/--restart/--prep modes."
+        },
+        {
+          "id": "T11.2",
+          "description": "dry-run prints plan; --apply writes jobs via batch enqueue."
+        },
+        {
+          "id": "T11.3",
+          "description": "Refuse --restart when all-state archive lookup cannot confirm no draft."
+        }
+      ],
+      "tests": [
+        {
+          "description": "dry-run changes nothing",
+          "kind": "unit"
+        },
+        {
+          "description": "apply creates new generation claimable while old terminal rows ignored",
+          "kind": "unit"
+        },
+        {
+          "description": "refuse restart on unknown archive state",
+          "kind": "unit"
+        },
+        {
+          "description": "--prep recovers prep-failed rows; --bv/--restart each run once",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "recovery exists before queue mode is enabled",
+        "never deletes or uploads",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T03b",
+        "T07",
+        "T10a"
+      ],
+      "estimated_loc": 220,
+      "suggested_skills": [],
+      "blocked_if": "T06 infeasible"
+    },
+    {
+      "id": "T12",
+      "title": "uploadPlan + idempotent enqueue + prep binding",
+      "serves": [
+        "c5"
+      ],
+      "description": "Persist uploadPlan before enqueue, enqueue prep then biliup batch, reuse plan on re-entry.",
+      "building_blocks": [
+        "uploadPlan",
+        "batch enqueue"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/orchestrator/src/ledger.ts",
+          "action": "modify",
+          "what": "uploadPlan migration/API"
+        },
+        {
+          "path": "packages/orchestrator/src/node-upload-queue.ts",
+          "action": "create",
+          "what": "plan/enqueue"
+        },
+        {
+          "path": "test/orchestrator/node-upload-queue.test.ts",
+          "action": "create",
+          "what": "idempotency/prep binding"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T12.1",
+          "description": "Write uploadPlan before enqueue; old sync_jobs DB migration."
+        },
+        {
+          "id": "T12.2",
+          "description": "Enqueue prep, then batch biliup with prepJobId; reuse plan on re-entry."
+        },
+        {
+          "id": "T12.3",
+          "description": "Update TODO T-62 progress after each kept task (separate docs commit)."
+        }
+      ],
+      "tests": [
+        {
+          "description": "re-entry after SSH timeout reuses jobIds",
+          "kind": "unit"
+        },
+        {
+          "description": "prep enqueued first; prepJobId bound; prep failure cascades",
+          "kind": "unit"
+        },
+        {
+          "description": "old sync_jobs DB gains uploadPlan; old rows read as NULL",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "no duplicate jobIds",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T04",
+        "T10a",
+        "T11"
+      ],
+      "estimated_loc": 220,
+      "suggested_skills": [],
+      "blocked": false,
+      "blocked_if": "T06 infeasible"
+    },
+    {
+      "id": "T13",
+      "title": "polling, sweep exemption, pin node, no abort, blocking gate, config",
+      "serves": [
+        "c5"
+      ],
+      "description": "Poll status, exempt in-flight jobs, pin node, never abort in queue mode, refuse blocking fallback with pending/running, parse nodeUpload config.",
+      "building_blocks": [
+        "poll",
+        "sweep",
+        "guard gate"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/orchestrator/src/reconciler.ts",
+          "action": "modify",
+          "what": "poll/sweep/no abort/fallback gate"
+        },
+        {
+          "path": "packages/orchestrator/src/node-side-upload.ts",
+          "action": "modify",
+          "what": "do not abort in queue mode"
+        },
+        {
+          "path": "packages/orchestrator/src/node-upload-config.ts",
+          "action": "create",
+          "what": "nodeUpload config"
+        },
+        {
+          "path": "configs/hub.config.example.json",
+          "action": "modify",
+          "what": "example"
+        },
+        {
+          "path": "test/orchestrator/node-upload-queue.test.ts",
+          "action": "modify",
+          "what": "poll/sweep/abort/fallback"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T13.1",
+          "description": "Poll 60s; touch ledger; sweep uses uploadPlan."
+        },
+        {
+          "id": "T13.2",
+          "description": "Pin node; queue mode never calls _node-abort; blocking fallback only when queue empty."
+        },
+        {
+          "id": "T13.3",
+          "description": "Queue mode requires capability \"biliup-queue\" (emitted only by T15) plus explicit nodeUpload.mode=queue; missing capability -> blocking."
+        },
+        {
+          "id": "T13.4",
+          "description": "nodeUpload config parse with defaults."
+        },
+        {
+          "id": "T13.6",
+          "description": "unreachableAlertMs warning in master poller."
+        }
+      ],
+      "tests": [
+        {
+          "description": "stale sweep does not fail in-flight job",
+          "kind": "unit"
+        },
+        {
+          "description": "queue mode does not abort; fallback refused with pending/running",
+          "kind": "unit"
+        },
+        {
+          "description": "queue refused when biliup-queue missing -> blocking",
+          "kind": "unit"
+        },
+        {
+          "description": "queue stays off when biliup-queue capability is absent (before T15)",
+          "kind": "unit"
+        },
+        {
+          "description": "blocking fallback 409 on pending/running/uncertain queue rows",
+          "kind": "unit"
+        },
+        {
+          "description": "queue disabled when -N 409 gate (T17) is absent",
+          "kind": "unit"
+        },
+        {
+          "description": "queue completion does not delete recordings (cleanup not called)",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "no abort in queue mode",
+        "default config blocking",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T12"
+      ],
+      "estimated_loc": 320,
+      "suggested_skills": [],
+      "blocked": false
+    },
+    {
+      "id": "T13b",
+      "title": "refuse queue on nodes running rolling upload",
+      "serves": [
+        "c5"
+      ],
+      "description": "Refuse queue on any node that has a task with rolling upload enabled (config-based, not a snapshot), via a node RPC reporting rolling-enabled tasks. Test both states.",
+      "building_blocks": [
+        "rolling detection",
+        "queue gate"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/orchestrator/src/node-upload-config.ts",
+          "action": "modify",
+          "what": "rolling config gate"
+        },
+        {
+          "path": "packages/orchestrator/src/transport.ts",
+          "action": "modify",
+          "what": "optional rolling status"
+        },
+        {
+          "path": "packages/orchestrator/src/transport-ssh.ts",
+          "action": "modify",
+          "what": "ssh status"
+        },
+        {
+          "path": "packages/app/src/node-enqueue.ts",
+          "action": "modify",
+          "what": "report rollingEnabled"
+        },
+        {
+          "path": "test/orchestrator/node-upload-queue.test.ts",
+          "action": "modify",
+          "what": "rolling refusal"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T13b.1",
+          "description": "Node RPC _node-status (or existing task list) returns rollingEnabled count; master refuses queue when >0."
+        }
+      ],
+      "tests": [
+        {
+          "description": "rolling active -> blocking; inactive -> queue allowed",
+          "kind": "unit"
+        },
+        {
+          "description": "rolling enabled task present -> queue refused",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "queue never runs beside rolling upload",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T13"
+      ],
+      "estimated_loc": 100,
+      "suggested_skills": [],
+      "blocked": false
+    },
+    {
+      "id": "T13c",
+      "title": "queue completion and failure mapping",
+      "serves": [
+        "c5"
+      ],
+      "description": "Map terminal queue states to ledger: all done -> setBv + markDone; uncertain/failed/order-blocked -> needs_manual with reason. No source cleanup.",
+      "building_blocks": [
+        "terminal mapping"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/orchestrator/src/node-upload-complete.ts",
+          "action": "create",
+          "what": "mapping"
+        },
+        {
+          "path": "test/orchestrator/node-upload-complete.test.ts",
+          "action": "create",
+          "what": "mapping tests"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T13c.1",
+          "description": "done -> BV+done; uncertain/failed/cancelled -> needs_manual; never call cleanupSourcesShared."
+        }
+      ],
+      "tests": [
+        {
+          "description": "done writes BV; failure maps to needs_manual; recordings untouched",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "no source deletion from queue completion",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T13"
+      ],
+      "estimated_loc": 100,
+      "suggested_skills": [],
+      "blocked": false
+    },
+    {
+      "id": "T16",
+      "title": "deploy guard (needs-decision)",
+      "serves": [
+        "c5"
+      ],
+      "description": "BLOCKED until user approves deploy guard change. Three-state guard. Must merge before T15 emits biliup-queue.",
+      "building_blocks": [
+        "deploy guard"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "scripts/deploy-precheck.py",
+          "action": "modify",
+          "what": "guard"
+        },
+        {
+          "path": "AGENTS.md",
+          "action": "modify",
+          "what": "guard text"
+        },
+        {
+          "path": "test/scripts/deploy-precheck.test.ts",
+          "action": "create",
+          "what": "invoke python via spawnSync with fake JSON env"
+        },
+        {
+          "path": "scripts/deploy-precheck.sh",
+          "action": "modify",
+          "what": "fetch /api/proc/active and pass to python"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T16.1",
+          "description": "Three-state guard; unsupported old node checks fresh uploading result file; unreachable waits."
+        },
+        {
+          "id": "T16.2",
+          "description": "Test harness spawns python3 with fixture JSON; document command in test header."
+        },
+        {
+          "id": "T16.3",
+          "description": "Define .sh -> .py input contract carrying task list, proc active and uploading result freshness."
+        },
+        {
+          "id": "T16.4",
+          "description": "Test harness skips with a clear message if python3 is unavailable in CI."
+        }
+      ],
+      "tests": [
+        {
+          "description": "guard waits on running.biliup/fresh uploading; unsupported proceeds; unreachable waits",
+          "kind": "integration"
+        }
+      ],
+      "acceptance_criteria": [
+        "user approved needs-decision",
+        "guard fail-closed only when unknown",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T13",
+        "T10a"
+      ],
+      "estimated_loc": 180,
+      "suggested_skills": [],
+      "blocked": true,
+      "blocked_reason": "needs-decision: deploy guard change; must be approved and merged before T15 capability."
+    },
+    {
+      "id": "T17",
+      "title": "409 and -N base-key semantics (needs-decision)",
+      "serves": [
+        "c5"
+      ],
+      "description": "BLOCKED until user approves. 409 for existing BV or non-terminal queue items, unknown SSH -> 409, -N base key with explicit force.",
+      "building_blocks": [
+        "409 rules"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/orchestrator/src/reconciler.ts",
+          "action": "modify",
+          "what": "409/-N"
+        },
+        {
+          "path": "test/orchestrator/node-upload-queue.test.ts",
+          "action": "modify",
+          "what": "409 cases"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T17.1",
+          "description": "409 rules and force flag; log old BV on forced retry."
+        }
+      ],
+      "tests": [
+        {
+          "description": "409 blocks pending/running/uncertain; allows failed/cancelled; unknown SSH -> 409",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "user approved needs-decision",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T13"
+      ],
+      "estimated_loc": 120,
+      "suggested_skills": [],
+      "blocked": true,
+      "blocked_reason": "needs-decision: -N/runNow 409 semantics. If declined, queue stays disabled."
+    },
+    {
+      "id": "T14",
+      "title": "measure stall signals on an authorized real upload",
+      "serves": [
+        "c6"
+      ],
+      "description": "MANUAL / BLOCKED until the user authorizes a real node upload. Record /proc io wchar, checkpoint mtime/size, and pty progress only if the human runs the upload under a pty; choose signal and stallMs.",
+      "building_blocks": [
+        "measurement record"
+      ],
+      "tools": [
+        "ssh",
+        "procfs"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "docs/node-upload-stall-measurement.md",
+          "action": "create",
+          "what": "commands and output"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T14.1",
+          "description": "HUMAN: authorize and let one real hub upload run; agent does not start uploads."
+        },
+        {
+          "id": "T14.3",
+          "description": "Record sanitized fixture and stallMs; run issue-guard before commit."
+        },
+        {
+          "id": "T14.4",
+          "description": "Optional pty run only if the human launches it; agent does not change the upload path."
+        }
+      ],
+      "tests": [
+        {
+          "description": "non-zero deltas during transfer, zero during submit; choice recorded",
+          "kind": "manual"
+        }
+      ],
+      "acceptance_criteria": [
+        "real output recorded",
+        "stallMs chosen"
+      ],
+      "depends_on": [],
+      "estimated_loc": 60,
+      "suggested_skills": [],
+      "blocked": true,
+      "blocked_reason": "HUMAN-ONLY: the user must run/authorize one real upload; the agent only samples passively. Not executable autonomously."
+    },
+    {
+      "id": "T15",
+      "title": "stall-based death and submit alerts",
+      "serves": [
+        "c3"
+      ],
+      "description": "Implement byte-progress stall death using the signal chosen in T14, submitAlertMs/maxWallMs alerts, slow alerts, and pid-bound lane release. Blocked until T14.",
+      "building_blocks": [
+        "stall watchdog",
+        "submit alert",
+        "pid-bound slot"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/processors/src/biliup.ts",
+          "action": "modify",
+          "what": "stall watchdog"
+        },
+        {
+          "path": "packages/proc-queue/src/runner.ts",
+          "action": "modify",
+          "what": "pid-bound slot"
+        },
+        {
+          "path": "test/processors/biliup-stall.test.ts",
+          "action": "create",
+          "what": "stall cases"
+        },
+        {
+          "path": "test/proc-queue/runner.test.ts",
+          "action": "modify",
+          "what": "runner behavior"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T15.1",
+          "description": "Sample the chosen signal only during transfer; zero for stallMs -> stop and retry after no-draft proof."
+        },
+        {
+          "id": "T15.2",
+          "description": "gate_wait/submit never participate in stall death."
+        },
+        {
+          "id": "T15.3",
+          "description": "submitAlertMs/maxWallMs alerts and uncertain; keep slot until child exits."
+        },
+        {
+          "id": "T15.4",
+          "description": "slowAlertBps window warning only."
+        },
+        {
+          "id": "T15.5",
+          "description": "Report capability \"biliup-queue\" only after stall death + submit alerts land."
+        },
+        {
+          "id": "T15.7",
+          "description": "Only T15 adds capability \"biliup-queue\"; no other task reports it."
+        },
+        {
+          "id": "T15.6",
+          "description": "Capability \"biliup-queue\" is emitted only after T14+T16; T17 (-N 409) only controls the -N flag, not stall death."
+        }
+      ],
+      "tests": [
+        {
+          "description": "no growth for stallMs -> retry; growth -> no kill; process gone grace",
+          "kind": "unit"
+        },
+        {
+          "description": "gate_wait/submit no kill",
+          "kind": "unit"
+        },
+        {
+          "description": "slot stays held while child alive",
+          "kind": "unit"
+        },
+        {
+          "description": "capability biliup-queue absent before signal config, present after",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "only byte progress can kill",
+        "submit never killed",
+        "signal from T14",
+        "feat/fix: bump root patch version and run pnpm bundle",
+        "after keep: update TODO T-62 and child issue status (separate docs commit)"
+      ],
+      "depends_on": [
+        "T14",
+        "T09",
+        "T08",
+        "T16",
+        "T17"
+      ],
+      "estimated_loc": 300,
+      "suggested_skills": [],
+      "blocked": true,
+      "blocked_reason": "Blocked until human-run T14 measurement exists."
+    }
+  ],
+  "order": [
+    "T01",
+    "T03",
+    "T03b",
+    "T02",
+    "T04",
+    "T05",
+    "T06",
+    "T07",
+    "T08",
+    "T09",
+    "T10a",
+    "T10b",
+    "T11",
+    "T12",
+    "T13",
+    "T13b",
+    "T13c",
+    "T16",
+    "T17",
+    "T14",
+    "T15"
+  ]
+}

@@ -13,7 +13,7 @@ import { Command } from "commander";
 import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { TaskStore, resolveTaskWebhook, type Task, type EngineKind } from "./store.js";
 import { resolveTaskStreamCookies } from "./stream-cookies.js";
-import { rootHubConfig, resolveOutputDir } from "./paths.js";
+import { rootHubConfig, rootHubDir, resolveOutputDir } from "./paths.js";
 import { resolveDbPath } from "./db.js";
 import { parseSchedule, toDanmuFlag, parseBoolFlag } from "./task-input.js";
 
@@ -22,13 +22,35 @@ import { parseSchedule, toDanmuFlag, parseBoolFlag } from "./task-input.js";
  *   --hub-config(存在的文件路径→读文件;否则当内联 JSON 串) > settings 表 hubConfig > <root>/config/hub-config.json(自动读)。
  * 即:把 hub-config.example.json 复制成 hub-config.json 改完,`serve --hub` 即自动加载(无需 --hub-config)。都没有 → undefined(跳过)。
  */
-export function resolveHubConfigJson(arg: string | undefined, store: TaskStore): string | undefined {
-  if (arg) return existsSync(arg) ? readFileSync(arg, "utf-8") : arg;
+export interface ResolvedHubConfig {
+  /** 配置 JSON 串(可直接 JSON.parse);undefined = 没配置。 */
+  json: string | undefined;
+  /**
+   * 这份配置**存放在哪**(文件路径);inline 时为 undefined。
+   * UI 改 resources 时必须写回这里 —— 盲目写 rootHubConfig() 会改到一份
+   * **根本没被使用**的文件(用户用 --hub-config 指定了别的路径时),表现为「改了没生效」。
+   */
+  path?: string;
+  /** 来源。决定写回方式:arg-file/root-file 写文件,settings 写 settings 表,inline 无法持久化(400)。 */
+  source: "arg-file" | "settings" | "root-file" | "inline";
+}
+
+export function resolveHubConfig(arg: string | undefined, store: TaskStore): ResolvedHubConfig {
+  if (arg) {
+    return existsSync(arg)
+      ? { json: readFileSync(arg, "utf-8"), path: arg, source: "arg-file" }
+      : { json: arg, source: "inline" };
+  }
   const fromDb = store.getSetting("hubConfig");
-  if (fromDb) return fromDb;
+  if (fromDb) return { json: fromDb, source: "settings" };
   const p = rootHubConfig();
-  if (existsSync(p)) return readFileSync(p, "utf-8");
-  return undefined;
+  if (existsSync(p)) return { json: readFileSync(p, "utf-8"), path: p, source: "root-file" };
+  return { json: undefined, source: "root-file" };
+}
+
+/** 只要 JSON 串的既有调用点(保持原签名不变,避免无关改动扩散)。 */
+export function resolveHubConfigJson(arg: string | undefined, store: TaskStore): string | undefined {
+  return resolveHubConfig(arg, store).json;
 }
 import { RecordingSession } from "@drec/manager";
 import { createLogger, getEngine, getPlatform, platformForRoom } from "@drec/core";
@@ -40,10 +62,14 @@ import {
   webhookTogglesFromEnv,
   type NotifWebhookToggles,
 } from "@drec/observability";
-import type { Recorder, RecordOpts, NotifyEvent, Notifier } from "@drec/core";
+import type { Recorder, RecordOpts, NotifyEvent, Notifier, StageFormat } from "@drec/core";
 import { TaskDaemon } from "./daemon.js";
 import { TaskManager } from "./task-manager.js";
 import { NodeRecordSpawner } from "./process/spawner.js";
+import { makeRollingUploadHookFactory } from "./rolling-upload.js";
+import { makeNodeRemuxHookFactory, resolveNodeOutputFormat } from "./node-remux.js";
+import { effectiveHubConfig, makeNewBroadcastGate } from "./disk-gate.js";
+import { effectiveTimezone } from "./timezone.js";
 
 // 本文件含多个命令组,日志按命令归属 scope:task→task_manager、daemon→scheduler、serve→web_server。
 const log = createLogger("task_manager");
@@ -95,7 +121,35 @@ export function buildSessionForTask(
     name: task.name ?? undefined,
   };
 
-  const session = new RecordingSession(recorder, { notifier, danmuEnabled });
+  // 边录边传(T-33,默认关):开启时注入「每会话一个」上传钩子工厂(metadata 读 hub 规则/hub.config)。
+  let makeRolling = makeRollingUploadHookFactory({
+    enabled: task.rollingEffective, // 只读 master 派生的生效值(issue #40)
+    platform: task.platform,
+    roomSlug: platformForRoom(task.room).extractRoomSlug(task.room),
+  });
+  // 节点侧原地替换容器(issue #137):与 spawn 路径共用同一个判定点;rolling 生效时恒 original(互斥)。
+  // 前台 `task run` 不做崩溃接管(接管在每次 `record` 子进程启动时做,会扫同一目录)。
+  const nodeFormat = resolveNodeOutputFormat(task, rootHubDir());
+  if (!makeRolling && nodeFormat !== "original") {
+    makeRolling = makeNodeRemuxHookFactory({
+      format: nodeFormat as StageFormat,
+      owner: platformForRoom(task.room).extractRoomSlug(task.room),
+      log: (m) => console.log(m),
+      alert: (message) => { void notifier.notify({ kind: "error", stage: "转封装", message }).catch(() => {}); },
+    });
+  }
+  // 新一场开播的磁盘水位闸门(issue #96):`task run` 前台录制同样受约束,与 cli record / 手动启动同口径。
+  // 水位来源用 effectiveHubConfig()(含 inline/settings 来源的 JSON),与 daemon 同口径。
+  const effHub = effectiveHubConfig();
+  const admitNewBroadcast = makeNewBroadcastGate({
+    outDir: opts.outDir, hubConfigPath: effHub.path, hubConfigJson: effHub.json,
+  });
+  const session = new RecordingSession(recorder, {
+    notifier, danmuEnabled, makeRolling, admitNewBroadcast,
+    // Record the effective timezone into the session sidecar next to the absolute startMs
+    // (issue #87); self-describing metadata, no reader yet.
+    timeZone: effectiveTimezone(store),
+  });
   return { session, opts, url: roomToUrl(task.room) };
 }
 
@@ -196,6 +250,7 @@ interface AddOpts {
   useCookie?: string;
   out?: string;
   schedule?: string;
+  rollingUpload?: string;
   db?: string;
 }
 
@@ -206,12 +261,21 @@ interface AddOpts {
 export interface HubStarter {
   start(opts: {
     hubConfigJson: string | undefined;
+    /**
+     * `--hub-config` 的**原始入参**(可能是文件路径,也可能是内联 JSON 串)。
+     *
+     * T15 需要它来「热读当前生效的那份配置」:只有拿到原始入参,才能重新走
+     * `resolveHubConfig` 判定到底是 arg-file / settings / root-file / inline,
+     * 只给一个 JSON 快照的话,UI 改完资源后我们读的还是启动时那一份(改了不生效)。
+     */
+    hubConfigArg?: string | undefined;
     dbPath: string | undefined;
     store: TaskStore;
     manager: {
       isRecording(id: number): boolean;
       isRunning(id: number): boolean;
       stop(id: number): Promise<void>;
+      requestStop(id: number): void;
     };
     onEvent: (e: import("@drec/core").NotifyEvent) => void;
     log: (msg: string) => void;
@@ -220,13 +284,25 @@ export interface HubStarter {
   /** 连接测试(cli L5 用 orchestrator getTransport + listInventory 实现)。 */
   testWorker?: (cfg: { kind: string; host?: string; dataRoot?: string; id?: string; apiUrl?: string }) => Promise<import("@drec/core").WorkerTestResult>;
   /** 批量存活探针(cli L5 用 orchestrator scoped transport ping 实现)。省略 → status 端点返回 []。 */
-  probeAllWorkers?: () => Promise<Array<{ id: string; ok: boolean; error?: string }>>;
+  probeAllWorkers?: () => Promise<import("@drec/core").WorkerStatus[]>;
+  /** master 读某节点的任务清单(F3,只读)。省略 → 端点返回 400。 */
+  nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
+  /** master 代查某节点的任务日志尾巴(F3)。省略 → 端点返回 400(hub 未启用)。 */
+  nodeTaskLogs?: (workerId: string, taskId: number, lines: number) => Promise<import("@drec/core").NodeTaskLogsDTO>;
   /** master 控制台读取 hub 源任务的 worker 录制状态快照。 */
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
+  /** The master console reads the zero-disk side-node status snapshot (issue #331). */
+  zeroDiskStatus?: (platform: string, roomSlug: string) => import("@drec/core").ZeroDiskNodeStatusDTO[];
   /** master 资源池快照(读同一 ResourcePool 实例);队列页显示 CPU/上传占用与排队位次。省略 → 全 0。 */
+  /** 边录边传的实时进度(F1;controller 队列页展示)。 */
+  rollingDelivery?: () => import("@drec/core").RollingDeliveryDTO[];
+  blockedBroadcasts?: () => import("@drec/core").HubBlockedBroadcastDTO[];
   poolSnapshot?: () => import("@drec/core").HubPoolSnapshotDTO | undefined;
-  /** 立即触发一次 hub 任务同步(规则/worker 变更后由 web API 调用;hub 未就绪时排队,start 后补跑)。 */
-  requestSyncTasks?: () => void;
+  /**
+   * 立即触发一次 hub 任务同步(规则/worker 变更后由 web API 调用;hub 未就绪时排队,start 后补跑)。
+   * `force=true` = 显式确认缩容/清空,让节点跳过 T-2 安全阀;force 会被**累积**到合并补跑那一轮。
+   */
+  requestSyncTasks?: (opts?: { force?: boolean }) => void;
   /**
    * master 本机抑制名单:「源任务已由 hub 规则切到远端节点录制」→ 本机不应实跑。
    * 供 web API 的 startTask 判断(手动启动不得绕过 daemon 的抑制,否则双节点重复录制)。
@@ -236,8 +312,10 @@ export interface HubStarter {
   retryNode?: (streamKey: string, node: string, opts?: { force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 停一场后处理(rsync/ffmpeg/biliup),不动录制。hub 未启用 → web API 返回 400。 */
   stopJob?: (streamKey: string) => Promise<{ ok: boolean; error?: string; code?: number }>;
+  /** Mark / unmark a needs_manual run as reviewed (issue #312; CLI 注入)。省略 → 端点返回「hub 未启用」。 */
+  ackJob?: (streamKey: string, opts: { note?: string; undo?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number }>;
   /** 立刻跑一场已有录像的后处理(跳过 settle / 断流窗)。hub 未启用 → web API 返回 400。 */
-  runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string }>;
+  runNow?: (opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean }) => Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }>;
 }
 
 /** Build the `task` command group. Pass a getWebhook() that reads program-level opts/env. */
@@ -258,6 +336,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .option("--use-cookie <0|1>", "弹幕含礼物: 1=含礼物(需账号cookie) 0=仅评论(匿名) (默认 1)")
     .option("--out <dir>", "输出目录")
     .option("--schedule <HH:MM-HH:MM>", "定时窗口（仅存储，本骨架不自动启停）")
+    .option("--rolling-upload <0|1>", "[已弃用] 旧边录边传开关;请改在 hub 规则设 pipeline.upload.mode=rolling(旧值 1 且规则未配置 ≡ rolling)")
     .option("--db <path>", "数据库路径（默认 ./douyin-rec.db 或 env DOUYIN_REC_DB）")
     .action(async (o: AddOpts) => {
       const store = new TaskStore(o.db);
@@ -298,6 +377,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
         outDir: o.out ?? null,
         scheduleStart,
         scheduleEnd,
+        rollingUpload: parseBoolFlag(o.rollingUpload, false),
       });
       store.close();
       log.info(`已创建任务 id=${t.id}（${t.name ?? t.room}）`);
@@ -318,6 +398,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
     .option("--use-cookie <0|1>", "弹幕含礼物: 1=含礼物(需账号cookie) 0=仅评论(匿名)")
     .option("--out <dir>", "输出目录")
     .option("--schedule <HH:MM-HH:MM>", "定时窗口（仅存储，本骨架不自动启停）")
+    .option("--rolling-upload <0|1>", "[已弃用] 旧边录边传开关(1=开 0=关,默认不改);请改在 hub 规则设 pipeline.upload.mode=rolling")
     .option("--db <path>", "数据库路径（默认 ./douyin-rec.db 或 env DOUYIN_REC_DB）")
     .action((id: string, o: AddOpts & { id?: string }) => {
       const store = new TaskStore(o.db);
@@ -354,6 +435,7 @@ export function buildTaskCommand(getWebhook: () => string | undefined, hubStarte
       }
       if (o.useCookie !== undefined) patch.useCookie = parseBoolFlag(o.useCookie, true);
       if (o.out !== undefined) patch.outDir = o.out;
+      if (o.rollingUpload !== undefined) patch.rollingUpload = parseBoolFlag(o.rollingUpload, false);
       if (o.schedule !== undefined) {
         const [s, e] = parseSchedule(o.schedule);
         patch.scheduleStart = s;

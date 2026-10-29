@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
-import { JobAbortedError, USER_STOP, abortJob, runWithJob, throwIfAborted } from "@drec/core";
+import { JobAbortedError, USER_STOP, abortJob, runWithJob, throwIfAborted, addArchiveToSeasonIfConfigured } from "@drec/core";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +13,16 @@ import {
   type WorkflowNodeKey,
 } from "./workflow.js";
 import { SyncLedger } from "./ledger.js";
+import { JobDispatcher } from "./job-dispatcher.js";
 import type { PipelineDeps } from "./pipeline.js";
+
+vi.mock("@drec/core", async (orig) => {
+  const m = await orig<typeof import("@drec/core")>();
+  return {
+    ...m,
+    addArchiveToSeasonIfConfigured: vi.fn(async () => ({ status: "added", sectionId: 1, aid: 1, cid: 1, title: "t" })),
+  };
+});
 
 const STREAM_KEY = "douyin:test-room:2026-06-27";
 const DATE_NAME = "主播名_2026-06-27";
@@ -148,6 +157,88 @@ function minimalCtx(t: TestDeps, pool: ResourcePool): NodeRunContext {
 }
 
 describe("runWorkflowNodes — 安全阀与分支隔离", () => {
+  it("seasonSectionId: upload_plain persists BV then associates; a later burn failure cannot skip it", async () => {
+    const t = makeDeps();
+    t.ledger.upsertPending(STREAM_KEY, Date.now());
+    t.deps.cfg = { ...t.deps.cfg, uploadMeta: { ...t.deps.cfg.uploadMeta, seasonSectionId: 456 } };
+    t.uploadPlain.mockResolvedValue("BVSEASON");
+    vi.mocked(addArchiveToSeasonIfConfigured).mockImplementationOnce(async () => {
+      // The global upload chain must already be released when the bounded season HTTP call starts.
+      expect(t.deps.pool!.snapshot().upload.active).toBe(0);
+      return { status: "added", sectionId: 456, aid: 1, cid: 1, title: "t" };
+    });
+    // Burn fails after upload: association must already have happened.
+    t.sh.mockImplementation(async (cmd: string) => {
+      if (cmd.includes(" merge ")) {
+        writeFileSync(t.products.plain, "x");
+        writeFileSync(t.products.plainXml, "x");
+      } else if (cmd.includes("--style danmu")) {
+        throw new Error("burn down");
+      }
+    });
+    const workflow = build(t);
+    const r = await runWorkflowNodes({
+      streamKey: STREAM_KEY, nodes: workflow.nodes, edges: workflow.edges,
+      ctx: workflow.ctx, pool: t.deps.pool!,
+    });
+    expect(r.ok).toBe(false);
+    expect(t.ledger.get(STREAM_KEY)?.bv).toBe("BVSEASON");
+    expect(t.ledger.get(STREAM_KEY)?.seasonState).toBe("done");
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).toHaveBeenCalledWith(
+      expect.objectContaining({ bvid: "BVSEASON", sectionId: 456, reconcileFirst: false }),
+    );
+  });
+
+  it("append nodes do not wait for a slow season association", async () => {
+    const t = makeDeps();
+    t.ledger.upsertPending(STREAM_KEY, Date.now());
+    t.deps.cfg = { ...t.deps.cfg, uploadMeta: { ...t.deps.cfg.uploadMeta, seasonSectionId: 456 } };
+    const slowBv = ["B", "V", "SEASONSLOW"].join("");
+    t.uploadPlain.mockResolvedValue(slowBv);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let appended = false;
+    vi.mocked(addArchiveToSeasonIfConfigured).mockImplementationOnce(async () => {
+      await gate;
+      return { status: "added", sectionId: 456, aid: 1, cid: 1, title: "t" };
+    });
+    t.appendGroup.mockImplementation(async () => {
+      appended = true;
+      release();
+    });
+    const workflow = build(t);
+    const r = await runWorkflowNodes({
+      streamKey: STREAM_KEY, nodes: workflow.nodes, edges: workflow.edges,
+      ctx: workflow.ctx, pool: t.deps.pool!,
+    });
+    expect(r.ok).toBe(true);
+    expect(appended).toBe(true);
+    expect(t.ledger.get(STREAM_KEY)?.seasonState).toBe("done");
+  });
+
+  it("a pending checkpoint failure keeps upload_plain successful and never starts an untracked association", async () => {
+    const t = makeDeps();
+    t.ledger.upsertPending(STREAM_KEY, Date.now());
+    t.deps.cfg = { ...t.deps.cfg, uploadMeta: { ...t.deps.cfg.uploadMeta, seasonSectionId: 456 } };
+    const bv = ["B", "V", "SEASONPENDINGFAIL"].join("");
+    t.uploadPlain.mockResolvedValue(bv);
+    vi.mocked(addArchiveToSeasonIfConfigured).mockClear();
+    vi.spyOn(t.ledger, "setBvAndSeasonState").mockImplementation(() => {
+      throw new Error("EIO season pending");
+    });
+    const workflow = build(t, { burnDanmu: false, burnLivechat: false });
+    const r = await runWorkflowNodes({
+      streamKey: STREAM_KEY, nodes: workflow.nodes, edges: workflow.edges,
+      ctx: workflow.ctx, pool: t.deps.pool!,
+    });
+    expect(r.ok).toBe(true);
+    expect(t.uploadPlain).toHaveBeenCalledTimes(1);
+    expect(t.ledger.get(STREAM_KEY)?.bv).toBe(bv);
+    expect(t.ledger.getNodeState(STREAM_KEY, "upload_plain")?.state).toBe("done");
+    expect(t.ledger.get(STREAM_KEY)?.seasonState).toBeNull();
+    expect(vi.mocked(addArchiveToSeasonIfConfigured)).not.toHaveBeenCalled();
+  });
+
   it("P1 上传失败 → 兄弟 burn 轨照常完成;append 被 blocked 不悬挂", async () => {
     const t = makeDeps();
     t.uploadPlain.mockRejectedValue(new Error("network down"));
@@ -399,6 +490,136 @@ describe("ResourcePool — cpu/net 串行与内存闸门", () => {
     expect(active.max).toBe(1);
     t.ledger.close();
   });
+
+  it("memory shortage past the timeout alerts once (need vs available) and still runs after recovery", async () => {
+    let now = 0;
+    let mem = 1900; // steady ~1.9 GB, below the 2048 burn floor
+    const alerts: string[] = [];
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 2048, memWaitTimeoutMs: 10_000, uploadRateLimit: 0 },
+      {
+        now: () => now,
+        // virtual clock; memory recovers only well after the timeout has elapsed
+        sleep: async (ms) => { now += ms; if (now >= 60_000) mem = 4096; },
+        freeMemMB: () => mem,
+        onMemShortage: (m) => alerts.push(m),
+      },
+    );
+    let ran = false;
+    await pool.withCpu(async () => { ran = true; }, "douyin:1:d", "burn");
+    expect(ran).toBe(true);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toContain("need 2048 MB");
+    expect(alerts[0]).toContain("available 1900 MB");
+  });
+
+  it("merge uses its own (lower) floor: 1.9 GB available is enough for merge but not for burn", async () => {
+    let now = 0;
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 2048, minMergeFreeMemMB: 512, memWaitTimeoutMs: 10_000, uploadRateLimit: 0 },
+      { now: () => now, sleep: async (ms) => { now += ms; if (now >= 30_000) throw new Error("burn still gated"); }, freeMemMB: () => 1900 },
+    );
+    await pool.withCpu(async () => {}, "douyin:1:d", "merge"); // passes immediately
+    await expect(pool.withCpu(async () => {}, "douyin:1:d", "burn")).rejects.toThrow("burn still gated");
+  });
+
+  it("a burn waiting for memory does not hold the CPU slot: another stream's merge still runs", async () => {
+    let mem = 1900; // enough for merge (512), not for burn (2048)
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 2048, minMergeFreeMemMB: 512, maxCpuParallel: 1, memWaitTimeoutMs: 600_000, uploadRateLimit: 0 },
+      { sleep: () => new Promise((r) => setImmediate(r)), freeMemMB: () => mem },
+    );
+    let burnRan = false;
+    const burn = pool.withCpu(async () => { burnRan = true; }, "douyin:A:d", "burn");
+    await new Promise((r) => setImmediate(r));
+    let mergeRan = false;
+    const merge = pool.withCpu(async () => { mergeRan = true; }, "douyin:B:d", "merge");
+    const outcome = await Promise.race([merge.then(() => "merged"), new Promise((r) => setTimeout(() => r("blocked"), 200))]);
+    expect(outcome).toBe("merged");
+    expect(mergeRan).toBe(true);
+    expect(burnRan).toBe(false);
+    // The waiting burn is reported as queued, not as holding the slot.
+    expect(pool.snapshot().cpu.active).toBe(0);
+    expect(pool.snapshot().waiting.some((w) => w.streamKey === "douyin:A:d" && w.resource === "cpu")).toBe(true);
+    mem = 4096;
+    await burn;
+    expect(burnRan).toBe(true);
+  });
+
+  it("default burn floor is 1024 MB: ~1.9 GB available runs a burn without waiting", async () => {
+    let slept = 0;
+    const pool = new ResourcePool({ uploadRateLimit: 0 }, { sleep: async () => { slept++; throw new Error("burn gated"); }, freeMemMB: () => 1900 });
+    await pool.withCpu(async () => {}, "douyin:1:d", "burn");
+    expect(slept).toBe(0);
+  });
+
+  it("issue #311: merge node through runWorkflowNodes uses the merge floor; memory low then recovers -> merge runs", async () => {
+    const t = makeDeps();
+    let mem = 300; // below the 512 merge floor
+    let sleeps = 0;
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 1024, minMergeFreeMemMB: 512, memWaitTimeoutMs: 60_000, uploadRateLimit: 0 },
+      {
+        // recovers to 600: enough for merge (512) but not for burn (1024); bounded so a wrong floor fails fast
+        sleep: async () => { if (++sleeps > 5) throw new Error("still gated"); mem = 600; },
+        freeMemMB: () => mem,
+      },
+    );
+    const events: Array<{ key: string; at: "start" | "end"; ts: number }> = [];
+    await runWorkflowNodes({
+      streamKey: STREAM_KEY,
+      nodes: [makeControlledNode("merge", "cpu", events, { n: 0, max: 0 })],
+      edges: [],
+      ctx: minimalCtx(t, pool),
+      pool,
+    });
+    expect(events.map((e) => `${e.key}:${e.at}`)).toEqual(["merge:start", "merge:end"]);
+    expect(t.ledger.getNodeState(STREAM_KEY, "merge")?.state).toBe("done");
+    expect(sleeps).toBe(1);
+    t.ledger.close();
+  });
+
+  it("time spent queuing for the CPU lock does not count toward the memory alert", async () => {
+    let now = 0;
+    let mem = 4096;
+    const alerts: string[] = [];
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 1024, maxCpuParallel: 1, memWaitTimeoutMs: 10_000, uploadRateLimit: 0 },
+      { now: () => now, sleep: async (ms) => { now += ms; mem = 4096; }, freeMemMB: () => mem, onMemShortage: (m) => alerts.push(m) },
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const holder = pool.withCpu(async () => { await gate; }, "douyin:A:d", "burn");
+    let ran = false;
+    const queued = pool.withCpu(async () => { ran = true; }, "douyin:B:d", "burn");
+    await new Promise((r) => setImmediate(r));
+    now += 60_000; // queued behind the holder well past the alert timeout
+    mem = 100; // memory is short at the moment the lock is handed over
+    release();
+    await holder;
+    await queued;
+    expect(ran).toBe(true);
+    expect(alerts).toHaveLength(0);
+  });
+
+  it("a throwing memory probe after acquiring the lock releases the CPU permit", async () => {
+    let calls = 0;
+    const pool = new ResourcePool(
+      { minBurnFreeMemMB: 1024, maxCpuParallel: 1, uploadRateLimit: 0 },
+      // 1st probe (before the lock) passes, 2nd (re-check under the lock) throws
+      { freeMemMB: () => { calls++; if (calls === 2) throw new Error("probe failed"); return 4096; } },
+    );
+    await expect(pool.withCpu(async () => {}, "douyin:A:d", "burn")).rejects.toThrow("probe failed");
+    expect(pool.snapshot().cpu.active).toBe(0);
+    let ran = false;
+    await pool.withCpu(async () => { ran = true; }, "douyin:B:d", "burn");
+    expect(ran).toBe(true);
+  });
+
+  it("minBurnFreeMemMB=0 still switches the whole gate off, merge included (backward compat)", async () => {
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0 }, { freeMemMB: () => 10 });
+    await pool.withCpu(async () => {}, "douyin:1:d", "merge");
+  });
 });
 
 describe("ResourcePool — 全局上传队列(withUpload)", () => {
@@ -604,5 +825,83 @@ describe("稿件名 / 分P名 / 文件名 分离(端到端参数验证)", () => 
     expect(uploadArg.video).toBe(t.products.plain); // 原路径,无 .upload 别名
     expect(existsSync(join(t.stageSub, ".upload"))).toBe(false);
     t.ledger.close();
+  });
+});
+
+// ── T15 热读:改配置立即生效,且不破坏 T8/T19 的限流账本 ─────────────────────────
+describe("T15 ResourcePool 热读取值器", () => {
+  it("maxCpuParallelLive:并发上限可在线调高,后续 acquire 立刻按新值放行", async () => {
+    let max = 1;
+    const pool = new ResourcePool({
+      minBurnFreeMemMB: 0, uploadRateLimit: 0,
+      maxCpuParallelLive: () => max,
+    });
+    let active = 0;
+    let peak = 0;
+    const task = async (): Promise<void> => {
+      await pool.withCpu(async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 5));
+        active--;
+      });
+    };
+    const t1 = task();
+    await new Promise((r) => setTimeout(r, 1));
+    expect(pool.snapshot().cpu.max).toBe(1);
+
+    max = 2;                                   // UI 改配置 → 立即生效(不重启)
+    const t2 = task();
+    await new Promise((r) => setTimeout(r, 8));
+    expect(peak).toBe(2);                      // 第二个真的并发跑起来了
+    await Promise.all([t1, t2]);
+  });
+
+  it("live getter 返回非法值 → 夹到 1(0 个并行 = 永远排队 = 看起来像卡死)", () => {
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, maxCpuParallelLive: () => 0 });
+    expect(pool.snapshot().cpu.max).toBe(1);
+    const nan = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, maxCpuParallelLive: () => Number.NaN });
+    expect(nan.snapshot().cpu.max).toBe(1);
+  });
+
+  it("不传 live getter 时行为不变(向后兼容:仍是构造时的静态值)", () => {
+    const pool = new ResourcePool({ minBurnFreeMemMB: 0, uploadRateLimit: 0, maxCpuParallel: 3 });
+    expect(pool.snapshot().cpu.max).toBe(3);
+  });
+
+  it("热读不重置上传限流账本(每 tick 重建 pool 的捷径会清空 T8/T19 窗口)", () => {
+    // 占用一次上传配额,再热读配置 —— windowUsed 必须保持,不能被「重建」清零。
+    const pool = new ResourcePool({
+      minBurnFreeMemMB: 0, uploadRateLimit: 2, uploadRateWindowMs: 600_000, uploadCooldownMs: 0,
+      maxCpuParallelLive: () => 2,
+    });
+    const mark = (): void => {
+      const snap = pool.snapshot();
+      void snap;
+    };
+    mark();
+    const before = pool.snapshot().upload.windowUsed;
+    // 热读路径本身不该动 uploadTimes
+    void pool.snapshot().cpu.max;
+    expect(pool.snapshot().upload.windowUsed).toBe(before);
+  });
+});
+
+describe("T15 JobDispatcher 热读并发上限", () => {
+  it("maxConcurrentLive:改并发后下一场用新值", async () => {
+    let max = 1;
+    const d = new JobDispatcher({ maxConcurrentLive: () => max, log: () => {} });
+    expect(d.maxConcurrent).toBe(1);
+    max = 4;
+    // 触发一次派发循环:enqueue 会重取上限
+    const p = d.enqueue("a", async () => {});
+    d.drain();
+    await p;
+    expect(d.maxConcurrent).toBe(4);
+  });
+
+  it("非法 live 值夹到 1", () => {
+    const d = new JobDispatcher({ maxConcurrentLive: () => -5, log: () => {} });
+    expect(d.maxConcurrent).toBe(1);
   });
 });

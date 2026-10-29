@@ -1,0 +1,2133 @@
+{
+  "objective": "让 hub 编排、队列与多节点分发在真实负载下既正确又实时：修掉会丢数据/丢产物的控制面与清理缺陷，消除跨房间串行阻塞，把队列与 workflow 从 3s 拉取改成推送 + 本地计时，并把「一个房间一个配置入口」落成 API 与页面。目标是不改变现有选优/冗余录制语义，而是让状态可信、产物可核验、节点可控。",
+  "end_state": "1) master 配置不可读时节点任务一条不减（有 rejected 告警）；删除 = **节点 store 受管任务 − 期望keys**（今天的语义），由 T2 空期望/骤减守卫 + 显式 force（DREC_ALLOW_SHRINK / ?force=1）保护；规则 disabled = 停用保留，规则文件消失 = 两阶段删除；T1 的 managed/rooms.json 仅作审计/版本回执（可选，不参与删除判定）；2) 队列页与 hub workflow 由 SSE 推送驱动，局域网内状态变化 1s 内可见，时长每秒本地刷新，慢请求不出现旧值覆盖，断连有过期提示；3) reconcileAll 跨房间并发派发（同房间串行、不重复建稿），后一场的 job 行不再等前一场上传结束；4) 上传冷却与限速窗口跨 master 重启保留，且**节点侧上传共用同一套冷却**（共享组件放在 @drec/core，app 不依赖 orchestrator）；5) 一个 PUT /api/rooms/:key 同时改录制与处理，/rooms 是唯一可写入口（配置 + 启停/立即处理/重试清理动作）；6) 上传成功后按**实际提交段数**核验分 P 完整性再删源，清理失败可见且可重试（含分段与合并两条路径）；7) 短命录制（起得来但录不成）递进退避并熔断告警；8) master/worker 的期望版本与 bundle 版本可见、错配可告警；本机与远端录制状态实时化。",
+  "non_goals": [
+    "不引入消息中间件或常连控制通道（T-16 已评估不做），SSE 走既有 http server。",
+    "不引入 worker claim/lease 队列（plans/029 §8 明确不做）——房间是常驻监控，不是一次性 job。",
+    "不改动 selectWinner 的覆盖度/完整度/弹幕优先级与冗余录制模型（T-2 / plans/026 保持现状）。",
+    "不合并 tasks 表与 config/hub/*.json 的物理存储（plans/029 Phase 3 保持可选、本方案不做）。",
+    "不改变现有 B 站上传硬标准（关水印、copyright=1、private 默认）与上传 skill 的唯一权威地位。",
+    "不在本方案内实现自动选点（T-2/plans026）：现有「显式勾选 workers + requires 能力门控」已足够；自动选点需先解决出口风控标签采集。",
+    "删除判定不使用 managed/rooms.json 快照 diff（快照 ≡ 期望，diff 恒空）；快照仅作审计与版本回执，不参与删除决策。"
+  ],
+  "environment": {
+    "language": "typescript",
+    "runtime": "node>=24 (ESM, node:sqlite 内置)",
+    "package_manager": "pnpm (workspace, 13 包)",
+    "os": "macOS 开发机 + Linux(docker master) + Debian VPS worker",
+    "test_command": "pnpm test && pnpm typecheck && pnpm bundle; cd packages/web && pnpm build",
+    "notes": "watch/SSE 的纯逻辑部分用 vitest；web 无 vitest，靠 tsc -b + vite build + 手动核对（AGENTS.md 允许）。真实录制断言必须用命令实测。"
+  },
+  "components": [
+    {
+      "id": "c1",
+      "name": "control-plane-safety",
+      "description": "master→节点期望任务下发的安全阀：期望状态副本、骤减守卫、显式删除意图"
+    },
+    {
+      "id": "c2",
+      "name": "realtime-state",
+      "description": "hub 状态变更监视 + SSE 推送 + 前端订阅，替代 3s 轮询并消除竞态"
+    },
+    {
+      "id": "c3",
+      "name": "queue-scheduling",
+      "description": "跨房间非阻塞派发、资源池并行度可配、同房间串行与公平轮转"
+    },
+    {
+      "id": "c4",
+      "name": "durable-upload-limits",
+      "description": "上传冷却截止与滑动窗口跨进程重启持久化"
+    },
+    {
+      "id": "c5",
+      "name": "room-unification",
+      "description": "一个房间一个配置入口：统一 /api/rooms 读写 录制+处理，Web 单页维护"
+    },
+    {
+      "id": "c6",
+      "name": "artifact-verification",
+      "description": "上传后核验分 P 完整性再删源；清理独立化且可重试"
+    },
+    {
+      "id": "c7",
+      "name": "cleanup-maintenance",
+      "description": "孤儿/空壳/中间产物的可预览、可审计维护清理"
+    },
+    {
+      "id": "c8",
+      "name": "recording-health",
+      "description": "以有效落盘判健康、短命录制熔断，替代 onLive 无条件清零退避"
+    }
+  ],
+  "open_questions": [
+    "D4（plans029）：master Docker VM 内存能否从 4GB 提到 8GB+？决定 maxCpuParallel 能否稳定从 1 提到 2~3（也是 T7 并发上限有意义的前提）。",
+    "DREC_EXPLICIT_DELETE 灰度：推荐首版**默认关**（纯走 store−期望 + T2 守卫），观察一轮发布后再决定是否默认开。请裁决。",
+    "节点侧上传的账号键：master 与节点需用同一身份键（bilibili:<mid>）共享冷却；节点如何取 mid（cookies.json 可读）需在 T19 落地时确认。",
+    "SSE 是否需要并发上限/鉴权？当前 /api 无鉴权且仅 tailscale 内可达；本方案沿用现状（T6 做前端加固 + T4 加订阅上限）。若将来暴露公网需另开鉴权任务。"
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "节点落盘「上次成功下发」审计快照（managed/rooms.json）",
+      "serves": [
+        "c1"
+      ],
+      "description": "节点每次成功应用 master 期望后，把该快照原子写入**显式传入**的 managedStateDir 下的 rooms.json。**用途明确为可观测/审计（+ T16 的版本回执），不作为删除判定依据** —— 因为它恒等于 desired，diff 必然为空。目录必须由调用方传入（`_apply-tasks <dataRoot>` 传 join(dataRoot,'config','managed')；local 传 rootConfigDir()/managed），**不得由 DOUYIN_REC_ROOT 推导**（远端短命进程只带 dataRoot）。",
+      "building_blocks": [
+        "paths.rootManagedStatePath()",
+        "writeManagedState/readManagedState(原子写: tmp+rename)",
+        "task-sync apply 成功后落盘"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [
+        "node:fs"
+      ],
+      "files": [
+        {
+          "path": "packages/app/src/managed-state.ts",
+          "action": "create",
+          "what": "ManagedState + readManagedState(dir)/writeManagedState(dir,state)"
+        },
+        {
+          "path": "packages/app/src/task-sync.ts",
+          "action": "modify",
+          "what": "applyRemoteTasks 增可选 opts.managedStateDir"
+        },
+        {
+          "path": "packages/app/src/index.ts",
+          "action": "modify",
+          "what": "导出 managed-state 与 rootConfigDir（后者目前未导出）"
+        },
+        {
+          "path": "packages/cli/src/cli.ts",
+          "action": "modify",
+          "what": "两个调用点传 managedStateDir"
+        },
+        {
+          "path": "test/app/managed-state.test.ts",
+          "action": "create",
+          "what": "落盘/读回/坏 JSON/路径归属 用例"
+        },
+        {
+          "path": "test/app/task-sync.test.ts",
+          "action": "modify",
+          "what": "不传 managedStateDir 时行为不变（现有 11 处调用保持通过）"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T1.1",
+          "description": "定义 ManagedState {version:number; savedAt:number; desired: RemoteTaskSpec[]}；注释写明「审计用途，非删除依据」"
+        },
+        {
+          "id": "T1.2",
+          "description": "实现 writeManagedState(dir,state)：mkdirSync recursive + 写 .rooms.json.tmp + renameSync 覆盖（原子）"
+        },
+        {
+          "id": "T1.3",
+          "description": "实现 readManagedState(dir)：缺失或 JSON/字段损坏 → null（首次运行安全）"
+        },
+        {
+          "id": "T1.4",
+          "description": "applyRemoteTasks 增 opts.managedStateDir（**可选**：缺省则不写，向后兼容现有 11 处调用）；成功返回前写副本，失败仅 log 不抛"
+        },
+        {
+          "id": "T1.5",
+          "description": "调用点各传目录：cli `_apply-tasks` → join(dataRoot,'config','managed')；cli local 同步 → join(rootConfigDir(),'managed')；index.ts 需额外 export rootConfigDir"
+        }
+      ],
+      "tests": [
+        {
+          "description": "write→read 得到相同 desired",
+          "kind": "unit"
+        },
+        {
+          "description": "损坏 JSON / 文件缺失 → read 返回 null 且不抛",
+          "kind": "unit"
+        },
+        {
+          "description": "目录不存在时 write 自动创建",
+          "kind": "unit"
+        },
+        {
+          "description": "文件落在传入的 managedStateDir 下（断言不落在 cwd / DOUYIN_REC_ROOT）",
+          "kind": "unit"
+        },
+        {
+          "description": "不传 managedStateDir → 不写文件且行为与现状一致",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "传了 managedStateDir 时，快照落在该目录（不是 cwd/DOUYIN_REC_ROOT）",
+        "不传时零副作用（现有调用与测试不变）",
+        "删除该文件不影响录制与任务",
+        "两个生产调用点（_apply-tasks / local 同步）都传 managedStateDir；T16 的版本回执依赖它，因此这两处为必需（其它测试调用可不传）"
+      ],
+      "depends_on": [],
+      "estimated_loc": 190,
+      "status": "done"
+    },
+    {
+      "id": "T2",
+      "title": "期望骤减安全阀（空期望拒绝 / 骤减只停不删）",
+      "serves": [
+        "c1"
+      ],
+      "description": "在 applyRemoteTasks 入口加骤减守卫：期望为空且本地有受管任务 → 拒绝返回 rejected='empty-desired'；期望 ≤ floor(受管数/2) → 只停用不删除。**必须同时提供显式强制通道**（否则 T-17 房间重分配那种「期望 N→0」的合法操作会被永久拒绝、旧节点继续双录）：`DREC_ALLOW_SHRINK=1` 环境变量 + `POST /api/hub/apply?force=1`（master 侧动作），force 时跳过守卫并记录一条「强制应用」审计日志。 **force 必须端到端可送达远端节点**：`Transport.applyTasks` 增 `opts.force?`，`_apply-tasks` 的 base64 payload 增 `force`，LocalTransport/SshTransport 透传；master 侧 `/api/hub/apply` 路由（server.ts + api）触发一次强制同步；另支持目标节点 env `DREC_ALLOW_SHRINK=1` 作为等效开关。",
+      "building_blocks": [
+        "ApplyTasksResult.rejected?",
+        "guardShrink(desiredCount, managedCount)",
+        "CLI 打印 rejected"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/core/src/worker-contract.ts",
+          "action": "modify",
+          "what": "ApplyTasksResult 增可选 rejected?: string"
+        },
+        {
+          "path": "packages/app/src/task-sync.ts",
+          "action": "modify",
+          "what": "入口守卫 + 骤减只停用"
+        },
+        {
+          "path": "packages/cli/src/cli.ts",
+          "action": "modify",
+          "what": "_apply-tasks 与 local 同步路径打印 rejected"
+        },
+        {
+          "path": "test/app/task-sync.test.ts",
+          "action": "modify",
+          "what": "空期望拒绝 / 骤减只停用 / 正常删除仍生效 三用例"
+        },
+        {
+          "path": "packages/orchestrator/src/transport.ts",
+          "action": "modify",
+          "what": "applyTasks(input:{desired, force?}) 契约扩展"
+        },
+        {
+          "path": "packages/orchestrator/src/transport-local.ts",
+          "action": "modify",
+          "what": "force 透传到 applyRemoteTasks opts"
+        },
+        {
+          "path": "packages/orchestrator/src/transport-ssh.ts",
+          "action": "modify",
+          "what": "force 编入 _apply-tasks payload"
+        },
+        {
+          "path": "packages/app/src/web/server.ts",
+          "action": "modify",
+          "what": "路由 POST /api/hub/apply（force 参数）"
+        },
+        {
+          "path": "packages/app/src/web/api/hub-jobs.ts",
+          "action": "modify",
+          "what": "applyHubTasks(force) 处理器（触发 master 同步）"
+        },
+        {
+          "path": "packages/app/src/web/api/types.ts",
+          "action": "modify",
+          "what": "Api 类型增 applyHubTasks"
+        },
+        {
+          "path": "packages/app/src/cli-task.ts",
+          "action": "modify",
+          "what": "HubStarter.requestSyncTasks 放宽为 (opts?:{force?:boolean})=>void"
+        },
+        {
+          "path": "packages/app/src/serve.ts",
+          "action": "modify",
+          "what": "requestSyncTasks 透传 force 给 hubStarter"
+        },
+        {
+          "path": "test/app/web-api.test.ts",
+          "action": "modify",
+          "what": "POST /api/hub/apply?force=1 → requestSyncTasks({force:true}) 端到端断言"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T2.1",
+          "description": "ApplyTasksResult 加 rejected?: string（向后兼容，旧消费方忽略）"
+        },
+        {
+          "id": "T2.2",
+          "description": "计算两个基线：totalManaged = listTasks().filter(managedBy==='hub').length（**含 disabled**，用于空期望守卫）；enabledManaged = 其中 enabled 的数量（**仅用于骤减比例守卫**）"
+        },
+        {
+          "id": "T2.3",
+          "description": "守卫边界用 `desired.length <= Math.floor(managedCount/2)`（修复 managedCount=2/desired=1 漏判）"
+        },
+        {
+          "id": "T2.3b",
+          "description": "空期望守卫用 totalManaged（全停用的节点 + 空期望也必须被拦，否则会被删空）；比例守卫用 enabledManaged"
+        },
+        {
+          "id": "T2.4",
+          "description": "opts.force 或 process.env.DREC_ALLOW_SHRINK in ('1','true') → 跳过守卫；否则空期望/骤减按守卫返回并 log warn"
+        },
+        {
+          "id": "T2.5",
+          "description": "cli 暴露 `POST /api/hub/apply?force=1`（仅 master/local，回环 internal=1 语义与现有硬停一致）并打印 rejected/forced"
+        },
+        {
+          "id": "T2.6",
+          "description": "Transport.applyTasks 增 opts.force?；SshTransport 把 force 放进 _apply-tasks base64；LocalTransport 直接传 applyRemoteTasks opts"
+        },
+        {
+          "id": "T2.7",
+          "description": "cli _apply-tasks 解析 payload.force → applyRemoteTasks(..., {force})；env DREC_ALLOW_SHRINK=1 等价"
+        },
+        {
+          "id": "T2.8",
+          "description": "HubStarter.requestSyncTasks 放宽为 (opts?:{force?:boolean})=>void；serve.ts 透传；cli.requestHubSync 接受 force，**并把 force 做 OR 累积进 pending 标志（pendingForce = pendingForce || opts?.force），在合并的那轮补跑里重放** —— 否则周期性同步在途时到达的 force 会被合并丢失、守卫照旧拦截（N→0 静默无效）"
+        }
+      ],
+      "tests": [
+        {
+          "description": "空期望 + 1 个受管任务 → removed 为空且 rejected==='empty-desired'",
+          "kind": "unit"
+        },
+        {
+          "description": "受管 4 → 期望 1（≤2）→ 被移出的 3 个只 setEnabled(false)、仍在 store",
+          "kind": "unit"
+        },
+        {
+          "description": "受管 2 → 期望 1（≤1）→ 只停用（边界用例）",
+          "kind": "unit"
+        },
+        {
+          "description": "受管 4 → 期望 3（>2）→ 正常两阶段删除",
+          "kind": "unit"
+        },
+        {
+          "description": "force=true 或 DREC_ALLOW_SHRINK=1 时 期望 7→0 正常应用（不拒绝）",
+          "kind": "unit"
+        },
+        {
+          "description": "节点有 3 个受管但已 disabled 的任务 + desired=[] → rejected 且零删除",
+          "kind": "unit"
+        },
+        {
+          "description": "远端节点收到 force 后 期望 N→0 正常执行（不经 env）",
+          "kind": "unit"
+        },
+        {
+          "description": "web POST /api/hub/apply?force=1 断言 requestSyncTasks 收到 {force:true}（端到端 seam）",
+          "kind": "unit"
+        },
+        {
+          "description": "在一次非 force 同步在途时发起 force → 合并补跑仍以 force 到达 applyRemoteTasks（不丢标志）",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "applyRemoteTasks(store, []) 在本地有受管任务时不删任何任务且返回 rejected",
+        "T-17 式「期望 N→0」可用 force 正常执行",
+        "rejected / forced 都可在 serve 日志中 grep"
+      ],
+      "depends_on": [
+        "T1"
+      ],
+      "estimated_loc": 210,
+      "status": "done"
+    },
+    {
+      "id": "T3",
+      "title": "删除语义收敛：节点 store 减期望（T2 守卫保护）+ 禁用与删除分离",
+      "serves": [
+        "c1"
+      ],
+      "description": "**放弃快照 diff**（快照 ≡ desired，diff 恒空 → 永不删除，任务泄漏）。删除仍以**节点 store 的受管任务减去 desiredKeys** 为准（= 今天的行为）—— 之所以现在安全，是因为 **T2 的空期望/骤减守卫**拦住了「master 读不到 → 大规模误删」这一唯一危险路径，且提供了显式 force 覆盖。同时**把「禁用规则」与「删除规则」区分开**：`desiredFor()` 对 `enabled:false` 的房间仍产出 `enabled:false` 条目（→ 节点停用但保留任务），只有规则文件**消失**（或 sourceTaskId 解绑）才缺席 → 进入两阶段删除。`RemoteTaskSpec.deleted?` 仅作可选提示（提前一轮删），默认忽略（`DREC_EXPLICIT_DELETE` 默认关）。",
+      "building_blocks": [
+        "RemoteTaskSpec.deleted?",
+        "desiredFor 产出 deleted 条目",
+        "两阶段删除仅对 deleted 生效"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/core/src/api-types.ts",
+          "action": "modify",
+          "what": "RemoteTaskSpec 增 deleted?: boolean"
+        },
+        {
+          "path": "packages/app/src/task-sync.ts",
+          "action": "modify",
+          "what": "删除条件 = store 受管 − desiredKeys（默认）；DREC_EXPLICIT_DELETE=1 时才额外采信 deleted:true 做提前删除"
+        },
+        {
+          "path": "packages/cli/src/cli.ts",
+          "action": "modify",
+          "what": "desiredFor() 依规则删除意图生成 deleted 条目；读 DREC_EXPLICIT_DELETE"
+        },
+        {
+          "path": "test/app/task-sync.test.ts",
+          "action": "modify",
+          "what": "缺席不删 / deleted 才删 / 开关两种行为"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T3.1",
+          "description": "确认删除判定 = store 受管任务 − desiredKeys（保留现有 for 循环实现，不改语义）"
+        },
+        {
+          "id": "T3.2",
+          "description": "cli.ts desiredFor：把 `!rule.enabled` 的房间改为产出 enabled:false 条目（不再 continue 跳过）；仅 sourceTaskId 为空/任务不存在时跳过（= 真删除意图）"
+        },
+        {
+          "id": "T3.3",
+          "description": "T2 的两个基线保持：空期望守卫用 totalManaged（含 disabled），骤减比例用 enabledManaged；本任务不改变这一点"
+        },
+        {
+          "id": "T3.4",
+          "description": "RemoteTaskSpec.deleted? 保留为可选提示：仅在 DREC_EXPLICIT_DELETE=1 时采信（跳过第1轮直接删）；默认关 = 忽略"
+        },
+        {
+          "id": "T3.5",
+          "description": "文档化语义矩阵：enabled:false（停用保留）/ 缺席（两阶段删除，受 T2 守卫）/ force（合法缩容）"
+        },
+        {
+          "id": "T3.6",
+          "description": "disabled 且**同时被移出 rule.workers / requires 不再满足**的房间：desiredFor 仍需为该 worker 产出 enabled:false 条目（否则该节点的房间会保持启用）——与 T-10 能力门控口径一致：门控只决定「是否派给该节点」，不决定「是否停用已有任务」"
+        }
+      ],
+      "tests": [
+        {
+          "description": "快照含 A、期望缺 A → 第1轮 pending 不删；第2轮（已停）→ removeTask",
+          "kind": "unit"
+        },
+        {
+          "description": "期望 A 为 enabled:false → A 保留且停用（不算删除、不计入骤减）",
+          "kind": "unit"
+        },
+        {
+          "description": "master 期望为空（配置不可读）→ T2 守卫拦截，一条不删",
+          "kind": "unit"
+        },
+        {
+          "description": "DREC_EXPLICIT_DELETE=1 且 deleted:true → 跳过第1轮直接删；默认关时忽略该字段",
+          "kind": "unit"
+        },
+        {
+          "description": "7→0 且 force=1 → 正常两阶段删除",
+          "kind": "unit"
+        },
+        {
+          "description": "规则 disabled 且该 worker 已从 workers 勾选移除 → 该 worker 上仍是 enabled:false（停用保留），不是删除",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "规则文件消失 → 节点两阶段删除；规则仅 disabled → 节点停用但保留",
+        "master 配置目录不可读 → 节点任务一条不减（T2 守卫）",
+        "T-17 式合法缩容可用 force 执行"
+      ],
+      "depends_on": [
+        "T2"
+      ],
+      "estimated_loc": 300,
+      "status": "done"
+    },
+    {
+      "id": "T4",
+      "title": "hub 状态变更监视 + SSE 端点 /api/hub/stream",
+      "serves": [
+        "c2"
+      ],
+      "description": "app 侧加 HubWatch（廉价指纹：优先 MAX(updatedAt)/MAX(rowid) 而非 COUNT(*)）并在 **web/server.ts** 暴露 SSE —— SSE 不能走 api.ts（dispatch 返回 ApiResult 后经 sendJson 序列化，只有 index 特判）。故：RouteMatch['name'] 增 'hubStream'，createServer 在 sendJson 之前特判写出 text/event-stream + 订阅 + 心跳 + res close 退订；HubWatch 经 **WebServerDeps**（非 ApiDeps）注入。只读连接设 PRAGMA busy_timeout，避免 SQLITE_BUSY 时 listHubJobs 静默返回空队列。",
+      "building_blocks": [
+        "HubWatch(change detection + 订阅)",
+        "SSE 帧写工具 sseFrame(event,data)",
+        "路由 /api/hub/stream"
+      ],
+      "tools": [
+        "vitest",
+        "node:http"
+      ],
+      "packages": [
+        "node:fs",
+        "node:sqlite"
+      ],
+      "files": [
+        {
+          "path": "packages/app/src/hub-watch.ts",
+          "action": "create",
+          "what": "HubWatch：指纹(MAX 而非 COUNT)+去抖+订阅"
+        },
+        {
+          "path": "packages/app/src/web/server.ts",
+          "action": "modify",
+          "what": "RouteMatch['name'] 加 'hubStream'；WebServerDeps 加 hubWatch；createServer 特判 SSE"
+        },
+        {
+          "path": "packages/app/src/serve.ts",
+          "action": "modify",
+          "what": "创建 HubWatch 实例，传入 createWebServer 的 deps"
+        },
+        {
+          "path": "packages/app/src/hub-jobs.ts",
+          "action": "modify",
+          "what": "只读连接加 PRAGMA busy_timeout"
+        },
+        {
+          "path": "test/app/hub-watch.test.ts",
+          "action": "create",
+          "what": "指纹变化/无变化/订阅/stop 清理 用例"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T4.1",
+          "description": "computeVersionFingerprint(dbPath): {mtimeMs, jobsMaxUpdatedAt, jobsRowid, stepsMaxRowid, nodeStatesMaxUpdatedAt}，全 try/catch"
+        },
+        {
+          "id": "T4.2",
+          "description": "HubWatch setInterval(1000) 比较指纹，变化去抖 ≥250ms 后 notify 订阅者"
+        },
+        {
+          "id": "T4.3",
+          "description": "sseFrame(event,data) 生成 'event:\\ndata:\\n\\n' 与心跳注释帧"
+        },
+        {
+          "id": "T4.4",
+          "description": "server.ts：RouteMatch['name'] 增 'hubStream'；createServer 命中该路由时写 SSE 头、订阅 hubWatch、15s 心跳、res.on('close') 退订"
+        },
+        {
+          "id": "T4.5",
+          "description": "WebServerDeps 增 hubWatch?: HubWatch；serve.ts 传实例；hub-jobs 只读连接 exec('PRAGMA busy_timeout=3000')"
+        }
+      ],
+      "tests": [
+        {
+          "description": "指纹在 sync db 变更后不同、未变时相同",
+          "kind": "unit"
+        },
+        {
+          "description": "订阅者在变化时收到一次通知，取消订阅后不再收到",
+          "kind": "unit"
+        },
+        {
+          "description": "sseFrame 输出符合 event:/data:/空行 结构",
+          "kind": "unit"
+        },
+        {
+          "description": "db 文件缺失时指纹稳定且不抛",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "curl -N /api/hub/stream 持续收到 changed 帧 + 心跳",
+        "写一条 sync_jobs 变更后 1~2s 内推送 changed",
+        "客户端断开后服务端订阅数回落（无泄漏）",
+        "busy_timeout 生效：并发读写时不出现静默空队列"
+      ],
+      "depends_on": [],
+      "estimated_loc": 290,
+      "status": "done"
+    },
+    {
+      "id": "T5",
+      "title": "队列读取批量化：去 N+1 查询与连接复用",
+      "serves": [
+        "c2",
+        "c3"
+      ],
+      "description": "listHubJobs 目前对每个 job 分别 prepare 查询 events/steps/candidates/nodeStates（limit 200 active 时约 800 次查询 + 每次新建 DatabaseSync）。改为一次性按 streamKey IN (...) 批量取各表再内存分组，并让 HubWatch/队列/详情共用同一读连接策略。",
+      "building_blocks": [
+        "批量 IN 查询 + 内存分组",
+        "per-streamKey 索引映射"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [
+        "node:sqlite"
+      ],
+      "files": [
+        {
+          "path": "packages/app/src/hub-jobs.ts",
+          "action": "modify",
+          "what": "listHubJobs 改为批量查询各附属表并内存分组"
+        },
+        {
+          "path": "packages/app/src/hub-jobs.test.ts",
+          "action": "modify",
+          "what": "批量结果与逐条等价 + 空集/旧库缺表 用例"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T5.1",
+          "description": "先查 jobs（含分页），收集 streamKeys"
+        },
+        {
+          "id": "T5.2",
+          "description": "用 `WHERE streamKey IN (?,...)` 一次性查询 events/steps/candidates/nodeStates（keys 为空则跳过）"
+        },
+        {
+          "id": "T5.3",
+          "description": "按 streamKey 分桶进 Map，映射回每个 view（保持原字段与排序语义：events 按 at、steps 按 at、candidates 按 isWinner+coverage）"
+        },
+        {
+          "id": "T5.4",
+          "description": "保留旧库缺表时的逐表 try/catch 降级"
+        }
+      ],
+      "tests": [
+        {
+          "description": "同一数据集下批量实现与旧逐条实现对每个 job 输出深相等",
+          "kind": "unit"
+        },
+        {
+          "description": "无 job / 旧库缺 steps 表时不抛",
+          "kind": "unit"
+        },
+        {
+          "description": "limit/offset/states 过滤仍正确",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "pnpm test 全过（含等价性用例）",
+        "实测 /api/hub/queue 在 200 active 行时查询条数从约 800 降到 ≤6（可在测试中计数 statement 调用）"
+      ],
+      "depends_on": [],
+      "estimated_loc": 200,
+      "status": "done"
+    },
+    {
+      "id": "T6",
+      "title": "前端改推送驱动：useHubStream + 去重入 + 过期提示 + 本地计时",
+      "serves": [
+        "c2"
+      ],
+      "description": "useHubStream：订阅 /api/hub/stream，收到 changed 立即重取；usePolling 补重入保护与过期标记；QueuePage/HubPage/RoomDetail 改用它；时长/ETA/冷却由本地 1s tick 展示。**加固（防重连风暴把轮询负载带回来）**：单页最多 1 个 EventSource（复用），断线退化为**指数退避的有界兜底轮询**（fallbackMs 从 3s 起步、封顶 30s，不在每 tab 固定高频），页面隐藏（document.hidden）时暂停兜底轮询。",
+      "building_blocks": [
+        "useHubStream(fetchFn, opts)",
+        "usePolling 重入守卫",
+        "本地 useTicker(1s)",
+        "stale 标记"
+      ],
+      "tools": [
+        "tsc -b",
+        "vite build"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/web/src/lib/hooks.ts",
+          "action": "modify",
+          "what": "usePolling 加 in-flight 守卫与 lastOk 时间；新增 useHubStream 与 useTicker"
+        },
+        {
+          "path": "packages/web/src/pages/QueuePage.tsx",
+          "action": "modify",
+          "what": "改用 useHubStream；时长本地 tick；过期提示"
+        },
+        {
+          "path": "packages/web/src/pages/HubPage.tsx",
+          "action": "modify",
+          "what": "改用 useHubStream；坏请求不再吞"
+        },
+        {
+          "path": "packages/web/src/components/RoomDetail.tsx",
+          "action": "modify",
+          "what": "改用 useHubStream；worker 列表与 run 刷新解耦"
+        },
+        {
+          "path": "packages/web/src/lib/i18n.tsx",
+          "action": "modify",
+          "what": "过期/重连中文案"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T6.1",
+          "description": "EventSource 封装为 useHubStream(refetch, {fallbackMs})：onmessage→refetch、onerror→标记 stale 并退化为 fallback 轮询"
+        },
+        {
+          "id": "T6.2",
+          "description": "usePolling 加 runningRef 守卫，跳过上次未完成的 tick；记录 lastOkAt"
+        },
+        {
+          "id": "T6.3",
+          "description": "抽取 useTicker(1000) 供页面本地每秒重算 sec/eta/cooldown 展示"
+        },
+        {
+          "id": "T6.4",
+          "description": "三个页面替换 usePolling 调用点；错误不再静默，设 stale 标志渲染「数据可能已过期」"
+        },
+        {
+          "id": "T6.5",
+          "description": "单页复用 1 个 EventSource（模块级单例 + 引用计数），避免多组件各自建连"
+        },
+        {
+          "id": "T6.6",
+          "description": "兜底轮询用指数退避 3s→30s 封顶；document.hidden 时暂停，visible 时立即补拉一次"
+        }
+      ],
+      "tests": [
+        {
+          "description": "manual: 局域网内改一条 job 状态，队列页与 workflow 1s 内同步更新",
+          "kind": "manual"
+        },
+        {
+          "description": "manual: 断网后显示过期提示，恢复后自动对齐",
+          "kind": "manual"
+        },
+        {
+          "description": "manual: 展开 run + 滚动位置在刷新时不被打断",
+          "kind": "manual"
+        },
+        {
+          "description": "manual: 服务端断开后前端以退避间隔重试、恢复时立刻对齐且不再高频请求",
+          "kind": "manual"
+        },
+        {
+          "description": "manual: 隐藏标签页后无兜底请求发出",
+          "kind": "manual"
+        }
+      ],
+      "acceptance_criteria": [
+        "cd packages/web && pnpm build 通过且 tsc -b 无错",
+        "状态下发后 1s 内两处 UI 一致；慢请求期间不出现旧值覆盖新值；断连有可见过期提示"
+      ],
+      "depends_on": [
+        "T4",
+        "T5"
+      ],
+      "estimated_loc": 340,
+      "status": "done"
+    },
+    {
+      "id": "T7",
+      "title": "reconcileAll 非阻塞派发:job 先行创建 + 有界并发(CPU 仍串行)",
+      "serves": [
+        "c3"
+      ],
+      "description": "reconcileAll 在 for 循环里 `await _runPipeline` → 后一房间的 job 行都不创建。改两阶段:①建全部 job(快);②JobDispatcher 有界并发执行。**诚实边界**:`maxCpuParallel` 缺省仍是 1 → merge/burn **依旧串行**;上传队列按设计全局串行(防 601)。本任务真正交付的是:**后一房间的 job 行立即可见**(队列/UI 不再假死)+ 下个房间的 pull/net/upload 能与前一房间的 CPU 编码重叠。「两场同时跑」要等 T15 + D4(内存配额)。必须 `await dispatcher.drain()`(保留 hub 的 running 守卫,防重复建稿)。",
+      "building_blocks": [
+        "JobDispatcher(有界并发 + 同 key 串行)",
+        "reconcileAll 两阶段：plan → dispatch"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/orchestrator/src/reconciler.ts",
+          "action": "modify",
+          "what": "拆 planBroadcasts 与 dispatchPipelines；不再在循环中 await 整场"
+        },
+        {
+          "path": "packages/orchestrator/src/job-dispatcher.ts",
+          "action": "create",
+          "what": "有界并发调度器：入队、并发上限、同 key 去重、收集错误"
+        },
+        {
+          "path": "packages/orchestrator/src/job-dispatcher.test.ts",
+          "action": "create",
+          "what": "并发上限/同 key 串行/单场失败不影响其余 用例"
+        },
+        {
+          "path": "packages/orchestrator/src/reconciler.test.ts",
+          "action": "modify",
+          "what": "新增「长任务不阻塞其它房间建 job」用例"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T7.1",
+          "description": "实现 JobDispatcher({maxConcurrent})：enqueue(streamKey, run) 仅对**活动** key 去重（settle 后删除 key），drain() 等全部结束；重试交给 ledger 的 RETRYABLE/UNSAFE_RETRY_NODES 判断"
+        },
+        {
+          "id": "T7.2",
+          "description": "reconcileAll 第一阶段：过滤 + upsertPending + 建 job + 收集待跑（不含长 IO）"
+        },
+        {
+          "id": "T7.3",
+          "description": "第二阶段：dispatcher.enqueue(streamKey, ()=>this._runPipeline(...))；末尾 await dispatcher.drain()"
+        },
+        {
+          "id": "T7.4",
+          "description": "ReconcilerDeps 增 maxConcurrentPipelines?: number；构造时建 dispatcher；cli.ts 传 hubCfg.resources.maxConcurrentPipelines ?? 2"
+        },
+        {
+          "id": "T7.5",
+          "description": "单场抛错只 markFailed 该场（保持现有 try/catch 语义）；日志打印并发/排队数"
+        }
+      ],
+      "tests": [
+        {
+          "description": "房间 A 的 pipeline 仍 pending 时，房间 B 的 job 行已创建（不再串行阻塞）",
+          "kind": "unit"
+        },
+        {
+          "description": "同一 streamKey 在 pending 期间被触发两次 → 只执行一次",
+          "kind": "unit"
+        },
+        {
+          "description": "maxConcurrentPipelines=1 时严格串行；=2 时两场重叠",
+          "kind": "unit"
+        },
+        {
+          "description": "某场抛错不影响其它场完成",
+          "kind": "unit"
+        },
+        {
+          "description": "上一轮 failed（attempts<maxRetries）的 job 在下一轮被重新派发（不被 justFinished 抑制）",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "两场同时收播:后一场的 job 行立刻出现(不等前一场结束)",
+        "同房间永不并发、不重复建稿",
+        "merge/burn 在 maxCpuParallel=1 下仍严格串行(不夸大收益)"
+      ],
+      "depends_on": [],
+      "estimated_loc": 320,
+      "status": "done"
+    },
+    {
+      "id": "T8",
+      "title": "上传冷却与滑动窗口持久化（跨重启保留）",
+      "serves": [
+        "c4"
+      ],
+      "description": "ResourcePool 的 uploadBlockedUntil / uploadTimes 只在内存，master 重启即丢（B 站 601/21566 冷却历史消失 → 可能立刻再打爆）。把两者持久化到 sync db（新表 upload_limits 单行），启动时恢复，写入时机为命中限流与每次占额。",
+      "building_blocks": [
+        "UploadLimitStore(persist/restore)",
+        "ResourcePool 注入 store",
+        "reconcile/serve 装配"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [
+        "node:sqlite"
+      ],
+      "files": [
+        {
+          "path": "packages/orchestrator/src/upload-limits.ts",
+          "action": "create",
+          "what": "UploadLimitStore：load/save blockedUntil 与 times[]（同库单行，容错）"
+        },
+        {
+          "path": "packages/orchestrator/src/workflow.ts",
+          "action": "modify",
+          "what": "ResourcePool 接受注入 store，占额/命中冷却时持久化，构造时恢复"
+        },
+        {
+          "path": "packages/cli/src/cli.ts",
+          "action": "modify",
+          "what": "装配 UploadLimitStore 并传入 ResourcePool"
+        },
+        {
+          "path": "packages/orchestrator/src/upload-limits.test.ts",
+          "action": "create",
+          "what": "保存/恢复/过期清理/坏数据容错 用例"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T8.1",
+          "description": "建表 upload_limits(id INTEGER PRIMARY KEY CHECK(id=1), blockedUntil INTEGER, times TEXT, updatedAt INTEGER)"
+        },
+        {
+          "id": "T8.2",
+          "description": "实现 save(): upsert 单行；load(): 读回并丢弃已过期 times（< now-window）"
+        },
+        {
+          "id": "T8.3",
+          "description": "ResourcePool 构造接受 limitStore，恢复 uploadBlockedUntil 与 uploadTimes"
+        },
+        {
+          "id": "T8.4",
+          "description": "_awaitUploadSlot 占额后与命中限流后调用 save（写失败仅 warn）"
+        }
+      ],
+      "tests": [
+        {
+          "description": "命中 601 后新建 ResourcePool（同 store）仍处于冷却期",
+          "kind": "unit"
+        },
+        {
+          "description": "窗口外的历史 times 在 load 时被丢弃",
+          "kind": "unit"
+        },
+        {
+          "description": "store 表损坏/缺失时回落空状态不抛",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "master 重启后，冷却未到期的提交仍被等到冷却结束",
+        "窗口计数跨重启不归零（不出现重启即打爆）"
+      ],
+      "depends_on": [
+        "T7"
+      ],
+      "estimated_loc": 220,
+      "status": "done"
+    },
+    {
+      "id": "T9",
+      "title": "统一房间 API：GET/PUT /api/rooms/:key",
+      "serves": [
+        "c5"
+      ],
+      "description": "新增 rooms 域：一次请求读写「录制(task) + 处理(hub 规则)」两半，内部仍调 store.* 与 hubStore.*（不改物理存储）。旧 /api/tasks 与 /api/hub/rules 保持可用。写路径做单次校验 + 失败回滚提示，避免前端连写两个接口造成半成功。",
+      "building_blocks": [
+        "RoomDTO/RoomPayload",
+        "GET/PUT /api/rooms/:key",
+        "两半写的原子性策略"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/core/src/api-types.ts",
+          "action": "modify",
+          "what": "RoomDTO / RoomPayload 类型"
+        },
+        {
+          "path": "packages/app/src/web/api/rooms.ts",
+          "action": "create",
+          "what": "buildRooms：GET 读两半、PUT 写两半（含校验）"
+        },
+        {
+          "path": "packages/app/src/web/api.ts",
+          "action": "modify",
+          "what": "组装 rooms 域"
+        },
+        {
+          "path": "packages/app/src/web/server.ts",
+          "action": "modify",
+          "what": "路由 /api/rooms 与 /api/rooms/:key"
+        },
+        {
+          "path": "test/app/web-api.test.ts",
+          "action": "modify",
+          "what": "读两半/写两半/不存在 404/缺 sourceTaskId 校验"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T9.1",
+          "description": "定义 RoomDTO {key,platform,roomSlug,room,recording{...task字段},processing{pipeline,workers,requires,enabled},sync{sourceTaskId}}"
+        },
+        {
+          "id": "T9.2",
+          "description": "实现 GET /api/rooms/:key：task(按 sourceTaskId 或 room 反查) + hub 规则合并"
+        },
+        {
+          "id": "T9.3",
+          "description": "实现 PUT /api/rooms/:key：先 updateTask，成功后再 upsertHubRule；第二步失败时回滚第一步并返回 500+原因"
+        },
+        {
+          "id": "T9.4",
+          "description": "路由注册（:key 用 decode，key 形如 douyin.123）"
+        }
+      ],
+      "tests": [
+        {
+          "description": "GET 返回录制与处理两半且与旧接口一致",
+          "kind": "unit"
+        },
+        {
+          "description": "PUT 同时改 quality 与 pipeline.steps 后，两处读回都变更",
+          "kind": "unit"
+        },
+        {
+          "description": "hub 写失败时 task 回滚（不出现半成功）",
+          "kind": "unit"
+        },
+        {
+          "description": "不存在房间 → 404",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "一个 PUT /api/rooms/:key 同时改录制与处理；旧 API 行为不变",
+        "写入失败不留半成功状态"
+      ],
+      "depends_on": [
+        "T2"
+      ],
+      "estimated_loc": 320,
+      "status": "done"
+    },
+    {
+      "id": "T10",
+      "title": "Hub 房间弹窗内联录制配置(复用既有 Hub 页,不新建页)",
+      "serves": [
+        "c5"
+      ],
+      "description": "**低风险版「一个房间一个入口」**:不新建 RoomsPage、不退役既有页面。就在用户已经在用的 Hub 页动手 —— HubRuleDialog 增加「录制」区块(quality/engine/danmu/segmentSec/useCookie/窗口),读写绑定的 source task;保存走 T9 的 `PUT /api/rooms/:key` 一次写两半(带回滚)。用户从此可在 Hub 一处配完该房间。既有 Tasks 页与 Hub 配置页**保持不变**(无需求反转、可随时回退)。完整单页合并见 T20(需你确认)。",
+      "building_blocks": [
+        "RoomsPage",
+        "RoomForm(录制+处理)",
+        "导航与路由"
+      ],
+      "tools": [
+        "tsc -b",
+        "vite build"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/web/src/modals/HubRuleDialog.tsx",
+          "action": "modify",
+          "what": "增「录制」区块,读写 source task;保存改用 PUT /api/rooms/:key"
+        },
+        {
+          "path": "packages/web/src/lib/i18n.tsx",
+          "action": "modify",
+          "what": "录制区块 + 「录制开关 vs 处理开关」说明文案"
+        },
+        {
+          "path": "packages/app/src/web/api/hub-rules.ts",
+          "action": "modify",
+          "what": "规则读返回绑定的 task 摘要(供弹窗回显)"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T10.1",
+          "description": "HubRuleDialog 增录制区块(字段来自任务):quality/engine/danmu/segmentSec/useCookie/scheduleStart/scheduleEnd"
+        },
+        {
+          "id": "T10.2",
+          "description": "回显:读规则时带出 source task 摘要(hub-rules API 扩展)"
+        },
+        {
+          "id": "T10.3",
+          "description": "保存:一次 PUT /api/rooms/:key 写录制+处理两半;失败展示原因并保留编辑态"
+        },
+        {
+          "id": "T10.4",
+          "description": "文案区分「录制开关(是否录)」与「处理开关(录完做什么)」,避免误操作"
+        }
+      ],
+      "tests": [
+        {
+          "description": "manual: 在 Hub 弹窗改 danmu 与 burn_livechat → 两处持久化,旧页面可见",
+          "kind": "manual"
+        },
+        {
+          "description": "manual: 保存失败时不产生半成功状态",
+          "kind": "manual"
+        }
+      ],
+      "acceptance_criteria": [
+        "在既有 Hub 页一处即可配完该房间的录制与处理(不新建页)",
+        "既有 Tasks 页与 Hub 配置页行为零变更",
+        "cd packages/web && pnpm build 通过"
+      ],
+      "depends_on": [
+        "T9"
+      ],
+      "estimated_loc": 240,
+      "status": "done"
+    },
+    {
+      "id": "T11",
+      "title": "产物完整性核验 + 延迟删源",
+      "serves": [
+        "c6"
+      ],
+      "description": "上传后核验「实际分 P 数 vs 实际提交的分组数」再决定是否删源。**不能用上界估**（splitToSizeLimit / uploadBatchSize / segmentGroupSec / splitGroupsBySession 都改变实际段数 → 会频繁误判，而 mismatch 又不删源 → 磁盘被占满）。基线必须是**实际上传的批次数**，且**两条上传路径都要写**：分段路径在 appendSegmentGroup 里写（已有 sync_parts），**合并路径（workflow.ts 的 upload_plain/append_danmu/append_livechat）目前完全不写 sync_parts → 必须补写**，否则合并路径期望恒为 0。期望 = 1(P1) + Σ doneParts(group).size（仅启用组）；countParts 返回 null 记入可重试状态（不立刻转人工）。接缝：PipelineDeps 增 `countParts?: (bv)=>Promise<number|null>`（缺省 undefined = 核验关闭），cli 注入 countVideoParts —— orchestrator 不得 import @drec/app。",
+      "building_blocks": [
+        "expectedParts(cfg, plan)",
+        "verifyUploaded(bv, expected)",
+        "deferDelete 决策"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/orchestrator/src/verify.ts",
+          "action": "create",
+          "what": "expectedPartCount / verifyUploaded（纯函数 + countParts 注入）"
+        },
+        {
+          "path": "packages/orchestrator/src/workflow.ts",
+          "action": "modify",
+          "what": "upload_plain/append_danmu/append_livechat 节点成功后 ledger.markPartDone（合并路径基线）"
+        },
+        {
+          "path": "packages/orchestrator/src/segment-pipeline.ts",
+          "action": "modify",
+          "what": "上传后先核验再清理；不一致则不删源"
+        },
+        {
+          "path": "packages/orchestrator/src/pipeline.ts",
+          "action": "modify",
+          "what": "合并路径同样先核验再清理"
+        },
+        {
+          "path": "packages/orchestrator/src/verify.test.ts",
+          "action": "create",
+          "what": "期望计算 / 不一致保留 / 一致删除 用例"
+        },
+        {
+          "path": "packages/core/src/hub-ledger-contract.ts",
+          "action": "modify",
+          "what": "HUB_STEP_NAMES 增 'clean_verify'"
+        },
+        {
+          "path": "packages/web/src/components/HubJobs.tsx",
+          "action": "modify",
+          "what": "ALL_STEP_KEYS 增 'clean_verify'（满足 _MissingStepKey 断言）+ 非流程渲染"
+        },
+        {
+          "path": "packages/web/src/lib/i18n.tsx",
+          "action": "modify",
+          "what": "stepNode.clean_verify 文案"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T11.1",
+          "description": "确认两路径 group 名**统一**：分段路径现状是 'plain'/'append_danmu'/'append_livechat'（segment-pipeline 传 step 名）；合并路径新增写入也用**同名**（'append_danmu'/'append_livechat'），不要另起 'danmu'/'livechat'（否则 expected 恒为 0 → 永远 mismatch）"
+        },
+        {
+          "id": "T11.2",
+          "description": "**合并路径**：workflow.ts 的 upload_plain/append_danmu/append_livechat 成功后调用 ledger.markPartDone(streamKey, group, idx)"
+        },
+        {
+          "id": "T11.3",
+          "description": "expected = 1 + (doneParts('plain').size-1) + doneParts('append_danmu').size + doneParts('append_livechat').size（仅启用组）；纯函数 verifyParts(expected, actual|null) → ok|mismatch|unknown"
+        },
+        {
+          "id": "T11.4",
+          "description": "PipelineDeps 增 countParts?；cli.ts 注入 (bv)=>countVideoParts(bv, cfg.cookies)"
+        },
+        {
+          "id": "T11.5",
+          "description": "unknown → 写 sync_node_states clean_verify=pending（可重试态），由 T12 的补跑机制下轮再验；mismatch → needs_manual+不删源；ok → 清理"
+        },
+        {
+          "id": "T11.6",
+          "description": "core hub-ledger-contract.ts 的 HUB_STEP_NAMES 增 'clean_verify'（否则 SyncLedger.syncNodeState(StepName) 类型不通过）"
+        },
+        {
+          "id": "T11.7",
+          "description": "**同步 web 的步骤清单**：packages/web/src/components/HubJobs.tsx 的 ALL_STEP_KEYS 增 'clean_verify'（否则 `_MissingStepKey extends never` 断言编译失败）；并在 i18n 补 `hub.jobs.stepNode.clean_verify` 文案，或显式把 clean_verify 标为非流程节点（从流程渲染中排除但仍在 ALL_STEP_KEYS 里满足类型）"
+        },
+        {
+          "id": "T11.8",
+          "description": "pipeline.ts 的续跑 append 路径同样依赖这些 markPartDone 记录（确认续跑语义不受影响）"
+        }
+      ],
+      "tests": [
+        {
+          "description": "分段路径 期望 9、实际 9 → ok",
+          "kind": "unit"
+        },
+        {
+          "description": "**合并路径** 期望 3、实际 2 → mismatch 且源保留",
+          "kind": "unit"
+        },
+        {
+          "description": "unknown（countParts null）→ 记 pending、不删源、不立即转人工；下轮 countParts 恢复正常后转 ok",
+          "kind": "unit"
+        },
+        {
+          "description": "未注入 countParts → 核验关闭，行为与现状一致",
+          "kind": "unit"
+        },
+        {
+          "description": "pnpm typecheck 通过（StepName 含 clean_verify）",
+          "kind": "unit"
+        },
+        {
+          "description": "cd packages/web && pnpm build 通过（ALL_STEP_KEYS 覆盖新增 StepName）",
+          "kind": "unit"
+        },
+        {
+          "description": "向后兼容：既有 sync_parts 行为 'plain'/'append_danmu'/'append_livechat' 的历史 job 在新公式下仍能算出正确 expected",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "分 P 数与期望不一致时不删源录像，转人工并告警",
+        "一致时清理行为与现状相同",
+        "新增 StepName 后 根 tsc 与 web tsc 均通过（两处清单同步）"
+      ],
+      "depends_on": [],
+      "estimated_loc": 330,
+      "status": "done"
+    },
+    {
+      "id": "T12",
+      "title": "清理独立化：可重试、与上传解耦、失败不影响终态",
+      "serves": [
+        "c6",
+        "c7"
+      ],
+      "description": "**先修前提**：现状 cleanup 错误被全部吞掉（transport.cleanup?.(paths).catch(()=>{})、defaultRmStage try/catch），所以今天 cleanup 不可能让 job 变 failed —— 真正的缺陷是「清理失败不可见」。做法：cleanupSourcesShared 收集每个目标的失败并返回 {ok, failed:[{target,error}]}；pipeline 在 markDone 之后调用 it，**绝不因清理失败改终态**，只把 clean_source/clean_stage_src/clean_stage 步骤标 failed 并记错误；reconciler 对 done 且存在 clean_* failed 的 job 补跑（带节流）；UI 显示可重试。",
+      "building_blocks": [
+        "cleanup 步骤状态机",
+        "retryCleanup(streamKey)",
+        "UI 展示"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/orchestrator/src/pipeline.ts",
+          "action": "modify",
+          "what": "cleanupSourcesShared 返回 {ok,failed}；markDone 后调用，失败只写 clean_* failed"
+        },
+        {
+          "path": "packages/orchestrator/src/segment-pipeline.ts",
+          "action": "modify",
+          "what": "两处 cleanupSourcesShared 调用点消费 {ok,failed} 并标 clean_* failed"
+        },
+        {
+          "path": "packages/orchestrator/src/reconciler.ts",
+          "action": "modify",
+          "what": "对 done 且 clean_*/clean_verify failed|pending 的 job 补跑（节流+幂等）"
+        },
+        {
+          "path": "packages/app/src/web/api/hub-jobs.ts",
+          "action": "modify",
+          "what": "暴露 pendingCleanup/verify 标记与重试入口"
+        },
+        {
+          "path": "packages/orchestrator/src/pipeline.test.ts",
+          "action": "modify",
+          "what": "清理失败不改终态 + 重试成功 用例"
+        },
+        {
+          "path": "packages/core/src/hub-ledger-contract.ts",
+          "action": "modify",
+          "what": "（若 T11 未加）确保 'clean_verify' 在 HUB_STEP_NAMES"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T12.1",
+          "description": "cleanupSourcesShared 返回 {ok, failed:[{target,error}]}（不再吞错）"
+        },
+        {
+          "id": "T12.2",
+          "description": "pipeline 与 segment-pipeline 两处调用点都消费返回值，标记 clean_* step failed"
+        },
+        {
+          "id": "T12.3",
+          "description": "reconciler 每轮补跑 done 且 clean_* failed 或 clean_verify pending 的 job（节流+幂等）"
+        },
+        {
+          "id": "T12.4",
+          "description": "API 暴露 pendingCleanup/pendingVerify，UI 显示并可重试"
+        },
+        {
+          "id": "T12.5",
+          "description": "补跑扫描必须插在 reconciler 对 job.state==='done' 的**终态短路之前**（否则永远看不到 done 的 clean_* failed/clean_verify pending）"
+        }
+      ],
+      "tests": [
+        {
+          "description": "注入抛错的 rmStage/transport.cleanup → job 仍 done、clean_* 为 failed",
+          "kind": "unit"
+        },
+        {
+          "description": "重跑清理成功后 clean_* 变 done",
+          "kind": "unit"
+        },
+        {
+          "description": "重复执行清理幂等（文件已不存在不报错）",
+          "kind": "unit"
+        },
+        {
+          "description": "分段路径 rmStage 抛错 → job 仍 done 且 clean_stage=failed",
+          "kind": "unit"
+        },
+        {
+          "description": "clean_verify=pending 的 job 在下一轮被重新核验",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "上传成功但清理失败时，job 不显示 failed，且能重试补齐",
+        "重试幂等（重复执行不报错）"
+      ],
+      "depends_on": [
+        "T11"
+      ],
+      "estimated_loc": 280,
+      "status": "done"
+    },
+    {
+      "id": "T13",
+      "title": "孤儿与中间产物维护清理（可预览、可审计）",
+      "serves": [
+        "c7"
+      ],
+      "description": "维护任务：扫描 recordings 与 stage，识别「空壳 xml（0 条 d/gift/member）」「无视频无内容 xml 的孤儿 session.json」「.upload/.work 残留」，先出报告（预览）再删。**必须服从 AGENTS.md 硬约束「.xml/.ass 不得删掉最后一份」**：recorderings/ 下的 xml 只在「同会话存在另一份有内容的 xml 或该场已在别处有副本」时才可删；判定不了就保留。删除集与保留集的定义**复用 cleanup-recording-today skill 的口径**（不新造策略），并写审计日志。",
+      "building_blocks": [
+        "scanOrphans(root)",
+        "cleanupOrphans(root, {dryRun})",
+        "审计日志"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [
+        "node:fs"
+      ],
+      "files": [
+        {
+          "path": "packages/app/src/orphan-cleanup.ts",
+          "action": "create",
+          "what": "scanOrphans / cleanupOrphans（纯文件操作，dryRun 支持）"
+        },
+        {
+          "path": "packages/app/src/web/api/maintenance.ts",
+          "action": "create",
+          "what": "GET 预览 + POST 执行"
+        },
+        {
+          "path": "packages/app/src/web/server.ts",
+          "action": "modify",
+          "what": "路由 /api/maintenance/orphans"
+        },
+        {
+          "path": "packages/app/src/orphan-cleanup.test.ts",
+          "action": "create",
+          "what": "空壳/孤儿识别、有内容 xml 保留、dryRun 不删 用例"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T13.1",
+          "description": "isEmptyXml(path)：无 <d /<gift /<member → true（纯函数）"
+        },
+        {
+          "id": "T13.2",
+          "description": "scanOrphans(root)：返回 {emptyXml[], orphanSession[], scratch[], reclaimableBytes}，并对每个 emptyXml 标注 keepReason（是否最后一份）"
+        },
+        {
+          "id": "T13.3",
+          "description": "cleanupOrphans(root,{dryRun})：只删 keepReason==null 的项 + 孤儿 session + scratch；否则保留"
+        },
+        {
+          "id": "T13.4",
+          "description": "审计日志：打印删除清单/计数/保留原因；POST 需显式 confirm=true"
+        }
+      ],
+      "tests": [
+        {
+          "description": "有内容的 xml 与含 gaps 的 session 永不进入删除集",
+          "kind": "unit"
+        },
+        {
+          "description": "dryRun 只返回清单不删文件",
+          "kind": "unit"
+        },
+        {
+          "description": "无 .ts 但 xml 有内容的会话 → session 保留",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "预览与实际删除一致；删除后再次扫描为空",
+        "recorderings/ 下唯一一份含弹幕的 xml 在任何情况下都不被删除（有单测守护）"
+      ],
+      "depends_on": [
+        "T12"
+      ],
+      "estimated_loc": 240,
+      "status": "done"
+    },
+    {
+      "id": "T14",
+      "title": "录制健康：以有效落盘判成功 + 短命录制熔断",
+      "serves": [
+        "c8"
+      ],
+      "description": "onLive 无条件清零 reconnectFails → 「起得来但几秒退出」无限 5s 重连（实测 1650 次）。但 record-engine 的进度信号是 protected/private，RecordingSession 拿不到 → 必须**先扩 core 契约**：Recorder 增可选 `lastProgressAgeMs?(): number|null`；PollingRecorder 用既有 lastAdvanceAt 实现（复用，不加第二套看门狗）；未实现该方法的 recorder → 回落「无信号规则」。常数：STABLE_RECORD_MS=120_000、SHORT_LIVED_ALARM=10。",
+      "building_blocks": [
+        "录制稳定性判定(时长+字节增长)",
+        "backoff 只在稳定后复位",
+        "熔断告警"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/core/src/types.ts",
+          "action": "modify",
+          "what": "Recorder 增可选 lastProgressAgeMs?(): number|null"
+        },
+        {
+          "path": "packages/record-engine/src/index.ts",
+          "action": "modify",
+          "what": "PollingRecorder 实现 lastProgressAgeMs()，复用 lastAdvanceAt/markProgress（无活动或无进度 → null）"
+        },
+        {
+          "path": "packages/manager/src/index.ts",
+          "action": "modify",
+          "what": "onLive 记 onLiveAt、移除无条件清零；按稳定性判据清零/累计"
+        },
+        {
+          "path": "test/session.test.ts",
+          "action": "modify",
+          "what": "MockDlrRecorder 增 lastProgressAgeMs；短命递进 + 稳定清零 + 熔断 用例"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T14.1",
+          "description": "core types.ts：Recorder 增 lastProgressAgeMs?(): number|null（可选，向后兼容）"
+        },
+        {
+          "id": "T14.2",
+          "description": "PollingRecorder 实现 lastProgressAgeMs()：无 proc 或 lastAdvanceAt===0 → null，否则 Date.now()-lastAdvanceAt"
+        },
+        {
+          "id": "T14.3",
+          "description": "RecordingSession：onLive 记 onLiveAt、移除无条件 reconnectFails=0；达 STABLE_RECORD_MS 且进度新鲜 → 清零"
+        },
+        {
+          "id": "T14.4",
+          "description": "无 lastProgressAgeMs 的 recorder → 以「录制时长 ≥ STABLE_RECORD_MS」为稳定性判据"
+        },
+        {
+          "id": "T14.5",
+          "description": "连续 SHORT_LIVED_ALARM 次短命 → notify error（继续按封顶退避，不放弃）"
+        }
+      ],
+      "tests": [
+        {
+          "description": "连续 5 次 5s 内退出 → 退避递增且不复位",
+          "kind": "unit"
+        },
+        {
+          "description": "稳定录制 ≥120s 后再断 → reconnectFails 归零",
+          "kind": "unit"
+        },
+        {
+          "description": "达 10 次短命 → 发一次 error 告警",
+          "kind": "unit"
+        },
+        {
+          "description": "MockDlrRecorder 增 lastProgressAgeMs 后既有 session 用例仍通过",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "短命录制不再以固定 5s 间隔无限重连（实测日志退避递增）",
+        "正常长直播断流后仍能快速恢复（不误伤）"
+      ],
+      "depends_on": [],
+      "estimated_loc": 300,
+      "status": "done"
+    },
+    {
+      "id": "T15",
+      "title": "资源池并行度可配置 + 同资源公平轮转",
+      "serves": [
+        "c3",
+        "c8"
+      ],
+      "description": "resources 存在 master 实际使用的那份 hub 配置里（**可能是 `--hub-config` 指定的文件或 settings.hubConfig**，不一定是 rootHubConfig()）。故：把「master 已解析的 hubConfig 路径」透传到 API（不再盲目 rootHubConfig()），新增 hub-config-store 原子写该文件；并把 resources 改为**每轮对账热读**（注入 getter，仿 loadTransports），使 UI 改完即生效（无需重启）。`maxConcurrentPipelines` 只在 cli.ts 注入 ReconcilerDeps 一处消费。",
+      "building_blocks": [
+        "resources 读写 API + UI",
+        "Semaphore FIFO 公平性",
+        "推荐值计算"
+      ],
+      "tools": [
+        "vitest",
+        "tsc -b",
+        "vite build"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/app/src/hub-config-store.ts",
+          "action": "create",
+          "what": "readResources(path)/writeResources(path,partial)：原子写、只改 resources 键、范围校验"
+        },
+        {
+          "path": "packages/app/src/web/api/settings.ts",
+          "action": "modify",
+          "what": "resources 经 hub-config-store 读写，路径由 deps 传入（已解析的那份）"
+        },
+        {
+          "path": "packages/app/src/cli-task.ts",
+          "action": "modify",
+          "what": "resolveHubConfigJson 同时返回已解析路径，供 API 复用"
+        },
+        {
+          "path": "packages/core/src/api-types.ts",
+          "action": "modify",
+          "what": "resources DTO 增 maxConcurrentPipelines"
+        },
+        {
+          "path": "packages/web/src/modals/SettingsDialog.tsx",
+          "action": "modify",
+          "what": "资源区块 + 推荐值 + 「立即生效」说明"
+        },
+        {
+          "path": "packages/cli/src/cli.ts",
+          "action": "modify",
+          "what": "ResourcePool 用 getter 热读 resources；maxConcurrentPipelines 注入 ReconcilerDeps"
+        },
+        {
+          "path": "test/app/hub-config-store.test.ts",
+          "action": "create",
+          "what": "读写往返/非法值/缺文件/不破坏 workers 用例"
+        },
+        {
+          "path": "packages/app/src/serve.ts",
+          "action": "modify",
+          "what": "适配 resolveHubConfigJson 新返回：两处调用点改用 .json（真值判断）与 .json/传给 HubStarter.start"
+        },
+        {
+          "path": "test/app/hub-config-scaffold.test.ts",
+          "action": "modify",
+          "what": "更新 5 处 resolver 返回断言（string → {json,path?,source}）"
+        },
+        {
+          "path": "packages/orchestrator/src/workflow.test.ts",
+          "action": "modify",
+          "what": "并行度变更即时生效 + 同资源 FIFO 无饿死 用例"
+        },
+        {
+          "path": "packages/app/src/web/server.ts",
+          "action": "modify",
+          "what": "RouteMatch 增 resources 路由 + WebServerDeps 增 hubConfigSource/path"
+        },
+        {
+          "path": "packages/app/src/web/api/types.ts",
+          "action": "modify",
+          "what": "ApiDeps 增 hubConfigSource/path；Api 增 getResources/setResources"
+        },
+        {
+          "path": "packages/orchestrator/src/workflow.ts",
+          "action": "modify",
+          "what": "ResourcePoolCfg/ResourcePool 支持 getter 热读（或每 tick 重建并保留 T8 持久化 times/blockedUntil）"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T15.1",
+          "description": "hub-config-store：readResources(path) 缺文件返回默认；writeResources 只覆盖 resources 键（保留 workers 等）"
+        },
+        {
+          "id": "T15.2",
+          "description": "resolveHubConfigJson 返回 {json, path?, source:'arg-file'|'settings'|'root-file'|'inline'}；API 按 source 写回：arg-file/root-file → 写该文件；settings → store.setSetting('hubConfig', json)；inline → 400（无法持久化内联配置）"
+        },
+        {
+          "id": "T15.3",
+          "description": "范围校验（≥1 / ≥0），非法值 400 且不改文件"
+        },
+        {
+          "id": "T15.4",
+          "description": "ResourcePool 的 maxCpuParallel/maxNetParallel/minBurnFreeMemMB 改为每 tick getter 热读（重启生效改为即时生效）"
+        },
+        {
+          "id": "T15.5",
+          "description": "maxConcurrentPipelines 经 ReconcilerDeps 注入（唯一消费点，服务 T7）"
+        },
+        {
+          "id": "T15.6",
+          "description": "live getter 每 tick 重新调用 resolver（cli 已有 store 引用），保证热读的是**当前实际生效的那份来源**"
+        },
+        {
+          "id": "T15.7",
+          "description": "resolveHubConfigJson 改为返回 {json,path?,source} 后，同步 serve.ts 两处调用点与 test/app/hub-config-scaffold.test.ts 的 5 处断言（否则 typecheck/test 必红）"
+        },
+        {
+          "id": "T15.8",
+          "description": "若选择「每 tick 重建池」：必须显式保留 T8 持久化的 uploadTimes/uploadBlockedUntil（否则热读会静默清掉限速历史）；否则注入 getter"
+        }
+      ],
+      "tests": [
+        {
+          "description": "writeResources 后 read 一致且 workers 未变",
+          "kind": "unit"
+        },
+        {
+          "description": "非法值被拒且文件不变",
+          "kind": "unit"
+        },
+        {
+          "description": "--hub-config 指定非默认文件时，API 写入的是该文件（而非 rootHubConfig()）",
+          "kind": "unit"
+        },
+        {
+          "description": "resources 变更后新出现的 run 立即采用新并行度（getter 热读）",
+          "kind": "unit"
+        },
+        {
+          "description": "source='settings' 时 API 写回 settings.hubConfig（不写文件）且下一 tick 生效",
+          "kind": "unit"
+        },
+        {
+          "description": "source='inline' 时 PUT resources 返回 400",
+          "kind": "unit"
+        },
+        {
+          "description": "pnpm typecheck 通过 + hub-config-scaffold 既有 5 用例更新后通过",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "UI 可改并行度并生效；非法值不写坏配置",
+        "同资源等待顺序稳定（无饿死）"
+      ],
+      "depends_on": [
+        "T7"
+      ],
+      "estimated_loc": 320,
+      "status": "done"
+    },
+    {
+      "id": "T16",
+      "title": "【后置/可选】节点应用回执与版本可见性",
+      "serves": [
+        "c1",
+        "c3"
+      ],
+      "description": "多节点分发目前无「期望版本 / 已应用版本 / bundle 版本」的可观测面。做法:节点 managed/rooms.json 增 {version,appVersion,appliedAt},`_node-status` 读回,master `/api/hub/workers/status` 透出,UI 显示漂移告警。**非关键路径**:不影响正确性,是运维可见性增强 → 排在 P1 之后,可按需做或不做。",
+      "building_blocks": [
+        "applyRemoteTasks 写 version+savedAt+appVersion",
+        "_node-status 隐藏命令",
+        "workers/status 汇总",
+        "漂移告警"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/app/src/managed-state.ts",
+          "action": "modify",
+          "what": "ManagedState 增 {version, appVersion, appliedAt}"
+        },
+        {
+          "path": "packages/app/src/task-sync.ts",
+          "action": "modify",
+          "what": "应用成功时写入 version（master 传入）"
+        },
+        {
+          "path": "packages/core/src/api-types.ts",
+          "action": "modify",
+          "what": "WorkerStatus 增 appliedVersion/expectedVersion/bundleVersion/syncError 可选字段"
+        },
+        {
+          "path": "packages/cli/src/cli.ts",
+          "action": "modify",
+          "what": "_apply-tasks 传期望版本；新增 `_node-status <dataRoot>` 隐藏命令"
+        },
+        {
+          "path": "packages/orchestrator/src/transport-ssh.ts",
+          "action": "modify",
+          "what": "nodeStatus?() 调用 _node-status；不可达/旧 bundle → null"
+        },
+        {
+          "path": "packages/app/src/web/api/workers.ts",
+          "action": "modify",
+          "what": "workers/status 合并版本字段与 syncError"
+        },
+        {
+          "path": "packages/web/src/components/WorkersPanel.tsx",
+          "action": "modify",
+          "what": "版本列 + 漂移告警徽标"
+        },
+        {
+          "path": "test/app/task-sync.test.ts",
+          "action": "modify",
+          "what": "版本矩阵（旧 worker unknown / 不一致告警 / 一致无告警）"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T16.1",
+          "description": "ManagedState 加 {version:number, appVersion:string, appliedAt:number}"
+        },
+        {
+          "id": "T16.2",
+          "description": "applyRemoteTasks 接收 opts.expectedVersion（master 递增的单调计数）并落盘"
+        },
+        {
+          "id": "T16.3",
+          "description": "新增隐藏命令 `_node-status <dataRoot>`：输出 {appVersion, appliedVersion, appliedAt, taskCount, managedCount}"
+        },
+        {
+          "id": "T16.4",
+          "description": "transport-ssh 增 nodeStatus?()；不可达/旧 bundle 返回 null（显示 unknown，不报错）"
+        },
+        {
+          "id": "T16.5",
+          "description": "workers/status + WorkersPanel：版本列与漂移告警（expected!=applied 或 appVersion 与 master 不一致）"
+        },
+        {
+          "id": "T16.6",
+          "description": "core api-types.ts：WorkerStatus 增可选字段（向后兼容，旧消费方忽略）"
+        }
+      ],
+      "tests": [
+        {
+          "description": "旧 worker（无 _node-status）→ status 显示 unknown 且不报错",
+          "kind": "unit"
+        },
+        {
+          "description": "expectedVersion 与 appliedVersion 不一致 → 漂移标记",
+          "kind": "unit"
+        },
+        {
+          "description": "版本一致时不产生告警",
+          "kind": "unit"
+        },
+        {
+          "description": "WorkerStatus DTO 序列化/反序列化保留新字段",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "/api/hub/workers/status 每个 worker 有 appliedVersion/expectedVersion/bundleVersion/syncError",
+        "master 与 worker 版本错配或同步失败时 UI 有可见告警",
+        "旧 bundle 兼容（unknown 而非报错）"
+      ],
+      "depends_on": [
+        "T1",
+        "T2"
+      ],
+      "estimated_loc": 300,
+      "status": "deferred"
+    },
+    {
+      "id": "T17",
+      "title": "录制侧状态实时化（任务/节点录制状态不再各自 5s 轮询）",
+      "serves": [
+        "c2",
+        "c8"
+      ],
+      "description": "SSE 只覆盖 sync 台账。任务/录制状态仍靠 5s SSH 探测（cli.ts recordingStatusTimer）+ /api/tasks 2~3s 轮询 → 「房间页」在开播/收播瞬间仍显陈旧。做法：a) 把 recordingStatusTimer 周期从 5s 缩短并可在 busy 时自适应；b) 本机录制状态变化（task-manager onLog/状态变更）时立即失效缓存并触发同一 SSE 的 changed 事件；c) 远端状态缓存带 lastCheckedAt 并透出，UI 标注「N 秒前」。",
+      "building_blocks": [
+        "recordingStatus 缓存 + 失效",
+        "HubWatch 触发点扩展",
+        "lastCheckedAt 透出"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/app/src/serve.ts",
+          "action": "modify",
+          "what": "一处构造 HubWatch/notifyChanged，同时传给 createWebServer 与 TaskManager deps"
+        },
+        {
+          "path": "packages/app/src/task-manager.ts",
+          "action": "modify",
+          "what": "起/停/开播状态变更时调用 notifyChanged()"
+        },
+        {
+          "path": "packages/app/src/hub-watch.ts",
+          "action": "modify",
+          "what": "公开 notifyChanged()（外部触发失效）"
+        },
+        {
+          "path": "packages/cli/src/cli.ts",
+          "action": "modify",
+          "what": "recordingStatus 周期自适应（有活动 2s / 空闲 10s）"
+        },
+        {
+          "path": "packages/app/src/web/api/tasks.ts",
+          "action": "modify",
+          "what": "返回 recordingStatusCheckedAt"
+        },
+        {
+          "path": "packages/web/src/components/RoomDetail.tsx",
+          "action": "modify",
+          "what": "显示「录制状态 N 秒前核对」"
+        },
+        {
+          "path": "test/app/web-api.test.ts",
+          "action": "modify",
+          "what": "lastCheckedAt 传播用例"
+        },
+        {
+          "path": "test/app/task-manager.test.ts",
+          "action": "modify",
+          "what": "起停触发一次 notifyChanged 用例"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T17.1",
+          "description": "recordingStatus 探测周期自适应：任一 worker 在录 → 2s，否则 10s"
+        },
+        {
+          "id": "T17.2",
+          "description": "TaskManager 状态变更（起/停/开播）时调用 hubWatch.notifyChanged()"
+        },
+        {
+          "id": "T17.3",
+          "description": "/api/tasks 响应带 recordingStatusCheckedAt；SSE changed 触发前端重取"
+        },
+        {
+          "id": "T17.4",
+          "description": "RoomDetail 显示「录制状态 N 秒前核对」；超期标黄"
+        },
+        {
+          "id": "T17.5",
+          "description": "serve.ts 构造一次 HubWatch，注入 createWebServer 的 deps 与 TaskManager 的 onStateChange，避免两处各建"
+        }
+      ],
+      "tests": [
+        {
+          "description": "本机任务起停后立即触发一次 changed（不等周期）",
+          "kind": "unit"
+        },
+        {
+          "description": "lastCheckedAt 随探测更新并透出",
+          "kind": "unit"
+        },
+        {
+          "description": "本机起停触发恰好一次 changed（不重复、不丢失）",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "开播/收播在房间页 1~2s 内反映（不再固定 5s+）",
+        "远端状态显示核对时间，陈旧时可识别"
+      ],
+      "depends_on": [
+        "T4",
+        "T6"
+      ],
+      "estimated_loc": 260,
+      "status": "done"
+    },
+    {
+      "id": "T18",
+      "title": "房间级动作(加在既有 Hub 房间详情,不新建页)",
+      "serves": [
+        "c5"
+      ],
+      "description": "房间级**动作**与配置收敛分开:本任务只在既有 `RoomDetail`(Hub 右详情 pane)加动作条,不做新页。动作:启用/停用自动录制 · 结束后停止(drain) · 立即停止(硬停,二次确认会截断录像) · 立即处理本场(run-now) · 重试清理。复用既有 API(`/api/tasks/:id/stop`、drain 语义、`/api/hub/jobs/run`、T12 的 cleanup retry)。",
+      "building_blocks": [
+        "RoomActionBar",
+        "共用 RoomFormFields（复用既有校验）",
+        "动作→API 映射"
+      ],
+      "tools": [
+        "tsc -b",
+        "vite build"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/web/src/components/RoomDetail.tsx",
+          "action": "modify",
+          "what": "增房间动作条(启停/drain/硬停确认/立即处理/重试清理)"
+        },
+        {
+          "path": "packages/web/src/lib/i18n.tsx",
+          "action": "modify",
+          "what": "动作与确认文案"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T18.1",
+          "description": "动作条:enabled 开关 → PUT /api/rooms;drain/stop → 既有接口(硬停二次确认)"
+        },
+        {
+          "id": "T18.2",
+          "description": "立即处理本场 → POST /api/hub/jobs/run(既有);重试清理 → T12 接口"
+        },
+        {
+          "id": "T18.3",
+          "description": "动作后即时刷新(SSE changed 或局部重取)"
+        }
+      ],
+      "tests": [
+        {
+          "description": "manual: 在 Hub 房间详情可完成启停/立即处理/重试清理并看到状态变化",
+          "kind": "manual"
+        }
+      ],
+      "acceptance_criteria": [
+        "配置与动作都能在既有 Hub 页完成,无需跨页",
+        "既有两页行为零变更"
+      ],
+      "depends_on": [
+        "T12"
+      ],
+      "estimated_loc": 220,
+      "status": "done"
+    },
+    {
+      "id": "T19",
+      "title": "节点侧上传共用持久化 601 冷却（T-18 房间不上传风暴）",
+      "serves": [
+        "c4"
+      ],
+      "description": "node-pipeline.ts（app L4）直接调 uploadPlain/appendGroup，无 ResourcePool、无冷却 → 节点侧上传（plans027 T-18）会绕开 T8 的限流，重演 601/21566 风暴。**架构约束**：app(rank 4) 不得 import orchestrator(4.5)（test/arch/layering.test.ts）。故共享组件放 **@drec/core（rank 0）**：`core/src/upload-gate.ts` 导出 UploadGate（可注入 store/now/sleep，纯契约 + 逻辑），orchestrator 的 ResourcePool 与该 core 契约对齐（复用同一语义），app/node-pipeline 直接消费 core 的 UploadGate（app 已依赖 core）。按账号键（如 `bilibili:<mid>`）持久化 blockedUntil/times；cli(L5) 负责装配（节点侧 gate 用节点本地 DB 行）。",
+      "building_blocks": [
+        "UploadGate(可注入 clock/sleep/store)",
+        "按账号分键的冷却",
+        "node-pipeline 接线"
+      ],
+      "tools": [
+        "vitest"
+      ],
+      "packages": [
+        "node:sqlite"
+      ],
+      "files": [
+        {
+          "path": "packages/core/src/upload-gate.ts",
+          "action": "create",
+          "what": "UploadGate：awaitSlot()/recordRateLimit()，可注入 store(读写成对)/now/sleep；不 import app/orchestrator"
+        },
+        {
+          "path": "packages/core/src/index.ts",
+          "action": "modify",
+          "what": "导出 upload-gate"
+        },
+        {
+          "path": "packages/orchestrator/src/upload-limits.ts",
+          "action": "modify",
+          "what": "持久化 store 类型与 core 契约对齐（同一 shape）；ResourcePool 继续消费"
+        },
+        {
+          "path": "packages/app/src/node-pipeline.ts",
+          "action": "modify",
+          "what": "上传前过 core UploadGate（节点本地 DB 行）；命中 601 记冷却"
+        },
+        {
+          "path": "packages/cli/src/cli.ts",
+          "action": "modify",
+          "what": "装配节点侧 gate（path/DB 与 mid 来源）"
+        },
+        {
+          "path": "test/app/node-pipeline.test.ts",
+          "action": "create",
+          "what": "节点侧命中 601 → 冷却跨重启保留 + 不超窗口 用例"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T19.1",
+          "description": "core/upload-gate.ts：UploadGate{awaitSlot(key), recordRateLimit(key)} + UploadGateStore 接口（read/write，实现由调用方注入）"
+        },
+        {
+          "id": "T19.2",
+          "description": "core 内实现默认 sqlite store 适配器接口签名（不绑定具体路径），orchestrator/app 各自注入真实 store"
+        },
+        {
+          "id": "T19.3",
+          "description": "ResourcePool 改为消费 core 的冷却语义（保持现有行为，仅共享实现/契约）"
+        },
+        {
+          "id": "T19.4",
+          "description": "node-pipeline 上传前 await gate.awaitSlot(accountKey)；配置了 accountKey 才启用；命中 601 gate.recordRateLimit"
+        },
+        {
+          "id": "T19.5",
+          "description": "cli 装配：节点侧 gate 用 <dataRoot>/db 的 upload_limits 行；accountKey = 'bilibili:'+DedeUserID（从 bilibili cookies.json 读，本地与 master 同账号 → 同键）"
+        },
+        {
+          "id": "T19.6",
+          "description": "若本轮不做：TODO 增条目 + 风险表写明「节点侧上传暂不受限，可能触发 601」"
+        }
+      ],
+      "tests": [
+        {
+          "description": "core UploadGate 单元：窗口内超限等待、命中限流后冷却（可注入 clock）",
+          "kind": "unit"
+        },
+        {
+          "description": "节点侧命中 601 后重启，冷却仍生效（同 accountKey）",
+          "kind": "unit"
+        },
+        {
+          "description": "app→core 依赖方向通过 test/arch/layering.test.ts",
+          "kind": "unit"
+        }
+      ],
+      "acceptance_criteria": [
+        "节点侧与 master 侧上传共享同一冷却/窗口（同 accountKey）",
+        "不引入 app→orchestrator 依赖（layering 测试必须通过）",
+        "若不实现：TODO 有条目且风险表登记，不静默"
+      ],
+      "depends_on": [
+        "T8"
+      ],
+      "estimated_loc": 300,
+      "status": "done"
+    },
+    {
+      "id": "T20",
+      "title": "【需你确认后立项】完整单页合并 + 退役旧入口",
+      "serves": [
+        "c5"
+      ],
+      "description": "**这是需求反转,不是 bug 修复** —— 把 Tasks 页与 Hub 配置页合并成单一 RoomsPage 并退役旧入口。只有在 T10/T18(低风险版)用起来后,你确认「确实需要单页」才立项。**当前不排期、不承诺**。若要立项,需先明确:①只要 task 无规则的房间 ②只要规则无 task 的房间 ③旧 URL 的处置(重定向/只读) ④退役周期。",
+      "building_blocks": [
+        "路由收敛",
+        "只读/重定向",
+        "弹窗删除"
+      ],
+      "tools": [
+        "tsc -b",
+        "vite build"
+      ],
+      "packages": [],
+      "files": [
+        {
+          "path": "packages/web/src/pages/TaskList.tsx",
+          "action": "modify",
+          "what": "移除配置入口（保留状态/详情/日志），或重定向到 /rooms"
+        },
+        {
+          "path": "packages/web/src/pages/HubPage.tsx",
+          "action": "modify",
+          "what": "移除规则配置表单（保留 jobs/队列/节点），指向 /rooms"
+        },
+        {
+          "path": "packages/web/src/App.tsx",
+          "action": "modify",
+          "what": "旧路由处理（重定向或只读）"
+        },
+        {
+          "path": "packages/web/src/lib/i18n.tsx",
+          "action": "modify",
+          "what": "迁移提示文案"
+        }
+      ],
+      "subtasks": [
+        {
+          "id": "T20.1",
+          "description": "(立项后)确认 /rooms 覆盖「只有 task」「只有规则」两种房间"
+        },
+        {
+          "id": "T20.2",
+          "description": "(立项后)旧页改只读或重定向,保留日志/详情"
+        },
+        {
+          "id": "T20.3",
+          "description": "(立项后)删除无引用弹窗或降为内部组件"
+        }
+      ],
+      "tests": [
+        {
+          "description": "manual: 旧 URL 不再是配置入口（重定向或只读），无双重写路径",
+          "kind": "manual"
+        },
+        {
+          "description": "manual: 两种房间（只有 task / 只有规则）都能在 /rooms 配完",
+          "kind": "manual"
+        }
+      ],
+      "acceptance_criteria": [
+        "需你明确确认后才有验收标准(当前不排期)"
+      ],
+      "depends_on": [
+        "T18",
+        "T10"
+      ],
+      "estimated_loc": 220,
+      "status": "decision-gated"
+    }
+  ],
+  "order": [
+    "T1",
+    "T11",
+    "T12",
+    "T13",
+    "T14",
+    "T2",
+    "T3",
+    "T4",
+    "T5",
+    "T6",
+    "T17",
+    "T7",
+    "T15",
+    "T8",
+    "T19",
+    "T18",
+    "T9",
+    "T10",
+    "T16",
+    "T20"
+  ],
+  "milestones": [
+    {
+      "id": "M1",
+      "name": "P0 止血(T1 已完成)",
+      "tasks": [
+        "T1"
+      ],
+      "ship_gate": "节点任务不再被误删;分P不符不删源;清理失败可见可重试;短命录制退避递增。每个任务独立可发布。"
+    },
+    {
+      "id": "M2",
+      "name": "实时与吞吐",
+      "tasks": [
+        "T4",
+        "T5",
+        "T6",
+        "T7",
+        "T8",
+        "T15",
+        "T19"
+      ],
+      "ship_gate": "队列/workflow SSE 1s 内同步且无旧值覆盖;后一房间 job 行立即可见;冷却跨重启保留;节点侧共用冷却。"
+    },
+    {
+      "id": "M3",
+      "name": "房间入口(低风险版)",
+      "tasks": [
+        "T9",
+        "T10",
+        "T18"
+      ],
+      "ship_gate": "在既有 Hub 页一处配完房间并可执行房间级动作;既有页面行为零变更。"
+    },
+    {
+      "id": "M4",
+      "name": "可选/需确认",
+      "tasks": [
+        "T16",
+        "T20"
+      ],
+      "ship_gate": "T16 运维可见性可按需;T20 是需求反转,需你确认后立项。当前不排期。"
+    }
+  ]
+}

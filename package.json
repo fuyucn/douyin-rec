@@ -1,6 +1,6 @@
 {
   "name": "douyin-rec",
-  "version": "0.0.37",
+  "version": "0.0.241",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.33.2",
@@ -23,6 +23,7 @@
     "mesio:install": "sh scripts/install-mesio.sh",
     "biliup:install": "sh scripts/install-biliup.sh",
     "test": "vitest run",
+    "test:e2e": "vitest run test/e2e",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

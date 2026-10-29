@@ -11,11 +11,14 @@
  * 弹幕已收进 Platform.connectDanmu,不再有弹幕 provider 注册。
  * 原「每平台 × ffmpeg/mesio」4 个录制器 provider 已删,收敛为引擎策略。
  */
-import { registerEngine, registerPlatform } from "@drec/core";
+import { registerEngine, registerPlatform, registerProcessor } from "@drec/core";
 import { douyinPlatform } from "@drec/douyin-live";
 import { bilibiliPlatform } from "@drec/bilibili-live";
 import { kuaishouPlatform } from "@drec/kuaishou-live";
 import { ffmpegEngine, mesioEngine } from "@drec/record-engine";
+import { existsSync } from "node:fs";
+import { makeBiliupProcessor, remuxProcessor, uploadPrepProcessor } from "@drec/processors";
+import { openNodeUploadGate, openNodeUploadSlot, resolveUploadAccountKey, rootBiliupCookies } from "@drec/app";
 
 // ── 平台 ────────────────────────────────────────────────────────────────────
 // 接第二平台:写 <平台>-core 实现 Platform + 在此 registerPlatform 一行。
@@ -27,6 +30,26 @@ registerPlatform(kuaishouPlatform); // 快手(取流 = 直播页 __INITIAL_STATE
 // 通用录制器(PollingRecorder)按 task.engine / platform.defaultEngine 选其一。
 registerEngine(ffmpegEngine);
 registerEngine(mesioEngine);
+
+// ── 后处理处理器 ──────────────────────────────────────────────────────────────
+// 加处理器 = `@drec/processors` 里一个模块 + 此处一行(与上面 registerPlatform / registerEngine 并列)。
+registerProcessor(remuxProcessor);
+registerProcessor(uploadPrepProcessor);
+// biliup on a node: same account rate-limit gate and local cookies as the blocking node pipeline (plan 038 T15b).
+// One gate per process: the runner lives in the long-running serve process, so a gate per job would leak a
+// sqlite handle per upload (the gate exposes no close); the store itself serialises across processes.
+let nodeUploadGate: ReturnType<typeof openNodeUploadGate> | undefined;
+// One node-wide upload slot, shared with rolling upload (plan 038 PR4); null = unusable store, never blocks.
+const nodeUploadSlot = openNodeUploadSlot();
+registerProcessor(makeBiliupProcessor({
+  gate: () => (nodeUploadGate ??= openNodeUploadGate()),
+  ...(nodeUploadSlot ? { slot: nodeUploadSlot } : {}),
+  accountKey: resolveUploadAccountKey,
+  localCookies: () => {
+    const local = process.env.BILIUP_COOKIE ?? rootBiliupCookies();
+    return existsSync(local) ? local : null;
+  },
+}));
 
 // ── 弹幕 ──────────────────────────────────────────────────────────────────────
 // 弹幕不再走「按名查 provider」注册表 —— 已收进 Platform.connectDanmu()(抖音见 @drec/douyin-live

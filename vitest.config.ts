@@ -49,11 +49,21 @@ export default defineConfig({
     alias: {
       "@drec/core": fileURLToPath(new URL("./packages/core/src/index.ts", import.meta.url)),
       "@drec/manager": fileURLToPath(new URL("./packages/manager/src/index.ts", import.meta.url)),
+      "@drec/proc-queue": fileURLToPath(new URL("./packages/proc-queue/src/index.ts", import.meta.url)),
+      "@drec/processors": fileURLToPath(new URL("./packages/processors/src/index.ts", import.meta.url)),
+      // 0 落盘直传(独立包,见 packages/zero-upload)。必须早于 processors 解析:
+      // processors 的入口 re-export 它,别名顺序不影响结果但指明了归属。
+      "@drec/zero-upload": fileURLToPath(new URL("./packages/zero-upload/src/index.ts", import.meta.url)),
       "@drec/post-process": fileURLToPath(new URL("./packages/post-process/src/index.ts", import.meta.url)),
       "@drec/douyin-live": fileURLToPath(new URL("./packages/douyin-live/src/index.ts", import.meta.url)),
       "@drec/record-engine": fileURLToPath(new URL("./packages/record-engine/src/index.ts", import.meta.url)),
       "@drec/ffmpeg-recorder-extra": fileURLToPath(new URL("./packages/ffmpeg-recorder-extra/src/index.ts", import.meta.url)),
       "@drec/orchestrator": fileURLToPath(new URL("./packages/orchestrator/src/index.ts", import.meta.url)),
+      // web 表单规则经此 alias 复用 core 纯判定(与 packages/web/vite.config.ts 同名同目标)。
+      "@drec/rolling-policy": fileURLToPath(new URL("./packages/core/src/rolling-policy.ts", import.meta.url)),
+      "@drec/zero-disk-policy": fileURLToPath(new URL("./packages/core/src/zero-disk-policy.ts", import.meta.url)),
+      "@drec/hub-ledger-contract": fileURLToPath(new URL("./packages/core/src/hub-ledger-contract.ts", import.meta.url)),
+      "@drec/output-format": fileURLToPath(new URL("./packages/core/src/output-format.ts", import.meta.url)),
     },
   },
 });

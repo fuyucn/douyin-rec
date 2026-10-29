@@ -53,6 +53,15 @@ describe("SyncLedger", () => {
     expect(l.get("k1")?.error).toBe("boom");
     l.close();
   });
+  it("setBvAndSeasonState writes the upload BV and season intent together", () => {
+    const l = fresh();
+    const bv = ["B", "V", "atomic"].join("");
+    l.upsertPending("k1");
+    l.setBvAndSeasonState("k1", bv, "pending");
+    expect(l.get("k1")?.bv).toBe(bv);
+    expect(l.get("k1")?.seasonState).toBe("pending");
+    l.close();
+  });
   it("状态转换自动记入 sync_job_events(时间线可复盘:每步起点=事件时刻)", () => {
     const l = fresh();
     l.upsertPending("k1");                       // → pending 事件
@@ -71,7 +80,7 @@ describe("SyncLedger", () => {
   it("listRecent 按 updatedAt 倒序返回最近 N 个 job", () => {
     const l = fresh();
     l.upsertPending("a"); l.upsertPending("b"); l.upsertPending("c");
-    l.setState("b", "merging");                  // b 最新
+    l.setState("b", "syncing"); l.setState("b", "merging"); // b 最新
     const rows = l.listRecent(2);
     expect(rows).toHaveLength(2);
     expect(rows[0].streamKey).toBe("b");
@@ -160,7 +169,7 @@ describe("ledger 列迁移 tenant→worker(幂等 RENAME COLUMN)", () => {
   it("setBv 只落 bv 列,不改 state、不产生新事件", () => {
     const l = fresh();
     l.upsertPending("k1");                 // pending
-    l.setState("k1", "uploading");         // uploading
+    l.setState("k1", "syncing"); l.setState("k1", "merging"); l.setState("k1", "uploading"); // uploading
     const before = l.getEvents("k1").length;
     l.setBv("k1", "BVabc");
     expect(l.get("k1")?.bv).toBe("BVabc");
@@ -317,6 +326,23 @@ describe("sweepStale 崩溃恢复", () => {
     expect(l.getNodeState("douyin:6:2026-08-11", "merge")?.error).toBeNull();
     expect(l.getNodeState("douyin:6:2026-08-11", "burn_danmu")?.state).toBe("pending");
     expect(l.getNodeState("douyin:6:2026-08-11", "upload_plain")?.state).toBe("done");
+    l.close();
+  });
+});
+
+describe("backfillNodeStates", () => {
+  it("a skipped step carries no node verdict; an unfinished start still backfills as failed (issue #176)", () => {
+    const l = fresh();
+    l.upsertPending("k1");
+    l.logStep("k1", "merge", "start");
+    l.logStep("k1", "merge", "done");
+    l.logStep("k1", "burn_danmu", "skipped");
+    l.logStep("k1", "burn_livechat", "start");
+    l.backfillNodeStates("k1");
+    const states = new Map(l.getNodeStates("k1").map((n) => [n.node, n.state]));
+    expect(states.get("merge")).toBe("done");
+    expect(states.has("burn_danmu")).toBe(false);
+    expect(states.get("burn_livechat")).toBe("failed");
     l.close();
   });
 });

@@ -49,6 +49,56 @@ describe("hub-store(文件版,按平台限定 key)", () => {
     expect(updateHubRule(dir, "douyin.nope", { enabled: true })).toBeNull();
   });
 
+  // ── pipeline 深合并(修静默数据丢失)─────────────────────────────────────────
+  // 背景:前端房间编辑面板只提交它知道的字段(步骤 + upload 的 mode/private/tag/tid/desc)。
+  // 若 update 整体替换 pipeline,一次「只改一个步骤」的保存就会把 cleanup(清理开关)
+  // 与 titleTemplate 等标题模板静默抹掉 —— 它们不在该表单里,用户看不出自己弄丢了什么。
+  it("update 深合并 pipeline:未提交的 cleanup / 标题模板不被抹掉(静默丢失回归)", () => {
+    upsertHubRule(dir, {
+      platform: "douyin",
+      roomSlug: "123456",
+      pipeline: {
+        steps: { mergeSegments: true, burnDanmu: true },
+        cleanup: { sourceAfterDone: true, stageAfterDone: true },
+        upload: { mode: "upload", tid: 21, tag: "旧tag", titleTemplate: "{name}_{date}", partTitleTemplate: "P{part}" },
+        minSegmentSec: 5,
+      },
+    });
+    // 模拟面板保存:只提交 steps 的一个开关 + upload 的部分字段(不含 cleanup/标题模板)。
+    updateHubRule(dir, "douyin.123456", {
+      pipeline: { steps: { burnDanmu: false }, upload: { mode: "upload", private: true } },
+    });
+    const p = getHubRule(dir, "douyin.123456")!.pipeline;
+    // 提交的字段生效
+    expect(p.steps?.burnDanmu).toBe(false);
+    expect(p.upload?.private).toBe(true);
+    // 同层未提交的字段保留(不是被整体替换清空)
+    expect(p.steps?.mergeSegments).toBe(true);
+    expect(p.upload?.tag).toBe("旧tag");
+    expect(p.upload?.tid).toBe(21);
+    expect(p.upload?.titleTemplate).toBe("{name}_{date}");
+    expect(p.upload?.partTitleTemplate).toBe("P{part}");
+    // 外层未提交的字段保留
+    expect(p.cleanup).toEqual({ sourceAfterDone: true, stageAfterDone: true });
+    expect(p.minSegmentSec).toBe(5);
+  });
+
+  it("upsert 也深合并 pipeline(同 key 二次写不丢 cleanup)", () => {
+    upsertHubRule(dir, {
+      platform: "douyin",
+      roomSlug: "123456",
+      pipeline: { steps: { burnDanmu: true }, cleanup: { sourceAfterDone: true } },
+    });
+    upsertHubRule(dir, {
+      platform: "douyin",
+      roomSlug: "123456",
+      pipeline: { steps: { burnLivechat: true } },
+    });
+    const p = getHubRule(dir, "douyin.123456")!.pipeline;
+    expect(p.steps).toEqual({ burnDanmu: true, burnLivechat: true });
+    expect(p.cleanup).toEqual({ sourceAfterDone: true });
+  });
+
   it("remove 删文件(按 key);不存在返回 false", () => {
     upsertHubRule(dir, { platform: "douyin", roomSlug: "123456" });
     expect(removeHubRule(dir, "douyin.123456")).toBe(true);
@@ -100,6 +150,21 @@ describe("hub-store(文件版,按平台限定 key)", () => {
     expect(bare.workers).toBeUndefined();
   });
 
+  it("requires 字段创建/更新往返;空数组视为无要求(不落盘)", () => {
+    const r = upsertHubRule(dir, { platform: "douyin", roomSlug: "123456", requires: ["danmu:douyin"] });
+    expect(r.requires).toEqual(["danmu:douyin"]);
+    expect(getHubRule(dir, "douyin.123456")!.requires).toEqual(["danmu:douyin"]);
+    // update 改 requires
+    const u = updateHubRule(dir, "douyin.123456", { requires: ["danmu:douyin", "burn"] })!;
+    expect(u.requires).toEqual(["danmu:douyin", "burn"]);
+    // 空数组 → 清空(undefined)
+    const cleared = updateHubRule(dir, "douyin.123456", { requires: [] })!;
+    expect(cleared.requires).toBeUndefined();
+    // 缺省 = 无要求
+    const bare = upsertHubRule(dir, { platform: "douyin", roomSlug: "999" });
+    expect(bare.requires).toBeUndefined();
+  });
+
   it("reorder:整体重排写 order;upsert/update 沿用 order;集合不匹配则拒绝", () => {
     upsertHubRule(dir, { platform: "douyin", roomSlug: "aaa" });
     upsertHubRule(dir, { platform: "douyin", roomSlug: "bbb" });
@@ -128,5 +193,22 @@ describe("hub-store(文件版,按平台限定 key)", () => {
   it("localSuppressedSourceTaskIds:远端 worker 已被删除(幽灵 id)→ 不抑制本机,避免两头都不录", () => {
     upsertHubRule(dir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 10 }, workers: ["ghost"] });
     expect([...localSuppressedSourceTaskIds(dir, new Set(["local"]))]).toEqual([]);
+  });
+
+  it("T-10 能力门控:远端存在但缺 requires 能力 → 不抑制本机(否则两头都不录)", () => {
+    // vps2 存在,但规则要求 danmu:douyin,而 vps2 无此能力 → reconciler 会排除它 → 本机必须实跑。
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 10 }, workers: ["vps2"], requires: ["danmu:douyin"] });
+    const capsNoDanmu = () => undefined;                                  // vps2 无能力
+    expect([...localSuppressedSourceTaskIds(dir, new Set(["local", "vps2"]), capsNoDanmu)]).toEqual([]);
+    // 同一规则:vps2 具备 danmu:douyin → 远端能接 → 本机抑制。
+    const capsWithDanmu = (id: string) => (id === "vps2" ? ["danmu:douyin"] : undefined);
+    expect([...localSuppressedSourceTaskIds(dir, new Set(["local", "vps2"]), capsWithDanmu)]).toEqual([10]);
+  });
+
+  it("T-10:无能力信息时不抑制(安全默认:宁可本机实跑,也不冒「两头都不录」的风险)", () => {
+    upsertHubRule(dir, { platform: "douyin", roomSlug: "111", recording: { sourceTaskId: 10 }, workers: ["vps2"], requires: ["danmu:douyin"] });
+    // 不传第 3 参(拿不到能力)→ 无法证明远端合格 → 不抑制本机(与 reconciler 同判定:
+    // requires 非空时 satisfiesCapabilities(undefined, requires)=false)。
+    expect([...localSuppressedSourceTaskIds(dir, new Set(["local", "vps2"]))]).toEqual([]);
   });
 });

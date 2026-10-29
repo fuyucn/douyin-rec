@@ -1,3 +1,4 @@
+import type { PathLayout } from "./output-paths.js";
 /** 一条弹幕消息（统一模型，Recorder/DanmuSource 都用） */
 export type DanmuKind = "danmaku" | "gift" | "member";
 export interface DanmuMessage {
@@ -19,6 +20,8 @@ export interface StreamInfo {
   title?: string;
   /** 分辨率/编码，如 "1088x1920 | H264" */
   streamDesc?: string;
+  /** Platform id of the broadcast being recorded (`PlatformStream.liveSessionId`); absent when unknown. */
+  liveSessionId?: string;
 }
 
 export interface RecordOpts {
@@ -33,12 +36,34 @@ export interface RecordOpts {
    */
   name?: string;
   /**
+   * Recording directory layout for NEW sessions (issue #336): "room" = `<name>_<platform>_<room>/`,
+   * anything else / omitted = the legacy `<name>/` directory. Node-local switch, read by the CLI at start.
+   */
+  outputLayout?: PathLayout;
+  /**
    * 弹幕 xml 落盘粒度（仅当弹幕由 DanmuSource + 我们的 XmlDanmuWriter 写时生效）：
    *   "session"（默认）— 整场一个 xml，合并时按 ffprobe 时长切 ASS。最稳，避开断流位移。
    *   "segment"        — 每个视频分段一个 xml（{base}_NNN.xml），配对好看但断流可能位移。
    */
   danmuXmlMode?: "session" | "segment";
+  /**
+   * **新一场开播的准入闸门**(磁盘水位,issue #96)。录制器在确认开播、**即将起录一场新直播之前**调用:
+   * `{ok:false}` → 本轮不起录、保持「等待开播」,下一轮轮询再试(空间恢复后自动开始,无需重启);
+   * 不实现 / 返回 `{ok:true}` = 放行(默认,行为不变)。
+   * 只用于**新一场**:同场断流重连由会话层放行(绝不据此打断/拒绝同场重连,见 plans/033 I2 与 D6)。
+   * 实现必须便宜且不抛错(抛错视为放行,不能因探测失败误拦录制)。
+   */
+  admit?: () => AdmitDecision;
 }
+
+/** 准入判定:放行,或带原因拒绝(原因会进日志与告警)。 */
+export type AdmitDecision =
+  | { ok: true }
+  /**
+   * `reason` 是给人看的完整说明(可含实时数值);`key` 是**稳定的去重键**(不含实时数值)。
+   * 告警 / 日志按 `key ?? reason` 去重:否则剩余空间每变 0.1GB 就当成新原因、每轮轮询都发一条。
+   */
+  | { ok: false; reason: string; key?: string };
 
 export interface RecorderEvents {
   /**
@@ -74,6 +99,17 @@ export interface Recorder {
    * 未实现时 session 只依赖 RecordStop / onOffline 事件。
    */
   isLive?(): Promise<boolean>;
+  /**
+   * 「输出是否还在前进」的**可选**信号(毫秒龄):录制器最近一次确认有新增字节/时间戳前进
+   * 距今多久。`null` = 当前**没有活跃录制**或**从未有过进度**(无从判断)。
+   *
+   * 用途(T14):上层 `RecordingSession` 用它区分「真的录稳了」与「起得来但几秒就退出」——
+   * 只有「录制时长够 + 进度新鲜」才允许把重连退避复位。**未实现该方法的 recorder 视为无信号**,
+   * 上层回落到「无信号 → 录制时长够即算成功」,老 recorder 无需改动(向后兼容)。
+   * ⚠️ 实现必须复用**自己已有的**卡死看门狗时钟(不得引入第二套),且无活跃进程时返 `null`
+   * (返回 ~epoch 的巨大年龄会被误判成「卡死」)。
+   */
+  lastProgressAgeMs?(): number | null;
   /**
    * 「疑似本场结束」提示(来自弹幕 ControlMessage 等旁路信号)。实现方**必须**用权威 `getLiving`
    * 复核:false → 立刻收尾(把「等看门狗 60s」缩短到秒级);true/未知 → 忽略(网络抖动)。

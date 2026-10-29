@@ -1,6 +1,10 @@
 // ts/test/upload/biliup.test.ts
 import { describe, it, expect } from "vitest";
 import { biliupCookieHeader, buildUploadArgs, parseBV, uploadPlain } from "../../packages/app/src/upload/biliup.js";
+import { isUploadRateLimited } from "../../packages/core/src/upload-contract.js";
+
+// 提交接口显式 web(app 默认更易触发 21566 风控,见 biliup.ts 的 uploadSubmit 注释)。
+const SUBMIT = ["--submit", "web"];
 
 describe("biliup 包装", () => {
   it("buildUploadArgs：公开稿件参数映射", () => {
@@ -10,6 +14,7 @@ describe("biliup 包装", () => {
     });
     const s = a.join(" ");
     expect(s).toContain("-u /c/cookies.json upload /o/x.mp4");
+    expect(s).toContain("--submit web");   // 提交接口显式 web
     expect(s).toContain("--title 标题");
     expect(s).toContain("--tid 21");
     expect(s).toContain("--tag a,b,c");
@@ -41,6 +46,7 @@ describe("biliup 包装", () => {
     });
     const s = a.join(" ");
     expect(s).toContain("-u /c/c.json upload /o/seg000.mp4 /o/seg001.mp4 /o/seg002.mp4");
+    expect(s).toContain("--submit web");
     // 顺序 = 分 P 顺序,且仍带关水印/仅自己可见
     expect(s).toContain('--extra-fields {"watermark":{"state":0}}');
     expect(s).toContain("--is-only-self 1");
@@ -62,6 +68,47 @@ describe("biliup 包装", () => {
     expect(bv).toBe("BV1Ab4y1C7xY");
     expect(calls[0]).toContain("alia");
     expect(calls[1]).toContain("txa");
+  });
+  // 回归：上游 504 文案是 "Gateway Time-out"(连字符),旧正则 `timed? out` 匹配不到 →
+  // 被当成不可重试,线路不切换、整场 504 转 needs_manual。报错样例取自线上 job log。
+  it("uploadPlain：上游 504 Gateway Time-out 视为可换线重试", async () => {
+    const calls: string[][] = [];
+    const run = async (argv: string[]): Promise<string> => {
+      calls.push(argv);
+      if (argv.includes("alia")) {
+        throw new Error(
+          "biliup 失败 (rc=1): HTTP status server error (504 Gateway Time-out) for url " +
+            "(https://upos-cs-upcdnalia.bilivideo.com/ugcever/x.mp4?chunks=318&chunk=45&partNumber=46&start=471859200&end=482344960)",
+        );
+      }
+      return "投稿成功 BV1Ab4y1C7xY";
+    };
+    const bv = await uploadPlain({
+      plain: { video: "/o/x.mp4", cookies: "/c/c.json", title: "t", tag: "x", tid: 21, public: false },
+      run,
+      lines: ["alia", "txa"],
+    });
+    expect(bv).toBe("BV1Ab4y1C7xY");
+    expect(calls.map((c) => c.find((a) => a === "alia" || a === "txa"))).toEqual(["alia", "txa"]);
+  });
+  it("uploadPlain：502/503 服务端错误也可换线重试", async () => {
+    for (const code of ["502 Bad Gateway", "503 Service Temporarily Unavailable"]) {
+      const calls: string[][] = [];
+      const run = async (argv: string[]): Promise<string> => {
+        calls.push(argv);
+        if (argv.includes("alia")) {
+          throw new Error(`biliup 失败 (rc=1): HTTP status server error (${code}) uploader.rs:557 start=100 end=200`);
+        }
+        return "投稿成功 BV1Ab4y1C7xY";
+      };
+      const bv = await uploadPlain({
+        plain: { video: "/o/x.mp4", cookies: "/c/c.json", title: "t", tag: "x", tid: 21, public: false },
+        run,
+        lines: ["alia", "txa"],
+      });
+      expect(bv).toBe("BV1Ab4y1C7xY");
+      expect(calls).toHaveLength(2);
+    }
   });
   it("uploadPlain：鉴权/参数错误不换线，避免重复上传", async () => {
     const calls: string[][] = [];
@@ -89,5 +136,53 @@ describe("biliup 包装", () => {
         ],
       },
     })).toBe("SESSDATA=sess; bili_jct=csrf");
+  });
+});
+
+describe("提交接口 --submit(防风控 21566)", () => {
+  // 回归:曾经漏带 --submit → biliup CLI 默认走 app 接口 → 21566「投稿过于频繁」→ 整场转人工。
+  it("buildUploadArgs 默认带 --submit web", () => {
+    const a = buildUploadArgs({ video: "/o/x.mp4", cookies: "/c/c.json", title: "t", tag: "x", tid: 21, public: false });
+    expect(a).toContain("--submit");
+    expect(a[a.indexOf("--submit") + 1]).toBe("web");
+  });
+  it("BILIUP_SUBMIT 可覆盖为 app(回退旧 CLI 默认)", () => {
+    const prev = process.env.BILIUP_SUBMIT;
+    process.env.BILIUP_SUBMIT = "app";
+    try {
+      const a = buildUploadArgs({ video: "/o/x.mp4", cookies: "/c/c.json", title: "t", tag: "x", tid: 21, public: false });
+      expect(a[a.indexOf("--submit") + 1]).toBe("app");
+    } finally {
+      if (prev === undefined) delete process.env.BILIUP_SUBMIT; else process.env.BILIUP_SUBMIT = prev;
+    }
+  });
+  it("BILIUP_SUBMIT 非法值回落 web(不静默传非法串给 biliup)", () => {
+    const prev = process.env.BILIUP_SUBMIT;
+    process.env.BILIUP_SUBMIT = "bogus";
+    try {
+      const a = buildUploadArgs({ video: "/o/x.mp4", cookies: "/c/c.json", title: "t", tag: "x", tid: 21, public: false });
+      expect(a[a.indexOf("--submit") + 1]).toBe("web");
+    } finally {
+      if (prev === undefined) delete process.env.BILIUP_SUBMIT; else process.env.BILIUP_SUBMIT = prev;
+    }
+  });
+});
+
+describe("isUploadRateLimited：识别 601 与 21566", () => {
+  it("601 上传视频过快", () => {
+    expect(isUploadRateLimited(new Error("biliup 失败 (rc=1): code: 601 您上传视频过快，请您稍作休息后再继续"))).toBe(true);
+  });
+  it("21566 投稿过于频繁(app 接口风控)", () => {
+    // 真实报错形态(biliup 1.2.1):ResponseData { code: 21566, ..., message: "投稿过于频繁…" }
+    const msg = 'biliup 失败 (rc=1): ResponseData { code: 21566, data: None, message: "投稿过于频繁，建议将APP升级至最新版本后再试", ttl: Some(1) }';
+    expect(isUploadRateLimited(new Error(msg))).toBe(true);
+  });
+  it("21186 投稿频率过快(并发建稿实测:两个房间同时开录时命中)", () => {
+    const msg = 'create failed: {"code":21186,"message":"您投稿的频率过快，请稍等2秒","ttl":1}';
+    expect(isUploadRateLimited(new Error(msg))).toBe(true);
+  });
+  it("普通错误不误判", () => {
+    expect(isUploadRateLimited(new Error("登录已失效"))).toBe(false);
+    expect(isUploadRateLimited(new Error("biliup 失败 (rc=1): HTTP status server error (500)"))).toBe(false);
   });
 });

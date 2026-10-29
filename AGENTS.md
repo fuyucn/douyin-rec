@@ -6,7 +6,7 @@
 提供 CLI 子命令与 Web UI（React）。支持 **master + worker 多节点架构**：master 通过 hub 编排把录制任务
 同步下发到选定节点，收播后在 master 侧做合并/烧录/上传。
 
-**技术栈**：Node 24（ESM，`.js` import 后缀）、pnpm workspace（13 个包）、TypeScript、vitest、
+**技术栈**：Node 24（ESM，`.js` import 后缀）、pnpm workspace（16 个包）、TypeScript、vitest、
 commander、esbuild 双产物打包（`dist/douyin-rec.mjs` + `dist/tui.mjs`）、`node:sqlite`（内置）。
 录制自研：`record-engine` 提供通用轮询基类 + 可插拔 ffmpeg/mesio 引擎；取流靠 vendored a_bogus 签名
 （`packages/douyin-live/src/vendor`）；弹幕 WS 客户端自研（参考 `douyin-danma-listener` 重写，
@@ -28,8 +28,30 @@ commander、esbuild 双产物打包（`dist/douyin-rec.mjs` + `dist/tui.mjs`）�
   Global Constraints），并**在 `TODO.md` 里挂链接**；plan 与 TODO 双向引用。
 - **提交**：`TODO.md` 与 plan 文件按仓库提交规范单独 commit（见「提交规范」），代码变更分开。
 
-当前台账速览（细节以 `TODO.md` 为准）：`T-1` 能力门控、`T-3` 选优补弹幕维度（这两项本轮要做）；
-`T-2` 负载分摊（未来，见 `plans/026_worker_load_placement.md`）；`T-4`…`T-9` 见文件。
+**不要在这里维护台账速览**——它会过期（曾长期写着已完成的 T-1/T-3）。以 `TODO.md` 的
+「进行中」段为唯一真相；要指代某项，直接引用它的 `T-N`。
+
+## Agent 开发流程（agent 必读）
+
+线上问题和优化走 GitHub issue，不在对话里直接开做。细则见 `docs/agent-workflow.md`。
+
+- **值班 Audit 只读。** 可以查三节点录制、`/api/hub/queue`、`sync_jobs`、磁盘和日志。没有命令输出不算 issue。不改代码、不删文件、不重启、不另开上传。
+- **issue 不写隐私。** 禁止主播名、房间号、streamKey、文件名、BV、IP、主机名、路径、cookie、webhook。
+  开票**和发评论前**都先跑 `python3 scripts/issue-guard.py <file>`（评论也过一遍），命中就脱敏。细节留在本地台账。
+- **优化建议单独开 `enhancement`。** 不和故障混在一条 issue 里。
+- **Triage 只打标签：** `accept` / `decline` / `needs-decision`。上传、删源、部署、改 hub 规则一律 `needs-decision`，不能自行 accept。
+  `needs-decision` 的评论必须写「决定三行」：要决定什么 / 不做会怎样 / 建议选项。
+- **只有 `accept` 的 issue 才能改代码。** 一个 issue 一个分支；完成开 PR，PR 链到 issue（分步实现的票中间各步写 `Part of #N`、最后一步写 `Fixes #N`）。**不合并 PR（合并归 review 会话）、不部署。** `accept` 之后再在 `TODO.md` 记一条 `T-N`，并写上 issue 链接。
+- **issue 评论也算输入。** 实现前读完评论。可以不采纳，但 PR 里要写出理由。
+- **`accept` ≠ 有人在做。** 实现 heartbeat 自动认领：扫到 `accept` 且无 `in-progress` 的票即打 `in-progress` 并评论「哪个 agent、何时开始」；人只在想指定别的会话做时手动接管。
+- **做完要留言，然后可以 close。** 先总结结果和未采纳的理由，再按「四不 close」门禁自查（有证据 / 已验证 / 有回归测试 / 已回写经验）；**四条全过，agent 可直接 `gh issue close` 并写明关闭依据**，不必等人。缺任一条就不 close，改成在 issue 里写清缺口并保持 open。
+- **PR 由自动 review 会话审查，门禁全过即由 agent 合并**（`gh pr merge --merge`，base 保持
+  `feat/hub-optimization`）——不必等人手动合并；review 只打回、不代改代码。
+- **RISK 门禁：** 合并前跑 `scripts/pr-risk-scan.sh`；输出 `RISK`（上传 / 清理删除 / 保留规则 / ledger、
+  或改了敏感文件清单）→ 不自动合并，票转 `needs-decision` 并写「决定三行」，等人拍板。
+- **打回回路：** review 不过 → PR 保持 open、票转 `rework-1`（再不过 `rework-2`），实现会话在原分支返工后
+  转回 `in-review` 重审；第 3 次仍不过转 `needs-decision`。细则见 `docs/agent-workflow.md`「review 门禁」。
+- **部署仍由人做（部署不变）。** master 与 VPS1 任一 `recording===true` 就等；用户明确 override 除外。
 
 ## 自审循环（agent 必读：写完 ≠ 完成）
 
@@ -107,8 +129,8 @@ pnpm serve:local                                           # 本地开发（port
 ## 仓库布局（pnpm workspace monorepo，`packages/*`）
 
 分层由 `test/arch/layering.test.ts` 守护：依赖只能向下，**新增包必须在该测试 `RANKS` 登记**。
-当前 rank：core=0、observability=0.5、post-process/tui/ffmpeg-recorder-extra=0、
-record-engine=1、douyin-live/bilibili-live/kuaishou-live=1.5、manager=3、app=4、orchestrator=4.5、cli=5。
+当前 rank：core=0、observability=0.5、post-process=0.2、tui/ffmpeg-recorder-extra=0、
+proc-queue=0.3、processors=0.4、record-engine=1、douyin-live/bilibili-live/kuaishou-live=1.5、manager=3、app=4、orchestrator=4.5、cli=5。
 
 ```
 packages/
@@ -117,6 +139,8 @@ packages/
 │                             #   + platform(Platform 接口 + 注册表) + notify + api-types
 ├── observability/            # L0.5 logs + notification 实现(端口在 core;app/cli 依赖,manager/orchestrator 不依赖)
 ├── post-process/             # L0 后处理(纯函数):concat 多会话拼接 / burn 烧字幕 / ass / merge / ffmpeg spawn / fonts
+├── proc-queue/               # L0.3 每节点持久任务表(node:sqlite)+ ProcRunner 租约/心跳/fencing/关停;只经 core 注册表找处理器
+├── processors/               # L0.4 后处理处理器实现:remux(校验/原地转换/recover);加处理器 = 一个模块 + providers-register 一行
 ├── ffmpeg-recorder-extra/    # L0 附加插件:logStreamMeta(流信息) + detectDevice(ffprobe encoder)
 ├── tui/                      # L0 Ink TUI(独立打包 dist/tui.mjs)
 ├── record-engine/            # L1 通用 PollingRecorder(平台无关 + 引擎无关)+ 引擎策略 DownloadEngine:
@@ -168,6 +192,19 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
 - 弹幕（独立 provider）：`connectDanmu` 在平台 core 内实现，经 `resolveLiveId`→`resolveDouyinLiveId`
   拿本场 liveId 连 WS，`XmlDanmuWriter` 写 biliLive 格式 `.xml`。
 
+### 处理任务表（@drec/proc-queue，plans/036 T3）
+- 每节点持久任务表 `<root>/db/proc-queue.db`（`node:sqlite` WAL）：`ProcQueueStore`（幂等迁移 / enqueue / `BEGIN IMMEDIATE` claim /
+  租约 / finish）+ `ProcRunner`（租约心跳 / fencing / 限额 / 磁盘准入 / 接管 recover / `stop()`）。首次切 WAL 带退避重试，
+  多进程并发首开安全（真多进程测试 `test/proc-queue/store-multiproc.test.ts`）。`tick()` 永不抛；fence 后同一持有者重获租约时，
+  被 abort 的行按孤儿经 `recover()` 处理，不停在 running。已认领过的 pending 行被取消 → 下次 claim 直接落 `cancelled`。
+- 接口：`GET /api/proc/active`（`ProcActiveDTO`：`host` / `running` / `pending` / `leaseAlive` 按 kind；runner 未起 → 503）；
+  `POST /api/proc/purge {purgeFailed:true}` 人工清 failed；隐藏命令 `_proc-gc <dataRoot> [--purge-failed]`；
+  `_node-status` 附 `procActive`。**远端入队通道（T9a，无派发方）**：隐藏命令 `_enqueue <dataRoot> <base64>`（只受理 remux；
+  路径经 `allowedRoots`（数据根 `recordings/`+`stage/`、各任务输出目录、本机 hub `stageDir`）+ **realpath 校验**拒符号链接逃逸；回执 `stale` 附
+  节点 store 的 `nextGeneration`，remux done 后原输入 stat 失败 → `rejected`）、`_proc-status <dataRoot> <base64-jobIds>`（`{receipts}`，未知 jobId 缺席）；
+  `_node-capabilities` 附 `processors`；Transport `enqueue?/procStatus?`（ssh + local），旧节点未知命令 → `ProcUnsupported`。**部署 guard 补充**：`running.biliup > 0` 同样视为在忙（第二期上传落地后生效，见 plans/036 §2.3）。
+- 保留：done/cancelled 7 天 GC（runner 每小时）；failed/uncertain 不自动删，uncertain 须先 `ackUncertain` 再 purge。
+
 ### 录制会话（RecordingSession，@drec/manager）
 - 弹幕归属：录制器 video-only → 总是用独立 DanmuSource + XmlDanmuWriter 落盘。
 - **弹幕在 `onLive` 才启动**（不是会话开始）：`danmuStarted` 守卫每个 `_startInner` 只连一次。**根因**：
@@ -196,7 +233,50 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
   `process.env.TZ`，启动日志打一行 `[tz] 时区 = ...` 可查；`GET/POST /api/timezone` 可查/改，改了立即生效
   （daemon 下一次 tick 就用新时区，不用重启）。踩过的坑：host 层 `TZ` 难从进程外内省
   （`ssh vps date` 是 ssh 会话自己的环境，不是服务进程的，得挖 `/proc/<pid>/environ`）—— 这条彻底绕开。
+  **所有「日期」入口共用这一口径**（issue #155）：分段文件名 `stamp`（record-engine）、streamKey 日期（orchestrator
+  `identity`，Reconciler 注入 `timeZone` getter）、会话名还原 startMs（`scan`）、标题 / 产物名（core `zonedStamp`）、
+  前端默认日期（`todayYmdInTz(serverTz)`）都走 core 的 `resolveTimeZone`/`processTimeZone`（env 未设 → 北京，**不回落宿主机
+  本地时区**）。不经 `serve` 的独立 CLI 命令由 cli `preAction` 钩子调 `applyTimezoneFromDb()` 读同一设置。
 - 状态恢复、崩溃自动重启、每任务日志环形缓冲（web 实时 tail）。
+- **未开播 ≠ 失败（issue #308）**：录制进程未开播时必须**留在进程内**按 ~30s 轮询（PollingRecorder 与 0 落盘
+  `waitForBroadcast` 同口径），绝不能以非 0 退出交给调度重试——每次重启都会重新请求取流与弹幕 liveId，放大风控。
+  0 落盘的「同一场」判定（打开稿件状态）放在**开播那一刻**，不在进程启动时；弹幕只在开播后连接（未开播时解析的
+  liveId 是上一场的）。TaskManager 重启耗尽后记放弃时间，daemon 冷却 10 分钟内不自动拉起（手动启停清除），
+  否则「放弃」约 20s 后就被 daemon 当作进入窗口重启，形成无限循环。
+- **输出格式·节点侧原地替换**（issue #137，`app/node-remux.ts` 薄封装 + `@drec/processors` 的 remux 模块，plans/036 T6）：任务字段 `outputFormat`（original/mp4/mkv）。仅**无后处理**
+  的任务生效 —— `TaskManager.spawnFor` 经唯一判定点 `resolveNodeOutputFormat` 决定是否给子进程传 `--output-format`
+  （hub 受管 / 有 **enabled** 规则绑定 / 边录边传 → original 不传；`enabled=false` 的规则视同未绑定、走封口转换；规则之后才绑定则下一次 spawn 起生效；判定唯一输入 `shouldConvertAtSeal`；**有 enabled 规则绑定的任务封口时仍不转（处理中途从不转换），但自 T9b 起改由收尾后转换，不再锁**，见下）。子进程经 manager 的
+  封口钩子（与边录边传同一接缝、互斥）在每个分段**封口后**先写会话边车 `nodeFormat`、再**入队为 `remux` 处理任务**（每节点任务表 `<root>/db/proc-queue.db`，
+  jobId=`jobIdOf("remux", task…@fileTag, g)`）；执行体 `remuxProcessor`（cpu / lane=copy / retryable / interruptible）串行 `-c copy` 到 `*.drec-remux` 临时文件 → 校验
+  → fsync + 原子 rename → **最后**才删原文件；任一步失败保留原文件并走告警通道。校验是**唯一函数**
+  `verifyRemuxed`（正常路径与崩溃接管共用）：ffprobe 可读 / 有视频流与视频包 / 头部时长在容差内 / **扫全部视频包 pts 的
+  跨度（post-process `ffprobeVideoSpan`）与原文件在容差内** / 新文件体积 ≥ 原文件 × `MIN_SIZE_RATIO`。扫包是关键：
+  mkv 与 faststart mp4 的时长写在文件头，截断后头部时长仍完整，只看头部会放过坏文件。同一函数还比**视频包数**（新 ≥ 原 − min(一个 GOP, 0.5%)）、**音频**（原有音频则新文件必须有音轨且音频包数在容差内）、**全包扫描的 ffprobe 告警行数**（新不得多于原，挡索引完好但数据被补零的 mp4）。所有 ffprobe 探测走统一运行器（post-process `runFfprobe`）：消费 stderr 只留尾部、有超时并杀进程，超时/异常一律「无法判定」→ 两份都留。**执行宿主按租约规则（plans/036 §2.3）**：每 kind 本机至多一个存活持有者；`task serve` 先持有，`record` 子进程只入队；独立 `record`
+  仅在无存活持有者时持有（serve 起来后置 `handoverRequested`，持有者跑完当前 job 让出）。会话收尾（`onSessionEnd`）**保留 3 分钟总时限**等待本进程
+  入队的行：本进程持有则等、他人（serve）持有或等待中被接管则立即结束且不告警；超时告警文案不变，未完成行留在表中由持有者续跑。
+  **任务表打不开 → 回落进程内串行链 + 告警**（稳定版兜底；入队失败 / 因契约·stat 失败被拒的单段同样回落）。**同段已有终态行（failed/uncertain/cancelled）被拒 → 不回落、只告警一次**（`EnqueueResult.existingState`；须人工 ack/requeue，不得被进程内重转绕过，#160）。`record` 带 `--task-id`（仅 outputFormat 生效时）→ 入队行归属任务、serve 侧失败告警按任务显示；remux 的 ffmpeg 带 `-hide_banner`，失败文案里是真因而非版本横幅。表内 job 的崩溃续跑走 `recover`
+  （只碰该 job 的 src / 目标 / tmp，不扫目录：只有 tmp → 删 tmp → 重跑；目标在且校验通过 → done 并删原文件；存疑 → `uncertain` + 新文件 `.drec-suspect`
+  隔离、两份都留）；关停回 `pending`（attempts 不加、tmp 清、原文件不动）。不可逆动作（rename / 删原文件）前 `assertLease`。
+  契约层（`assertJobInvariants`）拒绝 xml / ass / 会话边车进 `replaceInputs`；处理器与 proc-queue 包内禁止 `readdirSync` / `groupSessions` / 目录推导（grep 守护）。
+  崩溃接管**后台执行、不挡开录**并有总时限。临时文件名带任务标识 + pid：接管时本任务残留且进程已死 → 立即清并告警，别的任务的新鲜残留不碰；校验失败而原文件已不存在（对方任务刚转完）→ 跳过、不隔离新文件。任何「无法判定」一律按失败处理。
+  会话 sidecar 记 `nodeFormat`（老文件缺字段=未转换），录制目录扫描据此识别无段号单文件；`groupSessions` 不传
+  `nodeFormats` 时一个 mp4/mkv 都不收（stage / 合并模式不会把分 P 产物当源）。`record` 启动时 `recoverNodeRemux`
+  （目录级，保留一个版本只兜底「不在任务表里」的旧 tmp / 配对）接管崩溃遗留：孤儿临时文件只删 mtime 早于 `STALE_TMP_MIN_AGE_MS` 的（扫的是共享输出根，新鲜的可能是别的任务在写）；
+  配对新文件通过同一校验才删原文件，**存疑（不通过 / 无法判定）→ 两份都留**（新文件改名加 `.drec-suspect` 隔离，避免重复计入），
+  永不删到最后一份；接管的每个动作都发告警（「上次中断、该段保持原容器」）。任务视图（TaskDTO）下发 `outputFormatLock`
+  （`nodeOutputFormatLock`，原因 `hub-managed` / `hub-rule` / `rolling` / `no-survivors`：`hub-rule` = enabled 规则仅按房间键命中、本任务不是规则源任务（`sourceTaskId` 缺省或指向别的任务，收尾只认源任务的格式 → 所选格式永不生效）；`no-survivors` 只对规则源任务算，且节点侧上传时按「stage 不留副本」口径（与派发同判定）。不变量是单向的「锁 ⇒ 封口不转」，**不再是**「锁 ⇔ 封口不转」），
+  前端据此锁定下拉，不自判 hub 状态（参数类型 = core `OutputFormatLock`，switch 带 `never` 穷举，后端加原因漏分支会编译报错）；旧后端缺字段按不锁降级。
+- **输出格式·收尾后留存转格式**（issue #168，plans/036 T9b，orchestrator `finalize-format`）：有 enabled 规则绑定的任务，**job `done` 且清理完成之后**
+  （`runPipeline` 唯一出口，合并 / 分段 / 各续跑共用；fire-and-forget，**不阻塞 done、不碰上传路径**，上传仍固定 mp4），`planSurvivorRemux()` 按 core `survivingArtifacts`
+  （与清理同一判定）+ 磁盘实际存在算留存清单，对**容器 ≠ 所选格式的源录像分段**（节点 `recordings` 里的派到该节点；stage 拉回的源段副本派到本机，
+  `stageDir` 可在数据根外）经 `_enqueue` / 本机通道入队 `remux`。**不转三分 P 成品（D6）、xml/ass、边车**；会话边车只作 `params.sidecar`、
+  **绝不进 `inputs`**（remux 处理器转换前写 `nodeFormat`）。缺会话边车（stage 副本 / 旧节点）→ 跳过并标注；**stage 交付模式**的正常终点（stage 就绪、清理之后；管线返回 `stageReady` 标记）同样派发，失败 / 不确定 / 用户停止的 `needs_manual` 不派发。
+  每场只派发一次（`sync_jobs.followups` JSON 列，`claimFollowups` 为唯一闸门；旧库迁移补列，老行 NULL = 未派发）。对账每轮轮询 `_proc-status`：
+  `pending` 且无存活执行者持续 ≥ 60s → 告警一次（每节点一条，不回落、不重派）；入队回执 `stale` → 以 `nextGeneration` 重发**恰一次**；`rejected` 只标注；**入队本身失败**（非「不支持」，如 ssh 抖动）→ 每节点告警一次，条目留在 open 集合（`enqueue-failed`），对账轮询指数退避重入队至多 3 次，耗尽 → 终结并再告警一次；
+  `_proc-status` 未知命令（节点已回滚）→ 标注「节点已回滚，留存转格式未执行」、停止轮询、**不进 needs_manual**；回执缺席 → 终结并标注。
+  所有失败路径只标注 / 告警，**绝不改 job 终态、绝不删文件**。`no-survivors`：规则使节点与 stage 都不留源视频时才锁格式下拉。
+  **残余说明**：禁用规则期间（`enabled=false`）封口转换成 mp4/mkv 的录像，规则重新启用后 `groupSessions` 不收未声明容器的会话 → 对 hub 不可见（也不会被删）；
+  这是 plans/036 F3 的明确决定（与「规则之后才绑定」同口径）。
 
 ### hub 多节点编排（orchestrator + app 的 hub-store/task-sync）
 - **角色与节点分配**：Docker `task serve --hub` 同时是控制台/master 和一个可选的 `local` 录制 worker；
@@ -213,6 +293,9 @@ tools/ scripts/rename assets/fonts   # 保留:合并辅助 / 重命名 / 烧字�
 - **身份/聚类**：录制端写 `{base}.session.json`（roomSlug=web_rid + platform + gaps）。`identity`
   按 **(platform, roomSlug)** 聚成一场（streamKey=`{platform}:{roomSlug}:{date}`）→ douyin/bilibili
   同房间号不撞、跨节点一致（不靠主播名）。
+  **同场口径（issue #292）**：相邻会话间隔 ≤ 30 分钟 = 同一场，> 30 分钟 = 新场次，唯一常量 core `SAME_BROADCAST_GAP_MS`
+  （聚类 / `reconnectWindowMs` 缺省共用）；边录边传删段后扫描起点取会话边车 `startMs`，不随剩余分段漂移；同日 `_HHMM`
+  派生 job 与已有稿件无法证明相隔 > 30 分钟 → 自动路径 `needs_manual`、重跑 409（`run-now-guard`）。
 - **选优**（`select.ts`）：覆盖度优先（coverage=1−gap/span）→ **完整录全（单会话无断流）优先**，
   多个完整取最长；**所有节点都断流（没人录全）→ 中断 + 通知 + 绝不删源**（留人工）。
   要烧弹幕时另加「有弹幕优先」（见 `selectWinner` 的 `requireDanmu`）。
@@ -286,7 +369,9 @@ node dist/douyin-rec.mjs _apply-tasks <dataRoot> <base64>   # 远端应用 maste
 `dist/douyin-rec.mjs` + `dist/tui.mjs`）。vitest 无法 import 这些包 → 平台实例**零单测**，
 靠 store/hub/orchestrator 测 + `test/setup.ts` 注册假平台 + 真实录制覆盖。
 
-📁 **数据目录**：db / recordings / stage / config（含 hub 规则、biliup cookies）全收在**一个数据根**
+📁 **数据目录**：db / recordings / stage / logs（hub 场次日志，永久保留，不在 stage 内）/ config（含 hub 规则、biliup cookies）全收在**一个数据根**
+
+📂 **房间目录布局**（`<名>_<平台>_<房间号>/`，节点本地开关，默认关）：规则、开关文件、回滚与上线顺序见 `docs/output-layout.md`；路径只经 core 的输出路径解析模块，不要手拼。
 `DOUYIN_REC_ROOT` 下（见 `packages/app/src/paths.ts`），不散落项目里。**未设时默认 `./output-data`**
 （裸跑不再把文件平铺进 cwd）。本仓库约定：`pnpm serve:local` 用 `DOUYIN_REC_ROOT=./data-local`；
 docker 固定 `/output-data`（映射宿主机 `docker-data/`）。专用 env（`DOUYIN_REC_DB`/`DOUYIN_REC_OUTPUT`/
@@ -324,6 +409,11 @@ docker 固定 `/output-data`（映射宿主机 `docker-data/`）。专用 env（
   - 部署前查**两个节点**(任一在录就等):
     - 本地:`curl -s http://127.0.0.1:7860/api/tasks`
     - VPS:`ssh ubuntu@100.97.21.80 'curl -s http://127.0.0.1:7860/api/tasks'`
+  - **上传也算在途（`scripts/deploy-precheck.sh` 为唯一实现，三态口径）**：`GET /api/proc/active` 的
+    `running.biliup>0` → 等待；端点 404（旧 bundle，无 proc-queue）→ blocking 路径的上传不在队列里，
+    改查节点 `<dataRoot>/stage/*/.drec-node-result.json` 有无**未陈旧**（默认 6h 内）的 `phase=uploading`：有 → 等待，
+    无 → 记录「该节点无法确认」后放行，读不到 stage 目录 → 当未知；不可达 / 超时 / 503 / 响应看不懂 → fail-closed 等待。
+    检查范围 = master + VPS1 + VPS2，部署前直接跑该脚本（退出码 0 放行 / 1 在录或在传 / 2 状态未知）。
   - 有录制 → **不要重启**;等录制结束(可周期性轮询)或先告诉用户什么时候可以部署。
   - 只有用户**明确要求**(如"强制部署""现在就部署""override")才可无视此 guard。
   - 原因:重启会杀掉录制子进程 → 当前分段被截断,可能丢流且 hub 侧留下不完整产物。
@@ -339,16 +429,27 @@ docker 固定 `/output-data`（映射宿主机 `docker-data/`）。专用 env（
 
 ## 版本规则（package.json `version`）
 
-**每个 `feat` / `fix` 都必须 bump 一次 version，与是否部署无关。** 版本号是变更的标记，
-不是部署的标记——一个版本可以只 commit/push 而不部署；也可以攒几个版本后一起部署。
+**按路径判定，不按提交类型：任何改动触及运行时路径（清单见下）的 PR 都必须 bump 一次 version，
+与是否部署、与 type 是 feat/fix/refactor/chore 无关。** 版本号是产物变更的标记，不是部署的标记——
+一个版本可以只 commit/push 而不部署；也可以攒几个版本后一起部署。
 
-- 完成一个 `feat` 或 `fix`（不含纯 `docs`/`test`/`chore`）→ 在 commit **之前** 把根目录
+- 触及运行时路径（通常是 `feat` / `fix`，也包括改依赖锁文件的 `chore`、改源码的 `refactor`）→ 在 commit **之前** 把根目录
   `package.json` 的 `version` patch +1（`0.0.X` → `0.0.X+1`），并重新执行 `pnpm bundle`
   使 `dist/douyin-rec.mjs` 内嵌的 `APP_VERSION` 同步更新。
 - version bump 与代码变更合入**同一个 commit**（`chore: bump version` 写进该 commit 的正文，
   或作为紧随其后的独立 chore commit 均可）。
 - **部署不是强制的**：不需要每次 bump 都部署；部署时只需用 bundle 产物
   （`dist/douyin-rec.mjs`）的 `APP_VERSION` 确认节点上跑的是哪个版本。
+- **非运行时豁免（工具类 PR）**：改动只落在工具类目录（`docs/`、`test/`、`.github/`、`plans/`、`dev/`、
+  `remote/`、`scripts/` 里除两个 install 脚本外的文件 等）或 vitest 收集的用例文件(以 vitest.config 的 include 为准)时，**不 bump、不 bundle**；
+  PR 的「版本」段写「无需 bump + 理由」。
+  判定是**黑名单**语义：只要改动触及下列运行时路径之一，就必须 bump 并重新 bundle——
+  `packages/`、`package.json`、`Dockerfile`、`docker-compose`、`dist/`、`configs/`、`assets/`、
+  `esbuild.config.mjs`、`tsconfig.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`.dockerignore`、
+  `scripts/install-mesio.sh`、`scripts/install-biliup.sh`。
+  其中 `configs/` 会经 bundle 内联进产物；`assets/`、两个 install 脚本会进镜像；`.dockerignore` 决定镜像构建上下文。
+  这份清单是 `scripts/pr-gate.py` 的 `RUNTIME_PATHS` 的逐字副本——两边任何一处改动都必须同步另一处
+  （有回归测试钉住），否则「人写的规则」和「机器检查」会分头漂移（这正是本条要消灭的问题）。
 
 ## 提交规范（约定式提交 / Conventional Commits）
 

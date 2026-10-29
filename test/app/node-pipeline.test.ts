@@ -1,0 +1,1306 @@
+/**
+ * T19:节点侧上传共限流持久化 601 冷却 —— node-pipeline 的上传路径必须过 core UploadGate。
+ *
+ * 覆盖:① 命中 601 → 冷却跨「重启」(新 gate 实例 + 新 store 实例)保留;
+ *      ② 冷却期内节点侧上传被阻塞;③ 账号键解析(与 master 同键/异键);
+ *      ④ master 与节点共享同一限流状态文件时,总提交数不超 rateLimit(并发场景)。
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as nodeFs from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { deriveTitles } from "../../packages/app/src/node-pipeline.js";
+import { UploadGate, openUploadLimitStore, biliAccountKeyFromCookiesJson, stageSessionDir, addArchiveToSeasonIfConfigured } from "@drec/core";
+import { tryDirectTsLink, nodeStageCleanupTargets, openNodeUploadGate, planGroups, prepareNodeUploadAlias, readNodeResult, resolveUploadAccountKey, runNodeSidePipeline, splitGroupsBySession, writeNodeResult, abortNodeExecutor, isExecutorCmdline, nodeExecutorPidPath } from "../../packages/app/src/node-pipeline.js";
+import { remuxSegment, ffprobeDuration } from "@drec/post-process";
+import { uploadPlain, appendGroup, countVideoParts, runBiliup } from "../../packages/app/src/upload/biliup.js";
+
+// node:fs 走 spy(默认透传真实实现)—— 只有「硬链接不可用」用例才临时打桩 linkSync 抛错。
+vi.mock("node:fs", { spy: true });
+
+// 全局 setup 已先于本文件加载 @drec/core(其 node:fs 绑定不受上面的 spy 影响),
+// 故「硬链接不可用」改经 linkOrCopy 的注入口(fs)模拟 EXDEV。
+const linkFail = vi.hoisted(() => ({ on: false }));
+const seasonSpy = vi.hoisted(() => ({ calls: [] as Array<{ bvid?: string; persistedBv?: string; fail?: boolean }> }));
+const seasonHook = vi.hoisted(() => ({ onCall: undefined as undefined | ((o: { bvid?: string }) => void) }));
+vi.mock("@drec/core", async (orig) => {
+  const m = await orig<typeof import("@drec/core")>();
+  const fs = await import("node:fs");
+  return {
+    ...m,
+    addArchiveToSeasonIfConfigured: async (o: Parameters<typeof m.addArchiveToSeasonIfConfigured>[0]) => {
+      seasonSpy.calls.push({ bvid: o.bvid });
+      seasonHook.onCall?.(o);
+      if (seasonSpy.calls.at(-1)?.fail) {
+        // Simulate the real wrapper's never-throw contract for a season-side failure.
+        o.note?.("[season] 加入合集失败: simulated");
+        return { status: "failed", sectionId: o.sectionId ?? 1, error: "simulated", retryable: true } as const;
+      }
+      return { status: "added", sectionId: o.sectionId ?? 1, aid: 1, cid: 1, title: "t" } as const;
+    },
+    linkOrCopy: (s: string, d: string, o?: Parameters<typeof m.linkOrCopy>[2]) =>
+      m.linkOrCopy(s, d, linkFail.on ? {
+        ...o,
+        fs: {
+          linkSync: () => { throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" }); },
+          copyFileSync: fs.copyFileSync,
+          statSync: fs.statSync,
+        },
+      } : o),
+  };
+});
+// 逐段 remux/合并/时长探测是外部进程调用,这里换成可控替身(只影响本文件的节点侧用例)。
+vi.mock("@drec/post-process", async (orig) => {
+  const actual = await orig<typeof import("@drec/post-process")>();
+  return {
+    ...actual,
+    ffprobeDuration: vi.fn(async () => 60),
+    remuxSegment: vi.fn(async (_src: string, out: string) => { writeFileSync(out, "REMUXED"); }),
+    mergeSession: async (_inputs: string[], out: string) => { writeFileSync(out, "MERGED"); },
+  };
+});
+
+// biliup 上传外部进程换成 spy(issue #2 A3：幂等重入须证明「有 bv → 绝不重复 uploadPlain」)。
+vi.mock("../../packages/app/src/upload/biliup.js", () => ({
+  uploadPlain: vi.fn(async () => "BV1NEW"),
+  appendGroup: vi.fn(async () => {}),
+  countVideoParts: vi.fn(async () => null),
+  runBiliup: vi.fn(async () => ""),
+  isAllFilesUploadedLine: (line: string) => /All files uploaded successfully/.test(line),
+}));
+
+const silence = (): void => {};
+const tmp = (): string => join(mkdtempSync(join(tmpdir(), "node-gate-")), "x.db");
+function clock(start = 1_000_000): { now: () => number; sleep: (ms: number) => Promise<void>; advance: (ms: number) => void } {
+  let t = start;
+  return { now: () => t, sleep: async (ms: number) => { t += Math.max(0, ms); }, advance: (ms) => { t += ms; } };
+}
+
+describe("节点侧上传限流(T19)", () => {
+  it("命中 601 → 冷却写入节点本地库;新 gate 实例(等价重启)冷却仍在", async () => {
+    const db = tmp();
+    const c = clock();
+    const store = openUploadLimitStore(db, { log: silence });
+    const gate = new UploadGate({ store, cooldownMs: 30_000, rateLimit: 5, now: c.now, sleep: c.sleep, warn: silence });
+    const key = biliAccountKeyFromCookiesJson(JSON.stringify({ cookie_info: { cookies: [{ name: "DedeUserID", value: "42" }] } }));
+
+    await expect(gate.run(key, async () => { throw new Error("code: 601"); })).rejects.toThrow();
+    store.close();
+
+    // 「重启」:全新 store + 全新 gate,冷却必须还在(不因进程重启清零)。
+    const store2 = openUploadLimitStore(db, { log: silence });
+    const gate2 = new UploadGate({ store: store2, cooldownMs: 30_000, rateLimit: 5, now: c.now, sleep: c.sleep, warn: silence });
+    const t0 = c.now();
+    await gate2.awaitSlot(key); // 冷却期内 → 阻塞到截止
+    expect(c.now() - t0).toBe(30_000);
+    store2.close();
+  });
+
+  it("冷却期内节点侧上传被拒绝(等够冷却才放行),非立刻重试", async () => {
+    const db = tmp();
+    const c = clock();
+    const store = openUploadLimitStore(db, { log: silence });
+    const gate = new UploadGate({ store, cooldownMs: 20_000, rateLimit: 100, now: c.now, sleep: c.sleep, warn: silence });
+    gate.recordRateLimit("bilibili:42");
+    const t0 = c.now();
+    await gate.run("bilibili:42", async () => "bv");
+    expect(c.now() - t0).toBe(20_000);
+    store.close();
+  });
+
+  it("master 与节点用同一 store 文件 + 同一账号键 → 总提交数不超 rateLimit(并发)", async () => {
+    const db = tmp();
+    const c = clock();
+    // 模拟 master ResourcePool 与节点 UploadGate 两个独立进程,共用该 db 文件。
+    const masterStore = openUploadLimitStore(db, { log: silence });
+    const nodeStore = openUploadLimitStore(db, { log: silence });
+    const { ResourcePool } = await import("@drec/orchestrator");
+    const pool = new ResourcePool(
+      { uploadRateLimit: 2, uploadRateWindowMs: 1000, uploadCooldownMs: 5000 },
+      { now: c.now, sleep: c.sleep, limitStore: masterStore, limitKey: "bilibili:42", warn: silence },
+    );
+    const nodeGate = new UploadGate({
+      store: nodeStore, rateLimit: 2, windowMs: 1000, cooldownMs: 5000, now: c.now, sleep: c.sleep, warn: silence,
+    });
+    const key = "bilibili:42";
+    // 并发 6 次提交(master 3 + 节点 3)。
+    // 断言打在**限流账本**上,而不是「await 返回时刻」:注入的假时钟会被别的并发调用 sleep 推进,
+    // 一个调用醒来时 now 可能已晚于自己占额的时刻(语义正常)。账本才是配额的权威。
+    await Promise.all([
+      pool.withUpload(async () => 1, "s1"),
+      pool.withUpload(async () => 2, "s2"),
+      nodeGate.awaitSlot(key),
+      pool.withUpload(async () => 3, "s3"),
+      nodeGate.awaitSlot(key),
+      nodeGate.awaitSlot(key),
+    ]);
+    const st = masterStore.load(key);
+    expect(st).not.toBeNull();
+    const times = st!.times;
+    // 账本只保留**当前窗口**(tryClaim 每次按窗口裁剪重写),窗口内条目数即已占配额数。
+    expect(times.length).toBeGreaterThan(0);
+    expect(times.every((x) => Number.isFinite(x))).toBe(true);
+    // master + 节点合计不超过 rateLimit=2 —— 这正是「共享限流桶」的验收标准。
+    expect(times.length).toBeLessThanOrEqual(2);
+    const spread = times[times.length - 1] - times[0];
+    expect(spread).toBeLessThan(1000);
+    masterStore.close();
+    nodeStore.close();
+  });
+
+  it("不同账号互不影响(节点 A 的冷却不挡节点 B)", async () => {
+    const db = tmp();
+    const c = clock();
+    const store = openUploadLimitStore(db, { log: silence });
+    const gate = new UploadGate({ store, cooldownMs: 30_000, rateLimit: 5, now: c.now, sleep: c.sleep, warn: silence });
+    gate.recordRateLimit("bilibili:1");
+    const t0 = c.now();
+    await gate.awaitSlot("bilibili:2");
+    expect(c.now() - t0).toBe(0); // 另一账号立即放行
+    store.close();
+  });
+
+  it("openNodeUploadGate:库损坏 → fail-closed 冷却(不是无限速)", async () => {
+    const db = tmp();
+    writeFileSync(db, "not sqlite");
+    const c = clock();
+    const gate = openNodeUploadGate({ store: openUploadLimitStore(db, { log: silence }), rateLimit: 5, cooldownMs: 0, warn: silence });
+    // 注入假时钟需重开 gate:openNodeUploadGate 未暴露时钟 → 用 store 损坏 + 默认时钟断言不抛即可。
+    // 真实验证时钟相关行为见 core/upload-gate.test.ts 的 fail-closed 用例。
+    expect(() => gate.peek("k")).not.toThrow();
+  });
+
+  it("resolveUploadAccountKey:读本机 cookies.json;缺失/损坏 → unknown 桶", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ck-"));
+    const p = join(dir, "cookies.json");
+    writeFileSync(p, JSON.stringify({ cookie_info: { cookies: [{ name: "DedeUserID", value: "777" }] } }));
+    expect(resolveUploadAccountKey(p)).toBe("bilibili:777");
+    writeFileSync(p, "{broken");
+    expect(resolveUploadAccountKey(p)).toBe("bilibili:unknown");
+    expect(resolveUploadAccountKey(join(dir, "nope.json"))).toBe("bilibili:unknown");
+  });
+});
+
+/**
+ * 节点侧产物的**分组/命名**纯逻辑。
+ *
+ * 这里必须与 master 分段模式**逐字一致**(唯一真理 = post-process 的 `planSegmentGroups`):
+ * 曾经节点侧另写了一份「累计 ≥ 0.8×目标就切」的近似算法 → 同一场在节点侧与 master 侧切出
+ * **不同的分 P 数/长度**,稿件形态就变了。
+ */
+describe("节点侧分组/命名(与 master 同源)", () => {
+  const T = (i: number): string => `/r/s_${String(i).padStart(3, "0")}.ts`;
+
+  it("planGroups:groupSec<=0 → 逐段一个分 P(与 master 相同)", () => {
+    const files = [T(0), T(1), T(2)];
+    expect(planGroups(files, 0, [60, 60, 60], () => "")).toEqual([[T(0)], [T(1)], [T(2)]]);
+  });
+
+  it("planGroups:按累计时长聚组,单组不超 target×1.2(与 planSegmentGroups 同口径)", () => {
+    const files = [T(0), T(1), T(2), T(3)];
+    // target=100 → limit=120:60+60 超限 → 两两成组。
+    expect(planGroups(files, 100, [60, 60, 60, 60], () => "")).toEqual([
+      [T(0), T(1)],
+      [T(2), T(3)],
+    ]);
+    // target=120 → limit=144:60+60=120 ≤144,可并入 → 前两段一组,后两段一组(第三段 180 超限)。
+    expect(planGroups(files, 120, [60, 60, 60, 60], () => "")).toEqual([
+      [T(0), T(1)],
+      [T(2), T(3)],
+    ]);
+  });
+
+  it("planGroups:单段自身超过上限 → 独占一组(不切它)", () => {
+    const files = [T(0), T(1)];
+    expect(planGroups(files, 60, [10, 500], () => "")).toEqual([[T(0)], [T(1)]]);
+  });
+
+  it("splitGroupsBySession:同一个分 P 绝不跨会话(跨会话 → 弹幕窗口错位/丢失)", () => {
+    // 组 [0,1,2] 里 0/1 属会话 A、2 属会话 B → 必须切成 [0,1] 与 [2]。
+    const xmlOf = (i: number): string => (i < 2 ? "/r/a.xml" : "/r/b.xml");
+    expect(splitGroupsBySession([[0, 1, 2]], xmlOf)).toEqual([[0, 1], [2]]);
+  });
+
+  it("splitGroupsBySession:无 xml(空串)也算同一会话,不因缺失而乱切", () => {
+    expect(splitGroupsBySession([[0, 1, 2]], () => "")).toEqual([[0, 1, 2]]);
+  });
+
+  it("prepareNodeUploadAlias:建硬链接别名(同 inode,零拷贝);stem 为空 → 回落原名", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias-"));
+    const canonical = join(dir, "114275050882_2026-10-11_09-50-00_000.mp4");
+    writeFileSync(canonical, "video");
+
+    const alias = prepareNodeUploadAlias(dir, "P1", canonical);
+    expect(alias).toBe(join(dir, ".upload", "P1.mp4"));
+    expect(statSync(alias).ino).toBe(statSync(canonical).ino); // 硬链接 = 同一 inode
+    expect(readFileSync(alias, "utf-8")).toBe("video");
+
+    expect(prepareNodeUploadAlias(dir, null, canonical)).toBe(canonical); // 未配模板 → 原名
+  });
+
+  it("prepareNodeUploadAlias:重名别名重建 → 指向最新产物(不残留旧内容)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "alias2-"));
+    const a = join(dir, "x_000.mp4");
+    const b = join(dir, "x_001.mp4");
+    writeFileSync(a, "A");
+    writeFileSync(b, "B");
+    prepareNodeUploadAlias(dir, "P2", a);
+    const alias = prepareNodeUploadAlias(dir, "P2", b); // 同名 → 覆盖
+    expect(readFileSync(alias, "utf-8")).toBe("B");
+    expect(statSync(alias).ino).toBe(statSync(b).ino);
+  });
+});
+
+/**
+ * 节点侧路径**没有 pull** ⇒ master 的 `clean_stage` 只清 master 自己的 stageSub,
+ * 节点 stage 里的成品 mp4 + `.work/` 中间产物永远没人清(线上实测:VPS2 一个房间留 3.4G)。
+ * 这里钉死节点侧自己的清理口径(与 master `clean_stage` 同义)。
+ */
+describe("nodeStageCleanupTargets(节点 stage 收尾口径)", () => {
+  function makeStageDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nodestage-"));
+    writeFileSync(join(dir, "Lilt_2026-10-12_000.mp4"), "v");
+    writeFileSync(join(dir, "Lilt_2026-10-12_001.mp4"), "v");
+    writeFileSync(join(dir, "Lilt_2026-10-12.xml"), "x");
+    writeFileSync(join(dir, "Lilt_2026-10-12.ass"), "a");
+    mkdirSync(join(dir, ".work"), { recursive: true });
+    writeFileSync(join(dir, ".work", "000.mp4"), "v");
+    mkdirSync(join(dir, ".upload"), { recursive: true });
+    writeFileSync(join(dir, ".upload", "P1.mp4"), "v");
+    return dir;
+  }
+
+  it("默认删成品 mp4 + .work/ + .upload/,但**不**碰 .xml/.ass", () => {
+    const dir = makeStageDir();
+    const targets = nodeStageCleanupTargets(dir).map((p) => p.replace(dir + "/", ""));
+    expect(targets.sort()).toEqual([
+      ".upload",
+      ".work",
+      "Lilt_2026-10-12_000.mp4",
+      "Lilt_2026-10-12_001.mp4",
+    ]);
+  });
+
+  it("deleteXml=true(stageAfterDone 开)→ 连 .xml/.ass 一并删(此时节点源 xml 被保留)", () => {
+    const dir = makeStageDir();
+    const targets = nodeStageCleanupTargets(dir, { deleteXml: true }).map((p) => p.replace(dir + "/", ""));
+    expect(targets).toContain("Lilt_2026-10-12.xml");
+    expect(targets).toContain("Lilt_2026-10-12.ass");
+    expect(targets).toHaveLength(6);
+  });
+
+  it("目录不存在 → 空数组(清理路径绝不反噬)", () => {
+    expect(nodeStageCleanupTargets(join(tmpdir(), "definitely-not-here-12345"))).toEqual([]);
+  });
+});
+
+/**
+ * 节点侧**落盘结果文件**往返(「假失败」修复的另一半,见 orchestrator/node-side-upload.test.ts)。
+ *
+ * master 经 ssh 调 `_node-pipeline` 是长命令,ssh 可能在节点跑完上传后才断开 ⇒ master 回读该文件
+ * 才是权威结果。这里钉死:上传前 `uploading`、成功后 `done+bv`、建稿后 append 失败 `failed+bv`,
+ * 以及「损坏/缺字段 → null」(master 按确认没成处理,绝不误判成成功)。
+ */
+describe("节点侧结果文件 writeNodeResult / readNodeResult", () => {
+  const sub = (): string => mkdtempSync(join(tmpdir(), "noderes-"));
+
+  it("无文件 → null(节点没跑过该场)", () => {
+    expect(readNodeResult(sub())).toBeNull();
+  });
+
+  it("损坏 JSON → null(绝不抛,也绝不误判成功)", () => {
+    const dir = sub();
+    writeFileSync(join(dir, ".drec-node-result.json"), "{not json");
+    expect(readNodeResult(dir)).toBeNull();
+  });
+
+  it("phase 非法 → null(防旧/脏文件被当成权威结果)", () => {
+    const dir = sub();
+    writeFileSync(join(dir, ".drec-node-result.json"), JSON.stringify({ phase: "weird", ok: true }));
+    expect(readNodeResult(dir)).toBeNull();
+  });
+
+  it("done + bv 往返:bv / products / atMs 保真", () => {
+    const dir = sub();
+    writeNodeResult(dir, { phase: "done", ok: true, bv: "BV1X", products: ["/s/a.mp4"] }, silence);
+    const r = readNodeResult(dir);
+    expect(r?.phase).toBe("done");
+    expect(r?.ok).toBe(true);
+    expect(r?.bv).toBe("BV1X");
+    expect(r?.products).toEqual(["/s/a.mp4"]);
+    expect(typeof r?.atMs).toBe("number");
+    expect(r!.atMs).toBeGreaterThan(0);
+  });
+
+  it("started(A1 尽早落盘)→ ok=false、无 bv;master 据此区分「已接管未建稿」", () => {
+    const dir = sub();
+    writeNodeResult(dir, { phase: "started", ok: false }, silence);
+    const r = readNodeResult(dir);
+    expect(r?.phase).toBe("started");
+    expect(r?.ok).toBe(false);
+    expect(r?.bv).toBeUndefined(); // started 本身**不代表已建稿**
+  });
+
+  it("uploading(上传前落盘)→ ok=false、无 bv;master 据此判「结果不确定」", () => {
+    const dir = sub();
+    writeNodeResult(dir, { phase: "uploading", ok: false }, silence);
+    const r = readNodeResult(dir);
+    expect(r).toEqual({ phase: "uploading", ok: false, bv: undefined, products: undefined, error: undefined, atMs: r!.atMs });
+    expect(r!.ok).toBe(false);
+    expect(r!.bv).toBeUndefined();
+  });
+
+  it("failed 带 bv(建稿后 append 失败)→ bv 保真,master 据此判「已建稿、绝不重传」", () => {
+    const dir = sub();
+    writeNodeResult(dir, { phase: "failed", ok: false, bv: "BV1PART", error: "append 挂在 3/5" }, silence);
+    const r = readNodeResult(dir);
+    expect(r?.phase).toBe("failed");
+    expect(r?.bv).toBe("BV1PART");
+    expect(r?.error).toContain("append");
+  });
+});
+
+/**
+ * issue #6:节点侧「中间产物 → 规范上传名」也改「同盘硬链接优先」。
+ *
+ * 改前 `copyFileSync(work, out)`:同一份数据在 stage 存两遍,上传进行中峰值磁盘翻倍
+ * (实测某场:源 ≈5.1G + `.work/` ≈4.9G + 顶层规范名 ≈4.9G ≈ 15.5G,节点盘 49G)。
+ * 中间产物(`.work/<段号>.mp4`)与规范名同在 stage 子目录、同一文件系统 ⇒ 硬链接零额外空间。
+ *
+ * 这里跑**真的** `runNodeSidePipeline`(stage 模式,不触发 biliup),用真文件系统验证落盘形态;
+ * remux/时长探测换成可控替身(见文件顶部 vi.mock)。
+ */
+describe("节点侧:中间产物 → 规范上传名改同盘硬链接(issue #6)", () => {
+  /** 造一个「节点本地录制目录 + stage 目录」的临时场景,返回 spec(不烧录、不上传)。 */
+  function scene(): { stageDir: string; sub: string; spec: Parameters<typeof runNodeSidePipeline>[0] } {
+    const root = mkdtempSync(join(tmpdir(), "node-hl-"));
+    const recDir = join(root, "recordings");
+    mkdirSync(recDir, { recursive: true });
+    const tsFiles = [0, 1, 2].map((i) => {
+      const p = join(recDir, `Lilt_2026-10-12_05-18-36_${String(i).padStart(3, "0")}.ts`);
+      writeFileSync(p, "src");
+      return p;
+    });
+    const stageDir = join(root, "stage");
+    mkdirSync(stageDir, { recursive: true });
+    return {
+      stageDir,
+      sub: join(stageDir, "douyin_123_2026-10-12"),
+      spec: {
+        streamKey: "douyin:123:2026-10-12",
+        tsFiles,
+        sessionBase: "Lilt_2026-10-12_05-18-36",
+        startMs: 1_750_000_000_000,
+        liveTitle: "开播啦",
+        mergeSegments: false,
+        uploadMode: "stage",
+        stageDir,
+        uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像", titleTemplate: "{name}_{date}" },
+        uploadPrivate: true,
+      },
+    };
+  }
+  const workOf = (sub: string, i: number): string => join(sub, ".work", `${String(i).padStart(3, "0")}.mp4`);
+  const canonicalOf = (sub: string, i: number): string => join(sub, `Lilt_2026-10-12_${String(i).padStart(3, "0")}.mp4`);
+
+  it("逐段产出与 .work 中间产物**同 inode**(零额外空间),上传物 = 规范名", async () => {
+    const { sub, spec } = scene();
+    const r = await runNodeSidePipeline(spec, silence);
+
+    expect(r.ok).toBe(true);
+    expect(r.products).toHaveLength(3);
+    for (let i = 0; i < 3; i++) {
+      const canonical = canonicalOf(sub, i);
+      expect(existsSync(canonical)).toBe(true);
+      expect(r.products![i]).toBe(canonical);
+      // 同一 inode = 同一份数据(改前是两个不同 inode 的真副本)。
+      expect(statSync(canonical).ino).toBe(statSync(workOf(sub, i)).ino);
+      expect(statSync(canonical).nlink).toBe(2);
+      expect(readFileSync(canonical, "utf-8")).toBe("REMUXED");
+    }
+  });
+
+  it("linkSync 抛错(跨设备/不支持硬链接)→ 回落复制:内容一致、inode 不同", async () => {
+    const { sub, spec } = scene();
+    linkFail.on = true;
+    try {
+      const r = await runNodeSidePipeline(spec, silence);
+
+      expect(r.ok).toBe(true);
+      for (let i = 0; i < 3; i++) {
+        const canonical = canonicalOf(sub, i);
+        expect(existsSync(canonical)).toBe(true);
+        expect(statSync(canonical).ino).not.toBe(statSync(workOf(sub, i)).ino); // 真复制
+        expect(readFileSync(canonical, "utf-8")).toBe("REMUXED");
+      }
+    } finally {
+      linkFail.on = false; // 别把打桩泄漏给后面的用例
+    }
+  });
+
+  it("续跑:规范名已存在 → 不重复 remux、inode 不变(改成 rename/mv 会让重跑重做一遍)", async () => {
+    const { sub, spec } = scene();
+    const r1 = await runNodeSidePipeline(spec, silence);
+    expect(r1.ok).toBe(true);
+    const inos = [0, 1, 2].map((i) => statSync(canonicalOf(sub, i)).ino);
+
+    // 再跑一遍(等价「中断重跑」):.work 与规范名都在 → 全部跳过。
+    const r2 = await runNodeSidePipeline(spec, silence);
+    expect(r2.ok).toBe(true);
+    for (let i = 0; i < 3; i++) {
+      expect(statSync(canonicalOf(sub, i)).ino).toBe(inos[i]); // 没被重建
+      expect(statSync(canonicalOf(sub, i)).ino).toBe(statSync(workOf(sub, i)).ino);
+    }
+  });
+});
+
+
+/**
+ * A1/A2/A3 issue #2 收口回归。
+ *
+ *  - A1「尽早落盘」:进入 remux **之前**先写 `started` → 执行体在 remux 阶段就被终止/抛错时,
+ *    master 回读仍能看到 `started`(而非 null),据此区分「已接管未建稿」。
+ *  - A3 幂等重入:落盘结果已有 bv → **绝不重复 uploadPlain 建稿**(B站不可逆),
+ *    只按 countVideoParts 续未确认的分 P;确认不了 → 抛错转人工;done+bv → 整场跳过。
+ *  - A2 pid/cmdline:abortNodeExecutor 经注入 deps 安全终止,cmdline 不匹配绝不误杀。
+ */
+describe("issue #2 A1:started 在 remux 之前落盘(执行体中途死仍可见)", () => {
+  // 同文件内 vi.fn 不会自动清零(见 issue#6 用例已调用 remuxSegment)→ 每次先清,
+  // 保证「未调用」断言只反映本次管线调用。
+  beforeEach(() => {
+    vi.mocked(remuxSegment).mockClear();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(appendGroup).mockClear();
+    vi.mocked(countVideoParts).mockClear();
+  });
+
+  function uploadScene(): { stageDir: string; sub: string; spec: Parameters<typeof runNodeSidePipeline>[0] } {
+    const root = mkdtempSync(join(tmpdir(), "node-a1-"));
+    const recDir = join(root, "recordings");
+    mkdirSync(recDir, { recursive: true });
+    const tsFiles = [0, 1, 2].map((i) => {
+      const f = join(recDir, `Lilt_2026-10-12_05-18-36_${String(i).padStart(3, "0")}.ts`);
+      writeFileSync(f, "src");
+      return f;
+    });
+    const stageDir = join(root, "stage");
+    mkdirSync(stageDir, { recursive: true });
+    return {
+      stageDir,
+      sub: join(stageDir, "douyin_123_2026-10-12"),
+      spec: {
+        streamKey: "douyin:123:2026-10-12",
+        tsFiles,
+        sessionBase: "Lilt_2026-10-12_05-18-36",
+        startMs: 1_750_000_000_000,
+        liveTitle: "开播啦",
+        mergeSegments: false,
+        uploadMode: "upload",
+        stageDir,
+        uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像", titleTemplate: "{name}_{date}" },
+        uploadPrivate: true,
+      },
+    };
+  }
+
+  it("remux 阶段抛错 → 落盘停在 started(不是 null,master 可区分「已接管未建稿」)", async () => {
+    const { sub, spec } = uploadScene();
+    vi.mocked(remuxSegment).mockImplementationOnce(() => { throw new Error("remux boom"); });
+    await expect(runNodeSidePipeline(spec, silence)).rejects.toThrow(/remux boom/);
+    const r = readNodeResult(sub);
+    expect(r?.phase).toBe("started"); // started 写在 produceParts 之前 → 中途死也留痕
+    expect(r?.bv).toBeUndefined();    // started 不代表已建稿
+  });
+
+  describe("issue #336: node-local layout switch", () => {
+    const withSwitch = async (layout: "room" | undefined, body: () => Promise<void>): Promise<void> => {
+      const saved = process.env.DOUYIN_REC_ROOT;
+      const dataRoot = mkdtempSync(join(tmpdir(), "node-layout-"));
+      process.env.DOUYIN_REC_ROOT = dataRoot;
+      if (layout) {
+        mkdirSync(join(dataRoot, "config"), { recursive: true });
+        writeFileSync(join(dataRoot, "config", "output-layout.json"), JSON.stringify({ layout }));
+      }
+      try { await body(); } finally { if (saved === undefined) delete process.env.DOUYIN_REC_ROOT; else process.env.DOUYIN_REC_ROOT = saved; }
+    };
+
+    it("switch on: a new session dir is the room dir (room number stands in for the unknown anchor name); result readable after the switch is turned off", async () => {
+      const { stageDir, spec } = uploadScene();
+      await withSwitch("room", async () => {
+        vi.mocked(remuxSegment).mockImplementationOnce(() => { throw new Error("remux boom"); });
+        await expect(runNodeSidePipeline(spec, silence)).rejects.toThrow(/remux boom/);
+        const roomSub = join(stageDir, "123_douyin_123", "2026-10-12");
+        expect(readNodeResult(roomSub)?.phase).toBe("started");
+        expect(existsSync(join(stageDir, "douyin_123_2026-10-12"))).toBe(false);
+      });
+      // switch off again: the node-side lookup (what _node-result / _node-abort use) still finds the room-layout result
+      await withSwitch(undefined, async () => {
+        expect(readNodeResult(stageSessionDir(stageDir, "douyin:123:2026-10-12"))?.phase).toBe("started");
+      });
+    });
+
+    it("switch on but the session already runs in the old layout: it stays there (no re-upload from a fresh dir)", async () => {
+      const { stageDir, sub, spec } = uploadScene();
+      mkdirSync(sub, { recursive: true });
+      await withSwitch("room", async () => {
+        vi.mocked(remuxSegment).mockImplementationOnce(() => { throw new Error("remux boom"); });
+        await expect(runNodeSidePipeline(spec, silence)).rejects.toThrow(/remux boom/);
+        expect(readNodeResult(sub)?.phase).toBe("started");
+        expect(existsSync(join(stageDir, "123_douyin_123"))).toBe(false);
+      });
+    });
+
+    it("switch off (default): the old layout, exactly as before", async () => {
+      const { sub, spec } = uploadScene();
+      await withSwitch(undefined, async () => {
+        vi.mocked(remuxSegment).mockImplementationOnce(() => { throw new Error("remux boom"); });
+        await expect(runNodeSidePipeline(spec, silence)).rejects.toThrow(/remux boom/);
+        expect(readNodeResult(sub)?.phase).toBe("started");
+      });
+    });
+  });
+
+  it("执行体接管即写 pid 文件(.drec-node-executor.pid)供 _node-abort 定位", async () => {
+    const { sub, spec } = uploadScene();
+    vi.mocked(remuxSegment).mockImplementationOnce(() => { throw new Error("remux boom"); });
+    await expect(runNodeSidePipeline(spec, silence)).rejects.toThrow();
+    // 中途抛错(未经 removeNodeExecutorPid 路径)→ pid 文件仍在 → master 能定位并终止。
+    expect(existsSync(nodeExecutorPidPath(sub))).toBe(true);
+  });
+});
+
+describe("issue #2 A3:执行体幂等重入(有 bv 绝不重复建稿)", () => {
+  // 同文件内 vi.fn 不会自动清零(见 issue#6 用例已调用 remuxSegment)→ 每次先清,
+  // 保证「未调用」断言只反映本次管线调用。
+  beforeEach(() => {
+    vi.mocked(remuxSegment).mockClear();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(appendGroup).mockClear();
+    vi.mocked(countVideoParts).mockClear();
+  });
+
+  function scene(): { sub: string; spec: Parameters<typeof runNodeSidePipeline>[0]; gate: UploadGate } {
+    const root = mkdtempSync(join(tmpdir(), "node-a3-"));
+    const recDir = join(root, "recordings");
+    mkdirSync(recDir, { recursive: true });
+    const tsFiles = [0, 1, 2].map((i) => {
+      const f = join(recDir, `Lilt_2026-10-12_07-00-00_${String(i).padStart(3, "0")}.ts`);
+      writeFileSync(f, "src");
+      return f;
+    });
+    const stageDir = join(root, "stage");
+    mkdirSync(stageDir, { recursive: true });
+    const c = clock();
+    const store = openUploadLimitStore(join(root, "x.db"), { log: silence });
+    const gate = new UploadGate({ store, cooldownMs: 0, rateLimit: 1000, now: c.now, sleep: c.sleep, warn: silence });
+    return {
+      sub: join(stageDir, "douyin_123_2026-10-13"),
+      spec: {
+        streamKey: "douyin:123:2026-10-13",
+        tsFiles,
+        sessionBase: "Lilt_2026-123",
+        startMs: 1_750_000_000_000,
+        liveTitle: "开播啦",
+        mergeSegments: false,
+        uploadMode: "upload",
+        stageDir,
+        uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像", titleTemplate: "{name}_{date}" },
+        uploadPrivate: true,
+      } as unknown as Parameters<typeof runNodeSidePipeline>[0],
+      gate,
+    };
+  }
+
+  it("done + bv 落盘 → 整场跳过(remux/upload/append 都不调用)", async () => {
+    const { sub, spec, gate } = scene();
+    writeNodeResult(sub, { phase: "done", ok: true, bv: "BV1DONE", products: ["/p1.mp4"] }, silence);
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r).toEqual({ ok: true, bv: "BV1DONE", products: ["/p1.mp4"] });
+    expect(vi.mocked(uploadPlain)).not.toHaveBeenCalled();
+    expect(vi.mocked(appendGroup)).not.toHaveBeenCalled();
+    expect(vi.mocked(remuxSegment)).not.toHaveBeenCalled(); // 跳过 remux
+    expect(existsSync(nodeExecutorPidPath(sub))).toBe(false); // 早返回清理陈旧 pid
+  });
+
+  it("failed + bv 落盘 + countVideoParts=2 → 跳过建稿、只续第 3 个分 P(绝不重复 uploadPlain)", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(appendGroup).mockClear();
+    writeNodeResult(sub, { phase: "failed", ok: false, bv: "BV1OLD", error: "append 挂在 2/3" }, silence);
+    vi.mocked(countVideoParts).mockResolvedValueOnce(2);
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    expect(r.bv).toBe("BV1OLD");                    // 复用稿件,不新建
+    expect(vi.mocked(uploadPlain)).not.toHaveBeenCalled(); // 幂等核心:绝不重复建稿
+    expect(vi.mocked(appendGroup)).toHaveBeenCalledTimes(1); // 只补 parts[2](分 P 3)
+    expect(vi.mocked(countVideoParts)).toHaveBeenCalledWith("BV1OLD", expect.any(String));
+    const final = readNodeResult(sub);
+    expect(final?.phase).toBe("done");
+    expect(final?.bv).toBe("BV1OLD");
+  });
+
+  it("re-entry preserves a prior BV on disk before the part-count network read", async () => {
+    const { sub, spec, gate } = scene();
+    writeNodeResult(sub, { phase: "failed", ok: false, bv: "BV1OLD", error: "append 中断" }, silence);
+    vi.mocked(countVideoParts).mockRejectedValueOnce(new Error("count network down"));
+
+    await expect(runNodeSidePipeline(spec, silence, gate)).rejects.toThrow("count network down");
+
+    const onDisk = readNodeResult(sub);
+    expect(onDisk?.bv).toBe("BV1OLD");
+    expect(onDisk?.phase).toBe("failed");
+  });
+
+  it("seasonSectionId: BV 先落盘,再关联;关联失败不影响上传", async () => {
+    const { sub, spec, gate } = scene();
+    seasonSpy.calls.length = 0;
+    seasonHook.onCall = (o) => {
+      // At the moment the season call runs, the node result must already carry the BV.
+      const onDisk = readNodeResult(sub);
+      seasonSpy.calls[seasonSpy.calls.length - 1]!.persistedBv = onDisk?.bv;
+      expect(onDisk?.seasonState).toBe("pending");
+      if (o.bvid === "BV1NEW") seasonSpy.calls[seasonSpy.calls.length - 1]!.fail = true;
+    };
+    try {
+      vi.mocked(uploadPlain).mockClear();
+      vi.mocked(appendGroup).mockClear();
+      const r = await runNodeSidePipeline({ ...spec, uploadMeta: { ...spec.uploadMeta, seasonSectionId: 123 } }, silence, gate);
+      expect(r.ok).toBe(true);
+      expect(r.bv).toBe("BV1NEW");
+      expect(vi.mocked(uploadPlain)).toHaveBeenCalledTimes(1);
+      expect(seasonSpy.calls.at(-1)).toMatchObject({ bvid: "BV1NEW", persistedBv: "BV1NEW" });
+      expect(readNodeResult(sub)?.seasonState).toBe("pending");
+    } finally {
+      seasonHook.onCall = undefined;
+    }
+  });
+
+  it("failed + bv 但 countVideoParts=null(确认不了已建到第几)→ 抛错转人工、绝不重复建稿", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(uploadPlain).mockClear();
+    writeNodeResult(sub, { phase: "failed", ok: false, bv: "BV1X", error: "append 中断" }, silence);
+    vi.mocked(countVideoParts).mockResolvedValueOnce(null);
+    await expect(runNodeSidePipeline(spec, silence, gate)).rejects.toThrow(/转人工|无法确认/);
+    expect(vi.mocked(uploadPlain)).not.toHaveBeenCalled(); // 既不盲目 append 也不重建稿
+    // 抛错前已落 failed 且保留 bv(不抹掉建稿证据)→ master 仍判「已建稿、绝不重传」。
+    const r = readNodeResult(sub);
+    expect(r?.phase).toBe("failed");
+    expect(r?.bv).toBe("BV1X");
+  });
+
+  it("无 bv 的 started 重入 → 正常新建稿并推进终态(started 不是「已建稿」证据)", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(uploadPlain).mockClear();
+    writeNodeResult(sub, { phase: "started", ok: false }, silence); // 上次 remux 前死、没建稿
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    expect(vi.mocked(uploadPlain)).toHaveBeenCalledTimes(1); // 没建过稿 → 安全新建
+    expect(readNodeResult(sub)?.phase).toBe("done"); // started 已推进为终态
+  });
+
+  it("#59:每次 appendGroup 都带 countParts,且回读的是本稿件 bv + 本机 cookies 路径", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(appendGroup).mockClear();
+    vi.mocked(countVideoParts).mockClear();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1CNT");
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    const calls = vi.mocked(appendGroup).mock.calls as unknown as Array<[{ bv: string; countParts?: () => Promise<number | null> }]>;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [o] of calls) {
+      expect(o.bv).toBe("BV1CNT");
+      expect(typeof o.countParts, "缺 countParts 则追加结果不确定时无法幂等核对").toBe("function");
+    }
+    await calls[0]![0].countParts!();
+    expect(vi.mocked(countVideoParts)).toHaveBeenLastCalledWith("BV1CNT", expect.any(String));
+    expect(readNodeResult(sub)?.phase).toBe("done");
+  });
+
+  it("#59:append 结果不确定(抛 ambiguous)→ 不重试、落 failed+bv 转人工,只调一次", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1AMB");
+    const err = new Error("[append-ambiguous] append 结果不确定,需人工核对");
+    vi.mocked(appendGroup).mockRejectedValueOnce(err);
+    await expect(runNodeSidePipeline(spec, silence, gate)).rejects.toThrow(/不确定|人工/);
+    expect(vi.mocked(appendGroup)).toHaveBeenCalledTimes(1); // 绝不重复追加
+    const r = readNodeResult(sub);
+    expect(r?.phase).toBe("failed");
+    expect(r?.bv).toBe("BV1AMB");
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+  });
+
+  it("0 字节分段:跳过不让整场失败,其余照常上传;成功后源清理仍删掉空段", async () => {
+    const { spec, gate } = scene();
+    vi.mocked(remuxSegment).mockClear();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1EMPTY");
+    writeFileSync(spec.tsFiles[1]!, ""); // 写满盘 / 开播即断留下的 0 字节段
+    const r = await runNodeSidePipeline({ ...spec, cleanSourceAfterDone: true }, silence, gate);
+    expect(r.ok).toBe(true);
+    expect(r.bv).toBe("BV1EMPTY");
+    const remuxedSrc = vi.mocked(remuxSegment).mock.calls.map((c) => c[0] as string);
+    expect(remuxedSrc).not.toContain(spec.tsFiles[1]);
+    expect(remuxedSrc).toHaveLength(2);
+    expect(existsSync(spec.tsFiles[1]!)).toBe(false); // 清理按原始清单,空段也删
+  });
+
+  it("全是 0 字节分段 → 明确报错、不建稿、不落 failed(留 started,重入不被永久卡死)", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(uploadPlain).mockClear();
+    for (const f of spec.tsFiles) writeFileSync(f, "");
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/0 字节/);
+    expect(vi.mocked(uploadPlain)).not.toHaveBeenCalled();
+    expect(readNodeResult(sub)?.phase).toBe("started");
+  });
+
+  // issue #25 ②:BV / 进度在建稿、追加成功的**当下**落盘;执行体被杀(不经 catch)时 master 仍能回读到。
+  it("#25②:建稿后、首次 append 起就已落盘 BV+confirmedParts=1+意图(此刻被杀也读得到 BV)", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1KILL");
+    let snap: ReturnType<typeof readNodeResult> = null;
+    // 在第一次 append 调用的瞬间读盘 = 模拟「建稿后、append 期间被 SIGKILL」时盘上的样子。
+    vi.mocked(appendGroup).mockImplementationOnce(async () => { snap = readNodeResult(sub); throw new Error("[append-ambiguous] killed"); });
+    await expect(runNodeSidePipeline(spec, silence, gate)).rejects.toThrow();
+    expect(snap).not.toBeNull();
+    expect(snap!.phase).toBe("uploading");
+    expect(snap!.bv).toBe("BV1KILL");
+    expect(snap!.confirmedParts).toBe(1);
+    expect(snap!.intentPart).toBe(2);     // 追加前已写意图:第 2 分 P 结果未知
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+  });
+
+  it("#25②:每次 append 成功后进度推进,意图被清掉;整场完成落 done", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1PROG");
+    const seen: Array<[number | undefined, number | undefined]> = [];
+    vi.mocked(appendGroup).mockImplementation(async () => { const r = readNodeResult(sub); seen.push([r?.confirmedParts, r?.intentPart]); });
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    expect(seen).toEqual([[1, 2], [2, 3]]); // 第 2 次 append 时:已确认 2、意图 3
+    expect(readNodeResult(sub)?.phase).toBe("done");
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+  });
+
+  // issue #204:结果文件的 step 仅是可观测信息(phase 不变),随 biliup 起进程 / 打印 `All files uploaded` 推进。
+  it("#204:step 依次 gate_wait → transfer → submit(建稿与每次 append 各走一遍),整场完成 phase=done 且不带 step", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockReset();
+    const seen: string[] = [];
+    const step = (): string => { const r = readNodeResult(sub); return `${r?.phase}/${r?.step}`; };
+    vi.mocked(runBiliup).mockImplementation((async (_argv: string[], hooks?: { onSpawn?: (p?: number) => void; onLine?: (l: string) => void }) => {
+      seen.push(`before:${step()}`);
+      hooks?.onSpawn?.(4242);
+      seen.push(`spawned:${step()}`);
+      hooks?.onLine?.("uploading part 1/1");
+      seen.push(`midway:${step()}`);
+      hooks?.onLine?.("All files uploaded successfully, checkpoint removed");
+      seen.push(`all-uploaded:${step()}`);
+      return "ok";
+    }) as never);
+    vi.mocked(uploadPlain).mockImplementation(async (o) => { await o.run!(["upload"]); return "BV1STEP"; });
+    vi.mocked(appendGroup).mockImplementation(async (o) => { await o.run!(["append"]); });
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    expect(seen.slice(0, 4)).toEqual([
+      "before:uploading/gate_wait", "spawned:uploading/transfer", "midway:uploading/transfer", "all-uploaded:uploading/submit",
+    ]);
+    // 每次 append 前都先回到 gate_wait(等配额),再 transfer → submit
+    expect(seen.slice(4, 8)).toEqual([
+      "before:uploading/gate_wait", "spawned:uploading/transfer", "midway:uploading/transfer", "all-uploaded:uploading/submit",
+    ]);
+    const done = readNodeResult(sub);
+    expect(done?.phase).toBe("done");
+    expect(done?.step).toBeUndefined();
+    vi.mocked(uploadPlain).mockImplementation(async () => "BV1NEW");
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+  });
+
+  it("#204:step 落盘失败不中断上传(只是可观测信息)", async () => {
+    const { spec, gate } = scene();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockReset();
+    vi.mocked(runBiliup).mockImplementation((async (_argv: string[], hooks?: { onSpawn?: (p?: number) => void }) => {
+      hooks?.onSpawn?.(1);
+      return "ok";
+    }) as never);
+    vi.mocked(uploadPlain).mockImplementation(async (o) => { await o.run!(["upload"]); return "BV1SOFT"; });
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+    // 只让「step=transfer」的那次落盘(rename)失败,其余照常 → 上传仍应成功
+    const fsMod = await import("node:fs");
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    let failed = 0;
+    vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => {
+      if (String(from).endsWith(".tmp") && actual.readFileSync(from, "utf-8").includes('"step":"transfer"')) {
+        failed += 1;
+        throw new Error("EIO step write");
+      }
+      return actual.renameSync(from, to);
+    }) as never);
+    try {
+      const r = await runNodeSidePipeline(spec, silence, gate);
+      expect(failed).toBeGreaterThan(0); // 确实触发过 step 落盘失败
+      expect(r.ok).toBe(true);
+    } finally {
+      vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => actual.renameSync(from, to)) as never);
+      vi.mocked(uploadPlain).mockImplementation(async () => "BV1NEW");
+    }
+  });
+
+  it("season pending checkpoint write failure does not POST an untracked association", async () => {
+    const { sub, spec, gate } = scene();
+    const seasonWriteBv = ["B", "V", "1SEASONWRITE"].join("");
+    seasonSpy.calls.length = 0;
+    vi.mocked(uploadPlain).mockResolvedValueOnce(seasonWriteBv);
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+    const fsMod = await import("node:fs");
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    let failed = 0;
+    vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => {
+      if (String(from).endsWith(".tmp") && actual.readFileSync(from, "utf-8").includes('"seasonState":"pending"')) {
+        failed += 1;
+        throw new Error("EIO season write");
+      }
+      return actual.renameSync(from, to);
+    }) as never);
+    try {
+      const r = await runNodeSidePipeline({ ...spec, uploadMeta: { ...spec.uploadMeta, seasonSectionId: 123 } }, silence, gate);
+      expect(r.ok).toBe(true);
+      expect(r.bv).toBe(seasonWriteBv);
+      expect(failed).toBeGreaterThan(0);
+      expect(seasonSpy.calls).toHaveLength(0);
+      expect(readNodeResult(sub)?.phase).toBe("done");
+    } finally {
+      vi.mocked(fsMod.renameSync).mockImplementation(((from: string, to: string) => actual.renameSync(from, to)) as never);
+      vi.mocked(uploadPlain).mockImplementation(async () => "BV1NEW");
+    }
+  });
+
+  it("#25②:append 抛错 → failed 结果里带 bv 与已确认进度", async () => {
+    const { sub, spec, gate } = scene();
+    vi.mocked(appendGroup).mockReset();
+    vi.mocked(uploadPlain).mockResolvedValueOnce("BV1FAIL");
+    vi.mocked(appendGroup).mockRejectedValueOnce(new Error("[append-ambiguous] x"));
+    await expect(runNodeSidePipeline(spec, silence, gate)).rejects.toThrow();
+    const r = readNodeResult(sub);
+    expect(r?.phase).toBe("failed");
+    expect(r?.bv).toBe("BV1FAIL");
+    expect(r?.confirmedParts).toBe(1);
+    vi.mocked(appendGroup).mockImplementation(async () => {});
+  });
+
+  it("#25②:旧结果文件(无 confirmedParts/intentPart)照常解析;非法值被丢弃", () => {
+    const { sub } = scene();
+    writeNodeResult(sub, { phase: "uploading", ok: false, bv: "BV1OLD" }, silence);
+    const old = readNodeResult(sub);
+    expect(old?.bv).toBe("BV1OLD");
+    expect(old?.confirmedParts).toBeUndefined();
+    expect(old?.intentPart).toBeUndefined();
+    writeFileSync(join(sub, ".drec-node-result.json"), JSON.stringify({ phase: "uploading", ok: false, confirmedParts: -3, intentPart: 0 }));
+    const bad = readNodeResult(sub);
+    expect(bad?.confirmedParts).toBeUndefined();
+    expect(bad?.intentPart).toBeUndefined();
+  });
+});
+
+describe("issue #2 A2:abortNodeExecutor(经注入 deps 安全终止,绝不误杀)", () => {
+  it("无 pid 文件 → aborted=true(节点已应答且本场无执行体:未启动或已收尾)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "abort-"));
+    const killed: Array<[number, string | number]> = [];
+    const res = await abortNodeExecutor(dir, "douyin:1:2026-10-12", {
+      readCmdline: () => null, listChildren: () => [], kill: (pid, sig) => { killed.push([pid, sig]); return true; },
+    }, async () => {}, 0);
+    // pid 文件是执行体的登记表:`_node-abort` 能应答 = 节点可达;无 pid = 本场没有(也不会再有)执行体。
+    expect(res.aborted).toBe(true);
+    expect(res.detail).toContain("无 pid 文件");
+    expect(killed).toHaveLength(0); // 无从杀起,绝不发任何信号
+  });
+
+  it("stage 子目录不存在 → aborted=false(可能不是执行体真正的落盘位置,不确定不定为「确已停」)", async () => {
+    const missing = join(mkdtempSync(join(tmpdir(), "abort-parent-")), "no-such-stage-sub");
+    const killed: Array<[number, string | number]> = [];
+    const res = await abortNodeExecutor(missing, "douyin:1:2026-10-12", {
+      readCmdline: () => null, listChildren: () => [], kill: (pid, sig) => { killed.push([pid, sig]); return true; },
+    }, async () => {}, 0);
+    // 假 `aborted:true` 会让 master 把 started 判成「确认没成 failed」= 静默分裂复发 → 必须保守 false。
+    expect(res.aborted).toBe(false);
+    expect(res.detail).toContain("不确定");
+    expect(killed).toHaveLength(0);
+  });
+
+  it("pid 存活但 cmdline 不匹配 → aborted=true 且**不发任何 kill**(防 pid 回收误杀)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "abort-"));
+    writeFileSync(join(dir, ".drec-node-executor.pid"), "4242");
+    const killed: Array<[number, string | number]> = [];
+    const res = await abortNodeExecutor(dir, "douyin:1:2026-10-12", {
+      readCmdline: () => ["node", "other.js"], // 不是本场 _node-pipeline
+      listChildren: () => [], kill: (pid, sig) => { killed.push([pid, sig]); return true; },
+    }, async () => {}, 0);
+    expect(res.aborted).toBe(true);
+    expect(res.detail).toContain("不误杀");
+    expect(killed.filter(([, sig]) => sig !== 0)).toHaveLength(0); // 除存活探测外无 kill
+  });
+
+  it("cmdline 匹配本场 streamKey → SIGTERM→SIGKILL 连同子进程一并终止", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "abort-"));
+    writeFileSync(join(dir, ".drec-node-executor.pid"), "4242");
+    const spec = Buffer.from(JSON.stringify({ streamKey: "douyin:1:2026-10-12" })).toString("base64");
+    const alive = new Set([4242, 99]); // 父 + 一个子(biliup/ffmpeg)
+    const sigs: Array<[number, string | number]> = [];
+    const res = await abortNodeExecutor(dir, "douyin:1:2026-10-12", {
+      readCmdline: () => ["node", "dist/douyin-rec.mjs", "_node-pipeline", "/data", spec],
+      listChildren: () => [99],
+      kill: (pid, sig) => { sigs.push([pid, sig]); if (sig === "SIGKILL") alive.delete(pid); return alive.has(pid); },
+    }, async () => {}, 0);
+    expect(res.aborted).toBe(true);
+    expect(res.killed).toEqual(expect.arrayContaining([4242, 99])); // 父与子都在目标内
+    // SIGTERM 先发给父与子,随后 SIGKILL 兜底
+    expect(sigs.some(([p, s]) => s === "SIGTERM" && p === 99)).toBe(true);
+    expect(sigs.some(([p, s]) => s === "SIGKILL" && p === 4242)).toBe(true);
+  });
+
+  it("pid 存活但读不到 cmdline(非 Linux/权限)→ aborted=false(不确定,调用方保守)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "abort-"));
+    writeFileSync(join(dir, ".drec-node-executor.pid"), "4242");
+    const res = await abortNodeExecutor(dir, "douyin:1:2026-10-12", {
+      readCmdline: () => null, listChildren: () => [], kill: (pid, sig) => sig === 0,
+    }, async () => {}, 0);
+    expect(res.aborted).toBe(false);
+  });
+
+  it("isExecutorCmdline:base64 spec 比对 streamKey,精确身份防误杀", () => {
+    const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64");
+    expect(isExecutorCmdline(["node", "x", "_node-pipeline", "/d", enc({ streamKey: "a:1:2" })], "a:1:2")).toBe(true);
+    expect(isExecutorCmdline(["node", "x", "_node-pipeline", "/d", enc({ streamKey: "a:1:2" })], "z:9:9")).toBe(false);
+    expect(isExecutorCmdline(["node", "x", "other"], "a:1:2")).toBe(false); // 无 _node-pipeline
+    expect(isExecutorCmdline(null, "a:1:2")).toBe(false);
+  });
+});
+
+/**
+ * `.ts` 直传(steps.tsDirect):ffmpeg 的 .ts 单段分 P 不 remux,源硬链接成规范名直接上传 ——
+ * 同一内容在节点上只占一份(源 inode == 上传物 inode,没有 .work、没有 mp4)。
+ */
+describe("节点侧:.ts 直传(tsDirect)", () => {
+  function scene(over: { files?: string[]; tsDirect?: boolean; mergeSegments?: boolean } = {}): { sub: string; spec: Parameters<typeof runNodeSidePipeline>[0] } {
+    const root = mkdtempSync(join(tmpdir(), "node-tsd-"));
+    const recDir = join(root, "recordings");
+    mkdirSync(recDir, { recursive: true });
+    const names = over.files ?? [0, 1, 2].map((i) => `Lilt_2026-10-12_05-18-36_${String(i).padStart(3, "0")}.ts`);
+    const tsFiles = names.map((n) => { const p = join(recDir, n); writeFileSync(p, "SRCTS"); return p; });
+    const stageDir = join(root, "stage");
+    mkdirSync(stageDir, { recursive: true });
+    return {
+      sub: join(stageDir, "douyin_123_2026-10-12"),
+      spec: {
+        streamKey: "douyin:123:2026-10-12",
+        tsFiles,
+        sessionBase: "Lilt_2026-10-12_05-18-36",
+        startMs: 1_750_000_000_000,
+        liveTitle: "开播啦",
+        mergeSegments: over.mergeSegments ?? false,
+        tsDirect: over.tsDirect,
+        uploadMode: "stage",
+        stageDir,
+        uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像", titleTemplate: "{name}_{date}" },
+        uploadPrivate: true,
+      },
+    };
+  }
+
+  it("开启 + 单段分 P + .ts → 上传物是源的硬链接(同 inode),没有 mp4 / .work", async () => {
+    vi.mocked(remuxSegment).mockClear();
+    const { sub, spec } = scene({ tsDirect: true });
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(remuxSegment).not.toHaveBeenCalled();
+    expect(r.products).toHaveLength(3);
+    for (let i = 0; i < 3; i++) {
+      const out = join(sub, `Lilt_2026-10-12_${String(i).padStart(3, "0")}.ts`);
+      expect(r.products![i]).toBe(out);
+      expect(statSync(out).ino).toBe(statSync(spec.tsFiles[i]!).ino); // 同一份数据
+      expect(readFileSync(out, "utf-8")).toBe("SRCTS");
+      expect(existsSync(join(sub, `Lilt_2026-10-12_${String(i).padStart(3, "0")}.mp4`))).toBe(false);
+    }
+    expect(existsSync(join(sub, ".work", "000.mp4"))).toBe(false);
+  });
+
+  it("默认(未开)→ 行为不变:照常 remux 成 mp4", async () => {
+    vi.mocked(remuxSegment).mockClear();
+    const { sub, spec } = scene();
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(remuxSegment).toHaveBeenCalledTimes(3);
+    expect(r.products![0]).toBe(join(sub, "Lilt_2026-10-12_000.mp4"));
+  });
+
+  it("开启但源是 .flv(mesio)→ 仍 remux(时基必须钉 90000)", async () => {
+    vi.mocked(remuxSegment).mockClear();
+    const { spec } = scene({ tsDirect: true, files: ["Lilt_2026-10-12_05-18-36_000.flv"] });
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(remuxSegment).toHaveBeenCalledTimes(1);
+    expect(r.products![0]).toMatch(/\.mp4$/);
+  });
+
+  it("开启但组内多段需要合并 → 仍走合并(直传只管单段独占的分 P)", async () => {
+    vi.mocked(remuxSegment).mockClear();
+    const { spec } = scene({ tsDirect: true, mergeSegments: true });
+    spec.segmentGroupSec = 100000; // 60s×3 全进一组
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(r.products).toHaveLength(1);
+    expect(r.products![0]).toMatch(/\.mp4$/);
+    expect(readFileSync(r.products![0]!, "utf-8")).toBe("MERGED");
+  });
+
+  it("硬链接失败(跨设备)→ 回落 remux,**不复制**出第二份 .ts", async () => {
+    vi.mocked(remuxSegment).mockClear();
+    const { sub, spec } = scene({ tsDirect: true });
+    const linkSpy = vi.mocked(nodeFs.linkSync);
+    for (let i = 0; i < 3; i++) linkSpy.mockImplementationOnce(() => { throw Object.assign(new Error("EXDEV"), { code: "EXDEV" }); });
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(remuxSegment).toHaveBeenCalledTimes(3);
+    for (let i = 0; i < 3; i++) {
+      expect(existsSync(join(sub, `Lilt_2026-10-12_${String(i).padStart(3, "0")}.ts`))).toBe(false);
+    }
+  });
+
+  it("续跑:规范 .ts 已存在 → 复用,inode 不变", async () => {
+    const { sub, spec } = scene({ tsDirect: true });
+    await runNodeSidePipeline(spec, silence);
+    const out = join(sub, "Lilt_2026-10-12_000.ts");
+    const ino = statSync(out).ino;
+    const r2 = await runNodeSidePipeline(spec, silence);
+    expect(r2.ok).toBe(true);
+    expect(statSync(out).ino).toBe(ino);
+  });
+
+  it("tryDirectTsLink:源不存在 → false(调用方回落 remux)", () => {
+    expect(tryDirectTsLink(join(tmpdir(), "nope-xyz.ts"), join(tmpdir(), "nope-dst-xyz.ts"))).toBe(false);
+  });
+
+  it("nodeStageCleanupTargets:stage 里的 .ts 直传链接也属于可清理的成品(只删链接,不碰源)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nodestage-ts-"));
+    writeFileSync(join(dir, "Lilt_2026-10-12_000.ts"), "v");
+    writeFileSync(join(dir, "Lilt_2026-10-12.xml"), "x");
+    const targets = nodeStageCleanupTargets(dir).map((p) => p.replace(dir + "/", ""));
+    expect(targets).toEqual(["Lilt_2026-10-12_000.ts"]);
+  });
+});
+
+describe("节点侧:.ts 直传的安全边界(审查补测)", () => {
+  beforeEach(() => {
+    vi.mocked(remuxSegment).mockClear();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(appendGroup).mockClear();
+  });
+
+  function scene(clean: { source?: boolean; stage?: boolean }): { sub: string; spec: Parameters<typeof runNodeSidePipeline>[0]; gate: UploadGate } {
+    const root = mkdtempSync(join(tmpdir(), "node-tsd-up-"));
+    const recDir = join(root, "recordings");
+    mkdirSync(recDir, { recursive: true });
+    const tsFiles = [0, 1].map((i) => {
+      const f = join(recDir, `Lilt_2026-10-12_05-18-36_${String(i).padStart(3, "0")}.ts`);
+      writeFileSync(f, "SRCTS");
+      return f;
+    });
+    const stageDir = join(root, "stage");
+    mkdirSync(stageDir, { recursive: true });
+    const c = clock();
+    const store = openUploadLimitStore(join(root, "x.db"), { log: silence });
+    const gate = new UploadGate({ store, cooldownMs: 0, rateLimit: 1000, now: c.now, sleep: c.sleep, warn: silence });
+    return {
+      sub: join(stageDir, "douyin_123_2026-10-12"),
+      spec: {
+        streamKey: "douyin:123:2026-10-12",
+        tsFiles,
+        sessionBase: "Lilt_2026-10-12_05-18-36",
+        startMs: 1_750_000_000_000,
+        liveTitle: "开播啦",
+        mergeSegments: false,
+        tsDirect: true,
+        uploadMode: "upload",
+        stageDir,
+        uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像", titleTemplate: "{name}_{date}", partTitleTemplate: "{name}_P{part}" },
+        uploadPrivate: true,
+        cleanSourceAfterDone: clean.source,
+        cleanStageAfterDone: clean.stage,
+      } as unknown as Parameters<typeof runNodeSidePipeline>[0],
+      gate,
+    };
+  }
+
+  it("ffprobe 探不出时长的段(损坏/截断)→ 不直传,回落 remux(让 ffmpeg 兜底报错,不静默上传坏文件)", async () => {
+    const { sub, spec } = scene({});
+    spec.uploadMode = "stage";
+    // 第 1 段 ffprobe 失败(durationOf 吞成 0),第 2 段正常。
+    vi.mocked(ffprobeDuration).mockRejectedValueOnce(new Error("moov atom not found"));
+    const r = await runNodeSidePipeline(spec, silence);
+    expect(r.ok).toBe(true);
+    expect(vi.mocked(remuxSegment)).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(sub, "Lilt_2026-10-12_000.ts"))).toBe(false); // 坏段没被硬链接
+    expect(existsSync(join(sub, "Lilt_2026-10-12_000.mp4"))).toBe(true);
+    expect(existsSync(join(sub, "Lilt_2026-10-12_001.ts"))).toBe(true);  // 好段照常直传
+  });
+
+  it("upload 模式:传给 biliup 的是 .ts(经分 P 标题别名,硬链接),不是 mp4", async () => {
+    const { spec, gate } = scene({});
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    const created = vi.mocked(uploadPlain).mock.calls[0]![0] as { plain: { video: string } };
+    expect(created.plain.video).toMatch(/\.ts$/);
+    expect(created.plain.video).toContain("/.upload/");
+    const appended = vi.mocked(appendGroup).mock.calls[0]![0] as { files: string[] };
+    expect(appended.files[0]).toMatch(/\.ts$/);
+    expect(vi.mocked(remuxSegment)).not.toHaveBeenCalled();
+  });
+
+  it("清理 source+stage 都开 → 上传成功后两处链接都清完(此时才释放数据)", async () => {
+    const { sub, spec, gate } = scene({ source: true, stage: true });
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    for (const f of spec.tsFiles) expect(existsSync(f)).toBe(false);
+    expect(existsSync(join(sub, "Lilt_2026-10-12_000.ts"))).toBe(false);
+    expect(existsSync(join(sub, ".upload"))).toBe(false);
+  });
+
+  it("只清 source、不清 stage → stage 链接仍持有完整数据(不丢唯一副本)", async () => {
+    const { sub, spec, gate } = scene({ source: true, stage: false });
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    for (const f of spec.tsFiles) expect(existsSync(f)).toBe(false);
+    expect(readFileSync(join(sub, "Lilt_2026-10-12_000.ts"), "utf-8")).toBe("SRCTS");
+  });
+
+  it("只清 stage、不清 source → 源完好(只删链接,不碰 recordings)", async () => {
+    const { sub, spec, gate } = scene({ source: false, stage: true });
+    const r = await runNodeSidePipeline(spec, silence, gate);
+    expect(r.ok).toBe(true);
+    for (const f of spec.tsFiles) expect(readFileSync(f, "utf-8")).toBe("SRCTS");
+    expect(existsSync(join(sub, "Lilt_2026-10-12_000.ts"))).toBe(false);
+  });
+});
+
+/**
+ * issue #140:产物「**存在** ≠ **完整**」。
+ *
+ * 线上 incident(2026-10-15):被看门狗强杀留下的半成品**大小正常**却读不出时长;旧逻辑只问
+ * `existsSync(work)` → 直接硬链接成上传物 → B站建稿返回 `code: 0`、到转码阶段才报 `state=-16`。
+ * 这里钉住两件事:① 半成品必须原地重做;② 提交前读不出时长的产物一律拒投。
+ */
+describe("issue #140:半成品不复用 + 提交前自检", () => {
+  beforeEach(() => {
+    vi.mocked(remuxSegment).mockClear();
+    vi.mocked(uploadPlain).mockClear();
+    vi.mocked(appendGroup).mockClear();
+    vi.mocked(ffprobeDuration).mockClear();
+  });
+  afterEach(() => { vi.mocked(ffprobeDuration).mockImplementation(async () => 60); });
+
+  function scene(uploadMode: "stage" | "upload"): { sub: string; spec: Parameters<typeof runNodeSidePipeline>[0] } {
+    const root = mkdtempSync(join(tmpdir(), "node-140-"));
+    const recDir = join(root, "recordings");
+    mkdirSync(recDir, { recursive: true });
+    const ts = join(recDir, "Lilt_2026-10-15_12-14-16_000.ts");
+    writeFileSync(ts, "src");
+    const stageDir = join(root, "stage");
+    mkdirSync(stageDir, { recursive: true });
+    return {
+      sub: join(stageDir, "douyin_123_2026-10-15"),
+      spec: {
+        streamKey: "douyin:123:2026-10-15",
+        tsFiles: [ts],
+        sessionBase: "Lilt_2026-10-15_12-14-16",
+        startMs: 1_760_000_000_000,
+        liveTitle: "开播啦",
+        mergeSegments: false,
+        uploadMode,
+        stageDir,
+        uploadMeta: { tag: "直播录像", tid: 21, desc: "直播录像", titleTemplate: "{name}_{date}" },
+        uploadPrivate: true,
+      },
+    };
+  }
+
+  it("已有中间产物但读不出时长(半成品)→ 原地重做,不当成品复用", async () => {
+    const { sub, spec } = scene("stage");
+    const work = join(sub, ".work", "000.mp4");
+    mkdirSync(join(sub, ".work"), { recursive: true });
+    writeFileSync(work, "HALF-WRITTEN");
+    let seen = false;
+    vi.mocked(ffprobeDuration).mockImplementation(async (f: string) => {
+      if (f === work && !seen) { seen = true; return 0; } // 残留:文件在、时长读不出
+      return 60;
+    });
+
+    const r = await runNodeSidePipeline(spec, silence);
+
+    expect(vi.mocked(remuxSegment)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(remuxSegment).mock.calls[0]?.[1]).toBe(work); // 重做在原地(保留续跑语义)
+    expect(readFileSync(work, "utf-8")).toBe("REMUXED");
+    expect(r.products).toEqual([join(sub, "Lilt_2026-10-15_000.mp4")]);
+    // 规范名与重做后的中间产物同 inode(不是新副本)。
+    expect(statSync(join(sub, "Lilt_2026-10-15_000.mp4")).ino).toBe(statSync(work).ino);
+  });
+
+  it("产物读不出时长 → 提交前拒投:不调 uploadPlain / appendGroup,结果停在 started", async () => {
+    const { sub, spec } = scene("upload");
+    vi.mocked(ffprobeDuration).mockImplementation(async (f: string) =>
+      /_000\.mp4$/.test(f) && !f.includes(".work/") ? 0 : 60);
+
+    await expect(runNodeSidePipeline(spec, silence)).rejects.toThrow(/产物自检失败/);
+
+    expect(vi.mocked(uploadPlain)).not.toHaveBeenCalled();
+    expect(vi.mocked(appendGroup)).not.toHaveBeenCalled();
+    // 与「remux 抛错」同口径:停在 started(还没跟 B站说话)→ master 可判定「确认没成」。
+    expect(readNodeResult(sub)?.phase).toBe("started");
+  });
+
+  it("规范名是陈旧产物(与 .work 不同 inode)→ 重新链到中间产物,不留下旧内容", async () => {
+    const { sub, spec } = scene("stage");
+    const work = join(sub, ".work", "000.mp4");
+    mkdirSync(join(sub, ".work"), { recursive: true });
+    writeFileSync(work, "REMUXED");
+    // 陈旧规范名:另一份文件(不同 inode)。旧实现 `if (!existsSync(out)) linkOrCopySync(...)` 会原样留着它。
+    const canonical = join(sub, "Lilt_2026-10-15_000.mp4");
+    writeFileSync(canonical, "STALE");
+
+    const r = await runNodeSidePipeline(spec, silence);
+
+    expect(r.ok).toBe(true);
+    expect(readFileSync(canonical, "utf-8")).toBe("REMUXED");       // 已被换成中间产物
+    expect(statSync(canonical).ino).toBe(statSync(work).ino);       // 同一 inode(零拷贝)
+    expect(vi.mocked(remuxSegment)).not.toHaveBeenCalled();         // 中间产物可读 → 不重做
+  });
+});
+
+describe("节点侧标题时区(issue #158)", () => {
+  const spec = (timeZone?: string) => ({
+    streamKey: "douyin:r:2026-10-15", tsFiles: ["/nonexistent/x_2026-10-15_13-00-00.ts"], mergeSegments: true,
+    startMs: Date.UTC(2026, 9, 15, 20, 0, 0), // 北京 10-16 04:00 / 美西 10-15 13:00
+    sessionBase: "x_2026-10-15", timeZone, // 仅日期会话名 → 时刻取 startMs 按时区渲染
+    uploadMeta: { titleTemplate: "{date}_{HH}" },
+  }) as never;
+  const withTz = <T,>(tz: string, f: () => T): T => {
+    const o = process.env.TZ; process.env.TZ = tz;
+    try { return f(); } finally { if (o === undefined) delete process.env.TZ; else process.env.TZ = o; }
+  };
+  it("spec 缺 timeZone → 取进程生效时区(与边录边传同口径),不回落北京", () => {
+    const r = withTz("America/Los_Angeles", () => deriveTitles(spec(), () => {}));
+    expect(r.stem).toBe("2026-10-15_13");
+  });
+  it("spec 带 timeZone → 以 spec 为准(不受进程 TZ 影响)", () => {
+    const r = withTz("America/Los_Angeles", () => deriveTitles(spec("Asia/Shanghai"), () => {}));
+    expect(r.stem).toBe("2026-10-16_04");
+  });
+});

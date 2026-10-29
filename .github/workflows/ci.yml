@@ -20,6 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # 拉全历史:issue-guard --diff 要用 merge-base 算出 PR 新增行(浅克隆算不出)。
+        # 架构文档守护(gen-architecture.mjs --check)现在只比结构、不再依赖 git log 热度(issue #29)。
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -27,6 +31,9 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         # 版本不写死在这里：pnpm/action-setup@v4 自动读 package.json 的 packageManager 字段。
+
+      - name: "Privacy gate (issue-guard --diff,只扫 PR 新增行)"
+        run: python3 scripts/issue-guard.py --diff origin/feat/hub-optimization
 
       - name: "Install (root)"
         run: pnpm install --frozen-lockfile

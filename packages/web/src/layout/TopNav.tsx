@@ -1,7 +1,7 @@
 import { useAtomValue } from "jotai";
-import { useState, type ReactNode } from "react";
-import { Link, NavLink } from "react-router-dom";
-import { Settings } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Link, NavLink, useLocation } from "react-router-dom";
+import { ChevronDown, Settings } from "lucide-react";
 import { cookieStatusAtom, hubEnabledAtom } from "../atoms";
 import { RecordGlyph } from "../components/Brand";
 import { ThemeToggle } from "../components/ThemeToggle";
@@ -9,12 +9,68 @@ import { CookieDialog } from "../modals/CookieDialog";
 import { QrLoginDialog } from "../modals/QrLoginDialog";
 import { SettingsDialog } from "../modals/SettingsDialog";
 import { useT } from "../lib/i18n";
+import { navSections } from "../lib/nav";
+
+/** 页面入口。桌面放进顶栏;手机一行放不下中文标签,改到第二行,避免被 hidden 掉。 */
+function PageLinks({ className }: { className: string }): ReactNode {
+  const t = useT();
+  const hubEnabled = useAtomValue(hubEnabledAtom);
+  const location = useLocation();
+  const details = useRef<HTMLDetailsElement>(null);
+  const sections = navSections(hubEnabled === true);
+  const matches = (item: (typeof sections.primary)[number]): boolean =>
+    location.pathname === item.to
+    || (!item.end && location.pathname.startsWith(`${item.to}/`));
+  const advancedActive = sections.advanced.some(matches);
+  useEffect(() => {
+    const closeOutside = (event: PointerEvent): void => {
+      if (details.current?.open && !details.current.contains(event.target as Node)) details.current.open = false;
+    };
+    const closeEscape = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || !details.current?.open) return;
+      details.current.open = false;
+      details.current.querySelector("summary")?.focus();
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeEscape);
+    };
+  }, []);
+  const link = (item: (typeof sections.primary)[number]): ReactNode => (
+    <NavLink
+      key={item.to}
+      to={item.to}
+      end={item.end}
+      onClick={() => { if (details.current) details.current.open = false; }}
+      className={({ isActive }) => `topbar-link shrink-0 ${isActive ? "topbar-link-active" : ""}`}
+    >
+      {t(item.labelKey)}
+    </NavLink>
+  );
+  return (
+    <nav className={className} aria-label={t("nav.title")}>
+      {sections.primary.map(link)}
+      {sections.advanced.length > 0 && (
+        <details ref={details} className="topbar-advanced">
+          <summary className={`topbar-link topbar-advanced-trigger shrink-0${advancedActive ? " topbar-link-active" : ""}`}>
+            {t("nav.advanced")}
+            <ChevronDown className="w-3 h-3" />
+          </summary>
+          <div className="topbar-advanced-menu">
+            {sections.advanced.map(link)}
+          </div>
+        </details>
+      )}
+    </nav>
+  );
+}
 
 /** 顶栏:控制台式导航 + 全局 cookie 状态 + 设置(账号/Webhook/通知)。 */
 export function TopNav(): ReactNode {
   const t = useT();
   const cookie = useAtomValue(cookieStatusAtom);
-  const hubEnabled = useAtomValue(hubEnabledAtom);
   const [qrOpen, setQrOpen] = useState(false);
   const [qrPlatform, setQrPlatform] = useState("douyin");
   const [pasteOpen, setPasteOpen] = useState(false);
@@ -50,65 +106,47 @@ export function TopNav(): ReactNode {
 
   return (
     <header className="sticky top-0 z-40 topbar">
-      <div className="max-w-[1200px] mx-auto h-[56px] px-4 sm:px-6 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 min-w-0">
-          <Link to="/" className="flex items-center gap-3 min-w-0 shrink-0">
-            <div className="brand-mark">
-              <RecordGlyph />
-            </div>
-            <span className="flex flex-col min-w-0 leading-none">
-              <span className="headline text-[15px] truncate">{t("nav.title")}</span>
-              <span className="hidden sm:block font-mono text-[10px] uppercase text-muted mt-1">
-                Douyin Rec
+      <div className="max-w-[1200px] mx-auto">
+        <div className="h-[56px] px-4 sm:px-6 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <Link to="/" className="flex items-center gap-3 min-w-0 shrink-0">
+              <div className="brand-mark">
+                <RecordGlyph />
+              </div>
+              <span className="flex flex-col min-w-0 leading-none">
+                <span className="headline text-[15px] truncate">{t("nav.title")}</span>
+                <span className="hidden sm:block font-mono text-[10px] uppercase text-muted mt-1">
+                  Douyin Rec
+                </span>
               </span>
-            </span>
-          </Link>
-          <nav className="hidden sm:flex items-center gap-1 ml-2">
-            {(([
-              ["/", t("nav.tasksList")],
-              // Hub 与处理队列都仅 master(启用 hub)显示;slave/未开不显示。
-              // 顺序:录制任务 → Hub(配置编排)→ 处理队列(运行观测),从「配」到「看」。
-              ...(hubEnabled ? [["/hub", "Hub"] as const] : []),
-              ...(hubEnabled ? [["/queue", t("nav.queue")] as const] : []),
-            ]) as const).map(([to, label]) => (
-              <NavLink
-                key={to}
-                to={to}
-                end={to === "/"}
-                className={({ isActive }) =>
-                  `topbar-link ${
-                    isActive ? "topbar-link-active" : ""
-                  }`
-                }
-              >
-                {label}
-              </NavLink>
-            ))}
-          </nav>
-        </div>
+            </Link>
+            <PageLinks className="hidden sm:flex items-center gap-1 ml-2" />
+          </div>
 
-        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-          {/* 登录状态 pill:点它开设置(账号 tab)。title 说清「账号与设置」,避免以为只是状态展示。 */}
-          <button
-            type="button"
-            onClick={() => setSettingsOpen(true)}
-            className="status-pill"
-            title={t("settings.accountAndSettings")}
-            aria-label={t("settings.accountAndSettings")}
-          >
-            <span className="dot" style={{ background: pillColor }} />
-            <span>{pillText}</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setSettingsOpen(true)}
-            title={t("settings.title")}
-            className="icon-btn"
-          >
-            <Settings className="w-4 h-4" />
-          </button>
-          <ThemeToggle />
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+            {/* 登录状态 pill:点它开设置(账号 tab)。title 说清「账号与设置」,避免以为只是状态展示。 */}
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              className="status-pill"
+              title={t("settings.accountAndSettings")}
+              aria-label={t("settings.accountAndSettings")}
+            >
+              <span className="dot" style={{ background: pillColor }} />
+              <span>{pillText}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              title={t("settings.title")}
+              className="icon-btn"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+            <ThemeToggle />
+          </div>
         </div>
+        <PageLinks className="topbar-mobile-nav" />
       </div>
 
       <QrLoginDialog open={qrOpen} onClose={() => setQrOpen(false)} platform={qrPlatform} />

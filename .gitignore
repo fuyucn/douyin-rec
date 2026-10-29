@@ -16,7 +16,10 @@ output/
 recordings/
 data-local/
 docker-data/
-output-data/     # 未设 DOUYIN_REC_ROOT 时的默认数据根(见 packages/app/src/paths.ts DEFAULT_ROOT)
+# 未设 DOUYIN_REC_ROOT 时的默认数据根(见 packages/app/src/paths.ts DEFAULT_ROOT)。
+# 注意:注释必须独立成行 —— 行内注释会让 git 把整行当 pattern,导致忽略失效(踩过)。
+output-data/
+stage/
 *.db
 *.log
 mesio.log*
@@ -31,7 +34,6 @@ cookies.json
 venv/
 
 # 本地专属 / 一次性调试产物(非本项目产物,勿带入 main)
-/AGENTS.md
 /.codex/
 /.orka/
 /icloud
@@ -48,3 +50,11 @@ remote/
 .hallmark/
 skills-lock.json
 logs/
+
+# Python 字节码缓存
+__pycache__/
+*.pyc
+
+# dev 多节点 e2e 数据根(issue #82)
+data-dev/
+

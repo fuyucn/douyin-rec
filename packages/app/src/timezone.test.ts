@@ -1,6 +1,9 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { applyTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
-import type { TaskStore } from "./store.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { applyTimezone, applyTimezoneFromDb, effectiveTimezone, isValidTimezone, DEFAULT_TIMEZONE } from "./timezone.js";
+import { TaskStore } from "./store.js";
 
 /** 极简假 store:applyTimezone 只用到 getSetting("timezone")。 */
 const fakeStore = (timezone?: string): TaskStore =>
@@ -52,5 +55,58 @@ describe("applyTimezone", () => {
     const laHour = new Date("2026-07-01T20:00:00Z").getHours();
     expect(shanghaiHour).not.toBe(laHour); // 同一时刻,两个时区算出的小时数必须不同
     expect(shanghaiHour).toBe(4); // 20:00 UTC + 8h = 次日 04:00
+  });
+});
+
+describe("effectiveTimezone / applyTimezoneFromDb(独立 CLI 入口,issue #155)", () => {
+  const prevTZ = process.env.TZ;
+  afterEach(() => {
+    if (prevTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTZ;
+  });
+
+  it("effectiveTimezone 只看设置:空/非法 → 北京,不看 process.env.TZ", () => {
+    process.env.TZ = "America/Los_Angeles";
+    expect(effectiveTimezone(fakeStore())).toBe("Asia/Shanghai");
+    expect(effectiveTimezone(fakeStore("Not/AZone"))).toBe("Asia/Shanghai");
+    expect(effectiveTimezone(fakeStore("America/Chicago"))).toBe("America/Chicago");
+  });
+
+  it("库不存在 → 保留继承的有效 TZ(不抛错、不建库;issue #158 取代 #155 的「覆盖为北京」)", () => {
+    process.env.TZ = "America/Los_Angeles";
+    const dir = mkdtempSync(join(tmpdir(), "tz-nodb-"));
+    expect(applyTimezoneFromDb(join(dir, "none.db"))).toBe("America/Los_Angeles");
+    expect(process.env.TZ).toBe("America/Los_Angeles");
+  });
+
+  it("库里有 settings.timezone → 写进 process.env.TZ,覆盖宿主机值", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tz-db-"));
+    const path = join(dir, "t.db");
+    const store = new TaskStore(path);
+    store.setSetting("timezone", "Asia/Tokyo");
+    store.db.close();
+    process.env.TZ = "America/Los_Angeles";
+    expect(applyTimezoneFromDb(path)).toBe("Asia/Tokyo");
+    expect(process.env.TZ).toBe("Asia/Tokyo");
+  });
+
+  it("库在但没设置该项 / 值非法 → 北京", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tz-db2-"));
+    const path = join(dir, "t.db");
+    const store = new TaskStore(path);
+    store.setSetting("timezone", "Bogus/Zone");
+    store.db.close();
+    process.env.TZ = "America/Los_Angeles";
+    expect(applyTimezoneFromDb(path)).toBe("Asia/Shanghai");
+  });
+
+  it("读库失败(损坏文件)→ 保留继承的有效 TZ;继承值也无效 → 北京", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tz-bad-"));
+    const path = join(dir, "bad.db");
+    writeFileSync(path, "not a sqlite file at all, just garbage bytes ......................");
+    process.env.TZ = "Asia/Tokyo";
+    expect(applyTimezoneFromDb(path)).toBe("Asia/Tokyo");
+    delete process.env.TZ;
+    expect(applyTimezoneFromDb(path)).toBe("Asia/Shanghai");
   });
 });

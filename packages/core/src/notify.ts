@@ -1,6 +1,11 @@
 // 通知契约(接口+事件类型)。具体实现(Discord/Null + makeNotifier 工厂)在 app 层,
 // 这样 manager(RecordingSession)只依赖 core 的接口,不反向依赖 app(否则循环依赖)。
-export type NotifyEvent =
+import type { NotifyContext } from "./notify-context.js";
+
+/** Optional structured context on every event (issue #53); renderers ignore it until they opt in. */
+export type NotifyEvent = NotifyEventBody & { ctx?: NotifyContext };
+
+type NotifyEventBody =
   | { kind: "recordStart"; anchor: string; room: string; quality: string }
   // reason：本场录制结束的原因（手动停止 / 窗口结束收播 / 主播下播 / …）。缺省=未标注。
   | { kind: "recordEnd"; anchor: string; room: string; outDir: string; reason?: string }
@@ -8,11 +13,14 @@ export type NotifyEvent =
   | { kind: "recordReconnect"; anchor: string; room: string; downSec: number }
   | { kind: "mergeDone"; file: string }
   | { kind: "burnDone"; style: string; file: string }
-  | { kind: "uploadDone"; bv: string; url: string }
+  // streamKey(hub 场次)可选:上传完成通知据此在发送前补上主播名/日期(见 observability enrichHubEvent)。
+  | { kind: "uploadDone"; bv: string; url: string; streamKey?: string; anchor?: string; date?: string }
   // hub 编排开始处理一场直播(新建 job、pipeline 启动)。同一场只发一次。
-  | { kind: "hubTaskStart"; streamKey: string; room: string; workers: string[]; mode: "stage" | "upload" }
+  // anchor/date/workerNames 由发送前的 enrichHubEvent 补齐(room 只是房间号,人读不出是谁);缺省时退回旧文案。
+  | { kind: "hubTaskStart"; streamKey: string; room: string; workers: string[]; mode: "stage" | "upload";
+      anchor?: string; date?: string; workerNames?: string[] }
   // stage 模式:合成完毕、等人工上传(正常终点,不是错误)。同一场只发一次。
-  | { kind: "stageReady"; streamKey: string }
+  | { kind: "stageReady"; streamKey: string; anchor?: string; date?: string }
   | { kind: "error"; stage: string; message: string };
 
 export interface Notifier { notify(e: NotifyEvent): Promise<void>; }

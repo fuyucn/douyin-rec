@@ -18,6 +18,31 @@ export const TITLE_TOKENS = [
 ] as const;
 export const DEFAULT_TITLE_TIMEZONE = "Asia/Shanghai";
 
+/** 校验是不是 Intl 认得的 IANA 时区名。 */
+export function isValidTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 设置值 → 生效时区:空 / 非法 → 缺省北京时间。所有「按设置时区算日期」的入口共用,别各写一份。 */
+export function resolveTimeZone(raw?: string | null): string {
+  const tz = (raw ?? "").trim();
+  return tz && isValidTimeZone(tz) ? tz : DEFAULT_TITLE_TIMEZONE;
+}
+
+/**
+ * 当前进程生效的时区:`serve` 与独立 CLI 入口启动时都会把 `settings.timezone` 写进 `process.env.TZ`
+ * (见 app `applyTimezone` / `applyTimezoneFromDb`)。env 未设或非法 → 缺省北京时间,
+ * **不**回落宿主机本地时区(那正是 #155 的根因)。
+ */
+export function processTimeZone(): string {
+  return resolveTimeZone(process.env.TZ);
+}
+
 const TOKEN_RE = /\{([A-Za-z]+)\}/g;
 const STAMP_FULL = /^(.+)_(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})$/;
 const STAMP_NO_SEC = /^(.+)_(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})$/;
@@ -65,12 +90,7 @@ export function parseSessionStamp(sessionBase: string): (TitleParts & { hasTime:
 }
 
 export function zonedStamp(ms: number, timeZone?: string): Omit<TitleParts, "name"> {
-  let tz = (timeZone ?? "").trim() || DEFAULT_TITLE_TIMEZONE;
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: tz });
-  } catch {
-    tz = DEFAULT_TITLE_TIMEZONE;
-  }
+  const tz = resolveTimeZone(timeZone);
   const bag: Record<string, string> = {};
   for (const part of new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
@@ -90,6 +110,27 @@ export function zonedStamp(ms: number, timeZone?: string): Omit<TitleParts, "nam
     mm: bag.minute ?? "00",
     ss: bag.second ?? "00",
   };
+}
+
+/**
+ * `zonedStamp` 的逆运算:把 tz 下的墙钟时间(月 1-12)换成 epoch ms。
+ * 用于把会话名里的 `YYYY-MM-DD_HH-mm-ss`(设置时区墙钟)还原成时刻,不看宿主机本地时区。
+ * 夏令时空洞/重叠的墙钟取靠后的合法解(与 `Date` 本地构造的常见行为同向,足够兜底用)。
+ */
+export function epochFromZonedParts(
+  y: number, mo: number, d: number, h: number, mi: number, s: number, timeZone?: string,
+): number {
+  const asUtc = Date.UTC(y, mo - 1, d, h, mi, s);
+  let guess = asUtc;
+  for (let i = 0; i < 3; i++) {
+    const z = zonedStamp(guess, timeZone);
+    const [zy, zmo, zd] = z.date.split("-").map(Number) as [number, number, number];
+    const shown = Date.UTC(zy, zmo - 1, zd, Number(z.hh), Number(z.mm), Number(z.ss));
+    const delta = asUtc - shown;
+    if (delta === 0) break;
+    guess += delta;
+  }
+  return guess;
 }
 
 export function resolveTitleParts(ctx: TitleContext): TitleParts {
@@ -212,14 +253,45 @@ export function validateLooseTitleTemplate(template: string): string | null {
   return null;
 }
 
+// Emoji are dropped instead of replaced: an anchor name like `小明🌟` should produce `小明`,
+// not a stray `-`. Variation selectors, ZWJ, keycap marks and skin tones are removed with them.
+const EMOJI_RE =
+  /[\p{Extended_Pictographic}\p{Regional_Indicator}\u200D\uFE0F\u20E3\u{1F3FB}-\u{1F3FF}]/gu;
+
+/**
+ * Turn a rendered name into a legal file stem. Identity for names that already pass
+ * `isSafeStem`, so stems produced before this existed stay byte-identical (rerun-stable).
+ * Otherwise emoji are ignored, every other disallowed char (dots, full-width punctuation,
+ * spaces) becomes `-`, runs collapse, and edge dashes are trimmed. Returns "" when nothing
+ * legal is left.
+ */
+export function sanitizeStem(rendered: string): string {
+  // Checked before NFC so already-legal names are never rewritten (NFC can change some ideographs).
+  if (SAFE_STEM.test(rendered)) return rendered;
+  return rendered
+    .normalize("NFC")
+    .replace(EMOJI_RE, "")
+    .replace(/[^\p{L}\p{N}_\-【】（）()]/gu, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/-+_|_-+/g, "_")
+    .replace(/^[-_]+|-+$/g, "");
+}
+
+/**
+ * Render the stage file stem. Anchor names may contain chars that are illegal in a stem
+ * (emoji, `.`, full-width symbols); those are sanitized instead of failing the job (#171).
+ * The submission title keeps the original chars — see `resolveSubmissionTitle`.
+ */
 export function formatUploadTitle(template: string | null | undefined, ctx: TitleContext): string {
   const rendered = applyTitleTemplate(template, resolveTitlePartsWithLiveTitle(ctx));
   if (!rendered) throw new Error("标题渲染结果为空");
-  if (rendered.length > MAX_TITLE_LEN) {
-    throw new Error(`标题超过 ${MAX_TITLE_LEN} 字: ${rendered} (${rendered.length})`);
+  const stem = sanitizeStem(rendered);
+  if (!stem) throw new Error(`标题清洗后为空: ${rendered}`);
+  // Length is checked on the sanitized stem: emoji count as 2 UTF-16 units but become one `-`.
+  if (stem.length > MAX_TITLE_LEN) {
+    throw new Error(`标题超过 ${MAX_TITLE_LEN} 字: ${stem} (${stem.length})`);
   }
-  if (!isSafeStem(rendered)) throw new Error(`标题含非法文件名字符: ${rendered}`);
-  return rendered;
+  return stem;
 }
 
 /**
@@ -306,4 +378,25 @@ export function resolveOutputStem(opts: TitleContext & {
   const existing = opts.existingStem?.trim();
   if (existing) return existing;
   return formatUploadTitle(opts.template, opts);
+}
+
+/**
+ * Submission (稿件) title — single source for master pipeline, node pipeline, node-upload
+ * dispatch and rolling upload.
+ *
+ * 1. `submissionTemplate` set → loose render (B 站 allows spaces/punctuation/emoji).
+ * 2. Otherwise fall back to the file-name template, rendered loosely so original chars
+ *    survive (#171), but only while it still maps to `stem`; if the template changed after
+ *    the stem was locked, keep the locked stem so reruns stay stable.
+ */
+export function resolveSubmissionTitle(opts: {
+  submissionTemplate?: string | null;
+  template?: string | null;
+  stem: string;
+  ctx: TitleContext;
+}): string {
+  const sub = (opts.submissionTemplate ?? "").trim();
+  if (sub) return formatBiliTitle(sub, opts.ctx);
+  const loose = applyTitleTemplate(opts.template, resolveTitlePartsWithLiveTitle(opts.ctx)).trim();
+  return loose && loose.length <= MAX_TITLE_LEN && sanitizeStem(loose) === opts.stem ? loose : opts.stem;
 }

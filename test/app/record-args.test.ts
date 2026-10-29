@@ -18,12 +18,44 @@ function mkTask(over: Partial<Task> = {}): Task {
     scheduleEnd: null,
     status: "stopped",
     useCookie: true,
+    rollingUpload: false,
+    rollingEffective: false,
+    streamUpload: false,
+    streamUploadSpool: true,
     createdAt: "2026-06-12T00:00:00.000Z",
     ...over,
   };
 }
 
 describe("buildRecordArgs", () => {
+  it("passes --stream-upload for zero-disk streaming (plans/039)", () => {
+    expect(buildRecordArgs(mkTask({ streamUpload: true }))).toContain("--stream-upload");
+  });
+
+  it("zero-disk tasks fall back to the resolved anchor when no name is set (no room-number titles)", () => {
+    const args = buildRecordArgs(mkTask({ streamUpload: true, name: null, anchorName: "主播" }));
+    const i = args.indexOf("--name");
+    expect(i).toBeGreaterThan(0);
+    expect(args[i + 1]).toBe("主播");
+    // No name and no anchor → no flag at all (the CLI keeps its room-slug fallback).
+    expect(buildRecordArgs(mkTask({ streamUpload: true, name: null, anchorName: null }))).not.toContain("--name");
+  });
+
+  it("普通录制不吃 anchorName 回退(它自己从每场流解析 owner)", () => {
+    expect(buildRecordArgs(mkTask({ streamUpload: false, name: null, anchorName: "缓存名字" }))).not.toContain("--name");
+  });
+
+  it("passes --stream-upload-spool none only when the spool is explicitly disabled", () => {
+    expect(buildRecordArgs(mkTask({ streamUpload: true, streamUploadSpool: true }))).not.toContain("--stream-upload-spool");
+    expect(buildRecordArgs(mkTask({ streamUpload: true, streamUploadSpool: false }))).toContain("--stream-upload-spool");
+  });
+
+  it("never passes both --rolling-upload and --stream-upload (mutually exclusive)", () => {
+    const args = buildRecordArgs(mkTask({ streamUpload: true, rollingEffective: true }));
+    expect(args).not.toContain("--rolling-upload");
+    expect(args).toContain("--stream-upload");
+  });
+
   it("maps all base fields with defaults (name present, no cookies, default outDir)", () => {
     expect(buildRecordArgs(mkTask())).toEqual([
       "record",
@@ -64,18 +96,34 @@ describe("buildRecordArgs", () => {
     expect(args[args.indexOf("--name") + 1]).toBe("一勺小苏打");
   });
 
+  it("T-33/#40:rollingEffective=true → 追加 --rolling-upload 1(默认关 = 不带该 flag;旧开关 rollingUpload 不再参与)", () => {
+    expect(buildRecordArgs(mkTask())).not.toContain("--rolling-upload");
+    expect(buildRecordArgs(mkTask({ rollingUpload: true, rollingEffective: false }))).not.toContain("--rolling-upload");
+    const args = buildRecordArgs(mkTask({ rollingEffective: true }));
+    const i = args.indexOf("--rolling-upload");
+    expect(i).toBeGreaterThan(-1);
+    expect(args[i + 1]).toBe("1");
+  });
+
   it("omits --name when task.name is null", () => {
     expect(buildRecordArgs(mkTask({ name: null }))).not.toContain("--name");
   });
 
-  it("appends --cookies only when present", () => {
+  it("凭证永不进 argv:task.cookies 有值也不出现 --cookies / 原文", () => {
     const args = buildRecordArgs(mkTask({ cookies: "sessionid=abc" }));
-    expect(args).toContain("--cookies");
-    expect(args[args.indexOf("--cookies") + 1]).toBe("sessionid=abc");
+    expect(args).not.toContain("--cookies");
+    expect(args.join("\0")).not.toContain("sessionid=abc");
   });
 
-  it("omits --cookies when null", () => {
-    expect(buildRecordArgs(mkTask({ cookies: null }))).not.toContain("--cookies");
+  it("传入 cookiesFile → 追加 --cookies-file <path>,且不含凭证原文", () => {
+    const args = buildRecordArgs(mkTask({ cookies: "sessionid=abc" }), "/root/run/record-1.cred");
+    expect(args[args.indexOf("--cookies-file") + 1]).toBe("/root/run/record-1.cred");
+    expect(args).not.toContain("--cookies");
+    expect(args.join("\0")).not.toContain("sessionid=abc");
+  });
+
+  it("未传 cookiesFile → 不带 --cookies-file", () => {
+    expect(buildRecordArgs(mkTask({ cookies: null }))).not.toContain("--cookies-file");
   });
 
   it("uses task.outDir when set", () => {
@@ -95,5 +143,14 @@ describe("buildRecordArgs", () => {
   it("passes a full URL room through verbatim", () => {
     const args = buildRecordArgs(mkTask({ room: "https://live.douyin.com/999" }));
     expect(args[args.indexOf("--room") + 1]).toBe("https://live.douyin.com/999");
+  });
+
+  it("outputFormat 生效时带 --task-id(封口转换行归属任务);original 不带", () => {
+    const withFmt = buildRecordArgs(mkTask({ id: 42, outputFormat: "mkv" }));
+    const i = withFmt.indexOf("--task-id");
+    expect(i).toBeGreaterThan(-1);
+    expect(withFmt[i + 1]).toBe("42");
+    expect(buildRecordArgs(mkTask({ id: 42 }))).not.toContain("--task-id");
+    expect(buildRecordArgs(mkTask({ id: 42, outputFormat: "original" }))).not.toContain("--task-id");
   });
 });

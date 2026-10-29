@@ -4,12 +4,15 @@ import { ReactFlow, Background, Controls, Handle, Position, type Node, type Edge
 import "@xyflow/react/dist/style.css";
 import { api, type HubJobDTO } from "../api/client";
 import type { HubStepName } from "@drec/contracts";
+import { STAGE_READY } from "@drec/hub-ledger-contract";
+import { runNeedsAttention } from "../lib/room-status";
 import { IconButton } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Dialog } from "./Dialog";
 import { Tooltip } from "./Tooltip";
 import { useT } from "../lib/i18n";
 import { buildFlow, pickMetric, type FlowCfg } from "./flow-build";
+import { deriveStepStatuses, stepDetail, type NodeStatus } from "../lib/hub-job-steps";
 
 type TFunc = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -37,6 +40,14 @@ export function humanSecFull(sec: number | null): string {
 }
 
 /** 状态 → 步骤名(译文,渲染时按当前语言解析)。 */
+/**
+ * 后处理状态(state)→ 展示文案。导出供任务详情页复用 —— 状态名到 key 的映射必须只有一处:
+ * `needs_manual` → `needsManual` 这种下划线/驼峰差异,复制一份必然漏。
+ */
+export function jobStateLabel(t: TFunc, state: string): string {
+  return stepLabelMap(t)[state] ?? state;
+}
+
 function stepLabelMap(t: TFunc): Record<string, string> {
   return {
     pending: t("hub.jobs.step.pending"),
@@ -67,8 +78,6 @@ export function runDate(streamKey: string): string {
   return parts.slice(2).join(":") || streamKey;
 }
 
-type NodeStatus = "done" | "active" | "skipped" | "todo" | "failed" | "blocked";
-
 const NODE_COLOR: Record<NodeStatus, { bg: string; fg: string; ring: string }> = {
   done: { bg: "var(--success)", fg: "var(--qr-surface)", ring: "var(--success)" },
   active: { bg: "var(--ink)", fg: "var(--canvas)", ring: "var(--ink)" },
@@ -78,55 +87,35 @@ const NODE_COLOR: Record<NodeStatus, { bg: string; fg: string; ring: string }> =
   todo: { bg: "transparent", fg: "var(--muted-soft)", ring: "var(--hairline)" },
 };
 
-/** API nodeStates.state → UI 状态(未知值一律回落 todo)。 */
-const NODE_STATE_TO_UI: Record<string, NodeStatus> = {
-  running: "active",
-  pending: "todo",
-  done: "done",
-  failed: "failed",
-  blocked: "blocked",
-  skipped: "skipped",
-};
-
 /**
  * 所有可能出现的子步骤 key(与布局解耦,仅供 stepStatuses 遍历取状态)。
  * 顺序=展示顺序,保持不变;成员覆盖由下面的类型断言守护(新增 core 步骤名而这里漏掉会编译失败)。
  */
-const ALL_STEP_KEYS = ["select", "pull", "merge", "burn_danmu", "burn_livechat", "clean_stage_src", "upload_plain", "append_danmu", "append_livechat", "clean_source", "clean_stage"] as const;
+const ALL_STEP_KEYS = ["select", "pull", "node_upload", "merge", "burn_danmu", "burn_livechat", "clean_stage_src", "upload_plain", "append_danmu", "append_livechat", "clean_verify", "clean_source", "clean_stage"] as const;
 type _MissingStepKey = Exclude<HubStepName, (typeof ALL_STEP_KEYS)[number]>;
 /** 覆盖全部 HubStepName 才可赋值(漏一个 → 类型塌成 never → 编译失败)。 */
 const ALL_STEP_KEYS_TYPED: _MissingStepKey extends never ? typeof ALL_STEP_KEYS : never = ALL_STEP_KEYS;
 
-/** 从 job.steps(start/done 配对)推导每个子步骤的状态 + 耗时。 */
-function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec: number | null }> {
-  const pair = new Map<string, { start?: number; done?: number }>();
-  for (const s of job.steps) {
-    const e = pair.get(s.step) ?? {};
-    if (s.phase === "start") e.start = s.at;
-    else e.done = s.at;
-    pair.set(s.step, e);
-  }
-  const success = job.state === "done" || job.state === "needs_manual";
-  const now = Date.now();
-  const nodeStates = new Map(job.nodeStates.map((n) => [n.node, n]));
-  const out: Record<string, { status: NodeStatus; sec: number | null }> = {};
-  for (const key of ALL_STEP_KEYS_TYPED) {
-    const e = pair.get(key);
-    const n = nodeStates.get(key);
-    if (n) {
-      // workflow 安全阀状态优先(running→active、pending→todo);耗时仍由 steps 配对推导。
-      const status: NodeStatus = NODE_STATE_TO_UI[n.state] ?? "todo";
-      const sec = e?.done != null && e.start != null ? Math.round((e.done - e.start) / 1000)
-        : status === "active" && e?.start != null ? Math.round((now - e.start) / 1000)
-        : null;
-      out[key] = { status, sec };
-      continue;
-    }
-    if (e?.done != null) out[key] = { status: "done", sec: e.start != null ? Math.round((e.done - e.start) / 1000) : null };
-    else if (e?.start != null) out[key] = { status: "active", sec: Math.round((now - e.start) / 1000) };
-    else out[key] = { status: success ? "skipped" : "todo", sec: null };
+/**
+ * 上传后收尾未完成的节点(T12):清理失败(clean_* = failed)与核验待重试(clean_verify = pending)。
+ *
+ * **从 nodeStates 派生**而不是新增 DTO 字段 —— nodeStates 已是这些状态的唯一真理源
+ * (orchestrator 的 syncNodeState 写、app 的 hub-jobs 只读同一张库),派生可避免两份真相漂移。
+ */
+const CLEANUP_BACKFILL_KEYS = new Set(["clean_source", "clean_stage_src", "clean_stage"]);
+export function pendingFinalizeNodes(job: HubJobDTO): string[] {
+  const out: string[] = [];
+  for (const n of job.nodeStates) {
+    if (n.state === "done" || n.state === "skipped") continue;
+    const isVerifyPending = n.node === "clean_verify" && n.state === "pending";
+    if (isVerifyPending || (CLEANUP_BACKFILL_KEYS.has(n.node) && n.state === "failed")) out.push(n.node);
   }
   return out;
+}
+
+/** Derive node states from ledger events. Exported via the pure helper for regression coverage. */
+function stepStatuses(job: HubJobDTO): Record<string, { status: NodeStatus; sec: number | null }> {
+  return deriveStepStatuses(job, ALL_STEP_KEYS_TYPED);
 }
 
 /** 自定义节点:状态圆 + 标签 + 耗时。hover 出详情(状态 + 耗时)。 */
@@ -193,15 +182,19 @@ function StepNode({ data }: { data: { label: string; status: NodeStatus; sec: nu
 }
 
 /** select 步的 fan-in 候选节点:录制节点 + 覆盖度;winner 绿框 + ✔ + 「最优」。hover 出详情(覆盖/时长/完整/胜出)。 */
-function CandidateNode({ data }: { data: { name: string; coveragePct: number; durationSec: number; complete: boolean; isWinner: boolean } }): ReactNode {
+function CandidateNode({ data }: { data: { name: string; coveragePct: number; durationSec: number; complete: boolean; isWinner: boolean; danmuCount?: number | null } }): ReactNode {
   const t = useT();
   const win = data.isWinner;
+  // danmuCount 为 null(旧库/未统计)时不显示;0 明确显示「无弹幕」——这正是选优要看的关键差异。
+  const danmuText = data.danmuCount == null
+    ? ""
+    : ` · ${data.danmuCount > 0 ? t("hub.jobs.candDanmu", { n: data.danmuCount }) : t("hub.jobs.candNoDanmu")}`;
   const tip = (
     <div className="text-left leading-snug">
       <div className="font-medium text-[12px]">{data.name}{win ? ` · ${t("hub.jobs.candWinner")}` : ""}</div>
       <div className="text-[11px] text-muted-soft mt-0.5">
         {t("hub.jobs.candCoverage", { pct: data.coveragePct })} · {humanSecFull(data.durationSec)}
-        {data.complete ? ` · ${t("hub.jobs.candComplete")}` : ""}
+        {data.complete ? ` · ${t("hub.jobs.candComplete")}` : ""}{danmuText}
       </div>
     </div>
   );
@@ -267,6 +260,7 @@ function PipelineFlowInner({
       durationSec: c.durationSec,
       complete: c.complete,
       isWinner: c.isWinner,
+      danmuCount: c.danmuCount ?? null,
     },
   }));
   const candEdges: Edge[] = cands.map((c) => ({
@@ -280,11 +274,12 @@ function PipelineFlowInner({
     },
   }));
   const graph = buildFlow(job, TERMINAL.has(job.state) ? undefined : cfg);
-  const detailOf = (key: string): string | undefined =>
-    job.steps.filter((s) => s.step === key && s.phase === "done").map((s) => s.detail).filter(Boolean).pop();
+  const detailOf = (key: string): string | undefined => stepDetail(job.steps, key);
   const nodeErrorOf = (key: string): string | undefined =>
     job.nodeStates.find((n) => n.node === key && n.state !== "done")?.error ?? undefined;
-  const RETRYABLE = new Set(["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat"]);
+  // clean_*/clean_verify 的重跑 = 「补跑收尾」(删源/核验,幂等,不会重传)→ 与核心节点同口径可重试。
+  const RETRYABLE = new Set(["merge", "burn_danmu", "burn_livechat", "upload_plain", "append_danmu", "append_livechat",
+    "clean_verify", "clean_source", "clean_stage_src", "clean_stage"]);
   // 运行中 run 的失败节点可能是上一轮崩溃残留,而续跑已经在处理该轨道(append 中);
   // 此刻点重跑会排队/与续跑冲突,故只在终态(failed / needs_manual)才显示节点级重跑。
   const nodeRetryVisible = TERMINAL.has(job.state) && onRetry != null;
@@ -358,7 +353,7 @@ function PipelineFlowInner({
 /** graph 的稳定签名:由 steps + state + 候选(节点/胜出)决定。轮询每 3s 传入新 job 对象,但只要
  *  签名不变就跳过重渲染 —— 避免每次轮询用全新 nodes/edges 数组冲刷 React Flow、触发 fitView 重算导致偶发空白。 */
 function pipelineSig(j: HubJobDTO, cfg?: FlowCfg): string {
-  const cand = j.candidates.map((c) => `${c.worker}:${c.isWinner ? 1 : 0}`).join(",");
+  const cand = j.candidates.map((c) => `${c.worker}:${c.isWinner ? 1 : 0}:${c.danmuCount ?? ""}`).join(",");
   const steps = j.steps.map((s) => `${s.step}:${s.phase}:${s.at}:${s.detail ?? ""}`).join(",");
   const nodes = j.nodeStates.map((n) => `${n.node}:${n.state}:${n.error ?? ""}:${n.updatedAt}`).join(",");
   const c = cfg ? JSON.stringify([cfg.steps, cfg.upload?.mode, cfg.cleanup]) : "";
@@ -462,6 +457,19 @@ export function RunCard({
               <Play className="w-3.5 h-3.5" />
             </IconButton>
           )}
+          {/* 上传已完成但收尾(清理/核验)没做完:源或 stage 还占着磁盘,reconciler 会按节流自动补跑,
+              这里也给出手动入口(补跑是幂等的,不会重传)。 */}
+          {job.state === "done" && pendingFinalizeNodes(job).length > 0 && onRunNow && (
+            <IconButton
+              title={t("hub.jobs.retryFinalize")}
+              onClick={(e) => {
+                e.stopPropagation();
+                void onRunNow(job.streamKey);
+              }}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </IconButton>
+          )}
           {job.hasLog && (
             <IconButton
               title={t("hub.jobs.viewLog")}
@@ -485,7 +493,22 @@ export function RunCard({
           </a>
         )}
       </div>
-      {job.error && <div className="text-[12px] mt-1" style={{ color: "var(--error-fg)" }}>{job.error}</div>}
+      {/* stage 模式正常收口(issue #188):error 只是「已存档待人工上传」的说明,不是事故 —— 用中性色,
+          否则房间 run 卡片上会出现红字,和本仓「降低告警疲劳」的目标相反。 */}
+      {job.error && (
+        <div
+          className="text-[12px] mt-1"
+          style={{ color: job.error === STAGE_READY ? "var(--muted-soft)" : "var(--error-fg)" }}
+        >
+          {job.error}
+        </div>
+      )}
+      {/* Reviewed needs_manual run (issue #312): the error stays as the record; the note says why it is closed. */}
+      {job.state === "needs_manual" && job.ackedAt != null && (
+        <div className="text-[12px] mt-1 text-muted">
+          {t("hub.jobs.acked", { note: job.ackNote ?? "" })}
+        </div>
+      )}
       {expanded && (
         <div className="mt-3 pt-3 border-t border-hairline overflow-x-auto" onClick={(e) => e.stopPropagation()}>
           <PipelineFlow job={job} workerName={workerName} cfg={cfg} onRetry={onRetry ? requestRetry : undefined} />
@@ -531,14 +554,18 @@ export function JobLogDialog({ logKey, onClose }: { logKey: string | null; onClo
 }
 
 /** 规则行内的「最近一次运行」紧凑徽标(在跑=当前步 spinner;终态=状态)。无 run → 提示。 */
-export function LatestRunBadge({ run }: { run: { state: string; currentStepSec?: number | null } | undefined }): ReactNode {
+export function LatestRunBadge({ run }: { run: { state: string; manualPhase?: string | null; currentStepSec?: number | null } | undefined }): ReactNode {
   const t = useT();
   const labels = stepLabelMap(t);
   if (!run) return <span className="text-muted-soft text-xs">{t("hub.jobs.noRunYet")}</span>;
+  // Same verdict as the room list (runNeedsAttention): a benign needs_manual (stage close-out /
+  // user stop) is neutral and uses the queue page's wording, not the amber "needs action" colour.
+  const benign = run.state === "needs_manual" && !runNeedsAttention(run);
+  const benignKey = run.manualPhase === "stopped" ? "queue.phase.stopped" : "queue.phase.uploadWait";
   return (
-    <span className="inline-flex items-center gap-1 text-[12px] font-medium" style={{ color: stateColor(run.state) }}>
+    <span className="inline-flex items-center gap-1 text-[12px] font-medium" style={{ color: benign ? "var(--muted)" : stateColor(run.state) }}>
       {!TERMINAL.has(run.state) && <Loader2 className="w-3 h-3 animate-spin" />}
-      {labels[run.state] ?? run.state}
+      {benign ? t(benignKey) : (labels[run.state] ?? run.state)}
       {run.currentStepSec != null && <span className="text-muted-soft font-normal">· {humanSec(run.currentStepSec)}</span>}
     </span>
   );

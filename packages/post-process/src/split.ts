@@ -65,7 +65,11 @@ export async function splitToSizeLimit(
 
   const durationSec = await probeDuration(inputMp4);
   const { parts, segmentTimeSec } = planSizeSplit(size, durationSec, limitBytes);
-  const stem = resolve(inputMp4).replace(/\.mp4$/i, "");
-  await run(buildSplitArgs(inputMp4, segmentTimeSec, `${stem}_part%d.mp4`));
-  return Array.from({ length: parts }, (_, i) => `${stem}_part${i}.mp4`);
+  // 分段沿用输入的容器扩展名(mp4/mkv;segment muxer 按输出扩展名选封装)。
+  const abs = resolve(inputMp4);
+  const dot = abs.lastIndexOf(".");
+  const stem = abs.slice(0, dot);
+  const ext = abs.slice(dot);
+  await run(buildSplitArgs(inputMp4, segmentTimeSec, `${stem}_part%d${ext}`));
+  return Array.from({ length: parts }, (_, i) => `${stem}_part${i}${ext}`);
 }

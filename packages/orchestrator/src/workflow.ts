@@ -3,10 +3,13 @@ import { freemem } from "node:os";
 import type { SyncLedger, StepName } from "./ledger.js";
 import type { PipelineCfg, PipelineDeps } from "./pipeline.js";
 import { humanBytes } from "./format.js";
-import { isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP } from "@drec/core";
+import { addArchiveToSeasonIfConfigured, seasonCheckpointState, effectiveStageFormat, isAppendAmbiguous, isJobAbort, isUploadRateLimited, throwIfAborted, USER_STOP, UPLOAD_FAIL_CLOSED_MS } from "@drec/core";
 import { retry } from "./retry.js";
 import type { StageProducts } from "./session-plan.js";
 import { prepareUploadAlias } from "./session-plan.js";
+import { PART_GROUP_CANONICAL } from "./verify.js";
+import { sanitizeUploadLimitState, type UploadLimitStore } from "./upload-limits.js";
+import { UPLOAD_GATE_DEFAULT_KEY } from "@drec/core";
 
 export { deriveStageProducts, withOutputStem, type StageProducts } from "./session-plan.js";
 
@@ -86,6 +89,7 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
   const details = new Map<string, string>();
   // append_livechat 只在 danmu 轨存在时依赖其 p2 输出(否则跳过 append_danmu 不应阻断 livechat)。
   const appendDanmuOn = willUpload && burnDanmu;
+  const stageFmt = effectiveStageFormat(cfg.outputFormat, cfg.uploadMode);
 
   // 续跑幂等:已 done 的产物直接从确定性路径回填,下游 append 无需重跑上游也能拿到输入。
   if (ledger.getNodeState(streamKey, "upload_plain")?.state === "done") {
@@ -146,9 +150,11 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         // 断流重连多会话:一次 merge --merge-sessions 拼全部会话(视频 -c copy + 弹幕偏移合并)。
         // --out-base 锁定 stem(= B 站标题),stage 与投稿同一串。
         const outBase = shSingleQuote(products.dateName);
+        // 产物容器:非 mp4 才带 --format(CLI 缺省 = mp4,默认路径的命令行与改动前逐字一致)。
+        const fmtFlag = stageFmt === "mp4" ? "" : ` --format ${stageFmt}`;
         const cmd = multi
-          ? `node dist/douyin-rec.mjs merge --in ${stageSub} --merge-sessions --out-base ${outBase}`
-          : `node dist/douyin-rec.mjs merge --in ${stageSub} --base ${c.products.sessionBase} --out-base ${outBase}`;
+          ? `node dist/douyin-rec.mjs merge --in ${stageSub} --merge-sessions --out-base ${outBase}${fmtFlag}`
+          : `node dist/douyin-rec.mjs merge --in ${stageSub} --base ${c.products.sessionBase} --out-base ${outBase}${fmtFlag}`;
         const out = await c.sh(cmd);
         // 录制产物体检:⚠ 是诊断明细(段级提示,只进 step detail),❗ 才是「成品确实有可见风险」,
         // 由 CLI 按成品尾部错误数判定阈值后打印 —— 只有 ❗ 才发通知,避免孤立坏块天天刷告警。
@@ -232,7 +238,26 @@ export function buildWorkflow(input: WorkflowBuildInput): Workflow {
         });
         // checkpoint:P1 建稿成功即刻落库 bv —— 必须在这里(不能等 burn/split 完),
         // 否则 P1 成功后若后续节点失败,bv 丢失 → 重试重传 P1 → 重复稿。
-        ledger.setBv(streamKey, bv);
+        if (cfg.uploadMeta.seasonSectionId) {
+          let saved = false;
+          let lastError: unknown;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try { ledger.setBvAndSeasonState(streamKey, bv, "pending"); saved = true; break; }
+            catch (e) { lastError = e; }
+          }
+          if (!saved) {
+            c.log(`season pending checkpoint not saved: ${String((lastError as Error)?.message ?? lastError).slice(0, 200)}`);
+            ledger.setBv(streamKey, bv);
+          }
+        } else {
+          ledger.setBv(streamKey, bv);
+        }
+        // The BV is durable now. The executor associates the season after this upload slot is released
+        // (see runWorkflowNodes), so the bounded HTTP call never extends the global upload chain.
+        // 分P核验基线(T11):P1 = plain 组第 0 段。合并路径此前**完全不写** sync_parts →
+        // 期望段数恒 0、核验恒跳过(等于没核验),而分段路径有 —— 两条路径基线口径必须一致。
+        // 合并路径的 plain 是单文件(不切分),故恒 1 个分 P;段号 0 起(与分段路径同一口径)。
+        ledger.markPartDone(streamKey, PART_GROUP_CANONICAL.plain, 0);
         c.set("bv", bv);
         const d3 = bytesDetail(products.plain);
         if (d3) c.stepDetail("upload_plain", d3);
@@ -350,6 +375,11 @@ async function runAppendGroup(
     step,
     log: c.log,
   });
+  // 分P核验基线(T11):**append 成功后**才记 checkpoint —— 失败/未提交的分 P 不进基线。
+  // 组名用步骤名(`append_danmu`/`append_livechat`),与分段路径 `appendSegmentGroup` 完全一致
+  // (不能另起 `danmu`/`livechat`:那会让核验读不到分段路径写的行,恒 mismatch)。
+  const group = step === "append_danmu" ? PART_GROUP_CANONICAL.danmu : PART_GROUP_CANONICAL.livechat;
+  for (let i = 0; i < files.length; i++) c.ledger.markPartDone(c.streamKey, group, i);
   c.set(out, "done");
   c.stepDetail(step, `${files.length} 段${files.length ? ` · ${humanBytes(sumBytesOf(files))}` : ""}`);
 }
@@ -359,7 +389,25 @@ export interface ResourcePoolCfg {
   maxCpuParallel?: number;
   maxNetParallel?: number;
   minBurnFreeMemMB?: number;
+  /**
+   * Minimum free memory (MB) before a merge node (ffmpeg concat `-c copy`, no re-encode) may start.
+   * Default 512: measured peak RSS of a 1080p concat-copy is ~60 MB, so 512 is ~8x headroom.
+   */
+  minMergeFreeMemMB?: number;
+  /** How long a node waits for memory before ONE alert is raised; waiting continues afterwards. */
   memWaitTimeoutMs?: number;
+  /**
+   * **热读取值器**(T15):传函数则每次判定都用它取当前值,改配置**立即生效、无需重启**。
+   * 不传则退回上面的数字字段(行为不变)。
+   *
+   * 为什么用 getter 而不是「每 tick 重建 pool」:重建会把 T8/T19 持久化的
+   * `uploadTimes`/`uploadBlockedUntil`/限流账本**静默清空** —— 那等于每次改配置
+   * 都重新放行一次上传,正是 601 风控最怕的(自审:评审点名过这条捷径)。
+   */
+  maxCpuParallelLive?: () => number;
+  maxNetParallelLive?: () => number;
+  minBurnFreeMemMBLive?: () => number;
+  minMergeFreeMemMBLive?: () => number;
   /**
    * **全局上传队列**:B 站按「提交次数」限流(`code 601 上传视频过快`),与并发数无关。
    * 故队列对「每一次提交」做限速:
@@ -385,16 +433,28 @@ export interface PoolSnapshot {
 class Semaphore {
   private active = 0;
   private queue: Array<() => void> = [];
-  constructor(private max: number) {}
+  /** 上限的**取值器**:T15 起可为 getter(每 tick 热读配置),也可为常量(默认)。 */
+  private readonly resolveMax: () => number;
+  constructor(max: number | (() => number)) {
+    this.resolveMax = typeof max === "function" ? max : (): number => max;
+  }
+  /** 当前上限;非法值夹到 1(0 个并行 = 永远排队 = 看起来像卡死)。 */
+  private max(): number {
+    const n = this.resolveMax();
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
+  }
   /** 只读快照:当前持锁数 / 等待队列长度 / 上限。 */
   snapshot(): { active: number; queued: number; max: number } {
-    return { active: this.active, queued: this.queue.length, max: this.max };
+    return { active: this.active, queued: this.queue.length, max: this.max() };
   }
   async acquire(): Promise<void> {
-    if (this.active < this.max) { this.active++; return; }
+    if (this.active < this.max()) { this.active++; return; }
+    // 排队。**拿到让渡的许可就算数,不再回到上面重新核对上限** ——
+    // release() 让渡时已经 active++ 了,回去重判会看到 active>=max 于是**再排一次队**,
+    // 造成「许可已让渡但没人接手」的活锁(实测 pipeline 全部超时)。
+    // 并发上限在等待期间被调低时,已在队列里的人按**让渡时刻**的判定生效 ——
+    // 这是一致且可解释的口径(不会超发:release 只让渡一个)。
     await new Promise<void>((resolve) => this.queue.push(resolve));
-    // release() 让渡时已 active++,这里不能再加,否则排队者持锁数会多 1,
-    // 永久泄漏一个许可(后续同资源任务全部卡死)。
   }
   release(): void {
     this.active--;
@@ -419,6 +479,15 @@ function readFileSyncSafe(p: string): string | undefined {
 }
 
 export class ResourcePool {
+  /**
+   * 限流状态存储不可用时的兜底冷却下限(ms);防止配置 cooldown=0 时 fail-closed 退化成无限速。
+   *
+   * **引用 core 的同名常量,不再自己写一份 30min**:这是 T19 之后 master 侧与节点侧
+   * 唯一的 fail-closed 口径。两处各写 `30 * 60_000` 时,改了一处另一边不会跟着变,
+   * 且不会有任何报错 —— 表现为「某条路径的 fail-closed 悄悄变成别的值」。
+   * (跨任务审计发现)
+   */
+  static readonly UPLOAD_FAILCLOSED_MS = UPLOAD_FAIL_CLOSED_MS;
   private cpu: Semaphore;
   private net: Semaphore;
   private streamLocks = new Map<string, Promise<unknown>>();
@@ -441,6 +510,10 @@ export class ResourcePool {
     Array<{ streamKey: string; resource: "cpu" | "net" | "upload"; since: number; token: symbol }>
   >();
   private minBurnFreeMemMB: number;
+  /** 热读的内存下限(T15);无 getter 时是构造值的常量闭包。 */
+  private minBurnFreeMemMBLive: () => number;
+  private minMergeFreeMemMBLive: () => number;
+  private onMemShortage: (msg: string) => void;
   private memWaitTimeoutMs: number;
   private now: () => number;
   private sleep: (ms: number) => Promise<void>;
@@ -453,14 +526,39 @@ export class ResourcePool {
   private uploadTimes: number[] = [];
   /** 命中 601 后的静默截止时刻(此前的提交一律等到此刻,给 B 站冷却)。 */
   private uploadBlockedUntil = 0;
+  /** 限流状态持久化后端(T8);缺省 = 纯内存。 */
+  private limitStore?: UploadLimitStore;
+  /**
+   * 限流状态的分键(030 T19)。默认 `UPLOAD_GATE_DEFAULT_KEY`;**master 与节点侧节点上传
+   * 必须传同一个账号键**(`bilibili:<DedeUserID>`)才能共享冷却 —— 键算法唯一真理在 core。
+   */
+  private limitKey: string;
+  /** 诊断日志(持久化失败等);缺省 console.error。 */
+  private warn: (msg: string) => void;
 
   constructor(
     cfg: ResourcePoolCfg = {},
-    inject: { now?: () => number; sleep?: (ms: number) => Promise<void>; freeMemMB?: () => number } = {},
+    inject: {
+      now?: () => number;
+      sleep?: (ms: number) => Promise<void>;
+      freeMemMB?: () => number;
+      /** 上传限流状态的跨重启持久化后端(T8)。缺省 = 纯内存(旧行为)。 */
+      limitStore?: UploadLimitStore;
+      /** 限流分键;缺省 `UPLOAD_GATE_DEFAULT_KEY`。 */
+      limitKey?: string;
+      /** 持久化失败等诊断日志;缺省 console.error。**绝不静默**。 */
+      warn?: (msg: string) => void;
+      /** Called once per wait when memory stays short past `memWaitTimeoutMs` (the wait itself continues). */
+      onMemShortage?: (msg: string) => void;
+    } = {},
   ) {
-    this.cpu = new Semaphore(Math.max(1, cfg.maxCpuParallel ?? 1));
-    this.net = new Semaphore(Math.max(1, cfg.maxNetParallel ?? 1));
-    this.minBurnFreeMemMB = cfg.minBurnFreeMemMB ?? 2048;
+    // 有 live getter 就热读它,否则用构造时的数字(后者保持向后兼容)。
+    this.cpu = new Semaphore(cfg.maxCpuParallelLive ?? ((): number => Math.max(1, cfg.maxCpuParallel ?? 1)));
+    this.net = new Semaphore(cfg.maxNetParallelLive ?? ((): number => Math.max(1, cfg.maxNetParallel ?? 1)));
+    // 热读版:每次等内存门前取当前值(UI 改完立即生效);无 getter 时退回构造值。
+    this.minBurnFreeMemMBLive = cfg.minBurnFreeMemMBLive ?? ((): number => cfg.minBurnFreeMemMB ?? 1024);
+    this.minBurnFreeMemMB = cfg.minBurnFreeMemMB ?? 1024;
+    this.minMergeFreeMemMBLive = cfg.minMergeFreeMemMBLive ?? ((): number => cfg.minMergeFreeMemMB ?? 512);
     this.memWaitTimeoutMs = cfg.memWaitTimeoutMs ?? 600_000;
     this.uploadRateLimit = Math.max(0, cfg.uploadRateLimit ?? 5);
     this.uploadRateWindowMs = Math.max(0, cfg.uploadRateWindowMs ?? 600_000);
@@ -468,6 +566,39 @@ export class ResourcePool {
     this.now = inject.now ?? Date.now;
     this.sleep = inject.sleep ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
     this.freeMemMB = inject.freeMemMB ?? systemFreeMemMB;
+    this.limitStore = inject.limitStore;
+    this.limitKey = (inject.limitKey ?? "").trim() || UPLOAD_GATE_DEFAULT_KEY;
+    this.warn = inject.warn ?? ((m: string) => console.error(m));
+    this.onMemShortage = inject.onMemShortage ?? ((m: string) => this.warn(m));
+    this.restoreUploadLimits();
+  }
+
+  /** 构造时读回冷却/窗口状态。**存储不可用 = fail-closed**:先冷却一个完整 cooldown 再放行。 */
+  private restoreUploadLimits(): void {
+    if (!this.limitStore) return;
+    const now = this.now();
+    const state = this.limitStore.load(this.limitKey);
+    if (state === null) {
+      // 无法确认上次打到哪 → 按「刚命中 601」处理,宁可多等,不能重启即打爆。
+      // 配置把 cooldown 显式设成 0(关冷却)时,fail-closed 不能退化成无限速 → 用兜底下限。
+      const cooldown = this.uploadCooldownMs > 0 ? this.uploadCooldownMs : ResourcePool.UPLOAD_FAILCLOSED_MS;
+      this.uploadBlockedUntil = now + cooldown;
+      this.warn("[upload-limits] 限流状态不可用,本进程按保守冷却启动");
+      return;
+    }
+    const clean = sanitizeUploadLimitState(state, now, this.uploadRateWindowMs);
+    this.uploadBlockedUntil = clean.blockedUntil;
+    this.uploadTimes = clean.times;
+  }
+
+  /** 落盘当前限流状态;失败只 warn(不阻断上传),但必须留痕。 */
+  private persistUploadLimits(): void {
+    if (!this.limitStore) return;
+    try {
+      this.limitStore.save(this.limitKey, { blockedUntil: this.uploadBlockedUntil, times: [...this.uploadTimes] });
+    } catch (e) {
+      this.warn(`[upload-limits] 持久化失败(限流状态仅存内存): ${(e as Error).message}`);
+    }
   }
 
   private async withSemaphore<T>(s: Semaphore, fn: () => Promise<T>): Promise<T> {
@@ -504,7 +635,8 @@ export class ResourcePool {
   snapshot(): PoolSnapshot {
     const now = this.now();
     const winStart = now - this.uploadRateWindowMs;
-    const inWindow = this.uploadTimes.filter((t) => t > winStart);
+    // 与判定侧(`_awaitUploadSlot` / core UploadGate)同一窗口口径 `>=`;仅展示用,差一毫秒无碍。
+    const inWindow = this.uploadTimes.filter((t) => t >= winStart);
     // 位次按资源分组:每个资源队列内先到的排前(1-based)。
     const byResource = new Map<string, Array<{ streamKey: string; since: number }>>();
     for (const entries of this.waiting.values()) {
@@ -537,24 +669,51 @@ export class ResourcePool {
     };
   }
 
-  /** CPU 锁(merge/burn 共用,max=1)+ 内存闸门;内存长期不足 → 抛错由节点标 failed。 */
-  async withCpu<T>(fn: () => Promise<T>, streamKey?: string): Promise<T> {
+  /**
+   * CPU lock (merge/burn share it, max=1) + memory gate.
+   * Memory shortage only queues: the node keeps polling until memory recovers. After `memWaitTimeoutMs`
+   * one alert states need vs available, then waiting continues (a user stop still aborts the wait).
+   * The memory wait happens OUTSIDE the CPU lock, so a node that cannot get memory never blocks other
+   * streams; memory is re-checked once the lock is held. `kind` picks the floor: merge (copy-only) vs burn.
+   */
+  async withCpu<T>(fn: () => Promise<T>, streamKey?: string, kind: "merge" | "burn" = "burn"): Promise<T> {
     const clear = this.markWaiting(streamKey, "cpu");
-    try {
-      return await this.withSemaphore(this.cpu, async () => {
-        clear(); // 已进闸门 → 不再算「排队」
-        if (this.minBurnFreeMemMB > 0) {
-          const deadline = this.now() + this.memWaitTimeoutMs;
-          while (this.freeMemMB() < this.minBurnFreeMemMB) {
-            throwIfAborted();
-            if (this.now() >= deadline) {
-              throw new Error(`内存不足(可用 ${Math.round(this.freeMemMB())}MB < ${this.minBurnFreeMemMB}MB),等待超时`);
-            }
-            await this.sleep(2000);
-          }
+    // Merge never gates stricter than burn: `minBurnFreeMemMB: 0` (gate off) keeps disabling both.
+    const floor = (): number => {
+      const burnFloor = this.minBurnFreeMemMBLive();
+      return kind === "merge" ? Math.min(this.minMergeFreeMemMBLive(), burnFloor) : burnFloor;
+    };
+    const memOk = (): boolean => { const f = floor(); return f <= 0 || this.freeMemMB() >= f; };
+    // The alert clock starts when memory is first seen short, not when the node starts queuing for
+    // the CPU lock: time spent behind another node's merge/burn is not a memory shortage.
+    let shortSince: number | undefined;
+    let alerted = false;
+    const waitForMem = async (): Promise<void> => {
+      while (!memOk()) {
+        throwIfAborted();
+        shortSince ??= this.now();
+        if (!alerted && this.now() - shortSince >= this.memWaitTimeoutMs) {
+          alerted = true;
+          this.onMemShortage(
+            `Memory low for ${kind}${streamKey ? ` (${streamKey})` : ""}: need ${floor()} MB, available ${Math.round(this.freeMemMB())} MB; still waiting`,
+          );
         }
-        return fn();
-      });
+        await this.sleep(2000);
+      }
+    };
+    try {
+      for (;;) {
+        await waitForMem();
+        await this.cpu.acquire();
+        let ok: boolean;
+        try { ok = memOk(); } catch (e) { this.cpu.release(); throw e; } // never leak the permit
+        if (ok) {
+          clear(); // 已进闸门 → 不再算「排队」
+          try { return await fn(); } finally { this.cpu.release(); }
+        }
+        // Memory dropped while queued for the lock: give the slot back and wait again.
+        this.cpu.release();
+      }
     } finally {
       clear();
     }
@@ -586,7 +745,10 @@ export class ResourcePool {
         return await fn();
       } catch (e) {
         // 601:记录全局冷却,让后续提交(含本次重试)等够时间再打。
-        if (isUploadRateLimited(e)) this.uploadBlockedUntil = Math.max(this.uploadBlockedUntil, this.now() + this.uploadCooldownMs);
+        if (isUploadRateLimited(e)) {
+          this.uploadBlockedUntil = Math.max(this.uploadBlockedUntil, this.now() + this.uploadCooldownMs);
+          this.persistUploadLimits(); // 冷却必须在重启后仍在,否则重启即再打 601
+        }
         throw e;
       } finally {
         this.uploadActive--;
@@ -598,8 +760,32 @@ export class ResourcePool {
     return run;
   }
 
+  /**
+   * 与**共享 store 同步**(T19):master 与节点侧上传写同一张 upload_limits 表(各自进程、各自库路径时
+   * 不共享,同机同库时共享)。内存窗口只在本进程内权威 → 每次判定前重读 store 并**并集**,
+   * 否则会把别的进程刚占的额/刚记的冷却当成不存在(实测:节点侧记了冷却、master 照样打)。
+   * 单调合并:blockedUntil 取晚、times 取并集 → 不会用自己的旧值覆盖更新的状态。
+   */
+  private syncFromLimitStore(): void {
+    if (!this.limitStore) return;
+    const state = this.limitStore.load(this.limitKey);
+    if (state === null) return; // 不可用:已在构造时 fail-closed,运行期保持内存值
+    const clean = sanitizeUploadLimitState(state, this.now(), this.uploadRateWindowMs);
+    this.uploadBlockedUntil = Math.max(this.uploadBlockedUntil, clean.blockedUntil);
+    // **按多重集取 max,不能用 Set**:同一毫秒内的两次提交时间戳相同,Set 去重会把两次占额
+    // 并成一次 → 窗口计数偏小 → 真实超频被放行(自审发现;回归用例:并发窗口计数跨重启保留)。
+    // 逐刻取两边出现次数的较大者 = 「落盘(权威并集) ∪ 内存(本进程尚未落盘的增量)」。
+    const countOf = (arr: number[], t: number): number => arr.reduce((n, x) => (x === t ? n + 1 : n), 0);
+    const all = [...new Set([...this.uploadTimes, ...clean.times])].sort((a, b) => a - b);
+    this.uploadTimes = all.flatMap((t) => Array.from(
+      { length: Math.max(countOf(this.uploadTimes, t), countOf(clean.times, t)) },
+      () => t,
+    ));
+  }
+
   /** 等一个上传配额:先过冷却期,再保证滑动窗口内不超过 uploadRateLimit 次。 */
   private async _awaitUploadSlot(): Promise<void> {
+    this.syncFromLimitStore();
     // 冷却期独立于次数限制:即使限速关闭,命中 601 后也要等冷却。
     while (this.uploadBlockedUntil > this.now()) {
       throwIfAborted();
@@ -609,16 +795,28 @@ export class ResourcePool {
     for (;;) {
       throwIfAborted();
       const now = this.now();
-      if (this.uploadBlockedUntil > now) { await this.sleep(this.uploadBlockedUntil - now); continue; }
-      // 丢弃窗口外的历史提交时刻。
+      if (this.uploadBlockedUntil > now) { await this.sleep(this.uploadBlockedUntil - now); this.syncFromLimitStore(); continue; }
+      // 丢弃窗口外的历史提交时刻。边界 `>=`(滑出边界那一毫秒仍算在窗口内)——
+      // 与 core UploadGate / store.tryClaim 的判定**逐字一致**,否则两侧会在边界处各多放一格。
       const winStart = now - this.uploadRateWindowMs;
-      this.uploadTimes = this.uploadTimes.filter((t) => t > winStart);
+      this.uploadTimes = this.uploadTimes.filter((t) => t >= winStart);
       if (this.uploadTimes.length < this.uploadRateLimit) {
-        this.uploadTimes.push(now);
-        return;
+        // T19:store 支持原子占额时走它(master 与节点侧上传共享同一行时不会各占一格)。
+        if (this.limitStore?.tryClaim) {
+          if (this.limitStore.tryClaim(this.limitKey, now, this.uploadRateWindowMs, this.uploadRateLimit)) {
+            this.syncFromLimitStore();
+            return;
+          }
+          this.syncFromLimitStore(); // 没抢到 → 用真实状态重算该等多久
+          if (this.uploadTimes.length < this.uploadRateLimit) continue;
+        } else {
+          this.uploadTimes.push(now);
+          this.persistUploadLimits(); // 占额即落盘,重启后窗口不归零
+          return;
+        }
       }
       // 超频:睡到最早那次的窗口滑出为止。
-      await this.sleep(this.uploadTimes[0] + this.uploadRateWindowMs - now);
+      await this.sleep(Math.max(1, this.uploadTimes[0] + this.uploadRateWindowMs - now));
     }
   }
 
@@ -667,6 +865,14 @@ export interface WorkflowRunOptions {
  */
 export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<WorkflowRunResult> {
   const { streamKey, nodes, edges, ctx, pool, forceRetry = new Set(), autoRetry = new Set() } = opts;
+  let seasonTail: Promise<void> = Promise.resolve();
+  const queueSeasonAfterUpload = (): void => {
+    seasonTail = seasonTail
+      .then(() => associateSeasonAfterUpload(ctx, streamKey, false))
+      .catch((e) => {
+        ctx.log(`season association exception (left pending): ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+      });
+  };
   const byKey = new Map(nodes.map((n) => [n.key, n]));
   const parents = new Map<WorkflowNodeKey, WorkflowNodeKey[]>();
   for (const [from, to] of edges) {
@@ -754,10 +960,13 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
         await node.run(ctx);
         validateArtifacts(node.outputs, "输出");
       };
-      if (node.resource === "cpu") await pool.withCpu(body, streamKey);
+      if (node.resource === "cpu") await pool.withCpu(body, streamKey, node.key === "merge" ? "merge" : "burn");
       else if (node.resource === "upload") await pool.withUpload(body, streamKey);
       else if (node.resource === "net") await pool.withNet(body, streamKey);
       else await body();
+      // Season association starts only after withUpload has released, so its bounded HTTP budget
+      // cannot hold the global submission chain. Append nodes continue while it is in flight.
+      if (node.key === "upload_plain") queueSeasonAfterUpload();
       ctx.ledger.syncNodeState(streamKey, node.key, "done", { error: null });
       const detail = ctx.stepDetail(node.key);
       ctx.ledger.logStep(streamKey, node.key, "done", detail);
@@ -820,6 +1029,7 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
       }
     }
   }
+  await seasonTail;
   if (abortErr) throw abortErr;
   // 最后一轮 failed 父节点可能没来得及算到兄弟轨末尾节点 → 补算,保证返回结果完整(ledger 已 persist)。
   for (const node of nodes) compute(node.key);
@@ -827,6 +1037,43 @@ export async function runWorkflowNodes(opts: WorkflowRunOptions): Promise<Workfl
   const failed = nodes.filter((n) => state.get(n.key) === "failed").map((n) => n.key);
   const blocked = nodes.filter((n) => state.get(n.key) === "blocked").map((n) => n.key);
   return { ok: failed.length === 0 && blocked.length === 0, failed, blocked };
+}
+
+/**
+ * Best-effort season association owned by the merged workflow. The BV and "pending" marker are written
+ * by upload_plain before its upload slot is released; this runs after release and records the terminal
+ * state. Never throws, so a season-side failure cannot fail an otherwise successful upload.
+ */
+export async function associateSeasonAfterUpload(ctx: NodeRunContext, streamKey: string, reconcileFirst = true): Promise<void> {
+  await associateSeasonForJob(ctx.ledger, ctx.cfg, streamKey, (m) => ctx.log(m), { reconcileFirst });
+}
+
+/** Shared by the merged workflow and its resume path; idempotent and never throws. */
+export async function associateSeasonForJob(
+  ledger: SyncLedger,
+  cfg: PipelineCfg,
+  streamKey: string,
+  log: (msg: string) => void,
+  opts: { reconcileFirst?: boolean } = {},
+): Promise<void> {
+  const row = ledger.get(streamKey);
+  const bv = row?.bv;
+  // Only an explicit "pending" checkpoint (or a fresh create that just persisted it) is associated.
+  // Legacy rows without any seasonState were never requested, so enabling the feature must never
+  // retroactively add old archives.
+  const pendingNow = row?.seasonState === "pending";
+  if (!cfg.uploadMeta.seasonSectionId || !bv || row?.seasonState === "done" || row?.seasonState === "failed") return;
+  if (!pendingNow) return;
+  const reconcileFirst = opts.reconcileFirst ?? true;
+  const season = await addArchiveToSeasonIfConfigured({
+    cookiesPath: cfg.cookies,
+    sectionId: cfg.uploadMeta.seasonSectionId,
+    bvid: bv,
+    reconcileFirst,
+    note: log,
+  });
+  try { ledger.setSeasonState(streamKey, seasonCheckpointState(season)); }
+  catch (e) { log(`season terminal checkpoint not saved: ${String((e as Error)?.message ?? e).slice(0, 200)}`); }
 }
 
 function shSingleQuote(s: string): string {
