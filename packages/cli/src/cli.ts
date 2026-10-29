@@ -208,7 +208,7 @@ program
   .option("--reconnect <sec>", "断流快速重连等待(秒) (默认 5)")
   .option("--rolling-upload <0|1>", "边录边传: 1=录制中每封口一段就上传并删该段源 0=整场录完再处理 (默认 0)")
   .option("--stream-upload <0|1>", "直播直传: 1=ffmpeg stdout 直传 UPOS 并续同一稿件,上传确认后删本地回退文件;0=关闭(默认)")
-  .option("--stream-upload-size <bytes>", "流式直传每 P 字节上界(默认对齐后的 1GiB)")
+  .option("--stream-upload-size <bytes>", "流式直传每 P 字节上界(默认对齐后的 1.5GiB)")
   .option("--stream-upload-sec <sec>", "流式直传每 P 时长阈值(秒),与 --stream-upload-size 谁先到算一 P")
   .option("--stream-upload-stall-sec <sec>", "流式直传无写入看门狗(秒;默认 300,最低 60):超时自动封口并追稿")
   .option("--stream-upload-recover-sec <sec>", "流式直传停滞后的自动恢复窗口(秒;默认 1200,最低 60)")
@@ -816,7 +816,7 @@ program
   .description("[内部] 直播间边录边传 PoC:ffmpeg -fs 分段 → UPOS 直传 → 建私稿")
   .requiredOption("--cookies <path>", "biliup cookies.json 路径")
   // 默认上界从常量派生,不写裸数字:隐私闸门会把看似房间号的长数字当违规(实测误报)。
-  .option("--size <bytes>", `分段字节上界(默认 ${DEFAULT_SEGMENT_CAP} = 对齐后的 1GiB;须 10MiB 对齐)`, String(DEFAULT_SEGMENT_CAP))
+  .option("--size <bytes>", `分段字节上界(默认 ${DEFAULT_SEGMENT_CAP} = 对齐后的 1.5GiB;须 10MiB 对齐)`, String(DEFAULT_SEGMENT_CAP))
   .option("--segments <n>", "最多录几段(默认 1;调试用)", "1")
   .option("--max-sec <sec>", "时长阈值(秒):与 --size 谁先到算一 P。0/缺省 = 只用字节兜底")
   .option("--spool-dir <dir>", "spool 目录(默认系统临时目录)")
@@ -840,8 +840,8 @@ program
       process.stderr.write(`[直播直传] size ${o.size} 未按 10MiB 对齐 → 用 ${sizeCap}\n`);
     }
     if (sizeCap !== DEFAULT_SEGMENT_CAP && o.size === String(DEFAULT_SEGMENT_CAP)) {
-      // 走到这里说明用户手改过 --size;提示真实生效值,避免「我设了 1GiB 怎么变成 1030MiB」。
-      process.stderr.write(`[直播直传] 默认上界已按 10MiB 对齐为 ${DEFAULT_SEGMENT_CAP}(1GiB=102.4×10MiB,不对齐)\n`);
+      // 走到这里说明用户手改过 --size;提示真实生效值,避免「我设了 1.5GiB 怎么变成 1540MiB」。
+      process.stderr.write(`[直播直传] 默认上界已按 10MiB 对齐为 ${DEFAULT_SEGMENT_CAP}(1.5GiB=153.6×10MiB,不对齐)\n`);
     }
     const spoolDir = o.spoolDir ?? `${tmpdir()}/live-pump`;
     const maxSegments = Math.max(1, Number(o.segments));

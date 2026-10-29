@@ -2,7 +2,7 @@
 
 > 本文件是本仓库 **agent 工作的唯一待办台账**。管理规则见 `AGENTS.md`「任务与 TODO 管理」。
 > 编号 `T-N` 稳定不变（引用/提交信息里用它指代条目）。
-> 最后更新：2026-10-26
+> 最后更新：2026-10-28
 
 ## 状态约定
 
@@ -14,6 +14,12 @@
 每条至少写清：**做什么 + 为什么 + 验收标准**；有计划的挂 `plans/NNN_*.md` 链接。
 
 ## 进行中
+- [~] **T-124 直播直传默认分 P 字节上界 1GiB → 1.5GiB（issue [#387](https://github.com/fuyucn/douyin-rec/issues/387)）**（2026-10-28）
+  — 用户直接指派：默认分段上界从 1GiB 提高到 1.5GiB。
+  **做什么**: `DEFAULT_SEGMENT_CAP` 由 `alignFileSize(1024**3)` 改为 `alignFileSize(1.5 * 1024**3)`（= 1540MiB，保持 10MiB 对齐）；同步 CLI `--stream-upload-size` / `_live-pump --size` 说明和 Web 中英文「默认 1.5GB」；单测钉住新对齐值。
+  **为什么**: 单 P 默认上限更大，减少长直播的分 P 数量与上传落后窗口；只影响兜底上限，不改变分 P 结算策略。
+  **验收**: `DEFAULT_SEGMENT_CAP` 等于 `alignFileSize(1.5 * 1024**3)` 且为 10MiB 整数倍；CLI/Web 文案无「默认 1GB」残留；全量测试 / 类型 / Web 构建 / i18n / bundle 通过。
+
 - [~] **T-123 直播直传日志与新 `.live` 文件命名（issue [#385](https://github.com/fuyucn/douyin-rec/issues/385)）**（2026-10-28）
   — UI 名称已统一，但日志仍暴露内部实现名，生产 spool 仍使用旧前缀；用户要求回退文件开关标推荐开启，并改用更清晰的文件名格式。
   **做什么**: 用户可见日志前缀统一为「直播直传」；新 session 的 spool/XML 改为日期时间序号加 `.live` 后缀；orphan 清扫同时兼容旧格式和新格式；状态 sidecar 命名保持兼容；UI 文案标注推荐开启。

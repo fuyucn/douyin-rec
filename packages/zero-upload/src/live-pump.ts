@@ -84,16 +84,16 @@ export function alignFileSize(n: number): number {
 }
 
 /**
- * 默认分段上界(用户拍板:生产默认 1GiB;测试用 100MiB 显式传入)。
+ * 默认分段上界(用户拍板:生产默认 1.5GiB;测试用 100MiB 显式传入)。
  *
  * 这只是**兜底上界**(防爆盘/防爆内存),不是分 P 的期望大小 —— 分 P 大小由
  * {@link SealPolicy} 的两个阈值谁先到决定。
  *
  * 仍然走 {@link alignFileSize}:块边界对齐 10MiB 时,尾块更可能刚好凑满一个整块,
- * 少一次「不足一块」的收尾。1 GiB 本身不是 10MiB 整数倍(102.4),直接写 `1024**3`
- * 会让每次分 P 都多出一个 4 MiB 碎尾块。
+ * 少一次「不足一块」的收尾。1.5 GiB 本身不是 10MiB 整数倍(153.6),直接写 `1.5 * 1024**3`
+ * 会让每次分 P 都多出一个碎尾块。
  */
-export const DEFAULT_SEGMENT_CAP = alignFileSize(1024 * 1024 * 1024);
+export const DEFAULT_SEGMENT_CAP = alignFileSize(1.5 * 1024 * 1024 * 1024);
 
 /**
  * A live HTTP video stream normally emits bytes continuously. Five minutes without a single

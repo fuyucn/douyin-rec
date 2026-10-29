@@ -246,15 +246,16 @@ describe("alignFileSize", () => {
     expect(alignFileSize(10 * 1024 * 1024 + 1)).toBe(20 * 1024 * 1024);
   });
 
-  it("测试档 100MiB 与生产默认 1GiB 都是 10MiB 对齐值", () => {
+  it("测试档 100MiB 与生产默认 1.5GiB 都是 10MiB 对齐值", () => {
     expect(alignFileSize(100 * 1024 * 1024)).toBe(100 * 1024 * 1024);
     expect(DEFAULT_SEGMENT_CAP % (10 * 1024 * 1024)).toBe(0);
     expect(alignFileSize(0)).toBe(0);
-    // ⚠️ 钉住这个回归:1 GiB = 102.4 × 10MiB,**不是**对齐值;
-    // 若有人把默认值改回裸 1024**3,UPOS 尾块会是 4MiB 碎块 → 整段回退文件上传。
-    expect(1024 * 1024 * 1024 % (10 * 1024 * 1024)).not.toBe(0);
-    expect(DEFAULT_SEGMENT_CAP).toBe(alignFileSize(1024 * 1024 * 1024));
-    expect(DEFAULT_SEGMENT_CAP).toBe(1030 * 1024 * 1024);
+    // ⚠️ 钉住这个回归:1.5 GiB = 153.6 × 10MiB,**不是**对齐值;
+    // 若有人把默认值改回裸 1.5*1024**3,UPOS 尾块会是碎块 → 整段回退文件上传。
+    expect(Math.floor(1.5 * 1024 * 1024 * 1024 / (10 * 1024 * 1024)) * 10 * 1024 * 1024)
+      .not.toBe(1.5 * 1024 * 1024 * 1024);
+    expect(DEFAULT_SEGMENT_CAP).toBe(alignFileSize(1.5 * 1024 * 1024 * 1024));
+    expect(DEFAULT_SEGMENT_CAP).toBe(1540 * 1024 * 1024);
   });
 });
 
