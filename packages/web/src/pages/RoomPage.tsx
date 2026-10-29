@@ -231,14 +231,14 @@ export function RoomPage(): ReactNode {
               ))}
             </InfoGroup>
 
-            {task?.streamUpload && task.zeroDisk?.some((z) => z.live) && (
+            {task?.streamUpload && task.zeroDisk?.length ? (
               <InfoGroup title={t("room.zeroDisk.live.title")}>
                 <LiveUploadTimeline
                   taskId={task.id}
                   summaries={task.zeroDisk.flatMap((z) => z.live ? [{ workerId: z.workerId, summary: z.live }] : [])}
                 />
               </InfoGroup>
-            )}
+            ) : null}
 
             {rolling.length > 0 && (
               <InfoGroup title={t("tasks.progressTitle")}>

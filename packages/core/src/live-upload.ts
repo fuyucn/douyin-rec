@@ -49,6 +49,7 @@ export interface LiveEvent {
   uploadedBytes?: number;
   chunks?: number;
   bytes?: number;
+  bvid?: string;
   message?: string;
   outcome?: "finished" | "failed" | "stopped";
   session?: LiveEventSession;
@@ -152,6 +153,7 @@ function normalizeEvent(x: unknown): LiveEvent | null {
     ...(x.uploadedBytes !== undefined ? { uploadedBytes: x.uploadedBytes as number } : {}),
     ...(x.chunks !== undefined ? { chunks: x.chunks as number } : {}),
     ...(x.bytes !== undefined ? { bytes: x.bytes as number } : {}),
+    ...(typeof x.bvid === "string" && x.bvid ? { bvid: x.bvid } : {}),
     ...(typeof x.message === "string" ? { message: x.message.slice(0, LIVE_MESSAGE_LIMIT) } : {}),
     ...(x.outcome ? { outcome: x.outcome } : {}),
     ...(session ? { session: { ...(session as unknown as LiveEventSession) } } : {}),
@@ -201,7 +203,7 @@ export function normalizeLiveUploadSnapshot(x: unknown): LiveUploadSnapshot | nu
     const events = (Array.isArray(x.events) ? x.events : []).map(normalizeEvent).filter((e): e is LiveEvent => e !== null)
       .sort((a, b) => a.at - b.at).slice(-LIVE_EVENT_LIMIT);
     const parts = (Array.isArray(x.parts) ? x.parts : []).map(normalizePart).filter((p): p is LivePartView => p !== null)
-      .sort((a, b) => a.index - b.index).slice(0, LIVE_PART_LIMIT);
+      .sort((a, b) => a.index - b.index).slice(-LIVE_PART_LIMIT);
     const currentPart = x.currentPart === undefined ? undefined : normalizeCurrent(x.currentPart);
     if (x.currentPart !== undefined && !currentPart) return null;
     return {
@@ -234,6 +236,6 @@ export function capLiveUploadSnapshot(
   return {
     ...s,
     events: s.events.slice(-events),
-    parts: s.parts.slice(0, parts),
+    parts: s.parts.slice(-parts),
   };
 }

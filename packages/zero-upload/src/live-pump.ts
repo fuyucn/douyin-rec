@@ -2104,6 +2104,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
     return { session };
   };
 
+  let preRecoveryOpened = false;
   if (o.waitForBroadcast) {
     // A previous run may have left a pending/unconfirmed part (e.g. the last part's submit failed
     // as the show ended). Settle it now, while its archive is still "this broadcast", instead of
@@ -2115,7 +2116,9 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
       log("[直播直传] 上次运行留有未确认分 P,等待开播前先恢复");
       const pre = await openSession();
       if ("fail" in pre) return pre.fail;
+      preRecoveryOpened = true;
     }
+    if (preRecoveryOpened) emit({ at: Date.now(), kind: "waiting" });
     // Wait BEFORE opening the session for recording. The session decides "same broadcast or a
     // new one" from the state's last activity when it is constructed; deciding at process start
     // and then waiting hours would append the next broadcast to the previous one's archive. The
@@ -2318,11 +2321,11 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
               error: String((e as Error)?.message ?? e).slice(0, 200),
             }));
           if (submitted.ok) {
-            emit({ at: Date.now(), kind: "part_confirmed", part: unconfirmedIndex });
             const part = session.parts.find((p) => p.index === unconfirmedIndex && p.confirmed);
             if (!part) {
               return { ok: false, error: `自动重试未确认目标分 P(索引 ${unconfirmedIndex})` };
             }
+            emit({ at: Date.now(), kind: "part_confirmed", part: unconfirmedIndex, ...(submitted.bvid ? { bvid: submitted.bvid } : {}) });
             return {
               ok: true,
               ...(part?.stem ? { stem: part.stem } : {}),
@@ -2448,7 +2451,7 @@ export async function runLivePump(o: RunLivePumpOptions): Promise<RunLivePumpRes
         `[直播直传] 段${seg + 1} 已确认到稿件 ${submitted.bvid ?? submitted.aid}` +
         `${r.usedFileFallback ? " (整文件回退)" : ""}`,
       );
-      emit({ at: Date.now(), kind: "part_confirmed", part: nextIndex, ...(submitted.bvid ? { message: submitted.bvid } : {}) });
+      emit({ at: Date.now(), kind: "part_confirmed", part: nextIndex, ...(submitted.bvid ? { bvid: submitted.bvid } : {}) });
       log("[状态] 分P已确认");
       try {
         const bv = submitted.bvid ?? session.bvid;

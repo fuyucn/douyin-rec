@@ -192,6 +192,19 @@ export function pruneLiveFiles(now = Date.now()): void {
   } catch { /* best effort */ }
 }
 
+/** Per-room 1s read cache; never share one room's data with another. */
+export function createLiveFileCache(ttlMs = 1000, now: () => number = Date.now) {
+  const cache = new Map<string, { at: number; data: ReturnType<typeof readLiveUploadFile> }>();
+  return (platform: string, roomSlug: string): ReturnType<typeof readLiveUploadFile> => {
+    const key = `${platform}:${roomSlug}`;
+    const hit = cache.get(key);
+    if (hit && now() - hit.at < ttlMs) return hit.data;
+    const data = readLiveUploadFile(liveUploadPath(platform, roomSlug));
+    cache.set(key, { at: now(), data });
+    return data;
+  };
+}
+
 /** Write the per-room status. Failures are swallowed: status is observability, never a reason to stop uploading. */
 export function writeZeroDiskStatus(s: Omit<ZeroDiskNodeStatus, "v" | "updatedAt">, now: number = Date.now()): void {
   try {

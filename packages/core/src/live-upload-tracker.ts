@@ -47,7 +47,7 @@ function upsertPart(s: LiveUploadSnapshot, part: number, phase: LivePartPhase, e
     ...(e.uploadedBytes !== undefined ? { uploadedBytes: e.uploadedBytes } : {}),
     ...(e.chunks !== undefined ? { chunks: e.chunks } : {}),
     ...(e.bytes !== undefined ? { bytes: e.bytes } : {}),
-    ...(e.kind === "part_confirmed" && s.bvid ? { bvid: s.bvid } : {}),
+    ...(e.kind === "part_confirmed" && (e.bvid ?? s.bvid) ? { bvid: e.bvid ?? s.bvid } : {}),
     ...(e.kind === "part_failed" && e.message ? { error: e.message } : {}),
   };
   if (i >= 0) s.parts[i] = next;
@@ -133,7 +133,10 @@ export function applyLiveEvent(state: LiveRunTracker, e: LiveEvent): LiveRunTrac
     const phase = phaseFor(e.kind, s.currentPart?.phase);
     if (phase) {
       upsertPart(s, e.part, phase, e);
-      if (e.kind === "part_confirmed") s.state = "submitting";
+      if (e.kind === "part_confirmed") {
+        if (e.bvid) s.bvid = e.bvid;
+        s.state = "submitting";
+      }
       else if (e.kind === "part_failed") s.state = "failed";
       else if (s.state === "waiting") s.state = "streaming";
     }

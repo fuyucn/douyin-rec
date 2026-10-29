@@ -80,7 +80,7 @@ describe("live upload timeline wiring", () => {
     const page = readFileSync(join(SRC, "pages", "RoomPage.tsx"), "utf-8");
     const component = readFileSync(join(SRC, "components", "LiveUploadTimeline.tsx"), "utf-8");
     expect(page).toContain("<LiveUploadTimeline");
-    expect(page).toContain("task.zeroDisk?.some((z) => z.live)");
+    expect(page).toContain("task.zeroDisk?.length");
     expect(component).toContain("api.getTaskLive");
   });
 });
