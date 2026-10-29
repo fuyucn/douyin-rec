@@ -8,7 +8,7 @@
  *
  * Pure orchestration over the Transport seam; no ssh / sqlite here (the receipt writer is injected).
  */
-import type { NodeCapabilities, ZeroDiskNodeStatus, ZeroDiskNodeStatusDTO, ZeroDiskReceipt, ZeroDiskReport } from "@drec/core";
+import { liveUploadSummary, type NodeCapabilities, type ZeroDiskNodeStatus, type ZeroDiskNodeStatusDTO, type ZeroDiskReceipt, type ZeroDiskReport } from "@drec/core";
 import type { Transport } from "./transport.js";
 
 export interface ZeroDiskWorker {
@@ -192,6 +192,8 @@ export class ZeroDiskFleet {
     if (poll.kind === "offline") return { ...base, state: "offline", reason: poll.reason, checkedAt: poll.at };
     const st: ZeroDiskNodeStatus | undefined = poll.report.status.find((s) => s.platform === room.platform && s.roomSlug === room.roomSlug);
     if (!st) return { ...base, state: "ok", checkedAt: poll.at };
+    const lv = poll.report.live?.find((x) => x.platform === room.platform && x.roomSlug === room.roomSlug);
+    const current = lv?.current ?? lv?.previous;
     return {
       ...base,
       state: "ok",
@@ -200,8 +202,17 @@ export class ZeroDiskFleet {
       ...(st.message ? { message: st.message } : {}),
       parts: st.parts,
       ...(st.bvid ? { bvid: st.bvid } : {}),
+      ...(current ? { live: liveUploadSummary(current) } : {}),
       checkedAt: poll.at,
     };
+  }
+
+  /** Full current/previous snapshots from the last successful poll; null when unavailable. */
+  live(workerId: string, platform: string, roomSlug: string): { current?: import("@drec/core").LiveUploadSnapshot; previous?: import("@drec/core").LiveUploadSnapshot } | null {
+    const poll = this.polls.get(workerId);
+    if (poll?.kind !== "ok") return null;
+    const lv = poll.report.live?.find((x) => x.platform === platform && x.roomSlug === roomSlug);
+    return lv ? { ...(lv.current ? { current: lv.current } : {}), ...(lv.previous ? { previous: lv.previous } : {}) } : null;
   }
 
   /** Snapshot keyed by `platform:roomSlug` for the targets the master currently expects. */

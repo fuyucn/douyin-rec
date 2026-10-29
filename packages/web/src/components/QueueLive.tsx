@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import type { HubBlockedBroadcastDTO, HubPoolSnapshotDTO, QueueItemDTO } from "../api/client";
 import { humanSec, JobLogDialog } from "./HubJobs";
 import { useT } from "../lib/i18n";
+import type { LiveUploadLane as LiveUploadLaneRow } from "../lib/queue-live";
 import { platformLabel, roomId } from "../lib/labels";
 import { liveStepLabel } from "../lib/queue-live";
 import { countNodeHealth, fmtBytes, type NodeHealthProbe, type NodeSummary } from "../lib/nodes-summary";
@@ -121,6 +122,32 @@ export function LiveLane({ item, now, dataAt, onOpenLog }: {
       </div>
       {uploadLine(item, t)}
     </article>
+  );
+}
+
+export function LiveUploadLanes({ lanes, now }: { lanes: LiveUploadLaneRow[]; now: number }): ReactNode {
+  const t = useT();
+  if (lanes.length === 0) return null;
+  return (
+    <div className="space-y-2 mb-5">
+      {lanes.map((l) => (
+        <article key={`${l.taskId}-${l.workerId}`} className="live-lane">
+          <div className="live-lane-head">
+            <div className="min-w-0">
+              <div className="font-medium text-ink truncate">{l.name ?? l.room}</div>
+              <div className="font-mono text-[11px] text-muted-soft mt-0.5">
+                {l.workerName} · {t("queue.liveUpload.state", { state: t(`room.zeroDisk.live.state.${l.state}`) })}
+              </div>
+            </div>
+            <div className="text-right shrink-0">
+              {l.partIndex !== undefined && <div className="font-mono text-sm text-ink">P{l.partIndex + 1}</div>}
+              {l.bvid && <div className="font-mono text-[11px] text-muted">{l.bvid}</div>}
+              <div className="text-[10px] text-muted-soft">{Math.max(0, Math.round((now - l.updatedAt) / 1000))}s</div>
+            </div>
+          </div>
+        </article>
+      ))}
+    </div>
   );
 }
 

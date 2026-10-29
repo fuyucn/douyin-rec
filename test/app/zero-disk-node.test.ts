@@ -22,6 +22,8 @@ import {
   writeZeroDiskStatus,
   zeroDiskNodeDir,
   zeroDiskNodePreflight,
+  liveUploadPath,
+  createLiveFileCache,
 } from "../../packages/app/src/zero-disk-node.js";
 import { zeroDiskStreamKey } from "@drec/core";
 import {
@@ -189,6 +191,66 @@ describe("status + receipt files (node-written, master-polled)", () => {
   it("a refused / finished status is reported as written (no liveness downgrade)", () => {
     writeZeroDiskStatus({ platform: "douyin", roomSlug: "1", state: "refused", code: "account_mismatch", message: "m", parts: 0 });
     expect(buildZeroDiskReport({ isAlive: () => false }).status[0]).toMatchObject({ state: "refused", code: "account_mismatch" });
+  });
+
+  it("attaches bounded current/previous live snapshots without clobbering status", () => {
+    useRoot("live-report");
+    writeZeroDiskStatus({ platform: "douyin", roomSlug: "1", state: "running", parts: 1 });
+    const p = liveUploadPath("douyin", "1");
+    mkdirSync(join(p, ".."), { recursive: true });
+    writeFileSync(p, JSON.stringify({
+      v: 1, platform: "douyin", roomSlug: "1", pid: 1, updatedAt: 10,
+      current: {
+        schemaVersion: 1, mode: "zero-disk", sessionId: "douyin:1:10", createdAt: 10,
+        platform: "douyin", roomSlug: "1", state: "streaming", startedAt: 10, updatedAt: 10,
+        currentPart: { index: 0, phase: "streaming", uploadedBytes: 50, chunks: 1 },
+        parts: [{ index: 0, phase: "streaming", uploadedBytes: 50, chunks: 1 }], events: [],
+      },
+    }));
+    const r = buildZeroDiskReport({ isAlive: () => true });
+    expect(r.status[0]).toMatchObject({ state: "running", parts: 1 });
+    expect(r.live?.[0]?.current?.currentPart?.uploadedBytes).toBe(50);
+  });
+
+  it("stale finished live sessions are summary-free but do not inflate the report", () => {
+    useRoot("live-stale");
+    for (let i = 0; i < 20; i++) {
+      const p = liveUploadPath("douyin", String(i));
+      mkdirSync(join(p, ".."), { recursive: true });
+      writeFileSync(p, JSON.stringify({
+        v: 1, platform: "douyin", roomSlug: String(i), pid: 1, updatedAt: 1,
+        current: {
+          schemaVersion: 1, mode: "zero-disk", sessionId: `douyin:${i}:1`, createdAt: 1,
+          platform: "douyin", roomSlug: String(i), state: "finished", startedAt: 1, updatedAt: 1,
+          parts: [], events: [],
+        },
+      }));
+    }
+    const r = buildZeroDiskReport({ isAlive: () => true });
+    expect(JSON.stringify(r).length).toBeLessThan(256 * 1024);
+    expect(r.live?.every((x) => x.current === undefined)).toBe(true);
+  });
+
+  it("local live cache is keyed per room", () => {
+    useRoot("live-cache");
+    const write = (room: string, bytes: number) => {
+      const p = liveUploadPath("douyin", room);
+      mkdirSync(join(p, ".."), { recursive: true });
+      writeFileSync(p, JSON.stringify({
+        v: 1, platform: "douyin", roomSlug: room, pid: 1, updatedAt: 1,
+        current: {
+          schemaVersion: 1, mode: "zero-disk", sessionId: `${room}:1`, createdAt: 1,
+          platform: "douyin", roomSlug: room, state: "streaming", startedAt: 1, updatedAt: 1,
+          currentPart: { index: 0, phase: "streaming", uploadedBytes: bytes, chunks: 1 },
+          parts: [], events: [],
+        },
+      }));
+    };
+    write("a", 1);
+    write("b", 2);
+    const cache = createLiveFileCache();
+    expect(cache("douyin", "a")?.current?.currentPart?.uploadedBytes).toBe(1);
+    expect(cache("douyin", "b")?.current?.currentPart?.uploadedBytes).toBe(2);
   });
   it("receipts older than the TTL are pruned on the next write; fresh ones survive", () => {
     writeZeroDiskReceipt(receipt({ id: "old" }));

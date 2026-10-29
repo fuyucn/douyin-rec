@@ -4,6 +4,11 @@ import type { OutputFormat } from "./output-format.js";
 import type { NotifyEvent, NotifKey, NotifWebhookToggles } from "./notify.js";
 import type { ZeroDiskDelivery, ZeroDiskNodeStatusDTO } from "./zero-disk-delivery.js";
 export type { ZeroDiskNodeStatusDTO, ZeroDiskRunState, ZeroDiskRefusalCode } from "./zero-disk-delivery.js";
+export type {
+  LiveUploadSnapshot, LiveUploadState, LiveUploadMode, LiveEvent, LiveEventKind,
+  LivePartView, LivePartPhase, LivePumpReporter, LiveEventSession, LiveCurrentPart,
+  LiveUploadSummary,
+} from "./live-upload.js";
 export type { NotifyEvent, NotifKey, NotifWebhookToggles };
 
 /** hub 规则 `pipeline.upload.mode` 的取值。`rolling` = 合成并上传 + 录制端边录边传(issue #40)。 */

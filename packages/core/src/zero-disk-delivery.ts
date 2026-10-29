@@ -9,6 +9,7 @@
  * Parsing is strict on purpose: a missing field is a refusal to start, never a default.
  */
 import { processTimeZone, zonedStamp } from "./title-template.js";
+import { capLiveUploadSnapshot, normalizeLiveUploadSnapshot, type LiveUploadSnapshot, type LiveUploadSummary } from "./live-upload.js";
 
 /** Env var carrying the delivered JSON from the node's task manager to its `record` child. */
 export const ZERO_DISK_DELIVERY_ENV = "DREC_ZERO_DISK_DELIVERY";
@@ -197,6 +198,8 @@ export interface ZeroDiskReport {
   v: 1;
   receipts: ZeroDiskReceipt[];
   status: ZeroDiskNodeStatus[];
+  /** Bounded current/previous snapshots for rooms with an active or recent run. */
+  live?: Array<{ platform: string; roomSlug: string; current?: LiveUploadSnapshot; previous?: LiveUploadSnapshot }>;
 }
 
 const RUN_STATES: readonly string[] = ["running", "finished", "failed", "refused", "stopped"];
@@ -237,7 +240,18 @@ export function normalizeZeroDiskReport(x: unknown): ZeroDiskReport | null {
   if (!isRecord(x) || x.v !== 1) return null;
   const receipts = (Array.isArray(x.receipts) ? x.receipts : []).map(normalizeZeroDiskReceipt).filter((r): r is ZeroDiskReceipt => r !== null);
   const status = (Array.isArray(x.status) ? x.status : []).map(normalizeZeroDiskStatus).filter((s): s is ZeroDiskNodeStatus => s !== null);
-  return { v: 1, receipts, status };
+  const live = (Array.isArray(x.live) ? x.live : []).flatMap((v) => {
+    if (!isRecord(v) || typeof v.platform !== "string" || !v.platform || typeof v.roomSlug !== "string" || !v.roomSlug) return [];
+    const current = v.current ? normalizeLiveUploadSnapshot(v.current) : undefined;
+    const previous = v.previous ? normalizeLiveUploadSnapshot(v.previous) : undefined;
+    return [{
+      platform: v.platform,
+      roomSlug: v.roomSlug,
+      ...(current ? { current: capLiveUploadSnapshot(current) } : {}),
+      ...(previous ? { previous: capLiveUploadSnapshot(previous) } : {}),
+    }];
+  });
+  return { v: 1, receipts, status, ...(live.length ? { live } : {}) };
 }
 
 /** GET /api/tasks projection of one zero-disk node for a room (one entry per targeted worker). */
@@ -256,4 +270,6 @@ export interface ZeroDiskNodeStatusDTO {
   bvid?: string;
   /** When the master last got a real answer (epoch ms). */
   checkedAt: number | null;
+  /** Compact timeline summary for this worker/room. */
+  live?: LiveUploadSummary;
 }

@@ -23,6 +23,7 @@ import { QUALITY_FULL, fmtClock, fmtStartedAt, platformLabel, roomHref, roomId, 
 import { localTimeTooltip } from "../lib/tz";
 import { versionKeys } from "../lib/room-detail";
 import { zeroDiskView } from "../lib/zero-disk-status";
+import { LiveUploadTimeline } from "../components/LiveUploadTimeline";
 import { deliverText, nodesText, roomName, RoomBadge, runLabel, statusDetail, useRoomActions, useRoomsData } from "./rooms/shared";
 
 export function RoomPage(): ReactNode {
@@ -229,6 +230,15 @@ export function RoomPage(): ReactNode {
                 } />
               ))}
             </InfoGroup>
+
+            {task?.streamUpload && task.zeroDisk?.length ? (
+              <InfoGroup title={t("room.zeroDisk.live.title")}>
+                <LiveUploadTimeline
+                  taskId={task.id}
+                  summaries={task.zeroDisk.flatMap((z) => z.live ? [{ workerId: z.workerId, summary: z.live }] : [])}
+                />
+              </InfoGroup>
+            ) : null}
 
             {rolling.length > 0 && (
               <InfoGroup title={t("tasks.progressTitle")}>

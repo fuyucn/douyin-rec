@@ -293,6 +293,12 @@ export interface HubStarter {
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
   /** The master console reads the zero-disk side-node status snapshot (issue #331). */
   zeroDiskStatus?: (platform: string, roomSlug: string) => import("@drec/core").ZeroDiskNodeStatusDTO[];
+  /** Full current/previous snapshots for managed zero-disk detail. */
+  readZeroDiskLive?: (platform: string, roomSlug: string) => Array<{
+    workerId: string; workerName: string;
+    current?: import("@drec/core").LiveUploadSnapshot;
+    previous?: import("@drec/core").LiveUploadSnapshot;
+  }>;
   /** master 资源池快照(读同一 ResourcePool 实例);队列页显示 CPU/上传占用与排队位次。省略 → 全 0。 */
   /** 边录边传的实时进度(F1;controller 队列页展示)。 */
   rollingDelivery?: () => import("@drec/core").RollingDeliveryDTO[];

@@ -102,6 +102,8 @@ export const api = {
   getPlatforms: (): Promise<PlatformsDTO> => request("GET", "/api/platforms"),
   getTask: (id: number): Promise<TaskDetail> => request("GET", `/api/tasks/${id}`),
   getTaskLogs: (id: number): Promise<{ lines: string[] }> => request("GET", `/api/tasks/${id}/logs`),
+  getTaskLive: (id: number): Promise<{ entries: Array<{ workerId: string; workerName: string; current?: import("@drec/contracts").LiveUploadSnapshot; previous?: import("@drec/contracts").LiveUploadSnapshot }> }> =>
+    request("GET", `/api/tasks/${id}/live`),
   createTask: (input: TaskPayload): Promise<Task> => request("POST", "/api/tasks", input),
   updateTask: (id: number, input: Partial<TaskPayload>): Promise<Task> =>
     request("PATCH", `/api/tasks/${id}`, input),

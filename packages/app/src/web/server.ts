@@ -44,6 +44,7 @@ export interface RouteMatch {
     | "updateTask"
     | "getTask"
     | "getTaskLogs"
+    | "getTaskLive"
     | "deleteTask"
     | "refreshTaskAnchor"
     | "startTask"
@@ -204,6 +205,7 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "stopTask", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/stop$/, param: "id" },
   { name: "drainTask", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/drain$/, param: "id" },
   { name: "getTaskLogs", methods: ["GET"], pattern: /^\/api\/tasks\/(\d+)\/logs$/, param: "id" },
+  { name: "getTaskLive", methods: ["GET"], pattern: /^\/api\/tasks\/(\d+)\/live$/, param: "id" },
   { name: "listRecordings", methods: ["GET"], pattern: /^\/api\/tasks\/(\d+)\/recordings$/, param: "id" },
   { name: "startMerge", methods: ["POST"], pattern: /^\/api\/tasks\/(\d+)\/merge$/, param: "id", needsBody: true },
   { name: "getTask", methods: ["GET"], pattern: /^\/api\/tasks\/(\d+)$/, param: "id" },
@@ -287,6 +289,10 @@ export interface WebServerDeps {
   recordingWorkers?: (platform: string, roomSlug: string) => import("@drec/core").RecordingWorkerStatusDTO[];
   /** Zero-disk side-node status snapshot (issue #331); injected by the CLI so no SSH happens on the request path. */
   zeroDiskStatus?: (platform: string, roomSlug: string) => import("@drec/core").ZeroDiskNodeStatusDTO[];
+  zeroDiskLive?: (platform: string, roomSlug: string) => Array<{
+    workerId: string; workerName: string; current?: import("@drec/core").LiveUploadSnapshot;
+    previous?: import("@drec/core").LiveUploadSnapshot;
+  }>;
   /** 节点侧 master 下发快照目录(见 ApiDeps.managedStateDir);serve 不论是否 hub 模式都注入。 */
   managedStateDir?: string;
   /** 立即触发一次 hub 任务同步(规则/worker 变更后调用,不用等周期 tick)。force=跳过节点骤减安全阀。 */
@@ -393,6 +399,8 @@ async function dispatch(
       return api.getTask(match.id!);
     case "getTaskLogs":
       return api.getTaskLogs(match.id!);
+    case "getTaskLive":
+      return api.getTaskLive(match.id!);
     case "deleteTask":
       return api.deleteTask(match.id!);
     case "refreshTaskAnchor":
@@ -660,6 +668,7 @@ export function createWebServer(deps: WebServerDeps): Server {
     nodeTasks: deps.nodeTasks,
     recordingWorkers: deps.recordingWorkers,
     zeroDiskStatus: deps.zeroDiskStatus,
+    zeroDiskLive: deps.zeroDiskLive,
     managedStateDir: deps.managedStateDir,
     requestSyncTasks: deps.requestSyncTasks,
     admitStart: deps.admitStart,
