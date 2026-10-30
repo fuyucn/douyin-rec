@@ -300,7 +300,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
             const p = platformForRoom(t.room);
             workerStates = hubStarter.recordingWorkers(p.id, p.extractRoomSlug(t.room));
           } catch {
-            workerStates = []; // 探测失败按「没在录」处理,下一轮再看,不阻塞其它任务
+            workerStates = [{ state: "unavailable" }]; // 探测失败 → 保留上一轮判定,不能读成收播
           }
         }
         const prev = lastRec.get(t.id);
