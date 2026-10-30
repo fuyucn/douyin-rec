@@ -8,6 +8,7 @@ export type { HubStarter } from "./cli-task.js";
 export { TaskStore } from "./store.js";
 export { resolveTaskCookies } from "./store.js";
 export { sweepOrphanSpools, ORPHAN_SPOOL_GRACE_MS } from "./live-pump-spool.js";
+export { NotifyOutbox, type OutboxEvent } from "./notify-outbox.js";
 export { resolveTaskStreamCookies } from "./stream-cookies.js";
 export type { Task } from "./store.js";
 export { listNodeTasks, applyRemoteTasks } from "./task-sync.js";

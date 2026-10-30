@@ -31,7 +31,7 @@ import { groupSessionsInDir, mergeSession, mergeSessions } from "@drec/post-proc
 import { renderXmlToAss } from "@drec/post-process";
 import { burn } from "@drec/post-process";
 import { FONTS_DIR } from "@drec/post-process";
-import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout, LiveUploadReporter } from "@drec/app";
+import { upload as biliUpload, checkBiliup, DEFAULT_COOKIES, rootOutputDir, readOutputLayout, LiveUploadReporter, NotifyOutbox } from "@drec/app";
 import { isJobAbort, isJobLive, registerChild, runWithJob, throwIfAborted, USER_STOP, type Recorder, type RecordOpts, type NotifyEvent, type Notifier, type RemoteTaskSpec, type RecordingWorkerStatusDTO, type ZeroDiskNodeStatusDTO, type RollingDeliveryDTO, type HubPoolSnapshotDTO, type HubBlockedBroadcastDTO, type NodeTaskLogsDTO, type NodeTasksDTO, type WorkerStatus } from "@drec/core";
 import { makeNotifier, shouldSendWebhook, webhookTogglesFromEnv, resolveUploadAccountKey, type NotifWebhookToggles } from "@drec/app";
 import { buildTaskCommand, buildCookieCommand, resolveHubConfig, readManagedState, refreshLocalRollingEffective, rollingSpecFields, buildZeroDiskDelivery, zeroDiskStreamMeta, planZeroDiskSpec, APP_VERSION, syncDbPathFor } from "@drec/app";
@@ -1301,6 +1301,34 @@ const requestNodeTasks = async (workerId: string): Promise<NodeTasksDTO> => {
   }
 };
 
+/**
+ * 主控拉取某个节点的通知发件箱(issue #405)。
+ * 本机节点直接读本地库;远端走既有 SSH 通道,不开新端口。
+ */
+const requestNotifyOutbox = async (
+  workerId: string,
+  after: number,
+  limit: number,
+  ackIds: number[] = [],
+): Promise<Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: import("@drec/core").NotifyEvent }>> => {
+  const { workerStore, rootHubConfig, NotifyOutbox, drecRoot } = await import("@drec/app");
+  const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
+  if (!w) return [];
+  if (w.kind === "local") {
+    const box = new NotifyOutbox(`${w.dataRoot ?? drecRoot()}/db/notify-outbox.db`);
+    try {
+      if (ackIds.length > 0) box.ack(ackIds);
+      return box.list(after, limit);
+    } finally {
+      box.close();
+    }
+  }
+  const { SshTransport } = await import("@drec/orchestrator");
+  const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
+  const rows = await t.notifyOutbox(after, limit, ackIds);
+  return (rows ?? []) as Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: import("@drec/core").NotifyEvent }>;
+};
+
 const requestHubRunNow = async (
   opts: { streamKey: string; winnerWorker?: string; wait?: boolean; force?: boolean },
 ): Promise<{ ok: boolean; error?: string; code?: number; streamKey?: string; forceable?: boolean }> => {
@@ -1315,6 +1343,7 @@ const hubStarter: HubStarter = {
   readZeroDiskLive,
   nodeTaskLogs: requestNodeTaskLogs,
   nodeTasks: requestNodeTasks,
+  notifyOutbox: requestNotifyOutbox,
   rollingDelivery: readRollingDelivery,
   blockedBroadcasts: readBlockedBroadcasts,
   poolSnapshot: readPoolSnapshot,
@@ -2674,6 +2703,29 @@ program
 
 // (内部) 处理任务表人工清理(plans/036 §2.3):done/cancelled 超 7 天删;`--purge-failed` 额外删 failed。
 // uncertain 永不在此删(须先在任务表里 ack);库不存在 → 0,不创建文件。输出 {deleted}。
+program
+  .command("_notify-outbox <dataRoot>", { hidden: true })
+  .option("--after <id>", "只取 id 大于该游标的事件")
+  .option("--limit <n>", "本次最多返回多少条(默认 200)")
+  .option("--ack <ids>", "逗号分隔的事件 id,读取后一并确认")
+  .action((dataRoot: string, o: { after?: string; limit?: string; ack?: string }) => {
+    const box = new NotifyOutbox(join(dataRoot, "db", "notify-outbox.db"));
+    try {
+      const ids = (o.ack ?? "").split(",").map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n > 0);
+      if (ids.length > 0) box.ack(ids);
+      box.prune();
+      const limitRaw = Number(o.limit ?? 200);
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(1000, limitRaw) : 200;
+      const afterRaw = Number(o.after ?? 0);
+      const after = Number.isFinite(afterRaw) && afterRaw > 0 ? afterRaw : 0;
+      // limit=0 只用于「纯确认」:不回传任何行,避免每次 ack 多拉 200 条跨网传输。
+      const events = Number(o.limit) === 0 ? [] : box.list(after, limit);
+      process.stdout.write(JSON.stringify({ events }) + "\n");
+    } finally {
+      box.close();
+    }
+  });
+
 program
   .command("_proc-gc <dataRoot>", { hidden: true })
   .option("--purge-failed", "额外清理 failed 行")
