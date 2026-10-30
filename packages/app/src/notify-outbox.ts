@@ -47,6 +47,8 @@ export class NotifyOutbox {
     // serve 与 `_notify-outbox` 命令是两个进程写同一个文件:WAL + busy_timeout 才不会一撞就丢事件。
     this.db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;");
     this.db.exec(SCHEMA);
+    // 进程重启会重置计数:启动时先清一次,避免长期不停机/不轮询时永远等不到第 200 条。
+    try { this.prune(); } catch { /* 启动清理失败不影响使用 */ }
   }
 
   /** Append one event; returns its monotonic id (the master's cursor). */
@@ -97,13 +99,14 @@ export class NotifyOutbox {
    * step a master that never polls lets the file grow forever.
    */
   prune(days = 7, maxRows = DEFAULT_MAX_ROWS, now = Date.now()): number {
+    const cap = Number.isFinite(maxRows) && maxRows > 0 ? maxRows : DEFAULT_MAX_ROWS;
     const cut = now - days * 86_400_000;
     let removed = Number(this.db.prepare("DELETE FROM notify_outbox WHERE at < ?").run(cut).changes ?? 0);
     const total = Number((this.db.prepare("SELECT COUNT(*) AS n FROM notify_outbox").get() as { n: number }).n);
-    if (total > maxRows) {
+    if (total > cap) {
       removed += Number(this.db.prepare(
         "DELETE FROM notify_outbox WHERE id IN (SELECT id FROM notify_outbox ORDER BY id LIMIT ?)",
-      ).run(total - maxRows).changes ?? 0);
+      ).run(total - cap).changes ?? 0);
     }
     return removed;
   }
