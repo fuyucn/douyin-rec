@@ -33,15 +33,15 @@ describe("NotifyOutbox", () => {
     expect(box.list().map((e) => e.id)).toEqual([a + 1]);
   });
 
-  it("prunes only acked rows past the retention window", () => {
+  it("prunes rows past the retention window whether acked or not", () => {
     const now = Date.now();
     const oldAcked = box.append(null, "r1", ev("r1"), true, now - 30 * 86_400_000);
     const oldUnacked = box.append(null, "r2", ev("r2"), true, now - 30 * 86_400_000);
     const fresh = box.append(null, "r3", ev("r3"), true, now);
-    box.ack([oldAcked, fresh]);
-    expect(box.prune(7, now)).toBe(1);
-    // The old row that was never delivered must survive, otherwise the master loses it.
-    expect(box.list().map((e) => e.id)).toEqual([oldUnacked]);
+    box.ack([oldAcked]);
+    expect(box.prune(7, 10_000, now)).toBe(2);
+    expect(box.list().map((e) => e.id)).toEqual([fresh]);
+    expect(oldUnacked).toBeLessThan(fresh);
   });
 
   it("caps a pull at the requested limit", () => {
@@ -72,5 +72,25 @@ describe("NotifyOutbox concurrency", () => {
       a.close();
       b.close();
     }
+  });
+});
+
+describe("NotifyOutbox bounds", () => {
+  it("drops unacked rows older than the retention window", () => {
+    const now = Date.now();
+    const old = box.append(null, "r1", ev("r1"), true, now - 30 * 86_400_000);
+    const fresh = box.append(null, "r2", ev("r2"), true, now);
+    expect(box.prune(7, 10_000, now)).toBe(1);
+    expect(box.list().map((e) => e.id)).toEqual([fresh]);
+    expect(old).toBeLessThan(fresh);
+  });
+
+  it("keeps at most maxRows, dropping the oldest first", () => {
+    const now = Date.now();
+    for (let i = 0; i < 6; i++) box.append(null, `r${i}`, ev(`r${i}`), true, now);
+    expect(box.prune(7, 3, now)).toBe(3);
+    const ids = box.list().map((e) => e.id);
+    expect(ids).toHaveLength(3);
+    expect(ids).toEqual([4, 5, 6]);
   });
 });

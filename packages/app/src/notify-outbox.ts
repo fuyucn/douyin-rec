@@ -33,18 +33,30 @@ CREATE TABLE IF NOT EXISTS notify_outbox (
 CREATE INDEX IF NOT EXISTS notify_outbox_unacked ON notify_outbox(acked, id);
 `;
 
+/** Hard cap on rows kept in the outbox; older rows are dropped beyond it (issue #409). */
+export const DEFAULT_MAX_ROWS = 10_000;
+/** Prune every N appends so a node without a polling master still stays bounded. */
+const APPEND_PRUNE_EVERY = 200;
+
 export class NotifyOutbox {
   private readonly db: DatabaseSync;
+  private appends = 0;
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     // serve 与 `_notify-outbox` 命令是两个进程写同一个文件:WAL + busy_timeout 才不会一撞就丢事件。
     this.db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;");
     this.db.exec(SCHEMA);
+    // 进程重启会重置计数:启动时先清一次,避免长期不停机/不轮询时永远等不到第 200 条。
+    try { this.prune(); } catch { /* 启动清理失败不影响使用 */ }
   }
 
   /** Append one event; returns its monotonic id (the master's cursor). */
   append(taskId: number | null, room: string | null, event: NotifyEvent, wantWebhook = true, now = Date.now()): number {
+    // 每 200 条顺手清理一次:主控长期不拉取时也不会无限增长(issue #409)。
+    if (++this.appends % APPEND_PRUNE_EVERY === 0) {
+      try { this.prune(undefined, undefined, now); } catch { /* 清理失败不影响写入 */ }
+    }
     const r = this.db
       .prepare("INSERT INTO notify_outbox(at, task_id, room, want_webhook, payload) VALUES(?,?,?,?,?)")
       .run(now, taskId, room, wantWebhook ? 1 : 0, JSON.stringify(event));
@@ -81,10 +93,22 @@ export class NotifyOutbox {
     return n;
   }
 
-  /** Drop acked rows older than the retention window. */
-  prune(days = 7, now = Date.now()): number {
+  /**
+   * Bound the queue: drop rows older than the retention window (acked or not) and then, if the
+   * table is still above `maxRows`, drop the oldest rows regardless of state. Without the second
+   * step a master that never polls lets the file grow forever.
+   */
+  prune(days = 7, maxRows = DEFAULT_MAX_ROWS, now = Date.now()): number {
+    const cap = Number.isFinite(maxRows) && maxRows > 0 ? maxRows : DEFAULT_MAX_ROWS;
     const cut = now - days * 86_400_000;
-    return Number(this.db.prepare("DELETE FROM notify_outbox WHERE acked = 1 AND at < ?").run(cut).changes ?? 0);
+    let removed = Number(this.db.prepare("DELETE FROM notify_outbox WHERE at < ?").run(cut).changes ?? 0);
+    const total = Number((this.db.prepare("SELECT COUNT(*) AS n FROM notify_outbox").get() as { n: number }).n);
+    if (total > cap) {
+      removed += Number(this.db.prepare(
+        "DELETE FROM notify_outbox WHERE id IN (SELECT id FROM notify_outbox ORDER BY id LIMIT ?)",
+      ).run(total - cap).changes ?? 0);
+    }
+    return removed;
   }
 
   close(): void {
