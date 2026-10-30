@@ -19,6 +19,7 @@ import { Button } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { JobLogDialog, RunCard } from "./HubJobs";
 import { CurrentRunTree } from "./CurrentRunTree";
+import { LiveRunHistory } from "./LiveRunHistory";
 import { RunNowDialog } from "./RunNowDialog";
 import type { FlowCfg } from "./flow-build";
 import { useHubStream, usePolling, useToast, errMessage } from "../lib/hooks";
@@ -168,6 +169,7 @@ export function RoomRunsPanel({
   return (
     <>
     <CurrentRunTree task={task} rolling={rolling} workers={workers} />
+    <LiveRunHistory task={task} workers={workers} />
     <section className="run-list-shell">
       <div className="px-3 py-2.5 border-b border-hairline flex items-center justify-between gap-3">
         <span className="section-label">{t("rooms.runsHeading")}</span>

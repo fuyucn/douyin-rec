@@ -298,6 +298,7 @@ export interface HubStarter {
     workerId: string; workerName: string;
     current?: import("@drec/core").LiveUploadSnapshot;
     previous?: import("@drec/core").LiveUploadSnapshot;
+    history?: import("@drec/core").LiveUploadSnapshot[];
   }>;
   /** master 资源池快照(读同一 ResourcePool 实例);队列页显示 CPU/上传占用与排队位次。省略 → 全 0。 */
   /** 边录边传的实时进度(F1;controller 队列页展示)。 */

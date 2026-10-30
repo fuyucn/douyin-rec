@@ -296,6 +296,7 @@ export interface WebServerDeps {
   zeroDiskLive?: (platform: string, roomSlug: string) => Array<{
     workerId: string; workerName: string; current?: import("@drec/core").LiveUploadSnapshot;
     previous?: import("@drec/core").LiveUploadSnapshot;
+    history?: import("@drec/core").LiveUploadSnapshot[];
   }>;
   /** 节点侧 master 下发快照目录(见 ApiDeps.managedStateDir);serve 不论是否 hub 模式都注入。 */
   managedStateDir?: string;

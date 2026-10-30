@@ -1209,6 +1209,7 @@ let hubZeroDiskLive: ((platform: string, roomSlug: string) => Array<{
   workerId: string; workerName: string;
   current?: import("@drec/core").LiveUploadSnapshot;
   previous?: import("@drec/core").LiveUploadSnapshot;
+  history?: import("@drec/core").LiveUploadSnapshot[];
 }>) | undefined;
 /** 各节点边录边传的实时进度(F1;随 5 秒状态轮询整体替换,只读展示)。 */
 let hubDeliverySnapshot: RollingDeliveryDTO[] = [];
@@ -1224,6 +1225,7 @@ const readZeroDiskLive = (platform: string, roomSlug: string): Array<{
   workerId: string; workerName: string;
   current?: import("@drec/core").LiveUploadSnapshot;
   previous?: import("@drec/core").LiveUploadSnapshot;
+  history?: import("@drec/core").LiveUploadSnapshot[];
 }> => hubZeroDiskLive?.(platform, roomSlug) ?? [];
 /** master 资源池快照提供者(由 hubStarter.start 注入,读同一 ResourcePool 实例);未启动 → undefined。 */
 let hubPoolSnapshot: (() => HubPoolSnapshotDTO) | undefined;

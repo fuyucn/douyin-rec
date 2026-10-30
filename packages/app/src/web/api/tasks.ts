@@ -13,7 +13,7 @@ import type { TaskStore } from "../../store.js";
 import { parseSchedule, toDanmuFlag } from "../../task-input.js";
 import { redactLogLines } from "@drec/core";
 import * as hubStore from "../../hub-store.js";
-import { liveUploadPath, readLiveUploadFile } from "../../zero-disk-node.js";
+import { liveUploadPath, readLiveHistory, readLiveUploadFile } from "../../zero-disk-node.js";
 
 /** Web 停止请求最多同步等待的时间(ms)。普通任务几秒内退出;rolling 任务可能在传末段,超时先返回。 */
 const STOP_WAIT_MS = 15_000;
@@ -187,10 +187,11 @@ export function buildTasks(ctx: ApiCtx) {
       if (!t.streamUpload) return err(404, "任务未开启直播直传");
       const p = platformForRoom(t.room);
       const roomSlug = p.extractRoomSlug(t.room);
-      const entries: Array<{ workerId: string; workerName: string; current?: unknown; previous?: unknown }> = [];
+      const entries: Array<{ workerId: string; workerName: string; current?: unknown; previous?: unknown; history?: unknown }> = [];
       if (t.managedBy !== "hub") {
         const local = readLiveUploadFile(liveUploadPath(p.id, roomSlug));
-        if (local) entries.push({ workerId: "local", workerName: "本机", ...local });
+        const history = readLiveHistory(p.id, roomSlug);
+        if (local || history.length) entries.push({ workerId: "local", workerName: "本机", ...local, ...(history.length ? { history } : {}) });
       }
       entries.push(...(deps.zeroDiskLive?.(p.id, roomSlug) ?? []));
       return { status: 200, body: { entries } };

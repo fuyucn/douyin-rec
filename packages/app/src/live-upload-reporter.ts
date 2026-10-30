@@ -7,7 +7,7 @@ import {
   type LiveRunTracker,
   type LiveUploadSnapshot,
 } from "@drec/core";
-import { liveUploadPath, pruneLiveFiles, readLiveUploadFile, writeJsonAtomic, type LiveFile } from "./zero-disk-node.js";
+import { liveUploadPath, pruneLiveFiles, readLiveUploadFile, upsertLiveHistory, writeJsonAtomic, type LiveFile } from "./zero-disk-node.js";
 
 /**
  * Single writer for one room's live file. Snapshot writes are throttled to 5s; terminal
@@ -54,13 +54,28 @@ export class LiveUploadReporter implements LivePumpReporter {
   }
 
   private readonly writeEveryMs: number;
+  /** Last history write key: the same finished runs are not rewritten on every terminal event. */
+  private historyKey = "";
   private readonly writeImpl: (path: string, value: unknown) => void;
 
   event(e: LiveEvent): void {
     this.tracker = applyLiveEvent(this.tracker, e);
     const terminal = e.kind === "run_end" || e.kind === "run_start" || e.kind === "run_resume" || e.kind === "part_confirmed" || e.kind === "part_failed";
-    if (terminal) this.flush();
-    else this.throttledFlush();
+    if (terminal) {
+      this.flush();
+      this.recordHistory();
+    } else this.throttledFlush();
+  }
+
+  /** Runs that are no longer running go to the room history: the previous run, and a current run that ended. */
+  private recordHistory(): void {
+    const cur = this.tracker.current;
+    const ended = cur && (cur.state === "finished" || cur.state === "failed" || cur.state === "stopped") ? cur : undefined;
+    const prev = this.tracker.previous;
+    const key = `${prev?.sessionId ?? ""}|${prev?.state ?? ""}|${ended?.sessionId ?? ""}|${ended?.state ?? ""}|${ended?.updatedAt ?? ""}`;
+    if (key === this.historyKey) return;
+    // Remember the key only after a successful write, so a failed write is retried on the next event.
+    if (upsertLiveHistory(this.platform, this.roomSlug, [prev, ended])) this.historyKey = key;
   }
 
   progress(p: { part: number; uploadedBytes: number; chunks: number }): void {
