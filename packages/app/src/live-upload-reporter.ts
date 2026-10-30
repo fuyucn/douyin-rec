@@ -51,11 +51,11 @@ export class LiveUploadReporter implements LivePumpReporter {
     // A fresh/terminal room gets the initial waiting snapshot; a resumable non-terminal archive
     // keeps its old pid/state until the first real event.
     if (!existing?.current || (terminal && !meaningful)) this.flush();
-    // A run rotated away while this process was down (killed, then a new run started) is recorded here.
-    this.recordHistory();
   }
 
   private readonly writeEveryMs: number;
+  /** Last history write key: the same finished runs are not rewritten on every terminal event. */
+  private historyKey = "";
   private readonly writeImpl: (path: string, value: unknown) => void;
 
   event(e: LiveEvent): void {
@@ -71,7 +71,11 @@ export class LiveUploadReporter implements LivePumpReporter {
   private recordHistory(): void {
     const cur = this.tracker.current;
     const ended = cur && (cur.state === "finished" || cur.state === "failed" || cur.state === "stopped") ? cur : undefined;
-    upsertLiveHistory(this.platform, this.roomSlug, [this.tracker.previous, ended]);
+    const prev = this.tracker.previous;
+    const key = `${prev?.sessionId ?? ""}|${prev?.state ?? ""}|${ended?.sessionId ?? ""}|${ended?.state ?? ""}|${ended?.updatedAt ?? ""}`;
+    if (key === this.historyKey) return;
+    this.historyKey = key;
+    upsertLiveHistory(this.platform, this.roomSlug, [prev, ended]);
   }
 
   progress(p: { part: number; uploadedBytes: number; chunks: number }): void {

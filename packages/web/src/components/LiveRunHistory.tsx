@@ -14,7 +14,8 @@ import { RunTreeView, StatePill } from "./RunTree";
 export function LiveRunHistory({ task, workers }: { task: Task | undefined; workers: WorkerDTO[] }): ReactNode {
   const t = useT();
   const taskId = task?.id ?? null;
-  const live = !!task?.streamUpload && (task.zeroDisk ?? []).some((z) => z.live);
+  // History outlives the broadcast, so it is read for any live-upload task, not only while a node is live.
+  const live = !!task?.streamUpload;
   const [entries, setEntries] = useState<LiveDetailEntry[]>([]);
   const ref = useRef(taskId);
   useEffect(() => { ref.current = taskId; setEntries([]); }, [taskId]);
@@ -24,8 +25,10 @@ export function LiveRunHistory({ task, workers }: { task: Task | undefined; work
     void api.getTaskLive(id).then((r) => { if (ref.current === id) setEntries(r.entries); }).catch(() => {});
   }, 30_000, live && taskId !== null);
 
+  // A run that just ended is also the node's current run until the next one starts: CurrentRunTree shows it, so skip it here.
+  const shown = new Set(entries.flatMap((e) => (e.current?.sessionId ? [e.current.sessionId] : [])));
   const runs = entries
-    .flatMap((e) => (e.history ?? []).map((s) => ({ e, s })))
+    .flatMap((e) => (e.history ?? []).filter((s) => !s.sessionId || !shown.has(s.sessionId)).map((s) => ({ e, s })))
     .sort((a, b) => b.s.startedAt - a.s.startedAt);
   if (runs.length === 0) return null;
 

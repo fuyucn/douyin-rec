@@ -227,14 +227,17 @@ export function upsertLiveHistory(platform: string, roomSlug: string, snaps: Arr
 
 /** Remove stale live files; mirrors receipt retention. */
 export function pruneLiveFiles(now = Date.now()): void {
-  const dir = join(zeroDiskNodeDir(), "live");
-  try {
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".json")) continue;
-      const p = join(dir, f);
-      if (now - statSync(p).mtimeMs > ZERO_DISK_RECEIPT_TTL_MS) rmSync(p, { force: true });
-    }
-  } catch { /* best effort */ }
+  // History follows the live files' retention: a room's history file is never newer than its live file.
+  for (const sub of ["live", "history"]) {
+    const dir = join(zeroDiskNodeDir(), sub);
+    try {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith(".json")) continue;
+        const p = join(dir, f);
+        if (now - statSync(p).mtimeMs > ZERO_DISK_RECEIPT_TTL_MS) rmSync(p, { force: true });
+      }
+    } catch { /* best effort */ }
+  }
 }
 
 /** Per-room 1s read cache; never share one room's data with another. */

@@ -160,6 +160,20 @@ describe("live run history (issue #413)", () => {
     expect(h.map((x) => [x.sessionId, x.state])).toEqual([["h2:1", "stopped"]]);
   });
 
+  it("a restart on a crashed run that is still current does not record it as history", () => {
+    const path = liveUploadPath("douyin", "h6");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({
+      v: 1, platform: "douyin", roomSlug: "h6", pid: 999_999, updatedAt: 5,
+      current: {
+        schemaVersion: 1, mode: "zero-disk", sessionId: "h6:1", createdAt: 1,
+        platform: "douyin", roomSlug: "h6", state: "streaming", startedAt: 1, updatedAt: 5, parts: [], events: [],
+      },
+    } satisfies LiveFile));
+    new LiveUploadReporter({ platform: "douyin", roomSlug: "h6", writeEveryMs: 1 });
+    expect(readLiveHistory("douyin", "h6")).toEqual([]);
+  });
+
   it("caps the history at LIVE_HISTORY_LIMIT, newest first", () => {
     for (let i = 1; i <= LIVE_HISTORY_LIMIT + 5; i++) upsertLiveHistory("douyin", "h3", [snap(`h3:${i}`, i, "finished")]);
     const h = readLiveHistory("douyin", "h3");
