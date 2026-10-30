@@ -93,9 +93,9 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
 
     // 受管节点(DREC_NOTIFY_RELAY=1)不自己做任何通知:事件写发件箱,由主控统一发送(issue #405)。
     // 子进程与本站中枢都必须静默,否则节点本地与主控会各发一条。
-    // 显式开关优先;受管节点(master 写过 config/managed)自动进入中继,否则独立部署照常本地发。
-    const relayMode = process.env.DREC_NOTIFY_RELAY === "1"
-      || (!o.hub && existsSync(join(rootConfigDir(), "managed")));
+    // 只认显式开关:目录标记是历史残留,不能用来推断「现在仍受管」,否则会把通知静默憋死在节点上。
+    const relayMode = process.env.DREC_NOTIFY_RELAY === "1";
+    if (relayMode) serveLog.info("[notify] 中继模式:事件写入发件箱,由主控统一发送");
 
     // ONE manager drives both the web (manual start/stop) and, if requested,
     // the scheduler (automatic start/stop). They share the same subprocess
@@ -103,7 +103,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     const spawner = new NodeRecordSpawner({
       // getter:每次 spawn 读「全局 --discord-webhook/env ?? settings 表 discordWebhook」(与下方
       // EventCenter 的 globalHook 一致),否则 UI 里设的 webhook 进不了子进程(子进程无 DB)。
-      webhook: () => getWebhook() ?? store.getSetting("discordWebhook") ?? undefined,
+      // 中继模式下节点不持有推送地址:不传给子进程,凭据文件也不会生成。
+      webhook: () => relayMode ? undefined : getWebhook() ?? store.getSetting("discordWebhook") ?? undefined,
       // mesio 路径设置:每次 spawn 读 settings.mesioPath(空=引擎兜底 bin/mesio)→ 注入 MESIO_PATH。
       mesioPath: () => store.getSetting("mesioPath") || undefined,
       // 抖音 API 模式设置:每次 spawn 读 settings.douyinApiMode(空=默认 balance)→ 注入 DOUYIN_REC_API_MODE。
@@ -389,9 +390,9 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
                     : undefined;
                   events.emit(t?.id ?? null, r.event, { webhook: r.wantWebhook });
                 }
-                notifyCursors.set(w.id, max);
-                // 发送后再确认:主控中途崩溃时事件会重发一次,而不是丢失。
+                // 发送后再确认,确认成功才推进游标:确认失败时下一轮会重发,而不是丢事件。
                 await hubStarter!.notifyOutbox!(w.id, max, 0, rows.map((r) => r.id));
+                notifyCursors.set(w.id, max);
               } catch {
                 // 节点不可达/旧版本 → 下一轮再试,不影响其它节点
               }

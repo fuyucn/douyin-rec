@@ -58,3 +58,19 @@ describe("NotifyOutbox routing metadata", () => {
     expect(rows.map((r) => [r.room, r.wantWebhook])).toEqual([["douyin.123", true], ["douyin.123", false]]);
   });
 });
+
+describe("NotifyOutbox concurrency", () => {
+  it("lets a second connection append while the first is open", () => {
+    const shared = join(dir, "shared.db");
+    const a = new NotifyOutbox(shared);
+    const b = new NotifyOutbox(shared);
+    try {
+      a.append(null, "r1", ev("r1"));
+      b.append(null, "r2", ev("r2"));
+      expect(a.list()).toHaveLength(2);
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+});
