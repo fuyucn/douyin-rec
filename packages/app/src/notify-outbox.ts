@@ -39,7 +39,7 @@ export class NotifyOutbox {
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     // serve 与 `_notify-outbox` 命令是两个进程写同一个文件:WAL + busy_timeout 才不会一撞就丢事件。
-    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+    this.db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;");
     this.db.exec(SCHEMA);
   }
 
