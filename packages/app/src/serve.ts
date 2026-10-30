@@ -9,7 +9,7 @@
  */
 import { mkdirSync, statfsSync } from "node:fs";
 import { join } from "node:path";
-import { createLogger, freeBytesOf, freeGBOf } from "@drec/core";
+import { createLogger, freeBytesOf, freeGBOf, platformForRoom } from "@drec/core";
 import { TaskStore, resolveTaskWebhook } from "./store.js";
 import { resolveDbPath } from "./db.js";
 import { EventCenter } from "@drec/observability";
@@ -25,6 +25,7 @@ import { TaskDaemon, resolveDiskWatermark } from "./daemon.js";
 import { makeManualStartAdmit, currentDiskMinGB } from "./disk-gate.js";
 import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue";
 import { TaskManager } from "./task-manager.js";
+import { masterSendsTransition, roomIsLive, workerProbeUsable, type LiveTick } from "./live-notify.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { sweepCredentialFiles } from "./process/credential-file.js";
@@ -284,22 +285,40 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       log: (m) => console.log(m),
     });
 
-    // 开播/收播观察器:轮询 manager.isRecording 翻转 → emit 到本地流(Discord 已由录制子进程
-    // 用每任务 webhook 发,故 { webhook:false } 不重复推)。首次见到只播种不触发,避免启动即误报。
-    const lastRec = new Map<number, boolean>();
+    // 开播/收播观察器:本机进程与 hub 节点任一在录即视为「这场在播」,翻转时 emit 一次。
+    // 主控代发 webhook 的两种情形:本机直播直传(子进程不发),以及进程在 worker 上的房间
+    // (子进程不在本机)。本机文件录制仍由录制子进程自己发,这里只进本地流,避免重复推送。
+    // 记住上一 tick 的完整判定:{在播, 本机, 直播直传}。收播时用「刚结束的那场」的归属,
+    // 因为本机文件录制在进程退出前就已把录制标记清掉,按当前 tick 判会给它重复推送。
+    const lastRec = new Map<number, LiveTick>();
     const recWatch = setInterval(() => {
       for (const t of store.listTasks()) {
-        const rec = manager.isRecording(t.id);
+        const localRec = manager.isRecording(t.id);
+        let workerStates: ReadonlyArray<{ state: string }> = [];
+        if (!localRec && hubEnabled && hubStarter?.recordingWorkers) {
+          try {
+            const p = platformForRoom(t.room);
+            workerStates = hubStarter.recordingWorkers(p.id, p.extractRoomSlug(t.room));
+          } catch {
+            workerStates = [{ state: "unavailable" }]; // 探测失败 → 保留上一轮判定,不能读成收播
+          }
+        }
         const prev = lastRec.get(t.id);
-        lastRec.set(t.id, rec);
-        if (prev === undefined || rec === prev) continue;
+        // 节点探测不到时保留上一 tick 的判定:一次网络抖动不能被读成「收播」,否则会误报。
+        const usableProbe = workerProbeUsable(workerStates);
+        const rec = usableProbe ? roomIsLive(localRec, workerStates) : prev?.live ?? localRec;
+        const next: LiveTick = { live: rec, local: localRec, streamUpload: t.streamUpload === true };
+        if (prev === undefined) { lastRec.set(t.id, next); continue; }
+        if (rec === prev.live) { lastRec.set(t.id, next); continue; }
+        lastRec.set(t.id, next);
         const anchor = taskDisplayName(t, manager.getAnchorName(t.id));
+        const selfNotifies = !masterSendsTransition(prev, next);
         events.emit(
           t.id,
           rec
             ? { kind: "recordStart", anchor, room: t.room, quality: t.quality }
             : { kind: "recordEnd", anchor, room: t.room, outDir: t.outDir ?? "" },
-          { webhook: false },
+          { webhook: !selfNotifies },
         );
       }
     }, 3000);
