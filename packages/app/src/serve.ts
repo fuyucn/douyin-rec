@@ -25,7 +25,7 @@ import { TaskDaemon, resolveDiskWatermark } from "./daemon.js";
 import { makeManualStartAdmit, currentDiskMinGB } from "./disk-gate.js";
 import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue";
 import { TaskManager } from "./task-manager.js";
-import { masterNotifiesLive, roomIsLive } from "./live-notify.js";
+import { masterSendsTransition, roomIsLive, workerProbeUsable, type LiveTick } from "./live-notify.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { sweepCredentialFiles } from "./process/credential-file.js";
@@ -288,7 +288,9 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // 开播/收播观察器:本机进程与 hub 节点任一在录即视为「这场在播」,翻转时 emit 一次。
     // 主控代发 webhook 的两种情形:本机直播直传(子进程不发),以及进程在 worker 上的房间
     // (子进程不在本机)。本机文件录制仍由录制子进程自己发,这里只进本地流,避免重复推送。
-    const lastRec = new Map<number, boolean>();
+    // 记住上一 tick 的完整判定:{在播, 本机, 直播直传}。收播时用「刚结束的那场」的归属,
+    // 因为本机文件录制在进程退出前就已把录制标记清掉,按当前 tick 判会给它重复推送。
+    const lastRec = new Map<number, LiveTick>();
     const recWatch = setInterval(() => {
       for (const t of store.listTasks()) {
         const localRec = manager.isRecording(t.id);
@@ -301,12 +303,16 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
             workerStates = []; // 探测失败按「没在录」处理,下一轮再看,不阻塞其它任务
           }
         }
-        const rec = roomIsLive(localRec, workerStates);
         const prev = lastRec.get(t.id);
-        lastRec.set(t.id, rec);
-        if (prev === undefined || rec === prev) continue;
+        // 节点探测不到时保留上一 tick 的判定:一次网络抖动不能被读成「收播」,否则会误报。
+        const usableProbe = workerProbeUsable(workerStates);
+        const rec = usableProbe ? roomIsLive(localRec, workerStates) : prev?.live ?? localRec;
+        const next: LiveTick = { live: rec, local: localRec, streamUpload: t.streamUpload === true };
+        if (prev === undefined) { lastRec.set(t.id, next); continue; }
+        if (rec === prev.live) { lastRec.set(t.id, next); continue; }
+        lastRec.set(t.id, next);
         const anchor = taskDisplayName(t, manager.getAnchorName(t.id));
-        const selfNotifies = !masterNotifiesLive(localRec, t.streamUpload === true);
+        const selfNotifies = !masterSendsTransition(prev, next);
         events.emit(
           t.id,
           rec
