@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { LiveUploadReporter } from "./live-upload-reporter.js";
-import { liveUploadPath, readLiveUploadFile, type LiveFile } from "./zero-disk-node.js";
+import { buildZeroDiskReport, liveHistoryPath, liveUploadPath, readLiveHistory, readLiveUploadFile, upsertLiveHistory, type LiveFile } from "./zero-disk-node.js";
+import { LIVE_HISTORY_LIMIT, type LiveUploadSnapshot } from "@drec/core";
 
 const prevRoot = process.env.DOUYIN_REC_ROOT;
 let root: string;
@@ -130,5 +131,56 @@ describe("LiveUploadReporter", () => {
     r.event({ at: 7, kind: "run_resume", session: { sessionId: "r8:1", createdAt: 1, resumed: true } });
     expect(r.read()?.current?.state).toBe("streaming");
     expect(r.read()?.current?.parts).toHaveLength(1);
+  });
+});
+
+describe("live run history (issue #413)", () => {
+  const snap = (sessionId: string, startedAt: number, state: LiveUploadSnapshot["state"]): LiveUploadSnapshot => ({
+    schemaVersion: 1, mode: "zero-disk", sessionId, createdAt: startedAt, platform: "douyin", roomSlug: "h1",
+    state, startedAt, updatedAt: startedAt, parts: [], events: [],
+  });
+
+  it("keeps a finished run once, even when the terminal state is flushed again", () => {
+    const r = new LiveUploadReporter({ platform: "douyin", roomSlug: "h1", writeEveryMs: 1 });
+    r.event({ at: 1, kind: "run_start", session: session("h1:1", 1) });
+    r.event({ at: 2, kind: "run_end", outcome: "finished" });
+    r.event({ at: 3, kind: "run_end", outcome: "finished" });
+    const h = readLiveHistory("douyin", "h1");
+    expect(h.map((x) => x.sessionId)).toEqual(["h1:1"]);
+    expect(h[0].state).toBe("finished");
+  });
+
+  it("records a run cut off by a crash as stopped when the next run rotates it away", () => {
+    const first = new LiveUploadReporter({ platform: "douyin", roomSlug: "h2", writeEveryMs: 1 });
+    first.event({ at: 1, kind: "run_start", session: session("h2:1", 1) });
+    first.event({ at: 2, kind: "part_streaming", part: 0 });
+    const next = new LiveUploadReporter({ platform: "douyin", roomSlug: "h2", writeEveryMs: 1 });
+    next.event({ at: 3, kind: "run_start", session: session("h2:2", 3) });
+    const h = readLiveHistory("douyin", "h2");
+    expect(h.map((x) => [x.sessionId, x.state])).toEqual([["h2:1", "stopped"]]);
+  });
+
+  it("caps the history at LIVE_HISTORY_LIMIT, newest first", () => {
+    for (let i = 1; i <= LIVE_HISTORY_LIMIT + 5; i++) upsertLiveHistory("douyin", "h3", [snap(`h3:${i}`, i, "finished")]);
+    const h = readLiveHistory("douyin", "h3");
+    expect(h).toHaveLength(LIVE_HISTORY_LIMIT);
+    expect(h[0].sessionId).toBe(`h3:${LIVE_HISTORY_LIMIT + 5}`);
+  });
+
+  it("skips snapshots without a session and ignores a torn history file", () => {
+    upsertLiveHistory("douyin", "h4", [snap("", 1, "finished")].map((x) => ({ ...x, sessionId: undefined })));
+    expect(readLiveHistory("douyin", "h4")).toEqual([]);
+    const path = liveHistoryPath("douyin", "h4");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "{not json");
+    expect(readLiveHistory("douyin", "h4")).toEqual([]);
+  });
+
+  it("is carried by the node report next to the current run", () => {
+    const r = new LiveUploadReporter({ platform: "douyin", roomSlug: "h5", writeEveryMs: 1 });
+    r.event({ at: 1, kind: "run_start", session: session("h5:1", 1) });
+    r.event({ at: 2, kind: "run_end", outcome: "finished" });
+    const entry = buildZeroDiskReport({ isAlive: () => true }).live?.find((x) => x.roomSlug === "h5");
+    expect(entry?.history?.map((x) => x.sessionId)).toEqual(["h5:1"]);
   });
 });

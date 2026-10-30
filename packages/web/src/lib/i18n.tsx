@@ -278,7 +278,7 @@ const DICT = {
       runTree: {
         viewTree: "运行树", viewFlow: "流程图", step: { stream: "录制+上传", seal: "封口", submit: "提交", confirm: "确认" },
         confirmedFold: "已确认 {n} 个分 P", pending: "待传 {n} 个", noParts: "暂无分 P", hubChain: "hub 处理链",
-        cover: "覆盖 {pct}% · {min} 分钟", gap: "有缺口", noHistory: "无历史", current: "当前场次", root: "第 {n} 场", zoomIn: "放大", zoomOut: "缩小", fit: "适应",
+        cover: "覆盖 {pct}% · {min} 分钟", gap: "有缺口", noHistory: "无历史", current: "当前场次", root: "第 {n} 场", zoomIn: "放大", zoomOut: "缩小", fit: "适应", liveHistory: "直播直传历史场次",
       },
       runtime: {
         open: "运行树", backToDetail: "返回房间详情", preview: "预览版",
@@ -871,7 +871,7 @@ const DICT = {
       runTree: {
         viewTree: "Tree", viewFlow: "Flow", step: { stream: "Record+upload", seal: "Seal", submit: "Submit", confirm: "Confirm" },
         confirmedFold: "{n} part(s) confirmed", pending: "{n} pending", noParts: "No parts yet", hubChain: "hub pipeline",
-        cover: "{pct}% coverage · {min} min", gap: "gaps", noHistory: "No history", current: "Current run", root: "Run {n}", zoomIn: "Zoom in", zoomOut: "Zoom out", fit: "Fit",
+        cover: "{pct}% coverage · {min} min", gap: "gaps", noHistory: "No history", current: "Current run", root: "Run {n}", zoomIn: "Zoom in", zoomOut: "Zoom out", fit: "Fit", liveHistory: "Live-upload history",
       },
       runtime: {
         open: "Runtime tree", backToDetail: "Back to room details", preview: "Preview",

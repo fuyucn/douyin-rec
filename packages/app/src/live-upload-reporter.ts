@@ -7,7 +7,7 @@ import {
   type LiveRunTracker,
   type LiveUploadSnapshot,
 } from "@drec/core";
-import { liveUploadPath, pruneLiveFiles, readLiveUploadFile, writeJsonAtomic, type LiveFile } from "./zero-disk-node.js";
+import { liveUploadPath, pruneLiveFiles, readLiveUploadFile, upsertLiveHistory, writeJsonAtomic, type LiveFile } from "./zero-disk-node.js";
 
 /**
  * Single writer for one room's live file. Snapshot writes are throttled to 5s; terminal
@@ -51,6 +51,8 @@ export class LiveUploadReporter implements LivePumpReporter {
     // A fresh/terminal room gets the initial waiting snapshot; a resumable non-terminal archive
     // keeps its old pid/state until the first real event.
     if (!existing?.current || (terminal && !meaningful)) this.flush();
+    // A run rotated away while this process was down (killed, then a new run started) is recorded here.
+    this.recordHistory();
   }
 
   private readonly writeEveryMs: number;
@@ -59,8 +61,17 @@ export class LiveUploadReporter implements LivePumpReporter {
   event(e: LiveEvent): void {
     this.tracker = applyLiveEvent(this.tracker, e);
     const terminal = e.kind === "run_end" || e.kind === "run_start" || e.kind === "run_resume" || e.kind === "part_confirmed" || e.kind === "part_failed";
-    if (terminal) this.flush();
-    else this.throttledFlush();
+    if (terminal) {
+      this.flush();
+      this.recordHistory();
+    } else this.throttledFlush();
+  }
+
+  /** Runs that are no longer running go to the room history: the previous run, and a current run that ended. */
+  private recordHistory(): void {
+    const cur = this.tracker.current;
+    const ended = cur && (cur.state === "finished" || cur.state === "failed" || cur.state === "stopped") ? cur : undefined;
+    upsertLiveHistory(this.platform, this.roomSlug, [this.tracker.previous, ended]);
   }
 
   progress(p: { part: number; uploadedBytes: number; chunks: number }): void {

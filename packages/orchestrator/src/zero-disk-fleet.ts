@@ -208,11 +208,15 @@ export class ZeroDiskFleet {
   }
 
   /** Full current/previous snapshots from the last successful poll; null when unavailable. */
-  live(workerId: string, platform: string, roomSlug: string): { current?: import("@drec/core").LiveUploadSnapshot; previous?: import("@drec/core").LiveUploadSnapshot } | null {
+  live(workerId: string, platform: string, roomSlug: string): { current?: import("@drec/core").LiveUploadSnapshot; previous?: import("@drec/core").LiveUploadSnapshot; history?: import("@drec/core").LiveUploadSnapshot[] } | null {
     const poll = this.polls.get(workerId);
     if (poll?.kind !== "ok") return null;
     const lv = poll.report.live?.find((x) => x.platform === platform && x.roomSlug === roomSlug);
-    return lv ? { ...(lv.current ? { current: lv.current } : {}), ...(lv.previous ? { previous: lv.previous } : {}) } : null;
+    return lv ? {
+      ...(lv.current ? { current: lv.current } : {}),
+      ...(lv.previous ? { previous: lv.previous } : {}),
+      ...(lv.history?.length ? { history: lv.history } : {}),
+    } : null;
   }
 
   /** Snapshot keyed by `platform:roomSlug` for the targets the master currently expects. */
