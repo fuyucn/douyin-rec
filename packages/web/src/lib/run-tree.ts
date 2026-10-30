@@ -129,13 +129,16 @@ export function rollingNode(rows: RollingDeliveryDTO[], id: string, name: string
   return { id, name, role, parts, confirmed, ambiguous, pending: Math.max(0, total - confirmed - (up ? 1 : 0) - ambiguous) };
 }
 
-/** Live snapshots that belong to a broadcast: a `waiting` pump is not on air yet (issue #408). */
-export function broadcastSnaps<T>(items: T[], stateOf: (item: T) => string): T[] {
-  return items.filter((item) => stateOf(item) !== "waiting");
+/**
+ * The live snapshots that are on air (a `waiting` pump is not on air yet, issue #408) and the root state
+ * derived from them. Nothing on air -> `waiting`, so the caller can skip the whole tree.
+ */
+export function liveBroadcast<T>(items: T[], stateOf: (item: T) => string): { onAir: T[]; state: StepState } {
+  const onAir = items.filter((item) => stateOf(item) !== "waiting");
+  return { onAir, state: liveRootState(onAir.map(stateOf)) };
 }
 
-/** Root state of the running broadcast from its live snapshots (issue #408): never hard-code "running". */
-export function liveRootState(states: string[]): StepState {
+function liveRootState(states: string[]): StepState {
   if (states.some((s) => s === "streaming" || s === "submitting")) return "running";
   if (states.some((s) => s === "failed")) return "failed";
   if (states.some((s) => s === "stopped")) return "skipped";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { broadcastSnaps, liveNode, liveRootState, partSteps, pipelineTree, rollingNode, rootStateOf, treeEdges } from "../../packages/web/src/lib/run-tree.js";
+import { liveBroadcast, liveNode, partSteps, pipelineTree, rollingNode, rootStateOf, treeEdges } from "../../packages/web/src/lib/run-tree.js";
 import type { HubJobDTO, RollingDeliveryDTO } from "../../packages/web/src/api/client.js";
 import type { LiveUploadSnapshot } from "../../packages/core/src/live-upload.js";
 
@@ -107,21 +107,34 @@ describe("rootStateOf", () => {
   });
 });
 
-describe("liveRootState / broadcastSnaps (issue #408)", () => {
+describe("liveBroadcast (issue #408)", () => {
+  const by = (state: string): { state: string } => ({ state });
+
   it("derives the root state from the snapshots instead of a hard-coded running", () => {
-    expect(liveRootState(["streaming"])).toBe("running");
-    expect(liveRootState(["waiting", "submitting"])).toBe("running");
-    expect(liveRootState(["failed"])).toBe("failed");
-    expect(liveRootState(["stopped"])).toBe("skipped");
-    expect(liveRootState(["finished"])).toBe("done");
-    expect(liveRootState(["waiting"])).toBe("waiting");
-    expect(liveRootState([])).toBe("waiting");
+    const root = (...states: string[]): unknown => liveBroadcast(states.map(by), (s) => s.state).state;
+    expect(root("streaming")).toBe("running");
+    expect(root("waiting", "submitting")).toBe("running");
+    expect(root("failed")).toBe("failed");
+    expect(root("stopped")).toBe("skipped");
+    expect(root("finished")).toBe("done");
+    expect(root("waiting")).toBe("waiting");
+    expect(root()).toBe("waiting");
   });
 
   it("drops waiting snapshots: a pump waiting for the broadcast is not on air", () => {
-    const snaps = [snap({ state: "waiting" }), snap({ state: "streaming" })];
-    expect(broadcastSnaps(snaps, (s) => s.state)).toHaveLength(1);
-    expect(broadcastSnaps([snap({ state: "waiting" })], (s) => s.state)).toHaveLength(0);
+    const mixed = liveBroadcast([by("waiting"), by("streaming")], (s) => s.state);
+    expect(mixed.onAir).toEqual([by("streaming")]);
+    expect(mixed.state).toBe("running");
+    const idle = liveBroadcast([by("waiting")], (s) => s.state);
+    expect(idle.onAir).toHaveLength(0);
+    expect(idle.state).toBe("waiting");
+  });
+
+  it("works on the component's {e, s} pairs", () => {
+    const pairs = [{ s: snap({ state: "waiting" }) }, { s: snap({ state: "stopped" }) }];
+    const b = liveBroadcast(pairs, ({ s }) => s.state);
+    expect(b.onAir).toHaveLength(1);
+    expect(b.state).toBe("skipped");
   });
 });
 
