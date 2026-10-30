@@ -6,7 +6,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type RollingDeliveryDTO, type Task, type WorkerDTO } from "../api/client";
 import { usePolling } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { liveNode, rollingNode, type PartsNode } from "../lib/run-tree";
+import { liveBroadcast, liveNode, rollingNode, type PartsNode, type StepState } from "../lib/run-tree";
 import type { LiveDetailEntry } from "../lib/zero-disk-status";
 import { RunTreeView } from "./RunTree";
 
@@ -25,12 +25,15 @@ export function CurrentRunTree({ task, rolling, workers }: { task: Task | undefi
 
   const name = (id: string, fallback?: string): string => workers.find((w) => w.id === id)?.name ?? fallback ?? id;
   const nodes: PartsNode[] = [];
+  // The root state comes from what the nodes report (issue #408), not a hard-coded "running".
+  let state: StepState = "running";
   if (live) {
-    const snaps = entries.flatMap((e) => (e.current ? [{ e, s: e.current }] : []));
+    const broadcast = liveBroadcast(entries.flatMap((e) => (e.current ? [{ e, s: e.current }] : [])), ({ s }) => s.state);
+    state = broadcast.state;
     // Only a node that is actually streaming / submitting can be the winner (same rule as the runtime page).
-    const active = snaps.filter(({ s }) => s.state === "streaming" || s.state === "submitting");
+    const active = broadcast.onAir.filter(({ s }) => s.state === "streaming" || s.state === "submitting");
     const newest = [...active].sort((a, b) => b.s.updatedAt - a.s.updatedAt)[0];
-    for (const { e, s } of snaps) nodes.push(liveNode(s, e.workerId, name(e.workerId, e.workerName), e === newest?.e ? "winner" : "standby"));
+    for (const { e, s } of broadcast.onAir) nodes.push(liveNode(s, e.workerId, name(e.workerId, e.workerName), e === newest?.e ? "winner" : "standby"));
   } else {
     const byWorker = new Map<string, RollingDeliveryDTO[]>();
     for (const r of rolling) byWorker.set(r.workerId, [...(byWorker.get(r.workerId) ?? []), r]);
@@ -45,7 +48,7 @@ export function CurrentRunTree({ task, rolling, workers }: { task: Task | undefi
       </div>
       <div className="p-3">
         <RunTreeView
-          root={{ title: t("room.runTree.current"), sub: t(live ? "room.runtime.mode.live-direct" : "room.runtime.mode.rolling"), state: "running", bv }}
+          root={{ title: t("room.runTree.current"), sub: t(live ? "room.runtime.mode.live-direct" : "room.runtime.mode.rolling"), state, bv }}
           tree={{ kind: "parts", nodes }}
         />
       </div>
