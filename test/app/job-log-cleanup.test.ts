@@ -56,7 +56,8 @@ describe("job log cleanup (issue #414)", () => {
     expect(existsSync(a) || existsSync(b)).toBe(false);
   });
 
-  it("reports a failed delete instead of swallowing it", () => {
+  // Root ignores directory permission bits, so the failure cannot be produced there.
+  it.skipIf(process.getuid?.() === 0)("reports a failed delete instead of swallowing it", () => {
     const a = log("a.log", 30, 40);
     const b = log("b.log", 30, 60);
     // A read-only room directory makes the removal of its files fail; the failure must come back.
@@ -65,6 +66,9 @@ describe("job log cleanup (issue #414)", () => {
       const r = cleanupJobLogs(root, 7, NOW);
       expect(r.deleted).toBe(0);
       expect(r.failed.map((f) => f.file).sort()).toEqual(["a.log", "b.log"]);
+      // The error must be a code, not the fs message: that message carries the full path.
+      expect(r.failed.every((f) => f.error === "EACCES" || f.error === "EPERM")).toBe(true);
+      expect(JSON.stringify(r)).not.toContain(root);
       expect(existsSync(a) && existsSync(b)).toBe(true);
     } finally {
       chmodSync(roomDir, 0o700);

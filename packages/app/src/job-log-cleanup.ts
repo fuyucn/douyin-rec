@@ -29,7 +29,7 @@ export interface JobLogCleanupResult {
   olderThanDays: number;
   deleted: number;
   bytes: number;
-  /** Files that could not be removed (basename only); reported, never swallowed. */
+  /** Files that could not be removed (basename + error code only); reported, never swallowed. */
   failed: Array<{ file: string; error: string }>;
 }
 
@@ -82,8 +82,8 @@ export function cleanupJobLogs(logsRoot: string, days: number, now?: number): Jo
       deleted += 1;
       bytes += size;
     } catch (e) {
-      // Basename only: the console shows this list, and the full path would expose the data root.
-      failed.push({ file: basename(file), error: (e as Error)?.message ?? String(e) });
+      // Basename + error code only: the message from the fs layer embeds the full path, which would expose the data root.
+      failed.push({ file: basename(file), error: (e as NodeJS.ErrnoException).code ?? "UNKNOWN" });
     }
   }
   return { olderThanDays: days, deleted, bytes, failed };
