@@ -1310,7 +1310,7 @@ const requestNotifyOutbox = async (
   after: number,
   limit: number,
   ackIds: number[] = [],
-): Promise<Array<{ id: number; at: number; taskId: number | null; event: import("@drec/core").NotifyEvent }>> => {
+): Promise<Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: import("@drec/core").NotifyEvent }>> => {
   const { workerStore, rootHubConfig, NotifyOutbox, drecRoot } = await import("@drec/app");
   const w = workerStore.listWorkers(rootHubConfig()).find((x) => x.id === workerId);
   if (!w) return [];
@@ -1326,7 +1326,7 @@ const requestNotifyOutbox = async (
   const { SshTransport } = await import("@drec/orchestrator");
   const t = new SshTransport({ id: w.id, host: w.host!, dataRoot: w.dataRoot! });
   const rows = await t.notifyOutbox(after, limit, ackIds);
-  return (rows ?? []) as Array<{ id: number; at: number; taskId: number | null; event: import("@drec/core").NotifyEvent }>;
+  return (rows ?? []) as Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: import("@drec/core").NotifyEvent }>;
 };
 
 const requestHubRunNow = async (
@@ -2714,12 +2714,19 @@ program
       const ids = (o.ack ?? "").split(",").map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n > 0);
       if (ids.length > 0) box.ack(ids);
       box.prune();
-      const events = box.list(Number(o.after ?? 0) || 0, Math.min(1000, Number(o.limit ?? 200) || 200));
+      const limitRaw = Number(o.limit ?? 200);
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(1000, limitRaw) : 200;
+      const afterRaw = Number(o.after ?? 0);
+      const after = Number.isFinite(afterRaw) && afterRaw > 0 ? afterRaw : 0;
+      // limit=0 只用于「纯确认」:不回传任何行,避免每次 ack 多拉 200 条跨网传输。
+      const events = Number(o.limit) === 0 ? [] : box.list(after, limit);
       process.stdout.write(JSON.stringify({ events }) + "\n");
     } finally {
       box.close();
     }
-  })
+  });
+
+program
   .command("_proc-gc <dataRoot>", { hidden: true })
   .option("--purge-failed", "额外清理 failed 行")
   .description("(内部) 清理节点处理任务表(done/cancelled > 7 天;可选 failed)")

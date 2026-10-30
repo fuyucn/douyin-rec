@@ -288,7 +288,7 @@ export interface HubStarter {
   /** master 读某节点的任务清单(F3,只读)。省略 → 端点返回 400。 */
   nodeTasks?: (workerId: string) => Promise<import("@drec/core").NodeTasksDTO>;
   /** master 拉取某节点的通知发件箱(issue #405)。省略 → 不做中继。 */
-  notifyOutbox?: (workerId: string, after: number, limit: number, ackIds?: number[]) => Promise<Array<{ id: number; at: number; taskId: number | null; event: import("@drec/core").NotifyEvent }>>;
+  notifyOutbox?: (workerId: string, after: number, limit: number, ackIds?: number[]) => Promise<Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: import("@drec/core").NotifyEvent }>>;
   /** master 代查某节点的任务日志尾巴(F3)。省略 → 端点返回 400(hub 未启用)。 */
   nodeTaskLogs?: (workerId: string, taskId: number, lines: number) => Promise<import("@drec/core").NodeTaskLogsDTO>;
   /** master 控制台读取 hub 源任务的 worker 录制状态快照。 */

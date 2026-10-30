@@ -7,7 +7,7 @@
  * **命令定义**(`task serve` 的选项/描述)在 cli(T-22 第 4 步:命令定义属入口层);
  * 本文件只负责「拿到已解析的选项后怎么把服务跑起来」。cli 通过 `runServe(opts, deps)` 调它。
  */
-import { mkdirSync, statfsSync } from "node:fs";
+import { existsSync, mkdirSync, statfsSync } from "node:fs";
 import { join } from "node:path";
 import { createLogger, freeBytesOf, freeGBOf, platformForRoom } from "@drec/core";
 import { TaskStore, resolveTaskWebhook } from "./store.js";
@@ -93,7 +93,9 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
 
     // 受管节点(DREC_NOTIFY_RELAY=1)不自己做任何通知:事件写发件箱,由主控统一发送(issue #405)。
     // 子进程与本站中枢都必须静默,否则节点本地与主控会各发一条。
-    const relayMode = process.env.DREC_NOTIFY_RELAY === "1";
+    // 显式开关优先;受管节点(master 写过 config/managed)自动进入中继,否则独立部署照常本地发。
+    const relayMode = process.env.DREC_NOTIFY_RELAY === "1"
+      || (!o.hub && existsSync(join(rootConfigDir(), "managed")));
 
     // ONE manager drives both the web (manual start/stop) and, if requested,
     // the scheduler (automatic start/stop). They share the same subprocess
@@ -146,7 +148,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       },
       // 子进程结构化告警(取流失败/卡死/录制错误)→ 站内 toast(webhook 子进程已发,故 webhook:false 不重发)。
       onAlert: (taskId, stage, message, ctx) => {
-        events.emit(taskId, { kind: "error", stage, message, ...(ctx ? { ctx } : {}) }, { webhook: false });
+        // 中继节点:子进程已被静默,告警必须由主控代发,所以这里要标记成需要推送。
+        events.emit(taskId, { kind: "error", stage, message, ...(ctx ? { ctx } : {}) }, { webhook: relayMode });
       },
     });
 
@@ -180,7 +183,10 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       // 发件箱已就绪时由主控代发,本地不再持有发送方。
       ...(notifyOutbox ? {} : { makeNotifier }),
       ...(notifyOutbox
-        ? { onEmit: (e: import("@drec/observability").AppEvent) => { notifyOutbox!.append(e.taskId, e.event, e.at); } }
+        ? { onEmit: (e: import("@drec/observability").AppEvent, meta: { webhook: boolean }) => {
+          const t = e.taskId == null ? null : store.getTask(e.taskId);
+          notifyOutbox!.append(e.taskId, t?.room ?? null, e.event, meta.webhook, e.at);
+        } }
         : {}),
       resolveWebhook: (taskId) => {
         const t = taskId == null ? null : store.getTask(taskId);
@@ -338,7 +344,9 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
           rec
             ? { kind: "recordStart", anchor, room: t.room, quality: t.quality }
             : { kind: "recordEnd", anchor, room: t.room, outDir: t.outDir ?? "" },
-          { webhook: !selfNotifies },
+          // 中继节点只进本地流:开播/收播已由主控的代发逻辑统一发送(issue #403),
+          // 再走中继就会重复。其余事件按原归属。
+          { webhook: relayMode ? false : !selfNotifies },
         );
       }
     }, 3000);
@@ -346,8 +354,11 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     // 通知中继(issue #405):受管节点把事件写进自己的发件箱,主控每 10 秒按游标拉取,
     // 统一走本中枢发送,发送后确认。节点不持有推送凭据。旧 bundle 没有该命令 → 拉取返回空。
     const notifyCursors = new Map<string, number>();
+    let notifyRunning = false;
     const notifyRelay = hubEnabled && hubStarter?.notifyOutbox
       ? setInterval(() => {
+          if (notifyRunning) return; // 上一轮还没结束(慢节点/SSH 超时)时不并发重发
+          notifyRunning = true;
           void (async () => {
             let workers: ReturnType<typeof workerStore.listWorkers> = [];
             try {
@@ -364,7 +375,19 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
                 let max = after;
                 for (const r of rows) {
                   if (r.id > max) max = r.id;
-                  events.emit(r.taskId, r.event, { webhook: true });
+                  // 节点与主控的 task id 是两套,必须按房间重新解析,否则可能发到别的房间。
+                  const t = r.room
+                    ? store.listTasks().find((x) => {
+                        try {
+                          const p = platformForRoom(x.room);
+                          const q = platformForRoom(r.room!);
+                          return p.id === q.id && p.extractRoomSlug(x.room) === q.extractRoomSlug(r.room!);
+                        } catch {
+                          return false;
+                        }
+                      })
+                    : undefined;
+                  events.emit(t?.id ?? null, r.event, { webhook: r.wantWebhook });
                 }
                 notifyCursors.set(w.id, max);
                 // 发送后再确认:主控中途崩溃时事件会重发一次,而不是丢失。
@@ -373,7 +396,7 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
                 // 节点不可达/旧版本 → 下一轮再试,不影响其它节点
               }
             }
-          })();
+          })().finally(() => { notifyRunning = false; });
         }, 10_000)
       : null;
 

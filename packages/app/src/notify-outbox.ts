@@ -11,7 +11,12 @@ import type { NotifyEvent } from "@drec/core";
 export interface OutboxEvent {
   id: number;
   at: number;
+  /** The node's own task id: NOT the master's id space, only useful on the node. */
   taskId: number | null;
+  /** Room URL/key, so the master can resolve the right task after sync. */
+  room: string | null;
+  /** Whether the master should deliver this to Discord (in-app-only events are false). */
+  wantWebhook: boolean;
   event: NotifyEvent;
 }
 
@@ -20,6 +25,8 @@ CREATE TABLE IF NOT EXISTS notify_outbox (
   id      INTEGER PRIMARY KEY AUTOINCREMENT,
   at      INTEGER NOT NULL,
   task_id INTEGER,
+  room    TEXT,
+  want_webhook INTEGER NOT NULL DEFAULT 1,
   payload TEXT NOT NULL,
   acked   INTEGER NOT NULL DEFAULT 0
 );
@@ -35,22 +42,26 @@ export class NotifyOutbox {
   }
 
   /** Append one event; returns its monotonic id (the master's cursor). */
-  append(taskId: number | null, event: NotifyEvent, now = Date.now()): number {
+  append(taskId: number | null, room: string | null, event: NotifyEvent, wantWebhook = true, now = Date.now()): number {
     const r = this.db
-      .prepare("INSERT INTO notify_outbox(at, task_id, payload) VALUES(?,?,?)")
-      .run(now, taskId, JSON.stringify(event));
+      .prepare("INSERT INTO notify_outbox(at, task_id, room, want_webhook, payload) VALUES(?,?,?,?,?)")
+      .run(now, taskId, room, wantWebhook ? 1 : 0, JSON.stringify(event));
     return Number(r.lastInsertRowid);
   }
 
   /** Unacked events with id > after, oldest first. */
   list(after = 0, limit = 200): OutboxEvent[] {
     const rows = this.db
-      .prepare("SELECT id, at, task_id, payload FROM notify_outbox WHERE acked = 0 AND id > ? ORDER BY id LIMIT ?")
-      .all(after, limit) as Array<{ id: number; at: number; task_id: number | null; payload: string }>;
+      .prepare("SELECT id, at, task_id, room, want_webhook, payload FROM notify_outbox WHERE acked = 0 AND id > ? ORDER BY id LIMIT ?")
+      .all(after, limit) as Array<{ id: number; at: number; task_id: number | null; room: string | null; want_webhook: number; payload: string }>;
     const out: OutboxEvent[] = [];
     for (const r of rows) {
       try {
-        out.push({ id: r.id, at: r.at, taskId: r.task_id ?? null, event: JSON.parse(r.payload) as NotifyEvent });
+        out.push({
+          id: r.id, at: r.at, taskId: r.task_id ?? null, room: r.room ?? null,
+          wantWebhook: r.want_webhook !== 0,
+          event: JSON.parse(r.payload) as NotifyEvent,
+        });
       } catch {
         // Corrupt row: ack it so it cannot block the queue forever.
         this.ack([r.id]);

@@ -20,24 +20,24 @@ const ev = (room: string): { kind: "recordStart"; anchor: string; room: string; 
 
 describe("NotifyOutbox", () => {
   it("returns unacked events in id order and respects the cursor", () => {
-    const a = box.append(1, ev("r1"));
-    const b = box.append(1, ev("r2"));
+    const a = box.append(1, "r1", ev("r1"));
+    const b = box.append(1, "r2", ev("r2"));
     expect(box.list().map((e) => e.id)).toEqual([a, b]);
     expect(box.list(a).map((e) => e.id)).toEqual([b]);
   });
 
   it("drops acked events from the queue", () => {
-    const a = box.append(null, ev("r1"));
-    box.append(null, ev("r2"));
+    const a = box.append(null, "r1", ev("r1"));
+    box.append(null, "r2", ev("r2"));
     expect(box.ack([a])).toBe(1);
     expect(box.list().map((e) => e.id)).toEqual([a + 1]);
   });
 
   it("prunes only acked rows past the retention window", () => {
     const now = Date.now();
-    const oldAcked = box.append(null, ev("r1"), now - 30 * 86_400_000);
-    const oldUnacked = box.append(null, ev("r2"), now - 30 * 86_400_000);
-    const fresh = box.append(null, ev("r3"), now);
+    const oldAcked = box.append(null, "r1", ev("r1"), true, now - 30 * 86_400_000);
+    const oldUnacked = box.append(null, "r2", ev("r2"), true, now - 30 * 86_400_000);
+    const fresh = box.append(null, "r3", ev("r3"), true, now);
     box.ack([oldAcked, fresh]);
     expect(box.prune(7, now)).toBe(1);
     // The old row that was never delivered must survive, otherwise the master loses it.
@@ -45,7 +45,16 @@ describe("NotifyOutbox", () => {
   });
 
   it("caps a pull at the requested limit", () => {
-    for (let i = 0; i < 5; i++) box.append(null, ev(`r${i}`));
+    for (let i = 0; i < 5; i++) box.append(null, `r${i}`, ev(`r${i}`));
     expect(box.list(0, 2)).toHaveLength(2);
+  });
+});
+
+describe("NotifyOutbox routing metadata", () => {
+  it("keeps the room and the webhook intent for the master", () => {
+    box.append(3, "douyin.123", { kind: "error", stage: "取流", message: "x" }, true);
+    box.append(3, "douyin.123", { kind: "recordStart", anchor: "a", room: "douyin.123", quality: "origin" }, false);
+    const rows = box.list();
+    expect(rows.map((r) => [r.room, r.wantWebhook])).toEqual([["douyin.123", true], ["douyin.123", false]]);
   });
 });

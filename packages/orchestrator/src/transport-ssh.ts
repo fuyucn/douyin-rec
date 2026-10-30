@@ -287,7 +287,7 @@ export class SshTransport implements Transport {
    * 拉取节点的通知发件箱(issue #405)。旧 bundle 没有该命令 → 返回 null(视为不支持,不报错)。
    * `ackIds` 非空时同一次调用顺便确认,避免多一次 ssh。
    */
-  async notifyOutbox(after: number, limit: number, ackIds: number[] = []): Promise<Array<{ id: number; at: number; taskId: number | null; event: unknown }> | null> {
+  async notifyOutbox(after: number, limit: number, ackIds: number[] = []): Promise<Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: unknown }> | null> {
     const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
     const ack = ackIds.length > 0 ? ` --ack ${ackIds.join(",")}` : "";
     let out: string;
@@ -298,7 +298,7 @@ export class SshTransport implements Transport {
       throw e;
     }
     const parsed = JSON.parse(out) as { events?: unknown };
-    return Array.isArray(parsed.events) ? (parsed.events as Array<{ id: number; at: number; taskId: number | null; event: unknown }>) : [];
+    return Array.isArray(parsed.events) ? (parsed.events as Array<{ id: number; at: number; taskId: number | null; room: string | null; wantWebhook: boolean; event: unknown }>) : [];
   }
 
   /**
