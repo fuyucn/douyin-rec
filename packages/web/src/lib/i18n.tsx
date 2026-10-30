@@ -434,7 +434,7 @@ const DICT = {
         childTitle: "这是 child node(从节点)",
         childDesc1: "本节点未启用 hub(以 ", childDesc2: " 运行,无 ", childDesc3: ")。多节点选优合并 / 上传由 ",
         childMaster: "主控节点", childDesc4: "统一编排;Hub 规则只在主控上配置与生效。本节点只负责录制 + 供主控拉取。",
-        roomsHeading: "直播间", selectRoomHint: "从左侧选择一个直播间查看运行记录。", backToList: "返回直播间列表",
+        roomsHeading: "直播间", selectRoomHint: "从左侧选择一个直播间查看运行记录。", backToList: "返回直播间列表", logsTitle: "场次日志清理", logsHint: "场次日志永久保留。这里只做手动清理：删除超过指定天数的日志文件，删除前先预览。", logsDays: "天数", logsPreview: "预览", logsCleanup: "清理", logsPreviewResult: "将删除 {count} 个文件，共 {size}", logsConfirmTitle: "删除场次日志？", logsConfirmMessage: "将删除 {count} 个超过 {days} 天的场次日志（{size}）。此操作不可恢复。", logsDone: "已删除 {deleted} 个文件（{size}）", logsFailed: "{count} 个文件删除失败：{names}",
       },
       detail: {
         pipelineConfig: "后处理配置",
@@ -1026,7 +1026,7 @@ const DICT = {
         childTitle: "This is a child node",
         childDesc1: "Hub isn't enabled on this node (running ", childDesc2: " without ", childDesc3: "). Multi-node selection/merge/upload is orchestrated entirely by the ",
         childMaster: "master node", childDesc4: "; Hub rules are only configured and take effect on master. This node only records and lets master pull from it.",
-        roomsHeading: "Rooms", selectRoomHint: "Select a room on the left to view its run history.", backToList: "Back to rooms",
+        roomsHeading: "Rooms", selectRoomHint: "Select a room on the left to view its run history.", backToList: "Back to rooms", logsTitle: "Job log cleanup", logsHint: "Job logs are kept forever. Cleanup is manual only: delete logs older than the given days, after a preview.", logsDays: "Days", logsPreview: "Preview", logsCleanup: "Clean up", logsPreviewResult: "Will delete {count} files, {size} in total", logsConfirmTitle: "Delete job logs?", logsConfirmMessage: "Delete {count} job logs older than {days} days ({size}). This cannot be undone.", logsDone: "Deleted {deleted} files ({size})", logsFailed: "{count} files could not be deleted: {names}",
       },
       detail: {
         pipelineConfig: "Post-processing config",

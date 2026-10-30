@@ -110,6 +110,8 @@ export interface RouteMatch {
     | "procPurge"
     | "previewOrphans"
     | "cleanupOrphans"
+    | "previewJobLogs"
+    | "cleanupJobLogs"
     | "hubStream"
     | "index";
   /** Path param when the route has /:id. */
@@ -170,6 +172,8 @@ const ROUTES: readonly RouteEntry[] = [
   { name: "procPurge", methods: ["POST"], pattern: /^\/api\/proc\/purge$/, needsBody: true },
   { name: "previewOrphans", methods: ["GET"], pattern: /^\/api\/maintenance\/orphans$/ },
   { name: "cleanupOrphans", methods: ["POST"], pattern: /^\/api\/maintenance\/orphans$/, needsBody: true },
+  { name: "previewJobLogs", methods: ["GET"], pattern: /^\/api\/maintenance\/job-logs$/ },
+  { name: "cleanupJobLogs", methods: ["POST"], pattern: /^\/api\/maintenance\/job-logs$/, needsBody: true },
   { name: "hubStatus", methods: ["GET"], pattern: /^\/api\/hub\/status$/ },
   { name: "applyHubTasks", methods: ["POST"], pattern: /^\/api\/hub\/apply$/ },
   { name: "listRooms", methods: ["GET"], pattern: /^\/api\/rooms$/ },
@@ -382,6 +386,12 @@ async function dispatch(
     case "cleanupOrphans": {
       const body = (await readJson(req)) as { confirm?: boolean };
       return maintenance.cleanupOrphans(body ?? {});
+    }
+    case "previewJobLogs":
+      return maintenance.previewJobLogs(new URL(req.url ?? "/", "http://localhost").searchParams.get("olderThanDays"));
+    case "cleanupJobLogs": {
+      const body = (await readJson(req)) as { olderThanDays?: unknown; confirm?: boolean };
+      return maintenance.cleanupJobLogs(body ?? {});
     }
     case "listTasks":
       return api.listTasks();

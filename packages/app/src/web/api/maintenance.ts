@@ -15,7 +15,8 @@
  */
 import { listHubJobs, hubStageDir } from "../../hub-jobs.js";
 import { cleanupOrphans, scanOrphans, type ScanOptions, type ScanResult, type CleanupResult } from "../../orphan-cleanup.js";
-import { drecRoot, resolveOutputDir, rootStageDir } from "../../paths.js";
+import { drecRoot, resolveOutputDir, rootLogsDir, rootStageDir } from "../../paths.js";
+import { cleanupJobLogs, parseJobLogDays, previewJobLogs } from "../../job-log-cleanup.js";
 import { HUB_TERMINAL_STATES, platformForRoom, recordingRoomDirCandidates, stageSessionDirCandidates } from "@drec/core";
 import type { ManagerLike, ApiResult } from "./types.js";
 import type { TaskStore } from "../../store.js";
@@ -29,6 +30,8 @@ export interface MaintenanceDeps {
   dataRoot?: string;
   /** stage 目录覆盖(hub.config.json 的 stageDir 优先,默认 `<root>/stage`)。 */
   stageDir?: string;
+  /** hub 场次日志根目录;省略回落 `rootLogsDir()`。 */
+  logsDir?: string;
 }
 
 /**
@@ -50,8 +53,11 @@ function recordingDirsOf(task: { room: string; outDir: string | null; name: stri
 export function buildMaintenance(deps: MaintenanceDeps): {
   previewOrphans(): ApiResult;
   cleanupOrphans(input: { confirm?: boolean } | undefined): ApiResult;
+  previewJobLogs(days: unknown): ApiResult;
+  cleanupJobLogs(input: { olderThanDays?: unknown; confirm?: boolean } | undefined): ApiResult;
 } {
   const root = deps.dataRoot ?? drecRoot();
+  const logsRoot = deps.logsDir ?? rootLogsDir();
 
   /** 当前活动路径:正在录制的目录 + 非终态 hub job 的 stage 子目录。宁可多保留,不可误删。 */
   const activity = (): { recordingDirs: string[]; activePaths: string[] } => {
@@ -104,6 +110,32 @@ export function buildMaintenance(deps: MaintenanceDeps): {
         return { status: 200, body: r };
       } catch (e) {
         return { status: 500, body: { error: `清理失败: ${(e as Error)?.message ?? e}` } };
+      }
+    },
+
+    previewJobLogs(days: unknown): ApiResult {
+      const n = parseJobLogDays(days);
+      if (n === null) return { status: 400, body: { error: "天数必须为 1–3650 的整数" } };
+      try {
+        return { status: 200, body: { dryRun: true, ...previewJobLogs(logsRoot, n) } };
+      } catch {
+        // Fixed text: an fs error message would carry the full data-root path.
+        return { status: 500, body: { error: "场次日志扫描失败" } };
+      }
+    },
+
+    cleanupJobLogs(input): ApiResult {
+      // 同孤儿清理:未显式 confirm → 400,先预览。
+      if (input?.confirm !== true) {
+        return { status: 400, body: { error: "清理需要显式 confirm=true(先用 GET 预览)" } };
+      }
+      const n = parseJobLogDays(input.olderThanDays);
+      if (n === null) return { status: 400, body: { error: "天数必须为 1–3650 的整数" } };
+      try {
+        // 删除失败不吞:failed 随 body 返回;整体 200(部分成功是常态)。
+        return { status: 200, body: cleanupJobLogs(logsRoot, n) };
+      } catch {
+        return { status: 500, body: { error: "场次日志清理失败" } };
       }
     },
   };
