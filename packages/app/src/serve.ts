@@ -26,6 +26,7 @@ import { makeManualStartAdmit, currentDiskMinGB } from "./disk-gate.js";
 import { ProcQueueStore, ProcRunner, SimpleSlotLimiter } from "@drec/proc-queue";
 import { TaskManager } from "./task-manager.js";
 import { masterSendsTransition, roomIsLive, workerProbeUsable, type LiveTick } from "./live-notify.js";
+import { NotifyOutbox } from "./notify-outbox.js";
 import { TaskLogStore } from "@drec/observability";
 import { NodeRecordSpawner } from "./process/spawner.js";
 import { sweepCredentialFiles } from "./process/credential-file.js";
@@ -90,6 +91,10 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
     if (swept.removed > 0) console.log(`[cred] 启动清扫:删除残留录制凭证文件 ${swept.removed} 个`);
     for (const f of swept.failed) console.error(`[cred] 启动清扫失败: ${f}`);
 
+    // 受管节点(DREC_NOTIFY_RELAY=1)不自己做任何通知:事件写发件箱,由主控统一发送(issue #405)。
+    // 子进程与本站中枢都必须静默,否则节点本地与主控会各发一条。
+    const relayMode = process.env.DREC_NOTIFY_RELAY === "1";
+
     // ONE manager drives both the web (manual start/stop) and, if requested,
     // the scheduler (automatic start/stop). They share the same subprocess
     // lifecycle + crash auto-restart.
@@ -102,7 +107,10 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       // 抖音 API 模式设置:每次 spawn 读 settings.douyinApiMode(空=默认 balance)→ 注入 DOUYIN_REC_API_MODE。
       douyinApiMode: () => store.getSetting("douyinApiMode") || undefined,
       // webhook 类型开关:每次 spawn 读 settings → DREC_WEBHOOK_TOGGLES 注入子进程。
-      webhookToggles: () => resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
+      // 中继模式下子进程一律不发:类型开关强制全关(事件仍会经发件箱上报)。
+      webhookToggles: () => relayMode
+        ? { live: false, recordEnd: false, merge: false, hub: false, error: false }
+        : resolveWebhookToggles(store.getSetting("notifWebhookToggles")),
       onLog: (m) => console.log(m),
     });
     // Per-task log ring buffer shared with the manager so the Web 详情/日志
@@ -158,10 +166,22 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
 
     // 站内事件中枢:每个事件 → 本地事件流(web/tui 轮询)+ 按「任务 webhook ?? 全局」发 Discord。
     const globalHook = (): string | null => getWebhook() ?? store.getSetting("discordWebhook") ?? null;
+    let notifyOutbox: NotifyOutbox | null = null;
+    if (relayMode) {
+      try {
+        notifyOutbox = new NotifyOutbox(join(drecRoot(), "db", "notify-outbox.db"));
+      } catch (e) {
+        serveLog.error("[notify] 发件箱打不开,本次仍按本地发送:", e);
+      }
+    }
     const events = new EventCenter({
       // 墙钟播种游标:进程重启后 id 仍单调,前端旧游标不会过滤掉重启窗口内的新事件。
       initialSeq: Date.now(),
-      makeNotifier,
+      // 发件箱已就绪时由主控代发,本地不再持有发送方。
+      ...(notifyOutbox ? {} : { makeNotifier }),
+      ...(notifyOutbox
+        ? { onEmit: (e: import("@drec/observability").AppEvent) => { notifyOutbox!.append(e.taskId, e.event, e.at); } }
+        : {}),
       resolveWebhook: (taskId) => {
         const t = taskId == null ? null : store.getTask(taskId);
         return resolveTaskWebhook(t ?? { webhook: null }, globalHook()) ?? undefined;
@@ -323,6 +343,40 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
       }
     }, 3000);
 
+    // 通知中继(issue #405):受管节点把事件写进自己的发件箱,主控每 10 秒按游标拉取,
+    // 统一走本中枢发送,发送后确认。节点不持有推送凭据。旧 bundle 没有该命令 → 拉取返回空。
+    const notifyCursors = new Map<string, number>();
+    const notifyRelay = hubEnabled && hubStarter?.notifyOutbox
+      ? setInterval(() => {
+          void (async () => {
+            let workers: ReturnType<typeof workerStore.listWorkers> = [];
+            try {
+              workers = workerStore.listWorkers(rootHubConfig());
+            } catch {
+              return;
+            }
+            for (const w of workers) {
+              if (w.kind === "local") continue; // 本机事件已经在主控自己的中枢里
+              const after = notifyCursors.get(w.id) ?? 0;
+              try {
+                const rows = await hubStarter!.notifyOutbox!(w.id, after, 200, []);
+                if (rows.length === 0) continue;
+                let max = after;
+                for (const r of rows) {
+                  if (r.id > max) max = r.id;
+                  events.emit(r.taskId, r.event, { webhook: true });
+                }
+                notifyCursors.set(w.id, max);
+                // 发送后再确认:主控中途崩溃时事件会重发一次,而不是丢失。
+                await hubStarter!.notifyOutbox!(w.id, max, 0, rows.map((r) => r.id));
+              } catch {
+                // 节点不可达/旧版本 → 下一轮再试,不影响其它节点
+              }
+            }
+          })();
+        }, 10_000)
+      : null;
+
     // 磁盘看门狗:输出根剩余 < 阈值 → 全局告警(原画很快写满盘;Python 版有此保护,TS 重写漏了)。
     const DISK_MIN_GB = Number(process.env.DOUYIN_REC_DISK_MIN_GB ?? 5);
     let diskAlerted = false;
@@ -472,6 +526,8 @@ export async function runServe(o: ServeOpts, deps: ServeDeps): Promise<void> {
         serveLog.error("[proc] runner 停止出错:", err);
       });
       clearInterval(recWatch);
+      if (notifyRelay) clearInterval(notifyRelay);
+      notifyOutbox?.close();
       clearInterval(diskWatch);
       clearInterval(cookieWatch);
       if (canaryWatch) clearInterval(canaryWatch);

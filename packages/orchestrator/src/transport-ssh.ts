@@ -284,6 +284,24 @@ export class SshTransport implements Transport {
   }
 
   /**
+   * 拉取节点的通知发件箱(issue #405)。旧 bundle 没有该命令 → 返回 null(视为不支持,不报错)。
+   * `ackIds` 非空时同一次调用顺便确认,避免多一次 ssh。
+   */
+  async notifyOutbox(after: number, limit: number, ackIds: number[] = []): Promise<Array<{ id: number; at: number; taskId: number | null; event: unknown }> | null> {
+    const nodePrefix = this.o.remoteNode ?? `node ${this.o.dataRoot}/dist/douyin-rec.mjs`;
+    const ack = ackIds.length > 0 ? ` --ack ${ackIds.join(",")}` : "";
+    let out: string;
+    try {
+      out = await this.runStatus([`${nodePrefix} _notify-outbox ${this.o.dataRoot} --after ${after} --limit ${limit}${ack}`]);
+    } catch (e) {
+      if (isUnknownCommandError(e)) return null;
+      throw e;
+    }
+    const parsed = JSON.parse(out) as { events?: unknown };
+    return Array.isArray(parsed.events) ? (parsed.events as Array<{ id: number; at: number; taskId: number | null; event: unknown }>) : [];
+  }
+
+  /**
    * 读远端某任务的日志尾巴(F3)。日志来自节点 serve 的**内存环形缓冲**,节点重启即空 →
    * 返回 `error` 由调用方原样展示,不当成失败抛错(可观测性不能反过来打断任何东西)。
    */
