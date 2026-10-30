@@ -129,6 +129,20 @@ export function rollingNode(rows: RollingDeliveryDTO[], id: string, name: string
   return { id, name, role, parts, confirmed, ambiguous, pending: Math.max(0, total - confirmed - (up ? 1 : 0) - ambiguous) };
 }
 
+/** Live snapshots that belong to a broadcast: a `waiting` pump is not on air yet (issue #408). */
+export function broadcastSnaps<T>(items: T[], stateOf: (item: T) => string): T[] {
+  return items.filter((item) => stateOf(item) !== "waiting");
+}
+
+/** Root state of the running broadcast from its live snapshots (issue #408): never hard-code "running". */
+export function liveRootState(states: string[]): StepState {
+  if (states.some((s) => s === "streaming" || s === "submitting")) return "running";
+  if (states.some((s) => s === "failed")) return "failed";
+  if (states.some((s) => s === "stopped")) return "skipped";
+  if (states.some((s) => s === "finished")) return "done";
+  return "waiting";
+}
+
 const ORDER = [
   "pull", "node_upload", "merge", "burn_danmu", "burn_livechat", "upload_plain",
   "append_danmu", "append_livechat", "clean_stage_src", "clean_source", "clean_stage",

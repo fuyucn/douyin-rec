@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { liveNode, partSteps, pipelineTree, rollingNode, rootStateOf, treeEdges } from "../../packages/web/src/lib/run-tree.js";
+import { broadcastSnaps, liveNode, liveRootState, partSteps, pipelineTree, rollingNode, rootStateOf, treeEdges } from "../../packages/web/src/lib/run-tree.js";
 import type { HubJobDTO, RollingDeliveryDTO } from "../../packages/web/src/api/client.js";
 import type { LiveUploadSnapshot } from "../../packages/core/src/live-upload.js";
 
@@ -104,6 +104,24 @@ describe("rootStateOf", () => {
     expect(rootStateOf({ state: "failed", error: "x" })).toBe("failed");
     expect(rootStateOf({ state: "done", error: null })).toBe("done");
     expect(rootStateOf({ state: "merging", error: null })).toBe("running");
+  });
+});
+
+describe("liveRootState / broadcastSnaps (issue #408)", () => {
+  it("derives the root state from the snapshots instead of a hard-coded running", () => {
+    expect(liveRootState(["streaming"])).toBe("running");
+    expect(liveRootState(["waiting", "submitting"])).toBe("running");
+    expect(liveRootState(["failed"])).toBe("failed");
+    expect(liveRootState(["stopped"])).toBe("skipped");
+    expect(liveRootState(["finished"])).toBe("done");
+    expect(liveRootState(["waiting"])).toBe("waiting");
+    expect(liveRootState([])).toBe("waiting");
+  });
+
+  it("drops waiting snapshots: a pump waiting for the broadcast is not on air", () => {
+    const snaps = [snap({ state: "waiting" }), snap({ state: "streaming" })];
+    expect(broadcastSnaps(snaps, (s) => s.state)).toHaveLength(1);
+    expect(broadcastSnaps([snap({ state: "waiting" })], (s) => s.state)).toHaveLength(0);
   });
 });
 
