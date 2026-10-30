@@ -47,6 +47,8 @@ export interface PipelineCandidate {
   coverage: number;
   durationSec: number;
   complete: boolean;
+  /** Source cleanup of the run (`clean_source` deletes every member's source, losers included). Absent when the run has no such step. */
+  cleanState?: StepState;
 }
 
 export interface PipelineTree {
@@ -171,11 +173,13 @@ export function pipelineTree(job: HubJobDTO, cfg: FlowCfg | undefined, workerNam
   const steps = ORDER.filter((k) => present.has(k)).map((key) => ({ key, state: stepState(job, key) }));
   const selected = job.candidates.length > 0 || job.steps.some((s) => s.step === "select" && s.phase === "done");
   const selectState: StepState = selected ? "done" : TERMINAL.has(job.state) ? "unknown" : "running";
+  const cleanSource = steps.find((s) => s.key === "clean_source");
   return {
     kind: "pipeline",
     candidates: job.candidates.map((c) => ({
       id: c.worker, name: workerName(c.worker), winner: c.isWinner,
       coverage: c.coverage, durationSec: c.durationSec, complete: c.complete,
+      ...(cleanSource ? { cleanState: cleanSource.state } : {}),
     })),
     selectState,
     steps,
@@ -213,6 +217,8 @@ export function treeEdges(tree: RunTree): TreeEdge[] {
     out.push([`c:${c.id}`, "sel", !c.winner]);
   }
   if (tree.steps.length > 0) out.push(["sel", `h:${tree.steps[0].key}`]);
+  // The hub chain reads left to right: each step is linked to the next one.
+  for (let i = 1; i < tree.steps.length; i++) out.push([`h:${tree.steps[i - 1].key}`, `h:${tree.steps[i].key}`]);
   return out;
 }
 

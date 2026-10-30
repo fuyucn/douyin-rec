@@ -154,7 +154,23 @@ describe("treeEdges", () => {
     const e = treeEdges(t);
     expect(e.filter(([f]) => f === "root").map(([, to]) => to)).toEqual(["c:a", "c:b"]);
     expect(e.filter(([, to]) => to === "sel")).toEqual([["c:a", "sel", false], ["c:b", "sel", true]]);
-    expect(e.at(-1)?.[0]).toBe("sel");
+    expect(e.filter(([f]) => f === "sel")).toEqual([["sel", "h:pull"]]);
+  });
+
+  it("links the hub steps left to right, one edge per neighbour pair (issue #407)", () => {
+    const t = pipelineTree(job({ steps: [{ step: "pull", phase: "done", at: 1 }, { step: "merge", phase: "start", at: 2 }] }), undefined, (id) => id);
+    expect(treeEdges(t)).toEqual([["root", "sel"], ["sel", "h:pull"], ["h:pull", "h:merge"]]);
+  });
+
+  it("puts the source cleanup state on every candidate, losers included (issue #407)", () => {
+    const cands = [
+      { worker: "a", coverage: 1, durationSec: 60, complete: true, isWinner: true },
+      { worker: "b", coverage: 1, durationSec: 60, complete: true, isWinner: false },
+    ];
+    const withClean = pipelineTree(job({ candidates: cands, steps: [{ step: "clean_source", phase: "done", at: 1 }] }), undefined, (id) => id);
+    expect(withClean.candidates.map((c) => c.cleanState)).toEqual(["done", "done"]);
+    const without = pipelineTree(job({ candidates: cands }), undefined, (id) => id);
+    expect(without.candidates.map((c) => c.cleanState)).toEqual([undefined, undefined]);
   });
 
   it("links a node to its folded summary only when there is something folded", () => {

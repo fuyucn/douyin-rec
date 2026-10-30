@@ -216,6 +216,7 @@ function CandidateCard({ c }: { c: PipelineTree["candidates"][number] }): ReactN
       <div className="tr-kicker">{t(c.winner ? "room.runtime.role.winner" : "room.runtime.role.candidate")}</div>
       <div className="tr-title">{c.name}</div>
       <div className="tr-sub">{t("room.runTree.cover", { pct: Math.round(c.coverage * 100), min: Math.round(c.durationSec / 60) })}{c.complete ? "" : ` · ${t("room.runTree.gap")}`}</div>
+      {c.cleanState && <div className="tr-row"><span className="tr-pill">{t("hub.jobs.stepNode.clean_source")}</span><StatePill state={c.cleanState} /></div>}
     </div>
   );
 }
@@ -236,12 +237,14 @@ function HubChain({ tree }: { tree: PipelineTree }): ReactNode {
   return (
     <div className="tr-hub">
       <div className="tr-kicker">{t("room.runTree.hubChain")}</div>
-      {tree.steps.map((s, i) => (
-        <div key={s.key} className={`tr-card tr-step tr-part-${s.state}`} data-tr-id={`h:${s.key}`}>
-          <b>{i + 1} · {t(`hub.jobs.stepNode.${s.key}`)}</b>
-          <StatePill state={s.state} />
-        </div>
-      ))}
+      <div className="tr-hub-steps">
+        {tree.steps.map((s, i) => (
+          <div key={s.key} className={`tr-card tr-step tr-part-${s.state}`} data-tr-id={`h:${s.key}`}>
+            <b>{i + 1} · {t(`hub.jobs.stepNode.${s.key}`)}</b>
+            <StatePill state={s.state} />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
