@@ -207,13 +207,13 @@ export function readLiveHistory(platform: string, roomSlug: string): LiveUploadS
  * cut off before it finished is stored as `stopped`. Keyed by sessionId: a later write of the same run
  * replaces the earlier one, so repeated calls are idempotent. Best effort, like the status file.
  */
-export function upsertLiveHistory(platform: string, roomSlug: string, snaps: Array<LiveUploadSnapshot | undefined>): void {
+export function upsertLiveHistory(platform: string, roomSlug: string, snaps: Array<LiveUploadSnapshot | undefined>): boolean {
   const incoming = snaps.flatMap((s): LiveUploadSnapshot[] => {
     if (!s?.sessionId) return [];
     const done = s.state === "finished" || s.state === "failed" || s.state === "stopped";
     return [done ? s : { ...s, state: "stopped" }];
   });
-  if (incoming.length === 0) return;
+  if (incoming.length === 0) return true;
   try {
     const ids = new Set(incoming.map((s) => s.sessionId));
     const runs = [...incoming, ...readLiveHistory(platform, roomSlug).filter((s) => !ids.has(s.sessionId))]
@@ -222,7 +222,11 @@ export function upsertLiveHistory(platform: string, roomSlug: string, snaps: Arr
     const path = liveHistoryPath(platform, roomSlug);
     mkdirSync(dirname(path), { recursive: true });
     writeJsonAtomic(path, { v: 1, platform, roomSlug, runs });
-  } catch { /* observability only */ }
+    return true;
+  } catch {
+    // Observability only: report the failure to the caller, which retries on its next change.
+    return false;
+  }
 }
 
 /** Remove stale live files; mirrors receipt retention. */

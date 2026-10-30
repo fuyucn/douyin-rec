@@ -74,8 +74,8 @@ export class LiveUploadReporter implements LivePumpReporter {
     const prev = this.tracker.previous;
     const key = `${prev?.sessionId ?? ""}|${prev?.state ?? ""}|${ended?.sessionId ?? ""}|${ended?.state ?? ""}|${ended?.updatedAt ?? ""}`;
     if (key === this.historyKey) return;
-    this.historyKey = key;
-    upsertLiveHistory(this.platform, this.roomSlug, [prev, ended]);
+    // Remember the key only after a successful write, so a failed write is retried on the next event.
+    if (upsertLiveHistory(this.platform, this.roomSlug, [prev, ended])) this.historyKey = key;
   }
 
   progress(p: { part: number; uploadedBytes: number; chunks: number }): void {
