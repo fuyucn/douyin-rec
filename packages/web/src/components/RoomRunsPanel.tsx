@@ -163,24 +163,28 @@ export function RoomRunsPanel({
     }
   };
 
+  // 直播直传/边录边传的当前场次这一行是否会有(空列表判定与计数都要算上它)。
+  const hasLiveRow = !!task?.streamUpload && ((task.zeroDisk ?? []).some((z) => z.live) || rolling.length > 0);
+
   // cfg 交给 RunCard 画「计划图」(进行中 run 还没写 steps 时靠它画出待办节点)。
   const cfg = useMemo(() => (room.processing?.pipeline ?? undefined) as FlowCfg | undefined, [room.key, room.processing]);
 
   return (
     <>
-    <CurrentRunTree task={task} rolling={rolling} workers={workers} />
-    <LiveRunHistory task={task} workers={workers} />
     <section className="run-list-shell">
       <div className="px-3 py-2.5 border-b border-hairline flex items-center justify-between gap-3">
         <span className="section-label">{t("rooms.runsHeading")}</span>
         <div className="flex items-center gap-2">
-          <span className="font-mono text-[11px] text-muted-soft">{total}</span>
+          <span className="font-mono text-[11px] text-muted-soft">{runs.length + (hasLiveRow ? 1 : 0)}</span>
           <Button small variant="secondary" onClick={() => setRunOpen(true)}>
             {t("hub.jobs.runNow")}
           </Button>
         </div>
       </div>
       <div className="p-1.5">
+        {/* 当前场次与直播直传历史排在最前面,是同一份运行列表的最新几条,不另起区块。 */}
+        <CurrentRunTree task={task} rolling={rolling} workers={workers} />
+        <LiveRunHistory task={task} workers={workers} />
         {!loaded &&
           [0, 1].map((i) => (
             <div key={i} className="px-3 py-2.5" aria-hidden="true">
@@ -188,7 +192,7 @@ export function RoomRunsPanel({
               <span className="skeleton block h-3 w-36 max-w-full mt-2" />
             </div>
           ))}
-        {loaded && runs.length === 0 && (
+        {loaded && runs.length === 0 && !hasLiveRow && (
           <div className="empty-state" style={{ minHeight: 160 }}>
             <History className="w-9 h-9" style={{ color: "var(--muted-soft)" }} />
             <div className="text-sm font-medium text-ink">{t("rooms.runsEmpty")}</div>
