@@ -91,9 +91,14 @@ def scan_block(text: str, source: str, first_line: int, added_from: int = 0) -> 
 
 def scan(text: str, source: str) -> list[str]:
     hits: list[str] = []
+    known = tracked_basenames()
     for lineno, line in enumerate(text.splitlines(), start=1):
         for name, pattern, why in RULES:
             for match in re.finditer(pattern, line):
+                # Same exemption as diff mode: a filename that is a tracked repo file is source code,
+                # not a recording artifact (audit/design docs cite source filenames all the time).
+                if name == FILENAME_RULE and Path(match.group(0)).name in known:
+                    continue
                 hits.append(
                     f"{source}:{lineno}: [{name}] {why} -> {match.group(0)!r}"
                 )

@@ -59,7 +59,7 @@ export function JobLogCleanup(): ReactNode {
   };
 
   return (
-    <div className="card p-4 mt-6">
+    <div className="card p-4">
       <div className="text-sm font-medium text-ink">{t("hub.page.logsTitle")}</div>
       <p className="text-xs text-muted-soft mt-1">{t("hub.page.logsHint")}</p>
       <div className="flex flex-wrap items-center gap-2 mt-3">
