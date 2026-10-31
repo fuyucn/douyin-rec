@@ -27,7 +27,7 @@ import { useT } from "../lib/i18n";
 import { todayYmdInTz } from "../lib/tz";
 import { serverTimezoneAtom } from "../atoms";
 import { shouldToastRunError } from "../lib/run-now";
-import { hasCurrentRun, listedRunCount, showsRunsEmpty } from "../lib/room-runs";
+import { listedRunCount, showsRunsEmpty } from "../lib/room-runs";
 import { useAtomValue } from "jotai";
 
 const PAGE = 20;
@@ -164,12 +164,10 @@ export function RoomRunsPanel({
     }
   };
 
-  // 直播直传/边录边传的当前场次这一行是否会有(空列表判定与计数都要算上它,issue #417)。
-  const hasLiveRow = hasCurrentRun({
-    streamUpload: !!task?.streamUpload,
-    liveNodes: (task?.zeroDisk ?? []).filter((z) => z.live).length,
-    rolling: rolling.length,
-  });
+  // 行数由两个子组件自报(它们才是「这一行到底渲染没有」的唯一判定),列表只按实际行数算计数与空状态(issue #417)。
+  const [currentRows, setCurrentRows] = useState(0);
+  const [historyRows, setHistoryRows] = useState(0);
+  const liveRows = currentRows + historyRows;
 
   // cfg 交给 RunCard 画「计划图」(进行中 run 还没写 steps 时靠它画出待办节点)。
   const cfg = useMemo(() => (room.processing?.pipeline ?? undefined) as FlowCfg | undefined, [room.key, room.processing]);
@@ -180,7 +178,7 @@ export function RoomRunsPanel({
       <div className="px-3 py-2.5 border-b border-hairline flex items-center justify-between gap-3">
         <span className="section-label">{t("rooms.runsHeading")}</span>
         <div className="flex items-center gap-2">
-          <span className="font-mono text-[11px] text-muted-soft">{listedRunCount({ hubRuns: runs.length, hasCurrent: hasLiveRow })}</span>
+          <span className="font-mono text-[11px] text-muted-soft">{listedRunCount({ hubRuns: total, liveRows })}</span>
           <Button small variant="secondary" onClick={() => setRunOpen(true)}>
             {t("hub.jobs.runNow")}
           </Button>
@@ -188,8 +186,8 @@ export function RoomRunsPanel({
       </div>
       <div className="p-1.5">
         {/* 当前场次与直播直传历史排在最前面,是同一份运行列表的最新几条,不另起区块。 */}
-        <CurrentRunTree task={task} rolling={rolling} workers={workers} />
-        <LiveRunHistory task={task} workers={workers} />
+        <CurrentRunTree task={task} rolling={rolling} workers={workers} onRowsChange={setCurrentRows} defaultOpen={!collapsed} />
+        <LiveRunHistory task={task} workers={workers} onRowsChange={setHistoryRows} />
         {!loaded &&
           [0, 1].map((i) => (
             <div key={i} className="px-3 py-2.5" aria-hidden="true">
@@ -197,7 +195,7 @@ export function RoomRunsPanel({
               <span className="skeleton block h-3 w-36 max-w-full mt-2" />
             </div>
           ))}
-        {showsRunsEmpty({ loaded, hubRuns: runs.length, hasCurrent: hasLiveRow }) && (
+        {showsRunsEmpty({ loaded, hubRuns: runs.length, liveRows }) && (
           <div className="empty-state" style={{ minHeight: 160 }}>
             <History className="w-9 h-9" style={{ color: "var(--muted-soft)" }} />
             <div className="text-sm font-medium text-ink">{t("rooms.runsEmpty")}</div>

@@ -25,7 +25,7 @@ export function LiveRunRow({ title, badge, state, bv, nodes, defaultOpen }: {
 }): ReactNode {
   return (
     <details className="group px-3" open={defaultOpen}>
-      <summary className="flex items-center justify-between gap-2 py-3 cursor-pointer list-none">
+      <summary className="flex items-center justify-between gap-2 py-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
         <span className="flex items-center gap-2 flex-wrap min-w-0">
           <ChevronDown className="w-3.5 h-3.5 text-muted-soft transition-transform group-open:rotate-0 -rotate-90" />
           <span className="font-mono text-[13px] text-ink">{title}</span>
@@ -43,7 +43,15 @@ export function LiveRunRow({ title, badge, state, bv, nodes, defaultOpen }: {
   );
 }
 
-export function CurrentRunTree({ task, rolling, workers }: { task: Task | undefined; rolling: RollingDeliveryDTO[]; workers: WorkerDTO[] }): ReactNode {
+export function CurrentRunTree({ task, rolling, workers, onRowsChange, defaultOpen = true }: {
+  task: Task | undefined;
+  rolling: RollingDeliveryDTO[];
+  workers: WorkerDTO[];
+  /** Report how many rows this component renders, so the list's count and empty state follow the rendered rows. */
+  onRowsChange?: (rows: number) => void;
+  /** Start collapsed (the detail page keeps its summary on one screen). */
+  defaultOpen?: boolean;
+}): ReactNode {
   const t = useT();
   const taskId = task?.id ?? null;
   const live = !!task?.streamUpload && (task.zeroDisk ?? []).some((z) => z.live);
@@ -67,12 +75,17 @@ export function CurrentRunTree({ task, rolling, workers }: { task: Task | undefi
     const active = broadcast.onAir.filter(({ s }) => s.state === "streaming" || s.state === "submitting");
     const newest = [...active].sort((a, b) => b.s.updatedAt - a.s.updatedAt)[0];
     for (const { e, s } of broadcast.onAir) nodes.push(liveNode(s, e.workerId, name(e.workerId, e.workerName), e === newest?.e ? "winner" : "standby"));
-  } else {
+  } else if (task?.streamUpload) {
     const byWorker = new Map<string, RollingDeliveryDTO[]>();
     for (const r of rolling) byWorker.set(r.workerId, [...(byWorker.get(r.workerId) ?? []), r]);
     for (const [id, rows] of byWorker) nodes.push(rollingNode(rows, id, name(id, rows[0]?.workerName), rows.some((r) => r.recording) ? "winner" : "standby"));
   }
-  if (nodes.length === 0) return null;
+  const rendered = nodes.length > 0;
+  useEffect(() => {
+    onRowsChange?.(rendered ? 1 : 0);
+    return () => onRowsChange?.(0);
+  }, [onRowsChange, rendered]);
+  if (!rendered) return null;
   const bv = (live ? entries.find((e) => e.current?.bvid)?.current?.bvid : rolling.find((r) => r.bv)?.bv) ?? null;
   return (
     <LiveRunRow
@@ -81,7 +94,7 @@ export function CurrentRunTree({ task, rolling, workers }: { task: Task | undefi
       state={state}
       bv={bv}
       nodes={nodes}
-      defaultOpen
+      defaultOpen={defaultOpen}
     />
   );
 }

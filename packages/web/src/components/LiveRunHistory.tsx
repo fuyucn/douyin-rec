@@ -11,7 +11,12 @@ import { liveBroadcast, liveNode } from "../lib/run-tree";
 import type { LiveDetailEntry } from "../lib/zero-disk-status";
 import { LiveRunRow } from "./CurrentRunTree";
 
-export function LiveRunHistory({ task, workers }: { task: Task | undefined; workers: WorkerDTO[] }): ReactNode {
+export function LiveRunHistory({ task, workers, onRowsChange }: {
+  task: Task | undefined;
+  workers: WorkerDTO[];
+  /** Report how many rows this component renders, so the list's count and empty state follow the rendered rows. */
+  onRowsChange?: (rows: number) => void;
+}): ReactNode {
   const t = useT();
   const taskId = task?.id ?? null;
   // History outlives the broadcast, so it is read for any live-upload task, not only while a node is live.
@@ -31,6 +36,10 @@ export function LiveRunHistory({ task, workers }: { task: Task | undefined; work
   const runs = entries
     .flatMap((e) => (e.history ?? []).filter((s) => !s.sessionId || !shown.has(s.sessionId)).map((s) => ({ e, s })))
     .sort((a, b) => b.s.startedAt - a.s.startedAt);
+  useEffect(() => {
+    onRowsChange?.(runs.length);
+    return () => onRowsChange?.(0);
+  }, [onRowsChange, runs.length]);
   if (runs.length === 0) return null;
 
   return (
