@@ -27,6 +27,7 @@ import { useT } from "../lib/i18n";
 import { todayYmdInTz } from "../lib/tz";
 import { serverTimezoneAtom } from "../atoms";
 import { shouldToastRunError } from "../lib/run-now";
+import { hasCurrentRun, listedRunCount, showsRunsEmpty } from "../lib/room-runs";
 import { useAtomValue } from "jotai";
 
 const PAGE = 20;
@@ -163,8 +164,12 @@ export function RoomRunsPanel({
     }
   };
 
-  // 直播直传/边录边传的当前场次这一行是否会有(空列表判定与计数都要算上它)。
-  const hasLiveRow = !!task?.streamUpload && ((task.zeroDisk ?? []).some((z) => z.live) || rolling.length > 0);
+  // 直播直传/边录边传的当前场次这一行是否会有(空列表判定与计数都要算上它,issue #417)。
+  const hasLiveRow = hasCurrentRun({
+    streamUpload: !!task?.streamUpload,
+    liveNodes: (task?.zeroDisk ?? []).filter((z) => z.live).length,
+    rolling: rolling.length,
+  });
 
   // cfg 交给 RunCard 画「计划图」(进行中 run 还没写 steps 时靠它画出待办节点)。
   const cfg = useMemo(() => (room.processing?.pipeline ?? undefined) as FlowCfg | undefined, [room.key, room.processing]);
@@ -175,7 +180,7 @@ export function RoomRunsPanel({
       <div className="px-3 py-2.5 border-b border-hairline flex items-center justify-between gap-3">
         <span className="section-label">{t("rooms.runsHeading")}</span>
         <div className="flex items-center gap-2">
-          <span className="font-mono text-[11px] text-muted-soft">{runs.length + (hasLiveRow ? 1 : 0)}</span>
+          <span className="font-mono text-[11px] text-muted-soft">{listedRunCount({ hubRuns: runs.length, hasCurrent: hasLiveRow })}</span>
           <Button small variant="secondary" onClick={() => setRunOpen(true)}>
             {t("hub.jobs.runNow")}
           </Button>
@@ -192,7 +197,7 @@ export function RoomRunsPanel({
               <span className="skeleton block h-3 w-36 max-w-full mt-2" />
             </div>
           ))}
-        {loaded && runs.length === 0 && !hasLiveRow && (
+        {showsRunsEmpty({ loaded, hubRuns: runs.length, hasCurrent: hasLiveRow }) && (
           <div className="empty-state" style={{ minHeight: 160 }}>
             <History className="w-9 h-9" style={{ color: "var(--muted-soft)" }} />
             <div className="text-sm font-medium text-ink">{t("rooms.runsEmpty")}</div>
