@@ -72,3 +72,36 @@
 1. 必修：P1 鉴权（共享密钥 + Origin/Host 校验 + content-type 限制 + body 上限 + mesioPath 校验）；P2 清理失败可见；P2 SyncLedger WAL/busy_timeout + 台账失败告警。
 2. 建议修：rsync 转义（先确认节点 rsync 版本）、pr-risk-scan 清单、issue-guard 规则。
 3. 可接受：acquireLease 事务、pid 指纹、日志清理排除非终态、前端两项。
+
+---
+
+# 附：专项审计（结构与代码 bug，第三轮，2026-10-31）
+
+汇总 issue：#420。本轮覆盖分层守护、包职责与录制链路功能缺陷（#419 未覆盖的面）。
+
+## 结构 Findings
+
+- [结构-中] orchestrator → app 反向依赖被 RANKS 检查意外放行（只拒 depRank >= myRank，4.5→4 合法通过；源码注释以为会挂，与实际不符）。建议加显式禁止边清单。
+- [结构-中] 分层测试只读 package.json 的 dependencies，不扫源码 import（含动态 import）；web 经 vite alias 直接引 core 内部文件绕过包边界。建议对 packages/*/src 做 import 扫描并与 RANKS 对账。
+- [结构-中] app 直写 orchestrator 台账 schema：hub-jobs.ts 以可写连接 DELETE 五张台账表，「SyncLedger 是唯一写端」不成立；hub-watch/hub-jobs 裸 SQL 依赖台账列。建议读写模型收进 SyncLedger、app 走注入端口。
+- [结构-中] 原子写至少 8 份实现（worker-store/credential-file/hub-config-store/managed-state/hub-store/zero-disk-node/rolling-upload/live-pump），临时文件命名约定不同，清理扫描只覆盖 core 那种。建议统一到 core。
+- [结构-中] 新增包要手工登记 7 处，仅 RANKS 与生成脚本 2 处强制；vitest alias/tsconfig paths 缺多个包且残留失效别名；生成架构图的 RANK_LABEL/SEMANTIC 缺漏导致 mermaid 分组标错。建议别名从 workspace 现算或加测试钉住。
+- [结构-中] core 含 I/O 与上传业务（rolling-upload 路径调用带登录态的外部接口；upload-gate/slot 在 core）；「core 纯契约」只测不依赖 @drec/*，不禁 fs/网络。
+- [结构-低] app 约 70 文件过大（节点侧执行体可拆）；ffmpeg-recorder-extra 可并入 record-engine；scheduler 用本地时区 getHours()（靠 serve 改 TZ 才正确，与「日期统一口径」不一致）。
+
+## bug Findings
+
+- [bug-高] 断流重连被最后一段上传阻塞：`manager/index.ts` _handleOffline 里 `await rolling.onSessionEnd()`（等 GB 级末段上传，槽忙最多 30 分钟）排在退避与重连之前，期间主播还在播，内容永久丢失。涉上传行为 → needs-decision。修法：后台收尾 + 后继会话按 #46 接管，需先修「同进程 pid 视为已结束」假设。
+- [bug-中] ffmpeg 分段解析在主播名含撇号时失效：`record-engine/engines/ffmpeg.ts:52` 正则 `/Opening '([^']+\.ts)' for writing/`，sanitizePathSegment 不剥 `'`，含撇号名从第 2 段起全部不触发 onSegment → 不上传/不转码/不删源，静默残留转人工。修法小：放宽正则 + stderr 按行缓冲。
+- [bug-中] 弹幕 WS 僵尸连接：listener-base 的 start 在 await 场次号/访客登录态期间 stop() 空操作、随后仍连 WS 无人关；client.ts 的 close() 不清重连定时器、不终止 CONNECTING 态 socket。同设备多路 WS 并存（风控信号），僵尸源闭包写进下一场 xml。修法：stopped 标志 + close 全清 + 登录态拉取超时；顺带让 client 可测（注入签名/proto）。
+- [bug-中] mesio 引擎只上报第 1 段：无逐段回调，边录边传/节点侧 remux 在 mesio+分段下第 2 段起失效。需先确认调用链是否已拦截。
+- [bug-低] daemon.tick 在 reconcileRollingDrift 里 await 停任务，占住 ticking 锁拖慢全部任务窗口启停；弹幕去重键秒级精度，同秒同内容两条丢一条。
+
+## 测试缺口
+danmaku/client.ts 零测试（重连计数/清零/exhausted/close 竞态）；引擎撇号/单段问题无用例。
+
+## 建议处理顺序
+1. needs-decision：重连阻塞（涉上传行为）。
+2. 直接修（小）：ffmpeg 撇号解析；弹幕僵尸 WS（一张票，含 client 可测性）。
+3. 先确认再定：mesio 逐段上报。
+4. enhancement：分层守护补强、app 直写台账收进 SyncLedger、原子写统一、包登记自动化、core I/O 迁出、scheduler 时区口径。
