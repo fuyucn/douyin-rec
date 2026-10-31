@@ -9,7 +9,6 @@ import { LatestRunBadge } from "../components/HubJobs";
 import { runNeedsAttention } from "../lib/room-status";
 import { RoomDetail } from "../components/RoomDetail";
 import { WorkersPanel } from "../components/WorkersPanel";
-import { JobLogCleanup } from "../components/JobLogCleanup";
 import { HubRuleDialog } from "../modals/HubRuleDialog";
 import { useDragReorder } from "../lib/dragReorder";
 import { useHubStream, usePolling, useToast, errMessage } from "../lib/hooks";
@@ -278,8 +277,6 @@ export function HubPage(): ReactNode {
           </section>
         </div>
       )}
-
-      <JobLogCleanup />
 
       <HubRuleDialog open={dialogOpen} onClose={() => setDialogOpen(false)} rule={null} onSaved={() => void refresh().catch(() => {})} />
 
