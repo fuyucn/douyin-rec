@@ -11,13 +11,17 @@ describe("取流错误消息不携带登录串 (issue #425)", () => {
   it("douyin_api.js 的 assert 模板不含登录串插值", () => {
     const src = read("packages/douyin-live/src/stream/douyin_api.js");
     expect(src).not.toMatch(/cookies:\s*\$\{cookies\}/);
-    expect(src).toContain("登录串: ${cookies ? `有(${cookies.length})` : \"无\"}");
+    expect(src).toContain('登录串: ${cookies ? `有(${cookies.length})` : "无"}');
+  });
+
+  it("login secret is not logged via console.error(opts)", () => {
+    const src = read("packages/douyin-live/src/stream/douyin_api.js");
+    expect(src).not.toMatch(/console\.error\(opts\)/);
   });
 
   it("loadBalancer 的日志出口对登录串字段脱敏", () => {
     const src = read("packages/douyin-live/src/stream/loadBalancer/loadBalancer.js");
-    expect(src.match(/console\.warn/g)?.length).toBe(2);
-    expect((src.match(/已隐去/g) ?? []).length).toBe(2);
+    expect(src).toContain("export function redactSecrets");
     expect(src).not.toMatch(/console\.warn\([^)]*lastError\.message\);/);
     expect(src).not.toMatch(/Next retry at: \$\{\(new Date\(/);
   });

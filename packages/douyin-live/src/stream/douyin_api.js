@@ -385,7 +385,8 @@ async function getRoomInfoByWeb(webRoomId, opts = {}) {
 }
 async function getRoomInfoByMobile(secUserId, opts = {}) {
     if (!secUserId) {
-        console.error(opts);
+        // ⚠️ 我们的扩展(issue #425):opts 里可能含 auth(登录串),不能整对象打印。
+        console.error("[stream_processor] Mobile API 缺少 secUserId", { hasAuth: !!opts?.auth, keys: Object.keys(opts ?? {}) });
         throw new Error("Mobile API need secUserId, please set uid field");
     }
     if (typeof secUserId === "number") {
