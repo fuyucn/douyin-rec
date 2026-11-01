@@ -536,8 +536,8 @@ describe("issue-guard.py --diff", () => {
     const r = guard(d);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("本机路径");
-    expect(r.stderr).toContain("/root/data");
-    expect(r.stderr).toContain("/mnt/backup");
+    expect(r.stderr).toContain("/root/data"); // issue-guard: allow
+    expect(r.stderr).toContain("/mnt/backup"); // issue-guard: allow
     const { d: d2, g: g2 } = repo();
     appendFileSync(join(d2, "docs", "a.md"), "输出在 data-local/recordings 目录\n");
     g2("commit", "-qam", "c");
