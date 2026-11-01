@@ -397,7 +397,7 @@ async function readJson(req: IncomingMessage, res: ServerResponse): Promise<unkn
       chunks.push(c as Buffer);
     }
   } catch (e) {
-    // 兕底销毁(BODY_LINGER_MS)会从这里打断迭代 —— 超限路径按 413 处理;其余(客户端中途断开等)照旧上抛。
+    // 兜底销毁(BODY_LINGER_MS)会从这里打断迭代 —— 超限路径按 413 处理;其余(客户端中途断开等)照旧上抛。
     if (overflow) throw new BodyTooLargeError();
     throw e;
   }
@@ -937,7 +937,7 @@ export function createWebServer(deps: WebServerDeps): Server {
         sendJson(res, result.status, result.body);
       } catch (e) {
         if (e instanceof BodyTooLargeError) {
-          // 超限路径的 413 已由 readJson 早响应发出(send413AndClose);这里只在响应尚未发出时兑底。
+          // 超限路径的 413 已由 readJson 早响应发出(send413AndClose);这里只在响应尚未发出时兜底。
           if (!res.headersSent) sendJson(res, 413, { error: e.message });
           return;
         }
