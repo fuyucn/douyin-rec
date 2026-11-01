@@ -536,6 +536,8 @@ describe("issue-guard.py --diff", () => {
     const r = guard(d);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("本机路径");
+    expect(r.stderr).toContain("/root/data");
+    expect(r.stderr).toContain("/mnt/backup");
     const { d: d2, g: g2 } = repo();
     appendFileSync(join(d2, "docs", "a.md"), "输出在 data-local/recordings 目录\n");
     g2("commit", "-qam", "c");
@@ -544,7 +546,10 @@ describe("issue-guard.py --diff", () => {
     const { d: d3, g: g3 } = repo();
     appendFileSync(join(d3, "docs", "a.md"), "RUN mkdir -p /root/.ssh\nCOPY ssh /root/.ssh/config\nENV P=/root/.cache/ms-playwright\n默认装到 /srv/drec 或 /srv/docker-data\nout=\"$t/root/node-1/x\"\n");
     g3("commit", "-qam", "c");
+    appendFileSync(join(d3, "docs", "a.md"), "    - ./remote/vps.key:/root/.ssh/vps.key:ro\n");
+    g3("commit", "-qam", "c2");
     const r3 = guard(d3);
     expect(r3.stderr).not.toContain("本机路径");
+    expect(r3.status).toBe(0);
   });
 });
