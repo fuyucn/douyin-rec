@@ -268,6 +268,8 @@ export abstract class ListenerDanmuSource implements DanmuSource {
       await client.connect();
     } catch (e) {
       const m = (e as Error)?.message ?? String(e);
+      // 已被 stop 取消的 start:连接失败属取消路径,只记日志不告警(复审 #431)。
+      if (isStale()) { log.info(`${this.name} 已停止,忽略连接失败: ${m}`); return; }
       log.error(`${this.name} 连接失败:`, m);
       alert(`弹幕连接失败,本场可能整场无弹幕: ${m}。room=${roomUrl} liveId=${liveId}`);
       throw e;
