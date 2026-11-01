@@ -71,7 +71,7 @@ JS 做归一化 diff),补齐了以下**上游修复**(这些是我们缺的,不�
 
 上游的 `loadBalancer/` **只有 `getInfo` 走 balance**;`getStream` 传 `api:"balance"` 会静默落到 `web`
 (`stream.ts` 里只处理 `userHTML`/`webHTML`/`random`),且均衡器把「不抛错但返回不可用结果」当成功。
-我们在 vendored 副本上补了 4 处(2026-10-07):
+我们在 vendored 副本上补了 6 处(2026-10-07,含 #425 两项):
 
 1. **`loadBalancer.js`: `getNextEndpoint(exclude)`** —— 支持排除端点。取流时排除 `userHTML`
    (它只返回状态、无 `sources/streams`)。
@@ -84,6 +84,18 @@ JS 做归一化 diff),补齐了以下**上游修复**(这些是我们缺的,不�
 4. **`stream.js`: `getStream` 支持 `api:"balance"`** —— 走均衡器拿完整 roomInfo(含 sources)再选流,
    并传 `exclude:["webHTML","userHTML"]` + `validate`(要求 living 且有 streams)。
 
+5. **`douyin_api.js`: assert 错误模板不打登录串** —— 上游把整串会话登录串拼进 `Unexpected resp` 消息,
+   经 loadBalancer 的 console.warn 进 docker logs(2026-10-31 巡检发现,issue #425)。只打「有(长度)/无」。
+6. **`loadBalancer.js`: 日志出口对 `cookies:` 字段脱敏 + blocked 消息的时间戳修复** —— 上游 blocked 消息
+   用逗号运算符把 `nextRetryTime` 丢掉了(`(new Date(...).toISOString(), error.message)`),且把原始
+   error.message 拼进日志。两处 console.warn 现在都过滤 `cookies:` 字段(issue #425)。
+
+   注意:上游**只修了 `getStream` 直调路径,没修 balance 路径** —— 它的 `loadBalancer` 端点表里
+   `webHTML` 仍在候选、且会把「无流」当成功返回。我们的 `exclude` + `validate` 正好补上这半。
+
+   **但弹幕 liveId 解析相反** —— 那里 `webHTML` 可用(只要 `id_str` 不要流,实测正常),故
+   `resolveDouyinLiveId` 的 balance **保留** `webHTML`。两处 exclude 不同是有意的,别「统一」掉。
+
    ⚠️ **取流必须排除 `webHTML`**。依据(两条,互相印证):
    - **上游官方声明**:`@bililive-tools/douyin-recorder` CHANGELOG **1.17.1** —— 「修复:`webHTML`
      接口不再参与获取流」;`stream.ts:75-77` 把 `webHTML` 强制改回 `web`。**我们 vendored 的是 1.17.0,
@@ -91,11 +103,6 @@ JS 做归一化 diff),补齐了以下**上游修复**(这些是我们缺的,不�
    - **我们的实测**(2026-10-07,家宽 + VPS 均如此):`webHTML` 的 `getRoomInfo` **恒返回 `streams: 0`**
      (只给状态与 `id_str`,不给流),选中即「未找到对应的流」。
 
-   注意:上游**只修了 `getStream` 直调路径,没修 balance 路径** —— 它的 `loadBalancer` 端点表里
-   `webHTML` 仍在候选、且会把「无流」当成功返回。我们的 `exclude` + `validate` 正好补上这半。
-
-   **但弹幕 liveId 解析相反** —— 那里 `webHTML` 可用(只要 `id_str` 不要流,实测正常),故
-   `resolveDouyinLiveId` 的 balance **保留** `webHTML`。两处 exclude 不同是有意的,别「统一」掉。
 
 接线(`packages/douyin-live/src/index.ts`,全部走 balance):`getStream`(视频)、`getLiving`、
 `fetchAnchorName`、`resolveDouyinWebRid`、`resolveDouyinLiveId`(弹幕 liveId;balance + `web` 兜底,
